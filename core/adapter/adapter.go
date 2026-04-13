@@ -56,16 +56,16 @@ func (a *VolumeReplicaAdapter) OnAssignment(info AssignmentInfo) ApplyLog {
 
 // OnProbeResult processes a transport probe result. This produces
 // reachability + recovery facts for the engine.
+//
+// Same-observation batch rule: ProbeSucceeded and RecoveryFactsObserved
+// from the same probe are applied as one atomic batch under a single
+// lock hold. No unrelated event can interleave between them.
+//
 // The adapter NEVER decides recovery class — it normalizes facts,
 // the engine decides.
 func (a *VolumeReplicaAdapter) OnProbeResult(result ProbeResult) ApplyLog {
 	events := NormalizeProbe(result)
-	var log ApplyLog
-	for _, ev := range events {
-		l := a.applyAndExecute(ev)
-		log.Merge(l)
-	}
-	return log
+	return a.applyBatchAndExecute(events)
 }
 
 // OnSessionClose processes a terminal session result. This is one of
@@ -101,6 +101,59 @@ func (a *VolumeReplicaAdapter) Trace() []engine.TraceEntry {
 }
 
 // --- Internal: the single route ---
+
+// applyBatchAndExecute applies multiple same-observation events as one
+// atomic batch under a single lock hold. No unrelated event can
+// interleave between them. Commands are collected from all events,
+// then executed outside the lock.
+func (a *VolumeReplicaAdapter) applyBatchAndExecute(events []engine.Event) ApplyLog {
+	if len(events) == 1 {
+		return a.applyAndExecute(events[0])
+	}
+
+	a.mu.Lock()
+
+	var log ApplyLog
+	var cmds []engine.Command
+	sessionIDs := make(map[string]uint64)
+
+	// Apply all events in the batch under one lock hold.
+	for _, ev := range events {
+		result := engine.Apply(&a.state, ev)
+		a.trace = append(a.trace, result.Trace...)
+		log.Trace = append(log.Trace, result.Trace...)
+		log.Projection = result.Projection
+
+		for _, cmd := range result.Commands {
+			kind := engine.CommandKind(cmd)
+			a.cmdLog = append(a.cmdLog, kind)
+			log.Commands = append(log.Commands, kind)
+			cmds = append(cmds, cmd)
+		}
+	}
+
+	// Feed session lifecycle events for any Start* commands.
+	sessionEvents := a.buildSessionEvents(cmds, sessionIDs)
+	for _, sev := range sessionEvents {
+		sr := engine.Apply(&a.state, sev)
+		a.trace = append(a.trace, sr.Trace...)
+		for _, cmd := range sr.Commands {
+			kind := engine.CommandKind(cmd)
+			a.cmdLog = append(a.cmdLog, kind)
+			log.Commands = append(log.Commands, kind)
+			cmds = append(cmds, cmd)
+		}
+	}
+
+	a.mu.Unlock()
+
+	// Execute commands outside the lock.
+	for _, cmd := range cmds {
+		a.executeCommand(cmd, sessionIDs)
+	}
+
+	return log
+}
 
 // applyAndExecute is the ONE route: event → engine (under lock) → commands (outside lock).
 func (a *VolumeReplicaAdapter) applyAndExecute(ev engine.Event) ApplyLog {

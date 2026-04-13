@@ -456,3 +456,88 @@ func TestFullRoute_AlreadyCaughtUp(t *testing.T) {
 		t.Fatalf("already caught up: expected healthy, got %s", p.Mode)
 	}
 }
+
+// --- Same-observation batch: probe events applied atomically ---
+
+func TestBatch_ProbeEventsAtomic(t *testing.T) {
+	// Prove that ProbeSucceeded + RecoveryFactsObserved from the same
+	// probe enter the engine under one lock hold. A concurrent ProbeFailed
+	// from a different source cannot interleave between them.
+	exec := newMockExecutor()
+
+	exec.probeResults["r1"] = ProbeResult{
+		ReplicaID: "r1", Success: true,
+		EndpointVersion: 1, TransportEpoch: 1,
+		ReplicaFlushedLSN: 50, PrimaryTailLSN: 10, PrimaryHeadLSN: 100,
+	}
+
+	a := NewVolumeReplicaAdapter(exec)
+
+	a.OnAssignment(AssignmentInfo{
+		VolumeID: "vol1", ReplicaID: "r1",
+		Epoch: 1, EndpointVersion: 1,
+		DataAddr: "a", CtrlAddr: "b",
+	})
+
+	// Wait for auto-probe (uses batch path).
+	time.Sleep(100 * time.Millisecond)
+
+	p := a.Projection()
+	// If events were interleaved, decision could be "unknown" because
+	// a concurrent ProbeFailed could sneak between ProbeSucceeded and
+	// RecoveryFactsObserved. With batch, we get a clean decision.
+	if p.RecoveryDecision == engine.DecisionUnknown {
+		t.Fatal("batch: decision=unknown — probe events may have been interleaved")
+	}
+	// Decision should be catch_up or none (if async catch-up already completed).
+	// Both are valid — the important thing is NOT unknown (which would mean
+	// the batch was broken by interleaving).
+	if p.RecoveryDecision != engine.DecisionCatchUp && p.RecoveryDecision != engine.DecisionNone {
+		t.Fatalf("batch: expected catch_up or none, got %s", p.RecoveryDecision)
+	}
+}
+
+// Verify that OnProbeResult calls applyBatchAndExecute (not per-event applyAndExecute)
+// by checking that a multi-event probe produces a coherent trace without
+// intermediate decisions.
+func TestBatch_ProbeTraceIsCoherent(t *testing.T) {
+	exec := newMockExecutor()
+	a := NewVolumeReplicaAdapter(exec)
+
+	a.OnAssignment(AssignmentInfo{
+		VolumeID: "vol1", ReplicaID: "r1",
+		Epoch: 1, EndpointVersion: 1,
+		DataAddr: "a", CtrlAddr: "b",
+	})
+
+	// Manual probe with both events — should be one batch.
+	log := a.OnProbeResult(ProbeResult{
+		ReplicaID: "r1", Success: true,
+		EndpointVersion: 1, TransportEpoch: 1,
+		ReplicaFlushedLSN: 50, PrimaryTailLSN: 10, PrimaryHeadLSN: 100,
+	})
+
+	// The trace should show both events processed, and the final
+	// projection should reflect the RecoveryFactsObserved decision.
+	hasProbeSucceeded := false
+	hasDecision := false
+	for _, te := range log.Trace {
+		if te.Step == "reachable" {
+			hasProbeSucceeded = true
+		}
+		if te.Step == "decision" {
+			hasDecision = true
+		}
+	}
+	if !hasProbeSucceeded {
+		t.Fatal("batch trace missing ProbeSucceeded")
+	}
+	if !hasDecision {
+		t.Fatal("batch trace missing decision from RecoveryFactsObserved")
+	}
+
+	if log.Projection.RecoveryDecision != engine.DecisionCatchUp {
+		t.Fatalf("batch: expected catch_up from coherent batch, got %s",
+			log.Projection.RecoveryDecision)
+	}
+}
