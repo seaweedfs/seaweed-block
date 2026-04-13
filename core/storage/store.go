@@ -147,6 +147,9 @@ func (s *BlockStore) ApplyEntry(lba uint32, data []byte, lsn uint64) error {
 	if lba >= s.numBlocks {
 		return fmt.Errorf("storage: apply LBA %d out of range", lba)
 	}
+	if len(data) != s.blockSize {
+		return fmt.Errorf("storage: apply data size %d != block size %d", len(data), s.blockSize)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 

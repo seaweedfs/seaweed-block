@@ -125,7 +125,9 @@ func (a *VolumeReplicaAdapter) applyAndExecute(ev engine.Event) ApplyLog {
 
 	// Feed session lifecycle events back into engine while still under lock
 	// (these are synchronous, no external calls).
-	sessionEvents := a.buildSessionEvents(cmds)
+	// Also capture session IDs so executeCommand doesn't need to re-lock.
+	sessionIDs := make(map[string]uint64) // command key → sessionID
+	sessionEvents := a.buildSessionEvents(cmds, sessionIDs)
 	for _, sev := range sessionEvents {
 		sr := engine.Apply(&a.state, sev)
 		a.trace = append(a.trace, sr.Trace...)
@@ -139,24 +141,25 @@ func (a *VolumeReplicaAdapter) applyAndExecute(ev engine.Event) ApplyLog {
 	a.mu.Unlock()
 
 	// Step 2: Execute commands OUTSIDE the lock.
-	// This prevents deadlock when executors call back into the adapter.
+	// Session IDs were captured under lock — no re-locking needed.
 	for _, cmd := range cmds {
-		a.executeCommand(cmd)
+		a.executeCommand(cmd, sessionIDs)
 	}
 
 	return log
 }
 
 // buildSessionEvents creates SessionPrepared/Started events for
-// Start* commands. These are fed back into the engine synchronously
-// (they don't involve external calls).
-func (a *VolumeReplicaAdapter) buildSessionEvents(cmds []engine.Command) []engine.Event {
+// Start* commands and captures the assigned session IDs in the map.
+// Called under lock — no external calls, no race.
+func (a *VolumeReplicaAdapter) buildSessionEvents(cmds []engine.Command, sessionIDs map[string]uint64) []engine.Event {
 	var events []engine.Event
 	for _, cmd := range cmds {
 		switch c := cmd.(type) {
 		case engine.StartCatchUp:
 			a.nextSessionID++
 			sid := a.nextSessionID
+			sessionIDs[c.ReplicaID] = sid
 			events = append(events,
 				NormalizeSessionPrepared(c.ReplicaID, sid, engine.SessionCatchUp, c.TargetLSN),
 				NormalizeSessionStarted(c.ReplicaID, sid),
@@ -164,6 +167,7 @@ func (a *VolumeReplicaAdapter) buildSessionEvents(cmds []engine.Command) []engin
 		case engine.StartRebuild:
 			a.nextSessionID++
 			sid := a.nextSessionID
+			sessionIDs[c.ReplicaID] = sid
 			events = append(events,
 				NormalizeSessionPrepared(c.ReplicaID, sid, engine.SessionRebuild, c.TargetLSN),
 				NormalizeSessionStarted(c.ReplicaID, sid),
@@ -174,9 +178,9 @@ func (a *VolumeReplicaAdapter) buildSessionEvents(cmds []engine.Command) []engin
 }
 
 // executeCommand dispatches one engine command to the executor.
-// Called OUTSIDE the lock. Executor may call back asynchronously
-// through the registered OnSessionClose callback.
-func (a *VolumeReplicaAdapter) executeCommand(cmd engine.Command) {
+// Called OUTSIDE the lock. Session IDs were captured under lock by
+// buildSessionEvents — no re-locking needed, no race.
+func (a *VolumeReplicaAdapter) executeCommand(cmd engine.Command, sessionIDs map[string]uint64) {
 	switch c := cmd.(type) {
 	case engine.ProbeReplica:
 		go func() {
@@ -185,11 +189,7 @@ func (a *VolumeReplicaAdapter) executeCommand(cmd engine.Command) {
 		}()
 
 	case engine.StartCatchUp:
-		// Session ID was already assigned by buildSessionEvents and
-		// applied to the engine. Read it from current state.
-		a.mu.Lock()
-		sid := a.state.Session.SessionID
-		a.mu.Unlock()
+		sid := sessionIDs[c.ReplicaID]
 		err := a.executor.StartCatchUp(c.ReplicaID, sid, c.TargetLSN)
 		if err != nil {
 			a.OnSessionClose(SessionCloseResult{
@@ -201,9 +201,7 @@ func (a *VolumeReplicaAdapter) executeCommand(cmd engine.Command) {
 		}
 
 	case engine.StartRebuild:
-		a.mu.Lock()
-		sid := a.state.Session.SessionID
-		a.mu.Unlock()
+		sid := sessionIDs[c.ReplicaID]
 		err := a.executor.StartRebuild(c.ReplicaID, sid, c.TargetLSN)
 		if err != nil {
 			a.OnSessionClose(SessionCloseResult{

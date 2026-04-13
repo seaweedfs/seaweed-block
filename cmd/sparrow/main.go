@@ -69,9 +69,8 @@ func main() {
 		DataAddr: replicaAddr, CtrlAddr: replicaAddr,
 	})
 
-	// Wait for async probe.
-	time.Sleep(200 * time.Millisecond)
-	p := adpt.Projection()
+	// Wait for async probe to complete.
+	p := waitForMode(adpt, engine.ModeHealthy, 5*time.Second)
 	fmt.Printf("Mode: %s  Decision: %s  R=%d S=%d H=%d\n",
 		p.Mode, p.RecoveryDecision, p.R, p.S, p.H)
 	printResult("Demo 1", p.Mode == engine.ModeHealthy)

@@ -133,7 +133,10 @@ func (r *ReplicaListener) handleConn(conn net.Conn) {
 			frontier := r.store.Sync()
 			resp := make([]byte, 8)
 			binary.BigEndian.PutUint64(resp, frontier)
-			WriteMsg(conn, MsgBarrierResp, resp)
+			if err := WriteMsg(conn, MsgBarrierResp, resp); err != nil {
+				log.Printf("replica: write barrier response: %v", err)
+				return
+			}
 
 		default:
 			log.Printf("replica: unknown message type 0x%02x", msgType)

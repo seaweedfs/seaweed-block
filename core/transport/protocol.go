@@ -55,6 +55,10 @@ func WriteMsg(conn net.Conn, msgType byte, payload []byte) error {
 	return nil
 }
 
+// MaxPayloadSize is the upper bound for incoming message payloads.
+// Prevents memory exhaustion from malicious or buggy senders.
+const MaxPayloadSize = 16 * 1024 * 1024 // 16MB
+
 // ReadMsg reads a typed message from the connection.
 func ReadMsg(conn net.Conn) (msgType byte, payload []byte, err error) {
 	header := make([]byte, 5)
@@ -63,6 +67,9 @@ func ReadMsg(conn net.Conn) (msgType byte, payload []byte, err error) {
 	}
 	msgType = header[0]
 	length := binary.BigEndian.Uint32(header[1:5])
+	if length > MaxPayloadSize {
+		return 0, nil, fmt.Errorf("transport: payload too large: %d > %d", length, MaxPayloadSize)
+	}
 	if length > 0 {
 		payload = make([]byte, length)
 		if _, err := io.ReadFull(conn, payload); err != nil {

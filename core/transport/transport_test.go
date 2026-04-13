@@ -140,6 +140,9 @@ func TestTransport_Rebuild_StreamsAndAdvancesFrontier(t *testing.T) {
 		t.Fatal("timeout")
 	}
 
+	// Small delay for replica handler to finish Sync after MsgRebuildDone.
+	time.Sleep(50 * time.Millisecond)
+
 	// Replica frontier must match primary.
 	rR, _, _ := replica.Boundaries()
 	if rR != pH {
