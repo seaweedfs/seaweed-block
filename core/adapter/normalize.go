@@ -16,7 +16,7 @@
 package adapter
 
 import (
-	"github.com/seaweedfs/seaweed-block/v3mini/engine"
+	"github.com/seaweedfs/seaweed-block/core/engine"
 )
 
 // --- Runtime observations (raw facts from transport/heartbeat) ---

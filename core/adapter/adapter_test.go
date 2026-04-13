@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/seaweedfs/seaweed-block/v3mini/engine"
+	"github.com/seaweedfs/seaweed-block/core/engine"
 )
 
 // mockExecutor records commands and wires the session close callback.
@@ -264,6 +264,14 @@ func checkPlainType(t *testing.T, path string, rt reflect.Type) {
 
 func TestC12_ExecutorCannotChoosePolicy(t *testing.T) {
 	exec := newMockExecutor()
+
+	// Pre-set probe result so auto-probe from assignment succeeds.
+	exec.probeResults["r1"] = ProbeResult{
+		ReplicaID: "r1", Success: true,
+		EndpointVersion: 1, TransportEpoch: 1,
+		ReplicaFlushedLSN: 5, PrimaryTailLSN: 50, PrimaryHeadLSN: 100,
+	}
+
 	a := NewVolumeReplicaAdapter(exec)
 
 	a.OnAssignment(AssignmentInfo{
@@ -272,12 +280,11 @@ func TestC12_ExecutorCannotChoosePolicy(t *testing.T) {
 		DataAddr: "a", CtrlAddr: "b",
 	})
 
-	// Probe returns facts requiring rebuild: R=5 < S=50.
-	a.OnProbeResult(ProbeResult{
-		ReplicaID: "r1", Success: true,
-		EndpointVersion: 1, TransportEpoch: 1,
-		ReplicaFlushedLSN: 5, PrimaryTailLSN: 50, PrimaryHeadLSN: 100,
-	})
+	// Wait for auto-probe to fire.
+	time.Sleep(100 * time.Millisecond)
+
+	// The executor should have received StartRebuild from the engine.
+	// The auto-probe with pre-set results handles the full chain.
 
 	cmds := exec.getCommands()
 	hasRebuild := false

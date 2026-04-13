@@ -1,2 +1,174 @@
 # seaweed-block
+
 Block Storage for Kubernetes
+
+`seaweed-block` is a standalone block-storage experiment built around a
+deterministic semantic core. The current repository is the first public
+runnable slice of that work: a narrow block sparrow that proves one clean
+recovery route end-to-end.
+
+```text
+facts -> engine decision -> adapter command -> runtime execution -> session close
+```
+
+## Product Vision
+
+`seaweed-block` aims to make block storage for Kubernetes much lighter, easier,
+and more flexible than traditional storage stacks.
+
+The product direction is:
+
+1. simpler to understand and operate than heavyweight systems such as Ceph
+2. lighter to start and iterate on for developers and platform teams
+3. flexible enough to grow from a small cluster service into a practical Kubernetes block platform
+4. easier to reason about during failure and recovery, without a maze of hidden control-plane behavior
+
+In short:
+
+1. easier than heavyweight storage systems
+2. more direct than control-plane-heavy designs
+3. still structured enough to grow into serious replicated block storage
+
+## Design Philosophy
+
+The technical design is intentionally shaped around a few strict choices:
+
+1. semantic core first: recovery meaning is defined in a deterministic engine before broad system growth
+2. one route only: observation, decision, execution, and terminal close follow one explicit path
+3. strict authority boundaries: engine decides, adapter normalizes, runtime executes
+4. terminal truth is narrow: recovery is not "successful" until explicit session close says so
+5. reviewable growth: the project is phase-driven so new features do not silently pollute the core
+6. runtime must not silently redefine semantics, including widening engine-issued recovery targets
+
+## Why This Approach
+
+Many storage systems become difficult because recovery semantics, transport
+mechanics, retries, and product features get mixed together.
+
+`seaweed-block` is an attempt to separate those layers more cleanly:
+
+1. facts determine semantics
+2. transport does not silently redefine policy
+3. the system can be tested and reviewed from the semantic contract outward
+4. the same semantic model should later support broader runtime work without changing its meaning
+
+Current status:
+
+1. semantic core: present
+2. replay/conformance runtime: present
+3. adapter-backed route: present
+4. runnable block sparrow: present
+5. operations UX: not yet built out
+6. persistence / crash recovery: not yet built out
+
+## What Works Today
+
+The current repository can run one narrow block slice end-to-end through real
+TCP transport.
+
+Demonstrated paths:
+
+1. healthy: replica is already caught up
+2. catch-up: replica is behind within retained window
+3. rebuild: replica is behind beyond retained window
+
+The current route stays intentionally narrow:
+
+1. one semantic route
+2. one active session at a time
+3. one terminal-close authority
+4. executor honors the engine-issued `targetLSN`
+
+## What This Repo Is Not Yet
+
+This repository is not yet:
+
+1. production-ready storage
+2. a full SeaweedFS block product
+3. a complete frontend protocol implementation
+4. a broad operations shell or UI
+5. a replacement claim over the current `V2` baseline
+
+Current limitations:
+
+1. storage is in-memory only
+2. no persistence or crash recovery
+3. no master service; assignment is hardcoded in the demo
+4. no iSCSI or NVMe-oF frontend
+5. no concurrent write path during replication
+6. no broad timeout / reconnect / hardening logic
+
+## Repo Layout
+
+```text
+cmd/
+  sparrow/        runnable Phase 04 demo entry point
+
+core/
+  engine/         deterministic semantic core
+  schema/         conformance case schema and conversion
+  runtime/        replay runner
+  conformance/    YAML semantic cases
+  adapter/        single-route adapter boundary
+  storage/        minimal in-memory block store
+  transport/      minimal TCP transport for the runnable sparrow
+```
+
+`core/` is the public-facing semantic center path for this repository.
+
+## Quick Start
+
+Requirements:
+
+1. Go `1.23+`
+
+Run the runnable sparrow:
+
+```bash
+go run ./cmd/sparrow
+```
+
+Expected outcome:
+
+1. healthy demo passes
+2. catch-up demo passes
+3. rebuild demo passes
+
+Run the test suite:
+
+```bash
+go test ./...
+```
+
+## Design Rules
+
+The current implementation is intentionally shaped around a few strict rules:
+
+1. timers trigger observation; facts determine semantics
+2. the engine owns semantic recovery decisions
+3. the adapter/runtime may execute, but may not redefine policy
+4. terminal truth comes only from explicit session close
+5. session `targetLSN` is fixed by the engine and must not be silently widened by the executor
+
+## Near-Term Direction
+
+The next planned steps are:
+
+1. freeze and stabilize the first public runnable shape under `core/`
+2. add minimal operations and test interfaces
+3. calibrate against selected high-value scenarios from the existing benchmark path
+4. expand only after the semantic boundary stays clean
+
+## Honesty Note
+
+This repository should currently be read as:
+
+1. a runnable semantic-core-first block prototype
+2. a clean recovery-route reference
+3. a base for future operations, calibration, and storage work
+
+It should not yet be read as:
+
+1. finished block product
+2. production-ready replicated storage
+3. complete protocol or deployment surface

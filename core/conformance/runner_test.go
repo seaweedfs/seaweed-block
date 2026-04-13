@@ -5,8 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/seaweedfs/seaweed-block/v3mini/runtime"
-	"github.com/seaweedfs/seaweed-block/v3mini/schema"
+	"github.com/seaweedfs/seaweed-block/core/runtime"
+	"github.com/seaweedfs/seaweed-block/core/schema"
 )
 
 // TestConformance_YAMLCases loads conformance cases from cases.yaml

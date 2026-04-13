@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/seaweedfs/seaweed-block/v3mini/engine"
+	"github.com/seaweedfs/seaweed-block/core/engine"
 )
 
 // VolumeReplicaAdapter manages one volume × replica through the V3

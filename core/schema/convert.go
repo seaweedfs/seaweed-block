@@ -3,7 +3,7 @@ package schema
 import (
 	"fmt"
 
-	"github.com/seaweedfs/seaweed-block/v3mini/engine"
+	"github.com/seaweedfs/seaweed-block/core/engine"
 )
 
 // ToEngineEvent converts a schema EventInput to a typed engine Event.

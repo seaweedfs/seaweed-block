@@ -6,8 +6,8 @@ package runtime
 import (
 	"fmt"
 
-	"github.com/seaweedfs/seaweed-block/v3mini/engine"
-	"github.com/seaweedfs/seaweed-block/v3mini/schema"
+	"github.com/seaweedfs/seaweed-block/core/engine"
+	"github.com/seaweedfs/seaweed-block/core/schema"
 )
 
 // ReplayResult holds the output of one conformance case replay.
