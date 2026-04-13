@@ -1,0 +1,197 @@
+version: v3-mini-1
+
+cases:
+  - name: "catch_up_within_wal"
+    description: "R >= S and R < H → catch_up decision, StartCatchUp emitted"
+    events:
+      - kind: AssignmentObserved
+        volume_id: vol1
+        replica_id: r1
+        epoch: 1
+        endpoint_version: 1
+        data_addr: "10.0.0.2:9333"
+        ctrl_addr: "10.0.0.2:9334"
+      - kind: ProbeSucceeded
+        replica_id: r1
+        endpoint_version: 1
+        transport_epoch: 1
+      - kind: RecoveryFactsObserved
+        replica_id: r1
+        r: 50
+        s: 10
+        h: 100
+    expect:
+      # Mode is degraded because StartCatchUp was emitted but no session
+      # started yet. Mode becomes recovering only when SessionPrepared/Started runs.
+      mode: degraded
+      recovery_decision: catch_up
+      must_emit_commands: [StartCatchUp]
+      must_not_emit_commands: [StartRebuild]
+
+  - name: "rebuild_beyond_wal"
+    description: "R < S → rebuild decision, StartRebuild emitted"
+    events:
+      - kind: AssignmentObserved
+        volume_id: vol1
+        replica_id: r1
+        epoch: 1
+        endpoint_version: 1
+        data_addr: "10.0.0.2:9333"
+        ctrl_addr: "10.0.0.2:9334"
+      - kind: ProbeSucceeded
+        replica_id: r1
+        endpoint_version: 1
+        transport_epoch: 1
+      - kind: RecoveryFactsObserved
+        replica_id: r1
+        r: 5
+        s: 50
+        h: 100
+    expect:
+      mode: degraded
+      recovery_decision: rebuild
+      must_emit_commands: [StartRebuild]
+      must_not_emit_commands: [StartCatchUp]
+
+  - name: "caught_up_healthy"
+    description: "R >= H → no recovery, PublishHealthy emitted"
+    events:
+      - kind: AssignmentObserved
+        volume_id: vol1
+        replica_id: r1
+        epoch: 1
+        endpoint_version: 1
+        data_addr: "10.0.0.2:9333"
+        ctrl_addr: "10.0.0.2:9334"
+      - kind: ProbeSucceeded
+        replica_id: r1
+        endpoint_version: 1
+        transport_epoch: 1
+      - kind: RecoveryFactsObserved
+        replica_id: r1
+        r: 100
+        s: 10
+        h: 100
+    expect:
+      mode: healthy
+      recovery_decision: none
+      must_emit_commands: [PublishHealthy]
+      must_not_emit_commands: [StartCatchUp, StartRebuild]
+
+  - name: "stale_epoch_rejected"
+    description: "Assignment with older epoch is silently rejected"
+    events:
+      - kind: AssignmentObserved
+        volume_id: vol1
+        replica_id: r1
+        epoch: 5
+        endpoint_version: 1
+        data_addr: a
+        ctrl_addr: b
+      - kind: AssignmentObserved
+        volume_id: vol1
+        replica_id: r1
+        epoch: 3
+        endpoint_version: 1
+        data_addr: old
+        ctrl_addr: old
+    expect:
+      must_have_trace_steps: [stale_assignment]
+
+  - name: "progress_does_not_complete"
+    description: "Session progress to target does NOT imply completion"
+    events:
+      - kind: AssignmentObserved
+        volume_id: vol1
+        replica_id: r1
+        epoch: 1
+        endpoint_version: 1
+        data_addr: a
+        ctrl_addr: b
+      - kind: ProbeSucceeded
+        replica_id: r1
+        endpoint_version: 1
+        transport_epoch: 1
+      - kind: RecoveryFactsObserved
+        replica_id: r1
+        r: 0
+        s: 0
+        h: 100
+      - kind: SessionPrepared
+        replica_id: r1
+        session_id: 1
+        session_kind: catch_up
+        target_lsn: 100
+      - kind: SessionStarted
+        replica_id: r1
+        session_id: 1
+      - kind: SessionProgressObserved
+        replica_id: r1
+        session_id: 1
+        achieved_lsn: 100
+    expect:
+      session_phase: running
+      must_not_emit_commands: [PublishHealthy]
+
+  - name: "session_closed_completed_to_healthy"
+    description: "Full lifecycle: assign → probe → facts → session → complete → healthy"
+    events:
+      - kind: AssignmentObserved
+        volume_id: vol1
+        replica_id: r1
+        epoch: 1
+        endpoint_version: 1
+        data_addr: a
+        ctrl_addr: b
+      - kind: ProbeSucceeded
+        replica_id: r1
+        endpoint_version: 1
+        transport_epoch: 1
+      - kind: RecoveryFactsObserved
+        replica_id: r1
+        r: 0
+        s: 0
+        h: 100
+      - kind: SessionPrepared
+        replica_id: r1
+        session_id: 1
+        session_kind: catch_up
+        target_lsn: 100
+      - kind: SessionStarted
+        replica_id: r1
+        session_id: 1
+      - kind: SessionClosedCompleted
+        replica_id: r1
+        session_id: 1
+        achieved_lsn: 100
+    expect:
+      mode: healthy
+      recovery_decision: none
+      session_phase: completed
+      must_emit_commands: [PublishHealthy]
+
+  - name: "transport_loss_does_not_rebuild"
+    description: "Probe failure → degraded, NOT rebuild"
+    events:
+      - kind: AssignmentObserved
+        volume_id: vol1
+        replica_id: r1
+        epoch: 1
+        endpoint_version: 1
+        data_addr: a
+        ctrl_addr: b
+      - kind: ProbeSucceeded
+        replica_id: r1
+        endpoint_version: 1
+        transport_epoch: 1
+      - kind: RecoveryFactsObserved
+        replica_id: r1
+        r: 50
+        s: 10
+        h: 100
+      - kind: ProbeFailed
+        replica_id: r1
+        reason: connection_reset
+    expect:
+      must_emit_commands: [PublishDegraded]
+      must_not_emit_commands: [StartRebuild]
