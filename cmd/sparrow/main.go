@@ -52,9 +52,10 @@ import (
 
 // options captures parsed command-line flags.
 type options struct {
-	json     bool
-	runs     int
-	httpAddr string
+	json      bool
+	runs      int
+	httpAddr  string
+	calibrate bool
 }
 
 func main() {
@@ -79,6 +80,10 @@ func main() {
 		os.Exit(2)
 	}
 
+	if opts.calibrate {
+		os.Exit(runCalibration(opts))
+	}
+
 	code := runSparrow(opts)
 	os.Exit(code)
 }
@@ -89,6 +94,7 @@ func parseFlags(args []string) (options, error) {
 	fs.BoolVar(&opts.json, "json", false, "emit machine-readable JSON")
 	fs.IntVar(&opts.runs, "runs", 1, "repeat the demo N times")
 	fs.StringVar(&opts.httpAddr, "http", "", "optional HTTP ops listen address (e.g. :9090)")
+	fs.BoolVar(&opts.calibrate, "calibrate", false, "run the Phase 06 calibration pass instead of the demo")
 	if err := fs.Parse(args); err != nil {
 		return opts, err
 	}

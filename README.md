@@ -151,6 +151,8 @@ go run ./cmd/sparrow --help                # authoritative scope statement
 go run ./cmd/sparrow --json                # machine-readable output for CI
 go run ./cmd/sparrow --runs 10             # repeat the full demo N times
 go run ./cmd/sparrow --http :9090          # add read-only HTTP inspection
+go run ./cmd/sparrow --calibrate           # Phase 06 calibration pass (C1-C5)
+go run ./cmd/sparrow --calibrate --json    # machine-readable calibration Report
 ```
 
 HTTP endpoints (read-only): `/status`, `/projection`, `/trace`. Every
@@ -160,6 +162,25 @@ for the complete list of supported flags, endpoints, and exit codes.
 
 This binary is a development and validation entry point only. The
 production operations surface is `weed shell` after integration.
+
+## Calibration
+
+Phase 06 adds a small calibration set that drives the accepted route
+through five scenario families (C1-C5) and records expected-versus-
+observed evidence. Run it with:
+
+```bash
+go run ./cmd/sparrow --calibrate          # text report
+go run ./cmd/sparrow --calibrate --json   # machine-readable Report
+```
+
+Evidence artifacts:
+
+- [docs/calibration/scenario-map.md](docs/calibration/scenario-map.md)
+- [docs/calibration/divergence-log.md](docs/calibration/divergence-log.md)
+
+If a case diverges, record it in `divergence-log.md` before changing
+the route or the expectations.
 
 ## Design Rules
 

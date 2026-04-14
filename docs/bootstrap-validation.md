@@ -15,6 +15,8 @@ design, the production interface is `weed shell` after integration.
 | Repeatable validation | `go run ./cmd/sparrow --runs 10 --json` |
 | Machine-readable output for CI | `go run ./cmd/sparrow --json` |
 | Optional read-only HTTP inspection | `go run ./cmd/sparrow --http :9090` |
+| Phase 06 calibration pass | `go run ./cmd/sparrow --calibrate` |
+| Calibration report as JSON (for tester review) | `go run ./cmd/sparrow --calibrate --json` |
 
 ## Not supported in Phase 05
 
