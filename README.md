@@ -140,6 +140,27 @@ Run the test suite:
 go test ./...
 ```
 
+## Operations
+
+The sparrow supports optional flags for repeatable validation and
+read-only inspection. Defaults are unchanged from the Phase 04 demo:
+
+```bash
+go run ./cmd/sparrow                       # three demos, text output (default)
+go run ./cmd/sparrow --help                # authoritative scope statement
+go run ./cmd/sparrow --json                # machine-readable output for CI
+go run ./cmd/sparrow --runs 10             # repeat the full demo N times
+go run ./cmd/sparrow --http :9090          # add read-only HTTP inspection
+```
+
+HTTP endpoints (read-only): `/status`, `/projection`, `/trace`. Every
+mutation verb returns 501 with an explicit "not supported in Phase 05"
+body. See [docs/bootstrap-validation.md](docs/bootstrap-validation.md)
+for the complete list of supported flags, endpoints, and exit codes.
+
+This binary is a development and validation entry point only. The
+production operations surface is `weed shell` after integration.
+
 ## Design Rules
 
 The current implementation is intentionally shaped around a few strict rules:
