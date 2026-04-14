@@ -82,14 +82,37 @@ func (s *BlockStore) Read(lba uint32) ([]byte, error) {
 }
 
 // Sync marks all current writes as durable. Returns the synced frontier.
-func (s *BlockStore) Sync() uint64 {
+// In-memory storage cannot fail to "flush", so the error is always nil —
+// the (uint64, error) signature matches the LogicalStorage contract so
+// file-backed and SmartWAL implementations can return real fsync errors
+// through the same API.
+func (s *BlockStore) Sync() (uint64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.nextLSN > 1 {
 		s.syncedLSN = s.nextLSN - 1
 	}
-	return s.syncedLSN
+	return s.syncedLSN, nil
 }
+
+// Recover is a no-op for the in-memory BlockStore — there is no on-disk
+// state to replay. Returns (0, nil) to satisfy the LogicalStorage
+// contract. File-backed and SmartWAL implementations do real work here.
+func (s *BlockStore) Recover() (uint64, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.syncedLSN, nil
+}
+
+// Close is a no-op for the in-memory BlockStore. Returns nil to satisfy
+// the LogicalStorage contract.
+func (s *BlockStore) Close() error {
+	return nil
+}
+
+// Compile-time assertion: BlockStore must satisfy LogicalStorage so
+// callers of LogicalStorage can transparently use either backend.
+var _ LogicalStorage = (*BlockStore)(nil)
 
 // Boundaries returns the current R/S/H recovery boundaries.
 //   - R (syncedLSN): what's durable on this node

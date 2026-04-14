@@ -153,6 +153,7 @@ go run ./cmd/sparrow --runs 10             # repeat the full demo N times
 go run ./cmd/sparrow --http :9090          # add read-only HTTP inspection
 go run ./cmd/sparrow --calibrate           # Phase 06 calibration pass (C1-C5)
 go run ./cmd/sparrow --calibrate --json    # machine-readable calibration Report
+go run ./cmd/sparrow --persist-demo --persist-dir DIR    # Phase 07 single-node persistence demo
 ```
 
 HTTP endpoints (read-only): `/status`, `/projection`, `/trace`. Every
@@ -181,6 +182,27 @@ Evidence artifacts:
 
 If a case diverges, record it in `divergence-log.md` before changing
 the route or the expectations.
+
+## Persistence
+
+Phase 07 admits one persistence-backed local storage implementation
+behind the `LogicalStorage` interface and proves restart-surviving
+local data on a single node:
+
+```bash
+go run ./cmd/sparrow --persist-demo --persist-dir /tmp/sparrow-persist
+```
+
+What this proves: data acked by `Sync()` survives `Close + Open +
+Recover` on a clean stop/restart of one process.
+
+What this does NOT prove: crash consistency from process kill or
+power loss; distributed durability across nodes; SmartWAL semantics
+(future work behind the same interface).
+
+See [docs/persistence.md](docs/persistence.md) for the on-disk
+format, exit codes, anti-pattern guards, and explicit carry-forward
+list.
 
 ## Design Rules
 

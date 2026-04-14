@@ -137,7 +137,7 @@ func (*scenarioC2ShortGap) Run() (Observed, error) {
 		data, _ := h.primaryStore.Read(i)
 		_ = h.replicaStore.ApplyEntry(i, data, pH/2)
 	}
-	h.replicaStore.Sync()
+	_, _ = h.replicaStore.Sync()
 
 	h.assign(1, 1)
 	p := h.waitForDecisionFinal(5 * time.Second)
@@ -220,7 +220,7 @@ func (*scenarioC4TerminalClose) Run() (Observed, error) {
 		data, _ := h.primaryStore.Read(i)
 		_ = h.replicaStore.ApplyEntry(i, data, pH/2)
 	}
-	h.replicaStore.Sync()
+	_, _ = h.replicaStore.Sync()
 
 	h.assign(1, 1)
 	p := h.waitForDecisionFinal(5 * time.Second)
@@ -362,7 +362,7 @@ func (*scenarioC5OrderStable) Run() (Observed, error) {
 			data, _ := h.primaryStore.Read(j)
 			_ = h.replicaStore.ApplyEntry(j, data, pH/2)
 		}
-		h.replicaStore.Sync()
+		_, _ = h.replicaStore.Sync()
 
 		applyPerturbation(h, p)
 		proj := h.waitForDecisionFinal(5 * time.Second)

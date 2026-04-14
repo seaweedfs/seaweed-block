@@ -77,13 +77,13 @@ func TestScopeStatement_HonestAboutUnsupported(t *testing.T) {
 	}
 }
 
-func TestVersion_HasPhase05Tag(t *testing.T) {
-	// The version string should make the Phase 05 pre-production
-	// status obvious. Zero-dot prefix + "phase05" tag.
+func TestVersion_HasPhaseTag(t *testing.T) {
+	// The version string should make the pre-production status obvious
+	// (zero-dot prefix) and tag the current phase explicitly.
 	if !strings.HasPrefix(Version, "0.") {
 		t.Fatalf("Version %q should start with 0. (pre-production)", Version)
 	}
-	if !strings.Contains(Version, "phase05") {
+	if !strings.Contains(Version, "phase") {
 		t.Fatalf("Version %q should tag the phase explicitly", Version)
 	}
 }
@@ -155,7 +155,7 @@ func TestStartHTTPOps_BindsAndServes(t *testing.T) {
 		t.Fatalf("/status: got %d, want 200", resp.StatusCode)
 	}
 	body, _ := io.ReadAll(resp.Body)
-	if !strings.Contains(string(body), "phase05") {
+	if !strings.Contains(string(body), "phase") {
 		t.Fatalf("/status body should contain version tag, got: %s", body)
 	}
 }
@@ -178,6 +178,47 @@ func TestStartHTTPOps_FailsOnPortConflict(t *testing.T) {
 	// Must be a real net error, not a wrapped log line.
 	if !strings.Contains(err.Error(), "bind") && !strings.Contains(err.Error(), "address") {
 		t.Logf("note: error is %v (platform-dependent message; this is not a failure)", err)
+	}
+}
+
+func TestRunPersistDemo_HappyPath(t *testing.T) {
+	dir := t.TempDir()
+	code := runPersistDemo(options{
+		json:        true,
+		persistDemo: true,
+		persistDir:  dir,
+	})
+	if code != 0 {
+		t.Fatalf("runPersistDemo exit code = %d, want 0 (data should survive restart)", code)
+	}
+}
+
+func TestRunPersistDemo_RequiresPersistDir(t *testing.T) {
+	code := runPersistDemo(options{
+		persistDemo: true,
+		persistDir:  "", // missing
+	})
+	if code != 2 {
+		t.Fatalf("runPersistDemo without --persist-dir: code=%d, want 2 (usage)", code)
+	}
+}
+
+// TestRunPersistDemo_RepeatableInSameDir locks in that running the
+// demo twice in the same dir works. The first run creates the file;
+// the second run must remove the prior file and recreate cleanly.
+// Without the prior-file cleanup, CreateWALStore's O_EXCL would fail
+// on the second invocation.
+func TestRunPersistDemo_RepeatableInSameDir(t *testing.T) {
+	dir := t.TempDir()
+	for i := 0; i < 2; i++ {
+		code := runPersistDemo(options{
+			json:        true,
+			persistDemo: true,
+			persistDir:  dir,
+		})
+		if code != 0 {
+			t.Fatalf("run %d: exit code = %d, want 0", i+1, code)
+		}
 	}
 }
 

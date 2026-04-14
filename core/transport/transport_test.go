@@ -30,7 +30,7 @@ func writeTestBlocks(store *storage.BlockStore, count uint32) {
 		data[1] = byte(i + 0xA0)
 		store.Write(i, data)
 	}
-	store.Sync()
+	_, _ = store.Sync()
 }
 
 func assertDataMatch(t *testing.T, label string, primary, replica *storage.BlockStore, count uint32) {
@@ -56,8 +56,8 @@ func TestTransport_Healthy_ProbeShowsCaughtUp(t *testing.T) {
 		lsn, _ := primary.Write(i, data)
 		replica.ApplyEntry(i, data, lsn)
 	}
-	primary.Sync()
-	replica.Sync()
+	_, _ = primary.Sync()
+	_, _ = replica.Sync()
 
 	exec := NewBlockExecutor(primary, listener.Addr(), 1)
 	result := exec.Probe("r1", listener.Addr(), listener.Addr())
@@ -163,7 +163,7 @@ func TestTransport_Rebuild_DoesNotCorruptLBA0(t *testing.T) {
 	data0[0] = 0xDE
 	data0[1] = 0xAD
 	primary.Write(0, data0)
-	primary.Sync()
+	_, _ = primary.Sync()
 
 	exec := NewBlockExecutor(primary, listener.Addr(), 1)
 	closeCh := make(chan adapter.SessionCloseResult, 1)
