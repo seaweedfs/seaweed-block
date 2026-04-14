@@ -126,8 +126,21 @@ func (r *ReplicaListener) handleConn(conn net.Conn) {
 				achievedLSN := binary.BigEndian.Uint64(payload)
 				r.store.AdvanceFrontier(achievedLSN)
 			}
-			if _, err := r.store.Sync(); err != nil {
+			// Sync, then acknowledge with the replica's actual synced
+			// frontier (same shape as MsgBarrierResp). The primary
+			// waits for this before returning from doRebuild —
+			// without it, the session could "complete" before the
+			// replica has applied and synced the rebuild blocks. Ack
+			// carries replica's true state.
+			frontier, err := r.store.Sync()
+			if err != nil {
 				log.Printf("replica: sync after rebuild: %v", err)
+				return
+			}
+			resp := make([]byte, 8)
+			binary.BigEndian.PutUint64(resp, frontier)
+			if err := WriteMsg(conn, MsgBarrierResp, resp); err != nil {
+				log.Printf("replica: write rebuild ack: %v", err)
 			}
 			return
 

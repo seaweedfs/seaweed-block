@@ -140,8 +140,9 @@ func TestTransport_Rebuild_StreamsAndAdvancesFrontier(t *testing.T) {
 		t.Fatal("timeout")
 	}
 
-	// Small delay for replica handler to finish Sync after MsgRebuildDone.
-	time.Sleep(50 * time.Millisecond)
+	// No sleep needed: doRebuild waits for the replica's barrier ack,
+	// which is sent AFTER Sync(). When closeCh fires, the replica store
+	// has already applied all blocks and persisted the frontier.
 
 	// Replica frontier must match primary.
 	rR, _, _ := replica.Boundaries()

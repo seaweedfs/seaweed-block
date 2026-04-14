@@ -207,8 +207,29 @@ func (e *BlockExecutor) doRebuild(targetLSN uint64) (uint64, error) {
 		return 0, fmt.Errorf("rebuild done: %w", err)
 	}
 
-	log.Printf("executor: rebuild complete, sent %d blocks (targetLSN=%d)", len(blocks), targetLSN)
-	return targetLSN, nil
+	// Wait for replica ack. Rebuild is not complete until the replica has
+	// actually applied the blocks, called AdvanceFrontier, and Sync'd. The
+	// ack carries the replica's real synced frontier; returning before this
+	// would let OnSessionClose fire while the replica is still catching up,
+	// producing a race where callers see "success" on a not-yet-applied
+	// store. Mirrors the catch-up barrier contract.
+	msgType, ackPayload, err := ReadMsg(conn)
+	if err != nil {
+		return 0, fmt.Errorf("rebuild ack: %w", err)
+	}
+	if msgType != MsgBarrierResp {
+		return 0, fmt.Errorf("rebuild ack: unexpected message type 0x%02x", msgType)
+	}
+	if len(ackPayload) < 8 {
+		return 0, fmt.Errorf("rebuild ack: short payload (%d)", len(ackPayload))
+	}
+	replicaFrontier := binary.BigEndian.Uint64(ackPayload)
+
+	log.Printf("executor: rebuild complete, sent %d blocks (targetLSN=%d, replicaFrontier=%d)",
+		len(blocks), targetLSN, replicaFrontier)
+	// Report the replica's actual frontier as achievedLSN — this is the
+	// truthful durability boundary, not the primary's intent.
+	return replicaFrontier, nil
 }
 
 func (e *BlockExecutor) InvalidateSession(replicaID string, sessionID uint64, reason string) {
