@@ -187,26 +187,33 @@ Evidence artifacts:
 If a case diverges, record it in `divergence-log.md` before changing
 the route or the expectations.
 
-## Persistence
+## Persistence and the local data process
 
-Phase 07 admits one persistence-backed local storage implementation
-behind the `LogicalStorage` interface and proves restart-surviving
-local data on a single node:
+A bounded local data process owns read, write, flush, checkpoint,
+and recovery on one node, behind the `LogicalStorage` interface.
+Acked writes survive abrupt process kill; recovery is deterministic;
+a background flusher drains the WAL into the extent and advances
+the on-disk checkpoint.
 
 ```bash
 go run ./cmd/sparrow --persist-demo --persist-dir /tmp/sparrow-persist
 ```
 
-What this proves: data acked by `Sync()` survives `Close + Open +
-Recover` on a clean stop/restart of one process.
+What's proven (single-node):
 
-What this does NOT prove: crash consistency from process kill or
-power loss; distributed durability across nodes; SmartWAL semantics
-(future work behind the same interface).
+- Acked writes survive process kill (verified by simulated-kill tests
+  that bypass `Close()` and a crash family across four windows).
+- Recovery is deterministic across reopens of the same on-disk state.
+- Unacked writes may vanish but never corrupt acked data.
 
-See [docs/persistence.md](docs/persistence.md) for the on-disk
-format, exit codes, anti-pattern guards, and explicit carry-forward
-list.
+What's NOT in scope: distributed durability across nodes;
+power-loss durability beyond what `fsync` guarantees at the
+OS+device boundary; bit-rot detection in the extent.
+
+For details:
+
+- [docs/local-data-process.md](docs/local-data-process.md) — the institution, what it owns, the crash model, carry-forward
+- [docs/persistence.md](docs/persistence.md) — backend implementation details, on-disk format, exit codes, NVMe/raw-device path
 
 ## Design Rules
 

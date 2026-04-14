@@ -306,6 +306,175 @@ func TestSmartWAL_AckedWritesSurviveSimulatedCrash(t *testing.T) {
 	}
 }
 
+// TestSmartWAL_CrashFamily_AbruptKillAtMultipleWindows is the
+// SmartWAL parallel of WALStore's crash family. SmartWAL's
+// architecture has fewer "windows" than WALStore because it has no
+// separate WAL→extent flush step (writes go directly to extent, one
+// fsync per Sync covers both extent and metadata). The meaningful
+// windows here are:
+//
+//   - kill_pre_sync: writes returned but no Sync was called yet.
+//     Nothing required to survive. Reads of those LBAs return
+//     either the written bytes (if the extent write reached disk)
+//     or zeros (if it did not) — never garbage.
+//   - kill_post_sync: writes followed by a successful Sync, then
+//     immediate kill. Acked writes must survive.
+//   - kill_after_acked_then_unacked_overwrite: write A to LBA 0 +
+//     Sync; overwrite LBA 0 with B (no Sync); kill. The
+//     failure-atomicity claim is that LBA 0 reads either A or B —
+//     never garbage, never some other LBA's data, never a third
+//     value that was never written.
+//
+// "Abrupt kill" is simulated by dropping the file handle without
+// going through Close — no implicit fsync, no housekeeping.
+func TestSmartWAL_CrashFamily_AbruptKillAtMultipleWindows(t *testing.T) {
+	t.Run("kill_pre_sync", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "store.bin")
+
+		patterns := [][]byte{
+			makeBlock(4096, 0xA0),
+			makeBlock(4096, 0xA1),
+			makeBlock(4096, 0xA2),
+		}
+		func() {
+			s, err := CreateStore(path, 16, 4096)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for i, data := range patterns {
+				if _, err := s.Write(uint32(i), data); err != nil {
+					t.Fatal(err)
+				}
+			}
+			_ = s.fd.Close() // bypass Close — no fsync, no metadata persist
+		}()
+
+		s, err := OpenStore(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer s.Close()
+		if _, err := s.Recover(); err != nil {
+			t.Fatal(err)
+		}
+		zero := make([]byte, 4096)
+		for i, want := range patterns {
+			got, err := s.Read(uint32(i))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(got, want) && !bytes.Equal(got, zero) {
+				t.Fatalf("LBA %d after pre-Sync kill: got neither write nor zero — corruption: got[0]=%02x",
+					i, got[0])
+			}
+		}
+	})
+
+	t.Run("kill_post_sync", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "store.bin")
+
+		patterns := [][]byte{
+			makeBlock(4096, 0xB0),
+			makeBlock(4096, 0xB1),
+			makeBlock(4096, 0xB2),
+		}
+		func() {
+			s, err := CreateStore(path, 16, 4096)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for i, data := range patterns {
+				if _, err := s.Write(uint32(i), data); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := s.Sync(); err != nil {
+				t.Fatal(err)
+			}
+			_ = s.fd.Close()
+		}()
+
+		s, err := OpenStore(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer s.Close()
+		if _, err := s.Recover(); err != nil {
+			t.Fatal(err)
+		}
+		for i, want := range patterns {
+			got, err := s.Read(uint32(i))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(got, want) {
+				t.Fatalf("LBA %d ACKED bytes did not survive post-Sync kill: got[0]=%02x want[0]=%02x",
+					i, got[0], want[0])
+			}
+		}
+	})
+
+	t.Run("kill_after_acked_then_unacked_overwrite", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "store.bin")
+
+		acked := makeBlock(4096, 0xCC)     // pattern A — acked via Sync
+		overwrite := makeBlock(4096, 0xDD) // pattern B — written, never Sync'd
+
+		func() {
+			s, err := CreateStore(path, 16, 4096)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Acked: A on LBA 0.
+			if _, err := s.Write(0, acked); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.Sync(); err != nil {
+				t.Fatal(err)
+			}
+			// Unacked overwrite: B on LBA 0. Extent has B (atomic at
+			// 4KB-on-4KB-sector); metadata for LSN=2 may or may not
+			// have hit disk.
+			if _, err := s.Write(0, overwrite); err != nil {
+				t.Fatal(err)
+			}
+			_ = s.fd.Close()
+		}()
+
+		s, err := OpenStore(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer s.Close()
+		if _, err := s.Recover(); err != nil {
+			t.Fatal(err)
+		}
+		got, err := s.Read(0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Failure atomicity: read returns either the acked bytes or
+		// the unacked-overwrite bytes — never garbage, never another
+		// LBA's data, never a third value that was never written.
+		if !bytes.Equal(got, acked) && !bytes.Equal(got, overwrite) {
+			t.Fatalf("LBA 0 after acked+unacked-overwrite kill: got neither A nor B — corruption: got[0]=%02x acked[0]=%02x overwrite[0]=%02x",
+				got[0], acked[0], overwrite[0])
+		}
+		// Other LBAs must remain zero (no cross-LBA contamination).
+		zero := make([]byte, 4096)
+		for i := uint32(1); i < 4; i++ {
+			other, _ := s.Read(i)
+			if !bytes.Equal(other, zero) {
+				t.Fatalf("LBA %d should be untouched, got non-zero bytes: got[0]=%02x",
+					i, other[0])
+			}
+		}
+	})
+}
+
 // TestSmartWAL_RecoverIsIdempotent: calling Recover twice on the
 // same on-disk state yields identical results.
 func TestSmartWAL_RecoverIsIdempotent(t *testing.T) {

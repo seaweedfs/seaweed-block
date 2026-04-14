@@ -48,7 +48,14 @@ type WALStore struct {
 	sb        *superblock
 	wal       *walWriter
 	dm        *dirtyMap
-	committer *groupCommitter
+	committer *GroupCommitter
+	flusher   *flusher      // background WAL→extent applier; nil if disabled
+	admission *walAdmission // backpressure on WAL pressure; nil if disabled
+
+	// admissionTimeout is the per-Write deadline for admission. If
+	// the WAL stays above the hard watermark for longer than this,
+	// the Write returns errWALFull. Defaults to 30s.
+	admissionTimeout time.Duration
 
 	mu        sync.RWMutex
 	closed    bool
@@ -60,6 +67,12 @@ type WALStore struct {
 	// extentBase is the absolute file offset where the extent region
 	// begins; cached for fast read/write.
 	extentBase uint64
+
+	// checkpointLSN is the highest LSN whose data has been durably
+	// written into the extent and recorded in the on-disk superblock.
+	// Recovery skips WAL records with LSN <= checkpointLSN. Advanced
+	// only by the flusher.
+	checkpointLSN uint64
 
 	syncs atomic.Uint64 // total fsync operations performed (test/diagnostic)
 }
@@ -145,28 +158,130 @@ func openInitialized(path string, f *os.File, sb *superblock) (*WALStore, error)
 	dm := newDirtyMap(64) // 64 shards is plenty for Phase 07 demo workloads
 
 	s := &WALStore{
-		path:       path,
-		fd:         f,
-		sb:         sb,
-		wal:        wal,
-		dm:         dm,
-		extentBase: sb.WALOffset + sb.WALSize,
-		nextLSN:    sb.WALCheckpointLSN + 1,
-		syncedLSN:  sb.WALCheckpointLSN,
-		walTail:    sb.WALTail,
-		walHead:    sb.WALHead,
+		path:          path,
+		fd:            f,
+		sb:            sb,
+		wal:           wal,
+		dm:            dm,
+		extentBase:    sb.WALOffset + sb.WALSize,
+		nextLSN:       sb.WALCheckpointLSN + 1,
+		syncedLSN:     sb.WALCheckpointLSN,
+		walTail:       sb.WALTail,
+		walHead:       sb.WALHead,
+		checkpointLSN: sb.WALCheckpointLSN,
 	}
 	if s.nextLSN < 1 {
 		s.nextLSN = 1
 	}
-	committer := newGroupCommitter(groupCommitterConfig{
+	committer := NewGroupCommitter(GroupCommitterConfig{
 		SyncFunc: func() error { return f.Sync() },
 		MaxDelay: 1 * time.Millisecond,
 		MaxBatch: 64,
 	})
-	go committer.run()
+	go committer.Run()
 	s.committer = committer
+
+	// Background flusher: drains dirty map → extent, advances
+	// checkpoint, allows WAL recycling. Defaults are conservative
+	// for the demo workload; tunable via config in future.
+	s.flusher = newFlusher(s, flusherConfig{})
+	go s.flusher.run()
+
+	// WAL admission: backpressure when WAL is full. Soft watermark
+	// throttles writers slightly; hard watermark blocks them until
+	// the flusher drains. Both wake the flusher via Notify(). This
+	// is the V2-faithful way to handle WAL pressure without
+	// returning ErrWALFull to callers under transient load.
+	// Watermarks 0.7/0.9 match V2 config.go defaults
+	// (WALSoftWatermark, WALHardWatermark). Admission wakes the
+	// flusher via NotifyUrgent — same seam V2 wires for pressure-
+	// driven flushes.
+	s.admissionTimeout = 30 * time.Second
+	s.admission = newWALAdmission(walAdmissionConfig{
+		MaxConcurrent: 64,
+		SoftWatermark: 0.70,
+		HardWatermark: 0.90,
+		WALUsedFn: func() float64 {
+			return s.wal.usedFraction()
+		},
+		NotifyFn: func() {
+			if s.flusher != nil {
+				s.flusher.NotifyUrgent()
+			}
+		},
+		ClosedFn: func() bool {
+			s.mu.RLock()
+			defer s.mu.RUnlock()
+			return s.closed
+		},
+	})
+
 	return s, nil
+}
+
+// writeExtent pwrites one block into the extent at lba's natural
+// offset. Used by the flusher to drain WAL records into the extent.
+// Caller is responsible for fsync (the flusher batches one fsync per
+// flush cycle covering all writeExtent calls in that cycle).
+func (s *WALStore) writeExtent(lba uint32, data []byte) error {
+	off := int64(s.extentBase + uint64(lba)*uint64(s.sb.BlockSize))
+	if _, err := s.fd.WriteAt(data, off); err != nil {
+		return fmt.Errorf("storage: write extent LBA %d: %w", lba, err)
+	}
+	return nil
+}
+
+// persistCheckpoint advances the on-disk checkpoint LSN to highestLSN
+// (after the flusher has confirmed the extent writes are fsync'd).
+// Updates both the in-memory checkpointLSN and the on-disk
+// superblock.WALCheckpointLSN. The superblock pwrite is itself
+// unsynced — the next fsync (or close) flushes it.
+//
+// If we crash between the extent fsync and the superblock fsync,
+// recovery sees the OLD checkpoint, replays the WAL records, and
+// over-writes the extent with identical bytes. Wasteful but correct.
+func (s *WALStore) persistCheckpoint(highestLSN uint64) error {
+	s.mu.Lock()
+	if highestLSN <= s.checkpointLSN {
+		s.mu.Unlock()
+		return nil
+	}
+	s.checkpointLSN = highestLSN
+	s.sb.WALCheckpointLSN = highestLSN
+	s.mu.Unlock()
+
+	hdrBuf := make([]byte, superblockSize)
+	if _, err := s.fd.ReadAt(hdrBuf, 0); err != nil {
+		return fmt.Errorf("storage: read superblock for checkpoint: %w", err)
+	}
+	// Re-encode in place via writeTo onto a buffer, then pwrite at 0.
+	// We use a small in-memory writer to avoid mucking with file
+	// offset state under the WAL writer's nose.
+	buf := newSimpleByteBuf()
+	if _, err := s.sb.writeTo(buf); err != nil {
+		return fmt.Errorf("storage: encode superblock: %w", err)
+	}
+	if _, err := s.fd.WriteAt(buf.bytes(), 0); err != nil {
+		return fmt.Errorf("storage: pwrite superblock: %w", err)
+	}
+	return nil
+}
+
+// CheckpointLSN returns the highest LSN whose data has been durably
+// written into the extent. Diagnostic only.
+func (s *WALStore) CheckpointLSN() uint64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.checkpointLSN
+}
+
+// FlushCount returns the total flush cycles the background flusher
+// has performed. Diagnostic only.
+func (s *WALStore) FlushCount() uint64 {
+	if s.flusher == nil {
+		return 0
+	}
+	return s.flusher.FlushCount()
 }
 
 // Recover replays WAL entries past the last checkpoint into the dirty
@@ -214,6 +329,18 @@ func (s *WALStore) Write(lba uint32, data []byte) (uint64, error) {
 	if len(data) != int(s.sb.BlockSize) {
 		return 0, fmt.Errorf("storage: data size %d != block size %d", len(data), s.sb.BlockSize)
 	}
+
+	// WAL admission: throttle/block under WAL pressure. If admission
+	// is disabled (admission==nil), Write proceeds immediately. The
+	// admission Acquire may block up to admissionTimeout — under
+	// hard pressure it spins waiting for the flusher to drain.
+	if s.admission != nil {
+		if err := s.admission.Acquire(s.admissionTimeout); err != nil {
+			return 0, fmt.Errorf("storage: WAL admission: %w", err)
+		}
+		defer s.admission.Release()
+	}
+
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
@@ -418,20 +545,51 @@ func (s *WALStore) ApplyEntry(lba uint32, data []byte, lsn uint64) error {
 	return nil
 }
 
-// AllBlocks snapshots every dirty LBA's current bytes. Used by the
-// rebuild server to enumerate what to ship. Clean LBAs (read from
-// extent) are NOT included — the caller knows the clean tail by
-// asking NumBlocks() and reading the missing ones if it needs them.
+// AllBlocks snapshots every written LBA's current bytes. Reads
+// every LBA in the volume via Read() (which checks the dirty map
+// first, falls back to the extent) and returns the entries whose
+// content is non-zero.
+//
+// This honors the LogicalStorage contract: "snapshots every
+// written LBA's current bytes" — including LBAs whose data has
+// been flushed out of the dirty map into the extent. Filtering
+// zeros preserves the "snapshot of dirty bits" semantics callers
+// expect (a never-written LBA shouldn't appear in the output;
+// neither should an LBA that was trimmed back to zeros).
+//
+// Linear scan over numBlocks. Acceptable for the rebuild path
+// (one-shot, off the hot read/write loop). Not appropriate for
+// a hot-path scan.
 func (s *WALStore) AllBlocks() map[uint32][]byte {
+	n := s.NumBlocks()
 	out := make(map[uint32][]byte)
-	for _, e := range s.dm.snapshot() {
-		data, err := s.readFromWAL(e.WALOffset)
+	zero := make([]byte, s.sb.BlockSize)
+	for lba := uint32(0); lba < n; lba++ {
+		data, err := s.Read(lba)
 		if err != nil {
 			continue
 		}
-		out[uint32(e.LBA)] = data
+		// Skip never-written / trimmed LBAs.
+		if bytesAllZero(data, zero) {
+			continue
+		}
+		out[lba] = data
 	}
 	return out
+}
+
+// bytesAllZero is a fast tight-loop equality against a zero slice.
+// We pass zero in to avoid allocating it per LBA.
+func bytesAllZero(data, zero []byte) bool {
+	if len(data) != len(zero) {
+		return false
+	}
+	for i, b := range data {
+		if b != zero[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // Close persists current WAL boundaries into the superblock,
@@ -446,6 +604,13 @@ func (s *WALStore) Close() error {
 	s.closed = true
 	s.mu.Unlock()
 
+	// Stop the flusher first so it can't race the file close.
+	// flusher.Stop performs one final best-effort flush so any
+	// pending dirty entries get into the extent + checkpoint
+	// before we release the file.
+	if s.flusher != nil {
+		s.flusher.Stop()
+	}
 	if s.committer != nil {
 		s.committer.Stop()
 	}

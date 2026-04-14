@@ -52,10 +52,11 @@ const defaultWALSlots = 65536
 // the same LBA from different goroutines are NOT serialized at this
 // layer — callers must order their own per-LBA writes.
 type Store struct {
-	path string
-	fd   *os.File
-	hdr  *header
-	ring *ring
+	path      string
+	fd        *os.File
+	hdr       *header
+	ring      *ring
+	committer *storage.GroupCommitter // batches concurrent Sync into one fsync
 
 	extentBase int64
 
@@ -157,6 +158,16 @@ func openInitialized(path string, f *os.File, hdr *header) (*Store, error) {
 		extentBase: extentBase,
 		nextLSN:    1,
 	}
+	// Group committer batches concurrent Sync callers into one
+	// fsync — same pattern WALStore uses. Without this, SmartWAL
+	// scales poorly under concurrent durable writers because each
+	// caller's Sync() does its own fd.Sync().
+	s.committer = storage.NewGroupCommitter(storage.GroupCommitterConfig{
+		SyncFunc: func() error { return f.Sync() },
+		MaxDelay: 1 * time.Millisecond,
+		MaxBatch: 64,
+	})
+	go s.committer.Run()
 	return s, nil
 }
 
@@ -273,8 +284,8 @@ func (s *Store) Sync() (uint64, error) {
 		return 0, errors.New("smartwal: Sync after Close")
 	}
 	s.mu.RUnlock()
-	if err := s.fd.Sync(); err != nil {
-		return 0, fmt.Errorf("smartwal: fsync: %w", err)
+	if err := s.committer.SyncCache(); err != nil {
+		return 0, fmt.Errorf("smartwal: group commit fsync: %w", err)
 	}
 	s.syncs.Add(1)
 
@@ -385,6 +396,9 @@ func (s *Store) Close() error {
 	}
 	s.closed = true
 	s.mu.Unlock()
+	if s.committer != nil {
+		s.committer.Stop()
+	}
 	if s.fd != nil {
 		_ = s.fd.Sync()
 		err := s.fd.Close()
