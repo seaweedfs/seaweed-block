@@ -2,6 +2,7 @@ package adapter
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/seaweedfs/seaweed-block/core/engine"
@@ -47,8 +48,28 @@ func NewVolumeReplicaAdapter(exec CommandExecutor) *VolumeReplicaAdapter {
 	return a
 }
 
+// --- Ingress rule for future extensions -----------------------------------
+//
+// Same-observation batch rule:
+//   If a single runtime observation normalizes to MORE THAN ONE engine event
+//   (e.g. a probe produces ProbeSucceeded + RecoveryFactsObserved), those
+//   events MUST be applied as one atomic batch via applyBatchAndExecute.
+//   No unrelated event is allowed to interleave between facts from the same
+//   observation.
+//
+//   If a new ingress method is added and the observation normalizes to one
+//   event only, applyAndExecute is sufficient. If it normalizes to N events,
+//   route through applyBatchAndExecute — never loop applyAndExecute N times.
+//
+// The proof currently lives only at the probe ingress
+// (TestBatch_AtomicUnderContention). Any new multi-fact ingress MUST add an
+// equivalent contention test for its own event pair. Single-event tests do
+// NOT establish the invariant.
+// --------------------------------------------------------------------------
+
 // OnAssignment processes a master assignment. This is the identity
-// truth ingress path.
+// truth ingress path. AssignmentObserved is a single event, so this
+// path uses applyAndExecute directly.
 func (a *VolumeReplicaAdapter) OnAssignment(info AssignmentInfo) ApplyLog {
 	ev := NormalizeAssignment(info)
 	return a.applyAndExecute(ev)
@@ -57,9 +78,10 @@ func (a *VolumeReplicaAdapter) OnAssignment(info AssignmentInfo) ApplyLog {
 // OnProbeResult processes a transport probe result. This produces
 // reachability + recovery facts for the engine.
 //
-// Same-observation batch rule: ProbeSucceeded and RecoveryFactsObserved
-// from the same probe are applied as one atomic batch under a single
-// lock hold. No unrelated event can interleave between them.
+// A successful probe normalizes to TWO same-observation events
+// (ProbeSucceeded + RecoveryFactsObserved). They enter the engine
+// via applyBatchAndExecute as one atomic batch — see the ingress
+// rule above and TestBatch_AtomicUnderContention.
 //
 // The adapter NEVER decides recovery class — it normalizes facts,
 // the engine decides.
@@ -117,6 +139,14 @@ func (a *VolumeReplicaAdapter) applyBatchAndExecute(events []engine.Event) Apply
 	var cmds []engine.Command
 	sessionIDs := make(map[string]uint64)
 
+	// EventKind for a batch is the comma-joined kinds of the input events
+	// (same-observation batch: callers see what went in).
+	kinds := make([]string, 0, len(events))
+	for _, ev := range events {
+		kinds = append(kinds, engine.EventKind(ev))
+	}
+	log.EventKind = "batch:" + strings.Join(kinds, ",")
+
 	// Apply all events in the batch under one lock hold.
 	for _, ev := range events {
 		result := engine.Apply(&a.state, ev)
@@ -133,10 +163,15 @@ func (a *VolumeReplicaAdapter) applyBatchAndExecute(events []engine.Event) Apply
 	}
 
 	// Feed session lifecycle events for any Start* commands.
+	// Session traces MUST be in log.Trace too so diagnostics see the full
+	// batch, not just the input events. Projection is refreshed after each
+	// session apply so log.Projection reflects post-session state.
 	sessionEvents := a.buildSessionEvents(cmds, sessionIDs)
 	for _, sev := range sessionEvents {
 		sr := engine.Apply(&a.state, sev)
 		a.trace = append(a.trace, sr.Trace...)
+		log.Trace = append(log.Trace, sr.Trace...)
+		log.Projection = sr.Projection
 		for _, cmd := range sr.Commands {
 			kind := engine.CommandKind(cmd)
 			a.cmdLog = append(a.cmdLog, kind)
@@ -184,6 +219,8 @@ func (a *VolumeReplicaAdapter) applyAndExecute(ev engine.Event) ApplyLog {
 	for _, sev := range sessionEvents {
 		sr := engine.Apply(&a.state, sev)
 		a.trace = append(a.trace, sr.Trace...)
+		log.Trace = append(log.Trace, sr.Trace...)
+		log.Projection = sr.Projection
 		for _, cmd := range sr.Commands {
 			kind := engine.CommandKind(cmd)
 			a.cmdLog = append(a.cmdLog, kind)
