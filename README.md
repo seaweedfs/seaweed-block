@@ -116,6 +116,10 @@ core/
 
 `core/` is the public-facing semantic center path for this repository.
 
+For a full taxonomy of events, commands, truth domains, and operator
+enums — and why there is no single unified state diagram — see
+[docs/surface.md](docs/surface.md).
+
 ## Quick Start
 
 Requirements:
