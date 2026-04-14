@@ -2,6 +2,7 @@ package adapter
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/seaweedfs/seaweed-block/core/engine"
@@ -47,8 +48,28 @@ func NewVolumeReplicaAdapter(exec CommandExecutor) *VolumeReplicaAdapter {
 	return a
 }
 
+// --- Ingress rule for future extensions -----------------------------------
+//
+// Same-observation batch rule:
+//   If a single runtime observation normalizes to MORE THAN ONE engine event
+//   (e.g. a probe produces ProbeSucceeded + RecoveryFactsObserved), those
+//   events MUST be applied as one atomic batch via applyBatchAndExecute.
+//   No unrelated event is allowed to interleave between facts from the same
+//   observation.
+//
+//   If a new ingress method is added and the observation normalizes to one
+//   event only, applyAndExecute is sufficient. If it normalizes to N events,
+//   route through applyBatchAndExecute — never loop applyAndExecute N times.
+//
+// The proof currently lives only at the probe ingress
+// (TestBatch_AtomicUnderContention). Any new multi-fact ingress MUST add an
+// equivalent contention test for its own event pair. Single-event tests do
+// NOT establish the invariant.
+// --------------------------------------------------------------------------
+
 // OnAssignment processes a master assignment. This is the identity
-// truth ingress path.
+// truth ingress path. AssignmentObserved is a single event, so this
+// path uses applyAndExecute directly.
 func (a *VolumeReplicaAdapter) OnAssignment(info AssignmentInfo) ApplyLog {
 	ev := NormalizeAssignment(info)
 	return a.applyAndExecute(ev)
@@ -56,16 +77,17 @@ func (a *VolumeReplicaAdapter) OnAssignment(info AssignmentInfo) ApplyLog {
 
 // OnProbeResult processes a transport probe result. This produces
 // reachability + recovery facts for the engine.
+//
+// A successful probe normalizes to TWO same-observation events
+// (ProbeSucceeded + RecoveryFactsObserved). They enter the engine
+// via applyBatchAndExecute as one atomic batch — see the ingress
+// rule above and TestBatch_AtomicUnderContention.
+//
 // The adapter NEVER decides recovery class — it normalizes facts,
 // the engine decides.
 func (a *VolumeReplicaAdapter) OnProbeResult(result ProbeResult) ApplyLog {
 	events := NormalizeProbe(result)
-	var log ApplyLog
-	for _, ev := range events {
-		l := a.applyAndExecute(ev)
-		log.Merge(l)
-	}
-	return log
+	return a.applyBatchAndExecute(events)
 }
 
 // OnSessionClose processes a terminal session result. This is one of
@@ -102,46 +124,100 @@ func (a *VolumeReplicaAdapter) Trace() []engine.TraceEntry {
 
 // --- Internal: the single route ---
 
-// applyAndExecute is the ONE route: event → engine (under lock) → commands (outside lock).
-func (a *VolumeReplicaAdapter) applyAndExecute(ev engine.Event) ApplyLog {
-	// Step 1: Apply under lock, collect commands.
-	a.mu.Lock()
+// applyEventLocked is the shared engine.Apply + accumulation step used by
+// both applyBatchAndExecute and applyAndExecute. It MUST be called with
+// a.mu held.
+//
+// It mutates:
+//   - a.state (via engine.Apply)
+//   - a.trace, a.cmdLog (adapter-wide accumulators)
+//   - *log (Trace appended, Projection set to result, Commands appended)
+//   - *cmds (raw commands appended for later out-of-lock execution)
+//
+// It does NOT set log.EventKind — callers set that themselves, since
+// single-event and batch paths label EventKind differently.
+func (a *VolumeReplicaAdapter) applyEventLocked(ev engine.Event, log *ApplyLog, cmds *[]engine.Command) {
 	result := engine.Apply(&a.state, ev)
 	a.trace = append(a.trace, result.Trace...)
-
-	var log ApplyLog
-	log.EventKind = engine.EventKind(ev)
+	log.Trace = append(log.Trace, result.Trace...)
 	log.Projection = result.Projection
-	log.Trace = result.Trace
-
-	// Collect command kinds under lock.
-	cmds := make([]engine.Command, len(result.Commands))
-	copy(cmds, result.Commands)
-	for _, cmd := range cmds {
+	for _, cmd := range result.Commands {
 		kind := engine.CommandKind(cmd)
 		a.cmdLog = append(a.cmdLog, kind)
 		log.Commands = append(log.Commands, kind)
+		*cmds = append(*cmds, cmd)
+	}
+}
+
+// applyBatchAndExecute applies multiple same-observation events as one
+// atomic batch under a single lock hold. No unrelated event can
+// interleave between them. Commands are collected from all events,
+// then executed outside the lock.
+func (a *VolumeReplicaAdapter) applyBatchAndExecute(events []engine.Event) ApplyLog {
+	if len(events) == 1 {
+		return a.applyAndExecute(events[0])
 	}
 
-	// Feed session lifecycle events back into engine while still under lock
-	// (these are synchronous, no external calls).
-	// Also capture session IDs so executeCommand doesn't need to re-lock.
-	sessionIDs := make(map[string]uint64) // command key → sessionID
+	a.mu.Lock()
+
+	var log ApplyLog
+	var cmds []engine.Command
+	sessionIDs := make(map[string]uint64)
+
+	// EventKind for a batch is the comma-joined kinds of the input events
+	// (same-observation batch: callers see what went in).
+	kinds := make([]string, 0, len(events))
+	for _, ev := range events {
+		kinds = append(kinds, engine.EventKind(ev))
+	}
+	log.EventKind = "batch:" + strings.Join(kinds, ",")
+
+	// Apply all events in the batch under one lock hold.
+	for _, ev := range events {
+		a.applyEventLocked(ev, &log, &cmds)
+	}
+
+	// Feed session lifecycle events for any Start* commands.
+	// applyEventLocked ensures session traces appear in log.Trace and that
+	// log.Projection reflects post-session state.
 	sessionEvents := a.buildSessionEvents(cmds, sessionIDs)
 	for _, sev := range sessionEvents {
-		sr := engine.Apply(&a.state, sev)
-		a.trace = append(a.trace, sr.Trace...)
-		for _, cmd := range sr.Commands {
-			kind := engine.CommandKind(cmd)
-			a.cmdLog = append(a.cmdLog, kind)
-			log.Commands = append(log.Commands, kind)
-			cmds = append(cmds, cmd)
-		}
+		a.applyEventLocked(sev, &log, &cmds)
 	}
+
 	a.mu.Unlock()
 
-	// Step 2: Execute commands OUTSIDE the lock.
-	// Session IDs were captured under lock — no re-locking needed.
+	// Execute commands outside the lock.
+	for _, cmd := range cmds {
+		a.executeCommand(cmd, sessionIDs)
+	}
+
+	return log
+}
+
+// applyAndExecute is the ONE route for a single event: event → engine
+// (under lock) → commands (outside lock).
+func (a *VolumeReplicaAdapter) applyAndExecute(ev engine.Event) ApplyLog {
+	a.mu.Lock()
+
+	var log ApplyLog
+	var cmds []engine.Command
+
+	log.EventKind = engine.EventKind(ev)
+	a.applyEventLocked(ev, &log, &cmds)
+
+	// Feed session lifecycle events back into engine while still under lock
+	// (these are synchronous, no external calls). Session IDs captured in
+	// buildSessionEvents so executeCommand doesn't need to re-lock.
+	sessionIDs := make(map[string]uint64)
+	sessionEvents := a.buildSessionEvents(cmds, sessionIDs)
+	for _, sev := range sessionEvents {
+		a.applyEventLocked(sev, &log, &cmds)
+	}
+
+	a.mu.Unlock()
+
+	// Execute commands OUTSIDE the lock.
 	for _, cmd := range cmds {
 		a.executeCommand(cmd, sessionIDs)
 	}
