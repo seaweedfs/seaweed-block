@@ -126,11 +126,17 @@ func (r *ReplicaListener) handleConn(conn net.Conn) {
 				achievedLSN := binary.BigEndian.Uint64(payload)
 				r.store.AdvanceFrontier(achievedLSN)
 			}
-			r.store.Sync()
+			if _, err := r.store.Sync(); err != nil {
+				log.Printf("replica: sync after rebuild: %v", err)
+			}
 			return
 
 		case MsgBarrierReq:
-			frontier := r.store.Sync()
+			frontier, err := r.store.Sync()
+			if err != nil {
+				log.Printf("replica: sync for barrier: %v", err)
+				return
+			}
 			resp := make([]byte, 8)
 			binary.BigEndian.PutUint64(resp, frontier)
 			if err := WriteMsg(conn, MsgBarrierResp, resp); err != nil {

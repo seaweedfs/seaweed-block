@@ -1,0 +1,295 @@
+package storage
+
+import (
+	"bytes"
+	"path/filepath"
+	"testing"
+)
+
+// Contract tests for the LogicalStorage interface. Each test runs
+// against every registered implementation. A new implementation slots
+// in by adding a constructor to the implementations() table — no test
+// duplication needed.
+//
+// What these tests assert (Phase 07 contract surface):
+//
+//   - basic Write / Read round-trip
+//   - Sync returns the highest written LSN, monotonically non-decreasing
+//   - Boundaries (R/S/H) advance correctly
+//   - ApplyEntry honors the supplied LSN (replication path)
+//   - AdvanceFrontier / AdvanceWALTail behave as documented
+//   - Close is idempotent
+//
+// File-specific recovery tests (Recover, restart-survive) live in
+// file_storage_test.go since the in-memory store has nothing to recover.
+
+type implFactory struct {
+	name string
+	// fresh creates a new empty store. dir is a per-test temp dir the
+	// implementation may use (in-memory ignores it).
+	fresh func(t *testing.T, dir string, numBlocks uint32, blockSize int) LogicalStorage
+}
+
+func implementations() []implFactory {
+	return []implFactory{
+		{
+			name: "BlockStore-mem",
+			fresh: func(t *testing.T, dir string, numBlocks uint32, blockSize int) LogicalStorage {
+				return NewBlockStore(numBlocks, blockSize)
+			},
+		},
+		{
+			name: "WALStore",
+			fresh: func(t *testing.T, dir string, numBlocks uint32, blockSize int) LogicalStorage {
+				path := filepath.Join(dir, "store.bin")
+				s, err := CreateWALStore(path, numBlocks, blockSize)
+				if err != nil {
+					t.Fatalf("CreateWALStore: %v", err)
+				}
+				t.Cleanup(func() { _ = s.Close() })
+				return s
+			},
+		},
+	}
+}
+
+// runForEachImpl executes fn against every registered implementation as
+// a subtest. Use this to write one test body that proves the contract
+// holds for both backends.
+func runForEachImpl(t *testing.T, fn func(t *testing.T, store LogicalStorage)) {
+	t.Helper()
+	for _, impl := range implementations() {
+		impl := impl
+		t.Run(impl.name, func(t *testing.T) {
+			dir := t.TempDir()
+			store := impl.fresh(t, dir, 16, 4096)
+			fn(t, store)
+		})
+	}
+}
+
+func makeBlock(blockSize int, fillByte byte) []byte {
+	b := make([]byte, blockSize)
+	for i := range b {
+		b[i] = fillByte
+	}
+	return b
+}
+
+func TestContract_WriteReadRoundTrip(t *testing.T) {
+	runForEachImpl(t, func(t *testing.T, store LogicalStorage) {
+		want := makeBlock(store.BlockSize(), 0xAB)
+		lsn, err := store.Write(0, want)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if lsn == 0 {
+			t.Fatal("Write returned LSN 0")
+		}
+		got, err := store.Read(0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(got, want) {
+			t.Fatalf("Read returned wrong bytes: got[0]=%02x want[0]=%02x", got[0], want[0])
+		}
+	})
+}
+
+func TestContract_ReadUnwrittenLBAReturnsZeros(t *testing.T) {
+	runForEachImpl(t, func(t *testing.T, store LogicalStorage) {
+		got, err := store.Read(7)
+		if err != nil {
+			t.Fatal(err)
+		}
+		zero := make([]byte, store.BlockSize())
+		if !bytes.Equal(got, zero) {
+			t.Fatalf("unread LBA should be zeros, got non-zero at index 0: %02x", got[0])
+		}
+	})
+}
+
+func TestContract_WriteAdvancesLSN(t *testing.T) {
+	runForEachImpl(t, func(t *testing.T, store LogicalStorage) {
+		var lastLSN uint64
+		for i := uint32(0); i < 5; i++ {
+			lsn, err := store.Write(i, makeBlock(store.BlockSize(), byte(i)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if lsn <= lastLSN {
+				t.Fatalf("LSN did not strictly advance: prev=%d got=%d", lastLSN, lsn)
+			}
+			lastLSN = lsn
+		}
+	})
+}
+
+func TestContract_SyncReturnsHighestWrittenLSN(t *testing.T) {
+	runForEachImpl(t, func(t *testing.T, store LogicalStorage) {
+		var highest uint64
+		for i := uint32(0); i < 3; i++ {
+			lsn, err := store.Write(i, makeBlock(store.BlockSize(), 1))
+			if err != nil {
+				t.Fatal(err)
+			}
+			highest = lsn
+		}
+		synced, err := store.Sync()
+		if err != nil {
+			t.Fatalf("Sync: %v", err)
+		}
+		if synced != highest {
+			t.Fatalf("Sync returned %d, want %d (highest written)", synced, highest)
+		}
+	})
+}
+
+func TestContract_SyncMonotonicNonDecreasing(t *testing.T) {
+	runForEachImpl(t, func(t *testing.T, store LogicalStorage) {
+		var prev uint64
+		for round := 0; round < 3; round++ {
+			for i := uint32(0); i < 2; i++ {
+				_, err := store.Write(i, makeBlock(store.BlockSize(), byte(round)))
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			synced, err := store.Sync()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if synced < prev {
+				t.Fatalf("Sync regressed: prev=%d got=%d", prev, synced)
+			}
+			prev = synced
+		}
+	})
+}
+
+func TestContract_BoundariesReflectWrites(t *testing.T) {
+	runForEachImpl(t, func(t *testing.T, store LogicalStorage) {
+		R, S, H := store.Boundaries()
+		if R != 0 || S != 0 || H != 0 {
+			t.Fatalf("fresh store: R=%d S=%d H=%d, all want 0", R, S, H)
+		}
+
+		_, err := store.Write(0, makeBlock(store.BlockSize(), 1))
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = store.Sync()
+		R, _, H = store.Boundaries()
+		if R == 0 || H == 0 {
+			t.Fatalf("after write+sync: R=%d H=%d, both should be > 0", R, H)
+		}
+		if R != H {
+			t.Fatalf("after sync of single write: R=%d H=%d should be equal", R, H)
+		}
+	})
+}
+
+func TestContract_ApplyEntryUsesSuppliedLSN(t *testing.T) {
+	runForEachImpl(t, func(t *testing.T, store LogicalStorage) {
+		want := makeBlock(store.BlockSize(), 0xCD)
+		// ApplyEntry is the replication path — the LSN comes from the
+		// source, not from the local allocator.
+		err := store.ApplyEntry(3, want, 100)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := store.Read(3)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(got, want) {
+			t.Fatal("ApplyEntry data did not round-trip")
+		}
+		_, _, H := store.Boundaries()
+		if H != 100 {
+			t.Fatalf("ApplyEntry should advance H to supplied LSN: H=%d, want 100", H)
+		}
+		// Subsequent local Write must not collide with the applied LSN.
+		nextLSN, err := store.Write(4, makeBlock(store.BlockSize(), 0xEF))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if nextLSN <= 100 {
+			t.Fatalf("Write after ApplyEntry: lsn=%d, should be > 100", nextLSN)
+		}
+	})
+}
+
+func TestContract_AdvanceFrontierBumpsH(t *testing.T) {
+	runForEachImpl(t, func(t *testing.T, store LogicalStorage) {
+		store.AdvanceFrontier(50)
+		_, _, H := store.Boundaries()
+		if H != 50 {
+			t.Fatalf("AdvanceFrontier(50) should set H=50, got %d", H)
+		}
+		// Subsequent write must allocate an LSN beyond the advanced frontier.
+		lsn, err := store.Write(0, makeBlock(store.BlockSize(), 1))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if lsn <= 50 {
+			t.Fatalf("Write after AdvanceFrontier(50): lsn=%d should be > 50", lsn)
+		}
+	})
+}
+
+func TestContract_AdvanceWALTailMovesS(t *testing.T) {
+	runForEachImpl(t, func(t *testing.T, store LogicalStorage) {
+		_, _ = store.Write(0, makeBlock(store.BlockSize(), 1))
+		_, _ = store.Write(1, makeBlock(store.BlockSize(), 2))
+		store.AdvanceWALTail(20)
+		_, S, _ := store.Boundaries()
+		if S != 20 {
+			t.Fatalf("AdvanceWALTail(20): S=%d, want 20", S)
+		}
+		// Tail must not regress.
+		store.AdvanceWALTail(5)
+		_, S, _ = store.Boundaries()
+		if S != 20 {
+			t.Fatalf("AdvanceWALTail(5) after 20 should not regress: S=%d, want 20", S)
+		}
+	})
+}
+
+func TestContract_AllBlocksReturnsCurrentSnapshot(t *testing.T) {
+	runForEachImpl(t, func(t *testing.T, store LogicalStorage) {
+		_, _ = store.Write(0, makeBlock(store.BlockSize(), 0x01))
+		_, _ = store.Write(2, makeBlock(store.BlockSize(), 0x02))
+		_, _ = store.Write(5, makeBlock(store.BlockSize(), 0x05))
+		all := store.AllBlocks()
+		if len(all) != 3 {
+			t.Fatalf("AllBlocks: got %d entries, want 3", len(all))
+		}
+		if all[0][0] != 0x01 || all[2][0] != 0x02 || all[5][0] != 0x05 {
+			t.Fatalf("AllBlocks: wrong content")
+		}
+	})
+}
+
+func TestContract_CloseIsIdempotent(t *testing.T) {
+	runForEachImpl(t, func(t *testing.T, store LogicalStorage) {
+		if err := store.Close(); err != nil {
+			t.Fatalf("first Close: %v", err)
+		}
+		if err := store.Close(); err != nil {
+			t.Fatalf("second Close (must be idempotent): %v", err)
+		}
+	})
+}
+
+func TestContract_RecoverOnFreshStoreReturnsZero(t *testing.T) {
+	runForEachImpl(t, func(t *testing.T, store LogicalStorage) {
+		recovered, err := store.Recover()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if recovered != 0 {
+			t.Fatalf("fresh store Recover: got %d, want 0", recovered)
+		}
+	})
+}

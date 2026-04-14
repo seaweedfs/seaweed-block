@@ -52,10 +52,12 @@ import (
 
 // options captures parsed command-line flags.
 type options struct {
-	json      bool
-	runs      int
-	httpAddr  string
-	calibrate bool
+	json        bool
+	runs        int
+	httpAddr    string
+	calibrate   bool
+	persistDemo bool
+	persistDir  string
 }
 
 func main() {
@@ -84,6 +86,10 @@ func main() {
 		os.Exit(runCalibration(opts))
 	}
 
+	if opts.persistDemo {
+		os.Exit(runPersistDemo(opts))
+	}
+
 	code := runSparrow(opts)
 	os.Exit(code)
 }
@@ -95,6 +101,8 @@ func parseFlags(args []string) (options, error) {
 	fs.IntVar(&opts.runs, "runs", 1, "repeat the demo N times")
 	fs.StringVar(&opts.httpAddr, "http", "", "optional HTTP ops listen address (e.g. :9090)")
 	fs.BoolVar(&opts.calibrate, "calibrate", false, "run the Phase 06 calibration pass instead of the demo")
+	fs.BoolVar(&opts.persistDemo, "persist-demo", false, "run the Phase 07 single-node persistence demo instead of the demo")
+	fs.StringVar(&opts.persistDir, "persist-dir", "", "directory for the --persist-demo data file (required with --persist-demo)")
 	if err := fs.Parse(args); err != nil {
 		return opts, err
 	}
@@ -264,14 +272,14 @@ func runOne(verbose bool) []demoResult {
 		data[0] = byte(i + 1)
 		primaryStore.Write(i, data)
 	}
-	primaryStore.Sync()
+	_, _ = primaryStore.Sync()
 
 	blocks := primaryStore.AllBlocks()
 	_, _, pH := primaryStore.Boundaries()
 	for lba, data := range blocks {
 		replicaStore.ApplyEntry(lba, data, pH)
 	}
-	replicaStore.Sync()
+	_, _ = replicaStore.Sync()
 
 	exec := transport.NewBlockExecutor(primaryStore, replicaAddr, 1)
 	adpt := adapter.NewVolumeReplicaAdapter(exec)
@@ -298,7 +306,7 @@ func runOne(verbose bool) []demoResult {
 		data[0] = byte(i + 1)
 		primaryStore.Write(i, data)
 	}
-	primaryStore.Sync()
+	_, _ = primaryStore.Sync()
 
 	exec2 := transport.NewBlockExecutor(primaryStore, replicaAddr, 2)
 	adpt2 := adapter.NewVolumeReplicaAdapter(exec2)

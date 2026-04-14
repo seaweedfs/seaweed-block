@@ -60,7 +60,7 @@ func (h *harness) writeBlocks(n uint32) {
 		data[0] = byte(i + 1)
 		h.primaryStore.Write(i, data)
 	}
-	h.primaryStore.Sync()
+	_, _ = h.primaryStore.Sync()
 }
 
 // mirrorToReplica copies the primary's current blocks into the replica
@@ -72,7 +72,7 @@ func (h *harness) mirrorToReplica() {
 	for lba, data := range blocks {
 		_ = h.replicaStore.ApplyEntry(lba, data, pH)
 	}
-	h.replicaStore.Sync()
+	_, _ = h.replicaStore.Sync()
 }
 
 // advanceWALPastReplica moves the primary's WAL tail past the replica's

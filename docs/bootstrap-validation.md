@@ -17,18 +17,22 @@ design, the production interface is `weed shell` after integration.
 | Optional read-only HTTP inspection | `go run ./cmd/sparrow --http :9090` |
 | Phase 06 calibration pass | `go run ./cmd/sparrow --calibrate` |
 | Calibration report as JSON (for tester review) | `go run ./cmd/sparrow --calibrate --json` |
+| Phase 07 single-node persistence demo | `go run ./cmd/sparrow --persist-demo --persist-dir DIR` |
+| Persistence demo as JSON | `go run ./cmd/sparrow --persist-demo --persist-dir DIR --json` |
 
-## Not supported in Phase 05
+## Not supported
 
 These will either not exist or will return an explicit error:
 
-- persistence or crash recovery — storage is in-memory
+- crash consistency from process kill or power loss (Phase 07 proves clean stop+restart only)
+- distributed durability across nodes
 - master service or dynamic assignment
 - any mutation via the HTTP ops surface — POST/PUT/PATCH/DELETE return 501
 - RF3 or multi-replica flows
 - frontend protocols (iSCSI, NVMe-oF)
 - concurrent writer during replication
 - a real operator CLI — `weed shell` is the eventual interface
+- SmartWAL semantics (future implementation behind the same `LogicalStorage` interface)
 
 ## Default run
 
@@ -126,10 +130,10 @@ curl -s localhost:9090/trace | jq
 
 | Code | Meaning |
 |---|---|
-| 0 | All demos passed across all runs |
-| 1 | One or more demos failed (validation use) |
+| 0 | All demos / scenarios / persistence checks passed |
+| 1 | One or more demos failed, or persisted data did not survive restart |
 | 2 | Usage or flag error |
-| 3 | Runtime setup failure (currently: `--http` bind failed) |
+| 3 | Runtime setup failure (e.g. `--http` bind failed; persistence file open / fsync failed) |
 
 ## What the interface is NOT
 
