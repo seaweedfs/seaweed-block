@@ -124,6 +124,31 @@ func (a *VolumeReplicaAdapter) Trace() []engine.TraceEntry {
 
 // --- Internal: the single route ---
 
+// applyEventLocked is the shared engine.Apply + accumulation step used by
+// both applyBatchAndExecute and applyAndExecute. It MUST be called with
+// a.mu held.
+//
+// It mutates:
+//   - a.state (via engine.Apply)
+//   - a.trace, a.cmdLog (adapter-wide accumulators)
+//   - *log (Trace appended, Projection set to result, Commands appended)
+//   - *cmds (raw commands appended for later out-of-lock execution)
+//
+// It does NOT set log.EventKind — callers set that themselves, since
+// single-event and batch paths label EventKind differently.
+func (a *VolumeReplicaAdapter) applyEventLocked(ev engine.Event, log *ApplyLog, cmds *[]engine.Command) {
+	result := engine.Apply(&a.state, ev)
+	a.trace = append(a.trace, result.Trace...)
+	log.Trace = append(log.Trace, result.Trace...)
+	log.Projection = result.Projection
+	for _, cmd := range result.Commands {
+		kind := engine.CommandKind(cmd)
+		a.cmdLog = append(a.cmdLog, kind)
+		log.Commands = append(log.Commands, kind)
+		*cmds = append(*cmds, cmd)
+	}
+}
+
 // applyBatchAndExecute applies multiple same-observation events as one
 // atomic batch under a single lock hold. No unrelated event can
 // interleave between them. Commands are collected from all events,
@@ -149,35 +174,15 @@ func (a *VolumeReplicaAdapter) applyBatchAndExecute(events []engine.Event) Apply
 
 	// Apply all events in the batch under one lock hold.
 	for _, ev := range events {
-		result := engine.Apply(&a.state, ev)
-		a.trace = append(a.trace, result.Trace...)
-		log.Trace = append(log.Trace, result.Trace...)
-		log.Projection = result.Projection
-
-		for _, cmd := range result.Commands {
-			kind := engine.CommandKind(cmd)
-			a.cmdLog = append(a.cmdLog, kind)
-			log.Commands = append(log.Commands, kind)
-			cmds = append(cmds, cmd)
-		}
+		a.applyEventLocked(ev, &log, &cmds)
 	}
 
 	// Feed session lifecycle events for any Start* commands.
-	// Session traces MUST be in log.Trace too so diagnostics see the full
-	// batch, not just the input events. Projection is refreshed after each
-	// session apply so log.Projection reflects post-session state.
+	// applyEventLocked ensures session traces appear in log.Trace and that
+	// log.Projection reflects post-session state.
 	sessionEvents := a.buildSessionEvents(cmds, sessionIDs)
 	for _, sev := range sessionEvents {
-		sr := engine.Apply(&a.state, sev)
-		a.trace = append(a.trace, sr.Trace...)
-		log.Trace = append(log.Trace, sr.Trace...)
-		log.Projection = sr.Projection
-		for _, cmd := range sr.Commands {
-			kind := engine.CommandKind(cmd)
-			a.cmdLog = append(a.cmdLog, kind)
-			log.Commands = append(log.Commands, kind)
-			cmds = append(cmds, cmd)
-		}
+		a.applyEventLocked(sev, &log, &cmds)
 	}
 
 	a.mu.Unlock()
@@ -190,48 +195,29 @@ func (a *VolumeReplicaAdapter) applyBatchAndExecute(events []engine.Event) Apply
 	return log
 }
 
-// applyAndExecute is the ONE route: event → engine (under lock) → commands (outside lock).
+// applyAndExecute is the ONE route for a single event: event → engine
+// (under lock) → commands (outside lock).
 func (a *VolumeReplicaAdapter) applyAndExecute(ev engine.Event) ApplyLog {
-	// Step 1: Apply under lock, collect commands.
 	a.mu.Lock()
-	result := engine.Apply(&a.state, ev)
-	a.trace = append(a.trace, result.Trace...)
 
 	var log ApplyLog
-	log.EventKind = engine.EventKind(ev)
-	log.Projection = result.Projection
-	log.Trace = result.Trace
+	var cmds []engine.Command
 
-	// Collect command kinds under lock.
-	cmds := make([]engine.Command, len(result.Commands))
-	copy(cmds, result.Commands)
-	for _, cmd := range cmds {
-		kind := engine.CommandKind(cmd)
-		a.cmdLog = append(a.cmdLog, kind)
-		log.Commands = append(log.Commands, kind)
-	}
+	log.EventKind = engine.EventKind(ev)
+	a.applyEventLocked(ev, &log, &cmds)
 
 	// Feed session lifecycle events back into engine while still under lock
-	// (these are synchronous, no external calls).
-	// Also capture session IDs so executeCommand doesn't need to re-lock.
-	sessionIDs := make(map[string]uint64) // command key → sessionID
+	// (these are synchronous, no external calls). Session IDs captured in
+	// buildSessionEvents so executeCommand doesn't need to re-lock.
+	sessionIDs := make(map[string]uint64)
 	sessionEvents := a.buildSessionEvents(cmds, sessionIDs)
 	for _, sev := range sessionEvents {
-		sr := engine.Apply(&a.state, sev)
-		a.trace = append(a.trace, sr.Trace...)
-		log.Trace = append(log.Trace, sr.Trace...)
-		log.Projection = sr.Projection
-		for _, cmd := range sr.Commands {
-			kind := engine.CommandKind(cmd)
-			a.cmdLog = append(a.cmdLog, kind)
-			log.Commands = append(log.Commands, kind)
-			cmds = append(cmds, cmd)
-		}
+		a.applyEventLocked(sev, &log, &cmds)
 	}
+
 	a.mu.Unlock()
 
-	// Step 2: Execute commands OUTSIDE the lock.
-	// Session IDs were captured under lock — no re-locking needed.
+	// Execute commands OUTSIDE the lock.
 	for _, cmd := range cmds {
 		a.executeCommand(cmd, sessionIDs)
 	}
