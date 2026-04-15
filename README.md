@@ -120,6 +120,11 @@ For a full taxonomy of events, commands, truth domains, and operator
 enums — and why there is no single unified state diagram — see
 [docs/surface.md](docs/surface.md).
 
+For the data-sync institution boundary (catch-up / rebuild byte
+movement, lineage gate, achieved-frontier report, and what is
+explicitly carried forward to later phases) see
+[docs/data-sync-institution.md](docs/data-sync-institution.md).
+
 ## Quick Start
 
 Requirements:

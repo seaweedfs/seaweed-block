@@ -1,12 +1,10 @@
 package transport
 
 import (
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"log"
 	"net"
-	"sort"
 	"sync"
 	"time"
 
@@ -17,6 +15,13 @@ import (
 // BlockExecutor implements adapter.CommandExecutor using real TCP
 // transport and in-memory storage. It is the "muscle" layer — it
 // executes commands but never decides policy.
+//
+// The executor hosts the session lifecycle (register / attach conn /
+// invalidate / finish) and the probe path. The two byte-movement
+// paths — catch-up and rebuild — live in catchup_sender.go and
+// rebuild_sender.go respectively, so each protocol's wire shape and
+// terminator stay distinct. The barrier exchange and typed
+// BarrierResponse live in barrier.go.
 type BlockExecutor struct {
 	primaryStore *storage.BlockStore
 	replicaAddr  string // replica's TCP address
@@ -27,6 +32,10 @@ type BlockExecutor struct {
 	stepDelay      time.Duration
 }
 
+// activeSession is the executor's per-recovery handle. The cancel
+// channel unblocks goroutines parked in select; the conn pointer
+// lets InvalidateSession close in-flight I/O so a parked ReadMsg
+// returns immediately instead of waiting for TCP timeout.
 type activeSession struct {
 	lineage RecoveryLineage
 	cancel  chan struct{}
@@ -35,6 +44,10 @@ type activeSession struct {
 
 var errSessionInvalidated = errors.New("session invalidated")
 
+// recoveryConnTimeout bounds every send/receive on a recovery conn.
+// Small enough that a silent peer cannot park the sender for more
+// than a few seconds; large enough that a healthy peer always meets
+// it on a single block exchange.
 const recoveryConnTimeout = 5 * time.Second
 
 // NewBlockExecutor creates an executor for one primary → replica pair.
@@ -51,7 +64,9 @@ func (e *BlockExecutor) SetOnSessionClose(fn adapter.OnSessionClose) {
 }
 
 // Probe dials the replica, sends a probe request, and returns the
-// replica's R/S/H boundaries. Returns facts only — never decides policy.
+// replica's R/S/H boundaries. Returns facts only — never decides
+// policy. Probe is observation, not byte movement: it carries no
+// lineage and never mutates replica state.
 func (e *BlockExecutor) Probe(replicaID, dataAddr, ctrlAddr string, epoch, endpointVersion uint64) adapter.ProbeResult {
 	addr := e.replicaAddr
 	if dataAddr != "" {
@@ -114,195 +129,17 @@ func (e *BlockExecutor) Probe(replicaID, dataAddr, ctrlAddr string, epoch, endpo
 		EndpointVersion:   endpointVersion,
 		TransportEpoch:    epoch,
 		ReplicaFlushedLSN: resp.SyncedLSN, // R
-		PrimaryTailLSN:    primaryS,        // S
-		PrimaryHeadLSN:    primaryH,         // H
+		PrimaryTailLSN:    primaryS,       // S
+		PrimaryHeadLSN:    primaryH,       // H
 	}
 }
 
-// StartCatchUp ships WAL entries from the primary to the replica.
-// Runs asynchronously — calls OnSessionClose when done.
-func (e *BlockExecutor) StartCatchUp(replicaID string, sessionID, epoch, endpointVersion, targetLSN uint64) error {
-	lineage := RecoveryLineage{
-		SessionID:       sessionID,
-		Epoch:           epoch,
-		EndpointVersion: endpointVersion,
-		TargetLSN:       targetLSN,
-	}
-	session, err := e.registerSession(lineage)
-	if err != nil {
-		return err
-	}
-
-	go func() {
-		achieved, err := e.doCatchUp(session, targetLSN)
-		e.finishSession(replicaID, session, achieved, err)
-	}()
-	return nil
-}
-
-func (e *BlockExecutor) doCatchUp(session *activeSession, targetLSN uint64) (uint64, error) {
-	conn, err := net.DialTimeout("tcp", e.replicaAddr, 2*time.Second)
-	if err != nil {
-		return 0, fmt.Errorf("catch-up dial: %w", err)
-	}
-	if err := e.attachConn(session, conn); err != nil {
-		_ = conn.Close()
-		return 0, err
-	}
-	defer func() {
-		e.detachConn(session, conn)
-		_ = conn.Close()
-	}()
-
-	// Ship all blocks from primary store with the target LSN so the
-	// replica's store advances its boundaries correctly.
-	blocks := e.primaryStore.AllBlocks()
-	lbas := make([]int, 0, len(blocks))
-	for lba := range blocks {
-		lbas = append(lbas, int(lba))
-	}
-	sort.Ints(lbas)
-	for _, lbaInt := range lbas {
-		select {
-		case <-session.cancel:
-			return 0, errSessionInvalidated
-		default:
-		}
-		lba := uint32(lbaInt)
-		entry := EncodeShipEntry(ShipEntry{
-			Lineage: session.lineage,
-			LBA:     lba,
-			LSN:     targetLSN,
-			Data:    blocks[lba],
-		})
-		if err := conn.SetDeadline(time.Now().Add(recoveryConnTimeout)); err != nil {
-			return 0, fmt.Errorf("catch-up set deadline: %w", err)
-		}
-		if err := WriteMsg(conn, MsgShipEntry, entry); err != nil {
-			return 0, fmt.Errorf("catch-up ship LBA %d: %w", lba, err)
-		}
-		if e.stepDelay > 0 {
-			time.Sleep(e.stepDelay)
-		}
-	}
-
-	// Send barrier to confirm durability. The barrier response carries
-	// the replica's actual synced frontier — use THAT as achievedLSN,
-	// not the intent target.
-	select {
-	case <-session.cancel:
-		return 0, errSessionInvalidated
-	default:
-	}
-	if err := conn.SetDeadline(time.Now().Add(recoveryConnTimeout)); err != nil {
-		return 0, fmt.Errorf("catch-up set deadline: %w", err)
-	}
-	if err := WriteMsg(conn, MsgBarrierReq, EncodeLineage(session.lineage)); err != nil {
-		return 0, fmt.Errorf("catch-up barrier: %w", err)
-	}
-	if err := conn.SetDeadline(time.Now().Add(recoveryConnTimeout)); err != nil {
-		return 0, fmt.Errorf("catch-up set deadline: %w", err)
-	}
-	msgType, payload, err := ReadMsg(conn)
-	if err != nil || msgType != MsgBarrierResp {
-		return 0, fmt.Errorf("catch-up barrier resp: %v", err)
-	}
-	achievedLSN := binary.BigEndian.Uint64(payload)
-	log.Printf("executor: catch-up complete, replica synced to %d", achievedLSN)
-	return achievedLSN, nil
-}
-
-// StartRebuild streams all base blocks from primary to replica.
-// Runs asynchronously — calls OnSessionClose when done.
-func (e *BlockExecutor) StartRebuild(replicaID string, sessionID, epoch, endpointVersion, targetLSN uint64) error {
-	lineage := RecoveryLineage{
-		SessionID:       sessionID,
-		Epoch:           epoch,
-		EndpointVersion: endpointVersion,
-		TargetLSN:       targetLSN,
-	}
-	session, err := e.registerSession(lineage)
-	if err != nil {
-		return err
-	}
-
-	go func() {
-		achieved, err := e.doRebuild(session, targetLSN)
-		e.finishSession(replicaID, session, achieved, err)
-	}()
-	return nil
-}
-
-func (e *BlockExecutor) doRebuild(session *activeSession, targetLSN uint64) (uint64, error) {
-	conn, err := net.DialTimeout("tcp", e.replicaAddr, 2*time.Second)
-	if err != nil {
-		return 0, fmt.Errorf("rebuild dial: %w", err)
-	}
-	if err := e.attachConn(session, conn); err != nil {
-		_ = conn.Close()
-		return 0, err
-	}
-	defer func() {
-		e.detachConn(session, conn)
-		_ = conn.Close()
-	}()
-
-	// Send all blocks. The target is the engine's frozen targetLSN,
-	// not the primary's current head. The executor must not silently
-	// upgrade the target — that would violate the engine's contract.
-	blocks := e.primaryStore.AllBlocks()
-	lbas := make([]int, 0, len(blocks))
-	for lba := range blocks {
-		lbas = append(lbas, int(lba))
-	}
-	sort.Ints(lbas)
-	for _, lbaInt := range lbas {
-		select {
-		case <-session.cancel:
-			return 0, errSessionInvalidated
-		default:
-		}
-		lba := uint32(lbaInt)
-		payload := EncodeRebuildBlock(session.lineage, lba, blocks[lba])
-		if err := conn.SetDeadline(time.Now().Add(recoveryConnTimeout)); err != nil {
-			return 0, fmt.Errorf("rebuild set deadline: %w", err)
-		}
-		if err := WriteMsg(conn, MsgRebuildBlock, payload); err != nil {
-			return 0, fmt.Errorf("rebuild block LBA %d: %w", lba, err)
-		}
-		if e.stepDelay > 0 {
-			time.Sleep(e.stepDelay)
-		}
-	}
-
-	// Send done with the engine's frozen targetLSN.
-	select {
-	case <-session.cancel:
-		return 0, errSessionInvalidated
-	default:
-	}
-	if err := conn.SetDeadline(time.Now().Add(recoveryConnTimeout)); err != nil {
-		return 0, fmt.Errorf("rebuild set deadline: %w", err)
-	}
-	if err := WriteMsg(conn, MsgRebuildDone, EncodeLineage(session.lineage)); err != nil {
-		return 0, fmt.Errorf("rebuild done: %w", err)
-	}
-	if err := conn.SetDeadline(time.Now().Add(recoveryConnTimeout)); err != nil {
-		return 0, fmt.Errorf("rebuild set deadline: %w", err)
-	}
-	msgType, payload, err := ReadMsg(conn)
-	if err != nil || msgType != MsgBarrierResp {
-		return 0, fmt.Errorf("rebuild ack resp: %v", err)
-	}
-	if len(payload) < 8 {
-		return 0, fmt.Errorf("rebuild ack resp: short payload")
-	}
-	achievedLSN := binary.BigEndian.Uint64(payload)
-
-	log.Printf("executor: rebuild complete, sent %d blocks (targetLSN=%d)", len(blocks), targetLSN)
-	return achievedLSN, nil
-}
-
+// InvalidateSession cancels the session and closes its conn so any
+// goroutine parked in ReadMsg unblocks immediately. The matching
+// finishSession call sees the session removed from the map and skips
+// the close callback — by the time invalidation reaches the executor
+// the engine has already moved on, so a delayed callback would race
+// with whatever recovery decision the engine made next.
 func (e *BlockExecutor) InvalidateSession(replicaID string, sessionID uint64, reason string) {
 	var conn net.Conn
 	e.mu.Lock()
@@ -328,6 +165,9 @@ func (e *BlockExecutor) PublishDegraded(replicaID string, reason string) {
 	log.Printf("executor: publish degraded for %s: %s", replicaID, reason)
 }
 
+// registerSession reserves a session slot under mu. Returns an error
+// if the same SessionID is already in flight — duplicates indicate a
+// caller bug, not a transient condition, so we fail fast.
 func (e *BlockExecutor) registerSession(lineage RecoveryLineage) (*activeSession, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -343,6 +183,10 @@ func (e *BlockExecutor) registerSession(lineage RecoveryLineage) (*activeSession
 	return session, nil
 }
 
+// attachConn binds a live conn to a session under mu. Returns
+// errSessionInvalidated if the session was removed between
+// registerSession and attachConn — in that case the caller closes
+// the conn immediately and returns without sending anything.
 func (e *BlockExecutor) attachConn(session *activeSession, conn net.Conn) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -355,6 +199,9 @@ func (e *BlockExecutor) attachConn(session *activeSession, conn net.Conn) error 
 	return nil
 }
 
+// detachConn clears the conn pointer when the sender finishes its
+// own work, so InvalidateSession after a clean finish doesn't try
+// to close an already-closed conn.
 func (e *BlockExecutor) detachConn(session *activeSession, conn net.Conn) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -368,6 +215,12 @@ func (e *BlockExecutor) detachConn(session *activeSession, conn net.Conn) {
 	}
 }
 
+// finishSession is the single completion path for catch-up and
+// rebuild. Drops the close callback if the session was invalidated
+// (the engine already moved on) or if a different session pointer
+// occupies the slot (shouldn't happen with monotonic SessionIDs but
+// the check is cheap and prevents a stale callback from racing a
+// fresh one).
 func (e *BlockExecutor) finishSession(replicaID string, session *activeSession, achieved uint64, err error) {
 	if errors.Is(err, errSessionInvalidated) {
 		return
