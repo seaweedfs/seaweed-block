@@ -50,17 +50,18 @@ func (s *State) Update(demo string, a *adapter.VolumeReplicaAdapter) {
 	s.adapter = a
 }
 
-// Snapshot returns the current demo label, projection, and trace.
-// Returns zero values if no demo has run yet. Zero values are not
-// errors — they are honest "nothing yet" outputs.
-func (s *State) Snapshot() (demo string, proj engine.ReplicaProjection, trace []engine.TraceEntry) {
+// Snapshot returns the current demo label, projection, trace, and
+// watchdog lifecycle evidence. Returns zero values if no demo has run
+// yet. Zero values are not errors — they are honest "nothing yet"
+// outputs.
+func (s *State) Snapshot() (demo string, proj engine.ReplicaProjection, trace []engine.TraceEntry, watchdog []adapter.WatchdogEvent) {
 	s.mu.RLock()
 	a := s.adapter
 	demo = s.currentDemo
 	s.mu.RUnlock()
 
 	if a == nil {
-		return demo, engine.ReplicaProjection{}, nil
+		return demo, engine.ReplicaProjection{}, nil, nil
 	}
-	return demo, a.Projection(), a.Trace()
+	return demo, a.Projection(), a.Trace(), a.WatchdogLog()
 }

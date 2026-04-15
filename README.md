@@ -160,10 +160,15 @@ go run ./cmd/sparrow --calibrate --json    # machine-readable calibration Report
 go run ./cmd/sparrow --persist-demo --persist-dir DIR    # Phase 07 single-node persistence demo
 ```
 
-HTTP endpoints (read-only): `/status`, `/projection`, `/trace`. Every
-mutation verb returns 501 with an explicit "not supported in Phase 05"
-body. See [docs/bootstrap-validation.md](docs/bootstrap-validation.md)
-for the complete list of supported flags, endpoints, and exit codes.
+HTTP endpoints (read-only): `GET /` returns the self-describing surface
+map; `GET /status`, `GET /projection`, `GET /trace`, `GET /watchdog`,
+`GET /diagnose` expose the bounded single-node inspection surface. Every
+mutation verb returns 501 with an explicit read-only ops-surface body.
+
+See [docs/single-node-surface.md](docs/single-node-surface.md) for the
+bounded single-node product surface (P11), or
+[docs/bootstrap-validation.md](docs/bootstrap-validation.md) for the
+full list of supported flags, endpoints, and exit codes.
 
 This binary is a development and validation entry point only. The
 production operations surface is `weed shell` after integration.
@@ -221,6 +226,17 @@ The current replicated path is documented as two bounded lower institutions:
 
 - [docs/data-sync-institution.md](docs/data-sync-institution.md) — byte movement, wire protocol, lineage gate, achieved-frontier report
 - [docs/recovery-execution-institution.md](docs/recovery-execution-institution.md) — command admission, real execution start, invalidation, close-path lifecycle truth
+
+## Single-node product surface
+
+Above the three lower institutions (local data, data sync,
+recovery execution) sits one bounded single-node operator
+surface — start / inspect / validate / diagnose — exposed as six
+read-only HTTP endpoints plus the sparrow CLI. No cluster-shaped
+wording; no mutation authority. Cluster-wide surfaces are deferred
+to later phases.
+
+- [docs/single-node-surface.md](docs/single-node-surface.md) — surface map, workflow, honesty rules, carry-forward
 
 ## Design Rules
 

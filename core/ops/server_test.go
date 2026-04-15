@@ -24,7 +24,9 @@ func newTestServer(t *testing.T, state *State) (string, func()) {
 	mux.Handle("/status", withReadOnly(http.HandlerFunc(h.status)))
 	mux.Handle("/projection", withReadOnly(http.HandlerFunc(h.projection)))
 	mux.Handle("/trace", withReadOnly(http.HandlerFunc(h.trace)))
-	mux.Handle("/", withReadOnly(http.HandlerFunc(h.notFound)))
+	mux.Handle("/watchdog", withReadOnly(http.HandlerFunc(h.watchdog)))
+	mux.Handle("/diagnose", withReadOnly(http.HandlerFunc(h.diagnose)))
+	mux.Handle("/", withReadOnly(http.HandlerFunc(h.index)))
 
 	srv := httptest.NewServer(mux)
 	return srv.URL, srv.Close
@@ -92,6 +94,22 @@ func TestTrace_EmptyArrayWhenNoDemo(t *testing.T) {
 	}
 }
 
+func TestWatchdog_EmptyArrayWhenNoDemo(t *testing.T) {
+	url, cleanup := newTestServer(t, NewState())
+	defer cleanup()
+
+	resp, err := http.Get(url + "/watchdog")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	trimmed := strings.TrimSpace(string(body))
+	if !strings.HasPrefix(trimmed, "[") || !strings.HasSuffix(trimmed, "]") {
+		t.Fatalf("watchdog: not a JSON array: %q", trimmed)
+	}
+}
+
 // mutationMethods are every non-read verb that must return 501.
 var mutationMethods = []string{"POST", "PUT", "PATCH", "DELETE"}
 
@@ -99,7 +117,7 @@ func TestMutations_Return501OnEveryPath(t *testing.T) {
 	url, cleanup := newTestServer(t, NewState())
 	defer cleanup()
 
-	paths := []string{"/status", "/projection", "/trace", "/does-not-exist"}
+	paths := []string{"/", "/status", "/projection", "/trace", "/watchdog", "/diagnose", "/does-not-exist"}
 	for _, p := range paths {
 		for _, m := range mutationMethods {
 			t.Run(m+" "+p, func(t *testing.T) {
@@ -124,8 +142,8 @@ func TestMutations_Return501OnEveryPath(t *testing.T) {
 				if err := json.Unmarshal(body, &decoded); err != nil {
 					t.Fatalf("body not JSON: %v  body=%s", err, body)
 				}
-				if !strings.Contains(decoded["error"], "not supported in Phase 05") {
-					t.Fatalf("error message missing phase 05 text: %q", decoded["error"])
+				if !strings.Contains(decoded["error"], "read-only ops surface") {
+					t.Fatalf("error message missing read-only text: %q", decoded["error"])
 				}
 			})
 		}
@@ -148,12 +166,15 @@ func TestUnknownPath_Returns404(t *testing.T) {
 
 func TestState_UpdateReflectsInSnapshot(t *testing.T) {
 	st := NewState()
-	demo, _, tr := st.Snapshot()
+	demo, _, tr, wd := st.Snapshot()
 	if demo != "" {
 		t.Fatalf("fresh state demo=%q, want empty", demo)
 	}
 	if tr != nil {
 		t.Fatalf("fresh state trace=%v, want nil", tr)
+	}
+	if wd != nil {
+		t.Fatalf("fresh state watchdog=%v, want nil", wd)
 	}
 
 	// Use a live adapter so Snapshot() has something to read.
@@ -161,7 +182,7 @@ func TestState_UpdateReflectsInSnapshot(t *testing.T) {
 	a := adapter.NewVolumeReplicaAdapter(exec)
 	st.Update("healthy", a)
 
-	demo, _, _ = st.Snapshot()
+	demo, _, _, _ = st.Snapshot()
 	if demo != "healthy" {
 		t.Fatalf("after Update: demo=%q, want healthy", demo)
 	}

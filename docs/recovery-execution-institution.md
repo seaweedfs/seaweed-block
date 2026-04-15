@@ -63,49 +63,39 @@ must not silently absorb them:
 
 The current recovery-execution institution proves these boundaries:
 
-| Scenario | Property proven | Proof |
-|---|---|---|
-| Session prepared but not yet started | projection stays `starting`; no fabricated `running` without a real start callback | `TestSessionStarted_ComesFromExecutorStartCallback` |
-| Prepared session exceeds bounded start timeout | adapter emits `SessionClosedFailed(start_timeout)`; prepared does not hang forever | `TestPreparedNeverStarted_TimesOutAndFailsClosed` |
-| Immediate executor start error | adapter converts the failure into `SessionClosedFailed`; lifecycle fails closed without a `started` event | `TestPreparedNeverStarted_FailsClosedOnImmediateStartError` |
-| Delayed `SessionStarted` after failure | same-session `SessionStarted` is ignored once the session has already failed | `TestV3_Terminal_DelayedStartAfterFailureIgnored` |
-| Delayed `SessionClosedCompleted` after failure | same-session completion is ignored; late success cannot revive a failed session | `TestV3_Terminal_DelayedCompleteAfterFailureIgnored` |
-| Delayed `SessionClosedFailed` after completion | same-session late failure cannot un-complete an already-completed session | `TestV3_Terminal_DelayedFailureAfterCompletionIgnored` |
-| Duplicate terminal close (completed twice) | second `SessionClosedCompleted` does not re-fire healthy commands or alter state | `TestV3_Terminal_DuplicateCompletedIgnored` |
-| Duplicate terminal close (failed twice) | second `SessionClosedFailed` does not re-fire degraded commands or alter state | `TestV3_Terminal_DuplicateFailedIgnored` |
-| Illegal phase transitions after terminal | every illegal event after `PhaseFailed` / `PhaseCompleted` leaves `st.Session` byte-for-byte unchanged | `TestV3_Terminal_InvalidPhaseTransitionsLeaveStateUnchanged` |
-| Delayed stale start callback after newer assignment | old `SessionStarted` is rejected; it cannot advance the new session | `TestStaleStartCallback_OldSessionIgnoredAfterNewAssignment` |
-| Delayed stale close callback after newer assignment | old `SessionClosed*` is rejected; it cannot make the new session healthy or failed | `TestStaleCallback_OldSessionIgnoredAfterNewAssignment` |
-| Transport dial failure | executor emits failed close but no `SessionStarted`; command issuance alone does not count as running | `TestTransport_CatchUp_DialFailureDoesNotEmitStarted` |
-| Session invalidation mid-run | invalidated session does not emit terminal close; runtime cancellation is semantically dead | `TestTransport_Rebuild_InvalidatedSessionStopsWithoutCallback` |
-| Session invalidation during blocked ack read | invalidation unblocks `ReadMsg` by closing the conn; no spurious callback | `TestTransport_Rebuild_InvalidateInterruptsBlockedAckRead` |
-| Late completion racing invalidate | a session that completes in parallel with invalidation still produces no callback — `finishSession` drops it | `TestTransport_Lifecycle_LateCompletionAfterInvalidateDropped` |
+| Scenario | Property proven |
+|---|---|
+| Session prepared but not yet started | projection stays `starting`; no fabricated `running` without a real start callback |
+| Prepared session exceeds bounded start timeout | adapter emits `SessionClosedFailed(start_timeout)`; prepared does not hang forever |
+| Immediate executor start error | adapter converts the failure into `SessionClosedFailed`; lifecycle fails closed without a `started` event |
+| Delayed start after timeout | same-session `SessionStarted` is ignored once the session has already failed |
+| Delayed success close after timeout | same-session `SessionClosedCompleted` is ignored; late success cannot revive a failed session |
+| Delayed stale start callback after newer assignment | old `SessionStarted` is rejected; it cannot advance the new session |
+| Delayed stale close callback after newer assignment | old `SessionClosed*` is rejected; it cannot make the new session healthy or failed |
+| Transport dial failure | executor emits failed close but no `SessionStarted`; command issuance alone does not count as running |
+| Session invalidation mid-run | invalidated session does not emit terminal close; runtime cancellation is semantically dead |
 
-### Watchdog contract (P10)
-
-The start-timeout watchdog lives in the adapter, not the transport.
-Its rules are enumerated and separately proven:
-
-| Rule | Property proven | Proof |
-|---|---|---|
-| Timer cleared by real start | a watchdog armed for session N is cleared when `OnSessionStart(N)` arrives; a later `AfterFunc` fire is a no-op | `TestWatchdog_ClearedByRealStart` |
-| Timer cleared by immediate close | a session that closes before the timeout records `clear_closed`, not `fire` | `TestWatchdog_ClearedByImmediateClose` |
-| Old timer cannot fail new session | a timer armed for session N, firing after session N+M is prepared, sees the mismatched active session and records `fire_noop` | `TestWatchdog_OldTimerCannotFailNewSession` |
-| Invalidate before start — no false success | invalidating a prepared session (e.g., identity change) does not fabricate `SessionStarted` or `SessionClosedCompleted`; late callbacks from the stale session are traced as stale and rejected | `TestWatchdog_InvalidateBeforeStart_NoFalseStartNoFalseSuccess` |
-
-Watchdog evidence is exposed via `adapter.WatchdogLog()` which
-records `arm / clear_started / clear_closed / supersede / fire /
-fire_noop` events per sessionID. This is execution evidence for
-tests and diagnostic dumps, not an operator product surface.
-
-### The truth split
+The key truth split is:
 
 - `SessionPrepared` means the engine accepted one bounded recovery contract.
 - `SessionStarted` means runtime execution actually began.
 - `SessionClosedCompleted` / `SessionClosedFailed` are the only terminal lifecycle truth.
-- The watchdog is the adapter's sole bounded means of escaping a
-  never-starting prepared session; once a session is past `PhaseStarting`
-  the watchdog can no longer act on it.
+
+## Watchdog Guard Note
+
+One non-blocking implementation note is important for future maintainers:
+
+1. the adapter watchdog's read of engine state before firing is advisory, not authoritative
+2. after that pre-check, engine state may still move before the watchdog calls back into the adapter
+3. the final authoritative guard remains the engine's phase checks in `applySessionFailed`
+
+This dual layer is intentional:
+
+1. the watchdog should suppress obviously stale timeout fires where it can
+2. the engine must remain the last semantic guard against late timeout/start/close races
+
+Do not simplify this into one convenience check unless the replacement preserves
+both properties explicitly.
 
 ## Reading Order
 
@@ -120,40 +110,15 @@ For someone new to this institution:
 6. `core/adapter/adapter_test.go` and
    `core/transport/transport_test.go` — lifecycle proof set
 
-## What is NOT proven here
-
-P10 does not claim any of the following, and its tests must not be
-read as evidence for them:
-
-- **Who decides to retry** — the engine may re-emit a `Start*`
-  command when new facts arrive; P10 does not define when those
-  new facts arrive, nor any cross-session retry schedule.
-- **Who decides `catch_up` vs `rebuild`** — this is engine policy,
-  not an execution-lifecycle concern.
-- **`targetLSN` widening or rewriting** — the executor must honor
-  the frozen command; no P10 rule changes this.
-- **Multi-replica lifecycle coordination** — a second replica's
-  session is a separate adapter instance; P10 rules apply per
-  adapter, not across a replica set.
-- **Failover-policy-driven session kills** — the engine's
-  `InvalidateSession` today is driven only by identity change
-  (assignment / removal). Policy-driven invalidation (e.g., a
-  placement decision) belongs to P14.
-- **Operator-visible retry counters or repair surfaces** —
-  watchdog evidence is internal; no operator surface exists yet.
-
 ## Carry-Forward
 
 Items the recovery-execution institution leaves explicitly to later phases:
 
-- **Later P10 / operational hardening** — per-session timeout
-  classification (dial vs handshake vs ship vs barrier), cross-session
-  retry/backoff policy, and live-WAL-during-rebuild orchestration.
+- **Later P10 work** — per-session timeout classification, retry/backoff policy,
+  richer execution-phase observability, and live-WAL-during-rebuild orchestration.
 - **P12 (bounded replicated failover contract)** — rejoin contract,
   multi-replica lifecycle coordination, and bounded takeover guarantees.
 - **P14 (topology / failover policy)** — epoch authority, promotion,
-  failover selection, and replica placement truth. Policy-driven
-  invalidation (non-identity) enters here.
+  failover selection, and replica placement truth.
 - **P15 (operator-facing governance surface)** — operator controls for
-  retire / repair / rebalance and their publication semantics, plus
-  any operator-visible view of the watchdog evidence log.
+  retire / repair / rebalance and their publication semantics.
