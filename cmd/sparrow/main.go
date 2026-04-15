@@ -1,33 +1,3 @@
-// Command sparrow runs the minimal V3 block slice demonstrating
-// healthy, catch-up, and rebuild paths through the semantic engine.
-//
-// Default invocation (Phase 04 accepted behavior, unchanged):
-//
-//	go run ./cmd/sparrow
-//
-// The sparrow starts a primary + replica in-process, writes blocks,
-// and exercises all three recovery paths through the V3 adapter.
-//
-// Phase 05 extensions (opt-in flags, do not change default behavior):
-//
-//	--json          Emit machine-readable JSON instead of text
-//	--runs N        Repeat the full demo N times (validation-style)
-//	--http ADDR     Start a read-only HTTP ops surface; stays up after
-//	                demos until SIGINT. /status /projection /trace.
-//	--help          Print the authoritative supported/unsupported scope
-//	--version       Print version information
-//
-// Exit codes:
-//
-//	0               All demos passed
-//	1               One or more demos failed (validation use)
-//	2               Usage / flag error
-//
-// This binary is a development and validation entry point only.
-// The production operations surface is `weed shell` per the
-// V3 operations design; this sparrow exists to make the runnable
-// slice easy to start, inspect, and validate repeatedly during the
-// standalone pre-integration stage of the repo.
 package main
 
 import (
@@ -39,8 +9,6 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"os/signal"
-	"syscall"
 	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/adapter"
@@ -50,7 +18,6 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/transport"
 )
 
-// options captures parsed command-line flags.
 type options struct {
 	json        bool
 	runs        int
@@ -60,321 +27,221 @@ type options struct {
 	persistDir  string
 }
 
+type demoResult struct {
+	Demo       string                 `json:"demo"`
+	Pass       bool                   `json:"pass"`
+	Reason     string                 `json:"reason,omitempty"`
+	Projection engine.ReplicaProjection `json:"projection"`
+}
+
 func main() {
 	log.SetFlags(log.Lmicroseconds)
 
-	// Handle --help / --version before normal flag parsing so users
-	// can always discover capability.
-	if len(os.Args) >= 2 {
-		switch os.Args[1] {
-		case "-h", "--help", "help":
-			fmt.Print(ScopeStatement)
-			os.Exit(0)
-		case "-v", "--version", "version":
-			fmt.Printf("sparrow %s\n", Version)
-			os.Exit(0)
-		}
-	}
-
 	opts, err := parseFlags(os.Args[1:])
 	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		fmt.Fprintln(os.Stderr, "sparrow:", err)
 		os.Exit(2)
 	}
 
-	if opts.calibrate {
+	switch {
+	case opts.calibrate:
 		os.Exit(runCalibration(opts))
-	}
-
-	if opts.persistDemo {
+	case opts.persistDemo:
 		os.Exit(runPersistDemo(opts))
+	default:
+		os.Exit(runSparrow(opts))
 	}
-
-	code := runSparrow(opts)
-	os.Exit(code)
 }
 
 func parseFlags(args []string) (options, error) {
-	fs := flag.NewFlagSet("sparrow", flag.ContinueOnError)
 	var opts options
-	fs.BoolVar(&opts.json, "json", false, "emit machine-readable JSON")
-	fs.IntVar(&opts.runs, "runs", 1, "repeat the demo N times")
-	fs.StringVar(&opts.httpAddr, "http", "", "optional HTTP ops listen address (e.g. :9090)")
-	fs.BoolVar(&opts.calibrate, "calibrate", false, "run the Phase 06 calibration pass instead of the demo")
-	fs.BoolVar(&opts.persistDemo, "persist-demo", false, "run the Phase 07 single-node persistence demo instead of the demo")
-	fs.StringVar(&opts.persistDir, "persist-dir", "", "directory for the --persist-demo data file (required with --persist-demo)")
+	fs := flag.NewFlagSet("sparrow", flag.ContinueOnError)
+	fs.BoolVar(&opts.json, "json", false, "emit machine-readable JSON output")
+	fs.IntVar(&opts.runs, "runs", 1, "repeat the validation path N times")
+	fs.StringVar(&opts.httpAddr, "http", "", "start read-only HTTP ops server on ADDR")
+	fs.BoolVar(&opts.calibrate, "calibrate", false, "run the Phase 06 calibration package")
+	fs.BoolVar(&opts.persistDemo, "persist-demo", false, "run the single-node persistence demonstration")
+	fs.StringVar(&opts.persistDir, "persist-dir", "", "directory for --persist-demo backing file")
+	fs.SetOutput(ioDiscard{})
 	if err := fs.Parse(args); err != nil {
-		return opts, err
+		return options{}, err
 	}
 	if opts.runs < 1 {
-		return opts, fmt.Errorf("sparrow: --runs must be >= 1, got %d", opts.runs)
+		return options{}, fmt.Errorf("--runs must be >= 1")
 	}
 	return opts, nil
 }
 
-// demoResult is one outcome record for JSON or text emission.
-type demoResult struct {
-	Run    int    `json:"run"`
-	Name   string `json:"name"`
-	Pass   bool   `json:"pass"`
-	Mode   string `json:"mode"`
-	R      uint64 `json:"R"`
-	S      uint64 `json:"S"`
-	H      uint64 `json:"H"`
-	Reason string `json:"reason,omitempty"`
-}
-
-type runSummary struct {
-	Version   string       `json:"version"`
-	Runs      int          `json:"runs"`
-	Total     int          `json:"total"`
-	Passed    int          `json:"passed"`
-	Failed    int          `json:"failed"`
-	AllPassed bool         `json:"all_passed"`
-	Results   []demoResult `json:"results"`
-}
-
-// lastAdapter is set after each demo so the HTTP ops server, if
-// enabled, can surface the most recent projection/trace for inspection.
-// Protected by its own mutex-free simple assignment: the ops server
-// reads it via an accessor under lock.
-var sparrowState = ops.NewState()
-
-// startHTTPOps binds a listener synchronously and starts the ops
-// server in a goroutine. Returns the running *http.Server, the
-// ACTUAL bound address (useful when addr is ":0" for a random port),
-// and an error if the bind fails.
-//
-// Binding must happen on the caller's goroutine so a port conflict
-// returns a proper error rather than being swallowed into a log line
-// after the caller has already claimed success. The goroutine only
-// runs Serve() — which, given a pre-bound listener, cannot fail at
-// bind time.
-func startHTTPOps(addr string) (*http.Server, string, error) {
-	listener, err := net.Listen("tcp", addr)
-	if err != nil {
-		return nil, "", err
-	}
-	boundAddr := listener.Addr().String()
-	srv := ops.NewServer(boundAddr, Version, ScopeStatement, sparrowState)
-	go func() {
-		if err := srv.Serve(listener); err != nil && err != http.ErrServerClosed {
-			log.Printf("sparrow: http ops serve: %v", err)
-		}
-	}()
-	return srv, boundAddr, nil
-}
-
 func runSparrow(opts options) int {
-	// Optional HTTP ops surface. Started BEFORE demos so testers can
-	// probe /status even during long runs. Bind MUST be synchronous so
-	// a port conflict surfaces as an exit code, not a log line — the
-	// Phase 05 scope promises honest interfaces.
-	var httpServer *http.Server
+	state := ops.NewState()
+	var srv *http.Server
 	if opts.httpAddr != "" {
-		srv, boundAddr, err := startHTTPOps(opts.httpAddr)
+		boundSrv, boundAddr, err := startHTTPOpsWithState(opts.httpAddr, state)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "sparrow: failed to bind --http %s: %v\n", opts.httpAddr, err)
 			return 3
 		}
-		httpServer = srv
-		if !opts.json {
-			fmt.Printf("HTTP ops surface listening on %s (/status /projection /trace)\n", boundAddr)
-		}
+		srv = boundSrv
+		fmt.Printf("listening on %s\n", boundAddr)
+		defer shutdownServer(srv)
 	}
 
-	summary := runSummary{
-		Version: Version,
-		Runs:    opts.runs,
-		Results: []demoResult{},
-	}
-
-	for run := 1; run <= opts.runs; run++ {
-		if !opts.json {
-			fmt.Printf("=== V3 Block Sparrow (run %d/%d) ===\n\n", run, opts.runs)
+	allPassed := true
+	var allResults [][]demoResult
+	for i := 0; i < opts.runs; i++ {
+		results, err := runValidationPass(state)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "sparrow: validation run %d: %v\n", i+1, err)
+			return 3
 		}
-		results := runOne(!opts.json)
-		for i := range results {
-			results[i].Run = run
-		}
-		summary.Results = append(summary.Results, results...)
-	}
-
-	for _, r := range summary.Results {
-		summary.Total++
-		if r.Pass {
-			summary.Passed++
-		} else {
-			summary.Failed++
+		allResults = append(allResults, results)
+		for _, r := range results {
+			if !r.Pass {
+				allPassed = false
+			}
 		}
 	}
-	summary.AllPassed = summary.Failed == 0
 
 	if opts.json {
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
-		_ = enc.Encode(summary)
+		_ = enc.Encode(allResults)
 	} else {
-		fmt.Println()
-		fmt.Printf("=== Sparrow Complete: %d/%d passed ===\n", summary.Passed, summary.Total)
-		fmt.Println("Three paths demonstrated per run:")
-		fmt.Println("  1. Healthy (R >= H)")
-		fmt.Println("  2. Catch-up (R >= S, R < H) → session close → healthy")
-		fmt.Println("  3. Rebuild (R < S) → full base copy → session close → healthy")
-	}
-
-	// If HTTP ops is enabled, stay up until signal — testers need
-	// time to inspect /status /projection /trace.
-	if httpServer != nil {
-		if !opts.json {
-			fmt.Println()
-			fmt.Println("HTTP ops surface is live. Press Ctrl+C to exit.")
+		fmt.Println("=== V3 Block Sparrow ===")
+		for runIdx, results := range allResults {
+			fmt.Printf("\nRun %d:\n", runIdx+1)
+			for _, r := range results {
+				status := "FAIL"
+				if r.Pass {
+					status = "PASS"
+				}
+				fmt.Printf("  %s: %s", r.Demo, status)
+				if r.Reason != "" {
+					fmt.Printf(" (%s)", r.Reason)
+				}
+				fmt.Println()
+			}
 		}
-		sig := make(chan os.Signal, 1)
-		signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
-		<-sig
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		_ = httpServer.Shutdown(ctx)
 	}
 
-	if summary.AllPassed {
+	if allPassed {
 		return 0
 	}
 	return 1
 }
 
-// runOne executes the three canonical demos once and returns per-demo results.
-// verbose=true means human-readable progress output to stdout.
-func runOne(verbose bool) []demoResult {
-	results := make([]demoResult, 0, 3)
+func runValidationPass(state *ops.State) ([]demoResult, error) {
+	var results []demoResult
 
 	primaryStore := storage.NewBlockStore(256, 4096)
 	replicaStore := storage.NewBlockStore(256, 4096)
 
 	replicaListener, err := transport.NewReplicaListener("127.0.0.1:0", replicaStore)
 	if err != nil {
-		log.Fatalf("replica listener: %v", err)
+		return nil, fmt.Errorf("replica listener: %w", err)
 	}
 	replicaListener.Serve()
 	defer replicaListener.Stop()
 	replicaAddr := replicaListener.Addr()
-	if verbose {
-		fmt.Printf("Replica listening on %s\n", replicaAddr)
-	}
 
-	// --- Demo 1: Healthy ---
-	if verbose {
-		fmt.Println("\n--- Demo 1: Healthy (no recovery needed) ---")
-	}
+	exec := transport.NewBlockExecutor(primaryStore, replicaAddr)
+	adpt := adapter.NewVolumeReplicaAdapter(exec)
+	state.Update("healthy", adpt)
+
 	for i := uint32(0); i < 10; i++ {
 		data := make([]byte, 4096)
 		data[0] = byte(i + 1)
-		primaryStore.Write(i, data)
+		_, _ = primaryStore.Write(i, data)
 	}
 	_, _ = primaryStore.Sync()
-
 	blocks := primaryStore.AllBlocks()
 	_, _, pH := primaryStore.Boundaries()
 	for lba, data := range blocks {
-		replicaStore.ApplyEntry(lba, data, pH)
+		_ = replicaStore.ApplyEntry(lba, data, pH)
 	}
 	_, _ = replicaStore.Sync()
-
-	exec := transport.NewBlockExecutor(primaryStore, replicaAddr, 1)
-	adpt := adapter.NewVolumeReplicaAdapter(exec)
 	adpt.OnAssignment(adapter.AssignmentInfo{
 		VolumeID: "vol1", ReplicaID: "r1",
 		Epoch: 1, EndpointVersion: 1,
 		DataAddr: replicaAddr, CtrlAddr: replicaAddr,
 	})
-	p1 := waitForMode(adpt, engine.ModeHealthy, 5*time.Second)
-	sparrowState.Update("healthy", adpt)
-	results = append(results, buildResult("healthy", p1))
-	if verbose {
-		fmt.Printf("Mode: %s  Decision: %s  R=%d S=%d H=%d\n",
-			p1.Mode, p1.RecoveryDecision, p1.R, p1.S, p1.H)
-		printResult("Demo 1", p1.Mode == engine.ModeHealthy)
-	}
+	time.Sleep(200 * time.Millisecond)
+	results = append(results, buildResult("healthy", adpt.Projection()))
 
-	// --- Demo 2: Catch-up ---
-	if verbose {
-		fmt.Println("\n--- Demo 2: Catch-up (short gap) ---")
-	}
 	for i := uint32(10); i < 20; i++ {
 		data := make([]byte, 4096)
 		data[0] = byte(i + 1)
-		primaryStore.Write(i, data)
+		_, _ = primaryStore.Write(i, data)
 	}
 	_, _ = primaryStore.Sync()
-
-	exec2 := transport.NewBlockExecutor(primaryStore, replicaAddr, 2)
+	exec2 := transport.NewBlockExecutor(primaryStore, replicaAddr)
 	adpt2 := adapter.NewVolumeReplicaAdapter(exec2)
+	state.Update("catch_up", adpt2)
 	adpt2.OnAssignment(adapter.AssignmentInfo{
 		VolumeID: "vol1", ReplicaID: "r1",
 		Epoch: 2, EndpointVersion: 2,
 		DataAddr: replicaAddr, CtrlAddr: replicaAddr,
 	})
-	p2 := waitForMode(adpt2, engine.ModeHealthy, 5*time.Second)
-	sparrowState.Update("catch-up", adpt2)
-	results = append(results, buildResult("catch-up", p2))
-	if verbose {
-		fmt.Printf("Mode: %s  Decision: %s  R=%d S=%d H=%d\n",
-			p2.Mode, p2.RecoveryDecision, p2.R, p2.S, p2.H)
-		printResult("Demo 2", p2.Mode == engine.ModeHealthy)
-	}
+	results = append(results, buildResult("catch_up", waitForMode(adpt2, engine.ModeHealthy, 5*time.Second)))
 
-	// --- Demo 3: Rebuild ---
-	if verbose {
-		fmt.Println("\n--- Demo 3: Rebuild (long gap) ---")
-	}
 	replicaStore2 := storage.NewBlockStore(256, 4096)
-	replicaListener.Stop()
 	replicaListener2, err := transport.NewReplicaListener("127.0.0.1:0", replicaStore2)
 	if err != nil {
-		log.Fatalf("replica listener 2: %v", err)
+		return nil, fmt.Errorf("replica listener 2: %w", err)
 	}
 	replicaListener2.Serve()
 	defer replicaListener2.Stop()
 	replicaAddr2 := replicaListener2.Addr()
-
 	primaryStore.AdvanceWALTail(primaryStore.NextLSN())
-
-	exec3 := transport.NewBlockExecutor(primaryStore, replicaAddr2, 3)
+	exec3 := transport.NewBlockExecutor(primaryStore, replicaAddr2)
 	adpt3 := adapter.NewVolumeReplicaAdapter(exec3)
+	state.Update("rebuild", adpt3)
 	adpt3.OnAssignment(adapter.AssignmentInfo{
 		VolumeID: "vol1", ReplicaID: "r1",
 		Epoch: 3, EndpointVersion: 3,
 		DataAddr: replicaAddr2, CtrlAddr: replicaAddr2,
 	})
-	p3 := waitForMode(adpt3, engine.ModeHealthy, 5*time.Second)
-	sparrowState.Update("rebuild", adpt3)
-	results = append(results, buildResult("rebuild", p3))
-	if verbose {
-		fmt.Printf("Mode: %s  Decision: %s  R=%d S=%d H=%d\n",
-			p3.Mode, p3.RecoveryDecision, p3.R, p3.S, p3.H)
-		printResult("Demo 3", p3.Mode == engine.ModeHealthy)
-	}
+	results = append(results, buildResult("rebuild", waitForMode(adpt3, engine.ModeHealthy, 5*time.Second)))
 
-	return results
+	return results, nil
 }
 
-func buildResult(name string, p engine.ReplicaProjection) demoResult {
+func buildResult(name string, proj engine.ReplicaProjection) demoResult {
 	r := demoResult{
-		Name: name,
-		Pass: p.Mode == engine.ModeHealthy,
-		Mode: string(p.Mode),
-		R:    p.R,
-		S:    p.S,
-		H:    p.H,
+		Demo:       name,
+		Pass:       proj.Mode == engine.ModeHealthy,
+		Projection: proj,
 	}
 	if !r.Pass {
-		r.Reason = p.Reason
-		if r.Reason == "" {
-			r.Reason = fmt.Sprintf("did not reach healthy mode (final mode=%s decision=%s)", p.Mode, p.RecoveryDecision)
+		if proj.Reason != "" {
+			r.Reason = proj.Reason
+		} else {
+			r.Reason = string(proj.Mode)
 		}
 	}
 	return r
+}
+
+func startHTTPOps(addr string) (*http.Server, string, error) {
+	return startHTTPOpsWithState(addr, ops.NewState())
+}
+
+func startHTTPOpsWithState(addr string, state *ops.State) (*http.Server, string, error) {
+	srv := ops.NewServer(addr, Version, ScopeStatement, state)
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, "", err
+	}
+	go func() {
+		_ = srv.Serve(ln)
+	}()
+	return srv, ln.Addr().String(), nil
+}
+
+func shutdownServer(srv *http.Server) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	_ = srv.Shutdown(ctx)
 }
 
 func waitForMode(adpt *adapter.VolumeReplicaAdapter, want engine.Mode, timeout time.Duration) engine.ReplicaProjection {
@@ -389,10 +256,6 @@ func waitForMode(adpt *adapter.VolumeReplicaAdapter, want engine.Mode, timeout t
 	return adpt.Projection()
 }
 
-func printResult(demo string, passed bool) {
-	if passed {
-		fmt.Printf("  %s: PASS\n", demo)
-	} else {
-		fmt.Printf("  %s: FAIL\n", demo)
-	}
-}
+type ioDiscard struct{}
+
+func (ioDiscard) Write(p []byte) (int, error) { return len(p), nil }

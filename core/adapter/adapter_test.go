@@ -2,7 +2,6 @@ package adapter
 
 import (
 	"reflect"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -18,11 +17,19 @@ type mockExecutor struct {
 	commands       []string
 	nextSession    atomic.Uint64
 	onSessionClose OnSessionClose // wired by adapter
+	autoClose      bool
+	starts         []startRecord
+}
+
+type startRecord struct {
+	kind      string
+	sessionID uint64
 }
 
 func newMockExecutor() *mockExecutor {
 	m := &mockExecutor{
 		probeResults: make(map[string]ProbeResult),
+		autoClose:    true,
 	}
 	m.nextSession.Store(100)
 	return m
@@ -34,55 +41,69 @@ func (m *mockExecutor) SetOnSessionClose(fn OnSessionClose) {
 	m.onSessionClose = fn
 }
 
-func (m *mockExecutor) Probe(replicaID, dataAddr, ctrlAddr string) ProbeResult {
+func (m *mockExecutor) Probe(replicaID, dataAddr, ctrlAddr string, epoch, endpointVersion uint64) ProbeResult {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.commands = append(m.commands, "Probe")
 	if r, ok := m.probeResults[replicaID]; ok {
 		return r
 	}
-	return ProbeResult{ReplicaID: replicaID, Success: false, FailReason: "no mock result"}
+	return ProbeResult{
+		ReplicaID:       replicaID,
+		Success:         false,
+		EndpointVersion: endpointVersion,
+		TransportEpoch:  epoch,
+		FailReason:      "no mock result",
+	}
 }
 
-func (m *mockExecutor) StartCatchUp(replicaID string, sessionID uint64, targetLSN uint64) error {
+func (m *mockExecutor) StartCatchUp(replicaID string, sessionID, epoch, endpointVersion, targetLSN uint64) error {
 	m.mu.Lock()
 	m.commands = append(m.commands, "StartCatchUp")
 	cb := m.onSessionClose
+	autoClose := m.autoClose
+	m.starts = append(m.starts, startRecord{kind: "StartCatchUp", sessionID: sessionID})
 	m.mu.Unlock()
 
 	// Simulate async completion: session succeeds after a short delay.
 	// Uses the adapter-assigned sessionID so the engine accepts the close.
-	go func() {
-		time.Sleep(10 * time.Millisecond)
-		if cb != nil {
-			cb(SessionCloseResult{
-				ReplicaID:   replicaID,
-				SessionID:   sessionID,
-				Success:     true,
-				AchievedLSN: targetLSN,
-			})
-		}
-	}()
+	if autoClose {
+		go func() {
+			time.Sleep(10 * time.Millisecond)
+			if cb != nil {
+				cb(SessionCloseResult{
+					ReplicaID:   replicaID,
+					SessionID:   sessionID,
+					Success:     true,
+					AchievedLSN: targetLSN,
+				})
+			}
+		}()
+	}
 	return nil
 }
 
-func (m *mockExecutor) StartRebuild(replicaID string, sessionID uint64, targetLSN uint64) error {
+func (m *mockExecutor) StartRebuild(replicaID string, sessionID, epoch, endpointVersion, targetLSN uint64) error {
 	m.mu.Lock()
 	m.commands = append(m.commands, "StartRebuild")
 	cb := m.onSessionClose
+	autoClose := m.autoClose
+	m.starts = append(m.starts, startRecord{kind: "StartRebuild", sessionID: sessionID})
 	m.mu.Unlock()
 
-	go func() {
-		time.Sleep(10 * time.Millisecond)
-		if cb != nil {
-			cb(SessionCloseResult{
-				ReplicaID:   replicaID,
-				SessionID:   sessionID,
-				Success:     true,
-				AchievedLSN: targetLSN,
-			})
-		}
-	}()
+	if autoClose {
+		go func() {
+			time.Sleep(10 * time.Millisecond)
+			if cb != nil {
+				cb(SessionCloseResult{
+					ReplicaID:   replicaID,
+					SessionID:   sessionID,
+					Success:     true,
+					AchievedLSN: targetLSN,
+				})
+			}
+		}()
+	}
 	return nil
 }
 
@@ -110,6 +131,26 @@ func (m *mockExecutor) getCommands() []string {
 	cp := make([]string, len(m.commands))
 	copy(cp, m.commands)
 	return cp
+}
+
+func (m *mockExecutor) latestSessionID(kind string) uint64 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for i := len(m.starts) - 1; i >= 0; i-- {
+		if m.starts[i].kind == kind {
+			return m.starts[i].sessionID
+		}
+	}
+	return 0
+}
+
+func (m *mockExecutor) fireClose(result SessionCloseResult) {
+	m.mu.Lock()
+	cb := m.onSessionClose
+	m.mu.Unlock()
+	if cb != nil {
+		cb(result)
+	}
 }
 
 // ============================================================
@@ -458,224 +499,68 @@ func TestFullRoute_AlreadyCaughtUp(t *testing.T) {
 	}
 }
 
-// --- Same-observation batch: probe events applied atomically ---
-
-// TestBatch_UsesBatchPath is a structural guard: a multi-event probe must
-// go through applyBatchAndExecute (EventKind has "batch:" prefix) and the
-// returned ApplyLog must be complete — both event markers in Trace, final
-// Projection reflects post-apply state, EventKind is not empty.
-//
-// This catches regressions where someone replaces OnProbeResult's batch
-// call with a per-event loop (EventKind would become a single event name
-// and session events would be missing from log.Trace).
-func TestBatch_UsesBatchPath(t *testing.T) {
+func TestStaleCallback_OldSessionIgnoredAfterNewAssignment(t *testing.T) {
 	exec := newMockExecutor()
+	exec.autoClose = false
 	a := NewVolumeReplicaAdapter(exec)
 
+	exec.probeResults["r1"] = ProbeResult{
+		ReplicaID: "r1", Success: true,
+		EndpointVersion: 1, TransportEpoch: 1,
+		ReplicaFlushedLSN: 50, PrimaryTailLSN: 10, PrimaryHeadLSN: 100,
+	}
 	a.OnAssignment(AssignmentInfo{
 		VolumeID: "vol1", ReplicaID: "r1",
 		Epoch: 1, EndpointVersion: 1,
 		DataAddr: "a", CtrlAddr: "b",
 	})
+	time.Sleep(50 * time.Millisecond)
+	oldSessionID := exec.latestSessionID("StartCatchUp")
+	if oldSessionID == 0 {
+		t.Fatal("expected first catch-up session")
+	}
 
-	log := a.OnProbeResult(ProbeResult{
+	exec.probeResults["r1"] = ProbeResult{
 		ReplicaID: "r1", Success: true,
-		EndpointVersion: 1, TransportEpoch: 1,
-		ReplicaFlushedLSN: 50, PrimaryTailLSN: 10, PrimaryHeadLSN: 100,
-	})
-
-	// Structural: batch path stamps EventKind with "batch:" prefix.
-	if !strings.HasPrefix(log.EventKind, "batch:") {
-		t.Fatalf("EventKind=%q — expected batch path (prefix 'batch:')", log.EventKind)
+		EndpointVersion: 2, TransportEpoch: 2,
+		ReplicaFlushedLSN: 60, PrimaryTailLSN: 20, PrimaryHeadLSN: 120,
 	}
-	if !strings.Contains(log.EventKind, "ProbeSucceeded") ||
-		!strings.Contains(log.EventKind, "RecoveryFactsObserved") {
-		t.Fatalf("EventKind=%q — should list both same-observation facts", log.EventKind)
-	}
-
-	// Log.Trace must contain BOTH input events' markers (not just the first).
-	var probeSuccMarker, recoveryFactsMarker bool
-	for _, te := range log.Trace {
-		if te.Step == "event" && te.Detail == "ProbeSucceeded" {
-			probeSuccMarker = true
-		}
-		if te.Step == "event" && te.Detail == "RecoveryFactsObserved" {
-			recoveryFactsMarker = true
-		}
-	}
-	if !probeSuccMarker || !recoveryFactsMarker {
-		t.Fatalf("log.Trace missing event markers: ProbeSucceeded=%v RecoveryFactsObserved=%v",
-			probeSuccMarker, recoveryFactsMarker)
-	}
-
-	// Log.Projection must be post-apply state, not an intermediate snapshot.
-	// RecoveryDecision is set by RecoveryFactsObserved (the second event).
-	// If log.Projection were left at the first event's projection, decision
-	// would be DecisionUnknown.
-	if log.Projection.RecoveryDecision != engine.DecisionCatchUp {
-		t.Fatalf("log.Projection.RecoveryDecision=%s — expected catch_up (log may be stale)",
-			log.Projection.RecoveryDecision)
-	}
-}
-
-// TestBatch_LogIncludesSessionEvents verifies that SessionPrepared and
-// SessionStarted events emitted during the same apply window appear in
-// log.Trace and that log.Projection reflects POST-session state, not
-// the projection right after the input events.
-//
-// This catches regressions where session events update a.trace but not
-// log.Trace / log.Projection (the original bug before this fix).
-func TestBatch_LogIncludesSessionEvents(t *testing.T) {
-	exec := newMockExecutor()
-	a := NewVolumeReplicaAdapter(exec)
-
 	a.OnAssignment(AssignmentInfo{
 		VolumeID: "vol1", ReplicaID: "r1",
-		Epoch: 1, EndpointVersion: 1,
-		DataAddr: "a", CtrlAddr: "b",
+		Epoch: 2, EndpointVersion: 2,
+		DataAddr: "b", CtrlAddr: "b",
 	})
+	time.Sleep(50 * time.Millisecond)
+	newSessionID := exec.latestSessionID("StartCatchUp")
+	if newSessionID == 0 || newSessionID == oldSessionID {
+		t.Fatalf("expected second distinct catch-up session, old=%d new=%d", oldSessionID, newSessionID)
+	}
 
-	log := a.OnProbeResult(ProbeResult{
-		ReplicaID: "r1", Success: true,
-		EndpointVersion: 1, TransportEpoch: 1,
-		ReplicaFlushedLSN: 50, PrimaryTailLSN: 10, PrimaryHeadLSN: 100,
+	exec.fireClose(SessionCloseResult{
+		ReplicaID:   "r1",
+		SessionID:   oldSessionID,
+		Success:     true,
+		AchievedLSN: 100,
 	})
+	time.Sleep(20 * time.Millisecond)
 
-	// Because decision is catch_up, engine emits StartCatchUp → adapter
-	// synthesizes SessionPrepared+SessionStarted events under the same lock.
-	// Those event markers must appear in log.Trace (not silently swallowed).
-	var prepared, started bool
-	for _, te := range log.Trace {
-		if te.Step == "event" && te.Detail == "SessionPrepared" {
-			prepared = true
-		}
-		if te.Step == "event" && te.Detail == "SessionStarted" {
-			started = true
-		}
+	p := a.Projection()
+	if p.Mode == engine.ModeHealthy {
+		t.Fatal("stale callback should not make new assignment healthy")
 	}
-	if !prepared || !started {
-		t.Fatalf("log.Trace missing session markers: SessionPrepared=%v SessionStarted=%v",
-			prepared, started)
+	if p.SessionPhase != engine.PhaseRunning {
+		t.Fatalf("stale callback should not stop live session, phase=%s", p.SessionPhase)
 	}
 
-	// Commands must include StartCatchUp.
-	var hasStartCatchUp bool
-	for _, c := range log.Commands {
-		if c == "StartCatchUp" {
-			hasStartCatchUp = true
-		}
-	}
-	if !hasStartCatchUp {
-		t.Fatalf("log.Commands missing StartCatchUp: %v", log.Commands)
-	}
-}
-
-// TestBatch_AtomicUnderContention proves that same-observation probe events
-// truly enter under ONE lock hold — no unrelated event can interleave.
-//
-// Strategy: while the main goroutine fires successful probes for r1 (which
-// produce a batch of {ProbeSucceeded, RecoveryFactsObserved}), competing
-// goroutines fire ProbeFailed for a DIFFERENT replica. The engine rejects
-// those via checkReplicaID, but each rejected apply still emits an
-// "event: ProbeFailed" trace marker before rejection.
-//
-// If the batch were split (e.g., someone reverts OnProbeResult to a
-// per-event loop), the adapter mutex would be released between
-// ProbeSucceeded and RecoveryFactsObserved and the competing ProbeFailed
-// marker would frequently land between them — visible in adapter.Trace().
-//
-// Invariant: in the filtered sequence of "event" trace entries, every
-// ProbeSucceeded must be immediately followed by RecoveryFactsObserved.
-func TestBatch_AtomicUnderContention(t *testing.T) {
-	exec := newMockExecutor()
-	a := NewVolumeReplicaAdapter(exec)
-
-	a.OnAssignment(AssignmentInfo{
-		VolumeID: "vol1", ReplicaID: "r1",
-		Epoch: 1, EndpointVersion: 1,
-		DataAddr: "a", CtrlAddr: "b",
+	exec.fireClose(SessionCloseResult{
+		ReplicaID:   "r1",
+		SessionID:   newSessionID,
+		Success:     true,
+		AchievedLSN: 120,
 	})
+	time.Sleep(50 * time.Millisecond)
 
-	successProbe := ProbeResult{
-		ReplicaID: "r1", Success: true,
-		EndpointVersion: 1, TransportEpoch: 1,
-		ReplicaFlushedLSN: 50, PrimaryTailLSN: 10, PrimaryHeadLSN: 100,
+	if got := a.Projection().Mode; got != engine.ModeHealthy {
+		t.Fatalf("new session close should converge to healthy, got %s", got)
 	}
-	// Competing probe: different replica. Engine's checkReplicaID rejects
-	// it (so r1's state is untouched), but Apply still emits the initial
-	// "event: ProbeFailed" trace entry before rejection. That marker is
-	// what exposes interleaving.
-	competingProbe := ProbeResult{
-		ReplicaID:  "r2-other",
-		Success:    false,
-		FailReason: "synthetic",
-	}
-
-	stop := make(chan struct{})
-	var wg sync.WaitGroup
-	const workers = 4
-	for i := 0; i < workers; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for {
-				select {
-				case <-stop:
-					return
-				default:
-					a.OnProbeResult(competingProbe)
-				}
-			}
-		}()
-	}
-
-	const iterations = 2000
-	for i := 0; i < iterations; i++ {
-		a.OnProbeResult(successProbe)
-	}
-
-	close(stop)
-	wg.Wait()
-
-	// Filter trace to "event" markers only.
-	tr := a.Trace()
-	var events []string
-	for _, te := range tr {
-		if te.Step == "event" {
-			events = append(events, te.Detail)
-		}
-	}
-
-	var successCount, competingCount int
-	for i, ev := range events {
-		switch ev {
-		case "ProbeSucceeded":
-			successCount++
-			// The atomic-batch invariant: the NEXT event marker must be
-			// RecoveryFactsObserved. Anything else (especially ProbeFailed
-			// from the competing goroutines) means interleaving.
-			if i+1 >= len(events) {
-				t.Fatalf("trailing ProbeSucceeded with no follow-up marker at idx %d", i)
-			}
-			if events[i+1] != "RecoveryFactsObserved" {
-				t.Fatalf("interleaving detected at idx %d: ProbeSucceeded followed by %q, want RecoveryFactsObserved",
-					i, events[i+1])
-			}
-		case "ProbeFailed":
-			competingCount++
-		}
-	}
-
-	if successCount < iterations/2 {
-		t.Fatalf("too few ProbeSucceeded observed: %d of %d (state may be stuck)",
-			successCount, iterations)
-	}
-	// Confirm contention was real: competing goroutines should have landed
-	// thousands of events. Without contention, the test would be vacuous.
-	if competingCount < workers {
-		t.Fatalf("no contention observed (competing events=%d workers=%d) — test is vacuous",
-			competingCount, workers)
-	}
-	t.Logf("contention verified: %d successful batches, %d competing events — no splits",
-		successCount, competingCount)
 }

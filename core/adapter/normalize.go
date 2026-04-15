@@ -82,8 +82,10 @@ func NormalizeProbe(p ProbeResult) []engine.Event {
 	if !p.Success {
 		return []engine.Event{
 			engine.ProbeFailed{
-				ReplicaID: p.ReplicaID,
-				Reason:    p.FailReason,
+				ReplicaID:       p.ReplicaID,
+				EndpointVersion: p.EndpointVersion,
+				TransportEpoch:  p.TransportEpoch,
+				Reason:          p.FailReason,
 			},
 		}
 	}
@@ -96,16 +98,14 @@ func NormalizeProbe(p ProbeResult) []engine.Event {
 		},
 	}
 
-	// If R/S/H boundaries are available, report them as recovery facts.
-	// The engine decides whether this means catch_up, rebuild, or none.
-	if p.PrimaryHeadLSN > 0 {
-		events = append(events, engine.RecoveryFactsObserved{
-			ReplicaID: p.ReplicaID,
-			R:         p.ReplicaFlushedLSN,
-			S:         p.PrimaryTailLSN,
-			H:         p.PrimaryHeadLSN,
-		})
-	}
+	events = append(events, engine.RecoveryFactsObserved{
+		ReplicaID:       p.ReplicaID,
+		EndpointVersion: p.EndpointVersion,
+		TransportEpoch:  p.TransportEpoch,
+		R:               p.ReplicaFlushedLSN,
+		S:               p.PrimaryTailLSN,
+		H:               p.PrimaryHeadLSN,
+	})
 
 	return events
 }

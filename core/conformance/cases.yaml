@@ -195,3 +195,48 @@ cases:
     expect:
       must_emit_commands: [PublishDegraded]
       must_not_emit_commands: [StartRebuild]
+
+  - name: "stale_probe_failed_old_transport_epoch_rejected"
+    description: "ProbeFailed from an older transport epoch is ignored"
+    events:
+      - kind: AssignmentObserved
+        volume_id: vol1
+        replica_id: r1
+        epoch: 5
+        endpoint_version: 5
+        data_addr: a
+        ctrl_addr: b
+      - kind: ProbeFailed
+        replica_id: r1
+        endpoint_version: 5
+        transport_epoch: 4
+        reason: stale_probe
+    expect:
+      must_have_trace_steps: [stale_probe_failed]
+
+  - name: "recovery_facts_before_probe_still_converges"
+    description: "Same facts in reversed order still converge to catch_up"
+    events:
+      - kind: AssignmentObserved
+        volume_id: vol1
+        replica_id: r1
+        epoch: 1
+        endpoint_version: 1
+        data_addr: a
+        ctrl_addr: b
+      - kind: RecoveryFactsObserved
+        replica_id: r1
+        endpoint_version: 1
+        transport_epoch: 1
+        r: 50
+        s: 10
+        h: 100
+      - kind: ProbeSucceeded
+        replica_id: r1
+        endpoint_version: 1
+        transport_epoch: 1
+    expect:
+      mode: degraded
+      recovery_decision: catch_up
+      must_emit_commands: [StartCatchUp]
+      must_not_emit_commands: [StartRebuild]

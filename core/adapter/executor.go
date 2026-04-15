@@ -20,17 +20,17 @@ type CommandExecutor interface {
 	// Probe dials the replica and collects transport/recovery facts.
 	// Returns a ProbeResult with success/failure and R/S/H boundaries.
 	// Must NOT decide recovery class — that's the engine's job.
-	Probe(replicaID, dataAddr, ctrlAddr string) ProbeResult
+	Probe(replicaID, dataAddr, ctrlAddr string, epoch, endpointVersion uint64) ProbeResult
 
 	// StartCatchUp begins a catch-up session with the given sessionID and targetLSN.
 	// The sessionID is assigned by the adapter (matches the engine's session truth).
 	// Runs asynchronously; completion/failure MUST be reported via the
 	// registered OnSessionClose callback using the SAME sessionID.
-	StartCatchUp(replicaID string, sessionID uint64, targetLSN uint64) error
+	StartCatchUp(replicaID string, sessionID, epoch, endpointVersion, targetLSN uint64) error
 
 	// StartRebuild begins a full rebuild session with the given sessionID and targetLSN.
 	// Same contract as StartCatchUp.
-	StartRebuild(replicaID string, sessionID uint64, targetLSN uint64) error
+	StartRebuild(replicaID string, sessionID, epoch, endpointVersion, targetLSN uint64) error
 
 	// InvalidateSession cancels an active session.
 	InvalidateSession(replicaID string, sessionID uint64, reason string)

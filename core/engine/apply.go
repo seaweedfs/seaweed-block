@@ -116,9 +116,30 @@ func checkReplicaID(st *ReplicaState, eventReplicaID string, r *ApplyResult, tra
 	return false
 }
 
+func staleTransportObservation(st *ReplicaState, endpointVersion, transportEpoch uint64) (bool, string) {
+	if endpointVersion > 0 && endpointVersion < st.Identity.EndpointVersion {
+		return true, "endpoint version too old"
+	}
+	if transportEpoch > 0 && transportEpoch < st.Identity.Epoch {
+		return true, "transport epoch too old"
+	}
+	if endpointVersion > 0 &&
+		endpointVersion == st.Reachability.ObservedEndpointVersion &&
+		transportEpoch > 0 &&
+		transportEpoch < st.Reachability.TransportEpoch {
+		return true, "transport epoch rolled backward"
+	}
+	return false, ""
+}
+
 // --- Identity ---
 
 func applyAssignment(st *ReplicaState, e AssignmentObserved, r *ApplyResult, trace func(string, string)) {
+	if e.Epoch == 0 || e.EndpointVersion == 0 {
+		trace("invalid_assignment", "epoch and endpoint version must be >= 1")
+		return
+	}
+
 	// Monotonic identity check: reject stale epoch OR same-epoch with
 	// older endpoint version. Prevents rolling endpoint truth backward.
 	if e.Epoch < st.Identity.Epoch {
@@ -164,15 +185,21 @@ func applyAssignment(st *ReplicaState, e AssignmentObserved, r *ApplyResult, tra
 	// Request probe if not reachable.
 	if st.Reachability.Status != ProbeReachable {
 		r.Commands = append(r.Commands, ProbeReplica{
-			ReplicaID: e.ReplicaID,
-			DataAddr:  e.DataAddr,
-			CtrlAddr:  e.CtrlAddr,
+			ReplicaID:       e.ReplicaID,
+			Epoch:           e.Epoch,
+			EndpointVersion: e.EndpointVersion,
+			DataAddr:        e.DataAddr,
+			CtrlAddr:        e.CtrlAddr,
 		})
 		trace("probe_requested", "not reachable after assignment")
 	}
 }
 
 func applyEndpoint(st *ReplicaState, e EndpointObserved, r *ApplyResult, trace func(string, string)) {
+	if e.EndpointVersion == 0 {
+		trace("invalid_endpoint", "endpoint version must be >= 1")
+		return
+	}
 	if e.EndpointVersion <= st.Identity.EndpointVersion {
 		trace("stale_endpoint", "version too old")
 		return
@@ -184,9 +211,11 @@ func applyEndpoint(st *ReplicaState, e EndpointObserved, r *ApplyResult, trace f
 	trace("endpoint_updated", "reachability reset")
 
 	r.Commands = append(r.Commands, ProbeReplica{
-		ReplicaID: e.ReplicaID,
-		DataAddr:  e.DataAddr,
-		CtrlAddr:  e.CtrlAddr,
+		ReplicaID:       e.ReplicaID,
+		Epoch:           st.Identity.Epoch,
+		EndpointVersion: e.EndpointVersion,
+		DataAddr:        e.DataAddr,
+		CtrlAddr:        e.CtrlAddr,
 	})
 }
 
@@ -208,8 +237,8 @@ func applyRemoval(st *ReplicaState, e ReplicaRemoved, r *ApplyResult, trace func
 // --- Reachability ---
 
 func applyProbeSucceeded(st *ReplicaState, e ProbeSucceeded, r *ApplyResult, trace func(string, string)) {
-	if e.EndpointVersion < st.Identity.EndpointVersion {
-		trace("stale_probe", "probe for old endpoint version")
+	if stale, reason := staleTransportObservation(st, e.EndpointVersion, e.TransportEpoch); stale {
+		trace("stale_probe", reason)
 		return
 	}
 	st.Reachability.Status = ProbeReachable
@@ -217,9 +246,19 @@ func applyProbeSucceeded(st *ReplicaState, e ProbeSucceeded, r *ApplyResult, tra
 	st.Reachability.ObservedEndpointVersion = e.EndpointVersion
 	st.Reachability.TransportEpoch = e.TransportEpoch
 	trace("reachable", "probe succeeded")
+
+	// If recovery facts were already observed, becoming reachable should reopen
+	// the bounded decision path immediately instead of depending on event order.
+	if st.Recovery.R != 0 || st.Recovery.S != 0 || st.Recovery.H != 0 {
+		decide(st, r, trace)
+	}
 }
 
 func applyProbeFailed(st *ReplicaState, e ProbeFailed, r *ApplyResult, trace func(string, string)) {
+	if stale, reason := staleTransportObservation(st, e.EndpointVersion, e.TransportEpoch); stale {
+		trace("stale_probe_failed", reason)
+		return
+	}
 	st.Reachability.Status = ProbeUnreachable
 	trace("unreachable", e.Reason)
 
@@ -235,6 +274,10 @@ func applyProbeFailed(st *ReplicaState, e ProbeFailed, r *ApplyResult, trace fun
 // --- Recovery facts ---
 
 func applyRecoveryFacts(st *ReplicaState, e RecoveryFactsObserved, r *ApplyResult, trace func(string, string)) {
+	if stale, reason := staleTransportObservation(st, e.EndpointVersion, e.TransportEpoch); stale {
+		trace("stale_recovery_facts", reason)
+		return
+	}
 	st.Recovery.R = e.R
 	st.Recovery.S = e.S
 	st.Recovery.H = e.H
@@ -286,8 +329,10 @@ func decide(st *ReplicaState, r *ApplyResult, trace func(string, string)) {
 
 		if !hasActiveSession(st) {
 			r.Commands = append(r.Commands, StartCatchUp{
-				ReplicaID: st.Identity.ReplicaID,
-				TargetLSN: H,
+				ReplicaID:       st.Identity.ReplicaID,
+				Epoch:           st.Identity.Epoch,
+				EndpointVersion: st.Identity.EndpointVersion,
+				TargetLSN:       H,
 			})
 			trace("command", "StartCatchUp")
 		}
@@ -299,8 +344,10 @@ func decide(st *ReplicaState, r *ApplyResult, trace func(string, string)) {
 
 		if !hasActiveSession(st) {
 			r.Commands = append(r.Commands, StartRebuild{
-				ReplicaID: st.Identity.ReplicaID,
-				TargetLSN: H,
+				ReplicaID:       st.Identity.ReplicaID,
+				Epoch:           st.Identity.Epoch,
+				EndpointVersion: st.Identity.EndpointVersion,
+				TargetLSN:       H,
 			})
 			trace("command", "StartRebuild")
 		}

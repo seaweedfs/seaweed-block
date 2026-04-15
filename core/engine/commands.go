@@ -8,9 +8,11 @@ type Command interface {
 
 // ProbeReplica: request the runtime to probe the replica's reachability.
 type ProbeReplica struct {
-	ReplicaID string
-	DataAddr  string
-	CtrlAddr  string
+	ReplicaID       string
+	Epoch           uint64
+	EndpointVersion uint64
+	DataAddr        string
+	CtrlAddr        string
 }
 
 func (ProbeReplica) commandKind() string { return "ProbeReplica" }
@@ -18,8 +20,10 @@ func (ProbeReplica) commandKind() string { return "ProbeReplica" }
 // StartCatchUp: request the runtime to start a catch-up session.
 // May only be emitted from bounded R/S/H facts, not from transport errors.
 type StartCatchUp struct {
-	ReplicaID string
-	TargetLSN uint64
+	ReplicaID       string
+	Epoch           uint64
+	EndpointVersion uint64
+	TargetLSN       uint64
 }
 
 func (StartCatchUp) commandKind() string { return "StartCatchUp" }
@@ -27,8 +31,10 @@ func (StartCatchUp) commandKind() string { return "StartCatchUp" }
 // StartRebuild: request the runtime to start a full rebuild session.
 // May only be emitted from bounded R/S/H facts, not from transport errors.
 type StartRebuild struct {
-	ReplicaID string
-	TargetLSN uint64
+	ReplicaID       string
+	Epoch           uint64
+	EndpointVersion uint64
+	TargetLSN       uint64
 }
 
 func (StartRebuild) commandKind() string { return "StartRebuild" }

@@ -234,6 +234,26 @@ The next planned steps are:
 3. calibrate against selected high-value scenarios from the existing benchmark path
 4. expand only after the semantic boundary stays clean
 
+## Roadmap
+
+The project is still under active development. Each upcoming phase
+closes one specific contract; the boundaries are kept narrow on
+purpose so a phase that ships does not silently absorb work the
+next phase still owns.
+
+| Phase | Closes | Out of scope |
+|---|---|---|
+| P9  | move bytes correctly under lineage | execution lifecycle, policy |
+| P10 | execute recovery lifecycle (start / cancel / complete / timeout) | who or when to recover |
+| P11 | ship single-node product, no cluster-shape leak | replicated surface |
+| P12 | bounded replicated failover contract — mechanism, not policy | who promotes, when to fail over |
+| P13 | harden the replicated slice for release criteria | new features |
+| P14 | topology / failover policy (epoch authority, placement, who-promotes) | operator-facing surface |
+| P15 | operator-facing governance surface | inventing new authority outside P14 |
+
+A task that crosses two rows is either misassigned or signals a
+gap in the closure definitions. PR scope checks against this table.
+
 ## Honesty Note
 
 This repository should currently be read as:

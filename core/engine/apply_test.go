@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"math/rand"
 	"testing"
 )
 
@@ -130,6 +131,58 @@ func TestV3_Stale_OldEpochAssignment(t *testing.T) {
 	assertTraceContains(t, r, "stale_assignment")
 }
 
+func TestV3_Invalid_ZeroEpochAssignmentRejectedEarly(t *testing.T) {
+	st := &ReplicaState{}
+
+	r := Apply(st, AssignmentObserved{
+		VolumeID: "vol1", ReplicaID: "r1",
+		Epoch: 0, EndpointVersion: 1,
+		DataAddr: "a", CtrlAddr: "b",
+	})
+
+	if st.Identity.MemberPresent {
+		t.Fatal("zero-epoch assignment should not initialize identity")
+	}
+	assertTraceContains(t, r, "invalid_assignment")
+	assertNoCommand(t, r, "ProbeReplica")
+}
+
+func TestV3_Invalid_ZeroEndpointAssignmentRejectedEarly(t *testing.T) {
+	st := &ReplicaState{}
+
+	r := Apply(st, AssignmentObserved{
+		VolumeID: "vol1", ReplicaID: "r1",
+		Epoch: 1, EndpointVersion: 0,
+		DataAddr: "a", CtrlAddr: "b",
+	})
+
+	if st.Identity.MemberPresent {
+		t.Fatal("zero-endpoint assignment should not initialize identity")
+	}
+	assertTraceContains(t, r, "invalid_assignment")
+	assertNoCommand(t, r, "ProbeReplica")
+}
+
+func TestV3_Invalid_ZeroEndpointObservedRejectedEarly(t *testing.T) {
+	st := &ReplicaState{}
+	Apply(st, AssignmentObserved{
+		VolumeID: "vol1", ReplicaID: "r1",
+		Epoch: 1, EndpointVersion: 1,
+		DataAddr: "a", CtrlAddr: "b",
+	})
+
+	r := Apply(st, EndpointObserved{
+		ReplicaID: "r1", EndpointVersion: 0,
+		DataAddr: "b", CtrlAddr: "b",
+	})
+
+	if st.Identity.EndpointVersion != 1 {
+		t.Fatalf("zero endpoint observation should not mutate endpoint version, got %d", st.Identity.EndpointVersion)
+	}
+	assertTraceContains(t, r, "invalid_endpoint")
+	assertNoCommand(t, r, "ProbeReplica")
+}
+
 func TestV3_Stale_OldEndpointProbe(t *testing.T) {
 	st := &ReplicaState{}
 	Apply(st, AssignmentObserved{VolumeID: "vol1", ReplicaID: "r1", Epoch: 1, EndpointVersion: 5, DataAddr: "a", CtrlAddr: "b"})
@@ -140,6 +193,50 @@ func TestV3_Stale_OldEndpointProbe(t *testing.T) {
 		t.Fatal("stale endpoint probe should not mark reachable")
 	}
 	assertTraceContains(t, r, "stale_probe")
+}
+
+func TestV3_Stale_OldTransportEpochProbeRejected(t *testing.T) {
+	st := &ReplicaState{}
+	Apply(st, AssignmentObserved{VolumeID: "vol1", ReplicaID: "r1", Epoch: 5, EndpointVersion: 5, DataAddr: "a", CtrlAddr: "b"})
+
+	r := Apply(st, ProbeSucceeded{ReplicaID: "r1", EndpointVersion: 5, TransportEpoch: 4})
+
+	if st.Reachability.Status == ProbeReachable {
+		t.Fatal("old transport epoch probe should not mark reachable")
+	}
+	assertTraceContains(t, r, "stale_probe")
+}
+
+func TestV3_Stale_OldTransportEpochProbeFailureRejected(t *testing.T) {
+	st := &ReplicaState{}
+	Apply(st, AssignmentObserved{VolumeID: "vol1", ReplicaID: "r1", Epoch: 5, EndpointVersion: 5, DataAddr: "a", CtrlAddr: "b"})
+
+	r := Apply(st, ProbeFailed{ReplicaID: "r1", EndpointVersion: 5, TransportEpoch: 4, Reason: "stale"})
+
+	if st.Reachability.Status == ProbeUnreachable {
+		t.Fatal("old transport epoch probe failure should not degrade reachability")
+	}
+	assertTraceContains(t, r, "stale_probe_failed")
+}
+
+func TestV3_Stale_OldTransportEpochRecoveryFactsRejected(t *testing.T) {
+	st := &ReplicaState{}
+	Apply(st, AssignmentObserved{VolumeID: "vol1", ReplicaID: "r1", Epoch: 5, EndpointVersion: 5, DataAddr: "a", CtrlAddr: "b"})
+	Apply(st, ProbeSucceeded{ReplicaID: "r1", EndpointVersion: 5, TransportEpoch: 5})
+
+	r := Apply(st, RecoveryFactsObserved{
+		ReplicaID:       "r1",
+		EndpointVersion: 5,
+		TransportEpoch:  4,
+		R:               5,
+		S:               50,
+		H:               100,
+	})
+
+	if st.Recovery.H != 0 {
+		t.Fatalf("stale recovery facts should not update H, got %d", st.Recovery.H)
+	}
+	assertTraceContains(t, r, "stale_recovery_facts")
 }
 
 func TestV3_Stale_WrongSessionProgress(t *testing.T) {
@@ -336,6 +433,77 @@ func TestV3_WrongReplica_EventRejected(t *testing.T) {
 	// State should be unchanged.
 	if !st.Identity.MemberPresent {
 		t.Fatal("wrong-replica removal should not affect this engine")
+	}
+}
+
+// --- Order / property checks ---
+
+func TestV3_Order_ProbeAndFactsPermutationConverges(t *testing.T) {
+	run := func(events []Event) ApplyResult {
+		st := &ReplicaState{}
+		Apply(st, AssignmentObserved{
+			VolumeID: "vol1", ReplicaID: "r1",
+			Epoch: 1, EndpointVersion: 1,
+			DataAddr: "a", CtrlAddr: "b",
+		})
+		var last ApplyResult
+		for _, ev := range events {
+			last = Apply(st, ev)
+		}
+		return last
+	}
+
+	probe := ProbeSucceeded{ReplicaID: "r1", EndpointVersion: 1, TransportEpoch: 1}
+	facts := RecoveryFactsObserved{ReplicaID: "r1", R: 50, S: 10, H: 100}
+
+	ordered := run([]Event{probe, facts})
+	reversed := run([]Event{facts, probe})
+
+	if ordered.Projection.RecoveryDecision != DecisionCatchUp {
+		t.Fatalf("ordered decision=%s, want catch_up", ordered.Projection.RecoveryDecision)
+	}
+	if reversed.Projection.RecoveryDecision != DecisionCatchUp {
+		t.Fatalf("reversed decision=%s, want catch_up", reversed.Projection.RecoveryDecision)
+	}
+	assertHasCommand(t, ordered, "StartCatchUp")
+	assertHasCommand(t, reversed, "StartCatchUp")
+}
+
+func TestV3_Property_RandomStaleSessionEventsCannotMutateLiveSession(t *testing.T) {
+	rng := rand.New(rand.NewSource(42))
+	st := &ReplicaState{}
+	assignAndProbe(st)
+	Apply(st, SessionPrepared{ReplicaID: "r1", SessionID: 10, Kind: SessionCatchUp, TargetLSN: 100})
+	Apply(st, SessionStarted{ReplicaID: "r1", SessionID: 10})
+
+	for i := 0; i < 200; i++ {
+		wrongID := uint64(rng.Intn(1000) + 11)
+
+		var r ApplyResult
+		switch rng.Intn(4) {
+		case 0:
+			r = Apply(st, SessionProgressObserved{ReplicaID: "r1", SessionID: wrongID, AchievedLSN: uint64(rng.Intn(100) + 1)})
+			assertTraceContains(t, r, "stale_session_progress")
+		case 1:
+			r = Apply(st, SessionClosedCompleted{ReplicaID: "r1", SessionID: wrongID, AchievedLSN: 100})
+			assertTraceContains(t, r, "stale_session_completed")
+		case 2:
+			r = Apply(st, SessionClosedFailed{ReplicaID: "r1", SessionID: wrongID, Reason: "stale"})
+			assertTraceContains(t, r, "stale_session_failed")
+		default:
+			r = Apply(st, SessionInvalidated{ReplicaID: "r1", SessionID: wrongID, Reason: "stale"})
+			assertTraceContains(t, r, "stale_session_invalidated")
+		}
+
+		if st.Session.SessionID != 10 {
+			t.Fatalf("iteration %d: stale event changed session ID to %d", i, st.Session.SessionID)
+		}
+		if st.Session.Phase != PhaseRunning {
+			t.Fatalf("iteration %d: stale event changed phase to %s", i, st.Session.Phase)
+		}
+		if st.Session.TargetLSN != 100 {
+			t.Fatalf("iteration %d: stale event changed target to %d", i, st.Session.TargetLSN)
+		}
 	}
 }
 

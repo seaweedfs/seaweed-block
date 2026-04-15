@@ -2,6 +2,7 @@ package transport
 
 import (
 	"bytes"
+	"net"
 	"testing"
 	"time"
 
@@ -30,7 +31,7 @@ func writeTestBlocks(store *storage.BlockStore, count uint32) {
 		data[1] = byte(i + 0xA0)
 		store.Write(i, data)
 	}
-	_, _ = store.Sync()
+	store.Sync()
 }
 
 func assertDataMatch(t *testing.T, label string, primary, replica *storage.BlockStore, count uint32) {
@@ -56,11 +57,11 @@ func TestTransport_Healthy_ProbeShowsCaughtUp(t *testing.T) {
 		lsn, _ := primary.Write(i, data)
 		replica.ApplyEntry(i, data, lsn)
 	}
-	_, _ = primary.Sync()
-	_, _ = replica.Sync()
+	primary.Sync()
+	replica.Sync()
 
-	exec := NewBlockExecutor(primary, listener.Addr(), 1)
-	result := exec.Probe("r1", listener.Addr(), listener.Addr())
+	exec := NewBlockExecutor(primary, listener.Addr())
+	result := exec.Probe("r1", listener.Addr(), listener.Addr(), 1, 1)
 
 	if !result.Success {
 		t.Fatalf("probe failed: %s", result.FailReason)
@@ -81,12 +82,12 @@ func TestTransport_CatchUp_ShipsAndBarrierConfirms(t *testing.T) {
 
 	writeTestBlocks(primary, 10)
 
-	exec := NewBlockExecutor(primary, listener.Addr(), 1)
+	exec := NewBlockExecutor(primary, listener.Addr())
 	closeCh := make(chan adapter.SessionCloseResult, 1)
 	exec.SetOnSessionClose(func(r adapter.SessionCloseResult) { closeCh <- r })
 
 	_, _, pH := primary.Boundaries()
-	if err := exec.StartCatchUp("r1", 1, pH); err != nil {
+	if err := exec.StartCatchUp("r1", 1, 1, 1, pH); err != nil {
 		t.Fatal(err)
 	}
 
@@ -119,12 +120,12 @@ func TestTransport_Rebuild_StreamsAndAdvancesFrontier(t *testing.T) {
 
 	writeTestBlocks(primary, 10)
 
-	exec := NewBlockExecutor(primary, listener.Addr(), 1)
+	exec := NewBlockExecutor(primary, listener.Addr())
 	closeCh := make(chan adapter.SessionCloseResult, 1)
 	exec.SetOnSessionClose(func(r adapter.SessionCloseResult) { closeCh <- r })
 
 	_, _, pH := primary.Boundaries()
-	if err := exec.StartRebuild("r1", 1, pH); err != nil {
+	if err := exec.StartRebuild("r1", 1, 1, 1, pH); err != nil {
 		t.Fatal(err)
 	}
 
@@ -139,10 +140,6 @@ func TestTransport_Rebuild_StreamsAndAdvancesFrontier(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("timeout")
 	}
-
-	// No sleep needed: doRebuild waits for the replica's barrier ack,
-	// which is sent AFTER Sync(). When closeCh fires, the replica store
-	// has already applied all blocks and persisted the frontier.
 
 	// Replica frontier must match primary.
 	rR, _, _ := replica.Boundaries()
@@ -164,14 +161,14 @@ func TestTransport_Rebuild_DoesNotCorruptLBA0(t *testing.T) {
 	data0[0] = 0xDE
 	data0[1] = 0xAD
 	primary.Write(0, data0)
-	_, _ = primary.Sync()
+	primary.Sync()
 
-	exec := NewBlockExecutor(primary, listener.Addr(), 1)
+	exec := NewBlockExecutor(primary, listener.Addr())
 	closeCh := make(chan adapter.SessionCloseResult, 1)
 	exec.SetOnSessionClose(func(r adapter.SessionCloseResult) { closeCh <- r })
 
 	_, _, pH := primary.Boundaries()
-	exec.StartRebuild("r1", 1, pH)
+	exec.StartRebuild("r1", 1, 1, 1, pH)
 
 	select {
 	case r := <-closeCh:
@@ -186,5 +183,189 @@ func TestTransport_Rebuild_DoesNotCorruptLBA0(t *testing.T) {
 	rd, _ := replica.Read(0)
 	if rd[0] != 0xDE || rd[1] != 0xAD {
 		t.Fatalf("LBA 0 corrupted: got [%02x %02x], want [DE AD]", rd[0], rd[1])
+	}
+}
+
+func TestTransport_Rebuild_InvalidatedSessionStopsWithoutCallback(t *testing.T) {
+	primary, replica, listener := setupPrimaryReplica(t)
+	writeTestBlocks(primary, 64)
+
+	exec := NewBlockExecutor(primary, listener.Addr())
+	exec.stepDelay = 2 * time.Millisecond
+	closeCh := make(chan adapter.SessionCloseResult, 1)
+	exec.SetOnSessionClose(func(r adapter.SessionCloseResult) { closeCh <- r })
+
+	_, _, pH := primary.Boundaries()
+	if err := exec.StartRebuild("r1", 7, 1, 1, pH); err != nil {
+		t.Fatal(err)
+	}
+
+	time.Sleep(20 * time.Millisecond)
+	exec.InvalidateSession("r1", 7, "epoch_bump")
+
+	select {
+	case r := <-closeCh:
+		t.Fatalf("invalidated session should not callback, got %+v", r)
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	rR, _, _ := replica.Boundaries()
+	if rR == pH {
+		t.Fatalf("invalidated rebuild should not reach target frontier %d", pH)
+	}
+}
+
+func TestTransport_ReplicaRejectsStaleMutationLineage(t *testing.T) {
+	_, replica, listener := setupPrimaryReplica(t)
+
+	newData := make([]byte, 4096)
+	newData[0], newData[1] = 0xAA, 0xBB
+	oldData := make([]byte, 4096)
+	oldData[0], oldData[1] = 0x11, 0x22
+
+	sendRebuildBlock := func(lineage RecoveryLineage, data []byte) error {
+		conn, err := net.Dial("tcp", listener.Addr())
+		if err != nil {
+			return err
+		}
+		defer conn.Close()
+		if err := WriteMsg(conn, MsgRebuildBlock, EncodeRebuildBlock(lineage, 0, data)); err != nil {
+			return err
+		}
+		return nil
+	}
+
+	if err := sendRebuildBlock(RecoveryLineage{
+		SessionID: 2, Epoch: 2, EndpointVersion: 2, TargetLSN: 10,
+	}, newData); err != nil {
+		t.Fatalf("send newer lineage: %v", err)
+	}
+	time.Sleep(50 * time.Millisecond)
+
+	if err := sendRebuildBlock(RecoveryLineage{
+		SessionID: 1, Epoch: 1, EndpointVersion: 1, TargetLSN: 5,
+	}, oldData); err != nil {
+		t.Fatalf("send stale lineage: %v", err)
+	}
+	time.Sleep(50 * time.Millisecond)
+
+	got, err := replica.Read(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got[0] != 0xAA || got[1] != 0xBB {
+		t.Fatalf("stale lineage overwrote accepted block: got [%02x %02x], want [aa bb]", got[0], got[1])
+	}
+}
+
+func TestTransport_RebuildBlock_UsesTargetLSNBeforeDone(t *testing.T) {
+	_, replica, listener := setupPrimaryReplica(t)
+
+	conn, err := net.Dial("tcp", listener.Addr())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	data := make([]byte, 4096)
+	data[0], data[1] = 0xCA, 0xFE
+	lineage := RecoveryLineage{
+		SessionID:       3,
+		Epoch:           3,
+		EndpointVersion: 3,
+		TargetLSN:       77,
+	}
+	if err := WriteMsg(conn, MsgRebuildBlock, EncodeRebuildBlock(lineage, 7, data)); err != nil {
+		t.Fatal(err)
+	}
+
+	time.Sleep(50 * time.Millisecond)
+
+	got, err := replica.Read(7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got[0] != 0xCA || got[1] != 0xFE {
+		t.Fatalf("rebuild block data mismatch: got [%02x %02x], want [ca fe]", got[0], got[1])
+	}
+
+	_, _, h := replica.Boundaries()
+	if h != 77 {
+		t.Fatalf("rebuild block should advance walHead to targetLSN before done, got H=%d want 77", h)
+	}
+}
+
+func TestTransport_Rebuild_InvalidateInterruptsBlockedAckRead(t *testing.T) {
+	primary := storage.NewBlockStore(8, 4096)
+	writeTestBlocks(primary, 2)
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+
+	doneReceived := make(chan struct{})
+	clientClosed := make(chan struct{})
+	serverErr := make(chan error, 1)
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		defer conn.Close()
+
+		for {
+			msgType, _, err := ReadMsg(conn)
+			if err != nil {
+				serverErr <- err
+				return
+			}
+			if msgType == MsgRebuildDone {
+				close(doneReceived)
+				_ = conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+				var b [1]byte
+				_, err := conn.Read(b[:])
+				if err == nil {
+					serverErr <- nil
+					return
+				}
+				close(clientClosed)
+				serverErr <- err
+				return
+			}
+		}
+	}()
+
+	exec := NewBlockExecutor(primary, ln.Addr().String())
+	closeCh := make(chan adapter.SessionCloseResult, 1)
+	exec.SetOnSessionClose(func(r adapter.SessionCloseResult) { closeCh <- r })
+
+	_, _, pH := primary.Boundaries()
+	if err := exec.StartRebuild("r1", 9, 1, 1, pH); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case <-doneReceived:
+	case err := <-serverErr:
+		t.Fatalf("server failed before rebuild done: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for rebuild done")
+	}
+
+	exec.InvalidateSession("r1", 9, "test_interrupt_blocked_read")
+
+	select {
+	case <-clientClosed:
+	case <-time.After(1 * time.Second):
+		t.Fatal("invalidate did not close client conn while ack read was blocked")
+	}
+
+	select {
+	case r := <-closeCh:
+		t.Fatalf("invalidated blocked rebuild should not callback, got %+v", r)
+	case <-time.After(150 * time.Millisecond):
 	}
 }
