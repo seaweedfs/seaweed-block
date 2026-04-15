@@ -290,6 +290,174 @@ func TestV3_Terminal_OnlySessionClosedCompletedGivesSuccess(t *testing.T) {
 	assertHasCommand(t, r, "PublishHealthy")
 }
 
+func TestV3_Terminal_DelayedStartAfterFailureIgnored(t *testing.T) {
+	st := &ReplicaState{}
+	assignAndProbe(st)
+	Apply(st, RecoveryFactsObserved{ReplicaID: "r1", R: 0, S: 0, H: 100})
+	Apply(st, SessionPrepared{ReplicaID: "r1", SessionID: 1, Kind: SessionCatchUp, TargetLSN: 100})
+	Apply(st, SessionClosedFailed{ReplicaID: "r1", SessionID: 1, Reason: "start_timeout"})
+
+	r := Apply(st, SessionStarted{ReplicaID: "r1", SessionID: 1})
+
+	if st.Session.Phase != PhaseFailed {
+		t.Fatalf("phase=%s, want failed", st.Session.Phase)
+	}
+	assertTraceContains(t, r, "session_started_ignored")
+}
+
+func TestV3_Terminal_DelayedCompleteAfterFailureIgnored(t *testing.T) {
+	st := &ReplicaState{}
+	assignAndProbe(st)
+	Apply(st, RecoveryFactsObserved{ReplicaID: "r1", R: 0, S: 0, H: 100})
+	Apply(st, SessionPrepared{ReplicaID: "r1", SessionID: 1, Kind: SessionCatchUp, TargetLSN: 100})
+	Apply(st, SessionClosedFailed{ReplicaID: "r1", SessionID: 1, Reason: "start_timeout"})
+
+	r := Apply(st, SessionClosedCompleted{ReplicaID: "r1", SessionID: 1, AchievedLSN: 100})
+
+	if st.Session.Phase != PhaseFailed {
+		t.Fatalf("phase=%s, want failed", st.Session.Phase)
+	}
+	if st.Recovery.R != 0 {
+		t.Fatalf("R=%d, want unchanged 0", st.Recovery.R)
+	}
+	assertTraceContains(t, r, "session_completed_ignored")
+	assertNoCommand(t, r, "PublishHealthy")
+}
+
+// TestV3_Terminal_DelayedFailureAfterCompletionIgnored proves a
+// late SessionClosedFailed cannot un-complete a completed session.
+// Required for P10 closure: a successfully closed session must not
+// be revived into a failure state by a late callback for the same
+// session.
+func TestV3_Terminal_DelayedFailureAfterCompletionIgnored(t *testing.T) {
+	st := &ReplicaState{}
+	assignAndProbe(st)
+	Apply(st, RecoveryFactsObserved{ReplicaID: "r1", R: 0, S: 0, H: 100})
+	Apply(st, SessionPrepared{ReplicaID: "r1", SessionID: 1, Kind: SessionCatchUp, TargetLSN: 100})
+	Apply(st, SessionStarted{ReplicaID: "r1", SessionID: 1})
+	Apply(st, SessionClosedCompleted{ReplicaID: "r1", SessionID: 1, AchievedLSN: 100})
+
+	if st.Session.Phase != PhaseCompleted {
+		t.Fatalf("precondition: phase=%s, want completed", st.Session.Phase)
+	}
+
+	r := Apply(st, SessionClosedFailed{ReplicaID: "r1", SessionID: 1, Reason: "late_failure"})
+
+	if st.Session.Phase != PhaseCompleted {
+		t.Fatalf("phase=%s, want unchanged completed", st.Session.Phase)
+	}
+	if st.Session.FailureReason != "" {
+		t.Fatalf("FailureReason=%q, want empty after delayed failure", st.Session.FailureReason)
+	}
+	assertTraceContains(t, r, "session_failed_ignored")
+	assertNoCommand(t, r, "PublishDegraded")
+}
+
+// TestV3_Terminal_DuplicateCompletedIgnored proves a second
+// SessionClosedCompleted for the same already-completed session
+// does not re-fire healthy commands or disturb semantic truth.
+func TestV3_Terminal_DuplicateCompletedIgnored(t *testing.T) {
+	st := &ReplicaState{}
+	assignAndProbe(st)
+	Apply(st, RecoveryFactsObserved{ReplicaID: "r1", R: 0, S: 0, H: 100})
+	Apply(st, SessionPrepared{ReplicaID: "r1", SessionID: 1, Kind: SessionCatchUp, TargetLSN: 100})
+	Apply(st, SessionStarted{ReplicaID: "r1", SessionID: 1})
+	Apply(st, SessionClosedCompleted{ReplicaID: "r1", SessionID: 1, AchievedLSN: 100})
+
+	before := st.Session
+
+	r := Apply(st, SessionClosedCompleted{ReplicaID: "r1", SessionID: 1, AchievedLSN: 100})
+
+	if st.Session != before {
+		t.Fatalf("session state changed on duplicate completion: %+v", st.Session)
+	}
+	assertTraceContains(t, r, "session_completed_ignored")
+}
+
+// TestV3_Terminal_DuplicateFailedIgnored proves a second
+// SessionClosedFailed for the same already-failed session does not
+// re-fire PublishDegraded or disturb semantic truth.
+func TestV3_Terminal_DuplicateFailedIgnored(t *testing.T) {
+	st := &ReplicaState{}
+	assignAndProbe(st)
+	Apply(st, RecoveryFactsObserved{ReplicaID: "r1", R: 0, S: 0, H: 100})
+	Apply(st, SessionPrepared{ReplicaID: "r1", SessionID: 1, Kind: SessionCatchUp, TargetLSN: 100})
+	Apply(st, SessionClosedFailed{ReplicaID: "r1", SessionID: 1, Reason: "first_failure"})
+
+	before := st.Session
+
+	r := Apply(st, SessionClosedFailed{ReplicaID: "r1", SessionID: 1, Reason: "duplicate_failure"})
+
+	if st.Session != before {
+		t.Fatalf("session state changed on duplicate failure: %+v", st.Session)
+	}
+	if st.Session.FailureReason != "first_failure" {
+		t.Fatalf("FailureReason=%q, want first_failure", st.Session.FailureReason)
+	}
+	assertTraceContains(t, r, "session_failed_ignored")
+	assertNoCommand(t, r, "PublishDegraded")
+}
+
+// TestV3_Terminal_InvalidPhaseTransitionsLeaveStateUnchanged is the
+// umbrella check: every illegal transition the P10 rule-set names
+// must leave st.Session byte-for-byte unchanged. Covers the
+// cross-product of (Prepared, Started, Completed, Failed) vs each
+// terminal phase.
+func TestV3_Terminal_InvalidPhaseTransitionsLeaveStateUnchanged(t *testing.T) {
+	cases := []struct {
+		name      string
+		terminal  Event   // the event that puts the session into a terminal phase
+		illegal   []Event // events that must be ignored after terminal
+		wantPhase SessionPhase
+	}{
+		{
+			name:     "after_failed",
+			terminal: SessionClosedFailed{ReplicaID: "r1", SessionID: 1, Reason: "x"},
+			illegal: []Event{
+				SessionStarted{ReplicaID: "r1", SessionID: 1},
+				SessionClosedCompleted{ReplicaID: "r1", SessionID: 1, AchievedLSN: 100},
+				SessionClosedFailed{ReplicaID: "r1", SessionID: 1, Reason: "y"},
+				SessionProgressObserved{ReplicaID: "r1", SessionID: 1, AchievedLSN: 50},
+			},
+			wantPhase: PhaseFailed,
+		},
+		{
+			name:     "after_completed",
+			terminal: SessionClosedCompleted{ReplicaID: "r1", SessionID: 1, AchievedLSN: 100},
+			illegal: []Event{
+				SessionStarted{ReplicaID: "r1", SessionID: 1},
+				SessionClosedCompleted{ReplicaID: "r1", SessionID: 1, AchievedLSN: 200},
+				SessionClosedFailed{ReplicaID: "r1", SessionID: 1, Reason: "x"},
+				SessionProgressObserved{ReplicaID: "r1", SessionID: 1, AchievedLSN: 50},
+			},
+			wantPhase: PhaseCompleted,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			st := &ReplicaState{}
+			assignAndProbe(st)
+			Apply(st, RecoveryFactsObserved{ReplicaID: "r1", R: 0, S: 0, H: 100})
+			Apply(st, SessionPrepared{ReplicaID: "r1", SessionID: 1, Kind: SessionCatchUp, TargetLSN: 100})
+			Apply(st, SessionStarted{ReplicaID: "r1", SessionID: 1})
+			Apply(st, tc.terminal)
+
+			if st.Session.Phase != tc.wantPhase {
+				t.Fatalf("precondition: phase=%s, want %s", st.Session.Phase, tc.wantPhase)
+			}
+			snapshot := st.Session
+
+			for _, ev := range tc.illegal {
+				Apply(st, ev)
+				if st.Session != snapshot {
+					t.Fatalf("illegal event %T mutated session: before=%+v after=%+v",
+						ev, snapshot, st.Session)
+				}
+			}
+		})
+	}
+}
+
 // --- Transport Loss Does NOT Force Rebuild ---
 
 func TestV3_TransportLoss_DoesNotForceRebuild(t *testing.T) {

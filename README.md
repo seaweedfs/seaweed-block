@@ -120,11 +120,6 @@ For a full taxonomy of events, commands, truth domains, and operator
 enums — and why there is no single unified state diagram — see
 [docs/surface.md](docs/surface.md).
 
-For the data-sync institution boundary (catch-up / rebuild byte
-movement, lineage gate, achieved-frontier report, and what is
-explicitly carried forward to later phases) see
-[docs/data-sync-institution.md](docs/data-sync-institution.md).
-
 ## Quick Start
 
 Requirements:
@@ -220,6 +215,13 @@ For details:
 - [docs/local-data-process.md](docs/local-data-process.md) — the institution, what it owns, the crash model, carry-forward
 - [docs/persistence.md](docs/persistence.md) — backend implementation details, on-disk format, exit codes, NVMe/raw-device path
 
+## Replication institutions
+
+The current replicated path is documented as two bounded lower institutions:
+
+- [docs/data-sync-institution.md](docs/data-sync-institution.md) — byte movement, wire protocol, lineage gate, achieved-frontier report
+- [docs/recovery-execution-institution.md](docs/recovery-execution-institution.md) — command admission, real execution start, invalidation, close-path lifecycle truth
+
 ## Design Rules
 
 The current implementation is intentionally shaped around a few strict rules:
@@ -238,26 +240,6 @@ The next planned steps are:
 2. add minimal operations and test interfaces
 3. calibrate against selected high-value scenarios from the existing benchmark path
 4. expand only after the semantic boundary stays clean
-
-## Roadmap
-
-The project is still under active development. Each upcoming phase
-closes one specific contract; the boundaries are kept narrow on
-purpose so a phase that ships does not silently absorb work the
-next phase still owns.
-
-| Phase | Closes | Out of scope |
-|---|---|---|
-| P9  | move bytes correctly under lineage | execution lifecycle, policy |
-| P10 | execute recovery lifecycle (start / cancel / complete / timeout) | who or when to recover |
-| P11 | ship single-node product, no cluster-shape leak | replicated surface |
-| P12 | bounded replicated failover contract — mechanism, not policy | who promotes, when to fail over |
-| P13 | harden the replicated slice for release criteria | new features |
-| P14 | topology / failover policy (epoch authority, placement, who-promotes) | operator-facing surface |
-| P15 | operator-facing governance surface | inventing new authority outside P14 |
-
-A task that crosses two rows is either misassigned or signals a
-gap in the closure definitions. PR scope checks against this table.
 
 ## Honesty Note
 

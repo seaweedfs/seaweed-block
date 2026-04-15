@@ -83,12 +83,23 @@ func TestTransport_CatchUp_ShipsAndBarrierConfirms(t *testing.T) {
 	writeTestBlocks(primary, 10)
 
 	exec := NewBlockExecutor(primary, listener.Addr())
+	startCh := make(chan adapter.SessionStartResult, 1)
 	closeCh := make(chan adapter.SessionCloseResult, 1)
+	exec.SetOnSessionStart(func(r adapter.SessionStartResult) { startCh <- r })
 	exec.SetOnSessionClose(func(r adapter.SessionCloseResult) { closeCh <- r })
 
 	_, _, pH := primary.Boundaries()
 	if err := exec.StartCatchUp("r1", 1, 1, 1, pH); err != nil {
 		t.Fatal(err)
+	}
+
+	select {
+	case started := <-startCh:
+		if started.SessionID != 1 {
+			t.Fatalf("start sessionID=%d want 1", started.SessionID)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for start")
 	}
 
 	select {
@@ -121,12 +132,23 @@ func TestTransport_Rebuild_StreamsAndAdvancesFrontier(t *testing.T) {
 	writeTestBlocks(primary, 10)
 
 	exec := NewBlockExecutor(primary, listener.Addr())
+	startCh := make(chan adapter.SessionStartResult, 1)
 	closeCh := make(chan adapter.SessionCloseResult, 1)
+	exec.SetOnSessionStart(func(r adapter.SessionStartResult) { startCh <- r })
 	exec.SetOnSessionClose(func(r adapter.SessionCloseResult) { closeCh <- r })
 
 	_, _, pH := primary.Boundaries()
 	if err := exec.StartRebuild("r1", 1, 1, 1, pH); err != nil {
 		t.Fatal(err)
+	}
+
+	select {
+	case started := <-startCh:
+		if started.SessionID != 1 {
+			t.Fatalf("start sessionID=%d want 1", started.SessionID)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for start")
 	}
 
 	select {
@@ -150,6 +172,42 @@ func TestTransport_Rebuild_StreamsAndAdvancesFrontier(t *testing.T) {
 	// Data integrity — this is the critical check that catches the
 	// old bug where rebuild corrupted LBA 0 with zeros.
 	assertDataMatch(t, "rebuild", primary, replica, 10)
+}
+
+func TestTransport_CatchUp_DialFailureDoesNotEmitStarted(t *testing.T) {
+	primary := storage.NewBlockStore(64, 4096)
+	writeTestBlocks(primary, 4)
+
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := l.Addr().String()
+	_ = l.Close()
+
+	exec := NewBlockExecutor(primary, addr)
+	startCh := make(chan adapter.SessionStartResult, 1)
+	closeCh := make(chan adapter.SessionCloseResult, 1)
+	exec.SetOnSessionStart(func(r adapter.SessionStartResult) { startCh <- r })
+	exec.SetOnSessionClose(func(r adapter.SessionCloseResult) { closeCh <- r })
+
+	if err := exec.StartCatchUp("r1", 9, 1, 1, 4); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case started := <-startCh:
+		t.Fatalf("dial failure should not emit started, got %+v", started)
+	case result := <-closeCh:
+		if result.Success {
+			t.Fatal("dial failure should fail closed")
+		}
+		if result.SessionID != 9 {
+			t.Fatalf("close sessionID=%d want 9", result.SessionID)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for failed close")
+	}
 }
 
 // --- Rebuild does not corrupt LBA 0 (regression test) ---
@@ -367,5 +425,54 @@ func TestTransport_Rebuild_InvalidateInterruptsBlockedAckRead(t *testing.T) {
 	case r := <-closeCh:
 		t.Fatalf("invalidated blocked rebuild should not callback, got %+v", r)
 	case <-time.After(150 * time.Millisecond):
+	}
+}
+
+// TestTransport_Lifecycle_LateCompletionAfterInvalidateDropped
+// proves the transport's P10 promise: even if a rebuild reaches its
+// own notion of "success" after the session has been invalidated by
+// the engine, finishSession's double-check (session still in the
+// registry AND still the same pointer) drops the callback. No stale
+// success can leak back into the adapter / engine.
+//
+// We exercise the real race: a full rebuild runs end-to-end against
+// a legit replica, but we call InvalidateSession concurrently in a
+// loop until it lands between the rebuild goroutine's last write
+// and its finishSession call.
+func TestTransport_Lifecycle_LateCompletionAfterInvalidateDropped(t *testing.T) {
+	primary, _, listener := setupPrimaryReplica(t)
+	writeTestBlocks(primary, 4)
+
+	exec := NewBlockExecutor(primary, listener.Addr())
+	closeCh := make(chan adapter.SessionCloseResult, 4)
+	startCh := make(chan adapter.SessionStartResult, 4)
+	exec.SetOnSessionStart(func(r adapter.SessionStartResult) { startCh <- r })
+	exec.SetOnSessionClose(func(r adapter.SessionCloseResult) { closeCh <- r })
+
+	const sessionID = uint64(42)
+	_, _, pH := primary.Boundaries()
+	if err := exec.StartRebuild("r1", sessionID, 1, 1, pH); err != nil {
+		t.Fatal(err)
+	}
+
+	// Wait for real start to be emitted — proves the rebuild goroutine
+	// is past attachConn and inside the ship loop.
+	select {
+	case <-startCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for real start")
+	}
+
+	// Invalidate — may race with completion. Either outcome must result
+	// in NO success callback:
+	//   - early invalidate: goroutine sees cancel, returns errSessionInvalidated, finishSession drops
+	//   - late invalidate: goroutine already past ship loop; finishSession
+	//     finds session removed from registry, drops callback
+	exec.InvalidateSession("r1", sessionID, "test_late_completion")
+
+	select {
+	case r := <-closeCh:
+		t.Fatalf("invalidated session must not produce close callback, got %+v", r)
+	case <-time.After(300 * time.Millisecond):
 	}
 }

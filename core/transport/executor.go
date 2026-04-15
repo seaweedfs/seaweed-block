@@ -15,27 +15,17 @@ import (
 // BlockExecutor implements adapter.CommandExecutor using real TCP
 // transport and in-memory storage. It is the "muscle" layer — it
 // executes commands but never decides policy.
-//
-// The executor hosts the session lifecycle (register / attach conn /
-// invalidate / finish) and the probe path. The two byte-movement
-// paths — catch-up and rebuild — live in catchup_sender.go and
-// rebuild_sender.go respectively, so each protocol's wire shape and
-// terminator stay distinct. The barrier exchange and typed
-// BarrierResponse live in barrier.go.
 type BlockExecutor struct {
 	primaryStore *storage.BlockStore
 	replicaAddr  string // replica's TCP address
 
 	mu             sync.Mutex
+	onSessionStart adapter.OnSessionStart
 	onSessionClose adapter.OnSessionClose
 	sessions       map[uint64]*activeSession
 	stepDelay      time.Duration
 }
 
-// activeSession is the executor's per-recovery handle. The cancel
-// channel unblocks goroutines parked in select; the conn pointer
-// lets InvalidateSession close in-flight I/O so a parked ReadMsg
-// returns immediately instead of waiting for TCP timeout.
 type activeSession struct {
 	lineage RecoveryLineage
 	cancel  chan struct{}
@@ -44,10 +34,6 @@ type activeSession struct {
 
 var errSessionInvalidated = errors.New("session invalidated")
 
-// recoveryConnTimeout bounds every send/receive on a recovery conn.
-// Small enough that a silent peer cannot park the sender for more
-// than a few seconds; large enough that a healthy peer always meets
-// it on a single block exchange.
 const recoveryConnTimeout = 5 * time.Second
 
 // NewBlockExecutor creates an executor for one primary → replica pair.
@@ -63,10 +49,12 @@ func (e *BlockExecutor) SetOnSessionClose(fn adapter.OnSessionClose) {
 	e.onSessionClose = fn
 }
 
+func (e *BlockExecutor) SetOnSessionStart(fn adapter.OnSessionStart) {
+	e.onSessionStart = fn
+}
+
 // Probe dials the replica, sends a probe request, and returns the
-// replica's R/S/H boundaries. Returns facts only — never decides
-// policy. Probe is observation, not byte movement: it carries no
-// lineage and never mutates replica state.
+// replica's R/S/H boundaries. Returns facts only — never decides policy.
 func (e *BlockExecutor) Probe(replicaID, dataAddr, ctrlAddr string, epoch, endpointVersion uint64) adapter.ProbeResult {
 	addr := e.replicaAddr
 	if dataAddr != "" {
@@ -134,12 +122,6 @@ func (e *BlockExecutor) Probe(replicaID, dataAddr, ctrlAddr string, epoch, endpo
 	}
 }
 
-// InvalidateSession cancels the session and closes its conn so any
-// goroutine parked in ReadMsg unblocks immediately. The matching
-// finishSession call sees the session removed from the map and skips
-// the close callback — by the time invalidation reaches the executor
-// the engine has already moved on, so a delayed callback would race
-// with whatever recovery decision the engine made next.
 func (e *BlockExecutor) InvalidateSession(replicaID string, sessionID uint64, reason string) {
 	var conn net.Conn
 	e.mu.Lock()
@@ -165,9 +147,6 @@ func (e *BlockExecutor) PublishDegraded(replicaID string, reason string) {
 	log.Printf("executor: publish degraded for %s: %s", replicaID, reason)
 }
 
-// registerSession reserves a session slot under mu. Returns an error
-// if the same SessionID is already in flight — duplicates indicate a
-// caller bug, not a transient condition, so we fail fast.
 func (e *BlockExecutor) registerSession(lineage RecoveryLineage) (*activeSession, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -183,10 +162,6 @@ func (e *BlockExecutor) registerSession(lineage RecoveryLineage) (*activeSession
 	return session, nil
 }
 
-// attachConn binds a live conn to a session under mu. Returns
-// errSessionInvalidated if the session was removed between
-// registerSession and attachConn — in that case the caller closes
-// the conn immediately and returns without sending anything.
 func (e *BlockExecutor) attachConn(session *activeSession, conn net.Conn) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -199,9 +174,6 @@ func (e *BlockExecutor) attachConn(session *activeSession, conn net.Conn) error 
 	return nil
 }
 
-// detachConn clears the conn pointer when the sender finishes its
-// own work, so InvalidateSession after a clean finish doesn't try
-// to close an already-closed conn.
 func (e *BlockExecutor) detachConn(session *activeSession, conn net.Conn) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -215,12 +187,20 @@ func (e *BlockExecutor) detachConn(session *activeSession, conn net.Conn) {
 	}
 }
 
-// finishSession is the single completion path for catch-up and
-// rebuild. Drops the close callback if the session was invalidated
-// (the engine already moved on) or if a different session pointer
-// occupies the slot (shouldn't happen with monotonic SessionIDs but
-// the check is cheap and prevents a stale callback from racing a
-// fresh one).
+func (e *BlockExecutor) signalSessionStart(replicaID string, sessionID uint64) {
+	e.mu.Lock()
+	cb := e.onSessionStart
+	_, ok := e.sessions[sessionID]
+	e.mu.Unlock()
+	if cb == nil || !ok {
+		return
+	}
+	cb(adapter.SessionStartResult{
+		ReplicaID: replicaID,
+		SessionID: sessionID,
+	})
+}
+
 func (e *BlockExecutor) finishSession(replicaID string, session *activeSession, achieved uint64, err error) {
 	if errors.Is(err, errSessionInvalidated) {
 		return

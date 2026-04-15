@@ -29,7 +29,7 @@ func (e *BlockExecutor) StartCatchUp(replicaID string, sessionID, epoch, endpoin
 	}
 
 	go func() {
-		achieved, err := e.doCatchUp(session, targetLSN)
+		achieved, err := e.doCatchUp(replicaID, session, targetLSN)
 		e.finishSession(replicaID, session, achieved, err)
 	}()
 	return nil
@@ -49,7 +49,7 @@ func (e *BlockExecutor) StartCatchUp(replicaID string, sessionID, epoch, endpoin
 // just the WAL window. Bounded incremental WAL streaming belongs to
 // later execution-lifecycle work (P10) and is intentionally out of
 // the data-sync institution's current scope.
-func (e *BlockExecutor) doCatchUp(session *activeSession, targetLSN uint64) (uint64, error) {
+func (e *BlockExecutor) doCatchUp(replicaID string, session *activeSession, targetLSN uint64) (uint64, error) {
 	conn, err := net.DialTimeout("tcp", e.replicaAddr, 2*time.Second)
 	if err != nil {
 		return 0, fmt.Errorf("catch-up dial: %w", err)
@@ -62,6 +62,7 @@ func (e *BlockExecutor) doCatchUp(session *activeSession, targetLSN uint64) (uin
 		e.detachConn(session, conn)
 		_ = conn.Close()
 	}()
+	e.signalSessionStart(replicaID, session.lineage.SessionID)
 
 	blocks := e.primaryStore.AllBlocks()
 	lbas := make([]int, 0, len(blocks))

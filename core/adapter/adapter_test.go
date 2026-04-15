@@ -1,6 +1,7 @@
 package adapter
 
 import (
+	"fmt"
 	"reflect"
 	"sync"
 	"sync/atomic"
@@ -16,8 +17,12 @@ type mockExecutor struct {
 	probeResults   map[string]ProbeResult
 	commands       []string
 	nextSession    atomic.Uint64
+	onSessionStart OnSessionStart
 	onSessionClose OnSessionClose // wired by adapter
+	autoStart      bool
 	autoClose      bool
+	catchUpErr     error
+	rebuildErr     error
 	starts         []startRecord
 }
 
@@ -29,10 +34,17 @@ type startRecord struct {
 func newMockExecutor() *mockExecutor {
 	m := &mockExecutor{
 		probeResults: make(map[string]ProbeResult),
+		autoStart:    true,
 		autoClose:    true,
 	}
 	m.nextSession.Store(100)
 	return m
+}
+
+func (m *mockExecutor) SetOnSessionStart(fn OnSessionStart) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.onSessionStart = fn
 }
 
 func (m *mockExecutor) SetOnSessionClose(fn OnSessionClose) {
@@ -60,10 +72,21 @@ func (m *mockExecutor) Probe(replicaID, dataAddr, ctrlAddr string, epoch, endpoi
 func (m *mockExecutor) StartCatchUp(replicaID string, sessionID, epoch, endpointVersion, targetLSN uint64) error {
 	m.mu.Lock()
 	m.commands = append(m.commands, "StartCatchUp")
+	startCb := m.onSessionStart
 	cb := m.onSessionClose
+	autoStart := m.autoStart
 	autoClose := m.autoClose
+	startErr := m.catchUpErr
 	m.starts = append(m.starts, startRecord{kind: "StartCatchUp", sessionID: sessionID})
 	m.mu.Unlock()
+
+	if startErr != nil {
+		return startErr
+	}
+
+	if autoStart && startCb != nil {
+		startCb(SessionStartResult{ReplicaID: replicaID, SessionID: sessionID})
+	}
 
 	// Simulate async completion: session succeeds after a short delay.
 	// Uses the adapter-assigned sessionID so the engine accepts the close.
@@ -86,10 +109,21 @@ func (m *mockExecutor) StartCatchUp(replicaID string, sessionID, epoch, endpoint
 func (m *mockExecutor) StartRebuild(replicaID string, sessionID, epoch, endpointVersion, targetLSN uint64) error {
 	m.mu.Lock()
 	m.commands = append(m.commands, "StartRebuild")
+	startCb := m.onSessionStart
 	cb := m.onSessionClose
+	autoStart := m.autoStart
 	autoClose := m.autoClose
+	startErr := m.rebuildErr
 	m.starts = append(m.starts, startRecord{kind: "StartRebuild", sessionID: sessionID})
 	m.mu.Unlock()
+
+	if startErr != nil {
+		return startErr
+	}
+
+	if autoStart && startCb != nil {
+		startCb(SessionStartResult{ReplicaID: replicaID, SessionID: sessionID})
+	}
 
 	if autoClose {
 		go func() {
@@ -147,6 +181,15 @@ func (m *mockExecutor) latestSessionID(kind string) uint64 {
 func (m *mockExecutor) fireClose(result SessionCloseResult) {
 	m.mu.Lock()
 	cb := m.onSessionClose
+	m.mu.Unlock()
+	if cb != nil {
+		cb(result)
+	}
+}
+
+func (m *mockExecutor) fireStart(result SessionStartResult) {
+	m.mu.Lock()
+	cb := m.onSessionStart
 	m.mu.Unlock()
 	if cb != nil {
 		cb(result)
@@ -499,6 +542,177 @@ func TestFullRoute_AlreadyCaughtUp(t *testing.T) {
 	}
 }
 
+func TestSessionStarted_ComesFromExecutorStartCallback(t *testing.T) {
+	exec := newMockExecutor()
+	exec.autoStart = false
+	exec.autoClose = false
+	a := NewVolumeReplicaAdapter(exec)
+
+	exec.probeResults["r1"] = ProbeResult{
+		ReplicaID: "r1", Success: true,
+		EndpointVersion: 1, TransportEpoch: 1,
+		ReplicaFlushedLSN: 50, PrimaryTailLSN: 10, PrimaryHeadLSN: 100,
+	}
+	a.OnAssignment(AssignmentInfo{
+		VolumeID: "vol1", ReplicaID: "r1",
+		Epoch: 1, EndpointVersion: 1,
+		DataAddr: "a", CtrlAddr: "b",
+	})
+	time.Sleep(50 * time.Millisecond)
+
+	sessionID := exec.latestSessionID("StartCatchUp")
+	if sessionID == 0 {
+		t.Fatal("expected catch-up session")
+	}
+	if got := a.Projection().SessionPhase; got != engine.PhaseStarting {
+		t.Fatalf("before runtime start callback, phase=%s want %s", got, engine.PhaseStarting)
+	}
+
+	exec.fireStart(SessionStartResult{ReplicaID: "r1", SessionID: sessionID})
+	time.Sleep(20 * time.Millisecond)
+
+	if got := a.Projection().SessionPhase; got != engine.PhaseRunning {
+		t.Fatalf("after runtime start callback, phase=%s want %s", got, engine.PhaseRunning)
+	}
+
+	exec.fireClose(SessionCloseResult{
+		ReplicaID:   "r1",
+		SessionID:   sessionID,
+		Success:     true,
+		AchievedLSN: 100,
+	})
+	time.Sleep(20 * time.Millisecond)
+
+	if got := a.Projection().Mode; got != engine.ModeHealthy {
+		t.Fatalf("after runtime close callback, mode=%s want %s", got, engine.ModeHealthy)
+	}
+}
+
+func TestPreparedNeverStarted_FailsClosedOnImmediateStartError(t *testing.T) {
+	exec := newMockExecutor()
+	exec.autoStart = false
+	exec.autoClose = false
+	exec.catchUpErr = fmt.Errorf("boom_start")
+	a := NewVolumeReplicaAdapter(exec)
+
+	exec.probeResults["r1"] = ProbeResult{
+		ReplicaID: "r1", Success: true,
+		EndpointVersion: 1, TransportEpoch: 1,
+		ReplicaFlushedLSN: 50, PrimaryTailLSN: 10, PrimaryHeadLSN: 100,
+	}
+	a.OnAssignment(AssignmentInfo{
+		VolumeID: "vol1", ReplicaID: "r1",
+		Epoch: 1, EndpointVersion: 1,
+		DataAddr: "a", CtrlAddr: "b",
+	})
+	time.Sleep(50 * time.Millisecond)
+
+	p := a.Projection()
+	if got := p.SessionPhase; got != engine.PhaseFailed {
+		t.Fatalf("immediate start error should fail closed from prepared, phase=%s", got)
+	}
+	if p.Mode == engine.ModeHealthy {
+		t.Fatal("immediate start error must not produce healthy")
+	}
+	if got := p.Mode; got != engine.ModeDegraded {
+		t.Fatalf("immediate start error should degrade projection, mode=%s", got)
+	}
+	foundFailedTrace := false
+	for _, te := range a.Trace() {
+		if te.Step == "session_failed" && te.Detail == "start_catchup_failed: boom_start" {
+			foundFailedTrace = true
+			break
+		}
+	}
+	if !foundFailedTrace {
+		t.Fatal("expected session_failed trace for immediate start error")
+	}
+}
+
+func TestPreparedNeverStarted_TimesOutAndFailsClosed(t *testing.T) {
+	exec := newMockExecutor()
+	exec.autoStart = false
+	exec.autoClose = false
+	a := NewVolumeReplicaAdapter(exec)
+	a.startTimeout = 30 * time.Millisecond
+
+	exec.probeResults["r1"] = ProbeResult{
+		ReplicaID: "r1", Success: true,
+		EndpointVersion: 1, TransportEpoch: 1,
+		ReplicaFlushedLSN: 50, PrimaryTailLSN: 10, PrimaryHeadLSN: 100,
+	}
+	a.OnAssignment(AssignmentInfo{
+		VolumeID: "vol1", ReplicaID: "r1",
+		Epoch: 1, EndpointVersion: 1,
+		DataAddr: "a", CtrlAddr: "b",
+	})
+
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if a.Projection().SessionPhase == engine.PhaseFailed {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	p := a.Projection()
+	if got := p.SessionPhase; got != engine.PhaseFailed {
+		t.Fatalf("start timeout should fail prepared session, phase=%s", got)
+	}
+	if got := p.Mode; got != engine.ModeDegraded {
+		t.Fatalf("start timeout should degrade projection, mode=%s", got)
+	}
+	assertTraceHasDetail(t, a.Trace(), "session_failed", "start_timeout")
+}
+
+func TestDelayedStartAndCloseAfterTimeout_Ignored(t *testing.T) {
+	exec := newMockExecutor()
+	exec.autoStart = false
+	exec.autoClose = false
+	a := NewVolumeReplicaAdapter(exec)
+	a.startTimeout = 30 * time.Millisecond
+
+	exec.probeResults["r1"] = ProbeResult{
+		ReplicaID: "r1", Success: true,
+		EndpointVersion: 1, TransportEpoch: 1,
+		ReplicaFlushedLSN: 50, PrimaryTailLSN: 10, PrimaryHeadLSN: 100,
+	}
+	a.OnAssignment(AssignmentInfo{
+		VolumeID: "vol1", ReplicaID: "r1",
+		Epoch: 1, EndpointVersion: 1,
+		DataAddr: "a", CtrlAddr: "b",
+	})
+	time.Sleep(50 * time.Millisecond)
+
+	sessionID := exec.latestSessionID("StartCatchUp")
+	if sessionID == 0 {
+		t.Fatal("expected catch-up session")
+	}
+	if got := a.Projection().SessionPhase; got != engine.PhaseFailed {
+		t.Fatalf("expected timeout to fail session first, phase=%s", got)
+	}
+
+	exec.fireStart(SessionStartResult{ReplicaID: "r1", SessionID: sessionID})
+	exec.fireClose(SessionCloseResult{
+		ReplicaID:   "r1",
+		SessionID:   sessionID,
+		Success:     true,
+		AchievedLSN: 100,
+	})
+	time.Sleep(30 * time.Millisecond)
+
+	p := a.Projection()
+	if got := p.SessionPhase; got != engine.PhaseFailed {
+		t.Fatalf("delayed callbacks after timeout should not revive session, phase=%s", got)
+	}
+	if got := p.Mode; got == engine.ModeHealthy {
+		t.Fatal("delayed callbacks after timeout must not produce healthy")
+	}
+	trace := a.Trace()
+	assertTraceHasDetail(t, trace, "session_started_ignored", "current phase=failed")
+	assertTraceHasDetail(t, trace, "session_completed_ignored", "current phase=failed")
+}
+
 func TestStaleCallback_OldSessionIgnoredAfterNewAssignment(t *testing.T) {
 	exec := newMockExecutor()
 	exec.autoClose = false
@@ -562,5 +776,73 @@ func TestStaleCallback_OldSessionIgnoredAfterNewAssignment(t *testing.T) {
 
 	if got := a.Projection().Mode; got != engine.ModeHealthy {
 		t.Fatalf("new session close should converge to healthy, got %s", got)
+	}
+}
+
+func assertTraceHasDetail(t *testing.T, trace []engine.TraceEntry, step, detail string) {
+	t.Helper()
+	for _, te := range trace {
+		if te.Step == step && te.Detail == detail {
+			return
+		}
+	}
+	t.Fatalf("expected trace [%s] %q, got %+v", step, detail, trace)
+}
+
+func TestStaleStartCallback_OldSessionIgnoredAfterNewAssignment(t *testing.T) {
+	exec := newMockExecutor()
+	exec.autoStart = false
+	exec.autoClose = false
+	a := NewVolumeReplicaAdapter(exec)
+
+	exec.probeResults["r1"] = ProbeResult{
+		ReplicaID: "r1", Success: true,
+		EndpointVersion: 1, TransportEpoch: 1,
+		ReplicaFlushedLSN: 50, PrimaryTailLSN: 10, PrimaryHeadLSN: 100,
+	}
+	a.OnAssignment(AssignmentInfo{
+		VolumeID: "vol1", ReplicaID: "r1",
+		Epoch: 1, EndpointVersion: 1,
+		DataAddr: "a", CtrlAddr: "b",
+	})
+	time.Sleep(50 * time.Millisecond)
+
+	oldSessionID := exec.latestSessionID("StartCatchUp")
+	if oldSessionID == 0 {
+		t.Fatal("expected first catch-up session")
+	}
+
+	exec.probeResults["r1"] = ProbeResult{
+		ReplicaID: "r1", Success: true,
+		EndpointVersion: 2, TransportEpoch: 2,
+		ReplicaFlushedLSN: 60, PrimaryTailLSN: 20, PrimaryHeadLSN: 120,
+	}
+	a.OnAssignment(AssignmentInfo{
+		VolumeID: "vol1", ReplicaID: "r1",
+		Epoch: 2, EndpointVersion: 2,
+		DataAddr: "b", CtrlAddr: "b",
+	})
+	time.Sleep(50 * time.Millisecond)
+
+	newSessionID := exec.latestSessionID("StartCatchUp")
+	if newSessionID == 0 || newSessionID == oldSessionID {
+		t.Fatalf("expected second distinct catch-up session, old=%d new=%d", oldSessionID, newSessionID)
+	}
+	if got := a.Projection().SessionPhase; got != engine.PhaseStarting {
+		t.Fatalf("before start callbacks, phase=%s want %s", got, engine.PhaseStarting)
+	}
+
+	exec.fireStart(SessionStartResult{ReplicaID: "r1", SessionID: oldSessionID})
+	time.Sleep(20 * time.Millisecond)
+
+	if got := a.Projection().SessionPhase; got != engine.PhaseStarting {
+		t.Fatalf("stale start callback should not advance live session, phase=%s", got)
+	}
+
+	exec.fireStart(SessionStartResult{ReplicaID: "r1", SessionID: newSessionID})
+	time.Sleep(20 * time.Millisecond)
+
+	if got := a.Projection().SessionPhase; got != engine.PhaseRunning {
+		t.Fatalf("current start callback should advance to running, phase=%s", got)
 	}
 }

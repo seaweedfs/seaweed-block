@@ -1,5 +1,7 @@
 package engine
 
+import "fmt"
+
 // ApplyResult holds the output of one Apply call.
 type ApplyResult struct {
 	Commands   []Command
@@ -377,7 +379,11 @@ func applySessionPrepared(st *ReplicaState, e SessionPrepared, r *ApplyResult, t
 
 func applySessionStarted(st *ReplicaState, e SessionStarted, r *ApplyResult, trace func(string, string)) {
 	if e.SessionID != st.Session.SessionID {
-		trace("stale_session_started", "wrong session ID")
+		trace("stale_session_started", phaseMismatchDetail(e.SessionID, st.Session.SessionID))
+		return
+	}
+	if st.Session.Phase != PhaseStarting {
+		trace("session_started_ignored", "current phase="+string(st.Session.Phase))
 		return
 	}
 	st.Session.Phase = PhaseRunning
@@ -386,11 +392,11 @@ func applySessionStarted(st *ReplicaState, e SessionStarted, r *ApplyResult, tra
 
 func applySessionProgress(st *ReplicaState, e SessionProgressObserved, r *ApplyResult, trace func(string, string)) {
 	if e.SessionID != st.Session.SessionID {
-		trace("stale_session_progress", "wrong session ID")
+		trace("stale_session_progress", phaseMismatchDetail(e.SessionID, st.Session.SessionID))
 		return
 	}
 	if st.Session.Phase != PhaseRunning {
-		trace("session_progress_ignored", "not in running phase")
+		trace("session_progress_ignored", "current phase="+string(st.Session.Phase))
 		return
 	}
 	if e.AchievedLSN > st.Session.AchievedLSN {
@@ -403,7 +409,11 @@ func applySessionProgress(st *ReplicaState, e SessionProgressObserved, r *ApplyR
 
 func applySessionCompleted(st *ReplicaState, e SessionClosedCompleted, r *ApplyResult, trace func(string, string)) {
 	if e.SessionID != st.Session.SessionID {
-		trace("stale_session_completed", "wrong session ID")
+		trace("stale_session_completed", phaseMismatchDetail(e.SessionID, st.Session.SessionID))
+		return
+	}
+	if st.Session.Phase != PhaseStarting && st.Session.Phase != PhaseRunning {
+		trace("session_completed_ignored", "current phase="+string(st.Session.Phase))
 		return
 	}
 	st.Session.Phase = PhaseCompleted
@@ -417,7 +427,11 @@ func applySessionCompleted(st *ReplicaState, e SessionClosedCompleted, r *ApplyR
 
 func applySessionFailed(st *ReplicaState, e SessionClosedFailed, r *ApplyResult, trace func(string, string)) {
 	if e.SessionID != st.Session.SessionID {
-		trace("stale_session_failed", "wrong session ID")
+		trace("stale_session_failed", phaseMismatchDetail(e.SessionID, st.Session.SessionID))
+		return
+	}
+	if st.Session.Phase != PhaseStarting && st.Session.Phase != PhaseRunning {
+		trace("session_failed_ignored", "current phase="+string(st.Session.Phase))
 		return
 	}
 	st.Session.Phase = PhaseFailed
@@ -432,11 +446,26 @@ func applySessionFailed(st *ReplicaState, e SessionClosedFailed, r *ApplyResult,
 
 func applySessionInvalidated(st *ReplicaState, e SessionInvalidated, r *ApplyResult, trace func(string, string)) {
 	if e.SessionID != st.Session.SessionID {
-		trace("stale_session_invalidated", "wrong session ID")
+		trace("stale_session_invalidated", phaseMismatchDetail(e.SessionID, st.Session.SessionID))
 		return
 	}
 	st.Session = SessionTruth{}
 	trace("session_invalidated", e.Reason)
+}
+
+// phaseMismatchDetail formats a consistent diagnostic for "wrong
+// session ID" traces so operators can tell at a glance whether a
+// stale callback belongs to an older session (event<current), a
+// newer one (event>current), or a session that no longer exists
+// (current=0).
+func phaseMismatchDetail(eventID, currentID uint64) string {
+	if currentID == 0 {
+		return fmt.Sprintf("event session=%d but no active session", eventID)
+	}
+	if eventID < currentID {
+		return fmt.Sprintf("event session=%d older than current=%d", eventID, currentID)
+	}
+	return fmt.Sprintf("event session=%d newer than current=%d", eventID, currentID)
 }
 
 // --- Publication derivation ---

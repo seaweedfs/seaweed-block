@@ -12,6 +12,12 @@ package adapter
 // the session completes or fails. Without this, terminal truth never
 // reaches the engine and the replica stays stuck non-healthy.
 type CommandExecutor interface {
+	// SetOnSessionStart registers the callback for real execution start.
+	// The adapter calls this during construction. The executor MUST call
+	// it when a session has actually begun running, rather than when the
+	// engine merely issued the Start* command.
+	SetOnSessionStart(fn OnSessionStart)
+
 	// SetOnSessionClose registers the callback for terminal session truth.
 	// The adapter calls this during construction. The executor MUST call
 	// it when any session completes or fails.
@@ -46,3 +52,8 @@ type CommandExecutor interface {
 // The adapter registers this with the executor so terminal truth flows
 // back through the engine's explicit close path.
 type OnSessionClose func(SessionCloseResult)
+
+// OnSessionStart is the callback signature for real session start.
+// The adapter registers this with the executor so SessionStarted is
+// tied to actual execution start instead of command issuance alone.
+type OnSessionStart func(SessionStartResult)

@@ -171,15 +171,17 @@ func TestState_UpdateReflectsInSnapshot(t *testing.T) {
 // It does nothing — the adapter is only used for its Projection()
 // and Trace() accessors, not for real transport.
 type nopExecutor struct {
+	onStart adapter.OnSessionStart
 	onClose adapter.OnSessionClose
 }
 
+func (e *nopExecutor) SetOnSessionStart(fn adapter.OnSessionStart) { e.onStart = fn }
 func (e *nopExecutor) SetOnSessionClose(fn adapter.OnSessionClose) { e.onClose = fn }
 func (e *nopExecutor) Probe(string, string, string, uint64, uint64) adapter.ProbeResult {
 	return adapter.ProbeResult{Success: false, FailReason: "nop"}
 }
 func (e *nopExecutor) StartCatchUp(string, uint64, uint64, uint64, uint64) error { return nil }
 func (e *nopExecutor) StartRebuild(string, uint64, uint64, uint64, uint64) error { return nil }
-func (e *nopExecutor) InvalidateSession(string, uint64, string)  {}
-func (e *nopExecutor) PublishHealthy(string)                     {}
-func (e *nopExecutor) PublishDegraded(string, string)            {}
+func (e *nopExecutor) InvalidateSession(string, uint64, string)                  {}
+func (e *nopExecutor) PublishHealthy(string)                                     {}
+func (e *nopExecutor) PublishDegraded(string, string)                            {}

@@ -29,7 +29,7 @@ func (e *BlockExecutor) StartRebuild(replicaID string, sessionID, epoch, endpoin
 	}
 
 	go func() {
-		achieved, err := e.doRebuild(session, targetLSN)
+		achieved, err := e.doRebuild(replicaID, session, targetLSN)
 		e.finishSession(replicaID, session, achieved, err)
 	}()
 	return nil
@@ -49,7 +49,7 @@ func (e *BlockExecutor) StartRebuild(replicaID string, sessionID, epoch, endpoin
 // executor MUST NOT silently widen lineage.TargetLSN — that would
 // violate the engine's contract that recovery completion equals the
 // frozen target, not whatever the executor decided to do.
-func (e *BlockExecutor) doRebuild(session *activeSession, targetLSN uint64) (uint64, error) {
+func (e *BlockExecutor) doRebuild(replicaID string, session *activeSession, targetLSN uint64) (uint64, error) {
 	conn, err := net.DialTimeout("tcp", e.replicaAddr, 2*time.Second)
 	if err != nil {
 		return 0, fmt.Errorf("rebuild dial: %w", err)
@@ -62,6 +62,7 @@ func (e *BlockExecutor) doRebuild(session *activeSession, targetLSN uint64) (uin
 		e.detachConn(session, conn)
 		_ = conn.Close()
 	}()
+	e.signalSessionStart(replicaID, session.lineage.SessionID)
 
 	blocks := e.primaryStore.AllBlocks()
 	lbas := make([]int, 0, len(blocks))
