@@ -203,6 +203,6 @@ func (e *nopExecutor) Probe(string, string, string, uint64, uint64) adapter.Prob
 }
 func (e *nopExecutor) StartCatchUp(string, uint64, uint64, uint64, uint64) error { return nil }
 func (e *nopExecutor) StartRebuild(string, uint64, uint64, uint64, uint64) error { return nil }
-func (e *nopExecutor) InvalidateSession(string, uint64, string)                  {}
-func (e *nopExecutor) PublishHealthy(string)                                     {}
-func (e *nopExecutor) PublishDegraded(string, string)                            {}
+func (e *nopExecutor) InvalidateSession(string, uint64, string)  {}
+func (e *nopExecutor) PublishHealthy(string)                     {}
+func (e *nopExecutor) PublishDegraded(string, string)            {}

@@ -8,20 +8,6 @@ import (
 	"testing"
 )
 
-// These tests prove the P11 single-node product-surface contract:
-//
-//   - the surface is self-describing via GET /
-//   - the surface map lists exactly the endpoints the mux wires
-//   - /diagnose reads only from accepted lower truth, never inventing new state
-//   - every empty state is honest (not a falsely-confident response)
-//   - no endpoint uses cluster-shaped vocabulary
-//
-// The tests are the P11 honesty proof — they reject any future change
-// that quietly adds cluster-shaped wording or a new authority path.
-
-// TestSurfaceIndex_SelfDescribing proves GET / returns a surface map
-// that names every endpoint the operator can use, plus the scope and
-// a note that the surface is read-only.
 func TestSurfaceIndex_SelfDescribing(t *testing.T) {
 	url, cleanup := newTestServer(t, NewState())
 	defer cleanup()
@@ -65,10 +51,6 @@ func TestSurfaceIndex_SelfDescribing(t *testing.T) {
 	}
 }
 
-// TestSurfaceIndex_WordingIsSingleNode proves the P11 wording rule:
-// the surface map must declare itself single-node and must not carry
-// cluster-shaped vocabulary. Any drift here trips this test and
-// forces an explicit decision.
 func TestSurfaceIndex_WordingIsSingleNode(t *testing.T) {
 	url, cleanup := newTestServer(t, NewState())
 	defer cleanup()
@@ -89,9 +71,6 @@ func TestSurfaceIndex_WordingIsSingleNode(t *testing.T) {
 	}
 }
 
-// TestDiagnose_EmptyStateIsHonest proves /diagnose does not invent
-// certainty when nothing has run. Every field is either empty or a
-// zero-valued structured summary.
 func TestDiagnose_EmptyStateIsHonest(t *testing.T) {
 	url, cleanup := newTestServer(t, NewState())
 	defer cleanup()
@@ -122,14 +101,6 @@ func TestDiagnose_EmptyStateIsHonest(t *testing.T) {
 	}
 }
 
-// TestDiagnose_OnlyReadsLowerTruth proves /diagnose does not produce
-// fields that aren't derivable from projection, trace, or watchdog.
-// The small shape is the surface's honesty promise: if the lower
-// layers don't know something, /diagnose cannot make it up.
-//
-// Enforced structurally — if someone later adds a field to
-// diagnoseBody that isn't sourced from the snapshot, this test
-// should be updated to cover it.
 func TestDiagnose_OnlyReadsLowerTruth(t *testing.T) {
 	url, cleanup := newTestServer(t, NewState())
 	defer cleanup()
@@ -139,7 +110,6 @@ func TestDiagnose_OnlyReadsLowerTruth(t *testing.T) {
 	var body diagnoseBody
 	_ = json.NewDecoder(resp.Body).Decode(&body)
 
-	// Every top-level field must be one of the known names.
 	raw, _ := json.Marshal(body)
 	var asMap map[string]json.RawMessage
 	_ = json.Unmarshal(raw, &asMap)
@@ -160,9 +130,6 @@ func TestDiagnose_OnlyReadsLowerTruth(t *testing.T) {
 	}
 }
 
-// TestSurfaceMutations_IncludesRootAndDiagnose tightens the existing
-// mutation rejection to cover the two new endpoints. Any accidental
-// exposure of a write path would flip this red.
 func TestSurfaceMutations_IncludesRootAndDiagnose(t *testing.T) {
 	url, cleanup := newTestServer(t, NewState())
 	defer cleanup()

@@ -324,11 +324,6 @@ func TestV3_Terminal_DelayedCompleteAfterFailureIgnored(t *testing.T) {
 	assertNoCommand(t, r, "PublishHealthy")
 }
 
-// TestV3_Terminal_DelayedFailureAfterCompletionIgnored proves a
-// late SessionClosedFailed cannot un-complete a completed session.
-// Required for P10 closure: a successfully closed session must not
-// be revived into a failure state by a late callback for the same
-// session.
 func TestV3_Terminal_DelayedFailureAfterCompletionIgnored(t *testing.T) {
 	st := &ReplicaState{}
 	assignAndProbe(st)
@@ -353,9 +348,6 @@ func TestV3_Terminal_DelayedFailureAfterCompletionIgnored(t *testing.T) {
 	assertNoCommand(t, r, "PublishDegraded")
 }
 
-// TestV3_Terminal_DuplicateCompletedIgnored proves a second
-// SessionClosedCompleted for the same already-completed session
-// does not re-fire healthy commands or disturb semantic truth.
 func TestV3_Terminal_DuplicateCompletedIgnored(t *testing.T) {
 	st := &ReplicaState{}
 	assignAndProbe(st)
@@ -374,9 +366,6 @@ func TestV3_Terminal_DuplicateCompletedIgnored(t *testing.T) {
 	assertTraceContains(t, r, "session_completed_ignored")
 }
 
-// TestV3_Terminal_DuplicateFailedIgnored proves a second
-// SessionClosedFailed for the same already-failed session does not
-// re-fire PublishDegraded or disturb semantic truth.
 func TestV3_Terminal_DuplicateFailedIgnored(t *testing.T) {
 	st := &ReplicaState{}
 	assignAndProbe(st)
@@ -398,16 +387,11 @@ func TestV3_Terminal_DuplicateFailedIgnored(t *testing.T) {
 	assertNoCommand(t, r, "PublishDegraded")
 }
 
-// TestV3_Terminal_InvalidPhaseTransitionsLeaveStateUnchanged is the
-// umbrella check: every illegal transition the P10 rule-set names
-// must leave st.Session byte-for-byte unchanged. Covers the
-// cross-product of (Prepared, Started, Completed, Failed) vs each
-// terminal phase.
 func TestV3_Terminal_InvalidPhaseTransitionsLeaveStateUnchanged(t *testing.T) {
 	cases := []struct {
 		name      string
-		terminal  Event   // the event that puts the session into a terminal phase
-		illegal   []Event // events that must be ignored after terminal
+		terminal  Event
+		illegal   []Event
 		wantPhase SessionPhase
 	}{
 		{

@@ -15,13 +15,13 @@ import (
 // to semantic decisions to command execution.
 //
 // The adapter loop:
-//  1. Runtime observation arrives (assignment, probe result, session close)
-//  2. Normalize into engine event(s)
-//  3. Apply to engine state (under lock)
-//  4. Collect emitted commands (under lock)
-//  5. Release lock
-//  6. Execute commands (outside lock — never call executor under mu)
-//  7. Commands may produce async results → back to step 1
+//   1. Runtime observation arrives (assignment, probe result, session close)
+//   2. Normalize into engine event(s)
+//   3. Apply to engine state (under lock)
+//   4. Collect emitted commands (under lock)
+//   5. Release lock
+//   6. Execute commands (outside lock — never call executor under mu)
+//   7. Commands may produce async results → back to step 1
 //
 // There is exactly ONE route. No parallel convenience paths.
 type VolumeReplicaAdapter struct {
@@ -32,34 +32,7 @@ type VolumeReplicaAdapter struct {
 	cmdLog         []string            // all commands executed
 	startTimeout   time.Duration
 	startWatchdogs map[uint64]*time.Timer
-
-	// watchdogLog records lifecycle-visible watchdog events
-	// (arm / clear / fire / fire-no-op) for diagnosis. Not an
-	// operator surface; exists so tests and trace dumps can
-	// prove the timer did or did not do a thing.
-	watchdogLog []WatchdogEvent
-}
-
-// WatchdogKind names a point in the start-timeout watchdog's
-// lifecycle. Used only in evidence/trace paths.
-type WatchdogKind string
-
-const (
-	WatchdogArm         WatchdogKind = "arm"
-	WatchdogClearStart  WatchdogKind = "clear_started"
-	WatchdogClearClose  WatchdogKind = "clear_closed"
-	WatchdogFire        WatchdogKind = "fire"
-	WatchdogFireNoop    WatchdogKind = "fire_noop"
-	WatchdogSupersede   WatchdogKind = "supersede"
-)
-
-// WatchdogEvent is one entry in the watchdog log. Kind says what
-// happened; Detail gives the reason (e.g., "phase=running" when a
-// fire was suppressed because a real start already arrived).
-type WatchdogEvent struct {
-	Kind      WatchdogKind
-	SessionID uint64
-	Detail    string
+	watchdogLog    []WatchdogEvent
 }
 
 var sessionIDCounter atomic.Uint64
@@ -105,30 +78,17 @@ func (a *VolumeReplicaAdapter) OnProbeResult(result ProbeResult) ApplyLog {
 }
 
 // OnSessionClose processes a terminal session result. This is one of
-// only two paths that can produce terminal semantic truth. Clears the
-// start-timeout watchdog so a late timer cannot fire after the
-// session already has terminal truth.
+// only two paths that can produce terminal semantic truth.
 func (a *VolumeReplicaAdapter) OnSessionClose(result SessionCloseResult) ApplyLog {
 	a.clearStartWatchdog(result.SessionID, WatchdogClearClose)
 	return a.applyBatchAndExecute([]engine.Event{NormalizeSessionClose(result)}, "SessionClose")
 }
 
 // OnSessionStart processes a runtime signal that a prepared session has
-// actually begun executing. Clears the start-timeout watchdog so it
-// cannot later kill a session that is legitimately running.
+// actually begun executing.
 func (a *VolumeReplicaAdapter) OnSessionStart(result SessionStartResult) ApplyLog {
 	a.clearStartWatchdog(result.SessionID, WatchdogClearStart)
 	return a.applyBatchAndExecute([]engine.Event{NormalizeSessionStart(result)}, "SessionStart")
-}
-
-// OnRemoval processes a master removal event. The master has
-// decided this adapter no longer manages this replica. Sessions
-// are invalidated, recovery is cleared, and the publication state
-// is withdrawn. This is the old primary's demotion path in P12.
-func (a *VolumeReplicaAdapter) OnRemoval(replicaID, reason string) ApplyLog {
-	return a.applyBatchAndExecute([]engine.Event{
-		engine.ReplicaRemoved{ReplicaID: replicaID, Reason: reason},
-	}, "ReplicaRemoved")
 }
 
 // Projection returns the current operator-facing projection.
@@ -287,16 +247,6 @@ func (a *VolumeReplicaAdapter) executeCommand(q queuedCommand) {
 	}
 }
 
-// armStartWatchdog arms the bounded start-timeout timer for a
-// StartCatchUp / StartRebuild command. Rules (locked by P10):
-//
-//   - arm only for the two Start* kinds
-//   - never arm for sessionID=0 (non-session commands)
-//   - at fire time, check both timer identity (so a superseded
-//     timer bails) AND engine state (so only sessions still in
-//     PhaseStarting are failed)
-//   - fire that finds the engine beyond PhaseStarting is a no-op
-//     with an explicit watchdog evidence record, not silent
 func (a *VolumeReplicaAdapter) armStartWatchdog(q queuedCommand) {
 	if q.sessionID == 0 || a.startTimeout <= 0 {
 		return
@@ -312,13 +262,10 @@ func (a *VolumeReplicaAdapter) armStartWatchdog(q queuedCommand) {
 		a.mu.Lock()
 		current := a.startWatchdogs[q.sessionID]
 		if current == nil {
-			// Cleared by real start or close before firing.
 			a.mu.Unlock()
 			return
 		}
 		if current != timer {
-			// A newer timer for the same sessionID was armed —
-			// this old one must not act on current state.
 			a.mu.Unlock()
 			return
 		}
@@ -370,9 +317,6 @@ func (a *VolumeReplicaAdapter) armStartWatchdog(q queuedCommand) {
 	a.mu.Unlock()
 }
 
-// clearStartWatchdog stops and removes the timer for sessionID.
-// Caller passes the reason so the evidence log distinguishes
-// cleared-by-start from cleared-by-close.
 func (a *VolumeReplicaAdapter) clearStartWatchdog(sessionID uint64, reason WatchdogKind) {
 	if sessionID == 0 {
 		return
@@ -392,17 +336,6 @@ func (a *VolumeReplicaAdapter) clearStartWatchdog(sessionID uint64, reason Watch
 	}
 }
 
-// WatchdogLog returns a snapshot of the watchdog lifecycle events
-// recorded so far. Tests and diagnostic dumps use this to prove a
-// timer was armed, cleared, fired, or superseded.
-func (a *VolumeReplicaAdapter) WatchdogLog() []WatchdogEvent {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	cp := make([]WatchdogEvent, len(a.watchdogLog))
-	copy(cp, a.watchdogLog)
-	return cp
-}
-
 func replicaIDFromCommand(cmd engine.Command) string {
 	switch c := cmd.(type) {
 	case engine.StartCatchUp:
@@ -420,6 +353,45 @@ func replicaIDFromCommand(cmd engine.Command) string {
 	default:
 		return ""
 	}
+}
+
+// OnRemoval processes a master removal event. The master has
+// decided this adapter no longer manages this replica. Sessions
+// are invalidated, recovery is cleared, and the publication state
+// is withdrawn. This is the old primary's demotion path.
+func (a *VolumeReplicaAdapter) OnRemoval(replicaID, reason string) ApplyLog {
+	return a.applyBatchAndExecute([]engine.Event{
+		engine.ReplicaRemoved{ReplicaID: replicaID, Reason: reason},
+	}, "ReplicaRemoved")
+}
+
+// WatchdogKind names a lifecycle point in the start-timeout watchdog.
+type WatchdogKind string
+
+const (
+	WatchdogArm        WatchdogKind = "arm"
+	WatchdogClearStart WatchdogKind = "clear_started"
+	WatchdogClearClose WatchdogKind = "clear_closed"
+	WatchdogFire       WatchdogKind = "fire"
+	WatchdogFireNoop   WatchdogKind = "fire_noop"
+	WatchdogSupersede  WatchdogKind = "supersede"
+)
+
+// WatchdogEvent records one lifecycle event from the start-timeout
+// watchdog. Used by the ops inspection surface and tests.
+type WatchdogEvent struct {
+	Kind      WatchdogKind
+	SessionID uint64
+	Detail    string
+}
+
+// WatchdogLog returns a snapshot of the watchdog lifecycle events.
+func (a *VolumeReplicaAdapter) WatchdogLog() []WatchdogEvent {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	cp := make([]WatchdogEvent, len(a.watchdogLog))
+	copy(cp, a.watchdogLog)
+	return cp
 }
 
 // ApplyLog records what happened during one adapter operation.

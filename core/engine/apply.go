@@ -453,11 +453,6 @@ func applySessionInvalidated(st *ReplicaState, e SessionInvalidated, r *ApplyRes
 	trace("session_invalidated", e.Reason)
 }
 
-// phaseMismatchDetail formats a consistent diagnostic for "wrong
-// session ID" traces so operators can tell at a glance whether a
-// stale callback belongs to an older session (event<current), a
-// newer one (event>current), or a session that no longer exists
-// (current=0).
 func phaseMismatchDetail(eventID, currentID uint64) string {
 	if currentID == 0 {
 		return fmt.Sprintf("event session=%d but no active session", eventID)

@@ -31,8 +31,6 @@ func NewServer(addr, version, scope string, state *State) *http.Server {
 	mux.Handle("/trace", withReadOnly(http.HandlerFunc(h.trace)))
 	mux.Handle("/watchdog", withReadOnly(http.HandlerFunc(h.watchdog)))
 	mux.Handle("/diagnose", withReadOnly(http.HandlerFunc(h.diagnose)))
-	// Root returns the surface map on GET /; any other path under /
-	// falls through to h.notFound via h.index's own path check.
 	mux.Handle("/", withReadOnly(http.HandlerFunc(h.index)))
 
 	return &http.Server{

@@ -53,6 +53,12 @@ func (e *BlockExecutor) SetOnSessionStart(fn adapter.OnSessionStart) {
 	e.onSessionStart = fn
 }
 
+func (e *BlockExecutor) SetStepDelay(d time.Duration) {
+	e.mu.Lock()
+	e.stepDelay = d
+	e.mu.Unlock()
+}
+
 // Probe dials the replica, sends a probe request, and returns the
 // replica's R/S/H boundaries. Returns facts only — never decides policy.
 func (e *BlockExecutor) Probe(replicaID, dataAddr, ctrlAddr string, epoch, endpointVersion uint64) adapter.ProbeResult {
@@ -117,8 +123,8 @@ func (e *BlockExecutor) Probe(replicaID, dataAddr, ctrlAddr string, epoch, endpo
 		EndpointVersion:   endpointVersion,
 		TransportEpoch:    epoch,
 		ReplicaFlushedLSN: resp.SyncedLSN, // R
-		PrimaryTailLSN:    primaryS,       // S
-		PrimaryHeadLSN:    primaryH,       // H
+		PrimaryTailLSN:    primaryS,        // S
+		PrimaryHeadLSN:    primaryH,         // H
 	}
 }
 

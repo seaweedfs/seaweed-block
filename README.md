@@ -166,7 +166,7 @@ map; `GET /status`, `GET /projection`, `GET /trace`, `GET /watchdog`,
 mutation verb returns 501 with an explicit read-only ops-surface body.
 
 See [docs/single-node-surface.md](docs/single-node-surface.md) for the
-bounded single-node product surface (P11), or
+bounded single-node product surface, or
 [docs/bootstrap-validation.md](docs/bootstrap-validation.md) for the
 full list of supported flags, endpoints, and exit codes.
 
@@ -233,8 +233,7 @@ Above the three lower institutions (local data, data sync,
 recovery execution) sits one bounded single-node operator
 surface — start / inspect / validate / diagnose — exposed as six
 read-only HTTP endpoints plus the sparrow CLI. No cluster-shaped
-wording; no mutation authority. Cluster-wide surfaces are deferred
-to later phases.
+wording; no mutation authority.
 
 - [docs/single-node-surface.md](docs/single-node-surface.md) — surface map, workflow, honesty rules, carry-forward
 

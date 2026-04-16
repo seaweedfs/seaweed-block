@@ -1,6 +1,7 @@
 package transport
 
 import (
+	"encoding/binary"
 	"log"
 	"net"
 	"sync"
@@ -8,14 +9,8 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
-// ReplicaListener accepts connections from the primary and serves
-// the replica side of the data-sync institution: WAL ship apply,
-// probe response, rebuild block + done apply, and barrier exchange.
-//
-// One activeLineage tracks the most-authoritative recovery lineage
-// the replica has currently admitted; mutations are gated through
-// acceptMutationLineage so stale or out-of-order traffic fails
-// closed at the data plane without ever touching the store.
+// ReplicaListener accepts connections from the primary and handles
+// WAL shipping, probe requests, and rebuild streams.
 type ReplicaListener struct {
 	store    *storage.BlockStore
 	listener net.Listener
@@ -83,10 +78,6 @@ func (r *ReplicaListener) acceptLoop() {
 	}
 }
 
-// handleConn dispatches one frame at a time to a per-message-type
-// handler. Each handler returns true if the connection should keep
-// reading the next frame, false if the conn must be closed (decode
-// failure, lineage rejection, or terminal MsgRebuildDone).
 func (r *ReplicaListener) handleConn(conn net.Conn) {
 	defer conn.Close()
 
@@ -96,135 +87,97 @@ func (r *ReplicaListener) handleConn(conn net.Conn) {
 			return // connection closed
 		}
 
-		var keepGoing bool
 		switch msgType {
 		case MsgShipEntry:
-			keepGoing = r.handleShipEntry(payload)
+			entry, err := DecodeShipEntry(payload)
+			if err != nil {
+				log.Printf("replica: decode ship entry: %v", err)
+				return
+			}
+			if !r.acceptMutationLineage(entry.Lineage) {
+				log.Printf("replica: reject stale ship session=%d epoch=%d endpointVersion=%d",
+					entry.Lineage.SessionID, entry.Lineage.Epoch, entry.Lineage.EndpointVersion)
+				return
+			}
+			if err := r.store.ApplyEntry(entry.LBA, entry.Data, entry.LSN); err != nil {
+				log.Printf("replica: apply entry: %v", err)
+			}
+
 		case MsgProbeReq:
-			keepGoing = r.handleProbeReq(conn)
+			R, S, H := r.store.Boundaries()
+			resp := EncodeProbeResp(ProbeResponse{
+				SyncedLSN: R,
+				WalTail:   S,
+				WalHead:   H,
+			})
+			if err := WriteMsg(conn, MsgProbeResp, resp); err != nil {
+				return
+			}
+
 		case MsgRebuildBlock:
-			keepGoing = r.handleRebuildBlock(payload)
+			lineage, lba, data, err := DecodeRebuildBlock(payload)
+			if err != nil {
+				log.Printf("replica: decode rebuild block: %v", err)
+				return
+			}
+			if !r.acceptMutationLineage(lineage) {
+				log.Printf("replica: reject stale rebuild block session=%d epoch=%d endpointVersion=%d",
+					lineage.SessionID, lineage.Epoch, lineage.EndpointVersion)
+				return
+			}
+			// Rebuild blocks carry the engine's frozen targetLSN in their
+			// lineage. Apply that real LSN immediately so any future
+			// LSN-aware ApplyEntry guard still treats rebuild data as current.
+			if err := r.store.ApplyEntry(lba, data, lineage.TargetLSN); err != nil {
+				log.Printf("replica: apply rebuild block: %v", err)
+			}
+
 		case MsgRebuildDone:
-			r.handleRebuildDone(conn, payload)
-			return // RebuildDone is terminal — close the conn
+			lineage, err := DecodeLineage(payload)
+			if err != nil {
+				log.Printf("replica: decode rebuild done: %v", err)
+				return
+			}
+			if !r.acceptMutationLineage(lineage) {
+				log.Printf("replica: reject stale rebuild done session=%d epoch=%d endpointVersion=%d",
+					lineage.SessionID, lineage.Epoch, lineage.EndpointVersion)
+				return
+			}
+			// The done message carries the engine's frozen target LSN.
+			// Advance the replica's frontier metadata without touching
+			// any block data — AdvanceFrontier only updates nextLSN/walHead.
+			r.store.AdvanceFrontier(lineage.TargetLSN)
+			frontier, _ := r.store.Sync()
+			resp := make([]byte, 8)
+			binary.BigEndian.PutUint64(resp, frontier)
+			if err := WriteMsg(conn, MsgBarrierResp, resp); err != nil {
+				return
+			}
+			return
+
 		case MsgBarrierReq:
-			keepGoing = r.handleBarrierReq(conn, payload)
+			lineage, err := DecodeLineage(payload)
+			if err != nil {
+				log.Printf("replica: decode barrier req: %v", err)
+				return
+			}
+			if !r.acceptMutationLineage(lineage) {
+				log.Printf("replica: reject stale barrier session=%d epoch=%d endpointVersion=%d",
+					lineage.SessionID, lineage.Epoch, lineage.EndpointVersion)
+				return
+			}
+			frontier, _ := r.store.Sync()
+			resp := make([]byte, 8)
+			binary.BigEndian.PutUint64(resp, frontier)
+			WriteMsg(conn, MsgBarrierResp, resp)
+
 		default:
 			log.Printf("replica: unknown message type 0x%02x", msgType)
 			return
 		}
-		if !keepGoing {
-			return
-		}
 	}
 }
 
-// handleShipEntry applies one MsgShipEntry frame. Returns false if
-// decode or lineage check fails — the connection must be closed
-// without partial application.
-func (r *ReplicaListener) handleShipEntry(payload []byte) bool {
-	entry, err := DecodeShipEntry(payload)
-	if err != nil {
-		log.Printf("replica: decode ship entry: %v", err)
-		return false
-	}
-	if !r.acceptMutationLineage(entry.Lineage) {
-		log.Printf("replica: reject stale ship session=%d epoch=%d endpointVersion=%d",
-			entry.Lineage.SessionID, entry.Lineage.Epoch, entry.Lineage.EndpointVersion)
-		return false
-	}
-	if err := r.store.ApplyEntry(entry.LBA, entry.Data, entry.LSN); err != nil {
-		log.Printf("replica: apply entry: %v", err)
-	}
-	return true
-}
-
-// handleProbeReq replies with the replica's R/S/H boundaries. Probe
-// is observation only — no lineage check, no state mutation.
-func (r *ReplicaListener) handleProbeReq(conn net.Conn) bool {
-	R, S, H := r.store.Boundaries()
-	resp := EncodeProbeResp(ProbeResponse{
-		SyncedLSN: R,
-		WalTail:   S,
-		WalHead:   H,
-	})
-	if err := WriteMsg(conn, MsgProbeResp, resp); err != nil {
-		return false
-	}
-	return true
-}
-
-// handleRebuildBlock applies one MsgRebuildBlock frame. Rebuild
-// blocks carry the engine's frozen targetLSN in their lineage; we
-// apply that real LSN immediately so any future LSN-aware
-// ApplyEntry guard still treats rebuild data as current.
-func (r *ReplicaListener) handleRebuildBlock(payload []byte) bool {
-	lineage, lba, data, err := DecodeRebuildBlock(payload)
-	if err != nil {
-		log.Printf("replica: decode rebuild block: %v", err)
-		return false
-	}
-	if !r.acceptMutationLineage(lineage) {
-		log.Printf("replica: reject stale rebuild block session=%d epoch=%d endpointVersion=%d",
-			lineage.SessionID, lineage.Epoch, lineage.EndpointVersion)
-		return false
-	}
-	if err := r.store.ApplyEntry(lba, data, lineage.TargetLSN); err != nil {
-		log.Printf("replica: apply rebuild block: %v", err)
-	}
-	return true
-}
-
-// handleRebuildDone is the terminal frame of a rebuild stream. It
-// advances the replica's frontier to the engine's target, syncs,
-// and replies with the achieved frontier as a typed BarrierResponse.
-// The achieved value is what the store reports — never the target
-// the primary asked for.
-func (r *ReplicaListener) handleRebuildDone(conn net.Conn, payload []byte) {
-	lineage, err := DecodeLineage(payload)
-	if err != nil {
-		log.Printf("replica: decode rebuild done: %v", err)
-		return
-	}
-	if !r.acceptMutationLineage(lineage) {
-		log.Printf("replica: reject stale rebuild done session=%d epoch=%d endpointVersion=%d",
-			lineage.SessionID, lineage.Epoch, lineage.EndpointVersion)
-		return
-	}
-	r.store.AdvanceFrontier(lineage.TargetLSN)
-	frontier, _ := r.store.Sync()
-	if err := WriteMsg(conn, MsgBarrierResp, EncodeBarrierResp(BarrierResponse{AchievedLSN: frontier})); err != nil {
-		log.Printf("replica: write rebuild barrier resp: %v", err)
-	}
-}
-
-// handleBarrierReq syncs the store and replies with the achieved
-// frontier as a typed BarrierResponse. Used by catch-up to confirm
-// durability of the entries that just shipped.
-func (r *ReplicaListener) handleBarrierReq(conn net.Conn, payload []byte) bool {
-	lineage, err := DecodeLineage(payload)
-	if err != nil {
-		log.Printf("replica: decode barrier req: %v", err)
-		return false
-	}
-	if !r.acceptMutationLineage(lineage) {
-		log.Printf("replica: reject stale barrier session=%d epoch=%d endpointVersion=%d",
-			lineage.SessionID, lineage.Epoch, lineage.EndpointVersion)
-		return false
-	}
-	frontier, _ := r.store.Sync()
-	if err := WriteMsg(conn, MsgBarrierResp, EncodeBarrierResp(BarrierResponse{AchievedLSN: frontier})); err != nil {
-		return false
-	}
-	return true
-}
-
-// acceptMutationLineage gates every state-changing frame. Returns
-// true when incoming lineage is at least as authoritative as the
-// currently active one; updates the active lineage on a strict
-// upgrade. Zero-valued fields are rejected as defense-in-depth —
-// the engine ingress also enforces this, but a wire-layer guard
-// keeps the replica honest even against a malformed sender.
 func (r *ReplicaListener) acceptMutationLineage(incoming RecoveryLineage) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -250,11 +203,6 @@ func (r *ReplicaListener) acceptMutationLineage(incoming RecoveryLineage) bool {
 	}
 }
 
-// compareLineage orders two lineages by semantic authority:
-// epoch first, then endpointVersion, then sessionID. Returns 1 if
-// a is strictly more authoritative, -1 if b is, 0 if equal in all
-// three fields (TargetLSN is NOT part of authority — same lineage
-// must agree on target).
 func compareLineage(a, b RecoveryLineage) int {
 	switch {
 	case a.Epoch < b.Epoch:

@@ -17,15 +17,19 @@ One statement:
 > Given an external reassignment `(replicaID, epoch+1, new addresses)`,
 > the engine clears any in-flight session, invalidates stale lineage,
 > re-probes the replica, decides catch-up or rebuild based on R/S/H
-> facts, and converges to healthy — while the old primary's stale
-> execution is rejected at every layer by the lineage gate.
+> facts, and converges to healthy. When recovery is needed (R < H),
+> the new primary's mutating traffic establishes the new epoch on the
+> replica, and the old primary's stale execution is rejected by the
+> lineage gate. When the replica is already caught up (R ≥ H), no
+> mutating traffic is sent and the replica's lineage gate is NOT
+> advanced — see "Known limitation" below.
 
 ### Steps
 
 | Step | What happens | Who acts |
 |---|---|---|
 | 1. Master reassigns | sends `AssignmentObserved(epoch+1)` to the new primary's adapter | external authority (P14 scope) |
-| 2. Old primary demoted | receives `ReplicaRemoved` or just stops receiving assignments | external authority |
+| 2. Old primary demoted | receives explicit `ReplicaRemoved` from external authority | external authority |
 | 3. Engine clears | epoch bump → `InvalidateSession` + clear session/reachability/recovery | engine (deterministic) |
 | 4. Probe | new primary probes replica to discover R/S/H | executor (data-sync institution) |
 | 5. Decide | engine's `decide()` classifies catch-up or rebuild | engine (semantic authority) |
@@ -50,9 +54,9 @@ Four handoff tests in `core/adapter/handoff_test.go`:
 | Test | What it proves |
 |---|---|
 | `TestHandoff_OldPrimaryToNewPrimary_Converges` | Full route: A (epoch=1) reaches healthy; B (epoch=2) probes, recovers, converges. Replica data matches B. |
-| `TestHandoff_StaleOldPrimaryTraffic_Rejected` | After B's epoch=2 mutating traffic establishes lineage on the replica, stale epoch=1 frames are rejected at the data plane. |
+| `TestHandoff_StaleOldPrimaryTraffic_Rejected` | After B's epoch=2 **recovery traffic** establishes lineage on the replica, stale epoch=1 frames are rejected at the data plane. Requires B to have sent at least one mutating message — does NOT cover the R≥H (no-recovery) branch. |
 | `TestHandoff_RejoinAfterNewPrimary_DataConsistent` | After handoff, every LBA the new primary wrote is byte-identical on the replica. |
-| `TestHandoff_OldPrimaryDemoted_NoResurrection` | After the old primary receives `ReplicaRemoved`, late callbacks cannot resurrect a healthy projection. |
+| `TestHandoff_OldPrimaryDemoted_NoResurrection` | During an active session, `ReplicaRemoved` clears the session; late `OnSessionStart` and `OnSessionClose` callbacks from the old executor cannot resurrect a healthy projection or re-enter a running phase. |
 
 These tests use two real adapters + two real transport executors
 sharing one replica listener — no mocks. They prove the lower
