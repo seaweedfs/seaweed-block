@@ -1,9 +1,12 @@
 # Bootstrap and Validation
 
-This doc describes how to start, inspect, and validate the
-runnable sparrow in this repository. It is the Phase 05 operability
-surface. It is NOT a production operator CLI — per the V3 operations
-design, the production interface is `weed shell` after integration.
+This doc is the reference for the sparrow CLI flags, HTTP endpoints,
+and exit codes. For the product-shape view of the single-node surface
+(scope statement, workflow, honesty rules, carry-forward), see
+[docs/single-node-surface.md](single-node-surface.md).
+
+This binary is NOT a production operator CLI — the production
+interface is `weed shell` after integration.
 
 ## Supported
 
@@ -100,11 +103,14 @@ HTTP server alive until `Ctrl+C`.
 
 | Endpoint | Method | Returns |
 |---|---|---|
+| `/` | GET | surface map: scope + list of endpoints + read-only note |
 | `/status` | GET | version, uptime, scope statement, current demo label |
 | `/projection` | GET | latest adapter `ReplicaProjection` as JSON |
 | `/trace` | GET | latest adapter trace as JSON array |
-| any path | POST/PUT/PATCH/DELETE | 501 Not Implemented + "not supported in Phase 05" |
-| unknown path | GET | 404 with a `hint` field pointing to the three valid paths |
+| `/watchdog` | GET | latest adapter watchdog lifecycle evidence as JSON array |
+| `/diagnose` | GET | bounded single-node diagnosis summary over projection / trace / watchdog |
+| any path | POST/PUT/PATCH/DELETE | 501 Not Implemented + read-only ops-surface body |
+| unknown path | GET | 404 with a `hint` field pointing to `/` |
 
 ### Example
 
@@ -113,9 +119,12 @@ HTTP server alive until `Ctrl+C`.
 go run ./cmd/sparrow --http :9090 &
 
 # In another:
-curl -s localhost:9090/status | jq
+curl -s localhost:9090/          | jq   # surface map — start here
+curl -s localhost:9090/status    | jq
 curl -s localhost:9090/projection | jq
-curl -s localhost:9090/trace | jq
+curl -s localhost:9090/trace     | jq
+curl -s localhost:9090/watchdog  | jq
+curl -s localhost:9090/diagnose  | jq
 ```
 
 ### Invariants enforced at the HTTP layer

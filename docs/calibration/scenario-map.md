@@ -114,6 +114,24 @@ Evidence honesty notes:
 - `A1`/`A4` coverage is bounded by the "same facts" constraint. Probes that arrive post-convergence with pre-captured (now stale) facts are NOT part of this set, because the engine legitimately re-enters recovery when fact-carrying events refresh R/S/H. That is engine correctness, not an A1/A4 leak, and including it would either loosen the pass criterion to vacuity or misattribute engine behavior.
 - `A7` evidence remains structural (all C1-C4 use the real transport stack end-to-end) rather than adversarial. A future calibration that injects transport failures mid-session would strengthen this.
 
+## Post-Closure Adversarial Proofs
+
+After the first-pass calibration set closed, the deliver repo added
+adversarial protocol proofs that are narrower than a new calibration
+family but stronger than the original structural evidence:
+
+| Proof | Location | What it locks in |
+|---|---|---|
+| stale callback after reassignment is ignored | `core/adapter/adapter_test.go::TestStaleCallback_OldSessionIgnoredAfterNewAssignment` | old session close cannot become current semantic truth after a newer assignment creates a newer session |
+| invalidated rebuild session does not callback success | `core/transport/transport_test.go::TestTransport_Rebuild_InvalidatedSessionStopsWithoutCallback` | execution lag does not re-enter the semantic route after invalidation |
+| replica rejects stale mutation lineage | `core/transport/transport_test.go::TestTransport_ReplicaRejectsStaleMutationLineage` | old primary / old session data-plane writes cannot overwrite newer accepted lineage |
+| stale transport epoch probe failure is rejected | `core/conformance/cases.yaml` + `core/engine/apply_test.go` | stale reachability loss does not degrade current truth |
+| recovery facts before probe success still converge | `core/conformance/cases.yaml` + `core/engine/apply_test.go` | same fact set under reorder still yields the same bounded recovery decision |
+
+These do not replace C1-C5. They carry forward the calibration package
+with more explicit fail-closed proof around handoff, stale lineage, and
+same-facts reorder behavior.
+
 ## Notes By Family
 
 ### C1

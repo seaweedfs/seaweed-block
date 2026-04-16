@@ -3,6 +3,10 @@ package calibration
 import (
 	"encoding/json"
 	"testing"
+	"time"
+
+	"github.com/seaweedfs/seaweed-block/core/adapter"
+	"github.com/seaweedfs/seaweed-block/core/engine"
 )
 
 // TestAllScenarios_PassEndToEnd is the headline Phase 06 test: every
@@ -164,6 +168,39 @@ func TestC5_RecoverySignatureCheckActuallyWorks(t *testing.T) {
 	}
 	if sigDup.NCatchUp != 2 {
 		t.Fatalf("sigDup should count both catch-ups: %+v", sigDup)
+	}
+}
+
+func TestCalibration_Handoff_StaleProbeFailureIgnoredAfterEpochAdvance(t *testing.T) {
+	h, err := newHarness()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.close()
+
+	h.writeBlocks(8)
+	h.mirrorToReplica()
+	h.assign(1, 1)
+	if p := h.waitForDecisionFinal(3 * time.Second); p.Mode != engine.ModeHealthy {
+		t.Fatalf("precondition: epoch1 should converge healthy, got %s", p.Mode)
+	}
+
+	h.assign(2, 2)
+	if p := h.waitForDecisionFinal(3 * time.Second); p.Mode != engine.ModeHealthy {
+		t.Fatalf("precondition: epoch2 should converge healthy, got %s", p.Mode)
+	}
+
+	h.adapter.OnProbeResult(adapter.ProbeResult{
+		ReplicaID:       "r1",
+		Success:         false,
+		EndpointVersion: 1,
+		TransportEpoch:  1,
+		FailReason:      "stale_old_primary",
+	})
+	time.Sleep(50 * time.Millisecond)
+
+	if got := h.adapter.Projection().Mode; got != engine.ModeHealthy {
+		t.Fatalf("stale old-primary probe failure should be ignored, got mode %s", got)
 	}
 }
 

@@ -7,9 +7,9 @@ import (
 	"time"
 )
 
-var errGroupCommitShutdown = errors.New("storage: group committer shut down")
+var ErrGroupCommitShutdown = errors.New("storage: group committer shut down")
 
-// groupCommitter batches concurrent SyncCache requests into a single
+// GroupCommitter batches concurrent SyncCache requests into a single
 // fsync. This amortizes the cost of fsync across many writers and is
 // the difference between "fsync per write" and "fsync per millisecond
 // regardless of write rate".
@@ -17,7 +17,7 @@ var errGroupCommitShutdown = errors.New("storage: group committer shut down")
 // Lifetime: NewGroupCommitter() → Run() in a goroutine →
 // SyncCache() from any number of writers → Stop() shuts the loop down
 // and fails any waiters that arrive after.
-type groupCommitter struct {
+type GroupCommitter struct {
 	syncFunc func() error
 	maxDelay time.Duration
 	maxBatch int
@@ -33,21 +33,21 @@ type groupCommitter struct {
 	syncCount atomic.Uint64
 }
 
-// groupCommitterConfig is the constructor arg for newGroupCommitter.
-type groupCommitterConfig struct {
+// GroupCommitterConfig is the constructor arg for NewGroupCommitter.
+type GroupCommitterConfig struct {
 	SyncFunc func() error  // required: the actual fsync (or analogue)
 	MaxDelay time.Duration // upper bound on per-batch waiting; default 1ms
 	MaxBatch int           // flush immediately if this many waiters accumulate; default 64
 }
 
-func newGroupCommitter(cfg groupCommitterConfig) *groupCommitter {
+func NewGroupCommitter(cfg GroupCommitterConfig) *GroupCommitter {
 	if cfg.MaxDelay == 0 {
 		cfg.MaxDelay = 1 * time.Millisecond
 	}
 	if cfg.MaxBatch == 0 {
 		cfg.MaxBatch = 64
 	}
-	return &groupCommitter{
+	return &GroupCommitter{
 		syncFunc: cfg.SyncFunc,
 		maxDelay: cfg.MaxDelay,
 		maxBatch: cfg.MaxBatch,
@@ -58,7 +58,7 @@ func newGroupCommitter(cfg groupCommitterConfig) *groupCommitter {
 }
 
 // run drives the batching loop. Call this once in a goroutine.
-func (gc *groupCommitter) run() {
+func (gc *GroupCommitter) Run() {
 	defer close(gc.done)
 	for {
 		select {
@@ -110,7 +110,7 @@ func (gc *groupCommitter) run() {
 
 // fsyncSafe runs syncFunc with panic recovery so a misbehaving sync
 // doesn't take the whole loop down silently.
-func (gc *groupCommitter) fsyncSafe() (err error) {
+func (gc *GroupCommitter) fsyncSafe() (err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			err = errors.New("storage: group committer syncFunc panic")
@@ -119,25 +119,25 @@ func (gc *groupCommitter) fsyncSafe() (err error) {
 	return gc.syncFunc()
 }
 
-func (gc *groupCommitter) markStoppedAndDrain() {
+func (gc *GroupCommitter) markStoppedAndDrain() {
 	gc.mu.Lock()
 	gc.stopped = true
 	pending := gc.pending
 	gc.pending = nil
 	gc.mu.Unlock()
 	for _, ch := range pending {
-		ch <- errGroupCommitShutdown
+		ch <- ErrGroupCommitShutdown
 	}
 }
 
 // SyncCache requests an fsync. Blocks until the next batch flushes
 // (or the committer shuts down). Returns the result of the fsync.
-func (gc *groupCommitter) SyncCache() error {
+func (gc *GroupCommitter) SyncCache() error {
 	ch := make(chan error, 1)
 	gc.mu.Lock()
 	if gc.stopped {
 		gc.mu.Unlock()
-		return errGroupCommitShutdown
+		return ErrGroupCommitShutdown
 	}
 	gc.pending = append(gc.pending, ch)
 	gc.mu.Unlock()
@@ -151,8 +151,8 @@ func (gc *groupCommitter) SyncCache() error {
 }
 
 // Stop shuts down the committer. Idempotent. Pending waiters receive
-// errGroupCommitShutdown.
-func (gc *groupCommitter) Stop() {
+// ErrGroupCommitShutdown.
+func (gc *GroupCommitter) Stop() {
 	gc.stopOnce.Do(func() {
 		close(gc.stopCh)
 		<-gc.done
@@ -161,4 +161,4 @@ func (gc *groupCommitter) Stop() {
 
 // SyncCount returns the number of fsync operations performed. Useful
 // for tests asserting on batching behavior.
-func (gc *groupCommitter) SyncCount() uint64 { return gc.syncCount.Load() }
+func (gc *GroupCommitter) SyncCount() uint64 { return gc.syncCount.Load() }

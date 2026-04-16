@@ -51,8 +51,10 @@ func (ProbeSucceeded) eventKind() string { return "ProbeSucceeded" }
 
 // ProbeFailed: primary could not reach the replica.
 type ProbeFailed struct {
-	ReplicaID string
-	Reason    string
+	ReplicaID       string
+	EndpointVersion uint64
+	TransportEpoch  uint64
+	Reason          string
 }
 
 func (ProbeFailed) eventKind() string { return "ProbeFailed" }
@@ -61,10 +63,12 @@ func (ProbeFailed) eventKind() string { return "ProbeFailed" }
 
 // RecoveryFactsObserved: primary reports the R/S/H boundaries.
 type RecoveryFactsObserved struct {
-	ReplicaID string
-	R         uint64 // replica durable boundary
-	S         uint64 // primary WAL tail (recoverable start)
-	H         uint64 // primary head (target)
+	ReplicaID       string
+	EndpointVersion uint64
+	TransportEpoch  uint64
+	R               uint64 // replica durable boundary
+	S               uint64 // primary WAL tail (recoverable start)
+	H               uint64 // primary head (target)
 }
 
 func (RecoveryFactsObserved) eventKind() string { return "RecoveryFactsObserved" }

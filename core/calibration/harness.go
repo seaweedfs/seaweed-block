@@ -34,7 +34,7 @@ func newHarness() (*harness, error) {
 		return nil, fmt.Errorf("replica listener: %w", err)
 	}
 	ln.Serve()
-	exec := transport.NewBlockExecutor(primary, ln.Addr(), 1)
+	exec := transport.NewBlockExecutor(primary, ln.Addr())
 	a := adapter.NewVolumeReplicaAdapter(exec)
 	return &harness{
 		primaryStore: primary,

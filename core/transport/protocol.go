@@ -23,11 +23,24 @@ const (
 	MsgBarrierResp  byte = 0x07 // replica → primary: sync response
 )
 
+// RecoveryLineage binds a mutating recovery stream to one accepted recovery
+// contract. The tuple is ordered by semantic authority:
+// epoch -> endpointVersion -> sessionID, with targetLSN frozen by the engine.
+// All four fields MUST be >= 1; zero-valued identity lineage is rejected
+// at engine event ingestion before any recovery command is emitted.
+type RecoveryLineage struct {
+	SessionID       uint64
+	Epoch           uint64
+	EndpointVersion uint64
+	TargetLSN       uint64
+}
+
 // ShipEntry is one replicated block write.
 type ShipEntry struct {
-	LBA  uint32
-	LSN  uint64
-	Data []byte
+	Lineage RecoveryLineage
+	LBA     uint32
+	LSN     uint64
+	Data    []byte
 }
 
 // ProbeResponse carries the replica's recovery boundaries.
@@ -79,25 +92,55 @@ func ReadMsg(conn net.Conn) (msgType byte, payload []byte, err error) {
 	return msgType, payload, nil
 }
 
+// EncodeLineage serializes a recovery lineage.
+// Wire: [8B sessionID][8B epoch][8B endpointVersion][8B targetLSN]
+func EncodeLineage(l RecoveryLineage) []byte {
+	buf := make([]byte, 32)
+	binary.BigEndian.PutUint64(buf[0:8], l.SessionID)
+	binary.BigEndian.PutUint64(buf[8:16], l.Epoch)
+	binary.BigEndian.PutUint64(buf[16:24], l.EndpointVersion)
+	binary.BigEndian.PutUint64(buf[24:32], l.TargetLSN)
+	return buf
+}
+
+// DecodeLineage deserializes a recovery lineage.
+func DecodeLineage(buf []byte) (RecoveryLineage, error) {
+	if len(buf) < 32 {
+		return RecoveryLineage{}, fmt.Errorf("transport: short recovery lineage")
+	}
+	return RecoveryLineage{
+		SessionID:       binary.BigEndian.Uint64(buf[0:8]),
+		Epoch:           binary.BigEndian.Uint64(buf[8:16]),
+		EndpointVersion: binary.BigEndian.Uint64(buf[16:24]),
+		TargetLSN:       binary.BigEndian.Uint64(buf[24:32]),
+	}, nil
+}
+
 // EncodeShipEntry serializes a ship entry.
-// Wire: [4B LBA][8B LSN][data...]
+// Wire: [32B lineage][4B LBA][8B LSN][data...]
 func EncodeShipEntry(e ShipEntry) []byte {
-	buf := make([]byte, 12+len(e.Data))
-	binary.BigEndian.PutUint32(buf[0:4], e.LBA)
-	binary.BigEndian.PutUint64(buf[4:12], e.LSN)
-	copy(buf[12:], e.Data)
+	buf := make([]byte, 44+len(e.Data))
+	copy(buf[0:32], EncodeLineage(e.Lineage))
+	binary.BigEndian.PutUint32(buf[32:36], e.LBA)
+	binary.BigEndian.PutUint64(buf[36:44], e.LSN)
+	copy(buf[44:], e.Data)
 	return buf
 }
 
 // DecodeShipEntry deserializes a ship entry.
 func DecodeShipEntry(buf []byte) (ShipEntry, error) {
-	if len(buf) < 12 {
+	if len(buf) < 44 {
 		return ShipEntry{}, fmt.Errorf("transport: short ship entry")
 	}
+	lineage, err := DecodeLineage(buf[0:32])
+	if err != nil {
+		return ShipEntry{}, err
+	}
 	return ShipEntry{
-		LBA:  binary.BigEndian.Uint32(buf[0:4]),
-		LSN:  binary.BigEndian.Uint64(buf[4:12]),
-		Data: buf[12:],
+		Lineage: lineage,
+		LBA:     binary.BigEndian.Uint32(buf[32:36]),
+		LSN:     binary.BigEndian.Uint64(buf[36:44]),
+		Data:    buf[44:],
 	}, nil
 }
 
@@ -124,18 +167,23 @@ func DecodeProbeResp(buf []byte) (ProbeResponse, error) {
 }
 
 // EncodeRebuildBlock serializes one rebuild block.
-// Wire: [4B LBA][data...]
-func EncodeRebuildBlock(lba uint32, data []byte) []byte {
-	buf := make([]byte, 4+len(data))
-	binary.BigEndian.PutUint32(buf[0:4], lba)
-	copy(buf[4:], data)
+// Wire: [32B lineage][4B LBA][data...]
+func EncodeRebuildBlock(lineage RecoveryLineage, lba uint32, data []byte) []byte {
+	buf := make([]byte, 36+len(data))
+	copy(buf[0:32], EncodeLineage(lineage))
+	binary.BigEndian.PutUint32(buf[32:36], lba)
+	copy(buf[36:], data)
 	return buf
 }
 
 // DecodeRebuildBlock deserializes one rebuild block.
-func DecodeRebuildBlock(buf []byte) (lba uint32, data []byte, err error) {
-	if len(buf) < 4 {
-		return 0, nil, fmt.Errorf("transport: short rebuild block")
+func DecodeRebuildBlock(buf []byte) (lineage RecoveryLineage, lba uint32, data []byte, err error) {
+	if len(buf) < 36 {
+		return RecoveryLineage{}, 0, nil, fmt.Errorf("transport: short rebuild block")
 	}
-	return binary.BigEndian.Uint32(buf[0:4]), buf[4:], nil
+	lineage, err = DecodeLineage(buf[0:32])
+	if err != nil {
+		return RecoveryLineage{}, 0, nil, err
+	}
+	return lineage, binary.BigEndian.Uint32(buf[32:36]), buf[36:], nil
 }

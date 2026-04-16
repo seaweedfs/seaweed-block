@@ -6,6 +6,11 @@ interface; the in-memory `BlockStore` is the other. Both satisfy the
 same contract; tests run against both via a shared factory table so a
 new backend slots in without test duplication.
 
+For the broader institutional view of read / write / flush /
+checkpoint / recover as one bounded execution institution with an
+explicit crash model and named carry-forward boundaries, see
+[docs/local-data-process.md](local-data-process.md).
+
 ## What this proves
 
 1. **Acked writes survive crash.** A write whose enclosing `Sync()`

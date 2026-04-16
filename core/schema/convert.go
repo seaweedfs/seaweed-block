@@ -42,16 +42,20 @@ func ToEngineEvent(ei EventInput) (engine.Event, error) {
 
 	case "ProbeFailed":
 		return engine.ProbeFailed{
-			ReplicaID: ei.ReplicaID,
-			Reason:    ei.Reason,
+			ReplicaID:       ei.ReplicaID,
+			EndpointVersion: ei.EndpointVersion,
+			TransportEpoch:  ei.TransportEpoch,
+			Reason:          ei.Reason,
 		}, nil
 
 	case "RecoveryFactsObserved":
 		return engine.RecoveryFactsObserved{
-			ReplicaID: ei.ReplicaID,
-			R:         ei.R,
-			S:         ei.S,
-			H:         ei.H,
+			ReplicaID:       ei.ReplicaID,
+			EndpointVersion: ei.EndpointVersion,
+			TransportEpoch:  ei.TransportEpoch,
+			R:               ei.R,
+			S:               ei.S,
+			H:               ei.H,
 		}, nil
 
 	case "SessionPrepared":

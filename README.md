@@ -160,10 +160,15 @@ go run ./cmd/sparrow --calibrate --json    # machine-readable calibration Report
 go run ./cmd/sparrow --persist-demo --persist-dir DIR    # Phase 07 single-node persistence demo
 ```
 
-HTTP endpoints (read-only): `/status`, `/projection`, `/trace`. Every
-mutation verb returns 501 with an explicit "not supported in Phase 05"
-body. See [docs/bootstrap-validation.md](docs/bootstrap-validation.md)
-for the complete list of supported flags, endpoints, and exit codes.
+HTTP endpoints (read-only): `GET /` returns the self-describing surface
+map; `GET /status`, `GET /projection`, `GET /trace`, `GET /watchdog`,
+`GET /diagnose` expose the bounded single-node inspection surface. Every
+mutation verb returns 501 with an explicit read-only ops-surface body.
+
+See [docs/single-node-surface.md](docs/single-node-surface.md) for the
+bounded single-node product surface, or
+[docs/bootstrap-validation.md](docs/bootstrap-validation.md) for the
+full list of supported flags, endpoints, and exit codes.
 
 This binary is a development and validation entry point only. The
 production operations surface is `weed shell` after integration.
@@ -187,26 +192,59 @@ Evidence artifacts:
 If a case diverges, record it in `divergence-log.md` before changing
 the route or the expectations.
 
-## Persistence
+## Persistence and the local data process
 
-Phase 07 admits one persistence-backed local storage implementation
-behind the `LogicalStorage` interface and proves restart-surviving
-local data on a single node:
+A bounded local data process owns read, write, flush, checkpoint,
+and recovery on one node, behind the `LogicalStorage` interface.
+Acked writes survive abrupt process kill; recovery is deterministic;
+a background flusher drains the WAL into the extent and advances
+the on-disk checkpoint.
 
 ```bash
 go run ./cmd/sparrow --persist-demo --persist-dir /tmp/sparrow-persist
 ```
 
-What this proves: data acked by `Sync()` survives `Close + Open +
-Recover` on a clean stop/restart of one process.
+What's proven (single-node):
 
-What this does NOT prove: crash consistency from process kill or
-power loss; distributed durability across nodes; SmartWAL semantics
-(future work behind the same interface).
+- Acked writes survive process kill (verified by simulated-kill tests
+  that bypass `Close()` and a crash family across four windows).
+- Recovery is deterministic across reopens of the same on-disk state.
+- Unacked writes may vanish but never corrupt acked data.
 
-See [docs/persistence.md](docs/persistence.md) for the on-disk
-format, exit codes, anti-pattern guards, and explicit carry-forward
-list.
+What's NOT in scope: distributed durability across nodes;
+power-loss durability beyond what `fsync` guarantees at the
+OS+device boundary; bit-rot detection in the extent.
+
+For details:
+
+- [docs/local-data-process.md](docs/local-data-process.md) — the institution, what it owns, the crash model, carry-forward
+- [docs/persistence.md](docs/persistence.md) — backend implementation details, on-disk format, exit codes, NVMe/raw-device path
+
+## Replication institutions
+
+The current replicated path is documented as two bounded lower institutions:
+
+- [docs/data-sync-institution.md](docs/data-sync-institution.md) — byte movement, wire protocol, lineage gate, achieved-frontier report
+- [docs/recovery-execution-institution.md](docs/recovery-execution-institution.md) — command admission, real execution start, invalidation, close-path lifecycle truth
+
+## Single-node product surface
+
+Above the three lower institutions (local data, data sync,
+recovery execution) sits one bounded single-node operator
+surface — start / inspect / validate / diagnose — exposed as six
+read-only HTTP endpoints plus the sparrow CLI. No cluster-shaped
+wording; no mutation authority.
+
+- [docs/single-node-surface.md](docs/single-node-surface.md) — surface map, workflow, honesty rules, carry-forward
+
+## Replicated durable slice
+
+The first bounded product capability beyond single-node operation:
+one old-primary → new-primary → rejoin path that converges with
+explicit fencing and stale-lineage rejection. Mechanism, not policy
+— who becomes primary and when to fail over belong to later phases.
+
+- [docs/replicated-slice.md](docs/replicated-slice.md) — the bounded route, authority boundary, durability claim, known limitations, carry-forward
 
 ## Design Rules
 

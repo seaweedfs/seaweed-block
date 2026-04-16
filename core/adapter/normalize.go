@@ -54,6 +54,13 @@ type SessionCloseResult struct {
 	FailReason  string
 }
 
+// SessionStartResult reports that a recovery session has actually begun
+// executing in the runtime.
+type SessionStartResult struct {
+	ReplicaID string
+	SessionID uint64
+}
+
 // --- Normalization: raw facts → engine events ---
 
 // NormalizeAssignment converts a master assignment into engine events.
@@ -82,8 +89,10 @@ func NormalizeProbe(p ProbeResult) []engine.Event {
 	if !p.Success {
 		return []engine.Event{
 			engine.ProbeFailed{
-				ReplicaID: p.ReplicaID,
-				Reason:    p.FailReason,
+				ReplicaID:       p.ReplicaID,
+				EndpointVersion: p.EndpointVersion,
+				TransportEpoch:  p.TransportEpoch,
+				Reason:          p.FailReason,
 			},
 		}
 	}
@@ -96,16 +105,14 @@ func NormalizeProbe(p ProbeResult) []engine.Event {
 		},
 	}
 
-	// If R/S/H boundaries are available, report them as recovery facts.
-	// The engine decides whether this means catch_up, rebuild, or none.
-	if p.PrimaryHeadLSN > 0 {
-		events = append(events, engine.RecoveryFactsObserved{
-			ReplicaID: p.ReplicaID,
-			R:         p.ReplicaFlushedLSN,
-			S:         p.PrimaryTailLSN,
-			H:         p.PrimaryHeadLSN,
-		})
-	}
+	events = append(events, engine.RecoveryFactsObserved{
+		ReplicaID:       p.ReplicaID,
+		EndpointVersion: p.EndpointVersion,
+		TransportEpoch:  p.TransportEpoch,
+		R:               p.ReplicaFlushedLSN,
+		S:               p.PrimaryTailLSN,
+		H:               p.PrimaryHeadLSN,
+	})
 
 	return events
 }
@@ -127,6 +134,15 @@ func NormalizeSessionClose(r SessionCloseResult) engine.Event {
 	}
 }
 
+// NormalizeSessionStart converts a runtime start callback into an engine event.
+// This marks real execution start, not just command issuance.
+func NormalizeSessionStart(r SessionStartResult) engine.Event {
+	return engine.SessionStarted{
+		ReplicaID: r.ReplicaID,
+		SessionID: r.SessionID,
+	}
+}
+
 // NormalizeSessionPrepared creates a SessionPrepared event when the
 // adapter has set up a recovery session in response to a Start* command.
 func NormalizeSessionPrepared(replicaID string, sessionID uint64, kind engine.SessionKind, targetLSN uint64) engine.Event {
@@ -135,14 +151,5 @@ func NormalizeSessionPrepared(replicaID string, sessionID uint64, kind engine.Se
 		SessionID: sessionID,
 		Kind:      kind,
 		TargetLSN: targetLSN,
-	}
-}
-
-// NormalizeSessionStarted creates a SessionStarted event when
-// the session begins executing.
-func NormalizeSessionStarted(replicaID string, sessionID uint64) engine.Event {
-	return engine.SessionStarted{
-		ReplicaID: replicaID,
-		SessionID: sessionID,
 	}
 }

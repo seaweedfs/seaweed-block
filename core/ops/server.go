@@ -9,7 +9,7 @@ import (
 // NewServer builds an *http.Server with read-only handlers wired in.
 // The caller runs it with ListenAndServe() and shuts it down with
 // Shutdown(). Every mutation verb (POST, PUT, PATCH, DELETE) on any
-// ops path returns 501 with the Phase 05 "not supported" body — the
+// ops path returns 501 with the read-only "not supported" body — the
 // boundary is enforced at the HTTP layer, not by omission.
 //
 // Arguments:
@@ -29,10 +29,9 @@ func NewServer(addr, version, scope string, state *State) *http.Server {
 	mux.Handle("/status", withReadOnly(http.HandlerFunc(h.status)))
 	mux.Handle("/projection", withReadOnly(http.HandlerFunc(h.projection)))
 	mux.Handle("/trace", withReadOnly(http.HandlerFunc(h.trace)))
-	// Catch-all for unknown paths — still enforce read-only and give
-	// an honest 404 (not 501) so mistyped paths are distinguishable
-	// from attempted mutations.
-	mux.Handle("/", withReadOnly(http.HandlerFunc(h.notFound)))
+	mux.Handle("/watchdog", withReadOnly(http.HandlerFunc(h.watchdog)))
+	mux.Handle("/diagnose", withReadOnly(http.HandlerFunc(h.diagnose)))
+	mux.Handle("/", withReadOnly(http.HandlerFunc(h.index)))
 
 	return &http.Server{
 		Addr:              addr,
@@ -42,8 +41,8 @@ func NewServer(addr, version, scope string, state *State) *http.Server {
 }
 
 // withReadOnly rejects all non-GET/HEAD/OPTIONS requests with 501
-// and a structured "not supported in Phase 05" body. This is the
-// enforcement point for the ops-surface mutation boundary.
+// and a structured read-only body. This is the enforcement point for
+// the ops-surface mutation boundary.
 func withReadOnly(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
@@ -54,7 +53,7 @@ func withReadOnly(next http.Handler) http.Handler {
 			w.Header().Set("Allow", "GET, HEAD, OPTIONS")
 			w.WriteHeader(http.StatusNotImplemented)
 			_ = json.NewEncoder(w).Encode(map[string]string{
-				"error":  "not supported in Phase 05",
+				"error":  "not supported on the read-only ops surface",
 				"reason": "the ops surface is read-only; no mutation verbs are wired",
 				"method": r.Method,
 				"path":   r.URL.Path,

@@ -179,3 +179,15 @@ func (w *walWriter) logicalTailValue() uint64 {
 
 // fsync forces buffered data to durable storage.
 func (w *walWriter) fsync() error { return w.fd.Sync() }
+
+// usedFraction returns the fraction of the WAL region currently in
+// use, in the range [0, 1]. Used by the admission controller to
+// decide whether to throttle or block writers.
+func (w *walWriter) usedFraction() float64 {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.walSize == 0 {
+		return 0
+	}
+	return float64(w.used()) / float64(w.walSize)
+}

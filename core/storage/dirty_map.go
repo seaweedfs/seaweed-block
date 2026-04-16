@@ -68,6 +68,31 @@ func (d *dirtyMap) delete(lba uint64) {
 	s.mu.Unlock()
 }
 
+// compareAndDelete removes the entry for lba ONLY if the currently
+// stored LSN equals expectedLSN. Returns true if the delete happened.
+//
+// Used by the flusher cleanup path to avoid the race where:
+//
+//   1. Flusher snapshots {LBA, oldLSN}.
+//   2. Concurrent Write() updates the entry to {LBA, newLSN}.
+//   3. Flusher writes oldLSN's data to extent.
+//   4. Flusher tries to clean up — without this guard, an
+//      unconditional delete by LBA would also drop the newer entry,
+//      leaving the new write unflushed AND invisible to subsequent
+//      reads (which would fall back to stale extent bytes).
+//
+// V2's flusher uses this same compare-then-delete pattern.
+func (d *dirtyMap) compareAndDelete(lba, expectedLSN uint64) bool {
+	s := d.shard(lba)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if e, ok := s.m[lba]; ok && e.lsn == expectedLSN {
+		delete(s.m, lba)
+		return true
+	}
+	return false
+}
+
 // snapshotEntry is one entry returned by snapshot().
 type snapshotEntry struct {
 	LBA       uint64

@@ -16,6 +16,9 @@ type ReplicaListener struct {
 	listener net.Listener
 	stopCh   chan struct{}
 	wg       sync.WaitGroup
+
+	mu            sync.Mutex
+	activeLineage RecoveryLineage
 }
 
 // NewReplicaListener creates a listener on the given address.
@@ -91,6 +94,11 @@ func (r *ReplicaListener) handleConn(conn net.Conn) {
 				log.Printf("replica: decode ship entry: %v", err)
 				return
 			}
+			if !r.acceptMutationLineage(entry.Lineage) {
+				log.Printf("replica: reject stale ship session=%d epoch=%d endpointVersion=%d",
+					entry.Lineage.SessionID, entry.Lineage.Epoch, entry.Lineage.EndpointVersion)
+				return
+			}
 			if err := r.store.ApplyEntry(entry.LBA, entry.Data, entry.LSN); err != nil {
 				log.Printf("replica: apply entry: %v", err)
 			}
@@ -107,59 +115,113 @@ func (r *ReplicaListener) handleConn(conn net.Conn) {
 			}
 
 		case MsgRebuildBlock:
-			lba, data, err := DecodeRebuildBlock(payload)
+			lineage, lba, data, err := DecodeRebuildBlock(payload)
 			if err != nil {
 				log.Printf("replica: decode rebuild block: %v", err)
 				return
 			}
-			// Apply with LSN=1 as placeholder; the real LSN comes in
-			// MsgRebuildDone to advance the frontier correctly.
-			if err := r.store.ApplyEntry(lba, data, 1); err != nil {
+			if !r.acceptMutationLineage(lineage) {
+				log.Printf("replica: reject stale rebuild block session=%d epoch=%d endpointVersion=%d",
+					lineage.SessionID, lineage.Epoch, lineage.EndpointVersion)
+				return
+			}
+			// Rebuild blocks carry the engine's frozen targetLSN in their
+			// lineage. Apply that real LSN immediately so any future
+			// LSN-aware ApplyEntry guard still treats rebuild data as current.
+			if err := r.store.ApplyEntry(lba, data, lineage.TargetLSN); err != nil {
 				log.Printf("replica: apply rebuild block: %v", err)
 			}
 
 		case MsgRebuildDone:
-			// The done message carries the primary's head LSN.
-			// Advance the replica's frontier metadata without touching
-			// any block data — AdvanceFrontier only updates nextLSN/walHead.
-			if len(payload) >= 8 {
-				achievedLSN := binary.BigEndian.Uint64(payload)
-				r.store.AdvanceFrontier(achievedLSN)
-			}
-			// Sync, then acknowledge with the replica's actual synced
-			// frontier (same shape as MsgBarrierResp). The primary
-			// waits for this before returning from doRebuild —
-			// without it, the session could "complete" before the
-			// replica has applied and synced the rebuild blocks. Ack
-			// carries replica's true state.
-			frontier, err := r.store.Sync()
+			lineage, err := DecodeLineage(payload)
 			if err != nil {
-				log.Printf("replica: sync after rebuild: %v", err)
+				log.Printf("replica: decode rebuild done: %v", err)
 				return
 			}
+			if !r.acceptMutationLineage(lineage) {
+				log.Printf("replica: reject stale rebuild done session=%d epoch=%d endpointVersion=%d",
+					lineage.SessionID, lineage.Epoch, lineage.EndpointVersion)
+				return
+			}
+			// The done message carries the engine's frozen target LSN.
+			// Advance the replica's frontier metadata without touching
+			// any block data — AdvanceFrontier only updates nextLSN/walHead.
+			r.store.AdvanceFrontier(lineage.TargetLSN)
+			frontier, _ := r.store.Sync()
 			resp := make([]byte, 8)
 			binary.BigEndian.PutUint64(resp, frontier)
 			if err := WriteMsg(conn, MsgBarrierResp, resp); err != nil {
-				log.Printf("replica: write rebuild ack: %v", err)
+				return
 			}
 			return
 
 		case MsgBarrierReq:
-			frontier, err := r.store.Sync()
+			lineage, err := DecodeLineage(payload)
 			if err != nil {
-				log.Printf("replica: sync for barrier: %v", err)
+				log.Printf("replica: decode barrier req: %v", err)
 				return
 			}
+			if !r.acceptMutationLineage(lineage) {
+				log.Printf("replica: reject stale barrier session=%d epoch=%d endpointVersion=%d",
+					lineage.SessionID, lineage.Epoch, lineage.EndpointVersion)
+				return
+			}
+			frontier, _ := r.store.Sync()
 			resp := make([]byte, 8)
 			binary.BigEndian.PutUint64(resp, frontier)
-			if err := WriteMsg(conn, MsgBarrierResp, resp); err != nil {
-				log.Printf("replica: write barrier response: %v", err)
-				return
-			}
+			WriteMsg(conn, MsgBarrierResp, resp)
 
 		default:
 			log.Printf("replica: unknown message type 0x%02x", msgType)
 			return
 		}
+	}
+}
+
+func (r *ReplicaListener) acceptMutationLineage(incoming RecoveryLineage) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if incoming.SessionID == 0 || incoming.Epoch == 0 || incoming.EndpointVersion == 0 {
+		return false
+	}
+
+	active := r.activeLineage
+	if active.SessionID == 0 {
+		r.activeLineage = incoming
+		return true
+	}
+
+	switch compareLineage(incoming, active) {
+	case 1:
+		r.activeLineage = incoming
+		return true
+	case 0:
+		return incoming.TargetLSN == active.TargetLSN
+	default:
+		return false
+	}
+}
+
+func compareLineage(a, b RecoveryLineage) int {
+	switch {
+	case a.Epoch < b.Epoch:
+		return -1
+	case a.Epoch > b.Epoch:
+		return 1
+	}
+	switch {
+	case a.EndpointVersion < b.EndpointVersion:
+		return -1
+	case a.EndpointVersion > b.EndpointVersion:
+		return 1
+	}
+	switch {
+	case a.SessionID < b.SessionID:
+		return -1
+	case a.SessionID > b.SessionID:
+		return 1
+	default:
+		return 0
 	}
 }

@@ -44,6 +44,60 @@ does not return to them. They are runtime execution state. If a future
 V3 runtime is written, it will have its own analogous states, and the
 engine will stay unaware of them.
 
+## Recovery Command Lineage
+
+The engine still emits partial-state recovery intent:
+
+- `StartCatchUp`
+- `StartRebuild`
+
+But in the deliver code those commands are NOT executed as lineage-free
+requests.
+
+The accepted execution contract is:
+
+1. the engine chooses recovery class and freezes `targetLSN`
+2. the adapter assigns a fresh `sessionID`
+3. the execution surface binds recovery work to
+   `sessionID + epoch + endpointVersion + targetLSN`
+4. the transport layer carries that lineage on mutating recovery traffic
+5. stale or superseded lineage is rejected or ignored rather than
+   allowed to redefine live truth
+
+This means:
+
+- the semantic command is still partial state
+- the execution route is not
+- delayed callbacks, old sessions, and stale primary traffic must be
+  fenced by lineage before they can affect current truth
+
+Files:
+
+- `core/adapter/adapter.go`
+- `core/adapter/executor.go`
+- `core/transport/protocol.go`
+- `core/transport/executor.go`
+- `core/transport/replica.go`
+
+## Semantic Death Rule In Deliver Code
+
+The short form from the design docs is now implemented concretely:
+
+**old process may still run, but it must already be semantically dead.**
+
+In the deliver code that means:
+
+1. identity advance clears engine session truth immediately and emits
+   `InvalidateSession`
+2. the executor actively cancels invalidated sessions instead of only
+   logging them
+3. late close callbacks from invalidated sessions are dropped
+4. the replica listener rejects stale mutation lineage on ship/rebuild
+   traffic
+
+So execution lag is tolerated only as cleanup latency. It is not
+allowed to continue mutating accepted semantic or storage truth.
+
 ## Why No Single Diagram
 
 A "one big state diagram" view does not fit, and should not be drawn:
@@ -90,10 +144,20 @@ for "what states can this system be in" is not a diagram. It is:
    - Same-observation batch rule: multi-fact observations enter
      through `applyBatchAndExecute` atomically
      (see `core/adapter/adapter.go` ingress header)
+   - stale session callbacks and stale mutation lineage are rejected
+     by ID/epoch/endpoint fencing
+   - recovery facts arriving before probe success still converge once
+     reachability becomes current
 
 3. **Conformance cases** — YAML event sequences with expected
    projections under `core/conformance/`. Each case pins one
    legal trajectory.
+
+Those cases now include:
+
+- stale probe failure with old transport epoch is rejected
+- recovery facts arriving before probe success still converge to the
+  same catch-up decision
 
 4. **Trace output** — every `Apply` emits a trace entry per decision
    step. For any concrete run, the trace is the diagram for that run.
@@ -128,3 +192,10 @@ When adding an event, command, enum value, or truth domain:
 Do not add a type without a reducer path. Do not add a reducer path
 without a conformance case. The surface grows only when all three
 move together.
+
+If the new surface can outlive reassignment, restart, or handoff, also
+answer these before accepting it:
+
+1. what is the minimum execution lineage
+2. where is stale lineage rejected
+3. how do we prove old callbacks cannot become new truth
