@@ -238,6 +238,15 @@ to later phases.
 
 - [docs/single-node-surface.md](docs/single-node-surface.md) — surface map, workflow, honesty rules, carry-forward
 
+## Replicated durable slice
+
+The first bounded product capability beyond single-node operation:
+one old-primary → new-primary → rejoin path that converges with
+explicit fencing and stale-lineage rejection. Mechanism, not policy
+— who becomes primary and when to fail over belong to later phases.
+
+- [docs/replicated-slice.md](docs/replicated-slice.md) — the bounded route, authority boundary, durability claim, known limitations, carry-forward
+
 ## Design Rules
 
 The current implementation is intentionally shaped around a few strict rules:

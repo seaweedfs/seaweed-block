@@ -121,6 +121,16 @@ func (a *VolumeReplicaAdapter) OnSessionStart(result SessionStartResult) ApplyLo
 	return a.applyBatchAndExecute([]engine.Event{NormalizeSessionStart(result)}, "SessionStart")
 }
 
+// OnRemoval processes a master removal event. The master has
+// decided this adapter no longer manages this replica. Sessions
+// are invalidated, recovery is cleared, and the publication state
+// is withdrawn. This is the old primary's demotion path in P12.
+func (a *VolumeReplicaAdapter) OnRemoval(replicaID, reason string) ApplyLog {
+	return a.applyBatchAndExecute([]engine.Event{
+		engine.ReplicaRemoved{ReplicaID: replicaID, Reason: reason},
+	}, "ReplicaRemoved")
+}
+
 // Projection returns the current operator-facing projection.
 func (a *VolumeReplicaAdapter) Projection() engine.ReplicaProjection {
 	a.mu.Lock()
