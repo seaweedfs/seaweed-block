@@ -47,6 +47,14 @@ func DeriveProjection(st *ReplicaState) ReplicaProjection {
 		p.Mode = ModeRecovering
 	case st.Publication.Healthy:
 		p.Mode = ModeHealthy
+	case st.Recovery.Decision == DecisionNone &&
+		st.Reachability.Status == ProbeReachable &&
+		st.Identity.Epoch > st.Reachability.FencedEpoch:
+		// P14 S1: caught-up but fence not yet acked. Transitional
+		// — not healthy yet, but nothing is wrong. Show as
+		// recovering rather than degraded so operators read the
+		// transition correctly.
+		p.Mode = ModeRecovering
 	default:
 		p.Mode = ModeDegraded
 	}

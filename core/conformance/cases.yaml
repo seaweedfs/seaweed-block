@@ -54,7 +54,7 @@ cases:
       must_not_emit_commands: [StartCatchUp]
 
   - name: "caught_up_healthy"
-    description: "R >= H → no recovery, PublishHealthy emitted"
+    description: "R >= H → FenceAtEpoch first; PublishHealthy only after FenceCompleted"
     events:
       - kind: AssignmentObserved
         volume_id: vol1
@@ -72,10 +72,14 @@ cases:
         r: 100
         s: 10
         h: 100
+      - kind: FenceCompleted
+        replica_id: r1
+        epoch: 1
+        endpoint_version: 1
     expect:
       mode: healthy
       recovery_decision: none
-      must_emit_commands: [PublishHealthy]
+      must_emit_commands: [FenceAtEpoch, PublishHealthy]
       must_not_emit_commands: [StartCatchUp, StartRebuild]
 
   - name: "stale_epoch_rejected"

@@ -131,6 +131,33 @@ type SessionInvalidated struct {
 
 func (SessionInvalidated) eventKind() string { return "SessionInvalidated" }
 
+// --- Fence events (authority: transport) ---
+
+// FenceCompleted: a FenceAtEpoch command completed successfully —
+// the replica's lineage gate has now observed this epoch via a
+// barrier ack. Advances Reachability.FencedEpoch.
+type FenceCompleted struct {
+	ReplicaID       string
+	Epoch           uint64
+	EndpointVersion uint64
+}
+
+func (FenceCompleted) eventKind() string { return "FenceCompleted" }
+
+// FenceFailed: a FenceAtEpoch command did not complete (timeout,
+// dial failure, replica unreachable mid-barrier). Reachability.
+// FencedEpoch is NOT advanced; the next probe will re-trigger
+// decide(), which will re-emit FenceAtEpoch if the engine still
+// thinks the replica is caught up under the newer epoch.
+type FenceFailed struct {
+	ReplicaID       string
+	Epoch           uint64
+	EndpointVersion uint64
+	Reason          string
+}
+
+func (FenceFailed) eventKind() string { return "FenceFailed" }
+
 // EventKind returns the string name of an event for tracing.
 func EventKind(e Event) string {
 	if e == nil {

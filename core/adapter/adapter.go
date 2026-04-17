@@ -33,6 +33,36 @@ type VolumeReplicaAdapter struct {
 	startTimeout   time.Duration
 	startWatchdogs map[uint64]*time.Timer
 	watchdogLog    []WatchdogEvent
+
+	// fenceInFlight: at most one fence attempt outstanding per
+	// fence LINEAGE — keyed by (replicaID, epoch, endpointVersion).
+	// Value is the sessionID of the in-flight fence; used to match
+	// the returning FenceResult to the live attempt and drop
+	// callbacks for superseded attempts.
+	//
+	// IMPORTANT: keying by lineage (not by replicaID alone) prevents
+	// a newer-epoch fence from being starved by an older in-flight
+	// fence. If identity advances mid-fence, decide() emits a new
+	// FenceAtEpoch at the new lineage — which occupies its own slot
+	// and is dispatched in parallel with the older one. The older
+	// callback is dropped by the engine as stale
+	// (applyFenceCompleted checks e.Epoch >= Identity.Epoch); the
+	// newer one advances FencedEpoch normally.
+	//
+	// Same-lineage duplicates (engine re-emits FenceAtEpoch at the
+	// same (epoch, endpointVersion) on a later probe while the
+	// first attempt is still pending) are dropped by the slot check.
+	fenceInFlight map[fenceKey]uint64
+}
+
+// fenceKey is the lineage key for fence dedupe. Two fence attempts
+// are "the same attempt" iff their (replicaID, epoch, endpointVersion)
+// tuples are equal. Newer-epoch fences therefore never dedupe against
+// older-epoch fences and cannot be starved by them.
+type fenceKey struct {
+	replicaID       string
+	epoch           uint64
+	endpointVersion uint64
 }
 
 var sessionIDCounter atomic.Uint64
@@ -52,6 +82,7 @@ func NewVolumeReplicaAdapter(exec CommandExecutor) *VolumeReplicaAdapter {
 		executor:       exec,
 		startTimeout:   defaultSessionStartTimeout,
 		startWatchdogs: make(map[uint64]*time.Timer),
+		fenceInFlight:  make(map[fenceKey]uint64),
 	}
 	exec.SetOnSessionStart(func(result SessionStartResult) {
 		a.OnSessionStart(result)
@@ -59,6 +90,10 @@ func NewVolumeReplicaAdapter(exec CommandExecutor) *VolumeReplicaAdapter {
 	// Wire the close callback: executor → adapter.OnSessionClose → engine.
 	exec.SetOnSessionClose(func(result SessionCloseResult) {
 		a.OnSessionClose(result)
+	})
+	// Wire the fence callback: executor → adapter.OnFenceComplete → engine.
+	exec.SetOnFenceComplete(func(result FenceResult) {
+		a.OnFenceComplete(result)
 	})
 	return a
 }
@@ -89,6 +124,85 @@ func (a *VolumeReplicaAdapter) OnSessionClose(result SessionCloseResult) ApplyLo
 func (a *VolumeReplicaAdapter) OnSessionStart(result SessionStartResult) ApplyLog {
 	a.clearStartWatchdog(result.SessionID, WatchdogClearStart)
 	return a.applyBatchAndExecute([]engine.Event{NormalizeSessionStart(result)}, "SessionStart")
+}
+
+// OnFenceComplete processes a fence outcome from the transport.
+// Releases the in-flight slot (keyed by lineage) and normalizes to
+// FenceCompleted (success) or FenceFailed (failure) into the engine.
+// Callbacks whose (replicaID, epoch, endpointVersion) are not tracked,
+// or whose sessionID does not match the tracked attempt for that
+// lineage (e.g. a late straggler after the slot was reassigned by an
+// explicit clear), are dropped silently.
+func (a *VolumeReplicaAdapter) OnFenceComplete(result FenceResult) ApplyLog {
+	key := fenceKey{
+		replicaID:       result.ReplicaID,
+		epoch:           result.Epoch,
+		endpointVersion: result.EndpointVersion,
+	}
+	a.mu.Lock()
+	trackedSessionID, ok := a.fenceInFlight[key]
+	if ok && trackedSessionID == result.SessionID {
+		delete(a.fenceInFlight, key)
+	}
+	a.mu.Unlock()
+	if !ok || trackedSessionID != result.SessionID {
+		// Superseded / late callback: drop silently. The engine
+		// already moved on (or never expected this attempt).
+		return ApplyLog{EventKind: "fence_callback_dropped"}
+	}
+	var ev engine.Event
+	if result.Success {
+		ev = engine.FenceCompleted{
+			ReplicaID:       result.ReplicaID,
+			Epoch:           result.Epoch,
+			EndpointVersion: result.EndpointVersion,
+		}
+	} else {
+		ev = engine.FenceFailed{
+			ReplicaID:       result.ReplicaID,
+			Epoch:           result.Epoch,
+			EndpointVersion: result.EndpointVersion,
+			Reason:          result.FailReason,
+		}
+	}
+	return a.applyBatchAndExecute([]engine.Event{ev}, "FenceComplete")
+}
+
+// acquireFenceSlot atomically claims the fence slot for the full
+// fence lineage (replicaID, epoch, endpointVersion). Returns false
+// if a fence at the SAME lineage is already running — the duplicate
+// FenceAtEpoch command from the engine (e.g. re-emitted on a later
+// probe while the first attempt is still pending) is dropped.
+//
+// Critically, a fence at a DIFFERENT lineage (newer epoch or newer
+// endpoint) acquires its own slot and is dispatched — it is NOT
+// starved by an older in-flight fence. This is the bounded-closure
+// fix for the "newer-epoch fence dropped behind older in-flight"
+// linger bug.
+func (a *VolumeReplicaAdapter) acquireFenceSlot(replicaID string, epoch, endpointVersion, sessionID uint64) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	key := fenceKey{
+		replicaID:       replicaID,
+		epoch:           epoch,
+		endpointVersion: endpointVersion,
+	}
+	if _, inFlight := a.fenceInFlight[key]; inFlight {
+		return false
+	}
+	a.fenceInFlight[key] = sessionID
+	return true
+}
+
+func (a *VolumeReplicaAdapter) releaseFenceSlot(replicaID string, epoch, endpointVersion uint64) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	key := fenceKey{
+		replicaID:       replicaID,
+		epoch:           epoch,
+		endpointVersion: endpointVersion,
+	}
+	delete(a.fenceInFlight, key)
 }
 
 // Projection returns the current operator-facing projection.
@@ -196,6 +310,14 @@ func (a *VolumeReplicaAdapter) prepareQueuedCommands(cmds []engine.Command) ([]e
 				NormalizeSessionPrepared(c.ReplicaID, sid, engine.SessionRebuild, c.TargetLSN),
 			)
 			queued = append(queued, queuedCommand{cmd: cmd, sessionID: sid})
+		case engine.FenceAtEpoch:
+			// Fence mints its own sessionID so the lineage wire frame
+			// carries a unique tuple. No SessionPrepared event —
+			// fence does NOT go through the session lifecycle
+			// (no Starting/Running/Completed phases), it's a
+			// command + event pair.
+			sid := sessionIDCounter.Add(1)
+			queued = append(queued, queuedCommand{cmd: cmd, sessionID: sid})
 		default:
 			queued = append(queued, queuedCommand{cmd: cmd})
 		}
@@ -244,6 +366,31 @@ func (a *VolumeReplicaAdapter) executeCommand(q queuedCommand) {
 
 	case engine.PublishDegraded:
 		a.executor.PublishDegraded(c.ReplicaID, c.Reason)
+
+	case engine.FenceAtEpoch:
+		// Dedupe keyed by full fence lineage (replicaID, epoch,
+		// endpointVersion). Same-lineage duplicates (engine
+		// re-emits on a later probe) are dropped. Different-
+		// lineage attempts (e.g. newer epoch after identity
+		// advance) claim their own slot — the older in-flight
+		// fence does NOT starve them.
+		if !a.acquireFenceSlot(c.ReplicaID, c.Epoch, c.EndpointVersion, q.sessionID) {
+			return
+		}
+		err := a.executor.Fence(c.ReplicaID, q.sessionID, c.Epoch, c.EndpointVersion)
+		if err != nil {
+			// Synchronous dispatch failure — normalize to
+			// FenceFailed and release this lineage's slot.
+			a.releaseFenceSlot(c.ReplicaID, c.Epoch, c.EndpointVersion)
+			a.OnFenceComplete(FenceResult{
+				ReplicaID:       c.ReplicaID,
+				SessionID:       q.sessionID,
+				Epoch:           c.Epoch,
+				EndpointVersion: c.EndpointVersion,
+				Success:         false,
+				FailReason:      fmt.Sprintf("fence_dispatch_failed: %v", err),
+			})
+		}
 	}
 }
 

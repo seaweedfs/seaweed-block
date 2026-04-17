@@ -13,17 +13,18 @@ import (
 )
 
 // BlockExecutor implements adapter.CommandExecutor using real TCP
-// transport and in-memory storage. It is the "muscle" layer — it
-// executes commands but never decides policy.
+// transport and a primary-side LogicalStorage. It is the "muscle"
+// layer — it executes commands but never decides policy.
 type BlockExecutor struct {
-	primaryStore *storage.BlockStore
+	primaryStore storage.LogicalStorage
 	replicaAddr  string // replica's TCP address
 
-	mu             sync.Mutex
-	onSessionStart adapter.OnSessionStart
-	onSessionClose adapter.OnSessionClose
-	sessions       map[uint64]*activeSession
-	stepDelay      time.Duration
+	mu               sync.Mutex
+	onSessionStart   adapter.OnSessionStart
+	onSessionClose   adapter.OnSessionClose
+	onFenceComplete  adapter.OnFenceComplete
+	sessions         map[uint64]*activeSession
+	stepDelay        time.Duration
 }
 
 type activeSession struct {
@@ -36,8 +37,8 @@ var errSessionInvalidated = errors.New("session invalidated")
 
 const recoveryConnTimeout = 5 * time.Second
 
-// NewBlockExecutor creates an executor for one primary → replica pair.
-func NewBlockExecutor(primaryStore *storage.BlockStore, replicaAddr string) *BlockExecutor {
+// NewBlockExecutor creates an executor for one primary -> replica pair.
+func NewBlockExecutor(primaryStore storage.LogicalStorage, replicaAddr string) *BlockExecutor {
 	return &BlockExecutor{
 		primaryStore: primaryStore,
 		replicaAddr:  replicaAddr,
@@ -57,6 +58,77 @@ func (e *BlockExecutor) SetStepDelay(d time.Duration) {
 	e.mu.Lock()
 	e.stepDelay = d
 	e.mu.Unlock()
+}
+
+func (e *BlockExecutor) SetOnFenceComplete(fn adapter.OnFenceComplete) {
+	e.onFenceComplete = fn
+}
+
+// Fence sends one MsgBarrierReq at the given lineage to the
+// replica and awaits MsgBarrierResp. Does NOT ship any blocks and
+// does NOT go through the session registry — fence is a single
+// barrier exchange, not a recovery session.
+//
+// On success or failure, fires the registered OnFenceComplete
+// callback exactly once. Retry is the adapter/engine's
+// responsibility (probe-driven); this method never retries.
+func (e *BlockExecutor) Fence(replicaID string, sessionID, epoch, endpointVersion uint64) error {
+	lineage := RecoveryLineage{
+		SessionID:       sessionID,
+		Epoch:           epoch,
+		EndpointVersion: endpointVersion,
+		// TargetLSN is not used by acceptMutationLineage for order
+		// comparison; set to 0 to signal "fence, no recovery target."
+		TargetLSN: 0,
+	}
+	go e.doFence(replicaID, lineage)
+	return nil
+}
+
+func (e *BlockExecutor) doFence(replicaID string, lineage RecoveryLineage) {
+	result := adapter.FenceResult{
+		ReplicaID:       replicaID,
+		SessionID:       lineage.SessionID,
+		Epoch:           lineage.Epoch,
+		EndpointVersion: lineage.EndpointVersion,
+	}
+
+	conn, err := net.DialTimeout("tcp", e.replicaAddr, 2*time.Second)
+	if err != nil {
+		result.Success = false
+		result.FailReason = fmt.Sprintf("fence dial: %v", err)
+		e.fireFenceComplete(result)
+		return
+	}
+	defer conn.Close()
+
+	if err := sendBarrierReq(conn, lineage, recoveryConnTimeout); err != nil {
+		result.Success = false
+		result.FailReason = fmt.Sprintf("fence barrier send: %v", err)
+		e.fireFenceComplete(result)
+		return
+	}
+	resp, err := recvBarrierResp(conn, recoveryConnTimeout)
+	if err != nil {
+		result.Success = false
+		result.FailReason = fmt.Sprintf("fence barrier resp: %v", err)
+		e.fireFenceComplete(result)
+		return
+	}
+	_ = resp // AchievedLSN is not used by fence — we only needed the replica's ack
+
+	result.Success = true
+	log.Printf("executor: fence complete replica=%s epoch=%d", replicaID, lineage.Epoch)
+	e.fireFenceComplete(result)
+}
+
+func (e *BlockExecutor) fireFenceComplete(result adapter.FenceResult) {
+	e.mu.Lock()
+	cb := e.onFenceComplete
+	e.mu.Unlock()
+	if cb != nil {
+		cb(result)
+	}
 }
 
 // Probe dials the replica, sends a probe request, and returns the
