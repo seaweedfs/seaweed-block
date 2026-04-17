@@ -47,8 +47,14 @@ type flusher struct {
 	doneCh   chan struct{}
 	notifyCh chan struct{} // wakeup channel; bumped by admission under WAL pressure
 	stopOnce sync.Once
-	flushes  atomic.Uint64 // diagnostic
-	bytesOut atomic.Uint64 // diagnostic
+	// skipFinalFlush is read by the run loop after stopCh closes. When
+	// true, the goroutine exits WITHOUT the normal one-last best-effort
+	// flushOnce — this is the honest-abrupt path used by
+	// WALStore.SimulateAbruptStop. Always set before close(stopCh) so
+	// the happens-before from the channel close publishes the value.
+	skipFinalFlush bool
+	flushes        atomic.Uint64 // diagnostic
+	bytesOut       atomic.Uint64 // diagnostic
 }
 
 type flusherConfig struct {
@@ -95,9 +101,14 @@ func (f *flusher) run() {
 	for {
 		select {
 		case <-f.stopCh:
-			// One last best-effort flush so a clean shutdown advances
-			// the checkpoint as far as possible.
-			_ = f.flushOnce()
+			// Clean shutdown: one last best-effort flush so the
+			// checkpoint advances as far as possible.
+			// Abrupt shutdown (StopAbrupt): skip that flush — the
+			// goroutine exits without touching disk, so acked data
+			// must recover from whatever Sync already made durable.
+			if !f.skipFinalFlush {
+				_ = f.flushOnce()
+			}
 			return
 		case <-ticker.C:
 			if err := f.flushOnce(); err != nil {
@@ -111,10 +122,29 @@ func (f *flusher) run() {
 	}
 }
 
-// Stop signals the flusher to stop and waits for the run loop to
-// exit. Idempotent.
+// Stop signals the flusher to stop, lets it run one final best-
+// effort flush to advance the checkpoint, and waits for exit.
+// Idempotent.
 func (f *flusher) Stop() {
 	f.stopOnce.Do(func() {
+		close(f.stopCh)
+		<-f.doneCh
+	})
+}
+
+// StopAbrupt signals the flusher to exit WITHOUT the final
+// best-effort flushOnce. Used by WALStore.SimulateAbruptStop to
+// model honest-abrupt process loss: no clean propagation of
+// dirty-map entries into the extent, no checkpoint advance on
+// the way out.
+//
+// This still joins the goroutine via doneCh so the test harness
+// does not leak it. The "abrupt" part is strictly about skipping
+// the final flush; the goroutine exit itself is clean.
+// Idempotent (shares stopOnce with Stop).
+func (f *flusher) StopAbrupt() {
+	f.stopOnce.Do(func() {
+		f.skipFinalFlush = true
 		close(f.stopCh)
 		<-f.doneCh
 	})

@@ -58,19 +58,26 @@ Current status:
 2. replay/conformance runtime: present
 3. adapter-backed route: present
 4. runnable block sparrow: present
-5. operations UX: not yet built out
-6. persistence / crash recovery: not yet built out
+5. persistence + crash recovery: present (WALStore + smartwal.Store, qualified end-to-end — see bounded first-launch envelope below)
+6. replicated RF2 handoff/rejoin on persistent storage: present (bounded first-launch envelope)
+7. topology authority / automated failover / RF3: not yet built out
+8. operator governance surface / frontend protocols (iSCSI, NVMe/TCP, CSI): not yet built out
 
 ## What Works Today
 
-The current repository can run one narrow block slice end-to-end through real
-TCP transport.
+The current repository runs the bounded persistent RF2 first-launch
+slice end-to-end through real TCP transport. Full supported set
+lives in [docs/p13-support-envelope.md](docs/p13-support-envelope.md).
 
-Demonstrated paths:
+Demonstrated paths (proven on both `WALStore` and `smartwal.Store`):
 
 1. healthy: replica is already caught up
 2. catch-up: replica is behind within retained window
 3. rebuild: replica is behind beyond retained window
+4. graceful handoff: old primary → new primary → replica converges
+5. graceful reopen + recover: replica restart preserves the new primary's truth
+6. abrupt stop + reopen: acked data survives unclean shutdown; rejoin converges
+7. stale old-lineage traffic is rejected at the data plane after reopen
 
 The current route stays intentionally narrow:
 
@@ -83,20 +90,22 @@ The current route stays intentionally narrow:
 
 This repository is not yet:
 
-1. production-ready storage
-2. a full SeaweedFS block product
-3. a complete frontend protocol implementation
-4. a broad operations shell or UI
+1. a full SeaweedFS block product (P14 + P15 work pending)
+2. a complete frontend protocol implementation (P15 — iSCSI, NVMe/TCP, CSI)
+3. a broad operations shell or operator-governance UI (P15)
+4. a topology-authority / automated-failover system (P14)
 5. a replacement claim over the current `V2` baseline
 
-Current limitations:
+Current limitations (see [docs/p13-support-envelope.md](docs/p13-support-envelope.md) for the frozen set):
 
-1. storage is in-memory only
-2. no persistence or crash recovery
-3. no master service; assignment is hardcoded in the demo
-4. no iSCSI or NVMe-oF frontend
-5. no concurrent write path during replication
-6. no broad timeout / reconnect / hardening logic
+1. no master service; assignment is hardcoded in the demo
+2. no automated failover trigger (who/when is P14 topology-authority scope)
+3. no proactive caught-up (R ≥ H) epoch fence on the replica (P14)
+4. no RF3 / quorum / multi-replica coordination (P14)
+5. no iSCSI, NVMe/TCP, or CSI frontend (P15)
+6. no operator governance surface — retire / repair / rebalance verbs (P15)
+7. no qualification yet for abrupt stop *during* in-flight rebuild / catch-up (future P13 slice)
+8. no qualification yet for primary-side abrupt fault (future P13 slice)
 
 ## Repo Layout
 
@@ -245,6 +254,17 @@ explicit fencing and stale-lineage rejection. Mechanism, not policy
 — who becomes primary and when to fail over belong to later phases.
 
 - [docs/replicated-slice.md](docs/replicated-slice.md) — the bounded route, authority boundary, durability claim, known limitations, carry-forward
+
+## Bounded first-launch envelope (P13, current)
+
+The persistent RF2 slice on WALStore and smartwal.Store, qualified
+against graceful and abrupt-stop replica faults, with a read-only
+diagnosis surface. **This is the canonical entry point for
+testers and operators** — anything not named in the envelope doc
+is explicitly out of scope for first launch.
+
+- [docs/first-launch-validation.md](docs/first-launch-validation.md) — the one canonical validation workflow (how to start, inspect, interpret)
+- [docs/p13-support-envelope.md](docs/p13-support-envelope.md) — the release-gate artifact: frozen supported/unsupported sets, per-route proof, diagnosis surface, carry-forward
 
 ## Design Rules
 

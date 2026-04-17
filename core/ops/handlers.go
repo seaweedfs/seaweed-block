@@ -99,8 +99,13 @@ func (h *handlers) diagnose(w http.ResponseWriter, r *http.Request) {
 		SessionPhase:    string(proj.SessionPhase),
 		Decision:        string(proj.RecoveryDecision),
 		Reason:          proj.Reason,
+		Epoch:           proj.Epoch,
+		Frontiers:       frontiers{R: proj.R, S: proj.S, H: proj.H},
+		LastSessionKind: string(proj.SessionKind),
+		LastDecision:    lastDecision(tr),
 		LastTraceStep:   lastTraceStep(tr),
 		WatchdogSummary: summarizeWatchdog(wd),
+		SupportClaim:    "bounded first-launch: persistent RF2 handoff/rejoin on WALStore/SmartWAL (see docs/p13-support-envelope.md)",
 		Note:            "bounded summary; full trace at /trace, full watchdog log at /watchdog",
 	}
 	writeJSON(w, http.StatusOK, summary)
@@ -131,9 +136,23 @@ type diagnoseBody struct {
 	SessionPhase    string          `json:"session_phase"`
 	Decision        string          `json:"decision"`
 	Reason          string          `json:"reason,omitempty"`
+	Epoch           uint64          `json:"epoch"`
+	Frontiers       frontiers       `json:"frontiers"`
+	LastSessionKind string          `json:"last_session_kind,omitempty"`
+	LastDecision    string          `json:"last_decision,omitempty"`
 	LastTraceStep   string          `json:"last_trace_step,omitempty"`
 	WatchdogSummary watchdogSummary `json:"watchdog_summary"`
+	SupportClaim    string          `json:"support_claim"`
 	Note            string          `json:"note"`
+}
+
+// frontiers is the replica's recovery triple derived from the
+// engine's projection. Named so operators don't have to decode
+// R/S/H by position.
+type frontiers struct {
+	R uint64 `json:"replica_flushed_lsn"`
+	S uint64 `json:"primary_tail_lsn"`
+	H uint64 `json:"primary_head_lsn"`
 }
 
 type watchdogSummary struct {
@@ -144,6 +163,19 @@ type watchdogSummary struct {
 	Fires        int `json:"fires"`
 	FireNoops    int `json:"fire_noops"`
 	Supersedes   int `json:"supersedes"`
+}
+
+// lastDecision returns the Detail of the most recent "decision"
+// trace entry (engine recovery classification), or empty if none
+// has run. Lets operators see at a glance which recovery branch
+// the engine last picked without scanning the full trace.
+func lastDecision(tr []engine.TraceEntry) string {
+	for i := len(tr) - 1; i >= 0; i-- {
+		if tr[i].Step == "decision" {
+			return tr[i].Detail
+		}
+	}
+	return ""
 }
 
 func lastTraceStep(tr []engine.TraceEntry) string {
