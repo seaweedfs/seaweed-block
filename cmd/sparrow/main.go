@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/adapter"
+	"github.com/seaweedfs/seaweed-block/core/authority"
 	"github.com/seaweedfs/seaweed-block/core/engine"
 	"github.com/seaweedfs/seaweed-block/core/ops"
 	"github.com/seaweedfs/seaweed-block/core/storage"
@@ -133,6 +134,15 @@ func runSparrow(opts options) int {
 func runValidationPass(state *ops.State) ([]demoResult, error) {
 	var results []demoResult
 
+	// All three demos route assignment truth through the S2 authority
+	// publisher — the publisher mints Epoch/EndpointVersion, no demo
+	// code constructs AssignmentInfo directly.
+	dir := authority.NewStaticDirective(nil)
+	pub := authority.NewPublisher(dir)
+	pubCtx, pubCancel := context.WithCancel(context.Background())
+	defer pubCancel()
+	go func() { _ = pub.Run(pubCtx) }()
+
 	primaryStore := storage.NewBlockStore(256, 4096)
 	replicaStore := storage.NewBlockStore(256, 4096)
 
@@ -160,13 +170,17 @@ func runValidationPass(state *ops.State) ([]demoResult, error) {
 		_ = replicaStore.ApplyEntry(lba, data, pH)
 	}
 	_, _ = replicaStore.Sync()
-	adpt.OnAssignment(adapter.AssignmentInfo{
+
+	bridge1Ctx, bridge1Cancel := context.WithCancel(pubCtx)
+	go authority.Bridge(bridge1Ctx, pub, adpt, "vol1", "r1")
+	dir.Append(authority.AssignmentAsk{
 		VolumeID: "vol1", ReplicaID: "r1",
-		Epoch: 1, EndpointVersion: 1,
 		DataAddr: replicaAddr, CtrlAddr: replicaAddr,
+		Intent: authority.IntentBind,
 	})
 	time.Sleep(200 * time.Millisecond)
 	results = append(results, buildResult("healthy", adpt.Projection()))
+	bridge1Cancel()
 
 	for i := uint32(10); i < 20; i++ {
 		data := make([]byte, 4096)
@@ -177,12 +191,16 @@ func runValidationPass(state *ops.State) ([]demoResult, error) {
 	exec2 := transport.NewBlockExecutor(primaryStore, replicaAddr)
 	adpt2 := adapter.NewVolumeReplicaAdapter(exec2)
 	state.Update("catch_up", adpt2)
-	adpt2.OnAssignment(adapter.AssignmentInfo{
+
+	bridge2Ctx, bridge2Cancel := context.WithCancel(pubCtx)
+	go authority.Bridge(bridge2Ctx, pub, adpt2, "vol1", "r1")
+	dir.Append(authority.AssignmentAsk{
 		VolumeID: "vol1", ReplicaID: "r1",
-		Epoch: 2, EndpointVersion: 2,
 		DataAddr: replicaAddr, CtrlAddr: replicaAddr,
+		Intent: authority.IntentReassign,
 	})
 	results = append(results, buildResult("catch_up", waitForMode(adpt2, engine.ModeHealthy, 5*time.Second)))
+	bridge2Cancel()
 
 	replicaStore2 := storage.NewBlockStore(256, 4096)
 	replicaListener2, err := transport.NewReplicaListener("127.0.0.1:0", replicaStore2)
@@ -196,10 +214,14 @@ func runValidationPass(state *ops.State) ([]demoResult, error) {
 	exec3 := transport.NewBlockExecutor(primaryStore, replicaAddr2)
 	adpt3 := adapter.NewVolumeReplicaAdapter(exec3)
 	state.Update("rebuild", adpt3)
-	adpt3.OnAssignment(adapter.AssignmentInfo{
+
+	bridge3Ctx, bridge3Cancel := context.WithCancel(pubCtx)
+	defer bridge3Cancel()
+	go authority.Bridge(bridge3Ctx, pub, adpt3, "vol1", "r1")
+	dir.Append(authority.AssignmentAsk{
 		VolumeID: "vol1", ReplicaID: "r1",
-		Epoch: 3, EndpointVersion: 3,
 		DataAddr: replicaAddr2, CtrlAddr: replicaAddr2,
+		Intent: authority.IntentReassign,
 	})
 	results = append(results, buildResult("rebuild", waitForMode(adpt3, engine.ModeHealthy, 5*time.Second)))
 

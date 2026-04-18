@@ -35,9 +35,21 @@ The audit note is `p14-s2-audit.md`. The design note is
 
 5. **A Bridge that forwards publisher output to the adapter.** The
    `Bridge` helper subscribes to a `(VolumeID, ReplicaID)` stream
-   and forwards each `AssignmentInfo` to the adapter's existing
+   via `Subscribe` (which returns a per-subscription cancel) and
+   forwards each `AssignmentInfo` to the adapter's existing
    `OnAssignment` ingress. The adapter remains the one and only
    consumer entry point; no second mutation ingress was added.
+   Per-subscription cancel ensures one Bridge exiting never
+   disconnects other consumers on the same stream.
+
+5a. **Lossless-for-current-fact delivery.** Per-subscription
+    channels have capacity 1 with overwrite-latest semantics: if a
+    new publication arrives before the subscriber drains the prior
+    one, the publisher replaces the pending stale value with the
+    latest. The subscriber therefore never silently loses the
+    current authoritative state. Intermediate states may be
+    coalesced; for authority truth that is correct (the engine
+    cares about current identity, not interstitial history).
 
 6. **Closure target met.** The integration test
    `TestClosureTarget_SparrowReachesHealthyViaAuthorityRoute` in
@@ -46,14 +58,28 @@ The audit note is `p14-s2-audit.md`. The design note is
    `VolumeReplicaAdapter`, and reaches `Mode == ModeHealthy`
    without any `harness.assign(...)` call.
 
-7. **Non-forgeability is enforced by structural test.**
+7. **Non-forgeability is enforced by AST-based structural test.**
    `TestNonForgeability_NoAssignmentInfoMintingOutsideAuthority`
-   walks every `.go` file under `core/` (excluding `_test.go`
-   files and the allowlisted test-infrastructure packages
-   `authority`, `calibration`, `conformance`, `schema`) and fails
-   if any production file constructs an `AssignmentInfo` with a
-   non-zero `Epoch`. Adding a new package to the allowlist is an
-   explicit, reviewable change.
+   parses every production `.go` file in the whole repo (NOT just
+   `core/` — also covers `cmd/` and any future production
+   packages) using `go/ast`. It fails if a file outside the
+   allowlist either (a) constructs `AssignmentInfo` via composite
+   literal with a non-zero `Epoch` or `EndpointVersion` field, or
+   (b) declares a local variable of type `AssignmentInfo` (the
+   classic bypass shape: `var x AssignmentInfo; x.Epoch = input`).
+   Allowlist: `core/authority/`, `core/calibration/`,
+   `core/conformance/`, `core/schema/`. Adding a new package to
+   the allowlist is an explicit, reviewable change.
+
+8. **Sparrow demos migrated to authority route.** The three
+   pre-existing demos in `cmd/sparrow/main.go` (healthy / catch_up
+   / rebuild) previously minted `AssignmentInfo` with hard-coded
+   epochs directly. After S2 they all route assignment truth
+   through a shared `authority.Publisher`: the `healthy` demo
+   issues an `IntentBind`, the `catch_up` and `rebuild` demos
+   issue `IntentReassign`. No demo code in `cmd/sparrow/main.go`
+   constructs `AssignmentInfo` directly — the non-forgeability
+   test enforces this.
 
 ## What S2 did NOT close
 
@@ -103,15 +129,23 @@ Added:
 - `core/authority/authority.go` — `Publisher`, `Subscribe`,
   `Unsubscribe`, `LastPublished`, `Run`, `Bridge`,
   `AssignmentConsumer`.
-- `core/authority/authority_test.go` — 17 tests covering intent
+- `core/authority/authority_test.go` — 20 tests covering intent
   semantics, fan-out keyed by `(VolumeID, ReplicaID)`,
-  late-subscriber catch-up, `Run` loop, `Bridge`, closure target,
-  non-forgeability.
+  **independent-unsubscribe**, **lossless-for-current-fact
+  delivery**, late-subscriber catch-up, `Run` loop,
+  `RunClosesLiveSubscriptionsOnExit`, `Bridge`, closure target,
+  AST-based non-forgeability.
 - `docs/p14-s2-audit.md`, `docs/p14-s2-design.md`, this file.
 
-Changed: none. S2 did not modify the engine, adapter, transport,
-ops, storage, or sparrow wiring. The authority route stands as an
-additive, opt-in producer.
+Changed:
+- `cmd/sparrow/main.go`: the three demo sites (healthy / catch_up
+  / rebuild) migrated from direct `adpt.OnAssignment(...)` to the
+  authority route via a shared `Publisher` + per-demo `Bridge`.
+  This surfaced and fixed the pre-existing "hidden operator path"
+  smell where sparrow was minting epochs outside authority. The
+  non-forgeability test now passes on `cmd/sparrow/main.go`.
+
+Engine, adapter, transport, ops, and storage are unchanged.
 
 ## How to verify S2 is still closed in a future session
 
@@ -132,9 +166,12 @@ Specifically:
 - `TestPublisher_Reassign_RejectsUnboundKey`
 - `TestPublisher_Validate_RejectsMissingFields` (six sub-cases)
 - `TestPublisher_FanOut_TwoSubscribersOnSameKey`
+- `TestPublisher_IndependentUnsubscribe_OtherPeersUnaffected`
 - `TestPublisher_FanOut_SubscriberOnOtherVolumeDoesNotReceive`
 - `TestPublisher_LateSubscriber_ReceivesLastPublished`
-- `TestPublisher_Unsubscribe_ClosesChannel`
+- `TestPublisher_Cancel_ClosesOnlyThisSubscription`
+- `TestPublisher_DeliveryConvergesToLatestOnSlowConsumer`
+- `TestPublisher_RunClosesLiveSubscriptionsOnExit`
 - `TestPublisher_Run_DrivesDirectiveUntilCtxCancel`
 - `TestPublisher_Run_LogsAndContinuesOnRejectedAsk`
 - `TestBridge_ForwardsToConsumer`

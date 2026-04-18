@@ -134,25 +134,51 @@ Only `core/authority/` may construct an `AssignmentInfo` with
 The publisher exposes three verbs, none of which accept an
 `AssignmentInfo`:
 
-- `Subscribe(volumeID, replicaID string) <-chan AssignmentInfo` — a
-  consumer registers interest in authoritative assignments for a
-  specific `(VolumeID, ReplicaID)`. Returns a receive channel.
-  Unsubscribe via `Unsubscribe(volumeID, replicaID)` or ctx cancel.
+- `Subscribe(volumeID, replicaID string) (<-chan AssignmentInfo, func())`
+  — a consumer registers interest in authoritative assignments for
+  a specific `(VolumeID, ReplicaID)`. Returns a receive channel and
+  a **per-subscription** cancel function. Each cancel closes only
+  its own subscription's channel; other live subscriptions on the
+  same `(vid, rid)` are untouched. Cancel is idempotent.
 - `LastPublished(volumeID, replicaID string) (AssignmentInfo, bool)`
-  — read-only inspection of the last emitted fact for a key. Used
-  by late subscribers to catch up without waiting for the next
-  directive.
+  — read-only inspection of the last emitted fact for a key.
 - `Run(ctx)` — drive the publisher: consume `AssignmentAsk` values
   from the directive, apply the authoring rules above, fan out to
-  subscribers. One goroutine. Stops on ctx cancel.
+  subscribers. One goroutine. Stops on ctx cancel. On exit, every
+  live subscription channel is closed so Bridges observe end of
+  stream.
 
 What the publisher will NOT expose:
 
 - No `PublishAssignment(AssignmentInfo)`. Removed. Its earlier
-  presence let callers forge authoritative truth — that was the
-  relay-not-author bug the architect caught.
+  presence let callers forge authoritative truth.
+- No key-wide `Unsubscribe(vid, rid)`. Removed. A key-wide teardown
+  would let one Bridge exiting silently disconnect other live
+  consumers on the same stream — the architect caught this;
+  per-subscription cancel is the fix.
 - No `SetEpoch(...)`, no `ForcePromote(...)`, no per-replica
   health reads, no placement hints, no rebalance verbs.
+
+### Delivery semantics — lossless for the current fact
+
+Per-subscription channels have capacity 1. When the publisher
+authors a new `AssignmentInfo` and a subscriber has not yet drained
+the previous one, the publisher **overwrites** the pending stale
+value with the latest. The subscriber therefore always reads the
+LATEST authoritative state on its next drain — never silently loses
+the current fact.
+
+Intermediate states between two consumer drains may be coalesced.
+For authority truth this is the correct semantic: the engine cares
+about current identity, not interstitial history. A subscriber that
+cares about state transitions should use `LastPublished` plus its
+own change-detection — but for driving the adapter's
+`OnAssignment`, the latest fact is sufficient (monotonic guards in
+the engine accept it).
+
+This replaces the earlier "drop on full with only a log line"
+delivery, which could leave a subscriber on stale truth until an
+unrelated later ask happened.
 
 ## Directive interface
 
@@ -242,11 +268,18 @@ engine commands.
   values (no epoch/endpointVersion). After `Run(ctx)` processes them,
   subscribers observe `AssignmentInfo` with monotonically increasing
   `Epoch` / `EndpointVersion` authored by the publisher.
-- **Non-forgeability**: a structural test grep-audits production
-  `.go` files under `core/` (excluding `_test.go` and
-  `core/authority/`) for literal `adapter.AssignmentInfo{ Epoch:` or
-  `.Epoch = ` assignments. Fails if anything outside authority mints
-  a non-zero epoch in production code.
+- **Non-forgeability**: an AST-based structural test parses EVERY
+  production `.go` file across the whole repo (not just `core/`)
+  and fails if a file outside the allowlist either (a) constructs
+  `adapter.AssignmentInfo` via composite literal with non-zero
+  `Epoch` / `EndpointVersion`, or (b) declares a local variable
+  of type `AssignmentInfo` / `*AssignmentInfo` / `[]AssignmentInfo`
+  (the classic bypass shape for deferred mutation). Allowlist:
+  `core/authority/` (minter) and the test-infrastructure packages
+  `core/calibration/`, `core/conformance/`, `core/schema/`. The
+  adapter package itself is NOT in the allowlist — it only names
+  the type in signatures and never declares a local variable of
+  it.
 - **Fan-out keyed by (VolumeID, ReplicaID)**: two subscribers on the
   same `(vol1, r1)` both receive. A subscriber on `(vol2, r1)` does
   NOT receive `vol1`-keyed assignments (regression for the

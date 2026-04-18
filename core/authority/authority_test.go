@@ -1,12 +1,14 @@
 package authority
 
 import (
-	"bufio"
 	"context"
 	"errors"
+	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -194,8 +196,10 @@ func TestPublisher_Validate_RejectsMissingFields(t *testing.T) {
 
 func TestPublisher_FanOut_TwoSubscribersOnSameKey(t *testing.T) {
 	pub := NewPublisher(NewStaticDirective(nil))
-	chA := pub.Subscribe("v1", "r1")
-	chB := pub.Subscribe("v1", "r1")
+	chA, cancelA := pub.Subscribe("v1", "r1")
+	defer cancelA()
+	chB, cancelB := pub.Subscribe("v1", "r1")
+	defer cancelB()
 
 	if err := pub.apply(AssignmentAsk{
 		VolumeID: "v1", ReplicaID: "r1",
@@ -212,13 +216,61 @@ func TestPublisher_FanOut_TwoSubscribersOnSameKey(t *testing.T) {
 	}
 }
 
+// TestPublisher_IndependentUnsubscribe_OtherPeersUnaffected is the
+// regression test for the architect finding that key-wide
+// Unsubscribe tore down every subscriber on the same (vid, rid).
+// With the per-subscription cancel API, one subscriber leaving must
+// not close the channel of any other subscriber on the same key.
+func TestPublisher_IndependentUnsubscribe_OtherPeersUnaffected(t *testing.T) {
+	pub := NewPublisher(NewStaticDirective(nil))
+	chA, cancelA := pub.Subscribe("v1", "r1")
+	chB, cancelB := pub.Subscribe("v1", "r1")
+	defer cancelB()
+
+	if err := pub.apply(AssignmentAsk{
+		VolumeID: "v1", ReplicaID: "r1",
+		DataAddr: "d1", CtrlAddr: "c1",
+		Intent: IntentBind,
+	}); err != nil {
+		t.Fatalf("Bind: %v", err)
+	}
+	receiveOrFail(t, chA, "A before cancel")
+	receiveOrFail(t, chB, "B before cancel")
+
+	// Cancel only A. B must stay live.
+	cancelA()
+	select {
+	case _, ok := <-chA:
+		if ok {
+			t.Fatal("A channel expected closed after its own cancel")
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("A channel not closed after cancel")
+	}
+
+	// B must still receive the next authoritative fact.
+	if err := pub.apply(AssignmentAsk{
+		VolumeID: "v1", ReplicaID: "r1",
+		DataAddr: "d2", CtrlAddr: "c2",
+		Intent: IntentRefreshEndpoint,
+	}); err != nil {
+		t.Fatalf("RefreshEndpoint: %v", err)
+	}
+	got := receiveOrFail(t, chB, "B after A-only cancel")
+	if got.EndpointVersion != 2 {
+		t.Fatalf("B must continue receiving, got ev=%d", got.EndpointVersion)
+	}
+}
+
 func TestPublisher_FanOut_SubscriberOnOtherVolumeDoesNotReceive(t *testing.T) {
 	// Same replicaID across different volumes must NOT cross-deliver.
 	// This is the multi-volume correctness test the architect called
 	// out when we were keying only by ReplicaID.
 	pub := NewPublisher(NewStaticDirective(nil))
-	chV1 := pub.Subscribe("vol1", "r1")
-	chV2 := pub.Subscribe("vol2", "r1")
+	chV1, cancelV1 := pub.Subscribe("vol1", "r1")
+	defer cancelV1()
+	chV2, cancelV2 := pub.Subscribe("vol2", "r1")
+	defer cancelV2()
 
 	if err := pub.apply(AssignmentAsk{
 		VolumeID: "vol1", ReplicaID: "r1",
@@ -250,24 +302,115 @@ func TestPublisher_LateSubscriber_ReceivesLastPublished(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Bind: %v", err)
 	}
-	ch := pub.Subscribe("v1", "r1")
+	ch, cancel := pub.Subscribe("v1", "r1")
+	defer cancel()
 	got := receiveOrFail(t, ch, "late subscriber")
 	if got.Epoch != 1 {
 		t.Fatalf("late subscriber must receive last published, got epoch=%d", got.Epoch)
 	}
 }
 
-func TestPublisher_Unsubscribe_ClosesChannel(t *testing.T) {
+func TestPublisher_Cancel_ClosesOnlyThisSubscription(t *testing.T) {
 	pub := NewPublisher(NewStaticDirective(nil))
-	ch := pub.Subscribe("v1", "r1")
-	pub.Unsubscribe("v1", "r1")
+	ch, cancel := pub.Subscribe("v1", "r1")
+	cancel()
 	select {
 	case _, ok := <-ch:
 		if ok {
 			t.Fatal("expected channel closed")
 		}
 	case <-time.After(100 * time.Millisecond):
-		t.Fatal("channel not closed after Unsubscribe")
+		t.Fatal("channel not closed after cancel")
+	}
+	// cancel is idempotent — second call must not panic.
+	cancel()
+}
+
+// TestPublisher_DeliveryConvergesToLatestOnSlowConsumer is the
+// regression test for the architect's "silent drop" finding. An
+// authority publication must not be permanently lost just because
+// the per-subscription buffer was full when it landed. The publisher
+// overwrites a pending stale value with the latest, so the next
+// time the consumer drains the channel, it sees the CURRENT
+// authoritative state. Intermediate states between drains may be
+// coalesced — for authority truth that is correct (the engine
+// cares about current identity, not interstitial history).
+func TestPublisher_DeliveryConvergesToLatestOnSlowConsumer(t *testing.T) {
+	pub := NewPublisher(NewStaticDirective(nil))
+	ch, cancel := pub.Subscribe("v1", "r1")
+	defer cancel()
+
+	// Publish several authoritative facts WITHOUT draining the
+	// channel. With the old "drop and log" behavior, only the first
+	// would be retained and later publications would be lost. With
+	// the overwrite-latest behavior, the channel always holds the
+	// most recent one.
+	if err := pub.apply(AssignmentAsk{
+		VolumeID: "v1", ReplicaID: "r1",
+		DataAddr: "d1", CtrlAddr: "c1",
+		Intent: IntentBind,
+	}); err != nil {
+		t.Fatalf("Bind: %v", err)
+	}
+	if err := pub.apply(AssignmentAsk{
+		VolumeID: "v1", ReplicaID: "r1",
+		DataAddr: "d2", CtrlAddr: "c2",
+		Intent: IntentRefreshEndpoint,
+	}); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	if err := pub.apply(AssignmentAsk{
+		VolumeID: "v1", ReplicaID: "r1",
+		DataAddr: "d3", CtrlAddr: "c3",
+		Intent: IntentReassign,
+	}); err != nil {
+		t.Fatalf("Reassign: %v", err)
+	}
+
+	// Now drain. The consumer must see the LATEST authored fact
+	// (epoch=2 from Reassign, ev=1). Intermediate states may have
+	// been coalesced.
+	got := receiveOrFail(t, ch, "slow consumer catch-up")
+	if got.Epoch != 2 || got.EndpointVersion != 1 {
+		t.Fatalf("slow consumer must converge to latest, got epoch=%d ev=%d (want epoch=2 ev=1)",
+			got.Epoch, got.EndpointVersion)
+	}
+	if got.DataAddr != "d3" {
+		t.Fatalf("slow consumer must see latest addrs, got DataAddr=%q", got.DataAddr)
+	}
+}
+
+// TestPublisher_RunClosesLiveSubscriptionsOnExit — when Run exits
+// (ctx cancelled, directive errored), every still-live subscription
+// channel must close so Bridges observe end-of-stream and exit
+// their own loops cleanly.
+func TestPublisher_RunClosesLiveSubscriptionsOnExit(t *testing.T) {
+	dir := NewStaticDirective(nil) // never produces
+	pub := NewPublisher(dir)
+	ch, _ := pub.Subscribe("v1", "r1")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- pub.Run(ctx) }()
+
+	// Cancel Run and expect the subscription channel to close.
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Run: want context.Canceled, got %v", err)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("Run did not exit on ctx cancel")
+	}
+
+	select {
+	case _, ok := <-ch:
+		if ok {
+			t.Fatal("expected subscription channel closed after Run exit")
+		}
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("subscription channel not closed after Run exit")
 	}
 }
 
@@ -280,7 +423,8 @@ func TestPublisher_Run_DrivesDirectiveUntilCtxCancel(t *testing.T) {
 		{VolumeID: "v1", ReplicaID: "r1", DataAddr: "d", CtrlAddr: "c", Intent: IntentBind},
 	})
 	pub := NewPublisher(dir)
-	ch := pub.Subscribe("v1", "r1")
+	ch, cancelSub := pub.Subscribe("v1", "r1")
+	defer cancelSub()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -311,7 +455,8 @@ func TestPublisher_Run_LogsAndContinuesOnRejectedAsk(t *testing.T) {
 		{VolumeID: "v1", ReplicaID: "r1", DataAddr: "d", CtrlAddr: "c", Intent: IntentBind},    // accepted
 	})
 	pub := NewPublisher(dir)
-	ch := pub.Subscribe("v1", "r1")
+	ch, cancelSub := pub.Subscribe("v1", "r1")
+	defer cancelSub()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -480,56 +625,71 @@ func TestClosureTarget_SparrowReachesHealthyViaAuthorityRoute(t *testing.T) {
 // Non-forgeability — structural test
 // ============================================================
 
-// nonForgeabilityAllowedPaths are production-compiled test
-// infrastructure packages that are explicitly allowed to construct
-// AssignmentInfo with a non-zero Epoch. They are not operator or
-// admin paths; they exist to drive scenario tests from the
-// calibration harness and the YAML conformance runner. Adding a
-// package here is an explicit, reviewable act.
-var nonForgeabilityAllowedPaths = []string{
-	string(filepath.Separator) + "authority" + string(filepath.Separator),   // the minter
-	string(filepath.Separator) + "calibration" + string(filepath.Separator), // scenario harness
-	string(filepath.Separator) + "conformance" + string(filepath.Separator), // YAML test runner
-	string(filepath.Separator) + "schema" + string(filepath.Separator),      // event wire conversion
+// nonForgeabilityAllowedPackageSuffixes are production-compiled
+// test-infrastructure packages that may construct AssignmentInfo or
+// declare a local variable of its type. They are not operator or
+// admin paths; they exist to drive scenario tests. Adding a package
+// here is an explicit, reviewable act.
+//
+// Matched against the relative path from the repo root. Each suffix
+// must start with a path separator so "calibration" does not
+// accidentally match "recalibration".
+var nonForgeabilityAllowedPackageSuffixes = []string{
+	string(filepath.Separator) + "core" + string(filepath.Separator) + "authority" + string(filepath.Separator),
+	string(filepath.Separator) + "core" + string(filepath.Separator) + "calibration" + string(filepath.Separator),
+	string(filepath.Separator) + "core" + string(filepath.Separator) + "conformance" + string(filepath.Separator),
+	string(filepath.Separator) + "core" + string(filepath.Separator) + "schema" + string(filepath.Separator),
+	// core/adapter is the package that defines AssignmentInfo; it
+	// is the type owner and must name the type in field and method
+	// signatures. The AST check below permits references (type
+	// names in signatures / zero values) but flags construction
+	// with non-zero Epoch or EndpointVersion and local variable
+	// declarations of the type — so this suffix is NOT added.
 }
 
 // TestNonForgeability_NoAssignmentInfoMintingOutsideAuthority walks
-// every production .go file under core/ (excluding _test.go files
-// and explicit allowlisted packages) and fails if anything
-// constructs an adapter.AssignmentInfo with an Epoch field set to
-// anything other than a literal 0. This enforces at build-tree
-// scope that the publisher is the sole authoritative minter for
-// real system paths.
+// EVERY production .go file in the repo (not just core/) and fails
+// if any file outside the allowlist:
 //
-// The allowlist exists because calibration/conformance/schema are
-// test-infrastructure packages that happen to live in the
-// production tree. They drive scenario tests and YAML replays;
-// they are not operator or admin paths. Any new package added to
-// the allowlist must carry the same rationale — "this is test
-// infrastructure, not a system-owned path".
+//   1. constructs adapter.AssignmentInfo via composite literal with
+//      a non-zero Epoch or non-zero EndpointVersion, OR
+//   2. declares a local variable of type adapter.AssignmentInfo,
+//      (*adapter.AssignmentInfo), or []adapter.AssignmentInfo. A
+//      local variable of this type is the classic bypass shape for
+//      deferred mutation: `var x AssignmentInfo; x.Epoch = input`.
 //
-// The pattern is strict: it matches ANY `Epoch:` assignment inside
-// an `AssignmentInfo{...}` literal (whether the RHS is a literal
-// digit, a variable name, a function call, or anything else) — and
-// only allows `Epoch: 0` as a written-out zero. This catches the
-// bypass where someone would set `Epoch: userInput` via a CLI or
-// admin surface.
+// Using go/ast/parser rather than regex closes two prior weaknesses:
+//   - the regex-based check only matched struct literals, so a
+//     `var x AssignmentInfo; x.Epoch = v` bypass slipped through;
+//   - the regex walk was scoped to core/, so cmd/sparrow demos and
+//     any future cmd/ packages were not covered.
+//
+// The allowlist is defined above. Adapter itself (which defines
+// the type) is not in the allowlist because the AST check
+// intentionally allows type references in function signatures and
+// return types; what it forbids is construction with non-zero
+// identity fields and local declarations of the type. Adapter
+// never does either — it only receives values via OnAssignment.
 func TestNonForgeability_NoAssignmentInfoMintingOutsideAuthority(t *testing.T) {
-	coreDir, err := findCoreDir()
+	repoRoot, err := findRepoRoot()
 	if err != nil {
-		t.Fatalf("find core dir: %v", err)
+		t.Fatalf("find repo root: %v", err)
 	}
 
-	// Matches `AssignmentInfo{ ... Epoch: <expr>` where <expr> is the
-	// first non-space, non-comma, non-closing-brace token.
-	pattern := regexp.MustCompile(`AssignmentInfo\s*\{[\s\S]*?Epoch\s*:\s*([^\s,}]+)`)
-
 	var bad []string
-	err = filepath.WalkDir(coreDir, func(path string, d os.DirEntry, walkErr error) error {
+	err = filepath.WalkDir(repoRoot, func(path string, d os.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
 		if d.IsDir() {
+			// Skip vendor, hidden dirs (.git, .gocache, .gotmp), build
+			// output. We recurse into everything else.
+			name := d.Name()
+			if name == "vendor" || (len(name) > 0 && name[0] == '.') {
+				if path != repoRoot {
+					return filepath.SkipDir
+				}
+			}
 			return nil
 		}
 		if !strings.HasSuffix(path, ".go") {
@@ -538,39 +698,18 @@ func TestNonForgeability_NoAssignmentInfoMintingOutsideAuthority(t *testing.T) {
 		if strings.HasSuffix(path, "_test.go") {
 			return nil
 		}
-		for _, allowed := range nonForgeabilityAllowedPaths {
+		for _, allowed := range nonForgeabilityAllowedPackageSuffixes {
 			if strings.Contains(path, allowed) {
 				return nil
 			}
 		}
 
-		f, err := os.Open(path)
+		findings, err := auditNonForgeability(path)
 		if err != nil {
 			return err
 		}
-		defer f.Close()
-
-		var sb strings.Builder
-		scanner := bufio.NewScanner(f)
-		scanner.Buffer(make([]byte, 1<<20), 1<<20)
-		for scanner.Scan() {
-			sb.WriteString(scanner.Text())
-			sb.WriteString("\n")
-		}
-		if err := scanner.Err(); err != nil {
-			return err
-		}
-
-		matches := pattern.FindAllStringSubmatch(sb.String(), -1)
-		for _, m := range matches {
-			if len(m) < 2 {
-				continue
-			}
-			if m[1] == "0" {
-				continue // explicit zero is fine
-			}
-			bad = append(bad, path+": Epoch="+m[1])
-			break
+		for _, f := range findings {
+			bad = append(bad, path+": "+f)
 		}
 		return nil
 	})
@@ -578,9 +717,163 @@ func TestNonForgeability_NoAssignmentInfoMintingOutsideAuthority(t *testing.T) {
 		t.Fatalf("walk: %v", err)
 	}
 	if len(bad) > 0 {
-		t.Fatalf("non-forgeability: production code outside the authority/calibration/conformance/schema allowlist mints AssignmentInfo with a non-zero Epoch:\n  %s",
+		t.Fatalf("non-forgeability: production code outside the authority/calibration/conformance/schema allowlist forges AssignmentInfo:\n  %s",
 			strings.Join(bad, "\n  "))
 	}
+}
+
+// auditNonForgeability parses a Go source file and returns a list
+// of human-readable findings describing any disallowed use of
+// adapter.AssignmentInfo. It catches:
+//
+//   (a) composite literals of type AssignmentInfo / adapter.AssignmentInfo
+//       with Epoch or EndpointVersion fields set to non-zero values;
+//   (b) local variable declarations (var / :=) whose declared or
+//       inferred type is AssignmentInfo (value, pointer, or slice).
+//
+// Function parameters, method receivers, return type declarations,
+// and struct field types are NOT flagged — consuming values flows
+// through the type name, and forbidding that would block legitimate
+// adapter callers.
+func auditNonForgeability(path string) ([]string, error) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, path, nil, parser.ParseComments)
+	if err != nil {
+		return nil, err
+	}
+
+	var findings []string
+
+	isAssignmentInfoType := func(e ast.Expr) bool {
+		// Strip pointer and slice wrappers.
+		for {
+			switch t := e.(type) {
+			case *ast.StarExpr:
+				e = t.X
+				continue
+			case *ast.ArrayType:
+				e = t.Elt
+				continue
+			}
+			break
+		}
+		switch t := e.(type) {
+		case *ast.Ident:
+			return t.Name == "AssignmentInfo"
+		case *ast.SelectorExpr:
+			if id, ok := t.X.(*ast.Ident); ok {
+				return id.Name == "adapter" && t.Sel.Name == "AssignmentInfo"
+			}
+		}
+		return false
+	}
+
+	// (a) Composite literal Epoch/EV non-zero.
+	ast.Inspect(file, func(n ast.Node) bool {
+		cl, ok := n.(*ast.CompositeLit)
+		if !ok {
+			return true
+		}
+		if cl.Type == nil || !isAssignmentInfoType(cl.Type) {
+			return true
+		}
+		for _, elt := range cl.Elts {
+			kv, ok := elt.(*ast.KeyValueExpr)
+			if !ok {
+				continue
+			}
+			keyID, ok := kv.Key.(*ast.Ident)
+			if !ok {
+				continue
+			}
+			if keyID.Name != "Epoch" && keyID.Name != "EndpointVersion" {
+				continue
+			}
+			if litIsZero(kv.Value) {
+				continue
+			}
+			pos := fset.Position(kv.Pos())
+			findings = append(findings, fmtFinding(pos.Line, "composite literal sets %s to non-zero", keyID.Name))
+		}
+		return true
+	})
+
+	// (b) Local variable declarations of type AssignmentInfo.
+	// Scope: inside function bodies only. Package-level declarations,
+	// parameter declarations, and struct field types are excluded.
+	ast.Inspect(file, func(n ast.Node) bool {
+		fn, ok := n.(*ast.FuncDecl)
+		if !ok || fn.Body == nil {
+			return true
+		}
+		ast.Inspect(fn.Body, func(inner ast.Node) bool {
+			switch v := inner.(type) {
+			case *ast.DeclStmt:
+				gd, ok := v.Decl.(*ast.GenDecl)
+				if !ok || gd.Tok != token.VAR {
+					return true
+				}
+				for _, spec := range gd.Specs {
+					vs, ok := spec.(*ast.ValueSpec)
+					if !ok || vs.Type == nil {
+						continue
+					}
+					if isAssignmentInfoType(vs.Type) {
+						pos := fset.Position(vs.Pos())
+						findings = append(findings, fmtFinding(pos.Line, "local variable declared of type AssignmentInfo"))
+					}
+				}
+			case *ast.AssignStmt:
+				// `var x adapter.AssignmentInfo` uses GenDecl above.
+				// `x := adapter.AssignmentInfo{}` is a short decl; if
+				// RHS is a composite literal, the type check in (a)
+				// already handles non-zero Epoch/EV. We do NOT flag
+				// short decls of zero-value AssignmentInfo from a
+				// function call return (legitimate when the callee is
+				// a consumer API returning a zero value, e.g.
+				// Publisher.LastPublished), because that would be
+				// over-broad.
+			}
+			return true
+		})
+		return false
+	})
+
+	return findings, nil
+}
+
+func fmtFinding(line int, msg string, args ...any) string {
+	return fmt.Sprintf("line %d: %s", line, fmt.Sprintf(msg, args...))
+}
+
+func litIsZero(e ast.Expr) bool {
+	if lit, ok := e.(*ast.BasicLit); ok {
+		return lit.Kind == token.INT && lit.Value == "0"
+	}
+	return false
+}
+
+// findRepoRoot walks up from cwd until it finds a directory
+// containing a go.mod file. Used by the non-forgeability test so
+// the walker covers cmd/, core/, and any future production
+// packages in the repo — not just core/.
+func findRepoRoot() (string, error) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	dir := cwd
+	for i := 0; i < 10; i++ {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			return dir, nil
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+	return "", errors.New("could not locate repo root (no go.mod found walking up)")
 }
 
 // ============================================================
@@ -601,26 +894,3 @@ func receiveOrFail(t *testing.T, ch <-chan adapter.AssignmentInfo, who string) a
 	}
 }
 
-// findCoreDir locates the repository's core/ directory by walking up
-// from the current test file's working directory. Used by the
-// non-forgeability test.
-func findCoreDir() (string, error) {
-	cwd, err := os.Getwd()
-	if err != nil {
-		return "", err
-	}
-	// When tests run, cwd is the package dir. Walk up until we find
-	// a sibling "adapter" directory (proxy for "we're in core/").
-	dir := cwd
-	for i := 0; i < 6; i++ {
-		if info, err := os.Stat(filepath.Join(dir, "adapter")); err == nil && info.IsDir() {
-			return dir, nil
-		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			break
-		}
-		dir = parent
-	}
-	return "", errors.New("could not locate core/ directory")
-}
