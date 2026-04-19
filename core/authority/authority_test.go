@@ -380,6 +380,128 @@ func TestPublisher_DeliveryConvergesToLatestOnSlowConsumer(t *testing.T) {
 	}
 }
 
+// TestPublisher_CancelDuringDeliveryDoesNotPanic — regression for
+// the architect finding that apply()'s fan-out (outside pub.mu)
+// could race with cancel() and end up sending on a closed channel
+// (panic) or receiving zero values from a closed channel in a tight
+// loop (hang).
+//
+// The per-subscription mutex + closed flag closes that race: a
+// cancel that wins the per-sub lock closes the channel; any
+// in-flight deliver sees closed=true and returns; any late-arriving
+// deliver also sees closed=true and returns. No send-on-closed and
+// no infinite spin.
+func TestPublisher_CancelDuringDeliveryDoesNotPanic(t *testing.T) {
+	// Stress test: many concurrent publishes and cancels on the same
+	// key. Runs under the default test timeout; any panic trips the
+	// test runner's recovery. Any hang shows up as a timeout.
+	pub := NewPublisher(NewStaticDirective(nil))
+
+	// Prime state so all subsequent Refresh asks are valid.
+	if err := pub.apply(AssignmentAsk{
+		VolumeID: "v1", ReplicaID: "r1",
+		DataAddr: "d", CtrlAddr: "c",
+		Intent: IntentBind,
+	}); err != nil {
+		t.Fatalf("Bind: %v", err)
+	}
+
+	const subscribers = 50
+	const publishes = 200
+
+	var wg sync.WaitGroup
+	// Consumers: subscribe, drain a few, cancel.
+	for i := 0; i < subscribers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ch, cancel := pub.Subscribe("v1", "r1")
+			for j := 0; j < 3; j++ {
+				select {
+				case _, ok := <-ch:
+					if !ok {
+						return
+					}
+				case <-time.After(50 * time.Millisecond):
+				}
+			}
+			cancel()
+		}()
+	}
+
+	// Publisher: push many Refresh/Reassign asks in parallel.
+	for i := 0; i < publishes; i++ {
+		ask := AssignmentAsk{
+			VolumeID: "v1", ReplicaID: "r1",
+			DataAddr: fmt.Sprintf("d%d", i), CtrlAddr: fmt.Sprintf("c%d", i),
+			Intent: IntentRefreshEndpoint,
+		}
+		_ = pub.apply(ask)
+	}
+
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	select {
+	case <-done:
+		// If we get here, no panic and no hang.
+	case <-time.After(5 * time.Second):
+		t.Fatal("stress test hung — possible panic recovery or channel hang")
+	}
+}
+
+// TestPublisher_LateSubscriberReceivesLatestUnderConcurrentPublish
+// is the regression for the architect finding that Subscribe()'s
+// catch-up send happened OUTSIDE pub.mu, so a concurrent apply()
+// could author a newer fact and deliver it to the new subscriber
+// before the delayed catch-up send landed — producing stale/out-of-
+// order delivery.
+//
+// With catch-up under pub.mu, the subscriber is guaranteed to
+// eventually drain a value at least as fresh as the state at the
+// moment of subscription.
+func TestPublisher_LateSubscriberReceivesLatestUnderConcurrentPublish(t *testing.T) {
+	pub := NewPublisher(NewStaticDirective(nil))
+	if err := pub.apply(AssignmentAsk{
+		VolumeID: "v1", ReplicaID: "r1",
+		DataAddr: "d1", CtrlAddr: "c1",
+		Intent: IntentBind,
+	}); err != nil {
+		t.Fatalf("Bind: %v", err)
+	}
+
+	const iterations = 200
+	for i := 0; i < iterations; i++ {
+		// Kick off a Reassign that races with Subscribe.
+		go func() {
+			_ = pub.apply(AssignmentAsk{
+				VolumeID: "v1", ReplicaID: "r1",
+				DataAddr: "d", CtrlAddr: "c",
+				Intent: IntentReassign,
+			})
+		}()
+
+		ch, cancel := pub.Subscribe("v1", "r1")
+		var got adapter.AssignmentInfo
+		select {
+		case got = <-ch:
+		case <-time.After(200 * time.Millisecond):
+			cancel()
+			t.Fatalf("iter %d: no delivery on fresh subscribe", i)
+		}
+		// After all drains, the publisher's current state must be
+		// >= got. If the catch-up raced and enqueued a stale value
+		// after a newer deliver ran, the consumer could observe
+		// monotonicity violation across multiple drains.
+		latest, _ := pub.LastPublished("v1", "r1")
+		if got.Epoch > latest.Epoch {
+			cancel()
+			t.Fatalf("iter %d: delivered epoch=%d > current epoch=%d (stale delivery)",
+				i, got.Epoch, latest.Epoch)
+		}
+		cancel()
+	}
+}
+
 // TestPublisher_RunClosesLiveSubscriptionsOnExit — when Run exits
 // (ctx cancelled, directive errored), every still-live subscription
 // channel must close so Bridges observe end-of-stream and exit
@@ -722,6 +844,153 @@ func TestNonForgeability_NoAssignmentInfoMintingOutsideAuthority(t *testing.T) {
 	}
 }
 
+// TestNonForgeability_CatchesShortDeclBypass exercises the audit
+// function directly on synthetic source to prove it catches the
+// `x := adapter.AssignmentInfo{}; x.Epoch = userInput` deferred-
+// mutation bypass. Without the short-decl rule added to check (b),
+// this shape would pass both checks silently.
+func TestNonForgeability_CatchesShortDeclBypass(t *testing.T) {
+	src := `package bypass
+
+import "github.com/seaweedfs/seaweed-block/core/adapter"
+
+func Forge(userInput uint64) {
+	x := adapter.AssignmentInfo{}
+	x.Epoch = userInput
+	_ = x
+}
+`
+	tmp, err := os.CreateTemp("", "authority-bypass-*.go")
+	if err != nil {
+		t.Fatalf("tempfile: %v", err)
+	}
+	defer os.Remove(tmp.Name())
+	if _, err := tmp.WriteString(src); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	tmp.Close()
+
+	findings, err := auditNonForgeability(tmp.Name())
+	if err != nil {
+		t.Fatalf("audit: %v", err)
+	}
+	if len(findings) == 0 {
+		t.Fatal("expected audit to flag `x := adapter.AssignmentInfo{}` short-decl bypass, got none")
+	}
+	joined := strings.Join(findings, " | ")
+	if !strings.Contains(joined, "short decl") && !strings.Contains(joined, "deferred-mutation") {
+		t.Fatalf("expected bypass-specific finding, got: %s", joined)
+	}
+}
+
+// TestNonForgeability_CatchesVarDeclBypass confirms the long-form
+// `var x adapter.AssignmentInfo` bypass is also flagged.
+func TestNonForgeability_CatchesVarDeclBypass(t *testing.T) {
+	src := `package bypass
+
+import "github.com/seaweedfs/seaweed-block/core/adapter"
+
+func Forge(userInput uint64) {
+	var x adapter.AssignmentInfo
+	x.Epoch = userInput
+	_ = x
+}
+`
+	tmp, err := os.CreateTemp("", "authority-bypass-*.go")
+	if err != nil {
+		t.Fatalf("tempfile: %v", err)
+	}
+	defer os.Remove(tmp.Name())
+	if _, err := tmp.WriteString(src); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	tmp.Close()
+
+	findings, err := auditNonForgeability(tmp.Name())
+	if err != nil {
+		t.Fatalf("audit: %v", err)
+	}
+	if len(findings) == 0 {
+		t.Fatal("expected audit to flag `var x adapter.AssignmentInfo`, got none")
+	}
+}
+
+// TestNonForgeability_CatchesPointerShortDeclBypass exercises the
+// pointer-form short-decl bypass:
+//
+//	x := &adapter.AssignmentInfo{}
+//	x.Epoch = userInput
+//
+// A prior version of the AST walker only recognized a bare
+// *ast.CompositeLit on the RHS, missing the UnaryExpr(&, ...)
+// wrapper. The fix added unwrapAddrOfCompositeLit; this test
+// guards it.
+func TestNonForgeability_CatchesPointerShortDeclBypass(t *testing.T) {
+	src := `package bypass
+
+import "github.com/seaweedfs/seaweed-block/core/adapter"
+
+func Forge(userInput uint64) {
+	x := &adapter.AssignmentInfo{}
+	x.Epoch = userInput
+	_ = x
+}
+`
+	tmp, err := os.CreateTemp("", "authority-bypass-*.go")
+	if err != nil {
+		t.Fatalf("tempfile: %v", err)
+	}
+	defer os.Remove(tmp.Name())
+	if _, err := tmp.WriteString(src); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	tmp.Close()
+
+	findings, err := auditNonForgeability(tmp.Name())
+	if err != nil {
+		t.Fatalf("audit: %v", err)
+	}
+	if len(findings) == 0 {
+		t.Fatal("expected audit to flag `x := &adapter.AssignmentInfo{}` pointer-form bypass, got none")
+	}
+	joined := strings.Join(findings, " | ")
+	if !strings.Contains(joined, "short decl") && !strings.Contains(joined, "deferred-mutation") {
+		t.Fatalf("expected bypass-specific finding, got: %s", joined)
+	}
+}
+
+// TestNonForgeability_CatchesPointerVarDeclBypass exercises the
+// pointer-form long-decl bypass: `var x = &adapter.AssignmentInfo{}`.
+func TestNonForgeability_CatchesPointerVarDeclBypass(t *testing.T) {
+	src := `package bypass
+
+import "github.com/seaweedfs/seaweed-block/core/adapter"
+
+func Forge(userInput uint64) {
+	var x = &adapter.AssignmentInfo{}
+	x.Epoch = userInput
+	_ = x
+}
+`
+	tmp, err := os.CreateTemp("", "authority-bypass-*.go")
+	if err != nil {
+		t.Fatalf("tempfile: %v", err)
+	}
+	defer os.Remove(tmp.Name())
+	if _, err := tmp.WriteString(src); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	tmp.Close()
+
+	findings, err := auditNonForgeability(tmp.Name())
+	if err != nil {
+		t.Fatalf("audit: %v", err)
+	}
+	if len(findings) == 0 {
+		t.Fatal("expected audit to flag `var x = &adapter.AssignmentInfo{}`, got none")
+	}
+}
+
 // auditNonForgeability parses a Go source file and returns a list
 // of human-readable findings describing any disallowed use of
 // adapter.AssignmentInfo. It catches:
@@ -800,7 +1069,20 @@ func auditNonForgeability(path string) ([]string, error) {
 
 	// (b) Local variable declarations of type AssignmentInfo.
 	// Scope: inside function bodies only. Package-level declarations,
-	// parameter declarations, and struct field types are excluded.
+	// function parameters, and struct field types are excluded —
+	// they do not create a mutation point for later `.Epoch = x`
+	// assignment.
+	//
+	// Three declaration shapes are flagged:
+	//   - `var x adapter.AssignmentInfo`          (DeclStmt / GenDecl)
+	//   - `var x = adapter.AssignmentInfo{}`      (DeclStmt / GenDecl with value)
+	//   - `x := adapter.AssignmentInfo{}`         (short AssignStmt)
+	//
+	// The short-decl shape is the deferred-mutation bypass the
+	// architect called out: a zero-valued composite literal passes
+	// the (a) check (no non-zero fields set), then a later
+	// `x.Epoch = userInput` assignment forges authority truth.
+	// Flagging the short decl itself closes the hole.
 	ast.Inspect(file, func(n ast.Node) bool {
 		fn, ok := n.(*ast.FuncDecl)
 		if !ok || fn.Body == nil {
@@ -815,24 +1097,53 @@ func auditNonForgeability(path string) ([]string, error) {
 				}
 				for _, spec := range gd.Specs {
 					vs, ok := spec.(*ast.ValueSpec)
-					if !ok || vs.Type == nil {
+					if !ok {
 						continue
 					}
-					if isAssignmentInfoType(vs.Type) {
+					// `var x adapter.AssignmentInfo`
+					if vs.Type != nil && isAssignmentInfoType(vs.Type) {
 						pos := fset.Position(vs.Pos())
 						findings = append(findings, fmtFinding(pos.Line, "local variable declared of type AssignmentInfo"))
+						continue
+					}
+					// `var x = adapter.AssignmentInfo{...}` or
+					// `var x = &adapter.AssignmentInfo{...}` — type
+					// comes from the RHS composite literal. Both
+					// value and pointer forms are deferred-mutation
+					// bypass shapes: the pointer form lets a later
+					// `x.Epoch = userInput` forge authority truth
+					// just as easily as the value form.
+					for _, val := range vs.Values {
+						if cl := unwrapAddrOfCompositeLit(val); cl != nil && cl.Type != nil && isAssignmentInfoType(cl.Type) {
+							pos := fset.Position(vs.Pos())
+							findings = append(findings, fmtFinding(pos.Line, "local variable inferred type AssignmentInfo (value or pointer)"))
+							break
+						}
 					}
 				}
 			case *ast.AssignStmt:
-				// `var x adapter.AssignmentInfo` uses GenDecl above.
-				// `x := adapter.AssignmentInfo{}` is a short decl; if
-				// RHS is a composite literal, the type check in (a)
-				// already handles non-zero Epoch/EV. We do NOT flag
-				// short decls of zero-value AssignmentInfo from a
-				// function call return (legitimate when the callee is
-				// a consumer API returning a zero value, e.g.
-				// Publisher.LastPublished), because that would be
-				// over-broad.
+				// Short decl: `x := adapter.AssignmentInfo{...}` or
+				// `x := &adapter.AssignmentInfo{...}` has
+				// Tok == token.DEFINE. Only flag if the RHS directly
+				// constructs AssignmentInfo via composite literal
+				// (optionally wrapped in &). Flagging every
+				// `x, _ := someFn()` whose return happens to be
+				// AssignmentInfo would over-reach (legitimate
+				// consumer reads like LastPublished).
+				if v.Tok != token.DEFINE {
+					return true
+				}
+				for _, rhs := range v.Rhs {
+					cl := unwrapAddrOfCompositeLit(rhs)
+					if cl == nil || cl.Type == nil {
+						continue
+					}
+					if isAssignmentInfoType(cl.Type) {
+						pos := fset.Position(v.Pos())
+						findings = append(findings, fmtFinding(pos.Line, "short decl `x := [&]adapter.AssignmentInfo{...}` — deferred-mutation bypass shape"))
+						break
+					}
+				}
 			}
 			return true
 		})
@@ -844,6 +1155,24 @@ func auditNonForgeability(path string) ([]string, error) {
 
 func fmtFinding(line int, msg string, args ...any) string {
 	return fmt.Sprintf("line %d: %s", line, fmt.Sprintf(msg, args...))
+}
+
+// unwrapAddrOfCompositeLit returns the composite literal at the
+// core of an expression that is either a plain `X{...}` or an
+// address-of `&X{...}`. Returns nil if the expression is neither.
+//
+// Added to close the architect-identified gap where `x :=
+// &adapter.AssignmentInfo{}` and `var x = &adapter.AssignmentInfo{}`
+// slipped past the inferred-type bypass check because the walker
+// only recognized a bare *ast.CompositeLit on the RHS.
+func unwrapAddrOfCompositeLit(e ast.Expr) *ast.CompositeLit {
+	if u, ok := e.(*ast.UnaryExpr); ok && u.Op == token.AND {
+		e = u.X
+	}
+	if cl, ok := e.(*ast.CompositeLit); ok {
+		return cl
+	}
+	return nil
 }
 
 func litIsZero(e ast.Expr) bool {

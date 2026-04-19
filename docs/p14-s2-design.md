@@ -122,12 +122,18 @@ Only `core/authority/` may construct an `AssignmentInfo` with
 1. `AssignmentInfo` stays in `core/adapter` as it is today (it is
    the adapter's ingress shape). The authority package is the only
    production package that constructs one.
-2. A package-level test in `core/authority/` audits production
-   imports with a simple "forbidden constructor" grep: any
-   non-test `.go` file outside `core/authority/` that literal-typed
-   `adapter.AssignmentInfo{` with a non-zero `Epoch` field fails the
-   test. Test helpers (`_test.go` files) are exempt — calibration
-   and conformance retain their right to forge test facts.
+2. A package-level test in `core/authority/` audits every
+   production `.go` file in the whole repo (not just `core/`)
+   using `go/ast`. It fails if a file outside the allowlist either
+   (a) constructs `adapter.AssignmentInfo` via composite literal
+   with a non-zero `Epoch` or `EndpointVersion`, or (b) declares a
+   local variable — `var x`, `var x = X{...}`, or `x := X{...}`,
+   including pointer forms (`&X{...}`) — whose declared or
+   inferred type is `AssignmentInfo`. Case (b) closes the
+   deferred-mutation bypass (`var x AssignmentInfo; x.Epoch = v`).
+   Test helpers (`_test.go` files) are exempt, and the
+   test-infrastructure packages `core/calibration/`,
+   `core/conformance/`, `core/schema/` are explicitly allowlisted.
 
 ## Publication API — no public write verb
 

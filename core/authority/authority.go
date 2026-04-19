@@ -39,10 +39,57 @@ type assignmentState struct {
 // between the subscriber's last read and the next may be skipped
 // — for authority truth that is correct (the engine cares about
 // current identity, not history).
+//
+// Delivery and close are guarded by a per-subscription mutex so
+// the publisher never sends on a closed channel (panic) or loops
+// on a closed channel's zero-receives (hang). A cancellation that
+// races with an in-flight delivery sees one of two outcomes:
+//   - delivery wins: it drain+sends under the lock, then close
+//     runs next and closes the channel.
+//   - close wins: close sets closed=true and closes the channel,
+//     then delivery sees closed and returns without touching ch.
 type subscription struct {
 	id  uint64
 	key subKey
 	ch  chan adapter.AssignmentInfo
+
+	mu     sync.Mutex
+	closed bool
+}
+
+// deliver performs an overwrite-latest send to this subscription.
+// Called by Publisher.apply outside pub.mu. Safe to call
+// concurrently with close(): if the subscription is already
+// closed, deliver is a no-op and never touches ch.
+func (s *subscription) deliver(info adapter.AssignmentInfo) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return
+	}
+	// Drain any stale pending value (non-blocking: either the
+	// buffer has one item, or it's empty). Then send the latest.
+	// Cap=1 + known-empty-after-drain means the send is also
+	// non-blocking. Consumer-side receives never need the lock.
+	select {
+	case <-s.ch:
+	default:
+	}
+	s.ch <- info
+}
+
+// close closes the subscription's delivery channel exactly once.
+// Idempotent. Concurrent deliver() calls observe closed=true and
+// return without touching ch — so a cancel during in-flight
+// delivery never produces a send-on-closed panic.
+func (s *subscription) close() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return
+	}
+	s.closed = true
+	close(s.ch)
 }
 
 // Publisher is the system-owned authority for assignment truth.
@@ -80,7 +127,12 @@ func NewPublisher(dir Directive) *Publisher {
 //
 // If the publisher has already authored an AssignmentInfo for the
 // key, the new subscriber receives it immediately as late-
-// subscriber catch-up.
+// subscriber catch-up — and the catch-up value is guaranteed to
+// be the current authoritative state at the moment the subscriber
+// becomes visible, because the catch-up send and the subs-map
+// insert happen together under pub.mu. An apply() that authors a
+// newer fact after the subscriber is visible will drain the stale
+// catch-up value and replace it with the new fact via deliver().
 //
 // cancel is idempotent and safe to call from any goroutine.
 func (p *Publisher) Subscribe(volumeID, replicaID string) (<-chan adapter.AssignmentInfo, func()) {
@@ -89,21 +141,24 @@ func (p *Publisher) Subscribe(volumeID, replicaID string) (<-chan adapter.Assign
 		id:  id,
 		key: subKey{volumeID: volumeID, replicaID: replicaID},
 		// Capacity 1 with overwrite-latest semantics on full. See
-		// deliver() for the rationale.
+		// subscription.deliver() for the rationale.
 		ch: make(chan adapter.AssignmentInfo, 1),
 	}
 
+	// Subs-map insert and catch-up send happen atomically under
+	// pub.mu. This closes the "catch-up arrives after a newer
+	// apply()" race: any apply() contending for pub.mu must either
+	// run before us (so the state we read IS the current authoritative
+	// state), or after us (so it sees us in the subs map and will
+	// drain our catch-up via deliver()). The catch-up send to
+	// sub.ch is non-blocking because sub is fresh and only we can
+	// see it — no other goroutine can have filled its cap=1 buffer.
 	p.mu.Lock()
 	p.subs[sub.key] = append(p.subs[sub.key], sub)
-	st, hasState := p.state[sub.key]
-	p.mu.Unlock()
-
-	// Late-subscriber catch-up: deliver the last authored fact
-	// immediately so a subscriber that attaches after authoring
-	// does not miss identity.
-	if hasState && st.present {
-		sub.ch <- st.info // cap=1, fresh channel, always succeeds
+	if st, ok := p.state[sub.key]; ok && st.present {
+		sub.ch <- st.info
 	}
+	p.mu.Unlock()
 
 	var once sync.Once
 	cancel := func() {
@@ -138,7 +193,7 @@ func (p *Publisher) cancelSubscription(target *subscription) {
 	}
 	p.mu.Unlock()
 	if found {
-		close(target.ch)
+		target.close()
 	}
 }
 
@@ -191,7 +246,7 @@ func (p *Publisher) closeAllSubscriptions() {
 	p.subs = make(map[subKey][]*subscription)
 	p.mu.Unlock()
 	for _, s := range all {
-		close(s.ch)
+		s.close()
 	}
 }
 
@@ -270,39 +325,9 @@ func (p *Publisher) apply(ask AssignmentAsk) error {
 	p.mu.Unlock()
 
 	for _, s := range subs {
-		deliverLatest(s.ch, next)
+		s.deliver(next)
 	}
 	return nil
-}
-
-// deliverLatest performs a lossless-for-current-fact send onto a
-// capacity-1 channel. If the channel is empty, the send succeeds
-// directly. If the channel already holds a pending value (because
-// the subscriber hasn't drained yet), the stale pending value is
-// dropped and replaced with the latest one.
-//
-// The subscriber therefore always reads the LATEST authoritative
-// state next, never a stale one, and never silently loses the
-// current fact. For authority truth that is the correct semantic:
-// the engine cares about current identity, not interstitial
-// history between two publications.
-//
-// This replaces the earlier "drop on full with only a log line"
-// behavior, which could leave a subscriber on stale truth until
-// an unrelated future ask happened.
-func deliverLatest(ch chan adapter.AssignmentInfo, info adapter.AssignmentInfo) {
-	for {
-		select {
-		case ch <- info:
-			return
-		case <-ch:
-			// Drained a stale pending value. Retry send. Because
-			// only the publisher produces and the publisher's
-			// authoring loop is sequential per (vid, rid), the
-			// next iteration's send will either succeed or find
-			// a concurrent consumer read — both cases converge.
-		}
-	}
 }
 
 // AssignmentConsumer is the narrow interface the Bridge calls back

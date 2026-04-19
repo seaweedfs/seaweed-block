@@ -126,15 +126,22 @@ Added:
 
 - `core/authority/directive.go` — `AskIntent`, `AssignmentAsk`,
   `Directive`, `StaticDirective`, validation errors.
-- `core/authority/authority.go` — `Publisher`, `Subscribe`,
-  `Unsubscribe`, `LastPublished`, `Run`, `Bridge`,
-  `AssignmentConsumer`.
-- `core/authority/authority_test.go` — 20 tests covering intent
+- `core/authority/authority.go` — `Publisher`, `Subscribe` (returns
+  per-subscription cancel func), `LastPublished`, `Run`, `Bridge`,
+  `AssignmentConsumer`. No key-wide unsubscribe verb — per-
+  subscription cancel is the only teardown path.
+- `core/authority/authority_test.go` — 26 tests covering intent
   semantics, fan-out keyed by `(VolumeID, ReplicaID)`,
   **independent-unsubscribe**, **lossless-for-current-fact
-  delivery**, late-subscriber catch-up, `Run` loop,
+  delivery**, **cancel-vs-delivery race (stress test)**,
+  **late-subscriber-under-concurrent-publish ordering**,
+  late-subscriber catch-up, `Run` loop,
   `RunClosesLiveSubscriptionsOnExit`, `Bridge`, closure target,
-  AST-based non-forgeability.
+  AST-based non-forgeability including direct bypass-coverage
+  tests for `var x AssignmentInfo`,
+  `x := adapter.AssignmentInfo{}`, and the pointer-form variants
+  `var x = &adapter.AssignmentInfo{}` and
+  `x := &adapter.AssignmentInfo{}`.
 - `docs/p14-s2-audit.md`, `docs/p14-s2-design.md`, this file.
 
 Changed:
@@ -171,12 +178,18 @@ Specifically:
 - `TestPublisher_LateSubscriber_ReceivesLastPublished`
 - `TestPublisher_Cancel_ClosesOnlyThisSubscription`
 - `TestPublisher_DeliveryConvergesToLatestOnSlowConsumer`
+- `TestPublisher_CancelDuringDeliveryDoesNotPanic`
+- `TestPublisher_LateSubscriberReceivesLatestUnderConcurrentPublish`
 - `TestPublisher_RunClosesLiveSubscriptionsOnExit`
 - `TestPublisher_Run_DrivesDirectiveUntilCtxCancel`
 - `TestPublisher_Run_LogsAndContinuesOnRejectedAsk`
 - `TestBridge_ForwardsToConsumer`
 - `TestClosureTarget_SparrowReachesHealthyViaAuthorityRoute`
 - `TestNonForgeability_NoAssignmentInfoMintingOutsideAuthority`
+- `TestNonForgeability_CatchesShortDeclBypass`
+- `TestNonForgeability_CatchesVarDeclBypass`
+- `TestNonForgeability_CatchesPointerShortDeclBypass`
+- `TestNonForgeability_CatchesPointerVarDeclBypass`
 
 If the non-forgeability test starts failing because some new
 production package wants to construct `AssignmentInfo{Epoch: ...}`,
