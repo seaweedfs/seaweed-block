@@ -296,14 +296,30 @@ func (p *Publisher) apply(ask AssignmentAsk) error {
 		next.CtrlAddr = ask.CtrlAddr
 
 	case IntentReassign:
-		if !had || !prev.present {
+		// Per the P14 S3 "reassign semantic" boundary note
+		// (sw-block/design/v3-phase-14-s3-reassign-semantic.md):
+		// IntentReassign is a PER-VOLUME authority advance, not a
+		// per-slot Epoch bump. The target ReplicaID may differ
+		// from the currently-published replica for this volume
+		// (this is what makes cross-slot failover semantically
+		// valid in the first S3 accepted topology set). The new
+		// Epoch is minted from the maximum Epoch across every
+		// (VolumeID, *) key in publisher state, plus 1.
+		//
+		// IntentReassign still requires that *some* prior
+		// publication exists for this VolumeID. First-time
+		// establishment is the IntentBind path, not this one —
+		// using Reassign to create a volume's very first binding
+		// would confuse the per-volume monotonic line.
+		maxEpoch := maxPublishedEpochForVolume(p.state, ask.VolumeID)
+		if maxEpoch == 0 {
 			p.mu.Unlock()
 			return ErrReassignNotBound
 		}
 		next = adapter.AssignmentInfo{
 			VolumeID:        ask.VolumeID,
 			ReplicaID:       ask.ReplicaID,
-			Epoch:           prev.info.Epoch + 1,
+			Epoch:           maxEpoch + 1,
 			EndpointVersion: 1,
 			DataAddr:        ask.DataAddr,
 			CtrlAddr:        ask.CtrlAddr,
@@ -328,6 +344,26 @@ func (p *Publisher) apply(ask AssignmentAsk) error {
 		s.deliver(next)
 	}
 	return nil
+}
+
+// maxPublishedEpochForVolume scans the publisher's authoring state
+// and returns the maximum Epoch currently published on any
+// (VolumeID, *) key for the given volume. Zero return means no
+// prior publish exists for this volume at all — the caller should
+// treat that as "no per-volume authority line to advance".
+//
+// Must be called with p.mu held; reads p.state.
+func maxPublishedEpochForVolume(state map[subKey]assignmentState, volumeID string) uint64 {
+	var max uint64
+	for k, st := range state {
+		if !st.present || k.volumeID != volumeID {
+			continue
+		}
+		if st.info.Epoch > max {
+			max = st.info.Epoch
+		}
+	}
+	return max
 }
 
 // AssignmentConsumer is the narrow interface the Bridge calls back
@@ -358,4 +394,38 @@ func Bridge(ctx context.Context, pub *Publisher, consumer AssignmentConsumer, vo
 			consumer.OnAssignment(info)
 		}
 	}
+}
+
+// VolumeBridge subscribes to every (volumeID, replicaID) in the
+// given accepted-topology set and forwards each delivery to the
+// same consumer. It is the system-owned retarget path for the
+// first P14 S3 accepted topology: when authority moves from r1 to
+// r2 via a cross-slot Reassign, the inner Bridge for r2 delivers
+// the new AssignmentInfo and the consumer's OnAssignment handles
+// the identity advance through its existing monotonicity guards.
+// No test-side teardown-and-retarget is needed.
+//
+// VolumeBridge does NOT discover replica IDs — the accepted
+// topology set is passed in explicitly. Discovery belongs to
+// policy (S3) and to future operator / governance surfaces
+// (P15), not to this primitive.
+//
+// VolumeBridge blocks until ctx is cancelled. Cancelling ctx tears
+// down every inner Bridge goroutine cleanly via their own
+// per-subscription cancels. Returns when all inner bridges have
+// exited.
+func VolumeBridge(ctx context.Context, pub *Publisher, consumer AssignmentConsumer, volumeID string, replicaIDs ...string) {
+	if len(replicaIDs) == 0 {
+		<-ctx.Done()
+		return
+	}
+	var wg sync.WaitGroup
+	wg.Add(len(replicaIDs))
+	for _, rid := range replicaIDs {
+		go func(rid string) {
+			defer wg.Done()
+			Bridge(ctx, pub, consumer, volumeID, rid)
+		}(rid)
+	}
+	wg.Wait()
 }
