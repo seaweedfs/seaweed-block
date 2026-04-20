@@ -1,0 +1,14 @@
+# Go toolchain caches (if GOCACHE/GOTMPDIR is pointed at the workspace)
+.gocache/
+.gotmp/
+
+# Built binaries at repo root (sparrow is a command; tests build their own
+# transient copies). Anchored with / so these do NOT match the cmd/sparrow/
+# source directory's files.
+/sparrow
+/sparrow.exe
+
+# Test coverage artifacts
+*.test
+*.out
+coverage.out

@@ -10,9 +10,10 @@ import (
 )
 
 // ReplicaListener accepts connections from the primary and handles
-// WAL shipping, probe requests, and rebuild streams.
+// WAL shipping, probe requests, and rebuild streams against a
+// replica-side LogicalStorage.
 type ReplicaListener struct {
-	store    *storage.BlockStore
+	store    storage.LogicalStorage
 	listener net.Listener
 	stopCh   chan struct{}
 	wg       sync.WaitGroup
@@ -22,7 +23,7 @@ type ReplicaListener struct {
 }
 
 // NewReplicaListener creates a listener on the given address.
-func NewReplicaListener(addr string, store *storage.BlockStore) (*ReplicaListener, error) {
+func NewReplicaListener(addr string, store storage.LogicalStorage) (*ReplicaListener, error) {
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return nil, err

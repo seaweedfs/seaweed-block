@@ -58,6 +58,16 @@ type ReachabilityTruth struct {
 	LastContactKind         ContactKind
 	ObservedEndpointVersion uint64
 	TransportEpoch          uint64
+
+	// FencedEpoch is the highest epoch for which a FenceAtEpoch
+	// barrier has completed successfully on the replica's lineage
+	// gate. Bumped by applyFenceCompleted; reset on identity change.
+	// Used by decide() to gate PublishHealthy on the R>=H branch:
+	// caught-up handoff is only considered safe once the replica's
+	// lineage gate has observed the new epoch via mutating traffic
+	// (the fence barrier). Engine-internal; not exposed in
+	// ReplicaProjection.
+	FencedEpoch uint64
 }
 
 // RecoveryDecision represents the recovery classification.

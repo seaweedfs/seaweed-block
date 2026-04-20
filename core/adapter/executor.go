@@ -46,6 +46,21 @@ type CommandExecutor interface {
 
 	// PublishDegraded reports this replica as degraded.
 	PublishDegraded(replicaID string, reason string)
+
+	// Fence runs a one-barrier exchange at the given lineage
+	// (epoch, endpointVersion, sessionID). No catch-up, no
+	// rebuild — a single MsgBarrierReq that the replica accepts
+	// (advancing its activeLineage) or rejects. Runs
+	// asynchronously; outcome MUST be reported via the registered
+	// OnFenceComplete callback exactly once.
+	Fence(replicaID string, sessionID, epoch, endpointVersion uint64) error
+
+	// SetOnFenceComplete registers the callback for fence outcomes.
+	// Success=true means the replica acked at this epoch;
+	// Success=false with FailReason means the fence did not
+	// complete. Retry is probe-driven — the callback MUST NOT
+	// retry internally.
+	SetOnFenceComplete(fn OnFenceComplete)
 }
 
 // OnSessionClose is the callback signature for session completion/failure.
@@ -57,3 +72,19 @@ type OnSessionClose func(SessionCloseResult)
 // The adapter registers this with the executor so SessionStarted is
 // tied to actual execution start instead of command issuance alone.
 type OnSessionStart func(SessionStartResult)
+
+// OnFenceComplete is the callback signature for FenceAtEpoch outcomes.
+// Fires exactly once per Fence call. Success=true advances
+// Reachability.FencedEpoch; Success=false leaves it unchanged and
+// relies on the next probe to re-trigger.
+type OnFenceComplete func(FenceResult)
+
+// FenceResult is the fence outcome reported back to the adapter.
+type FenceResult struct {
+	ReplicaID       string
+	SessionID       uint64
+	Epoch           uint64
+	EndpointVersion uint64
+	Success         bool
+	FailReason      string
+}

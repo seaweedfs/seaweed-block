@@ -13,17 +13,28 @@ import (
 
 // mockExecutor records commands and wires the session close callback.
 type mockExecutor struct {
-	mu             sync.Mutex
-	probeResults   map[string]ProbeResult
-	commands       []string
-	nextSession    atomic.Uint64
-	onSessionStart OnSessionStart
-	onSessionClose OnSessionClose // wired by adapter
-	autoStart      bool
-	autoClose      bool
-	catchUpErr     error
-	rebuildErr     error
-	starts         []startRecord
+	mu              sync.Mutex
+	probeResults    map[string]ProbeResult
+	commands        []string
+	nextSession     atomic.Uint64
+	onSessionStart  OnSessionStart
+	onSessionClose  OnSessionClose // wired by adapter
+	onFenceComplete OnFenceComplete
+	autoStart       bool
+	autoClose       bool
+	autoFence       bool // fire OnFenceComplete(Success=true) on Fence()
+	catchUpErr      error
+	rebuildErr      error
+	fenceErr        error
+	starts          []startRecord
+	fences          []fenceRecord
+}
+
+type fenceRecord struct {
+	replicaID       string
+	sessionID       uint64
+	epoch           uint64
+	endpointVersion uint64
 }
 
 type startRecord struct {
@@ -36,6 +47,7 @@ func newMockExecutor() *mockExecutor {
 		probeResults: make(map[string]ProbeResult),
 		autoStart:    true,
 		autoClose:    true,
+		autoFence:    true,
 	}
 	m.nextSession.Store(100)
 	return m
@@ -51,6 +63,53 @@ func (m *mockExecutor) SetOnSessionClose(fn OnSessionClose) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.onSessionClose = fn
+}
+
+func (m *mockExecutor) SetOnFenceComplete(fn OnFenceComplete) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.onFenceComplete = fn
+}
+
+func (m *mockExecutor) Fence(replicaID string, sessionID, epoch, endpointVersion uint64) error {
+	m.mu.Lock()
+	m.commands = append(m.commands, "Fence")
+	m.fences = append(m.fences, fenceRecord{
+		replicaID: replicaID, sessionID: sessionID,
+		epoch: epoch, endpointVersion: endpointVersion,
+	})
+	cb := m.onFenceComplete
+	auto := m.autoFence
+	errVal := m.fenceErr
+	m.mu.Unlock()
+
+	if errVal != nil {
+		return errVal
+	}
+	if auto && cb != nil {
+		// Sync callback: deterministic mock — no goroutine. Real
+		// transport is async; the unit-test mock fires inline so
+		// tests can read projection without arbitrary sleeps.
+		cb(FenceResult{
+			ReplicaID:       replicaID,
+			SessionID:       sessionID,
+			Epoch:           epoch,
+			EndpointVersion: endpointVersion,
+			Success:         true,
+		})
+	}
+	return nil
+}
+
+// fireFence triggers the registered fence callback manually — used
+// by tests that need to control fence outcome timing.
+func (m *mockExecutor) fireFence(result FenceResult) {
+	m.mu.Lock()
+	cb := m.onFenceComplete
+	m.mu.Unlock()
+	if cb != nil {
+		cb(result)
+	}
 }
 
 func (m *mockExecutor) Probe(replicaID, dataAddr, ctrlAddr string, epoch, endpointVersion uint64) ProbeResult {
@@ -521,7 +580,22 @@ func TestTerminal_OnlySessionCloseProducesHealthy(t *testing.T) {
 // --- Already caught up: no session needed ---
 
 func TestFullRoute_AlreadyCaughtUp(t *testing.T) {
+	// P14 S1: caught-up under a new identity epoch is NOT
+	// immediately healthy. The engine emits FenceAtEpoch and
+	// holds publication at not-healthy until FenceCompleted
+	// advances the replica's lineage gate. With autoFence=true on
+	// the mock, the fence fires inline synchronously, so the
+	// sequence is: probe → fence command → fence completes →
+	// publication flips to healthy.
 	exec := newMockExecutor()
+	// Register success for the background probe triggered by
+	// OnAssignment so it doesn't race the manual OnProbeResult
+	// below with a ProbeFailed that would clobber reachability.
+	exec.probeResults["r1"] = ProbeResult{
+		ReplicaID: "r1", Success: true,
+		EndpointVersion: 1, TransportEpoch: 1,
+		ReplicaFlushedLSN: 100, PrimaryTailLSN: 10, PrimaryHeadLSN: 100,
+	}
 	a := NewVolumeReplicaAdapter(exec)
 
 	a.OnAssignment(AssignmentInfo{
@@ -529,16 +603,220 @@ func TestFullRoute_AlreadyCaughtUp(t *testing.T) {
 		Epoch: 1, EndpointVersion: 1,
 		DataAddr: "a", CtrlAddr: "b",
 	})
+	// Let the background probe finish.
+	time.Sleep(30 * time.Millisecond)
 
-	a.OnProbeResult(ProbeResult{
+	// autoFence completed synchronously during dispatch; projection
+	// must now be healthy.
+	p := a.Projection()
+	if p.Mode != engine.ModeHealthy {
+		t.Fatalf("caught up + auto-fence: expected healthy, got %s", p.Mode)
+	}
+}
+
+// TestFullRoute_CaughtUp_NotHealthyUntilFenceComplete proves the
+// ack-gated contract at the operator-visible surface: if the fence
+// is still in flight (fence callback has not fired), Mode must NOT
+// be ModeHealthy. This is the test the architect called out — P14
+// S1's contract is operator-visible, not just command-list-level.
+func TestFullRoute_CaughtUp_NotHealthyUntilFenceComplete(t *testing.T) {
+	exec := newMockExecutor()
+	exec.autoFence = false // hold the fence callback
+	// Pre-register a caught-up probe result so the background probe
+	// triggered by OnAssignment drives the full route on its own.
+	// Avoids racing a failing background probe against a manual
+	// ProbeSucceeded.
+	exec.probeResults["r1"] = ProbeResult{
 		ReplicaID: "r1", Success: true,
 		EndpointVersion: 1, TransportEpoch: 1,
 		ReplicaFlushedLSN: 100, PrimaryTailLSN: 10, PrimaryHeadLSN: 100,
+	}
+	a := NewVolumeReplicaAdapter(exec)
+
+	a.OnAssignment(AssignmentInfo{
+		VolumeID: "vol1", ReplicaID: "r1",
+		Epoch: 1, EndpointVersion: 1,
+		DataAddr: "a", CtrlAddr: "b",
+	})
+	// Wait for the background probe → fence dispatch chain to settle.
+	// autoFence=false guarantees the fence stays in flight.
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		exec.mu.Lock()
+		n := len(exec.fences)
+		exec.mu.Unlock()
+		if n == 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// Fence was dispatched but not completed — projection must
+	// NOT be healthy. Must also not be degraded (nothing's wrong).
+	p := a.Projection()
+	if p.Mode == engine.ModeHealthy {
+		t.Fatalf("fence not yet complete: Mode must not be healthy, got %s", p.Mode)
+	}
+	if p.Mode == engine.ModeDegraded {
+		t.Fatalf("fence pending is transitional, not degraded, got %s", p.Mode)
+	}
+	// Expected: ModeRecovering (transitional, waiting on fence).
+	if p.Mode != engine.ModeRecovering {
+		t.Fatalf("fence pending should show recovering, got %s", p.Mode)
+	}
+
+	// Find the in-flight fence and fire a success callback.
+	exec.mu.Lock()
+	if len(exec.fences) != 1 {
+		exec.mu.Unlock()
+		t.Fatalf("expected 1 fence in flight, got %d", len(exec.fences))
+	}
+	fr := exec.fences[0]
+	exec.mu.Unlock()
+	exec.fireFence(FenceResult{
+		ReplicaID:       fr.replicaID,
+		SessionID:       fr.sessionID,
+		Epoch:           fr.epoch,
+		EndpointVersion: fr.endpointVersion,
+		Success:         true,
 	})
 
-	p := a.Projection()
+	// Now projection must be healthy.
+	p = a.Projection()
 	if p.Mode != engine.ModeHealthy {
-		t.Fatalf("already caught up: expected healthy, got %s", p.Mode)
+		t.Fatalf("after fence complete: expected healthy, got %s", p.Mode)
+	}
+}
+
+// TestFence_NewerEpochNotStarvedByOlderInFlightFence — regression
+// test for the adapter's fence dedupe key. If the dedupe is keyed
+// only by replicaID, a newer-epoch fence emitted after an identity
+// advance is dropped while the older fence is still in flight. The
+// old callback then arrives, gets normalized to a FenceCompleted
+// event at the old epoch, which the engine rejects as stale — and
+// nothing re-drives decide() for the new epoch. Result: the replica
+// lingers non-healthy until some unrelated later probe happens.
+//
+// The fix keys dedupe by full fence lineage (replicaID, epoch,
+// endpointVersion). This test proves: after identity advances with
+// an older fence still in flight, the newer-epoch fence is
+// dispatched to the executor (NOT starved), and publishing healthy
+// depends only on the newer fence completing.
+func TestFence_NewerEpochNotStarvedByOlderInFlightFence(t *testing.T) {
+	exec := newMockExecutor()
+	exec.autoFence = false // hold all fence callbacks
+	// Caught-up probe at epoch=1.
+	exec.probeResults["r1"] = ProbeResult{
+		ReplicaID: "r1", Success: true,
+		EndpointVersion: 1, TransportEpoch: 1,
+		ReplicaFlushedLSN: 100, PrimaryTailLSN: 10, PrimaryHeadLSN: 100,
+	}
+	a := NewVolumeReplicaAdapter(exec)
+
+	a.OnAssignment(AssignmentInfo{
+		VolumeID: "vol1", ReplicaID: "r1",
+		Epoch: 1, EndpointVersion: 1,
+		DataAddr: "a", CtrlAddr: "b",
+	})
+	// Wait for the first fence to be dispatched but not completed.
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		exec.mu.Lock()
+		n := len(exec.fences)
+		exec.mu.Unlock()
+		if n == 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	exec.mu.Lock()
+	if len(exec.fences) != 1 {
+		exec.mu.Unlock()
+		t.Fatalf("expected 1 in-flight fence at epoch 1, got %d", len(exec.fences))
+	}
+	oldFence := exec.fences[0]
+	exec.mu.Unlock()
+	if oldFence.epoch != 1 || oldFence.endpointVersion != 1 {
+		t.Fatalf("old fence at wrong lineage: epoch=%d ev=%d",
+			oldFence.epoch, oldFence.endpointVersion)
+	}
+
+	// Identity advances to epoch=2 before the old fence completes.
+	// Update the pre-registered probe result so the background probe
+	// triggered by the new assignment returns epoch=2 boundaries.
+	exec.mu.Lock()
+	exec.probeResults["r1"] = ProbeResult{
+		ReplicaID: "r1", Success: true,
+		EndpointVersion: 2, TransportEpoch: 2,
+		ReplicaFlushedLSN: 200, PrimaryTailLSN: 20, PrimaryHeadLSN: 200,
+	}
+	exec.mu.Unlock()
+
+	a.OnAssignment(AssignmentInfo{
+		VolumeID: "vol1", ReplicaID: "r1",
+		Epoch: 2, EndpointVersion: 2,
+		DataAddr: "a2", CtrlAddr: "b2",
+	})
+	// Wait for the newer-epoch fence to be dispatched.
+	deadline = time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		exec.mu.Lock()
+		n := len(exec.fences)
+		exec.mu.Unlock()
+		if n >= 2 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	exec.mu.Lock()
+	n := len(exec.fences)
+	var newFence fenceRecord
+	if n >= 2 {
+		newFence = exec.fences[1]
+	}
+	exec.mu.Unlock()
+	if n < 2 {
+		t.Fatalf("newer-epoch fence was starved by older in-flight fence — still only %d fence(s) dispatched",
+			n)
+	}
+	if newFence.epoch != 2 || newFence.endpointVersion != 2 {
+		t.Fatalf("new fence at wrong lineage: epoch=%d ev=%d",
+			newFence.epoch, newFence.endpointVersion)
+	}
+
+	// Projection must not be healthy yet — the newer fence is still
+	// in flight and the old one would be stale even if it arrived.
+	if got := a.Projection().Mode; got == engine.ModeHealthy {
+		t.Fatalf("mode flipped Healthy before newer-epoch fence completed, got %s", got)
+	}
+
+	// Fire the NEW fence success callback. This must drive the
+	// replica to healthy under the new lineage.
+	exec.fireFence(FenceResult{
+		ReplicaID:       newFence.replicaID,
+		SessionID:       newFence.sessionID,
+		Epoch:           newFence.epoch,
+		EndpointVersion: newFence.endpointVersion,
+		Success:         true,
+	})
+	if got := a.Projection().Mode; got != engine.ModeHealthy {
+		t.Fatalf("after newer-epoch fence complete: expected healthy, got %s", got)
+	}
+	if got := a.Projection().Epoch; got != 2 {
+		t.Fatalf("projection epoch=%d, want 2", got)
+	}
+
+	// Late straggler: the OLD fence callback finally arrives. It
+	// must be dropped without disturbing the already-healthy state.
+	exec.fireFence(FenceResult{
+		ReplicaID:       oldFence.replicaID,
+		SessionID:       oldFence.sessionID,
+		Epoch:           oldFence.epoch,
+		EndpointVersion: oldFence.endpointVersion,
+		Success:         true,
+	})
+	if got := a.Projection().Mode; got != engine.ModeHealthy {
+		t.Fatalf("late old-epoch callback perturbed healthy state, mode=%s", got)
 	}
 }
 

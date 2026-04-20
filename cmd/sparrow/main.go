@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/adapter"
+	"github.com/seaweedfs/seaweed-block/core/authority"
 	"github.com/seaweedfs/seaweed-block/core/engine"
 	"github.com/seaweedfs/seaweed-block/core/ops"
 	"github.com/seaweedfs/seaweed-block/core/storage"
@@ -19,12 +20,15 @@ import (
 )
 
 type options struct {
-	json        bool
-	runs        int
-	httpAddr    string
-	calibrate   bool
-	persistDemo bool
-	persistDir  string
+	json           bool
+	runs           int
+	httpAddr       string
+	calibrate      bool
+	persistDemo    bool
+	persistDir     string
+	authorityStore  string
+	s5Bootstrap     bool
+	s7RestartSmoke  bool
 }
 
 type demoResult struct {
@@ -48,6 +52,10 @@ func main() {
 		os.Exit(runCalibration(opts))
 	case opts.persistDemo:
 		os.Exit(runPersistDemo(opts))
+	case opts.s5Bootstrap:
+		os.Exit(runS5Bootstrap(opts))
+	case opts.s7RestartSmoke:
+		os.Exit(runS7RestartSmoke(opts))
 	default:
 		os.Exit(runSparrow(opts))
 	}
@@ -62,12 +70,39 @@ func parseFlags(args []string) (options, error) {
 	fs.BoolVar(&opts.calibrate, "calibrate", false, "run the Phase 06 calibration package")
 	fs.BoolVar(&opts.persistDemo, "persist-demo", false, "run the single-node persistence demonstration")
 	fs.StringVar(&opts.persistDir, "persist-dir", "", "directory for --persist-demo backing file")
+	fs.StringVar(&opts.authorityStore, "authority-store", "", "directory for P14 S5 durable authority records")
+	fs.BoolVar(&opts.s5Bootstrap, "s5-bootstrap", false, "run the P14 S5 durable authority bootstrap (requires --authority-store)")
+	// --s7-restart-smoke is a test-only entry for the P14 S7 real-
+	// subprocess restart smoke. It is intentionally undocumented in
+	// operator tooling; the flag help string is terse so running
+	// sparrow with --help doesn't advertise it as a workflow.
+	fs.BoolVar(&opts.s7RestartSmoke, "s7-restart-smoke", false, "internal test-only: P14 S7 restart smoke (requires --authority-store)")
 	fs.SetOutput(ioDiscard{})
 	if err := fs.Parse(args); err != nil {
 		return options{}, err
 	}
 	if opts.runs < 1 {
 		return options{}, fmt.Errorf("--runs must be >= 1")
+	}
+	// --authority-store only makes sense under the durable
+	// bootstrap mode. The default validation demos are SMOKE
+	// tests by design — their Bind → Reassign → Reassign
+	// sequence is not restart-clean against a persisted store
+	// and forcing it to be would smuggle durability-aware
+	// branches into demo code. Keep the durable flag strict:
+	// only --s5-bootstrap consumes it. Future slices (S6 / S7)
+	// can widen this.
+	if opts.authorityStore != "" && !opts.s5Bootstrap && !opts.s7RestartSmoke {
+		return options{}, fmt.Errorf("--authority-store requires --s5-bootstrap or --s7-restart-smoke; use one of those for the durable authority path")
+	}
+	if opts.s5Bootstrap && opts.authorityStore == "" {
+		return options{}, fmt.Errorf("--s5-bootstrap requires --authority-store <dir>")
+	}
+	if opts.s7RestartSmoke && opts.authorityStore == "" {
+		return options{}, fmt.Errorf("--s7-restart-smoke requires --authority-store <dir>")
+	}
+	if opts.s5Bootstrap && opts.s7RestartSmoke {
+		return options{}, fmt.Errorf("--s5-bootstrap and --s7-restart-smoke are mutually exclusive")
 	}
 	return opts, nil
 }
@@ -86,10 +121,14 @@ func runSparrow(opts options) int {
 		defer shutdownServer(srv)
 	}
 
+	// The default validation path is in-memory by design.
+	// Durable authority (--authority-store) is only valid under
+	// --s5-bootstrap; see parseFlags for why. Attempting to run
+	// the demos against a durable store is rejected earlier.
 	allPassed := true
 	var allResults [][]demoResult
 	for i := 0; i < opts.runs; i++ {
-		results, err := runValidationPass(state)
+		results, err := runValidationPass(state, "vol1")
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "sparrow: validation run %d: %v\n", i+1, err)
 			return 3
@@ -130,8 +169,36 @@ func runSparrow(opts options) int {
 	return 1
 }
 
-func runValidationPass(state *ops.State) ([]demoResult, error) {
+func runValidationPass(state *ops.State, volumeID string, pubOpts ...authority.PublisherOption) ([]demoResult, error) {
 	var results []demoResult
+
+	// All three demos route assignment truth through the S2 authority
+	// publisher — the publisher mints Epoch/EndpointVersion, no demo
+	// code constructs AssignmentInfo directly.
+	//
+	// pubOpts is an S5-era wiring seam kept for forward-compat,
+	// but runSparrow ALWAYS passes the empty option set today:
+	// --authority-store is rejected at parseFlags unless paired
+	// with --s5-bootstrap, which is a separate mode and does not
+	// reach this function. The default validation demos run
+	// entirely in memory. Any LoadErrors() from an empty-option
+	// publisher will be zero-length; the logging loop below is a
+	// no-op in the default path and is kept for forward-compat
+	// with future slices that may legitimately pass a store here.
+	//
+	// volumeID is caller-chosen so future slices (S6/S7) can
+	// widen the flag surface without reworking this signature.
+	// Today the only caller is runSparrow, which passes "vol1".
+	dir := authority.NewStaticDirective(nil)
+	pub := authority.NewPublisher(dir, pubOpts...)
+	if errs := pub.LoadErrors(); len(errs) > 0 {
+		for _, e := range errs {
+			log.Printf("sparrow: durable authority reload skip: %v", e)
+		}
+	}
+	pubCtx, pubCancel := context.WithCancel(context.Background())
+	defer pubCancel()
+	go func() { _ = pub.Run(pubCtx) }()
 
 	primaryStore := storage.NewBlockStore(256, 4096)
 	replicaStore := storage.NewBlockStore(256, 4096)
@@ -160,13 +227,17 @@ func runValidationPass(state *ops.State) ([]demoResult, error) {
 		_ = replicaStore.ApplyEntry(lba, data, pH)
 	}
 	_, _ = replicaStore.Sync()
-	adpt.OnAssignment(adapter.AssignmentInfo{
-		VolumeID: "vol1", ReplicaID: "r1",
-		Epoch: 1, EndpointVersion: 1,
+
+	bridge1Ctx, bridge1Cancel := context.WithCancel(pubCtx)
+	go authority.Bridge(bridge1Ctx, pub, adpt, volumeID, "r1")
+	dir.Append(authority.AssignmentAsk{
+		VolumeID: volumeID, ReplicaID: "r1",
 		DataAddr: replicaAddr, CtrlAddr: replicaAddr,
+		Intent: authority.IntentBind,
 	})
 	time.Sleep(200 * time.Millisecond)
 	results = append(results, buildResult("healthy", adpt.Projection()))
+	bridge1Cancel()
 
 	for i := uint32(10); i < 20; i++ {
 		data := make([]byte, 4096)
@@ -177,12 +248,16 @@ func runValidationPass(state *ops.State) ([]demoResult, error) {
 	exec2 := transport.NewBlockExecutor(primaryStore, replicaAddr)
 	adpt2 := adapter.NewVolumeReplicaAdapter(exec2)
 	state.Update("catch_up", adpt2)
-	adpt2.OnAssignment(adapter.AssignmentInfo{
-		VolumeID: "vol1", ReplicaID: "r1",
-		Epoch: 2, EndpointVersion: 2,
+
+	bridge2Ctx, bridge2Cancel := context.WithCancel(pubCtx)
+	go authority.Bridge(bridge2Ctx, pub, adpt2, volumeID, "r1")
+	dir.Append(authority.AssignmentAsk{
+		VolumeID: volumeID, ReplicaID: "r1",
 		DataAddr: replicaAddr, CtrlAddr: replicaAddr,
+		Intent: authority.IntentReassign,
 	})
 	results = append(results, buildResult("catch_up", waitForMode(adpt2, engine.ModeHealthy, 5*time.Second)))
+	bridge2Cancel()
 
 	replicaStore2 := storage.NewBlockStore(256, 4096)
 	replicaListener2, err := transport.NewReplicaListener("127.0.0.1:0", replicaStore2)
@@ -196,10 +271,14 @@ func runValidationPass(state *ops.State) ([]demoResult, error) {
 	exec3 := transport.NewBlockExecutor(primaryStore, replicaAddr2)
 	adpt3 := adapter.NewVolumeReplicaAdapter(exec3)
 	state.Update("rebuild", adpt3)
-	adpt3.OnAssignment(adapter.AssignmentInfo{
-		VolumeID: "vol1", ReplicaID: "r1",
-		Epoch: 3, EndpointVersion: 3,
+
+	bridge3Ctx, bridge3Cancel := context.WithCancel(pubCtx)
+	defer bridge3Cancel()
+	go authority.Bridge(bridge3Ctx, pub, adpt3, volumeID, "r1")
+	dir.Append(authority.AssignmentAsk{
+		VolumeID: volumeID, ReplicaID: "r1",
 		DataAddr: replicaAddr2, CtrlAddr: replicaAddr2,
+		Intent: authority.IntentReassign,
 	})
 	results = append(results, buildResult("rebuild", waitForMode(adpt3, engine.ModeHealthy, 5*time.Second)))
 

@@ -75,7 +75,26 @@ func TestV3_Decision_CaughtUp_NoRecovery(t *testing.T) {
 	if r.Projection.RecoveryDecision != DecisionNone {
 		t.Fatalf("R>=H should be none, got %s", r.Projection.RecoveryDecision)
 	}
-	assertHasCommand(t, r, "PublishHealthy")
+	// P14 S1: caught-up path now emits FenceAtEpoch first to
+	// advance the replica's lineage gate. PublishHealthy MUST NOT
+	// be in the command list yet, and projection Mode MUST NOT be
+	// healthy — the operator-visible contract is ack-gated.
+	assertHasCommand(t, r, "FenceAtEpoch")
+	for _, cmd := range r.Commands {
+		if CommandKind(cmd) == "PublishHealthy" {
+			t.Fatal("PublishHealthy emitted before FenceCompleted — contract is ack-gated")
+		}
+	}
+	if r.Projection.Mode == ModeHealthy {
+		t.Fatalf("projection flipped healthy before fence complete: %s", r.Projection.Mode)
+	}
+
+	// Complete the fence → engine re-runs decide → emits PublishHealthy.
+	r2 := Apply(st, FenceCompleted{ReplicaID: "r1", Epoch: st.Identity.Epoch, EndpointVersion: st.Identity.EndpointVersion})
+	assertHasCommand(t, r2, "PublishHealthy")
+	if r2.Projection.Mode != ModeHealthy {
+		t.Fatalf("after FenceCompleted: expected healthy, got %s", r2.Projection.Mode)
+	}
 }
 
 func TestV3_Decision_CatchUp_GapWithinWAL(t *testing.T) {
@@ -656,6 +675,187 @@ func TestV3_Property_RandomStaleSessionEventsCannotMutateLiveSession(t *testing.
 		if st.Session.TargetLSN != 100 {
 			t.Fatalf("iteration %d: stale event changed target to %d", i, st.Session.TargetLSN)
 		}
+	}
+}
+
+// ============================================================
+// P14 S1 — Dedicated Fence Proof Tests
+//
+// These tests pin the operator-visible contract of the ack-gated
+// fence on the caught-up path. They must remain together so the
+// contract is auditable as a single unit.
+//
+// Contract surface (what these prove):
+//   1. Caught-up path emits ONLY FenceAtEpoch — no StartCatchUp,
+//      no StartRebuild. Fence is not a data-recovery session.
+//   2. PublishHealthy MUST NOT appear in any command stream before
+//      FenceCompleted has been applied.
+//   3. FenceFailed is fail-closed: FencedEpoch does not advance.
+//      The next probe re-runs decide() and re-emits FenceAtEpoch.
+//   4. A FenceCompleted for an old epoch (under a newer identity)
+//      is rejected — identity-advancement invalidates in-flight
+//      fence results.
+// ============================================================
+
+// TestFence_CaughtUpPath_UsesNoDataRecovery — a caught-up replica
+// under a newer identity epoch must not trigger a catch-up or
+// rebuild session. The only command the engine issues on the
+// caught-up branch is FenceAtEpoch. This is the structural proof
+// that fence is a command+event pair, NOT a session lifecycle.
+func TestFence_CaughtUpPath_UsesNoDataRecovery(t *testing.T) {
+	st := &ReplicaState{}
+	assignAndProbe(st)
+	r := Apply(st, RecoveryFactsObserved{ReplicaID: "r1", R: 100, S: 10, H: 100})
+
+	assertHasCommand(t, r, "FenceAtEpoch")
+	assertNoCommand(t, r, "StartCatchUp")
+	assertNoCommand(t, r, "StartRebuild")
+	// Also not a session — session phase is untouched.
+	if st.Session.Phase != PhaseNone {
+		t.Fatalf("fence is not a session: session phase=%s, want none",
+			st.Session.Phase)
+	}
+	if st.Session.SessionID != 0 {
+		t.Fatalf("fence must not allocate a session in engine state, got sid=%d",
+			st.Session.SessionID)
+	}
+}
+
+// TestFence_HealthyOnlyAfterFenceComplete — operator-visible
+// contract: PublishHealthy is held until FenceCompleted bumps the
+// replica's FencedEpoch. Observed from the projection Mode and the
+// command stream.
+func TestFence_HealthyOnlyAfterFenceComplete(t *testing.T) {
+	st := &ReplicaState{}
+	assignAndProbe(st)
+	r1 := Apply(st, RecoveryFactsObserved{ReplicaID: "r1", R: 100, S: 10, H: 100})
+
+	// Before FenceCompleted: no PublishHealthy, Mode not Healthy.
+	assertNoCommand(t, r1, "PublishHealthy")
+	if r1.Projection.Mode == ModeHealthy {
+		t.Fatalf("pre-fence projection flipped Healthy: %s", r1.Projection.Mode)
+	}
+	if st.Reachability.FencedEpoch >= st.Identity.Epoch {
+		t.Fatalf("pre-fence FencedEpoch=%d must be < Identity.Epoch=%d",
+			st.Reachability.FencedEpoch, st.Identity.Epoch)
+	}
+
+	// FenceCompleted at the current lineage — engine re-runs decide
+	// and must now emit PublishHealthy.
+	r2 := Apply(st, FenceCompleted{
+		ReplicaID:       "r1",
+		Epoch:           st.Identity.Epoch,
+		EndpointVersion: st.Identity.EndpointVersion,
+	})
+	assertHasCommand(t, r2, "PublishHealthy")
+	if r2.Projection.Mode != ModeHealthy {
+		t.Fatalf("post-fence projection not Healthy: %s", r2.Projection.Mode)
+	}
+	if st.Reachability.FencedEpoch != st.Identity.Epoch {
+		t.Fatalf("FencedEpoch=%d must match Identity.Epoch=%d after fence",
+			st.Reachability.FencedEpoch, st.Identity.Epoch)
+	}
+}
+
+// TestFence_FailureLeavesFencedEpochUnchanged — fail-closed
+// contract: FenceFailed does NOT advance FencedEpoch, and does NOT
+// re-emit FenceAtEpoch on its own. Retry is probe-driven: the next
+// successful probe re-runs decide() and re-emits FenceAtEpoch.
+func TestFence_FailureLeavesFencedEpochUnchanged(t *testing.T) {
+	st := &ReplicaState{}
+	assignAndProbe(st)
+	// Caught-up fact set — the engine should emit FenceAtEpoch.
+	r1 := Apply(st, RecoveryFactsObserved{ReplicaID: "r1", R: 100, S: 10, H: 100})
+	assertHasCommand(t, r1, "FenceAtEpoch")
+	preFencedEpoch := st.Reachability.FencedEpoch
+	if preFencedEpoch >= st.Identity.Epoch {
+		t.Fatalf("pre-fence FencedEpoch=%d must be < Identity.Epoch=%d",
+			preFencedEpoch, st.Identity.Epoch)
+	}
+
+	// FenceFailed at the current lineage — MUST NOT advance
+	// FencedEpoch and MUST NOT re-emit FenceAtEpoch here.
+	r2 := Apply(st, FenceFailed{
+		ReplicaID:       "r1",
+		Epoch:           st.Identity.Epoch,
+		EndpointVersion: st.Identity.EndpointVersion,
+		Reason:          "simulated_barrier_timeout",
+	})
+	if st.Reachability.FencedEpoch != preFencedEpoch {
+		t.Fatalf("FenceFailed advanced FencedEpoch: pre=%d post=%d",
+			preFencedEpoch, st.Reachability.FencedEpoch)
+	}
+	assertNoCommand(t, r2, "FenceAtEpoch")
+	assertNoCommand(t, r2, "PublishHealthy")
+	if r2.Projection.Mode == ModeHealthy {
+		t.Fatalf("post-FenceFailed projection must not be Healthy, got %s",
+			r2.Projection.Mode)
+	}
+
+	// Probe-driven retry: another successful probe re-runs decide()
+	// and emits FenceAtEpoch again.
+	r3 := Apply(st, ProbeSucceeded{
+		ReplicaID: "r1", EndpointVersion: 1, TransportEpoch: 1,
+	})
+	assertHasCommand(t, r3, "FenceAtEpoch")
+	assertNoCommand(t, r3, "PublishHealthy")
+}
+
+// TestFence_StaleOldEpochRejectedAfterFenceOnCaughtUp — identity
+// advance invalidates in-flight fences: a FenceCompleted carrying
+// an older epoch than the current identity must not advance the
+// gate and must not produce healthy publication.
+func TestFence_StaleOldEpochRejectedAfterFenceOnCaughtUp(t *testing.T) {
+	st := &ReplicaState{}
+	// Epoch 1 identity, caught-up, fence emitted but in-flight.
+	assignAndProbe(st)
+	r1 := Apply(st, RecoveryFactsObserved{ReplicaID: "r1", R: 100, S: 10, H: 100})
+	assertHasCommand(t, r1, "FenceAtEpoch")
+
+	// Identity advances to epoch 2 before the fence completes.
+	// Engine must clear reachability/session and request a probe.
+	Apply(st, AssignmentObserved{
+		VolumeID: "vol1", ReplicaID: "r1",
+		Epoch: 2, EndpointVersion: 2,
+		DataAddr: "a", CtrlAddr: "b",
+	})
+	if st.Identity.Epoch != 2 {
+		t.Fatalf("identity did not advance, got epoch=%d", st.Identity.Epoch)
+	}
+
+	// Stale FenceCompleted arrives for epoch 1 (the superseded
+	// attempt). It must be rejected: FencedEpoch must not jump to
+	// stale epoch, and the replica must not become Healthy.
+	rStale := Apply(st, FenceCompleted{
+		ReplicaID:       "r1",
+		Epoch:           1,
+		EndpointVersion: 1,
+	})
+	if st.Reachability.FencedEpoch >= st.Identity.Epoch {
+		t.Fatalf("stale FenceCompleted advanced FencedEpoch: got %d, identity=%d",
+			st.Reachability.FencedEpoch, st.Identity.Epoch)
+	}
+	assertTraceContains(t, rStale, "stale_fence_completed")
+	assertNoCommand(t, rStale, "PublishHealthy")
+	if rStale.Projection.Mode == ModeHealthy {
+		t.Fatalf("stale fence must not produce Healthy, got %s", rStale.Projection.Mode)
+	}
+
+	// A fresh fence at the new epoch must advance the gate normally.
+	Apply(st, ProbeSucceeded{ReplicaID: "r1", EndpointVersion: 2, TransportEpoch: 2})
+	Apply(st, RecoveryFactsObserved{ReplicaID: "r1", EndpointVersion: 2, TransportEpoch: 2, R: 100, S: 10, H: 100})
+	rFresh := Apply(st, FenceCompleted{
+		ReplicaID:       "r1",
+		Epoch:           2,
+		EndpointVersion: 2,
+	})
+	if st.Reachability.FencedEpoch != 2 {
+		t.Fatalf("fresh fence did not advance FencedEpoch to 2, got %d",
+			st.Reachability.FencedEpoch)
+	}
+	assertHasCommand(t, rFresh, "PublishHealthy")
+	if rFresh.Projection.Mode != ModeHealthy {
+		t.Fatalf("post-fresh-fence projection not Healthy: %s", rFresh.Projection.Mode)
 	}
 }
 

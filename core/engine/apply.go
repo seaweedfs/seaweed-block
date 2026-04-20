@@ -91,6 +91,16 @@ func Apply(st *ReplicaState, ev Event) ApplyResult {
 			break
 		}
 		applySessionInvalidated(st, e, &result, trace)
+	case FenceCompleted:
+		if !checkReplicaID(st, e.ReplicaID, &result, trace) {
+			break
+		}
+		applyFenceCompleted(st, e, &result, trace)
+	case FenceFailed:
+		if !checkReplicaID(st, e.ReplicaID, &result, trace) {
+			break
+		}
+		applyFenceFailed(st, e, &result, trace)
 	default:
 		trace("unknown_event", "ignored")
 	}
@@ -319,9 +329,26 @@ func decide(st *ReplicaState, r *ApplyResult, trace func(string, string)) {
 		st.Recovery.DecisionReason = "caught_up"
 		trace("decision", "none (R >= H)")
 
-		// If no active session and caught up, publish healthy.
+		// Ack-gated caught-up handoff: the replica's lineage gate
+		// needs the new epoch established before we can publish
+		// healthy, otherwise stale old-epoch traffic could still
+		// land. If Identity.Epoch > Reachability.FencedEpoch, emit
+		// FenceAtEpoch and HOLD PublishHealthy. PublishHealthy is
+		// only emitted once FenceCompleted has bumped FencedEpoch
+		// to match Identity.Epoch. On FenceFailed the engine leaves
+		// FencedEpoch unchanged; the next probe re-runs decide()
+		// and may re-emit the fence.
 		if st.Session.Phase == PhaseNone || st.Session.Phase == PhaseCompleted {
-			r.Commands = append(r.Commands, PublishHealthy{ReplicaID: st.Identity.ReplicaID})
+			if st.Identity.Epoch > st.Reachability.FencedEpoch {
+				r.Commands = append(r.Commands, FenceAtEpoch{
+					ReplicaID:       st.Identity.ReplicaID,
+					Epoch:           st.Identity.Epoch,
+					EndpointVersion: st.Identity.EndpointVersion,
+				})
+				trace("command", "FenceAtEpoch")
+			} else {
+				r.Commands = append(r.Commands, PublishHealthy{ReplicaID: st.Identity.ReplicaID})
+			}
 		}
 
 	case R >= S && R < H:
@@ -419,6 +446,12 @@ func applySessionCompleted(st *ReplicaState, e SessionClosedCompleted, r *ApplyR
 	st.Session.Phase = PhaseCompleted
 	st.Session.AchievedLSN = e.AchievedLSN
 	st.Recovery.R = e.AchievedLSN // advance replica boundary
+	// A successful catch-up/rebuild session sent mutating traffic
+	// at the current identity epoch, so the replica's lineage gate
+	// is now at this epoch. Treat completion as an implicit fence.
+	if st.Identity.Epoch > st.Reachability.FencedEpoch {
+		st.Reachability.FencedEpoch = st.Identity.Epoch
+	}
 	trace("session_completed", "")
 
 	// Re-evaluate: may be caught up now.
@@ -453,6 +486,52 @@ func applySessionInvalidated(st *ReplicaState, e SessionInvalidated, r *ApplyRes
 	trace("session_invalidated", e.Reason)
 }
 
+// --- Fence events (P14 S1) ---
+
+func applyFenceCompleted(st *ReplicaState, e FenceCompleted, r *ApplyResult, trace func(string, string)) {
+	// Lineage check: the fence result must belong to the current
+	// identity. A fence at an older epoch than Identity.Epoch is
+	// stale (identity advanced mid-fence); drop without mutating.
+	// A fence for an endpoint the engine no longer recognizes is
+	// also stale.
+	if e.Epoch < st.Identity.Epoch {
+		trace("stale_fence_completed", fmt.Sprintf("event epoch=%d older than current=%d",
+			e.Epoch, st.Identity.Epoch))
+		return
+	}
+	if e.Epoch == st.Identity.Epoch && e.EndpointVersion < st.Identity.EndpointVersion {
+		trace("stale_fence_completed", fmt.Sprintf("same epoch=%d but older endpointVersion=%d < current=%d",
+			e.Epoch, e.EndpointVersion, st.Identity.EndpointVersion))
+		return
+	}
+
+	if e.Epoch > st.Reachability.FencedEpoch {
+		st.Reachability.FencedEpoch = e.Epoch
+		trace("fenced", fmt.Sprintf("epoch=%d", e.Epoch))
+	} else {
+		trace("fence_completed_idempotent", fmt.Sprintf("epoch=%d already fenced", e.Epoch))
+	}
+
+	// Re-run decide: a caught-up replica that was waiting behind
+	// the fence can now publish healthy.
+	if st.Recovery.R != 0 || st.Recovery.S != 0 || st.Recovery.H != 0 {
+		decide(st, r, trace)
+	}
+}
+
+func applyFenceFailed(st *ReplicaState, e FenceFailed, r *ApplyResult, trace func(string, string)) {
+	// Fence failure is fail-closed: FencedEpoch is NOT advanced.
+	// The next probe will re-run decide() and re-emit FenceAtEpoch
+	// if the engine still believes the replica is caught up under
+	// the new epoch. We do NOT re-emit here; retry is probe-driven.
+	if e.Epoch < st.Identity.Epoch {
+		trace("stale_fence_failed", fmt.Sprintf("event epoch=%d older than current=%d",
+			e.Epoch, st.Identity.Epoch))
+		return
+	}
+	trace("fence_failed", fmt.Sprintf("epoch=%d reason=%s", e.Epoch, e.Reason))
+}
+
 func phaseMismatchDetail(eventID, currentID uint64) string {
 	if currentID == 0 {
 		return fmt.Sprintf("event session=%d but no active session", eventID)
@@ -475,9 +554,20 @@ func derivePublication(st *ReplicaState, trace func(string, string)) {
 
 	switch {
 	case st.Recovery.Decision == DecisionNone && st.Reachability.Status == ProbeReachable:
-		st.Publication.Healthy = true
-		st.Publication.Degraded = false
-		st.Publication.NeedsAttention = false
+		// Caught-up branch. Ack-gated on fence completion (P14 S1):
+		// the operator-visible Healthy must not flip true until the
+		// replica's lineage gate has observed Identity.Epoch via
+		// FenceCompleted. Otherwise stale old-epoch traffic could
+		// still land while the projection already reads healthy.
+		if st.Identity.Epoch > st.Reachability.FencedEpoch {
+			st.Publication.Healthy = false
+			st.Publication.Degraded = false
+			st.Publication.NeedsAttention = true
+		} else {
+			st.Publication.Healthy = true
+			st.Publication.Degraded = false
+			st.Publication.NeedsAttention = false
+		}
 	case st.Session.Phase == PhaseRunning || st.Session.Phase == PhaseStarting:
 		st.Publication.Healthy = false
 		st.Publication.Degraded = false

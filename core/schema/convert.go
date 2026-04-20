@@ -100,6 +100,21 @@ func ToEngineEvent(ei EventInput) (engine.Event, error) {
 			Reason:    ei.Reason,
 		}, nil
 
+	case "FenceCompleted":
+		return engine.FenceCompleted{
+			ReplicaID:       ei.ReplicaID,
+			Epoch:           ei.Epoch,
+			EndpointVersion: ei.EndpointVersion,
+		}, nil
+
+	case "FenceFailed":
+		return engine.FenceFailed{
+			ReplicaID:       ei.ReplicaID,
+			Epoch:           ei.Epoch,
+			EndpointVersion: ei.EndpointVersion,
+			Reason:          ei.Reason,
+		}, nil
+
 	default:
 		return nil, fmt.Errorf("schema: unknown event kind %q", ei.Kind)
 	}
