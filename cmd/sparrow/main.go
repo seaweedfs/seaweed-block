@@ -26,8 +26,9 @@ type options struct {
 	calibrate      bool
 	persistDemo    bool
 	persistDir     string
-	authorityStore string
-	s5Bootstrap    bool
+	authorityStore  string
+	s5Bootstrap     bool
+	s7RestartSmoke  bool
 }
 
 type demoResult struct {
@@ -53,6 +54,8 @@ func main() {
 		os.Exit(runPersistDemo(opts))
 	case opts.s5Bootstrap:
 		os.Exit(runS5Bootstrap(opts))
+	case opts.s7RestartSmoke:
+		os.Exit(runS7RestartSmoke(opts))
 	default:
 		os.Exit(runSparrow(opts))
 	}
@@ -69,6 +72,11 @@ func parseFlags(args []string) (options, error) {
 	fs.StringVar(&opts.persistDir, "persist-dir", "", "directory for --persist-demo backing file")
 	fs.StringVar(&opts.authorityStore, "authority-store", "", "directory for P14 S5 durable authority records")
 	fs.BoolVar(&opts.s5Bootstrap, "s5-bootstrap", false, "run the P14 S5 durable authority bootstrap (requires --authority-store)")
+	// --s7-restart-smoke is a test-only entry for the P14 S7 real-
+	// subprocess restart smoke. It is intentionally undocumented in
+	// operator tooling; the flag help string is terse so running
+	// sparrow with --help doesn't advertise it as a workflow.
+	fs.BoolVar(&opts.s7RestartSmoke, "s7-restart-smoke", false, "internal test-only: P14 S7 restart smoke (requires --authority-store)")
 	fs.SetOutput(ioDiscard{})
 	if err := fs.Parse(args); err != nil {
 		return options{}, err
@@ -84,11 +92,17 @@ func parseFlags(args []string) (options, error) {
 	// branches into demo code. Keep the durable flag strict:
 	// only --s5-bootstrap consumes it. Future slices (S6 / S7)
 	// can widen this.
-	if opts.authorityStore != "" && !opts.s5Bootstrap {
-		return options{}, fmt.Errorf("--authority-store requires --s5-bootstrap; use --s5-bootstrap for the durable authority path")
+	if opts.authorityStore != "" && !opts.s5Bootstrap && !opts.s7RestartSmoke {
+		return options{}, fmt.Errorf("--authority-store requires --s5-bootstrap or --s7-restart-smoke; use one of those for the durable authority path")
 	}
 	if opts.s5Bootstrap && opts.authorityStore == "" {
 		return options{}, fmt.Errorf("--s5-bootstrap requires --authority-store <dir>")
+	}
+	if opts.s7RestartSmoke && opts.authorityStore == "" {
+		return options{}, fmt.Errorf("--s7-restart-smoke requires --authority-store <dir>")
+	}
+	if opts.s5Bootstrap && opts.s7RestartSmoke {
+		return options{}, fmt.Errorf("--s5-bootstrap and --s7-restart-smoke are mutually exclusive")
 	}
 	return opts, nil
 }
