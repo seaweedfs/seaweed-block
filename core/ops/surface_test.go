@@ -114,19 +114,82 @@ func TestDiagnose_OnlyReadsLowerTruth(t *testing.T) {
 	var asMap map[string]json.RawMessage
 	_ = json.Unmarshal(raw, &asMap)
 	allowed := map[string]bool{
-		"current_demo":     true,
-		"mode":             true,
-		"session_phase":    true,
-		"decision":         true,
-		"reason":           true,
-		"last_trace_step":  true,
-		"watchdog_summary": true,
-		"note":             true,
+		"current_demo":      true,
+		"mode":              true,
+		"session_phase":     true,
+		"decision":          true,
+		"reason":            true,
+		"epoch":             true,
+		"frontiers":         true,
+		"last_session_kind": true,
+		"last_decision":     true,
+		"last_trace_step":   true,
+		"watchdog_summary":  true,
+		"support_claim":     true,
+		"note":              true,
 	}
 	for k := range asMap {
 		if !allowed[k] {
 			t.Fatalf("/diagnose exposes field %q not in the allowed single-node set", k)
 		}
+	}
+}
+
+// TestDiagnose_SupportClaimReferencesEnvelope proves /diagnose
+// surfaces a bounded support claim that points operators at the
+// support-envelope doc. This is the P13 S3 honesty anchor — if the
+// SupportClaim wording ever drifts (e.g. implies cluster closure),
+// this test fails.
+func TestDiagnose_SupportClaimReferencesEnvelope(t *testing.T) {
+	url, cleanup := newTestServer(t, NewState())
+	defer cleanup()
+
+	resp, _ := http.Get(url + "/diagnose")
+	defer resp.Body.Close()
+	var body diagnoseBody
+	_ = json.NewDecoder(resp.Body).Decode(&body)
+
+	if body.SupportClaim == "" {
+		t.Fatal("/diagnose must carry a support_claim naming what this slice supports")
+	}
+	low := strings.ToLower(body.SupportClaim)
+	if !strings.Contains(low, "bounded") {
+		t.Fatalf("support_claim must call itself bounded: %q", body.SupportClaim)
+	}
+	forbidden := []string{"cluster", "failover", "promotion", "topology authority", "rf3", "production"}
+	for _, bad := range forbidden {
+		if strings.Contains(low, bad) {
+			t.Fatalf("support_claim contains forbidden unbounded-scope word %q: %q", bad, body.SupportClaim)
+		}
+	}
+	if !strings.Contains(low, "support-envelope") {
+		t.Fatalf("support_claim must point at the support-envelope doc: %q", body.SupportClaim)
+	}
+}
+
+// TestDiagnose_EmptyStateFrontiersAreZero proves the new frontier
+// fields stay honest when no demo has run. Every numeric stays
+// zero; no fabricated values.
+func TestDiagnose_EmptyStateFrontiersAreZero(t *testing.T) {
+	url, cleanup := newTestServer(t, NewState())
+	defer cleanup()
+
+	resp, _ := http.Get(url + "/diagnose")
+	defer resp.Body.Close()
+	var body diagnoseBody
+	_ = json.NewDecoder(resp.Body).Decode(&body)
+
+	if body.Epoch != 0 {
+		t.Fatalf("empty diagnose: Epoch=%d, want 0", body.Epoch)
+	}
+	if body.Frontiers.R != 0 || body.Frontiers.S != 0 || body.Frontiers.H != 0 {
+		t.Fatalf("empty diagnose: frontiers=%+v, want zeros", body.Frontiers)
+	}
+	if body.LastDecision != "" {
+		t.Fatalf("empty diagnose: LastDecision=%q, want empty", body.LastDecision)
+	}
+	if body.LastSessionKind != "" {
+		t.Fatalf("empty diagnose: LastSessionKind=%q, want empty", body.LastSessionKind)
 	}
 }
 

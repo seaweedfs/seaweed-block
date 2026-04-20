@@ -387,6 +387,34 @@ func (s *Store) AllBlocks() map[uint32][]byte {
 	return out
 }
 
+// SimulateAbruptStop releases the file handle without the graceful
+// Close() sequence — no final fsync, no group-committer drain.
+// On-disk state is exactly what Sync() made durable before this
+// call; nothing later is promised to survive.
+//
+// Test-only primitive. Production code must use Close(). Mirrors
+// the same capability WALStore.SimulateAbruptStop exports so
+// adapter/transport tests can qualify abrupt-fault behavior
+// uniformly across both persistent backends.
+func (s *Store) SimulateAbruptStop() error {
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return nil
+	}
+	s.closed = true
+	s.mu.Unlock()
+	if s.committer != nil {
+		s.committer.Stop()
+	}
+	if s.fd != nil {
+		err := s.fd.Close()
+		s.fd = nil
+		return err
+	}
+	return nil
+}
+
 // Close fsyncs and releases the file. Idempotent.
 func (s *Store) Close() error {
 	s.mu.Lock()

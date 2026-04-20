@@ -592,6 +592,52 @@ func bytesAllZero(data, zero []byte) bool {
 	return true
 }
 
+// SimulateAbruptStop releases the file handle without the graceful
+// Close() sequence. Specifically:
+//
+//   - NO superblock persist (walHead/walTail not written back)
+//   - NO final flusher pass (flusher exits via StopAbrupt — the
+//     final best-effort flushOnce is skipped so no dirty-map
+//     entries get propagated into the extent on the way out)
+//   - NO group-committer drain (committer.Stop exits without
+//     running a final fsync batch)
+//
+// After this call, the on-disk state is exactly what prior Sync()
+// calls made durable. Any dirty-map entries that had not yet made
+// it to the extent remain in the WAL; recovery must replay them.
+//
+// The flusher and committer goroutines ARE joined (via their
+// doneCh) so the test harness does not leak them — this is the
+// one concession to test hygiene. True kill -9 would leave the
+// goroutines dangling entirely; for product-level durability
+// qualification ("acked data survives") that distinction does
+// not change what survives, because acked data was already
+// fsync'd to the WAL before this call.
+//
+// Test-only primitive. Production code must use Close().
+func (s *WALStore) SimulateAbruptStop() error {
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return nil
+	}
+	s.closed = true
+	s.mu.Unlock()
+
+	if s.flusher != nil {
+		s.flusher.StopAbrupt()
+	}
+	if s.committer != nil {
+		s.committer.Stop()
+	}
+	if s.fd != nil {
+		err := s.fd.Close()
+		s.fd = nil
+		return err
+	}
+	return nil
+}
+
 // Close persists current WAL boundaries into the superblock,
 // fsyncs the file, stops the group committer, and releases the
 // underlying file. Idempotent.
