@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/seaweedfs/seaweed-block/core/authority"
@@ -136,7 +137,7 @@ func TestS7Process_RestartReportsEvidence(t *testing.T) {
 
 	// Write one corrupt record next to it.
 	corrupt := "{not valid json}"
-	badPath := dir + string(os.PathSeparator) + "s7-bad.v3auth.json"
+	badPath := filepath.Join(dir, "s7-bad.v3auth.json")
 	if err := os.WriteFile(badPath, []byte(corrupt), 0o644); err != nil {
 		t.Fatalf("write corrupt: %v", err)
 	}

@@ -2,12 +2,14 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestS7Process_RealSubprocessRestartSmoke is the L2 process
@@ -39,6 +41,12 @@ func TestS7Process_RealSubprocessRestartSmoke(t *testing.T) {
 		t.Skip("skipping subprocess smoke under -short")
 	}
 
+	// Bound the whole test (build + two subprocess runs) to a
+	// conservative deadline so a hung `go build` or subprocess
+	// dies when `go test` times out instead of lingering.
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
 	tmp := t.TempDir()
 	binName := "sparrow-s7-smoke"
 	if runtime.GOOS == "windows" {
@@ -49,7 +57,7 @@ func TestS7Process_RealSubprocessRestartSmoke(t *testing.T) {
 	// Build the sparrow binary against the current module. Using
 	// the Go toolchain the test runs under keeps versions aligned
 	// with the test process.
-	buildCmd := exec.Command("go", "build", "-o", binPath, "github.com/seaweedfs/seaweed-block/cmd/sparrow")
+	buildCmd := exec.CommandContext(ctx, "go", "build", "-o", binPath, "github.com/seaweedfs/seaweed-block/cmd/sparrow")
 	var buildErr bytes.Buffer
 	buildCmd.Stderr = &buildErr
 	if err := buildCmd.Run(); err != nil {
@@ -59,7 +67,7 @@ func TestS7Process_RealSubprocessRestartSmoke(t *testing.T) {
 	storeDir := filepath.Join(tmp, "store")
 
 	// First run.
-	firstReport := runS7Smoke(t, binPath, storeDir, "first")
+	firstReport := runS7Smoke(ctx, t, binPath, storeDir, "first")
 	if firstReport.Error != "" {
 		t.Fatalf("first run reported error: %s", firstReport.Error)
 	}
@@ -83,7 +91,7 @@ func TestS7Process_RealSubprocessRestartSmoke(t *testing.T) {
 	}
 
 	// Second run against the same store directory.
-	secondReport := runS7Smoke(t, binPath, storeDir, "second")
+	secondReport := runS7Smoke(ctx, t, binPath, storeDir, "second")
 	if secondReport.Error != "" {
 		t.Fatalf("second run reported error: %s", secondReport.Error)
 	}
@@ -114,10 +122,10 @@ func TestS7Process_RealSubprocessRestartSmoke(t *testing.T) {
 // captures stdout, parses exactly one JSON line, and returns
 // the decoded report. Asserts exit 0 and that the pass-line
 // was emitted; anything else is a hard test failure.
-func runS7Smoke(t *testing.T, binPath, storeDir, label string) s7RestartSmokeReport {
+func runS7Smoke(ctx context.Context, t *testing.T, binPath, storeDir, label string) s7RestartSmokeReport {
 	t.Helper()
 
-	cmd := exec.Command(binPath, "--authority-store", storeDir, "--s7-restart-smoke")
+	cmd := exec.CommandContext(ctx, binPath, "--authority-store", storeDir, "--s7-restart-smoke")
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

@@ -449,17 +449,11 @@ func (p *Publisher) apply(ask AssignmentAsk) error {
 
 	// P14 S5 — durable write-through. If a store is wired, the
 	// freshly minted record is persisted under pub.mu BEFORE the
-	// in-memory state is committed. On Put failure the in-memory
-	// state is rolled back to its prior value (or cleared if this
-	// was a fresh key), the subscriber fan-out is skipped, and
-	// the error is returned to the caller. This keeps on-disk
-	// and in-memory truth in lock-step: subscribers never see a
-	// fact that isn't durable yet.
-	var prevForRollback assignmentState
-	var hadPrev bool
+	// in-memory state is committed. State mutation is deliberately
+	// sequenced after Put: on Put failure we simply return without
+	// touching p.state / p.writeSeqByVolume, so no rollback is
+	// needed. Subscribers never see a fact that isn't durable yet.
 	if p.store != nil {
-		prevForRollback, hadPrev = p.state[k]
-
 		// Compute the per-volume WriteSeq for this mint. Starts
 		// at the highest previously-persisted value for the
 		// volume (set during reload) + 1.
@@ -474,11 +468,8 @@ func (p *Publisher) apply(ask AssignmentAsk) error {
 			WriteSeq:        nextSeq,
 		}
 		if err := p.store.Put(record); err != nil {
-			// Rollback: we haven't mutated state yet, so this is
-			// just a no-op cleanup — but keep the structure so
-			// reviewers see the rollback is explicit.
-			_ = prevForRollback
-			_ = hadPrev
+			// State mutation hasn't happened yet; nothing to
+			// unwind. Just report the failure.
 			p.mu.Unlock()
 			return fmt.Errorf("authority: durable Put failed, rolling back mint: %w", err)
 		}
