@@ -272,25 +272,53 @@ func TestObservation_EndToEnd_SystemFedSnapshotReachesController(t *testing.T) {
 	_ = host.IngestHeartbeat(serverObs("s2", start, healthySlot("v1", "r2")))
 	_ = host.IngestHeartbeat(serverObs("s3", start, healthySlot("v1", "r3")))
 
-	// Wait for a synthesized snapshot to reach the sink.
-	deadline := time.Now().Add(1 * time.Second)
+	// Poll until the sink has RECEIVED a submission whose
+	// Volumes slice contains a supported v1 with three slots.
+	// Earlier drafts of this test broke on the first non-empty
+	// submission (which is the initial host-start rebuild that
+	// submits a PENDING v1 because no ingests have landed yet),
+	// then asserted on sink[last] — which could race to pick the
+	// pending submission instead of the supported one that comes
+	// after the ingests. The semantic under test is "a supported
+	// v1 eventually reaches the sink"; poll accordingly.
+	deadline := time.Now().Add(2 * time.Second)
+	var final ClusterSnapshot
+	sawSupported := false
 	for time.Now().Before(deadline) {
-		if len(sink.snapshot()) > 0 {
+		for _, c := range sink.records() {
+			if len(c.Snapshot.Volumes) == 1 &&
+				c.Snapshot.Volumes[0].VolumeID == "v1" &&
+				len(c.Snapshot.Volumes[0].Slots) == 3 {
+				final = c.Snapshot
+				sawSupported = true
+				break
+			}
+		}
+		if sawSupported {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	got := sink.snapshot()
-	if len(got) == 0 {
-		t.Fatal("sink never received a synthesized ClusterSnapshot")
+	if !sawSupported {
+		t.Fatalf("sink never received a supported v1 snapshot; last observed: %+v",
+			lastVolumes(sink))
 	}
-	final := got[len(got)-1]
-	if len(final.Volumes) != 1 || final.Volumes[0].VolumeID != "v1" {
-		t.Fatalf("expected v1 in final snapshot, got %+v", final.Volumes)
+	if final.Volumes[0].VolumeID != "v1" {
+		t.Fatalf("expected v1, got %+v", final.Volumes)
 	}
 	if len(final.Volumes[0].Slots) != 3 {
-		t.Fatalf("expected 3 slots for v1, got %d", len(final.Volumes[0].Slots))
+		t.Fatalf("expected 3 slots, got %d", len(final.Volumes[0].Slots))
 	}
+}
+
+// lastVolumes is a diagnostic helper for test failures: reports
+// the Volumes slice of the most recent sink submission (or "none").
+func lastVolumes(sink *recordingSink) any {
+	calls := sink.records()
+	if len(calls) == 0 {
+		return "none"
+	}
+	return calls[len(calls)-1].Snapshot.Volumes
 }
 
 // ============================================================

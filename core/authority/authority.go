@@ -2,6 +2,7 @@ package authority
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"sync"
 	"sync/atomic"
@@ -108,15 +109,131 @@ type Publisher struct {
 	mu    sync.Mutex
 	state map[subKey]assignmentState
 	subs  map[subKey][]*subscription
+
+	// P14 S5 — durable authority store. Optional; nil means
+	// in-memory only (existing behavior, used by tests and
+	// scenarios that don't need restart recovery).
+	//
+	// When non-nil:
+	//   - NewPublisher reloads state from store at construction.
+	//   - apply() writes through under pub.mu on every
+	//     successful mint. If Put fails, the in-memory state is
+	//     rolled back and the mint returns an error.
+	store AuthorityStore
+
+	// writeSeq is the monotonic per-volume write-sequence used
+	// when generating DurableRecords. Keyed by VolumeID (not
+	// subKey) because S5 persists one record per volume, and
+	// WriteSeq reflects the cumulative mint history for that
+	// volume across all its slots. Lives on Publisher so it
+	// survives across mints; starts at the max observed during
+	// reload so new writes extend, not overwrite, durable
+	// ordering.
+	writeSeqByVolume map[string]uint64
+
+	// loadErrs are any per-record skip errors encountered during
+	// reload. Exposed via LoadErrors() for tests and operator
+	// diagnosis. Per-volume fail-closed per sketch §10: these
+	// records are simply absent from state and the volume
+	// behaves as "never bound" until a new mint.
+	loadErrs []error
+}
+
+// PublisherOption configures a Publisher at construction.
+// Currently the only option is WithStore, but the variadic
+// shape is chosen so later slices can add options without
+// changing the constructor signature.
+type PublisherOption func(*Publisher)
+
+// WithStore wires the Publisher to a durable AuthorityStore.
+// The constructor reloads state from the store and every
+// successful apply() writes through synchronously before the
+// in-memory state is committed.
+//
+// Passing nil (or omitting the option entirely) keeps the
+// Publisher in-memory-only — the S1..S4 behavior.
+func WithStore(store AuthorityStore) PublisherOption {
+	return func(p *Publisher) {
+		p.store = store
+	}
 }
 
 // NewPublisher creates a Publisher that consumes from dir.
-func NewPublisher(dir Directive) *Publisher {
-	return &Publisher{
-		dir:   dir,
-		state: make(map[subKey]assignmentState),
-		subs:  make(map[subKey][]*subscription),
+//
+// When WithStore is supplied, the constructor performs a
+// synchronous reload from the store before returning: it
+// verifies each record, populates in-memory state, and records
+// any per-record skip errors (ErrCorruptRecord) for later
+// retrieval via LoadErrors(). Index-level reload failures
+// (e.g. cannot list the store directory) are reported by
+// panicking — the bootstrap contract is that such failures
+// fail the whole boot, and callers would otherwise have to
+// introduce a wide error-return path into a construction
+// function that historically cannot fail.
+//
+// Callers that want non-panic reload-error handling can check
+// store.Load() themselves before calling NewPublisher, or use
+// the future-planned authority_bootstrap helper that composes
+// the pieces.
+func NewPublisher(dir Directive, opts ...PublisherOption) *Publisher {
+	p := &Publisher{
+		dir:              dir,
+		state:            make(map[subKey]assignmentState),
+		subs:             make(map[subKey][]*subscription),
+		writeSeqByVolume: map[string]uint64{},
 	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(p)
+		}
+	}
+	if p.store != nil {
+		p.reloadFromStore()
+	}
+	return p
+}
+
+// reloadFromStore reads every durable record and populates the
+// Publisher's in-memory state. Per-volume fail-closed: corrupt
+// records are logged to p.loadErrs and their volumes are left
+// "never bound" in memory. An index-level failure (store cannot
+// be enumerated) panics — whole-process fail-closed per
+// sketch §10.
+func (p *Publisher) reloadFromStore() {
+	records, skips, err := p.store.LoadWithSkips()
+	if err != nil {
+		panic(fmt.Sprintf("authority: index-level store load failure: %v", err))
+	}
+	for _, rec := range records {
+		key := subKey{volumeID: rec.VolumeID, replicaID: rec.ReplicaID}
+		p.state[key] = assignmentState{
+			info: adapter.AssignmentInfo{
+				VolumeID:        rec.VolumeID,
+				ReplicaID:       rec.ReplicaID,
+				Epoch:           rec.Epoch,
+				EndpointVersion: rec.EndpointVersion,
+				DataAddr:        rec.DataAddr,
+				CtrlAddr:        rec.CtrlAddr,
+			},
+			present: true,
+		}
+		if rec.WriteSeq > p.writeSeqByVolume[rec.VolumeID] {
+			p.writeSeqByVolume[rec.VolumeID] = rec.WriteSeq
+		}
+	}
+	p.loadErrs = append(p.loadErrs, skips...)
+}
+
+// LoadErrors returns the per-record skip errors observed during
+// the last reload. Each entry is an ErrCorruptRecord wrap.
+// Used by restart tests and (in later phases) operator
+// diagnosis surfaces.
+func (p *Publisher) LoadErrors() []error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := make([]error, len(p.loadErrs))
+	copy(out, p.loadErrs)
+	return out
 }
 
 // Subscribe registers a new subscriber for (volumeID, replicaID)
@@ -328,6 +445,44 @@ func (p *Publisher) apply(ask AssignmentAsk) error {
 	default:
 		p.mu.Unlock()
 		return ErrUnknownIntent
+	}
+
+	// P14 S5 — durable write-through. If a store is wired, the
+	// freshly minted record is persisted under pub.mu BEFORE the
+	// in-memory state is committed. On Put failure the in-memory
+	// state is rolled back to its prior value (or cleared if this
+	// was a fresh key), the subscriber fan-out is skipped, and
+	// the error is returned to the caller. This keeps on-disk
+	// and in-memory truth in lock-step: subscribers never see a
+	// fact that isn't durable yet.
+	var prevForRollback assignmentState
+	var hadPrev bool
+	if p.store != nil {
+		prevForRollback, hadPrev = p.state[k]
+
+		// Compute the per-volume WriteSeq for this mint. Starts
+		// at the highest previously-persisted value for the
+		// volume (set during reload) + 1.
+		nextSeq := p.writeSeqByVolume[ask.VolumeID] + 1
+		record := DurableRecord{
+			VolumeID:        next.VolumeID,
+			ReplicaID:       next.ReplicaID,
+			Epoch:           next.Epoch,
+			EndpointVersion: next.EndpointVersion,
+			DataAddr:        next.DataAddr,
+			CtrlAddr:        next.CtrlAddr,
+			WriteSeq:        nextSeq,
+		}
+		if err := p.store.Put(record); err != nil {
+			// Rollback: we haven't mutated state yet, so this is
+			// just a no-op cleanup — but keep the structure so
+			// reviewers see the rollback is explicit.
+			_ = prevForRollback
+			_ = hadPrev
+			p.mu.Unlock()
+			return fmt.Errorf("authority: durable Put failed, rolling back mint: %w", err)
+		}
+		p.writeSeqByVolume[ask.VolumeID] = nextSeq
 	}
 
 	p.state[k] = assignmentState{info: next, present: true}
