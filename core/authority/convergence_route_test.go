@@ -132,6 +132,29 @@ func buildV1Heartbeats(at time.Time, unreachable map[string]bool) []HeartbeatMes
 	return out
 }
 
+// buildV1HeartbeatsWithAddrs builds the three-server heartbeat
+// set for "v1" with custom per-replica DataAddr/CtrlAddr. Used
+// by the IntentRefreshEndpoint route test where the slot
+// addresses intentionally diverge from what the publisher
+// currently holds.
+func buildV1HeartbeatsWithAddrs(at time.Time, addrs map[string][2]string) []HeartbeatMessage {
+	replicas := []struct{ server, replica string }{
+		{"s1", "r1"},
+		{"s2", "r2"},
+		{"s3", "r3"},
+	}
+	out := make([]HeartbeatMessage, 0, len(replicas))
+	for _, r := range replicas {
+		slot := healthySlot("v1", r.replica)
+		if da, ok := addrs[r.replica]; ok {
+			slot.DataAddr = da[0]
+			slot.CtrlAddr = da[1]
+		}
+		out = append(out, serverObs(r.server, at, slot))
+	}
+	return out
+}
+
 // waitForConsumerMatch polls consumer until pred returns true on
 // the most recent delivery, or deadlines out.
 func waitForConsumerMatch(t *testing.T, cons *recordingConsumer, pred func(adapter.AssignmentInfo) bool) adapter.AssignmentInfo {
@@ -357,6 +380,116 @@ func TestConvergenceRoute_PublishNotObserved_StuckWithoutChurn(t *testing.T) {
 	// epoch and bridge would have delivered it.
 	if delta := len(cons.snapshot()) - baseline; delta != 0 {
 		t.Fatalf("consumer saw %d additional deliveries during Stuck — indicates re-emission churn", delta)
+	}
+}
+
+// ============================================================
+// Route 4 (S8 evidence gap): IntentRefreshEndpoint end-to-end.
+//
+// Closes the S8 evidence-matrix Claim 6 gap: placement /
+// rebalance / failover have dedicated L1 routes, but endpoint-
+// refresh did not. This test exercises the specific route:
+//
+//   1. Bind primary r1 at d1/c1 via directive. Publisher mints
+//      r1@(Epoch=1, EV=1). Bridge delivers to adapter.
+//   2. Ingest heartbeats where r1's slot reports NEW addresses
+//      (d1-new, c1-new), while the publisher still holds the
+//      OLD (d1, c1).
+//   3. BuildSnapshot stamps Authority from the live publisher
+//      reader (old addrs) but the slot observation carries the
+//      new addrs. Controller's decideVolume compares the
+//      acceptable current slot's addrs against the publisher
+//      currentLine and emits IntentRefreshEndpoint.
+//   4. Publisher applies Refresh: EndpointVersion bumps (Epoch
+//      unchanged), DataAddr/CtrlAddr update.
+//   5. Bridge delivers the refreshed AssignmentInfo to the
+//      adapter, which advances on the same epoch lineage.
+//   6. Confirmation clears desired via the full contract
+//      including vol.Authority.DataAddr / CtrlAddr match.
+// ============================================================
+
+func TestConvergenceRoute_RefreshEndpoint_ConfirmsAndClearsDesired(t *testing.T) {
+	start := time.Date(2026, 4, 20, 12, 0, 0, 0, time.UTC)
+	clk := newFakeClock(start)
+
+	holder := &basisReaderHolder{}
+	ctrl := NewTopologyController(TopologyControllerConfig{
+		ExpectedSlotsPerVolume: 3,
+		RebalanceSkew:          100,
+		RetryWindow:            5 * time.Second,
+	}, holder)
+	ctrl.SetNowForTest(clk.Now)
+
+	// Publisher's directive is the controller — so IntentBind
+	// on phase 1 and IntentRefreshEndpoint on phase 2 both flow
+	// through the real decision path, not through a pre-wired
+	// static directive.
+	pub := NewPublisher(ctrl)
+	holder.set(pub)
+
+	host := NewObservationHost(ObservationHostConfig{
+		Freshness: FreshnessConfig{FreshnessWindow: 30 * time.Second, PendingGrace: 10 * time.Millisecond},
+		Topology:  AcceptedTopology{Volumes: []VolumeExpected{threeSlotVolume("v1")}},
+		Sink:      ctrl,
+		Reader:    holder,
+		Now:       clk.Now,
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	cons := &recordingConsumer{}
+	go pub.Run(ctx)
+	go VolumeBridge(ctx, pub, cons, "v1", "r1", "r2", "r3")
+	host.Start(ctx)
+	defer host.Stop()
+
+	// Phase 1: initial bind. Heartbeats use the default addrs
+	// (data-r1 / ctrl-r1) so they match the mint.
+	for _, hb := range buildV1Heartbeats(start, nil) {
+		_ = host.IngestHeartbeat(hb)
+	}
+	r1Line := waitForConsumerMatch(t, cons, func(info adapter.AssignmentInfo) bool {
+		return info.ReplicaID == "r1" && info.Epoch == 1 && info.EndpointVersion == 1
+	})
+
+	// Phase 2: r1's slot now reports NEW addresses. Publisher
+	// still holds the old ones. Heartbeats:
+	//   r1 -> data-r1-new / ctrl-r1-new
+	//   r2, r3 -> default healthy
+	clk.Advance(1 * time.Second)
+	for _, hb := range buildV1HeartbeatsWithAddrs(clk.Now(), map[string][2]string{
+		"r1": {"data-r1-new", "ctrl-r1-new"},
+	}) {
+		_ = host.IngestHeartbeat(hb)
+	}
+
+	// Controller must emit IntentRefreshEndpoint; publisher
+	// bumps EndpointVersion on the SAME Epoch.
+	refreshed := waitForConsumerMatch(t, cons, func(info adapter.AssignmentInfo) bool {
+		return info.ReplicaID == "r1" &&
+			info.Epoch == r1Line.Epoch &&
+			info.EndpointVersion > r1Line.EndpointVersion &&
+			info.DataAddr == "data-r1-new" &&
+			info.CtrlAddr == "ctrl-r1-new"
+	})
+	if refreshed.Epoch != 1 {
+		t.Fatalf("IntentRefreshEndpoint must preserve Epoch; got %d want 1", refreshed.Epoch)
+	}
+	if refreshed.EndpointVersion != 2 {
+		t.Fatalf("IntentRefreshEndpoint must bump EndpointVersion to 2; got %d", refreshed.EndpointVersion)
+	}
+
+	// Phase 3: next rebuild sees both publisher and observation
+	// agreeing on the new addrs → confirmation clears desired.
+	clk.Advance(1 * time.Second)
+	for _, hb := range buildV1HeartbeatsWithAddrs(clk.Now(), map[string][2]string{
+		"r1": {"data-r1-new", "ctrl-r1-new"},
+	}) {
+		_ = host.IngestHeartbeat(hb)
+	}
+	waitForDesiredCleared(t, ctrl, "v1")
+	if _, ok := ctrl.LastConvergenceStuck("v1"); ok {
+		t.Fatal("stuck evidence must not be present after Refresh confirmation")
 	}
 }
 
