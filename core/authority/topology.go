@@ -53,9 +53,17 @@ type ClusterSnapshot struct {
 // TopologyControllerConfig pins the accepted richer topology set:
 // multi-volume, three slots per volume, and bounded rebalance
 // pressure when server load skew exceeds RebalanceSkew.
+//
+// RetryWindow is the S6 bounded-wait clock: how long a desired
+// assignment may remain unconfirmed before it is marked Stuck and
+// ConvergenceStuckEvidence is recorded for the volume. S6 retry
+// is PASSIVE — this clock governs when Stuck surfaces, not when
+// an ask is re-emitted into the publisher. See
+// sw-block/design/v3-phase-14-s6-sketch.md §7.
 type TopologyControllerConfig struct {
 	ExpectedSlotsPerVolume int
 	RebalanceSkew          int
+	RetryWindow            time.Duration
 }
 
 func (c TopologyControllerConfig) withDefaults() TopologyControllerConfig {
@@ -65,17 +73,50 @@ func (c TopologyControllerConfig) withDefaults() TopologyControllerConfig {
 	if c.RebalanceSkew == 0 {
 		c.RebalanceSkew = 1
 	}
+	if c.RetryWindow == 0 {
+		c.RetryWindow = 5 * time.Second
+	}
 	return c
 }
 
 // DesiredAssignment is the convergence loop's per-volume desired
 // state. It intentionally stays at the AssignmentAsk level; the
 // publisher remains the sole minter of Epoch/EndpointVersion.
+//
+// P14 S6 convergence bookkeeping:
+//
+//   - ProposedBasis is the publisher's current line at the moment
+//     this desired ask was decided. Supersede uses it as the basis
+//     to compare against any later publisher line: only a publisher
+//     epoch STRICTLY greater than ProposedBasis.Epoch that also
+//     targets a replica OTHER than Ask.ReplicaID drops the desired
+//     (§9 case 1). For a Bind decided from no line, Assigned=false
+//     and Epoch=0.
+//
+//   - DesiredAt is the controller-side activation clock. Set when
+//     the desired entry is first recorded (i.e., at enqueue time),
+//     NOT when the publisher later applies the ask. The controller
+//     has no feedback channel from publisher to observe actual
+//     apply time; anchoring the clock at activation is the honest
+//     semantic.
+//
+//   - LastRetryAt records the last time the desired was re-
+//     evaluated on a fresh observation. Diagnostic only.
+//
+//   - Stuck is true once DesiredAt + RetryWindow has elapsed
+//     without confirmation. Stuck does NOT re-emit into the
+//     publisher; it surfaces ConvergenceStuckEvidence and keeps
+//     the desired entry so a later snapshot can still confirm or
+//     supersede.
 type DesiredAssignment struct {
-	Ask       AssignmentAsk
-	Reason    string
-	Revision  uint64
-	Observed  bool
+	Ask           AssignmentAsk
+	Reason        string
+	Revision      uint64
+	Observed      bool
+	ProposedBasis AuthorityBasis
+	DesiredAt     time.Time
+	LastRetryAt   time.Time
+	Stuck         bool
 }
 
 func sortVolumeSnapshots(vols []VolumeTopologySnapshot) {

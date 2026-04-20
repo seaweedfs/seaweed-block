@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 )
 
 // TopologyController is the multi-volume, cluster-scoped directive
@@ -24,19 +25,32 @@ type TopologyController struct {
 	reader AuthorityBasisReader
 	queue  *assignmentQueue
 
-	mu          sync.Mutex
-	desired     map[string]DesiredAssignment
-	unsupported map[string]UnsupportedEvidence
+	mu                sync.Mutex
+	desired           map[string]DesiredAssignment
+	unsupported       map[string]UnsupportedEvidence
+	convergenceStuck  map[string]*ConvergenceStuckEvidence
+	now               func() time.Time
 }
 
 func NewTopologyController(config TopologyControllerConfig, reader AuthorityBasisReader) *TopologyController {
 	return &TopologyController{
-		config:      config.withDefaults(),
-		reader:      reader,
-		queue:       newAssignmentQueue(),
-		desired:     make(map[string]DesiredAssignment),
-		unsupported: make(map[string]UnsupportedEvidence),
+		config:           config.withDefaults(),
+		reader:           reader,
+		queue:            newAssignmentQueue(),
+		desired:          make(map[string]DesiredAssignment),
+		unsupported:      make(map[string]UnsupportedEvidence),
+		convergenceStuck: make(map[string]*ConvergenceStuckEvidence),
+		now:              time.Now,
 	}
+}
+
+// SetNowForTest overrides the controller's clock source. Tests
+// use this to drive RetryWindow / Stuck transitions deterministically.
+// Production code MUST NOT call this.
+func (c *TopologyController) SetNowForTest(now func() time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.now = now
 }
 
 // SubmitClusterSnapshot is the cluster-scoped entry point for
@@ -74,46 +88,7 @@ func (c *TopologyController) SubmitClusterSnapshot(snap ClusterSnapshot) error {
 
 	for _, vol := range volumes {
 		currentLine, hasLine := c.reader.VolumeAuthorityLine(vol.VolumeID)
-		c.confirmDesiredLocked(vol, currentLine, hasLine)
-
-		// Snapshot-side topology honesty.
-		if vol.Authority.Assigned && !volumeIncludesReplica(vol, vol.Authority.ReplicaID) {
-			c.recordUnsupportedLocked(vol.VolumeID, snap, vol.Authority, "snapshot authority outside accepted topology: "+vol.Authority.ReplicaID)
-			c.clearDesiredLocked(vol.VolumeID)
-			continue
-		}
-		// Publisher-side out-of-topology authority.
-		if hasLine && !volumeIncludesReplica(vol, currentLine.ReplicaID) {
-			c.recordUnsupportedLocked(vol.VolumeID, snap, currentLine, "publisher authority outside accepted topology: "+currentLine.ReplicaID)
-			c.clearDesiredLocked(vol.VolumeID)
-			continue
-		}
-		// Stale snapshot: do not emit from a stale basis.
-		if !basisMatchesLine(vol.Authority, currentLine, hasLine) {
-			// Keep any existing desired state. A stale snapshot often
-			// means the publisher has already advanced the line but the
-			// collector has not yet observed it; clearing desired here
-			// would drop the publish-until-observed convergence record
-			// too early.
-			continue
-		}
-
-		ask, reason, emit := c.decideVolume(vol, serverIndex, currentLine, hasLine, currentLoad, projectedLoad)
-		if !emit {
-			c.clearDesiredLocked(vol.VolumeID)
-			continue
-		}
-		desired := DesiredAssignment{
-			Ask:      ask,
-			Reason:   reason,
-			Revision: snap.CollectedRevision,
-		}
-		if prev, ok := c.desired[vol.VolumeID]; ok && sameAsk(prev.Ask, ask) {
-			continue
-		}
-		c.desired[vol.VolumeID] = desired
-		c.queue.enqueue(ask)
-		applyProjectedMove(projectedLoad, vol, currentLine, hasLine, ask)
+		c.processSupportedVolumeLocked(vol, snap, serverIndex, currentLine, hasLine, currentLoad, projectedLoad)
 	}
 	return nil
 }
@@ -211,51 +186,110 @@ func (c *TopologyController) SubmitObservedState(snap ClusterSnapshot, report Su
 	projectedLoad := cloneLoad(currentLoad)
 	for _, vol := range volumes {
 		currentLine, hasLine := c.reader.VolumeAuthorityLine(vol.VolumeID)
-		c.confirmDesiredLocked(vol, currentLine, hasLine)
-
-		if vol.Authority.Assigned && !volumeIncludesReplica(vol, vol.Authority.ReplicaID) {
-			c.recordUnsupportedLocked(vol.VolumeID, snap, vol.Authority, "snapshot authority outside accepted topology: "+vol.Authority.ReplicaID)
-			c.clearDesiredLocked(vol.VolumeID)
-			continue
-		}
-		if hasLine && !volumeIncludesReplica(vol, currentLine.ReplicaID) {
-			c.recordUnsupportedLocked(vol.VolumeID, snap, currentLine, "publisher authority on replica outside accepted topology: "+currentLine.ReplicaID)
-			c.clearDesiredLocked(vol.VolumeID)
-			continue
-		}
-		// Stale snapshot: do not emit from a stale basis, but keep
-		// any existing desired state (publish-until-observed
-		// convergence record). Mirrors SubmitClusterSnapshot.
-		if !basisMatchesLine(vol.Authority, currentLine, hasLine) {
-			continue
-		}
-
-		ask, reason, emit := c.decideVolume(vol, serverIndex, currentLine, hasLine, currentLoad, projectedLoad)
-		// No action needed under this snapshot (e.g. current slot
-		// recovered, rebalance no longer desired). Clear any prior
-		// desired ask so a stale queued move cannot survive
-		// supported recovery.
-		if !emit {
-			c.clearDesiredLocked(vol.VolumeID)
-			continue
-		}
-		desired := DesiredAssignment{
-			Ask:      ask,
-			Reason:   reason,
-			Revision: snap.CollectedRevision,
-		}
-		// Same-ask dedupe: if the identical ask is already queued
-		// and desired, do not re-enqueue. Without this guard,
-		// repeated identical supported feeds would mint a new
-		// Reassign epoch each iteration — authority churn.
-		if prev, ok := c.desired[vol.VolumeID]; ok && sameAsk(prev.Ask, ask) {
-			continue
-		}
-		c.desired[vol.VolumeID] = desired
-		c.queue.enqueue(ask)
-		applyProjectedMove(projectedLoad, vol, currentLine, hasLine, ask)
+		c.processSupportedVolumeLocked(vol, snap, serverIndex, currentLine, hasLine, currentLoad, projectedLoad)
 	}
 	return nil
+}
+
+// processSupportedVolumeLocked is the shared supported-volume
+// convergence loop used by both SubmitClusterSnapshot and
+// SubmitObservedState. Per-iteration order (§5.2):
+//
+//  1. confirmDesiredLocked — if confirmation contract is
+//     satisfied, clear desired + stuck evidence (Active→None).
+//  2. supersedeDesiredLocked — §9 case 1/2: drop desired if
+//     publisher itself has moved past the proposed basis to a
+//     different replica, or observation and publisher agree on a
+//     different outcome. Case 3 ("decision produces different
+//     ask") is covered by the same-ask dedupe further below.
+//  3. Topology-honesty checks (clear desired on out-of-topology
+//     authority from either side).
+//  4. evaluateStuckLocked — if desired still outstanding, mark
+//     Stuck when DesiredAt + RetryWindow has elapsed. Runs
+//     before the stale-basis continue so publish-but-not-
+//     observed scenarios can surface Stuck evidence.
+//  5. Stale-basis continue — keep desired, no decide this tick.
+//  6. decideVolume + same-ask dedupe + enqueue. On enqueue,
+//     DesiredAt is anchored (or re-anchored) to c.now().
+func (c *TopologyController) processSupportedVolumeLocked(
+	vol VolumeTopologySnapshot,
+	snap ClusterSnapshot,
+	serverIndex map[string]ServerObservation,
+	currentLine AuthorityBasis,
+	hasLine bool,
+	currentLoad map[string]int,
+	projectedLoad map[string]int,
+) {
+	// A volume appearing in the supported set means observation
+	// cleared every supportability rule for it. Any prior
+	// unsupported evidence for this volume must drop — otherwise
+	// LastUnsupported() would keep reporting a stale fault after
+	// the volume is healthy. (Regression from the pre-refactor
+	// S4 behavior; stuck evidence has its own lifecycle and is
+	// NOT cleared here — §10 clearing rule 4.)
+	delete(c.unsupported, vol.VolumeID)
+
+	c.confirmDesiredLocked(vol, currentLine, hasLine)
+
+	if c.supersedeDesiredLocked(vol, currentLine, hasLine) {
+		// fall through — decideVolume may emit a new ask this tick.
+	}
+
+	if vol.Authority.Assigned && !volumeIncludesReplica(vol, vol.Authority.ReplicaID) {
+		c.recordUnsupportedLocked(vol.VolumeID, snap, vol.Authority, "snapshot authority outside accepted topology: "+vol.Authority.ReplicaID)
+		c.clearDesiredLocked(vol.VolumeID)
+		return
+	}
+	if hasLine && !volumeIncludesReplica(vol, currentLine.ReplicaID) {
+		c.recordUnsupportedLocked(vol.VolumeID, snap, currentLine, "publisher authority on replica outside accepted topology: "+currentLine.ReplicaID)
+		c.clearDesiredLocked(vol.VolumeID)
+		return
+	}
+
+	// Evaluate stuck state for any still-outstanding desired. This
+	// must run before the stale-basis continue so "publish-but-
+	// not-observed" — which shows up here as a stale basis — can
+	// surface ConvergenceStuckEvidence after the retry window.
+	c.evaluateStuckLocked(vol.VolumeID)
+
+	// Stale snapshot: do not emit from a stale basis, but keep any
+	// existing desired (publish-until-observed convergence record).
+	if !basisMatchesLine(vol.Authority, currentLine, hasLine) {
+		return
+	}
+
+	ask, reason, emit := c.decideVolume(vol, serverIndex, currentLine, hasLine, currentLoad, projectedLoad)
+	if !emit {
+		c.clearDesiredLocked(vol.VolumeID)
+		return
+	}
+	// Same-ask dedupe: if the identical ask is already the current
+	// desired, do not re-enqueue. Without this guard, repeated
+	// identical supported feeds would mint a new Reassign epoch
+	// each iteration — authority churn.
+	if prev, ok := c.desired[vol.VolumeID]; ok && sameAsk(prev.Ask, ask) {
+		return
+	}
+
+	// A different ask (or a new desired from None) replaces any
+	// prior stuck evidence — the old stuck record no longer
+	// describes the currently-outstanding desired (§10 clearing
+	// rule 2).
+	c.clearConvergenceStuckLocked(vol.VolumeID)
+
+	desired := DesiredAssignment{
+		Ask:           ask,
+		Reason:        reason,
+		Revision:      snap.CollectedRevision,
+		ProposedBasis: currentLine,
+		DesiredAt:     c.now(),
+	}
+	if !hasLine {
+		desired.ProposedBasis = AuthorityBasis{}
+	}
+	c.desired[vol.VolumeID] = desired
+	c.queue.enqueue(ask)
+	applyProjectedMove(projectedLoad, vol, currentLine, hasLine, ask)
 }
 
 // joinReasons returns a stable comma-joined reason string from
@@ -287,9 +321,45 @@ func (c *TopologyController) LastUnsupported(volumeID string) (UnsupportedEviden
 	return ev, ok
 }
 
+// LastConvergenceStuck returns the per-volume
+// ConvergenceStuckEvidence if the desired assignment for this
+// volume is currently Stuck. Returns (_, false) when no desired
+// is outstanding, when a desired is outstanding but still within
+// the retry window, or when the desired was confirmed /
+// superseded / cleared.
+//
+// Returned value is a copy: mutating it does not affect
+// controller state.
+func (c *TopologyController) LastConvergenceStuck(volumeID string) (ConvergenceStuckEvidence, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	ev, ok := c.convergenceStuck[volumeID]
+	if !ok {
+		return ConvergenceStuckEvidence{}, false
+	}
+	return *ev, true
+}
+
+// DesiredFor returns a copy of the current DesiredAssignment for
+// one volume, if any. Test-surface accessor; production code
+// should observe convergence outcomes through the publisher
+// stream and snapshot feeds, not by reading desired state.
+func (c *TopologyController) DesiredFor(volumeID string) (DesiredAssignment, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	d, ok := c.desired[volumeID]
+	return d, ok
+}
+
 func (c *TopologyController) clearDesiredLocked(volumeID string) {
 	delete(c.desired, volumeID)
 	c.queue.discard(volumeID)
+	// §10 clearing rule 1 / 2 / 3: whenever the desired clears
+	// (confirmed, superseded, supportability-driven), the stuck
+	// evidence clears with it. Supportability regaining does NOT
+	// invoke this path — that is handled by the supported-volume
+	// loop (§10 clearing rule 4).
+	c.clearConvergenceStuckLocked(volumeID)
 }
 
 func (c *TopologyController) recordUnsupportedLocked(volumeID string, snap ClusterSnapshot, basis AuthorityBasis, reason string) {
@@ -307,8 +377,14 @@ func (c *TopologyController) confirmDesiredLocked(vol VolumeTopologySnapshot, cu
 		return
 	}
 	if desiredObserved(desired, vol, currentLine, hasLine) {
-		delete(c.desired, vol.VolumeID)
-		c.queue.discard(vol.VolumeID)
+		// Route through clearDesiredLocked so §10 clearing rule 1
+		// (stuck evidence clears with the desired) applies to
+		// late confirmations that happen AFTER the volume had
+		// already transitioned into Stuck. Deleting the desired
+		// entry directly here would leave c.convergenceStuck[vid]
+		// populated, reporting a volume as still stuck after
+		// convergence had actually completed.
+		c.clearDesiredLocked(vol.VolumeID)
 	}
 }
 
