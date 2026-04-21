@@ -1,26 +1,21 @@
-// Ownership: sw test-support (per test-spec §9). Builds the
-// in-process P14 publication route used by t1_route_test.go.
+// Ownership: sw test-support (per test-spec §9: non-test helper
+// files *_test_support.go are sw-owned). Holds the in-process
+// route builder used by t1_route_test.go.
 //
-// Route: StaticDirective -> Publisher -> VolumeBridge ->
-//        latestLineageConsumer -> ProjectionView -> Provider.
+// Route wired here:
+//   StaticDirective ->
+//   authority.Publisher ->
+//   authority.Bridge (per-replica subscription) ->
+//   adapter.VolumeReplicaAdapter (real, with HealthyPathExecutor) ->
+//   volume.AdapterProjectionView ->
+//   frontend.Provider.
 //
-// Scope deviation (Discovery Bridge candidate, see sw review
-// notes in commit message): the QA spec's T1.L1.1 requires a
-// ReplicaID change across the "authority move". The current
-// Directive API exposes only Bind / RefreshEndpoint / Reassign,
-// where Reassign bumps Epoch for the same (Volume, Replica) —
-// no ReplicaID change. Cross-replica authority movement is
-// authored by TopologyController, not by StaticDirective.
-//
-// The route-helper below supports BOTH move modes:
-//   - EpochBumpMove (Reassign on same replica): exercises the
-//     per-op lineage fence against Epoch drift — the fence
-//     invariant the test really needs to prove at L1.
-//   - ReplicaMove   (cross-replica via a second Bind on a
-//     different key): exercises the bridge fan-in picking the
-//     new replica as primary.
-// T1.L1.1 uses the epoch-bump mode; the ReplicaID-change arm is
-// left for L2 over the real product route (per sketch §11.L2).
+// Readiness source: volume.AdapterProjectionView reads
+// (*VolumeReplicaAdapter).Projection() -> engine.ReplicaProjection
+// -> Mode. Healthy flips only when engine.DeriveProjection says
+// ModeHealthy, which requires Identity.Epoch <= FencedEpoch after
+// a successful probe. That path is the exact one the architect-
+// review finding required L1 to exercise.
 package frontend_test
 
 import (
@@ -32,149 +27,193 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/adapter"
 	"github.com/seaweedfs/seaweed-block/core/authority"
 	"github.com/seaweedfs/seaweed-block/core/frontend"
+	"github.com/seaweedfs/seaweed-block/core/host/volume"
 )
 
-// latestLineageView captures the most-recent AssignmentInfo the
-// bridge has delivered for one volume, and exposes it as a
-// frontend.ProjectionView. Healthy=true once any AssignmentInfo
-// has landed — that's the T1 minimum readiness bridge sketch
-// §11.L2 refers to.
-type latestLineageView struct {
+// t1Route bundles one in-process route for one (volumeID,
+// replicaID). Each replica gets its own adapter; authority
+// movement is simulated by the Publisher directing the ask to a
+// new (volumeID, replicaID) slot.
+type t1Route struct {
 	volumeID string
 
-	mu   sync.Mutex
-	seen bool
-	info adapter.AssignmentInfo
+	pub *authority.Publisher
+	dir *authority.StaticDirective
+
+	mu       sync.Mutex
+	slots    map[string]*replicaSlot // replicaID -> slot
+	current  string                  // current primary replicaID
+	cancel   context.CancelFunc
+	runDone  chan struct{}
+	volCtx   context.Context
 }
 
-func newLatestLineageView(volumeID string) *latestLineageView {
-	return &latestLineageView{volumeID: volumeID}
+// replicaSlot holds one replica's real adapter + AdapterProjectionView.
+type replicaSlot struct {
+	replicaID string
+	adapter   *adapter.VolumeReplicaAdapter
+	executor  *volume.HealthyPathExecutor
+	view      *volume.AdapterProjectionView
+	cancel    context.CancelFunc
+	done      chan struct{}
 }
 
-// OnAssignment satisfies authority.AssignmentConsumer. Returns an
-// empty ApplyLog — the view only observes lineage, it does not
-// drive engine events.
-func (v *latestLineageView) OnAssignment(info adapter.AssignmentInfo) adapter.ApplyLog {
-	if info.VolumeID != v.volumeID {
-		return adapter.ApplyLog{}
-	}
-	v.mu.Lock()
-	defer v.mu.Unlock()
-	// Latest-wins by (Epoch, EndpointVersion). Lower-epoch stale
-	// deliveries are discarded; same lineage is idempotent.
-	if v.seen {
-		if info.Epoch < v.info.Epoch {
-			return adapter.ApplyLog{}
-		}
-		if info.Epoch == v.info.Epoch && info.EndpointVersion < v.info.EndpointVersion {
-			return adapter.ApplyLog{}
-		}
-	}
-	v.info = info
-	v.seen = true
-	return adapter.ApplyLog{}
-}
-
-// Projection implements frontend.ProjectionView.
-func (v *latestLineageView) Projection() frontend.Projection {
-	v.mu.Lock()
-	defer v.mu.Unlock()
-	if !v.seen {
-		return frontend.Projection{VolumeID: v.volumeID, Healthy: false}
-	}
-	return frontend.Projection{
-		VolumeID:        v.info.VolumeID,
-		ReplicaID:       v.info.ReplicaID,
-		Epoch:           v.info.Epoch,
-		EndpointVersion: v.info.EndpointVersion,
-		Healthy:         true,
-	}
-}
-
-// currentLineage returns the latest seen info for test assertions.
-func (v *latestLineageView) currentLineage() (adapter.AssignmentInfo, bool) {
-	v.mu.Lock()
-	defer v.mu.Unlock()
-	return v.info, v.seen
-}
-
-// t1Route bundles the in-process route components so the test
-// can close them together.
-type t1Route struct {
-	pub    *authority.Publisher
-	dir    *authority.StaticDirective
-	view   *latestLineageView
-	cancel context.CancelFunc
-	done   chan struct{}
-}
-
-func (r *t1Route) Close() {
-	r.cancel()
-	<-r.done
-}
-
-// newT1Route wires Publisher + StaticDirective + VolumeBridge
-// against a single volume and returns the route handle.
-func newT1Route(t *testing.T, volumeID string, replicaIDs []string) *t1Route {
+// newT1Route wires Publisher + Directive + per-replica adapter
+// route. Replicas are started lazy — newT1Route returns before
+// any AssignmentInfo flows. The caller uses bindReplica to
+// drive the first Bind that brings a replica slot online.
+func newT1Route(t *testing.T, volumeID string) *t1Route {
 	t.Helper()
 	dir := authority.NewStaticDirective(nil)
 	pub := authority.NewPublisher(dir)
-	view := newLatestLineageView(volumeID)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
+	runDone := make(chan struct{})
 	go func() {
-		defer close(done)
-		var wg sync.WaitGroup
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			_ = pub.Run(ctx)
-		}()
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			authority.VolumeBridge(ctx, pub, view, volumeID, replicaIDs...)
-		}()
-		wg.Wait()
+		defer close(runDone)
+		_ = pub.Run(ctx)
 	}()
 
-	return &t1Route{
-		pub:    pub,
-		dir:    dir,
-		view:   view,
-		cancel: cancel,
-		done:   done,
+	r := &t1Route{
+		volumeID: volumeID,
+		pub:      pub,
+		dir:      dir,
+		slots:    map[string]*replicaSlot{},
+		cancel:   cancel,
+		runDone:  runDone,
+		volCtx:   ctx,
 	}
+	t.Cleanup(r.Close)
+	return r
 }
 
-// waitUntilHealthy polls the view until Healthy=true or deadline.
-func (r *t1Route) waitUntilHealthy(t *testing.T, deadline time.Duration) frontend.Projection {
+// bindReplica starts a subscription + real adapter + bridge view
+// for one replica, then appends the first IntentBind ask to the
+// directive. Returns the slot for test bookkeeping.
+func (r *t1Route) bindReplica(t *testing.T, replicaID, dataAddr, ctrlAddr string) *replicaSlot {
 	t.Helper()
+
+	exec := volume.NewHealthyPathExecutor()
+	a := adapter.NewVolumeReplicaAdapter(exec)
+	// L1 exercises same-replica Epoch drift, not cross-replica
+	// supersede — no probe needed. L2 wires a real probe via
+	// volume.Host.IsSuperseded.
+	view := volume.NewAdapterProjectionView(a, r.volumeID, replicaID, nil)
+
+	slotCtx, slotCancel := context.WithCancel(r.volCtx)
+	done := make(chan struct{})
+
+	// Bridge (per-replica subscription) forwards AssignmentInfo
+	// from publisher to this replica's adapter.
+	go func() {
+		defer close(done)
+		authority.Bridge(slotCtx, r.pub, a, r.volumeID, replicaID)
+	}()
+
+	slot := &replicaSlot{
+		replicaID: replicaID,
+		adapter:   a,
+		executor:  exec,
+		view:      view,
+		cancel:    slotCancel,
+		done:      done,
+	}
+	r.mu.Lock()
+	r.slots[replicaID] = slot
+	if r.current == "" {
+		r.current = replicaID
+	}
+	r.mu.Unlock()
+
+	r.dir.Append(authority.AssignmentAsk{
+		VolumeID:  r.volumeID,
+		ReplicaID: replicaID,
+		DataAddr:  dataAddr,
+		CtrlAddr:  ctrlAddr,
+		Intent:    authority.IntentBind,
+	})
+	return slot
+}
+
+// reassignReplica bumps the Epoch on the current replica via
+// IntentReassign. This is the L1 "authority move" arm — it
+// drives the frontend fence against Epoch drift using the real
+// publication path (Publisher authors a new Epoch, Bridge
+// delivers it to the adapter, engine applies it, projection
+// advances).
+func (r *t1Route) reassignReplica(replicaID, dataAddr, ctrlAddr string) {
+	r.dir.Append(authority.AssignmentAsk{
+		VolumeID:  r.volumeID,
+		ReplicaID: replicaID,
+		DataAddr:  dataAddr,
+		CtrlAddr:  ctrlAddr,
+		Intent:    authority.IntentReassign,
+	})
+}
+
+// view returns the frontend ProjectionView for a replica slot.
+func (r *t1Route) view(replicaID string) frontend.ProjectionView {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if s, ok := r.slots[replicaID]; ok {
+		return s.view
+	}
+	return nil
+}
+
+// waitUntilHealthy polls the given replica's adapter projection
+// until Healthy=true, then returns the frontend.Projection. On
+// deadline expiry, fails the test.
+func (r *t1Route) waitUntilHealthy(t *testing.T, replicaID string, deadline time.Duration) frontend.Projection {
+	t.Helper()
+	v := r.view(replicaID)
+	if v == nil {
+		t.Fatalf("no slot for replica %q", replicaID)
+	}
 	end := time.Now().Add(deadline)
 	for time.Now().Before(end) {
-		p := r.view.Projection()
+		p := v.Projection()
 		if p.Healthy {
 			return p
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatalf("route did not reach Healthy within %v", deadline)
+	t.Fatalf("replica %q did not reach Healthy within %v (last projection=%+v)", replicaID, deadline, v.Projection())
 	return frontend.Projection{}
 }
 
-// waitUntilEpochAdvances polls the view until the published
-// Epoch > from, or deadline.
-func (r *t1Route) waitUntilEpochAdvances(t *testing.T, from uint64, deadline time.Duration) frontend.Projection {
+// waitUntilEpochAdvances polls until the replica's view reports
+// a higher Epoch than `from`, then returns the new projection.
+func (r *t1Route) waitUntilEpochAdvances(t *testing.T, replicaID string, from uint64, deadline time.Duration) frontend.Projection {
 	t.Helper()
+	v := r.view(replicaID)
+	if v == nil {
+		t.Fatalf("no slot for replica %q", replicaID)
+	}
 	end := time.Now().Add(deadline)
 	for time.Now().Before(end) {
-		p := r.view.Projection()
+		p := v.Projection()
 		if p.Healthy && p.Epoch > from {
 			return p
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatalf("projection Epoch did not advance past %d within %v", from, deadline)
+	t.Fatalf("replica %q Epoch did not advance past %d within %v (last=%+v)", replicaID, from, deadline, v.Projection())
 	return frontend.Projection{}
+}
+
+// Close tears the route down: cancel context, wait for bridge
+// and publisher goroutines to exit.
+func (r *t1Route) Close() {
+	r.mu.Lock()
+	slots := make([]*replicaSlot, 0, len(r.slots))
+	for _, s := range r.slots {
+		slots = append(slots, s)
+	}
+	r.mu.Unlock()
+	r.cancel()
+	for _, s := range slots {
+		<-s.done
+	}
+	<-r.runDone
 }

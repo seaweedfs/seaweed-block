@@ -4,20 +4,22 @@
 // Maps to ledger rows: INV-FRONTEND-001 + INV-FRONTEND-002 + INV-AUTH-001 (consume)
 //
 // Test layer: Component (L1)
-// Bounded fate: Over the in-process P14 publication route
-// (Publisher + VolumeBridge → frontend bridge), authority
-// movement correctly invalidates old backend and enables a new
-// backend on the advanced lineage.
+// Bounded fate: Over the in-process P14 publication route feeding
+// a REAL VolumeReplicaAdapter (not a lineage-only fake view),
+// frontend readiness derives from engine.DeriveProjection ->
+// ModeHealthy, not from raw AssignmentInfo receipt. Authority
+// movement (Epoch bump via IntentReassign) causes the adapter's
+// engine projection to advance, AdapterProjectionView reflects
+// the new lineage, the old backend's per-op fence rejects, and
+// a new backend can open on the new lineage.
 //
 // Scope deviation vs test-spec §5 (sw review finding, routed to
-// Discovery Bridge): the spec's T1.L1.1 asserts a ReplicaID
-// change (r1 → r2) across the move. Cross-replica authorship
-// requires TopologyController-driven reassign, not StaticDirective.
-// This L1 test proves the per-operation lineage fence against
-// Epoch/EndpointVersion drift — the invariant the fence actually
-// defends. ReplicaID-change coverage moves to L2 over the real
-// product route, where TopologyController is in the loop (sketch
-// §11.L2). If QA Owner disagrees, raise as Discovery Bridge (c).
+// Discovery Bridge): the spec's T1.L1.1 asserts ReplicaID change
+// across the move. Cross-replica authorship requires
+// TopologyController-driven reassign, not StaticDirective. This
+// L1 test proves the per-operation lineage fence against Epoch
+// drift — the invariant the fence actually defends. ReplicaID-
+// change coverage moves to L2 over the real product route.
 package frontend_test
 
 import (
@@ -27,34 +29,29 @@ import (
 	"testing"
 	"time"
 
-	"github.com/seaweedfs/seaweed-block/core/authority"
 	"github.com/seaweedfs/seaweed-block/core/frontend"
 	"github.com/seaweedfs/seaweed-block/core/frontend/memback"
 )
 
 func TestT1Route_HealthyOpenWriteStaleRejectNewOpen(t *testing.T) {
-	route := newT1Route(t, "v1", []string{"r1"})
-	defer route.Close()
+	route := newT1Route(t, "v1")
 
-	// PHASE 1: initial Bind on r1 drives the route to Healthy.
-	route.dir.Append(authority.AssignmentAsk{
-		VolumeID:  "v1",
-		ReplicaID: "r1",
-		DataAddr:  "data-r1-v1",
-		CtrlAddr:  "ctrl-r1-v1",
-		Intent:    authority.IntentBind,
-	})
+	// PHASE 1: bind r1. Real adapter + HealthyPathExecutor drives
+	// engine through Probe -> Fence -> ModeHealthy. The
+	// AdapterProjectionView reports Healthy only AFTER the engine
+	// actually reaches ModeHealthy (FencedEpoch advance).
+	route.bindReplica(t, "r1", "data-r1-v1", "ctrl-r1-v1")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	initial := route.waitUntilHealthy(t, 2*time.Second)
+	initial := route.waitUntilHealthy(t, "r1", 2*time.Second)
 	if initial.ReplicaID != "r1" || initial.Epoch != 1 || initial.EndpointVersion != 1 {
 		t.Fatalf("initial projection: %+v", initial)
 	}
 
 	// PHASE 2: open backend; write pre-move payload.
-	provider := memback.NewProvider(route.view)
+	provider := memback.NewProvider(route.view("r1"))
 	oldBackend, err := provider.Open(ctx, "v1")
 	if err != nil {
 		t.Fatalf("Open initial: %v", err)
@@ -64,19 +61,13 @@ func TestT1Route_HealthyOpenWriteStaleRejectNewOpen(t *testing.T) {
 		t.Fatalf("Write pre-move: %v", err)
 	}
 
-	// PHASE 3: drive authority move through the publication path:
-	// Reassign bumps the Epoch on the same (volume, replica) key.
-	// This is an Epoch-drift "move" — the frontend fence must treat
-	// it as a new lineage and invalidate the old backend, regardless
-	// of whether the ReplicaID changed.
-	route.dir.Append(authority.AssignmentAsk{
-		VolumeID:  "v1",
-		ReplicaID: "r1",
-		DataAddr:  "data-r1-v1",
-		CtrlAddr:  "ctrl-r1-v1",
-		Intent:    authority.IntentReassign,
-	})
-	newProj := route.waitUntilEpochAdvances(t, initial.Epoch, 2*time.Second)
+	// PHASE 3: drive authority move through the publication path.
+	// IntentReassign bumps Epoch for the same (volume, replica).
+	// Engine sees new Identity.Epoch, re-probes, re-fences, and
+	// Mode stays/returns to Healthy at the new Epoch. Old backend
+	// still holds old Epoch — its per-op fence must reject.
+	route.reassignReplica("r1", "data-r1-v1", "ctrl-r1-v1")
+	newProj := route.waitUntilEpochAdvances(t, "r1", initial.Epoch, 3*time.Second)
 	if newProj.Epoch <= initial.Epoch {
 		t.Fatalf("post-move epoch must advance: old=%d new=%d", initial.Epoch, newProj.Epoch)
 	}
@@ -89,7 +80,7 @@ func TestT1Route_HealthyOpenWriteStaleRejectNewOpen(t *testing.T) {
 		t.Fatalf("old Write: expected ErrStalePrimary, got %v", err)
 	}
 
-	// PHASE 5: open new backend on new lineage; verify new identity.
+	// PHASE 5: open new backend on new lineage; verify identity.
 	newBackend, err := provider.Open(ctx, "v1")
 	if err != nil {
 		t.Fatalf("Open post-move: %v", err)

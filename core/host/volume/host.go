@@ -48,14 +48,24 @@ type Config struct {
 	// subprocess smokes emit a structured "assignment-received"
 	// pass-line. Nil in production.
 	ReadyMarker chan<- adapter.AssignmentInfo
+
+	// EnableT1Readiness replaces the T0 noop executor with a
+	// HealthyPathExecutor so the volume's adapter can actually
+	// reach engine.ModeHealthy on a successful assignment. This
+	// is the T1-owned "minimum product-route readiness bridge"
+	// sketch §11.L2 requires. Off by default (so T0 tests keep
+	// their documented non-healthy projection).
+	EnableT1Readiness bool
 }
 
 // Host is the composed volume-side block product daemon.
 type Host struct {
-	cfg  Config
-	log  *log.Logger
-	exec *noopExecutor
-	adpt *adapter.VolumeReplicaAdapter
+	cfg   Config
+	log   *log.Logger
+	exec  *noopExecutor
+	t1exec *HealthyPathExecutor
+	adpt  *adapter.VolumeReplicaAdapter
+	view  *AdapterProjectionView
 
 	conn   *grpc.ClientConn
 	obsCli control.ObservationServiceClient
@@ -133,20 +143,69 @@ func New(cfg Config) (*Host, error) {
 		return nil, fmt.Errorf("volume.New: dial master %q: %w", cfg.MasterAddr, err)
 	}
 
-	exec := newNoopExecutor()
-	adpt := adapter.NewVolumeReplicaAdapter(exec)
+	// Pick executor: T0 default is noopExecutor (adapter stays
+	// not-Healthy); T1 readiness bridge swaps in HealthyPathExecutor
+	// so the adapter can actually reach engine.ModeHealthy.
+	var (
+		noopExec *noopExecutor
+		t1Exec   *HealthyPathExecutor
+		execIface adapter.CommandExecutor
+	)
+	if cfg.EnableT1Readiness {
+		t1Exec = NewHealthyPathExecutor()
+		execIface = t1Exec
+	} else {
+		noopExec = newNoopExecutor()
+		execIface = noopExec
+	}
+	adpt := adapter.NewVolumeReplicaAdapter(execIface)
 
 	h := &Host{
 		cfg:    cfg,
 		log:    lg,
-		exec:   exec,
+		exec:   noopExec,
+		t1exec: t1Exec,
 		adpt:   adpt,
 		conn:   conn,
 		obsCli: control.NewObservationServiceClient(conn),
 		asnCli: control.NewAssignmentServiceClient(conn),
 	}
+	// View wires host as the SupersedeProbe so fail-closed kicks
+	// in when master names another replica at a newer lineage.
+	h.view = NewAdapterProjectionView(adpt, cfg.VolumeID, cfg.ReplicaID, h)
 	return h, nil
 }
+
+// IsSuperseded satisfies SupersedeProbe: returns true when this
+// host's lastOther record names a DIFFERENT replica at a strictly
+// newer (Epoch, EndpointVersion) than the caller's self-lineage.
+// Same-replica updates (our own Epoch advance) are NOT supersede
+// events; the bridge handles those naturally through adapter
+// projection.
+func (h *Host) IsSuperseded(selfReplicaID string, selfEpoch, selfEV uint64) bool {
+	h.otherMu.Lock()
+	defer h.otherMu.Unlock()
+	if h.lastOther == nil {
+		return false
+	}
+	other := h.lastOther
+	if other.ReplicaId == selfReplicaID {
+		return false
+	}
+	if other.Epoch > selfEpoch {
+		return true
+	}
+	if other.Epoch == selfEpoch && other.EndpointVersion > selfEV {
+		return true
+	}
+	return false
+}
+
+// ProjectionView returns the AdapterProjectionView that bridges
+// the adapter's engine projection to the frontend contract. Used
+// by the volume's status endpoint and by L1/L2 tests that want
+// to consume frontend readiness directly.
+func (h *Host) ProjectionView() *AdapterProjectionView { return h.view }
 
 // Adapter exposes the underlying VolumeReplicaAdapter for tests.
 func (h *Host) Adapter() *adapter.VolumeReplicaAdapter { return h.adpt }

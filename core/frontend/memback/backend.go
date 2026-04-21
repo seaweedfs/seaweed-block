@@ -17,23 +17,39 @@ type volumeStore struct {
 
 func newVolumeStore() *volumeStore { return &volumeStore{} }
 
-func (s *volumeStore) read(offset int64, p []byte) int {
+// ErrInvalidOffset is returned from Read/Write when the caller
+// passes a negative offset. Kept distinct from ErrStalePrimary /
+// ErrBackendClosed because it's a caller-input defect, not a
+// lineage or lifecycle fault.
+var ErrInvalidOffset = errInvalidOffset{}
+
+type errInvalidOffset struct{}
+
+func (errInvalidOffset) Error() string { return "memback: invalid (negative) offset" }
+
+func (s *volumeStore) read(offset int64, p []byte) (int, error) {
+	if offset < 0 {
+		return 0, ErrInvalidOffset
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if offset < 0 || offset >= int64(len(s.data)) {
-		return 0
+	if offset >= int64(len(s.data)) {
+		return 0, nil
 	}
-	return copy(p, s.data[offset:])
+	return copy(p, s.data[offset:]), nil
 }
 
-func (s *volumeStore) write(offset int64, p []byte) int {
+func (s *volumeStore) write(offset int64, p []byte) (int, error) {
+	if offset < 0 {
+		return 0, ErrInvalidOffset
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	need := int(offset) + len(p)
 	if need > len(s.data) {
 		s.data = append(s.data, make([]byte, need-len(s.data))...)
 	}
-	return copy(s.data[offset:], p)
+	return copy(s.data[offset:], p), nil
 }
 
 // backend is the per-open memback Backend. Holds a frozen
@@ -65,14 +81,14 @@ func (b *backend) Read(_ context.Context, offset int64, p []byte) (int, error) {
 	if err := b.guard(); err != nil {
 		return 0, err
 	}
-	return b.store.read(offset, p), nil
+	return b.store.read(offset, p)
 }
 
 func (b *backend) Write(_ context.Context, offset int64, p []byte) (int, error) {
 	if err := b.guard(); err != nil {
 		return 0, err
 	}
-	return b.store.write(offset, p), nil
+	return b.store.write(offset, p)
 }
 
 // guard enforces the two per-operation preconditions:

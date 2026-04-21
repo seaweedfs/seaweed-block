@@ -5,6 +5,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -30,6 +31,13 @@ type flags struct {
 	// Epoch > 0. L2 subprocess smoke uses this to assert route
 	// closure.
 	printReadyLine bool
+
+	// T1 closure-loop flags: enable the minimum readiness bridge
+	// (HealthyPathExecutor) and expose a status HTTP endpoint.
+	// statusAddr ":0" is for tests — the process prints the bound
+	// addr on the ready line so the test harness can discover it.
+	enableT1Readiness bool
+	statusAddr        string
 }
 
 func parseFlags(args []string) (flags, error) {
@@ -43,6 +51,8 @@ func parseFlags(args []string) (flags, error) {
 	fs.StringVar(&f.ctrlAddr, "ctrl-addr", "", "control-path address (required)")
 	fs.DurationVar(&f.hbInterval, "heartbeat-interval", 2*time.Second, "heartbeat send interval")
 	fs.BoolVar(&f.printReadyLine, "t0-print-ready", false, "internal test-only: emit one structured JSON line on stdout on first assignment")
+	fs.BoolVar(&f.enableT1Readiness, "t1-readiness", false, "enable T1 readiness bridge (HealthyPathExecutor) so adapter projection reaches Healthy")
+	fs.StringVar(&f.statusAddr, "status-addr", "", "address for the status HTTP endpoint (e.g. 127.0.0.1:0); empty disables")
 	fs.SetOutput(os.Stderr)
 	if err := fs.Parse(args); err != nil {
 		return flags{}, err
@@ -81,6 +91,12 @@ type readyLine struct {
 	EndpointVersion uint64 `json:"endpoint_version"`
 }
 
+type statusReadyLine struct {
+	Component string `json:"component"`
+	Phase     string `json:"phase"`
+	StatusAddr string `json:"status_addr"`
+}
+
 func run(f flags) int {
 	var readyCh chan adapter.AssignmentInfo
 	if f.printReadyLine {
@@ -96,12 +112,31 @@ func run(f flags) int {
 		CtrlAddr:          f.ctrlAddr,
 		HeartbeatInterval: f.hbInterval,
 		ReadyMarker:       readyCh,
+		EnableT1Readiness: f.enableT1Readiness,
 	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "blockvolume:", err)
 		return 1
 	}
 	h.Start()
+
+	var status *volume.StatusServer
+	if f.statusAddr != "" {
+		status = volume.NewStatusServer(h.ProjectionView())
+		bound, err := status.Start(f.statusAddr)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "blockvolume: status server:", err)
+			_ = h.Close()
+			return 1
+		}
+		// Emit a discoverable ready line so subprocess harnesses
+		// can learn the bound port when --status-addr is ":0".
+		_ = json.NewEncoder(os.Stdout).Encode(statusReadyLine{
+			Component:  "blockvolume",
+			Phase:      "status-listening",
+			StatusAddr: bound,
+		})
+	}
 
 	if readyCh != nil {
 		go func() {
@@ -125,6 +160,11 @@ func run(f flags) int {
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 	<-sig
 
+	if status != nil {
+		shutCtx, shutCancel := context.WithTimeout(context.Background(), 2*time.Second)
+		_ = status.Close(shutCtx)
+		shutCancel()
+	}
 	if err := h.Close(); err != nil {
 		fmt.Fprintln(os.Stderr, "blockvolume: close:", err)
 		return 1
