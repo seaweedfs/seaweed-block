@@ -165,9 +165,26 @@ func (s *FileAuthorityStore) Put(record DurableRecord) error {
 		return fmt.Errorf("authority_store: close temp: %w", closeErr)
 	}
 
-	// Atomic rename. On POSIX this is atomic by spec; on Windows
-	// os.Rename uses MoveFileEx with MOVEFILE_REPLACE_EXISTING.
-	if err := os.Rename(tempPath, finalPath); err != nil {
+	// Atomic rename via renameWithRetry (authority_store_rename.go).
+	// Cross-platform atomic-write pattern: tempfile + fsync +
+	// close + rename-over-existing. On POSIX this is atomic by
+	// spec; on Windows MoveFileEx with MOVEFILE_REPLACE_EXISTING
+	// is "atomic enough" for the durability model (crash leaves
+	// either old or new file; never torn).
+	//
+	// Why not github.com/google/renameio/v2: that library
+	// explicitly refuses Windows — its WriteFile is !windows
+	// and its maybe/Windows path falls back to non-atomic
+	// os.WriteFile (see package doc at v2.0.2). Our Windows
+	// path is where the real work is needed, so the tempfile+
+	// rename+retry pattern lives here.
+	//
+	// The retry absorbs Windows-specific transient failures
+	// (ERROR_ACCESS_DENIED / ERROR_SHARING_VIOLATION from AV /
+	// indexer / filter handle retention). Non-retryable errors
+	// surface immediately. Budget: 20 attempts with exponential
+	// backoff capped at 2s per wait, total worst-case ~30s.
+	if err := renameWithRetry(tempPath, finalPath); err != nil {
 		_ = os.Remove(tempPath)
 		return fmt.Errorf("authority_store: rename temp->final: %w", err)
 	}

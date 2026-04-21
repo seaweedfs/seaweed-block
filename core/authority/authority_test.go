@@ -761,6 +761,20 @@ var nonForgeabilityAllowedPackageSuffixes = []string{
 	string(filepath.Separator) + "core" + string(filepath.Separator) + "calibration" + string(filepath.Separator),
 	string(filepath.Separator) + "core" + string(filepath.Separator) + "conformance" + string(filepath.Separator),
 	string(filepath.Separator) + "core" + string(filepath.Separator) + "schema" + string(filepath.Separator),
+	// core/host/volume is permitted to construct adapter.AssignmentInfo
+	// ONLY via the named decoder decodeAssignmentFact in subscribe.go,
+	// which field-copies a master-minted AssignmentFact arriving on
+	// the SubscribeAssignments stream. This repo-wide guard grants
+	// the directory-level permission; the STRICTER package-local
+	// guard in core/host/volume/boundary_guard_test.go
+	// (TestNoOtherAssignmentInfoConstruction) enforces that exactly
+	// one composite literal exists, inside exactly that named
+	// function. The two guards compose:
+	//   - repo-wide: "host/volume is an allowed directory"
+	//   - package-local: "and only ONE function inside it, named"
+	// See sw-block/design/v3-phase-15-t0-sketch.md §3.1 / §6.4 / §9
+	// and core/host/volume/subscribe.go for the decode boundary.
+	string(filepath.Separator) + "core" + string(filepath.Separator) + "host" + string(filepath.Separator) + "volume" + string(filepath.Separator),
 	// core/adapter is the package that defines AssignmentInfo; it
 	// is the type owner and must name the type in field and method
 	// signatures. The AST check below permits references (type

@@ -34,6 +34,35 @@ type ObservationStore struct {
 	observations map[string]Observation // key: ServerID
 	revision     uint64
 	onMutation   func()
+
+	// supersededCount counts heartbeat ingests that were dropped
+	// because a newer ObservedAt was already stored for the same
+	// ServerID. Diagnostic only — PCDD-DELAYED-HB-001 evidence
+	// surface. Not an authority input; publisher / controller /
+	// evidence minting paths MUST NOT read it. Exposed via
+	// SupersededCount().
+	supersededCount uint64
+}
+
+// SupersededCount returns the total number of ingests that were
+// dropped because a newer observation from the same server was
+// already stored. Diagnostic surface for PCDD-DELAYED-HB-001.
+// NOT authority input. Monotonic across the lifetime of the store.
+func (s *ObservationStore) SupersededCount() uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.supersededCount
+}
+
+// SetNowForTest replaces the store's clock source. Tests use this
+// to drive expiry / freshness deterministically. Symmetric with
+// authority.TopologyController.SetNowForTest. Production code
+// MUST NOT call this; a boundary-guard test enforces that the
+// identifier appears only in _test.go files.
+func (s *ObservationStore) SetNowForTest(now func() time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.now = now
 }
 
 // NewObservationStore constructs a store with the given freshness
@@ -99,6 +128,14 @@ func (s *ObservationStore) Ingest(obs Observation) error {
 		if prev.ObservedAt.After(obs.ObservedAt) {
 			// Out-of-order ingest: keep the newer one already
 			// stored. No mutation fired.
+			//
+			// Diagnostic counter for PCDD-DELAYED-HB-001. Not an
+			// authority input. Must never be read by publisher /
+			// controller / evidence minting path — it exists so
+			// tests and operators can see that a superseded
+			// heartbeat was observed and recorded-as-superseded,
+			// distinct from "silently dropped".
+			s.supersededCount++
 			s.mu.Unlock()
 			return nil
 		}

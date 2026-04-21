@@ -123,6 +123,18 @@ func (h *ObservationHost) Store() *ObservationStore {
 	return h.store
 }
 
+// SetNowForTest forwards a test-controllable clock to the
+// underlying ObservationStore. Tests use this to advance the
+// freshness window deterministically (e.g., to exercise
+// PCDD-DEAD-PEER detection). Production code MUST NOT call this.
+//
+// Mirrors authority.TopologyController.SetNowForTest — identifier
+// name is auditable; a boundary-guard test enforces that
+// SetNowForTest appears only in _test.go files.
+func (h *ObservationHost) SetNowForTest(now func() time.Time) {
+	h.store.SetNowForTest(now)
+}
+
 // Ingest is the primary push entry point. Source adapters call
 // this with a translated Observation (typically via
 // HeartbeatToObservation). Ingest delegates to the store and

@@ -15,13 +15,13 @@ import (
 // to semantic decisions to command execution.
 //
 // The adapter loop:
-//   1. Runtime observation arrives (assignment, probe result, session close)
-//   2. Normalize into engine event(s)
-//   3. Apply to engine state (under lock)
-//   4. Collect emitted commands (under lock)
-//   5. Release lock
-//   6. Execute commands (outside lock — never call executor under mu)
-//   7. Commands may produce async results → back to step 1
+//  1. Runtime observation arrives (assignment, probe result, session close)
+//  2. Normalize into engine event(s)
+//  3. Apply to engine state (under lock)
+//  4. Collect emitted commands (under lock)
+//  5. Release lock
+//  6. Execute commands (outside lock — never call executor under mu)
+//  7. Commands may produce async results → back to step 1
 //
 // There is exactly ONE route. No parallel convenience paths.
 type VolumeReplicaAdapter struct {
@@ -32,6 +32,8 @@ type VolumeReplicaAdapter struct {
 	cmdLog         []string            // all commands executed
 	startTimeout   time.Duration
 	startWatchdogs map[uint64]*time.Timer
+	fenceTimeout   time.Duration
+	fenceWatchdogs map[fenceKey]*time.Timer
 	watchdogLog    []WatchdogEvent
 
 	// fenceInFlight: at most one fence attempt outstanding per
@@ -68,6 +70,7 @@ type fenceKey struct {
 var sessionIDCounter atomic.Uint64
 
 const defaultSessionStartTimeout = 5 * time.Second
+const defaultFenceTimeout = 15 * time.Second
 
 type queuedCommand struct {
 	cmd       engine.Command
@@ -82,6 +85,8 @@ func NewVolumeReplicaAdapter(exec CommandExecutor) *VolumeReplicaAdapter {
 		executor:       exec,
 		startTimeout:   defaultSessionStartTimeout,
 		startWatchdogs: make(map[uint64]*time.Timer),
+		fenceTimeout:   defaultFenceTimeout,
+		fenceWatchdogs: make(map[fenceKey]*time.Timer),
 		fenceInFlight:  make(map[fenceKey]uint64),
 	}
 	exec.SetOnSessionStart(func(result SessionStartResult) {
@@ -141,10 +146,15 @@ func (a *VolumeReplicaAdapter) OnFenceComplete(result FenceResult) ApplyLog {
 	}
 	a.mu.Lock()
 	trackedSessionID, ok := a.fenceInFlight[key]
+	timer := a.fenceWatchdogs[key]
 	if ok && trackedSessionID == result.SessionID {
+		delete(a.fenceWatchdogs, key)
 		delete(a.fenceInFlight, key)
 	}
 	a.mu.Unlock()
+	if timer != nil {
+		timer.Stop()
+	}
 	if !ok || trackedSessionID != result.SessionID {
 		// Superseded / late callback: drop silently. The engine
 		// already moved on (or never expected this attempt).
@@ -202,7 +212,48 @@ func (a *VolumeReplicaAdapter) releaseFenceSlot(replicaID string, epoch, endpoin
 		epoch:           epoch,
 		endpointVersion: endpointVersion,
 	}
+	delete(a.fenceWatchdogs, key)
 	delete(a.fenceInFlight, key)
+}
+
+// armFenceWatchdog gives every dispatched fence a bounded local fate.
+// If the executor never calls back with FenceCompleted/FenceFailed,
+// the adapter synthesizes a FenceFailed("fence_timeout") for the same
+// lineage. This closes the silent liveness hole where the caught-up
+// route could otherwise wait forever with no explicit progress path.
+func (a *VolumeReplicaAdapter) armFenceWatchdog(key fenceKey, sessionID uint64) {
+	if sessionID == 0 || a.fenceTimeout <= 0 {
+		return
+	}
+
+	var timer *time.Timer
+	timer = time.AfterFunc(a.fenceTimeout, func() {
+		a.mu.Lock()
+		currentSessionID, ok := a.fenceInFlight[key]
+		currentTimer := a.fenceWatchdogs[key]
+		if !ok || currentSessionID != sessionID || currentTimer != timer {
+			a.mu.Unlock()
+			return
+		}
+		delete(a.fenceWatchdogs, key)
+		a.mu.Unlock()
+
+		a.OnFenceComplete(FenceResult{
+			ReplicaID:       key.replicaID,
+			SessionID:       sessionID,
+			Epoch:           key.epoch,
+			EndpointVersion: key.endpointVersion,
+			Success:         false,
+			FailReason:      "fence_timeout",
+		})
+	})
+
+	a.mu.Lock()
+	if old := a.fenceWatchdogs[key]; old != nil {
+		old.Stop()
+	}
+	a.fenceWatchdogs[key] = timer
+	a.mu.Unlock()
 }
 
 // Projection returns the current operator-facing projection.
@@ -377,6 +428,12 @@ func (a *VolumeReplicaAdapter) executeCommand(q queuedCommand) {
 		if !a.acquireFenceSlot(c.ReplicaID, c.Epoch, c.EndpointVersion, q.sessionID) {
 			return
 		}
+		key := fenceKey{
+			replicaID:       c.ReplicaID,
+			epoch:           c.Epoch,
+			endpointVersion: c.EndpointVersion,
+		}
+		a.armFenceWatchdog(key, q.sessionID)
 		err := a.executor.Fence(c.ReplicaID, q.sessionID, c.Epoch, c.EndpointVersion)
 		if err != nil {
 			// Synchronous dispatch failure — normalize to

@@ -820,6 +820,204 @@ func TestFence_NewerEpochNotStarvedByOlderInFlightFence(t *testing.T) {
 	}
 }
 
+// TestFence_MissingCallback_TimesOutAndReprobeReemits closes the
+// remaining bounded-fate hole on the caught-up fence route. If the
+// executor dispatches FenceAtEpoch successfully but never calls
+// back, the adapter must not wait forever in a silent transitional
+// state. Instead it synthesizes FenceFailed("fence_timeout"),
+// leaves the projection non-healthy, and allows the next probe to
+// re-emit FenceAtEpoch at the same lineage.
+func TestFence_MissingCallback_TimesOutAndReprobeReemits(t *testing.T) {
+	exec := newMockExecutor()
+	exec.autoFence = false // simulate missing callback forever
+	exec.probeResults["r1"] = ProbeResult{
+		ReplicaID: "r1", Success: true,
+		EndpointVersion: 1, TransportEpoch: 1,
+		ReplicaFlushedLSN: 100, PrimaryTailLSN: 10, PrimaryHeadLSN: 100,
+	}
+	a := NewVolumeReplicaAdapter(exec)
+	a.fenceTimeout = 30 * time.Millisecond
+
+	a.OnAssignment(AssignmentInfo{
+		VolumeID: "vol1", ReplicaID: "r1",
+		Epoch: 1, EndpointVersion: 1,
+		DataAddr: "a", CtrlAddr: "b",
+	})
+
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		exec.mu.Lock()
+		n := len(exec.fences)
+		exec.mu.Unlock()
+		if n == 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	exec.mu.Lock()
+	if len(exec.fences) != 1 {
+		exec.mu.Unlock()
+		t.Fatalf("expected first fence dispatch, got %d", len(exec.fences))
+	}
+	oldFence := exec.fences[0]
+	exec.mu.Unlock()
+
+	// Let the adapter-local fence timeout synthesize FenceFailed.
+	deadline = time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		trace := a.Trace()
+		found := false
+		for _, te := range trace {
+			if te.Step == "fence_failed" && te.Detail == "epoch=1 reason=fence_timeout" {
+				found = true
+				break
+			}
+		}
+		if found {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	assertTraceHasDetail(t, a.Trace(), "fence_failed", "epoch=1 reason=fence_timeout")
+	if got := a.Projection().Mode; got == engine.ModeHealthy {
+		t.Fatalf("missing fence callback must not leave projection healthy, got %s", got)
+	}
+
+	// The next probe should re-drive the caught-up fence route at the
+	// same lineage. Missing callback is now bounded as timeout+retry,
+	// not a forever-wait assumption.
+	a.OnProbeResult(exec.probeResults["r1"])
+	deadline = time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		exec.mu.Lock()
+		n := len(exec.fences)
+		exec.mu.Unlock()
+		if n >= 2 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	exec.mu.Lock()
+	if len(exec.fences) < 2 {
+		exec.mu.Unlock()
+		t.Fatalf("expected probe-driven re-emitted fence, got %d dispatches", len(exec.fences))
+	}
+	newFence := exec.fences[1]
+	exec.mu.Unlock()
+	if newFence.epoch != oldFence.epoch || newFence.endpointVersion != oldFence.endpointVersion {
+		t.Fatalf("probe-driven retry changed lineage unexpectedly: old=(%d,%d) new=(%d,%d)",
+			oldFence.epoch, oldFence.endpointVersion, newFence.epoch, newFence.endpointVersion)
+	}
+
+	exec.fireFence(FenceResult{
+		ReplicaID:       newFence.replicaID,
+		SessionID:       newFence.sessionID,
+		Epoch:           newFence.epoch,
+		EndpointVersion: newFence.endpointVersion,
+		Success:         true,
+	})
+	if got := a.Projection().Mode; got != engine.ModeHealthy {
+		t.Fatalf("after retried fence completion: expected healthy, got %s", got)
+	}
+
+	// A very late callback from the timed-out attempt must still be
+	// dropped and must not perturb the healthy state.
+	exec.fireFence(FenceResult{
+		ReplicaID:       oldFence.replicaID,
+		SessionID:       oldFence.sessionID,
+		Epoch:           oldFence.epoch,
+		EndpointVersion: oldFence.endpointVersion,
+		Success:         true,
+	})
+	if got := a.Projection().Mode; got != engine.ModeHealthy {
+		t.Fatalf("late callback from timed-out fence perturbed healthy state, got %s", got)
+	}
+}
+
+// TestFence_DuplicateSameLineageCallback_Dropped proves the adapter
+// drops a duplicate callback for the same fence lineage after the
+// first completion already advanced the route. This pins the current
+// bounded behavior: one fence attempt has one accepted completion
+// path, and a second identical callback must not re-enter the engine
+// or duplicate PublishHealthy.
+func TestFence_DuplicateSameLineageCallback_Dropped(t *testing.T) {
+	exec := newMockExecutor()
+	exec.autoFence = false
+	exec.probeResults["r1"] = ProbeResult{
+		ReplicaID: "r1", Success: true,
+		EndpointVersion: 1, TransportEpoch: 1,
+		ReplicaFlushedLSN: 100, PrimaryTailLSN: 10, PrimaryHeadLSN: 100,
+	}
+	a := NewVolumeReplicaAdapter(exec)
+
+	a.OnAssignment(AssignmentInfo{
+		VolumeID: "vol1", ReplicaID: "r1",
+		Epoch: 1, EndpointVersion: 1,
+		DataAddr: "a", CtrlAddr: "b",
+	})
+
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		exec.mu.Lock()
+		n := len(exec.fences)
+		exec.mu.Unlock()
+		if n == 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	exec.mu.Lock()
+	if len(exec.fences) != 1 {
+		exec.mu.Unlock()
+		t.Fatalf("expected one fence dispatch, got %d", len(exec.fences))
+	}
+	fr := exec.fences[0]
+	exec.mu.Unlock()
+
+	exec.fireFence(FenceResult{
+		ReplicaID:       fr.replicaID,
+		SessionID:       fr.sessionID,
+		Epoch:           fr.epoch,
+		EndpointVersion: fr.endpointVersion,
+		Success:         true,
+	})
+	if got := a.Projection().Mode; got != engine.ModeHealthy {
+		t.Fatalf("after first fence complete: expected healthy, got %s", got)
+	}
+
+	before := 0
+	for _, c := range exec.getCommands() {
+		if c == "PublishHealthy" {
+			before++
+		}
+	}
+	if before != 1 {
+		t.Fatalf("expected exactly one PublishHealthy after first completion, got %d", before)
+	}
+
+	// Duplicate callback at the exact same lineage/session must be dropped.
+	exec.fireFence(FenceResult{
+		ReplicaID:       fr.replicaID,
+		SessionID:       fr.sessionID,
+		Epoch:           fr.epoch,
+		EndpointVersion: fr.endpointVersion,
+		Success:         true,
+	})
+	if got := a.Projection().Mode; got != engine.ModeHealthy {
+		t.Fatalf("duplicate same-lineage fence callback perturbed healthy state, got %s", got)
+	}
+
+	after := 0
+	for _, c := range exec.getCommands() {
+		if c == "PublishHealthy" {
+			after++
+		}
+	}
+	if after != before {
+		t.Fatalf("duplicate same-lineage fence callback duplicated PublishHealthy: before=%d after=%d", before, after)
+	}
+}
+
 func TestSessionStarted_ComesFromExecutorStartCallback(t *testing.T) {
 	exec := newMockExecutor()
 	exec.autoStart = false
