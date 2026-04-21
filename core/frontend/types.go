@@ -1,0 +1,63 @@
+// Package frontend is the T1 V3 frontend contract boundary
+// (sketch: sw-block/design/v3-phase-15-t1-sketch.md §5).
+//
+// The frontend consumes adapter/engine projection through a
+// read-only ProjectionView. It never mints authority, never
+// selects primary, never imports core/authority. This boundary
+// is AST-guarded by boundary_guard_test.go.
+package frontend
+
+import "context"
+
+// Identity is the full authority lineage a backend was opened
+// against. Every Read/Write re-validates identity against the
+// current projection — see sketch §7 stale-primary fence point.
+type Identity struct {
+	VolumeID        string
+	ReplicaID       string
+	Epoch           uint64
+	EndpointVersion uint64
+}
+
+// Projection is the frontend-facing view of adapter/engine
+// readiness plus the identity fields required to stamp a backend.
+//
+// Per sketch §5 note, the imported projection type may be
+// adjusted to match the current adapter/engine API. This struct
+// is that adjustment: engine.ReplicaProjection does not carry
+// VolumeID / ReplicaID (those live in adapter.AssignmentInfo),
+// so the frontend bundles the pair volume hosts already know
+// about for their own replica with the engine.ReplicaProjection
+// Mode into a single value that ProjectionView.Projection()
+// returns.
+type Projection struct {
+	VolumeID        string
+	ReplicaID       string
+	Epoch           uint64
+	EndpointVersion uint64
+	Healthy         bool
+}
+
+// ProjectionView is the read-only seam between adapter/engine
+// state and the frontend. Implementations must not expose
+// publisher, authority, directive, or assignment-minting
+// methods; this interface is the ONLY channel the frontend is
+// allowed to consume.
+type ProjectionView interface {
+	Projection() Projection
+}
+
+// Backend is a per-lineage handle for one open frontend session.
+type Backend interface {
+	Read(ctx context.Context, offset int64, p []byte) (int, error)
+	Write(ctx context.Context, offset int64, p []byte) (int, error)
+	Identity() Identity
+	Close() error
+}
+
+// Provider opens backends against a volume by consulting a
+// ProjectionView. Open blocks until the projection becomes
+// healthy or ctx expires.
+type Provider interface {
+	Open(ctx context.Context, volumeID string) (Backend, error)
+}
