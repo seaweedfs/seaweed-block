@@ -2,6 +2,17 @@
 // for L1 in-process route tests. Mirrors the iSCSI test client
 // in shape: dial, ICReq, fabric Connect, IO Read/Write, close.
 // Not a general-purpose initiator — only what L1 needs.
+//
+// Batch 11a rewire: NVMe-oF queue model is now enforced. An
+// nvmeClient opens TWO TCP connections:
+//   - adminConn (QID=0): admin Connect allocates CNTLID,
+//     admin opcodes (Identify in 11a; Property/Features/Keep
+//     Alive/AER in 11b) go here.
+//   - ioConn (QID>0): IO Connect cites the CNTLID; Read/
+//     Write/Flush go here.
+// Tests that only need IO round-trip see the existing API
+// (writeCmd/readCmd dispatch through ioConn); tests that
+// exercise admin opcodes use adminCmd.
 package nvme_test
 
 import (
@@ -13,81 +24,204 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/frontend/nvme"
 )
 
-// nvmeClient drives one NVMe/TCP connection against a target.
+// nvmeClient drives one NVMe/TCP session pair (admin + IO)
+// against a target.
 type nvmeClient struct {
+	t *testing.T
+
+	admin     net.Conn
+	adminR    *nvme.Reader
+	adminW    *nvme.Writer
+
+	io     net.Conn
+	ioR    *nvme.Reader
+	ioW    *nvme.Writer
+
+	cid    atomic.Uint32 // command identifier counter (shared across queues)
+	cntlID uint16        // assigned by admin Connect; echoed by IO Connect
+
+	// Back-compat shims: old tests use cli.conn / cli.r / cli.w
+	// for IO commands. Point these at the IO queue so existing
+	// scsiCmdFull-style helpers keep working.
 	conn net.Conn
 	r    *nvme.Reader
 	w    *nvme.Writer
-	cid  atomic.Uint32 // command identifier counter
 }
 
+// close tears down both TCP connections. Idempotent.
+func (c *nvmeClient) close() {
+	if c.io != nil {
+		_ = c.io.Close()
+	}
+	if c.admin != nil {
+		_ = c.admin.Close()
+	}
+}
+
+// dialAndConnect opens the admin + IO queue pair using the
+// canonical test identity (SubNQN = "nqn.2026-04.example.v3:subsys",
+// HostNQN = "nqn.2026-04.example.host:1"). Returns a client
+// with both connections established and IO opcodes routed
+// through ioConn.
 func dialAndConnect(t *testing.T, addr string) *nvmeClient {
+	t.Helper()
+	return dialAndConnectOpts(t, addr, connectOptions{})
+}
+
+// connectOptions tunes Connect parameters. Zero-values produce
+// the canonical test identity.
+type connectOptions struct {
+	SubNQN  string
+	HostNQN string
+	// SkipIOQueue bypasses the IO queue Connect. Used by tests
+	// that want admin-only (e.g., Identify-only).
+	SkipIOQueue bool
+}
+
+func dialAndConnectOpts(t *testing.T, addr string, opts connectOptions) *nvmeClient {
+	t.Helper()
+	if opts.SubNQN == "" {
+		opts.SubNQN = "nqn.2026-04.example.v3:subsys"
+	}
+	if opts.HostNQN == "" {
+		opts.HostNQN = "nqn.2026-04.example.host:1"
+	}
+
+	c := &nvmeClient{t: t}
+
+	// Admin queue: Connect with QID=0, CNTLID=0xFFFF.
+	c.admin = dialAndHandshake(t, addr)
+	c.adminR = nvme.NewReader(c.admin)
+	c.adminW = nvme.NewWriter(c.admin)
+
+	cid := uint16(c.cid.Add(1))
+	adminCmd := nvme.CapsuleCommand{
+		OpCode: 0x7F, // adminFabric
+		FCType: 0x01, // fcConnect
+		CID:    cid,
+		D10:    uint32(0) << 16, // QID=0 (admin)
+	}
+	adminCD := nvme.ConnectData{
+		HostID:  [16]byte{0x01, 0x02, 0x03, 0x04},
+		CNTLID:  0xFFFF,
+		SubNQN:  opts.SubNQN,
+		HostNQN: opts.HostNQN,
+	}
+	cdBuf := make([]byte, 1024)
+	adminCD.Marshal(cdBuf)
+	if err := c.adminW.SendWithData(0x4, 0, &adminCmd, 64, cdBuf); err != nil {
+		t.Fatalf("admin Connect send: %v", err)
+	}
+	adminResp := recvCapsuleResp(t, c.adminR)
+	if adminResp.CID != cid {
+		t.Fatalf("admin Connect resp CID=%d want %d", adminResp.CID, cid)
+	}
+	if adminResp.Status != 0 {
+		t.Fatalf("admin Connect status=0x%04x (non-success)", adminResp.Status)
+	}
+	// CapsuleResp DW0[15:0] = assigned CNTLID.
+	c.cntlID = uint16(adminResp.DW0 & 0xFFFF)
+	if c.cntlID == 0 {
+		t.Fatalf("admin Connect did not assign CNTLID (DW0=0x%08x)", adminResp.DW0)
+	}
+
+	if opts.SkipIOQueue {
+		return c
+	}
+
+	// IO queue: Connect with QID=1, CNTLID = what admin gave us.
+	c.io = dialAndHandshake(t, addr)
+	c.ioR = nvme.NewReader(c.io)
+	c.ioW = nvme.NewWriter(c.io)
+
+	ioCID := uint16(c.cid.Add(1))
+	ioCmd := nvme.CapsuleCommand{
+		OpCode: 0x7F,
+		FCType: 0x01,
+		CID:    ioCID,
+		D10:    uint32(1) << 16, // QID=1 (first IO queue)
+	}
+	ioCD := nvme.ConnectData{
+		HostID:  adminCD.HostID,
+		CNTLID:  c.cntlID, // echo admin's assignment
+		SubNQN:  opts.SubNQN,
+		HostNQN: opts.HostNQN,
+	}
+	ioCDBuf := make([]byte, 1024)
+	ioCD.Marshal(ioCDBuf)
+	if err := c.ioW.SendWithData(0x4, 0, &ioCmd, 64, ioCDBuf); err != nil {
+		t.Fatalf("IO Connect send: %v", err)
+	}
+	ioResp := recvCapsuleResp(t, c.ioR)
+	if ioResp.CID != ioCID {
+		t.Fatalf("IO Connect resp CID=%d want %d", ioResp.CID, ioCID)
+	}
+	if ioResp.Status != 0 {
+		t.Fatalf("IO Connect status=0x%04x (non-success)", ioResp.Status)
+	}
+
+	// Back-compat: existing tests use c.conn / c.r / c.w for IO.
+	c.conn = c.io
+	c.r = c.ioR
+	c.w = c.ioW
+
+	return c
+}
+
+// dialAndHandshake does TCP connect + ICReq/ICResp. Returns the
+// conn ready for Connect.
+func dialAndHandshake(t *testing.T, addr string) net.Conn {
 	t.Helper()
 	conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
 	if err != nil {
 		t.Fatalf("dial %s: %v", addr, err)
 	}
 	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
-	c := &nvmeClient{
-		conn: conn,
-		r:    nvme.NewReader(conn),
-		w:    nvme.NewWriter(conn),
-	}
+	w := nvme.NewWriter(conn)
+	r := nvme.NewReader(conn)
 
-	// Phase 1: ICReq → ICResp.
 	icr := nvme.ICRequest{
-		PDUFormatVersion: 0x0000, // NVMe-TCP 1.0a
-		PDUDataAlignment: 0,
-		PDUDataDigest:    0,
+		PDUFormatVersion: 0x0000,
 		PDUMaxR2T:        1,
 	}
-	if err := c.w.SendHeaderOnly(0x0 /* pduICReq */, &icr, 120 /* icBodySize */); err != nil {
+	if err := w.SendHeaderOnly(0x0, &icr, 120); err != nil {
 		t.Fatalf("send ICReq: %v", err)
 	}
-	ch, err := c.r.Dequeue()
+	ch, err := r.Dequeue()
 	if err != nil {
 		t.Fatalf("read ICResp: %v", err)
 	}
-	if ch.Type != 0x1 /* pduICResp */ {
+	if ch.Type != 0x1 {
 		t.Fatalf("expected ICResp, got 0x%x", ch.Type)
 	}
 	var icrep nvme.ICResponse
-	if err := c.r.Receive(&icrep); err != nil {
+	if err := r.Receive(&icrep); err != nil {
 		t.Fatalf("read ICResp body: %v", err)
 	}
-
-	// Phase 2: Fabric Connect.
-	cid := uint16(c.cid.Add(1))
-	cmd := nvme.CapsuleCommand{
-		OpCode: 0x7F, // adminFabric
-		FCType: 0x01, // fcConnect
-		CID:    cid,
-		// D10/D11 carry RECFMT and SQSIZE in real drivers; for
-		// our minimal Connect they're ignored.
-	}
-	cd := nvme.ConnectData{
-		HostID:  [16]byte{0x01, 0x02, 0x03, 0x04},
-		CNTLID:  0xFFFF, // request new controller
-		SubNQN:  "nqn.2026-04.example.v3:subsys",
-		HostNQN: "nqn.2026-04.example.host:1",
-	}
-	cdBuf := make([]byte, 1024 /* connectDataSize */)
-	cd.Marshal(cdBuf)
-	if err := c.w.SendWithData(0x4 /* pduCapsuleCmd */, 0, &cmd, 64 /* capsuleCmdSize */, cdBuf); err != nil {
-		t.Fatalf("send Connect: %v", err)
-	}
-	resp := c.recvCapsuleResp(t)
-	if resp.CID != cid {
-		t.Fatalf("Connect resp CID=%d want %d", resp.CID, cid)
-	}
-	if resp.Status != 0 {
-		t.Fatalf("Connect status=0x%04x (non-success)", resp.Status)
-	}
-	return c
+	return conn
 }
 
-// readCmd issues an IO Read CapsuleCmd and returns (status, data).
-// expectedBytes drives the C2HData receive.
+// recvCapsuleResp is a standalone reader (not a method on
+// nvmeClient) so it works for either admin or IO connection.
+func recvCapsuleResp(t *testing.T, r *nvme.Reader) nvme.CapsuleResponse {
+	t.Helper()
+	ch, err := r.Dequeue()
+	if err != nil {
+		t.Fatalf("read CapsuleResp hdr: %v", err)
+	}
+	if ch.Type != 0x5 {
+		t.Fatalf("expected CapsuleResp, got 0x%x", ch.Type)
+	}
+	var resp nvme.CapsuleResponse
+	if err := r.Receive(&resp); err != nil {
+		t.Fatalf("recv CapsuleResp: %v", err)
+	}
+	return resp
+}
+
+// ---------- IO command helpers (routed through ioConn) ----------
+
+// readCmd issues an IO Read CapsuleCmd on the IO queue.
 func (c *nvmeClient) readCmd(t *testing.T, slba uint64, nlb uint16, expectedBytes int) (uint16, []byte) {
 	t.Helper()
 	cid := uint16(c.cid.Add(1))
@@ -97,36 +231,33 @@ func (c *nvmeClient) readCmd(t *testing.T, slba uint64, nlb uint16, expectedByte
 		NSID:   1,
 		D10:    uint32(slba & 0xFFFFFFFF),
 		D11:    uint32(slba >> 32),
-		D12:    uint32(nlb - 1), // NLB is zero-based on wire
+		D12:    uint32(nlb - 1),
 	}
-	if err := c.w.SendHeaderOnly(0x4, &cmd, 64); err != nil {
+	if err := c.ioW.SendHeaderOnly(0x4, &cmd, 64); err != nil {
 		t.Fatalf("send Read: %v", err)
 	}
 
-	// Expect a C2HData (with data) followed by a CapsuleResp.
-	// Server sends C2HData first.
-	ch, err := c.r.Dequeue()
+	ch, err := c.ioR.Dequeue()
 	if err != nil {
 		t.Fatalf("read C2HData hdr: %v", err)
 	}
 	if ch.Type != 0x7 /* pduC2HData */ {
-		// Could be an error CapsuleResp without data — handle that.
-		if ch.Type == 0x5 /* pduCapsuleResp */ {
+		if ch.Type == 0x5 {
 			var resp nvme.CapsuleResponse
-			_ = c.r.Receive(&resp)
+			_ = c.ioR.Receive(&resp)
 			return resp.Status, nil
 		}
 		t.Fatalf("expected C2HData or CapsuleResp, got 0x%x", ch.Type)
 	}
 	var dh nvme.C2HDataHeader
-	if err := c.r.Receive(&dh); err != nil {
+	if err := c.ioR.Receive(&dh); err != nil {
 		t.Fatalf("recv C2HData: %v", err)
 	}
-	data := make([]byte, c.r.Length())
-	if err := c.r.ReceiveData(data); err != nil {
+	data := make([]byte, c.ioR.Length())
+	if err := c.ioR.ReceiveData(data); err != nil {
 		t.Fatalf("read data: %v", err)
 	}
-	resp := c.recvCapsuleResp(t)
+	resp := recvCapsuleResp(t, c.ioR)
 	if resp.CID != cid {
 		t.Fatalf("Read resp CID=%d want %d", resp.CID, cid)
 	}
@@ -134,8 +265,8 @@ func (c *nvmeClient) readCmd(t *testing.T, slba uint64, nlb uint16, expectedByte
 	return resp.Status, data
 }
 
-// writeCmd issues an IO Write CapsuleCmd, waits for R2T, sends
-// the H2CData payload, then reads the CapsuleResp status.
+// writeCmd issues an IO Write on the IO queue; handles R2T +
+// H2CData + CapsuleResp round trip.
 func (c *nvmeClient) writeCmd(t *testing.T, slba uint64, nlb uint16, payload []byte) uint16 {
 	t.Helper()
 	cid := uint16(c.cid.Add(1))
@@ -147,67 +278,90 @@ func (c *nvmeClient) writeCmd(t *testing.T, slba uint64, nlb uint16, payload []b
 		D11:    uint32(slba >> 32),
 		D12:    uint32(nlb - 1),
 	}
-	if err := c.w.SendHeaderOnly(0x4, &cmd, 64); err != nil {
+	if err := c.ioW.SendHeaderOnly(0x4, &cmd, 64); err != nil {
 		t.Fatalf("send Write: %v", err)
 	}
 
-	// Expect R2T from server.
-	ch, err := c.r.Dequeue()
+	ch, err := c.ioR.Dequeue()
 	if err != nil {
 		t.Fatalf("read R2T hdr: %v", err)
 	}
-	if ch.Type == 0x5 /* CapsuleResp */ {
-		// Server short-circuited (e.g. validation error) — return
-		// the error status without sending data.
+	if ch.Type == 0x5 {
 		var resp nvme.CapsuleResponse
-		_ = c.r.Receive(&resp)
+		_ = c.ioR.Receive(&resp)
 		return resp.Status
 	}
-	if ch.Type != 0x9 /* pduR2T */ {
+	if ch.Type != 0x9 {
 		t.Fatalf("expected R2T, got 0x%x", ch.Type)
 	}
 	var r2t nvme.R2THeader
-	if err := c.r.Receive(&r2t); err != nil {
+	if err := c.ioR.Receive(&r2t); err != nil {
 		t.Fatalf("recv R2T: %v", err)
 	}
 
-	// Send H2CData carrying the full payload in one PDU.
 	h2c := nvme.H2CDataHeader{
 		CCCID: cid,
 		TAG:   r2t.TAG,
 		DATAO: 0,
 		DATAL: uint32(len(payload)),
 	}
-	if err := c.w.SendWithData(0x6 /* pduH2CData */, 0, &h2c, 16 /* h2cDataHdrSize */, payload); err != nil {
+	if err := c.ioW.SendWithData(0x6, 0, &h2c, 16, payload); err != nil {
 		t.Fatalf("send H2CData: %v", err)
 	}
 
-	resp := c.recvCapsuleResp(t)
+	resp := recvCapsuleResp(t, c.ioR)
 	if resp.CID != cid {
 		t.Fatalf("Write resp CID=%d want %d", resp.CID, cid)
 	}
 	return resp.Status
 }
 
-func (c *nvmeClient) recvCapsuleResp(t *testing.T) nvme.CapsuleResponse {
+// ---------- Admin command helpers (routed through adminConn) ----------
+
+// adminIdentify issues an admin Identify with the given CNS and
+// optional NSID. Returns the 4 KiB response data + status.
+func (c *nvmeClient) adminIdentify(t *testing.T, cns uint8, nsid uint32) (uint16, []byte) {
 	t.Helper()
-	ch, err := c.r.Dequeue()
+	cid := uint16(c.cid.Add(1))
+	cmd := nvme.CapsuleCommand{
+		OpCode: 0x06, // adminIdentify
+		CID:    cid,
+		NSID:   nsid,
+		D10:    uint32(cns), // CNS in CDW10[7:0]
+	}
+	if err := c.adminW.SendHeaderOnly(0x4, &cmd, 64); err != nil {
+		t.Fatalf("send Identify: %v", err)
+	}
+	ch, err := c.adminR.Dequeue()
 	if err != nil {
-		t.Fatalf("read CapsuleResp hdr: %v", err)
+		t.Fatalf("read Identify resp hdr: %v", err)
 	}
-	if ch.Type != 0x5 /* pduCapsuleResp */ {
-		t.Fatalf("expected CapsuleResp, got 0x%x", ch.Type)
+	if ch.Type == 0x5 {
+		// Error path — no C2HData, just CapsuleResp.
+		var resp nvme.CapsuleResponse
+		_ = c.adminR.Receive(&resp)
+		return resp.Status, nil
 	}
-	var resp nvme.CapsuleResponse
-	if err := c.r.Receive(&resp); err != nil {
-		t.Fatalf("recv CapsuleResp: %v", err)
+	if ch.Type != 0x7 {
+		t.Fatalf("expected C2HData, got 0x%x", ch.Type)
 	}
-	return resp
+	var dh nvme.C2HDataHeader
+	if err := c.adminR.Receive(&dh); err != nil {
+		t.Fatalf("recv C2HData: %v", err)
+	}
+	data := make([]byte, c.adminR.Length())
+	if err := c.adminR.ReceiveData(data); err != nil {
+		t.Fatalf("read identify data: %v", err)
+	}
+	resp := recvCapsuleResp(t, c.adminR)
+	if resp.CID != cid {
+		t.Fatalf("Identify resp CID=%d want %d", resp.CID, cid)
+	}
+	return resp.Status, data
 }
 
-func (c *nvmeClient) close() { _ = c.conn.Close() }
+// ---------- Status assertion helpers ----------
 
-// expectStatusSuccess fails the test if the wire status word is non-zero.
 func expectStatusSuccess(t *testing.T, status uint16, op string) {
 	t.Helper()
 	if status != 0 {
@@ -215,12 +369,8 @@ func expectStatusSuccess(t *testing.T, status uint16, op string) {
 	}
 }
 
-// expectStatusANATransition fails the test if status is not the
-// stale-lineage tuple (SCT=3, SC=3 → wire = 0x0606 with DNR=1
-// adds 0x8000).
 func expectStatusANATransition(t *testing.T, status uint16, op string) {
 	t.Helper()
-	// SCT=3 SC=3 with DNR=1 = 0x8606; tolerate DNR=0 too (0x0606).
 	const sctMask = 0x0E00
 	const scMask = 0x01FE
 	gotSCT := (status & sctMask) >> 9

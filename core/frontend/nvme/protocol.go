@@ -28,12 +28,42 @@ const (
 // ---------- Admin / Fabric command opcodes ----------
 
 const (
-	adminFabric uint8 = 0x7F // Fabric-specific commands
+	// NVM admin opcode subset. Batch 11a introduces Identify
+	// (0x06). SetFeatures / GetFeatures / KeepAlive / AsyncEventRequest
+	// land with Batch 11b per port plan §7.
+	adminGetLogPage    uint8 = 0x02
+	adminIdentify      uint8 = 0x06
+	adminAbort         uint8 = 0x08
+	adminSetFeatures   uint8 = 0x09
+	adminGetFeatures   uint8 = 0x0A
+	adminAsyncEvent    uint8 = 0x0C
+	adminKeepAlive     uint8 = 0x18
+	adminFabric        uint8 = 0x7F // Fabric-specific commands
 )
 
 // Fabric command types (FCType).
 const (
-	fcConnect uint8 = 0x01
+	fcPropertySet uint8 = 0x00
+	fcConnect     uint8 = 0x01
+	fcPropertyGet uint8 = 0x04
+	fcDisconnect  uint8 = 0x08
+)
+
+// Identify CNS values (Batch 11a).
+const (
+	cnsIdentifyNamespace  uint8 = 0x00
+	cnsIdentifyController uint8 = 0x01
+	cnsActiveNSList       uint8 = 0x02
+	cnsNSDescriptorList   uint8 = 0x03
+)
+
+// Misc constants used by Identify builders. Only the versions
+// we actually advertise are declared here; adding dead versions
+// violates port-model discipline (port plan §5 stop-rule #4
+// "Advertised ≡ implemented").
+const (
+	identifySize  = 4096       // Identify response size (fixed)
+	nvmeVersion13 = 0x00010300 // NVMe 1.3 — what 11a's VS register advertises (D11)
 )
 
 // ---------- Sizes ----------

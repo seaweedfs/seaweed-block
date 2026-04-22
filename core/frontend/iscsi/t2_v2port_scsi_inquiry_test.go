@@ -11,6 +11,7 @@
 // Maps to ledger rows:
 //   - PCDD-ISCSI-VPD00-ADVERTISED-LIST-001 (advertised pages ≡ implemented pages)
 //   - PCDD-ISCSI-VPD83-NAA-DETERMINISM-001 (same VolumeID → same NAA; different → different)
+//   - PCDD-ISCSI-VPD80-SERIAL-DETERMINISM-001 (same VolumeID → same Serial; different → different; N1 symmetry with VPD 0x83)
 //
 // Test layer: Unit (library-level; no target or session required).
 
@@ -224,6 +225,124 @@ func TestT2V2Port_SCSI_InquiryVPD83_NAADerivationDeterministic(t *testing.T) {
 		naa := naaFromVPD(vpdQuery(t, h, 0x83))
 		if naa[0]>>4 != 0x06 {
 			t.Fatalf("empty VolumeID: NAA high nibble = 0x%x; want 0x6", naa[0]>>4)
+		}
+	})
+}
+
+// QA.A3.3 — port-plan §3.3 N1 symmetry (VPD 0x80)
+//
+// Asserts that the Unit Serial Number in VPD 0x80, when not overridden
+// by operator config, is derived per-volume from sha256(VolumeID) and
+// is therefore deterministic + collision-free across VolumeIDs. This
+// is the SYMMETRIC counterpart to the VPD 0x83 NAA invariant: Linux
+// udev fingerprints devices using BOTH pages, so if 0x80 returns the
+// same hardcoded constant for every volume (the V2 bug that N1 called
+// out) while 0x83 is per-volume unique, the pair is inconsistent and
+// latently breaks downstream storage stacks that weight 0x80.
+//
+// History: batch 10.5 initially shipped with Serial defaulting to the
+// hardcoded literal "SWF00001" — same pattern N1 rejected for NAA.
+// QA Owner flagged the asymmetry; sw fixed in follow-up commit
+// d649b43 by deriving the default Serial as hex(sha256(VolumeID)[:8]).
+// This test pins that fix as a lasting invariant so nobody reverts to
+// a shared constant without also updating this assertion.
+func TestT2V2Port_SCSI_InquiryVPD80_SerialDerivationDeterministic(t *testing.T) {
+	// serialFromVPD extracts the raw Serial bytes from a VPD 0x80
+	// response. Shape: header[4] + serial payload; length at [2:4].
+	serialFromVPD := func(data []byte) []byte {
+		t.Helper()
+		if len(data) < 4 {
+			t.Fatalf("VPD 0x80 too short: %d", len(data))
+		}
+		if data[0] != 0x00 || data[1] != 0x80 {
+			t.Fatalf("VPD 0x80 header: device=0x%02x page=0x%02x", data[0], data[1])
+		}
+		ln := int(binary.BigEndian.Uint16(data[2:4]))
+		if 4+ln > len(data) {
+			t.Fatalf("VPD 0x80 declared length=%d exceeds data=%d", ln, len(data)-4)
+		}
+		return data[4 : 4+ln]
+	}
+
+	// Sub-test: determinism — same VolumeID produces the same Serial
+	// across repeated queries AND across fresh handlers.
+	t.Run("SameVolumeIDProducesSameSerial", func(t *testing.T) {
+		h1 := handlerForVolume(t, "volume-alpha")
+		s1a := serialFromVPD(vpdQuery(t, h1, 0x80))
+		s1b := serialFromVPD(vpdQuery(t, h1, 0x80))
+		if !bytes.Equal(s1a, s1b) {
+			t.Fatalf("Serial not stable across calls: %q vs %q", s1a, s1b)
+		}
+
+		h2 := handlerForVolume(t, "volume-alpha") // fresh handler, same VolumeID
+		s2 := serialFromVPD(vpdQuery(t, h2, 0x80))
+		if !bytes.Equal(s1a, s2) {
+			t.Fatalf("Serial not stable across handlers for same VolumeID: %q vs %q (N1 symmetry broken)", s1a, s2)
+		}
+	})
+
+	// Sub-test: collision — different VolumeIDs produce different
+	// Serials. Uses the same case set as the NAA collision test so
+	// the symmetry is explicit: every VolumeID that produces a unique
+	// NAA must also produce a unique Serial.
+	t.Run("DifferentVolumeIDsProduceDifferentSerial", func(t *testing.T) {
+		cases := []string{
+			"volume-alpha",
+			"volume-beta",
+			"v1",
+			"v1-phase3-inv",
+			"iqn.2026-04.example.v3:v1",
+			"iqn.2026-04.example.v3:v2",
+			// Adversarial: very similar VolumeIDs.
+			"volume-aaaa",
+			"volume-aaab",
+		}
+		seen := make(map[string]string, len(cases))
+		for _, vid := range cases {
+			h := handlerForVolume(t, vid)
+			s := string(serialFromVPD(vpdQuery(t, h, 0x80)))
+			if prior, dup := seen[s]; dup {
+				t.Fatalf("Serial collision: VolumeID %q and %q both produce Serial=%q (N1 symmetry: collision guard broken)", prior, vid, s)
+			}
+			seen[s] = vid
+		}
+	})
+
+	// Sub-test: shape guard — default Serial must be 16-char
+	// lowercase hex (sha256[:8] encoded). If someone reverts to the
+	// 8-char "SWF00001" literal or any other fixed constant, this
+	// fires — symmetrically with the VPD 0x83 high-nibble guard.
+	t.Run("DefaultSerialIsSha256HexShape", func(t *testing.T) {
+		h := handlerForVolume(t, "volume-alpha")
+		s := serialFromVPD(vpdQuery(t, h, 0x80))
+		if len(s) != 16 {
+			t.Fatalf("default Serial length = %d; want 16 (hex of sha256[:8])", len(s))
+		}
+		for i, b := range s {
+			isHexDigit := (b >= '0' && b <= '9') || (b >= 'a' && b <= 'f')
+			if !isHexDigit {
+				t.Fatalf("Serial[%d] = 0x%02x (%q); not lowercase hex — shape regression (possible revert to shared constant)", i, b, s)
+			}
+		}
+		if bytes.HasPrefix(s, []byte("SWF")) {
+			t.Fatalf("Serial %q begins with SWF — regression to pre-d649b43 hardcoded constant", s)
+		}
+	})
+
+	// Sub-test: operator override — non-empty cfg.SerialNo bypasses
+	// derivation, so operators who explicitly set it own uniqueness.
+	// Pins the config precedence rule from addendum A.
+	t.Run("OperatorOverrideBypassesDerivation", func(t *testing.T) {
+		override := "ASSET-TAG-042"
+		rec := testback.NewRecordingBackend(frontend.Identity{
+			VolumeID: "volume-alpha", ReplicaID: "r1", Epoch: 1, EndpointVersion: 1,
+		})
+		h := iscsi.NewSCSIHandler(iscsi.HandlerConfig{Backend: rec, SerialNo: override})
+		s := serialFromVPD(vpdQuery(t, h, 0x80))
+		// Override may be right-padded to a fixed width; the prefix
+		// must equal the configured value verbatim.
+		if !bytes.HasPrefix(s, []byte(override)) {
+			t.Fatalf("override Serial prefix = %q; want prefix %q (operator override path broken)", s, override)
 		}
 	})
 }

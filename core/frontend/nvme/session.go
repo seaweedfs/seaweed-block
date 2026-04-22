@@ -34,6 +34,11 @@ type Session struct {
 	handler *IOHandler
 	logger  Logger
 
+	// target holds a reference back to the Target so we can
+	// allocate/look-up CNTLIDs on Connect. Set by the Target
+	// when it constructs the session (11a).
+	target *Target
+
 	// expectedSubNQN is the subsystem NQN this session must
 	// match against the host's Fabric Connect ConnectData.
 	// Empty means "no enforcement" (in-process L1 tests that
@@ -45,7 +50,21 @@ type Session struct {
 	expectedSubNQN string
 
 	connected atomic.Bool // true after Fabric Connect
-	closed    atomic.Bool
+
+	// Queue-model state set during Fabric Connect (§3.1 A10.5 + R3,
+	// QA finding #1 moving queue model into 11a):
+	//
+	//   qid   — 0 = admin queue; >0 = IO queue. Determines which
+	//           opcodes the dispatcher accepts on this session.
+	//   ctrl  — set on BOTH admin and IO sessions. Admin Connect
+	//           allocates the controller and pins it here; IO
+	//           Connect must cite an existing CNTLID and pins
+	//           the same pointer.
+	qid    uint16
+	qidSet bool
+	ctrl   *adminController
+
+	closed atomic.Bool
 
 	// sqhd advances per CapsuleResponse (NVMe submission queue
 	// head pointer for queue depth tracking — 0 in T2 scope
@@ -58,12 +77,13 @@ type Logger interface {
 	Printf(format string, args ...interface{})
 }
 
-func newSession(conn net.Conn, h *IOHandler, expectedSubNQN string, lg Logger) *Session {
+func newSession(conn net.Conn, h *IOHandler, target *Target, expectedSubNQN string, lg Logger) *Session {
 	return &Session{
 		conn:           conn,
 		r:              NewReader(conn),
 		w:              NewWriter(conn),
 		handler:        h,
+		target:         target,
 		expectedSubNQN: expectedSubNQN,
 		logger:         lg,
 	}
@@ -144,6 +164,8 @@ func (s *Session) handleCapsuleCmd(ctx context.Context) error {
 		}
 	}
 
+	// Fabric commands (including Connect) bypass the qid/connected
+	// gate — they ESTABLISH the gate.
 	if cmd.OpCode == adminFabric {
 		return s.handleFabric(&cmd, inline)
 	}
@@ -151,20 +173,78 @@ func (s *Session) handleCapsuleCmd(ctx context.Context) error {
 		return s.replyStatus(&cmd, MakeStatusField(SCTGeneric, SCInvalidOpcode, true))
 	}
 
+	// Post-Connect dispatch: route by queue type (QA finding #1
+	// moved queue routing into 11a).
+	//   QID=0 (admin queue) → admin opcodes only; IO opcodes
+	//                         return Invalid Opcode.
+	//   QID>0 (IO queue)    → IO opcodes only; admin opcodes
+	//                         return Invalid Opcode.
+	// This enforces the NVMe queue model Linux kernel expects:
+	// admin commands must arrive on the admin connection, IO
+	// must arrive on the IO connection.
+	if s.qid == 0 {
+		return s.adminDispatch(ctx, &cmd)
+	}
+	return s.ioDispatch(ctx, &cmd)
+}
+
+// adminDispatch routes admin-queue opcodes. 11a implements
+// Identify (CNS 0x00/0x01/0x02/0x03). SetFeatures / GetFeatures /
+// KeepAlive / AsyncEventRequest are 11b. Unknown opcodes return
+// Invalid Opcode — §6 stop rule #4 (advertised ≡ implemented)
+// means Identify Controller must NOT advertise any capability
+// that falls through to this default.
+func (s *Session) adminDispatch(ctx context.Context, cmd *CapsuleCommand) error {
 	switch cmd.OpCode {
-	case ioRead:
-		return s.handleRead(ctx, &cmd)
-	case ioWrite:
-		return s.handleWrite(ctx, &cmd)
-	case ioFlush:
-		return s.replyStatus(&cmd, 0) // Success
+	case adminIdentify:
+		return s.handleAdminIdentify(cmd)
 	default:
-		return s.replyStatus(&cmd, MakeStatusField(SCTGeneric, SCInvalidOpcode, true))
+		return s.replyStatus(cmd, MakeStatusField(SCTGeneric, SCInvalidOpcode, true))
 	}
 }
 
+// ioDispatch routes IO-queue opcodes.
+func (s *Session) ioDispatch(ctx context.Context, cmd *CapsuleCommand) error {
+	switch cmd.OpCode {
+	case ioRead:
+		return s.handleRead(ctx, cmd)
+	case ioWrite:
+		return s.handleWrite(ctx, cmd)
+	case ioFlush:
+		return s.replyStatus(cmd, 0) // Success — SYNC handled by backend in T3
+	default:
+		return s.replyStatus(cmd, MakeStatusField(SCTGeneric, SCInvalidOpcode, true))
+	}
+}
+
+// handleFabric processes Fabric-specific commands. Today: only
+// Connect (fcConnect). PropertyGet / PropertySet / Disconnect
+// land with Batch 11b.
+//
+// Connect semantics per NVMe-oF §3.3:
+//   - CDW10[31:16] carries QID (admin=0, IO>0).
+//   - ConnectData at bytes 16–17 carries CNTLID. For admin
+//     queue Connect the host sends 0xFFFF (request new); the
+//     target allocates a controller and returns the assigned
+//     CNTLID in CapsuleResp DW0[15:0]. For IO queue Connect
+//     the host echoes its previously-assigned CNTLID; the
+//     target validates it against the registered admin
+//     controllers (R3).
+//
+// Errors per NVMe-oF §3.3.1:
+//   - Wrong SubNQN → Command Specific / ConnectInvalidParameters
+//   - Unknown CNTLID on IO Connect → Command Specific /
+//     ConnectInvalidHost (0x82) — distinct from 0x80 so logs
+//     disambiguate "wrong subsystem" vs "unknown controller".
+//   - Double-Connect on same session → InvalidOpcode
+//     (we don't support re-Connect within one TCP conn).
 func (s *Session) handleFabric(cmd *CapsuleCommand, inline []byte) error {
 	if cmd.FCType != fcConnect {
+		return s.replyStatus(cmd, MakeStatusField(SCTGeneric, SCInvalidOpcode, true))
+	}
+	if s.qidSet {
+		// Connect already processed on this session. NVMe-oF
+		// does not allow re-Connect on an established session.
 		return s.replyStatus(cmd, MakeStatusField(SCTGeneric, SCInvalidOpcode, true))
 	}
 	if len(inline) < connectDataSize {
@@ -173,27 +253,115 @@ func (s *Session) handleFabric(cmd *CapsuleCommand, inline []byte) error {
 	var cd ConnectData
 	cd.Unmarshal(inline[:connectDataSize])
 
-	// Subsystem identity check: when the target was configured
-	// with a SubsysNQN, Connect must name THAT subsystem. NVMe-oF
-	// §3.3.1 dedicated status code is "Connect Invalid Parameters"
-	// (Command Specific SC=0x80). Auth (HostNQN policy) is T8;
-	// this check is wire-level identity, not access control.
+	qid := uint16(cmd.D10 >> 16)
+
+	// Subsystem identity check (applies to both admin and IO
+	// Connect). Reuses ckpt 8 follow-up enforcement.
 	if s.expectedSubNQN != "" && cd.SubNQN != s.expectedSubNQN {
 		if s.logger != nil {
-			s.logger.Printf("nvme: Connect REJECTED host=%q wanted subsys=%q got=%q",
-				cd.HostNQN, s.expectedSubNQN, cd.SubNQN)
+			s.logger.Printf("nvme: Connect REJECTED (wrong subsys) host=%q wanted=%q got=%q qid=%d",
+				cd.HostNQN, s.expectedSubNQN, cd.SubNQN, qid)
 		}
 		return s.replyStatus(cmd,
 			MakeStatusField(SCTCommandSpecific, SCConnectInvalidParameters, true))
 	}
 
+	if qid == 0 {
+		return s.handleAdminConnect(cmd, &cd, qid)
+	}
+	return s.handleIOConnect(cmd, &cd, qid)
+}
+
+// handleAdminConnect allocates a fresh CNTLID, registers an
+// admin controller with the Target, pins it to this session,
+// and replies with the assigned CNTLID in CapsuleResp DW0.
+func (s *Session) handleAdminConnect(cmd *CapsuleCommand, cd *ConnectData, qid uint16) error {
+	// NVMe-oF §3.3: admin Connect MUST set CNTLID=0xFFFF
+	// (request new). Some hosts send 0x0 instead; accept both
+	// as "allocate new" for L2-OS compat.
+	if cd.CNTLID != 0xFFFF && cd.CNTLID != 0x0000 {
+		if s.logger != nil {
+			s.logger.Printf("nvme: admin Connect with preset CNTLID=0x%04x rejected (must be 0xFFFF)",
+				cd.CNTLID)
+		}
+		return s.replyStatus(cmd,
+			MakeStatusField(SCTCommandSpecific, SCConnectInvalidParameters, true))
+	}
+	// Target may be nil in narrow in-process tests that use
+	// newSession directly; in that case we allocate a local
+	// controller without a registry.
+	var ctrl *adminController
+	if s.target != nil {
+		// R1: stash VolumeID at admin Connect so Identify
+		// builders can derive NGUID/Serial deterministically
+		// (sha256 derivation — no "SWF00001" stub).
+		ctrl = s.target.allocAdminController(cd.SubNQN, cd.HostNQN, s.target.cfg.VolumeID)
+	} else {
+		ctrl = &adminController{
+			cntlID:   1,
+			subNQN:   cd.SubNQN,
+			hostNQN:  cd.HostNQN,
+			volumeID: "v1",
+		}
+	}
+	s.qid = qid
+	s.qidSet = true
+	s.ctrl = ctrl
 	s.connected.Store(true)
 	if s.logger != nil {
-		s.logger.Printf("nvme: Connect accepted host=%q subsys=%q", cd.HostNQN, cd.SubNQN)
+		s.logger.Printf("nvme: admin Connect accepted host=%q subsys=%q cntlid=%d",
+			cd.HostNQN, cd.SubNQN, ctrl.cntlID)
 	}
-	// Reply with success; DW0/DW1 carry the assigned controller ID
-	// in the low 16 bits of DW0 (we use 1).
-	return s.sendCapsuleResp(cmd.CID, 0x00000001, 0, 0)
+	// CapsuleResp DW0[15:0] = assigned CNTLID; Linux host reads
+	// this and echoes it in subsequent IO queue Connect.
+	return s.sendCapsuleResp(cmd.CID, uint32(ctrl.cntlID), 0, 0)
+}
+
+// handleIOConnect validates that the host's CNTLID claim points
+// to a registered admin controller and pins that controller to
+// this IO queue session.
+func (s *Session) handleIOConnect(cmd *CapsuleCommand, cd *ConnectData, qid uint16) error {
+	var ctrl *adminController
+	if s.target != nil {
+		ctrl = s.target.lookupAdminController(cd.CNTLID)
+	}
+	if ctrl == nil {
+		if s.logger != nil {
+			s.logger.Printf("nvme: IO Connect qid=%d CNTLID=%d not found (admin session must precede)",
+				qid, cd.CNTLID)
+		}
+		// ConnectInvalidHost (SCT=CommandSpecific SC=0x82) is the
+		// dedicated code for "host claim doesn't match a known
+		// controller" — distinct from 0x80 "wrong SubNQN".
+		return s.replyStatus(cmd,
+			MakeStatusField(SCTCommandSpecific, SCConnectInvalidHost, true))
+	}
+	// Cross-check SubNQN matches admin's (V2 parity).
+	//
+	// NOT cross-checking HostNQN: V2 doesn't, and nvme-cli
+	// is spec-allowed to emit slightly different HostNQN per
+	// queue (uncommon but legal). An earlier sw draft added
+	// HostNQN cross-check as belt-and-suspenders but that
+	// diverged from V2 and risked breaking real Linux L2-OS.
+	// T8 (auth) owns tighter HostNQN policy.
+	if cd.SubNQN != ctrl.subNQN {
+		if s.logger != nil {
+			s.logger.Printf("nvme: IO Connect CNTLID=%d SubNQN mismatch: got %q want %q",
+				cd.CNTLID, cd.SubNQN, ctrl.subNQN)
+		}
+		return s.replyStatus(cmd,
+			MakeStatusField(SCTCommandSpecific, SCConnectInvalidHost, true))
+	}
+	s.qid = qid
+	s.qidSet = true
+	s.ctrl = ctrl
+	s.connected.Store(true)
+	if s.logger != nil {
+		s.logger.Printf("nvme: IO Connect accepted host=%q subsys=%q cntlid=%d qid=%d",
+			cd.HostNQN, cd.SubNQN, ctrl.cntlID, qid)
+	}
+	// IO Connect's CapsuleResp echoes CNTLID in DW0 (matches V2).
+	return s.sendCapsuleResp(cmd.CID, uint32(ctrl.cntlID), 0, 0)
 }
 
 func (s *Session) handleRead(ctx context.Context, cmd *CapsuleCommand) error {
@@ -288,6 +456,16 @@ func (s *Session) sendCapsuleResp(cid uint16, dw0, dw1 uint32, status uint16) er
 
 func (s *Session) close() {
 	if s.closed.CompareAndSwap(false, true) {
+		// Admin session (QID=0) owns the CNTLID in the Target
+		// registry. Release it so IO sessions that outlive the
+		// admin session can't see a "phantom" CNTLID. IO
+		// sessions that ARE still active hold the ctrl pointer
+		// locally and continue operating; they don't re-validate
+		// against the registry per-command (port plan §3.1 A10.5
+		// note).
+		if s.qid == 0 && s.ctrl != nil && s.target != nil {
+			s.target.releaseAdminController(s.ctrl.cntlID)
+		}
 		_ = s.conn.Close()
 	}
 }
