@@ -9,12 +9,15 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"net"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/adapter"
+	"github.com/seaweedfs/seaweed-block/core/frontend/iscsi"
+	"github.com/seaweedfs/seaweed-block/core/frontend/memback"
 	"github.com/seaweedfs/seaweed-block/core/host/volume"
 )
 
@@ -38,6 +41,16 @@ type flags struct {
 	// addr on the ready line so the test harness can discover it.
 	enableT1Readiness bool
 	statusAddr        string
+
+	// T2 iSCSI frontend flags. iscsiListen is the TCP address
+	// the iSCSI target binds on; empty disables the frontend.
+	// The bind is rejected at startup if it is not a loopback
+	// address — unauthenticated frontend on an external port
+	// would be a T2-scope safety regression. Per T2 assignment
+	// §3.2 "Defaults must be safe": no auth → loopback only.
+	iscsiListen string
+	iscsiIQN    string
+	iscsiLUN    uint
 }
 
 func parseFlags(args []string) (flags, error) {
@@ -53,6 +66,9 @@ func parseFlags(args []string) (flags, error) {
 	fs.BoolVar(&f.printReadyLine, "t0-print-ready", false, "internal test-only: emit one structured JSON line on stdout on first assignment")
 	fs.BoolVar(&f.enableT1Readiness, "t1-readiness", false, "enable T1 readiness bridge (HealthyPathExecutor) so adapter projection reaches Healthy")
 	fs.StringVar(&f.statusAddr, "status-addr", "", "address for the status HTTP endpoint (e.g. 127.0.0.1:0); empty disables")
+	fs.StringVar(&f.iscsiListen, "iscsi-listen", "", "iSCSI target bind address (e.g. 127.0.0.1:0); empty disables. Loopback-only in T2 scope (no auth)")
+	fs.StringVar(&f.iscsiIQN, "iscsi-iqn", "", "iSCSI target IQN (required if --iscsi-listen is set)")
+	fs.UintVar(&f.iscsiLUN, "iscsi-lun", 0, "iSCSI LUN id (default 0)")
 	fs.SetOutput(os.Stderr)
 	if err := fs.Parse(args); err != nil {
 		return flags{}, err
@@ -70,7 +86,42 @@ func parseFlags(args []string) (flags, error) {
 	if len(missing) > 0 {
 		return flags{}, fmt.Errorf("required: %v", missing)
 	}
+	if f.iscsiListen != "" {
+		if f.iscsiIQN == "" {
+			return flags{}, fmt.Errorf("--iscsi-iqn is required when --iscsi-listen is set")
+		}
+		if err := enforceIscsiLoopbackBind(f.iscsiListen); err != nil {
+			return flags{}, err
+		}
+		// iSCSI needs a Healthy adapter projection to open a
+		// memback backend. Auto-enable the T1 readiness bridge
+		// rather than failing — safer default for the beta
+		// product host (operator can still set --t1-readiness=false
+		// explicitly to surface a configuration error).
+		f.enableT1Readiness = true
+	}
 	return f, nil
+}
+
+// enforceIscsiLoopbackBind mirrors volume.StatusServer's guard:
+// refuses to bind iSCSI on anything other than 127.0.0.1 / ::1
+// in T2 scope. The iSCSI frontend does not implement AuthN/Z in
+// T2 (sketch §6), so exposing it on an external NIC would ship
+// an unauthenticated block-I/O endpoint. Real-network iSCSI
+// lands with T8 (security).
+func enforceIscsiLoopbackBind(addr string) error {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return fmt.Errorf("--iscsi-listen %q not host:port: %w", addr, err)
+	}
+	if host == "" {
+		return fmt.Errorf("--iscsi-listen %q has empty host; must be a loopback address (127.0.0.1 or ::1)", addr)
+	}
+	ip := net.ParseIP(host)
+	if ip == nil || !ip.IsLoopback() {
+		return fmt.Errorf("--iscsi-listen %q is not loopback; T2 iSCSI target is unauthenticated and refuses external binds", addr)
+	}
+	return nil
 }
 
 func main() {
@@ -92,9 +143,16 @@ type readyLine struct {
 }
 
 type statusReadyLine struct {
+	Component  string `json:"component"`
+	Phase      string `json:"phase"`
+	StatusAddr string `json:"status_addr"`
+}
+
+type iscsiReadyLine struct {
 	Component string `json:"component"`
 	Phase     string `json:"phase"`
-	StatusAddr string `json:"status_addr"`
+	IscsiAddr string `json:"iscsi_addr"`
+	IQN       string `json:"iqn"`
 }
 
 func run(f flags) int {
@@ -156,10 +214,44 @@ func run(f flags) int {
 		}()
 	}
 
+	var iscsiTarget *iscsi.Target
+	if f.iscsiListen != "" {
+		// memback provider wraps the volume's AdapterProjectionView
+		// so per-op lineage fence + supersede fence still apply at
+		// SCSI command granularity.
+		prov := memback.NewProvider(h.ProjectionView())
+		iscsiTarget = iscsi.NewTarget(iscsi.TargetConfig{
+			Listen:   f.iscsiListen,
+			IQN:      f.iscsiIQN,
+			VolumeID: f.volumeID,
+			Provider: prov,
+		})
+		iscsiAddr, err := iscsiTarget.Start()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "blockvolume: iscsi target:", err)
+			if status != nil {
+				shutCtx, shutCancel := context.WithTimeout(context.Background(), 2*time.Second)
+				_ = status.Close(shutCtx)
+				shutCancel()
+			}
+			_ = h.Close()
+			return 1
+		}
+		_ = json.NewEncoder(os.Stdout).Encode(iscsiReadyLine{
+			Component: "blockvolume",
+			Phase:     "iscsi-listening",
+			IscsiAddr: iscsiAddr,
+			IQN:       f.iscsiIQN,
+		})
+	}
+
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 	<-sig
 
+	if iscsiTarget != nil {
+		_ = iscsiTarget.Close()
+	}
 	if status != nil {
 		shutCtx, shutCancel := context.WithTimeout(context.Background(), 2*time.Second)
 		_ = status.Close(shutCtx)
