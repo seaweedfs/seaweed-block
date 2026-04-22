@@ -172,33 +172,29 @@ func (t *Target) handleConn(conn net.Conn) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Close session when target is closing.
+	// Close session when target is closing. Crucially, cancel
+	// the session's ctx in addition to closing conn — otherwise
+	// a session blocked inside Provider.Open (waiting on
+	// projection readiness) would keep t.sessions.Wait pinned
+	// forever because Open's only wakeup channel is the ctx.
 	go func() {
 		select {
 		case <-t.closed:
+			cancel()
 			_ = conn.Close()
 		case <-ctx.Done():
 		}
 	}()
 
-	// Open a backend via the frontend.Provider. The Provider
-	// blocks until the projection is healthy or returns
-	// ErrNotReady. We pass our own ctx so target-shutdown
-	// cancels the wait. Discovery sessions also call this so
-	// the frontend backend is ready by the time SCSI traffic
-	// could land — keeps the lifecycle uniform.
-	backend, err := t.cfg.Provider.Open(ctx, t.cfg.VolumeID)
-	if err != nil {
-		t.logger.Printf("iscsi: Provider.Open(%s): %v", t.cfg.VolumeID, err)
-		return
-	}
-	defer backend.Close()
-
-	cfg := t.cfg.Handler
-	cfg.Backend = backend
-	handler := NewSCSIHandler(cfg)
-
-	sess := newSession(conn, handler, t.cfg.Negotiation, t, t, t.logger)
+	// Do NOT open the backend here. Architect residual-risk
+	// fix (2026-04-21): Discovery sessions must not depend on
+	// frontend.Provider readiness — otherwise a not-yet-Healthy
+	// volume blocks `iscsiadm -m discovery` indefinitely when
+	// it should at least return SendTargets. The session opens
+	// the backend after login succeeds, and only for Normal
+	// sessions.
+	sess := newSession(conn, t.cfg.Provider, t.cfg.VolumeID, t.cfg.Handler,
+		t.cfg.Negotiation, t, t, t.logger)
 	if err := sess.serve(ctx); err != nil && !errors.Is(err, net.ErrClosed) {
 		t.logger.Printf("iscsi: session error (%s): %v", conn.RemoteAddr(), err)
 	}

@@ -21,6 +21,8 @@ import (
 	"io"
 	"net"
 	"sync/atomic"
+
+	"github.com/seaweedfs/seaweed-block/core/frontend"
 )
 
 // SessionState distinguishes login vs. FullFeature.
@@ -34,6 +36,20 @@ const (
 
 // Session carries one iSCSI session's per-connection state.
 // Created by the Target on accept; driven by serve().
+//
+// Backend readiness and Session type interact as follows (fix
+// for architect residual-risk note 2026-04-21 round-9):
+//   - Login runs FIRST on every accepted connection. The
+//     frontend.Provider is NOT dialed before login.
+//   - After login succeeds:
+//       * Discovery session → skip backend open entirely.
+//         SendTargets / Logout / NOP-Out work without a backend.
+//         iscsiadm -m discovery succeeds even when the volume's
+//         adapter projection is still non-Healthy.
+//       * Normal session → open the backend via Provider; a
+//         Provider.Open failure (e.g. ErrNotReady) closes the
+//         session cleanly WITHOUT blocking subsequent discovery
+//         attempts.
 type Session struct {
 	conn    net.Conn
 	handler *SCSIHandler
@@ -48,12 +64,22 @@ type Session struct {
 	// Negotiator drives multi-round login parameter exchange.
 	// negCfg + resolver + lister are injected by Target at
 	// construction so this layer stays unaware of the target's
-	// catalog. Discovery sessions don't reach the SCSI handler;
-	// they exit after the SendTargets exchange + Logout.
-	negCfg   NegotiableConfig
-	resolver TargetResolver
-	lister   TargetLister
+	// catalog.
+	negCfg    NegotiableConfig
+	resolver  TargetResolver
+	lister    TargetLister
 	negResult LoginResult
+
+	// Backend open is deferred to post-login, Normal-session
+	// only. provider + volumeID + hcfg are captured at session
+	// construction; the session calls provider.Open() after
+	// login succeeds and builds the SCSIHandler then.
+	provider  frontend.Provider
+	volumeID  string
+	hcfg      HandlerConfig
+	// backend holds the opened backend so serve() can Close it
+	// on exit. nil for Discovery sessions.
+	backend frontend.Backend
 
 	// Session lifetime.
 	closed atomic.Bool
@@ -67,29 +93,52 @@ type Logger interface {
 }
 
 // newSession builds a fresh session for the accepted conn.
-// negCfg/resolver/lister come from the Target. handler may be
-// nil for Discovery-only sessions; the negotiator decides which
-// path applies after login.
-func newSession(conn net.Conn, handler *SCSIHandler, negCfg NegotiableConfig, resolver TargetResolver, lister TargetLister, logger Logger) *Session {
+// provider + volumeID + hcfg are captured for post-login,
+// Normal-session-only backend open (residual-risk fix). The
+// backend is NOT opened at construction.
+func newSession(conn net.Conn, provider frontend.Provider, volumeID string, hcfg HandlerConfig, negCfg NegotiableConfig, resolver TargetResolver, lister TargetLister, logger Logger) *Session {
 	return &Session{
 		conn:     conn,
-		handler:  handler,
 		logger:   logger,
 		state:    SessionLogin,
 		negCfg:   negCfg,
 		resolver: resolver,
 		lister:   lister,
+		provider: provider,
+		volumeID: volumeID,
+		hcfg:     hcfg,
 	}
 }
 
 // serve runs the session until the connection closes.
 func (s *Session) serve(ctx context.Context) error {
 	defer s.close()
-	// Login phase — serial, single-PDU round trips.
+	// Phase 1: login negotiation. No backend opened yet.
 	if err := s.loginPhase(); err != nil {
 		return fmt.Errorf("login: %w", err)
 	}
-	// Full-Feature phase — dispatch SCSI commands.
+	// Phase 2: open backend for Normal sessions only. Discovery
+	// sessions never touch the frontend.Provider — they only
+	// need SendTargets, which comes from the TargetLister that
+	// was wired at construction.
+	if s.negResult.SessionType == SessionTypeNormal {
+		backend, err := s.provider.Open(ctx, s.volumeID)
+		if err != nil {
+			// Clean close — do NOT hold the socket. A parallel
+			// discovery attempt on the listen addr must still
+			// make progress.
+			if s.logger != nil {
+				s.logger.Printf("iscsi: Provider.Open(%s): %v (closing Normal session)",
+					s.volumeID, err)
+			}
+			return fmt.Errorf("provider open: %w", err)
+		}
+		s.backend = backend
+		hcfg := s.hcfg
+		hcfg.Backend = backend
+		s.handler = NewSCSIHandler(hcfg)
+	}
+	// Phase 3: Full-Feature dispatch loop.
 	return s.fullFeatureLoop(ctx)
 }
 
@@ -299,6 +348,9 @@ func (s *Session) handleNOPOut(req *PDU) error {
 
 func (s *Session) close() {
 	if s.closed.CompareAndSwap(false, true) {
+		if s.backend != nil {
+			_ = s.backend.Close()
+		}
 		_ = s.conn.Close()
 		s.state = SessionClosed
 	}
