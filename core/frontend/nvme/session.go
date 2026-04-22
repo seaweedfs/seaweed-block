@@ -1,54 +1,63 @@
 package nvme
 
-// NVMe/TCP session — RX/TX split with per-CID pendingWrite routing.
-// BUG-001 / BUG-002 / BUG-004 co-fix (2026-04-22).
+// NVMe/TCP session — faithful V2 port of the RX/TX split pattern.
+// Reverts the pragmatic per-CID pendingWrites evolution from the
+// initial BUG-001 fix (commit eae028a); see BUG-001 §13 for why
+// that evolution broke kernel compatibility on m01.
 //
-// ## Relationship to V2 (port discipline note)
+// ## What V2 does (port verbatim, with V3 module-path adaptation)
 //
-// V2 `weed/storage/blockvol/nvme/controller.go` uses a two-loop
-// pattern (rxLoop + txLoop + respCh) that we port faithfully. V2
-// additionally uses **inline R2T data collection inside rxLoop**
-// (collectR2TData → recvH2CData → bufferInterleaved). That inline
-// pattern works against real Linux NVMe/TCP hosts because the
-// kernel always ships H2CData immediately after receiving an R2T
-// — so rxLoop never blocks meaningfully inside recvH2CData.
+// Phase 1 (synchronous): ICReq / ICResp.
 //
-// It does NOT work against spec-legal hosts (or QA's conformance
-// tests) that pipeline multiple CapsuleCmds BEFORE sending any
-// H2CData. V2's inline recvH2CData blocks waiting for H2CData-1
-// while cmd-2 sits buffered in pendingCapsules, so R2T-2 is never
-// emitted → client never sends H2CData → deadlock.
+// Phase 2 (RX/TX split):
+//   - rxLoop goroutine — sole reader of s.r after IC. Per iteration:
+//       * drain pendingCapsules (Cmds buffered during a prior R2T
+//         data collection window) BEFORE reading next wire PDU
+//       * read next CommonHeader
+//       * CapsuleCmd → parseCapsule + dispatchFromRx
+//       * H2CData (outside a collection window) → protocol error
+//       * other → protocol error
+//   - dispatchFromRx routes by QID:
+//       * Fabric / Admin (qid=0): synchronous, handler enqueues
+//         response via respCh
+//       * IO Write (qid>0, no inline data): collectR2TData inline
+//         in rxLoop — enqueues R2T, waits r2tDone, then
+//         recvH2CData collects all H2CData for this cmd. If
+//         interleaved CapsuleCmds arrive during recvH2CData,
+//         bufferInterleaved stashes them in pendingCapsules; rxLoop
+//         drains them on its next iteration.
+//       * IO Read / Flush / other: handler goroutine, enqueue
+//         response via respCh.
+//   - txLoop goroutine — sole writer of s.w after IC. Drains
+//     respCh, writes CapsuleResp / C2HData / R2T PDUs.
 //
-// V3 evolves V2's pattern by moving H2CData collection OUT of
-// rxLoop and into per-CID state:
-//   - rxLoop reads PDUs strictly by type. No nested read loops.
-//   - CapsuleCmd for Write → register a pendingWrite keyed by CID
-//     + enqueue R2T + spawn handler goroutine waiting on the
-//     pendingWrite's done channel. rxLoop returns immediately to
-//     read the next PDU (cmd-N+1 or H2CData-N).
-//   - H2CData → route bytes into the matching pendingWrite; when
-//     full, close its done channel.
-//   - Handler goroutine wakes, calls backend.Write, enqueues
-//     CapsuleResp.
+// Invariant this preserves and why it matters:
+//   AT MOST ONE R2T IS OUTSTANDING AT A TIME on a given session.
+//   collectR2TData blocks rxLoop until the current Write's data
+//   has been fully received. pipelined Cmds that arrive mid-collect
+//   go into pendingCapsules and are processed in order after
+//   collectR2TData returns. Linux NVMe-TCP kernel driver (and the
+//   NVMe-TCP spec req_state machine) is built around this model:
+//   kernel sends H2CData for cmd-N in response to R2T-N and
+//   doesn't pre-emit R2T-(N+1) until cmd-N's data is done.
 //
-// Structurally this is still RX/TX split with respCh; the only
-// divergence from V2 is that the pipelining invariant now lives
-// in a pendingWrites map rather than in a sync recvH2CData call
-// with a pendingCapsules fallback. The difference is ~60 LOC.
-// See the BUG-001 fix commit message for why this was a required
-// evolution rather than an ambitious rewrite.
+// The initial BUG-001 fix (eae028a) deviated from this by spawning
+// a handler goroutine per Write and emitting all R2Ts async. That
+// passed a Go-client conformance test QA wrote that expected all
+// R2Ts before any H2CData, but the real Linux kernel state machine
+// does NOT pipeline data across R2Ts — it saw two R2Ts for what it
+// tracked as overlapping requests and errored with "r2t len X
+// exceeded data len X (Y sent)". See BUG-001 §13 post-mortem.
 //
-// ## BUG-002 (fcDisconnect)
+// ## BUG-002 (fcDisconnect) + BUG-004 (SQHD wrap)
 //
-// handleFabric now routes fcDisconnect → handleDisconnect, which
-// enqueues a success CapsuleResp and returns the errDisconnect
-// sentinel. serve() catches the sentinel and returns nil.
-//
-// ## BUG-004 (SQHD wrap at queueSize)
-//
-// Session.queueSize is parsed from Connect CDW11 low-16 (zero-
-// based + 1). advanceSQHD wraps at queueSize. CATTR bit 2
-// (flowCtlOff) from CDW11 bit 18 reports SQHD=0xFFFF when set.
+// These orthogonal fixes are retained — they don't interact with
+// the concurrency model:
+//   - handleDisconnect: enqueues success CapsuleResp, returns
+//     errDisconnect sentinel; serve() maps it to nil.
+//   - Connect parses CDW11 low-16 (SQSIZE zero-based +1) + bit 18
+//     (CATTR flow-ctrl-off). advanceSQHD wraps at queueSize;
+//     writeResponse reports 0xFFFF when flowCtlOff.
 
 import (
 	"context"
@@ -74,34 +83,15 @@ type Request struct {
 }
 
 // response represents a pending response to be written by txLoop.
-// Two variants:
-//   - Standard: resp (+ optional c2hData for Read/Identify)
-//   - R2T: r2t non-nil; r2tSent signals when R2T has been flushed
-//     to the wire (currently unused by the per-CID design but
-//     kept for symmetry with V2's r2tDone shape — future uses).
+// Either a standard CapsuleResp (with optional c2hData) or an R2T
+// PDU. r2tDone is closed by txLoop after R2T is flushed to wire
+// so collectR2TData (in rxLoop) can proceed to recv H2CData.
 type response struct {
 	resp    CapsuleResponse
 	c2hData []byte
 
 	r2t     *R2THeader
-	r2tSent chan struct{}
-}
-
-// pendingWrite tracks an in-flight IO Write between R2T emission
-// and H2CData reception. rxLoop's H2CData path writes into buf;
-// when received == totalBytes, rxLoop closes done. The handler
-// goroutine blocks on done before calling backend.Write.
-type pendingWrite struct {
-	cid        uint16
-	tag        uint16
-	totalBytes uint32
-	buf        []byte
-	received   uint32
-	done       chan struct{}
-	// protocolErr is set by rxLoop if the H2CData stream violates
-	// framing (out-of-range DATAO, under-size PDU, etc.). Handler
-	// goroutine checks it before calling backend.
-	protocolErr atomic.Value // error
+	r2tDone chan struct{}
 }
 
 // Session carries per-connection NVMe/TCP state.
@@ -121,23 +111,20 @@ type Session struct {
 	qid        uint16
 	qidSet     bool
 	ctrl       *adminController
-	queueSize  uint16 // BUG-004: parsed from Connect
-	flowCtlOff bool   // BUG-004: CATTR bit 2
+	queueSize  uint16 // BUG-004
+	flowCtlOff bool   // BUG-004
 
-	// BUG-004: SQHD tracked atomically. rxLoop advances on each
-	// capsule parse; txLoop reads at response-stamp time.
-	sqhd atomic.Uint32 // lower 16 bits are live
+	// BUG-004: SQHD tracked atomically; rxLoop advances on parse,
+	// txLoop reads at response-stamp time.
+	sqhd atomic.Uint32
 
-	// RX/TX split state — created in serve() after IC.
 	respCh chan *response
 	done   chan struct{}
 	cmdWg  sync.WaitGroup
 
-	// Per-CID pending Writes. Guarded by pwMu. rxLoop registers
-	// on Write-cmd dispatch, unregisters after done; H2CData path
-	// looks up by CCCID.
-	pwMu          sync.Mutex
-	pendingWrites map[uint16]*pendingWrite
+	// pendingCapsules holds CapsuleCmds that arrived during a
+	// prior R2T data collection window. rxLoop-local; no mutex.
+	pendingCapsules []*Request
 
 	closed atomic.Bool
 }
@@ -156,19 +143,16 @@ func newSession(conn net.Conn, h *IOHandler, target *Target, expectedSubNQN stri
 		target:         target,
 		expectedSubNQN: expectedSubNQN,
 		logger:         lg,
-		pendingWrites:  make(map[uint16]*pendingWrite),
 	}
 }
 
 func (s *Session) serve(ctx context.Context) error {
 	defer s.close()
 
-	// Phase 1: ICReq / ICResp synchronous.
 	if err := s.handleICReq(); err != nil {
 		return fmt.Errorf("ICReq: %w", err)
 	}
 
-	// Phase 2: RX/TX split.
 	s.respCh = make(chan *response, 128)
 	s.done = make(chan struct{})
 
@@ -179,15 +163,10 @@ func (s *Session) serve(ctx context.Context) error {
 
 	rxErr := s.rxLoop(ctx)
 
-	// Unblock any handlers still waiting for H2CData so cmdWg
-	// can drain.
-	s.abortPendingWrites()
 	s.cmdWg.Wait()
-
 	close(s.done)
 	txErr := <-txErrCh
 
-	// BUG-002: graceful Disconnect is not an error.
 	if errors.Is(rxErr, errDisconnect) {
 		rxErr = nil
 	}
@@ -215,7 +194,7 @@ func (s *Session) handleICReq() error {
 		PDUFormatVersion: req.PDUFormatVersion,
 		PDUDataAlignment: 0,
 		PDUDataDigest:    0,
-		MaxH2CDataLength: 0x8000, // 32 KiB
+		MaxH2CDataLength: 0x8000,
 	}
 	return s.w.SendHeaderOnly(pduICResp, &resp, icBodySize)
 }
@@ -227,6 +206,19 @@ func (s *Session) rxLoop(ctx context.Context) error {
 		if s.closed.Load() {
 			return nil
 		}
+		// Drain capsules buffered during a prior R2T data
+		// collection window before reading the next wire PDU.
+		// This is the V2 pipelining invariant: cmds pipelined
+		// by kernel during our H2CData collection get processed
+		// here in order.
+		for len(s.pendingCapsules) > 0 {
+			req := s.pendingCapsules[0]
+			s.pendingCapsules = s.pendingCapsules[1:]
+			if err := s.dispatchFromRx(ctx, req); err != nil {
+				return err
+			}
+		}
+
 		ch, err := s.r.Dequeue()
 		if err != nil {
 			if err == io.EOF || s.closed.Load() {
@@ -244,16 +236,13 @@ func (s *Session) rxLoop(ctx context.Context) error {
 				return err
 			}
 		case pduH2CData:
-			if err := s.routeH2CData(); err != nil {
-				return err
-			}
+			return fmt.Errorf("unexpected H2CData PDU outside R2T flow")
 		default:
 			return fmt.Errorf("unsupported PDU type 0x%x", ch.Type)
 		}
 	}
 }
 
-// parseCapsule reads a CapsuleCmd PDU + optional inline data.
 func (s *Session) parseCapsule() (*Request, error) {
 	var capsule CapsuleCommand
 	if err := s.r.Receive(&capsule); err != nil {
@@ -266,62 +255,9 @@ func (s *Session) parseCapsule() (*Request, error) {
 			return nil, err
 		}
 	}
-	req := &Request{
-		capsule: capsule,
-		payload: payload,
-	}
+	req := &Request{capsule: capsule, payload: payload}
 	req.resp.CID = capsule.CID
 	return req, nil
-}
-
-// routeH2CData reads an H2CData PDU and routes its bytes to the
-// matching pendingWrite by CCCID. Closes done when the write is
-// fully received. Framing violations are recorded on the
-// pendingWrite's protocolErr and the handler goroutine surfaces
-// them as a status-error CapsuleResp.
-func (s *Session) routeH2CData() error {
-	var h H2CDataHeader
-	if err := s.r.Receive(&h); err != nil {
-		return fmt.Errorf("H2CData: receive header: %w", err)
-	}
-	dataLen := s.r.Length()
-	pw := s.lookupPending(h.CCCID)
-	if pw == nil {
-		// Unknown CCCID: drain data to keep the stream framed,
-		// then fail the session (protocol violation).
-		if dataLen > 0 {
-			drain := make([]byte, dataLen)
-			_ = s.r.ReceiveData(drain)
-		}
-		return fmt.Errorf("H2CData for unknown CCCID=%d", h.CCCID)
-	}
-	if dataLen == 0 {
-		err := fmt.Errorf("H2CData: zero-length payload")
-		pw.protocolErr.Store(err)
-		close(pw.done)
-		return err
-	}
-	if h.DATAO+dataLen > pw.totalBytes {
-		err := fmt.Errorf("H2CData: data exceeds expected size (%d+%d > %d)",
-			h.DATAO, dataLen, pw.totalBytes)
-		pw.protocolErr.Store(err)
-		// Drain bytes before returning so the stream stays framed
-		// for any future PDUs (txLoop will tear down shortly anyway).
-		drain := make([]byte, dataLen)
-		_ = s.r.ReceiveData(drain)
-		close(pw.done)
-		return err
-	}
-	if err := s.r.ReceiveData(pw.buf[h.DATAO : h.DATAO+dataLen]); err != nil {
-		pw.protocolErr.Store(err)
-		close(pw.done)
-		return err
-	}
-	pw.received += dataLen
-	if pw.received >= pw.totalBytes {
-		close(pw.done)
-	}
-	return nil
 }
 
 // advanceSQHD (BUG-004) wraps SQHD at queueSize.
@@ -337,9 +273,10 @@ func (s *Session) advanceSQHD() {
 // dispatchFromRx routes a parsed capsule.
 //   - Fabric: synchronous.
 //   - Admin (qid=0): synchronous.
-//   - IO Write: register pendingWrite, enqueue R2T, spawn handler
-//     goroutine (waits on pendingWrite.done).
-//   - IO Read/Flush/other: spawn handler goroutine.
+//   - IO Write: collectR2TData inline in rxLoop (populates
+//     pendingCapsules via bufferInterleaved if kernel pipelines),
+//     THEN spawn handler goroutine for backend.Write.
+//   - IO Read/Flush/other: handler goroutine.
 func (s *Session) dispatchFromRx(ctx context.Context, req *Request) error {
 	cmd := &req.capsule
 	if cmd.OpCode == adminFabric {
@@ -357,10 +294,15 @@ func (s *Session) dispatchFromRx(ctx context.Context, req *Request) error {
 		return s.adminDispatch(ctx, req)
 	}
 
-	// IO queue.
-	if cmd.OpCode == ioWrite {
-		return s.dispatchIOWrite(ctx, req)
+	// IO queue. For Write without inline data, collect R2T data
+	// inline FIRST (this is where pendingCapsules gets populated
+	// via bufferInterleaved during recvH2CData), THEN dispatch.
+	if cmd.OpCode == ioWrite && len(req.payload) == 0 {
+		if err := s.collectR2TData(req); err != nil {
+			return err
+		}
 	}
+
 	s.cmdWg.Add(1)
 	go func() {
 		defer s.cmdWg.Done()
@@ -369,97 +311,96 @@ func (s *Session) dispatchFromRx(ctx context.Context, req *Request) error {
 	return nil
 }
 
-// dispatchIOWrite registers a pendingWrite, enqueues R2T, and
-// spawns a handler goroutine that waits for H2CData completion.
-func (s *Session) dispatchIOWrite(ctx context.Context, req *Request) error {
-	cmd := &req.capsule
-	totalBytes := cmd.LbaLength() * s.handler.BlockSize()
-	pw := &pendingWrite{
-		cid:        cmd.CID,
-		tag:        1,
-		totalBytes: totalBytes,
-		buf:        make([]byte, totalBytes),
-		done:       make(chan struct{}),
-	}
-	if !s.registerPending(pw) {
-		// Duplicate CID on a pipelined Write is a protocol
-		// violation; respond InvalidField and skip.
-		req.resp.Status = MakeStatusField(SCTGeneric, SCInvalidField, true)
-		s.enqueueResponse(&response{resp: req.resp})
-		return nil
-	}
-	s.enqueueResponse(&response{
+// collectR2TData (called from rxLoop only) enqueues R2T via
+// respCh, waits for txLoop to flush it (r2tDone), then drives
+// recvH2CData to collect all H2CData bytes for this Write. This
+// blocks rxLoop; pipelined Cmds arriving during this window are
+// absorbed into pendingCapsules by bufferInterleaved.
+func (s *Session) collectR2TData(req *Request) error {
+	totalBytes := req.capsule.LbaLength() * s.handler.BlockSize()
+
+	r2tDone := make(chan struct{})
+	select {
+	case s.respCh <- &response{
 		r2t: &R2THeader{
-			CCCID: cmd.CID,
-			TAG:   pw.tag,
+			CCCID: req.capsule.CID,
+			TAG:   1,
 			DATAO: 0,
 			DATAL: totalBytes,
 		},
-	})
-	s.cmdWg.Add(1)
-	go func() {
-		defer s.cmdWg.Done()
-		defer s.unregisterPending(cmd.CID)
-		select {
-		case <-pw.done:
-		case <-s.done:
-			return
-		}
-		if err := pw.protocolErr.Load(); err != nil {
-			req.resp.Status = MakeStatusField(SCTGeneric, SCInvalidField, true)
-			s.enqueueResponse(&response{resp: req.resp})
-			return
-		}
-		req.payload = pw.buf
-		s.handleWrite(ctx, req)
-	}()
+		r2tDone: r2tDone,
+	}:
+	case <-s.done:
+		return nil
+	}
+
+	select {
+	case <-r2tDone:
+	case <-s.done:
+		return nil
+	}
+
+	data, err := s.recvH2CData(totalBytes)
+	if err != nil {
+		return err
+	}
+	req.payload = data
 	return nil
 }
 
-// registerPending adds pw to the pendingWrites map if no existing
-// entry has the same CID. Returns true on success, false on CID
-// collision (protocol violation — tag reuse within outstanding).
-func (s *Session) registerPending(pw *pendingWrite) bool {
-	s.pwMu.Lock()
-	defer s.pwMu.Unlock()
-	if _, exists := s.pendingWrites[pw.cid]; exists {
-		return false
-	}
-	s.pendingWrites[pw.cid] = pw
-	return true
-}
-
-func (s *Session) unregisterPending(cid uint16) {
-	s.pwMu.Lock()
-	delete(s.pendingWrites, cid)
-	s.pwMu.Unlock()
-}
-
-func (s *Session) lookupPending(cid uint16) *pendingWrite {
-	s.pwMu.Lock()
-	defer s.pwMu.Unlock()
-	return s.pendingWrites[cid]
-}
-
-// abortPendingWrites closes every pending write's done channel
-// with a protocol-error sentinel, so handler goroutines blocked
-// on the channel can exit. Called when rxLoop returns.
-func (s *Session) abortPendingWrites() {
-	s.pwMu.Lock()
-	defer s.pwMu.Unlock()
-	for _, pw := range s.pendingWrites {
-		if pw.protocolErr.Load() == nil {
-			pw.protocolErr.Store(errors.New("session closed mid-write"))
+// recvH2CData reads H2CData PDU(s) off the wire until totalBytes
+// have been collected. Called from rxLoop via collectR2TData.
+// If a CapsuleCmd PDU arrives during this window (kernel
+// pipelined the next cmd on this queue), bufferInterleaved reads
+// it fully and appends to pendingCapsules; rxLoop drains them on
+// its next iteration.
+func (s *Session) recvH2CData(totalBytes uint32) ([]byte, error) {
+	buf := make([]byte, totalBytes)
+	received := uint32(0)
+	for received < totalBytes {
+		ch, err := s.r.Dequeue()
+		if err != nil {
+			return nil, fmt.Errorf("recvH2CData: read header: %w", err)
 		}
-		// close(done) may panic if already closed; guard with a
-		// recover pattern via a select-on-closed idiom.
-		select {
-		case <-pw.done:
-			// already closed
-		default:
-			close(pw.done)
+		if ch.Type == pduCapsuleCmd {
+			if err := s.bufferInterleaved(); err != nil {
+				return nil, fmt.Errorf("recvH2CData: buffer interleaved capsule: %w", err)
+			}
+			continue
 		}
+		if ch.Type != pduH2CData {
+			return nil, fmt.Errorf("recvH2CData: expected H2CData (0x6), got 0x%x", ch.Type)
+		}
+		var h2c H2CDataHeader
+		if err := s.r.Receive(&h2c); err != nil {
+			return nil, fmt.Errorf("recvH2CData: receive header: %w", err)
+		}
+		dataLen := s.r.Length()
+		if dataLen == 0 {
+			return nil, fmt.Errorf("recvH2CData: H2CData PDU has no payload")
+		}
+		if h2c.DATAO+dataLen > totalBytes {
+			return nil, fmt.Errorf("recvH2CData: data exceeds expected size (%d+%d > %d)",
+				h2c.DATAO, dataLen, totalBytes)
+		}
+		if err := s.r.ReceiveData(buf[h2c.DATAO : h2c.DATAO+dataLen]); err != nil {
+			return nil, fmt.Errorf("recvH2CData: receive data: %w", err)
+		}
+		received += dataLen
 	}
+	return buf, nil
+}
+
+// bufferInterleaved reads a complete CapsuleCmd PDU that arrived
+// during H2CData collection, appends it to pendingCapsules for
+// rxLoop to dispatch after collectR2TData returns.
+func (s *Session) bufferInterleaved() error {
+	req, err := s.parseCapsule()
+	if err != nil {
+		return err
+	}
+	s.pendingCapsules = append(s.pendingCapsules, req)
+	return nil
 }
 
 // adminDispatch handles admin-queue opcodes synchronously.
@@ -483,13 +424,15 @@ func (s *Session) adminDispatch(ctx context.Context, req *Request) error {
 	}
 }
 
-// dispatchIO handles IO-queue opcodes other than Write (Write
-// takes the pendingWrite path above).
+// dispatchIO handles IO-queue opcodes (goroutine). Write's data
+// has already been collected by collectR2TData in rxLoop.
 func (s *Session) dispatchIO(ctx context.Context, req *Request) {
 	cmd := &req.capsule
 	switch cmd.OpCode {
 	case ioRead:
 		s.handleRead(ctx, req)
+	case ioWrite:
+		s.handleWrite(ctx, req)
 	case ioFlush:
 		s.enqueueResponse(&response{resp: req.resp})
 	default:
@@ -532,17 +475,18 @@ func (s *Session) txLoop() error {
 	}
 }
 
+// completeWaiters unblocks r2tDone on a discarded response.
 func completeWaiters(resp *response) {
-	if resp.r2tSent != nil {
-		close(resp.r2tSent)
+	if resp.r2tDone != nil {
+		close(resp.r2tDone)
 	}
 }
 
 func (s *Session) writeResponse(resp *response) error {
 	if resp.r2t != nil {
 		err := s.w.SendHeaderOnly(pduR2T, resp.r2t, r2tHdrSize)
-		if resp.r2tSent != nil {
-			close(resp.r2tSent)
+		if resp.r2tDone != nil {
+			close(resp.r2tDone)
 		}
 		return err
 	}
@@ -614,8 +558,7 @@ func (s *Session) handleFabric(req *Request) error {
 	case fcPropertySet:
 		return s.handlePropertySet(req)
 	case fcDisconnect:
-		// BUG-002.
-		return s.handleDisconnect(req)
+		return s.handleDisconnect(req) // BUG-002
 	}
 	if cmd.FCType != fcConnect {
 		req.resp.Status = MakeStatusField(SCTGeneric, SCInvalidOpcode, true)
@@ -636,7 +579,7 @@ func (s *Session) handleFabric(req *Request) error {
 	cd.Unmarshal(req.payload[:connectDataSize])
 
 	qid := uint16(cmd.D10 >> 16)
-	// BUG-004: parse queueSize (CDW11 low-16 zero-based) + CATTR.
+	// BUG-004: SQSIZE zero-based low-16; CATTR bit 2 at D11 bit 18.
 	queueSize := uint16(cmd.D11&0xFFFF) + 1
 	cattr := uint8(cmd.D11 >> 16)
 	flowCtlOff := (cattr & 0x04) != 0
@@ -736,8 +679,7 @@ func (s *Session) handleIOConnect(req *Request, cd *ConnectData, qid, queueSize 
 	return nil
 }
 
-// handleDisconnect (BUG-002) enqueues success then returns the
-// errDisconnect sentinel.
+// handleDisconnect (BUG-002).
 func (s *Session) handleDisconnect(req *Request) error {
 	if s.logger != nil && s.ctrl != nil {
 		s.logger.Printf("nvme: Disconnect cntlid=%d qid=%d", s.ctrl.cntlID, s.qid)
