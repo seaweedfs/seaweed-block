@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 
@@ -134,17 +135,20 @@ func NewSCSIHandler(cfg HandlerConfig) *SCSIHandler {
 	if product == "" {
 		product = "BlockVol        "
 	}
-	serial := cfg.SerialNo
-	if serial == "" {
-		serial = "SWF00001"
-	}
+	// serialNo is NOT defaulted at construction time. Leaving
+	// it empty lets VPD 0x80 compute a per-volume-deterministic
+	// serial via serialFromVolumeID() at request time — mirrors
+	// the NAA derivation in VPD 0x83 (port plan §3.3 N1 symmetry,
+	// 2026-04-22 QA review). A caller who wants a literal serial
+	// (e.g. operator asset tag) passes it in cfg.SerialNo; that
+	// overrides the derivation.
 	return &SCSIHandler{
 		backend:    cfg.Backend,
 		blockSize:  bs,
 		volumeSize: vs,
 		vendorID:   vendor,
 		productID:  product,
-		serialNo:   serial,
+		serialNo:   cfg.SerialNo,
 	}
 }
 
@@ -363,7 +367,19 @@ func (h *SCSIHandler) inquiryVPD(pageCode uint8, allocLen uint16) SCSIResult {
 		return SCSIResult{Status: StatusGood, Data: data}
 
 	case 0x80: // Unit Serial Number
-		serial := padRight(h.serialNo, 8)
+		// Symmetric with VPD 0x83 NAA derivation: if cfg.SerialNo
+		// was explicitly set, use it as-is (operator override);
+		// otherwise derive a 16-char ASCII serial from the
+		// backend's VolumeID so every volume has a unique
+		// fingerprint (Linux udev reads both 0x80 + 0x83 to build
+		// its unique ID — they must both be per-volume unique).
+		// Port plan §3.3 N1 was NAA-only; this closes the
+		// symmetric gap per QA review 2026-04-22.
+		serialStr := h.serialNo
+		if serialStr == "" {
+			serialStr = serialFromVolumeID(h.backend.Identity().VolumeID)
+		}
+		serial := padRight(serialStr, len(serialStr))
 		data := make([]byte, 4+len(serial))
 		data[0] = 0x00
 		data[1] = 0x80
@@ -430,6 +446,22 @@ func naaFromVolumeID(volumeID string) [8]byte {
 	// nibble of byte 0 from the hash.
 	out[0] = 0x60 | (out[0] & 0x0f)
 	return out
+}
+
+// serialFromVolumeID builds a 16-character ASCII serial from the
+// handler's VolumeID. Hex-encoded sha256(VolumeID)[:8] — gives 64
+// bits of entropy, per-volume unique, deterministic across
+// restarts, fits comfortably in VPD 0x80 (SCSI Unit Serial is
+// traditionally 8–16 ASCII chars).
+//
+// Symmetric counterpart to naaFromVolumeID; introduced 2026-04-22
+// to close the N1 asymmetry where VPD 0x80 was still using the
+// "SWF00001" hardcoded stub while VPD 0x83 was already
+// per-volume derived. Linux udev's unique-fingerprint logic reads
+// both pages together, so both must be per-volume unique.
+func serialFromVolumeID(volumeID string) string {
+	sum := sha256.Sum256([]byte(volumeID))
+	return hex.EncodeToString(sum[:8])
 }
 
 func (h *SCSIHandler) readCapacity10() SCSIResult {

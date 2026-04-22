@@ -135,10 +135,45 @@ func TestT2Batch10_5_InquiryVPD80_ReturnsSerial(t *testing.T) {
 	if pageLen != len(r.Data)-4 {
 		t.Fatalf("declared page length=%d != actual %d", pageLen, len(r.Data)-4)
 	}
-	// Default serial "SWF00001" padded to 8 bytes.
+	// With cfg.SerialNo unset (newHandlerForTest passes no
+	// SerialNo), the default derives from VolumeID per §3.3 N1
+	// symmetry (QA review 2026-04-22). VolumeID="v1" → 16
+	// lowercase hex chars. Assert shape only; the QA A-tier
+	// determinism/collision test pins the exact invariant.
 	serial := r.Data[4:]
-	if !bytes.HasPrefix(serial, []byte("SWF00001")) {
-		t.Fatalf("serial %q does not start with SWF00001", serial)
+	if len(serial) != 16 {
+		t.Fatalf("serial length=%d want 16 (hex-encoded sha256[:8])", len(serial))
+	}
+	for _, b := range serial {
+		// Must be lowercase hex.
+		if !((b >= '0' && b <= '9') || (b >= 'a' && b <= 'f')) {
+			t.Fatalf("serial %q contains non-hex byte 0x%02x", serial, b)
+		}
+	}
+	// Explicitly pin the N1 invariant at this layer: serial must
+	// NOT be the old "SWF00001" stub (regression guard).
+	if bytes.HasPrefix(serial, []byte("SWF00001")) {
+		t.Fatal("serial still uses old hardcoded stub; N1 symmetry broken")
+	}
+}
+
+// Operator override path: cfg.SerialNo explicitly set is honored
+// verbatim. Lets asset-tracked environments keep a specific
+// serial (e.g. matching storage asset tags) without losing the
+// default derivation for the common case.
+func TestT2Batch10_5_InquiryVPD80_RespectsOperatorOverride(t *testing.T) {
+	rec := testback.NewRecordingBackend(frontend.Identity{VolumeID: "v1"})
+	h := iscsi.NewSCSIHandler(iscsi.HandlerConfig{
+		Backend:  rec,
+		SerialNo: "ASSET-TAG-007",
+	})
+	r := h.HandleCommand(context.Background(), inquiryVPDCDB(0x80, 255), nil)
+	if r.AsError() != nil {
+		t.Fatalf("VPD 0x80: %v", r.AsError())
+	}
+	serial := r.Data[4:]
+	if !bytes.Equal(serial, []byte("ASSET-TAG-007")) {
+		t.Fatalf("serial %q did not honor operator override", serial)
 	}
 }
 
