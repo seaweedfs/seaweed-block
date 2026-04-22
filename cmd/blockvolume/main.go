@@ -96,8 +96,12 @@ func parseFlags(args []string) (flags, error) {
 		// iSCSI needs a Healthy adapter projection to open a
 		// memback backend. Auto-enable the T1 readiness bridge
 		// rather than failing — safer default for the beta
-		// product host (operator can still set --t1-readiness=false
-		// explicitly to surface a configuration error).
+		// product host. Emits a one-line stderr notice so
+		// operators don't misread the auto-enable as an
+		// invisible side effect.
+		if !f.enableT1Readiness {
+			fmt.Fprintln(os.Stderr, "blockvolume: iscsi enabled: t1-readiness auto-enabled")
+		}
 		f.enableT1Readiness = true
 	}
 	return f, nil
