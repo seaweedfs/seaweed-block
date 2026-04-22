@@ -314,6 +314,11 @@ func cdbExpectedWriteBytes(cdb [16]byte, blockSize uint32) (uint32, bool) {
 	case ScsiWrite10:
 		transferLen := uint32(cdb[7])<<8 | uint32(cdb[8])
 		return transferLen * blockSize, true
+	case ScsiWrite16:
+		// 32-bit transferLen in CDB bytes 10-13 (Batch 10.5).
+		transferLen := uint32(cdb[10])<<24 | uint32(cdb[11])<<16 |
+			uint32(cdb[12])<<8 | uint32(cdb[13])
+		return transferLen * blockSize, true
 	}
 	return 0, false
 }

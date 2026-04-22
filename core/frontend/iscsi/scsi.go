@@ -2,6 +2,7 @@ package iscsi
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -9,18 +10,33 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/frontend"
 )
 
-// SCSI opcodes (SBC-4 / SPC-5). Only the subset T2 needs for a
-// basic attach + write + read round-trip is declared here; the
-// rest are rejected as ILLEGAL REQUEST until later tracks add
-// them.
+// SCSI opcodes (SBC-4 / SPC-5). Extended in Batch 10.5 to cover
+// the Linux/kernel + Windows-initiator OS probe surface per the
+// locked port plan (v3-phase-15-t2-batch-10-5-port-plan.md §3.1).
+// Opcodes not in this list still return ILLEGAL REQUEST.
 const (
-	ScsiTestUnitReady  uint8 = 0x00
-	ScsiRequestSense   uint8 = 0x03
-	ScsiInquiry        uint8 = 0x12
-	ScsiReadCapacity10 uint8 = 0x25
-	ScsiRead10         uint8 = 0x28
-	ScsiWrite10        uint8 = 0x2a
-	ScsiReportLuns     uint8 = 0xa0
+	ScsiTestUnitReady     uint8 = 0x00
+	ScsiRequestSense      uint8 = 0x03
+	ScsiInquiry           uint8 = 0x12
+	ScsiModeSelect6       uint8 = 0x15
+	ScsiModeSense6        uint8 = 0x1a
+	ScsiStartStopUnit     uint8 = 0x1b
+	ScsiReadCapacity10    uint8 = 0x25
+	ScsiRead10            uint8 = 0x28
+	ScsiWrite10           uint8 = 0x2a
+	ScsiSyncCache10       uint8 = 0x35
+	ScsiModeSelect10      uint8 = 0x55
+	ScsiModeSense10       uint8 = 0x5a
+	ScsiRead16            uint8 = 0x88
+	ScsiWrite16           uint8 = 0x8a
+	ScsiSyncCache16       uint8 = 0x91
+	ScsiServiceActionIn16 uint8 = 0x9e
+	ScsiReportLuns        uint8 = 0xa0
+)
+
+// Service Action codes for SERVICE ACTION IN(16) opcode 0x9e.
+const (
+	SaiReadCapacity16 uint8 = 0x10
 )
 
 // Fixed block size for the T2 contract backend. Real volumes
@@ -153,12 +169,39 @@ func (h *SCSIHandler) HandleCommand(ctx context.Context, cdb [16]byte, dataOut [
 		return h.requestSense(cdb)
 	case ScsiInquiry:
 		return h.inquiry(cdb)
+	// Batch 10.5: MODE_SELECT + START_STOP_UNIT — trivial Good
+	// stubs paired with MODE_SENSE (see port plan §3.1.a).
+	case ScsiModeSelect6, ScsiModeSelect10:
+		return SCSIResult{Status: StatusGood}
+	case ScsiStartStopUnit:
+		return SCSIResult{Status: StatusGood}
+	// Batch 10.5: MODE_SENSE(6/10).
+	case ScsiModeSense6:
+		return h.modeSense6(cdb)
+	case ScsiModeSense10:
+		return h.modeSense10(cdb)
 	case ScsiReadCapacity10:
 		return h.readCapacity10()
 	case ScsiRead10:
 		return h.read10(ctx, cdb)
 	case ScsiWrite10:
 		return h.write10(ctx, cdb, dataOut)
+	// Batch 10.5: SYNC_CACHE(10/16) — memback non-durable, no-op
+	// Good. T3 owns real flush behavior when durable backend lands.
+	case ScsiSyncCache10, ScsiSyncCache16:
+		return SCSIResult{Status: StatusGood}
+	// Batch 10.5: 16-byte data variants (64-bit LBA).
+	case ScsiRead16:
+		return h.read16(ctx, cdb)
+	case ScsiWrite16:
+		return h.write16(ctx, cdb, dataOut)
+	case ScsiServiceActionIn16:
+		sa := cdb[1] & 0x1f
+		if sa == SaiReadCapacity16 {
+			return h.readCapacity16(cdb)
+		}
+		return illegalRequest(ASCInvalidFieldInCDB, 0x00,
+			fmt.Sprintf("unsupported SAI16 service action 0x%02x", sa))
 	case ScsiReportLuns:
 		return h.reportLuns(cdb)
 	default:
@@ -216,6 +259,22 @@ func (h *SCSIHandler) doWrite(ctx context.Context, lba uint64, transferLen uint3
 	return SCSIResult{Status: StatusGood}
 }
 
+// Batch 10.5: 16-byte data variants. 64-bit LBA (bytes 2–9) +
+// 32-bit transferLen (bytes 10–13). Dispatches to the same
+// doRead/doWrite paths as the 10-byte variants.
+
+func (h *SCSIHandler) read16(ctx context.Context, cdb [16]byte) SCSIResult {
+	lba := binary.BigEndian.Uint64(cdb[2:10])
+	transferLen := binary.BigEndian.Uint32(cdb[10:14])
+	return h.doRead(ctx, lba, transferLen)
+}
+
+func (h *SCSIHandler) write16(ctx context.Context, cdb [16]byte, dataOut []byte) SCSIResult {
+	lba := binary.BigEndian.Uint64(cdb[2:10])
+	transferLen := binary.BigEndian.Uint32(cdb[10:14])
+	return h.doWrite(ctx, lba, transferLen, dataOut)
+}
+
 // --- metadata path ---
 
 func (h *SCSIHandler) requestSense(cdb [16]byte) SCSIResult {
@@ -232,22 +291,20 @@ func (h *SCSIHandler) requestSense(cdb [16]byte) SCSIResult {
 
 func (h *SCSIHandler) inquiry(cdb [16]byte) SCSIResult {
 	evpd := cdb[1] & 0x01
-	if evpd != 0 {
-		// VPD pages are useful for real initiators but not for
-		// the T2 L0 contract smoke. Reject until L2 coverage
-		// lands.
-		return illegalRequest(ASCInvalidFieldInCDB, 0x00, "VPD not supported in T2 scope")
-	}
+	pageCode := cdb[2]
 	allocLen := binary.BigEndian.Uint16(cdb[3:5])
 	if allocLen == 0 {
 		allocLen = 36
 	}
+	if evpd != 0 {
+		return h.inquiryVPD(pageCode, allocLen)
+	}
 	data := make([]byte, 36)
-	data[0] = 0x00                  // Peripheral device type: direct-access block
-	data[1] = 0x00                  // RMB=0
-	data[2] = 0x06                  // Version: SPC-4
-	data[3] = 0x02                  // Response data format
-	data[4] = 31                    // Additional length (36-5)
+	data[0] = 0x00 // Peripheral device type: direct-access block
+	data[1] = 0x00 // RMB=0
+	data[2] = 0x06 // Version: SPC-4
+	data[3] = 0x02 // Response data format
+	data[4] = 31   // Additional length (36-5)
 	copy(data[8:16], padRight(h.vendorID, 8))
 	copy(data[16:32], padRight(h.productID, 16))
 	copy(data[32:36], "0001")
@@ -257,15 +314,217 @@ func (h *SCSIHandler) inquiry(cdb [16]byte) SCSIResult {
 	return SCSIResult{Status: StatusGood, Data: data}
 }
 
+// Batch 10.5: INQUIRY VPD. Approved pages: 0x00 (supported list),
+// 0x80 (unit serial number), 0x83 (device identification, non-ALUA
+// branch only). VPD 0xB0 / 0xB2 are explicitly NOT implemented
+// and NOT advertised (port plan §3.3 N3 — advertised list must
+// match implemented set or kernel logs errors on every probe).
+func (h *SCSIHandler) inquiryVPD(pageCode uint8, allocLen uint16) SCSIResult {
+	switch pageCode {
+	case 0x00: // Supported VPD pages
+		// Peripheral device type + page code + 2-byte page length
+		// + one byte per supported page. List is EXACT match to
+		// the pages the switch below actually implements.
+		pages := []byte{0x00, 0x80, 0x83}
+		data := make([]byte, 4+len(pages))
+		data[0] = 0x00
+		data[1] = 0x00
+		binary.BigEndian.PutUint16(data[2:4], uint16(len(pages)))
+		copy(data[4:], pages)
+		if int(allocLen) < len(data) {
+			data = data[:allocLen]
+		}
+		return SCSIResult{Status: StatusGood, Data: data}
+
+	case 0x80: // Unit Serial Number
+		serial := padRight(h.serialNo, 8)
+		data := make([]byte, 4+len(serial))
+		data[0] = 0x00
+		data[1] = 0x80
+		binary.BigEndian.PutUint16(data[2:4], uint16(len(serial)))
+		copy(data[4:], serial)
+		if int(allocLen) < len(data) {
+			data = data[:allocLen]
+		}
+		return SCSIResult{Status: StatusGood, Data: data}
+
+	case 0x83: // Device Identification (non-ALUA branch only)
+		return h.inquiryVPD83(allocLen)
+
+	default:
+		return illegalRequest(ASCInvalidFieldInCDB, 0x00,
+			fmt.Sprintf("VPD page 0x%02x not implemented in T2 scope", pageCode))
+	}
+}
+
+// inquiryVPD83 emits ONE NAA-6 Registered Extended designator
+// derived from the volume identity. V2 has an ALUA branch (TPG /
+// RTP descriptors); that's skipped in Batch 10.5 (ALUA is
+// skip-list). V2's fallback stub NAA was a hardcoded constant —
+// unusable for T2 because all volumes would report the same
+// unique ID and Linux multipath / udev would conflate them
+// (port plan §3.3 N1). Instead we derive a per-volume NAA from
+// sha256(VolumeID)[:7] prefixed with 0x60 (NAA-6).
+func (h *SCSIHandler) inquiryVPD83(allocLen uint16) SCSIResult {
+	// Designator 1: NAA-6 identifier (8 bytes). Derive from the
+	// frontend.Backend's captured VolumeID — stable across the
+	// backend's lifetime and the only authoritative identity
+	// the handler has access to (no extra config threading).
+	naa := naaFromVolumeID(h.backend.Identity().VolumeID)
+	naaDesc := []byte{
+		0x01, // code set = binary
+		0x03, // PIV=0, association=00 (logical unit), type=3 (NAA)
+		0x00, // reserved
+		0x08, // identifier length = 8 bytes
+	}
+	naaDesc = append(naaDesc, naa[:]...)
+
+	data := make([]byte, 4+len(naaDesc))
+	data[0] = 0x00
+	data[1] = 0x83
+	binary.BigEndian.PutUint16(data[2:4], uint16(len(naaDesc)))
+	copy(data[4:], naaDesc)
+	if int(allocLen) < len(data) {
+		data = data[:allocLen]
+	}
+	return SCSIResult{Status: StatusGood, Data: data}
+}
+
+// naaFromVolumeID builds an 8-byte NAA-6 identifier from the
+// handler's VolumeID. The high nibble of byte 0 is pinned to 0x6
+// (NAA-6 Registered Extended). The remaining 60 bits are
+// sha256(VolumeID) truncated to fit. Deterministic (same VolumeID
+// → same NAA across process restarts) and collision-free for
+// realistic volume counts (T2 single-volume is trivially safe).
+func naaFromVolumeID(volumeID string) [8]byte {
+	sum := sha256.Sum256([]byte(volumeID))
+	var out [8]byte
+	copy(out[:], sum[:8])
+	// Force the high nibble to 0x6 (NAA-6). Preserve the low
+	// nibble of byte 0 from the hash.
+	out[0] = 0x60 | (out[0] & 0x0f)
+	return out
+}
+
 func (h *SCSIHandler) readCapacity10() SCSIResult {
 	totalBlocks := h.volumeSize / uint64(h.blockSize)
 	data := make([]byte, 8)
 	if totalBlocks > 0 {
-		// Returns LBA of last block, not count.
-		binary.BigEndian.PutUint32(data[0:4], uint32(totalBlocks-1))
+		// Returns LBA of last block, not count. If >2^32 blocks,
+		// V2 returns 0xFFFFFFFF to signal "use READ_CAPACITY(16)";
+		// we preserve that.
+		if totalBlocks > 0xFFFFFFFF {
+			binary.BigEndian.PutUint32(data[0:4], 0xFFFFFFFF)
+		} else {
+			binary.BigEndian.PutUint32(data[0:4], uint32(totalBlocks-1))
+		}
 	}
 	binary.BigEndian.PutUint32(data[4:8], h.blockSize)
 	return SCSIResult{Status: StatusGood, Data: data}
+}
+
+// Batch 10.5: READ_CAPACITY(16). 32-byte response with 64-bit
+// last-LBA + block size + flags. LBPME=1 advertises logical
+// block provisioning management enabled (needed by kernel when
+// backend is thin-provisioned); we set it to stay compatible
+// with V2's advertised shape even though T2 memback isn't
+// actually thin. UNMAP ops are NOT implemented (skip-list),
+// so kernel may probe VPD 0xB2 and we'll reject — that's the
+// expected fallback per port plan §3.3 N3.
+func (h *SCSIHandler) readCapacity16(cdb [16]byte) SCSIResult {
+	allocLen := binary.BigEndian.Uint32(cdb[10:14])
+	if allocLen < 32 {
+		allocLen = 32
+	}
+	totalBlocks := h.volumeSize / uint64(h.blockSize)
+	data := make([]byte, 32)
+	if totalBlocks > 0 {
+		binary.BigEndian.PutUint64(data[0:8], totalBlocks-1)
+	}
+	binary.BigEndian.PutUint32(data[8:12], h.blockSize)
+	// byte 14 bit 7 (LBPME) = 1 matches V2 advertised shape.
+	data[14] = 0x80
+	if allocLen < uint32(len(data)) {
+		data = data[:allocLen]
+	}
+	return SCSIResult{Status: StatusGood, Data: data}
+}
+
+// Batch 10.5: MODE_SENSE(6) / MODE_SENSE(10). Build minimal mode
+// page data for pages 0x08 (Caching) and 0x0A (Control); 0x3F
+// returns all. Other pages produce an empty mode page set,
+// matching V2. No mode_select persistence (MODE_SELECT is no-op
+// Good). The header shape differs between 6-byte and 10-byte
+// variants; page body is shared via buildModePages.
+
+func (h *SCSIHandler) modeSense6(cdb [16]byte) SCSIResult {
+	allocLen := cdb[4]
+	if allocLen == 0 {
+		allocLen = 4
+	}
+	pages := h.buildModePages(cdb[2] & 0x3f)
+	data := make([]byte, 4+len(pages))
+	data[0] = byte(3 + len(pages)) // Mode data length (everything after byte 0)
+	// data[1..3]: medium type / device-specific / block descriptor length = 0
+	copy(data[4:], pages)
+	if int(allocLen) < len(data) {
+		data = data[:allocLen]
+	}
+	return SCSIResult{Status: StatusGood, Data: data}
+}
+
+func (h *SCSIHandler) modeSense10(cdb [16]byte) SCSIResult {
+	allocLen := binary.BigEndian.Uint16(cdb[7:9])
+	if allocLen == 0 {
+		allocLen = 8
+	}
+	pages := h.buildModePages(cdb[2] & 0x3f)
+	data := make([]byte, 8+len(pages))
+	binary.BigEndian.PutUint16(data[0:2], uint16(6+len(pages))) // Mode data length
+	// data[2..7]: medium type / device-specific / LONGLBA flag / block descriptor length = 0
+	copy(data[8:], pages)
+	if int(allocLen) < len(data) {
+		data = data[:allocLen]
+	}
+	return SCSIResult{Status: StatusGood, Data: data}
+}
+
+func (h *SCSIHandler) buildModePages(pageCode uint8) []byte {
+	switch pageCode {
+	case 0x08: // Caching
+		return modePage08()
+	case 0x0a: // Control
+		return modePage0A()
+	case 0x3f: // All pages
+		var pages []byte
+		pages = append(pages, modePage08()...)
+		pages = append(pages, modePage0A()...)
+		return pages
+	default:
+		return nil
+	}
+}
+
+// modePage08 is the Caching mode page (SBC-4 §7.5.5). WCE=1 tells
+// Windows/Linux the device supports a write cache — matches V2's
+// Windows-tuned value. SYNC_CACHE is a no-op in T2 (memback is
+// non-durable per port plan §3.3 N2); WCE=1 just means the
+// kernel may send flushes more eagerly, which we accept.
+func modePage08() []byte {
+	page := make([]byte, 20)
+	page[0] = 0x08 // page code
+	page[1] = 18   // page length (20 - 2)
+	page[2] = 0x04 // WCE=1, RCD=0
+	return page
+}
+
+// modePage0A is the Control mode page (SPC-5 §8.4.8). Default
+// zero values are fine for T2.
+func modePage0A() []byte {
+	page := make([]byte, 12)
+	page[0] = 0x0a // page code
+	page[1] = 10   // page length (12 - 2)
+	return page
 }
 
 func (h *SCSIHandler) reportLuns(cdb [16]byte) SCSIResult {
