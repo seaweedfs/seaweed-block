@@ -360,6 +360,159 @@ func (c *nvmeClient) adminIdentify(t *testing.T, cns uint8, nsid uint32) (uint16
 	return resp.Status, data
 }
 
+// adminPropertyGet issues a Fabric PropertyGet for the given
+// register offset. size8=true for CAP (8-byte), false for
+// VS/CC/CSTS (4-byte). Returns (status, value).
+func (c *nvmeClient) adminPropertyGet(t *testing.T, offset uint32, size8 bool) (uint16, uint64) {
+	t.Helper()
+	cid := uint16(c.cid.Add(1))
+	var sizeBit uint32
+	if size8 {
+		sizeBit = 1
+	}
+	cmd := nvme.CapsuleCommand{
+		OpCode: 0x7F, // adminFabric
+		FCType: 0x04, // fcPropertyGet
+		CID:    cid,
+		D10:    sizeBit, // bit 0 = size (0=4B, 1=8B)
+		D11:    offset,
+	}
+	if err := c.adminW.SendHeaderOnly(0x4, &cmd, 64); err != nil {
+		t.Fatalf("send PropertyGet: %v", err)
+	}
+	resp := recvCapsuleResp(t, c.adminR)
+	if resp.CID != cid {
+		t.Fatalf("PropertyGet resp CID=%d want %d", resp.CID, cid)
+	}
+	val := uint64(resp.DW0)
+	if size8 {
+		val |= uint64(resp.DW1) << 32
+	}
+	return resp.Status, val
+}
+
+// adminPropertySet issues a Fabric PropertySet.
+func (c *nvmeClient) adminPropertySet(t *testing.T, offset uint32, size8 bool, value uint64) uint16 {
+	t.Helper()
+	cid := uint16(c.cid.Add(1))
+	var sizeBit uint32
+	if size8 {
+		sizeBit = 1
+	}
+	cmd := nvme.CapsuleCommand{
+		OpCode: 0x7F,
+		FCType: 0x00, // fcPropertySet
+		CID:    cid,
+		D10:    sizeBit,
+		D11:    offset,
+		D12:    uint32(value),
+		D13:    uint32(value >> 32),
+	}
+	if err := c.adminW.SendHeaderOnly(0x4, &cmd, 64); err != nil {
+		t.Fatalf("send PropertySet: %v", err)
+	}
+	resp := recvCapsuleResp(t, c.adminR)
+	if resp.CID != cid {
+		t.Fatalf("PropertySet resp CID=%d want %d", resp.CID, cid)
+	}
+	return resp.Status
+}
+
+// adminSetFeatures issues Set Features with the given FID in
+// CDW10 and value in CDW11. Returns (status, DW0 of response).
+func (c *nvmeClient) adminSetFeatures(t *testing.T, fid uint8, cdw11 uint32) (uint16, uint32) {
+	t.Helper()
+	cid := uint16(c.cid.Add(1))
+	cmd := nvme.CapsuleCommand{
+		OpCode: 0x09, // adminSetFeatures
+		CID:    cid,
+		D10:    uint32(fid),
+		D11:    cdw11,
+	}
+	if err := c.adminW.SendHeaderOnly(0x4, &cmd, 64); err != nil {
+		t.Fatalf("send SetFeatures: %v", err)
+	}
+	resp := recvCapsuleResp(t, c.adminR)
+	if resp.CID != cid {
+		t.Fatalf("SetFeatures resp CID=%d want %d", resp.CID, cid)
+	}
+	return resp.Status, resp.DW0
+}
+
+// adminGetFeatures issues Get Features with the given FID + SEL.
+func (c *nvmeClient) adminGetFeatures(t *testing.T, fid uint8, sel uint8) (uint16, uint32) {
+	t.Helper()
+	cid := uint16(c.cid.Add(1))
+	cmd := nvme.CapsuleCommand{
+		OpCode: 0x0A, // adminGetFeatures
+		CID:    cid,
+		D10:    uint32(fid) | (uint32(sel&0x7) << 8),
+	}
+	if err := c.adminW.SendHeaderOnly(0x4, &cmd, 64); err != nil {
+		t.Fatalf("send GetFeatures: %v", err)
+	}
+	resp := recvCapsuleResp(t, c.adminR)
+	if resp.CID != cid {
+		t.Fatalf("GetFeatures resp CID=%d want %d", resp.CID, cid)
+	}
+	return resp.Status, resp.DW0
+}
+
+// adminKeepAlive issues KeepAlive on the admin queue.
+func (c *nvmeClient) adminKeepAlive(t *testing.T) uint16 {
+	t.Helper()
+	cid := uint16(c.cid.Add(1))
+	cmd := nvme.CapsuleCommand{
+		OpCode: 0x18, // adminKeepAlive
+		CID:    cid,
+	}
+	if err := c.adminW.SendHeaderOnly(0x4, &cmd, 64); err != nil {
+		t.Fatalf("send KeepAlive: %v", err)
+	}
+	resp := recvCapsuleResp(t, c.adminR)
+	if resp.CID != cid {
+		t.Fatalf("KeepAlive resp CID=%d want %d", resp.CID, cid)
+	}
+	return resp.Status
+}
+
+// adminAER issues Async Event Request. Returns the assigned CID
+// so the test can assert the server parked it (vs emitted a
+// response). Does NOT wait for a CapsuleResp — AER parking is
+// non-response, per QA constraint #1.
+func (c *nvmeClient) adminAER(t *testing.T) uint16 {
+	t.Helper()
+	cid := uint16(c.cid.Add(1))
+	cmd := nvme.CapsuleCommand{
+		OpCode: 0x0C, // adminAsyncEvent
+		CID:    cid,
+	}
+	if err := c.adminW.SendHeaderOnly(0x4, &cmd, 64); err != nil {
+		t.Fatalf("send AER: %v", err)
+	}
+	return cid
+}
+
+// adminAERExpectLimitExceeded issues an AER and expects a
+// CapsuleResp (the parking slot is already full). Returns the
+// status.
+func (c *nvmeClient) adminAERExpectResponse(t *testing.T) uint16 {
+	t.Helper()
+	cid := uint16(c.cid.Add(1))
+	cmd := nvme.CapsuleCommand{
+		OpCode: 0x0C,
+		CID:    cid,
+	}
+	if err := c.adminW.SendHeaderOnly(0x4, &cmd, 64); err != nil {
+		t.Fatalf("send AER: %v", err)
+	}
+	resp := recvCapsuleResp(t, c.adminR)
+	if resp.CID != cid {
+		t.Fatalf("AER resp CID=%d want %d", resp.CID, cid)
+	}
+	return resp.Status
+}
+
 // ---------- Status assertion helpers ----------
 
 func expectStatusSuccess(t *testing.T, status uint16, op string) {

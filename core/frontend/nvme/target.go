@@ -42,22 +42,6 @@ type TargetConfig struct {
 	Logger *log.Logger
 }
 
-// adminController is the per-(admin-queue-Connect) state
-// allocated when a host issues Fabric Connect with QID=0. IO
-// queue Connects (QID>0) must cite this controller's CNTLID
-// to be admitted; otherwise we reject with Connect Invalid Host
-// (NVMe-oF §3.3.1).
-//
-// 11a scope keeps this minimal — just identity. 11b adds the
-// CAP / VS / CC / CSTS register state + keep-alive timer state
-// + pending-AER slot and may rename to its own file.
-type adminController struct {
-	cntlID   uint16
-	subNQN   string // expected subsystem this controller serves
-	hostNQN  string // captured from the admin Connect's ConnectData
-	volumeID string // pinned at admin Connect so Identify builders can derive NGUID/Serial (R1)
-}
-
 // Target is a TCP-listening NVMe/TCP target.
 type Target struct {
 	cfg TargetConfig
@@ -96,18 +80,14 @@ func NewTarget(cfg TargetConfig) *Target {
 
 // allocAdminController allocates a fresh CNTLID and registers
 // an admin controller for it. Caller is the admin-queue
-// Connect handler. Returns the new controller.
+// Connect handler. Returns the new controller with register
+// state initialized per NVMe 1.3 boot semantics.
 func (t *Target) allocAdminController(subNQN, hostNQN, volumeID string) *adminController {
 	t.ctrlMu.Lock()
 	defer t.ctrlMu.Unlock()
 	id := t.nextCntlID
 	t.nextCntlID++
-	ctrl := &adminController{
-		cntlID:   id,
-		subNQN:   subNQN,
-		hostNQN:  hostNQN,
-		volumeID: volumeID,
-	}
+	ctrl := newAdminController(id, subNQN, hostNQN, volumeID)
 	t.ctrls[id] = ctrl
 	return ctrl
 }

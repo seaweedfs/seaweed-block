@@ -42,6 +42,13 @@ const (
 	SCConnectInvalidParameters uint8 = 0x80
 	SCConnectControllerBusy    uint8 = 0x81
 	SCConnectInvalidHost       uint8 = 0x82
+
+	// AsyncEventRequestLimitExceeded is returned when the host
+	// sends more AERs than the controller advertised via
+	// Identify Controller AERL. T2 advertises AERL=0 (= 1
+	// outstanding AER supported), so a second AER while one is
+	// parked gets this code. NVMe 1.3 §5.2.
+	SCAsyncEventRequestLimitExceeded uint8 = 0x05
 )
 
 // NVMe Status Codes within SCTPathRelated. These are the

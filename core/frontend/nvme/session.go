@@ -1,30 +1,108 @@
 package nvme
 
-// NVMe/TCP session — minimal T2 scope.
+// NVMe/TCP session — RX/TX split with per-CID pendingWrite routing.
+// BUG-001 / BUG-002 / BUG-004 co-fix (2026-04-22).
 //
-// One controller per TCP connection. Sequence:
-//   1. ICReq -> ICResp (TCP-level transport handshake)
-//   2. Fabric Connect (CapsuleCmd OpCode=0x7F FCType=0x01) ->
-//      CapsuleResp success (controller established)
-//   3. IO Read/Write/Flush via CapsuleCmd; Read replies with
-//      C2HData (carrying the bytes) + CapsuleResp; Write
-//      replies with R2T (request data) -> H2CData (host sends) ->
-//      CapsuleResp.
+// ## Relationship to V2 (port discipline note)
 //
-// Production NVMe-TCP supports many features T2 skips:
-// digests (HDGST/DDGST), Identify Controller / Identify
-// Namespace / Active NS List, Get Log Page, Set Features
-// negotiation, multi-PDU H2C/C2H Data, Async Event Reports,
-// Keep Alive timer. Those land with capsule extensions in a
-// later checkpoint as L2-OS enablement requires.
+// V2 `weed/storage/blockvol/nvme/controller.go` uses a two-loop
+// pattern (rxLoop + txLoop + respCh) that we port faithfully. V2
+// additionally uses **inline R2T data collection inside rxLoop**
+// (collectR2TData → recvH2CData → bufferInterleaved). That inline
+// pattern works against real Linux NVMe/TCP hosts because the
+// kernel always ships H2CData immediately after receiving an R2T
+// — so rxLoop never blocks meaningfully inside recvH2CData.
+//
+// It does NOT work against spec-legal hosts (or QA's conformance
+// tests) that pipeline multiple CapsuleCmds BEFORE sending any
+// H2CData. V2's inline recvH2CData blocks waiting for H2CData-1
+// while cmd-2 sits buffered in pendingCapsules, so R2T-2 is never
+// emitted → client never sends H2CData → deadlock.
+//
+// V3 evolves V2's pattern by moving H2CData collection OUT of
+// rxLoop and into per-CID state:
+//   - rxLoop reads PDUs strictly by type. No nested read loops.
+//   - CapsuleCmd for Write → register a pendingWrite keyed by CID
+//     + enqueue R2T + spawn handler goroutine waiting on the
+//     pendingWrite's done channel. rxLoop returns immediately to
+//     read the next PDU (cmd-N+1 or H2CData-N).
+//   - H2CData → route bytes into the matching pendingWrite; when
+//     full, close its done channel.
+//   - Handler goroutine wakes, calls backend.Write, enqueues
+//     CapsuleResp.
+//
+// Structurally this is still RX/TX split with respCh; the only
+// divergence from V2 is that the pipelining invariant now lives
+// in a pendingWrites map rather than in a sync recvH2CData call
+// with a pendingCapsules fallback. The difference is ~60 LOC.
+// See the BUG-001 fix commit message for why this was a required
+// evolution rather than an ambitious rewrite.
+//
+// ## BUG-002 (fcDisconnect)
+//
+// handleFabric now routes fcDisconnect → handleDisconnect, which
+// enqueues a success CapsuleResp and returns the errDisconnect
+// sentinel. serve() catches the sentinel and returns nil.
+//
+// ## BUG-004 (SQHD wrap at queueSize)
+//
+// Session.queueSize is parsed from Connect CDW11 low-16 (zero-
+// based + 1). advanceSQHD wraps at queueSize. CATTR bit 2
+// (flowCtlOff) from CDW11 bit 18 reports SQHD=0xFFFF when set.
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
+	"sync"
 	"sync/atomic"
 )
+
+// errDisconnect is a sentinel returned by handleDisconnect (BUG-002)
+// so serve() can exit gracefully after enqueueing the success
+// response.
+var errDisconnect = errors.New("disconnect")
+
+// Request represents an in-flight NVMe command being processed.
+type Request struct {
+	capsule CapsuleCommand
+	payload []byte // inline/R2T-collected data for Write
+	resp    CapsuleResponse
+	c2hData []byte // non-nil for Read/Identify responses
+}
+
+// response represents a pending response to be written by txLoop.
+// Two variants:
+//   - Standard: resp (+ optional c2hData for Read/Identify)
+//   - R2T: r2t non-nil; r2tSent signals when R2T has been flushed
+//     to the wire (currently unused by the per-CID design but
+//     kept for symmetry with V2's r2tDone shape — future uses).
+type response struct {
+	resp    CapsuleResponse
+	c2hData []byte
+
+	r2t     *R2THeader
+	r2tSent chan struct{}
+}
+
+// pendingWrite tracks an in-flight IO Write between R2T emission
+// and H2CData reception. rxLoop's H2CData path writes into buf;
+// when received == totalBytes, rxLoop closes done. The handler
+// goroutine blocks on done before calling backend.Write.
+type pendingWrite struct {
+	cid        uint16
+	tag        uint16
+	totalBytes uint32
+	buf        []byte
+	received   uint32
+	done       chan struct{}
+	// protocolErr is set by rxLoop if the H2CData stream violates
+	// framing (out-of-range DATAO, under-size PDU, etc.). Handler
+	// goroutine checks it before calling backend.
+	protocolErr atomic.Value // error
+}
 
 // Session carries per-connection NVMe/TCP state.
 type Session struct {
@@ -34,42 +112,34 @@ type Session struct {
 	handler *IOHandler
 	logger  Logger
 
-	// target holds a reference back to the Target so we can
-	// allocate/look-up CNTLIDs on Connect. Set by the Target
-	// when it constructs the session (11a).
 	target *Target
 
-	// expectedSubNQN is the subsystem NQN this session must
-	// match against the host's Fabric Connect ConnectData.
-	// Empty means "no enforcement" (in-process L1 tests that
-	// don't pin a subsystem identity); production always sets
-	// it via Target.SubsysNQN. When non-empty and the host's
-	// SubNQN doesn't match, Connect is rejected with
-	// SCT=CommandSpecific SC=ConnectInvalidParameters
-	// (NVMe-oF spec §3.3.1).
 	expectedSubNQN string
 
-	connected atomic.Bool // true after Fabric Connect
+	connected atomic.Bool
 
-	// Queue-model state set during Fabric Connect (§3.1 A10.5 + R3,
-	// QA finding #1 moving queue model into 11a):
-	//
-	//   qid   — 0 = admin queue; >0 = IO queue. Determines which
-	//           opcodes the dispatcher accepts on this session.
-	//   ctrl  — set on BOTH admin and IO sessions. Admin Connect
-	//           allocates the controller and pins it here; IO
-	//           Connect must cite an existing CNTLID and pins
-	//           the same pointer.
-	qid    uint16
-	qidSet bool
-	ctrl   *adminController
+	qid        uint16
+	qidSet     bool
+	ctrl       *adminController
+	queueSize  uint16 // BUG-004: parsed from Connect
+	flowCtlOff bool   // BUG-004: CATTR bit 2
+
+	// BUG-004: SQHD tracked atomically. rxLoop advances on each
+	// capsule parse; txLoop reads at response-stamp time.
+	sqhd atomic.Uint32 // lower 16 bits are live
+
+	// RX/TX split state — created in serve() after IC.
+	respCh chan *response
+	done   chan struct{}
+	cmdWg  sync.WaitGroup
+
+	// Per-CID pending Writes. Guarded by pwMu. rxLoop registers
+	// on Write-cmd dispatch, unregisters after done; H2CData path
+	// looks up by CCCID.
+	pwMu          sync.Mutex
+	pendingWrites map[uint16]*pendingWrite
 
 	closed atomic.Bool
-
-	// sqhd advances per CapsuleResponse (NVMe submission queue
-	// head pointer for queue depth tracking — 0 in T2 scope
-	// but bumped so the wire field looks live).
-	sqhd uint16
 }
 
 // Logger is a tiny indirection for log injection.
@@ -86,44 +156,50 @@ func newSession(conn net.Conn, h *IOHandler, target *Target, expectedSubNQN stri
 		target:         target,
 		expectedSubNQN: expectedSubNQN,
 		logger:         lg,
+		pendingWrites:  make(map[uint16]*pendingWrite),
 	}
 }
 
 func (s *Session) serve(ctx context.Context) error {
 	defer s.close()
+
+	// Phase 1: ICReq / ICResp synchronous.
 	if err := s.handleICReq(); err != nil {
 		return fmt.Errorf("ICReq: %w", err)
 	}
-	for !s.closed.Load() {
-		ch, err := s.r.Dequeue()
-		if err != nil {
-			if err == io.EOF {
-				return nil
-			}
-			return err
-		}
-		switch ch.Type {
-		case pduCapsuleCmd:
-			if err := s.handleCapsuleCmd(ctx); err != nil {
-				return err
-			}
-		case pduH2CData:
-			// Stray Data PDU outside an active R2T: protocol error.
-			// (T2 minimal session requests R2T inline within
-			// handleCapsuleCmd, so the dispatcher never returns
-			// here mid-write.)
-			return fmt.Errorf("unexpected H2CData outside R2T window")
-		default:
-			return fmt.Errorf("unsupported PDU type 0x%x", ch.Type)
-		}
+
+	// Phase 2: RX/TX split.
+	s.respCh = make(chan *response, 128)
+	s.done = make(chan struct{})
+
+	txErrCh := make(chan error, 1)
+	go func() {
+		txErrCh <- s.txLoop()
+	}()
+
+	rxErr := s.rxLoop(ctx)
+
+	// Unblock any handlers still waiting for H2CData so cmdWg
+	// can drain.
+	s.abortPendingWrites()
+	s.cmdWg.Wait()
+
+	close(s.done)
+	txErr := <-txErrCh
+
+	// BUG-002: graceful Disconnect is not an error.
+	if errors.Is(rxErr, errDisconnect) {
+		rxErr = nil
 	}
-	return nil
+	if rxErr != nil {
+		return rxErr
+	}
+	return txErr
 }
 
-// ---------- Phase 1: TCP-level init ----------
+// ---------- Phase 1: IC handshake ----------
 
 func (s *Session) handleICReq() error {
-	// Read ICReq.
 	ch, err := s.r.Dequeue()
 	if err != nil {
 		return err
@@ -135,166 +211,466 @@ func (s *Session) handleICReq() error {
 	if err := s.r.Receive(&req); err != nil {
 		return err
 	}
-
-	// Reply with ICResp. We accept whatever PDUFormatVersion the
-	// host sent — T2 minimal compatibility.
 	resp := ICResponse{
 		PDUFormatVersion: req.PDUFormatVersion,
 		PDUDataAlignment: 0,
 		PDUDataDigest:    0,
-		MaxH2CDataLength: 0x8000, // 32 KiB; bigger writes get split into multi-PDU
+		MaxH2CDataLength: 0x8000, // 32 KiB
 	}
 	return s.w.SendHeaderOnly(pduICResp, &resp, icBodySize)
 }
 
-// ---------- Phase 2/3: capsule command dispatch ----------
+// ---------- Phase 2: rxLoop ----------
 
-func (s *Session) handleCapsuleCmd(ctx context.Context) error {
-	var cmd CapsuleCommand
-	if err := s.r.Receive(&cmd); err != nil {
+func (s *Session) rxLoop(ctx context.Context) error {
+	for {
+		if s.closed.Load() {
+			return nil
+		}
+		ch, err := s.r.Dequeue()
+		if err != nil {
+			if err == io.EOF || s.closed.Load() {
+				return nil
+			}
+			return fmt.Errorf("read header: %w", err)
+		}
+		switch ch.Type {
+		case pduCapsuleCmd:
+			req, err := s.parseCapsule()
+			if err != nil {
+				return fmt.Errorf("capsule: %w", err)
+			}
+			if err := s.dispatchFromRx(ctx, req); err != nil {
+				return err
+			}
+		case pduH2CData:
+			if err := s.routeH2CData(); err != nil {
+				return err
+			}
+		default:
+			return fmt.Errorf("unsupported PDU type 0x%x", ch.Type)
+		}
+	}
+}
+
+// parseCapsule reads a CapsuleCmd PDU + optional inline data.
+func (s *Session) parseCapsule() (*Request, error) {
+	var capsule CapsuleCommand
+	if err := s.r.Receive(&capsule); err != nil {
+		return nil, err
+	}
+	var payload []byte
+	if n := s.r.Length(); n > 0 {
+		payload = make([]byte, n)
+		if err := s.r.ReceiveData(payload); err != nil {
+			return nil, err
+		}
+	}
+	req := &Request{
+		capsule: capsule,
+		payload: payload,
+	}
+	req.resp.CID = capsule.CID
+	return req, nil
+}
+
+// routeH2CData reads an H2CData PDU and routes its bytes to the
+// matching pendingWrite by CCCID. Closes done when the write is
+// fully received. Framing violations are recorded on the
+// pendingWrite's protocolErr and the handler goroutine surfaces
+// them as a status-error CapsuleResp.
+func (s *Session) routeH2CData() error {
+	var h H2CDataHeader
+	if err := s.r.Receive(&h); err != nil {
+		return fmt.Errorf("H2CData: receive header: %w", err)
+	}
+	dataLen := s.r.Length()
+	pw := s.lookupPending(h.CCCID)
+	if pw == nil {
+		// Unknown CCCID: drain data to keep the stream framed,
+		// then fail the session (protocol violation).
+		if dataLen > 0 {
+			drain := make([]byte, dataLen)
+			_ = s.r.ReceiveData(drain)
+		}
+		return fmt.Errorf("H2CData for unknown CCCID=%d", h.CCCID)
+	}
+	if dataLen == 0 {
+		err := fmt.Errorf("H2CData: zero-length payload")
+		pw.protocolErr.Store(err)
+		close(pw.done)
 		return err
 	}
-	// Read inline ConnectData if this is Fabric Connect (capsule
-	// can carry a 1024-byte payload).
-	var inline []byte
-	if n := s.r.Length(); n > 0 {
-		inline = make([]byte, n)
-		if err := s.r.ReceiveData(inline); err != nil {
+	if h.DATAO+dataLen > pw.totalBytes {
+		err := fmt.Errorf("H2CData: data exceeds expected size (%d+%d > %d)",
+			h.DATAO, dataLen, pw.totalBytes)
+		pw.protocolErr.Store(err)
+		// Drain bytes before returning so the stream stays framed
+		// for any future PDUs (txLoop will tear down shortly anyway).
+		drain := make([]byte, dataLen)
+		_ = s.r.ReceiveData(drain)
+		close(pw.done)
+		return err
+	}
+	if err := s.r.ReceiveData(pw.buf[h.DATAO : h.DATAO+dataLen]); err != nil {
+		pw.protocolErr.Store(err)
+		close(pw.done)
+		return err
+	}
+	pw.received += dataLen
+	if pw.received >= pw.totalBytes {
+		close(pw.done)
+	}
+	return nil
+}
+
+// advanceSQHD (BUG-004) wraps SQHD at queueSize.
+func (s *Session) advanceSQHD() {
+	cur := uint16(s.sqhd.Load())
+	nxt := cur + 1
+	if s.queueSize > 0 && nxt >= s.queueSize {
+		nxt = 0
+	}
+	s.sqhd.Store(uint32(nxt))
+}
+
+// dispatchFromRx routes a parsed capsule.
+//   - Fabric: synchronous.
+//   - Admin (qid=0): synchronous.
+//   - IO Write: register pendingWrite, enqueue R2T, spawn handler
+//     goroutine (waits on pendingWrite.done).
+//   - IO Read/Flush/other: spawn handler goroutine.
+func (s *Session) dispatchFromRx(ctx context.Context, req *Request) error {
+	cmd := &req.capsule
+	if cmd.OpCode == adminFabric {
+		return s.handleFabric(req)
+	}
+	if !s.connected.Load() {
+		req.resp.Status = MakeStatusField(SCTGeneric, SCInvalidOpcode, true)
+		s.enqueueResponse(&response{resp: req.resp})
+		return nil
+	}
+
+	s.advanceSQHD()
+
+	if s.qid == 0 {
+		return s.adminDispatch(ctx, req)
+	}
+
+	// IO queue.
+	if cmd.OpCode == ioWrite {
+		return s.dispatchIOWrite(ctx, req)
+	}
+	s.cmdWg.Add(1)
+	go func() {
+		defer s.cmdWg.Done()
+		s.dispatchIO(ctx, req)
+	}()
+	return nil
+}
+
+// dispatchIOWrite registers a pendingWrite, enqueues R2T, and
+// spawns a handler goroutine that waits for H2CData completion.
+func (s *Session) dispatchIOWrite(ctx context.Context, req *Request) error {
+	cmd := &req.capsule
+	totalBytes := cmd.LbaLength() * s.handler.BlockSize()
+	pw := &pendingWrite{
+		cid:        cmd.CID,
+		tag:        1,
+		totalBytes: totalBytes,
+		buf:        make([]byte, totalBytes),
+		done:       make(chan struct{}),
+	}
+	if !s.registerPending(pw) {
+		// Duplicate CID on a pipelined Write is a protocol
+		// violation; respond InvalidField and skip.
+		req.resp.Status = MakeStatusField(SCTGeneric, SCInvalidField, true)
+		s.enqueueResponse(&response{resp: req.resp})
+		return nil
+	}
+	s.enqueueResponse(&response{
+		r2t: &R2THeader{
+			CCCID: cmd.CID,
+			TAG:   pw.tag,
+			DATAO: 0,
+			DATAL: totalBytes,
+		},
+	})
+	s.cmdWg.Add(1)
+	go func() {
+		defer s.cmdWg.Done()
+		defer s.unregisterPending(cmd.CID)
+		select {
+		case <-pw.done:
+		case <-s.done:
+			return
+		}
+		if err := pw.protocolErr.Load(); err != nil {
+			req.resp.Status = MakeStatusField(SCTGeneric, SCInvalidField, true)
+			s.enqueueResponse(&response{resp: req.resp})
+			return
+		}
+		req.payload = pw.buf
+		s.handleWrite(ctx, req)
+	}()
+	return nil
+}
+
+// registerPending adds pw to the pendingWrites map if no existing
+// entry has the same CID. Returns true on success, false on CID
+// collision (protocol violation — tag reuse within outstanding).
+func (s *Session) registerPending(pw *pendingWrite) bool {
+	s.pwMu.Lock()
+	defer s.pwMu.Unlock()
+	if _, exists := s.pendingWrites[pw.cid]; exists {
+		return false
+	}
+	s.pendingWrites[pw.cid] = pw
+	return true
+}
+
+func (s *Session) unregisterPending(cid uint16) {
+	s.pwMu.Lock()
+	delete(s.pendingWrites, cid)
+	s.pwMu.Unlock()
+}
+
+func (s *Session) lookupPending(cid uint16) *pendingWrite {
+	s.pwMu.Lock()
+	defer s.pwMu.Unlock()
+	return s.pendingWrites[cid]
+}
+
+// abortPendingWrites closes every pending write's done channel
+// with a protocol-error sentinel, so handler goroutines blocked
+// on the channel can exit. Called when rxLoop returns.
+func (s *Session) abortPendingWrites() {
+	s.pwMu.Lock()
+	defer s.pwMu.Unlock()
+	for _, pw := range s.pendingWrites {
+		if pw.protocolErr.Load() == nil {
+			pw.protocolErr.Store(errors.New("session closed mid-write"))
+		}
+		// close(done) may panic if already closed; guard with a
+		// recover pattern via a select-on-closed idiom.
+		select {
+		case <-pw.done:
+			// already closed
+		default:
+			close(pw.done)
+		}
+	}
+}
+
+// adminDispatch handles admin-queue opcodes synchronously.
+func (s *Session) adminDispatch(ctx context.Context, req *Request) error {
+	cmd := &req.capsule
+	switch cmd.OpCode {
+	case adminIdentify:
+		return s.handleAdminIdentify(req)
+	case adminSetFeatures:
+		return s.handleSetFeatures(req)
+	case adminGetFeatures:
+		return s.handleGetFeatures(req)
+	case adminKeepAlive:
+		return s.handleKeepAlive(req)
+	case adminAsyncEvent:
+		return s.handleAsyncEventRequest(req)
+	default:
+		req.resp.Status = MakeStatusField(SCTGeneric, SCInvalidOpcode, true)
+		s.enqueueResponse(&response{resp: req.resp})
+		return nil
+	}
+}
+
+// dispatchIO handles IO-queue opcodes other than Write (Write
+// takes the pendingWrite path above).
+func (s *Session) dispatchIO(ctx context.Context, req *Request) {
+	cmd := &req.capsule
+	switch cmd.OpCode {
+	case ioRead:
+		s.handleRead(ctx, req)
+	case ioFlush:
+		s.enqueueResponse(&response{resp: req.resp})
+	default:
+		req.resp.Status = MakeStatusField(SCTGeneric, SCInvalidOpcode, true)
+		s.enqueueResponse(&response{resp: req.resp})
+	}
+}
+
+// ---------- Phase 2: txLoop ----------
+
+func (s *Session) txLoop() error {
+	var firstErr error
+	for {
+		select {
+		case resp := <-s.respCh:
+			if firstErr != nil {
+				completeWaiters(resp)
+				continue
+			}
+			if err := s.writeResponse(resp); err != nil {
+				firstErr = err
+				s.conn.Close()
+			}
+		case <-s.done:
+			for {
+				select {
+				case resp := <-s.respCh:
+					if firstErr == nil {
+						if err := s.writeResponse(resp); err != nil {
+							firstErr = err
+						}
+					} else {
+						completeWaiters(resp)
+					}
+				default:
+					return firstErr
+				}
+			}
+		}
+	}
+}
+
+func completeWaiters(resp *response) {
+	if resp.r2tSent != nil {
+		close(resp.r2tSent)
+	}
+}
+
+func (s *Session) writeResponse(resp *response) error {
+	if resp.r2t != nil {
+		err := s.w.SendHeaderOnly(pduR2T, resp.r2t, r2tHdrSize)
+		if resp.r2tSent != nil {
+			close(resp.r2tSent)
+		}
+		return err
+	}
+
+	if s.flowCtlOff {
+		resp.resp.SQHD = 0xFFFF
+	} else {
+		resp.resp.SQHD = uint16(s.sqhd.Load())
+	}
+
+	if len(resp.c2hData) > 0 {
+		hdr := C2HDataHeader{
+			CCCID: resp.resp.CID,
+			DATAO: 0,
+			DATAL: uint32(len(resp.c2hData)),
+		}
+		if err := s.w.SendWithData(pduC2HData, c2hFlagLast, &hdr, c2hDataHdrSize, resp.c2hData); err != nil {
 			return err
 		}
 	}
-
-	// Fabric commands (including Connect) bypass the qid/connected
-	// gate — they ESTABLISH the gate.
-	if cmd.OpCode == adminFabric {
-		return s.handleFabric(&cmd, inline)
-	}
-	if !s.connected.Load() {
-		return s.replyStatus(&cmd, MakeStatusField(SCTGeneric, SCInvalidOpcode, true))
-	}
-
-	// Post-Connect dispatch: route by queue type (QA finding #1
-	// moved queue routing into 11a).
-	//   QID=0 (admin queue) → admin opcodes only; IO opcodes
-	//                         return Invalid Opcode.
-	//   QID>0 (IO queue)    → IO opcodes only; admin opcodes
-	//                         return Invalid Opcode.
-	// This enforces the NVMe queue model Linux kernel expects:
-	// admin commands must arrive on the admin connection, IO
-	// must arrive on the IO connection.
-	if s.qid == 0 {
-		return s.adminDispatch(ctx, &cmd)
-	}
-	return s.ioDispatch(ctx, &cmd)
+	return s.w.SendHeaderOnly(pduCapsuleResp, &resp.resp, capsuleRespSize)
 }
 
-// adminDispatch routes admin-queue opcodes. 11a implements
-// Identify (CNS 0x00/0x01/0x02/0x03). SetFeatures / GetFeatures /
-// KeepAlive / AsyncEventRequest are 11b. Unknown opcodes return
-// Invalid Opcode — §6 stop rule #4 (advertised ≡ implemented)
-// means Identify Controller must NOT advertise any capability
-// that falls through to this default.
-func (s *Session) adminDispatch(ctx context.Context, cmd *CapsuleCommand) error {
-	switch cmd.OpCode {
-	case adminIdentify:
-		return s.handleAdminIdentify(cmd)
-	default:
-		return s.replyStatus(cmd, MakeStatusField(SCTGeneric, SCInvalidOpcode, true))
+func (s *Session) enqueueResponse(resp *response) {
+	select {
+	case s.respCh <- resp:
+	case <-s.done:
 	}
 }
 
-// ioDispatch routes IO-queue opcodes.
-func (s *Session) ioDispatch(ctx context.Context, cmd *CapsuleCommand) error {
-	switch cmd.OpCode {
-	case ioRead:
-		return s.handleRead(ctx, cmd)
-	case ioWrite:
-		return s.handleWrite(ctx, cmd)
-	case ioFlush:
-		return s.replyStatus(cmd, 0) // Success — SYNC handled by backend in T3
-	default:
-		return s.replyStatus(cmd, MakeStatusField(SCTGeneric, SCInvalidOpcode, true))
+// ---------- IO handlers (run in goroutines) ----------
+
+func (s *Session) handleRead(ctx context.Context, req *Request) {
+	res := s.handler.Handle(ctx, IOCommand{
+		Opcode: req.capsule.OpCode,
+		NSID:   req.capsule.NSID,
+		SLBA:   req.capsule.Lba(),
+		NLB:    req.capsule.LbaLength(),
+	})
+	if res.AsError() != nil {
+		req.resp.Status = MakeStatusField(res.SCT, res.SC, true)
+		s.enqueueResponse(&response{resp: req.resp})
+		return
 	}
+	s.enqueueResponse(&response{resp: req.resp, c2hData: res.Data})
 }
 
-// handleFabric processes Fabric-specific commands. Today: only
-// Connect (fcConnect). PropertyGet / PropertySet / Disconnect
-// land with Batch 11b.
-//
-// Connect semantics per NVMe-oF §3.3:
-//   - CDW10[31:16] carries QID (admin=0, IO>0).
-//   - ConnectData at bytes 16–17 carries CNTLID. For admin
-//     queue Connect the host sends 0xFFFF (request new); the
-//     target allocates a controller and returns the assigned
-//     CNTLID in CapsuleResp DW0[15:0]. For IO queue Connect
-//     the host echoes its previously-assigned CNTLID; the
-//     target validates it against the registered admin
-//     controllers (R3).
-//
-// Errors per NVMe-oF §3.3.1:
-//   - Wrong SubNQN → Command Specific / ConnectInvalidParameters
-//   - Unknown CNTLID on IO Connect → Command Specific /
-//     ConnectInvalidHost (0x82) — distinct from 0x80 so logs
-//     disambiguate "wrong subsystem" vs "unknown controller".
-//   - Double-Connect on same session → InvalidOpcode
-//     (we don't support re-Connect within one TCP conn).
-func (s *Session) handleFabric(cmd *CapsuleCommand, inline []byte) error {
+func (s *Session) handleWrite(ctx context.Context, req *Request) {
+	res := s.handler.Handle(ctx, IOCommand{
+		Opcode: req.capsule.OpCode,
+		NSID:   req.capsule.NSID,
+		SLBA:   req.capsule.Lba(),
+		NLB:    req.capsule.LbaLength(),
+		Data:   req.payload,
+	})
+	if res.AsError() != nil {
+		req.resp.Status = MakeStatusField(res.SCT, res.SC, true)
+	}
+	s.enqueueResponse(&response{resp: req.resp})
+}
+
+// ---------- Fabric ----------
+
+func (s *Session) handleFabric(req *Request) error {
+	cmd := &req.capsule
+	switch cmd.FCType {
+	case fcPropertyGet:
+		return s.handlePropertyGet(req)
+	case fcPropertySet:
+		return s.handlePropertySet(req)
+	case fcDisconnect:
+		// BUG-002.
+		return s.handleDisconnect(req)
+	}
 	if cmd.FCType != fcConnect {
-		return s.replyStatus(cmd, MakeStatusField(SCTGeneric, SCInvalidOpcode, true))
+		req.resp.Status = MakeStatusField(SCTGeneric, SCInvalidOpcode, true)
+		s.enqueueResponse(&response{resp: req.resp})
+		return nil
 	}
 	if s.qidSet {
-		// Connect already processed on this session. NVMe-oF
-		// does not allow re-Connect on an established session.
-		return s.replyStatus(cmd, MakeStatusField(SCTGeneric, SCInvalidOpcode, true))
+		req.resp.Status = MakeStatusField(SCTGeneric, SCInvalidOpcode, true)
+		s.enqueueResponse(&response{resp: req.resp})
+		return nil
 	}
-	if len(inline) < connectDataSize {
-		return s.replyStatus(cmd, MakeStatusField(SCTGeneric, SCInvalidField, true))
+	if len(req.payload) < connectDataSize {
+		req.resp.Status = MakeStatusField(SCTGeneric, SCInvalidField, true)
+		s.enqueueResponse(&response{resp: req.resp})
+		return nil
 	}
 	var cd ConnectData
-	cd.Unmarshal(inline[:connectDataSize])
+	cd.Unmarshal(req.payload[:connectDataSize])
 
 	qid := uint16(cmd.D10 >> 16)
+	// BUG-004: parse queueSize (CDW11 low-16 zero-based) + CATTR.
+	queueSize := uint16(cmd.D11&0xFFFF) + 1
+	cattr := uint8(cmd.D11 >> 16)
+	flowCtlOff := (cattr & 0x04) != 0
 
-	// Subsystem identity check (applies to both admin and IO
-	// Connect). Reuses ckpt 8 follow-up enforcement.
 	if s.expectedSubNQN != "" && cd.SubNQN != s.expectedSubNQN {
 		if s.logger != nil {
 			s.logger.Printf("nvme: Connect REJECTED (wrong subsys) host=%q wanted=%q got=%q qid=%d",
 				cd.HostNQN, s.expectedSubNQN, cd.SubNQN, qid)
 		}
-		return s.replyStatus(cmd,
-			MakeStatusField(SCTCommandSpecific, SCConnectInvalidParameters, true))
+		req.resp.Status = MakeStatusField(SCTCommandSpecific,
+			SCConnectInvalidParameters, true)
+		s.enqueueResponse(&response{resp: req.resp})
+		return nil
 	}
 
 	if qid == 0 {
-		return s.handleAdminConnect(cmd, &cd, qid)
+		return s.handleAdminConnect(req, &cd, qid, queueSize, flowCtlOff)
 	}
-	return s.handleIOConnect(cmd, &cd, qid)
+	return s.handleIOConnect(req, &cd, qid, queueSize, flowCtlOff)
 }
 
-// handleAdminConnect allocates a fresh CNTLID, registers an
-// admin controller with the Target, pins it to this session,
-// and replies with the assigned CNTLID in CapsuleResp DW0.
-func (s *Session) handleAdminConnect(cmd *CapsuleCommand, cd *ConnectData, qid uint16) error {
-	// NVMe-oF §3.3: admin Connect MUST set CNTLID=0xFFFF
-	// (request new). Some hosts send 0x0 instead; accept both
-	// as "allocate new" for L2-OS compat.
+func (s *Session) handleAdminConnect(req *Request, cd *ConnectData, qid, queueSize uint16, flowCtlOff bool) error {
 	if cd.CNTLID != 0xFFFF && cd.CNTLID != 0x0000 {
 		if s.logger != nil {
 			s.logger.Printf("nvme: admin Connect with preset CNTLID=0x%04x rejected (must be 0xFFFF)",
 				cd.CNTLID)
 		}
-		return s.replyStatus(cmd,
-			MakeStatusField(SCTCommandSpecific, SCConnectInvalidParameters, true))
+		req.resp.Status = MakeStatusField(SCTCommandSpecific,
+			SCConnectInvalidParameters, true)
+		s.enqueueResponse(&response{resp: req.resp})
+		return nil
 	}
-	// Target may be nil in narrow in-process tests that use
-	// newSession directly; in that case we allocate a local
-	// controller without a registry.
 	var ctrl *adminController
 	if s.target != nil {
-		// R1: stash VolumeID at admin Connect so Identify
-		// builders can derive NGUID/Serial deterministically
-		// (sha256 derivation — no "SWF00001" stub).
 		ctrl = s.target.allocAdminController(cd.SubNQN, cd.HostNQN, s.target.cfg.VolumeID)
 	} else {
 		ctrl = &adminController{
@@ -307,162 +683,73 @@ func (s *Session) handleAdminConnect(cmd *CapsuleCommand, cd *ConnectData, qid u
 	s.qid = qid
 	s.qidSet = true
 	s.ctrl = ctrl
+	s.queueSize = queueSize
+	s.flowCtlOff = flowCtlOff
 	s.connected.Store(true)
 	if s.logger != nil {
-		s.logger.Printf("nvme: admin Connect accepted host=%q subsys=%q cntlid=%d",
-			cd.HostNQN, cd.SubNQN, ctrl.cntlID)
+		s.logger.Printf("nvme: admin Connect accepted host=%q subsys=%q cntlid=%d qsize=%d",
+			cd.HostNQN, cd.SubNQN, ctrl.cntlID, queueSize)
 	}
-	// CapsuleResp DW0[15:0] = assigned CNTLID; Linux host reads
-	// this and echoes it in subsequent IO queue Connect.
-	return s.sendCapsuleResp(cmd.CID, uint32(ctrl.cntlID), 0, 0)
+	s.advanceSQHD()
+	req.resp.DW0 = uint32(ctrl.cntlID)
+	s.enqueueResponse(&response{resp: req.resp})
+	return nil
 }
 
-// handleIOConnect validates that the host's CNTLID claim points
-// to a registered admin controller and pins that controller to
-// this IO queue session.
-func (s *Session) handleIOConnect(cmd *CapsuleCommand, cd *ConnectData, qid uint16) error {
+func (s *Session) handleIOConnect(req *Request, cd *ConnectData, qid, queueSize uint16, flowCtlOff bool) error {
 	var ctrl *adminController
 	if s.target != nil {
 		ctrl = s.target.lookupAdminController(cd.CNTLID)
 	}
 	if ctrl == nil {
 		if s.logger != nil {
-			s.logger.Printf("nvme: IO Connect qid=%d CNTLID=%d not found (admin session must precede)",
-				qid, cd.CNTLID)
+			s.logger.Printf("nvme: IO Connect qid=%d CNTLID=%d not found", qid, cd.CNTLID)
 		}
-		// ConnectInvalidHost (SCT=CommandSpecific SC=0x82) is the
-		// dedicated code for "host claim doesn't match a known
-		// controller" — distinct from 0x80 "wrong SubNQN".
-		return s.replyStatus(cmd,
-			MakeStatusField(SCTCommandSpecific, SCConnectInvalidHost, true))
+		req.resp.Status = MakeStatusField(SCTCommandSpecific,
+			SCConnectInvalidHost, true)
+		s.enqueueResponse(&response{resp: req.resp})
+		return nil
 	}
-	// Cross-check SubNQN matches admin's (V2 parity).
-	//
-	// NOT cross-checking HostNQN: V2 doesn't, and nvme-cli
-	// is spec-allowed to emit slightly different HostNQN per
-	// queue (uncommon but legal). An earlier sw draft added
-	// HostNQN cross-check as belt-and-suspenders but that
-	// diverged from V2 and risked breaking real Linux L2-OS.
-	// T8 (auth) owns tighter HostNQN policy.
 	if cd.SubNQN != ctrl.subNQN {
 		if s.logger != nil {
 			s.logger.Printf("nvme: IO Connect CNTLID=%d SubNQN mismatch: got %q want %q",
 				cd.CNTLID, cd.SubNQN, ctrl.subNQN)
 		}
-		return s.replyStatus(cmd,
-			MakeStatusField(SCTCommandSpecific, SCConnectInvalidHost, true))
+		req.resp.Status = MakeStatusField(SCTCommandSpecific,
+			SCConnectInvalidHost, true)
+		s.enqueueResponse(&response{resp: req.resp})
+		return nil
 	}
 	s.qid = qid
 	s.qidSet = true
 	s.ctrl = ctrl
+	s.queueSize = queueSize
+	s.flowCtlOff = flowCtlOff
 	s.connected.Store(true)
 	if s.logger != nil {
-		s.logger.Printf("nvme: IO Connect accepted host=%q subsys=%q cntlid=%d qid=%d",
-			cd.HostNQN, cd.SubNQN, ctrl.cntlID, qid)
+		s.logger.Printf("nvme: IO Connect accepted host=%q subsys=%q cntlid=%d qid=%d qsize=%d",
+			cd.HostNQN, cd.SubNQN, ctrl.cntlID, qid, queueSize)
 	}
-	// IO Connect's CapsuleResp echoes CNTLID in DW0 (matches V2).
-	return s.sendCapsuleResp(cmd.CID, uint32(ctrl.cntlID), 0, 0)
+	s.advanceSQHD()
+	req.resp.DW0 = uint32(ctrl.cntlID)
+	s.enqueueResponse(&response{resp: req.resp})
+	return nil
 }
 
-func (s *Session) handleRead(ctx context.Context, cmd *CapsuleCommand) error {
-	res := s.handler.Handle(ctx, IOCommand{
-		Opcode: cmd.OpCode,
-		NSID:   cmd.NSID,
-		SLBA:   cmd.Lba(),
-		NLB:    cmd.LbaLength(),
-	})
-	if res.AsError() != nil {
-		return s.replyStatus(cmd, MakeStatusField(res.SCT, res.SC, true))
+// handleDisconnect (BUG-002) enqueues success then returns the
+// errDisconnect sentinel.
+func (s *Session) handleDisconnect(req *Request) error {
+	if s.logger != nil && s.ctrl != nil {
+		s.logger.Printf("nvme: Disconnect cntlid=%d qid=%d", s.ctrl.cntlID, s.qid)
 	}
-	// Send C2HData with last flag, then a CapsuleResp Success.
-	hdr := C2HDataHeader{
-		CCCID: cmd.CID,
-		DATAO: 0,
-		DATAL: uint32(len(res.Data)),
-	}
-	if err := s.w.SendWithData(pduC2HData, c2hFlagLast, &hdr, c2hDataHdrSize, res.Data); err != nil {
-		return err
-	}
-	return s.sendCapsuleResp(cmd.CID, 0, 0, 0)
+	s.enqueueResponse(&response{resp: req.resp})
+	return errDisconnect
 }
 
-func (s *Session) handleWrite(ctx context.Context, cmd *CapsuleCommand) error {
-	totalBytes := cmd.LbaLength() * s.handler.BlockSize()
-
-	// Issue R2T to request the host send the write payload.
-	r2t := R2THeader{
-		CCCID: cmd.CID,
-		TAG:   1,
-		DATAO: 0,
-		DATAL: totalBytes,
-	}
-	if err := s.w.SendHeaderOnly(pduR2T, &r2t, r2tHdrSize); err != nil {
-		return err
-	}
-
-	// Receive H2CData PDU(s) until we have totalBytes.
-	collected := make([]byte, 0, totalBytes)
-	for uint32(len(collected)) < totalBytes {
-		ch, err := s.r.Dequeue()
-		if err != nil {
-			return err
-		}
-		if ch.Type != pduH2CData {
-			return fmt.Errorf("expected H2CData, got 0x%x", ch.Type)
-		}
-		var h H2CDataHeader
-		if err := s.r.Receive(&h); err != nil {
-			return err
-		}
-		if h.CCCID != cmd.CID || h.TAG != r2t.TAG {
-			return fmt.Errorf("H2CData CCCID/TAG mismatch")
-		}
-		chunk := make([]byte, s.r.Length())
-		if err := s.r.ReceiveData(chunk); err != nil {
-			return err
-		}
-		collected = append(collected, chunk...)
-	}
-
-	res := s.handler.Handle(ctx, IOCommand{
-		Opcode: cmd.OpCode,
-		NSID:   cmd.NSID,
-		SLBA:   cmd.Lba(),
-		NLB:    cmd.LbaLength(),
-		Data:   collected,
-	})
-	if res.AsError() != nil {
-		return s.replyStatus(cmd, MakeStatusField(res.SCT, res.SC, true))
-	}
-	return s.sendCapsuleResp(cmd.CID, 0, 0, 0)
-}
-
-func (s *Session) replyStatus(cmd *CapsuleCommand, status uint16) error {
-	return s.sendCapsuleResp(cmd.CID, 0, 0, status)
-}
-
-func (s *Session) sendCapsuleResp(cid uint16, dw0, dw1 uint32, status uint16) error {
-	s.sqhd++
-	resp := CapsuleResponse{
-		DW0:     dw0,
-		DW1:     dw1,
-		SQHD:    s.sqhd,
-		QueueID: 0,
-		CID:     cid,
-		Status:  status,
-	}
-	return s.w.SendHeaderOnly(pduCapsuleResp, &resp, capsuleRespSize)
-}
+// ---------- Shutdown ----------
 
 func (s *Session) close() {
 	if s.closed.CompareAndSwap(false, true) {
-		// Admin session (QID=0) owns the CNTLID in the Target
-		// registry. Release it so IO sessions that outlive the
-		// admin session can't see a "phantom" CNTLID. IO
-		// sessions that ARE still active hold the ctrl pointer
-		// locally and continue operating; they don't re-validate
-		// against the registry per-command (port plan §3.1 A10.5
-		// note).
 		if s.qid == 0 && s.ctrl != nil && s.target != nil {
 			s.target.releaseAdminController(s.ctrl.cntlID)
 		}

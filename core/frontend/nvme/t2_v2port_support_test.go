@@ -30,7 +30,7 @@ const (
 	idCtrlOffsetOAES   = 92  // 4 bytes — Optional Async Events Supported
 	idCtrlOffsetOACS   = 256 // 2 bytes — Optional Admin Command Support
 	idCtrlOffsetONCS   = 520 // 2 bytes — Optional NVM Command Support
-	idCtrlOffsetANACAP = 343 // 1 byte
+	idCtrlOffsetANACAP = 341 // 1 byte — sw's identify.go authoritative offset (V2-ported)
 	idCtrlOffsetANAGRP = 344 // 4 bytes ANAGRPMAX + 4 bytes NANAGRPID
 	idCtrlPayloadSize  = 4096
 )

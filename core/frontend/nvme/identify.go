@@ -44,7 +44,12 @@ import (
 // handleAdminIdentify decodes the CNS value from CDW10 and
 // dispatches to the matching builder. Unknown CNS values return
 // InvalidField (Generic SC=0x02) without reaching a builder.
-func (s *Session) handleAdminIdentify(cmd *CapsuleCommand) error {
+//
+// BUG-001 fix: response flows through respCh. The 4 KiB C2HData
+// payload is placed in response.c2hData; writeResponse emits the
+// C2HData PDU followed by the CapsuleResp atomically.
+func (s *Session) handleAdminIdentify(req *Request) error {
+	cmd := &req.capsule
 	cns := uint8(cmd.D10 & 0xFF)
 	var data []byte
 	switch cns {
@@ -57,20 +62,12 @@ func (s *Session) handleAdminIdentify(cmd *CapsuleCommand) error {
 	case cnsNSDescriptorList:
 		data = s.buildNSDescriptorList(cmd.NSID)
 	default:
-		return s.replyStatus(cmd, MakeStatusField(SCTGeneric, SCInvalidField, true))
+		req.resp.Status = MakeStatusField(SCTGeneric, SCInvalidField, true)
+		s.enqueueResponse(&response{resp: req.resp})
+		return nil
 	}
-	// Identify responses arrive as one C2HData PDU followed by a
-	// Success CapsuleResp. The full 4 KiB fits well inside our
-	// MaxH2CDataLength cap (32 KiB); no splitting needed.
-	hdr := C2HDataHeader{
-		CCCID: cmd.CID,
-		DATAO: 0,
-		DATAL: uint32(len(data)),
-	}
-	if err := s.w.SendWithData(pduC2HData, c2hFlagLast, &hdr, c2hDataHdrSize, data); err != nil {
-		return err
-	}
-	return s.sendCapsuleResp(cmd.CID, 0, 0, 0)
+	s.enqueueResponse(&response{resp: req.resp, c2hData: data})
+	return nil
 }
 
 // buildIdentifyController emits the 4 KiB Identify Controller
@@ -166,10 +163,14 @@ func (s *Session) buildIdentifyController() []byte {
 	buf[262] = 0
 
 	// bytes 320-321: KAS (Keep Alive Support, 100 ms granularity).
-	// 0 = no KAS; >0 = supported with this granularity. 11a
-	// does NOT implement Keep Alive (11b) — advertised ≡
-	// implemented → KAS=0. 11b flips this.
-	binary.LittleEndian.PutUint16(buf[320:], 0)
+	// 0 = no KAS; >0 = supported with this granularity. 11b
+	// implements Set Features 0x0F (store KATO) + opcode 0x18
+	// (KeepAlive responds Success), so KAS=1 (100ms minimum
+	// granularity). Per QA constraint #2 the target does NOT
+	// arm a fatal-timeout watchdog — KAS advertises that the
+	// mechanism exists, not that missed KeepAlives terminate
+	// the connection. Matches V2 behavior.
+	binary.LittleEndian.PutUint16(buf[320:], 1)
 
 	// byte 341: ANACAP (ANA Capabilities).
 	// D2 fix: V2 sets bit 3 (Optimized state reported); we zero
