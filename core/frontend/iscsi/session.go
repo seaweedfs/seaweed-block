@@ -248,20 +248,39 @@ func (s *Session) handleTextReq(req *PDU) error {
 //       2. Remaining bytes solicited via R2T + Data-Out PDUs
 //          (T2 ckpt 10 port — enables iscsiadm writes larger
 //          than FirstBurstLength).
-//     The full payload is dispatched to the SCSI handler once
-//     ExpectedDataTransferLength bytes are collected.
+//     EDTL is validated against the CDB's transfer length BEFORE
+//     any allocation / R2T is issued — otherwise a hostile
+//     initiator could inflate EDTL vs. CDB and force
+//     make([]byte, edtl) + solicited Data-Out collection before
+//     the SCSI layer's own bounds check runs (architect review
+//     2026-04-21 ckpt 10 Medium finding).
 //
-//   - READ (FlagR) / metadata: response data rides in one or
-//     more Data-In PDUs with the S-bit on the last. Small
-//     payloads fit in a single Data-In; large reads that exceed
-//     MaxRecvDataSegmentLength are split (MaxRecv defaults to
-//     256 KiB, bigger than T2 contract-smoke payloads).
+//   - READ (FlagR) / metadata: response data rides in ONE
+//     Data-In PDU with the S-bit set. T2 ckpt 10 does NOT split
+//     reads across multiple Data-In PDUs (MaxRecvDataSegmentLength
+//     currently bounds the whole read at 256 KiB; larger reads
+//     exceed T2 contract-smoke payloads). Multi-Data-In splitting
+//     lands if an OS initiator needs it.
 func (s *Session) handleSCSICmd(ctx context.Context, req *PDU) error {
+	cdb := req.CDB()
 	edtl := req.ExpectedDataTransferLength()
 	isWrite := req.OpSpecific1()&FlagW != 0
 
 	var dataOut []byte
 	if isWrite && edtl > 0 {
+		// Pre-flight EDTL vs CDB consistency check. For writes
+		// we recognize (WRITE(10)), compute the authoritative
+		// expected bytes and reject mismatches at CHECK CONDITION
+		// BEFORE allocating edtl bytes or issuing R2T. Writes
+		// using an opcode we don't recognize here fall through
+		// to the handler (which rejects Invalid Opcode).
+		if expected, ok := cdbExpectedWriteBytes(cdb, s.handler.BlockSize()); ok {
+			if edtl != expected {
+				return s.sendSCSIResponse(req, illegalRequest(
+					ASCInvalidFieldInCDB, 0x00,
+					"EDTL does not match CDB transfer length"))
+			}
+		}
 		collected, err := s.collectWriteData(req, edtl)
 		if err != nil {
 			return err
@@ -273,13 +292,30 @@ func (s *Session) handleSCSICmd(ctx context.Context, req *PDU) error {
 		dataOut = req.DataSegment
 	}
 
-	cdb := req.CDB()
 	result := s.handler.HandleCommand(ctx, cdb, dataOut)
 
 	if len(result.Data) > 0 {
 		return s.sendDataInWithStatus(req, result)
 	}
 	return s.sendSCSIResponse(req, result)
+}
+
+// cdbExpectedWriteBytes computes the data-transfer size in bytes
+// a WRITE CDB advertises. For opcodes we don't handle as writes
+// (or don't recognize yet), returns (_, false) so the caller
+// falls through to the SCSI handler's own per-opcode validation.
+//
+// Kept as a narrow lookup rather than reaching into scsi.go
+// because handleSCSICmd doesn't need to build a SCSIResult — it
+// just needs to bound the pre-allocation. Expand as new write
+// opcodes are added to scsi.go.
+func cdbExpectedWriteBytes(cdb [16]byte, blockSize uint32) (uint32, bool) {
+	switch cdb[0] {
+	case ScsiWrite10:
+		transferLen := uint32(cdb[7])<<8 | uint32(cdb[8])
+		return transferLen * blockSize, true
+	}
+	return 0, false
 }
 
 // collectWriteData assembles the write payload from immediate
@@ -340,11 +376,14 @@ func (s *Session) collectWriteData(req *PDU, edtl uint32) ([]byte, error) {
 		if pdu.Opcode() != OpSCSIDataOut {
 			return nil, fmt.Errorf("expected Data-Out, got %s", OpcodeName(pdu.Opcode()))
 		}
-		if pdu.TargetTransferTag() != ttt && pdu.TargetTransferTag() != 0xFFFFFFFF {
-			// Initiators typically echo our TTT; 0xFFFFFFFF is
-			// also accepted for unsolicited Data-Out but we
-			// disable that via InitialR2T=Yes.
-			return nil, fmt.Errorf("Data-Out TTT=0x%08x does not match R2T TTT=0x%08x",
+		if pdu.TargetTransferTag() != ttt {
+			// R2T-solicited Data-Out MUST echo the target's TTT
+			// from the R2T. 0xFFFFFFFF signals unsolicited
+			// Data-Out, which we disable via InitialR2T=Yes —
+			// accepting it here would silently weaken the
+			// negotiated "solicited-only" discipline (architect
+			// review 2026-04-21 ckpt 10 Medium finding).
+			return nil, fmt.Errorf("Data-Out TTT=0x%08x does not echo R2T TTT=0x%08x",
 				pdu.TargetTransferTag(), ttt)
 		}
 		if pdu.DataSN() != nextDataSN {
