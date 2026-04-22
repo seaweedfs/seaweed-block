@@ -29,6 +29,70 @@ func inquiryVPDCDB(page uint8, allocLen uint16) [16]byte {
 	return cdb
 }
 
+// Standard INQUIRY (EVPD=0): V2 tuned 96-byte response with
+// Additional Length=91, CmdQue=1. PM Medium finding 2026-04-22.
+func TestT2Batch10_5_Inquiry_StandardResponse_V2TunedShape(t *testing.T) {
+	h := newHandlerForTest(t)
+	var cdb [16]byte
+	cdb[0] = iscsi.ScsiInquiry
+	binary.BigEndian.PutUint16(cdb[3:5], 96)
+	r := h.HandleCommand(context.Background(), cdb, nil)
+	if r.AsError() != nil {
+		t.Fatalf("INQUIRY: %v", r.AsError())
+	}
+	if len(r.Data) != 96 {
+		t.Fatalf("len=%d want 96 (V2-tuned shape)", len(r.Data))
+	}
+	if r.Data[0] != 0x00 { // SBC direct-access
+		t.Fatalf("byte 0 = 0x%02x want 0x00", r.Data[0])
+	}
+	if r.Data[2] != 0x06 { // SPC-4 version
+		t.Fatalf("byte 2 = 0x%02x want 0x06 (SPC-4)", r.Data[2])
+	}
+	if r.Data[3] != 0x02 { // Response data format
+		t.Fatalf("byte 3 = 0x%02x want 0x02", r.Data[3])
+	}
+	if r.Data[4] != 91 { // Additional length = 96 - 5
+		t.Fatalf("additional length=%d want 91", r.Data[4])
+	}
+	// TPGS (byte 5 bits 5:4) MUST be zero — ALUA is skip-list.
+	if r.Data[5]&0x30 != 0 {
+		t.Fatalf("TPGS bits set in byte 5 (0x%02x) — ALUA is skip-list", r.Data[5])
+	}
+	// CmdQue (byte 7 bit 1) MUST be 1 per V2 tuning.
+	if r.Data[7]&0x02 == 0 {
+		t.Fatalf("CmdQue=0 in byte 7 (0x%02x); V2 tuning requires CmdQue=1", r.Data[7])
+	}
+}
+
+// A caller-supplied short allocLen MUST truncate. Same SPC-5
+// §6.6 rule as READ_CAPACITY(16): initiator allocation length
+// is authoritative.
+func TestT2Batch10_5_Inquiry_ShortAllocLen_Truncates(t *testing.T) {
+	h := newHandlerForTest(t)
+	cases := []uint16{0, 1, 8, 36, 64, 95}
+	for _, al := range cases {
+		var cdb [16]byte
+		cdb[0] = iscsi.ScsiInquiry
+		binary.BigEndian.PutUint16(cdb[3:5], al)
+		r := h.HandleCommand(context.Background(), cdb, nil)
+		if r.AsError() != nil {
+			t.Fatalf("allocLen=%d: %v", al, r.AsError())
+		}
+		want := int(al)
+		if al == 0 {
+			// V2 + SPC convention: allocLen=0 is treated as the
+			// natural default (we picked 96, V2 picked 36).
+			// Either way the response must not exceed 96.
+			want = 96
+		}
+		if len(r.Data) != want {
+			t.Fatalf("allocLen=%d: returned %d bytes, want %d",
+				al, len(r.Data), want)
+		}
+	}
+}
+
 func TestT2Batch10_5_InquiryVPD00_ReturnsSupportedPagesList(t *testing.T) {
 	h := newHandlerForTest(t)
 	r := h.HandleCommand(context.Background(), inquiryVPDCDB(0x00, 255), nil)
@@ -174,9 +238,38 @@ func TestT2Batch10_5_ReadCapacity16_ReturnsLastLBAAndBlockSize(t *testing.T) {
 	if blockSize != iscsi.DefaultBlockSize {
 		t.Fatalf("block size=%d want %d", blockSize, iscsi.DefaultBlockSize)
 	}
-	// LBPME bit at byte 14 bit 7.
-	if r.Data[14]&0x80 == 0 {
-		t.Fatalf("LBPME bit not set in byte 14 (got 0x%02x)", r.Data[14])
+	// LBPME (byte 14 bit 7) MUST be zero — Batch 10.5 does not
+	// implement UNMAP / VPD 0xB2 (skip list §3.2), so advertising
+	// provisioning management is an overclaim. PM High / architect
+	// Medium finding 2026-04-22.
+	if r.Data[14]&0x80 != 0 {
+		t.Fatalf("LBPME bit set in byte 14 (0x%02x); must be 0 while UNMAP + VPD 0xB2 are skip-list",
+			r.Data[14])
+	}
+}
+
+// Architect Medium finding 2026-04-22: a short allocLen MUST
+// truncate the 32-byte response, not be forced up. V2 parity
+// applies to the response SHAPE (fields + byte positions),
+// not to the length — caller-supplied allocLen is authoritative.
+func TestT2Batch10_5_ReadCapacity16_ShortAllocLen_Truncates(t *testing.T) {
+	h := newHandlerForTest(t)
+	cases := []uint32{0, 1, 7, 8, 12, 20, 31}
+	for _, al := range cases {
+		r := h.HandleCommand(context.Background(), readCap16CDB(al), nil)
+		if r.AsError() != nil {
+			t.Fatalf("allocLen=%d: %v", al, r.AsError())
+		}
+		if uint32(len(r.Data)) != al {
+			t.Fatalf("allocLen=%d: returned %d bytes — must truncate to %d",
+				al, len(r.Data), al)
+		}
+	}
+	// A caller asking for MORE than 32 bytes still gets 32
+	// (server never pads beyond the natural response size).
+	r := h.HandleCommand(context.Background(), readCap16CDB(100), nil)
+	if len(r.Data) != 32 {
+		t.Fatalf("allocLen=100: returned %d, want 32 (natural size cap)", len(r.Data))
 	}
 }
 

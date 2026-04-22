@@ -289,25 +289,51 @@ func (h *SCSIHandler) requestSense(cdb [16]byte) SCSIResult {
 	return SCSIResult{Status: StatusGood, Data: data}
 }
 
+// Batch 10.5: Standard INQUIRY ported to V2's 96-byte tuned
+// response (PM Medium finding 2026-04-22).
+//
+// Key V2 parity bytes we now emit:
+//   byte 4  = 91     Additional length (96 - 5)
+//   byte 7  = 0x02   CmdQue=1 — command queuing supported
+//   bytes 8-15      Vendor ID, 8 bytes, space-padded
+//   bytes 16-31     Product ID, 16 bytes, space-padded
+//   bytes 32-35     Product revision "0001"
+//   bytes 36-95     Reserved / zero
+//
+// Skip list compliance (ports plan §3.2):
+//   byte 5 bit 4 (TPGS implicit) — NOT set (ALUA is skip-list)
+//   byte 6 / other tuning bits   — zero (V2 sets some for
+//     enclosure/multiPort/vendor-specific; T2 has no reason
+//     to advertise them)
+//
+// NOTE: the prior 36-byte minimal response still worked for
+// iscsiadm attach, but under-advertised CmdQue and forced the
+// kernel to assume minimum SPC capabilities. V2 tuning avoids
+// spurious SCSI layer log messages about command queuing
+// behavior.
 func (h *SCSIHandler) inquiry(cdb [16]byte) SCSIResult {
 	evpd := cdb[1] & 0x01
 	pageCode := cdb[2]
 	allocLen := binary.BigEndian.Uint16(cdb[3:5])
 	if allocLen == 0 {
-		allocLen = 36
+		allocLen = 96
 	}
 	if evpd != 0 {
 		return h.inquiryVPD(pageCode, allocLen)
 	}
-	data := make([]byte, 36)
-	data[0] = 0x00 // Peripheral device type: direct-access block
-	data[1] = 0x00 // RMB=0
+	data := make([]byte, 96)
+	data[0] = 0x00 // Peripheral device type: direct-access block (SBC)
+	data[1] = 0x00 // RMB=0 (not removable)
 	data[2] = 0x06 // Version: SPC-4
-	data[3] = 0x02 // Response data format
-	data[4] = 31   // Additional length (36-5)
+	data[3] = 0x02 // Response data format (SPC-2+)
+	data[4] = 91   // Additional length (96 - 5)
+	// byte 5: SCCS / ACC / TPGS / 3PC — all zero in T2 (no ALUA)
+	// byte 6: reserved / EncServ / VS / MultiP — zero
+	data[7] = 0x02 // BQue=0, CmdQue=1
 	copy(data[8:16], padRight(h.vendorID, 8))
 	copy(data[16:32], padRight(h.productID, 16))
 	copy(data[32:36], "0001")
+	// bytes 36-95 reserved; V2 leaves zeros.
 	if int(allocLen) < len(data) {
 		data = data[:allocLen]
 	}
@@ -424,26 +450,35 @@ func (h *SCSIHandler) readCapacity10() SCSIResult {
 }
 
 // Batch 10.5: READ_CAPACITY(16). 32-byte response with 64-bit
-// last-LBA + block size + flags. LBPME=1 advertises logical
-// block provisioning management enabled (needed by kernel when
-// backend is thin-provisioned); we set it to stay compatible
-// with V2's advertised shape even though T2 memback isn't
-// actually thin. UNMAP ops are NOT implemented (skip-list),
-// so kernel may probe VPD 0xB2 and we'll reject — that's the
-// expected fallback per port plan §3.3 N3.
+// last-LBA + block size + flags.
+//
+// LBPME (byte 14 bit 7): 0 in T2 — must stay aligned with
+// implemented surface. Batch 10.5 explicitly does NOT port
+// UNMAP / VPD 0xB2 (port plan §3.2 skip list). Advertising
+// LBPME=1 would tell the initiator "logical block provisioning
+// management enabled" while the backing discovery surfaces
+// (VPD 0xB0/0xB2) + operations (UNMAP) are absent. V2 sets
+// LBPME=1 because V2 also implements UNMAP + VPD 0xB2; the
+// "V2 parity" wording in an earlier draft was wrong — what V2
+// parity-demands is that advertised ≡ implemented. For T2
+// that means LBPME=0 until UNMAP + VPD 0xB2 are in-scope.
+// (PM High / architect Medium finding, 2026-04-22.)
 func (h *SCSIHandler) readCapacity16(cdb [16]byte) SCSIResult {
+	// Architect Medium finding (2026-04-22): do NOT force
+	// allocLen up to the full 32-byte response size. The
+	// initiator's allocation length is the authoritative
+	// upper bound per SPC-5 §6.6; returning more than asked
+	// for is a protocol violation. If the caller supplies
+	// allocLen=0, SPC-5 §6.6 says "no data shall be transferred"
+	// — we return an empty Good response in that case.
 	allocLen := binary.BigEndian.Uint32(cdb[10:14])
-	if allocLen < 32 {
-		allocLen = 32
-	}
 	totalBlocks := h.volumeSize / uint64(h.blockSize)
 	data := make([]byte, 32)
 	if totalBlocks > 0 {
 		binary.BigEndian.PutUint64(data[0:8], totalBlocks-1)
 	}
 	binary.BigEndian.PutUint32(data[8:12], h.blockSize)
-	// byte 14 bit 7 (LBPME) = 1 matches V2 advertised shape.
-	data[14] = 0x80
+	// LBPME + LBPRZ stay zero — aligned with skip list §3.2.
 	if allocLen < uint32(len(data)) {
 		data = data[:allocLen]
 	}
