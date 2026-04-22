@@ -18,6 +18,7 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/adapter"
 	"github.com/seaweedfs/seaweed-block/core/frontend/iscsi"
 	"github.com/seaweedfs/seaweed-block/core/frontend/memback"
+	"github.com/seaweedfs/seaweed-block/core/frontend/nvme"
 	"github.com/seaweedfs/seaweed-block/core/host/volume"
 )
 
@@ -51,6 +52,13 @@ type flags struct {
 	iscsiListen string
 	iscsiIQN    string
 	iscsiLUN    uint
+
+	// T2 NVMe/TCP frontend flags. Symmetric with iSCSI flags
+	// per QA note: same loopback-only safe-default rule, same
+	// auto-enable of --t1-readiness so the symmetry stays clean.
+	nvmeListen   string
+	nvmeSubsysNQN string
+	nvmeNS       uint
 }
 
 func parseFlags(args []string) (flags, error) {
@@ -69,6 +77,9 @@ func parseFlags(args []string) (flags, error) {
 	fs.StringVar(&f.iscsiListen, "iscsi-listen", "", "iSCSI target bind address (e.g. 127.0.0.1:0); empty disables. Loopback-only in T2 scope (no auth)")
 	fs.StringVar(&f.iscsiIQN, "iscsi-iqn", "", "iSCSI target IQN (required if --iscsi-listen is set)")
 	fs.UintVar(&f.iscsiLUN, "iscsi-lun", 0, "iSCSI LUN id (default 0)")
+	fs.StringVar(&f.nvmeListen, "nvme-listen", "", "NVMe/TCP target bind address (e.g. 127.0.0.1:0); empty disables. Loopback-only in T2 scope (no auth)")
+	fs.StringVar(&f.nvmeSubsysNQN, "nvme-subsysnqn", "", "NVMe subsystem NQN (required if --nvme-listen is set)")
+	fs.UintVar(&f.nvmeNS, "nvme-ns", 1, "NVMe namespace id (default 1)")
 	fs.SetOutput(os.Stderr)
 	if err := fs.Parse(args); err != nil {
 		return flags{}, err
@@ -90,7 +101,7 @@ func parseFlags(args []string) (flags, error) {
 		if f.iscsiIQN == "" {
 			return flags{}, fmt.Errorf("--iscsi-iqn is required when --iscsi-listen is set")
 		}
-		if err := enforceIscsiLoopbackBind(f.iscsiListen); err != nil {
+		if err := enforceFrontendLoopbackBind("iscsi", f.iscsiListen); err != nil {
 			return flags{}, err
 		}
 		// iSCSI needs a Healthy adapter projection to open a
@@ -104,26 +115,41 @@ func parseFlags(args []string) (flags, error) {
 		}
 		f.enableT1Readiness = true
 	}
+	if f.nvmeListen != "" {
+		if f.nvmeSubsysNQN == "" {
+			return flags{}, fmt.Errorf("--nvme-subsysnqn is required when --nvme-listen is set")
+		}
+		if err := enforceFrontendLoopbackBind("nvme", f.nvmeListen); err != nil {
+			return flags{}, err
+		}
+		// Symmetric with iSCSI auto-enable per QA checkpoint-7
+		// note: keep the two protocols' safe-default behavior
+		// identical so the closure report doesn't have to
+		// explain asymmetry.
+		if !f.enableT1Readiness {
+			fmt.Fprintln(os.Stderr, "blockvolume: nvme enabled: t1-readiness auto-enabled")
+		}
+		f.enableT1Readiness = true
+	}
 	return f, nil
 }
 
-// enforceIscsiLoopbackBind mirrors volume.StatusServer's guard:
-// refuses to bind iSCSI on anything other than 127.0.0.1 / ::1
-// in T2 scope. The iSCSI frontend does not implement AuthN/Z in
-// T2 (sketch §6), so exposing it on an external NIC would ship
-// an unauthenticated block-I/O endpoint. Real-network iSCSI
-// lands with T8 (security).
-func enforceIscsiLoopbackBind(addr string) error {
+// enforceFrontendLoopbackBind mirrors volume.StatusServer's
+// guard for any T2 frontend (iscsi / nvme): refuses to bind on
+// anything other than 127.0.0.1 / ::1. T2 frontends are
+// unauthenticated (sketch §6); real-network exposure lands
+// with T8 (security).
+func enforceFrontendLoopbackBind(kind, addr string) error {
 	host, _, err := net.SplitHostPort(addr)
 	if err != nil {
-		return fmt.Errorf("--iscsi-listen %q not host:port: %w", addr, err)
+		return fmt.Errorf("--%s-listen %q not host:port: %w", kind, addr, err)
 	}
 	if host == "" {
-		return fmt.Errorf("--iscsi-listen %q has empty host; must be a loopback address (127.0.0.1 or ::1)", addr)
+		return fmt.Errorf("--%s-listen %q has empty host; must be a loopback address (127.0.0.1 or ::1)", kind, addr)
 	}
 	ip := net.ParseIP(host)
 	if ip == nil || !ip.IsLoopback() {
-		return fmt.Errorf("--iscsi-listen %q is not loopback; T2 iSCSI target is unauthenticated and refuses external binds", addr)
+		return fmt.Errorf("--%s-listen %q is not loopback; T2 %s target is unauthenticated and refuses external binds", kind, addr, kind)
 	}
 	return nil
 }
@@ -157,6 +183,13 @@ type iscsiReadyLine struct {
 	Phase     string `json:"phase"`
 	IscsiAddr string `json:"iscsi_addr"`
 	IQN       string `json:"iqn"`
+}
+
+type nvmeReadyLine struct {
+	Component string `json:"component"`
+	Phase     string `json:"phase"`
+	NvmeAddr  string `json:"nvme_addr"`
+	SubsysNQN string `json:"subsys_nqn"`
 }
 
 func run(f flags) int {
@@ -249,10 +282,44 @@ func run(f flags) int {
 		})
 	}
 
+	var nvmeTarget *nvme.Target
+	if f.nvmeListen != "" {
+		prov := memback.NewProvider(h.ProjectionView())
+		nvmeTarget = nvme.NewTarget(nvme.TargetConfig{
+			Listen:    f.nvmeListen,
+			SubsysNQN: f.nvmeSubsysNQN,
+			VolumeID:  f.volumeID,
+			Provider:  prov,
+		})
+		nvmeAddr, err := nvmeTarget.Start()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "blockvolume: nvme target:", err)
+			if iscsiTarget != nil {
+				_ = iscsiTarget.Close()
+			}
+			if status != nil {
+				shutCtx, shutCancel := context.WithTimeout(context.Background(), 2*time.Second)
+				_ = status.Close(shutCtx)
+				shutCancel()
+			}
+			_ = h.Close()
+			return 1
+		}
+		_ = json.NewEncoder(os.Stdout).Encode(nvmeReadyLine{
+			Component: "blockvolume",
+			Phase:     "nvme-listening",
+			NvmeAddr:  nvmeAddr,
+			SubsysNQN: f.nvmeSubsysNQN,
+		})
+	}
+
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 	<-sig
 
+	if nvmeTarget != nil {
+		_ = nvmeTarget.Close()
+	}
 	if iscsiTarget != nil {
 		_ = iscsiTarget.Close()
 	}
