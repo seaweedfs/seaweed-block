@@ -1,24 +1,25 @@
 // Ownership: QA (Condition 4 of BUG-001 fix Discovery Bridge review).
 // sw may NOT modify without architect approval via §8B.4.
 //
-// Two additional regression tests for the pipelined-cmd port:
+// REVISION 2026-04-22 (post-c0c0a1d revert to V2-strict):
+// Original draft expected async R2T emission — incompatible with
+// kernel. Rewritten to kernel-realistic paired R2T+data+resp cycle
+// under single-R2T-outstanding invariant. See BUG-001 §13 +
+// feedback_porting_discipline.md citation.
 //
 // 1. TestT2V2Port_NVMe_IO_PipelinedNWritesSameQueue —
-//    Parametric N ∈ {2, 4, 8, 16, 32}. After BUG-001 fix, server
-//    must accept N in-flight CapsuleCmds on one IO queue, issue
-//    N R2Ts, receive N payloads, emit N CapsuleResps. Pins
-//    "pipelining is not just 2" so sw's fix can't pass by
-//    accident with a 2-slot special case.
+//    Parametric N ∈ {2, 4, 8, 16, 32}. All N CapsuleCmds shipped
+//    back-to-back (kernel pipelines freely); then paired
+//    R2T→H2CData→CapResp cycle per cmd. Pins server's
+//    pendingCapsules drain works at scale (not just N=2) and
+//    FIFO ordering is preserved.
 //
 // 2. TestT2V2Port_NVMe_IO_ConnectionCloseDrainsInflight —
-//    Fire N pipelined cmds, close the TCP connection mid-stream.
-//    Target must not panic, must not leak goroutines, must
-//    release the admin controller. Pins cleanup discipline in
-//    the new rxLoop / txLoop design.
-//
-// Status at landing (2026-04-22): both are RED on current V3
-// (Batch 11b). When sw's BUG-001 fix lands, both must go GREEN
-// without breaking any earlier A-tier or debug test.
+//    Simplified: 1 cmd + R2T received, then abrupt TCP close
+//    BEFORE sending H2CData. Pins cleanup discipline (no
+//    goroutine leak on mid-R2T close). Previous multi-cmd shape
+//    was covered "by accident" under V2-strict since inline
+//    collectR2TData blocks and then returns on socket error.
 
 package nvme_test
 
@@ -31,13 +32,8 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/frontend/nvme"
 )
 
-// TestT2V2Port_NVMe_IO_PipelinedNWritesSameQueue pins that the
-// fix supports arbitrary queue depths, not just depth-2 (the
-// minimum repro from BUG-001).
-//
-// Kernel advertises QD up to ctrl.CAP.MQES+1 = 64 in our case;
-// picks 8 in practice for mkfs. Testing up to 32 covers the
-// realistic range without chasing the 64 absolute max.
+// TestT2V2Port_NVMe_IO_PipelinedNWritesSameQueue —
+// N pipelined cmds, kernel-realistic paired-cycle shape.
 func TestT2V2Port_NVMe_IO_PipelinedNWritesSameQueue(t *testing.T) {
 	cases := []int{2, 4, 8, 16, 32}
 	for _, n := range cases {
@@ -45,13 +41,12 @@ func TestT2V2Port_NVMe_IO_PipelinedNWritesSameQueue(t *testing.T) {
 		t.Run(fmt.Sprintf("N=%d", n), func(t *testing.T) {
 			backend, cli := newChunkedWriteTarget(t)
 
-			const perCmdBytes = 8 * 1024 // 8 KiB per cmd keeps total bounded at N=32
-			const chunks = 2              // 2 × 4 KiB H2CData PDUs per cmd
+			const perCmdBytes = 8 * 1024
+			const chunks = 2
 			const nlb = uint16(perCmdBytes / 512)
 
-			// Build N payloads so data-integrity on backend side
-			// can be verified (each distinct).
 			payloads := make([][]byte, n)
+			cids := make([]uint16, n)
 			for i := range payloads {
 				p := make([]byte, perCmdBytes)
 				for j := range p {
@@ -60,8 +55,7 @@ func TestT2V2Port_NVMe_IO_PipelinedNWritesSameQueue(t *testing.T) {
 				payloads[i] = p
 			}
 
-			// --- Send N capsule cmds back-to-back ---
-			cids := make([]uint16, n)
+			// --- Phase 1: fire ALL N cmds back-to-back (pipelined) ---
 			for i := 0; i < n; i++ {
 				cids[i] = uint16(cli.cid.Add(1))
 				cmd := nvme.CapsuleCommand{
@@ -76,171 +70,145 @@ func TestT2V2Port_NVMe_IO_PipelinedNWritesSameQueue(t *testing.T) {
 
 			_ = cli.io.SetReadDeadline(time.Now().Add(10 * time.Second))
 
-			// --- Collect N R2Ts; server must interleave them ---
-			r2tByCID := make(map[uint16]nvme.R2THeader, n)
-			for collected := 0; collected < n; collected++ {
+			// --- Phase 2: opportunistic drain until N CapResps ---
+			//
+			// V2-strict spawns backend.Write as a goroutine after
+			// collectR2TData returns; txLoop orders R2T-i+1 and
+			// CapResp-i based on goroutine completion vs pendingCapsules
+			// drain timing. Kernel does the same opportunistic drain
+			// by PDU type. We mirror kernel behavior so the test is
+			// tolerant of legitimate ordering freedom.
+
+			payloadByCID := make(map[uint16][]byte, n)
+			for i, cid := range cids {
+				payloadByCID[cid] = payloads[i]
+			}
+			respSeen := make(map[uint16]bool, n)
+			r2tSeen := make(map[uint16]bool, n)
+
+			for len(respSeen) < n {
 				ch, err := cli.ioR.Dequeue()
 				if err != nil {
-					t.Fatalf("Dequeue R2T[%d/%d]: %v — BUG-001 fix incomplete: server did not emit all N R2Ts for pipelined cmds",
-						collected, n, err)
+					t.Fatalf("drain Dequeue (seen %d R2T, %d resp of %d): %v",
+						len(r2tSeen), len(respSeen), n, err)
 				}
-				if ch.Type == 0x5 {
+				switch ch.Type {
+				case 0x9: // R2T
+					var r2t nvme.R2THeader
+					if err := cli.ioR.Receive(&r2t); err != nil {
+						t.Fatalf("recv R2T: %v", err)
+					}
+					if r2tSeen[r2t.CCCID] {
+						t.Fatalf("duplicate R2T for CID=%d", r2t.CCCID)
+					}
+					r2tSeen[r2t.CCCID] = true
+
+					p, ok := payloadByCID[r2t.CCCID]
+					if !ok {
+						t.Fatalf("R2T for unknown CID=%d", r2t.CCCID)
+					}
+					for c := 0; c < chunks; c++ {
+						off := c * (perCmdBytes / chunks)
+						h := nvme.H2CDataHeader{
+							CCCID: r2t.CCCID, TAG: r2t.TAG,
+							DATAO: uint32(off),
+							DATAL: uint32(perCmdBytes / chunks),
+						}
+						if err := cli.ioW.SendWithData(0x6, 0, &h,
+							16, p[off:off+perCmdBytes/chunks]); err != nil {
+							t.Fatalf("send H2CData CID=%d chunk %d: %v", r2t.CCCID, c, err)
+						}
+					}
+				case 0x5: // CapsuleResp
 					var resp nvme.CapsuleResponse
-					_ = cli.ioR.Receive(&resp)
-					t.Fatalf("early CapsuleResp cid=%d status=0x%04x — server responded before issuing all R2Ts",
-						resp.CID, resp.Status)
-				}
-				if ch.Type != 0x9 {
-					t.Fatalf("R2T[%d] type=0x%x, want 0x09", collected, ch.Type)
-				}
-				var r2t nvme.R2THeader
-				if err := cli.ioR.Receive(&r2t); err != nil {
-					t.Fatalf("recv R2T[%d]: %v", collected, err)
-				}
-				if _, seen := r2tByCID[r2t.CCCID]; seen {
-					t.Fatalf("duplicate R2T for CID=%d", r2t.CCCID)
-				}
-				r2tByCID[r2t.CCCID] = r2t
-			}
-
-			// --- Send all H2CData: per-cmd serial internally,
-			// cmd order round-robin to test interleaved arrival ---
-			for chunk := 0; chunk < chunks; chunk++ {
-				for i, cid := range cids {
-					r2t := r2tByCID[cid]
-					off := chunk * (perCmdBytes / chunks)
-					h := nvme.H2CDataHeader{
-						CCCID: cid, TAG: r2t.TAG,
-						DATAO: uint32(off),
-						DATAL: uint32(perCmdBytes / chunks),
+					if err := cli.ioR.Receive(&resp); err != nil {
+						t.Fatalf("recv CapResp: %v", err)
 					}
-					if err := cli.ioW.SendWithData(0x6, 0, &h,
-						16, payloads[i][off:off+perCmdBytes/chunks]); err != nil {
-						t.Fatalf("send H2CData cid=%d chunk=%d: %v", cid, chunk, err)
+					if resp.Status != 0 {
+						t.Fatalf("CapResp CID=%d status=0x%04x", resp.CID, resp.Status)
 					}
+					if respSeen[resp.CID] {
+						t.Fatalf("duplicate CapResp for CID=%d", resp.CID)
+					}
+					respSeen[resp.CID] = true
+				default:
+					t.Fatalf("unexpected PDU type 0x%02x during drain", ch.Type)
 				}
 			}
 
-			// --- Receive N CapsuleResps ---
-			seen := make(map[uint16]bool, n)
-			for i := 0; i < n; i++ {
-				resp := recvCapsuleResp(t, cli.ioR)
-				if resp.Status != 0 {
-					t.Fatalf("resp[%d] CID=%d status=0x%04x", i, resp.CID, resp.Status)
-				}
-				if seen[resp.CID] {
-					t.Fatalf("duplicate resp for CID=%d", resp.CID)
-				}
-				seen[resp.CID] = true
-			}
-			for _, cid := range cids {
-				if !seen[cid] {
-					t.Errorf("missing CapsuleResp for CID=%d", cid)
-				}
+			if len(r2tSeen) != n {
+				t.Errorf("R2T count: got %d, want %d", len(r2tSeen), n)
 			}
 
-			// --- Integrity: N backend.Write calls, N × perCmdBytes total ---
+			// --- Integrity ---
 			if got := backend.calls.Load(); got != int32(n) {
-				t.Errorf("backend.calls=%d; want %d", got, n)
+				t.Errorf("backend.calls=%d, want %d", got, n)
 			}
 			if got, want := backend.bytes.Load(), int64(n)*int64(perCmdBytes); got != want {
-				t.Errorf("backend.bytes=%d; want %d (lost %d)", got, want, want-got)
+				t.Errorf("backend.bytes=%d, want %d (lost %d)", got, want, want-got)
 			}
 		})
 	}
 }
 
-// TestT2V2Port_NVMe_IO_ConnectionCloseDrainsInflight pins
-// cleanup discipline: if the host closes the TCP connection
-// while N cmds are in-flight, Target must release resources
-// without panicking or leaking goroutines.
-//
-// Strategy:
-//  1. Snapshot runtime.NumGoroutine
-//  2. Spin target, open IO queue, fire N=8 pipelined cmds
-//  3. Receive the first R2T so we're guaranteed sw has entered
-//     the rxLoop-active state
-//  4. Abruptly close the IO TCP conn
-//  5. Give Target a grace period to drain
-//  6. Assert goroutine count is within reason (tolerate ~4
-//     stragglers for admin session + Target accept loop + WG
-//     drain; 50+ extra means leak)
-//  7. Close Target; re-check NumGoroutine is back near baseline
-//
-// RED pre-fix: handleWrite's blocking read on a closed conn
-// may return an error AND the serial session loop may not
-// propagate cleanup to admin controller's release path.
-// GREEN post-fix: rxLoop detects EOF, cancels pending cmds via
-// ctx, txLoop drains, cmdWg.Wait unblocks, session returns.
+// TestT2V2Port_NVMe_IO_ConnectionCloseDrainsInflight pins cleanup
+// discipline: abrupt close mid-R2T (client received R2T, never
+// sends H2CData) must not leak goroutines or panic the target.
 func TestT2V2Port_NVMe_IO_ConnectionCloseDrainsInflight(t *testing.T) {
-	_ = backendStubForClose // keep compile if future helpers elided
-
-	// Baseline before we even build the target — avoids counting
-	// package init goroutines as leaks.
 	runtime.GC()
 	time.Sleep(50 * time.Millisecond)
 	baseline := runtime.NumGoroutine()
 
 	backend, cli := newChunkedWriteTarget(t)
 
-	const n = 8
-	const perCmdBytes = 8 * 1024
-	const nlb = uint16(perCmdBytes / 512)
+	const total = 32 * 1024
+	const nlb = uint16(total / 512)
 
-	// Fire N pipelined cmds without reading.
-	for i := 0; i < n; i++ {
-		cid := uint16(cli.cid.Add(1))
-		cmd := nvme.CapsuleCommand{
-			OpCode: 0x01, CID: cid, NSID: 1,
-			D10: uint32(i) * uint32(nlb), D11: 0,
-			D12: uint32(nlb - 1),
-		}
-		if err := cli.ioW.SendHeaderOnly(0x4, &cmd, 64); err != nil {
-			t.Fatalf("send cmd[%d]: %v", i, err)
-		}
+	// Fire one cmd. Server will emit R2T and then block inline
+	// waiting for H2CData (V2-strict). We receive R2T but never
+	// send data — then close the TCP conn.
+	cid := uint16(cli.cid.Add(1))
+	cmd := nvme.CapsuleCommand{
+		OpCode: 0x01, CID: cid, NSID: 1,
+		D10: 0, D11: 0, D12: uint32(nlb - 1),
+	}
+	if err := cli.ioW.SendHeaderOnly(0x4, &cmd, 64); err != nil {
+		t.Fatalf("send cmd: %v", err)
 	}
 
-	// Wait for the first R2T so rxLoop is demonstrably active.
 	_ = cli.io.SetReadDeadline(time.Now().Add(5 * time.Second))
 	ch, err := cli.ioR.Dequeue()
 	if err != nil {
-		// Pre-fix, server may have already closed us with
-		// "expected H2CData, got 0x4". That's fine — we still
-		// get to test the cleanup path, just from the other
-		// direction.
-		t.Logf("first Dequeue returned %v (acceptable — proceeding to close path)", err)
-	} else if ch.Type == 0x9 {
-		var r2t nvme.R2THeader
-		_ = cli.ioR.Receive(&r2t)
+		t.Fatalf("R2T Dequeue: %v", err)
+	}
+	if ch.Type != 0x9 {
+		t.Fatalf("expected R2T, got type 0x%02x", ch.Type)
+	}
+	var r2t nvme.R2THeader
+	if err := cli.ioR.Receive(&r2t); err != nil {
+		t.Fatalf("recv R2T: %v", err)
 	}
 
-	// Abrupt close of the IO TCP conn — simulates a host crash
-	// or nvme disconnect while data is in flight.
+	// Abrupt close — server is now inline in recvH2CData waiting
+	// on a PDU that will never arrive. Close triggers read error
+	// on the server side; rxLoop must unwind cleanly.
 	_ = cli.io.Close()
 
-	// Grace period for target to drain + release admin controller.
+	// Grace period for target-side drain.
 	time.Sleep(500 * time.Millisecond)
 
-	// We expect backend.calls to be 0 or some small number; the
-	// actual invariant is "target didn't panic and didn't wedge".
-	_ = backend
+	// Backend must not have been called (no H2CData ever arrived).
+	if got := backend.calls.Load(); got != 0 {
+		t.Errorf("backend.calls=%d, want 0 (no H2CData was sent)", got)
+	}
 
-	// Goroutine delta after drain. We don't care about exact
-	// count; 50+ over baseline is a clear leak signal.
+	// Goroutine delta after drain. 50+ over baseline is a clear
+	// leak signal.
 	runtime.GC()
 	time.Sleep(50 * time.Millisecond)
 	afterDrain := runtime.NumGoroutine()
 	if afterDrain > baseline+50 {
-		t.Errorf("goroutine leak: baseline=%d after-conn-close=%d (delta=%d)",
+		t.Errorf("goroutine leak: baseline=%d after-close=%d (delta=%d)",
 			baseline, afterDrain, afterDrain-baseline)
 	}
-
-	// Target.Close runs via t.Cleanup; once fired, final check
-	// in a second t.Cleanup runs after it. Can't do that here
-	// easily; instead trust the drain grace period + baseline
-	// comparison.
 }
-
-// backendStubForClose is a vestigial symbol to keep the import
-// for (*writeCountingBackend) visible if helper imports shift.
-var backendStubForClose = (*writeCountingBackend)(nil)
