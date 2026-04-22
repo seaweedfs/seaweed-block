@@ -76,6 +76,9 @@ type connectOptions struct {
 	// SkipIOQueue bypasses the IO queue Connect. Used by tests
 	// that want admin-only (e.g., Identify-only).
 	SkipIOQueue bool
+	// KATO sets the Keep Alive Timeout in admin Connect's CDW12
+	// (BUG-003). Zero = no timeout.
+	KATO uint32
 }
 
 func dialAndConnectOpts(t *testing.T, addr string, opts connectOptions) *nvmeClient {
@@ -100,6 +103,7 @@ func dialAndConnectOpts(t *testing.T, addr string, opts connectOptions) *nvmeCli
 		FCType: 0x01, // fcConnect
 		CID:    cid,
 		D10:    uint32(0) << 16, // QID=0 (admin)
+		D12:    opts.KATO,       // KATO per BUG-003
 	}
 	adminCD := nvme.ConnectData{
 		HostID:  [16]byte{0x01, 0x02, 0x03, 0x04},

@@ -628,10 +628,16 @@ func (s *Session) handleAdminConnect(req *Request, cd *ConnectData, qid, queueSi
 	s.ctrl = ctrl
 	s.queueSize = queueSize
 	s.flowCtlOff = flowCtlOff
+	// BUG-003: plumb KATO from Connect CDW12 into the controller.
+	// V2 fabric.go:41 extracts this at Connect; V3 previously only
+	// accepted KATO via Set Features 0x0F, which typical Linux hosts
+	// do not call. Store unit matches V2 (uint32 round-trip; QA
+	// constraint #2 keeps this store-only, no timer).
+	ctrl.setKATO(req.capsule.D12)
 	s.connected.Store(true)
 	if s.logger != nil {
-		s.logger.Printf("nvme: admin Connect accepted host=%q subsys=%q cntlid=%d qsize=%d",
-			cd.HostNQN, cd.SubNQN, ctrl.cntlID, queueSize)
+		s.logger.Printf("nvme: admin Connect accepted host=%q subsys=%q cntlid=%d qsize=%d kato=%d",
+			cd.HostNQN, cd.SubNQN, ctrl.cntlID, queueSize, req.capsule.D12)
 	}
 	s.advanceSQHD()
 	req.resp.DW0 = uint32(ctrl.cntlID)
