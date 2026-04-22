@@ -109,46 +109,96 @@ func dialAndLoginOpts(t *testing.T, addr string, opts loginOptions) *testClient 
 	return c
 }
 
-// scsiCmd builds a SCSI-Cmd PDU wrapping the given CDB, with
-// optional immediate data (for WRITE in T2 minimal scope).
-// Returns the SCSI-Response status + any Data-In payload.
-func (c *testClient) scsiCmd(t *testing.T, cdb [16]byte, dataOut []byte, expectedDataIn int) (status uint8, dataIn []byte) {
+// scsiCmd builds a SCSI-Cmd PDU wrapping the given CDB. If
+// `immediate` is non-empty it rides in the SCSI-Cmd's data
+// segment (ImmediateData path). If the write's EDTL exceeds
+// len(immediate), the target emits R2T and the client feeds
+// the remainder from `solicited` via Data-Out PDUs.
+//
+// For simple small writes, pass the full payload as
+// `immediate` and leave `solicited` nil — matches ckpt 4 flow.
+//
+// `expectedDataIn` is the read-side transfer length (0 for
+// metadata/writes). Returns the SCSI-Response status + any
+// collected Data-In payload.
+func (c *testClient) scsiCmd(t *testing.T, cdb [16]byte, immediate []byte, expectedDataIn int) (status uint8, dataIn []byte) {
 	t.Helper()
+	return c.scsiCmdFull(t, cdb, immediate, nil, expectedDataIn)
+}
+
+// scsiCmdFull is the extended form: EDTL = len(immediate) +
+// len(solicited). Used by the ckpt 10 large-write tests to
+// drive the R2T → Data-Out path.
+func (c *testClient) scsiCmdFull(t *testing.T, cdb [16]byte, immediate, solicited []byte, expectedDataIn int) (status uint8, dataIn []byte) {
+	t.Helper()
+	totalWrite := len(immediate) + len(solicited)
+
 	req := &iscsi.PDU{}
 	req.SetOpcode(iscsi.OpSCSICmd)
-	req.SetOpSpecific1(iscsi.FlagF) // final
+	req.SetOpSpecific1(iscsi.FlagF)
 	if expectedDataIn > 0 {
-		req.BHS[1] |= iscsi.FlagR // read
+		req.BHS[1] |= iscsi.FlagR
 	}
-	if len(dataOut) > 0 {
-		req.BHS[1] |= iscsi.FlagW // write
+	if totalWrite > 0 {
+		req.BHS[1] |= iscsi.FlagW
 	}
-	req.SetLUN(0) // LUN 0
-	req.SetInitiatorTaskTag(c.itt)
+	req.SetLUN(0)
+	itt := c.itt
+	req.SetInitiatorTaskTag(itt)
 	c.itt++
-	req.SetExpectedDataTransferLength(uint32(len(dataOut) + expectedDataIn))
+	req.SetExpectedDataTransferLength(uint32(totalWrite + expectedDataIn))
 	req.SetCmdSN(c.cmdSN)
 	c.cmdSN++
 	req.SetExpStatSN(c.statSN + 1)
 	req.SetCDB(cdb)
-	if len(dataOut) > 0 {
-		req.DataSegment = dataOut
+	if len(immediate) > 0 {
+		req.DataSegment = immediate
 	}
 	if err := iscsi.WritePDU(c.conn, req); err != nil {
 		t.Fatalf("write scsi-cmd: %v", err)
 	}
 
-	// Read responses until we see something with status. In the
-	// minimal target:
-	//   - commands returning data: ONE Data-In with S-bit set
-	//   - commands without data: ONE SCSI-Response
+	// Read loop. For writes with solicited > 0 the target sends
+	// R2T(s) first; we respond with Data-Out, then the target
+	// emits SCSI-Response. For reads, Data-In(s) arrive until
+	// the one with S-bit.
 	var collected bytes.Buffer
+	solicitedOffset := len(immediate) // where in the logical write stream Data-Out starts
+	var dataSN uint32
 	for {
 		resp, err := iscsi.ReadPDU(c.conn)
 		if err != nil {
 			t.Fatalf("read scsi resp: %v", err)
 		}
 		switch resp.Opcode() {
+		case iscsi.OpR2T:
+			if len(solicited) == 0 {
+				t.Fatalf("unexpected R2T (no solicited data)")
+			}
+			offset := resp.BufferOffset()
+			desired := resp.DesiredDataLength()
+			if int(offset)-solicitedOffset < 0 || int(offset)+int(desired)-solicitedOffset > len(solicited) {
+				t.Fatalf("R2T range (offset=%d desired=%d) outside solicited payload [%d, %d)",
+					offset, desired, solicitedOffset, solicitedOffset+len(solicited))
+			}
+			start := int(offset) - solicitedOffset
+			chunk := solicited[start : start+int(desired)]
+
+			// Send a single Data-Out PDU covering the R2T window.
+			out := &iscsi.PDU{}
+			out.SetOpcode(iscsi.OpSCSIDataOut)
+			out.SetOpSpecific1(iscsi.FlagF) // final in this burst
+			out.SetLUN(0)
+			out.SetInitiatorTaskTag(itt)
+			out.SetTargetTransferTag(resp.TargetTransferTag())
+			out.SetDataSN(dataSN)
+			dataSN++
+			out.SetBufferOffset(offset)
+			out.SetExpStatSN(c.statSN + 1)
+			out.DataSegment = chunk
+			if err := iscsi.WritePDU(c.conn, out); err != nil {
+				t.Fatalf("write Data-Out: %v", err)
+			}
 		case iscsi.OpSCSIDataIn:
 			collected.Write(resp.DataSegment)
 			if resp.OpSpecific1()&iscsi.FlagS != 0 {

@@ -240,30 +240,142 @@ func (s *Session) handleTextReq(req *PDU) error {
 	return WritePDU(s.conn, resp)
 }
 
-// handleSCSICmd processes a SCSI-Cmd PDU. For T2 scope:
-//   - WRITE(10): dataOut MUST be carried in the SCSI-Cmd's
-//     data segment (ImmediateData=true in the minimal negotiator).
-//     A future checkpoint will add R2T + multi-PDU Data-Out for
-//     OS initiator compat.
-//   - READ(10): target returns Data-In PDU(s) followed by a
-//     SCSI-Response. For small (<=one-block) reads we pack both
-//     into one Data-In with the S-bit set.
-//   - Metadata (TUR, INQUIRY, READ CAPACITY, REPORT LUNS, etc):
-//     response data rides in Data-In if any; SCSI-Response
-//     carries the status.
+// handleSCSICmd processes a SCSI-Cmd PDU.
+//
+//   - WRITE (FlagW): dataOut may arrive in two places:
+//       1. Immediate data in the SCSI-Cmd's data segment (when
+//          ImmediateData=Yes was negotiated).
+//       2. Remaining bytes solicited via R2T + Data-Out PDUs
+//          (T2 ckpt 10 port — enables iscsiadm writes larger
+//          than FirstBurstLength).
+//     The full payload is dispatched to the SCSI handler once
+//     ExpectedDataTransferLength bytes are collected.
+//
+//   - READ (FlagR) / metadata: response data rides in one or
+//     more Data-In PDUs with the S-bit on the last. Small
+//     payloads fit in a single Data-In; large reads that exceed
+//     MaxRecvDataSegmentLength are split (MaxRecv defaults to
+//     256 KiB, bigger than T2 contract-smoke payloads).
 func (s *Session) handleSCSICmd(ctx context.Context, req *PDU) error {
+	edtl := req.ExpectedDataTransferLength()
+	isWrite := req.OpSpecific1()&FlagW != 0
+
+	var dataOut []byte
+	if isWrite && edtl > 0 {
+		collected, err := s.collectWriteData(req, edtl)
+		if err != nil {
+			return err
+		}
+		dataOut = collected
+	} else {
+		// Metadata or read: dataOut is just the inline segment
+		// (typically empty).
+		dataOut = req.DataSegment
+	}
+
 	cdb := req.CDB()
-	dataOut := req.DataSegment
 	result := s.handler.HandleCommand(ctx, cdb, dataOut)
 
-	// Pack response. For commands that return data (READ,
-	// INQUIRY, ...), emit one Data-In PDU carrying the full
-	// payload with S-bit set so the status is conveyed in the
-	// same PDU. No separate SCSI-Response is needed in that case.
 	if len(result.Data) > 0 {
 		return s.sendDataInWithStatus(req, result)
 	}
 	return s.sendSCSIResponse(req, result)
+}
+
+// collectWriteData assembles the write payload from immediate
+// data (carried in the SCSI-Cmd) + any Data-Out PDUs solicited
+// via R2T. Returns the full edtl-sized buffer on success.
+//
+// T2 scope: single R2T for all remaining bytes. V2 supports
+// MaxBurstLength-chunked multi-R2T; we'll port that chunking
+// only if an OS initiator actually exposes the need — per the
+// assignment §4.3 rule "port the smallest required R2T path".
+func (s *Session) collectWriteData(req *PDU, edtl uint32) ([]byte, error) {
+	buf := make([]byte, edtl)
+	var received uint32
+
+	// Immediate data from the SCSI-Cmd's data segment.
+	if n := uint32(len(req.DataSegment)); n > 0 {
+		if n > edtl {
+			return nil, fmt.Errorf("immediate data %d > EDTL %d", n, edtl)
+		}
+		copy(buf, req.DataSegment)
+		received = n
+	}
+	if received >= edtl {
+		return buf, nil
+	}
+
+	// Solicit the remainder with one R2T. TargetTransferTag is
+	// arbitrary per-target scope; 1 is fine while a session only
+	// has one outstanding write at a time (T2 minimal session).
+	const ttt uint32 = 1
+	r2t := &PDU{}
+	r2t.SetOpcode(OpR2T)
+	r2t.SetOpSpecific1(FlagF)
+	r2t.SetLUN(req.LUN())
+	r2t.SetInitiatorTaskTag(req.InitiatorTaskTag())
+	r2t.SetTargetTransferTag(ttt)
+	// StatSN on R2T is a snapshot of the current StatSN (no
+	// increment — R2T doesn't carry status).
+	r2t.SetStatSN(s.statSN)
+	r2t.SetExpCmdSN(req.CmdSN() + 1)
+	r2t.SetMaxCmdSN(req.CmdSN() + 32)
+	r2t.SetR2TSN(0)
+	r2t.SetBufferOffset(received)
+	r2t.SetDesiredDataLength(edtl - received)
+	if err := WritePDU(s.conn, r2t); err != nil {
+		return nil, fmt.Errorf("send R2T: %w", err)
+	}
+
+	// Read Data-Out PDU(s) until we have edtl bytes. V2 enforces
+	// DataSN + BufferOffset ordering (DataPDUInOrder /
+	// DataSequenceInOrder both default Yes); we do the same.
+	var nextDataSN uint32
+	for received < edtl {
+		pdu, err := ReadPDU(s.conn)
+		if err != nil {
+			return nil, fmt.Errorf("read Data-Out: %w", err)
+		}
+		if pdu.Opcode() != OpSCSIDataOut {
+			return nil, fmt.Errorf("expected Data-Out, got %s", OpcodeName(pdu.Opcode()))
+		}
+		if pdu.TargetTransferTag() != ttt && pdu.TargetTransferTag() != 0xFFFFFFFF {
+			// Initiators typically echo our TTT; 0xFFFFFFFF is
+			// also accepted for unsolicited Data-Out but we
+			// disable that via InitialR2T=Yes.
+			return nil, fmt.Errorf("Data-Out TTT=0x%08x does not match R2T TTT=0x%08x",
+				pdu.TargetTransferTag(), ttt)
+		}
+		if pdu.DataSN() != nextDataSN {
+			return nil, fmt.Errorf("Data-Out DataSN=%d, expected %d",
+				pdu.DataSN(), nextDataSN)
+		}
+		nextDataSN++
+
+		offset := pdu.BufferOffset()
+		if offset != received {
+			return nil, fmt.Errorf("Data-Out BufferOffset=%d does not match received=%d",
+				offset, received)
+		}
+		data := pdu.DataSegment
+		end := offset + uint32(len(data))
+		if end > edtl {
+			return nil, fmt.Errorf("Data-Out extends past EDTL: end=%d edtl=%d",
+				end, edtl)
+		}
+		copy(buf[offset:], data)
+		received = end
+
+		// F-bit on Data-Out marks the last PDU of the sequence.
+		// We accept it as a hint but trust received == edtl as
+		// the authoritative termination condition.
+		if pdu.OpSpecific1()&FlagF != 0 && received != edtl {
+			return nil, fmt.Errorf("Data-Out F-bit with received=%d < edtl=%d",
+				received, edtl)
+		}
+	}
+	return buf, nil
 }
 
 func (s *Session) sendDataInWithStatus(req *PDU, r SCSIResult) error {
