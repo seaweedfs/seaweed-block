@@ -1,0 +1,69 @@
+# T2 L2-A NVMe/TCP smoke scenario.
+#
+# Sign-prep for T2B-NVMe-product-ready. Scripted round-trip of
+# Write / Read operations against a real blockmaster + blockvolume
+# subprocess pair, driven by the Go replay harness in
+# t2_l2_nvme_smoke_replay_test.go.
+#
+# Payload semantics: each Write step constructs a deterministic
+# byte pattern from `seed` — byte[i] = byte((seed + i) & 0xFF).
+# The matching Read step asserts the returned bytes match the
+# expected seed pattern.
+#
+# SLBA / NLB are in 512-byte logical-block units (matches what
+# the target advertises via Identify Namespace LBADS=9).
+
+name: t2-nvme-smoke
+subsys_nqn: nqn.2026-04.example.v3:subsys
+description: >
+  NVMe/TCP L2 scripted smoke — connect to running volume, exercise
+  mixed-size Writes + Reads at distinct LBA ranges, confirm
+  read-back matches.
+
+steps:
+  # Single-LBA write (smallest possible NVMe IO)
+  - op: write
+    slba: 0
+    nlb: 1
+    seed: 11
+    note: 512-byte write at LBA 0
+  - op: read
+    slba: 0
+    nlb: 1
+    expect_seed: 11
+    note: read back 512 bytes
+
+  # 4 KiB write (common fs block)
+  - op: write
+    slba: 8
+    nlb: 8
+    seed: 22
+    note: 4 KiB write at LBA 8
+  - op: read
+    slba: 8
+    nlb: 8
+    expect_seed: 22
+
+  # 32 KiB write (MDTS boundary, kernel mkfs pattern)
+  - op: write
+    slba: 64
+    nlb: 64
+    seed: 33
+    note: 32 KiB MDTS-boundary write
+  - op: read
+    slba: 64
+    nlb: 64
+    expect_seed: 33
+
+  # Re-write and re-read overlapping region with different seed
+  # — pins that Writes actually overwrite (not append / dedupe).
+  - op: write
+    slba: 0
+    nlb: 1
+    seed: 44
+    note: overwrite LBA 0 with new seed
+  - op: read
+    slba: 0
+    nlb: 1
+    expect_seed: 44
+    note: read back must see overwrite
