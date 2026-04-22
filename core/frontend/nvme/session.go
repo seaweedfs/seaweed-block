@@ -34,6 +34,16 @@ type Session struct {
 	handler *IOHandler
 	logger  Logger
 
+	// expectedSubNQN is the subsystem NQN this session must
+	// match against the host's Fabric Connect ConnectData.
+	// Empty means "no enforcement" (in-process L1 tests that
+	// don't pin a subsystem identity); production always sets
+	// it via Target.SubsysNQN. When non-empty and the host's
+	// SubNQN doesn't match, Connect is rejected with
+	// SCT=CommandSpecific SC=ConnectInvalidParameters
+	// (NVMe-oF spec §3.3.1).
+	expectedSubNQN string
+
 	connected atomic.Bool // true after Fabric Connect
 	closed    atomic.Bool
 
@@ -48,13 +58,14 @@ type Logger interface {
 	Printf(format string, args ...interface{})
 }
 
-func newSession(conn net.Conn, h *IOHandler, lg Logger) *Session {
+func newSession(conn net.Conn, h *IOHandler, expectedSubNQN string, lg Logger) *Session {
 	return &Session{
-		conn:    conn,
-		r:       NewReader(conn),
-		w:       NewWriter(conn),
-		handler: h,
-		logger:  lg,
+		conn:           conn,
+		r:              NewReader(conn),
+		w:              NewWriter(conn),
+		handler:        h,
+		expectedSubNQN: expectedSubNQN,
+		logger:         lg,
 	}
 }
 
@@ -156,13 +167,26 @@ func (s *Session) handleFabric(cmd *CapsuleCommand, inline []byte) error {
 	if cmd.FCType != fcConnect {
 		return s.replyStatus(cmd, MakeStatusField(SCTGeneric, SCInvalidOpcode, true))
 	}
-	// Validate inline ConnectData length but accept any HostNQN /
-	// SubNQN — auth lands with T8.
 	if len(inline) < connectDataSize {
 		return s.replyStatus(cmd, MakeStatusField(SCTGeneric, SCInvalidField, true))
 	}
 	var cd ConnectData
 	cd.Unmarshal(inline[:connectDataSize])
+
+	// Subsystem identity check: when the target was configured
+	// with a SubsysNQN, Connect must name THAT subsystem. NVMe-oF
+	// §3.3.1 dedicated status code is "Connect Invalid Parameters"
+	// (Command Specific SC=0x80). Auth (HostNQN policy) is T8;
+	// this check is wire-level identity, not access control.
+	if s.expectedSubNQN != "" && cd.SubNQN != s.expectedSubNQN {
+		if s.logger != nil {
+			s.logger.Printf("nvme: Connect REJECTED host=%q wanted subsys=%q got=%q",
+				cd.HostNQN, s.expectedSubNQN, cd.SubNQN)
+		}
+		return s.replyStatus(cmd,
+			MakeStatusField(SCTCommandSpecific, SCConnectInvalidParameters, true))
+	}
+
 	s.connected.Store(true)
 	if s.logger != nil {
 		s.logger.Printf("nvme: Connect accepted host=%q subsys=%q", cd.HostNQN, cd.SubNQN)

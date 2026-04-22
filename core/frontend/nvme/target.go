@@ -146,7 +146,7 @@ func (t *Target) handleConn(conn net.Conn) {
 	hcfg.Backend = backend
 	handler := NewIOHandler(hcfg)
 
-	sess := newSession(conn, handler, t.logger)
+	sess := newSession(conn, handler, t.cfg.SubsysNQN, t.logger)
 	if err := sess.serve(ctx); err != nil && !errors.Is(err, net.ErrClosed) {
 		t.logger.Printf("nvme: session error (%s): %v", conn.RemoteAddr(), err)
 	}

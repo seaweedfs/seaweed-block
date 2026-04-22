@@ -32,6 +32,18 @@ const (
 	SCCapacityExceeded     uint8 = 0x81
 )
 
+// NVMe Status Codes within SCTCommandSpecific that are
+// load-bearing for Fabric Connect (NVMe-oF spec §3.3.1).
+// 0x80 (Connect Invalid Parameters) is the canonical code
+// when a Connect command names a SubNQN the target does not
+// host — distinct from auth (0x85) and from Invalid Host
+// (0x82) which is reserved for HostNQN policy rejection.
+const (
+	SCConnectInvalidParameters uint8 = 0x80
+	SCConnectControllerBusy    uint8 = 0x81
+	SCConnectInvalidHost       uint8 = 0x82
+)
+
 // NVMe Status Codes within SCTPathRelated. These are the
 // "ANA" (Asymmetric Namespace Access) family — the direct
 // semantic match for a V3 authority move: a path that was

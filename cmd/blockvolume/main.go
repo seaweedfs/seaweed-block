@@ -290,6 +290,7 @@ func run(f flags) int {
 			SubsysNQN: f.nvmeSubsysNQN,
 			VolumeID:  f.volumeID,
 			Provider:  prov,
+			Handler:   nvme.HandlerConfig{NSID: uint32(f.nvmeNS)},
 		})
 		nvmeAddr, err := nvmeTarget.Start()
 		if err != nil {
