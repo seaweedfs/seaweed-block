@@ -26,7 +26,22 @@ type testClient struct {
 	tsih   uint16
 }
 
+// loginOptions tunes the test client's login behavior. Defaults
+// produce a single-round Normal-session login with the canonical
+// test target name. Tests that need Discovery sessions or a
+// custom TargetName override fields.
+type loginOptions struct {
+	SessionType   string // "" → "Normal"
+	TargetName    string // "" → "iqn.2026-04.example.v3:v1"
+	InitiatorName string // "" → "iqn.2026-04.example.host:test"
+}
+
 func dialAndLogin(t *testing.T, addr string) *testClient {
+	t.Helper()
+	return dialAndLoginOpts(t, addr, loginOptions{})
+}
+
+func dialAndLoginOpts(t *testing.T, addr string, opts loginOptions) *testClient {
 	t.Helper()
 	conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
 	if err != nil {
@@ -35,18 +50,43 @@ func dialAndLogin(t *testing.T, addr string) *testClient {
 	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
 	c := &testClient{conn: conn, cmdSN: 0, itt: 1}
 
-	// Send a single-round login request that transits straight
-	// to FullFeature. CSG=LoginOp, NSG=FullFeature, Transit=1.
+	if opts.SessionType == "" {
+		opts.SessionType = iscsi.SessionTypeNormal
+	}
+	if opts.InitiatorName == "" {
+		opts.InitiatorName = "iqn.2026-04.example.host:test"
+	}
+	if opts.TargetName == "" && opts.SessionType == iscsi.SessionTypeNormal {
+		opts.TargetName = "iqn.2026-04.example.v3:v1"
+	}
+
+	// Single-round login: CSG=LoginOp, NSG=FullFeature, Transit=1.
+	// Carries InitiatorName/SessionType/TargetName + minimal
+	// operational params. The negotiator handles the direct
+	// LoginOp jump (V2-compatible behavior).
 	req := &iscsi.PDU{}
 	req.SetOpcode(iscsi.OpLoginReq)
 	req.SetImmediate(true)
 	req.SetLoginStages(iscsi.StageLoginOp, iscsi.StageFullFeature)
 	req.SetLoginTransit(true)
-	// ISID: a fixed test identity (6 bytes).
 	req.SetISID([6]byte{0x02, 0x3d, 0x00, 0x00, 0x00, 0x01})
 	req.SetInitiatorTaskTag(c.itt)
 	c.itt++
 	req.SetCmdSN(c.cmdSN)
+
+	params := iscsi.NewParams()
+	params.Set("InitiatorName", opts.InitiatorName)
+	params.Set("SessionType", opts.SessionType)
+	if opts.TargetName != "" {
+		params.Set("TargetName", opts.TargetName)
+	}
+	params.Set("HeaderDigest", "None")
+	params.Set("DataDigest", "None")
+	params.Set("MaxRecvDataSegmentLength", "262144")
+	params.Set("InitialR2T", "Yes")
+	params.Set("ImmediateData", "Yes")
+	req.DataSegment = params.Encode()
+
 	if err := iscsi.WritePDU(conn, req); err != nil {
 		t.Fatalf("write login: %v", err)
 	}

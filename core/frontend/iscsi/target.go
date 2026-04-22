@@ -26,10 +26,15 @@ type TargetConfig struct {
 	Listen string
 
 	// IQN is the iSCSI Qualified Name advertised to initiators.
-	// Currently informational — T2 minimal login does not parse
-	// TargetName from login params. Will be used when login
-	// negotiation expands.
+	// Used as the SendTargets discovery list entry AND as the
+	// expected TargetName during Normal-session login.
 	IQN string
+
+	// PortalAddr is what we advertise in SendTargets responses
+	// (defaults to the actual bound listen address). Operators
+	// override when listen is 0.0.0.0/[::] but clients need a
+	// routable IP. Format: "host:port,portal-group-tag".
+	PortalAddr string
 
 	// VolumeID is handed to Provider.Open.
 	VolumeID string
@@ -41,6 +46,10 @@ type TargetConfig struct {
 	// vendor/product strings). Optional — zero values get the
 	// T2 defaults from HandlerConfig.
 	Handler HandlerConfig
+
+	// Negotiation profile for login parameter exchange. Zero
+	// value = DefaultNegotiableConfig().
+	Negotiation NegotiableConfig
 
 	// Logger. Nil → log.Default wrapped for the session layer.
 	Logger *log.Logger
@@ -66,11 +75,40 @@ func NewTarget(cfg TargetConfig) *Target {
 	if lg == nil {
 		lg = log.Default()
 	}
+	if cfg.Negotiation == (NegotiableConfig{}) {
+		cfg.Negotiation = DefaultNegotiableConfig()
+	}
 	return &Target{
 		cfg:    cfg,
 		logger: stdlogAdapter{l: lg},
 		closed: make(chan struct{}),
 	}
+}
+
+// HasTarget satisfies TargetResolver: accepts the configured
+// IQN. Future multi-target support extends this to a registry.
+func (t *Target) HasTarget(name string) bool {
+	return t.cfg.IQN != "" && name == t.cfg.IQN
+}
+
+// ListTargets satisfies TargetLister for SendTargets discovery.
+// Single-target host: emit our one IQN with the bound listen
+// addr (or operator-supplied PortalAddr).
+func (t *Target) ListTargets() []DiscoveryTarget {
+	if t.cfg.IQN == "" {
+		return nil
+	}
+	addr := t.cfg.PortalAddr
+	if addr == "" {
+		t.mu.Lock()
+		if t.ln != nil {
+			// Default portal group tag = 1 (matches Negotiation
+			// default) so iscsiadm recognizes the entry.
+			addr = t.ln.Addr().String() + ",1"
+		}
+		t.mu.Unlock()
+	}
+	return []DiscoveryTarget{{Name: t.cfg.IQN, Address: addr}}
 }
 
 // Start binds and spawns the accept loop in a goroutine.
@@ -146,7 +184,9 @@ func (t *Target) handleConn(conn net.Conn) {
 	// Open a backend via the frontend.Provider. The Provider
 	// blocks until the projection is healthy or returns
 	// ErrNotReady. We pass our own ctx so target-shutdown
-	// cancels the wait.
+	// cancels the wait. Discovery sessions also call this so
+	// the frontend backend is ready by the time SCSI traffic
+	// could land — keeps the lifecycle uniform.
 	backend, err := t.cfg.Provider.Open(ctx, t.cfg.VolumeID)
 	if err != nil {
 		t.logger.Printf("iscsi: Provider.Open(%s): %v", t.cfg.VolumeID, err)
@@ -158,7 +198,7 @@ func (t *Target) handleConn(conn net.Conn) {
 	cfg.Backend = backend
 	handler := NewSCSIHandler(cfg)
 
-	sess := newSession(conn, handler, t.logger)
+	sess := newSession(conn, handler, t.cfg.Negotiation, t, t, t.logger)
 	if err := sess.serve(ctx); err != nil && !errors.Is(err, net.ErrClosed) {
 		t.logger.Printf("iscsi: session error (%s): %v", conn.RemoteAddr(), err)
 	}

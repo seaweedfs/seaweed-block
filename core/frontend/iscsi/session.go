@@ -45,6 +45,16 @@ type Session struct {
 	// StatSN advances per SCSI Response the target sends.
 	statSN uint32
 
+	// Negotiator drives multi-round login parameter exchange.
+	// negCfg + resolver + lister are injected by Target at
+	// construction so this layer stays unaware of the target's
+	// catalog. Discovery sessions don't reach the SCSI handler;
+	// they exit after the SendTargets exchange + Logout.
+	negCfg   NegotiableConfig
+	resolver TargetResolver
+	lister   TargetLister
+	negResult LoginResult
+
 	// Session lifetime.
 	closed atomic.Bool
 }
@@ -57,12 +67,18 @@ type Logger interface {
 }
 
 // newSession builds a fresh session for the accepted conn.
-func newSession(conn net.Conn, handler *SCSIHandler, logger Logger) *Session {
+// negCfg/resolver/lister come from the Target. handler may be
+// nil for Discovery-only sessions; the negotiator decides which
+// path applies after login.
+func newSession(conn net.Conn, handler *SCSIHandler, negCfg NegotiableConfig, resolver TargetResolver, lister TargetLister, logger Logger) *Session {
 	return &Session{
-		conn:    conn,
-		handler: handler,
-		logger:  logger,
-		state:   SessionLogin,
+		conn:     conn,
+		handler:  handler,
+		logger:   logger,
+		state:    SessionLogin,
+		negCfg:   negCfg,
+		resolver: resolver,
+		lister:   lister,
 	}
 }
 
@@ -78,6 +94,7 @@ func (s *Session) serve(ctx context.Context) error {
 }
 
 func (s *Session) loginPhase() error {
+	neg := NewLoginNegotiator(s.negCfg)
 	for s.state == SessionLogin {
 		pdu, err := ReadPDU(s.conn)
 		if err != nil {
@@ -87,14 +104,22 @@ func (s *Session) loginPhase() error {
 			return fmt.Errorf("%w: expected Login-Request, got %s",
 				ErrLoginInvalidRequest, OpcodeName(pdu.Opcode()))
 		}
-		resp := buildLoginResponse(pdu, s.tsih)
+		resp := neg.HandleLoginPDU(pdu, s.resolver)
 		if err := WritePDU(s.conn, resp); err != nil {
 			return err
 		}
-		if loginGrantsFullFeature(pdu) {
+		// If negotiator emitted a reject, the response status is
+		// non-Success; close the session after the reply.
+		if resp.LoginStatusClass() != LoginStatusSuccess {
+			return fmt.Errorf("login rejected: class=0x%02x detail=0x%02x",
+				resp.LoginStatusClass(), resp.LoginStatusDetail())
+		}
+		if neg.Done() {
 			s.state = SessionFullFeature
+			s.negResult = neg.Result()
 			if s.logger != nil {
-				s.logger.Printf("session: transit to FullFeature (ISID=%x)", pdu.ISID())
+				s.logger.Printf("session: FullFeature initiator=%q target=%q type=%q",
+					s.negResult.InitiatorName, s.negResult.TargetName, s.negResult.SessionType)
 			}
 			return nil
 		}
@@ -121,13 +146,23 @@ func (s *Session) fullFeatureLoop(ctx context.Context) error {
 func (s *Session) dispatch(ctx context.Context, pdu *PDU) error {
 	switch pdu.Opcode() {
 	case OpSCSICmd:
+		// Discovery sessions reject SCSI commands per RFC 7143
+		// §6.2 — discovery is a control plane only. Reply with
+		// Reject so iscsiadm doesn't hang.
+		if s.negResult.SessionType == SessionTypeDiscovery {
+			return fmt.Errorf("SCSI command in Discovery session")
+		}
+		if s.handler == nil {
+			return fmt.Errorf("SCSI handler not configured for this session")
+		}
 		return s.handleSCSICmd(ctx, pdu)
 	case OpSCSIDataOut:
 		// In the minimal session, SCSI-Cmd carries immediate data
 		// for all writes (see handleSCSICmd). A stray Data-Out
-		// without a preceding R2T is a protocol error; reject
-		// rather than silently discard.
+		// without a preceding R2T is a protocol error.
 		return fmt.Errorf("unexpected Data-Out without R2T")
+	case OpTextReq:
+		return s.handleTextReq(pdu)
 	case OpLogoutReq:
 		return s.handleLogout(pdu)
 	case OpNOPOut:
@@ -135,6 +170,25 @@ func (s *Session) dispatch(ctx context.Context, pdu *PDU) error {
 	default:
 		return fmt.Errorf("unsupported opcode in FFP: %s", OpcodeName(pdu.Opcode()))
 	}
+}
+
+// handleTextReq services SendTargets discovery (RFC 7143 §12.3).
+// Other text keys produce an empty Text-Response. Discovery
+// sessions are the typical caller; Normal sessions are also
+// allowed to issue Text Requests but T2's response set is the
+// same.
+func (s *Session) handleTextReq(req *PDU) error {
+	var targets []DiscoveryTarget
+	if s.lister != nil {
+		targets = s.lister.ListTargets()
+	}
+	resp := HandleTextRequest(req, targets)
+	// Text-Response advances StatSN like a SCSI-Response would.
+	s.statSN++
+	resp.SetStatSN(s.statSN)
+	resp.SetExpCmdSN(req.CmdSN() + 1)
+	resp.SetMaxCmdSN(req.CmdSN() + 32)
+	return WritePDU(s.conn, resp)
 }
 
 // handleSCSICmd processes a SCSI-Cmd PDU. For T2 scope:
