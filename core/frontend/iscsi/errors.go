@@ -37,14 +37,16 @@ const (
 	ASCNotReady            uint8 = 0x04
 	ASCNotReadyManualIntv  uint8 = 0x03
 
-	// Stale primary: we choose "NOT READY / CAUSE NOT REPORTABLE"
-	// (0x04/0x00) with a distinct sense key so initiators treat
-	// the stale-lineage window as a transient not-ready rather
-	// than a persistent hardware fault. The exact ASC is an
-	// implementation choice per sketch §6 ("deterministic
-	// mapping"); this file is the single source of truth.
-	ASCStaleLineage     uint8 = 0x04
-	ASCQStaleLineage    uint8 = 0x00
+	// Stale primary: 0x04 / 0x0A = "LOGICAL UNIT NOT READY,
+	// ASYMMETRIC ACCESS STATE TRANSITION" (SPC-5 Annex F). This
+	// ASC/ASCQ pair matches the semantics of a lineage move —
+	// the path is temporarily unavailable because authority has
+	// transitioned. Distinct from ASCNotReady (0x04/0x00) so
+	// operators can tell "stale lineage" and "closed/not-ready"
+	// apart in logs. This is the single source of truth for
+	// the mapping (sketch §6 "deterministic mapping").
+	ASCStaleLineage  uint8 = 0x04
+	ASCQStaleLineage uint8 = 0x0A
 )
 
 // SCSIError is the concrete error type returned up the protocol
