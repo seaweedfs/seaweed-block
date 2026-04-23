@@ -125,11 +125,28 @@ func (e *BlockExecutor) Ship(replicaID string, lineage RecoveryLineage, lba uint
 	return nil
 }
 
+// RegisterLiveShipSession registers a session for steady-state live
+// shipping. The session is registered without a conn — Ship will
+// lazy-dial replicaAddr on first call. This is the V3 "steady-state
+// attach" lifecycle entry point; recovery commands use StartCatchUp
+// / StartRebuild instead.
+//
+// Called by: ReplicaPeer constructor (core/replication, T4a-3).
+// Owns: the new activeSession entry in the executor's sessions map.
+// Borrows: lineage — caller retains. Caller is responsible for a
+// matching InvalidateSession on peer teardown.
+func (e *BlockExecutor) RegisterLiveShipSession(lineage RecoveryLineage) error {
+	if _, err := e.registerSession(lineage); err != nil {
+		return err
+	}
+	return nil
+}
+
 // attachShipSession registers a session + attaches the given conn for
 // Ship dispatch. Test-only helper — production code registers sessions
-// via the normal lifecycle (StartCatchUp / StartRebuild / future
-// steady-state attach) and relies on Ship's lazy dial for the
-// conn-attach step.
+// via the normal lifecycle (RegisterLiveShipSession / StartCatchUp /
+// StartRebuild) and relies on Ship's lazy dial for the conn-attach
+// step.
 func (e *BlockExecutor) attachShipSession(lineage RecoveryLineage, conn net.Conn) error {
 	sess, err := e.registerSession(lineage)
 	if err != nil {
