@@ -12,24 +12,45 @@ import (
 // Matches V2 WALShipper.Ship (wal_shipper.go:240) verbatim.
 const shipWriteDeadline = 3 * time.Second
 
+// shipDialTimeout bounds the lazy-dial window inside Ship when an
+// already-registered session has no attached conn yet. Matches V2
+// WALShipper.ensureDataConn (wal_shipper.go:636) verbatim.
+const shipDialTimeout = 3 * time.Second
+
 // Ship sends one WAL entry live to the named replica over the session's
 // attached data connection. Fire-and-forget: no per-entry ack at this
 // layer — durability closure is T4b concern (Barrier / sync_all).
 //
-// The session for lineage.SessionID must already be registered and have
-// an attached conn (via StartCatchUp / StartRebuild / future steady-state
-// attach). Ship does NOT lazy-dial — by design, per v3-phase-15-t4a-2-
-// g1-v2-read.md §6.1: V3 lifts dial responsibility to the peer layer
-// (ReplicaPeer.ShipEntry), preserving V2's transparent-reconnect property
-// via "degrade + catch-up" at the caller, not inside Ship.
+// Session contract: the session for lineage.SessionID MUST already be
+// registered (e.g., from a prior Probe / StartCatchUp / StartRebuild /
+// future steady-state attach). Ship does NOT auto-register from the
+// incoming lineage — doing so would weaken the accepted-lineage model
+// that the epoch fence depends on. If the session exists but has no
+// attached conn yet, Ship lazy-dials e.replicaAddr and attaches. This
+// preserves the V2 transport-muscle lazy-dial seam (wal_shipper.go:632
+// ensureDataConn) at the V3 V2-faithful location (§0-B Stability-
+// Locality rule).
+//
+// On dial or write failure, Ship returns error. The peer layer
+// (ReplicaPeer.ShipEntry, T4a-3) translates the error to peer-state
+// Degraded + Invalidate(reason). This is the architect-revised seam:
+// V3 BlockExecutor does not own ReplicaState, so V2's silent
+// return-nil-after-markDegraded cannot be literal-ported without a
+// concrete executor→peer failure callback — error return is the
+// correct V3-layering substitute (see v3-phase-15-t4a-2-g1-v2-read.md
+// §6 architect review).
 //
 // Called by: ReplicaPeer.ShipEntry (T4a-3) on behalf of
 // ReplicationVolume.OnLocalWrite fan-out.
-// Owns: per-write deadline on the session's conn; nothing persistent.
+// Owns: per-write deadline on the session's conn; lazy dial + attach
+// of the session's data conn when missing.
 // Borrows: session (by SessionID lookup); data slice — caller retains,
 // Ship does not mutate and does not retain past return.
 //
 // Invariants preserved from V2 WALShipper.Ship:
+//   - Lazy dial on missing conn (wal_shipper.go:632-643): same trigger,
+//     same 3s DialTimeout; attach-under-mu races resolved by "first
+//     winner keeps" semantics.
 //   - Epoch-== silent drop (L1 §2.1 invariant #2, wal_shipper.go:217-221):
 //     entries whose lineage.Epoch does not match the session's accepted
 //     epoch return nil without writing anything to the wire.
@@ -56,9 +77,35 @@ func (e *BlockExecutor) Ship(replicaID string, lineage RecoveryLineage, lba uint
 	conn := session.conn
 	e.mu.Unlock()
 
+	// Lazy dial if the registered session has no conn attached yet.
+	// Done outside e.mu so a slow dial doesn't wedge other sessions.
 	if conn == nil {
-		return fmt.Errorf("transport: ship: session %d for replica=%s has no attached conn",
-			lineage.SessionID, replicaID)
+		dialed, err := net.DialTimeout("tcp", e.replicaAddr, shipDialTimeout)
+		if err != nil {
+			return fmt.Errorf("transport: ship: dial replica=%s sessionID=%d: %w",
+				replicaID, lineage.SessionID, err)
+		}
+		// Re-acquire lock to attach. Handle three races:
+		//   1. Session invalidated between release+reacquire → drop our conn.
+		//   2. Another Ship already dialed and attached → use theirs, drop ours.
+		//   3. We win → install our conn.
+		e.mu.Lock()
+		current, stillActive := e.sessions[lineage.SessionID]
+		switch {
+		case !stillActive || current != session:
+			e.mu.Unlock()
+			_ = dialed.Close()
+			return fmt.Errorf("transport: ship: session %d invalidated during dial",
+				lineage.SessionID)
+		case session.conn != nil:
+			conn = session.conn
+			e.mu.Unlock()
+			_ = dialed.Close()
+		default:
+			session.conn = dialed
+			conn = dialed
+			e.mu.Unlock()
+		}
 	}
 
 	payload := EncodeShipEntry(ShipEntry{
@@ -79,13 +126,10 @@ func (e *BlockExecutor) Ship(replicaID string, lineage RecoveryLineage, lba uint
 }
 
 // attachShipSession registers a session + attaches the given conn for
-// Ship dispatch. Exposed only to tests and to ReplicaPeer (T4a-3) via
-// the executor's session lifecycle. Kept unexported; higher layers call
-// StartCatchUp/StartRebuild or (future) a dedicated steady-state attach
-// method to establish sessions.
-//
-// This helper lets tests drive Ship without going through StartCatchUp
-// (which runs a streaming catch-up that's not what we want to test).
+// Ship dispatch. Test-only helper — production code registers sessions
+// via the normal lifecycle (StartCatchUp / StartRebuild / future
+// steady-state attach) and relies on Ship's lazy dial for the
+// conn-attach step.
 func (e *BlockExecutor) attachShipSession(lineage RecoveryLineage, conn net.Conn) error {
 	sess, err := e.registerSession(lineage)
 	if err != nil {
@@ -95,4 +139,12 @@ func (e *BlockExecutor) attachShipSession(lineage RecoveryLineage, conn net.Conn
 		return err
 	}
 	return nil
+}
+
+// registerShipSessionForTest is a test-only helper that registers a
+// session WITHOUT attaching any conn. Lets tests exercise Ship's
+// lazy-dial path against a registered session whose conn is nil.
+func (e *BlockExecutor) registerShipSessionForTest(lineage RecoveryLineage) error {
+	_, err := e.registerSession(lineage)
+	return err
 }

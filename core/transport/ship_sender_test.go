@@ -132,8 +132,10 @@ func TestExecutor_Ship_ConnFailure(t *testing.T) {
 }
 
 // TestExecutor_Ship_NoSession — Ship against an unknown sessionID returns
-// error without panicking. Exercises the pre-registration contract
-// documented in ship_sender.go godoc.
+// error without panicking. Exercises the pre-registration contract:
+// Ship does NOT auto-register from incoming lineage (architect-revised
+// G-1, Change 1) because the accepted-lineage model is what grounds
+// the epoch fence.
 func TestExecutor_Ship_NoSession(t *testing.T) {
 	primary := storage.NewBlockStore(64, 4096)
 	exec := NewBlockExecutor(primary, "127.0.0.1:0")
@@ -145,6 +147,127 @@ func TestExecutor_Ship_NoSession(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "no session") {
 		t.Fatalf("expected 'no session' error, got: %v", err)
+	}
+}
+
+// TestExecutor_Ship_LazyDial_OnRegisteredSessionWithoutConn — architect-
+// revised Option B regression: when the session is registered but has
+// no attached conn, Ship lazy-dials replicaAddr, attaches, and sends.
+// Preserves V2 ensureDataConn semantic (wal_shipper.go:632) at the
+// V2-faithful V3 location.
+func TestExecutor_Ship_LazyDial_OnRegisteredSessionWithoutConn(t *testing.T) {
+	_, replica, listener := setupPrimaryReplica(t)
+	primary := storage.NewBlockStore(64, 4096)
+	exec := NewBlockExecutor(primary, listener.Addr())
+
+	lineage := shipTestLineage()
+	if err := exec.registerShipSessionForTest(lineage); err != nil {
+		t.Fatalf("registerShipSessionForTest: %v", err)
+	}
+	// Close whatever conn Ship lazy-dials so the replica listener's
+	// handleConn goroutine can exit — listener.Stop() waits on it.
+	t.Cleanup(func() {
+		exec.mu.Lock()
+		if s := exec.sessions[lineage.SessionID]; s != nil && s.conn != nil {
+			_ = s.conn.Close()
+		}
+		exec.mu.Unlock()
+	})
+
+	// Verify no conn attached before first Ship.
+	exec.mu.Lock()
+	if exec.sessions[lineage.SessionID].conn != nil {
+		exec.mu.Unlock()
+		t.Fatal("precondition violated: conn already attached")
+	}
+	exec.mu.Unlock()
+
+	data := make([]byte, 4096)
+	data[0], data[1] = 0xBA, 0xBE
+	if err := exec.Ship("r1", lineage, 2, 1, data); err != nil {
+		t.Fatalf("Ship lazy-dial: %v", err)
+	}
+
+	// Post-Ship: conn must be attached to the session.
+	exec.mu.Lock()
+	attached := exec.sessions[lineage.SessionID].conn != nil
+	exec.mu.Unlock()
+	if !attached {
+		t.Fatal("lazy-dial did not attach conn to session")
+	}
+
+	// Data must arrive on replica.
+	deadline := time.Now().Add(2 * time.Second)
+	var got []byte
+	for time.Now().Before(deadline) {
+		got, _ = replica.Read(2)
+		if got != nil && got[0] == 0xBA {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got == nil || got[0] != 0xBA || got[1] != 0xBE {
+		t.Fatalf("replica LBA 2 did not receive lazy-dialed ship: got [%02x %02x]",
+			got[0], got[1])
+	}
+
+	// Second Ship must reuse the already-attached conn (no re-dial).
+	exec.mu.Lock()
+	connAfterFirst := exec.sessions[lineage.SessionID].conn
+	exec.mu.Unlock()
+
+	data2 := make([]byte, 4096)
+	data2[0] = 0xEF
+	if err := exec.Ship("r1", lineage, 3, 2, data2); err != nil {
+		t.Fatalf("Ship 2: %v", err)
+	}
+	exec.mu.Lock()
+	connAfterSecond := exec.sessions[lineage.SessionID].conn
+	exec.mu.Unlock()
+	if connAfterFirst != connAfterSecond {
+		t.Fatal("second Ship re-dialed instead of reusing attached conn")
+	}
+}
+
+// TestExecutor_Ship_LazyDial_DialFailure_ReturnsError — architect-revised
+// Change 2: dial failure returns error (not V2's silent return-nil),
+// because V3 BlockExecutor does not own peer state. Peer layer
+// (ReplicaPeer.ShipEntry, T4a-3) will translate the error to Degraded
+// + Invalidate.
+func TestExecutor_Ship_LazyDial_DialFailure_ReturnsError(t *testing.T) {
+	// Reserve a port then release it → guaranteed unreachable.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadAddr := ln.Addr().String()
+	_ = ln.Close()
+
+	primary := storage.NewBlockStore(64, 4096)
+	exec := NewBlockExecutor(primary, deadAddr)
+
+	lineage := shipTestLineage()
+	if err := exec.registerShipSessionForTest(lineage); err != nil {
+		t.Fatal(err)
+	}
+
+	data := make([]byte, 4096)
+	err = exec.Ship("r1", lineage, 0, 1, data)
+	if err == nil {
+		t.Fatal("expected dial-failure error, got nil")
+	}
+	if !strings.Contains(err.Error(), "dial") {
+		t.Fatalf("expected 'dial' error, got: %v", err)
+	}
+
+	// Session must remain registered but without a conn so a future
+	// dial can succeed once replicaAddr becomes reachable again.
+	exec.mu.Lock()
+	sess, ok := exec.sessions[lineage.SessionID]
+	stillNoConn := ok && sess != nil && sess.conn == nil
+	exec.mu.Unlock()
+	if !stillNoConn {
+		t.Fatal("dial failure should leave session registered with no conn")
 	}
 }
 
