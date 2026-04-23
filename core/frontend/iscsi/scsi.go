@@ -190,9 +190,22 @@ func (h *SCSIHandler) HandleCommand(ctx context.Context, cdb [16]byte, dataOut [
 		return h.read10(ctx, cdb)
 	case ScsiWrite10:
 		return h.write10(ctx, cdb, dataOut)
-	// Batch 10.5: SYNC_CACHE(10/16) — memback non-durable, no-op
-	// Good. T3 owns real flush behavior when durable backend lands.
+	// T3b wire: SYNCHRONIZE_CACHE(10) / (16) dispatches to
+	// Backend.Sync(ctx). Durable backends flush the WAL; memback
+	// Sync is a no-op (returns nil). Errors propagate to
+	// MEDIUM_ERROR (SPC-5 §7.26) rather than swallowed — stop
+	// rule §3.6 (error-faithful Sync wire) makes data-integrity
+	// hazards visible to the host.
 	case ScsiSyncCache10, ScsiSyncCache16:
+		if err := h.backend.Sync(ctx); err != nil {
+			return SCSIResult{
+				Status:   StatusCheckCondition,
+				SenseKey: SenseMediumError,
+				ASC:      ASCWriteError,
+				ASCQ:     0x00,
+				Reason:   fmt.Sprintf("SYNC_CACHE: backend sync: %v", err),
+			}
+		}
 		return SCSIResult{Status: StatusGood}
 	// Batch 10.5: 16-byte data variants (64-bit LBA).
 	case ScsiRead16:

@@ -434,6 +434,16 @@ func (s *Session) dispatchIO(ctx context.Context, req *Request) {
 	case ioWrite:
 		s.handleWrite(ctx, req)
 	case ioFlush:
+		// T3b wire: dispatch to IOHandler.Handle which calls
+		// Backend.Sync(ctx) — error propagates to CapsuleResp
+		// status instead of silent Success.
+		res := s.handler.Handle(ctx, IOCommand{
+			Opcode: req.capsule.OpCode,
+			NSID:   req.capsule.NSID,
+		})
+		if res.AsError() != nil {
+			req.resp.Status = MakeStatusField(res.SCT, res.SC, true)
+		}
 		s.enqueueResponse(&response{resp: req.resp})
 	default:
 		req.resp.Status = MakeStatusField(SCTGeneric, SCInvalidOpcode, true)

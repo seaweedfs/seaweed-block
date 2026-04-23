@@ -16,6 +16,8 @@ import (
 	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/adapter"
+	"github.com/seaweedfs/seaweed-block/core/frontend"
+	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
 	"github.com/seaweedfs/seaweed-block/core/frontend/iscsi"
 	"github.com/seaweedfs/seaweed-block/core/frontend/memback"
 	"github.com/seaweedfs/seaweed-block/core/frontend/nvme"
@@ -59,6 +61,16 @@ type flags struct {
 	nvmeListen   string
 	nvmeSubsysNQN string
 	nvmeNS       uint
+
+	// T3b durable-backend flags. When --durable-root is set, the
+	// iSCSI and NVMe providers use DurableProvider instead of
+	// memback. --durable-impl selects walstore or smartwal
+	// (default smartwal per PM direction). --durable-blocks +
+	// --durable-blocksize are used on first-time storage create.
+	durableRoot      string
+	durableImpl      string // "smartwal" | "walstore"
+	durableBlocks    uint
+	durableBlockSize uint
 }
 
 func parseFlags(args []string) (flags, error) {
@@ -80,6 +92,10 @@ func parseFlags(args []string) (flags, error) {
 	fs.StringVar(&f.nvmeListen, "nvme-listen", "", "NVMe/TCP target bind address (e.g. 127.0.0.1:0); empty disables. Loopback-only in T2 scope (no auth)")
 	fs.StringVar(&f.nvmeSubsysNQN, "nvme-subsysnqn", "", "NVMe subsystem NQN (required if --nvme-listen is set)")
 	fs.UintVar(&f.nvmeNS, "nvme-ns", 1, "NVMe namespace id (default 1)")
+	fs.StringVar(&f.durableRoot, "durable-root", "", "directory for persistent storage files; empty = memback (non-durable)")
+	fs.StringVar(&f.durableImpl, "durable-impl", "smartwal", "LogicalStorage impl: smartwal (default) or walstore; ignored unless --durable-root is set")
+	fs.UintVar(&f.durableBlocks, "durable-blocks", 2048, "number of blocks per volume on first create (ignored when opening existing)")
+	fs.UintVar(&f.durableBlockSize, "durable-blocksize", 4096, "block size in bytes on first create")
 	fs.SetOutput(os.Stderr)
 	if err := fs.Parse(args); err != nil {
 		return flags{}, err
@@ -251,12 +267,71 @@ func run(f flags) int {
 		}()
 	}
 
-	var iscsiTarget *iscsi.Target
-	if f.iscsiListen != "" {
-		// memback provider wraps the volume's AdapterProjectionView
+	// T3b: pick Provider per --durable-root flag. When the flag is
+	// unset, fall back to memback (non-durable, legacy behavior).
+	// When set, DurableProvider opens (or creates) on-disk storage
+	// per --durable-impl and runs Recovery before the frontends
+	// accept connections.
+	var provider frontend.Provider
+	var durableProv *durable.DurableProvider
+	if f.durableRoot != "" {
+		cfg := durable.ProviderConfig{
+			Impl:        durable.ImplName(f.durableImpl),
+			StorageRoot: f.durableRoot,
+			BlockSize:   int(f.durableBlockSize),
+			NumBlocks:   uint32(f.durableBlocks),
+		}
+		dp, err := durable.NewDurableProvider(cfg, h.ProjectionView())
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "blockvolume: durable provider:", err)
+			if status != nil {
+				shutCtx, shutCancel := context.WithTimeout(context.Background(), 2*time.Second)
+				_ = status.Close(shutCtx)
+				shutCancel()
+			}
+			_ = h.Close()
+			return 1
+		}
+		durableProv = dp
+		provider = dp
+		// Eagerly open + recover the served volume so the
+		// frontend-side Open returns an operational=true backend.
+		// Opens the underlying storage + runs LogicalStorage.Recover;
+		// on error we surface to stderr + /status but don't panic.
+		openCtx, openCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		if _, err := dp.Open(openCtx, f.volumeID); err != nil {
+			openCancel()
+			fmt.Fprintln(os.Stderr, "blockvolume: durable open:", err)
+			_ = dp.Close()
+			if status != nil {
+				shutCtx, shutCancel := context.WithTimeout(context.Background(), 2*time.Second)
+				_ = status.Close(shutCtx)
+				shutCancel()
+			}
+			_ = h.Close()
+			return 1
+		}
+		report, err := dp.RecoverVolume(openCtx, f.volumeID)
+		openCancel()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "blockvolume: durable recovery failed:", report.Evidence)
+			// Keep running so /status can surface NotReady — the
+			// adapter is already flipped to non-operational with
+			// evidence; frontends will reject I/O per INV-DURABLE-
+			// OPGATE-001 read-side path.
+		} else {
+			fmt.Fprintln(os.Stderr, "blockvolume: durable recovered:", report.Evidence)
+		}
+	} else {
+		// memback fallback — wraps the volume's AdapterProjectionView
 		// so per-op lineage fence + supersede fence still apply at
 		// SCSI command granularity.
-		prov := memback.NewProvider(h.ProjectionView())
+		provider = memback.NewProvider(h.ProjectionView())
+	}
+
+	var iscsiTarget *iscsi.Target
+	if f.iscsiListen != "" {
+		prov := provider
 		iscsiTarget = iscsi.NewTarget(iscsi.TargetConfig{
 			Listen:   f.iscsiListen,
 			IQN:      f.iscsiIQN,
@@ -284,7 +359,7 @@ func run(f flags) int {
 
 	var nvmeTarget *nvme.Target
 	if f.nvmeListen != "" {
-		prov := memback.NewProvider(h.ProjectionView())
+		prov := provider
 		nvmeTarget = nvme.NewTarget(nvme.TargetConfig{
 			Listen:    f.nvmeListen,
 			SubsysNQN: f.nvmeSubsysNQN,
@@ -323,6 +398,12 @@ func run(f flags) int {
 	}
 	if iscsiTarget != nil {
 		_ = iscsiTarget.Close()
+	}
+	// T3b: close DurableProvider in correct order — Provider.Close
+	// closes backends first (flags them closed) then storage files
+	// (releases fd + final fsync).
+	if durableProv != nil {
+		_ = durableProv.Close()
 	}
 	if status != nil {
 		shutCtx, shutCancel := context.WithTimeout(context.Background(), 2*time.Second)

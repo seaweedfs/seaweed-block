@@ -36,6 +36,9 @@ const (
 	ASCLBAOutOfRange       uint8 = 0x21
 	ASCNotReady            uint8 = 0x04
 	ASCNotReadyManualIntv  uint8 = 0x03
+	// ASCWriteError — T3b: SYNC_CACHE backend-sync failure maps
+	// here per SPC-5 §D.2.14 ("WRITE ERROR" 0x0C/00).
+	ASCWriteError uint8 = 0x0C
 
 	// Stale primary: 0x04 / 0x0A = "LOGICAL UNIT NOT READY,
 	// ASYMMETRIC ACCESS STATE TRANSITION" (SPC-5 Annex F). This

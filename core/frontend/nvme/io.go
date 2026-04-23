@@ -161,8 +161,14 @@ func (h *IOHandler) Handle(ctx context.Context, cmd IOCommand) IOResult {
 	case ioWrite:
 		return h.write(ctx, cmd)
 	case ioFlush:
-		// No backend-level flush yet — Success is safe because
-		// the T2 memback backend is not a write-back cache.
+		// T3b wire: dispatch to Backend.Sync. Durable backends
+		// flush the WAL; memback Sync is a no-op (returns nil).
+		// Errors propagate as InternalError (NVMe 1.4 §4.5; SCT=0
+		// SC=0x06) — stop rule §3.6 (error-faithful) forbids
+		// swallowing to Success.
+		if err := h.backend.Sync(ctx); err != nil {
+			return mapBackendError(err, "flush")
+		}
 		return IOResult{SCT: SCTGeneric, SC: SCSuccess}
 	default:
 		return IOResult{
