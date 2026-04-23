@@ -125,6 +125,22 @@ func (e *BlockExecutor) Ship(replicaID string, lineage RecoveryLineage, lba uint
 	return nil
 }
 
+// HasSession reports whether a session with the given SessionID is
+// currently registered on the executor. Diagnostic / test accessor —
+// used by core/replication tests to assert session lifecycle (e.g.,
+// that a peer's Close invalidates its session). Not intended for
+// production flow-control.
+//
+// Called by: core/replication tests (Opt-3 executor-teardown fence).
+// Owns: read-only snapshot under e.mu.
+// Borrows: nothing.
+func (e *BlockExecutor) HasSession(sessionID uint64) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	_, ok := e.sessions[sessionID]
+	return ok
+}
+
 // RegisterLiveShipSession registers a session for steady-state live
 // shipping. The session is registered without a conn — Ship will
 // lazy-dial replicaAddr on first call. This is the V3 "steady-state
