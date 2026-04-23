@@ -70,6 +70,11 @@ func (c *countingFaultBackend) Write(ctx context.Context, offset int64, p []byte
 	return c.inner.Write(ctx, offset, p)
 }
 
+func (c *countingFaultBackend) Sync(ctx context.Context) error { return c.inner.Sync(ctx) }
+func (c *countingFaultBackend) SetOperational(ok bool, evidence string) {
+	c.inner.SetOperational(ok, evidence)
+}
+
 // newFaultyTargetClient builds a Target fronted by a
 // countingFaultBackend with `failN` initial write failures queued.
 func newFaultyTargetClient(t *testing.T, failN int32) (*countingFaultBackend, *nvmeClient) {

@@ -49,6 +49,10 @@ type WriteCall struct {
 	Data   []byte // defensive copy; safe to read after the call
 }
 
+// SyncCall records one Sync call. Kept separate so tests can
+// assert "Sync fired N times" without re-synthesizing from Write.
+type SyncCall struct{}
+
 // RecordingBackend is a frontend.Backend that stores every
 // Read/Write call plus bytes written at each offset. Used by L0
 // tests that assert "the protocol target routed N reads/writes
@@ -57,18 +61,25 @@ type WriteCall struct {
 // Holds an in-memory byte slab (like memback) so Read can
 // return the most-recent bytes written at that offset.
 type RecordingBackend struct {
-	mu        sync.Mutex
-	id        frontend.Identity
-	closed    bool
-	reads     []ReadCall
-	writes    []WriteCall
-	data      []byte
+	mu     sync.Mutex
+	id     frontend.Identity
+	closed bool
+	reads  []ReadCall
+	writes []WriteCall
+	syncs  []SyncCall
+	data   []byte
+
+	// T3a operational-gate state. Default true — recording backend
+	// is a test double with no readiness lifecycle; tests that want
+	// to exercise ErrNotReady call SetOperational(false, _).
+	operational bool
+	opEvidence  string
 }
 
 // NewRecordingBackend constructs a fresh recording backend at
 // the given identity.
 func NewRecordingBackend(id frontend.Identity) *RecordingBackend {
-	return &RecordingBackend{id: id}
+	return &RecordingBackend{id: id, operational: true}
 }
 
 func (r *RecordingBackend) Identity() frontend.Identity { return r.id }
@@ -86,6 +97,9 @@ func (r *RecordingBackend) Read(_ context.Context, offset int64, p []byte) (int,
 	if r.closed {
 		return 0, frontend.ErrBackendClosed
 	}
+	if !r.operational {
+		return 0, frontend.ErrNotReady
+	}
 	r.reads = append(r.reads, ReadCall{Offset: offset, Length: len(p)})
 	if offset < 0 || offset >= int64(len(r.data)) {
 		return 0, nil
@@ -98,6 +112,9 @@ func (r *RecordingBackend) Write(_ context.Context, offset int64, p []byte) (int
 	defer r.mu.Unlock()
 	if r.closed {
 		return 0, frontend.ErrBackendClosed
+	}
+	if !r.operational {
+		return 0, frontend.ErrNotReady
 	}
 	cp := make([]byte, len(p))
 	copy(cp, p)
@@ -141,6 +158,36 @@ func (r *RecordingBackend) ReadAt(i int) ReadCall {
 	return r.reads[i]
 }
 
+// Sync records one sync call; returns nil (no on-disk state).
+// Subject to closed/operational gates.
+func (r *RecordingBackend) Sync(_ context.Context) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed {
+		return frontend.ErrBackendClosed
+	}
+	if !r.operational {
+		return frontend.ErrNotReady
+	}
+	r.syncs = append(r.syncs, SyncCall{})
+	return nil
+}
+
+// SyncCount returns the number of Sync calls.
+func (r *RecordingBackend) SyncCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.syncs)
+}
+
+// SetOperational flips the readiness gate. See frontend.Backend godoc.
+func (r *RecordingBackend) SetOperational(ok bool, evidence string) {
+	r.mu.Lock()
+	r.operational = ok
+	r.opEvidence = evidence
+	r.mu.Unlock()
+}
+
 // ---------- StaleRejectingBackend: every op returns ErrStalePrimary. ----------
 
 // StaleRejectingBackend is a frontend.Backend whose Read and
@@ -182,6 +229,15 @@ func (s *StaleRejectingBackend) Read(_ context.Context, _ int64, _ []byte) (int,
 func (s *StaleRejectingBackend) Write(_ context.Context, _ int64, _ []byte) (int, error) {
 	return 0, frontend.ErrStalePrimary
 }
+
+// Sync matches Read/Write — always stale.
+func (s *StaleRejectingBackend) Sync(_ context.Context) error {
+	return frontend.ErrStalePrimary
+}
+
+// SetOperational is a no-op — this backend is defined by its
+// error shape, not a readiness gate.
+func (s *StaleRejectingBackend) SetOperational(_ bool, _ string) {}
 
 // Compile-time checks so type drift shows up early.
 var (

@@ -52,6 +52,10 @@ func (b *countingBackend) Write(ctx context.Context, off int64, p []byte) (int, 
 	b.writes.Add(1)
 	return b.inner.Write(ctx, off, p)
 }
+func (b *countingBackend) Sync(ctx context.Context) error { return b.inner.Sync(ctx) }
+func (b *countingBackend) SetOperational(ok bool, evidence string) {
+	b.inner.SetOperational(ok, evidence)
+}
 func (b *countingBackend) WriteCallCount() int32 { return b.writes.Load() }
 
 // Architect finding #1 (memory-amplification / protocol

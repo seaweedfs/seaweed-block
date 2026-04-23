@@ -45,6 +45,12 @@ type writeCountingBackend struct {
 
 func (b *writeCountingBackend) Identity() frontend.Identity { return b.inner.Identity() }
 func (b *writeCountingBackend) Close() error                { return b.inner.Close() }
+func (b *writeCountingBackend) Sync(ctx context.Context) error {
+	return b.inner.Sync(ctx)
+}
+func (b *writeCountingBackend) SetOperational(ok bool, evidence string) {
+	b.inner.SetOperational(ok, evidence)
+}
 func (b *writeCountingBackend) Read(ctx context.Context, off int64, p []byte) (int, error) {
 	return b.inner.Read(ctx, off, p)
 }

@@ -3,6 +3,7 @@ package memback
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend"
 )
@@ -62,10 +63,20 @@ type backend struct {
 
 	mu     sync.Mutex
 	closed bool
+
+	// T3a operational gate. memback opens operational=true because
+	// it's ambient in-memory storage with no readiness lifecycle.
+	// Host/provider code using memback can still flip via
+	// SetOperational for tests that want to exercise ErrNotReady.
+	operational atomic.Bool
+	opEvidence  atomic.Value // string
 }
 
 func newBackend(view frontend.ProjectionView, id frontend.Identity, store *volumeStore) *backend {
-	return &backend{view: view, id: id, store: store}
+	b := &backend{view: view, id: id, store: store}
+	b.operational.Store(true)
+	b.opEvidence.Store("")
+	return b
 }
 
 func (b *backend) Identity() frontend.Identity { return b.id }
@@ -91,6 +102,18 @@ func (b *backend) Write(_ context.Context, offset int64, p []byte) (int, error) 
 	return b.store.write(offset, p)
 }
 
+// Sync is a no-op for memback (no on-disk state). Still subject
+// to the guard so closed/stale backends can't drive a sync.
+func (b *backend) Sync(_ context.Context) error {
+	return b.guard()
+}
+
+// SetOperational flips the readiness gate. See Backend godoc.
+func (b *backend) SetOperational(ok bool, evidence string) {
+	b.opEvidence.Store(evidence)
+	b.operational.Store(ok)
+}
+
 // guard enforces the two per-operation preconditions:
 //   - Backend has not been closed.
 //   - Every identity field still matches the current projection
@@ -102,6 +125,9 @@ func (b *backend) guard() error {
 	b.mu.Unlock()
 	if closed {
 		return frontend.ErrBackendClosed
+	}
+	if !b.operational.Load() {
+		return frontend.ErrNotReady
 	}
 	proj := b.view.Projection()
 	if !proj.Healthy ||

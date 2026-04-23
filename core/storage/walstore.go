@@ -97,8 +97,10 @@ func CreateWALStore(path string, numBlocks uint32, blockSize int) (*WALStore, er
 
 	volumeBytes := uint64(numBlocks) * uint64(blockSize)
 	sb, err := newSuperblock(volumeBytes, createOptions{
-		BlockSize:  uint32(blockSize),
-		ExtentSize: uint32(blockSize), // one block per extent slot keeps math trivial
+		BlockSize:   uint32(blockSize),
+		ExtentSize:  uint32(blockSize), // one block per extent slot keeps math trivial
+		ImplKind:    ImplKindWALStore,
+		ImplVersion: WALStoreImplVersion,
 	})
 	if err != nil {
 		_ = f.Close()

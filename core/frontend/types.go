@@ -48,9 +48,25 @@ type ProjectionView interface {
 }
 
 // Backend is a per-lineage handle for one open frontend session.
+//
+// T3a extends the interface with two methods (all existing
+// implementations gain trivial impls in the same commit):
+//
+//   - Sync: frontends emit this on SYNCHRONIZE CACHE / Flush.
+//     For durable backends it calls LogicalStorage.Sync; for
+//     in-memory backends it is a no-op returning nil.
+//
+//   - SetOperational: lifecycle gate controlled by the host /
+//     provider. Before SetOperational(true, _) is called, every
+//     I/O MUST return ErrNotReady (see INV-DURABLE-OPGATE-001).
+//     This is local-readiness only — SetOperational does NOT
+//     touch identity/lineage/epoch; authority publication stays
+//     on the master path (PCDD-STUFFING-001).
 type Backend interface {
 	Read(ctx context.Context, offset int64, p []byte) (int, error)
 	Write(ctx context.Context, offset int64, p []byte) (int, error)
+	Sync(ctx context.Context) error
+	SetOperational(ok bool, evidence string)
 	Identity() Identity
 	Close() error
 }
