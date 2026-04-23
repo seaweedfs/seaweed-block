@@ -24,6 +24,7 @@ SMB_STAGE_REMOTE="${SMB_STAGE_REMOTE:-/mnt/smb/work/share/t2-sanity/seaweed_bloc
 REMOTE_BUILD_DIR="${REMOTE_BUILD_DIR:-/tmp/t2m01_sb}"
 REMOTE_RUN_DIR="${REMOTE_RUN_DIR:-/tmp/t2m01}"
 SUBSYS_NQN="${SUBSYS_NQN:-nqn.2026-04.m01:v1-r1}"
+DURABLE_IMPL="${DURABLE_IMPL:-smartwal}"  # smartwal | walstore
 MATRIX_A_CYCLES="${MATRIX_A_CYCLES:-10}"
 MATRIX_B_ITERATIONS="${MATRIX_B_ITERATIONS:-50}"
 ARTIFACT_DIR="${ARTIFACT_DIR:-${SRC_DIR%/*}/seaweedfs/sw-block/design/bugs/001-artifacts}"
@@ -63,7 +64,7 @@ sudo umount /mnt/t2nvme 2>/dev/null || true
 sudo nvme disconnect -n '${SUBSYS_NQN}' 2>/dev/null || true
 ' >/dev/null 2>&1 || true
     $SSH "
-rm -rf ${REMOTE_RUN_DIR}/store ${REMOTE_RUN_DIR}/v1-s* && mkdir -p ${REMOTE_RUN_DIR}/logs
+rm -rf ${REMOTE_RUN_DIR}/store ${REMOTE_RUN_DIR}/v1-s* ${REMOTE_RUN_DIR}/durable && mkdir -p ${REMOTE_RUN_DIR}/logs ${REMOTE_RUN_DIR}/durable/s1 ${REMOTE_RUN_DIR}/durable/s2 ${REMOTE_RUN_DIR}/durable/s3
 nohup /tmp/blockmaster --authority-store ${REMOTE_RUN_DIR}/store --listen 127.0.0.1:9180 \
     --topology ${REMOTE_RUN_DIR}/topology.yaml --t0-print-ready \
     > ${REMOTE_RUN_DIR}/logs/master.log 2>&1 </dev/null & disown
@@ -74,6 +75,7 @@ for S in 1 2 3; do
         --ctrl-addr 127.0.0.1:921\${S} --data-addr 127.0.0.1:922\${S} \
         --nvme-listen 127.0.0.1:442\${S} --nvme-subsysnqn nqn.2026-04.m01:v1-r\${S} \
         --nvme-ns 1 --t0-print-ready --t1-readiness \
+        --durable-root ${REMOTE_RUN_DIR}/durable/s\${S} --durable-impl ${DURABLE_IMPL} \
         > ${REMOTE_RUN_DIR}/logs/v\${S}.log 2>&1 </dev/null & disown
 done
 sleep 8
@@ -164,14 +166,96 @@ done
 
 log "  Matrix B all sizes PASS"
 
+# --- Matrix C — small-file burst (group_commit batching coverage) ---
+#
+# V2 group_commit coalesced many small writers; T3 durable path
+# needs the same under real kernel fs. 1000 small files in an
+# ext4 fs + explicit sync stresses the batching path that unit
+# tests can't fully exercise.
+
+log "Matrix C — small-file burst (stress group_commit batching)"
+$SSH "
+set -e
+sudo nvme connect -t tcp -a 127.0.0.1 -s 4421 -n ${SUBSYS_NQN} >/dev/null 2>&1
+sleep 1
+DEV=\$(sudo nvme list | awk '/SeaweedFS/ {print \$1; exit}')
+# 8 MiB volume → mkfs with inode ratio tuned for many small files.
+# -N 2000: pre-allocate 2000 inodes (enough for 500+ file burst)
+# -b 1024: keep small block size so directory entries fit
+sudo mkfs.ext4 -F -b 1024 -I 128 -N 2000 \${DEV} >/dev/null 2>&1
+sudo mkdir -p /mnt/t2nvme
+sudo mount \${DEV} /mnt/t2nvme
+# Target 500 small files — plenty to stress group_commit batching
+# without hitting fs-level quota. Don't silently break on ENOSPC;
+# report the actual count at the end.
+target=500
+written=0
+for i in \$(seq 1 \${target}); do
+    if echo \"small-\$i\" | sudo tee /mnt/t2nvme/f\$i >/dev/null 2>&1; then
+        written=\$((written + 1))
+    fi
+done
+sudo sync
+count=\$(ls /mnt/t2nvme 2>/dev/null | wc -l)
+echo \"small-file burst: target=\${target} written=\${written} fs-count=\${count}\"
+# Require at least 300 files actually landed; if under, fs quota is
+# the bottleneck not group_commit — either way flag for review.
+if [ \${written} -lt 300 ]; then
+    echo \"ERROR: only \${written} of \${target} files written; group_commit stress not adequately exercised\"
+    exit 1
+fi
+sudo umount /mnt/t2nvme
+sudo nvme disconnect -n ${SUBSYS_NQN} >/dev/null 2>&1
+" || die "Matrix C small-file burst failed"
+check_dmesg_clean "matrix-c-small-file"
+log "  Matrix C PASS"
+
+# --- Matrix D — cross-session consistency (remount durability) ---
+#
+# Write pattern → umount → remount → verify pattern still present.
+# Exercises superblock/WAL replay across a clean umount boundary
+# (distinct from crash-recovery: here the umount is clean, so if
+# data is missing it's a durability-path bug not a recovery-path bug).
+
+log "Matrix D — cross-session consistency (5 remount cycles)"
+$SSH "
+set -e
+sudo nvme connect -t tcp -a 127.0.0.1 -s 4421 -n ${SUBSYS_NQN} >/dev/null 2>&1
+sleep 1
+DEV=\$(sudo nvme list | awk '/SeaweedFS/ {print \$1; exit}')
+sudo mkfs.ext4 -F -b 1024 -I 128 -N 16 \${DEV} >/dev/null 2>&1
+sudo mkdir -p /mnt/t2nvme
+for cycle in \$(seq 1 5); do
+    sudo mount \${DEV} /mnt/t2nvme
+    echo \"cycle-\$cycle-marker-\$(date +%s)\" | sudo tee /mnt/t2nvme/cycle.txt >/dev/null
+    expected=\$(sudo cat /mnt/t2nvme/cycle.txt)
+    sudo sync
+    sudo umount /mnt/t2nvme
+
+    sudo mount \${DEV} /mnt/t2nvme
+    got=\$(sudo cat /mnt/t2nvme/cycle.txt 2>/dev/null || echo MISSING)
+    sudo umount /mnt/t2nvme
+
+    if [ \"\$got\" != \"\$expected\" ]; then
+        echo \"cross-session cycle \$cycle: got '\$got' want '\$expected'\"
+        exit 1
+    fi
+done
+sudo nvme disconnect -n ${SUBSYS_NQN} >/dev/null 2>&1
+" || die "Matrix D cross-session consistency failed"
+check_dmesg_clean "matrix-d-cross-session"
+log "  Matrix D all 5 cycles PASS"
+
 # --- Phase 4: cleanup + summary ---
 
 collect_diagnostics "pass"
 stop_services
 
-log "ALL MATRICES GREEN"
+log "ALL MATRICES GREEN (impl=${DURABLE_IMPL})"
 log "  Matrix A: ${MATRIX_A_CYCLES} cycles"
 log "  Matrix B: 32K/256K/1M size coverage"
+log "  Matrix C: small-file burst (group_commit batching)"
+log "  Matrix D: cross-session consistency (5 remount cycles)"
 log "  Artifacts: ${ARTIFACT_DIR}/m01-{dmesg,v1}-pass.*"
 log ""
 log "Post to BUG-001 §12 log + closure report §A.3 batch 11c row."

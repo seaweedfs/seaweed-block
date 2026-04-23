@@ -82,8 +82,10 @@ shared `logicalStorageFactories()` helper (Addendum A #1 matrix).
   workloads land post-G4.
 - No cross-node / network / kernel overhead — that's the m01 fio
   run scheduled for post-sign verification.
-- The `_TBD_` placeholder numbers are not a gap in T3c delivery;
-  they're a shape commitment that later measurement fills.
+- First-light numbers above captured 2026-04-22 on sw dev
+  Windows 11 loopback. m01 fio run scheduled post-sign is the
+  production-representative measurement; dev-loopback numbers
+  are the internal baseline only.
 
 ---
 
