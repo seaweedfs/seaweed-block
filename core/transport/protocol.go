@@ -1,8 +1,13 @@
 // Package transport provides minimal TCP block replication for the sparrow.
 // Three operations: Ship (WAL entry), Probe (handshake with R/S/H), Rebuild (full base copy).
 //
-// Wire format is intentionally simple — no framing library needed.
-// Each message: [1B type][4B length][payload...]
+// Wire format — V3 clean-break replication envelope (12 bytes):
+//
+//	[4B magic "SWRP"][1B version][1B type][1B flags][1B reserved][4B length][payload]
+//
+// Magic + version let replicas refuse foreign / incompatible traffic at the
+// first byte. Flags and reserved are zero in V1 and carved out for future
+// protocol extensions without reshuffling the preamble.
 package transport
 
 import (
@@ -10,6 +15,22 @@ import (
 	"fmt"
 	"io"
 	"net"
+)
+
+// Envelope preamble (V3 T4a-1 clean-break layout).
+//
+// MagicV3Repl is ASCII "SWRP" (SeaWeed Replication Protocol). Present on every
+// frame. Replicas reject frames whose first 4 bytes do not match.
+//
+// ProtocolVersion = 1 is V1 of the V3 replication envelope. Unknown versions
+// are rejected — there is no silent fallback. Future versions may change
+// flags/reserved semantics or payload encoding.
+//
+// preambleLen is the fixed preamble byte count (4+1+1+1+1+4 = 12).
+const (
+	MagicV3Repl     uint32 = 0x53575250 // "SWRP"
+	ProtocolVersion byte   = 1
+	preambleLen            = 12
 )
 
 // Message types
@@ -53,10 +74,18 @@ type ProbeResponse struct {
 // --- Wire helpers ---
 
 // WriteMsg sends a typed message on the connection.
+//
+// Wire preamble (12 bytes): [4B magic "SWRP"][1B version][1B type]
+// [1B flags=0][1B reserved=0][4B length][payload...].
+// Flags and reserved are always 0 in V1; future versions may define bits.
 func WriteMsg(conn net.Conn, msgType byte, payload []byte) error {
-	header := make([]byte, 5)
-	header[0] = msgType
-	binary.BigEndian.PutUint32(header[1:5], uint32(len(payload)))
+	header := make([]byte, preambleLen)
+	binary.BigEndian.PutUint32(header[0:4], MagicV3Repl)
+	header[4] = ProtocolVersion
+	header[5] = msgType
+	header[6] = 0 // flags
+	header[7] = 0 // reserved
+	binary.BigEndian.PutUint32(header[8:12], uint32(len(payload)))
 	if _, err := conn.Write(header); err != nil {
 		return err
 	}
@@ -72,14 +101,26 @@ func WriteMsg(conn net.Conn, msgType byte, payload []byte) error {
 // Prevents memory exhaustion from malicious or buggy senders.
 const MaxPayloadSize = 16 * 1024 * 1024 // 16MB
 
-// ReadMsg reads a typed message from the connection.
+// ReadMsg reads a typed message from the connection. Validates magic + version
+// before accepting the frame; mismatches are rejected with a descriptive error
+// so the caller can close the conn rather than attempt to recover.
 func ReadMsg(conn net.Conn) (msgType byte, payload []byte, err error) {
-	header := make([]byte, 5)
+	header := make([]byte, preambleLen)
 	if _, err := io.ReadFull(conn, header); err != nil {
 		return 0, nil, err
 	}
-	msgType = header[0]
-	length := binary.BigEndian.Uint32(header[1:5])
+	magic := binary.BigEndian.Uint32(header[0:4])
+	if magic != MagicV3Repl {
+		return 0, nil, fmt.Errorf("transport: bad magic: 0x%08x (want 0x%08x)", magic, MagicV3Repl)
+	}
+	version := header[4]
+	if version != ProtocolVersion {
+		return 0, nil, fmt.Errorf("transport: unsupported version: %d (want %d)", version, ProtocolVersion)
+	}
+	msgType = header[5]
+	// header[6] (flags) and header[7] (reserved) are ignored in V1; reserved
+	// for forward-compatible extension.
+	length := binary.BigEndian.Uint32(header[8:12])
 	if length > MaxPayloadSize {
 		return 0, nil, fmt.Errorf("transport: payload too large: %d > %d", length, MaxPayloadSize)
 	}
