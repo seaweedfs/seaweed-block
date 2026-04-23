@@ -189,6 +189,17 @@ func (s *services) SubscribeAssignments(req *control.SubscribeRequest, stream co
 				DataAddr:        info.DataAddr,
 				CtrlAddr:        info.CtrlAddr,
 			}
+			// T4a-5 P-refined: populate the peer set from publisher
+			// LastPublished queries for every non-self replica slot in
+			// this volume's topology. peer_set_generation is derived
+			// from the authoritative line's (Epoch, EndpointVersion)
+			// so it is monotonic across process lifetimes (the
+			// publisher's lex-dedupe upstream guarantees strictly-
+			// increasing (Epoch, EV) pairs within the stream, and the
+			// same ordering is preserved across master restarts
+			// because Epoch/EV are durable authority facts).
+			fact.Peers = s.collectPeers(req.VolumeId, info.ReplicaID)
+			fact.PeerSetGeneration = (info.Epoch << 32) | uint64(uint32(info.EndpointVersion))
 			if err := stream.Send(fact); err != nil {
 				return err
 			}
@@ -262,6 +273,46 @@ func validateHeartbeat(r *control.HeartbeatReport) error {
 		}
 	}
 	return nil
+}
+
+// collectPeers builds the AssignmentFact.peers list for a volume
+// from the publisher's most-recent authoritative lines. Only
+// replicas OTHER than self_replica are included — the primary
+// does not ship to itself. Slots with no published line yet are
+// skipped (they'll appear in later emissions once their line
+// lands; cold-start is therefore benign, not erroneous).
+//
+// This is the T4a-5 peer-set construction site. It is strictly
+// a READ of publisher state — no caching, no derivation, no
+// local accumulation (option R rejected in T4a-5.0 discovery
+// doc §9.5). Peer membership comes from accepted topology
+// (replicaSlotsFor) and per-peer line content comes from the
+// publisher's durable LastPublished state — both are
+// master-authoritative.
+func (s *services) collectPeers(volumeID, selfReplicaID string) []*control.ReplicaDescriptor {
+	slots := s.host.replicaSlotsFor(volumeID)
+	if len(slots) == 0 {
+		return nil
+	}
+	pub := s.host.boot.Publisher
+	peers := make([]*control.ReplicaDescriptor, 0, len(slots))
+	for _, rid := range slots {
+		if rid == selfReplicaID {
+			continue
+		}
+		info, ok := pub.LastPublished(volumeID, rid)
+		if !ok {
+			continue
+		}
+		peers = append(peers, &control.ReplicaDescriptor{
+			ReplicaId:       info.ReplicaID,
+			Epoch:           info.Epoch,
+			EndpointVersion: info.EndpointVersion,
+			DataAddr:        info.DataAddr,
+			CtrlAddr:        info.CtrlAddr,
+		})
+	}
+	return peers
 }
 
 // heartbeatFromWire is the wire -> authority-layer translator.

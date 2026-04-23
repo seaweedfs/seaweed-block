@@ -25,6 +25,7 @@ package volume
 
 import (
 	"github.com/seaweedfs/seaweed-block/core/adapter"
+	"github.com/seaweedfs/seaweed-block/core/replication"
 	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
 )
 
@@ -47,4 +48,38 @@ func decodeAssignmentFact(f *control.AssignmentFact) adapter.AssignmentInfo {
 		DataAddr:        f.DataAddr,
 		CtrlAddr:        f.CtrlAddr,
 	}
+}
+
+// decodeReplicaTargets is the T4a-5 peer-set decode path. Parallel
+// to decodeAssignmentFact but produces replication.ReplicaTarget
+// values + the monotonic peer_set_generation — NOT adapter.Assignment
+// Info. This preserves the T0 boundary (decodeAssignmentFact
+// remains the sole AssignmentInfo constructor; AST fence
+// TestNoOtherAssignmentInfoConstruction continues to pass) while
+// unlocking primary-side replication fan-out via
+// ReplicationVolume.UpdateReplicaSet(generation, targets).
+//
+// Field-copy only, same discipline as decodeAssignmentFact: no
+// derivation, no accumulation, no cache — the peer-set authority
+// is master-minted (T4a-5.0 discovery §9.1 guardrail #3).
+//
+// Master-side contract (v3-phase-15-t4a-5-0-host-callback-discovery
+// doc §9.1): f.Peers already excludes the self-replica; no
+// further filter is needed here. Callers feed the returned
+// targets slice + generation directly into UpdateReplicaSet.
+func decodeReplicaTargets(f *control.AssignmentFact) ([]replication.ReplicaTarget, uint64) {
+	if len(f.Peers) == 0 {
+		return nil, f.PeerSetGeneration
+	}
+	out := make([]replication.ReplicaTarget, 0, len(f.Peers))
+	for _, p := range f.Peers {
+		out = append(out, replication.ReplicaTarget{
+			ReplicaID:       p.ReplicaId,
+			DataAddr:        p.DataAddr,
+			ControlAddr:     p.CtrlAddr,
+			Epoch:           p.Epoch,
+			EndpointVersion: p.EndpointVersion,
+		})
+	}
+	return out, f.PeerSetGeneration
 }

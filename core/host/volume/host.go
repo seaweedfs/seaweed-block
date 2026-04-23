@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/adapter"
+	"github.com/seaweedfs/seaweed-block/core/replication"
 	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -56,6 +57,19 @@ type Config struct {
 	// sketch §11.L2 requires. Off by default (so T0 tests keep
 	// their documented non-healthy projection).
 	EnableT1Readiness bool
+
+	// ReplicationVolume, when non-nil, receives peer-set updates on
+	// every self-replica AssignmentFact. The Host calls
+	// UpdateReplicaSet(peer_set_generation, targets) AFTER
+	// adapter.OnAssignment so identity ingestion and replication
+	// ingestion progress together but do not cross the decode
+	// boundary (peers are decoded via subscribe.go:decodeReplicaTargets,
+	// not via decodeAssignmentFact).
+	//
+	// Nil means "no replication fan-out" (T0 observer-only hosts,
+	// bootstrap before ReplicationVolume is ready). T4a-5 production
+	// wiring sets this to the per-volume ReplicationVolume.
+	ReplicationVolume *replication.ReplicationVolume
 }
 
 // Host is the composed volume-side block product daemon.
@@ -374,6 +388,18 @@ func (h *Host) streamOnce(ctx context.Context) error {
 		// SOLE permitted decode path. See subscribe.go.
 		info := decodeAssignmentFact(fact)
 		h.adpt.OnAssignment(info)
+		// T4a-5: peer-set routing. Decoded via the separate host-only
+		// decodeReplicaTargets path (not through AssignmentInfo), so
+		// the TestNoOtherAssignmentInfoConstruction AST fence stays
+		// green. If ReplicationVolume is nil (T0/observer-only
+		// config), the peer set is ignored on this host.
+		if h.cfg.ReplicationVolume != nil {
+			targets, gen := decodeReplicaTargets(fact)
+			if err := h.cfg.ReplicationVolume.UpdateReplicaSet(gen, targets); err != nil {
+				h.log.Printf("blockvolume: volume %s replication UpdateReplicaSet failed (gen=%d, peers=%d): %v",
+					h.cfg.VolumeID, gen, len(targets), err)
+			}
+		}
 		if h.cfg.ReadyMarker != nil && info.Epoch > 0 && h.readyOnce.CompareAndSwap(false, true) {
 			select {
 			case h.cfg.ReadyMarker <- info:

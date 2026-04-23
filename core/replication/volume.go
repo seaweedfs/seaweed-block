@@ -4,7 +4,10 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"sort"
+	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/seaweedfs/seaweed-block/core/storage"
 	"github.com/seaweedfs/seaweed-block/core/transport"
@@ -35,9 +38,16 @@ type ReplicationVolume struct {
 	store    storage.LogicalStorage // borrowed, NEVER closed by us
 	newExec  executorFactory        // test seam; default dials real TCP
 
-	mu     sync.Mutex // serializes UpdateReplicaSet + OnLocalWrite entry AND fan-out
-	peers  map[string]*ReplicaPeer
-	closed bool
+	mu                    sync.Mutex // serializes UpdateReplicaSet + OnLocalWrite entry AND fan-out
+	peers                 map[string]*ReplicaPeer
+	closed                bool
+	lastAppliedGeneration uint64 // monotonic guard; 0 means "no generation applied yet"
+
+	// replayedGens counts UpdateReplicaSet calls dropped as stale
+	// (generation > 0 && generation <= lastAppliedGeneration). Exposed
+	// only to same-package tests for now; a public Stats() or
+	// Prometheus hook is a T4-end observability pass.
+	replayedGens atomic.Uint64
 }
 
 // executorFactory lets tests inject a BlockExecutor constructor that
@@ -72,18 +82,53 @@ func NewReplicationVolume(volumeID string, store storage.LogicalStorage) *Replic
 // lineage update on existing peers is a T4c refinement when recovery
 // sessions thread through.
 //
+// Generation rule (T4a-5.0 decision §9.4):
+//   - generation == 0: unversioned apply. Peer map IS mutated, but
+//     lastAppliedGeneration is NOT advanced. Intended for test /
+//     fake-master use only; production master MUST emit >= 1.
+//   - generation > 0 && generation > lastAppliedGeneration: apply
+//     + advance lastAppliedGeneration.
+//   - generation > 0 && generation <= lastAppliedGeneration: stale
+//     replay. Peer map NOT mutated; replayedGens counter increments;
+//     debug log emits a peer-ID-set delta diff for forensics. Returns
+//     nil (idempotent replay is success, not error — consistent with
+//     Ship's epoch-== silent-drop pattern).
+//
+// The empty-peer-set case (targets == [] with any generation) flows
+// through the same teardown path as N → M-1 removal, just iterated to
+// completion. No special branch. Standalone / RF=1 / operator-drained
+// volumes are legal authoritative state.
+//
 // Called by: Host authority-callback path (T4a-5), on every
 // assignment event that carries a replica-set delta.
 // Owns: peers map mutations under v.mu; *ReplicaPeer lifecycle (New
 // on add, Close on remove / lineage bump); the per-peer BlockExecutor
-// created via newExec.
+// created via newExec; the lastAppliedGeneration monotonic guard.
 // Borrows: targets slice — caller retains; we read-only copy the
 // fields we need.
-func (v *ReplicationVolume) UpdateReplicaSet(targets []ReplicaTarget) error {
+func (v *ReplicationVolume) UpdateReplicaSet(generation uint64, targets []ReplicaTarget) error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	if v.closed {
 		return fmt.Errorf("replication: UpdateReplicaSet: volume %s closed", v.volumeID)
+	}
+
+	// Generation guard (T4a-5.0 §9.4 three-way rule).
+	if generation > 0 && generation <= v.lastAppliedGeneration {
+		v.replayedGens.Add(1)
+		// Log peer-ID-set delta for forensics (Q2 binding — IDs only,
+		// not full target structs). `had` is the current in-memory
+		// peer ID set; `got` is the incoming set. Equal sets are the
+		// normal replay case; unequal sets indicate a master-side
+		// oddity worth a grep.
+		had := peerIDSet(v.peers)
+		got := targetIDSet(targets)
+		if !stringSetEqual(had, got) {
+			log.Printf("replication: volume %s stale-gen replay (gen=%d, lastApplied=%d) with differing peers — had=%s got=%s",
+				v.volumeID, generation, v.lastAppliedGeneration,
+				formatIDSet(had), formatIDSet(got))
+		}
+		return nil
 	}
 
 	want := make(map[string]ReplicaTarget, len(targets))
@@ -94,7 +139,8 @@ func (v *ReplicationVolume) UpdateReplicaSet(targets []ReplicaTarget) error {
 		want[t.ReplicaID] = t
 	}
 
-	// Remove peers no longer in the authoritative set.
+	// Remove peers no longer in the authoritative set. Same teardown
+	// path is used for N → 0 (empty targets) — no special branch.
 	for id, peer := range v.peers {
 		if _, keep := want[id]; !keep {
 			_ = peer.Close()
@@ -120,7 +166,59 @@ func (v *ReplicationVolume) UpdateReplicaSet(targets []ReplicaTarget) error {
 		}
 		v.peers[id] = peer
 	}
+
+	// Advance the monotonic guard only for real (non-zero) generations.
+	if generation > 0 {
+		v.lastAppliedGeneration = generation
+	}
 	return nil
+}
+
+// peerIDSet extracts the set of peer IDs from the current peers map.
+// Caller must hold v.mu.
+func peerIDSet(peers map[string]*ReplicaPeer) map[string]struct{} {
+	out := make(map[string]struct{}, len(peers))
+	for id := range peers {
+		out[id] = struct{}{}
+	}
+	return out
+}
+
+// targetIDSet extracts the set of replica IDs from an incoming targets
+// slice.
+func targetIDSet(targets []ReplicaTarget) map[string]struct{} {
+	out := make(map[string]struct{}, len(targets))
+	for _, t := range targets {
+		out[t.ReplicaID] = struct{}{}
+	}
+	return out
+}
+
+// stringSetEqual compares two string sets.
+func stringSetEqual(a, b map[string]struct{}) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k := range a {
+		if _, ok := b[k]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// formatIDSet renders a string set in deterministic brace form for
+// diff logs: {id1,id2} with IDs sorted ascending. Empty → {}.
+func formatIDSet(s map[string]struct{}) string {
+	if len(s) == 0 {
+		return "{}"
+	}
+	ids := make([]string, 0, len(s))
+	for id := range s {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return "{" + strings.Join(ids, ",") + "}"
 }
 
 // OnLocalWrite fans out one acked local write to every tracked peer.

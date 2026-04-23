@@ -63,7 +63,7 @@ func TestReplicationVolume_UpdateReplicaSet_AddPeer(t *testing.T) {
 	if v.PeerCount() != 0 {
 		t.Fatalf("precondition: PeerCount=%d want 0", v.PeerCount())
 	}
-	if err := v.UpdateReplicaSet([]ReplicaTarget{targetFor("r1", addr, 1, 1)}); err != nil {
+	if err := v.UpdateReplicaSet(0, []ReplicaTarget{targetFor("r1", addr, 1, 1)}); err != nil {
 		t.Fatalf("UpdateReplicaSet: %v", err)
 	}
 	if v.PeerCount() != 1 {
@@ -95,7 +95,7 @@ func TestReplicationVolume_UpdateReplicaSet_RemovePeer_ExecutorTornDown(t *testi
 	}
 
 	// Add.
-	if err := v.UpdateReplicaSet([]ReplicaTarget{targetFor("r1", addr, 1, 1)}); err != nil {
+	if err := v.UpdateReplicaSet(0, []ReplicaTarget{targetFor("r1", addr, 1, 1)}); err != nil {
 		t.Fatal(err)
 	}
 	v.mu.Lock()
@@ -108,7 +108,7 @@ func TestReplicationVolume_UpdateReplicaSet_RemovePeer_ExecutorTornDown(t *testi
 	}
 
 	// Remove (empty target set).
-	if err := v.UpdateReplicaSet([]ReplicaTarget{}); err != nil {
+	if err := v.UpdateReplicaSet(0, []ReplicaTarget{}); err != nil {
 		t.Fatalf("remove: %v", err)
 	}
 	if v.PeerCount() != 0 {
@@ -121,7 +121,7 @@ func TestReplicationVolume_UpdateReplicaSet_RemovePeer_ExecutorTornDown(t *testi
 	}
 
 	// (c) re-add at same ReplicaID must work cleanly and ship must reach replica.
-	if err := v.UpdateReplicaSet([]ReplicaTarget{targetFor("r1", addr, 1, 1)}); err != nil {
+	if err := v.UpdateReplicaSet(0, []ReplicaTarget{targetFor("r1", addr, 1, 1)}); err != nil {
 		t.Fatalf("re-add: %v", err)
 	}
 	if v.PeerCount() != 1 {
@@ -149,7 +149,7 @@ func TestReplicationVolume_UpdateReplicaSet_LineageBump_RecreatesPeer(t *testing
 	addr, _ := replicaHarness(t, "r1")
 	v := volumeHarness(t, "vol1")
 
-	if err := v.UpdateReplicaSet([]ReplicaTarget{targetFor("r1", addr, 1, 1)}); err != nil {
+	if err := v.UpdateReplicaSet(0, []ReplicaTarget{targetFor("r1", addr, 1, 1)}); err != nil {
 		t.Fatal(err)
 	}
 	v.mu.Lock()
@@ -158,7 +158,7 @@ func TestReplicationVolume_UpdateReplicaSet_LineageBump_RecreatesPeer(t *testing
 	v.mu.Unlock()
 
 	// Bump epoch.
-	if err := v.UpdateReplicaSet([]ReplicaTarget{targetFor("r1", addr, 2, 1)}); err != nil {
+	if err := v.UpdateReplicaSet(0, []ReplicaTarget{targetFor("r1", addr, 2, 1)}); err != nil {
 		t.Fatal(err)
 	}
 	v.mu.Lock()
@@ -181,7 +181,7 @@ func TestReplicationVolume_UpdateReplicaSet_LineageBump_RecreatesPeer(t *testing
 func TestReplicationVolume_OnLocalWrite_SinglePeer_BestEffort(t *testing.T) {
 	addr, replica := replicaHarness(t, "r1")
 	v := volumeHarness(t, "vol1")
-	if err := v.UpdateReplicaSet([]ReplicaTarget{targetFor("r1", addr, 1, 1)}); err != nil {
+	if err := v.UpdateReplicaSet(0, []ReplicaTarget{targetFor("r1", addr, 1, 1)}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -235,7 +235,7 @@ func TestReplicationVolume_OnLocalWrite_PeerErrorDoesNotFailCaller(t *testing.T)
 	_ = ln.Close()
 
 	v := volumeHarness(t, "vol1")
-	if err := v.UpdateReplicaSet([]ReplicaTarget{targetFor("r-dead", deadAddr, 1, 1)}); err != nil {
+	if err := v.UpdateReplicaSet(0, []ReplicaTarget{targetFor("r-dead", deadAddr, 1, 1)}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -274,7 +274,7 @@ func TestReplicationVolume_OnLocalWrite_PeerErrorDoesNotFailCaller(t *testing.T)
 func TestReplicationVolume_OnLocalWrite_ConcurrentLSNs_OrderedAtReplica(t *testing.T) {
 	addr, replica := replicaHarness(t, "r1")
 	v := volumeHarness(t, "vol1")
-	if err := v.UpdateReplicaSet([]ReplicaTarget{targetFor("r1", addr, 1, 1)}); err != nil {
+	if err := v.UpdateReplicaSet(0, []ReplicaTarget{targetFor("r1", addr, 1, 1)}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -363,7 +363,7 @@ func TestReplicationVolume_Constructor_DoesNotOwnStore(t *testing.T) {
 	v := NewReplicationVolume("vol1", store)
 
 	// Do some operations, including Close.
-	_ = v.UpdateReplicaSet([]ReplicaTarget{}) // empty set is valid
+	_ = v.UpdateReplicaSet(0, []ReplicaTarget{}) // empty set is valid
 	_ = v.Close()
 	_ = v.Close() // idempotent
 
@@ -399,7 +399,7 @@ func TestReplicationVolume_OnLocalWrite_Closed_Errors(t *testing.T) {
 		t.Fatalf("expected 'closed' error, got: %v", err)
 	}
 
-	err = v.UpdateReplicaSet([]ReplicaTarget{})
+	err = v.UpdateReplicaSet(0, []ReplicaTarget{})
 	if err == nil {
 		t.Fatal("expected error on UpdateReplicaSet post-Close")
 	}
@@ -428,3 +428,206 @@ func waitForReplicaLBA(t *testing.T, replica *storage.BlockStore, lba uint32, wa
 // Silence unused-import warnings in some build configs where the test
 // files reference fmt only in the error paths.
 var _ = fmt.Sprintf
+
+// --- Test 9: Q1 monotonic-guard pin ---
+
+// TestReplicationVolume_UpdateReplicaSet_Generation_MonotonicGuard —
+// Q1/Q2 pin (T4a-5.0 §9.4 rule). Apply a sequence of increasing
+// generations, then a stale one (gen <= lastApplied). Stale apply
+// must:
+//   - return nil (idempotent replay is success, not an error)
+//   - NOT mutate the peer map
+//   - advance replayedGens counter (Q1 binding)
+//
+// Also exercises the Q2 "differing peers" log path by making the
+// stale-replay set differ from the live set.
+func TestReplicationVolume_UpdateReplicaSet_Generation_MonotonicGuard(t *testing.T) {
+	addr1, _ := replicaHarness(t, "r1")
+	addr2, _ := replicaHarness(t, "r2")
+	v := volumeHarness(t, "vol1")
+
+	// gen=1 → apply r1
+	if err := v.UpdateReplicaSet(1, []ReplicaTarget{targetFor("r1", addr1, 1, 1)}); err != nil {
+		t.Fatal(err)
+	}
+	// gen=2 → apply r1+r2
+	if err := v.UpdateReplicaSet(2, []ReplicaTarget{
+		targetFor("r1", addr1, 1, 1),
+		targetFor("r2", addr2, 1, 1),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// gen=3 → apply r2 only (r1 removed)
+	if err := v.UpdateReplicaSet(3, []ReplicaTarget{targetFor("r2", addr2, 1, 1)}); err != nil {
+		t.Fatal(err)
+	}
+	if v.PeerCount() != 1 {
+		t.Fatalf("after gen=3 PeerCount=%d want 1", v.PeerCount())
+	}
+
+	preReplayed := v.replayedGens.Load()
+
+	// Stale replay at gen=2 with the ORIGINAL r1+r2 set. Must not
+	// mutate peers (still r2 only); must increment replayedGens.
+	err := v.UpdateReplicaSet(2, []ReplicaTarget{
+		targetFor("r1", addr1, 1, 1),
+		targetFor("r2", addr2, 1, 1),
+	})
+	if err != nil {
+		t.Fatalf("stale-gen replay should return nil, got %v", err)
+	}
+	if v.PeerCount() != 1 {
+		t.Fatalf("stale-gen replay mutated peer map: PeerCount=%d want 1", v.PeerCount())
+	}
+	if v.replayedGens.Load() != preReplayed+1 {
+		t.Fatalf("replayedGens counter: got %d want %d", v.replayedGens.Load(), preReplayed+1)
+	}
+
+	// Also stale at gen=3 (equal is stale per the rule: gen <= lastApplied).
+	if err := v.UpdateReplicaSet(3, []ReplicaTarget{}); err != nil {
+		t.Fatal(err)
+	}
+	if v.PeerCount() != 1 {
+		t.Fatalf("gen==lastApplied must be stale no-op: PeerCount=%d want 1", v.PeerCount())
+	}
+	if v.replayedGens.Load() != preReplayed+2 {
+		t.Fatalf("replayedGens counter after second replay: got %d want %d",
+			v.replayedGens.Load(), preReplayed+2)
+	}
+
+	// Forward progress to gen=4 works after stale replays.
+	if err := v.UpdateReplicaSet(4, []ReplicaTarget{}); err != nil {
+		t.Fatal(err)
+	}
+	if v.PeerCount() != 0 {
+		t.Fatalf("gen=4 apply should remove all peers: got %d", v.PeerCount())
+	}
+}
+
+// --- Test 10: Q1 unversioned-apply pin ---
+
+// TestReplicationVolume_UpdateReplicaSet_GenerationZero_DoesNotAdvanceGuard
+// — gen=0 applies peer mutations but MUST NOT advance lastApplied.
+// Pinning this means test-harness uses of gen=0 cannot accidentally
+// poison the monotonic guard (the original MaxUint64 sentinel
+// hazard that QA caught and this rule replaces).
+func TestReplicationVolume_UpdateReplicaSet_GenerationZero_DoesNotAdvanceGuard(t *testing.T) {
+	addr, _ := replicaHarness(t, "r1")
+	v := volumeHarness(t, "vol1")
+
+	// gen=5 → apply r1. lastApplied=5.
+	if err := v.UpdateReplicaSet(5, []ReplicaTarget{targetFor("r1", addr, 1, 1)}); err != nil {
+		t.Fatal(err)
+	}
+	v.mu.Lock()
+	last := v.lastAppliedGeneration
+	v.mu.Unlock()
+	if last != 5 {
+		t.Fatalf("lastApplied after gen=5: got %d want 5", last)
+	}
+
+	// gen=0 → unversioned apply (remove r1). Peer mutation happens
+	// but lastApplied MUST stay at 5.
+	if err := v.UpdateReplicaSet(0, []ReplicaTarget{}); err != nil {
+		t.Fatal(err)
+	}
+	if v.PeerCount() != 0 {
+		t.Fatalf("gen=0 did not mutate peer map: PeerCount=%d want 0", v.PeerCount())
+	}
+	v.mu.Lock()
+	last = v.lastAppliedGeneration
+	v.mu.Unlock()
+	if last != 5 {
+		t.Fatalf("gen=0 advanced lastApplied: got %d want 5 (monotonic guard would be poisoned)", last)
+	}
+
+	// gen=3 now arrives — still stale vs lastApplied=5. Must be
+	// rejected. If the guard had been poisoned by gen=0 (e.g., reset
+	// to 0), gen=3 would have been accepted.
+	preReplayed := v.replayedGens.Load()
+	if err := v.UpdateReplicaSet(3, []ReplicaTarget{targetFor("r1", addr, 1, 1)}); err != nil {
+		t.Fatal(err)
+	}
+	if v.PeerCount() != 0 {
+		t.Fatalf("gen=3 (stale vs lastApplied=5) was not rejected: PeerCount=%d", v.PeerCount())
+	}
+	if v.replayedGens.Load() != preReplayed+1 {
+		t.Fatal("gen=3 should have been counted as stale replay")
+	}
+}
+
+// --- Test 11: Q3 empty-peer-set with lifecycle teardown ---
+
+// TestReplicationVolume_UpdateReplicaSet_EmptyPeerSet_AppliesWithTeardown
+// — Q3 binding: UpdateReplicaSet(gen, []) MUST go through the normal
+// teardown path, NOT a special "clear the map" fast-path. Assertions:
+//   (a) PeerCount() == 0 after apply
+//   (b) every formerly-present peer's executor session is invalidated
+//   (c) next OnLocalWrite succeeds as a zero-fanout no-op
+func TestReplicationVolume_UpdateReplicaSet_EmptyPeerSet_AppliesWithTeardown(t *testing.T) {
+	addr1, _ := replicaHarness(t, "r1")
+	addr2, _ := replicaHarness(t, "r2")
+	v := volumeHarness(t, "vol1")
+
+	// Wrap newExec to collect per-peer executors so we can assert
+	// session invalidation.
+	var execs []*transport.BlockExecutor
+	var execMu sync.Mutex
+	v.newExec = func(store storage.LogicalStorage, replicaAddr string) *transport.BlockExecutor {
+		e := transport.NewBlockExecutor(store, replicaAddr)
+		execMu.Lock()
+		execs = append(execs, e)
+		execMu.Unlock()
+		return e
+	}
+
+	// Apply gen=1 with r1+r2 → two peers, two executors, two sessions.
+	if err := v.UpdateReplicaSet(1, []ReplicaTarget{
+		targetFor("r1", addr1, 1, 1),
+		targetFor("r2", addr2, 1, 1),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Snapshot the session IDs before teardown.
+	v.mu.Lock()
+	sessionID1 := v.peers["r1"].sessionID
+	sessionID2 := v.peers["r2"].sessionID
+	v.mu.Unlock()
+
+	execMu.Lock()
+	snapshotExecs := append([]*transport.BlockExecutor(nil), execs...)
+	execMu.Unlock()
+	if len(snapshotExecs) < 2 {
+		t.Fatalf("expected >=2 executors after 2-peer apply, got %d", len(snapshotExecs))
+	}
+
+	// Apply gen=2 with [] → N→0 teardown.
+	if err := v.UpdateReplicaSet(2, []ReplicaTarget{}); err != nil {
+		t.Fatal(err)
+	}
+
+	// (a) PeerCount == 0
+	if v.PeerCount() != 0 {
+		t.Fatalf("PeerCount after empty-set apply=%d want 0", v.PeerCount())
+	}
+
+	// (b) both sessions invalidated. Scan all executors recorded for
+	// this volume and confirm neither session is still registered.
+	for _, e := range snapshotExecs {
+		if e.HasSession(sessionID1) {
+			t.Fatal("r1's session not invalidated after empty-set apply")
+		}
+		if e.HasSession(sessionID2) {
+			t.Fatal("r2's session not invalidated after empty-set apply")
+		}
+	}
+
+	// (c) next OnLocalWrite succeeds as zero-fanout no-op.
+	data := make([]byte, 4096)
+	data[0] = 0x7E
+	err := v.OnLocalWrite(context.Background(), LocalWrite{LBA: 0, Data: data, LSN: 1})
+	if err != nil {
+		t.Fatalf("OnLocalWrite after empty-set teardown: %v", err)
+	}
+}

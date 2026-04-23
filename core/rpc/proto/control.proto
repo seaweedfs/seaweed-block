@@ -98,10 +98,33 @@ message SubscribeRequest {
     uint64 resume_epoch = 3; // delivery hint only; does NOT influence authority
 }
 
+// ReplicaDescriptor — one entry in an AssignmentFact.peers list.
+// Carries the authoritative lineage + addressing for a single peer
+// replica. Used by primary to configure its replication fan-out
+// (see ReplicationVolume.UpdateReplicaSet). Master-minted; hosts
+// MUST NOT construct or accumulate these from local observations
+// (option R rejected in v3-phase-15-t4a-5-0-host-callback-discovery.md
+// §9.5).
+message ReplicaDescriptor {
+    string replica_id = 1;
+    uint64 epoch = 2;
+    uint64 endpoint_version = 3;
+    string data_addr = 4;
+    string ctrl_addr = 5;
+}
+
 // AssignmentFact — master-minted AssignmentInfo fact carried to a
-// subscribed volume. Field set mirrors adapter.AssignmentInfo.
-// NO intent field. The volume's sole permitted decode site is
-// core/host/volume/subscribe.go:decodeAssignmentFact.
+// subscribed volume. Identity fields (1-6) mirror
+// adapter.AssignmentInfo and MUST be decoded via the sole permitted
+// site core/host/volume/subscribe.go:decodeAssignmentFact (guarded
+// by the TestNoOtherAssignmentInfoConstruction AST fence).
+//
+// Peer-set fields (7-8) are consumed via a separate host-only
+// decoder decodeReplicaTargets in the same file — they do NOT
+// transit through AssignmentInfo or the adapter/engine layers
+// (guardrail #2 of T4a-5.0 decision). This keeps the narrow
+// identity-truth seam untouched while unlocking the primary-side
+// replication fan-out that ReplicationVolume.UpdateReplicaSet needs.
 message AssignmentFact {
     string volume_id = 1;
     string replica_id = 2;
@@ -109,6 +132,20 @@ message AssignmentFact {
     uint64 endpoint_version = 4;
     string data_addr = 5;
     string ctrl_addr = 6;
+
+    // peers — full authoritative peer set for this volume's current
+    // line. MAY be empty (legal: standalone / RF=1 / pre-peer
+    // bootstrap / operator-drained maintenance). self-replica is
+    // implicitly excluded from peers (the primary does not ship to
+    // itself).
+    repeated ReplicaDescriptor peers = 7;
+
+    // peer_set_generation — monotonic per-volume counter minted by
+    // master. Production master MUST emit peer_set_generation >= 1.
+    // ReplicationVolume.UpdateReplicaSet uses this for stale-replay
+    // protection; fake-master / test harnesses MAY use 0 for
+    // unversioned apply (does not advance the monotonic guard).
+    uint64 peer_set_generation = 8;
 }
 
 message StatusRequest {
