@@ -1,0 +1,50 @@
+# T3c scenario 3 of 4 — fsync boundary correctness.
+#
+# LogicalStorage contract §2: "Unacked data may disappear after
+# restart but cannot corrupt acked data."
+#
+# Two write sets separated by Sync. After restart:
+#   - ACKED blocks MUST be byte-exact.
+#   - UNACKED blocks are EITHER original OR zero — never
+#     partial / never another block's bytes.
+#
+# Go replay: core/frontend/durable/scenario_fsync_boundary_test.go
+#
+# Ledger: INV-DURABLE-FSYNC-BOUNDARY-001
+
+name: t3c-durable-fsync-boundary
+purpose: acked bytes preserved; unacked may vanish but cannot corrupt
+variant_matrix:
+  - walstore
+  - smartwal
+
+phases:
+  - name: acked_writes
+    actions:
+      - open_provider: {impl: ${variant}, num_blocks: 32, block_size: 4096}
+      - recover: {volume_id: v1}
+      - write_blocks: {lba: 0..4, seed: A}
+      - sync: {}
+
+  - name: unacked_writes
+    actions:
+      - write_blocks: {lba: 5..9, seed: B}
+      # NO sync
+
+  - name: restart_and_verify
+    actions:
+      - close_provider: {}
+      - open_provider: {impl: ${variant}}
+      - recover: {volume_id: v1}
+      - for_each_lba:
+          - lba: 0..4
+            assert: bytes_match_seed_A
+          - lba: 5..9
+            assert: bytes_match_seed_B_or_zero_never_other
+
+acceptance:
+  - all 5 acked blocks byte-exact after restart (both impls)
+  - all 5 unacked blocks either original or zero (no partial, no foreign bytes)
+
+pins_ledger:
+  - INV-DURABLE-FSYNC-BOUNDARY-001

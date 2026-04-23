@@ -1,0 +1,57 @@
+# T3c scenario 1 of 4 — crash recovery.
+#
+# Canonical G4 gate: any block whose Write returned ack (via Sync
+# returning nil) MUST survive a process restart byte-exact.
+#
+# YAML is documentation of shape. The authoritative test is the
+# matrix-parameterized Go replay at
+# core/frontend/durable/scenario_crash_recovery_test.go, which
+# runs against both walstore and smartwal impls per Addendum A #1.
+#
+# Ledger: INV-DURABLE-001
+
+name: t3c-durable-crash-recovery
+purpose: canonical G4 gate — acked bytes survive restart byte-exact
+variant_matrix:
+  - walstore
+  - smartwal
+
+phases:
+  - name: write_and_ack
+    actions:
+      - open_provider:
+          impl: ${variant}
+          storage_root: ${artifact_dir}/durable
+          num_blocks: 32
+          block_size: 4096
+          volume_id: v1
+      - recover: {volume_id: v1}
+      - write_n_distinct_blocks:
+          count: 8
+          seed: deterministic
+      - sync: {}
+      - close_provider: {}
+
+  - name: restart
+    actions:
+      - open_provider:
+          impl: ${variant}
+          storage_root: ${artifact_dir}/durable
+          num_blocks: 32
+          block_size: 4096
+          volume_id: v1
+      - recover:
+          volume_id: v1
+          assert_recovered_lsn_gt: 0
+
+  - name: verify
+    actions:
+      - read_all_blocks: {assert: byte_exact_match}
+
+acceptance:
+  - all 8 blocks read back byte-exact after restart (both impls)
+  - recovered LSN > 0 on second Recover
+  - no error on any Read
+
+pins_ledger:
+  - INV-DURABLE-001

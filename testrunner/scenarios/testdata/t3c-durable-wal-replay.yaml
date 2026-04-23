@@ -1,0 +1,46 @@
+# T3c scenario 2 of 4 — WAL replay correctness.
+#
+# N acked writes, immediate Close (so WAL may still hold entries
+# that haven't been checkpoint-flushed to extent). Restart must
+# replay the WAL during Recover so all N blocks are readable.
+#
+# Go replay: core/frontend/durable/scenario_wal_replay_test.go
+#
+# Ledger: INV-DURABLE-WAL-REPLAY-001
+
+name: t3c-durable-wal-replay
+purpose: all N acked writes recoverable via WAL replay after restart
+variant_matrix:
+  - walstore
+  - smartwal
+
+phases:
+  - name: rapid_writes
+    actions:
+      - open_provider:
+          impl: ${variant}
+          storage_root: ${artifact_dir}/durable
+          num_blocks: 64
+      - recover: {volume_id: v1}
+      - write_n_distinct_blocks:
+          count: 32
+      - sync: {}
+      - close_provider: {immediate: true}
+
+  - name: restart_and_replay
+    actions:
+      - open_provider: {impl: ${variant}, storage_root: ${artifact_dir}/durable}
+      - recover:
+          volume_id: v1
+          assert_recovered_lsn_ge: 32
+
+  - name: verify_all
+    actions:
+      - read_all_blocks: {assert: byte_exact_match, count: 32}
+
+acceptance:
+  - all 32 blocks readable with original bytes (both impls)
+  - recovered LSN >= 32
+
+pins_ledger:
+  - INV-DURABLE-WAL-REPLAY-001

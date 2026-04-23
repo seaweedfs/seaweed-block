@@ -1,0 +1,49 @@
+# T3c scenario 4 of 4 — disk fill / graceful error.
+#
+# Volume geometry is fixed at create time (NumBlocks × BlockSize).
+# Writing past the last LBA must:
+#   - return a clean error (not silent success)
+#   - leave in-range blocks intact (no corruption)
+#
+# V3 equivalent of V2's "disk-fill" — exercises the fail-hard
+# property without needing to exhaust a real filesystem.
+#
+# Go replay: core/frontend/durable/scenario_disk_fill_test.go
+#
+# Ledger: PCDD-DURABLE-DISK-FULL-001
+
+name: t3c-durable-disk-fill
+purpose: write past volume end fails cleanly without corrupting in-range data
+variant_matrix:
+  - walstore
+  - smartwal
+
+phases:
+  - name: fill_volume
+    actions:
+      - open_provider:
+          impl: ${variant}
+          num_blocks: 4
+          block_size: 4096
+      - recover: {volume_id: v1}
+      - write_blocks: {lba: 0..3, seed: F}
+      - sync: {}
+
+  - name: attempt_overflow
+    actions:
+      - write:
+          offset: 16384  # numBlocks * blockSize; first byte past EOV
+          assert: error_returned
+
+  - name: verify_no_corruption
+    actions:
+      - for_each_lba:
+          - lba: 0..3
+            assert: bytes_match_seed_F
+
+acceptance:
+  - write past volume end returns error (both impls)
+  - all 4 in-range blocks byte-exact (no corruption from failed op)
+
+pins_ledger:
+  - PCDD-DURABLE-DISK-FULL-001
