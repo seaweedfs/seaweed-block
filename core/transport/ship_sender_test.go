@@ -2,7 +2,9 @@ package transport
 
 import (
 	"bytes"
+	"errors"
 	"net"
+	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -377,4 +379,85 @@ func TestExecutor_Ship_StaleEpoch_SilentDrop(t *testing.T) {
 	if rd == nil || rd[0] != 0xAA || rd[1] != 0xBB {
 		t.Fatalf("fresh-epoch Ship should arrive: got [%02x %02x]", rd[0], rd[1])
 	}
+}
+
+// TestExecutor_Ship_WriteDeadline_Fires is the explicit pin test for
+// INV-REPL-SHIP-TRANSPORT-MUSCLE-001 component (3): the 3s write
+// deadline must fire when the peer stalls, so Ship returns within
+// ~deadline rather than ~120s TCP retransmission timeout.
+//
+// Shape: we use net.Pipe() — a synchronous in-memory connected pair
+// with no kernel buffers. Writes block immediately until the other
+// side reads. SetWriteDeadline is supported and unblocks the stalled
+// write with a timeout error. This isolates the deadline invariant
+// from kernel TCP buffer auto-tuning (which on Windows/Linux loopback
+// can absorb 16+ MiB before blocking and makes TCP-based timing tests
+// fundamentally unreliable).
+//
+// We bypass Ship's lazy-dial here by pre-attaching the pipe's client
+// end to the session — the deadline invariant applies to Ship's write
+// regardless of how the conn got there. Lazy-dial is exercised in
+// TestExecutor_Ship_LazyDial_OnRegisteredSessionWithoutConn.
+func TestExecutor_Ship_WriteDeadline_Fires(t *testing.T) {
+	client, server := net.Pipe()
+	t.Cleanup(func() {
+		_ = client.Close()
+		_ = server.Close()
+	})
+
+	// Server side: never read. The pipe write will wedge on the
+	// very first byte after the implicit internal buffer is full
+	// (net.Pipe() has zero internal buffering — every Write blocks
+	// until the matching Read).
+
+	primary := storage.NewBlockStore(64, 4096)
+	exec := NewBlockExecutor(primary, "unused:0") // no dial in this test
+	lineage := shipTestLineage()
+	if err := exec.attachShipSession(lineage, client); err != nil {
+		t.Fatalf("attachShipSession: %v", err)
+	}
+
+	data := make([]byte, 4096)
+	data[0] = 0xAB
+
+	start := time.Now()
+	err := exec.Ship("r1", lineage, 1, 1, data)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatalf("Ship returned nil after %v; expected deadline-exceeded error", elapsed)
+	}
+	// Budget: deadline is shipWriteDeadline = 3s. Allow up to 5s
+	// for scheduling slop. If we hit 10s the deadline didn't fire.
+	if elapsed > 10*time.Second {
+		t.Fatalf("Ship took %v; expected ~3s (shipWriteDeadline). Write deadline likely not firing — invariant regression.",
+			elapsed)
+	}
+	// And: must have wedged for at least most of the deadline. If we
+	// returned in <2.5s it was some other error path, not the deadline.
+	// This is the affirmative proof the deadline IS the mechanism that
+	// unblocked the write.
+	if elapsed < 2500*time.Millisecond {
+		t.Fatalf("Ship returned in %v — too fast to have hit the 3s deadline; error path is not deadline-driven",
+			elapsed)
+	}
+	if !isTimeoutErr(err) && !strings.Contains(err.Error(), "write failed") {
+		t.Fatalf("Ship error does not look like write-deadline timeout: %v", err)
+	}
+}
+
+// isTimeoutErr checks whether err (or anything in its chain) implements
+// Timeout() bool == true. Used by the deadline-fires test.
+func isTimeoutErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	if os.IsTimeout(err) {
+		return true
+	}
+	var te interface{ Timeout() bool }
+	if errors.As(err, &te) {
+		return te.Timeout()
+	}
+	return false
 }
