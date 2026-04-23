@@ -49,6 +49,17 @@ type ProjectionView interface {
 
 // Backend is a per-lineage handle for one open frontend session.
 //
+// Lifecycle ownership (BUG-005 2026-04-22):
+//   Backend.Close() is OWNED BY THE PROVIDER. Session-layer
+//   consumers (iSCSI session, NVMe controller, etc.) MUST NOT
+//   call Close on a Backend obtained from Provider.Open —
+//   treat the returned Backend as a BORROWED reference for the
+//   duration of the session. DurableProvider caches one Backend
+//   per volumeID; a session-level Close would mark the cached
+//   Backend closed and break every subsequent session. Session
+//   teardown should release conn + session-local state only.
+//   Provider.Close tears down all Backends in correct order.
+//
 // T3a extends the interface with two methods (all existing
 // implementations gain trivial impls in the same commit):
 //

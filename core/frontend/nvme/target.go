@@ -184,7 +184,13 @@ func (t *Target) handleConn(conn net.Conn) {
 		t.logger.Printf("nvme: Provider.Open(%s): %v", t.cfg.VolumeID, err)
 		return
 	}
-	defer backend.Close()
+	// BUG-005 fix (2026-04-22): do NOT close the Backend here.
+	// The Provider owns Backend lifecycle — `DurableProvider`
+	// caches one Backend per volumeID so multiple sessions share
+	// the underlying LogicalStorage handle. Closing from the
+	// per-session path would mark the cached Backend closed,
+	// breaking the next session's I/O with ErrBackendClosed.
+	// See sw-block/design/bugs/005_backend_close_cross_session.md.
 
 	hcfg := t.cfg.Handler
 	hcfg.Backend = backend

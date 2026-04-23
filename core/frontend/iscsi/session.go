@@ -504,9 +504,12 @@ func (s *Session) handleNOPOut(req *PDU) error {
 
 func (s *Session) close() {
 	if s.closed.CompareAndSwap(false, true) {
-		if s.backend != nil {
-			_ = s.backend.Close()
-		}
+		// BUG-005 fix (2026-04-22): do NOT close the Backend here.
+		// The Provider owns Backend lifecycle (DurableProvider
+		// caches one Backend per volumeID across sessions). The
+		// session's reference is a borrowed handle; session end
+		// should release the TCP conn + session-local state
+		// only. See sw-block/design/bugs/005_backend_close_cross_session.md.
 		_ = s.conn.Close()
 		s.state = SessionClosed
 	}
