@@ -77,13 +77,25 @@ func (e *BlockExecutor) Fence(replicaID string, sessionID, epoch, endpointVersio
 		SessionID:       sessionID,
 		Epoch:           epoch,
 		EndpointVersion: endpointVersion,
-		// TargetLSN is not used by acceptMutationLineage for order
-		// comparison; set to 0 to signal "fence, no recovery target."
-		TargetLSN: 0,
+		// TargetLSN is not semantically meaningful for fence (fence
+		// doesn't declare a recovery target), but post-T4b-1 the
+		// barrier-ack wire demands every lineage field be non-zero
+		// (architect round-21 uniform rule applied at decode). Using
+		// the liveShipTargetLSN sentinel (1) keeps Fence composable
+		// with the stricter wire while preserving the "not a recovery
+		// target" intent — no TargetLSN-sensitive code in the fence
+		// path reads this value.
+		TargetLSN: fenceSentinelTargetLSN,
 	}
 	go e.doFence(replicaID, lineage)
 	return nil
 }
+
+// fenceSentinelTargetLSN is the lineage.TargetLSN value used for
+// fence requests. Arbitrary non-zero value; matches the
+// liveShipTargetLSN convention on the peer-level live ship path.
+// See Fence() godoc for why this is non-zero.
+const fenceSentinelTargetLSN uint64 = 1
 
 func (e *BlockExecutor) doFence(replicaID string, lineage RecoveryLineage) {
 	result := adapter.FenceResult{

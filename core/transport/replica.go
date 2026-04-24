@@ -1,7 +1,6 @@
 package transport
 
 import (
-	"encoding/binary"
 	"log"
 	"net"
 	"sync"
@@ -149,8 +148,15 @@ func (r *ReplicaListener) handleConn(conn net.Conn) {
 			// any block data — AdvanceFrontier only updates nextLSN/walHead.
 			r.store.AdvanceFrontier(lineage.TargetLSN)
 			frontier, _ := r.store.Sync()
-			resp := make([]byte, 8)
-			binary.BigEndian.PutUint64(resp, frontier)
+			// Echo the request's full lineage in the rebuild-done ack
+			// per T4b-1 wire extension. T4b scope does not yet validate
+			// this lineage on the primary (catch-up/rebuild paths are
+			// T4c / T5), but the wire must already carry it so those
+			// validators can consume it when they land.
+			resp := EncodeBarrierResp(BarrierResponse{
+				Lineage:     lineage,
+				AchievedLSN: frontier,
+			})
 			if err := WriteMsg(conn, MsgBarrierResp, resp); err != nil {
 				return
 			}
@@ -168,8 +174,15 @@ func (r *ReplicaListener) handleConn(conn net.Conn) {
 				return
 			}
 			frontier, _ := r.store.Sync()
-			resp := make([]byte, 8)
-			binary.BigEndian.PutUint64(resp, frontier)
+			// Echo the request's full lineage in the barrier ack per
+			// T4b-1 wire extension (round-21 uniform rule + H5 LOCK).
+			// The primary's DurabilityCoordinator (T4b-2/T4b-3)
+			// validates this tuple against the session it is awaiting
+			// before counting the ack toward quorum.
+			resp := EncodeBarrierResp(BarrierResponse{
+				Lineage:     lineage,
+				AchievedLSN: frontier,
+			})
 			WriteMsg(conn, MsgBarrierResp, resp)
 
 		default:
