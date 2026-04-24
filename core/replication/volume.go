@@ -297,6 +297,21 @@ func (v *ReplicationVolume) Close() error {
 	return nil
 }
 
+// Observe satisfies the durable.WriteObserver seam by wrapping
+// the caller's params into a LocalWrite and delegating to
+// OnLocalWrite. This lets StorageBackend call ReplicationVolume
+// without importing LocalWrite, and without ReplicationVolume
+// importing core/frontend/durable (one-way data-plane coupling:
+// frontend → replication, control flow only).
+//
+// Called by: core/frontend/durable.StorageBackend.writeBytes
+// after a successful LogicalStorage.Write.
+// Owns: same serialization and fan-out semantics as OnLocalWrite.
+// Borrows: data slice; see OnLocalWrite for the full contract.
+func (v *ReplicationVolume) Observe(ctx context.Context, lba uint32, lsn uint64, data []byte) error {
+	return v.OnLocalWrite(ctx, LocalWrite{LBA: lba, Data: data, LSN: lsn})
+}
+
 // PeerCount returns the current number of tracked peers. Test helper
 // and diagnostic accessor.
 func (v *ReplicationVolume) PeerCount() int {

@@ -41,12 +41,34 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"sync"
 	"sync/atomic"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
+
+// WriteObserver is the narrow seam StorageBackend uses to notify the
+// replication layer of each successfully-applied local write. The
+// ReplicationVolume (core/replication) satisfies this interface via
+// its Observe method; the indirection keeps core/frontend/durable
+// from importing replication directly and lets tests inject mocks.
+//
+// Contract (matches V2 BlockVol.shipMu → ShipAll invariant):
+//   - StorageBackend calls Observe AFTER LogicalStorage.Write
+//     returns successfully, with the LBA + block data + LSN the
+//     storage layer just assigned.
+//   - Observe error does NOT fail the Write (best-effort
+//     replication matches V2 fire-and-forget ShipAll; per-peer
+//     degradation is the observer's concern, not the backend's).
+//   - StorageBackend calls Observe from within writeBytes; the
+//     ReplicationVolume's own mutex then serializes fan-out per
+//     volume (V2 shipMu equivalent; closes
+//     INV-REPL-LSN-ORDER-FANOUT-001 at the replication seam).
+type WriteObserver interface {
+	Observe(ctx context.Context, lba uint32, lsn uint64, data []byte) error
+}
 
 // errInvalidOffset is returned for negative byte offsets. Callers
 // should never produce these; both iSCSI and NVMe clamp LBA before
@@ -74,8 +96,9 @@ type StorageBackend struct {
 	operational atomic.Bool
 	opEvidence  atomic.Value // string
 
-	mu     sync.Mutex
-	closed bool
+	mu       sync.Mutex
+	closed   bool
+	observer WriteObserver // optional; nil = no replication fan-out
 }
 
 // NewStorageBackend constructs a backend. Starts NON-operational
@@ -110,6 +133,23 @@ func (b *StorageBackend) Close() error {
 	defer b.mu.Unlock()
 	b.closed = true
 	return nil
+}
+
+// SetWriteObserver installs the per-write notification seam used by
+// the replication layer. Safe to call only during setup (before
+// I/O begins) — the seam is intentionally not hot-swappable so a
+// well-behaved caller cannot race replication wiring against live
+// writes. Pass nil to disable replication fan-out on this backend.
+//
+// Called by: Provider (T3b) / Host (T4a-5) during volume wiring,
+// once per backend lifetime.
+// Owns: observer pointer under b.mu.
+// Borrows: the observer — caller retains ownership; StorageBackend
+// does not close or otherwise tear down the observer.
+func (b *StorageBackend) SetWriteObserver(obs WriteObserver) {
+	b.mu.Lock()
+	b.observer = obs
+	b.mu.Unlock()
 }
 
 // SetOperational flips the readiness gate. evidence is surfaced
@@ -169,7 +209,7 @@ func (b *StorageBackend) Write(ctx context.Context, offset int64, p []byte) (int
 	if len(p) == 0 {
 		return 0, nil
 	}
-	return b.writeBytes(offset, p)
+	return b.writeBytes(ctx, offset, p)
 }
 
 // gate is the per-I/O precondition stack. Order matters:
@@ -258,7 +298,7 @@ func (b *StorageBackend) readBytes(offset int64, p []byte) (int, error) {
 // Full-block writes skip the read (optimization for the hot path);
 // partial-block writes read-modify-write to preserve the bytes
 // outside the range.
-func (b *StorageBackend) writeBytes(offset int64, p []byte) (int, error) {
+func (b *StorageBackend) writeBytes(ctx context.Context, offset int64, p []byte) (int, error) {
 	if offset < 0 {
 		return 0, errInvalidOffset
 	}
@@ -290,8 +330,22 @@ func (b *StorageBackend) writeBytes(offset int64, p []byte) (int, error) {
 			copy(block[inBlockOff:], buf[:chunkLen])
 		}
 
-		if _, err := b.storage.Write(lba, block); err != nil {
+		lsn, err := b.storage.Write(lba, block)
+		if err != nil {
 			return total, fmt.Errorf("durable: write lba=%d: %w", lba, err)
+		}
+		// Replication fan-out (T4a-6 hook). Snapshot the observer under
+		// b.mu so a concurrent SetWriteObserver doesn't see us reading
+		// a stale pointer. Error is logged best-effort — peer layer
+		// degrades; the Write itself has already succeeded locally.
+		b.mu.Lock()
+		obs := b.observer
+		b.mu.Unlock()
+		if obs != nil {
+			if werr := obs.Observe(ctx, lba, lsn, block); werr != nil {
+				log.Printf("durable: replication fan-out failed lba=%d lsn=%d: %v",
+					lba, lsn, werr)
+			}
 		}
 		total += chunkLen
 		buf = buf[chunkLen:]
