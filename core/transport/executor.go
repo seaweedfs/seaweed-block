@@ -122,16 +122,130 @@ func (e *BlockExecutor) doFence(replicaID string, lineage RecoveryLineage) {
 	}
 	resp, err := recvBarrierResp(conn, recoveryConnTimeout)
 	if err != nil {
+		// Short / zero-valued / field-order-malformed payloads are
+		// rejected at the T4b-1 decode layer as errors, so they
+		// surface here and fail the fence — NOT a silent accept.
+		// Covers the uniform-rule failure class at the first
+		// existing consumer of the extended BarrierResponse wire
+		// (architect round 22).
 		result.Success = false
 		result.FailReason = fmt.Sprintf("fence barrier resp: %v", err)
 		e.fireFenceComplete(result)
 		return
 	}
-	_ = resp // AchievedLSN is not used by fence — we only needed the replica's ack
+	// T4b-2 round-22 lineage validation: the replica's echoed lineage
+	// MUST match the lineage we sent. This is the "valid-decode but
+	// wrong-session" case — decode was fine, but the ack is for a
+	// different authority tuple than the one we're awaiting.
+	// AchievedLSN is still not semantically meaningful for fence;
+	// the validation is purely about confirming the replica acked
+	// OUR request, not some concurrent / stale one.
+	if resp.Lineage != lineage {
+		result.Success = false
+		result.FailReason = fmt.Sprintf("fence barrier resp lineage mismatch: expected=%+v actual=%+v",
+			lineage, resp.Lineage)
+		log.Printf("executor: fence lineage mismatch replica=%s expected=%+v actual=%+v",
+			replicaID, lineage, resp.Lineage)
+		e.fireFenceComplete(result)
+		return
+	}
 
 	result.Success = true
 	log.Printf("executor: fence complete replica=%s epoch=%d", replicaID, lineage.Epoch)
 	e.fireFenceComplete(result)
+}
+
+// Barrier issues a per-peer barrier round-trip carrying the session
+// lineage. Blocks until the response arrives or the deadline fires.
+// Returns the validated BarrierAck on success, or error on transport
+// failure / ack rejection.
+//
+// Architect round-21 uniform rule applies end-to-end:
+//   - decode rejects short / zeroed / field-order-malformed acks
+//     (T4b-1 wire)
+//   - this method rejects valid-decode-but-wrong-session acks via
+//     ErrBarrierLineageMismatch (T4b-2 ack-consumer validation)
+// A future optimization MUST NOT weaken this to epoch-only; the
+// full-lineage rule is load-bearing for H5 LOCK.
+//
+// Called by: DurabilityCoordinator.SyncLocalAndReplicas (T4b-3)
+// per-peer fan-out.
+// Owns: per-call conn deadline (recoveryConnTimeout); lineage binding;
+// ack validation against the session's registered lineage.
+// Borrows: session by replicaID + lineage.SessionID; BarrierAck
+// payload fields are value-copied into the returned struct.
+func (e *BlockExecutor) Barrier(replicaID string, lineage RecoveryLineage, targetLSN uint64) (BarrierAck, error) {
+	// Session lookup + epoch-== fence (same pattern as Ship).
+	e.mu.Lock()
+	session, ok := e.sessions[lineage.SessionID]
+	if !ok || session == nil {
+		e.mu.Unlock()
+		return BarrierAck{}, fmt.Errorf("transport: barrier: no session for replica=%s sessionID=%d",
+			replicaID, lineage.SessionID)
+	}
+	if lineage.Epoch != session.lineage.Epoch {
+		sessionEpoch := session.lineage.Epoch
+		e.mu.Unlock()
+		log.Printf("transport: barrier: dropping targetLSN=%d replica=%s stale epoch %d (session epoch %d)",
+			targetLSN, replicaID, lineage.Epoch, sessionEpoch)
+		return BarrierAck{}, fmt.Errorf("transport: barrier: stale epoch %d (session %d)",
+			lineage.Epoch, sessionEpoch)
+	}
+	conn := session.conn
+	e.mu.Unlock()
+
+	// Lazy-dial if no conn (same pattern as Ship, architect round-11
+	// Option B). Attach-under-mu with "first winner keeps" races.
+	if conn == nil {
+		dialed, err := net.DialTimeout("tcp", e.replicaAddr, shipDialTimeout)
+		if err != nil {
+			return BarrierAck{}, fmt.Errorf("transport: barrier: dial replica=%s sessionID=%d: %w",
+				replicaID, lineage.SessionID, err)
+		}
+		e.mu.Lock()
+		current, stillActive := e.sessions[lineage.SessionID]
+		switch {
+		case !stillActive || current != session:
+			e.mu.Unlock()
+			_ = dialed.Close()
+			return BarrierAck{}, fmt.Errorf("transport: barrier: session %d invalidated during dial",
+				lineage.SessionID)
+		case session.conn != nil:
+			conn = session.conn
+			e.mu.Unlock()
+			_ = dialed.Close()
+		default:
+			session.conn = dialed
+			conn = dialed
+			e.mu.Unlock()
+		}
+	}
+
+	// Send request + receive response with deadlines on both sides
+	// (sendBarrierReq / recvBarrierResp already set conn deadline).
+	if err := sendBarrierReq(conn, lineage, recoveryConnTimeout); err != nil {
+		return BarrierAck{}, fmt.Errorf("transport: barrier: send replica=%s: %w", replicaID, err)
+	}
+	resp, err := recvBarrierResp(conn, recoveryConnTimeout)
+	if err != nil {
+		return BarrierAck{}, fmt.Errorf("transport: barrier: recv replica=%s: %w", replicaID, err)
+	}
+
+	// Full-lineage validation (architect round-21 uniform rule).
+	// Stale or cross-session acks fail here. Diagnostic log format
+	// matches architect's round-21 text: peer ID + full expected /
+	// actual lineage tuple.
+	if resp.Lineage != lineage {
+		log.Printf("transport: barrier: lineage mismatch replica=%s expected=%+v actual=%+v",
+			replicaID, lineage, resp.Lineage)
+		return BarrierAck{}, ErrBarrierLineageMismatch
+	}
+
+	return BarrierAck{
+		Lineage:     resp.Lineage,
+		AchievedLSN: resp.AchievedLSN,
+		Success:     true,
+	}, nil
 }
 
 func (e *BlockExecutor) fireFenceComplete(result adapter.FenceResult) {

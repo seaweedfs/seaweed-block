@@ -2,10 +2,34 @@ package transport
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"net"
 	"time"
 )
+
+// BarrierAck is the validated per-peer barrier outcome surfaced to
+// callers of BlockExecutor.Barrier. It captures the echoed lineage
+// (which the caller has already validated against the session's
+// expected lineage before receiving this struct) and the replica's
+// achieved frontier.
+//
+// Reason is populated by higher-layer aggregation (DurabilityCoordinator)
+// and is empty on successful Barrier returns.
+type BarrierAck struct {
+	Lineage     RecoveryLineage
+	AchievedLSN uint64
+	Success     bool
+	Reason      string
+}
+
+// ErrBarrierLineageMismatch is returned by BlockExecutor.Barrier when
+// the replica's response carries a lineage that does not match the
+// lineage the caller sent. Per architect round-21 uniform rule, such
+// acks MUST NOT be counted toward durability — the caller surfaces
+// the error verbatim; DurabilityCoordinator treats it as a failed
+// barrier for quorum arithmetic.
+var ErrBarrierLineageMismatch = errors.New("transport: barrier: response lineage does not match request")
 
 // BarrierResponse is the typed reply to MsgBarrierReq and to the
 // terminal MsgRebuildDone. AchievedLSN is the replica's actual
