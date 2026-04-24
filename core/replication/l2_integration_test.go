@@ -2,16 +2,26 @@ package replication
 
 // T4a-6 L2 subprocess integration test.
 //
-// Exercises the full frontend→storage→replication→transport→replica
-// wire using real TCP between two in-process BlockExecutor + Replica
-// Listener pairs. This is the T4a batch close gate per mini-plan
-// §4, and the proof that all T4a landed commits (T4a-1 envelope bump,
-// T4a-2 Ship, T4a-3 ReplicaPeer, T4a-4 ReplicationVolume, T4a-5
-// Host wire) compose correctly at the integration seam.
+// Exercises the storage→replication→transport→replica wire using
+// real TCP between two in-process BlockExecutor + ReplicaListener
+// pairs. Covers T4a-1 through T4a-4 plus the T4a-6 StorageBackend
+// WriteObserver hook added in this landing.
 //
-// Matrix: smartwal is the sign-bearing substrate (MUST pass).
-// walstore is reported non-gating per the T3 matrix discipline
-// (may fail on replay-post-crash per BUG-007; non-blocking here).
+// Scope note (T4a-6 follow-up): T4a-5's Host authority-callback
+// ordering (install-or-refuse, fail-closed) is covered by
+// core/host/volume/apply_fact_test.go, NOT by this file — the
+// integration test here drives ReplicationVolume.UpdateReplicaSet
+// directly and bypasses Host.applyFact. Both sets of tests
+// together cover the T4a landing; see 2ed72bd for the honest
+// separation.
+//
+// Matrix: smartwal is the sign-bearing substrate. walstore is a
+// second row that also gates in this harness (QA finding #4
+// follow-up removed the earlier "non-gating" fiction; Go's testing
+// framework has no clean demote-subtest-failure API, so pretending
+// walstore could fail without failing the test was incorrect). If
+// walstore ever regresses under BUG-007 the test fails honestly
+// and we invest in a real demotion harness.
 //
 // Frontend is approximated via direct StorageBackend.Write calls.
 // The full iSCSI/NVMe PDU layer is NOT exercised (iSCSI and NVMe
