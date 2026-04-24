@@ -56,8 +56,13 @@ func smartwalFactory(t *testing.T, dir, label string, blocks uint32, blockSize i
 	return s, cleanup
 }
 
-// walstoreFactory is the non-sign-bearing matrix row. Failures are
-// logged via t.Logf and NOT t.Fatal, matching the T3 matrix rule.
+// walstoreFactory is the second matrix row. Both rows are currently
+// gating — T4a-6 follow-up (QA finding #4) removed the earlier
+// "non-gating" fiction since Go's testing framework has no clean
+// demote-subtest-failure API and the previous defer-based harness
+// didn't actually demote. Both backends pass today; if walstore
+// regresses under BUG-007 the test fails honestly and we invest in
+// a real demotion harness then.
 func walstoreFactory(t *testing.T, dir, label string, blocks uint32, blockSize int) (storage.LogicalStorage, func()) {
 	t.Helper()
 	path := filepath.Join(dir, label+".walstore")
@@ -72,34 +77,20 @@ func walstoreFactory(t *testing.T, dir, label string, blocks uint32, blockSize i
 	return s, cleanup
 }
 
-// runMatrix runs the given scenario against each storage backend and
-// reports per-row results. smartwal rows are gating (t.Fatal on
-// failure via subtest); walstore rows are reported non-gating
-// (t.Logf on failure, no Fatal).
+// runMatrix runs the given scenario against each storage backend.
+// Both rows are gating in the current harness — see walstoreFactory
+// comment for the QA-review history on the earlier non-gating
+// fiction. T4a close requires smartwal to pass; walstore is
+// expected to pass today (BUG-007 doesn't affect the best-effort
+// write path T4a-6 exercises) but any regression will fail the
+// test honestly.
 func runMatrix(t *testing.T, scenario func(t *testing.T, newStorage storageFactory)) {
 	t.Helper()
-	t.Run("smartwal_gating", func(t *testing.T) {
+	t.Run("smartwal", func(t *testing.T) {
 		scenario(t, smartwalFactory)
 	})
-	t.Run("walstore_nongating", func(t *testing.T) {
-		// Non-gating: run in a subtest but swallow any Fatal so a
-		// walstore-only failure doesn't gate the parent test. We use
-		// t.Run + a recover-once pattern: scenario is free to
-		// t.Fatalf; we observe via t.Failed() after and demote.
-		defer func() {
-			// Note: t.Run returns false if the subtest failed; the
-			// parent remains green because we inspect + demote below.
-		}()
+	t.Run("walstore", func(t *testing.T) {
 		scenario(t, walstoreFactory)
-		if t.Failed() {
-			// Force-green the parent while preserving the diagnostic.
-			// Go testing has no direct "demote failure" API; the best
-			// we can do is log that this is the documented non-gating
-			// row. The parent subtest's FAIL status remains for
-			// operator visibility, but T4a batch gate only cares
-			// about smartwal.
-			t.Logf("T4a-6 matrix: walstore row failed (non-gating per BUG-007; T4a close depends on smartwal only)")
-		}
 	})
 }
 

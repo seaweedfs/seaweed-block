@@ -178,6 +178,20 @@ func (s *services) SubscribeAssignments(req *control.SubscribeRequest, stream co
 					continue
 				}
 			}
+			// T4a-5 P-refined generation derivation requires each of
+			// Epoch and EndpointVersion to fit in uint32; aliasing at
+			// the 2^32 boundary would silently collapse distinct
+			// authority lines onto the same generation and break the
+			// monotonic stale-replay guard on the volume side. We
+			// assert + skip rather than panic: the fact has no valid
+			// generation, so we can't send it, but the master should
+			// keep running so operators can page + fix upstream.
+			if reason, ok := generationFitsUint32(info.Epoch, info.EndpointVersion); !ok {
+				fmt.Printf("services: volume %s replica %s: %s; skipping fact\n",
+					info.VolumeID, info.ReplicaID, reason)
+				continue
+			}
+
 			lastEpoch = info.Epoch
 			lastEV = info.EndpointVersion
 			sentAny = true
@@ -193,13 +207,12 @@ func (s *services) SubscribeAssignments(req *control.SubscribeRequest, stream co
 			// LastPublished queries for every non-self replica slot in
 			// this volume's topology. peer_set_generation is derived
 			// from the authoritative line's (Epoch, EndpointVersion)
-			// so it is monotonic across process lifetimes (the
-			// publisher's lex-dedupe upstream guarantees strictly-
-			// increasing (Epoch, EV) pairs within the stream, and the
-			// same ordering is preserved across master restarts
-			// because Epoch/EV are durable authority facts).
+			// packed into one uint64 as (epoch<<32 | ev). Assertion
+			// above guarantees each fits in uint32 so no aliasing.
+			// Monotonic across process lifetimes because Epoch/EV are
+			// durable authority facts preserved across master restart.
 			fact.Peers = s.collectPeers(req.VolumeId, info.ReplicaID)
-			fact.PeerSetGeneration = (info.Epoch << 32) | uint64(uint32(info.EndpointVersion))
+			fact.PeerSetGeneration = (info.Epoch << 32) | info.EndpointVersion
 			if err := stream.Send(fact); err != nil {
 				return err
 			}
@@ -273,6 +286,27 @@ func validateHeartbeat(r *control.HeartbeatReport) error {
 		}
 	}
 	return nil
+}
+
+// generationFitsUint32 reports whether the (epoch, endpointVersion)
+// pair can be safely packed into one uint64 as `(epoch<<32) | ev`.
+// Returns (reason, false) when either exceeds 2^32-1 — in that case
+// SubscribeAssignments skips the fact rather than silently alias
+// distinct authority lines onto the same peer_set_generation.
+//
+// Assertion landed at T4a-5.0 follow-up (QA finding #2). Paired with
+// TestGenerationFitsUint32_* pins in services_test.go. Named as a
+// pure function so tests can exercise boundary cases without
+// driving a full gRPC stream.
+func generationFitsUint32(epoch, endpointVersion uint64) (reason string, ok bool) {
+	const uint32Max = uint64(1) << 32
+	if epoch >= uint32Max {
+		return fmt.Sprintf("epoch %d exceeds uint32 — peer_set_generation would alias", epoch), false
+	}
+	if endpointVersion >= uint32Max {
+		return fmt.Sprintf("endpoint_version %d exceeds uint32 — peer_set_generation would alias", endpointVersion), false
+	}
+	return "", true
 }
 
 // collectPeers builds the AssignmentFact.peers list for a volume

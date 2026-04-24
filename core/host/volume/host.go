@@ -60,16 +60,32 @@ type Config struct {
 
 	// ReplicationVolume, when non-nil, receives peer-set updates on
 	// every self-replica AssignmentFact. The Host calls
-	// UpdateReplicaSet(peer_set_generation, targets) AFTER
-	// adapter.OnAssignment so identity ingestion and replication
-	// ingestion progress together but do not cross the decode
-	// boundary (peers are decoded via subscribe.go:decodeReplicaTargets,
-	// not via decodeAssignmentFact).
+	// UpdateReplicaSet(peer_set_generation, targets) BEFORE
+	// adapter.OnAssignment — install-or-refuse ordering (T4a-6
+	// follow-up fix). If UpdateReplicaSet fails, OnAssignment is
+	// skipped so the adapter's projection stays not-Healthy and the
+	// StorageBackend's lineageCheck keeps writes blocked until master
+	// stream replay redelivers a fact that can be fully installed.
 	//
 	// Nil means "no replication fan-out" (T0 observer-only hosts,
 	// bootstrap before ReplicationVolume is ready). T4a-5 production
 	// wiring sets this to the per-volume ReplicationVolume.
 	ReplicationVolume *replication.ReplicationVolume
+}
+
+// assignmentConsumer is the narrow interface Host needs from the
+// adapter. *adapter.VolumeReplicaAdapter satisfies it. Test doubles
+// can substitute to drive applyFact without a real adapter + engine.
+type assignmentConsumer interface {
+	OnAssignment(info adapter.AssignmentInfo) adapter.ApplyLog
+}
+
+// replicaSetUpdater is the narrow interface Host needs from the
+// replication layer. *replication.ReplicationVolume satisfies it.
+// Test doubles can substitute to drive applyFact without needing a
+// real per-volume fan-out + transport listener.
+type replicaSetUpdater interface {
+	UpdateReplicaSet(generation uint64, targets []replication.ReplicaTarget) error
 }
 
 // Host is the composed volume-side block product daemon.
@@ -78,8 +94,14 @@ type Host struct {
 	log   *log.Logger
 	exec  *noopExecutor
 	t1exec *HealthyPathExecutor
-	adpt  *adapter.VolumeReplicaAdapter
-	view  *AdapterProjectionView
+	adpt  assignmentConsumer
+	// realAdpt is the underlying concrete adapter. Exposed for
+	// production call sites that need the full surface (status
+	// server, projection view wiring). Tests swap adpt only and
+	// leave realAdpt nil.
+	realAdpt    *adapter.VolumeReplicaAdapter
+	view        *AdapterProjectionView
+	replication replicaSetUpdater // nil = observer-only (no fan-out)
 
 	conn   *grpc.ClientConn
 	obsCli control.ObservationServiceClient
@@ -175,14 +197,18 @@ func New(cfg Config) (*Host, error) {
 	adpt := adapter.NewVolumeReplicaAdapter(execIface)
 
 	h := &Host{
-		cfg:    cfg,
-		log:    lg,
-		exec:   noopExec,
-		t1exec: t1Exec,
-		adpt:   adpt,
-		conn:   conn,
-		obsCli: control.NewObservationServiceClient(conn),
-		asnCli: control.NewAssignmentServiceClient(conn),
+		cfg:     cfg,
+		log:     lg,
+		exec:    noopExec,
+		t1exec:  t1Exec,
+		adpt:    adpt,
+		realAdpt: adpt,
+		conn:    conn,
+		obsCli:  control.NewObservationServiceClient(conn),
+		asnCli:  control.NewAssignmentServiceClient(conn),
+	}
+	if cfg.ReplicationVolume != nil {
+		h.replication = cfg.ReplicationVolume
 	}
 	// View wires host as the SupersedeProbe so fail-closed kicks
 	// in when master names another replica at a newer lineage.
@@ -222,7 +248,7 @@ func (h *Host) IsSuperseded(selfReplicaID string, selfEpoch, selfEV uint64) bool
 func (h *Host) ProjectionView() *AdapterProjectionView { return h.view }
 
 // Adapter exposes the underlying VolumeReplicaAdapter for tests.
-func (h *Host) Adapter() *adapter.VolumeReplicaAdapter { return h.adpt }
+func (h *Host) Adapter() *adapter.VolumeReplicaAdapter { return h.realAdpt }
 
 // Executor exposes the noopExecutor for tests that want to
 // inspect recorded commands.
@@ -376,35 +402,68 @@ func (h *Host) streamOnce(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		if fact.ReplicaId != h.cfg.ReplicaID {
-			// Superseded. The volume currently serving
-			// (vid, self.ReplicaID) is no longer the current
-			// authoritative line for this volume.
-			h.recordOtherLine(fact)
-			h.log.Printf("blockvolume: volume %s authority is now %s@%d (not this replica %s); recording supersede, not applying to adapter",
-				h.cfg.VolumeID, fact.ReplicaId, fact.Epoch, h.cfg.ReplicaID)
-			continue
+		h.applyFact(fact)
+	}
+}
+
+// applyFact processes one AssignmentFact from the master's
+// subscription stream. Extracted from streamOnce so tests can
+// exercise the install-or-refuse seam directly without a real
+// gRPC stream.
+//
+// Install-or-refuse ordering (T4a-6 follow-up fix, QA finding #1):
+//
+//  1. If the fact names another replica, record supersede and return.
+//  2. Otherwise (self-replica fact):
+//     a. Install replication peer set first (if configured).
+//     b. On UpdateReplicaSet failure, LOG and RETURN WITHOUT
+//        calling OnAssignment. The adapter's projection stays at
+//        its prior (not-Healthy until first successful install)
+//        state; StorageBackend.lineageCheck keeps writes blocked.
+//        Master's stream replay redelivers this fact on the next
+//        cycle; natural eventual convergence.
+//     c. Only after replication install succeeds (or observer-only
+//        mode): apply OnAssignment, driving the adapter's
+//        projection to Healthy.
+//
+// This preserves the V2 BlockVol.SetReplicaAddrs-then-admit-writes
+// atomicity that V3 lost when adapter + ReplicationVolume got split
+// across packages. Without install-or-refuse, a window existed where
+// OnAssignment could flip the projection Healthy before peers were
+// installed, admitting local-only writes with zero fan-out.
+func (h *Host) applyFact(fact *control.AssignmentFact) {
+	if fact.ReplicaId != h.cfg.ReplicaID {
+		// Superseded. The volume currently serving
+		// (vid, self.ReplicaID) is no longer the current
+		// authoritative line for this volume.
+		h.recordOtherLine(fact)
+		h.log.Printf("blockvolume: volume %s authority is now %s@%d (not this replica %s); recording supersede, not applying to adapter",
+			h.cfg.VolumeID, fact.ReplicaId, fact.Epoch, h.cfg.ReplicaID)
+		return
+	}
+
+	// Step (2a): install replication peer set first. Decoded via
+	// the separate host-only decodeReplicaTargets path (not through
+	// AssignmentInfo), so the TestNoOtherAssignmentInfoConstruction
+	// AST fence stays green.
+	if h.replication != nil {
+		targets, gen := decodeReplicaTargets(fact)
+		if err := h.replication.UpdateReplicaSet(gen, targets); err != nil {
+			// Step (2b): fail closed — do NOT apply OnAssignment.
+			h.log.Printf("blockvolume: volume %s replication UpdateReplicaSet failed (gen=%d, peers=%d): %v — NOT applying to adapter (fail-closed; master will retry via stream replay)",
+				h.cfg.VolumeID, gen, len(targets), err)
+			return
 		}
-		// SOLE permitted decode path. See subscribe.go.
-		info := decodeAssignmentFact(fact)
-		h.adpt.OnAssignment(info)
-		// T4a-5: peer-set routing. Decoded via the separate host-only
-		// decodeReplicaTargets path (not through AssignmentInfo), so
-		// the TestNoOtherAssignmentInfoConstruction AST fence stays
-		// green. If ReplicationVolume is nil (T0/observer-only
-		// config), the peer set is ignored on this host.
-		if h.cfg.ReplicationVolume != nil {
-			targets, gen := decodeReplicaTargets(fact)
-			if err := h.cfg.ReplicationVolume.UpdateReplicaSet(gen, targets); err != nil {
-				h.log.Printf("blockvolume: volume %s replication UpdateReplicaSet failed (gen=%d, peers=%d): %v",
-					h.cfg.VolumeID, gen, len(targets), err)
-			}
-		}
-		if h.cfg.ReadyMarker != nil && info.Epoch > 0 && h.readyOnce.CompareAndSwap(false, true) {
-			select {
-			case h.cfg.ReadyMarker <- info:
-			default:
-			}
+	}
+
+	// Step (2c): identity install only after replication is live.
+	// SOLE permitted decode path. See subscribe.go.
+	info := decodeAssignmentFact(fact)
+	h.adpt.OnAssignment(info)
+	if h.cfg.ReadyMarker != nil && info.Epoch > 0 && h.readyOnce.CompareAndSwap(false, true) {
+		select {
+		case h.cfg.ReadyMarker <- info:
+		default:
 		}
 	}
 }
