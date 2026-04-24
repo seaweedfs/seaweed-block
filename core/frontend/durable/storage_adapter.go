@@ -50,12 +50,13 @@ import (
 )
 
 // WriteObserver is the narrow seam StorageBackend uses to notify the
-// replication layer of each successfully-applied local write. The
-// ReplicationVolume (core/replication) satisfies this interface via
-// its Observe method; the indirection keeps core/frontend/durable
-// from importing replication directly and lets tests inject mocks.
+// replication layer of each successfully-applied local write and to
+// delegate Sync durability closure. The ReplicationVolume
+// (core/replication) satisfies this interface; the indirection keeps
+// core/frontend/durable from importing replication directly and lets
+// tests inject mocks.
 //
-// Contract (matches V2 BlockVol.shipMu → ShipAll invariant):
+// Observe contract (matches V2 BlockVol.shipMu → ShipAll invariant):
 //   - StorageBackend calls Observe AFTER LogicalStorage.Write
 //     returns successfully, with the LBA + block data + LSN the
 //     storage layer just assigned.
@@ -66,8 +67,23 @@ import (
 //     ReplicationVolume's own mutex then serializes fan-out per
 //     volume (V2 shipMu equivalent; closes
 //     INV-REPL-LSN-ORDER-FANOUT-001 at the replication seam).
+//
+// Sync contract (T4b-5 — matches V2 BlockVol.MakeDistributedSync):
+//   - When an observer is installed, StorageBackend.Sync DELEGATES
+//     the full sync job to observer.Sync — the observer owns both
+//     the local LogicalStorage.Sync call and the peer barriers,
+//     fanned out in parallel by DurabilityCoordinator.
+//   - targetLSN is the primary's current walHead at the moment the
+//     host requested Sync; caller (StorageBackend) reads it from
+//     LogicalStorage.Boundaries().
+//   - Observer.Sync returns error iff the mode-dependent durability
+//     arithmetic declared failure (ErrDurabilityBarrierFailed /
+//     ErrDurabilityQuorumLost / local fsync error). StorageBackend
+//     surfaces the error verbatim so the host sees the real
+//     durability outcome.
 type WriteObserver interface {
 	Observe(ctx context.Context, lba uint32, lsn uint64, data []byte) error
+	Sync(ctx context.Context, targetLSN uint64) error
 }
 
 // errInvalidOffset is returned for negative byte offsets. Callers
@@ -180,6 +196,28 @@ func (b *StorageBackend) Sync(ctx context.Context) error {
 	if err := b.gate(); err != nil {
 		return err
 	}
+	// T4b-5: if an observer is installed, delegate the FULL sync
+	// job — the observer (ReplicationVolume) owns both the local
+	// LogicalStorage.Sync call and the peer barriers fanned out
+	// in parallel by DurabilityCoordinator. Without this branch the
+	// local sync would run twice (once here, once inside the
+	// coordinator) which is both wasteful and semantically wrong
+	// (primary would be "durable" before peers were even queried).
+	//
+	// targetLSN is the primary's current walHead — the replica-facing
+	// intent for what must be durable. Local sync's achieved LSN
+	// should meet or exceed this; per-peer barriers carry the
+	// session lineage (TargetLSN fixed per session per peer.Barrier
+	// godoc).
+	b.mu.Lock()
+	obs := b.observer
+	b.mu.Unlock()
+	if obs != nil {
+		_, _, walHead := b.storage.Boundaries()
+		return obs.Sync(ctx, walHead)
+	}
+	// No observer installed — observer-free path runs local sync only
+	// (T0 / bootstrap / single-replica dev configurations).
 	if _, err := b.storage.Sync(); err != nil {
 		return fmt.Errorf("durable: storage sync: %w", err)
 	}

@@ -37,11 +37,13 @@ type ReplicationVolume struct {
 	volumeID string
 	store    storage.LogicalStorage // borrowed, NEVER closed by us
 	newExec  executorFactory        // test seam; default dials real TCP
+	coord    *DurabilityCoordinator // used by Sync; stateless
 
-	mu                    sync.Mutex // serializes UpdateReplicaSet + OnLocalWrite entry AND fan-out
+	mu                    sync.Mutex // serializes UpdateReplicaSet + OnLocalWrite entry AND fan-out AND Sync
 	peers                 map[string]*ReplicaPeer
 	closed                bool
-	lastAppliedGeneration uint64 // monotonic guard; 0 means "no generation applied yet"
+	lastAppliedGeneration uint64         // monotonic guard; 0 means "no generation applied yet"
+	durabilityMode        DurabilityMode // set via SetDurabilityMode; default is BestEffort
 
 	// replayedGens counts UpdateReplicaSet calls dropped as stale
 	// (generation > 0 && generation <= lastAppliedGeneration). Exposed
@@ -68,11 +70,87 @@ type executorFactory func(store storage.LogicalStorage, replicaAddr string) *tra
 // ReplicationVolume MUST NOT call store.Close() (BUG-005).
 func NewReplicationVolume(volumeID string, store storage.LogicalStorage) *ReplicationVolume {
 	return &ReplicationVolume{
-		volumeID: volumeID,
-		store:    store,
-		newExec:  transport.NewBlockExecutor,
-		peers:    make(map[string]*ReplicaPeer),
+		volumeID:       volumeID,
+		store:          store,
+		newExec:        transport.NewBlockExecutor,
+		coord:          NewDurabilityCoordinator(),
+		peers:          make(map[string]*ReplicaPeer),
+		durabilityMode: DurabilityBestEffort, // zero value; explicit for clarity
 	}
+}
+
+// SetDurabilityMode configures the per-volume durability semantic
+// that Sync uses. Safe to call at any time; effect applies from the
+// next Sync call forward. Per mini-plan §5, T4b does not support
+// per-Sync-call mode override — mode is a per-volume setting.
+//
+// Called by: Host / Provider composition root at volume lifecycle
+// start, or on operator reconfiguration.
+// Owns: durabilityMode field under v.mu.
+// Borrows: nothing.
+func (v *ReplicationVolume) SetDurabilityMode(mode DurabilityMode) {
+	v.mu.Lock()
+	v.durabilityMode = mode
+	v.mu.Unlock()
+}
+
+// DurabilityMode returns the currently-configured mode. Read-only
+// accessor for tests and diagnostics.
+func (v *ReplicationVolume) DurabilityMode() DurabilityMode {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	return v.durabilityMode
+}
+
+// Sync runs the per-volume durability closure for host-requested
+// cache flushes. Delegates to DurabilityCoordinator.SyncLocalAndReplicas
+// with the volume's configured mode + current peer set + a localSync
+// closure that wraps LogicalStorage.Sync.
+//
+// Lock scope: v.mu is held across the FULL call. This preserves the
+// same discipline as OnLocalWrite (architect T4a-4 round-15
+// Condition A): LSN-order fan-out serialization at the replication
+// layer. Concurrent Sync and OnLocalWrite calls are thus serialized
+// on v.mu, matching V2's shipMu semantics extended from ship-only
+// into ship+barrier. Accepted correctness-first trade-off: a slow
+// peer barrier stalls other writers on the same volume; async-queue
+// optimization (Option Z) is deferred post-T4 per mini-plan §6.
+//
+// Forward-carry: INV-REPL-LSN-ORDER-FANOUT-001 (T4a-4) must
+// continue to pass under the new code path; the adversarial
+// TestReplicationVolume_OnLocalWrite_ConcurrentLSNs_OrderedAtReplica
+// test and the new TestReplicationVolume_Sync_PreservesLSNOrder
+// UnderConcurrency pin verify no regression.
+//
+// Called by: StorageBackend.Sync (when a WriteObserver is installed)
+// per host-side FLUSH / SYNCHRONIZE_CACHE.
+// Owns: v.mu across the full SyncLocalAndReplicas call; peer snapshot
+// assembly.
+// Borrows: ctx + targetLSN from caller.
+func (v *ReplicationVolume) Sync(ctx context.Context, targetLSN uint64) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if v.closed {
+		return fmt.Errorf("replication: Sync: volume %s closed", v.volumeID)
+	}
+
+	// Snapshot the peers under v.mu — DurabilityCoordinator reads
+	// them from a slice so no further lock coordination is needed.
+	peers := make([]*ReplicaPeer, 0, len(v.peers))
+	for _, p := range v.peers {
+		peers = append(peers, p)
+	}
+
+	mode := v.durabilityMode
+	localSync := func(ctx context.Context) (uint64, error) {
+		return v.store.Sync()
+	}
+
+	_, err := v.coord.SyncLocalAndReplicas(ctx, mode, targetLSN, localSync, peers)
+	return err
 }
 
 // UpdateReplicaSet applies the authoritative replica set from a master
