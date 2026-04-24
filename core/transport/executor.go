@@ -97,6 +97,53 @@ func (e *BlockExecutor) Fence(replicaID string, sessionID, epoch, endpointVersio
 // See Fence() godoc for why this is non-zero.
 const fenceSentinelTargetLSN uint64 = 1
 
+// FenceSync performs a synchronous fence exchange against the replica:
+// dial a fresh conn, send MsgBarrierReq at the given lineage, read
+// MsgBarrierResp, validate the full-lineage echo, and return. Returns
+// nil on success or a descriptive error on any dial / send / recv /
+// lineage-mismatch failure.
+//
+// Does NOT go through the session registry — fence is a single barrier
+// exchange, not a recovery session. Does NOT fire OnFenceComplete; the
+// async entry point Fence() wraps FenceSync and handles the callback.
+//
+// Called by: BlockExecutor.doFence (async wrapper for legacy callback-
+// driven callers like the engine's recovery path) and
+// ReplicaPeer.Fence (T4b-3 wrapper for sync-style callers like
+// DurabilityCoordinator).
+// Owns: per-call conn dial + deadline; lineage validation against the
+// request lineage (round-21 uniform rule).
+// Borrows: lineage from caller.
+func (e *BlockExecutor) FenceSync(replicaID string, lineage RecoveryLineage) error {
+	conn, err := net.DialTimeout("tcp", e.replicaAddr, 2*time.Second)
+	if err != nil {
+		return fmt.Errorf("fence dial: %w", err)
+	}
+	defer conn.Close()
+
+	if err := sendBarrierReq(conn, lineage, recoveryConnTimeout); err != nil {
+		return fmt.Errorf("fence barrier send: %w", err)
+	}
+	resp, err := recvBarrierResp(conn, recoveryConnTimeout)
+	if err != nil {
+		// Short / zero-valued / field-order-malformed payloads are
+		// rejected at the T4b-1 decode layer as errors; they surface
+		// here without silent-accept (architect round 22 uniform rule
+		// at the first ack-consuming surface).
+		return fmt.Errorf("fence barrier resp: %w", err)
+	}
+	// T4b-2 round-22 lineage validation: the replica's echoed lineage
+	// MUST match the lineage we sent.
+	if resp.Lineage != lineage {
+		log.Printf("executor: fence lineage mismatch replica=%s expected=%+v actual=%+v",
+			replicaID, lineage, resp.Lineage)
+		return fmt.Errorf("fence barrier resp lineage mismatch: expected=%+v actual=%+v",
+			lineage, resp.Lineage)
+	}
+	log.Printf("executor: fence complete replica=%s epoch=%d", replicaID, lineage.Epoch)
+	return nil
+}
+
 func (e *BlockExecutor) doFence(replicaID string, lineage RecoveryLineage) {
 	result := adapter.FenceResult{
 		ReplicaID:       replicaID,
@@ -104,54 +151,12 @@ func (e *BlockExecutor) doFence(replicaID string, lineage RecoveryLineage) {
 		Epoch:           lineage.Epoch,
 		EndpointVersion: lineage.EndpointVersion,
 	}
-
-	conn, err := net.DialTimeout("tcp", e.replicaAddr, 2*time.Second)
-	if err != nil {
+	if err := e.FenceSync(replicaID, lineage); err != nil {
 		result.Success = false
-		result.FailReason = fmt.Sprintf("fence dial: %v", err)
-		e.fireFenceComplete(result)
-		return
+		result.FailReason = err.Error()
+	} else {
+		result.Success = true
 	}
-	defer conn.Close()
-
-	if err := sendBarrierReq(conn, lineage, recoveryConnTimeout); err != nil {
-		result.Success = false
-		result.FailReason = fmt.Sprintf("fence barrier send: %v", err)
-		e.fireFenceComplete(result)
-		return
-	}
-	resp, err := recvBarrierResp(conn, recoveryConnTimeout)
-	if err != nil {
-		// Short / zero-valued / field-order-malformed payloads are
-		// rejected at the T4b-1 decode layer as errors, so they
-		// surface here and fail the fence — NOT a silent accept.
-		// Covers the uniform-rule failure class at the first
-		// existing consumer of the extended BarrierResponse wire
-		// (architect round 22).
-		result.Success = false
-		result.FailReason = fmt.Sprintf("fence barrier resp: %v", err)
-		e.fireFenceComplete(result)
-		return
-	}
-	// T4b-2 round-22 lineage validation: the replica's echoed lineage
-	// MUST match the lineage we sent. This is the "valid-decode but
-	// wrong-session" case — decode was fine, but the ack is for a
-	// different authority tuple than the one we're awaiting.
-	// AchievedLSN is still not semantically meaningful for fence;
-	// the validation is purely about confirming the replica acked
-	// OUR request, not some concurrent / stale one.
-	if resp.Lineage != lineage {
-		result.Success = false
-		result.FailReason = fmt.Sprintf("fence barrier resp lineage mismatch: expected=%+v actual=%+v",
-			lineage, resp.Lineage)
-		log.Printf("executor: fence lineage mismatch replica=%s expected=%+v actual=%+v",
-			replicaID, lineage, resp.Lineage)
-		e.fireFenceComplete(result)
-		return
-	}
-
-	result.Success = true
-	log.Printf("executor: fence complete replica=%s epoch=%d", replicaID, lineage.Epoch)
 	e.fireFenceComplete(result)
 }
 

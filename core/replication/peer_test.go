@@ -228,3 +228,136 @@ func TestReplicaPeer_NewReplicaPeer_RejectsZeroAuthority(t *testing.T) {
 		})
 	}
 }
+
+// --- T4b-3 wrapper tests (5 per QA spec) ---
+
+// TestReplicaPeer_Barrier_Happy — round-trip through a real replica
+// listener. Peer is Healthy before and after; ack carries the peer's
+// registered lineage byte-exact.
+func TestReplicaPeer_Barrier_Happy(t *testing.T) {
+	peer, _, _ := setupPeerWithRealReplica(t)
+	if peer.State() != ReplicaHealthy {
+		t.Fatalf("precondition: expected Healthy, got %s", peer.State())
+	}
+
+	ack, err := peer.Barrier(context.Background(), 42)
+	if err != nil {
+		t.Fatalf("Barrier: %v", err)
+	}
+	if !ack.Success {
+		t.Fatal("ack.Success=false")
+	}
+	// Echo must match the peer's registered lineage (not the caller's
+	// targetLSN — that's coordinator-layer only).
+	if ack.Lineage != peer.lineage {
+		t.Fatalf("ack.Lineage %+v != peer.lineage %+v", ack.Lineage, peer.lineage)
+	}
+	if peer.State() != ReplicaHealthy {
+		t.Fatalf("Barrier success must leave peer Healthy, got %s", peer.State())
+	}
+}
+
+// TestReplicaPeer_Barrier_ErrorPropagates_MarksDegraded — the
+// INV-REPL-BARRIER-FAILURE-DEGRADES-PEER pin. Transport-level
+// barrier failure must flow through to peer.Invalidate +
+// state=Degraded (V2-faithful per §0-B locality; preserves V2's
+// WALShipper-internal markDegraded contract at the V3 peer wrapper
+// layer).
+func TestReplicaPeer_Barrier_ErrorPropagates_MarksDegraded(t *testing.T) {
+	// Reserve a port then release it → guaranteed unreachable.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadAddr := ln.Addr().String()
+	_ = ln.Close()
+
+	primary := storage.NewBlockStore(64, 4096)
+	exec := transport.NewBlockExecutor(primary, deadAddr)
+	target := ReplicaTarget{
+		ReplicaID:       "r-dead-barrier",
+		DataAddr:        deadAddr,
+		ControlAddr:     deadAddr,
+		Epoch:           4,
+		EndpointVersion: 2,
+	}
+	peer, err := NewReplicaPeer(target, exec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = peer.Close() })
+
+	if peer.State() != ReplicaHealthy {
+		t.Fatalf("precondition: Healthy, got %s", peer.State())
+	}
+
+	ack, err := peer.Barrier(context.Background(), 100)
+	if err == nil {
+		t.Fatal("Barrier against unreachable replica should error")
+	}
+	if ack.Success {
+		t.Fatal("ack.Success should be false on error path")
+	}
+	if peer.State() != ReplicaDegraded {
+		t.Fatalf("expected ReplicaDegraded after Barrier failure, got %s", peer.State())
+	}
+	// Error shape: should contain "barrier" and the underlying
+	// transport / dial failure signal.
+	if !strings.Contains(err.Error(), "barrier") {
+		t.Fatalf("expected 'barrier' in error, got: %v", err)
+	}
+}
+
+// TestReplicaPeer_Fence_Happy — fence exchange at caller-supplied
+// lineage against a real replica. Peer stays Healthy on success.
+func TestReplicaPeer_Fence_Happy(t *testing.T) {
+	peer, _, _ := setupPeerWithRealReplica(t)
+
+	// Use the peer's registered lineage so the replica's
+	// acceptMutationLineage rule passes (same-authority +
+	// same TargetLSN).
+	fenceLineage := peer.lineage
+
+	if err := peer.Fence(context.Background(), fenceLineage); err != nil {
+		t.Fatalf("Fence: %v", err)
+	}
+	if peer.State() != ReplicaHealthy {
+		t.Fatalf("Fence success must leave peer Healthy, got %s", peer.State())
+	}
+}
+
+// TestReplicaPeer_Barrier_AfterClose_Errors — post-Close Barrier
+// returns error without panic. No state mutation (peer is already
+// Unknown after Close).
+func TestReplicaPeer_Barrier_AfterClose_Errors(t *testing.T) {
+	peer, _, _ := setupPeerWithRealReplica(t)
+	if err := peer.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	_, err := peer.Barrier(context.Background(), 1)
+	if err == nil {
+		t.Fatal("Barrier on closed peer must error")
+	}
+	if !strings.Contains(err.Error(), "closed") {
+		t.Fatalf("expected 'closed' in error, got: %v", err)
+	}
+}
+
+// TestReplicaPeer_Fence_AfterClose_Errors — post-Close Fence returns
+// error without panic.
+func TestReplicaPeer_Fence_AfterClose_Errors(t *testing.T) {
+	peer, _, _ := setupPeerWithRealReplica(t)
+	fenceLineage := peer.lineage
+	if err := peer.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	err := peer.Fence(context.Background(), fenceLineage)
+	if err == nil {
+		t.Fatal("Fence on closed peer must error")
+	}
+	if !strings.Contains(err.Error(), "closed") {
+		t.Fatalf("expected 'closed' in error, got: %v", err)
+	}
+}

@@ -175,6 +175,89 @@ func (p *ReplicaPeer) ShipEntry(ctx context.Context, lineage transport.RecoveryL
 	return nil
 }
 
+// Barrier runs a per-peer durability barrier and returns the
+// replica's validated ack. On any transport / lineage-mismatch /
+// short-payload error, translates error → peer.Invalidate +
+// state=Degraded per INV-REPL-BARRIER-FAILURE-DEGRADES-PEER, then
+// surfaces the error to the caller. This preserves V2's
+// per-peer-execution-layer locality (V2 WALShipper.Barrier mutated
+// peer state internally via failBarrier → markDegraded; V3 puts
+// that mutation at the V2-faithful V3 location: ReplicaPeer.Barrier).
+//
+// MUST NOT gate the attempt on p.state == Degraded. The V2 "always
+// attempt BarrierAll, even when all shippers are Disconnected or
+// Degraded" invariant applies: an in-flight barrier may succeed
+// and transition the peer back to a healthy posture; gating it
+// out would make Degraded a one-way trap. Only the post-Close
+// gate applies.
+//
+// Wire payload: sends MsgBarrierReq with the peer's registered
+// lineage (unchanged from session registration). The caller-supplied
+// targetLSN is passed through to BlockExecutor.Barrier but does NOT
+// overwrite lineage.TargetLSN — replica's acceptMutationLineage
+// requires same-authority messages to carry the same TargetLSN as
+// the session was registered with, so overriding would self-reject.
+// Caller uses targetLSN at the coordinator layer (comparing against
+// ack.AchievedLSN) to decide per-mode durability arithmetic.
+//
+// Called by: DurabilityCoordinator.SyncLocalAndReplicas (T4b-4)
+// per-peer fan-out.
+// Owns: the error → Invalidate translation (peer state mutation).
+// Borrows: ctx + targetLSN from caller; lineage is read from peer's
+// own registered state.
+func (p *ReplicaPeer) Barrier(ctx context.Context, targetLSN uint64) (transport.BarrierAck, error) {
+	if err := ctx.Err(); err != nil {
+		return transport.BarrierAck{}, err
+	}
+	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+		return transport.BarrierAck{}, fmt.Errorf("replication: Barrier: peer %s closed", p.target.ReplicaID)
+	}
+	lineage := p.lineage
+	p.mu.Unlock()
+
+	ack, err := p.executor.Barrier(p.target.ReplicaID, lineage, targetLSN)
+	if err != nil {
+		p.Invalidate(fmt.Sprintf("barrier error: %v", err))
+		return transport.BarrierAck{}, err
+	}
+	return ack, nil
+}
+
+// Fence issues a synchronous fence exchange against this peer using
+// the caller-supplied lineage. Returns nil on success or a
+// descriptive error on any failure. On error, marks the peer
+// Degraded via Invalidate (parallel to Barrier).
+//
+// Lineage is caller-supplied (not peer-owned) because fence is used
+// to confirm a SPECIFIC authority tuple was received — typically
+// when the coordinator wants to verify an old lineage was acked
+// before advancing. The caller knows which lineage matters; the
+// peer doesn't drive the choice.
+//
+// Called by: DurabilityCoordinator (T4b-4) on quorum-loss recovery;
+// future T4c recovery pipeline.
+// Owns: error → Invalidate translation on failure.
+// Borrows: ctx + lineage from caller.
+func (p *ReplicaPeer) Fence(ctx context.Context, lineage transport.RecoveryLineage) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+		return fmt.Errorf("replication: Fence: peer %s closed", p.target.ReplicaID)
+	}
+	p.mu.Unlock()
+
+	if err := p.executor.FenceSync(p.target.ReplicaID, lineage); err != nil {
+		p.Invalidate(fmt.Sprintf("fence error: %v", err))
+		return err
+	}
+	return nil
+}
+
 // Invalidate marks the peer Degraded and logs the reason. No state
 // transitions beyond Healthy ↔ Degraded in T4a; CatchingUp /
 // Rebuilding / NeedsRebuild arrive at T4c. Calling Invalidate on an
