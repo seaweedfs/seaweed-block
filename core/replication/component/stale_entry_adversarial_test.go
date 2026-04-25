@@ -130,9 +130,9 @@ func TestComponent_Adversarial_BlockStoreApplyEntryRegressesWalHead(t *testing.T
 }
 
 // TestComponent_StaleEntrySkip_RuleStatement is documentation in
-// test form: pins the rule architect dictated in round-41 so future
-// readers find it via `go doc` / IDE search rather than only via
-// memory file.
+// test form: pins the rule architect dictated in round-41 + the
+// QA round-42 refinements so future readers find them via go doc
+// / IDE search rather than only via memory file.
 func TestComponent_StaleEntrySkip_RuleStatement(t *testing.T) {
 	t.Log(`
 INV-REPL-RECOVERY-STALE-ENTRY-SKIP-PER-LBA (architect round-41):
@@ -149,14 +149,41 @@ Why: pinLSN < replicaLSN is LEGAL and EXPECTED (probe-time R can
 advance during recovery via live lane / barrier / prior partial
 catch-up). Don't avoid the situation; design for it.
 
+ROUND-42 REFINEMENTS (QA — important; do not lose at T4d):
+
+INV-REPL-RECOVERY-STALE-SKIP-DATA-ONLY-NOT-ACCOUNTING:
+
+  The skip applies to DATA WRITE only. Per-session accounting
+  (bitmap, completion mask, scan coverage tracking) MUST update as
+  though the entry was processed. Otherwise the recovery session's
+  completion logic thinks the LBA wasn't reached, the bitmap
+  signals "recovery hasn't covered this slot," and the barrier
+  achievedLSN judgment is wrong.
+
+  Skip means: don't write data. Still mark "I saw this LBA."
+
+INV-REPL-LIVE-LANE-NEVER-SKIPS-LSN:
+
+  The per-LBA-LSN skip rule applies to the RECOVERY lane ONLY. The
+  live ship lane MUST NOT skip on stale LSN — live writes are
+  authoritative on (lineage, session) grounds and that gating is
+  sufficient. An "old LSN" on live is a duplicate/replay, handled
+  by lineage gating; per-LBA-LSN comparison is recovery-only.
+
 Required at T4d:
   1. Per-LBA applied LSN tracking at replica apply layer
   2. Recovery apply skips entries whose LSN <= per-LBA applied LSN
-  3. Live lane always applies; recovery lane skips stale
-  4. Adversarial tests:
+  3. Skip data write but UPDATE per-session accounting (refinement #1)
+  4. Apply skip rule on recovery lane only; live lane keeps current
+     lineage-gated apply (refinement #2)
+  5. Adversarial tests:
      - same LBA old/new + sever before new → no regression
      - repeated recovery window → byte state stable
      - live races recovery old → live wins
+     - recovery stale-skip → bitmap/completion mask MUST reflect
+       coverage despite no data write
+     - live lane receives old-LSN duplicate → applies normally
+       (no skip)
 
 NOT covered by frontier-monotonicity tests
 (TestComponent_CatchupFromBelowReplicaLSN_NoFrontierRegression) —
