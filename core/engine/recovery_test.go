@@ -188,6 +188,96 @@ func TestSessionFailed_WALRecycled_EscalatesToRebuild(t *testing.T) {
 	}
 }
 
+// TestSessionFailed_NonRecycled_RetriesUntilBudget — T4c-3 §4.1
+// retry-loop wiring (round-38). Engine increments Attempts on
+// non-recycled failure; while Attempts <= MaxRetries, re-emits the
+// matching Start* command. Once Attempts > MaxRetries, escalates
+// (via PublishDegraded + Decision reset).
+func TestSessionFailed_NonRecycled_RetriesUntilBudget(t *testing.T) {
+	st := &ReplicaState{
+		Identity: IdentityTruth{ReplicaID: "r1", Epoch: 1, EndpointVersion: 1},
+		Session:  SessionTruth{SessionID: 7, Phase: PhaseRunning},
+		Recovery: RecoveryTruth{Decision: DecisionCatchUp, H: 100},
+	}
+	budget := DefaultRuntimePolicyFor(RecoveryContentWALDelta).MaxRetries // 3
+	if budget != 3 {
+		t.Fatalf("test premise: wal_delta MaxRetries=%d, want 3", budget)
+	}
+
+	for attempt := 1; attempt <= budget; attempt++ {
+		st.Session = SessionTruth{SessionID: uint64(attempt + 6), Phase: PhaseRunning}
+		ev := SessionClosedFailed{
+			ReplicaID: "r1",
+			SessionID: uint64(attempt + 6),
+			Reason:    "transient: connection reset",
+		}
+		r := Apply(st, ev)
+		if st.Recovery.Attempts != attempt {
+			t.Errorf("attempt=%d: Attempts=%d, want %d", attempt, st.Recovery.Attempts, attempt)
+		}
+		// Within budget: must re-emit StartCatchUp.
+		hasRetry := false
+		for _, cmd := range r.Commands {
+			if _, ok := cmd.(StartCatchUp); ok {
+				hasRetry = true
+			}
+		}
+		if !hasRetry {
+			t.Errorf("attempt=%d: expected StartCatchUp re-emit (within budget); got %v",
+				attempt, r.Commands)
+		}
+		if st.Recovery.Decision != DecisionCatchUp {
+			t.Errorf("attempt=%d: Decision flipped from CatchUp to %s before budget exhausted",
+				attempt, st.Recovery.Decision)
+		}
+	}
+
+	// Attempt #4 (over budget): must escalate, NOT re-emit StartCatchUp.
+	st.Session = SessionTruth{SessionID: 11, Phase: PhaseRunning}
+	ev := SessionClosedFailed{ReplicaID: "r1", SessionID: 11, Reason: "transient again"}
+	r := Apply(st, ev)
+	for _, cmd := range r.Commands {
+		if _, ok := cmd.(StartCatchUp); ok {
+			t.Error("budget exhausted: must NOT re-emit StartCatchUp")
+		}
+	}
+	if st.Recovery.Attempts != 0 {
+		t.Errorf("budget exhausted: Attempts=%d, want 0 (reset)", st.Recovery.Attempts)
+	}
+	if st.Recovery.Decision != DecisionUnknown {
+		t.Errorf("budget exhausted: Decision=%s, want Unknown (reset)", st.Recovery.Decision)
+	}
+	if st.Recovery.DecisionReason != "retry_budget_exhausted" {
+		t.Errorf("budget exhausted: DecisionReason=%q, want retry_budget_exhausted",
+			st.Recovery.DecisionReason)
+	}
+	hasDegraded := false
+	for _, cmd := range r.Commands {
+		if _, ok := cmd.(PublishDegraded); ok {
+			hasDegraded = true
+		}
+	}
+	if !hasDegraded {
+		t.Error("budget exhausted: expected PublishDegraded command")
+	}
+}
+
+// TestSessionCompleted_ClearsAttemptCounter — pin: a successful
+// recovery clears Attempts so a future independent recovery starts
+// fresh.
+func TestSessionCompleted_ClearsAttemptCounter(t *testing.T) {
+	st := &ReplicaState{
+		Identity: IdentityTruth{ReplicaID: "r1", Epoch: 1, EndpointVersion: 1},
+		Session:  SessionTruth{SessionID: 7, Phase: PhaseRunning},
+		Recovery: RecoveryTruth{Decision: DecisionCatchUp, H: 100, Attempts: 2},
+	}
+	ev := SessionClosedCompleted{ReplicaID: "r1", SessionID: 7, AchievedLSN: 100}
+	Apply(st, ev)
+	if st.Recovery.Attempts != 0 {
+		t.Errorf("Attempts=%d after successful completion, want 0", st.Recovery.Attempts)
+	}
+}
+
 // TestSessionFailed_NonRecycled_DoesNotEscalate — counter-pin: a
 // non-recycle failure (e.g. transient network error, target-not-
 // reached) MUST NOT silently flip Decision to Rebuild. The retry

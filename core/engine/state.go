@@ -82,11 +82,25 @@ const (
 
 // RecoveryTruth: what recovery is needed. Authority: primary.
 type RecoveryTruth struct {
-	R              uint64           // replica durable/achieved boundary
-	S              uint64           // primary recoverable start boundary (WAL tail)
-	H              uint64           // primary target boundary (head)
+	R              uint64 // replica durable/achieved boundary
+	S              uint64 // primary recoverable start boundary (WAL tail)
+	H              uint64 // primary target boundary (head)
 	Decision       RecoveryDecision
 	DecisionReason string
+
+	// Attempts tracks how many StartCatchUp / StartRecovery commands
+	// the engine has emitted for the current Decision. Engine
+	// SessionFailed handler increments on close-with-non-recycled-
+	// error; cleared by SessionCompleted (success), by ErrWALRecycled
+	// escalation (Decision flips to Rebuild), and by identity changes
+	// (Recovery is reset wholesale).
+	//
+	// Per T4c-2 G-1 §4.1 architect Option B (retry budget lives in
+	// RuntimePolicy) + T4c-3 retry-loop wiring (round-38, this batch):
+	// when Attempts exceeds DefaultRuntimePolicyFor(kind).MaxRetries,
+	// the engine stops emitting fresh StartCatchUp and either escalates
+	// to Rebuild (if applicable) or falls back to Degraded.
+	Attempts int
 }
 
 // SessionKind identifies the type of recovery session.

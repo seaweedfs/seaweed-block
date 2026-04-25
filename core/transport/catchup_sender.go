@@ -116,8 +116,19 @@ func (e *BlockExecutor) doCatchUp(replicaID string, session *activeSession, targ
 	// is idempotent on already-applied LSNs. T4c-3 integration tests
 	// will cover the replicaFlushedLSN threading at the StartCatchUp
 	// command boundary if needed.
+	// Floor fromLSN to 1: LSN=0 is not a real entry (substrates start
+	// nextLSN at 1). smartwal's `oldestPreserved` defaults to 1 with
+	// no recycling; ScanLBAs(0, ...) would trip
+	// `fromLSN < oldestPreserved` and spuriously return
+	// ErrWALRecycled. Real LSNs always start at 1.
+	//
+	// TODO(T4d / engine→adapter→executor recovery wiring): thread
+	// replica's flushed LSN through StartCatchUp so the executor can
+	// scan from `R+1` rather than `1`. The replica is idempotent on
+	// already-applied LSNs (ApplyEntry contract) so the over-scan is
+	// correct but wasteful at scale.
 	var lastSent uint64
-	scanErr := e.primaryStore.ScanLBAs(0, func(entry storage.RecoveryEntry) error {
+	scanErr := e.primaryStore.ScanLBAs(1, func(entry storage.RecoveryEntry) error {
 		select {
 		case <-session.cancel:
 			return errSessionInvalidated

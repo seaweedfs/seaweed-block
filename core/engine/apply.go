@@ -446,6 +446,9 @@ func applySessionCompleted(st *ReplicaState, e SessionClosedCompleted, r *ApplyR
 	st.Session.Phase = PhaseCompleted
 	st.Session.AchievedLSN = e.AchievedLSN
 	st.Recovery.R = e.AchievedLSN // advance replica boundary
+	// T4c-3 retry-loop: success clears the attempt counter so a
+	// future independent recovery cycle starts with a fresh budget.
+	st.Recovery.Attempts = 0
 	// A successful catch-up/rebuild session sent mutating traffic
 	// at the current identity epoch, so the replica's lineage gate
 	// is now at this epoch. Treat completion as an implicit fence.
@@ -472,27 +475,99 @@ func applySessionFailed(st *ReplicaState, e SessionClosedFailed, r *ApplyResult,
 	trace("session_failed", e.Reason)
 
 	// T4c-2 G-1 §4.3 architect Option B: error-class mapping at engine
-	// SessionClose. ErrWALRecycled is a tier-class change — the gap
-	// has exceeded the substrate's retention window, and a retry at
-	// the same fromLSN cannot succeed. Force the recovery decision
-	// to Rebuild so the next decide() pass emits StartRebuild instead
-	// of looping on StartCatchUp.
-	//
-	// The substrate-package sentinel string is hard-coded here to
-	// avoid an engine→storage import dependency; the storage package
-	// owns the canonical error message ("storage: WAL recycled past
-	// requested LSN"). If that text drifts the integration matrix
-	// catches it (T4c-3 scenario #2 RecyclePathEscalates pin).
+	// SessionClose. ErrWALRecycled is a tier-class change — force
+	// recovery.Decision=Rebuild and reset Attempts so the next decide()
+	// pass emits a fresh StartRebuild rather than counting toward the
+	// catch-up retry budget.
 	if isWALRecycledFailure(e.Reason) {
 		st.Recovery.Decision = DecisionRebuild
 		st.Recovery.DecisionReason = "wal_recycled"
+		st.Recovery.Attempts = 0
 		trace("recycle_escalation", "ErrWALRecycled → recovery.Decision=Rebuild")
+		r.Commands = append(r.Commands, PublishDegraded{
+			ReplicaID: e.ReplicaID,
+			Reason:    "session_failed: " + e.Reason,
+		})
+		return
 	}
 
+	// T4c-3 §4.1 retry-loop wiring (round-38). Non-recycled failure:
+	// increment Attempts; if budget remaining, engine re-emits the
+	// matching Start* command on this same Apply (the recovery
+	// session was the active session; a new one for the same
+	// (decision, target) is in scope). Budget exhaustion publishes
+	// Degraded and clears the recovery decision so the next probe
+	// re-classifies.
+	//
+	// Exception: watchdog-synthesized start_timeout means the
+	// executor never even started the session — retrying an executor
+	// that won't start is unlikely to help. Skip retry; let the
+	// adapter's higher-layer machinery (probe re-classification)
+	// drive recovery.
+	if isStartTimeoutFailure(e.Reason) {
+		trace("start_timeout_no_retry", "watchdog timeout — skip retry")
+		r.Commands = append(r.Commands, PublishDegraded{
+			ReplicaID: e.ReplicaID,
+			Reason:    "session_failed: " + e.Reason,
+		})
+		return
+	}
+	st.Recovery.Attempts++
+	policy := DefaultRuntimePolicyFor(contentKindFor(st.Recovery.Decision))
+	budget := policy.MaxRetries
+	if st.Recovery.Attempts <= budget {
+		trace("retry_attempt",
+			fmt.Sprintf("attempt=%d budget=%d decision=%s",
+				st.Recovery.Attempts, budget, st.Recovery.Decision))
+		// Re-emit the appropriate Start* command. Lineage fields come
+		// from current Identity + recovery target.
+		switch st.Recovery.Decision {
+		case DecisionCatchUp:
+			r.Commands = append(r.Commands, StartCatchUp{
+				ReplicaID:       st.Identity.ReplicaID,
+				Epoch:           st.Identity.Epoch,
+				EndpointVersion: st.Identity.EndpointVersion,
+				TargetLSN:       st.Recovery.H,
+			})
+			trace("command", "StartCatchUp (retry)")
+		case DecisionRebuild:
+			r.Commands = append(r.Commands, StartRebuild{
+				ReplicaID:       st.Identity.ReplicaID,
+				Epoch:           st.Identity.Epoch,
+				EndpointVersion: st.Identity.EndpointVersion,
+				TargetLSN:       st.Recovery.H,
+			})
+			trace("command", "StartRebuild (retry)")
+		}
+		return
+	}
+
+	// Budget exhausted. Reset Attempts + clear decision so the next
+	// probe-driven decide() re-classifies (may pick Rebuild if R<S
+	// has shifted, or fall back to Degraded).
+	trace("retry_exhausted",
+		fmt.Sprintf("attempts=%d > budget=%d", st.Recovery.Attempts, budget))
+	st.Recovery.Attempts = 0
+	st.Recovery.Decision = DecisionUnknown
+	st.Recovery.DecisionReason = "retry_budget_exhausted"
 	r.Commands = append(r.Commands, PublishDegraded{
 		ReplicaID: e.ReplicaID,
-		Reason:    "session_failed: " + e.Reason,
+		Reason:    "retry_budget_exhausted: " + e.Reason,
 	})
+}
+
+// contentKindFor maps the engine's recovery Decision to the
+// RecoveryContentKind whose RuntimePolicy the retry budget comes
+// from. wal_delta covers catch-up; full_extent covers rebuild;
+// partial_lba is Stage 2 and not yet emitted by the engine.
+func contentKindFor(d RecoveryDecision) RecoveryContentKind {
+	switch d {
+	case DecisionCatchUp:
+		return RecoveryContentWALDelta
+	case DecisionRebuild:
+		return RecoveryContentFullExtent
+	}
+	return RecoveryContentWALDelta
 }
 
 // isWALRecycledFailure detects the substrate's ErrWALRecycled sentinel
@@ -510,6 +585,15 @@ func isWALRecycledFailure(reason string) bool {
 		"WAL recycled",
 		"wal recycled",
 	})
+}
+
+// isStartTimeoutFailure detects the adapter watchdog's synthetic
+// start_timeout failure. The watchdog emits exact text
+// "start_timeout" when an executor never signals SessionStart within
+// the configured window. Retrying makes no sense at the engine layer
+// — the executor itself isn't even reaching the dispatch path.
+func isStartTimeoutFailure(reason string) bool {
+	return reason == "start_timeout"
 }
 
 func containsAny(s string, subs []string) bool {
