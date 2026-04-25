@@ -28,7 +28,15 @@ type CommandExecutor interface {
 	// Probe dials the replica and collects transport/recovery facts.
 	// Returns a ProbeResult with success/failure and R/S/H boundaries.
 	// Must NOT decide recovery class — that's the engine's job.
-	Probe(replicaID, dataAddr, ctrlAddr string, epoch, endpointVersion uint64) ProbeResult
+	//
+	// Per T4c-1 (architect Option D): sessionID is a transient probe
+	// session minted by the adapter (parallel to FenceAtEpoch). The
+	// executor uses it to construct the wire-level RecoveryLineage for
+	// the symmetric ProbeReq + ProbeResponse pair. The probe sessionID
+	// is NOT registered in any executor session table, NOT represented
+	// in engine session truth, and NOT carried in OnSessionStart /
+	// OnSessionClose callbacks. Probe is non-mutating.
+	Probe(replicaID, dataAddr, ctrlAddr string, sessionID, epoch, endpointVersion uint64) ProbeResult
 
 	// StartCatchUp begins a catch-up session with the given sessionID and targetLSN.
 	// The sessionID is assigned by the adapter (matches the engine's session truth).

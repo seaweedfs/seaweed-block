@@ -262,12 +262,78 @@ func (e *BlockExecutor) fireFenceComplete(result adapter.FenceResult) {
 	}
 }
 
-// Probe dials the replica, sends a probe request, and returns the
-// replica's R/S/H boundaries. Returns facts only — never decides policy.
-func (e *BlockExecutor) Probe(replicaID, dataAddr, ctrlAddr string, epoch, endpointVersion uint64) adapter.ProbeResult {
+// ErrProbeLineageMismatch is returned by `BlockExecutor.Probe` when the
+// replica's response carries a lineage that does not match the request
+// lineage. Per architect round-21 + round-26 symmetric-pair rule, such
+// responses MUST NOT contribute to recovery facts — the executor surfaces
+// the error verbatim and the engine treats it as a probe failure.
+var ErrProbeLineageMismatch = errors.New("transport: probe: response lineage does not match request")
+
+// Probe dials the replica, sends a `MsgProbeReq` carrying the full
+// transient probe lineage (T4c-1 wire), and returns the replica's R/S/H
+// boundaries after validating the echoed lineage. Returns facts only —
+// never decides policy.
+//
+// Per T4c-1 (architect Option D): sessionID is the adapter-minted
+// transient probe sessionID. It is NOT registered in `executor.sessions`,
+// NOT carried in any session-lifecycle event. The lineage built here:
+//
+//	RecoveryLineage{SessionID, Epoch, EndpointVersion, TargetLSN: max(1, primaryH)}
+//
+// is consumed only by the wire pair. `primaryH` comes from
+// `primaryStore.Boundaries()`; the `max(1, ...)` floor ensures
+// architect's no-zero-TargetLSN rule holds even on an empty primary.
+//
+// The replica's `acceptMutationLineage` accepts a fresh higher-tuple
+// lineage normally — probe lineages monotonically advance with the
+// minted sessionID counter, so they don't masquerade as stale.
+//
+// Echo validation: if `resp.Lineage != requestLineage`, returns
+// `ErrProbeLineageMismatch`. Catches stale / cross-session / partially-
+// zeroed responses (the latter already caught at decode, but a valid-
+// decode-but-wrong-session ack is the load-bearing case here).
+//
+// Called by: adapter.executeCommand at engine.ProbeReplica dispatch.
+// Owns: dial timeout (2s); per-call conn deadline (3s); transient
+// probe lineage construction.
+// Borrows: primaryStore (boundaries snapshot for TargetLSN floor and
+// for R/S/H facts).
+func (e *BlockExecutor) Probe(replicaID, dataAddr, ctrlAddr string, sessionID, epoch, endpointVersion uint64) adapter.ProbeResult {
 	addr := e.replicaAddr
 	if dataAddr != "" {
 		addr = dataAddr
+	}
+
+	// Get primary's boundaries before dialing — the head is needed to
+	// build a non-zero TargetLSN for the request lineage, and the
+	// primaryS / primaryH are also returned in the ProbeResult.
+	_, primaryS, primaryH := e.primaryStore.Boundaries()
+
+	// Probe lineage construction (architect Option D). Floor TargetLSN
+	// at 1 to honor architect's no-zero-TargetLSN rule even when the
+	// primary has not yet written any data.
+	targetLSN := primaryH
+	if targetLSN == 0 {
+		targetLSN = 1
+	}
+	requestLineage := RecoveryLineage{
+		SessionID:       sessionID,
+		Epoch:           epoch,
+		EndpointVersion: endpointVersion,
+		TargetLSN:       targetLSN,
+	}
+	if requestLineage.SessionID == 0 || requestLineage.Epoch == 0 ||
+		requestLineage.EndpointVersion == 0 {
+		// Fail-closed: adapter must mint a non-zero sessionID; engine
+		// must populate non-zero epoch + endpointVersion before
+		// emitting ProbeReplica. A zero here is a programmer error.
+		return adapter.ProbeResult{
+			ReplicaID:       replicaID,
+			Success:         false,
+			EndpointVersion: endpointVersion,
+			TransportEpoch:  epoch,
+			FailReason:      fmt.Sprintf("probe lineage has zero field: %+v", requestLineage),
+		}
 	}
 
 	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
@@ -283,7 +349,7 @@ func (e *BlockExecutor) Probe(replicaID, dataAddr, ctrlAddr string, epoch, endpo
 	defer conn.Close()
 	conn.SetDeadline(time.Now().Add(3 * time.Second))
 
-	if err := WriteMsg(conn, MsgProbeReq, nil); err != nil {
+	if err := WriteMsg(conn, MsgProbeReq, EncodeProbeReq(ProbeRequest{Lineage: requestLineage})); err != nil {
 		return adapter.ProbeResult{
 			ReplicaID:       replicaID,
 			Success:         false,
@@ -315,8 +381,21 @@ func (e *BlockExecutor) Probe(replicaID, dataAddr, ctrlAddr string, epoch, endpo
 		}
 	}
 
-	// Get primary's boundaries for R/S/H.
-	_, primaryS, primaryH := e.primaryStore.Boundaries()
+	// Echo validation (round-26 symmetric-pair rule, mirrors T4b-2's
+	// barrier echo check). Primary-side consumer MUST reject stale /
+	// cross-session / partial-zero responses by full lineage tuple.
+	if resp.Lineage != requestLineage {
+		log.Printf("transport: probe: lineage mismatch replica=%s expected=%+v actual=%+v",
+			replicaID, requestLineage, resp.Lineage)
+		return adapter.ProbeResult{
+			ReplicaID:       replicaID,
+			Success:         false,
+			EndpointVersion: endpointVersion,
+			TransportEpoch:  epoch,
+			FailReason:      fmt.Sprintf("%v: expected=%+v actual=%+v",
+				ErrProbeLineageMismatch, requestLineage, resp.Lineage),
+		}
+	}
 
 	log.Printf("executor: probe %s success R=%d S=%d H=%d",
 		replicaID, resp.SyncedLSN, primaryS, primaryH)
@@ -326,8 +405,8 @@ func (e *BlockExecutor) Probe(replicaID, dataAddr, ctrlAddr string, epoch, endpo
 		EndpointVersion:   endpointVersion,
 		TransportEpoch:    epoch,
 		ReplicaFlushedLSN: resp.SyncedLSN, // R
-		PrimaryTailLSN:    primaryS,        // S
-		PrimaryHeadLSN:    primaryH,         // H
+		PrimaryTailLSN:    primaryS,       // S
+		PrimaryHeadLSN:    primaryH,       // H
 	}
 }
 

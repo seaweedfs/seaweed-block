@@ -244,11 +244,19 @@ func TestFailClosed_StaleShipAfterNewerRebuild_Rejected(t *testing.T) {
 	}
 }
 
-// TestFailClosed_ProbeDuringRebuild_DoesNotDisturbActiveLineage
-// proves probe is observation only: a probe arriving mid-rebuild
-// does not reset the replica's activeLineage, so subsequent rebuild
-// frames continue to be accepted at the same lineage.
-func TestFailClosed_ProbeDuringRebuild_DoesNotDisturbActiveLineage(t *testing.T) {
+// TestFailClosed_StaleProbeDuringRebuild_RejectedAndRebuildContinues
+// proves probe is now authority-bearing (T4c-1 round-26 symmetric-pair
+// rule): a probe carrying a stale lineage is rejected at
+// acceptMutationLineage (conn dropped without echo), so it cannot
+// disturb the replica's activeLineage. Subsequent rebuild frames at
+// the original (higher) lineage continue to be accepted.
+//
+// Pre-T4c-1 this test asserted "probe is observation only, no lineage."
+// That premise is invalidated by T4c-1 — probe IS authority-bearing.
+// The new contract: stale probe → fail-closed (drop without echo);
+// fresh probe → activeLineage advances and stale subsequent traffic
+// is correctly rejected.
+func TestFailClosed_StaleProbeDuringRebuild_RejectedAndRebuildContinues(t *testing.T) {
 	_, replica, listener := setupPrimaryReplica(t)
 
 	lin := RecoveryLineage{SessionID: 5, Epoch: 3, EndpointVersion: 3, TargetLSN: 99}
@@ -263,27 +271,26 @@ func TestFailClosed_ProbeDuringRebuild_DoesNotDisturbActiveLineage(t *testing.T)
 	}
 	time.Sleep(30 * time.Millisecond)
 
-	// Probe on a separate conn — observation, no lineage attached.
+	// Stale probe lineage (older epoch than the in-flight rebuild).
+	// Replica's acceptMutationLineage rejects → conn dropped without
+	// echo → primary observes EOF (in real flow, surfaces as probe
+	// failure).
+	stale := RecoveryLineage{SessionID: 1, Epoch: 1, EndpointVersion: 1, TargetLSN: 1}
 	connP, err := net.Dial("tcp", listener.Addr())
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer connP.Close()
-	if err := WriteMsg(connP, MsgProbeReq, nil); err != nil {
+	if err := WriteMsg(connP, MsgProbeReq, EncodeProbeReq(ProbeRequest{Lineage: stale})); err != nil {
 		t.Fatal(err)
 	}
-	msgType, payload, err := ReadMsg(connP)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if msgType != MsgProbeResp {
-		t.Fatalf("unexpected probe response type 0x%02x", msgType)
-	}
-	if _, err := DecodeProbeResp(payload); err != nil {
-		t.Fatalf("decode probe resp: %v", err)
+	// Stale probe must NOT receive an echo; conn drops on read.
+	if _, _, err := ReadMsg(connP); err == nil {
+		t.Fatalf("stale probe must be rejected without echo; got a response")
 	}
 
-	// Continue rebuild on the original conn — must still be accepted.
+	// Continue rebuild on the original conn — must still be accepted
+	// (probe was rejected, did not disturb activeLineage).
 	if err := WriteMsg(connA, MsgRebuildBlock, EncodeRebuildBlock(lin, 1, makeData(0xEF))); err != nil {
 		t.Fatalf("rebuild after probe: %v", err)
 	}
@@ -291,11 +298,11 @@ func TestFailClosed_ProbeDuringRebuild_DoesNotDisturbActiveLineage(t *testing.T)
 
 	got0, _ := replica.Read(0)
 	if got0[0] != 0xBE {
-		t.Fatalf("LBA 0 corrupted by probe: 0x%02x", got0[0])
+		t.Fatalf("LBA 0 corrupted by stale probe: 0x%02x", got0[0])
 	}
 	got1, _ := replica.Read(1)
 	if got1[0] != 0xEF {
-		t.Fatalf("LBA 1 not applied after probe — probe disturbed lineage: 0x%02x", got1[0])
+		t.Fatalf("LBA 1 not applied after stale probe — stale probe disturbed activeLineage: 0x%02x", got1[0])
 	}
 }
 

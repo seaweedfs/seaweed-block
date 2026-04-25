@@ -61,7 +61,8 @@ func TestTransport_Healthy_ProbeShowsCaughtUp(t *testing.T) {
 	replica.Sync()
 
 	exec := NewBlockExecutor(primary, listener.Addr())
-	result := exec.Probe("r1", listener.Addr(), listener.Addr(), 1, 1)
+	// T4c-1: Probe takes a transient adapter-minted sessionID.
+	result := exec.Probe("r1", listener.Addr(), listener.Addr(), 99, 1, 1)
 
 	if !result.Success {
 		t.Fatalf("probe failed: %s", result.FailReason)

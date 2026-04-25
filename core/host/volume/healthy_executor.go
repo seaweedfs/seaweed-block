@@ -48,7 +48,7 @@ func (e *HealthyPathExecutor) SetOnFenceComplete(fn adapter.OnFenceComplete) { e
 
 // Probe returns a successful probe. The adapter normalizes this
 // into a ProbeSucceeded event → Reachability.Status=Reachable.
-func (e *HealthyPathExecutor) Probe(replicaID, dataAddr, ctrlAddr string, epoch, endpointVersion uint64) adapter.ProbeResult {
+func (e *HealthyPathExecutor) Probe(replicaID, dataAddr, ctrlAddr string, sessionID, epoch, endpointVersion uint64) adapter.ProbeResult {
 	e.record("Probe:" + replicaID)
 	// Return Success=true plus caught-up boundaries (R=H=1, S=0).
 	// decide() sees R>=H and emits DecisionNone + FenceAtEpoch

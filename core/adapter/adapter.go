@@ -391,6 +391,16 @@ func (a *VolumeReplicaAdapter) prepareQueuedCommands(cmds []engine.Command) ([]e
 			// command + event pair.
 			sid := sessionIDCounter.Add(1)
 			queued = append(queued, queuedCommand{cmd: cmd, sessionID: sid})
+		case engine.ProbeReplica:
+			// T4c-1 (architect Option D): probe mints a transient
+			// sessionID so the wire frame carries a full lineage
+			// (round-26 symmetric-pair rule). Probe is non-mutating —
+			// no SessionPrepared event, no executor session-table
+			// registration, no OnSessionStart / OnSessionClose. The
+			// sessionID is consumed only by `executor.Probe` to
+			// construct the ProbeReq's RecoveryLineage.
+			sid := sessionIDCounter.Add(1)
+			queued = append(queued, queuedCommand{cmd: cmd, sessionID: sid})
 		default:
 			queued = append(queued, queuedCommand{cmd: cmd})
 		}
@@ -404,8 +414,11 @@ func (a *VolumeReplicaAdapter) prepareQueuedCommands(cmds []engine.Command) ([]e
 func (a *VolumeReplicaAdapter) executeCommand(q queuedCommand) {
 	switch c := q.cmd.(type) {
 	case engine.ProbeReplica:
+		// T4c-1: pass the adapter-minted transient probe sessionID so
+		// the executor can construct the ProbeReq's full lineage.
+		probeSessionID := q.sessionID
 		go func() {
-			result := a.executor.Probe(c.ReplicaID, c.DataAddr, c.CtrlAddr, c.Epoch, c.EndpointVersion)
+			result := a.executor.Probe(c.ReplicaID, c.DataAddr, c.CtrlAddr, probeSessionID, c.Epoch, c.EndpointVersion)
 			a.OnProbeResult(result)
 		}()
 

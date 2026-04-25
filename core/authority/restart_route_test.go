@@ -73,7 +73,7 @@ func (e *restartExecutor) SetOnFenceComplete(fn adapter.OnFenceComplete) {
 	e.mu.Unlock()
 }
 
-func (e *restartExecutor) Probe(replicaID, dataAddr, ctrlAddr string, epoch, endpointVersion uint64) adapter.ProbeResult {
+func (e *restartExecutor) Probe(replicaID, dataAddr, ctrlAddr string, sessionID, epoch, endpointVersion uint64) adapter.ProbeResult {
 	return adapter.ProbeResult{
 		ReplicaID:         replicaID,
 		Success:           true,

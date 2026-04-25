@@ -61,8 +61,11 @@ func TestProtocol_EnvelopeRoundTrip(t *testing.T) {
 			LSN:     10,
 			Data:    bytes.Repeat([]byte{0xAB}, 4096),
 		})},
-		{"MsgProbeReq", MsgProbeReq, nil},
+		{"MsgProbeReq", MsgProbeReq, EncodeProbeReq(ProbeRequest{
+			Lineage: RecoveryLineage{SessionID: 1, Epoch: 1, EndpointVersion: 1, TargetLSN: 10},
+		})},
 		{"MsgProbeResp", MsgProbeResp, EncodeProbeResp(ProbeResponse{
+			Lineage:   RecoveryLineage{SessionID: 1, Epoch: 1, EndpointVersion: 1, TargetLSN: 10},
 			SyncedLSN: 100, WalTail: 1, WalHead: 100,
 		})},
 		{"MsgRebuildBlock", MsgRebuildBlock, EncodeRebuildBlock(

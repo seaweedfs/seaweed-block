@@ -104,8 +104,35 @@ func (r *ReplicaListener) handleConn(conn net.Conn) {
 			}
 
 		case MsgProbeReq:
+			// T4c-1 wire upgrade: ProbeReq now carries full
+			// RecoveryLineage. Decode + validate + echo per round-26
+			// symmetric-pair rule. Failure to decode (short / zeroed
+			// lineage) closes the conn without echoing — the primary
+			// times out + treats as unreachable, which is the correct
+			// fail-closed surface.
+			//
+			// Probe is non-mutating: validation gates zeros and clearly
+			// stale lineages but MUST NOT advance `activeLineage`.
+			// Advancing activeLineage from a probe would cause a
+			// later catch-up / rebuild session at a lower sessionID
+			// (but same epoch / endpointVersion) to be incorrectly
+			// rejected as stale — probes monotonically advance
+			// sessionID via the adapter's global counter, so they
+			// would routinely race ahead of in-flight session IDs.
+			// Use `validateProbeLineage` instead.
+			req, err := DecodeProbeReq(payload)
+			if err != nil {
+				log.Printf("replica: decode probe req: %v", err)
+				return
+			}
+			if !r.validateProbeLineage(req.Lineage) {
+				log.Printf("replica: reject stale probe session=%d epoch=%d endpointVersion=%d",
+					req.Lineage.SessionID, req.Lineage.Epoch, req.Lineage.EndpointVersion)
+				return
+			}
 			R, S, H := r.store.Boundaries()
 			resp := EncodeProbeResp(ProbeResponse{
+				Lineage:   req.Lineage, // echo per round-26 Item C.3
 				SyncedLSN: R,
 				WalTail:   S,
 				WalHead:   H,
@@ -190,6 +217,46 @@ func (r *ReplicaListener) handleConn(conn net.Conn) {
 			return
 		}
 	}
+}
+
+// validateProbeLineage gates probe lineages: rejects zeros and clearly
+// stale tuples (older epoch / endpointVersion than activeLineage), but
+// does NOT advance activeLineage. Probe is non-mutating; activeLineage
+// belongs to mutating-flow tracking only.
+//
+// Stale rule: probe is rejected only when its (epoch, endpointVersion)
+// pair is strictly older than activeLineage's. SessionID alone does
+// NOT determine staleness for probes — probe sessionIDs come from a
+// monotonic adapter counter and routinely outpace in-flight session
+// IDs at the same (epoch, endpointVersion). A probe at the same
+// (epoch, endpointVersion) as activeLineage is always accepted for
+// echo, regardless of sessionID ordering.
+//
+// Called by: replica's MsgProbeReq handler (T4c-1).
+// Owns: the read of activeLineage; no writes.
+// Borrows: nothing.
+func (r *ReplicaListener) validateProbeLineage(incoming RecoveryLineage) bool {
+	if incoming.SessionID == 0 || incoming.Epoch == 0 ||
+		incoming.EndpointVersion == 0 || incoming.TargetLSN == 0 {
+		return false
+	}
+	r.mu.Lock()
+	active := r.activeLineage
+	r.mu.Unlock()
+	if active.SessionID == 0 {
+		// No active mutating lineage yet — any well-formed probe is
+		// acceptable for echo.
+		return true
+	}
+	// Reject only on strictly-older (epoch, endpointVersion). Same
+	// epoch / endpointVersion is accepted regardless of sessionID.
+	if incoming.Epoch < active.Epoch {
+		return false
+	}
+	if incoming.Epoch == active.Epoch && incoming.EndpointVersion < active.EndpointVersion {
+		return false
+	}
+	return true
 }
 
 func (r *ReplicaListener) acceptMutationLineage(incoming RecoveryLineage) bool {

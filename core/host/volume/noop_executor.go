@@ -52,7 +52,7 @@ func (e *noopExecutor) SetOnFenceComplete(fn adapter.OnFenceComplete) { e.onFenc
 // considering the replica caught-up; Mode stays non-Healthy
 // which is exactly the T0 acceptance claim (lineage known,
 // runtime facts NOT known).
-func (e *noopExecutor) Probe(replicaID, dataAddr, ctrlAddr string, epoch, endpointVersion uint64) adapter.ProbeResult {
+func (e *noopExecutor) Probe(replicaID, dataAddr, ctrlAddr string, sessionID, epoch, endpointVersion uint64) adapter.ProbeResult {
 	e.record("Probe:" + replicaID)
 	return adapter.ProbeResult{
 		ReplicaID:       replicaID,

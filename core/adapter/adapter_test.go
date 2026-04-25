@@ -28,6 +28,14 @@ type mockExecutor struct {
 	fenceErr        error
 	starts          []startRecord
 	fences          []fenceRecord
+	probeCalls      []probeRecord // T4c-1: captures sessionID adapter mints for ProbeReplica
+}
+
+type probeRecord struct {
+	replicaID       string
+	sessionID       uint64
+	epoch           uint64
+	endpointVersion uint64
 }
 
 type fenceRecord struct {
@@ -112,10 +120,16 @@ func (m *mockExecutor) fireFence(result FenceResult) {
 	}
 }
 
-func (m *mockExecutor) Probe(replicaID, dataAddr, ctrlAddr string, epoch, endpointVersion uint64) ProbeResult {
+func (m *mockExecutor) Probe(replicaID, dataAddr, ctrlAddr string, sessionID, epoch, endpointVersion uint64) ProbeResult {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.commands = append(m.commands, "Probe")
+	m.probeCalls = append(m.probeCalls, probeRecord{
+		replicaID:       replicaID,
+		sessionID:       sessionID,
+		epoch:           epoch,
+		endpointVersion: endpointVersion,
+	})
 	if r, ok := m.probeResults[replicaID]; ok {
 		return r
 	}
