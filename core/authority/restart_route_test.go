@@ -91,6 +91,9 @@ func (e *restartExecutor) StartCatchUp(replicaID string, sessionID, epoch, endpo
 func (e *restartExecutor) StartRebuild(replicaID string, sessionID, epoch, endpointVersion, targetLSN uint64) error {
 	return nil
 }
+func (e *restartExecutor) StartRecoverySession(replicaID string, sessionID, epoch, endpointVersion, targetLSN uint64, contentKind engine.RecoveryContentKind, policy engine.RecoveryRuntimePolicy) error {
+	return nil
+}
 func (e *restartExecutor) InvalidateSession(replicaID string, sessionID uint64, reason string) {}
 func (e *restartExecutor) PublishHealthy(replicaID string)                                     {}
 func (e *restartExecutor) PublishDegraded(replicaID string, reason string)                     {}

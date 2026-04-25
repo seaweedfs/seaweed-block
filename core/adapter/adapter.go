@@ -361,6 +361,28 @@ func (a *VolumeReplicaAdapter) prepareQueuedCommands(cmds []engine.Command) ([]e
 				NormalizeSessionPrepared(c.ReplicaID, sid, engine.SessionRebuild, c.TargetLSN),
 			)
 			queued = append(queued, queuedCommand{cmd: cmd, sessionID: sid})
+		case engine.StartRecovery:
+			// T4c-pre-B: forward-compatible dispatch path. Engine
+			// emission of StartRecovery happens at T4c-3 muscle port;
+			// today the legacy StartCatchUp / StartRebuild commands
+			// remain the engine's emit shape. This case ensures the
+			// adapter is ready when the migration lands.
+			//
+			// Map ContentKind to legacy SessionKind so the existing
+			// session lifecycle (SessionPrepared / Starting / Running
+			// / Completed) continues to work without churn:
+			//   wal_delta   → SessionCatchUp
+			//   full_extent → SessionRebuild
+			//   partial_lba → SessionRebuild (Stage 2 placeholder)
+			sid := sessionIDCounter.Add(1)
+			sessionKind := engine.SessionCatchUp
+			if c.ContentKind != engine.RecoveryContentWALDelta {
+				sessionKind = engine.SessionRebuild
+			}
+			events = append(events,
+				NormalizeSessionPrepared(c.ReplicaID, sid, sessionKind, c.TargetLSN),
+			)
+			queued = append(queued, queuedCommand{cmd: cmd, sessionID: sid})
 		case engine.FenceAtEpoch:
 			// Fence mints its own sessionID so the lineage wire frame
 			// carries a unique tuple. No SessionPrepared event —
@@ -406,6 +428,26 @@ func (a *VolumeReplicaAdapter) executeCommand(q queuedCommand) {
 				SessionID:  q.sessionID,
 				Success:    false,
 				FailReason: fmt.Sprintf("start_rebuild_failed: %v", err),
+			})
+		}
+
+	case engine.StartRecovery:
+		// T4c-pre-B unified dispatch: route through the executor's
+		// StartRecoverySession entry. Policy is taken from the
+		// command (engine populates via DefaultRuntimePolicyFor at
+		// emit time). On synchronous dispatch failure, normalize to
+		// SessionClose with a kind-tagged reason.
+		err := a.executor.StartRecoverySession(
+			c.ReplicaID,
+			q.sessionID, c.Epoch, c.EndpointVersion, c.TargetLSN,
+			c.ContentKind, c.RuntimePolicy,
+		)
+		if err != nil {
+			a.OnSessionClose(SessionCloseResult{
+				ReplicaID:  c.ReplicaID,
+				SessionID:  q.sessionID,
+				Success:    false,
+				FailReason: fmt.Sprintf("start_recovery_failed[%s]: %v", c.ContentKind, err),
 			})
 		}
 
@@ -456,7 +498,7 @@ func (a *VolumeReplicaAdapter) armStartWatchdog(q queuedCommand) {
 		return
 	}
 	switch q.cmd.(type) {
-	case engine.StartCatchUp, engine.StartRebuild:
+	case engine.StartCatchUp, engine.StartRebuild, engine.StartRecovery:
 	default:
 		return
 	}
@@ -545,6 +587,8 @@ func replicaIDFromCommand(cmd engine.Command) string {
 	case engine.StartCatchUp:
 		return c.ReplicaID
 	case engine.StartRebuild:
+		return c.ReplicaID
+	case engine.StartRecovery:
 		return c.ReplicaID
 	case engine.InvalidateSession:
 		return c.ReplicaID

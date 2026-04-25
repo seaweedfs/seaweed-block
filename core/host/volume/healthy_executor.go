@@ -4,6 +4,7 @@ import (
 	"sync"
 
 	"github.com/seaweedfs/seaweed-block/core/adapter"
+	"github.com/seaweedfs/seaweed-block/core/engine"
 )
 
 // HealthyPathExecutor is the T1 minimum-readiness executor. It
@@ -77,6 +78,16 @@ func (e *HealthyPathExecutor) StartCatchUp(replicaID string, sessionID, epoch, e
 
 func (e *HealthyPathExecutor) StartRebuild(replicaID string, sessionID, epoch, endpointVersion, targetLSN uint64) error {
 	e.record("StartRebuild:" + replicaID)
+	return nil
+}
+
+func (e *HealthyPathExecutor) StartRecoverySession(
+	replicaID string,
+	sessionID, epoch, endpointVersion, targetLSN uint64,
+	contentKind engine.RecoveryContentKind,
+	policy engine.RecoveryRuntimePolicy,
+) error {
+	e.record("StartRecoverySession:" + replicaID + ":" + string(contentKind))
 	return nil
 }
 

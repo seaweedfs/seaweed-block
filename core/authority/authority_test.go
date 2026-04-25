@@ -692,6 +692,9 @@ func (e *closureExecutor) StartCatchUp(replicaID string, sessionID, epoch, endpo
 func (e *closureExecutor) StartRebuild(replicaID string, sessionID, epoch, endpointVersion, targetLSN uint64) error {
 	return nil
 }
+func (e *closureExecutor) StartRecoverySession(replicaID string, sessionID, epoch, endpointVersion, targetLSN uint64, contentKind engine.RecoveryContentKind, policy engine.RecoveryRuntimePolicy) error {
+	return nil
+}
 func (e *closureExecutor) InvalidateSession(replicaID string, sessionID uint64, reason string) {}
 func (e *closureExecutor) PublishHealthy(replicaID string)                                     {}
 func (e *closureExecutor) PublishDegraded(replicaID string, reason string)                     {}

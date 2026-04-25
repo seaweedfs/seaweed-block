@@ -200,6 +200,18 @@ func (m *mockExecutor) StartRebuild(replicaID string, sessionID, epoch, endpoint
 	return nil
 }
 
+func (m *mockExecutor) StartRecoverySession(
+	replicaID string,
+	sessionID, epoch, endpointVersion, targetLSN uint64,
+	contentKind engine.RecoveryContentKind,
+	policy engine.RecoveryRuntimePolicy,
+) error {
+	if contentKind == engine.RecoveryContentFullExtent {
+		return m.StartRebuild(replicaID, sessionID, epoch, endpointVersion, targetLSN)
+	}
+	return m.StartCatchUp(replicaID, sessionID, epoch, endpointVersion, targetLSN)
+}
+
 func (m *mockExecutor) InvalidateSession(replicaID string, sessionID uint64, reason string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

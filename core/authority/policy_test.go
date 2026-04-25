@@ -955,6 +955,9 @@ func (e *policyClosureExecutor) StartCatchUp(replicaID string, sessionID, epoch,
 func (e *policyClosureExecutor) StartRebuild(replicaID string, sessionID, epoch, endpointVersion, targetLSN uint64) error {
 	return nil
 }
+func (e *policyClosureExecutor) StartRecoverySession(replicaID string, sessionID, epoch, endpointVersion, targetLSN uint64, contentKind engine.RecoveryContentKind, policy engine.RecoveryRuntimePolicy) error {
+	return nil
+}
 func (e *policyClosureExecutor) InvalidateSession(replicaID string, sessionID uint64, reason string) {}
 func (e *policyClosureExecutor) PublishHealthy(replicaID string)                                     {}
 func (e *policyClosureExecutor) PublishDegraded(replicaID string, reason string)                     {}

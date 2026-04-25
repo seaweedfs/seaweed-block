@@ -4,6 +4,7 @@ import (
 	"sync"
 
 	"github.com/seaweedfs/seaweed-block/core/adapter"
+	"github.com/seaweedfs/seaweed-block/core/engine"
 )
 
 // noopExecutor is the T0-scope CommandExecutor stub required by
@@ -69,6 +70,16 @@ func (e *noopExecutor) StartCatchUp(replicaID string, sessionID, epoch, endpoint
 
 func (e *noopExecutor) StartRebuild(replicaID string, sessionID, epoch, endpointVersion, targetLSN uint64) error {
 	e.record("StartRebuild:" + replicaID)
+	return nil
+}
+
+func (e *noopExecutor) StartRecoverySession(
+	replicaID string,
+	sessionID, epoch, endpointVersion, targetLSN uint64,
+	contentKind engine.RecoveryContentKind,
+	policy engine.RecoveryRuntimePolicy,
+) error {
+	e.record("StartRecoverySession:" + replicaID + ":" + string(contentKind))
 	return nil
 }
 

@@ -1,5 +1,7 @@
 package adapter
 
+import "github.com/seaweedfs/seaweed-block/core/engine"
+
 // CommandExecutor is the interface that runtime muscles must satisfy.
 // Each method corresponds to one engine command. The adapter calls
 // these after engine.Apply() emits commands.
@@ -37,6 +39,40 @@ type CommandExecutor interface {
 	// StartRebuild begins a full rebuild session with the given sessionID and targetLSN.
 	// Same contract as StartCatchUp.
 	StartRebuild(replicaID string, sessionID, epoch, endpointVersion, targetLSN uint64) error
+
+	// StartRecoverySession begins a recovery session for the given content
+	// kind under the given runtime policy. Per design memo §7a (T4c-pre-B):
+	// unifies catch-up / rebuild / partial-LBA execution behind one entry.
+	//
+	// ContentKind selects the substrate primitive:
+	//   - RecoveryContentWALDelta   → tier-1 WAL-window scan
+	//                                 (catch-up; subsumes StartCatchUp).
+	//   - RecoveryContentFullExtent → tier-3 full-extent fill
+	//                                 (rebuild; subsumes StartRebuild).
+	//   - RecoveryContentPartialLBA → tier-2 archive dump (Stage 2;
+	//                                 implementations may return error).
+	//
+	// RuntimePolicy carries the per-content-kind execution envelope
+	// (timeout / progress cadence / cancellation mode); see engine
+	// `DefaultRuntimePolicyFor`. The executor MUST honor the policy
+	// (no hard-coded timeouts that contradict it).
+	//
+	// Async lifecycle: same contract as StartCatchUp / StartRebuild —
+	// completion / failure MUST be reported via the registered
+	// OnSessionClose callback using the SAME sessionID.
+	//
+	// Transition note (T4c-pre-B): existing `StartCatchUp` /
+	// `StartRebuild` remain as the wire-level entry points until
+	// T4c-3 muscle port migrates engine emission to `StartRecovery`.
+	// Adapters / executors MAY implement `StartCatchUp` and
+	// `StartRebuild` as thin wrappers that build a `StartRecovery`
+	// command and dispatch through `StartRecoverySession`.
+	StartRecoverySession(
+		replicaID string,
+		sessionID, epoch, endpointVersion, targetLSN uint64,
+		contentKind engine.RecoveryContentKind,
+		policy engine.RecoveryRuntimePolicy,
+	) error
 
 	// InvalidateSession cancels an active session.
 	InvalidateSession(replicaID string, sessionID uint64, reason string)
