@@ -170,18 +170,52 @@ INV-REPL-LIVE-LANE-NEVER-SKIPS-LSN:
   sufficient. An "old LSN" on live is a duplicate/replay, handled
   by lineage gating; per-LBA-LSN comparison is recovery-only.
 
-Required at T4d:
-  1. Per-LBA applied LSN tracking at replica apply layer
-  2. Recovery apply skips entries whose LSN <= per-LBA applied LSN
-  3. Skip data write but UPDATE per-session accounting (refinement #1)
-  4. Apply skip rule on recovery lane only; live lane keeps current
-     lineage-gated apply (refinement #2)
-  5. Adversarial tests:
+ROUND-43 ARCHITECT SIGN ON FIX SHAPE:
+
+  T4d stale-entry safety belongs at the REPLICA RECOVERY APPLY GATE
+  (a NEW component, lane-aware), NOT spread across each substrate's
+  ApplyEntry. Substrate-level hardening is defense-in-depth, not
+  the primary fix. The invariant is about NO PER-LBA DATA REGRESSION,
+  not just frontier monotonicity.
+
+  Gate shape (architect verbatim):
+
+    live lane:
+      use existing lineage/session/live-order rules
+      do not use recovery stale-skip
+      do not update recovery coverage
+
+    recovery lane:
+      always update recovery accounting / coverage
+      if entry.LSN <= perLBAAppliedLSN[LBA]:
+          skip data write
+      else:
+          ApplyEntry(...)
+          update perLBAAppliedLSN[LBA] = entry.LSN
+
+  perLBAAppliedLSN source: from storage if exposed cleanly; else
+  session-local map seeded from recovery/live applies during the
+  session. Pre-existing state correctness eventually requires
+  substrate to expose per-LBA applied LSN metadata.
+
+T4d task list (round-43 final):
+
+  1. PRIMARY FIX — replica recovery apply gate (new component):
+     - Lane-aware (live vs recovery)
+     - Per-LBA applied LSN tracking
+     - Recovery lane: skip data write on stale; always update
+       accounting
+     - Live lane: passes through unchanged
+  2. DEFENSE-IN-DEPTH — substrate hardening:
+     - BlockStore.ApplyEntry: gate walHead = lsn on lsn > walHead
+     - walstore + smartwal: ideally add substrate-level
+       stale-protection or expose per-LBA applied LSN cleanly
+  3. 5 adversarial tests un-skipped + extended:
      - same LBA old/new + sever before new → no regression
-     - repeated recovery window → byte state stable
+     - repeated recovery window → byte state + per-LBA LSN stable
      - live races recovery old → live wins
-     - recovery stale-skip → bitmap/completion mask MUST reflect
-       coverage despite no data write
+     - recovery stale-skip → bitmap/coverage MUST reflect despite
+       no data write
      - live lane receives old-LSN duplicate → applies normally
        (no skip)
 
