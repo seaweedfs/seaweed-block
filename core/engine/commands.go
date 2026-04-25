@@ -177,6 +177,20 @@ type RecoveryRuntimePolicy struct {
 	ProgressCadence       time.Duration // progress callback / heartbeat cadence
 	Timeout               time.Duration // 0 = no fixed timeout (use stall detection)
 	CancellationMode      CancellationMode
+
+	// MaxRetries is the per-content-kind retry budget. Engine SessionClose
+	// handler retries (re-emits StartRecovery with incremented internal
+	// counter) on close-with-non-recycled-error until budget hit; on
+	// budget exhaustion, escalates to NeedsRebuild. Mirrors V2's
+	// `maxCatchupRetries=3` behavior at `WALShipper.CatchUpTo:286`.
+	//
+	// Per memo §7a.1a + G-1 §4.1 architect Option B (T4c-2 round-37):
+	// retry budget lives in the runtime policy, not on the executor or
+	// peer — keeps per-content-kind retry budgets explicit and
+	// co-located with timeout/cadence/cancellation. ErrWALRecycled
+	// (storage.ErrWALRecycled) is a tier-class change, NOT a retry
+	// trigger — it bypasses the budget entirely.
+	MaxRetries int
 }
 
 // StartRecovery — unified semantic command that subsumes
@@ -209,6 +223,7 @@ func DefaultRuntimePolicyFor(kind RecoveryContentKind) RecoveryRuntimePolicy {
 			Timeout:               30 * time.Second,
 			ProgressCadence:       1 * time.Second,
 			CancellationMode:      CancelOnTimeout,
+			MaxRetries:            3, // V2 maxCatchupRetries
 		}
 	case RecoveryContentFullExtent:
 		return RecoveryRuntimePolicy{
@@ -216,6 +231,7 @@ func DefaultRuntimePolicyFor(kind RecoveryContentKind) RecoveryRuntimePolicy {
 			Timeout:               0, // no fixed timeout — rebuild may legitimately take 30min+
 			ProgressCadence:       10 * time.Second,
 			CancellationMode:      CancelOnProgressStall,
+			MaxRetries:            0, // no retry; rebuild restart is a tier-class action
 		}
 	case RecoveryContentPartialLBA:
 		return RecoveryRuntimePolicy{
@@ -223,6 +239,7 @@ func DefaultRuntimePolicyFor(kind RecoveryContentKind) RecoveryRuntimePolicy {
 			Timeout:               0, // per-deployment tunable; depends on archive fetch SLA
 			ProgressCadence:       10 * time.Second,
 			CancellationMode:      CancelOnProgressStall,
+			MaxRetries:            1, // archive-bound; one retry tolerates a transient fetch hiccup
 		}
 	}
 	// Unknown kind — return zero-value; caller must validate.

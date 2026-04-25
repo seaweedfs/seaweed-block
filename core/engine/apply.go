@@ -471,10 +471,58 @@ func applySessionFailed(st *ReplicaState, e SessionClosedFailed, r *ApplyResult,
 	st.Session.FailureReason = e.Reason
 	trace("session_failed", e.Reason)
 
+	// T4c-2 G-1 §4.3 architect Option B: error-class mapping at engine
+	// SessionClose. ErrWALRecycled is a tier-class change — the gap
+	// has exceeded the substrate's retention window, and a retry at
+	// the same fromLSN cannot succeed. Force the recovery decision
+	// to Rebuild so the next decide() pass emits StartRebuild instead
+	// of looping on StartCatchUp.
+	//
+	// The substrate-package sentinel string is hard-coded here to
+	// avoid an engine→storage import dependency; the storage package
+	// owns the canonical error message ("storage: WAL recycled past
+	// requested LSN"). If that text drifts the integration matrix
+	// catches it (T4c-3 scenario #2 RecyclePathEscalates pin).
+	if isWALRecycledFailure(e.Reason) {
+		st.Recovery.Decision = DecisionRebuild
+		st.Recovery.DecisionReason = "wal_recycled"
+		trace("recycle_escalation", "ErrWALRecycled → recovery.Decision=Rebuild")
+	}
+
 	r.Commands = append(r.Commands, PublishDegraded{
 		ReplicaID: e.ReplicaID,
 		Reason:    "session_failed: " + e.Reason,
 	})
+}
+
+// isWALRecycledFailure detects the substrate's ErrWALRecycled sentinel
+// in a session-failure reason string. The wrapped error's
+// `errors.Is`-friendly form is `... WAL recycled past requested LSN`;
+// we match the "WAL recycled" infix to absorb both the wrap-formatted
+// and bare forms. Matches the storage package's sentinel text
+// (`storage.ErrWALRecycled`) without taking a package dependency on
+// it (engine MUST stay decoupled from storage).
+//
+// Per T4c-2 G-1 §4.3 (architect Option B): substrate-error-class
+// mapping at engine SessionClose handler.
+func isWALRecycledFailure(reason string) bool {
+	return reason != "" && containsAny(reason, []string{
+		"WAL recycled",
+		"wal recycled",
+	})
+}
+
+func containsAny(s string, subs []string) bool {
+	for _, sub := range subs {
+		if len(sub) <= len(s) {
+			for i := 0; i+len(sub) <= len(s); i++ {
+				if s[i:i+len(sub)] == sub {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 func applySessionInvalidated(st *ReplicaState, e SessionInvalidated, r *ApplyResult, trace func(string, string)) {

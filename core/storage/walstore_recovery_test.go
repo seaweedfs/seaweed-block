@@ -6,7 +6,7 @@ package storage
 //
 // Key contrast vs smartwal POC:
 //   - walstore preserves per-LSN entry data IN the WAL (not just
-//     metadata). 3 writes to same LBA → ScanFrom emits 3 entries.
+//     metadata). 3 writes to same LBA → ScanLBAs emits 3 entries.
 //   - No "data staleness" semantic — emitted Data is contemporaneous
 //     with emitted LSN.
 //   - ErrWALRecycled boundary is `checkpointLSN` (advanced by the
@@ -54,10 +54,10 @@ func walWriteLBA(t *testing.T, s *WALStore, lba uint32, marker byte) uint64 {
 
 // --- Capability #1: WAL replay (tier 1) ---
 
-// TestPOC_Walstore_ScanFrom_BasicRange — write 5 LSNs, ScanFrom(2)
+// TestWalstoreRecovery_ScanLBAs_BasicRange — write 5 LSNs, ScanLBAs(2)
 // returns LSNs 2..5 in order, with the data each LSN actually wrote.
 // V2-faithful: per-LSN, no dedup.
-func TestPOC_Walstore_ScanFrom_BasicRange(t *testing.T) {
+func TestWalstoreRecovery_ScanLBAs_BasicRange(t *testing.T) {
 	s := poWalstore(t)
 
 	lsns := make([]uint64, 5)
@@ -65,14 +65,14 @@ func TestPOC_Walstore_ScanFrom_BasicRange(t *testing.T) {
 		lsns[i] = walWriteLBA(t, s, i, byte(i+1))
 	}
 	// Sync ensures entries are durable in the WAL (not strictly needed
-	// for ScanFrom which reads pre-Sync data, but matches realistic
+	// for ScanLBAs which reads pre-Sync data, but matches realistic
 	// recovery scenario where replica's R is at a sync boundary).
 	if _, err := s.Sync(); err != nil {
 		t.Fatalf("Sync: %v", err)
 	}
 
 	var got []RecoveryEntry
-	err := s.ScanFrom(lsns[1], func(e RecoveryEntry) error {
+	err := s.ScanLBAs(lsns[1], func(e RecoveryEntry) error {
 		dup := make([]byte, len(e.Data))
 		copy(dup, e.Data)
 		e.Data = dup
@@ -80,7 +80,7 @@ func TestPOC_Walstore_ScanFrom_BasicRange(t *testing.T) {
 		return nil
 	})
 	if err != nil {
-		t.Fatalf("ScanFrom: %v", err)
+		t.Fatalf("ScanLBAs: %v", err)
 	}
 	if len(got) != 4 {
 		t.Fatalf("entries: got %d want 4 (LSNs 2..5)", len(got))
@@ -102,9 +102,9 @@ func TestPOC_Walstore_ScanFrom_BasicRange(t *testing.T) {
 	}
 }
 
-// TestPOC_Walstore_ScanFrom_FromHeadOrAbove_Empty — at-head and
+// TestWalstoreRecovery_ScanLBAs_FromHeadOrAbove_Empty — at-head and
 // beyond-head: no entries, no error.
-func TestPOC_Walstore_ScanFrom_FromHeadOrAbove_Empty(t *testing.T) {
+func TestWalstoreRecovery_ScanLBAs_FromHeadOrAbove_Empty(t *testing.T) {
 	s := poWalstore(t)
 	for i := uint32(0); i < 3; i++ {
 		walWriteLBA(t, s, i, byte(i+1))
@@ -114,22 +114,22 @@ func TestPOC_Walstore_ScanFrom_FromHeadOrAbove_Empty(t *testing.T) {
 	for _, fromLSN := range []uint64{head, head + 1, head + 100} {
 		t.Run(fmt.Sprintf("from=%d", fromLSN), func(t *testing.T) {
 			count := 0
-			err := s.ScanFrom(fromLSN, func(e RecoveryEntry) error {
+			err := s.ScanLBAs(fromLSN, func(e RecoveryEntry) error {
 				count++
 				return nil
 			})
 			if err != nil {
-				t.Fatalf("ScanFrom(%d): %v", fromLSN, err)
+				t.Fatalf("ScanLBAs(%d): %v", fromLSN, err)
 			}
 			if count != 0 {
-				t.Fatalf("ScanFrom(%d): emitted %d entries, want 0", fromLSN, count)
+				t.Fatalf("ScanLBAs(%d): emitted %d entries, want 0", fromLSN, count)
 			}
 		})
 	}
 }
 
-// TestPOC_Walstore_ScanFrom_PerLSNNotDeduped — V2-faithful semantic
-// pin. 3 writes to LBA=0 at distinct LSNs → ScanFrom emits 3
+// TestWalstoreRecovery_ScanLBAs_PerLSNNotDeduped — V2-faithful semantic
+// pin. 3 writes to LBA=0 at distinct LSNs → ScanLBAs emits 3
 // entries (one per LSN), each with the data that LSN actually wrote.
 //
 // THIS IS THE KEY DIFFERENCE vs smartwal POC §3.1:
@@ -138,14 +138,14 @@ func TestPOC_Walstore_ScanFrom_FromHeadOrAbove_Empty(t *testing.T) {
 //
 // Pins INV-REPL-RECOVERY-STREAM-LBA-DEDUP being NOT applicable to
 // walstore (memo §13.6 round-34 scoping — smartwal-mode-only).
-func TestPOC_Walstore_ScanFrom_PerLSNNotDeduped(t *testing.T) {
+func TestWalstoreRecovery_ScanLBAs_PerLSNNotDeduped(t *testing.T) {
 	s := poWalstore(t)
 	lsn1 := walWriteLBA(t, s, 0, 0xA1)
 	lsn2 := walWriteLBA(t, s, 0, 0xA2)
 	lsn3 := walWriteLBA(t, s, 0, 0xA3)
 
 	var got []RecoveryEntry
-	err := s.ScanFrom(1, func(e RecoveryEntry) error {
+	err := s.ScanLBAs(1, func(e RecoveryEntry) error {
 		dup := make([]byte, len(e.Data))
 		copy(dup, e.Data)
 		e.Data = dup
@@ -153,7 +153,7 @@ func TestPOC_Walstore_ScanFrom_PerLSNNotDeduped(t *testing.T) {
 		return nil
 	})
 	if err != nil {
-		t.Fatalf("ScanFrom: %v", err)
+		t.Fatalf("ScanLBAs: %v", err)
 	}
 	// V2-faithful: 3 writes to same LBA → 3 entries.
 	if len(got) != 3 {
@@ -178,10 +178,10 @@ func TestPOC_Walstore_ScanFrom_PerLSNNotDeduped(t *testing.T) {
 
 // --- Capability #1 + #4: ErrWALRecycled boundary ---
 
-// TestPOC_Walstore_ScanFrom_ErrWALRecycled — when fromLSN <=
+// TestWalstoreRecovery_ScanLBAs_ErrWALRecycled — when fromLSN <=
 // checkpointLSN, ErrWALRecycled fires. Walstore's checkpoint advances
 // after the flusher writes WAL entries to the extent.
-func TestPOC_Walstore_ScanFrom_ErrWALRecycled(t *testing.T) {
+func TestWalstoreRecovery_ScanLBAs_ErrWALRecycled(t *testing.T) {
 	s := poWalstore(t)
 	for i := uint32(0); i < 5; i++ {
 		walWriteLBA(t, s, i, byte(i+1))
@@ -205,35 +205,35 @@ func TestPOC_Walstore_ScanFrom_ErrWALRecycled(t *testing.T) {
 	}
 
 	// fromLSN=1 (below checkpoint): expect ErrWALRecycled.
-	err := s.ScanFrom(1, func(e RecoveryEntry) error { return nil })
+	err := s.ScanLBAs(1, func(e RecoveryEntry) error { return nil })
 	if !errors.Is(err, ErrWALRecycled) {
-		t.Fatalf("ScanFrom(1) with checkpointLSN=%d: got %v want ErrWALRecycled",
+		t.Fatalf("ScanLBAs(1) with checkpointLSN=%d: got %v want ErrWALRecycled",
 			cp, err)
 	}
 
 	// fromLSN=cp (at boundary, inclusive): also recycled.
-	err = s.ScanFrom(cp, func(e RecoveryEntry) error { return nil })
+	err = s.ScanLBAs(cp, func(e RecoveryEntry) error { return nil })
 	if !errors.Is(err, ErrWALRecycled) {
-		t.Fatalf("ScanFrom(%d=cp) at boundary: got %v want ErrWALRecycled", cp, err)
+		t.Fatalf("ScanLBAs(%d=cp) at boundary: got %v want ErrWALRecycled", cp, err)
 	}
 
 	// fromLSN=cp+1 (just above): must succeed if there are entries left.
 	count := 0
-	err = s.ScanFrom(cp+1, func(e RecoveryEntry) error {
+	err = s.ScanLBAs(cp+1, func(e RecoveryEntry) error {
 		count++
 		return nil
 	})
 	if err != nil {
-		t.Fatalf("ScanFrom(%d=cp+1) just above boundary: %v", cp+1, err)
+		t.Fatalf("ScanLBAs(%d=cp+1) just above boundary: %v", cp+1, err)
 	}
 	t.Logf("walstore retention: checkpoint=%d, scan from cp+1 returned %d entries", cp, count)
 }
 
 // --- Capability #2: extent enumeration ---
 
-// TestPOC_Walstore_AllBlocks_DeterministicOrdering — AllBlocks
+// TestWalstoreRecovery_AllBlocks_DeterministicOrdering — AllBlocks
 // returns the expected map; content correctness verified.
-func TestPOC_Walstore_AllBlocks_DeterministicOrdering(t *testing.T) {
+func TestWalstoreRecovery_AllBlocks_DeterministicOrdering(t *testing.T) {
 	s := poWalstore(t)
 	expected := map[uint32]byte{}
 	for i := uint32(0); i < 10; i++ {
@@ -262,7 +262,7 @@ func TestPOC_Walstore_AllBlocks_DeterministicOrdering(t *testing.T) {
 
 // --- Capability #3: concurrent live-write + recovery-read ---
 
-// TestPOC_Walstore_ScanFrom_ConcurrentLiveWrite_Safe — V2 paused
+// TestWalstoreRecovery_ScanLBAs_ConcurrentLiveWrite_Safe — V2 paused
 // live-ship during catch-up so V2 codebase doesn't validate this
 // concurrency. Walstore's per-LSN data preservation makes the
 // scenario lower-risk than smartwal: emitted Data is whatever was
@@ -272,7 +272,7 @@ func TestPOC_Walstore_AllBlocks_DeterministicOrdering(t *testing.T) {
 // Verifies: no deadlock, no torn reads, emitted entries carry data
 // CONTEMPORANEOUS with their LSN (not whatever the latest concurrent
 // write happened to be).
-func TestPOC_Walstore_ScanFrom_ConcurrentLiveWrite_Safe(t *testing.T) {
+func TestWalstoreRecovery_ScanLBAs_ConcurrentLiveWrite_Safe(t *testing.T) {
 	s := poWalstore(t)
 
 	// Pre-populate.
@@ -305,9 +305,9 @@ func TestPOC_Walstore_ScanFrom_ConcurrentLiveWrite_Safe(t *testing.T) {
 		}
 	}()
 
-	// Run ScanFrom while writer is hammering.
+	// Run ScanLBAs while writer is hammering.
 	collected := make([]RecoveryEntry, 0, 100)
-	err := s.ScanFrom(1, func(e RecoveryEntry) error {
+	err := s.ScanLBAs(1, func(e RecoveryEntry) error {
 		dup := make([]byte, len(e.Data))
 		copy(dup, e.Data)
 		e.Data = dup
@@ -320,9 +320,9 @@ func TestPOC_Walstore_ScanFrom_ConcurrentLiveWrite_Safe(t *testing.T) {
 	if err != nil {
 		// May hit ErrWALRecycled if writer pushed past checkpoint.
 		if !errors.Is(err, ErrWALRecycled) {
-			t.Fatalf("ScanFrom under concurrent writer: %v", err)
+			t.Fatalf("ScanLBAs under concurrent writer: %v", err)
 		}
-		t.Logf("ScanFrom under writer: ErrWALRecycled (writer outpaced retention; acceptable)")
+		t.Logf("ScanLBAs under writer: ErrWALRecycled (writer outpaced retention; acceptable)")
 		return
 	}
 
@@ -337,7 +337,7 @@ func TestPOC_Walstore_ScanFrom_ConcurrentLiveWrite_Safe(t *testing.T) {
 			t.Fatalf("LBA %d unexpected marker %02x — possible torn read or stale slot", e.LBA, marker)
 		}
 	}
-	t.Logf("FINDING (walstore): ScanFrom under concurrent writer emitted %d entries; no torn reads, no deadlock; per-LSN data contemporaneous with LSN (V2-faithful semantic). Concurrent live-write does not rewrite WAL slots, so emitted data matches the slot's LSN.",
+	t.Logf("FINDING (walstore): ScanLBAs under concurrent writer emitted %d entries; no torn reads, no deadlock; per-LSN data contemporaneous with LSN (V2-faithful semantic). Concurrent live-write does not rewrite WAL slots, so emitted data matches the slot's LSN.",
 		len(collected))
 }
 
@@ -351,14 +351,14 @@ func walWriteOnce(s *WALStore, lba uint32, marker byte) (uint64, error) {
 
 // --- Capability #4: WAL retention boundary characterization ---
 
-// TestPOC_Walstore_RetentionBoundary_Characterized — measures
+// TestWalstoreRecovery_RetentionBoundary_Characterized — measures
 // walstore's retention semantic. Unlike smartwal (fixed walSlots),
 // walstore retention is bounded by checkpointLSN advancement: the
 // flusher can advance checkpoint at any time, recycling WAL space.
 //
 // For POC characterization: confirm that ErrWALRecycled fires
 // precisely when fromLSN <= checkpointLSN.
-func TestPOC_Walstore_RetentionBoundary_Characterized(t *testing.T) {
+func TestWalstoreRecovery_RetentionBoundary_Characterized(t *testing.T) {
 	s := poWalstore(t)
 
 	// Write some entries.
@@ -389,23 +389,23 @@ func TestPOC_Walstore_RetentionBoundary_Characterized(t *testing.T) {
 		t.Skip("flusher did not advance checkpoint; cannot characterize boundary")
 	}
 
-	// Boundary verification: ScanFrom(cpAfter+1) must succeed if any
-	// entries above exist; ScanFrom(cpAfter) must fail.
-	err := s.ScanFrom(cpAfter, func(e RecoveryEntry) error { return nil })
+	// Boundary verification: ScanLBAs(cpAfter+1) must succeed if any
+	// entries above exist; ScanLBAs(cpAfter) must fail.
+	err := s.ScanLBAs(cpAfter, func(e RecoveryEntry) error { return nil })
 	if !errors.Is(err, ErrWALRecycled) {
-		t.Fatalf("ScanFrom(%d=cp) want ErrWALRecycled, got %v", cpAfter, err)
+		t.Fatalf("ScanLBAs(%d=cp) want ErrWALRecycled, got %v", cpAfter, err)
 	}
 	if cpAfter+1 < s.NextLSN() {
-		err = s.ScanFrom(cpAfter+1, func(e RecoveryEntry) error { return nil })
+		err = s.ScanLBAs(cpAfter+1, func(e RecoveryEntry) error { return nil })
 		if err != nil {
-			t.Fatalf("ScanFrom(%d=cp+1) want nil, got %v", cpAfter+1, err)
+			t.Fatalf("ScanLBAs(%d=cp+1) want nil, got %v", cpAfter+1, err)
 		}
 	}
 }
 
 // --- Sanity: walstore baseline behaviors unchanged ---
 
-func TestPOC_Walstore_Sanity_ExistingAPIsUnchanged(t *testing.T) {
+func TestWalstoreRecovery_Sanity_ExistingAPIsUnchanged(t *testing.T) {
 	s := poWalstore(t)
 	walWriteLBA(t, s, 0, 0x42)
 	if _, err := s.Sync(); err != nil {

@@ -52,11 +52,11 @@ func writeLBA(t *testing.T, s *Store, lba uint32, marker byte) uint64 {
 
 // --- Capability #1: WAL replay (tier 1) ---
 
-// TestPOC_ScanFrom_BasicRange — write 5 LSNs, ScanFrom(2) returns
+// TestSmartwalRecovery_ScanLBAs_BasicRange — write 5 LSNs, ScanLBAs(2) returns
 // LBAs touched at LSN ≥ 2, in LSN order, with current extent data.
 // Verifies the basic tier-1 shape works on smartwal under no
 // concurrent writers.
-func TestPOC_ScanFrom_BasicRange(t *testing.T) {
+func TestSmartwalRecovery_ScanLBAs_BasicRange(t *testing.T) {
 	s := poStore(t, 64)
 
 	// 5 distinct LBAs, 5 distinct LSNs.
@@ -66,7 +66,7 @@ func TestPOC_ScanFrom_BasicRange(t *testing.T) {
 	}
 
 	var got []RecoveryEntry
-	err := s.ScanFrom(lsns[1], func(e RecoveryEntry) error {
+	err := s.ScanLBAs(lsns[1], func(e RecoveryEntry) error {
 		// Copy data because POC docs Data borrowed; here we want to
 		// inspect after callback returns.
 		dup := make([]byte, len(e.Data))
@@ -76,7 +76,7 @@ func TestPOC_ScanFrom_BasicRange(t *testing.T) {
 		return nil
 	})
 	if err != nil {
-		t.Fatalf("ScanFrom: %v", err)
+		t.Fatalf("ScanLBAs: %v", err)
 	}
 	if len(got) != 4 {
 		t.Fatalf("entries: got %d want 4 (LSNs 2..5)", len(got))
@@ -99,10 +99,10 @@ func TestPOC_ScanFrom_BasicRange(t *testing.T) {
 	}
 }
 
-// TestPOC_ScanFrom_FromHeadOrAbove_Empty — ScanFrom(head) and
-// ScanFrom(head+N) return nil, no entries. Caller is at-or-ahead of
+// TestSmartwalRecovery_ScanLBAs_FromHeadOrAbove_Empty — ScanLBAs(head) and
+// ScanLBAs(head+N) return nil, no entries. Caller is at-or-ahead of
 // primary head; nothing to ship.
-func TestPOC_ScanFrom_FromHeadOrAbove_Empty(t *testing.T) {
+func TestSmartwalRecovery_ScanLBAs_FromHeadOrAbove_Empty(t *testing.T) {
 	s := poStore(t, 64)
 	for i := uint32(0); i < 3; i++ {
 		writeLBA(t, s, i, byte(i+1))
@@ -112,36 +112,36 @@ func TestPOC_ScanFrom_FromHeadOrAbove_Empty(t *testing.T) {
 	for _, fromLSN := range []uint64{head, head + 1, head + 100} {
 		t.Run(fmt.Sprintf("from=%d", fromLSN), func(t *testing.T) {
 			count := 0
-			err := s.ScanFrom(fromLSN, func(e RecoveryEntry) error {
+			err := s.ScanLBAs(fromLSN, func(e RecoveryEntry) error {
 				count++
 				return nil
 			})
 			if err != nil {
-				t.Fatalf("ScanFrom(%d): %v", fromLSN, err)
+				t.Fatalf("ScanLBAs(%d): %v", fromLSN, err)
 			}
 			if count != 0 {
-				t.Fatalf("ScanFrom(%d): emitted %d entries, want 0", fromLSN, count)
+				t.Fatalf("ScanLBAs(%d): emitted %d entries, want 0", fromLSN, count)
 			}
 		})
 	}
 }
 
-// TestPOC_ScanFrom_LastWriterWinsPerLBA — write LBA=0 at three
-// distinct LSNs (1, 2, 3) with three different markers. ScanFrom(1)
+// TestSmartwalRecovery_ScanLBAs_LastWriterWinsPerLBA — write LBA=0 at three
+// distinct LSNs (1, 2, 3) with three different markers. ScanLBAs(1)
 // must emit ONE entry for LBA=0 with the latest LSN (3) and the
 // latest data marker. This is the smartwal-specific
 // state-convergence semantic (extent has only latest data;
 // historical writes not recoverable).
 //
 // FINDING: this is the substrate quirk reported in POC report §3.1.
-func TestPOC_ScanFrom_LastWriterWinsPerLBA(t *testing.T) {
+func TestSmartwalRecovery_ScanLBAs_LastWriterWinsPerLBA(t *testing.T) {
 	s := poStore(t, 64)
 	writeLBA(t, s, 0, 0xA1)
 	writeLBA(t, s, 0, 0xA2)
 	lsn3 := writeLBA(t, s, 0, 0xA3)
 
 	var got []RecoveryEntry
-	err := s.ScanFrom(1, func(e RecoveryEntry) error {
+	err := s.ScanLBAs(1, func(e RecoveryEntry) error {
 		dup := make([]byte, len(e.Data))
 		copy(dup, e.Data)
 		e.Data = dup
@@ -149,7 +149,7 @@ func TestPOC_ScanFrom_LastWriterWinsPerLBA(t *testing.T) {
 		return nil
 	})
 	if err != nil {
-		t.Fatalf("ScanFrom: %v", err)
+		t.Fatalf("ScanLBAs: %v", err)
 	}
 	// Smartwal CANNOT deliver every LSN entry — it has only the
 	// latest per-LBA in the extent. So 3 writes to the same LBA
@@ -170,13 +170,13 @@ func TestPOC_ScanFrom_LastWriterWinsPerLBA(t *testing.T) {
 
 // --- Capability #1 + #4: ErrWALRecycled boundary ---
 
-// TestPOC_ScanFrom_ErrWALRecycled — write more LSNs than the ring
-// capacity holds, then ScanFrom(1) — expect ErrWALRecycled because
+// TestSmartwalRecovery_ScanLBAs_ErrWALRecycled — write more LSNs than the ring
+// capacity holds, then ScanLBAs(1) — expect ErrWALRecycled because
 // LSN 1's slot has been overwritten by a newer LSN.
 //
 // Capability #4 retention characterization: with `walSlots=8`,
 // retention window is exactly the last 8 LSNs.
-func TestPOC_ScanFrom_ErrWALRecycled(t *testing.T) {
+func TestSmartwalRecovery_ScanLBAs_ErrWALRecycled(t *testing.T) {
 	const walSlots = 8
 	s := poStore(t, walSlots)
 
@@ -187,38 +187,38 @@ func TestPOC_ScanFrom_ErrWALRecycled(t *testing.T) {
 	}
 
 	// fromLSN=1: must surface ErrWALRecycled.
-	err := s.ScanFrom(1, func(e RecoveryEntry) error { return nil })
+	err := s.ScanLBAs(1, func(e RecoveryEntry) error { return nil })
 	if !errors.Is(err, ErrWALRecycled) {
-		t.Fatalf("ScanFrom(1) on recycled WAL: got %v want ErrWALRecycled", err)
+		t.Fatalf("ScanLBAs(1) on recycled WAL: got %v want ErrWALRecycled", err)
 	}
 
 	// fromLSN at the boundary: head = walSlots+5+1 = 14 (next), so
 	// last walSlots = LSNs 6..13. fromLSN=6 must succeed.
 	count := 0
-	err = s.ScanFrom(6, func(e RecoveryEntry) error {
+	err = s.ScanLBAs(6, func(e RecoveryEntry) error {
 		count++
 		return nil
 	})
 	if err != nil {
-		t.Fatalf("ScanFrom(6) at retention boundary: %v", err)
+		t.Fatalf("ScanLBAs(6) at retention boundary: %v", err)
 	}
 	if count == 0 {
-		t.Fatalf("ScanFrom(6): emitted 0 entries; expected ≥1 (LBAs covered in [6,13])")
+		t.Fatalf("ScanLBAs(6): emitted 0 entries; expected ≥1 (LBAs covered in [6,13])")
 	}
 
 	// fromLSN one below boundary (5): must surface ErrWALRecycled.
-	err = s.ScanFrom(5, func(e RecoveryEntry) error { return nil })
+	err = s.ScanLBAs(5, func(e RecoveryEntry) error { return nil })
 	if !errors.Is(err, ErrWALRecycled) {
-		t.Fatalf("ScanFrom(5) just below boundary: got %v want ErrWALRecycled", err)
+		t.Fatalf("ScanLBAs(5) just below boundary: got %v want ErrWALRecycled", err)
 	}
 }
 
 // --- Capability #2: extent enumeration ---
 
-// TestPOC_AllBlocks_DeterministicOrdering — AllBlocks returns a map;
+// TestSmartwalRecovery_AllBlocks_DeterministicOrdering — AllBlocks returns a map;
 // iteration order is stable per the V3 storage contract. Verify
 // content correctness; ordering is the caller's job.
-func TestPOC_AllBlocks_DeterministicOrdering(t *testing.T) {
+func TestSmartwalRecovery_AllBlocks_DeterministicOrdering(t *testing.T) {
 	s := poStore(t, 64)
 	expected := map[uint32]byte{}
 	for i := uint32(0); i < 10; i++ {
@@ -247,16 +247,16 @@ func TestPOC_AllBlocks_DeterministicOrdering(t *testing.T) {
 
 // --- Capability #3: concurrent live-write + recovery-read ---
 
-// TestPOC_ScanFrom_ConcurrentLiveWrite_DataStaleness — exercises
+// TestSmartwalRecovery_ScanLBAs_ConcurrentLiveWrite_DataStaleness — exercises
 // the V3-NEW capability that V2 paused (V2 paused live-ship during
 // catch-up, so V2 codebase doesn't validate this concurrency).
 //
-// Spawns a writer goroutine that continues writing while ScanFrom
+// Spawns a writer goroutine that continues writing while ScanLBAs
 // runs. Verifies:
 //   - no crash, no deadlock
 //   - no torn reads (extent reads always return a complete block)
 //
-// Documents the "data staleness" semantic: ScanFrom may return
+// Documents the "data staleness" semantic: ScanLBAs may return
 // {LBA, LSN_old, data_new} where data_new came from a write the
 // scan didn't see (LSN > snapshot head). This is a CONCRETE
 // ARTIFACT of smartwal's extent-only design.
@@ -268,7 +268,7 @@ func TestPOC_AllBlocks_DeterministicOrdering(t *testing.T) {
 // recovery-stream lane alone, however, the LSN label may not match
 // the data — receiver must not rely on per-recovery-entry LSN-vs-
 // data consistency, only on cross-lane bitmap reconciliation.
-func TestPOC_ScanFrom_ConcurrentLiveWrite_DataStaleness(t *testing.T) {
+func TestSmartwalRecovery_ScanLBAs_ConcurrentLiveWrite_DataStaleness(t *testing.T) {
 	s := poStore(t, 256)
 
 	// Pre-populate.
@@ -299,9 +299,9 @@ func TestPOC_ScanFrom_ConcurrentLiveWrite_DataStaleness(t *testing.T) {
 		}
 	}()
 
-	// Run ScanFrom while writer is hammering.
+	// Run ScanLBAs while writer is hammering.
 	collected := make(map[uint32]RecoveryEntry)
-	err := s.ScanFrom(1, func(e RecoveryEntry) error {
+	err := s.ScanLBAs(1, func(e RecoveryEntry) error {
 		dup := make([]byte, len(e.Data))
 		copy(dup, e.Data)
 		e.Data = dup
@@ -316,9 +316,9 @@ func TestPOC_ScanFrom_ConcurrentLiveWrite_DataStaleness(t *testing.T) {
 		// Either outcome is informational for capability #3 — what
 		// we care about is no panic, no torn reads.
 		if !errors.Is(err, ErrWALRecycled) {
-			t.Fatalf("ScanFrom under concurrent writer: %v", err)
+			t.Fatalf("ScanLBAs under concurrent writer: %v", err)
 		}
-		t.Logf("ScanFrom under writer: ErrWALRecycled (expected possibility; writer outpaced retention)")
+		t.Logf("ScanLBAs under writer: ErrWALRecycled (expected possibility; writer outpaced retention)")
 		return
 	}
 
@@ -348,7 +348,7 @@ func TestPOC_ScanFrom_ConcurrentLiveWrite_DataStaleness(t *testing.T) {
 		}
 	}
 
-	t.Logf("FINDING: ScanFrom under concurrent writer emitted %d entries; head before scan=%d, head after=%d. No torn reads observed. Data-staleness semantic confirmed: emitted LSN labels reflect slot record at scan-time, but extent data may belong to a newer LSN.",
+	t.Logf("FINDING: ScanLBAs under concurrent writer emitted %d entries; head before scan=%d, head after=%d. No torn reads observed. Data-staleness semantic confirmed: emitted LSN labels reflect slot record at scan-time, but extent data may belong to a newer LSN.",
 		len(collected), headBeforeScan, s.NextLSN())
 }
 
@@ -363,10 +363,10 @@ func writeOnceWithMarker(s *Store, lba uint32, marker byte) (uint64, error) {
 
 // --- Capability #4: WAL retention boundary characterization ---
 
-// TestPOC_RetentionBoundary_Characterized — measures exactly when
+// TestSmartwalRecovery_RetentionBoundary_Characterized — measures exactly when
 // ErrWALRecycled fires for a given walSlots size. Drives capability
 // #4 numerically so the POC report can quote concrete values.
-func TestPOC_RetentionBoundary_Characterized(t *testing.T) {
+func TestSmartwalRecovery_RetentionBoundary_Characterized(t *testing.T) {
 	for _, walSlots := range []uint64{8, 16, 64} {
 		t.Run(fmt.Sprintf("slots=%d", walSlots), func(t *testing.T) {
 			s := poStore(t, walSlots)
@@ -375,16 +375,16 @@ func TestPOC_RetentionBoundary_Characterized(t *testing.T) {
 			for i := uint32(0); i < uint32(walSlots); i++ {
 				writeLBA(t, s, i%4, byte(i+1))
 			}
-			err := s.ScanFrom(1, func(e RecoveryEntry) error { return nil })
+			err := s.ScanLBAs(1, func(e RecoveryEntry) error { return nil })
 			if err != nil {
-				t.Fatalf("slots=%d at boundary: ScanFrom(1) = %v want nil", walSlots, err)
+				t.Fatalf("slots=%d at boundary: ScanLBAs(1) = %v want nil", walSlots, err)
 			}
 
 			// One more write: LSN 1's slot is overwritten.
 			writeLBA(t, s, 0, 0xFF)
-			err = s.ScanFrom(1, func(e RecoveryEntry) error { return nil })
+			err = s.ScanLBAs(1, func(e RecoveryEntry) error { return nil })
 			if !errors.Is(err, ErrWALRecycled) {
-				t.Fatalf("slots=%d after walSlots+1: ScanFrom(1) = %v want ErrWALRecycled",
+				t.Fatalf("slots=%d after walSlots+1: ScanLBAs(1) = %v want ErrWALRecycled",
 					walSlots, err)
 			}
 
@@ -392,9 +392,9 @@ func TestPOC_RetentionBoundary_Characterized(t *testing.T) {
 			// nextLSN = walSlots+2, oldest preserved = nextLSN - walSlots
 			// = 2.
 			fromBoundary := s.NextLSN() - walSlots
-			err = s.ScanFrom(fromBoundary, func(e RecoveryEntry) error { return nil })
+			err = s.ScanLBAs(fromBoundary, func(e RecoveryEntry) error { return nil })
 			if err != nil {
-				t.Fatalf("slots=%d at fresh boundary: ScanFrom(%d) = %v want nil",
+				t.Fatalf("slots=%d at fresh boundary: ScanLBAs(%d) = %v want nil",
 					walSlots, fromBoundary, err)
 			}
 		})
@@ -403,9 +403,9 @@ func TestPOC_RetentionBoundary_Characterized(t *testing.T) {
 
 // --- Sanity: smartwal API stability under POC additions ---
 
-// TestPOC_Sanity_ExistingAPIsUnchanged — verify the POC extensions
+// TestSmartwalRecovery_Sanity_ExistingAPIsUnchanged — verify the POC extensions
 // don't break baseline smartwal behaviors.
-func TestPOC_Sanity_ExistingAPIsUnchanged(t *testing.T) {
+func TestSmartwalRecovery_Sanity_ExistingAPIsUnchanged(t *testing.T) {
 	s := poStore(t, 64)
 	writeLBA(t, s, 0, 0x42)
 	if _, err := s.Sync(); err != nil {

@@ -117,6 +117,33 @@ type LogicalStorage interface {
 	// the rebuild server to enumerate what to ship.
 	AllBlocks() map[uint32][]byte
 
+	// ScanLBAs is the T4c-2 tier-1 recovery contract. Emits a
+	// RecoveryEntry callback for each modification the substrate
+	// retains within [fromLSN, head). Called by the catch-up sender
+	// (`transport.BlockExecutor.doCatchUp`) to stream the missing
+	// retained-WAL window to a replica.
+	//
+	// Substrate sub-mode (memo §5.1 / §13.0a):
+	//   - walstore: `wal_replay` (V2-faithful per-LSN; 3 writes to
+	//     LBA=L produce 3 entries)
+	//   - smartwal: `state_convergence` (per-LBA dedup; 3 writes to
+	//     LBA=L produce 1 entry, LSN is scan-time)
+	//   - BlockStore (in-memory): state_convergence-equivalent
+	//     synthesis (no real retention; emits current contents)
+	//
+	// Returns ErrWALRecycled (sentinel from this package) if fromLSN
+	// is at or below the substrate's retention boundary. Callers
+	// MUST treat ErrWALRecycled as a tier-class change (escalate to
+	// rebuild); other errors are stream-level and may be retried.
+	//
+	// The callback's return value follows V2 walstore semantics: a
+	// non-nil error from `fn` STOPS the scan and is returned to the
+	// caller; a `nil` return continues the scan past the current
+	// entry (used by the sender to skip entries past targetLSN
+	// without breaking the loop) — INV-REPL-CATCHUP-CALLBACK-RETURN-
+	// NIL-CONTINUES.
+	ScanLBAs(fromLSN uint64, fn func(RecoveryEntry) error) error
+
 	// --- Lifecycle ---
 
 	// Close releases any resources (file handles, fsync queues). After

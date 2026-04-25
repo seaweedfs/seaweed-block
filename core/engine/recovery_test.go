@@ -155,6 +155,88 @@ func TestDefaultRuntimePolicyFor_TimeoutCadenceConsistency(t *testing.T) {
 	}
 }
 
+// TestSessionFailed_WALRecycled_EscalatesToRebuild — T4c-2 G-1 §4.3
+// architect Option B: when a SessionClosedFailed event's Reason
+// contains the substrate's ErrWALRecycled sentinel text, engine MUST
+// set recovery.Decision = DecisionRebuild so the next decide() pass
+// emits StartRebuild instead of looping on StartCatchUp.
+//
+// `INV-REPL-CATCHUP-RECYCLE-ESCALATES`.
+func TestSessionFailed_WALRecycled_EscalatesToRebuild(t *testing.T) {
+	st := &ReplicaState{
+		Identity: IdentityTruth{ReplicaID: "r1", Epoch: 1, EndpointVersion: 1},
+		Session: SessionTruth{
+			SessionID: 7,
+			Phase:     PhaseRunning,
+		},
+		Recovery: RecoveryTruth{Decision: DecisionCatchUp},
+	}
+	ev := SessionClosedFailed{
+		ReplicaID:  "r1",
+		SessionID:  7,
+		Reason: "catch-up: WAL recycled: storage: WAL recycled past requested LSN: fromLSN=5 checkpointLSN=10",
+	}
+	r := Apply(st, ev)
+	_ = r
+	if st.Recovery.Decision != DecisionRebuild {
+		t.Errorf("Recovery.Decision = %s, want %s after WAL-recycled session failure",
+			st.Recovery.Decision, DecisionRebuild)
+	}
+	if st.Recovery.DecisionReason != "wal_recycled" {
+		t.Errorf("Recovery.DecisionReason = %q, want %q",
+			st.Recovery.DecisionReason, "wal_recycled")
+	}
+}
+
+// TestSessionFailed_NonRecycled_DoesNotEscalate — counter-pin: a
+// non-recycle failure (e.g. transient network error, target-not-
+// reached) MUST NOT silently flip Decision to Rebuild. The retry
+// path (G-1 §4.1) handles those — escalation is reserved for the
+// tier-class-change sentinel.
+func TestSessionFailed_NonRecycled_DoesNotEscalate(t *testing.T) {
+	st := &ReplicaState{
+		Identity: IdentityTruth{ReplicaID: "r1", Epoch: 1, EndpointVersion: 1},
+		Session: SessionTruth{
+			SessionID: 7,
+			Phase:     PhaseRunning,
+		},
+		Recovery: RecoveryTruth{Decision: DecisionCatchUp},
+	}
+	ev := SessionClosedFailed{
+		ReplicaID:  "r1",
+		SessionID:  7,
+		Reason: "catch-up: target 100 not reached (achieved=50)",
+	}
+	Apply(st, ev)
+	if st.Recovery.Decision != DecisionCatchUp {
+		t.Errorf("Recovery.Decision = %s, want %s — non-recycle failure must not escalate",
+			st.Recovery.Decision, DecisionCatchUp)
+	}
+}
+
+// TestDefaultRuntimePolicy_MaxRetries — T4c-2 G-1 §4.1 architect
+// Option B: per-content-kind retry budget lives on RuntimePolicy.
+// wal_delta gets V2's `maxCatchupRetries=3`; full_extent gets 0
+// (rebuild has no retry — restart is a tier-class action);
+// partial_lba gets 1 (archive-bound; one retry tolerates a transient
+// fetch hiccup).
+func TestDefaultRuntimePolicy_MaxRetries(t *testing.T) {
+	cases := []struct {
+		kind RecoveryContentKind
+		want int
+	}{
+		{RecoveryContentWALDelta, 3},
+		{RecoveryContentFullExtent, 0},
+		{RecoveryContentPartialLBA, 1},
+	}
+	for _, tc := range cases {
+		got := DefaultRuntimePolicyFor(tc.kind).MaxRetries
+		if got != tc.want {
+			t.Errorf("kind=%q MaxRetries = %d, want %d", tc.kind, got, tc.want)
+		}
+	}
+}
+
 // Sanity: the policy struct is comparable (all comparable fields).
 // If a future change adds a non-comparable field this catches it at
 // compile time rather than at usage site.

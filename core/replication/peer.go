@@ -30,15 +30,39 @@ type ReplicaTarget struct {
 	EndpointVersion uint64
 }
 
-// ReplicaState is the coarse peer health state. T4a scope supports
-// only Healthy ↔ Degraded. Richer states (CatchingUp, Rebuilding,
-// NeedsRebuild) arrive at T4c when the recovery pipeline lands.
+// ReplicaState is the coarse peer health state. T4a introduced
+// Healthy ↔ Degraded; T4c-2 extends with CatchingUp + NeedsRebuild
+// per memo §2.2.
+//
+// Transitions (T4c-2):
+//
+//	Healthy → CatchingUp        (probe classifies as catch-up-required)
+//	CatchingUp → Healthy         (catch-up done-ack received)
+//	CatchingUp → NeedsRebuild    (ErrWALRecycled OR retry budget exhausted)
+//	Degraded → CatchingUp        (probe after transient drop)
+//	Degraded → NeedsRebuild      (probe classifies as gap-too-large)
+//	NeedsRebuild → (terminal in T4c) — T5 introduces NeedsRebuild → Rebuilding
+//
+// The state machine is V3-native (no V2 file maps 1-to-1 — V2's
+// ReplicaState enum at `wal_shipper.go:24-32` is reference-only;
+// transitions in V3 are coordinator-driven, not in-shipper).
 type ReplicaState int
 
 const (
 	ReplicaUnknown ReplicaState = iota
 	ReplicaHealthy
 	ReplicaDegraded
+	// ReplicaCatchingUp — peer is in active catch-up streaming.
+	// Higher layers MUST NOT retry barrier or fence while in this
+	// state; the catch-up sender owns the conn until it completes
+	// (transitions to Healthy) or escalates (transitions to
+	// NeedsRebuild).
+	ReplicaCatchingUp
+	// ReplicaNeedsRebuild — terminal in T4c. Reached on
+	// ErrWALRecycled (gap exceeds substrate retention) or retry-
+	// budget exhaustion. T5 introduces the recovery-from-here path
+	// (NeedsRebuild → Rebuilding → Healthy).
+	ReplicaNeedsRebuild
 )
 
 func (s ReplicaState) String() string {
@@ -47,6 +71,10 @@ func (s ReplicaState) String() string {
 		return "healthy"
 	case ReplicaDegraded:
 		return "degraded"
+	case ReplicaCatchingUp:
+		return "catching_up"
+	case ReplicaNeedsRebuild:
+		return "needs_rebuild"
 	default:
 		return "unknown"
 	}
@@ -258,9 +286,77 @@ func (p *ReplicaPeer) Fence(ctx context.Context, lineage transport.RecoveryLinea
 	return nil
 }
 
-// Invalidate marks the peer Degraded and logs the reason. No state
-// transitions beyond Healthy ↔ Degraded in T4a; CatchingUp /
-// Rebuilding / NeedsRebuild arrive at T4c. Calling Invalidate on an
+// SetState transitions the peer to the given state per the T4c-2
+// state machine (see ReplicaState godoc). Invalid transitions log a
+// warning but DO NOT panic — silent rejection lets the coordinator
+// keep running while the misbehavior is investigated. The caller
+// MUST hold appropriate context (e.g., ack observation or
+// ErrWALRecycled detection) before requesting a transition.
+//
+// Allowed transitions (T4c-2, memo §2.2):
+//
+//	any        → Healthy        (initial / ack-confirmed steady)
+//	Healthy    → Degraded       (T4a/T4b: ship/barrier failure)
+//	Degraded   → Healthy        (recovery completed)
+//	Healthy    → CatchingUp     (probe → catch-up decision)
+//	Degraded   → CatchingUp     (probe after transient drop)
+//	CatchingUp → Healthy        (catch-up done-ack)
+//	CatchingUp → NeedsRebuild   (ErrWALRecycled OR retry exhausted)
+//	Degraded   → NeedsRebuild   (probe → rebuild decision)
+//	NeedsRebuild → (no successor in T4c — terminal)
+//
+// Called by: coordinator (T4c-2 catch-up flow, ErrWALRecycled
+// escalation) and engine SessionClose handler (close-with-success
+// returns to Healthy).
+// Owns: peer-state mutation under internal lock.
+func (p *ReplicaPeer) SetState(next ReplicaState) {
+	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+		return
+	}
+	prev := p.state
+	if !replicaStateTransitionAllowed(prev, next) {
+		p.mu.Unlock()
+		log.Printf("replication: peer %s rejected illegal state transition %s → %s",
+			p.target.ReplicaID, prev, next)
+		return
+	}
+	p.state = next
+	p.mu.Unlock()
+	log.Printf("replication: peer %s state %s → %s", p.target.ReplicaID, prev, next)
+}
+
+// replicaStateTransitionAllowed is the table-driven transition gate.
+// See SetState godoc for the rule list. NeedsRebuild is terminal in
+// T4c; T5 will extend with NeedsRebuild → Rebuilding.
+func replicaStateTransitionAllowed(prev, next ReplicaState) bool {
+	if prev == next {
+		return true // idempotent reset is harmless
+	}
+	if next == ReplicaHealthy {
+		// Anything but NeedsRebuild can resume Healthy. NeedsRebuild
+		// is terminal in T4c — must go through T5's Rebuilding path
+		// before returning to Healthy.
+		return prev != ReplicaNeedsRebuild
+	}
+	switch prev {
+	case ReplicaUnknown, ReplicaHealthy:
+		return next == ReplicaDegraded || next == ReplicaCatchingUp
+	case ReplicaDegraded:
+		return next == ReplicaCatchingUp || next == ReplicaNeedsRebuild
+	case ReplicaCatchingUp:
+		return next == ReplicaNeedsRebuild || next == ReplicaDegraded
+	case ReplicaNeedsRebuild:
+		return false // terminal in T4c
+	}
+	return false
+}
+
+// Invalidate marks the peer Degraded and logs the reason. T4a/T4b
+// behavior preserved: Healthy ↔ Degraded transitions on ship /
+// barrier failure. T4c-2 SetState handles the richer transitions
+// (CatchingUp, NeedsRebuild). Calling Invalidate on an
 // already-Degraded peer is a no-op (beyond the log line — still
 // useful because the reason string may be new).
 //

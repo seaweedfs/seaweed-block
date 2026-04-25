@@ -1,59 +1,40 @@
 package smartwal
 
-// T4c-pre-A POC code (per design memo §12). NOT production. The
-// API shape (ScanFrom + RecoveryEntry) is provisional — final form
-// depends on architect+QA decision on the semantic question
-// surfaced in v3-phase-15-t4c-pre-poc-report.md.
+// T4c-2 production smartwal recovery muscle: tier-1 `state_convergence`
+// (V3-native, per-LBA last-writer-wins) sub-mode of the `wal_delta`
+// recovery content kind (memo §13.0a).
 //
-// This file lives alongside store.go (not in _test.go) so the POC
-// methods can be exercised from external callers (e.g., a future
-// transport-side Recovery executor prototype) without re-exposing
-// internal record/ring types. Marked POC by file name + this
-// godoc; not advertised as a stable API.
+// Promoted from T4c-pre-A POC code (commit `66495f9`). Per memo §13
+// round-34: this sub-mode delivers state-convergent semantics — 3
+// writes to LBA=L produce 1 RecoveryEntry whose data is the latest-
+// observed value at scan time. The replica's converged state is
+// byte-equivalent to the primary's after the scan completes; the
+// `INV-REPL-RECOVERY-STREAM-LBA-DEDUP` and `INV-REPL-RECOVERY-STREAM-
+// LSN-IS-SCAN-TIME` invariants apply ONLY to this sub-mode.
+//
+// Scan-time LSN: the LSN field on emitted RecoveryEntry is the
+// highest LSN within [fromLSN, head] that wrote that LBA. Concurrent
+// live-write may bump the extent's actual data ahead of this LSN at
+// scan time — POC report §3.2 documents the concurrency interaction.
 
 import (
 	"errors"
 	"fmt"
 	"hash/crc32"
+
+	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
-// ErrWALRecycled is returned by ScanFrom when fromLSN is below the
-// substrate's retained-WAL window. Mirrors V2 walstore semantics
-// (`weed/storage/blockvol/wal_writer.go:218 ErrWALRecycled`).
-//
-// For smartwal: returned when fromLSN < (head - capacity), i.e.,
-// fromLSN's slot has been overwritten by a newer LSN's record.
-var ErrWALRecycled = errors.New("smartwal: WAL slot recycled past requested LSN")
+// Local aliases keep the call-site code unchanged when promoting from
+// POC types. The aliases re-export the unified storage-package types
+// without imposing a substrate-specific name on callers.
+type RecoveryEntry = storage.RecoveryEntry
 
-// RecoveryEntry is the per-LBA payload ScanFrom emits for tier-1
-// recovery streaming. Carries the LBA, the LATEST LSN within the
-// scan range that wrote that LBA, the current extent block, and
-// flags (write vs trim).
-//
-// IMPORTANT POC NOTE — semantic open question (see report §3.1):
-//
-// smartwal's WAL stores metadata only; the extent holds only the
-// LATEST per-LBA data. ScanFrom therefore CANNOT deliver every
-// LSN-versioned entry in the range (V2-strict-parity semantic).
-// It delivers latest-per-LBA in range (state-convergence-equivalent
-// semantic). For protocol correctness this is sufficient: replica
-// state converges to the same value either way, AND the bitmap
-// mask rule (design memo §2.2) handles cross-lane conflicts
-// independent of LSN labeling. But it diverges from V2's wire
-// observability — replica sees fewer entries than the primary
-// wrote. Architect+QA decision required (per POC report §3.1).
-//
-// Field LSN is "the highest LSN within [fromLSN, head] that wrote
-// this LBA." Concurrent live-write may bump the extent's actual
-// data ahead of this LSN — see report §3.2 concurrency discussion.
-type RecoveryEntry struct {
-	LSN   uint64
-	LBA   uint32
-	Flags uint8
-	Data  []byte
-}
+// ErrWALRecycled is the unified sentinel from storage; re-export so
+// existing call sites continue to compile.
+var ErrWALRecycled = storage.ErrWALRecycled
 
-// ScanFrom emits RecoveryEntry callbacks for every LBA modified
+// ScanLBAs emits RecoveryEntry callbacks for every LBA modified
 // within the LSN range [fromLSN, head], in LSN-ascending order
 // (last-writer-wins per LBA). Returns ErrWALRecycled if fromLSN's
 // slot has been overwritten.
@@ -75,12 +56,12 @@ type RecoveryEntry struct {
 // executor prototype (post architect decision on semantic).
 // Owns: per-call buffer for the slot scan; per-LBA last-writer-wins
 // map.
-// Borrows: fn callback — caller retains; ScanFrom does not retain
+// Borrows: fn callback — caller retains; ScanLBAs does not retain
 // references to fn or to RecoveryEntry.Data past the callback
 // return.
-func (s *Store) ScanFrom(fromLSN uint64, fn func(RecoveryEntry) error) error {
+func (s *Store) ScanLBAs(fromLSN uint64, fn func(RecoveryEntry) error) error {
 	if fn == nil {
-		return errors.New("smartwal: ScanFrom: nil callback")
+		return errors.New("smartwal: ScanLBAs: nil callback")
 	}
 
 	// Snapshot ring capacity + current head under lock so we have
@@ -88,7 +69,7 @@ func (s *Store) ScanFrom(fromLSN uint64, fn func(RecoveryEntry) error) error {
 	s.mu.RLock()
 	if s.closed {
 		s.mu.RUnlock()
-		return errors.New("smartwal: ScanFrom after Close")
+		return errors.New("smartwal: ScanLBAs after Close")
 	}
 	head := s.nextLSN
 	capacity := s.ring.capacity
@@ -118,7 +99,7 @@ func (s *Store) ScanFrom(fromLSN uint64, fn func(RecoveryEntry) error) error {
 	// wins per LBA.
 	records, err := s.ring.scanValid()
 	if err != nil {
-		return fmt.Errorf("smartwal: ScanFrom ring scan: %w", err)
+		return fmt.Errorf("smartwal: ScanLBAs ring scan: %w", err)
 	}
 
 	// Records arrive sorted by LSN ascending from scanValid().
@@ -170,7 +151,7 @@ func (s *Store) ScanFrom(fromLSN uint64, fn func(RecoveryEntry) error) error {
 		data := make([]byte, blockSize)
 		off := s.extentBase + int64(rec.LBA)*int64(blockSize)
 		if _, err := s.fd.ReadAt(data, off); err != nil {
-			return fmt.Errorf("smartwal: ScanFrom read extent LBA %d: %w", rec.LBA, err)
+			return fmt.Errorf("smartwal: ScanLBAs read extent LBA %d: %w", rec.LBA, err)
 		}
 
 		// CRC sanity: if the extent's current data does not match

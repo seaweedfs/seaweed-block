@@ -114,6 +114,84 @@ func (s *BlockStore) Close() error {
 // callers of LogicalStorage can transparently use either backend.
 var _ LogicalStorage = (*BlockStore)(nil)
 
+// ScanLBAs satisfies the LogicalStorage tier-1 recovery contract.
+// BlockStore is in-memory and has NO WAL retention — it cannot
+// distinguish "LBA was written at LSN N" from "LBA holds bytes that
+// happen to look like X." For T4c-2 catch-up scenarios that use
+// BlockStore (transport tests + calibration harness), the substrate
+// behaves as a state_convergence-equivalent: emit one entry per
+// currently-stored LBA, carrying the current bytes and the current
+// frontier LSN. fromLSN is effectively a "scan start hint"; we
+// honor the at-or-ahead-of-head shortcut (returns nil) but otherwise
+// do not enforce a retention boundary. Real production substrates
+// (walstore, smartwal) have proper retention + ErrWALRecycled
+// semantics.
+//
+// Per memo §13.0a, BlockStore reports its mode as
+// `RecoveryModeStateConvergence` for observability; callers that
+// require V2-faithful per-LSN replay MUST NOT use BlockStore as the
+// recovery substrate.
+//
+// Called by: transport.BlockExecutor.doCatchUp (T4c-2) when the
+// primary's substrate is BlockStore (test/calibration scenarios).
+// Owns: per-call snapshot of stored LBAs.
+// Borrows: fn callback — caller retains.
+func (s *BlockStore) ScanLBAs(fromLSN uint64, fn func(RecoveryEntry) error) error {
+	if fn == nil {
+		return nil
+	}
+	s.mu.RLock()
+	if fromLSN >= s.nextLSN {
+		s.mu.RUnlock()
+		return nil // caller is at-or-ahead of head; nothing to ship
+	}
+	// Snapshot the LBA-data map under the lock.
+	snapshot := make(map[uint32][]byte, len(s.blocks))
+	for lba, data := range s.blocks {
+		buf := make([]byte, len(data))
+		copy(buf, data)
+		snapshot[lba] = buf
+	}
+	// Synthesized scan-time LSN = walHead (the newest LSN actually
+	// written). nextLSN = walHead+1 would push every entry past the
+	// caller's targetLSN (typically equal to walHead) and cause the
+	// catch-up callback to skip everything via the
+	// `entry.LSN > targetLSN` cap.
+	frontierLSN := s.walHead
+	if frontierLSN == 0 {
+		frontierLSN = 1
+	}
+	s.mu.RUnlock()
+
+	// Emit in LBA order so behavior is deterministic across runs.
+	lbas := make([]uint32, 0, len(snapshot))
+	for lba := range snapshot {
+		lbas = append(lbas, lba)
+	}
+	for i := 1; i < len(lbas); i++ {
+		j := i
+		for j > 0 && lbas[j-1] > lbas[j] {
+			lbas[j-1], lbas[j] = lbas[j], lbas[j-1]
+			j--
+		}
+	}
+	// Use the frontier LSN as the synthesized scan-time LSN. This
+	// matches smartwal state_convergence semantic: emitted LSN is
+	// scan-time, not write-time.
+	for _, lba := range lbas {
+		entry := RecoveryEntry{
+			LSN:   frontierLSN,
+			LBA:   lba,
+			Flags: RecoveryEntryWrite,
+			Data:  snapshot[lba],
+		}
+		if err := fn(entry); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // Boundaries returns the current R/S/H recovery boundaries.
 //   - R (syncedLSN): what's durable on this node
 //   - S (walTail): oldest retained LSN

@@ -1,47 +1,24 @@
 package storage
 
-// T4c-pre-A POC code for walstore — `wal_replay` (V2-faithful) tier-1
-// mode. Mirror of smartwal's `core/storage/smartwal/recovery_poc.go`
-// for the `state_convergence` mode. NOT production. The API shape
-// (ScanFrom + RecoveryEntry) is provisional; final form lands at
-// T4c-3 muscle port behind a `LogicalStorage.ScanLBAs`-style method.
+// T4c-2 production walstore recovery muscle: tier-1 `wal_replay`
+// (V2-faithful per-LSN) sub-mode of the `wal_delta` recovery content
+// kind (memo §13.0a).
+//
+// Promoted from T4c-pre-A POC code (commit `c1584c6`); G-1 V2 read
+// signed at `v3-phase-15-t4c-2-g1-v2-read.md`. Six invariants pinned
+// at T4c-2 close — see catalogue §3.3.
 //
 // Key difference from smartwal: walstore's WAL stores full entry
 // data (LBA + LSN + Data per record). Per-LSN replay is faithful —
 // data is contemporaneous with LSN; no "data staleness" semantic;
-// no per-LBA dedup. Maps directly to `INV-REPL-RECOVERY-STREAM-LBA-
-// DEDUP` and `INV-REPL-RECOVERY-STREAM-LSN-IS-SCAN-TIME` being
-// **NOT** subject to walstore (per memo §13.6 round-34 scoping).
+// no per-LBA dedup.
 
 import (
 	"errors"
 	"fmt"
 )
 
-// ErrWALRecycled is returned by ScanFrom when fromLSN is below the
-// substrate's checkpoint boundary — the WAL space at that LSN may
-// have been reused by newer entries after the flusher advanced the
-// checkpoint. Mirrors V2 walstore semantics
-// (`weed/storage/blockvol/wal_writer.go:218`).
-var ErrWALRecycled = errors.New("storage: walstore WAL recycled past requested LSN")
-
-// RecoveryEntry is the per-record payload ScanFrom emits for tier-1
-// `wal_replay` mode. Carries the LBA, the contemporaneous LSN, the
-// flags (write vs trim), and the entry's data byte-for-byte from
-// the WAL. Walstore preserves data per LSN, so this is V2-faithful.
-//
-// Sibling shape to `smartwal.RecoveryEntry`. The two POC types
-// remain in their respective packages to keep substrate ownership
-// clear; T4c-3 muscle port will land a uniform shape behind the
-// `LogicalStorage` interface.
-type RecoveryEntry struct {
-	LSN   uint64
-	LBA   uint32
-	Flags uint8
-	Data  []byte
-}
-
-// ScanFrom emits RecoveryEntry callbacks for every WAL record with
+// ScanLBAs emits RecoveryEntry callbacks for every WAL record with
 // LSN >= fromLSN, in LSN-ascending order (the order the entries were
 // appended). Returns ErrWALRecycled if fromLSN is at or below the
 // store's current `checkpointLSN` — those entries have been flushed
@@ -64,19 +41,19 @@ type RecoveryEntry struct {
 // Called by: T4c-pre-A POC tests; future transport recovery
 // executor wal_replay path (post T4c-3 muscle port).
 // Owns: per-call scan buffer; LSN-filter pass.
-// Borrows: fn callback — caller retains; ScanFrom does not retain
+// Borrows: fn callback — caller retains; ScanLBAs does not retain
 // references to fn or to RecoveryEntry.Data past the callback
 // return.
-func (s *WALStore) ScanFrom(fromLSN uint64, fn func(RecoveryEntry) error) error {
+func (s *WALStore) ScanLBAs(fromLSN uint64, fn func(RecoveryEntry) error) error {
 	if fn == nil {
-		return errors.New("storage: walstore ScanFrom: nil callback")
+		return errors.New("storage: walstore ScanLBAs: nil callback")
 	}
 
 	// Snapshot store state under lock.
 	s.mu.RLock()
 	if s.closed {
 		s.mu.RUnlock()
-		return errors.New("storage: walstore ScanFrom after Close")
+		return errors.New("storage: walstore ScanLBAs after Close")
 	}
 	checkpointLSN := s.checkpointLSN
 	headLSN := s.nextLSN
@@ -132,7 +109,7 @@ func (s *WALStore) ScanFrom(fromLSN uint64, fn func(RecoveryEntry) error) error 
 			headerBuf := make([]byte, walEntryHeaderSize)
 			absOff := int64(walOffset + pos)
 			if _, err := s.fd.ReadAt(headerBuf, absOff); err != nil {
-				return fmt.Errorf("storage: walstore ScanFrom read header at %d: %w", pos, err)
+				return fmt.Errorf("storage: walstore ScanLBAs read header at %d: %w", pos, err)
 			}
 			entryType := headerBuf[16]
 			lengthField := parseLengthFromHeader(headerBuf)
@@ -152,7 +129,7 @@ func (s *WALStore) ScanFrom(fromLSN uint64, fn func(RecoveryEntry) error) error 
 			}
 			fullBuf := make([]byte, entrySize)
 			if _, err := s.fd.ReadAt(fullBuf, absOff); err != nil {
-				return fmt.Errorf("storage: walstore ScanFrom read entry at %d: %w", pos, err)
+				return fmt.Errorf("storage: walstore ScanLBAs read entry at %d: %w", pos, err)
 			}
 			entry, err := decodeWALEntry(fullBuf)
 			if err != nil {
