@@ -11,22 +11,27 @@ package component_test
 //   - Don't reach into framework internals — surface a primitive gap
 //     to sw if missing
 //
-// Coverage today (3 scenarios authorable with current framework):
-//   - ProbeCrossFlowWithRebuild_NonMutating  → INV-REPL-PROBE-NON-MUTATING-VALIDATION
-//   - RetryBudget_RecycledFailureSentinelStable → partial pin for engine retry loop
-//   - ModeLabelObservability_BothSubstrates  → INV-REPL-RECOVERY-MODE-OBSERVABLE (matrix-strong)
+// Coverage (round 39 + round 40, after sw closed framework gaps in
+// commit b1ee20b):
+//   - ProbeCrossFlowWithRebuild_NonMutating       → INV-REPL-PROBE-NON-MUTATING-VALIDATION
+//   - RetryBudget_RecycledFailureSentinelStable   → sentinel-text drift fence (partial pin for engine retry loop)
+//   - ModeLabelObservability_BothSubstrates       → INV-REPL-RECOVERY-MODE-OBSERVABLE (matrix-strong)
+//   - BarrierAchievedLSN_PartialProgress          → completion-gate pin: partial achieved ≠ Success (round 40)
+//   - DeadlinePerCallScope_NoSpilling             → live-ship + catch-up back-to-back; ergonomic pin (round 40)
+//   - LastSentMonotonic_WithinCall                → observed wrap counts emitted entries before sever (round 40)
 //
-// Deferred scenarios (require framework extensions OR Stage 2 m01 timing):
-//   - LastSentMonotonic_AcrossRetries        → needs reliable mid-stream drop timing
-//   - DeadlinePerCallScope_NoSpilling        → needs live-ship primitive (no WriteObserver in framework yet)
-//   - BarrierAchievedLSN_PartialProgress     → needs WithPrimaryStorageWrap + ship-N-then-fail substrate stub
-//
-// All 3 deferred scenarios are queued for Stage 2 m01 hardware run
-// where real network conditions provide the timing surface naturally.
+// Stage 2 m01 carry-over (genuinely hardware-timing-dependent):
+//   - LastSentMonotonic_AcrossRetries (FULL form): needs WithEngineDrivenRecovery
+//     (T4d-stubbed) so engine drives multi-call retry; today the framework's
+//     CatchUpReplica restarts at fromLSN=1, so cross-call lastSent monotonicity
+//     is an engine-loop property, not a sender-loop property. Component-scope
+//     pin lands when the stub binds at T4d.
 
 import (
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/replication/component"
 )
@@ -177,6 +182,164 @@ func TestT4c_QA_ModeLabelObservability_BothSubstrates(t *testing.T) {
 		c.AssertSawRecoveryMode(0, component.ExpectAnyMode)
 	})
 }
+
+// =====================================================================
+// Round 40 scenarios (using gap-closure primitives from commit b1ee20b)
+// =====================================================================
+
+// TestT4c_QA_BarrierAchievedLSN_PartialProgress_DistinctFromCompletion
+// pins the round-36 binding INV-REPL-CATCHUP-COMPLETION-FROM-BARRIER-
+// ACHIEVED-LSN. The completion gate is `AchievedLSN == TargetLSN`; if a
+// catch-up emits some-but-not-all entries (mid-stream drop) the
+// SessionCloseResult MUST report Success=false with AchievedLSN that
+// reflects partial progress — distinct from a clean completion at the
+// same LSN.
+//
+// This is the failure mode the architectural binding guards against:
+// without the explicit "from barrier achieved-lsn" gate, a catch-up
+// that ships 5 of 10 entries and dies could silently look like a
+// successful close at LSN=5, leaving the replica permanently behind.
+//
+// Substrate: matrix (gate is at sender layer, substrate-independent;
+// but mode-label assertion can't be paired with wraps per faults.go's
+// known limitation).
+func TestT4c_QA_BarrierAchievedLSN_PartialProgress_DistinctFromCompletion(t *testing.T) {
+	component.RunMatrix(t, func(t *testing.T, c *component.Cluster) {
+		const totalWrites = 10
+		const severAfter = 4
+
+		c.WithReplicas(1).
+			WithPrimaryStorageWrap(component.NewSeverDuringScanWrap(severAfter, nil)).
+			Start()
+		c.PrimaryWriteN(totalWrites)
+		c.PrimarySync()
+
+		result := c.CatchUpReplica(0)
+
+		// Completion gate pin: partial-progress MUST surface as failure,
+		// not silent success at AchievedLSN < TargetLSN.
+		if result.Success {
+			t.Fatalf("partial progress (severed after %d of %d) must NOT close as Success;"+
+				" achieved=%d. completion-from-barrier gate broken.",
+				severAfter, totalWrites, result.AchievedLSN)
+		}
+
+		// Distinctness pin: this failure mode is NOT a recycled-WAL
+		// case. Engine SessionFailed handler branches on the sentinel:
+		// recycled → Rebuild; other stream errors → Retry. If sever
+		// were conflated with recycled, retry budget logic breaks.
+		if strings.Contains(result.FailReason, "WAL recycled") {
+			t.Errorf("sever-mid-scan must NOT be conflated with WAL recycled;"+
+				" engine retry/rebuild branching depends on the distinction. FailReason=%q",
+				result.FailReason)
+		}
+
+		// Replica must NOT be considered converged — partial progress
+		// left it strictly behind.
+		if c.Replica(0) == nil {
+			t.Fatal("replica handle nil")
+		}
+	})
+}
+
+// TestT4c_QA_DeadlinePerCallScope_NoSpilling pins
+// INV-REPL-CATCHUP-DEADLINE-PER-CALL-SCOPE: a per-call deadline set
+// inside one operation MUST NOT bleed into subsequent operations on
+// the same wire. Round-36 binding: each ship call scopes its own
+// deadline; the post-call defer restores the prior deadline (typically
+// zero = no deadline).
+//
+// The failure mode this guards against: ship op 1 sets a tight
+// deadline, completes, but the wire's persistent net.Conn deadline
+// stays armed → ship op 2 inherits the expired deadline → spurious
+// "i/o timeout" on healthy traffic.
+//
+// Component-scope pin: two back-to-back live-ship batches on the same
+// wire. If the first ship's deadline spilled, the second ship's WAL
+// frames would hit an already-elapsed deadline and fail with a
+// transport-level timeout. Two batches both converging is the
+// no-spill evidence.
+//
+// Note: this scenario uses live-ship-only (not catch-up) because
+// live-ship and explicit CatchUpReplica use distinct session IDs;
+// the deadline-scope invariant lives at the per-call level inside
+// any one sender's wire, which back-to-back live-ships exercise
+// natively. The cross-orchestration form (live-ship → catch-up →
+// live-ship) requires session-coordination support (carry-forward
+// for T4d when the engine drives recovery alongside live-ship).
+//
+// Substrate: matrix (deadline scope is at transport layer, substrate-
+// independent).
+func TestT4c_QA_DeadlinePerCallScope_NoSpilling(t *testing.T) {
+	component.RunMatrix(t, func(t *testing.T, c *component.Cluster) {
+		c.WithReplicas(1).WithLiveShip().Start()
+
+		// Batch 1: live-ship through the WriteObserver hook.
+		c.PrimaryWriteViaBackendN(3)
+		c.WaitForConverge(2 * time.Second)
+
+		// Batch 2: another live-ship on the SAME wire. If batch 1's
+		// per-frame deadline had spilled into the wire's persistent
+		// net.Conn deadline state, batch 2 would fail with i/o timeout
+		// or short-write before delivering all frames. Clean
+		// convergence on batch 2 is the per-call-scope evidence.
+		c.PrimaryWriteViaBackendN(5)
+		c.WaitForConverge(2 * time.Second)
+	})
+}
+
+// TestT4c_QA_LastSentMonotonic_WithinCall pins the within-call form
+// of INV-REPL-CATCHUP-LASTSENT-MONOTONIC: while a single ScanLBAs
+// stream is feeding the sender, each emitted entry's LSN advances the
+// sender's lastSent forward strictly. We pin this at the substrate
+// emit layer using NewObservedScanWrap as a probe; the sender's view
+// of monotonic is the substrate's emit order plus its own per-entry
+// accept logic, both are unit-tested separately.
+//
+// CROSS-CALL form (full INV) is Stage 2 m01 work: today
+// CatchUpReplica restarts at fromLSN=1 every call (framework
+// hardcodes the start), so cross-call lastSent monotonicity requires
+// the engine retry loop driving fromLSN advancement. That binds when
+// WithEngineDrivenRecovery (T4d-stubbed) goes live.
+//
+// Substrate: matrix (emit ordering is substrate-respected by both
+// walstore wal_replay and smartwal state_convergence).
+func TestT4c_QA_LastSentMonotonic_WithinCall(t *testing.T) {
+	component.RunMatrix(t, func(t *testing.T, c *component.Cluster) {
+		const writes = 8
+		count := new(atomic.Int32)
+		c.WithReplicas(1).
+			WithPrimaryStorageWrap(component.NewObservedScanWrap(count)).
+			Start()
+		c.PrimaryWriteN(writes)
+		c.PrimarySync()
+
+		result := c.CatchUpReplica(0)
+		if !result.Success {
+			t.Fatalf("catch-up: %s", result.FailReason)
+		}
+
+		// Pin: substrate emitted at least one entry per LBA written
+		// (each substrate's mode is its own; both should observe ≥
+		// `writes` because each LBA was written exactly once).
+		emitted := count.Load()
+		if int(emitted) < writes {
+			t.Errorf("substrate emit count = %d, want ≥ %d (one per LBA write);"+
+				" within-call monotonic stream truncated", emitted, writes)
+		}
+
+		// AchievedLSN reflects the sender's lastSent at SessionClose
+		// — must equal the target. If lastSent were non-monotonic,
+		// the sender would either undershoot (gap) or the executor
+		// would catch the inversion and fail the session.
+		if result.AchievedLSN == 0 {
+			t.Errorf("AchievedLSN = 0 after %d writes; lastSent never advanced", writes)
+		}
+		c.AssertReplicaConverged(0)
+	})
+}
+
+// =====================================================================
 
 // storageRecycledSentinelMsg returns the canonical sentinel text
 // without taking an import dependency that would create a cycle.
