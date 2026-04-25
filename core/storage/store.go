@@ -261,7 +261,17 @@ func (s *BlockStore) ApplyEntry(lba uint32, data []byte, lsn uint64) error {
 	if lsn >= s.nextLSN {
 		s.nextLSN = lsn + 1
 	}
-	s.walHead = lsn
+	// Round-43 substrate hardening (defense-in-depth): walHead is
+	// the "stable frontier never goes backward" boundary per
+	// LogicalStorage contract §3 rule 3. Older-LSN ApplyEntry must
+	// NOT regress walHead. The replica recovery apply gate (T4d-2
+	// primary fix) prevents the older-LSN apply from reaching this
+	// path under recovery flow; this guard is the substrate-level
+	// safety net for any path that bypasses the gate (live duplicate,
+	// retry, future cross-substrate scenarios).
+	if lsn > s.walHead {
+		s.walHead = lsn
+	}
 	return nil
 }
 

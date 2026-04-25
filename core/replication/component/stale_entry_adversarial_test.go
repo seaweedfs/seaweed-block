@@ -90,19 +90,18 @@ func TestComponent_Adversarial_StaleEntryDoesNotRegress(t *testing.T) {
 	})
 }
 
-// TestComponent_Adversarial_BlockStoreApplyEntryRegressesWalHead
-// pins the BlockStore bug architect identified in round-41:
-// `BlockStore.ApplyEntry` does `s.walHead = lsn` unconditionally,
-// so an older-LSN apply REGRESSES walHead. This contradicts the
-// LogicalStorage contract (logical_storage.go §3 rule 3: "stable
-// frontier never goes backward").
+// TestComponent_BlockStore_ApplyEntry_OldLSN_DoesNotRegressWalHead
+// pins the round-43 substrate hardening fix at
+// `BlockStore.ApplyEntry`. Pre-fix: `s.walHead = lsn` unconditional
+// → older-LSN apply REGRESSES walHead, violating LogicalStorage
+// contract §3 rule 3 ("stable frontier never goes backward").
+// Post-fix: `if lsn > s.walHead { s.walHead = lsn }`.
 //
-// EXPECTED TO FAIL today. T4d (or a sooner BlockStore fix) must
-// gate the walHead update on `lsn > walHead`. This test exists to
-// surface the bug and gate the fix.
-func TestComponent_Adversarial_BlockStoreApplyEntryRegressesWalHead(t *testing.T) {
-	t.Skip("Round-41 architect-identified bug: BlockStore.ApplyEntry sets walHead unconditionally; older-LSN apply regresses H. Un-skip when fixed.")
-
+// Pre-T4d-1 hotfix (round-44): substrate-level guard lands ahead of
+// the larger T4d-2 replica recovery apply gate work. The gate is
+// the primary correctness boundary; this guard is defense-in-depth
+// for paths that may bypass the gate.
+func TestComponent_BlockStore_ApplyEntry_OldLSN_DoesNotRegressWalHead(t *testing.T) {
 	store := storage.NewBlockStore(64, 4096)
 
 	// Apply LSN=10 first.
