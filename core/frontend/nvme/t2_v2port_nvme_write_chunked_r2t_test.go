@@ -36,11 +36,20 @@ import (
 
 // writeCountingBackend wraps RecordingBackend and also exposes
 // the total bytes actually written (for integrity pin).
+//
+// lastWrite uses atomic.Pointer to permit safe concurrent access
+// from TestT2A_ConcurrentQueueStress (8 IO queues sharing one
+// backend). Each Write Stores a fresh copied slice and never
+// mutates it after store, so readers via Load() observe a stable
+// snapshot. The chunked-R2T integrity tests still observe the
+// most recent write — semantics preserved. Per §8B.4 Discovery
+// Bridge (architect-approved 2026-04-26): test-fixture-only fix
+// for the m01 -race finding under TestT2A_ConcurrentQueueStress.
 type writeCountingBackend struct {
 	inner     *testback.RecordingBackend
 	calls     atomic.Int32
 	bytes     atomic.Int64
-	lastWrite []byte
+	lastWrite atomic.Pointer[[]byte]
 }
 
 func (b *writeCountingBackend) Identity() frontend.Identity { return b.inner.Identity() }
@@ -57,11 +66,14 @@ func (b *writeCountingBackend) Read(ctx context.Context, off int64, p []byte) (i
 func (b *writeCountingBackend) Write(ctx context.Context, off int64, p []byte) (int, error) {
 	b.calls.Add(1)
 	b.bytes.Add(int64(len(p)))
-	// Capture for integrity check (NOT safe across concurrent
-	// writes, but the test drives them serially).
+	// Capture for integrity check. atomic.Pointer makes this safe
+	// for concurrent Writes (TestT2A_ConcurrentQueueStress shares
+	// one backend across 8 IO queues). Each store is a fresh slice
+	// that is never mutated after store, so Load() returns a stable
+	// snapshot.
 	cp := make([]byte, len(p))
 	copy(cp, p)
-	b.lastWrite = cp
+	b.lastWrite.Store(&cp)
 	return b.inner.Write(ctx, off, p)
 }
 
@@ -198,12 +210,17 @@ func TestT2V2Port_NVMe_IO_Write_8x4KiB_H2CDataChunks_mkfsPattern(t *testing.T) {
 	}
 
 	// Integrity: every byte the backend got must match what we sent.
-	if len(backend.lastWrite) != total {
-		t.Fatalf("lastWrite len=%d want %d", len(backend.lastWrite), total)
+	lastWritePtr := backend.lastWrite.Load()
+	if lastWritePtr == nil {
+		t.Fatalf("lastWrite is nil; want %d-byte capture", total)
+	}
+	lastWrite := *lastWritePtr
+	if len(lastWrite) != total {
+		t.Fatalf("lastWrite len=%d want %d", len(lastWrite), total)
 	}
 	for i := 0; i < total; i++ {
-		if backend.lastWrite[i] != payload[i] {
-			t.Fatalf("byte mismatch at offset %d: got 0x%02x want 0x%02x", i, backend.lastWrite[i], payload[i])
+		if lastWrite[i] != payload[i] {
+			t.Fatalf("byte mismatch at offset %d: got 0x%02x want 0x%02x", i, lastWrite[i], payload[i])
 		}
 	}
 }
