@@ -65,9 +65,19 @@ func NewReplicaListener(addr string, store storage.LogicalStorage) (*ReplicaList
 }
 
 // NewReplicaListenerWithApplyHook creates a listener with the T4d-2
-// apply-gate plug-in installed. The MsgShipEntry handler delegates
-// to `hook.Apply(lineage, lba, data, lsn)` for lane discrimination
-// + per-LBA stale-skip + coverage accounting.
+// apply-gate plug-in installed. The MsgShipEntry handler dispatches
+// caller-side to `hook.ApplyRecovery` or `hook.ApplyLive` based on
+// the connection/session lane it has established for this entry. The
+// hook itself is LANE-PURE per round-46 architect ruling — it does
+// not inspect payload bytes to decide lane.
+//
+// Today the handler's lane decision is a transitional shim based on
+// `lineage.TargetLSN == liveShipTargetLSNSentinel` (live) vs
+// otherwise (recovery). The shim lives at the CALLER (this handler),
+// not in the gate. See `CARRY-T4D-LANE-CONTEXT-001` (catalogue §3.3)
+// for the named carry tracking the future replacement (true
+// per-connection lane tag / separate handler routes / distinct
+// listener ports).
 //
 // Pass nil hook to get the no-gate behavior (== NewReplicaListener).
 func NewReplicaListenerWithApplyHook(addr string, store storage.LogicalStorage, hook ApplyHook) (*ReplicaListener, error) {

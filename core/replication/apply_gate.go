@@ -35,12 +35,22 @@ import (
 //     return error (caller logs + closes conn); do NOT silently skip;
 //     do NOT advance recoveryCovered.
 //
-// Lane discrimination (Q2 — no wire byte; implicit from session
-// context): catch-up / rebuild sessions ship with
-// `lineage.TargetLSN > liveShipTargetLSN` (=1); live ship sessions
-// ship with `TargetLSN == liveShipTargetLSN`. The gate reads the
-// lineage's TargetLSN signal — already on the wire from T4a/T4c —
-// without adding a new field.
+// Lane discrimination (Q2 + round-46 architect ruling): the gate is
+// LANE-PURE. Caller (transport replica handler) decides lane from
+// connection/session handler context and invokes the appropriate
+// explicit method (ApplyRecovery vs ApplyLive). The gate does NOT
+// inspect the lineage payload to discriminate lane — payload-derived
+// lane signals were rejected as "changes recovery semantics to
+// protect an implementation shortcut."
+//
+// Today's caller (transport replica.go MsgShipEntry handler) uses a
+// transitional shim based on lineage.TargetLSN to choose which gate
+// method to invoke — that shim lives at the CALLER, not in the gate.
+// The architectural fence: gate is pure on lane; caller's signal
+// source is replaceable. See CARRY-T4D-LANE-CONTEXT-001 (catalogue
+// §3.3) for the named carry tracking the future replacement (true
+// per-connection lane tag / separate handler routes / distinct
+// listener ports).
 //
 // Per-LBA applied LSN source (Option C hybrid, kickoff §2.5 #1):
 // at session init, query `store.AppliedLSNs()` for substrate-
