@@ -204,7 +204,7 @@ func (e *nopExecutor) SetOnFenceComplete(fn adapter.OnFenceComplete) { e.onFence
 func (e *nopExecutor) Probe(string, string, string, uint64, uint64, uint64) adapter.ProbeResult {
 	return adapter.ProbeResult{Success: false, FailReason: "nop"}
 }
-func (e *nopExecutor) StartCatchUp(string, uint64, uint64, uint64, uint64) error { return nil }
+func (e *nopExecutor) StartCatchUp(string, uint64, uint64, uint64, uint64, uint64) error { return nil }
 func (e *nopExecutor) StartRebuild(string, uint64, uint64, uint64, uint64) error { return nil }
 func (e *nopExecutor) StartRecoverySession(string, uint64, uint64, uint64, uint64, engine.RecoveryContentKind, engine.RecoveryRuntimePolicy) error {
 	return nil

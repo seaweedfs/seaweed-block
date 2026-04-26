@@ -357,10 +357,17 @@ func decide(st *ReplicaState, r *ApplyResult, trace func(string, string)) {
 		trace("decision", "catch_up (R >= S, R < H)")
 
 		if !hasActiveSession(st) {
+			// T4d-3: FromLSN = R + 1 — engine-owned "skip already-
+			// applied LSN" policy (G-1 §6.1 Option A; pins
+			// INV-REPL-CATCHUP-FROMLSN-IS-REPLICA-FLUSHED-PLUS-1).
+			// Source is engine state Recovery.R, NOT the raw probe
+			// payload (INV-REPL-CATCHUP-FROMLSN-FROM-ENGINE-STATE-
+			// NOT-PROBE).
 			r.Commands = append(r.Commands, StartCatchUp{
 				ReplicaID:       st.Identity.ReplicaID,
 				Epoch:           st.Identity.Epoch,
 				EndpointVersion: st.Identity.EndpointVersion,
+				FromLSN:         R + 1,
 				TargetLSN:       H,
 			})
 			trace("command", "StartCatchUp")
@@ -529,10 +536,16 @@ func applySessionFailed(st *ReplicaState, e SessionClosedFailed, r *ApplyResult,
 		// from current Identity + recovery target.
 		switch st.Recovery.Decision {
 		case DecisionCatchUp:
+			// T4d-3 §6.2 architect Option A: retry re-emit reuses
+			// ORIGINAL Recovery.R + 1 (not re-probed). Apply gate
+			// (T4d-2) handles re-shipped gap via per-LBA stale-skip.
+			// Pinned by TestT4d3_RetryAfterReplicaAdvanced_OverScans
+			// HandledByApplyGate.
 			r.Commands = append(r.Commands, StartCatchUp{
 				ReplicaID:       st.Identity.ReplicaID,
 				Epoch:           st.Identity.Epoch,
 				EndpointVersion: st.Identity.EndpointVersion,
+				FromLSN:         st.Recovery.R + 1,
 				TargetLSN:       st.Recovery.H,
 			})
 			trace("command", "StartCatchUp (retry)")

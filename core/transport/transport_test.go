@@ -90,7 +90,7 @@ func TestTransport_CatchUp_ShipsAndBarrierConfirms(t *testing.T) {
 	exec.SetOnSessionClose(func(r adapter.SessionCloseResult) { closeCh <- r })
 
 	_, _, pH := primary.Boundaries()
-	if err := exec.StartCatchUp("r1", 1, 1, 1, pH); err != nil {
+	if err := exec.StartCatchUp("r1", 1, 1, 1, 1, pH); err != nil {
 		t.Fatal(err)
 	}
 
@@ -192,7 +192,7 @@ func TestTransport_CatchUp_DialFailureDoesNotEmitStarted(t *testing.T) {
 	exec.SetOnSessionStart(func(r adapter.SessionStartResult) { startCh <- r })
 	exec.SetOnSessionClose(func(r adapter.SessionCloseResult) { closeCh <- r })
 
-	if err := exec.StartCatchUp("r1", 9, 1, 1, 4); err != nil {
+	if err := exec.StartCatchUp("r1", 9, 1, 1, 1, 4); err != nil {
 		t.Fatal(err)
 	}
 

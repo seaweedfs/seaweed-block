@@ -85,7 +85,7 @@ func (e *restartExecutor) Probe(replicaID, dataAddr, ctrlAddr string, sessionID,
 	}
 }
 
-func (e *restartExecutor) StartCatchUp(replicaID string, sessionID, epoch, endpointVersion, targetLSN uint64) error {
+func (e *restartExecutor) StartCatchUp(replicaID string, sessionID, epoch, endpointVersion, fromLSN, targetLSN uint64) error {
 	return nil
 }
 func (e *restartExecutor) StartRebuild(replicaID string, sessionID, epoch, endpointVersion, targetLSN uint64) error {

@@ -21,10 +21,20 @@ func (ProbeReplica) commandKind() string { return "ProbeReplica" }
 
 // StartCatchUp: request the runtime to start a catch-up session.
 // May only be emitted from bounded R/S/H facts, not from transport errors.
+//
+// T4d-3 (G-1 §6.1 architect Option A — engine adds +1):
+// `FromLSN` is the LSN the executor should start scanning FROM
+// (inclusive). Engine populates as `Recovery.R + 1` at emit time —
+// the "+1 to skip already-applied LSN" is engine-owned policy
+// (single-site pin via INV-REPL-CATCHUP-FROMLSN-IS-REPLICA-FLUSHED-
+// PLUS-1). Sender stays mechanical: scans from whatever the command
+// says, no policy. Engine-state-source pinned by
+// INV-REPL-CATCHUP-FROMLSN-FROM-ENGINE-STATE-NOT-PROBE.
 type StartCatchUp struct {
 	ReplicaID       string
 	Epoch           uint64
 	EndpointVersion uint64
+	FromLSN         uint64 // T4d-3: engine populates as Recovery.R + 1
 	TargetLSN       uint64
 }
 

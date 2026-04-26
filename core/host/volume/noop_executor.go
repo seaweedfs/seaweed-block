@@ -63,7 +63,7 @@ func (e *noopExecutor) Probe(replicaID, dataAddr, ctrlAddr string, sessionID, ep
 	}
 }
 
-func (e *noopExecutor) StartCatchUp(replicaID string, sessionID, epoch, endpointVersion, targetLSN uint64) error {
+func (e *noopExecutor) StartCatchUp(replicaID string, sessionID, epoch, endpointVersion, fromLSN, targetLSN uint64) error {
 	e.record("StartCatchUp:" + replicaID)
 	return nil
 }

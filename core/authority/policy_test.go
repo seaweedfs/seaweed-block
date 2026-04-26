@@ -949,7 +949,7 @@ func (e *policyClosureExecutor) Probe(replicaID, dataAddr, ctrlAddr string, sess
 	}
 }
 
-func (e *policyClosureExecutor) StartCatchUp(replicaID string, sessionID, epoch, endpointVersion, targetLSN uint64) error {
+func (e *policyClosureExecutor) StartCatchUp(replicaID string, sessionID, epoch, endpointVersion, fromLSN, targetLSN uint64) error {
 	return nil
 }
 func (e *policyClosureExecutor) StartRebuild(replicaID string, sessionID, epoch, endpointVersion, targetLSN uint64) error {

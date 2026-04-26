@@ -142,7 +142,7 @@ func (m *mockExecutor) Probe(replicaID, dataAddr, ctrlAddr string, sessionID, ep
 	}
 }
 
-func (m *mockExecutor) StartCatchUp(replicaID string, sessionID, epoch, endpointVersion, targetLSN uint64) error {
+func (m *mockExecutor) StartCatchUp(replicaID string, sessionID, epoch, endpointVersion, fromLSN, targetLSN uint64) error {
 	m.mu.Lock()
 	m.commands = append(m.commands, "StartCatchUp")
 	startCb := m.onSessionStart
@@ -223,7 +223,9 @@ func (m *mockExecutor) StartRecoverySession(
 	if contentKind == engine.RecoveryContentFullExtent {
 		return m.StartRebuild(replicaID, sessionID, epoch, endpointVersion, targetLSN)
 	}
-	return m.StartCatchUp(replicaID, sessionID, epoch, endpointVersion, targetLSN)
+	// T4d-3: bridge passes fromLSN=1 (StartRecoverySession doesn't
+	// carry fromLSN today; same convention as transport bridge).
+	return m.StartCatchUp(replicaID, sessionID, epoch, endpointVersion, 1, targetLSN)
 }
 
 func (m *mockExecutor) InvalidateSession(replicaID string, sessionID uint64, reason string) {

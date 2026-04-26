@@ -94,7 +94,7 @@ func TestTransport_CatchUp_WALStore_PersistsAcrossReplicaReopen(t *testing.T) {
 	exec.SetOnSessionStart(func(r adapter.SessionStartResult) { startCh <- r })
 	exec.SetOnSessionClose(func(r adapter.SessionCloseResult) { closeCh <- r })
 
-	if err := exec.StartCatchUp("r1", 41, 1, 1, pH); err != nil {
+	if err := exec.StartCatchUp("r1", 41, 1, 1, 1, pH); err != nil {
 		t.Fatal(err)
 	}
 

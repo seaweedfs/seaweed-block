@@ -98,7 +98,7 @@ func TestT4c3_Catchup_ShortDisconnect_DeltaOnly(t *testing.T) {
 		closeCh := make(chan adapter.SessionCloseResult, 1)
 		exec.SetOnSessionStart(func(adapter.SessionStartResult) {})
 		exec.SetOnSessionClose(func(r adapter.SessionCloseResult) { closeCh <- r })
-		if err := exec.StartCatchUp("replica-1", 1, 1, 1, pH); err != nil {
+		if err := exec.StartCatchUp("replica-1", 1, 1, 1, 1, pH); err != nil {
 			t.Fatalf("StartCatchUp: %v", err)
 		}
 
@@ -165,7 +165,7 @@ func TestT4c3_Catchup_GapExceedsRetention_EscalatesToNeedsRebuild(t *testing.T) 
 		closeCh := make(chan adapter.SessionCloseResult, 1)
 		exec.SetOnSessionStart(func(adapter.SessionStartResult) {})
 		exec.SetOnSessionClose(func(r adapter.SessionCloseResult) { closeCh <- r })
-		if err := exec.StartCatchUp("replica-1", 1, 1, 1, 1); err != nil {
+		if err := exec.StartCatchUp("replica-1", 1, 1, 1, 1, 1); err != nil {
 			t.Fatalf("StartCatchUp: %v", err)
 		}
 
@@ -277,7 +277,7 @@ func TestT4c3_Catchup_RecoveryModeLabelSurfaced(t *testing.T) {
 		closeCh := make(chan adapter.SessionCloseResult, 1)
 		exec.SetOnSessionStart(func(adapter.SessionStartResult) {})
 		exec.SetOnSessionClose(func(r adapter.SessionCloseResult) { closeCh <- r })
-		if err := exec.StartCatchUp("replica-1", 1, 1, 1, pH); err != nil {
+		if err := exec.StartCatchUp("replica-1", 1, 1, 1, 1, pH); err != nil {
 			t.Fatal(err)
 		}
 

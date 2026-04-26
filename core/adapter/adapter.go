@@ -423,7 +423,7 @@ func (a *VolumeReplicaAdapter) executeCommand(q queuedCommand) {
 		}()
 
 	case engine.StartCatchUp:
-		err := a.executor.StartCatchUp(c.ReplicaID, q.sessionID, c.Epoch, c.EndpointVersion, c.TargetLSN)
+		err := a.executor.StartCatchUp(c.ReplicaID, q.sessionID, c.Epoch, c.EndpointVersion, c.FromLSN, c.TargetLSN)
 		if err != nil {
 			// T4d-1: synchronous dispatch failure → Transport kind.
 			a.OnSessionClose(SessionCloseResult{

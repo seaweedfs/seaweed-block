@@ -686,7 +686,7 @@ func (e *closureExecutor) Probe(replicaID, dataAddr, ctrlAddr string, sessionID,
 	}
 }
 
-func (e *closureExecutor) StartCatchUp(replicaID string, sessionID, epoch, endpointVersion, targetLSN uint64) error {
+func (e *closureExecutor) StartCatchUp(replicaID string, sessionID, epoch, endpointVersion, fromLSN, targetLSN uint64) error {
 	return nil
 }
 func (e *closureExecutor) StartRebuild(replicaID string, sessionID, epoch, endpointVersion, targetLSN uint64) error {

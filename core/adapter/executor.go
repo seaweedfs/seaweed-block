@@ -38,11 +38,14 @@ type CommandExecutor interface {
 	// OnSessionClose callbacks. Probe is non-mutating.
 	Probe(replicaID, dataAddr, ctrlAddr string, sessionID, epoch, endpointVersion uint64) ProbeResult
 
-	// StartCatchUp begins a catch-up session with the given sessionID and targetLSN.
+	// StartCatchUp begins a catch-up session with the given sessionID,
+	// fromLSN (T4d-3), and targetLSN.
 	// The sessionID is assigned by the adapter (matches the engine's session truth).
+	// fromLSN is the LSN the executor scans FROM (inclusive); engine
+	// populates as Recovery.R + 1 per G-1 §6.1 architect Option A.
 	// Runs asynchronously; completion/failure MUST be reported via the
 	// registered OnSessionClose callback using the SAME sessionID.
-	StartCatchUp(replicaID string, sessionID, epoch, endpointVersion, targetLSN uint64) error
+	StartCatchUp(replicaID string, sessionID, epoch, endpointVersion, fromLSN, targetLSN uint64) error
 
 	// StartRebuild begins a full rebuild session with the given sessionID and targetLSN.
 	// Same contract as StartCatchUp.

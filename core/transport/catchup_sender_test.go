@@ -38,7 +38,7 @@ func runCatchUp(t *testing.T, exec *BlockExecutor, targetLSN uint64) adapter.Ses
 	closeCh := make(chan adapter.SessionCloseResult, 1)
 	exec.SetOnSessionStart(func(r adapter.SessionStartResult) { startCh <- r })
 	exec.SetOnSessionClose(func(r adapter.SessionCloseResult) { closeCh <- r })
-	if err := exec.StartCatchUp("r1", 1, 1, 1, targetLSN); err != nil {
+	if err := exec.StartCatchUp("r1", 1, 1, 1, 1, targetLSN); err != nil {
 		t.Fatal(err)
 	}
 	select {

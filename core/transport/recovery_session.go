@@ -102,7 +102,15 @@ func (e *BlockExecutor) StartRecoverySession(
 	switch contentKind {
 	case engine.RecoveryContentWALDelta:
 		// Bridge to existing catch-up sender.
-		return e.StartCatchUp(replicaID, sessionID, epoch, endpointVersion, targetLSN)
+		// T4d-3: legacy bridge — `StartRecoverySession` doesn't carry
+		// FromLSN today (engine emits StartCatchUp directly with
+		// FromLSN; this bridge path is for the unified
+		// StartRecovery command shape, where FromLSN is implied as
+		// "scan from start of retention"). Pass 1 (≥1 floor) so
+		// sender doesn't trip the substrate's fromLSN==0 spurious
+		// recycle. Future StartRecovery extension can carry an
+		// explicit FromLSN field.
+		return e.StartCatchUp(replicaID, sessionID, epoch, endpointVersion, 1, targetLSN)
 
 	case engine.RecoveryContentFullExtent:
 		// Bridge to existing rebuild sender.

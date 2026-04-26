@@ -466,7 +466,12 @@ func (c *Cluster) CatchUpReplica(replicaIdx int) adapter.SessionCloseResult {
 	exec.SetOnSessionClose(func(r adapter.SessionCloseResult) { closeCh <- r })
 
 	_, _, pH := c.primary.Store.Boundaries()
-	if err := exec.StartCatchUp(fmt.Sprintf("replica-%d", replicaIdx), 1, 1, 1, pH); err != nil {
+	// T4d-3: framework helper passes fromLSN=1 for the genesis-style
+	// catch-up shape (test scaffold). Tests that need explicit
+	// R+1 threading drive the executor directly with a chosen
+	// fromLSN. Component scenarios pinning R+1 bandwidth will use
+	// the executor directly per G-1 §7 test matrix.
+	if err := exec.StartCatchUp(fmt.Sprintf("replica-%d", replicaIdx), 1, 1, 1, 1, pH); err != nil {
 		c.t.Fatalf("CatchUpReplica[%d] StartCatchUp: %v", replicaIdx, err)
 	}
 

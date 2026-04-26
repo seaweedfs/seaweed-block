@@ -18,7 +18,11 @@ import (
 // institution; the other is StartRebuild. Both share session
 // registration, conn lifecycle, and the barrier exchange, but each
 // owns its own ship loop so the two protocols stay distinct.
-func (e *BlockExecutor) StartCatchUp(replicaID string, sessionID, epoch, endpointVersion, targetLSN uint64) error {
+// T4d-3: signature gains `fromLSN uint64` per G-1 §6.1 architect
+// Option A. Engine populates `FromLSN = Recovery.R + 1`; sender
+// scans from there. Sender does NOT add `+1` — the off-by-one
+// "skip already-applied" policy lives at the engine.
+func (e *BlockExecutor) StartCatchUp(replicaID string, sessionID, epoch, endpointVersion, fromLSN, targetLSN uint64) error {
 	lineage := RecoveryLineage{
 		SessionID:       sessionID,
 		Epoch:           epoch,
@@ -31,7 +35,7 @@ func (e *BlockExecutor) StartCatchUp(replicaID string, sessionID, epoch, endpoin
 	}
 
 	go func() {
-		achieved, err := e.doCatchUp(replicaID, session, targetLSN)
+		achieved, err := e.doCatchUp(replicaID, session, fromLSN, targetLSN)
 		e.finishSession(replicaID, session, achieved, err)
 	}()
 	return nil
@@ -76,7 +80,7 @@ func (e *BlockExecutor) StartCatchUp(replicaID string, sessionID, epoch, endpoin
 // returns. Owns: per-call conn deadline; ScanLBAs callback closure.
 // Borrows: primaryStore (substrate handle for ScanLBAs); session
 // (cancel channel + lineage).
-func (e *BlockExecutor) doCatchUp(replicaID string, session *activeSession, targetLSN uint64) (uint64, error) {
+func (e *BlockExecutor) doCatchUp(replicaID string, session *activeSession, fromLSN, targetLSN uint64) (uint64, error) {
 	conn, err := net.DialTimeout("tcp", e.replicaAddr, 2*time.Second)
 	if err != nil {
 		return 0, fmt.Errorf("catch-up dial: %w", err)
@@ -116,19 +120,24 @@ func (e *BlockExecutor) doCatchUp(replicaID string, session *activeSession, targ
 	// is idempotent on already-applied LSNs. T4c-3 integration tests
 	// will cover the replicaFlushedLSN threading at the StartCatchUp
 	// command boundary if needed.
-	// Floor fromLSN to 1: LSN=0 is not a real entry (substrates start
-	// nextLSN at 1). smartwal's `oldestPreserved` defaults to 1 with
-	// no recycling; ScanLBAs(0, ...) would trip
-	// `fromLSN < oldestPreserved` and spuriously return
-	// ErrWALRecycled. Real LSNs always start at 1.
+	// T4d-3: scan from `fromLSN` (passed by caller, originating at
+	// engine as Recovery.R + 1 per G-1 §6.1 architect Option A).
+	// Sender does NOT add any further `+1` adjustment — the off-by-
+	// one "skip already-applied LSN" policy lives at the engine
+	// (INV-REPL-CATCHUP-FROMLSN-IS-REPLICA-FLUSHED-PLUS-1).
 	//
-	// TODO(T4d / engine→adapter→executor recovery wiring): thread
-	// replica's flushed LSN through StartCatchUp so the executor can
-	// scan from `R+1` rather than `1`. The replica is idempotent on
-	// already-applied LSNs (ApplyEntry contract) so the over-scan is
-	// correct but wasteful at scale.
+	// Floor to 1: LSN=0 is not a real entry (substrates start
+	// nextLSN at 1). smartwal's `oldestPreserved` defaults to 1 with
+	// no recycling; ScanLBAs(0, ...) would trip `fromLSN <
+	// oldestPreserved` and spuriously return ErrWALRecycled. The
+	// floor is a sender-side belt-and-braces; engine should always
+	// emit FromLSN >= 1 anyway.
+	scanFromLSN := fromLSN
+	if scanFromLSN == 0 {
+		scanFromLSN = 1
+	}
 	var lastSent uint64
-	scanErr := e.primaryStore.ScanLBAs(1, func(entry storage.RecoveryEntry) error {
+	scanErr := e.primaryStore.ScanLBAs(scanFromLSN, func(entry storage.RecoveryEntry) error {
 		select {
 		case <-session.cancel:
 			return errSessionInvalidated
