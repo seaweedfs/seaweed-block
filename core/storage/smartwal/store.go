@@ -361,6 +361,36 @@ func (s *Store) ApplyEntry(lba uint32, data []byte, lsn uint64) error {
 	return nil
 }
 
+// AppliedLSNs returns per-LBA latest-applied-LSN derived from the
+// ring's valid records. smartwal's ring is capacity-bounded: records
+// older than (head - capacity) have been overwritten, so the returned
+// map is "best-effort within retention" — LBAs whose latest write has
+// rolled out of the ring are not reported.
+//
+// PARTIAL-VIEW NOTE (kickoff §2.5 #3 caveat): smartwal's ring
+// retention is typically larger than walstore's WAL window, so this
+// view is more complete than walstore's `AppliedLSNs()`. Still
+// defense-in-depth — the apply gate (T4d-2) is the authoritative
+// correctness boundary.
+//
+// Called by: T4d-2 replica recovery apply gate at session start.
+// Owns: per-call snapshot from `ring.scanValid()` reduced per-LBA
+// last-writer-wins.
+// Borrows: nothing (returned map is fresh and caller-owned).
+func (s *Store) AppliedLSNs() (map[uint32]uint64, error) {
+	records, err := s.ring.scanValid()
+	if err != nil {
+		return nil, fmt.Errorf("smartwal: AppliedLSNs ring scan: %w", err)
+	}
+	out := make(map[uint32]uint64, len(records))
+	for _, rec := range records {
+		if existing, ok := out[rec.LBA]; !ok || rec.LSN > existing {
+			out[rec.LBA] = rec.LSN
+		}
+	}
+	return out, nil
+}
+
 // AllBlocks snapshots every LBA's current bytes by reading directly
 // from the extent. Linear scan — N reads — but in practice the
 // rebuild server is the only caller and runs once per session.

@@ -425,11 +425,13 @@ func (a *VolumeReplicaAdapter) executeCommand(q queuedCommand) {
 	case engine.StartCatchUp:
 		err := a.executor.StartCatchUp(c.ReplicaID, q.sessionID, c.Epoch, c.EndpointVersion, c.TargetLSN)
 		if err != nil {
+			// T4d-1: synchronous dispatch failure → Transport kind.
 			a.OnSessionClose(SessionCloseResult{
-				ReplicaID:  c.ReplicaID,
-				SessionID:  q.sessionID,
-				Success:    false,
-				FailReason: fmt.Sprintf("start_catchup_failed: %v", err),
+				ReplicaID:   c.ReplicaID,
+				SessionID:   q.sessionID,
+				Success:     false,
+				FailureKind: engine.RecoveryFailureTransport,
+				FailReason:  fmt.Sprintf("start_catchup_failed: %v", err),
 			})
 		}
 
@@ -437,10 +439,11 @@ func (a *VolumeReplicaAdapter) executeCommand(q queuedCommand) {
 		err := a.executor.StartRebuild(c.ReplicaID, q.sessionID, c.Epoch, c.EndpointVersion, c.TargetLSN)
 		if err != nil {
 			a.OnSessionClose(SessionCloseResult{
-				ReplicaID:  c.ReplicaID,
-				SessionID:  q.sessionID,
-				Success:    false,
-				FailReason: fmt.Sprintf("start_rebuild_failed: %v", err),
+				ReplicaID:   c.ReplicaID,
+				SessionID:   q.sessionID,
+				Success:     false,
+				FailureKind: engine.RecoveryFailureTransport,
+				FailReason:  fmt.Sprintf("start_rebuild_failed: %v", err),
 			})
 		}
 
@@ -449,7 +452,7 @@ func (a *VolumeReplicaAdapter) executeCommand(q queuedCommand) {
 		// StartRecoverySession entry. Policy is taken from the
 		// command (engine populates via DefaultRuntimePolicyFor at
 		// emit time). On synchronous dispatch failure, normalize to
-		// SessionClose with a kind-tagged reason.
+		// SessionClose with Transport kind.
 		err := a.executor.StartRecoverySession(
 			c.ReplicaID,
 			q.sessionID, c.Epoch, c.EndpointVersion, c.TargetLSN,
@@ -457,10 +460,11 @@ func (a *VolumeReplicaAdapter) executeCommand(q queuedCommand) {
 		)
 		if err != nil {
 			a.OnSessionClose(SessionCloseResult{
-				ReplicaID:  c.ReplicaID,
-				SessionID:  q.sessionID,
-				Success:    false,
-				FailReason: fmt.Sprintf("start_recovery_failed[%s]: %v", c.ContentKind, err),
+				ReplicaID:   c.ReplicaID,
+				SessionID:   q.sessionID,
+				Success:     false,
+				FailureKind: engine.RecoveryFailureTransport,
+				FailReason:  fmt.Sprintf("start_recovery_failed[%s]: %v", c.ContentKind, err),
 			})
 		}
 
@@ -550,11 +554,14 @@ func (a *VolumeReplicaAdapter) armStartWatchdog(q queuedCommand) {
 		if !shouldFail {
 			return
 		}
+		// T4d-1: watchdog timeout → StartTimeout kind. Engine's
+		// applySessionFailed bypasses retry for this kind.
 		a.OnSessionClose(SessionCloseResult{
-			ReplicaID:  replicaIDFromCommand(q.cmd),
-			SessionID:  q.sessionID,
-			Success:    false,
-			FailReason: "start_timeout",
+			ReplicaID:   replicaIDFromCommand(q.cmd),
+			SessionID:   q.sessionID,
+			Success:     false,
+			FailureKind: engine.RecoveryFailureStartTimeout,
+			FailReason:  "start_timeout",
 		})
 	})
 

@@ -474,16 +474,19 @@ func applySessionFailed(st *ReplicaState, e SessionClosedFailed, r *ApplyResult,
 	st.Session.FailureReason = e.Reason
 	trace("session_failed", e.Reason)
 
-	// T4c-2 G-1 §4.3 architect Option B: error-class mapping at engine
-	// SessionClose. ErrWALRecycled is a tier-class change — force
-	// recovery.Decision=Rebuild and reset Attempts so the next decide()
-	// pass emits a fresh StartRebuild rather than counting toward the
-	// catch-up retry budget.
-	if isWALRecycledFailure(e.Reason) {
+	// T4d-1 (architect HIGH v0.1 #1 + v0.3 boundary fix): branch on
+	// typed FailureKind, NOT substring match. `Reason` is diagnostic
+	// text only and engine MUST NOT parse it.
+	//
+	// WALRecycled is a tier-class change — force recovery.Decision=
+	// Rebuild and reset Attempts so the next decide() pass emits a
+	// fresh StartRebuild rather than counting toward the catch-up
+	// retry budget.
+	if e.FailureKind == RecoveryFailureWALRecycled {
 		st.Recovery.Decision = DecisionRebuild
 		st.Recovery.DecisionReason = "wal_recycled"
 		st.Recovery.Attempts = 0
-		trace("recycle_escalation", "ErrWALRecycled → recovery.Decision=Rebuild")
+		trace("recycle_escalation", "FailureKind=WALRecycled → recovery.Decision=Rebuild")
 		r.Commands = append(r.Commands, PublishDegraded{
 			ReplicaID: e.ReplicaID,
 			Reason:    "session_failed: " + e.Reason,
@@ -504,8 +507,11 @@ func applySessionFailed(st *ReplicaState, e SessionClosedFailed, r *ApplyResult,
 	// that won't start is unlikely to help. Skip retry; let the
 	// adapter's higher-layer machinery (probe re-classification)
 	// drive recovery.
-	if isStartTimeoutFailure(e.Reason) {
-		trace("start_timeout_no_retry", "watchdog timeout — skip retry")
+	//
+	// T4d-1: branch on typed FailureKind (was: substring match on
+	// Reason text). Reason stays for diagnostics only.
+	if e.FailureKind == RecoveryFailureStartTimeout {
+		trace("start_timeout_no_retry", "FailureKind=StartTimeout — skip retry")
 		r.Commands = append(r.Commands, PublishDegraded{
 			ReplicaID: e.ReplicaID,
 			Reason:    "session_failed: " + e.Reason,
@@ -570,44 +576,19 @@ func contentKindFor(d RecoveryDecision) RecoveryContentKind {
 	return RecoveryContentWALDelta
 }
 
-// isWALRecycledFailure detects the substrate's ErrWALRecycled sentinel
-// in a session-failure reason string. The wrapped error's
-// `errors.Is`-friendly form is `... WAL recycled past requested LSN`;
-// we match the "WAL recycled" infix to absorb both the wrap-formatted
-// and bare forms. Matches the storage package's sentinel text
-// (`storage.ErrWALRecycled`) without taking a package dependency on
-// it (engine MUST stay decoupled from storage).
+// T4d-1: substring-match helpers `isWALRecycledFailure`,
+// `isStartTimeoutFailure`, and `containsAny` REMOVED. Engine now
+// branches on typed `e.FailureKind` (RecoveryFailureKind enum).
 //
-// Per T4c-2 G-1 §4.3 (architect Option B): substrate-error-class
-// mapping at engine SessionClose handler.
-func isWALRecycledFailure(reason string) bool {
-	return reason != "" && containsAny(reason, []string{
-		"WAL recycled",
-		"wal recycled",
-	})
-}
-
-// isStartTimeoutFailure detects the adapter watchdog's synthetic
-// start_timeout failure. The watchdog emits exact text
-// "start_timeout" when an executor never signals SessionStart within
-// the configured window. Retrying makes no sense at the engine layer
-// — the executor itself isn't even reaching the dispatch path.
-func isStartTimeoutFailure(reason string) bool {
-	return reason == "start_timeout"
-}
-
-func containsAny(s string, subs []string) bool {
-	for _, sub := range subs {
-		if len(sub) <= len(s) {
-			for i := 0; i+len(sub) <= len(s); i++ {
-				if s[i:i+len(sub)] == sub {
-					return true
-				}
-			}
-		}
-	}
-	return false
-}
+// `Reason` field on SessionClosedFailed is DIAGNOSTIC TEXT ONLY —
+// engine MUST NOT parse it. Substring matching was a temporary
+// T4c-2 contract; T4d-1 closes the binding per architect HIGH v0.1
+// #1 + v0.3 boundary discipline (engine→storage decoupling).
+//
+// Substrate-side classification lives in storage.RecoveryFailure +
+// storage.StorageRecoveryFailureKind. Transport extracts via
+// errors.As and maps to engine.RecoveryFailureKind at the boundary.
+// Adapter copies the typed field through SessionCloseResult.
 
 func applySessionInvalidated(st *ReplicaState, e SessionInvalidated, r *ApplyResult, trace func(string, string)) {
 	if e.SessionID != st.Session.SessionID {

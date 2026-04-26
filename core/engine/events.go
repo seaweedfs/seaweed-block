@@ -112,12 +112,85 @@ type SessionClosedCompleted struct {
 
 func (SessionClosedCompleted) eventKind() string { return "SessionClosedCompleted" }
 
+// RecoveryFailureKind is the engine-owned classification of why a
+// recovery session failed. Engine MUST NOT import core/storage —
+// substrate-side classification (`storage.StorageRecoveryFailureKind`)
+// is mapped at the transport boundary into this engine-local enum.
+//
+// Per architect kickoff §9.3 + T4d mini-plan v0.3 boundary discipline:
+// engine consumes its own type; storage owns its type; transport does
+// the mapping. See `feedback_engine_no_storage_import.md`.
+type RecoveryFailureKind int
+
+const (
+	// RecoveryFailureUnknown — default zero value; treat as generic
+	// failure (retryable per RecoveryRuntimePolicy.MaxRetries).
+	RecoveryFailureUnknown RecoveryFailureKind = iota
+
+	// RecoveryFailureWALRecycled — substrate's retention boundary
+	// crossed. Engine escalates to Decision=Rebuild (skips retry
+	// budget; tier-class change).
+	RecoveryFailureWALRecycled
+
+	// RecoveryFailureTransport — transport / connection error.
+	// Retryable up to RecoveryRuntimePolicy.MaxRetries.
+	RecoveryFailureTransport
+
+	// RecoveryFailureSubstrateIO — substrate IO failure during the
+	// scan (read error, decode error mid-scan). Retryable.
+	RecoveryFailureSubstrateIO
+
+	// RecoveryFailureTargetNotReached — catch-up didn't reach
+	// targetLSN (substrate ran dry before completion). Retryable.
+	RecoveryFailureTargetNotReached
+
+	// RecoveryFailureStartTimeout — adapter watchdog: executor
+	// never signaled SessionStart within the configured window.
+	// Engine's applySessionFailed BYPASSES retry for this kind
+	// (executor never started; retrying an unreachable executor
+	// doesn't help).
+	RecoveryFailureStartTimeout
+
+	// RecoveryFailureSessionInvalidated — session canceled by
+	// control path (identity changed, peer removed, etc.). Not
+	// retried as a recovery failure; engine handles via the
+	// invalidation path.
+	RecoveryFailureSessionInvalidated
+)
+
+// String returns the human-readable kind name for diagnostics. NOT
+// parsed by anyone — typed branching uses the int constants directly.
+func (k RecoveryFailureKind) String() string {
+	switch k {
+	case RecoveryFailureWALRecycled:
+		return "WALRecycled"
+	case RecoveryFailureTransport:
+		return "Transport"
+	case RecoveryFailureSubstrateIO:
+		return "SubstrateIO"
+	case RecoveryFailureTargetNotReached:
+		return "TargetNotReached"
+	case RecoveryFailureStartTimeout:
+		return "StartTimeout"
+	case RecoveryFailureSessionInvalidated:
+		return "SessionInvalidated"
+	default:
+		return "Unknown"
+	}
+}
+
 // SessionClosedFailed: the session failed.
 // This is one of only two terminal session events.
+//
+// Per T4d-1 (architect HIGH v0.1 #1 + v0.3 boundary fix): `FailureKind`
+// carries the typed classification engine branches on. `Reason` is
+// DIAGNOSTIC TEXT ONLY — engine MUST NOT parse it. Engine reads
+// `FailureKind` to decide retry vs escalate.
 type SessionClosedFailed struct {
-	ReplicaID string
-	SessionID uint64
-	Reason    string
+	ReplicaID   string
+	SessionID   uint64
+	FailureKind RecoveryFailureKind // typed branch field
+	Reason      string              // DIAGNOSTIC TEXT ONLY — do NOT parse
 }
 
 func (SessionClosedFailed) eventKind() string { return "SessionClosedFailed" }

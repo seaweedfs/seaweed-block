@@ -155,13 +155,15 @@ func TestDefaultRuntimePolicyFor_TimeoutCadenceConsistency(t *testing.T) {
 	}
 }
 
-// TestSessionFailed_WALRecycled_EscalatesToRebuild — T4c-2 G-1 §4.3
-// architect Option B: when a SessionClosedFailed event's Reason
-// contains the substrate's ErrWALRecycled sentinel text, engine MUST
+// TestSessionFailed_WALRecycled_EscalatesToRebuild — T4d-1 (architect
+// HIGH v0.1 #1 + v0.3 boundary fix): engine branches on TYPED
+// FailureKind, NOT on Reason substring. When a SessionClosedFailed
+// event's `FailureKind == RecoveryFailureWALRecycled`, engine MUST
 // set recovery.Decision = DecisionRebuild so the next decide() pass
 // emits StartRebuild instead of looping on StartCatchUp.
 //
-// `INV-REPL-CATCHUP-RECYCLE-ESCALATES`.
+// `INV-REPL-CATCHUP-RECYCLE-ESCALATES` (pinning method updated at
+// T4d-1: substring match → typed kind).
 func TestSessionFailed_WALRecycled_EscalatesToRebuild(t *testing.T) {
 	st := &ReplicaState{
 		Identity: IdentityTruth{ReplicaID: "r1", Epoch: 1, EndpointVersion: 1},
@@ -172,9 +174,10 @@ func TestSessionFailed_WALRecycled_EscalatesToRebuild(t *testing.T) {
 		Recovery: RecoveryTruth{Decision: DecisionCatchUp},
 	}
 	ev := SessionClosedFailed{
-		ReplicaID:  "r1",
-		SessionID:  7,
-		Reason: "catch-up: WAL recycled: storage: WAL recycled past requested LSN: fromLSN=5 checkpointLSN=10",
+		ReplicaID:   "r1",
+		SessionID:   7,
+		FailureKind: RecoveryFailureWALRecycled, // T4d-1: typed branch
+		Reason:      "catch-up: WAL recycled (diagnostic text only — engine MUST NOT parse)",
 	}
 	r := Apply(st, ev)
 	_ = r
@@ -185,6 +188,33 @@ func TestSessionFailed_WALRecycled_EscalatesToRebuild(t *testing.T) {
 	if st.Recovery.DecisionReason != "wal_recycled" {
 		t.Errorf("Recovery.DecisionReason = %q, want %q",
 			st.Recovery.DecisionReason, "wal_recycled")
+	}
+}
+
+// TestSessionFailed_WALRecycled_NoSubstringMatchUsed — T4d-1
+// negative pin: even if FailureKind is wrong (Unknown), Reason text
+// containing "WAL recycled" must NOT trigger escalation. This proves
+// engine does NOT fall back to substring matching.
+func TestSessionFailed_WALRecycled_NoSubstringMatchUsed(t *testing.T) {
+	st := &ReplicaState{
+		Identity: IdentityTruth{ReplicaID: "r1", Epoch: 1, EndpointVersion: 1},
+		Session:  SessionTruth{SessionID: 7, Phase: PhaseRunning},
+		Recovery: RecoveryTruth{Decision: DecisionCatchUp, H: 100},
+	}
+	// FailureKind=Unknown (zero value); Reason has the old substring.
+	// If engine still parses Reason, this would escalate to Rebuild.
+	// Post-T4d-1: must NOT escalate. Falls through to retry path.
+	ev := SessionClosedFailed{
+		ReplicaID: "r1",
+		SessionID: 7,
+		Reason:    "catch-up: WAL recycled past requested LSN (substring trap)",
+	}
+	Apply(st, ev)
+	if st.Recovery.Decision == DecisionRebuild {
+		t.Error("FAIL: engine fell back to substring match — must branch on FailureKind only")
+	}
+	if st.Recovery.DecisionReason == "wal_recycled" {
+		t.Error("FAIL: DecisionReason=wal_recycled set despite FailureKind=Unknown — substring path leaked")
 	}
 }
 

@@ -65,8 +65,14 @@ func (s *WALStore) ScanLBAs(fromLSN uint64, fn func(RecoveryEntry) error) error 
 	// available in the WAL (their physical WAL space may have been
 	// reused by newer appends).
 	if fromLSN <= checkpointLSN && checkpointLSN > 0 {
-		return fmt.Errorf("%w: fromLSN=%d checkpointLSN=%d headLSN=%d",
-			ErrWALRecycled, fromLSN, checkpointLSN, headLSN)
+		// T4d-1: wrap in typed RecoveryFailure so transport can
+		// extract the kind via errors.As. errors.Is(err,
+		// ErrWALRecycled) still works via Unwrap, preserving
+		// pre-T4d-1 callers during the migration window.
+		return NewWALRecycledFailure(
+			ErrWALRecycled,
+			fmt.Sprintf("fromLSN=%d checkpointLSN=%d headLSN=%d", fromLSN, checkpointLSN, headLSN),
+		)
 	}
 	if fromLSN >= headLSN {
 		return nil // caller is at-or-ahead of head; nothing to ship

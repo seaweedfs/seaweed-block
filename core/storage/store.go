@@ -192,6 +192,19 @@ func (s *BlockStore) ScanLBAs(fromLSN uint64, fn func(RecoveryEntry) error) erro
 	return nil
 }
 
+// AppliedLSNs satisfies the T4d-1 LogicalStorage extension. BlockStore
+// is in-memory and does NOT track per-LBA applied LSN — explicit
+// not-tracked return per kickoff §2.5 #1 architect Option C hybrid.
+// The replica recovery apply gate (T4d-2) handles the sentinel by
+// falling back to session-only tracking.
+//
+// Called by: T4d-2 replica recovery apply gate at session start.
+// Owns: nothing (returns sentinel + nil map).
+// Borrows: nothing.
+func (s *BlockStore) AppliedLSNs() (map[uint32]uint64, error) {
+	return nil, ErrAppliedLSNsNotTracked
+}
+
 // Boundaries returns the current R/S/H recovery boundaries.
 //   - R (syncedLSN): what's durable on this node
 //   - S (walTail): oldest retained LSN

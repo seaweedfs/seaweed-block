@@ -547,6 +547,37 @@ func (s *WALStore) ApplyEntry(lba uint32, data []byte, lsn uint64) error {
 	return nil
 }
 
+// AppliedLSNs returns a partial view of per-LBA applied LSN: only
+// LBAs whose latest write is still in the WAL (not yet flushed to
+// extent) are reported. Once an entry is flushed and the dirty-map
+// entry is cleared, walstore loses per-LBA LSN tracking — the
+// extent stores data only, not per-LBA LSN.
+//
+// PARTIAL-VIEW LIMITATION (kickoff §2.5 #3 caveat): for full per-LBA
+// applied-LSN tracking, walstore would need a permanent per-LBA LSN
+// map (substrate refactor, out of T4d-1 scope). The replica recovery
+// apply gate (T4d-2) is the authoritative correctness boundary; this
+// partial seed is defense-in-depth — it correctly stale-skips
+// recovery entries for LBAs still in the WAL window, and falls back
+// to "appliedLSN[LBA] = 0" semantics for flushed LBAs (which means
+// recovery WILL apply them — acceptable when the gate's session-only
+// tracking + live-lane updates fill in the gap during the session).
+//
+// Called by: T4d-2 replica recovery apply gate at session start.
+// Owns: per-call snapshot of dirty map (lock-free under shard locks).
+// Borrows: nothing (returned map is fresh and caller-owned).
+func (s *WALStore) AppliedLSNs() (map[uint32]uint64, error) {
+	entries := s.dm.snapshot()
+	out := make(map[uint32]uint64, len(entries))
+	for _, e := range entries {
+		lba := uint32(e.LBA)
+		if existing, ok := out[lba]; !ok || e.LSN > existing {
+			out[lba] = e.LSN
+		}
+	}
+	return out, nil
+}
+
 // AllBlocks snapshots every written LBA's current bytes. Reads
 // every LBA in the volume via Read() (which checks the dirty map
 // first, falls back to the extent) and returns the entries whose

@@ -144,6 +144,22 @@ type LogicalStorage interface {
 	// NIL-CONTINUES.
 	ScanLBAs(fromLSN uint64, fn func(RecoveryEntry) error) error
 
+	// AppliedLSNs returns the substrate's per-LBA latest-applied-LSN
+	// snapshot. T4d-2 replica recovery apply gate calls this at
+	// session start to seed its in-memory `appliedLSN[LBA]` map
+	// (Option C hybrid per kickoff §2.5 #1: substrate-query path
+	// where available; fallback to session-only tracking otherwise).
+	//
+	// Substrates that do NOT maintain per-LBA applied-LSN metadata
+	// MUST return `(nil, ErrAppliedLSNsNotTracked)` explicitly. The
+	// gate handles the sentinel (logs INFO once, falls back). NOT a
+	// panic; NOT silent degradation.
+	//
+	// Returned map ownership: caller MAY mutate the returned map.
+	// Substrate implementations MUST snapshot internal state into a
+	// fresh map (don't share internal storage).
+	AppliedLSNs() (map[uint32]uint64, error)
+
 	// --- Lifecycle ---
 
 	// Close releases any resources (file handles, fsync queues). After

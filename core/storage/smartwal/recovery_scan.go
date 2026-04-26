@@ -91,8 +91,12 @@ func (s *Store) ScanLBAs(fromLSN uint64, fn func(RecoveryEntry) error) error {
 		oldestPreserved = 1
 	}
 	if fromLSN < oldestPreserved {
-		return fmt.Errorf("%w: fromLSN=%d oldestPreserved=%d head=%d",
-			ErrWALRecycled, fromLSN, oldestPreserved, head)
+		// T4d-1: wrap in typed RecoveryFailure (storage-side kind).
+		// Transport extracts via errors.As and maps to engine kind.
+		return storage.NewWALRecycledFailure(
+			ErrWALRecycled,
+			fmt.Sprintf("fromLSN=%d oldestPreserved=%d head=%d", fromLSN, oldestPreserved, head),
+		)
 	}
 
 	// Scan all valid slot records, filter by LSN range, last-writer-

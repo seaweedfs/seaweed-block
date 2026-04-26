@@ -508,11 +508,17 @@ func (e *BlockExecutor) finishSession(replicaID string, session *activeSession, 
 		return
 	}
 	if err != nil {
+		// T4d-1 (architect HIGH v0.1 #1 + v0.3 boundary fix): extract
+		// substrate-side RecoveryFailure via errors.As + map to
+		// engine-owned RecoveryFailureKind. Engine MUST NOT import
+		// core/storage; transport does the mapping at the boundary
+		// (transport already imports both packages).
 		cb(adapter.SessionCloseResult{
-			ReplicaID:  replicaID,
-			SessionID:  session.lineage.SessionID,
-			Success:    false,
-			FailReason: err.Error(),
+			ReplicaID:   replicaID,
+			SessionID:   session.lineage.SessionID,
+			Success:     false,
+			FailureKind: classifyRecoveryFailure(err),
+			FailReason:  err.Error(),
 		})
 		return
 	}

@@ -46,12 +46,19 @@ type ProbeResult struct {
 }
 
 // SessionCloseResult is the outcome of a completed/failed recovery session.
+//
+// Per T4d-1 v0.3: `FailureKind` carries the engine-owned typed
+// classification (transport extracts substrate kind via errors.As and
+// maps to engine kind). `FailReason` stays as DIAGNOSTIC TEXT ONLY —
+// engine MUST NOT parse it. The adapter uses `FailureKind` field
+// directly when constructing `engine.SessionClosedFailed`.
 type SessionCloseResult struct {
 	ReplicaID   string
 	SessionID   uint64
 	Success     bool
 	AchievedLSN uint64
-	FailReason  string
+	FailureKind engine.RecoveryFailureKind // typed branch field; engine-owned enum
+	FailReason  string                     // DIAGNOSTIC TEXT ONLY — do NOT parse
 }
 
 // SessionStartResult reports that a recovery session has actually begun
@@ -128,9 +135,10 @@ func NormalizeSessionClose(r SessionCloseResult) engine.Event {
 		}
 	}
 	return engine.SessionClosedFailed{
-		ReplicaID: r.ReplicaID,
-		SessionID: r.SessionID,
-		Reason:    r.FailReason,
+		ReplicaID:   r.ReplicaID,
+		SessionID:   r.SessionID,
+		FailureKind: r.FailureKind, // T4d-1: typed branch field
+		Reason:      r.FailReason,  // diagnostic text only
 	}
 }
 

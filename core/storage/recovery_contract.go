@@ -82,3 +82,112 @@ const (
 	RecoveryEntryWrite uint8 = 1
 	RecoveryEntryTrim  uint8 = 2
 )
+
+// --- T4d-1 (round-43 + v0.3 boundary discipline): structured recovery
+//     failure kind ---
+//
+// `core/engine` MUST NOT import `core/storage` (memory rule
+// `feedback_engine_no_storage_import.md`). The substrate-facing kind
+// lives here; transport extracts it via `errors.As` and maps it to
+// the engine-owned `engine.RecoveryFailureKind` at the boundary.
+
+// StorageRecoveryFailureKind classifies why a substrate recovery
+// operation (today: ScanLBAs) failed. Substrate-facing only — this
+// type does NOT cross into engine. Transport reads it (via errors.As
+// against `*RecoveryFailure`) and maps to `engine.RecoveryFailureKind`.
+type StorageRecoveryFailureKind int
+
+const (
+	// StorageRecoveryFailureUnknown — default zero value; treat as
+	// generic substrate error (retryable per engine policy).
+	StorageRecoveryFailureUnknown StorageRecoveryFailureKind = iota
+
+	// StorageRecoveryFailureWALRecycled — fromLSN at or below the
+	// substrate's retention boundary. Tier-class change; transport
+	// maps to engine kind that triggers Rebuild escalation.
+	StorageRecoveryFailureWALRecycled
+
+	// StorageRecoveryFailureSubstrateIO — substrate IO error
+	// (read failure, decode failure mid-scan, etc.). Retryable.
+	StorageRecoveryFailureSubstrateIO
+)
+
+// String returns the human-readable kind name for diagnostics. NOT
+// parsed by anyone — typed branching uses the int constants directly.
+func (k StorageRecoveryFailureKind) String() string {
+	switch k {
+	case StorageRecoveryFailureWALRecycled:
+		return "WALRecycled"
+	case StorageRecoveryFailureSubstrateIO:
+		return "SubstrateIO"
+	default:
+		return "Unknown"
+	}
+}
+
+// RecoveryFailure is the typed-error envelope substrates return from
+// `ScanLBAs` when the failure is classifiable. Transport extracts the
+// kind via `errors.As(err, &target)` and maps it to engine kind.
+//
+// Implements `error` and `Unwrap` so existing `errors.Is(err,
+// ErrWALRecycled)` keeps working during the migration.
+type RecoveryFailure struct {
+	Kind   StorageRecoveryFailureKind
+	Cause  error  // wrapped underlying error for diagnostics
+	Detail string // free-form additional context
+}
+
+// Error returns a human-readable message. NOT parsed.
+func (f *RecoveryFailure) Error() string {
+	if f.Cause != nil {
+		if f.Detail != "" {
+			return "storage: " + f.Kind.String() + ": " + f.Detail + ": " + f.Cause.Error()
+		}
+		return "storage: " + f.Kind.String() + ": " + f.Cause.Error()
+	}
+	if f.Detail != "" {
+		return "storage: " + f.Kind.String() + ": " + f.Detail
+	}
+	return "storage: " + f.Kind.String()
+}
+
+// Unwrap supports `errors.Is(err, storage.ErrWALRecycled)` so
+// pre-T4d-1 callers continue to work during the migration window.
+func (f *RecoveryFailure) Unwrap() error { return f.Cause }
+
+// NewWALRecycledFailure wraps a substrate-internal recycle error in
+// the typed envelope. Substrate impls call this from ScanLBAs.
+func NewWALRecycledFailure(cause error, detail string) *RecoveryFailure {
+	if cause == nil {
+		cause = ErrWALRecycled
+	}
+	return &RecoveryFailure{
+		Kind:   StorageRecoveryFailureWALRecycled,
+		Cause:  cause,
+		Detail: detail,
+	}
+}
+
+// NewSubstrateIOFailure wraps a substrate IO error in the typed
+// envelope. Use when ScanLBAs failed mid-scan with a read/decode error.
+func NewSubstrateIOFailure(cause error, detail string) *RecoveryFailure {
+	return &RecoveryFailure{
+		Kind:   StorageRecoveryFailureSubstrateIO,
+		Cause:  cause,
+		Detail: detail,
+	}
+}
+
+// --- T4d-1 Option C hybrid: per-LBA applied-LSN exposure ---
+
+// ErrAppliedLSNsNotTracked is returned by `LogicalStorage.AppliedLSNs`
+// when the substrate does not maintain per-LBA applied-LSN metadata
+// (e.g., in-memory BlockStore). The replica recovery apply gate
+// (T4d-2) falls back to a session-only in-memory map seeded from
+// recovery/live applies during the session.
+//
+// Per architect kickoff §2.5 #1 (Option C hybrid): substrates that
+// CAN expose per-LBA applied-LSN cleanly do so; substrates that can't
+// MUST return this sentinel explicitly (NOT a panic, NOT silent
+// degradation).
+var ErrAppliedLSNsNotTracked = errors.New("storage: substrate does not track per-LBA applied LSN")

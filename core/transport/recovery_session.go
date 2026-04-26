@@ -1,10 +1,67 @@
 package transport
 
 import (
+	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/seaweedfs/seaweed-block/core/engine"
+	"github.com/seaweedfs/seaweed-block/core/storage"
 )
+
+// classifyRecoveryFailure is the T4d-1 boundary mapper: extracts the
+// substrate-side `*storage.RecoveryFailure` typed error via
+// `errors.As` and maps its `StorageRecoveryFailureKind` to the
+// engine-owned `engine.RecoveryFailureKind`. Engine MUST NOT import
+// core/storage; transport does the mapping at the boundary because
+// transport already imports both packages.
+//
+// Architect-locked (kickoff §9 / mini-plan v0.3): storage owns
+// substrate-side classification; transport maps; engine consumes its
+// own type. See `feedback_engine_no_storage_import.md`.
+//
+// Fallback heuristics for errors that aren't typed `*RecoveryFailure`:
+//   - errSessionInvalidated → RecoveryFailureSessionInvalidated
+//   - error mentioning "target" + "not reached" → RecoveryFailureTargetNotReached
+//     (catch-up sender's existing target-not-reached error wraps;
+//     T4e/G5 may add a typed kind for this so the substring match
+//     can go away too)
+//   - everything else → RecoveryFailureTransport (retryable per
+//     RecoveryRuntimePolicy)
+//
+// Called by: BlockExecutor.finishSession at session close path.
+// Owns: nothing; pure mapping.
+// Borrows: err is consumed read-only (errors.As doesn't mutate).
+func classifyRecoveryFailure(err error) engine.RecoveryFailureKind {
+	if err == nil {
+		return engine.RecoveryFailureUnknown
+	}
+	// Typed substrate failure — preferred path.
+	var rf *storage.RecoveryFailure
+	if errors.As(err, &rf) {
+		switch rf.Kind {
+		case storage.StorageRecoveryFailureWALRecycled:
+			return engine.RecoveryFailureWALRecycled
+		case storage.StorageRecoveryFailureSubstrateIO:
+			return engine.RecoveryFailureSubstrateIO
+		}
+		return engine.RecoveryFailureTransport
+	}
+	// Session invalidation is a transport-internal sentinel.
+	if errors.Is(err, errSessionInvalidated) {
+		return engine.RecoveryFailureSessionInvalidated
+	}
+	// Catch-up sender's existing "target N not reached" wrap. T4e/G5
+	// candidate to make typed (would add a sender-side typed-error
+	// envelope mirroring storage.RecoveryFailure). For now: substring
+	// inside transport is acceptable (transport owns its own messages;
+	// engine still branches on the typed FailureKind we set here).
+	msg := err.Error()
+	if strings.Contains(msg, "target") && strings.Contains(msg, "not reached") {
+		return engine.RecoveryFailureTargetNotReached
+	}
+	return engine.RecoveryFailureTransport
+}
 
 // StartRecoverySession is the unified recovery dispatch entry per
 // design memo §7a (T4c-pre-B). One semantic command, per-content-kind
