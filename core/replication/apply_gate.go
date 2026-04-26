@@ -96,25 +96,28 @@ func NewReplicaApplyGate(store storage.LogicalStorage) *ReplicaApplyGate {
 	}
 }
 
-// Apply routes the entry to the recovery or live apply path based
-// on the lineage's lane signal (Q2: lane implicit from handler
-// context, NOT a wire byte).
+// ApplyRecovery routes the entry through the recovery-lane apply
+// path. Per round-46 architect ruling: the gate is lane-PURE —
+// CALLER decides lane (from connection/session handler context)
+// and invokes the appropriate explicit method. The gate does NOT
+// inspect the lineage for lane discrimination.
 //
-// Implements `transport.ApplyHook`. Called by `transport.ReplicaListener`'s
-// MsgShipEntry handler when the gate is installed.
+// Implements `transport.ApplyHook.ApplyRecovery`. Called by
+// `transport.ReplicaListener`'s MsgShipEntry handler when the
+// caller has determined this entry is on the recovery lane.
 //
-// Lane signal: `lineage.TargetLSN > liveShipTargetLSN` → recovery lane.
-// `lineage.TargetLSN == liveShipTargetLSN` → live lane.
+// Behavior (architect round-43/44):
+//   - if entry.LSN <= appliedLSN[lba] → SKIP data write +
+//     advance `recoveryCovered` (round-44 #1)
+//   - else → substrate.ApplyEntry + update `appliedLSN` +
+//     `recoveryCovered`
 //
-// Returns:
-//   - nil on success (including legitimate recovery-lane stale-skip)
-//   - non-nil error on live-lane stale-fail-loud OR substrate
-//     ApplyEntry failure
+// Returns nil on success (including legitimate stale-skip);
+// non-nil error on substrate ApplyEntry failure.
 //
-// Owns: the apply decision; per-session state mutation under g.mu.
-// Borrows: data slice (substrate ApplyEntry may copy; gate does not
-// retain references past return).
-func (g *ReplicaApplyGate) Apply(lineage transport.RecoveryLineage, lba uint32, data []byte, lsn uint64) error {
+// Owns: per-session state mutation under g.mu.
+// Borrows: data slice (substrate may copy; gate does not retain).
+func (g *ReplicaApplyGate) ApplyRecovery(lineage transport.RecoveryLineage, lba uint32, data []byte, lsn uint64) error {
 	g.mu.Lock()
 	sess, ok := g.sessions[lineage.SessionID]
 	if !ok {
@@ -122,22 +125,29 @@ func (g *ReplicaApplyGate) Apply(lineage transport.RecoveryLineage, lba uint32, 
 		g.sessions[lineage.SessionID] = sess
 	}
 	g.mu.Unlock()
-
-	if isRecoveryLane(lineage) {
-		return g.applyRecovery(sess, lba, data, lsn)
-	}
-	return g.applyLive(sess, lba, data, lsn)
+	return g.applyRecovery(sess, lba, data, lsn)
 }
 
-// isRecoveryLane returns true iff the lineage signals a recovery
-// session (catch-up or rebuild). Per Q2: read existing wire field;
-// do NOT add a new lane byte.
+// ApplyLive routes the entry through the live-lane apply path.
+// Per round-46 architect ruling: the gate is lane-PURE — CALLER
+// decides lane from connection/session handler context.
 //
-// `liveShipTargetLSN` is the steady-state live-ship sentinel
-// (defined in peer.go); recovery sessions carry a real engine-frozen
-// TargetLSN > 1.
-func isRecoveryLane(lineage transport.RecoveryLineage) bool {
-	return lineage.TargetLSN > liveShipTargetLSN
+// Implements `transport.ApplyHook.ApplyLive`.
+//
+// Behavior (architect round-43/44):
+//   - if entry.LSN <= appliedLSN[lba] → return error
+//     (round-44 #2 INV-REPL-LIVE-LANE-STALE-FAILS-LOUD)
+//   - else → substrate.ApplyEntry + update `appliedLSN` +
+//     `liveTouched` ONLY (do NOT touch `recoveryCovered`)
+func (g *ReplicaApplyGate) ApplyLive(lineage transport.RecoveryLineage, lba uint32, data []byte, lsn uint64) error {
+	g.mu.Lock()
+	sess, ok := g.sessions[lineage.SessionID]
+	if !ok {
+		sess = g.initSessionLocked(lineage.SessionID)
+		g.sessions[lineage.SessionID] = sess
+	}
+	g.mu.Unlock()
+	return g.applyLive(sess, lba, data, lsn)
 }
 
 // applyRecovery handles the recovery-lane apply: stale-skip + always

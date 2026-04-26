@@ -44,25 +44,75 @@ func makeData(marker byte) []byte {
 	return d
 }
 
-// --- Lane discrimination (INV-REPL-LANE-DERIVED-FROM-HANDLER-CONTEXT) ---
+// --- Lane purity regression (round-46 architect ruling) ---
+//
+// Per round-46: gate is lane-PURE — caller decides lane, gate does
+// NOT inspect lineage.TargetLSN to discriminate. The previous
+// "isRecoveryLane(lineage)" helper has been removed; the gate's API
+// is two explicit methods (ApplyRecovery + ApplyLive).
+//
+// TestApplyGate_RecoveryWithTargetLSN1_RoutesToRecoveryLane is the
+// architect-required regression: a recovery session with TargetLSN=1
+// (the OLD live-ship sentinel value) routes to recovery lane when
+// caller invokes ApplyRecovery — proving the gate doesn't sniff the
+// payload.
 
-func TestApplyGate_LaneDiscriminator_RecoveryWhenTargetLSNAboveLive(t *testing.T) {
-	cases := []struct {
-		targetLSN uint64
-		want      bool // recovery lane?
-	}{
-		{liveShipTargetLSN, false}, // = 1 → live
-		{2, true},                  // > 1 → recovery
-		{100, true},
-		{0, false}, // 0 < 1 — also not recovery; live default
+func TestApplyGate_RecoveryWithTargetLSN1_RoutesToRecoveryLane(t *testing.T) {
+	gate, _ := newGate(t)
+	// Recovery lineage with TargetLSN=1 — the OLD live-ship sentinel
+	// value. Pre-rework, gate's TargetLSN inspection treated this
+	// as live → would have fail-loud'd a "stale" recovery entry.
+	// Post-rework: gate doesn't care about TargetLSN; ApplyRecovery
+	// is recovery-lane semantics regardless of the payload value.
+	lin := transport.RecoveryLineage{
+		SessionID: 7, Epoch: 1, EndpointVersion: 1, TargetLSN: 1,
 	}
-	for _, c := range cases {
-		l := transport.RecoveryLineage{
-			SessionID: 1, Epoch: 1, EndpointVersion: 1, TargetLSN: c.targetLSN,
-		}
-		if got := isRecoveryLane(l); got != c.want {
-			t.Errorf("isRecoveryLane(TargetLSN=%d) = %v, want %v", c.targetLSN, got, c.want)
-		}
+
+	// Apply newer first.
+	if err := gate.ApplyRecovery(lin, 5, makeData(0xBB), 50); err != nil {
+		t.Fatalf("first recovery apply: %v", err)
+	}
+
+	// Stale apply via recovery: must SKIP silently (recovery lane).
+	// If gate were sniffing TargetLSN==1 as live, this would
+	// fail-loud with an error.
+	err := gate.ApplyRecovery(lin, 5, makeData(0xAA), 30)
+	if err != nil {
+		t.Fatalf("FAIL: recovery stale apply errored — gate is treating TargetLSN=1 as live; should treat as recovery (caller's lane choice is authoritative); err=%v", err)
+	}
+
+	// Recovery coverage MUST advance even on stale-skip.
+	if !gate.SessionRecoveryCoverage(7, 5) {
+		t.Fatal("FAIL: recovery coverage did not advance — gate misrouted ApplyRecovery as live")
+	}
+}
+
+// TestApplyGate_LiveWithTargetLSN100_RoutesToLiveLane is the mirror
+// regression: live-lane sessions with arbitrarily-high TargetLSN
+// (which would have been mis-classified as recovery pre-rework)
+// route to live lane when caller invokes ApplyLive.
+func TestApplyGate_LiveWithTargetLSN100_RoutesToLiveLane(t *testing.T) {
+	gate, _ := newGate(t)
+	// Live lineage with TargetLSN=100 — would have been treated as
+	// recovery by pre-rework gate (TargetLSN > 1). Post-rework: gate
+	// honors caller's choice.
+	lin := transport.RecoveryLineage{
+		SessionID: 99, Epoch: 1, EndpointVersion: 1, TargetLSN: 100,
+	}
+
+	if err := gate.ApplyLive(lin, 5, makeData(0xBB), 50); err != nil {
+		t.Fatalf("first live apply: %v", err)
+	}
+
+	// Stale via live: must FAIL LOUD.
+	err := gate.ApplyLive(lin, 5, makeData(0xAA), 30)
+	if err == nil {
+		t.Fatal("FAIL: live stale apply did NOT error — gate misrouted ApplyLive as recovery")
+	}
+
+	// Live MUST NOT advance recovery coverage.
+	if gate.SessionRecoveryCoverage(99, 5) {
+		t.Fatal("FAIL: live apply advanced recovery coverage — gate misrouted ApplyLive as recovery")
 	}
 }
 
@@ -74,7 +124,7 @@ func TestApplyGate_RecoveryLane_StaleSkip_DoesNotRegressData(t *testing.T) {
 
 	// Apply newer first — LBA=5, LSN=50, value B.
 	dataB := makeData(0xBB)
-	if err := gate.Apply(lin, 5, dataB, 50); err != nil {
+	if err := gate.ApplyRecovery(lin, 5, dataB, 50); err != nil {
 		t.Fatalf("first apply: %v", err)
 	}
 	// Substrate has B.
@@ -85,7 +135,7 @@ func TestApplyGate_RecoveryLane_StaleSkip_DoesNotRegressData(t *testing.T) {
 
 	// Apply STALE — LBA=5, LSN=31, value A. Must skip.
 	dataA := makeData(0xAA)
-	if err := gate.Apply(lin, 5, dataA, 31); err != nil {
+	if err := gate.ApplyRecovery(lin, 5, dataA, 31); err != nil {
 		t.Errorf("stale apply must NOT error (recovery lane skips silently); got %v", err)
 	}
 	// Substrate STILL has B (no regression).
@@ -102,9 +152,9 @@ func TestApplyGate_RecoveryLane_StaleSkip_AdvancesRecoveryCovered(t *testing.T) 
 	lin := recoveryLineage(7, 100)
 
 	// Newer apply.
-	gate.Apply(lin, 5, makeData(0xBB), 50)
+	gate.ApplyRecovery(lin, 5, makeData(0xBB), 50)
 	// Stale skip.
-	gate.Apply(lin, 5, makeData(0xAA), 31)
+	gate.ApplyRecovery(lin, 5, makeData(0xAA), 31)
 
 	// recoveryCovered MUST be true for LBA=5 even though the stale
 	// apply was skipped. Without this, barrier completion lies and
@@ -118,7 +168,7 @@ func TestApplyGate_RecoveryLane_FreshApply_AdvancesCoverageAndAppliedLSN(t *test
 	gate, _ := newGate(t)
 	lin := recoveryLineage(7, 100)
 
-	gate.Apply(lin, 5, makeData(0xAA), 30)
+	gate.ApplyRecovery(lin, 5, makeData(0xAA), 30)
 	// Both maps updated.
 	if !gate.SessionRecoveryCoverage(7, 5) {
 		t.Error("recoveryCovered must include applied LBA")
@@ -136,10 +186,10 @@ func TestApplyGate_LiveLane_StaleEntry_ReturnsError(t *testing.T) {
 	lin := liveLineage(99)
 
 	// Live apply newer first.
-	gate.Apply(lin, 5, makeData(0xBB), 50)
+	gate.ApplyLive(lin, 5, makeData(0xBB), 50)
 
 	// Live STALE: must FAIL LOUD (return error).
-	err := gate.Apply(lin, 5, makeData(0xAA), 31)
+	err := gate.ApplyLive(lin, 5, makeData(0xAA), 31)
 	if err == nil {
 		t.Fatal("FAIL: round-44 INV-REPL-LIVE-LANE-STALE-FAILS-LOUD — live-lane stale MUST return error")
 	}
@@ -162,10 +212,10 @@ func TestApplyGate_LiveLane_StaleEntry_DoesNotAdvanceRecoveryCovered(t *testing.
 	lin := liveLineage(99)
 
 	// Establish LBA=5 at LSN=50.
-	gate.Apply(lin, 5, makeData(0xBB), 50)
+	gate.ApplyLive(lin, 5, makeData(0xBB), 50)
 
 	// Live stale (failed apply).
-	gate.Apply(lin, 5, makeData(0xAA), 31)
+	gate.ApplyLive(lin, 5, makeData(0xAA), 31)
 
 	// CRITICAL: live lane MUST NOT advance recoveryCovered, even on
 	// the FIRST (successful, non-stale) apply or on the stale-fail
@@ -182,8 +232,8 @@ func TestApplyGate_LiveAndRecovery_DistinctSessions_Independent(t *testing.T) {
 	live := liveLineage(50)
 	recov := recoveryLineage(7, 100)
 
-	gate.Apply(live, 5, makeData(0xBB), 100)
-	gate.Apply(recov, 5, makeData(0xAA), 30) // recovery sees its own session
+	gate.ApplyLive(live, 5, makeData(0xBB), 100)
+	gate.ApplyRecovery(recov, 5, makeData(0xAA), 30) // recovery sees its own session
 
 	// Recovery session sees its own appliedLSN (just set: 30).
 	lsn, ok := gate.SessionAppliedLSN(7, 5)
@@ -205,7 +255,7 @@ func TestApplyGate_OptionCHybrid_BlockStoreFallback_NoSeed(t *testing.T) {
 	// back to empty session map; first apply works normally.
 	gate, _ := newGate(t)
 	lin := recoveryLineage(7, 100)
-	if err := gate.Apply(lin, 5, makeData(0xAA), 30); err != nil {
+	if err := gate.ApplyRecovery(lin, 5, makeData(0xAA), 30); err != nil {
 		t.Fatalf("BlockStore-backed gate failed first apply: %v", err)
 	}
 	// SessionState should reflect 1 applied + 1 covered.
@@ -244,7 +294,7 @@ func TestApplyGate_OptionCHybrid_SubstrateSeedHonored(t *testing.T) {
 	lin := recoveryLineage(7, 100)
 
 	// Trigger session init (any Apply does it).
-	gate.Apply(lin, 99, makeData(0xCC), 60) // unrelated LBA to force init
+	gate.ApplyRecovery(lin, 99, makeData(0xCC), 60) // unrelated LBA to force init
 
 	// Now LBA=5's seeded LSN should be visible.
 	lsn, ok := gate.SessionAppliedLSN(7, 5)
@@ -257,7 +307,7 @@ func TestApplyGate_OptionCHybrid_SubstrateSeedHonored(t *testing.T) {
 
 	// And a stale recovery apply for LBA=5 at LSN=30 must skip.
 	dataA := makeData(0xAA)
-	gate.Apply(lin, 5, dataA, 30)
+	gate.ApplyRecovery(lin, 5, dataA, 30)
 	gotData, _ := store.Read(5)
 	if gotData[0] == 0xAA {
 		t.Fatal("FAIL: stale recovery apply applied despite substrate seed (round-43 stale-skip + Option C)")
@@ -290,7 +340,7 @@ func TestApplyGate_RestartMidRecovery_NewSessionReseedsFromSubstrate(t *testing.
 	// restart-safe enough" — this is exactly the case. With
 	// BlockStore (no AppliedLSNs), restart-safety degrades; this
 	// test documents the limitation honestly.
-	gate.Apply(lin, 5, makeData(0xAA), 30)
+	gate.ApplyRecovery(lin, 5, makeData(0xAA), 30)
 	got, _ := store.Read(5)
 	// EXPECTED on BlockStore (no substrate seed): data WAS regressed.
 	// This is the documented gap; substrate-side
@@ -316,7 +366,7 @@ func TestApplyGate_RestartSafe_SubstrateSeedPathRejectsStale(t *testing.T) {
 	// Stale recovery apply post-restart. With substrate seed
 	// honored, gate sees appliedLSN[5]=100, skips LSN=30. Pins
 	// INV-REPL-RECOVERY-COVERAGE-RESTART-SAFE.
-	gate.Apply(lin, 5, makeData(0xAA), 30)
+	gate.ApplyRecovery(lin, 5, makeData(0xAA), 30)
 	got, _ := store.Read(5)
 	if got[0] != 0xBB {
 		t.Fatalf("FAIL: post-restart stale recovery apply regressed data; got %02x, want B (round-44 INV-REPL-RECOVERY-COVERAGE-RESTART-SAFE; Option C hybrid full path)", got[0])
@@ -342,7 +392,7 @@ func TestApplyGate_SubstrateApplyError_Propagates(t *testing.T) {
 	gate := NewReplicaApplyGate(store)
 	lin := recoveryLineage(7, 100)
 
-	err := gate.Apply(lin, 5, makeData(0xAA), 30)
+	err := gate.ApplyRecovery(lin, 5, makeData(0xAA), 30)
 	if err == nil || !strings.Contains(err.Error(), "substrate boom") {
 		t.Errorf("substrate ApplyEntry error must propagate; got %v", err)
 	}
@@ -353,7 +403,7 @@ func TestApplyGate_SubstrateApplyError_Propagates(t *testing.T) {
 func TestApplyGate_CloseSession_ReleasesState(t *testing.T) {
 	gate, _ := newGate(t)
 	lin := recoveryLineage(7, 100)
-	gate.Apply(lin, 5, makeData(0xAA), 30)
+	gate.ApplyRecovery(lin, 5, makeData(0xAA), 30)
 	if _, _, _, found := gate.SessionState(7); !found {
 		t.Fatal("session 7 should exist before close")
 	}

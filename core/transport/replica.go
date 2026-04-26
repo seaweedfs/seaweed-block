@@ -8,11 +8,21 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
+// liveShipTargetLSNSentinel is the steady-state live-ship sentinel
+// value (== `replication.liveShipTargetLSN`). The replica handler's
+// transitional caller-side lane shim consults this sentinel; the
+// real fix (true handler-context lane signal) is post-T4d-2. Keeping
+// the sentinel here (transport package) avoids a transport→
+// replication import; the value is the same wire-stable constant
+// already in production.
+const liveShipTargetLSNSentinel uint64 = 1
+
 // ApplyHook is the T4d-2 plug-in seam for the replica recovery
-// apply gate. When non-nil, the MsgShipEntry handler delegates to
-// the hook instead of calling `store.ApplyEntry` directly. The hook
-// owns lane discrimination + per-session state + per-LBA stale-skip
-// per kickoff §9 (Q1/Q2/Q3) + round-43/44 architect lock.
+// apply gate. The hook is LANE-EXPLICIT per round-46 architect
+// ruling: caller (MsgShipEntry handler) decides lane from
+// connection/session handler context and invokes the matching
+// method. The hook does NOT inspect payload bytes for lane
+// discrimination.
 //
 // Implementations: `replication.ReplicaApplyGate`. Interface lives
 // in transport so the gate package can satisfy it without creating
@@ -23,7 +33,13 @@ import (
 // Per round-44 INV-REPL-LIVE-LANE-STALE-FAILS-LOUD: live-lane stale
 // entries surface here as errors.
 type ApplyHook interface {
-	Apply(lineage RecoveryLineage, lba uint32, data []byte, lsn uint64) error
+	// ApplyRecovery routes the entry through the recovery-lane apply
+	// path. Stale entries (LSN <= per-LBA applied) skip data + advance
+	// recovery coverage.
+	ApplyRecovery(lineage RecoveryLineage, lba uint32, data []byte, lsn uint64) error
+	// ApplyLive routes the entry through the live-lane apply path.
+	// Stale entries return error (fail-loud).
+	ApplyLive(lineage RecoveryLineage, lba uint32, data []byte, lsn uint64) error
 }
 
 // ReplicaListener accepts connections from the primary and handles
@@ -132,15 +148,35 @@ func (r *ReplicaListener) handleConn(conn net.Conn) {
 					entry.Lineage.SessionID, entry.Lineage.Epoch, entry.Lineage.EndpointVersion)
 				return
 			}
-			// T4d-2: if the apply-gate is installed, route through
-			// it for lane discrimination + per-LBA stale-skip +
-			// coverage accounting. The gate reads lineage.TargetLSN
-			// to decide live vs recovery (Q2 — no wire byte; existing
-			// signal). Live-lane stale entries return error here →
-			// log + close conn (round-44
+			// T4d-2 + round-46 rework: if the apply-gate is installed,
+			// route through it. Caller (this handler) decides lane;
+			// gate is lane-pure. Live-lane stale entries return error
+			// here → log + close conn (round-44
 			// INV-REPL-LIVE-LANE-STALE-FAILS-LOUD).
+			//
+			// LANE DISCRIMINATION (transitional shim):
+			// Today the replica handler has only one signal — the
+			// payload's TargetLSN. We use the steady-state live-ship
+			// sentinel (TargetLSN=1) as a transitional caller-side
+			// rule: TargetLSN=1 → live; otherwise → recovery. This
+			// shim is CALLER-side; the gate itself never inspects
+			// TargetLSN.
+			//
+			// TODO (T4e or post-G5 refactor): replace this shim with
+			// true handler-context lane discrimination — e.g., a
+			// per-connection lane tag set at accept-time via
+			// session-registration handshake, separate live vs
+			// recovery handler routes, or distinct listener ports.
+			// The architectural fence (gate is lane-pure) is in
+			// place; only the caller's signal source needs upgrading.
 			if r.applyHook != nil {
-				if err := r.applyHook.Apply(entry.Lineage, entry.LBA, entry.Data, entry.LSN); err != nil {
+				var err error
+				if entry.Lineage.TargetLSN == liveShipTargetLSNSentinel {
+					err = r.applyHook.ApplyLive(entry.Lineage, entry.LBA, entry.Data, entry.LSN)
+				} else {
+					err = r.applyHook.ApplyRecovery(entry.Lineage, entry.LBA, entry.Data, entry.LSN)
+				}
+				if err != nil {
 					log.Printf("replica: apply gate: %v", err)
 					return
 				}

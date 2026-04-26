@@ -37,12 +37,12 @@ func TestComponent_RecoveryStaleSkip_CoverageStillAdvances(t *testing.T) {
 		}
 
 		dataB := makeData(0xBB)
-		if err := gate.Apply(lin, 5, dataB, 50); err != nil {
+		if err := gate.ApplyRecovery(lin, 5, dataB, 50); err != nil {
 			t.Fatalf("first apply: %v", err)
 		}
 
 		dataA := makeData(0xAA)
-		if err := gate.Apply(lin, 5, dataA, 30); err != nil {
+		if err := gate.ApplyRecovery(lin, 5, dataA, 30); err != nil {
 			t.Errorf("stale recovery apply must NOT error; got %v", err)
 		}
 
@@ -75,12 +75,12 @@ func TestComponent_LiveLaneStaleEntry_FailsLoud(t *testing.T) {
 		}
 
 		// Newer apply.
-		if err := gate.Apply(lin, 5, makeData(0xBB), 50); err != nil {
+		if err := gate.ApplyLive(lin, 5, makeData(0xBB), 50); err != nil {
 			t.Fatalf("first live apply: %v", err)
 		}
 
 		// Stale: must fail loud.
-		err := gate.Apply(lin, 5, makeData(0xAA), 30)
+		err := gate.ApplyLive(lin, 5, makeData(0xAA), 30)
 		if err == nil {
 			t.Fatal("FAIL: round-44 INV-REPL-LIVE-LANE-STALE-FAILS-LOUD — live-lane stale MUST return error")
 		}
@@ -97,42 +97,54 @@ func TestComponent_LiveLaneStaleEntry_FailsLoud(t *testing.T) {
 
 // --- Lane discrimination (INV-REPL-LANE-DERIVED-FROM-HANDLER-CONTEXT) ---
 
-// TestComponent_LaneDerivedFromTargetLSN pins
-// INV-REPL-LANE-DERIVED-FROM-HANDLER-CONTEXT (Q2): the gate reads
-// lineage.TargetLSN to discriminate lane. No wire byte; existing
-// signal.
-func TestComponent_LaneDerivedFromTargetLSN(t *testing.T) {
+// TestComponent_LanePurity_CallerControlsDispatch pins the round-46
+// architect ruling: gate is lane-PURE; CALLER decides lane. Same
+// lineage payload + caller picks ApplyRecovery vs ApplyLive based
+// on its OWN context (handler-side decision, NOT gate-inspecting-
+// lineage).
+//
+// Replaces the previous TestComponent_LaneDerivedFromTargetLSN test
+// (round-46 rejected: "changes recovery semantics to protect an
+// implementation shortcut"). This rewritten test pins the inverse:
+// the gate honors caller's choice regardless of TargetLSN.
+//
+// `INV-REPL-LANE-DERIVED-FROM-HANDLER-CONTEXT` (round-46
+// strengthened): lane comes from handler context, NOT from
+// payload-derived signals.
+func TestComponent_LanePurity_CallerControlsDispatch(t *testing.T) {
 	component.RunSubstrate(t, "walstore", component.Walstore, func(t *testing.T, c *component.Cluster) {
 		c.WithReplicas(1).WithApplyGate().Start()
 
 		gate := c.ApplyGate(0)
 
-		// Same SessionID across two synthetic lineages — the only
-		// difference is TargetLSN. Recovery (TargetLSN=100) skips
-		// stale; live (TargetLSN=1) fail-louds on stale. Apply newer
-		// to recovery first, then attempt stale via live with the
-		// SAME sessionID — gate keys appliedLSN by sessionID, so
-		// the live apply sees recovery's appliedLSN[5]=50 too. (In
-		// production, live + recovery use distinct sessionIDs; this
-		// test is structural — pinning the lane discriminator only.)
-		recov := transport.RecoveryLineage{
+		// Identical lineage payload across two test paths — only the
+		// caller's choice of method differs. The gate honors that
+		// choice; the lineage's TargetLSN is irrelevant to lane
+		// dispatch INSIDE the gate.
+		identicalPayload := transport.RecoveryLineage{
 			SessionID: 7, Epoch: 1, EndpointVersion: 1, TargetLSN: 100,
 		}
-		live := transport.RecoveryLineage{
-			SessionID: 7, Epoch: 1, EndpointVersion: 1, TargetLSN: 1,
-		}
 
-		// Recovery sets appliedLSN[5]=50 + recoveryCovered.
-		gate.Apply(recov, 5, makeData(0xBB), 50)
+		// Caller picks recovery: stale skips silently.
+		gate.ApplyRecovery(identicalPayload, 5, makeData(0xBB), 50)
+		if err := gate.ApplyRecovery(identicalPayload, 5, makeData(0xAA), 30); err != nil {
+			t.Fatalf("recovery stale must skip silently regardless of payload TargetLSN; got %v", err)
+		}
 		if !gate.SessionRecoveryCoverage(7, 5) {
-			t.Fatal("recovery lane should have advanced coverage")
+			t.Fatal("recovery coverage must advance regardless of payload TargetLSN")
 		}
 
-		// Live attempts STALE LSN=30 → must fail-loud (lane decided
-		// by TargetLSN=1).
-		err := gate.Apply(live, 5, makeData(0xAA), 30)
+		// Different session, identical payload shape: caller picks
+		// live → same payload, fail-loud on stale.
+		identicalPayload.SessionID = 99
+		gate.ApplyLive(identicalPayload, 5, makeData(0xBB), 50)
+		err := gate.ApplyLive(identicalPayload, 5, makeData(0xAA), 30)
 		if err == nil {
-			t.Fatal("live lane (TargetLSN=1) should fail-loud on stale")
+			t.Fatal("live stale must fail-loud regardless of payload TargetLSN")
+		}
+		// Live MUST NOT advance recoveryCovered for this session.
+		if gate.SessionRecoveryCoverage(99, 5) {
+			t.Fatal("live caller MUST NOT advance recoveryCovered, regardless of payload TargetLSN")
 		}
 	})
 }
@@ -158,7 +170,7 @@ func TestComponent_OptionCHybrid_WalstoreSeed(t *testing.T) {
 		}
 
 		// Trigger session init (any apply does it). Use unrelated LBA.
-		gate.Apply(recov, 99, makeData(0xCC), 60)
+		gate.ApplyRecovery(recov, 99, makeData(0xCC), 60)
 
 		// Now LBA=5's seed should be visible.
 		seedLSN, ok := gate.SessionAppliedLSN(7, 5)
@@ -170,7 +182,7 @@ func TestComponent_OptionCHybrid_WalstoreSeed(t *testing.T) {
 		}
 
 		// Stale recovery for LBA=5 at LSN=30 must skip (data unchanged).
-		gate.Apply(recov, 5, makeData(0xAA), 30)
+		gate.ApplyRecovery(recov, 5, makeData(0xAA), 30)
 		got, _ := c.Replica(0).Store.Read(5)
 		if got[0] != 0xCC {
 			t.Errorf("FAIL: stale recovery apply regressed substrate; got %02x, want CC", got[0])
