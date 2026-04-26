@@ -262,7 +262,10 @@ func TestSessionFailed_NonRecycled_RetriesUntilBudget(t *testing.T) {
 		}
 	}
 
-	// Attempt #4 (over budget): must escalate, NOT re-emit StartCatchUp.
+	// Attempt #4 (over budget): per round-47 architect addition,
+	// catch-up exhaustion ESCALATES TO REBUILD (not just clear
+	// decision + degraded). Engine emits StartRebuild directly;
+	// pre-round-47 behavior was probe-dependent.
 	st.Session = SessionTruth{SessionID: 11, Phase: PhaseRunning}
 	ev := SessionClosedFailed{ReplicaID: "r1", SessionID: 11, Reason: "transient again"}
 	r := Apply(st, ev)
@@ -274,21 +277,105 @@ func TestSessionFailed_NonRecycled_RetriesUntilBudget(t *testing.T) {
 	if st.Recovery.Attempts != 0 {
 		t.Errorf("budget exhausted: Attempts=%d, want 0 (reset)", st.Recovery.Attempts)
 	}
-	if st.Recovery.Decision != DecisionUnknown {
-		t.Errorf("budget exhausted: Decision=%s, want Unknown (reset)", st.Recovery.Decision)
+	// Round-47: catch-up exhaustion → Decision=Rebuild + StartRebuild emit.
+	if st.Recovery.Decision != DecisionRebuild {
+		t.Errorf("budget exhausted: Decision=%s, want Rebuild (round-47 escalation)",
+			st.Recovery.Decision)
 	}
-	if st.Recovery.DecisionReason != "retry_budget_exhausted" {
-		t.Errorf("budget exhausted: DecisionReason=%q, want retry_budget_exhausted",
+	if st.Recovery.DecisionReason != "catchup_budget_exhausted" {
+		t.Errorf("budget exhausted: DecisionReason=%q, want catchup_budget_exhausted",
 			st.Recovery.DecisionReason)
 	}
+	hasRebuild := false
+	for _, cmd := range r.Commands {
+		if _, ok := cmd.(StartRebuild); ok {
+			hasRebuild = true
+		}
+	}
+	if !hasRebuild {
+		t.Error("budget exhausted: expected StartRebuild command (round-47 escalation, NOT just PublishDegraded)")
+	}
+}
+
+// TestT4d4_CatchupExhaustionEscalatesToRebuild — round-47 addition:
+// pin INV-REPL-CATCHUP-EXHAUSTION-ESCALATES-TO-REBUILD. Catch-up
+// budget exhaustion triggers automatic StartRebuild emission;
+// rebuild path becomes engine-driven end-to-end without waiting
+// for a fresh probe.
+func TestT4d4_CatchupExhaustionEscalatesToRebuild(t *testing.T) {
+	st := &ReplicaState{
+		Identity: IdentityTruth{ReplicaID: "r1", Epoch: 1, EndpointVersion: 1},
+		Session:  SessionTruth{SessionID: 7, Phase: PhaseRunning},
+		Recovery: RecoveryTruth{
+			Decision: DecisionCatchUp,
+			R:        50, S: 10, H: 100,
+			Attempts: 3, // already at budget edge (wal_delta MaxRetries=3)
+		},
+	}
+	ev := SessionClosedFailed{
+		ReplicaID:   "r1",
+		SessionID:   7,
+		FailureKind: RecoveryFailureTransport,
+		Reason:      "final transient failure",
+	}
+	r := Apply(st, ev)
+
+	// Decision must flip to Rebuild.
+	if st.Recovery.Decision != DecisionRebuild {
+		t.Errorf("FAIL: round-47 INV-REPL-CATCHUP-EXHAUSTION-ESCALATES-TO-REBUILD — Decision=%s, want Rebuild",
+			st.Recovery.Decision)
+	}
+
+	// StartRebuild command emitted (not just PublishDegraded).
+	var rebuildCmd *StartRebuild
+	for _, cmd := range r.Commands {
+		if rb, ok := cmd.(StartRebuild); ok {
+			rebuildCmd = &rb
+		}
+	}
+	if rebuildCmd == nil {
+		t.Fatal("FAIL: catch-up exhaustion must emit StartRebuild command (round-47)")
+	}
+	if rebuildCmd.TargetLSN != 100 {
+		t.Errorf("StartRebuild.TargetLSN = %d, want 100 (H from Recovery state)", rebuildCmd.TargetLSN)
+	}
+}
+
+// TestT4d4_RebuildExhaustionIsTerminal — round-47 addition: rebuild
+// has MaxRetries=0 so any rebuild failure exhausts immediately.
+// Result is terminal: Decision cleared, PublishDegraded emitted,
+// NO further StartRebuild re-emit. Pins INV-REPL-REBUILD-FAILURE-
+// TERMINAL.
+func TestT4d4_RebuildExhaustionIsTerminal(t *testing.T) {
+	st := &ReplicaState{
+		Identity: IdentityTruth{ReplicaID: "r1", Epoch: 1, EndpointVersion: 1},
+		Session:  SessionTruth{SessionID: 7, Phase: PhaseRunning},
+		Recovery: RecoveryTruth{Decision: DecisionRebuild, H: 100},
+	}
+	ev := SessionClosedFailed{
+		ReplicaID:   "r1",
+		SessionID:   7,
+		FailureKind: RecoveryFailureSubstrateIO,
+		Reason:      "rebuild substrate failed",
+	}
+	r := Apply(st, ev)
+
+	// Decision cleared (no escalation past Rebuild).
+	if st.Recovery.Decision != DecisionUnknown {
+		t.Errorf("rebuild failure must terminate (Decision=Unknown); got %s", st.Recovery.Decision)
+	}
+	// PublishDegraded emitted.
 	hasDegraded := false
 	for _, cmd := range r.Commands {
 		if _, ok := cmd.(PublishDegraded); ok {
 			hasDegraded = true
 		}
+		if _, ok := cmd.(StartRebuild); ok {
+			t.Error("rebuild failure must NOT re-emit StartRebuild (terminal)")
+		}
 	}
 	if !hasDegraded {
-		t.Error("budget exhausted: expected PublishDegraded command")
+		t.Error("rebuild failure must emit PublishDegraded")
 	}
 }
 

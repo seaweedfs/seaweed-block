@@ -107,6 +107,14 @@ type Cluster struct {
 // ReplicationVolume (the live-ship fan-out engine). Live-ship writes
 // go through `Backend` instead of `Store` so the WriteObserver hook
 // fires, driving the production live-ship path end-to-end.
+//
+// T4d-4 part B (round-47): when WithEngineDrivenRecovery is set,
+// PrimaryNode also owns one VolumeReplicaAdapter PER REPLICA. The
+// adapter is wired to its replica's executor (executor callbacks
+// flow into adapter.OnSessionClose etc); engine commands flow OUT
+// to the executor via the adapter's dispatch loop. Test scenarios
+// drive engine state by invoking adapter.OnAssignment +
+// adapter.OnProbeResult on the per-replica adapter.
 type PrimaryNode struct {
 	Store     storage.LogicalStorage
 	executors []*transport.BlockExecutor // one per replica, indexed by replica idx
@@ -114,6 +122,11 @@ type PrimaryNode struct {
 	// Live-ship surface (populated when WithLiveShip is set).
 	Backend *durable.StorageBackend
 	RepVol  *replication.ReplicationVolume
+
+	// T4d-4 part B: per-replica adapters for engine-driven recovery.
+	// Populated when cluster is built WithEngineDrivenRecovery; nil
+	// otherwise. Indexed by replica idx (matches executors slice).
+	adapters []*adapter.VolumeReplicaAdapter
 
 	cleanup func()
 }
@@ -207,20 +220,71 @@ func (c *Cluster) ApplyGate(replicaIdx int) *replication.ReplicaApplyGate {
 }
 
 // WithEngineDrivenRecovery enables engine→adapter→executor recovery
-// flows. Currently a NO-OP STUB — today `ReplicationVolume` bypasses
-// the adapter, so engine-driven recovery is not exercisable at
-// integration scope (engine retry-loop is unit-tested only).
+// flows. T4d-4 part B (round-47): this is REAL now. When set:
+//   - Cluster.Start constructs one VolumeReplicaAdapter per replica
+//   - Each adapter is wired to its replica's BlockExecutor via the
+//     adapter constructor's executor-callback registration
+//   - Test scenarios drive engine state via Cluster.DriveAssignment
+//     and Cluster.DriveProbeResult on the per-replica adapter
+//   - Engine retry loop runs end-to-end through the adapter dispatch:
+//     SessionFailed → engine increments Attempts → engine re-emits
+//     StartCatchUp → adapter dispatches → executor runs → SessionClose
+//     callback flows back into engine
 //
-// The full wiring lands at T4d. When it does, scenarios that called
-// this option will gain access to engine-driven catch-up, retry-loop
-// observation, and escalation behavior. Until then, this method
-// records the intent and emits a one-shot warning at Start().
-//
-// Forward-carry (T4d): wire ReplicationVolume.NewWithRecoveryAdapter
-// (or equivalent) and have this option swap that constructor in.
+// Use Cluster.Adapter(idx) to access the per-replica adapter for
+// projection / trace assertions.
 func (c *Cluster) WithEngineDrivenRecovery() *Cluster {
 	c.engineRecovery = true
 	return c
+}
+
+// Adapter returns the per-replica VolumeReplicaAdapter (T4d-4 part B
+// / round-47). Returns nil if cluster was NOT built with
+// WithEngineDrivenRecovery.
+//
+// Test scenarios use this to:
+//   - Inspect engine state via adapter.Projection() / adapter.Trace()
+//   - Drive assignments / probes via adapter.OnAssignment / OnProbeResult
+//   - Observe command emission via adapter.CommandLog()
+func (c *Cluster) Adapter(replicaIdx int) *adapter.VolumeReplicaAdapter {
+	c.t.Helper()
+	if c.primary == nil || c.primary.adapters == nil {
+		return nil
+	}
+	if replicaIdx < 0 || replicaIdx >= len(c.primary.adapters) {
+		c.t.Fatalf("Adapter(%d): out of range (have %d)", replicaIdx, len(c.primary.adapters))
+	}
+	return c.primary.adapters[replicaIdx]
+}
+
+// DriveAssignment routes a master-style assignment into the i-th
+// replica's adapter. Engine ingests as Identity truth and emits a
+// ProbeReplica command (the standard fresh-assignment flow).
+// Returns the adapter's ApplyLog from the operation.
+//
+// T4d-4 part B helper for scenarios pinning engine-driven flows.
+func (c *Cluster) DriveAssignment(replicaIdx int, info adapter.AssignmentInfo) adapter.ApplyLog {
+	c.t.Helper()
+	a := c.Adapter(replicaIdx)
+	if a == nil {
+		c.t.Fatal("DriveAssignment: WithEngineDrivenRecovery not set")
+	}
+	return a.OnAssignment(info)
+}
+
+// DriveProbeResult routes a probe result into the i-th replica's
+// adapter. Engine ingests as Reachability + RecoveryFacts truth and
+// runs decide() — may emit StartCatchUp / StartRebuild / FenceAtEpoch
+// per the recovery state.
+//
+// T4d-4 part B helper.
+func (c *Cluster) DriveProbeResult(replicaIdx int, result adapter.ProbeResult) adapter.ApplyLog {
+	c.t.Helper()
+	a := c.Adapter(replicaIdx)
+	if a == nil {
+		c.t.Fatal("DriveProbeResult: WithEngineDrivenRecovery not set")
+	}
+	return a.OnProbeResult(result)
 }
 
 // Start brings up the primary + replicas. Registers t.Cleanup for
@@ -290,10 +354,18 @@ func (c *Cluster) Start() *Cluster {
 		c.startLiveShip()
 	}
 
-	// Engine-driven recovery — T4d stub; warn so scenarios authored
-	// for the future option don't silently behave as direct-executor.
+	// T4d-4 part B (round-47): engine-driven recovery is REAL now.
+	// Construct one VolumeReplicaAdapter per replica, wired to that
+	// replica's executor. Adapter constructor wires executor's
+	// session callbacks (OnSessionStart/Close/FenceComplete) →
+	// adapter; adapter dispatch routes engine commands → executor.
+	// Test scenarios drive engine state via DriveAssignment +
+	// DriveProbeResult per replica index.
 	if c.engineRecovery {
-		c.t.Logf("component: WithEngineDrivenRecovery is a T4d stub (no-op today); scenario will run with direct executor-driven recovery instead")
+		c.primary.adapters = make([]*adapter.VolumeReplicaAdapter, c.replicaN)
+		for i, exec := range c.primary.executors {
+			c.primary.adapters[i] = adapter.NewVolumeReplicaAdapter(exec)
+		}
 	}
 
 	// Capture logs (recovery_mode label etc.) for assertion helpers.

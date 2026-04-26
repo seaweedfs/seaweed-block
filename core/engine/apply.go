@@ -561,11 +561,43 @@ func applySessionFailed(st *ReplicaState, e SessionClosedFailed, r *ApplyResult,
 		return
 	}
 
-	// Budget exhausted. Reset Attempts + clear decision so the next
-	// probe-driven decide() re-classifies (may pick Rebuild if R<S
-	// has shifted, or fall back to Degraded).
-	trace("retry_exhausted",
-		fmt.Sprintf("attempts=%d > budget=%d", st.Recovery.Attempts, budget))
+	// Budget exhausted. Per round-47 architect addition: catch-up
+	// budget exhaustion DIRECTLY ESCALATES to rebuild — engine emits
+	// StartRebuild without waiting for the next probe to re-classify.
+	// Pinned by INV-REPL-CATCHUP-EXHAUSTION-ESCALATES-TO-REBUILD.
+	//
+	// Pre-round-47 behavior: cleared Decision + emitted PublishDegraded;
+	// rebuild only fired if a fresh probe arrived showing R<S. That
+	// path was probe-dependent and could leave the replica idle for a
+	// probe interval before rebuild started.
+	//
+	// Round-47 scope: the rebuild path becomes engine-driven
+	// end-to-end. Catch-up exhaustion is itself the trigger; rebuild
+	// emission is automatic. Rebuild's MaxRetries=0 (per
+	// DefaultRuntimePolicyFor) means a rebuild failure terminates
+	// without further retry — clean terminal definition.
+	if st.Recovery.Decision == DecisionCatchUp {
+		trace("retry_exhausted_escalate_to_rebuild",
+			fmt.Sprintf("attempts=%d > budget=%d → emit StartRebuild (round-47)",
+				st.Recovery.Attempts, budget))
+		st.Recovery.Attempts = 0
+		st.Recovery.Decision = DecisionRebuild
+		st.Recovery.DecisionReason = "catchup_budget_exhausted"
+		r.Commands = append(r.Commands, StartRebuild{
+			ReplicaID:       st.Identity.ReplicaID,
+			Epoch:           st.Identity.Epoch,
+			EndpointVersion: st.Identity.EndpointVersion,
+			TargetLSN:       st.Recovery.H,
+		})
+		return
+	}
+
+	// Rebuild exhaustion (or any non-catch-up exhaustion):
+	// terminal — emit Degraded; no further retry. Rebuild's
+	// MaxRetries=0 makes this the natural termination point.
+	trace("retry_exhausted_terminal",
+		fmt.Sprintf("attempts=%d > budget=%d decision=%s — terminal",
+			st.Recovery.Attempts, budget, st.Recovery.Decision))
 	st.Recovery.Attempts = 0
 	st.Recovery.Decision = DecisionUnknown
 	st.Recovery.DecisionReason = "retry_budget_exhausted"
