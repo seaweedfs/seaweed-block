@@ -14,17 +14,14 @@ import (
 // methods. The embedded interface forwards everything else
 // transparently — only the overridden behavior changes.
 //
-// KNOWN WRAP-PATTERN LIMITATION: substrate-specific extension methods
-// (e.g. walstore's `CheckpointLSN`) are MASKED by the wrap because
-// embedding only exposes the LogicalStorage interface methods. The
-// catch-up sender's `recovery_mode` label probe duck-types
-// CheckpointLSN to distinguish walstore from smartwal — under a
-// wrap, that probe always sees state_convergence regardless of the
-// underlying substrate. Scenarios that need wrap + accurate mode
-// label simultaneously cannot rely on AssertSawRecoveryMode for the
-// walstore label. Forward-carry: refactor mode-label detection
-// behind a substrate-reported `RecoveryMode()` method that wraps
-// can forward explicitly.
+// T4d-4 (round-46): the T4c-2 wrap-pattern limitation around
+// `CheckpointLSN` masking is RESOLVED. `LogicalStorage.RecoveryMode()`
+// is now a first-class interface method, forwarded automatically by
+// embedded `storage.LogicalStorage` in the wrap structs below. The
+// catch-up sender consults `e.primaryStore.RecoveryMode()` (interface
+// method) instead of the duck-typed `CheckpointLSN` probe.
+// `AssertSawRecoveryMode` works correctly under wraps now. T4c §I
+// row 6 closure.
 
 // NewRecycledScanWrap returns a PrimaryStorageWrap that always
 // returns ErrWALRecycled from ScanLBAs. Use to test the rebuild-

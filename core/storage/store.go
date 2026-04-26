@@ -192,6 +192,13 @@ func (s *BlockStore) ScanLBAs(fromLSN uint64, fn func(RecoveryEntry) error) erro
 	return nil
 }
 
+// RecoveryMode reports BlockStore's recovery sub-mode (T4d-4 part A;
+// T4c §I row 6). BlockStore is in-memory; its ScanLBAs synthesizes
+// entries from current state — closest to state-convergence.
+func (s *BlockStore) RecoveryMode() RecoveryMode {
+	return RecoveryModeStateConvergence
+}
+
 // AppliedLSNs satisfies the T4d-1 LogicalStorage extension. BlockStore
 // is in-memory and does NOT track per-LBA applied LSN — explicit
 // not-tracked return per kickoff §2.5 #1 architect Option C hybrid.

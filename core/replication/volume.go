@@ -352,10 +352,35 @@ func (v *ReplicationVolume) OnLocalWrite(ctx context.Context, w LocalWrite) erro
 	return nil
 }
 
+// Stop is the T4d-4 canonical lifecycle entry point. Tears down all
+// peers (their executor sessions are invalidated), serializes against
+// concurrent OnLocalWrite/Sync via the volume mutex, and is
+// idempotent. Does NOT close the borrowed store
+// (`INV-REPL-LIFECYCLE-HANDLE-BORROWED-001` per BUG-005 discipline).
+//
+// Stop and Close are equivalent in T4d-4 (Stop delegates to Close);
+// the rename clarifies semantic intent — "Stop the volume's lifecycle
+// activity" reads more clearly than "Close the volume struct."
+// Future expansions (drain pending I/O, stop background goroutines)
+// land here under the Stop name.
+//
+// Pinned by: TestReplicationVolume_Stop_Idempotent,
+// TestReplicationVolume_Stop_DoesNotCloseBorrowedStore.
+//
+// Called by: Provider teardown.
+// Owns: peer-set teardown via peer.Close().
+// Borrows: nothing (store is BORROWED — never closed).
+func (v *ReplicationVolume) Stop() error {
+	return v.Close()
+}
+
 // Close releases all peers' registered sessions. Idempotent. Does
-// NOT close the borrowed store. ReplicationVolume.Stop is a full-
-// lifecycle hardening deferred to T4d per mini-plan §5; Close is the
-// minimum teardown needed for BUG-005 regression coverage.
+// NOT close the borrowed store (BUG-005 / INV-REPL-LIFECYCLE-HANDLE-
+// BORROWED-001).
+//
+// T4d-4 (round-46) renaming: Stop() is the canonical entry point;
+// Close() retained for backward compatibility with existing callers.
+// Both do the same thing.
 //
 // Called by: Provider teardown when the volume shuts down.
 // Owns: close flag; invalidation of each peer's executor session

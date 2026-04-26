@@ -547,6 +547,13 @@ func (s *WALStore) ApplyEntry(lba uint32, data []byte, lsn uint64) error {
 	return nil
 }
 
+// RecoveryMode reports walstore's recovery sub-mode (T4d-4 part A;
+// T4c §I row 6). walstore's ScanLBAs emits per-LSN entries from the
+// retained WAL — V2-faithful per-LSN replay.
+func (s *WALStore) RecoveryMode() RecoveryMode {
+	return RecoveryModeWALReplay
+}
+
 // AppliedLSNs returns a partial view of per-LBA applied LSN: only
 // LBAs whose latest write is still in the WAL (not yet flushed to
 // extent) are reported. Once an entry is flushed and the dirty-map

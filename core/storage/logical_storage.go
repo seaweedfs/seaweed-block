@@ -144,6 +144,21 @@ type LogicalStorage interface {
 	// NIL-CONTINUES.
 	ScanLBAs(fromLSN uint64, fn func(RecoveryEntry) error) error
 
+	// RecoveryMode returns the substrate's tier-1 recovery sub-mode
+	// (memo §5.1 / §13.0a). Replaces the duck-typed `CheckpointLSN`
+	// probe that T4c-2 used to distinguish walstore from smartwal.
+	// Per T4c §I row 6 + T4d-4 part A: substrate-reported value
+	// survives the component framework's storage-wrap pattern (the
+	// embedded interface forwards `RecoveryMode()` cleanly, where
+	// `CheckpointLSN` was a substrate-extension method that wraps
+	// did NOT forward).
+	//
+	// Implementations:
+	//   - walstore → RecoveryModeWALReplay (V2-faithful per-LSN)
+	//   - smartwal → RecoveryModeStateConvergence (per-LBA dedup)
+	//   - BlockStore → RecoveryModeStateConvergence (synthesis)
+	RecoveryMode() RecoveryMode
+
 	// AppliedLSNs returns the substrate's per-LBA latest-applied-LSN
 	// snapshot. T4d-2 replica recovery apply gate calls this at
 	// session start to seed its in-memory `appliedLSN[LBA]` map

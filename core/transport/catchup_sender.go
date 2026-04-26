@@ -204,16 +204,13 @@ func (e *BlockExecutor) doCatchUp(replicaID string, session *activeSession, from
 			targetLSN, resp.AchievedLSN)
 	}
 
-	// Mode label surfacing (memo §5.1). For now we report based on
-	// substrate type via a runtime check; T4c-3 integration tests
-	// will cover both substrate sub-modes through the matrix.
-	mode := storage.RecoveryModeStateConvergence
-	if _, ok := e.primaryStore.(interface{ CheckpointLSN() uint64 }); ok {
-		// walstore exposes CheckpointLSN — distinguishes it from
-		// BlockStore + smartwal. Provisional probe; T4c-3 will
-		// migrate this to a substrate-reported mode method.
-		mode = storage.RecoveryModeWALReplay
-	}
+	// Mode label surfacing (memo §5.1). T4d-4 part A: ask the
+	// substrate via the new RecoveryMode() interface method (T4c §I
+	// row 6). Replaces the T4c-2 duck-typed CheckpointLSN probe,
+	// which the component framework's storage-wrap pattern masked.
+	// Now wrap impls forward RecoveryMode() cleanly through the
+	// embedded LogicalStorage interface.
+	mode := e.primaryStore.RecoveryMode()
 	log.Printf("executor: catch-up complete replica=%s recovery_mode=%s achieved=%d target=%d last_sent=%d",
 		replicaID, mode, resp.AchievedLSN, targetLSN, lastSent)
 	return resp.AchievedLSN, nil

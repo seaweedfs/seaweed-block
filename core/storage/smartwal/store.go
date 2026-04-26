@@ -361,6 +361,13 @@ func (s *Store) ApplyEntry(lba uint32, data []byte, lsn uint64) error {
 	return nil
 }
 
+// RecoveryMode reports smartwal's recovery sub-mode (T4d-4 part A;
+// T4c §I row 6). smartwal's ScanLBAs emits per-LBA last-writer-wins
+// with scan-time LSN — state-convergence semantics.
+func (s *Store) RecoveryMode() storage.RecoveryMode {
+	return storage.RecoveryModeStateConvergence
+}
+
 // AppliedLSNs returns per-LBA latest-applied-LSN derived from the
 // ring's valid records. smartwal's ring is capacity-bounded: records
 // older than (head - capacity) have been overwritten, so the returned
