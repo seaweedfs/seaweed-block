@@ -226,7 +226,7 @@ func TestSessionFailed_WALRecycled_NoSubstringMatchUsed(t *testing.T) {
 func TestSessionFailed_NonRecycled_RetriesUntilBudget(t *testing.T) {
 	st := &ReplicaState{
 		Identity: IdentityTruth{ReplicaID: "r1", Epoch: 1, EndpointVersion: 1},
-		Session:  SessionTruth{SessionID: 7, Phase: PhaseRunning},
+		Session:  SessionTruth{SessionID: 7, Kind: SessionCatchUp, Phase: PhaseRunning},
 		Recovery: RecoveryTruth{Decision: DecisionCatchUp, H: 100},
 	}
 	budget := DefaultRuntimePolicyFor(RecoveryContentWALDelta).MaxRetries // 3
@@ -235,7 +235,7 @@ func TestSessionFailed_NonRecycled_RetriesUntilBudget(t *testing.T) {
 	}
 
 	for attempt := 1; attempt <= budget; attempt++ {
-		st.Session = SessionTruth{SessionID: uint64(attempt + 6), Phase: PhaseRunning}
+		st.Session = SessionTruth{SessionID: uint64(attempt + 6), Kind: SessionCatchUp, Phase: PhaseRunning}
 		ev := SessionClosedFailed{
 			ReplicaID: "r1",
 			SessionID: uint64(attempt + 6),
@@ -266,7 +266,7 @@ func TestSessionFailed_NonRecycled_RetriesUntilBudget(t *testing.T) {
 	// catch-up exhaustion ESCALATES TO REBUILD (not just clear
 	// decision + degraded). Engine emits StartRebuild directly;
 	// pre-round-47 behavior was probe-dependent.
-	st.Session = SessionTruth{SessionID: 11, Phase: PhaseRunning}
+	st.Session = SessionTruth{SessionID: 11, Kind: SessionCatchUp, Phase: PhaseRunning}
 	ev := SessionClosedFailed{ReplicaID: "r1", SessionID: 11, Reason: "transient again"}
 	r := Apply(st, ev)
 	for _, cmd := range r.Commands {
@@ -305,7 +305,7 @@ func TestSessionFailed_NonRecycled_RetriesUntilBudget(t *testing.T) {
 func TestT4d4_CatchupExhaustionEscalatesToRebuild(t *testing.T) {
 	st := &ReplicaState{
 		Identity: IdentityTruth{ReplicaID: "r1", Epoch: 1, EndpointVersion: 1},
-		Session:  SessionTruth{SessionID: 7, Phase: PhaseRunning},
+		Session:  SessionTruth{SessionID: 7, Kind: SessionCatchUp, Phase: PhaseRunning},
 		Recovery: RecoveryTruth{
 			Decision: DecisionCatchUp,
 			R:        50, S: 10, H: 100,

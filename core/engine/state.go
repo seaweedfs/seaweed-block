@@ -101,6 +101,23 @@ type RecoveryTruth struct {
 	// the engine stops emitting fresh StartCatchUp and either escalates
 	// to Rebuild (if applicable) or falls back to Degraded.
 	Attempts int
+
+	// RebuildPinned makes the rebuild decision sticky against probe
+	// re-classification. Set by:
+	//   - WALRecycled escalation (catch-up failed because primary
+	//     truncated the requested LSN range — gap is unrecoverable
+	//     via WAL replay)
+	//   - catch-up retry-budget exhaustion (round-47:
+	//     INV-REPL-CATCHUP-EXHAUSTION-ESCALATES-TO-REBUILD)
+	// Cleared by:
+	//   - successful rebuild SessionCompleted
+	//   - identity change / assignment reset
+	//
+	// While set, decide() forces Decision=Rebuild regardless of
+	// R/S/H — pins INV-REPL-REBUILD-DECISION-STICKY so a stale
+	// auto-probe arriving mid-flight cannot downgrade back to
+	// CatchUp before the rebuild lands.
+	RebuildPinned bool
 }
 
 // SessionKind identifies the type of recovery session.

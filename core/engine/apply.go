@@ -316,6 +316,29 @@ func decide(st *ReplicaState, r *ApplyResult, trace func(string, string)) {
 
 	R, S, H := st.Recovery.R, st.Recovery.S, st.Recovery.H
 
+	// Sticky rebuild (INV-REPL-REBUILD-DECISION-STICKY): once a
+	// catch-up failure has escalated to rebuild (WALRecycled or
+	// retry exhaustion), a subsequent probe with R>=S MUST NOT
+	// downgrade back to catch_up. The rebuild stays pinned until
+	// it completes successfully (or identity resets).
+	if st.Recovery.RebuildPinned {
+		st.Recovery.Decision = DecisionRebuild
+		if st.Recovery.DecisionReason == "" {
+			st.Recovery.DecisionReason = "rebuild_pinned"
+		}
+		trace("decision", "rebuild (pinned)")
+		if !hasActiveSession(st) {
+			r.Commands = append(r.Commands, StartRebuild{
+				ReplicaID:       st.Identity.ReplicaID,
+				Epoch:           st.Identity.Epoch,
+				EndpointVersion: st.Identity.EndpointVersion,
+				TargetLSN:       H,
+			})
+			trace("command", "StartRebuild (pinned)")
+		}
+		return
+	}
+
 	if R == 0 && S == 0 && H == 0 {
 		st.Recovery.Decision = DecisionUnknown
 		st.Recovery.DecisionReason = "no_boundaries"
@@ -456,6 +479,14 @@ func applySessionCompleted(st *ReplicaState, e SessionClosedCompleted, r *ApplyR
 	// T4c-3 retry-loop: success clears the attempt counter so a
 	// future independent recovery cycle starts with a fresh budget.
 	st.Recovery.Attempts = 0
+	// A successful rebuild discharges the pinned-rebuild obligation
+	// (INV-REPL-REBUILD-DECISION-STICKY). Catch-up completion does
+	// NOT clear it (a sticky rebuild remains pending if catch-up
+	// somehow completed instead — defensive; the rebuild gate also
+	// prevents catch-up from being emitted while pinned).
+	if st.Session.Kind == SessionRebuild {
+		st.Recovery.RebuildPinned = false
+	}
 	// A successful catch-up/rebuild session sent mutating traffic
 	// at the current identity epoch, so the replica's lineage gate
 	// is now at this epoch. Treat completion as an implicit fence.
@@ -493,11 +524,25 @@ func applySessionFailed(st *ReplicaState, e SessionClosedFailed, r *ApplyResult,
 		st.Recovery.Decision = DecisionRebuild
 		st.Recovery.DecisionReason = "wal_recycled"
 		st.Recovery.Attempts = 0
-		trace("recycle_escalation", "FailureKind=WALRecycled → recovery.Decision=Rebuild")
+		st.Recovery.RebuildPinned = true
+		trace("recycle_escalation", "FailureKind=WALRecycled → recovery.Decision=Rebuild (pinned)")
+		// Diagnostic surface: caller-visible degraded reason.
 		r.Commands = append(r.Commands, PublishDegraded{
 			ReplicaID: e.ReplicaID,
 			Reason:    "session_failed: " + e.Reason,
 		})
+		// INV-REPL-REBUILD-EMITTED-ON-WAL-RECYCLED: emit StartRebuild
+		// immediately. Subsequent probes can't downgrade (RebuildPinned).
+		// Skip if a rebuild session already exists.
+		if !hasActiveSession(st) {
+			r.Commands = append(r.Commands, StartRebuild{
+				ReplicaID:       st.Identity.ReplicaID,
+				Epoch:           st.Identity.Epoch,
+				EndpointVersion: st.Identity.EndpointVersion,
+				TargetLSN:       st.Recovery.H,
+			})
+			trace("command", "StartRebuild (wal_recycled escalation)")
+		}
 		return
 	}
 
@@ -576,13 +621,20 @@ func applySessionFailed(st *ReplicaState, e SessionClosedFailed, r *ApplyResult,
 	// emission is automatic. Rebuild's MaxRetries=0 (per
 	// DefaultRuntimePolicyFor) means a rebuild failure terminates
 	// without further retry — clean terminal definition.
-	if st.Recovery.Decision == DecisionCatchUp {
+	// Use the FAILED session's kind, not current Recovery.Decision —
+	// a stray probe arriving mid-retry can re-classify Decision to
+	// Rebuild before exhaustion fires, which would route us to the
+	// terminal-degraded branch and miss the round-47 escalation.
+	// The session that just failed is the source of truth for what
+	// recovery mode was actually being attempted.
+	if st.Session.Kind == SessionCatchUp {
 		trace("retry_exhausted_escalate_to_rebuild",
-			fmt.Sprintf("attempts=%d > budget=%d → emit StartRebuild (round-47)",
+			fmt.Sprintf("attempts=%d > budget=%d → emit StartRebuild (round-47, pinned)",
 				st.Recovery.Attempts, budget))
 		st.Recovery.Attempts = 0
 		st.Recovery.Decision = DecisionRebuild
 		st.Recovery.DecisionReason = "catchup_budget_exhausted"
+		st.Recovery.RebuildPinned = true
 		r.Commands = append(r.Commands, StartRebuild{
 			ReplicaID:       st.Identity.ReplicaID,
 			Epoch:           st.Identity.Epoch,
