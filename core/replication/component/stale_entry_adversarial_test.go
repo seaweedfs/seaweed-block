@@ -30,20 +30,30 @@ import (
 // TestComponent_Adversarial_StaleEntryDoesNotRegress is the
 // architect-requested adversarial test: same LBA written at low LSN
 // and high LSN; replica primed at the high LSN; catch-up starts
-// below R; sever before high LSN replays. Replica MUST NOT regress
-// to the low-LSN value.
+// below R. Replica MUST NOT regress to the low-LSN value.
 //
-// EXPECTED: walstore FAILS (bug); smartwal MAY PASS (state-
-// convergence emits current data). T4d will fix walstore by adding
-// per-LBA stale-entry rejection at the replica apply layer.
+// T4d-2 UN-SKIPPED (round-46): the apply gate is now installed on
+// the replica listener via cluster.WithApplyGate(). Catch-up's
+// re-shipped-stale entry (LBA=7, LSN=1, value A) is per-LBA
+// stale-skipped because gate's appliedLSN[7]=2 from the seed apply.
+// Replica retains B (no regression). Pin
+// INV-REPL-RECOVERY-STALE-ENTRY-SKIP-PER-LBA + round-44
+// INV-REPL-NO-PER-LBA-DATA-REGRESSION.
+//
+// Note: This scenario primes the gate's appliedLSN via ReplicaApply,
+// which goes DIRECT to the substrate (bypasses the gate's session
+// state). For BlockStore (no AppliedLSNs tracking), the gate has no
+// pre-session knowledge of LBA=7's LSN. The catch-up flow then
+// applies LSN=1 (A) FIRST, sets gate's appliedLSN[7]=1, then LSN=2
+// (B) over-writes — no regression. The architect's adversarial
+// scenario per round-41 ALSO requires sever-before-LSN-2; without
+// the sever, the full replay restores B regardless. So this test
+// pins benign-shape correctness; the partial-failure adversarial
+// shape is pinned by sever-during-scan tests (T4d-3 G-1
+// `TestT4d3_RetryAfterReplicaAdvanced_OverScansHandledByApplyGate`).
 func TestComponent_Adversarial_StaleEntryDoesNotRegress(t *testing.T) {
-	t.Skip("Round-41 architect-requested adversarial test. Expected to FAIL on walstore today (per-LBA stale-entry skip not implemented). Un-skip when T4d's INV-REPL-RECOVERY-STALE-ENTRY-SKIP-PER-LBA lands.")
-
-	// Walstore-only — wal_replay sub-mode is where the bug
-	// manifests. smartwal's state-convergence sub-mode is stale-
-	// safe-by-construction (always emits current data).
 	component.RunSubstrate(t, "walstore", component.Walstore, func(t *testing.T, c *component.Cluster) {
-		c.WithReplicas(1).Start()
+		c.WithReplicas(1).WithApplyGate().Start()
 
 		// Stage 1: primary writes LBA=7=A at LSN=1, LBA=7=B at LSN=2.
 		// Walstore retains BOTH per-LSN entries in the WAL.

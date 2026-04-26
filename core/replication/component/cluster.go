@@ -91,6 +91,7 @@ type Cluster struct {
 	primaryWrap    PrimaryStorageWrap // optional substrate wrap; nil = no wrap
 	withLiveShip   bool               // if true, primary spins up StorageBackend + ReplicationVolume
 	engineRecovery bool               // T4d hook (currently no-op + warning); see WithEngineDrivenRecovery
+	withApplyGate  bool               // T4d-2: install replication.ReplicaApplyGate on each replica's listener
 
 	// Built at Start()
 	primary  *PrimaryNode
@@ -119,10 +120,13 @@ type PrimaryNode struct {
 
 // ReplicaNode owns one replica's storage + listener.
 type ReplicaNode struct {
-	Idx       int
-	Store     storage.LogicalStorage
-	Listener  *transport.ReplicaListener
-	Addr      string
+	Idx      int
+	Store    storage.LogicalStorage
+	Listener *transport.ReplicaListener
+	Addr     string
+
+	// ApplyGate is non-nil iff cluster was built WithApplyGate (T4d-2).
+	ApplyGate *replication.ReplicaApplyGate
 
 	cleanup func()
 }
@@ -182,6 +186,26 @@ func (c *Cluster) WithLiveShip() *Cluster {
 	return c
 }
 
+// WithApplyGate installs the T4d-2 `replication.ReplicaApplyGate`
+// on every replica's listener (lane-aware per-LBA stale-skip +
+// 2-map split + Option C hybrid AppliedLSNs seed). Required for
+// scenarios that pin round-43/44 stale-skip invariants.
+//
+// When NOT set, replica listeners use direct substrate.ApplyEntry
+// (preserves T4a/T4b/T4c scenario behavior).
+func (c *Cluster) WithApplyGate() *Cluster {
+	c.withApplyGate = true
+	return c
+}
+
+// ApplyGate returns the T4d-2 apply gate for the i-th replica
+// (nil if WithApplyGate not set or before Start). Used by tests
+// that assert on per-session gate state (recoveryCovered, etc.).
+func (c *Cluster) ApplyGate(replicaIdx int) *replication.ReplicaApplyGate {
+	r := c.Replica(replicaIdx)
+	return r.ApplyGate
+}
+
 // WithEngineDrivenRecovery enables engine→adapter→executor recovery
 // flows. Currently a NO-OP STUB — today `ReplicationVolume` bypasses
 // the adapter, so engine-driven recovery is not exercisable at
@@ -210,17 +234,26 @@ func (c *Cluster) Start() *Cluster {
 	for i := 0; i < c.replicaN; i++ {
 		label := fmt.Sprintf("replica-%d", i)
 		store, cleanup := c.factory(c.t, c.dir, label, c.blocks, c.blockSize)
-		listener, err := transport.NewReplicaListener("127.0.0.1:0", store)
+		var gate *replication.ReplicaApplyGate
+		var listener *transport.ReplicaListener
+		var err error
+		if c.withApplyGate {
+			gate = replication.NewReplicaApplyGate(store)
+			listener, err = transport.NewReplicaListenerWithApplyHook("127.0.0.1:0", store, gate)
+		} else {
+			listener, err = transport.NewReplicaListener("127.0.0.1:0", store)
+		}
 		if err != nil {
 			cleanup()
 			c.t.Fatalf("%s: NewReplicaListener: %v", label, err)
 		}
 		listener.Serve()
 		node := &ReplicaNode{
-			Idx:      i,
-			Store:    store,
-			Listener: listener,
-			Addr:     listener.Addr(),
+			Idx:       i,
+			Store:     store,
+			Listener:  listener,
+			Addr:      listener.Addr(),
+			ApplyGate: gate,
 			cleanup: func() {
 				listener.Stop()
 				cleanup()

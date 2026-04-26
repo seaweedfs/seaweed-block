@@ -8,29 +8,62 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
+// ApplyHook is the T4d-2 plug-in seam for the replica recovery
+// apply gate. When non-nil, the MsgShipEntry handler delegates to
+// the hook instead of calling `store.ApplyEntry` directly. The hook
+// owns lane discrimination + per-session state + per-LBA stale-skip
+// per kickoff §9 (Q1/Q2/Q3) + round-43/44 architect lock.
+//
+// Implementations: `replication.ReplicaApplyGate`. Interface lives
+// in transport so the gate package can satisfy it without creating
+// an import cycle (transport ← replication import direction is the
+// existing one; this interface is the duck-type adapter).
+//
+// Returning a non-nil error → caller (handler) logs + closes conn.
+// Per round-44 INV-REPL-LIVE-LANE-STALE-FAILS-LOUD: live-lane stale
+// entries surface here as errors.
+type ApplyHook interface {
+	Apply(lineage RecoveryLineage, lba uint32, data []byte, lsn uint64) error
+}
+
 // ReplicaListener accepts connections from the primary and handles
 // WAL shipping, probe requests, and rebuild streams against a
 // replica-side LogicalStorage.
 type ReplicaListener struct {
-	store    storage.LogicalStorage
-	listener net.Listener
-	stopCh   chan struct{}
-	wg       sync.WaitGroup
+	store     storage.LogicalStorage
+	listener  net.Listener
+	stopCh    chan struct{}
+	wg        sync.WaitGroup
+	applyHook ApplyHook // T4d-2: optional gate plug-in; nil = direct apply
 
 	mu            sync.Mutex
 	activeLineage RecoveryLineage
 }
 
 // NewReplicaListener creates a listener on the given address.
+// No ApplyHook installed — MsgShipEntry handler calls store.ApplyEntry
+// directly (preserves T4a/T4b/T4c behavior; existing tests pass
+// unchanged).
 func NewReplicaListener(addr string, store storage.LogicalStorage) (*ReplicaListener, error) {
+	return NewReplicaListenerWithApplyHook(addr, store, nil)
+}
+
+// NewReplicaListenerWithApplyHook creates a listener with the T4d-2
+// apply-gate plug-in installed. The MsgShipEntry handler delegates
+// to `hook.Apply(lineage, lba, data, lsn)` for lane discrimination
+// + per-LBA stale-skip + coverage accounting.
+//
+// Pass nil hook to get the no-gate behavior (== NewReplicaListener).
+func NewReplicaListenerWithApplyHook(addr string, store storage.LogicalStorage, hook ApplyHook) (*ReplicaListener, error) {
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return nil, err
 	}
 	return &ReplicaListener{
-		store:    store,
-		listener: ln,
-		stopCh:   make(chan struct{}),
+		store:     store,
+		listener:  ln,
+		stopCh:    make(chan struct{}),
+		applyHook: hook,
 	}, nil
 }
 
@@ -99,6 +132,21 @@ func (r *ReplicaListener) handleConn(conn net.Conn) {
 					entry.Lineage.SessionID, entry.Lineage.Epoch, entry.Lineage.EndpointVersion)
 				return
 			}
+			// T4d-2: if the apply-gate is installed, route through
+			// it for lane discrimination + per-LBA stale-skip +
+			// coverage accounting. The gate reads lineage.TargetLSN
+			// to decide live vs recovery (Q2 — no wire byte; existing
+			// signal). Live-lane stale entries return error here →
+			// log + close conn (round-44
+			// INV-REPL-LIVE-LANE-STALE-FAILS-LOUD).
+			if r.applyHook != nil {
+				if err := r.applyHook.Apply(entry.Lineage, entry.LBA, entry.Data, entry.LSN); err != nil {
+					log.Printf("replica: apply gate: %v", err)
+					return
+				}
+				continue
+			}
+			// No hook: T4a/T4b/T4c behavior — direct apply.
 			if err := r.store.ApplyEntry(entry.LBA, entry.Data, entry.LSN); err != nil {
 				log.Printf("replica: apply entry: %v", err)
 			}
