@@ -154,6 +154,19 @@ func (p *DurableProvider) Open(ctx context.Context, volumeID string) (frontend.B
 	}
 	if h, ok := p.volumes[volumeID]; ok {
 		p.mu.Unlock()
+		// G5-5: latch the backend's Identity to the now-Healthy
+		// projection. If the backend was constructed via EnsureStorage
+		// pre-assignment, its captured Identity is zero-value and
+		// lineageCheck would reject every write. Latch-from-zero here
+		// installs the authoritative lineage; subsequent drift still
+		// fails closed (SetIdentity is single-shot from zero).
+		proj := p.view.Projection()
+		h.backend.SetIdentity(frontend.Identity{
+			VolumeID:        proj.VolumeID,
+			ReplicaID:       proj.ReplicaID,
+			Epoch:           proj.Epoch,
+			EndpointVersion: proj.EndpointVersion,
+		})
 		return h.backend, nil
 	}
 	p.mu.Unlock()

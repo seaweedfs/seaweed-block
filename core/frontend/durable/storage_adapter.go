@@ -137,9 +137,43 @@ func NewStorageBackend(s storage.LogicalStorage, view frontend.ProjectionView, i
 	return b
 }
 
-// Identity returns the lineage captured at Open. Never re-reads
-// from the projection — stable for the backend's lifetime.
-func (b *StorageBackend) Identity() frontend.Identity { return b.id }
+// Identity returns the captured lineage. Stable once the backend is
+// promoted out of zero-state via SetIdentity (or initialized via
+// NewStorageBackend with a non-zero id).
+func (b *StorageBackend) Identity() frontend.Identity {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.id
+}
+
+// SetIdentity latches the backend's lineage from the engine-side
+// authoritative projection. This is the bridge for the G5-5 wiring
+// where DurableProvider.EnsureStorage constructs the backend BEFORE
+// the assignment fact lands — at construction time view.Projection()
+// returns zero values, so the backend's captured identity is also
+// zero, and lineageCheck rejects every subsequent write with
+// ErrStalePrimary because proj.Epoch>0 != id.Epoch=0.
+//
+// Semantic: latch-from-zero is permitted (transitions a freshly-
+// constructed backend to its first authoritative lineage). Subsequent
+// SetIdentity calls with a different lineage are REJECTED — the
+// backend's identity is "captured at first promotion" and lineage
+// drift past that point is what lineageCheck → ErrStalePrimary
+// detects (failover safety net preserved).
+//
+// Returns true if the latch took effect (id was zero, now set).
+// Returns false on no-op (already set to same value) and on rejected
+// drift (already set to different value — caller should expect
+// ErrStalePrimary on subsequent gate calls anyway).
+func (b *StorageBackend) SetIdentity(id frontend.Identity) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.id.Epoch == 0 && b.id.EndpointVersion == 0 && b.id.ReplicaID == "" && b.id.VolumeID == "" {
+		b.id = id
+		return true
+	}
+	return false
+}
 
 // Close marks the backend closed. All subsequent I/O + Sync
 // return ErrBackendClosed. Does NOT close the underlying
