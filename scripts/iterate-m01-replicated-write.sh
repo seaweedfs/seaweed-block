@@ -205,6 +205,63 @@ wait_until() {
     return 1
 }
 
+# wait_until_byte_equal — poll-cycles m01verify against the replica's
+# walstore until the LBA's bytes match the expected pattern, or the
+# deadline expires. Each cycle: stop replica daemon (so OpenReadOnly
+# is honest about the no-concurrent-writer assumption), invoke
+# m01verify, restart replica. The "replica running" gap between
+# cycles is what gives the catch-up ship traffic time to land.
+#
+# Caller must ensure the replica daemon is RUNNING at entry (we kill
+# + restart). Caller is also responsible for the post-call replica
+# state (we leave it RUNNING on both success and timeout, so the
+# next test step can use the cluster).
+#
+# Usage: wait_until_byte_equal <lba> <hex-byte-pattern> <deadline_s> <desc>
+# Pattern is a single hex byte (e.g. "ab"), per m01verify --expected-pattern.
+wait_until_byte_equal() {
+    local lba="$1" pattern="$2" deadline_s="$3" desc="$4"
+    local end=$(( $(date +%s) + deadline_s ))
+    local last_out=""
+    while [ "$(date +%s)" -lt "${end}" ]; do
+        # Stop replica so m01verify's OpenReadOnly assumption holds.
+        $SSH_M02 "sudo killall -TERM g5-blockvolume 2>/dev/null; sleep 1" >/dev/null 2>&1 || true
+        local out
+        out=$($SSH_M02 "/tmp/g5-m01verify --walstore ${REMOTE_RUN_DIR}/replica-store/v1.bin --lba-start ${lba} --lba-count 1 --block-size 4096 --expected-pattern ${pattern} 2>&1" || true)
+        last_out="${out}"
+        # Restart replica so ship traffic can resume + cluster stays up.
+        start_replica >/dev/null 2>&1 || true
+        if echo "${out}" | grep -q '^OK '; then
+            log "  byte-equal ${desc} lba=${lba} pattern=${pattern} ✓ ($(($(date +%s) - (end - deadline_s)))s)"
+            return 0
+        fi
+        sleep 3  # let new ships arrive between attempts
+    done
+    log "wait_until_byte_equal(${desc}) TIMEOUT lba=${lba} pattern=${pattern} after ${deadline_s}s; last=${last_out}"
+    return 1
+}
+
+# iscsi_write_pattern — drive a kernel iSCSI write at the given LBA
+# with N blocks of the supplied 0xHH hex pattern. Login + write +
+# logout under set -euo pipefail with explicit failure modes.
+# Usage: iscsi_write_pattern <lba> <count> <hex-pattern>
+# Total bytes written = count * 4096.
+iscsi_write_pattern() {
+    local lba="$1" count="$2" pattern="$3"
+    local bytes=$(( count * 4096 ))
+    $SSH_M01 'set -euo pipefail
+sudo iscsiadm -m discovery -t st -p 127.0.0.1:'"${M01_ISCSI_PORT}"' >/dev/null
+sudo iscsiadm -m node -T '"${ISCSI_IQN}"' -p 127.0.0.1:'"${M01_ISCSI_PORT}"' --login >/dev/null
+sleep 2
+DEV=$(ls -t /dev/disk/by-path/*'"${ISCSI_IQN}"'*-lun-0 2>/dev/null | head -1)
+[ -n "$DEV" ] || { echo "ERROR: iSCSI device not visible after login"; exit 2; }
+python3 -c "import sys; sys.stdout.buffer.write(b\"\x'"${pattern}"'\" * '"${bytes}"')" | sudo dd of="$DEV" bs=4096 count='"${count}"' seek='"${lba}"' conv=fsync,nocreat
+sync
+sudo iscsiadm -m node -T '"${ISCSI_IQN}"' -p 127.0.0.1:'"${M01_ISCSI_PORT}"' --logout >/dev/null
+echo "WROTE-LBA-'"${lba}"'-COUNT-'"${count}"'-PATTERN-'"${pattern}"'"
+'
+}
+
 # --- Phase 1: sync + build ---
 
 sync_and_build() {
@@ -421,100 +478,122 @@ echo "WROTE-LBA-0-PATTERN-AB"
     log "  ✓ byte-equal"
 }
 
-# §2 #3 — network disconnect catch-up via /status/recovery R/H polling
-# Architect findings (round 52): (a) remote SSH bash blocks now use
-# `set -euo pipefail` to fail-closed; (b) DEV must be non-empty;
-# (c) primary.H must advance after the write OR test fails (catches
-# silent-write-failure masking).
+# §2 #3 — network disconnect catch-up
+#
+# Pattern (architect round 13 ratification per QA's planning input):
+# direct byte-equal as the pass condition, replacing the H/R polling
+# proxy. /status/recovery snapshots stay as supporting diagnostic
+# only.
+#
+#   1. baseline write LBA[0]=0xab; byte-equal verify (already done in
+#      verify_byte_equal — primary now contains LBA0=0xab)
+#   2. iptables OUTPUT DROP on m01 toward M02:M02_REPLICA_DATA_PORT
+#      (architect ruling: m01 OUTPUT drop preferred over M02 INPUT
+#      drop; least-broad rule that proves the scenario)
+#   3. primary write LBA[1]=0xcd (new pattern, BestEffort: primary
+#      WAL accepts; ship to r2 fails until heal)
+#   4. heal: iptables -D
+#   5. wait_until_byte_equal LBA[1]=0xcd CATCHUP_DEADLINE
+#   6. (informational) snapshot /status/recovery for diagnostic
+#
+# trap ensures iptables -D runs even on script abort so a failed run
+# does not poison the box.
 verify_network_catchup() {
     if [ "${HAS_ISCSI}" = "0" ]; then
         log "verify_network_catchup: SKIP (needs iscsiadm to drive write; use Tier 2 m01)"
         return 0
     fi
-    log "verify_network_catchup: iptables drop primary→replica WAL port + observe catch-up"
-    local prim_h_before prim_h_after
-    prim_h_before=$(poll_status_field "$SSH_M01" "${M01_PRIMARY_STATUS_PORT}" H)
-    [ -n "${prim_h_before}" ] || die "could not read primary.H before disconnect (status endpoint offline?)"
-    log "  pre-disconnect: primary.H=${prim_h_before}"
-    # Block primary→replica data port at M02
-    $SSH_M02 "sudo iptables -I INPUT -p tcp --dport ${M02_REPLICA_DATA_PORT} -j DROP"
-    # Trigger primary write while disconnected (login + write + logout)
-    $SSH_M01 'set -euo pipefail
-sudo iscsiadm -m node -T '"${ISCSI_IQN}"' -p 127.0.0.1:'"${M01_ISCSI_PORT}"' --login >/dev/null
-sleep 2
-DEV=$(ls -t /dev/disk/by-path/*'"${ISCSI_IQN}"'*-lun-0 2>/dev/null | head -1)
-[ -n "$DEV" ] || { echo "ERROR: iSCSI device not visible after login"; exit 2; }
-sudo dd if=/dev/urandom of="$DEV" bs=4096 count=2 conv=fsync,nocreat
-sync
-sudo iscsiadm -m node -T '"${ISCSI_IQN}"' -p 127.0.0.1:'"${M01_ISCSI_PORT}"' --logout >/dev/null
-echo "WROTE-2-BLOCKS"
-' || die "iscsi write during disconnect failed"
-    prim_h_after=$(poll_status_field "$SSH_M01" "${M01_PRIMARY_STATUS_PORT}" H)
-    [ -n "${prim_h_after}" ] || die "could not read primary.H after write"
-    [ "${prim_h_after}" -gt "${prim_h_before}" ] \
-        || die "primary.H did not advance: before=${prim_h_before} after=${prim_h_after} (silent write failure?)"
-    local rep_r
+    log "verify_network_catchup: m01 OUTPUT drop to ${M02_IP}:${M02_REPLICA_DATA_PORT} + write + heal + byte-equal"
+
+    # Cleanup trap: best-effort iptables -D, runs on any function exit
+    # path (success, die, set -e abort upstream).
+    local cleanup_done=0
+    _verify_network_catchup_cleanup() {
+        [ "${cleanup_done}" = "1" ] && return
+        cleanup_done=1
+        $SSH_M01 "sudo iptables -D OUTPUT -d ${M02_IP} -p tcp --dport ${M02_REPLICA_DATA_PORT} -j DROP" >/dev/null 2>&1 || true
+    }
+    trap _verify_network_catchup_cleanup RETURN
+
+    # Step 2: iptables OUTPUT drop on m01.
+    $SSH_M01 "sudo iptables -A OUTPUT -d ${M02_IP} -p tcp --dport ${M02_REPLICA_DATA_PORT} -j DROP" \
+        || die "iptables -A failed"
+    log "  network partitioned (m01 OUTPUT → ${M02_IP}:${M02_REPLICA_DATA_PORT} DROP)"
+
+    # Step 3: primary write LBA[1]=0xcd (different pattern from #2's
+    # LBA[0]=0xab so we can't false-positive on stale data).
+    iscsi_write_pattern 1 1 cd >/dev/null || die "iscsi write LBA[1]=0xcd during disconnect failed"
+    log "  primary wrote LBA[1]=0xcd (replica still partitioned)"
+
+    # Step 4: heal.
+    _verify_network_catchup_cleanup
+    log "  network healed (iptables -D applied)"
+
+    # Step 5: poll until byte-equal at replica.
+    wait_until_byte_equal 1 cd "${CATCHUP_DEADLINE}" "verify_network_catchup-LBA1" \
+        || die "replica did not converge LBA[1]=0xcd within ${CATCHUP_DEADLINE}s after heal"
+
+    # Step 6: diagnostic snapshot (not pass/fail oracle).
+    local prim_h rep_r decision
+    prim_h=$(poll_status_field "$SSH_M01" "${M01_PRIMARY_STATUS_PORT}" H)
     rep_r=$(poll_status_field "$SSH_M02" "${M02_REPLICA_STATUS_PORT}" R)
-    log "  pre-restore: primary.H=${prim_h_after} (advanced from ${prim_h_before}), replica.R=${rep_r}"
-    [ -n "${rep_r}" ] && [ "${rep_r}" -lt "${prim_h_after}" ] \
-        || die "replica.R should be behind primary.H after disconnect; got R=${rep_r} H=${prim_h_after}"
-    # Restore network
-    $SSH_M02 "sudo iptables -D INPUT -p tcp --dport ${M02_REPLICA_DATA_PORT} -j DROP"
-    # Poll until replica catches up
-    wait_until "replica catches up to primary.H=${prim_h_after}" "${CATCHUP_DEADLINE}" \
-        "[ \"\$(poll_status_field '$SSH_M02' '${M02_REPLICA_STATUS_PORT}' R)\" -ge \"${prim_h_after}\" ]" \
-        || die "replica did not catch up to H=${prim_h_after} within ${CATCHUP_DEADLINE}s"
-    # Assert RecoveryDecision was catch_up — empty no longer acceptable
-    # per architect round 52: empty decision means we missed the transition,
-    # which is suspect; require explicit catch_up evidence
-    local decision
     decision=$(poll_status_field "$SSH_M02" "${M02_REPLICA_STATUS_PORT}" RecoveryDecision)
-    case "${decision}" in
-        catch_up)     log "  RecoveryDecision=catch_up (explicit transition observed)" ;;
-        rebuild)      die "expected RecoveryDecision=catch_up; got rebuild (gap exceeded retention?)" ;;
-        "")           die "RecoveryDecision empty after observed catch-up — script missed the transition; tighten polling or capture decision history" ;;
-        *)            die "unexpected RecoveryDecision=${decision}" ;;
-    esac
-    log "  ✓ network catch-up converged (R behind by ${prim_h_after}-${rep_r}=$((prim_h_after - rep_r)) before restore)"
+    log "  diagnostic /status/recovery: primary.H=${prim_h} replica.R=${rep_r} replica.RecoveryDecision=${decision:-<empty>}"
+    log "  ✓ network catch-up byte-equal converged"
+
+    trap - RETURN
 }
 
 # §2 #4 — replica process stop/restart catch-up
-# Architect findings round 52 same as #3: set -e + DEV assert + H advancement.
+#
+# Pattern (architect round 13 ratification):
+#   1. baseline: replica running, byte-equal at LBA[0]=0xab from #2
+#   2. kill replica: pkill -TERM g5-blockvolume on M02
+#   3. primary write LBA[2]=0xef while replica is down (BestEffort:
+#      primary's WAL accepts the write; ship attempts to r2 fail
+#      since r2 is offline)
+#   4. restart replica with same --durable-root
+#   5. wait_until_byte_equal LBA[2]=0xef CATCHUP_DEADLINE
+#
+# Run #4 NAIVELY first (architect ruling 2 round 13). If catch-up
+# does not converge — primary's WAL did not retain writes during the
+# disconnect — that is a real recovery-path finding to surface, NOT
+# a test flaw. Do not change durability mode; do not paper over.
+#
+# Note: m01verify must read replica's walstore only while the
+# replica daemon is stopped or quiesced (architect caution round 13).
+# wait_until_byte_equal handles this internally (kill→verify→restart
+# per cycle).
 verify_restart_catchup() {
     if [ "${HAS_ISCSI}" = "0" ]; then
         log "verify_restart_catchup: SKIP (needs iscsiadm to drive write; use Tier 2 m01)"
         return 0
     fi
-    log "verify_restart_catchup: SIGTERM replica + restart same --durable-root"
-    local prim_h_before prim_h_after
-    prim_h_before=$(poll_status_field "$SSH_M01" "${M01_PRIMARY_STATUS_PORT}" H)
-    [ -n "${prim_h_before}" ] || die "could not read primary.H before stop"
-    # Trigger primary write while replica is down
-    $SSH_M02 "sudo pkill -TERM -f '[g]5-blockvolume.*server-id m02-replica'"
-    sleep 2
-    $SSH_M01 'set -euo pipefail
-sudo iscsiadm -m node -T '"${ISCSI_IQN}"' -p 127.0.0.1:'"${M01_ISCSI_PORT}"' --login >/dev/null
-sleep 2
-DEV=$(ls -t /dev/disk/by-path/*'"${ISCSI_IQN}"'*-lun-0 2>/dev/null | head -1)
-[ -n "$DEV" ] || { echo "ERROR: iSCSI device not visible after login"; exit 2; }
-sudo dd if=/dev/urandom of="$DEV" bs=4096 count=2 seek=4 conv=fsync,nocreat
-sync
-sudo iscsiadm -m node -T '"${ISCSI_IQN}"' -p 127.0.0.1:'"${M01_ISCSI_PORT}"' --logout >/dev/null
-echo "WROTE-2-BLOCKS-AT-OFFSET-4"
-' || die "iscsi write during replica-down failed"
-    prim_h_after=$(poll_status_field "$SSH_M01" "${M01_PRIMARY_STATUS_PORT}" H)
-    [ -n "${prim_h_after}" ] || die "could not read primary.H after offline write"
-    [ "${prim_h_after}" -gt "${prim_h_before}" ] \
-        || die "primary.H did not advance during replica-down write: before=${prim_h_before} after=${prim_h_after}"
-    log "  primary.H ${prim_h_before} → ${prim_h_after} during replica-down"
-    # Restart replica (same binary, same --durable-root)
-    start_replica
-    sleep 3
-    # Poll until replica catches up
-    wait_until "replica catches up post-restart to H=${prim_h_after}" "${CATCHUP_DEADLINE}" \
-        "[ \"\$(poll_status_field '$SSH_M02' '${M02_REPLICA_STATUS_PORT}' R)\" -ge \"${prim_h_after}\" ]" \
-        || die "replica did not catch up post-restart within ${CATCHUP_DEADLINE}s"
-    log "  ✓ restart catch-up converged (replica.R reached ${prim_h_after} after restart)"
+    log "verify_restart_catchup: kill replica + write while down + restart + byte-equal"
+
+    # Step 2: stop replica daemon.
+    $SSH_M02 "sudo killall -TERM g5-blockvolume; sleep 2" >/dev/null 2>&1 || true
+    log "  replica stopped"
+
+    # Step 3: primary write LBA[2]=0xef while replica is down.
+    iscsi_write_pattern 2 1 ef >/dev/null || die "iscsi write LBA[2]=0xef during replica-down failed"
+    log "  primary wrote LBA[2]=0xef (replica down)"
+
+    # Step 4: restart replica.
+    start_replica >/dev/null 2>&1 || true
+    log "  replica restarted"
+
+    # Step 5: wait_until_byte_equal at LBA[2]=0xef.
+    wait_until_byte_equal 2 ef "${CATCHUP_DEADLINE}" "verify_restart_catchup-LBA2" \
+        || die "replica did not converge LBA[2]=0xef within ${CATCHUP_DEADLINE}s after restart (CHECK: primary WAL retention during replica-down — real recovery-path finding if writes were dropped)"
+
+    # Diagnostic snapshot (not pass/fail oracle).
+    local prim_h rep_r decision
+    prim_h=$(poll_status_field "$SSH_M01" "${M01_PRIMARY_STATUS_PORT}" H)
+    rep_r=$(poll_status_field "$SSH_M02" "${M02_REPLICA_STATUS_PORT}" R)
+    decision=$(poll_status_field "$SSH_M02" "${M02_REPLICA_STATUS_PORT}" RecoveryDecision)
+    log "  diagnostic /status/recovery: primary.H=${prim_h} replica.R=${rep_r} replica.RecoveryDecision=${decision:-<empty>}"
+    log "  ✓ restart catch-up byte-equal converged"
 }
 
 # §2 #5 — race ×10 stress on G5-4 integration test
