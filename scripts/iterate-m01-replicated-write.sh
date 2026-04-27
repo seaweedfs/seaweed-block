@@ -390,11 +390,18 @@ sync
 sudo iscsiadm -m node -T '"${ISCSI_IQN}"' -p 127.0.0.1:'"${M01_ISCSI_PORT}"' --logout >/dev/null
 echo "WROTE-LBA-0-PATTERN-AB"
 ' || die "iscsi write failed"
+    # NOTE (round-12): H-advance preflight removed. Engine's
+    # Recovery.H is updated by probe events (RecoveryFactsObserved),
+    # not by local writes. At adoption time engine sets H=walHead
+    # (nextLSN, already=1 for empty walstore); after a local write
+    # at LSN=1 the next-allocated LSN becomes 2 but Recovery.H stays
+    # 1 until a probe re-reads boundaries. Using H-advance here is a
+    # false-positive trap. The actual proof of write+ship is the
+    # m01verify byte-equal compare below; failures upstream of that
+    # surface via the primary's log (set -euo pipefail in the dd
+    # block + non-zero exit on iscsi failure).
     prim_h_after=$(poll_status_field "$SSH_M01" "${M01_PRIMARY_STATUS_PORT}" H)
-    [ -n "${prim_h_after}" ] || die "could not read primary.H after write"
-    [ "${prim_h_after}" -gt "${prim_h_before}" ] \
-        || die "primary.H did not advance: before=${prim_h_before} after=${prim_h_after} (silent write failure masked?)"
-    log "  primary.H advanced ${prim_h_before} → ${prim_h_after}"
+    log "  primary.H pre/post: ${prim_h_before} → ${prim_h_after} (informational)"
     sleep 1  # let replication fan-out complete
     # Logout iscsi (release the device handle so we can stop replica cleanly later)
     $SSH_M01 "sudo iscsiadm -m node -T ${ISCSI_IQN} -p 127.0.0.1:${M01_ISCSI_PORT} --logout >/dev/null" || true
