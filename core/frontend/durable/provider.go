@@ -29,6 +29,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"sync"
@@ -156,11 +157,13 @@ func (p *DurableProvider) Open(ctx context.Context, volumeID string) (frontend.B
 		p.mu.Unlock()
 		// G5-5: latch the backend's Identity to the now-Healthy
 		// projection. If the backend was constructed via EnsureStorage
-		// pre-assignment, its captured Identity is zero-value and
-		// lineageCheck would reject every write. Latch-from-zero here
-		// installs the authoritative lineage; subsequent drift still
-		// fails closed (SetIdentity is single-shot from zero).
+		// pre-assignment, its captured Identity has Epoch=0 even though
+		// VolumeID/ReplicaID came from CLI config at construction.
+		// SetIdentity transitions Epoch=0 → live projection's Epoch/EV;
+		// subsequent drift still fails closed.
 		proj := p.view.Projection()
+		log.Printf("durable: dp.Open latching identity from projection volume=%s replica=%s epoch=%d ev=%d (post-waitHealthy)",
+			proj.VolumeID, proj.ReplicaID, proj.Epoch, proj.EndpointVersion)
 		h.backend.SetIdentity(frontend.Identity{
 			VolumeID:        proj.VolumeID,
 			ReplicaID:       proj.ReplicaID,

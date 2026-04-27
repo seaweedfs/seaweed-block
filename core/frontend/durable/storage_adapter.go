@@ -149,30 +149,47 @@ func (b *StorageBackend) Identity() frontend.Identity {
 // SetIdentity latches the backend's lineage from the engine-side
 // authoritative projection. This is the bridge for the G5-5 wiring
 // where DurableProvider.EnsureStorage constructs the backend BEFORE
-// the assignment fact lands — at construction time view.Projection()
-// returns zero values, so the backend's captured identity is also
-// zero, and lineageCheck rejects every subsequent write with
-// ErrStalePrimary because proj.Epoch>0 != id.Epoch=0.
+// the assignment fact lands.
 //
-// Semantic: latch-from-zero is permitted (transitions a freshly-
-// constructed backend to its first authoritative lineage). Subsequent
-// SetIdentity calls with a different lineage are REJECTED — the
-// backend's identity is "captured at first promotion" and lineage
-// drift past that point is what lineageCheck → ErrStalePrimary
-// detects (failover safety net preserved).
+// Pre-assignment state shape (round-11 finding): wrap() captures
+// `view.Projection()` at construction. AdapterProjectionView reports
+// VolumeID/ReplicaID from CLI config (non-empty even pre-assignment)
+// but Epoch=0/EV=0 (engine state is zero-value until OnAssignment
+// runs). So a freshly-constructed backend has b.id = {v1, r1, 0, 0}
+// — partially-zero, not all-zero. The latch condition keys on
+// Epoch=0 (the meaningful "no authority line yet" indicator);
+// VolumeID/ReplicaID match is asserted but unchanged.
 //
-// Returns true if the latch took effect (id was zero, now set).
-// Returns false on no-op (already set to same value) and on rejected
-// drift (already set to different value — caller should expect
-// ErrStalePrimary on subsequent gate calls anyway).
+// Semantic: latch when Epoch is currently zero (transitions from
+// pre-assignment to first authoritative lineage). Subsequent calls
+// with a different lineage are REJECTED — drift past the latched
+// value still fails closed via lineageCheck → ErrStalePrimary
+// (failover safety net preserved).
+//
+// Returns true if the latch took effect (Epoch was 0, now set).
+// Returns false on no-op (already at this Epoch+EV) and on rejected
+// drift (already latched to a different non-zero Epoch+EV).
 func (b *StorageBackend) SetIdentity(id frontend.Identity) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if b.id.Epoch == 0 && b.id.EndpointVersion == 0 && b.id.ReplicaID == "" && b.id.VolumeID == "" {
-		b.id = id
-		return true
+	// Reject drift past a non-zero latched Identity (preserves the
+	// failover safety net — lineage drift = ErrStalePrimary).
+	if b.id.Epoch != 0 || b.id.EndpointVersion != 0 {
+		return false
 	}
-	return false
+	// VolumeID/ReplicaID came from CLI config at backend construction
+	// time and don't change; refuse silently if caller tries to install
+	// a different volume/replica (paranoia — should never happen in
+	// production).
+	if (b.id.VolumeID != "" && b.id.VolumeID != id.VolumeID) ||
+		(b.id.ReplicaID != "" && b.id.ReplicaID != id.ReplicaID) {
+		return false
+	}
+	// Latch.
+	b.id = id
+	log.Printf("durable: StorageBackend.SetIdentity latched volume=%s replica=%s epoch=%d ev=%d",
+		id.VolumeID, id.ReplicaID, id.Epoch, id.EndpointVersion)
+	return true
 }
 
 // Close marks the backend closed. All subsequent I/O + Sync

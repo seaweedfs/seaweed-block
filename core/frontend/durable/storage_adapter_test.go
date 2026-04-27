@@ -436,43 +436,40 @@ func TestT3a_MatrixCoverage(t *testing.T) {
 	}
 }
 
-// G5-5 test: SetIdentity latches a zero-id backend to the assignment's
-// lineage; subsequent calls with a different id are rejected (drift
-// must still fail closed via lineageCheck → ErrStalePrimary).
-func TestG5_5_SetIdentity_LatchFromZero(t *testing.T) {
+// G5-5 test: SetIdentity latches a zero-Epoch backend (the
+// pre-assignment shape that EnsureStorage produces — VolumeID +
+// ReplicaID set from CLI config, Epoch=0+EV=0). Drift past the
+// latched value is rejected so lineageCheck fail-closed still
+// catches failover.
+func TestG5_5_SetIdentity_LatchFromZeroEpoch(t *testing.T) {
 	for _, f := range logicalStorageFactories() {
 		f := f
 		t.Run(f.name, func(t *testing.T) {
 			s := f.make(t, 16, 4096)
-			zero := frontend.Identity{}
+			preAssignment := frontend.Identity{VolumeID: "v1", ReplicaID: "r1", Epoch: 0, EndpointVersion: 0}
 			view := newStubView(frontend.Projection{
 				VolumeID: "v1", ReplicaID: "r1", Epoch: 1, EndpointVersion: 1, Healthy: true,
 			})
-			b := durable.NewStorageBackend(s, view, zero)
-			// Pre-latch: Identity is zero.
-			if got := b.Identity(); got.Epoch != 0 || got.ReplicaID != "" {
-				t.Fatalf("pre-latch: expected zero identity, got %+v", got)
+			b := durable.NewStorageBackend(s, view, preAssignment)
+			if got := b.Identity(); got.Epoch != 0 || got.VolumeID != "v1" {
+				t.Fatalf("pre-latch: expected {v1, r1, 0, 0}, got %+v", got)
 			}
-			// Latch from zero: must return true and apply.
 			id1 := frontend.Identity{VolumeID: "v1", ReplicaID: "r1", Epoch: 1, EndpointVersion: 1}
 			if !b.SetIdentity(id1) {
-				t.Fatal("SetIdentity from zero must return true")
+				t.Fatal("SetIdentity from Epoch=0 must return true")
 			}
 			if got := b.Identity(); got != id1 {
 				t.Fatalf("post-latch identity: got %+v want %+v", got, id1)
 			}
-			// Same value: no-op (returns false).
 			if b.SetIdentity(id1) {
-				t.Error("SetIdentity with same value must return false (idempotent no-op)")
+				t.Error("SetIdentity after latch must return false")
 			}
-			// Drift: must NOT update; subsequent gate calls would
-			// fail-closed via lineageCheck against the latched id1.
 			id2 := frontend.Identity{VolumeID: "v1", ReplicaID: "r1", Epoch: 2, EndpointVersion: 1}
 			if b.SetIdentity(id2) {
-				t.Error("SetIdentity with drifted lineage must return false (only latch-from-zero allowed)")
+				t.Error("SetIdentity drift must return false (lineageCheck still fail-closed)")
 			}
 			if got := b.Identity(); got != id1 {
-				t.Errorf("drift attempt mutated identity: got %+v want %+v (id1)", got, id1)
+				t.Errorf("drift attempt mutated identity: got %+v want %+v", got, id1)
 			}
 		})
 	}
