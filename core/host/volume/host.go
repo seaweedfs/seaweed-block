@@ -503,12 +503,24 @@ func (h *Host) applyFact(fact *control.AssignmentFact) {
 				h.cfg.VolumeID, gen, len(targets), err)
 			return
 		}
+		// Always log the peer-set install at INFO so operators (and
+		// hardware-test harness) can disambiguate "peer set is what I
+		// expect" from "peer set is empty" without -v / debug flags.
+		// One line per fact emission; small log footprint.
+		peerIDs := make([]string, 0, len(targets))
+		for _, t := range targets {
+			peerIDs = append(peerIDs, fmt.Sprintf("%s@%s", t.ReplicaID, t.DataAddr))
+		}
+		h.log.Printf("blockvolume: volume %s replication UpdateReplicaSet ok (gen=%d, peers=%d): %v",
+			h.cfg.VolumeID, gen, len(targets), peerIDs)
 	}
 
 	// Step (2c): identity install only after replication is live.
 	// SOLE permitted decode path. See subscribe.go.
 	info := decodeAssignmentFact(fact)
 	h.adpt.OnAssignment(info)
+	h.log.Printf("blockvolume: volume %s adopted as PRIMARY at %s@%d (EV=%d)",
+		h.cfg.VolumeID, info.ReplicaID, info.Epoch, info.EndpointVersion)
 	if h.cfg.ReadyMarker != nil && info.Epoch > 0 && h.readyOnce.CompareAndSwap(false, true) {
 		select {
 		case h.cfg.ReadyMarker <- info:
