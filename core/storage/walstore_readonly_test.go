@@ -4,8 +4,13 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
+
+// runtimeNumGoroutine wraps runtime.NumGoroutine so the test file's
+// import set stays minimal at the top of the file.
+func runtimeNumGoroutine() int { return runtime.NumGoroutine() }
 
 // TestOpenReadOnly_RoundTripWriteThenRead — pin G5-5: a value
 // written through the R/W path is observable via OpenReadOnly+Read.
@@ -71,4 +76,59 @@ func TestOpenReadOnly_FailsOnMissingFile(t *testing.T) {
 	if _, ok := err.(*os.PathError); ok {
 		// fine — wrapped os error
 	}
+}
+
+// TestOpenReadOnly_NoBackgroundGoroutines — architect REVIEW round 52
+// MEDIUM fix: the read-only path must NOT start flusher / committer /
+// admission goroutines (the original implementation did). Pin the
+// fix by snapshotting goroutine count before/after Open+Read+Close.
+//
+// Tolerance is a small constant (Go runtime spins up housekeeping
+// goroutines that are unrelated to walstore). The pin is "no growth
+// proportional to walstore writer machinery" — flusher + committer
+// alone would add 2 goroutines per Open.
+func TestOpenReadOnly_NoBackgroundGoroutines(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "vol.walstore")
+	w, err := CreateWALStore(path, 4, 4096)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Write(0, bytes.Repeat([]byte{0x42}, 4096)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	before := goroutineCount()
+	r, err := OpenReadOnly(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Read(0); err != nil {
+		t.Fatal(err)
+	}
+	during := goroutineCount()
+	if err := r.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Expect ZERO net goroutine growth from Open. Tolerance of 1 for
+	// transient runtime jitter; failing this would mean a goroutine
+	// (flusher / committer / admission / etc.) was started.
+	delta := during - before
+	if delta > 1 {
+		t.Errorf("OpenReadOnly leaked %d goroutines (before=%d during=%d) — read-only path must not start writer machinery",
+			delta, before, during)
+	}
+}
+
+func goroutineCount() int {
+	// runtime.NumGoroutine — but we use a small wrapper to keep the
+	// import locality with this test file.
+	return runtimeNumGoroutine()
 }

@@ -51,6 +51,20 @@ CATCHUP_DEADLINE=30
 SSH_M01="ssh -i ${SSH_KEY} -o ConnectTimeout=10 -o StrictHostKeyChecking=no ${M01_HOST}"
 SSH_M02="ssh -i ${SSH_KEY} -o ConnectTimeout=10 -o StrictHostKeyChecking=no ${M02_HOST}"
 
+# Tier 1 (LOCAL_MODE=1): run everything on the current Linux host
+# (e.g. WSL). Same ports, loopback only. No SSH overhead. Faster
+# iteration. Use Tier 2 (default, m01 cross-node) when deployment
+# realism is needed.
+if [ "${LOCAL_MODE:-0}" = "1" ]; then
+    log "LOCAL_MODE=1 — running both 'm01' + 'M02' on this host (Tier 1)"
+    SSH_M01="bash -c"
+    SSH_M02="bash -c"
+    # In LOCAL_MODE, the M02 'master' connects to the same loopback master
+    # (no cross-node), and the durable-root must differ between primary
+    # and replica to avoid lock contention.
+fi
+LOCAL_MODE="${LOCAL_MODE:-0}"
+
 # --- Helpers ---
 
 log() { printf '\033[1;36m[g5-5]\033[0m %s\n' "$*" >&2; }
@@ -149,7 +163,7 @@ nohup /tmp/g5-blockvolume \
     --durable-root ${REMOTE_RUN_DIR}/primary-store \
     --durable-impl ${DURABLE_IMPL} \
     --durable-blocks ${DURABLE_BLOCKS} --durable-blocksize ${DURABLE_BLOCKSIZE} \
-    --iscsi-listen 0.0.0.0:${M01_ISCSI_PORT} \
+    --iscsi-listen 127.0.0.1:${M01_ISCSI_PORT} \
     --iscsi-iqn ${ISCSI_IQN} \
     --t1-readiness \
     > ${REMOTE_RUN_DIR}/logs/primary.log 2>&1 </dev/null & disown"
@@ -174,8 +188,8 @@ nohup /tmp/g5-blockvolume \
 
 start_cluster() {
     log "phase 2: start cluster"
-    $SSH_M01 "sudo pkill -9 -f g5-blockvolume 2>/dev/null || true; sudo pkill -9 -f g5-blockmaster 2>/dev/null || true; rm -rf ${REMOTE_RUN_DIR} && mkdir -p ${REMOTE_RUN_DIR}/{logs,master-store,primary-store}"
-    $SSH_M02 "sudo pkill -9 -f g5-blockvolume 2>/dev/null || true; rm -rf ${REMOTE_RUN_DIR} && mkdir -p ${REMOTE_RUN_DIR}/{logs,replica-store}"
+    $SSH_M01 "sudo pkill -9 -f '[g]5-blockvolume' 2>/dev/null || true; sudo pkill -9 -f '[g]5-blockmaster' 2>/dev/null || true; rm -rf ${REMOTE_RUN_DIR} && mkdir -p ${REMOTE_RUN_DIR}/{logs,master-store,primary-store}"
+    $SSH_M02 "sudo pkill -9 -f '[g]5-blockvolume' 2>/dev/null || true; rm -rf ${REMOTE_RUN_DIR} && mkdir -p ${REMOTE_RUN_DIR}/{logs,replica-store}"
     write_topology
     start_master
     start_primary
@@ -184,8 +198,8 @@ start_cluster() {
 
 stop_cluster() {
     log "stop cluster"
-    $SSH_M01 "sudo pkill -9 -f g5-blockvolume 2>/dev/null || true; sudo pkill -9 -f g5-blockmaster 2>/dev/null || true" || true
-    $SSH_M02 "sudo pkill -9 -f g5-blockvolume 2>/dev/null || true" || true
+    $SSH_M01 "sudo pkill -9 -f '[g]5-blockvolume' 2>/dev/null || true; sudo pkill -9 -f '[g]5-blockmaster' 2>/dev/null || true" || true
+    $SSH_M02 "sudo pkill -9 -f '[g]5-blockvolume' 2>/dev/null || true" || true
 }
 
 # --- Phase 3: verify steps (per mini-plan v0.3 §2) ---
@@ -204,31 +218,39 @@ verify_cluster_ready() {
 }
 
 # §2 #2 — kernel iSCSI write + m01verify storage-aware compare
+# Architect findings round 52: remote SSH bash blocks use
+# `set -euo pipefail`; DEV must be non-empty; primary.H must advance
+# after the write (catches silent-write-failure masking).
 verify_byte_equal() {
     log "verify_byte_equal: iSCSI write 1 LBA + m01verify SHA-256"
-    # Prereq: open-iscsi initiator on m01.
     $SSH_M01 "command -v iscsiadm >/dev/null" || die "iscsiadm not installed on m01 (apt install open-iscsi)"
-    # Discover + login
-    $SSH_M01 "
-sudo iscsiadm -m discovery -t st -p 127.0.0.1:${M01_ISCSI_PORT} >/dev/null
-sudo iscsiadm -m node -T ${ISCSI_IQN} -p 127.0.0.1:${M01_ISCSI_PORT} --login >/dev/null
-" || die "iscsi login failed"
-    sleep 2
-    # Find the device (most-recently attached scsi disk)
-    local dev
-    dev=$($SSH_M01 "ls -t /dev/disk/by-path/*${ISCSI_IQN}*-lun-0 2>/dev/null | head -1")
-    [ -n "${dev}" ] || die "iscsi device not found under /dev/disk/by-path"
-    log "  iscsi device: ${dev}"
-    # Write a known pattern (0xab) into LBA 0 (4096 bytes) via dd
-    $SSH_M01 "
-sudo dd if=/dev/zero bs=4096 count=1 2>/dev/null | tr '\\0' '\\xab' | sudo dd of=${dev} bs=4096 count=1 conv=fsync,nocreat 2>/dev/null
+    local prim_h_before prim_h_after
+    prim_h_before=$(poll_status_field "$SSH_M01" "${M01_PRIMARY_STATUS_PORT}" H)
+    [ -n "${prim_h_before}" ] || die "could not read primary.H before write"
+    # Discover + login + write + assert + logout — all under set -euo pipefail
+    $SSH_M01 'set -euo pipefail
+sudo iscsiadm -m discovery -t st -p 127.0.0.1:'"${M01_ISCSI_PORT}"' >/dev/null
+sudo iscsiadm -m node -T '"${ISCSI_IQN}"' -p 127.0.0.1:'"${M01_ISCSI_PORT}"' --login >/dev/null
+sleep 2
+DEV=$(ls -t /dev/disk/by-path/*'"${ISCSI_IQN}"'*-lun-0 2>/dev/null | head -1)
+[ -n "$DEV" ] || { echo "ERROR: iSCSI device not visible after login"; exit 2; }
+echo "DEV=$DEV"
+# Fill 1 block with 0xab and write to LBA 0
+sudo dd if=/dev/zero bs=4096 count=1 2>/dev/null | tr "\0" "\xab" | sudo dd of="$DEV" bs=4096 count=1 conv=fsync,nocreat
 sync
-" || die "iscsi write failed"
+sudo iscsiadm -m node -T '"${ISCSI_IQN}"' -p 127.0.0.1:'"${M01_ISCSI_PORT}"' --logout >/dev/null
+echo "WROTE-LBA-0-PATTERN-AB"
+' || die "iscsi write failed"
+    prim_h_after=$(poll_status_field "$SSH_M01" "${M01_PRIMARY_STATUS_PORT}" H)
+    [ -n "${prim_h_after}" ] || die "could not read primary.H after write"
+    [ "${prim_h_after}" -gt "${prim_h_before}" ] \
+        || die "primary.H did not advance: before=${prim_h_before} after=${prim_h_after} (silent write failure masked?)"
+    log "  primary.H advanced ${prim_h_before} → ${prim_h_after}"
     sleep 1  # let replication fan-out complete
     # Logout iscsi (release the device handle so we can stop replica cleanly later)
     $SSH_M01 "sudo iscsiadm -m node -T ${ISCSI_IQN} -p 127.0.0.1:${M01_ISCSI_PORT} --logout >/dev/null" || true
     # Stop replica daemon so m01verify can OpenReadOnly
-    $SSH_M02 "sudo pkill -TERM -f 'g5-blockvolume.*server-id m02-replica' && sleep 2"
+    $SSH_M02 "sudo pkill -TERM -f '[g]5-blockvolume.*server-id m02-replica' && sleep 2"
     # m01verify reads replica's walstore
     local out
     out=$($SSH_M02 "/tmp/g5-m01verify --walstore ${REMOTE_RUN_DIR}/replica-store/v1.walstore --lba-start 0 --lba-count 1 --block-size 4096 --expected-pattern ab 2>&1")
@@ -241,66 +263,91 @@ sync
 }
 
 # §2 #3 — network disconnect catch-up via /status/recovery R/H polling
+# Architect findings (round 52): (a) remote SSH bash blocks now use
+# `set -euo pipefail` to fail-closed; (b) DEV must be non-empty;
+# (c) primary.H must advance after the write OR test fails (catches
+# silent-write-failure masking).
 verify_network_catchup() {
     log "verify_network_catchup: iptables drop primary→replica WAL port + observe catch-up"
+    local prim_h_before prim_h_after
+    prim_h_before=$(poll_status_field "$SSH_M01" "${M01_PRIMARY_STATUS_PORT}" H)
+    [ -n "${prim_h_before}" ] || die "could not read primary.H before disconnect (status endpoint offline?)"
+    log "  pre-disconnect: primary.H=${prim_h_before}"
     # Block primary→replica data port at M02
     $SSH_M02 "sudo iptables -I INPUT -p tcp --dport ${M02_REPLICA_DATA_PORT} -j DROP"
     # Trigger primary write while disconnected (login + write + logout)
-    $SSH_M01 "
-sudo iscsiadm -m node -T ${ISCSI_IQN} -p 127.0.0.1:${M01_ISCSI_PORT} --login >/dev/null
+    $SSH_M01 'set -euo pipefail
+sudo iscsiadm -m node -T '"${ISCSI_IQN}"' -p 127.0.0.1:'"${M01_ISCSI_PORT}"' --login >/dev/null
 sleep 2
-DEV=\$(ls -t /dev/disk/by-path/*${ISCSI_IQN}*-lun-0 2>/dev/null | head -1)
-sudo dd if=/dev/urandom of=\${DEV} bs=4096 count=2 conv=fsync,nocreat 2>/dev/null
+DEV=$(ls -t /dev/disk/by-path/*'"${ISCSI_IQN}"'*-lun-0 2>/dev/null | head -1)
+[ -n "$DEV" ] || { echo "ERROR: iSCSI device not visible after login"; exit 2; }
+sudo dd if=/dev/urandom of="$DEV" bs=4096 count=2 conv=fsync,nocreat
 sync
-sudo iscsiadm -m node -T ${ISCSI_IQN} -p 127.0.0.1:${M01_ISCSI_PORT} --logout >/dev/null
-" || die "iscsi write during disconnect failed"
-    # Verify replica is behind: R != H
-    local prim_h rep_r
-    prim_h=$(poll_status_field "$SSH_M01" "${M01_PRIMARY_STATUS_PORT}" H)
+sudo iscsiadm -m node -T '"${ISCSI_IQN}"' -p 127.0.0.1:'"${M01_ISCSI_PORT}"' --logout >/dev/null
+echo "WROTE-2-BLOCKS"
+' || die "iscsi write during disconnect failed"
+    prim_h_after=$(poll_status_field "$SSH_M01" "${M01_PRIMARY_STATUS_PORT}" H)
+    [ -n "${prim_h_after}" ] || die "could not read primary.H after write"
+    [ "${prim_h_after}" -gt "${prim_h_before}" ] \
+        || die "primary.H did not advance: before=${prim_h_before} after=${prim_h_after} (silent write failure?)"
+    local rep_r
     rep_r=$(poll_status_field "$SSH_M02" "${M02_REPLICA_STATUS_PORT}" R)
-    log "  pre-restore: primary.H=${prim_h}, replica.R=${rep_r}"
+    log "  pre-restore: primary.H=${prim_h_after} (advanced from ${prim_h_before}), replica.R=${rep_r}"
+    [ -n "${rep_r}" ] && [ "${rep_r}" -lt "${prim_h_after}" ] \
+        || die "replica.R should be behind primary.H after disconnect; got R=${rep_r} H=${prim_h_after}"
     # Restore network
     $SSH_M02 "sudo iptables -D INPUT -p tcp --dport ${M02_REPLICA_DATA_PORT} -j DROP"
     # Poll until replica catches up
-    wait_until "replica catches up to primary.H=${prim_h}" "${CATCHUP_DEADLINE}" \
-        "[ \"\$(poll_status_field '$SSH_M02' '${M02_REPLICA_STATUS_PORT}' R)\" -ge \"${prim_h}\" ]" \
-        || die "replica did not catch up to H=${prim_h} within ${CATCHUP_DEADLINE}s"
-    # Assert RecoveryDecision was catch_up (not rebuild)
+    wait_until "replica catches up to primary.H=${prim_h_after}" "${CATCHUP_DEADLINE}" \
+        "[ \"\$(poll_status_field '$SSH_M02' '${M02_REPLICA_STATUS_PORT}' R)\" -ge \"${prim_h_after}\" ]" \
+        || die "replica did not catch up to H=${prim_h_after} within ${CATCHUP_DEADLINE}s"
+    # Assert RecoveryDecision was catch_up — empty no longer acceptable
+    # per architect round 52: empty decision means we missed the transition,
+    # which is suspect; require explicit catch_up evidence
     local decision
     decision=$(poll_status_field "$SSH_M02" "${M02_REPLICA_STATUS_PORT}" RecoveryDecision)
     case "${decision}" in
-        catch_up|"")  ;;  # empty = already converged before observation; acceptable
+        catch_up)     log "  RecoveryDecision=catch_up (explicit transition observed)" ;;
         rebuild)      die "expected RecoveryDecision=catch_up; got rebuild (gap exceeded retention?)" ;;
-        *)            log "  RecoveryDecision=${decision}" ;;
+        "")           die "RecoveryDecision empty after observed catch-up — script missed the transition; tighten polling or capture decision history" ;;
+        *)            die "unexpected RecoveryDecision=${decision}" ;;
     esac
-    log "  ✓ network catch-up converged"
+    log "  ✓ network catch-up converged (R behind by ${prim_h_after}-${rep_r}=$((prim_h_after - rep_r)) before restore)"
 }
 
 # §2 #4 — replica process stop/restart catch-up
+# Architect findings round 52 same as #3: set -e + DEV assert + H advancement.
 verify_restart_catchup() {
     log "verify_restart_catchup: SIGTERM replica + restart same --durable-root"
+    local prim_h_before prim_h_after
+    prim_h_before=$(poll_status_field "$SSH_M01" "${M01_PRIMARY_STATUS_PORT}" H)
+    [ -n "${prim_h_before}" ] || die "could not read primary.H before stop"
     # Trigger primary write while replica is down
-    $SSH_M02 "sudo pkill -TERM -f 'g5-blockvolume.*server-id m02-replica'"
+    $SSH_M02 "sudo pkill -TERM -f '[g]5-blockvolume.*server-id m02-replica'"
     sleep 2
-    $SSH_M01 "
-sudo iscsiadm -m node -T ${ISCSI_IQN} -p 127.0.0.1:${M01_ISCSI_PORT} --login >/dev/null
+    $SSH_M01 'set -euo pipefail
+sudo iscsiadm -m node -T '"${ISCSI_IQN}"' -p 127.0.0.1:'"${M01_ISCSI_PORT}"' --login >/dev/null
 sleep 2
-DEV=\$(ls -t /dev/disk/by-path/*${ISCSI_IQN}*-lun-0 2>/dev/null | head -1)
-sudo dd if=/dev/urandom of=\${DEV} bs=4096 count=2 seek=4 conv=fsync,nocreat 2>/dev/null
+DEV=$(ls -t /dev/disk/by-path/*'"${ISCSI_IQN}"'*-lun-0 2>/dev/null | head -1)
+[ -n "$DEV" ] || { echo "ERROR: iSCSI device not visible after login"; exit 2; }
+sudo dd if=/dev/urandom of="$DEV" bs=4096 count=2 seek=4 conv=fsync,nocreat
 sync
-sudo iscsiadm -m node -T ${ISCSI_IQN} -p 127.0.0.1:${M01_ISCSI_PORT} --logout >/dev/null
-" || die "iscsi write during replica-down failed"
-    local prim_h
-    prim_h=$(poll_status_field "$SSH_M01" "${M01_PRIMARY_STATUS_PORT}" H)
-    log "  primary.H after offline write: ${prim_h}"
+sudo iscsiadm -m node -T '"${ISCSI_IQN}"' -p 127.0.0.1:'"${M01_ISCSI_PORT}"' --logout >/dev/null
+echo "WROTE-2-BLOCKS-AT-OFFSET-4"
+' || die "iscsi write during replica-down failed"
+    prim_h_after=$(poll_status_field "$SSH_M01" "${M01_PRIMARY_STATUS_PORT}" H)
+    [ -n "${prim_h_after}" ] || die "could not read primary.H after offline write"
+    [ "${prim_h_after}" -gt "${prim_h_before}" ] \
+        || die "primary.H did not advance during replica-down write: before=${prim_h_before} after=${prim_h_after}"
+    log "  primary.H ${prim_h_before} → ${prim_h_after} during replica-down"
     # Restart replica (same binary, same --durable-root)
     start_replica
     sleep 3
     # Poll until replica catches up
-    wait_until "replica catches up post-restart to H=${prim_h}" "${CATCHUP_DEADLINE}" \
-        "[ \"\$(poll_status_field '$SSH_M02' '${M02_REPLICA_STATUS_PORT}' R)\" -ge \"${prim_h}\" ]" \
+    wait_until "replica catches up post-restart to H=${prim_h_after}" "${CATCHUP_DEADLINE}" \
+        "[ \"\$(poll_status_field '$SSH_M02' '${M02_REPLICA_STATUS_PORT}' R)\" -ge \"${prim_h_after}\" ]" \
         || die "replica did not catch up post-restart within ${CATCHUP_DEADLINE}s"
-    log "  ✓ restart catch-up converged"
+    log "  ✓ restart catch-up converged (replica.R reached ${prim_h_after} after restart)"
 }
 
 # §2 #5 — race ×10 stress on G5-4 integration test
