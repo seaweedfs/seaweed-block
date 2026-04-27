@@ -48,8 +48,39 @@ ISCSI_IQN="iqn.2026-04.io.seaweed.block:v1"
 # Catch-up deadline (s) for #3 + #4
 CATCHUP_DEADLINE=30
 
-SSH_M01="ssh -n -i ${SSH_KEY} -o ConnectTimeout=10 -o StrictHostKeyChecking=no ${M01_HOST}"
-SSH_M02="ssh -n -i ${SSH_KEY} -o ConnectTimeout=10 -o StrictHostKeyChecking=no ${M02_HOST}"
+# SSH options for Windows-Git-Bash + remote-backgrounded process:
+#   -T : disable PTY allocation. Without this OpenSSH on Windows
+#        Git Bash tunnels a TTY for the remote shell and the local
+#        ssh waits for the PTY to detach — which never happens after
+#        `setsid nohup CMD &`, even with stdout/stderr/stdin all
+#        redirected. The PTY stays bound at the SSH layer.
+#   -n : already present; closes local stdin so ssh doesn't keep the
+#        connection alive waiting for terminal input.
+# These two together let `ssh host "CMD >log 2>&1 </dev/null &"`
+# return immediately. Diagnosed 2026-04-26 from start_replica hang.
+SSH_OPTS="-T -n -i ${SSH_KEY} -o ConnectTimeout=10 -o StrictHostKeyChecking=no -o BatchMode=yes"
+SSH_M01="ssh ${SSH_OPTS} ${M01_HOST}"
+SSH_M02="ssh ${SSH_OPTS} ${M02_HOST}"
+
+# SSH_LAUNCH wraps the *_HOST ssh command with a hard timeout for
+# the launch-and-detach pattern (start_master / start_primary /
+# start_replica). Even with -T -n + setsid + nohup + disown + exit 0,
+# Windows OpenSSH occasionally fails to release the connection. The
+# 15s wall-clock cap means we move on regardless — the remote process
+# is already detached, so the only risk is a stale ssh client process
+# on the local box, which is harmless.
+#
+# Falls back to a no-op wrapper if `timeout` isn't installed (Git
+# Bash without GNU coreutils — install via `pacman -S coreutils` or
+# upgrade Git for Windows).
+if command -v timeout >/dev/null 2>&1; then
+    SSH_LAUNCH_M01="timeout --preserve-status 15 ${SSH_M01}"
+    SSH_LAUNCH_M02="timeout --preserve-status 15 ${SSH_M02}"
+else
+    log "WARNING: 'timeout' not found; SSH launch hangs will not be auto-killed (install GNU coreutils on Git Bash to fix)"
+    SSH_LAUNCH_M01="${SSH_M01}"
+    SSH_LAUNCH_M02="${SSH_M02}"
+fi
 
 # --- Helpers ---
 
@@ -170,7 +201,7 @@ EOF"
 
 start_master() {
     log "  start blockmaster on m01..."
-    $SSH_M01 "
+    $SSH_LAUNCH_M01 "
 setsid nohup /tmp/g5-blockmaster \
     --authority-store ${REMOTE_RUN_DIR}/master-store \
     --listen 0.0.0.0:${M01_MASTER_PORT} \
@@ -178,12 +209,14 @@ setsid nohup /tmp/g5-blockmaster \
     --expected-slots-per-volume 2 \
     --t0-print-ready \
     > ${REMOTE_RUN_DIR}/logs/master.log 2>&1 </dev/null &
-sleep 1"
+disown \$! 2>/dev/null || true
+sleep 1
+exit 0"
 }
 
 start_primary() {
     log "  start primary blockvolume on m01..."
-    $SSH_M01 "
+    $SSH_LAUNCH_M01 "
 setsid nohup /tmp/g5-blockvolume \
     --master 127.0.0.1:${M01_MASTER_PORT} \
     --server-id m01-primary --volume-id v1 --replica-id r1 \
@@ -198,12 +231,14 @@ setsid nohup /tmp/g5-blockvolume \
     --iscsi-iqn ${ISCSI_IQN} \
     --t1-readiness \
     > ${REMOTE_RUN_DIR}/logs/primary.log 2>&1 </dev/null &
-sleep 1"
+disown \$! 2>/dev/null || true
+sleep 1
+exit 0"
 }
 
 start_replica() {
     log "  start replica blockvolume on M02..."
-    $SSH_M02 "mkdir -p ${REMOTE_RUN_DIR}/{logs,replica-store} && \
+    $SSH_LAUNCH_M02 "mkdir -p ${REMOTE_RUN_DIR}/{logs,replica-store} && \
 setsid nohup /tmp/g5-blockvolume \
     --master ${M02_MASTER_TARGET}:${M01_MASTER_PORT} \
     --server-id m02-replica --volume-id v1 --replica-id r2 \
@@ -216,7 +251,9 @@ setsid nohup /tmp/g5-blockvolume \
     --durable-blocks ${DURABLE_BLOCKS} --durable-blocksize ${DURABLE_BLOCKSIZE} \
     --t1-readiness \
     > ${REMOTE_RUN_DIR}/logs/replica.log 2>&1 </dev/null &
-sleep 1"
+disown \$! 2>/dev/null || true
+sleep 1
+exit 0"
 }
 
 start_cluster() {
