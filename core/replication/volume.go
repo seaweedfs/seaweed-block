@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/storage"
 	"github.com/seaweedfs/seaweed-block/core/transport"
@@ -50,6 +51,15 @@ type ReplicationVolume struct {
 	// only to same-package tests for now; a public Stats() or
 	// Prometheus hook is a T4-end observability pass.
 	replayedGens atomic.Uint64
+
+	// G5-5C probe loop integration. Set once via ConfigureProbeLoop;
+	// started via StartProbeLoop after primary admit; stopped FIRST
+	// during Close (before peer teardown) so an in-flight probe
+	// callback never lands on a closed volume / closed peer set.
+	// Read+written under v.mu.
+	probeLoop    *ProbeLoop
+	probeCfg     ProbeLoopConfig // remembered for SetProbeCooldownConfig push-down on UpdateReplicaSet
+	probeCfgSet  bool            // true after ConfigureProbeLoop succeeds
 }
 
 // executorFactory lets tests inject a BlockExecutor constructor that
@@ -242,6 +252,18 @@ func (v *ReplicationVolume) UpdateReplicaSet(generation uint64, targets []Replic
 		if err != nil {
 			return fmt.Errorf("replication: UpdateReplicaSet: add peer %s: %w", id, err)
 		}
+		// G5-5C: push the volume-level probe cooldown config onto the
+		// fresh peer (architect 2026-04-27 guidance #3). A new peer
+		// (whether first add or post-lineage-bump recreate) starts
+		// with cooldown reset to defaults; the prior peer's cooldown
+		// state cannot leak across the lineage boundary because that
+		// state lived on the now-closed *ReplicaPeer.
+		if v.probeCfgSet {
+			peer.SetProbeCooldownConfig(PeerProbeCooldown{
+				Base: v.probeCfg.CooldownBase,
+				Cap:  v.probeCfg.CooldownCap,
+			})
+		}
 		v.peers[id] = peer
 	}
 
@@ -392,6 +414,23 @@ func (v *ReplicationVolume) Stop() error {
 // (via peer.Close()).
 // Borrows: nothing.
 func (v *ReplicationVolume) Close() error {
+	// G5-5C ordering (architect 2026-04-27 guidance #2): stop the
+	// probe loop FIRST, before acquiring v.mu and tearing down
+	// peers. This ensures any in-flight probe callback completes /
+	// is cancelled before peers are closed; without this, a probeFn
+	// blocked on transport could observe a peer.Close() race or
+	// deadlock against UpdateReplicaSet's own peer teardown path.
+	//
+	// Snapshot the loop pointer under v.mu, then Stop with the lock
+	// released — Stop waits for the loop's goroutine, which itself
+	// calls peersFn that needs v.mu.
+	v.mu.Lock()
+	loop := v.probeLoop
+	v.mu.Unlock()
+	if loop != nil {
+		loop.Stop()
+	}
+
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	if v.closed {
@@ -426,4 +465,119 @@ func (v *ReplicationVolume) PeerCount() int {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	return len(v.peers)
+}
+
+// ConfigureProbeLoop installs the per-volume degraded-peer probe loop
+// (G5-5C). Idempotent? NO — calling Configure twice is rejected to
+// prevent silent replacement of an active loop. Configure once at
+// volume composition time; Start when primary role is admitted; Stop
+// is implicit in volume Close().
+//
+// The probeFn is host-injected: in production it dials executor.Probe
+// and forwards the ProbeResult to the per-(volume, replica) adapter
+// via OnProbeResult so the engine drives Decision (catch-up / rebuild
+// / none). Tests inject a stub that records the dispatch.
+//
+// Cooldown gating is wired automatically using DefaultProbeCooldownFn
+// + DefaultProbeResultFn over each peer's ProbeIfDegraded /
+// OnProbeAttempt (G5-5C #2). Newly-added peers (UpdateReplicaSet)
+// receive the cooldown config via SetProbeCooldownConfig.
+//
+// Pinned by:
+//   - INV-G5-5C-PRIMARY-RECOVERY-AUTHORITY-BOUNDED (peersFn snapshots
+//     v.peers under v.mu; never enumerates network-discoverable addrs)
+//
+// Called by: host composition root after constructing
+// ReplicationVolume and choosing a probeFn.
+// Owns: probeLoop field; probeCfg copy.
+// Borrows: probeFn — caller retains.
+func (v *ReplicationVolume) ConfigureProbeLoop(cfg ProbeLoopConfig, probeFn ProbeFn, now func() time.Time) error {
+	if probeFn == nil {
+		return fmt.Errorf("replication: ConfigureProbeLoop: probeFn is nil")
+	}
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if v.closed {
+		return fmt.Errorf("replication: ConfigureProbeLoop: volume %s closed", v.volumeID)
+	}
+	if v.probeLoop != nil {
+		return fmt.Errorf("replication: ConfigureProbeLoop: volume %s already configured (Configure-once contract)", v.volumeID)
+	}
+
+	// PeerSourceFn snapshots v.peers under v.mu. Lock ordering
+	// discipline (architect 2026-04-27 guidance #2): v.mu always
+	// acquired BEFORE peer.mu, never the reverse. The probe loop's
+	// tick takes v.mu in peersFn, releases it, then takes peer.mu in
+	// ProbeIfDegraded — no nested locking, no inversion.
+	peersFn := func() []*ReplicaPeer {
+		v.mu.Lock()
+		defer v.mu.Unlock()
+		if v.closed {
+			return nil
+		}
+		out := make([]*ReplicaPeer, 0, len(v.peers))
+		for _, p := range v.peers {
+			out = append(out, p)
+		}
+		return out
+	}
+
+	cooldownFn := DefaultProbeCooldownFn(now)
+	resultFn := DefaultProbeResultFn(now)
+
+	loop, err := NewProbeLoop(cfg, peersFn, probeFn, cooldownFn, resultFn)
+	if err != nil {
+		return fmt.Errorf("replication: ConfigureProbeLoop: %w", err)
+	}
+
+	v.probeLoop = loop
+	v.probeCfg = cfg
+	v.probeCfgSet = true
+
+	// Push cooldown config onto already-existing peers. Future peers
+	// added via UpdateReplicaSet pick up the config in that path.
+	for _, peer := range v.peers {
+		peer.SetProbeCooldownConfig(PeerProbeCooldown{
+			Base: cfg.CooldownBase,
+			Cap:  cfg.CooldownCap,
+		})
+	}
+	return nil
+}
+
+// StartProbeLoop starts the configured probe loop. Returns an error
+// if ConfigureProbeLoop was not called, or if the volume is closed.
+// Idempotent — second and later calls are no-ops (delegated to
+// ProbeLoop.Start which uses sync.Once).
+//
+// Architect 2026-04-27 guidance #1: only start after primary role is
+// admitted and cooldown config is in place. The loop will simply
+// observe an empty peer set if started early; no panic. But starting
+// before peers exist is a wasted goroutine wakeup, so production
+// callers SHOULD defer Start until at least one assignment fact has
+// been applied.
+//
+// Called by: host composition root once primary admit is complete.
+// Owns: nothing additional (delegates to ProbeLoop.Start).
+func (v *ReplicationVolume) StartProbeLoop() error {
+	v.mu.Lock()
+	loop := v.probeLoop
+	closed := v.closed
+	v.mu.Unlock()
+	if closed {
+		return fmt.Errorf("replication: StartProbeLoop: volume %s closed", v.volumeID)
+	}
+	if loop == nil {
+		return fmt.Errorf("replication: StartProbeLoop: volume %s probe loop not configured", v.volumeID)
+	}
+	return loop.Start()
+}
+
+// ProbeLoopForTest exposes the underlying loop pointer for in-package
+// test introspection (lifecycle assertions). Not part of the public
+// surface; renamed if exported elsewhere is needed.
+func (v *ReplicationVolume) probeLoopForTest() *ProbeLoop {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	return v.probeLoop
 }
