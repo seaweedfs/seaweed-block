@@ -78,7 +78,10 @@ func (s *ObservationStore) SupersededCount() uint64 {
 //   - no observation has reported any slot for this (volumeID, replicaID), OR
 //   - observations exist but the matching slot has empty DataAddr
 //     (caller-side fail-closed: skip the peer rather than synthesize
-//     a descriptor with an unusable addr)
+//     a descriptor with an unusable addr), OR
+//   - all matching observations are EXPIRED (now > obs.ExpiresAt) per
+//     architect round 54 finding-1: "expired heartbeat addr should
+//     fail closed" — same discipline as snapshot synthesis.
 //
 // NOT authority input. Read-only; safe to call concurrently.
 func (s *ObservationStore) SlotFact(volumeID, replicaID string) (SlotFact, bool) {
@@ -87,12 +90,21 @@ func (s *ObservationStore) SlotFact(volumeID, replicaID string) (SlotFact, bool)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	now := s.now()
 	var (
-		best       SlotFact
-		bestObsAt  time.Time
-		found      bool
+		best      SlotFact
+		bestObsAt time.Time
+		found     bool
 	)
 	for _, obs := range s.observations {
+		// Fail-closed on stale heartbeats (architect round 54
+		// finding-1). An expired observation's DataAddr cannot be
+		// trusted for primary→replica dial; skip and let caller
+		// surface the slot as "no observation" until the next
+		// fresh heartbeat lands.
+		if !obs.ExpiresAt.IsZero() && now.After(obs.ExpiresAt) {
+			continue
+		}
 		for _, slot := range obs.Slots {
 			if slot.VolumeID != volumeID || slot.ReplicaID != replicaID {
 				continue
@@ -100,8 +112,7 @@ func (s *ObservationStore) SlotFact(volumeID, replicaID string) (SlotFact, bool)
 			if slot.DataAddr == "" {
 				// Fail-closed: an observation that names the slot but
 				// without a usable DataAddr is unusable for primary
-				// fan-out. Skip; let the caller's topology check
-				// surface as "no observation" if this is the only one.
+				// fan-out.
 				continue
 			}
 			if !found || obs.ObservedAt.After(bestObsAt) {

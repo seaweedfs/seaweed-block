@@ -82,6 +82,39 @@ func TestObservationStore_SlotFact_LatestObservationWins(t *testing.T) {
 	}
 }
 
+// TestObservationStore_SlotFact_ExpiredObservation_FailsClosed pins
+// architect round 54 finding-1: expired heartbeat addrs MUST NOT be
+// used for live replication peer construction. Observation stays
+// visible in the store (other diagnostic surfaces use it), but
+// SlotFact's narrow contract is "give me an addr safe to dial NOW".
+func TestObservationStore_SlotFact_ExpiredObservation_FailsClosed(t *testing.T) {
+	t0 := time.Date(2026, 4, 27, 10, 0, 0, 0, time.UTC)
+	now := t0
+	clock := func() time.Time { return now }
+	s := NewObservationStore(FreshnessConfig{FreshnessWindow: 10 * time.Second}, clock)
+
+	// Ingest at t0 (ExpiresAt = t0+10s).
+	if err := s.Ingest(Observation{
+		ServerID:   "src",
+		ObservedAt: t0,
+		Slots:      []SlotFact{{VolumeID: "v1", ReplicaID: "r2", DataAddr: "192.168.1.184:9221"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Within freshness window: ok=true.
+	now = t0.Add(5 * time.Second)
+	if _, ok := s.SlotFact("v1", "r2"); !ok {
+		t.Fatal("within freshness window: ok=false; want true")
+	}
+
+	// Past freshness window: must fail closed.
+	now = t0.Add(11 * time.Second)
+	if got, ok := s.SlotFact("v1", "r2"); ok {
+		t.Fatalf("after expiry: ok=true got %+v; want false (fail-closed on expired heartbeat)", got)
+	}
+}
+
 func TestObservationStore_SlotFact_VolumeOrReplicaMismatch_ReturnsFalse(t *testing.T) {
 	now := time.Date(2026, 4, 27, 10, 0, 0, 0, time.UTC)
 	s := NewObservationStore(FreshnessConfig{FreshnessWindow: 30 * time.Second}, func() time.Time { return now })

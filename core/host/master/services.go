@@ -315,30 +315,38 @@ func generationFitsUint32(epoch, endpointVersion uint64) (reason string, ok bool
 // discovery doc §9.5: never accumulate from arbitrary observed
 // nodes).
 //
-// Per-slot resolution (G5-5A architect ratification 2026-04-27):
+// Per-slot resolution (G5-5A architect ratification 2026-04-27,
+// refined at round-54 review):
 //
-//   1. PRIMARY path: for slots whose authority is published (the
+//   1. AUTHORITY path: for slots whose authority is published (the
 //      bound replica + any historically-bound replicas with retained
-//      records), use the publisher's `LastPublished` lineage —
-//      authoritative Epoch / EndpointVersion / DataAddr / CtrlAddr.
+//      records), pull DataAddr/CtrlAddr from `LastPublished` (this
+//      is the freshest authoritative addr — refreshed via
+//      IntentRefreshEndpoint).
 //
-//   2. SUPPORTING path: for slots that ARE declared in topology
+//   2. OBSERVATION path: for slots that ARE declared in topology
 //      but have NO published authority line (the common case for
 //      supporting replicas — Publisher.apply only mints for the
-//      bound replica), fall back to the observation store's last
-//      heartbeat-reported SlotFact for that (volumeID, replicaID).
-//      This is OBSERVATION TRUTH, not authority truth. The synthesized
-//      ReplicaDescriptor carries Epoch=0 + EndpointVersion=0 to mark
-//      it explicitly as observation-derived; only the addresses are
-//      load-bearing for primary fan-out.
+//      bound replica), pull DataAddr/CtrlAddr from the observation
+//      store's freshest non-expired heartbeat. pub.state stays
+//      authority-only — architect option (B) "mint presence
+//      records" REJECTED.
 //
-//      pub.state stays authority-only. Architect option (B) — minting
-//      "presence" records into pub.state — was REJECTED at round 54.
+// Both paths stamp peer.Epoch / peer.EndpointVersion with the
+// SUBSCRIBING PRIMARY's lineage, NOT the peer's own. Rationale:
+// the descriptor's Epoch/EV become the live-ship lineage downstream
+// at ReplicaPeer construction; live ships travel under primary's
+// authority. Using a retained historical LastPublished epoch/EV
+// for the peer would mis-stamp frames against the current
+// authority and break the replica's apply gate.
 //
 // Fail-closed cases (slot is skipped, NOT silently substituted):
 //   - slot is the self replica (primary doesn't ship to itself)
-//   - slot has no published line AND no observation store record
-//   - observation exists but reports empty DataAddr (unusable for dial)
+//   - slot has no published line AND no fresh observation
+//   - observation exists but reports empty DataAddr (unusable)
+//   - observation exists but is expired (now > ExpiresAt) —
+//     architect round-54 finding 1: stale heartbeat addrs are
+//     unsafe for live dial
 //
 // Without this fallback, a cross-host replicated write would hang at
 // fsync barrier because primary's peers list is empty and nothing
@@ -371,42 +379,48 @@ type peerObservation interface {
 }
 
 // resolvePeers implements the G5-5A peer-set construction policy
-// (architect ratification 2026-04-27). Pure function; testable
-// without constructing a full Host.
+// (architect ratification 2026-04-27, refined round-54).
+// Pure function; testable without constructing a full Host.
 //
-// Observation-derived peers (path 2) inherit the SUBSCRIBING
-// primary's (Epoch, EndpointVersion). Rationale: in V3, supporting
-// replicas have no authority line of their own; live-ship frames
-// from primary→replica carry the PRIMARY's lineage, which is what
-// the replica validates against. The peer descriptor's Epoch/EV
-// fields are interpreted by the primary's ReplicaPeer constructor
-// as "lineage to stamp on outgoing frames", so primary's own
-// Epoch/EV is the architecturally-correct value. Stamping zero
-// would correctly mark the descriptor as observation-derived but
-// would break the downstream ReplicaPeer constructor's nonzero
-// invariant (replication/peer.go:130).
+// LINEAGE RULE (architect round 54 finding 2): peer descriptor
+// Epoch/EndpointVersion ALWAYS comes from the subscribing primary's
+// own line, regardless of whether the peer's address came from
+// authority publication (path 1) or observation (path 2).
+// Rationale: the peer descriptor is consumed by the primary's
+// ReplicaPeer constructor to stamp live-ship frames; live-ship is
+// always under PRIMARY's lineage. A retained historical
+// LastPublished line for the peer (e.g., r2 was previously bound
+// before reassignment to r1) carries r2's old Epoch/EV — using
+// those as the live-ship lineage would mis-stamp frames against
+// the current authority and the replica's apply gate would reject.
+// Authority/observation supplies ADDRESSES; subscriber lineage
+// stamps EPOCH/EV.
+//
+// PATH RULE: path 1 (authority) is preferred over path 2
+// (observation) when both have data, because authority has the
+// live-current DataAddr/CtrlAddr (refreshed via IntentRefreshEndpoint),
+// whereas observation may show a stale address from before a
+// re-bind.
 func resolvePeers(slots []string, selfInfo adapter.AssignmentInfo, volumeID string, pub peerLookup, obsStore peerObservation) []*control.ReplicaDescriptor {
 	peers := make([]*control.ReplicaDescriptor, 0, len(slots))
 	for _, rid := range slots {
 		if rid == selfInfo.ReplicaID {
 			continue
 		}
-		// Path 1: published authority line (bound replica or
-		// retained record after IntentReassign).
+		// Path 1: published authority line — use authority addrs,
+		// stamp subscriber lineage.
 		if info, ok := pub.LastPublished(volumeID, rid); ok {
 			peers = append(peers, &control.ReplicaDescriptor{
 				ReplicaId:       info.ReplicaID,
-				Epoch:           info.Epoch,
-				EndpointVersion: info.EndpointVersion,
+				Epoch:           selfInfo.Epoch,
+				EndpointVersion: selfInfo.EndpointVersion,
 				DataAddr:        info.DataAddr,
 				CtrlAddr:        info.CtrlAddr,
 			})
 			continue
 		}
-		// Path 2: observation-only (supporting replica; topology
-		// membership confirmed by the slots loop above; addr from
-		// last heartbeat). Inherit subscriber's Epoch/EV so the
-		// downstream ReplicaPeer ships under primary's lineage.
+		// Path 2: observation-only — use heartbeat addrs, stamp
+		// subscriber lineage. Same rationale as path 1.
 		if obsStore != nil {
 			if slot, ok := obsStore.SlotFact(volumeID, rid); ok {
 				peers = append(peers, &control.ReplicaDescriptor{
@@ -422,7 +436,8 @@ func resolvePeers(slots []string, selfInfo adapter.AssignmentInfo, volumeID stri
 		// Else: fail-closed skip. Slot is declared in topology but
 		// neither authority nor observation has a usable address yet
 		// (cold-start before heartbeat lands, or replica down). The
-		// next emission (after r2 heartbeats in) will include it.
+		// next emission (after the supporting replica heartbeats in)
+		// will include it.
 	}
 	return peers
 }

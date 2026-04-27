@@ -78,20 +78,33 @@ func TestResolvePeers_R1Bound_R2ObservedOnly_R2InPeersWithHeartbeatAddr(t *testi
 }
 
 // TestResolvePeers_BothBound — both slots have published authority
-// lines; both contribute via path 1 with their authoritative
-// epoch/EV/addrs. Confirms path-1 still works (no regression).
+// lines. r2 contributes via path 1 with its address from authority
+// state, but its lineage is STAMPED with the subscribing primary's
+// Epoch/EV (architect round 54 finding 2: lineage is always
+// subscriber's, even on path 1, because live-ship frames travel
+// under primary's authority — using r2's old/historical authority
+// values would break the apply gate at the replica).
 func TestResolvePeers_BothBound(t *testing.T) {
 	pub := &stubPub{state: map[[2]string]adapter.AssignmentInfo{
 		{"v1", "r1"}: {VolumeID: "v1", ReplicaID: "r1", Epoch: 5, EndpointVersion: 2, DataAddr: "10.0.0.1:9220"},
 		{"v1", "r2"}: {VolumeID: "v1", ReplicaID: "r2", Epoch: 4, EndpointVersion: 1, DataAddr: "10.0.0.2:9221"},
 	}}
 	obs := &stubObs{state: map[[2]string]authority.SlotFact{}}
-	peers := resolvePeers([]string{"r1", "r2"}, adapter.AssignmentInfo{ReplicaID: "r1", Epoch: 1, EndpointVersion: 1}, "v1", pub, obs)
+	subscriber := adapter.AssignmentInfo{ReplicaID: "r1", Epoch: 5, EndpointVersion: 2}
+	peers := resolvePeers([]string{"r1", "r2"}, subscriber, "v1", pub, obs)
 	if len(peers) != 1 {
 		t.Fatalf("expected 1 peer (r2, self r1 excluded); got %d", len(peers))
 	}
-	if peers[0].ReplicaId != "r2" || peers[0].Epoch != 4 || peers[0].EndpointVersion != 1 {
-		t.Errorf("path-1 record: got %+v want {r2, Epoch=4, EV=1}", peers[0])
+	got := peers[0]
+	if got.ReplicaId != "r2" {
+		t.Errorf("ReplicaId: got %q want r2", got.ReplicaId)
+	}
+	if got.DataAddr != "10.0.0.2:9221" {
+		t.Errorf("DataAddr: got %q want 10.0.0.2:9221 (path-1 authority addr)", got.DataAddr)
+	}
+	if got.Epoch != 5 || got.EndpointVersion != 2 {
+		t.Errorf("Epoch/EV: got %d/%d want 5/2 (subscriber's lineage, NOT peer's old 4/1)",
+			got.Epoch, got.EndpointVersion)
 	}
 }
 
@@ -124,24 +137,25 @@ func TestResolvePeers_NilObservationStore(t *testing.T) {
 
 // TestResolvePeers_PathOnePreferredOverPathTwo — when the same slot
 // has BOTH a published line AND an observation, path-1 (authority)
-// must win. The slot is the bound replica; observation is a stale
-// heartbeat from before the bind.
+// addr wins. The peer.Epoch/EV is still subscriber's lineage.
 func TestResolvePeers_PathOnePreferredOverPathTwo(t *testing.T) {
 	pub := &stubPub{state: map[[2]string]adapter.AssignmentInfo{
 		{"v1", "r1"}: {VolumeID: "v1", ReplicaID: "r1", Epoch: 7, EndpointVersion: 3, DataAddr: "AUTH:1"},
-		{"v1", "r2"}: {VolumeID: "v1", ReplicaID: "r2", Epoch: 7, EndpointVersion: 3, DataAddr: "AUTH:2"},
+		{"v1", "r2"}: {VolumeID: "v1", ReplicaID: "r2", Epoch: 4, EndpointVersion: 1, DataAddr: "AUTH:2"},
 	}}
 	obs := &stubObs{state: map[[2]string]authority.SlotFact{
 		{"v1", "r2"}: {VolumeID: "v1", ReplicaID: "r2", DataAddr: "OBS:2"},
 	}}
-	peers := resolvePeers([]string{"r1", "r2"}, adapter.AssignmentInfo{ReplicaID: "r1", Epoch: 7, EndpointVersion: 3}, "v1", pub, obs)
+	subscriber := adapter.AssignmentInfo{ReplicaID: "r1", Epoch: 7, EndpointVersion: 3}
+	peers := resolvePeers([]string{"r1", "r2"}, subscriber, "v1", pub, obs)
 	if len(peers) != 1 {
 		t.Fatalf("expected 1 peer; got %d", len(peers))
 	}
 	if peers[0].DataAddr != "AUTH:2" {
-		t.Errorf("DataAddr: got %q want AUTH:2 (path-1 must win over path-2)", peers[0].DataAddr)
+		t.Errorf("DataAddr: got %q want AUTH:2 (path-1 addr must win over path-2)", peers[0].DataAddr)
 	}
-	if peers[0].Epoch != 7 {
-		t.Errorf("Epoch: got %d want 7 (authority value)", peers[0].Epoch)
+	if peers[0].Epoch != 7 || peers[0].EndpointVersion != 3 {
+		t.Errorf("Epoch/EV: got %d/%d want 7/3 (subscriber's lineage even on path 1)",
+			peers[0].Epoch, peers[0].EndpointVersion)
 	}
 }
