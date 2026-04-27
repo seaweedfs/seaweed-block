@@ -21,6 +21,15 @@ set -euo pipefail
 # --- Config (env-overridable) ---
 M01_HOST="${M01_HOST:-testdev@192.168.1.181}"
 M02_HOST="${M02_HOST:-testdev@192.168.1.184}"
+# Routable IPs for cross-host advertise (--data-addr / --ctrl-addr).
+# Extracted from M01_HOST/M02_HOST. Used as the BIND addr too in
+# Tier 2: binding to a specific local-interface IP works on Linux,
+# AND ensures the daemon ADVERTISES a routable IP to master via
+# heartbeat (peer.DataAddr in AssignmentFact). Binding 0.0.0.0
+# would advertise "0.0.0.0:port" and break primary→replica dial
+# (0.0.0.0 is not a routable destination). QA round 54 finding.
+M01_IP="${M01_HOST##*@}"
+M02_IP="${M02_HOST##*@}"
 SSH_KEY="${SSH_KEY:-/c/work/dev_server/testdev_key}"
 SRC_DIR="${SRC_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 REMOTE_BUILD_DIR="${REMOTE_BUILD_DIR:-/tmp/g5_sb_build}"
@@ -144,9 +153,19 @@ if [ "${LOCAL_MODE}" = "1" ]; then
     SSH_M01="bash -c"
     SSH_M02="bash -c"
     M02_MASTER_TARGET="127.0.0.1"
+    # Tier 1: bind+advertise on loopback (single host).
+    M01_PRIMARY_BIND_IP="127.0.0.1"
+    M02_REPLICA_BIND_IP="127.0.0.1"
 else
     log "Tier 2: m01 cross-node (override with LOCAL_MODE=1 for fast local iteration)"
-    M02_MASTER_TARGET="192.168.1.181"
+    M02_MASTER_TARGET="${M01_IP}"
+    # Tier 2 (architect round 54): bind+advertise on each host's
+    # routable IP. The daemon advertises the literal --data-addr /
+    # --ctrl-addr to master heartbeat, master mints AssignmentFact.peers
+    # with the same string, primary dials it. 0.0.0.0 advertise breaks
+    # cross-host (primary tries to dial 0.0.0.0:port → unroutable).
+    M01_PRIMARY_BIND_IP="${M01_IP}"
+    M02_REPLICA_BIND_IP="${M02_IP}"
 fi
 HAS_ISCSI=0
 if [ "${LOCAL_MODE}" = "1" ]; then
@@ -294,7 +313,7 @@ EOF
 start_primary() {
     log "  start primary blockvolume on m01..."
     launch_m01 <<EOF
-setsid nohup /tmp/g5-blockvolume --master 127.0.0.1:${M01_MASTER_PORT} --server-id m01-primary --volume-id v1 --replica-id r1 --ctrl-addr 0.0.0.0:${M01_PRIMARY_CTRL_PORT} --data-addr 0.0.0.0:${M01_PRIMARY_DATA_PORT} --status-addr 127.0.0.1:${M01_PRIMARY_STATUS_PORT} --status-recovery --durable-root ${REMOTE_RUN_DIR}/primary-store --durable-impl ${DURABLE_IMPL} --durable-blocks ${DURABLE_BLOCKS} --durable-blocksize ${DURABLE_BLOCKSIZE} --iscsi-listen 127.0.0.1:${M01_ISCSI_PORT} --iscsi-iqn ${ISCSI_IQN} --t1-readiness > ${REMOTE_RUN_DIR}/logs/primary.log 2>&1 </dev/null &
+setsid nohup /tmp/g5-blockvolume --master 127.0.0.1:${M01_MASTER_PORT} --server-id m01-primary --volume-id v1 --replica-id r1 --ctrl-addr ${M01_PRIMARY_BIND_IP}:${M01_PRIMARY_CTRL_PORT} --data-addr ${M01_PRIMARY_BIND_IP}:${M01_PRIMARY_DATA_PORT} --status-addr 127.0.0.1:${M01_PRIMARY_STATUS_PORT} --status-recovery --durable-root ${REMOTE_RUN_DIR}/primary-store --durable-impl ${DURABLE_IMPL} --durable-blocks ${DURABLE_BLOCKS} --durable-blocksize ${DURABLE_BLOCKSIZE} --iscsi-listen 127.0.0.1:${M01_ISCSI_PORT} --iscsi-iqn ${ISCSI_IQN} --t1-readiness > ${REMOTE_RUN_DIR}/logs/primary.log 2>&1 </dev/null &
 disown \$! 2>/dev/null || true
 sleep 1
 exit 0
@@ -305,7 +324,7 @@ start_replica() {
     log "  start replica blockvolume on M02..."
     launch_m02 <<EOF
 mkdir -p ${REMOTE_RUN_DIR}/{logs,replica-store}
-setsid nohup /tmp/g5-blockvolume --master ${M02_MASTER_TARGET}:${M01_MASTER_PORT} --server-id m02-replica --volume-id v1 --replica-id r2 --ctrl-addr 0.0.0.0:${M02_REPLICA_CTRL_PORT} --data-addr 0.0.0.0:${M02_REPLICA_DATA_PORT} --status-addr 127.0.0.1:${M02_REPLICA_STATUS_PORT} --status-recovery --durable-root ${REMOTE_RUN_DIR}/replica-store --durable-impl ${DURABLE_IMPL} --durable-blocks ${DURABLE_BLOCKS} --durable-blocksize ${DURABLE_BLOCKSIZE} --t1-readiness > ${REMOTE_RUN_DIR}/logs/replica.log 2>&1 </dev/null &
+setsid nohup /tmp/g5-blockvolume --master ${M02_MASTER_TARGET}:${M01_MASTER_PORT} --server-id m02-replica --volume-id v1 --replica-id r2 --ctrl-addr ${M02_REPLICA_BIND_IP}:${M02_REPLICA_CTRL_PORT} --data-addr ${M02_REPLICA_BIND_IP}:${M02_REPLICA_DATA_PORT} --status-addr 127.0.0.1:${M02_REPLICA_STATUS_PORT} --status-recovery --durable-root ${REMOTE_RUN_DIR}/replica-store --durable-impl ${DURABLE_IMPL} --durable-blocks ${DURABLE_BLOCKS} --durable-blocksize ${DURABLE_BLOCKSIZE} --t1-readiness > ${REMOTE_RUN_DIR}/logs/replica.log 2>&1 </dev/null &
 disown \$! 2>/dev/null || true
 sleep 1
 exit 0
