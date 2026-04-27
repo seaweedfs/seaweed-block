@@ -48,17 +48,28 @@ ISCSI_IQN="iqn.2026-04.io.seaweed.block:v1"
 # Catch-up deadline (s) for #3 + #4
 CATCHUP_DEADLINE=30
 
-# SSH options for Windows-Git-Bash + remote-backgrounded process:
-#   -T : disable PTY allocation. Without this OpenSSH on Windows
-#        Git Bash tunnels a TTY for the remote shell and the local
-#        ssh waits for the PTY to detach — which never happens after
-#        `setsid nohup CMD &`, even with stdout/stderr/stdin all
-#        redirected. The PTY stays bound at the SSH layer.
-#   -n : already present; closes local stdin so ssh doesn't keep the
-#        connection alive waiting for terminal input.
-# These two together let `ssh host "CMD >log 2>&1 </dev/null &"`
-# return immediately. Diagnosed 2026-04-26 from start_replica hang.
-SSH_OPTS="-T -n -i ${SSH_KEY} -o ConnectTimeout=10 -o StrictHostKeyChecking=no -o BatchMode=yes"
+# Two SSH option sets — DIFFERENT requirements for two patterns:
+#
+# 1. SSH_OPTS  — for `ssh host "CMD"` (command-as-argument).
+#    Includes `-n` to close ssh's stdin so the connection doesn't
+#    wait on terminal input. Used by collect_diagnostics, status
+#    polls, simple one-shot commands.
+#
+# 2. SSH_OPTS_LAUNCH — for `ssh host bash -s <<EOF ... EOF`
+#    (script-via-stdin pattern, used by launch_m01/launch_m02).
+#    MUST NOT include `-n` because `-n` redirects ssh stdin from
+#    /dev/null, which means `bash -s` reads EOF immediately and
+#    exits before running the heredoc body — the daemon never
+#    starts. QA round 53 isolated this: dbg.sh on m01 confirmed
+#    `bash -s` works without `-n` and silently does nothing with
+#    `-n`. The PTY-hang protection comes from `-T` alone, which
+#    both option sets keep.
+#
+# Both sets keep `-T` (no PTY allocation) and `BatchMode=yes`
+# (refuse to prompt for password/key passphrase).
+SSH_OPTS_BASE="-T -i ${SSH_KEY} -o ConnectTimeout=10 -o StrictHostKeyChecking=no -o BatchMode=yes"
+SSH_OPTS="${SSH_OPTS_BASE} -n"
+SSH_OPTS_LAUNCH="${SSH_OPTS_BASE}"
 SSH_M01="ssh ${SSH_OPTS} ${M01_HOST}"
 SSH_M02="ssh ${SSH_OPTS} ${M02_HOST}"
 
@@ -102,7 +113,9 @@ launch_m01() {
     if [ "${LOCAL_MODE}" = "1" ]; then
         ${LAUNCH_TIMEOUT_PREFIX} bash -s
     else
-        ${LAUNCH_TIMEOUT_PREFIX} ssh ${SSH_OPTS} ${M01_HOST} bash -s
+        # SSH_OPTS_LAUNCH (no -n) — bash -s reads from stdin; -n
+        # would redirect stdin from /dev/null and bash would EOF.
+        ${LAUNCH_TIMEOUT_PREFIX} ssh ${SSH_OPTS_LAUNCH} ${M01_HOST} bash -s
     fi
 }
 
@@ -110,7 +123,7 @@ launch_m02() {
     if [ "${LOCAL_MODE}" = "1" ]; then
         ${LAUNCH_TIMEOUT_PREFIX} bash -s
     else
-        ${LAUNCH_TIMEOUT_PREFIX} ssh ${SSH_OPTS} ${M02_HOST} bash -s
+        ${LAUNCH_TIMEOUT_PREFIX} ssh ${SSH_OPTS_LAUNCH} ${M02_HOST} bash -s
     fi
 }
 
