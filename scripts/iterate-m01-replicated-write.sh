@@ -384,8 +384,11 @@ sleep 2
 DEV=$(ls -t /dev/disk/by-path/*'"${ISCSI_IQN}"'*-lun-0 2>/dev/null | head -1)
 [ -n "$DEV" ] || { echo "ERROR: iSCSI device not visible after login"; exit 2; }
 echo "DEV=$DEV"
-# Fill 1 block with 0xab and write to LBA 0
-sudo dd if=/dev/zero bs=4096 count=1 2>/dev/null | tr "\0" "\xab" | sudo dd of="$DEV" bs=4096 count=1 conv=fsync,nocreat
+# Fill 1 block with 0xab and write to LBA 0.
+# NOTE: do NOT use `tr "\0" "\xab"` — tr does not interpret \xHH
+# escapes; it would substitute with the literal char "x" (0x78).
+# Use python3 binary write for byte-exact 0xab.
+python3 -c "import sys; sys.stdout.buffer.write(b\"\xab\" * 4096)" | sudo dd of="$DEV" bs=4096 count=1 conv=fsync,nocreat
 sync
 sudo iscsiadm -m node -T '"${ISCSI_IQN}"' -p 127.0.0.1:'"${M01_ISCSI_PORT}"' --logout >/dev/null
 echo "WROTE-LBA-0-PATTERN-AB"
