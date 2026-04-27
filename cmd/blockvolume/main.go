@@ -22,6 +22,8 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/frontend/memback"
 	"github.com/seaweedfs/seaweed-block/core/frontend/nvme"
 	"github.com/seaweedfs/seaweed-block/core/host/volume"
+	"github.com/seaweedfs/seaweed-block/core/replication"
+	"github.com/seaweedfs/seaweed-block/core/transport"
 )
 
 type flags struct {
@@ -294,14 +296,18 @@ func run(f flags) int {
 		}
 		durableProv = dp
 		provider = dp
-		// Eagerly open + recover the served volume so the
-		// frontend-side Open returns an operational=true backend.
-		// Opens the underlying storage + runs LogicalStorage.Recover;
-		// on error we surface to stderr + /status but don't panic.
-		openCtx, openCancel := context.WithTimeout(context.Background(), 10*time.Second)
-		if _, err := dp.Open(openCtx, f.volumeID); err != nil {
-			openCancel()
-			fmt.Fprintln(os.Stderr, "blockvolume: durable open:", err)
+
+		// G5-4: open storage role-agnostically via EnsureStorage so
+		// replica roles (assigned to SUPPORTING, never reach Healthy
+		// via projection) can still expose LogicalStorage to
+		// ReplicaListener. The Healthy-gated dp.Open path is reserved
+		// for frontend consumers (iSCSI / NVMe targets); they call it
+		// when they accept their first I/O. Primary role: dp.Open
+		// will succeed at frontend bind. Replica role: frontends are
+		// not enabled (operator doesn't pass --iscsi-listen /
+		// --nvme-listen for replicas), so dp.Open is never called.
+		if _, sErr := dp.EnsureStorage(f.volumeID); sErr != nil {
+			fmt.Fprintln(os.Stderr, "blockvolume: durable storage open:", sErr)
 			_ = dp.Close()
 			if status != nil {
 				shutCtx, shutCancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -311,14 +317,11 @@ func run(f flags) int {
 			_ = h.Close()
 			return 1
 		}
-		report, err := dp.RecoverVolume(openCtx, f.volumeID)
-		openCancel()
-		if err != nil {
+		recCtx, recCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		report, recErr := dp.RecoverVolume(recCtx, f.volumeID)
+		recCancel()
+		if recErr != nil {
 			fmt.Fprintln(os.Stderr, "blockvolume: durable recovery failed:", report.Evidence)
-			// Keep running so /status can surface NotReady — the
-			// adapter is already flipped to non-operational with
-			// evidence; frontends will reject I/O per INV-DURABLE-
-			// OPGATE-001 read-side path.
 		} else {
 			fmt.Fprintln(os.Stderr, "blockvolume: durable recovered:", report.Evidence)
 		}
@@ -327,6 +330,69 @@ func run(f flags) int {
 		// so per-op lineage fence + supersede fence still apply at
 		// SCSI command granularity.
 		provider = memback.NewProvider(h.ProjectionView())
+	}
+
+	// G5-4: bind the T4 replication stack — ReplicationVolume for
+	// outbound peer fan-out (primary role) + ReplicaListener for
+	// incoming WAL traffic (replica role). Both code paths are bound
+	// at startup; whichever role the master assignment selects is the
+	// active one (INV-BIN-WIRING-ROLE-FROM-ASSIGNMENT). Construction
+	// is post-dp.RecoverVolume because both borrow the same
+	// LogicalStorage the durable Backend wraps; the LogicalStorage
+	// isn't usable until recovery completes.
+	//
+	// ReplicaListener bind = --data-addr (NOT --ctrl-addr): the
+	// transport executor's Probe + Ship paths dial peer.DataAddr
+	// (executor.go:303); for the listener to be reachable from
+	// remote primaries, it must bind on the address the master
+	// will mint into AssignmentFact.peers[*].DataAddr — i.e., the
+	// volume's --data-addr. --ctrl-addr stays reserved for future
+	// control-plane split (no current binder).
+	var (
+		replVolume *replication.ReplicationVolume
+		replListen *transport.ReplicaListener
+	)
+	if durableProv != nil {
+		store := durableProv.LogicalStorage(f.volumeID)
+		if store == nil {
+			fmt.Fprintln(os.Stderr, "blockvolume: replication wire: LogicalStorage(", f.volumeID, ") returned nil")
+			_ = durableProv.Close()
+			if status != nil {
+				shutCtx, shutCancel := context.WithTimeout(context.Background(), 2*time.Second)
+				_ = status.Close(shutCtx)
+				shutCancel()
+			}
+			_ = h.Close()
+			return 1
+		}
+		replVolume = replication.NewReplicationVolume(f.volumeID, store)
+		h.SetReplicationVolume(replVolume)
+
+		// Wire the backend's WriteObserver eagerly via the Backend
+		// accessor (G5-4: same StorageBackend instance dp.Open returns
+		// later for primary-role frontend bind). Without this hook,
+		// primary writes would land locally but never ship to peers.
+		if sb := durableProv.Backend(f.volumeID); sb != nil {
+			sb.SetWriteObserver(replVolume)
+		} else {
+			fmt.Fprintln(os.Stderr, "blockvolume: write-observer wire: Backend(", f.volumeID, ") returned nil; replication fan-out disabled")
+		}
+
+		listener, err := transport.NewReplicaListener(f.dataAddr, store)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "blockvolume: replica listener:", err)
+			_ = replVolume.Close()
+			_ = durableProv.Close()
+			if status != nil {
+				shutCtx, shutCancel := context.WithTimeout(context.Background(), 2*time.Second)
+				_ = status.Close(shutCtx)
+				shutCancel()
+			}
+			_ = h.Close()
+			return 1
+		}
+		listener.Serve()
+		replListen = listener
 	}
 
 	var iscsiTarget *iscsi.Target
@@ -398,6 +464,18 @@ func run(f flags) int {
 	}
 	if iscsiTarget != nil {
 		_ = iscsiTarget.Close()
+	}
+	// G5-4: tear down replication BEFORE durable storage close
+	// (INV-BIN-WIRING-LISTENER-LIFECYCLE-LIFO). Listener closes its
+	// accept loop + in-flight handler conns; ReplicationVolume closes
+	// its outbound peer connections. Both borrow LogicalStorage that
+	// durableProv.Close will release; tearing them down first
+	// prevents use-after-free on the storage handle.
+	if replListen != nil {
+		replListen.Stop()
+	}
+	if replVolume != nil {
+		_ = replVolume.Close()
 	}
 	// T3b: close DurableProvider in correct order — Provider.Close
 	// closes backends first (flags them closed) then storage files

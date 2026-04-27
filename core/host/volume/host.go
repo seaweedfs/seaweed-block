@@ -99,9 +99,17 @@ type Host struct {
 	// production call sites that need the full surface (status
 	// server, projection view wiring). Tests swap adpt only and
 	// leave realAdpt nil.
-	realAdpt    *adapter.VolumeReplicaAdapter
-	view        *AdapterProjectionView
-	replication replicaSetUpdater // nil = observer-only (no fan-out)
+	realAdpt *adapter.VolumeReplicaAdapter
+	view     *AdapterProjectionView
+
+	// replication may be set at New (via Config.ReplicationVolume) OR
+	// post-New via SetReplicationVolume (binary path: storage isn't
+	// open until dp.Open completes, which itself depends on host
+	// reaching reachable+Healthy via the assignment subscription —
+	// so the ReplicationVolume can only be constructed after Host.Start).
+	// nil = observer-only (no fan-out).
+	replicationMu sync.RWMutex
+	replication   replicaSetUpdater
 
 	conn   *grpc.ClientConn
 	obsCli control.ObservationServiceClient
@@ -208,12 +216,52 @@ func New(cfg Config) (*Host, error) {
 		asnCli:  control.NewAssignmentServiceClient(conn),
 	}
 	if cfg.ReplicationVolume != nil {
-		h.replication = cfg.ReplicationVolume
+		h.setReplicationLocked(cfg.ReplicationVolume)
 	}
 	// View wires host as the SupersedeProbe so fail-closed kicks
 	// in when master names another replica at a newer lineage.
 	h.view = NewAdapterProjectionView(adpt, cfg.VolumeID, cfg.ReplicaID, h)
 	return h, nil
+}
+
+// SetReplicationVolume installs (or replaces) the per-volume
+// replication fan-out coordinator AFTER Host.New. Used by the
+// production binary path: storage isn't available until the durable
+// provider opens, which itself depends on the host reaching a
+// reachable+Healthy projection via the assignment subscription —
+// so ReplicationVolume can only be constructed post-Start.
+//
+// The host's apply path reads h.replication under a read-lock at
+// every assignment; SetReplicationVolume writes under the write-lock,
+// so it is safe to call concurrently with assignment processing.
+// Effect applies on the next AssignmentFact.
+//
+// Passing nil reverts to observer-only (no fan-out). The previous
+// ReplicationVolume — if any — is NOT closed by SetReplicationVolume;
+// the caller owns its lifecycle (Provider/composition root).
+func (h *Host) SetReplicationVolume(rv *replication.ReplicationVolume) {
+	h.replicationMu.Lock()
+	defer h.replicationMu.Unlock()
+	if rv == nil {
+		h.replication = nil
+		return
+	}
+	h.setReplicationLocked(rv)
+}
+
+// setReplicationLocked installs the replication slot. Caller must
+// hold h.replicationMu (or be in the constructor where no other
+// goroutine has visibility yet).
+func (h *Host) setReplicationLocked(rv replicaSetUpdater) {
+	h.replication = rv
+}
+
+// getReplication returns the current replication slot under a
+// read-lock. Used by applyFact at every AssignmentFact.
+func (h *Host) getReplication() replicaSetUpdater {
+	h.replicationMu.RLock()
+	defer h.replicationMu.RUnlock()
+	return h.replication
 }
 
 // IsSuperseded satisfies SupersedeProbe: returns true when this
@@ -446,9 +494,10 @@ func (h *Host) applyFact(fact *control.AssignmentFact) {
 	// the separate host-only decodeReplicaTargets path (not through
 	// AssignmentInfo), so the TestNoOtherAssignmentInfoConstruction
 	// AST fence stays green.
-	if h.replication != nil {
+	rv := h.getReplication()
+	if rv != nil {
 		targets, gen := decodeReplicaTargets(fact)
-		if err := h.replication.UpdateReplicaSet(gen, targets); err != nil {
+		if err := rv.UpdateReplicaSet(gen, targets); err != nil {
 			// Step (2b): fail closed — do NOT apply OnAssignment.
 			h.log.Printf("blockvolume: volume %s replication UpdateReplicaSet failed (gen=%d, peers=%d): %v — NOT applying to adapter (fail-closed; master will retry via stream replay)",
 				h.cfg.VolumeID, gen, len(targets), err)

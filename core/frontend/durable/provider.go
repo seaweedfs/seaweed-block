@@ -175,6 +175,76 @@ func (p *DurableProvider) Open(ctx context.Context, volumeID string) (frontend.B
 	return h.backend, nil
 }
 
+// EnsureStorage opens (or creates) the on-disk LogicalStorage for
+// volumeID WITHOUT waiting for the projection to flip Healthy. This
+// is the binary-path entry point used by G5-4 to construct per-volume
+// ReplicationVolume + ReplicaListener: replicas (assigned to a
+// SUPPORTING role by master) never reach Healthy via the engine
+// projection, but their storage still needs to be open so ReplicaListener
+// can write incoming WAL entries into it.
+//
+// Open() (the frontend.Provider entry) keeps its Healthy-gated
+// semantic — frontend consumers that need a write-ready backend
+// continue to block until the projection authorizes. EnsureStorage
+// is the role-agnostic alternative for binary wiring that needs raw
+// storage access.
+//
+// The returned handle is borrowed — caller MUST NOT call Close on
+// it (BUG-005 discipline: Provider owns storage lifecycle).
+func (p *DurableProvider) EnsureStorage(volumeID string) (storage.LogicalStorage, error) {
+	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+		return nil, fmt.Errorf("durable: provider closed")
+	}
+	if h, ok := p.volumes[volumeID]; ok {
+		p.mu.Unlock()
+		return h.storage, nil
+	}
+	p.mu.Unlock()
+
+	h, err := p.openOrCreate(volumeID)
+	if err != nil {
+		return nil, err
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if existing, ok := p.volumes[volumeID]; ok {
+		_ = h.storage.Close()
+		return existing.storage, nil
+	}
+	p.volumes[volumeID] = h
+	return h.storage, nil
+}
+
+// LogicalStorage returns the opened LogicalStorage for volumeID,
+// or nil if neither Open nor EnsureStorage has been called for it.
+// Read-only accessor; use EnsureStorage for the open-on-demand path.
+func (p *DurableProvider) LogicalStorage(volumeID string) storage.LogicalStorage {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	h, ok := p.volumes[volumeID]
+	if !ok {
+		return nil
+	}
+	return h.storage
+}
+
+// Backend returns the StorageBackend wrapper for volumeID, or nil
+// if no Open / EnsureStorage call has populated it yet. Used by
+// G5-4 binary wiring to install SetWriteObserver eagerly (before
+// any frontend bind) — the same backend instance is returned by
+// the future dp.Open() call when a frontend asks.
+func (p *DurableProvider) Backend(volumeID string) *StorageBackend {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	h, ok := p.volumes[volumeID]
+	if !ok {
+		return nil
+	}
+	return h.backend
+}
+
 // waitHealthy polls the projection until it reports Healthy for
 // volumeID, or ctx / cfg.OpenTimeout expires.
 func (p *DurableProvider) waitHealthy(ctx context.Context, volumeID string) error {
