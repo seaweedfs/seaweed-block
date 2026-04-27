@@ -509,6 +509,14 @@ func (v *ReplicationVolume) ConfigureProbeLoop(cfg ProbeLoopConfig, probeFn Prob
 	// acquired BEFORE peer.mu, never the reverse. The probe loop's
 	// tick takes v.mu in peersFn, releases it, then takes peer.mu in
 	// ProbeIfDegraded — no nested locking, no inversion.
+	//
+	// HARD RULE: code on the probe path (peersFn → ProbeIfDegraded →
+	// probeFn → OnProbeAttempt) MUST NOT re-enter v.mu while holding
+	// peer.mu. Any future "peer callback into volume" that needs
+	// v.mu must release peer.mu first. Violating this introduces a
+	// peer → v reverse lock order and risks deadlock against
+	// UpdateReplicaSet / Sync paths that hold v.mu and call into
+	// peers.
 	peersFn := func() []*ReplicaPeer {
 		v.mu.Lock()
 		defer v.mu.Unlock()
