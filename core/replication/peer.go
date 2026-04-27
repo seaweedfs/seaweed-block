@@ -14,6 +14,7 @@ import (
 	"log"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/transport"
 )
@@ -93,10 +94,54 @@ const liveShipTargetLSN uint64 = 1
 // those arrive with the T4c recovery command chain.
 var peerSessionIDCounter atomic.Uint64
 
+// PeerProbeCooldown holds the per-peer backoff parameters used by
+// ProbeIfDegraded / OnProbeAttempt (G5-5C §1.G #7).
+//
+// IMPORTANT: this is per-peer cooldown / backoff, NOT the global probe
+// loop interval. Two distinct time concepts in G5-5C:
+//
+//   - Loop interval (ProbeLoopConfig.Interval, default 5s): how often
+//     the probe loop wakes up and iterates over peers. Applies to the
+//     whole volume's probe loop, not to any single peer.
+//   - Per-peer cooldown (Base, Cap): how long a peer is gated AFTER a
+//     probe attempt before the loop will dispatch the next probe to
+//     that same peer. Starts at Base on first attempt or after a
+//     success; doubles on each consecutive failure up to Cap; resets
+//     to Base on success.
+//
+// These are independent. A peer can be in cooldown longer than one
+// loop interval; the loop simply skips it on subsequent ticks until
+// cooldown elapses.
+type PeerProbeCooldown struct {
+	// Base is the initial cooldown after a probe attempt and the
+	// reset value after a successful probe. Default 5s.
+	Base time.Duration
+	// Cap is the maximum cooldown after consecutive failures.
+	// Default 60s. Cap >= Base is enforced (Cap < Base normalizes
+	// to Cap = Base).
+	Cap time.Duration
+}
+
+// DefaultPeerProbeCooldown returns the architect-bound G5-5C defaults
+// (5s base, 60s cap).
+func DefaultPeerProbeCooldown() PeerProbeCooldown {
+	return PeerProbeCooldown{
+		Base: 5 * time.Second,
+		Cap:  60 * time.Second,
+	}
+}
+
 // ReplicaPeer is the per-remote-replica runtime handle. Owns its
 // coarse health state, the peer-scoped live-ship RecoveryLineage, and
 // the lifecycle of its registered session in the executor. Bridges
 // ReplicationVolume fan-out (T4a-4) to the transport layer (T4a-2).
+//
+// G5-5C extension: also owns per-peer probe cooldown state (cooldown
+// deadline, consecutive-failure count, in-flight flag) so the
+// degraded-peer probe loop can gate / dispatch probes idempotently.
+// All probe state is mutated under p.mu; the actual probe transport
+// call MUST run with p.mu released to avoid lock-order crossings
+// (architect G5-5C #2 binding 2026-04-27).
 type ReplicaPeer struct {
 	target    ReplicaTarget
 	executor  *transport.BlockExecutor
@@ -106,6 +151,13 @@ type ReplicaPeer struct {
 	mu     sync.Mutex
 	state  ReplicaState
 	closed bool
+
+	// G5-5C probe cooldown / in-flight state. All fields read+written
+	// under p.mu only.
+	cooldownCfg       PeerProbeCooldown // policy (Base, Cap); defaults set in NewReplicaPeer
+	probeNextEligible time.Time         // wall-clock; before this, ProbeIfDegraded returns false
+	probeFailureCount int               // consecutive failures (0 after success or initial); drives backoff doubling
+	probeInFlight     bool              // true while a probe attempt is dispatched and not yet recorded
 }
 
 // NewReplicaPeer constructs a per-replica runtime handle and registers
@@ -143,12 +195,192 @@ func NewReplicaPeer(target ReplicaTarget, executor *transport.BlockExecutor) (*R
 		return nil, fmt.Errorf("replication: NewReplicaPeer: register session: %w", err)
 	}
 	return &ReplicaPeer{
-		target:    target,
-		executor:  executor,
-		sessionID: sessionID,
-		lineage:   lineage,
-		state:     ReplicaHealthy,
+		target:      target,
+		executor:    executor,
+		sessionID:   sessionID,
+		lineage:     lineage,
+		state:       ReplicaHealthy,
+		cooldownCfg: DefaultPeerProbeCooldown(),
 	}, nil
+}
+
+// SetProbeCooldownConfig overrides the default probe cooldown config
+// for this peer. Safe to call from any goroutine; takes effect from
+// the next ProbeIfDegraded / OnProbeAttempt call. Cap < Base
+// normalizes to Cap = Base. A zero Base or Cap leaves the existing
+// value unchanged for that field.
+//
+// Called by: ReplicationVolume after creating a peer, to push the
+// volume-level probe loop config down. Tests inject custom values to
+// shorten test wall-clock without flakiness.
+func (p *ReplicaPeer) SetProbeCooldownConfig(cfg PeerProbeCooldown) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if cfg.Base > 0 {
+		p.cooldownCfg.Base = cfg.Base
+	}
+	if cfg.Cap > 0 {
+		p.cooldownCfg.Cap = cfg.Cap
+	}
+	if p.cooldownCfg.Cap < p.cooldownCfg.Base {
+		p.cooldownCfg.Cap = p.cooldownCfg.Base
+	}
+}
+
+// ProbeIfDegraded gates whether the probe loop should dispatch a probe
+// for this peer right now. Returns true and atomically marks the peer
+// in-flight iff ALL of:
+//
+//   - peer is not closed (§1.E (c): closed peers are torn-down lineage)
+//   - peer.state == ReplicaDegraded (§1.A: only-on-degraded discipline)
+//   - now >= probeNextEligible (per-peer cooldown elapsed)
+//   - !probeInFlight (single in-flight per peer — INV-G5-5C-SINGLE-INFLIGHT-PER-PEER)
+//
+// On returning true, the caller MUST eventually call OnProbeAttempt
+// to release the in-flight flag and advance cooldown. If the caller
+// fails to call OnProbeAttempt (e.g., panic up the stack), the peer
+// stays in-flight forever — callers MUST defer OnProbeAttempt
+// immediately after the true return. ProbeLoop.dispatchProbe handles
+// this via deferred resultFn invocation.
+//
+// CRITICAL: this method runs entirely under p.mu. The actual probe
+// transport call (executor.Probe via the host-injected probeFn) MUST
+// run with p.mu RELEASED to avoid lock-order crossings with shipper /
+// other peers (architect G5-5C #2 binding 2026-04-27). The probe
+// loop's dispatchProbe respects this — ProbeIfDegraded is the
+// CooldownFn (synchronous, peer.mu-held); probeFn is dispatched
+// after the gate returns.
+//
+// Pinned by:
+//   - INV-G5-5C-SINGLE-INFLIGHT-PER-PEER
+//   - INV-G5-5C-RECOVERY-BACKOFF (cooldown gate)
+//   - INV-G5-5C-PRIMARY-RECOVERY-AUTHORITY-BOUNDED (closed-peer skip)
+//
+// Called by: ProbeLoop.tick via the default CooldownFn wrapper
+// (DefaultProbeCooldownFn).
+// Owns: probeInFlight transition false → true on success.
+// Borrows: now from caller (testable wall-clock injection).
+func (p *ReplicaPeer) ProbeIfDegraded(now time.Time) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed {
+		return false
+	}
+	if p.state != ReplicaDegraded {
+		return false
+	}
+	if p.probeInFlight {
+		return false
+	}
+	if !p.probeNextEligible.IsZero() && now.Before(p.probeNextEligible) {
+		return false
+	}
+	p.probeInFlight = true
+	return true
+}
+
+// OnProbeAttempt records the outcome of a probe dispatched after a
+// successful ProbeIfDegraded. Releases the in-flight flag and advances
+// cooldown:
+//
+//   - success: probeFailureCount = 0; nextEligible = now + Base.
+//   - failure: probeFailureCount++; nextEligible = now + min(Base * 2^(failureCount-1), Cap).
+//
+// Idempotent on a closed peer: if the peer was Closed during the
+// in-flight window (§1.E (c) lineage teardown), this method clears
+// the in-flight flag and returns silently — no cooldown update on
+// a torn-down peer. This guarantees Close() semantics: a peer Close()
+// followed by a delayed OnProbeAttempt does not leak in-flight or
+// cooldown state into a fresh peer that may share the same
+// underlying address.
+//
+// CRITICAL: like ProbeIfDegraded, runs entirely under p.mu. Must NOT
+// call into the engine, the executor, or any other peer's lock. The
+// engine-side recovery FSM advance (driving Decision via probe R/S/H)
+// is the responsibility of the host's probeFn → adapter.OnProbeResult
+// path, not this method.
+//
+// Pinned by:
+//   - INV-G5-5C-RECOVERY-BACKOFF (5s → 10s → 20s → 40s → 60s cap)
+//   - INV-G5-5C-SINGLE-INFLIGHT-PER-PEER (in-flight release)
+//
+// Called by: ProbeLoop.dispatchProbe via the default ResultFn wrapper
+// (DefaultProbeResultFn).
+// Owns: probeInFlight transition true → false; probeFailureCount
+// monotonic update; probeNextEligible deadline update.
+// Borrows: now from caller; success bool.
+func (p *ReplicaPeer) OnProbeAttempt(now time.Time, success bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	// Always clear in-flight, even on closed: prevents leaks.
+	p.probeInFlight = false
+	if p.closed {
+		return
+	}
+	if success {
+		p.probeFailureCount = 0
+		p.probeNextEligible = now.Add(p.cooldownCfg.Base)
+		return
+	}
+	p.probeFailureCount++
+	// Compute backoff: Base * 2^(failureCount-1), capped at Cap.
+	// Use multiplicative loop to avoid overflow on large counts;
+	// once we reach Cap we stop doubling.
+	delay := p.cooldownCfg.Base
+	for i := 1; i < p.probeFailureCount; i++ {
+		next := delay * 2
+		if next > p.cooldownCfg.Cap || next < delay /* overflow guard */ {
+			delay = p.cooldownCfg.Cap
+			break
+		}
+		delay = next
+	}
+	if delay > p.cooldownCfg.Cap {
+		delay = p.cooldownCfg.Cap
+	}
+	p.probeNextEligible = now.Add(delay)
+}
+
+// IsProbeInFlight reports whether a probe is currently dispatched
+// against this peer. Test/diagnostic accessor.
+func (p *ReplicaPeer) IsProbeInFlight() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.probeInFlight
+}
+
+// ProbeNextEligibleAt returns the wall-clock time at which the next
+// probe attempt is allowed (after the current cooldown). Zero time
+// means "no cooldown, eligible immediately". Test/diagnostic
+// accessor.
+func (p *ReplicaPeer) ProbeNextEligibleAt() time.Time {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.probeNextEligible
+}
+
+// DefaultProbeCooldownFn returns a CooldownFn that delegates to each
+// peer's ProbeIfDegraded(now) using the supplied clock function. The
+// clock indirection is the standard testability seam (production
+// passes time.Now; tests pass a controlled clock).
+func DefaultProbeCooldownFn(now func() time.Time) CooldownFn {
+	if now == nil {
+		now = time.Now
+	}
+	return func(p *ReplicaPeer) bool {
+		return p.ProbeIfDegraded(now())
+	}
+}
+
+// DefaultProbeResultFn returns a ResultFn that delegates to each
+// peer's OnProbeAttempt(now, err == nil) using the supplied clock.
+func DefaultProbeResultFn(now func() time.Time) ResultFn {
+	if now == nil {
+		now = time.Now
+	}
+	return func(p *ReplicaPeer, err error) {
+		p.OnProbeAttempt(now(), err == nil)
+	}
 }
 
 // Target returns the peer's ReplicaTarget. Read-only accessor for
