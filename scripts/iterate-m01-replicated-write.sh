@@ -167,7 +167,43 @@ sync_and_build() {
             || die "local build failed (try PREBUILT_BIN_DIR=/path/to/cross-compiled-bins)"
         return
     fi
+    # Tier 2 PREBUILT_BIN_DIR fast-path (architect option (a) round 53):
+    # If the operator has pre-built the 3 binaries (e.g. on a Windows
+    # workstation cross-compiled GOOS=linux, or fetched from a CI
+    # artifact), skip the source-tar + remote-build cycle entirely.
+    # Just scp the binaries to m01:/tmp/ and onward to M02.
+    if [ -n "${PREBUILT_BIN_DIR:-}" ]; then
+        log "phase 1: use pre-built binaries from PREBUILT_BIN_DIR=${PREBUILT_BIN_DIR}"
+        for bin in g5-blockmaster g5-blockvolume g5-m01verify; do
+            [ -x "${PREBUILT_BIN_DIR}/${bin}" ] || \
+                die "PREBUILT_BIN_DIR set but ${PREBUILT_BIN_DIR}/${bin} is missing or not executable"
+        done
+        scp -i "${SSH_KEY}" -o StrictHostKeyChecking=no \
+            "${PREBUILT_BIN_DIR}/g5-blockmaster" \
+            "${PREBUILT_BIN_DIR}/g5-blockvolume" \
+            "${PREBUILT_BIN_DIR}/g5-m01verify" \
+            "${M01_HOST}:/tmp/" >/dev/null \
+            || die "scp pre-built binaries → m01 failed"
+        log "  scp blockvolume + m01verify to M02..."
+        $SSH_M01 "scp -o StrictHostKeyChecking=no /tmp/g5-blockvolume /tmp/g5-m01verify ${M02_HOST}:/tmp/" >/dev/null \
+            || die "scp m01→M02 failed"
+        return
+    fi
+
     log "phase 1: sync source + build binaries on m01"
+    # Safety guard (architect option (a) round 53 binding): refuse to tar
+    # if SRC_DIR is empty / "/" / missing repo markers. Catches the case
+    # where the script was copied away from the repo (e.g. SMB-driven
+    # `bash /tmp/iterate.sh`) and SRC_DIR resolves to / — without this
+    # guard, the next line would tar the entire root filesystem.
+    case "${SRC_DIR}" in
+        ""|"/")
+            die "SRC_DIR refuses to be empty or '/' (would tar root filesystem); set PREBUILT_BIN_DIR or run from a real seaweed_block checkout"
+            ;;
+    esac
+    [ -f "${SRC_DIR}/go.mod" ] && [ -d "${SRC_DIR}/cmd/blockvolume" ] || \
+        die "SRC_DIR=${SRC_DIR} doesn't look like a seaweed_block checkout (missing go.mod or cmd/blockvolume/); set PREBUILT_BIN_DIR or fix SRC_DIR"
+
     cd "${SRC_DIR}"
     tar --exclude='.git' --exclude='*.exe' --exclude='*.test' -czf /tmp/g5-src.tgz .
     scp -i "${SSH_KEY}" -o StrictHostKeyChecking=no /tmp/g5-src.tgz "${M01_HOST}:/tmp/" >/dev/null
