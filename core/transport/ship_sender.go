@@ -80,11 +80,17 @@ func (e *BlockExecutor) Ship(replicaID string, lineage RecoveryLineage, lba uint
 	// Lazy dial if the registered session has no conn attached yet.
 	// Done outside e.mu so a slow dial doesn't wedge other sessions.
 	if conn == nil {
+		log.Printf("transport: ship lazy-dial replica=%s addr=%s sessionID=%d lsn=%d",
+			replicaID, e.replicaAddr, lineage.SessionID, lsn)
 		dialed, err := net.DialTimeout("tcp", e.replicaAddr, shipDialTimeout)
 		if err != nil {
+			log.Printf("transport: ship lazy-dial FAILED replica=%s addr=%s: %v",
+				replicaID, e.replicaAddr, err)
 			return fmt.Errorf("transport: ship: dial replica=%s sessionID=%d: %w",
 				replicaID, lineage.SessionID, err)
 		}
+		log.Printf("transport: ship lazy-dial ok replica=%s addr=%s",
+			replicaID, e.replicaAddr)
 		// Re-acquire lock to attach. Handle three races:
 		//   1. Session invalidated between release+reacquire → drop our conn.
 		//   2. Another Ship already dialed and attached → use theirs, drop ours.

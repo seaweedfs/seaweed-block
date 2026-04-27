@@ -197,9 +197,13 @@ func (p *ReplicaPeer) ShipEntry(ctx context.Context, lineage transport.RecoveryL
 	p.mu.Unlock()
 
 	if err := p.executor.Ship(p.target.ReplicaID, peerLineage, lba, lsn, data); err != nil {
+		log.Printf("replication: ship FAILED peer=%s addr=%s lba=%d lsn=%d: %v",
+			p.target.ReplicaID, p.target.DataAddr, lba, lsn, err)
 		p.Invalidate(fmt.Sprintf("ship error: %v", err))
 		return err
 	}
+	log.Printf("replication: ship ok peer=%s lba=%d lsn=%d",
+		p.target.ReplicaID, lba, lsn)
 	return nil
 }
 
@@ -245,11 +249,17 @@ func (p *ReplicaPeer) Barrier(ctx context.Context, targetLSN uint64) (transport.
 	lineage := p.lineage
 	p.mu.Unlock()
 
+	log.Printf("replication: barrier wait peer=%s addr=%s targetLSN=%d epoch=%d",
+		p.target.ReplicaID, p.target.DataAddr, targetLSN, lineage.Epoch)
 	ack, err := p.executor.Barrier(p.target.ReplicaID, lineage, targetLSN)
 	if err != nil {
+		log.Printf("replication: barrier FAILED peer=%s addr=%s targetLSN=%d: %v",
+			p.target.ReplicaID, p.target.DataAddr, targetLSN, err)
 		p.Invalidate(fmt.Sprintf("barrier error: %v", err))
 		return transport.BarrierAck{}, err
 	}
+	log.Printf("replication: barrier ack peer=%s targetLSN=%d achievedLSN=%d",
+		p.target.ReplicaID, targetLSN, ack.AchievedLSN)
 	return ack, nil
 }
 
