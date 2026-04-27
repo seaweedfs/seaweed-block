@@ -211,7 +211,7 @@ func (s *services) SubscribeAssignments(req *control.SubscribeRequest, stream co
 			// above guarantees each fits in uint32 so no aliasing.
 			// Monotonic across process lifetimes because Epoch/EV are
 			// durable authority facts preserved across master restart.
-			fact.Peers = s.collectPeers(req.VolumeId, info.ReplicaID)
+			fact.Peers = s.collectPeers(req.VolumeId, info)
 			fact.PeerSetGeneration = (info.Epoch << 32) | info.EndpointVersion
 			if err := stream.Send(fact); err != nil {
 				return err
@@ -309,42 +309,120 @@ func generationFitsUint32(epoch, endpointVersion uint64) (reason string, ok bool
 	return "", true
 }
 
-// collectPeers builds the AssignmentFact.peers list for a volume
-// from the publisher's most-recent authoritative lines. Only
-// replicas OTHER than self_replica are included — the primary
-// does not ship to itself. Slots with no published line yet are
-// skipped (they'll appear in later emissions once their line
-// lands; cold-start is therefore benign, not erroneous).
+// collectPeers builds the AssignmentFact.peers list for a volume.
+// Topology membership is the allow-list — only declared slot
+// members can appear in peers (option R rejected in T4a-5.0
+// discovery doc §9.5: never accumulate from arbitrary observed
+// nodes).
 //
-// This is the T4a-5 peer-set construction site. It is strictly
-// a READ of publisher state — no caching, no derivation, no
-// local accumulation (option R rejected in T4a-5.0 discovery
-// doc §9.5). Peer membership comes from accepted topology
-// (replicaSlotsFor) and per-peer line content comes from the
-// publisher's durable LastPublished state — both are
-// master-authoritative.
-func (s *services) collectPeers(volumeID, selfReplicaID string) []*control.ReplicaDescriptor {
+// Per-slot resolution (G5-5A architect ratification 2026-04-27):
+//
+//   1. PRIMARY path: for slots whose authority is published (the
+//      bound replica + any historically-bound replicas with retained
+//      records), use the publisher's `LastPublished` lineage —
+//      authoritative Epoch / EndpointVersion / DataAddr / CtrlAddr.
+//
+//   2. SUPPORTING path: for slots that ARE declared in topology
+//      but have NO published authority line (the common case for
+//      supporting replicas — Publisher.apply only mints for the
+//      bound replica), fall back to the observation store's last
+//      heartbeat-reported SlotFact for that (volumeID, replicaID).
+//      This is OBSERVATION TRUTH, not authority truth. The synthesized
+//      ReplicaDescriptor carries Epoch=0 + EndpointVersion=0 to mark
+//      it explicitly as observation-derived; only the addresses are
+//      load-bearing for primary fan-out.
+//
+//      pub.state stays authority-only. Architect option (B) — minting
+//      "presence" records into pub.state — was REJECTED at round 54.
+//
+// Fail-closed cases (slot is skipped, NOT silently substituted):
+//   - slot is the self replica (primary doesn't ship to itself)
+//   - slot has no published line AND no observation store record
+//   - observation exists but reports empty DataAddr (unusable for dial)
+//
+// Without this fallback, a cross-host replicated write would hang at
+// fsync barrier because primary's peers list is empty and nothing
+// fans out. QA round 54 surfaced this as the headline G5-5 L3 gap.
+func (s *services) collectPeers(volumeID string, selfInfo adapter.AssignmentInfo) []*control.ReplicaDescriptor {
 	slots := s.host.replicaSlotsFor(volumeID)
 	if len(slots) == 0 {
 		return nil
 	}
-	pub := s.host.boot.Publisher
+	var obsStore *authority.ObservationStore
+	if s.host.obs != nil {
+		obsStore = s.host.obs.Store()
+	}
+	return resolvePeers(slots, selfInfo, volumeID, s.host.boot.Publisher, obsStore)
+}
+
+// peerLookup is the narrow read interface resolvePeers needs from
+// the publisher. *authority.Publisher satisfies it; tests substitute
+// a stub.
+type peerLookup interface {
+	LastPublished(volumeID, replicaID string) (adapter.AssignmentInfo, bool)
+}
+
+// peerObservation is the narrow read interface resolvePeers needs
+// from the observation store. *authority.ObservationStore satisfies
+// it; tests substitute a stub. nil is permitted (fail-closed: only
+// path-1 published peers will resolve).
+type peerObservation interface {
+	SlotFact(volumeID, replicaID string) (authority.SlotFact, bool)
+}
+
+// resolvePeers implements the G5-5A peer-set construction policy
+// (architect ratification 2026-04-27). Pure function; testable
+// without constructing a full Host.
+//
+// Observation-derived peers (path 2) inherit the SUBSCRIBING
+// primary's (Epoch, EndpointVersion). Rationale: in V3, supporting
+// replicas have no authority line of their own; live-ship frames
+// from primary→replica carry the PRIMARY's lineage, which is what
+// the replica validates against. The peer descriptor's Epoch/EV
+// fields are interpreted by the primary's ReplicaPeer constructor
+// as "lineage to stamp on outgoing frames", so primary's own
+// Epoch/EV is the architecturally-correct value. Stamping zero
+// would correctly mark the descriptor as observation-derived but
+// would break the downstream ReplicaPeer constructor's nonzero
+// invariant (replication/peer.go:130).
+func resolvePeers(slots []string, selfInfo adapter.AssignmentInfo, volumeID string, pub peerLookup, obsStore peerObservation) []*control.ReplicaDescriptor {
 	peers := make([]*control.ReplicaDescriptor, 0, len(slots))
 	for _, rid := range slots {
-		if rid == selfReplicaID {
+		if rid == selfInfo.ReplicaID {
 			continue
 		}
-		info, ok := pub.LastPublished(volumeID, rid)
-		if !ok {
+		// Path 1: published authority line (bound replica or
+		// retained record after IntentReassign).
+		if info, ok := pub.LastPublished(volumeID, rid); ok {
+			peers = append(peers, &control.ReplicaDescriptor{
+				ReplicaId:       info.ReplicaID,
+				Epoch:           info.Epoch,
+				EndpointVersion: info.EndpointVersion,
+				DataAddr:        info.DataAddr,
+				CtrlAddr:        info.CtrlAddr,
+			})
 			continue
 		}
-		peers = append(peers, &control.ReplicaDescriptor{
-			ReplicaId:       info.ReplicaID,
-			Epoch:           info.Epoch,
-			EndpointVersion: info.EndpointVersion,
-			DataAddr:        info.DataAddr,
-			CtrlAddr:        info.CtrlAddr,
-		})
+		// Path 2: observation-only (supporting replica; topology
+		// membership confirmed by the slots loop above; addr from
+		// last heartbeat). Inherit subscriber's Epoch/EV so the
+		// downstream ReplicaPeer ships under primary's lineage.
+		if obsStore != nil {
+			if slot, ok := obsStore.SlotFact(volumeID, rid); ok {
+				peers = append(peers, &control.ReplicaDescriptor{
+					ReplicaId:       rid,
+					Epoch:           selfInfo.Epoch,
+					EndpointVersion: selfInfo.EndpointVersion,
+					DataAddr:        slot.DataAddr,
+					CtrlAddr:        slot.CtrlAddr,
+				})
+				continue
+			}
+		}
+		// Else: fail-closed skip. Slot is declared in topology but
+		// neither authority nor observation has a usable address yet
+		// (cold-start before heartbeat lands, or replica down). The
+		// next emission (after r2 heartbeats in) will include it.
 	}
 	return peers
 }

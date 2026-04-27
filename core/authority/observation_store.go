@@ -54,6 +54,66 @@ func (s *ObservationStore) SupersededCount() uint64 {
 	return s.supersededCount
 }
 
+// SlotFact returns the most-recently-observed SlotFact for a
+// (volumeID, replicaID) pair across all reporting servers, or
+// (zero, false) if no server has reported that slot.
+//
+// Used by master-side peer-set construction (G5-5A): supporting
+// replicas don't have a published authority line (Publisher.apply
+// only mints for the bound replica), so master falls back to the
+// last-heartbeat-observed DataAddr/CtrlAddr to populate
+// AssignmentFact.peers for primary fan-out. Topology membership is
+// the allow-list — the caller must confirm the (volumeID, replicaID)
+// is a declared slot before consulting this method.
+//
+// The returned SlotFact is the value reported by the LATEST
+// observation across all servers — multiple servers may report the
+// same (volumeID, replicaID) (e.g., during reassignment or topology
+// confusion). The caller's authority/topology gates upstream of
+// this method enforce the membership invariant; this method just
+// answers "what addr did the cluster last hear about for this
+// (volume, replica)?".
+//
+// Returns (zero, false) when:
+//   - no observation has reported any slot for this (volumeID, replicaID), OR
+//   - observations exist but the matching slot has empty DataAddr
+//     (caller-side fail-closed: skip the peer rather than synthesize
+//     a descriptor with an unusable addr)
+//
+// NOT authority input. Read-only; safe to call concurrently.
+func (s *ObservationStore) SlotFact(volumeID, replicaID string) (SlotFact, bool) {
+	if volumeID == "" || replicaID == "" {
+		return SlotFact{}, false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var (
+		best       SlotFact
+		bestObsAt  time.Time
+		found      bool
+	)
+	for _, obs := range s.observations {
+		for _, slot := range obs.Slots {
+			if slot.VolumeID != volumeID || slot.ReplicaID != replicaID {
+				continue
+			}
+			if slot.DataAddr == "" {
+				// Fail-closed: an observation that names the slot but
+				// without a usable DataAddr is unusable for primary
+				// fan-out. Skip; let the caller's topology check
+				// surface as "no observation" if this is the only one.
+				continue
+			}
+			if !found || obs.ObservedAt.After(bestObsAt) {
+				best = slot
+				bestObsAt = obs.ObservedAt
+				found = true
+			}
+		}
+	}
+	return best, found
+}
+
 // SetNowForTest replaces the store's clock source. Tests use this
 // to drive expiry / freshness deterministically. Symmetric with
 // authority.TopologyController.SetNowForTest. Production code
