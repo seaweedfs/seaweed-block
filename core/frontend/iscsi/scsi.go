@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend"
 )
@@ -197,7 +198,9 @@ func (h *SCSIHandler) HandleCommand(ctx context.Context, cdb [16]byte, dataOut [
 	// rule §3.6 (error-faithful Sync wire) makes data-integrity
 	// hazards visible to the host.
 	case ScsiSyncCache10, ScsiSyncCache16:
+		log.Printf("iscsi: SCSI SYNCHRONIZE_CACHE handler entry opcode=0x%02x", cdb[0])
 		if err := h.backend.Sync(ctx); err != nil {
+			log.Printf("iscsi: SCSI SYNCHRONIZE_CACHE backend.Sync FAILED: %v", err)
 			return SCSIResult{
 				Status:   StatusCheckCondition,
 				SenseKey: SenseMediumError,
@@ -206,6 +209,7 @@ func (h *SCSIHandler) HandleCommand(ctx context.Context, cdb [16]byte, dataOut [
 				Reason:   fmt.Sprintf("SYNC_CACHE: backend sync: %v", err),
 			}
 		}
+		log.Printf("iscsi: SCSI SYNCHRONIZE_CACHE backend.Sync ok")
 		return SCSIResult{Status: StatusGood}
 	// Batch 10.5: 16-byte data variants (64-bit LBA).
 	case ScsiRead16:
@@ -258,21 +262,32 @@ func (h *SCSIHandler) doRead(ctx context.Context, lba uint64, transferLen uint32
 }
 
 func (h *SCSIHandler) doWrite(ctx context.Context, lba uint64, transferLen uint32, dataOut []byte) SCSIResult {
+	// G5-5 instrumentation: log every SCSI WRITE arrival at the
+	// handler. If this line doesn't fire when the kernel initiator
+	// writes, the iSCSI session/login layer is rejecting the
+	// command before it reaches the SCSI handler.
+	log.Printf("iscsi: SCSI WRITE handler lba=%d transferLen=%d dataOut=%d", lba, transferLen, len(dataOut))
 	if transferLen == 0 {
 		return SCSIResult{Status: StatusGood}
 	}
 	totalBlocks := h.volumeSize / uint64(h.blockSize)
 	if lba >= totalBlocks || lba+uint64(transferLen) > totalBlocks {
+		log.Printf("iscsi: SCSI WRITE rejected (LBA out of range): lba=%d transferLen=%d totalBlocks=%d",
+			lba, transferLen, totalBlocks)
 		return illegalRequest(ASCLBAOutOfRange, 0x00, "write LBA out of range")
 	}
 	expectedBytes := int(transferLen) * int(h.blockSize)
 	if len(dataOut) < expectedBytes {
+		log.Printf("iscsi: SCSI WRITE rejected (short dataOut): expected=%d got=%d",
+			expectedBytes, len(dataOut))
 		return illegalRequest(ASCInvalidFieldInCDB, 0x00, "dataOut shorter than expected")
 	}
 	_, err := h.backend.Write(ctx, int64(lba)*int64(h.blockSize), dataOut[:expectedBytes])
 	if err != nil {
+		log.Printf("iscsi: SCSI WRITE backend.Write FAILED lba=%d: %v", lba, err)
 		return mapBackendError(err, "write")
 	}
+	log.Printf("iscsi: SCSI WRITE backend.Write ok lba=%d", lba)
 	return SCSIResult{Status: StatusGood}
 }
 

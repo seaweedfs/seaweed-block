@@ -241,7 +241,14 @@ func (b *StorageBackend) Read(ctx context.Context, offset int64, p []byte) (int,
 // overlay the partial range, write the full block back.
 // Every write is gated.
 func (b *StorageBackend) Write(ctx context.Context, offset int64, p []byte) (int, error) {
+	// G5-5 instrumentation: log every Write entry. If this line
+	// doesn't appear when the iSCSI initiator writes, the iSCSI
+	// handler is NOT calling our StorageBackend.Write (= bigger
+	// wiring gap, potentially using a different backend instance
+	// or bypassing the durable layer entirely).
+	log.Printf("durable: StorageBackend.Write entry offset=%d len=%d", offset, len(p))
 	if err := b.gate(); err != nil {
+		log.Printf("durable: StorageBackend.Write gate-rejected offset=%d: %v", offset, err)
 		return 0, err
 	}
 	if len(p) == 0 {
