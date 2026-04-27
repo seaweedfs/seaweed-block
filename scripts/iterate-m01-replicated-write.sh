@@ -74,18 +74,45 @@ SSH_M02="ssh ${SSH_OPTS} ${M02_HOST}"
 # Bash without GNU coreutils — install via `pacman -S coreutils` or
 # upgrade Git for Windows).
 if command -v timeout >/dev/null 2>&1; then
-    SSH_LAUNCH_M01="timeout --preserve-status 15 ${SSH_M01}"
-    SSH_LAUNCH_M02="timeout --preserve-status 15 ${SSH_M02}"
+    LAUNCH_TIMEOUT_PREFIX="timeout --preserve-status 15"
 else
-    log "WARNING: 'timeout' not found; SSH launch hangs will not be auto-killed (install GNU coreutils on Git Bash to fix)"
-    SSH_LAUNCH_M01="${SSH_M01}"
-    SSH_LAUNCH_M02="${SSH_M02}"
+    LAUNCH_TIMEOUT_PREFIX=""
 fi
 
 # --- Helpers ---
 
 log() { printf '\033[1;36m[g5-5]\033[0m %s\n' "$*" >&2; }
 die() { printf '\033[1;31m[g5-5 FAIL]\033[0m %s\n' "$*" >&2; collect_diagnostics fail; exit 1; }
+
+# launch_m01 / launch_m02 — accept a script body on stdin and execute
+# it via `bash -s` either locally (LOCAL_MODE=1) or remote ssh
+# (LOCAL_MODE=0). Used by start_master / start_primary / start_replica
+# to launch background daemons safely.
+#
+# Architect option (A) round 53: `bash -s <<EOF ... EOF` avoids the
+# `\<newline>` line-continuation hazard that plagued the prior
+# double-quoted-ssh-arg form. With `bash -s`, the heredoc body is
+# piped to remote bash's stdin and executed line-by-line with literal
+# newlines preserved — `&` and `disown` stay on separate lines no
+# matter what the local shell does to the script source.
+#
+# Hard-capped at 15s by LAUNCH_TIMEOUT_PREFIX (if `timeout` available).
+# If launch ssh hangs, we move on; remote process is already detached.
+launch_m01() {
+    if [ "${LOCAL_MODE}" = "1" ]; then
+        ${LAUNCH_TIMEOUT_PREFIX} bash -s
+    else
+        ${LAUNCH_TIMEOUT_PREFIX} ssh ${SSH_OPTS} ${M01_HOST} bash -s
+    fi
+}
+
+launch_m02() {
+    if [ "${LOCAL_MODE}" = "1" ]; then
+        ${LAUNCH_TIMEOUT_PREFIX} bash -s
+    else
+        ${LAUNCH_TIMEOUT_PREFIX} ssh ${SSH_OPTS} ${M02_HOST} bash -s
+    fi
+}
 
 mkdir -p "${ARTIFACT_DIR}"
 
@@ -237,59 +264,39 @@ EOF"
 
 start_master() {
     log "  start blockmaster on m01..."
-    $SSH_LAUNCH_M01 "
-setsid nohup /tmp/g5-blockmaster \
-    --authority-store ${REMOTE_RUN_DIR}/master-store \
-    --listen 0.0.0.0:${M01_MASTER_PORT} \
-    --topology ${REMOTE_RUN_DIR}/topology.yaml \
-    --expected-slots-per-volume 2 \
-    --t0-print-ready \
-    > ${REMOTE_RUN_DIR}/logs/master.log 2>&1 </dev/null &
+    # Architect option (A) round 53: pipe command via `bash -s`
+    # heredoc instead of double-quoted ssh argument. Single-line
+    # `setsid nohup ... &` (no `\<newline>` continuations) avoids
+    # the local-shell line-collapse hazard that joined `&` into the
+    # following `disown` statement, making remote bash wait on the
+    # bg job and hang the SSH session.
+    launch_m01 <<EOF
+setsid nohup /tmp/g5-blockmaster --authority-store ${REMOTE_RUN_DIR}/master-store --listen 0.0.0.0:${M01_MASTER_PORT} --topology ${REMOTE_RUN_DIR}/topology.yaml --expected-slots-per-volume 2 --t0-print-ready > ${REMOTE_RUN_DIR}/logs/master.log 2>&1 </dev/null &
 disown \$! 2>/dev/null || true
 sleep 1
-exit 0"
+exit 0
+EOF
 }
 
 start_primary() {
     log "  start primary blockvolume on m01..."
-    $SSH_LAUNCH_M01 "
-setsid nohup /tmp/g5-blockvolume \
-    --master 127.0.0.1:${M01_MASTER_PORT} \
-    --server-id m01-primary --volume-id v1 --replica-id r1 \
-    --ctrl-addr 0.0.0.0:${M01_PRIMARY_CTRL_PORT} \
-    --data-addr 0.0.0.0:${M01_PRIMARY_DATA_PORT} \
-    --status-addr 127.0.0.1:${M01_PRIMARY_STATUS_PORT} \
-    --status-recovery \
-    --durable-root ${REMOTE_RUN_DIR}/primary-store \
-    --durable-impl ${DURABLE_IMPL} \
-    --durable-blocks ${DURABLE_BLOCKS} --durable-blocksize ${DURABLE_BLOCKSIZE} \
-    --iscsi-listen 127.0.0.1:${M01_ISCSI_PORT} \
-    --iscsi-iqn ${ISCSI_IQN} \
-    --t1-readiness \
-    > ${REMOTE_RUN_DIR}/logs/primary.log 2>&1 </dev/null &
+    launch_m01 <<EOF
+setsid nohup /tmp/g5-blockvolume --master 127.0.0.1:${M01_MASTER_PORT} --server-id m01-primary --volume-id v1 --replica-id r1 --ctrl-addr 0.0.0.0:${M01_PRIMARY_CTRL_PORT} --data-addr 0.0.0.0:${M01_PRIMARY_DATA_PORT} --status-addr 127.0.0.1:${M01_PRIMARY_STATUS_PORT} --status-recovery --durable-root ${REMOTE_RUN_DIR}/primary-store --durable-impl ${DURABLE_IMPL} --durable-blocks ${DURABLE_BLOCKS} --durable-blocksize ${DURABLE_BLOCKSIZE} --iscsi-listen 127.0.0.1:${M01_ISCSI_PORT} --iscsi-iqn ${ISCSI_IQN} --t1-readiness > ${REMOTE_RUN_DIR}/logs/primary.log 2>&1 </dev/null &
 disown \$! 2>/dev/null || true
 sleep 1
-exit 0"
+exit 0
+EOF
 }
 
 start_replica() {
     log "  start replica blockvolume on M02..."
-    $SSH_LAUNCH_M02 "mkdir -p ${REMOTE_RUN_DIR}/{logs,replica-store} && \
-setsid nohup /tmp/g5-blockvolume \
-    --master ${M02_MASTER_TARGET}:${M01_MASTER_PORT} \
-    --server-id m02-replica --volume-id v1 --replica-id r2 \
-    --ctrl-addr 0.0.0.0:${M02_REPLICA_CTRL_PORT} \
-    --data-addr 0.0.0.0:${M02_REPLICA_DATA_PORT} \
-    --status-addr 127.0.0.1:${M02_REPLICA_STATUS_PORT} \
-    --status-recovery \
-    --durable-root ${REMOTE_RUN_DIR}/replica-store \
-    --durable-impl ${DURABLE_IMPL} \
-    --durable-blocks ${DURABLE_BLOCKS} --durable-blocksize ${DURABLE_BLOCKSIZE} \
-    --t1-readiness \
-    > ${REMOTE_RUN_DIR}/logs/replica.log 2>&1 </dev/null &
+    launch_m02 <<EOF
+mkdir -p ${REMOTE_RUN_DIR}/{logs,replica-store}
+setsid nohup /tmp/g5-blockvolume --master ${M02_MASTER_TARGET}:${M01_MASTER_PORT} --server-id m02-replica --volume-id v1 --replica-id r2 --ctrl-addr 0.0.0.0:${M02_REPLICA_CTRL_PORT} --data-addr 0.0.0.0:${M02_REPLICA_DATA_PORT} --status-addr 127.0.0.1:${M02_REPLICA_STATUS_PORT} --status-recovery --durable-root ${REMOTE_RUN_DIR}/replica-store --durable-impl ${DURABLE_IMPL} --durable-blocks ${DURABLE_BLOCKS} --durable-blocksize ${DURABLE_BLOCKSIZE} --t1-readiness > ${REMOTE_RUN_DIR}/logs/replica.log 2>&1 </dev/null &
 disown \$! 2>/dev/null || true
 sleep 1
-exit 0"
+exit 0
+EOF
 }
 
 start_cluster() {
