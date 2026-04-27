@@ -51,26 +51,39 @@ CATCHUP_DEADLINE=30
 SSH_M01="ssh -i ${SSH_KEY} -o ConnectTimeout=10 -o StrictHostKeyChecking=no ${M01_HOST}"
 SSH_M02="ssh -i ${SSH_KEY} -o ConnectTimeout=10 -o StrictHostKeyChecking=no ${M02_HOST}"
 
-# Tier 1 (LOCAL_MODE=1): run everything on the current Linux host
-# (e.g. WSL). Same ports, loopback only. No SSH overhead. Faster
-# iteration. Use Tier 2 (default, m01 cross-node) when deployment
-# realism is needed.
-if [ "${LOCAL_MODE:-0}" = "1" ]; then
-    log "LOCAL_MODE=1 — running both 'm01' + 'M02' on this host (Tier 1)"
-    SSH_M01="bash -c"
-    SSH_M02="bash -c"
-    # In LOCAL_MODE, the M02 'master' connects to the same loopback master
-    # (no cross-node), and the durable-root must differ between primary
-    # and replica to avoid lock contention.
-fi
-LOCAL_MODE="${LOCAL_MODE:-0}"
-
 # --- Helpers ---
 
 log() { printf '\033[1;36m[g5-5]\033[0m %s\n' "$*" >&2; }
 die() { printf '\033[1;31m[g5-5 FAIL]\033[0m %s\n' "$*" >&2; collect_diagnostics fail; exit 1; }
 
 mkdir -p "${ARTIFACT_DIR}"
+
+# Two-tier test mode (set BEFORE first SSH-or-bash command):
+#   Tier 1 (LOCAL_MODE=1): single Linux host (e.g. WSL Ubuntu)
+#     - both "m01" + "M02" processes on localhost
+#     - no SSH overhead, no cross-node sync
+#     - iSCSI tests skip if iscsiadm not installed
+#     - use for fast iteration during dev
+#   Tier 2 (default, LOCAL_MODE=0): m01 (192.168.1.181) + M02 (192.168.1.184)
+#     - real network + real iSCSI/NVMe kernel + real cross-host wire
+#     - use for deployment-realism close evidence
+LOCAL_MODE="${LOCAL_MODE:-0}"
+if [ "${LOCAL_MODE}" = "1" ]; then
+    log "LOCAL_MODE=1 → Tier 1: both processes on localhost (no SSH)"
+    SSH_M01="bash -c"
+    SSH_M02="bash -c"
+    M02_MASTER_TARGET="127.0.0.1"
+else
+    log "Tier 2: m01 cross-node (override with LOCAL_MODE=1 for fast local iteration)"
+    M02_MASTER_TARGET="192.168.1.181"
+fi
+HAS_ISCSI=0
+if [ "${LOCAL_MODE}" = "1" ]; then
+    if command -v iscsiadm >/dev/null 2>&1; then HAS_ISCSI=1; fi
+else
+    HAS_ISCSI=1  # assume m01/M02 have iscsiadm; verified at first iSCSI test
+fi
+[ "${HAS_ISCSI}" = "0" ] && log "  (iscsiadm not present locally → criteria #2/#3/#4 will skip with explicit message)"
 
 collect_diagnostics() {
     local label="$1"
@@ -105,6 +118,15 @@ wait_until() {
 # --- Phase 1: sync + build ---
 
 sync_and_build() {
+    if [ "${LOCAL_MODE}" = "1" ]; then
+        log "phase 1: build binaries locally (LOCAL_MODE — no sync, no scp)"
+        cd "${SRC_DIR}" && \
+            go build -o /tmp/g5-blockmaster ./cmd/blockmaster/ && \
+            go build -o /tmp/g5-blockvolume ./cmd/blockvolume/ && \
+            go build -tags m01verify -o /tmp/g5-m01verify ./cmd/m01verify/ \
+            || die "local build failed"
+        return
+    fi
     log "phase 1: sync source + build binaries on m01"
     cd "${SRC_DIR}"
     tar --exclude='.git' --exclude='*.exe' --exclude='*.test' -czf /tmp/g5-src.tgz .
@@ -173,7 +195,7 @@ start_replica() {
     log "  start replica blockvolume on M02..."
     $SSH_M02 "mkdir -p ${REMOTE_RUN_DIR}/{logs,replica-store} && \
 nohup /tmp/g5-blockvolume \
-    --master 192.168.1.181:${M01_MASTER_PORT} \
+    --master ${M02_MASTER_TARGET}:${M01_MASTER_PORT} \
     --server-id m02-replica --volume-id v1 --replica-id r2 \
     --ctrl-addr 0.0.0.0:${M02_REPLICA_CTRL_PORT} \
     --data-addr 0.0.0.0:${M02_REPLICA_DATA_PORT} \
@@ -222,6 +244,10 @@ verify_cluster_ready() {
 # `set -euo pipefail`; DEV must be non-empty; primary.H must advance
 # after the write (catches silent-write-failure masking).
 verify_byte_equal() {
+    if [ "${HAS_ISCSI}" = "0" ]; then
+        log "verify_byte_equal: SKIP (no iscsiadm; install open-iscsi for Tier 1 iSCSI coverage, OR use Tier 2 m01)"
+        return 0
+    fi
     log "verify_byte_equal: iSCSI write 1 LBA + m01verify SHA-256"
     $SSH_M01 "command -v iscsiadm >/dev/null" || die "iscsiadm not installed on m01 (apt install open-iscsi)"
     local prim_h_before prim_h_after
