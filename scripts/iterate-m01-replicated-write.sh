@@ -390,6 +390,12 @@ EOF
 
 start_cluster() {
     log "phase 2: start cluster"
+    # Pre-flight: drop any stale iptables rules from prior aborted runs.
+    # Both possible patterns (old INPUT-on-M02 and new OUTPUT-on-m01) are
+    # cleared so repeated test runs don't poison each other. Use `|| true`
+    # so missing rules don't fail set -e.
+    $SSH_M01 "sudo iptables -D OUTPUT -d ${M02_IP} -p tcp --dport ${M02_REPLICA_DATA_PORT} -j DROP 2>/dev/null || true"
+    $SSH_M02 "sudo iptables -D INPUT -p tcp --dport ${M02_REPLICA_DATA_PORT} -j DROP 2>/dev/null || true"
     $SSH_M01 "sudo pkill -9 -f '[g]5-blockvolume' 2>/dev/null || true; sudo pkill -9 -f '[g]5-blockmaster' 2>/dev/null || true; rm -rf ${REMOTE_RUN_DIR} && mkdir -p ${REMOTE_RUN_DIR}/{logs,master-store,primary-store}"
     $SSH_M02 "sudo pkill -9 -f '[g]5-blockvolume' 2>/dev/null || true; rm -rf ${REMOTE_RUN_DIR} && mkdir -p ${REMOTE_RUN_DIR}/{logs,replica-store}"
     write_topology
