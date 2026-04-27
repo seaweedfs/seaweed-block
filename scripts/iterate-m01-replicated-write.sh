@@ -22,7 +22,7 @@ set -euo pipefail
 M01_HOST="${M01_HOST:-testdev@192.168.1.181}"
 M02_HOST="${M02_HOST:-testdev@192.168.1.184}"
 SSH_KEY="${SSH_KEY:-/c/work/dev_server/testdev_key}"
-SRC_DIR="${SRC_DIR:-/c/work/seaweed_block}"
+SRC_DIR="${SRC_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 REMOTE_BUILD_DIR="${REMOTE_BUILD_DIR:-/tmp/g5_sb_build}"
 REMOTE_RUN_DIR="${REMOTE_RUN_DIR:-/tmp/g5_sb_run}"
 DURABLE_IMPL="${DURABLE_IMPL:-walstore}"
@@ -48,8 +48,8 @@ ISCSI_IQN="iqn.2026-04.io.seaweed.block:v1"
 # Catch-up deadline (s) for #3 + #4
 CATCHUP_DEADLINE=30
 
-SSH_M01="ssh -i ${SSH_KEY} -o ConnectTimeout=10 -o StrictHostKeyChecking=no ${M01_HOST}"
-SSH_M02="ssh -i ${SSH_KEY} -o ConnectTimeout=10 -o StrictHostKeyChecking=no ${M02_HOST}"
+SSH_M01="ssh -n -i ${SSH_KEY} -o ConnectTimeout=10 -o StrictHostKeyChecking=no ${M01_HOST}"
+SSH_M02="ssh -n -i ${SSH_KEY} -o ConnectTimeout=10 -o StrictHostKeyChecking=no ${M02_HOST}"
 
 # --- Helpers ---
 
@@ -119,12 +119,21 @@ wait_until() {
 
 sync_and_build() {
     if [ "${LOCAL_MODE}" = "1" ]; then
+        if [ -n "${PREBUILT_BIN_DIR:-}" ] && [ -x "${PREBUILT_BIN_DIR}/g5-blockmaster" ]; then
+            log "phase 1: use pre-built binaries from PREBUILT_BIN_DIR=${PREBUILT_BIN_DIR}"
+            cp "${PREBUILT_BIN_DIR}/g5-blockmaster" /tmp/g5-blockmaster
+            cp "${PREBUILT_BIN_DIR}/g5-blockvolume" /tmp/g5-blockvolume
+            cp "${PREBUILT_BIN_DIR}/g5-m01verify" /tmp/g5-m01verify
+            chmod +x /tmp/g5-blockmaster /tmp/g5-blockvolume /tmp/g5-m01verify
+            return
+        fi
         log "phase 1: build binaries locally (LOCAL_MODE — no sync, no scp)"
+        log "  hint: cross-compile on Windows + set PREBUILT_BIN_DIR if WSL Go is too old (project needs go 1.21+)"
         cd "${SRC_DIR}" && \
             go build -o /tmp/g5-blockmaster ./cmd/blockmaster/ && \
             go build -o /tmp/g5-blockvolume ./cmd/blockvolume/ && \
             go build -tags m01verify -o /tmp/g5-m01verify ./cmd/m01verify/ \
-            || die "local build failed"
+            || die "local build failed (try PREBUILT_BIN_DIR=/path/to/cross-compiled-bins)"
         return
     fi
     log "phase 1: sync source + build binaries on m01"
@@ -162,20 +171,20 @@ EOF"
 start_master() {
     log "  start blockmaster on m01..."
     $SSH_M01 "
-nohup /tmp/g5-blockmaster \
+setsid nohup /tmp/g5-blockmaster \
     --authority-store ${REMOTE_RUN_DIR}/master-store \
     --listen 0.0.0.0:${M01_MASTER_PORT} \
     --topology ${REMOTE_RUN_DIR}/topology.yaml \
     --expected-slots-per-volume 2 \
     --t0-print-ready \
-    > ${REMOTE_RUN_DIR}/logs/master.log 2>&1 </dev/null & disown
+    > ${REMOTE_RUN_DIR}/logs/master.log 2>&1 </dev/null &
 sleep 1"
 }
 
 start_primary() {
     log "  start primary blockvolume on m01..."
     $SSH_M01 "
-nohup /tmp/g5-blockvolume \
+setsid nohup /tmp/g5-blockvolume \
     --master 127.0.0.1:${M01_MASTER_PORT} \
     --server-id m01-primary --volume-id v1 --replica-id r1 \
     --ctrl-addr 0.0.0.0:${M01_PRIMARY_CTRL_PORT} \
@@ -188,13 +197,14 @@ nohup /tmp/g5-blockvolume \
     --iscsi-listen 127.0.0.1:${M01_ISCSI_PORT} \
     --iscsi-iqn ${ISCSI_IQN} \
     --t1-readiness \
-    > ${REMOTE_RUN_DIR}/logs/primary.log 2>&1 </dev/null & disown"
+    > ${REMOTE_RUN_DIR}/logs/primary.log 2>&1 </dev/null &
+sleep 1"
 }
 
 start_replica() {
     log "  start replica blockvolume on M02..."
     $SSH_M02 "mkdir -p ${REMOTE_RUN_DIR}/{logs,replica-store} && \
-nohup /tmp/g5-blockvolume \
+setsid nohup /tmp/g5-blockvolume \
     --master ${M02_MASTER_TARGET}:${M01_MASTER_PORT} \
     --server-id m02-replica --volume-id v1 --replica-id r2 \
     --ctrl-addr 0.0.0.0:${M02_REPLICA_CTRL_PORT} \
@@ -205,7 +215,8 @@ nohup /tmp/g5-blockvolume \
     --durable-impl ${DURABLE_IMPL} \
     --durable-blocks ${DURABLE_BLOCKS} --durable-blocksize ${DURABLE_BLOCKSIZE} \
     --t1-readiness \
-    > ${REMOTE_RUN_DIR}/logs/replica.log 2>&1 </dev/null & disown"
+    > ${REMOTE_RUN_DIR}/logs/replica.log 2>&1 </dev/null &
+sleep 1"
 }
 
 start_cluster() {
@@ -294,6 +305,10 @@ echo "WROTE-LBA-0-PATTERN-AB"
 # (c) primary.H must advance after the write OR test fails (catches
 # silent-write-failure masking).
 verify_network_catchup() {
+    if [ "${HAS_ISCSI}" = "0" ]; then
+        log "verify_network_catchup: SKIP (needs iscsiadm to drive write; use Tier 2 m01)"
+        return 0
+    fi
     log "verify_network_catchup: iptables drop primary→replica WAL port + observe catch-up"
     local prim_h_before prim_h_after
     prim_h_before=$(poll_status_field "$SSH_M01" "${M01_PRIMARY_STATUS_PORT}" H)
@@ -344,6 +359,10 @@ echo "WROTE-2-BLOCKS"
 # §2 #4 — replica process stop/restart catch-up
 # Architect findings round 52 same as #3: set -e + DEV assert + H advancement.
 verify_restart_catchup() {
+    if [ "${HAS_ISCSI}" = "0" ]; then
+        log "verify_restart_catchup: SKIP (needs iscsiadm to drive write; use Tier 2 m01)"
+        return 0
+    fi
     log "verify_restart_catchup: SIGTERM replica + restart same --durable-root"
     local prim_h_before prim_h_after
     prim_h_before=$(poll_status_field "$SSH_M01" "${M01_PRIMARY_STATUS_PORT}" H)
@@ -378,6 +397,20 @@ echo "WROTE-2-BLOCKS-AT-OFFSET-4"
 
 # §2 #5 — race ×10 stress on G5-4 integration test
 verify_race_stress() {
+    if [ "${LOCAL_MODE}" = "1" ]; then
+        # WSL Ubuntu 22 ships Go 1.18; project needs 1.21+. Skip in LOCAL_MODE
+        # unless WSL has been upgraded.
+        local go_minor; go_minor=$(go version 2>/dev/null | grep -oP 'go1\.\K[0-9]+' || echo 0)
+        if [ "${go_minor}" -lt 21 ]; then
+            log "verify_race_stress: SKIP (LOCAL_MODE Go ${go_minor} < 1.21; use Tier 2 m01 for -race)"
+            return 0
+        fi
+        log "verify_race_stress: TestG54_BinaryWiring x10 -race in SRC_DIR=${SRC_DIR}"
+        ( cd "${SRC_DIR}" && CGO_ENABLED=1 go test -race -count=10 -run TestG54_BinaryWiring ./cmd/blockvolume/ ) > "${ARTIFACT_DIR}/race-stress.log" 2>&1 \
+            || die "race stress failed; see ${ARTIFACT_DIR}/race-stress.log"
+        log "  ✓ race ×10"
+        return
+    fi
     log "verify_race_stress: TestG54_BinaryWiring x10 -race on m01"
     $SSH_M01 "command -v gcc >/dev/null" || die "gcc not installed on m01 (needed for CGO -race)"
     $SSH_M01 "cd ${REMOTE_BUILD_DIR} && CGO_ENABLED=1 go test -race -count=10 -run TestG54_BinaryWiring ./cmd/blockvolume/ 2>&1" > "${ARTIFACT_DIR}/race-stress.log" \
@@ -387,6 +420,18 @@ verify_race_stress() {
 
 # §2 #6 — full V3 suite green from m01
 verify_full_suite() {
+    if [ "${LOCAL_MODE}" = "1" ]; then
+        local go_minor; go_minor=$(go version 2>/dev/null | grep -oP 'go1\.\K[0-9]+' || echo 0)
+        if [ "${go_minor}" -lt 21 ]; then
+            log "verify_full_suite: SKIP (LOCAL_MODE Go ${go_minor} < 1.21; use Tier 2 m01 for full suite)"
+            return 0
+        fi
+        log "verify_full_suite: go test ./... in SRC_DIR=${SRC_DIR}"
+        ( cd "${SRC_DIR}" && go test ./... -count=1 -timeout 600s ) > "${ARTIFACT_DIR}/full-suite.log" 2>&1 \
+            || die "full suite failed; see ${ARTIFACT_DIR}/full-suite.log"
+        log "  ✓ full suite green"
+        return
+    fi
     log "verify_full_suite: go test ./... clean from m01"
     $SSH_M01 "cd ${REMOTE_BUILD_DIR} && go test ./... -count=1 -timeout 600s 2>&1" > "${ARTIFACT_DIR}/full-suite.log" \
         || die "full suite has failures; see ${ARTIFACT_DIR}/full-suite.log"
