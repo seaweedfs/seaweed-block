@@ -387,6 +387,29 @@ func DefaultProbeResultFn(now func() time.Time) ResultFn {
 // callers that need to inspect the authoritative lineage or address.
 func (p *ReplicaPeer) Target() ReplicaTarget { return p.target }
 
+// Executor returns the peer's *transport.BlockExecutor. Read-only
+// accessor for the production probe path (G5-5C) — the probeFn
+// dials executor.Probe with a fresh sessionID + the peer's target
+// fields. Callers MUST NOT call Close on the returned executor
+// (BUG-005 discipline: peer borrows executor; ReplicationVolume
+// owns its lifecycle).
+func (p *ReplicaPeer) Executor() *transport.BlockExecutor { return p.executor }
+
+// probeSessionIDCounter mints unique SessionIDs for runtime-driven
+// G5-5C probes (distinct from peerSessionIDCounter which mints for
+// live-ship sessions and from the adapter's probeSessionID counter
+// which mints for engine-emitted ProbeReplica commands). Three
+// counters because each path has different constraints; they share
+// nothing structurally.
+var probeSessionIDCounter atomic.Uint64
+
+// MintProbeSessionID returns a fresh SessionID for use in a
+// G5-5C runtime-driven probe (see core/replication/probe_loop.go's
+// production probeFn wiring). Always > 0.
+func MintProbeSessionID() uint64 {
+	return probeSessionIDCounter.Add(1)
+}
+
 // State returns the peer's current coarse health state. Thread-safe.
 func (p *ReplicaPeer) State() ReplicaState {
 	p.mu.Lock()

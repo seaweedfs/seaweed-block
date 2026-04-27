@@ -78,6 +78,17 @@ type flags struct {
 	durableImpl      string // "smartwal" | "walstore"
 	durableBlocks    uint
 	durableBlockSize uint
+
+	// G5-5C degraded-peer probe loop (primary-side runtime recovery
+	// trigger). Off by default; --degraded-probe-interval=0 keeps the
+	// loop disabled so existing G5-4 deployments behave unchanged.
+	// When enabled (interval > 0), the loop iterates over peers in
+	// ReplicaDegraded at the given interval and dispatches an
+	// engine-ingress probe per peer (with per-peer cooldown). See
+	// architect mini-plan v0.5 §1.A binding 2026-04-27.
+	degradedProbeInterval     time.Duration
+	degradedProbeCooldownBase time.Duration
+	degradedProbeCooldownCap  time.Duration
 }
 
 func parseFlags(args []string) (flags, error) {
@@ -104,6 +115,18 @@ func parseFlags(args []string) (flags, error) {
 	fs.StringVar(&f.durableImpl, "durable-impl", "smartwal", "LogicalStorage impl: smartwal (default) or walstore; ignored unless --durable-root is set")
 	fs.UintVar(&f.durableBlocks, "durable-blocks", 2048, "number of blocks per volume on first create (ignored when opening existing)")
 	fs.UintVar(&f.durableBlockSize, "durable-blocksize", 4096, "block size in bytes on first create")
+	fs.DurationVar(&f.degradedProbeInterval, "degraded-probe-interval", 0,
+		"G5-5C primary-side degraded-peer probe loop interval; 0 = OFF (default; existing G5-4 behavior preserved). "+
+			"Recommended production value: 5s. Distinct from --degraded-probe-cooldown-base: this is how often "+
+			"the loop wakes up; cooldown-base is how long a single peer is gated AFTER a probe attempt.")
+	fs.DurationVar(&f.degradedProbeCooldownBase, "degraded-probe-cooldown-base", 5*time.Second,
+		"G5-5C per-peer cooldown after a probe attempt (also the reset value after a successful probe). "+
+			"Doubled on consecutive failures up to --degraded-probe-cooldown-cap. "+
+			"Ignored when --degraded-probe-interval=0.")
+	fs.DurationVar(&f.degradedProbeCooldownCap, "degraded-probe-cooldown-cap", 60*time.Second,
+		"G5-5C per-peer cooldown ceiling for the consecutive-failure backoff. "+
+			"Must be >= --degraded-probe-cooldown-base; values below base are normalized up to base. "+
+			"Ignored when --degraded-probe-interval=0.")
 	fs.SetOutput(os.Stderr)
 	if err := fs.Parse(args); err != nil {
 		return flags{}, err
@@ -376,6 +399,61 @@ func run(f flags) int {
 		}
 		replVolume = replication.NewReplicationVolume(f.volumeID, store)
 		h.SetReplicationVolume(replVolume)
+
+		// G5-5C: configure + start the degraded-peer probe loop if
+		// the operator opted in via --degraded-probe-interval > 0.
+		// Off by default — preserves G5-4 behavior. Architect-bound
+		// 2026-04-27 §1.A: probe loop owned by ReplicationVolume
+		// lifecycle; volume.Close stops the loop before peer
+		// teardown (already implemented in core/replication).
+		//
+		// Self-check items (architect Batch #5 review 2026-04-27):
+		//   #1 interval=0 → don't Configure (loop stays absent)
+		//   #2 cooldown-base/cap normalized in NewProbeLoop (cap < base
+		//      is bumped up to base; 0 → defaults)
+		//   #3 production probeFn from volume.ProductionProbeFn —
+		//      releases peer.mu before transport call (loop discipline);
+		//      transport failure → non-nil err (advances backoff);
+		//      transport success → nil err (resets cooldown).
+		//   #4 Configure→Start ordering — Configure here, Start
+		//      ALSO here (peers may or may not exist yet; empty peer
+		//      set is safely no-op per Batch 3 HappyPath).
+		if f.degradedProbeInterval > 0 {
+			loopCfg := replication.ProbeLoopConfig{
+				Interval:      f.degradedProbeInterval,
+				MaxConcurrent: 1, // architect-bound v0.5 — only 1 supported
+				CooldownBase:  f.degradedProbeCooldownBase,
+				CooldownCap:   f.degradedProbeCooldownCap,
+			}
+			probeFn := volume.ProductionProbeFn(h.Adapter())
+			if err := replVolume.ConfigureProbeLoop(loopCfg, probeFn, time.Now); err != nil {
+				fmt.Fprintln(os.Stderr, "blockvolume: probe loop configure:", err)
+				_ = replVolume.Close()
+				_ = durableProv.Close()
+				if status != nil {
+					shutCtx, shutCancel := context.WithTimeout(context.Background(), 2*time.Second)
+					_ = status.Close(shutCtx)
+					shutCancel()
+				}
+				_ = h.Close()
+				return 1
+			}
+			if err := replVolume.StartProbeLoop(); err != nil {
+				fmt.Fprintln(os.Stderr, "blockvolume: probe loop start:", err)
+				_ = replVolume.Close()
+				_ = durableProv.Close()
+				if status != nil {
+					shutCtx, shutCancel := context.WithTimeout(context.Background(), 2*time.Second)
+					_ = status.Close(shutCtx)
+					shutCancel()
+				}
+				_ = h.Close()
+				return 1
+			}
+			fmt.Fprintf(os.Stderr,
+				"blockvolume: G5-5C probe loop started (interval=%s cooldown-base=%s cooldown-cap=%s)\n",
+				f.degradedProbeInterval, f.degradedProbeCooldownBase, f.degradedProbeCooldownCap)
+		}
 
 		// Wire the backend's WriteObserver eagerly via the Backend
 		// accessor (G5-4: same StorageBackend instance dp.Open returns
