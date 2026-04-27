@@ -28,11 +28,23 @@ func newProbeLoopForTest(
 	cooldownFn CooldownFn,
 ) *ProbeLoop {
 	t.Helper()
+	return newProbeLoopWithResult(t, interval, peersFn, probeFn, cooldownFn, func(_ *ReplicaPeer, _ error) {})
+}
+
+func newProbeLoopWithResult(
+	t *testing.T,
+	interval time.Duration,
+	peersFn PeerSourceFn,
+	probeFn ProbeFn,
+	cooldownFn CooldownFn,
+	resultFn ResultFn,
+) *ProbeLoop {
+	t.Helper()
 	cfg := DefaultProbeLoopConfig()
 	cfg.Interval = interval
 	cfg.CooldownBase = 100 * time.Millisecond
 	cfg.CooldownCap = 400 * time.Millisecond
-	loop, err := NewProbeLoop(cfg, peersFn, probeFn, cooldownFn)
+	loop, err := NewProbeLoop(cfg, peersFn, probeFn, cooldownFn, resultFn)
 	if err != nil {
 		t.Fatalf("NewProbeLoop: %v", err)
 	}
@@ -150,16 +162,58 @@ func TestProbeLoop_ZeroInterval_Rejected(t *testing.T) {
 	peersFn := func() []*ReplicaPeer { return nil }
 	probeFn := func(_ context.Context, _ *ReplicaPeer) error { return nil }
 	cooldownFn := func(_ *ReplicaPeer) bool { return true }
+	resultFn := func(_ *ReplicaPeer, _ error) {}
 
 	cfg := DefaultProbeLoopConfig()
 	cfg.Interval = 0
-	if _, err := NewProbeLoop(cfg, peersFn, probeFn, cooldownFn); err == nil {
+	if _, err := NewProbeLoop(cfg, peersFn, probeFn, cooldownFn, resultFn); err == nil {
 		t.Fatal("zero interval should be rejected at construction")
 	}
 
 	cfg.Interval = -1 * time.Second
-	if _, err := NewProbeLoop(cfg, peersFn, probeFn, cooldownFn); err == nil {
+	if _, err := NewProbeLoop(cfg, peersFn, probeFn, cooldownFn, resultFn); err == nil {
 		t.Fatal("negative interval should be rejected at construction")
+	}
+}
+
+// TestProbeLoop_MaxConcurrentGreaterThanOne_Rejected verifies that
+// a config with MaxConcurrent > 1 is rejected at construction
+// (G5-5C v0.5 architect-bound: MaxConcurrent=1 only). Avoids leaving
+// a knob the runtime silently ignores.
+func TestProbeLoop_MaxConcurrentGreaterThanOne_Rejected(t *testing.T) {
+	peersFn := func() []*ReplicaPeer { return nil }
+	probeFn := func(_ context.Context, _ *ReplicaPeer) error { return nil }
+	cooldownFn := func(_ *ReplicaPeer) bool { return true }
+	resultFn := func(_ *ReplicaPeer, _ error) {}
+
+	cfg := DefaultProbeLoopConfig()
+	cfg.MaxConcurrent = 4
+	if _, err := NewProbeLoop(cfg, peersFn, probeFn, cooldownFn, resultFn); err == nil {
+		t.Fatal("MaxConcurrent=4 should be rejected at construction in G5-5C v0.5")
+	}
+
+	// MaxConcurrent <= 0 normalizes to 1 (silent default), and 1 is
+	// the only accepted explicit value.
+	cfg.MaxConcurrent = 0
+	if _, err := NewProbeLoop(cfg, peersFn, probeFn, cooldownFn, resultFn); err != nil {
+		t.Fatalf("MaxConcurrent=0 should normalize to 1: %v", err)
+	}
+	cfg.MaxConcurrent = 1
+	if _, err := NewProbeLoop(cfg, peersFn, probeFn, cooldownFn, resultFn); err != nil {
+		t.Fatalf("MaxConcurrent=1 should be accepted: %v", err)
+	}
+}
+
+// TestProbeLoop_NilResultFn_Rejected verifies the resultFn seam is
+// required at construction.
+func TestProbeLoop_NilResultFn_Rejected(t *testing.T) {
+	peersFn := func() []*ReplicaPeer { return nil }
+	probeFn := func(_ context.Context, _ *ReplicaPeer) error { return nil }
+	cooldownFn := func(_ *ReplicaPeer) bool { return true }
+
+	cfg := DefaultProbeLoopConfig()
+	if _, err := NewProbeLoop(cfg, peersFn, probeFn, cooldownFn, nil); err == nil {
+		t.Fatal("nil resultFn should be rejected at construction")
 	}
 }
 
@@ -272,6 +326,154 @@ func TestProbeLoop_NilPeersOK(t *testing.T) {
 
 	if calls.Load() != 0 {
 		t.Fatalf("probeFn called %d times despite empty peer set", calls.Load())
+	}
+}
+
+// TestProbeLoop_StopCancelsInflightProbe verifies that Stop() unblocks
+// a probeFn that is currently waiting on its context. The loop's
+// dispatchProbe wires the per-call ctx to stopCh; without that, Stop
+// would hang waiting for an in-flight probe.
+func TestProbeLoop_StopCancelsInflightProbe(t *testing.T) {
+	probeStarted := make(chan struct{}, 1)
+	peersFn := func() []*ReplicaPeer {
+		return []*ReplicaPeer{{target: ReplicaTarget{ReplicaID: "r1"}}}
+	}
+	probeFn := func(ctx context.Context, _ *ReplicaPeer) error {
+		select {
+		case probeStarted <- struct{}{}:
+		default:
+		}
+		// Block until the loop cancels us via Stop.
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	cooldownFn := func(_ *ReplicaPeer) bool { return true }
+
+	loop := newProbeLoopForTest(t, 20*time.Millisecond, peersFn, probeFn, cooldownFn)
+	if err := loop.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	// Wait for probeFn to start.
+	select {
+	case <-probeStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("probeFn never started")
+	}
+
+	// Stop must return promptly — within ~200 ms — even though the
+	// in-flight probe is still blocked on ctx.Done().
+	stopReturned := make(chan struct{})
+	go func() {
+		loop.Stop()
+		close(stopReturned)
+	}()
+	select {
+	case <-stopReturned:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Stop did not return — in-flight probe was not cancelled")
+	}
+}
+
+// TestProbeLoop_ResultFn_ReceivesProbeOutcome verifies the new
+// ResultFn seam: every probeFn call produces exactly one resultFn
+// invocation, and the err passed to resultFn matches what probeFn
+// returned (success path, error path, panic path).
+func TestProbeLoop_ResultFn_ReceivesProbeOutcome(t *testing.T) {
+	type result struct {
+		peerID string
+		errMsg string
+	}
+	results := make(chan result, 16)
+
+	var probeCount atomic.Int64
+	peersFn := func() []*ReplicaPeer {
+		return []*ReplicaPeer{{target: ReplicaTarget{ReplicaID: "r1"}}}
+	}
+	probeFn := func(_ context.Context, _ *ReplicaPeer) error {
+		switch probeCount.Add(1) {
+		case 1:
+			return nil // success
+		case 2:
+			return errors.New("simulated failure")
+		default:
+			panic("simulated probeFn panic")
+		}
+	}
+	cooldownFn := func(_ *ReplicaPeer) bool { return true }
+	resultFn := func(p *ReplicaPeer, err error) {
+		msg := ""
+		if err != nil {
+			msg = err.Error()
+		}
+		results <- result{peerID: p.target.ReplicaID, errMsg: msg}
+	}
+
+	loop := newProbeLoopWithResult(t, 20*time.Millisecond, peersFn, probeFn, cooldownFn, resultFn)
+	if err := loop.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer loop.Stop()
+
+	collected := make([]result, 0, 3)
+	deadline := time.After(3 * time.Second)
+	for len(collected) < 3 {
+		select {
+		case r := <-results:
+			collected = append(collected, r)
+		case <-deadline:
+			t.Fatalf("collected only %d/3 results: %+v", len(collected), collected)
+		}
+	}
+
+	// Iteration 1: success → empty errMsg.
+	if collected[0].errMsg != "" {
+		t.Errorf("iter 1: expected nil err, got %q", collected[0].errMsg)
+	}
+	// Iteration 2: explicit error.
+	if collected[1].errMsg != "simulated failure" {
+		t.Errorf("iter 2: expected 'simulated failure', got %q", collected[1].errMsg)
+	}
+	// Iteration 3: panic must surface as a non-nil err to ResultFn so
+	// cooldown progression treats it as a failure.
+	if collected[2].errMsg == "" {
+		t.Errorf("iter 3: expected panic to surface as non-nil err to resultFn, got nil")
+	}
+}
+
+// TestProbeLoop_ResultFn_PanicIsolated verifies that a panic inside
+// resultFn does NOT crash the loop (CP4B-2 lesson 3 — defensive on
+// every callback, not just probeFn).
+func TestProbeLoop_ResultFn_PanicIsolated(t *testing.T) {
+	var probeCalls atomic.Int64
+	peersFn := func() []*ReplicaPeer {
+		return []*ReplicaPeer{{target: ReplicaTarget{ReplicaID: "r1"}}}
+	}
+	probeFn := func(_ context.Context, _ *ReplicaPeer) error {
+		probeCalls.Add(1)
+		return nil
+	}
+	cooldownFn := func(_ *ReplicaPeer) bool { return true }
+	var resultCalls atomic.Int64
+	resultFn := func(_ *ReplicaPeer, _ error) {
+		c := resultCalls.Add(1)
+		if c <= 2 {
+			panic("simulated resultFn panic")
+		}
+	}
+
+	loop := newProbeLoopWithResult(t, 20*time.Millisecond, peersFn, probeFn, cooldownFn, resultFn)
+	if err := loop.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer loop.Stop()
+
+	deadline := time.Now().Add(3 * time.Second)
+	for probeCalls.Load() < 3 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if probeCalls.Load() < 3 {
+		t.Fatalf("probeCalls=%d — resultFn panic likely halted loop", probeCalls.Load())
 	}
 }
 
