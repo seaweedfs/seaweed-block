@@ -379,7 +379,16 @@ func (b *StorageBackend) writeBytes(ctx context.Context, offset int64, p []byte)
 		b.mu.Lock()
 		obs := b.observer
 		b.mu.Unlock()
-		if obs != nil {
+		// G5-5 instrumentation: log every write hit to the observer
+		// hook so we can disambiguate "WriteObserver never wired" from
+		// "wired but fan-out fails downstream". obs==nil at write time
+		// indicates SetWriteObserver wasn't called BEFORE the iSCSI
+		// initiator started writing — a timing race in main.go.
+		if obs == nil {
+			log.Printf("durable: write observer NIL — replication fan-out skipped (lba=%d lsn=%d) — SetWriteObserver not yet wired",
+				lba, lsn)
+		} else {
+			log.Printf("durable: write observer dispatch lba=%d lsn=%d", lba, lsn)
 			if werr := obs.Observe(ctx, lba, lsn, block); werr != nil {
 				log.Printf("durable: replication fan-out failed lba=%d lsn=%d: %v",
 					lba, lsn, werr)

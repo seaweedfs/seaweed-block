@@ -336,6 +336,11 @@ func (v *ReplicationVolume) OnLocalWrite(ctx context.Context, w LocalWrite) erro
 	if v.closed {
 		return fmt.Errorf("replication: OnLocalWrite: volume %s closed", v.volumeID)
 	}
+	// G5-5 instrumentation: log entry with peer count so we can
+	// disambiguate "OnLocalWrite never called" vs "called but
+	// peers map is empty" vs "called and fans out".
+	log.Printf("replication: OnLocalWrite volume=%s lba=%d lsn=%d peers=%d",
+		v.volumeID, w.LBA, w.LSN, len(v.peers))
 
 	// Fan out under the mutex — LSN-order invariant (Condition A).
 	// Lineage is informational; each peer uses its own registered

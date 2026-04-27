@@ -187,10 +187,14 @@ func (p *ReplicaPeer) ShipEntry(ctx context.Context, lineage transport.RecoveryL
 	p.mu.Lock()
 	if p.closed {
 		p.mu.Unlock()
+		log.Printf("replication: ship gate-close peer=%s lba=%d lsn=%d (peer closed)",
+			p.target.ReplicaID, lba, lsn)
 		return fmt.Errorf("replication: ShipEntry: peer %s closed", p.target.ReplicaID)
 	}
 	if p.state == ReplicaDegraded {
 		p.mu.Unlock()
+		log.Printf("replication: ship gate-degraded peer=%s lba=%d lsn=%d (peer degraded)",
+			p.target.ReplicaID, lba, lsn)
 		return fmt.Errorf("replication: ShipEntry: peer %s degraded", p.target.ReplicaID)
 	}
 	peerLineage := p.lineage
