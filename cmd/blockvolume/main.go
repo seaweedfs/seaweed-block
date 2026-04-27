@@ -46,6 +46,11 @@ type flags struct {
 	// addr on the ready line so the test harness can discover it.
 	enableT1Readiness bool
 	statusAddr        string
+	// statusRecovery — G5-5 opt-in: enable /status/recovery?volume=v1
+	// endpoint exposing engine.ReplicaProjection (Mode/R/S/H/Decision).
+	// Default off; production binaries do NOT enable. Used by the m01
+	// orchestration script for catch-up verification (R/H polling).
+	statusRecovery bool
 
 	// T2 iSCSI frontend flags. iscsiListen is the TCP address
 	// the iSCSI target binds on; empty disables the frontend.
@@ -88,6 +93,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.BoolVar(&f.printReadyLine, "t0-print-ready", false, "internal test-only: emit one structured JSON line on stdout on first assignment")
 	fs.BoolVar(&f.enableT1Readiness, "t1-readiness", false, "enable T1 readiness bridge (HealthyPathExecutor) so adapter projection reaches Healthy")
 	fs.StringVar(&f.statusAddr, "status-addr", "", "address for the status HTTP endpoint (e.g. 127.0.0.1:0); empty disables")
+	fs.BoolVar(&f.statusRecovery, "status-recovery", false, "G5-5 opt-in: expose /status/recovery?volume=<id> with engine.ReplicaProjection (Mode/R/S/H/RecoveryDecision); off by default; loopback-only; intended for hardware test orchestration")
 	fs.StringVar(&f.iscsiListen, "iscsi-listen", "", "iSCSI target bind address (e.g. 127.0.0.1:0); empty disables. Loopback-only in T2 scope (no auth)")
 	fs.StringVar(&f.iscsiIQN, "iscsi-iqn", "", "iSCSI target IQN (required if --iscsi-listen is set)")
 	fs.UintVar(&f.iscsiLUN, "iscsi-lun", 0, "iSCSI LUN id (default 0)")
@@ -236,6 +242,9 @@ func run(f flags) int {
 	var status *volume.StatusServer
 	if f.statusAddr != "" {
 		status = volume.NewStatusServer(h.ProjectionView())
+		if f.statusRecovery {
+			status.EnableRecoveryEndpoint()
+		}
 		bound, err := status.Start(f.statusAddr)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "blockvolume: status server:", err)

@@ -41,15 +41,36 @@ import (
 type StatusServer struct {
 	view *AdapterProjectionView
 
-	mu   sync.Mutex
-	ln   net.Listener
-	srv  *http.Server
-	addr string
+	mu              sync.Mutex
+	ln              net.Listener
+	srv             *http.Server
+	addr            string
+	recoveryEnabled bool // G5-5: gates /status/recovery; off by default
 }
 
 // NewStatusServer wires a server to one volume host's view.
 func NewStatusServer(view *AdapterProjectionView) *StatusServer {
 	return &StatusServer{view: view}
+}
+
+// EnableRecoveryEndpoint opts in the test/operator-only
+// `/status/recovery?volume=v1` endpoint, which surfaces the
+// engine.ReplicaProjection (Mode, R/S/H, RecoveryDecision,
+// SessionKind/Phase, Reason) over HTTP. The endpoint is
+// loopback-only (same guard as `/status`).
+//
+// G5-5 uses this for hardware-test catch-up verification: the
+// orchestration script polls primary's H and replica's R to assert
+// catch-up convergence. Production binaries do NOT enable it
+// (default off; opt-in via --status-recovery flag). The endpoint
+// surfaces existing engine projection — no engine/adapter
+// behavior change.
+//
+// Must be called BEFORE Start.
+func (s *StatusServer) EnableRecoveryEndpoint() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.recoveryEnabled = true
 }
 
 // Start binds on addr and spawns the HTTP serve goroutine.
@@ -75,6 +96,9 @@ func (s *StatusServer) Start(addr string) (string, error) {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/status", s.handleStatus)
+	if s.recoveryEnabled {
+		mux.HandleFunc("/status/recovery", s.handleStatusRecovery)
+	}
 	s.srv = &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 
 	go func() { _ = s.srv.Serve(ln) }()
@@ -118,6 +142,42 @@ func (s *StatusServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(p)
+}
+
+// handleStatusRecovery returns engine.ReplicaProjection for the
+// targeted volume. Loopback-only; same guards as /status. Surfaced
+// fields cover the recovery boundaries (R/S/H), recovery decision,
+// session kind/phase, and reason — used by G5-5 hardware-test
+// catch-up verification (R/H polling).
+//
+// This endpoint is OPT-IN (off by default). Production binaries do
+// not enable it; m01 orchestration script + tests do via
+// --status-recovery / EnableRecoveryEndpoint.
+//
+// The response shape is the engine projection struct — JSON field
+// names follow Go default capitalization. Schema-stable across
+// G5-5 close (per `v3-batch-process.md` no engine/adapter behavior
+// change rule); future field additions are append-only.
+func (s *StatusServer) handleStatusRecovery(w http.ResponseWriter, r *http.Request) {
+	if !isLoopbackRemote(r.RemoteAddr) {
+		http.Error(w, "status endpoint restricted to loopback", http.StatusForbidden)
+		return
+	}
+	vol := r.URL.Query().Get("volume")
+	if vol == "" {
+		http.Error(w, "missing volume query param", http.StatusBadRequest)
+		return
+	}
+	// Frontend projection is the cheap volume-id check; if this
+	// host doesn't serve `vol`, fail-fast with 404 (same as /status).
+	fp := s.view.Projection()
+	if fp.VolumeID != vol {
+		http.Error(w, fmt.Sprintf("volume %q not served by this host (serves %q)", vol, fp.VolumeID), http.StatusNotFound)
+		return
+	}
+	ep := s.view.EngineProjection()
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(ep)
 }
 
 // enforceLoopbackBind refuses to bind on anything other than

@@ -5,6 +5,7 @@ package volume
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"strings"
 	"testing"
@@ -100,5 +101,93 @@ func TestIsLoopbackRemote(t *testing.T) {
 		if got := isLoopbackRemote(in); got != want {
 			t.Errorf("isLoopbackRemote(%q) = %v, want %v", in, got, want)
 		}
+	}
+}
+
+// TestStatusServer_RecoveryEndpoint_Disabled_Returns404 — G5-5
+// regression: /status/recovery is OPT-IN. Default config (no
+// EnableRecoveryEndpoint call) must NOT route the path.
+func TestStatusServer_RecoveryEndpoint_Disabled_Returns404(t *testing.T) {
+	s := NewStatusServer(NewAdapterProjectionView(
+		stubProjector{p: engine.ReplicaProjection{Mode: engine.ModeHealthy}},
+		"v1", "r1", nil))
+	addr, err := s.Start("127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer func() { _ = s.Close(context.Background()) }()
+	resp, err := http.Get("http://" + addr + "/status/recovery?volume=v1")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 404 {
+		t.Fatalf("disabled recovery endpoint: got %d want 404 (mux must not route)", resp.StatusCode)
+	}
+}
+
+// TestStatusServer_RecoveryEndpoint_Enabled_ReturnsEngineProjection
+// — pins that EnableRecoveryEndpoint exposes the engine projection
+// over HTTP with R/S/H + Mode + RecoveryDecision visible (the fields
+// G5-5 hardware-test catch-up verification reads).
+func TestStatusServer_RecoveryEndpoint_Enabled_ReturnsEngineProjection(t *testing.T) {
+	p := stubProjector{p: engine.ReplicaProjection{
+		Mode:             engine.ModeRecovering,
+		RecoveryDecision: "catch_up",
+		R:                42,
+		S:                10,
+		H:                100,
+		Epoch:            7,
+		EndpointVersion:  3,
+	}}
+	s := NewStatusServer(NewAdapterProjectionView(p, "v1", "r1", nil))
+	s.EnableRecoveryEndpoint()
+	addr, err := s.Start("127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer func() { _ = s.Close(context.Background()) }()
+	resp, err := http.Get("http://" + addr + "/status/recovery?volume=v1")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("enabled recovery: got %d want 200", resp.StatusCode)
+	}
+	var body map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	for _, want := range []string{"R", "S", "H", "Mode", "RecoveryDecision", "Epoch", "EndpointVersion"} {
+		if _, ok := body[want]; !ok {
+			t.Errorf("recovery body missing field %q (need for G5-5 catch-up verifier); body=%v", want, body)
+		}
+	}
+	if got, _ := body["R"].(float64); got != 42 {
+		t.Errorf("R: got %v want 42", body["R"])
+	}
+	if got, _ := body["H"].(float64); got != 100 {
+		t.Errorf("H: got %v want 100", body["H"])
+	}
+}
+
+// TestStatusServer_RecoveryEndpoint_WrongVolume_Returns404 — pins
+// that the wrong-volume guard fires the same way as /status.
+func TestStatusServer_RecoveryEndpoint_WrongVolume_Returns404(t *testing.T) {
+	s := NewStatusServer(NewAdapterProjectionView(stubProjector{}, "v1", "r1", nil))
+	s.EnableRecoveryEndpoint()
+	addr, err := s.Start("127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer func() { _ = s.Close(context.Background()) }()
+	resp, err := http.Get("http://" + addr + "/status/recovery?volume=other")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 404 {
+		t.Fatalf("wrong volume: got %d want 404", resp.StatusCode)
 	}
 }

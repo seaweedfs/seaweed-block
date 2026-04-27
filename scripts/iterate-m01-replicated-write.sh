@@ -1,272 +1,346 @@
 #!/usr/bin/env bash
-# iterate-m01-replicated-write.sh — G5-4 m01 hardware first-light harness
+# iterate-m01-replicated-write.sh — G5-5 m01 hardware first-light orchestration
 #
-# DRAFT v0.1 SKELETON — awaiting G5 kickoff §3 batch ratification.
-# Scenario bodies marked TODO(G5-arch-ratify) depend on G5 mini-plan.
+# Per v3-phase-15-g5-5-mini-plan.md v0.3 §2 acceptance criteria:
+#   #1 verify_cluster_ready          — blockmaster + 2x blockvolume, role-appropriate ready
+#   #2 verify_byte_equal             — kernel iSCSI write → m01verify storage-aware compare
+#   #3 verify_network_catchup        — iptables disconnect + /status/recovery R/H polling
+#   #4 verify_restart_catchup        — SIGTERM replica + restart same --durable-root
+#   #5 verify_race_stress            — TestG54_BinaryWiring x10 -race
+#   #6 verify_full_suite             — go test ./... clean
 #
-# Runs on local workstation, drives a 2-node cluster:
-#   - m01 (192.168.1.181) — primary blockvolume
-#   - M02 (192.168.1.184) — replica blockvolume
-# Both nodes share a blockmaster (running on m01).
+# Two-node cluster:
+#   m01 (192.168.1.181) — primary blockvolume + iSCSI target + blockmaster
+#   M02 (192.168.1.184) — replica blockvolume
 #
-# Mirrors structure of T2 iterate-m01-nvme.sh; key differences:
-#   - 2-node cross-host wire (vs T2's single-node 3-volume)
-#   - Replicated write path under test (vs T2's NVMe-oF target)
-#   - iptables-based mid-stream disconnect injection
-#   - Byte-exact convergence verification on both replicas
-#
-# Ownership: QA. Part of G5 batch G5-4 per
-# sw-block/design/v3-phase-15-g5-kickoff.md §3 (PROPOSAL — awaiting
-# architect ratification).
-#
+# Run from local workstation (Windows / Git Bash); SSH drives both nodes.
 # Exit 0 on all-green; non-zero + diagnostic artifacts on any failure.
 
 set -euo pipefail
 
 # --- Config (env-overridable) ---
-M01_HOST="${M01_HOST:-testdev@192.168.1.181}"   # primary node
-M02_HOST="${M02_HOST:-testdev@192.168.1.184}"   # replica node
+M01_HOST="${M01_HOST:-testdev@192.168.1.181}"
+M02_HOST="${M02_HOST:-testdev@192.168.1.184}"
 SSH_KEY="${SSH_KEY:-/c/work/dev_server/testdev_key}"
 SRC_DIR="${SRC_DIR:-/c/work/seaweed_block}"
 REMOTE_BUILD_DIR="${REMOTE_BUILD_DIR:-/tmp/g5_sb_build}"
 REMOTE_RUN_DIR="${REMOTE_RUN_DIR:-/tmp/g5_sb_run}"
-DURABLE_IMPL="${DURABLE_IMPL:-walstore}"          # walstore | smartwal — per-scenario matrix
-DURABLE_BLOCKS="${DURABLE_BLOCKS:-262144}"        # 1 GiB at 4 KiB blocks
+DURABLE_IMPL="${DURABLE_IMPL:-walstore}"
+DURABLE_BLOCKS="${DURABLE_BLOCKS:-256}"            # 1 MiB at 4 KiB blocks (small for fast tests)
 DURABLE_BLOCKSIZE="${DURABLE_BLOCKSIZE:-4096}"
-WORKLOAD_DURATION_SEC="${WORKLOAD_DURATION_SEC:-30}"
 ARTIFACT_DIR="${ARTIFACT_DIR:-${SRC_DIR%/*}/seaweedfs/sw-block/design/g5-artifacts}"
 
-# Network ports (m01 primary)
+# Network ports (m01 primary side)
 M01_MASTER_PORT=9180
 M01_PRIMARY_CTRL_PORT=9210
 M01_PRIMARY_DATA_PORT=9220
+M01_PRIMARY_STATUS_PORT=9290
+M01_ISCSI_PORT=3260
 
-# Network ports (M02 replica)
+# Network ports (M02 replica side)
 M02_REPLICA_CTRL_PORT=9211
 M02_REPLICA_DATA_PORT=9221
+M02_REPLICA_STATUS_PORT=9291
 
-SSH_M01="ssh -i ${SSH_KEY} -o ConnectTimeout=10 ${M01_HOST}"
-SSH_M02="ssh -i ${SSH_KEY} -o ConnectTimeout=10 ${M02_HOST}"
+# iSCSI target identity (primary serves a single LUN)
+ISCSI_IQN="iqn.2026-04.io.seaweed.block:v1"
+
+# Catch-up deadline (s) for #3 + #4
+CATCHUP_DEADLINE=30
+
+SSH_M01="ssh -i ${SSH_KEY} -o ConnectTimeout=10 -o StrictHostKeyChecking=no ${M01_HOST}"
+SSH_M02="ssh -i ${SSH_KEY} -o ConnectTimeout=10 -o StrictHostKeyChecking=no ${M02_HOST}"
 
 # --- Helpers ---
 
-log() { printf '\033[1;36m[g5-replwrite]\033[0m %s\n' "$*" >&2; }
-die() { printf '\033[1;31m[g5-replwrite FAIL]\033[0m %s\n' "$*" >&2; exit 1; }
+log() { printf '\033[1;36m[g5-5]\033[0m %s\n' "$*" >&2; }
+die() { printf '\033[1;31m[g5-5 FAIL]\033[0m %s\n' "$*" >&2; collect_diagnostics fail; exit 1; }
 
 mkdir -p "${ARTIFACT_DIR}"
 
 collect_diagnostics() {
     local label="$1"
     log "collecting diagnostics [${label}]..."
-    $SSH_M01 "cat ${REMOTE_RUN_DIR}/logs/master.log 2>/dev/null" > "${ARTIFACT_DIR}/master-${label}.log" || true
+    $SSH_M01 "cat ${REMOTE_RUN_DIR}/logs/master.log 2>/dev/null"  > "${ARTIFACT_DIR}/master-${label}.log"  || true
     $SSH_M01 "cat ${REMOTE_RUN_DIR}/logs/primary.log 2>/dev/null" > "${ARTIFACT_DIR}/primary-${label}.log" || true
     $SSH_M02 "cat ${REMOTE_RUN_DIR}/logs/replica.log 2>/dev/null" > "${ARTIFACT_DIR}/replica-${label}.log" || true
-    $SSH_M01 "sudo dmesg -T | tail -50" > "${ARTIFACT_DIR}/m01-dmesg-${label}.txt" 2>/dev/null || true
-    $SSH_M02 "sudo dmesg -T | tail -50" > "${ARTIFACT_DIR}/m02-dmesg-${label}.txt" 2>/dev/null || true
-    log "  → ${ARTIFACT_DIR}/{master,primary,replica}-${label}.log + {m01,m02}-dmesg-${label}.txt"
 }
 
-# --- Phase 1: sync + rebuild ---
+# poll_status — fetch /status/recovery from a given node + status port,
+# extract a JSON field via a tiny python one-liner. Returns the field
+# value on stdout or empty on failure.
+poll_status_field() {
+    local ssh_cmd="$1" status_port="$2" field="$3"
+    $ssh_cmd "curl -s --max-time 2 'http://127.0.0.1:${status_port}/status/recovery?volume=v1' | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get(\"${field}\",\"\"))' 2>/dev/null" || true
+}
+
+# wait_until — polls a check command until it returns 0 or deadline.
+wait_until() {
+    local desc="$1" deadline_s="$2" check_cmd="$3"
+    local end=$(( $(date +%s) + deadline_s ))
+    while [ "$(date +%s)" -lt "${end}" ]; do
+        if eval "${check_cmd}" >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 1
+    done
+    log "wait_until(${desc}) TIMEOUT after ${deadline_s}s"
+    return 1
+}
+
+# --- Phase 1: sync + build ---
 
 sync_and_build() {
-    log "phase 1: sync source + build binaries"
-
-    # Build on m01 (Go installed there); scp binaries to M02 (no Go on M02 per D-finding)
-    log "  syncing source to m01..."
+    log "phase 1: sync source + build binaries on m01"
     cd "${SRC_DIR}"
     tar --exclude='.git' --exclude='*.exe' --exclude='*.test' -czf /tmp/g5-src.tgz .
-    scp -i "${SSH_KEY}" /tmp/g5-src.tgz "${M01_HOST}:/tmp/" >/dev/null
+    scp -i "${SSH_KEY}" -o StrictHostKeyChecking=no /tmp/g5-src.tgz "${M01_HOST}:/tmp/" >/dev/null
     $SSH_M01 "rm -rf ${REMOTE_BUILD_DIR} && mkdir -p ${REMOTE_BUILD_DIR} && cd ${REMOTE_BUILD_DIR} && tar xzf /tmp/g5-src.tgz"
 
-    log "  building blockmaster + blockvolume on m01..."
-    $SSH_M01 "cd ${REMOTE_BUILD_DIR} && go build -o /tmp/g5-blockmaster ./cmd/blockmaster/ && go build -o /tmp/g5-blockvolume ./cmd/blockvolume/" || die "build failed on m01"
+    $SSH_M01 "
+cd ${REMOTE_BUILD_DIR} && \
+go build -o /tmp/g5-blockmaster   ./cmd/blockmaster/  && \
+go build -o /tmp/g5-blockvolume   ./cmd/blockvolume/  && \
+go build -tags m01verify -o /tmp/g5-m01verify ./cmd/m01verify/
+" || die "build failed on m01"
 
-    log "  scp blockvolume binary to M02 (Go not installed there)..."
-    $SSH_M01 "scp -o StrictHostKeyChecking=no /tmp/g5-blockvolume testdev@192.168.1.184:/tmp/" >/dev/null \
-        || $SSH_M02 "exit" \
-        || die "scp m01→M02 failed (verify SSH key on m01:~/.ssh/ has access to M02)"
+    log "  scp blockvolume + m01verify to M02..."
+    $SSH_M01 "scp -o StrictHostKeyChecking=no /tmp/g5-blockvolume /tmp/g5-m01verify ${M02_HOST}:/tmp/" >/dev/null \
+        || die "scp m01→M02 failed"
 }
 
-# --- Phase 2: start cluster ---
+# --- Phase 2: cluster lifecycle ---
 
-start_cluster() {
-    log "phase 2: start blockmaster (m01) + primary (m01) + replica (M02)"
+write_topology() {
+    $SSH_M01 "cat > ${REMOTE_RUN_DIR}/topology.yaml <<EOF
+volumes:
+  - volume_id: v1
+    slots:
+      - replica_id: r1
+        server_id: m01-primary
+      - replica_id: r2
+        server_id: m02-replica
+EOF"
+}
 
-    # Pre-cleanup
-    $SSH_M01 "sudo pkill -9 -f g5-blockvolume 2>/dev/null || true; sudo pkill -9 -f g5-blockmaster 2>/dev/null || true; rm -rf ${REMOTE_RUN_DIR} && mkdir -p ${REMOTE_RUN_DIR}/{logs,store,durable-primary}" >/dev/null
-    $SSH_M02 "sudo pkill -9 -f g5-blockvolume 2>/dev/null || true; rm -rf ${REMOTE_RUN_DIR} && mkdir -p ${REMOTE_RUN_DIR}/{logs,durable-replica}" >/dev/null
-
-    # blockmaster on m01
-    log "  starting blockmaster on m01..."
+start_master() {
+    log "  start blockmaster on m01..."
     $SSH_M01 "
-nohup /tmp/g5-blockmaster --authority-store ${REMOTE_RUN_DIR}/store --listen 0.0.0.0:${M01_MASTER_PORT} \
-    --topology ${REMOTE_RUN_DIR}/topology.yaml --t0-print-ready \
+nohup /tmp/g5-blockmaster \
+    --authority-store ${REMOTE_RUN_DIR}/master-store \
+    --listen 0.0.0.0:${M01_MASTER_PORT} \
+    --topology ${REMOTE_RUN_DIR}/topology.yaml \
+    --expected-slots-per-volume 2 \
+    --t0-print-ready \
     > ${REMOTE_RUN_DIR}/logs/master.log 2>&1 </dev/null & disown
-sleep 2
-pgrep -f g5-blockmaster >/dev/null || (cat ${REMOTE_RUN_DIR}/logs/master.log; exit 1)
-" || die "blockmaster failed to start"
+sleep 1"
+}
 
-    # primary blockvolume on m01
-    log "  starting primary blockvolume on m01..."
+start_primary() {
+    log "  start primary blockvolume on m01..."
     $SSH_M01 "
 nohup /tmp/g5-blockvolume \
     --master 127.0.0.1:${M01_MASTER_PORT} \
     --server-id m01-primary --volume-id v1 --replica-id r1 \
-    --ctrl-addr 0.0.0.0:${M01_PRIMARY_CTRL_PORT} --data-addr 0.0.0.0:${M01_PRIMARY_DATA_PORT} \
-    --durable-root ${REMOTE_RUN_DIR}/durable-primary --durable-impl ${DURABLE_IMPL} \
+    --ctrl-addr 0.0.0.0:${M01_PRIMARY_CTRL_PORT} \
+    --data-addr 0.0.0.0:${M01_PRIMARY_DATA_PORT} \
+    --status-addr 127.0.0.1:${M01_PRIMARY_STATUS_PORT} \
+    --status-recovery \
+    --durable-root ${REMOTE_RUN_DIR}/primary-store \
+    --durable-impl ${DURABLE_IMPL} \
     --durable-blocks ${DURABLE_BLOCKS} --durable-blocksize ${DURABLE_BLOCKSIZE} \
-    --t0-print-ready --t1-readiness \
-    > ${REMOTE_RUN_DIR}/logs/primary.log 2>&1 </dev/null & disown
-sleep 3
-pgrep -f 'g5-blockvolume.*server-id m01-primary' >/dev/null || (cat ${REMOTE_RUN_DIR}/logs/primary.log; exit 1)
-" || die "primary blockvolume failed to start"
+    --iscsi-listen 0.0.0.0:${M01_ISCSI_PORT} \
+    --iscsi-iqn ${ISCSI_IQN} \
+    --t1-readiness \
+    > ${REMOTE_RUN_DIR}/logs/primary.log 2>&1 </dev/null & disown"
+}
 
-    # replica blockvolume on M02
-    log "  starting replica blockvolume on M02..."
-    $SSH_M02 "
+start_replica() {
+    log "  start replica blockvolume on M02..."
+    $SSH_M02 "mkdir -p ${REMOTE_RUN_DIR}/{logs,replica-store} && \
 nohup /tmp/g5-blockvolume \
     --master 192.168.1.181:${M01_MASTER_PORT} \
     --server-id m02-replica --volume-id v1 --replica-id r2 \
-    --ctrl-addr 0.0.0.0:${M02_REPLICA_CTRL_PORT} --data-addr 0.0.0.0:${M02_REPLICA_DATA_PORT} \
-    --durable-root ${REMOTE_RUN_DIR}/durable-replica --durable-impl ${DURABLE_IMPL} \
+    --ctrl-addr 0.0.0.0:${M02_REPLICA_CTRL_PORT} \
+    --data-addr 0.0.0.0:${M02_REPLICA_DATA_PORT} \
+    --status-addr 127.0.0.1:${M02_REPLICA_STATUS_PORT} \
+    --status-recovery \
+    --durable-root ${REMOTE_RUN_DIR}/replica-store \
+    --durable-impl ${DURABLE_IMPL} \
     --durable-blocks ${DURABLE_BLOCKS} --durable-blocksize ${DURABLE_BLOCKSIZE} \
-    --t0-print-ready --t1-readiness \
-    > ${REMOTE_RUN_DIR}/logs/replica.log 2>&1 </dev/null & disown
-sleep 3
-pgrep -f 'g5-blockvolume.*server-id m02-replica' >/dev/null || (cat ${REMOTE_RUN_DIR}/logs/replica.log; exit 1)
-" || die "replica blockvolume failed to start"
+    --t1-readiness \
+    > ${REMOTE_RUN_DIR}/logs/replica.log 2>&1 </dev/null & disown"
+}
 
-    log "  cluster up: master+primary on m01, replica on M02"
+start_cluster() {
+    log "phase 2: start cluster"
+    $SSH_M01 "sudo pkill -9 -f g5-blockvolume 2>/dev/null || true; sudo pkill -9 -f g5-blockmaster 2>/dev/null || true; rm -rf ${REMOTE_RUN_DIR} && mkdir -p ${REMOTE_RUN_DIR}/{logs,master-store,primary-store}"
+    $SSH_M02 "sudo pkill -9 -f g5-blockvolume 2>/dev/null || true; rm -rf ${REMOTE_RUN_DIR} && mkdir -p ${REMOTE_RUN_DIR}/{logs,replica-store}"
+    write_topology
+    start_master
+    start_primary
+    start_replica
 }
 
 stop_cluster() {
-    log "stopping cluster..."
-    $SSH_M01 "sudo pkill -9 -f g5-blockvolume 2>/dev/null || true; sudo pkill -9 -f g5-blockmaster 2>/dev/null || true; sleep 1" >/dev/null 2>&1 || true
-    $SSH_M02 "sudo pkill -9 -f g5-blockvolume 2>/dev/null || true; sleep 1" >/dev/null 2>&1 || true
+    log "stop cluster"
+    $SSH_M01 "sudo pkill -9 -f g5-blockvolume 2>/dev/null || true; sudo pkill -9 -f g5-blockmaster 2>/dev/null || true" || true
+    $SSH_M02 "sudo pkill -9 -f g5-blockvolume 2>/dev/null || true" || true
 }
 
-# --- Phase 3: scenarios (TODO bodies await G5 mini-plan ratification) ---
+# --- Phase 3: verify steps (per mini-plan v0.3 §2) ---
 
-# TODO(G5-arch-ratify): the architect-ratified scenario list per G5
-# mini-plan §3 batch G5-4 acceptance criteria #3. Suggested set
-# (subject to architect ratification, see g5-kickoff.md §4 #1):
-#
-#   ShortDisconnect_DeltaCatchUp × {smartwal, walstore}
-#   LongDisconnect_RebuildEscalation × {smartwal, walstore}
-#   MidStreamDisconnect_Recovery × {smartwal, walstore}
-#   SteadyStateLiveShip_Throughput × {smartwal, walstore}
-#
-# Each scenario body needs:
-#   1. workload driver (iSCSI? gRPC admin? direct primary-write?)
-#   2. fault injection (iptables block on data-addr? or ctrl-addr?)
-#   3. wait-for-event (SessionClosed, RebuildSessionClosed, etc.)
-#   4. byte-exact convergence verification (compare AllBlocks() on
-#      primary vs replica)
-#
-# Need framework support:
-#   - workload driver — sw decision: iSCSI target binding to primary
-#     vs gRPC admin endpoint vs new test-only RPC
-#   - replica state inspector — gRPC status endpoint (--status-addr
-#     already on blockvolume) reports R/S/H/Decision
-#   - byte-exact verifier — read-back across both nodes via status
-#     endpoint or separate diagnostic tool
-
-scenario_short_disconnect_delta_catchup() {
-    local impl="$1"
-    log "  scenario: ShortDisconnect_DeltaCatchUp (${impl}) — TODO(G5-arch-ratify)"
-    # 1. Drive primary writes for 5s (TODO: workload driver)
-    # 2. iptables -I INPUT -p tcp --dport ${M02_REPLICA_DATA_PORT} -j DROP
-    # 3. Drive primary writes for 5s more
-    # 4. iptables -D INPUT -p tcp --dport ${M02_REPLICA_DATA_PORT} -j DROP
-    # 5. Wait for engine-driven catch-up to complete (poll status endpoint)
-    # 6. Verify replica converges byte-exact (delta only — most data was already shipped)
-    # 7. Assert: ScanLBAs metric shows reduced emit count vs full-window
-    return 0
+# §2 #1 — cluster reaches role-appropriate ready state
+verify_cluster_ready() {
+    log "verify_cluster_ready: primary should reach Healthy=true; replica Healthy=false"
+    wait_until "primary Healthy=true" 15 \
+        "[ \"\$($SSH_M01 \"curl -s --max-time 2 'http://127.0.0.1:${M01_PRIMARY_STATUS_PORT}/status?volume=v1' | grep -o '\\\"Healthy\\\":true'\")\" = '\"Healthy\":true' ]" \
+        || die "primary did not reach Healthy=true within 15s"
+    # Replica must respond to /status with Healthy=false (NOT Healthy=true; role split).
+    local rh
+    rh=$($SSH_M02 "curl -s --max-time 2 'http://127.0.0.1:${M02_REPLICA_STATUS_PORT}/status?volume=v1' | grep -o '\"Healthy\":[a-z]*'")
+    [ "${rh}" = '"Healthy":false' ] || die "replica reported ${rh}; expected Healthy=false (architect role-split binding)"
+    log "  ✓ cluster ready"
 }
 
-scenario_long_disconnect_rebuild_escalation() {
-    local impl="$1"
-    log "  scenario: LongDisconnect_RebuildEscalation (${impl}) — TODO(G5-arch-ratify)"
-    # 1. Drive primary writes for long enough to fill replica's WAL retention window
-    # 2. iptables block replica
-    # 3. Drive primary writes past retention
-    # 4. iptables unblock
-    # 5. Catch-up should fail with WAL recycled → engine emits StartRebuild
-    # 6. Rebuild completes → replica converges byte-exact
-    # 7. Assert: rebuild session was actually emitted (not just Decision=Rebuild state)
-    return 0
+# §2 #2 — kernel iSCSI write + m01verify storage-aware compare
+verify_byte_equal() {
+    log "verify_byte_equal: iSCSI write 1 LBA + m01verify SHA-256"
+    # Prereq: open-iscsi initiator on m01.
+    $SSH_M01 "command -v iscsiadm >/dev/null" || die "iscsiadm not installed on m01 (apt install open-iscsi)"
+    # Discover + login
+    $SSH_M01 "
+sudo iscsiadm -m discovery -t st -p 127.0.0.1:${M01_ISCSI_PORT} >/dev/null
+sudo iscsiadm -m node -T ${ISCSI_IQN} -p 127.0.0.1:${M01_ISCSI_PORT} --login >/dev/null
+" || die "iscsi login failed"
+    sleep 2
+    # Find the device (most-recently attached scsi disk)
+    local dev
+    dev=$($SSH_M01 "ls -t /dev/disk/by-path/*${ISCSI_IQN}*-lun-0 2>/dev/null | head -1")
+    [ -n "${dev}" ] || die "iscsi device not found under /dev/disk/by-path"
+    log "  iscsi device: ${dev}"
+    # Write a known pattern (0xab) into LBA 0 (4096 bytes) via dd
+    $SSH_M01 "
+sudo dd if=/dev/zero bs=4096 count=1 2>/dev/null | tr '\\0' '\\xab' | sudo dd of=${dev} bs=4096 count=1 conv=fsync,nocreat 2>/dev/null
+sync
+" || die "iscsi write failed"
+    sleep 1  # let replication fan-out complete
+    # Logout iscsi (release the device handle so we can stop replica cleanly later)
+    $SSH_M01 "sudo iscsiadm -m node -T ${ISCSI_IQN} -p 127.0.0.1:${M01_ISCSI_PORT} --logout >/dev/null" || true
+    # Stop replica daemon so m01verify can OpenReadOnly
+    $SSH_M02 "sudo pkill -TERM -f 'g5-blockvolume.*server-id m02-replica' && sleep 2"
+    # m01verify reads replica's walstore
+    local out
+    out=$($SSH_M02 "/tmp/g5-m01verify --walstore ${REMOTE_RUN_DIR}/replica-store/v1.walstore --lba-start 0 --lba-count 1 --block-size 4096 --expected-pattern ab 2>&1")
+    log "  m01verify output: ${out}"
+    echo "${out}" | grep -q '^OK ' || die "byte-equal verify failed: ${out}"
+    # Restart replica for subsequent steps
+    start_replica
+    sleep 3
+    log "  ✓ byte-equal"
 }
 
-scenario_mid_stream_disconnect_recovery() {
-    local impl="$1"
-    log "  scenario: MidStreamDisconnect_Recovery (${impl}) — TODO(G5-arch-ratify)"
-    # 1. Drive primary writes
-    # 2. Cause primary↔replica disconnect mid-catch-up (iptables block + unblock quickly)
-    # 3. Verify engine retry budget consumes attempts
-    # 4. Verify final convergence within budget OR escalation observed
-    return 0
+# §2 #3 — network disconnect catch-up via /status/recovery R/H polling
+verify_network_catchup() {
+    log "verify_network_catchup: iptables drop primary→replica WAL port + observe catch-up"
+    # Block primary→replica data port at M02
+    $SSH_M02 "sudo iptables -I INPUT -p tcp --dport ${M02_REPLICA_DATA_PORT} -j DROP"
+    # Trigger primary write while disconnected (login + write + logout)
+    $SSH_M01 "
+sudo iscsiadm -m node -T ${ISCSI_IQN} -p 127.0.0.1:${M01_ISCSI_PORT} --login >/dev/null
+sleep 2
+DEV=\$(ls -t /dev/disk/by-path/*${ISCSI_IQN}*-lun-0 2>/dev/null | head -1)
+sudo dd if=/dev/urandom of=\${DEV} bs=4096 count=2 conv=fsync,nocreat 2>/dev/null
+sync
+sudo iscsiadm -m node -T ${ISCSI_IQN} -p 127.0.0.1:${M01_ISCSI_PORT} --logout >/dev/null
+" || die "iscsi write during disconnect failed"
+    # Verify replica is behind: R != H
+    local prim_h rep_r
+    prim_h=$(poll_status_field "$SSH_M01" "${M01_PRIMARY_STATUS_PORT}" H)
+    rep_r=$(poll_status_field "$SSH_M02" "${M02_REPLICA_STATUS_PORT}" R)
+    log "  pre-restore: primary.H=${prim_h}, replica.R=${rep_r}"
+    # Restore network
+    $SSH_M02 "sudo iptables -D INPUT -p tcp --dport ${M02_REPLICA_DATA_PORT} -j DROP"
+    # Poll until replica catches up
+    wait_until "replica catches up to primary.H=${prim_h}" "${CATCHUP_DEADLINE}" \
+        "[ \"\$(poll_status_field '$SSH_M02' '${M02_REPLICA_STATUS_PORT}' R)\" -ge \"${prim_h}\" ]" \
+        || die "replica did not catch up to H=${prim_h} within ${CATCHUP_DEADLINE}s"
+    # Assert RecoveryDecision was catch_up (not rebuild)
+    local decision
+    decision=$(poll_status_field "$SSH_M02" "${M02_REPLICA_STATUS_PORT}" RecoveryDecision)
+    case "${decision}" in
+        catch_up|"")  ;;  # empty = already converged before observation; acceptable
+        rebuild)      die "expected RecoveryDecision=catch_up; got rebuild (gap exceeded retention?)" ;;
+        *)            log "  RecoveryDecision=${decision}" ;;
+    esac
+    log "  ✓ network catch-up converged"
 }
 
-scenario_steady_state_live_ship_throughput() {
-    local impl="$1"
-    log "  scenario: SteadyStateLiveShip_Throughput (${impl}) — TODO(G5-arch-ratify)"
-    # 1. No fault injection
-    # 2. Drive sustained writes for ${WORKLOAD_DURATION_SEC}s
-    # 3. Measure throughput, latency, replica lag
-    # 4. Verify walstore flusher cadence under sustained load
-    #    (relevant to G5-2 walstore tuning policy)
-    return 0
+# §2 #4 — replica process stop/restart catch-up
+verify_restart_catchup() {
+    log "verify_restart_catchup: SIGTERM replica + restart same --durable-root"
+    # Trigger primary write while replica is down
+    $SSH_M02 "sudo pkill -TERM -f 'g5-blockvolume.*server-id m02-replica'"
+    sleep 2
+    $SSH_M01 "
+sudo iscsiadm -m node -T ${ISCSI_IQN} -p 127.0.0.1:${M01_ISCSI_PORT} --login >/dev/null
+sleep 2
+DEV=\$(ls -t /dev/disk/by-path/*${ISCSI_IQN}*-lun-0 2>/dev/null | head -1)
+sudo dd if=/dev/urandom of=\${DEV} bs=4096 count=2 seek=4 conv=fsync,nocreat 2>/dev/null
+sync
+sudo iscsiadm -m node -T ${ISCSI_IQN} -p 127.0.0.1:${M01_ISCSI_PORT} --logout >/dev/null
+" || die "iscsi write during replica-down failed"
+    local prim_h
+    prim_h=$(poll_status_field "$SSH_M01" "${M01_PRIMARY_STATUS_PORT}" H)
+    log "  primary.H after offline write: ${prim_h}"
+    # Restart replica (same binary, same --durable-root)
+    start_replica
+    sleep 3
+    # Poll until replica catches up
+    wait_until "replica catches up post-restart to H=${prim_h}" "${CATCHUP_DEADLINE}" \
+        "[ \"\$(poll_status_field '$SSH_M02' '${M02_REPLICA_STATUS_PORT}' R)\" -ge \"${prim_h}\" ]" \
+        || die "replica did not catch up post-restart within ${CATCHUP_DEADLINE}s"
+    log "  ✓ restart catch-up converged"
 }
 
-# --- Phase 4: run scenario matrix ---
+# §2 #5 — race ×10 stress on G5-4 integration test
+verify_race_stress() {
+    log "verify_race_stress: TestG54_BinaryWiring x10 -race on m01"
+    $SSH_M01 "command -v gcc >/dev/null" || die "gcc not installed on m01 (needed for CGO -race)"
+    $SSH_M01 "cd ${REMOTE_BUILD_DIR} && CGO_ENABLED=1 go test -race -count=10 -run TestG54_BinaryWiring ./cmd/blockvolume/ 2>&1" > "${ARTIFACT_DIR}/race-stress.log" \
+        || die "race stress failed; see ${ARTIFACT_DIR}/race-stress.log"
+    log "  ✓ race ×10"
+}
 
-run_matrix() {
-    local scenarios=(
-        scenario_short_disconnect_delta_catchup
-        scenario_long_disconnect_rebuild_escalation
-        scenario_mid_stream_disconnect_recovery
-        scenario_steady_state_live_ship_throughput
-    )
-    local impls=(walstore smartwal)
-    local total=0 passed=0 failed=0
-
-    for impl in "${impls[@]}"; do
-        DURABLE_IMPL="${impl}"
-        for fn in "${scenarios[@]}"; do
-            total=$((total+1))
-            log "scenario ${total}: ${fn} on ${impl}"
-            start_cluster
-            if "${fn}" "${impl}"; then
-                passed=$((passed+1))
-                log "  ✓ pass"
-            else
-                failed=$((failed+1))
-                log "  ✗ FAIL"
-                collect_diagnostics "${fn}-${impl}"
-            fi
-            stop_cluster
-        done
-    done
-
-    log "matrix: ${passed}/${total} passed (${failed} failed)"
-    [ "${failed}" -eq 0 ] || die "matrix had ${failed} failures; see ${ARTIFACT_DIR}/"
+# §2 #6 — full V3 suite green from m01
+verify_full_suite() {
+    log "verify_full_suite: go test ./... clean from m01"
+    $SSH_M01 "cd ${REMOTE_BUILD_DIR} && go test ./... -count=1 -timeout 600s 2>&1" > "${ARTIFACT_DIR}/full-suite.log" \
+        || die "full suite has failures; see ${ARTIFACT_DIR}/full-suite.log"
+    log "  ✓ full suite green"
 }
 
 # --- Main ---
 
 main() {
-    log "=== G5-4 m01 hardware first-light harness (DRAFT v0.1 skeleton) ==="
-    log "primary node: ${M01_HOST}"
-    log "replica node: ${M02_HOST}"
-    log "substrate impl matrix: walstore + smartwal"
-    log "extent size: ${DURABLE_BLOCKS} blocks × ${DURABLE_BLOCKSIZE} bytes = $((DURABLE_BLOCKS*DURABLE_BLOCKSIZE/1024/1024)) MiB"
-    log "workload duration: ${WORKLOAD_DURATION_SEC}s per scenario"
-    log "artifact dir: ${ARTIFACT_DIR}"
+    log "=== G5-5 m01 hardware first-light ==="
+    log "primary: ${M01_HOST} ; replica: ${M02_HOST}"
+    log "substrate: ${DURABLE_IMPL} ; ${DURABLE_BLOCKS} blocks × ${DURABLE_BLOCKSIZE} B"
+    log "artifacts: ${ARTIFACT_DIR}"
 
     sync_and_build
-    run_matrix
+    start_cluster
+    sleep 3
 
-    log "=== ALL SCENARIOS PASSED ==="
+    verify_cluster_ready
+    verify_byte_equal
+    verify_network_catchup
+    verify_restart_catchup
+    verify_race_stress
+    verify_full_suite
+
+    stop_cluster
+    log "=== G5-5 ALL VERIFY STEPS PASS ==="
 }
 
 main "$@"

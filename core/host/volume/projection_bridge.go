@@ -90,3 +90,16 @@ func (v *AdapterProjectionView) Projection() frontend.Projection {
 		Healthy:         healthy,
 	}
 }
+
+// EngineProjection returns the underlying engine.ReplicaProjection
+// (Mode, R/S/H, RecoveryDecision, SessionKind/Phase, Reason). Used
+// by the G5-5 opt-in `/status/recovery` endpoint to surface recovery
+// boundaries for hardware-test catch-up verification. NOT consumed
+// by the frontend (which uses Projection() above for Healthy gating).
+//
+// This accessor reads engine state without modifying it; supersede
+// is NOT applied here (callers needing the same fail-closed semantic
+// the frontend gets should also call Projection()).
+func (v *AdapterProjectionView) EngineProjection() engine.ReplicaProjection {
+	return v.projector.Projection()
+}
