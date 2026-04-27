@@ -409,7 +409,7 @@ echo "WROTE-LBA-0-PATTERN-AB"
     $SSH_M02 "sudo pkill -TERM -f '[g]5-blockvolume.*server-id m02-replica' && sleep 2"
     # m01verify reads replica's walstore
     local out
-    out=$($SSH_M02 "/tmp/g5-m01verify --walstore ${REMOTE_RUN_DIR}/replica-store/v1.walstore --lba-start 0 --lba-count 1 --block-size 4096 --expected-pattern ab 2>&1")
+    out=$($SSH_M02 "/tmp/g5-m01verify --walstore ${REMOTE_RUN_DIR}/replica-store/v1.bin --lba-start 0 --lba-count 1 --block-size 4096 --expected-pattern ab 2>&1")
     log "  m01verify output: ${out}"
     echo "${out}" | grep -q '^OK ' || die "byte-equal verify failed: ${out}"
     # Restart replica for subsequent steps
