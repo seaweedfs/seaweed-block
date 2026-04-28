@@ -577,8 +577,12 @@ verify_restart_catchup() {
     fi
     log "verify_restart_catchup: kill replica + write while down + restart + byte-equal"
 
-    # Step 2: stop replica daemon.
-    $SSH_M02 "sudo killall -TERM g5-blockvolume; sleep 2" >/dev/null 2>&1 || true
+    # Step 2: stop replica daemon. TERM first for graceful shutdown,
+    # then KILL fallback after a brief grace window. Wait for the
+    # replica's status port to actually release before continuing —
+    # prior runs hit "address already in use" on restart because TERM
+    # alone left a lingering process holding the bind.
+    $SSH_M02 "sudo killall -TERM g5-blockvolume 2>/dev/null; sleep 1; sudo killall -KILL g5-blockvolume 2>/dev/null; for i in 1 2 3 4 5 6 7 8 9 10; do ss -ltn 2>/dev/null | grep -q ':${M02_REPLICA_STATUS_PORT}\b' || break; sleep 1; done" >/dev/null 2>&1 || true
     log "  replica stopped"
 
     # Step 3: primary write LBA[2]=0xef while replica is down.
