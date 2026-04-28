@@ -28,6 +28,19 @@ func (e *BlockExecutor) StartRebuild(replicaID string, sessionID, epoch, endpoin
 		return err
 	}
 
+	// G6 §2 #5 observability: emit a deterministic START marker BEFORE
+	// the goroutine spawns so QA's wait_until_rebuild_dispatched
+	// helper has a fixed log string to scrape against — independent
+	// of how long the actual rebuild takes on the wire (the
+	// pre-existing "executor: rebuild complete" line only fires
+	// AFTER completion, which the G5-5C scenario D 5s scrape window
+	// missed for sustained-write workloads).
+	//
+	// Pinned by: INV-G6-WALRECYCLE-DISPATCHES-REBUILD (test pointer)
+	// + QA `wait_until_rebuild_dispatched` helper (D-scenario harness).
+	log.Printf("executor: rebuild start replica=%s sessionID=%d epoch=%d EV=%d targetLSN=%d",
+		replicaID, sessionID, epoch, endpointVersion, targetLSN)
+
 	go func() {
 		achieved, err := e.doRebuild(replicaID, session, targetLSN)
 		e.finishSession(replicaID, session, achieved, err)
