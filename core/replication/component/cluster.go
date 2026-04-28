@@ -574,7 +574,10 @@ func (c *Cluster) ProbeReplica(replicaIdx int) adapter.ProbeResult {
 func (c *Cluster) KillReplicaListener(replicaIdx int) {
 	c.t.Helper()
 	r := c.Replica(replicaIdx)
-	r.Listener.Stop()
+	// Use StopHard so any active live-ship handler conn from the
+	// primary is force-closed — otherwise Stop's wg.Wait blocks
+	// forever on localhost (no remote-side close, no FIN/RST).
+	r.Listener.StopHard()
 }
 
 // SeverConnection forcefully closes any TCP connection currently

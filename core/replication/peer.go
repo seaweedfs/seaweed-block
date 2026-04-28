@@ -395,12 +395,34 @@ func (p *ReplicaPeer) Target() ReplicaTarget { return p.target }
 // owns its lifecycle).
 func (p *ReplicaPeer) Executor() *transport.BlockExecutor { return p.executor }
 
-// probeSessionIDCounter mints unique SessionIDs for runtime-driven
-// G5-5C probes (distinct from peerSessionIDCounter which mints for
-// live-ship sessions and from the adapter's probeSessionID counter
-// which mints for engine-emitted ProbeReplica commands). Three
-// counters because each path has different constraints; they share
-// nothing structurally.
+// probeSessionIDCounter mints SessionIDs for G5-5C runtime-driven
+// probes — the third of three independent SessionID counters in V3.
+// Why three (architect onboarding note 2026-04-27):
+//
+//  1. peerSessionIDCounter (peer.go:94) — live-ship sessions; one
+//     per *ReplicaPeer; lifetime = peer lifetime; carried in
+//     RecoveryLineage.SessionID for ShipEntry / Barrier wire frames
+//     so the replica's acceptMutationLineage gate can pin
+//     "same-authority ⇒ same SessionID" within a peer.
+//
+//  2. adapter probe counter (core/adapter/adapter.go probeSessionID
+//     local) — engine-emitted ProbeReplica command sessions; minted
+//     when the adapter consumes engine.ProbeReplica; not registered
+//     in any executor session table; transient probe sessions for
+//     the symmetric ProbeReq/ProbeResp pair.
+//
+//  3. probeSessionIDCounter (this file) — G5-5C primary-side
+//     runtime-driven probes; minted when the probe loop dispatches
+//     a fresh probe against a ReplicaDegraded peer; identical role
+//     to (2) except the *trigger* is the loop, not engine command
+//     emission.
+//
+// All three are uint64 atomics, all three are >0 (Add(1) starts at
+// 1), and none of the three SessionIDs ever cross paths because
+// the replica's acceptMutationLineage rules each see them in
+// non-overlapping wire contexts. Conflating any two would either
+// leak runtime state into engine truth or vice versa — keep them
+// separate.
 var probeSessionIDCounter atomic.Uint64
 
 // MintProbeSessionID returns a fresh SessionID for use in a

@@ -54,6 +54,7 @@ type ReplicaListener struct {
 
 	mu            sync.Mutex
 	activeLineage RecoveryLineage
+	conns         map[net.Conn]struct{} // active handler connections; protected by mu
 }
 
 // NewReplicaListener creates a listener on the given address.
@@ -90,6 +91,7 @@ func NewReplicaListenerWithApplyHook(addr string, store storage.LogicalStorage, 
 		listener:  ln,
 		stopCh:    make(chan struct{}),
 		applyHook: hook,
+		conns:     make(map[net.Conn]struct{}),
 	}, nil
 }
 
@@ -104,7 +106,12 @@ func (r *ReplicaListener) Serve() {
 	go r.acceptLoop()
 }
 
-// Stop shuts down the listener. Safe to call multiple times.
+// Stop shuts down the listener. Safe to call multiple times. Closes
+// the listener (no new accepts) and waits for in-flight handlers to
+// drain. Handlers will exit on their own when the remote side closes
+// the conn or sends a frame; if you need to force handler exit
+// regardless of remote state (e.g., simulating replica-process death
+// in tests), use StopHard.
 func (r *ReplicaListener) Stop() {
 	select {
 	case <-r.stopCh:
@@ -113,6 +120,40 @@ func (r *ReplicaListener) Stop() {
 	}
 	close(r.stopCh)
 	r.listener.Close()
+	r.wg.Wait()
+}
+
+// StopHard is like Stop but also forcibly closes all active handler
+// connections so handlers exit immediately. Used by component tests
+// that simulate "replica process died" without ever closing the
+// remote (primary) side of the conn — in production, the OS would
+// FIN/RST conns from a dead process; on localhost in-process tests,
+// nothing closes them, and Stop's wg.Wait would block forever.
+//
+// Safe to call multiple times. Idempotent.
+//
+// G5-5C #6 introduced this seam to make the restart-catch-up
+// component test deterministic without depending on remote-side
+// teardown.
+func (r *ReplicaListener) StopHard() {
+	select {
+	case <-r.stopCh:
+		return
+	default:
+	}
+	close(r.stopCh)
+	r.listener.Close()
+	// Snapshot + close active conns. Handler goroutines will return
+	// from ReadMsg with an error and run their deferred conn.Close().
+	r.mu.Lock()
+	conns := make([]net.Conn, 0, len(r.conns))
+	for c := range r.conns {
+		conns = append(conns, c)
+	}
+	r.mu.Unlock()
+	for _, c := range conns {
+		_ = c.Close()
+	}
 	r.wg.Wait()
 }
 
@@ -129,9 +170,17 @@ func (r *ReplicaListener) acceptLoop() {
 				return
 			}
 		}
+		r.mu.Lock()
+		r.conns[conn] = struct{}{}
+		r.mu.Unlock()
 		r.wg.Add(1)
 		go func() {
 			defer r.wg.Done()
+			defer func() {
+				r.mu.Lock()
+				delete(r.conns, conn)
+				r.mu.Unlock()
+			}()
 			r.handleConn(conn)
 		}()
 	}
