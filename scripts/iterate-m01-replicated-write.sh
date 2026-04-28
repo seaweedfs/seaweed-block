@@ -370,7 +370,7 @@ EOF
 start_primary() {
     log "  start primary blockvolume on m01..."
     launch_m01 <<EOF
-setsid nohup /tmp/g5-blockvolume --master 127.0.0.1:${M01_MASTER_PORT} --server-id m01-primary --volume-id v1 --replica-id r1 --ctrl-addr ${M01_PRIMARY_BIND_IP}:${M01_PRIMARY_CTRL_PORT} --data-addr ${M01_PRIMARY_BIND_IP}:${M01_PRIMARY_DATA_PORT} --status-addr 127.0.0.1:${M01_PRIMARY_STATUS_PORT} --status-recovery --durable-root ${REMOTE_RUN_DIR}/primary-store --durable-impl ${DURABLE_IMPL} --durable-blocks ${DURABLE_BLOCKS} --durable-blocksize ${DURABLE_BLOCKSIZE} --iscsi-listen 127.0.0.1:${M01_ISCSI_PORT} --iscsi-iqn ${ISCSI_IQN} --t1-readiness > ${REMOTE_RUN_DIR}/logs/primary.log 2>&1 </dev/null &
+setsid nohup /tmp/g5-blockvolume --master 127.0.0.1:${M01_MASTER_PORT} --server-id m01-primary --volume-id v1 --replica-id r1 --ctrl-addr ${M01_PRIMARY_BIND_IP}:${M01_PRIMARY_CTRL_PORT} --data-addr ${M01_PRIMARY_BIND_IP}:${M01_PRIMARY_DATA_PORT} --status-addr 127.0.0.1:${M01_PRIMARY_STATUS_PORT} --status-recovery --durable-root ${REMOTE_RUN_DIR}/primary-store --durable-impl ${DURABLE_IMPL} --durable-blocks ${DURABLE_BLOCKS} --durable-blocksize ${DURABLE_BLOCKSIZE} --iscsi-listen 127.0.0.1:${M01_ISCSI_PORT} --iscsi-iqn ${ISCSI_IQN} --t1-readiness --degraded-probe-interval=5s > ${REMOTE_RUN_DIR}/logs/primary.log 2>&1 </dev/null &
 disown \$! 2>/dev/null || true
 sleep 1
 exit 0
