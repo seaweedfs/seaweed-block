@@ -12,3 +12,13 @@
 *.test
 *.out
 coverage.out
+
+# G5-5* cross-compile artifacts (m01 hardware iteration script
+# stages binaries into _g5_bin/ before scp to the test host; root-
+# level *.exe are Windows-side build outputs that go build leaves
+# behind on iteration runs).
+/_g5_bin/
+/blockmaster
+/blockmaster.exe
+/blockvolume
+/blockvolume.exe
