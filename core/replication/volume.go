@@ -60,6 +60,14 @@ type ReplicationVolume struct {
 	probeLoop    *ProbeLoop
 	probeCfg     ProbeLoopConfig // remembered for SetProbeCooldownConfig push-down on UpdateReplicaSet
 	probeCfgSet  bool            // true after ConfigureProbeLoop succeeds
+
+	// G5-5C Batch #7 peer-lifecycle hook. Optional pair of callbacks
+	// invoked from UpdateReplicaSet on peer add / remove (including
+	// the lineage-bump teardown + recreate path). Used by the host
+	// to maintain a per-peer adapter registry in lockstep with the
+	// authoritative peer set.
+	onPeerAdded   func(*ReplicaPeer)
+	onPeerRemoved func(string) // by ReplicaID
 }
 
 // executorFactory lets tests inject a BlockExecutor constructor that
@@ -233,6 +241,12 @@ func (v *ReplicationVolume) UpdateReplicaSet(generation uint64, targets []Replic
 		if _, keep := want[id]; !keep {
 			_ = peer.Close()
 			delete(v.peers, id)
+			// G5-5C Batch #7: notify peer-lifecycle hook AFTER peer.Close
+			// to mirror the existing teardown ordering. Hook is called
+			// under v.mu (lock-order: v.mu → host registry's mu).
+			if v.onPeerRemoved != nil {
+				v.onPeerRemoved(id)
+			}
 		}
 	}
 
@@ -246,6 +260,13 @@ func (v *ReplicationVolume) UpdateReplicaSet(generation uint64, targets []Replic
 			// Lineage or address bumped → tear down + recreate.
 			_ = existing.Close()
 			delete(v.peers, id)
+			// G5-5C Batch #7: lineage-bump teardown also notifies the
+			// hook so the per-peer adapter is dropped before the fresh
+			// adapter is added below (mirrors the §1.E (c) discipline:
+			// new peer instance, fresh engine state).
+			if v.onPeerRemoved != nil {
+				v.onPeerRemoved(id)
+			}
 		}
 		executor := v.newExec(v.store, t.DataAddr)
 		peer, err := NewReplicaPeer(t, executor)
@@ -265,6 +286,12 @@ func (v *ReplicationVolume) UpdateReplicaSet(generation uint64, targets []Replic
 			})
 		}
 		v.peers[id] = peer
+		// G5-5C Batch #7: notify peer-lifecycle hook AFTER the peer is
+		// installed in the map so the host's registry can construct
+		// the per-peer adapter and prime it with the peer's identity.
+		if v.onPeerAdded != nil {
+			v.onPeerAdded(peer)
+		}
 	}
 
 	// Advance the monotonic guard only for real (non-zero) generations.
@@ -579,6 +606,56 @@ func (v *ReplicationVolume) StartProbeLoop() error {
 		return fmt.Errorf("replication: StartProbeLoop: volume %s probe loop not configured", v.volumeID)
 	}
 	return loop.Start()
+}
+
+// ConfigurePeerLifecycleHook registers callbacks invoked from
+// UpdateReplicaSet when peers are added (initial admit OR lineage-
+// bump recreate) or removed (set diff OR lineage-bump teardown).
+//
+// onAdded fires AFTER the new *ReplicaPeer is installed in v.peers
+// so callbacks can call peer.Target() / peer.Executor() without
+// racing the peer set. onRemoved fires AFTER peer.Close() and
+// delete-from-map for the SAME reason.
+//
+// Configure-once contract: a second call returns an error rather
+// than silently replacing the prior hook (matches ConfigureProbeLoop
+// discipline). Caller must Close() and reconstruct a new
+// ReplicationVolume to swap hooks.
+//
+// Lock-order discipline: hooks are called UNDER v.mu (the same lock
+// UpdateReplicaSet holds). Callbacks MUST NOT re-enter
+// ReplicationVolume methods that take v.mu (UpdateReplicaSet, Sync,
+// Close, ConfigureProbeLoop, StartProbeLoop, etc.) — that would
+// self-deadlock. Callbacks may safely take their own internal locks
+// (e.g., PeerAdapterRegistry.mu).
+//
+// Pinned by:
+//   - INV-G5-5C-PER-PEER-ADAPTER-PER-PEER-ENGINE
+//
+// Called by: host composition root after constructing
+// ReplicationVolume + PeerAdapterRegistry.
+// Owns: onPeerAdded / onPeerRemoved fields; nothing else.
+// Borrows: callbacks — caller retains.
+func (v *ReplicationVolume) ConfigurePeerLifecycleHook(onAdded func(*ReplicaPeer), onRemoved func(string)) error {
+	if onAdded == nil || onRemoved == nil {
+		return fmt.Errorf("replication: ConfigurePeerLifecycleHook: callbacks must be non-nil")
+	}
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if v.closed {
+		return fmt.Errorf("replication: ConfigurePeerLifecycleHook: volume %s closed", v.volumeID)
+	}
+	if v.onPeerAdded != nil || v.onPeerRemoved != nil {
+		return fmt.Errorf("replication: ConfigurePeerLifecycleHook: volume %s already configured (Configure-once contract)", v.volumeID)
+	}
+	v.onPeerAdded = onAdded
+	v.onPeerRemoved = onRemoved
+	// Replay current peer set so the host registry can catch up to
+	// any peers that were added BEFORE the hook was configured.
+	for _, peer := range v.peers {
+		onAdded(peer)
+	}
+	return nil
 }
 
 // ProbeLoopForTest exposes the underlying loop pointer for in-package

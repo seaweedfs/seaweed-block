@@ -419,13 +419,32 @@ func run(f flags) int {
 		//      ALSO here (peers may or may not exist yet; empty peer
 		//      set is safely no-op per Batch 3 HappyPath).
 		if f.degradedProbeInterval > 0 {
+			// G5-5C Batch #7: per-peer adapter registry is the engine
+			// state holder for each admitted peer (NOT for the host's
+			// own slot, which already has h.Adapter()). The probe loop's
+			// ProductionProbeFn routes per-peer via this registry so
+			// engine.checkReplicaID accepts the events.
+			peerRegistry := volume.NewPeerAdapterRegistry(f.volumeID, f.replicaID)
+			if err := replVolume.ConfigurePeerLifecycleHook(peerRegistry.OnPeerAdded, peerRegistry.OnPeerRemoved); err != nil {
+				fmt.Fprintln(os.Stderr, "blockvolume: peer lifecycle hook:", err)
+				_ = replVolume.Close()
+				_ = durableProv.Close()
+				if status != nil {
+					shutCtx, shutCancel := context.WithTimeout(context.Background(), 2*time.Second)
+					_ = status.Close(shutCtx)
+					shutCancel()
+				}
+				_ = h.Close()
+				return 1
+			}
+
 			loopCfg := replication.ProbeLoopConfig{
 				Interval:      f.degradedProbeInterval,
 				MaxConcurrent: 1, // architect-bound v0.5 — only 1 supported
 				CooldownBase:  f.degradedProbeCooldownBase,
 				CooldownCap:   f.degradedProbeCooldownCap,
 			}
-			probeFn := volume.ProductionProbeFn(h.Adapter())
+			probeFn := volume.ProductionProbeFn(peerRegistry.AdapterFor)
 			if err := replVolume.ConfigureProbeLoop(loopCfg, probeFn, time.Now); err != nil {
 				fmt.Fprintln(os.Stderr, "blockvolume: probe loop configure:", err)
 				_ = replVolume.Close()

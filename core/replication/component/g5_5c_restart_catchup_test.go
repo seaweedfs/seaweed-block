@@ -76,11 +76,17 @@ func rebindReplicaListener(t *testing.T, c *Cluster, idx int) {
 
 // configureProbeLoopOnCluster wires the production probe loop onto
 // the cluster's primary RepVol using the same path cmd/blockvolume
-// would use in production: ProductionProbeFn(adapter) →
-// ConfigureProbeLoop → StartProbeLoop. Single-replica cluster only
-// (cluster harness has one adapter per replica; a multi-replica
-// production wiring would need a router probeFn — out of scope for
-// this test).
+// would use in production AFTER G5-5C Batch #7: per-peer adapter
+// registry → ProductionProbeFn(router) → ConfigureProbeLoop →
+// StartProbeLoop.
+//
+// The cluster harness's WithEngineDrivenRecovery already constructs
+// per-peer adapters; we install them into a static-router closure
+// (NOT using PeerAdapterRegistry directly because the harness
+// pre-built them). In production, cmd/blockvolume uses
+// PeerAdapterRegistry instead, but the routing CONTRACT is the same:
+// look up adapter by replicaID. Both paths exercise the same
+// engine.checkReplicaID acceptance.
 func configureProbeLoopOnCluster(t *testing.T, c *Cluster) {
 	t.Helper()
 	if c.primary.RepVol == nil {
@@ -95,7 +101,14 @@ func configureProbeLoopOnCluster(t *testing.T, c *Cluster) {
 		CooldownBase:  20 * time.Millisecond,  // determinism: tight loop
 		CooldownCap:   200 * time.Millisecond, // determinism: short cap
 	}
-	probeFn := volume.ProductionProbeFn(c.primary.adapters[0])
+	// Per-peer router: cluster's adapters[0] tracks "replica-0".
+	router := volume.AdapterRouter(func(replicaID string) *adapter.VolumeReplicaAdapter {
+		if replicaID == "replica-0" {
+			return c.primary.adapters[0]
+		}
+		return nil
+	})
+	probeFn := volume.ProductionProbeFn(router)
 	if err := c.primary.RepVol.ConfigureProbeLoop(cfg, probeFn, time.Now); err != nil {
 		t.Fatalf("ConfigureProbeLoop: %v", err)
 	}

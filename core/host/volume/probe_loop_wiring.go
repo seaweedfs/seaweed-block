@@ -33,6 +33,16 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/replication"
 )
 
+// AdapterRouter is the per-peer adapter lookup signature. The probe
+// loop's router probeFn calls AdapterRouter(replicaID) to get the
+// per-peer adapter for forwarding the probe result. Returning nil
+// indicates "no adapter registered for this peer" — the probeFn
+// treats that as a transport failure (logs + returns non-nil err).
+//
+// Production implementations: PeerAdapterRegistry.AdapterFor.
+// Test implementations: a closure over a map.
+type AdapterRouter func(replicaID string) *adapter.VolumeReplicaAdapter
+
 // ProductionProbeFn returns a replication.ProbeFn suitable for
 // installation via ReplicationVolume.ConfigureProbeLoop on a host
 // running the production binary. The returned function:
@@ -40,9 +50,13 @@ import (
 //   - mints a fresh probe sessionID via replication.MintProbeSessionID;
 //   - dials peer.Executor().Probe with the peer's current Target
 //     fields (DataAddr / CtrlAddr / Epoch / EndpointVersion);
-//   - forwards the raw adapter.ProbeResult into adapter.OnProbeResult
-//     so the engine's NormalizeProbe path drives the recovery
-//     decision (probe → R/S/H → decide → catch-up / rebuild / none);
+//   - looks up the PER-PEER adapter via the router (G5-5C Batch #7);
+//   - forwards the raw adapter.ProbeResult into the per-peer
+//     adapter.OnProbeResult so the engine's NormalizeProbe path
+//     drives the recovery decision FOR THAT PEER (probe → R/S/H →
+//     decide → catch-up / rebuild / none); the per-peer adapter's
+//     engine state tracks Identity.ReplicaID = peer's ReplicaID, so
+//     engine.checkReplicaID accepts the event;
 //   - returns a non-nil error iff the probe failed to complete (so
 //     the probe loop's ResultFn can advance per-peer backoff).
 //     A successful probe with FailReason set still returns nil here
@@ -52,23 +66,24 @@ import (
 //     return value (architect Batch #5 self-check #3).
 //
 // The returned probeFn is safe to share across all peers of the
-// same volume; ReplicaID identification flows from the *ReplicaPeer
-// argument the loop passes in.
+// same volume; the AdapterRouter selects the right per-peer adapter
+// at dispatch time.
 //
-// Called by: cmd/blockvolume main wire, after the host's adapter
-// has been constructed and the ReplicationVolume has been built.
-// Owns: nothing (pure closure over the supplied adapter).
-// Borrows: a *adapter.VolumeReplicaAdapter pointer that the caller
-// retains; lifetime must outlive the probe loop's lifetime.
-func ProductionProbeFn(adpt *adapter.VolumeReplicaAdapter) replication.ProbeFn {
-	if adpt == nil {
-		// Fail-closed shim: if no adapter is wired, return a probeFn
+// Called by: cmd/blockvolume main wire, after PeerAdapterRegistry
+// is constructed and ConfigurePeerLifecycleHook is wired into
+// ReplicationVolume.
+// Owns: nothing (pure closure over the router).
+// Borrows: AdapterRouter — caller retains; lifetime must outlive
+// the probe loop's lifetime.
+func ProductionProbeFn(router AdapterRouter) replication.ProbeFn {
+	if router == nil {
+		// Fail-closed shim: if no router is wired, return a probeFn
 		// that ALWAYS reports failure (so cooldown progresses + log
 		// is loud). Callers should not pass nil; this guard exists to
 		// keep the probe-loop subsystem from panicking if the
 		// composition root is misconfigured.
 		return func(_ context.Context, peer *replication.ReplicaPeer) error {
-			return fmt.Errorf("ProductionProbeFn: nil adapter wired (peer=%s)", peer.Target().ReplicaID)
+			return fmt.Errorf("ProductionProbeFn: nil router wired (peer=%s)", peer.Target().ReplicaID)
 		}
 	}
 	return func(ctx context.Context, peer *replication.ReplicaPeer) error {
@@ -106,9 +121,23 @@ func ProductionProbeFn(adpt *adapter.VolumeReplicaAdapter) replication.ProbeFn {
 			return err
 		}
 
+		// (3a) Per-peer adapter lookup. If router returns nil for this
+		// peer (registry misconfigured / peer added before registry
+		// caught up), fail the probe so backoff advances and the
+		// log is loud.
+		adpt := router(t.ReplicaID)
+		if adpt == nil {
+			return fmt.Errorf("ProductionProbeFn: no adapter registered for peer=%s (PeerAdapterRegistry not synced?)", t.ReplicaID)
+		}
+
 		result := exec.Probe(t.ReplicaID, t.DataAddr, t.ControlAddr, sessionID, t.Epoch, t.EndpointVersion)
 
-		// (4) Forward to adapter — engine ingress for probe facts.
+		// (4) Forward to PER-PEER adapter — engine ingress for probe
+		// facts. The per-peer adapter's engine state tracks
+		// Identity.ReplicaID = peer's ReplicaID, so the engine's
+		// checkReplicaID accepts the event (G5-5C Batch #7 fix —
+		// production wire was previously feeding the host's own-slot
+		// adapter, which dropped peer events as wrong_replica).
 		// adapter.OnProbeResult is non-blocking (returns ApplyLog
 		// after Apply runs synchronously). Any panic is recovered by
 		// the probe loop's dispatchProbe (CP4B-2 lesson 3).

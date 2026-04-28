@@ -74,17 +74,42 @@ func TestNoOtherAssignmentInfoConstruction(t *testing.T) {
 		})
 	}
 
-	// Require exactly one hit, inside decodeAssignmentFact in
-	// subscribe.go. Any other shape fails.
-	if len(hits) != 1 {
-		t.Fatalf("expected exactly 1 adapter.AssignmentInfo composite literal in core/host/volume (outside tests); got %d: %+v", len(hits), hits)
+	// Allowed construction sites (PCDD-STUFFING-001 scope):
+	//   1. decodeAssignmentFact in subscribe.go — the master-to-host
+	//      fact decoder (T0 sketch §3.1).
+	//   2. OnPeerAdded in peer_adapter_registry.go — G5-5C Batch #7
+	//      per-peer engine identity priming. The registry constructs
+	//      one AssignmentInfo per admitted peer to seed the per-peer
+	//      adapter's engine state (so engine.checkReplicaID accepts
+	//      probe results targeted at that peer). This is NOT a
+	//      master-decode site; it's a peer-state initializer using
+	//      data already decoded upstream and routed through
+	//      ReplicaTarget.
+	//
+	// Any literal outside these two named functions fails the test —
+	// the rule predates Batch #7 but the per-peer-adapter shape
+	// requires a 2nd site that is bounded, named, and AST-pinned
+	// here.
+	allowed := map[string]string{
+		"decodeAssignmentFact": "subscribe.go",
+		"OnPeerAdded":          "peer_adapter_registry.go",
 	}
-	h := hits[0]
-	if filepath.Base(h.file) != "subscribe.go" {
-		t.Fatalf("adapter.AssignmentInfo literal must live in subscribe.go; found in %s at line %d (fn %s)", h.file, h.line, h.fn)
+
+	if len(hits) != len(allowed) {
+		t.Fatalf("expected exactly %d adapter.AssignmentInfo composite literals in core/host/volume (outside tests); got %d: %+v",
+			len(allowed), len(hits), hits)
 	}
-	if h.fn != "decodeAssignmentFact" {
-		t.Fatalf("adapter.AssignmentInfo literal must live inside decodeAssignmentFact; found in %s at line %d", h.fn, h.line)
+	for _, h := range hits {
+		wantFile, ok := allowed[h.fn]
+		if !ok {
+			t.Errorf("adapter.AssignmentInfo literal in disallowed function %s (file %s, line %d). Allowed: %v",
+				h.fn, h.file, h.line, allowed)
+			continue
+		}
+		if filepath.Base(h.file) != wantFile {
+			t.Errorf("adapter.AssignmentInfo literal in %s must live in %s; found in %s at line %d",
+				h.fn, wantFile, h.file, h.line)
+		}
 	}
 }
 
