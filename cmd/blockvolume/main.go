@@ -79,6 +79,15 @@ type flags struct {
 	durableBlocks    uint
 	durableBlockSize uint
 
+	// G6 §1.A α: WAL retention window past checkpoint LSN. Zero =
+	// pre-G6 strict checkpoint-driven recycle (existing behavior).
+	// Non-zero = walstore relaxes recovery-scan recycle gate to
+	// fromLSN > checkpointLSN - walRetentionLSNs, giving a slow
+	// replica room to catch up while it lags within the window.
+	// Substrate semantics differ: see ProviderConfig.WALRetentionLSNs
+	// godoc. Pinned by INV-G6-RETENTION-POLICY-OPERATOR-VISIBLE.
+	walRetentionLSNs uint64
+
 	// G5-5C degraded-peer probe loop (primary-side runtime recovery
 	// trigger). Off by default; --degraded-probe-interval=0 keeps the
 	// loop disabled so existing G5-4 deployments behave unchanged.
@@ -115,6 +124,16 @@ func parseFlags(args []string) (flags, error) {
 	fs.StringVar(&f.durableImpl, "durable-impl", "smartwal", "LogicalStorage impl: smartwal (default) or walstore; ignored unless --durable-root is set")
 	fs.UintVar(&f.durableBlocks, "durable-blocks", 2048, "number of blocks per volume on first create (ignored when opening existing)")
 	fs.UintVar(&f.durableBlockSize, "durable-blocksize", 4096, "block size in bytes on first create")
+	fs.Uint64Var(&f.walRetentionLSNs, "wal-retention-lsns", 0,
+		"G6 §1.A α: WAL retention window past checkpoint LSN (walstore only). "+
+			"Zero (default) preserves pre-G6 strict checkpoint-driven recycle. "+
+			"Non-zero relaxes the recovery-scan recycle gate so a replica lagging "+
+			"within the configured envelope still has a catch-up scan path; once a "+
+			"replica falls past this window the engine escalates to rebuild. "+
+			"Substrate semantics: walstore (append-only) honors this directly; "+
+			"smartwal (fixed-size ring) bounds retention via --durable-blocks instead "+
+			"and ignores this flag. Recommended starting value for sustained-write "+
+			"workloads on walstore: 10000 LSNs (sized to expected replica lag).")
 	fs.DurationVar(&f.degradedProbeInterval, "degraded-probe-interval", 0,
 		"G5-5C primary-side degraded-peer probe loop interval; 0 = OFF (default; existing G5-4 behavior preserved). "+
 			"Recommended production value: 5s. Distinct from --degraded-probe-cooldown-base: this is how often "+
@@ -341,10 +360,11 @@ func run(f flags) int {
 	var durableProv *durable.DurableProvider
 	if f.durableRoot != "" {
 		cfg := durable.ProviderConfig{
-			Impl:        durable.ImplName(f.durableImpl),
-			StorageRoot: f.durableRoot,
-			BlockSize:   int(f.durableBlockSize),
-			NumBlocks:   uint32(f.durableBlocks),
+			Impl:             durable.ImplName(f.durableImpl),
+			StorageRoot:      f.durableRoot,
+			BlockSize:        int(f.durableBlockSize),
+			NumBlocks:        uint32(f.durableBlocks),
+			WALRetentionLSNs: f.walRetentionLSNs, // G6 §1.A α
 		}
 		dp, err := durable.NewDurableProvider(cfg, h.ProjectionView())
 		if err != nil {

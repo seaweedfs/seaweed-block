@@ -57,21 +57,39 @@ func (s *WALStore) ScanLBAs(fromLSN uint64, fn func(RecoveryEntry) error) error 
 	}
 	checkpointLSN := s.checkpointLSN
 	headLSN := s.nextLSN
+	retentionLSNs := s.recoveryRetentionLSNs
 	s.mu.RUnlock()
 
-	// ErrWALRecycled: fromLSN must be > checkpointLSN. The flusher
-	// only advances checkpointLSN AFTER writing the corresponding
-	// extent blocks; entries with LSN <= checkpointLSN are no longer
-	// available in the WAL (their physical WAL space may have been
-	// reused by newer appends).
-	if fromLSN <= checkpointLSN && checkpointLSN > 0 {
+	// G6 §1.A α retention gate: the strict pre-G6 recycle threshold
+	// is checkpointLSN; G6 introduces an operator-tunable retention
+	// window so a slow replica still has a recovery scan path while
+	// it lags within the configured envelope.
+	//
+	// Effective recycle floor:
+	//   floor = checkpointLSN - retentionLSNs   (saturating to 0)
+	//
+	// fromLSN is recycled when fromLSN <= floor (strict <= preserved
+	// from pre-G6 to keep the boundary semantic identical: an LSN
+	// equal to the floor IS recycled). retentionLSNs == 0 reduces to
+	// the pre-G6 'fromLSN <= checkpointLSN' gate exactly.
+	//
+	// Pinned by: INV-G6-CATCHUP-CONVERGES-WITHIN-RETENTION (positive)
+	// + INV-G6-RETENTION-POLICY-OPERATOR-VISIBLE (the knob itself).
+	floor := checkpointLSN
+	if retentionLSNs >= floor {
+		floor = 0
+	} else {
+		floor = checkpointLSN - retentionLSNs
+	}
+	if fromLSN <= floor && checkpointLSN > 0 {
 		// T4d-1: wrap in typed RecoveryFailure so transport can
 		// extract the kind via errors.As. errors.Is(err,
 		// ErrWALRecycled) still works via Unwrap, preserving
 		// pre-T4d-1 callers during the migration window.
 		return NewWALRecycledFailure(
 			ErrWALRecycled,
-			fmt.Sprintf("fromLSN=%d checkpointLSN=%d headLSN=%d", fromLSN, checkpointLSN, headLSN),
+			fmt.Sprintf("fromLSN=%d checkpointLSN=%d headLSN=%d retentionLSNs=%d floor=%d",
+				fromLSN, checkpointLSN, headLSN, retentionLSNs, floor),
 		)
 	}
 	if fromLSN >= headLSN {

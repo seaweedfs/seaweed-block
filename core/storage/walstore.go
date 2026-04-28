@@ -74,6 +74,17 @@ type WALStore struct {
 	// only by the flusher.
 	checkpointLSN uint64
 
+	// recoveryRetentionLSNs is the operator-tunable retention window
+	// past checkpointLSN: the recovery scan accepts fromLSN as long as
+	// fromLSN > checkpointLSN - recoveryRetentionLSNs (G6 §1.A α).
+	// Zero means strict checkpoint-driven recycle (pre-G6 behavior).
+	// Operator sets via blockvolume's --wal-retention-lsns flag at
+	// store construction. Stored in-memory only — NOT persisted to
+	// the superblock; on restart the daemon re-applies the flag.
+	//
+	// Pinned by: INV-G6-RETENTION-POLICY-OPERATOR-VISIBLE.
+	recoveryRetentionLSNs uint64
+
 	syncs atomic.Uint64 // total fsync operations performed (test/diagnostic)
 }
 
@@ -484,6 +495,31 @@ func (s *WALStore) NumBlocks() uint32 {
 
 // BlockSize returns the IO unit size in bytes.
 func (s *WALStore) BlockSize() int { return int(s.sb.BlockSize) }
+
+// SetRecoveryRetentionLSNs configures the WAL retention window past
+// checkpointLSN. After this is set, the recovery scan accepts
+// fromLSN > checkpointLSN - retentionLSNs (G6 §1.A α). Zero (the
+// default) preserves pre-G6 strict checkpoint-driven recycle.
+//
+// Operator-tunable via blockvolume's --wal-retention-lsns flag.
+// In-memory only; not persisted (re-applied on restart from CLI).
+//
+// Called by: DurableProvider construction path after walstore is
+// opened, with the operator-supplied value from cmd/blockvolume.
+// Owns: recoveryRetentionLSNs field under s.mu.
+func (s *WALStore) SetRecoveryRetentionLSNs(n uint64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.recoveryRetentionLSNs = n
+}
+
+// RecoveryRetentionLSNs returns the currently-configured retention
+// window past checkpointLSN. Test/diagnostic accessor.
+func (s *WALStore) RecoveryRetentionLSNs() uint64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.recoveryRetentionLSNs
+}
 
 // AdvanceFrontier bumps the recorded frontier without writing data.
 // Used by the rebuild server to declare the replica's frontier

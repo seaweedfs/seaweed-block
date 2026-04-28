@@ -78,6 +78,23 @@ type ProviderConfig struct {
 	// OpenTimeout caps how long Open waits for the projection to
 	// report healthy for the requested volumeID. Zero → default 5s.
 	OpenTimeout time.Duration
+
+	// WALRetentionLSNs is the operator-tunable retention window past
+	// the substrate's checkpoint LSN (G6 §1.A α). Zero = pre-G6
+	// strict checkpoint-driven recycle. Non-zero relaxes the recycle
+	// gate so a slow replica still has a recovery scan path while
+	// it lags within the configured envelope.
+	//
+	// Substrate semantics:
+	//   - ImplWALStore (append-only): WAL retention is purely the
+	//     scan-time gate; non-zero value relaxes the gate to
+	//     fromLSN > checkpointLSN - WALRetentionLSNs.
+	//   - ImplSmartWAL (fixed-size ring): retention is implicit from
+	//     ring capacity (--durable-blocks). This flag is informational
+	//     for ImplSmartWAL; operators size retention via NumBlocks.
+	//
+	// Pinned by: INV-G6-RETENTION-POLICY-OPERATOR-VISIBLE.
+	WALRetentionLSNs uint64
 }
 
 // DurableProvider is the production frontend.Provider implementation.
@@ -347,6 +364,12 @@ func (p *DurableProvider) openExisting(volumeID, path string) (*volHandle, error
 		if err != nil {
 			return nil, fmt.Errorf("durable: OpenWALStore %s: %w", path, err)
 		}
+		// G6 §1.A α: plumb operator-tunable retention into walstore.
+		// Zero (pre-G6 default) preserves strict checkpoint-driven
+		// recycle.
+		if p.cfg.WALRetentionLSNs > 0 {
+			ws.SetRecoveryRetentionLSNs(p.cfg.WALRetentionLSNs)
+		}
 		s = ws
 	case ImplSmartWAL:
 		sw, err := smartwal.OpenStore(path)
@@ -374,6 +397,10 @@ func (p *DurableProvider) createFresh(volumeID, path string) (*volHandle, error)
 		ws, err := storage.CreateWALStore(path, p.cfg.NumBlocks, p.cfg.BlockSize)
 		if err != nil {
 			return nil, fmt.Errorf("durable: CreateWALStore %s: %w", path, err)
+		}
+		// G6 §1.A α (see openExisting comment for semantics).
+		if p.cfg.WALRetentionLSNs > 0 {
+			ws.SetRecoveryRetentionLSNs(p.cfg.WALRetentionLSNs)
 		}
 		s = ws
 	case ImplSmartWAL:
