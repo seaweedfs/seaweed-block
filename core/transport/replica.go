@@ -112,6 +112,14 @@ func (r *ReplicaListener) Serve() {
 // the conn or sends a frame; if you need to force handler exit
 // regardless of remote state (e.g., simulating replica-process death
 // in tests), use StopHard.
+//
+// Production / operational guidance: prefer Stop for normal shutdown
+// (process exit, role change, volume close) — handlers exit cleanly
+// after the OS-level FIN/RST from the remote primary's process exit
+// or transport timeout. StopHard is intended for test fault-injection
+// and exceptional emergency-stop paths only; using it as the default
+// shutdown route on production deployments would mask graceful-drain
+// bugs that real-world primaries depend on.
 func (r *ReplicaListener) Stop() {
 	select {
 	case <-r.stopCh:
