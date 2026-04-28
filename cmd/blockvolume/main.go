@@ -181,6 +181,37 @@ func parseFlags(args []string) (flags, error) {
 	return f, nil
 }
 
+// computeFrontendVolumeSize returns the byte capacity an iSCSI/NVMe
+// target should advertise: durableBlocks × blockSize.
+//
+// G5-5C addendum (P0 product fix, architect ruling 2026-04-28):
+// without this, the frontend silently used 1 MiB defaults regardless
+// of the daemon's actual durable config, breaking any workload above
+// 1 MiB. Inscribed as INV-G5-FRONTEND-CAPACITY-FROM-DURABLE-CONFIG —
+// "iSCSI/NVMe externally-visible volume capacity and block count
+// must derive from --durable-blocks × --durable-blocksize, not
+// silently fall back to frontend defaults."
+//
+// Overflow guard: blocks × blockSize is computed in uint64 and a
+// fits-in-uint64 check is applied (32×32 → 64 cannot overflow today
+// since both fit in uint32, but keep the guard for future
+// hardening).
+func computeFrontendVolumeSize(blocks uint, blockSize uint) (uint64, error) {
+	if blocks == 0 {
+		return 0, fmt.Errorf("computeFrontendVolumeSize: --durable-blocks must be > 0")
+	}
+	if blockSize == 0 {
+		return 0, fmt.Errorf("computeFrontendVolumeSize: --durable-blocksize must be > 0")
+	}
+	bs := uint64(blockSize)
+	bk := uint64(blocks)
+	out := bk * bs
+	if out/bs != bk {
+		return 0, fmt.Errorf("computeFrontendVolumeSize: blocks(%d) * blockSize(%d) overflows uint64", blocks, blockSize)
+	}
+	return out, nil
+}
+
 // enforceFrontendLoopbackBind mirrors volume.StatusServer's
 // guard for any T2 frontend (iscsi / nvme): refuses to bind on
 // anything other than 127.0.0.1 / ::1. T2 frontends are
@@ -501,6 +532,44 @@ func run(f flags) int {
 		replListen = listener
 	}
 
+	// G5-5C addendum (architect ruling 2026-04-28): frontend volume
+	// capacity MUST derive from the daemon's --durable-blocks ×
+	// --durable-blocksize when --durable-root is set, not silently
+	// fall back to frontend defaults. Without this plumb-through,
+	// iSCSI/NVMe advertise 1 MiB regardless of the daemon's actual
+	// durable capacity, which breaks any workload > 1 MiB.
+	//
+	// Memback path (--durable-root unset): keep frontend defaults.
+	// The frontend HandlerConfig zero-value path picks
+	// DefaultBlockSize=512 + DefaultVolumeBlocks=2048 (1 MiB) which
+	// is the historical memback contract and what the existing T2
+	// tests expect.
+	//
+	// Pinned by: INV-G5-FRONTEND-CAPACITY-FROM-DURABLE-CONFIG.
+	var (
+		frontendBlockSize  uint32
+		frontendVolumeSize uint64
+	)
+	if f.durableRoot != "" {
+		bs, err := computeFrontendVolumeSize(f.durableBlocks, f.durableBlockSize)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "blockvolume: frontend volume size:", err)
+			if status != nil {
+				shutCtx, shutCancel := context.WithTimeout(context.Background(), 2*time.Second)
+				_ = status.Close(shutCtx)
+				shutCancel()
+			}
+			_ = h.Close()
+			return 1
+		}
+		frontendBlockSize = uint32(f.durableBlockSize)
+		frontendVolumeSize = bs
+	}
+	// frontendBlockSize / frontendVolumeSize are zero on memback —
+	// HandlerConfig zero-value defaulting kicks in inside iscsi /
+	// nvme construction (preserves T2 historical 1 MiB / 512 B
+	// behavior).
+
 	var iscsiTarget *iscsi.Target
 	if f.iscsiListen != "" {
 		prov := provider
@@ -509,6 +578,10 @@ func run(f flags) int {
 			IQN:      f.iscsiIQN,
 			VolumeID: f.volumeID,
 			Provider: prov,
+			Handler: iscsi.HandlerConfig{
+				BlockSize:  frontendBlockSize,
+				VolumeSize: frontendVolumeSize,
+			},
 		})
 		iscsiAddr, err := iscsiTarget.Start()
 		if err != nil {
@@ -537,7 +610,15 @@ func run(f flags) int {
 			SubsysNQN: f.nvmeSubsysNQN,
 			VolumeID:  f.volumeID,
 			Provider:  prov,
-			Handler:   nvme.HandlerConfig{NSID: uint32(f.nvmeNS)},
+			// G5-5C addendum: capacity from durable config (see iSCSI block above).
+			// frontendBlockSize / frontendVolumeSize are 0 on memback
+			// path; nvme HandlerConfig zero-value defaulting preserves
+			// historical 1 MiB / 512 B contract for T2 tests.
+			Handler: nvme.HandlerConfig{
+				NSID:       uint32(f.nvmeNS),
+				BlockSize:  frontendBlockSize,
+				VolumeSize: frontendVolumeSize,
+			},
 		})
 		nvmeAddr, err := nvmeTarget.Start()
 		if err != nil {
