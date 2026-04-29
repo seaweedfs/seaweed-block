@@ -156,6 +156,30 @@ const (
 	// retried as a recovery failure; engine handles via the
 	// invalidation path.
 	RecoveryFailureSessionInvalidated
+
+	// RecoveryFailurePinUnderRetention — mid-session contract
+	// violation observed by sender: a `BaseBatchAck` arrived with
+	// `AcknowledgedLSN` below primary's current S boundary, so
+	// `coord.SetPinFloor(replicaID, ack, primaryS)` returned the
+	// typed `recovery.Failure(PinUnderRetention)`. The peer's
+	// progress fell behind the primary's WAL retention while the
+	// session was streaming — see INV-PIN-COMPATIBLE-WITH-RETENTION,
+	// docs/recovery-pin-floor-wire.md §5, and feedback round-43
+	// `INV-REPL-RECOVERY-STALE-ENTRY-SKIP-PER-LBA`.
+	//
+	// NOT RETRYABLE on the same lineage. Engine MUST treat this as
+	// terminal for the active recovery: skip the retry budget,
+	// emit `PublishDegraded`, and rely on the next probe to mint a
+	// fresh lineage with `fromLSN ≥ current S`. Same shape as
+	// `RecoveryFailureStartTimeout` — see `applySessionFailed` in
+	// apply.go.
+	//
+	// Mapping ratified by architect 2026-04-29 (Option A: bug-fix
+	// shape). Distinct from `RecoveryFailureWALRecycled` because
+	// WALRecycled is a cold-start scan failure (escalates to
+	// Rebuild); PinUnderRetention is a mid-session violation
+	// (terminal for current lineage, no auto-escalation).
+	RecoveryFailurePinUnderRetention
 )
 
 // String returns the human-readable kind name for diagnostics. NOT
@@ -174,6 +198,8 @@ func (k RecoveryFailureKind) String() string {
 		return "StartTimeout"
 	case RecoveryFailureSessionInvalidated:
 		return "SessionInvalidated"
+	case RecoveryFailurePinUnderRetention:
+		return "PinUnderRetention"
 	default:
 		return "Unknown"
 	}
