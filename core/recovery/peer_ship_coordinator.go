@@ -4,7 +4,16 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+
+	"github.com/seaweedfs/seaweed-block/core/storage"
 )
+
+// Compile-time assertion: PeerShipCoordinator's
+// MinPinAcrossActiveSessions signature satisfies the substrate's
+// RecycleFloorSource interface (G7-redo priority 2.5). If this break
+// it means the coordinator's pin-floor query method changed and the
+// substrate gate needs to track.
+var _ storage.RecycleFloorSource = (*PeerShipCoordinator)(nil)
 
 // ReplicaID is the per-volume peer identifier the coordinator keys on.
 // Defined locally so this package stays independent of engine/adapter

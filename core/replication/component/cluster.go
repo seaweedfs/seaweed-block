@@ -446,9 +446,15 @@ func (c *Cluster) Start() *Cluster {
 
 	// G7-redo: when dual-lane is enabled, instantiate the per-volume
 	// coordinator BEFORE building executors so each executor
-	// captures the same instance.
+	// captures the same instance. G7-redo 2.5: also install the
+	// recycle-floor gate on the primary substrate (walstore /
+	// memorywal both implement RecycleFloorGate) so checkpoint
+	// advancement clamps at min(pin_floor) during active sessions.
 	if c.dualLane {
 		c.coord = recovery.NewPeerShipCoordinator()
+		if gate, ok := pStore.(storage.RecycleFloorGate); ok {
+			gate.SetRecycleFloorSource(c.coord)
+		}
 	}
 	executors := make([]*transport.BlockExecutor, c.replicaN)
 	for i, r := range c.replicas {

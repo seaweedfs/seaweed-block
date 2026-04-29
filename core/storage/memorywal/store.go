@@ -65,6 +65,12 @@ type Store struct {
 	// installed an entry at high LSN) gets the available records
 	// rather than a spurious WALRecycled error.
 	recycleFloor uint64
+
+	// recycleFloorSrc gates AdvanceWALTail when non-nil: the
+	// proposed newTail cannot exceed `MinPinAcrossActiveSessions`.
+	// Same semantic as walstore.WALStore — see
+	// docs/recovery-wiring-plan.md §6.
+	recycleFloorSrc storage.RecycleFloorSource
 }
 
 type walRecord struct {
@@ -178,9 +184,20 @@ func (s *Store) AdvanceFrontier(lsn uint64) {
 // recycling. After this, ScanLBAs(fromLSN < newTail) returns
 // storage.RecoveryFailure(Kind=WALRecycled). Sets recycleFloor as
 // the explicit "you asked for LSNs we've recycled" gate.
+//
+// G7-redo 2.5: when a RecycleFloorSource is installed and reports
+// any active session, the proposed newTail is clamped to
+// MinPinAcrossActiveSessions. INV-RECYCLE-GATED-BY-MIN-ACTIVE-PIN.
 func (s *Store) AdvanceWALTail(newTail uint64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.recycleFloorSrc != nil {
+		if floor, anyActive := s.recycleFloorSrc.MinPinAcrossActiveSessions(); anyActive {
+			if newTail > floor {
+				newTail = floor
+			}
+		}
+	}
 	if newTail <= s.recycleFloor {
 		return
 	}
@@ -312,6 +329,17 @@ func (s *Store) AppliedLSNs() (map[uint32]uint64, error) {
 		}
 	}
 	return out, nil
+}
+
+// SetRecycleFloorSource installs the gate consulted in AdvanceWALTail
+// to clamp WAL recycle against active recover-session pin floors.
+// Pass nil to disable.
+//
+// Implements storage.RecycleFloorGate.
+func (s *Store) SetRecycleFloorSource(src storage.RecycleFloorSource) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.recycleFloorSrc = src
 }
 
 func (s *Store) Close() error {

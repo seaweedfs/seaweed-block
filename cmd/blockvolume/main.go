@@ -497,6 +497,18 @@ func run(f flags) int {
 				}
 				return transport.NewBlockExecutorWithDualLane(s, replicaAddr, peerDualLane, recoveryCoord, recovery.ReplicaID(replicaID))
 			})
+			// G7-redo 2.5: install the recycle-floor gate on the
+			// substrate so the WAL recycle path consults the
+			// per-volume coordinator's MinPinAcrossActiveSessions.
+			// Skipped silently when substrate doesn't implement
+			// RecycleFloorGate (BlockStore today, smartwal until it
+			// opts in). walstore + memorywal both satisfy.
+			if gate, ok := store.(storage.RecycleFloorGate); ok {
+				gate.SetRecycleFloorSource(recoveryCoord)
+				fmt.Fprintln(os.Stderr, "blockvolume: G7-redo 2.5 recycle gate installed (substrate honors min(pin_floor))")
+			} else {
+				fmt.Fprintln(os.Stderr, "blockvolume: G7-redo 2.5 substrate does not implement RecycleFloorGate; pin_floor advances unenforced at recycle")
+			}
 			fmt.Fprintln(os.Stderr, "blockvolume: G7-redo recovery-mode=dual-lane (PrimaryBridge per-peer; coord per-volume)")
 		}
 
