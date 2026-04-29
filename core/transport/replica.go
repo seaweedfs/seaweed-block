@@ -359,6 +359,29 @@ func (r *ReplicaListener) handleConn(conn net.Conn) {
 			// any block data — AdvanceFrontier only updates nextLSN/walHead.
 			r.store.AdvanceFrontier(lineage.TargetLSN)
 			frontier, _ := r.store.Sync()
+
+			// INV-G7-POST-REBUILD-LIVE-SHIP-RESUMES: downgrade activeLineage
+			// to live-form (TargetLSN = liveShipTargetLSNSentinel) so
+			// post-rebuild MsgShipEntry frames pass acceptMutationLineage's
+			// case-0 tiebreaker (same Epoch/EV → check TargetLSN equality).
+			//
+			// Without this, the rebuild lineage's real TargetLSN sticks in
+			// activeLineage; any subsequent live-ship lineage carries
+			// TargetLSN = liveShipTargetLSNSentinel ≠ rebuild's TargetLSN,
+			// fails the tiebreaker, and is rejected forever. That stranded
+			// every concurrent write that landed in primary's WAL after
+			// rebuild dispatch — surfaced by G7 §2 #5 canonical determinism
+			// run on 94bb860 (1 GREEN + 2 RED in 3 attempts; the RED runs
+			// had 498 mismatches at exactly the concurrent-LBA range, all
+			// reading as zero on the replica).
+			r.mu.Lock()
+			r.activeLineage = RecoveryLineage{
+				Epoch:           lineage.Epoch,
+				EndpointVersion: lineage.EndpointVersion,
+				SessionID:       lineage.SessionID,
+				TargetLSN:       liveShipTargetLSNSentinel,
+			}
+			r.mu.Unlock()
 			// Echo the request's full lineage in the rebuild-done ack
 			// per T4b-1 wire extension. T4b scope does not yet validate
 			// this lineage on the primary (catch-up/rebuild paths are
