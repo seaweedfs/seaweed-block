@@ -17,8 +17,10 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/adapter"
 	"github.com/seaweedfs/seaweed-block/core/frontend"
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
+	"github.com/seaweedfs/seaweed-block/core/recovery"
 	"github.com/seaweedfs/seaweed-block/core/replication"
 	"github.com/seaweedfs/seaweed-block/core/storage"
+	"github.com/seaweedfs/seaweed-block/core/storage/memorywal"
 	"github.com/seaweedfs/seaweed-block/core/storage/smartwal"
 	"github.com/seaweedfs/seaweed-block/core/transport"
 )
@@ -61,6 +63,23 @@ func Walstore(t *testing.T, dir, label string, blocks uint32, blockSize int) (st
 	}
 }
 
+// MemoryWAL is the V2-faithful in-memory WAL substrate factory
+// (core/storage/memorywal). Distinct from BlockStore in
+// core/storage: MemoryWAL preserves write-time LSN through ScanLBAs
+// (RecoveryModeWALReplay) so component tests that need per-LSN
+// replay semantics get the right shape without disk overhead.
+//
+// dir/label arguments are accepted to match SubstrateFactory but
+// ignored (the substrate is in-memory). Cleanup is a no-op (Close
+// only flips the closed flag; no files to remove).
+func MemoryWAL(t *testing.T, _ string, _ string, blocks uint32, blockSize int) (storage.LogicalStorage, func()) {
+	t.Helper()
+	s := memorywal.NewStore(blocks, blockSize)
+	return s, func() {
+		_ = s.Close()
+	}
+}
+
 // Defaults — tunable per-test via With* methods.
 const (
 	DefaultBlocks    uint32 = 64
@@ -92,6 +111,13 @@ type Cluster struct {
 	withLiveShip   bool               // if true, primary spins up StorageBackend + ReplicationVolume
 	engineRecovery bool               // T4d hook (currently no-op + warning); see WithEngineDrivenRecovery
 	withApplyGate  bool               // T4d-2: install replication.ReplicaApplyGate on each replica's listener
+	dualLane       bool               // G7-redo: route StartRebuild via core/recovery PrimaryBridge
+
+	// G7-redo: per-volume coordinator + per-replica dual-lane
+	// listeners populated by Start() when dualLane=true. Tests can
+	// inspect Coord() to assert pin floor / phase.
+	coord                *recovery.PeerShipCoordinator
+	dualLaneReplicaAddrs []string // index-aligned with replicas[]; empty when dualLane=false
 
 	// Built at Start()
 	primary  *PrimaryNode
@@ -137,6 +163,11 @@ type ReplicaNode struct {
 	Store    storage.LogicalStorage
 	Listener *transport.ReplicaListener
 	Addr     string
+
+	// DualLaneAddr is the recovery-package listener address bound
+	// alongside Listener when the cluster is built with
+	// WithDualLaneRecovery; empty otherwise.
+	DualLaneAddr string
 
 	// ApplyGate is non-nil iff cluster was built WithApplyGate (T4d-2).
 	ApplyGate *replication.ReplicaApplyGate
@@ -238,6 +269,45 @@ func (c *Cluster) WithEngineDrivenRecovery() *Cluster {
 	return c
 }
 
+// WithDualLaneRecovery routes StartRebuild through the core/recovery
+// PrimaryBridge (mirroring cmd/blockvolume's --recovery-mode=dual-lane).
+// Each replica gets a separate dual-lane listener bound to a different
+// localhost port; the per-volume coordinator is shared across all
+// per-replica executors so MinPinAcrossActiveSessions reflects the
+// true minimum.
+//
+// Compatible with WithEngineDrivenRecovery — engine-driven scenarios
+// can stack dual-lane on top so the engine emits StartRebuild and the
+// dual-lane bridge handles it transparently.
+//
+// Per docs/recovery-wiring-plan.md §7: this is the component-layer
+// dual-lane integration test surface; closes the gap between "single-
+// process unit POC" and "real engine→executor→wire→barrier round-trip".
+func (c *Cluster) WithDualLaneRecovery() *Cluster {
+	c.dualLane = true
+	return c
+}
+
+// Coord returns the per-volume PeerShipCoordinator when the cluster
+// was built WithDualLaneRecovery (nil otherwise). Tests use this to
+// assert pin floor advancement, phase transitions, etc.
+func (c *Cluster) Coord() *recovery.PeerShipCoordinator { return c.coord }
+
+// DualLaneReplicaAddr returns the i-th replica's dual-lane listen
+// address (bound by Start when WithDualLaneRecovery is set). Empty
+// when dual-lane is off. Diagnostic + edge-case tests only —
+// production code should never need this.
+func (c *Cluster) DualLaneReplicaAddr(i int) string {
+	c.t.Helper()
+	if !c.dualLane {
+		return ""
+	}
+	if i < 0 || i >= len(c.dualLaneReplicaAddrs) {
+		c.t.Fatalf("DualLaneReplicaAddr(%d): out of range (have %d)", i, len(c.dualLaneReplicaAddrs))
+	}
+	return c.dualLaneReplicaAddrs[i]
+}
+
 // Adapter returns the per-replica VolumeReplicaAdapter (T4d-4 part B
 // / round-47). Returns nil if cluster was NOT built with
 // WithEngineDrivenRecovery.
@@ -312,20 +382,56 @@ func (c *Cluster) Start() *Cluster {
 			c.t.Fatalf("%s: NewReplicaListener: %v", label, err)
 		}
 		listener.Serve()
-		node := &ReplicaNode{
-			Idx:       i,
-			Store:     store,
-			Listener:  listener,
-			Addr:      listener.Addr(),
-			ApplyGate: gate,
-			cleanup: func() {
-				listener.Stop()
+
+		// G7-redo: when dual-lane is enabled, bind a SECOND listener
+		// per replica for inbound recover-session conns. Lifecycle is
+		// goroutine-scoped here; replica cleanup tears it down.
+		var dualLaneAddr string
+		var dualLaneStop func()
+		if c.dualLane {
+			dlLn, lnErr := net.Listen("tcp", "127.0.0.1:0")
+			if lnErr != nil {
+				_ = listener
 				cleanup()
-			},
+				c.t.Fatalf("%s: dual-lane listen: %v", label, lnErr)
+			}
+			dualLaneAddr = dlLn.Addr().String()
+			bridge := recovery.NewReplicaBridge(store)
+			ctx, cancel := context.WithCancel(context.Background())
+			loopDone := make(chan struct{})
+			go func() {
+				defer close(loopDone)
+				bridge.AcceptDualLaneLoop(ctx, dlLn)
+			}()
+			dualLaneStop = func() {
+				cancel()
+				_ = dlLn.Close()
+				<-loopDone
+			}
+		}
+
+		nodeCleanup := func() {
+			if dualLaneStop != nil {
+				dualLaneStop()
+			}
+			listener.Stop()
+			cleanup()
+		}
+		node := &ReplicaNode{
+			Idx:           i,
+			Store:         store,
+			Listener:      listener,
+			Addr:          listener.Addr(),
+			DualLaneAddr:  dualLaneAddr,
+			ApplyGate:     gate,
+			cleanup:       nodeCleanup,
 		}
 		// Register replica cleanup FIRST so it runs LAST in LIFO.
 		c.t.Cleanup(node.cleanup)
 		c.replicas[i] = node
+		if c.dualLane {
+			c.dualLaneReplicaAddrs = append(c.dualLaneReplicaAddrs, dualLaneAddr)
+		}
 	}
 
 	// Bring up primary with one BlockExecutor per replica.
@@ -338,9 +444,22 @@ func (c *Cluster) Start() *Cluster {
 		pStore = c.primaryWrap(pStoreRaw)
 	}
 
+	// G7-redo: when dual-lane is enabled, instantiate the per-volume
+	// coordinator BEFORE building executors so each executor
+	// captures the same instance.
+	if c.dualLane {
+		c.coord = recovery.NewPeerShipCoordinator()
+	}
 	executors := make([]*transport.BlockExecutor, c.replicaN)
 	for i, r := range c.replicas {
-		executors[i] = transport.NewBlockExecutor(pStore, r.Addr)
+		if c.dualLane {
+			rid := recovery.ReplicaID(fmt.Sprintf("r-%d", i))
+			executors[i] = transport.NewBlockExecutorWithDualLane(
+				pStore, r.Addr, r.DualLaneAddr, c.coord, rid,
+			)
+		} else {
+			executors[i] = transport.NewBlockExecutor(pStore, r.Addr)
+		}
 	}
 	c.primary = &PrimaryNode{
 		Store:     pStore,
