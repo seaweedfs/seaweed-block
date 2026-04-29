@@ -12,6 +12,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -22,7 +23,9 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/frontend/memback"
 	"github.com/seaweedfs/seaweed-block/core/frontend/nvme"
 	"github.com/seaweedfs/seaweed-block/core/host/volume"
+	"github.com/seaweedfs/seaweed-block/core/recovery"
 	"github.com/seaweedfs/seaweed-block/core/replication"
+	"github.com/seaweedfs/seaweed-block/core/storage"
 	"github.com/seaweedfs/seaweed-block/core/transport"
 )
 
@@ -98,6 +101,18 @@ type flags struct {
 	degradedProbeInterval     time.Duration
 	degradedProbeCooldownBase time.Duration
 	degradedProbeCooldownCap  time.Duration
+
+	// G7-redo: recovery mode selector. "legacy" (default) keeps the
+	// existing single-lane core/transport rebuild path. "dual-lane"
+	// routes StartRebuild through core/recovery's PrimaryBridge,
+	// binding a separate listener at port=data-addr-port+1 per the
+	// deployment convention (docs/recovery-wiring-plan.md §4 Option A,
+	// architect ACK 2026-04-29).
+	//
+	// Default flip from legacy → dual-lane is a separate operations PR
+	// after one milestone of dual-lane GREEN observed in CI / hardware
+	// (architect §11 Resolution 3).
+	recoveryMode string
 }
 
 func parseFlags(args []string) (flags, error) {
@@ -146,9 +161,17 @@ func parseFlags(args []string) (flags, error) {
 		"G5-5C per-peer cooldown ceiling for the consecutive-failure backoff. "+
 			"Must be >= --degraded-probe-cooldown-base; values below base are normalized up to base. "+
 			"Ignored when --degraded-probe-interval=0.")
+	fs.StringVar(&f.recoveryMode, "recovery-mode", "legacy",
+		"G7-redo: recovery path. \"legacy\" (default) = single-lane "+
+			"core/transport rebuild. \"dual-lane\" = core/recovery PrimaryBridge "+
+			"with separate listener at data-addr port+1. Default flip is a "+
+			"separate ops PR after dual-lane GREEN milestone.")
 	fs.SetOutput(os.Stderr)
 	if err := fs.Parse(args); err != nil {
 		return flags{}, err
+	}
+	if f.recoveryMode != "legacy" && f.recoveryMode != "dual-lane" {
+		return flags{}, fmt.Errorf("--recovery-mode=%q invalid; want \"legacy\" or \"dual-lane\"", f.recoveryMode)
 	}
 	missing := []string{}
 	for name, val := range map[string]string{
@@ -451,6 +474,32 @@ func run(f flags) int {
 		replVolume = replication.NewReplicationVolume(f.volumeID, store)
 		h.SetReplicationVolume(replVolume)
 
+		// G7-redo: when --recovery-mode=dual-lane, inject the dual-lane
+		// executor factory so per-peer BlockExecutors route StartRebuild
+		// through core/recovery's PrimaryBridge. Per-volume coordinator
+		// is shared across all peers so MinPinAcrossActiveSessions
+		// reflects the true minimum (wiring plan §5).
+		//
+		// Dual-lane address derivation: peer.DataAddr's port + 1.
+		// Convention only — production may eventually carry a separate
+		// dual-lane field in AssignmentFact. See wiring plan §4 Option A.
+		if f.recoveryMode == "dual-lane" {
+			recoveryCoord := recovery.NewPeerShipCoordinator()
+			replVolume.SetDualLaneExecutorFactory(func(s storage.LogicalStorage, replicaAddr, replicaID string) *transport.BlockExecutor {
+				peerDualLane, err := deriveDualLaneAddr(replicaAddr)
+				if err != nil {
+					// Fall back to legacy ctor; the executor will not
+					// have a dual-lane path. Logged for diagnostics.
+					fmt.Fprintf(os.Stderr,
+						"blockvolume: recovery-mode=dual-lane but peer addr %q has no port+1 form (%v); falling back to legacy executor for this peer\n",
+						replicaAddr, err)
+					return transport.NewBlockExecutor(s, replicaAddr)
+				}
+				return transport.NewBlockExecutorWithDualLane(s, replicaAddr, peerDualLane, recoveryCoord, recovery.ReplicaID(replicaID))
+			})
+			fmt.Fprintln(os.Stderr, "blockvolume: G7-redo recovery-mode=dual-lane (PrimaryBridge per-peer; coord per-volume)")
+		}
+
 		// G5-5C: configure + start the degraded-peer probe loop if
 		// the operator opted in via --degraded-probe-interval > 0.
 		// Off by default — preserves G5-4 behavior. Architect-bound
@@ -550,6 +599,52 @@ func run(f flags) int {
 		}
 		listener.Serve()
 		replListen = listener
+
+		// G7-redo: when --recovery-mode=dual-lane, also bind a separate
+		// listener at port=data-addr-port+1 for inbound dual-lane
+		// recover-session connections. Each accepted conn is handed to
+		// a fresh recovery.Receiver via ReplicaBridge.AcceptDualLaneLoop.
+		// Listener lifecycle is goroutine-scoped here; daemon shutdown
+		// closes the underlying net.Listener via the deferred close
+		// added below (via the dualLaneListener variable + cleanup).
+		if f.recoveryMode == "dual-lane" {
+			dualLaneAddr, err := deriveDualLaneAddr(f.dataAddr)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "blockvolume: dual-lane listen addr derive:", err)
+				_ = replListen.Stop
+				_ = replVolume.Close()
+				_ = durableProv.Close()
+				if status != nil {
+					shutCtx, shutCancel := context.WithTimeout(context.Background(), 2*time.Second)
+					_ = status.Close(shutCtx)
+					shutCancel()
+				}
+				_ = h.Close()
+				return 1
+			}
+			dlLn, err := net.Listen("tcp", dualLaneAddr)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "blockvolume: dual-lane listen:", err)
+				_ = replListen.Stop
+				_ = replVolume.Close()
+				_ = durableProv.Close()
+				if status != nil {
+					shutCtx, shutCancel := context.WithTimeout(context.Background(), 2*time.Second)
+					_ = status.Close(shutCtx)
+					shutCancel()
+				}
+				_ = h.Close()
+				return 1
+			}
+			replicaBridge := recovery.NewReplicaBridge(store)
+			dualLaneCtx, dualLaneCancel := context.WithCancel(context.Background())
+			go replicaBridge.AcceptDualLaneLoop(dualLaneCtx, dlLn)
+			defer func() {
+				dualLaneCancel()
+				_ = dlLn.Close()
+			}()
+			fmt.Fprintf(os.Stderr, "blockvolume: G7-redo dual-lane listener bound at %s\n", dualLaneAddr)
+		}
 	}
 
 	// G5-5C addendum (architect ruling 2026-04-28): frontend volume
@@ -700,4 +795,24 @@ func run(f flags) int {
 		return 1
 	}
 	return 0
+}
+
+// deriveDualLaneAddr maps "host:port" → "host:port+1". Per
+// docs/recovery-wiring-plan.md §4 Option A: dual-lane traffic uses a
+// separate port from the legacy data port via this fixed convention.
+// Production may eventually carry a separate dual-lane field in
+// AssignmentFact; until then, all daemons must agree on this offset.
+func deriveDualLaneAddr(addr string) (string, error) {
+	host, portStr, err := net.SplitHostPort(addr)
+	if err != nil {
+		return "", fmt.Errorf("split %q: %w", addr, err)
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		return "", fmt.Errorf("port %q not numeric: %w", portStr, err)
+	}
+	if port+1 > 65535 {
+		return "", fmt.Errorf("port %d+1 overflows", port)
+	}
+	return net.JoinHostPort(host, strconv.Itoa(port+1)), nil
 }

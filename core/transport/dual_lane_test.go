@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"net"
-	"sync"
 	"testing"
 	"time"
 
@@ -28,35 +27,16 @@ func runDualLaneListener(t *testing.T, store storage.LogicalStorage) (addr strin
 		t.Fatalf("listen: %v", err)
 	}
 	bridge := recovery.NewReplicaBridge(store)
-	stopCh := make(chan struct{})
-	var wg sync.WaitGroup
-	wg.Add(1)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
 	go func() {
-		defer wg.Done()
-		for {
-			conn, acceptErr := ln.Accept()
-			if acceptErr != nil {
-				select {
-				case <-stopCh:
-					return
-				default:
-					t.Logf("dual-lane accept err: %v", acceptErr)
-					return
-				}
-			}
-			wg.Add(1)
-			go func(c net.Conn) {
-				defer wg.Done()
-				ctx, cancel := context.WithCancel(context.Background())
-				defer cancel()
-				_, _ = bridge.Serve(ctx, c)
-			}(conn)
-		}
+		defer close(done)
+		bridge.AcceptDualLaneLoop(ctx, ln)
 	}()
 	return ln.Addr().String(), func() {
-		close(stopCh)
+		cancel()
 		_ = ln.Close()
-		wg.Wait()
+		<-done
 	}
 }
 
