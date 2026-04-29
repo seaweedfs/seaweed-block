@@ -231,8 +231,8 @@ After this lands, update:
 
 ---
 
-## 11. Open questions for architect
+## 11. Open questions for architect — Resolved (architect ACK 2026-04-29)
 
-1. **`FailurePinUnderRetention` as a new kind** vs reusing `FailureWALRecycled` with a `Phase=pin-update` discriminator? Recommend new kind; cleaner taxonomy.
-2. **`SetPinFloor` signature**: parameter `primarySBoundary` (current recommendation) vs callback. Recommend parameter — keeps coordinator substrate-free.
-3. **Wire compat**: this is a fresh protocol on a separate wire path (per `core/recovery/`'s independence from `core/transport`). When wiring lands, do we keep the new frame and adopt it on the production wire, or fold into existing `MsgShipEntry` structure with a new flag byte? Recommend keeping new frame — cleanly distinguishes ack from data, easier wire trace.
+1. **`FailurePinUnderRetention` as a new kind** vs reusing `FailureWALRecycled`. **RESOLVED: new kind.** Rationale: `WALRecycled` is a cold-start scan failure (typical fix: bump pin / new lineage); `PinUnderRetention` is a mid-session contract violation (typical fix: invalidate session, log Invariant breach). Different `Retryable()` defaults, different operator response. Implementation MUST update `failure.go` matrix + `doc.go` INV ledger + `recovery-inv-test-map.md` row in lockstep — no verbal-only distinction.
+2. **`SetPinFloor` signature**: parameter vs callback. **RESOLVED: explicit parameter.** Caller computes floor from `(S, H, AckLSN)` and calls `SetPinFloor(floor)`. Coordinator stays substrate-free. If a unified entry is needed later, it should be a value type (`PinFloorInput struct`), NOT a `func() uint64` callback.
+3. **Wire compat**: independent frame `0x07` vs piggyback on `MsgShipEntry`. **RESOLVED: keep independent frame for this milestone.** Ack / data split → packet-capture, log, review all simpler; control-plane (receiver→primary ack) decoupled from data-plane (rate, retry). Piggyback / merge is a later bandwidth optimization — does not gate #3 correctness.
