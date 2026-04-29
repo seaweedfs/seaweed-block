@@ -85,6 +85,16 @@ type WALStore struct {
 	// Pinned by: INV-G6-RETENTION-POLICY-OPERATOR-VISIBLE.
 	recoveryRetentionLSNs uint64
 
+	// recycleFloorSrc gates `persistCheckpoint` advancement when
+	// non-nil: the proposed checkpoint cannot exceed the source's
+	// reported `MinPinAcrossActiveSessions`. Set via
+	// SetRecycleFloorSource at daemon wiring time when
+	// --recovery-mode=dual-lane.
+	//
+	// nil = no gate (legacy behavior). Per docs/recovery-wiring-plan.md
+	// §6 + INV-RECYCLE-GATED-BY-MIN-ACTIVE-PIN.
+	recycleFloorSrc RecycleFloorSource
+
 	syncs atomic.Uint64 // total fsync operations performed (test/diagnostic)
 }
 
@@ -255,6 +265,20 @@ func (s *WALStore) writeExtent(lba uint32, data []byte) error {
 // over-writes the extent with identical bytes. Wasteful but correct.
 func (s *WALStore) persistCheckpoint(highestLSN uint64) error {
 	s.mu.Lock()
+	// G7-redo 2.5: clamp the proposed checkpoint to the recycle
+	// floor reported by an external coordinator (e.g., the
+	// recovery package's PeerShipCoordinator). When a replica is
+	// in an active rebuild session and pin_floor < highestLSN, we
+	// hold the checkpoint at pin_floor so WAL entries the replica
+	// still depends on are retained. INV-RECYCLE-GATED-BY-MIN-
+	// ACTIVE-PIN.
+	if s.recycleFloorSrc != nil {
+		if floor, anyActive := s.recycleFloorSrc.MinPinAcrossActiveSessions(); anyActive {
+			if highestLSN > floor {
+				highestLSN = floor
+			}
+		}
+	}
 	if highestLSN <= s.checkpointLSN {
 		s.mu.Unlock()
 		return nil
@@ -507,6 +531,20 @@ func (s *WALStore) BlockSize() int { return int(s.sb.BlockSize) }
 // Called by: DurableProvider construction path after walstore is
 // opened, with the operator-supplied value from cmd/blockvolume.
 // Owns: recoveryRetentionLSNs field under s.mu.
+// SetRecycleFloorSource installs the gate consulted in
+// persistCheckpoint to clamp checkpoint advancement against active
+// recover-session pin floors. Pass nil to disable.
+//
+// Idempotent. Safe to call at any time — the gate is read under
+// s.mu so concurrent persistCheckpoint sees a consistent value.
+//
+// Implements storage.RecycleFloorGate.
+func (s *WALStore) SetRecycleFloorSource(src RecycleFloorSource) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.recycleFloorSrc = src
+}
+
 func (s *WALStore) SetRecoveryRetentionLSNs(n uint64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

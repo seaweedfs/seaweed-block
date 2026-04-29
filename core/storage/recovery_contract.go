@@ -180,6 +180,42 @@ func NewSubstrateIOFailure(cause error, detail string) *RecoveryFailure {
 
 // --- T4d-1 Option C hybrid: per-LBA applied-LSN exposure ---
 
+// --- G7-redo priority 2.5: WAL recycle gate via pin floor ---
+
+// RecycleFloorSource is implemented by external coordinators that
+// gate WAL recycle advancement based on per-replica commitments.
+// Substrates consult this on every checkpoint advance / WAL tail
+// move to ensure entries below the floor are retained for replicas
+// with active recover sessions.
+//
+// Today this is `core/recovery.PeerShipCoordinator`'s
+// `MinPinAcrossActiveSessions() (uint64, bool)` — Go structural
+// typing satisfies this interface automatically; no import cycle.
+//
+// Per docs/recovery-wiring-plan.md §6 + design doc
+// docs/recovery-pin-floor-wire.md §5 retention inequality.
+type RecycleFloorSource interface {
+	// MinPinAcrossActiveSessions returns the LSN below which any
+	// recycle is safe (across all active recover sessions) and a
+	// flag that says whether any session is active.
+	//
+	// `(0, false)` means no active session — the substrate may
+	// recycle freely per its retention policy.
+	// `(floor, true)` means at least one session is active and the
+	// substrate MUST NOT advance its recycle past `floor`.
+	MinPinAcrossActiveSessions() (uint64, bool)
+}
+
+// RecycleFloorGate is an optional interface a LogicalStorage impl
+// satisfies if it supports the pin-floor gate. Cmd / wiring code
+// type-asserts on this and skips the wiring if the substrate does
+// not implement it (BlockStore today; smartwal can opt in later).
+//
+// `walstore.WALStore` and `memorywal.Store` implement this.
+type RecycleFloorGate interface {
+	SetRecycleFloorSource(src RecycleFloorSource)
+}
+
 // ErrAppliedLSNsNotTracked is returned by `LogicalStorage.AppliedLSNs`
 // when the substrate does not maintain per-LBA applied-LSN metadata
 // (e.g., in-memory BlockStore). The replica recovery apply gate
