@@ -27,6 +27,7 @@ const (
 	frameWALEntry     frameType = 4 // primary → replica: WAL-lane entry
 	frameBarrierReq   frameType = 5 // primary → replica: request frontier sync
 	frameBarrierResp  frameType = 6 // replica → primary: ack with achievedLSN
+	frameBaseBatchAck frameType = 7 // replica → primary: incremental ack for pin_floor
 )
 
 const maxFramePayload = 16 * 1024 * 1024 // 16 MiB sanity cap
@@ -174,6 +175,40 @@ func decodeWALEntry(p []byte) (kind WALEntryKind, lba uint32, lsn uint64, data [
 		return 0, 0, 0, nil, fmt.Errorf("recovery: walEntry kind=%d not in {1,2}", kind)
 	}
 	return kind, binary.BigEndian.Uint32(p[1:]), binary.BigEndian.Uint64(p[5:]), p[13:], nil
+}
+
+// baseBatchAck: [8 SessionID][8 AcknowledgedLSN][4 BaseLBAUpper]
+//
+// SessionID identifies which session this ack belongs to (must match
+// the active session on the receiving conn; mismatch → FailureProtocol).
+// AcknowledgedLSN is the receiver's durable frontier as of this ack;
+// drives `coord.SetPinFloor` per docs/recovery-pin-floor-wire.md §4.
+// BaseLBAUpper reports the LBA prefix [0, BaseLBAUpper) durably
+// installed on the receiver — advisory for future retransmit logic
+// (NOT used for pin_floor in this milestone).
+type baseBatchAckPayload struct {
+	SessionID       uint64
+	AcknowledgedLSN uint64
+	BaseLBAUpper    uint32
+}
+
+func encodeBaseBatchAck(p baseBatchAckPayload) []byte {
+	out := make([]byte, 8+8+4)
+	binary.BigEndian.PutUint64(out[0:], p.SessionID)
+	binary.BigEndian.PutUint64(out[8:], p.AcknowledgedLSN)
+	binary.BigEndian.PutUint32(out[16:], p.BaseLBAUpper)
+	return out
+}
+
+func decodeBaseBatchAck(p []byte) (baseBatchAckPayload, error) {
+	if len(p) != 20 {
+		return baseBatchAckPayload{}, fmt.Errorf("recovery: baseBatchAck payload len=%d want 20", len(p))
+	}
+	return baseBatchAckPayload{
+		SessionID:       binary.BigEndian.Uint64(p[0:]),
+		AcknowledgedLSN: binary.BigEndian.Uint64(p[8:]),
+		BaseLBAUpper:    binary.BigEndian.Uint32(p[16:]),
+	}, nil
 }
 
 // barrierResp: [8 AchievedLSN]

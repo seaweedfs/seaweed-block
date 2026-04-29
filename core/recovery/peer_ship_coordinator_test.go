@@ -176,7 +176,7 @@ func TestCoordinator_MinPinAcrossActiveSessions(t *testing.T) {
 	}
 
 	// Advance r2's pin floor; min should now be r1's 100.
-	_ = c.SetPinFloor(r2, 150)
+	_ = c.SetPinFloor(r2, 150, 0)
 	floor, any = c.MinPinAcrossActiveSessions()
 	if !any || floor != 100 {
 		t.Fatalf("after advance r2 to 150: floor=%d want 100 (r1 is now lower)", floor)
@@ -197,20 +197,78 @@ func TestCoordinator_MinPinAcrossActiveSessions(t *testing.T) {
 }
 
 // INV-PIN-STABLE-WITHIN-SESSION: SetPinFloor monotonic.
+// Uses primarySBoundary=0 (recycle gate disabled in this test);
+// retention checks have their own test below.
 func TestCoordinator_SetPinFloor_Monotonic(t *testing.T) {
 	c := NewPeerShipCoordinator()
 	_ = c.StartSession(r1, 7, 100, 200)
 	if got := c.PinFloor(r1); got != 100 {
 		t.Fatalf("initial pinFloor=%d want 100 (== fromLSN)", got)
 	}
-	_ = c.SetPinFloor(r1, 150)
+	if err := c.SetPinFloor(r1, 150, 0); err != nil {
+		t.Fatalf("SetPinFloor(150): %v", err)
+	}
 	if got := c.PinFloor(r1); got != 150 {
 		t.Fatalf("after advance: pinFloor=%d want 150", got)
 	}
 	// Regression attempt: ignored.
-	_ = c.SetPinFloor(r1, 120)
+	if err := c.SetPinFloor(r1, 120, 0); err != nil {
+		t.Fatalf("SetPinFloor(120): %v", err)
+	}
 	if got := c.PinFloor(r1); got != 150 {
 		t.Fatalf("after regression attempt: pinFloor=%d want 150 (monotonic)", got)
+	}
+}
+
+// INV-PIN-COMPATIBLE-WITH-RETENTION: floor < primarySBoundary →
+// FailurePinUnderRetention, session must invalidate.
+func TestCoordinator_SetPinFloor_RejectsBelowRetention(t *testing.T) {
+	c := NewPeerShipCoordinator()
+	_ = c.StartSession(r1, 7, 100, 500)
+
+	// Healthy path: floor (200) ≥ primary's S (150).
+	if err := c.SetPinFloor(r1, 200, 150); err != nil {
+		t.Fatalf("healthy SetPinFloor: %v", err)
+	}
+
+	// Violation: primary's S has advanced to 250, replica's
+	// proposed floor of 240 is below — session contract broken.
+	err := c.SetPinFloor(r1, 240, 250)
+	if err == nil {
+		t.Fatal("SetPinFloor(floor=240, S=250): want PinUnderRetention error")
+	}
+	f := AsFailure(err)
+	if f == nil {
+		t.Fatalf("expected typed *Failure, got %T: %v", err, err)
+	}
+	if f.Kind != FailurePinUnderRetention {
+		t.Errorf("Kind=%s want PinUnderRetention", f.Kind)
+	}
+	if f.Phase != PhasePinUpdate {
+		t.Errorf("Phase=%s want pin-update", f.Phase)
+	}
+	if f.Retryable() {
+		t.Error("PinUnderRetention should be Retryable=false (new lineage required)")
+	}
+
+	// pinFloor must NOT have advanced on the rejected call.
+	if got := c.PinFloor(r1); got != 200 {
+		t.Errorf("pinFloor after rejected SetPinFloor: got %d want 200 (unchanged)", got)
+	}
+}
+
+// primarySBoundary=0 disables the retention check entirely (legacy
+// path; useful for tests that don't model retention).
+func TestCoordinator_SetPinFloor_ZeroBoundaryDisablesCheck(t *testing.T) {
+	c := NewPeerShipCoordinator()
+	_ = c.StartSession(r1, 7, 100, 500)
+	// Even floor=1 (way below typical retention) succeeds when S=0.
+	if err := c.SetPinFloor(r1, 1, 0); err != nil {
+		t.Fatalf("SetPinFloor with S=0: %v", err)
+	}
+	// Monotonic: floor=1 doesn't actually advance from the initial 100.
+	if got := c.PinFloor(r1); got != 100 {
+		t.Errorf("pinFloor=%d want 100 (initial; floor=1 didn't advance)", got)
 	}
 }
 
@@ -252,7 +310,7 @@ func TestCoordinator_IdlePeer_OperationsError(t *testing.T) {
 	if err := c.MarkBaseDone(r1); err == nil {
 		t.Error("MarkBaseDone on idle: want error")
 	}
-	if err := c.SetPinFloor(r1, 100); err == nil {
+	if err := c.SetPinFloor(r1, 100, 0); err == nil {
 		t.Error("SetPinFloor on idle: want error")
 	}
 	if c.BacklogDrained(r1) {

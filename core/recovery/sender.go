@@ -73,6 +73,25 @@ type Sender struct {
 	// scan finishes.
 	closeCh   chan struct{}
 	closeOnce sync.Once
+
+	// barrierRespCh delivers the inbound BarrierResp (or any wire /
+	// protocol failure surfaced by the reader goroutine) to the
+	// main Run goroutine at barrier-wait time. Buffered=1 so the
+	// reader can push exactly once without blocking on a consumer.
+	//
+	// Per docs/recovery-pin-floor-wire.md §7: the reader goroutine
+	// is required because BaseBatchAck arrives mid-stream during
+	// base lane while Run is busy writing frames. Pre-#3 there was
+	// no reader; only one inline readFrame at barrier time.
+	barrierRespCh chan ackOrResult
+}
+
+// ackOrResult is the channel payload from the reader goroutine to
+// the main Run goroutine: either the achieved LSN from BarrierResp
+// or a typed *Failure from any wire / protocol / pin-update error.
+type ackOrResult struct {
+	achieved uint64
+	err      error
 }
 
 type walItem struct {
@@ -88,9 +107,10 @@ func NewSender(primaryStore storage.LogicalStorage, coordinator *PeerShipCoordin
 	return &Sender{
 		primaryStore: primaryStore,
 		coordinator:  coordinator,
-		conn:         conn,
-		replicaID:    replicaID,
-		closeCh:      make(chan struct{}),
+		conn:          conn,
+		replicaID:     replicaID,
+		closeCh:       make(chan struct{}),
+		barrierRespCh: make(chan ackOrResult, 1),
 	}
 }
 
@@ -196,6 +216,13 @@ func (s *Sender) Run(ctx context.Context, sessionID, fromLSN, targetLSN uint64) 
 		return 0, newFailure(FailureWire, PhaseSendStart, err)
 	}
 
+	// Step 2b: spawn the inbound demux reader. From this point onward
+	// any frame from the receiver (BaseBatchAck during base lane,
+	// BarrierResp at end) flows through readerLoop. Reader exits on
+	// BarrierResp delivery, on any wire error, or on conn close by
+	// caller's defer.
+	go s.readerLoop()
+
 	// Step 3: base lane.
 	if err := s.streamBase(numBlocks); err != nil {
 		return 0, err // streamBase wraps its own Failure
@@ -251,27 +278,90 @@ func (s *Sender) Run(ctx context.Context, sessionID, fromLSN, targetLSN uint64) 
 			fmt.Errorf("TryAdvanceToSteadyLive rejected: %+v", st))
 	}
 
-	// Step 8 + 9: barrier round-trip.
+	// Step 8 + 9: barrier round-trip — reader goroutine delivers the
+	// inbound BarrierResp via barrierRespCh (or any wire / protocol /
+	// pin-update error surfaced earlier).
 	if err := s.writeFrame(frameBarrierReq, nil); err != nil {
 		return 0, newFailure(FailureWire, PhaseBarrierReq, err)
 	}
-	ft, payload, err := readFrame(s.conn)
-	if err != nil {
-		return 0, newFailure(FailureWire, PhaseBarrierResp, err)
-	}
-	if ft != frameBarrierResp {
-		return 0, newFailure(FailureProtocol, PhaseBarrierResp,
-			fmt.Errorf("expected barrierResp, got frame type %d", ft))
-	}
-	achieved, err := decodeBarrierResp(payload)
-	if err != nil {
-		return 0, newFailure(FailureProtocol, PhaseBarrierResp, err)
+	var achieved uint64
+	select {
+	case res := <-s.barrierRespCh:
+		if res.err != nil {
+			return 0, res.err
+		}
+		achieved = res.achieved
+	case <-ctx.Done():
+		return 0, newFailure(FailureCancelled, PhaseBarrierResp, ctx.Err())
 	}
 	if !s.coordinator.CanEmitSessionComplete(s.replicaID, achieved) {
 		return achieved, newFailure(FailureContract, PhaseBarrierResp,
 			fmt.Errorf("achieved=%d < target=%d", achieved, targetLSN))
 	}
 	return achieved, nil
+}
+
+// readerLoop is the sender's inbound demux. It reads frames until
+// BarrierResp arrives (success path) or any wire / protocol / pin
+// failure surfaces. Result is delivered to barrierRespCh exactly once.
+//
+// BaseBatchAck handling:
+//   1. Decode payload.
+//   2. Validate SessionID matches the active session.
+//   3. Fetch primary's S boundary (`Boundaries().S`).
+//   4. Call coord.SetPinFloor(replicaID, AcknowledgedLSN, S).
+//   5. On error (incl. PinUnderRetention), abort by pushing to
+//      barrierRespCh and return.
+//
+// Reader exits on:
+//   - BarrierResp delivered → push achieved, return.
+//   - readFrame error (peer closed, etc.) → push Wire failure, return.
+//   - any decode / validation error → push typed failure, return.
+//   - SetPinFloor error → push the typed failure, return.
+//
+// Single-shot: pushes exactly one ackOrResult to barrierRespCh.
+// barrierRespCh buffer=1 so push always succeeds without consumer.
+func (s *Sender) readerLoop() {
+	for {
+		ft, payload, err := readFrame(s.conn)
+		if err != nil {
+			s.barrierRespCh <- ackOrResult{err: newFailure(FailureWire, PhaseBarrierResp, err)}
+			return
+		}
+		switch ft {
+		case frameBaseBatchAck:
+			p, decErr := decodeBaseBatchAck(payload)
+			if decErr != nil {
+				s.barrierRespCh <- ackOrResult{err: newFailure(FailureProtocol, PhasePinUpdate, decErr)}
+				return
+			}
+			if p.SessionID != s.sessionID {
+				s.barrierRespCh <- ackOrResult{err: newFailure(FailureProtocol, PhasePinUpdate,
+					fmt.Errorf("ack sessionID=%d != active=%d", p.SessionID, s.sessionID))}
+				return
+			}
+			_, primaryS, _ := s.primaryStore.Boundaries()
+			if updateErr := s.coordinator.SetPinFloor(s.replicaID, p.AcknowledgedLSN, primaryS); updateErr != nil {
+				// SetPinFloor returns *Failure already typed
+				// (FailurePinUnderRetention or wrapped); pass through.
+				s.barrierRespCh <- ackOrResult{err: updateErr}
+				return
+			}
+			// continue reading
+		case frameBarrierResp:
+			achieved, decErr := decodeBarrierResp(payload)
+			if decErr != nil {
+				s.barrierRespCh <- ackOrResult{err: newFailure(FailureProtocol, PhaseBarrierResp, decErr)}
+				return
+			}
+			s.barrierRespCh <- ackOrResult{achieved: achieved}
+			return
+		default:
+			s.barrierRespCh <- ackOrResult{err: newFailure(FailureProtocol, PhaseBarrierResp,
+				fmt.Errorf("unexpected frame type %d", ft))}
+			return
+		}
+	}
 }
 
 // streamBase sends every LBA's current data as a base block. Dense
