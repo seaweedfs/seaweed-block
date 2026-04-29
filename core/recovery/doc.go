@@ -105,10 +105,13 @@
 //	  pin_floor advances iff the replica has emitted a BaseBatchAcked
 //	  fact for an LBA range whose base data is now installed on the
 //	  replica side. Primary cannot advance pin_floor on its own.
+//	  See docs/recovery-pin-floor-wire.md §3 (cadence) + §4 (semantics).
 //
 //	INV-PIN-COMPATIBLE-WITH-RETENTION
 //	  pin_floor ≥ retained(S) always holds. A session demanding a pin
 //	  below S MUST fail-loud → invalidate → new lineage.
+//	  See docs/recovery-pin-floor-wire.md §5 for the inequality and
+//	  the proposed FailurePinUnderRetention kind.
 //
 //	INV-RECYCLE-GATED-BY-MIN-ACTIVE-PIN
 //	  Primary's WAL recycle floor = min(pin_floor) over active sessions;
