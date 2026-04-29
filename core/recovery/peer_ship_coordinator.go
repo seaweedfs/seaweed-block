@@ -166,22 +166,45 @@ func (c *PeerShipCoordinator) MarkBaseDone(id ReplicaID) error {
 	return nil
 }
 
-// SetPinFloor advances the per-peer pin floor in response to a
-// replica BaseBatchAcked fact. Caller (layer 2 wire handler) is
-// responsible for translating "LBA prefix acked" → "WAL LSN below
-// which recycle is safe"; this method just stores the resulting LSN.
+// SetPinFloor advances the per-peer pin floor in response to a replica
+// BaseBatchAck fact. Caller (sender's ack reader) supplies BOTH the
+// proposed floor AND the primary's current S boundary (retainStart).
 //
-// INV-PIN-STABLE-WITHIN-SESSION: monotonic; lower values are ignored.
-func (c *PeerShipCoordinator) SetPinFloor(id ReplicaID, floor uint64) error {
+// Architect ACK on parameter form (vs callback): 2026-04-29
+// (docs/recovery-pin-floor-wire.md §11 Resolution 2). Coordinator
+// stays substrate-free; caller computes inputs.
+//
+// Inequality validations (INV-PIN-COMPATIBLE-WITH-RETENTION):
+//
+//   floor < primarySBoundary → return *Failure(PinUnderRetention)
+//                              session must be invalidated, new lineage.
+//   floor ≤ st.pinFloor      → silently ignored (monotonic).
+//   floor > st.pinFloor      → advance.
+//
+// Pre-conditions: caller has already validated `floor ≤ walApplied`
+// (the inequality (2) check from the spec); this method does NOT
+// re-check that because the coordinator does not know walApplied.
+func (c *PeerShipCoordinator) SetPinFloor(id ReplicaID, floor, primarySBoundary uint64) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	st, ok := c.states[id]
 	if !ok || st.phase == PhaseIdle {
 		return fmt.Errorf("recovery: SetPinFloor on idle peer %q", id)
 	}
-	if floor > st.pinFloor {
-		st.pinFloor = floor
+	// Monotonic check FIRST. If the new floor wouldn't advance pin
+	// anyway, there's no semantic decision to make — no need to
+	// validate retention. This avoids spurious PinUnderRetention on
+	// early-session acks where receiver's walApplied is still 0
+	// while primary's S has already advanced past 0.
+	if floor <= st.pinFloor {
+		return nil
 	}
+	// Now we're about to advance: check retention compatibility.
+	if primarySBoundary > 0 && floor < primarySBoundary {
+		return newFailure(FailurePinUnderRetention, PhasePinUpdate,
+			fmt.Errorf("replica %q: floor=%d below primary S=%d", id, floor, primarySBoundary))
+	}
+	st.pinFloor = floor
 	return nil
 }
 

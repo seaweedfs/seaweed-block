@@ -4,8 +4,21 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/storage"
+)
+
+// Default cadence for BaseBatchAck emission. After every K base-lane
+// blocks applied OR every T elapsed, the receiver emits one ack so
+// the primary can advance pin_floor incrementally. Mandatory acks
+// (MarkBaseComplete, BarrierReq) bypass the cadence guard.
+//
+// Per docs/recovery-pin-floor-wire.md §3. Tunable via
+// NewReceiverWithCadence.
+const (
+	DefaultCadenceK uint32        = 256
+	DefaultCadenceT time.Duration = 100 * time.Millisecond
 )
 
 // Receiver is the replica-side reader for one rebuild session. It
@@ -22,12 +35,31 @@ type Receiver struct {
 	// Populated after frameSessionStart.
 	session   *RebuildSession
 	sessionID uint64
+
+	// BaseBatchAck cadence config + state (per docs/recovery-pin-floor-wire.md §3).
+	cadenceK           uint32
+	cadenceT           time.Duration
+	blocksSinceLastAck uint32
+	lastAckTime        time.Time
+	baseInstalledUpper uint32 // highest base LBA installed (advisory in BaseBatchAck)
 }
 
-// NewReceiver constructs a receiver bound to the replica's substrate.
+// NewReceiver constructs a receiver bound to the replica's substrate
+// with default ack cadence (DefaultCadenceK blocks, DefaultCadenceT).
 // `conn` is the wire — caller's responsibility to close.
 func NewReceiver(store storage.LogicalStorage, conn io.ReadWriter) *Receiver {
-	return &Receiver{store: store, conn: conn}
+	return NewReceiverWithCadence(store, conn, DefaultCadenceK, DefaultCadenceT)
+}
+
+// NewReceiverWithCadence is NewReceiver with explicit cadence
+// parameters. Tests use this for deterministic ack timing.
+func NewReceiverWithCadence(store storage.LogicalStorage, conn io.ReadWriter, k uint32, t time.Duration) *Receiver {
+	return &Receiver{
+		store:    store,
+		conn:     conn,
+		cadenceK: k,
+		cadenceT: t,
+	}
 }
 
 // Session returns the active session (nil if SessionStart not yet
@@ -82,6 +114,15 @@ func (r *Receiver) Run() (achievedLSN uint64, err error) {
 				return 0, newFailure(FailureSubstrate, PhaseRecvApply,
 					fmt.Errorf("apply base lba=%d: %w", lba, applyErr))
 			}
+			if lba+1 > r.baseInstalledUpper {
+				r.baseInstalledUpper = lba + 1
+			}
+			r.blocksSinceLastAck++
+			if r.shouldAck() {
+				if ackErr := r.sendAck(); ackErr != nil {
+					return 0, ackErr
+				}
+			}
 
 		case frameWALEntry:
 			if r.session == nil {
@@ -103,6 +144,12 @@ func (r *Receiver) Run() (achievedLSN uint64, err error) {
 					errors.New("BaseDone before SessionStart"))
 			}
 			r.session.MarkBaseComplete()
+			// Mandatory final base-lane ack — base done means primary
+			// expects to know our base-installed cursor before drain
+			// even if cadence wouldn't have triggered yet.
+			if ackErr := r.sendAck(); ackErr != nil {
+				return 0, ackErr
+			}
 
 		case frameBarrierReq:
 			if r.session == nil {
@@ -138,4 +185,60 @@ func (r *Receiver) Run() (achievedLSN uint64, err error) {
 				fmt.Errorf("unknown frame type %d", ft))
 		}
 	}
+}
+
+// shouldAck evaluates the cadence rule per docs/recovery-pin-floor-wire.md §3.
+// Returns true on the FIRST trigger (K blocks accumulated OR T elapsed since
+// last ack). Idempotent: returns false if neither K nor T threshold reached.
+//
+// Special case: lastAckTime zero means "no ack sent yet" — don't trigger on
+// elapsed alone, otherwise the very first frame triggers ack which churns
+// for tests with very small K. Wait until at least 1 block has been applied.
+func (r *Receiver) shouldAck() bool {
+	if r.cadenceK > 0 && r.blocksSinceLastAck >= r.cadenceK {
+		return true
+	}
+	if r.cadenceT > 0 && r.blocksSinceLastAck > 0 {
+		if !r.lastAckTime.IsZero() && time.Since(r.lastAckTime) >= r.cadenceT {
+			return true
+		}
+		// First-ever ack: trigger by elapsed using session age (for
+		// tests that set tiny K and T) — but only after at least one
+		// block has been applied.
+		if r.lastAckTime.IsZero() {
+			// We don't track session start time; for the POC, the
+			// elapsed-since-zero case is captured the next time around.
+			// This deliberate undercount is harmless: K-trigger will
+			// catch typical workloads.
+		}
+	}
+	return false
+}
+
+// sendAck writes a frameBaseBatchAck with the receiver's current
+// AcknowledgedLSN and BaseLBAUpper. Resets cadence counters.
+//
+// AcknowledgedLSN semantics (POC): uses session.Status().WALApplied,
+// the highest WAL LSN this session has applied. For real WAL substrate
+// in production, the receiver should call store.Sync() first and use
+// the returned syncedLSN to claim true durability — see
+// docs/recovery-pin-floor-wire.md §3 ("During base lane: min(walApplied,
+// syncedLSN-at-ack-time)"). POC trusts in-memory durability.
+func (r *Receiver) sendAck() error {
+	if r.session == nil {
+		return newFailure(FailureProtocol, PhaseRecvAckWrite,
+			errors.New("sendAck before SessionStart"))
+	}
+	st := r.session.Status()
+	payload := encodeBaseBatchAck(baseBatchAckPayload{
+		SessionID:       r.sessionID,
+		AcknowledgedLSN: st.WALApplied,
+		BaseLBAUpper:    r.baseInstalledUpper,
+	})
+	if err := writeFrame(r.conn, frameBaseBatchAck, payload); err != nil {
+		return newFailure(FailureWire, PhaseRecvAckWrite, err)
+	}
+	r.blocksSinceLastAck = 0
+	r.lastAckTime = time.Now()
+	return nil
 }

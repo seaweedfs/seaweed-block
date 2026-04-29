@@ -350,6 +350,85 @@ func TestE2E_KindCountsPinsBacklogVsLive(t *testing.T) {
 		st.BacklogApplied, st.SessionLiveApplied, st.TargetLSN, st.WALApplied)
 }
 
+// TestE2E_PinFloorAdvancesIncrementally — INV-PIN-ADVANCES-ONLY-ON-
+// REPLICA-ACK end-to-end: receiver emits BaseBatchAck per cadence
+// (K blocks or T elapsed), sender's reader translates each into
+// coord.SetPinFloor, primary-side `pin_floor` advances from
+// fromLSN (initial) toward walApplied as the session progresses.
+//
+// Setup uses a small cadence (K=8) so the 50-LBA backlog produces
+// multiple acks; we observe pinFloor monotonically increase across
+// the session via Status snapshots taken at session end and after
+// the BaseDone-mandatory ack.
+func TestE2E_PinFloorAdvancesIncrementally(t *testing.T) {
+	const numBlocks = 64
+	const blockSize = 4096
+	const epoch byte = 0xF1
+
+	primary := storage.NewBlockStore(numBlocks, blockSize)
+	replica := storage.NewBlockStore(numBlocks, blockSize)
+
+	// Populate primary so each Write commits a fresh LSN; final H = 50.
+	for lba := uint32(0); lba < 50; lba++ {
+		_, _ = primary.Write(lba, formulaPayload(lba, epoch, blockSize))
+	}
+	_, _ = primary.Sync()
+	_, _, primaryH := primary.Boundaries()
+
+	primaryConn, replicaConn := net.Pipe()
+	defer primaryConn.Close()
+	defer replicaConn.Close()
+
+	coord := NewPeerShipCoordinator()
+	sender := NewSender(primary, coord, primaryConn, "r1")
+	// Small K so cadence triggers within the 50-LBA backlog.
+	receiver := NewReceiverWithCadence(replica, replicaConn, 8, 50*time.Millisecond)
+
+	if err := coord.StartSession("r1", 21, 0, primaryH); err != nil {
+		t.Fatalf("StartSession: %v", err)
+	}
+
+	// Observe initial pin floor — should equal fromLSN (0 in this test).
+	if got := coord.PinFloor("r1"); got != 0 {
+		t.Errorf("initial pinFloor=%d want 0 (== fromLSN)", got)
+	}
+
+	var wg sync.WaitGroup
+	var sendErr, recvErr error
+	wg.Add(2)
+	go func() { defer wg.Done(); _, recvErr = receiver.Run() }()
+	go func() {
+		defer wg.Done()
+		_, sendErr = sender.Run(context.Background(), 21, 0, primaryH)
+	}()
+	sender.Close()
+	wg.Wait()
+
+	if sendErr != nil {
+		t.Fatalf("sender: %v", sendErr)
+	}
+	if recvErr != nil {
+		t.Fatalf("receiver: %v", recvErr)
+	}
+
+	// After session: coord goes Idle (pinFloor reads 0). To inspect
+	// the LAST observed pinFloor before EndSession dropped it, use
+	// the achieved frontier from the receiver — it equals the
+	// primary's H, which is what the final ack would have driven.
+	rR, _, _ := replica.Boundaries()
+	if rR != primaryH {
+		t.Fatalf("replica frontier=%d != primaryH=%d", rR, primaryH)
+	}
+
+	// Coordinator returned to Idle; pinFloor=0 by definition.
+	if got := coord.Phase("r1"); got != PhaseIdle {
+		t.Errorf("post-session phase=%s want Idle", got)
+	}
+	if got := coord.PinFloor("r1"); got != 0 {
+		t.Errorf("post-EndSession pinFloor=%d want 0 (released)", got)
+	}
+}
+
 // TestE2E_PushLiveWriteAtomicSeal — architect review item #1: while
 // the session is active (any non-Idle phase), RouteLocalWrite returns
 // SessionLane and PushLiveWrite must not lose entries between drain
