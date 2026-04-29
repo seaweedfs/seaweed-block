@@ -33,8 +33,8 @@ Status legend:
 |---|---|---|---|
 | `INV-PIN-EXISTS-ONLY-DURING-SESSION` | Primary maintains no `pin_floor` in steady state; recycle proceeds per retention. `pin_floor` appears only during an active session. | `TestCoordinator_MinPinAcrossActiveSessions` (`core/recovery/peer_ship_coordinator_test.go:159`) — `anyActive=false` when no sessions; emerges on `StartSession`; vanishes on `EndSession` | ✅ pinned |
 | `INV-PIN-STABLE-WITHIN-SESSION` | Same session: `pin_floor` is monotonically non-decreasing. To pick a different anchor, invalidate session and start new lineage. | `TestCoordinator_SetPinFloor_Monotonic` (`core/recovery/peer_ship_coordinator_test.go:200`) — regression attempts ignored | ✅ pinned |
-| `INV-PIN-ADVANCES-ONLY-ON-REPLICA-ACK` | `pin_floor` advances iff replica has emitted `BaseBatchAcked` for an LBA range whose base data is now installed. Primary cannot advance pin on its own. | Design: `docs/recovery-pin-floor-wire.md` §3-§4. Tests pending implementation per §8 of that doc. | ⚠️ Forward (design landed; impl pending #3) |
-| `INV-PIN-COMPATIBLE-WITH-RETENTION` | `pin_floor ≥ retained(S)` always holds. A session demanding a pin below S MUST fail-loud → invalidate → new lineage. | Design: `docs/recovery-pin-floor-wire.md` §5 (retention inequality). | ⚠️ Forward (design landed; impl pending #3) |
+| `INV-PIN-ADVANCES-ONLY-ON-REPLICA-ACK` | `pin_floor` advances iff replica has emitted `BaseBatchAcked` for an LBA range whose base data is now installed. Primary cannot advance pin on its own. | `TestE2E_PinFloorAdvancesIncrementally` (`core/recovery/e2e_test.go:466`) — K=8 cadence drives multiple acks across 50-LBA backlog; pin advances through coord.SetPinFloor. Wire impl in `g7-redo/pin-floor` branch (`6cb89ee`). | ✅ pinned |
+| `INV-PIN-COMPATIBLE-WITH-RETENTION` | `pin_floor ≥ retained(S)` always holds. A session demanding a pin below S MUST fail-loud → invalidate → new lineage. | `TestCoordinator_SetPinFloor_RejectsBelowRetention` (`core/recovery/peer_ship_coordinator_test.go:225`) — typed `*Failure(PinUnderRetention)` on `floor < primaryS`; `TestCoordinator_SetPinFloor_ZeroBoundaryDisablesCheck` (`core/recovery/peer_ship_coordinator_test.go:262`) — `S=0` legacy path. | ✅ pinned |
 | `INV-RECYCLE-GATED-BY-MIN-ACTIVE-PIN` | Primary's WAL recycle floor = `min(pin_floor)` over active sessions; no sessions ⇒ pure retention. | `TestCoordinator_MinPinAcrossActiveSessions` (`core/recovery/peer_ship_coordinator_test.go:159`) — 2-replica scenario, min tracks lowest as one advances; releases on `EndSession` | ✅ pinned (logic only; recycle integration is next milestone) |
 | `INV-SESSION-COMPLETE-CLOSURE` | System-level done = layer-1 `TryComplete` ∧ barrier-ack(`achieved == targetLSN`). Both halves required before declaring InSync. | `TestCoordinator_CanEmitSessionComplete` (`core/recovery/peer_ship_coordinator_test.go:79`)<br>`TestE2E_RebuildHappyPath` (`core/recovery/e2e_test.go:33`) — full round-trip<br>`TestE2E_RebuildWithLiveWritesDuringSession` (`core/recovery/e2e_test.go:127`) — closure with live | ✅ pinned (closure predicate + e2e round-trip) |
 | `INV-LIVE-CAUGHT-UP-IFF-FRONTIER-AT-BARRIER` | "Live caught up" is provable only via probe/barrier comparing `R_repr` against `H` at frozen time, not via shipper liveness. | `TestE2E_RebuildHappyPath` and `TestE2E_RebuildWithLiveWritesDuringSession` — both require barrier achieved ≥ target before passing | ✅ pinned indirectly (no test passes without barrier) |
@@ -81,7 +81,7 @@ Status legend:
 
 | INV | Definition | Test(s) | Status |
 |---|---|---|---|
-| Failure retryable matrix (8 kinds) | Wire / Substrate / Contract → retryable; Protocol / Cancelled / SingleFlight / WALRecycled / Unknown → not retryable. | `TestFailure_RetryableMatrix` (`core/recovery/failure_test.go:11`) | ✅ pinned |
+| Failure retryable matrix (9 kinds) | Wire / Substrate / Contract → retryable; Protocol / Cancelled / SingleFlight / WALRecycled / **PinUnderRetention** / Unknown → not retryable. | `TestFailure_RetryableMatrix` (`core/recovery/failure_test.go:11`) | ✅ pinned (PinUnderRetention added in `g7-redo/pin-floor`) |
 | Typed `*Failure` envelope: nil-safe Error/Retryable, errors.Is via Unwrap | `TestFailure_NilSafeAndUnwrap` (`core/recovery/failure_test.go:33`) | ✅ pinned |
 | `AsFailure(err)` extraction works on chains; nil/plain → nil | `TestFailure_AsFailureExtraction` (`core/recovery/failure_test.go:52`) | ✅ pinned |
 | Wire failure surfaces as typed `Failure(Wire, …)`, retryable=true | `TestIntegrationStub_FailureTypedOnReceiverDown` (`core/recovery/integration_stub_test.go:298`) — replica conn closed early | ✅ pinned |
@@ -106,11 +106,11 @@ Status legend:
 ## Test sweep summary
 
 ```
-core/recovery/                       33 tests, all PASS
+core/recovery/                       36 tests, all PASS  (+3 from g7-redo/pin-floor)
 core/storage/memorywal/              14 tests, all PASS
 core/storage/contract_test.go        12 tests × 3 impls = 36 sub-test runs, all PASS
                                      ────
-                                     83 test results pinning the above INVs
+                                     86 test results pinning the above INVs
 ```
 
 Race-detector status: not run on Windows host (CGO_ENABLED required).

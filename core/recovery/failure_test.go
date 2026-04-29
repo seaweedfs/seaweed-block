@@ -21,6 +21,7 @@ func TestFailure_RetryableMatrix(t *testing.T) {
 		{FailureCancelled, false},
 		{FailureSingleFlight, false},
 		{FailureWALRecycled, false},
+		{FailurePinUnderRetention, false}, // Invariant breach; new lineage required
 	}
 	for _, tc := range cases {
 		f := newFailure(tc.kind, PhaseStartSession, errors.New("test"))
@@ -82,7 +83,8 @@ func TestFailure_KindStringStable(t *testing.T) {
 		FailureContract:     "Contract",
 		FailureCancelled:    "Cancelled",
 		FailureSingleFlight: "SingleFlight",
-		FailureWALRecycled:  "WALRecycled",
+		FailureWALRecycled:       "WALRecycled",
+		FailurePinUnderRetention: "PinUnderRetention",
 	}
 	for k, want := range cases {
 		if got := k.String(); got != want {

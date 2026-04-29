@@ -72,7 +72,29 @@ const (
 	// escalation: catch-up is impossible, must rebuild from a
 	// fresher pin. NOT RETRYABLE at the same fromLSN; engine must
 	// pick a new anchor and start a new lineage.
+	//
+	// Distinct from FailurePinUnderRetention (cold-start scan
+	// failure vs mid-session contract violation; see that doc).
 	FailureWALRecycled
+
+	// FailurePinUnderRetention — mid-session contract violation:
+	// `coord.SetPinFloor(replicaID, floor)` was called with a
+	// `floor` value below the primary's current S boundary. The
+	// session was streaming fine but primary's WAL retention has
+	// since advanced past where this session committed. Different
+	// from WALRecycled (which fires before any data ships) — this
+	// is an Invariant breach noticed during incremental ack.
+	//
+	// NOT RETRYABLE at the same lineage. The engine MUST invalidate
+	// this session and start a new lineage with a fromLSN ≥ current
+	// S. Operator alert: indicates retention policy is too
+	// aggressive vs the slowest replica's progress, OR the slowest
+	// replica is stalled. See INV-PIN-COMPATIBLE-WITH-RETENTION,
+	// docs/recovery-pin-floor-wire.md §5.
+	//
+	// Architect ACK on the new-kind decision: 2026-04-29
+	// (docs/recovery-pin-floor-wire.md §11 Resolution 1).
+	FailurePinUnderRetention
 )
 
 func (k FailureKind) String() string {
@@ -93,6 +115,8 @@ func (k FailureKind) String() string {
 		return "SingleFlight"
 	case FailureWALRecycled:
 		return "WALRecycled"
+	case FailurePinUnderRetention:
+		return "PinUnderRetention"
 	default:
 		return fmt.Sprintf("FailureKind(%d)", int(k))
 	}
@@ -116,6 +140,8 @@ const (
 	PhaseRecvDispatch Phase = "recv-dispatch" // receiver frame loop
 	PhaseRecvApply    Phase = "recv-apply"    // receiver substrate apply
 	PhaseRecvSync     Phase = "recv-sync"     // receiver Sync at barrier
+	PhaseRecvAckWrite Phase = "recv-ack-write" // receiver writing BaseBatchAck
+	PhasePinUpdate    Phase = "pin-update"    // sender translating ack → SetPinFloor
 )
 
 // Failure is the recovery package's typed error envelope.
@@ -158,7 +184,7 @@ func (f *Failure) Retryable() bool {
 	case FailureWire, FailureSubstrate, FailureContract:
 		return true
 	case FailureProtocol, FailureSingleFlight, FailureWALRecycled,
-		FailureCancelled, FailureUnknown:
+		FailurePinUnderRetention, FailureCancelled, FailureUnknown:
 		return false
 	default:
 		return false
