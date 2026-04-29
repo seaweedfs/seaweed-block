@@ -9,22 +9,51 @@ import (
 	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/adapter"
+	"github.com/seaweedfs/seaweed-block/core/recovery"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
 // BlockExecutor implements adapter.CommandExecutor using real TCP
 // transport and a primary-side LogicalStorage. It is the "muscle"
 // layer — it executes commands but never decides policy.
+//
+// Recovery mode: nil DualLane => legacy single-lane path (rebuild
+// streams MsgRebuildBlock and rejects live ship during rebuild).
+// non-nil DualLane => StartRebuild delegates to recovery package's
+// PrimaryBridge, dialing the replica's separate dual-lane port (per
+// docs/recovery-wiring-plan.md §4 Option A — separate ports).
+// Architect ACK on parallel-flag strategy (2026-04-29).
 type BlockExecutor struct {
 	primaryStore storage.LogicalStorage
-	replicaAddr  string // replica's TCP address
+	replicaAddr  string // replica's legacy port (rebuild + ship + barrier + probe)
 
-	mu               sync.Mutex
-	onSessionStart   adapter.OnSessionStart
-	onSessionClose   adapter.OnSessionClose
-	onFenceComplete  adapter.OnFenceComplete
-	sessions         map[uint64]*activeSession
-	stepDelay        time.Duration
+	// dualLane is non-nil when this executor is configured for
+	// dual-lane recovery. StartRebuild branches on this; ship +
+	// probe + fence always use the legacy path on replicaAddr.
+	dualLane *DualLaneConfig
+
+	mu              sync.Mutex
+	onSessionStart  adapter.OnSessionStart
+	onSessionClose  adapter.OnSessionClose
+	onFenceComplete adapter.OnFenceComplete
+	sessions        map[uint64]*activeSession
+	stepDelay       time.Duration
+}
+
+// DualLaneConfig holds the wiring for routing StartRebuild through
+// the core/recovery dual-lane mechanism. Constructed at cmd / daemon
+// startup when --recovery-mode=dual-lane.
+type DualLaneConfig struct {
+	// Bridge is the primary-side adapter built once per executor
+	// (bridge captures executor's callback redirections via closures
+	// in NewBlockExecutorWithDualLane).
+	Bridge *recovery.PrimaryBridge
+	// DialAddr is the replica's dual-lane listen address (separate
+	// port from replicaAddr per the wiring plan §4 Option A).
+	DialAddr string
+	// ReplicaID identifies this replica in the coordinator's
+	// per-peer state. Must match the receiver's session view.
+	ReplicaID recovery.ReplicaID
 }
 
 type activeSession struct {
@@ -37,13 +66,76 @@ var errSessionInvalidated = errors.New("session invalidated")
 
 const recoveryConnTimeout = 5 * time.Second
 
-// NewBlockExecutor creates an executor for one primary -> replica pair.
+// NewBlockExecutor creates a legacy-mode executor for one primary -> replica
+// pair. StartRebuild uses the existing single-lane MsgRebuildBlock path.
 func NewBlockExecutor(primaryStore storage.LogicalStorage, replicaAddr string) *BlockExecutor {
 	return &BlockExecutor{
 		primaryStore: primaryStore,
 		replicaAddr:  replicaAddr,
 		sessions:     make(map[uint64]*activeSession),
 	}
+}
+
+// NewBlockExecutorWithDualLane creates a dual-lane-mode executor.
+// StartRebuild routes through the recovery package's PrimaryBridge,
+// dialing dualLaneAddr (the replica's separate listen port). All other
+// methods (Probe / Fence / StartCatchUp / ship via Ship()) continue to
+// use replicaAddr's legacy port.
+//
+// `coord` must be a per-volume coordinator shared across all replicas
+// of the same volume so MinPinAcrossActiveSessions reflects the true
+// minimum (per wiring plan §5).
+//
+// `replicaID` MUST match the SessionStart payload the replica decodes;
+// in production it is the engine's per-peer identifier as a string.
+//
+// The bridge captures executor-state closures so that subsequent
+// SetOnSessionStart / SetOnSessionClose calls on this executor
+// propagate to bridge callbacks dynamically.
+func NewBlockExecutorWithDualLane(
+	primaryStore storage.LogicalStorage,
+	replicaAddr string,
+	dualLaneAddr string,
+	coord *recovery.PeerShipCoordinator,
+	replicaID recovery.ReplicaID,
+) *BlockExecutor {
+	e := NewBlockExecutor(primaryStore, replicaAddr)
+	bridge := recovery.NewPrimaryBridge(
+		primaryStore,
+		coord,
+		func(rid recovery.ReplicaID, sid uint64) {
+			e.mu.Lock()
+			cb := e.onSessionStart
+			e.mu.Unlock()
+			if cb != nil {
+				cb(adapter.SessionStartResult{SessionID: sid})
+			}
+		},
+		func(rid recovery.ReplicaID, sid uint64, achieved uint64, err error) {
+			e.mu.Lock()
+			cb := e.onSessionClose
+			e.mu.Unlock()
+			if cb == nil {
+				return
+			}
+			res := adapter.SessionCloseResult{
+				SessionID:   sid,
+				AchievedLSN: achieved,
+			}
+			if err == nil {
+				res.Success = true
+			} else {
+				res.FailReason = err.Error()
+			}
+			cb(res)
+		},
+	)
+	e.dualLane = &DualLaneConfig{
+		Bridge:    bridge,
+		DialAddr:  dualLaneAddr,
+		ReplicaID: replicaID,
+	}
+	return e
 }
 
 func (e *BlockExecutor) SetOnSessionClose(fn adapter.OnSessionClose) {
