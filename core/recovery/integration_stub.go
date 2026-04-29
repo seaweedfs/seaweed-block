@@ -1,0 +1,190 @@
+package recovery
+
+import (
+	"context"
+	"fmt"
+	"net"
+	"sync"
+
+	"github.com/seaweedfs/seaweed-block/core/storage"
+)
+
+// integration_stub.go is a *thin* integration shim that demonstrates
+// how the recovery package would be called from the existing
+// `core/transport/BlockExecutor` and `core/adapter/CommandExecutor`
+// surfaces, WITHOUT replacing them. Production integration will live
+// in those packages — this file proves the lifecycle/callback shape
+// so mismatches surface early (per architect's priority #1).
+//
+// Per architect ruling on G7-redo Layer-2 review: "与 BlockExecutor /
+// engine 出一条「薄」链路 — 单次 Run(session) 可调、不换全 transport".
+//
+// What this file deliberately does NOT do:
+//
+//   - Plug into core/transport/BlockExecutor.StartRebuild (that is
+//     the integration PR's job).
+//   - Replace the existing wire format (we use this package's frame
+//     format on a separate connection; production may keep both
+//     paths in parallel behind a flag).
+//   - Implement the full CommandExecutor surface (Probe, Fence,
+//     CatchUp, etc.); this stub covers only the rebuild lifecycle.
+
+// SessionStartCallback fires once per session AFTER the wire
+// connection is established and the SessionStart frame has been
+// written. Mirrors the existing `OnSessionStart` callback shape.
+type SessionStartCallback func(replicaID ReplicaID, sessionID uint64)
+
+// SessionCloseCallback fires once per session at termination
+// (success or failure). Mirrors the existing `OnSessionClose`
+// callback shape: success means achievedLSN ≥ targetLSN; on failure
+// `err` is non-nil and `achievedLSN` is 0.
+type SessionCloseCallback func(replicaID ReplicaID, sessionID uint64, achievedLSN uint64, err error)
+
+// PrimaryBridge is the primary-side adapter. One bridge instance
+// per primary daemon; it serializes session starts per replica via
+// the embedded coordinator's INV-SINGLE-FLIGHT-PER-REPLICA check.
+//
+// Live writes for active sessions are pushed via PushLiveWrite,
+// which the WAL shipper calls after consulting RouteLocalWrite.
+type PrimaryBridge struct {
+	store storage.LogicalStorage
+	coord *PeerShipCoordinator
+
+	onStart SessionStartCallback
+	onClose SessionCloseCallback
+
+	mu      sync.Mutex
+	senders map[ReplicaID]*Sender
+}
+
+// NewPrimaryBridge constructs a bridge bound to the primary's
+// substrate. Callbacks may be nil (fire-and-forget).
+func NewPrimaryBridge(store storage.LogicalStorage, coord *PeerShipCoordinator, onStart SessionStartCallback, onClose SessionCloseCallback) *PrimaryBridge {
+	return &PrimaryBridge{
+		store:   store,
+		coord:   coord,
+		onStart: onStart,
+		onClose: onClose,
+		senders: make(map[ReplicaID]*Sender),
+	}
+}
+
+// StartRebuildSession is shaped like CommandExecutor.StartRebuild:
+// non-blocking, returns immediately after spawning the session
+// goroutine. The caller controls termination via FinishLiveWrites
+// (which calls Sender.Close internally) or context cancellation.
+//
+// Wire detail (POC): caller provides the dialed `conn`. Production
+// integration would dial through the existing connection pool /
+// listener registry.
+func (b *PrimaryBridge) StartRebuildSession(ctx context.Context, conn net.Conn, replicaID ReplicaID, sessionID, fromLSN, targetLSN uint64) error {
+	// Single-flight check at the bridge level (before coordinator),
+	// so a second call observes our internal sender map first and
+	// reports the racing-bridge-call case distinctly from the
+	// coordinator's INV-SINGLE-FLIGHT-PER-REPLICA.
+	b.mu.Lock()
+	if _, busy := b.senders[replicaID]; busy {
+		b.mu.Unlock()
+		return fmt.Errorf("recovery bridge: replica %q already has active sender (single-flight)", replicaID)
+	}
+
+	// Register the session with the coordinator SYNCHRONOUSLY so the
+	// caller's next read of `coord.RouteLocalWrite` deterministically
+	// observes a non-Idle phase. If StartSession fails we don't
+	// install the sender or fire OnStart.
+	if err := b.coord.StartSession(replicaID, sessionID, fromLSN, targetLSN); err != nil {
+		b.mu.Unlock()
+		return fmt.Errorf("recovery bridge: %w", err)
+	}
+
+	sender := NewSender(b.store, b.coord, conn, replicaID)
+	b.senders[replicaID] = sender
+	b.mu.Unlock()
+
+	if b.onStart != nil {
+		b.onStart(replicaID, sessionID)
+	}
+
+	go func() {
+		achieved, err := sender.Run(ctx, sessionID, fromLSN, targetLSN)
+		b.mu.Lock()
+		delete(b.senders, replicaID)
+		b.mu.Unlock()
+		if b.onClose != nil {
+			b.onClose(replicaID, sessionID, achieved, err)
+		}
+	}()
+	return nil
+}
+
+// PushLiveWrite forwards a primary-side WAL append to the active
+// session for this peer (if any). Caller is the WAL shipper
+// integration; they MUST have already consulted
+// `coord.RouteLocalWrite(replicaID, lsn)` and confirmed
+// RouteSessionLane.
+//
+// Returns nil if the entry was queued, or error if no session is
+// active or the session has sealed for barrier.
+func (b *PrimaryBridge) PushLiveWrite(replicaID ReplicaID, lba uint32, lsn uint64, data []byte) error {
+	b.mu.Lock()
+	sender, ok := b.senders[replicaID]
+	b.mu.Unlock()
+	if !ok {
+		return fmt.Errorf("recovery bridge: no active session for replica %q", replicaID)
+	}
+	return sender.PushLiveWrite(lba, lsn, data)
+}
+
+// FinishLiveWrites signals the active session for this peer that
+// no more PushLiveWrite calls will arrive — sender will drain the
+// queue, transition phase, and run the barrier round-trip. Returns
+// false if no session is active.
+//
+// Equivalent to engine deciding "this peer's recover session can
+// converge now"; in production this is triggered when the engine
+// observes barrier-eligibility conditions.
+func (b *PrimaryBridge) FinishLiveWrites(replicaID ReplicaID) bool {
+	b.mu.Lock()
+	sender, ok := b.senders[replicaID]
+	b.mu.Unlock()
+	if !ok {
+		return false
+	}
+	sender.Close()
+	return true
+}
+
+// ReplicaBridge is the replica-side adapter. One bridge instance per
+// replica daemon; it accepts inbound recover-session connections and
+// drives a Receiver per connection.
+//
+// Production integration: this would be a side-channel listener on
+// a separate port from the existing ReplicaListener (parallel-path,
+// flag-toggled, per architect ruling).
+type ReplicaBridge struct {
+	store storage.LogicalStorage
+}
+
+// NewReplicaBridge constructs a bridge bound to the replica's substrate.
+func NewReplicaBridge(store storage.LogicalStorage) *ReplicaBridge {
+	return &ReplicaBridge{store: store}
+}
+
+// Serve accepts one inbound connection and drives a Receiver until
+// barrier ack returns or the connection errors. Returns the
+// achievedLSN reported on the wire, or an error.
+//
+// Caller spawns this in a goroutine per accepted connection.
+func (b *ReplicaBridge) Serve(ctx context.Context, conn net.Conn) (uint64, error) {
+	receiver := NewReceiver(b.store, conn)
+	// Caller is responsible for closing conn on return; wire the
+	// ctx through a goroutine that closes the conn on cancel so
+	// receiver.Run returns from its blocking read.
+	if ctx != nil {
+		go func() {
+			<-ctx.Done()
+			_ = conn.Close()
+		}()
+	}
+	return receiver.Run()
+}
