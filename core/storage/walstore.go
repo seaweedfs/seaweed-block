@@ -280,6 +280,91 @@ func (s *WALStore) persistCheckpoint(highestLSN uint64) error {
 	return nil
 }
 
+// ResetForRebuild zeroes the extent, clears the WAL ring + dirty map,
+// and persists a fresh-state superblock. After this call, every LBA
+// reads as zero and the substrate is ready to receive a full base
+// rebuild stream against a clean destination — INV-G7-REBUILD-
+// SUBSTRATE-NO-STALE-EXPOSED. The receiver invokes this at the start
+// of a new rebuild lineage so that `AllBlocks()`-filtered streams
+// (which omit zero source blocks) leave correct content on LBAs the
+// sender skips. Without it, a replica rejoining with a preserved
+// walstore retained stale non-zero bytes at zero-LBAs and produced
+// the G7 §2 #6 hardware-run mismatch pattern (run #3 evidence).
+//
+// Implementation: pwrite zeros over the extent, reset WAL writer,
+// clear dirty map, zero the in-memory frontier + checkpoint, persist
+// the cleared superblock, and fsync. After return, Read(lba) returns
+// zeros for every LBA and frontier is 0.
+//
+// Performance: at 256 MiB extent + 64 MiB WAL the cost is one large
+// pwrite + one fsync. On rotational media this is the long pole;
+// SSDs handle it in well under a second.
+func (s *WALStore) ResetForRebuild() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return errors.New("storage: ResetForRebuild after Close")
+	}
+
+	// Zero the extent in 1 MiB chunks to keep allocator pressure low.
+	const chunkSize = 1 << 20
+	zeros := make([]byte, chunkSize)
+	extentSize := int64(s.sb.VolumeSize)
+	for written := int64(0); written < extentSize; {
+		n := int64(chunkSize)
+		if extentSize-written < n {
+			n = extentSize - written
+		}
+		if _, err := s.fd.WriteAt(zeros[:n], int64(s.extentBase)+written); err != nil {
+			return fmt.Errorf("storage: ResetForRebuild zero extent at %d: %w", written, err)
+		}
+		written += n
+	}
+
+	// Zero the WAL region too. Without this, on-disk WAL entry headers
+	// from a prior session survive ResetForRebuild and `recoverWAL`'s
+	// defensive scan could re-decode them at next process start —
+	// dragging stale dirty-map state back over the freshly-zeroed
+	// extent. INV-G7-REBUILD-SUBSTRATE-NO-STALE-EXPOSED holds across
+	// restart only when the on-disk bytes match in-memory reset state.
+	walRegionSize := int64(s.sb.WALSize)
+	for written := int64(0); written < walRegionSize; {
+		n := int64(chunkSize)
+		if walRegionSize-written < n {
+			n = walRegionSize - written
+		}
+		if _, err := s.fd.WriteAt(zeros[:n], int64(s.sb.WALOffset)+written); err != nil {
+			return fmt.Errorf("storage: ResetForRebuild zero WAL region at %d: %w", written, err)
+		}
+		written += n
+	}
+
+	s.wal.reset()
+	s.dm.clear()
+
+	s.syncedLSN = 0
+	s.walHead = 0
+	s.walTail = 0
+	s.nextLSN = 1
+	s.checkpointLSN = 0
+
+	s.sb.WALCheckpointLSN = 0
+	s.sb.WALHead = 0
+	s.sb.WALTail = 0
+
+	hdr := newSimpleByteBuf()
+	if _, err := s.sb.writeTo(hdr); err != nil {
+		return fmt.Errorf("storage: ResetForRebuild encode superblock: %w", err)
+	}
+	if _, err := s.fd.WriteAt(hdr.bytes(), 0); err != nil {
+		return fmt.Errorf("storage: ResetForRebuild pwrite superblock: %w", err)
+	}
+	if err := s.fd.Sync(); err != nil {
+		return fmt.Errorf("storage: ResetForRebuild fsync: %w", err)
+	}
+	return nil
+}
+
 // CheckpointLSN returns the highest LSN whose data has been durably
 // written into the extent. Diagnostic only.
 func (s *WALStore) CheckpointLSN() uint64 {

@@ -52,9 +52,10 @@ type ReplicaListener struct {
 	wg        sync.WaitGroup
 	applyHook ApplyHook // T4d-2: optional gate plug-in; nil = direct apply
 
-	mu            sync.Mutex
-	activeLineage RecoveryLineage
-	conns         map[net.Conn]struct{} // active handler connections; protected by mu
+	mu                       sync.Mutex
+	activeLineage            RecoveryLineage
+	conns                    map[net.Conn]struct{} // active handler connections; protected by mu
+	rebuildResetSessionID    uint64                // sessionID for which ResetForRebuild has run; 0 = never; protected by mu
 }
 
 // NewReplicaListener creates a listener on the given address.
@@ -302,6 +303,38 @@ func (r *ReplicaListener) handleConn(conn net.Conn) {
 				log.Printf("replica: reject stale rebuild block session=%d epoch=%d endpointVersion=%d",
 					lineage.SessionID, lineage.Epoch, lineage.EndpointVersion)
 				return
+			}
+			// INV-G7-REBUILD-SUBSTRATE-NO-STALE-EXPOSED: zero the destination
+			// substrate at the start of each rebuild lineage so the sender's
+			// `AllBlocks()`-filtered stream (which omits zero source blocks)
+			// leaves correct content on every LBA — including LBAs the
+			// sender skips (they read as zero on a freshly-reset extent).
+			// Without this, a replica rejoining with a preserved walstore
+			// would retain stale non-zero bytes at zero-LBAs and produce
+			// the G7 §2 #6 hardware-run mismatch pattern (run #3: 6
+			// mismatches at every 256-LBA stride matching `(lba*11+3) mod
+			// 256 == 0`). One reset per session — re-arms on session
+			// transition (different SessionID) but is a no-op for repeat
+			// blocks within the same session.
+			//
+			// Topology assumption (V3 today): one replica process serves
+			// one mutation lineage at a time; `acceptMutationLineage`
+			// already gates concurrent stale lineages. If a future
+			// topology multiplexes overlapping rebuilds for the same
+			// replica across distinct connections, the reset gate must
+			// move into the substrate (per-replica rebuild mutex) — see
+			// G7 mini-plan §3 follow-up note.
+			r.mu.Lock()
+			needReset := r.rebuildResetSessionID != lineage.SessionID
+			if needReset {
+				r.rebuildResetSessionID = lineage.SessionID
+			}
+			r.mu.Unlock()
+			if needReset {
+				if err := r.store.ResetForRebuild(); err != nil {
+					log.Printf("replica: ResetForRebuild session=%d: %v", lineage.SessionID, err)
+					return
+				}
 			}
 			// Rebuild blocks carry the engine's frozen targetLSN in their
 			// lineage. Apply that real LSN immediately so any future

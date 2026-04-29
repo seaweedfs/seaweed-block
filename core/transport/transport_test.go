@@ -245,6 +245,82 @@ func TestTransport_Rebuild_DoesNotCorruptLBA0(t *testing.T) {
 	}
 }
 
+// TestTransport_Rebuild_OverwritesStaleReplicaAtZeroLBAs — INV-G7-REBUILD-
+// SUBSTRATE-NO-STALE-EXPOSED. When a replica rejoins with a preserved
+// walstore that has non-zero bytes at LBAs the primary now reads as zero,
+// the rebuild stream MUST overwrite those positions with primary's zero
+// content, not skip them.
+//
+// Closed by `LogicalStorage.ResetForRebuild` + receiver-side trigger in
+// `replica.go`'s `MsgRebuildBlock` handler: at the start of each rebuild
+// lineage the destination substrate is zeroed so the sender's filtered
+// stream is byte-equal-correct against a clean target. This test
+// validates the contract end-to-end against a `*storage.BlockStore`
+// receiver.
+func TestTransport_Rebuild_OverwritesStaleReplicaAtZeroLBAs(t *testing.T) {
+	primary, replica, listener := setupPrimaryReplica(t)
+
+	// Pre-populate the replica with non-zero stale bytes at LBAs the
+	// primary will leave as zero (LBAs 0, 2, 4). This simulates a
+	// rejoin-with-preserved-walstore scenario.
+	stale := make([]byte, 4096)
+	for i := range stale {
+		stale[i] = 0xAB
+	}
+	for _, lba := range []uint32{0, 2, 4} {
+		if err := replica.ApplyEntry(lba, stale, 1); err != nil {
+			t.Fatalf("seed stale lba %d: %v", lba, err)
+		}
+	}
+	replica.Sync()
+
+	// Primary writes at LBA 1 and 3 only; LBAs 0, 2, 4 are logically
+	// zero on the primary side.
+	one := make([]byte, 4096)
+	one[0] = 0x11
+	primary.Write(1, one)
+	three := make([]byte, 4096)
+	three[0] = 0x33
+	primary.Write(3, three)
+	primary.Sync()
+
+	exec := NewBlockExecutor(primary, listener.Addr())
+	closeCh := make(chan adapter.SessionCloseResult, 1)
+	exec.SetOnSessionClose(func(r adapter.SessionCloseResult) { closeCh <- r })
+
+	_, _, pH := primary.Boundaries()
+	if err := exec.StartRebuild("r1", 1, 1, 1, pH); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case r := <-closeCh:
+		if !r.Success {
+			t.Fatalf("rebuild failed: %s", r.FailReason)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout")
+	}
+
+	zero := make([]byte, 4096)
+	for _, lba := range []uint32{0, 2, 4} {
+		rd, err := replica.Read(lba)
+		if err != nil {
+			t.Fatalf("read replica lba %d: %v", lba, err)
+		}
+		if !bytes.Equal(rd, zero) {
+			t.Fatalf("INV-G7-REBUILD-SUBSTRATE-NO-STALE-EXPOSED violated: replica LBA %d still has stale bytes (rd[0]=%02x), want all-zero", lba, rd[0])
+		}
+	}
+	rd1, _ := replica.Read(1)
+	if rd1[0] != 0x11 {
+		t.Fatalf("LBA 1: got %02x want 11", rd1[0])
+	}
+	rd3, _ := replica.Read(3)
+	if rd3[0] != 0x33 {
+		t.Fatalf("LBA 3: got %02x want 33", rd3[0])
+	}
+}
+
 func TestTransport_Rebuild_InvalidatedSessionStopsWithoutCallback(t *testing.T) {
 	primary, replica, listener := setupPrimaryReplica(t)
 	writeTestBlocks(primary, 64)

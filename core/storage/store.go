@@ -307,3 +307,18 @@ func (s *BlockStore) AllBlocks() map[uint32][]byte {
 	}
 	return result
 }
+
+// ResetForRebuild clears all blocks; in-memory equivalent of zeroing the
+// extent. Also resets frontier counters so the post-reset state matches
+// the WALStore/SmartWAL implementations: every LBA reads as zero, no
+// LSN history retained. INV-G7-REBUILD-SUBSTRATE-NO-STALE-EXPOSED.
+func (s *BlockStore) ResetForRebuild() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.blocks = make(map[uint32][]byte)
+	s.walTail = 0
+	s.walHead = 0
+	s.nextLSN = 1
+	s.syncedLSN = 0
+	return nil
+}

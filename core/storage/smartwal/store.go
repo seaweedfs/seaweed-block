@@ -424,6 +424,56 @@ func (s *Store) AllBlocks() map[uint32][]byte {
 	return out
 }
 
+// ResetForRebuild zeroes the extent + ring slots and resets in-memory
+// state to fresh-store values, so a subsequent rebuild stream lands on
+// a clean destination — INV-G7-REBUILD-SUBSTRATE-NO-STALE-EXPOSED.
+func (s *Store) ResetForRebuild() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return errors.New("smartwal: ResetForRebuild after Close")
+	}
+
+	const chunkSize = 1 << 20
+	zeros := make([]byte, chunkSize)
+	extentSize := int64(s.hdr.NumBlocks) * int64(s.hdr.BlockSize)
+	for written := int64(0); written < extentSize; {
+		n := int64(chunkSize)
+		if extentSize-written < n {
+			n = extentSize - written
+		}
+		if _, err := s.fd.WriteAt(zeros[:n], s.extentBase+written); err != nil {
+			return fmt.Errorf("smartwal: ResetForRebuild zero extent at %d: %w", written, err)
+		}
+		written += n
+	}
+
+	// Zero the ring region too. ring offset = headerSize, size = ring.byteSize.
+	// We zero by writing zeros across the entire ring extent.
+	ringStart := int64(headerSize)
+	ringSize := s.extentBase - ringStart
+	for written := int64(0); written < ringSize; {
+		n := int64(chunkSize)
+		if ringSize-written < n {
+			n = ringSize - written
+		}
+		if _, err := s.fd.WriteAt(zeros[:n], ringStart+written); err != nil {
+			return fmt.Errorf("smartwal: ResetForRebuild zero ring at %d: %w", written, err)
+		}
+		written += n
+	}
+
+	s.nextLSN = 1
+	s.syncedLSN = 0
+	s.walHead = 0
+	s.walTail = 0
+
+	if err := s.fd.Sync(); err != nil {
+		return fmt.Errorf("smartwal: ResetForRebuild fsync: %w", err)
+	}
+	return nil
+}
+
 // Close fsyncs and releases the file. Idempotent.
 func (s *Store) Close() error {
 	s.mu.Lock()

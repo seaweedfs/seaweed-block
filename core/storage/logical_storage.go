@@ -117,6 +117,26 @@ type LogicalStorage interface {
 	// the rebuild server to enumerate what to ship.
 	AllBlocks() map[uint32][]byte
 
+	// ResetForRebuild prepares the substrate to receive a full base
+	// rebuild stream. After a successful return, every LBA in the
+	// extent reads as zero, the WAL ring is empty, the dirty map is
+	// cleared, and the durable frontier is set to 0. Subsequent
+	// `ApplyEntry` calls from the rebuild stream populate a clean
+	// destination — INV-G7-REBUILD-SUBSTRATE-NO-STALE-EXPOSED.
+	//
+	// Without this reset, a replica rejoining with a preserved
+	// walstore retains stale non-zero bytes at LBAs the primary now
+	// reads as zero (`AllBlocks()` filters zero blocks from the
+	// rebuild stream as a sparse-stream optimization). Resetting the
+	// destination makes the filter safe: skipped LBAs are guaranteed
+	// zero on the receiver.
+	//
+	// Implementations MUST persist the reset (zeroed extent + cleared
+	// metadata) before returning — partial completion is not allowed
+	// because the next ApplyEntry must observe a clean substrate.
+	// Idempotent: callable multiple times during a session restart.
+	ResetForRebuild() error
+
 	// ScanLBAs is the T4c-2 tier-1 recovery contract. Emits a
 	// RecoveryEntry callback for each modification the substrate
 	// retains within [fromLSN, head). Called by the catch-up sender
