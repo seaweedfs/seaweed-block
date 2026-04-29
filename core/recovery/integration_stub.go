@@ -188,3 +188,35 @@ func (b *ReplicaBridge) Serve(ctx context.Context, conn net.Conn) (uint64, error
 	}
 	return receiver.Run()
 }
+
+// AcceptDualLaneLoop runs an accept loop on the given listener,
+// dispatching every accepted connection to a fresh ReplicaBridge.Serve
+// goroutine. Returns when the listener is closed (caller's signal to
+// stop is `ln.Close()`). Production daemon (cmd/blockvolume) uses this
+// to bind the dual-lane port; tests can use it directly with a
+// temporary `net.Listen("tcp", "127.0.0.1:0")`.
+//
+// The function is non-blocking-safe: each conn handler runs in its
+// own goroutine, so a long-lived recovery session does not block
+// further accepts.
+//
+// Lifecycle: this loop OWNS the goroutines it spawns until the
+// listener is closed. After ln.Close, in-flight handlers continue
+// (they exit on ctx cancel or their own conn read error). Caller
+// owns ctx and listener lifecycles.
+func (b *ReplicaBridge) AcceptDualLaneLoop(ctx context.Context, ln net.Listener) {
+	for {
+		conn, err := ln.Accept()
+		if err != nil {
+			// Listener closed (caller's signal) or fatal accept error;
+			// either way, stop. Per-conn goroutines spawned earlier
+			// keep running until they exit on their own.
+			return
+		}
+		go func(c net.Conn) {
+			subCtx, cancel := context.WithCancel(ctx)
+			defer cancel()
+			_, _ = b.Serve(subCtx, c)
+		}(conn)
+	}
+}

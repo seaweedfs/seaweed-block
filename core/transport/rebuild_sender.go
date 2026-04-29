@@ -1,6 +1,7 @@
 package transport
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"net"
@@ -17,6 +18,9 @@ import (
 // MsgRebuildBlock per LBA, then a terminal MsgRebuildDone whose
 // BarrierResponse carries the replica's actually achieved frontier.
 func (e *BlockExecutor) StartRebuild(replicaID string, sessionID, epoch, endpointVersion, targetLSN uint64) error {
+	if e.dualLane != nil {
+		return e.startRebuildDualLane(replicaID, sessionID, epoch, endpointVersion, targetLSN)
+	}
 	lineage := RecoveryLineage{
 		SessionID:       sessionID,
 		Epoch:           epoch,
@@ -119,4 +123,50 @@ func (e *BlockExecutor) doRebuild(replicaID string, session *activeSession, targ
 	}
 	log.Printf("executor: rebuild complete, sent %d blocks (targetLSN=%d)", len(blocks), targetLSN)
 	return resp.AchievedLSN, nil
+}
+
+// startRebuildDualLane is the wiring entry into the dual-lane recovery
+// package. It dials the replica's separate dual-lane port (per
+// docs/recovery-wiring-plan.md §4 Option A) and delegates to the
+// PrimaryBridge captured in e.dualLane.Bridge.
+//
+// Lifecycle: this method is async (returns immediately after dialing
+// + StartRebuildSession + FinishLiveWrites are kicked off). The
+// bridge's onClose callback (set in NewBlockExecutorWithDualLane)
+// fires the executor's OnSessionClose when the goroutine completes.
+//
+// Why FinishLiveWrites is called immediately: legacy callers do not
+// push live writes during a rebuild (the legacy lineage gate rejected
+// them anyway). To match legacy behavior in this first-cut wiring,
+// the bridge's session is told there are no more live writes coming
+// before the goroutine even starts the backlog phase. Spec §3.2 #3
+// real-time interleave (architect priority #2) lifts this restriction
+// and is OUT OF SCOPE for this PR.
+func (e *BlockExecutor) startRebuildDualLane(replicaID string, sessionID, epoch, endpointVersion, targetLSN uint64) error {
+	dl := e.dualLane
+	conn, err := net.DialTimeout("tcp", dl.DialAddr, 2*time.Second)
+	if err != nil {
+		return fmt.Errorf("dual-lane dial %s: %w", dl.DialAddr, err)
+	}
+	// Same observability marker as the legacy path so QA helpers
+	// scrape it identically across modes (INV-G6-WALRECYCLE-DISPATCHES-
+	// REBUILD).
+	log.Printf("executor: rebuild start replica=%s sessionID=%d epoch=%d EV=%d targetLSN=%d (dual-lane)",
+		replicaID, sessionID, epoch, endpointVersion, targetLSN)
+	// fromLSN=0 for full rebuild matches the legacy doRebuild semantic
+	// (base lane covers everything; no catch-up tail). When a future
+	// caller wants partial rebuild from a specific LSN, the
+	// StartRebuild signature would need fromLSN added — out of scope.
+	if err := dl.Bridge.StartRebuildSession(context.Background(), conn, dl.ReplicaID, sessionID, 0, targetLSN); err != nil {
+		_ = conn.Close()
+		return fmt.Errorf("dual-lane start: %w", err)
+	}
+	// Legacy semantics: no live writes during rebuild. Signal the
+	// session immediately so it drains (empty queue) and barriers.
+	if !dl.Bridge.FinishLiveWrites(dl.ReplicaID) {
+		// Race: session ended before we could signal. Bridge already
+		// fired the close callback; nothing for us to do here.
+		_ = conn.Close()
+	}
+	return nil
 }

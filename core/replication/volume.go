@@ -37,7 +37,8 @@ type LocalWrite struct {
 type ReplicationVolume struct {
 	volumeID string
 	store    storage.LogicalStorage // borrowed, NEVER closed by us
-	newExec  executorFactory        // test seam; default dials real TCP
+	newExec     executorFactory        // test seam; default dials real TCP
+	newDualExec dualLaneExecutorFactory // optional dual-lane override; nil = use newExec
 	coord    *DurabilityCoordinator // used by Sync; stateless
 
 	mu                    sync.Mutex // serializes UpdateReplicaSet + OnLocalWrite entry AND fan-out AND Sync
@@ -75,6 +76,16 @@ type ReplicationVolume struct {
 // transport.NewBlockExecutor.
 type executorFactory func(store storage.LogicalStorage, replicaAddr string) *transport.BlockExecutor
 
+// dualLaneExecutorFactory is an optional alternative factory used
+// when the daemon is started in --recovery-mode=dual-lane. When non-nil,
+// `UpdateReplicaSet` calls it instead of `executorFactory` for each new
+// peer, giving the factory both the peer's data address AND its
+// replica ID so it can construct a BlockExecutor configured for the
+// dual-lane recovery package (per docs/recovery-wiring-plan.md §2).
+//
+// Default (legacy mode): nil; falls back to executorFactory.
+type dualLaneExecutorFactory func(store storage.LogicalStorage, replicaAddr, replicaID string) *transport.BlockExecutor
+
 // NewReplicationVolume constructs a per-volume fan-out coordinator.
 // The returned volume borrows store — it is a read-only handle from
 // the volume's perspective and is never closed here (Provider owns
@@ -95,6 +106,32 @@ func NewReplicationVolume(volumeID string, store storage.LogicalStorage) *Replic
 		peers:          make(map[string]*ReplicaPeer),
 		durabilityMode: DurabilityBestEffort, // zero value; explicit for clarity
 	}
+}
+
+// SetDualLaneExecutorFactory injects the dual-lane BlockExecutor
+// constructor so subsequent `UpdateReplicaSet` calls build per-peer
+// executors via the recovery package's PrimaryBridge instead of the
+// legacy single-lane path. Idempotent; pass nil to revert to legacy.
+//
+// Caller (cmd/blockvolume) is responsible for:
+//   - Building a per-volume `recovery.PeerShipCoordinator` ONCE and
+//     capturing it in the closure (so MinPinAcrossActiveSessions
+//     reports the true minimum across all peers).
+//   - Translating peer.replicaAddr (data port) → dual-lane port via
+//     deployment convention.
+//   - Starting the local dual-lane listener (see
+//     `recovery.AcceptDualLaneLoop`).
+//
+// MUST be called BEFORE the first `UpdateReplicaSet` so the very
+// first peer is built with the right factory; later switches DO NOT
+// retroactively re-construct existing peers.
+//
+// Per docs/recovery-wiring-plan.md §3 (lifecycle alignment) — mode is
+// exclusive: tests don't mix legacy and dual-lane on the same volume.
+func (v *ReplicationVolume) SetDualLaneExecutorFactory(f func(store storage.LogicalStorage, replicaAddr, replicaID string) *transport.BlockExecutor) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.newDualExec = f
 }
 
 // SetDurabilityMode configures the per-volume durability semantic
@@ -268,7 +305,12 @@ func (v *ReplicationVolume) UpdateReplicaSet(generation uint64, targets []Replic
 				v.onPeerRemoved(id)
 			}
 		}
-		executor := v.newExec(v.store, t.DataAddr)
+		var executor *transport.BlockExecutor
+		if v.newDualExec != nil {
+			executor = v.newDualExec(v.store, t.DataAddr, id)
+		} else {
+			executor = v.newExec(v.store, t.DataAddr)
+		}
 		peer, err := NewReplicaPeer(t, executor)
 		if err != nil {
 			return fmt.Errorf("replication: UpdateReplicaSet: add peer %s: %w", id, err)
