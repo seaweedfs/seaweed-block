@@ -570,6 +570,27 @@ func applySessionFailed(st *ReplicaState, e SessionClosedFailed, r *ApplyResult,
 		})
 		return
 	}
+	// G7-redo priority #3 [retry] Option A (architect 2026-04-29):
+	// PinUnderRetention is a mid-session pin/retention contract
+	// violation (recovery.FailurePinUnderRetention, see
+	// docs/recovery-pin-floor-wire.md §5). NOT retryable on the same
+	// lineage — retrying same fromLSN against an advanced primary S
+	// would either fail identically OR mask the situation that
+	// actually needs a fresh probe. Skip retry, leave Attempts
+	// untouched, and emit Degraded so the next probe mints a fresh
+	// lineage with fromLSN ≥ current S.
+	//
+	// Pinned by INV-PIN-COMPATIBLE-WITH-RETENTION at the engine
+	// retry-budget gate (see TestT4d_PinUnderRetention_BypassesRetryBudget).
+	if e.FailureKind == RecoveryFailurePinUnderRetention {
+		trace("pin_under_retention_no_retry",
+			"FailureKind=PinUnderRetention — skip retry; new lineage required")
+		r.Commands = append(r.Commands, PublishDegraded{
+			ReplicaID: e.ReplicaID,
+			Reason:    "session_failed: " + e.Reason,
+		})
+		return
+	}
 	st.Recovery.Attempts++
 	policy := DefaultRuntimePolicyFor(contentKindFor(st.Recovery.Decision))
 	budget := policy.MaxRetries

@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/seaweedfs/seaweed-block/core/engine"
+	"github.com/seaweedfs/seaweed-block/core/recovery"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
@@ -29,6 +30,16 @@ import (
 //   - everything else → RecoveryFailureTransport (retryable per
 //     RecoveryRuntimePolicy)
 //
+// Recovery-package failure mapping (recovery.Failure → engine.RecoveryFailureKind):
+// Per architect Option A 2026-04-29 (priority #3 [retry] bug-fix
+// shape), only `recovery.FailurePinUnderRetention` is mapped here
+// today. Full lossless mapping (Wire / Protocol / Substrate /
+// Contract / Cancelled / SingleFlight / Unknown) is the deliverable
+// of Option B kickoff — until then those kinds fall through to the
+// existing `RecoveryFailureTransport` retryable default. Adding new
+// branches is a single-line edit in the switch below + an engine
+// kind in `events.go`.
+//
 // Called by: BlockExecutor.finishSession at session close path.
 // Owns: nothing; pure mapping.
 // Borrows: err is consumed read-only (errors.As doesn't mutate).
@@ -46,6 +57,19 @@ func classifyRecoveryFailure(err error) engine.RecoveryFailureKind {
 			return engine.RecoveryFailureSubstrateIO
 		}
 		return engine.RecoveryFailureTransport
+	}
+	// Recovery-package typed failure — Option A scope: PinUnderRetention
+	// only. Documented non-retryable in core/recovery/failure.go; engine
+	// MUST NOT classify it as Transport (which is retryable). Other
+	// kinds in `recovery.FailureKind` deferred to Option B kickoff.
+	var rcf *recovery.Failure
+	if errors.As(err, &rcf) {
+		switch rcf.Kind {
+		case recovery.FailurePinUnderRetention:
+			return engine.RecoveryFailurePinUnderRetention
+		}
+		// Fall through: unmapped recovery kinds use the transport
+		// fallback below. Option B closes this gap.
 	}
 	// Session invalidation is a transport-internal sentinel.
 	if errors.Is(err, errSessionInvalidated) {
