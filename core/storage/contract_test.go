@@ -1,10 +1,16 @@
-package storage
+package storage_test
 
 import (
 	"bytes"
 	"path/filepath"
 	"testing"
+
+	"github.com/seaweedfs/seaweed-block/core/storage"
+	"github.com/seaweedfs/seaweed-block/core/storage/memorywal"
 )
+
+// LogicalStorage is re-aliased for brevity inside this _test package.
+type LogicalStorage = storage.LogicalStorage
 
 // Contract tests for the LogicalStorage interface. Each test runs
 // against every registered implementation. A new implementation slots
@@ -35,19 +41,25 @@ func implementations() []implFactory {
 		{
 			name: "BlockStore-mem",
 			fresh: func(t *testing.T, dir string, numBlocks uint32, blockSize int) LogicalStorage {
-				return NewBlockStore(numBlocks, blockSize)
+				return storage.NewBlockStore(numBlocks, blockSize)
 			},
 		},
 		{
 			name: "WALStore",
 			fresh: func(t *testing.T, dir string, numBlocks uint32, blockSize int) LogicalStorage {
 				path := filepath.Join(dir, "store.bin")
-				s, err := CreateWALStore(path, numBlocks, blockSize)
+				s, err := storage.CreateWALStore(path, numBlocks, blockSize)
 				if err != nil {
 					t.Fatalf("CreateWALStore: %v", err)
 				}
 				t.Cleanup(func() { _ = s.Close() })
 				return s
+			},
+		},
+		{
+			name: "MemoryWAL",
+			fresh: func(t *testing.T, dir string, numBlocks uint32, blockSize int) LogicalStorage {
+				return memorywal.NewStore(numBlocks, blockSize)
 			},
 		},
 	}
