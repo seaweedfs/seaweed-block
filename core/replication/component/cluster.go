@@ -459,7 +459,17 @@ func (c *Cluster) Start() *Cluster {
 	executors := make([]*transport.BlockExecutor, c.replicaN)
 	for i, r := range c.replicas {
 		if c.dualLane {
-			rid := recovery.ReplicaID(fmt.Sprintf("r-%d", i))
+			// INV-RID-UNIFIED-PER-SESSION: the construction RID MUST
+			// match the engine driver's per-replica ID (the arg flowing
+			// through StartRebuild). Engine driver convention here is
+			// "replica-%d" — see the AssignmentInfo / ProbeResult
+			// callsites in dual_lane_engine_test.go and the
+			// VolumeReplicaAdapter's keying. Pre-Phase-0-Fix-#1 this
+			// was "r-%d", which silently diverged: bridge keyed coord
+			// under "r-N" while sink keyed under "replica-N". The
+			// startRebuildDualLane assert now fails closed on that
+			// mismatch.
+			rid := recovery.ReplicaID(fmt.Sprintf("replica-%d", i))
 			executors[i] = transport.NewBlockExecutorWithDualLane(
 				pStore, r.Addr, r.DualLaneAddr, c.coord, rid,
 			)

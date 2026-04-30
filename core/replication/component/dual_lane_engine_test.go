@@ -107,7 +107,11 @@ func TestDualLane_EngineDrivenRebuild_HappyPath(t *testing.T) {
 		}
 
 		// Coordinator should be back to Idle for replica-0.
-		if got := c.Coord().Phase(recovery.ReplicaID("r-0")); got != recovery.PhaseIdle {
+		// Phase-0-Fix-#1 INV-RID-UNIFIED-PER-SESSION: the engine arg
+		// flowing through StartRebuild is "replica-0"; the bridge now
+		// keys coord under that arg. (Pre-fix this was "r-0",
+		// matching the cluster harness's stale construction RID.)
+		if got := c.Coord().Phase(recovery.ReplicaID("replica-0")); got != recovery.PhaseIdle {
 			t.Errorf("coord phase post-session: %s want Idle", got)
 		}
 
@@ -190,7 +194,8 @@ func TestDualLane_CoordReleasesPinFloorAfterSession(t *testing.T) {
 		if _, anyActive := c.Coord().MinPinAcrossActiveSessions(); anyActive {
 			t.Errorf("post-session: MinPinAcrossActiveSessions still reports anyActive=true")
 		}
-		if got := c.Coord().PinFloor(recovery.ReplicaID("r-0")); got != 0 {
+		// Phase-0-Fix-#1: keyed under the engine arg "replica-0" (was "r-0").
+		if got := c.Coord().PinFloor(recovery.ReplicaID("replica-0")); got != 0 {
 			t.Errorf("post-session: PinFloor=%d want 0 (released)", got)
 		}
 	})
@@ -246,7 +251,10 @@ func TestDualLane_EngineDrivenRebuild_WithPushLiveDuringSession(t *testing.T) {
 			t.Fatal("BlockExecutor missing dual-lane PrimaryBridge")
 		}
 
-		// PeerShipCoordinator keys match NewBlockExecutorWithDualLane replica id ("r-0").
+		// PeerShipCoordinator keys match NewBlockExecutorWithDualLane replica id
+		// ("replica-0" post-Phase-0-Fix-#1). DualLanePrimaryBridge() returns the
+		// construction RID, which now agrees with the engine arg per
+		// INV-RID-UNIFIED-PER-SESSION.
 		if c.Coord().Phase(coordRID) == recovery.PhaseIdle {
 			t.Fatal("coord still Idle after rebuild dispatch — PushLiveWrite would fail")
 		}
