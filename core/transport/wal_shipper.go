@@ -334,12 +334,25 @@ func (s *WalShipper) timerLoop() {
 }
 
 // drainOpportunity attempts one substrate scan cycle from cursor if
-// debt exists (cursor < head). Single-pass; the next tick / nudge
-// reschedules. Holds shipMu around the scan to keep INV-SINGLE.
+// debt exists (cursor < head) AND mode is Backlog. Single-pass; the
+// next tick / nudge reschedules. Holds shipMu around the scan to
+// keep INV-SINGLE.
 //
-// Idle mode: no-op (no replica context yet).
-// Backlog mode: scan; on R1 success transitions to Realtime.
-// Realtime mode: if cursor < head, scan to fill the gap.
+// Mode dispatch (consensus §13 E-WALSHIPPER-DUAL-MODE / mini-plan §11.2a):
+//
+//   Idle     → no-op (no replica context yet).
+//   Backlog  → scan substrate from cursor; emit each entry under
+//              shipMu; on cursor==head, R1 transitions to Realtime.
+//   Realtime → no-op. NotifyAppend is the driver in steady state
+//              (T4a best-effort no-replay carve-out). Restoring a
+//              substrate scan here would replay dead-window writes
+//              when peer comes back online, which is precisely what
+//              T4a forbids — that's T4c rebuild territory. CHK-
+//              WALSHIPPER-TIMER-DRAIN explicitly limited to ModeBacklog.
+//
+// DO NOT add a Realtime scan branch here without architect updating
+// consensus §13 (the T4a carve-out exists by design; reverting it
+// re-introduces the silent-divergence bug C2 closed).
 func (s *WalShipper) drainOpportunity() {
 	// Read mode + cursor + head as a CONSISTENT snapshot under
 	// shipMu — closes the TOCTOU window between the gate decision
