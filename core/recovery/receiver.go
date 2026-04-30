@@ -36,12 +36,20 @@ type Receiver struct {
 	session   *RebuildSession
 	sessionID uint64
 
-	// BaseBatchAck cadence config + state (per docs/recovery-pin-floor-wire.md §3).
+	// BaseBatchAck cadence config + state (per
+	// v3-recovery-pin-floor-wire.md §3).
 	cadenceK           uint32
 	cadenceT           time.Duration
 	blocksSinceLastAck uint32
 	lastAckTime        time.Time
 	baseInstalledUpper uint32 // highest base LBA installed (advisory in BaseBatchAck)
+
+	// appliedLSN tracks the highest WAL LSN successfully passed to
+	// session.ApplyWALEntry. Initialized to fromLSN at SessionStart
+	// (the watermark form: "fromLSN is already-installed-on-replica").
+	// Per v3-recovery-unified-wal-stream-kickoff.md §5 + mini-plan §2.3
+	// (Q13 ratified): the first WAL frame's expected LSN is fromLSN+1.
+	appliedLSN uint64
 }
 
 // NewReceiver constructs a receiver bound to the replica's substrate
@@ -100,6 +108,10 @@ func (r *Receiver) Run() (achievedLSN uint64, err error) {
 			}
 			r.sessionID = s.SessionID
 			r.session = NewRebuildSession(r.store, s.TargetLSN)
+			// §3.2 #3 monotonic-LSN init: fromLSN is the
+			// already-installed-on-replica watermark; first WAL frame's
+			// expected LSN is fromLSN+1.
+			r.appliedLSN = s.FromLSN
 
 		case frameBaseBlock:
 			if r.session == nil {
@@ -133,10 +145,21 @@ func (r *Receiver) Run() (achievedLSN uint64, err error) {
 			if decErr != nil {
 				return 0, newFailure(FailureProtocol, PhaseRecvDispatch, decErr)
 			}
+			// §3.2 #3 wire-level monotonic gate. Per kickoff v0.3 §5.1:
+			//   lsn == applied+1 → apply
+			//   lsn  > applied+1 → FailureContract (gap, not silent skip)
+			//   lsn == applied   → FailureProtocol (exact-duplicate; sender bug)
+			//   lsn  < applied   → FailureProtocol (in-stream backward)
+			// The §5.2 duplicate-LSN claim semantics is substrate-level
+			// per-LBA arbitration; it does NOT pass through this gate.
+			if mErr := r.checkMonotonic(lsn); mErr != nil {
+				return 0, mErr
+			}
 			if applyErr := r.session.ApplyWALEntry(kind, lba, data, lsn); applyErr != nil {
 				return 0, newFailure(FailureSubstrate, PhaseRecvApply,
 					fmt.Errorf("apply wal kind=%s lba=%d lsn=%d: %w", kind, lba, lsn, applyErr))
 			}
+			r.appliedLSN = lsn
 
 		case frameBaseDone:
 			if r.session == nil {
@@ -241,4 +264,44 @@ func (r *Receiver) sendAck() error {
 	r.blocksSinceLastAck = 0
 	r.lastAckTime = time.Now()
 	return nil
+}
+
+// checkMonotonic implements the §3.2 #3 wire-level monotonic LSN gate
+// per kickoff v0.3 §5.1. Four cases:
+//
+//	lsn == applied + 1: normal (the only legal forward step). Returns nil.
+//	lsn  > applied + 1: GAP — FailureContract; not silent skip. Sender
+//	                    MUST emit contiguous LSN. WAL-recycled gaps go
+//	                    through FailureWALRecycled at sender side.
+//	lsn == applied:     EXACT-DUPLICATE on the wire — FailureProtocol.
+//	                    TCP delivers in-order; recovery sender writes
+//	                    each LSN exactly once. NOT to be confused with
+//	                    §5.2 substrate-level per-LBA arbitration
+//	                    (INV-DUAL-LANE-WAL-WINS-BASE) — that's a
+//	                    different layer.
+//	lsn  < applied:     BACKWARD — FailureProtocol. Only legitimate
+//	                    "rewind" is session-level cursor:=pinLSN at a
+//	                    NEW SessionStart, never in-stream.
+//
+// Initialization (per Q13 ratified default): r.appliedLSN := fromLSN
+// at SessionStart so the first frame's expected LSN is fromLSN+1.
+func (r *Receiver) checkMonotonic(lsn uint64) error {
+	expected := r.appliedLSN + 1
+	if lsn == expected {
+		return nil
+	}
+	if lsn > expected {
+		return newFailure(FailureContract, PhaseRecvDispatch,
+			fmt.Errorf("WAL gap: got LSN=%d, expected %d (applied=%d)",
+				lsn, expected, r.appliedLSN))
+	}
+	if lsn == r.appliedLSN {
+		return newFailure(FailureProtocol, PhaseRecvDispatch,
+			fmt.Errorf("WAL exact-duplicate: got LSN=%d == applied=%d "+
+				"(sender re-emit; never legitimate on the wire)",
+				lsn, r.appliedLSN))
+	}
+	return newFailure(FailureProtocol, PhaseRecvDispatch,
+		fmt.Errorf("WAL backward: got LSN=%d < applied=%d",
+			lsn, r.appliedLSN))
 }

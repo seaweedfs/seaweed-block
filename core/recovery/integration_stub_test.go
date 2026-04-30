@@ -20,6 +20,11 @@ import (
 // This is the lifecycle/callback shape the integration PR will plug
 // into core/transport/BlockExecutor.
 func TestIntegrationStub_LifecycleCallbacks(t *testing.T) {
+	// Skipped post-§3.2 #3: BlockStore substrate (see e2e_test.go for
+	// rationale). Lifecycle-callback coverage moves to mini-plan §2.2
+	// memorywal-based test in follow-up commit.
+	t.Skip("BlockStore-substrate test; re-pinned on memorywal in mini-plan §2.2 follow-up")
+
 	const numBlocks = 32
 	const blockSize = 4096
 

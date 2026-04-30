@@ -20,36 +20,36 @@ var _ storage.RecycleFloorSource = (*PeerShipCoordinator)(nil)
 // types; integration code adapts to the project-wide peer identifier.
 type ReplicaID string
 
-// PeerShipPhase is the per-peer ship-phase enum required by
-// `v3-recovery-live-line-backlog-spec.md` §3.2.
+// PeerShipPhase is the per-peer ship-phase enum.
 //
-//	Idle              — no active recover session for this peer; Primary
-//	                    may steady-live-ship per existing reachability
-//	                    rules (§3.1).
-//	DrainingHistorical — session active; historical WAL backlog has not
-//	                    yet been drained to the frozen target. Primary
-//	                    MUST NOT publish (peer, InSync) for recover
-//	                    completion based on steady-live throughput
-//	                    alone (§3.2 last paragraph).
-//	SteadyLiveAllowed  — session active but Backlog drained ∧ baseDone
-//	                    hold; live ship is the authoritative path until
-//	                    barrier-ack closes the session.
+//	Idle    — no active recover session for this peer; Primary may
+//	          steady-live-ship per existing reachability rules.
+//	Active  — session is open. Live writes route on the SessionLane
+//	          until EndSession returns to Idle.
+//
+// Per v3-recovery-unified-wal-stream-mini-plan.md §2.4 (Q3 ratified):
+// the v0 enum had a third value PhaseSteadyLiveAllowed gated by
+// TryAdvanceToSteadyLive, intended as a publication-permission flag
+// for Backlog ∧ baseDone. §3.2 #3 deletes both the Steady* state and
+// the explicit transition step — barrier-ack's AchievedLSN ≥ targetLSN
+// is the authoritative completion signal; phase collapses to a binary
+// Idle/Active distinction. CHK-PHASE-NEVER-STEADY-BEFORE-DRAIN and
+// CHK-NO-FAKE-LIVE-DURING-BACKLOG re-anchor as "any active session ⇒
+// SessionLane until EndSession" (RouteLocalWrite returns SessionLane
+// for any non-Idle phase).
 type PeerShipPhase int
 
 const (
 	PhaseIdle PeerShipPhase = iota
-	PhaseDrainingHistorical
-	PhaseSteadyLiveAllowed
+	PhaseActive
 )
 
 func (p PeerShipPhase) String() string {
 	switch p {
 	case PhaseIdle:
 		return "Idle"
-	case PhaseDrainingHistorical:
-		return "DrainingHistorical"
-	case PhaseSteadyLiveAllowed:
-		return "SteadyLiveAllowed"
+	case PhaseActive:
+		return "Active"
 	default:
 		return fmt.Sprintf("Phase(%d)", int(p))
 	}
@@ -134,7 +134,7 @@ func (c *PeerShipCoordinator) StartSession(id ReplicaID, sessionID, fromLSN, tar
 			id, existing.sessionID, existing.phase)
 	}
 	c.states[id] = &peerShipState{
-		phase:      PhaseDrainingHistorical,
+		phase:      PhaseActive,
 		sessionID:  sessionID,
 		fromLSN:    fromLSN,
 		targetLSN:  targetLSN,
@@ -229,33 +229,15 @@ func (c *PeerShipCoordinator) BacklogDrained(id ReplicaID) bool {
 	return st.shipCursor >= st.targetLSN
 }
 
-// TryAdvanceToSteadyLive attempts the §3.2 transition. Returns true on
-// transition, false if any precondition fails. Idempotent.
-//
-// Preconditions (all required):
-//   - phase == DrainingHistorical
-//   - BacklogDrained (shipCursor ≥ targetLSN)
-//   - baseDone (if the session has a base lane; for catch-up-only
-//     sessions the coordinator caller may pre-mark this at start)
-func (c *PeerShipCoordinator) TryAdvanceToSteadyLive(id ReplicaID) bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	st, ok := c.states[id]
-	if !ok {
-		return false
-	}
-	if st.phase != PhaseDrainingHistorical {
-		return false
-	}
-	if st.shipCursor < st.targetLSN {
-		return false
-	}
-	if !st.baseDone {
-		return false
-	}
-	st.phase = PhaseSteadyLiveAllowed
-	return true
-}
+// (TryAdvanceToSteadyLive removed per
+// v3-recovery-unified-wal-stream-mini-plan.md §2.4. Phase enum
+// collapsed to {Idle, Active}; the publication-permission flag was
+// folded into "barrier-ack's AchievedLSN ≥ targetLSN is the
+// authoritative completion signal" — there is no longer an explicit
+// Steady* substate to advance into. shipCursor and baseDone are still
+// tracked on peerShipState as inputs to BacklogDrained / Status /
+// CanEmitSessionComplete diagnostics; only the explicit transition
+// step is gone.)
 
 // CanEmitSessionComplete is the §5.2 system-close predicate: given the
 // AchievedLSN echoed in the replica's barrier response, may the engine

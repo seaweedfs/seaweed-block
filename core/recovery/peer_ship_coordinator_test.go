@@ -5,57 +5,46 @@ import "testing"
 const r1 ReplicaID = "r1"
 const r2 ReplicaID = "r2"
 
-// CHK-PHASE-NEVER-STEADY-BEFORE-DRAIN: cannot transition until BOTH
-// shipCursor ≥ target AND baseDone hold.
-func TestCoordinator_PhaseTransitionRequiresDrainAndBaseDone(t *testing.T) {
+// CHK-PHASE-NEVER-STEADY-BEFORE-DRAIN re-anchored post-§3.2 #3:
+// the explicit transition step (TryAdvanceToSteadyLive) is gone;
+// phase collapses to {Idle, Active}. The CHK now reads as "any
+// active session ⇒ SessionLane until EndSession" — pinned by
+// TestCoordinator_RouteLocalWrite below. Pre-§3.2 #3 tests that
+// asserted the transition gate's drain∧baseDone preconditions are
+// no longer applicable: the only "completion gate" is now barrier-
+// ack's AchievedLSN ≥ targetLSN (CanEmitSessionComplete).
+//
+// BacklogDrained and baseDone are still tracked on peerShipState
+// for diagnostics + Status (see TestCoordinator_BacklogDrained_
+// FollowsShipCursor below).
+func TestCoordinator_BacklogDrained_FollowsShipCursor(t *testing.T) {
 	c := NewPeerShipCoordinator()
-	if err := c.StartSession(r1, 7, /*from*/ 100, /*target*/ 200); err != nil {
+	if err := c.StartSession(r1, 7, 100, 200); err != nil {
 		t.Fatalf("StartSession: %v", err)
 	}
-	if got := c.Phase(r1); got != PhaseDrainingHistorical {
-		t.Fatalf("phase after start: got %s want DrainingHistorical", got)
+	if got := c.Phase(r1); got != PhaseActive {
+		t.Fatalf("phase after start: got %s want Active", got)
 	}
-
-	// Neither drained nor base done.
-	if c.TryAdvanceToSteadyLive(r1) {
-		t.Fatal("transition should fail: neither drained nor baseDone")
+	if c.BacklogDrained(r1) {
+		t.Fatal("BacklogDrained should be false before RecordShipped(target)")
 	}
-
-	// Drained but base not done.
 	if err := c.RecordShipped(r1, 200); err != nil {
 		t.Fatalf("RecordShipped: %v", err)
 	}
 	if !c.BacklogDrained(r1) {
 		t.Fatal("BacklogDrained should be true after RecordShipped(target)")
 	}
-	if c.TryAdvanceToSteadyLive(r1) {
-		t.Fatal("transition should fail: drained but !baseDone")
+	// baseDone is still trackable as a flag.
+	st0, _ := c.Status(r1)
+	if st0.BaseDone {
+		t.Fatal("baseDone should be false before MarkBaseDone")
 	}
-
-	// Base done but suppose we somehow regress drained — that can't happen
-	// (cursor is monotonic), so test the symmetric: baseDone first, drained
-	// not yet.
-	c2 := NewPeerShipCoordinator()
-	_ = c2.StartSession(r1, 8, 100, 200)
-	_ = c2.MarkBaseDone(r1)
-	if c2.TryAdvanceToSteadyLive(r1) {
-		t.Fatal("transition should fail: baseDone but !drained")
-	}
-
-	// Now satisfy both on the original coordinator.
 	if err := c.MarkBaseDone(r1); err != nil {
 		t.Fatalf("MarkBaseDone: %v", err)
 	}
-	if !c.TryAdvanceToSteadyLive(r1) {
-		t.Fatal("transition should succeed: drained ∧ baseDone")
-	}
-	if got := c.Phase(r1); got != PhaseSteadyLiveAllowed {
-		t.Fatalf("phase after transition: got %s want SteadyLiveAllowed", got)
-	}
-
-	// Idempotent: calling again is harmless and returns false.
-	if c.TryAdvanceToSteadyLive(r1) {
-		t.Fatal("second TryAdvance should return false (already SteadyLiveAllowed)")
+	st1, _ := c.Status(r1)
+	if !st1.BaseDone {
+		t.Fatal("baseDone should be true after MarkBaseDone")
 	}
 }
 
@@ -107,10 +96,10 @@ func TestCoordinator_RecordShipped_Monotonic(t *testing.T) {
 	}
 }
 
-// CHK-NO-FAKE-LIVE-DURING-BACKLOG: while session is active (any
-// non-Idle phase), RouteLocalWrite returns SessionLane.
-// SteadyLiveAllowed is a publication-permission flag, not a routing
-// gate — see RouteLocalWrite docstring + architect ruling.
+// CHK-NO-FAKE-LIVE-DURING-BACKLOG re-anchored post-§3.2 #3: while
+// session is Active, RouteLocalWrite returns SessionLane regardless
+// of LSN; only EndSession (→ Idle) flips routing back to steady-
+// live. There is no longer a "SteadyLiveAllowed" sub-state.
 func TestCoordinator_RouteLocalWrite(t *testing.T) {
 	c := NewPeerShipCoordinator()
 
@@ -121,28 +110,24 @@ func TestCoordinator_RouteLocalWrite(t *testing.T) {
 
 	_ = c.StartSession(r1, 7, 100, 200)
 
-	// Draining: writes route to session lane (any LSN).
+	// Active: writes route to session lane (any LSN).
 	for _, lsn := range []uint64{150, 200, 201, 500} {
 		if got := c.RouteLocalWrite(r1, lsn); got != RouteSessionLane {
-			t.Fatalf("draining lsn=%d: route=%v want SessionLane", lsn, got)
+			t.Fatalf("active lsn=%d: route=%v want SessionLane", lsn, got)
 		}
 	}
 
-	// After SteadyLiveAllowed transition: still SessionLane (because
-	// barrier hasn't run; session is open; new writes must reach
-	// replica via the recover connection so barrier's AchievedLSN
-	// reflects them).
+	// Even after backlog "drained" (RecordShipped(target)) + baseDone,
+	// routing stays SessionLane because phase is still Active. Only
+	// EndSession returns the peer to Idle.
 	_ = c.RecordShipped(r1, 200)
 	_ = c.MarkBaseDone(r1)
-	if !c.TryAdvanceToSteadyLive(r1) {
-		t.Fatal("transition failed")
-	}
-	if got := c.Phase(r1); got != PhaseSteadyLiveAllowed {
-		t.Fatalf("phase: got %s want SteadyLiveAllowed", got)
+	if got := c.Phase(r1); got != PhaseActive {
+		t.Fatalf("phase: got %s want Active (post-§3.2 #3 collapse)", got)
 	}
 	for _, lsn := range []uint64{201, 500, 1000} {
 		if got := c.RouteLocalWrite(r1, lsn); got != RouteSessionLane {
-			t.Fatalf("SteadyLiveAllowed lsn=%d: route=%v want SessionLane (still in session)", lsn, got)
+			t.Fatalf("active lsn=%d: route=%v want SessionLane (still in session)", lsn, got)
 		}
 	}
 
