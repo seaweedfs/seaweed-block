@@ -17,7 +17,6 @@ package transport
 
 import (
 	"context"
-	"errors"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -26,6 +25,9 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/storage"
 	"github.com/seaweedfs/seaweed-block/core/storage/memorywal"
 )
+
+var _ = storage.ErrAppliedLSNsNotTracked // anchor: storage import survives unused-import scrub
+
 
 // --- helpers ----------------------------------------------------------
 
@@ -145,18 +147,25 @@ func TestWalShipper_RegistrySingleton(t *testing.T) {
 // shipMu. After that, cursor only advances via emission. No
 // in-band rewind."
 //
+// Q1b alignment (architect 2026-04-29): seed must satisfy
+// `head ≥ fromLSN`. Earlier draft seeded LSN 1..5 + fromLSN=10
+// gave head < fromLSN — an edge that exposes R1 bugs but doesn't
+// pin INV-MONOTONIC-CURSOR cleanly. Now seed LSN 1..15 so
+// head=15 ≥ fromLSN=10, and DrainBacklog has a real range
+// (10, 15] to ship.
+//
 // Test:
-//  1. StartSession(fromLSN=10) → cursor=10
-//  2. NotifyAppend lsn=11..15 → cursor advances to 15
-//  3. NotifyAppend with lsn≤cursor (idempotent retry) — cursor unchanged
-//  4. DrainBacklog with substrate scan emitting LSNs > cursor — advances
-//  5. Cursor only ever observed monotonic forward (sample many times)
+//  1. Pre-seed LSN 1..15 (memorywal head=15)
+//  2. StartSession(fromLSN=10) → cursor rewinds to 10
+//  3. DrainBacklog ships LSN 11..15 — cursor advances to 15
+//  4. Cursor never observed to decrease during drain (sampled)
+//  5. Idempotent NotifyAppend with lsn ≤ cursor — cursor unchanged
 func TestWalShipper_CursorMonotonic(t *testing.T) {
 	const fromLSN = uint64(10)
+	const seedCount = 15 // head=15 ≥ fromLSN=10 (Q1b alignment)
 
-	primary := memorywal.NewStore(8, 4096)
-	// Pre-seed primary so head > fromLSN.
-	for lba := uint32(0); lba < 5; lba++ {
+	primary := memorywal.NewStore(64, 4096)
+	for lba := uint32(0); lba < seedCount; lba++ {
 		_, _ = primary.Write(lba, payload(lba, 0xA0))
 	}
 	_, _ = primary.Sync()
@@ -202,9 +211,16 @@ func TestWalShipper_CursorMonotonic(t *testing.T) {
 		t.Errorf("cursor regressed during drain: %d violations", cursorViolations.Load())
 	}
 
+	// After drain, cursor must be at head (15) — DrainBacklog returns
+	// successfully only when R1 transitions cursor==head.
+	_, _, head := primary.Boundaries()
+	if got := s.Cursor(); got != head {
+		t.Errorf("post-drain cursor=%d want head=%d", got, head)
+	}
+
 	// Idempotent NotifyAppend with lsn ≤ cursor must not regress cursor.
 	cursorBefore := s.Cursor()
-	if err := s.NotifyAppend(0, fromLSN-1, payload(0, 0xAA)); err != nil {
+	if err := s.NotifyAppend(0, cursorBefore-1, payload(0, 0xAA)); err != nil {
 		t.Fatalf("idempotent NotifyAppend: %v", err)
 	}
 	if got := s.Cursor(); got != cursorBefore {
@@ -275,13 +291,22 @@ func TestWalShipper_RewindOnceAtSessionEntry(t *testing.T) {
 // during this WalShipper's lifetime is exactly (fromLSN, cursor]
 // of the substrate's log. No skips, no dups."
 //
+// Q1a anchoring (architect 2026-04-29): the contract is open-lower
+// at fromLSN. First emit's LSN MUST be `fromLSN+1`, NOT "1". Here
+// fromLSN=0 happens to make `fromLSN+1 = 1`, matching the seed; but
+// the assertion below derives the expected sequence from `fromLSN+1`
+// to make the contract explicit (and so a future variant with
+// fromLSN > 0 gets covered without rewriting the test logic).
+//
 // Test:
 //  1. Pre-seed primary with LSN 1..50 (memorywal write-time LSN).
 //  2. StartSession(fromLSN=0); DrainBacklog runs to completion.
 //  3. After drain: cursor = head = 50.
-//  4. emit log MUST be exactly LSN [1, 2, ..., 50] in order, no dups.
+//  4. emit log MUST be exactly LSN [fromLSN+1, .., head] in order,
+//     contiguous, no dups.
 func TestWalShipper_DeliveredEqualsCursor(t *testing.T) {
 	const numEntries = 50
+	const fromLSN = uint64(0) // for this case, head ≡ numEntries
 	primary := memorywal.NewStore(64, 4096)
 	for lba := uint32(0); lba < numEntries; lba++ {
 		_, _ = primary.Write(lba, payload(lba, 0xC0))
@@ -291,7 +316,7 @@ func TestWalShipper_DeliveredEqualsCursor(t *testing.T) {
 
 	emit := newRecordingEmit()
 	s := NewWalShipper("r1", HeadSourceFromStorage(primary), primary, emit.Func())
-	if err := s.StartSession(0); err != nil {
+	if err := s.StartSession(fromLSN); err != nil {
 		t.Fatalf("StartSession: %v", err)
 	}
 
@@ -308,15 +333,19 @@ func TestWalShipper_DeliveredEqualsCursor(t *testing.T) {
 		t.Errorf("post-drain mode=%s want Realtime (R1 transition success)", got)
 	}
 
+	// Open-lower at fromLSN: expected LSN sequence is
+	// [fromLSN+1, fromLSN+2, ..., head], contiguous.
+	expectedCount := head - fromLSN
 	got := emit.Snapshot()
-	if uint64(len(got)) != head {
-		t.Fatalf("emit count=%d want %d (== head)", len(got), head)
+	if uint64(len(got)) != expectedCount {
+		t.Fatalf("emit count=%d want %d (head=%d - fromLSN=%d)",
+			len(got), expectedCount, head, fromLSN)
 	}
-	// Strictly increasing LSN by 1, contiguous.
 	for i, e := range got {
-		want := uint64(i + 1)
+		want := fromLSN + 1 + uint64(i)
 		if e.LSN != want {
-			t.Errorf("emit[%d].LSN=%d want %d (contiguous (fromLSN, cursor])", i, e.LSN, want)
+			t.Errorf("emit[%d].LSN=%d want %d (open-lower at fromLSN=%d)",
+				i, e.LSN, want, fromLSN)
 		}
 	}
 }
@@ -364,12 +393,12 @@ func TestWalShipper_R1_NoGapAtTransition(t *testing.T) {
 		for i := uint32(0); i < N1; i++ {
 			lba := N0 + i
 			data := payload(lba, 0xD0)
-			if _, err := primary.Write(lba, data); err != nil {
+			lsn, err := primary.Write(lba, data)
+			if err != nil {
 				t.Errorf("concurrent Write: %v", err)
 				return
 			}
 			// Simulate the production path's NotifyAppend call.
-			lsn, _, _ := primary.Boundaries()
 			_ = s.NotifyAppend(lba, lsn, data)
 			time.Sleep(50 * time.Microsecond)
 		}
@@ -421,26 +450,28 @@ func TestWalShipper_R1_NoGapAtTransition(t *testing.T) {
 // TestWalShipper_R1_DoubleCheckRejectsRace — spec §5.1 R1 internal
 // guarantee: when caller observes cursor==head AT t0, calls into
 // AssertCaughtUpAndEnableTailShip (held under shipMu), and a write
-// has landed between t0 and the AAACtual flip, R1 returns false
+// has landed between t0 and the actual flip, R1 returns false
 // (caller stays Backlog).
 //
-// The OBSERVABLE behavior pinned by this test: under repeated
-// scenarios where head advances mid-check, mode does NOT flip to
-// Realtime prematurely. We use a fixedHeadSource to control head
-// values precisely.
+// Q3 alignment (architect 2026-04-29): use `fixedHeadSource` for
+// deterministic head control instead of relying on substrate
+// `Boundaries()` timing. The head value reported to WalShipper is
+// independent of substrate state; test bumps head atomically AT
+// THE MOMENT cursor reaches the previous head, and writes the new
+// LSN to substrate so the next scan picks it up.
 //
 // Setup:
-//  1. Manual head source set at H=10
-//  2. StartSession(0); cursor=0
-//  3. Substrate has LSN 1..10
-//  4. DrainBacklog ships LSN 1..10; cursor=10
-//  5. BEFORE DrainBacklog's R1 flip, race: bump head to 11
-//     (substrate writes new LSN 11; head returns 11)
-//  6. R1 sees head moved → stays Backlog → next loop scan picks LSN 11
-//  7. Eventually cursor=11=head, R1 succeeds, mode=Realtime
-//  8. emit log must include LSN 11 (not skipped)
-//
-// This is the "head moved during check window" case from spec §5.2.
+//  1. fixedHeadSource at h=10
+//  2. Substrate has LSN 1..10
+//  3. StartSession(0); DrainBacklog runs in goroutine
+//  4. Concurrent goroutine polls Cursor; on cursor reaching 10,
+//     atomically: substrate.Write(LSN 11) + fixedHeadSource.Set(11)
+//  5. R1's double-check inside shipMu re-reads head: if it sees 11,
+//     stays Backlog and rescans (picks LSN 11). If it sees 10 (race
+//     lost the window), it flips early — but then NotifyAppend on
+//     the LSN 11 path catches it via realtime emission. Either way
+//     the OUTCOME is: emit log contains LSN 11.
+//  6. After drain: cursor=11=fixedHeadSource. emit log = LSN 1..11.
 func TestWalShipper_R1_DoubleCheckRejectsRace(t *testing.T) {
 	primary := memorywal.NewStore(32, 4096)
 	for lba := uint32(0); lba < 10; lba++ {
@@ -448,24 +479,31 @@ func TestWalShipper_R1_DoubleCheckRejectsRace(t *testing.T) {
 	}
 	_, _ = primary.Sync()
 
+	head := &fixedHeadSource{h: 10}
 	emit := newRecordingEmit()
-	s := NewWalShipper("r1", HeadSourceFromStorage(primary), primary, emit.Func())
+	s := NewWalShipper("r1", head, primary, emit.Func())
 	if err := s.StartSession(0); err != nil {
 		t.Fatalf("StartSession: %v", err)
 	}
 
-	// Concurrent: at the moment cursor reaches 10, write LSN 11. The
-	// timing here is heuristic — the test asserts the OUTCOME (LSN
-	// 11 in emit log), not the exact path R1 took.
+	// Concurrent: when cursor reaches 10, inject LSN 11. Atomicity:
+	// substrate Write happens BEFORE head bump, so any scan that runs
+	// after the head bump sees LSN 11 in the substrate.
+	bumped := make(chan struct{})
 	go func() {
-		// Wait for cursor to approach head.
-		for s.Cursor() < 8 {
-			time.Sleep(time.Microsecond)
+		defer close(bumped)
+		// Spin until cursor is at the boundary. fixedHeadSource lets
+		// us synchronize on observed cursor without timing fudge.
+		for s.Cursor() < 10 {
+			time.Sleep(50 * time.Microsecond)
 		}
-		// Inject a write right before R1 would fire.
+		// Step 1: write to substrate first (so scan can find it)
 		_, _ = primary.Write(10, payload(10, 0xE0))
-		lsn, _, _ := primary.Boundaries()
-		_ = s.NotifyAppend(10, lsn, payload(10, 0xE0))
+		// Step 2: bump head AFTER substrate has the entry
+		head.Set(11)
+		// Step 3: notify (in case shipper transitioned to realtime
+		// already — covers the "race lost the R1 window" branch)
+		_ = s.NotifyAppend(10, 11, payload(10, 0xE0))
 	}()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -473,15 +511,20 @@ func TestWalShipper_R1_DoubleCheckRejectsRace(t *testing.T) {
 	if err := s.DrainBacklog(ctx); err != nil {
 		t.Fatalf("DrainBacklog: %v", err)
 	}
+	<-bumped
 
-	_, _, finalHead := primary.Boundaries()
-	if s.Cursor() != finalHead {
-		t.Errorf("cursor=%d != finalHead=%d", s.Cursor(), finalHead)
+	if got := s.Cursor(); got != 11 {
+		t.Errorf("cursor=%d want 11 (head bumped to 11; LSN 11 must have shipped)", got)
 	}
 
 	got := emit.Snapshot()
-	if uint64(len(got)) != finalHead {
-		t.Fatalf("emit count=%d != finalHead=%d (R1 missed an LSN)", len(got), finalHead)
+	if len(got) != 11 {
+		t.Fatalf("emit count=%d want 11 (LSN 1..11 contiguous; R1 must not skip LSN 11)", len(got))
+	}
+	// Verify LSN 11 specifically — that's the race-window LSN.
+	lastLSN := got[len(got)-1].LSN
+	if lastLSN != 11 {
+		t.Errorf("last emit LSN=%d want 11 (race-window LSN missed)", lastLSN)
 	}
 }
 
@@ -519,8 +562,7 @@ func TestWalShipper_NoDoubleLive(t *testing.T) {
 					return
 				}
 				data := payload(lba, 0xF0)
-				_, _ = primary.Write(lba, data)
-				lsn, _, _ := primary.Boundaries()
+				lsn, _ := primary.Write(lba, data)
 				_ = s.NotifyAppend(lba, lsn, data)
 				time.Sleep(time.Microsecond)
 			}
@@ -580,9 +622,9 @@ func TestWalShipper_R2_LagSignalFires(t *testing.T) {
 	// In Backlog mode: NotifyAppend doesn't ship; just updates lag
 	// sample. Drive head to 1000 by writes, but DON'T call DrainBacklog.
 	for lba := uint32(0); lba < 1000; lba++ {
-		_, _ = primary.Write(lba, payload(lba, 0xF0))
-		lsn, _, _ := primary.Boundaries()
-		_ = s.NotifyAppend(lba, lsn, payload(lba, 0xF0))
+		data := payload(lba, 0xF0)
+		lsn, _ := primary.Write(lba, data)
+		_ = s.NotifyAppend(lba, lsn, data)
 	}
 
 	// Allow the goroutine'd hook call to land.
@@ -622,9 +664,9 @@ func TestWalShipper_R2_NoSpuriousSignal(t *testing.T) {
 
 	// 50 writes — well under threshold of 1000.
 	for lba := uint32(0); lba < 50; lba++ {
-		_, _ = primary.Write(lba, payload(lba, 0xF0))
-		lsn, _, _ := primary.Boundaries()
-		_ = s.NotifyAppend(lba, lsn, payload(lba, 0xF0))
+		data := payload(lba, 0xF0)
+		lsn, _ := primary.Write(lba, data)
+		_ = s.NotifyAppend(lba, lsn, data)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
@@ -670,9 +712,12 @@ func TestWalShipper_BacklogToRealtime_Happy(t *testing.T) {
 	}
 
 	// Now in Realtime: a new write should emit immediately.
-	_, _ = primary.Write(15, payload(15, 0x10))
-	lsn, _, _ := primary.Boundaries()
-	if err := s.NotifyAppend(15, lsn, payload(15, 0x10)); err != nil {
+	rtData := payload(15, 0x10)
+	rtLSN, err := primary.Write(15, rtData)
+	if err != nil {
+		t.Fatalf("realtime Write: %v", err)
+	}
+	if err := s.NotifyAppend(15, rtLSN, rtData); err != nil {
 		t.Fatalf("Realtime NotifyAppend: %v", err)
 	}
 
@@ -737,9 +782,9 @@ func TestWalShipper_BacklogStaysBacklog_UnderLoad(t *testing.T) {
 			if i >= 8192 {
 				return
 			}
-			_, _ = primary.Write(i, payload(i, 0x20))
-			lsn, _, _ := primary.Boundaries()
-			_ = s.NotifyAppend(i, lsn, payload(i, 0x20))
+			data := payload(i, 0x20)
+			lsn, _ := primary.Write(i, data)
+			_ = s.NotifyAppend(i, lsn, data)
 			i++
 			// No sleep — writer runs as fast as possible.
 		}
@@ -751,14 +796,11 @@ func TestWalShipper_BacklogStaysBacklog_UnderLoad(t *testing.T) {
 	close(stopWriter)
 	<-writerDone
 
-	if drainErr == nil {
-		t.Fatal("DrainBacklog returned nil under saturation (expected ctx-cancel error or similar)")
-	}
-	if !errors.Is(drainErr, context.DeadlineExceeded) && !errors.Is(drainErr, context.Canceled) {
-		// Some other error is also acceptable; the spec just requires
-		// drain doesn't fake success.
-		t.Logf("DrainBacklog under saturation: %v (acceptable as long as not nil + not Realtime)", drainErr)
-	}
+	// Q1c (architect 2026-04-29): the spec's normative content is "R1
+	// must not fake-Realtime under saturation"; whether DrainBacklog
+	// returns nil or non-nil at ctx-deadline is implementation choice
+	// not pinned by spec. Primary assertions: mode != Realtime AND
+	// cursor < head. The err check is observational only.
 	if got := s.Mode(); got == ModeRealtime {
 		t.Errorf("under saturation: mode=%s, expected NOT Realtime (R1 must not fake transition)", got)
 	}
@@ -766,4 +808,7 @@ func TestWalShipper_BacklogStaysBacklog_UnderLoad(t *testing.T) {
 	if s.Cursor() >= head {
 		t.Errorf("under saturation: cursor=%d >= head=%d (writer should have outpaced drain)", s.Cursor(), head)
 	}
+	// Diagnostic only — drain return value is observation, not contract:
+	t.Logf("DrainBacklog under saturation: err=%v (any value is spec-conformant; "+
+		"primary contracts are mode!=Realtime + cursor<head, both checked above)", drainErr)
 }
