@@ -85,10 +85,45 @@ func NewPrimaryBridge(store storage.LogicalStorage, coord *PeerShipCoordinator, 
 // via context cancellation, but no explicit "go barrier" call is
 // needed.
 //
+// This method uses the in-package `senderBacklogSink` (bridging path,
+// emits frameWALEntry on the dual-lane port). Callers that want to
+// route the recovery WAL pump through a real `transport.WalShipper`
+// adapter use `StartRebuildSessionWithSink` instead — the wire format
+// alignment between the two paths is gated by P2d.
+//
 // Wire detail (POC): caller provides the dialed `conn`. Production
 // integration would dial through the existing connection pool /
 // listener registry.
 func (b *PrimaryBridge) StartRebuildSession(ctx context.Context, conn net.Conn, replicaID ReplicaID, sessionID, fromLSN, targetLSN uint64) error {
+	return b.startRebuildSessionLocked(ctx, conn, replicaID, sessionID, fromLSN, targetLSN, nil)
+}
+
+// StartRebuildSessionWithSink is the variant that accepts an external
+// `WalShipperSink` — typically a `transport.RecoverySink` that wraps
+// the per-replica `WalShipper` and enforces architect rules 1+2
+// (emit context set BEFORE StartSession; restored AFTER EndSession).
+//
+// Pre-decision parallel-safe wiring: this method exists so production
+// callers can plug a real adapter today without changing the bridge's
+// public surface later. The actual format compatibility between the
+// adapter's emits and the receiver's decoder is gated by P2d — until
+// that decision lands, callers should typically prefer the bridging
+// `StartRebuildSession` to avoid wire-format mismatch in production.
+//
+// `sink` MUST be non-nil; nil reverts to the bridging path (use
+// `StartRebuildSession` for that explicitly).
+func (b *PrimaryBridge) StartRebuildSessionWithSink(ctx context.Context, conn net.Conn, replicaID ReplicaID, sessionID, fromLSN, targetLSN uint64, sink WalShipperSink) error {
+	if sink == nil {
+		return fmt.Errorf("recovery bridge: StartRebuildSessionWithSink: sink is required (use StartRebuildSession for the bridging path)")
+	}
+	return b.startRebuildSessionLocked(ctx, conn, replicaID, sessionID, fromLSN, targetLSN, sink)
+}
+
+// startRebuildSessionLocked is the shared implementation. When `sink`
+// is nil, it constructs a bridging `senderBacklogSink` via
+// NewSenderWithBacklogRelay (legacy compatible). When non-nil, the
+// caller-provided sink is installed via NewSenderWithSink.
+func (b *PrimaryBridge) startRebuildSessionLocked(ctx context.Context, conn net.Conn, replicaID ReplicaID, sessionID, fromLSN, targetLSN uint64, sink WalShipperSink) error {
 	// Single-flight check at the bridge level (before coordinator),
 	// so a second call observes our internal sender map first and
 	// reports the racing-bridge-call case distinctly from the
@@ -108,7 +143,12 @@ func (b *PrimaryBridge) StartRebuildSession(ctx context.Context, conn net.Conn, 
 		return fmt.Errorf("recovery bridge: %w", err)
 	}
 
-	sender := NewSenderWithBacklogRelay(b.store, b.coord, conn, replicaID)
+	var sender *Sender
+	if sink == nil {
+		sender = NewSenderWithBacklogRelay(b.store, b.coord, conn, replicaID)
+	} else {
+		sender = NewSenderWithSink(b.store, b.coord, conn, replicaID, sink)
+	}
 	b.senders[replicaID] = sender
 	b.mu.Unlock()
 

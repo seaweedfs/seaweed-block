@@ -648,6 +648,31 @@ func (e *BlockExecutor) updateWalShipperEmitContext(replicaID string, conn net.C
 	entry.emitCtxMu.Unlock()
 }
 
+// SnapshotEmitContext returns the per-replica WalShipper's current
+// emit conn + lineage under the same mutex production code uses
+// (emitCtxMu). Intended for callers that need to capture the steady-
+// state context BEFORE constructing a RecoverySink — so EndSession's
+// rule-2 restore lands the right values rather than zero / nil.
+//
+// Returns (nil, zero RecoveryLineage) when no WalShipperEntry exists
+// for replicaID (i.e., no Ship has run yet for this replica). That
+// is honest — there is no steady context to restore.
+//
+// Called by: production wiring layer (e.g., transport.startRebuildDualLane)
+// right before NewRecoverySink, so the snapshot is consistent with
+// what's currently driving Ship().
+func (e *BlockExecutor) SnapshotEmitContext(replicaID string) (net.Conn, RecoveryLineage) {
+	e.walShipperMu.Lock()
+	entry, ok := e.walShippers[replicaID]
+	e.walShipperMu.Unlock()
+	if !ok {
+		return nil, RecoveryLineage{}
+	}
+	entry.emitCtxMu.Lock()
+	defer entry.emitCtxMu.Unlock()
+	return entry.emitConn, entry.emitLineage
+}
+
 // Registry lifecycle note (architect P1 review #4): walShippers
 // entries are never torn down today. For replica churn, lineage
 // invalidation, or executor reuse across distinct peer
