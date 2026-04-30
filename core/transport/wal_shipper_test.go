@@ -603,6 +603,7 @@ func TestWalShipper_R2_LagSignalFires(t *testing.T) {
 	cfg := WalShipperConfig{
 		IdleSleep:           time.Millisecond,
 		SaturationThreshold: 500,
+		DisableTimerDrain:   true, // C2: test drives lag manually; no auto-drain
 		OnSaturation: func(replicaID string, lag uint64) {
 			fired.Add(1)
 			if replicaID != "r1" {

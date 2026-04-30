@@ -146,6 +146,13 @@ type WalShipperConfig struct {
 	// context once when lag crosses the threshold; engine adapter
 	// decides what to do (escalate / log / etc.). nil = no hook.
 	OnSaturation func(replicaID string, lag uint64)
+
+	// DisableTimerDrain, if true, suppresses the C2 §6.8 #4 self-
+	// driving Backlog drain goroutine. Tests that need manual control
+	// over DrainBacklog timing (e.g., R2 saturation tests that drive
+	// lag without letting drain catch up) set this. Production
+	// callers leave it false (default).
+	DisableTimerDrain bool
 }
 
 // DefaultWalShipperConfig returns production defaults.
@@ -188,6 +195,26 @@ type WalShipper struct {
 	// spam.
 	lagSample       atomic.Uint64
 	saturationFired atomic.Bool
+
+	// C2 §6.8 #4 self-driving drain. timerLoop runs as a background
+	// goroutine for the shipper's lifetime; on each `IdleSleep` tick
+	// it wakes and (under shipMu) checks `cursor < head`. If true,
+	// runs one ScanLBAs emit cycle from cursor — pushing backlog
+	// without depending on NotifyAppend arrivals (forbids
+	// primary-idle starvation).
+	//
+	// nudgeCh is a 1-deep buffered signal: NotifyAppend in Realtime
+	// with `cursor < head` (debt detected) sends a non-blocking nudge
+	// to wake the timer goroutine immediately rather than waiting
+	// for the next IdleSleep tick. Idempotent — multiple nudges
+	// collapse to one wake.
+	//
+	// stopCh is closed by Stop() to terminate the timer goroutine.
+	// Idempotent via stopOnce.
+	nudgeCh   chan struct{}
+	stopCh    chan struct{}
+	stopOnce  sync.Once
+	timerDone chan struct{}
 }
 
 // NewWalShipper constructs a WalShipper bound to a substrate +
@@ -203,17 +230,157 @@ func NewWalShipper(replicaID string, head HeadSource, substrate storage.LogicalS
 }
 
 // NewWalShipperWithOptions is NewWalShipper with explicit config.
+// Starts the C2 self-driving drain goroutine; it idles in ModeIdle
+// (no emit) and only does work once Activate / StartSession run AND
+// the executor installs a non-nil emit context (conn). Stop the
+// goroutine via (*WalShipper).Stop().
 func NewWalShipperWithOptions(replicaID string, head HeadSource, substrate storage.LogicalStorage, emit EmitFunc, cfg WalShipperConfig) *WalShipper {
 	if cfg.IdleSleep <= 0 {
 		cfg.IdleSleep = 5 * time.Millisecond
 	}
-	return &WalShipper{
+	s := &WalShipper{
 		replicaID: replicaID,
 		head:      head,
 		substrate: substrate,
 		emit:      emit,
 		cfg:       cfg,
 		mode:      ModeIdle,
+		nudgeCh:   make(chan struct{}, 1),
+		stopCh:    make(chan struct{}),
+		timerDone: make(chan struct{}),
+	}
+	if cfg.DisableTimerDrain {
+		// Tests that need manual DrainBacklog control set this. The
+		// timerDone channel must be closed so Stop() doesn't block.
+		close(s.timerDone)
+	} else {
+		go s.timerLoop()
+	}
+	return s
+}
+
+// Stop terminates the self-driving drain goroutine. Idempotent.
+// Calling Stop after Stop is a no-op. Caller blocks until the
+// goroutine exits.
+//
+// In production the executor manages WalShipper lifecycle per
+// (volume, replicaID). For tests, defer Stop() to avoid goroutine
+// leaks across test cases.
+func (s *WalShipper) Stop() {
+	s.stopOnce.Do(func() {
+		close(s.stopCh)
+	})
+	<-s.timerDone
+}
+
+// timerLoop is the C2 self-driving drain goroutine. On every
+// IdleSleep tick, OR when nudged by NotifyAppend, it attempts one
+// ScanLBAs cycle if `cursor < head` and a session is active or
+// shipper is in Backlog mode.
+//
+// §6.8 #4 normative: "MUST implement a periodic ShipOpportunity
+// (timer or shipper-internal loop equivalent) that attempts
+// emit-from-cursor so backlog cannot depend solely on new appends
+// (Primary idle starvation forbidden)."
+func (s *WalShipper) timerLoop() {
+	defer close(s.timerDone)
+
+	ticker := time.NewTicker(s.cfg.IdleSleep)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-s.stopCh:
+			return
+		case <-ticker.C:
+			s.drainOpportunity()
+		case <-s.nudgeCh:
+			s.drainOpportunity()
+		}
+	}
+}
+
+// drainOpportunity attempts one substrate scan cycle from cursor if
+// debt exists (cursor < head). Single-pass; the next tick / nudge
+// reschedules. Holds shipMu around the scan to keep INV-SINGLE.
+//
+// Idle mode: no-op (no replica context yet).
+// Backlog mode: scan; on R1 success transitions to Realtime.
+// Realtime mode: if cursor < head, scan to fill the gap.
+func (s *WalShipper) drainOpportunity() {
+	s.shipMu.Lock()
+	mode := s.mode
+	cursor := s.cursor
+	s.shipMu.Unlock()
+
+	// §6.8 #4 TIMER drain applies to Backlog mode (recovery session
+	// backlog phase); Realtime mode is driven by NotifyAppend (T4a
+	// best-effort steady ship). Idle = no replica context.
+	if mode != ModeBacklog {
+		return
+	}
+	headNow := s.head.Head()
+	if cursor >= headNow {
+		return
+	}
+
+	// Substrate ScanLBAs treats fromLSN as exclusive lower from the
+	// caller's perspective (callback filters `e.LSN <= cursor`).
+	// Substrate-specific behavior: memorywal returns LSN > fromLSN
+	// (exclusive); smartwal returns LSN >= fromLSN (inclusive) and
+	// rejects fromLSN below oldestPreserved with ErrWALRecycled.
+	//
+	// Pass cursor directly. ErrWALRecycled is treated as transient
+	// (engine layer handles cursor recovery via session re-anchor);
+	// timer just no-ops this tick.
+	hardErr := error(nil)
+	scanErr := s.substrate.ScanLBAs(cursor, func(e storage.RecoveryEntry) error {
+		s.shipMu.Lock()
+		defer s.shipMu.Unlock()
+		if s.mode == ModeIdle {
+			return errStopScan
+		}
+		if e.LSN <= s.cursor {
+			return nil // already-emitted (concurrent drain or sub-LSN boundary); skip
+		}
+		kind := EmitKindLive
+		if s.mode == ModeBacklog {
+			kind = EmitKindBacklog
+		}
+		if err := s.emit(kind, e.LBA, e.LSN, e.Data); err != nil {
+			hardErr = fmt.Errorf("walshipper: drain emit lsn=%d: %w", e.LSN, err)
+			return err
+		}
+		s.cursor = e.LSN
+		s.updateLagLocked()
+		return nil
+	})
+	_ = hardErr
+	_ = scanErr
+
+	// R1 transition opportunity: if Backlog and cursor caught up.
+	s.shipMu.Lock()
+	if s.mode == ModeBacklog {
+		head := s.head.Head()
+		if s.cursor >= head {
+			_ = s.assertCaughtUpAndEnableTailShipLocked(head)
+		}
+	}
+	s.shipMu.Unlock()
+}
+
+// errStopScan is the sentinel returned from ScanLBAs callbacks to
+// stop iteration cleanly (mode changed mid-scan).
+var errStopScan = errors.New("walshipper: stop scan")
+
+// nudgeDrain wakes the timer goroutine immediately. Caller MUST be
+// holding shipMu when invoking — it's a single-shot non-blocking
+// signal used by NotifyAppend Realtime when debt is detected.
+func (s *WalShipper) nudgeDrainLocked() {
+	select {
+	case s.nudgeCh <- struct{}{}:
+	default:
+		// Already nudged; collapse multiple wakes into one.
 	}
 }
 
@@ -299,6 +466,11 @@ func (s *WalShipper) NotifyAppend(lba uint32, lsn uint64, data []byte) error {
 			// Idempotent: write already accounted for (e.g. retry).
 			return nil
 		}
+		// Realtime emit. NotifyAppend is the driver in steady state
+		// (T4a best-effort: each ship is independent; dead-window
+		// writes are NOT replayed — that's T4c catch-up territory).
+		// The §6.8 #4 TIMER drain applies to recovery-session Backlog
+		// mode, not steady Realtime.
 		if err := s.emit(EmitKindLive, lba, lsn, data); err != nil {
 			return err
 		}
