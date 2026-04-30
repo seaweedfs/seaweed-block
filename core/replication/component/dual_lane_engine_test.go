@@ -202,10 +202,13 @@ func TestDualLane_CoordReleasesPinFloorAfterSession(t *testing.T) {
 // via primary substrate Write + PrimaryBridge.PushLiveWrite (session
 // lane), matching core/recovery/integration_stub_test.go semantics.
 //
-// This pins the coordinator/bridge path for "live tail during rebuild"
-// without yet wiring ReplicationVolume steady-ship to PushLiveWrite
-// (that remains product work). WalShipper remains separate from the dual-
-// lane rebuild sender until P2d unifies EncodeShipEntry vs frameWALEntry.
+// Note (post-C2): with StrictRealtimeOrdering=false (default), the
+// PushLiveWrite-during-session race against sink.StartSession logs
+// a WALSHIPPER-OUT-OF-ORDER warning but still emits, so the test
+// continues to pass. Production callers that opt into strict mode
+// MUST synchronize on session-ready (WalShipper in Backlog) before
+// PushLiveWrite. Replacement coverage for the strict variant is in
+// TestC1_Realtime_OutOfOrder_StrictFailsClosed.
 func TestDualLane_EngineDrivenRebuild_WithPushLiveDuringSession(t *testing.T) {
 	component.RunSubstrate(t, "memorywal", component.MemoryWAL, func(t *testing.T, c *component.Cluster) {
 		c.WithReplicas(1).
@@ -248,6 +251,7 @@ func TestDualLane_EngineDrivenRebuild_WithPushLiveDuringSession(t *testing.T) {
 			t.Fatal("coord still Idle after rebuild dispatch — PushLiveWrite would fail")
 		}
 
+
 		liveLBA := uint32(55)
 		liveData := make([]byte, component.DefaultBlockSize)
 		liveData[0] = 0xEE
@@ -257,6 +261,10 @@ func TestDualLane_EngineDrivenRebuild_WithPushLiveDuringSession(t *testing.T) {
 		if rt := c.Coord().RouteLocalWrite(coordRID, liveLSN); rt != recovery.RouteSessionLane {
 			t.Fatalf("RouteLocalWrite during session: got %v want RouteSessionLane", rt)
 		}
+		// In Backlog mode, NotifyAppend is lag-only (no emit); the
+		// substrate scan in drainOpportunity picks up the entry from
+		// primary's WAL. So the live LSN reaches replica via the
+		// drain path, not the direct-emit path.
 		if err := br.PushLiveWrite(coordRID, liveLBA, liveLSN, liveData); err != nil {
 			t.Fatalf("PushLiveWrite: %v", err)
 		}

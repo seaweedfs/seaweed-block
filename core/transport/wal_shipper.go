@@ -31,6 +31,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -146,6 +147,23 @@ type WalShipperConfig struct {
 	// context once when lag crosses the threshold; engine adapter
 	// decides what to do (escalate / log / etc.). nil = no hook.
 	OnSaturation func(replicaID string, lag uint64)
+
+	// StrictRealtimeOrdering, if true, makes NotifyAppend Realtime
+	// FAIL CLOSED on `lsn != cursor + 1` (the T4a sequence invariant).
+	// Default false: log a warning and emit anyway (matches pre-guard
+	// behavior; preserves silent-direct-emit semantics existing tests
+	// depend on).
+	//
+	// Architect review 2026-04-30 #2 listed two tiers:
+	//   - Production: fail closed (set this true).
+	//   - Minimum: log + monitor (default false here).
+	//
+	// Set true on production callers (engine wiring) once they're
+	// ready for hard out-of-order surfacing. Setting false means
+	// gaps in the producer's LSN sequence get logged but the wire
+	// still ships the new lsn — silent divergence is observable in
+	// logs but not propagated to the caller as an error.
+	StrictRealtimeOrdering bool
 
 	// DisableTimerDrain, if true, suppresses the C2 §6.8 #4 self-
 	// driving Backlog drain goroutine.
@@ -323,9 +341,16 @@ func (s *WalShipper) timerLoop() {
 // Backlog mode: scan; on R1 success transitions to Realtime.
 // Realtime mode: if cursor < head, scan to fill the gap.
 func (s *WalShipper) drainOpportunity() {
+	// Read mode + cursor + head as a CONSISTENT snapshot under
+	// shipMu — closes the TOCTOU window between the gate decision
+	// (cursor < head?) and the scan setup. Without this, a
+	// concurrent NotifyAppend (Backlog mode lag-only) or another
+	// drain pass could change cursor between the unlock and the
+	// head read, and we'd compare against an already-stale cursor.
 	s.shipMu.Lock()
 	mode := s.mode
 	cursor := s.cursor
+	headNow := s.head.Head() // read under shipMu for a consistent snapshot
 	s.shipMu.Unlock()
 
 	// §6.8 #4 TIMER drain applies to Backlog mode (recovery session
@@ -334,7 +359,6 @@ func (s *WalShipper) drainOpportunity() {
 	if mode != ModeBacklog {
 		return
 	}
-	headNow := s.head.Head()
 	if cursor >= headNow {
 		return
 	}
@@ -481,11 +505,30 @@ func (s *WalShipper) NotifyAppend(lba uint32, lsn uint64, data []byte) error {
 			// Idempotent: write already accounted for (e.g. retry).
 			return nil
 		}
-		// Realtime emit. NotifyAppend is the driver in steady state
-		// (T4a best-effort: each ship is independent; dead-window
-		// writes are NOT replayed — that's T4c catch-up territory).
-		// The §6.8 #4 TIMER drain applies to recovery-session Backlog
-		// mode, not steady Realtime.
+		// T4a Realtime sequence guard (architect review 2026-04-30 #2).
+		//
+		// Realtime is append-driven; correctness requires
+		// NotifyAppend EXACTLY ONCE PER LSN IN ORDER (lsn == cursor+1).
+		// Gaps in the producer's sequence have no self-healing path
+		// (no Realtime substrate replay — that's T4c territory).
+		//
+		// Two-tier behavior controlled by StrictRealtimeOrdering:
+		//   true  → fail closed (production, post-engine-rebuild-on-gap)
+		//   false → log warning + emit anyway (default; preserves
+		//           pre-guard silent-direct-emit; observable via logs)
+		//
+		// The log line is the regression anchor: if you see
+		// "WALSHIPPER-OUT-OF-ORDER" in production, an LSN was skipped
+		// somewhere upstream — investigate before silent divergence
+		// causes byte mismatch on replica.
+		if lsn != s.cursor+1 {
+			if s.cfg.StrictRealtimeOrdering {
+				return fmt.Errorf("walshipper: Realtime NotifyAppend out-of-order: replica=%s lsn=%d cursor=%d (expected lsn==cursor+1; caller skipped an LSN or session should be in Backlog)",
+					s.replicaID, lsn, s.cursor)
+			}
+			log.Printf("WALSHIPPER-OUT-OF-ORDER replica=%s lsn=%d cursor=%d (expected cursor+1=%d; emitting anyway under non-strict mode — silent gap risk)",
+				s.replicaID, lsn, s.cursor, s.cursor+1)
+		}
 		if err := s.emit(EmitKindLive, lba, lsn, data); err != nil {
 			return err
 		}

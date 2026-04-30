@@ -287,6 +287,14 @@ func TestT4a6_BasicEndToEnd_PrimaryWriteReachesReplicaByteExact(t *testing.T) {
 // "best-effort is non-fatal to the writer and authority-driven
 // peer rebuild is the recovery path."
 func TestT4a6_BestEffort_DisconnectThenReassign(t *testing.T) {
+	// Note (post-C2): under StrictRealtimeOrdering=false (default),
+	// post-reassign third-batch ship with `lsn != cursor+1` logs a
+	// WALSHIPPER-OUT-OF-ORDER warning but still emits — preserving
+	// pre-guard "best-effort" semantics. When production opts into
+	// strict mode (via NewBlockExecutorWithDualLane future config),
+	// this test scenario will require an engine-driven rebuild on
+	// reassign to re-anchor cursor; today's test still passes
+	// because non-strict mode logs and continues.
 	runMatrix(t, func(t *testing.T, newStorage storageFactory) {
 		const (
 			blocks    = uint32(128)

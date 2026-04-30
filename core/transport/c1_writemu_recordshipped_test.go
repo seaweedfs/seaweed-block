@@ -61,15 +61,21 @@ func TestC1_WriteMu_SharedAcrossSenderAndWalShipper(t *testing.T) {
 	}
 }
 
-// TestC1_WriteMu_NoInterleave — concurrent Sender.writeFrame +
-// EmitFunc emit on the same conn don't produce interleaved bytes.
-// We use a captured wire to verify each frame is contiguous.
+// TestC1_WriteMu_FramesWellFormed — sequential NotifyAppend produces
+// well-formed frames on the wire.
 //
-// Setup: sender.writeFrame (legacy frame format) and EmitFunc (recovery
-// frame format) write under shared writeMu. With many concurrent
-// writers, the reader-side bytes still parse cleanly as a sequence
-// of well-formed frames.
-func TestC1_WriteMu_NoInterleave(t *testing.T) {
+// (Earlier version of this test fired 20 concurrent NotifyAppends with
+// arbitrary LSN order. That violated the T4a Realtime sequence
+// invariant — `lsn == cursor + 1` MUST hold per call — added by the
+// architect review of §6.8(3)/(9). Production callers serialize per-
+// replica via volume.mu; concurrent NotifyAppend with random LSNs is
+// not a representative scenario. Test now drives serially.)
+//
+// Real concurrent-writer coverage of writeMu sharing lives in
+// TestDualLane_LiveWritesDuringSession_AtomicSeal (40 concurrent
+// PrimaryBridge.PushLiveWrite while Sender.Run base + WAL goroutines
+// also write — exercises the actual production race).
+func TestC1_WriteMu_FramesWellFormed(t *testing.T) {
 	primary := memorywal.NewStore(8, 64)
 	e := NewBlockExecutor(primary, "127.0.0.1:0")
 	const replicaID = "r1"
@@ -84,7 +90,6 @@ func TestC1_WriteMu_NoInterleave(t *testing.T) {
 	shipper := e.WalShipperFor(replicaID)
 	e.updateWalShipperEmitContext(replicaID, writerConn, sessionLineage, EmitProfileDualLaneWALFrame)
 
-	// Drain reader continuously into a buffer; we'll inspect at end.
 	var (
 		readerMu  sync.Mutex
 		readerBuf []byte
@@ -106,25 +111,17 @@ func TestC1_WriteMu_NoInterleave(t *testing.T) {
 		}
 	}()
 
-	// Many concurrent emits via WalShipper.NotifyAppend (Realtime),
-	// each holds entry.writeMu during conn.Write.
+	// Sequential NotifyAppend, monotonic LSN (T4a invariant: lsn == cursor + 1).
 	const N = 20
-	var wg sync.WaitGroup
 	for i := 0; i < N; i++ {
-		wg.Add(1)
-		go func(idx int) {
-			defer wg.Done()
-			data := []byte{byte(idx)}
-			_ = shipper.NotifyAppend(uint32(idx), uint64(idx+1), data)
-		}(i)
+		data := []byte{byte(i)}
+		if err := shipper.NotifyAppend(uint32(i), uint64(i+1), data); err != nil {
+			t.Fatalf("NotifyAppend lsn=%d: %v", i+1, err)
+		}
 	}
-	wg.Wait()
 	_ = writerConn.Close()
 	<-readerDone
 
-	// Each frame on the wire is [1B type][4B len][payload]. We can
-	// walk the captured buffer and confirm every frame parses.
-	// Recovery frames: type=4 (frameWALEntry).
 	readerMu.Lock()
 	defer readerMu.Unlock()
 	cursor := 0
@@ -134,10 +131,8 @@ func TestC1_WriteMu_NoInterleave(t *testing.T) {
 			t.Fatalf("partial frame header at offset %d (got=%d total bytes; %d frames parsed)",
 				cursor, len(readerBuf), frames)
 		}
-		// frameWALEntry type=4
 		if readerBuf[cursor] != 4 {
-			t.Fatalf("offset %d: frame type=%d want frameWALEntry=4 (interleave detected; frames=%d)",
-				cursor, readerBuf[cursor], frames)
+			t.Fatalf("offset %d: frame type=%d want frameWALEntry=4", cursor, readerBuf[cursor])
 		}
 		payloadLen := int(readerBuf[cursor+1])<<24 | int(readerBuf[cursor+2])<<16 |
 			int(readerBuf[cursor+3])<<8 | int(readerBuf[cursor+4])
@@ -148,7 +143,70 @@ func TestC1_WriteMu_NoInterleave(t *testing.T) {
 		cursor += 5 + payloadLen
 		frames++
 	}
-	t.Logf("parsed %d well-formed frames from %d-byte capture (no interleave)", frames, len(readerBuf))
+	if frames != N {
+		t.Errorf("parsed %d well-formed frames; want %d", frames, N)
+	}
+}
+
+// TestC1_Realtime_OutOfOrder_StrictFailsClosed — T4a Realtime sequence
+// invariant under StrictRealtimeOrdering=true: NotifyAppend with
+// lsn != cursor+1 returns an explicit error rather than silently
+// dropping the gap. Banned regression: the old `if lsn > cursor + 1
+// ... drain` check (the dense-edge counterexample the architect
+// flagged).
+//
+// In default (non-strict) mode the same scenario logs a warning
+// (WALSHIPPER-OUT-OF-ORDER) and emits anyway — observable in logs
+// but doesn't break callers. Strict mode is the production safety
+// switch once the engine drives rebuild-on-gap.
+func TestC1_Realtime_OutOfOrder_StrictFailsClosed(t *testing.T) {
+	primary := memorywal.NewStore(8, 64)
+	prim, replicaEnd := net.Pipe()
+	defer prim.Close()
+	defer replicaEnd.Close()
+	go func() {
+		buf := make([]byte, 1024)
+		for {
+			if _, err := replicaEnd.Read(buf); err != nil {
+				return
+			}
+		}
+	}()
+
+	emit := func(_ EmitKind, _ uint32, _ uint64, _ []byte) error { return nil }
+	cfg := WalShipperConfig{
+		IdleSleep:              5 * time.Millisecond,
+		StrictRealtimeOrdering: true,
+		DisableTimerDrain:      true,
+	}
+	s := NewWalShipperWithOptions("r1", HeadSourceFromStorage(primary), primary, emit, cfg)
+	defer s.Stop()
+
+	// Activate transitions Idle → Realtime so subsequent NotifyAppend
+	// runs in the Realtime branch (where the guard lives).
+	if err := s.Activate(0); err != nil {
+		t.Fatalf("Activate: %v", err)
+	}
+
+	// Sequential dense LSN — passes the guard.
+	if err := s.NotifyAppend(0, 1, []byte{0x01}); err != nil {
+		t.Fatalf("first NotifyAppend (lsn=1, cursor=0): %v", err)
+	}
+	if err := s.NotifyAppend(1, 2, []byte{0x02}); err != nil {
+		t.Fatalf("second NotifyAppend (lsn=2, cursor=1): %v", err)
+	}
+
+	// Out-of-order: cursor=2, lsn=5. Strict mode: fail closed.
+	err := s.NotifyAppend(4, 5, []byte{0x05})
+	if err == nil {
+		t.Fatal("Realtime NotifyAppend with lsn=5 (cursor=2) silently accepted under StrictRealtimeOrdering; T4a sequence invariant violated")
+	}
+	t.Logf("out-of-order correctly rejected (strict): %v", err)
+
+	// Idempotent retry of an already-shipped LSN: still safe (lsn <= cursor).
+	if err := s.NotifyAppend(0, 1, []byte{0x01}); err != nil {
+		t.Errorf("idempotent retry of lsn=1: should be silent no-op, got %v", err)
+	}
 }
 
 // TestC1_PostEmitHook_AdvancesShipCursor — post-emit hook + Sender's
