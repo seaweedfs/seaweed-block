@@ -84,6 +84,12 @@ type Sender struct {
 	// base lane while Run is busy writing frames. Pre-#3 there was
 	// no reader; only one inline readFrame at barrier time.
 	barrierRespCh chan ackOrResult
+
+	// sink — when non-nil, Run() delegates the WAL pump (StartSession /
+	// DrainBacklog / EndSession) to this sink instead of running the
+	// in-package streamBacklog + closeCh + drainAndSeal sequence.
+	// Set by NewSenderWithSink. P2 architecture per mini-plan §3 P2.
+	sink WalShipperSink
 }
 
 // ackOrResult is the channel payload from the reader goroutine to
@@ -100,18 +106,75 @@ type walItem struct {
 	data []byte
 }
 
+// WalShipperSink is the abstract WAL-pump surface that Sender
+// delegates to in P2 (mini-plan §3 P2). When provided, Run() invokes:
+//
+//   1. StartSession(fromLSN) — before any WAL emission begins
+//   2. DrainBacklog(ctx)     — runs until cursor catches head
+//   3. EndSession()          — defer-fired regardless of exit path
+//
+// Implementations live OUTSIDE this package (transport.WalShipper
+// satisfies it via duck typing — no import cycle since the
+// interface lives here). The contract intentionally avoids exposing
+// wire format, lineage, or coord state — those are sink-side
+// concerns. Sink decides where bytes go (legacy port MsgShipEntry
+// vs dual-lane port frameWALEntry); Sender just orchestrates the
+// session bracket around the pump.
+//
+// Architect P1 review (2026-04-29) integration rules — must hold at
+// the layer that constructs the sink:
+//
+//   - The sink's emit context (e.g., conn + lineage) MUST be set
+//     BEFORE StartSession is called.
+//   - After EndSession, the emit context MUST be restored to the
+//     steady-state value (else next steady emit ships under stale
+//     recovery lineage).
+//
+// These are caller obligations; Sender does not enforce them.
+type WalShipperSink interface {
+	StartSession(fromLSN uint64) error
+	DrainBacklog(ctx context.Context) error
+	EndSession()
+}
+
 // NewSender constructs a sender bound to a primary store + coordinator.
 // `conn` is the wire — typically a *net.TCPConn in production, or a
 // net.Pipe end in tests. Sender does not close `conn`; caller does.
+//
+// LEGACY path (P2a): callers that don't have a WalShipperSink yet
+// use this constructor. Run() falls back to the in-package WAL pump
+// (streamBacklog + drainAndSeal + closeCh). P2c removes this path
+// once all callers migrate to NewSenderWithSink.
 func NewSender(primaryStore storage.LogicalStorage, coordinator *PeerShipCoordinator, conn io.ReadWriter, replicaID ReplicaID) *Sender {
 	return &Sender{
-		primaryStore: primaryStore,
-		coordinator:  coordinator,
+		primaryStore:  primaryStore,
+		coordinator:   coordinator,
 		conn:          conn,
 		replicaID:     replicaID,
 		closeCh:       make(chan struct{}),
 		barrierRespCh: make(chan ackOrResult, 1),
 	}
+}
+
+// NewSenderWithSink constructs a sender that delegates the WAL
+// pump to the provided sink. Run() calls sink.StartSession after
+// BaseDone, sink.DrainBacklog to run the pump, and sink.EndSession
+// in defer. The legacy in-package streamBacklog / drainAndSeal /
+// closeCh code path is NOT reached when a sink is installed —
+// that's the architect's "no double live" guard at the recovery
+// layer (mini-plan §4 INV-NO-DOUBLE-LIVE row).
+//
+// `sink` MUST be non-nil. For the legacy fallback, use NewSender.
+func NewSenderWithSink(primaryStore storage.LogicalStorage, coordinator *PeerShipCoordinator, conn io.ReadWriter, replicaID ReplicaID, sink WalShipperSink) *Sender {
+	if sink == nil {
+		// Defensive: caller passed nil; promote to legacy path so
+		// behavior is at least predictable. Production callers
+		// should pass a real sink.
+		return NewSender(primaryStore, coordinator, conn, replicaID)
+	}
+	s := NewSender(primaryStore, coordinator, conn, replicaID)
+	s.sink = sink
+	return s
 }
 
 // Close signals the sender that no more PushLiveWrite calls will
@@ -236,46 +299,65 @@ func (s *Sender) Run(ctx context.Context, sessionID, fromLSN, targetLSN uint64) 
 		return 0, newFailure(FailureContract, PhaseBaseDone, err)
 	}
 
-	// Step 5: backlog lane.
-	if err := s.streamBacklog(); err != nil {
-		return 0, err // streamBacklog wraps its own Failure
-	}
-
-	// Step 6: wait for caller's "no more live writes" signal OR ctx
-	// cancellation. Until Close() is called, PushLiveWrite continues
-	// to accept new entries. This is the dual-lane invariant: while
-	// session is active, every primary-side WAL append routes through
-	// the session lane, and the sender is the gate that decides when
-	// barrier may begin.
+	// Step 5–7: WAL pump.
 	//
-	// Ctx cancellation is the abort path: typically fired by the
-	// caller when the receiver goroutine fails so the sender unblocks
-	// and returns rather than waiting forever.
-	select {
-	case <-s.closeCh:
-	case <-ctx.Done():
-		return 0, newFailure(FailureCancelled, PhaseAwaitClose, ctx.Err())
+	// Sink-mode (P2a, mini-plan §3 P2): delegate StartSession +
+	// DrainBacklog to the injected sink. EndSession is fired in
+	// defer below. The legacy in-package streamBacklog/closeCh-wait/
+	// drainAndSeal sequence is NOT reached when sink != nil — that's
+	// the architect's "no double live" guard at the recovery layer.
+	//
+	// Legacy mode: in-package WAL pump (streamBacklog + closeCh
+	// wait + drainAndSeal). Removed in P2c once all callers
+	// migrate to NewSenderWithSink.
+	if s.sink != nil {
+		// Defer EndSession FIRST so it runs on every exit path
+		// after this point — including success path AND the
+		// failure paths below (DrainBacklog error, BarrierReq error,
+		// barrier-resp error). Mirrors the sink-side spec for
+		// always-cleanup.
+		defer s.sink.EndSession()
+
+		if err := s.sink.StartSession(fromLSN); err != nil {
+			return 0, newFailure(FailureContract, PhaseBacklog,
+				fmt.Errorf("sink.StartSession: %w", err))
+		}
+		if err := s.sink.DrainBacklog(ctx); err != nil {
+			// Classify substrate vs cancellation vs other.
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return 0, newFailure(FailureCancelled, PhaseBacklog, err)
+			}
+			return 0, newFailure(FailureSubstrate, PhaseBacklog,
+				fmt.Errorf("sink.DrainBacklog: %w", err))
+		}
+		// In sink mode, coord's TryAdvanceToSteadyLive is collapsed
+		// (kickoff Q3 ratified Phase enum collapse to {Idle, Active}).
+		// Skip the transition step; barrier-ack is the only
+		// authoritative completion signal.
+	} else {
+		// Legacy mode (P2c removes this branch):
+		if err := s.streamBacklog(); err != nil {
+			return 0, err
+		}
+		select {
+		case <-s.closeCh:
+		case <-ctx.Done():
+			return 0, newFailure(FailureCancelled, PhaseAwaitClose, ctx.Err())
+		}
+		if err := s.drainAndSeal(); err != nil {
+			return 0, err
+		}
 	}
 
-	// Step 7: drain live queue + atomic seal. Any PushLiveWrite that
-	// races concurrently is either captured before sealing or
-	// rejected with an error (caller sees the error and knows the
-	// session is closing). No queued write can be lost between drain
-	// and barrier because seal is atomic with the take.
-	if err := s.drainAndSeal(); err != nil {
-		return 0, err // drainAndSeal wraps its own Failure
-	}
-
-	// Step 8: phase transition. Per architect ruling, this is purely
-	// a publication-permission flag — RouteLocalWrite still returns
-	// SessionLane until EndSession (because the session is still
-	// open until barrier completes).
-	if !s.coordinator.TryAdvanceToSteadyLive(s.replicaID) {
-		// Defensive: if this fails after we've shipped backlog and
-		// marked base done, something is structurally wrong.
-		st, _ := s.coordinator.Status(s.replicaID)
-		return 0, newFailure(FailureContract, PhaseTransition,
-			fmt.Errorf("TryAdvanceToSteadyLive rejected: %+v", st))
+	// Step 8: phase transition (LEGACY ONLY). In sink mode the
+	// transition is no-op'd per kickoff Q3 ratified Phase enum
+	// collapse {Idle, Active}. Sink-mode skipped this step above.
+	if s.sink == nil {
+		if !s.coordinator.TryAdvanceToSteadyLive(s.replicaID) {
+			st, _ := s.coordinator.Status(s.replicaID)
+			return 0, newFailure(FailureContract, PhaseTransition,
+				fmt.Errorf("TryAdvanceToSteadyLive rejected: %+v", st))
+		}
 	}
 
 	// Step 8 + 9: barrier round-trip — reader goroutine delivers the
