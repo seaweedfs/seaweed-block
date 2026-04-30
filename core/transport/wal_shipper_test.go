@@ -56,7 +56,7 @@ func newRecordingEmit() *recordingEmit {
 }
 
 func (r *recordingEmit) Func() EmitFunc {
-	return func(lba uint32, lsn uint64, data []byte) error {
+	return func(_ EmitKind, lba uint32, lsn uint64, data []byte) error {
 		// INV-NO-DOUBLE-LIVE probe: track concurrent emits. shipMu
 		// should serialize so this never exceeds 1.
 		cur := r.inFlight.Add(1)
@@ -757,9 +757,9 @@ func TestWalShipper_BacklogStaysBacklog_UnderLoad(t *testing.T) {
 	// Block emit briefly per call to simulate slow wire — emit can't
 	// keep up with writes.
 	emit := newRecordingEmit()
-	slowEmit := EmitFunc(func(lba uint32, lsn uint64, data []byte) error {
+	slowEmit := EmitFunc(func(kind EmitKind, lba uint32, lsn uint64, data []byte) error {
 		time.Sleep(50 * time.Microsecond) // slow wire simulator
-		return emit.Func()(lba, lsn, data)
+		return emit.Func()(kind, lba, lsn, data)
 	})
 
 	s := NewWalShipper("r1", HeadSourceFromStorage(primary), primary, slowEmit)

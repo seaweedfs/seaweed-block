@@ -504,6 +504,17 @@ func (c *Cluster) Start() *Cluster {
 // Primary returns the primary node handle.
 func (c *Cluster) Primary() *PrimaryNode { return c.primary }
 
+// BlockExecutor returns the primary-side transport executor for replica
+// idx (same index as Replica / Adapter). Used by integration tests that
+// exercise dual-lane surfaces (e.g. PushLiveWrite on PrimaryBridge).
+func (c *Cluster) BlockExecutor(replicaIdx int) *transport.BlockExecutor {
+	c.t.Helper()
+	if replicaIdx < 0 || replicaIdx >= len(c.primary.executors) {
+		c.t.Fatalf("BlockExecutor(%d): out of range (have %d)", replicaIdx, len(c.primary.executors))
+	}
+	return c.primary.executors[replicaIdx]
+}
+
 // Replica returns the i-th replica handle.
 func (c *Cluster) Replica(i int) *ReplicaNode {
 	c.t.Helper()

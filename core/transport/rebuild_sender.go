@@ -130,16 +130,20 @@ func (e *BlockExecutor) doRebuild(replicaID string, session *activeSession, targ
 // docs/recovery-wiring-plan.md §4 Option A) and delegates to the
 // PrimaryBridge captured in e.dualLane.Bridge.
 //
-// Lifecycle: this method is async (returns immediately after dialing
-// + StartRebuildSession is kicked off). The bridge's onClose callback
-// (set in NewBlockExecutorWithDualLane) fires the executor's
-// OnSessionClose when the session goroutine completes — which now
-// happens autonomously: sender.Run barriers as soon as sink.DrainBacklog
-// returns (P2c-slice B-2 lifecycle; no explicit FinishLiveWrites needed).
+// P2d (architect 2026-04-30): the WAL pump routes through the
+// resident per-replica WalShipper via a transport.RecoverySink adapter.
+// Steady (legacy port) emit context is snapshotted before constructing
+// the sink so EndSession's rule-2 restore lands the right values.
+// During session, the WalShipper's emit profile is DualLaneWALFrame
+// (writes frameWALEntry on the dual-lane conn); after EndSession the
+// shipper's emit context is restored to the steady snapshot.
 //
-// Legacy semantics — no live writes during rebuild — are preserved by
-// the absence of any PushLiveWrite call here. The bridge's WalShipperSink
-// buffer remains empty; flushAndSeal ships zero entries; barrier converges.
+// Lifecycle: this method is async (returns immediately after dialing
+// + StartRebuildSessionWithSink is kicked off). The bridge's onClose
+// callback (set in NewBlockExecutorWithDualLane) fires the executor's
+// OnSessionClose when the session goroutine completes — happens
+// autonomously: sender.Run barriers as soon as sink.DrainBacklog
+// returns (P2c-slice B-2 lifecycle).
 func (e *BlockExecutor) startRebuildDualLane(replicaID string, sessionID, epoch, endpointVersion, targetLSN uint64) error {
 	dl := e.dualLane
 	conn, err := net.DialTimeout("tcp", dl.DialAddr, 2*time.Second)
@@ -151,11 +155,34 @@ func (e *BlockExecutor) startRebuildDualLane(replicaID string, sessionID, epoch,
 	// REBUILD).
 	log.Printf("executor: rebuild start replica=%s sessionID=%d epoch=%d EV=%d targetLSN=%d (dual-lane)",
 		replicaID, sessionID, epoch, endpointVersion, targetLSN)
+
+	// P2d wiring: build the RecoverySink that brackets the resident
+	// WalShipper around this session.
+	//
+	// Snapshot the steady emit context (legacy port + MsgShipEntry)
+	// before installing session context, so EndSession's rule-2
+	// restore lands the correct values. SnapshotEmitContext returns
+	// (nil, zero, SteadyMsgShip) when no Ship has run yet — that's
+	// the honest "no steady context to restore" signal.
+	steadyConn, steadyLineage, steadyProfile := e.SnapshotEmitContext(replicaID)
+	sessionLineage := RecoveryLineage{
+		SessionID:       sessionID,
+		Epoch:           epoch,
+		EndpointVersion: endpointVersion,
+		TargetLSN:       targetLSN,
+	}
+	sink := NewRecoverySinkWithProfiles(e, replicaID,
+		conn, sessionLineage, EmitProfileDualLaneWALFrame,
+		steadyConn, steadyLineage, steadyProfile,
+	)
+
 	// fromLSN=0 for full rebuild matches the legacy doRebuild semantic
 	// (base lane covers everything; no catch-up tail). When a future
 	// caller wants partial rebuild from a specific LSN, the
 	// StartRebuild signature would need fromLSN added — out of scope.
-	if err := dl.Bridge.StartRebuildSession(context.Background(), conn, dl.ReplicaID, sessionID, 0, targetLSN); err != nil {
+	if err := dl.Bridge.StartRebuildSessionWithSink(
+		context.Background(), conn, dl.ReplicaID, sessionID, 0, targetLSN, sink,
+	); err != nil {
 		_ = conn.Close()
 		return fmt.Errorf("dual-lane start: %w", err)
 	}

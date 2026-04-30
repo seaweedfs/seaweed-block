@@ -177,6 +177,23 @@ func decodeWALEntry(p []byte) (kind WALEntryKind, lba uint32, lsn uint64, data [
 	return kind, binary.BigEndian.Uint32(p[1:]), binary.BigEndian.Uint64(p[5:]), p[13:], nil
 }
 
+// WriteWALEntryFrame writes one WAL-lane frame on the dual-lane wire
+// — public surface for transport-side EmitFunc that targets the
+// recovery dual-lane port (P2d profile = DualLaneWALFrame).
+//
+// Wraps the package-internal frame format (writeFrame + encodeWALEntry)
+// so the transport layer can emit recovery-compatible WAL frames
+// without duplicating the encoding logic.
+//
+// `kind` MUST be WALKindBacklog (DrainBacklog scan emit) or
+// WALKindSessionLive (NotifyAppend Realtime emit during session).
+// The receiver-side rebuild_session uses kind only for observability
+// counts (BacklogApplied / SessionLiveApplied); apply behavior is
+// identical for both.
+func WriteWALEntryFrame(w io.Writer, kind WALEntryKind, lba uint32, lsn uint64, data []byte) error {
+	return writeFrame(w, frameWALEntry, encodeWALEntry(kind, lba, lsn, data))
+}
+
 // baseBatchAck: [8 SessionID][8 AcknowledgedLSN][4 BaseLBAUpper]
 //
 // SessionID identifies which session this ack belongs to (must match

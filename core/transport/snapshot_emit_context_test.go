@@ -22,12 +22,15 @@ func TestSnapshotEmitContext_NoEntry_ReturnsZero(t *testing.T) {
 	primary := memorywal.NewStore(8, 4096)
 	e := NewBlockExecutor(primary, "127.0.0.1:0")
 
-	conn, lineage := e.SnapshotEmitContext("never-shipped")
+	conn, lineage, profile := e.SnapshotEmitContext("never-shipped")
 	if conn != nil {
 		t.Errorf("SnapshotEmitContext on absent replica: conn=%p want nil", conn)
 	}
 	if lineage != (RecoveryLineage{}) {
 		t.Errorf("SnapshotEmitContext on absent replica: lineage=%+v want zero", lineage)
+	}
+	if profile != EmitProfileSteadyMsgShip {
+		t.Errorf("SnapshotEmitContext on absent replica: profile=%s want SteadyMsgShip", profile)
 	}
 }
 
@@ -48,14 +51,17 @@ func TestSnapshotEmitContext_AfterUpdate_ReturnsCurrent(t *testing.T) {
 
 	// Ensure entry exists, then update.
 	_ = e.WalShipperFor(replicaID)
-	e.updateWalShipperEmitContext(replicaID, steadyConn, steadyLineage)
+	e.updateWalShipperEmitContext(replicaID, steadyConn, steadyLineage, EmitProfileSteadyMsgShip)
 
-	gotConn, gotLineage := e.SnapshotEmitContext(replicaID)
+	gotConn, gotLineage, gotProfile := e.SnapshotEmitContext(replicaID)
 	if gotConn != steadyConn {
 		t.Errorf("SnapshotEmitContext conn=%p want %p", gotConn, steadyConn)
 	}
 	if gotLineage != steadyLineage {
 		t.Errorf("SnapshotEmitContext lineage=%+v want %+v", gotLineage, steadyLineage)
+	}
+	if gotProfile != EmitProfileSteadyMsgShip {
+		t.Errorf("SnapshotEmitContext profile=%s want SteadyMsgShip", gotProfile)
 	}
 }
 
@@ -79,11 +85,11 @@ func TestSnapshotEmitContext_ThenRecoverySink_RestoresCaptured(t *testing.T) {
 
 	// Production-shape step: pre-existing steady ship has set context.
 	_ = e.WalShipperFor(replicaID)
-	e.updateWalShipperEmitContext(replicaID, steadyConn, steadyLineage)
+	e.updateWalShipperEmitContext(replicaID, steadyConn, steadyLineage, EmitProfileSteadyMsgShip)
 
 	// Caller pattern: snapshot BEFORE constructing RecoverySink, pass
 	// to the constructor as the steady-restore values.
-	snappedConn, snappedLineage := e.SnapshotEmitContext(replicaID)
+	snappedConn, snappedLineage, _ := e.SnapshotEmitContext(replicaID)
 
 	sessionConn, _ := net.Pipe()
 	defer sessionConn.Close()

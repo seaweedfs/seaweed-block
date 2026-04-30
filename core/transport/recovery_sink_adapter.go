@@ -2,7 +2,9 @@ package transport
 
 import (
 	"context"
+	"errors"
 	"net"
+	"sync"
 )
 
 // RecoverySink is the transport-side adapter that satisfies
@@ -39,15 +41,37 @@ type RecoverySink struct {
 	replicaID string
 
 	// Session-context: applied BEFORE StartSession (rule 1).
+	// P2d (architect 2026-04-30): sessionProfile is fixed at
+	// EmitProfileDualLaneWALFrame in production — recovery sessions
+	// always emit on the dual-lane port using frameWALEntry.
 	sessionConn    net.Conn
 	sessionLineage RecoveryLineage
+	sessionProfile EmitProfile
 
 	// Pre-session / steady context: restored AFTER EndSession
-	// (rule 2). nil conn / zero lineage is honest — it just
-	// means "no steady emit context active before this session".
+	// (rule 2). nil conn / zero lineage / SteadyMsgShip profile is
+	// honest — "no steady emit context active before this session".
 	steadyConn    net.Conn
 	steadyLineage RecoveryLineage
+	steadyProfile EmitProfile
+
+	// sealMu protects sealed and serializes NotifyAppend's check-
+	// then-delegate against EndSession. After EndSession sets
+	// sealed=true, NotifyAppend returns ErrSinkSealed instead of
+	// delegating to WalShipper — matches senderBacklogSink's
+	// post-flushAndSeal contract so callers (PrimaryBridge.PushLiveWrite)
+	// get a clean "session is closing" signal during the brief
+	// window between sink-end and bridge-map-removal.
+	sealMu sync.Mutex
+	sealed bool
 }
+
+// ErrSinkSealed is returned by RecoverySink.NotifyAppend after the
+// session's EndSession has fired. Callers (PushLiveWrite) treat this
+// as "session is closing — fall back to steady-live or retry on a
+// fresh session". Mirrors the senderBacklogSink "sink sealed" error
+// so both sink implementations look the same to the caller.
+var ErrSinkSealed = errors.New("recovery: NotifyAppend after sink sealed (session is closing)")
 
 // NewRecoverySink constructs a RecoverySink bound to the
 // executor's per-replica WalShipper. Caller provides:
@@ -83,14 +107,36 @@ func NewRecoverySink(
 	steadyConn net.Conn,
 	steadyLineage RecoveryLineage,
 ) *RecoverySink {
+	return NewRecoverySinkWithProfiles(e, replicaID,
+		sessionConn, sessionLineage, EmitProfileDualLaneWALFrame,
+		steadyConn, steadyLineage, EmitProfileSteadyMsgShip,
+	)
+}
+
+// NewRecoverySinkWithProfiles is NewRecoverySink with explicit profile
+// arguments — for tests that want to exercise non-production
+// profile combinations or for future variants where the steady
+// profile differs from the legacy default.
+func NewRecoverySinkWithProfiles(
+	e *BlockExecutor,
+	replicaID string,
+	sessionConn net.Conn,
+	sessionLineage RecoveryLineage,
+	sessionProfile EmitProfile,
+	steadyConn net.Conn,
+	steadyLineage RecoveryLineage,
+	steadyProfile EmitProfile,
+) *RecoverySink {
 	_ = e.WalShipperFor(replicaID) // ensure entry exists
 	return &RecoverySink{
 		e:              e,
 		replicaID:      replicaID,
 		sessionConn:    sessionConn,
 		sessionLineage: sessionLineage,
+		sessionProfile: sessionProfile,
 		steadyConn:     steadyConn,
 		steadyLineage:  steadyLineage,
+		steadyProfile:  steadyProfile,
 	}
 }
 
@@ -100,7 +146,7 @@ func NewRecoverySink(
 // emit context has already been updated — caller's defer of
 // EndSession will restore it.
 func (r *RecoverySink) StartSession(fromLSN uint64) error {
-	r.e.updateWalShipperEmitContext(r.replicaID, r.sessionConn, r.sessionLineage)
+	r.e.updateWalShipperEmitContext(r.replicaID, r.sessionConn, r.sessionLineage, r.sessionProfile)
 	return r.e.WalShipperFor(r.replicaID).StartSession(fromLSN)
 }
 
@@ -117,16 +163,37 @@ func (r *RecoverySink) DrainBacklog(ctx context.Context) error {
 // emit triggered by the EndSession path completes under session
 // context before the restore lands.
 func (r *RecoverySink) EndSession() {
+	// Set sealed FIRST so any in-flight NotifyAppend that races
+	// past the sealMu check sees the sealed=true gate before the
+	// WalShipper transitions and emit context is restored. This is
+	// the analogue of senderBacklogSink.flushAndSeal's atomic seal
+	// boundary.
+	r.sealMu.Lock()
+	r.sealed = true
+	r.sealMu.Unlock()
+
 	r.e.WalShipperFor(r.replicaID).EndSession()
-	r.e.updateWalShipperEmitContext(r.replicaID, r.steadyConn, r.steadyLineage)
+	r.e.updateWalShipperEmitContext(r.replicaID, r.steadyConn, r.steadyLineage, r.steadyProfile)
 }
 
-// NotifyAppend delegates to WalShipper.NotifyAppend. In Backlog
-// mode (during the session) the call updates the lag sample;
-// the actual emit happens via the drain loop. In Realtime mode
-// (after EndSession) it ships directly under whatever emit
-// context is current — session context until restore, steady
-// context after.
+// NotifyAppend delegates to WalShipper.NotifyAppend during the
+// session. In Backlog mode the call updates the lag sample; the
+// drain loop picks up the entry from substrate. In Realtime mode
+// it ships directly under the session emit context (dual-lane port
+// + frameWALEntry).
+//
+// After EndSession seals the sink, NotifyAppend returns ErrSinkSealed
+// — matches senderBacklogSink's post-flushAndSeal contract so
+// callers (PushLiveWrite) get a clean "session is closing" signal.
+// Without this, a NotifyAppend racing in after EndSession would hit
+// the WalShipper with a steady (nil) emit context and produce a
+// confusing "no conn" error.
 func (r *RecoverySink) NotifyAppend(lba uint32, lsn uint64, data []byte) error {
+	r.sealMu.Lock()
+	sealed := r.sealed
+	r.sealMu.Unlock()
+	if sealed {
+		return ErrSinkSealed
+	}
 	return r.e.WalShipperFor(r.replicaID).NotifyAppend(lba, lsn, data)
 }

@@ -48,29 +48,64 @@ type BlockExecutor struct {
 	walShippers  map[string]*walShipperEntry
 }
 
+// EmitProfile selects the wire encoder + frame format used by the
+// per-replica WalShipper's EmitFunc. P2d (architect 2026-04-30):
+// dual-lane connections use frameWALEntry; legacy steady connections
+// use MsgShipEntry. The profile is part of the emit context (alongside
+// conn + lineage) and switches when recovery sessions bracket the
+// shipper into the dual-lane port.
+type EmitProfile int
+
+const (
+	// EmitProfileSteadyMsgShip — legacy port WAL ship: SWRP envelope
+	// (`WriteMsg(MsgShipEntry, EncodeShipEntry(...))`). Used outside
+	// recovery sessions and by Ship() in steady state.
+	EmitProfileSteadyMsgShip EmitProfile = iota
+	// EmitProfileDualLaneWALFrame — recovery dual-lane port: 5-byte
+	// recovery frame header + encodeWALEntry payload (via
+	// recovery.WriteWALEntryFrame). Used inside recovery sessions on
+	// the dual-lane connection. Kind tag derives from the EmitKind
+	// passed by WalShipper: Backlog or SessionLive.
+	EmitProfileDualLaneWALFrame
+)
+
+func (p EmitProfile) String() string {
+	switch p {
+	case EmitProfileSteadyMsgShip:
+		return "SteadyMsgShip"
+	case EmitProfileDualLaneWALFrame:
+		return "DualLaneWALFrame"
+	default:
+		return fmt.Sprintf("EmitProfile(%d)", int(p))
+	}
+}
+
 // walShipperEntry pairs a per-replica WalShipper with its mutable
-// wire-emit context (conn + lineage). Ship() / recovery-session
-// initialization updates the context under emitCtxMu before delegating
-// to the shipper; the EmitFunc reads it under the same mutex.
+// wire-emit context (conn + lineage + profile). Ship() / recovery-
+// session initialization updates the context under emitCtxMu before
+// delegating to the shipper; the EmitFunc reads it under the same
+// mutex.
 //
 // Architect P1 review (2026-04-29 #1): encoding MUST happen INSIDE
 // the EmitFunc, not by the caller before NotifyAppend. WalShipper
-// hands `(lba, lsn, raw block bytes)` to EmitFunc; EmitFunc owns
-// `EncodeShipEntry` so both steady-state Ship() AND backlog scan
-// (recovery.Sender via DrainBacklog, P2) feed the SAME EmitFunc
-// shape — one encoding seam, one wire frame type.
+// hands `(kind, lba, lsn, raw block bytes)` to EmitFunc; EmitFunc
+// owns the encoding so steady Ship() AND recovery-session emits
+// feed the SAME EmitFunc, with the profile selecting which wire
+// frame format to emit.
 //
-// emitLineage is the lineage used for `EncodeShipEntry`. For
-// steady-state ship, Ship() updates it from the active session per
-// call. For recovery-session backlog (P2), the session-installer
-// updates it from the session's lineage at StartSession time and
-// restores steady lineage at EndSession.
+// emitLineage is the lineage embedded in MsgShipEntry payloads
+// (steady profile only — frameWALEntry has no lineage field).
+// For steady-state ship, Ship() updates it from the active session
+// per call. For recovery-session emits, the session-installer
+// (RecoverySink) updates context at StartSession and restores
+// steady context at EndSession.
 type walShipperEntry struct {
 	shipper *WalShipper
 
 	emitCtxMu   sync.Mutex
 	emitConn    net.Conn
 	emitLineage RecoveryLineage
+	emitProfile EmitProfile
 }
 
 // DualLaneConfig holds the wiring for routing StartRebuild through
@@ -584,29 +619,58 @@ func (e *BlockExecutor) WalShipperFor(replicaID string) *WalShipper {
 	}
 
 	entry := &walShipperEntry{}
-	emit := func(lba uint32, lsn uint64, data []byte) error {
+	emit := func(kind EmitKind, lba uint32, lsn uint64, data []byte) error {
 		entry.emitCtxMu.Lock()
 		conn := entry.emitConn
 		lineage := entry.emitLineage
+		profile := entry.emitProfile
 		entry.emitCtxMu.Unlock()
 		if conn == nil {
-			return fmt.Errorf("transport: WalShipper for replica %s has no conn", replicaID)
+			// No emit context yet (Ship hasn't run; recovery session
+			// hasn't installed session context). Drop silently — same
+			// semantics as ModeIdle. Caller's NotifyAppend returns nil;
+			// entry remains in primary substrate and will be picked up
+			// by the next emit context's drain (recovery DrainBacklog
+			// scan or steady catch-up). This avoids racing against
+			// session-bracket installation when callers inject live
+			// writes via PushLiveWrite during the WalShipperFor →
+			// sink.StartSession window.
+			return nil
 		}
+
+		// P2d profile dispatch (architect 2026-04-30):
+		//   SteadyMsgShip  → legacy MsgShipEntry on legacy port.
+		//   DualLaneWALFrame → recovery frameWALEntry on dual-lane port.
 		// Encoding lives HERE (architect P1 review #1): WalShipper
-		// hands raw `(lba, lsn, data)` tuples; EmitFunc owns
-		// `EncodeShipEntry` so steady Ship() + backlog ScanLBAs
-		// both produce the same MsgShipEntry frame shape on the
-		// wire. Without this, P2's DrainBacklog would ship raw
-		// substrate bytes that the replica's MsgShipEntry handler
-		// can't decode.
-		payload := EncodeShipEntry(ShipEntry{
-			Lineage: lineage,
-			LBA:     lba,
-			LSN:     lsn,
-			Data:    data,
-		})
+		// hands raw tuples; EmitFunc owns the encoder choice so steady
+		// Ship and recovery-session emits both feed one delivery seam.
 		_ = conn.SetWriteDeadline(time.Now().Add(shipWriteDeadline))
-		err := WriteMsg(conn, MsgShipEntry, payload)
+		var err error
+		switch profile {
+		case EmitProfileSteadyMsgShip:
+			payload := EncodeShipEntry(ShipEntry{
+				Lineage: lineage,
+				LBA:     lba,
+				LSN:     lsn,
+				Data:    data,
+			})
+			err = WriteMsg(conn, MsgShipEntry, payload)
+		case EmitProfileDualLaneWALFrame:
+			// Map EmitKind → recovery WALEntryKind. Backlog scan emits
+			// → WALKindBacklog; Realtime / NotifyAppend emits during
+			// session → WALKindSessionLive (the kind tag drives the
+			// receiver's BacklogApplied vs SessionLiveApplied counters
+			// — observability only; apply behavior identical).
+			var walKind recovery.WALEntryKind
+			if kind == EmitKindBacklog {
+				walKind = recovery.WALKindBacklog
+			} else {
+				walKind = recovery.WALKindSessionLive
+			}
+			err = recovery.WriteWALEntryFrame(conn, walKind, lba, lsn, data)
+		default:
+			err = fmt.Errorf("transport: WalShipper for replica %s has unknown emit profile %s", replicaID, profile)
+		}
 		_ = conn.SetWriteDeadline(time.Time{})
 		return err
 	}
@@ -620,22 +684,26 @@ func (e *BlockExecutor) WalShipperFor(replicaID string) *WalShipper {
 	return s
 }
 
-// updateWalShipperEmitContext sets the wire conn + lineage that the
-// per-replica WalShipper's EmitFunc will use on its next emit.
-// Ship() calls this before delegating NotifyAppend; the EmitFunc
-// reads emitConn + emitLineage at emit time and `EncodeShipEntry`
-// the (raw block bytes, lineage) → MsgShipEntry payload.
+// updateWalShipperEmitContext sets the wire conn + lineage + profile
+// that the per-replica WalShipper's EmitFunc will use on its next
+// emit. Ship() calls this before delegating NotifyAppend; recovery
+// session start (RecoverySink) calls it to install the dual-lane
+// session context.
 //
 // Ordering invariant (architect P1 review #3): every code path
-// that ends in an emit (steady Ship, future recovery-session
-// backlog DrainBacklog, future Activate) MUST refresh this
-// context BEFORE the call that may emit. Otherwise EmitFunc emits
-// with stale lineage / nil conn. P2 wiring of recovery.Sender
-// must call this from the session-installer before StartSession.
+// that ends in an emit (steady Ship, recovery-session DrainBacklog,
+// recovery-session NotifyAppend) MUST refresh this context BEFORE
+// the call that may emit. Otherwise EmitFunc emits with stale
+// lineage / nil conn / wrong profile.
+//
+// P2d (architect 2026-04-30): `profile` is part of the context —
+// SteadyMsgShip for legacy port, DualLaneWALFrame for dual-lane port.
+// The profile selects the encoder; legacy callers pass
+// EmitProfileSteadyMsgShip to preserve existing wire shape.
 //
 // No-op if the WalShipper hasn't been created yet (caller will
 // create via WalShipperFor and re-call).
-func (e *BlockExecutor) updateWalShipperEmitContext(replicaID string, conn net.Conn, lineage RecoveryLineage) {
+func (e *BlockExecutor) updateWalShipperEmitContext(replicaID string, conn net.Conn, lineage RecoveryLineage, profile EmitProfile) {
 	e.walShipperMu.Lock()
 	entry, ok := e.walShippers[replicaID]
 	e.walShipperMu.Unlock()
@@ -645,32 +713,52 @@ func (e *BlockExecutor) updateWalShipperEmitContext(replicaID string, conn net.C
 	entry.emitCtxMu.Lock()
 	entry.emitConn = conn
 	entry.emitLineage = lineage
+	entry.emitProfile = profile
 	entry.emitCtxMu.Unlock()
 }
 
 // SnapshotEmitContext returns the per-replica WalShipper's current
-// emit conn + lineage under the same mutex production code uses
-// (emitCtxMu). Intended for callers that need to capture the steady-
-// state context BEFORE constructing a RecoverySink — so EndSession's
-// rule-2 restore lands the right values rather than zero / nil.
+// emit conn + lineage + profile under the same mutex production code
+// uses (emitCtxMu). Intended for callers that need to capture the
+// steady-state context BEFORE constructing a RecoverySink — so
+// EndSession's rule-2 restore lands the right values rather than
+// zero / nil.
 //
-// Returns (nil, zero RecoveryLineage) when no WalShipperEntry exists
-// for replicaID (i.e., no Ship has run yet for this replica). That
-// is honest — there is no steady context to restore.
+// Returns (nil, zero RecoveryLineage, EmitProfileSteadyMsgShip) when
+// no WalShipperEntry exists for replicaID (i.e., no Ship has run yet
+// for this replica). That is honest: the steady restore is "no
+// context yet, default to steady profile" — matching what a fresh
+// Ship() call would set.
 //
 // Called by: production wiring layer (e.g., transport.startRebuildDualLane)
 // right before NewRecoverySink, so the snapshot is consistent with
 // what's currently driving Ship().
-func (e *BlockExecutor) SnapshotEmitContext(replicaID string) (net.Conn, RecoveryLineage) {
+func (e *BlockExecutor) SnapshotEmitContext(replicaID string) (net.Conn, RecoveryLineage, EmitProfile) {
 	e.walShipperMu.Lock()
 	entry, ok := e.walShippers[replicaID]
 	e.walShipperMu.Unlock()
 	if !ok {
-		return nil, RecoveryLineage{}
+		return nil, RecoveryLineage{}, EmitProfileSteadyMsgShip
 	}
 	entry.emitCtxMu.Lock()
 	defer entry.emitCtxMu.Unlock()
-	return entry.emitConn, entry.emitLineage
+	return entry.emitConn, entry.emitLineage, entry.emitProfile
+}
+
+// DualLanePrimaryBridge returns the recovery PrimaryBridge plus the
+// coordinator replica key when this executor was built with
+// NewBlockExecutorWithDualLane. Legacy executors return (_, _, false).
+//
+// Integration tests (e.g. core/replication/component) use this to drive
+// PushLiveWrite during an engine-dispatched rebuild. Production should
+// ideally route session-lane writes via a single control plane; this
+// accessor exists so tests can close the bridge/coordinator seam without
+// duplicating cluster executor construction.
+func (e *BlockExecutor) DualLanePrimaryBridge() (*recovery.PrimaryBridge, recovery.ReplicaID, bool) {
+	if e.dualLane == nil {
+		return nil, "", false
+	}
+	return e.dualLane.Bridge, e.dualLane.ReplicaID, true
 }
 
 // Registry lifecycle note (architect P1 review #4): walShippers

@@ -161,7 +161,7 @@ func TestWalShipper_Resident_SteadyShipBetweenSessions(t *testing.T) {
 	steadyLineage := RecoveryLineage{
 		SessionID: 1, Epoch: 1, EndpointVersion: 1, TargetLSN: 1,
 	}
-	e.updateWalShipperEmitContext(replicaID, steadyConn, steadyLineage)
+	e.updateWalShipperEmitContext(replicaID, steadyConn, steadyLineage, EmitProfileSteadyMsgShip)
 
 	// Phase 1: steady NotifyAppend (Realtime).
 	if err := shipper.NotifyAppend(0, 1, []byte{0x01}); err != nil {
@@ -258,7 +258,7 @@ func TestWalShipper_Resident_NotifyAppendDuringSession_BacklogMode(t *testing.T)
 	sessionLineage := RecoveryLineage{
 		SessionID: 100, Epoch: 1, EndpointVersion: 1, TargetLSN: 1000,
 	}
-	e.updateWalShipperEmitContext(replicaID, steadyConn, steadyLineage)
+	e.updateWalShipperEmitContext(replicaID, steadyConn, steadyLineage, EmitProfileSteadyMsgShip)
 
 	sink := NewRecoverySink(e, replicaID,
 		sessionConn, sessionLineage,

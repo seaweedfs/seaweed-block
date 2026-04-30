@@ -23,6 +23,7 @@ package transport
 import (
 	"bytes"
 	"context"
+	"errors"
 	"net"
 	"sync"
 	"testing"
@@ -31,12 +32,14 @@ import (
 )
 
 // recordedEmit captures one emit observation from the test's
-// recording EmitFunc. Intentionally records (conn, lineage, lba,
-// lsn) but NOT data — the test pins lifecycle ordering, not wire
-// format.
+// recording EmitFunc. Intentionally records (conn, lineage, profile,
+// kind, lba, lsn) but NOT data — the test pins lifecycle ordering,
+// not wire format.
 type recordedEmit struct {
 	conn    net.Conn
 	lineage RecoveryLineage
+	profile EmitProfile
+	kind    EmitKind
 	lba     uint32
 	lsn     uint64
 }
@@ -72,14 +75,16 @@ func installRecordingShipper(t *testing.T, e *BlockExecutor, replicaID string) (
 	var recMu sync.Mutex
 	recorded := []recordedEmit{}
 
-	rec := func(lba uint32, lsn uint64, data []byte) error {
+	rec := func(kind EmitKind, lba uint32, lsn uint64, data []byte) error {
 		entry.emitCtxMu.Lock()
 		conn := entry.emitConn
 		lineage := entry.emitLineage
+		profile := entry.emitProfile
 		entry.emitCtxMu.Unlock()
 		recMu.Lock()
 		recorded = append(recorded, recordedEmit{
-			conn: conn, lineage: lineage, lba: lba, lsn: lsn,
+			conn: conn, lineage: lineage, profile: profile,
+			kind: kind, lba: lba, lsn: lsn,
 		})
 		recMu.Unlock()
 		return nil
@@ -138,7 +143,7 @@ func TestRecoverySink_StartSession_InstallsSessionContext(t *testing.T) {
 	// Pre-state: install steady context. This mimics Ship() having
 	// been the previous user of the shipper.
 	_ = e.WalShipperFor(replicaID)
-	e.updateWalShipperEmitContext(replicaID, steadyConn, steadyLineage)
+	e.updateWalShipperEmitContext(replicaID, steadyConn, steadyLineage, EmitProfileSteadyMsgShip)
 
 	pre, preLin := readEntryEmitContext(t, e, replicaID)
 	if pre != steadyConn || preLin != steadyLineage {
@@ -205,7 +210,7 @@ func TestRecoverySink_DrainBacklogEmits_UseSessionContext(t *testing.T) {
 	sessionLineage := RecoveryLineage{
 		SessionID: 99, Epoch: 2, EndpointVersion: 3, TargetLSN: 1000,
 	}
-	e.updateWalShipperEmitContext(replicaID, steadyConn, steadyLineage)
+	e.updateWalShipperEmitContext(replicaID, steadyConn, steadyLineage, EmitProfileSteadyMsgShip)
 
 	sink := NewRecoverySink(e, replicaID,
 		sessionConn, sessionLineage,
@@ -263,7 +268,7 @@ func TestRecoverySink_EndSession_RestoresSteadyContext(t *testing.T) {
 	}
 
 	_ = e.WalShipperFor(replicaID)
-	e.updateWalShipperEmitContext(replicaID, steadyConn, steadyLineage)
+	e.updateWalShipperEmitContext(replicaID, steadyConn, steadyLineage, EmitProfileSteadyMsgShip)
 
 	sink := NewRecoverySink(e, replicaID,
 		sessionConn, sessionLineage,
@@ -321,7 +326,7 @@ func TestRecoverySink_NotifyAppendAfterEndSession_UsesSteadyContext(t *testing.T
 		SessionID: 42, Epoch: 1, EndpointVersion: 1, TargetLSN: 200,
 	}
 
-	e.updateWalShipperEmitContext(replicaID, steadyConn, steadyLineage)
+	e.updateWalShipperEmitContext(replicaID, steadyConn, steadyLineage, EmitProfileSteadyMsgShip)
 
 	sink := NewRecoverySink(e, replicaID,
 		sessionConn, sessionLineage,
@@ -336,10 +341,16 @@ func TestRecoverySink_NotifyAppendAfterEndSession_UsesSteadyContext(t *testing.T
 	}
 	sink.EndSession()
 
-	// Post-EndSession Realtime-mode NotifyAppend MUST emit under
-	// steady context (rule 2 surface check from the emit side).
-	if err := sink.NotifyAppend(7, 100, []byte{0xCC}); err != nil {
-		t.Fatalf("NotifyAppend post-EndSession: %v", err)
+	// Post-EndSession: sink itself is sealed (rejects NotifyAppend
+	// with ErrSinkSealed — verified separately in
+	// TestRecoverySink_NotifyAppendAfterEndSession_Sealed). The
+	// rule-2 architectural assertion is "emit context restored to
+	// steady" which is independent of sink seal — verify by calling
+	// the underlying WalShipper directly so the recording EmitFunc
+	// captures the post-EndSession context state.
+	shipper := e.WalShipperFor(replicaID)
+	if err := shipper.NotifyAppend(7, 100, []byte{0xCC}); err != nil {
+		t.Fatalf("WalShipper.NotifyAppend post-EndSession: %v", err)
 	}
 
 	recMu.Lock()
@@ -396,7 +407,7 @@ func TestRecoverySink_FullLifecycle(t *testing.T) {
 		SessionID: 99, Epoch: 5, EndpointVersion: 7, TargetLSN: 5000,
 	}
 
-	e.updateWalShipperEmitContext(replicaID, steadyConn, steadyLineage)
+	e.updateWalShipperEmitContext(replicaID, steadyConn, steadyLineage, EmitProfileSteadyMsgShip)
 
 	sink := NewRecoverySink(e, replicaID,
 		sessionConn, sessionLineage,
@@ -420,9 +431,12 @@ func TestRecoverySink_FullLifecycle(t *testing.T) {
 
 	sink.EndSession()
 
-	// Post-session Realtime emit.
-	if err := sink.NotifyAppend(15, 9999, []byte{0xFF}); err != nil {
-		t.Fatalf("NotifyAppend post-EndSession: %v", err)
+	// Post-session Realtime emit. Sink is sealed; bypass it and
+	// call the underlying WalShipper directly to verify the post-
+	// EndSession emit context is the restored steady context.
+	shipper := e.WalShipperFor(replicaID)
+	if err := shipper.NotifyAppend(15, 9999, []byte{0xFF}); err != nil {
+		t.Fatalf("WalShipper.NotifyAppend post-EndSession: %v", err)
 	}
 
 	recMu.Lock()
@@ -451,6 +465,53 @@ func TestRecoverySink_FullLifecycle(t *testing.T) {
 
 	t.Logf("full lifecycle: %d session-phase emits + %d post-session emits, all contexts correct",
 		sessionEmitCount, totalEmits-sessionEmitCount)
+}
+
+// TestRecoverySink_NotifyAppendAfterEndSession_Sealed — post-
+// EndSession the sink itself rejects NotifyAppend with ErrSinkSealed.
+// Mirrors senderBacklogSink's post-flushAndSeal contract so callers
+// (PrimaryBridge.PushLiveWrite) get a clean "session is closing"
+// signal — without this gate, races between EndSession and bridge-
+// map-removal would produce confusing "no conn" errors from the
+// underlying WalShipper.
+func TestRecoverySink_NotifyAppendAfterEndSession_Sealed(t *testing.T) {
+	primary := memorywal.NewStore(8, 4096)
+	e := NewBlockExecutor(primary, "127.0.0.1:0")
+	const replicaID = "r1"
+
+	steadyConn, _ := net.Pipe()
+	defer steadyConn.Close()
+	sessionConn, _ := net.Pipe()
+	defer sessionConn.Close()
+
+	steadyLineage := RecoveryLineage{
+		SessionID: 7, Epoch: 1, EndpointVersion: 1, TargetLSN: 1,
+	}
+	sessionLineage := RecoveryLineage{
+		SessionID: 42, Epoch: 1, EndpointVersion: 1, TargetLSN: 200,
+	}
+
+	_ = e.WalShipperFor(replicaID)
+	e.updateWalShipperEmitContext(replicaID, steadyConn, steadyLineage, EmitProfileSteadyMsgShip)
+
+	sink := NewRecoverySink(e, replicaID,
+		sessionConn, sessionLineage,
+		steadyConn, steadyLineage,
+	)
+
+	if err := sink.StartSession(0); err != nil {
+		t.Fatalf("StartSession: %v", err)
+	}
+	sink.EndSession()
+
+	// Post-EndSession NotifyAppend MUST return ErrSinkSealed.
+	err := sink.NotifyAppend(0, 1, []byte{0x42})
+	if err == nil {
+		t.Fatal("post-EndSession NotifyAppend: want error, got nil")
+	}
+	if !errors.Is(err, ErrSinkSealed) {
+		t.Errorf("post-EndSession NotifyAppend err=%v want ErrSinkSealed", err)
+	}
 }
 
 // TestRecoverySink_SatisfiesWalShipperSink — compile-time check

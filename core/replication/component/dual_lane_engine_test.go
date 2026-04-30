@@ -195,3 +195,120 @@ func TestDualLane_CoordReleasesPinFloorAfterSession(t *testing.T) {
 		}
 	})
 }
+
+// TestDualLane_EngineDrivenRebuild_WithPushLiveDuringSession is the
+// component-lane extension of TestDualLane_EngineDrivenRebuild_HappyPath:
+// after the engine emits StartRebuild, tests inject one extra WAL entry
+// via primary substrate Write + PrimaryBridge.PushLiveWrite (session
+// lane), matching core/recovery/integration_stub_test.go semantics.
+//
+// This pins the coordinator/bridge path for "live tail during rebuild"
+// without yet wiring ReplicationVolume steady-ship to PushLiveWrite
+// (that remains product work). WalShipper remains separate from the dual-
+// lane rebuild sender until P2d unifies EncodeShipEntry vs frameWALEntry.
+func TestDualLane_EngineDrivenRebuild_WithPushLiveDuringSession(t *testing.T) {
+	component.RunSubstrate(t, "memorywal", component.MemoryWAL, func(t *testing.T, c *component.Cluster) {
+		c.WithReplicas(1).
+			WithEngineDrivenRecovery().
+			WithDualLaneRecovery().
+			Start()
+
+		const seedN = 12
+		c.PrimaryWriteN(seedN)
+		c.PrimarySync()
+
+		a := c.Adapter(0)
+
+		c.DriveAssignment(0, adapter.AssignmentInfo{
+			VolumeID:        "v1",
+			ReplicaID:       "replica-0",
+			Epoch:           1,
+			EndpointVersion: 1,
+			DataAddr:        c.Replica(0).Addr,
+			CtrlAddr:        c.Replica(0).Addr,
+		})
+
+		c.DriveProbeResult(0, adapter.ProbeResult{
+			ReplicaID:         "replica-0",
+			Success:           true,
+			EndpointVersion:   1,
+			TransportEpoch:    1,
+			ReplicaFlushedLSN: 0,
+			PrimaryTailLSN:    1,
+			PrimaryHeadLSN:    seedN,
+		})
+
+		br, coordRID, ok := c.BlockExecutor(0).DualLanePrimaryBridge()
+		if !ok || br == nil {
+			t.Fatal("BlockExecutor missing dual-lane PrimaryBridge")
+		}
+
+		// PeerShipCoordinator keys match NewBlockExecutorWithDualLane replica id ("r-0").
+		if c.Coord().Phase(coordRID) == recovery.PhaseIdle {
+			t.Fatal("coord still Idle after rebuild dispatch — PushLiveWrite would fail")
+		}
+
+		liveLBA := uint32(55)
+		liveData := make([]byte, component.DefaultBlockSize)
+		liveData[0] = 0xEE
+		liveData[component.DefaultBlockSize-1] = 0xDD
+		liveLSN := c.PrimaryWrite(liveLBA, liveData)
+
+		if rt := c.Coord().RouteLocalWrite(coordRID, liveLSN); rt != recovery.RouteSessionLane {
+			t.Fatalf("RouteLocalWrite during session: got %v want RouteSessionLane", rt)
+		}
+		if err := br.PushLiveWrite(coordRID, liveLBA, liveLSN, liveData); err != nil {
+			t.Fatalf("PushLiveWrite: %v", err)
+		}
+
+		deadline := time.Now().Add(8 * time.Second)
+		var sawStartRebuild bool
+		var sawSessionClosed bool
+		for time.Now().Before(deadline) {
+			for _, cmd := range a.CommandLog() {
+				if cmd == "StartRebuild" {
+					sawStartRebuild = true
+				}
+			}
+			for _, te := range a.Trace() {
+				if te.Step == "event" && te.Detail == "SessionClosedCompleted" {
+					sawSessionClosed = true
+				}
+			}
+			if sawStartRebuild && sawSessionClosed {
+				break
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		if !sawStartRebuild || !sawSessionClosed {
+			t.Fatalf("expected StartRebuild + SessionClosedCompleted got cmd=%v trace=%v",
+				a.CommandLog(), a.Trace())
+		}
+
+		for lba := uint32(0); lba < seedN; lba++ {
+			pd, err := c.Primary().Store.Read(lba)
+			if err != nil {
+				t.Fatalf("primary Read lba=%d: %v", lba, err)
+			}
+			rd, err := c.Replica(0).Store.Read(lba)
+			if err != nil {
+				t.Fatalf("replica Read lba=%d: %v", lba, err)
+			}
+			if !bytes.Equal(pd, rd) {
+				t.Fatalf("mismatch seeded lba %d", lba)
+			}
+		}
+		pl, err := c.Primary().Store.Read(liveLBA)
+		if err != nil {
+			t.Fatalf("primary Read live lba=%d: %v", liveLBA, err)
+		}
+		rl, err := c.Replica(0).Store.Read(liveLBA)
+		if err != nil {
+			t.Fatalf("replica Read live lba=%d: %v", liveLBA, err)
+		}
+		if !bytes.Equal(pl, rl) {
+			t.Fatalf("live PushLiveWrite LBA mismatch primary[0]=%02x replica[0]=%02x",
+				pl[0], rl[0])
+		}
+	})
+}

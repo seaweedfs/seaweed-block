@@ -129,7 +129,7 @@ func (e *BlockExecutor) Ship(replicaID string, lineage RecoveryLineage, lba uint
 	//
 	// Per v3-recovery-wal-shipper-mini-plan.md §3 P1.
 	s := e.WalShipperFor(replicaID)
-	e.updateWalShipperEmitContext(replicaID, conn, lineage)
+	e.updateWalShipperEmitContext(replicaID, conn, lineage, EmitProfileSteadyMsgShip)
 	if err := s.NotifyAppend(lba, lsn, data); err != nil {
 		return fmt.Errorf("transport: ship: write failed replica=%s lsn=%d: %w",
 			replicaID, lsn, err)

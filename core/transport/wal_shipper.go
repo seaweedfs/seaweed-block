@@ -38,6 +38,27 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
+// EmitKind tags one emit with its source lane semantic. Passed by
+// WalShipper to EmitFunc; the EmitFunc uses it only when the wire
+// profile cares (e.g., dual-lane recovery WAL frame's WALKind tag);
+// the legacy MsgShipEntry profile ignores it.
+//
+// EmitKindLive: NotifyAppend in Realtime mode (live writes from the
+// primary's local apply path).
+// EmitKindBacklog: DrainBacklog scan loop emits (substrate ScanLBAs
+// catch-up during recovery session backlog phase).
+//
+// P2d (architect 2026-04-30): kind plus the entry's emit profile
+// determines the wire frame: SteadyMsgShip + any kind → MsgShipEntry;
+// DualLaneWALFrame + Live → frameWALEntry(WALKindSessionLive);
+// DualLaneWALFrame + Backlog → frameWALEntry(WALKindBacklog).
+type EmitKind int
+
+const (
+	EmitKindLive EmitKind = iota
+	EmitKindBacklog
+)
+
 // EmitFunc is the wire-side delivery surface. WalShipper hands every
 // emit through this function. In production: BlockExecutor.Ship's
 // WriteMsg. In test: a mock that records LSN sequence + asserts
@@ -49,7 +70,7 @@ import (
 // belongs to the executor / engine layer (e.g., mark peer Degraded,
 // schedule retry, fail-close session). Mode stays unchanged on emit
 // error; cursor is NOT advanced for the failed emit.
-type EmitFunc func(lba uint32, lsn uint64, data []byte) error
+type EmitFunc func(kind EmitKind, lba uint32, lsn uint64, data []byte) error
 
 // HeadSource provides primary's current head LSN. WalShipper queries
 // this in R1's double-check and on each timer tick. The substrate's
@@ -278,7 +299,7 @@ func (s *WalShipper) NotifyAppend(lba uint32, lsn uint64, data []byte) error {
 			// Idempotent: write already accounted for (e.g. retry).
 			return nil
 		}
-		if err := s.emit(lba, lsn, data); err != nil {
+		if err := s.emit(EmitKindLive, lba, lsn, data); err != nil {
 			return err
 		}
 		s.cursor = lsn
@@ -340,7 +361,7 @@ func (s *WalShipper) DrainBacklog(ctx context.Context) error {
 			if s.mode != ModeBacklog || e.LSN <= s.cursor {
 				return nil // mode flipped or already-emitted; skip
 			}
-			if err := s.emit(e.LBA, e.LSN, e.Data); err != nil {
+			if err := s.emit(EmitKindBacklog, e.LBA, e.LSN, e.Data); err != nil {
 				hardErr = fmt.Errorf("walshipper: backlog emit lsn=%d: %w", e.LSN, err)
 				return err
 			}
