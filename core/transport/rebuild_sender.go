@@ -7,6 +7,8 @@ import (
 	"net"
 	"sort"
 	"time"
+
+	"github.com/seaweedfs/seaweed-block/core/recovery"
 )
 
 // StartRebuild streams every base block from primary to replica when
@@ -146,6 +148,31 @@ func (e *BlockExecutor) doRebuild(replicaID string, session *activeSession, targ
 // returns (P2c-slice B-2 lifecycle).
 func (e *BlockExecutor) startRebuildDualLane(replicaID string, sessionID, epoch, endpointVersion, targetLSN uint64) error {
 	dl := e.dualLane
+
+	// Phase 0 Fix #1 — INV-RID-UNIFIED-PER-SESSION:
+	// the engine's arg `replicaID` is the SINGLE source of truth for keying
+	// coord / WalShipper / sink / bridge for this session. The
+	// construction-time `dl.ReplicaID` exists for the test accessor
+	// (DualLanePrimaryBridge) and any cluster-wiring sanity, but it is not
+	// re-keyed per session. If the two diverge:
+	//
+	//   - sink.WriteMu()/post-emit hook keys under arg `replicaID`
+	//     → WalShipper writeMu + RecordShipped advance under arg
+	//   - bridge.StartRebuildSessionWithSink(... dl.ReplicaID ...) keys
+	//     coord.PinFloor under dl.ReplicaID
+	//   → PinFloor and shipCursor live under different IDs; the rebuild
+	//     never reconciles, but no error fires until much later (frontier
+	//     never converges, watchdog times out).
+	//
+	// Fix: (a) assert agreement at session entry — fail closed before we
+	// touch the wire — and (b) thread the arg through to the bridge so
+	// keying is uniform from this point on.
+	argRID := recovery.ReplicaID(replicaID)
+	if dl.ReplicaID != "" && dl.ReplicaID != argRID {
+		return fmt.Errorf("dual-lane replicaID drift: arg=%q dl=%q (must agree per INV-RID-UNIFIED-PER-SESSION)",
+			replicaID, string(dl.ReplicaID))
+	}
+
 	conn, err := net.DialTimeout("tcp", dl.DialAddr, 2*time.Second)
 	if err != nil {
 		return fmt.Errorf("dual-lane dial %s: %w", dl.DialAddr, err)
@@ -181,7 +208,7 @@ func (e *BlockExecutor) startRebuildDualLane(replicaID string, sessionID, epoch,
 	// caller wants partial rebuild from a specific LSN, the
 	// StartRebuild signature would need fromLSN added — out of scope.
 	if err := dl.Bridge.StartRebuildSessionWithSink(
-		context.Background(), conn, dl.ReplicaID, sessionID, 0, targetLSN, sink,
+		context.Background(), conn, argRID, sessionID, 0, targetLSN, sink,
 	); err != nil {
 		_ = conn.Close()
 		return fmt.Errorf("dual-lane start: %w", err)
