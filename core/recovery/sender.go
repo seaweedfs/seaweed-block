@@ -85,10 +85,11 @@ type Sender struct {
 	// no reader; only one inline readFrame at barrier time.
 	barrierRespCh chan ackOrResult
 
-	// sink — when non-nil, Run() delegates the WAL pump (StartSession /
-	// DrainBacklog / EndSession) to this sink instead of running the
-	// in-package streamBacklog + closeCh + drainAndSeal sequence.
-	// Set by NewSenderWithSink. P2 architecture per mini-plan §3 P2.
+	// sink — Run() delegates the WAL pump (StartSession / DrainBacklog
+	// / EndSession) to this sink. After P2c-slice A sink is mandatory:
+	// every Sender has one (transport WalShipper in production, or
+	// senderBacklogSink in the bridging path until P2d). Set by
+	// NewSenderWithSink / NewSenderWithBacklogRelay.
 	sink WalShipperSink
 }
 
@@ -137,15 +138,13 @@ type WalShipperSink interface {
 	EndSession()
 }
 
-// NewSender constructs a sender bound to a primary store + coordinator.
-// `conn` is the wire — typically a *net.TCPConn in production, or a
-// net.Pipe end in tests. Sender does not close `conn`; caller does.
-//
-// LEGACY path (P2a): callers that don't have a WalShipperSink yet
-// use this constructor. Run() falls back to the in-package WAL pump
-// (streamBacklog + drainAndSeal + closeCh). P2c removes this path
-// once all callers migrate to NewSenderWithSink.
-func NewSender(primaryStore storage.LogicalStorage, coordinator *PeerShipCoordinator, conn io.ReadWriter, replicaID ReplicaID) *Sender {
+// newSender is the private builder used by both sink-installing
+// constructors below. After P2c-slice A there is no public Sender
+// constructor without a sink — sink is mandatory; legacy NewSender
+// path was deleted. `conn` is the wire — typically a *net.TCPConn in
+// production, or a net.Pipe end in tests. Sender does not close
+// `conn`; caller does.
+func newSender(primaryStore storage.LogicalStorage, coordinator *PeerShipCoordinator, conn io.ReadWriter, replicaID ReplicaID) *Sender {
 	return &Sender{
 		primaryStore:  primaryStore,
 		coordinator:   coordinator,
@@ -159,23 +158,20 @@ func NewSender(primaryStore storage.LogicalStorage, coordinator *PeerShipCoordin
 // NewSenderWithSink constructs a sender that delegates the WAL
 // pump to the provided sink. Run() calls sink.StartSession after
 // BaseDone, sink.DrainBacklog to run the pump, and sink.EndSession
-// in defer. The in-package streamBacklog loop is NOT reached when a
-// sink is installed — that is the architect's "no double live" guard
-// at the recovery layer (mini-plan §4 INV-NO-DOUBLE-LIVE row).
+// in defer. There is no legacy in-package WAL pump anymore — sink is
+// the only path to the wire (mini-plan §4 INV-NO-DOUBLE-LIVE row).
 //
 // After DrainBacklog succeeds, Run still waits on closeCh and runs
-// drainAndSeal (same as legacy) so PushLiveWrite session-lane entries
-// converge until P2c routes live traffic through WalShipper.
+// drainAndSeal so PushLiveWrite session-lane entries converge until
+// P2c-slice B routes live traffic through WalShipper.
 //
-// `sink` MUST be non-nil. For the legacy fallback, use NewSender.
+// `sink` MUST be non-nil — passing nil is a programmer error and
+// panics at construction (P2c-slice A: sink mandatory).
 func NewSenderWithSink(primaryStore storage.LogicalStorage, coordinator *PeerShipCoordinator, conn io.ReadWriter, replicaID ReplicaID, sink WalShipperSink) *Sender {
 	if sink == nil {
-		// Defensive: caller passed nil; promote to legacy path so
-		// behavior is at least predictable. Production callers
-		// should pass a real sink.
-		return NewSender(primaryStore, coordinator, conn, replicaID)
+		panic("recovery: NewSenderWithSink: sink is required (P2c-slice A) — use NewSenderWithBacklogRelay if no transport WalShipper is wired yet")
 	}
-	s := NewSender(primaryStore, coordinator, conn, replicaID)
+	s := newSender(primaryStore, coordinator, conn, replicaID)
 	s.sink = sink
 	return s
 }
@@ -208,12 +204,12 @@ func (w senderBacklogSink) DrainBacklog(ctx context.Context) error {
 func (w senderBacklogSink) EndSession() {}
 
 // NewSenderWithBacklogRelay constructs a Sender whose WalShipperSink
-// replays WAL via streamBacklog (same frames as legacy NewSender).
-// Prefer this over legacy NewSender in tests and bridge code migrating
-// to the sink-first Run branch (P2b); production eventually uses
-// NewSenderWithSink with a transport WalShipper adapter (P2d).
+// replays WAL via streamBacklog using the in-package backlog relay
+// adapter. This is the bridging constructor used by tests and the
+// production primary bridge until P2d wires a real transport
+// WalShipper adapter behind NewSenderWithSink.
 func NewSenderWithBacklogRelay(primaryStore storage.LogicalStorage, coordinator *PeerShipCoordinator, conn io.ReadWriter, replicaID ReplicaID) *Sender {
-	s := NewSender(primaryStore, coordinator, conn, replicaID)
+	s := newSender(primaryStore, coordinator, conn, replicaID)
 	s.sink = senderBacklogSink{s: s}
 	return s
 }
@@ -269,14 +265,13 @@ func (s *Sender) PushLiveWrite(lba uint32, lsn uint64, data []byte) error {
 //  1. Send frameSessionStart.
 //  2. Base lane: ship every LBA's current data via frameBaseBlock.
 //  3. Send frameBaseDone; coordinator.MarkBaseDone.
-//  4. Backlog lane: ScanLBAs(fromLSN, ...); ship entries with
-//     LSN ∈ (fromLSN, targetLSN] via frameWALEntry; record each
-//     shipped LSN via coordinator.RecordShipped.
+//  4. WAL pump via sink: sink.StartSession(fromLSN); sink.DrainBacklog(ctx).
+//     The sink owns wire-format encoding and decides whether bytes go
+//     to the legacy port (frameWALEntry) or dual-lane port (P2d).
 //  5. Wait for caller's Close() OR ctx cancellation.
 //  6. Drain live queue + atomic seal; ship buffered live writes.
-//  7. coordinator.TryAdvanceToSteadyLive (§3.2 transition).
-//  8. Send frameBarrierReq, read frameBarrierResp.
-//  9. Verify achieved ≥ targetLSN via coordinator.CanEmitSessionComplete
+//  7. Send frameBarrierReq, read frameBarrierResp.
+//  8. Verify achieved ≥ targetLSN via coordinator.CanEmitSessionComplete
 //     (§5.2, CHK-BARRIER-BEFORE-CLOSE).
 //
 // Defer always: set sealed=true; coordinator.EndSession.
@@ -340,74 +335,43 @@ func (s *Sender) Run(ctx context.Context, sessionID, fromLSN, targetLSN uint64) 
 		return 0, newFailure(FailureContract, PhaseBaseDone, err)
 	}
 
-	// Step 5–7: WAL pump.
+	// Step 5–7: WAL pump via sink.
 	//
-	// Sink-mode (P2): delegate StartSession + DrainBacklog to the
-	// injected sink — streamBacklog is not called here (no duplicate
-	// WAL scan; mini-plan §4 INV-NO-DOUBLE-LIVE). EndSession defer
-	// brackets the session.
+	// Sink delegates StartSession + DrainBacklog to its implementation
+	// (transport WalShipper or in-package senderBacklogSink). One emit
+	// path = INV-NO-DOUBLE-LIVE at recovery layer (mini-plan §4).
 	//
-	// After DrainBacklog (sink or legacy pump), Run still waits on
-	// closeCh and runs drainAndSeal so PushLiveWrite session-lane
-	// tails ship before barrier (until P2c routes live via WalShipper).
+	// After DrainBacklog, Run still waits on closeCh and runs
+	// drainAndSeal so PushLiveWrite session-lane tails ship before
+	// barrier — slice B will route live traffic through WalShipper
+	// and remove this tail.
 	//
-	// Legacy mode (P2c removes this branch): direct streamBacklog.
-	if s.sink != nil {
-		// Defer EndSession FIRST so it runs on every exit path
-		// after this point — including success path AND the
-		// failure paths below (DrainBacklog error, BarrierReq error,
-		// barrier-resp error). Mirrors the sink-side spec for
-		// always-cleanup.
-		defer s.sink.EndSession()
+	// Defer EndSession FIRST so it fires on every exit path after this
+	// point — DrainBacklog error, BarrierReq error, barrier-resp error.
+	defer s.sink.EndSession()
 
-		if err := s.sink.StartSession(fromLSN); err != nil {
-			return 0, newFailure(FailureContract, PhaseBacklog,
-				fmt.Errorf("sink.StartSession: %w", err))
-		}
-		if err := s.sink.DrainBacklog(ctx); err != nil {
-			// Classify substrate vs cancellation vs other.
-			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-				return 0, newFailure(FailureCancelled, PhaseBacklog, err)
-			}
-			return 0, newFailure(FailureSubstrate, PhaseBacklog,
-				fmt.Errorf("sink.DrainBacklog: %w", err))
-		}
-		// In sink mode, coord's TryAdvanceToSteadyLive is collapsed
-		// (kickoff Q3 ratified Phase enum collapse to {Idle, Active}).
-		// Skip the transition step; barrier-ack is the only
-		// authoritative completion signal.
-		select {
-		case <-s.closeCh:
-		case <-ctx.Done():
-			return 0, newFailure(FailureCancelled, PhaseAwaitClose, ctx.Err())
-		}
-		if err := s.drainAndSeal(); err != nil {
-			return 0, err
-		}
-	} else {
-		// Legacy mode (P2c removes this branch):
-		if err := s.streamBacklog(); err != nil {
-			return 0, err
-		}
-		select {
-		case <-s.closeCh:
-		case <-ctx.Done():
-			return 0, newFailure(FailureCancelled, PhaseAwaitClose, ctx.Err())
-		}
-		if err := s.drainAndSeal(); err != nil {
-			return 0, err
-		}
+	if err := s.sink.StartSession(fromLSN); err != nil {
+		return 0, newFailure(FailureContract, PhaseBacklog,
+			fmt.Errorf("sink.StartSession: %w", err))
 	}
-
-	// Step 8: phase transition (LEGACY ONLY). In sink mode the
-	// transition is no-op'd per kickoff Q3 ratified Phase enum
-	// collapse {Idle, Active}. Sink-mode skipped this step above.
-	if s.sink == nil {
-		if !s.coordinator.TryAdvanceToSteadyLive(s.replicaID) {
-			st, _ := s.coordinator.Status(s.replicaID)
-			return 0, newFailure(FailureContract, PhaseTransition,
-				fmt.Errorf("TryAdvanceToSteadyLive rejected: %+v", st))
+	if err := s.sink.DrainBacklog(ctx); err != nil {
+		// Classify substrate vs cancellation vs other.
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return 0, newFailure(FailureCancelled, PhaseBacklog, err)
 		}
+		return 0, newFailure(FailureSubstrate, PhaseBacklog,
+			fmt.Errorf("sink.DrainBacklog: %w", err))
+	}
+	// Coord's TryAdvanceToSteadyLive is collapsed (kickoff Q3 ratified
+	// Phase enum collapse to {Idle, Active}). Barrier-ack is the only
+	// authoritative completion signal.
+	select {
+	case <-s.closeCh:
+	case <-ctx.Done():
+		return 0, newFailure(FailureCancelled, PhaseAwaitClose, ctx.Err())
+	}
+	if err := s.drainAndSeal(); err != nil {
+		return 0, err
 	}
 
 	// Step 8 + 9: barrier round-trip — reader goroutine delivers the

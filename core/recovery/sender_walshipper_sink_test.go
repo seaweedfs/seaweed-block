@@ -125,17 +125,24 @@ func (r *recordingSink) snapshot() (startCalls, drainCalls, endCalls int, order 
 	return r.startCalls, r.drainCalls, r.endCalls, o
 }
 
-// TestSender_NoSink_FallsBackToLegacyBehavior — P2a backwards-compat:
-// callers that don't pass a sink (NewSender — old signature) get
-// the existing streamBacklog/drainAndSeal path. P2c removes this
-// fallback after all callers migrate.
+// TestNewSenderWithSink_NilSinkPanics — P2c-slice A: sink is mandatory.
 //
-// This test does NOT assert on full e2e — it just confirms the
-// constructor accepts and Run is reachable. The detailed e2e
-// behavior is covered by existing TestE2E_RebuildHappyPath etc.
-// Skipped here by design (those tests still run via legacy path).
-func TestSender_NoSink_FallsBackToLegacyBehavior(t *testing.T) {
-	t.Skip(`legacy-path coverage: instantiate NewSender (no sink) and exercise streamBacklog in isolation if needed — e2e use NewSenderWithBacklogRelay (P2b)`)
+// Before P2c, NewSenderWithSink(..., nil) silently promoted to the
+// legacy NewSender path. After P2c-slice A there is no legacy path,
+// so a nil sink is a programmer error. Constructor panics — clear
+// blast radius, fails at construction not at first WAL emit.
+func TestNewSenderWithSink_NilSinkPanics(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("NewSenderWithSink(nil) did not panic; sink must be mandatory after P2c-slice A")
+		}
+	}()
+	coord := NewPeerShipCoordinator()
+	store := storage.NewBlockStore(4, 4096)
+	prim, replicaEnd := net.Pipe()
+	defer prim.Close()
+	defer replicaEnd.Close()
+	_ = NewSenderWithSink(store, coord, prim, "r1", nil)
 }
 
 // TestSender_WithSink_DelegatesStartSession — basic delegation.
