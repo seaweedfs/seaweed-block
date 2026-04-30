@@ -33,7 +33,12 @@ package transport
 //     fail → session.Success = false).
 //
 // Pinned by: §11.7 pillar 3 (receiver convergence). Companion to
-// Pillar 2 commits e354813 / e5a8763 / 7d051e2 / 9f62ebe.
+// Phase 0 / C3 / Pillar 2 commits:
+//   e354813 (transport: unify replicaID)
+//   e5a8763 (test harness: replica-%d alignment)
+//   7d051e2 (recovery: C3 fault-injection — spy sink)
+//   9f62ebe (transport: pillar 2 fault-injection on assembled stack)
+//   291e652 (THIS slice — pillar 3 slice-1 same-LBA arbitration).
 
 import (
 	"bytes"
@@ -78,8 +83,8 @@ import (
 // captures both the wire-ordering invariant and the apply-order
 // arbitration invariant: BOTH must hold for the test to pass.
 //
-// Stability check (not enforced in CI): I ran this 5× locally and
-// observed deterministic convergence to B on all overwritten LBAs.
+// Stability check (not enforced in CI): 10 consecutive runs locally
+// showed deterministic convergence to B on all overwritten LBAs.
 // If this becomes flaky in future, the receiver's apply path is
 // the suspect.
 func TestPillar3Slice1_ReceiverConvergence_LiveOverwritesBacklog_SameLBAs(t *testing.T) {
@@ -169,7 +174,28 @@ func TestPillar3Slice1_ReceiverConvergence_LiveOverwritesBacklog_SameLBAs(t *tes
 		t.Fatalf("session not Success — convergence claim moot. FailReason=%q", res.FailReason)
 	}
 
-	// Untouched LBAs: replica must hold seed pattern A.
+	// Pillar-3 polish: assert AchievedLSN against post-session primary.H.
+	// Live writes pushed LSNs 13/14/15 onto primary; primary.H should be
+	// 15 (= frozenTarget + len(overwrites)). The receiver's barrier-ack
+	// AchievedLSN MUST equal that — anything less means a SessionLive
+	// frame didn't apply (silent gap), anything more means we drifted
+	// past the actually-shipped tail. Tighter than "achieved >= target".
+	_, _, postPrimaryH := primary.Boundaries()
+	expectedAchieved := frozenTarget + uint64(len(overwriteLBAs))
+	if postPrimaryH != expectedAchieved {
+		t.Fatalf("post-session primaryH=%d want %d (frozenTarget %d + %d live writes)",
+			postPrimaryH, expectedAchieved, frozenTarget, len(overwriteLBAs))
+	}
+	if res.AchievedLSN != postPrimaryH {
+		t.Errorf("AchievedLSN=%d != postPrimaryH=%d (barrier ack should reflect last-shipped LSN)",
+			res.AchievedLSN, postPrimaryH)
+	}
+
+	// Untouched LBAs: replica must hold seed pattern A AND must equal
+	// primary's bytes for that LBA (defence-in-depth — we expect both
+	// to be the seed pattern, but tying to primary directly catches
+	// any future receiver bug that diverges from primary even if it
+	// "happens to" still match the seed cache).
 	overwriteSet := make(map[uint32]struct{}, len(overwriteLBAs))
 	for _, lba := range overwriteLBAs {
 		overwriteSet[lba] = struct{}{}
@@ -178,32 +204,47 @@ func TestPillar3Slice1_ReceiverConvergence_LiveOverwritesBacklog_SameLBAs(t *tes
 		if _, ovw := overwriteSet[lba]; ovw {
 			continue
 		}
-		got, err := replica.Read(lba)
+		gotR, err := replica.Read(lba)
 		if err != nil {
 			t.Fatalf("replica.Read untouched lba=%d: %v", lba, err)
 		}
-		expected := make([]byte, blockSize)
-		expected[0] = byte(0x40 | lba)
-		expected[1] = 0xA0
-		if !bytes.Equal(got, expected) {
-			t.Errorf("untouched lba=%d not seed-A; got[0:2]=%02x %02x want %02x %02x",
-				lba, got[0], got[1], expected[0], expected[1])
+		gotP, err := primary.Read(lba)
+		if err != nil {
+			t.Fatalf("primary.Read untouched lba=%d: %v", lba, err)
+		}
+		if !bytes.Equal(gotR, gotP) {
+			t.Errorf("untouched lba=%d: replica != primary (got_replica[0:2]=%02x %02x got_primary[0:2]=%02x %02x)",
+				lba, gotR[0], gotR[1], gotP[0], gotP[1])
+		}
+		// Sanity: must still be seed-A pattern (untouched).
+		if gotR[0] != byte(0x40|lba) || gotR[1] != 0xA0 {
+			t.Errorf("untouched lba=%d not seed-A; got[0:2]=%02x %02x", lba, gotR[0], gotR[1])
 		}
 	}
 
-	// Overwritten LBAs: replica must hold live B (higher-LSN wins).
-	// This is the discriminating assertion. If receiver lacked the
-	// wire-ordering or apply-order arbitration the architect calls out
-	// for §11.7 pillar 3, an overwritten LBA could end up at A.
+	// Overwritten LBAs: replica MUST equal primary (== live B), AND
+	// MUST equal the cached bRefs (sanity that the live-write payload
+	// itself wasn't dropped silently). The discriminating assertion
+	// is the replica == primary direction; if receiver lacked the
+	// wire-ordering or apply-order arbitration §11.7 pillar 3 calls
+	// out, an overwritten LBA could end up at A — replica.Read would
+	// then differ from primary.Read.
 	for _, lba := range overwriteLBAs {
-		got, err := replica.Read(lba)
+		gotR, err := replica.Read(lba)
 		if err != nil {
 			t.Fatalf("replica.Read overwritten lba=%d: %v", lba, err)
 		}
+		gotP, err := primary.Read(lba)
+		if err != nil {
+			t.Fatalf("primary.Read overwritten lba=%d: %v", lba, err)
+		}
+		if !bytes.Equal(gotR, gotP) {
+			t.Errorf("INV-PILLAR3-SAMELBA-CONVERGENCE: overwritten lba=%d replica != primary (got_replica[0:2]=%02x %02x got_primary[0:2]=%02x %02x); live-write LSN > backlog LSN must arbitrate",
+				lba, gotR[0], gotR[1], gotP[0], gotP[1])
+		}
 		want := bRefs[lba]
-		if !bytes.Equal(got, want) {
-			t.Errorf("INV-PILLAR3-SAMELBA-CONVERGENCE: overwritten lba=%d not live-B; got[0:2]=%02x %02x want %02x %02x (live-write LSN > backlog LSN must arbitrate)",
-				lba, got[0], got[1], want[0], want[1])
+		if !bytes.Equal(gotR, want) {
+			t.Errorf("overwritten lba=%d replica differs from cached live-write payload bRefs (test-internal sanity)", lba)
 		}
 	}
 
