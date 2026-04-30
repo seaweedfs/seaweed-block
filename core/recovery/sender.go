@@ -394,34 +394,71 @@ func (s *Sender) Run(ctx context.Context, sessionID, fromLSN, targetLSN uint64) 
 	// caller's defer.
 	go s.readerLoop()
 
-	// Step 2: base lane.
-	if err := s.streamBase(numBlocks); err != nil {
-		return 0, err // streamBase wraps its own Failure
-	}
+	// Step 2 + 3 + 4: BASE ∥ WAL — run base lane and WAL pump as
+	// concurrent goroutines (§6.8 #6 / P6 / G3 BASE ∥ WAL wall-clock
+	// overlap). Both write through the shared writeMu (C1) — frame
+	// integrity preserved by mutex-bounded interleaving on the wire.
+	//
+	// Base goroutine:  streamBase → frameBaseDone → coord.MarkBaseDone.
+	// WAL goroutine:   sink.StartSession → sink.DrainBacklog.
+	//
+	// errgroup waits both; on any error from either, ctx cancel fires
+	// to unblock the other. Barrier writes only after both complete.
+	groupCtx, groupCancel := context.WithCancel(ctx)
+	defer groupCancel()
+	baseErr := make(chan error, 1)
+	walErr := make(chan error, 1)
 
-	// Step 3: BaseDone signal.
-	if err := s.writeFrame(frameBaseDone, nil); err != nil {
-		return 0, newFailure(FailureWire, PhaseBaseDone, err)
-	}
-	if err := s.coordinator.MarkBaseDone(s.replicaID); err != nil {
-		return 0, newFailure(FailureContract, PhaseBaseDone, err)
-	}
-
-	// Step 4: WAL pump via sink. StartSession sets up sink state;
-	// DrainBacklog runs the pump AND (for the bridging sink) flushes
-	// buffered live writes + seals. After this returns, no more
-	// session-lane WAL frames will go out — barrier is next.
-	if err := s.sink.StartSession(fromLSN); err != nil {
-		return 0, newFailure(FailureContract, PhaseBacklog,
-			fmt.Errorf("sink.StartSession: %w", err))
-	}
-	if err := s.sink.DrainBacklog(ctx); err != nil {
-		// Classify substrate vs cancellation vs other.
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return 0, newFailure(FailureCancelled, PhaseBacklog, err)
+	go func() {
+		// Base lane.
+		if err := s.streamBase(numBlocks); err != nil {
+			groupCancel()
+			baseErr <- err
+			return
 		}
-		return 0, newFailure(FailureSubstrate, PhaseBacklog,
-			fmt.Errorf("sink.DrainBacklog: %w", err))
+		// BaseDone signal.
+		if err := s.writeFrame(frameBaseDone, nil); err != nil {
+			groupCancel()
+			baseErr <- newFailure(FailureWire, PhaseBaseDone, err)
+			return
+		}
+		if err := s.coordinator.MarkBaseDone(s.replicaID); err != nil {
+			groupCancel()
+			baseErr <- newFailure(FailureContract, PhaseBaseDone, err)
+			return
+		}
+		baseErr <- nil
+	}()
+
+	go func() {
+		if err := s.sink.StartSession(fromLSN); err != nil {
+			groupCancel()
+			walErr <- newFailure(FailureContract, PhaseBacklog,
+				fmt.Errorf("sink.StartSession: %w", err))
+			return
+		}
+		if err := s.sink.DrainBacklog(groupCtx); err != nil {
+			groupCancel()
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				walErr <- newFailure(FailureCancelled, PhaseBacklog, err)
+				return
+			}
+			walErr <- newFailure(FailureSubstrate, PhaseBacklog,
+				fmt.Errorf("sink.DrainBacklog: %w", err))
+			return
+		}
+		walErr <- nil
+	}()
+
+	// Wait both. On any error, propagate first non-nil; ctx cancel
+	// fired by failing goroutine ensures the other unblocks.
+	bErr := <-baseErr
+	wErr := <-walErr
+	if bErr != nil {
+		return 0, bErr
+	}
+	if wErr != nil {
+		return 0, wErr
 	}
 
 	// Step 5 + 6: barrier round-trip — reader goroutine delivers the
