@@ -65,10 +65,18 @@ func NewRebuildSession(store storage.LogicalStorage, targetLSN uint64) *RebuildS
 // (skipped=true, nil) when the WAL lane has already won this LBA;
 // (skipped=false, nil) when the substrate apply succeeded.
 //
-// The base block is applied with `targetLSN` as its LSN. POC choice:
-// base goes through the substrate's WAL just like WAL lane does.
-// Production may want a direct-extent path to avoid WAL pressure;
-// that is a layer-2/substrate question, not a layer-1 concern.
+// Per v3-recovery-algorithm-consensus.md §6.10 (INV-RECV-BITMAP-CORE):
+// BASE writes go through `WriteExtentDirect`, NOT the LSN-tracked
+// `ApplyEntry` path. The bitmap is the sole arbiter of BASE-vs-WAL
+// conflict at this LBA; the substrate's per-LBA stale-skip / WAL-
+// record machinery does not interpret BASE bytes as a competing-LSN
+// write (because BASE never enters the substrate's WAL).
+//
+// Frontier advancement is deferred to `MarkBaseComplete`, which calls
+// `store.AdvanceFrontier(targetLSN)` once the BASE phase signals
+// stream-complete. Pre-§6.10 code piggybacked on `ApplyEntry`'s
+// implicit frontier-advance side effect; the new direct-extent path
+// must opt in explicitly.
 //
 // INV-DUAL-LANE-WAL-WINS-BASE.
 func (s *RebuildSession) ApplyBaseBlock(lba uint32, data []byte) (skipped bool, err error) {
@@ -80,8 +88,8 @@ func (s *RebuildSession) ApplyBaseBlock(lba uint32, data []byte) (skipped bool, 
 	if s.bitmap.IsApplied(lba) {
 		return true, nil
 	}
-	if err := s.store.ApplyEntry(lba, data, s.targetLSN); err != nil {
-		return false, fmt.Errorf("recovery: base apply lba=%d: %w", lba, err)
+	if err := s.store.WriteExtentDirect(lba, data); err != nil {
+		return false, fmt.Errorf("recovery: base extent-direct lba=%d: %w", lba, err)
 	}
 	return false, nil
 }
@@ -142,10 +150,24 @@ func (s *RebuildSession) BaseBatchAcked(lbaUpper uint32) {
 // MarkBaseComplete signals that the base lane has shipped the last
 // block. Combined with walApplied ≥ targetLSN, this is the layer-1
 // completion predicate.
+//
+// Per §6.10 frontier-pairing: BASE writes go through
+// `WriteExtentDirect` which does NOT advance the substrate's
+// nextLSN / walHead / syncedLSN. The recovery layer compensates by
+// advancing the frontier to `targetLSN` here — once BASE is done,
+// the replica's R/H boundaries reflect "the snapshot at fromLSN
+// is installed" without needing a competing WAL apply at
+// targetLSN. Subsequent WAL frames at LSN > targetLSN advance
+// further via `ApplyEntry`'s normal side effects.
 func (s *RebuildSession) MarkBaseComplete() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.baseDone = true
+	// §6.10 frontier reconciliation: BASE bytes are now installed
+	// to extent; declare frontier at targetLSN so post-rebuild
+	// Sync()/Boundaries() report a non-degenerate value even on
+	// BASE-only sessions (no WAL frames in this session).
+	s.store.AdvanceFrontier(s.targetLSN)
 }
 
 // TryComplete reports whether the layer-1 completion predicate holds.

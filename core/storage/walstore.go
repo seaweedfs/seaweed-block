@@ -584,6 +584,29 @@ func (s *WALStore) AdvanceWALTail(newTail uint64) {
 	}
 }
 
+// WriteExtentDirect installs a base block directly into the extent
+// without going through the WAL append path — INV-RECV-BITMAP-CORE
+// (§6.10). The receiver's per-session bitmap is the sole arbiter of
+// BASE-vs-WAL conflict at this LBA; substrate-level WAL replay /
+// stale-skip is intentionally bypassed.
+//
+// No LSN is recorded. nextLSN / walHead / dirtyMap are NOT advanced.
+// The recovery layer pairs this with AdvanceFrontier(targetLSN) at
+// MarkBaseComplete to keep post-rebuild frontier reporting honest.
+//
+// Durability follows the same rule as Write: bytes become durable
+// only on the next successful Sync (the extent fsync covers them).
+func (s *WALStore) WriteExtentDirect(lba uint32, data []byte) error {
+	maxLBA := uint32(s.sb.VolumeSize / uint64(s.sb.BlockSize))
+	if lba >= maxLBA {
+		return fmt.Errorf("storage: WriteExtentDirect LBA %d out of range", lba)
+	}
+	if len(data) != int(s.sb.BlockSize) {
+		return fmt.Errorf("storage: WriteExtentDirect data size %d != block size %d", len(data), s.sb.BlockSize)
+	}
+	return s.writeExtent(lba, data)
+}
+
 // ApplyEntry writes a replicated block with the source's LSN rather
 // than allocating a fresh one. Same durability semantics as Write
 // (becomes durable on next Sync).
