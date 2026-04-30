@@ -38,6 +38,26 @@ type BlockExecutor struct {
 	onFenceComplete adapter.OnFenceComplete
 	sessions        map[uint64]*activeSession
 	stepDelay       time.Duration
+
+	// walShippers is the per-replica WalShipper registry per
+	// v3-recovery-wal-shipper-spec.md §3 INV-SINGLE: at most one
+	// WalShipper per (volume, replicaID). Get-or-create via
+	// WalShipperFor. Each entry owns a shipper + a mutable emit-conn
+	// pointer that Ship() updates before delegating NotifyAppend.
+	walShipperMu sync.Mutex
+	walShippers  map[string]*walShipperEntry
+}
+
+// walShipperEntry pairs a per-replica WalShipper with its mutable
+// wire context (the conn that the WalShipper's EmitFunc will write
+// to at emit time). Ship() updates entry.emitConn under
+// emitCtxMu before delegating to the shipper; the EmitFunc reads
+// emitConn under the same mutex.
+type walShipperEntry struct {
+	shipper *WalShipper
+
+	emitCtxMu sync.Mutex
+	emitConn  net.Conn
 }
 
 // DualLaneConfig holds the wiring for routing StartRebuild through
@@ -525,6 +545,69 @@ func (e *BlockExecutor) PublishHealthy(replicaID string) {
 
 func (e *BlockExecutor) PublishDegraded(replicaID string, reason string) {
 	log.Printf("executor: publish degraded for %s: %s", replicaID, reason)
+}
+
+// WalShipperFor returns the per-replica WalShipper for replicaID,
+// creating one on first call. Idempotent: subsequent calls for the
+// same replicaID return the same instance (INV-SINGLE per
+// v3-recovery-wal-shipper-spec.md §3).
+//
+// The returned WalShipper is in Realtime mode immediately (Activate
+// at cursor=0). Steady-state Ship() delegates here. Recovery
+// sessions can later transition the same shipper into Backlog mode
+// via StartSession (P2 wiring).
+//
+// Concurrent calls for the same replicaID linearize through
+// walShipperMu; all callers observe the same instance.
+func (e *BlockExecutor) WalShipperFor(replicaID string) *WalShipper {
+	e.walShipperMu.Lock()
+	defer e.walShipperMu.Unlock()
+
+	if e.walShippers == nil {
+		e.walShippers = make(map[string]*walShipperEntry)
+	}
+	if entry, ok := e.walShippers[replicaID]; ok {
+		return entry.shipper
+	}
+
+	entry := &walShipperEntry{}
+	emit := func(lba uint32, lsn uint64, data []byte) error {
+		entry.emitCtxMu.Lock()
+		conn := entry.emitConn
+		entry.emitCtxMu.Unlock()
+		if conn == nil {
+			return fmt.Errorf("transport: WalShipper for replica %s has no conn", replicaID)
+		}
+		_ = conn.SetWriteDeadline(time.Now().Add(shipWriteDeadline))
+		err := WriteMsg(conn, MsgShipEntry, data)
+		_ = conn.SetWriteDeadline(time.Time{})
+		return err
+	}
+	s := NewWalShipper(replicaID, HeadSourceFromStorage(e.primaryStore), e.primaryStore, emit)
+	// Activate immediately into Realtime — first Ship's lsn > 0 will
+	// emit cleanly. Recovery sessions later StartSession to transition
+	// to Backlog.
+	_ = s.Activate(0)
+	entry.shipper = s
+	e.walShippers[replicaID] = entry
+	return s
+}
+
+// updateWalShipperConn sets the wire conn that the per-replica
+// WalShipper's EmitFunc will use on its next emit. Ship() calls this
+// before delegating NotifyAppend; the EmitFunc reads emitConn at
+// emit time. No-op if the WalShipper hasn't been created yet (caller
+// will create it via WalShipperFor and re-call).
+func (e *BlockExecutor) updateWalShipperConn(replicaID string, conn net.Conn) {
+	e.walShipperMu.Lock()
+	entry, ok := e.walShippers[replicaID]
+	e.walShipperMu.Unlock()
+	if !ok {
+		return
+	}
+	entry.emitCtxMu.Lock()
+	entry.emitConn = conn
+	entry.emitCtxMu.Unlock()
 }
 
 func (e *BlockExecutor) registerSession(lineage RecoveryLineage) (*activeSession, error) {

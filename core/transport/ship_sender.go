@@ -121,10 +121,18 @@ func (e *BlockExecutor) Ship(replicaID string, lineage RecoveryLineage, lba uint
 		Data:    data,
 	})
 
-	_ = conn.SetWriteDeadline(time.Now().Add(shipWriteDeadline))
-	err := WriteMsg(conn, MsgShipEntry, payload)
-	_ = conn.SetWriteDeadline(time.Time{})
-	if err != nil {
+	// P1 delegation: the WAL emit decision (whether/when this LSN
+	// actually goes on the wire) belongs to the per-replica
+	// WalShipper, not directly to Ship. We update the shipper's
+	// emit-conn context with the conn we just resolved (above), then
+	// hand the encoded payload to NotifyAppend. The shipper's
+	// EmitFunc will WriteMsg under shipMu — INV-NO-DOUBLE-LIVE +
+	// INV-MONOTONIC-CURSOR enforced at one place.
+	//
+	// Per v3-recovery-wal-shipper-mini-plan.md §3 P1.
+	s := e.WalShipperFor(replicaID)
+	e.updateWalShipperConn(replicaID, conn)
+	if err := s.NotifyAppend(lba, lsn, payload); err != nil {
 		return fmt.Errorf("transport: ship: write failed replica=%s lsn=%d: %w",
 			replicaID, lsn, err)
 	}
