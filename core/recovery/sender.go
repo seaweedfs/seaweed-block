@@ -11,25 +11,18 @@ import (
 )
 
 // Sender is the primary-side driver of one rebuild session. It runs
-// the base lane, the backlog lane, and (during the same session)
-// accepts post-target live writes through PushLiveWrite, all sharing
-// one ordered ship queue per peer (spec §3.2 #3).
+// the base lane, then delegates the WAL pump (and live-write traffic
+// during the session) to its WalShipperSink, and finally runs the
+// barrier round-trip.
 //
 // POC scope:
 //   - Base lane: dense — ships every LBA in [0, NumBlocks()) by reading
-//     primary's current state via LogicalStorage.Read. (sparse omit
-//     and substrate basement-clearing are a later milestone; see
-//     INV-BASE-SPARSE-REQUIRES-SUBSTRATE-CLOSURE.)
-//   - Backlog lane: replays primary's WAL via ScanLBAs(fromLSN, ...)
-//     up to (and including) targetLSN. Entries past targetLSN are
-//     skipped at this lane — they are post-target traffic that
-//     either rides the same session lane (if injected via
-//     PushLiveWrite while DrainingHistorical) or routes to the
-//     steady-live path (after coordinator transitions).
-//   - Single goroutine drives the wire writer; concurrent producers
-//     enqueue items via a mutex-protected slice. No backpressure /
-//     bounded buffer in the POC — the sender drives the slice
-//     synchronously.
+//     primary's current state via LogicalStorage.Read.
+//   - WAL pump: delegated to sink. The bridging sink (senderBacklogSink)
+//     scans the substrate's WAL via ScanLBAs(fromLSN, ...) up to (and
+//     including) targetLSN. Live writes during the session arrive via
+//     PushLiveWrite → sink.NotifyAppend; the bridging sink owns the
+//     buffering / atomic-seal / LSN-ordered flush discipline.
 //   - No baseBatchAck pin advancement during the session: pin floor
 //     stays at the session's fromLSN until EndSession releases it.
 //     Adding incremental pin advancement is a layer-2 enhancement.
@@ -37,14 +30,14 @@ import (
 // Sender owns:
 //   - The wire `conn` writer side (frame writes serialize through
 //     `writerMu`).
-//   - The ordered ship queue (`queue`).
 //
 // Sender borrows:
-//   - `primaryStore` for reads (base + backlog).
+//   - `primaryStore` for reads (base + bridging-sink backlog scan).
 //   - `coordinator` for ship-phase transitions and routing decisions.
+//   - The injected sink for the entire WAL emit path.
 //
 // Sender does NOT own: receiver-side state, retry policy, lineage
-// minting, or session lifecycle decisions (those come from upstream).
+// minting, session lifecycle decisions, or any live-write buffer.
 type Sender struct {
 	primaryStore storage.LogicalStorage
 	coordinator  *PeerShipCoordinator
@@ -58,22 +51,6 @@ type Sender struct {
 
 	writerMu sync.Mutex // serializes conn writes (frames are atomic)
 
-	// queueMu protects the live-write queue + sealed flag. Backlog
-	// and base lanes run on the Run() goroutine and write directly
-	// without queueing because they are sequential by construction.
-	// Live writes from PushLiveWrite append here; the final drain
-	// happens AFTER closeCh is closed, atomic with sealing.
-	queueMu   sync.Mutex
-	liveQueue []walItem
-	sealed    bool // set by drainAndSeal; PushLiveWrite errors after this
-
-	// closeCh signals "no more live writes coming; safe to drain
-	// queue, transition phase, and run barrier". Caller closes via
-	// Sender.Close(). Run blocks on this channel after the backlog
-	// scan finishes.
-	closeCh   chan struct{}
-	closeOnce sync.Once
-
 	// barrierRespCh delivers the inbound BarrierResp (or any wire /
 	// protocol failure surfaced by the reader goroutine) to the
 	// main Run goroutine at barrier-wait time. Buffered=1 so the
@@ -81,15 +58,14 @@ type Sender struct {
 	//
 	// Per docs/recovery-pin-floor-wire.md §7: the reader goroutine
 	// is required because BaseBatchAck arrives mid-stream during
-	// base lane while Run is busy writing frames. Pre-#3 there was
-	// no reader; only one inline readFrame at barrier time.
+	// base lane while Run is busy writing frames.
 	barrierRespCh chan ackOrResult
 
 	// sink — Run() delegates the WAL pump (StartSession / DrainBacklog
-	// / EndSession) to this sink. After P2c-slice A sink is mandatory:
-	// every Sender has one (transport WalShipper in production, or
-	// senderBacklogSink in the bridging path until P2d). Set by
-	// NewSenderWithSink / NewSenderWithBacklogRelay.
+	// / EndSession / NotifyAppend) to this sink. After P2c-slice A sink
+	// is mandatory: every Sender has one (transport WalShipper in
+	// production, or senderBacklogSink in the bridging path until P2d).
+	// Set by NewSenderWithSink / NewSenderWithBacklogRelay.
 	sink WalShipperSink
 }
 
@@ -101,21 +77,20 @@ type ackOrResult struct {
 	err      error
 }
 
-type walItem struct {
-	lba  uint32
-	lsn  uint64
-	data []byte
-}
-
 // WalShipperSink is the abstract WAL-pump surface that Sender
 // delegates to. Run() invokes the session bracket:
 //
 //   1. StartSession(fromLSN) — before any WAL emission begins
-//   2. DrainBacklog(ctx)     — runs until cursor catches head
-//   3. EndSession()          — defer-fired regardless of exit path
+//   2. DrainBacklog(ctx)     — runs until cursor catches head;
+//                              for the bridging sink, also flushes
+//                              buffered live writes and seals.
+//   3. EndSession()          — defer-fired regardless of exit path;
+//                              MUST be idempotent and MUST seal the
+//                              sink against further NotifyAppend so
+//                              post-Run pushes get an explicit error.
 //
 // Plus the live-write API for RouteSessionLane traffic during the
-// session (P2c-slice B-1 — single live path):
+// session:
 //
 //   4. NotifyAppend(lba, lsn, data) — primary's WAL append handed
 //      to the sink. Sink decides whether to ship directly (production
@@ -148,34 +123,27 @@ type WalShipperSink interface {
 }
 
 // newSender is the private builder used by both sink-installing
-// constructors below. After P2c-slice A there is no public Sender
-// constructor without a sink — sink is mandatory; legacy NewSender
-// path was deleted. `conn` is the wire — typically a *net.TCPConn in
-// production, or a net.Pipe end in tests. Sender does not close
-// `conn`; caller does.
+// constructors below. Sink is mandatory; legacy NewSender path is gone.
+// `conn` is the wire — typically a *net.TCPConn in production, or a
+// net.Pipe end in tests. Sender does not close `conn`; caller does.
 func newSender(primaryStore storage.LogicalStorage, coordinator *PeerShipCoordinator, conn io.ReadWriter, replicaID ReplicaID) *Sender {
 	return &Sender{
 		primaryStore:  primaryStore,
 		coordinator:   coordinator,
 		conn:          conn,
 		replicaID:     replicaID,
-		closeCh:       make(chan struct{}),
 		barrierRespCh: make(chan ackOrResult, 1),
 	}
 }
 
 // NewSenderWithSink constructs a sender that delegates the WAL
 // pump to the provided sink. Run() calls sink.StartSession after
-// BaseDone, sink.DrainBacklog to run the pump, and sink.EndSession
-// in defer. There is no legacy in-package WAL pump anymore — sink is
-// the only path to the wire (mini-plan §4 INV-NO-DOUBLE-LIVE row).
-//
-// After DrainBacklog succeeds, Run still waits on closeCh and runs
-// drainAndSeal so PushLiveWrite session-lane entries converge until
-// P2c-slice B routes live traffic through WalShipper.
+// BaseDone, sink.DrainBacklog to run the pump (which also handles
+// live-write flush + seal in the bridging path), and sink.EndSession
+// in defer.
 //
 // `sink` MUST be non-nil — passing nil is a programmer error and
-// panics at construction (P2c-slice A: sink mandatory).
+// panics at construction (P2c-slice A).
 func NewSenderWithSink(primaryStore storage.LogicalStorage, coordinator *PeerShipCoordinator, conn io.ReadWriter, replicaID ReplicaID, sink WalShipperSink) *Sender {
 	if sink == nil {
 		panic("recovery: NewSenderWithSink: sink is required (P2c-slice A) — use NewSenderWithBacklogRelay if no transport WalShipper is wired yet")
@@ -185,75 +153,142 @@ func NewSenderWithSink(primaryStore storage.LogicalStorage, coordinator *PeerShi
 	return s
 }
 
-// senderBacklogSink adapts Sender's legacy streamBacklog pump to
-// WalShipperSink. P2b uses it to migrate e2e tests onto the sink
-// branch without changing recovery wire format (receiver still expects
-// frameWALEntry). Production P2d replaces this with transport.WalShipper
-// once dual-lane + MsgShipEntry context is wired.
-//
-// StartSession / EndSession are no-ops: session bounds live on Sender
-// (fromLSN/targetLSN set at Run entry); rewind semantics belong on the
-// real WalShipper sink in transport.
-//
-// NotifyAppend (P2c-slice B-1) buffers live writes in the sender's
-// liveQueue under queueMu — production discipline (architect rule 2)
-// because streamBacklog runs as a one-shot ScanLBAs scan and direct
-// wire emit during the scan would interleave LSNs and break the
-// receiver's monotonic check. drainAndSeal flushes the queue in LSN
-// order after backlog drain. When P2d swaps in a real transport
-// WalShipper sink, NotifyAppend will route to WalShipper.NotifyAppend
-// (Backlog mode lag-tracking; Realtime direct ship under shipMu) and
-// the buffer becomes redundant (slice B-2 deletion).
-type senderBacklogSink struct {
-	s *Sender
+// walItem is the per-entry record buffered by senderBacklogSink while
+// streamBacklog is in flight. P2c-slice B-2 moved this into the sink:
+// the buffer is a sink-internal artifact of the bridging path, not a
+// Sender field. When P2d swaps in a real transport WalShipper sink,
+// this type goes with the bridging sink.
+type walItem struct {
+	lba  uint32
+	lsn  uint64
+	data []byte
 }
 
-func (w senderBacklogSink) StartSession(fromLSN uint64) error {
+// senderBacklogSink is the in-package WalShipperSink that bridges
+// recovery.Sender's emit path to the legacy frameWALEntry wire format.
+// Production P2d replaces this with a transport.WalShipper adapter
+// once dual-lane vs MsgShipEntry context is wired.
+//
+// Lifecycle (P2c-slice B-2):
+//   - StartSession is a no-op: session bounds live on Sender (fromLSN /
+//     targetLSN set at Run entry); rewind semantics belong on the real
+//     WalShipper sink in transport.
+//   - NotifyAppend buffers live writes under sinkMu — the bridging
+//     path's "production discipline" (architect rule 2). streamBacklog
+//     is a one-shot ScanLBAs scan; direct wire emit during the scan
+//     would interleave LSNs and break the receiver's monotonic check.
+//   - DrainBacklog runs streamBacklog (ships LSN ≤ targetLSN entries)
+//     and then flushAndSeal — sorts buffered live writes (LSN >
+//     targetLSN) by LSN and ships them as WALKindSessionLive frames,
+//     atomically seal=true so subsequent NotifyAppend rejects.
+//   - EndSession is the defer-safety net: idempotent seal so any post-
+//     Run NotifyAppend gets an explicit error. Buffer entries that
+//     weren't flushed (e.g., DrainBacklog errored mid-scan) are
+//     dropped — the wire is presumed unsalvageable in error paths.
+//
+// When P2d wires the real transport.WalShipper sink, NotifyAppend will
+// route to WalShipper.NotifyAppend (Backlog mode lag-tracking; Realtime
+// direct ship under shipMu) — the buffer + flushAndSeal scaffolding
+// here goes away with the bridging sink.
+type senderBacklogSink struct {
+	s *Sender
+
+	sinkMu sync.Mutex
+	queue  []walItem
+	sealed bool
+}
+
+func (w *senderBacklogSink) StartSession(fromLSN uint64) error {
 	_ = fromLSN
 	return nil
 }
 
-func (w senderBacklogSink) DrainBacklog(ctx context.Context) error {
+func (w *senderBacklogSink) DrainBacklog(ctx context.Context) error {
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
-	return w.s.streamBacklog()
+	if err := w.s.streamBacklog(); err != nil {
+		return err
+	}
+	return w.flushAndSeal()
 }
 
-func (w senderBacklogSink) EndSession() {}
+// EndSession is the defer-safety seal. If DrainBacklog ran successfully,
+// the sink is already sealed and this is a no-op. If Run errored
+// before DrainBacklog (e.g., StartSession failed) or DrainBacklog
+// errored mid-flight, this guarantees no post-Run NotifyAppend silently
+// buffers into a dead session.
+func (w *senderBacklogSink) EndSession() {
+	w.sinkMu.Lock()
+	w.sealed = true
+	// Drop any unflushed entries — error paths shouldn't try to ship
+	// to a presumed-broken wire. The atomic-seal contract holds for
+	// the success path (DrainBacklog → flushAndSeal); error paths
+	// surface failures back to the caller via Run's return value.
+	w.queue = nil
+	w.sinkMu.Unlock()
+}
 
-func (w senderBacklogSink) NotifyAppend(lba uint32, lsn uint64, data []byte) error {
-	return w.s.bufferLiveWriteLocked(lba, lsn, data)
+func (w *senderBacklogSink) NotifyAppend(lba uint32, lsn uint64, data []byte) error {
+	w.sinkMu.Lock()
+	defer w.sinkMu.Unlock()
+	if w.sealed {
+		return errors.New("recovery: NotifyAppend after sink sealed (session is closing)")
+	}
+	cp := make([]byte, len(data))
+	copy(cp, data)
+	w.queue = append(w.queue, walItem{lba: lba, lsn: lsn, data: cp})
+	return nil
+}
+
+// flushAndSeal atomically takes the buffered live-write queue and
+// forbids further NotifyAppend (sealed=true under sinkMu), then ships
+// every item in LSN order on the same wire as streamBacklog. The
+// atomic take + seal guarantees no concurrent NotifyAppend can land
+// an entry that misses the flush — the push either lands before
+// sinkMu acquisition (captured in queue) or after (sealed → error).
+func (w *senderBacklogSink) flushAndSeal() error {
+	w.sinkMu.Lock()
+	if w.sealed {
+		// Idempotent: DrainBacklog called us once; EndSession defer
+		// would also call us. After first seal, no further work.
+		w.sinkMu.Unlock()
+		return nil
+	}
+	queue := w.queue
+	w.queue = nil
+	w.sealed = true
+	w.sinkMu.Unlock()
+
+	// Stable sort by LSN ascending.
+	for i := 1; i < len(queue); i++ {
+		j := i
+		for j > 0 && queue[j-1].lsn > queue[j].lsn {
+			queue[j-1], queue[j] = queue[j], queue[j-1]
+			j--
+		}
+	}
+
+	for _, item := range queue {
+		if err := w.s.writeFrame(frameWALEntry, encodeWALEntry(WALKindSessionLive, item.lba, item.lsn, item.data)); err != nil {
+			return newFailure(FailureWire, PhaseDrainSeal, err)
+		}
+		if err := w.s.coordinator.RecordShipped(w.s.replicaID, item.lsn); err != nil {
+			return newFailure(FailureContract, PhaseDrainSeal, err)
+		}
+	}
+	return nil
 }
 
 // NewSenderWithBacklogRelay constructs a Sender whose WalShipperSink
-// replays WAL via streamBacklog using the in-package backlog relay
-// adapter. This is the bridging constructor used by tests and the
-// production primary bridge until P2d wires a real transport
-// WalShipper adapter behind NewSenderWithSink.
+// replays WAL via streamBacklog and owns the live-write buffer +
+// flushAndSeal discipline. This is the bridging constructor used by
+// tests and the production primary bridge until P2d wires a real
+// transport WalShipper adapter behind NewSenderWithSink.
 func NewSenderWithBacklogRelay(primaryStore storage.LogicalStorage, coordinator *PeerShipCoordinator, conn io.ReadWriter, replicaID ReplicaID) *Sender {
 	s := newSender(primaryStore, coordinator, conn, replicaID)
-	s.sink = senderBacklogSink{s: s}
+	s.sink = &senderBacklogSink{s: s}
 	return s
-}
-
-// Close signals the sender that no more PushLiveWrite calls will
-// arrive for this session, so it may safely drain the live queue,
-// transition phase, and run the barrier round-trip. Idempotent.
-//
-// Caller pattern:
-//
-//	go sender.Run(...)
-//	// ... PushLiveWrite as the WAL shipper produces local writes ...
-//	sender.Close()  // session may now barrier
-//	// wait for Run to return; coordinator phase will be Idle
-//
-// PushLiveWrite calls that race with Close (arrive concurrently) are
-// either accepted (queued before drainAndSeal) OR rejected with an
-// error (sealed already). The atomic-seal contract guarantees no
-// queued write is lost between drain and barrier.
-func (s *Sender) Close() {
-	s.closeOnce.Do(func() { close(s.closeCh) })
 }
 
 // PushLiveWrite hands the sender one local-write event for this peer.
@@ -261,94 +296,66 @@ func (s *Sender) Close() {
 // `coordinator.RouteLocalWrite(replicaID, lsn)` and confirmed the
 // routing is RouteSessionLane; this method does not double-check.
 //
-// P2c-slice B-1: routes through the sink's NotifyAppend so the live
-// path is uniform with the sink's other emit surfaces. The sink owns
-// buffering / ordering discipline:
+// P2c-slice B-1 / B-2: routes through the sink's NotifyAppend; the
+// sink owns buffering / ordering discipline:
 //
-//   - Bridging path (senderBacklogSink): buffer in liveQueue,
-//     drainAndSeal flushes in LSN order after backlog completes.
-//     Production discipline per architect rule 2 — required until
-//     P2d aligns dual-lane wire format.
+//   - Bridging path (senderBacklogSink): buffer in sink-internal
+//     queue under sinkMu, flushed in LSN order during DrainBacklog's
+//     flushAndSeal. Production discipline per architect rule 2.
 //   - Real transport WalShipper sink (P2d): NotifyAppend routes
 //     directly to WalShipper.NotifyAppend; ordering comes from
 //     shipMu + Backlog/Realtime mode design.
+//
+// After the sink seals (DrainBacklog completes or EndSession defer
+// fires), NotifyAppend returns an explicit error so post-session
+// callers learn the session is closing.
 func (s *Sender) PushLiveWrite(lba uint32, lsn uint64, data []byte) error {
 	return s.sink.NotifyAppend(lba, lsn, data)
-}
-
-// bufferLiveWriteLocked is the senderBacklogSink-side buffer entry.
-// Acquires queueMu, rejects after seal, copies data, appends to
-// liveQueue. drainAndSeal consumes it in LSN order after backlog.
-//
-// Lives on Sender (not senderBacklogSink) so the buffer state — same
-// queueMu, sealed, liveQueue, walItem — stays co-located with the
-// drainAndSeal flush. When the bridging sink is replaced by a real
-// transport WalShipper sink (P2d), this method goes with the queue.
-func (s *Sender) bufferLiveWriteLocked(lba uint32, lsn uint64, data []byte) error {
-	s.queueMu.Lock()
-	defer s.queueMu.Unlock()
-	if s.sealed {
-		return errors.New("recovery: PushLiveWrite after sender sealed (session is closing)")
-	}
-	cp := make([]byte, len(data))
-	copy(cp, data)
-	s.liveQueue = append(s.liveQueue, walItem{lba: lba, lsn: lsn, data: cp})
-	return nil
 }
 
 // Run drives the entire session end-to-end and blocks until barrier
 // ack returns. Returns the AchievedLSN reported by the replica on
 // success; returns an error on any wire / session failure.
 //
-// PRECONDITION: caller already invoked coord.StartSession.
-//
-// Sequence:
-//  1. Send frameSessionStart.
-//  2. Base lane: ship every LBA's current data via frameBaseBlock.
-//  3. Send frameBaseDone; coordinator.MarkBaseDone.
-//  4. WAL pump via sink: sink.StartSession(fromLSN); sink.DrainBacklog(ctx).
-//     The sink owns wire-format encoding and decides whether bytes go
-//     to the legacy port (frameWALEntry) or dual-lane port (P2d).
-//  5. Wait for caller's Close() OR ctx cancellation.
-//  6. Drain live queue + atomic seal; ship buffered live writes.
-//  7. Send frameBarrierReq, read frameBarrierResp.
-//  8. Verify achieved ≥ targetLSN via coordinator.CanEmitSessionComplete
-//     (§5.2, CHK-BARRIER-BEFORE-CLOSE).
-//
-// Defer always: set sealed=true; coordinator.EndSession.
-//
-// Caller MUST call Run exactly once per Sender instance.
-//
-// Caller MUST have already invoked
+// PRECONDITION: caller already invoked
 // `coordinator.StartSession(replicaID, sessionID, fromLSN, targetLSN)`
 // synchronously before spawning the goroutine that calls Run. This
 // keeps "session is registered" observable from the call site that
 // scheduled Run, so concurrent code reading `coord.RouteLocalWrite`
 // after the spawn point sees a non-Idle phase deterministically.
 //
-// Run's defer always calls coordinator.EndSession, regardless of the
-// exit path (success, ctx-cancel, wire-error). Sealed is also set in
-// the defer so any post-Run PushLiveWrite gets an explicit error
-// instead of silently appending to a dead queue.
+// Sequence:
+//  1. Send frameSessionStart.
+//  2. Base lane: ship every LBA's current data via frameBaseBlock.
+//  3. Send frameBaseDone; coordinator.MarkBaseDone.
+//  4. WAL pump via sink: sink.StartSession(fromLSN); sink.DrainBacklog(ctx).
+//     The sink owns wire-format encoding AND (in the bridging path)
+//     the live-write buffer flush + seal that previously lived on
+//     Sender as drainAndSeal.
+//  5. Send frameBarrierReq, read frameBarrierResp.
+//  6. Verify achieved ≥ targetLSN via coordinator.CanEmitSessionComplete
+//     (§5.2, CHK-BARRIER-BEFORE-CLOSE).
+//
+// Defer always: sink.EndSession (idempotent seal) + coordinator.EndSession.
+//
+// Caller MUST call Run exactly once per Sender instance.
 //
 // Lifecycle / cancellation: pass a Context whose cancellation signals
-// "abort this session". A typical pattern is to cancel the context
-// when the receiver-side goroutine fails, so a sender blocked on
-// closeCh wakes up and returns ctx.Err().
+// "abort this session". DrainBacklog observes ctx and returns ctx.Err()
+// on cancellation; sink.EndSession defer fires regardless.
 func (s *Sender) Run(ctx context.Context, sessionID, fromLSN, targetLSN uint64) (achievedLSN uint64, err error) {
 	s.sessionID = sessionID
 	s.fromLSN = fromLSN
 	s.targetLSN = targetLSN
 
-	// Defer cleanup runs on every exit path.
-	defer func() {
-		s.queueMu.Lock()
-		s.sealed = true
-		s.queueMu.Unlock()
-		s.coordinator.EndSession(s.replicaID)
-	}()
+	// Defer cleanup runs on every exit path. EndSession on the sink
+	// is the seal-defense — guarantees post-Run NotifyAppend (e.g.,
+	// PushLiveWrite via PrimaryBridge) gets an explicit error rather
+	// than silently buffering into a dead session.
+	defer s.coordinator.EndSession(s.replicaID)
+	defer s.sink.EndSession()
 
-	// Step 2: SessionStart frame.
+	// Step 1: SessionStart frame.
 	numBlocks := s.primaryStore.NumBlocks()
 	if err := s.writeFrame(frameSessionStart, encodeSessionStart(sessionStartPayload{
 		SessionID: sessionID, FromLSN: fromLSN, TargetLSN: targetLSN, NumBlocks: numBlocks,
@@ -356,19 +363,19 @@ func (s *Sender) Run(ctx context.Context, sessionID, fromLSN, targetLSN uint64) 
 		return 0, newFailure(FailureWire, PhaseSendStart, err)
 	}
 
-	// Step 2b: spawn the inbound demux reader. From this point onward
+	// Step 1b: spawn the inbound demux reader. From this point onward
 	// any frame from the receiver (BaseBatchAck during base lane,
 	// BarrierResp at end) flows through readerLoop. Reader exits on
 	// BarrierResp delivery, on any wire error, or on conn close by
 	// caller's defer.
 	go s.readerLoop()
 
-	// Step 3: base lane.
+	// Step 2: base lane.
 	if err := s.streamBase(numBlocks); err != nil {
 		return 0, err // streamBase wraps its own Failure
 	}
 
-	// Step 4: BaseDone signal.
+	// Step 3: BaseDone signal.
 	if err := s.writeFrame(frameBaseDone, nil); err != nil {
 		return 0, newFailure(FailureWire, PhaseBaseDone, err)
 	}
@@ -376,21 +383,10 @@ func (s *Sender) Run(ctx context.Context, sessionID, fromLSN, targetLSN uint64) 
 		return 0, newFailure(FailureContract, PhaseBaseDone, err)
 	}
 
-	// Step 5–7: WAL pump via sink.
-	//
-	// Sink delegates StartSession + DrainBacklog to its implementation
-	// (transport WalShipper or in-package senderBacklogSink). One emit
-	// path = INV-NO-DOUBLE-LIVE at recovery layer (mini-plan §4).
-	//
-	// After DrainBacklog, Run still waits on closeCh and runs
-	// drainAndSeal so PushLiveWrite session-lane tails ship before
-	// barrier — slice B will route live traffic through WalShipper
-	// and remove this tail.
-	//
-	// Defer EndSession FIRST so it fires on every exit path after this
-	// point — DrainBacklog error, BarrierReq error, barrier-resp error.
-	defer s.sink.EndSession()
-
+	// Step 4: WAL pump via sink. StartSession sets up sink state;
+	// DrainBacklog runs the pump AND (for the bridging sink) flushes
+	// buffered live writes + seals. After this returns, no more
+	// session-lane WAL frames will go out — barrier is next.
 	if err := s.sink.StartSession(fromLSN); err != nil {
 		return 0, newFailure(FailureContract, PhaseBacklog,
 			fmt.Errorf("sink.StartSession: %w", err))
@@ -403,19 +399,8 @@ func (s *Sender) Run(ctx context.Context, sessionID, fromLSN, targetLSN uint64) 
 		return 0, newFailure(FailureSubstrate, PhaseBacklog,
 			fmt.Errorf("sink.DrainBacklog: %w", err))
 	}
-	// Coord's TryAdvanceToSteadyLive is collapsed (kickoff Q3 ratified
-	// Phase enum collapse to {Idle, Active}). Barrier-ack is the only
-	// authoritative completion signal.
-	select {
-	case <-s.closeCh:
-	case <-ctx.Done():
-		return 0, newFailure(FailureCancelled, PhaseAwaitClose, ctx.Err())
-	}
-	if err := s.drainAndSeal(); err != nil {
-		return 0, err
-	}
 
-	// Step 8 + 9: barrier round-trip — reader goroutine delivers the
+	// Step 5 + 6: barrier round-trip — reader goroutine delivers the
 	// inbound BarrierResp via barrierRespCh (or any wire / protocol /
 	// pin-update error surfaced earlier).
 	if err := s.writeFrame(frameBarrierReq, nil); err != nil {
@@ -527,8 +512,8 @@ func (s *Sender) streamBacklog() error {
 	var wireErr, contractErr error // surfaced from inside the callback
 	scanErr := s.primaryStore.ScanLBAs(s.fromLSN, func(e storage.RecoveryEntry) error {
 		// Skip entries past frozen target — those belong on the
-		// steady-live path or get fed back via PushLiveWrite if the
-		// session is still DrainingHistorical.
+		// session-lane buffer (via NotifyAppend) or the steady-live
+		// path; streamBacklog only ships pre-target history.
 		if e.LSN > s.targetLSN {
 			return stop
 		}
@@ -562,39 +547,6 @@ func (s *Sender) streamBacklog() error {
 			return newFailure(FailureWALRecycled, PhaseBacklog, scanErr)
 		}
 		return newFailure(FailureSubstrate, PhaseBacklog, scanErr)
-	}
-	return nil
-}
-
-// drainAndSeal atomically takes the live queue and forbids further
-// PushLiveWrite calls (sealed=true under queueMu), then ships every
-// item in LSN order. The atomic take + seal guarantees no concurrent
-// PushLiveWrite can land an entry that misses the drain — either the
-// push happens before the lock and is captured, or after and gets a
-// "sender sealed" error.
-func (s *Sender) drainAndSeal() error {
-	s.queueMu.Lock()
-	queue := s.liveQueue
-	s.liveQueue = nil
-	s.sealed = true
-	s.queueMu.Unlock()
-
-	// Stable sort by LSN ascending.
-	for i := 1; i < len(queue); i++ {
-		j := i
-		for j > 0 && queue[j-1].lsn > queue[j].lsn {
-			queue[j-1], queue[j] = queue[j], queue[j-1]
-			j--
-		}
-	}
-
-	for _, item := range queue {
-		if err := s.writeFrame(frameWALEntry, encodeWALEntry(WALKindSessionLive, item.lba, item.lsn, item.data)); err != nil {
-			return newFailure(FailureWire, PhaseDrainSeal, err)
-		}
-		if err := s.coordinator.RecordShipped(s.replicaID, item.lsn); err != nil {
-			return newFailure(FailureContract, PhaseDrainSeal, err)
-		}
 	}
 	return nil
 }

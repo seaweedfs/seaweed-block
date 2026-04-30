@@ -132,8 +132,7 @@ const (
 	PhaseBaseLane     Phase = "base-lane"     // base block stream
 	PhaseBaseDone     Phase = "base-done"     // BaseDone frame write
 	PhaseBacklog      Phase = "backlog"       // ScanLBAs + WAL stream
-	PhaseAwaitClose   Phase = "await-close"   // blocked on closeCh
-	PhaseDrainSeal    Phase = "drain-seal"    // drainAndSeal live queue
+	PhaseDrainSeal    Phase = "drain-seal"    // bridging-sink flushAndSeal
 	PhaseTransition   Phase = "transition"    // TryAdvanceToSteadyLive
 	PhaseBarrierReq   Phase = "barrier-req"   // BarrierReq frame write
 	PhaseBarrierResp  Phase = "barrier-resp"  // BarrierResp read/decode

@@ -19,6 +19,13 @@ import (
 // Per architect ruling on G7-redo Layer-2 review: "与 BlockExecutor /
 // engine 出一条「薄」链路 — 单次 Run(session) 可调、不换全 transport".
 //
+// P2c-slice B-2 lifecycle change: barrier auto-fires when sink.DrainBacklog
+// returns (the bridging sink flushes its live-write buffer + seals there).
+// Engine no longer needs an explicit "go barrier" signal — the previous
+// FinishLiveWrites / sender.Close pattern is gone. Live writes that arrive
+// after the sink seals get a "session is closing" error from PushLiveWrite
+// so callers can fall back to steady-live or retry on a fresh session.
+//
 // What this file deliberately does NOT do:
 //
 //   - Plug into core/transport/BlockExecutor.StartRebuild (that is
@@ -45,7 +52,9 @@ type SessionCloseCallback func(replicaID ReplicaID, sessionID uint64, achievedLS
 // the embedded coordinator's INV-SINGLE-FLIGHT-PER-REPLICA check.
 //
 // Live writes for active sessions are pushed via PushLiveWrite,
-// which the WAL shipper calls after consulting RouteLocalWrite.
+// which the WAL shipper calls after consulting RouteLocalWrite. The
+// session converges autonomously: sender.Run barriers as soon as
+// sink.DrainBacklog returns (P2c-slice B-2 lifecycle).
 type PrimaryBridge struct {
 	store storage.LogicalStorage
 	coord *PeerShipCoordinator
@@ -71,8 +80,10 @@ func NewPrimaryBridge(store storage.LogicalStorage, coord *PeerShipCoordinator, 
 
 // StartRebuildSession is shaped like CommandExecutor.StartRebuild:
 // non-blocking, returns immediately after spawning the session
-// goroutine. The caller controls termination via FinishLiveWrites
-// (which calls Sender.Close internally) or context cancellation.
+// goroutine. After P2c-slice B-2 the session terminates on its own
+// when sink.DrainBacklog returns; the caller can still abort early
+// via context cancellation, but no explicit "go barrier" call is
+// needed.
 //
 // Wire detail (POC): caller provides the dialed `conn`. Production
 // integration would dial through the existing connection pool /
@@ -133,25 +144,6 @@ func (b *PrimaryBridge) PushLiveWrite(replicaID ReplicaID, lba uint32, lsn uint6
 		return fmt.Errorf("recovery bridge: no active session for replica %q", replicaID)
 	}
 	return sender.PushLiveWrite(lba, lsn, data)
-}
-
-// FinishLiveWrites signals the active session for this peer that
-// no more PushLiveWrite calls will arrive — sender will drain the
-// queue, transition phase, and run the barrier round-trip. Returns
-// false if no session is active.
-//
-// Equivalent to engine deciding "this peer's recover session can
-// converge now"; in production this is triggered when the engine
-// observes barrier-eligibility conditions.
-func (b *PrimaryBridge) FinishLiveWrites(replicaID ReplicaID) bool {
-	b.mu.Lock()
-	sender, ok := b.senders[replicaID]
-	b.mu.Unlock()
-	if !ok {
-		return false
-	}
-	sender.Close()
-	return true
 }
 
 // ReplicaBridge is the replica-side adapter. One bridge instance per

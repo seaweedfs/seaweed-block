@@ -194,7 +194,7 @@ func TestNewSenderWithBacklogRelay_installsRelaySink(t *testing.T) {
 	if snd.sink == nil {
 		t.Fatal("NewSenderWithBacklogRelay: expected backlog relay sink")
 	}
-	var _ WalShipperSink = senderBacklogSink{}
+	var _ WalShipperSink = &senderBacklogSink{}
 }
 
 // TestSender_WithSink_DelegationOrder — pin the ordering contract.
@@ -235,13 +235,10 @@ func TestSender_WithSink_DelegationOrder(t *testing.T) {
 	sender := NewSenderWithSink(primary, coord, primaryConn, "r1", sink)
 	receiver := NewReceiver(replica, replicaConn)
 
-	// After DrainBacklog returns, sink-mode Run waits on closeCh —
-	// unblock it so barrier + sink.EndSession can run.
-	go func() {
-		<-sink.drainCalledCh
-		sender.Close()
-	}()
-
+	// P2c-slice B-2: sender.Run barriers as soon as DrainBacklog
+	// returns; no closeCh wait. recordingSink.DrainBacklog returns
+	// nil immediately, so Run proceeds to the barrier round-trip
+	// directly. EndSession fires via defer regardless.
 	var (
 		wg      sync.WaitGroup
 		runErr  error
@@ -461,8 +458,8 @@ func TestSender_PushLiveWrite_RoutesViaSinkNotifyAppend(t *testing.T) {
 	}
 }
 
-// TestSenderBacklogSink_NotifyAppend_BuffersForDrainAndSeal — P2c-slice B-1:
-// bridging-path discipline.
+// TestSenderBacklogSink_NotifyAppend_BuffersForFlushAndSeal — P2c-slice B-2:
+// bridging-path discipline (buffer now owned by senderBacklogSink, not Sender).
 //
 // Until P2d aligns the wire format (dual-lane frameWALEntry vs legacy
 // MsgShipEntry), senderBacklogSink cannot ship live writes directly to
@@ -470,17 +467,18 @@ func TestSender_PushLiveWrite_RoutesViaSinkNotifyAppend(t *testing.T) {
 // the receiver's monotonic-LSN check (architect rule 2: "production
 // discipline / queue under one mutex").
 //
-// senderBacklogSink.NotifyAppend therefore buffers into the sender's
-// liveQueue (held under queueMu) so drainAndSeal can ship them in LSN
-// order after backlog drain completes. This test pins that contract:
-// after NotifyAppend, liveQueue holds the entry; drainAndSeal would
-// flush it on the wire path.
+// senderBacklogSink.NotifyAppend therefore buffers into the sink's
+// internal queue (under sinkMu) so flushAndSeal — called at the tail
+// of DrainBacklog — can ship them in LSN order after streamBacklog
+// completes. This test pins that contract: after NotifyAppend, the
+// sink's queue holds the entries; flushAndSeal would flush them on
+// the wire path.
 //
 // When P2d swaps in a real transport.WalShipper sink, NotifyAppend
 // will route to WalShipper.NotifyAppend (Backlog mode lag-tracking;
-// Realtime direct ship under shipMu) — at which point the liveQueue
-// scaffolding can go (slice B-2).
-func TestSenderBacklogSink_NotifyAppend_BuffersForDrainAndSeal(t *testing.T) {
+// Realtime direct ship under shipMu) — at which point the buffer
+// scaffolding here goes too.
+func TestSenderBacklogSink_NotifyAppend_BuffersForFlushAndSeal(t *testing.T) {
 	coord := NewPeerShipCoordinator()
 	store := storage.NewBlockStore(4, 4096)
 	prim, replicaEnd := net.Pipe()
@@ -498,22 +496,26 @@ func TestSenderBacklogSink_NotifyAppend_BuffersForDrainAndSeal(t *testing.T) {
 		t.Fatalf("PushLiveWrite: %v", err)
 	}
 
-	// Buffer accessor: read sender's liveQueue under queueMu. This
-	// is a white-box check — the buffering location is the slice B-1
-	// stopgap. Once a real WalShipper sink replaces the bridging path
-	// (slice B-2), the queue goes away and this test goes with it.
-	sender.queueMu.Lock()
-	bufLen := len(sender.liveQueue)
+	// Buffer accessor: read the sink's internal queue under sinkMu.
+	// White-box check — the buffer's location is the bridging-sink's
+	// concern; when a real transport.WalShipper sink replaces it (P2d),
+	// this test goes too.
+	bs, ok := sender.sink.(*senderBacklogSink)
+	if !ok {
+		t.Fatalf("sink type=%T, want *senderBacklogSink", sender.sink)
+	}
+	bs.sinkMu.Lock()
+	bufLen := len(bs.queue)
 	var lsns []uint64
-	for _, w := range sender.liveQueue {
+	for _, w := range bs.queue {
 		lsns = append(lsns, w.lsn)
 	}
-	sender.queueMu.Unlock()
+	bs.sinkMu.Unlock()
 
 	if bufLen != 2 {
-		t.Errorf("liveQueue len=%d, want 2 (NotifyAppend must buffer in bridging path)", bufLen)
+		t.Errorf("sink queue len=%d, want 2 (NotifyAppend must buffer in bridging path)", bufLen)
 	}
 	if len(lsns) != 2 || lsns[0] != 200 || lsns[1] != 201 {
-		t.Errorf("liveQueue LSNs=%v, want [200 201]", lsns)
+		t.Errorf("sink queue LSNs=%v, want [200 201]", lsns)
 	}
 }

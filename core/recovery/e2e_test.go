@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/storage"
+	"github.com/seaweedfs/seaweed-block/core/storage/memorywal"
 )
 
 // formulaPayload synthesizes a deterministic 4 KiB block whose first
@@ -78,8 +79,8 @@ func TestE2E_RebuildHappyPath(t *testing.T) {
 		defer wg.Done()
 		sendAchieved, sendErr = sender.Run(context.Background(), 7, 0, primaryH)
 	}()
-	// No live writes in this scenario; signal sender immediately.
-	sender.Close()
+	// No live writes in this scenario; sender.Run barriers as soon as
+	// sink.DrainBacklog returns (P2c-slice B-2 lifecycle).
 	wg.Wait()
 
 	if sendErr != nil {
@@ -160,44 +161,31 @@ func TestE2E_RebuildWithLiveWritesDuringSession(t *testing.T) {
 	}
 
 	// Phase 3: simulate WAL shipper that observes local writes and
-	// asks the coordinator where each goes. We start the writer in
-	// its own goroutine right away — coord.StartSession already moved
-	// phase to DrainingHistorical so RouteLocalWrite returns
-	// SessionLane deterministically.
-	var startedSignal sync.WaitGroup
-	startedSignal.Add(1)
-
-	// The "WAL shipper" goroutine.
-	var liveWg sync.WaitGroup
-	liveWg.Add(1)
-	go func() {
-		defer liveWg.Done()
-		startedSignal.Wait() // wait until session is open
-		// Five live writes on primary while session active.
-		for i := uint32(0); i < 5; i++ {
-			lba := 30 + i
-			data := formulaPayload(lba, epoch, blockSize)
-			lsn, err := primary.Write(lba, data)
-			if err != nil {
-				t.Errorf("live Write lba=%d: %v", lba, err)
-				return
-			}
-			// Ask coordinator how to route this entry.
-			route := coord.RouteLocalWrite("r1", lsn)
-			if route != RouteSessionLane {
-				t.Errorf("during DrainingHistorical: expected RouteSessionLane, got %v", route)
-				return
-			}
-			if err := sender.PushLiveWrite(lba, lsn, data); err != nil {
-				t.Errorf("PushLiveWrite: %v", err)
-				return
-			}
+	// asks the coordinator where each goes. After P2c-slice B-2,
+	// sender.Run barriers as soon as sink.DrainBacklog returns —
+	// there is no engine "go barrier" signal anymore. To preserve
+	// the "writes during the session land before barrier" contract
+	// deterministically, push live writes BEFORE starting sender.Run.
+	// The bridging sink buffers them under sinkMu and flushAndSeal
+	// ships them in LSN order after streamBacklog completes.
+	for i := uint32(0); i < 5; i++ {
+		lba := 30 + i
+		data := formulaPayload(lba, epoch, blockSize)
+		lsn, err := primary.Write(lba, data)
+		if err != nil {
+			t.Fatalf("live Write lba=%d: %v", lba, err)
 		}
-		// After the session ends (sender.Run returns), coordinator
-		// goes Idle and any further writes route to RouteSteadyLive.
-		// We don't actually generate more writes here; the assertion
-		// is in the post-Run check below.
-	}()
+		// Ask coordinator how to route this entry. coord.StartSession
+		// above already moved phase to DrainingHistorical, so
+		// RouteLocalWrite returns SessionLane.
+		route := coord.RouteLocalWrite("r1", lsn)
+		if route != RouteSessionLane {
+			t.Fatalf("during DrainingHistorical: expected RouteSessionLane, got %v", route)
+		}
+		if err := sender.PushLiveWrite(lba, lsn, data); err != nil {
+			t.Fatalf("PushLiveWrite: %v", err)
+		}
+	}
 
 	var (
 		wg           sync.WaitGroup
@@ -213,13 +201,8 @@ func TestE2E_RebuildWithLiveWritesDuringSession(t *testing.T) {
 	}()
 	go func() {
 		defer wg.Done()
-		// Signal the live-writer goroutine that session is open.
-		startedSignal.Done()
 		sendAchieved, sendErr = sender.Run(context.Background(), /*sessionID*/ 11, /*fromLSN*/ 0, frozenTarget)
 	}()
-	// Wait for live writer to finish injecting before signaling close.
-	liveWg.Wait()
-	sender.Close()
 	wg.Wait()
 
 	if sendErr != nil {
@@ -268,12 +251,19 @@ func TestE2E_RebuildWithLiveWritesDuringSession(t *testing.T) {
 // up" — convergence is still proved by the byte-equal check after
 // barrier (per architect ruling: kind is observability, not
 // convergence proof).
+//
+// Substrate choice (P2c-slice B-2): memorywal — preserves real
+// write-time LSNs, so live writes after frozenTarget keep LSN >
+// frozenTarget and streamBacklog filters them out cleanly. BlockStore
+// would synthesize LSN from walHead at scan time, so live writes
+// (push-before-Run) would shift walHead and ALL entries would get
+// stamped with the new walHead → all filtered out.
 func TestE2E_KindCountsPinsBacklogVsLive(t *testing.T) {
 	const numBlocks = 32
 	const blockSize = 4096
 	const epoch byte = 0xE5
 
-	primary := storage.NewBlockStore(numBlocks, blockSize)
+	primary := memorywal.NewStore(numBlocks, blockSize)
 	replica := storage.NewBlockStore(numBlocks, blockSize)
 
 	// Phase 1: 10 LBAs — these become the backlog.
@@ -295,6 +285,21 @@ func TestE2E_KindCountsPinsBacklogVsLive(t *testing.T) {
 		t.Fatalf("StartSession: %v", err)
 	}
 
+	// Phase 2: 3 live writes BEFORE sender.Run starts. The bridging
+	// sink buffers them under sinkMu via PushLiveWrite; flushAndSeal
+	// ships them as WALKindSessionLive after streamBacklog. memorywal
+	// preserves real LSNs, so these get LSN > frozenTarget and
+	// streamBacklog's `e.LSN > targetLSN` filter excludes them from
+	// the backlog scan, leaving them to flushAndSeal.
+	for i := uint32(0); i < 3; i++ {
+		lba := 10 + i
+		data := formulaPayload(lba, epoch, blockSize)
+		lsn, _ := primary.Write(lba, data)
+		if err := sender.PushLiveWrite(lba, lsn, data); err != nil {
+			t.Fatalf("PushLiveWrite (pre-Run): %v", err)
+		}
+	}
+
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go func() {
@@ -305,35 +310,6 @@ func TestE2E_KindCountsPinsBacklogVsLive(t *testing.T) {
 		defer wg.Done()
 		_, _ = sender.Run(context.Background(), 17, 0, frozenTarget)
 	}()
-
-	// Wait for backlog to fully drain on the receiver before injecting
-	// live writes. Otherwise, BlockStore's ScanLBAs synthesizes
-	// scan-time LSN from walHead, and a concurrent primary.Write in
-	// this test would push walHead past targetLSN — causing the
-	// backlog scan's `e.LSN > targetLSN` check to filter all 10
-	// historical entries out. This is a deterministic ordering
-	// requirement for the kind-count assertion, NOT a layer-1 bug.
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		sess := receiver.Session()
-		if sess != nil && sess.Status().BacklogApplied == 10 {
-			break
-		}
-		time.Sleep(time.Millisecond)
-	}
-	if got := receiver.Session().Status().BacklogApplied; got != 10 {
-		t.Fatalf("backlog never reached 10 (got %d) — receiver/sender not advancing", got)
-	}
-
-	// Inject 3 live writes on primary; push to sender.
-	for i := uint32(0); i < 3; i++ {
-		lba := 10 + i
-		data := formulaPayload(lba, epoch, blockSize)
-		lsn, _ := primary.Write(lba, data)
-		_ = sender.PushLiveWrite(lba, lsn, data)
-	}
-
-	sender.Close()
 	wg.Wait()
 
 	st := receiver.Session().Status()
@@ -401,7 +377,7 @@ func TestE2E_PinFloorAdvancesIncrementally(t *testing.T) {
 		defer wg.Done()
 		_, sendErr = sender.Run(context.Background(), 21, 0, primaryH)
 	}()
-	sender.Close()
+	// No live writes; sender.Run barriers on its own after DrainBacklog.
 	wg.Wait()
 
 	if sendErr != nil {
@@ -432,12 +408,13 @@ func TestE2E_PinFloorAdvancesIncrementally(t *testing.T) {
 // TestE2E_PushLiveWriteAtomicSeal — architect review item #1: while
 // the session is active (any non-Idle phase), RouteLocalWrite returns
 // SessionLane and PushLiveWrite must not lose entries between drain
-// and barrier. The guarantee is enforced by drainAndSeal's atomic
-// take + seal under queueMu: any concurrent push either lands before
-// the seal (and ships) or returns "sealed" error (and caller knows
-// session is closing).
+// and barrier. After P2c-slice B-2 the seal point lives in the
+// bridging sink's flushAndSeal (under sinkMu): any concurrent push
+// either lands before sealing (buffered → shipped) or returns "sink
+// sealed" error (caller knows session is closing).
 //
-// This test races N pushers against Close + Run completion. Every
+// This test races N pushers against Run's autonomous completion
+// (sender.Run barriers as soon as sink.DrainBacklog returns). Every
 // successful PushLiveWrite (no error) must result in the entry being
 // shipped — verified by the receiver's substrate having that LBA at
 // the correct content.
@@ -517,9 +494,12 @@ func TestE2E_PushLiveWriteAtomicSeal(t *testing.T) {
 		}(w)
 	}
 
-	// Let pushers run a bit, then close the sender.
+	// Let pushers finish; sender.Run barriers autonomously when
+	// sink.DrainBacklog completes (P2c-slice B-2). Pushers race with
+	// flushAndSeal: pushes that land before sealing get nil; after
+	// sealing get an error. The atomic-seal contract is at the sink's
+	// flushAndSeal boundary, not the previous closeCh.
 	pushersWg.Wait()
-	sender.Close()
 	wg.Wait()
 
 	if sendErr != nil {
