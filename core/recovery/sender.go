@@ -49,7 +49,8 @@ type Sender struct {
 	fromLSN   uint64
 	targetLSN uint64
 
-	writerMu sync.Mutex // serializes conn writes (frames are atomic)
+	writerMu     sync.Mutex  // own mutex; serializes conn writes (frames are atomic)
+	sharedWriter *sync.Mutex // optional; non-nil if sink exposes WriteMu() (C1 §6.8 #1)
 
 	// barrierRespCh delivers the inbound BarrierResp (or any wire /
 	// protocol failure surfaced by the reader goroutine) to the
@@ -150,6 +151,14 @@ func NewSenderWithSink(primaryStore storage.LogicalStorage, coordinator *PeerShi
 	}
 	s := newSender(primaryStore, coordinator, conn, replicaID)
 	s.sink = sink
+	// C1 §6.8 #1: if the sink exposes a shared write mutex (the
+	// per-replica entry's writeMu), use it so Sender.writeFrame and
+	// the WalShipper's EmitFunc serialize on the same conn. Sinks
+	// that don't share (bridging senderBacklogSink) leave sharedWriter
+	// nil; Sender falls back to its own writerMu (uncontended).
+	if wms, ok := sink.(interface{ WriteMu() *sync.Mutex }); ok {
+		s.sharedWriter = wms.WriteMu()
+	}
 	return s
 }
 
@@ -355,6 +364,21 @@ func (s *Sender) Run(ctx context.Context, sessionID, fromLSN, targetLSN uint64) 
 	defer s.coordinator.EndSession(s.replicaID)
 	defer s.sink.EndSession()
 
+	// C1 §6.8 accounting: install a post-emit hook on the sink (if it
+	// supports it) so each successful WalShipper-routed emit advances
+	// coord.shipCursor via RecordShipped. Without this, the dual-lane
+	// path silently leaves shipCursor at fromLSN. Cleared at session
+	// end so post-session emits don't call into a teardown coord.
+	type postEmitHookSetter interface {
+		SetPostEmitHook(hook func(lsn uint64))
+	}
+	if h, ok := s.sink.(postEmitHookSetter); ok {
+		h.SetPostEmitHook(func(lsn uint64) {
+			_ = s.coordinator.RecordShipped(s.replicaID, lsn)
+		})
+		defer h.SetPostEmitHook(nil)
+	}
+
 	// Step 1: SessionStart frame.
 	numBlocks := s.primaryStore.NumBlocks()
 	if err := s.writeFrame(frameSessionStart, encodeSessionStart(sessionStartPayload{
@@ -552,7 +576,17 @@ func (s *Sender) streamBacklog() error {
 }
 
 func (s *Sender) writeFrame(t frameType, payload []byte) error {
-	s.writerMu.Lock()
-	defer s.writerMu.Unlock()
+	// C1 (§6.8 #1 mechanical SINGLE-SERIALIZER): when the sink exposes
+	// WriteMu() (transport.RecoverySink does), share that mutex with
+	// the WalShipper's EmitFunc so concurrent emits don't interleave
+	// header+payload on the same conn. Falls back to own mutex when
+	// the sink doesn't share (bridging path; legacy single-writer).
+	if s.sharedWriter != nil {
+		s.sharedWriter.Lock()
+		defer s.sharedWriter.Unlock()
+	} else {
+		s.writerMu.Lock()
+		defer s.writerMu.Unlock()
+	}
 	return writeFrame(s.conn, t, payload)
 }

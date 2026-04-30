@@ -197,3 +197,35 @@ func (r *RecoverySink) NotifyAppend(lba uint32, lsn uint64, data []byte) error {
 	}
 	return r.e.WalShipperFor(r.replicaID).NotifyAppend(lba, lsn, data)
 }
+
+// WriteMu returns the per-replica entry's writeMu so recovery.Sender
+// (which writes SessionStart / BaseBlock / BaseDone / BarrierReq on
+// the same dual-lane conn) can serialize its writes against the
+// WalShipper's EmitFunc writes. Without sharing this mutex, the two
+// writers race on conn.Write and can interleave header/payload of
+// different frames.
+//
+// recovery.Sender duck-types this method via an optional sub-interface;
+// when present, it uses the returned mutex for its writeFrame in
+// place of its own private mutex. Returns nil if no entry exists yet —
+// caller falls back to its own mutex.
+//
+// Implements §6.8 #1 SINGLE-SERIALIZER (mechanical) — one mutex per
+// (volume, replicaID) entry serializes all conn writes.
+func (r *RecoverySink) WriteMu() *sync.Mutex {
+	return r.e.WalShipperWriteMu(r.replicaID)
+}
+
+// SetPostEmitHook installs the callback recovery.Sender provides at
+// session start: typically `func(lsn uint64) { coord.RecordShipped(replicaID, lsn) }`.
+// Fires after each successful WalShipper emit (Backlog scan or Live
+// NotifyAppend) so per-peer shipCursor advances in lockstep with
+// emit.
+//
+// recovery.Sender duck-types this method via an optional sub-interface;
+// when present, it calls SetPostEmitHook at session start (with the
+// RecordShipped callback) and SetPostEmitHook(nil) at session end so
+// post-session emits don't call into a torn-down coord state.
+func (r *RecoverySink) SetPostEmitHook(hook func(lsn uint64)) {
+	r.e.SetWalShipperPostEmitHook(r.replicaID, hook)
+}

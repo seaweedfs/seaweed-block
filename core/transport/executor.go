@@ -106,6 +106,22 @@ type walShipperEntry struct {
 	emitConn    net.Conn
 	emitLineage RecoveryLineage
 	emitProfile EmitProfile
+	// postEmit fires after a successful conn.Write; recovery sessions
+	// install a callback that calls coord.RecordShipped(replicaID, lsn)
+	// so shipCursor advances atomically with emit. nil = no-op.
+	postEmit func(lsn uint64)
+
+	// writeMu serializes conn.Write on the entry's emitConn across
+	// EmitFunc and any external writer that shares this conn (notably
+	// recovery.Sender's writeFrame during a dual-lane session). Without
+	// this shared mutex, concurrent header+payload writes from the two
+	// paths can interleave and punch through frame boundaries.
+	//
+	// In steady state (Ship → only one writer per legacy conn), the
+	// mutex is uncontended. In dual-lane sessions, recovery.Sender
+	// duck-types `WriteMu() *sync.Mutex` on the sink and uses this
+	// mutex for its own writeFrame calls.
+	writeMu sync.Mutex
 }
 
 // DualLaneConfig holds the wiring for routing StartRebuild through
@@ -624,6 +640,7 @@ func (e *BlockExecutor) WalShipperFor(replicaID string) *WalShipper {
 		conn := entry.emitConn
 		lineage := entry.emitLineage
 		profile := entry.emitProfile
+		postEmit := entry.postEmit
 		entry.emitCtxMu.Unlock()
 		if conn == nil {
 			// No emit context yet (Ship hasn't run; recovery session
@@ -638,12 +655,13 @@ func (e *BlockExecutor) WalShipperFor(replicaID string) *WalShipper {
 			return nil
 		}
 
-		// P2d profile dispatch (architect 2026-04-30):
-		//   SteadyMsgShip  → legacy MsgShipEntry on legacy port.
-		//   DualLaneWALFrame → recovery frameWALEntry on dual-lane port.
-		// Encoding lives HERE (architect P1 review #1): WalShipper
-		// hands raw tuples; EmitFunc owns the encoder choice so steady
-		// Ship and recovery-session emits both feed one delivery seam.
+		// C1 (§6.8 #1 mechanical SINGLE-SERIALIZER): hold writeMu
+		// across the wire write so concurrent recovery.Sender.writeFrame
+		// (also acquiring the same mutex via WalShipperSink.WriteMu())
+		// can't interleave header+payload of two frames. In steady
+		// state this is uncontended (only Ship writes); in dual-lane
+		// sessions it serializes Sender + WalShipper writers.
+		entry.writeMu.Lock()
 		_ = conn.SetWriteDeadline(time.Now().Add(shipWriteDeadline))
 		var err error
 		switch profile {
@@ -672,6 +690,16 @@ func (e *BlockExecutor) WalShipperFor(replicaID string) *WalShipper {
 			err = fmt.Errorf("transport: WalShipper for replica %s has unknown emit profile %s", replicaID, profile)
 		}
 		_ = conn.SetWriteDeadline(time.Time{})
+		entry.writeMu.Unlock()
+
+		// C1 post-emit hook: on successful wire write, fire the
+		// callback installed by the session installer (recovery.Sender)
+		// so coord.RecordShipped advances the per-replica shipCursor.
+		// Fired OUTSIDE writeMu so the callback doesn't deadlock with
+		// itself or block the next writer.
+		if err == nil && postEmit != nil {
+			postEmit(lsn)
+		}
 		return err
 	}
 	s := NewWalShipper(replicaID, HeadSourceFromStorage(e.primaryStore), e.primaryStore, emit)
@@ -715,6 +743,48 @@ func (e *BlockExecutor) updateWalShipperEmitContext(replicaID string, conn net.C
 	entry.emitLineage = lineage
 	entry.emitProfile = profile
 	entry.emitCtxMu.Unlock()
+}
+
+// SetWalShipperPostEmitHook installs (or clears, if hook==nil) the
+// per-emit callback that fires after a successful wire write. Recovery
+// sessions use it to translate "this LSN reached the wire" into
+// `coord.RecordShipped(replicaID, lsn)` — advances per-peer shipCursor
+// in lockstep with emit.
+//
+// Set BEFORE StartSession so the first emit fires the hook; clear
+// (nil) at EndSession so post-session emits don't call into a
+// torn-down coordinator state.
+//
+// No-op if no WalShipperEntry exists for replicaID.
+func (e *BlockExecutor) SetWalShipperPostEmitHook(replicaID string, hook func(lsn uint64)) {
+	e.walShipperMu.Lock()
+	entry, ok := e.walShippers[replicaID]
+	e.walShipperMu.Unlock()
+	if !ok {
+		return
+	}
+	entry.emitCtxMu.Lock()
+	entry.postEmit = hook
+	entry.emitCtxMu.Unlock()
+}
+
+// WalShipperWriteMu returns the per-replica entry's writeMu — the
+// mutex EmitFunc holds during conn.Write. Recovery.Sender uses this
+// for its own writeFrame calls during a dual-lane session so both
+// writers serialize on the same conn (§6.8 #1 mechanical
+// SINGLE-SERIALIZER).
+//
+// Returns nil when no WalShipperEntry exists for replicaID — caller
+// (the sink) returns nil from WriteMu(), and recovery.Sender falls
+// back to its own private mutex.
+func (e *BlockExecutor) WalShipperWriteMu(replicaID string) *sync.Mutex {
+	e.walShipperMu.Lock()
+	entry, ok := e.walShippers[replicaID]
+	e.walShipperMu.Unlock()
+	if !ok {
+		return nil
+	}
+	return &entry.writeMu
 }
 
 // SnapshotEmitContext returns the per-replica WalShipper's current
