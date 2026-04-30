@@ -131,17 +131,19 @@ func (e *BlockExecutor) doRebuild(replicaID string, session *activeSession, targ
 // PrimaryBridge captured in e.dualLane.Bridge.
 //
 // Lifecycle: this method is async (returns immediately after dialing
-// + StartRebuildSession + FinishLiveWrites are kicked off). The
-// bridge's onClose callback (set in NewBlockExecutorWithDualLane)
-// fires the executor's OnSessionClose when the goroutine completes.
+// + StartRebuildSession is kicked off). The bridge's onClose callback
+// (set in NewBlockExecutorWithDualLane) fires the executor's
+// OnSessionClose when the sender goroutine completes — which now
+// happens naturally once the WAL pump (streamUntilHead) catches the
+// primary's head + idle window elapses + barrier-ack returns.
 //
-// Why FinishLiveWrites is called immediately: legacy callers do not
-// push live writes during a rebuild (the legacy lineage gate rejected
-// them anyway). To match legacy behavior in this first-cut wiring,
-// the bridge's session is told there are no more live writes coming
-// before the goroutine even starts the backlog phase. Spec §3.2 #3
-// real-time interleave (architect priority #2) lifts this restriction
-// and is OUT OF SCOPE for this PR.
+// Pre-§3.2 #3 this method called FinishLiveWrites immediately as a
+// workaround for the legacy "no live writes during rebuild" semantic.
+// That gate is now deleted (per
+// v3-recovery-unified-wal-stream-mini-plan.md §2.5): the sender
+// self-drives via cursor advancement; live writes during rebuild
+// flow through the substrate's growing tail and are picked up by
+// streamUntilHead's repeated ScanLBAs cycles.
 func (e *BlockExecutor) startRebuildDualLane(replicaID string, sessionID, epoch, endpointVersion, targetLSN uint64) error {
 	dl := e.dualLane
 	conn, err := net.DialTimeout("tcp", dl.DialAddr, 2*time.Second)
@@ -160,13 +162,6 @@ func (e *BlockExecutor) startRebuildDualLane(replicaID string, sessionID, epoch,
 	if err := dl.Bridge.StartRebuildSession(context.Background(), conn, dl.ReplicaID, sessionID, 0, targetLSN); err != nil {
 		_ = conn.Close()
 		return fmt.Errorf("dual-lane start: %w", err)
-	}
-	// Legacy semantics: no live writes during rebuild. Signal the
-	// session immediately so it drains (empty queue) and barriers.
-	if !dl.Bridge.FinishLiveWrites(dl.ReplicaID) {
-		// Race: session ended before we could signal. Bridge already
-		// fired the close callback; nothing for us to do here.
-		_ = conn.Close()
 	}
 	return nil
 }

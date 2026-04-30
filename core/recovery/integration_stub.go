@@ -117,43 +117,6 @@ func (b *PrimaryBridge) StartRebuildSession(ctx context.Context, conn net.Conn, 
 	return nil
 }
 
-// PushLiveWrite forwards a primary-side WAL append to the active
-// session for this peer (if any). Caller is the WAL shipper
-// integration; they MUST have already consulted
-// `coord.RouteLocalWrite(replicaID, lsn)` and confirmed
-// RouteSessionLane.
-//
-// Returns nil if the entry was queued, or error if no session is
-// active or the session has sealed for barrier.
-func (b *PrimaryBridge) PushLiveWrite(replicaID ReplicaID, lba uint32, lsn uint64, data []byte) error {
-	b.mu.Lock()
-	sender, ok := b.senders[replicaID]
-	b.mu.Unlock()
-	if !ok {
-		return fmt.Errorf("recovery bridge: no active session for replica %q", replicaID)
-	}
-	return sender.PushLiveWrite(lba, lsn, data)
-}
-
-// FinishLiveWrites signals the active session for this peer that
-// no more PushLiveWrite calls will arrive — sender will drain the
-// queue, transition phase, and run the barrier round-trip. Returns
-// false if no session is active.
-//
-// Equivalent to engine deciding "this peer's recover session can
-// converge now"; in production this is triggered when the engine
-// observes barrier-eligibility conditions.
-func (b *PrimaryBridge) FinishLiveWrites(replicaID ReplicaID) bool {
-	b.mu.Lock()
-	sender, ok := b.senders[replicaID]
-	b.mu.Unlock()
-	if !ok {
-		return false
-	}
-	sender.Close()
-	return true
-}
-
 // ReplicaBridge is the replica-side adapter. One bridge instance per
 // replica daemon; it accepts inbound recover-session connections and
 // drives a Receiver per connection.

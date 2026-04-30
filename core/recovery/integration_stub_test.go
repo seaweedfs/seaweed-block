@@ -98,15 +98,14 @@ func TestIntegrationStub_LifecycleCallbacks(t *testing.T) {
 	}
 	mu.Unlock()
 
-	// Inject one live write while session is active.
+	// Inject one live write while session is active. Post-§3.2 #3:
+	// writes flow through substrate; the pump's streamUntilHead picks
+	// them up via repeated ScanLBAs cycles. No bridge.PushLiveWrite.
 	liveLBA := uint32(20)
 	liveData := formulaPayload(liveLBA, 0xD0, blockSize)
 	liveLSN, _ := primary.Write(liveLBA, liveData)
 	if route := coord.RouteLocalWrite("r1", liveLSN); route != RouteSessionLane {
 		t.Fatalf("RouteLocalWrite during session: got %v want SessionLane", route)
-	}
-	if err := bridge.PushLiveWrite("r1", liveLBA, liveLSN, liveData); err != nil {
-		t.Fatalf("PushLiveWrite: %v", err)
 	}
 
 	// Single-flight: a second StartRebuildSession on same replica errors.
@@ -114,10 +113,8 @@ func TestIntegrationStub_LifecycleCallbacks(t *testing.T) {
 		t.Error("second StartRebuildSession on same peer: want error (single-flight)")
 	}
 
-	// Tell sender to barrier.
-	if !bridge.FinishLiveWrites("r1") {
-		t.Fatal("FinishLiveWrites returned false; expected active session")
-	}
+	// Pump exits naturally on idle window after primary stops appending.
+	// (Pre-§3.2 #3 used bridge.FinishLiveWrites here.)
 
 	// Wait for OnClose.
 	closeWG.Wait()
@@ -212,11 +209,10 @@ func TestIntegrationStub_ReceiverFailsEarly_SenderUnblocks(t *testing.T) {
 		t.Fatal("OnClose: expected non-nil err (receiver was closed before session start)")
 	}
 
-	// PushLiveWrite after Run returns should error (sealed by defer).
-	pushErr := bridge.PushLiveWrite("r1", 0, 1, []byte{})
-	if pushErr == nil {
-		t.Error("PushLiveWrite after Run returns: want error (no active sender)")
-	}
+	// (Pre-§3.2 #3 this asserted PushLiveWrite errored after seal.
+	// Post-§3.2 #3 there is no PushLiveWrite API; the equivalent
+	// post-Run state observation is the coord phase being Idle, which
+	// is asserted just below.)
 
 	// Coord should be back to Idle (EndSession ran in defer).
 	if got := coord.Phase("r1"); got != PhaseIdle {
@@ -395,8 +391,12 @@ func TestIntegrationStub_FailureTypedOnCancellation(t *testing.T) {
 	if f.Kind != FailureCancelled {
 		t.Errorf("Kind=%s want Cancelled", f.Kind)
 	}
-	if f.Phase != PhaseAwaitClose {
-		t.Errorf("Phase=%q want AwaitClose", f.Phase)
+	// Post-§3.2 #3: streamUntilHead is where ctx.Done is awaited
+	// (during the idle-window time.After). Pre-refactor used a
+	// dedicated PhaseAwaitClose for the closeCh wait; the unified
+	// pump tags the cancel as PhaseBacklog (the WAL pump phase).
+	if f.Phase != PhaseBacklog {
+		t.Errorf("Phase=%q want Backlog (unified pump)", f.Phase)
 	}
 	if f.Retryable() {
 		t.Error("Cancelled failure should be Retryable=false (caller's decision)")

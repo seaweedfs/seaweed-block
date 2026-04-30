@@ -6,42 +6,32 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
 // Sender is the primary-side driver of one rebuild session. It runs
-// the base lane, the backlog lane, and (during the same session)
-// accepts post-target live writes through PushLiveWrite, all sharing
-// one ordered ship queue per peer (spec §3.2 #3).
+// the base lane and the WAL lane on top of the same primary WAL via
+// a single forward cursor: the cursor is initialized to fromLSN at
+// session start (the one rewind), advances monotonically per
+// ScanLBAs callback, exits when caught up with primary head AND an
+// idle window has elapsed.
 //
-// POC scope:
-//   - Base lane: dense — ships every LBA in [0, NumBlocks()) by reading
-//     primary's current state via LogicalStorage.Read. (sparse omit
-//     and substrate basement-clearing are a later milestone; see
-//     INV-BASE-SPARSE-REQUIRES-SUBSTRATE-CLOSURE.)
-//   - Backlog lane: replays primary's WAL via ScanLBAs(fromLSN, ...)
-//     up to (and including) targetLSN. Entries past targetLSN are
-//     skipped at this lane — they are post-target traffic that
-//     either rides the same session lane (if injected via
-//     PushLiveWrite while DrainingHistorical) or routes to the
-//     steady-live path (after coordinator transitions).
-//   - Single goroutine drives the wire writer; concurrent producers
-//     enqueue items via a mutex-protected slice. No backpressure /
-//     bounded buffer in the POC — the sender drives the slice
-//     synchronously.
-//   - No baseBatchAck pin advancement during the session: pin floor
-//     stays at the session's fromLSN until EndSession releases it.
-//     Adding incremental pin advancement is a layer-2 enhancement.
+// Per v3-recovery-unified-wal-stream-kickoff.md (architect 2026-04-29):
+// 单队列交织 = [pinLSN, head) 上的滑动光标，≠ 两段物理 phase. The earlier
+// POC's two-phase shape (streamBacklog → drainAndSeal → SessionLive)
+// is gone; sender now ships from one source — the primary's WAL —
+// from fromLSN forward to head. The Kind byte (Backlog / SessionLive)
+// flips once when the cursor catches up with head; this is
+// observability only, not a state machine boundary.
 //
 // Sender owns:
-//   - The wire `conn` writer side (frame writes serialize through
-//     `writerMu`).
-//   - The ordered ship queue (`queue`).
+//   - The wire `conn` writer side (frame writes serialize through `writerMu`).
 //
 // Sender borrows:
-//   - `primaryStore` for reads (base + backlog).
-//   - `coordinator` for ship-phase transitions and routing decisions.
+//   - `primaryStore` for reads (base + WAL pump).
+//   - `coordinator` for ship-cursor recording and routing decisions.
 //
 // Sender does NOT own: receiver-side state, retry policy, lineage
 // minting, or session lifecycle decisions (those come from upstream).
@@ -58,31 +48,18 @@ type Sender struct {
 
 	writerMu sync.Mutex // serializes conn writes (frames are atomic)
 
-	// queueMu protects the live-write queue + sealed flag. Backlog
-	// and base lanes run on the Run() goroutine and write directly
-	// without queueing because they are sequential by construction.
-	// Live writes from PushLiveWrite append here; the final drain
-	// happens AFTER closeCh is closed, atomic with sealing.
-	queueMu   sync.Mutex
-	liveQueue []walItem
-	sealed    bool // set by drainAndSeal; PushLiveWrite errors after this
-
-	// closeCh signals "no more live writes coming; safe to drain
-	// queue, transition phase, and run barrier". Caller closes via
-	// Sender.Close(). Run blocks on this channel after the backlog
-	// scan finishes.
-	closeCh   chan struct{}
-	closeOnce sync.Once
+	// idleWindow guards against barrier-mid-burst: pump exits only if
+	// the cursor has caught head AND no new appends arrived for this
+	// duration. Default 100ms; configurable via NewSenderWithOptions.
+	// Per kickoff §3.2: this is NOT a convergence proof — only barrier
+	// + AchievedLSN ≥ targetLSN proves convergence. The idle window is
+	// purely a "don't barrier in a millisecond-long lull" guard.
+	idleWindow time.Duration
 
 	// barrierRespCh delivers the inbound BarrierResp (or any wire /
 	// protocol failure surfaced by the reader goroutine) to the
 	// main Run goroutine at barrier-wait time. Buffered=1 so the
 	// reader can push exactly once without blocking on a consumer.
-	//
-	// Per docs/recovery-pin-floor-wire.md §7: the reader goroutine
-	// is required because BaseBatchAck arrives mid-stream during
-	// base lane while Run is busy writing frames. Pre-#3 there was
-	// no reader; only one inline readFrame at barrier time.
 	barrierRespCh chan ackOrResult
 }
 
@@ -94,65 +71,36 @@ type ackOrResult struct {
 	err      error
 }
 
-type walItem struct {
-	lba  uint32
-	lsn  uint64
-	data []byte
-}
+// kindFlipEpsilon is the LSN distance at which the sender flips
+// frameWALEntry's Kind byte from Backlog to SessionLive (kickoff
+// Q1 ratified default = 8). Inline constant; observability-only.
+const kindFlipEpsilon uint64 = 8
+
+// defaultIdleWindow is the production default for the pump's exit
+// idle guard (kickoff Q11 ratified default).
+const defaultIdleWindow = 100 * time.Millisecond
 
 // NewSender constructs a sender bound to a primary store + coordinator.
 // `conn` is the wire — typically a *net.TCPConn in production, or a
 // net.Pipe end in tests. Sender does not close `conn`; caller does.
 func NewSender(primaryStore storage.LogicalStorage, coordinator *PeerShipCoordinator, conn io.ReadWriter, replicaID ReplicaID) *Sender {
+	return NewSenderWithOptions(primaryStore, coordinator, conn, replicaID, defaultIdleWindow)
+}
+
+// NewSenderWithOptions constructs a sender with an explicit idle-window
+// duration (test convenience for tighter timing).
+func NewSenderWithOptions(primaryStore storage.LogicalStorage, coordinator *PeerShipCoordinator, conn io.ReadWriter, replicaID ReplicaID, idleWindow time.Duration) *Sender {
+	if idleWindow <= 0 {
+		idleWindow = defaultIdleWindow
+	}
 	return &Sender{
-		primaryStore: primaryStore,
-		coordinator:  coordinator,
+		primaryStore:  primaryStore,
+		coordinator:   coordinator,
 		conn:          conn,
 		replicaID:     replicaID,
-		closeCh:       make(chan struct{}),
+		idleWindow:    idleWindow,
 		barrierRespCh: make(chan ackOrResult, 1),
 	}
-}
-
-// Close signals the sender that no more PushLiveWrite calls will
-// arrive for this session, so it may safely drain the live queue,
-// transition phase, and run the barrier round-trip. Idempotent.
-//
-// Caller pattern:
-//
-//	go sender.Run(...)
-//	// ... PushLiveWrite as the WAL shipper produces local writes ...
-//	sender.Close()  // session may now barrier
-//	// wait for Run to return; coordinator phase will be Idle
-//
-// PushLiveWrite calls that race with Close (arrive concurrently) are
-// either accepted (queued before drainAndSeal) OR rejected with an
-// error (sealed already). The atomic-seal contract guarantees no
-// queued write is lost between drain and barrier.
-func (s *Sender) Close() {
-	s.closeOnce.Do(func() { close(s.closeCh) })
-}
-
-// PushLiveWrite hands the sender one local-write event for this peer.
-// Caller (the WAL shipper integration) must already have consulted
-// `coordinator.RouteLocalWrite(replicaID, lsn)` and confirmed the
-// routing is RouteSessionLane; this method does not double-check.
-//
-// Live writes are buffered until the backlog drain phase finishes,
-// then flushed in LSN order before barrier. POC simplification —
-// in production the sender would interleave them with backlog by
-// LSN order in real time. Spec §3.2 #3 (single ordered queue) is
-// preserved at the level of "post-backlog drain, before barrier".
-func (s *Sender) PushLiveWrite(lba uint32, lsn uint64, data []byte) error {
-	s.queueMu.Lock()
-	defer s.queueMu.Unlock()
-	if s.sealed {
-		return errors.New("recovery: PushLiveWrite after sender sealed (session is closing)")
-	}
-	cp := make([]byte, len(data))
-	copy(cp, data)
-	s.liveQueue = append(s.liveQueue, walItem{lba: lba, lsn: lsn, data: cp})
-	return nil
 }
 
 // Run drives the entire session end-to-end and blocks until barrier
@@ -161,54 +109,35 @@ func (s *Sender) PushLiveWrite(lba uint32, lsn uint64, data []byte) error {
 //
 // PRECONDITION: caller already invoked coord.StartSession.
 //
-// Sequence:
+// Sequence (post-§3.2 #3):
 //  1. Send frameSessionStart.
-//  2. Base lane: ship every LBA's current data via frameBaseBlock.
-//  3. Send frameBaseDone; coordinator.MarkBaseDone.
-//  4. Backlog lane: ScanLBAs(fromLSN, ...); ship entries with
-//     LSN ∈ (fromLSN, targetLSN] via frameWALEntry; record each
-//     shipped LSN via coordinator.RecordShipped.
-//  5. Wait for caller's Close() OR ctx cancellation.
-//  6. Drain live queue + atomic seal; ship buffered live writes.
-//  7. coordinator.TryAdvanceToSteadyLive (§3.2 transition).
-//  8. Send frameBarrierReq, read frameBarrierResp.
-//  9. Verify achieved ≥ targetLSN via coordinator.CanEmitSessionComplete
-//     (§5.2, CHK-BARRIER-BEFORE-CLOSE).
+//  2. Spawn readerLoop (inbound demux for BaseBatchAck / BarrierResp).
+//  3. Base lane: ship every LBA's current data via frameBaseBlock.
+//  4. Send frameBaseDone; coordinator.MarkBaseDone.
+//  5. WAL pump: streamUntilHead — cursor walks (fromLSN, head] with
+//     monotonic LSN, kind flips Backlog→SessionLive once at catch-up,
+//     exits when cursor == head AND idleWindow elapsed.
+//  6. Send frameBarrierReq, await frameBarrierResp.
+//  7. Verify achieved ≥ targetLSN via coordinator.CanEmitSessionComplete.
 //
-// Defer always: set sealed=true; coordinator.EndSession.
+// Defer: coordinator.EndSession.
 //
 // Caller MUST call Run exactly once per Sender instance.
 //
 // Caller MUST have already invoked
-// `coordinator.StartSession(replicaID, sessionID, fromLSN, targetLSN)`
-// synchronously before spawning the goroutine that calls Run. This
-// keeps "session is registered" observable from the call site that
-// scheduled Run, so concurrent code reading `coord.RouteLocalWrite`
-// after the spawn point sees a non-Idle phase deterministically.
-//
-// Run's defer always calls coordinator.EndSession, regardless of the
-// exit path (success, ctx-cancel, wire-error). Sealed is also set in
-// the defer so any post-Run PushLiveWrite gets an explicit error
-// instead of silently appending to a dead queue.
+// `coordinator.StartSession(replicaID, sessionID, fromLSN, targetLSN)`.
 //
 // Lifecycle / cancellation: pass a Context whose cancellation signals
 // "abort this session". A typical pattern is to cancel the context
-// when the receiver-side goroutine fails, so a sender blocked on
-// closeCh wakes up and returns ctx.Err().
+// when the receiver-side goroutine fails so the sender unblocks.
 func (s *Sender) Run(ctx context.Context, sessionID, fromLSN, targetLSN uint64) (achievedLSN uint64, err error) {
 	s.sessionID = sessionID
 	s.fromLSN = fromLSN
 	s.targetLSN = targetLSN
 
-	// Defer cleanup runs on every exit path.
-	defer func() {
-		s.queueMu.Lock()
-		s.sealed = true
-		s.queueMu.Unlock()
-		s.coordinator.EndSession(s.replicaID)
-	}()
+	defer s.coordinator.EndSession(s.replicaID)
 
-	// Step 2: SessionStart frame.
+	// Step 1: SessionStart frame.
 	numBlocks := s.primaryStore.NumBlocks()
 	if err := s.writeFrame(frameSessionStart, encodeSessionStart(sessionStartPayload{
 		SessionID: sessionID, FromLSN: fromLSN, TargetLSN: targetLSN, NumBlocks: numBlocks,
@@ -216,16 +145,12 @@ func (s *Sender) Run(ctx context.Context, sessionID, fromLSN, targetLSN uint64) 
 		return 0, newFailure(FailureWire, PhaseSendStart, err)
 	}
 
-	// Step 2b: spawn the inbound demux reader. From this point onward
-	// any frame from the receiver (BaseBatchAck during base lane,
-	// BarrierResp at end) flows through readerLoop. Reader exits on
-	// BarrierResp delivery, on any wire error, or on conn close by
-	// caller's defer.
+	// Step 2: spawn the inbound demux reader.
 	go s.readerLoop()
 
 	// Step 3: base lane.
 	if err := s.streamBase(numBlocks); err != nil {
-		return 0, err // streamBase wraps its own Failure
+		return 0, err
 	}
 
 	// Step 4: BaseDone signal.
@@ -236,51 +161,12 @@ func (s *Sender) Run(ctx context.Context, sessionID, fromLSN, targetLSN uint64) 
 		return 0, newFailure(FailureContract, PhaseBaseDone, err)
 	}
 
-	// Step 5: backlog lane.
-	if err := s.streamBacklog(); err != nil {
-		return 0, err // streamBacklog wraps its own Failure
+	// Step 5: WAL pump — rewind to fromLSN, walk forward to head + idle.
+	if err := s.streamUntilHead(ctx); err != nil {
+		return 0, err
 	}
 
-	// Step 6: wait for caller's "no more live writes" signal OR ctx
-	// cancellation. Until Close() is called, PushLiveWrite continues
-	// to accept new entries. This is the dual-lane invariant: while
-	// session is active, every primary-side WAL append routes through
-	// the session lane, and the sender is the gate that decides when
-	// barrier may begin.
-	//
-	// Ctx cancellation is the abort path: typically fired by the
-	// caller when the receiver goroutine fails so the sender unblocks
-	// and returns rather than waiting forever.
-	select {
-	case <-s.closeCh:
-	case <-ctx.Done():
-		return 0, newFailure(FailureCancelled, PhaseAwaitClose, ctx.Err())
-	}
-
-	// Step 7: drain live queue + atomic seal. Any PushLiveWrite that
-	// races concurrently is either captured before sealing or
-	// rejected with an error (caller sees the error and knows the
-	// session is closing). No queued write can be lost between drain
-	// and barrier because seal is atomic with the take.
-	if err := s.drainAndSeal(); err != nil {
-		return 0, err // drainAndSeal wraps its own Failure
-	}
-
-	// Step 8: phase transition. Per architect ruling, this is purely
-	// a publication-permission flag — RouteLocalWrite still returns
-	// SessionLane until EndSession (because the session is still
-	// open until barrier completes).
-	if !s.coordinator.TryAdvanceToSteadyLive(s.replicaID) {
-		// Defensive: if this fails after we've shipped backlog and
-		// marked base done, something is structurally wrong.
-		st, _ := s.coordinator.Status(s.replicaID)
-		return 0, newFailure(FailureContract, PhaseTransition,
-			fmt.Errorf("TryAdvanceToSteadyLive rejected: %+v", st))
-	}
-
-	// Step 8 + 9: barrier round-trip — reader goroutine delivers the
-	// inbound BarrierResp via barrierRespCh (or any wire / protocol /
-	// pin-update error surfaced earlier).
+	// Step 6: barrier request.
 	if err := s.writeFrame(frameBarrierReq, nil); err != nil {
 		return 0, newFailure(FailureWire, PhaseBarrierReq, err)
 	}
@@ -294,6 +180,8 @@ func (s *Sender) Run(ctx context.Context, sessionID, fromLSN, targetLSN uint64) 
 	case <-ctx.Done():
 		return 0, newFailure(FailureCancelled, PhaseBarrierResp, ctx.Err())
 	}
+
+	// Step 7: convergence check.
 	if !s.coordinator.CanEmitSessionComplete(s.replicaID, achieved) {
 		return achieved, newFailure(FailureContract, PhaseBarrierResp,
 			fmt.Errorf("achieved=%d < target=%d", achieved, targetLSN))
@@ -301,26 +189,17 @@ func (s *Sender) Run(ctx context.Context, sessionID, fromLSN, targetLSN uint64) 
 	return achieved, nil
 }
 
-// readerLoop is the sender's inbound demux. It reads frames until
-// BarrierResp arrives (success path) or any wire / protocol / pin
-// failure surfaces. Result is delivered to barrierRespCh exactly once.
+// readerLoop is the sender's inbound demux. Reads frames until
+// BarrierResp arrives or any wire / protocol / pin failure surfaces.
 //
 // BaseBatchAck handling:
-//   1. Decode payload.
-//   2. Validate SessionID matches the active session.
-//   3. Fetch primary's S boundary (`Boundaries().S`).
-//   4. Call coord.SetPinFloor(replicaID, AcknowledgedLSN, S).
-//   5. On error (incl. PinUnderRetention), abort by pushing to
-//      barrierRespCh and return.
-//
-// Reader exits on:
-//   - BarrierResp delivered → push achieved, return.
-//   - readFrame error (peer closed, etc.) → push Wire failure, return.
-//   - any decode / validation error → push typed failure, return.
-//   - SetPinFloor error → push the typed failure, return.
+//  1. Decode payload.
+//  2. Validate SessionID matches the active session.
+//  3. Fetch primary's S boundary.
+//  4. Call coord.SetPinFloor(replicaID, AcknowledgedLSN, S).
+//  5. On error (incl. PinUnderRetention), abort.
 //
 // Single-shot: pushes exactly one ackOrResult to barrierRespCh.
-// barrierRespCh buffer=1 so push always succeeds without consumer.
 func (s *Sender) readerLoop() {
 	for {
 		ft, payload, err := readFrame(s.conn)
@@ -342,8 +221,6 @@ func (s *Sender) readerLoop() {
 			}
 			_, primaryS, _ := s.primaryStore.Boundaries()
 			if updateErr := s.coordinator.SetPinFloor(s.replicaID, p.AcknowledgedLSN, primaryS); updateErr != nil {
-				// SetPinFloor returns *Failure already typed
-				// (FailurePinUnderRetention or wrapped); pass through.
 				s.barrierRespCh <- ackOrResult{err: updateErr}
 				return
 			}
@@ -365,8 +242,7 @@ func (s *Sender) readerLoop() {
 }
 
 // streamBase sends every LBA's current data as a base block. Dense
-// for POC; sparse omit is a later optimization paired with a
-// substrate basement-clearing INV.
+// for POC; sparse omit is a later optimization.
 func (s *Sender) streamBase(numBlocks uint32) error {
 	for lba := uint32(0); lba < numBlocks; lba++ {
 		data, err := s.primaryStore.Read(lba)
@@ -381,85 +257,87 @@ func (s *Sender) streamBase(numBlocks uint32) error {
 	return nil
 }
 
-// streamBacklog replays the primary's WAL window (fromLSN, targetLSN]
-// via ScanLBAs and ships each entry on the WAL lane. Records each
-// shipped LSN with the coordinator so BacklogDrained becomes true
-// once the highest LSN ≤ targetLSN is shipped.
-func (s *Sender) streamBacklog() error {
-	stop := errors.New("scan stop sentinel")
-	var wireErr, contractErr error // surfaced from inside the callback
-	scanErr := s.primaryStore.ScanLBAs(s.fromLSN, func(e storage.RecoveryEntry) error {
-		// Skip entries past frozen target — those belong on the
-		// steady-live path or get fed back via PushLiveWrite if the
-		// session is still DrainingHistorical.
-		if e.LSN > s.targetLSN {
-			return stop
-		}
-		// fromLSN is exclusive in our contract; ScanLBAs may emit
-		// LSN == fromLSN if the substrate's retention starts there.
-		// Skip the boundary entry.
-		if e.LSN <= s.fromLSN {
+// streamUntilHead is the §3.2 #3 unified WAL pump: one cursor that
+// rewinds to fromLSN at session start, walks forward via ScanLBAs,
+// kind-flips Backlog→SessionLive once at catch-up, exits on
+// (cursor caught head AND idleWindow elapsed).
+//
+// Per v3-recovery-unified-wal-stream-kickoff.md §3.1.
+//
+// Termination conditions:
+//   - cursor == head AND no append in idleWindow → return nil (barrier ready)
+//   - ctx cancelled → FailureCancelled
+//   - ScanLBAs returns ErrWALRecycled → FailureWALRecycled
+//   - ScanLBAs returns other error → FailureSubstrate
+//   - frame write fails → FailureWire
+//   - coord.RecordShipped fails → FailureContract
+func (s *Sender) streamUntilHead(ctx context.Context) error {
+	cursor := s.fromLSN
+	kind := WALKindBacklog
+
+	for {
+		// Pump one scan cycle from the current cursor.
+		var wireErr, contractErr error
+		scanErr := s.primaryStore.ScanLBAs(cursor, func(e storage.RecoveryEntry) error {
+			// fromLSN is exclusive — substrate may emit an entry at
+			// LSN == cursor (when cursor was set to that LSN by a
+			// prior callback or initialized at fromLSN). Skip.
+			if e.LSN <= cursor {
+				return nil
+			}
+			if err := s.writeFrame(frameWALEntry, encodeWALEntry(kind, e.LBA, e.LSN, e.Data)); err != nil {
+				wireErr = err
+				return err
+			}
+			cursor = e.LSN
+			if err := s.coordinator.RecordShipped(s.replicaID, cursor); err != nil {
+				contractErr = err
+				return err
+			}
+			// Kind flip: monotonic, one-way (Backlog → SessionLive).
+			if kind == WALKindBacklog {
+				_, _, head := s.primaryStore.Boundaries()
+				if head > cursor && head-cursor < kindFlipEpsilon {
+					kind = WALKindSessionLive
+				} else if head <= cursor {
+					// Already caught up at this entry; flip immediately.
+					kind = WALKindSessionLive
+				}
+			}
 			return nil
+		})
+		if wireErr != nil {
+			return newFailure(FailureWire, PhaseBacklog, wireErr)
 		}
-		if err := s.writeFrame(frameWALEntry, encodeWALEntry(WALKindBacklog, e.LBA, e.LSN, e.Data)); err != nil {
-			wireErr = err
-			return err
+		if contractErr != nil {
+			return newFailure(FailureContract, PhaseBacklog, contractErr)
 		}
-		if err := s.coordinator.RecordShipped(s.replicaID, e.LSN); err != nil {
-			contractErr = err
-			return err
+		if scanErr != nil {
+			if errors.Is(scanErr, storage.ErrWALRecycled) {
+				return newFailure(FailureWALRecycled, PhaseBacklog, scanErr)
+			}
+			return newFailure(FailureSubstrate, PhaseBacklog, scanErr)
 		}
-		return nil
-	})
-	if wireErr != nil {
-		return newFailure(FailureWire, PhaseBacklog, wireErr)
-	}
-	if contractErr != nil {
-		return newFailure(FailureContract, PhaseBacklog, contractErr)
-	}
-	if scanErr != nil && !errors.Is(scanErr, stop) {
-		// ScanLBAs returns storage.ErrWALRecycled when fromLSN is
-		// below retention. Tier-class escalation: caller must pick
-		// a fresher anchor.
-		if errors.Is(scanErr, storage.ErrWALRecycled) {
-			return newFailure(FailureWALRecycled, PhaseBacklog, scanErr)
-		}
-		return newFailure(FailureSubstrate, PhaseBacklog, scanErr)
-	}
-	return nil
-}
 
-// drainAndSeal atomically takes the live queue and forbids further
-// PushLiveWrite calls (sealed=true under queueMu), then ships every
-// item in LSN order. The atomic take + seal guarantees no concurrent
-// PushLiveWrite can land an entry that misses the drain — either the
-// push happens before the lock and is captured, or after and gets a
-// "sender sealed" error.
-func (s *Sender) drainAndSeal() error {
-	s.queueMu.Lock()
-	queue := s.liveQueue
-	s.liveQueue = nil
-	s.sealed = true
-	s.queueMu.Unlock()
-
-	// Stable sort by LSN ascending.
-	for i := 1; i < len(queue); i++ {
-		j := i
-		for j > 0 && queue[j-1].lsn > queue[j].lsn {
-			queue[j-1], queue[j] = queue[j], queue[j-1]
-			j--
+		// Scan exhausted at this snapshot. Decide: loop again or barrier?
+		_, _, head := s.primaryStore.Boundaries()
+		if cursor < head {
+			// More entries appeared mid-scan. Loop immediately —
+			// don't sleep before re-scanning a known-non-empty range.
+			continue
+		}
+		// cursor == head: caught up at this moment. Verify idle window.
+		select {
+		case <-time.After(s.idleWindow):
+			_, _, headAgain := s.primaryStore.Boundaries()
+			if cursor == headAgain {
+				return nil // barrier ready
+			}
+			// head moved during idle window; loop again.
+		case <-ctx.Done():
+			return newFailure(FailureCancelled, PhaseBacklog, ctx.Err())
 		}
 	}
-
-	for _, item := range queue {
-		if err := s.writeFrame(frameWALEntry, encodeWALEntry(WALKindSessionLive, item.lba, item.lsn, item.data)); err != nil {
-			return newFailure(FailureWire, PhaseDrainSeal, err)
-		}
-		if err := s.coordinator.RecordShipped(s.replicaID, item.lsn); err != nil {
-			return newFailure(FailureContract, PhaseDrainSeal, err)
-		}
-	}
-	return nil
 }
 
 func (s *Sender) writeFrame(t frameType, payload []byte) error {
