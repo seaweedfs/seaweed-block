@@ -53,7 +53,7 @@ func TestE2E_RebuildHappyPath(t *testing.T) {
 	defer replicaConn.Close()
 
 	coord := NewPeerShipCoordinator()
-	sender := NewSender(primary, coord, primaryConn, "r1")
+	sender := NewSenderWithBacklogRelay(primary, coord, primaryConn, "r1")
 	receiver := NewReceiver(replica, replicaConn)
 
 	_, _, primaryH := primary.Boundaries()
@@ -151,7 +151,7 @@ func TestE2E_RebuildWithLiveWritesDuringSession(t *testing.T) {
 	defer replicaConn.Close()
 
 	coord := NewPeerShipCoordinator()
-	sender := NewSender(primary, coord, primaryConn, "r1")
+	sender := NewSenderWithBacklogRelay(primary, coord, primaryConn, "r1")
 	receiver := NewReceiver(replica, replicaConn)
 
 	// Caller-of-Run contract: StartSession before spawning Run.
@@ -288,7 +288,7 @@ func TestE2E_KindCountsPinsBacklogVsLive(t *testing.T) {
 	defer replicaConn.Close()
 
 	coord := NewPeerShipCoordinator()
-	sender := NewSender(primary, coord, primaryConn, "r1")
+	sender := NewSenderWithBacklogRelay(primary, coord, primaryConn, "r1")
 	receiver := NewReceiver(replica, replicaConn)
 
 	if err := coord.StartSession("r1", 17, 0, frozenTarget); err != nil {
@@ -380,7 +380,7 @@ func TestE2E_PinFloorAdvancesIncrementally(t *testing.T) {
 	defer replicaConn.Close()
 
 	coord := NewPeerShipCoordinator()
-	sender := NewSender(primary, coord, primaryConn, "r1")
+	sender := NewSenderWithBacklogRelay(primary, coord, primaryConn, "r1")
 	// Small K so cadence triggers within the 50-LBA backlog.
 	receiver := NewReceiverWithCadence(replica, replicaConn, 8, 50*time.Millisecond)
 
@@ -461,7 +461,7 @@ func TestE2E_PushLiveWriteAtomicSeal(t *testing.T) {
 	defer replicaConn.Close()
 
 	coord := NewPeerShipCoordinator()
-	sender := NewSender(primary, coord, primaryConn, "r1")
+	sender := NewSenderWithBacklogRelay(primary, coord, primaryConn, "r1")
 	receiver := NewReceiver(replica, replicaConn)
 
 	if err := coord.StartSession("r1", 13, 0, frozenTarget); err != nil {

@@ -11,20 +11,19 @@ package recovery
 //     sink interface; transport's WalShipper implements it via duck
 //     typing (no import cycle since interface lives here).
 //
-// P2a scope (this commit, smallest green-on-merge step):
-//   - WalShipperSink interface defined in this package.
-//   - recovery.Sender constructor accepts an OPTIONAL sink. If
-//     sink != nil, Run() delegates pump-shape steps (StartSession,
-//     DrainBacklog, EndSession) to the sink instead of running its
-//     own streamBacklog/drainAndSeal/closeCh.
-//   - Old e2e tests (sink == nil path) are untouched in P2a.
+// P2 — Sender delegates the backlog WAL scan+pump to WalShipperSink.
+// streamBacklog runs only inside the backlog-relay sink (P2b) or legacy
+// NewSender (until P2c). After sink.DrainBacklog, Run still waits on
+// Close and drainAndSeal for PushLiveWrite session tails until P2c.
 //
-// P2b: migrate e2e tests to sink-based.
-// P2c: make sink required; delete streamBacklog/drainAndSeal/etc.
-// P2d: transport-layer integration tests for the two architect-
-//      mandated rules:
-//       1. updateWalShipperEmitContext BEFORE sink.StartSession.
-//       2. After sink.EndSession, restore steady lineage / context.
+// Migration:
+//   - P2b: NewSenderWithBacklogRelay / NewSenderWithSink; e2e uses relay.
+//
+// P2c: make sink required; delete legacy NewSender pump.
+//
+// P2d: transport-layer integration tests for caller obligations:
+//   1. updateWalShipperEmitContext BEFORE sink.StartSession.
+//   2. After sink.EndSession, restore steady lineage / context.
 
 import (
 	"bytes"
@@ -32,9 +31,7 @@ import (
 	"errors"
 	"net"
 	"sync"
-	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
@@ -138,7 +135,7 @@ func (r *recordingSink) snapshot() (startCalls, drainCalls, endCalls int, order 
 // behavior is covered by existing TestE2E_RebuildHappyPath etc.
 // Skipped here by design (those tests still run via legacy path).
 func TestSender_NoSink_FallsBackToLegacyBehavior(t *testing.T) {
-	t.Skip("legacy-path coverage stays in TestE2E_RebuildHappyPath etc. for P2a; this slot is a placeholder for the migration in P2b")
+	t.Skip(`legacy-path coverage: instantiate NewSender (no sink) and exercise streamBacklog in isolation if needed — e2e use NewSenderWithBacklogRelay (P2b)`)
 }
 
 // TestSender_WithSink_DelegatesStartSession — basic delegation.
@@ -149,12 +146,20 @@ func TestSender_NoSink_FallsBackToLegacyBehavior(t *testing.T) {
 // sink.StartSession(fromLSN) at least once. Order is asserted
 // in TestSender_WithSink_DelegationOrder.
 func TestSender_WithSink_DelegatesStartSession(t *testing.T) {
-	sink := newRecordingSink()
-	// Construct a Sender wired to the sink. The exact constructor
-	// signature is the impl decision; we expect a NewSenderWithSink
-	// or NewSenderWithOptions path.
-	_ = sink
-	t.Skip("TODO impl: NewSenderWithSink + Run delegation — drives this test from RED to GREEN")
+	t.Skip("redundant with TestSender_WithSink_DelegationOrder (covers StartSession + ordering)")
+}
+
+func TestNewSenderWithBacklogRelay_installsRelaySink(t *testing.T) {
+	coord := NewPeerShipCoordinator()
+	store := storage.NewBlockStore(4, 4096)
+	prim, replicaEnd := net.Pipe()
+	defer prim.Close()
+	defer replicaEnd.Close()
+	snd := NewSenderWithBacklogRelay(store, coord, prim, "r1")
+	if snd.sink == nil {
+		t.Fatal("NewSenderWithBacklogRelay: expected backlog relay sink")
+	}
+	var _ WalShipperSink = senderBacklogSink{}
 }
 
 // TestSender_WithSink_DelegationOrder — pin the ordering contract.
@@ -194,6 +199,13 @@ func TestSender_WithSink_DelegationOrder(t *testing.T) {
 	sink := newRecordingSink()
 	sender := NewSenderWithSink(primary, coord, primaryConn, "r1", sink)
 	receiver := NewReceiver(replica, replicaConn)
+
+	// After DrainBacklog returns, sink-mode Run waits on closeCh —
+	// unblock it so barrier + sink.EndSession can run.
+	go func() {
+		<-sink.drainCalledCh
+		sender.Close()
+	}()
 
 	var (
 		wg      sync.WaitGroup
@@ -297,12 +309,6 @@ func newMemorywalForTest(t *testing.T, numBlocks uint32, blockSize int) storage.
 	return storage.NewBlockStore(numBlocks, blockSize)
 }
 
-// silence-unused-import shims for placeholder tests still using SKIP.
-var (
-	_ = atomic.Int32{}
-	_ = time.Time{}
-)
-
 // TestSender_WithSink_EndSessionAlwaysCalled — always-cleanup contract.
 //
 // Sink.EndSession MUST be called via defer regardless of how Run
@@ -354,7 +360,5 @@ func TestSender_WithSink_NoStreamBacklogReachable(t *testing.T) {
 	// becomes a compile-time invariant. P2a softer version:
 	// verify recordingSink.drainCalls == 1 AND no frameWALEntry
 	// originates from a non-sink code path.
-	var sinkDrainCalls atomic.Int32
-	_ = sinkDrainCalls
 	t.Skip("TODO impl: sink-installed Sender does NOT run streamBacklog (P2a soft assert; P2c compile-time)")
 }

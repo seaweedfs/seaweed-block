@@ -97,7 +97,7 @@ func (b *PrimaryBridge) StartRebuildSession(ctx context.Context, conn net.Conn, 
 		return fmt.Errorf("recovery bridge: %w", err)
 	}
 
-	sender := NewSender(b.store, b.coord, conn, replicaID)
+	sender := NewSenderWithBacklogRelay(b.store, b.coord, conn, replicaID)
 	b.senders[replicaID] = sender
 	b.mu.Unlock()
 

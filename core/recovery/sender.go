@@ -159,10 +159,13 @@ func NewSender(primaryStore storage.LogicalStorage, coordinator *PeerShipCoordin
 // NewSenderWithSink constructs a sender that delegates the WAL
 // pump to the provided sink. Run() calls sink.StartSession after
 // BaseDone, sink.DrainBacklog to run the pump, and sink.EndSession
-// in defer. The legacy in-package streamBacklog / drainAndSeal /
-// closeCh code path is NOT reached when a sink is installed —
-// that's the architect's "no double live" guard at the recovery
-// layer (mini-plan §4 INV-NO-DOUBLE-LIVE row).
+// in defer. The in-package streamBacklog loop is NOT reached when a
+// sink is installed — that is the architect's "no double live" guard
+// at the recovery layer (mini-plan §4 INV-NO-DOUBLE-LIVE row).
+//
+// After DrainBacklog succeeds, Run still waits on closeCh and runs
+// drainAndSeal (same as legacy) so PushLiveWrite session-lane entries
+// converge until P2c routes live traffic through WalShipper.
 //
 // `sink` MUST be non-nil. For the legacy fallback, use NewSender.
 func NewSenderWithSink(primaryStore storage.LogicalStorage, coordinator *PeerShipCoordinator, conn io.ReadWriter, replicaID ReplicaID, sink WalShipperSink) *Sender {
@@ -174,6 +177,44 @@ func NewSenderWithSink(primaryStore storage.LogicalStorage, coordinator *PeerShi
 	}
 	s := NewSender(primaryStore, coordinator, conn, replicaID)
 	s.sink = sink
+	return s
+}
+
+// senderBacklogSink adapts Sender's legacy streamBacklog pump to
+// WalShipperSink. P2b uses it to migrate e2e tests onto the sink
+// branch without changing recovery wire format (receiver still expects
+// frameWALEntry). Production P2d replaces this with transport.WalShipper
+// once dual-lane + MsgShipEntry context is wired.
+//
+// StartSession / EndSession are no-ops: session bounds live on Sender
+// (fromLSN/targetLSN set at Run entry); rewind semantics belong on the
+// real WalShipper sink in transport.
+type senderBacklogSink struct {
+	s *Sender
+}
+
+func (w senderBacklogSink) StartSession(fromLSN uint64) error {
+	_ = fromLSN
+	return nil
+}
+
+func (w senderBacklogSink) DrainBacklog(ctx context.Context) error {
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	return w.s.streamBacklog()
+}
+
+func (w senderBacklogSink) EndSession() {}
+
+// NewSenderWithBacklogRelay constructs a Sender whose WalShipperSink
+// replays WAL via streamBacklog (same frames as legacy NewSender).
+// Prefer this over legacy NewSender in tests and bridge code migrating
+// to the sink-first Run branch (P2b); production eventually uses
+// NewSenderWithSink with a transport WalShipper adapter (P2d).
+func NewSenderWithBacklogRelay(primaryStore storage.LogicalStorage, coordinator *PeerShipCoordinator, conn io.ReadWriter, replicaID ReplicaID) *Sender {
+	s := NewSender(primaryStore, coordinator, conn, replicaID)
+	s.sink = senderBacklogSink{s: s}
 	return s
 }
 
@@ -301,15 +342,16 @@ func (s *Sender) Run(ctx context.Context, sessionID, fromLSN, targetLSN uint64) 
 
 	// Step 5–7: WAL pump.
 	//
-	// Sink-mode (P2a, mini-plan §3 P2): delegate StartSession +
-	// DrainBacklog to the injected sink. EndSession is fired in
-	// defer below. The legacy in-package streamBacklog/closeCh-wait/
-	// drainAndSeal sequence is NOT reached when sink != nil — that's
-	// the architect's "no double live" guard at the recovery layer.
+	// Sink-mode (P2): delegate StartSession + DrainBacklog to the
+	// injected sink — streamBacklog is not called here (no duplicate
+	// WAL scan; mini-plan §4 INV-NO-DOUBLE-LIVE). EndSession defer
+	// brackets the session.
 	//
-	// Legacy mode: in-package WAL pump (streamBacklog + closeCh
-	// wait + drainAndSeal). Removed in P2c once all callers
-	// migrate to NewSenderWithSink.
+	// After DrainBacklog (sink or legacy pump), Run still waits on
+	// closeCh and runs drainAndSeal so PushLiveWrite session-lane
+	// tails ship before barrier (until P2c routes live via WalShipper).
+	//
+	// Legacy mode (P2c removes this branch): direct streamBacklog.
 	if s.sink != nil {
 		// Defer EndSession FIRST so it runs on every exit path
 		// after this point — including success path AND the
@@ -334,6 +376,14 @@ func (s *Sender) Run(ctx context.Context, sessionID, fromLSN, targetLSN uint64) 
 		// (kickoff Q3 ratified Phase enum collapse to {Idle, Active}).
 		// Skip the transition step; barrier-ack is the only
 		// authoritative completion signal.
+		select {
+		case <-s.closeCh:
+		case <-ctx.Done():
+			return 0, newFailure(FailureCancelled, PhaseAwaitClose, ctx.Err())
+		}
+		if err := s.drainAndSeal(); err != nil {
+			return 0, err
+		}
 	} else {
 		// Legacy mode (P2c removes this branch):
 		if err := s.streamBacklog(); err != nil {
