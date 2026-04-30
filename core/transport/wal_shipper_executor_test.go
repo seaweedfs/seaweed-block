@@ -166,13 +166,36 @@ func TestBlockExecutor_Ship_AdvancesWalShipperCursor(t *testing.T) {
 	}
 }
 
-// TestBlockExecutor_WalShipperFor_StableUnderConcurrent_Ship —
-// strong INV-SINGLE under concurrent Ship() to same replica.
+// TestBlockExecutor_WalShipperRegistry_StableUnderConcurrent_Ship —
+// REGISTRY stability under concurrent Ship() load. NOT a lossless-
+// emit test.
 //
-// Concurrent Ship() calls for replicaID=r1 must all funnel through
-// the SAME WalShipper instance. If the registry races and creates a
-// second WalShipper, INV-SINGLE is violated.
-func TestBlockExecutor_WalShipperFor_StableUnderConcurrent_Ship(t *testing.T) {
+// Architect P1 review (2026-04-29 #2): concurrent Ship() calls for
+// the SAME replicaID is NOT the production contract — production
+// serializes fan-out via `ReplicationVolume.OnLocalWrite`'s `v.mu`
+// held across the whole peer loop ("Condition A" in volume.go).
+// Realtime's `if lsn <= s.cursor { return nil }` is correct under
+// that serialization but DROPS out-of-order concurrent ships in
+// this test. Specifically: if goroutine A ships LSN=5 after
+// goroutine B already shipped LSN=10, A's emit is silently dropped
+// and cursor stays at 10.
+//
+// What this test pins:
+//   - INV-SINGLE registry: WalShipperFor returns the SAME instance
+//     under concurrent Ship load (no registry race / second instance).
+//   - cursor advances to SOMETHING ≤ maxLSN (cannot be 0 — at least
+//     one Ship landed).
+//
+// What this test does NOT pin:
+//   - "All 200 LSNs reach the wire" — would require serialized Ship
+//     (production-mirror pattern) OR a recording EmitFunc that counts
+//     successful WriteMsg. Lossless-emit is INV-NO-DOUBLE-LIVE +
+//     production volume.mu serialization, NOT the registry.
+//
+// Replacement test (production-mirror, serialized) lives in P2 e2e
+// when recovery.Sender + walShipper integrate; cursor==maxLSN there
+// IS lossless because LSN order matches Ship order.
+func TestBlockExecutor_WalShipperRegistry_StableUnderConcurrent_Ship(t *testing.T) {
 	primary := memorywal.NewStore(64, 4096)
 	exec := NewBlockExecutor(primary, "")
 
@@ -226,10 +249,19 @@ func TestBlockExecutor_WalShipperFor_StableUnderConcurrent_Ship(t *testing.T) {
 		t.Errorf("concurrent Ship: WalShipperFor(r1) returned different instance after load (registry race)")
 	}
 
-	// Cursor should be at the highest LSN any Ship saw.
+	// Cursor advanced from 0. We deliberately do NOT assert
+	// cursor == maxLSN here: out-of-order concurrent Ship
+	// (non-production scenario; production serializes via volume.mu)
+	// can have lower-LSN goroutines silently idempotent-skip when a
+	// higher LSN already advanced cursor. cursor ≤ maxLSN is the
+	// only honest bound. Lossless-emit pinning belongs to P2 e2e
+	// with serialized Ship.
 	const maxLSN = uint64(writers * perWriter)
-	if got := expected.Cursor(); got != maxLSN {
-		t.Errorf("after %d concurrent Ships: cursor=%d want %d (some emit was lost or out of order)",
-			writers*perWriter, got, maxLSN)
+	cursor := expected.Cursor()
+	if cursor == 0 {
+		t.Errorf("after %d concurrent Ships: cursor=0 (no Ship landed at all)", writers*perWriter)
+	}
+	if cursor > maxLSN {
+		t.Errorf("cursor=%d > maxLSN=%d (impossible — bug)", cursor, maxLSN)
 	}
 }

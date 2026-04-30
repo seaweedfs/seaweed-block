@@ -49,15 +49,28 @@ type BlockExecutor struct {
 }
 
 // walShipperEntry pairs a per-replica WalShipper with its mutable
-// wire context (the conn that the WalShipper's EmitFunc will write
-// to at emit time). Ship() updates entry.emitConn under
-// emitCtxMu before delegating to the shipper; the EmitFunc reads
-// emitConn under the same mutex.
+// wire-emit context (conn + lineage). Ship() / recovery-session
+// initialization updates the context under emitCtxMu before delegating
+// to the shipper; the EmitFunc reads it under the same mutex.
+//
+// Architect P1 review (2026-04-29 #1): encoding MUST happen INSIDE
+// the EmitFunc, not by the caller before NotifyAppend. WalShipper
+// hands `(lba, lsn, raw block bytes)` to EmitFunc; EmitFunc owns
+// `EncodeShipEntry` so both steady-state Ship() AND backlog scan
+// (recovery.Sender via DrainBacklog, P2) feed the SAME EmitFunc
+// shape — one encoding seam, one wire frame type.
+//
+// emitLineage is the lineage used for `EncodeShipEntry`. For
+// steady-state ship, Ship() updates it from the active session per
+// call. For recovery-session backlog (P2), the session-installer
+// updates it from the session's lineage at StartSession time and
+// restores steady lineage at EndSession.
 type walShipperEntry struct {
 	shipper *WalShipper
 
-	emitCtxMu sync.Mutex
-	emitConn  net.Conn
+	emitCtxMu   sync.Mutex
+	emitConn    net.Conn
+	emitLineage RecoveryLineage
 }
 
 // DualLaneConfig holds the wiring for routing StartRebuild through
@@ -574,12 +587,26 @@ func (e *BlockExecutor) WalShipperFor(replicaID string) *WalShipper {
 	emit := func(lba uint32, lsn uint64, data []byte) error {
 		entry.emitCtxMu.Lock()
 		conn := entry.emitConn
+		lineage := entry.emitLineage
 		entry.emitCtxMu.Unlock()
 		if conn == nil {
 			return fmt.Errorf("transport: WalShipper for replica %s has no conn", replicaID)
 		}
+		// Encoding lives HERE (architect P1 review #1): WalShipper
+		// hands raw `(lba, lsn, data)` tuples; EmitFunc owns
+		// `EncodeShipEntry` so steady Ship() + backlog ScanLBAs
+		// both produce the same MsgShipEntry frame shape on the
+		// wire. Without this, P2's DrainBacklog would ship raw
+		// substrate bytes that the replica's MsgShipEntry handler
+		// can't decode.
+		payload := EncodeShipEntry(ShipEntry{
+			Lineage: lineage,
+			LBA:     lba,
+			LSN:     lsn,
+			Data:    data,
+		})
 		_ = conn.SetWriteDeadline(time.Now().Add(shipWriteDeadline))
-		err := WriteMsg(conn, MsgShipEntry, data)
+		err := WriteMsg(conn, MsgShipEntry, payload)
 		_ = conn.SetWriteDeadline(time.Time{})
 		return err
 	}
@@ -593,12 +620,22 @@ func (e *BlockExecutor) WalShipperFor(replicaID string) *WalShipper {
 	return s
 }
 
-// updateWalShipperConn sets the wire conn that the per-replica
-// WalShipper's EmitFunc will use on its next emit. Ship() calls this
-// before delegating NotifyAppend; the EmitFunc reads emitConn at
-// emit time. No-op if the WalShipper hasn't been created yet (caller
-// will create it via WalShipperFor and re-call).
-func (e *BlockExecutor) updateWalShipperConn(replicaID string, conn net.Conn) {
+// updateWalShipperEmitContext sets the wire conn + lineage that the
+// per-replica WalShipper's EmitFunc will use on its next emit.
+// Ship() calls this before delegating NotifyAppend; the EmitFunc
+// reads emitConn + emitLineage at emit time and `EncodeShipEntry`
+// the (raw block bytes, lineage) → MsgShipEntry payload.
+//
+// Ordering invariant (architect P1 review #3): every code path
+// that ends in an emit (steady Ship, future recovery-session
+// backlog DrainBacklog, future Activate) MUST refresh this
+// context BEFORE the call that may emit. Otherwise EmitFunc emits
+// with stale lineage / nil conn. P2 wiring of recovery.Sender
+// must call this from the session-installer before StartSession.
+//
+// No-op if the WalShipper hasn't been created yet (caller will
+// create via WalShipperFor and re-call).
+func (e *BlockExecutor) updateWalShipperEmitContext(replicaID string, conn net.Conn, lineage RecoveryLineage) {
 	e.walShipperMu.Lock()
 	entry, ok := e.walShippers[replicaID]
 	e.walShipperMu.Unlock()
@@ -607,8 +644,17 @@ func (e *BlockExecutor) updateWalShipperConn(replicaID string, conn net.Conn) {
 	}
 	entry.emitCtxMu.Lock()
 	entry.emitConn = conn
+	entry.emitLineage = lineage
 	entry.emitCtxMu.Unlock()
 }
+
+// Registry lifecycle note (architect P1 review #4): walShippers
+// entries are never torn down today. For replica churn, lineage
+// invalidation, or executor reuse across distinct peer
+// generations, P3+ may add an explicit Forget(replicaID) /
+// teardown hook. Out of scope for MVP since current call sites
+// (cmd/blockvolume, tests) construct one BlockExecutor per
+// (volume, replica) lifecycle.
 
 func (e *BlockExecutor) registerSession(lineage RecoveryLineage) (*activeSession, error) {
 	e.mu.Lock()

@@ -114,25 +114,23 @@ func (e *BlockExecutor) Ship(replicaID string, lineage RecoveryLineage, lba uint
 		}
 	}
 
-	payload := EncodeShipEntry(ShipEntry{
-		Lineage: lineage,
-		LBA:     lba,
-		LSN:     lsn,
-		Data:    data,
-	})
-
-	// P1 delegation: the WAL emit decision (whether/when this LSN
-	// actually goes on the wire) belongs to the per-replica
-	// WalShipper, not directly to Ship. We update the shipper's
-	// emit-conn context with the conn we just resolved (above), then
-	// hand the encoded payload to NotifyAppend. The shipper's
-	// EmitFunc will WriteMsg under shipMu — INV-NO-DOUBLE-LIVE +
-	// INV-MONOTONIC-CURSOR enforced at one place.
+	// P1 delegation (architect P1 review #1 — encoding seam fix):
+	// hand RAW `(lba, lsn, data)` to the per-replica WalShipper. The
+	// shipper's EmitFunc owns `EncodeShipEntry` so the wire-frame
+	// shape is the SAME whether the bytes came from steady-state
+	// Ship() (here) or backlog ScanLBAs (P2 DrainBacklog). One
+	// encoding seam = one wire format.
+	//
+	// Update the emit context (conn + lineage) BEFORE NotifyAppend
+	// per the ordering invariant in updateWalShipperEmitContext doc.
+	// The shipper's EmitFunc will WriteMsg under shipMu —
+	// INV-NO-DOUBLE-LIVE + INV-MONOTONIC-CURSOR enforced at one
+	// place.
 	//
 	// Per v3-recovery-wal-shipper-mini-plan.md §3 P1.
 	s := e.WalShipperFor(replicaID)
-	e.updateWalShipperConn(replicaID, conn)
-	if err := s.NotifyAppend(lba, lsn, payload); err != nil {
+	e.updateWalShipperEmitContext(replicaID, conn, lineage)
+	if err := s.NotifyAppend(lba, lsn, data); err != nil {
 		return fmt.Errorf("transport: ship: write failed replica=%s lsn=%d: %w",
 			replicaID, lsn, err)
 	}
