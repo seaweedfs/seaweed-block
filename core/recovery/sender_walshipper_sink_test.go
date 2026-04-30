@@ -36,21 +36,30 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
+// notifyAppendCall captures one NotifyAppend invocation for assertions.
+type notifyAppendCall struct {
+	lba  uint32
+	lsn  uint64
+	data []byte
+}
+
 // recordingSink is a mock WalShipperSink that captures call order
 // + arguments. Tests assert against the recorded log to pin
 // delegation ordering.
 type recordingSink struct {
 	mu sync.Mutex
 
-	startCalls    int
-	startFromLSNs []uint64
-	drainCalls    int
-	endCalls      int
-	callOrder     []string // sequence of method names
+	startCalls        int
+	startFromLSNs     []uint64
+	drainCalls        int
+	endCalls          int
+	notifyAppendCalls []notifyAppendCall
+	callOrder         []string // sequence of method names
 
 	// Test injection knobs.
-	startErr error
-	drainErr error
+	startErr        error
+	drainErr        error
+	notifyAppendErr error
 
 	// drainBlocksUntil is closed by the test to release a blocked
 	// DrainBacklog call. nil = return immediately.
@@ -117,12 +126,31 @@ func (r *recordingSink) EndSession() {
 	r.mu.Unlock()
 }
 
+func (r *recordingSink) NotifyAppend(lba uint32, lsn uint64, data []byte) error {
+	r.mu.Lock()
+	cp := make([]byte, len(data))
+	copy(cp, data)
+	r.notifyAppendCalls = append(r.notifyAppendCalls, notifyAppendCall{lba: lba, lsn: lsn, data: cp})
+	r.callOrder = append(r.callOrder, "NotifyAppend")
+	err := r.notifyAppendErr
+	r.mu.Unlock()
+	return err
+}
+
 func (r *recordingSink) snapshot() (startCalls, drainCalls, endCalls int, order []string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	o := make([]string, len(r.callOrder))
 	copy(o, r.callOrder)
 	return r.startCalls, r.drainCalls, r.endCalls, o
+}
+
+func (r *recordingSink) snapshotNotifyAppend() []notifyAppendCall {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]notifyAppendCall, len(r.notifyAppendCalls))
+	copy(out, r.notifyAppendCalls)
+	return out
 }
 
 // TestNewSenderWithSink_NilSinkPanics — P2c-slice A: sink is mandatory.
@@ -368,4 +396,124 @@ func TestSender_WithSink_NoStreamBacklogReachable(t *testing.T) {
 	// verify recordingSink.drainCalls == 1 AND no frameWALEntry
 	// originates from a non-sink code path.
 	t.Skip("TODO impl: sink-installed Sender does NOT run streamBacklog (P2a soft assert; P2c compile-time)")
+}
+
+// TestSender_PushLiveWrite_RoutesViaSinkNotifyAppend — P2c-slice B-1:
+// the single live path. recovery.Sender.PushLiveWrite is the recovery-
+// layer entry point for RouteSessionLane writes; after slice B-1 it
+// MUST delegate to s.sink.NotifyAppend instead of touching liveQueue
+// directly. The sink — production transport WalShipper or bridging
+// senderBacklogSink — owns the buffering / ordering discipline.
+//
+// What this test pins:
+//   - PushLiveWrite invokes sink.NotifyAppend exactly once per call.
+//   - lba/lsn/data are forwarded verbatim (caller's bytes; sink
+//     decides whether to copy).
+//   - When sink.NotifyAppend returns error, PushLiveWrite returns it
+//     (caller surfaces the failure to the engine).
+//
+// What this test does NOT pin (slice B-2 / P2d concerns):
+//   - Whether liveQueue / drainAndSeal scaffolding is removed.
+//   - Wire format of session-live frames (frameWALEntry vs MsgShipEntry).
+func TestSender_PushLiveWrite_RoutesViaSinkNotifyAppend(t *testing.T) {
+	coord := NewPeerShipCoordinator()
+	store := storage.NewBlockStore(4, 4096)
+	prim, replicaEnd := net.Pipe()
+	defer prim.Close()
+	defer replicaEnd.Close()
+
+	sink := newRecordingSink()
+	sender := NewSenderWithSink(store, coord, prim, "r1", sink)
+
+	// Three live writes during a hypothetical session window.
+	calls := []notifyAppendCall{
+		{lba: 0, lsn: 100, data: []byte{0xAA, 0xBB}},
+		{lba: 1, lsn: 101, data: []byte{0xCC}},
+		{lba: 2, lsn: 102, data: []byte{0xDD, 0xEE, 0xFF}},
+	}
+	for _, c := range calls {
+		if err := sender.PushLiveWrite(c.lba, c.lsn, c.data); err != nil {
+			t.Fatalf("PushLiveWrite(lba=%d lsn=%d): %v", c.lba, c.lsn, err)
+		}
+	}
+
+	got := sink.snapshotNotifyAppend()
+	if len(got) != len(calls) {
+		t.Fatalf("sink.NotifyAppend called %d times; want %d (PushLiveWrite must route via sink)", len(got), len(calls))
+	}
+	for i, want := range calls {
+		if got[i].lba != want.lba || got[i].lsn != want.lsn {
+			t.Errorf("call %d: got lba=%d lsn=%d, want lba=%d lsn=%d",
+				i, got[i].lba, got[i].lsn, want.lba, want.lsn)
+		}
+		if !bytes.Equal(got[i].data, want.data) {
+			t.Errorf("call %d: data mismatch: got=%x want=%x", i, got[i].data, want.data)
+		}
+	}
+
+	// Error propagation: when sink.NotifyAppend errors, PushLiveWrite
+	// surfaces the error to the caller.
+	sink.mu.Lock()
+	sink.notifyAppendErr = errors.New("synthetic NotifyAppend failure")
+	sink.mu.Unlock()
+	if err := sender.PushLiveWrite(3, 103, []byte{0x42}); err == nil {
+		t.Errorf("PushLiveWrite did not surface sink.NotifyAppend error")
+	}
+}
+
+// TestSenderBacklogSink_NotifyAppend_BuffersForDrainAndSeal — P2c-slice B-1:
+// bridging-path discipline.
+//
+// Until P2d aligns the wire format (dual-lane frameWALEntry vs legacy
+// MsgShipEntry), senderBacklogSink cannot ship live writes directly to
+// the wire — it would interleave with streamBacklog frames and break
+// the receiver's monotonic-LSN check (architect rule 2: "production
+// discipline / queue under one mutex").
+//
+// senderBacklogSink.NotifyAppend therefore buffers into the sender's
+// liveQueue (held under queueMu) so drainAndSeal can ship them in LSN
+// order after backlog drain completes. This test pins that contract:
+// after NotifyAppend, liveQueue holds the entry; drainAndSeal would
+// flush it on the wire path.
+//
+// When P2d swaps in a real transport.WalShipper sink, NotifyAppend
+// will route to WalShipper.NotifyAppend (Backlog mode lag-tracking;
+// Realtime direct ship under shipMu) — at which point the liveQueue
+// scaffolding can go (slice B-2).
+func TestSenderBacklogSink_NotifyAppend_BuffersForDrainAndSeal(t *testing.T) {
+	coord := NewPeerShipCoordinator()
+	store := storage.NewBlockStore(4, 4096)
+	prim, replicaEnd := net.Pipe()
+	defer prim.Close()
+	defer replicaEnd.Close()
+
+	sender := NewSenderWithBacklogRelay(store, coord, prim, "r1")
+
+	// Push two live writes via the public PushLiveWrite path; this
+	// goes Sender.PushLiveWrite → sink.NotifyAppend → buffer.
+	if err := sender.PushLiveWrite(7, 200, []byte{0x11, 0x22}); err != nil {
+		t.Fatalf("PushLiveWrite: %v", err)
+	}
+	if err := sender.PushLiveWrite(8, 201, []byte{0x33}); err != nil {
+		t.Fatalf("PushLiveWrite: %v", err)
+	}
+
+	// Buffer accessor: read sender's liveQueue under queueMu. This
+	// is a white-box check — the buffering location is the slice B-1
+	// stopgap. Once a real WalShipper sink replaces the bridging path
+	// (slice B-2), the queue goes away and this test goes with it.
+	sender.queueMu.Lock()
+	bufLen := len(sender.liveQueue)
+	var lsns []uint64
+	for _, w := range sender.liveQueue {
+		lsns = append(lsns, w.lsn)
+	}
+	sender.queueMu.Unlock()
+
+	if bufLen != 2 {
+		t.Errorf("liveQueue len=%d, want 2 (NotifyAppend must buffer in bridging path)", bufLen)
+	}
+	if len(lsns) != 2 || lsns[0] != 200 || lsns[1] != 201 {
+		t.Errorf("liveQueue LSNs=%v, want [200 201]", lsns)
+	}
 }

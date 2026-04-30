@@ -108,11 +108,19 @@ type walItem struct {
 }
 
 // WalShipperSink is the abstract WAL-pump surface that Sender
-// delegates to in P2 (mini-plan §3 P2). When provided, Run() invokes:
+// delegates to. Run() invokes the session bracket:
 //
 //   1. StartSession(fromLSN) — before any WAL emission begins
 //   2. DrainBacklog(ctx)     — runs until cursor catches head
 //   3. EndSession()          — defer-fired regardless of exit path
+//
+// Plus the live-write API for RouteSessionLane traffic during the
+// session (P2c-slice B-1 — single live path):
+//
+//   4. NotifyAppend(lba, lsn, data) — primary's WAL append handed
+//      to the sink. Sink decides whether to ship directly (production
+//      WalShipper Realtime mode) or buffer for ordered drain (bridging
+//      senderBacklogSink). Sender.PushLiveWrite routes here.
 //
 // Implementations live OUTSIDE this package (transport.WalShipper
 // satisfies it via duck typing — no import cycle since the
@@ -120,7 +128,7 @@ type walItem struct {
 // wire format, lineage, or coord state — those are sink-side
 // concerns. Sink decides where bytes go (legacy port MsgShipEntry
 // vs dual-lane port frameWALEntry); Sender just orchestrates the
-// session bracket around the pump.
+// session bracket and routes live writes through.
 //
 // Architect P1 review (2026-04-29) integration rules — must hold at
 // the layer that constructs the sink:
@@ -136,6 +144,7 @@ type WalShipperSink interface {
 	StartSession(fromLSN uint64) error
 	DrainBacklog(ctx context.Context) error
 	EndSession()
+	NotifyAppend(lba uint32, lsn uint64, data []byte) error
 }
 
 // newSender is the private builder used by both sink-installing
@@ -185,6 +194,16 @@ func NewSenderWithSink(primaryStore storage.LogicalStorage, coordinator *PeerShi
 // StartSession / EndSession are no-ops: session bounds live on Sender
 // (fromLSN/targetLSN set at Run entry); rewind semantics belong on the
 // real WalShipper sink in transport.
+//
+// NotifyAppend (P2c-slice B-1) buffers live writes in the sender's
+// liveQueue under queueMu — production discipline (architect rule 2)
+// because streamBacklog runs as a one-shot ScanLBAs scan and direct
+// wire emit during the scan would interleave LSNs and break the
+// receiver's monotonic check. drainAndSeal flushes the queue in LSN
+// order after backlog drain. When P2d swaps in a real transport
+// WalShipper sink, NotifyAppend will route to WalShipper.NotifyAppend
+// (Backlog mode lag-tracking; Realtime direct ship under shipMu) and
+// the buffer becomes redundant (slice B-2 deletion).
 type senderBacklogSink struct {
 	s *Sender
 }
@@ -202,6 +221,10 @@ func (w senderBacklogSink) DrainBacklog(ctx context.Context) error {
 }
 
 func (w senderBacklogSink) EndSession() {}
+
+func (w senderBacklogSink) NotifyAppend(lba uint32, lsn uint64, data []byte) error {
+	return w.s.bufferLiveWriteLocked(lba, lsn, data)
+}
 
 // NewSenderWithBacklogRelay constructs a Sender whose WalShipperSink
 // replays WAL via streamBacklog using the in-package backlog relay
@@ -238,12 +261,30 @@ func (s *Sender) Close() {
 // `coordinator.RouteLocalWrite(replicaID, lsn)` and confirmed the
 // routing is RouteSessionLane; this method does not double-check.
 //
-// Live writes are buffered until the backlog drain phase finishes,
-// then flushed in LSN order before barrier. POC simplification —
-// in production the sender would interleave them with backlog by
-// LSN order in real time. Spec §3.2 #3 (single ordered queue) is
-// preserved at the level of "post-backlog drain, before barrier".
+// P2c-slice B-1: routes through the sink's NotifyAppend so the live
+// path is uniform with the sink's other emit surfaces. The sink owns
+// buffering / ordering discipline:
+//
+//   - Bridging path (senderBacklogSink): buffer in liveQueue,
+//     drainAndSeal flushes in LSN order after backlog completes.
+//     Production discipline per architect rule 2 — required until
+//     P2d aligns dual-lane wire format.
+//   - Real transport WalShipper sink (P2d): NotifyAppend routes
+//     directly to WalShipper.NotifyAppend; ordering comes from
+//     shipMu + Backlog/Realtime mode design.
 func (s *Sender) PushLiveWrite(lba uint32, lsn uint64, data []byte) error {
+	return s.sink.NotifyAppend(lba, lsn, data)
+}
+
+// bufferLiveWriteLocked is the senderBacklogSink-side buffer entry.
+// Acquires queueMu, rejects after seal, copies data, appends to
+// liveQueue. drainAndSeal consumes it in LSN order after backlog.
+//
+// Lives on Sender (not senderBacklogSink) so the buffer state — same
+// queueMu, sealed, liveQueue, walItem — stays co-located with the
+// drainAndSeal flush. When the bridging sink is replaced by a real
+// transport WalShipper sink (P2d), this method goes with the queue.
+func (s *Sender) bufferLiveWriteLocked(lba uint32, lsn uint64, data []byte) error {
 	s.queueMu.Lock()
 	defer s.queueMu.Unlock()
 	if s.sealed {
