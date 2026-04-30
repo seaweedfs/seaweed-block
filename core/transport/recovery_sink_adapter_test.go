@@ -49,6 +49,13 @@ type recordedEmit struct {
 //
 // Returns a pointer to a slice the test consumes; callers must
 // hold the test's mutex while reading.
+//
+// TEST-ONLY / single-goroutine: the entry.shipper assignment below
+// does NOT acquire walShipperMu. Production paths (WalShipperFor,
+// updateWalShipperEmitContext) take that mutex; this helper bypasses
+// it deliberately because tests run before any concurrent access.
+// Do not lift this pattern into production code or concurrent test
+// scenarios without re-introducing the lock.
 func installRecordingShipper(t *testing.T, e *BlockExecutor, replicaID string) (*[]recordedEmit, *sync.Mutex) {
 	t.Helper()
 

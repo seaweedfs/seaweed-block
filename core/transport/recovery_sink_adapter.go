@@ -61,6 +61,20 @@ type RecoverySink struct {
 // NewRecoverySink ensures the WalShipperEntry exists (via
 // WalShipperFor) so the emit-context update in StartSession has
 // somewhere to land.
+//
+// Caller obligations:
+//
+//   - Defer EndSession at the call site that calls StartSession.
+//     If StartSession returns an error, the emit context has already
+//     been swapped to session — only the deferred EndSession restores
+//     steady. (recovery.Sender.Run defers sink.EndSession; production
+//     callers using NewRecoverySink directly must do the same.)
+//   - The caller is responsible for snapshotting the steady context
+//     correctly. Passing nil sessionConn is a programmer error
+//     (Realtime emits during the session would have nowhere to go);
+//     passing nil steadyConn is honest only when no steady ship was
+//     in flight before this session — the next steady emit will see
+//     "no conn" and fail closed at the EmitFunc level.
 func NewRecoverySink(
 	e *BlockExecutor,
 	replicaID string,
