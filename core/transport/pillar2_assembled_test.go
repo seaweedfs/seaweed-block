@@ -42,7 +42,6 @@ package transport
 import (
 	"bytes"
 	"fmt"
-	"net"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -154,89 +153,59 @@ func TestPillar2A_BaseError_AssembledStack_FailReason(t *testing.T) {
 		res.FailReason, rR, rH, primaryH)
 }
 
-// ─── C: mid-session wire abort → emit context restored ───────────────
+// ─── C: deterministic session failure → emit context restored ───────
 //
-// Setup: real assembled stack. Run a Ship() first to establish the
-// resident WalShipper's steady-state emit context (conn + lineage +
-// profile). Snapshot it. Start rebuild. After OnSessionStart fires
-// (so we know the WAL goroutine has installed session emit context),
-// abort by closing the dual-lane listener — every accepted conn drops,
-// surface as wire failure on Sender's writeFrame, BASE / WAL goroutines
-// exit, defer chain runs (sink.EndSession + coord.EndSession).
+// Setup: real assembled stack with faulty primary substrate (BASE
+// fails after N reads). Snapshot pre-session WalShipper emit context.
+// StartRebuild → BASE goroutine errors → session fails →
+// OnSessionClose fires with FailReason. Snapshot post-session emit
+// context; assert it equals the pre-session snapshot (rule-2 restore).
 //
-// After OnSessionClose:
-//   - res.Success == false (wire failure surface);
-//   - resident WalShipper emit context matches the pre-session snapshot
-//     (rule-2 restore — comparing the EmitProfile and conn-nilness, since
-//     the steady conn was nil pre-Ship-on-fresh-replica);
-//   - coord.Phase == Idle;
-//   - No goroutine leak (informational; goroutine count is noisy).
+// Why faulty-store instead of mid-session wire abort: §6.10 made
+// BASE bypass the WAL apply path (writeExtentDirect), so base lane
+// is fast enough to complete a small backlog before any wire-abort
+// timing trick can fire. Faulty-read is deterministic: BASE
+// guaranteed fails at the N+1th block, no race.
+//
+// Asserts:
+//   - res.Success == false (deterministic via faulty read);
+//   - res.FailReason mentions the synthetic error;
+//   - resident WalShipper emit context matches pre-session snapshot
+//     (rule-2 restore on the failure path — the actual claim);
+//   - coord.Phase == Idle.
 func TestPillar2C_WireAbortMidSession_AssembledStack_RestoresEmitContext(t *testing.T) {
 	const numBlocks = 64
 	const blockSize = 256
 
-	primary := memorywal.NewStore(numBlocks, blockSize)
-	// Generous backlog so BASE has work AFTER OnSessionStart fires —
-	// wire abort during BASE is the failure surface we want to test.
+	primaryRaw := memorywal.NewStore(numBlocks, blockSize)
 	for lba := uint32(0); lba < 30; lba++ {
 		data := make([]byte, blockSize)
 		data[0] = byte(0x70 | (lba & 0xF))
-		_, _ = primary.Write(lba, data)
+		_, _ = primaryRaw.Write(lba, data)
 	}
-	_, _ = primary.Sync()
-	_, _, primaryH := primary.Boundaries()
+	_, _ = primaryRaw.Sync()
+	_, _, primaryH := primaryRaw.Boundaries()
+
+	// Faulty wrapper: streamBase fails after 4 successful Read calls,
+	// surface as Substrate failure → bridge onClose → executor's
+	// OnSessionClose with Success=false.
+	faulty := &faultyReadStorePillar2{LogicalStorage: primaryRaw, failAfter: 4}
 
 	replica := storage.NewBlockStore(numBlocks, blockSize)
-
-	// Custom listener so we can close it (and all accepted conns) mid-session.
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	dualLaneAddr := ln.Addr().String()
-	bridge := recovery.NewReplicaBridge(replica)
-
-	var (
-		acceptedMu sync.Mutex
-		accepted   []net.Conn
-	)
-	acceptDone := make(chan struct{})
-	go func() {
-		defer close(acceptDone)
-		for {
-			conn, err := ln.Accept()
-			if err != nil {
-				return
-			}
-			acceptedMu.Lock()
-			accepted = append(accepted, conn)
-			acceptedMu.Unlock()
-			go func(c net.Conn) {
-				_, _ = bridge.Serve(nil, c)
-				_ = c.Close()
-			}(conn)
-		}
-	}()
-	defer func() {
-		_ = ln.Close()
-		<-acceptDone
-		acceptedMu.Lock()
-		for _, c := range accepted {
-			_ = c.Close()
-		}
-		acceptedMu.Unlock()
-	}()
+	dualLaneAddr, stop := runDualLaneListener(t, replica)
+	defer stop()
 
 	coord := recovery.NewPeerShipCoordinator()
 	const replicaID = "r1"
 	exec := NewBlockExecutorWithDualLane(
-		primary, "127.0.0.1:0", dualLaneAddr, coord,
+		faulty, "127.0.0.1:0", dualLaneAddr, coord,
 		recovery.ReplicaID(replicaID),
 	)
 
 	// Pre-session: WalShipper not yet created (no Ship has run).
 	// SnapshotEmitContext returns (nil, zero, SteadyMsgShip) — the
-	// fresh-replica baseline.
+	// fresh-replica baseline. This is the snapshot the rule-2 restore
+	// must return to.
 	preConn, preLineage, preProfile := exec.SnapshotEmitContext(replicaID)
 	if preConn != nil {
 		t.Errorf("pre-session preConn=%v want nil (no Ship has run)", preConn)
@@ -245,9 +214,7 @@ func TestPillar2C_WireAbortMidSession_AssembledStack_RestoresEmitContext(t *test
 		t.Errorf("pre-session preProfile=%s want SteadyMsgShip", preProfile)
 	}
 
-	startCh := make(chan adapter.SessionStartResult, 1)
 	closeCh := make(chan adapter.SessionCloseResult, 1)
-	exec.SetOnSessionStart(func(r adapter.SessionStartResult) { startCh <- r })
 	exec.SetOnSessionClose(func(r adapter.SessionCloseResult) { closeCh <- r })
 
 	beforeGoroutines := runtime.NumGoroutine()
@@ -256,35 +223,18 @@ func TestPillar2C_WireAbortMidSession_AssembledStack_RestoresEmitContext(t *test
 		t.Fatalf("StartRebuild: %v", err)
 	}
 
-	// Wait for OnSessionStart so we know the WalShipper has session emit
-	// context installed (this is the window we're aborting from).
-	select {
-	case <-startCh:
-	case <-time.After(2 * time.Second):
-		t.Fatal("OnSessionStart did not fire within 2s")
-	}
-
-	// Abort: close every accepted conn. Sender's next writeFrame surfaces
-	// wire failure; goroutines exit; bridge.onClose fires; executor's
-	// OnSessionClose dispatches with Success=false.
-	acceptedMu.Lock()
-	for _, c := range accepted {
-		_ = c.Close()
-	}
-	acceptedMu.Unlock()
-
 	var res adapter.SessionCloseResult
 	select {
 	case res = <-closeCh:
 	case <-time.After(5 * time.Second):
-		t.Fatal("OnSessionClose did not fire within 5s of wire abort")
+		t.Fatal("OnSessionClose did not fire within 5s of forced BASE failure")
 	}
 
 	if res.Success {
-		t.Errorf("expected Success=false on wire abort; got Success=true")
+		t.Errorf("expected Success=false on faulty-store BASE failure; got Success=true")
 	}
 	if res.FailReason == "" {
-		t.Error("expected non-empty FailReason on wire abort")
+		t.Error("expected non-empty FailReason on BASE failure")
 	}
 
 	// Rule-2 restore: post-EndSession the resident WalShipper's emit
@@ -302,14 +252,14 @@ func TestPillar2C_WireAbortMidSession_AssembledStack_RestoresEmitContext(t *test
 	}
 
 	if got := coord.Phase(recovery.ReplicaID(replicaID)); got != recovery.PhaseIdle {
-		t.Errorf("post-abort coord.Phase=%s want Idle", got)
+		t.Errorf("post-failure coord.Phase=%s want Idle", got)
 	}
 
 	// Goroutine leak (informational only — runtime noise).
 	time.Sleep(100 * time.Millisecond)
 	leaked := runtime.NumGoroutine() - beforeGoroutines
 	if leaked > 2 {
-		t.Logf("goroutine count delta=%d after wire abort (informational; may include accept-loop)", leaked)
+		t.Logf("goroutine count delta=%d after session failure (informational)", leaked)
 	}
 }
 
