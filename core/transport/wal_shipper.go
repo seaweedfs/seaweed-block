@@ -148,10 +148,25 @@ type WalShipperConfig struct {
 	OnSaturation func(replicaID string, lag uint64)
 
 	// DisableTimerDrain, if true, suppresses the C2 §6.8 #4 self-
-	// driving Backlog drain goroutine. Tests that need manual control
-	// over DrainBacklog timing (e.g., R2 saturation tests that drive
-	// lag without letting drain catch up) set this. Production
-	// callers leave it false (default).
+	// driving Backlog drain goroutine.
+	//
+	// PRODUCTION CALLERS MUST LEAVE THIS false. §6.8 #4 is a MUST:
+	// "primary-idle starvation forbidden" — backlog cannot depend
+	// solely on new appends. Setting DisableTimerDrain=true in
+	// production violates the architect contract.
+	//
+	// Test-only invariant when set true:
+	//   "the WalShipper MUST NOT linger in cursor < head without
+	//    an alternative drain source" — i.e., the test itself drives
+	//    DrainBacklog explicitly, OR the test asserts on a
+	//    transient-debt state and tears the shipper down before
+	//    the assertion would observe starvation.
+	//
+	// Today's only callers are core/transport's R2 saturation tests
+	// (TestWalShipper_R2_LagSignalFires / NoSpuriousSignal): they
+	// build lag by writing without a manual DrainBacklog call,
+	// observe OnSaturation fires, then tear down. Within the test
+	// scope, debt is intentional and bounded.
 	DisableTimerDrain bool
 }
 

@@ -121,6 +121,21 @@ type walShipperEntry struct {
 	// mutex is uncontended. In dual-lane sessions, recovery.Sender
 	// duck-types `WriteMu() *sync.Mutex` on the sink and uses this
 	// mutex for its own writeFrame calls.
+	//
+	// Lock hierarchy (architect §6.8 mechanical SINGLE-SERIALIZER):
+	//
+	//   walShipper.shipMu  ───>  walShipperEntry.writeMu
+	//
+	//   - WalShipper holds shipMu around mode/cursor mutations and
+	//     calls EmitFunc under it (NotifyAppend Realtime, DrainBacklog
+	//     scan callback, drainOpportunity scan callback). EmitFunc
+	//     then acquires writeMu for the wire write — shipMu is
+	//     OUTERMOST.
+	//   - recovery.Sender.writeFrame acquires only writeMu (Sender
+	//     does not hold shipMu).
+	//
+	// Therefore: any code path that holds shipMu may acquire writeMu,
+	// but NEVER the reverse. Reversing this order risks deadlock.
 	writeMu sync.Mutex
 }
 
