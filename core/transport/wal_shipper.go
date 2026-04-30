@@ -43,9 +43,12 @@ import (
 // WriteMsg. In test: a mock that records LSN sequence + asserts
 // invariants.
 //
-// Returning an error transitions WalShipper to Backlog (or stays
-// Backlog if already there) and aborts the current emit; caller is
-// responsible for downstream handling (peer Degraded etc.).
+// On error: WalShipper propagates the error to its caller (NotifyAppend
+// or DrainBacklog return value) and aborts the current emit. WalShipper
+// does NOT itself flip mode or take degraded action — that decision
+// belongs to the executor / engine layer (e.g., mark peer Degraded,
+// schedule retry, fail-close session). Mode stays unchanged on emit
+// error; cursor is NOT advanced for the failed emit.
 type EmitFunc func(lba uint32, lsn uint64, data []byte) error
 
 // HeadSource provides primary's current head LSN. WalShipper queries
@@ -151,8 +154,11 @@ type WalShipper struct {
 	mode   WalShipperMode
 	cursor uint64 // last-emitted LSN (or fromLSN if no emit yet in session)
 
-	// Session state — present iff mode != Idle and StartSession was
-	// called. EndSession returns to Idle.
+	// Session state — present iff StartSession was called and
+	// EndSession has not run yet. EndSession sets sessionActive=false
+	// and transitions mode to Realtime (NOT Idle). ModeIdle is the
+	// initial state at NewWalShipper construction; there is no path
+	// from any non-Idle mode back to Idle in current API.
 	sessionActive bool
 	fromLSN       uint64 // session entry watermark (post-rewind cursor anchor)
 
@@ -161,9 +167,6 @@ type WalShipper struct {
 	// spam.
 	lagSample       atomic.Uint64
 	saturationFired atomic.Bool
-
-	// Stop signal for the backlog drain goroutine.
-	stopBacklog chan struct{}
 }
 
 // NewWalShipper constructs a WalShipper bound to a substrate +
@@ -231,7 +234,6 @@ func (s *WalShipper) StartSession(fromLSN uint64) error {
 	s.sessionActive = true
 	s.mode = ModeBacklog
 	s.saturationFired.Store(false)
-	s.stopBacklog = make(chan struct{})
 	return nil
 }
 
@@ -242,10 +244,6 @@ func (s *WalShipper) StartSession(fromLSN uint64) error {
 func (s *WalShipper) EndSession() {
 	s.shipMu.Lock()
 	defer s.shipMu.Unlock()
-	if s.stopBacklog != nil {
-		close(s.stopBacklog)
-		s.stopBacklog = nil
-	}
 	s.sessionActive = false
 	// Stay at whatever cursor we reached. If DrainBacklog succeeded,
 	// we're at head (Realtime). If it failed mid-way, we're somewhere
