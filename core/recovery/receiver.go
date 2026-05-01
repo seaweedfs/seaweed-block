@@ -35,6 +35,12 @@ type Receiver struct {
 	// Populated after frameSessionStart.
 	session   *RebuildSession
 	sessionID uint64
+	// recvFromLSN/appliedWalLSN: wire-level LSN monotonicity gate (§IV.0 T4,
+	// v3-recovery-unified-wal-stream-kickoff.md §5.1). After SessionStart,
+	// appliedWalLSN == FromLSN until the first WAL frame advances it; only
+	// lsn == appliedWalLSN+1 is accepted.
+	recvFromLSN   uint64
+	appliedWalLSN uint64
 
 	// BaseBatchAck cadence config + state (per docs/recovery-pin-floor-wire.md §3).
 	cadenceK           uint32
@@ -59,6 +65,37 @@ func NewReceiverWithCadence(store storage.LogicalStorage, conn io.ReadWriter, k 
 		conn:     conn,
 		cadenceK: k,
 		cadenceT: t,
+	}
+}
+
+// checkMonotonic enforces contiguous recover-wire LSNs after the session FromLSN
+// watermark (§IV.0 T4; kickoff §5.1). Only used when replica substrate reports
+// RecoveryModeWALReplay — BlockStore/smartwal convergence scans synthesize LSN.
+func (r *Receiver) checkMonotonic(lsn uint64) error {
+	expected := r.appliedWalLSN + 1
+	if lsn == expected {
+		return nil
+	}
+	if lsn > expected {
+		return newFailure(FailureContract, PhaseRecvDispatch,
+			fmt.Errorf("WAL gap: got LSN=%d, expected=%d (appliedWalLSN=%d)", lsn, expected, r.appliedWalLSN))
+	}
+	if lsn == r.appliedWalLSN {
+		return newFailure(FailureProtocol, PhaseRecvDispatch,
+			fmt.Errorf("WAL exact-duplicate on wire: LSN=%d (appliedWalLSN=%d)", lsn, r.appliedWalLSN))
+	}
+	return newFailure(FailureProtocol, PhaseRecvDispatch,
+		fmt.Errorf("WAL backward: got LSN=%d < appliedWalLSN=%d", lsn, r.appliedWalLSN))
+}
+
+func (r *Receiver) enforceWalWireMonotonic(lsn uint64) error {
+	switch r.store.RecoveryMode() {
+	case storage.RecoveryModeWALReplay:
+		return r.checkMonotonic(lsn)
+	default:
+		// State convergence: ScanLBAs may attach the same frontier LSN to many
+		// RecoveryEntry payloads (storage/store.go §ScanLBAs, smartwal semantics).
+		return nil
 	}
 }
 
@@ -100,6 +137,8 @@ func (r *Receiver) Run() (achievedLSN uint64, err error) {
 			}
 			r.sessionID = s.SessionID
 			r.session = NewRebuildSession(r.store, s.TargetLSN)
+			r.recvFromLSN = s.FromLSN
+			r.appliedWalLSN = s.FromLSN
 
 		case frameBaseBlock:
 			if r.session == nil {
@@ -133,9 +172,15 @@ func (r *Receiver) Run() (achievedLSN uint64, err error) {
 			if decErr != nil {
 				return 0, newFailure(FailureProtocol, PhaseRecvDispatch, decErr)
 			}
+			if err := r.enforceWalWireMonotonic(lsn); err != nil {
+				return 0, err
+			}
 			if applyErr := r.session.ApplyWALEntry(kind, lba, data, lsn); applyErr != nil {
 				return 0, newFailure(FailureSubstrate, PhaseRecvApply,
 					fmt.Errorf("apply wal kind=%s lba=%d lsn=%d: %w", kind, lba, lsn, applyErr))
+			}
+			if lsn > r.appliedWalLSN {
+				r.appliedWalLSN = lsn
 			}
 
 		case frameBaseDone:
