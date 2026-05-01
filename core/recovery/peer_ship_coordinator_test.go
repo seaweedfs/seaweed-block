@@ -78,16 +78,27 @@ func TestCoordinator_SingleFlightPerReplica(t *testing.T) {
 	}
 }
 
-// CHK-BARRIER-BEFORE-CLOSE: CanEmitSessionComplete enforces achieved ≥ target.
+// CHK-BARRIER-BEFORE-CLOSE: CanEmitSessionComplete enforces the
+// §IV.2.1 A-class conjunct (recover-semantics-adjustment-plan §1):
+//
+//	phase != Idle ∧ baseDone ∧ achieved ≥ target
+//	∧ (walLegOkWitnessed → walLegOkAtBarrier)
 func TestCoordinator_CanEmitSessionComplete(t *testing.T) {
 	c := NewPeerShipCoordinator()
 	_ = c.StartSession(r1, 7, 100, 200)
+
+	// !baseDone: refuse (§IV.2.1 A-class).
+	if c.CanEmitSessionComplete(r1, 250) {
+		t.Fatal("!baseDone: should refuse (A-class conjunct)")
+	}
+
+	_ = c.MarkBaseDone(r1)
 
 	if c.CanEmitSessionComplete(r1, 199) {
 		t.Fatal("achievedLSN < target: should refuse")
 	}
 	if !c.CanEmitSessionComplete(r1, 200) {
-		t.Fatal("achievedLSN == target: should permit")
+		t.Fatal("achievedLSN == target ∧ baseDone: should permit (no probe witness = legacy collapse)")
 	}
 	if !c.CanEmitSessionComplete(r1, 250) {
 		t.Fatal("achievedLSN > target: should permit")

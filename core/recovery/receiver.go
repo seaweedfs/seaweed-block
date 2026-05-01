@@ -206,6 +206,13 @@ func (r *Receiver) Run() (achievedLSN uint64, err error) {
 			if syncErr != nil {
 				return 0, newFailure(FailureSubstrate, PhaseRecvSync, syncErr)
 			}
+			// §IV.2.1 / recover-semantics-adjustment-plan §1 A-class:
+			// latch the barrier-arrival witness BEFORE the layer-1
+			// closure check. BarrierReq arrival = primary attests
+			// PrimaryWalLegOk under serializer lock (§IV.2.1
+			// disjunction); layer-1 TryComplete makes that explicit
+			// in the conjunct.
+			r.session.WitnessBarrier()
 			// Layer-1 closure check (necessary, not sufficient — the
 			// system close is the primary's CanEmitSessionComplete
 			// after reading our response).

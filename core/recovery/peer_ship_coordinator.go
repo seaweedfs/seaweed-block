@@ -121,6 +121,23 @@ type peerShipState struct {
 	// this counter's logical value is preserved (only the source of
 	// truth shifts from coordinator-local to wire-confirmed).
 	barrierAttempt uint64
+
+	// §IV.2.1 / recover-semantics-adjustment-plan §1 — A-class wave:
+	// PrimaryWalLegOk witness recorded by the sender at the moment of
+	// BarrierReq emission (taken from WalShipper.ProbeBarrierEligibility
+	// under shipMu).
+	//
+	// walLegOkWitnessed: latched true by RecordBarrierWalLegOk; remains
+	//   false on the bridging-sink path where no probe is available
+	//   (legacy recover(a,b) path, preserved for back-compat).
+	// walLegOkAtBarrier: the boolean value the probe returned.
+	//
+	// CanEmitSessionComplete uses these as the §IV.2.1 conjunct: when
+	// witnessed=true, walLegOkAtBarrier MUST be true for close to be
+	// authorized. When witnessed=false (no probe), the conjunct
+	// collapses to legacy behavior.
+	walLegOkWitnessed bool
+	walLegOkAtBarrier bool
 }
 
 // NewPeerShipCoordinator constructs a fresh coordinator with no active
@@ -276,23 +293,62 @@ func (c *PeerShipCoordinator) TryAdvanceToSteadyLive(id ReplicaID) bool {
 	return true
 }
 
+// RecordBarrierWalLegOk records the PrimaryWalLegOk witness taken at
+// BarrierReq emission. Called by the sender immediately after the
+// WalShipper.ProbeBarrierEligibility snapshot, BEFORE writing the
+// frameBarrierReq to the wire — so the witness is durable in coord
+// state by the time CanEmitSessionComplete runs.
+//
+// §IV.2.1 / recover-semantics-adjustment-plan §1 — A-class wave:
+// this is the "synthesized from existing observables" channel that
+// makes PrimaryWalLegOk an explicit conjunct of session close
+// authority instead of an implicit assumption.
+//
+// Latches: once recorded, walLegOkWitnessed stays true for the rest
+// of the session; walLegOkAtBarrier reflects the most recent
+// recording. Repeated BarrierReq attempts within a session may
+// re-record (the most recent witness wins). Cleared at EndSession
+// via state delete (next StartSession yields fresh peerShipState).
+//
+// Returns error only on idle peer (no active session).
+func (c *PeerShipCoordinator) RecordBarrierWalLegOk(id ReplicaID, walLegOk bool) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	st, ok := c.states[id]
+	if !ok || st.phase == PhaseIdle {
+		return fmt.Errorf("recovery: RecordBarrierWalLegOk on idle peer %q", id)
+	}
+	st.walLegOkWitnessed = true
+	st.walLegOkAtBarrier = walLegOk
+	return nil
+}
+
 // CanEmitSessionComplete is the §5.2 system-close predicate: given the
 // AchievedLSN echoed in the replica's barrier response, may the engine
-// emit `SessionClosedCompleted`? True iff achieved ≥ frozen target.
+// emit `SessionClosedCompleted`?
+//
+// §IV.2.1 / recover-semantics-adjustment-plan §1 — A-class wave:
+// the historic recover(a,b) sole gate (`achievedLSN >= targetLSN`) is
+// no longer dispositive. The realizable §IV.2.1 conjunct synthesized
+// from existing observables is:
+//
+//	phase != Idle
+//	∧ baseDone
+//	∧ achievedLSN ≥ targetLSN  (kept pre-C-class for Y-as-comparator;
+//	                          C-class will replace with cut-witness)
+//	∧ (walLegOkWitnessed → walLegOkAtBarrier)
+//	    — when the dual-lane sender recorded a PrimaryWalLegOk witness
+//	      at BarrierReq emission, that witness MUST be true. On the
+//	      bridging-sink path the witness stays unset and the conjunct
+//	      collapses to legacy (back-compat preserved while §IV.2.1
+//	      probe wiring is dual-lane-only).
+//
+// Per §IV.2.1, this primary-side coordinator IS the terminal authority
+// for "session semantically complete" — replica-side TryComplete is
+// only the per-cut layer-1 witness check.
 //
 // CHK-BARRIER-BEFORE-CLOSE: callers MUST have observed a successful
-// barrier round-trip before calling this; it is purely the comparison.
-//
-// §IV.2.1 / FS-1 / Gate G0 — Tier 1 completion-authority site.
-// The `achievedLSN >= st.targetLSN` predicate below is the historic
-// recover(a,b) gate; per consensus §I P8, this is NOT the recover(a)
-// completion authority. Migration target (per
-// `sw-block/design/recover-semantics-adjustment-plan.md` §1 +
-// `learn/2026-05-01-recover-target-audit.md` Tier 1) replaces this
-// with PrimaryWalLegOk(P) under serializer lock + ReplicaWalWitness
-// reporting at the BarrierHandshake cut. AchievedLSN becomes a
-// per-cut witness, not a "crossed target" finishing condition. NO
-// behavior change pre-Gate G0.
+// barrier round-trip before calling this.
 func (c *PeerShipCoordinator) CanEmitSessionComplete(id ReplicaID, achievedLSN uint64) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -300,7 +356,20 @@ func (c *PeerShipCoordinator) CanEmitSessionComplete(id ReplicaID, achievedLSN u
 	if !ok || st.phase == PhaseIdle {
 		return false
 	}
-	return achievedLSN >= st.targetLSN
+	if !st.baseDone {
+		return false
+	}
+	if achievedLSN < st.targetLSN {
+		return false
+	}
+	// §IV.2.1 conjunct: dual-lane probe witness binds when present.
+	// Bridging-sink path leaves walLegOkWitnessed=false (legacy);
+	// dual-lane path records the witness via RecordBarrierWalLegOk
+	// and the value MUST be true for close authorization.
+	if st.walLegOkWitnessed && !st.walLegOkAtBarrier {
+		return false
+	}
+	return true
 }
 
 // NextBarrierCut returns the next per-session BarrierReq attempt
@@ -413,13 +482,15 @@ func (c *PeerShipCoordinator) MinPinAcrossActiveSessions() (floor uint64, anyAct
 
 // PeerStatus is a diagnostic snapshot for layer-3 / monitoring.
 type PeerStatus struct {
-	Phase      PeerShipPhase
-	SessionID  uint64
-	FromLSN    uint64
-	TargetLSN  uint64
-	ShipCursor uint64
-	BaseDone   bool
-	PinFloor   uint64
+	Phase             PeerShipPhase
+	SessionID         uint64
+	FromLSN           uint64
+	TargetLSN         uint64
+	ShipCursor        uint64
+	BaseDone          bool
+	PinFloor          uint64
+	WalLegOkWitnessed bool // §IV.2.1 A-class: true once sender recorded the probe witness
+	WalLegOkAtBarrier bool // §IV.2.1 A-class: most recent witness value
 }
 
 func (c *PeerShipCoordinator) Status(id ReplicaID) (PeerStatus, bool) {
@@ -430,12 +501,14 @@ func (c *PeerShipCoordinator) Status(id ReplicaID) (PeerStatus, bool) {
 		return PeerStatus{Phase: PhaseIdle}, false
 	}
 	return PeerStatus{
-		Phase:      st.phase,
-		SessionID:  st.sessionID,
-		FromLSN:    st.fromLSN,
-		TargetLSN:  st.targetLSN,
-		ShipCursor: st.shipCursor,
-		BaseDone:   st.baseDone,
-		PinFloor:   st.pinFloor,
+		Phase:             st.phase,
+		SessionID:         st.sessionID,
+		FromLSN:           st.fromLSN,
+		TargetLSN:         st.targetLSN,
+		ShipCursor:        st.shipCursor,
+		BaseDone:          st.baseDone,
+		PinFloor:          st.pinFloor,
+		WalLegOkWitnessed: st.walLegOkWitnessed,
+		WalLegOkAtBarrier: st.walLegOkAtBarrier,
 	}, true
 }

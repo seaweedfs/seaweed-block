@@ -518,6 +518,16 @@ func (s *Sender) Run(ctx context.Context, sessionID, fromLSN, targetLSN uint64) 
 	if cut, err := s.coordinator.NextBarrierCut(s.replicaID); err == nil {
 		barrierCutID = cut
 	}
+	// §IV.2.1 / recover-semantics-adjustment-plan §1 A-class:
+	// record the PrimaryWalLegOk witness in coord state BEFORE
+	// writing frameBarrierReq, so CanEmitSessionComplete sees it as
+	// part of the close conjunct. Dual-lane only — bridging sink
+	// path (no probe) leaves the witness unset and the predicate
+	// collapses to legacy. Idle-peer error is impossible here
+	// (StartSession has run); silently swallowed for safety.
+	if probeAvailable {
+		_ = s.coordinator.RecordBarrierWalLegOk(s.replicaID, probeWalLegOk)
+	}
 	if probeAvailable && barrierCutID > 0 {
 		log.Printf("replication: barrier prepare replica=%s sessionID=%d cut=CCS:%d PrimaryDebtZero=%t LiveTail=%t WalLegOk=%t cursor=%d head=%d",
 			s.replicaID, sessionID, barrierCutID,

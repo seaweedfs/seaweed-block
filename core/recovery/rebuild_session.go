@@ -36,6 +36,22 @@ type RebuildSession struct {
 	baseDone   bool   // base lane has signaled stream-complete via MarkBaseComplete
 	completed  bool   // TryComplete has returned done=true at least once; latched
 
+	// barrierWitnessed: latched true on the FIRST WitnessBarrier() call
+	// (receiver invokes this at frameBarrierReq arrival, before TryComplete).
+	//
+	// §IV.2.1 / recover-semantics-adjustment-plan §1 — A-class wave:
+	// the arrival of BarrierReq from the primary attests that the primary's
+	// WalShipper observed PrimaryWalLegOk under serializer lock and chose to
+	// emit. Layer-1 TryComplete adds this as an explicit conjunct so the
+	// replica's "session done" signal cannot be claimed without the primary's
+	// barrier witness — matching the §IV.2.1 coordinator-owned narrative.
+	//
+	// Pre-A-class behavior (sole `walApplied >= targetLSN`) was the
+	// recover(a,b) replica-side independent verdict; per §I P8 / G0 closure
+	// that authority moves to the primary (coordinator), and the replica
+	// becomes a per-cut witness, not a closer.
+	barrierWitnessed bool
+
 	// Per-kind WAL apply counters (observability only — do NOT use
 	// to infer convergence; see WALEntryKind doc). Useful for INV
 	// pinning in tests and operator dashboards: "session shipped N
@@ -170,28 +186,47 @@ func (s *RebuildSession) MarkBaseComplete() {
 	s.store.AdvanceFrontier(s.targetLSN)
 }
 
+// WitnessBarrier latches the barrier-arrival witness. Called by the
+// receiver immediately on frameBarrierReq arrival, BEFORE TryComplete.
+//
+// §IV.2.1 / recover-semantics-adjustment-plan §1 — A-class wave:
+// per §I P8, the "session semantically complete" claim is
+// coordinator-owned (primary). On the replica side, the arrival of
+// BarrierReq IS the witness that the primary's WalShipper observed
+// PrimaryWalLegOk (DebtZero ∨ LiveTail) at the serializer-locked
+// snapshot. Layer-1 TryComplete adds this as a required conjunct so
+// the replica's local view cannot independently claim closure.
+//
+// Idempotent: latch-only, no error on repeat calls.
+func (s *RebuildSession) WitnessBarrier() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.barrierWitnessed = true
+}
+
 // TryComplete reports whether the layer-1 completion predicate holds.
-// Returns (achievedLSN, true) when baseDone ∧ walApplied ≥ targetLSN;
-// achievedLSN is walApplied (which by predicate is ≥ targetLSN).
+// Returns (achievedLSN, true) when baseDone ∧ walApplied ≥ targetLSN
+// ∧ barrierWitnessed; achievedLSN is walApplied.
 //
-// Idempotent: once it returns done=true, the session is latched
-// completed and subsequent Apply* calls return errors.
+// §IV.2.1 / recover-semantics-adjustment-plan §1 — A-class wave:
+// the historic recover(a,b) sole gate (`walApplied >= targetLSN`) is
+// no longer dispositive. The realizable §IV.2.1 conjunct synthesized
+// from existing observables is:
 //
-// INV-SESSION-COMPLETE-ON-CONJUNCTION-LAYER1. Note: the system-level
-// "rebuild done" closure additionally requires a barrier-ack from the
-// replica matching achievedLSN — that is layer 2's responsibility.
+//	baseDone (replica MarkBaseComplete fired)
+//	∧ walApplied ≥ targetLSN  (kept pre-C-class for Y-as-comparator;
+//	                          C-class will replace with cut-witness)
+//	∧ barrierWitnessed         (BarrierReq arrival = primary attests
+//	                          PrimaryWalLegOk under shipMu)
 //
-// §IV.2.1 / FS-1 / Gate G0 — Tier 1 completion-authority site.
-// The `walApplied < targetLSN` predicate below is the historic
-// recover(a,b) gate; per consensus §I P8, this is NOT the recover(a)
-// completion authority. The migration target (per
-// `sw-block/design/recover-semantics-adjustment-plan.md` §1 row
-// "TryComplete: walApplied ≥ Target 独断 → 新 conjunct" and
-// `learn/2026-05-01-recover-target-audit.md` Tier 1 row) replaces
-// this with `baseDone ∧ ReplicaWalWitness ∧ (coordinator-explicit
-// PrimaryWalLegOk OR barrier state machine phase)`. NO behavior
-// change pre-Gate G0; Tier-1 edits await T2 predicate name + witness
-// channel pinning.
+// Note: layer-1 TryComplete is NOT the system-close authority.
+// Per §IV.2.1, the terminal claim "session semantically complete"
+// is coordinator-owned (primary's CanEmitSessionComplete after
+// reading BarrierResp). TryComplete here is the replica's
+// per-cut layer-1 witness check, not a verdict.
+//
+// Idempotent: once done=true, the session is latched completed and
+// subsequent Apply* calls return errors.
 func (s *RebuildSession) TryComplete() (achievedLSN uint64, done bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -204,6 +239,9 @@ func (s *RebuildSession) TryComplete() (achievedLSN uint64, done bool) {
 	if s.walApplied < s.targetLSN {
 		return 0, false
 	}
+	if !s.barrierWitnessed {
+		return 0, false
+	}
 	s.completed = true
 	return s.walApplied, true
 }
@@ -214,6 +252,7 @@ type Status struct {
 	WALApplied         uint64
 	BaseDone           bool
 	Completed          bool
+	BarrierWitnessed   bool   // §IV.2.1 A-class: latched on frameBarrierReq arrival
 	BaseAckedPrefix    uint32
 	BitmapApplied      int    // count of LBAs the WAL lane has marked
 	BacklogApplied     uint64 // count of WALKindBacklog entries applied
@@ -228,6 +267,7 @@ func (s *RebuildSession) Status() Status {
 		WALApplied:         s.walApplied,
 		BaseDone:           s.baseDone,
 		Completed:          s.completed,
+		BarrierWitnessed:   s.barrierWitnessed,
 		BaseAckedPrefix:    s.baseAckedPrefix,
 		BitmapApplied:      s.bitmap.AppliedCount(),
 		BacklogApplied:     s.backlogApplied,
