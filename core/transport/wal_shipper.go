@@ -207,20 +207,21 @@ type WalShipperConfig struct {
 
 // DefaultWalShipperConfig returns production defaults.
 //
-// MIGRATION NOTE (slice 1 of §6.3 collapse): LegacyOutOfOrderEmit
-// defaults to TRUE here as a transitional bridge — preserves
-// pre-§6.3 "log + emit on tail gap" semantics so existing tests +
-// production callers don't observe a behavior flip in this commit.
-// Slice 2 will flip the default to false (§6.3 normative fail-closed
-// on tail gap), once production callers have been audited /
-// migrated. Tests that explicitly want §6.3 strict behavior must
-// set LegacyOutOfOrderEmit=false in their config.
+// SLICE-2 (architect ruling 2026-04-30): LegacyOutOfOrderEmit
+// defaults to FALSE — §6.3 normative tail-gap fail-closed. The
+// shipper does NOT silently emit input bytes for a missing-LSN
+// case; the engine MUST escalate to rebuild on tail gap.
+//
+// Tests / call sites that still need pre-§6.3 log+emit behavior
+// MUST opt in explicitly with LegacyOutOfOrderEmit=true AND
+// document a deprecation owner + removal date. New code MUST NOT
+// rely on log+drop-gap.
 func DefaultWalShipperConfig() WalShipperConfig {
 	return WalShipperConfig{
-		IdleSleep:            5 * time.Millisecond,
-		SaturationThreshold:  100_000,
-		OnSaturation:         nil,
-		LegacyOutOfOrderEmit: true, // slice-1 transitional; flip in slice-2
+		IdleSleep:           5 * time.Millisecond,
+		SaturationThreshold: 100_000,
+		OnSaturation:        nil,
+		// LegacyOutOfOrderEmit: false (zero value) — §6.3 normative.
 	}
 }
 

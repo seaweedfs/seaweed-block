@@ -163,8 +163,9 @@ func TestWalShipper_Resident_SteadyShipBetweenSessions(t *testing.T) {
 	}
 	e.updateWalShipperEmitContext(replicaID, steadyConn, steadyLineage, EmitProfileSteadyMsgShip)
 
-	// Phase 1: steady NotifyAppend (Realtime).
-	if err := shipper.NotifyAppend(0, 1, []byte{0x01}); err != nil {
+	// Phase 1: steady NotifyAppend (Realtime). lsn = cursor+1 = 1.
+	p1LSN := shipper.Cursor() + 1
+	if err := shipper.NotifyAppend(0, p1LSN, []byte{0x01}); err != nil {
 		t.Fatalf("phase1 NotifyAppend: %v", err)
 	}
 
@@ -185,7 +186,11 @@ func TestWalShipper_Resident_SteadyShipBetweenSessions(t *testing.T) {
 	sink1.EndSession()
 
 	// Phase 3: steady NotifyAppend between sessions (Realtime, steady context).
-	if err := shipper.NotifyAppend(1, 2, []byte{0x02}); err != nil {
+	// §6.3 migration: cursor was reset to fromLSN=0 by session1's StartSession;
+	// DrainBacklog with empty substrate didn't advance it. Use cursor+1 so
+	// fast-path fires.
+	p3LSN := shipper.Cursor() + 1
+	if err := shipper.NotifyAppend(1, p3LSN, []byte{0x02}); err != nil {
 		t.Fatalf("phase3 NotifyAppend: %v", err)
 	}
 
@@ -205,8 +210,9 @@ func TestWalShipper_Resident_SteadyShipBetweenSessions(t *testing.T) {
 	}
 	sink2.EndSession()
 
-	// Phase 5: steady NotifyAppend post-session-2.
-	if err := shipper.NotifyAppend(2, 3, []byte{0x03}); err != nil {
+	// Phase 5: steady NotifyAppend post-session-2. §6.3: cursor+1.
+	p5LSN := shipper.Cursor() + 1
+	if err := shipper.NotifyAppend(2, p5LSN, []byte{0x03}); err != nil {
 		t.Fatalf("phase5 NotifyAppend: %v", err)
 	}
 
@@ -292,8 +298,9 @@ func TestWalShipper_Resident_NotifyAppendDuringSession_BacklogMode(t *testing.T)
 	}
 	sink.EndSession()
 
-	// Post-EndSession Realtime emit MUST land.
-	if err := shipper.NotifyAppend(99, 9999, []byte{0xFF}); err != nil {
+	// Post-EndSession Realtime emit MUST land. §6.3: lsn=cursor+1.
+	postLSN := shipper.Cursor() + 1
+	if err := shipper.NotifyAppend(99, postLSN, []byte{0xFF}); err != nil {
 		t.Fatalf("post-session NotifyAppend: %v", err)
 	}
 
@@ -306,8 +313,8 @@ func TestWalShipper_Resident_NotifyAppendDuringSession_BacklogMode(t *testing.T)
 	}
 
 	last := (*recorded)[len(*recorded)-1]
-	if last.lba != 99 || last.lsn != 9999 {
-		t.Errorf("last emit unexpected: lba=%d lsn=%d (want 99/9999)", last.lba, last.lsn)
+	if last.lba != 99 || last.lsn != postLSN {
+		t.Errorf("last emit unexpected: lba=%d lsn=%d (want 99/%d)", last.lba, last.lsn, postLSN)
 	}
 	if last.lineage != steadyLineage {
 		t.Errorf("post-session emit lineage=%+v want steady=%+v (rule 2 violated)",

@@ -137,32 +137,34 @@ func TestBlockExecutor_Ship_AdvancesWalShipperCursor(t *testing.T) {
 
 	const replicaID = "r1"
 
-	// Ship LSN=10 → walShipper cursor must reach 10.
-	if err := exec.Ship(replicaID, lineage, 0, 10, []byte{0xAA, 0xBB}); err != nil {
-		t.Fatalf("Ship lsn=10: %v", err)
+	// §6.3 migration: sequential LSN starting at cursor+1=1; no gaps.
+	// Test claim is "Ship advances WalShipper cursor" — sequential LSN
+	// is the production-mirror pattern (cursor advances by 1 per Ship).
+	// Ship LSN=1 → cursor must reach 1.
+	if err := exec.Ship(replicaID, lineage, 0, 1, []byte{0xAA, 0xBB}); err != nil {
+		t.Fatalf("Ship lsn=1: %v", err)
 	}
 	s := exec.WalShipperFor(replicaID)
-	if got := s.Cursor(); got != 10 {
-		t.Errorf("after Ship lsn=10: walShipper.Cursor()=%d want 10 (Ship must delegate to WalShipper)", got)
+	if got := s.Cursor(); got != 1 {
+		t.Errorf("after Ship lsn=1: walShipper.Cursor()=%d want 1 (Ship must delegate to WalShipper)", got)
 	}
 
-	// Ship LSN=20 → walShipper cursor advances.
-	if err := exec.Ship(replicaID, lineage, 1, 20, []byte{0xCC}); err != nil {
-		t.Fatalf("Ship lsn=20: %v", err)
+	// Ship LSN=2 → cursor advances.
+	if err := exec.Ship(replicaID, lineage, 1, 2, []byte{0xCC}); err != nil {
+		t.Fatalf("Ship lsn=2: %v", err)
 	}
-	if got := s.Cursor(); got != 20 {
-		t.Errorf("after Ship lsn=20: walShipper.Cursor()=%d want 20", got)
+	if got := s.Cursor(); got != 2 {
+		t.Errorf("after Ship lsn=2: walShipper.Cursor()=%d want 2", got)
 	}
 
-	// Idempotent Ship with lsn=15 (less than current cursor=20) —
-	// walShipper's NotifyAppend in Realtime drops it; cursor unchanged.
-	// Ship should still return nil (caller can't tell idempotent skip
-	// from successful emit at this layer).
-	if err := exec.Ship(replicaID, lineage, 2, 15, []byte{0xDD}); err != nil {
-		t.Fatalf("Ship lsn=15 (idempotent): %v", err)
+	// Idempotent Ship with lsn=1 (less than cursor=2) — walShipper's
+	// drive() drops it (in.lsn <= cursor); cursor unchanged. Ship
+	// returns nil regardless.
+	if err := exec.Ship(replicaID, lineage, 2, 1, []byte{0xDD}); err != nil {
+		t.Fatalf("Ship lsn=1 (idempotent): %v", err)
 	}
-	if got := s.Cursor(); got != 20 {
-		t.Errorf("after idempotent Ship lsn=15: walShipper.Cursor()=%d want 20 (no regress)", got)
+	if got := s.Cursor(); got != 2 {
+		t.Errorf("after idempotent Ship lsn=1: walShipper.Cursor()=%d want 2 (no regress)", got)
 	}
 }
 
@@ -224,44 +226,56 @@ func TestBlockExecutor_WalShipperRegistry_StableUnderConcurrent_Ship(t *testing.
 	// First, capture the walShipper instance from main goroutine.
 	expected := exec.WalShipperFor(replicaID)
 
-	// Drive concurrent Ship() — each writer ships distinct LSNs.
+	// §6.3 migration (architect Path B ruling): concurrent Ship with
+	// out-of-order LSN is no longer a survivable pattern — under the
+	// fail-closed tail-gap default, out-of-order LSN returns an error
+	// per §6.3 / §6.9 NEGATIVE-EQUITY. The test's own header
+	// acknowledges concurrent Ship is "NOT production" — production
+	// serializes via volume.mu. The registry-stability claim
+	// (INV-SINGLE: WalShipperFor returns the same instance) is
+	// independent of concurrency and holds under sequential Ship.
+	//
+	// Drive sequential Ship from a single goroutine but call
+	// WalShipperFor from N concurrent goroutines to still exercise the
+	// registry-stability concurrency claim — the part of the test
+	// whose intent survives the §6.3 collapse.
 	var wg sync.WaitGroup
-	for w := 0; w < writers; w++ {
+	const lookups = 8
+	for r := 0; r < lookups; r++ {
 		wg.Add(1)
-		go func(workerID int) {
+		go func() {
 			defer wg.Done()
-			for i := 0; i < perWriter; i++ {
-				// LSNs: 1..200, distinct per (worker, i).
-				lsn := uint64(workerID*perWriter + i + 1)
-				if err := exec.Ship(replicaID, lineage, uint32(i), lsn, []byte{byte(workerID)}); err != nil {
-					t.Errorf("Ship: %v", err)
+			for j := 0; j < perWriter; j++ {
+				if got := exec.WalShipperFor(replicaID); got != expected {
+					t.Errorf("WalShipperFor concurrent lookup returned different instance (registry race)")
 					return
 				}
 			}
-		}(w)
+		}()
+	}
+	// Sequential Ship with cursor+1 LSN — production-mirror.
+	for i := 0; i < writers*perWriter; i++ {
+		lsn := uint64(i + 1)
+		if err := exec.Ship(replicaID, lineage, uint32(i%64), lsn, []byte{byte(i & 0xFF)}); err != nil {
+			t.Fatalf("Ship lsn=%d: %v", lsn, err)
+		}
 	}
 	wg.Wait()
 
-	// After concurrent Ships, the WalShipper for r1 must STILL be
-	// the same instance — registry must have linearized.
+	// After Ships + concurrent lookups, the WalShipper for r1 must
+	// still be the same instance — registry stability claim survives
+	// concurrent WalShipperFor lookups.
 	got := exec.WalShipperFor(replicaID)
 	if got != expected {
-		t.Errorf("concurrent Ship: WalShipperFor(r1) returned different instance after load (registry race)")
+		t.Errorf("WalShipperFor returned different instance after load (registry race)")
 	}
 
-	// Cursor advanced from 0. We deliberately do NOT assert
-	// cursor == maxLSN here: out-of-order concurrent Ship
-	// (non-production scenario; production serializes via volume.mu)
-	// can have lower-LSN goroutines silently idempotent-skip when a
-	// higher LSN already advanced cursor. cursor ≤ maxLSN is the
-	// only honest bound. Lossless-emit pinning belongs to P2 e2e
-	// with serialized Ship.
+	// Sequential Ship: cursor MUST equal maxLSN (lossless under §6.3
+	// when LSN sequence is dense and serialized — the production-mirror
+	// pattern).
 	const maxLSN = uint64(writers * perWriter)
 	cursor := expected.Cursor()
-	if cursor == 0 {
-		t.Errorf("after %d concurrent Ships: cursor=0 (no Ship landed at all)", writers*perWriter)
-	}
-	if cursor > maxLSN {
-		t.Errorf("cursor=%d > maxLSN=%d (impossible — bug)", cursor, maxLSN)
+	if cursor != maxLSN {
+		t.Errorf("after sequential Ships: cursor=%d want %d (lossless under §6.3 + serialized)", cursor, maxLSN)
 	}
 }

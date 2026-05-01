@@ -73,7 +73,11 @@ func TestP2d_EmitDispatch_SteadyMsgShipProfile(t *testing.T) {
 		resCh <- readUntilEOF(readerConn)
 	}()
 
-	if err := shipper.NotifyAppend(7, 50, []byte{0xDE, 0xAD, 0xBE, 0xEF}); err != nil {
+	// §6.3 migration: lsn=cursor+1=1 so fast-path tail-emit fires.
+	// (Pre-§6.3 this used lsn=50 for distinctness; under §6.3
+	// fail-closed default, that would CursorGap. The wire-format
+	// claim — SWRP preamble vs frameWALEntry — is unchanged.)
+	if err := shipper.NotifyAppend(7, 1, []byte{0xDE, 0xAD, 0xBE, 0xEF}); err != nil {
 		t.Fatalf("NotifyAppend: %v", err)
 	}
 	_ = writerConn.Close()
@@ -121,7 +125,9 @@ func TestP2d_EmitDispatch_DualLaneWALFrameProfile_LiveKind(t *testing.T) {
 		resCh <- readUntilEOF(readerConn)
 	}()
 
-	if err := shipper.NotifyAppend(11, 200, []byte{0xCA, 0xFE}); err != nil {
+	// §6.3 migration: lsn=1 so fast-path fires. Wire-format claim
+	// (frameWALEntry + WALKindSessionLive tag) is independent of LSN.
+	if err := shipper.NotifyAppend(11, 1, []byte{0xCA, 0xFE}); err != nil {
 		t.Fatalf("NotifyAppend: %v", err)
 	}
 	_ = writerConn.Close()

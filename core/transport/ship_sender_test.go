@@ -363,9 +363,11 @@ func TestExecutor_Ship_StaleEpoch_SilentDrop(t *testing.T) {
 	}
 
 	// Sanity: a matching-epoch Ship on the same session still works.
+	// §6.3 migration: lsn=cursor+1=1 (cursor=0; the stale-epoch Ship
+	// above was silent-dropped before reaching the shipper).
 	fresh := make([]byte, 4096)
 	fresh[0], fresh[1] = 0xAA, 0xBB
-	if err := exec.Ship("r1", lineage, 6, 2, fresh); err != nil {
+	if err := exec.Ship("r1", lineage, 6, 1, fresh); err != nil {
 		t.Fatalf("fresh-epoch Ship: %v", err)
 	}
 	deadline := time.Now().Add(2 * time.Second)

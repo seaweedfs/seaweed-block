@@ -349,7 +349,12 @@ func TestRecoverySink_NotifyAppendAfterEndSession_UsesSteadyContext(t *testing.T
 	// the underlying WalShipper directly so the recording EmitFunc
 	// captures the post-EndSession context state.
 	shipper := e.WalShipperFor(replicaID)
-	if err := shipper.NotifyAppend(7, 100, []byte{0xCC}); err != nil {
+	// §6.3 migration: lsn = cursor+1 so fast-path tail-emit fires.
+	// Post-EndSession cursor is wherever DrainBacklog left it (0 for
+	// empty substrate). Test's claim is rule-2 context restore, not
+	// LSN-sequence semantics — distinct LSN value not required.
+	postLSN := shipper.Cursor() + 1
+	if err := shipper.NotifyAppend(7, postLSN, []byte{0xCC}); err != nil {
 		t.Fatalf("WalShipper.NotifyAppend post-EndSession: %v", err)
 	}
 
@@ -360,8 +365,8 @@ func TestRecoverySink_NotifyAppendAfterEndSession_UsesSteadyContext(t *testing.T
 		t.Fatal("no emits recorded")
 	}
 	last := (*recorded)[len(*recorded)-1]
-	if last.lba != 7 || last.lsn != 100 {
-		t.Fatalf("last emit unexpected: lba=%d lsn=%d (want lba=7 lsn=100)", last.lba, last.lsn)
+	if last.lba != 7 || last.lsn != postLSN {
+		t.Fatalf("last emit unexpected: lba=%d lsn=%d (want lba=7 lsn=%d)", last.lba, last.lsn, postLSN)
 	}
 	if last.conn != steadyConn {
 		t.Errorf("post-EndSession emit: conn=%p want steadyConn=%p (rule 2 violated)",
@@ -435,7 +440,9 @@ func TestRecoverySink_FullLifecycle(t *testing.T) {
 	// call the underlying WalShipper directly to verify the post-
 	// EndSession emit context is the restored steady context.
 	shipper := e.WalShipperFor(replicaID)
-	if err := shipper.NotifyAppend(15, 9999, []byte{0xFF}); err != nil {
+	// §6.3 migration: lsn = cursor+1 so fast-path fires.
+	postLSN := shipper.Cursor() + 1
+	if err := shipper.NotifyAppend(15, postLSN, []byte{0xFF}); err != nil {
 		t.Fatalf("WalShipper.NotifyAppend post-EndSession: %v", err)
 	}
 
