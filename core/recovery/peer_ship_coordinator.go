@@ -59,6 +59,10 @@ func (p PeerShipPhase) String() string {
 // local write must travel on for a given peer, given that peer's current
 // ship phase. Spec §3.2 #3: "one ordered outbound queue per peer mixing
 // recover-tagged and post-target traffic with explicit LSN order".
+//
+// §IV.0 T3 (v3-recovery-algorithm-consensus.md): RouteSessionLane means
+// all WAL for this peer MUST ship on the recover dual-lane session path —
+// never a parallel steady bearer fork (§I P2).
 type LocalWriteRouting int
 
 const (
@@ -102,6 +106,21 @@ type peerShipState struct {
 	// path via PinFloor() and the cluster-wide
 	// MinPinAcrossActiveSessions() helper.
 	pinFloor uint64
+
+	// barrierAttempt counts BarrierReq attempts made in THIS session.
+	// Increments on each call to NextBarrierCut; starts at 0 at
+	// StartSession; the first call yields 1.
+	//
+	// Pre-§IV.2.4 wire change (G0-wire ratified 2026-05-03 to keep
+	// targetLSN as compat band; CCS not yet on wire), this counter is
+	// the marker-line cutID per architect's Option B (plan §8.2.6):
+	// `cut=CCS:<barrierAttempt>` in `barrier prepare` AND
+	// `barrier handshake` log lines, providing QA's grep round-trip
+	// even before the real CheckpointCutSeq is on the wire. When
+	// C-class lands the CCS field on the BarrierReq/Resp payload,
+	// this counter's logical value is preserved (only the source of
+	// truth shifts from coordinator-local to wire-confirmed).
+	barrierAttempt uint64
 }
 
 // NewPeerShipCoordinator constructs a fresh coordinator with no active
@@ -282,6 +301,31 @@ func (c *PeerShipCoordinator) CanEmitSessionComplete(id ReplicaID, achievedLSN u
 		return false
 	}
 	return achievedLSN >= st.targetLSN
+}
+
+// NextBarrierCut returns the next per-session BarrierReq attempt
+// counter for this peer, incrementing in-place. First call after
+// StartSession yields 1; subsequent calls within the same session
+// increment monotonically. Per architect Option B (plan §8.2.6):
+//
+//   - Pre-§IV.2.4 wire change, this counter populates the marker
+//     line `cut=CCS:<n>` so QA hardware oracle can grep round-trip
+//     between `barrier prepare` and `barrier handshake`.
+//   - When C-class wire lands CheckpointCutSeq on the
+//     BarrierReq/Resp payload, this counter's logical value is
+//     preserved; only the source-of-truth shifts.
+//
+// Returns 0 + error when no active session exists (caller MUST treat
+// 0 as invalid and not log a marker with cut=CCS:0).
+func (c *PeerShipCoordinator) NextBarrierCut(id ReplicaID) (uint64, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	st, ok := c.states[id]
+	if !ok || st.phase == PhaseIdle {
+		return 0, fmt.Errorf("recovery: NextBarrierCut on idle peer %q", id)
+	}
+	st.barrierAttempt++
+	return st.barrierAttempt, nil
 }
 
 // EndSession tears down the session for a peer (after barrier-ack

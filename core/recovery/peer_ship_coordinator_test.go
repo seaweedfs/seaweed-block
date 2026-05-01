@@ -320,3 +320,49 @@ func TestCoordinator_IdlePeer_OperationsError(t *testing.T) {
 		t.Error("BacklogDrained on idle: want false")
 	}
 }
+
+// TestCoordinator_NextBarrierCut_MonotonicPerSession — Option B
+// (plan §8.2.6): per-session counter starts at 1, increments per
+// call within a session, resets to 0 on next StartSession.
+func TestCoordinator_NextBarrierCut_MonotonicPerSession(t *testing.T) {
+	c := NewPeerShipCoordinator()
+
+	// Pre-session: error.
+	if cut, err := c.NextBarrierCut(r1); err == nil || cut != 0 {
+		t.Errorf("NextBarrierCut on idle: cut=%d err=%v want 0+error", cut, err)
+	}
+
+	if err := c.StartSession(r1, 7, 100, 200); err != nil {
+		t.Fatalf("StartSession: %v", err)
+	}
+
+	// First call: 1.
+	cut, err := c.NextBarrierCut(r1)
+	if err != nil {
+		t.Fatalf("NextBarrierCut #1: %v", err)
+	}
+	if cut != 1 {
+		t.Errorf("first cut=%d want 1", cut)
+	}
+	// Second call: 2.
+	cut, err = c.NextBarrierCut(r1)
+	if err != nil {
+		t.Fatalf("NextBarrierCut #2: %v", err)
+	}
+	if cut != 2 {
+		t.Errorf("second cut=%d want 2", cut)
+	}
+
+	// EndSession + new StartSession resets to 0; first call yields 1.
+	c.EndSession(r1)
+	if err := c.StartSession(r1, 8, 100, 200); err != nil {
+		t.Fatalf("StartSession (second session): %v", err)
+	}
+	cut, err = c.NextBarrierCut(r1)
+	if err != nil {
+		t.Fatalf("NextBarrierCut after restart: %v", err)
+	}
+	if cut != 1 {
+		t.Errorf("post-restart first cut=%d want 1 (per-session reset)", cut)
+	}
+}

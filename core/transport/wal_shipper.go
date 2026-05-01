@@ -257,6 +257,19 @@ type WalShipper struct {
 	lagSample       atomic.Uint64
 	saturationFired atomic.Bool
 
+	// PrimaryLiveTail observability (§IV.2.1, slice marker-only stage).
+	// firstLiveEmitted is set on the first EmitKindLive emit in this
+	// session and stays set monotonically until StartSession (which
+	// resets it). Used by ProbeBarrierEligibilityLocked to compute the
+	// LiveTail bool component of PrimaryWalLegOk.
+	//
+	// Atomic for read-without-shipMu by lock-free probe paths if
+	// future callers want it; today reads happen under shipMu so an
+	// atomic isn't strictly needed, but the bool sets are by drive()
+	// under shipMu — atomic.Bool is the safest type for "set once,
+	// read many" semantics.
+	firstLiveEmitted atomic.Bool
+
 	// C2 §6.8 #4 self-driving drain. timerLoop runs as a background
 	// goroutine for the shipper's lifetime; on each `IdleSleep` tick
 	// it wakes and (under shipMu) checks `cursor < head`. If true,
@@ -439,6 +452,7 @@ func (s *WalShipper) drive(in driveInput) error {
 			return err
 		}
 		s.cursor = in.lsn
+		s.firstLiveEmitted.Store(true) // §IV.2.1 PrimaryLiveTail seed
 		s.updateLagLocked()
 		return nil
 	}
@@ -481,6 +495,7 @@ func (s *WalShipper) drive(in driveInput) error {
 		return err
 	}
 	s.cursor = in.lsn
+	s.firstLiveEmitted.Store(true) // §IV.2.1 PrimaryLiveTail seed
 	s.updateLagLocked()
 	return nil
 }
@@ -614,6 +629,7 @@ func (s *WalShipper) StartSession(fromLSN uint64) error {
 	s.sessionActive = true
 	s.mode = ModeBacklog
 	s.saturationFired.Store(false)
+	s.firstLiveEmitted.Store(false) // §IV.2.1 PrimaryLiveTail reset per session
 	return nil
 }
 
@@ -832,4 +848,36 @@ func (s *WalShipper) SessionActive() bool {
 	s.shipMu.Lock()
 	defer s.shipMu.Unlock()
 	return s.sessionActive
+}
+
+// ProbeBarrierEligibility takes a single consistent snapshot of the
+// §IV.2.1 PrimaryWalLegOk inputs under shipMu:
+//
+//	debtZero  = (cursor == head observed at this moment)
+//	liveTail  = at least one EmitKindLive frame emitted in this session
+//	walLegOk  = debtZero ∨ liveTail
+//	cursor    = last-emitted LSN
+//	head      = primary's head LSN at the snapshot moment
+//
+// Slice marker-only stage (§8.2.6 hardware oracle contract): callers
+// observe these values and log them in the `barrier prepare` marker
+// before frameBarrierReq is written. The values are NOT yet used to
+// gate the BarrierReq emission — that gate replacement is the A-class
+// wave which un-skips TestRecoverA_DebtZeroPath_BarrierEligible et al.
+//
+// The accessor name is suffixed with neither "Locked" nor "Unlocked"
+// because it manages its own lock — internally takes shipMu, returns,
+// releases. Callers must NOT hold shipMu themselves; passing through
+// drive() is what serializes against in-flight emits.
+//
+// Pinned by §IV.2.1 / §8.2.6.
+func (s *WalShipper) ProbeBarrierEligibility() (debtZero, liveTail, walLegOk bool, cursor, head uint64) {
+	s.shipMu.Lock()
+	defer s.shipMu.Unlock()
+	cursor = s.cursor
+	head = s.head.Head()
+	debtZero = cursor == head
+	liveTail = s.firstLiveEmitted.Load()
+	walLegOk = debtZero || liveTail
+	return
 }

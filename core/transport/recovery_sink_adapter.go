@@ -229,3 +229,26 @@ func (r *RecoverySink) WriteMu() *sync.Mutex {
 func (r *RecoverySink) SetPostEmitHook(hook func(lsn uint64)) {
 	r.e.SetWalShipperPostEmitHook(r.replicaID, hook)
 }
+
+// ProbeBarrierEligibility surfaces the §IV.2.1 PrimaryWalLegOk
+// observation tuple from the per-replica WalShipper, taken under the
+// shipper's serializer lock so the snapshot is consistent. Returns
+// (false, false, false, 0, 0) when no shipper exists for the replica
+// (defensive — shouldn't happen on a live session but the executor's
+// registry is map-backed so a probe before WalShipperFor is theoretically
+// possible).
+//
+// recovery.Sender's barrierEligibilityProbe interface duck-types this
+// method; the dual-lane production path uses it to populate the
+// `barrier prepare` / `barrier handshake` markers per plan §8.2.6.
+// The bridging-sink path (senderBacklogSink) does NOT implement this
+// interface — pre-§IV.2.1 markers are dual-lane-only.
+//
+// Slice marker-only stage: probe is observation, not gating.
+func (r *RecoverySink) ProbeBarrierEligibility() (debtZero, liveTail, walLegOk bool, cursor, head uint64) {
+	shipper := r.e.WalShipperFor(r.replicaID)
+	if shipper == nil {
+		return false, false, false, 0, 0
+	}
+	return shipper.ProbeBarrierEligibility()
+}

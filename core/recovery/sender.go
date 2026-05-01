@@ -5,10 +5,33 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"sync"
 
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
+
+// barrierEligibilityProbe is the optional sink-side hook that exposes
+// the §IV.2.1 PrimaryWalLegOk observation tuple. Implemented by the
+// dual-lane RecoverySink (transport package) which has access to the
+// per-replica WalShipper; bridging-sink (senderBacklogSink) does NOT
+// implement this — only the dual-lane production path emits the
+// `barrier prepare` / `barrier handshake` markers per plan §8.2.6.
+//
+// Returning values:
+//
+//	debtZero — cursor == head observed under serializer lock at probe
+//	liveTail — at least one EmitKindLive frame in this session
+//	walLegOk — debtZero ∨ liveTail
+//	cursor   — last-emitted LSN
+//	head     — primary's head at probe
+//
+// Slice marker-only stage: probe is observation; the values do NOT
+// gate BarrierReq emission. A-class wave (post-G0) replaces the
+// recover(a,b) `walApplied >= target` predicate with this tuple.
+type barrierEligibilityProbe interface {
+	ProbeBarrierEligibility() (debtZero, liveTail, walLegOk bool, cursor, head uint64)
+}
 
 // Sender is the primary-side driver of one rebuild session. It runs
 // the base lane, then delegates the WAL pump (and live-write traffic
@@ -464,6 +487,44 @@ func (s *Sender) Run(ctx context.Context, sessionID, fromLSN, targetLSN uint64) 
 	// Step 5 + 6: barrier round-trip — reader goroutine delivers the
 	// inbound BarrierResp via barrierRespCh (or any wire / protocol /
 	// pin-update error surfaced earlier).
+	//
+	// §IV.2.1 / §8.2.6 marker-only stage (G0 closed; Tier-1 predicate
+	// replacement = A-class wave, not this commit). Before writing
+	// frameBarrierReq, snapshot the PrimaryWalLegOk inputs from the
+	// sink (if it implements barrierEligibilityProbe) and emit the
+	// 5-field `barrier prepare` log line per plan §8.2.6 hardware
+	// oracle contract. The values are real (debtZero, liveTail,
+	// walLegOk computed from current shipper state) but do NOT yet
+	// gate the emission — observability bridge for QA.
+	//
+	// cutID source per architect Option B (plan §8.2.6 + §6 v3.27):
+	// per-session monotonic counter from coord.NextBarrierCut. Pre-
+	// §IV.2.4 wire change, this is a coordinator-local sequence;
+	// post-C-class it becomes the wire CheckpointCutSeq with no
+	// log-prefix change (still `cut=CCS:<n>`).
+	var (
+		barrierCutID    uint64
+		probeDebtZero   bool
+		probeLiveTail   bool
+		probeWalLegOk   bool
+		probeCursor     uint64
+		probeHead       uint64
+		probeAvailable  bool
+	)
+	if probe, ok := s.sink.(barrierEligibilityProbe); ok {
+		probeDebtZero, probeLiveTail, probeWalLegOk, probeCursor, probeHead = probe.ProbeBarrierEligibility()
+		probeAvailable = true
+	}
+	if cut, err := s.coordinator.NextBarrierCut(s.replicaID); err == nil {
+		barrierCutID = cut
+	}
+	if probeAvailable && barrierCutID > 0 {
+		log.Printf("replication: barrier prepare replica=%s sessionID=%d cut=CCS:%d PrimaryDebtZero=%t LiveTail=%t WalLegOk=%t cursor=%d head=%d",
+			s.replicaID, sessionID, barrierCutID,
+			probeDebtZero, probeLiveTail, probeWalLegOk,
+			probeCursor, probeHead)
+	}
+
 	if err := s.writeFrame(frameBarrierReq, nil); err != nil {
 		return 0, newFailure(FailureWire, PhaseBarrierReq, err)
 	}
@@ -476,6 +537,19 @@ func (s *Sender) Run(ctx context.Context, sessionID, fromLSN, targetLSN uint64) 
 		achieved = res.achieved
 	case <-ctx.Done():
 		return 0, newFailure(FailureCancelled, PhaseBarrierResp, ctx.Err())
+	}
+
+	// §IV.2.1 / §8.2.6 marker-only stage: emit the `barrier handshake`
+	// log line with the SAME cutID as the prepare line (Option B
+	// round-trip). Pre-C-class wire (no CheckpointCutSeq on the
+	// BarrierResp payload), `match=true` is unconditional — the same
+	// cutID flows from prepare to handshake by construction. Post-
+	// C-class, match becomes the real wire-vs-engine compare; a
+	// `match=false` line in hardware logs is the RED scenario per
+	// §8.2.6.
+	if probeAvailable && barrierCutID > 0 {
+		log.Printf("replication: barrier handshake cut=CCS:%d achieved=%d match=true",
+			barrierCutID, achieved)
 	}
 	// §IV.2.1 / FS-1 / Gate G0 — Tier 1 completion-authority site.
 	// The CanEmitSessionComplete check below + FailureContract on
