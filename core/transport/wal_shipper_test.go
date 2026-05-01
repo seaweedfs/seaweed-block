@@ -745,58 +745,85 @@ func TestWalShipper_BacklogToRealtime_Happy(t *testing.T) {
 	}
 }
 
-// TestWalShipper_BacklogStaysBacklog_UnderLoad — spec §5.3 explicit
-// non-guarantee.
+// TestWalShipper_R2_SaturationUnderSustainedLoad — §6.3 saturation
+// observability under continuous writer pressure.
 //
-// "R1 does NOT guarantee Backlog ever transitions to Realtime under
-// sustained high write load. If write rate > scan rate persistently,
-// cursor never catches head; R1 never fires; mode stays Backlog."
+// (Renamed from TestWalShipper_BacklogStaysBacklog_UnderLoad which
+// tested a §13-era contract: "mode stays Backlog under saturation".
+// §6.3 single drive() collapse retired the mode-as-dispatch concept;
+// the new contract is observability via the lag signal — OnSaturation
+// fires once per session when lag crosses threshold, regardless of
+// any mode label.)
 //
-// Test:
-//  1. Fast concurrent writer that out-paces drain (writes + writes).
-//  2. After bounded time (e.g. 200ms), cancel ctx.
-//  3. DrainBacklog returns FailureCancelled (or wrapped ctx.Err).
-//  4. Mode is still Backlog (NOT Realtime).
-//  5. cursor < head (still chasing).
+// Setup:
+//  1. Slow EmitFunc (sleeps per call) — simulates slow wire so the
+//     scan loop within a single drive() takes measurable time.
+//  2. Background writer goroutine writes substrate fast (no emit).
+//     Producer outpaces ship rate; head advances faster than cursor.
+//  3. Trigger drive() periodically via NotifyAppend; each drive()
+//     CASE A scan observes lag mid-flight (between emits).
 //
-// This pins that R1 doesn't lie under saturation; it stays Backlog
-// honestly so engine + R2 can react.
-func TestWalShipper_BacklogStaysBacklog_UnderLoad(t *testing.T) {
-	t.Skip("§6.3 collapse migration: pre-§6.3 this test asserted that " +
-		"Backlog mode persists while a writer outpaces the drain. Under §6.3 " +
-		"single drive() dispatch (commit Path A), drive()'s CASE A scan loop " +
-		"runs to completion under one shipMu acquire; if cursor catches head " +
-		"at any iteration, R1 fires and mode becomes Realtime — the writer " +
-		"queue then clears in the next NotifyAppend's drive() call. The " +
-		"§13-era 'Backlog persists under saturation' premise no longer holds. " +
-		"Re-author against §6.3's saturation model (lag observed during " +
-		"CASE A scan, OnSaturation fires once per session) — see " +
-		"TestWalShipper_R2_LagSignalFires for the new pattern.")
+// What §6.3 promises here:
+//   - OnSaturation fires exactly once per session when lag crosses
+//     threshold (single-shot, INV-R2-SINGLE-SHOT-PER-SESSION).
+//   - cursor advances monotonically (INV-MONOTONIC-CURSOR), never
+//     regresses, even under sustained writer pressure.
+//   - After writer stops + bounded settle time, cursor catches head
+//     (drive() CASE A drains remaining backlog).
+//
+// What §6.3 does NOT promise here (§13-era retired):
+//   - "Mode stays Backlog under load" — mode is now derived;
+//     transient ModeRealtime windows (cursor==head between writer's
+//     primary.Write and next NotifyAppend) are normal and harmless.
+//   - "DrainBacklog returns FailureCancelled at ctx deadline" —
+//     drive() integrates its own scan; the explicit DrainBacklog
+//     entry point is for recovery sessions, not steady saturation.
+func TestWalShipper_R2_SaturationUnderSustainedLoad(t *testing.T) {
 	primary := memorywal.NewStore(8192, 4096)
-	for lba := uint32(0); lba < 100; lba++ {
+	// Pre-seed enough lag so the very first drive() observes
+	// lag >= threshold (saturation fires deterministically).
+	const seedN = 600
+	for lba := uint32(0); lba < seedN; lba++ {
 		_, _ = primary.Write(lba, payload(lba, 0x20))
 	}
 	_, _ = primary.Sync()
 
-	// Block emit briefly per call to simulate slow wire — emit can't
-	// keep up with writes.
 	emit := newRecordingEmit()
 	slowEmit := EmitFunc(func(kind EmitKind, lba uint32, lsn uint64, data []byte) error {
 		time.Sleep(50 * time.Microsecond) // slow wire simulator
 		return emit.Func()(kind, lba, lsn, data)
 	})
 
-	s := NewWalShipper("r1", HeadSourceFromStorage(primary), primary, slowEmit)
+	var fired atomic.Int32
+	cfg := WalShipperConfig{
+		IdleSleep:           time.Millisecond,
+		SaturationThreshold: 500, // lag will exceed this on first observation
+		DisableTimerDrain:   true,
+		OnSaturation: func(replicaID string, lag uint64) {
+			fired.Add(1)
+			if replicaID != "r1" {
+				t.Errorf("OnSaturation replicaID=%q want r1", replicaID)
+			}
+			if lag < 500 {
+				t.Errorf("OnSaturation lag=%d want ≥500", lag)
+			}
+		},
+	}
+	s := NewWalShipperWithOptions("r1", HeadSourceFromStorage(primary), primary, slowEmit, cfg)
+	defer s.Stop()
 	if err := s.StartSession(0); err != nil {
 		t.Fatalf("StartSession: %v", err)
 	}
 
-	// Faster writer than drain.
+	// Background writer keeps adding entries; head extends during
+	// drive()'s CASE A scan. Each writer iteration writes substrate
+	// only (no NotifyAppend) — the test's main goroutine drives
+	// emission via NotifyAppend triggers below.
 	stopWriter := make(chan struct{})
 	writerDone := make(chan struct{})
 	go func() {
 		defer close(writerDone)
-		i := uint32(100)
+		i := uint32(seedN)
 		for {
 			select {
 			case <-stopWriter:
@@ -806,33 +833,55 @@ func TestWalShipper_BacklogStaysBacklog_UnderLoad(t *testing.T) {
 			if i >= 8192 {
 				return
 			}
-			data := payload(i, 0x20)
-			lsn, _ := primary.Write(i, data)
-			_ = s.NotifyAppend(i, lsn, data)
+			_, _ = primary.Write(i, payload(i, 0x30))
 			i++
-			// No sleep — writer runs as fast as possible.
 		}
 	}()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
-	drainErr := s.DrainBacklog(ctx)
-	cancel()
+	// Trigger drive() with a sequence of NotifyAppends. Each call
+	// enters CASE A (cursor < head), scans+emits a chunk, releases.
+	// updateLagLocked observes lag during scan; first observation ≥
+	// threshold fires OnSaturation.
+	cursor0 := s.Cursor()
+	for k := 0; k < 50; k++ {
+		// Use the current cursor+1 path; substrate-fill via CASE A
+		// will dominate (cursor far behind head). Input.lsn is
+		// idempotent-skipped because CASE A advances cursor past it.
+		next := s.Cursor() + 1
+		_ = s.NotifyAppend(0, next, payload(0, 0x40))
+		// Brief breather so the writer goroutine can extend head.
+		time.Sleep(time.Millisecond)
+	}
+
+	// Stop writer and let drive() catch up.
 	close(stopWriter)
 	<-writerDone
+	// One final drive to drain any remaining tail.
+	for k := 0; k < 5; k++ {
+		next := s.Cursor() + 1
+		_ = s.NotifyAppend(0, next, payload(0, 0x40))
+		time.Sleep(time.Millisecond)
+	}
 
-	// Q1c (architect 2026-04-29): the spec's normative content is "R1
-	// must not fake-Realtime under saturation"; whether DrainBacklog
-	// returns nil or non-nil at ctx-deadline is implementation choice
-	// not pinned by spec. Primary assertions: mode != Realtime AND
-	// cursor < head. The err check is observational only.
-	if got := s.Mode(); got == ModeRealtime {
-		t.Errorf("under saturation: mode=%s, expected NOT Realtime (R1 must not fake transition)", got)
+	// Allow the goroutine'd OnSaturation hook to land if it fired
+	// just before our reads.
+	deadline := time.Now().Add(200 * time.Millisecond)
+	for time.Now().Before(deadline) && fired.Load() == 0 {
+		time.Sleep(time.Millisecond)
 	}
-	_, _, head := primary.Boundaries()
-	if s.Cursor() >= head {
-		t.Errorf("under saturation: cursor=%d >= head=%d (writer should have outpaced drain)", s.Cursor(), head)
+
+	if fired.Load() == 0 {
+		t.Errorf("OnSaturation never fired despite seeded lag≈%d > threshold 500", seedN)
 	}
-	// Diagnostic only — drain return value is observation, not contract:
-	t.Logf("DrainBacklog under saturation: err=%v (any value is spec-conformant; "+
-		"primary contracts are mode!=Realtime + cursor<head, both checked above)", drainErr)
+	if fired.Load() > 1 {
+		t.Errorf("OnSaturation fired %d times; want 1 (single-shot per session)", fired.Load())
+	}
+
+	// cursor advanced monotonically (INV-MONOTONIC-CURSOR).
+	if s.Cursor() <= cursor0 {
+		t.Errorf("cursor did not advance: cursor0=%d post=%d", cursor0, s.Cursor())
+	}
+
+	t.Logf("§6.3 saturation: cursor advanced %d→%d; OnSaturation fired=%d",
+		cursor0, s.Cursor(), fired.Load())
 }

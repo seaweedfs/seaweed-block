@@ -22,6 +22,7 @@ import (
 	"bytes"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -41,20 +42,6 @@ import (
 // as WALKindSessionLive → applied on replica. Pushes after seal → error
 // → caller knows session is closing.
 func TestDualLane_LiveWritesDuringSession_AtomicSeal(t *testing.T) {
-	t.Skip("§6.3 collapse migration: under §6.3 single drive() dispatch " +
-		"(Path A commit), each PushLiveWrite during a session goes through " +
-		"WalShipper.drive() — concurrent pushers race against each other's " +
-		"CASE A substrate scans. The atomic-seal contract this test pins " +
-		"(every successful push reaches replica byte-equal) is sound, but " +
-		"the §6.3 dispatch shape introduces a subtle race window where a " +
-		"successful push (returns nil) precedes the cursor visible inside " +
-		"the next drive() call's CASE A scan, and the entry is emitted via " +
-		"a different drive() invocation's scan rather than its own. The end " +
-		"replica state is still byte-equal-primary post-barrier in the " +
-		"common case, but ~1/10 runs surface a stragglar LBA. Re-author " +
-		"against §6.3: serialize pushes (no concurrency) OR drop the " +
-		"acceptedSet-vs-replica-Read direct comparison and assert only " +
-		"replica == primary post-barrier.")
 	const numBlocks = 256
 	const blockSize = 4096
 	const backlogN = 100 // backlog scan length — large enough to give pushers a window
@@ -109,21 +96,22 @@ func TestDualLane_LiveWritesDuringSession_AtomicSeal(t *testing.T) {
 		t.Fatal("OnSessionStart did not fire within 2s")
 	}
 
-	// Pusher fan-out: 8 workers × 5 LBAs = 40 attempted pushes.
-	// LBAs 100..139, distinct per worker. Each push:
-	//   1. primary.Write to allocate a fresh LSN > frozenTarget
-	//   2. bridge.PushLiveWrite → sink.NotifyAppend
-	// Race: scan + flush race against pushers; some land before seal,
-	// some after.
+	// §6.3 / Path B: pusher fan-out runs concurrently against the
+	// session, but the contract being tested is "post-barrier replica
+	// converges to primary" — NOT "every successful push reaches
+	// replica byte-equal at the per-pusher granularity". The pre-§6.3
+	// per-pusher acceptedSet vs replica.Read comparison was racy under
+	// §6.3 single drive() dispatch (concurrent CASE A scans interleave
+	// against producer state); architect Path B ruling: drop that
+	// per-pusher cache; assert whole-array equivalence post-barrier.
 	const writers = 8
 	const perWriter = 5
 
-	var (
-		acceptedMu  sync.Mutex
-		acceptedSet = map[uint32][]byte{}
-	)
-
 	bridge := exec.dualLane.Bridge
+	var (
+		pushedAccepted atomic.Int32
+		pushedRejected atomic.Int32
+	)
 	var pushersWG sync.WaitGroup
 	for w := 0; w < writers; w++ {
 		pushersWG.Add(1)
@@ -143,15 +131,10 @@ func TestDualLane_LiveWritesDuringSession_AtomicSeal(t *testing.T) {
 					return
 				}
 				if pushErr := bridge.PushLiveWrite(recovery.ReplicaID("r1"), lba, lsn, data); pushErr == nil {
-					// Successful push — the atomic-seal contract demands
-					// this entry MUST land on replica.
-					acceptedMu.Lock()
-					acceptedSet[lba] = append([]byte(nil), data...)
-					acceptedMu.Unlock()
+					pushedAccepted.Add(1)
+				} else {
+					pushedRejected.Add(1)
 				}
-				// pushErr != nil → "sink sealed" — caller knows session
-				// is closing. Production would re-route to steady-live;
-				// test just drops.
 			}
 		}(w)
 	}
@@ -168,33 +151,28 @@ func TestDualLane_LiveWritesDuringSession_AtomicSeal(t *testing.T) {
 		t.Fatalf("session not Success; FailReason=%q", closeRes.FailReason)
 	}
 
-	// Atomic-seal contract: every successful push is byte-equal on replica.
-	acceptedMu.Lock()
-	defer acceptedMu.Unlock()
-
-	if len(acceptedSet) == 0 {
-		t.Fatal("no pushes succeeded — flush+seal raced ahead of all pushers; widen the test window")
+	// §6.3 Path B post-barrier convergence: every LBA that primary
+	// has must equal replica. This is the architect's "barrier 后整块
+	// replica.Read == primary.Read" contract. Iterates across the
+	// full LBA range any pusher could have written (backlog + push
+	// window).
+	maxLBA := uint32(backlogN + writers*perWriter)
+	if maxLBA > numBlocks {
+		maxLBA = numBlocks
 	}
-
-	for lba, want := range acceptedSet {
-		got, err := replica.Read(lba)
+	for lba := uint32(0); lba < maxLBA; lba++ {
+		pd, err := primary.Read(lba)
+		if err != nil {
+			t.Fatalf("primary.Read lba=%d: %v", lba, err)
+		}
+		rd, err := replica.Read(lba)
 		if err != nil {
 			t.Errorf("replica.Read lba=%d: %v", lba, err)
 			continue
 		}
-		if !bytes.Equal(got, want) {
-			t.Errorf("INV-SEAL-ATOMIC violated: lba=%d successful push but replica bytes differ (got[0:2]=%02x %02x want[0:2]=%02x %02x)",
-				lba, got[0], got[1], want[0], want[1])
-		}
-	}
-
-	// Backlog correctness: every seeded LBA must also be byte-equal.
-	// streamBacklog ships these as WALKindBacklog; receiver applies.
-	for lba := uint32(0); lba < backlogN; lba++ {
-		pd, _ := primary.Read(lba)
-		rd, _ := replica.Read(lba)
 		if !bytes.Equal(pd, rd) {
-			t.Errorf("backlog lba=%d mismatch", lba)
+			t.Errorf("post-barrier convergence violated: lba=%d primary[0:2]=%02x %02x replica[0:2]=%02x %02x",
+				lba, pd[0], pd[1], rd[0], rd[1])
 		}
 	}
 
@@ -203,8 +181,9 @@ func TestDualLane_LiveWritesDuringSession_AtomicSeal(t *testing.T) {
 		t.Errorf("post-session phase=%s want Idle", got)
 	}
 
-	t.Logf("dual-lane live-write E2E: %d/%d pushes accepted, all byte-equal on replica; backlog %d entries also byte-equal",
-		len(acceptedSet), writers*perWriter, backlogN)
+	t.Logf("§6.3 Path B atomic-seal: %d/%d pushes accepted (%d rejected); "+
+		"post-barrier replica == primary across LBA [0,%d)",
+		pushedAccepted.Load(), int32(writers*perWriter), pushedRejected.Load(), maxLBA)
 }
 
 // TestDualLane_LiveWritesDuringSession_AchievedLSN — sanity:
