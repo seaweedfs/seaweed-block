@@ -1,5 +1,8 @@
 package recovery
 
+// Completion oracle: recover(a,b) band — NOT recover(a) closure.
+// See sw-block/design/recover-semantics-adjustment-plan.md §8.1.
+
 import (
 	"bytes"
 	"sync"

@@ -1,5 +1,9 @@
 package transport
 
+// Completion oracle: recover(a,b) band — NOT recover(a) closure.
+// See sw-block/design/recover-semantics-adjustment-plan.md §8.1.
+// migrate-candidate: depends on primary.H semantics, see §8.1 Tier-5 migration
+
 // Pillar 3 slice-1 (mini-plan §11.7) — receiver-side convergence under
 // SAME-LBA conflict between backlog WAL and SessionLive writes.
 //
