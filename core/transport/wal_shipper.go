@@ -148,22 +148,39 @@ type WalShipperConfig struct {
 	// decides what to do (escalate / log / etc.). nil = no hook.
 	OnSaturation func(replicaID string, lag uint64)
 
-	// StrictRealtimeOrdering, if true, makes NotifyAppend Realtime
-	// FAIL CLOSED on `lsn != cursor + 1` (the T4a sequence invariant).
-	// Default false: log a warning and emit anyway (matches pre-guard
-	// behavior; preserves silent-direct-emit semantics existing tests
-	// depend on).
+	// StrictRealtimeOrdering, if true, makes the tail-emit path FAIL
+	// CLOSED on `lsn != cursor + 1` when cursor == head (no debt).
+	// Default false: still fails closed (per consensus §6.3 — input
+	// payload MUST NOT replace a missing LSN), unless
+	// LegacyOutOfOrderEmit is also set. The flag now functions as
+	// "fail-closed at the tail-emit gate" — same behavior strict and
+	// non-strict, kept for production-side wiring expressivity.
 	//
-	// Architect review 2026-04-30 #2 listed two tiers:
-	//   - Production: fail closed (set this true).
-	//   - Minimum: log + monitor (default false here).
-	//
-	// Set true on production callers (engine wiring) once they're
-	// ready for hard out-of-order surfacing. Setting false means
-	// gaps in the producer's LSN sequence get logged but the wire
-	// still ships the new lsn — silent divergence is observable in
-	// logs but not propagated to the caller as an error.
+	// NOTE (2026-04-30 §6.3 / §6.9 collapse): Pre-§6.3 default behavior
+	// was "log warning + emit input bytes anyway" on a tail gap. That
+	// bypass-the-gap behavior is now opt-in via LegacyOutOfOrderEmit —
+	// see that field. StrictRealtimeOrdering's old role (toggling
+	// fail-closed) is subsumed by §6.3's tail-gap contract; both
+	// values now fail closed by default.
 	StrictRealtimeOrdering bool
+
+	// LegacyOutOfOrderEmit, if true, restores pre-§6.3 behavior on a
+	// tail gap (cursor == head, input.lsn != cursor+1): log a warning
+	// and emit input bytes anyway. DEPRECATED — exists only as a
+	// short-lived migration knob for tests / staging that exercised
+	// the silent-fill path. Callers MUST plan to remove this flag.
+	//
+	// Production wiring MUST leave this false. With this flag false,
+	// a tail-gap surfaces as an error from the dispatch path; the
+	// engine MUST treat the error as a CursorGap signal and escalate
+	// to rebuild (consensus §6.3 + §6.9 NEGATIVE-EQUITY ban: the
+	// shipper does NOT self-heal a tail gap by ad-hoc emit).
+	//
+	// NOTE: this flag does NOT affect the debt-fill path (cursor <
+	// head). When debt exists, drive() always scans substrate first
+	// (CASE A) regardless of LegacyOutOfOrderEmit — debt-fill via
+	// substrate is the §6.3 default, not negotiable.
+	LegacyOutOfOrderEmit bool
 
 	// DisableTimerDrain, if true, suppresses the C2 §6.8 #4 self-
 	// driving Backlog drain goroutine.
@@ -189,11 +206,21 @@ type WalShipperConfig struct {
 }
 
 // DefaultWalShipperConfig returns production defaults.
+//
+// MIGRATION NOTE (slice 1 of §6.3 collapse): LegacyOutOfOrderEmit
+// defaults to TRUE here as a transitional bridge — preserves
+// pre-§6.3 "log + emit on tail gap" semantics so existing tests +
+// production callers don't observe a behavior flip in this commit.
+// Slice 2 will flip the default to false (§6.3 normative fail-closed
+// on tail gap), once production callers have been audited /
+// migrated. Tests that explicitly want §6.3 strict behavior must
+// set LegacyOutOfOrderEmit=false in their config.
 func DefaultWalShipperConfig() WalShipperConfig {
 	return WalShipperConfig{
-		IdleSleep:           5 * time.Millisecond,
-		SaturationThreshold: 100_000,
-		OnSaturation:        nil,
+		IdleSleep:            5 * time.Millisecond,
+		SaturationThreshold:  100_000,
+		OnSaturation:         nil,
+		LegacyOutOfOrderEmit: true, // slice-1 transitional; flip in slice-2
 	}
 }
 
@@ -333,92 +360,204 @@ func (s *WalShipper) timerLoop() {
 	}
 }
 
-// drainOpportunity attempts one substrate scan cycle from cursor if
-// debt exists (cursor < head) AND mode is Backlog. Single-pass; the
-// next tick / nudge reschedules. Holds shipMu around the scan to
-// keep INV-SINGLE.
+// driveInput is the unified payload to the §6.3 single-dispatch
+// drive() function. has=false is a timer/nudge ∅-tick (no incoming
+// append); has=true is a NotifyAppend caller offering an Append.
 //
-// Mode dispatch (consensus §13 E-WALSHIPPER-DUAL-MODE / mini-plan §11.2a):
+// Per consensus §6.3 there is ONE mailbox: both inputs converge on
+// drive(). The "two-mailbox" anti-pattern (separate Backlog vs
+// Realtime queues) is forbidden by §6.9 HOPE-SHIPPER-MONOTONIC.
+type driveInput struct {
+	has  bool
+	lba  uint32
+	lsn  uint64
+	data []byte
+}
+
+// drive is the §6.3 normative single-dispatch entry. It implements:
 //
-//   Idle     → no-op (no replica context yet).
-//   Backlog  → scan substrate from cursor; emit each entry under
-//              shipMu; on cursor==head, R1 transitions to Realtime.
-//   Realtime → no-op. NotifyAppend is the driver in steady state
-//              (T4a best-effort no-replay carve-out). Restoring a
-//              substrate scan here would replay dead-window writes
-//              when peer comes back online, which is precisely what
-//              T4a forbids — that's T4c rebuild territory. CHK-
-//              WALSHIPPER-TIMER-DRAIN explicitly limited to ModeBacklog.
+//	CASE A — debt (cursor < head):
+//	  Substrate is canonical. Scan from cursor, emit each entry,
+//	  advance cursor; loop until cursor == head OR scan exits with
+//	  no progress. Per §13 alignment, this is the BACKLOG-DRAIN
+//	  path even when invoked from a NotifyAppend caller — debt-first
+//	  means substrate, NOT input. The reader of this code who is
+//	  worried about "Realtime is reading substrate?": no, we are
+//	  observing debt and switching to backlog semantics for this
+//	  call; ModeRealtime as a name is not load-bearing for dispatch.
 //
-// DO NOT add a Realtime scan branch here without architect updating
-// consensus §13 (the T4a carve-out exists by design; reverting it
-// re-introduces the silent-divergence bug C2 closed).
-func (s *WalShipper) drainOpportunity() {
-	// Read mode + cursor + head as a CONSISTENT snapshot under
-	// shipMu — closes the TOCTOU window between the gate decision
-	// (cursor < head?) and the scan setup. Without this, a
-	// concurrent NotifyAppend (Backlog mode lag-only) or another
-	// drain pass could change cursor between the unlock and the
-	// head read, and we'd compare against an already-stale cursor.
+//	CASE B — caught up + fresh tail (cursor == head, input.has,
+//	  input.lsn == cursor+1):
+//	  Emit input directly; advance cursor by 1.
+//
+//	CASE C — caught up + ∅ input: noop.
+//
+//	Tail-gap (cursor == head, input.lsn != cursor+1, input.lsn > cursor):
+//	  Per §6.3 / §6.9 NEGATIVE-EQUITY ban — input payload MUST NOT
+//	  replace a missing LSN. Default: return an explicit error so
+//	  the engine escalates to rebuild. LegacyOutOfOrderEmit=true
+//	  (transitional) restores pre-§6.3 log+emit behavior.
+//
+//	Idle (mode == ModeIdle): drop everything (no replica context).
+//
+// Concurrency: drive holds shipMu for the whole call, including the
+// CASE A scan loop. INV-SINGLE: at most one drive() executing per
+// peer at any time. EmitFunc internally takes its own writeMu (per
+// walShipperEntry) for the wire-write atomic envelope; that lock is
+// shorter-scoped and orthogonal to shipMu. Concurrent drive callers
+// queue on shipMu — this is the §6 / P2 "single serializer per peer"
+// rule, not optional.
+//
+// CONVENTION on cursor semantics: this implementation tracks cursor
+// as LAST-EMITTED LSN. Spec §6.3 uses cursor = NEXT-TO-EMIT LSN.
+// Translation: spec.cursor == internal.cursor + 1. The check
+// `lsn == cursor + 1` here is identical to spec's `lsn == cursor`.
+func (s *WalShipper) drive(in driveInput) error {
 	s.shipMu.Lock()
-	mode := s.mode
-	cursor := s.cursor
-	headNow := s.head.Head() // read under shipMu for a consistent snapshot
-	s.shipMu.Unlock()
+	defer s.shipMu.Unlock()
 
-	// §6.8 #4 TIMER drain applies to Backlog mode (recovery session
-	// backlog phase); Realtime mode is driven by NotifyAppend (T4a
-	// best-effort steady ship). Idle = no replica context.
-	if mode != ModeBacklog {
-		return
-	}
-	if cursor >= headNow {
-		return
+	if s.mode == ModeIdle {
+		return nil
 	}
 
-	// Substrate ScanLBAs treats fromLSN as exclusive lower from the
-	// caller's perspective (callback filters `e.LSN <= cursor`).
-	// Substrate-specific behavior: memorywal returns LSN > fromLSN
-	// (exclusive); smartwal returns LSN >= fromLSN (inclusive) and
-	// rejects fromLSN below oldestPreserved with ErrWALRecycled.
+	head := s.head.Head()
+
+	// FAST-PATH tail emit: input arrived for exactly the next LSN
+	// AND substrate has nothing beyond it. "The debt is exactly the
+	// input" — no queue jumping, input bytes are canonical (caller
+	// already persisted to substrate; bytes equal). Preserves
+	// EmitKindLive on the steady-state ship hot path so wire
+	// observability tags Realtime tail emits as Live.
 	//
-	// Pass cursor directly. ErrWALRecycled is treated as transient
-	// (engine layer handles cursor recovery via session re-anchor);
-	// timer just no-ops this tick.
-	hardErr := error(nil)
-	scanErr := s.substrate.ScanLBAs(cursor, func(e storage.RecoveryEntry) error {
-		s.shipMu.Lock()
-		defer s.shipMu.Unlock()
+	// This is NOT a §6.3 violation. §6.3 forbids using input to fill
+	// a GAP (input.lsn > cursor+1, missing intermediate LSNs). Here
+	// input.lsn == cursor+1 AND head == input.lsn, so there is no
+	// gap — input IS the entire next-step debt.
+	if in.has && in.lsn == s.cursor+1 && head <= in.lsn {
+		if err := s.emit(EmitKindLive, in.lba, in.lsn, in.data); err != nil {
+			return err
+		}
+		s.cursor = in.lsn
+		s.updateLagLocked()
+		return nil
+	}
+
+	// CASE A — debt-first substrate fill. Reaches here when there's
+	// a gap larger than input alone can fill, OR substrate is ahead
+	// of input. Loops internally until cursor catches head OR scan
+	// terminates. Even invoked from NotifyAppend, this is BACKLOG-
+	// CLASS work (consensus §13 alignment): the wire kind tag is
+	// EmitKindBacklog because we're filling debt from substrate.
+	if err := s.driveCaseADebtFillLocked(); err != nil {
+		return err
+	}
+
+	// CASE C — ∅ input + caught up.
+	if !in.has {
+		return nil
+	}
+
+	// Idempotent skip: input.lsn already past cursor (substrate scan
+	// in CASE A may have advanced cursor over it).
+	if in.lsn <= s.cursor {
+		return nil
+	}
+
+	// CASE B (post-CASE-A residual) — caught up tail emit. Requires
+	// lsn == cursor+1 exactly. A gap here is a producer contract
+	// violation; do NOT use input bytes to fill (§6.3 / §6.9
+	// NEGATIVE-EQUITY).
+	if in.lsn != s.cursor+1 {
+		if s.cfg.LegacyOutOfOrderEmit {
+			log.Printf("WALSHIPPER-OUT-OF-ORDER replica=%s lsn=%d cursor=%d (expected cursor+1=%d; LegacyOutOfOrderEmit=true → emitting; DEPRECATED, see §6.3)",
+				s.replicaID, in.lsn, s.cursor, s.cursor+1)
+		} else {
+			return fmt.Errorf("walshipper: tail-emit cursor gap: replica=%s lsn=%d cursor=%d (expected lsn==cursor+1; engine MUST escalate to rebuild per §6.3 / §6.9)",
+				s.replicaID, in.lsn, s.cursor)
+		}
+	}
+	if err := s.emit(EmitKindLive, in.lba, in.lsn, in.data); err != nil {
+		return err
+	}
+	s.cursor = in.lsn
+	s.updateLagLocked()
+	return nil
+}
+
+// driveCaseADebtFillLocked implements §6.3 CASE A: scan substrate
+// from cursor, emit each entry as backlog kind, advance cursor, loop
+// until cursor == head OR scan returns no progress / error. Caller
+// MUST hold shipMu.
+//
+// The emit kind is EmitKindBacklog regardless of which caller path
+// invoked drive() — when CASE A fires, by definition we are filling
+// debt from substrate, which IS backlog semantics on the wire. Any
+// future code that needs to distinguish "live tail gap fill" vs
+// "session backlog drain" should split the kind tag here, not at
+// the dispatch level.
+//
+// On R1 caught-up (cursor reaches head) under ModeBacklog session,
+// the assertCaughtUpAndEnableTailShipLocked transition runs as part
+// of this call's tail.
+func (s *WalShipper) driveCaseADebtFillLocked() error {
+	head := s.head.Head()
+	if s.cursor >= head {
+		return nil
+	}
+
+	// Scan from current cursor. Substrate-specific behavior:
+	// memorywal exclusive lower; smartwal inclusive lower with
+	// ErrWALRecycled past retention. Callback runs UNDER our
+	// already-held shipMu — does NOT re-acquire (deadlock).
+	var hardErr error
+	scanErr := s.substrate.ScanLBAs(s.cursor, func(e storage.RecoveryEntry) error {
 		if s.mode == ModeIdle {
 			return errStopScan
 		}
 		if e.LSN <= s.cursor {
-			return nil // already-emitted (concurrent drain or sub-LSN boundary); skip
+			return nil // already-emitted boundary
 		}
-		kind := EmitKindLive
-		if s.mode == ModeBacklog {
-			kind = EmitKindBacklog
-		}
-		if err := s.emit(kind, e.LBA, e.LSN, e.Data); err != nil {
-			hardErr = fmt.Errorf("walshipper: drain emit lsn=%d: %w", e.LSN, err)
+		if err := s.emit(EmitKindBacklog, e.LBA, e.LSN, e.Data); err != nil {
+			hardErr = fmt.Errorf("walshipper: drive CASE A emit lsn=%d: %w", e.LSN, err)
 			return err
 		}
 		s.cursor = e.LSN
 		s.updateLagLocked()
 		return nil
 	})
-	_ = hardErr
-	_ = scanErr
+	if hardErr != nil {
+		return hardErr
+	}
+	if scanErr != nil {
+		if errors.Is(scanErr, errStopScan) {
+			// Mode flipped to Idle mid-scan — clean stop.
+			return nil
+		}
+		if errors.Is(scanErr, storage.ErrWALRecycled) {
+			// Transient at this layer; engine handles recycle via
+			// session re-anchor. Do NOT propagate as fatal here.
+			return nil
+		}
+		return fmt.Errorf("walshipper: drive CASE A scan: %w", scanErr)
+	}
 
-	// R1 transition opportunity: if Backlog and cursor caught up.
-	s.shipMu.Lock()
+	// R1 transition opportunity: if a session is active and we caught
+	// up to head, the spec §5 R1 procedure flips ModeBacklog →
+	// ModeRealtime under shipMu (we already hold it).
 	if s.mode == ModeBacklog {
-		head := s.head.Head()
-		if s.cursor >= head {
-			_ = s.assertCaughtUpAndEnableTailShipLocked(head)
+		head2 := s.head.Head()
+		if s.cursor >= head2 {
+			_ = s.assertCaughtUpAndEnableTailShipLocked(head2)
 		}
 	}
-	s.shipMu.Unlock()
+	return nil
+}
+
+// drainOpportunity is the timer/nudge entry into drive(). Wraps
+// drive(driveInput{has: false}) — see drive() doc for §6.3 CASE A/B/C
+// dispatch.
+func (s *WalShipper) drainOpportunity() {
+	_ = s.drive(driveInput{has: false})
 }
 
 // errStopScan is the sentinel returned from ScanLBAs callbacks to
@@ -493,64 +632,28 @@ func (s *WalShipper) EndSession() {
 	s.mode = ModeRealtime
 }
 
-// NotifyAppend is called by primary's write path for every committed
-// LSN. In Realtime mode: emits immediately via EmitFunc, advances
-// cursor. In Backlog mode: just updates lag sample (the backlog drain
-// loop will pick the new entry via its next ScanLBAs cycle). In
-// Idle mode: no-op (replica isn't active).
+// NotifyAppend is the §6.3 single-mailbox entry for "primary just
+// committed an LSN; here are the bytes". Per §6.3 / §6.9: this
+// thin wrapper offers the input to drive() — the actual dispatch
+// (debt-fill via substrate vs tail emit vs idempotent skip vs gap
+// error) lives there.
 //
-// Returns whatever EmitFunc returns in Realtime mode; nil otherwise.
-// On emit error, mode stays Realtime (caller / executor decides
-// degraded handling).
+// Behavior contract (§6.3):
+//
+//   - cursor < head (debt): drive runs CASE A first — substrate
+//     canonical, scan-and-emit until caught up. The input bytes
+//     are NOT used to fill any LSN gap (§6.9 NEGATIVE-EQUITY ban).
+//     If, after CASE A, input.lsn <= new cursor → idempotent skip
+//     (substrate scan covered it).
+//   - cursor == head + lsn == cursor+1: CASE B — tail emit.
+//   - cursor == head + lsn != cursor+1: tail-gap. Default fail-
+//     closed; engine MUST escalate to rebuild. LegacyOutOfOrderEmit
+//     restores pre-§6.3 log+emit behavior (transitional only).
+//
+// On emit error, mode stays unchanged; caller / executor decides
+// degraded handling.
 func (s *WalShipper) NotifyAppend(lba uint32, lsn uint64, data []byte) error {
-	s.shipMu.Lock()
-	defer s.shipMu.Unlock()
-
-	switch s.mode {
-	case ModeIdle:
-		return nil
-	case ModeBacklog:
-		// Update lag sample; backlog loop will pick up via ScanLBAs.
-		s.updateLagLocked()
-		return nil
-	case ModeRealtime:
-		if lsn <= s.cursor {
-			// Idempotent: write already accounted for (e.g. retry).
-			return nil
-		}
-		// T4a Realtime sequence guard (architect review 2026-04-30 #2).
-		//
-		// Realtime is append-driven; correctness requires
-		// NotifyAppend EXACTLY ONCE PER LSN IN ORDER (lsn == cursor+1).
-		// Gaps in the producer's sequence have no self-healing path
-		// (no Realtime substrate replay — that's T4c territory).
-		//
-		// Two-tier behavior controlled by StrictRealtimeOrdering:
-		//   true  → fail closed (production, post-engine-rebuild-on-gap)
-		//   false → log warning + emit anyway (default; preserves
-		//           pre-guard silent-direct-emit; observable via logs)
-		//
-		// The log line is the regression anchor: if you see
-		// "WALSHIPPER-OUT-OF-ORDER" in production, an LSN was skipped
-		// somewhere upstream — investigate before silent divergence
-		// causes byte mismatch on replica.
-		if lsn != s.cursor+1 {
-			if s.cfg.StrictRealtimeOrdering {
-				return fmt.Errorf("walshipper: Realtime NotifyAppend out-of-order: replica=%s lsn=%d cursor=%d (expected lsn==cursor+1; caller skipped an LSN or session should be in Backlog)",
-					s.replicaID, lsn, s.cursor)
-			}
-			log.Printf("WALSHIPPER-OUT-OF-ORDER replica=%s lsn=%d cursor=%d (expected cursor+1=%d; emitting anyway under non-strict mode — silent gap risk)",
-				s.replicaID, lsn, s.cursor, s.cursor+1)
-		}
-		if err := s.emit(EmitKindLive, lba, lsn, data); err != nil {
-			return err
-		}
-		s.cursor = lsn
-		s.updateLagLocked()
-		return nil
-	default:
-		return fmt.Errorf("walshipper: NotifyAppend in unknown mode %s", s.mode)
-	}
+	return s.drive(driveInput{has: true, lba: lba, lsn: lsn, data: data})
 }
 
 // DrainBacklog runs the backlog-mode pull loop until either:

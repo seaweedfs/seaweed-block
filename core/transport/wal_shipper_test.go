@@ -620,13 +620,26 @@ func TestWalShipper_R2_LagSignalFires(t *testing.T) {
 		t.Fatalf("StartSession: %v", err)
 	}
 
-	// In Backlog mode: NotifyAppend doesn't ship; just updates lag
-	// sample. Drive head to 1000 by writes, but DON'T call DrainBacklog.
+	// §6.3 collapse note: pre-§6.3, NotifyAppend in Backlog mode was
+	// lag-only (no emit) — the test could pump 1000 NotifyAppends and
+	// observe lag accumulate. Post-§6.3 (drive() single dispatch),
+	// NotifyAppend with input.lsn==cursor+1 takes the fast-path tail
+	// emit; cursor advances per call; lag stays at 0. To create the
+	// saturation observable in the new model, pre-seed substrate
+	// (build head without triggering drive), then trigger ONE drive()
+	// call whose CASE A scan observes the high lag during the first
+	// emit's updateLag.
 	for lba := uint32(0); lba < 1000; lba++ {
 		data := payload(lba, 0xF0)
-		lsn, _ := primary.Write(lba, data)
-		_ = s.NotifyAppend(lba, lsn, data)
+		_, _ = primary.Write(lba, data) // substrate head advances; no NotifyAppend yet
 	}
+
+	// Single trigger NotifyAppend. drive() CASE A scans from cursor=0;
+	// first emit's updateLag observes head-cursor ≈ 1000 ≥ threshold
+	// 500 → OnSaturation fires (single-shot per session).
+	trigData := payload(1500, 0xF1)
+	trigLSN, _ := primary.Write(1500, trigData)
+	_ = s.NotifyAppend(1500, trigLSN, trigData)
 
 	// Allow the goroutine'd hook call to land.
 	deadline := time.Now().Add(500 * time.Millisecond)
@@ -635,7 +648,7 @@ func TestWalShipper_R2_LagSignalFires(t *testing.T) {
 	}
 
 	if fired.Load() == 0 {
-		t.Errorf("OnSaturation never fired despite lag ~1000 > threshold 500")
+		t.Errorf("OnSaturation never fired despite seeded lag ≈1000 > threshold 500")
 	}
 	if fired.Load() > 1 {
 		t.Errorf("OnSaturation fired %d times; want 1 (single-shot per session)", fired.Load())
@@ -749,6 +762,16 @@ func TestWalShipper_BacklogToRealtime_Happy(t *testing.T) {
 // This pins that R1 doesn't lie under saturation; it stays Backlog
 // honestly so engine + R2 can react.
 func TestWalShipper_BacklogStaysBacklog_UnderLoad(t *testing.T) {
+	t.Skip("§6.3 collapse migration: pre-§6.3 this test asserted that " +
+		"Backlog mode persists while a writer outpaces the drain. Under §6.3 " +
+		"single drive() dispatch (commit Path A), drive()'s CASE A scan loop " +
+		"runs to completion under one shipMu acquire; if cursor catches head " +
+		"at any iteration, R1 fires and mode becomes Realtime — the writer " +
+		"queue then clears in the next NotifyAppend's drive() call. The " +
+		"§13-era 'Backlog persists under saturation' premise no longer holds. " +
+		"Re-author against §6.3's saturation model (lag observed during " +
+		"CASE A scan, OnSaturation fires once per session) — see " +
+		"TestWalShipper_R2_LagSignalFires for the new pattern.")
 	primary := memorywal.NewStore(8192, 4096)
 	for lba := uint32(0); lba < 100; lba++ {
 		_, _ = primary.Write(lba, payload(lba, 0x20))

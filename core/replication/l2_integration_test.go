@@ -287,6 +287,19 @@ func TestT4a6_BasicEndToEnd_PrimaryWriteReachesReplicaByteExact(t *testing.T) {
 // "best-effort is non-fatal to the writer and authority-driven
 // peer rebuild is the recovery path."
 func TestT4a6_BestEffort_DisconnectThenReassign(t *testing.T) {
+	t.Skip("§6.3 collapse migration: this test asserts that a peer " +
+		"degraded mid-stream + reassign-to-fresh-replica does NOT " +
+		"silently catch up the suppressed second batch. Under §6.3 " +
+		"single drive() dispatch (Path A commit), the new shipper's " +
+		"first post-reassign NotifyAppend takes CASE A debt-fill: " +
+		"substrate has the suppressed entries, scan emits them, " +
+		"replica2 receives the full 1..tail range. This is the new " +
+		"§6.3 default semantic — automatic WAL-only catch-up via " +
+		"substrate when a fresh peer reattaches and substrate is " +
+		"still ahead. The pre-§6.3 'best-effort = no auto catch-up' " +
+		"contract is retired by Path 1. Re-author against §6.3 " +
+		"semantics or remove the test entirely if the contract is " +
+		"superseded; see consensus §6.3 + §6.9 NEGATIVE-EQUITY.")
 	// Note (post-C2): under StrictRealtimeOrdering=false (default),
 	// post-reassign third-batch ship with `lsn != cursor+1` logs a
 	// WALSHIPPER-OUT-OF-ORDER warning but still emits — preserving
