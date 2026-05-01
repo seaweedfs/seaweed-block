@@ -263,6 +263,17 @@ func (c *PeerShipCoordinator) TryAdvanceToSteadyLive(id ReplicaID) bool {
 //
 // CHK-BARRIER-BEFORE-CLOSE: callers MUST have observed a successful
 // barrier round-trip before calling this; it is purely the comparison.
+//
+// §IV.2.1 / FS-1 / Gate G0 — Tier 1 completion-authority site.
+// The `achievedLSN >= st.targetLSN` predicate below is the historic
+// recover(a,b) gate; per consensus §I P8, this is NOT the recover(a)
+// completion authority. Migration target (per
+// `sw-block/design/recover-semantics-adjustment-plan.md` §1 +
+// `learn/2026-05-01-recover-target-audit.md` Tier 1) replaces this
+// with PrimaryWalLegOk(P) under serializer lock + ReplicaWalWitness
+// reporting at the BarrierHandshake cut. AchievedLSN becomes a
+// per-cut witness, not a "crossed target" finishing condition. NO
+// behavior change pre-Gate G0.
 func (c *PeerShipCoordinator) CanEmitSessionComplete(id ReplicaID, achievedLSN uint64) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()

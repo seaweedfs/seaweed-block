@@ -180,6 +180,18 @@ func (s *RebuildSession) MarkBaseComplete() {
 // INV-SESSION-COMPLETE-ON-CONJUNCTION-LAYER1. Note: the system-level
 // "rebuild done" closure additionally requires a barrier-ack from the
 // replica matching achievedLSN — that is layer 2's responsibility.
+//
+// §IV.2.1 / FS-1 / Gate G0 — Tier 1 completion-authority site.
+// The `walApplied < targetLSN` predicate below is the historic
+// recover(a,b) gate; per consensus §I P8, this is NOT the recover(a)
+// completion authority. The migration target (per
+// `sw-block/design/recover-semantics-adjustment-plan.md` §1 row
+// "TryComplete: walApplied ≥ Target 独断 → 新 conjunct" and
+// `learn/2026-05-01-recover-target-audit.md` Tier 1 row) replaces
+// this with `baseDone ∧ ReplicaWalWitness ∧ (coordinator-explicit
+// PrimaryWalLegOk OR barrier state machine phase)`. NO behavior
+// change pre-Gate G0; Tier-1 edits await T2 predicate name + witness
+// channel pinning.
 func (s *RebuildSession) TryComplete() (achievedLSN uint64, done bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

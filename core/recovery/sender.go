@@ -477,6 +477,17 @@ func (s *Sender) Run(ctx context.Context, sessionID, fromLSN, targetLSN uint64) 
 	case <-ctx.Done():
 		return 0, newFailure(FailureCancelled, PhaseBarrierResp, ctx.Err())
 	}
+	// §IV.2.1 / FS-1 / Gate G0 — Tier 1 completion-authority site.
+	// The CanEmitSessionComplete check below + FailureContract on
+	// `achieved < target` is the historic recover(a,b) Run-success
+	// predicate; per consensus §I P8, this is NOT the recover(a)
+	// completion authority. Migration target (per
+	// `sw-block/design/recover-semantics-adjustment-plan.md` §1 +
+	// `learn/2026-05-01-recover-target-audit.md` Tier 1) replaces
+	// this with `baseDone (replica) ∧ PrimaryWalLegOk(P) (primary
+	// WalShipper) ∧ BarrierHandshake`; FailureContract is rebound
+	// to "barrier-pre violation / lifecycle contract violation"
+	// rather than "did not reach Y". NO behavior change pre-Gate G0.
 	if !s.coordinator.CanEmitSessionComplete(s.replicaID, achieved) {
 		return achieved, newFailure(FailureContract, PhaseBarrierResp,
 			fmt.Errorf("achieved=%d < target=%d", achieved, targetLSN))
