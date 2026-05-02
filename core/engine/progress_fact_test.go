@@ -167,3 +167,29 @@ func TestRecoveryFactsObserved_ProgressFact_ClassifiesWithCanonicalFact(t *testi
 		t.Fatalf("ClassifyProgress()=%s want %s", got, DecisionCatchUp)
 	}
 }
+
+func TestDurableAckObserved_ProgressFact_CanAdvanceRecyclePin(t *testing.T) {
+	event := DurableAckObserved{
+		ReplicaID:       "r1",
+		EndpointVersion: 2,
+		TransportEpoch:  3,
+		DurableLSN:      7,
+		PrimaryTailLSN:  5,
+		PrimaryHeadLSN:  10,
+	}
+	fact := event.ProgressFact()
+	if fact.Source != ProgressFromDurableAck || fact.Confidence != ProgressLiveWire {
+		t.Fatalf("source/confidence=(%s,%s), want (%s,%s)",
+			fact.Source, fact.Confidence, ProgressFromDurableAck, ProgressLiveWire)
+	}
+	if fact.ReplicaR != event.DurableLSN || !fact.ReplicaRKnown {
+		t.Fatalf("ReplicaR=(%d known=%v), want (%d true)",
+			fact.ReplicaR, fact.ReplicaRKnown, event.DurableLSN)
+	}
+	if got := ClassifyProgress(fact); got != DecisionCatchUp {
+		t.Fatalf("ClassifyProgress()=%s want %s", got, DecisionCatchUp)
+	}
+	if !CanAdvanceRecyclePin(fact) {
+		t.Fatal("durable ack fact must be authorized to advance recycle pin")
+	}
+}

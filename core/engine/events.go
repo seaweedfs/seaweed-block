@@ -73,6 +73,20 @@ type RecoveryFactsObserved struct {
 
 func (RecoveryFactsObserved) eventKind() string { return "RecoveryFactsObserved" }
 
+// DurableAckObserved reports a replica durable frontier learned from
+// recovery-session feedback (for example BaseBatchAck). It is not probe
+// reachability and does not by itself decide health or start recovery.
+type DurableAckObserved struct {
+	ReplicaID       string
+	EndpointVersion uint64
+	TransportEpoch  uint64
+	DurableLSN      uint64
+	PrimaryTailLSN  uint64
+	PrimaryHeadLSN  uint64
+}
+
+func (DurableAckObserved) eventKind() string { return "DurableAckObserved" }
+
 // --- Session events (authority: session owner / executor) ---
 
 // SessionPrepared: a recovery session has been planned but not started.

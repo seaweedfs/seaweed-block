@@ -61,6 +61,11 @@ func Apply(st *ReplicaState, ev Event) ApplyResult {
 			break
 		}
 		applyRecoveryFacts(st, e, &result, trace)
+	case DurableAckObserved:
+		if !checkReplicaID(st, e.ReplicaID, &result, trace) {
+			break
+		}
+		applyDurableAck(st, e, &result, trace)
 	case SessionPrepared:
 		if !checkReplicaID(st, e.ReplicaID, &result, trace) {
 			break
@@ -296,6 +301,19 @@ func applyRecoveryFacts(st *ReplicaState, e RecoveryFactsObserved, r *ApplyResul
 
 	// Core decision logic (from v3-mini-engine.md section 8).
 	decide(st, r, trace)
+}
+
+func applyDurableAck(st *ReplicaState, e DurableAckObserved, r *ApplyResult, trace func(string, string)) {
+	if stale, reason := staleTransportObservation(st, e.EndpointVersion, e.TransportEpoch); stale {
+		trace("stale_durable_ack", reason)
+		return
+	}
+	fact := e.ProgressFact()
+	if fact.ReplicaR > st.Recovery.DurableAckR || !st.Recovery.DurableAckKnown {
+		st.Recovery.DurableAckR = fact.ReplicaR
+		st.Recovery.DurableAckKnown = true
+	}
+	trace("durable_ack_observed", fmt.Sprintf("R=%d", fact.ReplicaR))
 }
 
 // decide runs the core bounded decision logic.

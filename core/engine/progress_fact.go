@@ -67,6 +67,23 @@ func (e RecoveryFactsObserved) ProgressFact() ReplicaProgressFact {
 	}
 }
 
+// ProgressFact converts durable recovery feedback into the canonical fact
+// seam. Unlike probe facts, durable ack facts are authorized to advance
+// WAL recycle pin, but this conversion does not imply health or membership.
+func (e DurableAckObserved) ProgressFact() ReplicaProgressFact {
+	return ReplicaProgressFact{
+		ReplicaID:          e.ReplicaID,
+		EndpointVersion:    e.EndpointVersion,
+		ReplicaR:           e.DurableLSN,
+		ReplicaRKnown:      true,
+		PrimaryS:           e.PrimaryTailLSN,
+		PrimaryH:           e.PrimaryHeadLSN,
+		PrimaryBoundsKnown: true,
+		Source:             ProgressFromDurableAck,
+		Confidence:         ProgressLiveWire,
+	}
+}
+
 // ClassifyProgress maps a unified progress fact to the engine's recovery
 // class. Numeric R/S/H semantics are source-independent; source authority
 // is handled by helpers such as CanAdvanceRecyclePin.

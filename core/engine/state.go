@@ -88,6 +88,12 @@ type RecoveryTruth struct {
 	Decision       RecoveryDecision
 	DecisionReason string
 
+	// DurableAckR is the latest replica durable-ack frontier observed
+	// by the engine. It is progress telemetry for lag policy and WAL
+	// release authority, not a recovery-class predicate by itself.
+	DurableAckR     uint64
+	DurableAckKnown bool
+
 	// Attempts tracks how many StartCatchUp / StartRecovery commands
 	// the engine has emitted for the current Decision. Engine
 	// SessionFailed handler increments on close-with-non-recycled-
