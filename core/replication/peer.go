@@ -468,13 +468,23 @@ func (p *ReplicaPeer) ShipEntry(ctx context.Context, lineage transport.RecoveryL
 			p.target.ReplicaID, lba, lsn)
 		return fmt.Errorf("replication: ShipEntry: peer %s closed", p.target.ReplicaID)
 	}
+	peerLineage := p.lineage
+	targetID := p.target.ReplicaID
+	executor := p.executor
 	if p.state == ReplicaDegraded {
 		p.mu.Unlock()
+		if handled, err := executor.TryPushLiveWrite(targetID, lba, lsn, data); handled {
+			if err != nil {
+				return err
+			}
+			log.Printf("replication: ship session-lane peer=%s lba=%d lsn=%d (peer degraded, active recovery session)",
+				targetID, lba, lsn)
+			return nil
+		}
 		log.Printf("replication: ship gate-degraded peer=%s lba=%d lsn=%d (peer degraded)",
-			p.target.ReplicaID, lba, lsn)
-		return fmt.Errorf("replication: ShipEntry: peer %s degraded", p.target.ReplicaID)
+			targetID, lba, lsn)
+		return fmt.Errorf("replication: ShipEntry: peer %s degraded", targetID)
 	}
-	peerLineage := p.lineage
 	p.mu.Unlock()
 
 	if err := p.executor.Ship(p.target.ReplicaID, peerLineage, lba, lsn, data); err != nil {

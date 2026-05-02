@@ -6,11 +6,14 @@ package replication
 import (
 	"bytes"
 	"context"
+	"io"
 	"net"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/seaweedfs/seaweed-block/core/recovery"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 	"github.com/seaweedfs/seaweed-block/core/transport"
 )
@@ -143,6 +146,124 @@ func TestReplicaPeer_ShipEntry_ConnFailure_MarksDegraded(t *testing.T) {
 	if !strings.Contains(err.Error(), "degraded") {
 		t.Fatalf("expected 'degraded' error, got: %v", err)
 	}
+}
+
+type peerRecordingSessionSink struct {
+	started chan struct{}
+	release chan struct{}
+	ended   chan struct{}
+
+	mu      sync.Mutex
+	entries int
+}
+
+func newPeerRecordingSessionSink() *peerRecordingSessionSink {
+	return &peerRecordingSessionSink{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+		ended:   make(chan struct{}),
+	}
+}
+
+func (s *peerRecordingSessionSink) StartSession(fromLSN uint64) error {
+	_ = fromLSN
+	close(s.started)
+	return nil
+}
+
+func (s *peerRecordingSessionSink) DrainBacklog(ctx context.Context) error {
+	select {
+	case <-s.release:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (s *peerRecordingSessionSink) EndSession() {
+	select {
+	case <-s.ended:
+	default:
+		close(s.ended)
+	}
+}
+
+func (s *peerRecordingSessionSink) NotifyAppend(lba uint32, lsn uint64, data []byte) error {
+	_, _, _ = lba, lsn, data
+	s.mu.Lock()
+	s.entries++
+	s.mu.Unlock()
+	return nil
+}
+
+func (s *peerRecordingSessionSink) Entries() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.entries
+}
+
+// TestReplicaPeer_ShipEntry_DegradedWithActiveSession_RoutesSessionLane
+// pins the production call path for the global single-emitter rule.
+// Hardware #5 showed that executor-level gates are too low: degraded
+// peers used to reject before BlockExecutor.Ship was reached. Active
+// recovery sessions must get first refusal even when the peer's coarse
+// state is Degraded.
+func TestReplicaPeer_ShipEntry_DegradedWithActiveSession_RoutesSessionLane(t *testing.T) {
+	primary := storage.NewBlockStore(8, 4096)
+	coord := recovery.NewPeerShipCoordinator()
+	replicaID := "r-peer-session"
+	exec := transport.NewBlockExecutorWithDualLane(primary, "127.0.0.1:1", "127.0.0.1:2", coord, recovery.ReplicaID(replicaID))
+	target := ReplicaTarget{
+		ReplicaID:       replicaID,
+		DataAddr:        "127.0.0.1:1",
+		ControlAddr:     "127.0.0.1:1",
+		Epoch:           3,
+		EndpointVersion: 1,
+	}
+	peer, err := NewReplicaPeer(target, exec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = peer.Close() })
+	peer.SetState(ReplicaDegraded)
+
+	sessionClient, sessionServer := net.Pipe()
+	t.Cleanup(func() {
+		_ = sessionClient.Close()
+		_ = sessionServer.Close()
+	})
+	go func() {
+		_, _ = io.Copy(io.Discard, sessionServer)
+	}()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	sink := newPeerRecordingSessionSink()
+	bridge, _, ok := exec.DualLanePrimaryBridge()
+	if !ok {
+		t.Fatal("missing dual-lane bridge")
+	}
+	if err := bridge.StartRebuildSessionWithSink(ctx, sessionClient, recovery.ReplicaID(replicaID), 77, 10, 10, sink); err != nil {
+		t.Fatalf("start active session: %v", err)
+	}
+	select {
+	case <-sink.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("session sink did not start")
+	}
+
+	data := make([]byte, 4096)
+	if err := peer.ShipEntry(context.Background(), transport.RecoveryLineage{}, 4, 11, data); err != nil {
+		t.Fatalf("ShipEntry on degraded peer with active session: %v", err)
+	}
+	if got := sink.Entries(); got != 1 {
+		t.Fatalf("ShipEntry routed %d entries to active session; want 1", got)
+	}
+
+	cancel()
+	_ = sessionClient.Close()
+	_ = sessionServer.Close()
+	close(sink.release)
 }
 
 // TestReplicaPeer_Invalidate_MovesToDegraded — direct call to

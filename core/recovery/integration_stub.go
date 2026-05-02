@@ -173,6 +173,17 @@ func (b *PrimaryBridge) startRebuildSessionLocked(ctx context.Context, conn net.
 	return nil
 }
 
+// HasActiveSession reports whether a dual-lane recovery session is
+// currently in flight for the given replica. Transport uses this as the
+// active-session gate before the legacy steady Ship path can touch the
+// resident WalShipper's emit context.
+func (b *PrimaryBridge) HasActiveSession(replicaID ReplicaID) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	_, ok := b.senders[replicaID]
+	return ok
+}
+
 // PushLiveWrite forwards a primary-side WAL append to the active
 // session for this peer (if any). Caller is the WAL shipper
 // integration; they MUST have already consulted

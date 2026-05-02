@@ -2,14 +2,18 @@ package transport
 
 import (
 	"bytes"
+	"context"
 	"errors"
+	"io"
 	"net"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/seaweedfs/seaweed-block/core/recovery"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
@@ -462,4 +466,140 @@ func isTimeoutErr(err error) bool {
 		return te.Timeout()
 	}
 	return false
+}
+
+type recordingSessionSink struct {
+	started  chan struct{}
+	release  chan struct{}
+	ended    chan struct{}
+	startErr error
+
+	mu      sync.Mutex
+	entries []struct {
+		lba  uint32
+		lsn  uint64
+		data []byte
+	}
+}
+
+func newRecordingSessionSink() *recordingSessionSink {
+	return &recordingSessionSink{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+		ended:   make(chan struct{}),
+	}
+}
+
+func (s *recordingSessionSink) StartSession(fromLSN uint64) error {
+	_ = fromLSN
+	close(s.started)
+	return s.startErr
+}
+
+func (s *recordingSessionSink) DrainBacklog(ctx context.Context) error {
+	select {
+	case <-s.release:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (s *recordingSessionSink) EndSession() {
+	select {
+	case <-s.ended:
+	default:
+		close(s.ended)
+	}
+}
+
+func (s *recordingSessionSink) NotifyAppend(lba uint32, lsn uint64, data []byte) error {
+	cp := append([]byte(nil), data...)
+	s.mu.Lock()
+	s.entries = append(s.entries, struct {
+		lba  uint32
+		lsn  uint64
+		data []byte
+	}{lba: lba, lsn: lsn, data: cp})
+	s.mu.Unlock()
+	return nil
+}
+
+func (s *recordingSessionSink) Entries() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.entries)
+}
+
+// TestExecutor_Ship_ActiveDualLaneSession_RoutesThroughSingleSessionEmitter
+// pins the global single-emitter rule at the executor boundary.
+//
+// While a dual-lane recovery session is active for a replica, Ship must
+// not fall through to the legacy steady MsgShip path. The only legal live
+// WAL egress is PrimaryBridge.PushLiveWrite -> active session sink. If this
+// regresses, Ship overwrites the resident WalShipper's emit context and the
+// same monotonic cursor can speak through two wire profiles.
+func TestExecutor_Ship_ActiveDualLaneSession_RoutesThroughSingleSessionEmitter(t *testing.T) {
+	primary := storage.NewBlockStore(8, 4096)
+	coord := recovery.NewPeerShipCoordinator()
+	replicaID := "r1"
+	exec := NewBlockExecutorWithDualLane(primary, "127.0.0.1:1", "127.0.0.1:2", coord, recovery.ReplicaID(replicaID))
+
+	steadyClient, steadyServer := net.Pipe()
+	t.Cleanup(func() {
+		_ = steadyClient.Close()
+		_ = steadyServer.Close()
+	})
+	steadyLineage := RecoveryLineage{SessionID: 91, Epoch: 7, EndpointVersion: 3, TargetLSN: 100}
+	_ = exec.WalShipperFor(replicaID)
+	exec.updateWalShipperEmitContext(replicaID, steadyClient, steadyLineage, EmitProfileSteadyMsgShip)
+
+	sessionClient, sessionServer := net.Pipe()
+	t.Cleanup(func() {
+		_ = sessionClient.Close()
+		_ = sessionServer.Close()
+	})
+	go func() {
+		_, _ = io.Copy(io.Discard, sessionServer)
+	}()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	sink := newRecordingSessionSink()
+	if err := exec.dualLane.Bridge.StartRebuildSessionWithSink(
+		ctx, sessionClient, recovery.ReplicaID(replicaID), 77, 10, 10, sink,
+	); err != nil {
+		t.Fatalf("StartRebuildSessionWithSink: %v", err)
+	}
+	select {
+	case <-sink.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("session sink did not start")
+	}
+
+	shipLineage := RecoveryLineage{SessionID: 92, Epoch: 7, EndpointVersion: 3, TargetLSN: 200}
+	data := make([]byte, 4096)
+	data[0] = 0x5a
+	if err := exec.Ship(replicaID, shipLineage, 4, 11, data); err != nil {
+		t.Fatalf("Ship during active dual-lane session: %v", err)
+	}
+	if got := sink.Entries(); got != 1 {
+		t.Fatalf("active session Ship routed %d entries to session sink; want 1", got)
+	}
+
+	gotConn, gotLineage, gotProfile := exec.SnapshotEmitContext(replicaID)
+	if gotConn != steadyClient {
+		t.Fatalf("Ship during active session overwrote emit conn: got %p want steady %p", gotConn, steadyClient)
+	}
+	if gotLineage != steadyLineage {
+		t.Fatalf("Ship during active session overwrote emit lineage: got %+v want %+v", gotLineage, steadyLineage)
+	}
+	if gotProfile != EmitProfileSteadyMsgShip {
+		t.Fatalf("Ship during active session changed emit profile: got %s want %s", gotProfile, EmitProfileSteadyMsgShip)
+	}
+
+	cancel()
+	_ = sessionClient.Close()
+	_ = sessionServer.Close()
+	close(sink.release)
 }

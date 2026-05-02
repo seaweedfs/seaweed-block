@@ -386,6 +386,7 @@ func (e *BlockExecutor) doFence(replicaID string, lineage RecoveryLineage) {
 //     (T4b-1 wire)
 //   - this method rejects valid-decode-but-wrong-session acks via
 //     ErrBarrierLineageMismatch (T4b-2 ack-consumer validation)
+//
 // A future optimization MUST NOT weaken this to epoch-only; the
 // full-lineage rule is load-bearing for H5 LOCK.
 //
@@ -608,7 +609,7 @@ func (e *BlockExecutor) Probe(replicaID, dataAddr, ctrlAddr string, sessionID, e
 			Success:         false,
 			EndpointVersion: endpointVersion,
 			TransportEpoch:  epoch,
-			FailReason:      fmt.Sprintf("%v: expected=%+v actual=%+v",
+			FailReason: fmt.Sprintf("%v: expected=%+v actual=%+v",
 				ErrProbeLineageMismatch, requestLineage, resp.Lineage),
 		}
 	}
@@ -869,6 +870,27 @@ func (e *BlockExecutor) DualLanePrimaryBridge() (*recovery.PrimaryBridge, recove
 		return nil, "", false
 	}
 	return e.dualLane.Bridge, e.dualLane.ReplicaID, true
+}
+
+// TryPushLiveWrite routes a live WAL entry through an active dual-lane
+// recovery session if one exists for replicaID. Returns (handled=true)
+// whenever the entry was claimed by that session path, even if the
+// session sink returned an error. Legacy-mode executors, or dual-lane
+// executors with no active session for replicaID, return handled=false.
+//
+// This is the peer-layer counterpart to Ship's internal active-session
+// gate: callers that would otherwise reject on coarse peer state can
+// still respect the single-emitter rule and offer writes to the active
+// recovery session before falling back to steady shipping.
+func (e *BlockExecutor) TryPushLiveWrite(replicaID string, lba uint32, lsn uint64, data []byte) (handled bool, err error) {
+	if e.dualLane == nil {
+		return false, nil
+	}
+	rid := recovery.ReplicaID(replicaID)
+	if !e.dualLane.Bridge.HasActiveSession(rid) {
+		return false, nil
+	}
+	return true, e.dualLane.Bridge.PushLiveWrite(rid, lba, lsn, data)
 }
 
 // Registry lifecycle note (architect P1 review #4): walShippers

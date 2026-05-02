@@ -5,6 +5,8 @@ import (
 	"log"
 	"net"
 	"time"
+
+	"github.com/seaweedfs/seaweed-block/core/recovery"
 )
 
 // shipWriteDeadline bounds Ship's TCP write so a dead replica can't
@@ -56,6 +58,16 @@ const shipDialTimeout = 3 * time.Second
 //     epoch return nil without writing anything to the wire.
 //   - 3s write deadline (wal_shipper.go:240): byte-identical bound.
 func (e *BlockExecutor) Ship(replicaID string, lineage RecoveryLineage, lba uint32, lsn uint64, data []byte) error {
+	// Global single-emitter gate: an active recovery session owns the
+	// peer's live WAL egress. Ship must not fall through to the legacy
+	// steady MsgShip path because that path mutates the resident
+	// WalShipper's emit context. During recovery, every live write must
+	// enter through the active session sink so the one monotonic cursor
+	// speaks through one wire profile.
+	if e.dualLane != nil && e.dualLane.Bridge.HasActiveSession(recovery.ReplicaID(replicaID)) {
+		return e.dualLane.Bridge.PushLiveWrite(recovery.ReplicaID(replicaID), lba, lsn, data)
+	}
+
 	e.mu.Lock()
 	session, ok := e.sessions[lineage.SessionID]
 	if !ok || session == nil {
