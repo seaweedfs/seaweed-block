@@ -39,17 +39,20 @@ type CommandExecutor interface {
 	Probe(replicaID, dataAddr, ctrlAddr string, sessionID, epoch, endpointVersion uint64) ProbeResult
 
 	// StartCatchUp begins a catch-up session with the given sessionID,
-	// fromLSN (T4d-3), and targetLSN.
+	// fromLSN (T4d-3), and frontierHint.
 	// The sessionID is assigned by the adapter (matches the engine's session truth).
 	// fromLSN is the LSN the executor scans FROM (inclusive); engine
 	// populates as Recovery.R + 1 per G-1 §6.1 architect Option A.
+	// frontierHint is advisory/compat lineage data, not a completion
+	// predicate and not the WAL scan stop line.
 	// Runs asynchronously; completion/failure MUST be reported via the
 	// registered OnSessionClose callback using the SAME sessionID.
-	StartCatchUp(replicaID string, sessionID, epoch, endpointVersion, fromLSN, targetLSN uint64) error
+	StartCatchUp(replicaID string, sessionID, epoch, endpointVersion, fromLSN, frontierHint uint64) error
 
-	// StartRebuild begins a full rebuild session with the given sessionID and targetLSN.
+	// StartRebuild begins a full rebuild session with the given sessionID
+	// and frontierHint. The transport chooses/syncs the BASE pin itself.
 	// Same contract as StartCatchUp.
-	StartRebuild(replicaID string, sessionID, epoch, endpointVersion, targetLSN uint64) error
+	StartRebuild(replicaID string, sessionID, epoch, endpointVersion, frontierHint uint64) error
 
 	// StartRecoverySession begins a recovery session for the given content
 	// kind under the given runtime policy. Per design memo §7a (T4c-pre-B):
@@ -80,7 +83,7 @@ type CommandExecutor interface {
 	// command and dispatch through `StartRecoverySession`.
 	StartRecoverySession(
 		replicaID string,
-		sessionID, epoch, endpointVersion, targetLSN uint64,
+		sessionID, epoch, endpointVersion, frontierHint uint64,
 		contentKind engine.RecoveryContentKind,
 		policy engine.RecoveryRuntimePolicy,
 	) error

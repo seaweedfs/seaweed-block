@@ -22,12 +22,13 @@ import (
 // Option A. Engine populates `FromLSN = Recovery.R + 1`; sender
 // scans from there. Sender does NOT add `+1` — the off-by-one
 // "skip already-applied" policy lives at the engine.
-func (e *BlockExecutor) StartCatchUp(replicaID string, sessionID, epoch, endpointVersion, fromLSN, targetLSN uint64) error {
+func (e *BlockExecutor) StartCatchUp(replicaID string, sessionID, epoch, endpointVersion, fromLSN, frontierHint uint64) error {
 	lineage := RecoveryLineage{
 		SessionID:       sessionID,
 		Epoch:           epoch,
 		EndpointVersion: endpointVersion,
-		TargetLSN:       targetLSN,
+		FrontierHint:    frontierHint,
+		TargetLSN:       frontierHint,
 	}
 	session, err := e.registerSession(lineage)
 	if err != nil {
@@ -35,7 +36,7 @@ func (e *BlockExecutor) StartCatchUp(replicaID string, sessionID, epoch, endpoin
 	}
 
 	go func() {
-		achieved, err := e.doCatchUp(replicaID, session, fromLSN, targetLSN)
+		achieved, err := e.doCatchUp(replicaID, session, fromLSN, frontierHint)
 		e.finishSession(replicaID, session, achieved, err)
 	}()
 	return nil

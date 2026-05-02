@@ -108,21 +108,21 @@ func (p *PeerCommandExecutor) Probe(replicaID, dataAddr, ctrlAddr string, sessio
 	return p.inner.Probe(replicaID, dataAddr, ctrlAddr, sessionID, epoch, endpointVersion)
 }
 
-func (p *PeerCommandExecutor) StartCatchUp(replicaID string, sessionID, epoch, endpointVersion, fromLSN, targetLSN uint64) error {
-	return p.inner.StartCatchUp(replicaID, sessionID, epoch, endpointVersion, fromLSN, targetLSN)
+func (p *PeerCommandExecutor) StartCatchUp(replicaID string, sessionID, epoch, endpointVersion, fromLSN, frontierHint uint64) error {
+	return p.inner.StartCatchUp(replicaID, sessionID, epoch, endpointVersion, fromLSN, frontierHint)
 }
 
-func (p *PeerCommandExecutor) StartRebuild(replicaID string, sessionID, epoch, endpointVersion, targetLSN uint64) error {
-	return p.inner.StartRebuild(replicaID, sessionID, epoch, endpointVersion, targetLSN)
+func (p *PeerCommandExecutor) StartRebuild(replicaID string, sessionID, epoch, endpointVersion, frontierHint uint64) error {
+	return p.inner.StartRebuild(replicaID, sessionID, epoch, endpointVersion, frontierHint)
 }
 
 func (p *PeerCommandExecutor) StartRecoverySession(
 	replicaID string,
-	sessionID, epoch, endpointVersion, targetLSN uint64,
+	sessionID, epoch, endpointVersion, frontierHint uint64,
 	contentKind engine.RecoveryContentKind,
 	policy engine.RecoveryRuntimePolicy,
 ) error {
-	return p.inner.StartRecoverySession(replicaID, sessionID, epoch, endpointVersion, targetLSN, contentKind, policy)
+	return p.inner.StartRecoverySession(replicaID, sessionID, epoch, endpointVersion, frontierHint, contentKind, policy)
 }
 
 func (p *PeerCommandExecutor) InvalidateSession(replicaID string, sessionID uint64, reason string) {

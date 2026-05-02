@@ -19,7 +19,7 @@ import (
 // institution. The wire protocol differs from catch-up:
 // MsgRebuildBlock per LBA, then a terminal MsgRebuildDone whose
 // BarrierResponse carries the replica's actually achieved frontier.
-func (e *BlockExecutor) StartRebuild(replicaID string, sessionID, epoch, endpointVersion, targetLSN uint64) error {
+func (e *BlockExecutor) StartRebuild(replicaID string, sessionID, epoch, endpointVersion, frontierHint uint64) error {
 	// Legacy wrapper: older adapter/engine surfaces only provide the
 	// frontier hint. The transport owns the base snapshot cut, so take a
 	// local durable sync here and use that as BasePinLSN. This keeps the
@@ -29,7 +29,7 @@ func (e *BlockExecutor) StartRebuild(replicaID string, sessionID, epoch, endpoin
 	if err != nil {
 		return fmt.Errorf("rebuild base pin sync: %w", err)
 	}
-	return e.StartRebuildPinned(replicaID, sessionID, epoch, endpointVersion, basePinLSN, targetLSN)
+	return e.StartRebuildPinned(replicaID, sessionID, epoch, endpointVersion, basePinLSN, frontierHint)
 }
 
 // StartRebuildPinned is the explicit rebuild entry point: basePinLSN is

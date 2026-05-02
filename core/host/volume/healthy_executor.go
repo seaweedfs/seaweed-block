@@ -71,19 +71,19 @@ func (e *HealthyPathExecutor) Probe(replicaID, dataAddr, ctrlAddr string, sessio
 // lifecycle; engine currently doesn't demand session completion for
 // Healthy because Recovery.Decision stays None under a successful
 // probe with no contact gap.
-func (e *HealthyPathExecutor) StartCatchUp(replicaID string, sessionID, epoch, endpointVersion, fromLSN, targetLSN uint64) error {
+func (e *HealthyPathExecutor) StartCatchUp(replicaID string, sessionID, epoch, endpointVersion, fromLSN, frontierHint uint64) error {
 	e.record("StartCatchUp:" + replicaID)
 	return nil
 }
 
-func (e *HealthyPathExecutor) StartRebuild(replicaID string, sessionID, epoch, endpointVersion, targetLSN uint64) error {
+func (e *HealthyPathExecutor) StartRebuild(replicaID string, sessionID, epoch, endpointVersion, frontierHint uint64) error {
 	e.record("StartRebuild:" + replicaID)
 	return nil
 }
 
 func (e *HealthyPathExecutor) StartRecoverySession(
 	replicaID string,
-	sessionID, epoch, endpointVersion, targetLSN uint64,
+	sessionID, epoch, endpointVersion, frontierHint uint64,
 	contentKind engine.RecoveryContentKind,
 	policy engine.RecoveryRuntimePolicy,
 ) error {

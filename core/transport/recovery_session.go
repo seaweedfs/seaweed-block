@@ -114,7 +114,7 @@ func classifyRecoveryFailure(err error) engine.RecoveryFailureKind {
 // `v3-phase-15-t4c-pre-poc-report.md` §3.b documents this gap.
 func (e *BlockExecutor) StartRecoverySession(
 	replicaID string,
-	sessionID, epoch, endpointVersion, targetLSN uint64,
+	sessionID, epoch, endpointVersion, frontierHint uint64,
 	contentKind engine.RecoveryContentKind,
 	policy engine.RecoveryRuntimePolicy,
 ) error {
@@ -133,11 +133,11 @@ func (e *BlockExecutor) StartRecoverySession(
 		// sender doesn't trip the substrate's fromLSN==0 spurious
 		// recycle. Future StartRecovery extension can carry an
 		// explicit FromLSN field.
-		return e.StartCatchUp(replicaID, sessionID, epoch, endpointVersion, 1, targetLSN)
+		return e.StartCatchUp(replicaID, sessionID, epoch, endpointVersion, 1, frontierHint)
 
 	case engine.RecoveryContentFullExtent:
 		// Bridge to existing rebuild sender.
-		return e.StartRebuild(replicaID, sessionID, epoch, endpointVersion, targetLSN)
+		return e.StartRebuild(replicaID, sessionID, epoch, endpointVersion, frontierHint)
 
 	case engine.RecoveryContentPartialLBA:
 		// Stage 2 — archive-driven LBA dump fetch. Not implemented
