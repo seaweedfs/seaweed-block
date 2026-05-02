@@ -19,10 +19,12 @@ import (
 )
 
 type flags struct {
-	authorityStore       string
-	listen               string
-	topology             string
-	expectedSlotsPerVol  int
+	authorityStore      string
+	listen              string
+	topology            string
+	expectedSlotsPerVol int
+	freshnessWindow     time.Duration
+	pendingGrace        time.Duration
 	// printReadyLine: test-only flag that emits a single
 	// structured JSON line to stdout after the gRPC listener is
 	// bound, so L2 subprocess tests can parse the ready event.
@@ -37,6 +39,8 @@ func parseFlags(args []string) (flags, error) {
 	fs.StringVar(&f.listen, "listen", "127.0.0.1:0", "gRPC listen address (e.g. 127.0.0.1:9180)")
 	fs.StringVar(&f.topology, "topology", "", "path to accepted-topology YAML (required for assignment to mint)")
 	fs.IntVar(&f.expectedSlotsPerVol, "expected-slots-per-volume", 3, "RF/expected slot count per volume; the controller rejects observation snapshots whose slot count differs (default 3, set to 2 for 2-node smoke clusters)")
+	fs.DurationVar(&f.freshnessWindow, "freshness-window", 30*time.Second, "observation freshness window before a server's heartbeat expires")
+	fs.DurationVar(&f.pendingGrace, "pending-grace", 1*time.Second, "bootstrap/missing-observation grace before supportability reports unsupported")
 	fs.BoolVar(&f.printReadyLine, "t0-print-ready", false, "internal test-only: emit one structured JSON line on stdout after listener bound")
 	fs.SetOutput(os.Stderr)
 	if err := fs.Parse(args); err != nil {
@@ -80,7 +84,7 @@ func run(f flags) int {
 		AuthorityStoreDir: f.authorityStore,
 		Listen:            f.listen,
 		Topology:          topo,
-		Freshness:         authority.FreshnessConfig{FreshnessWindow: 30 * time.Second, PendingGrace: 1 * time.Second},
+		Freshness:         authority.FreshnessConfig{FreshnessWindow: f.freshnessWindow, PendingGrace: f.pendingGrace},
 		ControllerConfig:  authority.TopologyControllerConfig{ExpectedSlotsPerVolume: f.expectedSlotsPerVol},
 	}
 	h, err := master.New(cfg)

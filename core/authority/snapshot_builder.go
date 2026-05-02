@@ -90,17 +90,20 @@ func BuildSnapshot(store storeSnapshot, topology AcceptedTopology, reader Author
 
 	for _, vid := range configuredIDs {
 		expected, _ := topology.lookupVolume(vid)
-		verdict := evaluateVolume(vid, expected, freshSlotsByVolume[vid], store)
+		var basis AuthorityBasis
+		hasLine := false
+		if reader != nil {
+			basis, hasLine = reader.VolumeAuthorityLine(vid)
+		}
+		verdict := evaluateVolume(vid, expected, freshSlotsByVolume[vid], store, basis, hasLine)
 
 		switch verdict.state {
 		case SupportabilitySupported:
 			// Stamp the per-volume current authority basis from
 			// the reader (read-only). This lets the controller's
 			// stale-resistance check match on subsequent feeds.
-			if reader != nil {
-				if basis, ok := reader.VolumeAuthorityLine(vid); ok {
-					verdict.topology.Authority = basis
-				}
+			if hasLine {
+				verdict.topology.Authority = basis
 			}
 			volumes = append(volumes, verdict.topology)
 		case SupportabilityPending:
@@ -197,6 +200,8 @@ func evaluateVolume(
 	expected VolumeExpected,
 	freshSlots []slotWithServer,
 	store storeSnapshot,
+	authorityLine AuthorityBasis,
+	hasAuthorityLine bool,
 ) volumeVerdict {
 	// If the volume is not in the accepted topology at all, it is
 	// unsupported — we cannot honestly build a VolumeTopologySnapshot
@@ -295,6 +300,7 @@ func evaluateVolume(
 	// expired.
 	coveredReplicas := map[string]bool{}
 	pending := false
+	degradedByMissingOrExpiredCurrent := false
 	for _, expectedSlot := range expected.Slots {
 		serverFresh := store.freshnessFor(expectedSlot.ServerID)
 		switch serverFresh {
@@ -318,10 +324,18 @@ func evaluateVolume(
 			// pending, not unsupported.
 			pending = true
 		case ServerMissing:
-			addReason(ReasonMissingServerObservation)
+			if hasAuthorityLine && expectedSlot.ReplicaID == authorityLine.ReplicaID {
+				degradedByMissingOrExpiredCurrent = true
+			} else {
+				addReason(ReasonMissingServerObservation)
+			}
 		case ServerExpired:
-			addReason(ReasonStaleObservation)
-			addOffender(expectedSlot.ServerID)
+			if hasAuthorityLine && expectedSlot.ReplicaID == authorityLine.ReplicaID {
+				degradedByMissingOrExpiredCurrent = true
+			} else {
+				addReason(ReasonStaleObservation)
+				addOffender(expectedSlot.ServerID)
+			}
 		}
 	}
 
@@ -349,6 +363,14 @@ func evaluateVolume(
 			}
 		}
 	}
+	if degradedByMissingOrExpiredCurrent && len(coveredReplicas) == 0 {
+		addReason(ReasonStaleObservation)
+		for _, expectedSlot := range expected.Slots {
+			if store.freshnessFor(expectedSlot.ServerID) == ServerExpired {
+				addOffender(expectedSlot.ServerID)
+			}
+		}
+	}
 
 	// Collapse: unsupported wins over pending.
 	if len(reasons) > 0 {
@@ -365,16 +387,16 @@ func evaluateVolume(
 	// volume is pending.
 	if pending {
 		return volumeVerdict{
-			state:          SupportabilityPending,
-			reasons:        []string{ReasonPartialInventory},
-			note:           "within bootstrap pending grace",
+			state:   SupportabilityPending,
+			reasons: []string{ReasonPartialInventory},
+			note:    "within bootstrap pending grace",
 		}
 	}
 
 	// Otherwise, supported — assemble the VolumeTopologySnapshot.
 	return volumeVerdict{
 		state:    SupportabilitySupported,
-		topology: assembleVolumeTopology(volumeID, expected, freshSlots),
+		topology: assembleVolumeTopology(volumeID, expected, freshSlots, authorityLine, hasAuthorityLine),
 	}
 }
 
@@ -386,6 +408,8 @@ func assembleVolumeTopology(
 	volumeID string,
 	expected VolumeExpected,
 	freshSlots []slotWithServer,
+	authorityLine AuthorityBasis,
+	hasAuthorityLine bool,
 ) VolumeTopologySnapshot {
 	slots := make([]ReplicaCandidate, 0, len(expected.Slots))
 
@@ -399,7 +423,16 @@ func assembleVolumeTopology(
 	for _, e := range expected.Slots {
 		f, ok := byReplicaID[e.ReplicaID]
 		if !ok {
-			continue // supported means all covered; defensive
+			placeholder := ReplicaCandidate{
+				ReplicaID: e.ReplicaID,
+				ServerID:  e.ServerID,
+			}
+			if hasAuthorityLine && authorityLine.ReplicaID == e.ReplicaID {
+				placeholder.DataAddr = authorityLine.DataAddr
+				placeholder.CtrlAddr = authorityLine.CtrlAddr
+			}
+			slots = append(slots, placeholder)
+			continue
 		}
 		slots = append(slots, ReplicaCandidate{
 			ReplicaID:       f.slot.ReplicaID,
