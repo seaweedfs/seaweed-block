@@ -47,6 +47,43 @@ func pipeConn(t *testing.T) (client, server net.Conn) {
 	return client, server
 }
 
+func TestRecoveryLineage_FrontierHintAlias_EncodesWireSlot(t *testing.T) {
+	lineage := RecoveryLineage{
+		SessionID:       1,
+		Epoch:           2,
+		EndpointVersion: 3,
+		FrontierHint:    4,
+	}
+	encoded := EncodeLineage(lineage)
+	if got := binary.BigEndian.Uint64(encoded[24:32]); got != 4 {
+		t.Fatalf("wire slot [24:32]: got %d want frontier hint 4", got)
+	}
+
+	decoded, err := DecodeLineage(encoded)
+	if err != nil {
+		t.Fatalf("DecodeLineage: %v", err)
+	}
+	if decoded.TargetLSN != 4 {
+		t.Fatalf("decoded legacy TargetLSN: got %d want 4", decoded.TargetLSN)
+	}
+	if got := decoded.EffectiveFrontierHint(); got != 4 {
+		t.Fatalf("decoded effective frontier hint: got %d want 4", got)
+	}
+}
+
+func TestRecoveryLineage_EquivalentTreatsFrontierHintAndLegacyTargetAsSame(t *testing.T) {
+	modern := RecoveryLineage{SessionID: 11, Epoch: 2, EndpointVersion: 3, FrontierHint: 77}
+	legacy := RecoveryLineage{SessionID: 11, Epoch: 2, EndpointVersion: 3, TargetLSN: 77}
+	if !modern.Equivalent(legacy) || !legacy.Equivalent(modern) {
+		t.Fatalf("frontier hint and legacy target alias should be equivalent: modern=%+v legacy=%+v", modern, legacy)
+	}
+	mismatch := legacy
+	mismatch.TargetLSN = 78
+	if modern.Equivalent(mismatch) {
+		t.Fatalf("different frontier hints must not be equivalent: modern=%+v mismatch=%+v", modern, mismatch)
+	}
+}
+
 // TestProtocol_EnvelopeRoundTrip writes one frame of every defined message
 // type and verifies the reader recovers the same type + payload bytes.
 func TestProtocol_EnvelopeRoundTrip(t *testing.T) {

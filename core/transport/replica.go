@@ -305,10 +305,10 @@ func (r *ReplicaListener) handleConn(conn net.Conn) {
 					lineage.SessionID, lineage.Epoch, lineage.EndpointVersion)
 				return
 			}
-			// Rebuild blocks carry the engine's frozen targetLSN in their
-			// lineage. Apply that real LSN immediately so any future
+			// Rebuild blocks carry the engine's frozen base frontier hint in
+			// their lineage. Apply that real LSN immediately so any future
 			// LSN-aware ApplyEntry guard still treats rebuild data as current.
-			if err := r.store.ApplyEntry(lba, data, lineage.TargetLSN); err != nil {
+			if err := r.store.ApplyEntry(lba, data, lineage.EffectiveFrontierHint()); err != nil {
 				log.Printf("replica: apply rebuild block: %v", err)
 			}
 
@@ -323,10 +323,10 @@ func (r *ReplicaListener) handleConn(conn net.Conn) {
 					lineage.SessionID, lineage.Epoch, lineage.EndpointVersion)
 				return
 			}
-			// The done message carries the engine's frozen target LSN.
+			// The done message carries the engine's frozen base frontier hint.
 			// Advance the replica's frontier metadata without touching
 			// any block data — AdvanceFrontier only updates nextLSN/walHead.
-			r.store.AdvanceFrontier(lineage.TargetLSN)
+			r.store.AdvanceFrontier(lineage.EffectiveFrontierHint())
 			frontier, _ := r.store.Sync()
 			// Echo the request's full lineage in the rebuild-done ack
 			// per T4b-1 wire extension. T4b scope does not yet validate
@@ -390,7 +390,7 @@ func (r *ReplicaListener) handleConn(conn net.Conn) {
 // Borrows: nothing.
 func (r *ReplicaListener) validateProbeLineage(incoming RecoveryLineage) bool {
 	if incoming.SessionID == 0 || incoming.Epoch == 0 ||
-		incoming.EndpointVersion == 0 || incoming.TargetLSN == 0 {
+		incoming.EndpointVersion == 0 || incoming.EffectiveFrontierHint() == 0 {
 		return false
 	}
 	r.mu.Lock()
@@ -431,7 +431,7 @@ func (r *ReplicaListener) acceptMutationLineage(incoming RecoveryLineage) bool {
 		r.activeLineage = incoming
 		return true
 	case 0:
-		return incoming.TargetLSN == active.TargetLSN
+		return incoming.EffectiveFrontierHint() == active.EffectiveFrontierHint()
 	default:
 		return false
 	}

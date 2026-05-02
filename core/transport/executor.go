@@ -350,7 +350,7 @@ func (e *BlockExecutor) FenceSync(replicaID string, lineage RecoveryLineage) err
 	}
 	// T4b-2 round-22 lineage validation: the replica's echoed lineage
 	// MUST match the lineage we sent.
-	if resp.Lineage != lineage {
+	if !resp.Lineage.Equivalent(lineage) {
 		log.Printf("executor: fence lineage mismatch replica=%s expected=%+v actual=%+v",
 			replicaID, lineage, resp.Lineage)
 		return fmt.Errorf("fence barrier resp lineage mismatch: expected=%+v actual=%+v",
@@ -457,7 +457,7 @@ func (e *BlockExecutor) Barrier(replicaID string, lineage RecoveryLineage, targe
 	// Stale or cross-session acks fail here. Diagnostic log format
 	// matches architect's round-21 text: peer ID + full expected /
 	// actual lineage tuple.
-	if resp.Lineage != lineage {
+	if !resp.Lineage.Equivalent(lineage) {
 		log.Printf("transport: barrier: lineage mismatch replica=%s expected=%+v actual=%+v",
 			replicaID, lineage, resp.Lineage)
 		return BarrierAck{}, ErrBarrierLineageMismatch
@@ -505,10 +505,11 @@ var ErrProbeLineageMismatch = errors.New("transport: probe: response lineage doe
 // lineage normally — probe lineages monotonically advance with the
 // minted sessionID counter, so they don't masquerade as stale.
 //
-// Echo validation: if `resp.Lineage != requestLineage`, returns
-// `ErrProbeLineageMismatch`. Catches stale / cross-session / partially-
-// zeroed responses (the latter already caught at decode, but a valid-
-// decode-but-wrong-session ack is the load-bearing case here).
+// Echo validation uses RecoveryLineage.Equivalent so the new FrontierHint
+// name and the legacy TargetLSN wire alias compare as the same fourth slot.
+// Mismatches return `ErrProbeLineageMismatch`. Catches stale / cross-session /
+// partially-zeroed responses (the latter already caught at decode, but a
+// valid-decode-but-wrong-session ack is the load-bearing case here).
 //
 // Called by: adapter.executeCommand at engine.ProbeReplica dispatch.
 // Owns: dial timeout (2s); per-call conn deadline (3s); transient
@@ -601,7 +602,7 @@ func (e *BlockExecutor) Probe(replicaID, dataAddr, ctrlAddr string, sessionID, e
 	// Echo validation (round-26 symmetric-pair rule, mirrors T4b-2's
 	// barrier echo check). Primary-side consumer MUST reject stale /
 	// cross-session / partial-zero responses by full lineage tuple.
-	if resp.Lineage != requestLineage {
+	if !resp.Lineage.Equivalent(requestLineage) {
 		log.Printf("transport: probe: lineage mismatch replica=%s expected=%+v actual=%+v",
 			replicaID, requestLineage, resp.Lineage)
 		return adapter.ProbeResult{
