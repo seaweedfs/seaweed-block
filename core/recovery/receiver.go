@@ -10,10 +10,11 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
-// Default cadence for BaseBatchAck emission. After every K base-lane
-// blocks applied OR every T elapsed, the receiver emits one ack so
-// the primary can advance pin_floor incrementally. Mandatory acks
-// (MarkBaseComplete, BarrierReq) bypass the cadence guard.
+// Default cadence for recovery durable-progress ack emission. After
+// every K base-lane blocks applied OR every T elapsed, the receiver
+// emits one BaseBatchAck frame so the primary can advance pin_floor
+// from the durable WAL frontier. Mandatory acks (MarkBaseComplete,
+// BarrierReq) bypass the cadence guard.
 //
 // Per docs/recovery-pin-floor-wire.md §3. Tunable via
 // NewReceiverWithCadence.
@@ -43,16 +44,17 @@ type Receiver struct {
 	recvFromLSN   uint64
 	appliedWalLSN uint64
 
-	// BaseBatchAck cadence config + state (per docs/recovery-pin-floor-wire.md §3).
+	// Durable-progress ack cadence config + state (per docs/recovery-pin-floor-wire.md §3).
 	cadenceK           uint32
 	cadenceT           time.Duration
 	blocksSinceLastAck uint32
 	lastAckTime        time.Time
-	baseInstalledUpper uint32 // highest base LBA installed (advisory in BaseBatchAck)
+	baseInstalledUpper uint32 // highest base LBA installed; advisory only in BaseBatchAck
 }
 
 // NewReceiver constructs a receiver bound to the replica's substrate
-// with default ack cadence (DefaultCadenceK blocks, DefaultCadenceT).
+// with default durable-progress ack cadence (DefaultCadenceK blocks,
+// DefaultCadenceT).
 // `conn` is the wire — caller's responsibility to close.
 func NewReceiver(store storage.LogicalStorage, conn io.ReadWriter) *Receiver {
 	return NewReceiverWithCadence(store, conn, DefaultCadenceK, DefaultCadenceT)
@@ -305,8 +307,10 @@ func (r *Receiver) shouldAck() bool {
 	return false
 }
 
-// sendAck writes a frameBaseBatchAck with the receiver's current
-// AcknowledgedLSN and BaseLBAUpper. Resets cadence counters.
+// sendAck writes a frameBaseBatchAck. The frame name is historical:
+// AcknowledgedLSN is the authoritative durable WAL frontier used for
+// pin-floor movement; BaseLBAUpper is advisory base progress only.
+// Resets cadence counters.
 //
 // AcknowledgedLSN semantics: receiver ack is a durable claim, not an
 // in-memory apply claim. The replica first flushes its local substrate,

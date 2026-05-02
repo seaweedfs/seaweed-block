@@ -44,9 +44,10 @@ type preBarrierSealer interface {
 	SealBeforeBarrier() error
 }
 
-// DurableAckCallback reports a receiver BaseBatchAck after it has passed
-// the coordinator pin-floor update. It is optional telemetry for the
-// semantic engine; pin safety still lives in PeerShipCoordinator.
+// DurableAckCallback reports the authoritative durable WAL frontier from a
+// receiver BaseBatchAck after it has passed the coordinator pin-floor update.
+// It is optional telemetry for the semantic engine; pin safety still lives in
+// PeerShipCoordinator.
 type DurableAckCallback func(replicaID ReplicaID, sessionID, acknowledgedLSN, primaryS, primaryH uint64)
 
 // Sender is the primary-side driver of one rebuild session. It runs
@@ -213,7 +214,7 @@ func NewSenderWithSink(primaryStore storage.LogicalStorage, coordinator *PeerShi
 }
 
 // SetOnDurableAck installs an optional progress callback fired whenever
-// the receiver emits a valid durable BaseBatchAck. Existing callers may
+// the receiver emits a valid durable progress ack. Existing callers may
 // leave it nil; it is not part of the close predicate.
 func (s *Sender) SetOnDurableAck(fn DurableAckCallback) {
 	s.onDurableAck = fn
@@ -662,7 +663,7 @@ func (s *Sender) Run(ctx context.Context, sessionID, fromLSN, frontierHint uint6
 // BarrierResp arrives (success path) or any wire / protocol / pin
 // failure surfaces. Result is delivered to barrierRespCh exactly once.
 //
-// BaseBatchAck handling:
+// Durable progress ack handling (wire frame: historical BaseBatchAck):
 //  1. Decode payload.
 //  2. Validate SessionID matches the active session.
 //  3. Fetch primary's S boundary (`Boundaries().S`).

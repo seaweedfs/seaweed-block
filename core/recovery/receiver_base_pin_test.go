@@ -82,7 +82,7 @@ func TestReceiver_SessionStart_UsesFromLSNAsBaseFrontierHint(t *testing.T) {
 	}
 }
 
-func TestReceiver_BaseBatchAck_DoesNotExceedDurableSyncFrontier(t *testing.T) {
+func TestReceiver_DurableProgressAck_DoesNotExceedDurableSyncFrontier(t *testing.T) {
 	store := &receiverAckStore{
 		numBlocks:    4,
 		blockSize:    4096,
@@ -125,7 +125,7 @@ func TestReceiver_BaseBatchAck_DoesNotExceedDurableSyncFrontier(t *testing.T) {
 			ack.AcknowledgedLSN, store.syncFrontier)
 	}
 	if ack.BaseLBAUpper != receiver.baseInstalledUpper {
-		t.Fatalf("BaseLBAUpper=%d want %d", ack.BaseLBAUpper, receiver.baseInstalledUpper)
+		t.Fatalf("BaseLBAUpper=%d want advisory base progress %d", ack.BaseLBAUpper, receiver.baseInstalledUpper)
 	}
 	if store.syncCalls != 1 {
 		t.Fatalf("Sync calls=%d want 1", store.syncCalls)

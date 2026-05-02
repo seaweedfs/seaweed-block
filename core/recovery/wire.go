@@ -200,11 +200,15 @@ func WriteWALEntryFrame(w io.Writer, kind WALEntryKind, lba uint32, lsn uint64, 
 //
 // SessionID identifies which session this ack belongs to (must match
 // the active session on the receiving conn; mismatch → FailureProtocol).
-// AcknowledgedLSN is the receiver's durable frontier as of this ack;
-// drives `coord.SetPinFloor` per docs/recovery-pin-floor-wire.md §4.
-// BaseLBAUpper reports the LBA prefix [0, BaseLBAUpper) durably
-// installed on the receiver — advisory for future retransmit logic
-// (NOT used for pin_floor in this milestone).
+// This frame is a durable progress ack, despite the historical
+// BaseBatchAck name. AcknowledgedLSN is authoritative: it is the
+// receiver's durable WAL frontier as of this ack and drives
+// `coord.SetPinFloor` per docs/recovery-pin-floor-wire.md §4.
+//
+// BaseLBAUpper is advisory progress only: it reports the base-lane
+// LBA prefix [0, BaseLBAUpper) installed on the receiver for operator
+// visibility / future retransmit logic. It MUST NOT drive pin_floor,
+// recover completion, or membership.
 type baseBatchAckPayload struct {
 	SessionID       uint64
 	AcknowledgedLSN uint64
