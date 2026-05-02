@@ -431,6 +431,52 @@ func TestAdapter_DurableAckBelowRetention_StartsRebuild(t *testing.T) {
 	}
 }
 
+func TestAdapter_PinUnderRetentionClose_DoesNotRetrySameLineage(t *testing.T) {
+	exec := newMockExecutor()
+	exec.autoClose = false
+	exec.probeResults["r1"] = ProbeResult{
+		ReplicaID:         "r1",
+		Success:           true,
+		EndpointVersion:   1,
+		TransportEpoch:    1,
+		ReplicaFlushedLSN: 10,
+		PrimaryTailLSN:    5,
+		PrimaryHeadLSN:    30,
+	}
+	a := NewVolumeReplicaAdapter(exec)
+	a.OnAssignment(AssignmentInfo{
+		VolumeID:        "v1",
+		ReplicaID:       "r1",
+		Epoch:           1,
+		EndpointVersion: 1,
+		DataAddr:        "data",
+		CtrlAddr:        "ctrl",
+	})
+
+	sessionID := waitForLatestSessionID(t, exec, "StartCatchUp")
+	beforeStarts := countStarts(exec, "StartCatchUp") + countStarts(exec, "StartRebuild")
+
+	exec.fireClose(SessionCloseResult{
+		ReplicaID:   "r1",
+		SessionID:   sessionID,
+		Success:     false,
+		FailureKind: engine.RecoveryFailurePinUnderRetention,
+		FailReason:  "pin under retention: durable ack below primary S",
+	})
+
+	afterStarts := countStarts(exec, "StartCatchUp") + countStarts(exec, "StartRebuild")
+	if afterStarts != beforeStarts {
+		t.Fatalf("PinUnderRetention retried same lineage: starts before=%d after=%d log=%v",
+			beforeStarts, afterStarts, exec.getCommands())
+	}
+	if !hasAdapterCommand(a, "PublishDegraded") {
+		t.Fatalf("PinUnderRetention must publish degraded; commands=%v", a.CommandLog())
+	}
+	if got := a.Projection().Mode; got == engine.ModeHealthy {
+		t.Fatalf("PinUnderRetention must not leave replica healthy")
+	}
+}
+
 func TestAdapter_StartCatchUp_UsesFrontierHintOverLegacyTarget(t *testing.T) {
 	exec := newMockExecutor()
 	exec.autoStart = false
@@ -526,6 +572,31 @@ func latestStartRecord(t *testing.T, exec *mockExecutor, kind string) startRecor
 	}
 	t.Fatalf("no %s start record; commands=%v starts=%v", kind, exec.commands, exec.starts)
 	return startRecord{}
+}
+
+func waitForLatestSessionID(t *testing.T, exec *mockExecutor, kind string) uint64 {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if sid := exec.latestSessionID(kind); sid != 0 {
+			return sid
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("no %s session started; commands=%v", kind, exec.getCommands())
+	return 0
+}
+
+func countStarts(exec *mockExecutor, kind string) int {
+	exec.mu.Lock()
+	defer exec.mu.Unlock()
+	n := 0
+	for _, start := range exec.starts {
+		if start.kind == kind {
+			n++
+		}
+	}
+	return n
 }
 
 func hasAdapterCommand(a *VolumeReplicaAdapter, kind string) bool {
