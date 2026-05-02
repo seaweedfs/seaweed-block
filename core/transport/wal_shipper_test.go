@@ -28,7 +28,6 @@ import (
 
 var _ = storage.ErrAppliedLSNsNotTracked // anchor: storage import survives unused-import scrub
 
-
 // --- helpers ----------------------------------------------------------
 
 // recordingEmit captures every (lba, lsn, data) handed to it. Used by
@@ -282,6 +281,24 @@ func TestWalShipper_RewindOnceAtSessionEntry(t *testing.T) {
 	}
 	if got := s.Mode(); got != ModeBacklog {
 		t.Errorf("post-StartSession mode=%s want Backlog", got)
+	}
+}
+
+func TestWalShipper_AdvanceRecoveredCursor_OnlyMovesForward(t *testing.T) {
+	primary := memorywal.NewStore(8, 4096)
+	emit := newRecordingEmit()
+	s := NewWalShipper("r1", HeadSourceFromStorage(primary), primary, emit.Func())
+
+	if err := s.Activate(100); err != nil {
+		t.Fatalf("Activate: %v", err)
+	}
+	s.AdvanceRecoveredCursor(150)
+	if got := s.Cursor(); got != 150 {
+		t.Fatalf("after forward advance cursor=%d want 150", got)
+	}
+	s.AdvanceRecoveredCursor(120)
+	if got := s.Cursor(); got != 150 {
+		t.Fatalf("after stale recovery witness cursor=%d want 150 (no rewind)", got)
 	}
 }
 

@@ -226,7 +226,7 @@ func NewReplicaPeer(target ReplicaTarget, executor *transport.BlockExecutor) (*R
 // The new live session ID is strictly greater than completedSessionID
 // so post-recovery steady MsgShipEntry traffic can advance the replica
 // from the recovery lineage back into the live lane.
-func (p *ReplicaPeer) RefreshLiveShipSessionAfter(completedSessionID uint64, reason string) error {
+func (p *ReplicaPeer) RefreshLiveShipSessionAfter(completedSessionID, achievedLSN uint64, reason string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.closed {
@@ -244,6 +244,7 @@ func (p *ReplicaPeer) RefreshLiveShipSessionAfter(completedSessionID uint64, rea
 	if err := p.executor.RegisterLiveShipSession(newLineage); err != nil {
 		return fmt.Errorf("replication: refresh live ship session: %w", err)
 	}
+	p.executor.AdvanceLiveShipCursor(p.target.ReplicaID, achievedLSN)
 	p.executor.InvalidateSession(p.target.ReplicaID, oldSessionID, reason)
 	p.sessionID = newSessionID
 	p.lineage = newLineage

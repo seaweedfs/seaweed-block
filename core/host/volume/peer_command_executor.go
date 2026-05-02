@@ -75,7 +75,7 @@ func (p *PeerCommandExecutor) SetOnSessionStart(fn adapter.OnSessionStart) {
 func (p *PeerCommandExecutor) SetOnSessionClose(fn adapter.OnSessionClose) {
 	p.inner.SetOnSessionClose(func(r adapter.SessionCloseResult) {
 		if r.Success {
-			if err := p.peer.RefreshLiveShipSessionAfter(r.SessionID, "recovery session completed"); err != nil {
+			if err := p.peer.RefreshLiveShipSessionAfter(r.SessionID, r.AchievedLSN, "recovery session completed"); err != nil {
 				r.Success = false
 				r.FailReason = err.Error()
 				p.peer.Invalidate("live session refresh failed: " + err.Error())

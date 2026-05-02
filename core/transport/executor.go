@@ -753,6 +753,15 @@ func (e *BlockExecutor) WalShipperFor(replicaID string) *WalShipper {
 	return s
 }
 
+// AdvanceLiveShipCursor records that recovery has durably carried the
+// replica through achievedLSN, so the next steady live write can start
+// at achievedLSN+1 instead of tripping the resident WalShipper's tail
+// gap guard. The cursor only moves forward.
+func (e *BlockExecutor) AdvanceLiveShipCursor(replicaID string, achievedLSN uint64) {
+	s := e.WalShipperFor(replicaID)
+	s.AdvanceRecoveredCursor(achievedLSN)
+}
+
 // updateWalShipperEmitContext sets the wire conn + lineage + profile
 // that the per-replica WalShipper's EmitFunc will use on its next
 // emit. Ship() calls this before delegating NotifyAppend; recovery

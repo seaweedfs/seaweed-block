@@ -56,6 +56,20 @@ func setupPeerWithRealReplica(t *testing.T) (*ReplicaPeer, *storage.BlockStore, 
 	return peer, replicaStore, listener
 }
 
+func waitReplicaBlock(t *testing.T, replica *storage.BlockStore, lba uint32, want []byte) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		got, _ := replica.Read(lba)
+		if bytes.Equal(got, want) {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	got, _ := replica.Read(lba)
+	t.Fatalf("replica LBA %d data mismatch: got %x want %x", lba, got, want)
+}
+
 // TestReplicaPeer_ShipEntry_Happy — one entry through a fully-wired
 // peer arrives at the replica byte-exact; peer stays Healthy.
 func TestReplicaPeer_ShipEntry_Happy(t *testing.T) {
@@ -273,7 +287,7 @@ func TestReplicaPeer_RefreshLiveShipSessionAfter_RotatesPastRecoverySession(t *t
 		t.Fatalf("precondition: old live session %d not registered", oldSessionID)
 	}
 
-	if err := peer.RefreshLiveShipSessionAfter(500, "test recovery completed"); err != nil {
+	if err := peer.RefreshLiveShipSessionAfter(500, 6001, "test recovery completed"); err != nil {
 		t.Fatalf("RefreshLiveShipSessionAfter: %v", err)
 	}
 	if peer.sessionID <= 500 {
@@ -291,6 +305,41 @@ func TestReplicaPeer_RefreshLiveShipSessionAfter_RotatesPastRecoverySession(t *t
 	if !peer.executor.HasSession(peer.sessionID) {
 		t.Fatalf("new live session %d not registered", peer.sessionID)
 	}
+}
+
+func TestReplicaPeer_PostRecoveryFirstLiveWrite_UsesRefreshedSession(t *testing.T) {
+	peer, replica, _ := setupPeerWithRealReplica(t)
+	oldSessionID := peer.sessionID
+
+	first := bytes.Repeat([]byte{0x11}, 4096)
+	if err := peer.ShipEntry(context.Background(), transport.RecoveryLineage{}, 2, 1, first); err != nil {
+		t.Fatalf("pre-recovery ShipEntry: %v", err)
+	}
+	waitReplicaBlock(t, replica, 2, first)
+
+	recoverySessionID := oldSessionID + 500
+	recoveryLineage := transport.RecoveryLineage{
+		SessionID:       recoverySessionID,
+		Epoch:           peer.target.Epoch,
+		EndpointVersion: peer.target.EndpointVersion,
+		TargetLSN:       6001,
+	}
+	if err := peer.executor.FenceSync(peer.target.ReplicaID, recoveryLineage); err != nil {
+		t.Fatalf("establish recovery lineage: %v", err)
+	}
+
+	if err := peer.RefreshLiveShipSessionAfter(recoveryLineage.SessionID, recoveryLineage.TargetLSN, "test recovery completed"); err != nil {
+		t.Fatalf("RefreshLiveShipSessionAfter: %v", err)
+	}
+	if peer.executor.HasSession(oldSessionID) {
+		t.Fatalf("old live session %d still registered after refresh", oldSessionID)
+	}
+
+	after := bytes.Repeat([]byte{0x22}, 4096)
+	if err := peer.ShipEntry(context.Background(), transport.RecoveryLineage{}, 3, 6002, after); err != nil {
+		t.Fatalf("post-recovery ShipEntry: %v", err)
+	}
+	waitReplicaBlock(t, replica, 3, after)
 }
 
 // TestReplicaPeer_Invalidate_MovesToDegraded — direct call to

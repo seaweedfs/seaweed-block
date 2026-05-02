@@ -609,6 +609,23 @@ func (s *WalShipper) Activate(cursor uint64) error {
 	return nil
 }
 
+// AdvanceRecoveredCursor moves the steady cursor forward after an
+// external recovery session has produced a durable witness. This is
+// the EndSession -> steady handoff for call paths where the recovery
+// close fact is observed above the WalShipper owner (e.g. peer callback
+// refresh). It never rewinds: if the resident feeder is already beyond
+// achievedLSN, the call is a no-op.
+func (s *WalShipper) AdvanceRecoveredCursor(achievedLSN uint64) {
+	s.shipMu.Lock()
+	defer s.shipMu.Unlock()
+	if achievedLSN > s.cursor {
+		s.cursor = achievedLSN
+	}
+	if !s.sessionActive {
+		s.mode = ModeRealtime
+	}
+}
+
 // StartSession transitions WalShipper into Backlog mode for a recovery
 // session. Resets cursor to fromLSN (the one allowed rewind per
 // INV-MONOTONIC-CURSOR). Caller (recovery.Sender) MUST then call
