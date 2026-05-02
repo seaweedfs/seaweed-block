@@ -105,3 +105,28 @@ func TestAdapter_FlowControlVerdictReturnsLastRecordedVerdict(t *testing.T) {
 		t.Fatalf("FlowControlVerdict=%+v want %+v", got, want)
 	}
 }
+
+func TestFlowControlObservationFromDurableAck_UsesPrimaryBoundariesAndAck(t *testing.T) {
+	obs := FlowControlObservationFromDurableAck(90, 30, 100, DurableAckResult{
+		ReplicaID:      "r1",
+		DurableLSN:     70,
+		PrimaryTailLSN: 1,
+		PrimaryHeadLSN: 2,
+	})
+
+	if !obs.PrimaryBoundsKnown {
+		t.Fatal("PrimaryBoundsKnown=false want true")
+	}
+	if obs.PrimaryDurableLSN != 90 || obs.PrimaryTailLSN != 30 || obs.PrimaryHeadLSN != 100 {
+		t.Fatalf("primary bounds=(%d,%d,%d) want (90,30,100)",
+			obs.PrimaryDurableLSN, obs.PrimaryTailLSN, obs.PrimaryHeadLSN)
+	}
+	if !obs.SlowestReplicaDurableKnown || obs.SlowestReplicaDurableLSN != 70 {
+		t.Fatalf("slowest durable=(%d known=%v), want (70,true)",
+			obs.SlowestReplicaDurableLSN, obs.SlowestReplicaDurableKnown)
+	}
+	if !obs.SessionDurableKnown || obs.SessionDurableLSN != 70 {
+		t.Fatalf("session durable=(%d known=%v), want (70,true)",
+			obs.SessionDurableLSN, obs.SessionDurableKnown)
+	}
+}

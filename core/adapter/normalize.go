@@ -192,6 +192,22 @@ func NormalizeDurableAck(r DurableAckResult) engine.Event {
 	}
 }
 
+// FlowControlObservationFromDurableAck builds the write-pressure observation
+// shape from primary storage boundaries plus the latest durable ack. It does
+// not normalize to an engine.Event because flow control is not recovery truth.
+func FlowControlObservationFromDurableAck(primaryR, primaryS, primaryH uint64, ack DurableAckResult) engine.FlowControlObservation {
+	return engine.FlowControlObservation{
+		PrimaryDurableLSN:          primaryR,
+		PrimaryTailLSN:             primaryS,
+		PrimaryHeadLSN:             primaryH,
+		PrimaryBoundsKnown:         true,
+		SlowestReplicaDurableLSN:   ack.DurableLSN,
+		SlowestReplicaDurableKnown: true,
+		SessionDurableLSN:          ack.DurableLSN,
+		SessionDurableKnown:        true,
+	}
+}
+
 // NormalizeSessionPrepared creates a SessionPrepared event when the
 // adapter has set up a recovery session in response to a Start* command.
 func NormalizeSessionPrepared(replicaID string, sessionID uint64, kind engine.SessionKind, frontierHint uint64) engine.Event {
