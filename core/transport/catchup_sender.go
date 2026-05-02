@@ -48,9 +48,9 @@ func (e *BlockExecutor) StartCatchUp(replicaID string, sessionID, epoch, endpoin
 //     at the replica's flushed frontier; each entry ships as
 //     MsgShipEntry carrying the session lineage
 //  3. send MsgBarrierReq + read typed BarrierResponse. AchievedLSN is
-//     the replica frontier observation; this legacy catch-up wrapper
-//     still compares it to targetLSN until the catch-up path gains the
-//     same PrimaryWalLegOk witness used by dual-lane rebuild close.
+//     the replica frontier observation; legacy catch-up closes when
+//     the replica witnesses the last WAL entry this feeder actually
+//     wrote, not when it crosses the compat target band.
 //
 // Substrate sub-mode is reported via storage.RecoveryMode (memo §5.1)
 // in the success log line so operators can tell at a glance whether
@@ -61,7 +61,7 @@ func (e *BlockExecutor) StartCatchUp(replicaID string, sessionID, epoch, endpoin
 //   - storage.ErrWALRecycled wrapped → tier-class change; engine
 //     SessionClose handler maps to peer NeedsRebuild (G-1 §4.3
 //     Option B)
-//   - target-not-reached after clean scan → stream-level error;
+//   - ack-behind-last-sent after clean scan → stream-level error;
 //     engine retries until RecoveryRuntimePolicy.MaxRetries (G-1 §4.1)
 //   - other stream errors → same retry path
 //
@@ -188,14 +188,13 @@ func (e *BlockExecutor) doCatchUp(replicaID string, session *activeSession, from
 	}
 
 	// Barrier-as-terminator (G-1 §4.2 architect Option B):
-	// `BarrierResponse.AchievedLSN` carries the same information
-	// V2's MsgCatchupDone marker provided. INV-REPL-CATCHUP-COMPLETION-
-	// FROM-BARRIER-ACHIEVED-LSN: completion is determined by comparing
-	// `resp.AchievedLSN` against `targetLSN`; partial-progress is
-	// surfaceable via the returned (lastSent, error) tuple.
-	if targetLSN > 0 && resp.AchievedLSN < targetLSN {
-		return lastSent, fmt.Errorf("catch-up: target %d not reached (achieved=%d)",
-			targetLSN, resp.AchievedLSN)
+	// `BarrierResponse.AchievedLSN` is the replica's frontier
+	// observation. The feeder's closure responsibility is the bytes it
+	// actually wrote in this session: lastSent. targetLSN remains in
+	// lineage/logging as a compat band, but is not the close predicate.
+	if lastSent > 0 && resp.AchievedLSN < lastSent {
+		return lastSent, fmt.Errorf("catch-up: ack %d behind last sent %d (target band=%d)",
+			resp.AchievedLSN, lastSent, targetLSN)
 	}
 
 	// Mode label surfacing (memo §5.1). T4d-4 part A: ask the
