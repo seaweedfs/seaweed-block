@@ -161,10 +161,15 @@ func (a *VolumeReplicaAdapter) SetFlowControlPolicy(policy engine.FlowControlPol
 func (a *VolumeReplicaAdapter) OnFlowControlObservation(obs engine.FlowControlObservation) engine.FlowControlVerdict {
 	facts := engine.BuildFlowControlFacts(obs)
 	a.mu.Lock()
-	defer a.mu.Unlock()
 	verdict := engine.EvaluateFlowControl(a.flowControlPolicy, facts)
 	a.lastFlowControlVerdict = verdict
 	a.flowControlObserved = true
+	a.mu.Unlock()
+
+	stdlog.Printf("adapter: flow-control dry-run action=%s reason=%s primary_flush_lag=%d replica_durable_lag=%d retention_pressure=%d sync_quorum_misses=%d recovery_backlog=%d explicit_durability=%t",
+		verdict.Action, verdict.Reason,
+		facts.PrimaryFlushLag, facts.ReplicaDurableLag, facts.RetentionPressure,
+		facts.SyncQuorumMisses, facts.RecoveryBacklog, facts.ExplicitDurability)
 	return verdict
 }
 

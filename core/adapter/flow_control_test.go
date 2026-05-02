@@ -1,6 +1,9 @@
 package adapter
 
 import (
+	"bytes"
+	stdlog "log"
+	"strings"
 	"testing"
 
 	"github.com/seaweedfs/seaweed-block/core/engine"
@@ -128,6 +131,39 @@ func TestAdapter_DiagnosticsIncludesFlowControlWithoutChangingProjection(t *test
 	if diag.Projection != before {
 		t.Fatalf("flow-control diagnostics changed projection: before=%+v after=%+v",
 			before, diag.Projection)
+	}
+}
+
+func TestAdapter_FlowControlObservation_EmitsStableDryRunLog(t *testing.T) {
+	var buf bytes.Buffer
+	prev := stdlog.Writer()
+	stdlog.SetOutput(&buf)
+	defer stdlog.SetOutput(prev)
+
+	exec := newMockExecutor()
+	a := NewVolumeReplicaAdapter(exec)
+	a.SetFlowControlPolicy(engine.FlowControlPolicy{MaxPrimaryFlushLag: 10})
+
+	a.OnFlowControlObservation(engine.FlowControlObservation{
+		PrimaryDurableLSN:  1,
+		PrimaryTailLSN:     5,
+		PrimaryHeadLSN:     20,
+		PrimaryBoundsKnown: true,
+		ExplicitDurability: true,
+	})
+
+	logLine := buf.String()
+	for _, want := range []string{
+		"adapter: flow-control dry-run",
+		"action=fail_durability_write",
+		"reason=primary_flush_lag",
+		"primary_flush_lag=19",
+		"retention_pressure=15",
+		"explicit_durability=true",
+	} {
+		if !strings.Contains(logLine, want) {
+			t.Fatalf("log line missing %q:\n%s", want, logLine)
+		}
 	}
 }
 
