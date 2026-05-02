@@ -308,21 +308,28 @@ func (r *Receiver) shouldAck() bool {
 // sendAck writes a frameBaseBatchAck with the receiver's current
 // AcknowledgedLSN and BaseLBAUpper. Resets cadence counters.
 //
-// AcknowledgedLSN semantics (POC): uses session.Status().WALApplied,
-// the highest WAL LSN this session has applied. For real WAL substrate
-// in production, the receiver should call store.Sync() first and use
-// the returned syncedLSN to claim true durability — see
-// docs/recovery-pin-floor-wire.md §3 ("During base lane: min(walApplied,
-// syncedLSN-at-ack-time)"). POC trusts in-memory durability.
+// AcknowledgedLSN semantics: receiver ack is a durable claim, not an
+// in-memory apply claim. The replica first flushes its local substrate,
+// then reports min(session WALApplied, syncedLSN-at-ack-time). This is
+// the value the primary uses to advance pin_floor; over-claiming here
+// can recycle WAL that the replica has not actually made durable.
 func (r *Receiver) sendAck() error {
 	if r.session == nil {
 		return newFailure(FailureProtocol, PhaseRecvAckWrite,
 			errors.New("sendAck before SessionStart"))
 	}
 	st := r.session.Status()
+	syncedLSN, err := r.store.Sync()
+	if err != nil {
+		return newFailure(FailureSubstrate, PhaseRecvAckWrite, err)
+	}
+	acknowledgedLSN := st.WALApplied
+	if syncedLSN < acknowledgedLSN {
+		acknowledgedLSN = syncedLSN
+	}
 	payload := encodeBaseBatchAck(baseBatchAckPayload{
 		SessionID:       r.sessionID,
-		AcknowledgedLSN: st.WALApplied,
+		AcknowledgedLSN: acknowledgedLSN,
 		BaseLBAUpper:    r.baseInstalledUpper,
 	})
 	if err := writeFrame(r.conn, frameBaseBatchAck, payload); err != nil {
