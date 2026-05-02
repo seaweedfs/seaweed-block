@@ -50,6 +50,10 @@ type SessionStartCallback func(replicaID ReplicaID, sessionID uint64)
 // On failure `err` is non-nil and `achievedLSN` is 0.
 type SessionCloseCallback func(replicaID ReplicaID, sessionID uint64, achievedLSN uint64, err error)
 
+// DurableAckCallback fires when a sender observes a receiver durable ack.
+// It is progress telemetry; session close remains the terminal callback.
+type BridgeDurableAckCallback func(replicaID ReplicaID, sessionID, acknowledgedLSN, primaryS, primaryH uint64)
+
 // PrimaryBridge is the primary-side adapter. One bridge instance
 // per primary daemon; it serializes session starts per replica via
 // the embedded coordinator's INV-SINGLE-FLIGHT-PER-REPLICA check.
@@ -64,6 +68,7 @@ type PrimaryBridge struct {
 
 	onStart SessionStartCallback
 	onClose SessionCloseCallback
+	onAck   BridgeDurableAckCallback
 
 	mu      sync.Mutex
 	senders map[ReplicaID]*Sender
@@ -88,6 +93,14 @@ func NewPrimaryBridge(store storage.LogicalStorage, coord *PeerShipCoordinator, 
 		onClose: onClose,
 		senders: make(map[ReplicaID]*Sender),
 	}
+}
+
+// SetOnDurableAck installs an optional progress callback. Safe to call
+// after construction; senders snapshot the bridge callback at ack time.
+func (b *PrimaryBridge) SetOnDurableAck(fn BridgeDurableAckCallback) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.onAck = fn
 }
 
 // StartRebuildSession is shaped like CommandExecutor.StartRebuild:
@@ -167,6 +180,14 @@ func (b *PrimaryBridge) startRebuildSessionLocked(ctx context.Context, conn net.
 	} else {
 		sender = NewSenderWithSink(b.store, b.coord, conn, replicaID, sink)
 	}
+	sender.SetOnDurableAck(func(rid ReplicaID, sid, acknowledgedLSN, primaryS, primaryH uint64) {
+		b.mu.Lock()
+		cb := b.onAck
+		b.mu.Unlock()
+		if cb != nil {
+			cb(rid, sid, acknowledgedLSN, primaryS, primaryH)
+		}
+	})
 	b.senders[replicaID] = sender
 	b.mu.Unlock()
 

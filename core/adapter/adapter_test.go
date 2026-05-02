@@ -22,6 +22,7 @@ type mockExecutor struct {
 	nextSession     atomic.Uint64
 	onSessionStart  OnSessionStart
 	onSessionClose  OnSessionClose // wired by adapter
+	onDurableAck    OnDurableAck
 	onFenceComplete OnFenceComplete
 	autoStart       bool
 	autoClose       bool
@@ -76,6 +77,12 @@ func (m *mockExecutor) SetOnSessionClose(fn OnSessionClose) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.onSessionClose = fn
+}
+
+func (m *mockExecutor) SetOnDurableAck(fn OnDurableAck) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.onDurableAck = fn
 }
 
 func (m *mockExecutor) SetOnFenceComplete(fn OnFenceComplete) {
@@ -332,6 +339,40 @@ func TestC8_SameFactsSameDecision(t *testing.T) {
 	}
 	if p1.RecoveryDecision != engine.DecisionCatchUp {
 		t.Fatalf("C8: expected catch_up, got %s", p1.RecoveryDecision)
+	}
+}
+
+func TestAdapter_DurableAckCallback_ReachesEngineProgressFact(t *testing.T) {
+	exec := newMockExecutor()
+	a := NewVolumeReplicaAdapter(exec)
+	a.OnAssignment(AssignmentInfo{
+		VolumeID:        "v1",
+		ReplicaID:       "r1",
+		Epoch:           1,
+		EndpointVersion: 1,
+		DataAddr:        "data",
+		CtrlAddr:        "ctrl",
+	})
+
+	exec.mu.Lock()
+	cb := exec.onDurableAck
+	exec.mu.Unlock()
+	if cb == nil {
+		t.Fatal("NewVolumeReplicaAdapter did not wire optional durable ack callback")
+	}
+	cb(DurableAckResult{
+		ReplicaID:      "r1",
+		SessionID:      7,
+		DurableLSN:     11,
+		PrimaryTailLSN: 5,
+		PrimaryHeadLSN: 20,
+	})
+
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if !a.state.Recovery.DurableAckKnown || a.state.Recovery.DurableAckR != 11 {
+		t.Fatalf("engine DurableAck=(%d known=%v), want (11 true)",
+			a.state.Recovery.DurableAckR, a.state.Recovery.DurableAckKnown)
 	}
 }
 

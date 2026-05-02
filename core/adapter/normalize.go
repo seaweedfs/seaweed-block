@@ -178,6 +178,20 @@ func NormalizeSessionStart(r SessionStartResult) engine.Event {
 	}
 }
 
+// NormalizeDurableAck converts mid-session durable progress into an
+// engine event. The event records progress only; engine policy decides
+// later whether and how to use it for lag.
+func NormalizeDurableAck(r DurableAckResult) engine.Event {
+	return engine.DurableAckObserved{
+		ReplicaID:       r.ReplicaID,
+		EndpointVersion: r.EndpointVersion,
+		TransportEpoch:  r.TransportEpoch,
+		DurableLSN:      r.DurableLSN,
+		PrimaryTailLSN:  r.PrimaryTailLSN,
+		PrimaryHeadLSN:  r.PrimaryHeadLSN,
+	}
+}
+
 // NormalizeSessionPrepared creates a SessionPrepared event when the
 // adapter has set up a recovery session in response to a Start* command.
 func NormalizeSessionPrepared(replicaID string, sessionID uint64, kind engine.SessionKind, frontierHint uint64) engine.Event {

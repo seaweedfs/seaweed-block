@@ -44,6 +44,11 @@ type preBarrierSealer interface {
 	SealBeforeBarrier() error
 }
 
+// DurableAckCallback reports a receiver BaseBatchAck after it has passed
+// the coordinator pin-floor update. It is optional telemetry for the
+// semantic engine; pin safety still lives in PeerShipCoordinator.
+type DurableAckCallback func(replicaID ReplicaID, sessionID, acknowledgedLSN, primaryS, primaryH uint64)
+
 // Sender is the primary-side driver of one rebuild session. It runs
 // the base lane, then delegates the WAL pump (and live-write traffic
 // during the session) to its WalShipperSink, and finally runs the
@@ -111,6 +116,8 @@ type Sender struct {
 	// to avoid routing live writes into a sender that is registered for
 	// single-flight but whose WalShipper is not yet the active feeder.
 	liveReady atomic.Bool
+
+	onDurableAck DurableAckCallback
 }
 
 // ackOrResult is the channel payload from the reader goroutine to
@@ -203,6 +210,13 @@ func NewSenderWithSink(primaryStore storage.LogicalStorage, coordinator *PeerShi
 		s.sharedWriter = wms.WriteMu()
 	}
 	return s
+}
+
+// SetOnDurableAck installs an optional progress callback fired whenever
+// the receiver emits a valid durable BaseBatchAck. Existing callers may
+// leave it nil; it is not part of the close predicate.
+func (s *Sender) SetOnDurableAck(fn DurableAckCallback) {
+	s.onDurableAck = fn
 }
 
 // walItem is the per-entry record buffered by senderBacklogSink while
@@ -683,12 +697,15 @@ func (s *Sender) readerLoop() {
 					fmt.Errorf("ack sessionID=%d != active=%d", p.SessionID, s.sessionID))}
 				return
 			}
-			_, primaryS, _ := s.primaryStore.Boundaries()
+			_, primaryS, primaryH := s.primaryStore.Boundaries()
 			if updateErr := s.coordinator.SetPinFloor(s.replicaID, p.AcknowledgedLSN, primaryS); updateErr != nil {
 				// SetPinFloor returns *Failure already typed
 				// (FailurePinUnderRetention or wrapped); pass through.
 				s.barrierRespCh <- ackOrResult{err: updateErr}
 				return
+			}
+			if s.onDurableAck != nil {
+				s.onDurableAck(s.replicaID, s.sessionID, p.AcknowledgedLSN, primaryS, primaryH)
 			}
 			// continue reading
 		case frameBarrierResp:

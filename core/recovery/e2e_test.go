@@ -352,6 +352,16 @@ func TestE2E_PinFloorAdvancesIncrementally(t *testing.T) {
 
 	coord := NewPeerShipCoordinator()
 	sender := NewSenderWithBacklogRelay(primary, coord, primaryConn, "r1")
+	var ackMu sync.Mutex
+	var ackFrontiers []uint64
+	sender.SetOnDurableAck(func(replicaID ReplicaID, sessionID, acknowledgedLSN, primaryS, primaryH uint64) {
+		if replicaID != "r1" || sessionID != 21 {
+			t.Errorf("durable ack callback identity=(%s,%d), want (r1,21)", replicaID, sessionID)
+		}
+		ackMu.Lock()
+		ackFrontiers = append(ackFrontiers, acknowledgedLSN)
+		ackMu.Unlock()
+	})
 	// Small K so cadence triggers within the 50-LBA backlog.
 	receiver := NewReceiverWithCadence(replica, replicaConn, 8, 50*time.Millisecond)
 
@@ -380,6 +390,16 @@ func TestE2E_PinFloorAdvancesIncrementally(t *testing.T) {
 	}
 	if recvErr != nil {
 		t.Fatalf("receiver: %v", recvErr)
+	}
+	ackMu.Lock()
+	defer ackMu.Unlock()
+	if len(ackFrontiers) == 0 {
+		t.Fatal("sender durable ack callback did not fire")
+	}
+	for i := 1; i < len(ackFrontiers); i++ {
+		if ackFrontiers[i] < ackFrontiers[i-1] {
+			t.Fatalf("durable ack callbacks regressed: %v", ackFrontiers)
+		}
 	}
 
 	// After session: coord goes Idle (pinFloor reads 0). To inspect

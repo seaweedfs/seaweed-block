@@ -97,6 +97,11 @@ func NewVolumeReplicaAdapter(exec CommandExecutor) *VolumeReplicaAdapter {
 	exec.SetOnSessionClose(func(result SessionCloseResult) {
 		a.OnSessionClose(result)
 	})
+	if durableAckExec, ok := exec.(DurableAckCallbackSetter); ok {
+		durableAckExec.SetOnDurableAck(func(result DurableAckResult) {
+			a.OnDurableAck(result)
+		})
+	}
 	// Wire the fence callback: executor → adapter.OnFenceComplete → engine.
 	exec.SetOnFenceComplete(func(result FenceResult) {
 		a.OnFenceComplete(result)
@@ -130,6 +135,11 @@ func (a *VolumeReplicaAdapter) OnSessionClose(result SessionCloseResult) ApplyLo
 func (a *VolumeReplicaAdapter) OnSessionStart(result SessionStartResult) ApplyLog {
 	a.clearStartWatchdog(result.SessionID, WatchdogClearStart)
 	return a.applyBatchAndExecute([]engine.Event{NormalizeSessionStart(result)}, "SessionStart")
+}
+
+// OnDurableAck processes non-terminal durable progress from the executor.
+func (a *VolumeReplicaAdapter) OnDurableAck(result DurableAckResult) ApplyLog {
+	return a.applyBatchAndExecute([]engine.Event{NormalizeDurableAck(result)}, "DurableAck")
 }
 
 // OnFenceComplete processes a fence outcome from the transport.

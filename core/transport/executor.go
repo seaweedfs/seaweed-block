@@ -13,6 +13,8 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
+var _ adapter.DurableAckCallbackSetter = (*BlockExecutor)(nil)
+
 // BlockExecutor implements adapter.CommandExecutor using real TCP
 // transport and a primary-side LogicalStorage. It is the "muscle"
 // layer — it executes commands but never decides policy.
@@ -35,6 +37,7 @@ type BlockExecutor struct {
 	mu              sync.Mutex
 	onSessionStart  adapter.OnSessionStart
 	onSessionClose  adapter.OnSessionClose
+	onDurableAck    adapter.OnDurableAck
 	onFenceComplete adapter.OnFenceComplete
 	sessions        map[uint64]*activeSession
 	stepDelay       time.Duration
@@ -254,6 +257,20 @@ func NewBlockExecutorWithDualLane(
 			cb(res)
 		},
 	)
+	bridge.SetOnDurableAck(func(rid recovery.ReplicaID, sid, acknowledgedLSN, primaryS, primaryH uint64) {
+		e.mu.Lock()
+		cb := e.onDurableAck
+		e.mu.Unlock()
+		if cb != nil {
+			cb(adapter.DurableAckResult{
+				ReplicaID:      string(rid),
+				SessionID:      sid,
+				DurableLSN:     acknowledgedLSN,
+				PrimaryTailLSN: primaryS,
+				PrimaryHeadLSN: primaryH,
+			})
+		}
+	})
 	e.dualLane = &DualLaneConfig{
 		Bridge:    bridge,
 		DialAddr:  dualLaneAddr,
@@ -268,6 +285,12 @@ func (e *BlockExecutor) SetOnSessionClose(fn adapter.OnSessionClose) {
 
 func (e *BlockExecutor) SetOnSessionStart(fn adapter.OnSessionStart) {
 	e.onSessionStart = fn
+}
+
+func (e *BlockExecutor) SetOnDurableAck(fn adapter.OnDurableAck) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.onDurableAck = fn
 }
 
 func (e *BlockExecutor) SetStepDelay(d time.Duration) {

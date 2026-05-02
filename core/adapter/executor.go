@@ -123,6 +123,12 @@ type OnSessionClose func(SessionCloseResult)
 // tied to actual execution start instead of command issuance alone.
 type OnSessionStart func(SessionStartResult)
 
+// OnDurableAck is the callback signature for non-terminal durable
+// progress. It is intentionally separate from OnSessionClose: durable
+// ack can drive lag policy / pin authority, but does not complete a
+// recovery session by itself.
+type OnDurableAck func(DurableAckResult)
+
 // OnFenceComplete is the callback signature for FenceAtEpoch outcomes.
 // Fires exactly once per Fence call. Success=true advances
 // Reachability.FencedEpoch; Success=false leaves it unchanged and
@@ -137,4 +143,23 @@ type FenceResult struct {
 	EndpointVersion uint64
 	Success         bool
 	FailReason      string
+}
+
+// DurableAckResult reports a replica durable frontier observed during an
+// active recovery session.
+type DurableAckResult struct {
+	ReplicaID       string
+	SessionID       uint64
+	EndpointVersion uint64
+	TransportEpoch  uint64
+	DurableLSN      uint64
+	PrimaryTailLSN  uint64
+	PrimaryHeadLSN  uint64
+}
+
+// DurableAckCallbackSetter is optionally implemented by executors that
+// can report mid-session durable progress. CommandExecutor does not
+// require this so existing mocks and muscles remain source-compatible.
+type DurableAckCallbackSetter interface {
+	SetOnDurableAck(fn OnDurableAck)
 }
