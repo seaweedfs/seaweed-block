@@ -106,6 +106,31 @@ func TestAdapter_FlowControlVerdictReturnsLastRecordedVerdict(t *testing.T) {
 	}
 }
 
+func TestAdapter_DiagnosticsIncludesFlowControlWithoutChangingProjection(t *testing.T) {
+	exec := newMockExecutor()
+	a := NewVolumeReplicaAdapter(exec)
+	a.SetFlowControlPolicy(engine.FlowControlPolicy{MaxPrimaryFlushLag: 10})
+	before := a.Projection()
+
+	want := a.OnFlowControlObservation(engine.FlowControlObservation{
+		PrimaryDurableLSN:  1,
+		PrimaryHeadLSN:     20,
+		PrimaryBoundsKnown: true,
+	})
+
+	diag := a.Diagnostics()
+	if !diag.FlowControlObserved {
+		t.Fatal("Diagnostics().FlowControlObserved=false want true")
+	}
+	if diag.FlowControlVerdict != want {
+		t.Fatalf("Diagnostics().FlowControlVerdict=%+v want %+v", diag.FlowControlVerdict, want)
+	}
+	if diag.Projection != before {
+		t.Fatalf("flow-control diagnostics changed projection: before=%+v after=%+v",
+			before, diag.Projection)
+	}
+}
+
 func TestFlowControlObservationFromDurableAck_UsesPrimaryBoundariesAndAck(t *testing.T) {
 	obs := FlowControlObservationFromDurableAck(90, 30, 100, DurableAckResult{
 		ReplicaID:      "r1",

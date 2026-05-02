@@ -35,6 +35,7 @@ func TestComponent_FlowControlObservation_FromStorageBoundariesAndDurableAck(t *
 			DurableLSN: primaryH - 1,
 		})
 		got := a.OnFlowControlObservation(obs)
+		diag := a.Diagnostics()
 
 		if got.Action != engine.FlowControlShapePrimaryWrites {
 			t.Fatalf("Action=%s want %s (primary local flush lag should dominate)",
@@ -46,6 +47,10 @@ func TestComponent_FlowControlObservation_FromStorageBoundariesAndDurableAck(t *
 		if afterCommands := len(a.CommandLog()); afterCommands != beforeCommands {
 			t.Fatalf("flow-control observation changed command log: before=%d after=%d log=%v",
 				beforeCommands, afterCommands, a.CommandLog())
+		}
+		if !diag.FlowControlObserved || diag.FlowControlVerdict != got {
+			t.Fatalf("Diagnostics flow-control=(observed=%v verdict=%+v), want %+v",
+				diag.FlowControlObserved, diag.FlowControlVerdict, got)
 		}
 	})
 }

@@ -307,6 +307,26 @@ func (a *VolumeReplicaAdapter) Projection() engine.ReplicaProjection {
 	return engine.DeriveProjection(&a.state)
 }
 
+// Diagnostics is an adapter-local inspection snapshot. It may include runtime
+// observations that are NOT engine truth (for example flow-control verdicts).
+// Callers must not feed this back into the engine as control input.
+type Diagnostics struct {
+	Projection          engine.ReplicaProjection
+	FlowControlObserved bool
+	FlowControlVerdict  engine.FlowControlVerdict
+}
+
+// Diagnostics returns a point-in-time adapter inspection snapshot.
+func (a *VolumeReplicaAdapter) Diagnostics() Diagnostics {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return Diagnostics{
+		Projection:          engine.DeriveProjection(&a.state),
+		FlowControlObserved: a.flowControlObserved,
+		FlowControlVerdict:  a.lastFlowControlVerdict,
+	}
+}
+
 // CommandLog returns all commands executed so far (for testing).
 func (a *VolumeReplicaAdapter) CommandLog() []string {
 	a.mu.Lock()
