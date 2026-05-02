@@ -91,8 +91,15 @@ type RecoveryTruth struct {
 	// DurableAckR is the latest replica durable-ack frontier observed
 	// by the engine. It is progress telemetry for lag policy and WAL
 	// release authority, not a recovery-class predicate by itself.
-	DurableAckR     uint64
-	DurableAckKnown bool
+	DurableAckR             uint64
+	DurableAckKnown         bool
+	DurableAckPrimaryH      uint64
+	DurableAckStalledSample int
+
+	// LagDecision records the latest coordinator interpretation of durable
+	// ack progress. This is policy state only; the raw recovery class still
+	// comes from R/S/H facts and ClassifyProgress.
+	LagDecision LagDecision
 
 	// Attempts tracks how many StartCatchUp / StartRecovery commands
 	// the engine has emitted for the current Decision. Engine

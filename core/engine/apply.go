@@ -309,11 +309,110 @@ func applyDurableAck(st *ReplicaState, e DurableAckObserved, r *ApplyResult, tra
 		return
 	}
 	fact := e.ProgressFact()
+	updateDurableAckLagState(st, fact)
 	if fact.ReplicaR > st.Recovery.DurableAckR || !st.Recovery.DurableAckKnown {
 		st.Recovery.DurableAckR = fact.ReplicaR
 		st.Recovery.DurableAckKnown = true
 	}
-	trace("durable_ack_observed", fmt.Sprintf("R=%d", fact.ReplicaR))
+	lag := durableAckLagDecision(st, fact)
+	st.Recovery.LagDecision = lag
+	trace("durable_ack_observed",
+		fmt.Sprintf("R=%d lag=%s stalled_samples=%d",
+			st.Recovery.DurableAckR, lag, st.Recovery.DurableAckStalledSample))
+
+	// A single lagging ack is normal. Only a durable-ack stall observed
+	// over the policy window becomes a coordinator action. This keeps
+	// feeder progress as the first answer and uses recovery only when
+	// progress stops while the primary head keeps moving.
+	if lag == LagDecisionStartCatchUp && canEmitRecoveryFromDurableAck(st) {
+		st.Recovery.R = st.Recovery.DurableAckR
+		st.Recovery.S = fact.PrimaryS
+		st.Recovery.H = fact.PrimaryH
+		st.Recovery.Decision = DecisionCatchUp
+		st.Recovery.DecisionReason = "durable_ack_stalled_within_wal"
+		r.Commands = append(r.Commands, StartCatchUp{
+			ReplicaID:       st.Identity.ReplicaID,
+			Epoch:           st.Identity.Epoch,
+			EndpointVersion: st.Identity.EndpointVersion,
+			FromLSN:         st.Recovery.DurableAckR + 1,
+			FrontierHint:    fact.PrimaryH,
+			TargetLSN:       fact.PrimaryH,
+		})
+		trace("command", "StartCatchUp (durable ack stalled)")
+	}
+	if lag == LagDecisionStartRebuild && canEmitRecoveryFromDurableAck(st) {
+		st.Recovery.R = st.Recovery.DurableAckR
+		st.Recovery.S = fact.PrimaryS
+		st.Recovery.H = fact.PrimaryH
+		st.Recovery.Decision = DecisionRebuild
+		st.Recovery.DecisionReason = "durable_ack_below_retention"
+		r.Commands = append(r.Commands, StartRebuild{
+			ReplicaID:       st.Identity.ReplicaID,
+			Epoch:           st.Identity.Epoch,
+			EndpointVersion: st.Identity.EndpointVersion,
+			FrontierHint:    fact.PrimaryH,
+			TargetLSN:       fact.PrimaryH,
+		})
+		trace("command", "StartRebuild (durable ack below retention)")
+	}
+}
+
+func updateDurableAckLagState(st *ReplicaState, fact ReplicaProgressFact) {
+	previousKnown := st.Recovery.DurableAckKnown
+	previousR := st.Recovery.DurableAckR
+	previousH := st.Recovery.DurableAckPrimaryH
+
+	currentR := previousR
+	if !previousKnown || fact.ReplicaR > currentR {
+		currentR = fact.ReplicaR
+	}
+	st.Recovery.DurableAckPrimaryH = fact.PrimaryH
+
+	switch {
+	case !previousKnown:
+		st.Recovery.DurableAckStalledSample = 1
+	case currentR > previousR:
+		st.Recovery.DurableAckStalledSample = 1
+	case fact.PrimaryH > previousH:
+		st.Recovery.DurableAckStalledSample++
+	}
+}
+
+func durableAckLagDecision(st *ReplicaState, fact ReplicaProgressFact) LagDecision {
+	facts := make([]ReplicaProgressFact, 0, 3)
+	if st.Recovery.DurableAckStalledSample >= 3 {
+		facts = append(facts,
+			durableAckPolicyFact(st.Recovery.DurableAckR, fact.PrimaryS, subtractSaturating(fact.PrimaryH, 2)),
+			durableAckPolicyFact(st.Recovery.DurableAckR, fact.PrimaryS, subtractSaturating(fact.PrimaryH, 1)),
+		)
+	}
+	facts = append(facts, durableAckPolicyFact(st.Recovery.DurableAckR, fact.PrimaryS, fact.PrimaryH))
+	return EvaluateLagPolicy(LagPolicy{StalledSamples: 3}, facts)
+}
+
+func canEmitRecoveryFromDurableAck(st *ReplicaState) bool {
+	return st.Identity.MemberPresent &&
+		st.Reachability.Status == ProbeReachable &&
+		!hasActiveSession(st)
+}
+
+func subtractSaturating(v, delta uint64) uint64 {
+	if v < delta {
+		return 0
+	}
+	return v - delta
+}
+
+func durableAckPolicyFact(replicaR, primaryS, primaryH uint64) ReplicaProgressFact {
+	return ReplicaProgressFact{
+		ReplicaR:           replicaR,
+		ReplicaRKnown:      true,
+		PrimaryS:           primaryS,
+		PrimaryH:           primaryH,
+		PrimaryBoundsKnown: true,
+		Source:             ProgressFromDurableAck,
+		Confidence:         ProgressLiveWire,
+	}
 }
 
 // decide runs the core bounded decision logic.
