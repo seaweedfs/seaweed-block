@@ -37,6 +37,10 @@ type VolumeReplicaAdapter struct {
 	fenceWatchdogs map[fenceKey]*time.Timer
 	watchdogLog    []WatchdogEvent
 
+	flowControlPolicy      engine.FlowControlPolicy
+	lastFlowControlVerdict engine.FlowControlVerdict
+	flowControlObserved    bool
+
 	// fenceInFlight: at most one fence attempt outstanding per
 	// fence LINEAGE — keyed by (replicaID, epoch, endpointVersion).
 	// Value is the sessionID of the in-flight fence; used to match
@@ -140,6 +144,35 @@ func (a *VolumeReplicaAdapter) OnSessionStart(result SessionStartResult) ApplyLo
 // OnDurableAck processes non-terminal durable progress from the executor.
 func (a *VolumeReplicaAdapter) OnDurableAck(result DurableAckResult) ApplyLog {
 	return a.applyBatchAndExecute([]engine.Event{NormalizeDurableAck(result)}, "DurableAck")
+}
+
+// SetFlowControlPolicy installs the primary write-pressure policy used by
+// OnFlowControlObservation. This does not change write behavior by itself;
+// it only controls the recorded verdict for tests/diagnostics/future wiring.
+func (a *VolumeReplicaAdapter) SetFlowControlPolicy(policy engine.FlowControlPolicy) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.flowControlPolicy = policy
+}
+
+// OnFlowControlObservation records the current primary write-pressure verdict.
+// It is intentionally not part of the engine event stream: flow-control facts
+// do not start recovery, do not advance WAL pins, and do not feed replicas.
+func (a *VolumeReplicaAdapter) OnFlowControlObservation(obs engine.FlowControlObservation) engine.FlowControlVerdict {
+	facts := engine.BuildFlowControlFacts(obs)
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	verdict := engine.EvaluateFlowControl(a.flowControlPolicy, facts)
+	a.lastFlowControlVerdict = verdict
+	a.flowControlObserved = true
+	return verdict
+}
+
+// FlowControlVerdict returns the last recorded write-pressure verdict.
+func (a *VolumeReplicaAdapter) FlowControlVerdict() (engine.FlowControlVerdict, bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.lastFlowControlVerdict, a.flowControlObserved
 }
 
 // OnFenceComplete processes a fence outcome from the transport.
