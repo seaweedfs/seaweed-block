@@ -68,9 +68,9 @@ type flags struct {
 	// T2 NVMe/TCP frontend flags. Symmetric with iSCSI flags
 	// per QA note: same loopback-only safe-default rule, same
 	// auto-enable of --t1-readiness so the symmetry stays clean.
-	nvmeListen   string
+	nvmeListen    string
 	nvmeSubsysNQN string
-	nvmeNS       uint
+	nvmeNS        uint
 
 	// T3b durable-backend flags. When --durable-root is set, the
 	// iSCSI and NVMe providers use DurableProvider instead of
@@ -113,6 +113,11 @@ type flags struct {
 	// after one milestone of dual-lane GREEN observed in CI / hardware
 	// (architect §11 Resolution 3).
 	recoveryMode string
+
+	// G9A: user-visible replication acknowledgement profile.
+	// best-effort is the beta default. sync-quorum / sync-all opt into
+	// foreground write ACK gating through the durable WriteObserver seam.
+	replicationAck string
 }
 
 func parseFlags(args []string) (flags, error) {
@@ -166,12 +171,18 @@ func parseFlags(args []string) (flags, error) {
 			"core/transport rebuild. \"dual-lane\" = core/recovery PrimaryBridge "+
 			"with separate listener at data-addr port+1. Default flip is a "+
 			"separate ops PR after dual-lane GREEN milestone.")
+	fs.StringVar(&f.replicationAck, "replication-ack", "best-effort",
+		"G9A replication acknowledgement profile: \"best-effort\" (default), \"sync-quorum\", or \"sync-all\". "+
+			"sync-* modes fail foreground writes when required replica acknowledgement is unavailable.")
 	fs.SetOutput(os.Stderr)
 	if err := fs.Parse(args); err != nil {
 		return flags{}, err
 	}
 	if f.recoveryMode != "legacy" && f.recoveryMode != "dual-lane" {
 		return flags{}, fmt.Errorf("--recovery-mode=%q invalid; want \"legacy\" or \"dual-lane\"", f.recoveryMode)
+	}
+	if _, _, err := parseReplicationAckProfile(f.replicationAck); err != nil {
+		return flags{}, err
 	}
 	missing := []string{}
 	for name, val := range map[string]string{
@@ -221,6 +232,20 @@ func parseFlags(args []string) (flags, error) {
 		f.enableT1Readiness = true
 	}
 	return f, nil
+}
+
+func parseReplicationAckProfile(profile string) (replication.DurabilityMode, durable.WriteAckPolicy, error) {
+	switch profile {
+	case "best-effort":
+		return replication.DurabilityBestEffort, durable.WriteAckBestEffort, nil
+	case "sync-quorum":
+		return replication.DurabilitySyncQuorum, durable.WriteAckRequireObserverAck, nil
+	case "sync-all":
+		return replication.DurabilitySyncAll, durable.WriteAckRequireObserverAck, nil
+	default:
+		return replication.DurabilityBestEffort, durable.WriteAckBestEffort,
+			fmt.Errorf("--replication-ack=%q invalid; want \"best-effort\", \"sync-quorum\", or \"sync-all\"", profile)
+	}
 }
 
 // computeFrontendVolumeSize returns the byte capacity an iSCSI/NVMe
@@ -472,6 +497,19 @@ func run(f flags) int {
 			return 1
 		}
 		replVolume = replication.NewReplicationVolume(f.volumeID, store)
+		repMode, writeAck, err := parseReplicationAckProfile(f.replicationAck)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "blockvolume:", err)
+			_ = durableProv.Close()
+			if status != nil {
+				shutCtx, shutCancel := context.WithTimeout(context.Background(), 2*time.Second)
+				_ = status.Close(shutCtx)
+				shutCancel()
+			}
+			_ = h.Close()
+			return 1
+		}
+		replVolume.SetDurabilityMode(repMode)
 		h.SetReplicationVolume(replVolume)
 
 		// G7-redo: when --recovery-mode=dual-lane, inject the dual-lane
@@ -592,6 +630,7 @@ func run(f flags) int {
 		// primary writes would land locally but never ship to peers.
 		if sb := durableProv.Backend(f.volumeID); sb != nil {
 			sb.SetWriteObserver(replVolume)
+			sb.SetWriteAckPolicy(writeAck)
 		} else {
 			fmt.Fprintln(os.Stderr, "blockvolume: write-observer wire: Backend(", f.volumeID, ") returned nil; replication fan-out disabled")
 		}
