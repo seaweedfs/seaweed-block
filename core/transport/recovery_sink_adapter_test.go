@@ -541,3 +541,85 @@ func TestRecoverySink_SatisfiesWalShipperSink(t *testing.T) {
 	}
 	var _ walShipperSinkShape = (*RecoverySink)(nil)
 }
+
+// TestFeedLiveWrite_RetainedWrite_ReplayedByNextRecoveryBacklog pins
+// the retained-WAL contract at the single ingress boundary. When a peer
+// is degraded and no session is ready, FeedLiveWrite must not return an
+// error or dial legacy steady; the committed WAL remains in the primary
+// substrate. The next recovery session's backlog drain is responsible
+// for replaying that retained LSN under the session emit context.
+func TestFeedLiveWrite_RetainedWrite_ReplayedByNextRecoveryBacklog(t *testing.T) {
+	primary := memorywal.NewStore(8, 64)
+	e := NewBlockExecutor(primary, "127.0.0.1:0")
+	const replicaID = "r1"
+
+	recorded, recMu := installRecordingShipper(t, e, replicaID)
+
+	lba := uint32(3)
+	data := bytes.Repeat([]byte{0x5a}, 64)
+	lsn, err := primary.Write(lba, data)
+	if err != nil {
+		t.Fatalf("primary Write: %v", err)
+	}
+	if _, err := primary.Sync(); err != nil {
+		t.Fatalf("primary Sync: %v", err)
+	}
+
+	disposition, err := e.FeedLiveWrite(replicaID, RecoveryLineage{}, false, lba, lsn, data)
+	if err != nil {
+		t.Fatalf("FeedLiveWrite allowSteady=false: %v", err)
+	}
+	if disposition != LiveWriteRetained {
+		t.Fatalf("disposition=%v want LiveWriteRetained", disposition)
+	}
+
+	recMu.Lock()
+	if got := len(*recorded); got != 0 {
+		recMu.Unlock()
+		t.Fatalf("retained write emitted %d records before recovery session; want 0", got)
+	}
+	recMu.Unlock()
+
+	steadyConn, _ := net.Pipe()
+	defer steadyConn.Close()
+	sessionConn, _ := net.Pipe()
+	defer sessionConn.Close()
+
+	steadyLineage := RecoveryLineage{SessionID: 1, Epoch: 1, EndpointVersion: 1, TargetLSN: 1}
+	sessionLineage := RecoveryLineage{SessionID: 77, Epoch: 1, EndpointVersion: 1, TargetLSN: lsn}
+	e.updateWalShipperEmitContext(replicaID, steadyConn, steadyLineage, EmitProfileSteadyMsgShip)
+
+	sink := NewRecoverySink(e, replicaID,
+		sessionConn, sessionLineage,
+		steadyConn, steadyLineage,
+	)
+	if err := sink.StartSession(0); err != nil {
+		t.Fatalf("StartSession: %v", err)
+	}
+	if err := sink.DrainBacklog(context.Background()); err != nil {
+		t.Fatalf("DrainBacklog: %v", err)
+	}
+	sink.EndSession()
+
+	recMu.Lock()
+	defer recMu.Unlock()
+	if len(*recorded) != 1 {
+		t.Fatalf("recorded emits=%d want 1 retained WAL replay", len(*recorded))
+	}
+	got := (*recorded)[0]
+	if got.kind != EmitKindBacklog {
+		t.Fatalf("replayed kind=%v want EmitKindBacklog", got.kind)
+	}
+	if got.lba != lba || got.lsn != lsn {
+		t.Fatalf("replayed entry lba=%d lsn=%d want lba=%d lsn=%d", got.lba, got.lsn, lba, lsn)
+	}
+	if got.conn != sessionConn {
+		t.Fatalf("replayed conn=%p want sessionConn=%p", got.conn, sessionConn)
+	}
+	if got.lineage != sessionLineage {
+		t.Fatalf("replayed lineage=%+v want session lineage=%+v", got.lineage, sessionLineage)
+	}
+	if got.profile != EmitProfileDualLaneWALFrame {
+		t.Fatalf("replayed profile=%s want DualLaneWALFrame", got.profile)
+	}
+}

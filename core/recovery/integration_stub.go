@@ -180,8 +180,8 @@ func (b *PrimaryBridge) startRebuildSessionLocked(ctx context.Context, conn net.
 func (b *PrimaryBridge) HasActiveSession(replicaID ReplicaID) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	_, ok := b.senders[replicaID]
-	return ok
+	sender, ok := b.senders[replicaID]
+	return ok && sender.LiveReady()
 }
 
 // PushLiveWrite forwards a primary-side WAL append to the active
@@ -198,6 +198,9 @@ func (b *PrimaryBridge) PushLiveWrite(replicaID ReplicaID, lba uint32, lsn uint6
 	b.mu.Unlock()
 	if !ok {
 		return fmt.Errorf("recovery bridge: no active session for replica %q", replicaID)
+	}
+	if !sender.LiveReady() {
+		return fmt.Errorf("recovery bridge: session for replica %q is not live-ready", replicaID)
 	}
 	return sender.PushLiveWrite(lba, lsn, data)
 }

@@ -351,6 +351,7 @@ func TestPillar2B_LiveWrites_HighPressure_BarrierIntegrity(t *testing.T) {
 	// barrier semantics).
 	const totalPushes = 128
 	bridge := exec.dualLane.Bridge
+	waitDualLaneLiveReady(t, bridge, recovery.ReplicaID(replicaID))
 
 	var (
 		acceptedLBA = make(map[uint32]struct{}, totalPushes)

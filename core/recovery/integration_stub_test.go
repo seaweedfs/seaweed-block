@@ -23,7 +23,7 @@ import (
 // This is the lifecycle/callback shape the integration PR will plug
 // into core/transport/BlockExecutor.
 func TestIntegrationStub_LifecycleCallbacks(t *testing.T) {
-	const numBlocks = 32
+	const numBlocks = 512
 	const blockSize = 4096
 
 	primary := storage.NewBlockStore(numBlocks, blockSize)
@@ -108,6 +108,7 @@ func TestIntegrationStub_LifecycleCallbacks(t *testing.T) {
 	if route := coord.RouteLocalWrite("r1", liveLSN); route != RouteSessionLane {
 		t.Fatalf("RouteLocalWrite during session: got %v want SessionLane", route)
 	}
+	waitBridgeLiveReady(t, bridge, "r1")
 	if err := bridge.PushLiveWrite("r1", liveLBA, liveLSN, liveData); err != nil {
 		t.Fatalf("PushLiveWrite: %v", err)
 	}
@@ -242,6 +243,18 @@ func waitClosed(wg *sync.WaitGroup) <-chan struct{} {
 		close(ch)
 	}()
 	return ch
+}
+
+func waitBridgeLiveReady(t *testing.T, bridge *PrimaryBridge, replicaID ReplicaID) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if bridge.HasActiveSession(replicaID) {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("bridge session for %s did not become live-ready", replicaID)
 }
 
 // TestIntegrationStub_FailureTypedOnReceiverDown — Layer 3 surface:

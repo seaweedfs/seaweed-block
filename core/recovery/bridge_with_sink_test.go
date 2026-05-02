@@ -13,9 +13,11 @@ package recovery
 import (
 	"bytes"
 	"context"
+	"io"
 	"net"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
@@ -120,6 +122,69 @@ func TestPrimaryBridge_StartRebuildSessionWithSink_InvokesSinkLifecycle(t *testi
 		if order[i] != w {
 			t.Errorf("call[%d]=%q want %q (full order=%v)", i, order[i], w, order)
 		}
+	}
+}
+
+// TestPrimaryBridge_LiveWritesNotAcceptedBeforeSinkStartCompletes pins
+// the start-side seal: a sender installed for single-flight is not an
+// active live-WAL feeder until sink.StartSession returns. Writes that
+// arrive in this window must be retained by the caller and replayed by
+// backlog; pushing them into a not-yet-started sink recreates the
+// dual-brain race where recovery is registered but the WalShipper is
+// still in the wrong mode.
+func TestPrimaryBridge_LiveWritesNotAcceptedBeforeSinkStartCompletes(t *testing.T) {
+	primary := storage.NewBlockStore(4, 4096)
+	_, _ = primary.Sync()
+	coord := NewPeerShipCoordinator()
+
+	var closeWG sync.WaitGroup
+	closeWG.Add(1)
+	bridge := NewPrimaryBridge(primary, coord, nil,
+		func(_ ReplicaID, _ uint64, _ uint64, _ error) {
+			closeWG.Done()
+		})
+
+	primaryConn, replicaConn := net.Pipe()
+	defer primaryConn.Close()
+	defer replicaConn.Close()
+	go func() {
+		_, _ = io.Copy(io.Discard, replicaConn)
+	}()
+
+	releaseStart := make(chan struct{})
+	sink := newRecordingSink()
+	sink.startBlocksUntil = releaseStart
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := bridge.StartRebuildSessionWithSink(
+		ctx, primaryConn, "r1", 42, 0, 0, sink,
+	); err != nil {
+		t.Fatalf("StartRebuildSessionWithSink: %v", err)
+	}
+
+	select {
+	case <-sink.startCalledCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("sink.StartSession did not start")
+	}
+
+	if bridge.HasActiveSession("r1") {
+		t.Fatal("bridge reports active session before sink.StartSession completed")
+	}
+	if err := bridge.PushLiveWrite("r1", 1, 1, bytes.Repeat([]byte{0x42}, 4096)); err == nil {
+		t.Fatal("PushLiveWrite before live-ready succeeded; want retained-by-caller path")
+	}
+
+	close(releaseStart)
+	cancel()
+	_ = primaryConn.Close()
+	_ = replicaConn.Close()
+
+	select {
+	case <-waitClosed(&closeWG):
+	case <-time.After(2 * time.Second):
+		t.Fatal("session did not close after releasing blocked StartSession")
 	}
 }
 

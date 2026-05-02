@@ -150,6 +150,7 @@ func TestPillar3Slice1_ReceiverConvergence_LiveOverwritesBacklog_SameLBAs(t *tes
 	// PushLiveWrite routes it to the active session sink → flushAndSeal
 	// will ship it as WALKindSessionLive on the wire.
 	bridge := exec.dualLane.Bridge
+	waitDualLaneLiveReady(t, bridge, recovery.ReplicaID(replicaID))
 	bRefs := make(map[uint32][]byte, len(overwriteLBAs))
 	for _, lba := range overwriteLBAs {
 		bData := make([]byte, blockSize)
@@ -258,4 +259,18 @@ func TestPillar3Slice1_ReceiverConvergence_LiveOverwritesBacklog_SameLBAs(t *tes
 
 	t.Logf("pillar3-slice1: backlog=%d, live-overwrites on LBA %v converged to B; achievedLSN=%d",
 		seedN, overwriteLBAs, res.AchievedLSN)
+}
+
+func waitDualLaneLiveReady(t *testing.T, bridge interface {
+	HasActiveSession(recovery.ReplicaID) bool
+}, replicaID recovery.ReplicaID) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if bridge.HasActiveSession(replicaID) {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("dual-lane bridge session for %s did not become live-ready", replicaID)
 }

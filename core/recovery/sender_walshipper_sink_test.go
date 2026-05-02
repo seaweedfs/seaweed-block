@@ -64,6 +64,12 @@ type recordingSink struct {
 	drainErr        error
 	notifyAppendErr error
 
+	// startBlocksUntil is closed by the test to release a blocked
+	// StartSession call. nil = return immediately.
+	startBlocksUntil <-chan struct{}
+	startCalledCh    chan struct{}
+	startOnce        sync.Once
+
 	// drainBlocksUntil is closed by the test to release a blocked
 	// DrainBacklog call. nil = return immediately.
 	drainBlocksUntil <-chan struct{}
@@ -82,6 +88,7 @@ type recordingSink struct {
 
 func newRecordingSink() *recordingSink {
 	return &recordingSink{
+		startCalledCh: make(chan struct{}),
 		drainCalledCh: make(chan struct{}),
 	}
 }
@@ -92,7 +99,14 @@ func (r *recordingSink) StartSession(fromLSN uint64) error {
 	r.startFromLSNs = append(r.startFromLSNs, fromLSN)
 	r.callOrder = append(r.callOrder, "StartSession")
 	err := r.startErr
+	blocker := r.startBlocksUntil
 	r.mu.Unlock()
+	r.startOnce.Do(func() { close(r.startCalledCh) })
+	if blocker != nil {
+		select {
+		case <-blocker:
+		}
+	}
 	return err
 }
 
@@ -203,11 +217,11 @@ func TestNewSenderWithBacklogRelay_installsRelaySink(t *testing.T) {
 // TestSender_WithSink_DelegationOrder — pin the ordering contract.
 //
 // recovery.Sender's Run() with a sink installed MUST invoke:
-//   1. sink.StartSession(fromLSN) — before any WAL emission begins
-//   2. sink.DrainBacklog(ctx)     — runs the pump
-//   3. sink.EndSession()          — after the session bracket closes
-//                                   (defer-fired regardless of
-//                                   success or failure)
+//  1. sink.StartSession(fromLSN) — before any WAL emission begins
+//  2. sink.DrainBacklog(ctx)     — runs the pump
+//  3. sink.EndSession()          — after the session bracket closes
+//     (defer-fired regardless of
+//     success or failure)
 //
 // The test does NOT assert on Run's exit value — convergence
 // requires the sink to actually pump WAL entries, which our

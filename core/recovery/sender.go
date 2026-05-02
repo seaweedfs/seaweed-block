@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"sync"
+	"sync/atomic"
 
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
@@ -31,6 +32,16 @@ import (
 // recover(a,b) `walApplied >= target` predicate with this tuple.
 type barrierEligibilityProbe interface {
 	ProbeBarrierEligibility() (debtZero, liveTail, walLegOk bool, cursor, head uint64)
+}
+
+// preBarrierSealer is implemented only by the bridging sink. It lets
+// Sender close the live-write acceptance window at the single point
+// where both base and WAL backlog have completed, immediately before
+// BarrierReq. Production RecoverySink does not implement this; its
+// resident WalShipper remains the live feeder through the barrier
+// window until EndSession.
+type preBarrierSealer interface {
+	SealBeforeBarrier() error
 }
 
 // Sender is the primary-side driver of one rebuild session. It runs
@@ -91,6 +102,12 @@ type Sender struct {
 	// production, or senderBacklogSink in the bridging path until P2d).
 	// Set by NewSenderWithSink / NewSenderWithBacklogRelay.
 	sink WalShipperSink
+
+	// liveReady is true only after Run has written SessionStart and
+	// the sink has entered its session bracket. PrimaryBridge uses it
+	// to avoid routing live writes into a sender that is registered for
+	// single-flight but whose WalShipper is not yet the active feeder.
+	liveReady atomic.Bool
 }
 
 // ackOrResult is the channel payload from the reader goroutine to
@@ -104,22 +121,22 @@ type ackOrResult struct {
 // WalShipperSink is the abstract WAL-pump surface that Sender
 // delegates to. Run() invokes the session bracket:
 //
-//   1. StartSession(fromLSN) — before any WAL emission begins
-//   2. DrainBacklog(ctx)     — runs until cursor catches head;
-//                              for the bridging sink, also flushes
-//                              buffered live writes and seals.
-//   3. EndSession()          — defer-fired regardless of exit path;
-//                              MUST be idempotent and MUST seal the
-//                              sink against further NotifyAppend so
-//                              post-Run pushes get an explicit error.
+//  1. StartSession(fromLSN) — before any WAL emission begins
+//  2. DrainBacklog(ctx)     — runs until cursor catches head;
+//     for the bridging sink, also flushes
+//     buffered live writes and seals.
+//  3. EndSession()          — defer-fired regardless of exit path;
+//     MUST be idempotent and MUST seal the
+//     sink against further NotifyAppend so
+//     post-Run pushes get an explicit error.
 //
 // Plus the live-write API for RouteSessionLane traffic during the
 // session:
 //
-//   4. NotifyAppend(lba, lsn, data) — primary's WAL append handed
-//      to the sink. Sink decides whether to ship directly (production
-//      WalShipper Realtime mode) or buffer for ordered drain (bridging
-//      senderBacklogSink). Sender.PushLiveWrite routes here.
+//  4. NotifyAppend(lba, lsn, data) — primary's WAL append handed
+//     to the sink. Sink decides whether to ship directly (production
+//     WalShipper Realtime mode) or buffer for ordered drain (bridging
+//     senderBacklogSink). Sender.PushLiveWrite routes here.
 //
 // Implementations live OUTSIDE this package (transport.WalShipper
 // satisfies it via duck typing — no import cycle since the
@@ -210,9 +227,12 @@ type walItem struct {
 //     is a one-shot ScanLBAs scan; direct wire emit during the scan
 //     would interleave LSNs and break the receiver's monotonic check.
 //   - DrainBacklog runs streamBacklog (ships LSN ≤ targetLSN entries)
-//     and then flushAndSeal — sorts buffered live writes (LSN >
-//     targetLSN) by LSN and ships them as WALKindSessionLive frames,
-//     atomically seal=true so subsequent NotifyAppend rejects.
+//     but does NOT seal. Sender calls SealBeforeBarrier after both
+//     base and WAL goroutines complete, so live writes remain accepted
+//     for the full base-transfer window.
+//   - SealBeforeBarrier sorts buffered live writes (LSN > targetLSN)
+//     by LSN and ships them as WALKindSessionLive frames, atomically
+//     seal=true so subsequent NotifyAppend rejects before BarrierReq.
 //   - EndSession is the defer-safety net: idempotent seal so any post-
 //     Run NotifyAppend gets an explicit error. Buffer entries that
 //     weren't flushed (e.g., DrainBacklog errored mid-scan) are
@@ -239,10 +259,7 @@ func (w *senderBacklogSink) DrainBacklog(ctx context.Context) error {
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
-	if err := w.s.streamBacklog(); err != nil {
-		return err
-	}
-	return w.flushAndSeal()
+	return w.s.streamBacklog()
 }
 
 // EndSession is the defer-safety seal. If DrainBacklog ran successfully,
@@ -271,6 +288,10 @@ func (w *senderBacklogSink) NotifyAppend(lba uint32, lsn uint64, data []byte) er
 	copy(cp, data)
 	w.queue = append(w.queue, walItem{lba: lba, lsn: lsn, data: cp})
 	return nil
+}
+
+func (w *senderBacklogSink) SealBeforeBarrier() error {
+	return w.flushAndSeal()
 }
 
 // flushAndSeal atomically takes the buffered live-write queue and
@@ -345,6 +366,15 @@ func (s *Sender) PushLiveWrite(lba uint32, lsn uint64, data []byte) error {
 	return s.sink.NotifyAppend(lba, lsn, data)
 }
 
+// LiveReady reports whether this sender can accept live WAL through
+// PushLiveWrite. A sender can exist in PrimaryBridge's single-flight
+// map before it is live-ready; writes in that window must be retained
+// by the caller and replayed by the session backlog, not pushed into a
+// not-yet-started sink.
+func (s *Sender) LiveReady() bool {
+	return s.liveReady.Load()
+}
+
 // Run drives the entire session end-to-end and blocks until barrier
 // ack returns. Returns the AchievedLSN reported by the replica on
 // success; returns an error on any wire / session failure.
@@ -389,6 +419,7 @@ func (s *Sender) Run(ctx context.Context, sessionID, fromLSN, targetLSN uint64) 
 	// than silently buffering into a dead session.
 	defer s.coordinator.EndSession(s.replicaID)
 	defer s.sink.EndSession()
+	defer s.liveReady.Store(false)
 
 	// C1 §6.8 accounting: install a post-emit hook on the sink (if it
 	// supports it) so each successful WalShipper-routed emit advances
@@ -414,6 +445,20 @@ func (s *Sender) Run(ctx context.Context, sessionID, fromLSN, targetLSN uint64) 
 		return 0, newFailure(FailureWire, PhaseSendStart, err)
 	}
 	log.Printf("g7-debug: Sender.Run frameSessionStart written ok replica=%s", s.replicaID)
+
+	// Start the WAL feeder synchronously before exposing this sender
+	// as live-ready. The bridge may already hold this sender for
+	// single-flight, but PushLiveWrite must not enter until the sink has
+	// installed the session emit context and rewound the resident
+	// WalShipper to the session pin.
+	log.Printf("g7-debug: Sender.Run sink.StartSession entry replica=%s fromLSN=%d", s.replicaID, fromLSN)
+	if err := s.sink.StartSession(fromLSN); err != nil {
+		log.Printf("g7-debug: Sender.Run sink.StartSession err replica=%s err=%v", s.replicaID, err)
+		return 0, newFailure(FailureContract, PhaseBacklog,
+			fmt.Errorf("sink.StartSession: %w", err))
+	}
+	s.liveReady.Store(true)
+	log.Printf("g7-debug: Sender.Run sink.StartSession done live-ready replica=%s", s.replicaID)
 
 	// Step 1b: spawn the inbound demux reader. From this point onward
 	// any frame from the receiver (BaseBatchAck during base lane,
@@ -465,15 +510,7 @@ func (s *Sender) Run(ctx context.Context, sessionID, fromLSN, targetLSN uint64) 
 	}()
 
 	go func() {
-		log.Printf("g7-debug: wal goroutine entry replica=%s fromLSN=%d", s.replicaID, fromLSN)
-		if err := s.sink.StartSession(fromLSN); err != nil {
-			log.Printf("g7-debug: wal goroutine sink.StartSession err replica=%s err=%v", s.replicaID, err)
-			groupCancel()
-			walErr <- newFailure(FailureContract, PhaseBacklog,
-				fmt.Errorf("sink.StartSession: %w", err))
-			return
-		}
-		log.Printf("g7-debug: wal goroutine sink.StartSession done replica=%s", s.replicaID)
+		log.Printf("g7-debug: wal goroutine DrainBacklog entry replica=%s fromLSN=%d", s.replicaID, fromLSN)
 		if err := s.sink.DrainBacklog(groupCtx); err != nil {
 			log.Printf("g7-debug: wal goroutine sink.DrainBacklog err replica=%s err=%v", s.replicaID, err)
 			groupCancel()
@@ -502,6 +539,12 @@ func (s *Sender) Run(ctx context.Context, sessionID, fromLSN, targetLSN uint64) 
 		return 0, wErr
 	}
 
+	if sealer, ok := s.sink.(preBarrierSealer); ok {
+		if err := sealer.SealBeforeBarrier(); err != nil {
+			return 0, err
+		}
+	}
+
 	// Step 5 + 6: barrier round-trip — reader goroutine delivers the
 	// inbound BarrierResp via barrierRespCh (or any wire / protocol /
 	// pin-update error surfaced earlier).
@@ -521,13 +564,13 @@ func (s *Sender) Run(ctx context.Context, sessionID, fromLSN, targetLSN uint64) 
 	// post-C-class it becomes the wire CheckpointCutSeq with no
 	// log-prefix change (still `cut=CCS:<n>`).
 	var (
-		barrierCutID    uint64
-		probeDebtZero   bool
-		probeLiveTail   bool
-		probeWalLegOk   bool
-		probeCursor     uint64
-		probeHead       uint64
-		probeAvailable  bool
+		barrierCutID   uint64
+		probeDebtZero  bool
+		probeLiveTail  bool
+		probeWalLegOk  bool
+		probeCursor    uint64
+		probeHead      uint64
+		probeAvailable bool
 	)
 	if probe, ok := s.sink.(barrierEligibilityProbe); ok {
 		probeDebtZero, probeLiveTail, probeWalLegOk, probeCursor, probeHead = probe.ProbeBarrierEligibility()
@@ -602,12 +645,12 @@ func (s *Sender) Run(ctx context.Context, sessionID, fromLSN, targetLSN uint64) 
 // failure surfaces. Result is delivered to barrierRespCh exactly once.
 //
 // BaseBatchAck handling:
-//   1. Decode payload.
-//   2. Validate SessionID matches the active session.
-//   3. Fetch primary's S boundary (`Boundaries().S`).
-//   4. Call coord.SetPinFloor(replicaID, AcknowledgedLSN, S).
-//   5. On error (incl. PinUnderRetention), abort by pushing to
-//      barrierRespCh and return.
+//  1. Decode payload.
+//  2. Validate SessionID matches the active session.
+//  3. Fetch primary's S boundary (`Boundaries().S`).
+//  4. Call coord.SetPinFloor(replicaID, AcknowledgedLSN, S).
+//  5. On error (incl. PinUnderRetention), abort by pushing to
+//     barrierRespCh and return.
 //
 // Reader exits on:
 //   - BarrierResp delivered → push achieved, return.
