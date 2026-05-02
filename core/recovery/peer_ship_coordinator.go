@@ -26,14 +26,14 @@ type ReplicaID string
 //	Idle              — no active recover session for this peer; Primary
 //	                    may steady-live-ship per existing reachability
 //	                    rules (§3.1).
-//	DrainingHistorical — session active; historical WAL backlog has not
-//	                    yet been drained to the frozen target. Primary
-//	                    MUST NOT publish (peer, InSync) for recover
-//	                    completion based on steady-live throughput
-//	                    alone (§3.2 last paragraph).
-//	SteadyLiveAllowed  — session active but Backlog drained ∧ baseDone
-//	                    hold; live ship is the authoritative path until
-//	                    barrier-ack closes the session.
+//	DrainingHistorical — session active; the feeder has not yet reached
+//	                    its publication hint. Primary MUST NOT publish
+//	                    (peer, InSync) for recover completion based on
+//	                    steady-live throughput alone.
+//	SteadyLiveAllowed  — session active but publication-hint reached ∧
+//	                    baseDone hold; live ship is still the
+//	                    authoritative path until barrier closes the
+//	                    session.
 type PeerShipPhase int
 
 const (
@@ -93,12 +93,12 @@ type PeerShipCoordinator struct {
 }
 
 type peerShipState struct {
-	phase      PeerShipPhase
-	sessionID  uint64
-	fromLSN    uint64 // session's lower LSN bound (pinned at start; engine-owned)
-	targetLSN  uint64 // session's frozen upper LSN bound
-	shipCursor uint64 // highest LSN successfully shipped on the session lane
-	baseDone   bool
+	phase        PeerShipPhase
+	sessionID    uint64
+	fromLSN      uint64 // session's lower LSN bound (pinned at start; engine-owned)
+	frontierHint uint64 // legacy fourth-slot band; publication hint, not close predicate
+	shipCursor   uint64 // highest LSN successfully shipped on the session lane
+	baseDone     bool
 
 	// pinFloor is the recycle gate value for THIS peer's session. May
 	// equal fromLSN at session start; advances on replica BaseBatchAcked
@@ -112,8 +112,8 @@ type peerShipState struct {
 	// StartSession; the first call yields 1.
 	//
 	// Pre-§IV.2.4 wire change (G0-wire ratified 2026-05-03 to keep
-	// targetLSN as compat band; CCS not yet on wire), this counter is
-	// the marker-line cutID per architect's Option B (plan §8.2.6):
+	// frontierHint as compat band; CCS not yet on wire), this counter
+	// is the marker-line cutID per architect's Option B (plan §8.2.6):
 	// `cut=CCS:<barrierAttempt>` in `barrier prepare` AND
 	// `barrier handshake` log lines, providing QA's grep round-trip
 	// even before the real CheckpointCutSeq is on the wire. When
@@ -143,7 +143,7 @@ type peerShipState struct {
 	// sessions that cannot provide a PrimaryWalLegOk witness. Production
 	// dual-lane sessions must leave this false so a missing witness
 	// fail-closes instead of silently resurrecting recover(a,b)'s
-	// achievedLSN >= targetLSN oracle.
+	// achievedLSN >= frontierHint oracle.
 	allowLegacyBandClose bool
 }
 
@@ -161,22 +161,22 @@ func NewPeerShipCoordinator() *PeerShipCoordinator {
 //
 // fromLSN is the session contract's lower LSN bound — typically
 // `Recovery.R + 1` for a catch-up or the engine's BasePinLSN choice
-// for a rebuild. targetLSN is the legacy compat/frontier-hint band; it
+// for a rebuild. frontierHint is the legacy compat/frontier-hint band; it
 // is no longer required to be >= fromLSN and is not a close predicate
 // unless StartSessionLegacyBand explicitly opts into old behavior.
-func (c *PeerShipCoordinator) StartSession(id ReplicaID, sessionID, fromLSN, targetLSN uint64) error {
-	return c.startSession(id, sessionID, fromLSN, targetLSN, false)
+func (c *PeerShipCoordinator) StartSession(id ReplicaID, sessionID, fromLSN, frontierHint uint64) error {
+	return c.startSession(id, sessionID, fromLSN, frontierHint, false)
 }
 
 // StartSessionLegacyBand starts a session that explicitly permits the
-// legacy achievedLSN >= targetLSN close oracle when no PrimaryWalLegOk
+// legacy achievedLSN >= frontierHint close oracle when no PrimaryWalLegOk
 // witness is recorded. Use only for bridging/back-compat paths that cannot
 // probe the WAL feeder; production dual-lane must use StartSession.
-func (c *PeerShipCoordinator) StartSessionLegacyBand(id ReplicaID, sessionID, fromLSN, targetLSN uint64) error {
-	return c.startSession(id, sessionID, fromLSN, targetLSN, true)
+func (c *PeerShipCoordinator) StartSessionLegacyBand(id ReplicaID, sessionID, fromLSN, frontierHint uint64) error {
+	return c.startSession(id, sessionID, fromLSN, frontierHint, true)
 }
 
-func (c *PeerShipCoordinator) startSession(id ReplicaID, sessionID, fromLSN, targetLSN uint64, allowLegacyBandClose bool) error {
+func (c *PeerShipCoordinator) startSession(id ReplicaID, sessionID, fromLSN, frontierHint uint64, allowLegacyBandClose bool) error {
 	if sessionID == 0 {
 		return errors.New("recovery: sessionID must be non-zero")
 	}
@@ -190,7 +190,7 @@ func (c *PeerShipCoordinator) startSession(id ReplicaID, sessionID, fromLSN, tar
 		phase:                PhaseDrainingHistorical,
 		sessionID:            sessionID,
 		fromLSN:              fromLSN,
-		targetLSN:            targetLSN,
+		frontierHint:         frontierHint,
 		shipCursor:           fromLSN, // anchor cursor at the session's lower bound
 		pinFloor:             fromLSN,
 		allowLegacyBandClose: allowLegacyBandClose,
@@ -271,8 +271,9 @@ func (c *PeerShipCoordinator) SetPinFloor(id ReplicaID, floor, primarySBoundary 
 	return nil
 }
 
-// BacklogDrained evaluates the spec §3.2 predicate:
-// shipCursor ≥ frozen targetLSN. Returns false for idle peers.
+// BacklogDrained evaluates the legacy publication-hint predicate:
+// shipCursor ≥ frontierHint. Returns false for idle peers. This is not
+// a recover close predicate.
 func (c *PeerShipCoordinator) BacklogDrained(id ReplicaID) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -280,7 +281,7 @@ func (c *PeerShipCoordinator) BacklogDrained(id ReplicaID) bool {
 	if !ok || st.phase == PhaseIdle {
 		return false
 	}
-	return st.shipCursor >= st.targetLSN
+	return st.shipCursor >= st.frontierHint
 }
 
 // TryAdvanceToSteadyLive attempts the §3.2 transition. Returns true on
@@ -288,7 +289,7 @@ func (c *PeerShipCoordinator) BacklogDrained(id ReplicaID) bool {
 //
 // Preconditions (all required):
 //   - phase == DrainingHistorical
-//   - BacklogDrained (shipCursor ≥ targetLSN)
+//   - BacklogDrained (shipCursor ≥ frontierHint)
 //   - baseDone (if the session has a base lane; for catch-up-only
 //     sessions the coordinator caller may pre-mark this at start)
 func (c *PeerShipCoordinator) TryAdvanceToSteadyLive(id ReplicaID) bool {
@@ -301,7 +302,7 @@ func (c *PeerShipCoordinator) TryAdvanceToSteadyLive(id ReplicaID) bool {
 	if st.phase != PhaseDrainingHistorical {
 		return false
 	}
-	if st.shipCursor < st.targetLSN {
+	if st.shipCursor < st.frontierHint {
 		return false
 	}
 	if !st.baseDone {
@@ -346,14 +347,14 @@ func (c *PeerShipCoordinator) RecordBarrierWalLegOk(id ReplicaID, walLegOk bool)
 // emit `SessionClosedCompleted`?
 //
 // §IV.2.1 / recover-semantics-adjustment-plan §1 — A-class wave:
-// the historic recover(a,b) sole gate (`achievedLSN >= targetLSN`) is
+// the historic recover(a,b) sole gate (`achievedLSN >= frontierHint`) is
 // no longer dispositive. The realizable §IV.2.1 conjunct synthesized
 // from existing observables is:
 //
 //	phase != Idle
 //	∧ baseDone
 //	∧ (when walLegOkWitnessed: walLegOkAtBarrier)
-//	∧ (when !walLegOkWitnessed: explicit legacy opt-in ∧ achievedLSN ≥ targetLSN)
+//	∧ (when !walLegOkWitnessed: explicit legacy opt-in ∧ achievedLSN ≥ frontierHint)
 //
 // In the dual-lane path, the PrimaryWalLegOk witness is the completion
 // authority and achievedLSN is returned as an observation, not compared
@@ -382,7 +383,7 @@ func (c *PeerShipCoordinator) CanEmitSessionComplete(id ReplicaID, achievedLSN u
 	if !st.allowLegacyBandClose {
 		return false
 	}
-	return achievedLSN >= st.targetLSN
+	return achievedLSN >= st.frontierHint
 }
 
 // NextBarrierCut returns the next per-session BarrierReq attempt
@@ -498,7 +499,8 @@ type PeerStatus struct {
 	Phase                PeerShipPhase
 	SessionID            uint64
 	FromLSN              uint64
-	TargetLSN            uint64
+	FrontierHint         uint64
+	TargetLSN            uint64 // deprecated diagnostic alias for FrontierHint
 	ShipCursor           uint64
 	BaseDone             bool
 	PinFloor             uint64
@@ -518,7 +520,8 @@ func (c *PeerShipCoordinator) Status(id ReplicaID) (PeerStatus, bool) {
 		Phase:                st.phase,
 		SessionID:            st.sessionID,
 		FromLSN:              st.fromLSN,
-		TargetLSN:            st.targetLSN,
+		FrontierHint:         st.frontierHint,
+		TargetLSN:            st.frontierHint,
 		ShipCursor:           st.shipCursor,
 		BaseDone:             st.baseDone,
 		PinFloor:             st.pinFloor,

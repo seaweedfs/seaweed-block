@@ -9,7 +9,7 @@ const r1 ReplicaID = "r1"
 const r2 ReplicaID = "r2"
 
 // CHK-PHASE-NEVER-STEADY-BEFORE-DRAIN: cannot transition until BOTH
-// shipCursor ≥ target AND baseDone hold.
+// shipCursor ≥ frontierHint AND baseDone hold.
 func TestCoordinator_PhaseTransitionRequiresDrainAndBaseDone(t *testing.T) {
 	c := NewPeerShipCoordinator()
 	if err := c.StartSession(r1, 7, 100, 200); err != nil {
@@ -29,7 +29,7 @@ func TestCoordinator_PhaseTransitionRequiresDrainAndBaseDone(t *testing.T) {
 		t.Fatalf("RecordShipped: %v", err)
 	}
 	if !c.BacklogDrained(r1) {
-		t.Fatal("BacklogDrained should be true after RecordShipped(target)")
+		t.Fatal("BacklogDrained should be true after RecordShipped(frontierHint)")
 	}
 	if c.TryAdvanceToSteadyLive(r1) {
 		t.Fatal("transition should fail: drained but !baseDone")
@@ -82,7 +82,7 @@ func TestCoordinator_SingleFlightPerReplica(t *testing.T) {
 // §IV.2.1 A-class conjunct (recover-semantics-adjustment-plan §1):
 //
 //	phase != Idle ∧ baseDone
-//	∧ (walLegOkWitnessed ? walLegOkAtBarrier : explicit legacy opt-in ∧ achieved ≥ target)
+//	∧ (walLegOkWitnessed ? walLegOkAtBarrier : explicit legacy opt-in ∧ achieved ≥ frontierHint)
 func TestCoordinator_CanEmitSessionComplete(t *testing.T) {
 	c := NewPeerShipCoordinator()
 	_ = c.StartSession(r1, 7, 100, 200)
@@ -102,10 +102,10 @@ func TestCoordinator_CanEmitSessionComplete(t *testing.T) {
 	_ = legacy.StartSessionLegacyBand(r1, 7, 100, 200)
 	_ = legacy.MarkBaseDone(r1)
 	if legacy.CanEmitSessionComplete(r1, 199) {
-		t.Fatal("legacy opt-in achievedLSN < target: should refuse")
+		t.Fatal("legacy opt-in achievedLSN < frontierHint: should refuse")
 	}
 	if !legacy.CanEmitSessionComplete(r1, 200) {
-		t.Fatal("legacy opt-in achievedLSN == target ∧ baseDone: should permit")
+		t.Fatal("legacy opt-in achievedLSN == frontierHint ∧ baseDone: should permit")
 	}
 	if !legacy.CanEmitSessionComplete(r1, 250) {
 		t.Fatal("legacy opt-in achievedLSN > target: should permit")
@@ -358,12 +358,12 @@ func TestCoordinator_StartSession_ArgValidation(t *testing.T) {
 	// base pin higher than an older compatibility hint; that must not
 	// fail session registration.
 	if err := c.StartSession(r1, 1, 200, 100); err != nil {
-		t.Errorf("targetLSN/frontier hint below fromLSN/base pin should be legal: %v", err)
+		t.Errorf("frontier hint below fromLSN/base pin should be legal: %v", err)
 	}
 	c.EndSession(r1)
-	// Equal targets are legal (zero-LSN-progress sessions).
+	// Equal fromLSN/frontierHint is legal (zero-LSN-progress session).
 	if err := c.StartSession(r1, 1, 100, 100); err != nil {
-		t.Errorf("targetLSN == fromLSN: %v", err)
+		t.Errorf("frontierHint == fromLSN: %v", err)
 	}
 }
 
