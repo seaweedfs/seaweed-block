@@ -67,13 +67,21 @@ func (p *PeerCommandExecutor) SetOnSessionStart(fn adapter.OnSessionStart) {
 }
 
 // SetOnSessionClose wraps the adapter-supplied callback so a
-// successful session ALSO transitions peer.state CatchingUp →
-// Healthy. The adapter's bookkeeping (engine SessionClosedCompleted/
-// Failed) still runs after.
+// successful recovery session first rotates the peer's steady live
+// session, then transitions peer.state CatchingUp → Healthy. The
+// rotation is the EndSession → steady-capable handoff: post-recovery
+// live traffic must not reuse a pre-recovery broken TCP conn or stale
+// session ID.
 func (p *PeerCommandExecutor) SetOnSessionClose(fn adapter.OnSessionClose) {
 	p.inner.SetOnSessionClose(func(r adapter.SessionCloseResult) {
 		if r.Success {
-			p.peer.SetState(replication.ReplicaHealthy)
+			if err := p.peer.RefreshLiveShipSessionAfter(r.SessionID, "recovery session completed"); err != nil {
+				r.Success = false
+				r.FailReason = err.Error()
+				p.peer.Invalidate("live session refresh failed: " + err.Error())
+			} else {
+				p.peer.SetState(replication.ReplicaHealthy)
+			}
 		}
 		// Failure path: the adapter feeds engine
 		// SessionClosedFailed which (per FailureKind) may emit

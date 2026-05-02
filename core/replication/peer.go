@@ -94,6 +94,19 @@ const liveShipTargetLSN uint64 = 1
 // those arrive with the T4c recovery command chain.
 var peerSessionIDCounter atomic.Uint64
 
+func mintPeerSessionIDAfter(after uint64) uint64 {
+	for {
+		cur := peerSessionIDCounter.Load()
+		next := cur + 1
+		if next <= after {
+			next = after + 1
+		}
+		if peerSessionIDCounter.CompareAndSwap(cur, next) {
+			return next
+		}
+	}
+}
+
 // PeerProbeCooldown holds the per-peer backoff parameters used by
 // ProbeIfDegraded / OnProbeAttempt (G5-5C §1.G #7).
 //
@@ -184,7 +197,7 @@ func NewReplicaPeer(target ReplicaTarget, executor *transport.BlockExecutor) (*R
 			"replication: NewReplicaPeer: target needs nonzero epoch (got %d) and endpointVersion (got %d)",
 			target.Epoch, target.EndpointVersion)
 	}
-	sessionID := peerSessionIDCounter.Add(1)
+	sessionID := mintPeerSessionIDAfter(0)
 	lineage := transport.RecoveryLineage{
 		SessionID:       sessionID,
 		Epoch:           target.Epoch,
@@ -202,6 +215,41 @@ func NewReplicaPeer(target ReplicaTarget, executor *transport.BlockExecutor) (*R
 		state:       ReplicaHealthy,
 		cooldownCfg: DefaultPeerProbeCooldown(),
 	}, nil
+}
+
+// RefreshLiveShipSessionAfter rotates the peer's steady live-ship
+// session after a recovery session has completed. Recovery establishes
+// a newer replica-side lineage and may leave the old steady TCP conn
+// broken; reusing the pre-recovery live session would either write to a
+// dead socket or be rejected by the replica's monotonic lineage gate.
+//
+// The new live session ID is strictly greater than completedSessionID
+// so post-recovery steady MsgShipEntry traffic can advance the replica
+// from the recovery lineage back into the live lane.
+func (p *ReplicaPeer) RefreshLiveShipSessionAfter(completedSessionID uint64, reason string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed {
+		return nil
+	}
+
+	oldSessionID := p.sessionID
+	newSessionID := mintPeerSessionIDAfter(completedSessionID)
+	newLineage := transport.RecoveryLineage{
+		SessionID:       newSessionID,
+		Epoch:           p.target.Epoch,
+		EndpointVersion: p.target.EndpointVersion,
+		TargetLSN:       liveShipTargetLSN,
+	}
+	if err := p.executor.RegisterLiveShipSession(newLineage); err != nil {
+		return fmt.Errorf("replication: refresh live ship session: %w", err)
+	}
+	p.executor.InvalidateSession(p.target.ReplicaID, oldSessionID, reason)
+	p.sessionID = newSessionID
+	p.lineage = newLineage
+	log.Printf("replication: peer %s refreshed live session old=%d new=%d after recovery=%d",
+		p.target.ReplicaID, oldSessionID, newSessionID, completedSessionID)
+	return nil
 }
 
 // SetProbeCooldownConfig overrides the default probe cooldown config

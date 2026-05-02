@@ -266,6 +266,36 @@ func TestReplicaPeer_ShipEntry_DegradedWithActiveSession_RoutesSessionLane(t *te
 	close(sink.release)
 }
 
+func TestReplicaPeer_RefreshLiveShipSessionAfter_RotatesPastRecoverySession(t *testing.T) {
+	peer, _, _ := setupPeerWithRealReplica(t)
+	oldSessionID := peer.sessionID
+	if oldSessionID >= 500 {
+		t.Fatalf("precondition: live session already beyond recovery marker: %d", oldSessionID)
+	}
+	if !peer.executor.HasSession(oldSessionID) {
+		t.Fatalf("precondition: old live session %d not registered", oldSessionID)
+	}
+
+	if err := peer.RefreshLiveShipSessionAfter(500, "test recovery completed"); err != nil {
+		t.Fatalf("RefreshLiveShipSessionAfter: %v", err)
+	}
+	if peer.sessionID <= 500 {
+		t.Fatalf("new live sessionID=%d want > recovery session 500", peer.sessionID)
+	}
+	if peer.lineage.SessionID != peer.sessionID {
+		t.Fatalf("lineage SessionID=%d does not match peer sessionID=%d", peer.lineage.SessionID, peer.sessionID)
+	}
+	if peer.lineage.TargetLSN != liveShipTargetLSN {
+		t.Fatalf("lineage TargetLSN=%d want live sentinel %d", peer.lineage.TargetLSN, liveShipTargetLSN)
+	}
+	if peer.executor.HasSession(oldSessionID) {
+		t.Fatalf("old live session %d still registered after refresh", oldSessionID)
+	}
+	if !peer.executor.HasSession(peer.sessionID) {
+		t.Fatalf("new live session %d not registered", peer.sessionID)
+	}
+}
+
 // TestReplicaPeer_Invalidate_MovesToDegraded — direct call to
 // Invalidate (outside ShipEntry path) also moves Healthy → Degraded.
 // Exercises the authority-driven path (ReplicationVolume would call
