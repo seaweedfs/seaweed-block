@@ -130,3 +130,90 @@ func TestG8B_L2PrimaryKill_ReassignsAuthorityToReplica(t *testing.T) {
 		t.Fatalf("r2 did not become Healthy after r1 kill; status=%v", r2Failover)
 	}
 }
+
+func TestG8C_L2OldPrimaryReturn_RemainsStaleAfterFailover(t *testing.T) {
+	if testing.Short() {
+		t.Skip("L2 subprocess failover test; -short skip")
+	}
+	bins := buildG54Binaries(t)
+	art := t.TempDir()
+
+	_, masterAddr := startG8Master(t, bins, art)
+
+	r1Data, r1Status := pickAddr(t), pickAddr(t)
+	r2Data, r2Status := pickAddr(t), pickAddr(t)
+	r1Ctrl, r2Ctrl := pickAddr(t), pickAddr(t)
+	r1Store := filepath.Join(art, "r1-store")
+	r2Store := filepath.Join(art, "r2-store")
+
+	r1 := startG54Volume(t, bins, art, volOpts{
+		masterAddr: masterAddr,
+		serverID:   "s1", replicaID: "r1",
+		dataAddr: r1Data, ctrlAddr: r1Ctrl,
+		statusAddr:  r1Status,
+		durableRoot: r1Store,
+		logTag:      "g8c-r1-initial",
+	})
+	_ = startG54Volume(t, bins, art, volOpts{
+		masterAddr: masterAddr,
+		serverID:   "s2", replicaID: "r2",
+		dataAddr: r2Data, ctrlAddr: r2Ctrl,
+		statusAddr:  r2Status,
+		durableRoot: r2Store,
+		logTag:      "g8c-r2",
+	})
+
+	pollStatus(t, r1Status, 10*time.Second, func(b map[string]any) bool {
+		h, _ := b["Healthy"].(bool)
+		rid, _ := b["ReplicaID"].(string)
+		return h && rid == "r1"
+	})
+	r1.stop(t)
+
+	r2Failover := pollStatus(t, r2Status, 8*time.Second, func(b map[string]any) bool {
+		h, _ := b["Healthy"].(bool)
+		rid, _ := b["ReplicaID"].(string)
+		epoch, _ := b["Epoch"].(float64)
+		return h && rid == "r2" && epoch >= 2
+	})
+	if r2Failover == nil {
+		t.Fatal("r2: no status response after r1 kill")
+	}
+	if h, _ := r2Failover["Healthy"].(bool); !h {
+		t.Fatalf("r2 did not become Healthy after r1 kill; status=%v", r2Failover)
+	}
+
+	r1ReturnStatus := pickAddr(t)
+	_ = startG54Volume(t, bins, art, volOpts{
+		masterAddr: masterAddr,
+		serverID:   "s1", replicaID: "r1",
+		dataAddr: r1Data, ctrlAddr: r1Ctrl,
+		statusAddr:  r1ReturnStatus,
+		durableRoot: r1Store,
+		logTag:      "g8c-r1-return",
+	})
+
+	r1Returned := pollStatus(t, r1ReturnStatus, 10*time.Second, func(b map[string]any) bool {
+		_, ok := b["Healthy"]
+		return ok
+	})
+	if r1Returned == nil {
+		t.Fatal("returned r1: no status response")
+	}
+	if h, _ := r1Returned["Healthy"].(bool); h {
+		t.Fatalf("returned old primary must remain stale/non-Healthy after r2 failover; status=%v", r1Returned)
+	}
+
+	r2StillPrimary := pollStatus(t, r2Status, 5*time.Second, func(b map[string]any) bool {
+		h, _ := b["Healthy"].(bool)
+		rid, _ := b["ReplicaID"].(string)
+		epoch, _ := b["Epoch"].(float64)
+		return h && rid == "r2" && epoch >= 2
+	})
+	if r2StillPrimary == nil {
+		t.Fatal("r2: no status response after r1 return")
+	}
+	if h, _ := r2StillPrimary["Healthy"].(bool); !h {
+		t.Fatalf("r2 must remain primary after old r1 returns; status=%v", r2StillPrimary)
+	}
+}
