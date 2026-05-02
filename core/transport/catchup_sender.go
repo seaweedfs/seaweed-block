@@ -46,12 +46,11 @@ func (e *BlockExecutor) StartCatchUp(replicaID string, sessionID, epoch, endpoin
 //  1. dial the replica
 //  2. stream the substrate's retained-WAL window via ScanLBAs starting
 //     at the replica's flushed frontier; each entry ships as
-//     MsgShipEntry carrying the engine's targetLSN
-//  3. send MsgBarrierReq + read typed BarrierResponse — the barrier's
-//     AchievedLSN is the caller-facing "did we reach target" answer
-//     (per G-1 §4.2: barrier-as-terminator collapses V2's separate
-//     MsgCatchupDone marker into the existing barrier response, with
-//     INV-REPL-CATCHUP-COMPLETION-FROM-BARRIER-ACHIEVED-LSN inscribed)
+//     MsgShipEntry carrying the session lineage
+//  3. send MsgBarrierReq + read typed BarrierResponse. AchievedLSN is
+//     the replica frontier observation; this legacy catch-up wrapper
+//     still compares it to targetLSN until the catch-up path gains the
+//     same PrimaryWalLegOk witness used by dual-lane rebuild close.
 //
 // Substrate sub-mode is reported via storage.RecoveryMode (memo §5.1)
 // in the success log line so operators can tell at a glance whether
@@ -67,8 +66,9 @@ func (e *BlockExecutor) StartCatchUp(replicaID string, sessionID, epoch, endpoin
 //   - other stream errors → same retry path
 //
 // Hidden invariants honored:
-//   - INV-REPL-CATCHUP-CALLBACK-RETURN-NIL-CONTINUES — callback skips
-//     entries past targetLSN by `return nil`, not by erroring out
+//   - INV-REPL-CATCHUP-FEEDS-AVAILABLE-WAL — callback does not cap
+//     entries at targetLSN; target remains a compat lineage band, not
+//     a feeder stop line.
 //   - INV-REPL-CATCHUP-LASTSENT-MONOTONIC — `lastSent` only advances
 //     on successful frame write, so partial-progress achievedLSN is
 //     surfaceable to the caller
@@ -142,12 +142,6 @@ func (e *BlockExecutor) doCatchUp(replicaID string, session *activeSession, from
 		case <-session.cancel:
 			return errSessionInvalidated
 		default:
-		}
-		// Per-entry target cap: skip entries past targetLSN by
-		// returning nil (continues the scan) — INV-REPL-CATCHUP-
-		// CALLBACK-RETURN-NIL-CONTINUES.
-		if targetLSN > 0 && entry.LSN > targetLSN {
-			return nil
 		}
 		shipPayload := EncodeShipEntry(ShipEntry{
 			Lineage: session.lineage,

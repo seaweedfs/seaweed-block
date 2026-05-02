@@ -21,7 +21,7 @@ import (
 //     TestCatchUpSender_RecycledFromLSN_ErrorPropagates — substrate ErrWALRecycled
 //
 //   7 V3-only invariant pins (1 per §5 invariant + 2 mode-label):
-//     TestCatchUpSender_CallbackReturnNilContinues
+//     TestCatchUpSender_FeedsPastTargetBand
 //     TestCatchUpSender_DoneMarkerOnZeroEntries  (re-shaped per §4.2 binding)
 //     TestCatchUpSender_DeadlineClearedAfterReturn
 //     TestCatchUpSender_TargetNotReachedVsRecycledDistinguished
@@ -112,31 +112,32 @@ func (r *recycledStubStore) ScanLBAs(fromLSN uint64, fn func(storage.RecoveryEnt
 
 // --- V3-only invariant pins ---
 
-// TestCatchUpSender_CallbackReturnNilContinues — INV-REPL-CATCHUP-
-// CALLBACK-RETURN-NIL-CONTINUES. Substrate emits 5 entries with LSNs
-// 1..5; targetLSN=3. Sender callback skips entries with LSN > 3 by
-// returning nil; the scan must continue (not stop) and the barrier
-// must complete normally with the last successfully-shipped entry as
-// the achieved frontier.
-func TestCatchUpSender_CallbackReturnNilContinues(t *testing.T) {
-	exec, primary, _ := newCatchUpExecutor(t)
-	writeTestBlocks(primary, 5)
-	// targetLSN=3 — entries 4, 5 must be skipped via return-nil.
+// TestCatchUpSender_FeedsPastTargetBand — targetLSN must not act as
+// the catch-up feeder's stop line. The sender feeds all retained WAL
+// entries at or after fromLSN; target remains a compat lineage band.
+func TestCatchUpSender_FeedsPastTargetBand(t *testing.T) {
+	primaryRaw, replica, listener := setupPrimaryReplica(t)
+	for i := uint32(0); i < 5; i++ {
+		data := make([]byte, 4096)
+		data[0] = byte(i + 1)
+		_, _ = primaryRaw.Write(i, data)
+	}
+	primaryRaw.Sync()
+
+	exec := NewBlockExecutor(primaryRaw, listener.Addr())
+	// targetLSN=3, but WAL entries 4 and 5 must still be fed.
 	result := runCatchUp(t, exec, 3)
 	if !result.Success {
-		// State-convergence semantic: BlockStore emits all entries at
-		// scan-time LSN = walHead = 5. Every entry's LSN (5) > target
-		// (3), so all are skipped. Barrier achieves walHead = 5 > 3
-		// → NOT a target-not-reached error in this synthesis.
-		// What we ASSERT: the callback's return-nil-continues is
-		// honored (the test doesn't crash on a non-nil error from
-		// the callback or stop the scan early).
-		t.Logf("FailReason: %s", result.FailReason)
+		t.Fatalf("catch-up failed: %s", result.FailReason)
 	}
-	// Sanity: at minimum, doCatchUp completed without panic and
-	// surfaced a result.
-	if result.SessionID == 0 {
-		t.Fatal("sessionID should be set on close")
+	if result.AchievedLSN < 5 {
+		t.Fatalf("AchievedLSN=%d want >=5 (entries past target band must be fed)", result.AchievedLSN)
+	}
+	for i := uint32(3); i < 5; i++ {
+		got, _ := replica.Read(i)
+		if got[0] != byte(i+1) {
+			t.Fatalf("LBA %d not fed past target band: got marker %d want %d", i, got[0], byte(i+1))
+		}
 	}
 }
 
