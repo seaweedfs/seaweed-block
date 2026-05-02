@@ -376,6 +376,45 @@ func TestAdapter_DurableAckCallback_ReachesEngineProgressFact(t *testing.T) {
 	}
 }
 
+func TestAdapter_DurableAckStall_StartsCatchUp(t *testing.T) {
+	exec := newMockExecutor()
+	exec.autoStart = false
+	exec.autoClose = false
+	a := newHealthyAdapterForDurableAck(t, exec)
+
+	cb := durableAckCallback(t, exec)
+	cb(DurableAckResult{ReplicaID: "r1", DurableLSN: 10, PrimaryTailLSN: 5, PrimaryHeadLSN: 20})
+	cb(DurableAckResult{ReplicaID: "r1", DurableLSN: 10, PrimaryTailLSN: 5, PrimaryHeadLSN: 25})
+	if hasAdapterCommand(a, "StartCatchUp") {
+		t.Fatal("durable ack lag must not start catch-up before the stalled evidence window closes")
+	}
+
+	cb(DurableAckResult{ReplicaID: "r1", DurableLSN: 10, PrimaryTailLSN: 5, PrimaryHeadLSN: 30})
+
+	start := latestStartRecord(t, exec, "StartCatchUp")
+	if start.fromLSN != 11 {
+		t.Fatalf("StartCatchUp.fromLSN=%d want durable ack R+1=11", start.fromLSN)
+	}
+	if start.targetLSN != 30 {
+		t.Fatalf("StartCatchUp frontier arg=%d want primary head 30", start.targetLSN)
+	}
+}
+
+func TestAdapter_DurableAckBelowRetention_StartsRebuild(t *testing.T) {
+	exec := newMockExecutor()
+	exec.autoStart = false
+	exec.autoClose = false
+	_ = newHealthyAdapterForDurableAck(t, exec)
+
+	cb := durableAckCallback(t, exec)
+	cb(DurableAckResult{ReplicaID: "r1", DurableLSN: 4, PrimaryTailLSN: 5, PrimaryHeadLSN: 30})
+
+	start := latestStartRecord(t, exec, "StartRebuild")
+	if start.targetLSN != 30 {
+		t.Fatalf("StartRebuild frontier arg=%d want primary head 30", start.targetLSN)
+	}
+}
+
 func TestAdapter_StartCatchUp_UsesFrontierHintOverLegacyTarget(t *testing.T) {
 	exec := newMockExecutor()
 	exec.autoStart = false
@@ -416,6 +455,70 @@ func TestAdapter_StartCatchUp_UsesFrontierHintOverLegacyTarget(t *testing.T) {
 	if got.targetLSN != 123 {
 		t.Fatalf("executor legacy target arg=%d, want FrontierHint 123", got.targetLSN)
 	}
+}
+
+func newHealthyAdapterForDurableAck(t *testing.T, exec *mockExecutor) *VolumeReplicaAdapter {
+	t.Helper()
+	exec.probeResults["r1"] = ProbeResult{
+		ReplicaID:         "r1",
+		Success:           true,
+		EndpointVersion:   1,
+		TransportEpoch:    1,
+		ReplicaFlushedLSN: 20,
+		PrimaryTailLSN:    5,
+		PrimaryHeadLSN:    20,
+	}
+	a := NewVolumeReplicaAdapter(exec)
+	a.OnAssignment(AssignmentInfo{
+		VolumeID:        "v1",
+		ReplicaID:       "r1",
+		Epoch:           1,
+		EndpointVersion: 1,
+		DataAddr:        "data",
+		CtrlAddr:        "ctrl",
+	})
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if a.Projection().Mode == engine.ModeHealthy {
+			return a
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("adapter did not reach healthy before durable ack test; commands=%v trace=%v",
+		a.CommandLog(), a.Trace())
+	return nil
+}
+
+func durableAckCallback(t *testing.T, exec *mockExecutor) OnDurableAck {
+	t.Helper()
+	exec.mu.Lock()
+	defer exec.mu.Unlock()
+	if exec.onDurableAck == nil {
+		t.Fatal("durable ack callback was not wired")
+	}
+	return exec.onDurableAck
+}
+
+func latestStartRecord(t *testing.T, exec *mockExecutor, kind string) startRecord {
+	t.Helper()
+	exec.mu.Lock()
+	defer exec.mu.Unlock()
+	for i := len(exec.starts) - 1; i >= 0; i-- {
+		if exec.starts[i].kind == kind {
+			return exec.starts[i]
+		}
+	}
+	t.Fatalf("no %s start record; commands=%v starts=%v", kind, exec.commands, exec.starts)
+	return startRecord{}
+}
+
+func hasAdapterCommand(a *VolumeReplicaAdapter, kind string) bool {
+	for _, got := range a.CommandLog() {
+		if got == kind {
+			return true
+		}
+	}
+	return false
 }
 
 // --- C9: Timer only triggers probe, never direct recovery ---
