@@ -321,7 +321,7 @@ func TestTransport_ReplicaRejectsStaleMutationLineage(t *testing.T) {
 	}
 }
 
-func TestTransport_RebuildBlock_UsesTargetLSNBeforeDone(t *testing.T) {
+func TestTransport_RebuildBlock_DoesNotAdvanceFrontierBeforeDone(t *testing.T) {
 	_, replica, listener := setupPrimaryReplica(t)
 
 	conn, err := net.Dial("tcp", listener.Addr())
@@ -353,8 +353,8 @@ func TestTransport_RebuildBlock_UsesTargetLSNBeforeDone(t *testing.T) {
 	}
 
 	_, _, h := replica.Boundaries()
-	if h != 77 {
-		t.Fatalf("rebuild block should advance walHead to targetLSN before done, got H=%d want 77", h)
+	if h != 0 {
+		t.Fatalf("rebuild base block must not advance walHead before done, got H=%d want 0", h)
 	}
 }
 

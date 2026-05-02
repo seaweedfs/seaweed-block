@@ -83,10 +83,10 @@ func TestFailClosed_OverlappingSessions_OldCannotPolluteNew(t *testing.T) {
 // successfully completes, the achieved frontier reflects the NEW
 // session's target, and replica data matches the new primary.
 //
-// Note: post-M2 each rebuild block applies at lineage.TargetLSN, so
-// walHead can advance from a partial rebuild even before RebuildDone
-// runs. The convergence guarantee is at the data + achieved-frontier
-// level, not at "walHead must stay at zero".
+// Rebuild blocks are BASE-lane bytes: a partial rebuild may write
+// extent data, but it must not advance the replica frontier until
+// RebuildDone. The convergence guarantee is at the next complete
+// session's data + achieved-frontier level.
 func TestFailClosed_PrimaryHalfCrash_NextSessionConverges(t *testing.T) {
 	_, replica, listener := setupPrimaryReplica(t)
 

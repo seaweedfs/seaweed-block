@@ -74,6 +74,12 @@ type WALStore struct {
 	// only by the flusher.
 	checkpointLSN uint64
 
+	// pendingDirectFrontierLSN is set by AdvanceFrontier after direct
+	// extent writes (rebuild BASE lane). It is persisted as checkpoint
+	// metadata only after a successful Sync, so an un-synced BASE install
+	// cannot be mistaken for durable recovery progress after a crash.
+	pendingDirectFrontierLSN uint64
+
 	// recoveryRetentionLSNs is the operator-tunable retention window
 	// past checkpointLSN: the recovery scan accepts fromLSN as long as
 	// fromLSN > checkpointLSN - recoveryRetentionLSNs (G6 §1.A α).
@@ -493,7 +499,30 @@ func (s *WALStore) Sync() (uint64, error) {
 		s.syncedLSN = s.walHead
 	}
 	frontier := s.syncedLSN
+	var sbBytes []byte
+	if s.pendingDirectFrontierLSN > s.checkpointLSN && s.pendingDirectFrontierLSN <= s.syncedLSN {
+		s.checkpointLSN = s.pendingDirectFrontierLSN
+		s.sb.WALCheckpointLSN = s.pendingDirectFrontierLSN
+		if s.walHead > s.sb.WALHead {
+			s.sb.WALHead = s.walHead
+		}
+		buf := newSimpleByteBuf()
+		if _, err := s.sb.writeTo(buf); err != nil {
+			s.mu.Unlock()
+			return 0, fmt.Errorf("storage: encode superblock: %w", err)
+		}
+		sbBytes = buf.bytes()
+		s.pendingDirectFrontierLSN = 0
+	}
 	s.mu.Unlock()
+	if len(sbBytes) > 0 {
+		if _, err := s.fd.WriteAt(sbBytes, 0); err != nil {
+			return 0, fmt.Errorf("storage: pwrite direct frontier superblock: %w", err)
+		}
+		if err := s.fd.Sync(); err != nil {
+			return 0, fmt.Errorf("storage: fsync direct frontier superblock: %w", err)
+		}
+	}
 	return frontier, nil
 }
 
@@ -570,6 +599,9 @@ func (s *WALStore) AdvanceFrontier(lsn uint64) {
 	}
 	if lsn > s.walHead {
 		s.walHead = lsn
+	}
+	if lsn > s.pendingDirectFrontierLSN {
+		s.pendingDirectFrontierLSN = lsn
 	}
 }
 

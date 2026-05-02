@@ -305,11 +305,11 @@ func (r *ReplicaListener) handleConn(conn net.Conn) {
 					lineage.SessionID, lineage.Epoch, lineage.EndpointVersion)
 				return
 			}
-			// Rebuild blocks carry the engine's frozen base frontier hint in
-			// their lineage. Apply that real LSN immediately so any future
-			// LSN-aware ApplyEntry guard still treats rebuild data as current.
-			if err := r.store.ApplyEntry(lba, data, lineage.EffectiveFrontierHint()); err != nil {
-				log.Printf("replica: apply rebuild block: %v", err)
+			// Rebuild blocks are BASE-lane bytes. They must not enter the
+			// WAL apply path and must not advance R/S/H per block; the
+			// frontier is reconciled once, at MsgRebuildDone.
+			if err := r.store.WriteExtentDirect(lba, data); err != nil {
+				log.Printf("replica: apply rebuild base block: %v", err)
 			}
 
 		case MsgRebuildDone:
