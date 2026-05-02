@@ -142,10 +142,14 @@ func (r *Receiver) Run() (achievedLSN uint64, err error) {
 					fmt.Errorf("numBlocks mismatch primary=%d local=%d", s.NumBlocks, got))
 			}
 			r.sessionID = s.SessionID
-			// Wire compat: sessionStart still names this field
-			// TargetLSN, but receiver treats it as the BASE lane's
-			// frontier hint/pin. It is not a completion target.
-			r.session = NewRebuildSession(r.store, s.TargetLSN)
+			// Wire compat: sessionStart still carries TargetLSN in
+			// the legacy fourth slot, but BASE frontier comes from
+			// FromLSN. In dual-lane rebuild, FromLSN is the
+			// primary's BasePinLSN: the durable cut through which
+			// the BASE snapshot is valid. TargetLSN is retained only
+			// as a compat/frontier-hint band and MUST NOT drive BASE
+			// AdvanceFrontier.
+			r.session = NewRebuildSession(r.store, s.FromLSN)
 			// Seed walApplied with fromLSN so AchievedLSN remains a
 			// monotonic observation even when no WAL frames arrive.
 			// Completion itself is baseDone + BarrierReq witness; the
