@@ -75,10 +75,11 @@ func TestReplicationVolume_UpdateReplicaSet_AddPeer(t *testing.T) {
 
 // TestReplicationVolume_UpdateReplicaSet_RemovePeer_ExecutorTornDown —
 // Opt-3 three-assertion fence:
-//   (a) peer.Close called once and only once on removal
-//   (b) session removed from underlying executor
-//   (c) re-add at same ReplicaID succeeds and a subsequent OnLocalWrite
-//       reaches the replica
+//
+//	(a) peer.Close called once and only once on removal
+//	(b) session removed from underlying executor
+//	(c) re-add at same ReplicaID succeeds and a subsequent OnLocalWrite
+//	    reaches the replica
 func TestReplicationVolume_UpdateReplicaSet_RemovePeer_ExecutorTornDown(t *testing.T) {
 	addr, replica := replicaHarness(t, "r1")
 	v := volumeHarness(t, "vol1")
@@ -217,6 +218,61 @@ func TestReplicationVolume_OnLocalWrite_SinglePeer_BestEffort(t *testing.T) {
 	v.mu.Unlock()
 	if state != ReplicaHealthy {
 		t.Fatalf("peer state=%s want healthy", state)
+	}
+}
+
+func TestG9A_ReplicationVolume_OnLocalWrite_BestEffortRetainsRecoveringPeer(t *testing.T) {
+	addr, _ := replicaHarness(t, "r1")
+	v := volumeHarness(t, "vol-g9a-best-effort")
+	if err := v.UpdateReplicaSet(0, []ReplicaTarget{targetFor("r1", addr, 1, 1)}); err != nil {
+		t.Fatal(err)
+	}
+	v.mu.Lock()
+	v.peers["r1"].SetState(ReplicaCatchingUp)
+	v.mu.Unlock()
+
+	data := make([]byte, 4096)
+	data[0] = 0xA9
+	if err := v.OnLocalWrite(context.Background(), LocalWrite{LBA: 3, Data: data, LSN: 9}); err != nil {
+		t.Fatalf("best-effort recovering peer should retain/feed without failing Write observer: %v", err)
+	}
+}
+
+func TestG9A_ReplicationVolume_OnLocalWrite_SyncAllFailsRecoveringPeer(t *testing.T) {
+	addr, _ := replicaHarness(t, "r1")
+	v := volumeHarness(t, "vol-g9a-sync-all")
+	v.SetDurabilityMode(DurabilitySyncAll)
+	if err := v.UpdateReplicaSet(0, []ReplicaTarget{targetFor("r1", addr, 1, 1)}); err != nil {
+		t.Fatal(err)
+	}
+	v.mu.Lock()
+	v.peers["r1"].SetState(ReplicaCatchingUp)
+	v.mu.Unlock()
+
+	data := make([]byte, 4096)
+	data[0] = 0xB9
+	err := v.OnLocalWrite(context.Background(), LocalWrite{LBA: 4, Data: data, LSN: 10})
+	if !strings.Contains(fmt.Sprint(err), ErrDurabilityBarrierFailed.Error()) {
+		t.Fatalf("sync_all recovering peer should fail write ack, got %v", err)
+	}
+}
+
+func TestG9A_ReplicationVolume_OnLocalWrite_SyncQuorumRF2FailsRecoveringPeer(t *testing.T) {
+	addr, _ := replicaHarness(t, "r1")
+	v := volumeHarness(t, "vol-g9a-sync-quorum")
+	v.SetDurabilityMode(DurabilitySyncQuorum)
+	if err := v.UpdateReplicaSet(0, []ReplicaTarget{targetFor("r1", addr, 1, 1)}); err != nil {
+		t.Fatal(err)
+	}
+	v.mu.Lock()
+	v.peers["r1"].SetState(ReplicaCatchingUp)
+	v.mu.Unlock()
+
+	data := make([]byte, 4096)
+	data[0] = 0xC9
+	err := v.OnLocalWrite(context.Background(), LocalWrite{LBA: 5, Data: data, LSN: 11})
+	if !strings.Contains(fmt.Sprint(err), ErrDurabilityQuorumLost.Error()) {
+		t.Fatalf("sync_quorum RF=2 recovering peer should fail write ack, got %v", err)
 	}
 }
 
@@ -561,9 +617,10 @@ func TestReplicationVolume_UpdateReplicaSet_GenerationZero_DoesNotAdvanceGuard(t
 // TestReplicationVolume_UpdateReplicaSet_EmptyPeerSet_AppliesWithTeardown
 // — Q3 binding: UpdateReplicaSet(gen, []) MUST go through the normal
 // teardown path, NOT a special "clear the map" fast-path. Assertions:
-//   (a) PeerCount() == 0 after apply
-//   (b) every formerly-present peer's executor session is invalidated
-//   (c) next OnLocalWrite succeeds as a zero-fanout no-op
+//
+//	(a) PeerCount() == 0 after apply
+//	(b) every formerly-present peer's executor session is invalidated
+//	(c) next OnLocalWrite succeeds as a zero-fanout no-op
 func TestReplicationVolume_UpdateReplicaSet_EmptyPeerSet_AppliesWithTeardown(t *testing.T) {
 	addr1, _ := replicaHarness(t, "r1")
 	addr2, _ := replicaHarness(t, "r2")
