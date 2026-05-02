@@ -332,6 +332,7 @@ func decide(st *ReplicaState, r *ApplyResult, trace func(string, string)) {
 				ReplicaID:       st.Identity.ReplicaID,
 				Epoch:           st.Identity.Epoch,
 				EndpointVersion: st.Identity.EndpointVersion,
+				FrontierHint:    H,
 				TargetLSN:       H,
 			})
 			trace("command", "StartRebuild (pinned)")
@@ -391,6 +392,7 @@ func decide(st *ReplicaState, r *ApplyResult, trace func(string, string)) {
 				Epoch:           st.Identity.Epoch,
 				EndpointVersion: st.Identity.EndpointVersion,
 				FromLSN:         R + 1,
+				FrontierHint:    H,
 				TargetLSN:       H,
 			})
 			trace("command", "StartCatchUp")
@@ -406,6 +408,7 @@ func decide(st *ReplicaState, r *ApplyResult, trace func(string, string)) {
 				ReplicaID:       st.Identity.ReplicaID,
 				Epoch:           st.Identity.Epoch,
 				EndpointVersion: st.Identity.EndpointVersion,
+				FrontierHint:    H,
 				TargetLSN:       H,
 			})
 			trace("command", "StartRebuild")
@@ -425,11 +428,16 @@ func applySessionPrepared(st *ReplicaState, e SessionPrepared, r *ApplyResult, t
 		trace("stale_session_prepared", "session ID too old")
 		return
 	}
+	frontierHint := e.FrontierHint
+	if frontierHint == 0 {
+		frontierHint = e.TargetLSN
+	}
 	st.Session = SessionTruth{
-		SessionID: e.SessionID,
-		Kind:      e.Kind,
-		TargetLSN: e.TargetLSN,
-		Phase:     PhaseStarting,
+		SessionID:    e.SessionID,
+		Kind:         e.Kind,
+		FrontierHint: frontierHint,
+		TargetLSN:    frontierHint,
+		Phase:        PhaseStarting,
 	}
 	trace("session_prepared", string(e.Kind))
 }
@@ -539,6 +547,7 @@ func applySessionFailed(st *ReplicaState, e SessionClosedFailed, r *ApplyResult,
 				ReplicaID:       st.Identity.ReplicaID,
 				Epoch:           st.Identity.Epoch,
 				EndpointVersion: st.Identity.EndpointVersion,
+				FrontierHint:    st.Recovery.H,
 				TargetLSN:       st.Recovery.H,
 			})
 			trace("command", "StartRebuild (wal_recycled escalation)")
@@ -612,6 +621,7 @@ func applySessionFailed(st *ReplicaState, e SessionClosedFailed, r *ApplyResult,
 				Epoch:           st.Identity.Epoch,
 				EndpointVersion: st.Identity.EndpointVersion,
 				FromLSN:         st.Recovery.R + 1,
+				FrontierHint:    st.Recovery.H,
 				TargetLSN:       st.Recovery.H,
 			})
 			trace("command", "StartCatchUp (retry)")
@@ -620,6 +630,7 @@ func applySessionFailed(st *ReplicaState, e SessionClosedFailed, r *ApplyResult,
 				ReplicaID:       st.Identity.ReplicaID,
 				Epoch:           st.Identity.Epoch,
 				EndpointVersion: st.Identity.EndpointVersion,
+				FrontierHint:    st.Recovery.H,
 				TargetLSN:       st.Recovery.H,
 			})
 			trace("command", "StartRebuild (retry)")
@@ -660,6 +671,7 @@ func applySessionFailed(st *ReplicaState, e SessionClosedFailed, r *ApplyResult,
 			ReplicaID:       st.Identity.ReplicaID,
 			Epoch:           st.Identity.Epoch,
 			EndpointVersion: st.Identity.EndpointVersion,
+			FrontierHint:    st.Recovery.H,
 			TargetLSN:       st.Recovery.H,
 		})
 		return

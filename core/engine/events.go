@@ -77,9 +77,12 @@ func (RecoveryFactsObserved) eventKind() string { return "RecoveryFactsObserved"
 
 // SessionPrepared: a recovery session has been planned but not started.
 type SessionPrepared struct {
-	ReplicaID string
-	SessionID uint64
-	Kind      SessionKind
+	ReplicaID    string
+	SessionID    uint64
+	Kind         SessionKind
+	FrontierHint uint64
+	// TargetLSN is a legacy alias kept while adapter/executor/wire
+	// vocabulary migrates. Prefer FrontierHint for new engine code.
 	TargetLSN uint64
 }
 

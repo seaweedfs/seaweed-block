@@ -376,13 +376,13 @@ func (a *VolumeReplicaAdapter) prepareQueuedCommands(cmds []engine.Command) ([]e
 		case engine.StartCatchUp:
 			sid := sessionIDCounter.Add(1)
 			events = append(events,
-				NormalizeSessionPrepared(c.ReplicaID, sid, engine.SessionCatchUp, c.TargetLSN),
+				NormalizeSessionPrepared(c.ReplicaID, sid, engine.SessionCatchUp, c.EffectiveFrontierHint()),
 			)
 			queued = append(queued, queuedCommand{cmd: cmd, sessionID: sid})
 		case engine.StartRebuild:
 			sid := sessionIDCounter.Add(1)
 			events = append(events,
-				NormalizeSessionPrepared(c.ReplicaID, sid, engine.SessionRebuild, c.TargetLSN),
+				NormalizeSessionPrepared(c.ReplicaID, sid, engine.SessionRebuild, c.EffectiveFrontierHint()),
 			)
 			queued = append(queued, queuedCommand{cmd: cmd, sessionID: sid})
 		case engine.StartRecovery:
@@ -404,7 +404,7 @@ func (a *VolumeReplicaAdapter) prepareQueuedCommands(cmds []engine.Command) ([]e
 				sessionKind = engine.SessionRebuild
 			}
 			events = append(events,
-				NormalizeSessionPrepared(c.ReplicaID, sid, sessionKind, c.TargetLSN),
+				NormalizeSessionPrepared(c.ReplicaID, sid, sessionKind, c.EffectiveFrontierHint()),
 			)
 			queued = append(queued, queuedCommand{cmd: cmd, sessionID: sid})
 		case engine.FenceAtEpoch:
@@ -447,7 +447,7 @@ func (a *VolumeReplicaAdapter) executeCommand(q queuedCommand) {
 		}()
 
 	case engine.StartCatchUp:
-		err := a.executor.StartCatchUp(c.ReplicaID, q.sessionID, c.Epoch, c.EndpointVersion, c.FromLSN, c.TargetLSN)
+		err := a.executor.StartCatchUp(c.ReplicaID, q.sessionID, c.Epoch, c.EndpointVersion, c.FromLSN, c.EffectiveFrontierHint())
 		if err != nil {
 			// T4d-1: synchronous dispatch failure → Transport kind.
 			a.OnSessionClose(SessionCloseResult{
@@ -460,7 +460,7 @@ func (a *VolumeReplicaAdapter) executeCommand(q queuedCommand) {
 		}
 
 	case engine.StartRebuild:
-		err := a.executor.StartRebuild(c.ReplicaID, q.sessionID, c.Epoch, c.EndpointVersion, c.TargetLSN)
+		err := a.executor.StartRebuild(c.ReplicaID, q.sessionID, c.Epoch, c.EndpointVersion, c.EffectiveFrontierHint())
 		if err != nil {
 			a.OnSessionClose(SessionCloseResult{
 				ReplicaID:   c.ReplicaID,
@@ -479,7 +479,7 @@ func (a *VolumeReplicaAdapter) executeCommand(q queuedCommand) {
 		// SessionClose with Transport kind.
 		err := a.executor.StartRecoverySession(
 			c.ReplicaID,
-			q.sessionID, c.Epoch, c.EndpointVersion, c.TargetLSN,
+			q.sessionID, c.Epoch, c.EndpointVersion, c.EffectiveFrontierHint(),
 			c.ContentKind, c.RuntimePolicy,
 		)
 		if err != nil {

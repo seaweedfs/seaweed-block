@@ -35,10 +35,23 @@ type StartCatchUp struct {
 	Epoch           uint64
 	EndpointVersion uint64
 	FromLSN         uint64 // T4d-3: engine populates as Recovery.R + 1
-	TargetLSN       uint64
+	// FrontierHint is the preferred semantic name for the primary
+	// head/band captured when the recovery command was emitted. It is
+	// a base/WAL frontier hint, not a completion predicate.
+	FrontierHint uint64
+	// TargetLSN is a legacy alias kept for adapter/executor/wire
+	// compatibility while callers migrate to FrontierHint.
+	TargetLSN uint64
 }
 
 func (StartCatchUp) commandKind() string { return "StartCatchUp" }
+
+func (c StartCatchUp) EffectiveFrontierHint() uint64 {
+	if c.FrontierHint != 0 {
+		return c.FrontierHint
+	}
+	return c.TargetLSN
+}
 
 // StartRebuild: request the runtime to start a full rebuild session.
 // May only be emitted from bounded R/S/H facts, not from transport errors.
@@ -46,10 +59,23 @@ type StartRebuild struct {
 	ReplicaID       string
 	Epoch           uint64
 	EndpointVersion uint64
-	TargetLSN       uint64
+	// FrontierHint is the preferred semantic name for the base
+	// frontier/pin captured when the rebuild command was emitted. It
+	// is not a session completion predicate.
+	FrontierHint uint64
+	// TargetLSN is a legacy alias kept for adapter/executor/wire
+	// compatibility while callers migrate to FrontierHint.
+	TargetLSN uint64
 }
 
 func (StartRebuild) commandKind() string { return "StartRebuild" }
+
+func (c StartRebuild) EffectiveFrontierHint() uint64 {
+	if c.FrontierHint != 0 {
+		return c.FrontierHint
+	}
+	return c.TargetLSN
+}
 
 // InvalidateSession: request the runtime to invalidate a stale session.
 type InvalidateSession struct {
@@ -148,9 +174,9 @@ const (
 type DurationClass string
 
 const (
-	DurationShort        DurationClass = "short"          // milliseconds-seconds
-	DurationLong         DurationClass = "long"           // minutes-hours
-	DurationArchiveBound DurationClass = "archive_bound"  // includes archive/dump fetch latency
+	DurationShort        DurationClass = "short"         // milliseconds-seconds
+	DurationLong         DurationClass = "long"          // minutes-hours
+	DurationArchiveBound DurationClass = "archive_bound" // includes archive/dump fetch latency
 )
 
 // CancellationMode defines how a recovery session terminates on
@@ -215,12 +241,25 @@ type StartRecovery struct {
 	ReplicaID       string
 	Epoch           uint64
 	EndpointVersion uint64
-	TargetLSN       uint64
-	ContentKind     RecoveryContentKind
-	RuntimePolicy   RecoveryRuntimePolicy
+	// FrontierHint is the preferred semantic name for the primary
+	// frontier captured at command emission. It is not a target that
+	// proves completion.
+	FrontierHint uint64
+	// TargetLSN is a legacy alias kept for adapter/executor/wire
+	// compatibility while callers migrate to FrontierHint.
+	TargetLSN     uint64
+	ContentKind   RecoveryContentKind
+	RuntimePolicy RecoveryRuntimePolicy
 }
 
 func (StartRecovery) commandKind() string { return "StartRecovery" }
+
+func (c StartRecovery) EffectiveFrontierHint() uint64 {
+	if c.FrontierHint != 0 {
+		return c.FrontierHint
+	}
+	return c.TargetLSN
+}
 
 // DefaultRuntimePolicyFor returns the per-content-kind default
 // runtime policy from memo §7a.1a. Engine uses this when emitting

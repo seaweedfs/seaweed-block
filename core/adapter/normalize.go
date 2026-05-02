@@ -3,10 +3,10 @@
 // semantic events and semantic commands become runtime actions.
 //
 // The adapter has exactly four jobs:
-//   1. Gather runtime observations
-//   2. Normalize them into engine events
-//   3. Execute engine commands
-//   4. Feed back session-close truth
+//  1. Gather runtime observations
+//  2. Normalize them into engine events
+//  3. Execute engine commands
+//  4. Feed back session-close truth
 //
 // The adapter must NOT:
 //   - Invent identity truth
@@ -85,10 +85,11 @@ func NormalizeAssignment(a AssignmentInfo) engine.Event {
 
 // NormalizeProbe converts a probe result into engine events.
 // A successful probe produces up to 2 events:
-//   1. ProbeSucceeded (reachability)
-//   2. RecoveryFactsObserved (R/S/H boundaries)
+//  1. ProbeSucceeded (reachability)
+//  2. RecoveryFactsObserved (R/S/H boundaries)
+//
 // A failed probe produces 1 event:
-//   1. ProbeFailed
+//  1. ProbeFailed
 //
 // The adapter NEVER decides recovery class here. It only reports facts.
 // The engine's decide() function uses R/S/H to classify.
@@ -153,11 +154,12 @@ func NormalizeSessionStart(r SessionStartResult) engine.Event {
 
 // NormalizeSessionPrepared creates a SessionPrepared event when the
 // adapter has set up a recovery session in response to a Start* command.
-func NormalizeSessionPrepared(replicaID string, sessionID uint64, kind engine.SessionKind, targetLSN uint64) engine.Event {
+func NormalizeSessionPrepared(replicaID string, sessionID uint64, kind engine.SessionKind, frontierHint uint64) engine.Event {
 	return engine.SessionPrepared{
-		ReplicaID: replicaID,
-		SessionID: sessionID,
-		Kind:      kind,
-		TargetLSN: targetLSN,
+		ReplicaID:    replicaID,
+		SessionID:    sessionID,
+		Kind:         kind,
+		FrontierHint: frontierHint,
+		TargetLSN:    frontierHint,
 	}
 }

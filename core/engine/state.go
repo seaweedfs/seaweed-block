@@ -144,7 +144,8 @@ const (
 type SessionTruth struct {
 	SessionID     uint64
 	Kind          SessionKind
-	TargetLSN     uint64
+	FrontierHint  uint64
+	TargetLSN     uint64 // legacy alias for FrontierHint
 	AchievedLSN   uint64
 	Phase         SessionPhase
 	FailureReason string
