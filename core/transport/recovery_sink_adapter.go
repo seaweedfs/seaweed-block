@@ -176,8 +176,8 @@ func (r *RecoverySink) EndSession() {
 	// the analogue of senderBacklogSink.flushAndSeal's atomic seal
 	// boundary.
 	r.sealMu.Lock()
+	defer r.sealMu.Unlock()
 	r.sealed = true
-	r.sealMu.Unlock()
 
 	r.e.WalShipperFor(r.replicaID).EndSession()
 	r.e.updateWalShipperEmitContext(r.replicaID, r.steadyConn, r.steadyLineage, r.steadyProfile)
@@ -197,9 +197,8 @@ func (r *RecoverySink) EndSession() {
 // confusing "no conn" error.
 func (r *RecoverySink) NotifyAppend(lba uint32, lsn uint64, data []byte) error {
 	r.sealMu.Lock()
-	sealed := r.sealed
-	r.sealMu.Unlock()
-	if sealed {
+	defer r.sealMu.Unlock()
+	if r.sealed {
 		return ErrSinkSealed
 	}
 	return r.e.WalShipperFor(r.replicaID).NotifyAppend(lba, lsn, data)

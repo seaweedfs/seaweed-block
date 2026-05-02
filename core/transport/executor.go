@@ -890,7 +890,11 @@ func (e *BlockExecutor) TryPushLiveWrite(replicaID string, lba uint32, lsn uint6
 	if !e.dualLane.Bridge.HasActiveSession(rid) {
 		return false, nil
 	}
-	return true, e.dualLane.Bridge.PushLiveWrite(rid, lba, lsn, data)
+	err = e.dualLane.Bridge.PushLiveWrite(rid, lba, lsn, data)
+	if errors.Is(err, ErrSinkSealed) {
+		return false, nil
+	}
+	return true, err
 }
 
 // Registry lifecycle note (architect P1 review #4): walShippers

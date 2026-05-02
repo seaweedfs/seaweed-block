@@ -1,6 +1,7 @@
 package transport
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -65,7 +66,18 @@ func (e *BlockExecutor) Ship(replicaID string, lineage RecoveryLineage, lba uint
 	// enter through the active session sink so the one monotonic cursor
 	// speaks through one wire profile.
 	if e.dualLane != nil && e.dualLane.Bridge.HasActiveSession(recovery.ReplicaID(replicaID)) {
-		return e.dualLane.Bridge.PushLiveWrite(recovery.ReplicaID(replicaID), lba, lsn, data)
+		err := e.dualLane.Bridge.PushLiveWrite(recovery.ReplicaID(replicaID), lba, lsn, data)
+		if err == nil {
+			return nil
+		}
+		if !errors.Is(err, ErrSinkSealed) {
+			return err
+		}
+		// The bridge map can briefly outlive sink.EndSession. Once
+		// ErrSinkSealed is visible, RecoverySink has already restored
+		// the steady emit context; fall through to the normal steady
+		// Ship path instead of treating a closing session as having
+		// claimed this live write.
 	}
 
 	e.mu.Lock()
