@@ -469,11 +469,12 @@ func isTimeoutErr(err error) bool {
 }
 
 type recordingSessionSink struct {
-	started   chan struct{}
-	release   chan struct{}
-	ended     chan struct{}
-	startErr  error
-	notifyErr error
+	started          chan struct{}
+	release          chan struct{}
+	ended            chan struct{}
+	startErr         error
+	notifyErr        error
+	startBlocksUntil <-chan struct{}
 
 	mu      sync.Mutex
 	entries []struct {
@@ -494,6 +495,9 @@ func newRecordingSessionSink() *recordingSessionSink {
 func (s *recordingSessionSink) StartSession(fromLSN uint64) error {
 	_ = fromLSN
 	close(s.started)
+	if s.startBlocksUntil != nil {
+		<-s.startBlocksUntil
+	}
 	return s.startErr
 }
 
@@ -606,6 +610,86 @@ func TestExecutor_Ship_ActiveDualLaneSession_RoutesThroughSingleSessionEmitter(t
 	_ = sessionClient.Close()
 	_ = sessionServer.Close()
 	close(sink.release)
+}
+
+// TestExecutor_Ship_RegisteredButNotLiveReady_RetainsEvenWhenSteadyAllowed
+// pins the single-state-machine boundary before the session sink is
+// live-ready. Once the bridge has registered a recovery session, that
+// session owns the peer's WAL route; "not live-ready yet" means retain
+// for replay, not fall back to the old steady emitter just because the
+// peer is still Healthy.
+func TestExecutor_Ship_RegisteredButNotLiveReady_RetainsEvenWhenSteadyAllowed(t *testing.T) {
+	primary := storage.NewBlockStore(8, 4096)
+	coord := recovery.NewPeerShipCoordinator()
+	replicaID := "r1"
+	exec := NewBlockExecutorWithDualLane(primary, "127.0.0.1:1", "127.0.0.1:2", coord, recovery.ReplicaID(replicaID))
+
+	steadyClient, steadyServer := net.Pipe()
+	t.Cleanup(func() {
+		_ = steadyClient.Close()
+		_ = steadyServer.Close()
+	})
+	go func() {
+		_, _ = io.Copy(io.Discard, steadyServer)
+	}()
+
+	steadyLineage := RecoveryLineage{SessionID: 91, Epoch: 7, EndpointVersion: 3, TargetLSN: 100}
+	session, err := exec.registerSession(steadyLineage)
+	if err != nil {
+		t.Fatalf("register steady session: %v", err)
+	}
+	session.conn = steadyClient
+	shipper := exec.WalShipperFor(replicaID)
+	exec.updateWalShipperEmitContext(replicaID, steadyClient, steadyLineage, EmitProfileSteadyMsgShip)
+
+	sessionClient, sessionServer := net.Pipe()
+	t.Cleanup(func() {
+		_ = sessionClient.Close()
+		_ = sessionServer.Close()
+	})
+	go func() {
+		_, _ = io.Copy(io.Discard, sessionServer)
+	}()
+
+	releaseStart := make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	sink := newRecordingSessionSink()
+	sink.startBlocksUntil = releaseStart
+	if err := exec.dualLane.Bridge.StartRebuildSessionWithSink(
+		ctx, sessionClient, recovery.ReplicaID(replicaID), 77, 10, 10, sink,
+	); err != nil {
+		t.Fatalf("StartRebuildSessionWithSink: %v", err)
+	}
+	select {
+	case <-sink.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("session sink did not start")
+	}
+	if exec.dualLane.Bridge.HasActiveSession(recovery.ReplicaID(replicaID)) {
+		t.Fatal("bridge reports active before blocked StartSession returns")
+	}
+
+	data := make([]byte, 4096)
+	data[0] = 0x3c
+	disposition, err := exec.FeedLiveWrite(replicaID, steadyLineage, true, 3, 1, data)
+	if err != nil {
+		t.Fatalf("FeedLiveWrite during registered/not-ready session: %v", err)
+	}
+	if disposition != LiveWriteRetained {
+		t.Fatalf("disposition=%v want LiveWriteRetained", disposition)
+	}
+	if got := sink.Entries(); got != 0 {
+		t.Fatalf("not-ready session sink recorded %d entries; want 0", got)
+	}
+	if got := shipper.Cursor(); got != 0 {
+		t.Fatalf("steady shipper cursor=%d want 0; steady fallback emitted during recovery start window", got)
+	}
+
+	close(releaseStart)
+	cancel()
+	_ = sessionClient.Close()
+	_ = sessionServer.Close()
 }
 
 func TestExecutor_FeedLiveWrite_SteadyDisallowed_RetainsWithoutDial(t *testing.T) {

@@ -83,12 +83,21 @@ func (e *BlockExecutor) FeedLiveWrite(replicaID string, lineage RecoveryLineage,
 	// WalShipper's emit context. During recovery, every live write must
 	// enter through the active session sink so the one monotonic cursor
 	// speaks through one wire profile.
-	if e.dualLane != nil && e.dualLane.Bridge.HasActiveSession(recovery.ReplicaID(replicaID)) {
+	if e.dualLane != nil && e.dualLane.Bridge.HasRegisteredSession(recovery.ReplicaID(replicaID)) {
 		err := e.dualLane.Bridge.PushLiveWrite(recovery.ReplicaID(replicaID), lba, lsn, data)
 		if err == nil {
 			return LiveWriteEmitted, nil
 		}
-		if !errors.Is(err, ErrSinkSealed) {
+		if errors.Is(err, recovery.ErrSessionNotLiveReady) {
+			log.Printf("transport: live write retained replica=%s lsn=%d (recovery session registered but not live-ready)",
+				replicaID, lsn)
+			return LiveWriteRetained, nil
+		}
+		if errors.Is(err, recovery.ErrNoActiveSession) {
+			// Bridge sender-map deletion raced with our registered-session
+			// snapshot. Recovery no longer owns this write; use the steady
+			// path below.
+		} else if !errors.Is(err, ErrSinkSealed) {
 			return LiveWriteRetained, err
 		}
 		// The bridge map can briefly outlive sink.EndSession. Once

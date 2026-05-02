@@ -2,6 +2,7 @@ package recovery
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -67,6 +68,15 @@ type PrimaryBridge struct {
 	mu      sync.Mutex
 	senders map[ReplicaID]*Sender
 }
+
+// ErrNoActiveSession means the bridge has no sender registered for the
+// requested replica.
+var ErrNoActiveSession = errors.New("recovery bridge: no active session")
+
+// ErrSessionNotLiveReady means a session is registered and owns the
+// peer's WAL route, but the sink has not entered its live feeder window
+// yet. Callers must retain/replay the WAL fact, not fall back to steady.
+var ErrSessionNotLiveReady = errors.New("recovery bridge: session not live-ready")
 
 // NewPrimaryBridge constructs a bridge bound to the primary's
 // substrate. Callbacks may be nil (fire-and-forget).
@@ -191,6 +201,18 @@ func (b *PrimaryBridge) HasActiveSession(replicaID ReplicaID) bool {
 	return ok && sender.LiveReady()
 }
 
+// HasRegisteredSession reports whether recovery currently owns this
+// peer's WAL route, regardless of whether the sender is live-ready yet.
+// This is the routing-state check; HasActiveSession is only the
+// push-ready check. Transport must not use "not live-ready" as license
+// to fall back to steady while a recovery session is registered.
+func (b *PrimaryBridge) HasRegisteredSession(replicaID ReplicaID) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	_, ok := b.senders[replicaID]
+	return ok
+}
+
 // PushLiveWrite forwards a primary-side WAL append to the active
 // session for this peer (if any). Caller is the WAL shipper
 // integration; they MUST have already consulted
@@ -204,10 +226,10 @@ func (b *PrimaryBridge) PushLiveWrite(replicaID ReplicaID, lba uint32, lsn uint6
 	sender, ok := b.senders[replicaID]
 	b.mu.Unlock()
 	if !ok {
-		return fmt.Errorf("recovery bridge: no active session for replica %q", replicaID)
+		return fmt.Errorf("%w for replica %q", ErrNoActiveSession, replicaID)
 	}
 	if !sender.LiveReady() {
-		return fmt.Errorf("recovery bridge: session for replica %q is not live-ready", replicaID)
+		return fmt.Errorf("%w for replica %q", ErrSessionNotLiveReady, replicaID)
 	}
 	return sender.PushLiveWrite(lba, lsn, data)
 }
