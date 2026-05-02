@@ -22,6 +22,29 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
+type blockFirstReadStore struct {
+	storage.LogicalStorage
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func newBlockFirstReadStore(inner storage.LogicalStorage) *blockFirstReadStore {
+	return &blockFirstReadStore{
+		LogicalStorage: inner,
+		entered:        make(chan struct{}),
+		release:        make(chan struct{}),
+	}
+}
+
+func (s *blockFirstReadStore) Read(lba uint32) ([]byte, error) {
+	s.once.Do(func() {
+		close(s.entered)
+		<-s.release
+	})
+	return s.LogicalStorage.Read(lba)
+}
+
 // TestPrimaryBridge_StartRebuildSessionWithSink_NilRejected —
 // fail-closed: nil sink is a programmer error; method MUST refuse
 // rather than silently fall through to the bridging path. Callers
@@ -185,6 +208,77 @@ func TestPrimaryBridge_LiveWritesNotAcceptedBeforeSinkStartCompletes(t *testing.
 	case <-waitClosed(&closeWG):
 	case <-time.After(2 * time.Second):
 		t.Fatal("session did not close after releasing blocked StartSession")
+	}
+}
+
+// TestPrimaryBridge_LiveWriteDuringBaseFeedsCurrentSender pins the
+// middle of the session, not just start/end boundaries. Once
+// sink.StartSession has returned, live WAL must enter the current
+// sender/sink even while BASE is still blocked. That is the recovery
+// feeder's single-owner window: BASE may be slow, but live writes must
+// not fall back to legacy or wait for BASE to finish.
+func TestPrimaryBridge_LiveWriteDuringBaseFeedsCurrentSender(t *testing.T) {
+	const blockSize = 4096
+	raw := storage.NewBlockStore(8, blockSize)
+	for lba := uint32(0); lba < raw.NumBlocks(); lba++ {
+		_, _ = raw.Write(lba, bytes.Repeat([]byte{byte(lba + 1)}, blockSize))
+	}
+	_, _ = raw.Sync()
+	primary := newBlockFirstReadStore(raw)
+	coord := NewPeerShipCoordinator()
+
+	var closeWG sync.WaitGroup
+	closeWG.Add(1)
+	bridge := NewPrimaryBridge(primary, coord, nil,
+		func(_ ReplicaID, _ uint64, _ uint64, _ error) {
+			closeWG.Done()
+		})
+
+	primaryConn, replicaConn := net.Pipe()
+	defer primaryConn.Close()
+	defer replicaConn.Close()
+	go func() {
+		_, _ = io.Copy(io.Discard, replicaConn)
+	}()
+
+	sink := newRecordingSink()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := bridge.StartRebuildSessionWithSink(
+		ctx, primaryConn, "r1", 43, 0, 0, sink,
+	); err != nil {
+		t.Fatalf("StartRebuildSessionWithSink: %v", err)
+	}
+
+	select {
+	case <-primary.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("base lane did not enter blocked Read")
+	}
+	waitBridgeLiveReady(t, bridge, "r1")
+
+	liveData := bytes.Repeat([]byte{0x7d}, blockSize)
+	if err := bridge.PushLiveWrite("r1", 2, 1, liveData); err != nil {
+		t.Fatalf("PushLiveWrite while base blocked: %v", err)
+	}
+	got := sink.snapshotNotifyAppend()
+	if len(got) != 1 {
+		t.Fatalf("sink NotifyAppend calls=%d want 1 while base blocked", len(got))
+	}
+	if got[0].lba != 2 || got[0].lsn != 1 || !bytes.Equal(got[0].data, liveData) {
+		t.Fatalf("NotifyAppend got lba=%d lsn=%d dataMatch=%t; want lba=2 lsn=1 dataMatch=true",
+			got[0].lba, got[0].lsn, bytes.Equal(got[0].data, liveData))
+	}
+
+	close(primary.release)
+	cancel()
+	_ = primaryConn.Close()
+	_ = replicaConn.Close()
+
+	select {
+	case <-waitClosed(&closeWG):
+	case <-time.After(2 * time.Second):
+		t.Fatal("session did not close after releasing blocked base read")
 	}
 }
 
