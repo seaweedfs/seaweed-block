@@ -347,6 +347,27 @@ func TestV3_Terminal_OnlySessionClosedCompletedGivesSuccess(t *testing.T) {
 	assertHasCommand(t, r, "PublishHealthy")
 }
 
+func TestV3_Terminal_SessionCompletedDoesNotRegressRecoveryR(t *testing.T) {
+	st := &ReplicaState{}
+	assignAndProbe(st)
+	Apply(st, RecoveryFactsObserved{ReplicaID: "r1", R: 80, S: 0, H: 100})
+	Apply(st, SessionPrepared{ReplicaID: "r1", SessionID: 1, Kind: SessionCatchUp, FrontierHint: 100, TargetLSN: 100})
+	Apply(st, SessionStarted{ReplicaID: "r1", SessionID: 1})
+
+	r := Apply(st, SessionClosedCompleted{ReplicaID: "r1", SessionID: 1, AchievedLSN: 70})
+
+	if st.Recovery.R != 80 {
+		t.Fatalf("Recovery.R regressed to %d, want existing certified frontier 80", st.Recovery.R)
+	}
+	if st.Session.AchievedLSN != 70 {
+		t.Fatalf("Session.AchievedLSN=%d want observed close value 70", st.Session.AchievedLSN)
+	}
+	if r.Projection.RecoveryDecision == DecisionNone {
+		t.Fatal("Decision=None after low achieved value; should still require recovery")
+	}
+	assertNoCommand(t, r, "PublishHealthy")
+}
+
 func TestV3_Terminal_DelayedStartAfterFailureIgnored(t *testing.T) {
 	st := &ReplicaState{}
 	assignAndProbe(st)

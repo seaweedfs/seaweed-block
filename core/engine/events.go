@@ -143,8 +143,11 @@ const (
 	// scan (read error, decode error mid-scan). Retryable.
 	RecoveryFailureSubstrateIO
 
-	// RecoveryFailureTargetNotReached — catch-up didn't reach
-	// targetLSN (substrate ran dry before completion). Retryable.
+	// RecoveryFailureTargetNotReached — legacy diagnostic for old
+	// catch-up senders that explicitly failed a target-band compare.
+	// Current recover(a) transport should prefer concrete causes such
+	// as WALRecycled, ack-behind-last-sent (Transport), or SubstrateIO.
+	// Retryable while the legacy kind remains accepted.
 	RecoveryFailureTargetNotReached
 
 	// RecoveryFailureStartTimeout — adapter watchdog: executor

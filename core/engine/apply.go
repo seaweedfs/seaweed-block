@@ -483,7 +483,9 @@ func applySessionCompleted(st *ReplicaState, e SessionClosedCompleted, r *ApplyR
 	}
 	st.Session.Phase = PhaseCompleted
 	st.Session.AchievedLSN = e.AchievedLSN
-	st.Recovery.R = e.AchievedLSN // advance replica boundary
+	if e.AchievedLSN > st.Recovery.R {
+		st.Recovery.R = e.AchievedLSN // monotonic observed replica boundary
+	}
 	// T4c-3 retry-loop: success clears the attempt counter so a
 	// future independent recovery cycle starts with a fresh budget.
 	st.Recovery.Attempts = 0
