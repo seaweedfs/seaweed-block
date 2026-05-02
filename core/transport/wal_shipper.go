@@ -691,6 +691,11 @@ func (s *WalShipper) NotifyAppend(lba uint32, lsn uint64, data []byte) error {
 // path Backlog→Realtime; double-check inside shipMu after each
 // scan exhausts.
 func (s *WalShipper) DrainBacklog(ctx context.Context) error {
+	log.Printf("g7-debug: WalShipper.DrainBacklog entry replica=%s", s.replicaID)
+	var totalEmitted uint64
+	defer func() {
+		log.Printf("g7-debug: WalShipper.DrainBacklog defer-exit replica=%s totalEmitted=%d", s.replicaID, totalEmitted)
+	}()
 	for {
 		select {
 		case <-ctx.Done():
@@ -710,7 +715,9 @@ func (s *WalShipper) DrainBacklog(ctx context.Context) error {
 			return nil
 		}
 		cursor := s.cursor
+		head := s.head.Head()
 		s.shipMu.Unlock()
+		log.Printf("g7-debug: WalShipper.DrainBacklog iter replica=%s cursor=%d head=%d totalEmitted=%d", s.replicaID, cursor, head, totalEmitted)
 
 		// Pull-and-ship one scan cycle. ScanLBAs iterates entries
 		// with LSN > cursor; emit each under shipMu (so concurrent
@@ -718,6 +725,7 @@ func (s *WalShipper) DrainBacklog(ctx context.Context) error {
 		// holds).
 		var emitted bool
 		var hardErr error
+		var iterEmitCount uint64
 		scanErr := s.substrate.ScanLBAs(cursor, func(e storage.RecoveryEntry) error {
 			s.shipMu.Lock()
 			defer s.shipMu.Unlock()
@@ -725,14 +733,21 @@ func (s *WalShipper) DrainBacklog(ctx context.Context) error {
 				return nil // mode flipped or already-emitted; skip
 			}
 			if err := s.emit(EmitKindBacklog, e.LBA, e.LSN, e.Data); err != nil {
+				log.Printf("g7-debug: WalShipper.DrainBacklog emit err replica=%s lsn=%d err=%v", s.replicaID, e.LSN, err)
 				hardErr = fmt.Errorf("walshipper: backlog emit lsn=%d: %w", e.LSN, err)
 				return err
 			}
 			s.cursor = e.LSN
 			s.updateLagLocked()
 			emitted = true
+			iterEmitCount++
+			totalEmitted++
+			if totalEmitted%256 == 0 {
+				log.Printf("g7-debug: WalShipper.DrainBacklog emit progress replica=%s lsn=%d totalEmitted=%d", s.replicaID, e.LSN, totalEmitted)
+			}
 			return nil
 		})
+		log.Printf("g7-debug: WalShipper.DrainBacklog scan iter done replica=%s emitted=%t iterEmitCount=%d scanErr=%v", s.replicaID, emitted, iterEmitCount, scanErr)
 		if hardErr != nil {
 			return hardErr
 		}
@@ -745,7 +760,7 @@ func (s *WalShipper) DrainBacklog(ctx context.Context) error {
 
 		// Try R1 transition.
 		s.shipMu.Lock()
-		head := s.head.Head()
+		head = s.head.Head()
 		if s.cursor >= head {
 			if s.assertCaughtUpAndEnableTailShipLocked(head) {
 				s.shipMu.Unlock()

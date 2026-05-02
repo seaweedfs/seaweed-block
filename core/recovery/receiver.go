@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/storage"
@@ -108,13 +109,17 @@ func (r *Receiver) Session() *RebuildSession { return r.session }
 // `(achievedLSN, nil)` reported on the wire after a successful
 // barrier; returns an error on protocol violation or apply failure.
 func (r *Receiver) Run() (achievedLSN uint64, err error) {
+	log.Printf("g7-debug: Receiver.Run entry")
+	var baseCount, walCount uint64
 	for {
 		ft, payload, err := readFrame(r.conn)
 		if err != nil {
 			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+				log.Printf("g7-debug: Receiver.Run peer closed baseCount=%d walCount=%d sessionID=%d err=%v", baseCount, walCount, r.sessionID, err)
 				return 0, newFailure(FailureWire, PhaseRecvDispatch,
 					fmt.Errorf("peer closed before barrier: %w", err))
 			}
+			log.Printf("g7-debug: Receiver.Run readFrame err baseCount=%d walCount=%d sessionID=%d err=%v", baseCount, walCount, r.sessionID, err)
 			return 0, newFailure(FailureWire, PhaseRecvDispatch, err)
 		}
 
@@ -132,6 +137,7 @@ func (r *Receiver) Run() (achievedLSN uint64, err error) {
 			// matching primary's view; if the substrate disagrees, the
 			// session would silently mis-arbitrate, so we sanity-check.
 			if got := r.store.NumBlocks(); got != s.NumBlocks {
+				log.Printf("g7-debug: Receiver.Run numBlocks mismatch primary=%d local=%d", s.NumBlocks, got)
 				return 0, newFailure(FailureContract, PhaseRecvDispatch,
 					fmt.Errorf("numBlocks mismatch primary=%d local=%d", s.NumBlocks, got))
 			}
@@ -139,6 +145,7 @@ func (r *Receiver) Run() (achievedLSN uint64, err error) {
 			r.session = NewRebuildSession(r.store, s.TargetLSN)
 			r.recvFromLSN = s.FromLSN
 			r.appliedWalLSN = s.FromLSN
+			log.Printf("g7-debug: Receiver.Run frameSessionStart sessionID=%d fromLSN=%d targetLSN=%d numBlocks=%d", s.SessionID, s.FromLSN, s.TargetLSN, s.NumBlocks)
 
 		case frameBaseBlock:
 			if r.session == nil {
@@ -150,6 +157,7 @@ func (r *Receiver) Run() (achievedLSN uint64, err error) {
 				return 0, newFailure(FailureProtocol, PhaseRecvDispatch, decErr)
 			}
 			if _, applyErr := r.session.ApplyBaseBlock(lba, data); applyErr != nil {
+				log.Printf("g7-debug: Receiver.Run ApplyBaseBlock err lba=%d err=%v", lba, applyErr)
 				return 0, newFailure(FailureSubstrate, PhaseRecvApply,
 					fmt.Errorf("apply base lba=%d: %w", lba, applyErr))
 			}
@@ -157,8 +165,13 @@ func (r *Receiver) Run() (achievedLSN uint64, err error) {
 				r.baseInstalledUpper = lba + 1
 			}
 			r.blocksSinceLastAck++
+			baseCount++
+			if baseCount%4096 == 0 {
+				log.Printf("g7-debug: Receiver.Run base progress lba=%d baseCount=%d", lba, baseCount)
+			}
 			if r.shouldAck() {
 				if ackErr := r.sendAck(); ackErr != nil {
+					log.Printf("g7-debug: Receiver.Run sendAck err err=%v", ackErr)
 					return 0, ackErr
 				}
 			}
@@ -173,14 +186,20 @@ func (r *Receiver) Run() (achievedLSN uint64, err error) {
 				return 0, newFailure(FailureProtocol, PhaseRecvDispatch, decErr)
 			}
 			if err := r.enforceWalWireMonotonic(lsn); err != nil {
+				log.Printf("g7-debug: Receiver.Run enforceWalWireMonotonic err lsn=%d appliedWalLSN=%d err=%v", lsn, r.appliedWalLSN, err)
 				return 0, err
 			}
 			if applyErr := r.session.ApplyWALEntry(kind, lba, data, lsn); applyErr != nil {
+				log.Printf("g7-debug: Receiver.Run ApplyWALEntry err lsn=%d err=%v", lsn, applyErr)
 				return 0, newFailure(FailureSubstrate, PhaseRecvApply,
 					fmt.Errorf("apply wal kind=%s lba=%d lsn=%d: %w", kind, lba, lsn, applyErr))
 			}
 			if lsn > r.appliedWalLSN {
 				r.appliedWalLSN = lsn
+			}
+			walCount++
+			if walCount%256 == 0 {
+				log.Printf("g7-debug: Receiver.Run wal progress lsn=%d walCount=%d", lsn, walCount)
 			}
 
 		case frameBaseDone:
@@ -188,6 +207,7 @@ func (r *Receiver) Run() (achievedLSN uint64, err error) {
 				return 0, newFailure(FailureProtocol, PhaseRecvDispatch,
 					errors.New("BaseDone before SessionStart"))
 			}
+			log.Printf("g7-debug: Receiver.Run frameBaseDone baseCount=%d walCount=%d", baseCount, walCount)
 			r.session.MarkBaseComplete()
 			// Mandatory final base-lane ack — base done means primary
 			// expects to know our base-installed cursor before drain
@@ -201,9 +221,11 @@ func (r *Receiver) Run() (achievedLSN uint64, err error) {
 				return 0, newFailure(FailureProtocol, PhaseRecvDispatch,
 					errors.New("BarrierReq before SessionStart"))
 			}
+			log.Printf("g7-debug: Receiver.Run frameBarrierReq sessionID=%d baseCount=%d walCount=%d appliedWalLSN=%d", r.sessionID, baseCount, walCount, r.appliedWalLSN)
 			// Sync substrate so AchievedLSN reflects durable state.
 			frontier, syncErr := r.store.Sync()
 			if syncErr != nil {
+				log.Printf("g7-debug: Receiver.Run Sync err err=%v", syncErr)
 				return 0, newFailure(FailureSubstrate, PhaseRecvSync, syncErr)
 			}
 			// §IV.2.1 / recover-semantics-adjustment-plan §1 A-class:
@@ -219,13 +241,17 @@ func (r *Receiver) Run() (achievedLSN uint64, err error) {
 			achieved, done := r.session.TryComplete()
 			if !done {
 				st := r.session.Status()
+				log.Printf("g7-debug: Receiver.Run TryComplete=false st=%+v", st)
 				return 0, newFailure(FailureContract, PhaseRecvSync,
 					fmt.Errorf("barrier req but layer-1 not done: %+v", st))
 			}
+			log.Printf("g7-debug: Receiver.Run TryComplete=true achieved=%d frontier=%d", achieved, frontier)
 			_ = achieved
 			if writeErr := writeFrame(r.conn, frameBarrierResp, encodeBarrierResp(frontier)); writeErr != nil {
+				log.Printf("g7-debug: Receiver.Run BarrierResp write err err=%v", writeErr)
 				return 0, newFailure(FailureWire, PhaseRecvSync, writeErr)
 			}
+			log.Printf("g7-debug: Receiver.Run frameBarrierResp written, returning frontier=%d", frontier)
 			return frontier, nil
 
 		case frameBarrierResp:

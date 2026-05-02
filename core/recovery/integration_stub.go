@@ -3,6 +3,7 @@ package recovery
 import (
 	"context"
 	"fmt"
+	"log"
 	"net"
 	"sync"
 
@@ -156,8 +157,12 @@ func (b *PrimaryBridge) startRebuildSessionLocked(ctx context.Context, conn net.
 		b.onStart(replicaID, sessionID)
 	}
 
+	log.Printf("g7-debug: bridge.startRebuildSessionLocked spawning sender goroutine replica=%s sessionID=%d fromLSN=%d targetLSN=%d sinkType=%T",
+		replicaID, sessionID, fromLSN, targetLSN, sink)
 	go func() {
+		log.Printf("g7-debug: sender goroutine entry replica=%s sessionID=%d", replicaID, sessionID)
 		achieved, err := sender.Run(ctx, sessionID, fromLSN, targetLSN)
+		log.Printf("g7-debug: sender goroutine exit replica=%s sessionID=%d achieved=%d err=%v", replicaID, sessionID, achieved, err)
 		b.mu.Lock()
 		delete(b.senders, replicaID)
 		b.mu.Unlock()
@@ -245,10 +250,12 @@ func (b *ReplicaBridge) AcceptDualLaneLoop(ctx context.Context, ln net.Listener)
 			// keep running until they exit on their own.
 			return
 		}
+		log.Printf("g7-debug: replica accepted dual-lane conn from %s", conn.RemoteAddr())
 		go func(c net.Conn) {
 			subCtx, cancel := context.WithCancel(ctx)
 			defer cancel()
-			_, _ = b.Serve(subCtx, c)
+			achieved, serveErr := b.Serve(subCtx, c)
+			log.Printf("g7-debug: replica Serve exit remote=%s achieved=%d err=%v", c.RemoteAddr(), achieved, serveErr)
 		}(conn)
 	}
 }

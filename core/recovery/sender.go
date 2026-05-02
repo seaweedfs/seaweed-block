@@ -380,6 +380,9 @@ func (s *Sender) Run(ctx context.Context, sessionID, fromLSN, targetLSN uint64) 
 	s.fromLSN = fromLSN
 	s.targetLSN = targetLSN
 
+	log.Printf("g7-debug: Sender.Run entry replica=%s sessionID=%d fromLSN=%d targetLSN=%d sinkType=%T",
+		s.replicaID, sessionID, fromLSN, targetLSN, s.sink)
+
 	// Defer cleanup runs on every exit path. EndSession on the sink
 	// is the seal-defense — guarantees post-Run NotifyAppend (e.g.,
 	// PushLiveWrite via PrimaryBridge) gets an explicit error rather
@@ -404,11 +407,13 @@ func (s *Sender) Run(ctx context.Context, sessionID, fromLSN, targetLSN uint64) 
 
 	// Step 1: SessionStart frame.
 	numBlocks := s.primaryStore.NumBlocks()
+	log.Printf("g7-debug: Sender.Run writing frameSessionStart replica=%s numBlocks=%d", s.replicaID, numBlocks)
 	if err := s.writeFrame(frameSessionStart, encodeSessionStart(sessionStartPayload{
 		SessionID: sessionID, FromLSN: fromLSN, TargetLSN: targetLSN, NumBlocks: numBlocks,
 	})); err != nil {
 		return 0, newFailure(FailureWire, PhaseSendStart, err)
 	}
+	log.Printf("g7-debug: Sender.Run frameSessionStart written ok replica=%s", s.replicaID)
 
 	// Step 1b: spawn the inbound demux reader. From this point onward
 	// any frame from the receiver (BaseBatchAck during base lane,
@@ -433,34 +438,44 @@ func (s *Sender) Run(ctx context.Context, sessionID, fromLSN, targetLSN uint64) 
 	walErr := make(chan error, 1)
 
 	go func() {
+		log.Printf("g7-debug: base goroutine entry replica=%s numBlocks=%d", s.replicaID, numBlocks)
 		// Base lane.
 		if err := s.streamBase(numBlocks); err != nil {
+			log.Printf("g7-debug: base goroutine streamBase err replica=%s err=%v", s.replicaID, err)
 			groupCancel()
 			baseErr <- err
 			return
 		}
+		log.Printf("g7-debug: base goroutine streamBase done replica=%s", s.replicaID)
 		// BaseDone signal.
 		if err := s.writeFrame(frameBaseDone, nil); err != nil {
+			log.Printf("g7-debug: base goroutine BaseDone write err replica=%s err=%v", s.replicaID, err)
 			groupCancel()
 			baseErr <- newFailure(FailureWire, PhaseBaseDone, err)
 			return
 		}
 		if err := s.coordinator.MarkBaseDone(s.replicaID); err != nil {
+			log.Printf("g7-debug: base goroutine MarkBaseDone err replica=%s err=%v", s.replicaID, err)
 			groupCancel()
 			baseErr <- newFailure(FailureContract, PhaseBaseDone, err)
 			return
 		}
+		log.Printf("g7-debug: base goroutine exit ok replica=%s", s.replicaID)
 		baseErr <- nil
 	}()
 
 	go func() {
+		log.Printf("g7-debug: wal goroutine entry replica=%s fromLSN=%d", s.replicaID, fromLSN)
 		if err := s.sink.StartSession(fromLSN); err != nil {
+			log.Printf("g7-debug: wal goroutine sink.StartSession err replica=%s err=%v", s.replicaID, err)
 			groupCancel()
 			walErr <- newFailure(FailureContract, PhaseBacklog,
 				fmt.Errorf("sink.StartSession: %w", err))
 			return
 		}
+		log.Printf("g7-debug: wal goroutine sink.StartSession done replica=%s", s.replicaID)
 		if err := s.sink.DrainBacklog(groupCtx); err != nil {
+			log.Printf("g7-debug: wal goroutine sink.DrainBacklog err replica=%s err=%v", s.replicaID, err)
 			groupCancel()
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				walErr <- newFailure(FailureCancelled, PhaseBacklog, err)
@@ -470,13 +485,16 @@ func (s *Sender) Run(ctx context.Context, sessionID, fromLSN, targetLSN uint64) 
 				fmt.Errorf("sink.DrainBacklog: %w", err))
 			return
 		}
+		log.Printf("g7-debug: wal goroutine exit ok replica=%s", s.replicaID)
 		walErr <- nil
 	}()
 
 	// Wait both. On any error, propagate first non-nil; ctx cancel
 	// fired by failing goroutine ensures the other unblocks.
 	bErr := <-baseErr
+	log.Printf("g7-debug: Sender.Run base goroutine returned replica=%s err=%v", s.replicaID, bErr)
 	wErr := <-walErr
+	log.Printf("g7-debug: Sender.Run wal goroutine returned replica=%s err=%v", s.replicaID, wErr)
 	if bErr != nil {
 		return 0, bErr
 	}
@@ -646,6 +664,7 @@ func (s *Sender) readerLoop() {
 // for POC; sparse omit is a later optimization paired with a
 // substrate basement-clearing INV.
 func (s *Sender) streamBase(numBlocks uint32) error {
+	const progressEvery uint32 = 4096
 	for lba := uint32(0); lba < numBlocks; lba++ {
 		data, err := s.primaryStore.Read(lba)
 		if err != nil {
@@ -654,6 +673,9 @@ func (s *Sender) streamBase(numBlocks uint32) error {
 		}
 		if err := s.writeFrame(frameBaseBlock, encodeBaseBlock(lba, data)); err != nil {
 			return newFailure(FailureWire, PhaseBaseLane, err)
+		}
+		if (lba+1)%progressEvery == 0 {
+			log.Printf("g7-debug: streamBase progress replica=%s lba=%d/%d", s.replicaID, lba+1, numBlocks)
 		}
 	}
 	return nil

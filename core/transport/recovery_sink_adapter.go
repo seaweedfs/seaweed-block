@@ -3,6 +3,7 @@ package transport
 import (
 	"context"
 	"errors"
+	"log"
 	"net"
 	"sync"
 )
@@ -146,15 +147,21 @@ func NewRecoverySinkWithProfiles(
 // emit context has already been updated — caller's defer of
 // EndSession will restore it.
 func (r *RecoverySink) StartSession(fromLSN uint64) error {
+	log.Printf("g7-debug: RecoverySink.StartSession entry replica=%s fromLSN=%d", r.replicaID, fromLSN)
 	r.e.updateWalShipperEmitContext(r.replicaID, r.sessionConn, r.sessionLineage, r.sessionProfile)
-	return r.e.WalShipperFor(r.replicaID).StartSession(fromLSN)
+	err := r.e.WalShipperFor(r.replicaID).StartSession(fromLSN)
+	log.Printf("g7-debug: RecoverySink.StartSession exit replica=%s err=%v", r.replicaID, err)
+	return err
 }
 
 // DrainBacklog delegates to WalShipper.DrainBacklog. Any emits
 // from the drain loop run under the session emit context set by
 // StartSession.
 func (r *RecoverySink) DrainBacklog(ctx context.Context) error {
-	return r.e.WalShipperFor(r.replicaID).DrainBacklog(ctx)
+	log.Printf("g7-debug: RecoverySink.DrainBacklog entry replica=%s", r.replicaID)
+	err := r.e.WalShipperFor(r.replicaID).DrainBacklog(ctx)
+	log.Printf("g7-debug: RecoverySink.DrainBacklog exit replica=%s err=%v", r.replicaID, err)
+	return err
 }
 
 // EndSession transitions the underlying WalShipper back to

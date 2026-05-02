@@ -207,11 +207,14 @@ func (e *BlockExecutor) startRebuildDualLane(replicaID string, sessionID, epoch,
 	// (base lane covers everything; no catch-up tail). When a future
 	// caller wants partial rebuild from a specific LSN, the
 	// StartRebuild signature would need fromLSN added — out of scope.
+	log.Printf("g7-debug: startRebuildDualLane calling Bridge.StartRebuildSessionWithSink replica=%s sessionID=%d targetLSN=%d", replicaID, sessionID, targetLSN)
 	if err := dl.Bridge.StartRebuildSessionWithSink(
 		context.Background(), conn, argRID, sessionID, 0, targetLSN, sink,
 	); err != nil {
+		log.Printf("g7-debug: startRebuildDualLane Bridge.StartRebuildSessionWithSink err replica=%s err=%v", replicaID, err)
 		_ = conn.Close()
 		return fmt.Errorf("dual-lane start: %w", err)
 	}
+	log.Printf("g7-debug: startRebuildDualLane returned ok replica=%s sessionID=%d", replicaID, sessionID)
 	return nil
 }
