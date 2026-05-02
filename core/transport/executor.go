@@ -207,7 +207,17 @@ func NewBlockExecutorWithDualLane(
 			cb := e.onSessionStart
 			e.mu.Unlock()
 			if cb != nil {
-				cb(adapter.SessionStartResult{SessionID: sid})
+				// ReplicaID MUST be populated; without it the engine's
+				// checkReplicaID drops the event as wrong_replica
+				// (Identity.ReplicaID won't match empty), session
+				// Phase stays at Starting forever, hasActiveSession
+				// returns true permanently, and subsequent rebuild
+				// dispatches are silently suppressed. Hardware-validated
+				// 2026-05-02 (g7-20260502T012553Z trace).
+				cb(adapter.SessionStartResult{
+					ReplicaID: string(rid),
+					SessionID: sid,
+				})
 			}
 		},
 		func(rid recovery.ReplicaID, sid uint64, achieved uint64, err error) {
@@ -227,7 +237,12 @@ func NewBlockExecutorWithDualLane(
 			if cb == nil {
 				return
 			}
+			// ReplicaID MUST be populated — see start lambda above for
+			// the full failure mode (engine drops as wrong_replica;
+			// session Phase stuck; hasActiveSession blocks future
+			// dispatches). Hardware-validated 2026-05-02.
 			res := adapter.SessionCloseResult{
+				ReplicaID:   string(rid),
 				SessionID:   sid,
 				AchievedLSN: achieved,
 			}
