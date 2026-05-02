@@ -28,6 +28,25 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/storage/smartwal"
 )
 
+type writeObserverFunc struct {
+	observe func(context.Context, uint32, uint64, []byte) error
+	sync    func(context.Context, uint64) error
+}
+
+func (f writeObserverFunc) Observe(ctx context.Context, lba uint32, lsn uint64, data []byte) error {
+	if f.observe != nil {
+		return f.observe(ctx, lba, lsn, data)
+	}
+	return nil
+}
+
+func (f writeObserverFunc) Sync(ctx context.Context, targetLSN uint64) error {
+	if f.sync != nil {
+		return f.sync(ctx, targetLSN)
+	}
+	return nil
+}
+
 // ------- Matrix factory (Addendum A #1) -------
 
 // logicalStorageFactory is the shared factory contract; every
@@ -396,6 +415,70 @@ func TestT3a_StorageBackend_Sync_DispatchesToStorage(t *testing.T) {
 				t.Fatalf("R regressed: pre=%d post=%d", preR, postR)
 			}
 			_ = preS
+		})
+	}
+}
+
+// ------- G9A ACK profile seam -------
+
+func TestG9A_StorageBackend_WriteAckPolicy_BestEffortObserverErrorStillACKs(t *testing.T) {
+	observerErr := errors.New("replica recovering")
+	for _, f := range logicalStorageFactories() {
+		f := f
+		t.Run(f.name, func(t *testing.T) {
+			b, _, _ := newTestBackend(t, f, 4, 4096)
+			b.SetWriteObserver(writeObserverFunc{
+				observe: func(context.Context, uint32, uint64, []byte) error {
+					return observerErr
+				},
+			})
+
+			n, err := b.Write(context.Background(), 0, make([]byte, 4096))
+			if err != nil {
+				t.Fatalf("best-effort Write must not fail on observer error, got %v", err)
+			}
+			if n != 4096 {
+				t.Fatalf("Write n=%d want 4096", n)
+			}
+		})
+	}
+}
+
+func TestG9A_StorageBackend_WriteAckPolicy_RequireObserverAckFailsWithoutObserver(t *testing.T) {
+	for _, f := range logicalStorageFactories() {
+		f := f
+		t.Run(f.name, func(t *testing.T) {
+			b, _, _ := newTestBackend(t, f, 4, 4096)
+			b.SetWriteAckPolicy(durable.WriteAckRequireObserverAck)
+
+			n, err := b.Write(context.Background(), 0, make([]byte, 4096))
+			if !errors.Is(err, durable.ErrReplicationAckUnavailable) {
+				t.Fatalf("strict Write without observer: want ErrReplicationAckUnavailable, got n=%d err=%v", n, err)
+			}
+		})
+	}
+}
+
+func TestG9A_StorageBackend_WriteAckPolicy_RequireObserverAckPropagatesObserverError(t *testing.T) {
+	observerErr := errors.New("replica recovering")
+	for _, f := range logicalStorageFactories() {
+		f := f
+		t.Run(f.name, func(t *testing.T) {
+			b, _, _ := newTestBackend(t, f, 4, 4096)
+			b.SetWriteAckPolicy(durable.WriteAckRequireObserverAck)
+			b.SetWriteObserver(writeObserverFunc{
+				observe: func(context.Context, uint32, uint64, []byte) error {
+					return observerErr
+				},
+			})
+
+			n, err := b.Write(context.Background(), 0, make([]byte, 4096))
+			if !errors.Is(err, durable.ErrReplicationAckUnavailable) {
+				t.Fatalf("strict Write observer error: want ErrReplicationAckUnavailable, got n=%d err=%v", n, err)
+			}
+			if !errors.Is(err, observerErr) {
+				t.Fatalf("strict Write should wrap observer cause, got %v", err)
+			}
 		})
 	}
 }
