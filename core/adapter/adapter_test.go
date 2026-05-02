@@ -400,6 +400,22 @@ func TestAdapter_DurableAckStall_StartsCatchUp(t *testing.T) {
 	}
 }
 
+func TestAdapter_DurableAckProgressingLag_DoesNotStartRecovery(t *testing.T) {
+	exec := newMockExecutor()
+	exec.autoStart = false
+	exec.autoClose = false
+	a := newHealthyAdapterForDurableAck(t, exec)
+
+	cb := durableAckCallback(t, exec)
+	cb(DurableAckResult{ReplicaID: "r1", DurableLSN: 10, PrimaryTailLSN: 5, PrimaryHeadLSN: 20})
+	cb(DurableAckResult{ReplicaID: "r1", DurableLSN: 11, PrimaryTailLSN: 5, PrimaryHeadLSN: 40})
+	cb(DurableAckResult{ReplicaID: "r1", DurableLSN: 12, PrimaryTailLSN: 5, PrimaryHeadLSN: 80})
+
+	if hasAdapterCommand(a, "StartCatchUp") || hasAdapterCommand(a, "StartRebuild") {
+		t.Fatalf("progressing lag must remain feeder-owned; commands=%v", a.CommandLog())
+	}
+}
+
 func TestAdapter_DurableAckBelowRetention_StartsRebuild(t *testing.T) {
 	exec := newMockExecutor()
 	exec.autoStart = false
