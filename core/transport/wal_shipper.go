@@ -719,6 +719,35 @@ func (s *WalShipper) DrainBacklog(ctx context.Context) error {
 		s.shipMu.Unlock()
 		log.Printf("g7-debug: WalShipper.DrainBacklog iter replica=%s cursor=%d head=%d totalEmitted=%d", s.replicaID, cursor, head, totalEmitted)
 
+		// Cursor-already-caught-up shortcut: if cursor >= head at iter
+		// start, there's nothing to scan from substrate. Skip ScanLBAs
+		// (which would hit the recycle gate when cursor == checkpointLSN
+		// at the boundary) and try R1 transition directly.
+		//
+		// Hits in the dual-lane rebuild bootstrap (cursor == fromLSN ==
+		// targetLSN == primary head, no entries to drain) — pre-fix this
+		// path errored out via ErrWALRecycled and stalled hardware.
+		if cursor >= head {
+			s.shipMu.Lock()
+			head = s.head.Head() // re-read under lock
+			if s.cursor >= head {
+				if s.assertCaughtUpAndEnableTailShipLocked(head) {
+					s.shipMu.Unlock()
+					return nil
+				}
+			}
+			s.shipMu.Unlock()
+			// Head moved during the check; loop and re-scan.
+			if s.cfg.IdleSleep > 0 {
+				select {
+				case <-ctx.Done():
+					return fmt.Errorf("walshipper: DrainBacklog cancelled: %w", ctx.Err())
+				case <-time.After(s.cfg.IdleSleep):
+				}
+			}
+			continue
+		}
+
 		// Pull-and-ship one scan cycle. ScanLBAs iterates entries
 		// with LSN > cursor; emit each under shipMu (so concurrent
 		// NotifyAppend serializes naturally and INV-NO-DOUBLE-LIVE

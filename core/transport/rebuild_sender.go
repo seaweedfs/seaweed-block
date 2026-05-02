@@ -203,13 +203,33 @@ func (e *BlockExecutor) startRebuildDualLane(replicaID string, sessionID, epoch,
 		steadyConn, steadyLineage, steadyProfile,
 	)
 
-	// fromLSN=0 for full rebuild matches the legacy doRebuild semantic
-	// (base lane covers everything; no catch-up tail). When a future
-	// caller wants partial rebuild from a specific LSN, the
-	// StartRebuild signature would need fromLSN added — out of scope.
-	log.Printf("g7-debug: startRebuildDualLane calling Bridge.StartRebuildSessionWithSink replica=%s sessionID=%d targetLSN=%d", replicaID, sessionID, targetLSN)
+	// Rebuild-sentinel translation: caller passes targetLSN as the
+	// frozen frontier the replica must reach. The session's "fromLSN"
+	// is the snapshot pin — the LSN through which the base lane's
+	// extent snapshot is durable. WAL drain ships entries past the pin
+	// up to targetLSN.
+	//
+	// For a full rebuild (replica empty / too far behind retention to
+	// catch up via WAL alone), pin = targetLSN: base covers the snapshot
+	// through the checkpoint, WAL drain has nothing to ship at session
+	// start (cursor==head; see WalShipper.DrainBacklog cursor-caught-up
+	// shortcut), and any new writes during the session flow via
+	// NotifyAppend on the live path.
+	//
+	// Without this translation, passing fromLSN=0 to WalShipper.StartSession
+	// makes DrainBacklog's ScanLBAs(0) hit the recycle gate
+	// (`fromLSN <= floor=checkpointLSN`) and fail-fast — wal goroutine
+	// errors before barrier emission, hardware silently stalls.
+	// Hardware-validated 2026-05-02 (g7-debug trail captured the
+	// recycle error pre-fix).
+	//
+	// Future: when callers want catch-up-from-replicaLSN semantics,
+	// extend the StartRebuild signature with a `pin uint64` param;
+	// today targetLSN-as-pin is the only mode.
+	sessionFromLSN := targetLSN
+	log.Printf("g7-debug: startRebuildDualLane calling Bridge.StartRebuildSessionWithSink replica=%s sessionID=%d sessionFromLSN=%d targetLSN=%d", replicaID, sessionID, sessionFromLSN, targetLSN)
 	if err := dl.Bridge.StartRebuildSessionWithSink(
-		context.Background(), conn, argRID, sessionID, 0, targetLSN, sink,
+		context.Background(), conn, argRID, sessionID, sessionFromLSN, targetLSN, sink,
 	); err != nil {
 		log.Printf("g7-debug: startRebuildDualLane Bridge.StartRebuildSessionWithSink err replica=%s err=%v", replicaID, err)
 		_ = conn.Close()

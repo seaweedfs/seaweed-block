@@ -186,6 +186,28 @@ func (s *RebuildSession) MarkBaseComplete() {
 	s.store.AdvanceFrontier(s.targetLSN)
 }
 
+// SeedWalApplied seeds walApplied at session start with the receiver's
+// fromLSN watermark. Called by the receiver after constructing the
+// session in frameSessionStart, BEFORE any ApplyWALEntry.
+//
+// Rationale: for a "rebuild" session where the base lane covers the
+// entire snapshot through targetLSN, no WAL frames will arrive (nothing
+// to drain past the pin on the primary side). Without seeding, walApplied
+// stays at 0 and TryComplete's `walApplied >= targetLSN` conjunct never
+// holds — base-only rebuilds would never close. Seeding with fromLSN
+// represents "the receiver starts the session already at or past
+// fromLSN by virtue of base-lane coverage"; ApplyWALEntry monotonically
+// advances it from there if WAL frames do arrive.
+//
+// Idempotent: only advances; lower seeds are silently ignored.
+func (s *RebuildSession) SeedWalApplied(lsn uint64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if lsn > s.walApplied {
+		s.walApplied = lsn
+	}
+}
+
 // WitnessBarrier latches the barrier-arrival witness. Called by the
 // receiver immediately on frameBarrierReq arrival, BEFORE TryComplete.
 //

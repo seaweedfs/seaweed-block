@@ -211,6 +211,16 @@ func NewBlockExecutorWithDualLane(
 			}
 		},
 		func(rid recovery.ReplicaID, sid uint64, achieved uint64, err error) {
+			// Hardware-harness completion marker (matches the legacy
+			// doRebuild Printf form so QA's wait_until_rebuild_complete
+			// helper regex catches the dual-lane path identically). The
+			// "blocks sent" count is the dense streamBase coverage (==
+			// volume's NumBlocks); future sparse base lane would emit
+			// the actual count.
+			if err == nil {
+				log.Printf("executor: rebuild complete, sent %d blocks (targetLSN=%d)",
+					e.primaryStore.NumBlocks(), achieved)
+			}
 			e.mu.Lock()
 			cb := e.onSessionClose
 			e.mu.Unlock()
