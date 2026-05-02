@@ -33,6 +33,7 @@ import (
 	"net"
 	"testing"
 
+	"github.com/seaweedfs/seaweed-block/core/adapter"
 	"github.com/seaweedfs/seaweed-block/core/recovery"
 	"github.com/seaweedfs/seaweed-block/core/storage/memorywal"
 )
@@ -40,17 +41,17 @@ import (
 // TestPin_ProtectedDuringSession_AdvancesViaFeedback_ReleasedOnEnd —
 // full pin lifecycle around a WalShipper-routed recovery session:
 //
-//   1. coord.StartSession → pin = fromLSN
-//   2. RecoverySink.StartSession → WalShipper enters Backlog;
-//      pin still = fromLSN (protected; shipper mode change doesn't
-//      perturb pin).
-//   3. Simulate ack feedback: coord.SetPinFloor(replica, ackLSN, S);
-//      pin advances to ackLSN. (In production this is what the
-//      Sender's readerLoop does on each BaseBatchAck.)
-//   4. RecoverySink.EndSession → WalShipper back to Realtime;
-//      pin still at the advanced value (EndSession on the SHIPPER
-//      doesn't release the coord pin — coord.EndSession does).
-//   5. coord.EndSession → pin released (back to 0).
+//  1. coord.StartSession → pin = fromLSN
+//  2. RecoverySink.StartSession → WalShipper enters Backlog;
+//     pin still = fromLSN (protected; shipper mode change doesn't
+//     perturb pin).
+//  3. Simulate ack feedback: coord.SetPinFloor(replica, ackLSN, S);
+//     pin advances to ackLSN. (In production this is what the
+//     Sender's readerLoop does on each BaseBatchAck.)
+//  4. RecoverySink.EndSession → WalShipper back to Realtime;
+//     pin still at the advanced value (EndSession on the SHIPPER
+//     doesn't release the coord pin — coord.EndSession does).
+//  5. coord.EndSession → pin released (back to 0).
 func TestPin_ProtectedDuringSession_AdvancesViaFeedback_ReleasedOnEnd(t *testing.T) {
 	primary := memorywal.NewStore(64, 4096)
 	e := NewBlockExecutor(primary, "127.0.0.1:0")
@@ -223,4 +224,47 @@ func TestPin_MultiSession_MinPinAcrossActiveSessions(t *testing.T) {
 		t.Errorf("after all-ended: anyActive=true; want false (no sessions left)")
 	}
 	t.Logf("after all-ended: anyActive=false (no floor; substrate free to recycle)")
+}
+
+// TestPin_ProbeProgressDoesNotAdvancePinFloor pins the authority split:
+// probe R/S/H can improve recovery classification, but cannot release
+// primary WAL. Only durable progress ack feedback may advance coord pin.
+func TestPin_ProbeProgressDoesNotAdvancePinFloor(t *testing.T) {
+	coord := recovery.NewPeerShipCoordinator()
+	const replicaID recovery.ReplicaID = "r1"
+
+	if err := coord.StartSession(replicaID, 7, 10, 100); err != nil {
+		t.Fatalf("StartSession: %v", err)
+	}
+	if got := coord.PinFloor(replicaID); got != 10 {
+		t.Fatalf("initial PinFloor=%d want 10", got)
+	}
+
+	probe := adapter.ProbeResult{
+		ReplicaID:         string(replicaID),
+		Success:           true,
+		EndpointVersion:   1,
+		TransportEpoch:    1,
+		ReplicaFlushedLSN: 90,
+		PrimaryTailLSN:    10,
+		PrimaryHeadLSN:    100,
+	}
+	fact := probe.ProgressFact()
+	if fact.ReplicaR != 90 || !fact.ReplicaRKnown {
+		t.Fatalf("test setup: probe fact R=(%d known=%v), want (90 true)",
+			fact.ReplicaR, fact.ReplicaRKnown)
+	}
+
+	// There is intentionally no coord API that accepts probe facts for
+	// pin release. Observing a high probe R must not mutate pin state.
+	if got := coord.PinFloor(replicaID); got != 10 {
+		t.Fatalf("probe fact advanced PinFloor=%d; want unchanged 10", got)
+	}
+
+	if err := coord.SetPinFloor(replicaID, 90, 10); err != nil {
+		t.Fatalf("durable ack SetPinFloor: %v", err)
+	}
+	if got := coord.PinFloor(replicaID); got != 90 {
+		t.Fatalf("durable ack PinFloor=%d want 90", got)
+	}
 }
