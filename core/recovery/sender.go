@@ -79,12 +79,12 @@ type Sender struct {
 	replicaID    ReplicaID
 
 	// Session contract — set at Run() entry, immutable thereafter.
-	// targetLSN is the legacy name for the fourth wire slot. In
+	// frontierHint is the recovery session's legacy fourth wire slot. In
 	// production dual-lane it is only a frontier hint; the real WAL
 	// feeder owns catch-up/live-tail convergence.
-	sessionID uint64
-	fromLSN   uint64
-	targetLSN uint64
+	sessionID    uint64
+	fromLSN      uint64
+	frontierHint uint64
 
 	writerMu     sync.Mutex  // own mutex; serializes conn writes (frames are atomic)
 	sharedWriter *sync.Mutex // optional; non-nil if sink exposes WriteMu() (C1 §6.8 #1)
@@ -223,7 +223,7 @@ type walItem struct {
 //
 // Lifecycle (P2c-slice B-2):
 //   - StartSession is a no-op: session bounds live on Sender (fromLSN /
-//     targetLSN set at Run entry); rewind semantics belong on the real
+//     frontierHint set at Run entry); rewind semantics belong on the real
 //     WalShipper sink in transport.
 //   - NotifyAppend buffers live writes under sinkMu — the bridging
 //     path's "production discipline" (architect rule 2). streamBacklog
@@ -389,7 +389,7 @@ func (s *Sender) LiveReady() bool {
 // success; returns an error on any wire / session failure.
 //
 // PRECONDITION: caller already invoked
-// `coordinator.StartSession(replicaID, sessionID, fromLSN, targetLSN)`
+// `coordinator.StartSession(replicaID, sessionID, fromLSN, frontierHint)`
 // synchronously before spawning the goroutine that calls Run. This
 // keeps "session is registered" observable from the call site that
 // scheduled Run, so concurrent code reading `coord.RouteLocalWrite`
@@ -414,13 +414,13 @@ func (s *Sender) LiveReady() bool {
 // Lifecycle / cancellation: pass a Context whose cancellation signals
 // "abort this session". DrainBacklog observes ctx and returns ctx.Err()
 // on cancellation; sink.EndSession defer fires regardless.
-func (s *Sender) Run(ctx context.Context, sessionID, fromLSN, targetLSN uint64) (achievedLSN uint64, err error) {
+func (s *Sender) Run(ctx context.Context, sessionID, fromLSN, frontierHint uint64) (achievedLSN uint64, err error) {
 	s.sessionID = sessionID
 	s.fromLSN = fromLSN
-	s.targetLSN = targetLSN
+	s.frontierHint = frontierHint
 
-	log.Printf("g7-debug: Sender.Run entry replica=%s sessionID=%d fromLSN=%d targetLSN=%d sinkType=%T",
-		s.replicaID, sessionID, fromLSN, targetLSN, s.sink)
+	log.Printf("g7-debug: Sender.Run entry replica=%s sessionID=%d fromLSN=%d frontierHint=%d sinkType=%T",
+		s.replicaID, sessionID, fromLSN, frontierHint, s.sink)
 
 	// Defer cleanup runs on every exit path. EndSession on the sink
 	// is the seal-defense — guarantees post-Run NotifyAppend (e.g.,
@@ -449,7 +449,7 @@ func (s *Sender) Run(ctx context.Context, sessionID, fromLSN, targetLSN uint64) 
 	numBlocks := s.primaryStore.NumBlocks()
 	log.Printf("g7-debug: Sender.Run writing frameSessionStart replica=%s numBlocks=%d", s.replicaID, numBlocks)
 	if err := s.writeFrame(frameSessionStart, encodeSessionStart(sessionStartPayload{
-		SessionID: sessionID, FromLSN: fromLSN, TargetLSN: targetLSN, NumBlocks: numBlocks,
+		SessionID: sessionID, FromLSN: fromLSN, TargetLSN: frontierHint, NumBlocks: numBlocks,
 	})); err != nil {
 		return 0, newFailure(FailureWire, PhaseSendStart, err)
 	}
@@ -639,7 +639,7 @@ func (s *Sender) Run(ctx context.Context, sessionID, fromLSN, targetLSN uint64) 
 	// legacy target-band oracle for compatibility.
 	if !s.coordinator.CanEmitSessionComplete(s.replicaID, achieved) {
 		return achieved, newFailure(FailureContract, PhaseBarrierResp,
-			fmt.Errorf("session close predicate refused achieved=%d frontier_hint=%d", achieved, targetLSN))
+			fmt.Errorf("session close predicate refused achieved=%d frontier_hint=%d", achieved, frontierHint))
 	}
 	return achieved, nil
 }

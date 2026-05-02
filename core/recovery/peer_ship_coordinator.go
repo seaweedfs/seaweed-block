@@ -58,7 +58,7 @@ func (p PeerShipPhase) String() string {
 // LocalWriteRouting tells the WAL shipper which lane a freshly produced
 // local write must travel on for a given peer, given that peer's current
 // ship phase. Spec §3.2 #3: "one ordered outbound queue per peer mixing
-// recover-tagged and post-target traffic with explicit LSN order".
+// recover-tagged and session-live traffic with explicit LSN order".
 //
 // §IV.0 T3 (v3-recovery-algorithm-consensus.md): RouteSessionLane means
 // all WAL for this peer MUST ship on the recover dual-lane session path —
@@ -358,7 +358,7 @@ func (c *PeerShipCoordinator) RecordBarrierWalLegOk(id ReplicaID, walLegOk bool)
 //
 // In the dual-lane path, the PrimaryWalLegOk witness is the completion
 // authority and achievedLSN is returned as an observation, not compared
-// to the frozen target band. The no-witness branch fail-closes unless
+// to the frontier hint. The no-witness branch fail-closes unless
 // the session was explicitly started with StartSessionLegacyBand.
 //
 // Per §IV.2.1, this primary-side coordinator IS the terminal authority

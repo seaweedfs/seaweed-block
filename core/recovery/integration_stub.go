@@ -96,8 +96,8 @@ func NewPrimaryBridge(store storage.LogicalStorage, coord *PeerShipCoordinator, 
 // Wire detail (POC): caller provides the dialed `conn`. Production
 // integration would dial through the existing connection pool /
 // listener registry.
-func (b *PrimaryBridge) StartRebuildSession(ctx context.Context, conn net.Conn, replicaID ReplicaID, sessionID, fromLSN, targetLSN uint64) error {
-	return b.startRebuildSessionLocked(ctx, conn, replicaID, sessionID, fromLSN, targetLSN, nil)
+func (b *PrimaryBridge) StartRebuildSession(ctx context.Context, conn net.Conn, replicaID ReplicaID, sessionID, fromLSN, frontierHint uint64) error {
+	return b.startRebuildSessionLocked(ctx, conn, replicaID, sessionID, fromLSN, frontierHint, nil)
 }
 
 // StartRebuildSessionWithSink is the variant that accepts an external
@@ -114,18 +114,18 @@ func (b *PrimaryBridge) StartRebuildSession(ctx context.Context, conn net.Conn, 
 //
 // `sink` MUST be non-nil; nil reverts to the bridging path (use
 // `StartRebuildSession` for that explicitly).
-func (b *PrimaryBridge) StartRebuildSessionWithSink(ctx context.Context, conn net.Conn, replicaID ReplicaID, sessionID, fromLSN, targetLSN uint64, sink WalShipperSink) error {
+func (b *PrimaryBridge) StartRebuildSessionWithSink(ctx context.Context, conn net.Conn, replicaID ReplicaID, sessionID, fromLSN, frontierHint uint64, sink WalShipperSink) error {
 	if sink == nil {
 		return fmt.Errorf("recovery bridge: StartRebuildSessionWithSink: sink is required (use StartRebuildSession for the bridging path)")
 	}
-	return b.startRebuildSessionLocked(ctx, conn, replicaID, sessionID, fromLSN, targetLSN, sink)
+	return b.startRebuildSessionLocked(ctx, conn, replicaID, sessionID, fromLSN, frontierHint, sink)
 }
 
 // startRebuildSessionLocked is the shared implementation. When `sink`
 // is nil, it constructs a bridging `senderBacklogSink` via
 // NewSenderWithBacklogRelay (legacy compatible). When non-nil, the
 // caller-provided sink is installed via NewSenderWithSink.
-func (b *PrimaryBridge) startRebuildSessionLocked(ctx context.Context, conn net.Conn, replicaID ReplicaID, sessionID, fromLSN, targetLSN uint64, sink WalShipperSink) error {
+func (b *PrimaryBridge) startRebuildSessionLocked(ctx context.Context, conn net.Conn, replicaID ReplicaID, sessionID, fromLSN, frontierHint uint64, sink WalShipperSink) error {
 	// Single-flight check at the bridge level (before coordinator),
 	// so a second call observes our internal sender map first and
 	// reports the racing-bridge-call case distinctly from the
@@ -142,9 +142,9 @@ func (b *PrimaryBridge) startRebuildSessionLocked(ctx context.Context, conn net.
 	// install the sender or fire OnStart.
 	var err error
 	if sink == nil {
-		err = b.coord.StartSessionLegacyBand(replicaID, sessionID, fromLSN, targetLSN)
+		err = b.coord.StartSessionLegacyBand(replicaID, sessionID, fromLSN, frontierHint)
 	} else {
-		err = b.coord.StartSession(replicaID, sessionID, fromLSN, targetLSN)
+		err = b.coord.StartSession(replicaID, sessionID, fromLSN, frontierHint)
 	}
 	if err != nil {
 		b.mu.Unlock()
@@ -164,11 +164,11 @@ func (b *PrimaryBridge) startRebuildSessionLocked(ctx context.Context, conn net.
 		b.onStart(replicaID, sessionID)
 	}
 
-	log.Printf("g7-debug: bridge.startRebuildSessionLocked spawning sender goroutine replica=%s sessionID=%d fromLSN=%d targetLSN=%d sinkType=%T",
-		replicaID, sessionID, fromLSN, targetLSN, sink)
+	log.Printf("g7-debug: bridge.startRebuildSessionLocked spawning sender goroutine replica=%s sessionID=%d fromLSN=%d frontierHint=%d sinkType=%T",
+		replicaID, sessionID, fromLSN, frontierHint, sink)
 	go func() {
 		log.Printf("g7-debug: sender goroutine entry replica=%s sessionID=%d", replicaID, sessionID)
-		achieved, err := sender.Run(ctx, sessionID, fromLSN, targetLSN)
+		achieved, err := sender.Run(ctx, sessionID, fromLSN, frontierHint)
 		log.Printf("g7-debug: sender goroutine exit replica=%s sessionID=%d achieved=%d err=%v", replicaID, sessionID, achieved, err)
 		b.mu.Lock()
 		delete(b.senders, replicaID)

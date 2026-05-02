@@ -31,7 +31,7 @@ func formulaPayload(lba uint32, epoch byte, blockSize int) []byte {
 // TestE2E_RebuildHappyPath drives a full session end-to-end:
 //   - Primary writes 100 LBAs (LSN 1..100), syncs.
 //   - Replica is empty (separate substrate).
-//   - Session opens with fromLSN=0, targetLSN=100.
+//   - Session opens with fromLSN=0, frontierHint=100.
 //   - Sender ships base lane + backlog (no live writes yet).
 //   - Barrier round-trip closes the session.
 //   - Verify: every LBA on the replica matches primary.
@@ -114,11 +114,11 @@ func TestE2E_RebuildHappyPath(t *testing.T) {
 
 // TestE2E_RebuildWithLiveWritesDuringSession is the case the user
 // asked about: primary keeps writing during the session, sender
-// routes those post-target entries onto the session lane (because
+// routes those session-live entries onto the session lane (because
 // we are still DrainingHistorical) and ships them ahead of barrier.
 //
 // Sequence:
-//  1. Primary writes 30 LBAs, sync. Snapshot fromLSN=0, targetLSN=30.
+//  1. Primary writes 30 LBAs, sync. Snapshot fromLSN=0, frontierHint=30.
 //  2. Open session.
 //  3. While session is active, primary writes 5 more (LSN 31..35).
 //     The sender's caller (this test simulating the WAL shipper)
