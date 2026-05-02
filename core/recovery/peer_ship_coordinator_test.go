@@ -353,9 +353,14 @@ func TestCoordinator_StartSession_ArgValidation(t *testing.T) {
 	if err := c.StartSession(r1, 0, 100, 200); err == nil {
 		t.Error("sessionID=0 should error")
 	}
-	if err := c.StartSession(r1, 1, 200, 100); err == nil {
-		t.Error("targetLSN < fromLSN should error")
+	// BasePinLSN/fromLSN and the legacy frontier-hint band are
+	// independent. A primary sync taken at rebuild start may produce a
+	// base pin higher than an older compatibility hint; that must not
+	// fail session registration.
+	if err := c.StartSession(r1, 1, 200, 100); err != nil {
+		t.Errorf("targetLSN/frontier hint below fromLSN/base pin should be legal: %v", err)
 	}
+	c.EndSession(r1)
 	// Equal targets are legal (zero-LSN-progress sessions).
 	if err := c.StartSession(r1, 1, 100, 100); err != nil {
 		t.Errorf("targetLSN == fromLSN: %v", err)

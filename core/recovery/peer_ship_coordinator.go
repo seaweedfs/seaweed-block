@@ -160,9 +160,10 @@ func NewPeerShipCoordinator() *PeerShipCoordinator {
 // to avoid; the coordinator only enforces the invariant.
 //
 // fromLSN is the session contract's lower LSN bound — typically
-// `Recovery.R + 1` for a catch-up or the engine's pin choice for a
-// rebuild. targetLSN is frozen at session start and does not move
-// during the session (§2 "session target is fixed at start").
+// `Recovery.R + 1` for a catch-up or the engine's BasePinLSN choice
+// for a rebuild. targetLSN is the legacy compat/frontier-hint band; it
+// is no longer required to be >= fromLSN and is not a close predicate
+// unless StartSessionLegacyBand explicitly opts into old behavior.
 func (c *PeerShipCoordinator) StartSession(id ReplicaID, sessionID, fromLSN, targetLSN uint64) error {
 	return c.startSession(id, sessionID, fromLSN, targetLSN, false)
 }
@@ -178,9 +179,6 @@ func (c *PeerShipCoordinator) StartSessionLegacyBand(id ReplicaID, sessionID, fr
 func (c *PeerShipCoordinator) startSession(id ReplicaID, sessionID, fromLSN, targetLSN uint64, allowLegacyBandClose bool) error {
 	if sessionID == 0 {
 		return errors.New("recovery: sessionID must be non-zero")
-	}
-	if targetLSN < fromLSN {
-		return fmt.Errorf("recovery: targetLSN=%d < fromLSN=%d", targetLSN, fromLSN)
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
