@@ -94,6 +94,19 @@ const liveShipTargetLSN uint64 = 1
 // those arrive with the T4c recovery command chain.
 var peerSessionIDCounter atomic.Uint64
 
+func mintPeerSessionIDAfter(after uint64) uint64 {
+	for {
+		cur := peerSessionIDCounter.Load()
+		next := cur + 1
+		if next <= after {
+			next = after + 1
+		}
+		if peerSessionIDCounter.CompareAndSwap(cur, next) {
+			return next
+		}
+	}
+}
+
 // PeerProbeCooldown holds the per-peer backoff parameters used by
 // ProbeIfDegraded / OnProbeAttempt (G5-5C §1.G #7).
 //
@@ -184,7 +197,7 @@ func NewReplicaPeer(target ReplicaTarget, executor *transport.BlockExecutor) (*R
 			"replication: NewReplicaPeer: target needs nonzero epoch (got %d) and endpointVersion (got %d)",
 			target.Epoch, target.EndpointVersion)
 	}
-	sessionID := peerSessionIDCounter.Add(1)
+	sessionID := mintPeerSessionIDAfter(0)
 	lineage := transport.RecoveryLineage{
 		SessionID:       sessionID,
 		Epoch:           target.Epoch,
@@ -202,6 +215,42 @@ func NewReplicaPeer(target ReplicaTarget, executor *transport.BlockExecutor) (*R
 		state:       ReplicaHealthy,
 		cooldownCfg: DefaultPeerProbeCooldown(),
 	}, nil
+}
+
+// RefreshLiveShipSessionAfter rotates the peer's steady live-ship
+// session after a recovery session has completed. Recovery establishes
+// a newer replica-side lineage and may leave the old steady TCP conn
+// broken; reusing the pre-recovery live session would either write to a
+// dead socket or be rejected by the replica's monotonic lineage gate.
+//
+// The new live session ID is strictly greater than completedSessionID
+// so post-recovery steady MsgShipEntry traffic can advance the replica
+// from the recovery lineage back into the live lane.
+func (p *ReplicaPeer) RefreshLiveShipSessionAfter(completedSessionID, achievedLSN uint64, reason string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed {
+		return nil
+	}
+
+	oldSessionID := p.sessionID
+	newSessionID := mintPeerSessionIDAfter(completedSessionID)
+	newLineage := transport.RecoveryLineage{
+		SessionID:       newSessionID,
+		Epoch:           p.target.Epoch,
+		EndpointVersion: p.target.EndpointVersion,
+		TargetLSN:       liveShipTargetLSN,
+	}
+	if err := p.executor.RegisterLiveShipSession(newLineage); err != nil {
+		return fmt.Errorf("replication: refresh live ship session: %w", err)
+	}
+	p.executor.AdvanceLiveShipCursor(p.target.ReplicaID, achievedLSN)
+	p.executor.InvalidateSession(p.target.ReplicaID, oldSessionID, reason)
+	p.sessionID = newSessionID
+	p.lineage = newLineage
+	log.Printf("replication: peer %s refreshed live session old=%d new=%d after recovery=%d",
+		p.target.ReplicaID, oldSessionID, newSessionID, completedSessionID)
+	return nil
 }
 
 // SetProbeCooldownConfig overrides the default probe cooldown config
@@ -468,23 +517,26 @@ func (p *ReplicaPeer) ShipEntry(ctx context.Context, lineage transport.RecoveryL
 			p.target.ReplicaID, lba, lsn)
 		return fmt.Errorf("replication: ShipEntry: peer %s closed", p.target.ReplicaID)
 	}
-	if p.state == ReplicaDegraded {
-		p.mu.Unlock()
-		log.Printf("replication: ship gate-degraded peer=%s lba=%d lsn=%d (peer degraded)",
-			p.target.ReplicaID, lba, lsn)
-		return fmt.Errorf("replication: ShipEntry: peer %s degraded", p.target.ReplicaID)
-	}
 	peerLineage := p.lineage
+	targetID := p.target.ReplicaID
+	executor := p.executor
+	allowSteady := p.state == ReplicaHealthy
 	p.mu.Unlock()
 
-	if err := p.executor.Ship(p.target.ReplicaID, peerLineage, lba, lsn, data); err != nil {
+	disposition, err := executor.FeedLiveWrite(targetID, peerLineage, allowSteady, lba, lsn, data)
+	if err != nil {
 		log.Printf("replication: ship FAILED peer=%s addr=%s lba=%d lsn=%d: %v",
-			p.target.ReplicaID, p.target.DataAddr, lba, lsn, err)
+			targetID, p.target.DataAddr, lba, lsn, err)
 		p.Invalidate(fmt.Sprintf("ship error: %v", err))
 		return err
 	}
+	if disposition == transport.LiveWriteRetained {
+		log.Printf("replication: ship retained peer=%s lba=%d lsn=%d (state disallows steady; recovery will replay)",
+			targetID, lba, lsn)
+		return nil
+	}
 	log.Printf("replication: ship ok peer=%s lba=%d lsn=%d",
-		p.target.ReplicaID, lba, lsn)
+		targetID, lba, lsn)
 	return nil
 }
 

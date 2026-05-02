@@ -8,14 +8,18 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
-// liveShipTargetLSNSentinel is the steady-state live-ship sentinel
-// value (== `replication.liveShipTargetLSN`). The replica handler's
-// transitional caller-side lane shim consults this sentinel; the
-// real fix (true handler-context lane signal) is post-T4d-2. Keeping
-// the sentinel here (transport package) avoids a transport→
-// replication import; the value is the same wire-stable constant
-// already in production.
+// liveShipTargetLSNSentinel is the historical steady-state live-ship
+// lineage placeholder (== `replication.liveShipTargetLSN`). It is kept
+// for tests and wire compatibility only; replica lane discrimination is
+// connection-context based, not TargetLSN based.
 const liveShipTargetLSNSentinel uint64 = 1
+
+type mutationLane int
+
+const (
+	mutationLaneLive mutationLane = iota
+	mutationLaneRecovery
+)
 
 // ApplyHook is the T4d-2 plug-in seam for the replica recovery
 // apply gate. The hook is LANE-EXPLICIT per round-46 architect
@@ -72,13 +76,13 @@ func NewReplicaListener(addr string, store storage.LogicalStorage) (*ReplicaList
 // hook itself is LANE-PURE per round-46 architect ruling — it does
 // not inspect payload bytes to decide lane.
 //
-// Today the handler's lane decision is a transitional shim based on
-// `lineage.TargetLSN == liveShipTargetLSNSentinel` (live) vs
-// otherwise (recovery). The shim lives at the CALLER (this handler),
-// not in the gate. See `CARRY-T4D-LANE-CONTEXT-001` (catalogue §3.3)
-// for the named carry tracking the future replacement (true
-// per-connection lane tag / separate handler routes / distinct
-// listener ports).
+// Lane decision comes from handler context:
+//   - default legacy SWRP MsgShipEntry connections are live lane
+//   - StartCatchUp sends MsgRecoveryLaneStart on its connection before
+//     WAL frames; that marker flips this handler to recovery lane
+//
+// The hook remains lane-pure: it never inspects TargetLSN to decide
+// ApplyRecovery vs ApplyLive.
 //
 // Pass nil hook to get the no-gate behavior (== NewReplicaListener).
 func NewReplicaListenerWithApplyHook(addr string, store storage.LogicalStorage, hook ApplyHook) (*ReplicaListener, error) {
@@ -196,6 +200,7 @@ func (r *ReplicaListener) acceptLoop() {
 
 func (r *ReplicaListener) handleConn(conn net.Conn) {
 	defer conn.Close()
+	lane := mutationLaneLive
 
 	for {
 		msgType, payload, err := ReadMsg(conn)
@@ -204,6 +209,19 @@ func (r *ReplicaListener) handleConn(conn net.Conn) {
 		}
 
 		switch msgType {
+		case MsgRecoveryLaneStart:
+			lineage, err := DecodeLineage(payload)
+			if err != nil {
+				log.Printf("replica: decode recovery lane start: %v", err)
+				return
+			}
+			if !r.acceptMutationLineage(lineage) {
+				log.Printf("replica: reject stale recovery lane start session=%d epoch=%d endpointVersion=%d",
+					lineage.SessionID, lineage.Epoch, lineage.EndpointVersion)
+				return
+			}
+			lane = mutationLaneRecovery
+
 		case MsgShipEntry:
 			entry, err := DecodeShipEntry(payload)
 			if err != nil {
@@ -220,28 +238,12 @@ func (r *ReplicaListener) handleConn(conn net.Conn) {
 			// gate is lane-pure. Live-lane stale entries return error
 			// here → log + close conn (round-44
 			// INV-REPL-LIVE-LANE-STALE-FAILS-LOUD).
-			//
-			// LANE DISCRIMINATION (transitional shim):
-			// Today the replica handler has only one signal — the
-			// payload's TargetLSN. We use the steady-state live-ship
-			// sentinel (TargetLSN=1) as a transitional caller-side
-			// rule: TargetLSN=1 → live; otherwise → recovery. This
-			// shim is CALLER-side; the gate itself never inspects
-			// TargetLSN.
-			//
-			// TODO (T4e or post-G5 refactor): replace this shim with
-			// true handler-context lane discrimination — e.g., a
-			// per-connection lane tag set at accept-time via
-			// session-registration handshake, separate live vs
-			// recovery handler routes, or distinct listener ports.
-			// The architectural fence (gate is lane-pure) is in
-			// place; only the caller's signal source needs upgrading.
 			if r.applyHook != nil {
 				var err error
-				if entry.Lineage.TargetLSN == liveShipTargetLSNSentinel {
-					err = r.applyHook.ApplyLive(entry.Lineage, entry.LBA, entry.Data, entry.LSN)
-				} else {
+				if lane == mutationLaneRecovery {
 					err = r.applyHook.ApplyRecovery(entry.Lineage, entry.LBA, entry.Data, entry.LSN)
+				} else {
+					err = r.applyHook.ApplyLive(entry.Lineage, entry.LBA, entry.Data, entry.LSN)
 				}
 				if err != nil {
 					log.Printf("replica: apply gate: %v", err)
@@ -303,11 +305,11 @@ func (r *ReplicaListener) handleConn(conn net.Conn) {
 					lineage.SessionID, lineage.Epoch, lineage.EndpointVersion)
 				return
 			}
-			// Rebuild blocks carry the engine's frozen targetLSN in their
-			// lineage. Apply that real LSN immediately so any future
-			// LSN-aware ApplyEntry guard still treats rebuild data as current.
-			if err := r.store.ApplyEntry(lba, data, lineage.TargetLSN); err != nil {
-				log.Printf("replica: apply rebuild block: %v", err)
+			// Rebuild blocks are BASE-lane bytes. They must not enter the
+			// WAL apply path and must not advance R/S/H per block; the
+			// frontier is reconciled once, at MsgRebuildDone.
+			if err := r.store.WriteExtentDirect(lba, data); err != nil {
+				log.Printf("replica: apply rebuild base block: %v", err)
 			}
 
 		case MsgRebuildDone:
@@ -321,10 +323,10 @@ func (r *ReplicaListener) handleConn(conn net.Conn) {
 					lineage.SessionID, lineage.Epoch, lineage.EndpointVersion)
 				return
 			}
-			// The done message carries the engine's frozen target LSN.
+			// The done message carries the engine's frozen base frontier hint.
 			// Advance the replica's frontier metadata without touching
 			// any block data — AdvanceFrontier only updates nextLSN/walHead.
-			r.store.AdvanceFrontier(lineage.TargetLSN)
+			r.store.AdvanceFrontier(lineage.EffectiveFrontierHint())
 			frontier, _ := r.store.Sync()
 			// Echo the request's full lineage in the rebuild-done ack
 			// per T4b-1 wire extension. T4b scope does not yet validate
@@ -388,7 +390,7 @@ func (r *ReplicaListener) handleConn(conn net.Conn) {
 // Borrows: nothing.
 func (r *ReplicaListener) validateProbeLineage(incoming RecoveryLineage) bool {
 	if incoming.SessionID == 0 || incoming.Epoch == 0 ||
-		incoming.EndpointVersion == 0 || incoming.TargetLSN == 0 {
+		incoming.EndpointVersion == 0 || incoming.EffectiveFrontierHint() == 0 {
 		return false
 	}
 	r.mu.Lock()
@@ -429,7 +431,7 @@ func (r *ReplicaListener) acceptMutationLineage(incoming RecoveryLineage) bool {
 		r.activeLineage = incoming
 		return true
 	case 0:
-		return incoming.TargetLSN == active.TargetLSN
+		return incoming.EffectiveFrontierHint() == active.EffectiveFrontierHint()
 	default:
 		return false
 	}

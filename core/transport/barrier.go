@@ -42,7 +42,7 @@ var ErrBarrierLineageMismatch = errors.New("transport: barrier: response lineage
 //
 // Wire (post-T4b-1): [32B lineage][8B achievedLSN] — 40 bytes.
 // Lineage field order inside the 32B slab is strictly
-// SessionID, Epoch, EndpointVersion, TargetLSN (matches
+// SessionID, Epoch, EndpointVersion, frontierHint (matches
 // EncodeLineage). Any deviation MUST be rejected at decode.
 type BarrierResponse struct {
 	Lineage     RecoveryLineage
@@ -56,8 +56,9 @@ type BarrierResponse struct {
 const barrierRespSize = 40
 
 // EncodeBarrierResp serializes a barrier response.
-// Wire: [32B lineage (SessionID, Epoch, EndpointVersion, TargetLSN)]
-//       [8B achievedLSN]
+// Wire: [32B lineage (SessionID, Epoch, EndpointVersion, frontierHint)]
+//
+//	[8B achievedLSN]
 func EncodeBarrierResp(r BarrierResponse) []byte {
 	buf := make([]byte, barrierRespSize)
 	copy(buf[0:32], EncodeLineage(r.Lineage))
@@ -71,7 +72,7 @@ func EncodeBarrierResp(r BarrierResponse) []byte {
 //   - zero-valued or malformed lineage fields are invalid
 //     (catches partially-initialized-struct drift)
 //   - exact field order inside the lineage slab must be
-//     SessionID, Epoch, EndpointVersion, TargetLSN
+//     SessionID, Epoch, EndpointVersion, frontierHint
 //
 // Callers MUST treat any error return as "no valid ack" and MUST NOT
 // fabricate a frontier or count the ack toward durability.
@@ -89,9 +90,9 @@ func DecodeBarrierResp(buf []byte) (BarrierResponse, error) {
 	// applies the same rule to the ack path so a silently-zeroed or
 	// stale-heap-reuse response cannot sneak through as a valid ack.
 	if lineage.SessionID == 0 || lineage.Epoch == 0 ||
-		lineage.EndpointVersion == 0 || lineage.TargetLSN == 0 {
-		return BarrierResponse{}, fmt.Errorf("transport: barrier response has zero-valued lineage field (sessionID=%d epoch=%d endpointVersion=%d targetLSN=%d)",
-			lineage.SessionID, lineage.Epoch, lineage.EndpointVersion, lineage.TargetLSN)
+		lineage.EndpointVersion == 0 || lineage.EffectiveFrontierHint() == 0 {
+		return BarrierResponse{}, fmt.Errorf("transport: barrier response has zero-valued lineage field (sessionID=%d epoch=%d endpointVersion=%d frontierHint=%d)",
+			lineage.SessionID, lineage.Epoch, lineage.EndpointVersion, lineage.EffectiveFrontierHint())
 	}
 	return BarrierResponse{
 		Lineage:     lineage,

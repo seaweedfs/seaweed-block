@@ -61,6 +61,11 @@ func Apply(st *ReplicaState, ev Event) ApplyResult {
 			break
 		}
 		applyRecoveryFacts(st, e, &result, trace)
+	case DurableAckObserved:
+		if !checkReplicaID(st, e.ReplicaID, &result, trace) {
+			break
+		}
+		applyDurableAck(st, e, &result, trace)
 	case SessionPrepared:
 		if !checkReplicaID(st, e.ReplicaID, &result, trace) {
 			break
@@ -298,6 +303,118 @@ func applyRecoveryFacts(st *ReplicaState, e RecoveryFactsObserved, r *ApplyResul
 	decide(st, r, trace)
 }
 
+func applyDurableAck(st *ReplicaState, e DurableAckObserved, r *ApplyResult, trace func(string, string)) {
+	if stale, reason := staleTransportObservation(st, e.EndpointVersion, e.TransportEpoch); stale {
+		trace("stale_durable_ack", reason)
+		return
+	}
+	fact := e.ProgressFact()
+	updateDurableAckLagState(st, fact)
+	if fact.ReplicaR > st.Recovery.DurableAckR || !st.Recovery.DurableAckKnown {
+		st.Recovery.DurableAckR = fact.ReplicaR
+		st.Recovery.DurableAckKnown = true
+	}
+	lag := durableAckLagDecision(st, fact)
+	st.Recovery.LagDecision = lag
+	trace("durable_ack_observed",
+		fmt.Sprintf("R=%d lag=%s stalled_samples=%d",
+			st.Recovery.DurableAckR, lag, st.Recovery.DurableAckStalledSample))
+
+	// A single lagging ack is normal. Only a durable-ack stall observed
+	// over the policy window becomes a coordinator action. This keeps
+	// feeder progress as the first answer and uses recovery only when
+	// progress stops while the primary head keeps moving.
+	if lag == LagDecisionStartCatchUp && canEmitRecoveryFromDurableAck(st) {
+		st.Recovery.R = st.Recovery.DurableAckR
+		st.Recovery.S = fact.PrimaryS
+		st.Recovery.H = fact.PrimaryH
+		st.Recovery.Decision = DecisionCatchUp
+		st.Recovery.DecisionReason = "durable_ack_stalled_within_wal"
+		r.Commands = append(r.Commands, StartCatchUp{
+			ReplicaID:       st.Identity.ReplicaID,
+			Epoch:           st.Identity.Epoch,
+			EndpointVersion: st.Identity.EndpointVersion,
+			FromLSN:         st.Recovery.DurableAckR + 1,
+			FrontierHint:    fact.PrimaryH,
+			TargetLSN:       fact.PrimaryH,
+		})
+		trace("command", "StartCatchUp (durable ack stalled)")
+	}
+	if lag == LagDecisionStartRebuild && canEmitRecoveryFromDurableAck(st) {
+		st.Recovery.R = st.Recovery.DurableAckR
+		st.Recovery.S = fact.PrimaryS
+		st.Recovery.H = fact.PrimaryH
+		st.Recovery.Decision = DecisionRebuild
+		st.Recovery.DecisionReason = "durable_ack_below_retention"
+		r.Commands = append(r.Commands, StartRebuild{
+			ReplicaID:       st.Identity.ReplicaID,
+			Epoch:           st.Identity.Epoch,
+			EndpointVersion: st.Identity.EndpointVersion,
+			FrontierHint:    fact.PrimaryH,
+			TargetLSN:       fact.PrimaryH,
+		})
+		trace("command", "StartRebuild (durable ack below retention)")
+	}
+}
+
+func updateDurableAckLagState(st *ReplicaState, fact ReplicaProgressFact) {
+	previousKnown := st.Recovery.DurableAckKnown
+	previousR := st.Recovery.DurableAckR
+	previousH := st.Recovery.DurableAckPrimaryH
+
+	currentR := previousR
+	if !previousKnown || fact.ReplicaR > currentR {
+		currentR = fact.ReplicaR
+	}
+	st.Recovery.DurableAckPrimaryH = fact.PrimaryH
+
+	switch {
+	case !previousKnown:
+		st.Recovery.DurableAckStalledSample = 1
+	case currentR > previousR:
+		st.Recovery.DurableAckStalledSample = 1
+	case fact.PrimaryH > previousH:
+		st.Recovery.DurableAckStalledSample++
+	}
+}
+
+func durableAckLagDecision(st *ReplicaState, fact ReplicaProgressFact) LagDecision {
+	facts := make([]ReplicaProgressFact, 0, 3)
+	if st.Recovery.DurableAckStalledSample >= 3 {
+		facts = append(facts,
+			durableAckPolicyFact(st.Recovery.DurableAckR, fact.PrimaryS, subtractSaturating(fact.PrimaryH, 2)),
+			durableAckPolicyFact(st.Recovery.DurableAckR, fact.PrimaryS, subtractSaturating(fact.PrimaryH, 1)),
+		)
+	}
+	facts = append(facts, durableAckPolicyFact(st.Recovery.DurableAckR, fact.PrimaryS, fact.PrimaryH))
+	return EvaluateLagPolicy(LagPolicy{StalledSamples: 3}, facts)
+}
+
+func canEmitRecoveryFromDurableAck(st *ReplicaState) bool {
+	return st.Identity.MemberPresent &&
+		st.Reachability.Status == ProbeReachable &&
+		!hasActiveSession(st)
+}
+
+func subtractSaturating(v, delta uint64) uint64 {
+	if v < delta {
+		return 0
+	}
+	return v - delta
+}
+
+func durableAckPolicyFact(replicaR, primaryS, primaryH uint64) ReplicaProgressFact {
+	return ReplicaProgressFact{
+		ReplicaR:           replicaR,
+		ReplicaRKnown:      true,
+		PrimaryS:           primaryS,
+		PrimaryH:           primaryH,
+		PrimaryBoundsKnown: true,
+		Source:             ProgressFromDurableAck,
+		Confidence:         ProgressLiveWire,
+	}
+}
+
 // decide runs the core bounded decision logic.
 func decide(st *ReplicaState, r *ApplyResult, trace func(string, string)) {
 	if !st.Identity.MemberPresent {
@@ -314,7 +431,14 @@ func decide(st *ReplicaState, r *ApplyResult, trace func(string, string)) {
 		return
 	}
 
-	R, S, H := st.Recovery.R, st.Recovery.S, st.Recovery.H
+	fact := RecoveryFactsObserved{
+		ReplicaID:       st.Identity.ReplicaID,
+		EndpointVersion: st.Identity.EndpointVersion,
+		R:               st.Recovery.R,
+		S:               st.Recovery.S,
+		H:               st.Recovery.H,
+	}.ProgressFact()
+	H := fact.PrimaryH
 
 	// Sticky rebuild (INV-REPL-REBUILD-DECISION-STICKY): once a
 	// catch-up failure has escalated to rebuild (WALRecycled or
@@ -332,6 +456,7 @@ func decide(st *ReplicaState, r *ApplyResult, trace func(string, string)) {
 				ReplicaID:       st.Identity.ReplicaID,
 				Epoch:           st.Identity.Epoch,
 				EndpointVersion: st.Identity.EndpointVersion,
+				FrontierHint:    H,
 				TargetLSN:       H,
 			})
 			trace("command", "StartRebuild (pinned)")
@@ -339,15 +464,16 @@ func decide(st *ReplicaState, r *ApplyResult, trace func(string, string)) {
 		return
 	}
 
-	if R == 0 && S == 0 && H == 0 {
+	class := ClassifyProgress(fact)
+	if class == DecisionUnknown && !fact.PrimaryBoundsKnown {
 		st.Recovery.Decision = DecisionUnknown
 		st.Recovery.DecisionReason = "no_boundaries"
 		trace("decision", "unknown (no R/S/H)")
 		return
 	}
 
-	switch {
-	case R >= H:
+	switch class {
+	case DecisionNone:
 		st.Recovery.Decision = DecisionNone
 		st.Recovery.DecisionReason = "caught_up"
 		trace("decision", "none (R >= H)")
@@ -374,7 +500,7 @@ func decide(st *ReplicaState, r *ApplyResult, trace func(string, string)) {
 			}
 		}
 
-	case R >= S && R < H:
+	case DecisionCatchUp:
 		st.Recovery.Decision = DecisionCatchUp
 		st.Recovery.DecisionReason = "gap_within_wal"
 		trace("decision", "catch_up (R >= S, R < H)")
@@ -390,13 +516,14 @@ func decide(st *ReplicaState, r *ApplyResult, trace func(string, string)) {
 				ReplicaID:       st.Identity.ReplicaID,
 				Epoch:           st.Identity.Epoch,
 				EndpointVersion: st.Identity.EndpointVersion,
-				FromLSN:         R + 1,
+				FromLSN:         fact.ReplicaR + 1,
+				FrontierHint:    H,
 				TargetLSN:       H,
 			})
 			trace("command", "StartCatchUp")
 		}
 
-	case R < S:
+	case DecisionRebuild:
 		st.Recovery.Decision = DecisionRebuild
 		st.Recovery.DecisionReason = "gap_beyond_wal"
 		trace("decision", "rebuild (R < S)")
@@ -406,6 +533,7 @@ func decide(st *ReplicaState, r *ApplyResult, trace func(string, string)) {
 				ReplicaID:       st.Identity.ReplicaID,
 				Epoch:           st.Identity.Epoch,
 				EndpointVersion: st.Identity.EndpointVersion,
+				FrontierHint:    H,
 				TargetLSN:       H,
 			})
 			trace("command", "StartRebuild")
@@ -425,11 +553,16 @@ func applySessionPrepared(st *ReplicaState, e SessionPrepared, r *ApplyResult, t
 		trace("stale_session_prepared", "session ID too old")
 		return
 	}
+	frontierHint := e.FrontierHint
+	if frontierHint == 0 {
+		frontierHint = e.TargetLSN
+	}
 	st.Session = SessionTruth{
-		SessionID: e.SessionID,
-		Kind:      e.Kind,
-		TargetLSN: e.TargetLSN,
-		Phase:     PhaseStarting,
+		SessionID:    e.SessionID,
+		Kind:         e.Kind,
+		FrontierHint: frontierHint,
+		TargetLSN:    frontierHint,
+		Phase:        PhaseStarting,
 	}
 	trace("session_prepared", string(e.Kind))
 }
@@ -475,7 +608,9 @@ func applySessionCompleted(st *ReplicaState, e SessionClosedCompleted, r *ApplyR
 	}
 	st.Session.Phase = PhaseCompleted
 	st.Session.AchievedLSN = e.AchievedLSN
-	st.Recovery.R = e.AchievedLSN // advance replica boundary
+	if e.AchievedLSN > st.Recovery.R {
+		st.Recovery.R = e.AchievedLSN // monotonic observed replica boundary
+	}
 	// T4c-3 retry-loop: success clears the attempt counter so a
 	// future independent recovery cycle starts with a fresh budget.
 	st.Recovery.Attempts = 0
@@ -539,6 +674,7 @@ func applySessionFailed(st *ReplicaState, e SessionClosedFailed, r *ApplyResult,
 				ReplicaID:       st.Identity.ReplicaID,
 				Epoch:           st.Identity.Epoch,
 				EndpointVersion: st.Identity.EndpointVersion,
+				FrontierHint:    st.Recovery.H,
 				TargetLSN:       st.Recovery.H,
 			})
 			trace("command", "StartRebuild (wal_recycled escalation)")
@@ -612,6 +748,7 @@ func applySessionFailed(st *ReplicaState, e SessionClosedFailed, r *ApplyResult,
 				Epoch:           st.Identity.Epoch,
 				EndpointVersion: st.Identity.EndpointVersion,
 				FromLSN:         st.Recovery.R + 1,
+				FrontierHint:    st.Recovery.H,
 				TargetLSN:       st.Recovery.H,
 			})
 			trace("command", "StartCatchUp (retry)")
@@ -620,6 +757,7 @@ func applySessionFailed(st *ReplicaState, e SessionClosedFailed, r *ApplyResult,
 				ReplicaID:       st.Identity.ReplicaID,
 				Epoch:           st.Identity.Epoch,
 				EndpointVersion: st.Identity.EndpointVersion,
+				FrontierHint:    st.Recovery.H,
 				TargetLSN:       st.Recovery.H,
 			})
 			trace("command", "StartRebuild (retry)")
@@ -660,6 +798,7 @@ func applySessionFailed(st *ReplicaState, e SessionClosedFailed, r *ApplyResult,
 			ReplicaID:       st.Identity.ReplicaID,
 			Epoch:           st.Identity.Epoch,
 			EndpointVersion: st.Identity.EndpointVersion,
+			FrontierHint:    st.Recovery.H,
 			TargetLSN:       st.Recovery.H,
 		})
 		return

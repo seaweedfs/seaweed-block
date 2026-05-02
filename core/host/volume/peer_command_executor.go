@@ -67,13 +67,21 @@ func (p *PeerCommandExecutor) SetOnSessionStart(fn adapter.OnSessionStart) {
 }
 
 // SetOnSessionClose wraps the adapter-supplied callback so a
-// successful session ALSO transitions peer.state CatchingUp →
-// Healthy. The adapter's bookkeeping (engine SessionClosedCompleted/
-// Failed) still runs after.
+// successful recovery session first rotates the peer's steady live
+// session, then transitions peer.state CatchingUp → Healthy. The
+// rotation is the EndSession → steady-capable handoff: post-recovery
+// live traffic must not reuse a pre-recovery broken TCP conn or stale
+// session ID.
 func (p *PeerCommandExecutor) SetOnSessionClose(fn adapter.OnSessionClose) {
 	p.inner.SetOnSessionClose(func(r adapter.SessionCloseResult) {
 		if r.Success {
-			p.peer.SetState(replication.ReplicaHealthy)
+			if err := p.peer.RefreshLiveShipSessionAfter(r.SessionID, r.AchievedLSN, "recovery session completed"); err != nil {
+				r.Success = false
+				r.FailReason = err.Error()
+				p.peer.Invalidate("live session refresh failed: " + err.Error())
+			} else {
+				p.peer.SetState(replication.ReplicaHealthy)
+			}
 		}
 		// Failure path: the adapter feeds engine
 		// SessionClosedFailed which (per FailureKind) may emit
@@ -100,21 +108,21 @@ func (p *PeerCommandExecutor) Probe(replicaID, dataAddr, ctrlAddr string, sessio
 	return p.inner.Probe(replicaID, dataAddr, ctrlAddr, sessionID, epoch, endpointVersion)
 }
 
-func (p *PeerCommandExecutor) StartCatchUp(replicaID string, sessionID, epoch, endpointVersion, fromLSN, targetLSN uint64) error {
-	return p.inner.StartCatchUp(replicaID, sessionID, epoch, endpointVersion, fromLSN, targetLSN)
+func (p *PeerCommandExecutor) StartCatchUp(replicaID string, sessionID, epoch, endpointVersion, fromLSN, frontierHint uint64) error {
+	return p.inner.StartCatchUp(replicaID, sessionID, epoch, endpointVersion, fromLSN, frontierHint)
 }
 
-func (p *PeerCommandExecutor) StartRebuild(replicaID string, sessionID, epoch, endpointVersion, targetLSN uint64) error {
-	return p.inner.StartRebuild(replicaID, sessionID, epoch, endpointVersion, targetLSN)
+func (p *PeerCommandExecutor) StartRebuild(replicaID string, sessionID, epoch, endpointVersion, frontierHint uint64) error {
+	return p.inner.StartRebuild(replicaID, sessionID, epoch, endpointVersion, frontierHint)
 }
 
 func (p *PeerCommandExecutor) StartRecoverySession(
 	replicaID string,
-	sessionID, epoch, endpointVersion, targetLSN uint64,
+	sessionID, epoch, endpointVersion, frontierHint uint64,
 	contentKind engine.RecoveryContentKind,
 	policy engine.RecoveryRuntimePolicy,
 ) error {
-	return p.inner.StartRecoverySession(replicaID, sessionID, epoch, endpointVersion, targetLSN, contentKind, policy)
+	return p.inner.StartRecoverySession(replicaID, sessionID, epoch, endpointVersion, frontierHint, contentKind, policy)
 }
 
 func (p *PeerCommandExecutor) InvalidateSession(replicaID string, sessionID uint64, reason string) {

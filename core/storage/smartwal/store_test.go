@@ -1,5 +1,8 @@
 package smartwal
 
+// Completion oracle: recover(a,b) band — NOT recover(a) closure.
+// See sw-block/design/recover-semantics-adjustment-plan.md §8.1.
+
 import (
 	"bytes"
 	"os"
@@ -160,6 +163,86 @@ func TestSmartWAL_AdvanceFrontierBumpsH(t *testing.T) {
 	lsn, _ := s.Write(0, makeBlock(s.BlockSize(), 1))
 	if lsn <= 50 {
 		t.Fatalf("Write after AdvanceFrontier(50): lsn=%d, want > 50", lsn)
+	}
+}
+
+// TestSmartWAL_WriteExtentDirect — INV-RECV-BITMAP-CORE (§6.10).
+// smartwal-specific contract pin: WriteExtentDirect writes to the
+// extent without touching the ring (no LSN appended) and without
+// advancing nextLSN / walHead. The recovery receiver pairs it with
+// AdvanceFrontier(targetLSN) at MarkBaseComplete; this test asserts
+// the substrate-side half of that contract.
+func TestSmartWAL_WriteExtentDirect(t *testing.T) {
+	s := freshStore(t)
+	bs := s.BlockSize()
+	baseBytes := makeBlock(bs, 0xAA)
+
+	// Pre-condition: fresh store, frontier zero.
+	_, _, h0 := s.Boundaries()
+	if h0 != 0 {
+		t.Fatalf("fresh smartwal H=%d want 0", h0)
+	}
+	if next := s.NextLSN(); next != 1 {
+		t.Fatalf("fresh smartwal nextLSN=%d want 1", next)
+	}
+
+	// WriteExtentDirect succeeds and Read returns the bytes (smartwal
+	// reads always come from the extent — the ring is not consulted).
+	if err := s.WriteExtentDirect(3, baseBytes); err != nil {
+		t.Fatalf("WriteExtentDirect: %v", err)
+	}
+	got, err := s.Read(3)
+	if err != nil {
+		t.Fatalf("Read after WriteExtentDirect: %v", err)
+	}
+	if !bytes.Equal(got, baseBytes) {
+		t.Errorf("Read(3) returned %02x... want %02x...", got[:2], baseBytes[:2])
+	}
+
+	// Frontier MUST NOT have advanced — BASE has no LSN at this layer.
+	_, _, h1 := s.Boundaries()
+	if h1 != 0 {
+		t.Errorf("WriteExtentDirect advanced H to %d (must NOT touch frontier on smartwal)", h1)
+	}
+	if next := s.NextLSN(); next != 1 {
+		t.Errorf("WriteExtentDirect advanced nextLSN to %d (smartwal ring should be untouched)", next)
+	}
+
+	// A subsequent ApplyEntry at LSN > 0 goes through the ring + writeAt
+	// path and shadows the BASE bytes — smartwal's reads always pull
+	// from the extent, and ApplyEntry's writeAt overwrites the same
+	// extent offset, so the WAL bytes win at the byte level.
+	walBytes := makeBlock(bs, 0xBB)
+	if err := s.ApplyEntry(3, walBytes, 5); err != nil {
+		t.Fatalf("ApplyEntry after WriteExtentDirect: %v", err)
+	}
+	got2, err := s.Read(3)
+	if err != nil {
+		t.Fatalf("Read after ApplyEntry: %v", err)
+	}
+	if !bytes.Equal(got2, walBytes) {
+		t.Errorf("Read(3) after ApplyEntry returned %02x... want %02x...", got2[:2], walBytes[:2])
+	}
+	_, _, h2 := s.Boundaries()
+	if h2 < 5 {
+		t.Errorf("after ApplyEntry(lsn=5) H=%d want >= 5 (ApplyEntry's normal frontier side effect)", h2)
+	}
+
+	// Bypass-vs-WAL ordering — running another WriteExtentDirect for
+	// the SAME LBA AFTER an ApplyEntry would naively overwrite the
+	// extent. The receiver's bitmap discipline (§6.10) prevents this
+	// at the application layer; but at the substrate layer, the call
+	// IS technically still allowed and observable (smartwal does not
+	// enforce arbitration — bitmap is the sole arbiter, by design).
+	// Pin that observation so a future "let's silently dedupe at
+	// substrate" change doesn't quietly subvert §6.10.
+	staleBase := makeBlock(bs, 0xCC)
+	if err := s.WriteExtentDirect(3, staleBase); err != nil {
+		t.Fatalf("WriteExtentDirect (post-ApplyEntry, substrate must allow): %v", err)
+	}
+	got3, _ := s.Read(3)
+	if !bytes.Equal(got3, staleBase) {
+		t.Errorf("substrate-level: WriteExtentDirect after ApplyEntry must overwrite (bitmap arbitration is at receiver layer); got %02x want %02x", got3[0], staleBase[0])
 	}
 }
 

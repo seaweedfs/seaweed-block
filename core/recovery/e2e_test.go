@@ -1,5 +1,9 @@
 package recovery
 
+// Completion oracle: recover(a,b) band — NOT recover(a) closure.
+// See sw-block/design/recover-semantics-adjustment-plan.md §8.1.
+// migrate-candidate: depends on primary.H semantics, see §8.1 Tier-5 migration
+
 import (
 	"bytes"
 	"context"
@@ -9,6 +13,7 @@ import (
 	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/storage"
+	"github.com/seaweedfs/seaweed-block/core/storage/memorywal"
 )
 
 // formulaPayload synthesizes a deterministic 4 KiB block whose first
@@ -26,7 +31,7 @@ func formulaPayload(lba uint32, epoch byte, blockSize int) []byte {
 // TestE2E_RebuildHappyPath drives a full session end-to-end:
 //   - Primary writes 100 LBAs (LSN 1..100), syncs.
 //   - Replica is empty (separate substrate).
-//   - Session opens with fromLSN=0, targetLSN=100.
+//   - Session opens with fromLSN=0, frontierHint=100.
 //   - Sender ships base lane + backlog (no live writes yet).
 //   - Barrier round-trip closes the session.
 //   - Verify: every LBA on the replica matches primary.
@@ -53,12 +58,12 @@ func TestE2E_RebuildHappyPath(t *testing.T) {
 	defer replicaConn.Close()
 
 	coord := NewPeerShipCoordinator()
-	sender := NewSender(primary, coord, primaryConn, "r1")
+	sender := NewSenderWithBacklogRelay(primary, coord, primaryConn, "r1")
 	receiver := NewReceiver(replica, replicaConn)
 
 	_, _, primaryH := primary.Boundaries()
 	// Caller-of-Run contract: StartSession before spawning Run.
-	if err := coord.StartSession("r1", 7, 0, primaryH); err != nil {
+	if err := coord.StartSessionLegacyBand("r1", 7, 0, primaryH); err != nil {
 		t.Fatalf("StartSession: %v", err)
 	}
 
@@ -78,8 +83,8 @@ func TestE2E_RebuildHappyPath(t *testing.T) {
 		defer wg.Done()
 		sendAchieved, sendErr = sender.Run(context.Background(), 7, 0, primaryH)
 	}()
-	// No live writes in this scenario; signal sender immediately.
-	sender.Close()
+	// No live writes in this scenario; sender.Run barriers as soon as
+	// sink.DrainBacklog returns (P2c-slice B-2 lifecycle).
 	wg.Wait()
 
 	if sendErr != nil {
@@ -109,11 +114,11 @@ func TestE2E_RebuildHappyPath(t *testing.T) {
 
 // TestE2E_RebuildWithLiveWritesDuringSession is the case the user
 // asked about: primary keeps writing during the session, sender
-// routes those post-target entries onto the session lane (because
+// routes those session-live entries onto the session lane (because
 // we are still DrainingHistorical) and ships them ahead of barrier.
 //
 // Sequence:
-//  1. Primary writes 30 LBAs, sync. Snapshot fromLSN=0, targetLSN=30.
+//  1. Primary writes 30 LBAs, sync. Snapshot fromLSN=0, frontierHint=30.
 //  2. Open session.
 //  3. While session is active, primary writes 5 more (LSN 31..35).
 //     The sender's caller (this test simulating the WAL shipper)
@@ -151,53 +156,40 @@ func TestE2E_RebuildWithLiveWritesDuringSession(t *testing.T) {
 	defer replicaConn.Close()
 
 	coord := NewPeerShipCoordinator()
-	sender := NewSender(primary, coord, primaryConn, "r1")
+	sender := NewSenderWithBacklogRelay(primary, coord, primaryConn, "r1")
 	receiver := NewReceiver(replica, replicaConn)
 
 	// Caller-of-Run contract: StartSession before spawning Run.
-	if err := coord.StartSession("r1", 11, 0, frozenTarget); err != nil {
+	if err := coord.StartSessionLegacyBand("r1", 11, 0, frozenTarget); err != nil {
 		t.Fatalf("StartSession: %v", err)
 	}
 
 	// Phase 3: simulate WAL shipper that observes local writes and
-	// asks the coordinator where each goes. We start the writer in
-	// its own goroutine right away — coord.StartSession already moved
-	// phase to DrainingHistorical so RouteLocalWrite returns
-	// SessionLane deterministically.
-	var startedSignal sync.WaitGroup
-	startedSignal.Add(1)
-
-	// The "WAL shipper" goroutine.
-	var liveWg sync.WaitGroup
-	liveWg.Add(1)
-	go func() {
-		defer liveWg.Done()
-		startedSignal.Wait() // wait until session is open
-		// Five live writes on primary while session active.
-		for i := uint32(0); i < 5; i++ {
-			lba := 30 + i
-			data := formulaPayload(lba, epoch, blockSize)
-			lsn, err := primary.Write(lba, data)
-			if err != nil {
-				t.Errorf("live Write lba=%d: %v", lba, err)
-				return
-			}
-			// Ask coordinator how to route this entry.
-			route := coord.RouteLocalWrite("r1", lsn)
-			if route != RouteSessionLane {
-				t.Errorf("during DrainingHistorical: expected RouteSessionLane, got %v", route)
-				return
-			}
-			if err := sender.PushLiveWrite(lba, lsn, data); err != nil {
-				t.Errorf("PushLiveWrite: %v", err)
-				return
-			}
+	// asks the coordinator where each goes. After P2c-slice B-2,
+	// sender.Run barriers as soon as sink.DrainBacklog returns —
+	// there is no engine "go barrier" signal anymore. To preserve
+	// the "writes during the session land before barrier" contract
+	// deterministically, push live writes BEFORE starting sender.Run.
+	// The bridging sink buffers them under sinkMu and flushAndSeal
+	// ships them in LSN order after streamBacklog completes.
+	for i := uint32(0); i < 5; i++ {
+		lba := 30 + i
+		data := formulaPayload(lba, epoch, blockSize)
+		lsn, err := primary.Write(lba, data)
+		if err != nil {
+			t.Fatalf("live Write lba=%d: %v", lba, err)
 		}
-		// After the session ends (sender.Run returns), coordinator
-		// goes Idle and any further writes route to RouteSteadyLive.
-		// We don't actually generate more writes here; the assertion
-		// is in the post-Run check below.
-	}()
+		// Ask coordinator how to route this entry. coord.StartSession
+		// above already moved phase to DrainingHistorical, so
+		// RouteLocalWrite returns SessionLane.
+		route := coord.RouteLocalWrite("r1", lsn)
+		if route != RouteSessionLane {
+			t.Fatalf("during DrainingHistorical: expected RouteSessionLane, got %v", route)
+		}
+		if err := sender.PushLiveWrite(lba, lsn, data); err != nil {
+			t.Fatalf("PushLiveWrite: %v", err)
+		}
+	}
 
 	var (
 		wg           sync.WaitGroup
@@ -213,13 +205,8 @@ func TestE2E_RebuildWithLiveWritesDuringSession(t *testing.T) {
 	}()
 	go func() {
 		defer wg.Done()
-		// Signal the live-writer goroutine that session is open.
-		startedSignal.Done()
-		sendAchieved, sendErr = sender.Run(context.Background(), /*sessionID*/ 11, /*fromLSN*/ 0, frozenTarget)
+		sendAchieved, sendErr = sender.Run(context.Background(), 11, 0, frozenTarget)
 	}()
-	// Wait for live writer to finish injecting before signaling close.
-	liveWg.Wait()
-	sender.Close()
 	wg.Wait()
 
 	if sendErr != nil {
@@ -258,22 +245,25 @@ func TestE2E_RebuildWithLiveWritesDuringSession(t *testing.T) {
 	}
 }
 
-// TestE2E_KindCountsPinsBacklogVsLive verifies the WAL-lane kind tag
-// flows wire → receiver → RebuildSession.Status: a session that ships
-// N backlog entries plus M PushLiveWrite entries should report
-// exactly (N, M) in BacklogApplied / SessionLiveApplied. This pins
-// the observability contract from WALEntryKind.
+// TestE2E_BridgingBacklogDrainsPastTargetBand verifies the legacy
+// bridging sink no longer treats the fourth wire slot as a backlog stop
+// line. If retained WAL contains entries above the session's frontier
+// hint, streamBacklog feeds them as backlog; a duplicate PushLiveWrite
+// for the same LSN is skipped during seal.
 //
 // IMPORTANT: this test does NOT use kind counts to assert "caught
 // up" — convergence is still proved by the byte-equal check after
 // barrier (per architect ruling: kind is observability, not
 // convergence proof).
-func TestE2E_KindCountsPinsBacklogVsLive(t *testing.T) {
+//
+// Substrate choice: memorywal preserves real write-time LSNs, so the
+// test proves entries with LSN > frozenTarget are retained and fed.
+func TestE2E_BridgingBacklogDrainsPastTargetBand(t *testing.T) {
 	const numBlocks = 32
 	const blockSize = 4096
 	const epoch byte = 0xE5
 
-	primary := storage.NewBlockStore(numBlocks, blockSize)
+	primary := memorywal.NewStore(numBlocks, blockSize)
 	replica := storage.NewBlockStore(numBlocks, blockSize)
 
 	// Phase 1: 10 LBAs — these become the backlog.
@@ -288,11 +278,24 @@ func TestE2E_KindCountsPinsBacklogVsLive(t *testing.T) {
 	defer replicaConn.Close()
 
 	coord := NewPeerShipCoordinator()
-	sender := NewSender(primary, coord, primaryConn, "r1")
+	sender := NewSenderWithBacklogRelay(primary, coord, primaryConn, "r1")
 	receiver := NewReceiver(replica, replicaConn)
 
-	if err := coord.StartSession("r1", 17, 0, frozenTarget); err != nil {
+	if err := coord.StartSessionLegacyBand("r1", 17, 0, frozenTarget); err != nil {
 		t.Fatalf("StartSession: %v", err)
+	}
+
+	// Phase 2: 3 writes after frozenTarget, before sender.Run starts.
+	// They are both retained in primary WAL and offered to the bridging
+	// live queue. Correct behavior is to feed them once via backlog scan
+	// and skip the duplicate queued copies during SealBeforeBarrier.
+	for i := uint32(0); i < 3; i++ {
+		lba := 10 + i
+		data := formulaPayload(lba, epoch, blockSize)
+		lsn, _ := primary.Write(lba, data)
+		if err := sender.PushLiveWrite(lba, lsn, data); err != nil {
+			t.Fatalf("PushLiveWrite (pre-Run): %v", err)
+		}
 	}
 
 	var wg sync.WaitGroup
@@ -305,46 +308,14 @@ func TestE2E_KindCountsPinsBacklogVsLive(t *testing.T) {
 		defer wg.Done()
 		_, _ = sender.Run(context.Background(), 17, 0, frozenTarget)
 	}()
-
-	// Wait for backlog to fully drain on the receiver before injecting
-	// live writes. Otherwise, BlockStore's ScanLBAs synthesizes
-	// scan-time LSN from walHead, and a concurrent primary.Write in
-	// this test would push walHead past targetLSN — causing the
-	// backlog scan's `e.LSN > targetLSN` check to filter all 10
-	// historical entries out. This is a deterministic ordering
-	// requirement for the kind-count assertion, NOT a layer-1 bug.
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		sess := receiver.Session()
-		if sess != nil && sess.Status().BacklogApplied == 10 {
-			break
-		}
-		time.Sleep(time.Millisecond)
-	}
-	if got := receiver.Session().Status().BacklogApplied; got != 10 {
-		t.Fatalf("backlog never reached 10 (got %d) — receiver/sender not advancing", got)
-	}
-
-	// Inject 3 live writes on primary; push to sender.
-	for i := uint32(0); i < 3; i++ {
-		lba := 10 + i
-		data := formulaPayload(lba, epoch, blockSize)
-		lsn, _ := primary.Write(lba, data)
-		_ = sender.PushLiveWrite(lba, lsn, data)
-	}
-
-	sender.Close()
 	wg.Wait()
 
 	st := receiver.Session().Status()
-	// 10 backlog entries: ScanLBAs over BlockStore emits one entry
-	// per stored LBA at scan-time LSN. Our 10 stored LBAs all have
-	// LSN ≤ frozenTarget, so all 10 ship as Backlog kind.
-	if st.BacklogApplied != 10 {
-		t.Errorf("BacklogApplied=%d want 10", st.BacklogApplied)
+	if st.BacklogApplied != 13 {
+		t.Errorf("BacklogApplied=%d want 13 (must feed retained WAL past target band)", st.BacklogApplied)
 	}
-	if st.SessionLiveApplied != 3 {
-		t.Errorf("SessionLiveApplied=%d want 3", st.SessionLiveApplied)
+	if st.SessionLiveApplied != 0 {
+		t.Errorf("SessionLiveApplied=%d want 0 (duplicate queued live writes should be skipped)", st.SessionLiveApplied)
 	}
 	t.Logf("kind counts: backlog=%d, sessionLive=%d (target=%d, walApplied=%d)",
 		st.BacklogApplied, st.SessionLiveApplied, st.TargetLSN, st.WALApplied)
@@ -380,11 +351,21 @@ func TestE2E_PinFloorAdvancesIncrementally(t *testing.T) {
 	defer replicaConn.Close()
 
 	coord := NewPeerShipCoordinator()
-	sender := NewSender(primary, coord, primaryConn, "r1")
+	sender := NewSenderWithBacklogRelay(primary, coord, primaryConn, "r1")
+	var ackMu sync.Mutex
+	var ackFrontiers []uint64
+	sender.SetOnDurableAck(func(replicaID ReplicaID, sessionID, acknowledgedLSN, primaryS, primaryH uint64) {
+		if replicaID != "r1" || sessionID != 21 {
+			t.Errorf("durable ack callback identity=(%s,%d), want (r1,21)", replicaID, sessionID)
+		}
+		ackMu.Lock()
+		ackFrontiers = append(ackFrontiers, acknowledgedLSN)
+		ackMu.Unlock()
+	})
 	// Small K so cadence triggers within the 50-LBA backlog.
 	receiver := NewReceiverWithCadence(replica, replicaConn, 8, 50*time.Millisecond)
 
-	if err := coord.StartSession("r1", 21, 0, primaryH); err != nil {
+	if err := coord.StartSessionLegacyBand("r1", 21, 0, primaryH); err != nil {
 		t.Fatalf("StartSession: %v", err)
 	}
 
@@ -401,7 +382,7 @@ func TestE2E_PinFloorAdvancesIncrementally(t *testing.T) {
 		defer wg.Done()
 		_, sendErr = sender.Run(context.Background(), 21, 0, primaryH)
 	}()
-	sender.Close()
+	// No live writes; sender.Run barriers on its own after DrainBacklog.
 	wg.Wait()
 
 	if sendErr != nil {
@@ -409,6 +390,16 @@ func TestE2E_PinFloorAdvancesIncrementally(t *testing.T) {
 	}
 	if recvErr != nil {
 		t.Fatalf("receiver: %v", recvErr)
+	}
+	ackMu.Lock()
+	defer ackMu.Unlock()
+	if len(ackFrontiers) == 0 {
+		t.Fatal("sender durable ack callback did not fire")
+	}
+	for i := 1; i < len(ackFrontiers); i++ {
+		if ackFrontiers[i] < ackFrontiers[i-1] {
+			t.Fatalf("durable ack callbacks regressed: %v", ackFrontiers)
+		}
 	}
 
 	// After session: coord goes Idle (pinFloor reads 0). To inspect
@@ -432,12 +423,13 @@ func TestE2E_PinFloorAdvancesIncrementally(t *testing.T) {
 // TestE2E_PushLiveWriteAtomicSeal — architect review item #1: while
 // the session is active (any non-Idle phase), RouteLocalWrite returns
 // SessionLane and PushLiveWrite must not lose entries between drain
-// and barrier. The guarantee is enforced by drainAndSeal's atomic
-// take + seal under queueMu: any concurrent push either lands before
-// the seal (and ships) or returns "sealed" error (and caller knows
-// session is closing).
+// and barrier. After P2c-slice B-2 the seal point lives in the
+// bridging sink's flushAndSeal (under sinkMu): any concurrent push
+// either lands before sealing (buffered → shipped) or returns "sink
+// sealed" error (caller knows session is closing).
 //
-// This test races N pushers against Close + Run completion. Every
+// This test races N pushers against Run's autonomous completion
+// (sender.Run barriers as soon as sink.DrainBacklog returns). Every
 // successful PushLiveWrite (no error) must result in the entry being
 // shipped — verified by the receiver's substrate having that LBA at
 // the correct content.
@@ -461,10 +453,10 @@ func TestE2E_PushLiveWriteAtomicSeal(t *testing.T) {
 	defer replicaConn.Close()
 
 	coord := NewPeerShipCoordinator()
-	sender := NewSender(primary, coord, primaryConn, "r1")
+	sender := NewSenderWithBacklogRelay(primary, coord, primaryConn, "r1")
 	receiver := NewReceiver(replica, replicaConn)
 
-	if err := coord.StartSession("r1", 13, 0, frozenTarget); err != nil {
+	if err := coord.StartSessionLegacyBand("r1", 13, 0, frozenTarget); err != nil {
 		t.Fatalf("StartSession: %v", err)
 	}
 
@@ -517,9 +509,12 @@ func TestE2E_PushLiveWriteAtomicSeal(t *testing.T) {
 		}(w)
 	}
 
-	// Let pushers run a bit, then close the sender.
+	// Let pushers finish; sender.Run barriers autonomously when
+	// sink.DrainBacklog completes (P2c-slice B-2). Pushers race with
+	// flushAndSeal: pushes that land before sealing get nil; after
+	// sealing get an error. The atomic-seal contract is at the sink's
+	// flushAndSeal boundary, not the previous closeCh.
 	pushersWg.Wait()
-	sender.Close()
 	wg.Wait()
 
 	if sendErr != nil {

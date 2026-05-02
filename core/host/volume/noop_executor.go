@@ -63,19 +63,19 @@ func (e *noopExecutor) Probe(replicaID, dataAddr, ctrlAddr string, sessionID, ep
 	}
 }
 
-func (e *noopExecutor) StartCatchUp(replicaID string, sessionID, epoch, endpointVersion, fromLSN, targetLSN uint64) error {
+func (e *noopExecutor) StartCatchUp(replicaID string, sessionID, epoch, endpointVersion, fromLSN, frontierHint uint64) error {
 	e.record("StartCatchUp:" + replicaID)
 	return nil
 }
 
-func (e *noopExecutor) StartRebuild(replicaID string, sessionID, epoch, endpointVersion, targetLSN uint64) error {
+func (e *noopExecutor) StartRebuild(replicaID string, sessionID, epoch, endpointVersion, frontierHint uint64) error {
 	e.record("StartRebuild:" + replicaID)
 	return nil
 }
 
 func (e *noopExecutor) StartRecoverySession(
 	replicaID string,
-	sessionID, epoch, endpointVersion, targetLSN uint64,
+	sessionID, epoch, endpointVersion, frontierHint uint64,
 	contentKind engine.RecoveryContentKind,
 	policy engine.RecoveryRuntimePolicy,
 ) error {

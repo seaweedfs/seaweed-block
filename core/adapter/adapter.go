@@ -2,6 +2,7 @@ package adapter
 
 import (
 	"fmt"
+	stdlog "log"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -35,6 +36,10 @@ type VolumeReplicaAdapter struct {
 	fenceTimeout   time.Duration
 	fenceWatchdogs map[fenceKey]*time.Timer
 	watchdogLog    []WatchdogEvent
+
+	flowControlPolicy      engine.FlowControlPolicy
+	lastFlowControlVerdict engine.FlowControlVerdict
+	flowControlObserved    bool
 
 	// fenceInFlight: at most one fence attempt outstanding per
 	// fence LINEAGE — keyed by (replicaID, epoch, endpointVersion).
@@ -96,6 +101,11 @@ func NewVolumeReplicaAdapter(exec CommandExecutor) *VolumeReplicaAdapter {
 	exec.SetOnSessionClose(func(result SessionCloseResult) {
 		a.OnSessionClose(result)
 	})
+	if durableAckExec, ok := exec.(DurableAckCallbackSetter); ok {
+		durableAckExec.SetOnDurableAck(func(result DurableAckResult) {
+			a.OnDurableAck(result)
+		})
+	}
 	// Wire the fence callback: executor → adapter.OnFenceComplete → engine.
 	exec.SetOnFenceComplete(func(result FenceResult) {
 		a.OnFenceComplete(result)
@@ -129,6 +139,45 @@ func (a *VolumeReplicaAdapter) OnSessionClose(result SessionCloseResult) ApplyLo
 func (a *VolumeReplicaAdapter) OnSessionStart(result SessionStartResult) ApplyLog {
 	a.clearStartWatchdog(result.SessionID, WatchdogClearStart)
 	return a.applyBatchAndExecute([]engine.Event{NormalizeSessionStart(result)}, "SessionStart")
+}
+
+// OnDurableAck processes non-terminal durable progress from the executor.
+func (a *VolumeReplicaAdapter) OnDurableAck(result DurableAckResult) ApplyLog {
+	return a.applyBatchAndExecute([]engine.Event{NormalizeDurableAck(result)}, "DurableAck")
+}
+
+// SetFlowControlPolicy installs the primary write-pressure policy used by
+// OnFlowControlObservation. This does not change write behavior by itself;
+// it only controls the recorded verdict for tests/diagnostics/future wiring.
+func (a *VolumeReplicaAdapter) SetFlowControlPolicy(policy engine.FlowControlPolicy) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.flowControlPolicy = policy
+}
+
+// OnFlowControlObservation records the current primary write-pressure verdict.
+// It is intentionally not part of the engine event stream: flow-control facts
+// do not start recovery, do not advance WAL pins, and do not feed replicas.
+func (a *VolumeReplicaAdapter) OnFlowControlObservation(obs engine.FlowControlObservation) engine.FlowControlVerdict {
+	facts := engine.BuildFlowControlFacts(obs)
+	a.mu.Lock()
+	verdict := engine.EvaluateFlowControl(a.flowControlPolicy, facts)
+	a.lastFlowControlVerdict = verdict
+	a.flowControlObserved = true
+	a.mu.Unlock()
+
+	stdlog.Printf("adapter: flow-control dry-run action=%s reason=%s primary_flush_lag=%d replica_durable_lag=%d retention_pressure=%d sync_quorum_misses=%d recovery_backlog=%d explicit_durability=%t",
+		verdict.Action, verdict.Reason,
+		facts.PrimaryFlushLag, facts.ReplicaDurableLag, facts.RetentionPressure,
+		facts.SyncQuorumMisses, facts.RecoveryBacklog, facts.ExplicitDurability)
+	return verdict
+}
+
+// FlowControlVerdict returns the last recorded write-pressure verdict.
+func (a *VolumeReplicaAdapter) FlowControlVerdict() (engine.FlowControlVerdict, bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.lastFlowControlVerdict, a.flowControlObserved
 }
 
 // OnFenceComplete processes a fence outcome from the transport.
@@ -263,6 +312,26 @@ func (a *VolumeReplicaAdapter) Projection() engine.ReplicaProjection {
 	return engine.DeriveProjection(&a.state)
 }
 
+// Diagnostics is an adapter-local inspection snapshot. It may include runtime
+// observations that are NOT engine truth (for example flow-control verdicts).
+// Callers must not feed this back into the engine as control input.
+type Diagnostics struct {
+	Projection          engine.ReplicaProjection
+	FlowControlObserved bool
+	FlowControlVerdict  engine.FlowControlVerdict
+}
+
+// Diagnostics returns a point-in-time adapter inspection snapshot.
+func (a *VolumeReplicaAdapter) Diagnostics() Diagnostics {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return Diagnostics{
+		Projection:          engine.DeriveProjection(&a.state),
+		FlowControlObserved: a.flowControlObserved,
+		FlowControlVerdict:  a.lastFlowControlVerdict,
+	}
+}
+
 // CommandLog returns all commands executed so far (for testing).
 func (a *VolumeReplicaAdapter) CommandLog() []string {
 	a.mu.Lock()
@@ -287,6 +356,12 @@ func (a *VolumeReplicaAdapter) Trace() []engine.TraceEntry {
 // applied as one atomic batch under the adapter lock, then emitted commands are
 // executed outside the lock.
 func (a *VolumeReplicaAdapter) applyBatchAndExecute(events []engine.Event, eventKind string) ApplyLog {
+	// g7-debug: diagnostic logging for hardware bug investigation.
+	// Trace which adapter (by Identity.ReplicaID) is processing what.
+	a.mu.Lock()
+	debugRID := a.state.Identity.ReplicaID
+	a.mu.Unlock()
+	stdlog.Printf("g7-debug: adapter[rid=%s].applyBatchAndExecute kind=%s nEvents=%d", debugRID, eventKind, len(events))
 	// Step 1: Apply under lock, collect commands.
 	a.mu.Lock()
 	var log ApplyLog
@@ -306,6 +381,16 @@ func (a *VolumeReplicaAdapter) applyBatchAndExecute(events []engine.Event, event
 		a.trace = append(a.trace, result.Trace...)
 		log.Projection = result.Projection
 		log.Trace = append(log.Trace, result.Trace...)
+
+		// g7-debug: log engine state after each event so we can see
+		// what decide() saw when it didn't emit.
+		stdlog.Printf("g7-debug: adapter[rid=%s] post-event=%s state: R=%d S=%d H=%d Decision=%s Pinned=%t Reachable=%s Phase=%s SessionID=%d MemberPresent=%t Identity.Epoch=%d Identity.EV=%d nCmds=%d trace=%v",
+			debugRID, engine.EventKind(ev),
+			a.state.Recovery.R, a.state.Recovery.S, a.state.Recovery.H,
+			a.state.Recovery.Decision, a.state.Recovery.RebuildPinned,
+			a.state.Reachability.Status, a.state.Session.Phase, a.state.Session.SessionID,
+			a.state.Identity.MemberPresent, a.state.Identity.Epoch, a.state.Identity.EndpointVersion,
+			len(result.Commands), result.Trace)
 
 		for _, cmd := range result.Commands {
 			kind := engine.CommandKind(cmd)
@@ -332,6 +417,13 @@ func (a *VolumeReplicaAdapter) applyBatchAndExecute(events []engine.Event, event
 	}
 	a.mu.Unlock()
 
+	// g7-debug: report all commands collected (engine + session-prepared follow-ups).
+	cmdKinds := make([]string, 0, len(queued))
+	for _, q := range queued {
+		cmdKinds = append(cmdKinds, engine.CommandKind(q.cmd))
+	}
+	stdlog.Printf("g7-debug: adapter[rid=%s] applyBatchAndExecute exit nQueued=%d cmds=%v", debugRID, len(queued), cmdKinds)
+
 	// Step 2: Execute commands OUTSIDE the lock.
 	// This prevents deadlock when executors call back into the adapter.
 	for _, cmd := range queued {
@@ -352,13 +444,13 @@ func (a *VolumeReplicaAdapter) prepareQueuedCommands(cmds []engine.Command) ([]e
 		case engine.StartCatchUp:
 			sid := sessionIDCounter.Add(1)
 			events = append(events,
-				NormalizeSessionPrepared(c.ReplicaID, sid, engine.SessionCatchUp, c.TargetLSN),
+				NormalizeSessionPrepared(c.ReplicaID, sid, engine.SessionCatchUp, c.EffectiveFrontierHint()),
 			)
 			queued = append(queued, queuedCommand{cmd: cmd, sessionID: sid})
 		case engine.StartRebuild:
 			sid := sessionIDCounter.Add(1)
 			events = append(events,
-				NormalizeSessionPrepared(c.ReplicaID, sid, engine.SessionRebuild, c.TargetLSN),
+				NormalizeSessionPrepared(c.ReplicaID, sid, engine.SessionRebuild, c.EffectiveFrontierHint()),
 			)
 			queued = append(queued, queuedCommand{cmd: cmd, sessionID: sid})
 		case engine.StartRecovery:
@@ -380,7 +472,7 @@ func (a *VolumeReplicaAdapter) prepareQueuedCommands(cmds []engine.Command) ([]e
 				sessionKind = engine.SessionRebuild
 			}
 			events = append(events,
-				NormalizeSessionPrepared(c.ReplicaID, sid, sessionKind, c.TargetLSN),
+				NormalizeSessionPrepared(c.ReplicaID, sid, sessionKind, c.EffectiveFrontierHint()),
 			)
 			queued = append(queued, queuedCommand{cmd: cmd, sessionID: sid})
 		case engine.FenceAtEpoch:
@@ -423,7 +515,7 @@ func (a *VolumeReplicaAdapter) executeCommand(q queuedCommand) {
 		}()
 
 	case engine.StartCatchUp:
-		err := a.executor.StartCatchUp(c.ReplicaID, q.sessionID, c.Epoch, c.EndpointVersion, c.FromLSN, c.TargetLSN)
+		err := a.executor.StartCatchUp(c.ReplicaID, q.sessionID, c.Epoch, c.EndpointVersion, c.FromLSN, c.EffectiveFrontierHint())
 		if err != nil {
 			// T4d-1: synchronous dispatch failure → Transport kind.
 			a.OnSessionClose(SessionCloseResult{
@@ -436,7 +528,7 @@ func (a *VolumeReplicaAdapter) executeCommand(q queuedCommand) {
 		}
 
 	case engine.StartRebuild:
-		err := a.executor.StartRebuild(c.ReplicaID, q.sessionID, c.Epoch, c.EndpointVersion, c.TargetLSN)
+		err := a.executor.StartRebuild(c.ReplicaID, q.sessionID, c.Epoch, c.EndpointVersion, c.EffectiveFrontierHint())
 		if err != nil {
 			a.OnSessionClose(SessionCloseResult{
 				ReplicaID:   c.ReplicaID,
@@ -455,7 +547,7 @@ func (a *VolumeReplicaAdapter) executeCommand(q queuedCommand) {
 		// SessionClose with Transport kind.
 		err := a.executor.StartRecoverySession(
 			c.ReplicaID,
-			q.sessionID, c.Epoch, c.EndpointVersion, c.TargetLSN,
+			q.sessionID, c.Epoch, c.EndpointVersion, c.EffectiveFrontierHint(),
 			c.ContentKind, c.RuntimePolicy,
 		)
 		if err != nil {

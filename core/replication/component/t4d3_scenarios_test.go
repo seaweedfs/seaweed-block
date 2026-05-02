@@ -15,8 +15,9 @@ import (
 //   - TestT4d3_CatchUp_NonEmptyReplica_ShortGap_BandwidthBounded_Smartwal
 //   - TestT4d3_RetryAfterReplicaAdvanced_OverScansHandledByApplyGate
 //     (round-46 ADDITION 1 — pins §6.2 Option A safety claim)
-//   - TestT4d3_RecoveryTargetLSN1_KnownGap (CARRY-T4D-LANE-CONTEXT-001
-//     close, Option B — documents the H=1 known gap)
+//   - TestT4d3_RecoveryTargetLSN1_RoutesByConnectionContext
+//     (CARRY-T4D-LANE-CONTEXT-001 close — recovery TargetLSN=1 no
+//     longer misroutes as live)
 
 // observingScanWrap counts ScanLBAs emissions for bandwidth tests.
 type observingScanWrap struct {
@@ -191,24 +192,41 @@ func TestT4d3_RetryAfterReplicaAdvanced_OverScansHandledByApplyGate(t *testing.T
 	})
 }
 
-// TestT4d3_RecoveryTargetLSN1_KnownGap pins
-// CARRY-T4D-LANE-CONTEXT-001 known gap (round-46 architect close
-// condition Option B). Today the transport replica handler's
-// caller-side lane shim uses TargetLSN==1 as the live-lane sentinel.
-// A recovery session with TargetLSN=1 (legitimate when H=1; happens
-// during initial bootstrap or empty-volume recovery) MISCLASSIFIES
-// at the transport handler level — the gate would receive
-// ApplyLive instead of ApplyRecovery for this session's frames.
-//
-// This is the documented gap Option B references. The test SKIPS
-// today and stays as a forward-binding marker for the future fix
-// (true per-connection lane tag / separate handler routes).
-//
-// Pre-fix: skipped with TODO. Post-fix (T4e or beyond): un-skip
-// when true handler-context lane signaling lands. The gate API
-// itself is already lane-pure (ApplyRecovery vs ApplyLive); only
-// the caller's signal source needs upgrading per
-// CARRY-T4D-LANE-CONTEXT-001.
-func TestT4d3_RecoveryTargetLSN1_KnownGap(t *testing.T) {
-	t.Skip("CARRY-T4D-LANE-CONTEXT-001 known gap (round-46 close condition Option B). Recovery session with TargetLSN=1 misclassifies at transport caller-side lane shim. Gate API is already lane-pure; the gap is in the CALLER's signal source. Un-skip when true handler-context lane signaling lands (T4e or beyond).")
+// TestT4d3_RecoveryTargetLSN1_RoutesByConnectionContext pins the
+// closure of CARRY-T4D-LANE-CONTEXT-001. Legacy SWRP catch-up now
+// sends MsgRecoveryLaneStart before WAL frames, so the replica
+// handler routes by connection context instead of sniffing
+// lineage.TargetLSN. A recovery session with TargetLSN=1 is valid
+// and must still use ApplyRecovery semantics.
+func TestT4d3_RecoveryTargetLSN1_RoutesByConnectionContext(t *testing.T) {
+	component.RunSubstrate(t, "walstore", component.Walstore, func(t *testing.T, c *component.Cluster) {
+		c.WithReplicas(1).WithApplyGate().Start()
+
+		primaryData := make([]byte, component.DefaultBlockSize)
+		primaryData[0] = 0x11
+		lsn := c.PrimaryWrite(0, primaryData)
+		if lsn != 1 {
+			t.Fatalf("test expects first primary LSN=1, got %d", lsn)
+		}
+
+		// Seed the replica ahead on this LBA. Catch-up will ship the
+		// primary's LSN=1 entry. If the handler incorrectly routes
+		// TargetLSN=1 as live, the apply gate returns live-stale and
+		// the catch-up session fails. Recovery lane must stale-skip.
+		replicaData := make([]byte, component.DefaultBlockSize)
+		replicaData[0] = 0x22
+		c.ReplicaApply(0, 0, replicaData, 2)
+
+		result := c.CatchUpReplica(0)
+		if !result.Success {
+			t.Fatalf("TargetLSN=1 recovery session failed; lane context likely misrouted as live: %+v", result)
+		}
+		if !c.ApplyGate(0).SessionRecoveryCoverage(1, 0) {
+			t.Fatal("recovery TargetLSN=1 did not advance recovery coverage")
+		}
+		got, _ := c.Replica(0).Store.Read(0)
+		if got[0] != 0x22 {
+			t.Fatalf("stale recovery entry regressed data: got %02x want 22", got[0])
+		}
+	})
 }

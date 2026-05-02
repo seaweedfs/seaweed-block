@@ -23,10 +23,11 @@ import (
 //
 // Fallback heuristics for errors that aren't typed `*RecoveryFailure`:
 //   - errSessionInvalidated → RecoveryFailureSessionInvalidated
-//   - error mentioning "target" + "not reached" → RecoveryFailureTargetNotReached
-//     (catch-up sender's existing target-not-reached error wraps;
-//     T4e/G5 may add a typed kind for this so the substring match
-//     can go away too)
+//   - legacy error mentioning "target" + "not reached" →
+//     RecoveryFailureTargetNotReached. Current catch-up sender no
+//     longer uses target-band completion; this branch exists only to
+//     classify older/runtime diagnostic strings without making engine
+//     parse text.
 //   - everything else → RecoveryFailureTransport (retryable per
 //     RecoveryRuntimePolicy)
 //
@@ -75,11 +76,9 @@ func classifyRecoveryFailure(err error) engine.RecoveryFailureKind {
 	if errors.Is(err, errSessionInvalidated) {
 		return engine.RecoveryFailureSessionInvalidated
 	}
-	// Catch-up sender's existing "target N not reached" wrap. T4e/G5
-	// candidate to make typed (would add a sender-side typed-error
-	// envelope mirroring storage.RecoveryFailure). For now: substring
-	// inside transport is acceptable (transport owns its own messages;
-	// engine still branches on the typed FailureKind we set here).
+	// Legacy "target N not reached" wrap. Transport owns this
+	// compatibility classifier; engine still branches only on the typed
+	// FailureKind we set here.
 	msg := err.Error()
 	if strings.Contains(msg, "target") && strings.Contains(msg, "not reached") {
 		return engine.RecoveryFailureTargetNotReached
@@ -115,7 +114,7 @@ func classifyRecoveryFailure(err error) engine.RecoveryFailureKind {
 // `v3-phase-15-t4c-pre-poc-report.md` §3.b documents this gap.
 func (e *BlockExecutor) StartRecoverySession(
 	replicaID string,
-	sessionID, epoch, endpointVersion, targetLSN uint64,
+	sessionID, epoch, endpointVersion, frontierHint uint64,
 	contentKind engine.RecoveryContentKind,
 	policy engine.RecoveryRuntimePolicy,
 ) error {
@@ -134,11 +133,11 @@ func (e *BlockExecutor) StartRecoverySession(
 		// sender doesn't trip the substrate's fromLSN==0 spurious
 		// recycle. Future StartRecovery extension can carry an
 		// explicit FromLSN field.
-		return e.StartCatchUp(replicaID, sessionID, epoch, endpointVersion, 1, targetLSN)
+		return e.StartCatchUp(replicaID, sessionID, epoch, endpointVersion, 1, frontierHint)
 
 	case engine.RecoveryContentFullExtent:
 		// Bridge to existing rebuild sender.
-		return e.StartRebuild(replicaID, sessionID, epoch, endpointVersion, targetLSN)
+		return e.StartRebuild(replicaID, sessionID, epoch, endpointVersion, frontierHint)
 
 	case engine.RecoveryContentPartialLBA:
 		// Stage 2 — archive-driven LBA dump fetch. Not implemented

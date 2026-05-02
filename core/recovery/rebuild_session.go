@@ -27,14 +27,30 @@ import (
 // This type knows nothing about pin_floor, primary recycle, wire
 // protocol, or barrier ack. Those live in layer 2.
 type RebuildSession struct {
-	store     storage.LogicalStorage
-	targetLSN uint64 // frozen at session creation; WAL lane must reach this for completion
+	store            storage.LogicalStorage
+	baseFrontierHint uint64 // snapshot pin/frontier hint for BASE lane; not a completion predicate
 
 	mu         sync.Mutex
 	bitmap     *RebuildBitmap
 	walApplied uint64 // highest LSN observed via WAL lane in this session; monotonic
 	baseDone   bool   // base lane has signaled stream-complete via MarkBaseComplete
 	completed  bool   // TryComplete has returned done=true at least once; latched
+
+	// barrierWitnessed: latched true on the FIRST WitnessBarrier() call
+	// (receiver invokes this at frameBarrierReq arrival, before TryComplete).
+	//
+	// §IV.2.1 / recover-semantics-adjustment-plan §1 — A-class wave:
+	// the arrival of BarrierReq from the primary attests that the primary's
+	// WalShipper observed PrimaryWalLegOk under serializer lock and chose to
+	// emit. Layer-1 TryComplete adds this as an explicit conjunct so the
+	// replica's "session done" signal cannot be claimed without the primary's
+	// barrier witness — matching the §IV.2.1 coordinator-owned narrative.
+	//
+	// Pre-A-class behavior (sole `walApplied >= targetLSN`) was the
+	// recover(a,b) replica-side independent verdict; per §I P8 / G0 closure
+	// that authority moves to the primary (coordinator), and the replica
+	// becomes a per-cut witness, not a closer.
+	barrierWitnessed bool
 
 	// Per-kind WAL apply counters (observability only — do NOT use
 	// to infer convergence; see WALEntryKind doc). Useful for INV
@@ -50,14 +66,17 @@ type RebuildSession struct {
 	baseAckedPrefix uint32
 }
 
-// NewRebuildSession constructs a session targeting the given LSN.
+// NewRebuildSession constructs a session with the given BASE frontier hint.
 // numBlocks comes from the substrate (store.NumBlocks()) and sizes the
-// bitmap. targetLSN is the frozen WAL completion target.
-func NewRebuildSession(store storage.LogicalStorage, targetLSN uint64) *RebuildSession {
+// bitmap. The hint currently arrives over the legacy TargetLSN wire slot,
+// but within recovery it is only the frontier to publish after BASE bytes
+// are installed. Completion is driven by baseDone plus the primary's
+// barrier witness, not by walApplied crossing this value.
+func NewRebuildSession(store storage.LogicalStorage, baseFrontierHint uint64) *RebuildSession {
 	return &RebuildSession{
-		store:     store,
-		targetLSN: targetLSN,
-		bitmap:    NewRebuildBitmap(store.NumBlocks()),
+		store:            store,
+		baseFrontierHint: baseFrontierHint,
+		bitmap:           NewRebuildBitmap(store.NumBlocks()),
 	}
 }
 
@@ -65,10 +84,18 @@ func NewRebuildSession(store storage.LogicalStorage, targetLSN uint64) *RebuildS
 // (skipped=true, nil) when the WAL lane has already won this LBA;
 // (skipped=false, nil) when the substrate apply succeeded.
 //
-// The base block is applied with `targetLSN` as its LSN. POC choice:
-// base goes through the substrate's WAL just like WAL lane does.
-// Production may want a direct-extent path to avoid WAL pressure;
-// that is a layer-2/substrate question, not a layer-1 concern.
+// Per v3-recovery-algorithm-consensus.md §6.10 (INV-RECV-BITMAP-CORE):
+// BASE writes go through `WriteExtentDirect`, NOT the LSN-tracked
+// `ApplyEntry` path. The bitmap is the sole arbiter of BASE-vs-WAL
+// conflict at this LBA; the substrate's per-LBA stale-skip / WAL-
+// record machinery does not interpret BASE bytes as a competing-LSN
+// write (because BASE never enters the substrate's WAL).
+//
+// Frontier advancement is deferred to `MarkBaseComplete`, which calls
+// `store.AdvanceFrontier(baseFrontierHint)` once the BASE phase signals
+// stream-complete. Pre-§6.10 code piggybacked on `ApplyEntry`'s
+// implicit frontier-advance side effect; the new direct-extent path
+// must opt in explicitly.
 //
 // INV-DUAL-LANE-WAL-WINS-BASE.
 func (s *RebuildSession) ApplyBaseBlock(lba uint32, data []byte) (skipped bool, err error) {
@@ -80,8 +107,8 @@ func (s *RebuildSession) ApplyBaseBlock(lba uint32, data []byte) (skipped bool, 
 	if s.bitmap.IsApplied(lba) {
 		return true, nil
 	}
-	if err := s.store.ApplyEntry(lba, data, s.targetLSN); err != nil {
-		return false, fmt.Errorf("recovery: base apply lba=%d: %w", lba, err)
+	if err := s.store.WriteExtentDirect(lba, data); err != nil {
+		return false, fmt.Errorf("recovery: base extent-direct lba=%d: %w", lba, err)
 	}
 	return false, nil
 }
@@ -140,24 +167,90 @@ func (s *RebuildSession) BaseBatchAcked(lbaUpper uint32) {
 }
 
 // MarkBaseComplete signals that the base lane has shipped the last
-// block. Combined with walApplied ≥ targetLSN, this is the layer-1
-// completion predicate.
+// block. Completion still requires a BarrierReq witness; the base
+// frontier hint is not itself a local completion oracle.
+//
+// Per §6.10 frontier-pairing: BASE writes go through
+// `WriteExtentDirect` which does NOT advance the substrate's
+// nextLSN / walHead / syncedLSN. The recovery layer compensates by
+// advancing the frontier to `baseFrontierHint` here — once BASE is done,
+// the replica's R/H boundaries reflect "the snapshot at fromLSN
+// is installed" without needing a competing WAL apply at
+// that hint. Subsequent WAL frames above that hint advance
+// further via `ApplyEntry`'s normal side effects.
 func (s *RebuildSession) MarkBaseComplete() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.baseDone = true
+	// §6.10 frontier reconciliation: BASE bytes are now installed
+	// to extent; declare frontier at baseFrontierHint so post-rebuild
+	// Sync()/Boundaries() report a non-degenerate value even on
+	// BASE-only sessions (no WAL frames in this session).
+	s.store.AdvanceFrontier(s.baseFrontierHint)
+}
+
+// SeedWalApplied seeds walApplied at session start with the receiver's
+// fromLSN watermark. Called by the receiver after constructing the
+// session in frameSessionStart, BEFORE any ApplyWALEntry.
+//
+// Rationale: walApplied/AchievedLSN is an observation, not a completion
+// oracle. Seeding with fromLSN preserves monotonic reporting for
+// base-only sessions; ApplyWALEntry advances it further if WAL frames
+// arrive.
+//
+// Idempotent: only advances; lower seeds are silently ignored.
+func (s *RebuildSession) SeedWalApplied(lsn uint64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if lsn > s.walApplied {
+		s.walApplied = lsn
+	}
+}
+
+// WitnessBarrier latches the barrier-arrival witness. Called by the
+// receiver immediately on frameBarrierReq arrival, BEFORE TryComplete.
+//
+// §IV.2.1 / recover-semantics-adjustment-plan §1 — A-class wave:
+// per §I P8, the "session semantically complete" claim is
+// coordinator-owned (primary). On the replica side, the arrival of
+// BarrierReq IS the witness that the primary's WalShipper observed
+// PrimaryWalLegOk (DebtZero ∨ LiveTail) at the serializer-locked
+// snapshot. Layer-1 TryComplete adds this as a required conjunct so
+// the replica's local view cannot independently claim closure.
+//
+// Idempotent: latch-only, no error on repeat calls.
+func (s *RebuildSession) WitnessBarrier() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.barrierWitnessed = true
 }
 
 // TryComplete reports whether the layer-1 completion predicate holds.
-// Returns (achievedLSN, true) when baseDone ∧ walApplied ≥ targetLSN;
-// achievedLSN is walApplied (which by predicate is ≥ targetLSN).
+// Returns (achievedLSN, true) when baseDone ∧ barrierWitnessed;
+// achievedLSN is walApplied.
 //
-// Idempotent: once it returns done=true, the session is latched
-// completed and subsequent Apply* calls return errors.
+// §IV.2.1 / recover-semantics-adjustment-plan §1 — A-class wave:
+// the historic recover(a,b) sole gate (`walApplied >= targetLSN`) is
+// no longer dispositive. The realizable §IV.2.1 conjunct synthesized
+// from existing observables is:
 //
-// INV-SESSION-COMPLETE-ON-CONJUNCTION-LAYER1. Note: the system-level
-// "rebuild done" closure additionally requires a barrier-ack from the
-// replica matching achievedLSN — that is layer 2's responsibility.
+//	baseDone          (replica MarkBaseComplete fired)
+//	∧ barrierWitnessed (BarrierReq arrival = primary attests
+//	                   PrimaryWalLegOk under shipMu)
+//
+// walApplied/achievedLSN remains an observation returned to the
+// primary. It is not compared to baseFrontierHint here: the hint is
+// carried for frontier bookkeeping, but the receiver is not allowed to
+// self-declare "caught up" by crossing it.
+//
+// Note: layer-1 TryComplete is NOT the system-close authority.
+// Per §IV.2.1, the terminal claim "session semantically complete"
+// is coordinator-owned (primary's CanEmitSessionComplete after
+// reading BarrierResp). TryComplete here is the replica's
+// per-cut layer-1 witness check, not a verdict.
+//
+// Idempotent: once done=true, the session is latched completed and
+// subsequent Apply* calls return errors.
 func (s *RebuildSession) TryComplete() (achievedLSN uint64, done bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -167,7 +260,7 @@ func (s *RebuildSession) TryComplete() (achievedLSN uint64, done bool) {
 	if !s.baseDone {
 		return 0, false
 	}
-	if s.walApplied < s.targetLSN {
+	if !s.barrierWitnessed {
 		return 0, false
 	}
 	s.completed = true
@@ -176,10 +269,12 @@ func (s *RebuildSession) TryComplete() (achievedLSN uint64, done bool) {
 
 // Status returns a snapshot of session progress for layer 2 / monitoring.
 type Status struct {
-	TargetLSN          uint64
+	BaseFrontierHint   uint64
+	TargetLSN          uint64 // deprecated alias for legacy tests/reporting
 	WALApplied         uint64
 	BaseDone           bool
 	Completed          bool
+	BarrierWitnessed   bool   // §IV.2.1 A-class: latched on frameBarrierReq arrival
 	BaseAckedPrefix    uint32
 	BitmapApplied      int    // count of LBAs the WAL lane has marked
 	BacklogApplied     uint64 // count of WALKindBacklog entries applied
@@ -190,10 +285,12 @@ func (s *RebuildSession) Status() Status {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return Status{
-		TargetLSN:          s.targetLSN,
+		BaseFrontierHint:   s.baseFrontierHint,
+		TargetLSN:          s.baseFrontierHint,
 		WALApplied:         s.walApplied,
 		BaseDone:           s.baseDone,
 		Completed:          s.completed,
+		BarrierWitnessed:   s.barrierWitnessed,
 		BaseAckedPrefix:    s.baseAckedPrefix,
 		BitmapApplied:      s.bitmap.AppliedCount(),
 		BacklogApplied:     s.backlogApplied,

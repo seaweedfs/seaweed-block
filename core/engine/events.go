@@ -73,13 +73,30 @@ type RecoveryFactsObserved struct {
 
 func (RecoveryFactsObserved) eventKind() string { return "RecoveryFactsObserved" }
 
+// DurableAckObserved reports a replica durable frontier learned from
+// recovery-session feedback (for example BaseBatchAck). It is not probe
+// reachability and does not by itself decide health or start recovery.
+type DurableAckObserved struct {
+	ReplicaID       string
+	EndpointVersion uint64
+	TransportEpoch  uint64
+	DurableLSN      uint64
+	PrimaryTailLSN  uint64
+	PrimaryHeadLSN  uint64
+}
+
+func (DurableAckObserved) eventKind() string { return "DurableAckObserved" }
+
 // --- Session events (authority: session owner / executor) ---
 
 // SessionPrepared: a recovery session has been planned but not started.
 type SessionPrepared struct {
-	ReplicaID string
-	SessionID uint64
-	Kind      SessionKind
+	ReplicaID    string
+	SessionID    uint64
+	Kind         SessionKind
+	FrontierHint uint64
+	// TargetLSN is a legacy alias kept while adapter/executor/wire
+	// vocabulary migrates. Prefer FrontierHint for new engine code.
 	TargetLSN uint64
 }
 
@@ -140,8 +157,11 @@ const (
 	// scan (read error, decode error mid-scan). Retryable.
 	RecoveryFailureSubstrateIO
 
-	// RecoveryFailureTargetNotReached — catch-up didn't reach
-	// targetLSN (substrate ran dry before completion). Retryable.
+	// RecoveryFailureTargetNotReached — legacy diagnostic for old
+	// catch-up senders that explicitly failed a target-band compare.
+	// Current recover(a) transport should prefer concrete causes such
+	// as WALRecycled, ack-behind-last-sent (Transport), or SubstrateIO.
+	// Retryable while the legacy kind remains accepted.
 	RecoveryFailureTargetNotReached
 
 	// RecoveryFailureStartTimeout — adapter watchdog: executor

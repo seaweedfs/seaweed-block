@@ -295,6 +295,26 @@ func (s *BlockStore) ApplyEntry(lba uint32, data []byte, lsn uint64) error {
 	return nil
 }
 
+// WriteExtentDirect installs bytes into the in-memory block map without
+// advancing nextLSN or walHead — INV-RECV-BITMAP-CORE (§6.10): BASE
+// lane bypasses the LSN-tracked WAL apply path. The recovery receiver
+// pairs this with AdvanceFrontier(targetLSN) in MarkBaseComplete to
+// keep post-rebuild frontier reporting honest.
+func (s *BlockStore) WriteExtentDirect(lba uint32, data []byte) error {
+	if lba >= s.numBlocks {
+		return fmt.Errorf("storage: WriteExtentDirect LBA %d out of range", lba)
+	}
+	if len(data) != s.blockSize {
+		return fmt.Errorf("storage: WriteExtentDirect data size %d != block size %d", len(data), s.blockSize)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cp := make([]byte, s.blockSize)
+	copy(cp, data)
+	s.blocks[lba] = cp
+	return nil
+}
+
 // AllBlocks returns all written LBAs and their data (for rebuild serving).
 func (s *BlockStore) AllBlocks() map[uint32][]byte {
 	s.mu.RLock()

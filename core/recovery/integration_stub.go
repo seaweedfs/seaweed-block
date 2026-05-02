@@ -2,7 +2,9 @@ package recovery
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log"
 	"net"
 	"sync"
 
@@ -18,6 +20,13 @@ import (
 //
 // Per architect ruling on G7-redo Layer-2 review: "与 BlockExecutor /
 // engine 出一条「薄」链路 — 单次 Run(session) 可调、不换全 transport".
+//
+// P2c-slice B-2 lifecycle change: barrier auto-fires when sink.DrainBacklog
+// returns (the bridging sink flushes its live-write buffer + seals there).
+// Engine no longer needs an explicit "go barrier" signal — the previous
+// FinishLiveWrites / sender.Close pattern is gone. Live writes that arrive
+// after the sink seals get a "session is closing" error from PushLiveWrite
+// so callers can fall back to steady-live or retry on a fresh session.
 //
 // What this file deliberately does NOT do:
 //
@@ -36,26 +45,43 @@ type SessionStartCallback func(replicaID ReplicaID, sessionID uint64)
 
 // SessionCloseCallback fires once per session at termination
 // (success or failure). Mirrors the existing `OnSessionClose`
-// callback shape: success means achievedLSN ≥ targetLSN; on failure
-// `err` is non-nil and `achievedLSN` is 0.
+// callback shape: success means the session close predicate accepted
+// the barrier result; achievedLSN is the observed replica frontier.
+// On failure `err` is non-nil and `achievedLSN` is 0.
 type SessionCloseCallback func(replicaID ReplicaID, sessionID uint64, achievedLSN uint64, err error)
+
+// DurableAckCallback fires when a sender observes a receiver durable ack.
+// It is progress telemetry; session close remains the terminal callback.
+type BridgeDurableAckCallback func(replicaID ReplicaID, sessionID, acknowledgedLSN, primaryS, primaryH uint64)
 
 // PrimaryBridge is the primary-side adapter. One bridge instance
 // per primary daemon; it serializes session starts per replica via
 // the embedded coordinator's INV-SINGLE-FLIGHT-PER-REPLICA check.
 //
 // Live writes for active sessions are pushed via PushLiveWrite,
-// which the WAL shipper calls after consulting RouteLocalWrite.
+// which the WAL shipper calls after consulting RouteLocalWrite. The
+// session converges autonomously: sender.Run barriers as soon as
+// sink.DrainBacklog returns (P2c-slice B-2 lifecycle).
 type PrimaryBridge struct {
 	store storage.LogicalStorage
 	coord *PeerShipCoordinator
 
 	onStart SessionStartCallback
 	onClose SessionCloseCallback
+	onAck   BridgeDurableAckCallback
 
 	mu      sync.Mutex
 	senders map[ReplicaID]*Sender
 }
+
+// ErrNoActiveSession means the bridge has no sender registered for the
+// requested replica.
+var ErrNoActiveSession = errors.New("recovery bridge: no active session")
+
+// ErrSessionNotLiveReady means a session is registered and owns the
+// peer's WAL route, but the sink has not entered its live feeder window
+// yet. Callers must retain/replay the WAL fact, not fall back to steady.
+var ErrSessionNotLiveReady = errors.New("recovery bridge: session not live-ready")
 
 // NewPrimaryBridge constructs a bridge bound to the primary's
 // substrate. Callbacks may be nil (fire-and-forget).
@@ -69,15 +95,60 @@ func NewPrimaryBridge(store storage.LogicalStorage, coord *PeerShipCoordinator, 
 	}
 }
 
+// SetOnDurableAck installs an optional progress callback. Safe to call
+// after construction; senders snapshot the bridge callback at ack time.
+func (b *PrimaryBridge) SetOnDurableAck(fn BridgeDurableAckCallback) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.onAck = fn
+}
+
 // StartRebuildSession is shaped like CommandExecutor.StartRebuild:
 // non-blocking, returns immediately after spawning the session
-// goroutine. The caller controls termination via FinishLiveWrites
-// (which calls Sender.Close internally) or context cancellation.
+// goroutine. After P2c-slice B-2 the session terminates on its own
+// when sink.DrainBacklog returns; the caller can still abort early
+// via context cancellation, but no explicit "go barrier" call is
+// needed.
+//
+// This method uses the in-package `senderBacklogSink` (bridging path,
+// emits frameWALEntry on the dual-lane port). Callers that want to
+// route the recovery WAL pump through a real `transport.WalShipper`
+// adapter use `StartRebuildSessionWithSink` instead — the wire format
+// alignment between the two paths is gated by P2d.
 //
 // Wire detail (POC): caller provides the dialed `conn`. Production
 // integration would dial through the existing connection pool /
 // listener registry.
-func (b *PrimaryBridge) StartRebuildSession(ctx context.Context, conn net.Conn, replicaID ReplicaID, sessionID, fromLSN, targetLSN uint64) error {
+func (b *PrimaryBridge) StartRebuildSession(ctx context.Context, conn net.Conn, replicaID ReplicaID, sessionID, fromLSN, frontierHint uint64) error {
+	return b.startRebuildSessionLocked(ctx, conn, replicaID, sessionID, fromLSN, frontierHint, nil)
+}
+
+// StartRebuildSessionWithSink is the variant that accepts an external
+// `WalShipperSink` — typically a `transport.RecoverySink` that wraps
+// the per-replica `WalShipper` and enforces architect rules 1+2
+// (emit context set BEFORE StartSession; restored AFTER EndSession).
+//
+// Pre-decision parallel-safe wiring: this method exists so production
+// callers can plug a real adapter today without changing the bridge's
+// public surface later. The actual format compatibility between the
+// adapter's emits and the receiver's decoder is gated by P2d — until
+// that decision lands, callers should typically prefer the bridging
+// `StartRebuildSession` to avoid wire-format mismatch in production.
+//
+// `sink` MUST be non-nil; nil reverts to the bridging path (use
+// `StartRebuildSession` for that explicitly).
+func (b *PrimaryBridge) StartRebuildSessionWithSink(ctx context.Context, conn net.Conn, replicaID ReplicaID, sessionID, fromLSN, frontierHint uint64, sink WalShipperSink) error {
+	if sink == nil {
+		return fmt.Errorf("recovery bridge: StartRebuildSessionWithSink: sink is required (use StartRebuildSession for the bridging path)")
+	}
+	return b.startRebuildSessionLocked(ctx, conn, replicaID, sessionID, fromLSN, frontierHint, sink)
+}
+
+// startRebuildSessionLocked is the shared implementation. When `sink`
+// is nil, it constructs a bridging `senderBacklogSink` via
+// NewSenderWithBacklogRelay (legacy compatible). When non-nil, the
+// caller-provided sink is installed via NewSenderWithSink.
+func (b *PrimaryBridge) startRebuildSessionLocked(ctx context.Context, conn net.Conn, replicaID ReplicaID, sessionID, fromLSN, frontierHint uint64, sink WalShipperSink) error {
 	// Single-flight check at the bridge level (before coordinator),
 	// so a second call observes our internal sender map first and
 	// reports the racing-bridge-call case distinctly from the
@@ -92,12 +163,31 @@ func (b *PrimaryBridge) StartRebuildSession(ctx context.Context, conn net.Conn, 
 	// caller's next read of `coord.RouteLocalWrite` deterministically
 	// observes a non-Idle phase. If StartSession fails we don't
 	// install the sender or fire OnStart.
-	if err := b.coord.StartSession(replicaID, sessionID, fromLSN, targetLSN); err != nil {
+	var err error
+	if sink == nil {
+		err = b.coord.StartSessionLegacyBand(replicaID, sessionID, fromLSN, frontierHint)
+	} else {
+		err = b.coord.StartSession(replicaID, sessionID, fromLSN, frontierHint)
+	}
+	if err != nil {
 		b.mu.Unlock()
 		return fmt.Errorf("recovery bridge: %w", err)
 	}
 
-	sender := NewSender(b.store, b.coord, conn, replicaID)
+	var sender *Sender
+	if sink == nil {
+		sender = NewSenderWithBacklogRelay(b.store, b.coord, conn, replicaID)
+	} else {
+		sender = NewSenderWithSink(b.store, b.coord, conn, replicaID, sink)
+	}
+	sender.SetOnDurableAck(func(rid ReplicaID, sid, acknowledgedLSN, primaryS, primaryH uint64) {
+		b.mu.Lock()
+		cb := b.onAck
+		b.mu.Unlock()
+		if cb != nil {
+			cb(rid, sid, acknowledgedLSN, primaryS, primaryH)
+		}
+	})
 	b.senders[replicaID] = sender
 	b.mu.Unlock()
 
@@ -105,8 +195,12 @@ func (b *PrimaryBridge) StartRebuildSession(ctx context.Context, conn net.Conn, 
 		b.onStart(replicaID, sessionID)
 	}
 
+	log.Printf("g7-debug: bridge.startRebuildSessionLocked spawning sender goroutine replica=%s sessionID=%d fromLSN=%d frontierHint=%d sinkType=%T",
+		replicaID, sessionID, fromLSN, frontierHint, sink)
 	go func() {
-		achieved, err := sender.Run(ctx, sessionID, fromLSN, targetLSN)
+		log.Printf("g7-debug: sender goroutine entry replica=%s sessionID=%d", replicaID, sessionID)
+		achieved, err := sender.Run(ctx, sessionID, fromLSN, frontierHint)
+		log.Printf("g7-debug: sender goroutine exit replica=%s sessionID=%d achieved=%d err=%v", replicaID, sessionID, achieved, err)
 		b.mu.Lock()
 		delete(b.senders, replicaID)
 		b.mu.Unlock()
@@ -115,6 +209,29 @@ func (b *PrimaryBridge) StartRebuildSession(ctx context.Context, conn net.Conn, 
 		}
 	}()
 	return nil
+}
+
+// HasActiveSession reports whether a dual-lane recovery session is
+// currently in flight for the given replica. Transport uses this as the
+// active-session gate before the legacy steady Ship path can touch the
+// resident WalShipper's emit context.
+func (b *PrimaryBridge) HasActiveSession(replicaID ReplicaID) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	sender, ok := b.senders[replicaID]
+	return ok && sender.LiveReady()
+}
+
+// HasRegisteredSession reports whether recovery currently owns this
+// peer's WAL route, regardless of whether the sender is live-ready yet.
+// This is the routing-state check; HasActiveSession is only the
+// push-ready check. Transport must not use "not live-ready" as license
+// to fall back to steady while a recovery session is registered.
+func (b *PrimaryBridge) HasRegisteredSession(replicaID ReplicaID) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	_, ok := b.senders[replicaID]
+	return ok
 }
 
 // PushLiveWrite forwards a primary-side WAL append to the active
@@ -130,28 +247,12 @@ func (b *PrimaryBridge) PushLiveWrite(replicaID ReplicaID, lba uint32, lsn uint6
 	sender, ok := b.senders[replicaID]
 	b.mu.Unlock()
 	if !ok {
-		return fmt.Errorf("recovery bridge: no active session for replica %q", replicaID)
+		return fmt.Errorf("%w for replica %q", ErrNoActiveSession, replicaID)
+	}
+	if !sender.LiveReady() {
+		return fmt.Errorf("%w for replica %q", ErrSessionNotLiveReady, replicaID)
 	}
 	return sender.PushLiveWrite(lba, lsn, data)
-}
-
-// FinishLiveWrites signals the active session for this peer that
-// no more PushLiveWrite calls will arrive — sender will drain the
-// queue, transition phase, and run the barrier round-trip. Returns
-// false if no session is active.
-//
-// Equivalent to engine deciding "this peer's recover session can
-// converge now"; in production this is triggered when the engine
-// observes barrier-eligibility conditions.
-func (b *PrimaryBridge) FinishLiveWrites(replicaID ReplicaID) bool {
-	b.mu.Lock()
-	sender, ok := b.senders[replicaID]
-	b.mu.Unlock()
-	if !ok {
-		return false
-	}
-	sender.Close()
-	return true
 }
 
 // ReplicaBridge is the replica-side adapter. One bridge instance per
@@ -213,10 +314,12 @@ func (b *ReplicaBridge) AcceptDualLaneLoop(ctx context.Context, ln net.Listener)
 			// keep running until they exit on their own.
 			return
 		}
+		log.Printf("g7-debug: replica accepted dual-lane conn from %s", conn.RemoteAddr())
 		go func(c net.Conn) {
 			subCtx, cancel := context.WithCancel(ctx)
 			defer cancel()
-			_, _ = b.Serve(subCtx, c)
+			achieved, serveErr := b.Serve(subCtx, c)
+			log.Printf("g7-debug: replica Serve exit remote=%s achieved=%d err=%v", c.RemoteAddr(), achieved, serveErr)
 		}(conn)
 	}
 }

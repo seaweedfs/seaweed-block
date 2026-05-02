@@ -1,5 +1,8 @@
 package adapter
 
+// Completion oracle: recover(a,b) band — NOT recover(a) closure.
+// See sw-block/design/recover-semantics-adjustment-plan.md §8.1.
+
 import (
 	"fmt"
 	"reflect"
@@ -19,6 +22,7 @@ type mockExecutor struct {
 	nextSession     atomic.Uint64
 	onSessionStart  OnSessionStart
 	onSessionClose  OnSessionClose // wired by adapter
+	onDurableAck    OnDurableAck
 	onFenceComplete OnFenceComplete
 	autoStart       bool
 	autoClose       bool
@@ -48,6 +52,8 @@ type fenceRecord struct {
 type startRecord struct {
 	kind      string
 	sessionID uint64
+	fromLSN   uint64
+	targetLSN uint64
 }
 
 func newMockExecutor() *mockExecutor {
@@ -71,6 +77,12 @@ func (m *mockExecutor) SetOnSessionClose(fn OnSessionClose) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.onSessionClose = fn
+}
+
+func (m *mockExecutor) SetOnDurableAck(fn OnDurableAck) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.onDurableAck = fn
 }
 
 func (m *mockExecutor) SetOnFenceComplete(fn OnFenceComplete) {
@@ -150,7 +162,10 @@ func (m *mockExecutor) StartCatchUp(replicaID string, sessionID, epoch, endpoint
 	autoStart := m.autoStart
 	autoClose := m.autoClose
 	startErr := m.catchUpErr
-	m.starts = append(m.starts, startRecord{kind: "StartCatchUp", sessionID: sessionID})
+	m.starts = append(m.starts, startRecord{
+		kind: "StartCatchUp", sessionID: sessionID,
+		fromLSN: fromLSN, targetLSN: targetLSN,
+	})
 	m.mu.Unlock()
 
 	if startErr != nil {
@@ -187,7 +202,10 @@ func (m *mockExecutor) StartRebuild(replicaID string, sessionID, epoch, endpoint
 	autoStart := m.autoStart
 	autoClose := m.autoClose
 	startErr := m.rebuildErr
-	m.starts = append(m.starts, startRecord{kind: "StartRebuild", sessionID: sessionID})
+	m.starts = append(m.starts, startRecord{
+		kind: "StartRebuild", sessionID: sessionID,
+		targetLSN: targetLSN,
+	})
 	m.mu.Unlock()
 
 	if startErr != nil {
@@ -322,6 +340,272 @@ func TestC8_SameFactsSameDecision(t *testing.T) {
 	if p1.RecoveryDecision != engine.DecisionCatchUp {
 		t.Fatalf("C8: expected catch_up, got %s", p1.RecoveryDecision)
 	}
+}
+
+func TestAdapter_DurableAckCallback_ReachesEngineProgressFact(t *testing.T) {
+	exec := newMockExecutor()
+	a := NewVolumeReplicaAdapter(exec)
+	a.OnAssignment(AssignmentInfo{
+		VolumeID:        "v1",
+		ReplicaID:       "r1",
+		Epoch:           1,
+		EndpointVersion: 1,
+		DataAddr:        "data",
+		CtrlAddr:        "ctrl",
+	})
+
+	exec.mu.Lock()
+	cb := exec.onDurableAck
+	exec.mu.Unlock()
+	if cb == nil {
+		t.Fatal("NewVolumeReplicaAdapter did not wire optional durable ack callback")
+	}
+	cb(DurableAckResult{
+		ReplicaID:      "r1",
+		SessionID:      7,
+		DurableLSN:     11,
+		PrimaryTailLSN: 5,
+		PrimaryHeadLSN: 20,
+	})
+
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if !a.state.Recovery.DurableAckKnown || a.state.Recovery.DurableAckR != 11 {
+		t.Fatalf("engine DurableAck=(%d known=%v), want (11 true)",
+			a.state.Recovery.DurableAckR, a.state.Recovery.DurableAckKnown)
+	}
+}
+
+func TestAdapter_DurableAckStall_StartsCatchUp(t *testing.T) {
+	exec := newMockExecutor()
+	exec.autoStart = false
+	exec.autoClose = false
+	a := newHealthyAdapterForDurableAck(t, exec)
+
+	cb := durableAckCallback(t, exec)
+	cb(DurableAckResult{ReplicaID: "r1", DurableLSN: 10, PrimaryTailLSN: 5, PrimaryHeadLSN: 20})
+	cb(DurableAckResult{ReplicaID: "r1", DurableLSN: 10, PrimaryTailLSN: 5, PrimaryHeadLSN: 25})
+	if hasAdapterCommand(a, "StartCatchUp") {
+		t.Fatal("durable ack lag must not start catch-up before the stalled evidence window closes")
+	}
+
+	cb(DurableAckResult{ReplicaID: "r1", DurableLSN: 10, PrimaryTailLSN: 5, PrimaryHeadLSN: 30})
+
+	start := latestStartRecord(t, exec, "StartCatchUp")
+	if start.fromLSN != 11 {
+		t.Fatalf("StartCatchUp.fromLSN=%d want durable ack R+1=11", start.fromLSN)
+	}
+	if start.targetLSN != 30 {
+		t.Fatalf("StartCatchUp frontier arg=%d want primary head 30", start.targetLSN)
+	}
+}
+
+func TestAdapter_DurableAckProgressingLag_DoesNotStartRecovery(t *testing.T) {
+	exec := newMockExecutor()
+	exec.autoStart = false
+	exec.autoClose = false
+	a := newHealthyAdapterForDurableAck(t, exec)
+
+	cb := durableAckCallback(t, exec)
+	cb(DurableAckResult{ReplicaID: "r1", DurableLSN: 10, PrimaryTailLSN: 5, PrimaryHeadLSN: 20})
+	cb(DurableAckResult{ReplicaID: "r1", DurableLSN: 11, PrimaryTailLSN: 5, PrimaryHeadLSN: 40})
+	cb(DurableAckResult{ReplicaID: "r1", DurableLSN: 12, PrimaryTailLSN: 5, PrimaryHeadLSN: 80})
+
+	if hasAdapterCommand(a, "StartCatchUp") || hasAdapterCommand(a, "StartRebuild") {
+		t.Fatalf("progressing lag must remain feeder-owned; commands=%v", a.CommandLog())
+	}
+}
+
+func TestAdapter_DurableAckBelowRetention_StartsRebuild(t *testing.T) {
+	exec := newMockExecutor()
+	exec.autoStart = false
+	exec.autoClose = false
+	_ = newHealthyAdapterForDurableAck(t, exec)
+
+	cb := durableAckCallback(t, exec)
+	cb(DurableAckResult{ReplicaID: "r1", DurableLSN: 4, PrimaryTailLSN: 5, PrimaryHeadLSN: 30})
+
+	start := latestStartRecord(t, exec, "StartRebuild")
+	if start.targetLSN != 30 {
+		t.Fatalf("StartRebuild frontier arg=%d want primary head 30", start.targetLSN)
+	}
+}
+
+func TestAdapter_PinUnderRetentionClose_DoesNotRetrySameLineage(t *testing.T) {
+	exec := newMockExecutor()
+	exec.autoClose = false
+	exec.probeResults["r1"] = ProbeResult{
+		ReplicaID:         "r1",
+		Success:           true,
+		EndpointVersion:   1,
+		TransportEpoch:    1,
+		ReplicaFlushedLSN: 10,
+		PrimaryTailLSN:    5,
+		PrimaryHeadLSN:    30,
+	}
+	a := NewVolumeReplicaAdapter(exec)
+	a.OnAssignment(AssignmentInfo{
+		VolumeID:        "v1",
+		ReplicaID:       "r1",
+		Epoch:           1,
+		EndpointVersion: 1,
+		DataAddr:        "data",
+		CtrlAddr:        "ctrl",
+	})
+
+	sessionID := waitForLatestSessionID(t, exec, "StartCatchUp")
+	beforeStarts := countStarts(exec, "StartCatchUp") + countStarts(exec, "StartRebuild")
+
+	exec.fireClose(SessionCloseResult{
+		ReplicaID:   "r1",
+		SessionID:   sessionID,
+		Success:     false,
+		FailureKind: engine.RecoveryFailurePinUnderRetention,
+		FailReason:  "pin under retention: durable ack below primary S",
+	})
+
+	afterStarts := countStarts(exec, "StartCatchUp") + countStarts(exec, "StartRebuild")
+	if afterStarts != beforeStarts {
+		t.Fatalf("PinUnderRetention retried same lineage: starts before=%d after=%d log=%v",
+			beforeStarts, afterStarts, exec.getCommands())
+	}
+	if !hasAdapterCommand(a, "PublishDegraded") {
+		t.Fatalf("PinUnderRetention must publish degraded; commands=%v", a.CommandLog())
+	}
+	if got := a.Projection().Mode; got == engine.ModeHealthy {
+		t.Fatalf("PinUnderRetention must not leave replica healthy")
+	}
+}
+
+func TestAdapter_StartCatchUp_UsesFrontierHintOverLegacyTarget(t *testing.T) {
+	exec := newMockExecutor()
+	exec.autoStart = false
+	exec.autoClose = false
+	a := NewVolumeReplicaAdapter(exec)
+
+	cmd := engine.StartCatchUp{
+		ReplicaID:       "r1",
+		Epoch:           1,
+		EndpointVersion: 1,
+		FromLSN:         5,
+		FrontierHint:    123,
+		TargetLSN:       999,
+	}
+	events, queued := a.prepareQueuedCommands([]engine.Command{cmd})
+	if len(events) != 1 || len(queued) != 1 {
+		t.Fatalf("prepareQueuedCommands produced events=%d queued=%d, want 1/1", len(events), len(queued))
+	}
+	prepared, ok := events[0].(engine.SessionPrepared)
+	if !ok {
+		t.Fatalf("event type = %T, want engine.SessionPrepared", events[0])
+	}
+	if prepared.FrontierHint != 123 || prepared.TargetLSN != 123 {
+		t.Fatalf("SessionPrepared hints = frontier:%d legacy:%d, want 123/123",
+			prepared.FrontierHint, prepared.TargetLSN)
+	}
+
+	a.executeCommand(queued[0])
+	exec.mu.Lock()
+	defer exec.mu.Unlock()
+	if len(exec.starts) != 1 {
+		t.Fatalf("executor starts=%d, want 1", len(exec.starts))
+	}
+	got := exec.starts[0]
+	if got.fromLSN != 5 {
+		t.Fatalf("executor fromLSN=%d, want 5", got.fromLSN)
+	}
+	if got.targetLSN != 123 {
+		t.Fatalf("executor legacy target arg=%d, want FrontierHint 123", got.targetLSN)
+	}
+}
+
+func newHealthyAdapterForDurableAck(t *testing.T, exec *mockExecutor) *VolumeReplicaAdapter {
+	t.Helper()
+	exec.probeResults["r1"] = ProbeResult{
+		ReplicaID:         "r1",
+		Success:           true,
+		EndpointVersion:   1,
+		TransportEpoch:    1,
+		ReplicaFlushedLSN: 20,
+		PrimaryTailLSN:    5,
+		PrimaryHeadLSN:    20,
+	}
+	a := NewVolumeReplicaAdapter(exec)
+	a.OnAssignment(AssignmentInfo{
+		VolumeID:        "v1",
+		ReplicaID:       "r1",
+		Epoch:           1,
+		EndpointVersion: 1,
+		DataAddr:        "data",
+		CtrlAddr:        "ctrl",
+	})
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if a.Projection().Mode == engine.ModeHealthy {
+			return a
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("adapter did not reach healthy before durable ack test; commands=%v trace=%v",
+		a.CommandLog(), a.Trace())
+	return nil
+}
+
+func durableAckCallback(t *testing.T, exec *mockExecutor) OnDurableAck {
+	t.Helper()
+	exec.mu.Lock()
+	defer exec.mu.Unlock()
+	if exec.onDurableAck == nil {
+		t.Fatal("durable ack callback was not wired")
+	}
+	return exec.onDurableAck
+}
+
+func latestStartRecord(t *testing.T, exec *mockExecutor, kind string) startRecord {
+	t.Helper()
+	exec.mu.Lock()
+	defer exec.mu.Unlock()
+	for i := len(exec.starts) - 1; i >= 0; i-- {
+		if exec.starts[i].kind == kind {
+			return exec.starts[i]
+		}
+	}
+	t.Fatalf("no %s start record; commands=%v starts=%v", kind, exec.commands, exec.starts)
+	return startRecord{}
+}
+
+func waitForLatestSessionID(t *testing.T, exec *mockExecutor, kind string) uint64 {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if sid := exec.latestSessionID(kind); sid != 0 {
+			return sid
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("no %s session started; commands=%v", kind, exec.getCommands())
+	return 0
+}
+
+func countStarts(exec *mockExecutor, kind string) int {
+	exec.mu.Lock()
+	defer exec.mu.Unlock()
+	n := 0
+	for _, start := range exec.starts {
+		if start.kind == kind {
+			n++
+		}
+	}
+	return n
+}
+
+func hasAdapterCommand(a *VolumeReplicaAdapter, kind string) bool {
+	for _, got := range a.CommandLog() {
+		if got == kind {
+			return true
+		}
+	}
+	return false
 }
 
 // --- C9: Timer only triggers probe, never direct recovery ---

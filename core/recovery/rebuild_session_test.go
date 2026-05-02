@@ -1,5 +1,9 @@
 package recovery
 
+// Completion oracle: recover(a) layer-1 witness where noted; older
+// band-specific tests are retained only as recover(a,b) coverage.
+// See sw-block/design/recover-semantics-adjustment-plan.md §8.1.
+
 import (
 	"bytes"
 	"sync"
@@ -69,8 +73,12 @@ func TestRebuildSession_BaseFirstThenWALOverwrites(t *testing.T) {
 	}
 }
 
-// INV-SESSION-COMPLETE-ON-CONJUNCTION-LAYER1: TryComplete = baseDone ∧
-// walApplied ≥ targetLSN. Three negative cases + positive case.
+// INV-SESSION-COMPLETE-ON-CONJUNCTION-LAYER1 (A-class wave per
+// recover-semantics-adjustment-plan §1):
+//
+//	TryComplete = baseDone ∧ barrierWitnessed
+//
+// Three negative cases (any conjunct missing) + positive case.
 func TestRebuildSession_TryComplete_Conjunction(t *testing.T) {
 	s, _ := newSession(t, 16, 100)
 
@@ -82,26 +90,32 @@ func TestRebuildSession_TryComplete_Conjunction(t *testing.T) {
 	// baseDone but WAL not yet at target.
 	s.MarkBaseComplete()
 	_ = s.ApplyWALEntry(WALKindBacklog, 0, makeBlock(0x01), 50)
-	if _, done := s.TryComplete(); done {
-		t.Fatal("baseDone=true, walApplied=50 < target=100: should not be done")
+	s.WitnessBarrier()
+	achieved, done := s.TryComplete()
+	if !done {
+		t.Fatal("baseDone=true ∧ barrierWitnessed=true should complete even when walApplied < target")
+	}
+	if achieved != 50 {
+		t.Fatalf("achievedLSN=%d want 50 observation", achieved)
 	}
 
 	// WAL at target but baseDone reset wouldn't be possible — instead
 	// check the symmetric case in a separate session.
 	s2, _ := newSession(t, 16, 100)
 	_ = s2.ApplyWALEntry(WALKindBacklog, 0, makeBlock(0x01), 100)
+	s2.WitnessBarrier()
 	if _, done := s2.TryComplete(); done {
 		t.Fatal("walApplied=target but !baseDone: should not be done")
 	}
 
-	// Both: should complete.
-	_ = s.ApplyWALEntry(WALKindBacklog, 0, makeBlock(0x02), 100)
-	achieved, done := s.TryComplete()
-	if !done {
-		t.Fatal("baseDone ∧ walApplied >= target: TryComplete should be done")
-	}
-	if achieved < 100 {
-		t.Fatalf("achievedLSN=%d want >= 100", achieved)
+	// §IV.2.1 A-class: baseDone ∧ walApplied≥target but no barrier
+	// witness — must NOT complete (recover(a,b) would have, recover(a)
+	// rejects: replica cannot independently claim closure).
+	s3, _ := newSession(t, 16, 100)
+	s3.MarkBaseComplete()
+	_ = s3.ApplyWALEntry(WALKindBacklog, 0, makeBlock(0x01), 100)
+	if _, done := s3.TryComplete(); done {
+		t.Fatal("baseDone ∧ walApplied≥target but !barrierWitnessed: should NOT be done (§IV.2.1 A-class)")
 	}
 }
 
@@ -109,6 +123,7 @@ func TestRebuildSession_TryComplete_LatchesCompleted(t *testing.T) {
 	s, _ := newSession(t, 16, 50)
 	s.MarkBaseComplete()
 	_ = s.ApplyWALEntry(WALKindBacklog, 0, makeBlock(0x01), 50)
+	s.WitnessBarrier()
 	if _, done := s.TryComplete(); !done {
 		t.Fatal("expected done")
 	}
@@ -209,8 +224,11 @@ func TestRebuildSession_Status_Snapshot(t *testing.T) {
 	s.BaseBatchAcked(8)
 
 	st := s.Status()
+	if st.BaseFrontierHint != 200 {
+		t.Errorf("BaseFrontierHint=%d want 200", st.BaseFrontierHint)
+	}
 	if st.TargetLSN != 200 {
-		t.Errorf("TargetLSN=%d want 200", st.TargetLSN)
+		t.Errorf("TargetLSN legacy alias=%d want 200", st.TargetLSN)
 	}
 	if st.WALApplied != 100 {
 		t.Errorf("WALApplied=%d want 100", st.WALApplied)
@@ -219,7 +237,7 @@ func TestRebuildSession_Status_Snapshot(t *testing.T) {
 		t.Error("BaseDone want true")
 	}
 	if st.Completed {
-		t.Error("Completed want false (walApplied < target)")
+		t.Error("Completed want false (!barrierWitnessed)")
 	}
 	if st.BaseAckedPrefix != 8 {
 		t.Errorf("BaseAckedPrefix=%d want 8", st.BaseAckedPrefix)

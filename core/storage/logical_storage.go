@@ -113,6 +113,35 @@ type LogicalStorage interface {
 	// path so frontier tracking stays coherent with the source.
 	ApplyEntry(lba uint32, data []byte, lsn uint64) error
 
+	// WriteExtentDirect installs one block's bytes directly into the
+	// substrate's extent, bypassing the WAL apply path entirely. Used
+	// by the recovery receiver's BASE lane (rebuild snapshot install)
+	// so the substrate's own per-LBA stale-skip / WAL-record machinery
+	// does NOT interpret BASE bytes as a competing-LSN write.
+	//
+	// Per v3-recovery-algorithm-consensus.md §6.10:
+	//   - INV-RECV-BITMAP-CORE: the receiver's per-session bitmap is
+	//     the SOLE arbiter of "BASE vs WAL won this LBA"; substrate
+	//     stale-skip is irrelevant for BASE because BASE doesn't go
+	//     through the WAL apply path.
+	//   - BASE writes are LSN-less at this layer. Substrates that
+	//     internally key records by LSN MUST synthesize a sensible
+	//     non-conflicting LSN (e.g., 0 or below current retention) or
+	//     write to a pure extent surface; the on-wire BASE frame
+	//     carries no LSN.
+	//
+	// Frontier (R/S/H boundaries) is NOT advanced by this call —
+	// BASE-only sessions that need post-rebuild frontier reporting
+	// at >= fromLSN MUST pair this with an explicit AdvanceFrontier
+	// (the recovery layer does this in MarkBaseComplete).
+	//
+	// Returns an error if the substrate cannot honor the bypass
+	// semantics (e.g., a future read-only WAL substrate with no
+	// extent surface). Callers MUST surface the error rather than
+	// silently fall back to ApplyEntry — fallback re-introduces the
+	// stale-skip race the spec explicitly forbids.
+	WriteExtentDirect(lba uint32, data []byte) error
+
 	// AllBlocks snapshots every written LBA's current bytes. Used by
 	// the rebuild server to enumerate what to ship.
 	AllBlocks() map[uint32][]byte

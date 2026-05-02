@@ -42,18 +42,46 @@ const (
 	MsgRebuildDone  byte = 0x05 // primary → replica: rebuild complete
 	MsgBarrierReq   byte = 0x06 // primary → replica: sync request
 	MsgBarrierResp  byte = 0x07 // replica → primary: sync response
+	// MsgRecoveryLaneStart marks the current legacy SWRP connection as
+	// recovery-lane before any MsgShipEntry frames arrive. It replaces
+	// payload-derived lane guessing from RecoveryLineage.TargetLSN.
+	MsgRecoveryLaneStart byte = 0x08
 )
 
 // RecoveryLineage binds a mutating recovery stream to one accepted recovery
 // contract. The tuple is ordered by semantic authority:
-// epoch -> endpointVersion -> sessionID, with targetLSN frozen by the engine.
-// All four fields MUST be >= 1; zero-valued identity lineage is rejected
+// epoch -> endpointVersion -> sessionID, with a frontier hint frozen by the
+// engine. The fourth wire slot is still named TargetLSN for compatibility,
+// but it is no longer a completion predicate or lane signal.
+// All four wire fields MUST be >= 1; zero-valued identity lineage is rejected
 // at engine event ingestion before any recovery command is emitted.
 type RecoveryLineage struct {
 	SessionID       uint64
 	Epoch           uint64
 	EndpointVersion uint64
-	TargetLSN       uint64
+	FrontierHint    uint64
+	TargetLSN       uint64 // legacy wire alias for FrontierHint
+}
+
+func (l RecoveryLineage) EffectiveFrontierHint() uint64 {
+	if l.FrontierHint != 0 {
+		return l.FrontierHint
+	}
+	return l.TargetLSN
+}
+
+func (l RecoveryLineage) WireLineage() RecoveryLineage {
+	hint := l.EffectiveFrontierHint()
+	l.FrontierHint = 0
+	l.TargetLSN = hint
+	return l
+}
+
+func (l RecoveryLineage) Equivalent(other RecoveryLineage) bool {
+	return l.SessionID == other.SessionID &&
+		l.Epoch == other.Epoch &&
+		l.EndpointVersion == other.EndpointVersion &&
+		l.EffectiveFrontierHint() == other.EffectiveFrontierHint()
 }
 
 // ShipEntry is one replicated block write.
@@ -75,7 +103,7 @@ type ShipEntry struct {
 // in engine session truth. See `feedback_t4c_probe_lineage_option_d.md`
 // (architect Option D resolution).
 //
-// Wire (T4c-1): [32B lineage (SessionID, Epoch, EndpointVersion, TargetLSN)] — 32 bytes.
+// Wire (T4c-1): [32B lineage (SessionID, Epoch, EndpointVersion, frontierHint)] — 32 bytes.
 type ProbeRequest struct {
 	Lineage RecoveryLineage
 }
@@ -172,13 +200,13 @@ func ReadMsg(conn net.Conn) (msgType byte, payload []byte, err error) {
 }
 
 // EncodeLineage serializes a recovery lineage.
-// Wire: [8B sessionID][8B epoch][8B endpointVersion][8B targetLSN]
+// Wire: [8B sessionID][8B epoch][8B endpointVersion][8B frontierHint]
 func EncodeLineage(l RecoveryLineage) []byte {
 	buf := make([]byte, 32)
 	binary.BigEndian.PutUint64(buf[0:8], l.SessionID)
 	binary.BigEndian.PutUint64(buf[8:16], l.Epoch)
 	binary.BigEndian.PutUint64(buf[16:24], l.EndpointVersion)
-	binary.BigEndian.PutUint64(buf[24:32], l.TargetLSN)
+	binary.BigEndian.PutUint64(buf[24:32], l.EffectiveFrontierHint())
 	return buf
 }
 
@@ -253,9 +281,9 @@ func DecodeProbeReq(buf []byte) (ProbeRequest, error) {
 		return ProbeRequest{}, fmt.Errorf("transport: probe request lineage decode: %w", err)
 	}
 	if lineage.SessionID == 0 || lineage.Epoch == 0 ||
-		lineage.EndpointVersion == 0 || lineage.TargetLSN == 0 {
-		return ProbeRequest{}, fmt.Errorf("transport: probe request has zero-valued lineage field (sessionID=%d epoch=%d endpointVersion=%d targetLSN=%d)",
-			lineage.SessionID, lineage.Epoch, lineage.EndpointVersion, lineage.TargetLSN)
+		lineage.EndpointVersion == 0 || lineage.EffectiveFrontierHint() == 0 {
+		return ProbeRequest{}, fmt.Errorf("transport: probe request has zero-valued lineage field (sessionID=%d epoch=%d endpointVersion=%d frontierHint=%d)",
+			lineage.SessionID, lineage.Epoch, lineage.EndpointVersion, lineage.EffectiveFrontierHint())
 	}
 	return ProbeRequest{Lineage: lineage}, nil
 }
@@ -286,9 +314,9 @@ func DecodeProbeResp(buf []byte) (ProbeResponse, error) {
 		return ProbeResponse{}, fmt.Errorf("transport: probe response lineage decode: %w", err)
 	}
 	if lineage.SessionID == 0 || lineage.Epoch == 0 ||
-		lineage.EndpointVersion == 0 || lineage.TargetLSN == 0 {
-		return ProbeResponse{}, fmt.Errorf("transport: probe response has zero-valued lineage field (sessionID=%d epoch=%d endpointVersion=%d targetLSN=%d)",
-			lineage.SessionID, lineage.Epoch, lineage.EndpointVersion, lineage.TargetLSN)
+		lineage.EndpointVersion == 0 || lineage.EffectiveFrontierHint() == 0 {
+		return ProbeResponse{}, fmt.Errorf("transport: probe response has zero-valued lineage field (sessionID=%d epoch=%d endpointVersion=%d frontierHint=%d)",
+			lineage.SessionID, lineage.Epoch, lineage.EndpointVersion, lineage.EffectiveFrontierHint())
 	}
 	return ProbeResponse{
 		Lineage:   lineage,

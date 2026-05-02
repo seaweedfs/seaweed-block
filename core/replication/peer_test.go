@@ -1,13 +1,19 @@
 package replication
 
+// Completion oracle: recover(a,b) band — NOT recover(a) closure.
+// See sw-block/design/recover-semantics-adjustment-plan.md §8.1.
+
 import (
 	"bytes"
 	"context"
+	"io"
 	"net"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/seaweedfs/seaweed-block/core/recovery"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 	"github.com/seaweedfs/seaweed-block/core/transport"
 )
@@ -50,6 +56,20 @@ func setupPeerWithRealReplica(t *testing.T) (*ReplicaPeer, *storage.BlockStore, 
 	return peer, replicaStore, listener
 }
 
+func waitReplicaBlock(t *testing.T, replica *storage.BlockStore, lba uint32, want []byte) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		got, _ := replica.Read(lba)
+		if bytes.Equal(got, want) {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	got, _ := replica.Read(lba)
+	t.Fatalf("replica LBA %d data mismatch: got %x want %x", lba, got, want)
+}
+
 // TestReplicaPeer_ShipEntry_Happy — one entry through a fully-wired
 // peer arrives at the replica byte-exact; peer stays Healthy.
 func TestReplicaPeer_ShipEntry_Happy(t *testing.T) {
@@ -82,7 +102,8 @@ func TestReplicaPeer_ShipEntry_Happy(t *testing.T) {
 // TestReplicaPeer_ShipEntry_ConnFailure_MarksDegraded — the forward-
 // carry CARRY-1 pin test from T4a-2. On ship error, peer must mark
 // Degraded + (implicitly) Invalidate. Subsequent ShipEntry on the
-// same peer returns error without touching the wire (T4a state gate).
+// same peer is retained without touching the wire (health state is not
+// the WAL egress owner; future recovery will replay from primary WAL).
 //
 // This closes catalogue §3.2.1 C4 (no-hard-stop / error-return
 // handoff) from PARTIAL to DONE.
@@ -129,17 +150,196 @@ func TestReplicaPeer_ShipEntry_ConnFailure_MarksDegraded(t *testing.T) {
 		t.Fatalf("expected ReplicaDegraded after ship failure, got %s", peer.State())
 	}
 
-	// Subsequent ShipEntry is rejected at the peer without touching
-	// the wire (peer-state gate). This is the "no-hard-stop" shape:
-	// failure degrades the peer, and upstream callers see a cheap
-	// error instead of a real dial attempt every time.
+	// Subsequent ShipEntry is retained without touching the wire. This
+	// is the single-egress shape: Degraded remains a health fact, not a
+	// second WAL-routing decision.
 	err = peer.ShipEntry(context.Background(), transport.RecoveryLineage{}, 1, 2, data)
-	if err == nil {
-		t.Fatal("Degraded peer should reject subsequent ShipEntry, got nil")
+	if err != nil {
+		t.Fatalf("Degraded peer live write should be retained for recovery replay, got error: %v", err)
 	}
-	if !strings.Contains(err.Error(), "degraded") {
-		t.Fatalf("expected 'degraded' error, got: %v", err)
+}
+
+type peerRecordingSessionSink struct {
+	started chan struct{}
+	release chan struct{}
+	ended   chan struct{}
+
+	mu      sync.Mutex
+	entries int
+}
+
+func newPeerRecordingSessionSink() *peerRecordingSessionSink {
+	return &peerRecordingSessionSink{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+		ended:   make(chan struct{}),
 	}
+}
+
+func (s *peerRecordingSessionSink) StartSession(fromLSN uint64) error {
+	_ = fromLSN
+	close(s.started)
+	return nil
+}
+
+func (s *peerRecordingSessionSink) DrainBacklog(ctx context.Context) error {
+	select {
+	case <-s.release:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (s *peerRecordingSessionSink) EndSession() {
+	select {
+	case <-s.ended:
+	default:
+		close(s.ended)
+	}
+}
+
+func (s *peerRecordingSessionSink) NotifyAppend(lba uint32, lsn uint64, data []byte) error {
+	_, _, _ = lba, lsn, data
+	s.mu.Lock()
+	s.entries++
+	s.mu.Unlock()
+	return nil
+}
+
+func (s *peerRecordingSessionSink) Entries() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.entries
+}
+
+// TestReplicaPeer_ShipEntry_DegradedWithActiveSession_RoutesSessionLane
+// pins the production call path for the global single-emitter rule.
+// Hardware #5 showed that executor-level gates are too low: degraded
+// peers used to reject before BlockExecutor.Ship was reached. Active
+// recovery sessions must get first refusal even when the peer's coarse
+// state is Degraded.
+func TestReplicaPeer_ShipEntry_DegradedWithActiveSession_RoutesSessionLane(t *testing.T) {
+	primary := storage.NewBlockStore(8, 4096)
+	coord := recovery.NewPeerShipCoordinator()
+	replicaID := "r-peer-session"
+	exec := transport.NewBlockExecutorWithDualLane(primary, "127.0.0.1:1", "127.0.0.1:2", coord, recovery.ReplicaID(replicaID))
+	target := ReplicaTarget{
+		ReplicaID:       replicaID,
+		DataAddr:        "127.0.0.1:1",
+		ControlAddr:     "127.0.0.1:1",
+		Epoch:           3,
+		EndpointVersion: 1,
+	}
+	peer, err := NewReplicaPeer(target, exec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = peer.Close() })
+	peer.SetState(ReplicaDegraded)
+
+	sessionClient, sessionServer := net.Pipe()
+	t.Cleanup(func() {
+		_ = sessionClient.Close()
+		_ = sessionServer.Close()
+	})
+	go func() {
+		_, _ = io.Copy(io.Discard, sessionServer)
+	}()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	sink := newPeerRecordingSessionSink()
+	bridge, _, ok := exec.DualLanePrimaryBridge()
+	if !ok {
+		t.Fatal("missing dual-lane bridge")
+	}
+	if err := bridge.StartRebuildSessionWithSink(ctx, sessionClient, recovery.ReplicaID(replicaID), 77, 10, 10, sink); err != nil {
+		t.Fatalf("start active session: %v", err)
+	}
+	select {
+	case <-sink.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("session sink did not start")
+	}
+
+	data := make([]byte, 4096)
+	if err := peer.ShipEntry(context.Background(), transport.RecoveryLineage{}, 4, 11, data); err != nil {
+		t.Fatalf("ShipEntry on degraded peer with active session: %v", err)
+	}
+	if got := sink.Entries(); got != 1 {
+		t.Fatalf("ShipEntry routed %d entries to active session; want 1", got)
+	}
+
+	cancel()
+	_ = sessionClient.Close()
+	_ = sessionServer.Close()
+	close(sink.release)
+}
+
+func TestReplicaPeer_RefreshLiveShipSessionAfter_RotatesPastRecoverySession(t *testing.T) {
+	peer, _, _ := setupPeerWithRealReplica(t)
+	oldSessionID := peer.sessionID
+	if oldSessionID >= 500 {
+		t.Fatalf("precondition: live session already beyond recovery marker: %d", oldSessionID)
+	}
+	if !peer.executor.HasSession(oldSessionID) {
+		t.Fatalf("precondition: old live session %d not registered", oldSessionID)
+	}
+
+	if err := peer.RefreshLiveShipSessionAfter(500, 6001, "test recovery completed"); err != nil {
+		t.Fatalf("RefreshLiveShipSessionAfter: %v", err)
+	}
+	if peer.sessionID <= 500 {
+		t.Fatalf("new live sessionID=%d want > recovery session 500", peer.sessionID)
+	}
+	if peer.lineage.SessionID != peer.sessionID {
+		t.Fatalf("lineage SessionID=%d does not match peer sessionID=%d", peer.lineage.SessionID, peer.sessionID)
+	}
+	if peer.lineage.TargetLSN != liveShipTargetLSN {
+		t.Fatalf("lineage TargetLSN=%d want live sentinel %d", peer.lineage.TargetLSN, liveShipTargetLSN)
+	}
+	if peer.executor.HasSession(oldSessionID) {
+		t.Fatalf("old live session %d still registered after refresh", oldSessionID)
+	}
+	if !peer.executor.HasSession(peer.sessionID) {
+		t.Fatalf("new live session %d not registered", peer.sessionID)
+	}
+}
+
+func TestReplicaPeer_PostRecoveryFirstLiveWrite_UsesRefreshedSession(t *testing.T) {
+	peer, replica, _ := setupPeerWithRealReplica(t)
+	oldSessionID := peer.sessionID
+
+	first := bytes.Repeat([]byte{0x11}, 4096)
+	if err := peer.ShipEntry(context.Background(), transport.RecoveryLineage{}, 2, 1, first); err != nil {
+		t.Fatalf("pre-recovery ShipEntry: %v", err)
+	}
+	waitReplicaBlock(t, replica, 2, first)
+
+	recoverySessionID := oldSessionID + 500
+	recoveryLineage := transport.RecoveryLineage{
+		SessionID:       recoverySessionID,
+		Epoch:           peer.target.Epoch,
+		EndpointVersion: peer.target.EndpointVersion,
+		TargetLSN:       6001,
+	}
+	if err := peer.executor.FenceSync(peer.target.ReplicaID, recoveryLineage); err != nil {
+		t.Fatalf("establish recovery lineage: %v", err)
+	}
+
+	if err := peer.RefreshLiveShipSessionAfter(recoveryLineage.SessionID, recoveryLineage.TargetLSN, "test recovery completed"); err != nil {
+		t.Fatalf("RefreshLiveShipSessionAfter: %v", err)
+	}
+	if peer.executor.HasSession(oldSessionID) {
+		t.Fatalf("old live session %d still registered after refresh", oldSessionID)
+	}
+
+	after := bytes.Repeat([]byte{0x22}, 4096)
+	if err := peer.ShipEntry(context.Background(), transport.RecoveryLineage{}, 3, 6002, after); err != nil {
+		t.Fatalf("post-recovery ShipEntry: %v", err)
+	}
+	waitReplicaBlock(t, replica, 3, after)
 }
 
 // TestReplicaPeer_Invalidate_MovesToDegraded — direct call to

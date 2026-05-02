@@ -1,15 +1,18 @@
 package recovery
 
+// Completion oracle: recover(a,b) band — NOT recover(a) closure.
+// See sw-block/design/recover-semantics-adjustment-plan.md §8.1.
+
 import "testing"
 
 const r1 ReplicaID = "r1"
 const r2 ReplicaID = "r2"
 
 // CHK-PHASE-NEVER-STEADY-BEFORE-DRAIN: cannot transition until BOTH
-// shipCursor ≥ target AND baseDone hold.
+// shipCursor ≥ frontierHint AND baseDone hold.
 func TestCoordinator_PhaseTransitionRequiresDrainAndBaseDone(t *testing.T) {
 	c := NewPeerShipCoordinator()
-	if err := c.StartSession(r1, 7, /*from*/ 100, /*target*/ 200); err != nil {
+	if err := c.StartSession(r1, 7, 100, 200); err != nil {
 		t.Fatalf("StartSession: %v", err)
 	}
 	if got := c.Phase(r1); got != PhaseDrainingHistorical {
@@ -26,7 +29,7 @@ func TestCoordinator_PhaseTransitionRequiresDrainAndBaseDone(t *testing.T) {
 		t.Fatalf("RecordShipped: %v", err)
 	}
 	if !c.BacklogDrained(r1) {
-		t.Fatal("BacklogDrained should be true after RecordShipped(target)")
+		t.Fatal("BacklogDrained should be true after RecordShipped(frontierHint)")
 	}
 	if c.TryAdvanceToSteadyLive(r1) {
 		t.Fatal("transition should fail: drained but !baseDone")
@@ -75,23 +78,81 @@ func TestCoordinator_SingleFlightPerReplica(t *testing.T) {
 	}
 }
 
-// CHK-BARRIER-BEFORE-CLOSE: CanEmitSessionComplete enforces achieved ≥ target.
+// CHK-BARRIER-BEFORE-CLOSE: CanEmitSessionComplete enforces the
+// §IV.2.1 A-class conjunct (recover-semantics-adjustment-plan §1):
+//
+//	phase != Idle ∧ baseDone
+//	∧ (walLegOkWitnessed ? walLegOkAtBarrier : explicit legacy opt-in ∧ achieved ≥ frontierHint)
 func TestCoordinator_CanEmitSessionComplete(t *testing.T) {
 	c := NewPeerShipCoordinator()
 	_ = c.StartSession(r1, 7, 100, 200)
 
-	if c.CanEmitSessionComplete(r1, 199) {
-		t.Fatal("achievedLSN < target: should refuse")
+	// !baseDone: refuse (§IV.2.1 A-class).
+	if c.CanEmitSessionComplete(r1, 250) {
+		t.Fatal("!baseDone: should refuse (A-class conjunct)")
 	}
-	if !c.CanEmitSessionComplete(r1, 200) {
-		t.Fatal("achievedLSN == target: should permit")
+
+	_ = c.MarkBaseDone(r1)
+
+	if c.CanEmitSessionComplete(r1, 250) {
+		t.Fatal("missing walLegOk witness on normal session: should fail closed")
 	}
-	if !c.CanEmitSessionComplete(r1, 250) {
-		t.Fatal("achievedLSN > target: should permit")
+
+	legacy := NewPeerShipCoordinator()
+	_ = legacy.StartSessionLegacyBand(r1, 7, 100, 200)
+	_ = legacy.MarkBaseDone(r1)
+	if legacy.CanEmitSessionComplete(r1, 199) {
+		t.Fatal("legacy opt-in achievedLSN < frontierHint: should refuse")
+	}
+	if !legacy.CanEmitSessionComplete(r1, 200) {
+		t.Fatal("legacy opt-in achievedLSN == frontierHint ∧ baseDone: should permit")
+	}
+	if !legacy.CanEmitSessionComplete(r1, 250) {
+		t.Fatal("legacy opt-in achievedLSN > target: should permit")
 	}
 	// Idle peer: never permitted.
 	if c.CanEmitSessionComplete(r2, 999) {
 		t.Fatal("idle peer: CanEmitSessionComplete should refuse")
+	}
+}
+
+func TestCoordinator_CanEmitSessionComplete_WitnessIgnoresTargetBand(t *testing.T) {
+	c := NewPeerShipCoordinator()
+	_ = c.StartSession(r1, 7, 100, 200)
+	_ = c.MarkBaseDone(r1)
+
+	if err := c.RecordBarrierWalLegOk(r1, true); err != nil {
+		t.Fatalf("RecordBarrierWalLegOk: %v", err)
+	}
+	if !c.CanEmitSessionComplete(r1, 199) {
+		t.Fatal("walLegOk witness should authorize close even when achievedLSN is below target band")
+	}
+
+	if err := c.RecordBarrierWalLegOk(r1, false); err != nil {
+		t.Fatalf("RecordBarrierWalLegOk(false): %v", err)
+	}
+	if c.CanEmitSessionComplete(r1, 1_000_000) {
+		t.Fatal("walLegOk=false witness must refuse even with huge achievedLSN")
+	}
+}
+
+func TestCoordinator_CanEmitSessionComplete_MissingWitnessRequiresExplicitLegacyOptIn(t *testing.T) {
+	normal := NewPeerShipCoordinator()
+	_ = normal.StartSession(r1, 7, 100, 200)
+	_ = normal.MarkBaseDone(r1)
+	if normal.CanEmitSessionComplete(r1, 1_000_000) {
+		t.Fatal("normal session without witness must fail closed even with huge achievedLSN")
+	}
+
+	legacy := NewPeerShipCoordinator()
+	_ = legacy.StartSessionLegacyBand(r1, 7, 100, 200)
+	_ = legacy.MarkBaseDone(r1)
+	if !legacy.CanEmitSessionComplete(r1, 200) {
+		t.Fatal("legacy opt-in should preserve band oracle")
+	}
+	st, _ := legacy.Status(r1)
+	if !st.AllowLegacyBandClose {
+		t.Fatal("Status.AllowLegacyBandClose=false for StartSessionLegacyBand")
 	}
 }
 
@@ -292,12 +353,17 @@ func TestCoordinator_StartSession_ArgValidation(t *testing.T) {
 	if err := c.StartSession(r1, 0, 100, 200); err == nil {
 		t.Error("sessionID=0 should error")
 	}
-	if err := c.StartSession(r1, 1, 200, 100); err == nil {
-		t.Error("targetLSN < fromLSN should error")
+	// BasePinLSN/fromLSN and the legacy frontier-hint band are
+	// independent. A primary sync taken at rebuild start may produce a
+	// base pin higher than an older compatibility hint; that must not
+	// fail session registration.
+	if err := c.StartSession(r1, 1, 200, 100); err != nil {
+		t.Errorf("frontier hint below fromLSN/base pin should be legal: %v", err)
 	}
-	// Equal targets are legal (zero-LSN-progress sessions).
+	c.EndSession(r1)
+	// Equal fromLSN/frontierHint is legal (zero-LSN-progress session).
 	if err := c.StartSession(r1, 1, 100, 100); err != nil {
-		t.Errorf("targetLSN == fromLSN: %v", err)
+		t.Errorf("frontierHint == fromLSN: %v", err)
 	}
 }
 
@@ -315,5 +381,51 @@ func TestCoordinator_IdlePeer_OperationsError(t *testing.T) {
 	}
 	if c.BacklogDrained(r1) {
 		t.Error("BacklogDrained on idle: want false")
+	}
+}
+
+// TestCoordinator_NextBarrierCut_MonotonicPerSession — Option B
+// (plan §8.2.6): per-session counter starts at 1, increments per
+// call within a session, resets to 0 on next StartSession.
+func TestCoordinator_NextBarrierCut_MonotonicPerSession(t *testing.T) {
+	c := NewPeerShipCoordinator()
+
+	// Pre-session: error.
+	if cut, err := c.NextBarrierCut(r1); err == nil || cut != 0 {
+		t.Errorf("NextBarrierCut on idle: cut=%d err=%v want 0+error", cut, err)
+	}
+
+	if err := c.StartSession(r1, 7, 100, 200); err != nil {
+		t.Fatalf("StartSession: %v", err)
+	}
+
+	// First call: 1.
+	cut, err := c.NextBarrierCut(r1)
+	if err != nil {
+		t.Fatalf("NextBarrierCut #1: %v", err)
+	}
+	if cut != 1 {
+		t.Errorf("first cut=%d want 1", cut)
+	}
+	// Second call: 2.
+	cut, err = c.NextBarrierCut(r1)
+	if err != nil {
+		t.Fatalf("NextBarrierCut #2: %v", err)
+	}
+	if cut != 2 {
+		t.Errorf("second cut=%d want 2", cut)
+	}
+
+	// EndSession + new StartSession resets to 0; first call yields 1.
+	c.EndSession(r1)
+	if err := c.StartSession(r1, 8, 100, 200); err != nil {
+		t.Fatalf("StartSession (second session): %v", err)
+	}
+	cut, err = c.NextBarrierCut(r1)
+	if err != nil {
+		t.Fatalf("NextBarrierCut after restart: %v", err)
+	}
+	if cut != 1 {
+		t.Errorf("post-restart first cut=%d want 1 (per-session reset)", cut)
 	}
 }

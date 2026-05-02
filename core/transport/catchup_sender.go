@@ -22,12 +22,13 @@ import (
 // Option A. Engine populates `FromLSN = Recovery.R + 1`; sender
 // scans from there. Sender does NOT add `+1` — the off-by-one
 // "skip already-applied" policy lives at the engine.
-func (e *BlockExecutor) StartCatchUp(replicaID string, sessionID, epoch, endpointVersion, fromLSN, targetLSN uint64) error {
+func (e *BlockExecutor) StartCatchUp(replicaID string, sessionID, epoch, endpointVersion, fromLSN, frontierHint uint64) error {
 	lineage := RecoveryLineage{
 		SessionID:       sessionID,
 		Epoch:           epoch,
 		EndpointVersion: endpointVersion,
-		TargetLSN:       targetLSN,
+		FrontierHint:    frontierHint,
+		TargetLSN:       frontierHint,
 	}
 	session, err := e.registerSession(lineage)
 	if err != nil {
@@ -35,7 +36,7 @@ func (e *BlockExecutor) StartCatchUp(replicaID string, sessionID, epoch, endpoin
 	}
 
 	go func() {
-		achieved, err := e.doCatchUp(replicaID, session, fromLSN, targetLSN)
+		achieved, err := e.doCatchUp(replicaID, session, fromLSN, frontierHint)
 		e.finishSession(replicaID, session, achieved, err)
 	}()
 	return nil
@@ -46,12 +47,11 @@ func (e *BlockExecutor) StartCatchUp(replicaID string, sessionID, epoch, endpoin
 //  1. dial the replica
 //  2. stream the substrate's retained-WAL window via ScanLBAs starting
 //     at the replica's flushed frontier; each entry ships as
-//     MsgShipEntry carrying the engine's targetLSN
-//  3. send MsgBarrierReq + read typed BarrierResponse — the barrier's
-//     AchievedLSN is the caller-facing "did we reach target" answer
-//     (per G-1 §4.2: barrier-as-terminator collapses V2's separate
-//     MsgCatchupDone marker into the existing barrier response, with
-//     INV-REPL-CATCHUP-COMPLETION-FROM-BARRIER-ACHIEVED-LSN inscribed)
+//     MsgShipEntry carrying the session lineage
+//  3. send MsgBarrierReq + read typed BarrierResponse. AchievedLSN is
+//     the replica frontier observation; legacy catch-up closes when
+//     the replica witnesses the last WAL entry this feeder actually
+//     wrote, not when it crosses the compat target band.
 //
 // Substrate sub-mode is reported via storage.RecoveryMode (memo §5.1)
 // in the success log line so operators can tell at a glance whether
@@ -62,13 +62,14 @@ func (e *BlockExecutor) StartCatchUp(replicaID string, sessionID, epoch, endpoin
 //   - storage.ErrWALRecycled wrapped → tier-class change; engine
 //     SessionClose handler maps to peer NeedsRebuild (G-1 §4.3
 //     Option B)
-//   - target-not-reached after clean scan → stream-level error;
+//   - ack-behind-last-sent after clean scan → stream-level error;
 //     engine retries until RecoveryRuntimePolicy.MaxRetries (G-1 §4.1)
 //   - other stream errors → same retry path
 //
 // Hidden invariants honored:
-//   - INV-REPL-CATCHUP-CALLBACK-RETURN-NIL-CONTINUES — callback skips
-//     entries past targetLSN by `return nil`, not by erroring out
+//   - INV-REPL-CATCHUP-FEEDS-AVAILABLE-WAL — callback does not cap
+//     entries at targetLSN; target remains a compat lineage band, not
+//     a feeder stop line.
 //   - INV-REPL-CATCHUP-LASTSENT-MONOTONIC — `lastSent` only advances
 //     on successful frame write, so partial-progress achievedLSN is
 //     surfaceable to the caller
@@ -80,7 +81,7 @@ func (e *BlockExecutor) StartCatchUp(replicaID string, sessionID, epoch, endpoin
 // returns. Owns: per-call conn deadline; ScanLBAs callback closure.
 // Borrows: primaryStore (substrate handle for ScanLBAs); session
 // (cancel channel + lineage).
-func (e *BlockExecutor) doCatchUp(replicaID string, session *activeSession, fromLSN, targetLSN uint64) (uint64, error) {
+func (e *BlockExecutor) doCatchUp(replicaID string, session *activeSession, fromLSN, frontierHint uint64) (uint64, error) {
 	conn, err := net.DialTimeout("tcp", e.replicaAddr, 2*time.Second)
 	if err != nil {
 		return 0, fmt.Errorf("catch-up dial: %w", err)
@@ -105,11 +106,14 @@ func (e *BlockExecutor) doCatchUp(replicaID string, session *activeSession, from
 	if err := conn.SetDeadline(time.Now().Add(recoveryConnTimeout)); err != nil {
 		return 0, fmt.Errorf("catch-up set deadline: %w", err)
 	}
+	if err := WriteMsg(conn, MsgRecoveryLaneStart, EncodeLineage(session.lineage)); err != nil {
+		return 0, fmt.Errorf("catch-up recovery lane start: %w", err)
+	}
 
 	// Replica's flushed LSN is what catch-up streams from. The
 	// scan starts at fromLSN+1 (entries STRICTLY AFTER the replica's
 	// frontier). T4b probe handshake delivered the replica's R; the
-	// engine's StartCatchUp command embeds H as the ship target.
+	// engine's StartCatchUp command embeds H as the frontier hint.
 	// V2 used `runCatchUpTo(replicaFlushedLSN, targetLSN)` (line 845);
 	// V3's executor doesn't yet thread replicaFlushedLSN through
 	// StartCatchUp — for muscle parity, we scan from 0 and let the
@@ -142,12 +146,6 @@ func (e *BlockExecutor) doCatchUp(replicaID string, session *activeSession, from
 		case <-session.cancel:
 			return errSessionInvalidated
 		default:
-		}
-		// Per-entry target cap: skip entries past targetLSN by
-		// returning nil (continues the scan) — INV-REPL-CATCHUP-
-		// CALLBACK-RETURN-NIL-CONTINUES.
-		if targetLSN > 0 && entry.LSN > targetLSN {
-			return nil
 		}
 		shipPayload := EncodeShipEntry(ShipEntry{
 			Lineage: session.lineage,
@@ -194,14 +192,13 @@ func (e *BlockExecutor) doCatchUp(replicaID string, session *activeSession, from
 	}
 
 	// Barrier-as-terminator (G-1 §4.2 architect Option B):
-	// `BarrierResponse.AchievedLSN` carries the same information
-	// V2's MsgCatchupDone marker provided. INV-REPL-CATCHUP-COMPLETION-
-	// FROM-BARRIER-ACHIEVED-LSN: completion is determined by comparing
-	// `resp.AchievedLSN` against `targetLSN`; partial-progress is
-	// surfaceable via the returned (lastSent, error) tuple.
-	if targetLSN > 0 && resp.AchievedLSN < targetLSN {
-		return lastSent, fmt.Errorf("catch-up: target %d not reached (achieved=%d)",
-			targetLSN, resp.AchievedLSN)
+	// `BarrierResponse.AchievedLSN` is the replica's frontier
+	// observation. The feeder's closure responsibility is the bytes it
+	// actually wrote in this session: lastSent. frontierHint remains in
+	// lineage/logging as a compat band, but is not the close predicate.
+	if lastSent > 0 && resp.AchievedLSN < lastSent {
+		return lastSent, fmt.Errorf("catch-up: ack %d behind last sent %d (frontier_hint=%d)",
+			resp.AchievedLSN, lastSent, frontierHint)
 	}
 
 	// Mode label surfacing (memo §5.1). T4d-4 part A: ask the
@@ -211,7 +208,7 @@ func (e *BlockExecutor) doCatchUp(replicaID string, session *activeSession, from
 	// Now wrap impls forward RecoveryMode() cleanly through the
 	// embedded LogicalStorage interface.
 	mode := e.primaryStore.RecoveryMode()
-	log.Printf("executor: catch-up complete replica=%s recovery_mode=%s achieved=%d target=%d last_sent=%d",
-		replicaID, mode, resp.AchievedLSN, targetLSN, lastSent)
+	log.Printf("executor: catch-up complete replica=%s recovery_mode=%s achieved=%d frontier_hint=%d last_sent=%d",
+		replicaID, mode, resp.AchievedLSN, frontierHint, lastSent)
 	return resp.AchievedLSN, nil
 }

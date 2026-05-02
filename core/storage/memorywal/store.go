@@ -236,6 +236,39 @@ func (s *Store) ApplyEntry(lba uint32, data []byte, lsn uint64) error {
 	return nil
 }
 
+// WriteExtentDirect appends a record at LSN=0 (sentinel) so it is the
+// most-recently-inserted entry for this LBA — Read's reverse-scan
+// finds it first until a subsequent ApplyEntry at LSN>0 lands and
+// shadows it. memorywal has no separate extent surface, so "extent
+// direct" is realized through the same record list with no
+// frontier / retention / nextLSN side effect.
+//
+// Per §6.10: BASE bypasses the LSN-tracked WAL apply path. The
+// receiver's bitmap is the sole arbiter at this layer — memorywal
+// does not consult LSN for BASE-vs-WAL arbitration; the receiver
+// will only call this when its bitmap says no WAL has touched the
+// LBA in this session.
+func (s *Store) WriteExtentDirect(lba uint32, data []byte) error {
+	if lba >= s.numBlocks {
+		return fmt.Errorf("memorywal: WriteExtentDirect LBA %d out of range", lba)
+	}
+	if len(data) != s.blockSize {
+		return fmt.Errorf("memorywal: WriteExtentDirect data size %d != block size %d", len(data), s.blockSize)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return errors.New("memorywal: WriteExtentDirect after Close")
+	}
+	cp := make([]byte, s.blockSize)
+	copy(cp, data)
+	// LSN=0 sentinel — distinguishes BASE-direct from WAL-applied
+	// records in any future diagnostic scan; intentionally NOT a
+	// retention / nextLSN advance signal.
+	s.records = append(s.records, walRecord{LSN: 0, LBA: lba, Flags: storage.RecoveryEntryWrite, Data: cp})
+	return nil
+}
+
 // AllBlocks returns last-writer-wins per LBA across retained records,
 // filtering out all-zero blocks (matches the LogicalStorage contract).
 func (s *Store) AllBlocks() map[uint32][]byte {

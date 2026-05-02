@@ -45,14 +45,13 @@ const (
 
 	// FailureContract — session-level invariant violation that the
 	// recovery package detected after the wire round-trip:
-	// barrier's AchievedLSN < frozen targetLSN (peer fell behind
-	// during transit), TryComplete returned !done at barrier
-	// request (caller fired barrier prematurely), or
-	// TryAdvanceToSteadyLive failed with state inconsistent with
-	// the spec §3.2 transition guard.
+	// missing/false PrimaryWalLegOk witness, receiver TryComplete
+	// returned !done at BarrierReq (caller fired barrier prematurely),
+	// or legacy/bridging close explicitly opted into the old band
+	// oracle and the observed achieved frontier did not satisfy it.
 	// RETRYABLE with caveat: the engine should re-evaluate the
 	// recovery decision (R/S/H may have shifted) before retrying.
-	// Same fromLSN/targetLSN may yield the same result.
+	// Same fromLSN/frontier hint may yield the same result.
 	FailureContract
 
 	// FailureCancelled — caller cancelled the context. NOT a
@@ -127,21 +126,20 @@ func (k FailureKind) String() string {
 type Phase string
 
 const (
-	PhaseStartSession Phase = "start-session" // before/during coord.StartSession
-	PhaseSendStart    Phase = "send-start"    // SessionStart frame write
-	PhaseBaseLane     Phase = "base-lane"     // base block stream
-	PhaseBaseDone     Phase = "base-done"     // BaseDone frame write
-	PhaseBacklog      Phase = "backlog"       // ScanLBAs + WAL stream
-	PhaseAwaitClose   Phase = "await-close"   // blocked on closeCh
-	PhaseDrainSeal    Phase = "drain-seal"    // drainAndSeal live queue
-	PhaseTransition   Phase = "transition"    // TryAdvanceToSteadyLive
-	PhaseBarrierReq   Phase = "barrier-req"   // BarrierReq frame write
-	PhaseBarrierResp  Phase = "barrier-resp"  // BarrierResp read/decode
-	PhaseRecvDispatch Phase = "recv-dispatch" // receiver frame loop
-	PhaseRecvApply    Phase = "recv-apply"    // receiver substrate apply
-	PhaseRecvSync     Phase = "recv-sync"     // receiver Sync at barrier
+	PhaseStartSession Phase = "start-session"  // before/during coord.StartSession
+	PhaseSendStart    Phase = "send-start"     // SessionStart frame write
+	PhaseBaseLane     Phase = "base-lane"      // base block stream
+	PhaseBaseDone     Phase = "base-done"      // BaseDone frame write
+	PhaseBacklog      Phase = "backlog"        // ScanLBAs + WAL stream
+	PhaseDrainSeal    Phase = "drain-seal"     // bridging-sink flushAndSeal
+	PhaseTransition   Phase = "transition"     // TryAdvanceToSteadyLive
+	PhaseBarrierReq   Phase = "barrier-req"    // BarrierReq frame write
+	PhaseBarrierResp  Phase = "barrier-resp"   // BarrierResp read/decode
+	PhaseRecvDispatch Phase = "recv-dispatch"  // receiver frame loop
+	PhaseRecvApply    Phase = "recv-apply"     // receiver substrate apply
+	PhaseRecvSync     Phase = "recv-sync"      // receiver Sync at barrier
 	PhaseRecvAckWrite Phase = "recv-ack-write" // receiver writing BaseBatchAck
-	PhasePinUpdate    Phase = "pin-update"    // sender translating ack → SetPinFloor
+	PhasePinUpdate    Phase = "pin-update"     // sender translating ack → SetPinFloor
 )
 
 // Failure is the recovery package's typed error envelope.
@@ -168,7 +166,7 @@ func (f *Failure) Error() string {
 func (f *Failure) Unwrap() error { return f.Underlying }
 
 // Retryable advises the engine whether the same session parameters
-// (fromLSN, targetLSN) may be retried after this failure. NOT a
+// (fromLSN, frontier hint) may be retried after this failure. NOT a
 // guarantee that retry will succeed — the engine still owns the
 // retry budget and may choose to escalate to a fresh lineage.
 //

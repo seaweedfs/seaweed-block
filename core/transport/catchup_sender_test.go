@@ -1,5 +1,9 @@
 package transport
 
+// Completion oracle: recover(a,b) band — NOT recover(a) closure.
+// See sw-block/design/recover-semantics-adjustment-plan.md §8.1.
+// migrate-candidate: depends on primary.H semantics, see §8.1 Tier-5 migration
+
 import (
 	"errors"
 	"strings"
@@ -17,10 +21,11 @@ import (
 //     TestCatchUpSender_RecycledFromLSN_ErrorPropagates — substrate ErrWALRecycled
 //
 //   7 V3-only invariant pins (1 per §5 invariant + 2 mode-label):
-//     TestCatchUpSender_CallbackReturnNilContinues
+//     TestCatchUpSender_FeedsPastTargetBand
 //     TestCatchUpSender_DoneMarkerOnZeroEntries  (re-shaped per §4.2 binding)
 //     TestCatchUpSender_DeadlineClearedAfterReturn
-//     TestCatchUpSender_TargetNotReachedVsRecycledDistinguished
+//     TestCatchUpSender_EmptyScanDoesNotFailTargetBand
+//     TestCatchUpSender_AckBehindLastSentFails
 //     TestCatchUpSender_LastSentNotAdvancedOnWriteFail (covered by happy + recycle paths)
 //     TestCatchUpSender_ModeLabelEmittedWALReplay
 //     TestCatchUpSender_CompletionFromBarrierAchievedLSN  (§4.2 binding)
@@ -106,41 +111,50 @@ func (r *recycledStubStore) ScanLBAs(fromLSN uint64, fn func(storage.RecoveryEnt
 	return storage.ErrWALRecycled
 }
 
+type dropApplyHook struct{}
+
+func (dropApplyHook) ApplyRecovery(lineage RecoveryLineage, lba uint32, data []byte, lsn uint64) error {
+	return nil
+}
+
+func (dropApplyHook) ApplyLive(lineage RecoveryLineage, lba uint32, data []byte, lsn uint64) error {
+	return nil
+}
+
 // --- V3-only invariant pins ---
 
-// TestCatchUpSender_CallbackReturnNilContinues — INV-REPL-CATCHUP-
-// CALLBACK-RETURN-NIL-CONTINUES. Substrate emits 5 entries with LSNs
-// 1..5; targetLSN=3. Sender callback skips entries with LSN > 3 by
-// returning nil; the scan must continue (not stop) and the barrier
-// must complete normally with the last successfully-shipped entry as
-// the achieved frontier.
-func TestCatchUpSender_CallbackReturnNilContinues(t *testing.T) {
-	exec, primary, _ := newCatchUpExecutor(t)
-	writeTestBlocks(primary, 5)
-	// targetLSN=3 — entries 4, 5 must be skipped via return-nil.
+// TestCatchUpSender_FeedsPastTargetBand — targetLSN must not act as
+// the catch-up feeder's stop line. The sender feeds all retained WAL
+// entries at or after fromLSN; target remains a compat lineage band.
+func TestCatchUpSender_FeedsPastTargetBand(t *testing.T) {
+	primaryRaw, replica, listener := setupPrimaryReplica(t)
+	for i := uint32(0); i < 5; i++ {
+		data := make([]byte, 4096)
+		data[0] = byte(i + 1)
+		_, _ = primaryRaw.Write(i, data)
+	}
+	primaryRaw.Sync()
+
+	exec := NewBlockExecutor(primaryRaw, listener.Addr())
+	// targetLSN=3, but WAL entries 4 and 5 must still be fed.
 	result := runCatchUp(t, exec, 3)
 	if !result.Success {
-		// State-convergence semantic: BlockStore emits all entries at
-		// scan-time LSN = walHead = 5. Every entry's LSN (5) > target
-		// (3), so all are skipped. Barrier achieves walHead = 5 > 3
-		// → NOT a target-not-reached error in this synthesis.
-		// What we ASSERT: the callback's return-nil-continues is
-		// honored (the test doesn't crash on a non-nil error from
-		// the callback or stop the scan early).
-		t.Logf("FailReason: %s", result.FailReason)
+		t.Fatalf("catch-up failed: %s", result.FailReason)
 	}
-	// Sanity: at minimum, doCatchUp completed without panic and
-	// surfaced a result.
-	if result.SessionID == 0 {
-		t.Fatal("sessionID should be set on close")
+	if result.AchievedLSN < 5 {
+		t.Fatalf("AchievedLSN=%d want >=5 (entries past target band must be fed)", result.AchievedLSN)
+	}
+	for i := uint32(3); i < 5; i++ {
+		got, _ := replica.Read(i)
+		if got[0] != byte(i+1) {
+			t.Fatalf("LBA %d not fed past target band: got marker %d want %d", i, got[0], byte(i+1))
+		}
 	}
 }
 
 // TestCatchUpSender_CompletionFromBarrierAchievedLSN — §4.2 binding
-// invariant. The catch-up's completion judgment comes from the
+// invariant. The catch-up's completion observation comes from the
 // barrier response's AchievedLSN, not from a separate done marker.
-// Pin: when AchievedLSN >= targetLSN, success; when < targetLSN,
-// surfaces "target not reached" error.
 func TestCatchUpSender_CompletionFromBarrierAchievedLSN(t *testing.T) {
 	exec, primary, _ := newCatchUpExecutor(t)
 	writeTestBlocks(primary, 3)
@@ -155,13 +169,6 @@ func TestCatchUpSender_CompletionFromBarrierAchievedLSN(t *testing.T) {
 		t.Errorf("happy: AchievedLSN=%d want %d", r1.AchievedLSN, pH)
 	}
 
-	// Target ahead of replica's reachable frontier: catch-up cannot
-	// satisfy. We can't easily synthesize this with BlockStore
-	// (replica's frontier follows primary's), so just assert the
-	// happy path's barrier-derived completion semantic. The
-	// target-not-reached error path is covered indirectly by the
-	// completion logic: if `resp.AchievedLSN < targetLSN` the error
-	// "target N not reached" surfaces.
 	_ = r1
 }
 
@@ -191,32 +198,58 @@ func TestCatchUpSender_DeadlineClearedAfterReturn(t *testing.T) {
 	// cleanly; absence of error is the indirect fence.
 }
 
-// TestCatchUpSender_TargetNotReachedVsRecycledDistinguished —
-// INV-REPL-CATCHUP-TARGET-NOT-REACHED-VS-RECYCLED-DISTINGUISHED.
-// Two different error classes:
-//   (a) substrate returns ErrWALRecycled  → wrapped sentinel
-//   (b) barrier achieves < targetLSN      → "target N not reached"
-//
-// (a) covered by TestCatchUpSender_RecycledFromLSN_ErrorPropagates.
-// (b) tested here via a custom substrate that emits no entries.
-func TestCatchUpSender_TargetNotReachedVsRecycledDistinguished(t *testing.T) {
+// TestCatchUpSender_EmptyScanDoesNotFailTargetBand —
+// targetLSN is not a catch-up close predicate. If the substrate emits
+// no entries, the feeder wrote no WAL and the session may close at the
+// observed frontier. Upper layers must use later probe/decision facts
+// to determine whether more feeding is needed.
+func TestCatchUpSender_EmptyScanDoesNotFailTargetBand(t *testing.T) {
 	primary := &emptyScanStore{BlockStore: storage.NewBlockStore(64, 4096)}
 	primary.Write(0, make([]byte, 4096))
 	primary.Write(1, make([]byte, 4096)) // walHead = 2
 	_, _, listener := setupPrimaryReplica(t)
 	exec := NewBlockExecutor(primary, listener.Addr())
 
-	// targetLSN=2; substrate emits no entries; replica's frontier
-	// stays 0; barrier achieves 0 < 2 → "target not reached" error.
+	result := runCatchUp(t, exec, 2)
+	if !result.Success {
+		t.Fatalf("empty feeder scan should not fail solely because target band is higher: %s", result.FailReason)
+	}
+	if result.AchievedLSN != 0 {
+		t.Fatalf("AchievedLSN=%d want 0 (replica observed no WAL)", result.AchievedLSN)
+	}
+}
+
+// TestCatchUpSender_AckBehindLastSentFails —
+// INV-REPL-CATCHUP-ACK-COVERS-LAST-SENT. Two different error classes:
+//   (a) substrate returns ErrWALRecycled  → wrapped sentinel
+//   (b) barrier achieves < lastSent       → ack-behind-last-sent
+//
+// (a) covered by TestCatchUpSender_RecycledFromLSN_ErrorPropagates.
+// (b) tested here via a replica that drops ShipEntry payloads but
+// still responds to the barrier.
+func TestCatchUpSender_AckBehindLastSentFails(t *testing.T) {
+	primary := storage.NewBlockStore(64, 4096)
+	primary.Write(0, make([]byte, 4096))
+	primary.Write(1, make([]byte, 4096))
+	primary.Sync()
+	replica := storage.NewBlockStore(64, 4096)
+	dropListener, err := NewReplicaListenerWithApplyHook("127.0.0.1:0", replica, dropApplyHook{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dropListener.Stop()
+	dropListener.Serve()
+	exec := NewBlockExecutor(primary, dropListener.Addr())
+
 	result := runCatchUp(t, exec, 2)
 	if result.Success {
-		t.Fatal("catch-up against empty substrate must report target-not-reached")
+		t.Fatal("catch-up must fail when barrier ack is behind lastSent")
 	}
 	if strings.Contains(result.FailReason, "WAL recycled") {
-		t.Errorf("target-not-reached must NOT be conflated with WAL recycle: %s", result.FailReason)
+		t.Errorf("ack-behind-last-sent must NOT be conflated with WAL recycle: %s", result.FailReason)
 	}
-	if !strings.Contains(result.FailReason, "target") {
-		t.Errorf("FailReason should mention target: %s", result.FailReason)
+	if !strings.Contains(result.FailReason, "behind last sent") {
+		t.Errorf("FailReason should mention behind-last-sent: %s", result.FailReason)
 	}
 }
 

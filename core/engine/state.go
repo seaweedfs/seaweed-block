@@ -88,6 +88,19 @@ type RecoveryTruth struct {
 	Decision       RecoveryDecision
 	DecisionReason string
 
+	// DurableAckR is the latest replica durable-ack frontier observed
+	// by the engine. It is progress telemetry for lag policy and WAL
+	// release authority, not a recovery-class predicate by itself.
+	DurableAckR             uint64
+	DurableAckKnown         bool
+	DurableAckPrimaryH      uint64
+	DurableAckStalledSample int
+
+	// LagDecision records the latest coordinator interpretation of durable
+	// ack progress. This is policy state only; the raw recovery class still
+	// comes from R/S/H facts and ClassifyProgress.
+	LagDecision LagDecision
+
 	// Attempts tracks how many StartCatchUp / StartRecovery commands
 	// the engine has emitted for the current Decision. Engine
 	// SessionFailed handler increments on close-with-non-recycled-
@@ -144,7 +157,8 @@ const (
 type SessionTruth struct {
 	SessionID     uint64
 	Kind          SessionKind
-	TargetLSN     uint64
+	FrontierHint  uint64
+	TargetLSN     uint64 // legacy alias for FrontierHint
 	AchievedLSN   uint64
 	Phase         SessionPhase
 	FailureReason string

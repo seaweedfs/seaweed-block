@@ -29,9 +29,8 @@ package component_test
 //      replicas catch up independently and converge.
 //
 // Known framework limitations worked around:
-//   - sessionID=1 collision under multi-catchup-per-replica (CARRY-T4D-
-//     LANE-CONTEXT-001 territory) → scenarios use single catch-up per
-//     replica per test
+//   - sessionID=1 collision under multi-catchup-per-replica →
+//     scenarios use single catch-up per replica per test
 //   - Default block geometry 64 blocks → use WithBlockGeometry(256, 4096)
 //     when scenarios touch LBAs > 64
 //   - AssertNoPerLBARegression / AssertLaneIntegrity / RestartReplica
@@ -53,11 +52,10 @@ import (
 //
 // SKIPPED — known framework gap. Both WithLiveShip() and
 // CatchUpReplica(idx) currently mint sessionID=1 by default; concurrent
-// use of both paths (even across different replicas) causes the
+// use of both paths (even across different replicas) can cause the
 // receiver-side replica handler to reject the second session as
-// "stale ship session=1". This is the same cross-orchestration
-// sessionID coordination gap already inscribed as a T4c §I forward-
-// carry (related to CARRY-T4D-LANE-CONTEXT-001 territory).
+// "stale ship session=1". This is a cross-orchestration sessionID
+// coordination gap, not a TargetLSN lane-discrimination gap.
 //
 // When the framework gains per-call session minting (or mock-engine
 // drives the assignment + minted sessionIDs), this scenario unblocks.
@@ -66,7 +64,7 @@ import (
 // fence; the composition test waits for framework primitive.
 func TestG5_QA_LaneDiscipline_LiveAndRecoveryConcurrent_MultiReplica(t *testing.T) {
 	t.Skip("known framework gap: live-ship + concurrent catch-up share sessionID=1; " +
-		"see T4c §I cross-orchestration carry + CARRY-T4D-LANE-CONTEXT-001 territory. " +
+		"see T4c §I cross-orchestration sessionID carry. " +
 		"Gate API itself pinned by TestComponent_LanePurity_CallerControlsDispatch.")
 }
 
@@ -181,4 +179,3 @@ func replicasFirstNLBAsEqual(t *testing.T, c *component.Cluster, replicaIdx int,
 	}
 	return mismatch == 0
 }
-

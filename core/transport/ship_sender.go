@@ -1,10 +1,20 @@
 package transport
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"net"
 	"time"
+
+	"github.com/seaweedfs/seaweed-block/core/recovery"
+)
+
+type LiveWriteDisposition int
+
+const (
+	LiveWriteEmitted LiveWriteDisposition = iota
+	LiveWriteRetained
 )
 
 // shipWriteDeadline bounds Ship's TCP write so a dead replica can't
@@ -56,11 +66,57 @@ const shipDialTimeout = 3 * time.Second
 //     epoch return nil without writing anything to the wire.
 //   - 3s write deadline (wal_shipper.go:240): byte-identical bound.
 func (e *BlockExecutor) Ship(replicaID string, lineage RecoveryLineage, lba uint32, lsn uint64, data []byte) error {
+	_, err := e.FeedLiveWrite(replicaID, lineage, true, lba, lsn, data)
+	return err
+}
+
+// FeedLiveWrite is the single primary-side ingress for one committed WAL
+// fact toward a peer. It owns the route decision between an active
+// recovery session and the legacy steady sender. Health state is a hint:
+// when allowSteady is false and no recovery session claims the write, the
+// WAL fact is retained in the primary WAL for future recovery instead of
+// being emitted on the legacy steady connection.
+func (e *BlockExecutor) FeedLiveWrite(replicaID string, lineage RecoveryLineage, allowSteady bool, lba uint32, lsn uint64, data []byte) (LiveWriteDisposition, error) {
+	// Global single-emitter gate: an active recovery session owns the
+	// peer's live WAL egress. Ship must not fall through to the legacy
+	// steady MsgShip path because that path mutates the resident
+	// WalShipper's emit context. During recovery, every live write must
+	// enter through the active session sink so the one monotonic cursor
+	// speaks through one wire profile.
+	if e.dualLane != nil && e.dualLane.Bridge.HasRegisteredSession(recovery.ReplicaID(replicaID)) {
+		err := e.dualLane.Bridge.PushLiveWrite(recovery.ReplicaID(replicaID), lba, lsn, data)
+		if err == nil {
+			return LiveWriteEmitted, nil
+		}
+		if errors.Is(err, recovery.ErrSessionNotLiveReady) {
+			log.Printf("transport: live write retained replica=%s lsn=%d (recovery session registered but not live-ready)",
+				replicaID, lsn)
+			return LiveWriteRetained, nil
+		}
+		if errors.Is(err, recovery.ErrNoActiveSession) {
+			// Bridge sender-map deletion raced with our registered-session
+			// snapshot. Recovery no longer owns this write; use the steady
+			// path below.
+		} else if !errors.Is(err, ErrSinkSealed) {
+			return LiveWriteRetained, err
+		}
+		// The bridge map can briefly outlive sink.EndSession. Once
+		// ErrSinkSealed is visible, RecoverySink has already restored
+		// the steady emit context; fall through to the normal steady
+		// Ship path instead of treating a closing session as having
+		// claimed this live write.
+	}
+	if !allowSteady {
+		log.Printf("transport: live write retained replica=%s lsn=%d (steady disallowed; recovery will replay)",
+			replicaID, lsn)
+		return LiveWriteRetained, nil
+	}
+
 	e.mu.Lock()
 	session, ok := e.sessions[lineage.SessionID]
 	if !ok || session == nil {
 		e.mu.Unlock()
-		return fmt.Errorf("transport: ship: no session for replica=%s sessionID=%d",
+		return LiveWriteRetained, fmt.Errorf("transport: ship: no session for replica=%s sessionID=%d",
 			replicaID, lineage.SessionID)
 	}
 	// Epoch-== fence. V2 wal_shipper.go:217-221 silent drop.
@@ -72,7 +128,7 @@ func (e *BlockExecutor) Ship(replicaID string, lineage RecoveryLineage, lba uint
 		e.mu.Unlock()
 		log.Printf("transport: ship: dropping LSN=%d replica=%s stale epoch %d (session epoch %d)",
 			lsn, replicaID, lineage.Epoch, sessionEpoch)
-		return nil
+		return LiveWriteRetained, nil
 	}
 	conn := session.conn
 	e.mu.Unlock()
@@ -86,7 +142,7 @@ func (e *BlockExecutor) Ship(replicaID string, lineage RecoveryLineage, lba uint
 		if err != nil {
 			log.Printf("transport: ship lazy-dial FAILED replica=%s addr=%s: %v",
 				replicaID, e.replicaAddr, err)
-			return fmt.Errorf("transport: ship: dial replica=%s sessionID=%d: %w",
+			return LiveWriteRetained, fmt.Errorf("transport: ship: dial replica=%s sessionID=%d: %w",
 				replicaID, lineage.SessionID, err)
 		}
 		log.Printf("transport: ship lazy-dial ok replica=%s addr=%s",
@@ -101,7 +157,7 @@ func (e *BlockExecutor) Ship(replicaID string, lineage RecoveryLineage, lba uint
 		case !stillActive || current != session:
 			e.mu.Unlock()
 			_ = dialed.Close()
-			return fmt.Errorf("transport: ship: session %d invalidated during dial",
+			return LiveWriteRetained, fmt.Errorf("transport: ship: session %d invalidated during dial",
 				lineage.SessionID)
 		case session.conn != nil:
 			conn = session.conn
@@ -114,21 +170,27 @@ func (e *BlockExecutor) Ship(replicaID string, lineage RecoveryLineage, lba uint
 		}
 	}
 
-	payload := EncodeShipEntry(ShipEntry{
-		Lineage: lineage,
-		LBA:     lba,
-		LSN:     lsn,
-		Data:    data,
-	})
-
-	_ = conn.SetWriteDeadline(time.Now().Add(shipWriteDeadline))
-	err := WriteMsg(conn, MsgShipEntry, payload)
-	_ = conn.SetWriteDeadline(time.Time{})
-	if err != nil {
-		return fmt.Errorf("transport: ship: write failed replica=%s lsn=%d: %w",
+	// P1 delegation (architect P1 review #1 — encoding seam fix):
+	// hand RAW `(lba, lsn, data)` to the per-replica WalShipper. The
+	// shipper's EmitFunc owns `EncodeShipEntry` so the wire-frame
+	// shape is the SAME whether the bytes came from steady-state
+	// Ship() (here) or backlog ScanLBAs (P2 DrainBacklog). One
+	// encoding seam = one wire format.
+	//
+	// Update the emit context (conn + lineage) BEFORE NotifyAppend
+	// per the ordering invariant in updateWalShipperEmitContext doc.
+	// The shipper's EmitFunc will WriteMsg under shipMu —
+	// INV-NO-DOUBLE-LIVE + INV-MONOTONIC-CURSOR enforced at one
+	// place.
+	//
+	// Per v3-recovery-wal-shipper-mini-plan.md §3 P1.
+	s := e.WalShipperFor(replicaID)
+	e.updateWalShipperEmitContext(replicaID, conn, lineage, EmitProfileSteadyMsgShip)
+	if err := s.NotifyAppend(lba, lsn, data); err != nil {
+		return LiveWriteRetained, fmt.Errorf("transport: ship: write failed replica=%s lsn=%d: %w",
 			replicaID, lsn, err)
 	}
-	return nil
+	return LiveWriteEmitted, nil
 }
 
 // HasSession reports whether a session with the given SessionID is

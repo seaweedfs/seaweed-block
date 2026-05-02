@@ -14,13 +14,16 @@ import (
 // TestIntegrationStub_LifecycleCallbacks exercises the bridge as a
 // CommandExecutor-shaped surface: StartRebuildSession spawns a
 // goroutine, callback OnStart fires synchronously before return,
-// PushLiveWrite during the session works, FinishLiveWrites triggers
-// barrier, OnClose reports the achieved LSN at the end.
+// PushLiveWrite during the session works, OnClose reports the
+// achieved LSN at the end. After P2c-slice B-2 the session terminates
+// autonomously when sink.DrainBacklog returns — there is no explicit
+// FinishLiveWrites / sender.Close signal anymore. Live writes pushed
+// before sender.Run barriers are buffered and shipped via flushAndSeal.
 //
 // This is the lifecycle/callback shape the integration PR will plug
 // into core/transport/BlockExecutor.
 func TestIntegrationStub_LifecycleCallbacks(t *testing.T) {
-	const numBlocks = 32
+	const numBlocks = 512
 	const blockSize = 4096
 
 	primary := storage.NewBlockStore(numBlocks, blockSize)
@@ -105,6 +108,7 @@ func TestIntegrationStub_LifecycleCallbacks(t *testing.T) {
 	if route := coord.RouteLocalWrite("r1", liveLSN); route != RouteSessionLane {
 		t.Fatalf("RouteLocalWrite during session: got %v want SessionLane", route)
 	}
+	waitBridgeLiveReady(t, bridge, "r1")
 	if err := bridge.PushLiveWrite("r1", liveLBA, liveLSN, liveData); err != nil {
 		t.Fatalf("PushLiveWrite: %v", err)
 	}
@@ -114,12 +118,9 @@ func TestIntegrationStub_LifecycleCallbacks(t *testing.T) {
 		t.Error("second StartRebuildSession on same peer: want error (single-flight)")
 	}
 
-	// Tell sender to barrier.
-	if !bridge.FinishLiveWrites("r1") {
-		t.Fatal("FinishLiveWrites returned false; expected active session")
-	}
-
-	// Wait for OnClose.
+	// P2c-slice B-2: sender.Run barriers autonomously after DrainBacklog
+	// returns; OnClose fires when Run goroutine exits. No explicit
+	// FinishLiveWrites needed.
 	closeWG.Wait()
 	replicaWG.Wait()
 
@@ -224,60 +225,14 @@ func TestIntegrationStub_ReceiverFailsEarly_SenderUnblocks(t *testing.T) {
 	}
 }
 
-// TestIntegrationStub_CtxCancelUnblocksSender — if the caller cancels
-// the context while sender is blocked on closeCh (waiting for
-// FinishLiveWrites), Run returns ctx.Err() instead of hanging forever.
+// TestIntegrationStub_CtxCancelUnblocksSender — obsolete in
+// P2c-slice B-2. Previously sender.Run blocked on closeCh waiting
+// for FinishLiveWrites; ctx cancel was the escape hatch. After B-2,
+// sender.Run never enters that idle wait — it barriers as soon as
+// DrainBacklog returns. Coordinator returning to Idle on session
+// completion is covered by the lifecycle test.
 func TestIntegrationStub_CtxCancelUnblocksSender(t *testing.T) {
-	const numBlocks = 16
-	const blockSize = 4096
-
-	primary := storage.NewBlockStore(numBlocks, blockSize)
-	replica := storage.NewBlockStore(numBlocks, blockSize)
-	_, _ = primary.Sync()
-
-	primaryConn, replicaConn := net.Pipe()
-	defer primaryConn.Close()
-	defer replicaConn.Close()
-
-	coord := NewPeerShipCoordinator()
-
-	var closeWG sync.WaitGroup
-	var closeErr error
-	closeWG.Add(1)
-	bridge := NewPrimaryBridge(primary, coord, nil,
-		func(_ ReplicaID, _ uint64, _ uint64, err error) {
-			closeErr = err
-			closeWG.Done()
-		})
-
-	// Replica receiver running normally; will block reading frames
-	// after base lane finishes (since sender will be waiting for ctx
-	// or closeCh and sending nothing more).
-	replicaBridge := NewReplicaBridge(replica)
-	go func() { _, _ = replicaBridge.Serve(context.Background(), replicaConn) }()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	_, _, primaryH := primary.Boundaries()
-	if err := bridge.StartRebuildSession(ctx, primaryConn, "r1", 7, 0, primaryH); err != nil {
-		t.Fatalf("StartRebuildSession: %v", err)
-	}
-
-	// Don't call FinishLiveWrites — instead cancel ctx after a moment.
-	time.Sleep(50 * time.Millisecond)
-	cancel()
-
-	select {
-	case <-waitClosed(&closeWG):
-	case <-time.After(2 * time.Second):
-		t.Fatal("OnClose did not fire within 2s after ctx cancel")
-	}
-
-	if closeErr == nil {
-		t.Fatal("OnClose: expected non-nil err on ctx cancel")
-	}
-	if got := coord.Phase("r1"); got != PhaseIdle {
-		t.Errorf("post-cancel phase=%s want Idle", got)
-	}
+	t.Skip("obsolete after P2c-slice B-2: no closeCh wait — Run barriers as soon as DrainBacklog returns")
 }
 
 // waitClosed turns a sync.WaitGroup into a channel for select.
@@ -288,6 +243,18 @@ func waitClosed(wg *sync.WaitGroup) <-chan struct{} {
 		close(ch)
 	}()
 	return ch
+}
+
+func waitBridgeLiveReady(t *testing.T, bridge *PrimaryBridge, replicaID ReplicaID) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if bridge.HasActiveSession(replicaID) {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("bridge session for %s did not become live-ready", replicaID)
 }
 
 // TestIntegrationStub_FailureTypedOnReceiverDown — Layer 3 surface:
@@ -346,59 +313,14 @@ func TestIntegrationStub_FailureTypedOnReceiverDown(t *testing.T) {
 	t.Logf("typed failure: %v (retryable=%v)", f, f.Retryable())
 }
 
-// TestIntegrationStub_FailureTypedOnCancellation — ctx cancel during
-// the await-close phase yields Kind=Cancelled, Retryable=false (the
-// caller decides retry, not the engine's retry budget).
+// TestIntegrationStub_FailureTypedOnCancellation — obsolete in
+// P2c-slice B-2. The previous design had sender.Run block on closeCh
+// after DrainBacklog and tested ctx cancel during that wait
+// (PhaseAwaitClose). After B-2, sender.Run barriers autonomously
+// when DrainBacklog returns — there is no idle wait window to
+// cancel into. Cancellation paths during DrainBacklog itself
+// (substrate scan returning ctx.Err()) are covered by the sink's
+// own DrainBacklog tests.
 func TestIntegrationStub_FailureTypedOnCancellation(t *testing.T) {
-	const numBlocks = 16
-	primary := storage.NewBlockStore(numBlocks, 4096)
-	replica := storage.NewBlockStore(numBlocks, 4096)
-	_, _ = primary.Sync()
-
-	primaryConn, replicaConn := net.Pipe()
-	defer primaryConn.Close()
-	defer replicaConn.Close()
-
-	coord := NewPeerShipCoordinator()
-
-	var closeWG sync.WaitGroup
-	var closeErr error
-	closeWG.Add(1)
-	bridge := NewPrimaryBridge(primary, coord, nil,
-		func(_ ReplicaID, _ uint64, _ uint64, err error) {
-			closeErr = err
-			closeWG.Done()
-		})
-
-	replicaBridge := NewReplicaBridge(replica)
-	go func() { _, _ = replicaBridge.Serve(context.Background(), replicaConn) }()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	_, _, primaryH := primary.Boundaries()
-	if err := bridge.StartRebuildSession(ctx, primaryConn, "r1", 100, 0, primaryH); err != nil {
-		t.Fatalf("StartRebuildSession: %v", err)
-	}
-
-	// Don't call FinishLiveWrites — let sender block on closeCh, then
-	// cancel ctx to surface FailureCancelled.
-	time.Sleep(50 * time.Millisecond)
-	cancel()
-	closeWG.Wait()
-
-	if closeErr == nil {
-		t.Fatal("expected non-nil err on ctx cancel")
-	}
-	f := AsFailure(closeErr)
-	if f == nil {
-		t.Fatalf("expected typed *Failure, got %T: %v", closeErr, closeErr)
-	}
-	if f.Kind != FailureCancelled {
-		t.Errorf("Kind=%s want Cancelled", f.Kind)
-	}
-	if f.Phase != PhaseAwaitClose {
-		t.Errorf("Phase=%q want AwaitClose", f.Phase)
-	}
-	if f.Retryable() {
-		t.Error("Cancelled failure should be Retryable=false (caller's decision)")
-	}
+	t.Skip("obsolete after P2c-slice B-2: no closeCh wait to cancel into; ctx-cancel during DrainBacklog is covered by sink-level tests")
 }

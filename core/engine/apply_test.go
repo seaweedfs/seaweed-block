@@ -108,6 +108,25 @@ func TestV3_Decision_CatchUp_GapWithinWAL(t *testing.T) {
 	assertHasCommand(t, r, "StartCatchUp")
 }
 
+func TestV3_Decision_CatchUp_EmitsFrontierHintAlias(t *testing.T) {
+	st := &ReplicaState{}
+	assignAndProbe(st)
+	r := Apply(st, RecoveryFactsObserved{ReplicaID: "r1", R: 50, S: 10, H: 100})
+
+	for _, cmd := range r.Commands {
+		if c, ok := cmd.(StartCatchUp); ok {
+			if c.FrontierHint != 100 {
+				t.Fatalf("FrontierHint = %d, want 100", c.FrontierHint)
+			}
+			if c.TargetLSN != c.FrontierHint {
+				t.Fatalf("legacy TargetLSN = %d, want alias of FrontierHint %d", c.TargetLSN, c.FrontierHint)
+			}
+			return
+		}
+	}
+	t.Fatal("StartCatchUp not emitted")
+}
+
 func TestV3_Decision_Rebuild_GapBeyondWAL(t *testing.T) {
 	st := &ReplicaState{}
 	assignAndProbe(st)
@@ -117,6 +136,25 @@ func TestV3_Decision_Rebuild_GapBeyondWAL(t *testing.T) {
 		t.Fatalf("R<S should be rebuild, got %s", r.Projection.RecoveryDecision)
 	}
 	assertHasCommand(t, r, "StartRebuild")
+}
+
+func TestV3_SessionPrepared_FrontierHintIsCanonical(t *testing.T) {
+	st := &ReplicaState{}
+	assignAndProbe(st)
+	Apply(st, SessionPrepared{
+		ReplicaID:    "r1",
+		SessionID:    7,
+		Kind:         SessionCatchUp,
+		FrontierHint: 123,
+		TargetLSN:    999,
+	})
+
+	if st.Session.FrontierHint != 123 {
+		t.Fatalf("FrontierHint = %d, want 123", st.Session.FrontierHint)
+	}
+	if st.Session.TargetLSN != 123 {
+		t.Fatalf("legacy TargetLSN = %d, want canonical FrontierHint alias 123", st.Session.TargetLSN)
+	}
 }
 
 func TestV3_Decision_Unknown_NotReachable(t *testing.T) {
@@ -307,6 +345,27 @@ func TestV3_Terminal_OnlySessionClosedCompletedGivesSuccess(t *testing.T) {
 		t.Fatalf("decision=%s, want none after completion", r.Projection.RecoveryDecision)
 	}
 	assertHasCommand(t, r, "PublishHealthy")
+}
+
+func TestV3_Terminal_SessionCompletedDoesNotRegressRecoveryR(t *testing.T) {
+	st := &ReplicaState{}
+	assignAndProbe(st)
+	Apply(st, RecoveryFactsObserved{ReplicaID: "r1", R: 80, S: 0, H: 100})
+	Apply(st, SessionPrepared{ReplicaID: "r1", SessionID: 1, Kind: SessionCatchUp, FrontierHint: 100, TargetLSN: 100})
+	Apply(st, SessionStarted{ReplicaID: "r1", SessionID: 1})
+
+	r := Apply(st, SessionClosedCompleted{ReplicaID: "r1", SessionID: 1, AchievedLSN: 70})
+
+	if st.Recovery.R != 80 {
+		t.Fatalf("Recovery.R regressed to %d, want existing certified frontier 80", st.Recovery.R)
+	}
+	if st.Session.AchievedLSN != 70 {
+		t.Fatalf("Session.AchievedLSN=%d want observed close value 70", st.Session.AchievedLSN)
+	}
+	if r.Projection.RecoveryDecision == DecisionNone {
+		t.Fatal("Decision=None after low achieved value; should still require recovery")
+	}
+	assertNoCommand(t, r, "PublishHealthy")
 }
 
 func TestV3_Terminal_DelayedStartAfterFailureIgnored(t *testing.T) {
