@@ -20,11 +20,16 @@ import (
 // MsgRebuildBlock per LBA, then a terminal MsgRebuildDone whose
 // BarrierResponse carries the replica's actually achieved frontier.
 func (e *BlockExecutor) StartRebuild(replicaID string, sessionID, epoch, endpointVersion, targetLSN uint64) error {
-	// Legacy wrapper: older adapter/engine surfaces only provide one
-	// number. Treat it as both the base snapshot pin and the frontier
-	// hint. New transport code that has a distinct base pin should call
-	// StartRebuildPinned.
-	return e.StartRebuildPinned(replicaID, sessionID, epoch, endpointVersion, targetLSN, targetLSN)
+	// Legacy wrapper: older adapter/engine surfaces only provide the
+	// frontier hint. The transport owns the base snapshot cut, so take a
+	// local durable sync here and use that as BasePinLSN. This keeps the
+	// base feeder's WAL rewind point tied to primary storage reality, not
+	// to a probe/compat band value.
+	basePinLSN, err := e.primaryStore.Sync()
+	if err != nil {
+		return fmt.Errorf("rebuild base pin sync: %w", err)
+	}
+	return e.StartRebuildPinned(replicaID, sessionID, epoch, endpointVersion, basePinLSN, targetLSN)
 }
 
 // StartRebuildPinned is the explicit rebuild entry point: basePinLSN is
@@ -35,9 +40,6 @@ func (e *BlockExecutor) StartRebuild(replicaID string, sessionID, epoch, endpoin
 func (e *BlockExecutor) StartRebuildPinned(replicaID string, sessionID, epoch, endpointVersion, basePinLSN, frontierHint uint64) error {
 	if e.dualLane != nil {
 		return e.startRebuildDualLane(replicaID, sessionID, epoch, endpointVersion, basePinLSN, frontierHint)
-	}
-	if basePinLSN != frontierHint {
-		return fmt.Errorf("legacy rebuild path requires basePinLSN == frontierHint (basePinLSN=%d frontierHint=%d)", basePinLSN, frontierHint)
 	}
 	lineage := RecoveryLineage{
 		SessionID:       sessionID,

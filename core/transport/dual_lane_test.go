@@ -189,6 +189,65 @@ func TestDualLane_StartRebuildPinned_SeparatesBasePinFromFrontierHint(t *testing
 	}
 }
 
+func TestDualLane_StartRebuild_DerivesBasePinFromPrimarySync(t *testing.T) {
+	primary := storage.NewBlockStore(16, 4096)
+	for lba := uint32(0); lba < 4; lba++ {
+		data := bytes.Repeat([]byte{byte(lba + 1)}, 4096)
+		if _, err := primary.Write(lba, data); err != nil {
+			t.Fatalf("Write: %v", err)
+		}
+	}
+	_, _, preH := primary.Boundaries()
+	if preH == 0 {
+		t.Fatal("test premise: primary head must be non-zero")
+	}
+	coord := recovery.NewPeerShipCoordinator()
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		conn, _ := ln.Accept()
+		accepted <- conn
+	}()
+
+	exec := NewBlockExecutorWithDualLane(
+		primary,
+		"127.0.0.1:0",
+		ln.Addr().String(),
+		coord,
+		recovery.ReplicaID("r1"),
+	)
+
+	const frontierHint = uint64(99)
+	if err := exec.StartRebuild("r1", 18, 1, 1, frontierHint); err != nil {
+		t.Fatalf("StartRebuild: %v", err)
+	}
+
+	st, ok := coord.Status("r1")
+	if !ok {
+		t.Fatal("coordinator has no active session")
+	}
+	if st.FromLSN != preH {
+		t.Fatalf("coordinator FromLSN=%d want synced primary H/base pin %d", st.FromLSN, preH)
+	}
+	if st.TargetLSN != frontierHint {
+		t.Fatalf("coordinator TargetLSN=%d want frontier hint %d", st.TargetLSN, frontierHint)
+	}
+
+	select {
+	case conn := <-accepted:
+		if conn != nil {
+			_ = conn.Close()
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("dual-lane listener did not accept connection")
+	}
+}
+
 // TestDualLane_LegacyConstructorIsNotDualLane verifies the
 // existing NewBlockExecutor path is unchanged: e.dualLane is nil,
 // StartRebuild falls through to the legacy single-lane code (no
