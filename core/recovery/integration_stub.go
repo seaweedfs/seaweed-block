@@ -44,8 +44,9 @@ type SessionStartCallback func(replicaID ReplicaID, sessionID uint64)
 
 // SessionCloseCallback fires once per session at termination
 // (success or failure). Mirrors the existing `OnSessionClose`
-// callback shape: success means achievedLSN ≥ targetLSN; on failure
-// `err` is non-nil and `achievedLSN` is 0.
+// callback shape: success means the session close predicate accepted
+// the barrier result; achievedLSN is the observed replica frontier.
+// On failure `err` is non-nil and `achievedLSN` is 0.
 type SessionCloseCallback func(replicaID ReplicaID, sessionID uint64, achievedLSN uint64, err error)
 
 // PrimaryBridge is the primary-side adapter. One bridge instance

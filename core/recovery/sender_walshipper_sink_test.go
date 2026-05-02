@@ -226,10 +226,8 @@ func TestNewSenderWithBacklogRelay_installsRelaySink(t *testing.T) {
 // The test does NOT assert on Run's exit value — convergence
 // requires the sink to actually pump WAL entries, which our
 // recordingSink doesn't do (its DrainBacklog returns nil
-// immediately). Run will likely return FailureContract from the
-// barrier check (walApplied < target on receiver). What we DO
-// assert: the 3 sink methods were called in the right order
-// regardless of how Run exits.
+// immediately). What we DO assert: the 3 sink methods were called in
+// the right order regardless of how Run exits.
 func TestSender_WithSink_DelegationOrder(t *testing.T) {
 	const fromLSN = uint64(0)
 	const targetLSN = uint64(50)

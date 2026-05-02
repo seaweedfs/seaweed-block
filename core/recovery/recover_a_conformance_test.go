@@ -75,8 +75,8 @@ func TestRecoverA_DebtZeroPath_BarrierEligible(t *testing.T) {
 	if err := c.RecordBarrierWalLegOk(id, true); err != nil {
 		t.Fatalf("RecordBarrierWalLegOk: %v", err)
 	}
-	if !c.CanEmitSessionComplete(id, 200) {
-		t.Fatal("DebtZero witness ∧ achieved≥target ∧ baseDone: CanEmit should authorize")
+	if !c.CanEmitSessionComplete(id, 199) {
+		t.Fatal("DebtZero witness ∧ baseDone: CanEmit should authorize even when achieved is below target band")
 	}
 	st, _ := c.Status(id)
 	if !st.WalLegOkWitnessed {
@@ -106,8 +106,8 @@ func TestRecoverA_LiveTailPath_BarrierEligibleAfterEverEmittedLive(t *testing.T)
 	if err := c.RecordBarrierWalLegOk(id, true); err != nil {
 		t.Fatalf("RecordBarrierWalLegOk: %v", err)
 	}
-	if !c.CanEmitSessionComplete(id, 250) {
-		t.Fatal("LiveTail witness ∧ achieved≥target ∧ baseDone: CanEmit should authorize")
+	if !c.CanEmitSessionComplete(id, 199) {
+		t.Fatal("LiveTail witness ∧ baseDone: CanEmit should authorize even when achieved is below target band")
 	}
 }
 
@@ -120,14 +120,14 @@ func TestRecoverA_Disjunction_EitherPathSuffices(t *testing.T) {
 	// Path 1: only DebtZero would have produced this witness.
 	c1, id1 := canEmitConjunctSetup(t, 200)
 	_ = c1.RecordBarrierWalLegOk(id1, true)
-	if !c1.CanEmitSessionComplete(id1, 200) {
+	if !c1.CanEmitSessionComplete(id1, 199) {
 		t.Fatal("DebtZero-only witness: CanEmit should authorize")
 	}
 
 	// Path 2: only LiveTail would have produced this witness.
 	c2, id2 := canEmitConjunctSetup(t, 200)
 	_ = c2.RecordBarrierWalLegOk(id2, true)
-	if !c2.CanEmitSessionComplete(id2, 200) {
+	if !c2.CanEmitSessionComplete(id2, 199) {
 		t.Fatal("LiveTail-only witness: CanEmit should authorize")
 	}
 
@@ -139,7 +139,7 @@ func TestRecoverA_Disjunction_EitherPathSuffices(t *testing.T) {
 // TestRecoverA_NeitherPath_NotEligible — when neither PrimaryDebtZero
 // nor PrimaryLiveTail holds, the disjunction at the shipper yields
 // walLegOk=false; sender records false; CanEmitSessionComplete
-// REFUSES authorization even with achieved ≥ target ∧ baseDone.
+// REFUSES authorization even with any achieved observation ∧ baseDone.
 //
 // In production the sender returns FailureContract on the failed
 // CanEmit, so the close-by-error path closes "session not eligible"
@@ -155,7 +155,7 @@ func TestRecoverA_NeitherPath_NotEligible(t *testing.T) {
 		t.Fatalf("RecordBarrierWalLegOk: %v", err)
 	}
 	if c.CanEmitSessionComplete(id, 200) {
-		t.Fatal("walLegOk=false witness: CanEmit MUST refuse (achieved≥target alone is no longer sufficient)")
+		t.Fatal("walLegOk=false witness: CanEmit MUST refuse (achieved observation is not completion authority)")
 	}
 	if c.CanEmitSessionComplete(id, 1_000_000) {
 		t.Fatal("walLegOk=false witness with huge achieved: CanEmit MUST still refuse")
@@ -165,7 +165,7 @@ func TestRecoverA_NeitherPath_NotEligible(t *testing.T) {
 	// is overwriteable per RecordBarrierWalLegOk doc — most recent
 	// witness wins).
 	_ = c.RecordBarrierWalLegOk(id, true)
-	if !c.CanEmitSessionComplete(id, 200) {
+	if !c.CanEmitSessionComplete(id, 1) {
 		t.Fatal("after re-record walLegOk=true: CanEmit should authorize")
 	}
 }

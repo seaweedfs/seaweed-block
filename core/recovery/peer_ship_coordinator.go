@@ -334,14 +334,14 @@ func (c *PeerShipCoordinator) RecordBarrierWalLegOk(id ReplicaID, walLegOk bool)
 //
 //	phase != Idle
 //	∧ baseDone
-//	∧ achievedLSN ≥ targetLSN  (kept pre-C-class for Y-as-comparator;
-//	                          C-class will replace with cut-witness)
-//	∧ (walLegOkWitnessed → walLegOkAtBarrier)
-//	    — when the dual-lane sender recorded a PrimaryWalLegOk witness
-//	      at BarrierReq emission, that witness MUST be true. On the
-//	      bridging-sink path the witness stays unset and the conjunct
-//	      collapses to legacy (back-compat preserved while §IV.2.1
-//	      probe wiring is dual-lane-only).
+//	∧ (when walLegOkWitnessed: walLegOkAtBarrier)
+//	∧ (when !walLegOkWitnessed: achievedLSN ≥ targetLSN legacy band)
+//
+// In the dual-lane path, the PrimaryWalLegOk witness is the completion
+// authority and achievedLSN is returned as an observation, not compared
+// to the frozen target band. The no-witness branch intentionally keeps
+// the old recover(a,b) band oracle for bridging/back-compat tests until
+// that path is retired.
 //
 // Per §IV.2.1, this primary-side coordinator IS the terminal authority
 // for "session semantically complete" — replica-side TryComplete is
@@ -359,17 +359,13 @@ func (c *PeerShipCoordinator) CanEmitSessionComplete(id ReplicaID, achievedLSN u
 	if !st.baseDone {
 		return false
 	}
-	if achievedLSN < st.targetLSN {
-		return false
-	}
 	// §IV.2.1 conjunct: dual-lane probe witness binds when present.
-	// Bridging-sink path leaves walLegOkWitnessed=false (legacy);
-	// dual-lane path records the witness via RecordBarrierWalLegOk
-	// and the value MUST be true for close authorization.
-	if st.walLegOkWitnessed && !st.walLegOkAtBarrier {
-		return false
+	// Bridging-sink path leaves walLegOkWitnessed=false and therefore
+	// remains on the legacy target-band gate for compatibility.
+	if st.walLegOkWitnessed {
+		return st.walLegOkAtBarrier
 	}
-	return true
+	return achievedLSN >= st.targetLSN
 }
 
 // NextBarrierCut returns the next per-session BarrierReq attempt

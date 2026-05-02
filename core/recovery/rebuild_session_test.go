@@ -1,6 +1,7 @@
 package recovery
 
-// Completion oracle: recover(a,b) band — NOT recover(a) closure.
+// Completion oracle: recover(a) layer-1 witness where noted; older
+// band-specific tests are retained only as recover(a,b) coverage.
 // See sw-block/design/recover-semantics-adjustment-plan.md §8.1.
 
 import (
@@ -75,7 +76,7 @@ func TestRebuildSession_BaseFirstThenWALOverwrites(t *testing.T) {
 // INV-SESSION-COMPLETE-ON-CONJUNCTION-LAYER1 (A-class wave per
 // recover-semantics-adjustment-plan §1):
 //
-//	TryComplete = baseDone ∧ walApplied ≥ targetLSN ∧ barrierWitnessed
+//	TryComplete = baseDone ∧ barrierWitnessed
 //
 // Three negative cases (any conjunct missing) + positive case.
 func TestRebuildSession_TryComplete_Conjunction(t *testing.T) {
@@ -90,8 +91,12 @@ func TestRebuildSession_TryComplete_Conjunction(t *testing.T) {
 	s.MarkBaseComplete()
 	_ = s.ApplyWALEntry(WALKindBacklog, 0, makeBlock(0x01), 50)
 	s.WitnessBarrier()
-	if _, done := s.TryComplete(); done {
-		t.Fatal("baseDone=true, walApplied=50 < target=100: should not be done")
+	achieved, done := s.TryComplete()
+	if !done {
+		t.Fatal("baseDone=true ∧ barrierWitnessed=true should complete even when walApplied < target")
+	}
+	if achieved != 50 {
+		t.Fatalf("achievedLSN=%d want 50 observation", achieved)
 	}
 
 	// WAL at target but baseDone reset wouldn't be possible — instead
@@ -111,16 +116,6 @@ func TestRebuildSession_TryComplete_Conjunction(t *testing.T) {
 	_ = s3.ApplyWALEntry(WALKindBacklog, 0, makeBlock(0x01), 100)
 	if _, done := s3.TryComplete(); done {
 		t.Fatal("baseDone ∧ walApplied≥target but !barrierWitnessed: should NOT be done (§IV.2.1 A-class)")
-	}
-
-	// All three conjuncts: should complete.
-	_ = s.ApplyWALEntry(WALKindBacklog, 0, makeBlock(0x02), 100)
-	achieved, done := s.TryComplete()
-	if !done {
-		t.Fatal("baseDone ∧ walApplied >= target ∧ barrierWitnessed: TryComplete should be done")
-	}
-	if achieved < 100 {
-		t.Fatalf("achievedLSN=%d want >= 100", achieved)
 	}
 }
 
@@ -239,7 +234,7 @@ func TestRebuildSession_Status_Snapshot(t *testing.T) {
 		t.Error("BaseDone want true")
 	}
 	if st.Completed {
-		t.Error("Completed want false (walApplied < target)")
+		t.Error("Completed want false (!barrierWitnessed)")
 	}
 	if st.BaseAckedPrefix != 8 {
 		t.Errorf("BaseAckedPrefix=%d want 8", st.BaseAckedPrefix)

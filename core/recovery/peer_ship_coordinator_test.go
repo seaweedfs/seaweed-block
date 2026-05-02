@@ -81,8 +81,8 @@ func TestCoordinator_SingleFlightPerReplica(t *testing.T) {
 // CHK-BARRIER-BEFORE-CLOSE: CanEmitSessionComplete enforces the
 // §IV.2.1 A-class conjunct (recover-semantics-adjustment-plan §1):
 //
-//	phase != Idle ∧ baseDone ∧ achieved ≥ target
-//	∧ (walLegOkWitnessed → walLegOkAtBarrier)
+//	phase != Idle ∧ baseDone
+//	∧ (walLegOkWitnessed ? walLegOkAtBarrier : achieved ≥ target)
 func TestCoordinator_CanEmitSessionComplete(t *testing.T) {
 	c := NewPeerShipCoordinator()
 	_ = c.StartSession(r1, 7, 100, 200)
@@ -106,6 +106,26 @@ func TestCoordinator_CanEmitSessionComplete(t *testing.T) {
 	// Idle peer: never permitted.
 	if c.CanEmitSessionComplete(r2, 999) {
 		t.Fatal("idle peer: CanEmitSessionComplete should refuse")
+	}
+}
+
+func TestCoordinator_CanEmitSessionComplete_WitnessIgnoresTargetBand(t *testing.T) {
+	c := NewPeerShipCoordinator()
+	_ = c.StartSession(r1, 7, 100, 200)
+	_ = c.MarkBaseDone(r1)
+
+	if err := c.RecordBarrierWalLegOk(r1, true); err != nil {
+		t.Fatalf("RecordBarrierWalLegOk: %v", err)
+	}
+	if !c.CanEmitSessionComplete(r1, 199) {
+		t.Fatal("walLegOk witness should authorize close even when achievedLSN is below target band")
+	}
+
+	if err := c.RecordBarrierWalLegOk(r1, false); err != nil {
+		t.Fatalf("RecordBarrierWalLegOk(false): %v", err)
+	}
+	if c.CanEmitSessionComplete(r1, 1_000_000) {
+		t.Fatal("walLegOk=false witness must refuse even with huge achievedLSN")
 	}
 }
 

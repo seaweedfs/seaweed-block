@@ -143,11 +143,10 @@ func (r *Receiver) Run() (achievedLSN uint64, err error) {
 			}
 			r.sessionID = s.SessionID
 			r.session = NewRebuildSession(r.store, s.TargetLSN)
-			// Base-only rebuild gate: seed walApplied with fromLSN so
-			// TryComplete's `walApplied >= targetLSN` conjunct can hold
-			// when no WAL frames arrive (base lane covers the snapshot
-			// through targetLSN; primary's WAL drain ships nothing
-			// past the pin). See RebuildSession.SeedWalApplied doc.
+			// Seed walApplied with fromLSN so AchievedLSN remains a
+			// monotonic observation even when no WAL frames arrive.
+			// Completion itself is baseDone + BarrierReq witness; the
+			// seed is no longer a target-crossing trick.
 			r.session.SeedWalApplied(s.FromLSN)
 			r.recvFromLSN = s.FromLSN
 			r.appliedWalLSN = s.FromLSN

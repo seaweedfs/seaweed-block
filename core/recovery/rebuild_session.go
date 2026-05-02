@@ -28,7 +28,7 @@ import (
 // protocol, or barrier ack. Those live in layer 2.
 type RebuildSession struct {
 	store     storage.LogicalStorage
-	targetLSN uint64 // frozen at session creation; WAL lane must reach this for completion
+	targetLSN uint64 // compat band / frontier hint; not a completion predicate
 
 	mu         sync.Mutex
 	bitmap     *RebuildBitmap
@@ -66,9 +66,11 @@ type RebuildSession struct {
 	baseAckedPrefix uint32
 }
 
-// NewRebuildSession constructs a session targeting the given LSN.
+// NewRebuildSession constructs a session with the given compat band.
 // numBlocks comes from the substrate (store.NumBlocks()) and sizes the
-// bitmap. targetLSN is the frozen WAL completion target.
+// bitmap. targetLSN remains on the session for wire/frontier compatibility;
+// completion is now driven by baseDone plus the primary's barrier witness,
+// not by walApplied crossing this value.
 func NewRebuildSession(store storage.LogicalStorage, targetLSN uint64) *RebuildSession {
 	return &RebuildSession{
 		store:     store,
@@ -164,8 +166,8 @@ func (s *RebuildSession) BaseBatchAcked(lbaUpper uint32) {
 }
 
 // MarkBaseComplete signals that the base lane has shipped the last
-// block. Combined with walApplied ≥ targetLSN, this is the layer-1
-// completion predicate.
+// block. Completion still requires a BarrierReq witness; targetLSN is
+// not itself a local completion oracle.
 //
 // Per §6.10 frontier-pairing: BASE writes go through
 // `WriteExtentDirect` which does NOT advance the substrate's
@@ -190,14 +192,10 @@ func (s *RebuildSession) MarkBaseComplete() {
 // fromLSN watermark. Called by the receiver after constructing the
 // session in frameSessionStart, BEFORE any ApplyWALEntry.
 //
-// Rationale: for a "rebuild" session where the base lane covers the
-// entire snapshot through targetLSN, no WAL frames will arrive (nothing
-// to drain past the pin on the primary side). Without seeding, walApplied
-// stays at 0 and TryComplete's `walApplied >= targetLSN` conjunct never
-// holds — base-only rebuilds would never close. Seeding with fromLSN
-// represents "the receiver starts the session already at or past
-// fromLSN by virtue of base-lane coverage"; ApplyWALEntry monotonically
-// advances it from there if WAL frames do arrive.
+// Rationale: walApplied/AchievedLSN is an observation, not a completion
+// oracle. Seeding with fromLSN preserves monotonic reporting for
+// base-only sessions; ApplyWALEntry advances it further if WAL frames
+// arrive.
 //
 // Idempotent: only advances; lower seeds are silently ignored.
 func (s *RebuildSession) SeedWalApplied(lsn uint64) {
@@ -227,19 +225,22 @@ func (s *RebuildSession) WitnessBarrier() {
 }
 
 // TryComplete reports whether the layer-1 completion predicate holds.
-// Returns (achievedLSN, true) when baseDone ∧ walApplied ≥ targetLSN
-// ∧ barrierWitnessed; achievedLSN is walApplied.
+// Returns (achievedLSN, true) when baseDone ∧ barrierWitnessed;
+// achievedLSN is walApplied.
 //
 // §IV.2.1 / recover-semantics-adjustment-plan §1 — A-class wave:
 // the historic recover(a,b) sole gate (`walApplied >= targetLSN`) is
 // no longer dispositive. The realizable §IV.2.1 conjunct synthesized
 // from existing observables is:
 //
-//	baseDone (replica MarkBaseComplete fired)
-//	∧ walApplied ≥ targetLSN  (kept pre-C-class for Y-as-comparator;
-//	                          C-class will replace with cut-witness)
-//	∧ barrierWitnessed         (BarrierReq arrival = primary attests
-//	                          PrimaryWalLegOk under shipMu)
+//	baseDone          (replica MarkBaseComplete fired)
+//	∧ barrierWitnessed (BarrierReq arrival = primary attests
+//	                   PrimaryWalLegOk under shipMu)
+//
+// walApplied/achievedLSN remains an observation returned to the
+// primary. It is not compared to targetLSN here: the target band is
+// still carried for compatibility/frontier bookkeeping, but the
+// receiver is not allowed to self-declare "caught up" by crossing it.
 //
 // Note: layer-1 TryComplete is NOT the system-close authority.
 // Per §IV.2.1, the terminal claim "session semantically complete"
@@ -256,9 +257,6 @@ func (s *RebuildSession) TryComplete() (achievedLSN uint64, done bool) {
 		return s.walApplied, true
 	}
 	if !s.baseDone {
-		return 0, false
-	}
-	if s.walApplied < s.targetLSN {
 		return 0, false
 	}
 	if !s.barrierWitnessed {

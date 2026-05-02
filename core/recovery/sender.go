@@ -29,7 +29,7 @@ import (
 //
 // Slice marker-only stage: probe is observation; the values do NOT
 // gate BarrierReq emission. A-class wave (post-G0) replaces the
-// recover(a,b) `walApplied >= target` predicate with this tuple.
+// recover(a,b) target-crossing predicate with this tuple.
 type barrierEligibilityProbe interface {
 	ProbeBarrierEligibility() (debtZero, liveTail, walLegOk bool, cursor, head uint64)
 }
@@ -395,7 +395,7 @@ func (s *Sender) LiveReady() bool {
 //     the live-write buffer flush + seal that previously lived on
 //     Sender as drainAndSeal.
 //  5. Send frameBarrierReq, read frameBarrierResp.
-//  6. Verify achieved ≥ targetLSN via coordinator.CanEmitSessionComplete
+//  6. Verify the coordinator close predicate via CanEmitSessionComplete
 //     (§5.2, CHK-BARRIER-BEFORE-CLOSE).
 //
 // Defer always: sink.EndSession (idempotent seal) + coordinator.EndSession.
@@ -623,19 +623,14 @@ func (s *Sender) Run(ctx context.Context, sessionID, fromLSN, targetLSN uint64) 
 			barrierCutID, achieved)
 	}
 	// §IV.2.1 / FS-1 / Gate G0 — Tier 1 completion-authority site.
-	// The CanEmitSessionComplete check below + FailureContract on
-	// `achieved < target` is the historic recover(a,b) Run-success
-	// predicate; per consensus §I P8, this is NOT the recover(a)
-	// completion authority. Migration target (per
-	// `sw-block/design/recover-semantics-adjustment-plan.md` §1 +
-	// `learn/2026-05-01-recover-target-audit.md` Tier 1) replaces
-	// this with `baseDone (replica) ∧ PrimaryWalLegOk(P) (primary
-	// WalShipper) ∧ BarrierHandshake`; FailureContract is rebound
-	// to "barrier-pre violation / lifecycle contract violation"
-	// rather than "did not reach Y". NO behavior change pre-Gate G0.
+	// CanEmitSessionComplete is the primary-side close predicate. In
+	// the dual-lane path it consumes the PrimaryWalLegOk witness and
+	// treats `achieved` as an observation, not as a target-band
+	// comparator. The no-probe bridging path still collapses to the
+	// legacy target-band oracle for compatibility.
 	if !s.coordinator.CanEmitSessionComplete(s.replicaID, achieved) {
 		return achieved, newFailure(FailureContract, PhaseBarrierResp,
-			fmt.Errorf("achieved=%d < target=%d", achieved, targetLSN))
+			fmt.Errorf("session close predicate refused achieved=%d target=%d", achieved, targetLSN))
 	}
 	return achieved, nil
 }
