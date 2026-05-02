@@ -27,8 +27,8 @@ import (
 // This type knows nothing about pin_floor, primary recycle, wire
 // protocol, or barrier ack. Those live in layer 2.
 type RebuildSession struct {
-	store     storage.LogicalStorage
-	targetLSN uint64 // compat band / frontier hint; not a completion predicate
+	store            storage.LogicalStorage
+	baseFrontierHint uint64 // snapshot pin/frontier hint for BASE lane; not a completion predicate
 
 	mu         sync.Mutex
 	bitmap     *RebuildBitmap
@@ -66,16 +66,17 @@ type RebuildSession struct {
 	baseAckedPrefix uint32
 }
 
-// NewRebuildSession constructs a session with the given compat band.
+// NewRebuildSession constructs a session with the given BASE frontier hint.
 // numBlocks comes from the substrate (store.NumBlocks()) and sizes the
-// bitmap. targetLSN remains on the session for wire/frontier compatibility;
-// completion is now driven by baseDone plus the primary's barrier witness,
-// not by walApplied crossing this value.
-func NewRebuildSession(store storage.LogicalStorage, targetLSN uint64) *RebuildSession {
+// bitmap. The hint currently arrives over the legacy TargetLSN wire slot,
+// but within recovery it is only the frontier to publish after BASE bytes
+// are installed. Completion is driven by baseDone plus the primary's
+// barrier witness, not by walApplied crossing this value.
+func NewRebuildSession(store storage.LogicalStorage, baseFrontierHint uint64) *RebuildSession {
 	return &RebuildSession{
-		store:     store,
-		targetLSN: targetLSN,
-		bitmap:    NewRebuildBitmap(store.NumBlocks()),
+		store:            store,
+		baseFrontierHint: baseFrontierHint,
+		bitmap:           NewRebuildBitmap(store.NumBlocks()),
 	}
 }
 
@@ -91,7 +92,7 @@ func NewRebuildSession(store storage.LogicalStorage, targetLSN uint64) *RebuildS
 // write (because BASE never enters the substrate's WAL).
 //
 // Frontier advancement is deferred to `MarkBaseComplete`, which calls
-// `store.AdvanceFrontier(targetLSN)` once the BASE phase signals
+// `store.AdvanceFrontier(baseFrontierHint)` once the BASE phase signals
 // stream-complete. Pre-§6.10 code piggybacked on `ApplyEntry`'s
 // implicit frontier-advance side effect; the new direct-extent path
 // must opt in explicitly.
@@ -166,26 +167,26 @@ func (s *RebuildSession) BaseBatchAcked(lbaUpper uint32) {
 }
 
 // MarkBaseComplete signals that the base lane has shipped the last
-// block. Completion still requires a BarrierReq witness; targetLSN is
-// not itself a local completion oracle.
+// block. Completion still requires a BarrierReq witness; the base
+// frontier hint is not itself a local completion oracle.
 //
 // Per §6.10 frontier-pairing: BASE writes go through
 // `WriteExtentDirect` which does NOT advance the substrate's
 // nextLSN / walHead / syncedLSN. The recovery layer compensates by
-// advancing the frontier to `targetLSN` here — once BASE is done,
+// advancing the frontier to `baseFrontierHint` here — once BASE is done,
 // the replica's R/H boundaries reflect "the snapshot at fromLSN
 // is installed" without needing a competing WAL apply at
-// targetLSN. Subsequent WAL frames at LSN > targetLSN advance
+// that hint. Subsequent WAL frames above that hint advance
 // further via `ApplyEntry`'s normal side effects.
 func (s *RebuildSession) MarkBaseComplete() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.baseDone = true
 	// §6.10 frontier reconciliation: BASE bytes are now installed
-	// to extent; declare frontier at targetLSN so post-rebuild
+	// to extent; declare frontier at baseFrontierHint so post-rebuild
 	// Sync()/Boundaries() report a non-degenerate value even on
 	// BASE-only sessions (no WAL frames in this session).
-	s.store.AdvanceFrontier(s.targetLSN)
+	s.store.AdvanceFrontier(s.baseFrontierHint)
 }
 
 // SeedWalApplied seeds walApplied at session start with the receiver's
@@ -238,9 +239,9 @@ func (s *RebuildSession) WitnessBarrier() {
 //	                   PrimaryWalLegOk under shipMu)
 //
 // walApplied/achievedLSN remains an observation returned to the
-// primary. It is not compared to targetLSN here: the target band is
-// still carried for compatibility/frontier bookkeeping, but the
-// receiver is not allowed to self-declare "caught up" by crossing it.
+// primary. It is not compared to baseFrontierHint here: the hint is
+// carried for frontier bookkeeping, but the receiver is not allowed to
+// self-declare "caught up" by crossing it.
 //
 // Note: layer-1 TryComplete is NOT the system-close authority.
 // Per §IV.2.1, the terminal claim "session semantically complete"
@@ -268,7 +269,8 @@ func (s *RebuildSession) TryComplete() (achievedLSN uint64, done bool) {
 
 // Status returns a snapshot of session progress for layer 2 / monitoring.
 type Status struct {
-	TargetLSN          uint64
+	BaseFrontierHint   uint64
+	TargetLSN          uint64 // deprecated alias for legacy tests/reporting
 	WALApplied         uint64
 	BaseDone           bool
 	Completed          bool
@@ -283,7 +285,8 @@ func (s *RebuildSession) Status() Status {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return Status{
-		TargetLSN:          s.targetLSN,
+		BaseFrontierHint:   s.baseFrontierHint,
+		TargetLSN:          s.baseFrontierHint,
 		WALApplied:         s.walApplied,
 		BaseDone:           s.baseDone,
 		Completed:          s.completed,

@@ -74,6 +74,10 @@ func readFrame(r io.Reader) (frameType, []byte, error) {
 // --- frame payload encodings ---
 
 // sessionStart: [8 SessionID][8 FromLSN][8 TargetLSN][4 NumBlocks]
+//
+// Compatibility note: TargetLSN is the legacy wire name. Receiver code
+// interprets this slot as the BASE lane frontier hint/pin, not as a
+// completion target.
 type sessionStartPayload struct {
 	SessionID uint64
 	FromLSN   uint64
@@ -123,25 +127,23 @@ func decodeBaseBlock(p []byte) (lba uint32, data []byte, err error) {
 // session start.
 //
 // IMPORTANT: this is an observability + test-pinning aid, NOT a
-// convergence proof. "Live line caught up" still requires
-// barrier-ack + AchievedLSN ≥ targetLSN at the coordinator (architect
-// ruling on G7-redo Layer-2 review). Do not infer "caught up" from
-// the absence of Backlog frames alone — a quiet session could just
-// mean both lanes are idle, not that the system is in sync.
+// convergence proof. "Live line caught up" is a coordinator/feeder
+// close predicate, not a TargetLSN comparison. Do not infer "caught
+// up" from the absence of Backlog frames alone — a quiet session could
+// just mean both lanes are idle, not that the system is in sync.
 type WALEntryKind byte
 
 const (
 	// WALKindBacklog is emitted by the sender's streamBacklog loop
 	// (`ScanLBAs(fromLSN, ...)` historical replay). Bytes were
 	// already durable on the primary at session start; this is the
-	// "fill the gap up to frozen target" stream.
+	// "fill the recoverable historical gap" stream.
 	WALKindBacklog WALEntryKind = 1
 	// WALKindSessionLive is emitted by the sender's drainAndSeal
 	// after the WAL shipper has fed live writes through
 	// PushLiveWrite. These entries were written on the primary
-	// AFTER session start (typically LSN > targetLSN, but routing
-	// pushed them into the session lane per CHK-NO-FAKE-LIVE-
-	// DURING-BACKLOG).
+	// AFTER session start and were pushed into the session lane per
+	// CHK-NO-FAKE-LIVE-DURING-BACKLOG.
 	WALKindSessionLive WALEntryKind = 2
 )
 

@@ -142,6 +142,9 @@ func (r *Receiver) Run() (achievedLSN uint64, err error) {
 					fmt.Errorf("numBlocks mismatch primary=%d local=%d", s.NumBlocks, got))
 			}
 			r.sessionID = s.SessionID
+			// Wire compat: sessionStart still names this field
+			// TargetLSN, but receiver treats it as the BASE lane's
+			// frontier hint/pin. It is not a completion target.
 			r.session = NewRebuildSession(r.store, s.TargetLSN)
 			// Seed walApplied with fromLSN so AchievedLSN remains a
 			// monotonic observation even when no WAL frames arrive.

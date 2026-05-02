@@ -224,8 +224,11 @@ func TestRebuildSession_Status_Snapshot(t *testing.T) {
 	s.BaseBatchAcked(8)
 
 	st := s.Status()
+	if st.BaseFrontierHint != 200 {
+		t.Errorf("BaseFrontierHint=%d want 200", st.BaseFrontierHint)
+	}
 	if st.TargetLSN != 200 {
-		t.Errorf("TargetLSN=%d want 200", st.TargetLSN)
+		t.Errorf("TargetLSN legacy alias=%d want 200", st.TargetLSN)
 	}
 	if st.WALApplied != 100 {
 		t.Errorf("WALApplied=%d want 100", st.WALApplied)
