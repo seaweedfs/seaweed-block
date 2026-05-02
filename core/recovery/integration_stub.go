@@ -140,7 +140,13 @@ func (b *PrimaryBridge) startRebuildSessionLocked(ctx context.Context, conn net.
 	// caller's next read of `coord.RouteLocalWrite` deterministically
 	// observes a non-Idle phase. If StartSession fails we don't
 	// install the sender or fire OnStart.
-	if err := b.coord.StartSession(replicaID, sessionID, fromLSN, targetLSN); err != nil {
+	var err error
+	if sink == nil {
+		err = b.coord.StartSessionLegacyBand(replicaID, sessionID, fromLSN, targetLSN)
+	} else {
+		err = b.coord.StartSession(replicaID, sessionID, fromLSN, targetLSN)
+	}
+	if err != nil {
 		b.mu.Unlock()
 		return fmt.Errorf("recovery bridge: %w", err)
 	}

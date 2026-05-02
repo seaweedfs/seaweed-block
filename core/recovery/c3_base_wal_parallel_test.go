@@ -86,7 +86,7 @@ func TestC3_BaseWalParallel_FramesInterleave(t *testing.T) {
 	}()
 
 	coord := NewPeerShipCoordinator()
-	if err := coord.StartSession("r1", 7, 0, uint64(seedN)); err != nil {
+	if err := coord.StartSessionLegacyBand("r1", 7, 0, uint64(seedN)); err != nil {
 		t.Fatalf("StartSession: %v", err)
 	}
 

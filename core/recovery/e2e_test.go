@@ -63,7 +63,7 @@ func TestE2E_RebuildHappyPath(t *testing.T) {
 
 	_, _, primaryH := primary.Boundaries()
 	// Caller-of-Run contract: StartSession before spawning Run.
-	if err := coord.StartSession("r1", 7, 0, primaryH); err != nil {
+	if err := coord.StartSessionLegacyBand("r1", 7, 0, primaryH); err != nil {
 		t.Fatalf("StartSession: %v", err)
 	}
 
@@ -160,7 +160,7 @@ func TestE2E_RebuildWithLiveWritesDuringSession(t *testing.T) {
 	receiver := NewReceiver(replica, replicaConn)
 
 	// Caller-of-Run contract: StartSession before spawning Run.
-	if err := coord.StartSession("r1", 11, 0, frozenTarget); err != nil {
+	if err := coord.StartSessionLegacyBand("r1", 11, 0, frozenTarget); err != nil {
 		t.Fatalf("StartSession: %v", err)
 	}
 
@@ -205,7 +205,7 @@ func TestE2E_RebuildWithLiveWritesDuringSession(t *testing.T) {
 	}()
 	go func() {
 		defer wg.Done()
-		sendAchieved, sendErr = sender.Run(context.Background(), /*sessionID*/ 11, /*fromLSN*/ 0, frozenTarget)
+		sendAchieved, sendErr = sender.Run(context.Background(), 11, 0, frozenTarget)
 	}()
 	wg.Wait()
 
@@ -285,7 +285,7 @@ func TestE2E_KindCountsPinsBacklogVsLive(t *testing.T) {
 	sender := NewSenderWithBacklogRelay(primary, coord, primaryConn, "r1")
 	receiver := NewReceiver(replica, replicaConn)
 
-	if err := coord.StartSession("r1", 17, 0, frozenTarget); err != nil {
+	if err := coord.StartSessionLegacyBand("r1", 17, 0, frozenTarget); err != nil {
 		t.Fatalf("StartSession: %v", err)
 	}
 
@@ -364,7 +364,7 @@ func TestE2E_PinFloorAdvancesIncrementally(t *testing.T) {
 	// Small K so cadence triggers within the 50-LBA backlog.
 	receiver := NewReceiverWithCadence(replica, replicaConn, 8, 50*time.Millisecond)
 
-	if err := coord.StartSession("r1", 21, 0, primaryH); err != nil {
+	if err := coord.StartSessionLegacyBand("r1", 21, 0, primaryH); err != nil {
 		t.Fatalf("StartSession: %v", err)
 	}
 
@@ -445,7 +445,7 @@ func TestE2E_PushLiveWriteAtomicSeal(t *testing.T) {
 	sender := NewSenderWithBacklogRelay(primary, coord, primaryConn, "r1")
 	receiver := NewReceiver(replica, replicaConn)
 
-	if err := coord.StartSession("r1", 13, 0, frozenTarget); err != nil {
+	if err := coord.StartSessionLegacyBand("r1", 13, 0, frozenTarget); err != nil {
 		t.Fatalf("StartSession: %v", err)
 	}
 

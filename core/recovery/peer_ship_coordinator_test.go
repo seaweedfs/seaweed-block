@@ -12,7 +12,7 @@ const r2 ReplicaID = "r2"
 // shipCursor ≥ target AND baseDone hold.
 func TestCoordinator_PhaseTransitionRequiresDrainAndBaseDone(t *testing.T) {
 	c := NewPeerShipCoordinator()
-	if err := c.StartSession(r1, 7, /*from*/ 100, /*target*/ 200); err != nil {
+	if err := c.StartSession(r1, 7, 100, 200); err != nil {
 		t.Fatalf("StartSession: %v", err)
 	}
 	if got := c.Phase(r1); got != PhaseDrainingHistorical {
@@ -82,7 +82,7 @@ func TestCoordinator_SingleFlightPerReplica(t *testing.T) {
 // §IV.2.1 A-class conjunct (recover-semantics-adjustment-plan §1):
 //
 //	phase != Idle ∧ baseDone
-//	∧ (walLegOkWitnessed ? walLegOkAtBarrier : achieved ≥ target)
+//	∧ (walLegOkWitnessed ? walLegOkAtBarrier : explicit legacy opt-in ∧ achieved ≥ target)
 func TestCoordinator_CanEmitSessionComplete(t *testing.T) {
 	c := NewPeerShipCoordinator()
 	_ = c.StartSession(r1, 7, 100, 200)
@@ -94,14 +94,21 @@ func TestCoordinator_CanEmitSessionComplete(t *testing.T) {
 
 	_ = c.MarkBaseDone(r1)
 
-	if c.CanEmitSessionComplete(r1, 199) {
-		t.Fatal("achievedLSN < target: should refuse")
+	if c.CanEmitSessionComplete(r1, 250) {
+		t.Fatal("missing walLegOk witness on normal session: should fail closed")
 	}
-	if !c.CanEmitSessionComplete(r1, 200) {
-		t.Fatal("achievedLSN == target ∧ baseDone: should permit (no probe witness = legacy collapse)")
+
+	legacy := NewPeerShipCoordinator()
+	_ = legacy.StartSessionLegacyBand(r1, 7, 100, 200)
+	_ = legacy.MarkBaseDone(r1)
+	if legacy.CanEmitSessionComplete(r1, 199) {
+		t.Fatal("legacy opt-in achievedLSN < target: should refuse")
 	}
-	if !c.CanEmitSessionComplete(r1, 250) {
-		t.Fatal("achievedLSN > target: should permit")
+	if !legacy.CanEmitSessionComplete(r1, 200) {
+		t.Fatal("legacy opt-in achievedLSN == target ∧ baseDone: should permit")
+	}
+	if !legacy.CanEmitSessionComplete(r1, 250) {
+		t.Fatal("legacy opt-in achievedLSN > target: should permit")
 	}
 	// Idle peer: never permitted.
 	if c.CanEmitSessionComplete(r2, 999) {
@@ -126,6 +133,26 @@ func TestCoordinator_CanEmitSessionComplete_WitnessIgnoresTargetBand(t *testing.
 	}
 	if c.CanEmitSessionComplete(r1, 1_000_000) {
 		t.Fatal("walLegOk=false witness must refuse even with huge achievedLSN")
+	}
+}
+
+func TestCoordinator_CanEmitSessionComplete_MissingWitnessRequiresExplicitLegacyOptIn(t *testing.T) {
+	normal := NewPeerShipCoordinator()
+	_ = normal.StartSession(r1, 7, 100, 200)
+	_ = normal.MarkBaseDone(r1)
+	if normal.CanEmitSessionComplete(r1, 1_000_000) {
+		t.Fatal("normal session without witness must fail closed even with huge achievedLSN")
+	}
+
+	legacy := NewPeerShipCoordinator()
+	_ = legacy.StartSessionLegacyBand(r1, 7, 100, 200)
+	_ = legacy.MarkBaseDone(r1)
+	if !legacy.CanEmitSessionComplete(r1, 200) {
+		t.Fatal("legacy opt-in should preserve band oracle")
+	}
+	st, _ := legacy.Status(r1)
+	if !st.AllowLegacyBandClose {
+		t.Fatal("Status.AllowLegacyBandClose=false for StartSessionLegacyBand")
 	}
 }
 

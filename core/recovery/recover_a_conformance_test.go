@@ -179,11 +179,21 @@ func TestRecoverA_NeitherPath_NotEligible(t *testing.T) {
 // achieved ≥ target). This preserves bridging-sink (recover(a,b))
 // semantics until C-class lands.
 func TestRecoverA_BridgingSinkPath_LegacyCollapse(t *testing.T) {
-	c, id := canEmitConjunctSetup(t, 200)
+	c := NewPeerShipCoordinator()
+	const id ReplicaID = "r-a-class"
+	if err := c.StartSessionLegacyBand(id, 42, 100, 200); err != nil {
+		t.Fatalf("StartSessionLegacyBand: %v", err)
+	}
+	if err := c.MarkBaseDone(id); err != nil {
+		t.Fatalf("MarkBaseDone: %v", err)
+	}
 	// No RecordBarrierWalLegOk call — simulates bridging-sink path.
 	st, _ := c.Status(id)
 	if st.WalLegOkWitnessed {
 		t.Fatal("setup: WalLegOkWitnessed=true unexpectedly")
+	}
+	if !st.AllowLegacyBandClose {
+		t.Fatal("setup: legacy band close was not explicitly enabled")
 	}
 	if !c.CanEmitSessionComplete(id, 200) {
 		t.Fatal("no witness ∧ baseDone ∧ achieved≥target: legacy collapse should authorize")

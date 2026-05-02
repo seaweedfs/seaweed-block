@@ -138,6 +138,13 @@ type peerShipState struct {
 	// collapses to legacy behavior.
 	walLegOkWitnessed bool
 	walLegOkAtBarrier bool
+
+	// allowLegacyBandClose is an explicit opt-in for bridging/back-compat
+	// sessions that cannot provide a PrimaryWalLegOk witness. Production
+	// dual-lane sessions must leave this false so a missing witness
+	// fail-closes instead of silently resurrecting recover(a,b)'s
+	// achievedLSN >= targetLSN oracle.
+	allowLegacyBandClose bool
 }
 
 // NewPeerShipCoordinator constructs a fresh coordinator with no active
@@ -157,6 +164,18 @@ func NewPeerShipCoordinator() *PeerShipCoordinator {
 // rebuild. targetLSN is frozen at session start and does not move
 // during the session (§2 "session target is fixed at start").
 func (c *PeerShipCoordinator) StartSession(id ReplicaID, sessionID, fromLSN, targetLSN uint64) error {
+	return c.startSession(id, sessionID, fromLSN, targetLSN, false)
+}
+
+// StartSessionLegacyBand starts a session that explicitly permits the
+// legacy achievedLSN >= targetLSN close oracle when no PrimaryWalLegOk
+// witness is recorded. Use only for bridging/back-compat paths that cannot
+// probe the WAL feeder; production dual-lane must use StartSession.
+func (c *PeerShipCoordinator) StartSessionLegacyBand(id ReplicaID, sessionID, fromLSN, targetLSN uint64) error {
+	return c.startSession(id, sessionID, fromLSN, targetLSN, true)
+}
+
+func (c *PeerShipCoordinator) startSession(id ReplicaID, sessionID, fromLSN, targetLSN uint64, allowLegacyBandClose bool) error {
 	if sessionID == 0 {
 		return errors.New("recovery: sessionID must be non-zero")
 	}
@@ -170,12 +189,13 @@ func (c *PeerShipCoordinator) StartSession(id ReplicaID, sessionID, fromLSN, tar
 			id, existing.sessionID, existing.phase)
 	}
 	c.states[id] = &peerShipState{
-		phase:      PhaseDrainingHistorical,
-		sessionID:  sessionID,
-		fromLSN:    fromLSN,
-		targetLSN:  targetLSN,
-		shipCursor: fromLSN, // anchor cursor at the session's lower bound
-		pinFloor:   fromLSN,
+		phase:                PhaseDrainingHistorical,
+		sessionID:            sessionID,
+		fromLSN:              fromLSN,
+		targetLSN:            targetLSN,
+		shipCursor:           fromLSN, // anchor cursor at the session's lower bound
+		pinFloor:             fromLSN,
+		allowLegacyBandClose: allowLegacyBandClose,
 	}
 	return nil
 }
@@ -221,10 +241,10 @@ func (c *PeerShipCoordinator) MarkBaseDone(id ReplicaID) error {
 //
 // Inequality validations (INV-PIN-COMPATIBLE-WITH-RETENTION):
 //
-//   floor < primarySBoundary → return *Failure(PinUnderRetention)
-//                              session must be invalidated, new lineage.
-//   floor ≤ st.pinFloor      → silently ignored (monotonic).
-//   floor > st.pinFloor      → advance.
+//	floor < primarySBoundary → return *Failure(PinUnderRetention)
+//	                           session must be invalidated, new lineage.
+//	floor ≤ st.pinFloor      → silently ignored (monotonic).
+//	floor > st.pinFloor      → advance.
 //
 // Pre-conditions: caller has already validated `floor ≤ walApplied`
 // (the inequality (2) check from the spec); this method does NOT
@@ -335,13 +355,12 @@ func (c *PeerShipCoordinator) RecordBarrierWalLegOk(id ReplicaID, walLegOk bool)
 //	phase != Idle
 //	∧ baseDone
 //	∧ (when walLegOkWitnessed: walLegOkAtBarrier)
-//	∧ (when !walLegOkWitnessed: achievedLSN ≥ targetLSN legacy band)
+//	∧ (when !walLegOkWitnessed: explicit legacy opt-in ∧ achievedLSN ≥ targetLSN)
 //
 // In the dual-lane path, the PrimaryWalLegOk witness is the completion
 // authority and achievedLSN is returned as an observation, not compared
-// to the frozen target band. The no-witness branch intentionally keeps
-// the old recover(a,b) band oracle for bridging/back-compat tests until
-// that path is retired.
+// to the frozen target band. The no-witness branch fail-closes unless
+// the session was explicitly started with StartSessionLegacyBand.
 //
 // Per §IV.2.1, this primary-side coordinator IS the terminal authority
 // for "session semantically complete" — replica-side TryComplete is
@@ -359,11 +378,11 @@ func (c *PeerShipCoordinator) CanEmitSessionComplete(id ReplicaID, achievedLSN u
 	if !st.baseDone {
 		return false
 	}
-	// §IV.2.1 conjunct: dual-lane probe witness binds when present.
-	// Bridging-sink path leaves walLegOkWitnessed=false and therefore
-	// remains on the legacy target-band gate for compatibility.
 	if st.walLegOkWitnessed {
 		return st.walLegOkAtBarrier
+	}
+	if !st.allowLegacyBandClose {
+		return false
 	}
 	return achievedLSN >= st.targetLSN
 }
@@ -478,15 +497,16 @@ func (c *PeerShipCoordinator) MinPinAcrossActiveSessions() (floor uint64, anyAct
 
 // PeerStatus is a diagnostic snapshot for layer-3 / monitoring.
 type PeerStatus struct {
-	Phase             PeerShipPhase
-	SessionID         uint64
-	FromLSN           uint64
-	TargetLSN         uint64
-	ShipCursor        uint64
-	BaseDone          bool
-	PinFloor          uint64
-	WalLegOkWitnessed bool // §IV.2.1 A-class: true once sender recorded the probe witness
-	WalLegOkAtBarrier bool // §IV.2.1 A-class: most recent witness value
+	Phase                PeerShipPhase
+	SessionID            uint64
+	FromLSN              uint64
+	TargetLSN            uint64
+	ShipCursor           uint64
+	BaseDone             bool
+	PinFloor             uint64
+	WalLegOkWitnessed    bool // §IV.2.1 A-class: true once sender recorded the probe witness
+	WalLegOkAtBarrier    bool // §IV.2.1 A-class: most recent witness value
+	AllowLegacyBandClose bool
 }
 
 func (c *PeerShipCoordinator) Status(id ReplicaID) (PeerStatus, bool) {
@@ -497,14 +517,15 @@ func (c *PeerShipCoordinator) Status(id ReplicaID) (PeerStatus, bool) {
 		return PeerStatus{Phase: PhaseIdle}, false
 	}
 	return PeerStatus{
-		Phase:             st.phase,
-		SessionID:         st.sessionID,
-		FromLSN:           st.fromLSN,
-		TargetLSN:         st.targetLSN,
-		ShipCursor:        st.shipCursor,
-		BaseDone:          st.baseDone,
-		PinFloor:          st.pinFloor,
-		WalLegOkWitnessed: st.walLegOkWitnessed,
-		WalLegOkAtBarrier: st.walLegOkAtBarrier,
+		Phase:                st.phase,
+		SessionID:            st.sessionID,
+		FromLSN:              st.fromLSN,
+		TargetLSN:            st.targetLSN,
+		ShipCursor:           st.shipCursor,
+		BaseDone:             st.baseDone,
+		PinFloor:             st.pinFloor,
+		WalLegOkWitnessed:    st.walLegOkWitnessed,
+		WalLegOkAtBarrier:    st.walLegOkAtBarrier,
+		AllowLegacyBandClose: st.allowLegacyBandClose,
 	}, true
 }
