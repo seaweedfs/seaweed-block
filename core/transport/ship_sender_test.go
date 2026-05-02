@@ -608,6 +608,37 @@ func TestExecutor_Ship_ActiveDualLaneSession_RoutesThroughSingleSessionEmitter(t
 	close(sink.release)
 }
 
+func TestExecutor_FeedLiveWrite_SteadyDisallowed_RetainsWithoutDial(t *testing.T) {
+	primary := storage.NewBlockStore(8, 4096)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadAddr := ln.Addr().String()
+	_ = ln.Close()
+
+	exec := NewBlockExecutor(primary, deadAddr)
+	lineage := shipTestLineage()
+	if err := exec.registerShipSessionForTest(lineage); err != nil {
+		t.Fatalf("registerShipSessionForTest: %v", err)
+	}
+
+	data := make([]byte, 4096)
+	disposition, err := exec.FeedLiveWrite("r1", lineage, false, 1, 1, data)
+	if err != nil {
+		t.Fatalf("FeedLiveWrite with steady disallowed should retain, got error: %v", err)
+	}
+	if disposition != LiveWriteRetained {
+		t.Fatalf("disposition=%v want LiveWriteRetained", disposition)
+	}
+	exec.mu.Lock()
+	conn := exec.sessions[lineage.SessionID].conn
+	exec.mu.Unlock()
+	if conn != nil {
+		t.Fatal("FeedLiveWrite with steady disallowed unexpectedly dialed/attached conn")
+	}
+}
+
 // TestExecutor_Ship_ActiveSessionSealed_FallsBackToSteadyEmitter pins
 // the close-window behavior between RecoverySink.EndSession and bridge
 // sender-map deletion. ErrSinkSealed means the session sink is no longer

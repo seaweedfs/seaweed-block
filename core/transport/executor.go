@@ -872,31 +872,6 @@ func (e *BlockExecutor) DualLanePrimaryBridge() (*recovery.PrimaryBridge, recove
 	return e.dualLane.Bridge, e.dualLane.ReplicaID, true
 }
 
-// TryPushLiveWrite routes a live WAL entry through an active dual-lane
-// recovery session if one exists for replicaID. Returns (handled=true)
-// whenever the entry was claimed by that session path, even if the
-// session sink returned an error. Legacy-mode executors, or dual-lane
-// executors with no active session for replicaID, return handled=false.
-//
-// This is the peer-layer counterpart to Ship's internal active-session
-// gate: callers that would otherwise reject on coarse peer state can
-// still respect the single-emitter rule and offer writes to the active
-// recovery session before falling back to steady shipping.
-func (e *BlockExecutor) TryPushLiveWrite(replicaID string, lba uint32, lsn uint64, data []byte) (handled bool, err error) {
-	if e.dualLane == nil {
-		return false, nil
-	}
-	rid := recovery.ReplicaID(replicaID)
-	if !e.dualLane.Bridge.HasActiveSession(rid) {
-		return false, nil
-	}
-	err = e.dualLane.Bridge.PushLiveWrite(rid, lba, lsn, data)
-	if errors.Is(err, ErrSinkSealed) {
-		return false, nil
-	}
-	return true, err
-}
-
 // Registry lifecycle note (architect P1 review #4): walShippers
 // entries are never torn down today. For replica churn, lineage
 // invalidation, or executor reuse across distinct peer

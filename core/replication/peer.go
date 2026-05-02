@@ -519,30 +519,23 @@ func (p *ReplicaPeer) ShipEntry(ctx context.Context, lineage transport.RecoveryL
 	peerLineage := p.lineage
 	targetID := p.target.ReplicaID
 	executor := p.executor
-	if p.state == ReplicaDegraded {
-		p.mu.Unlock()
-		if handled, err := executor.TryPushLiveWrite(targetID, lba, lsn, data); handled {
-			if err != nil {
-				return err
-			}
-			log.Printf("replication: ship session-lane peer=%s lba=%d lsn=%d (peer degraded, active recovery session)",
-				targetID, lba, lsn)
-			return nil
-		}
-		log.Printf("replication: ship gate-degraded peer=%s lba=%d lsn=%d (peer degraded)",
-			targetID, lba, lsn)
-		return fmt.Errorf("replication: ShipEntry: peer %s degraded", targetID)
-	}
+	allowSteady := p.state == ReplicaHealthy
 	p.mu.Unlock()
 
-	if err := p.executor.Ship(p.target.ReplicaID, peerLineage, lba, lsn, data); err != nil {
+	disposition, err := executor.FeedLiveWrite(targetID, peerLineage, allowSteady, lba, lsn, data)
+	if err != nil {
 		log.Printf("replication: ship FAILED peer=%s addr=%s lba=%d lsn=%d: %v",
-			p.target.ReplicaID, p.target.DataAddr, lba, lsn, err)
+			targetID, p.target.DataAddr, lba, lsn, err)
 		p.Invalidate(fmt.Sprintf("ship error: %v", err))
 		return err
 	}
+	if disposition == transport.LiveWriteRetained {
+		log.Printf("replication: ship retained peer=%s lba=%d lsn=%d (state disallows steady; recovery will replay)",
+			targetID, lba, lsn)
+		return nil
+	}
 	log.Printf("replication: ship ok peer=%s lba=%d lsn=%d",
-		p.target.ReplicaID, lba, lsn)
+		targetID, lba, lsn)
 	return nil
 }
 

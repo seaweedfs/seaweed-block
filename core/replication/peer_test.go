@@ -88,7 +88,8 @@ func TestReplicaPeer_ShipEntry_Happy(t *testing.T) {
 // TestReplicaPeer_ShipEntry_ConnFailure_MarksDegraded — the forward-
 // carry CARRY-1 pin test from T4a-2. On ship error, peer must mark
 // Degraded + (implicitly) Invalidate. Subsequent ShipEntry on the
-// same peer returns error without touching the wire (T4a state gate).
+// same peer is retained without touching the wire (health state is not
+// the WAL egress owner; future recovery will replay from primary WAL).
 //
 // This closes catalogue §3.2.1 C4 (no-hard-stop / error-return
 // handoff) from PARTIAL to DONE.
@@ -135,16 +136,12 @@ func TestReplicaPeer_ShipEntry_ConnFailure_MarksDegraded(t *testing.T) {
 		t.Fatalf("expected ReplicaDegraded after ship failure, got %s", peer.State())
 	}
 
-	// Subsequent ShipEntry is rejected at the peer without touching
-	// the wire (peer-state gate). This is the "no-hard-stop" shape:
-	// failure degrades the peer, and upstream callers see a cheap
-	// error instead of a real dial attempt every time.
+	// Subsequent ShipEntry is retained without touching the wire. This
+	// is the single-egress shape: Degraded remains a health fact, not a
+	// second WAL-routing decision.
 	err = peer.ShipEntry(context.Background(), transport.RecoveryLineage{}, 1, 2, data)
-	if err == nil {
-		t.Fatal("Degraded peer should reject subsequent ShipEntry, got nil")
-	}
-	if !strings.Contains(err.Error(), "degraded") {
-		t.Fatalf("expected 'degraded' error, got: %v", err)
+	if err != nil {
+		t.Fatalf("Degraded peer live write should be retained for recovery replay, got error: %v", err)
 	}
 }
 
