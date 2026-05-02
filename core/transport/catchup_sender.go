@@ -81,7 +81,7 @@ func (e *BlockExecutor) StartCatchUp(replicaID string, sessionID, epoch, endpoin
 // returns. Owns: per-call conn deadline; ScanLBAs callback closure.
 // Borrows: primaryStore (substrate handle for ScanLBAs); session
 // (cancel channel + lineage).
-func (e *BlockExecutor) doCatchUp(replicaID string, session *activeSession, fromLSN, targetLSN uint64) (uint64, error) {
+func (e *BlockExecutor) doCatchUp(replicaID string, session *activeSession, fromLSN, frontierHint uint64) (uint64, error) {
 	conn, err := net.DialTimeout("tcp", e.replicaAddr, 2*time.Second)
 	if err != nil {
 		return 0, fmt.Errorf("catch-up dial: %w", err)
@@ -113,7 +113,7 @@ func (e *BlockExecutor) doCatchUp(replicaID string, session *activeSession, from
 	// Replica's flushed LSN is what catch-up streams from. The
 	// scan starts at fromLSN+1 (entries STRICTLY AFTER the replica's
 	// frontier). T4b probe handshake delivered the replica's R; the
-	// engine's StartCatchUp command embeds H as the ship target.
+	// engine's StartCatchUp command embeds H as the frontier hint.
 	// V2 used `runCatchUpTo(replicaFlushedLSN, targetLSN)` (line 845);
 	// V3's executor doesn't yet thread replicaFlushedLSN through
 	// StartCatchUp — for muscle parity, we scan from 0 and let the
@@ -194,11 +194,11 @@ func (e *BlockExecutor) doCatchUp(replicaID string, session *activeSession, from
 	// Barrier-as-terminator (G-1 §4.2 architect Option B):
 	// `BarrierResponse.AchievedLSN` is the replica's frontier
 	// observation. The feeder's closure responsibility is the bytes it
-	// actually wrote in this session: lastSent. targetLSN remains in
+	// actually wrote in this session: lastSent. frontierHint remains in
 	// lineage/logging as a compat band, but is not the close predicate.
 	if lastSent > 0 && resp.AchievedLSN < lastSent {
-		return lastSent, fmt.Errorf("catch-up: ack %d behind last sent %d (target band=%d)",
-			resp.AchievedLSN, lastSent, targetLSN)
+		return lastSent, fmt.Errorf("catch-up: ack %d behind last sent %d (frontier_hint=%d)",
+			resp.AchievedLSN, lastSent, frontierHint)
 	}
 
 	// Mode label surfacing (memo §5.1). T4d-4 part A: ask the
@@ -208,7 +208,7 @@ func (e *BlockExecutor) doCatchUp(replicaID string, session *activeSession, from
 	// Now wrap impls forward RecoveryMode() cleanly through the
 	// embedded LogicalStorage interface.
 	mode := e.primaryStore.RecoveryMode()
-	log.Printf("executor: catch-up complete replica=%s recovery_mode=%s achieved=%d target=%d last_sent=%d",
-		replicaID, mode, resp.AchievedLSN, targetLSN, lastSent)
+	log.Printf("executor: catch-up complete replica=%s recovery_mode=%s achieved=%d frontier_hint=%d last_sent=%d",
+		replicaID, mode, resp.AchievedLSN, frontierHint, lastSent)
 	return resp.AchievedLSN, nil
 }

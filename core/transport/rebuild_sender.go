@@ -76,18 +76,17 @@ func (e *BlockExecutor) StartRebuildPinned(replicaID string, sessionID, epoch, e
 // doRebuild performs the rebuild byte-movement path:
 //
 //  1. dial the replica
-//  2. ship every primary block as MsgRebuildBlock — the replica
-//     applies each with lineage.TargetLSN as the LSN, so a future
-//     LSN-aware ApplyEntry guard still treats rebuild data as current
-//  3. send MsgRebuildDone carrying the lineage; the replica advances
-//     its frontier to lineage.TargetLSN, syncs, and replies with a
-//     BarrierResponse holding the actually achieved frontier
+//  2. ship every primary block as MsgRebuildBlock. The base stream is
+//     pinned by the session lineage, but the frontier hint is not the
+//     recover close predicate.
+//  3. send MsgRebuildDone carrying the lineage; the replica syncs and
+//     replies with a BarrierResponse holding the actually achieved
+//     frontier.
 //
 // The achieved frontier is returned verbatim to the engine. The
-// executor MUST NOT silently widen lineage.TargetLSN — that would
-// violate the engine's contract that recovery completion equals the
-// frozen target, not whatever the executor decided to do.
-func (e *BlockExecutor) doRebuild(replicaID string, session *activeSession, targetLSN uint64) (uint64, error) {
+// executor MUST NOT silently widen the lineage's frontier hint — that
+// would turn a compatibility band into a false completion fact.
+func (e *BlockExecutor) doRebuild(replicaID string, session *activeSession, frontierHint uint64) (uint64, error) {
 	conn, err := net.DialTimeout("tcp", e.replicaAddr, 2*time.Second)
 	if err != nil {
 		return 0, fmt.Errorf("rebuild dial: %w", err)
@@ -142,7 +141,7 @@ func (e *BlockExecutor) doRebuild(replicaID string, session *activeSession, targ
 	if err != nil {
 		return 0, fmt.Errorf("rebuild ack resp: %w", err)
 	}
-	log.Printf("executor: rebuild complete, sent %d blocks (targetLSN=%d)", len(blocks), targetLSN)
+	log.Printf("executor: rebuild complete, sent %d blocks (frontier_hint=%d)", len(blocks), frontierHint)
 	return resp.AchievedLSN, nil
 }
 

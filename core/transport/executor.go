@@ -293,8 +293,8 @@ func (e *BlockExecutor) Fence(replicaID string, sessionID, epoch, endpointVersio
 		SessionID:       sessionID,
 		Epoch:           epoch,
 		EndpointVersion: endpointVersion,
-		// TargetLSN is not semantically meaningful for fence (fence
-		// doesn't declare a recovery target), but post-T4b-1 the
+		// FrontierHint/TargetLSN is not semantically meaningful for
+		// fence (fence doesn't declare a recovery target), but post-T4b-1 the
 		// barrier-ack wire demands every lineage field be non-zero
 		// (architect round-21 uniform rule applied at decode). Using
 		// the liveShipTargetLSN sentinel (1) keeps Fence composable
@@ -307,7 +307,7 @@ func (e *BlockExecutor) Fence(replicaID string, sessionID, epoch, endpointVersio
 	return nil
 }
 
-// fenceSentinelTargetLSN is the lineage.TargetLSN value used for
+// fenceSentinelTargetLSN is the legacy lineage.TargetLSN wire value used for
 // fence requests. Arbitrary non-zero value; matches the
 // liveShipTargetLSN convention on the peer-level live ship path.
 // See Fence() godoc for why this is non-zero.
@@ -396,7 +396,7 @@ func (e *BlockExecutor) doFence(replicaID string, lineage RecoveryLineage) {
 // ack validation against the session's registered lineage.
 // Borrows: session by replicaID + lineage.SessionID; BarrierAck
 // payload fields are value-copied into the returned struct.
-func (e *BlockExecutor) Barrier(replicaID string, lineage RecoveryLineage, targetLSN uint64) (BarrierAck, error) {
+func (e *BlockExecutor) Barrier(replicaID string, lineage RecoveryLineage, frontierHint uint64) (BarrierAck, error) {
 	// Session lookup + epoch-== fence (same pattern as Ship).
 	e.mu.Lock()
 	session, ok := e.sessions[lineage.SessionID]
@@ -408,8 +408,8 @@ func (e *BlockExecutor) Barrier(replicaID string, lineage RecoveryLineage, targe
 	if lineage.Epoch != session.lineage.Epoch {
 		sessionEpoch := session.lineage.Epoch
 		e.mu.Unlock()
-		log.Printf("transport: barrier: dropping targetLSN=%d replica=%s stale epoch %d (session epoch %d)",
-			targetLSN, replicaID, lineage.Epoch, sessionEpoch)
+		log.Printf("transport: barrier: dropping frontier_hint=%d replica=%s stale epoch %d (session epoch %d)",
+			frontierHint, replicaID, lineage.Epoch, sessionEpoch)
 		return BarrierAck{}, fmt.Errorf("transport: barrier: stale epoch %d (session %d)",
 			lineage.Epoch, sessionEpoch)
 	}
@@ -495,11 +495,11 @@ var ErrProbeLineageMismatch = errors.New("transport: probe: response lineage doe
 // transient probe sessionID. It is NOT registered in `executor.sessions`,
 // NOT carried in any session-lifecycle event. The lineage built here:
 //
-//	RecoveryLineage{SessionID, Epoch, EndpointVersion, TargetLSN: max(1, primaryH)}
+//	RecoveryLineage{SessionID, Epoch, EndpointVersion, FrontierHint/TargetLSN: max(1, primaryH)}
 //
 // is consumed only by the wire pair. `primaryH` comes from
-// `primaryStore.Boundaries()`; the `max(1, ...)` floor ensures
-// architect's no-zero-TargetLSN rule holds even on an empty primary.
+// `primaryStore.Boundaries()`; the `max(1, ...)` floor ensures the
+// wire lineage's fourth slot is non-zero even on an empty primary.
 //
 // The replica's `acceptMutationLineage` accepts a fresh higher-tuple
 // lineage normally — probe lineages monotonically advance with the
@@ -514,7 +514,7 @@ var ErrProbeLineageMismatch = errors.New("transport: probe: response lineage doe
 // Called by: adapter.executeCommand at engine.ProbeReplica dispatch.
 // Owns: dial timeout (2s); per-call conn deadline (3s); transient
 // probe lineage construction.
-// Borrows: primaryStore (boundaries snapshot for TargetLSN floor and
+// Borrows: primaryStore (boundaries snapshot for frontier-hint floor and
 // for R/S/H facts).
 func (e *BlockExecutor) Probe(replicaID, dataAddr, ctrlAddr string, sessionID, epoch, endpointVersion uint64) adapter.ProbeResult {
 	addr := e.replicaAddr
@@ -523,22 +523,23 @@ func (e *BlockExecutor) Probe(replicaID, dataAddr, ctrlAddr string, sessionID, e
 	}
 
 	// Get primary's boundaries before dialing — the head is needed to
-	// build a non-zero TargetLSN for the request lineage, and the
+	// build a non-zero frontier hint for the request lineage, and the
 	// primaryS / primaryH are also returned in the ProbeResult.
 	_, primaryS, primaryH := e.primaryStore.Boundaries()
 
-	// Probe lineage construction (architect Option D). Floor TargetLSN
+	// Probe lineage construction (architect Option D). Floor frontier hint
 	// at 1 to honor architect's no-zero-TargetLSN rule even when the
 	// primary has not yet written any data.
-	targetLSN := primaryH
-	if targetLSN == 0 {
-		targetLSN = 1
+	frontierHint := primaryH
+	if frontierHint == 0 {
+		frontierHint = 1
 	}
 	requestLineage := RecoveryLineage{
 		SessionID:       sessionID,
 		Epoch:           epoch,
 		EndpointVersion: endpointVersion,
-		TargetLSN:       targetLSN,
+		FrontierHint:    frontierHint,
+		TargetLSN:       frontierHint,
 	}
 	if requestLineage.SessionID == 0 || requestLineage.Epoch == 0 ||
 		requestLineage.EndpointVersion == 0 {
