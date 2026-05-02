@@ -45,6 +45,32 @@ type ProbeResult struct {
 	PrimaryHeadLSN    uint64 // H
 }
 
+// ProgressFact converts a successful probe into the canonical engine
+// progress fact. Failed probes do not carry trusted R/S/H and therefore
+// are represented as missing facts.
+func (p ProbeResult) ProgressFact() engine.ReplicaProgressFact {
+	if !p.Success {
+		return engine.ReplicaProgressFact{
+			ReplicaID:       p.ReplicaID,
+			EndpointVersion: p.EndpointVersion,
+			Source:          engine.ProgressFromProbe,
+			Confidence:      engine.ProgressMissing,
+		}
+	}
+	boundsKnown := !(p.ReplicaFlushedLSN == 0 && p.PrimaryTailLSN == 0 && p.PrimaryHeadLSN == 0)
+	return engine.ReplicaProgressFact{
+		ReplicaID:          p.ReplicaID,
+		EndpointVersion:    p.EndpointVersion,
+		ReplicaR:           p.ReplicaFlushedLSN,
+		ReplicaRKnown:      boundsKnown,
+		PrimaryS:           p.PrimaryTailLSN,
+		PrimaryH:           p.PrimaryHeadLSN,
+		PrimaryBoundsKnown: boundsKnown,
+		Source:             engine.ProgressFromProbe,
+		Confidence:         engine.ProgressLiveWire,
+	}
+}
+
 // SessionCloseResult is the outcome of a completed/failed recovery session.
 //
 // Per T4d-1 v0.3: `FailureKind` carries the engine-owned typed

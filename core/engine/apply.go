@@ -314,7 +314,14 @@ func decide(st *ReplicaState, r *ApplyResult, trace func(string, string)) {
 		return
 	}
 
-	R, S, H := st.Recovery.R, st.Recovery.S, st.Recovery.H
+	fact := RecoveryFactsObserved{
+		ReplicaID:       st.Identity.ReplicaID,
+		EndpointVersion: st.Identity.EndpointVersion,
+		R:               st.Recovery.R,
+		S:               st.Recovery.S,
+		H:               st.Recovery.H,
+	}.ProgressFact()
+	H := fact.PrimaryH
 
 	// Sticky rebuild (INV-REPL-REBUILD-DECISION-STICKY): once a
 	// catch-up failure has escalated to rebuild (WALRecycled or
@@ -340,15 +347,16 @@ func decide(st *ReplicaState, r *ApplyResult, trace func(string, string)) {
 		return
 	}
 
-	if R == 0 && S == 0 && H == 0 {
+	class := ClassifyProgress(fact)
+	if class == DecisionUnknown && !fact.PrimaryBoundsKnown {
 		st.Recovery.Decision = DecisionUnknown
 		st.Recovery.DecisionReason = "no_boundaries"
 		trace("decision", "unknown (no R/S/H)")
 		return
 	}
 
-	switch {
-	case R >= H:
+	switch class {
+	case DecisionNone:
 		st.Recovery.Decision = DecisionNone
 		st.Recovery.DecisionReason = "caught_up"
 		trace("decision", "none (R >= H)")
@@ -375,7 +383,7 @@ func decide(st *ReplicaState, r *ApplyResult, trace func(string, string)) {
 			}
 		}
 
-	case R >= S && R < H:
+	case DecisionCatchUp:
 		st.Recovery.Decision = DecisionCatchUp
 		st.Recovery.DecisionReason = "gap_within_wal"
 		trace("decision", "catch_up (R >= S, R < H)")
@@ -391,14 +399,14 @@ func decide(st *ReplicaState, r *ApplyResult, trace func(string, string)) {
 				ReplicaID:       st.Identity.ReplicaID,
 				Epoch:           st.Identity.Epoch,
 				EndpointVersion: st.Identity.EndpointVersion,
-				FromLSN:         R + 1,
+				FromLSN:         fact.ReplicaR + 1,
 				FrontierHint:    H,
 				TargetLSN:       H,
 			})
 			trace("command", "StartCatchUp")
 		}
 
-	case R < S:
+	case DecisionRebuild:
 		st.Recovery.Decision = DecisionRebuild
 		st.Recovery.DecisionReason = "gap_beyond_wal"
 		trace("decision", "rebuild (R < S)")

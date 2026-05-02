@@ -138,3 +138,32 @@ func TestReplicaProgressFact_HasNoTargetLSNField(t *testing.T) {
 		t.Fatal("ReplicaProgressFact must not carry TargetLSN; use PrimaryH/frontier facts instead")
 	}
 }
+
+func TestRecoveryFactsObserved_ProgressFact_PreservesEngineNoBoundariesCompatibility(t *testing.T) {
+	event := RecoveryFactsObserved{ReplicaID: "r1"}
+	fact := event.ProgressFact()
+	if fact.ReplicaRKnown || fact.PrimaryBoundsKnown {
+		t.Fatalf("all-zero RecoveryFactsObserved must remain no-boundaries for engine compatibility: %+v", fact)
+	}
+	if got := ClassifyProgress(fact); got != DecisionUnknown {
+		t.Fatalf("ClassifyProgress(all-zero event)=%s want %s", got, DecisionUnknown)
+	}
+}
+
+func TestRecoveryFactsObserved_ProgressFact_ClassifiesWithCanonicalFact(t *testing.T) {
+	event := RecoveryFactsObserved{
+		ReplicaID:       "r1",
+		EndpointVersion: 2,
+		R:               5,
+		S:               5,
+		H:               9,
+	}
+	fact := event.ProgressFact()
+	if fact.Source != ProgressFromProbe || fact.Confidence != ProgressLiveWire {
+		t.Fatalf("source/confidence=(%s,%s), want (%s,%s)",
+			fact.Source, fact.Confidence, ProgressFromProbe, ProgressLiveWire)
+	}
+	if got := ClassifyProgress(fact); got != DecisionCatchUp {
+		t.Fatalf("ClassifyProgress()=%s want %s", got, DecisionCatchUp)
+	}
+}

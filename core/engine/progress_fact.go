@@ -48,6 +48,25 @@ type ReplicaProgressFact struct {
 	Confidence ProgressConfidence
 }
 
+// ProgressFact converts the legacy engine recovery-facts event into the
+// canonical fact seam. The historical all-zero event means "no boundaries
+// observed" in engine tests, so it remains unknown here; a future explicit
+// empty-volume fact should set PrimaryBoundsKnown through a different path.
+func (e RecoveryFactsObserved) ProgressFact() ReplicaProgressFact {
+	boundsKnown := !(e.R == 0 && e.S == 0 && e.H == 0)
+	return ReplicaProgressFact{
+		ReplicaID:          e.ReplicaID,
+		EndpointVersion:    e.EndpointVersion,
+		ReplicaR:           e.R,
+		ReplicaRKnown:      boundsKnown,
+		PrimaryS:           e.S,
+		PrimaryH:           e.H,
+		PrimaryBoundsKnown: boundsKnown,
+		Source:             ProgressFromProbe,
+		Confidence:         ProgressLiveWire,
+	}
+}
+
 // ClassifyProgress maps a unified progress fact to the engine's recovery
 // class. Numeric R/S/H semantics are source-independent; source authority
 // is handled by helpers such as CanAdvanceRecyclePin.
