@@ -1,6 +1,7 @@
 package main_test
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"os/exec"
@@ -128,6 +129,77 @@ func TestG8B_L2PrimaryKill_ReassignsAuthorityToReplica(t *testing.T) {
 	}
 	if h, _ := r2Failover["Healthy"].(bool); !h {
 		t.Fatalf("r2 did not become Healthy after r1 kill; status=%v", r2Failover)
+	}
+}
+
+func TestG8B_L2PrimaryKill_NewPrimaryReadsAcknowledgedISCSIWrite(t *testing.T) {
+	if testing.Short() {
+		t.Skip("L2 subprocess failover data-continuity test; -short skip")
+	}
+	bins := buildG54Binaries(t)
+	art := t.TempDir()
+
+	_, masterAddr := startG8Master(t, bins, art)
+
+	iqn := "iqn.2026-05.example.g8:v1"
+	r1Data, r1Status, r1Iscsi := pickAddr(t), pickAddr(t), pickAddr(t)
+	r2Data, r2Status, r2Iscsi := pickAddr(t), pickAddr(t), pickAddr(t)
+	r1Ctrl, r2Ctrl := pickAddr(t), pickAddr(t)
+
+	r1 := startG54Volume(t, bins, art, volOpts{
+		masterAddr: masterAddr,
+		serverID:   "s1", replicaID: "r1",
+		dataAddr: r1Data, ctrlAddr: r1Ctrl,
+		statusAddr:  r1Status,
+		iscsiAddr:   r1Iscsi,
+		iscsiIQN:    iqn,
+		durableRoot: filepath.Join(art, "g8b-data-r1-store"),
+		logTag:      "g8b-data-r1",
+	})
+	_ = startG54Volume(t, bins, art, volOpts{
+		masterAddr: masterAddr,
+		serverID:   "s2", replicaID: "r2",
+		dataAddr: r2Data, ctrlAddr: r2Ctrl,
+		statusAddr:  r2Status,
+		iscsiAddr:   r2Iscsi,
+		iscsiIQN:    iqn,
+		durableRoot: filepath.Join(art, "g8b-data-r2-store"),
+		logTag:      "g8b-data-r2",
+	})
+
+	pollStatus(t, r1Status, 10*time.Second, func(b map[string]any) bool {
+		h, _ := b["Healthy"].(bool)
+		rid, _ := b["ReplicaID"].(string)
+		return h && rid == "r1"
+	})
+
+	const durableBlockSize = 4096
+	payload := bytes.Repeat([]byte{0x5a}, durableBlockSize)
+	copy(payload, []byte("g8-acknowledged-write-before-primary-kill"))
+	c1 := dialG8Iscsi(t, r1Iscsi, iqn)
+	c1.write10(t, 7, payload)
+	c1.close(t)
+
+	r1.stop(t)
+
+	r2Failover := pollStatus(t, r2Status, 8*time.Second, func(b map[string]any) bool {
+		h, _ := b["Healthy"].(bool)
+		rid, _ := b["ReplicaID"].(string)
+		epoch, _ := b["Epoch"].(float64)
+		return h && rid == "r2" && epoch >= 2
+	})
+	if r2Failover == nil {
+		t.Fatal("r2: no status response after r1 kill")
+	}
+	if h, _ := r2Failover["Healthy"].(bool); !h {
+		t.Fatalf("r2 did not become Healthy after r1 kill; status=%v", r2Failover)
+	}
+
+	c2 := dialG8Iscsi(t, r2Iscsi, iqn)
+	got := c2.read10(t, 7, 1, durableBlockSize)
+	c2.close(t)
+	if !bytes.Equal(got, payload) {
+		t.Fatalf("new primary read mismatch after failover: got prefix=%x want prefix=%x", got[:32], payload[:32])
 	}
 }
 

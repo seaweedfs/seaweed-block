@@ -169,14 +169,16 @@ func startG54Master(t *testing.T, bins l2bins, art string) (*proc, string) {
 }
 
 type volOpts struct {
-	masterAddr string
-	serverID   string
-	replicaID  string
-	dataAddr   string
-	ctrlAddr   string
-	statusAddr string
+	masterAddr  string
+	serverID    string
+	replicaID   string
+	dataAddr    string
+	ctrlAddr    string
+	statusAddr  string
+	iscsiAddr   string
+	iscsiIQN    string
 	durableRoot string
-	logTag     string
+	logTag      string
 }
 
 func startG54Volume(t *testing.T, bins l2bins, art string, o volOpts) *proc {
@@ -202,6 +204,12 @@ func startG54Volume(t *testing.T, bins l2bins, art string, o volOpts) *proc {
 		"--heartbeat-interval", "200ms",
 		"--t1-readiness",
 	)
+	if o.iscsiAddr != "" {
+		cmd.Args = append(cmd.Args,
+			"--iscsi-listen", o.iscsiAddr,
+			"--iscsi-iqn", o.iscsiIQN,
+		)
+	}
 	cmd.Stdout = lf
 	cmd.Stderr = lf
 	if err := cmd.Start(); err != nil {
