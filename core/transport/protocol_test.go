@@ -74,6 +74,9 @@ func TestProtocol_EnvelopeRoundTrip(t *testing.T) {
 		{"MsgRebuildDone", MsgRebuildDone, nil},
 		{"MsgBarrierReq", MsgBarrierReq, nil},
 		{"MsgBarrierResp", MsgBarrierResp, make([]byte, 8)},
+		{"MsgRecoveryLaneStart", MsgRecoveryLaneStart, EncodeLineage(
+			RecoveryLineage{SessionID: 1, Epoch: 1, EndpointVersion: 1, TargetLSN: 1},
+		)},
 	}
 
 	for _, tc := range cases {

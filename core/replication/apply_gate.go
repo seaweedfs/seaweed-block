@@ -43,14 +43,11 @@ import (
 // lane signals were rejected as "changes recovery semantics to
 // protect an implementation shortcut."
 //
-// Today's caller (transport replica.go MsgShipEntry handler) uses a
-// transitional shim based on lineage.TargetLSN to choose which gate
-// method to invoke — that shim lives at the CALLER, not in the gate.
-// The architectural fence: gate is pure on lane; caller's signal
-// source is replaceable. See CARRY-T4D-LANE-CONTEXT-001 (catalogue
-// §3.3) for the named carry tracking the future replacement (true
-// per-connection lane tag / separate handler routes / distinct
-// listener ports).
+// The transport caller now derives lane from handler context: legacy
+// catch-up connections send MsgRecoveryLaneStart before WAL frames;
+// unmarked legacy MsgShipEntry connections are live lane. The
+// architectural fence remains: gate is pure on lane and TargetLSN is
+// not a lane signal.
 //
 // Per-LBA applied LSN source (Option C hybrid, kickoff §2.5 #1):
 // at session init, query `store.AppliedLSNs()` for substrate-

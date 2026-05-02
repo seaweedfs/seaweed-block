@@ -105,6 +105,9 @@ func (e *BlockExecutor) doCatchUp(replicaID string, session *activeSession, from
 	if err := conn.SetDeadline(time.Now().Add(recoveryConnTimeout)); err != nil {
 		return 0, fmt.Errorf("catch-up set deadline: %w", err)
 	}
+	if err := WriteMsg(conn, MsgRecoveryLaneStart, EncodeLineage(session.lineage)); err != nil {
+		return 0, fmt.Errorf("catch-up recovery lane start: %w", err)
+	}
 
 	// Replica's flushed LSN is what catch-up streams from. The
 	// scan starts at fromLSN+1 (entries STRICTLY AFTER the replica's

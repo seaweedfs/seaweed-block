@@ -42,6 +42,10 @@ const (
 	MsgRebuildDone  byte = 0x05 // primary → replica: rebuild complete
 	MsgBarrierReq   byte = 0x06 // primary → replica: sync request
 	MsgBarrierResp  byte = 0x07 // replica → primary: sync response
+	// MsgRecoveryLaneStart marks the current legacy SWRP connection as
+	// recovery-lane before any MsgShipEntry frames arrive. It replaces
+	// payload-derived lane guessing from RecoveryLineage.TargetLSN.
+	MsgRecoveryLaneStart byte = 0x08
 )
 
 // RecoveryLineage binds a mutating recovery stream to one accepted recovery
