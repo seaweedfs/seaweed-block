@@ -51,6 +51,8 @@ type fenceRecord struct {
 type startRecord struct {
 	kind      string
 	sessionID uint64
+	fromLSN   uint64
+	targetLSN uint64
 }
 
 func newMockExecutor() *mockExecutor {
@@ -153,7 +155,10 @@ func (m *mockExecutor) StartCatchUp(replicaID string, sessionID, epoch, endpoint
 	autoStart := m.autoStart
 	autoClose := m.autoClose
 	startErr := m.catchUpErr
-	m.starts = append(m.starts, startRecord{kind: "StartCatchUp", sessionID: sessionID})
+	m.starts = append(m.starts, startRecord{
+		kind: "StartCatchUp", sessionID: sessionID,
+		fromLSN: fromLSN, targetLSN: targetLSN,
+	})
 	m.mu.Unlock()
 
 	if startErr != nil {
@@ -190,7 +195,10 @@ func (m *mockExecutor) StartRebuild(replicaID string, sessionID, epoch, endpoint
 	autoStart := m.autoStart
 	autoClose := m.autoClose
 	startErr := m.rebuildErr
-	m.starts = append(m.starts, startRecord{kind: "StartRebuild", sessionID: sessionID})
+	m.starts = append(m.starts, startRecord{
+		kind: "StartRebuild", sessionID: sessionID,
+		targetLSN: targetLSN,
+	})
 	m.mu.Unlock()
 
 	if startErr != nil {
@@ -324,6 +332,48 @@ func TestC8_SameFactsSameDecision(t *testing.T) {
 	}
 	if p1.RecoveryDecision != engine.DecisionCatchUp {
 		t.Fatalf("C8: expected catch_up, got %s", p1.RecoveryDecision)
+	}
+}
+
+func TestAdapter_StartCatchUp_UsesFrontierHintOverLegacyTarget(t *testing.T) {
+	exec := newMockExecutor()
+	exec.autoStart = false
+	exec.autoClose = false
+	a := NewVolumeReplicaAdapter(exec)
+
+	cmd := engine.StartCatchUp{
+		ReplicaID:       "r1",
+		Epoch:           1,
+		EndpointVersion: 1,
+		FromLSN:         5,
+		FrontierHint:    123,
+		TargetLSN:       999,
+	}
+	events, queued := a.prepareQueuedCommands([]engine.Command{cmd})
+	if len(events) != 1 || len(queued) != 1 {
+		t.Fatalf("prepareQueuedCommands produced events=%d queued=%d, want 1/1", len(events), len(queued))
+	}
+	prepared, ok := events[0].(engine.SessionPrepared)
+	if !ok {
+		t.Fatalf("event type = %T, want engine.SessionPrepared", events[0])
+	}
+	if prepared.FrontierHint != 123 || prepared.TargetLSN != 123 {
+		t.Fatalf("SessionPrepared hints = frontier:%d legacy:%d, want 123/123",
+			prepared.FrontierHint, prepared.TargetLSN)
+	}
+
+	a.executeCommand(queued[0])
+	exec.mu.Lock()
+	defer exec.mu.Unlock()
+	if len(exec.starts) != 1 {
+		t.Fatalf("executor starts=%d, want 1", len(exec.starts))
+	}
+	got := exec.starts[0]
+	if got.fromLSN != 5 {
+		t.Fatalf("executor fromLSN=%d, want 5", got.fromLSN)
+	}
+	if got.targetLSN != 123 {
+		t.Fatalf("executor legacy target arg=%d, want FrontierHint 123", got.targetLSN)
 	}
 }
 
