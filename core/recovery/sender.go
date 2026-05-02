@@ -53,10 +53,10 @@ type preBarrierSealer interface {
 //   - Base lane: dense — ships every LBA in [0, NumBlocks()) by reading
 //     primary's current state via LogicalStorage.Read.
 //   - WAL pump: delegated to sink. The bridging sink (senderBacklogSink)
-//     scans the substrate's WAL via ScanLBAs(fromLSN, ...) up to (and
-//     including) targetLSN. Live writes during the session arrive via
-//     PushLiveWrite → sink.NotifyAppend; the bridging sink owns the
-//     buffering / atomic-seal / LSN-ordered flush discipline.
+//     is a legacy/back-compat adapter that still uses the fourth slot as
+//     a historical band. Production transport uses RecoverySink +
+//     WalShipper, which drains to observed head and then feeds live tail
+//     through the same shipper.
 //   - No baseBatchAck pin advancement during the session: pin floor
 //     stays at the session's fromLSN until EndSession releases it.
 //     Adding incremental pin advancement is a layer-2 enhancement.
@@ -79,6 +79,9 @@ type Sender struct {
 	replicaID    ReplicaID
 
 	// Session contract — set at Run() entry, immutable thereafter.
+	// targetLSN is the legacy name for the fourth wire slot. In
+	// production dual-lane it is only a frontier hint; the real WAL
+	// feeder owns catch-up/live-tail convergence.
 	sessionID uint64
 	fromLSN   uint64
 	targetLSN uint64
@@ -226,11 +229,11 @@ type walItem struct {
 //     path's "production discipline" (architect rule 2). streamBacklog
 //     is a one-shot ScanLBAs scan; direct wire emit during the scan
 //     would interleave LSNs and break the receiver's monotonic check.
-//   - DrainBacklog runs streamBacklog (ships LSN ≤ targetLSN entries)
-//     but does NOT seal. Sender calls SealBeforeBarrier after both
-//     base and WAL goroutines complete, so live writes remain accepted
-//     for the full base-transfer window.
-//   - SealBeforeBarrier sorts buffered live writes (LSN > targetLSN)
+//   - DrainBacklog runs streamBacklog (legacy: ships LSN ≤ targetLSN
+//     entries) but does NOT seal. Sender calls SealBeforeBarrier after
+//     both base and WAL goroutines complete, so live writes remain
+//     accepted for the full base-transfer window.
+//   - SealBeforeBarrier sorts buffered live writes (legacy: LSN > targetLSN)
 //     by LSN and ships them as WALKindSessionLive frames, atomically
 //     seal=true so subsequent NotifyAppend rejects before BarrierReq.
 //   - EndSession is the defer-safety net: idempotent seal so any post-
@@ -630,7 +633,7 @@ func (s *Sender) Run(ctx context.Context, sessionID, fromLSN, targetLSN uint64) 
 	// legacy target-band oracle for compatibility.
 	if !s.coordinator.CanEmitSessionComplete(s.replicaID, achieved) {
 		return achieved, newFailure(FailureContract, PhaseBarrierResp,
-			fmt.Errorf("session close predicate refused achieved=%d target=%d", achieved, targetLSN))
+			fmt.Errorf("session close predicate refused achieved=%d frontier_hint=%d", achieved, targetLSN))
 	}
 	return achieved, nil
 }

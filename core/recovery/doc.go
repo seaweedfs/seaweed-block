@@ -1,26 +1,29 @@
 // Package recovery is the V3 dual-lane rebuild/recover mechanism (G7 redo).
 //
-// This package contains ONLY the layer-1 mechanism — no engine state,
-// no transport wire, no primary-side coordinator. It can be unit-tested
-// in isolation against any LogicalStorage implementation.
+// This package contains the layer-1 receiver mechanism plus the
+// primary-side feeder/session coordinator used by the transport
+// integration. It still has no engine state and does not mint lineage.
 //
 // # Architecture (three layers, this package = layer 1)
 //
-//	Layer 1 (this package, core/recovery/):
+//	Layer 1 receiver (this package, core/recovery/):
 //	  - RebuildBitmap: per-LBA "WAL has won base" flag.
 //	  - RebuildSession: receiver-side session that applies base + WAL
 //	    lanes concurrently, arbitrates via the bitmap, emits base-batch
 //	    ack facts, and reports completion via TryComplete().
 //
-//	Layer 2 (TODO, will live in core/rebuild_coordinator/ or engine):
+//	Layer 2 feeder/session control (this package + core/transport/):
+//	  - PeerShipCoordinator: per-replica single-flight session state,
+//	    pin floor, barrier witness, and close authorization.
+//	  - Sender: one session driver. It owns base frames and delegates
+//	    all WAL feeding to a WalShipperSink, so recovery and live WAL do
+//	    not have two independent emitters.
 //	  - Primary-side pin_floor management (recycle gate; advances on
 //	    replica BaseBatchAcked facts).
 //	  - Session lifecycle, fanout of OnLocalWrite to active sessions.
-//	  - Barrier-ack closure (system-level proof of catch-up).
-//	  - Single-flight enforcement: at most one active rebuild session
-//	    per replica.
+//	  - Barrier witness + coordinator close predicate.
 //
-//	Layer 3 (TODO):
+//	Layer 3 (engine / adapter integration):
 //	  - Error classification, retry budgets, escalation rules.
 //
 // # POC assumptions (for first integration milestone)
@@ -33,23 +36,19 @@
 //     LBAs < lbaUpper have been installed via base lane". Range-list
 //     acks are a later refinement.
 //   - WAL lane reuses one wire message (frameWALEntry) for both
-//     historical backlog (kind=Backlog) and post-target session live
+//     historical backlog (kind=Backlog) and session-live writes
 //     (kind=SessionLive). Receiver-side dispatch is by SessionStart
-//     activation + per-frame Kind byte, not by payload-byte heuristic
-//     (round-46 lane-purity preserved).
+//     activation + per-frame Kind byte, not by payload-byte heuristic.
 //   - Bitmap: single sync.Mutex on RebuildSession protects bitmap +
 //     walApplied + baseDone. Fine-grained locking is a perf milestone
 //     after correctness is proved.
-//   - TryComplete() is layer-1's closure: baseDone ∧ walApplied ≥
-//     targetLSN. barrier-ack is layer 2's system-level confirmation.
-//   - Sender: SEQUENTIAL phases — base-lane, BaseDone, backlog scan,
-//     wait Close(), drainAndSeal live queue, barrier. SessionLive
-//     entries pushed via PushLiveWrite are buffered and flushed AFTER
-//     backlog drain, NOT interleaved by LSN order in real time.
-//     Spec §3.2 #3 ("one ordered outbound queue per peer mixing
-//     recover-tagged and post-target traffic with explicit LSN order")
-//     is the next milestone. Documented as an explicit POC gap so
-//     "tests pass" is not misread as "spec §3.2 #3 satisfied".
+//   - TryComplete() is the receiver-side per-cut witness:
+//     baseDone ∧ barrierWitnessed. The primary-side coordinator is the
+//     authority that decides whether a session may close.
+//   - Sender runs BASE and WAL concurrently. BASE frames are written by
+//     Sender; WAL frames are owned by the injected WalShipperSink. This
+//     preserves the single-feeder invariant: one ordered WAL egress
+//     entity per peer, with Sender only orchestrating the session.
 //
 // # Forward-looking semantic refinement (not yet implemented)
 //
@@ -83,9 +82,9 @@
 //	  lane MUST skip subsequent base blocks for that LBA.
 //
 //	INV-SESSION-COMPLETE-ON-CONJUNCTION-LAYER1
-//	  TryComplete returns done=true iff baseDone ∧ walApplied ≥
-//	  targetLSN. NOT including the barrier-ack: that is layer-2's
-//	  system-level confirmation, not layer-1's mechanical predicate.
+//	  TryComplete returns done=true iff baseDone ∧ barrierWitnessed.
+//	  walApplied/AchievedLSN are observations, not a local target-band
+//	  completion oracle.
 //
 //	INV-BITMAP-NO-INDEPENDENT-LOCK
 //	  RebuildBitmap exposes no synchronization; callers (RebuildSession)
@@ -118,8 +117,10 @@
 //	  no sessions ⇒ pure retention.
 //
 //	INV-SESSION-COMPLETE-CLOSURE
-//	  System-level done = layer-1 TryComplete ∧ barrier-ack(achieved
-//	  == targetLSN). Both halves required before declaring InSync.
+//	  System-level done = receiver witness ∧ primary coordinator close
+//	  predicate. In the dual-lane path the close predicate consumes
+//	  PrimaryWalLegOk recorded at BarrierReq emission; AchievedLSN is
+//	  an observation.
 //
 //	INV-LIVE-CAUGHT-UP-IFF-FRONTIER-AT-BARRIER
 //	  "Live caught up" is provable only via probe/barrier comparing
