@@ -70,9 +70,9 @@ func TestDualLane_EngineDrivenRebuild_HappyPath(t *testing.T) {
 			Success:           true,
 			EndpointVersion:   1,
 			TransportEpoch:    1,
-			ReplicaFlushedLSN: 0,      // R
-			PrimaryTailLSN:    1,      // S
-			PrimaryHeadLSN:    seedN,  // H = 12
+			ReplicaFlushedLSN: 0,     // R
+			PrimaryTailLSN:    1,     // S
+			PrimaryHeadLSN:    seedN, // H = 12
 		})
 
 		// Wait for engine to dispatch StartRebuild (CommandLog) AND
@@ -259,7 +259,6 @@ func TestDualLane_EngineDrivenRebuild_WithPushLiveDuringSession(t *testing.T) {
 			t.Fatal("coord still Idle after rebuild dispatch — PushLiveWrite would fail")
 		}
 
-
 		liveLBA := uint32(55)
 		liveData := make([]byte, component.DefaultBlockSize)
 		liveData[0] = 0xEE
@@ -269,6 +268,7 @@ func TestDualLane_EngineDrivenRebuild_WithPushLiveDuringSession(t *testing.T) {
 		if rt := c.Coord().RouteLocalWrite(coordRID, liveLSN); rt != recovery.RouteSessionLane {
 			t.Fatalf("RouteLocalWrite during session: got %v want RouteSessionLane", rt)
 		}
+		waitBridgeLiveReady(t, br, coordRID)
 		// In Backlog mode, NotifyAppend is lag-only (no emit); the
 		// substrate scan in drainOpportunity picks up the entry from
 		// primary's WAL. So the live LSN reaches replica via the
@@ -405,15 +405,12 @@ func TestPillar3Slice2_EngineDriven_SameLBAArbitration(t *testing.T) {
 
 		// Wait for engine to emit StartRebuild AND for the bridge to be
 		// reachable (DualLanePrimaryBridge returns once the executor has
-		// the dual-lane config). The PushLiveWrite race against
-		// sink.StartSession is the same one TestDualLane_EngineDrivenRebuild_
-		// WithPushLiveDuringSession comments on (post-C2): logs a
-		// WALSHIPPER-OUT-OF-ORDER warning under the default non-strict
-		// mode but still emits.
+		// the dual-lane config).
 		br, coordRID, ok := c.BlockExecutor(0).DualLanePrimaryBridge()
 		if !ok || br == nil {
 			t.Fatal("BlockExecutor missing dual-lane PrimaryBridge")
 		}
+		waitBridgeLiveReady(t, br, coordRID)
 
 		// Live-overwrite the SAME LBAs as the backlog. Each Write goes
 		// onto primary's WAL with a fresh LSN > seedN; PushLiveWrite
@@ -503,4 +500,18 @@ func TestPillar3Slice2_EngineDriven_SameLBAArbitration(t *testing.T) {
 			}
 		}
 	})
+}
+
+func waitBridgeLiveReady(t *testing.T, bridge interface {
+	HasActiveSession(recovery.ReplicaID) bool
+}, replicaID recovery.ReplicaID) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if bridge.HasActiveSession(replicaID) {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("bridge session for %s did not become live-ready", replicaID)
 }
