@@ -20,14 +20,31 @@ import (
 // MsgRebuildBlock per LBA, then a terminal MsgRebuildDone whose
 // BarrierResponse carries the replica's actually achieved frontier.
 func (e *BlockExecutor) StartRebuild(replicaID string, sessionID, epoch, endpointVersion, targetLSN uint64) error {
+	// Legacy wrapper: older adapter/engine surfaces only provide one
+	// number. Treat it as both the base snapshot pin and the frontier
+	// hint. New transport code that has a distinct base pin should call
+	// StartRebuildPinned.
+	return e.StartRebuildPinned(replicaID, sessionID, epoch, endpointVersion, targetLSN, targetLSN)
+}
+
+// StartRebuildPinned is the explicit rebuild entry point: basePinLSN is
+// the WAL point through which the base snapshot is considered durable;
+// frontierHint is the session lineage's fourth wire slot and compatibility
+// band. Keeping them separate prevents the recovery feeder from using a
+// close/band value as the WAL rewind point by accident.
+func (e *BlockExecutor) StartRebuildPinned(replicaID string, sessionID, epoch, endpointVersion, basePinLSN, frontierHint uint64) error {
 	if e.dualLane != nil {
-		return e.startRebuildDualLane(replicaID, sessionID, epoch, endpointVersion, targetLSN)
+		return e.startRebuildDualLane(replicaID, sessionID, epoch, endpointVersion, basePinLSN, frontierHint)
+	}
+	if basePinLSN != frontierHint {
+		return fmt.Errorf("legacy rebuild path requires basePinLSN == frontierHint (basePinLSN=%d frontierHint=%d)", basePinLSN, frontierHint)
 	}
 	lineage := RecoveryLineage{
 		SessionID:       sessionID,
 		Epoch:           epoch,
 		EndpointVersion: endpointVersion,
-		TargetLSN:       targetLSN,
+		FrontierHint:    frontierHint,
+		TargetLSN:       frontierHint,
 	}
 	session, err := e.registerSession(lineage)
 	if err != nil {
@@ -44,11 +61,11 @@ func (e *BlockExecutor) StartRebuild(replicaID string, sessionID, epoch, endpoin
 	//
 	// Pinned by: INV-G6-WALRECYCLE-DISPATCHES-REBUILD (test pointer)
 	// + QA `wait_until_rebuild_dispatched` helper (D-scenario harness).
-	log.Printf("executor: rebuild start replica=%s sessionID=%d epoch=%d EV=%d targetLSN=%d",
-		replicaID, sessionID, epoch, endpointVersion, targetLSN)
+	log.Printf("executor: rebuild start replica=%s sessionID=%d epoch=%d EV=%d basePinLSN=%d frontierHint=%d targetLSN=%d",
+		replicaID, sessionID, epoch, endpointVersion, basePinLSN, frontierHint, frontierHint)
 
 	go func() {
-		achieved, err := e.doRebuild(replicaID, session, targetLSN)
+		achieved, err := e.doRebuild(replicaID, session, frontierHint)
 		e.finishSession(replicaID, session, achieved, err)
 	}()
 	return nil
@@ -146,7 +163,7 @@ func (e *BlockExecutor) doRebuild(replicaID string, session *activeSession, targ
 // OnSessionClose when the session goroutine completes — happens
 // autonomously: sender.Run barriers as soon as sink.DrainBacklog
 // returns (P2c-slice B-2 lifecycle).
-func (e *BlockExecutor) startRebuildDualLane(replicaID string, sessionID, epoch, endpointVersion, targetLSN uint64) error {
+func (e *BlockExecutor) startRebuildDualLane(replicaID string, sessionID, epoch, endpointVersion, basePinLSN, frontierHint uint64) error {
 	dl := e.dualLane
 
 	// Phase 0 Fix #1 — INV-RID-UNIFIED-PER-SESSION:
@@ -180,8 +197,8 @@ func (e *BlockExecutor) startRebuildDualLane(replicaID string, sessionID, epoch,
 	// Same observability marker as the legacy path so QA helpers
 	// scrape it identically across modes (INV-G6-WALRECYCLE-DISPATCHES-
 	// REBUILD).
-	log.Printf("executor: rebuild start replica=%s sessionID=%d epoch=%d EV=%d targetLSN=%d (dual-lane)",
-		replicaID, sessionID, epoch, endpointVersion, targetLSN)
+	log.Printf("executor: rebuild start replica=%s sessionID=%d epoch=%d EV=%d basePinLSN=%d frontierHint=%d targetLSN=%d (dual-lane)",
+		replicaID, sessionID, epoch, endpointVersion, basePinLSN, frontierHint, frontierHint)
 
 	// P2d wiring: build the RecoverySink that brackets the resident
 	// WalShipper around this session.
@@ -196,25 +213,19 @@ func (e *BlockExecutor) startRebuildDualLane(replicaID string, sessionID, epoch,
 		SessionID:       sessionID,
 		Epoch:           epoch,
 		EndpointVersion: endpointVersion,
-		TargetLSN:       targetLSN,
+		FrontierHint:    frontierHint,
+		TargetLSN:       frontierHint,
 	}
 	sink := NewRecoverySinkWithProfiles(e, replicaID,
 		conn, sessionLineage, EmitProfileDualLaneWALFrame,
 		steadyConn, steadyLineage, steadyProfile,
 	)
 
-	// Rebuild-sentinel translation: caller passes targetLSN as the
-	// frozen frontier the replica must reach. The session's "fromLSN"
-	// is the snapshot pin — the LSN through which the base lane's
-	// extent snapshot is durable. WAL drain ships entries past the pin
-	// up to targetLSN.
-	//
-	// For a full rebuild (replica empty / too far behind retention to
-	// catch up via WAL alone), pin = targetLSN: base covers the snapshot
-	// through the checkpoint, WAL drain has nothing to ship at session
-	// start (cursor==head; see WalShipper.DrainBacklog cursor-caught-up
-	// shortcut), and any new writes during the session flow via
-	// NotifyAppend on the live path.
+	// basePinLSN is the snapshot pin — the LSN through which the base
+	// lane's extent snapshot is durable. WAL drain ships entries after
+	// this pin. frontierHint is carried in the lineage for compatibility
+	// and diagnostics, but it is not allowed to silently pick the WAL
+	// rewind point.
 	//
 	// Without this translation, passing fromLSN=0 to WalShipper.StartSession
 	// makes DrainBacklog's ScanLBAs(0) hit the recycle gate
@@ -223,13 +234,10 @@ func (e *BlockExecutor) startRebuildDualLane(replicaID string, sessionID, epoch,
 	// Hardware-validated 2026-05-02 (g7-debug trail captured the
 	// recycle error pre-fix).
 	//
-	// Future: when callers want catch-up-from-replicaLSN semantics,
-	// extend the StartRebuild signature with a `pin uint64` param;
-	// today targetLSN-as-pin is the only mode.
-	sessionFromLSN := targetLSN
-	log.Printf("g7-debug: startRebuildDualLane calling Bridge.StartRebuildSessionWithSink replica=%s sessionID=%d sessionFromLSN=%d targetLSN=%d", replicaID, sessionID, sessionFromLSN, targetLSN)
+	sessionFromLSN := basePinLSN
+	log.Printf("g7-debug: startRebuildDualLane calling Bridge.StartRebuildSessionWithSink replica=%s sessionID=%d basePinLSN=%d frontierHint=%d", replicaID, sessionID, sessionFromLSN, frontierHint)
 	if err := dl.Bridge.StartRebuildSessionWithSink(
-		context.Background(), conn, argRID, sessionID, sessionFromLSN, targetLSN, sink,
+		context.Background(), conn, argRID, sessionID, sessionFromLSN, frontierHint, sink,
 	); err != nil {
 		log.Printf("g7-debug: startRebuildDualLane Bridge.StartRebuildSessionWithSink err replica=%s err=%v", replicaID, err)
 		_ = conn.Close()
