@@ -229,13 +229,15 @@ type walItem struct {
 //     path's "production discipline" (architect rule 2). streamBacklog
 //     is a one-shot ScanLBAs scan; direct wire emit during the scan
 //     would interleave LSNs and break the receiver's monotonic check.
-//   - DrainBacklog runs streamBacklog (legacy: ships LSN ≤ targetLSN
-//     entries) but does NOT seal. Sender calls SealBeforeBarrier after
-//     both base and WAL goroutines complete, so live writes remain
-//     accepted for the full base-transfer window.
-//   - SealBeforeBarrier sorts buffered live writes (legacy: LSN > targetLSN)
-//     by LSN and ships them as WALKindSessionLive frames, atomically
-//     seal=true so subsequent NotifyAppend rejects before BarrierReq.
+//   - DrainBacklog runs streamBacklog over all retained WAL after
+//     fromLSN; the legacy fourth slot is not a scan stop line.
+//     Sender calls SealBeforeBarrier after both base and WAL goroutines
+//     complete, so live writes remain accepted for the full base-transfer
+//     window.
+//   - SealBeforeBarrier sorts buffered live writes by LSN, skips entries
+//     the backlog scan already covered, and ships the remaining tail as
+//     WALKindSessionLive, atomically seal=true so subsequent NotifyAppend
+//     rejects before BarrierReq.
 //   - EndSession is the defer-safety net: idempotent seal so any post-
 //     Run NotifyAppend gets an explicit error. Buffer entries that
 //     weren't flushed (e.g., DrainBacklog errored mid-scan) are
@@ -299,10 +301,11 @@ func (w *senderBacklogSink) SealBeforeBarrier() error {
 
 // flushAndSeal atomically takes the buffered live-write queue and
 // forbids further NotifyAppend (sealed=true under sinkMu), then ships
-// every item in LSN order on the same wire as streamBacklog. The
-// atomic take + seal guarantees no concurrent NotifyAppend can land
-// an entry that misses the flush — the push either lands before
-// sinkMu acquisition (captured in queue) or after (sealed → error).
+// any item not already covered by streamBacklog in LSN order on the
+// same wire. The atomic take + seal guarantees no concurrent
+// NotifyAppend can land an entry that misses the flush — the push
+// either lands before sinkMu acquisition (captured in queue) or after
+// (sealed → error).
 func (w *senderBacklogSink) flushAndSeal() error {
 	w.sinkMu.Lock()
 	if w.sealed {
@@ -326,6 +329,9 @@ func (w *senderBacklogSink) flushAndSeal() error {
 	}
 
 	for _, item := range queue {
+		if st, ok := w.s.coordinator.Status(w.s.replicaID); ok && item.lsn <= st.ShipCursor {
+			continue
+		}
 		if err := w.s.writeFrame(frameWALEntry, encodeWALEntry(WALKindSessionLive, item.lba, item.lsn, item.data)); err != nil {
 			return newFailure(FailureWire, PhaseDrainSeal, err)
 		}
@@ -722,20 +728,14 @@ func (s *Sender) streamBase(numBlocks uint32) error {
 	return nil
 }
 
-// streamBacklog replays the primary's WAL window (fromLSN, targetLSN]
-// via ScanLBAs and ships each entry on the WAL lane. Records each
-// shipped LSN with the coordinator so BacklogDrained becomes true
-// once the highest LSN ≤ targetLSN is shipped.
+// streamBacklog replays the primary's retained WAL window after fromLSN
+// via ScanLBAs and ships each entry on the WAL lane. It deliberately
+// does not stop at the legacy fourth wire slot: the feeder's job is to
+// feed all retained WAL it can observe, while completion is decided by
+// the barrier witness + coordinator close predicate.
 func (s *Sender) streamBacklog() error {
-	stop := errors.New("scan stop sentinel")
 	var wireErr, contractErr error // surfaced from inside the callback
 	scanErr := s.primaryStore.ScanLBAs(s.fromLSN, func(e storage.RecoveryEntry) error {
-		// Skip entries past frozen target — those belong on the
-		// session-lane buffer (via NotifyAppend) or the steady-live
-		// path; streamBacklog only ships pre-target history.
-		if e.LSN > s.targetLSN {
-			return stop
-		}
 		// fromLSN is exclusive in our contract; ScanLBAs may emit
 		// LSN == fromLSN if the substrate's retention starts there.
 		// Skip the boundary entry.
@@ -758,7 +758,7 @@ func (s *Sender) streamBacklog() error {
 	if contractErr != nil {
 		return newFailure(FailureContract, PhaseBacklog, contractErr)
 	}
-	if scanErr != nil && !errors.Is(scanErr, stop) {
+	if scanErr != nil {
 		// ScanLBAs returns storage.ErrWALRecycled when fromLSN is
 		// below retention. Tier-class escalation: caller must pick
 		// a fresher anchor.

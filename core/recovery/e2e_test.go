@@ -245,24 +245,20 @@ func TestE2E_RebuildWithLiveWritesDuringSession(t *testing.T) {
 	}
 }
 
-// TestE2E_KindCountsPinsBacklogVsLive verifies the WAL-lane kind tag
-// flows wire → receiver → RebuildSession.Status: a session that ships
-// N backlog entries plus M PushLiveWrite entries should report
-// exactly (N, M) in BacklogApplied / SessionLiveApplied. This pins
-// the observability contract from WALEntryKind.
+// TestE2E_BridgingBacklogDrainsPastTargetBand verifies the legacy
+// bridging sink no longer treats the fourth wire slot as a backlog stop
+// line. If retained WAL contains entries above the session's frontier
+// hint, streamBacklog feeds them as backlog; a duplicate PushLiveWrite
+// for the same LSN is skipped during seal.
 //
 // IMPORTANT: this test does NOT use kind counts to assert "caught
 // up" — convergence is still proved by the byte-equal check after
 // barrier (per architect ruling: kind is observability, not
 // convergence proof).
 //
-// Substrate choice (P2c-slice B-2): memorywal — preserves real
-// write-time LSNs, so live writes after frozenTarget keep LSN >
-// frozenTarget and streamBacklog filters them out cleanly. BlockStore
-// would synthesize LSN from walHead at scan time, so live writes
-// (push-before-Run) would shift walHead and ALL entries would get
-// stamped with the new walHead → all filtered out.
-func TestE2E_KindCountsPinsBacklogVsLive(t *testing.T) {
+// Substrate choice: memorywal preserves real write-time LSNs, so the
+// test proves entries with LSN > frozenTarget are retained and fed.
+func TestE2E_BridgingBacklogDrainsPastTargetBand(t *testing.T) {
 	const numBlocks = 32
 	const blockSize = 4096
 	const epoch byte = 0xE5
@@ -289,12 +285,10 @@ func TestE2E_KindCountsPinsBacklogVsLive(t *testing.T) {
 		t.Fatalf("StartSession: %v", err)
 	}
 
-	// Phase 2: 3 live writes BEFORE sender.Run starts. The bridging
-	// sink buffers them under sinkMu via PushLiveWrite; flushAndSeal
-	// ships them as WALKindSessionLive after streamBacklog. memorywal
-	// preserves real LSNs, so these get LSN > frozenTarget and
-	// streamBacklog's `e.LSN > targetLSN` filter excludes them from
-	// the backlog scan, leaving them to flushAndSeal.
+	// Phase 2: 3 writes after frozenTarget, before sender.Run starts.
+	// They are both retained in primary WAL and offered to the bridging
+	// live queue. Correct behavior is to feed them once via backlog scan
+	// and skip the duplicate queued copies during SealBeforeBarrier.
 	for i := uint32(0); i < 3; i++ {
 		lba := 10 + i
 		data := formulaPayload(lba, epoch, blockSize)
@@ -317,14 +311,11 @@ func TestE2E_KindCountsPinsBacklogVsLive(t *testing.T) {
 	wg.Wait()
 
 	st := receiver.Session().Status()
-	// 10 backlog entries: ScanLBAs over BlockStore emits one entry
-	// per stored LBA at scan-time LSN. Our 10 stored LBAs all have
-	// LSN ≤ frozenTarget, so all 10 ship as Backlog kind.
-	if st.BacklogApplied != 10 {
-		t.Errorf("BacklogApplied=%d want 10", st.BacklogApplied)
+	if st.BacklogApplied != 13 {
+		t.Errorf("BacklogApplied=%d want 13 (must feed retained WAL past target band)", st.BacklogApplied)
 	}
-	if st.SessionLiveApplied != 3 {
-		t.Errorf("SessionLiveApplied=%d want 3", st.SessionLiveApplied)
+	if st.SessionLiveApplied != 0 {
+		t.Errorf("SessionLiveApplied=%d want 0 (duplicate queued live writes should be skipped)", st.SessionLiveApplied)
 	}
 	t.Logf("kind counts: backlog=%d, sessionLive=%d (target=%d, walApplied=%d)",
 		st.BacklogApplied, st.SessionLiveApplied, st.TargetLSN, st.WALApplied)
