@@ -50,10 +50,10 @@ type ReplicationVolume struct {
 	// replayedGens counts UpdateReplicaSet calls dropped as stale
 	// (generation > 0 && generation <= lastAppliedGeneration). Exposed
 	// only to same-package tests for now; a public Stats() or
-	// Prometheus hook is a T4-end observability pass.
+	// Prometheus hook is a future observability pass.
 	replayedGens atomic.Uint64
 
-	// G5-5C probe loop integration. Set once via ConfigureProbeLoop;
+	// Probe loop integration. Set once via ConfigureProbeLoop;
 	// started via StartProbeLoop after primary admit; stopped FIRST
 	// during Close (before peer teardown) so an in-flight probe
 	// callback never lands on a closed volume / closed peer set.
@@ -62,10 +62,10 @@ type ReplicationVolume struct {
 	probeCfg    ProbeLoopConfig // remembered for SetProbeCooldownConfig push-down on UpdateReplicaSet
 	probeCfgSet bool            // true after ConfigureProbeLoop succeeds
 
-	// G5-5C Batch #7 peer-lifecycle hook. Optional pair of callbacks
-	// invoked from UpdateReplicaSet on peer add / remove (including
-	// the lineage-bump teardown + recreate path). Used by the host
-	// to maintain a per-peer adapter registry in lockstep with the
+	// Peer-lifecycle hook. Optional pair of callbacks invoked from
+	// UpdateReplicaSet on peer add / remove (including the
+	// lineage-bump teardown + recreate path). Used by the host to
+	// maintain a per-peer adapter registry in lockstep with the
 	// authoritative peer set.
 	onPeerAdded   func(*ReplicaPeer)
 	onPeerRemoved func(string) // by ReplicaID
@@ -136,8 +136,8 @@ func (v *ReplicationVolume) SetDualLaneExecutorFactory(f func(store storage.Logi
 
 // SetDurabilityMode configures the per-volume durability semantic
 // that Sync uses. Safe to call at any time; effect applies from the
-// next Sync call forward. Per mini-plan §5, T4b does not support
-// per-Sync-call mode override — mode is a per-volume setting.
+// next Sync call forward. There is no per-Sync-call mode override —
+// mode is a per-volume setting.
 //
 // Called by: Host / Provider composition root at volume lifecycle
 // start, or on operator reconfiguration.
@@ -163,19 +163,14 @@ func (v *ReplicationVolume) DurabilityMode() DurabilityMode {
 // closure that wraps LogicalStorage.Sync.
 //
 // Lock scope: v.mu is held across the FULL call. This preserves the
-// same discipline as OnLocalWrite (architect T4a-4 round-15
-// Condition A): LSN-order fan-out serialization at the replication
-// layer. Concurrent Sync and OnLocalWrite calls are thus serialized
-// on v.mu, matching V2's shipMu semantics extended from ship-only
-// into ship+barrier. Accepted correctness-first trade-off: a slow
-// peer barrier stalls other writers on the same volume; async-queue
-// optimization (Option Z) is deferred post-T4 per mini-plan §6.
+// same discipline as OnLocalWrite — LSN-order fan-out serialization
+// at the replication layer. Concurrent Sync and OnLocalWrite calls
+// are thus serialized on v.mu. Accepted correctness-first trade-off:
+// a slow peer barrier stalls other writers on the same volume;
+// async-queue optimization is a future refinement.
 //
-// Forward-carry: INV-REPL-LSN-ORDER-FANOUT-001 (T4a-4) must
-// continue to pass under the new code path; the adversarial
-// TestReplicationVolume_OnLocalWrite_ConcurrentLSNs_OrderedAtReplica
-// test and the new TestReplicationVolume_Sync_PreservesLSNOrder
-// UnderConcurrency pin verify no regression.
+// Pinned by: INV-REPL-LSN-ORDER-FANOUT-001 +
+// TestReplicationVolume_Sync_PreservesLSNOrder_UnderConcurrency.
 //
 // Called by: StorageBackend.Sync (when a WriteObserver is installed)
 // per host-side FLUSH / SYNCHRONIZE_CACHE.
@@ -211,11 +206,11 @@ func (v *ReplicationVolume) Sync(ctx context.Context, targetLSN uint64) error {
 // UpdateReplicaSet applies the authoritative replica set from a master
 // assignment event. Adds new peers, removes deleted ones, and tears
 // down + recreates peers whose lineage (Epoch / EndpointVersion) has
-// bumped. Lineage-bump tear-down is the T4a MVP shape; in-place
-// lineage update on existing peers is a T4c refinement when recovery
-// sessions thread through.
+// bumped. Lineage-bump tear-down is the current shape; in-place
+// lineage update on existing peers is a future refinement when
+// recovery sessions thread through.
 //
-// Generation rule (T4a-5.0 decision §9.4):
+// Generation rule:
 //   - generation == 0: unversioned apply. Peer map IS mutated, but
 //     lastAppliedGeneration is NOT advanced. Intended for test /
 //     fake-master use only; production master MUST emit >= 1.
@@ -232,8 +227,8 @@ func (v *ReplicationVolume) Sync(ctx context.Context, targetLSN uint64) error {
 // completion. No special branch. Standalone / RF=1 / operator-drained
 // volumes are legal authoritative state.
 //
-// Called by: Host authority-callback path (T4a-5), on every
-// assignment event that carries a replica-set delta.
+// Called by: Host authority-callback path, on every assignment event
+// that carries a replica-set delta.
 // Owns: peers map mutations under v.mu; *ReplicaPeer lifecycle (New
 // on add, Close on remove / lineage bump); the per-peer BlockExecutor
 // created via newExec; the lastAppliedGeneration monotonic guard.
@@ -246,7 +241,7 @@ func (v *ReplicationVolume) UpdateReplicaSet(generation uint64, targets []Replic
 		return fmt.Errorf("replication: UpdateReplicaSet: volume %s closed", v.volumeID)
 	}
 
-	// Generation guard (T4a-5.0 §9.4 three-way rule).
+	// Generation guard (three-way rule).
 	if generation > 0 && generation <= v.lastAppliedGeneration {
 		v.replayedGens.Add(1)
 		// Log peer-ID-set delta for forensics (Q2 binding — IDs only,
@@ -278,9 +273,9 @@ func (v *ReplicationVolume) UpdateReplicaSet(generation uint64, targets []Replic
 		if _, keep := want[id]; !keep {
 			_ = peer.Close()
 			delete(v.peers, id)
-			// G5-5C Batch #7: notify peer-lifecycle hook AFTER peer.Close
-			// to mirror the existing teardown ordering. Hook is called
-			// under v.mu (lock-order: v.mu → host registry's mu).
+			// Notify peer-lifecycle hook AFTER peer.Close to mirror
+			// the existing teardown ordering. Hook is called under
+			// v.mu (lock-order: v.mu → host registry's mu).
 			if v.onPeerRemoved != nil {
 				v.onPeerRemoved(id)
 			}
@@ -297,10 +292,9 @@ func (v *ReplicationVolume) UpdateReplicaSet(generation uint64, targets []Replic
 			// Lineage or address bumped → tear down + recreate.
 			_ = existing.Close()
 			delete(v.peers, id)
-			// G5-5C Batch #7: lineage-bump teardown also notifies the
-			// hook so the per-peer adapter is dropped before the fresh
-			// adapter is added below (mirrors the §1.E (c) discipline:
-			// new peer instance, fresh engine state).
+			// Lineage-bump teardown also notifies the hook so the
+			// per-peer adapter is dropped before the fresh adapter is
+			// added below (new peer instance, fresh engine state).
 			if v.onPeerRemoved != nil {
 				v.onPeerRemoved(id)
 			}
@@ -315,12 +309,12 @@ func (v *ReplicationVolume) UpdateReplicaSet(generation uint64, targets []Replic
 		if err != nil {
 			return fmt.Errorf("replication: UpdateReplicaSet: add peer %s: %w", id, err)
 		}
-		// G5-5C: push the volume-level probe cooldown config onto the
-		// fresh peer (architect 2026-04-27 guidance #3). A new peer
-		// (whether first add or post-lineage-bump recreate) starts
-		// with cooldown reset to defaults; the prior peer's cooldown
-		// state cannot leak across the lineage boundary because that
-		// state lived on the now-closed *ReplicaPeer.
+		// Push the volume-level probe cooldown config onto the fresh
+		// peer. A new peer (whether first add or post-lineage-bump
+		// recreate) starts with cooldown reset to defaults; the prior
+		// peer's cooldown state cannot leak across the lineage
+		// boundary because that state lived on the now-closed
+		// *ReplicaPeer.
 		if v.probeCfgSet {
 			peer.SetProbeCooldownConfig(PeerProbeCooldown{
 				Base: v.probeCfg.CooldownBase,
@@ -328,9 +322,9 @@ func (v *ReplicationVolume) UpdateReplicaSet(generation uint64, targets []Replic
 			})
 		}
 		v.peers[id] = peer
-		// G5-5C Batch #7: notify peer-lifecycle hook AFTER the peer is
-		// installed in the map so the host's registry can construct
-		// the per-peer adapter and prime it with the peer's identity.
+		// Notify peer-lifecycle hook AFTER the peer is installed in
+		// the map so the host's registry can construct the per-peer
+		// adapter and prime it with the peer's identity.
 		if v.onPeerAdded != nil {
 			v.onPeerAdded(peer)
 		}
@@ -394,28 +388,24 @@ func formatIDSet(s map[string]struct{}) string {
 //
 // Contract: OnLocalWrite serializes fan-out in LSN order for a given
 // volume. Caller order is NOT trusted as the correctness mechanism —
-// the volume-level mutex v.mu is held across the entire fan-out loop
-// (architect Condition A). A future refactor that releases v.mu
-// before issuing per-peer Ship calls silently reintroduces the
-// BUG-001-class out-of-order-ship hazard that V2 BlockVol.shipMu was
-// designed to prevent.
+// the volume-level mutex v.mu is held across the entire fan-out loop.
+// A future refactor that releases v.mu before issuing per-peer Ship
+// calls silently reintroduces an out-of-order-ship hazard.
 //
 // Best-effort semantics: per-peer ship errors are logged and the
 // offending peer is marked Degraded (by ReplicaPeer.ShipEntry's own
-// error-handling path, T4a-3 forward-carry CARRY-1). A peer error
-// does NOT fail this OnLocalWrite call — the remaining peers still
-// receive the entry. Durability closure (sync_all / sync_quorum)
-// arrives at T4b.
+// error-handling path). A peer error does NOT fail this OnLocalWrite
+// call — the remaining peers still receive the entry. Stricter
+// durability closure (sync_all / sync_quorum) is layered above this.
 //
-// Accepted T4a trade-off (mini-plan change log): this is a
-// correctness-first serialized design. Throughput may be reduced or
-// peer slowness may amplify into writer latency when a peer's dial /
-// write is slow. Revisit (e.g., Option Z async queue) only after
-// INV-REPL-LSN-ORDER-FANOUT-001 is proven.
+// Accepted trade-off: this is a correctness-first serialized design.
+// Throughput may be reduced or peer slowness may amplify into writer
+// latency when a peer's dial / write is slow. Async-queue
+// optimization is a future refinement.
 //
-// Called by: Backend.Write wrapper (future T4a-5+ wire) immediately
-// after LogicalStorage.Write returns with the assigned LSN.
-// Owns: the per-write mutex hold across fan-out (Condition A lock
+// Called by: Backend.Write wrapper immediately after
+// LogicalStorage.Write returns with the assigned LSN.
+// Owns: the per-write mutex hold across fan-out (LSN-order lock
 // scope); per-peer error aggregation and logging.
 // Borrows: w.Data slice — caller retains; fan-out must not mutate.
 func (v *ReplicationVolume) OnLocalWrite(ctx context.Context, w LocalWrite) error {
@@ -427,9 +417,9 @@ func (v *ReplicationVolume) OnLocalWrite(ctx context.Context, w LocalWrite) erro
 	if v.closed {
 		return fmt.Errorf("replication: OnLocalWrite: volume %s closed", v.volumeID)
 	}
-	// G5-5 instrumentation: log entry with peer count so we can
-	// disambiguate "OnLocalWrite never called" vs "called but
-	// peers map is empty" vs "called and fans out".
+	// Log entry with peer count so we can disambiguate
+	// "OnLocalWrite never called" vs "called but peers map is empty"
+	// vs "called and fans out".
 	log.Printf("replication: OnLocalWrite volume=%s lba=%d lsn=%d peers=%d",
 		v.volumeID, w.LBA, w.LSN, len(v.peers))
 
@@ -438,9 +428,9 @@ func (v *ReplicationVolume) OnLocalWrite(ctx context.Context, w LocalWrite) erro
 	successes := 0
 	failures := 0
 
-	// Fan out under the mutex — LSN-order invariant (Condition A).
-	// Lineage is informational; each peer uses its own registered
-	// lineage for authority framing (T4a-3 peer owns its session).
+	// Fan out under the mutex — LSN-order invariant. Lineage is
+	// informational; each peer uses its own registered lineage for
+	// authority framing.
 	informational := transport.RecoveryLineage{}
 	for _, peer := range v.peers {
 		eligible := peer.State() == ReplicaHealthy
@@ -482,17 +472,15 @@ func evaluateWriteAck(mode DurabilityMode, rf, peerSuccesses, peerFailures int) 
 	return nil
 }
 
-// Stop is the T4d-4 canonical lifecycle entry point. Tears down all
-// peers (their executor sessions are invalidated), serializes against
+// Stop is the canonical lifecycle entry point. Tears down all peers
+// (their executor sessions are invalidated), serializes against
 // concurrent OnLocalWrite/Sync via the volume mutex, and is
 // idempotent. Does NOT close the borrowed store
-// (`INV-REPL-LIFECYCLE-HANDLE-BORROWED-001` per BUG-005 discipline).
+// (`INV-REPL-LIFECYCLE-HANDLE-BORROWED-001`).
 //
-// Stop and Close are equivalent in T4d-4 (Stop delegates to Close);
-// the rename clarifies semantic intent — "Stop the volume's lifecycle
-// activity" reads more clearly than "Close the volume struct."
-// Future expansions (drain pending I/O, stop background goroutines)
-// land here under the Stop name.
+// Stop and Close are equivalent (Stop delegates to Close); the
+// alias clarifies semantic intent. Future expansions (drain pending
+// I/O, stop background goroutines) land here under the Stop name.
 //
 // Pinned by: TestReplicationVolume_Stop_Idempotent,
 // TestReplicationVolume_Stop_DoesNotCloseBorrowedStore.
@@ -505,19 +493,17 @@ func (v *ReplicationVolume) Stop() error {
 }
 
 // Close releases all peers' registered sessions. Idempotent. Does
-// NOT close the borrowed store (BUG-005 / INV-REPL-LIFECYCLE-HANDLE-
-// BORROWED-001).
+// NOT close the borrowed store (INV-REPL-LIFECYCLE-HANDLE-BORROWED-001).
 //
-// T4d-4 (round-46) renaming: Stop() is the canonical entry point;
-// Close() retained for backward compatibility with existing callers.
-// Both do the same thing.
+// Stop() is the canonical entry point; Close() is retained for
+// backward compatibility with existing callers. Both do the same thing.
 //
 // Called by: Provider teardown when the volume shuts down.
 // Owns: close flag; invalidation of each peer's executor session
 // (via peer.Close()).
 // Borrows: nothing.
 func (v *ReplicationVolume) Close() error {
-	// G5-5C ordering (architect 2026-04-27 guidance #2): stop the
+	// Ordering: stop the
 	// probe loop FIRST, before acquiring v.mu and tearing down
 	// peers. This ensures any in-flight probe callback completes /
 	// is cancelled before peers are closed; without this, a probeFn
@@ -570,11 +556,11 @@ func (v *ReplicationVolume) PeerCount() int {
 	return len(v.peers)
 }
 
-// ConfigureProbeLoop installs the per-volume degraded-peer probe loop
-// (G5-5C). Idempotent? NO — calling Configure twice is rejected to
-// prevent silent replacement of an active loop. Configure once at
-// volume composition time; Start when primary role is admitted; Stop
-// is implicit in volume Close().
+// ConfigureProbeLoop installs the per-volume degraded-peer probe loop.
+// NOT idempotent — calling Configure twice is rejected to prevent
+// silent replacement of an active loop. Configure once at volume
+// composition time; Start when primary role is admitted; Stop is
+// implicit in volume Close().
 //
 // The probeFn is host-injected: in production it dials executor.Probe
 // and forwards the ProbeResult to the per-(volume, replica) adapter
@@ -583,12 +569,11 @@ func (v *ReplicationVolume) PeerCount() int {
 //
 // Cooldown gating is wired automatically using DefaultProbeCooldownFn
 // + DefaultProbeResultFn over each peer's ProbeIfDegraded /
-// OnProbeAttempt (G5-5C #2). Newly-added peers (UpdateReplicaSet)
-// receive the cooldown config via SetProbeCooldownConfig.
+// OnProbeAttempt. Newly-added peers (UpdateReplicaSet) receive the
+// cooldown config via SetProbeCooldownConfig.
 //
-// Pinned by:
-//   - INV-G5-5C-PRIMARY-RECOVERY-AUTHORITY-BOUNDED (peersFn snapshots
-//     v.peers under v.mu; never enumerates network-discoverable addrs)
+// peersFn snapshots v.peers under v.mu; never enumerates network-
+// discoverable addresses (the authority boundary stays at the volume).
 //
 // Called by: host composition root after constructing
 // ReplicationVolume and choosing a probeFn.
@@ -607,11 +592,10 @@ func (v *ReplicationVolume) ConfigureProbeLoop(cfg ProbeLoopConfig, probeFn Prob
 		return fmt.Errorf("replication: ConfigureProbeLoop: volume %s already configured (Configure-once contract)", v.volumeID)
 	}
 
-	// PeerSourceFn snapshots v.peers under v.mu. Lock ordering
-	// discipline (architect 2026-04-27 guidance #2): v.mu always
-	// acquired BEFORE peer.mu, never the reverse. The probe loop's
-	// tick takes v.mu in peersFn, releases it, then takes peer.mu in
-	// ProbeIfDegraded — no nested locking, no inversion.
+	// PeerSourceFn snapshots v.peers under v.mu. Lock ordering: v.mu
+	// always acquired BEFORE peer.mu, never the reverse. The probe
+	// loop's tick takes v.mu in peersFn, releases it, then takes
+	// peer.mu in ProbeIfDegraded — no nested locking, no inversion.
 	//
 	// HARD RULE: code on the probe path (peersFn → ProbeIfDegraded →
 	// probeFn → OnProbeAttempt) MUST NOT re-enter v.mu while holding

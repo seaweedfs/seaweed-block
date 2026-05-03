@@ -1,11 +1,11 @@
 // Package replication implements per-volume replication coordination:
 // fan-out of live writes from primary to replicas (ReplicationVolume),
 // per-replica runtime state (ReplicaPeer), and the seam to the master
-// authority callback (wired at T4a-5).
+// authority callback.
 //
-// T4a scope: best_effort single-replica live ship. Durability closure
-// (sync_all, sync_quorum, barriers) lands at T4b. Recovery pipeline
-// (probe, catch-up, rebuild, promotion) lands at T4c.
+// Scope: best-effort single-replica live ship plus recovery pipeline
+// (probe, catch-up, rebuild). Durability closure (sync_all,
+// sync_quorum, barriers) is layered above this package.
 package replication
 
 import (
@@ -21,8 +21,8 @@ import (
 
 // ReplicaTarget carries the authoritative per-replica addressing and
 // lineage information from a master assignment event. Produced by the
-// Host authority-callback wire (T4a-5) and consumed by
-// ReplicationVolume.UpdateReplicaSet (T4a-4).
+// Host authority-callback wire and consumed by
+// ReplicationVolume.UpdateReplicaSet.
 type ReplicaTarget struct {
 	ReplicaID       string
 	DataAddr        string
@@ -31,22 +31,21 @@ type ReplicaTarget struct {
 	EndpointVersion uint64
 }
 
-// ReplicaState is the coarse peer health state. T4a introduced
-// Healthy ↔ Degraded; T4c-2 extends with CatchingUp + NeedsRebuild
-// per memo §2.2.
+// ReplicaState is the coarse peer health state. The state machine
+// covers Healthy ↔ Degraded (live-ship failures) plus CatchingUp +
+// NeedsRebuild (recovery pipeline).
 //
-// Transitions (T4c-2):
+// Transitions:
 //
 //	Healthy → CatchingUp        (probe classifies as catch-up-required)
 //	CatchingUp → Healthy         (catch-up done-ack received)
 //	CatchingUp → NeedsRebuild    (ErrWALRecycled OR retry budget exhausted)
 //	Degraded → CatchingUp        (probe after transient drop)
 //	Degraded → NeedsRebuild      (probe classifies as gap-too-large)
-//	NeedsRebuild → (terminal in T4c) — T5 introduces NeedsRebuild → Rebuilding
+//	NeedsRebuild → (terminal)    — a future Rebuilding state will
+//	                              re-enter the recovery loop.
 //
-// The state machine is V3-native (no V2 file maps 1-to-1 — V2's
-// ReplicaState enum at `wal_shipper.go:24-32` is reference-only;
-// transitions in V3 are coordinator-driven, not in-shipper).
+// Transitions are coordinator-driven, not in-shipper.
 type ReplicaState int
 
 const (
@@ -59,10 +58,10 @@ const (
 	// (transitions to Healthy) or escalates (transitions to
 	// NeedsRebuild).
 	ReplicaCatchingUp
-	// ReplicaNeedsRebuild — terminal in T4c. Reached on
-	// ErrWALRecycled (gap exceeds substrate retention) or retry-
-	// budget exhaustion. T5 introduces the recovery-from-here path
-	// (NeedsRebuild → Rebuilding → Healthy).
+	// ReplicaNeedsRebuild — terminal in the current state machine.
+	// Reached on ErrWALRecycled (gap exceeds substrate retention) or
+	// retry-budget exhaustion. A future Rebuilding state will close
+	// the loop back to Healthy.
 	ReplicaNeedsRebuild
 )
 
@@ -86,12 +85,11 @@ func (s ReplicaState) String() string {
 // acceptMutationLineage gate) and stable across all ShipEntry calls
 // within a peer's lifetime so the replica's "same-authority ⇒ same
 // TargetLSN" fence holds. Distinct from recovery TargetLSNs, which
-// come from engine-frozen recovery contracts at T4c.
+// come from engine-frozen recovery contracts.
 const liveShipTargetLSN uint64 = 1
 
 // peerSessionIDCounter mints unique SessionIDs for live steady-state
-// sessions. Recovery-bound sessions carry engine-minted SessionIDs;
-// those arrive with the T4c recovery command chain.
+// sessions. Recovery-bound sessions carry engine-minted SessionIDs.
 var peerSessionIDCounter atomic.Uint64
 
 func mintPeerSessionIDAfter(after uint64) uint64 {
@@ -108,10 +106,10 @@ func mintPeerSessionIDAfter(after uint64) uint64 {
 }
 
 // PeerProbeCooldown holds the per-peer backoff parameters used by
-// ProbeIfDegraded / OnProbeAttempt (G5-5C §1.G #7).
+// ProbeIfDegraded / OnProbeAttempt.
 //
 // IMPORTANT: this is per-peer cooldown / backoff, NOT the global probe
-// loop interval. Two distinct time concepts in G5-5C:
+// loop interval. Two distinct time concepts:
 //
 //   - Loop interval (ProbeLoopConfig.Interval, default 5s): how often
 //     the probe loop wakes up and iterates over peers. Applies to the
@@ -135,7 +133,7 @@ type PeerProbeCooldown struct {
 	Cap time.Duration
 }
 
-// DefaultPeerProbeCooldown returns the architect-bound G5-5C defaults
+// DefaultPeerProbeCooldown returns the default cooldown values
 // (5s base, 60s cap).
 func DefaultPeerProbeCooldown() PeerProbeCooldown {
 	return PeerProbeCooldown{
@@ -147,14 +145,13 @@ func DefaultPeerProbeCooldown() PeerProbeCooldown {
 // ReplicaPeer is the per-remote-replica runtime handle. Owns its
 // coarse health state, the peer-scoped live-ship RecoveryLineage, and
 // the lifecycle of its registered session in the executor. Bridges
-// ReplicationVolume fan-out (T4a-4) to the transport layer (T4a-2).
+// ReplicationVolume fan-out to the transport layer.
 //
-// G5-5C extension: also owns per-peer probe cooldown state (cooldown
-// deadline, consecutive-failure count, in-flight flag) so the
-// degraded-peer probe loop can gate / dispatch probes idempotently.
-// All probe state is mutated under p.mu; the actual probe transport
-// call MUST run with p.mu released to avoid lock-order crossings
-// (architect G5-5C #2 binding 2026-04-27).
+// Also owns per-peer probe cooldown state (cooldown deadline,
+// consecutive-failure count, in-flight flag) so the degraded-peer
+// probe loop can gate / dispatch probes idempotently. All probe
+// state is mutated under p.mu; the actual probe transport call MUST
+// run with p.mu released to avoid lock-order crossings.
 type ReplicaPeer struct {
 	target    ReplicaTarget
 	executor  *transport.BlockExecutor
@@ -165,7 +162,7 @@ type ReplicaPeer struct {
 	state  ReplicaState
 	closed bool
 
-	// G5-5C probe cooldown / in-flight state. All fields read+written
+	// Probe cooldown / in-flight state. All fields read+written
 	// under p.mu only.
 	cooldownCfg       PeerProbeCooldown // policy (Base, Cap); defaults set in NewReplicaPeer
 	probeNextEligible time.Time         // wall-clock; before this, ProbeIfDegraded returns false
@@ -177,17 +174,17 @@ type ReplicaPeer struct {
 // a live-ship session against the given executor. The session's
 // lineage is derived from target.{Epoch, EndpointVersion}, a freshly
 // minted peer-local SessionID, and a constant liveShipTargetLSN.
-// Recovery-minted sessions (with engine-frozen TargetLSNs) arrive at
-// T4c when the recovery command chain ports over.
+// Recovery-minted sessions (with engine-frozen TargetLSNs) come from
+// the recovery command chain.
 //
-// Called by: ReplicationVolume.UpdateReplicaSet (T4a-4) when adding
-// a new peer to the authoritative replica set.
+// Called by: ReplicationVolume.UpdateReplicaSet when adding a new
+// peer to the authoritative replica set.
 // Owns: ReplicaState; the peer's registered session in the executor
 // (released by Close via InvalidateSession); the peer-scoped
 // RecoveryLineage.
 // Borrows: *transport.BlockExecutor — caller retains ownership and
 // is responsible for executor lifecycle. Peer does not close the
-// executor (BUG-005-class discipline).
+// executor.
 func NewReplicaPeer(target ReplicaTarget, executor *transport.BlockExecutor) (*ReplicaPeer, error) {
 	if executor == nil {
 		return nil, fmt.Errorf("replication: NewReplicaPeer: executor is nil")
@@ -280,10 +277,10 @@ func (p *ReplicaPeer) SetProbeCooldownConfig(cfg PeerProbeCooldown) {
 // for this peer right now. Returns true and atomically marks the peer
 // in-flight iff ALL of:
 //
-//   - peer is not closed (§1.E (c): closed peers are torn-down lineage)
-//   - peer.state == ReplicaDegraded (§1.A: only-on-degraded discipline)
+//   - peer is not closed (closed peers are torn-down lineage)
+//   - peer.state == ReplicaDegraded (only-on-degraded discipline)
 //   - now >= probeNextEligible (per-peer cooldown elapsed)
-//   - !probeInFlight (single in-flight per peer — INV-G5-5C-SINGLE-INFLIGHT-PER-PEER)
+//   - !probeInFlight (single in-flight per peer)
 //
 // On returning true, the caller MUST eventually call OnProbeAttempt
 // to release the in-flight flag and advance cooldown. If the caller
@@ -295,15 +292,9 @@ func (p *ReplicaPeer) SetProbeCooldownConfig(cfg PeerProbeCooldown) {
 // CRITICAL: this method runs entirely under p.mu. The actual probe
 // transport call (executor.Probe via the host-injected probeFn) MUST
 // run with p.mu RELEASED to avoid lock-order crossings with shipper /
-// other peers (architect G5-5C #2 binding 2026-04-27). The probe
-// loop's dispatchProbe respects this — ProbeIfDegraded is the
-// CooldownFn (synchronous, peer.mu-held); probeFn is dispatched
-// after the gate returns.
-//
-// Pinned by:
-//   - INV-G5-5C-SINGLE-INFLIGHT-PER-PEER
-//   - INV-G5-5C-RECOVERY-BACKOFF (cooldown gate)
-//   - INV-G5-5C-PRIMARY-RECOVERY-AUTHORITY-BOUNDED (closed-peer skip)
+// other peers. The probe loop's dispatchProbe respects this —
+// ProbeIfDegraded is the CooldownFn (synchronous, peer.mu-held);
+// probeFn is dispatched after the gate returns.
 //
 // Called by: ProbeLoop.tick via the default CooldownFn wrapper
 // (DefaultProbeCooldownFn).
@@ -336,9 +327,9 @@ func (p *ReplicaPeer) ProbeIfDegraded(now time.Time) bool {
 //   - failure: probeFailureCount++; nextEligible = now + min(Base * 2^(failureCount-1), Cap).
 //
 // Idempotent on a closed peer: if the peer was Closed during the
-// in-flight window (§1.E (c) lineage teardown), this method clears
-// the in-flight flag and returns silently — no cooldown update on
-// a torn-down peer. This guarantees Close() semantics: a peer Close()
+// in-flight window (lineage teardown), this method clears the
+// in-flight flag and returns silently — no cooldown update on a
+// torn-down peer. This guarantees Close() semantics: a peer Close()
 // followed by a delayed OnProbeAttempt does not leak in-flight or
 // cooldown state into a fresh peer that may share the same
 // underlying address.
@@ -349,9 +340,8 @@ func (p *ReplicaPeer) ProbeIfDegraded(now time.Time) bool {
 // is the responsibility of the host's probeFn → adapter.OnProbeResult
 // path, not this method.
 //
-// Pinned by:
-//   - INV-G5-5C-RECOVERY-BACKOFF (5s → 10s → 20s → 40s → 60s cap)
-//   - INV-G5-5C-SINGLE-INFLIGHT-PER-PEER (in-flight release)
+// Backoff schedule: Base, 2×Base, 4×Base, ... up to Cap (default
+// 5s, 10s, 20s, 40s, 60s).
 //
 // Called by: ProbeLoop.dispatchProbe via the default ResultFn wrapper
 // (DefaultProbeResultFn).
@@ -437,19 +427,17 @@ func DefaultProbeResultFn(now func() time.Time) ResultFn {
 func (p *ReplicaPeer) Target() ReplicaTarget { return p.target }
 
 // Executor returns the peer's *transport.BlockExecutor. Read-only
-// accessor for the production probe path (G5-5C) — the probeFn
-// dials executor.Probe with a fresh sessionID + the peer's target
-// fields. Callers MUST NOT call Close on the returned executor
-// (BUG-005 discipline: peer borrows executor; ReplicationVolume
-// owns its lifecycle).
+// accessor used by the production probe path — the probeFn dials
+// executor.Probe with a fresh sessionID + the peer's target fields.
+// Callers MUST NOT call Close on the returned executor (peer borrows
+// executor; ReplicationVolume owns its lifecycle).
 func (p *ReplicaPeer) Executor() *transport.BlockExecutor { return p.executor }
 
-// probeSessionIDCounter mints SessionIDs for G5-5C runtime-driven
-// probes — the third of three independent SessionID counters in V3.
-// Why three (architect onboarding note 2026-04-27):
+// probeSessionIDCounter mints SessionIDs for runtime-driven probes —
+// one of three independent SessionID counters:
 //
-//  1. peerSessionIDCounter (peer.go:94) — live-ship sessions; one
-//     per *ReplicaPeer; lifetime = peer lifetime; carried in
+//  1. peerSessionIDCounter (peer.go) — live-ship sessions; one per
+//     *ReplicaPeer; lifetime = peer lifetime; carried in
 //     RecoveryLineage.SessionID for ShipEntry / Barrier wire frames
 //     so the replica's acceptMutationLineage gate can pin
 //     "same-authority ⇒ same SessionID" within a peer.
@@ -460,22 +448,21 @@ func (p *ReplicaPeer) Executor() *transport.BlockExecutor { return p.executor }
 //     in any executor session table; transient probe sessions for
 //     the symmetric ProbeReq/ProbeResp pair.
 //
-//  3. probeSessionIDCounter (this file) — G5-5C primary-side
-//     runtime-driven probes; minted when the probe loop dispatches
-//     a fresh probe against a ReplicaDegraded peer; identical role
-//     to (2) except the *trigger* is the loop, not engine command
-//     emission.
+//  3. probeSessionIDCounter (this file) — primary-side runtime-driven
+//     probes; minted when the probe loop dispatches a fresh probe
+//     against a ReplicaDegraded peer; same role as (2) except the
+//     *trigger* is the loop, not engine command emission.
 //
 // All three are uint64 atomics, all three are >0 (Add(1) starts at
-// 1), and none of the three SessionIDs ever cross paths because
-// the replica's acceptMutationLineage rules each see them in
+// 1), and none of the three SessionIDs ever cross paths because the
+// replica's acceptMutationLineage rules each see them in
 // non-overlapping wire contexts. Conflating any two would either
 // leak runtime state into engine truth or vice versa — keep them
 // separate.
 var probeSessionIDCounter atomic.Uint64
 
 // MintProbeSessionID returns a fresh SessionID for use in a
-// G5-5C runtime-driven probe (see core/replication/probe_loop.go's
+// runtime-driven probe (see core/replication/probe_loop.go's
 // production probeFn wiring). Always > 0.
 func MintProbeSessionID() uint64 {
 	return probeSessionIDCounter.Add(1)
@@ -490,23 +477,20 @@ func (p *ReplicaPeer) State() ReplicaState {
 
 // ShipEntry ships one live WAL entry to this peer via its BlockExecutor.
 // Returns error on transport failure; on error the peer is marked
-// Degraded via Invalidate (forward-carry CARRY-1 from T4a-2). A
-// Degraded peer rejects subsequent ShipEntry calls until the recovery
-// pipeline (T4c) drives it back to Healthy.
+// Degraded via Invalidate. A Degraded peer rejects subsequent
+// ShipEntry calls until the recovery pipeline drives it back to
+// Healthy.
 //
-// The lineage param shape matches the sketch in v3-phase-15-t4-sketch
-// so ReplicationVolume (T4a-4) can thread authoritative lineage info
-// through. For T4a, the peer ships under its own registered lineage
-// (peer owns its live-ship session); caller-supplied lineage is
-// informational only. T4b/T4c may tighten this as recovery-bound
-// sessions arrive.
+// The peer ships under its own registered lineage (peer owns its
+// live-ship session); the caller-supplied lineage is informational
+// only.
 //
-// Called by: ReplicationVolume.OnLocalWrite (T4a-4) fan-out loop.
+// Called by: ReplicationVolume.OnLocalWrite fan-out loop.
 // Owns: peer-state mutation on ship error (via Invalidate).
 // Borrows: data slice — caller retains, ShipEntry does not mutate
 // and does not retain past return.
 func (p *ReplicaPeer) ShipEntry(ctx context.Context, lineage transport.RecoveryLineage, lba uint32, lsn uint64, data []byte) error {
-	_ = lineage // T4a: peer-owned lineage; caller param is informational.
+	_ = lineage // peer-owned lineage; caller param is informational.
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -565,8 +549,8 @@ func (p *ReplicaPeer) ShipEntry(ctx context.Context, lineage transport.RecoveryL
 // Caller uses targetLSN at the coordinator layer (comparing against
 // ack.AchievedLSN) to decide per-mode durability arithmetic.
 //
-// Called by: DurabilityCoordinator.SyncLocalAndReplicas (T4b-4)
-// per-peer fan-out.
+// Called by: DurabilityCoordinator.SyncLocalAndReplicas per-peer
+// fan-out.
 // Owns: the error → Invalidate translation (peer state mutation).
 // Borrows: ctx + targetLSN from caller; lineage is read from peer's
 // own registered state.
@@ -607,8 +591,8 @@ func (p *ReplicaPeer) Barrier(ctx context.Context, targetLSN uint64) (transport.
 // before advancing. The caller knows which lineage matters; the
 // peer doesn't drive the choice.
 //
-// Called by: DurabilityCoordinator (T4b-4) on quorum-loss recovery;
-// future T4c recovery pipeline.
+// Called by: DurabilityCoordinator on quorum-loss recovery; recovery
+// pipeline.
 // Owns: error → Invalidate translation on failure.
 // Borrows: ctx + lineage from caller.
 func (p *ReplicaPeer) Fence(ctx context.Context, lineage transport.RecoveryLineage) error {
@@ -629,28 +613,28 @@ func (p *ReplicaPeer) Fence(ctx context.Context, lineage transport.RecoveryLinea
 	return nil
 }
 
-// SetState transitions the peer to the given state per the T4c-2
-// state machine (see ReplicaState godoc). Invalid transitions log a
-// warning but DO NOT panic — silent rejection lets the coordinator
-// keep running while the misbehavior is investigated. The caller
-// MUST hold appropriate context (e.g., ack observation or
-// ErrWALRecycled detection) before requesting a transition.
+// SetState transitions the peer to the given state per the
+// ReplicaState machine. Invalid transitions log a warning but DO NOT
+// panic — silent rejection lets the coordinator keep running while
+// the misbehavior is investigated. The caller MUST hold appropriate
+// context (e.g., ack observation or ErrWALRecycled detection) before
+// requesting a transition.
 //
-// Allowed transitions (T4c-2, memo §2.2):
+// Allowed transitions:
 //
 //	any        → Healthy        (initial / ack-confirmed steady)
-//	Healthy    → Degraded       (T4a/T4b: ship/barrier failure)
+//	Healthy    → Degraded       (ship/barrier failure)
 //	Degraded   → Healthy        (recovery completed)
 //	Healthy    → CatchingUp     (probe → catch-up decision)
 //	Degraded   → CatchingUp     (probe after transient drop)
 //	CatchingUp → Healthy        (catch-up done-ack)
 //	CatchingUp → NeedsRebuild   (ErrWALRecycled OR retry exhausted)
 //	Degraded   → NeedsRebuild   (probe → rebuild decision)
-//	NeedsRebuild → (no successor in T4c — terminal)
+//	NeedsRebuild → (no successor — terminal)
 //
-// Called by: coordinator (T4c-2 catch-up flow, ErrWALRecycled
-// escalation) and engine SessionClose handler (close-with-success
-// returns to Healthy).
+// Called by: coordinator (catch-up flow, ErrWALRecycled escalation)
+// and engine SessionClose handler (close-with-success returns to
+// Healthy).
 // Owns: peer-state mutation under internal lock.
 func (p *ReplicaPeer) SetState(next ReplicaState) {
 	p.mu.Lock()
@@ -672,15 +656,16 @@ func (p *ReplicaPeer) SetState(next ReplicaState) {
 
 // replicaStateTransitionAllowed is the table-driven transition gate.
 // See SetState godoc for the rule list. NeedsRebuild is terminal in
-// T4c; T5 will extend with NeedsRebuild → Rebuilding.
+// the current machine; a future Rebuilding state will reopen the
+// recovery loop.
 func replicaStateTransitionAllowed(prev, next ReplicaState) bool {
 	if prev == next {
 		return true // idempotent reset is harmless
 	}
 	if next == ReplicaHealthy {
 		// Anything but NeedsRebuild can resume Healthy. NeedsRebuild
-		// is terminal in T4c — must go through T5's Rebuilding path
-		// before returning to Healthy.
+		// is terminal — a future Rebuilding path will reopen the
+		// route back to Healthy.
 		return prev != ReplicaNeedsRebuild
 	}
 	switch prev {
@@ -691,17 +676,16 @@ func replicaStateTransitionAllowed(prev, next ReplicaState) bool {
 	case ReplicaCatchingUp:
 		return next == ReplicaNeedsRebuild || next == ReplicaDegraded
 	case ReplicaNeedsRebuild:
-		return false // terminal in T4c
+		return false // terminal
 	}
 	return false
 }
 
-// Invalidate marks the peer Degraded and logs the reason. T4a/T4b
-// behavior preserved: Healthy ↔ Degraded transitions on ship /
-// barrier failure. T4c-2 SetState handles the richer transitions
-// (CatchingUp, NeedsRebuild). Calling Invalidate on an
-// already-Degraded peer is a no-op (beyond the log line — still
-// useful because the reason string may be new).
+// Invalidate marks the peer Degraded and logs the reason. Healthy ↔
+// Degraded transitions happen on ship / barrier failure; the richer
+// transitions (CatchingUp, NeedsRebuild) flow through SetState.
+// Calling Invalidate on an already-Degraded peer is a no-op (beyond
+// the log line — still useful because the reason string may be new).
 //
 // Called by: ShipEntry on transport error; ReplicationVolume on
 // explicit peer-down from authority updates.
