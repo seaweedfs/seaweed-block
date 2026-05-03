@@ -1,11 +1,91 @@
-# seaweed-block 🚧 Under Construction
+# seaweed-block 🚧 Alpha
 
 Block Storage for Kubernetes
 
-`seaweed-block` is a standalone block-storage experiment built around a
-deterministic semantic core. The current repository is the first public
-runnable slice of that work: a narrow block sparrow that proves one clean
-recovery route end-to-end.
+`seaweed-block` is a lightweight Kubernetes block-storage project. The current
+alpha MVP can run a dynamic PVC through CSI, iSCSI, a generated
+`blockvolume` daemon, and a pod checksum write/read on a single-node k3s lab.
+
+The project is not production-ready yet. It is now far enough along for
+contributors to run the MVP path, inspect the architecture, and help harden the
+Kubernetes packaging, persistence, recovery, and TestOps workflows.
+
+## Quick Start: Kubernetes Alpha MVP
+
+Read the MVP guide first:
+
+- [deploy/k8s/alpha/README.md](deploy/k8s/alpha/README.md)
+
+Build local images:
+
+```bash
+bash scripts/build-g15b-images.sh "$PWD"
+```
+
+For k3s, import them:
+
+```bash
+docker save sw-block:local | sudo k3s ctr images import -
+docker save sw-block-csi:local | sudo k3s ctr images import -
+```
+
+Run the verified dynamic PVC create/delete smoke:
+
+```bash
+bash scripts/run-k8s-alpha.sh "$PWD"
+```
+
+Expected output:
+
+```text
+PASS: dynamic PVC create/delete completed checksum write/read and cleanup
+```
+
+The same flow is documented as a manual `kubectl apply` sequence in
+[deploy/k8s/alpha/README.md](deploy/k8s/alpha/README.md).
+
+## Current MVP Status
+
+What works in the current alpha:
+
+- CSI dynamic PVC `CreateVolume`.
+- Blockmaster lifecycle + placement + assignment publication.
+- Launcher-generated `blockvolume` Deployment.
+- iSCSI frontend path.
+- Pod filesystem write/read checksum.
+- CSI `DeleteVolume` cleanup path.
+- TestOps registry and a minimal `cmd/sw-testops` CLI.
+
+Current defaults:
+
+- frontend protocol: iSCSI
+- durable backend: `walstore`
+- launcher-generated state: `emptyDir`
+- Kubernetes evidence: single-node k3s lab
+
+High-value references:
+
+- [docs/architecture.md](docs/architecture.md)
+- [docs/roadmap.md](docs/roadmap.md)
+- [deploy/k8s/alpha/README.md](deploy/k8s/alpha/README.md)
+
+## What This Repo Is Not Yet
+
+This repository is not yet:
+
+- production-ready storage
+- a multi-node Kubernetes storage system
+- a complete operator
+- a durable K8s volume product across pod restart
+- a failover-under-mounted-PVC product
+- an NVMe-oF CSI product path
+
+The current alpha is meant to be honest and runnable, not over-claimed.
+
+## Semantic Core Background
+
+The project started as a standalone block-storage experiment built around a
+deterministic semantic core. That recovery/authority foundation still matters:
 
 ```text
 facts -> engine decision -> adapter command -> runtime execution -> session close
@@ -52,16 +132,21 @@ mechanics, retries, and product features get mixed together.
 3. the system can be tested and reviewed from the semantic contract outward
 4. the same semantic model should later support broader runtime work without changing its meaning
 
-Current status:
+Legacy semantic-core status:
 
 1. semantic core: present
 2. replay/conformance runtime: present
 3. adapter-backed route: present
 4. runnable block sparrow: present
-5. operations UX: not yet built out
-6. persistence / crash recovery: not yet built out
+5. early operations UX: present only for the sparrow demo
+6. persistence / crash recovery: present in lower-level components, not yet a production Kubernetes durability claim
 
-## What Works Today
+## Legacy Sparrow Demo
+
+The older `sparrow` demo still exists as a semantic-core development entry
+point. Most new users should start with the Kubernetes alpha MVP above.
+
+## What Works In The Legacy Demo
 
 The current repository can run one narrow block slice end-to-end through real
 TCP transport.
@@ -79,24 +164,15 @@ The current route stays intentionally narrow:
 3. one terminal-close authority
 4. executor honors the engine-issued `targetLSN`
 
-## What This Repo Is Not Yet
+## Legacy Demo Limitations
 
-This repository is not yet:
+The sparrow demo is not the Kubernetes product path. Its limitations are kept
+visible because it remains useful for semantic-core development:
 
-1. production-ready storage
-2. a full SeaweedFS block product
-3. a complete frontend protocol implementation
-4. a broad operations shell or UI
-5. a replacement claim over the current `V2` baseline
-
-Current limitations:
-
-1. storage is in-memory only
-2. no persistence or crash recovery
-3. no master service; assignment is hardcoded in the demo
-4. no iSCSI or NVMe-oF frontend
-5. no concurrent write path during replication
-6. no broad timeout / reconnect / hardening logic
+1. narrow demo route
+2. not a full Kubernetes product
+3. not the CSI/iSCSI runtime path
+4. not a replacement claim over the older V2 baseline
 
 ## Repo Layout
 
