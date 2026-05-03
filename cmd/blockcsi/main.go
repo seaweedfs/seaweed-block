@@ -1,7 +1,7 @@
-// Command blockcsi is the V3 CSI daemon. G15a scope is static:
-// it consumes already-published frontend target facts from
-// blockmaster and mounts them through the node path; it does not
-// create volumes or mint authority.
+// Command blockcsi is the CSI daemon. Current scope is static: it
+// consumes already-published frontend target facts from blockmaster
+// and mounts them through the node path; it does not create volumes
+// or mint authority.
 package main
 
 import (

@@ -12,8 +12,7 @@ import (
 )
 
 // runS5Bootstrap is the live, non-test entrypoint exercising the
-// P14 S5 durable authority bootstrap path. This is the minimum
-// real call site that satisfies architect round-5:
+// durable authority bootstrap path:
 //
 //   1. AcquireStoreLock — single-owner OS lock on the store dir
 //   2. NewFileAuthorityStore — open file-per-volume backend

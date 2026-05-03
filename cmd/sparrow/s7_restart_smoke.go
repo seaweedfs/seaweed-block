@@ -10,14 +10,13 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/authority"
 )
 
-// runS7RestartSmoke is the narrow test-only entry that drives
-// the P14 S7 real-subprocess restart smoke (§8.1 shape 2 of the
-// S7 sketch). It is NOT advertised in --help and has no
-// operator workflow; it exists only so the L2 process test can
-// spawn a real `sparrow` binary twice against the same store
+// runS7RestartSmoke is the narrow test-only entry that drives the
+// real-subprocess restart smoke. It is NOT advertised in --help and
+// has no operator workflow; it exists only so the L2 process test
+// can spawn a real `sparrow` binary twice against the same store
 // directory and assert on structured stdout.
 //
-// Contract (pinned by sketch §8.4):
+// Contract:
 //
 //  1. Bootstrap against --authority-store (acquire lock, open
 //     file store, reload Publisher).

@@ -1,6 +1,6 @@
 //go:build m01verify
 
-// G5-5 hardware-test byte-equal verifier — built only under
+// Hardware-test byte-equal verifier — built only under the
 // `m01verify` build tag; never compiled into the production
 // blockvolume binary.
 //
@@ -8,17 +8,17 @@
 //
 //	go build -tags m01verify -o m01verify ./cmd/blockvolume/
 //
-// Usage (inside iterate-m01-replicated-write.sh):
+// Usage:
 //
 //	m01verify --walstore /tmp/g5sm/replica-store/v1.walstore \
 //	  --lba-start 0 --lba-count 256 --block-size 4096 \
 //	  --expected-pattern <hex-byte> | --expected-file payload.bin
 //
-// Per architect REVISE binding round 51: opens the replica's
-// walstore through `core/storage.OpenReadOnly` (NOT raw extent
-// peek), invokes Read(lba) over the target LBA range, SHA-256-
-// compares against the known primary write payload. Prints OK on
-// equality, MISMATCH lba=N exp=... got=... + exit 1 on diff.
+// Opens the replica's walstore through `core/storage.OpenReadOnly`
+// (NOT raw extent peek), invokes Read(lba) over the target LBA
+// range, SHA-256-compares against the known primary write payload.
+// Prints OK on equality, MISMATCH lba=N exp=... got=... + exit 1
+// on diff.
 //
 // Caller (script) MUST ensure the daemon owning the walstore is
 // stopped or quiesced before invocation; OpenReadOnly opens the

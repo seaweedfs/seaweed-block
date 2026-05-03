@@ -1,7 +1,5 @@
-// Command blockmaster is the block master daemon — the P15 beta
-// product host for P14 authority components + master-volume
-// control RPC. See sw-block/design/v3-phase-15-t0-sketch.md
-// §4.1 for the product-daemon contract.
+// Command blockmaster is the block master daemon — the product
+// host for authority components + master-volume control RPC.
 package main
 
 import (
