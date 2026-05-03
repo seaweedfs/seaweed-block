@@ -1,0 +1,59 @@
+{
+  "schema_version": "1.0",
+  "scenario": "g15d-k8s-dynamic",
+  "gate": "G15d",
+  "layer": "L5-k8s",
+  "driver": {
+    "type": "shell",
+    "path": "scripts/run-g15d-k8s-dynamic.sh"
+  },
+  "default_timeout_s": 720,
+  "required_capabilities": [
+    "bash",
+    "kubectl",
+    "privileged-k8s-node",
+    "iscsiadm",
+    "iscsi_tcp-loadable",
+    "mount"
+  ],
+  "required_images": [
+    "sw-block:local",
+    "sw-block-csi:local"
+  ],
+  "qa_instruction": "sw-block/design/test/v3-phase-15-g15d-qa-test-instruction.md",
+  "known_green_commit": "a3d1e6a",
+  "artifacts": [
+    "run.log",
+    "kubectl-version.txt",
+    "nodes.before.txt",
+    "block-stack.rendered.yaml",
+    "apply-block-stack.log",
+    "apply-rbac.log",
+    "apply-csidriver.log",
+    "apply-csi-controller.log",
+    "apply-csi-node.log",
+    "apply-dynamic.log",
+    "generated-blockvolume.yaml",
+    "generated-blockvolume.err",
+    "apply-generated-blockvolume.log",
+    "pod.log",
+    "pod.describe.txt",
+    "blockmaster.log",
+    "blockcsi-controller.log",
+    "csi-provisioner.log",
+    "csi-attacher.log",
+    "blockvolume-generated.log",
+    "kube-system-pods-deploys.txt",
+    "app-storage.txt",
+    "cleanup.log"
+  ],
+  "non_claims": [
+    "Single-node Kubernetes only.",
+    "Dynamic PVC smoke only; no delete/reclaim lifecycle claim.",
+    "Launcher writes and harness applies blockvolume manifests; no operator reconciliation claim.",
+    "Loopback iSCSI target exposure only.",
+    "No failover while pod remains mounted.",
+    "No CSI snapshot, clone, resize, block-mode, topology spread, or NVMe.",
+    "No performance or soak claim."
+  ]
+}

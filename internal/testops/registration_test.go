@@ -97,6 +97,54 @@ func TestG15bK8sStaticRegistrationBuildsShellDriver(t *testing.T) {
 	}
 }
 
+func TestG15dK8sDynamicRegistrationBuildsShellDriver(t *testing.T) {
+	repoRoot := findRepoRoot(t)
+	raw, err := os.Open(filepath.Join(repoRoot, "testops", "registry", "g15d-k8s-dynamic.json"))
+	if err != nil {
+		t.Fatalf("open registration: %v", err)
+	}
+	defer raw.Close()
+
+	registration, err := DecodeRegistration(raw)
+	if err != nil {
+		t.Fatalf("DecodeRegistration: %v", err)
+	}
+	if registration.Scenario != "g15d-k8s-dynamic" || registration.Driver.Type != "shell" {
+		t.Fatalf("registration=%+v", registration)
+	}
+	if registration.KnownGreenCommit != "a3d1e6a" {
+		t.Fatalf("known_green_commit=%q want a3d1e6a", registration.KnownGreenCommit)
+	}
+	driver, err := registration.NewDriver(repoRoot)
+	if err != nil {
+		t.Fatalf("NewDriver: %v", err)
+	}
+	shell, ok := driver.(ShellDriver)
+	if !ok {
+		t.Fatalf("driver type=%T want ShellDriver", driver)
+	}
+	if !filepath.IsAbs(shell.Path) || filepath.Base(shell.Path) != "run-g15d-k8s-dynamic.sh" {
+		t.Fatalf("shell path=%q", shell.Path)
+	}
+	if _, err := os.Stat(shell.Path); err != nil {
+		t.Fatalf("shell driver path missing: %v", err)
+	}
+	for _, want := range []string{"generated-blockvolume.yaml", "blockvolume-generated.log", "pod.log", "cleanup.log"} {
+		if !containsString(registration.Artifacts, want) {
+			t.Fatalf("registration artifacts missing %q: %v", want, registration.Artifacts)
+		}
+	}
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
 func findRepoRoot(t *testing.T) string {
 	t.Helper()
 	_, file, _, ok := runtime.Caller(0)
