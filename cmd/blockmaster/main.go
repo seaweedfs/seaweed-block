@@ -26,6 +26,7 @@ type flags struct {
 	expectedSlotsPerVol int
 	freshnessWindow     time.Duration
 	pendingGrace        time.Duration
+	lifecycleLoop       time.Duration
 	// printReadyLine: test-only flag that emits a single
 	// structured JSON line to stdout after the gRPC listener is
 	// bound, so L2 subprocess tests can parse the ready event.
@@ -43,6 +44,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.IntVar(&f.expectedSlotsPerVol, "expected-slots-per-volume", 3, "RF/expected slot count per volume; the controller rejects observation snapshots whose slot count differs (default 3, set to 2 for 2-node smoke clusters)")
 	fs.DurationVar(&f.freshnessWindow, "freshness-window", 30*time.Second, "observation freshness window before a server's heartbeat expires")
 	fs.DurationVar(&f.pendingGrace, "pending-grace", 1*time.Second, "bootstrap/missing-observation grace before supportability reports unsupported")
+	fs.DurationVar(&f.lifecycleLoop, "lifecycle-product-loop-interval", 0, "optional G9G product-loop interval; disabled when 0")
 	fs.BoolVar(&f.printReadyLine, "t0-print-ready", false, "internal test-only: emit one structured JSON line on stdout after listener bound")
 	fs.SetOutput(os.Stderr)
 	if err := fs.Parse(args); err != nil {
@@ -105,6 +107,9 @@ func run(f flags) int {
 	}
 
 	h.Start()
+	if f.lifecycleLoop > 0 {
+		go runLifecycleProductLoop(h, f.lifecycleLoop)
+	}
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
@@ -117,4 +122,15 @@ func run(f flags) int {
 		return 1
 	}
 	return 0
+}
+
+func runLifecycleProductLoop(h *master.Host, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		if _, err := h.RunLifecycleProductTick(); err != nil {
+			fmt.Fprintln(os.Stderr, "blockmaster: lifecycle product loop:", err)
+		}
+		<-ticker.C
+	}
 }
