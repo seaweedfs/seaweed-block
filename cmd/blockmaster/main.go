@@ -16,16 +16,19 @@ import (
 
 	"github.com/seaweedfs/seaweed-block/core/authority"
 	"github.com/seaweedfs/seaweed-block/core/host/master"
+	"github.com/seaweedfs/seaweed-block/core/lifecycle"
 )
 
 type flags struct {
-	authorityStore      string
-	lifecycleStore      string
-	listen              string
-	topology            string
-	expectedSlotsPerVol int
-	freshnessWindow     time.Duration
-	pendingGrace        time.Duration
+	authorityStore         string
+	lifecycleStore         string
+	lifecyclePlacementSeed string
+	listen                 string
+	topology               string
+	expectedSlotsPerVol    int
+	freshnessWindow        time.Duration
+	pendingGrace           time.Duration
+	lifecycleLoop          time.Duration
 	// printReadyLine: test-only flag that emits a single
 	// structured JSON line to stdout after the gRPC listener is
 	// bound, so L2 subprocess tests can parse the ready event.
@@ -38,11 +41,13 @@ func parseFlags(args []string) (flags, error) {
 	fs := flag.NewFlagSet("blockmaster", flag.ContinueOnError)
 	fs.StringVar(&f.authorityStore, "authority-store", "", "durable authority store directory (required)")
 	fs.StringVar(&f.lifecycleStore, "lifecycle-store", "", "optional G9D product lifecycle registration store directory (desired volumes, node inventory, placement intents); read-only with respect to assignment publication")
+	fs.StringVar(&f.lifecyclePlacementSeed, "lifecycle-placement-seed", "", "optional G9G seed JSON file containing placement intents to import into --lifecycle-store before the product loop starts")
 	fs.StringVar(&f.listen, "listen", "127.0.0.1:0", "gRPC listen address (e.g. 127.0.0.1:9180)")
 	fs.StringVar(&f.topology, "topology", "", "path to accepted-topology YAML (required for assignment to mint)")
 	fs.IntVar(&f.expectedSlotsPerVol, "expected-slots-per-volume", 3, "RF/expected slot count per volume; the controller rejects observation snapshots whose slot count differs (default 3, set to 2 for 2-node smoke clusters)")
 	fs.DurationVar(&f.freshnessWindow, "freshness-window", 30*time.Second, "observation freshness window before a server's heartbeat expires")
 	fs.DurationVar(&f.pendingGrace, "pending-grace", 1*time.Second, "bootstrap/missing-observation grace before supportability reports unsupported")
+	fs.DurationVar(&f.lifecycleLoop, "lifecycle-product-loop-interval", 0, "optional G9G product-loop interval; disabled when 0")
 	fs.BoolVar(&f.printReadyLine, "t0-print-ready", false, "internal test-only: emit one structured JSON line on stdout after listener bound")
 	fs.SetOutput(os.Stderr)
 	if err := fs.Parse(args); err != nil {
@@ -95,6 +100,13 @@ func run(f flags) int {
 		fmt.Fprintln(os.Stderr, "blockmaster:", err)
 		return 1
 	}
+	if f.lifecyclePlacementSeed != "" {
+		if err := importLifecyclePlacementSeed(h, f.lifecyclePlacementSeed); err != nil {
+			fmt.Fprintln(os.Stderr, "blockmaster:", err)
+			_ = h.Close(context.Background())
+			return 1
+		}
+	}
 
 	if f.printReadyLine {
 		_ = json.NewEncoder(os.Stdout).Encode(readyLine{
@@ -105,6 +117,9 @@ func run(f flags) int {
 	}
 
 	h.Start()
+	if f.lifecycleLoop > 0 {
+		go runLifecycleProductLoop(h, f.lifecycleLoop)
+	}
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
@@ -117,4 +132,50 @@ func run(f flags) int {
 		return 1
 	}
 	return 0
+}
+
+func importLifecyclePlacementSeed(h *master.Host, path string) error {
+	stores := h.Lifecycle()
+	if stores == nil {
+		return fmt.Errorf("--lifecycle-placement-seed requires --lifecycle-store")
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read lifecycle placement seed %q: %w", path, err)
+	}
+	var intents []lifecycle.PlacementIntent
+	if err := json.Unmarshal(raw, &intents); err != nil {
+		return fmt.Errorf("parse lifecycle placement seed %q: %w", path, err)
+	}
+	for _, intent := range intents {
+		plan := lifecycle.PlacementPlan{
+			VolumeID:   intent.VolumeID,
+			DesiredRF:  intent.DesiredRF,
+			Candidates: make([]lifecycle.PlacementCandidate, 0, len(intent.Slots)),
+		}
+		for _, slot := range intent.Slots {
+			plan.Candidates = append(plan.Candidates, lifecycle.PlacementCandidate{
+				VolumeID:  intent.VolumeID,
+				ServerID:  slot.ServerID,
+				PoolID:    slot.PoolID,
+				ReplicaID: slot.ReplicaID,
+				Source:    slot.Source,
+			})
+		}
+		if _, err := stores.Placements.ApplyPlan(plan); err != nil {
+			return fmt.Errorf("apply lifecycle placement seed %s: %w", intent.VolumeID, err)
+		}
+	}
+	return nil
+}
+
+func runLifecycleProductLoop(h *master.Host, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		if _, err := h.RunLifecycleProductTick(); err != nil {
+			fmt.Fprintln(os.Stderr, "blockmaster: lifecycle product loop:", err)
+		}
+		<-ticker.C
+	}
 }
