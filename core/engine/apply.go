@@ -314,6 +314,14 @@ func applyDurableAck(st *ReplicaState, e DurableAckObserved, r *ApplyResult, tra
 		st.Recovery.DurableAckR = fact.ReplicaR
 		st.Recovery.DurableAckKnown = true
 	}
+	if st.Recovery.RecoveryWindowClosed && fact.ReplicaR >= st.Recovery.R {
+		st.Recovery.PostCloseDurableAckKnown = true
+		if fact.ReplicaR > st.Recovery.PostCloseDurableAckR {
+			st.Recovery.PostCloseDurableAckR = fact.ReplicaR
+		}
+		trace("post_close_durable_ack",
+			fmt.Sprintf("R=%d closeR=%d", fact.ReplicaR, st.Recovery.R))
+	}
 	lag := durableAckLagDecision(st, fact)
 	st.Recovery.LagDecision = lag
 	trace("durable_ack_observed",
@@ -354,6 +362,9 @@ func applyDurableAck(st *ReplicaState, e DurableAckObserved, r *ApplyResult, tra
 			TargetLSN:       fact.PrimaryH,
 		})
 		trace("command", "StartRebuild (durable ack below retention)")
+	}
+	if st.Recovery.PostCloseDurableAckKnown {
+		decide(st, r, trace)
 	}
 }
 
@@ -495,6 +506,8 @@ func decide(st *ReplicaState, r *ApplyResult, trace func(string, string)) {
 					EndpointVersion: st.Identity.EndpointVersion,
 				})
 				trace("command", "FenceAtEpoch")
+			} else if recoveredReplicaWaitingForPostCloseAck(st) {
+				trace("publish_healthy_held", "waiting for post-close durable ack")
 			} else {
 				r.Commands = append(r.Commands, PublishHealthy{ReplicaID: st.Identity.ReplicaID})
 			}
@@ -545,6 +558,10 @@ func hasActiveSession(st *ReplicaState) bool {
 	return st.Session.Phase == PhaseStarting || st.Session.Phase == PhaseRunning
 }
 
+func recoveredReplicaWaitingForPostCloseAck(st *ReplicaState) bool {
+	return st.Recovery.RecoveryWindowClosed && !st.Recovery.PostCloseDurableAckKnown
+}
+
 // --- Session lifecycle ---
 
 func applySessionPrepared(st *ReplicaState, e SessionPrepared, r *ApplyResult, trace func(string, string)) {
@@ -564,6 +581,9 @@ func applySessionPrepared(st *ReplicaState, e SessionPrepared, r *ApplyResult, t
 		TargetLSN:    frontierHint,
 		Phase:        PhaseStarting,
 	}
+	st.Recovery.RecoveryWindowClosed = false
+	st.Recovery.PostCloseDurableAckKnown = false
+	st.Recovery.PostCloseDurableAckR = 0
 	trace("session_prepared", string(e.Kind))
 }
 
@@ -621,6 +641,11 @@ func applySessionCompleted(st *ReplicaState, e SessionClosedCompleted, r *ApplyR
 	// prevents catch-up from being emitted while pinned).
 	if st.Session.Kind == SessionRebuild {
 		st.Recovery.RebuildPinned = false
+	}
+	if st.Session.Kind == SessionCatchUp || st.Session.Kind == SessionRebuild {
+		st.Recovery.RecoveryWindowClosed = true
+		st.Recovery.PostCloseDurableAckKnown = false
+		st.Recovery.PostCloseDurableAckR = 0
 	}
 	// A successful catch-up/rebuild session sent mutating traffic
 	// at the current identity epoch, so the replica's lineage gate
@@ -929,7 +954,7 @@ func derivePublication(st *ReplicaState, trace func(string, string)) {
 		// replica's lineage gate has observed Identity.Epoch via
 		// FenceCompleted. Otherwise stale old-epoch traffic could
 		// still land while the projection already reads healthy.
-		if st.Identity.Epoch > st.Reachability.FencedEpoch {
+		if st.Identity.Epoch > st.Reachability.FencedEpoch || recoveredReplicaWaitingForPostCloseAck(st) {
 			st.Publication.Healthy = false
 			st.Publication.Degraded = false
 			st.Publication.NeedsAttention = true

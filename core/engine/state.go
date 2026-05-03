@@ -101,6 +101,19 @@ type RecoveryTruth struct {
 	// comes from R/S/H facts and ClassifyProgress.
 	LagDecision LagDecision
 
+	// RecoveryWindowClosed is set when a catch-up/rebuild session closes
+	// successfully. For rebuild, SessionClosedCompleted is the aggregate
+	// receiver proof that base + WAL + barrier closed; engine does not
+	// need a separate base-complete event in this slice.
+	RecoveryWindowClosed bool
+
+	// PostCloseDurableAckKnown means the primary observed durable progress
+	// after the recovery window closed. A recovered replica is not ready
+	// for publication until this confirms live-feed continuity beyond the
+	// recovery close point.
+	PostCloseDurableAckKnown bool
+	PostCloseDurableAckR     uint64
+
 	// Attempts tracks how many StartCatchUp / StartRecovery commands
 	// the engine has emitted for the current Decision. Engine
 	// SessionFailed handler increments on close-with-non-recycled-

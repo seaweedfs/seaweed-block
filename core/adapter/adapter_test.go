@@ -159,6 +159,7 @@ func (m *mockExecutor) StartCatchUp(replicaID string, sessionID, epoch, endpoint
 	m.commands = append(m.commands, "StartCatchUp")
 	startCb := m.onSessionStart
 	cb := m.onSessionClose
+	ackCb := m.onDurableAck
 	autoStart := m.autoStart
 	autoClose := m.autoClose
 	startErr := m.catchUpErr
@@ -189,6 +190,17 @@ func (m *mockExecutor) StartCatchUp(replicaID string, sessionID, epoch, endpoint
 					AchievedLSN: targetLSN,
 				})
 			}
+			if ackCb != nil {
+				ackCb(DurableAckResult{
+					ReplicaID:       replicaID,
+					SessionID:       sessionID,
+					EndpointVersion: endpointVersion,
+					TransportEpoch:  epoch,
+					DurableLSN:      targetLSN,
+					PrimaryTailLSN:  fromLSN,
+					PrimaryHeadLSN:  targetLSN,
+				})
+			}
 		}()
 	}
 	return nil
@@ -199,6 +211,7 @@ func (m *mockExecutor) StartRebuild(replicaID string, sessionID, epoch, endpoint
 	m.commands = append(m.commands, "StartRebuild")
 	startCb := m.onSessionStart
 	cb := m.onSessionClose
+	ackCb := m.onDurableAck
 	autoStart := m.autoStart
 	autoClose := m.autoClose
 	startErr := m.rebuildErr
@@ -225,6 +238,16 @@ func (m *mockExecutor) StartRebuild(replicaID string, sessionID, epoch, endpoint
 					SessionID:   sessionID,
 					Success:     true,
 					AchievedLSN: targetLSN,
+				})
+			}
+			if ackCb != nil {
+				ackCb(DurableAckResult{
+					ReplicaID:       replicaID,
+					SessionID:       sessionID,
+					EndpointVersion: endpointVersion,
+					TransportEpoch:  epoch,
+					DurableLSN:      targetLSN,
+					PrimaryHeadLSN:  targetLSN,
 				})
 			}
 		}()
@@ -286,6 +309,15 @@ func (m *mockExecutor) latestSessionID(kind string) uint64 {
 func (m *mockExecutor) fireClose(result SessionCloseResult) {
 	m.mu.Lock()
 	cb := m.onSessionClose
+	m.mu.Unlock()
+	if cb != nil {
+		cb(result)
+	}
+}
+
+func (m *mockExecutor) fireDurableAck(result DurableAckResult) {
+	m.mu.Lock()
+	cb := m.onDurableAck
 	m.mu.Unlock()
 	if cb != nil {
 		cb(result)
@@ -1369,6 +1401,15 @@ func TestSessionStarted_ComesFromExecutorStartCallback(t *testing.T) {
 		Success:     true,
 		AchievedLSN: 100,
 	})
+	exec.fireDurableAck(DurableAckResult{
+		ReplicaID:       "r1",
+		SessionID:       sessionID,
+		EndpointVersion: 1,
+		TransportEpoch:  1,
+		DurableLSN:      100,
+		PrimaryTailLSN:  10,
+		PrimaryHeadLSN:  100,
+	})
 	time.Sleep(20 * time.Millisecond)
 
 	if got := a.Projection().Mode; got != engine.ModeHealthy {
@@ -1568,6 +1609,15 @@ func TestStaleCallback_OldSessionIgnoredAfterNewAssignment(t *testing.T) {
 		SessionID:   newSessionID,
 		Success:     true,
 		AchievedLSN: 120,
+	})
+	exec.fireDurableAck(DurableAckResult{
+		ReplicaID:       "r1",
+		SessionID:       newSessionID,
+		EndpointVersion: 2,
+		TransportEpoch:  2,
+		DurableLSN:      120,
+		PrimaryTailLSN:  20,
+		PrimaryHeadLSN:  120,
 	})
 	time.Sleep(50 * time.Millisecond)
 

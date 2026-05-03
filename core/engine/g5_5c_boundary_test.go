@@ -46,26 +46,26 @@ func TestG5_5C_Dispatch_CatchUpVsRebuild_TableDriven(t *testing.T) {
 		wantCmdKind string // "StartCatchUp" or "StartRebuild" or ""
 	}{
 		{
-			name:        "caught_up",
-			r:           100, s: 10, h: 100,
+			name: "caught_up",
+			r:    100, s: 10, h: 100,
 			wantDec:     DecisionNone,
 			wantCmdKind: "", // none-decision emits FenceAtEpoch (covered elsewhere) but no recovery session
 		},
 		{
-			name:        "gap_within_wal_dispatches_catch_up",
-			r:           50, s: 10, h: 100,
+			name: "gap_within_wal_dispatches_catch_up",
+			r:    50, s: 10, h: 100,
 			wantDec:     DecisionCatchUp,
 			wantCmdKind: "StartCatchUp",
 		},
 		{
-			name:        "gap_exceeds_wal_dispatches_rebuild",
-			r:           5, s: 10, h: 100, // R < S: replica is behind the recoverable start
+			name: "gap_exceeds_wal_dispatches_rebuild",
+			r:    5, s: 10, h: 100, // R < S: replica is behind the recoverable start
 			wantDec:     DecisionRebuild,
 			wantCmdKind: "StartRebuild",
 		},
 		{
-			name:        "rebuild_pinned_overrides_catch_up",
-			r:           50, s: 10, h: 100, rebuildPin: true,
+			name: "rebuild_pinned_overrides_catch_up",
+			r:    50, s: 10, h: 100, rebuildPin: true,
 			wantDec:     DecisionRebuild,
 			wantCmdKind: "StartRebuild",
 		},
@@ -319,9 +319,9 @@ func TestG5_5C_StaleSessionAck_DoesNotPromoteHealth(t *testing.T) {
 
 // TestG5_5C_StaleSessionAck_FullAchievedDoesPromote is the
 // counterpart confirmation: a SessionCompleted with AchievedLSN ==
-// TargetLSN == H reaches DecisionNone and (after the implicit
-// fence) promotes Healthy. Without this dual, the prior test could
-// pass trivially (e.g., if Healthy never promotes for any input).
+// TargetLSN == H reaches DecisionNone. G9C tightens the final
+// publication gate: recovered replicas promote Healthy only after a
+// post-close durable ack proves live-feed continuity.
 func TestG5_5C_StaleSessionAck_FullAchievedDoesPromote(t *testing.T) {
 	st := &ReplicaState{}
 	Apply(st, AssignmentObserved{
@@ -352,20 +352,21 @@ func TestG5_5C_StaleSessionAck_FullAchievedDoesPromote(t *testing.T) {
 	if got := st.Recovery.Decision; got != DecisionNone {
 		t.Errorf("Decision = %s, want None on full-achievement", got)
 	}
-	// Implicit fence at SessionCompleted (apply.go:493-495) advances
-	// FencedEpoch to Identity.Epoch. Healthy gate may now flip true.
+	if st.Publication.Healthy {
+		t.Error("Publication.Healthy = true before post-close durable ack")
+	}
+	assertNoCommand(t, r, "PublishHealthy")
+
+	r2 := Apply(st, DurableAckObserved{
+		ReplicaID:       "r1",
+		EndpointVersion: 1,
+		TransportEpoch:  1,
+		DurableLSN:      100,
+		PrimaryTailLSN:  0,
+		PrimaryHeadLSN:  100,
+	})
 	if !st.Publication.Healthy {
-		t.Error("Publication.Healthy = false despite full-achievement + implicit fence")
+		t.Error("Publication.Healthy = false after full achievement + post-close durable ack")
 	}
-	// PublishHealthy expected.
-	hasHealthy := false
-	for _, cmd := range r.Commands {
-		if CommandKind(cmd) == "PublishHealthy" {
-			hasHealthy = true
-			break
-		}
-	}
-	if !hasHealthy {
-		t.Error("PublishHealthy not emitted on full-achievement ack")
-	}
+	assertHasCommand(t, r2, "PublishHealthy")
 }
