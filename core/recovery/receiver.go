@@ -259,14 +259,17 @@ func (r *Receiver) Run() (achievedLSN uint64, err error) {
 				return 0, newFailure(FailureContract, PhaseRecvSync,
 					fmt.Errorf("barrier req but layer-1 not done: %+v", st))
 			}
-			log.Printf("g7-debug: Receiver.Run TryComplete=true achieved=%d frontier=%d", achieved, frontier)
-			_ = achieved
-			if writeErr := writeFrame(r.conn, frameBarrierResp, encodeBarrierResp(frontier)); writeErr != nil {
+			durableAchieved := achieved
+			if frontier < durableAchieved {
+				durableAchieved = frontier
+			}
+			log.Printf("g7-debug: Receiver.Run TryComplete=true achieved=%d frontier=%d durableAchieved=%d", achieved, frontier, durableAchieved)
+			if writeErr := writeFrame(r.conn, frameBarrierResp, encodeBarrierResp(durableAchieved)); writeErr != nil {
 				log.Printf("g7-debug: Receiver.Run BarrierResp write err err=%v", writeErr)
 				return 0, newFailure(FailureWire, PhaseRecvSync, writeErr)
 			}
-			log.Printf("g7-debug: Receiver.Run frameBarrierResp written, returning frontier=%d", frontier)
-			return frontier, nil
+			log.Printf("g7-debug: Receiver.Run frameBarrierResp written, returning durableAchieved=%d", durableAchieved)
+			return durableAchieved, nil
 
 		case frameBarrierResp:
 			return 0, newFailure(FailureProtocol, PhaseRecvDispatch,

@@ -304,8 +304,20 @@ func TestG9B_StatusProjection_ComponentAdapterLifecycle_NotReadyRecoveringReady(
 		Success: true, AchievedLSN: 10,
 	})
 	body = s.statusProjection()
+	if body.ReplicationRole != ReplicationRoleRecovering {
+		t.Fatalf("after completed recovery before durable ack role=%q want %q", body.ReplicationRole, ReplicationRoleRecovering)
+	}
+	if body.FrontendPrimaryReady {
+		t.Fatalf("post-close recovered replica must not become frontend primary: %+v", body)
+	}
+
+	exec.durableAck(adapter.DurableAckResult{
+		ReplicaID: "r2", SessionID: exec.lastSessionID,
+		DurableLSN: 10, PrimaryTailLSN: 1, PrimaryHeadLSN: 10,
+	})
+	body = s.statusProjection()
 	if body.ReplicationRole != ReplicationRoleReady {
-		t.Fatalf("after completed recovery role=%q want %q", body.ReplicationRole, ReplicationRoleReady)
+		t.Fatalf("after post-close durable ack role=%q want %q", body.ReplicationRole, ReplicationRoleReady)
 	}
 	if body.FrontendPrimaryReady {
 		t.Fatalf("supporting replica_ready must not become frontend primary: %+v", body)
@@ -364,6 +376,7 @@ func TestIsLoopbackRemote(t *testing.T) {
 type g9bStatusExecutor struct {
 	onSessionStart  adapter.OnSessionStart
 	onSessionClose  adapter.OnSessionClose
+	onDurableAck    adapter.OnDurableAck
 	onFenceComplete adapter.OnFenceComplete
 	lastSessionID   uint64
 	probeCh         chan struct{}
@@ -379,6 +392,10 @@ func (e *g9bStatusExecutor) SetOnSessionStart(fn adapter.OnSessionStart) {
 
 func (e *g9bStatusExecutor) SetOnSessionClose(fn adapter.OnSessionClose) {
 	e.onSessionClose = fn
+}
+
+func (e *g9bStatusExecutor) SetOnDurableAck(fn adapter.OnDurableAck) {
+	e.onDurableAck = fn
 }
 
 func (e *g9bStatusExecutor) SetOnFenceComplete(fn adapter.OnFenceComplete) {
@@ -445,6 +462,12 @@ func (e *g9bStatusExecutor) Fence(replicaID string, sessionID, epoch, endpointVe
 func (e *g9bStatusExecutor) completeSession(result adapter.SessionCloseResult) {
 	if e.onSessionClose != nil {
 		e.onSessionClose(result)
+	}
+}
+
+func (e *g9bStatusExecutor) durableAck(result adapter.DurableAckResult) {
+	if e.onDurableAck != nil {
+		e.onDurableAck(result)
 	}
 }
 

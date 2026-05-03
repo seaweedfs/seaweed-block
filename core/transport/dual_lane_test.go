@@ -89,9 +89,19 @@ func TestDualLane_BlockExecutor_StartRebuild(t *testing.T) {
 	)
 
 	startCh := make(chan adapter.SessionStartResult, 1)
-	closeCh := make(chan adapter.SessionCloseResult, 1)
+	type recoveryEvent struct {
+		kind  string
+		close adapter.SessionCloseResult
+		ack   adapter.DurableAckResult
+	}
+	eventCh := make(chan recoveryEvent, 8)
 	exec.SetOnSessionStart(func(r adapter.SessionStartResult) { startCh <- r })
-	exec.SetOnSessionClose(func(r adapter.SessionCloseResult) { closeCh <- r })
+	exec.SetOnSessionClose(func(r adapter.SessionCloseResult) {
+		eventCh <- recoveryEvent{kind: "close", close: r}
+	})
+	exec.SetOnDurableAck(func(r adapter.DurableAckResult) {
+		eventCh <- recoveryEvent{kind: "ack", ack: r}
+	})
 
 	_, _, primaryH := primary.Boundaries()
 	if err := exec.StartRebuild("r1", 7, 1, 1, primaryH); err != nil {
@@ -110,16 +120,42 @@ func TestDualLane_BlockExecutor_StartRebuild(t *testing.T) {
 	}
 
 	// OnSessionClose: success with achievedLSN == primary H.
+	var closeResult adapter.SessionCloseResult
+	closeDeadline := time.After(5 * time.Second)
+	for {
+		select {
+		case ev := <-eventCh:
+			if ev.kind != "close" {
+				continue
+			}
+			closeResult = ev.close
+			if !closeResult.Success {
+				t.Fatalf("OnSessionClose: not Success; FailReason=%q", closeResult.FailReason)
+			}
+			if closeResult.AchievedLSN != primaryH {
+				t.Errorf("OnSessionClose: achievedLSN=%d want %d", closeResult.AchievedLSN, primaryH)
+			}
+			goto closeObserved
+		case <-closeDeadline:
+			t.Fatal("OnSessionClose did not fire within 5s")
+		}
+	}
+closeObserved:
+
+	// G9C: the real dual-lane executor must emit a durable progress
+	// fact AFTER the recovery close, so engine readiness can distinguish
+	// recovery-window closure from live-feed continuity.
 	select {
-	case got := <-closeCh:
-		if !got.Success {
-			t.Fatalf("OnSessionClose: not Success; FailReason=%q", got.FailReason)
+	case ev := <-eventCh:
+		if ev.kind != "ack" {
+			t.Fatalf("event after close=%s want ack", ev.kind)
 		}
-		if got.AchievedLSN != primaryH {
-			t.Errorf("OnSessionClose: achievedLSN=%d want %d", got.AchievedLSN, primaryH)
+		if ev.ack.DurableLSN != closeResult.AchievedLSN {
+			t.Fatalf("post-close durable ack LSN=%d want close achieved %d",
+				ev.ack.DurableLSN, closeResult.AchievedLSN)
 		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("OnSessionClose did not fire within 5s")
+	case <-time.After(2 * time.Second):
+		t.Fatal("post-close durable ack did not fire within 2s")
 	}
 
 	// Replica matches primary on the rebuilt range.

@@ -340,11 +340,26 @@ func TestV3_Terminal_OnlySessionClosedCompletedGivesSuccess(t *testing.T) {
 	if r.Projection.SessionPhase != PhaseCompleted {
 		t.Fatalf("phase=%s, want completed", r.Projection.SessionPhase)
 	}
-	// After completion + re-decision, should be caught up and healthy.
+	// After completion + re-decision, the recovery window is closed,
+	// but recovered-replica readiness still waits for post-close
+	// durable ack / live-feed continuity evidence.
 	if r.Projection.RecoveryDecision != DecisionNone {
 		t.Fatalf("decision=%s, want none after completion", r.Projection.RecoveryDecision)
 	}
-	assertHasCommand(t, r, "PublishHealthy")
+	assertNoCommand(t, r, "PublishHealthy")
+	if r.Projection.Mode == ModeHealthy {
+		t.Fatalf("session close alone must not publish healthy")
+	}
+
+	r2 := Apply(st, DurableAckObserved{
+		ReplicaID:       "r1",
+		EndpointVersion: 1,
+		TransportEpoch:  1,
+		DurableLSN:      100,
+		PrimaryTailLSN:  10,
+		PrimaryHeadLSN:  100,
+	})
+	assertHasCommand(t, r2, "PublishHealthy")
 }
 
 func TestV3_Terminal_SessionCompletedDoesNotRegressRecoveryR(t *testing.T) {

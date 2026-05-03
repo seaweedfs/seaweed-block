@@ -236,10 +236,8 @@ func NewBlockExecutorWithDualLane(
 			}
 			e.mu.Lock()
 			cb := e.onSessionClose
+			ackCb := e.onDurableAck
 			e.mu.Unlock()
-			if cb == nil {
-				return
-			}
 			// ReplicaID MUST be populated — see start lambda above for
 			// the full failure mode (engine drops as wrong_replica;
 			// session Phase stuck; hasActiveSession blocks future
@@ -254,7 +252,24 @@ func NewBlockExecutorWithDualLane(
 			} else {
 				res.FailReason = err.Error()
 			}
-			cb(res)
+			if cb != nil {
+				cb(res)
+			}
+			if err == nil && ackCb != nil {
+				// G9C: session close proves the recovery window closed;
+				// replica_ready needs a subsequent durable progress fact
+				// so the engine knows the live feed still owns this peer.
+				// `achieved` is the receiver's durable BarrierResp witness,
+				// not the primary's frontier intent.
+				_, primaryS, primaryH := e.primaryStore.Boundaries()
+				ackCb(adapter.DurableAckResult{
+					ReplicaID:      string(rid),
+					SessionID:      sid,
+					DurableLSN:     achieved,
+					PrimaryTailLSN: primaryS,
+					PrimaryHeadLSN: primaryH,
+				})
+			}
 		},
 	)
 	bridge.SetOnDurableAck(func(rid recovery.ReplicaID, sid, acknowledgedLSN, primaryS, primaryH uint64) {

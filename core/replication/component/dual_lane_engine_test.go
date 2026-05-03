@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/adapter"
+	"github.com/seaweedfs/seaweed-block/core/engine"
 	"github.com/seaweedfs/seaweed-block/core/recovery"
 	"github.com/seaweedfs/seaweed-block/core/replication/component"
 )
@@ -133,6 +134,64 @@ func TestDualLane_EngineDrivenRebuild_HappyPath(t *testing.T) {
 					lba, pd[0], rd[0])
 			}
 		}
+	})
+}
+
+// TestG9C_DualLaneRecoveredReplica_PublishesHealthyOnlyAfterPostCloseDurableAck
+// pins the host-facing G9C contract on the real engine→adapter→dual-lane
+// transport path:
+//
+//   - SessionClosedCompleted closes the recovery window, but the engine
+//     must hold PublishHealthy.
+//   - The dual-lane executor must then report a durable ack derived from
+//     the receiver's BarrierResp witness.
+//   - Only that post-close durable ack may publish healthy / replica_ready.
+func TestG9C_DualLaneRecoveredReplica_PublishesHealthyOnlyAfterPostCloseDurableAck(t *testing.T) {
+	component.RunSubstrate(t, "memorywal", component.MemoryWAL, func(t *testing.T, c *component.Cluster) {
+		c.WithReplicas(1).
+			WithEngineDrivenRecovery().
+			WithDualLaneRecovery().
+			Start()
+
+		const seedN = 12
+		c.PrimaryWriteN(seedN)
+		c.PrimarySync()
+
+		a := c.Adapter(0)
+		c.DriveAssignment(0, adapter.AssignmentInfo{
+			VolumeID:        "v1",
+			ReplicaID:       "replica-0",
+			Epoch:           1,
+			EndpointVersion: 1,
+			DataAddr:        c.Replica(0).Addr,
+			CtrlAddr:        c.Replica(0).Addr,
+		})
+		c.DriveProbeResult(0, adapter.ProbeResult{
+			ReplicaID:         "replica-0",
+			Success:           true,
+			EndpointVersion:   1,
+			TransportEpoch:    1,
+			ReplicaFlushedLSN: 0,
+			PrimaryTailLSN:    1,
+			PrimaryHeadLSN:    seedN,
+		})
+
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) {
+			trace := a.Trace()
+			closeIdx := traceIndex(trace, 0, "event", "SessionClosedCompleted")
+			heldIdx := traceIndex(trace, closeIdx+1, "publish_healthy_held", "waiting for post-close durable ack")
+			ackIdx := traceIndex(trace, heldIdx+1, "event", "DurableAckObserved")
+			postAckIdx := traceIndex(trace, ackIdx+1, "post_close_durable_ack", "")
+			if closeIdx >= 0 && heldIdx >= 0 && ackIdx >= 0 && postAckIdx >= 0 &&
+				commandLogContains(a.CommandLog(), "PublishHealthy") &&
+				a.Projection().Mode == engine.ModeHealthy {
+				return
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		t.Fatalf("post-close durable ack ordering not observed; trace=%v commands=%v projection=%+v",
+			a.Trace(), a.CommandLog(), a.Projection())
 	})
 }
 
@@ -514,4 +573,28 @@ func waitBridgeLiveReady(t *testing.T, bridge interface {
 		time.Sleep(time.Millisecond)
 	}
 	t.Fatalf("bridge session for %s did not become live-ready", replicaID)
+}
+
+func traceIndex(trace []engine.TraceEntry, start int, step, detail string) int {
+	if start < 0 {
+		return -1
+	}
+	for i := start; i < len(trace); i++ {
+		if trace[i].Step != step {
+			continue
+		}
+		if detail == "" || trace[i].Detail == detail {
+			return i
+		}
+	}
+	return -1
+}
+
+func commandLogContains(log []string, want string) bool {
+	for _, got := range log {
+		if got == want {
+			return true
+		}
+	}
+	return false
 }

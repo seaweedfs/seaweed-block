@@ -62,6 +62,44 @@ func waitProjection(t *testing.T, a *adapter.VolumeReplicaAdapter, want engine.M
 	}
 }
 
+func waitRecoveryCompleted(t *testing.T, a *adapter.VolumeReplicaAdapter, timeout time.Duration) engine.ReplicaProjection {
+	t.Helper()
+	deadline := time.After(timeout)
+	for {
+		p := a.Projection()
+		if p.SessionPhase == engine.PhaseCompleted {
+			return p
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("timeout waiting for completed recovery, last=%s phase=%s decision=%s",
+				p.Mode, p.SessionPhase, p.RecoveryDecision)
+		default:
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+}
+
+func waitRecoveredHealthy(t *testing.T, a *adapter.VolumeReplicaAdapter, replicaID string, timeout time.Duration) {
+	t.Helper()
+	p := waitRecoveryCompleted(t, a, timeout)
+	if p.Mode == engine.ModeHealthy {
+		return
+	}
+	// G9C: recovery-window close proves base+WAL+barrier closure, but
+	// supporting replica_ready waits for one post-close durable progress
+	// fact to prove the live feed still owns this replica.
+	a.OnDurableAck(adapter.DurableAckResult{
+		ReplicaID:       replicaID,
+		EndpointVersion: p.EndpointVersion,
+		TransportEpoch:  p.Epoch,
+		DurableLSN:      p.R,
+		PrimaryTailLSN:  p.S,
+		PrimaryHeadLSN:  p.H,
+	})
+	waitProjection(t, a, engine.ModeHealthy, timeout)
+}
+
 // TestHandoff_OldPrimaryToNewPrimary_Converges proves the core P12
 // route end-to-end:
 //
@@ -87,7 +125,7 @@ func TestHandoff_OldPrimaryToNewPrimary_Converges(t *testing.T) {
 		Epoch: 1, EndpointVersion: 1,
 		DataAddr: ln.Addr(), CtrlAddr: ln.Addr(),
 	})
-	waitProjection(t, adapterA, engine.ModeHealthy, 3*time.Second)
+	waitRecoveredHealthy(t, adapterA, "r1", 3*time.Second)
 
 	// Verify replica has A's data.
 	for _, lba := range []uint32{0, 1, 2} {
@@ -109,7 +147,7 @@ func TestHandoff_OldPrimaryToNewPrimary_Converges(t *testing.T) {
 		Epoch: 2, EndpointVersion: 2,
 		DataAddr: ln.Addr(), CtrlAddr: ln.Addr(),
 	})
-	waitProjection(t, adapterB, engine.ModeHealthy, 3*time.Second)
+	waitRecoveredHealthy(t, adapterB, "r1", 3*time.Second)
 
 	// Verify replica has B's data (the "new truth").
 	for _, lba := range []uint32{0, 1, 2, 3} {
@@ -139,7 +177,7 @@ func TestHandoff_StaleOldPrimaryTraffic_Rejected(t *testing.T) {
 		Epoch: 1, EndpointVersion: 1,
 		DataAddr: ln.Addr(), CtrlAddr: ln.Addr(),
 	})
-	waitProjection(t, adapterA, engine.ModeHealthy, 3*time.Second)
+	waitRecoveredHealthy(t, adapterA, "r1", 3*time.Second)
 
 	// Primary B starts at epoch=2 with MORE data so recovery is
 	// required (R < H). B's mutating traffic must establish
@@ -156,7 +194,7 @@ func TestHandoff_StaleOldPrimaryTraffic_Rejected(t *testing.T) {
 		Epoch: 2, EndpointVersion: 2,
 		DataAddr: ln.Addr(), CtrlAddr: ln.Addr(),
 	})
-	waitProjection(t, adapterB, engine.ModeHealthy, 3*time.Second)
+	waitRecoveredHealthy(t, adapterB, "r1", 3*time.Second)
 
 	// Now simulate stale A traffic: manually send a ship entry at
 	// epoch=1 to the replica. It must be rejected because B already
@@ -210,7 +248,7 @@ func TestHandoff_RejoinAfterNewPrimary_DataConsistent(t *testing.T) {
 		Epoch: 1, EndpointVersion: 1,
 		DataAddr: ln.Addr(), CtrlAddr: ln.Addr(),
 	})
-	waitProjection(t, adapterA, engine.ModeHealthy, 3*time.Second)
+	waitRecoveredHealthy(t, adapterA, "r1", 3*time.Second)
 
 	// B writes a different, larger set.
 	primaryB := storage.NewBlockStore(64, 4096)
@@ -222,7 +260,7 @@ func TestHandoff_RejoinAfterNewPrimary_DataConsistent(t *testing.T) {
 		Epoch: 2, EndpointVersion: 2,
 		DataAddr: ln.Addr(), CtrlAddr: ln.Addr(),
 	})
-	waitProjection(t, adapterB, engine.ModeHealthy, 3*time.Second)
+	waitRecoveredHealthy(t, adapterB, "r1", 3*time.Second)
 
 	// Every LBA that B wrote must match on the replica.
 	allB := primaryB.AllBlocks()
