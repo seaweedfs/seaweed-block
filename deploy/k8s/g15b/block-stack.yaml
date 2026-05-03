@@ -1,0 +1,160 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sw-block-cluster-spec
+  namespace: kube-system
+data:
+  cluster-spec.yaml: |
+    volumes:
+      - id: v1
+        size_bytes: 1048576
+        replication_factor: 2
+        placements:
+          - server_id: s1
+            replica_id: r1
+            source: existing_replica
+          - server_id: s2
+            replica_id: r2
+            source: existing_replica
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sw-blockmaster
+  namespace: kube-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sw-blockmaster
+  template:
+    metadata:
+      labels:
+        app: sw-blockmaster
+    spec:
+      containers:
+        - name: blockmaster
+          image: sw-block:local
+          imagePullPolicy: Never
+          command: ["/usr/local/bin/blockmaster"]
+          args:
+            - "--authority-store=/var/lib/sw-block/authority"
+            - "--lifecycle-store=/var/lib/sw-block/lifecycle"
+            - "--cluster-spec=/config/cluster-spec.yaml"
+            - "--lifecycle-product-loop-interval=100ms"
+            - "--listen=0.0.0.0:9333"
+            - "--expected-slots-per-volume=2"
+          ports:
+            - name: grpc
+              containerPort: 9333
+          volumeMounts:
+            - name: cluster-spec
+              mountPath: /config
+              readOnly: true
+            - name: state
+              mountPath: /var/lib/sw-block
+      volumes:
+        - name: cluster-spec
+          configMap:
+            name: sw-block-cluster-spec
+        - name: state
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: blockmaster
+  namespace: kube-system
+spec:
+  selector:
+    app: sw-blockmaster
+  ports:
+    - name: grpc
+      port: 9333
+      targetPort: 9333
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sw-blockvolume-r1
+  namespace: kube-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sw-blockvolume-r1
+  template:
+    metadata:
+      labels:
+        app: sw-blockvolume-r1
+    spec:
+      hostNetwork: true
+      containers:
+        - name: blockvolume
+          image: sw-block:local
+          imagePullPolicy: Never
+          command: ["/usr/local/bin/blockvolume"]
+          args:
+            - "--master=blockmaster.kube-system.svc.cluster.local:9333"
+            - "--server-id=s1"
+            - "--volume-id=v1"
+            - "--replica-id=r1"
+            - "--data-addr=127.0.0.1:19101"
+            - "--ctrl-addr=127.0.0.1:19102"
+            - "--durable-root=/var/lib/sw-block/volume"
+            - "--durable-impl=walstore"
+            - "--durable-blocks=256"
+            - "--durable-blocksize=4096"
+            - "--heartbeat-interval=200ms"
+            - "--t1-readiness"
+            - "--recovery-mode=dual-lane"
+            - "--iscsi-listen=127.0.0.1:3260"
+            - "--iscsi-iqn=iqn.2026-05.io.seaweedfs:g15b-v1"
+          volumeMounts:
+            - name: state
+              mountPath: /var/lib/sw-block
+      volumes:
+        - name: state
+          emptyDir: {}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sw-blockvolume-r2
+  namespace: kube-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sw-blockvolume-r2
+  template:
+    metadata:
+      labels:
+        app: sw-blockvolume-r2
+    spec:
+      hostNetwork: true
+      containers:
+        - name: blockvolume
+          image: sw-block:local
+          imagePullPolicy: Never
+          command: ["/usr/local/bin/blockvolume"]
+          args:
+            - "--master=blockmaster.kube-system.svc.cluster.local:9333"
+            - "--server-id=s2"
+            - "--volume-id=v1"
+            - "--replica-id=r2"
+            - "--data-addr=127.0.0.1:19201"
+            - "--ctrl-addr=127.0.0.1:19202"
+            - "--durable-root=/var/lib/sw-block/volume"
+            - "--durable-impl=walstore"
+            - "--durable-blocks=256"
+            - "--durable-blocksize=4096"
+            - "--heartbeat-interval=200ms"
+            - "--t1-readiness"
+            - "--recovery-mode=dual-lane"
+          volumeMounts:
+            - name: state
+              mountPath: /var/lib/sw-block
+      volumes:
+        - name: state
+          emptyDir: {}

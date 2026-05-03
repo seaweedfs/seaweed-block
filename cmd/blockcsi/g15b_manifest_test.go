@@ -32,6 +32,28 @@ func TestG15b_Manifest_ControllerUsesAttacherNotProvisioner(t *testing.T) {
 	}
 }
 
+func TestG15b_Manifest_ProductStackSingleNodeLoopbackShape(t *testing.T) {
+	body := g15bReadManifest(t, "block-stack.yaml")
+	for _, want := range []string{
+		"name: sw-blockmaster",
+		"name: sw-blockvolume-r1",
+		"name: sw-blockvolume-r2",
+		"--cluster-spec=/config/cluster-spec.yaml",
+		"--lifecycle-product-loop-interval=100ms",
+		"--expected-slots-per-volume=2",
+		"--recovery-mode=dual-lane",
+		"--iscsi-listen=127.0.0.1:3260",
+		"--iscsi-iqn=iqn.2026-05.io.seaweedfs:g15b-v1",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("block-stack.yaml missing %q", want)
+		}
+	}
+	if strings.Contains(body, "--iscsi-listen=0.0.0.0") {
+		t.Fatalf("G15b must not weaken loopback-only iSCSI bind")
+	}
+}
+
 func TestG15b_Manifest_StaticPVDoesNotEmbedTargetFacts(t *testing.T) {
 	body := g15bReadManifest(t, "static-pv-pvc-pod.yaml")
 	for _, forbidden := range []string{"iscsiAddr", "iqn", "nqn", "endpointVersion", "epoch"} {
@@ -93,7 +115,7 @@ func TestG15b_Manifest_StaticPVUsesBlockCSIDriver(t *testing.T) {
 }
 
 func TestG15b_Manifest_NoAuthorityShapedFields(t *testing.T) {
-	for _, file := range []string{"csi-driver.yaml", "csi-controller.yaml", "csi-node.yaml", "static-pv-pvc-pod.yaml"} {
+	for _, file := range []string{"block-stack.yaml", "csi-driver.yaml", "csi-controller.yaml", "csi-node.yaml", "static-pv-pvc-pod.yaml"} {
 		body := strings.ToLower(g15bStripYAMLComments(g15bReadManifest(t, file)))
 		for _, forbidden := range []string{"endpointversion", "authorityepoch", "assignmentfact", "assignmentask"} {
 			if strings.Contains(body, forbidden) {
