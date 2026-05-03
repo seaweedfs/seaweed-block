@@ -20,6 +20,7 @@ import (
 
 type flags struct {
 	authorityStore      string
+	lifecycleStore      string
 	listen              string
 	topology            string
 	expectedSlotsPerVol int
@@ -36,6 +37,7 @@ func parseFlags(args []string) (flags, error) {
 	var f flags
 	fs := flag.NewFlagSet("blockmaster", flag.ContinueOnError)
 	fs.StringVar(&f.authorityStore, "authority-store", "", "durable authority store directory (required)")
+	fs.StringVar(&f.lifecycleStore, "lifecycle-store", "", "optional G9D product lifecycle registration store directory (desired volumes, node inventory, placement intents); read-only with respect to assignment publication")
 	fs.StringVar(&f.listen, "listen", "127.0.0.1:0", "gRPC listen address (e.g. 127.0.0.1:9180)")
 	fs.StringVar(&f.topology, "topology", "", "path to accepted-topology YAML (required for assignment to mint)")
 	fs.IntVar(&f.expectedSlotsPerVol, "expected-slots-per-volume", 3, "RF/expected slot count per volume; the controller rejects observation snapshots whose slot count differs (default 3, set to 2 for 2-node smoke clusters)")
@@ -82,6 +84,7 @@ func run(f flags) int {
 	}
 	cfg := master.Config{
 		AuthorityStoreDir: f.authorityStore,
+		LifecycleStoreDir: f.lifecycleStore,
 		Listen:            f.listen,
 		Topology:          topo,
 		Freshness:         authority.FreshnessConfig{FreshnessWindow: f.freshnessWindow, PendingGrace: f.pendingGrace},

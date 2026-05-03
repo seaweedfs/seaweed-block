@@ -20,11 +20,13 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 
 	"github.com/seaweedfs/seaweed-block/core/authority"
 	"github.com/seaweedfs/seaweed-block/core/host/bootstrap"
+	"github.com/seaweedfs/seaweed-block/core/lifecycle"
 	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
 	"google.golang.org/grpc"
 )
@@ -51,24 +53,40 @@ type Config struct {
 	// ControllerConfig tunes controller knobs (retry window etc).
 	ControllerConfig authority.TopologyControllerConfig
 
+	// LifecycleStoreDir, when non-empty, opens product lifecycle
+	// registration stores (desired volumes, node inventory, placement
+	// intents). This is read-only composition for G9D: these stores do
+	// NOT drive assignment publication.
+	LifecycleStoreDir string
+
 	// Logger is used for structured startup and error logging. If
 	// nil, the default log package logger is used.
 	Logger *log.Logger
 }
 
+// LifecycleStores groups the product registration stores hosted by
+// blockmaster. The stores are controller input only; assignment
+// publication remains owned by authority.Controller/Publisher.
+type LifecycleStores struct {
+	Volumes    *lifecycle.FileStore
+	Nodes      *lifecycle.NodeInventoryStore
+	Placements *lifecycle.PlacementIntentStore
+}
+
 // Host is the composed master-side block product daemon. Lifecycle
 // is: New -> Start -> (serve requests) -> Close.
 type Host struct {
-	cfg    Config
-	log    *log.Logger
-	boot   *bootstrap.DurableAuthorityBootstrap
-	ctrl   *authority.TopologyController
-	obs    *authority.ObservationHost
-	ln     net.Listener
-	grpc   *grpc.Server
-	topo   authority.AcceptedTopology
-	cancel context.CancelFunc
-	wg     sync.WaitGroup
+	cfg       Config
+	log       *log.Logger
+	boot      *bootstrap.DurableAuthorityBootstrap
+	ctrl      *authority.TopologyController
+	obs       *authority.ObservationHost
+	ln        net.Listener
+	grpc      *grpc.Server
+	topo      authority.AcceptedTopology
+	lifecycle *LifecycleStores
+	cancel    context.CancelFunc
+	wg        sync.WaitGroup
 
 	started atomic.Bool
 }
@@ -150,6 +168,12 @@ func New(cfg Config) (*Host, error) {
 		Reader:    boot.Publisher,
 	})
 
+	lifecycleStores, err := openLifecycleStores(cfg.LifecycleStoreDir)
+	if err != nil {
+		_ = boot.Close()
+		return nil, fmt.Errorf("master.New: lifecycle stores: %w", err)
+	}
+
 	ln, err := net.Listen("tcp", cfg.Listen)
 	if err != nil {
 		_ = boot.Close()
@@ -157,13 +181,14 @@ func New(cfg Config) (*Host, error) {
 	}
 
 	h := &Host{
-		cfg:  cfg,
-		log:  lg,
-		boot: boot,
-		ctrl: ctrl,
-		obs:  obs,
-		ln:   ln,
-		topo: cfg.Topology,
+		cfg:       cfg,
+		log:       lg,
+		boot:      boot,
+		ctrl:      ctrl,
+		obs:       obs,
+		ln:        ln,
+		topo:      cfg.Topology,
+		lifecycle: lifecycleStores,
 	}
 
 	grpcSrv := grpc.NewServer()
@@ -181,6 +206,29 @@ func New(cfg Config) (*Host, error) {
 	return h, nil
 }
 
+func openLifecycleStores(dir string) (*LifecycleStores, error) {
+	if dir == "" {
+		return nil, nil
+	}
+	volumes, err := lifecycle.OpenFileStore(filepath.Join(dir, "volumes"))
+	if err != nil {
+		return nil, err
+	}
+	nodes, err := lifecycle.OpenNodeInventoryStore(filepath.Join(dir, "nodes"))
+	if err != nil {
+		return nil, err
+	}
+	placements, err := lifecycle.OpenPlacementIntentStore(filepath.Join(dir, "placements"))
+	if err != nil {
+		return nil, err
+	}
+	return &LifecycleStores{
+		Volumes:    volumes,
+		Nodes:      nodes,
+		Placements: placements,
+	}, nil
+}
+
 // Addr returns the bound listener address. Valid after New.
 func (h *Host) Addr() string { return h.ln.Addr().String() }
 
@@ -193,6 +241,11 @@ func (h *Host) Controller() *authority.TopologyController { return h.ctrl }
 
 // ObservationHost exposes the observation host for tests.
 func (h *Host) ObservationHost() *authority.ObservationHost { return h.obs }
+
+// Lifecycle returns product registration stores when configured. Nil means
+// the daemon is running in static-topology-only mode. Reading these stores
+// must not be treated as assignment authority.
+func (h *Host) Lifecycle() *LifecycleStores { return h.lifecycle }
 
 // replicaSlotsFor returns the accepted-topology replica IDs for a
 // volume, or nil if the volume isn't in accepted topology. Used
