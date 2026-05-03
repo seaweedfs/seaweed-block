@@ -11,6 +11,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"math"
 	"testing"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend"
@@ -368,12 +369,37 @@ func TestT2Batch10_5_Write16_LBAOutOfRange_Rejected(t *testing.T) {
 	}
 }
 
+func TestT2Batch10_5_Write16_LBAOverflow_Rejected(t *testing.T) {
+	h := newHandlerForTest(t)
+	r := h.HandleCommand(context.Background(),
+		write16CDB(math.MaxUint64, 1),
+		make([]byte, iscsi.DefaultBlockSize))
+	if r.Status == iscsi.StatusGood {
+		t.Fatal("WRITE(16) overflowing LBA range: Good (must fail)")
+	}
+	if r.ASC != iscsi.ASCLBAOutOfRange {
+		t.Fatalf("ASC=0x%02x want LBAOutOfRange", r.ASC)
+	}
+}
+
 func TestT2Batch10_5_Read16_LBAOutOfRange_Rejected(t *testing.T) {
 	h := newHandlerForTest(t)
 	r := h.HandleCommand(context.Background(),
 		read16CDB(iscsi.DefaultVolumeBlocks, 1), nil)
 	if r.Status == iscsi.StatusGood {
 		t.Fatal("READ(16) LBA past end: Good (must fail)")
+	}
+	if r.ASC != iscsi.ASCLBAOutOfRange {
+		t.Fatalf("ASC=0x%02x want LBAOutOfRange", r.ASC)
+	}
+}
+
+func TestT2Batch10_5_Read16_LBAOverflow_Rejected(t *testing.T) {
+	h := newHandlerForTest(t)
+	r := h.HandleCommand(context.Background(),
+		read16CDB(math.MaxUint64, 1), nil)
+	if r.Status == iscsi.StatusGood {
+		t.Fatal("READ(16) overflowing LBA range: Good (must fail)")
 	}
 	if r.ASC != iscsi.ASCLBAOutOfRange {
 		t.Fatalf("ASC=0x%02x want LBAOutOfRange", r.ASC)

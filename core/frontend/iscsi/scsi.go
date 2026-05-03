@@ -96,12 +96,12 @@ func (r SCSIResult) AsError() *SCSIError {
 // (if any) are an initiator / protocol concern, not this
 // layer's.
 type SCSIHandler struct {
-	backend     frontend.Backend
-	blockSize   uint32
-	volumeSize  uint64 // bytes
-	vendorID    string // 8 bytes
-	productID   string // 16 bytes
-	serialNo    string
+	backend    frontend.Backend
+	blockSize  uint32
+	volumeSize uint64 // bytes
+	vendorID   string // 8 bytes
+	productID  string // 16 bytes
+	serialNo   string
 }
 
 // HandlerConfig configures an SCSIHandler. Zero values pick
@@ -249,7 +249,7 @@ func (h *SCSIHandler) doRead(ctx context.Context, lba uint64, transferLen uint32
 		return SCSIResult{Status: StatusGood}
 	}
 	totalBlocks := h.volumeSize / uint64(h.blockSize)
-	if lba >= totalBlocks || lba+uint64(transferLen) > totalBlocks {
+	if lba >= totalBlocks || uint64(transferLen) > totalBlocks-lba {
 		return illegalRequest(ASCLBAOutOfRange, 0x00, "read LBA out of range")
 	}
 	byteLen := int(transferLen) * int(h.blockSize)
@@ -271,7 +271,7 @@ func (h *SCSIHandler) doWrite(ctx context.Context, lba uint64, transferLen uint3
 		return SCSIResult{Status: StatusGood}
 	}
 	totalBlocks := h.volumeSize / uint64(h.blockSize)
-	if lba >= totalBlocks || lba+uint64(transferLen) > totalBlocks {
+	if lba >= totalBlocks || uint64(transferLen) > totalBlocks-lba {
 		log.Printf("iscsi: SCSI WRITE rejected (LBA out of range): lba=%d transferLen=%d totalBlocks=%d",
 			lba, transferLen, totalBlocks)
 		return illegalRequest(ASCLBAOutOfRange, 0x00, "write LBA out of range")
@@ -684,9 +684,9 @@ func illegalRequest(asc, ascq uint8, reason string) SCSIResult {
 // (SPC-5 §4.5.3). Used by REQUEST SENSE.
 func buildSenseData(key, asc, ascq uint8) []byte {
 	d := make([]byte, 18)
-	d[0] = 0x70          // Current, fixed format
-	d[2] = key & 0x0f    // Sense key
-	d[7] = 10            // Additional length
+	d[0] = 0x70       // Current, fixed format
+	d[2] = key & 0x0f // Sense key
+	d[7] = 10         // Additional length
 	d[12] = asc
 	d[13] = ascq
 	return d

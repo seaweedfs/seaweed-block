@@ -74,9 +74,9 @@ type Session struct {
 	// only. provider + volumeID + hcfg are captured at session
 	// construction; the session calls provider.Open() after
 	// login succeeds and builds the SCSIHandler then.
-	provider  frontend.Provider
-	volumeID  string
-	hcfg      HandlerConfig
+	provider frontend.Provider
+	volumeID string
+	hcfg     HandlerConfig
 	// backend holds the opened backend so serve() can Close it
 	// on exit. nil for Discovery sessions.
 	backend frontend.Backend
@@ -275,11 +275,14 @@ func (s *Session) handleSCSICmd(ctx context.Context, req *PDU) error {
 		// using an opcode we don't recognize here fall through
 		// to the handler (which rejects Invalid Opcode).
 		if expected, ok := cdbExpectedWriteBytes(cdb, s.handler.BlockSize()); ok {
-			if edtl != expected {
+			if uint64(edtl) != expected {
 				return s.sendSCSIResponse(req, illegalRequest(
 					ASCInvalidFieldInCDB, 0x00,
 					"EDTL does not match CDB transfer length"))
 			}
+		}
+		if result, ok := s.validateWriteTransferLimits(req, edtl); !ok {
+			return s.sendSCSIResponse(req, result)
 		}
 		collected, err := s.collectWriteData(req, edtl)
 		if err != nil {
@@ -309,18 +312,33 @@ func (s *Session) handleSCSICmd(ctx context.Context, req *PDU) error {
 // because handleSCSICmd doesn't need to build a SCSIResult — it
 // just needs to bound the pre-allocation. Expand as new write
 // opcodes are added to scsi.go.
-func cdbExpectedWriteBytes(cdb [16]byte, blockSize uint32) (uint32, bool) {
+func cdbExpectedWriteBytes(cdb [16]byte, blockSize uint32) (uint64, bool) {
 	switch cdb[0] {
 	case ScsiWrite10:
 		transferLen := uint32(cdb[7])<<8 | uint32(cdb[8])
-		return transferLen * blockSize, true
+		return uint64(transferLen) * uint64(blockSize), true
 	case ScsiWrite16:
 		// 32-bit transferLen in CDB bytes 10-13 (Batch 10.5).
 		transferLen := uint32(cdb[10])<<24 | uint32(cdb[11])<<16 |
 			uint32(cdb[12])<<8 | uint32(cdb[13])
-		return transferLen * blockSize, true
+		return uint64(transferLen) * uint64(blockSize), true
 	}
 	return 0, false
+}
+
+func (s *Session) validateWriteTransferLimits(req *PDU, edtl uint32) (SCSIResult, bool) {
+	if maxBurst := s.negResult.MaxBurstLength; maxBurst > 0 && uint64(edtl) > uint64(maxBurst) {
+		return illegalRequest(
+			ASCInvalidFieldInCDB, 0x00,
+			"EDTL exceeds negotiated MaxBurstLength"), false
+	}
+	if firstBurst := s.negResult.FirstBurstLength; firstBurst > 0 &&
+		uint64(len(req.DataSegment)) > uint64(firstBurst) {
+		return illegalRequest(
+			ASCInvalidFieldInCDB, 0x00,
+			"immediate data exceeds negotiated FirstBurstLength"), false
+	}
+	return SCSIResult{Status: StatusGood}, true
 }
 
 // collectWriteData assembles the write payload from immediate

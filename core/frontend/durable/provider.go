@@ -103,7 +103,8 @@ type DurableProvider struct {
 	view frontend.ProjectionView
 
 	mu      sync.Mutex
-	volumes map[string]*volHandle // keyed by volumeID
+	volumes map[string]*volHandle  // keyed by volumeID
+	opening map[string]*sync.Mutex // keyed by volumeID; serializes open/create
 	closed  bool
 }
 
@@ -140,6 +141,7 @@ func NewDurableProvider(cfg ProviderConfig, view frontend.ProjectionView) (*Dura
 		cfg:     cfg,
 		view:    view,
 		volumes: map[string]*volHandle{},
+		opening: map[string]*sync.Mutex{},
 	}, nil
 }
 
@@ -165,6 +167,29 @@ func (p *DurableProvider) Open(ctx context.Context, volumeID string) (frontend.B
 		return nil, err
 	}
 
+	h, err := p.ensureHandle(volumeID)
+	if err != nil {
+		return nil, err
+	}
+	// Latch the backend's Identity to the now-Healthy projection. If
+	// the backend was constructed via EnsureStorage pre-assignment, its
+	// captured Identity has Epoch=0 even though VolumeID/ReplicaID came
+	// from CLI config at construction. SetIdentity transitions Epoch=0
+	// to the live projection's Epoch/EV; subsequent drift still fails
+	// closed.
+	proj := p.view.Projection()
+	log.Printf("durable: dp.Open latching identity from projection volume=%s replica=%s epoch=%d ev=%d (post-waitHealthy)",
+		proj.VolumeID, proj.ReplicaID, proj.Epoch, proj.EndpointVersion)
+	h.backend.SetIdentity(frontend.Identity{
+		VolumeID:        proj.VolumeID,
+		ReplicaID:       proj.ReplicaID,
+		Epoch:           proj.Epoch,
+		EndpointVersion: proj.EndpointVersion,
+	})
+	return h.backend, nil
+}
+
+func (p *DurableProvider) ensureHandle(volumeID string) (*volHandle, error) {
 	p.mu.Lock()
 	if p.closed {
 		p.mu.Unlock()
@@ -172,22 +197,26 @@ func (p *DurableProvider) Open(ctx context.Context, volumeID string) (frontend.B
 	}
 	if h, ok := p.volumes[volumeID]; ok {
 		p.mu.Unlock()
-		// G5-5: latch the backend's Identity to the now-Healthy
-		// projection. If the backend was constructed via EnsureStorage
-		// pre-assignment, its captured Identity has Epoch=0 even though
-		// VolumeID/ReplicaID came from CLI config at construction.
-		// SetIdentity transitions Epoch=0 → live projection's Epoch/EV;
-		// subsequent drift still fails closed.
-		proj := p.view.Projection()
-		log.Printf("durable: dp.Open latching identity from projection volume=%s replica=%s epoch=%d ev=%d (post-waitHealthy)",
-			proj.VolumeID, proj.ReplicaID, proj.Epoch, proj.EndpointVersion)
-		h.backend.SetIdentity(frontend.Identity{
-			VolumeID:        proj.VolumeID,
-			ReplicaID:       proj.ReplicaID,
-			Epoch:           proj.Epoch,
-			EndpointVersion: proj.EndpointVersion,
-		})
-		return h.backend, nil
+		return h, nil
+	}
+	openMu := p.opening[volumeID]
+	if openMu == nil {
+		openMu = &sync.Mutex{}
+		p.opening[volumeID] = openMu
+	}
+	p.mu.Unlock()
+
+	openMu.Lock()
+	defer openMu.Unlock()
+
+	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+		return nil, fmt.Errorf("durable: provider closed")
+	}
+	if h, ok := p.volumes[volumeID]; ok {
+		p.mu.Unlock()
+		return h, nil
 	}
 	p.mu.Unlock()
 
@@ -196,16 +225,18 @@ func (p *DurableProvider) Open(ctx context.Context, volumeID string) (frontend.B
 		return nil, err
 	}
 
-	// Check-then-insert: another goroutine may have raced us.
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if existing, ok := p.volumes[volumeID]; ok {
-		// Race: close the handle we just opened; return the winner.
+	if p.closed {
 		_ = h.storage.Close()
-		return existing.backend, nil
+		return nil, fmt.Errorf("durable: provider closed")
+	}
+	if existing, ok := p.volumes[volumeID]; ok {
+		_ = h.storage.Close()
+		return existing, nil
 	}
 	p.volumes[volumeID] = h
-	return h.backend, nil
+	return h, nil
 }
 
 // EnsureStorage opens (or creates) the on-disk LogicalStorage for
@@ -225,28 +256,10 @@ func (p *DurableProvider) Open(ctx context.Context, volumeID string) (frontend.B
 // The returned handle is borrowed — caller MUST NOT call Close on
 // it (BUG-005 discipline: Provider owns storage lifecycle).
 func (p *DurableProvider) EnsureStorage(volumeID string) (storage.LogicalStorage, error) {
-	p.mu.Lock()
-	if p.closed {
-		p.mu.Unlock()
-		return nil, fmt.Errorf("durable: provider closed")
-	}
-	if h, ok := p.volumes[volumeID]; ok {
-		p.mu.Unlock()
-		return h.storage, nil
-	}
-	p.mu.Unlock()
-
-	h, err := p.openOrCreate(volumeID)
+	h, err := p.ensureHandle(volumeID)
 	if err != nil {
 		return nil, err
 	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if existing, ok := p.volumes[volumeID]; ok {
-		_ = h.storage.Close()
-		return existing.storage, nil
-	}
-	p.volumes[volumeID] = h
 	return h.storage, nil
 }
 

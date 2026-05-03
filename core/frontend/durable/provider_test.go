@@ -9,6 +9,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend"
@@ -230,6 +231,44 @@ func TestT3b_DurableProvider_Open_Caches(t *testing.T) {
 			}
 			if b1 != b2 {
 				t.Errorf("Open returned different backends for same volumeID; cache broken")
+			}
+		})
+	}
+}
+
+func TestDurableProvider_EnsureStorage_ConcurrentSameVolumeReturnsSingleHandle(t *testing.T) {
+	for _, impl := range implMatrix() {
+		impl := impl
+		t.Run(string(impl), func(t *testing.T) {
+			p, _, _ := newProvider(t, impl)
+
+			const goroutines = 16
+			var wg sync.WaitGroup
+			wg.Add(goroutines)
+			storages := make([]any, goroutines)
+			errs := make([]error, goroutines)
+			for i := 0; i < goroutines; i++ {
+				i := i
+				go func() {
+					defer wg.Done()
+					storages[i], errs[i] = p.EnsureStorage("v1")
+				}()
+			}
+			wg.Wait()
+
+			for i, err := range errs {
+				if err != nil {
+					t.Fatalf("EnsureStorage[%d]: %v", i, err)
+				}
+			}
+			first := storages[0]
+			if first == nil {
+				t.Fatal("EnsureStorage[0] returned nil storage")
+			}
+			for i, got := range storages[1:] {
+				if got != first {
+					t.Fatalf("EnsureStorage[%d] returned different storage handle", i+1)
+				}
 			}
 		})
 	}
