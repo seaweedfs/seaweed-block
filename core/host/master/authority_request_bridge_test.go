@@ -45,6 +45,38 @@ func TestG9F2_VerifiedExistingReplicaProducesBindAsk(t *testing.T) {
 	}
 }
 
+func TestG15b_ProductLoop_RF2PlacementEmitsSingleDeterministicBind(t *testing.T) {
+	asks, err := assignmentRequestsFromVerifiedPlacement(lifecycle.VerifiedPlacement{
+		VolumeID: "v1",
+		Verified: true,
+		Slots: []lifecycle.VerifiedPlacementSlot{
+			{
+				ServerID:  "s1",
+				ReplicaID: "r1",
+				Source:    lifecycle.PlacementSourceExistingReplica,
+				DataAddr:  "127.0.0.1:19101",
+				CtrlAddr:  "127.0.0.1:19102",
+			},
+			{
+				ServerID:  "s2",
+				ReplicaID: "r2",
+				Source:    lifecycle.PlacementSourceExistingReplica,
+				DataAddr:  "127.0.0.1:19201",
+				CtrlAddr:  "127.0.0.1:19202",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("assignmentRequestsFromVerifiedPlacement: %v", err)
+	}
+	if len(asks) != 1 {
+		t.Fatalf("asks=%+v want exactly one frontend-primary bind", asks)
+	}
+	if got := asks[0].ReplicaID; got != "r1" {
+		t.Fatalf("replica=%q want first verified slot r1", got)
+	}
+}
+
 func TestG9F2_AssignmentRequestShapeHasNoEpochOrEndpointVersion(t *testing.T) {
 	typ := reflect.TypeOf(authority.AssignmentAsk{})
 	for _, forbidden := range []string{"Epoch", "EndpointVersion", "Assignment", "Ready", "Healthy", "Primary"} {

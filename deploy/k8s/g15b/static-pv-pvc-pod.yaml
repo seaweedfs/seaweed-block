@@ -1,0 +1,56 @@
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: sw-block-static-v1
+spec:
+  capacity:
+    storage: 1Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: sw-block-static
+  csi:
+    driver: block.csi.seaweedfs.com
+    volumeHandle: v1
+    fsType: ext4
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: sw-block-static-v1
+  namespace: default
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: sw-block-static
+  volumeName: sw-block-static-v1
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: sw-block-static-smoke
+  namespace: default
+spec:
+  restartPolicy: Never
+  containers:
+    - name: writer
+      image: busybox:1.36
+      command:
+        - /bin/sh
+        - -c
+        - |
+          set -eu
+          dd if=/dev/urandom of=/data/payload.bin bs=4096 count=1
+          sha256sum /data/payload.bin > /data/payload.sha256
+          sync
+          sha256sum -c /data/payload.sha256
+      volumeMounts:
+        - name: data
+          mountPath: /data
+  volumes:
+    - name: data
+      persistentVolumeClaim:
+        claimName: sw-block-static-v1

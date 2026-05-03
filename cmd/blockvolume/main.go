@@ -25,6 +25,7 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/host/volume"
 	"github.com/seaweedfs/seaweed-block/core/recovery"
 	"github.com/seaweedfs/seaweed-block/core/replication"
+	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 	"github.com/seaweedfs/seaweed-block/core/transport"
 )
@@ -737,6 +738,7 @@ func run(f flags) int {
 	// behavior).
 
 	var iscsiTarget *iscsi.Target
+	var frontendTargets []*control.FrontendTarget
 	if f.iscsiListen != "" {
 		prov := provider
 		iscsiTarget = iscsi.NewTarget(iscsi.TargetConfig{
@@ -766,6 +768,13 @@ func run(f flags) int {
 			IscsiAddr: iscsiAddr,
 			IQN:       f.iscsiIQN,
 		})
+		frontendTargets = append(frontendTargets, &control.FrontendTarget{
+			Protocol: "iscsi",
+			Addr:     iscsiAddr,
+			Iqn:      f.iscsiIQN,
+			Lun:      uint32(f.iscsiLUN),
+		})
+		h.SetFrontendTargets(frontendTargets)
 	}
 
 	var nvmeTarget *nvme.Target
@@ -806,6 +815,13 @@ func run(f flags) int {
 			NvmeAddr:  nvmeAddr,
 			SubsysNQN: f.nvmeSubsysNQN,
 		})
+		frontendTargets = append(frontendTargets, &control.FrontendTarget{
+			Protocol: "nvme",
+			Addr:     nvmeAddr,
+			Nqn:      f.nvmeSubsysNQN,
+			Nsid:     uint32(f.nvmeNS),
+		})
+		h.SetFrontendTargets(frontendTargets)
 	}
 
 	sig := make(chan os.Signal, 1)

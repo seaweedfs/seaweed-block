@@ -26,9 +26,9 @@ import (
 // rebuild hook so the host can re-synthesize reactively
 // (sketch §11).
 type ObservationStore struct {
-	config     FreshnessConfig
-	now        func() time.Time
-	startedAt  time.Time
+	config    FreshnessConfig
+	now       func() time.Time
+	startedAt time.Time
 
 	mu           sync.Mutex
 	observations map[string]Observation // key: ServerID
@@ -117,6 +117,7 @@ func (s *ObservationStore) SlotFact(volumeID, replicaID string) (SlotFact, bool)
 			}
 			if !found || obs.ObservedAt.After(bestObsAt) {
 				best = slot
+				best.Frontends = append([]FrontendTargetFact(nil), slot.Frontends...)
 				bestObsAt = obs.ObservedAt
 				found = true
 			}
@@ -228,13 +229,13 @@ func (s *ObservationStore) Ingest(obs Observation) error {
 // API boundary that keeps supportability logic off the
 // synthesized-output back-edge (sketch §12 one-way pipeline).
 type storeSnapshot struct {
-	observations     map[string]Observation
-	serverFreshness  map[string]ServerFreshness
-	revision         uint64
-	evaluatedAt      time.Time
-	startedAt        time.Time
-	pendingGrace     time.Duration
-	freshnessWindow  time.Duration
+	observations    map[string]Observation
+	serverFreshness map[string]ServerFreshness
+	revision        uint64
+	evaluatedAt     time.Time
+	startedAt       time.Time
+	pendingGrace    time.Duration
+	freshnessWindow time.Duration
 }
 
 // ServerFreshness is the derived freshness state of one ServerID

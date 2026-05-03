@@ -237,6 +237,7 @@ func (s *services) QueryVolumeStatus(ctx context.Context, req *control.StatusReq
 		resp.ReplicaId = line.ReplicaID
 		resp.Epoch = line.Epoch
 		resp.EndpointVersion = line.EndpointVersion
+		resp.Frontends = statusFrontendsForAssignedLine(s.host.obs, req.VolumeId, line.ReplicaID, line.Assigned)
 	}
 	if ev, ok := ctrl.LastUnsupported(req.VolumeId); ok {
 		resp.LastUnsupportedReason = ev.Reason
@@ -245,6 +246,16 @@ func (s *services) QueryVolumeStatus(ctx context.Context, req *control.StatusReq
 		resp.LastConvergenceStuckAt = ev.StuckAt.UTC().Format(time.RFC3339Nano)
 	}
 	return resp, nil
+}
+
+func statusFrontendsForAssignedLine(obs *authority.ObservationHost, volumeID, replicaID string, assigned bool) []*control.FrontendTarget {
+	if !assigned || obs == nil {
+		return nil
+	}
+	if slot, ok := obs.Store().SlotFact(volumeID, replicaID); ok {
+		return frontendTargetsToWire(slot.Frontends)
+	}
+	return nil
 }
 
 // validateHeartbeat rejects reports that are missing required
@@ -284,6 +295,26 @@ func validateHeartbeat(r *control.HeartbeatReport) error {
 		if s.DataAddr == "" || s.CtrlAddr == "" {
 			return fmt.Errorf("heartbeat: slot[%d] (%s/%s) missing DataAddr or CtrlAddr", i, s.VolumeId, s.ReplicaId)
 		}
+		for j, ft := range s.Frontends {
+			if ft == nil {
+				return fmt.Errorf("heartbeat: slot[%d].frontends[%d] is nil", i, j)
+			}
+			if ft.Protocol == "" || ft.Addr == "" {
+				return fmt.Errorf("heartbeat: slot[%d].frontends[%d] missing protocol or addr", i, j)
+			}
+			switch ft.Protocol {
+			case "iscsi":
+				if ft.Iqn == "" {
+					return fmt.Errorf("heartbeat: slot[%d].frontends[%d] iscsi missing iqn", i, j)
+				}
+			case "nvme":
+				if ft.Nqn == "" {
+					return fmt.Errorf("heartbeat: slot[%d].frontends[%d] nvme missing nqn", i, j)
+				}
+			default:
+				return fmt.Errorf("heartbeat: slot[%d].frontends[%d] unsupported protocol %q", i, j, ft.Protocol)
+			}
+		}
 	}
 	return nil
 }
@@ -318,19 +349,19 @@ func generationFitsUint32(epoch, endpointVersion uint64) (reason string, ok bool
 // Per-slot resolution (G5-5A architect ratification 2026-04-27,
 // refined at round-54 review):
 //
-//   1. AUTHORITY path: for slots whose authority is published (the
-//      bound replica + any historically-bound replicas with retained
-//      records), pull DataAddr/CtrlAddr from `LastPublished` (this
-//      is the freshest authoritative addr — refreshed via
-//      IntentRefreshEndpoint).
+//  1. AUTHORITY path: for slots whose authority is published (the
+//     bound replica + any historically-bound replicas with retained
+//     records), pull DataAddr/CtrlAddr from `LastPublished` (this
+//     is the freshest authoritative addr — refreshed via
+//     IntentRefreshEndpoint).
 //
-//   2. OBSERVATION path: for slots that ARE declared in topology
-//      but have NO published authority line (the common case for
-//      supporting replicas — Publisher.apply only mints for the
-//      bound replica), pull DataAddr/CtrlAddr from the observation
-//      store's freshest non-expired heartbeat. pub.state stays
-//      authority-only — architect option (B) "mint presence
-//      records" REJECTED.
+//  2. OBSERVATION path: for slots that ARE declared in topology
+//     but have NO published authority line (the common case for
+//     supporting replicas — Publisher.apply only mints for the
+//     bound replica), pull DataAddr/CtrlAddr from the observation
+//     store's freshest non-expired heartbeat. pub.state stays
+//     authority-only — architect option (B) "mint presence
+//     records" REJECTED.
 //
 // Both paths stamp peer.Epoch / peer.EndpointVersion with the
 // SUBSCRIBING PRIMARY's lineage, NOT the peer's own. Rationale:
@@ -454,6 +485,7 @@ func heartbeatFromWire(r *control.HeartbeatReport) authority.HeartbeatMessage {
 			ReplicaID:       s.ReplicaId,
 			DataAddr:        s.DataAddr,
 			CtrlAddr:        s.CtrlAddr,
+			Frontends:       frontendTargetsFromWire(s.Frontends),
 			Reachable:       s.Reachable,
 			ReadyForPrimary: s.ReadyForPrimary,
 			Eligible:        s.Eligible,
@@ -471,3 +503,41 @@ func heartbeatFromWire(r *control.HeartbeatReport) authority.HeartbeatMessage {
 	}
 }
 
+func frontendTargetsFromWire(in []*control.FrontendTarget) []authority.FrontendTargetFact {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]authority.FrontendTargetFact, 0, len(in))
+	for _, ft := range in {
+		if ft == nil {
+			continue
+		}
+		out = append(out, authority.FrontendTargetFact{
+			Protocol: ft.Protocol,
+			Addr:     ft.Addr,
+			IQN:      ft.Iqn,
+			NQN:      ft.Nqn,
+			LUN:      ft.Lun,
+			NSID:     ft.Nsid,
+		})
+	}
+	return out
+}
+
+func frontendTargetsToWire(in []authority.FrontendTargetFact) []*control.FrontendTarget {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]*control.FrontendTarget, 0, len(in))
+	for _, ft := range in {
+		out = append(out, &control.FrontendTarget{
+			Protocol: ft.Protocol,
+			Addr:     ft.Addr,
+			Iqn:      ft.IQN,
+			Nqn:      ft.NQN,
+			Lun:      ft.LUN,
+			Nsid:     ft.NSID,
+		})
+	}
+	return out
+}
