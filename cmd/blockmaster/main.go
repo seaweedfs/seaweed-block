@@ -23,6 +23,7 @@ type flags struct {
 	authorityStore         string
 	lifecycleStore         string
 	lifecyclePlacementSeed string
+	clusterSpec            string
 	listen                 string
 	topology               string
 	expectedSlotsPerVol    int
@@ -42,6 +43,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.StringVar(&f.authorityStore, "authority-store", "", "durable authority store directory (required)")
 	fs.StringVar(&f.lifecycleStore, "lifecycle-store", "", "optional G9D product lifecycle registration store directory (desired volumes, node inventory, placement intents); read-only with respect to assignment publication")
 	fs.StringVar(&f.lifecyclePlacementSeed, "lifecycle-placement-seed", "", "optional G9G seed JSON file containing placement intents to import into --lifecycle-store before the product loop starts")
+	fs.StringVar(&f.clusterSpec, "cluster-spec", "", "optional G9G-3 cluster spec YAML facade; imports accepted topology and lifecycle placement intent")
 	fs.StringVar(&f.listen, "listen", "127.0.0.1:0", "gRPC listen address (e.g. 127.0.0.1:9180)")
 	fs.StringVar(&f.topology, "topology", "", "path to accepted-topology YAML (required for assignment to mint)")
 	fs.IntVar(&f.expectedSlotsPerVol, "expected-slots-per-volume", 3, "RF/expected slot count per volume; the controller rejects observation snapshots whose slot count differs (default 3, set to 2 for 2-node smoke clusters)")
@@ -75,7 +77,7 @@ type readyLine struct {
 }
 
 func run(f flags) int {
-	topo, err := loadTopology(f.topology)
+	topo, clusterImport, err := loadProductInputs(f)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "blockmaster:", err)
 		return 2
@@ -99,6 +101,13 @@ func run(f flags) int {
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "blockmaster:", err)
 		return 1
+	}
+	if len(clusterImport.Placements) > 0 {
+		if err := importLifecyclePlacementIntents(h, clusterImport.Placements); err != nil {
+			fmt.Fprintln(os.Stderr, "blockmaster:", err)
+			_ = h.Close(context.Background())
+			return 1
+		}
 	}
 	if f.lifecyclePlacementSeed != "" {
 		if err := importLifecyclePlacementSeed(h, f.lifecyclePlacementSeed); err != nil {
@@ -134,6 +143,25 @@ func run(f flags) int {
 	return 0
 }
 
+func loadProductInputs(f flags) (authority.AcceptedTopology, clusterSpecImport, error) {
+	if f.clusterSpec == "" {
+		topo, err := loadTopology(f.topology)
+		return topo, clusterSpecImport{}, err
+	}
+	if f.topology != "" {
+		return authority.AcceptedTopology{}, clusterSpecImport{}, fmt.Errorf("--cluster-spec and --topology are mutually exclusive in this slice")
+	}
+	imports, err := loadClusterSpec(f.clusterSpec)
+	if err != nil {
+		return authority.AcceptedTopology{}, clusterSpecImport{}, err
+	}
+	topo, err := toAcceptedTopology(&imports.Topology)
+	if err != nil {
+		return authority.AcceptedTopology{}, clusterSpecImport{}, err
+	}
+	return topo, imports, nil
+}
+
 func importLifecyclePlacementSeed(h *master.Host, path string) error {
 	stores := h.Lifecycle()
 	if stores == nil {
@@ -146,6 +174,14 @@ func importLifecyclePlacementSeed(h *master.Host, path string) error {
 	var intents []lifecycle.PlacementIntent
 	if err := json.Unmarshal(raw, &intents); err != nil {
 		return fmt.Errorf("parse lifecycle placement seed %q: %w", path, err)
+	}
+	return importLifecyclePlacementIntents(h, intents)
+}
+
+func importLifecyclePlacementIntents(h *master.Host, intents []lifecycle.PlacementIntent) error {
+	stores := h.Lifecycle()
+	if stores == nil {
+		return fmt.Errorf("lifecycle placement import requires --lifecycle-store")
 	}
 	for _, intent := range intents {
 		plan := lifecycle.PlacementPlan{
