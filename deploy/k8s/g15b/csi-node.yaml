@@ -15,6 +15,19 @@ spec:
       serviceAccountName: sw-block-csi
       hostNetwork: true
       hostPID: true
+      initContainers:
+        - name: load-iscsi-tcp
+          image: sw-block-csi:local
+          imagePullPolicy: Never
+          command: ["/bin/sh", "-c"]
+          args:
+            - "modprobe iscsi_tcp || true"
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - name: modules-dir
+              mountPath: /lib/modules
+              readOnly: true
       containers:
         - name: block-csi
           image: sw-block-csi:local
@@ -66,6 +79,10 @@ spec:
           hostPath:
             path: /etc/iscsi
             type: DirectoryOrCreate
+        - name: modules-dir
+          hostPath:
+            path: /lib/modules
+            type: Directory
         - name: registration-dir
           hostPath:
             path: /var/lib/kubelet/plugins_registry

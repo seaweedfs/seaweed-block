@@ -11,6 +11,7 @@ FROM debian:bookworm-slim
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
       e2fsprogs \
+      kmod \
       open-iscsi \
       util-linux && \
     rm -rf /var/lib/apt/lists/*

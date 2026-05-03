@@ -65,6 +65,43 @@ func TestG15b_Manifest_ProductStackSingleNodeLoopbackShape(t *testing.T) {
 	}
 }
 
+func TestG15b_Manifest_AttachableReplicaIsFirstPlacementSlot(t *testing.T) {
+	cfg := g15bFindKind(t, "block-stack.yaml", "ConfigMap")
+	data := g15bMap(t, cfg, "data")
+	clusterSpec, ok := data["cluster-spec.yaml"].(string)
+	if !ok {
+		t.Fatalf("cluster-spec.yaml has type %T, want string", data["cluster-spec.yaml"])
+	}
+	var spec struct {
+		Volumes []struct {
+			ID         string `yaml:"id"`
+			Placements []struct {
+				ServerID  string `yaml:"server_id"`
+				ReplicaID string `yaml:"replica_id"`
+			} `yaml:"placements"`
+		} `yaml:"volumes"`
+	}
+	if err := yaml.Unmarshal([]byte(clusterSpec), &spec); err != nil {
+		t.Fatalf("decode cluster spec: %v", err)
+	}
+	if len(spec.Volumes) != 1 || len(spec.Volumes[0].Placements) < 2 {
+		t.Fatalf("cluster spec shape=%+v", spec)
+	}
+	first := spec.Volumes[0].Placements[0]
+	if first.ServerID != "s1" || first.ReplicaID != "r1" {
+		t.Fatalf("first placement=%+v want attachable r1/s1", first)
+	}
+
+	r1 := g15bReadDeploymentArgs(t, "sw-blockvolume-r1")
+	r2 := g15bReadDeploymentArgs(t, "sw-blockvolume-r2")
+	if !g15bArgsContain(r1, "--iscsi-listen=127.0.0.1:3260") {
+		t.Fatalf("r1 must expose the G15b static attach iSCSI target")
+	}
+	if g15bArgsContainPrefix(r2, "--iscsi-listen=") {
+		t.Fatalf("r2 must not expose a competing static iSCSI target in G15b")
+	}
+}
+
 func TestG15b_Manifest_StaticPVDoesNotEmbedTargetFacts(t *testing.T) {
 	body := g15bReadManifest(t, "static-pv-pvc-pod.yaml")
 	for _, forbidden := range []string{"iscsiAddr", "iqn", "nqn", "endpointVersion", "epoch"} {
@@ -113,6 +150,35 @@ func TestG15b_Manifest_NodePluginPrivilegedShape(t *testing.T) {
 	}
 }
 
+func TestG15b_Manifest_NodePluginLoadsISCSITCPModule(t *testing.T) {
+	doc := g15bFindKind(t, "csi-node.yaml", "DaemonSet")
+	podSpec := g15bMap(t, g15bMap(t, g15bMap(t, doc, "spec"), "template"), "spec")
+	initContainers := g15bSlice(t, podSpec, "initContainers")
+	loader := g15bContainer(t, initContainers, "load-iscsi-tcp")
+	if got := strings.Join(g15bStringSlice(t, loader, "args"), " "); !strings.Contains(got, "modprobe iscsi_tcp") {
+		t.Fatalf("load-iscsi-tcp args=%q, want modprobe iscsi_tcp", got)
+	}
+	sec := g15bMap(t, loader, "securityContext")
+	if got, ok := sec["privileged"].(bool); !ok || !got {
+		t.Fatalf("load-iscsi-tcp privileged=%v, want true", sec["privileged"])
+	}
+
+	mounts := g15bSlice(t, loader, "volumeMounts")
+	foundModules := false
+	for _, raw := range mounts {
+		m := raw.(map[string]any)
+		if m["mountPath"] == "/lib/modules" {
+			foundModules = true
+			if got, ok := m["readOnly"].(bool); !ok || !got {
+				t.Fatalf("/lib/modules readOnly=%v, want true", m["readOnly"])
+			}
+		}
+	}
+	if !foundModules {
+		t.Fatalf("load-iscsi-tcp missing /lib/modules host mount")
+	}
+}
+
 func TestG15b_Manifest_StaticPVUsesBlockCSIDriver(t *testing.T) {
 	doc := g15bFindKind(t, "static-pv-pvc-pod.yaml", "PersistentVolume")
 	spec := g15bMap(t, doc, "spec")
@@ -145,7 +211,7 @@ func TestG15b_ImageBuildInputs_ContainExpectedBinariesAndNodeTools(t *testing.T)
 	}
 
 	csi := g15bReadDeployFile(t, "Dockerfile.blockcsi")
-	for _, want := range []string{"./cmd/blockcsi", "open-iscsi", "e2fsprogs", "util-linux", "/usr/local/bin/blockcsi"} {
+	for _, want := range []string{"./cmd/blockcsi", "open-iscsi", "e2fsprogs", "kmod", "util-linux", "/usr/local/bin/blockcsi"} {
 		if !strings.Contains(csi, want) {
 			t.Fatalf("Dockerfile.blockcsi missing %q", want)
 		}
@@ -294,6 +360,20 @@ func g15bSlice(t *testing.T, m map[string]any, key string) []any {
 	return out
 }
 
+func g15bStringSlice(t *testing.T, m map[string]any, key string) []string {
+	t.Helper()
+	raw := g15bSlice(t, m, key)
+	out := make([]string, 0, len(raw))
+	for _, v := range raw {
+		s, ok := v.(string)
+		if !ok {
+			t.Fatalf("key %q item has type %T, want string", key, v)
+		}
+		out = append(out, s)
+	}
+	return out
+}
+
 func g15bContainer(t *testing.T, containers []any, name string) map[string]any {
 	t.Helper()
 	for _, raw := range containers {
@@ -307,6 +387,42 @@ func g15bContainer(t *testing.T, containers []any, name string) map[string]any {
 	}
 	t.Fatalf("container %q not found", name)
 	return nil
+}
+
+func g15bReadDeploymentArgs(t *testing.T, deployName string) []string {
+	t.Helper()
+	deploy := g15bFindDeployment(t, "block-stack.yaml", deployName)
+	spec := g15bMap(t, g15bMap(t, g15bMap(t, deploy, "spec"), "template"), "spec")
+	containers := g15bSlice(t, spec, "containers")
+	blockVolume := g15bContainer(t, containers, "blockvolume")
+	raw := g15bSlice(t, blockVolume, "args")
+	out := make([]string, 0, len(raw))
+	for _, v := range raw {
+		s, ok := v.(string)
+		if !ok {
+			t.Fatalf("%s arg has type %T, want string", deployName, v)
+		}
+		out = append(out, s)
+	}
+	return out
+}
+
+func g15bArgsContain(args []string, want string) bool {
+	for _, arg := range args {
+		if arg == want {
+			return true
+		}
+	}
+	return false
+}
+
+func g15bArgsContainPrefix(args []string, prefix string) bool {
+	for _, arg := range args {
+		if strings.HasPrefix(arg, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func g15bStripYAMLComments(body string) string {
