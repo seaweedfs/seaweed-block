@@ -7,8 +7,6 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
-
-	"github.com/seaweedfs/seaweed-block/core/lifecycle"
 )
 
 func TestG9G_L2ProductLoopPublishesAssignmentToBlockvolume(t *testing.T) {
@@ -18,9 +16,9 @@ func TestG9G_L2ProductLoopPublishesAssignmentToBlockvolume(t *testing.T) {
 	bins := buildG54Binaries(t)
 	art := t.TempDir()
 	lifecycleDir := filepath.Join(art, "lifecycle")
-	seedPath := writeG9GPlacementSeed(t, art)
+	specPath := writeG9GClusterSpec(t, art)
 
-	_, masterAddr := startG9GMaster(t, bins, art, lifecycleDir, seedPath)
+	_, masterAddr := startG9GMaster(t, bins, art, lifecycleDir, specPath)
 
 	r2Data, r2Status := pickAddr(t), pickAddr(t)
 	r2Ctrl := pickAddr(t)
@@ -47,32 +45,29 @@ func TestG9G_L2ProductLoopPublishesAssignmentToBlockvolume(t *testing.T) {
 	}
 }
 
-func writeG9GPlacementSeed(t *testing.T, art string) string {
+func writeG9GClusterSpec(t *testing.T, art string) string {
 	t.Helper()
-	seedPath := filepath.Join(art, "g9g-placement-seed.json")
-	raw, err := json.MarshalIndent([]lifecycle.PlacementIntent{{
-		VolumeID:  "v1",
-		DesiredRF: 1,
-		Slots: []lifecycle.PlacementSlotIntent{{
-			ServerID:  "s2",
-			ReplicaID: "r2",
-			Source:    lifecycle.PlacementSourceExistingReplica,
-		}},
-	}}, "", "  ")
-	if err != nil {
-		t.Fatalf("marshal seed: %v", err)
+	specPath := filepath.Join(art, "m01.yaml")
+	raw := []byte(`
+volumes:
+  - id: v1
+    size_bytes: 1048576
+    replication_factor: 1
+    placements:
+      - server_id: s2
+        replica_id: r2
+        source: existing_replica
+`)
+	if err := os.WriteFile(specPath, raw, 0o644); err != nil {
+		t.Fatalf("write cluster spec: %v", err)
 	}
-	if err := os.WriteFile(seedPath, raw, 0o644); err != nil {
-		t.Fatalf("write seed: %v", err)
-	}
-	return seedPath
+	return specPath
 }
 
-func startG9GMaster(t *testing.T, bins l2bins, art, lifecycleDir, seedPath string) (*proc, string) {
+func startG9GMaster(t *testing.T, bins l2bins, art, lifecycleDir, specPath string) (*proc, string) {
 	t.Helper()
 	storeDir := filepath.Join(art, "master-store")
 	_ = os.MkdirAll(storeDir, 0o755)
-	topo := write2SlotTopology(t, art)
 	logPath := filepath.Join(art, "master-g9g.log")
 	lf, err := os.Create(logPath)
 	if err != nil {
@@ -81,10 +76,9 @@ func startG9GMaster(t *testing.T, bins l2bins, art, lifecycleDir, seedPath strin
 	cmd := exec.Command(bins.master,
 		"--authority-store", storeDir,
 		"--lifecycle-store", lifecycleDir,
-		"--lifecycle-placement-seed", seedPath,
+		"--cluster-spec", specPath,
 		"--lifecycle-product-loop-interval", "100ms",
 		"--listen", "127.0.0.1:0",
-		"--topology", topo,
 		"--expected-slots-per-volume", "2",
 		"--freshness-window", "800ms",
 		"--pending-grace", "100ms",
