@@ -101,6 +101,41 @@ func TestG9A_StatusProjection_ReturnedOldPrimarySupersededNotReady(t *testing.T)
 	}
 }
 
+func TestG9A_StatusProjection_EngineRecoveringMapsReplicationRole(t *testing.T) {
+	p := stubProjector{p: engine.ReplicaProjection{
+		Mode:             engine.ModeRecovering,
+		RecoveryDecision: engine.DecisionCatchUp,
+		SessionKind:      engine.SessionCatchUp,
+		SessionPhase:     engine.PhaseRunning,
+		Epoch:            3,
+		EndpointVersion:  2,
+	}}
+	s := NewStatusServer(NewAdapterProjectionView(p, "v1", "r1", nil))
+	addr, err := s.Start("127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer func() { _ = s.Close(context.Background()) }()
+	resp, err := http.Get("http://" + addr + "/status?volume=v1")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("status: got %d want 200", resp.StatusCode)
+	}
+	var body StatusProjection
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Healthy || body.FrontendPrimaryReady {
+		t.Fatalf("recovering replica must not be frontend-primary-ready: %+v", body)
+	}
+	if body.ReplicationRole != ReplicationRoleRecovering {
+		t.Fatalf("replication role = %q want %q", body.ReplicationRole, ReplicationRoleRecovering)
+	}
+}
+
 func TestStatusServer_MissingVolume_Returns400(t *testing.T) {
 	s := NewStatusServer(NewAdapterProjectionView(stubProjector{}, "v1", "r1", nil))
 	addr, err := s.Start("127.0.0.1:0")

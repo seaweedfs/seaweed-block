@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/seaweedfs/seaweed-block/core/engine"
 	"github.com/seaweedfs/seaweed-block/core/frontend"
 )
 
@@ -53,9 +54,10 @@ const (
 	AuthorityRoleSuperseded = "superseded"
 	AuthorityRoleUnknown    = "unknown"
 
-	ReplicationRoleNone     = "none"
-	ReplicationRoleNotReady = "not_ready"
-	ReplicationRoleUnknown  = "unknown"
+	ReplicationRoleNone       = "none"
+	ReplicationRoleRecovering = "recovering"
+	ReplicationRoleNotReady   = "not_ready"
+	ReplicationRoleUnknown    = "unknown"
 )
 
 // StatusProjection is the append-only /status shape. It embeds the
@@ -167,6 +169,7 @@ func (s *StatusServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 
 func (s *StatusServer) statusProjection() StatusProjection {
 	p, superseded := s.view.projectionWithSupersede()
+	ep := s.view.EngineProjection()
 	authorityRole := AuthorityRoleUnknown
 	replicationRole := ReplicationRoleUnknown
 	switch {
@@ -176,6 +179,8 @@ func (s *StatusServer) statusProjection() StatusProjection {
 	case superseded:
 		authorityRole = AuthorityRoleSuperseded
 		replicationRole = ReplicationRoleNotReady
+	case ep.Mode == engine.ModeRecovering:
+		replicationRole = ReplicationRoleRecovering
 	}
 	return StatusProjection{
 		Projection:           p,
