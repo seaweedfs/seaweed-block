@@ -59,6 +59,19 @@ collect_daemon_logs() {
   kubectl -n kube-system exec deploy/sw-blockmaster -c blockmaster -- sh -c 'cat /manifests/*.yaml' >"$ARTIFACT_DIR/generated-blockvolume.yaml" 2>"$ARTIFACT_DIR/generated-blockvolume.err" || true
 }
 
+collect_post_delete_state() {
+  set +e
+  kubectl -n kube-system get pods,deploy -o wide >"$ARTIFACT_DIR/kube-system-pods-deploys.after-delete.txt" 2>&1 || true
+  kubectl -n "$NAMESPACE" get sc,pv,pvc,pod -o wide >"$ARTIFACT_DIR/app-storage.after-delete.txt" 2>&1 || true
+  if command -v sudo >/dev/null 2>&1; then
+    sudo iscsiadm -m session >"$ARTIFACT_DIR/iscsi-sessions.after-delete.txt" 2>&1 || true
+  elif command -v iscsiadm >/dev/null 2>&1; then
+    iscsiadm -m session >"$ARTIFACT_DIR/iscsi-sessions.after-delete.txt" 2>&1 || true
+  else
+    echo "iscsiadm unavailable" >"$ARTIFACT_DIR/iscsi-sessions.after-delete.txt"
+  fi
+}
+
 cleanup
 trap 'collect_daemon_logs; cleanup' EXIT
 
@@ -115,5 +128,41 @@ fi
 
 collect_daemon_logs
 
-log "PASS: dynamic PVC pod completed checksum write/read"
+log "dynamic PVC pod completed checksum write/read"
+
+log "delete dynamic pod and PVC"
+kubectl -n "$NAMESPACE" delete pod sw-block-dynamic-smoke --wait=true --timeout=120s | tee "$ARTIFACT_DIR/delete-pod.log"
+kubectl -n "$NAMESPACE" delete pvc sw-block-dynamic-v1 --wait=true --timeout=120s | tee "$ARTIFACT_DIR/delete-pvc.log"
+
+log "wait for launcher manifest cleanup after DeleteVolume"
+for _ in $(seq 1 180); do
+  if kubectl -n kube-system exec deploy/sw-blockmaster -c blockmaster -- sh -c '! ls /manifests/*.yaml >/dev/null 2>&1'; then
+    break
+  fi
+  sleep 1
+done
+if ! kubectl -n kube-system exec deploy/sw-blockmaster -c blockmaster -- sh -c '! ls /manifests/*.yaml >/dev/null 2>&1'; then
+  echo "launcher manifest still present after PVC delete" >&2
+  exit 1
+fi
+
+log "delete generated blockvolume Deployment after manifest cleanup"
+kubectl -n kube-system delete deploy -l app=sw-blockvolume --ignore-not-found=true --wait=true --timeout=120s | tee "$ARTIFACT_DIR/delete-generated-blockvolume.log"
+
+collect_post_delete_state
+
+if kubectl -n kube-system get deploy -l app=sw-blockvolume --no-headers 2>/dev/null | grep -q .; then
+  echo "generated blockvolume deployment still present" >&2
+  exit 1
+fi
+if kubectl -n "$NAMESPACE" get pvc sw-block-dynamic-v1 >/dev/null 2>&1; then
+  echo "dynamic PVC still present" >&2
+  exit 1
+fi
+if grep -q 'iqn.2026-05.io.seaweedfs' "$ARTIFACT_DIR/iscsi-sessions.after-delete.txt" 2>/dev/null; then
+  echo "dangling sw-block iSCSI session after delete" >&2
+  exit 1
+fi
+
+log "PASS: dynamic PVC create/delete completed checksum write/read and cleanup"
 log "artifacts=$ARTIFACT_DIR"
