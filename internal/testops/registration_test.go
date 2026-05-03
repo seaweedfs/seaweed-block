@@ -23,7 +23,7 @@ func TestDecodeRegistrationRejectsAuthorityShapedDriver(t *testing.T) {
 
 func TestG15bManifestRegistrationRunsGoTestAndWritesArtifacts(t *testing.T) {
 	repoRoot := findRepoRoot(t)
-	raw, err := os.Open(filepath.Join(repoRoot, "testops", "registry", "g15b-manifest.json"))
+	raw, err := os.Open(registrationPath(repoRoot, "g15b-manifest.json"))
 	if err != nil {
 		t.Fatalf("open registration: %v", err)
 	}
@@ -65,7 +65,7 @@ func TestG15bManifestRegistrationRunsGoTestAndWritesArtifacts(t *testing.T) {
 
 func TestG15bK8sStaticRegistrationBuildsShellDriver(t *testing.T) {
 	repoRoot := findRepoRoot(t)
-	raw, err := os.Open(filepath.Join(repoRoot, "testops", "registry", "g15b-k8s-static.json"))
+	raw, err := os.Open(registrationPath(repoRoot, "g15b-k8s-static.json"))
 	if err != nil {
 		t.Fatalf("open registration: %v", err)
 	}
@@ -99,7 +99,7 @@ func TestG15bK8sStaticRegistrationBuildsShellDriver(t *testing.T) {
 
 func TestG15dK8sDynamicRegistrationBuildsShellDriver(t *testing.T) {
 	repoRoot := findRepoRoot(t)
-	raw, err := os.Open(filepath.Join(repoRoot, "testops", "registry", "g15d-k8s-dynamic.json"))
+	raw, err := os.Open(registrationPath(repoRoot, "g15d-k8s-dynamic.json"))
 	if err != nil {
 		t.Fatalf("open registration: %v", err)
 	}
@@ -138,7 +138,7 @@ func TestG15dK8sDynamicRegistrationBuildsShellDriver(t *testing.T) {
 
 func TestG15eK8sDynamicCleanupRegistrationBuildsShellDriver(t *testing.T) {
 	repoRoot := findRepoRoot(t)
-	raw, err := os.Open(filepath.Join(repoRoot, "testops", "registry", "g15e-k8s-dynamic-cleanup.json"))
+	raw, err := os.Open(registrationPath(repoRoot, "g15e-k8s-dynamic-cleanup.json"))
 	if err != nil {
 		t.Fatalf("open registration: %v", err)
 	}
@@ -179,6 +179,10 @@ func containsString(values []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func registrationPath(repoRoot, name string) string {
+	return filepath.Join(repoRoot, "internal", "testops", "registry", name)
 }
 
 func findRepoRoot(t *testing.T) string {

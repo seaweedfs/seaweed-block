@@ -34,7 +34,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("sw-testops", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	fs.StringVar(&opts.repoRoot, "repo-root", ".", "seaweed_block repository root")
-	fs.StringVar(&opts.registryDir, "registry-dir", "testops/registry", "scenario registry directory")
+	fs.StringVar(&opts.registryDir, "registry-dir", "internal/testops/registry", "scenario registry directory")
 	fs.StringVar(&opts.scenario, "scenario", "", "scenario name to run")
 	fs.StringVar(&opts.artifactDir, "artifact-dir", "", "artifact output directory")
 	fs.StringVar(&opts.runID, "run-id", "", "stable run id")

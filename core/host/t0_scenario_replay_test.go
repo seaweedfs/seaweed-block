@@ -1,6 +1,6 @@
 package host_test
 
-// D4 — Go-native replay of testrunner/scenarios/t0-hosting-smoke.yaml.
+// D4 — Go-native replay of internal/legacy/testrunner/scenarios/t0-hosting-smoke.yaml.
 //
 // Final testrunner integration is deferred to Final Gate; this
 // test executes the scenario's phases in-process against the real
@@ -20,7 +20,7 @@ import (
 )
 
 // TestT0Scenario_HostingSmoke_Replay walks the four phases of
-// testrunner/scenarios/t0-hosting-smoke.yaml:
+// internal/legacy/testrunner/scenarios/t0-hosting-smoke.yaml:
 //   setup            — master + 3 volumes
 //   initial_assignment — baseline authority tuple
 //   kill_restart_cycles — 20× master SIGKILL + restart, tuple stable

@@ -3,7 +3,7 @@
 // Publishes first-light numbers for both LogicalStorage impls so
 // later changes have a comparison point. No threshold / no
 // pass-fail. Matches the workload shape pinned in
-// testrunner/perf/t3c-durable-baseline.md.
+// internal/legacy/testrunner/perf/t3c-durable-baseline.md.
 //
 // Run (matrix walks both impls):
 //   go test -run '^$' -bench 'BenchmarkT3c_DurablePerf' \
@@ -79,7 +79,7 @@ func BenchmarkT3c_DurablePerf(b *testing.B) {
 			// fills its WAL faster than the flusher drains and
 			// admission control errors. Benchmark measures write
 			// + periodic-sync cost, not burst throughput; documented
-			// in testrunner/perf/t3c-durable-baseline.md.
+			// in internal/legacy/testrunner/perf/t3c-durable-baseline.md.
 			const syncBatch = 64
 			for i := 0; i < b.N; i++ {
 				lba := rng.Int31n(int32(numBlocks))

@@ -1,4 +1,4 @@
-# `testrunner/` Overview
+# `internal/legacy/testrunner` Overview
 
 This directory contains older scenario/performance assets and compatibility
 material for the broader test-runner effort.
@@ -13,7 +13,7 @@ material for the broader test-runner effort.
 ## Relationship To TestOps
 
 `cmd/sw-testops` and `internal/testops` are the current lightweight scenario
-runner in this repository. The older testrunner assets are useful references,
+runner in this repository. These older testrunner assets are useful references,
 but should not force V2-style control semantics into the V3 code.
 
 ## Design Rules
@@ -22,4 +22,3 @@ but should not force V2-style control semantics into the V3 code.
 - Do not port old authority, promotion, or recovery assumptions blindly.
 - Prefer small registered scenarios with explicit artifacts over large opaque
   harnesses.
-

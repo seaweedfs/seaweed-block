@@ -229,8 +229,8 @@ core/
 
 deploy/k8s/alpha/ alpha Kubernetes manifests and manual guide
 docs/              architecture and roadmap notes
+internal/          non-public support libraries and test scenario registry
 scripts/           build and smoke-test helpers
-testops/           scenario registry
 ```
 
 ## Development Tests

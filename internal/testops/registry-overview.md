@@ -1,13 +1,12 @@
-# `testops/` Overview
+# `internal/testops/registry` Overview
 
-This directory contains scenario registry data and run outputs for TestOps.
+This directory contains scenario registry data for TestOps.
 
 ## Layout
 
 | Directory | Purpose |
 |---|---|
-| `registry/` | JSON scenario registrations consumed by `cmd/sw-testops`. |
-| `runs/` | Local run output directory. Generated results should not be treated as source unless explicitly checked in. |
+| `*.json` | Scenario registrations consumed by `cmd/sw-testops`. |
 
 ## Registry Contract
 
@@ -26,4 +25,3 @@ Each scenario should identify:
   they are useful as intentional red tests.
 - A scenario result should distinguish infrastructure error from product test
   failure.
-
