@@ -1,0 +1,20 @@
+FROM golang:1.25-bookworm AS build
+
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 go build -o /out/blockcsi ./cmd/blockcsi
+
+FROM debian:bookworm-slim
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+      e2fsprogs \
+      open-iscsi \
+      util-linux && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY --from=build /out/blockcsi /usr/local/bin/blockcsi
+
+ENTRYPOINT ["/usr/local/bin/blockcsi"]

@@ -125,9 +125,47 @@ func TestG15b_Manifest_NoAuthorityShapedFields(t *testing.T) {
 	}
 }
 
+func TestG15b_ImageBuildInputs_ContainExpectedBinariesAndNodeTools(t *testing.T) {
+	swBlock := g15bReadDeployFile(t, "Dockerfile.sw-block")
+	for _, want := range []string{"./cmd/blockmaster", "./cmd/blockvolume", "/usr/local/bin/blockmaster", "/usr/local/bin/blockvolume"} {
+		if !strings.Contains(swBlock, want) {
+			t.Fatalf("Dockerfile.sw-block missing %q", want)
+		}
+	}
+
+	csi := g15bReadDeployFile(t, "Dockerfile.blockcsi")
+	for _, want := range []string{"./cmd/blockcsi", "open-iscsi", "e2fsprogs", "util-linux", "/usr/local/bin/blockcsi"} {
+		if !strings.Contains(csi, want) {
+			t.Fatalf("Dockerfile.blockcsi missing %q", want)
+		}
+	}
+
+	buildScript := g15bReadScript(t, "build-g15b-images.sh")
+	for _, want := range []string{"Dockerfile.sw-block", "Dockerfile.blockcsi", "sw-block:local", "sw-block-csi:local"} {
+		if !strings.Contains(buildScript, want) {
+			t.Fatalf("build-g15b-images.sh missing %q", want)
+		}
+	}
+}
+
 func g15bReadManifest(t *testing.T, name string) string {
 	t.Helper()
+	return g15bReadDeployFile(t, name)
+}
+
+func g15bReadDeployFile(t *testing.T, name string) string {
+	t.Helper()
 	path := filepath.Join(g15bRepoRoot(t), "deploy", "k8s", "g15b", name)
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	return string(b)
+}
+
+func g15bReadScript(t *testing.T, name string) string {
+	t.Helper()
+	path := filepath.Join(g15bRepoRoot(t), "scripts", name)
 	b, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read %s: %v", path, err)
