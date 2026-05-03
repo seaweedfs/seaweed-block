@@ -127,6 +127,20 @@ Important non-claims:
 Use a Linux Kubernetes node where privileged CSI pods are allowed and
 `iscsi_tcp` is loadable.
 
+Quick Start prerequisites:
+
+- Docker
+- `kubectl`
+- a running Kubernetes cluster such as k3s
+- `iscsi_tcp` loadable on the node
+- `KUBECONFIG` set for your cluster
+
+For a default k3s install:
+
+```bash
+export KUBECONFIG="${KUBECONFIG:-/etc/rancher/k3s/k3s.yaml}"
+```
+
 Build local images:
 
 ```bash
@@ -149,7 +163,7 @@ bash scripts/run-k8s-alpha.sh "$PWD"
 Expected result:
 
 ```text
-PASS: dynamic PVC create/delete completed checksum write/read and cleanup
+[g15d] PASS: dynamic PVC create/delete completed checksum write/read and cleanup
 ```
 
 For the manual `kubectl apply` flow, see:
@@ -234,6 +248,8 @@ scripts/           build and smoke-test helpers
 ```
 
 ## Development Tests
+
+Development tests additionally need Go installed.
 
 Useful smoke tests:
 

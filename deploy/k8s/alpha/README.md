@@ -35,9 +35,16 @@ Current defaults:
 - Linux Kubernetes node
 - privileged CSI node plugin is allowed
 - `iscsi_tcp` kernel module is loadable
+- `kubectl` can reach the cluster
 - container images are available to the cluster:
   - `sw-block:local`
   - `sw-block-csi:local`
+
+For a default k3s install:
+
+```bash
+export KUBECONFIG="${KUBECONFIG:-/etc/rancher/k3s/k3s.yaml}"
+```
 
 For local k3s/kind-style testing, build images with:
 
@@ -113,6 +120,10 @@ Expected log:
 ```
 
 ## Cleanup
+
+The current alpha harness performs an explicit cleanup sweep for the generated
+blockvolume Deployment. A future operator should own that reconciliation instead
+of the smoke script.
 
 ```bash
 kubectl delete pod sw-block-dynamic-smoke --ignore-not-found=true

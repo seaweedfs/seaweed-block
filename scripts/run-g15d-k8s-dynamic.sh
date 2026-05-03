@@ -6,6 +6,7 @@ NAMESPACE="${G15D_NAMESPACE:-default}"
 ARTIFACT_DIR="${G15D_ARTIFACT_DIR:-/tmp/g15d-k8s-$(date -u +%Y%m%dT%H%M%SZ)}"
 
 mkdir -p "$ARTIFACT_DIR"
+POLL_LOG="$ARTIFACT_DIR/poll.log"
 
 log() {
   printf '[g15d] %s\n' "$*" | tee -a "$ARTIFACT_DIR/run.log"
@@ -103,12 +104,12 @@ kubectl apply -f "$ROOT/deploy/k8s/g15d/dynamic-pvc-pod.yaml" | tee "$ARTIFACT_D
 
 log "wait for launcher-generated blockvolume manifest"
 for _ in $(seq 1 180); do
-  if kubectl -n kube-system exec deploy/sw-blockmaster -c blockmaster -- sh -c 'ls /manifests/*.yaml >/dev/null 2>&1'; then
+  if kubectl -n kube-system exec deploy/sw-blockmaster -c blockmaster -- sh -c 'ls /manifests/*.yaml >/dev/null 2>&1' >>"$POLL_LOG" 2>&1; then
     break
   fi
   sleep 1
 done
-if ! kubectl -n kube-system exec deploy/sw-blockmaster -c blockmaster -- sh -c 'ls /manifests/*.yaml >/dev/null 2>&1'; then
+if ! kubectl -n kube-system exec deploy/sw-blockmaster -c blockmaster -- sh -c 'ls /manifests/*.yaml >/dev/null 2>&1' >>"$POLL_LOG" 2>&1; then
   echo "launcher did not write blockvolume manifests" >&2
   exit 1
 fi
@@ -147,12 +148,12 @@ kubectl -n "$NAMESPACE" delete pvc sw-block-dynamic-v1 --wait=true --timeout=120
 
 log "wait for launcher manifest cleanup after DeleteVolume"
 for _ in $(seq 1 180); do
-  if kubectl -n kube-system exec deploy/sw-blockmaster -c blockmaster -- sh -c '! ls /manifests/*.yaml >/dev/null 2>&1'; then
+  if kubectl -n kube-system exec deploy/sw-blockmaster -c blockmaster -- sh -c '! ls /manifests/*.yaml >/dev/null 2>&1' >>"$POLL_LOG" 2>&1; then
     break
   fi
   sleep 1
 done
-if ! kubectl -n kube-system exec deploy/sw-blockmaster -c blockmaster -- sh -c '! ls /manifests/*.yaml >/dev/null 2>&1'; then
+if ! kubectl -n kube-system exec deploy/sw-blockmaster -c blockmaster -- sh -c '! ls /manifests/*.yaml >/dev/null 2>&1' >>"$POLL_LOG" 2>&1; then
   echo "launcher manifest still present after PVC delete" >&2
   exit 1
 fi
