@@ -36,6 +36,10 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 )
 
 // l2bins holds the paths of compiled blockmaster + blockvolume.
@@ -343,6 +347,60 @@ func TestG54_BinaryWiring_RoleSplit_2NodeSmoke(t *testing.T) {
 	_ = conn.Close()
 }
 
+func TestG15a_BlockvolumeReportsFrontendTargetsToMasterStatus(t *testing.T) {
+	if testing.Short() {
+		t.Skip("L2 subprocess test; -short skip")
+	}
+	bins := buildG54Binaries(t)
+	art := t.TempDir()
+
+	_, masterAddr := startG54Master(t, bins, art)
+
+	primaryDataLn, primaryStatusLn := pickAddr(t), pickAddr(t)
+	replicaDataLn, replicaStatusLn := pickAddr(t), pickAddr(t)
+	primaryCtrl, replicaCtrl := pickAddr(t), pickAddr(t)
+	iscsiListen := pickAddr(t)
+	iqn := "iqn.2026-05.io.seaweedfs:g15a-v1"
+
+	_ = startG54Volume(t, bins, art, volOpts{
+		masterAddr:  masterAddr,
+		serverID:    "s1",
+		replicaID:   "r1",
+		dataAddr:    primaryDataLn,
+		ctrlAddr:    primaryCtrl,
+		statusAddr:  primaryStatusLn,
+		iscsiAddr:   iscsiListen,
+		iscsiIQN:    iqn,
+		durableRoot: filepath.Join(art, "primary-store"),
+		logTag:      "primary-iscsi",
+	})
+	_ = startG54Volume(t, bins, art, volOpts{
+		masterAddr:  masterAddr,
+		serverID:    "s2",
+		replicaID:   "r2",
+		dataAddr:    replicaDataLn,
+		ctrlAddr:    replicaCtrl,
+		statusAddr:  replicaStatusLn,
+		durableRoot: filepath.Join(art, "replica-store"),
+		logTag:      "replica",
+	})
+
+	resp := pollMasterStatus(t, masterAddr, "v1", 15*time.Second, func(resp *control.StatusResponse) bool {
+		if !resp.GetAssigned() || resp.GetReplicaId() != "r1" {
+			return false
+		}
+		for _, ft := range resp.GetFrontends() {
+			if ft.GetProtocol() == "iscsi" && ft.GetAddr() == iscsiListen && ft.GetIqn() == iqn {
+				return true
+			}
+		}
+		return false
+	})
+	if resp == nil {
+		t.Fatal("master status did not expose assigned replica's iSCSI frontend target")
+	}
+}
+
 // pickAddr binds a temporary listener to find a free port, then closes
 // it. Caller passes the addr to a subprocess; brief race window is
 // acceptable for a smoke test.
@@ -359,6 +417,34 @@ func pickAddr(t *testing.T) string {
 	addr := ln.Addr().String()
 	_ = ln.Close()
 	return addr
+}
+
+func pollMasterStatus(t *testing.T, masterAddr, volumeID string, deadline time.Duration, check func(*control.StatusResponse) bool) *control.StatusResponse {
+	t.Helper()
+	conn, err := grpc.NewClient(masterAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatalf("dial master: %v", err)
+	}
+	defer conn.Close()
+	client := control.NewEvidenceServiceClient(conn)
+	end := time.Now().Add(deadline)
+	var last *control.StatusResponse
+	for time.Now().Before(end) {
+		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+		resp, err := client.QueryVolumeStatus(ctx, &control.StatusRequest{VolumeId: volumeID})
+		cancel()
+		if err == nil {
+			last = resp
+			if check(resp) {
+				return resp
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if last != nil {
+		t.Logf("last master status: %+v", last)
+	}
+	return nil
 }
 
 // silence unused-import warnings on platforms where strings/sync

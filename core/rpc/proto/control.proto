@@ -85,6 +85,21 @@ message HeartbeatSlot {
     bool withdrawn = 8;
     uint64 evidence_score = 9;
     uint32 local_role_claim = 10; // authority.LocalRoleClaim enum value
+    repeated FrontendTarget frontends = 11;
+}
+
+// FrontendTarget — read-only frontend publication fact reported by
+// a blockvolume process. This is an observation/status fact only:
+// CSI may consume it to publish an already-running target, but
+// master/authority MUST NOT treat it as an assignment, readiness, or
+// placement input.
+message FrontendTarget {
+    string protocol = 1; // "iscsi" | "nvme"
+    string addr = 2;
+    string iqn = 3;
+    string nqn = 4;
+    uint32 lun = 5;
+    uint32 nsid = 6;
 }
 
 message HeartbeatAck {
@@ -163,4 +178,5 @@ message StatusResponse {
     bool assigned = 5;
     string last_unsupported_reason = 6;
     string last_convergence_stuck_at = 7;
+    repeated FrontendTarget frontends = 8;
 }

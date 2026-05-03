@@ -34,11 +34,11 @@ import (
 // HeartbeatMessage is the V2-shaped heartbeat payload one
 // reporting server sends. Ported as wire mechanism only.
 type HeartbeatMessage struct {
-	ServerID   string
-	SentAt     time.Time
-	Reachable  bool
-	Eligible   bool
-	Slots      []HeartbeatSlot
+	ServerID  string
+	SentAt    time.Time
+	Reachable bool
+	Eligible  bool
+	Slots     []HeartbeatSlot
 }
 
 // HeartbeatSlot is the per-slot portion of HeartbeatMessage.
@@ -50,6 +50,7 @@ type HeartbeatSlot struct {
 	ReplicaID       string
 	DataAddr        string
 	CtrlAddr        string
+	Frontends       []FrontendTargetFact
 	Reachable       bool
 	ReadyForPrimary bool
 	Eligible        bool
@@ -80,11 +81,13 @@ func HeartbeatToObservation(msg HeartbeatMessage) (Observation, error) {
 
 	slots := make([]SlotFact, 0, len(msg.Slots))
 	for _, s := range msg.Slots {
+		frontends := append([]FrontendTargetFact(nil), s.Frontends...)
 		slots = append(slots, SlotFact{
 			VolumeID:        s.VolumeID,
 			ReplicaID:       s.ReplicaID,
 			DataAddr:        s.DataAddr,
 			CtrlAddr:        s.CtrlAddr,
+			Frontends:       frontends,
 			Reachable:       s.Reachable,
 			ReadyForPrimary: s.ReadyForPrimary,
 			Eligible:        s.Eligible,

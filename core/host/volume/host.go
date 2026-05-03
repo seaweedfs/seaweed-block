@@ -90,11 +90,11 @@ type replicaSetUpdater interface {
 
 // Host is the composed volume-side block product daemon.
 type Host struct {
-	cfg   Config
-	log   *log.Logger
-	exec  *noopExecutor
+	cfg    Config
+	log    *log.Logger
+	exec   *noopExecutor
 	t1exec *HealthyPathExecutor
-	adpt  assignmentConsumer
+	adpt   assignmentConsumer
 	// realAdpt is the underlying concrete adapter. Exposed for
 	// production call sites that need the full surface (status
 	// server, projection view wiring). Tests swap adpt only and
@@ -128,6 +128,9 @@ type Host struct {
 	// demotion side effects in this slice.
 	otherMu   sync.Mutex
 	lastOther *control.AssignmentFact
+
+	frontendMu      sync.RWMutex
+	frontendTargets []*control.FrontendTarget
 }
 
 // LastOtherLine returns the most recent VOLUME authority fact
@@ -191,8 +194,8 @@ func New(cfg Config) (*Host, error) {
 	// not-Healthy); T1 readiness bridge swaps in HealthyPathExecutor
 	// so the adapter can actually reach engine.ModeHealthy.
 	var (
-		noopExec *noopExecutor
-		t1Exec   *HealthyPathExecutor
+		noopExec  *noopExecutor
+		t1Exec    *HealthyPathExecutor
 		execIface adapter.CommandExecutor
 	)
 	if cfg.EnableT1Readiness {
@@ -205,15 +208,15 @@ func New(cfg Config) (*Host, error) {
 	adpt := adapter.NewVolumeReplicaAdapter(execIface)
 
 	h := &Host{
-		cfg:     cfg,
-		log:     lg,
-		exec:    noopExec,
-		t1exec:  t1Exec,
-		adpt:    adpt,
+		cfg:      cfg,
+		log:      lg,
+		exec:     noopExec,
+		t1exec:   t1Exec,
+		adpt:     adpt,
 		realAdpt: adpt,
-		conn:    conn,
-		obsCli:  control.NewObservationServiceClient(conn),
-		asnCli:  control.NewAssignmentServiceClient(conn),
+		conn:     conn,
+		obsCli:   control.NewObservationServiceClient(conn),
+		asnCli:   control.NewAssignmentServiceClient(conn),
 	}
 	if cfg.ReplicationVolume != nil {
 		h.setReplicationLocked(cfg.ReplicationVolume)
@@ -302,6 +305,35 @@ func (h *Host) Adapter() *adapter.VolumeReplicaAdapter { return h.realAdpt }
 // inspect recorded commands.
 func (h *Host) Executor() *noopExecutor { return h.exec }
 
+// SetFrontendTargets publishes read-only frontend target facts into
+// the next heartbeat. These facts are endpoint observations only:
+// they do not change assignment, readiness, or authority state.
+func (h *Host) SetFrontendTargets(targets []*control.FrontendTarget) {
+	h.frontendMu.Lock()
+	defer h.frontendMu.Unlock()
+	h.frontendTargets = cloneFrontendTargets(targets)
+}
+
+func (h *Host) frontendTargetsSnapshot() []*control.FrontendTarget {
+	h.frontendMu.RLock()
+	defer h.frontendMu.RUnlock()
+	return cloneFrontendTargets(h.frontendTargets)
+}
+
+func cloneFrontendTargets(in []*control.FrontendTarget) []*control.FrontendTarget {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]*control.FrontendTarget, 0, len(in))
+	for _, t := range in {
+		if t == nil {
+			continue
+		}
+		out = append(out, proto.Clone(t).(*control.FrontendTarget))
+	}
+	return out
+}
+
 // Start kicks off the heartbeat loop + subscribe loop. Returns a
 // context cancelled on Close.
 func (h *Host) Start() context.Context {
@@ -370,6 +402,7 @@ func (h *Host) buildReport() *control.HeartbeatReport {
 				ReplicaId:       h.cfg.ReplicaID,
 				DataAddr:        h.cfg.DataAddr,
 				CtrlAddr:        h.cfg.CtrlAddr,
+				Frontends:       h.frontendTargetsSnapshot(),
 				Reachable:       true,
 				ReadyForPrimary: true,
 				Eligible:        true,
