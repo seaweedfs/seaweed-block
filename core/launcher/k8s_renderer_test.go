@@ -27,6 +27,7 @@ func TestG15d_K8sRenderer_RendersBlockVolumeDeploymentArgs(t *testing.T) {
 		"name: sw-blockvolume-pvc-a-r1",
 		"hostNetwork: true",
 		"dnsPolicy: ClusterFirstWithHostNet",
+		"- /usr/local/bin/blockvolume",
 		"--master=blockmaster.kube-system.svc.cluster.local:9333",
 		"--volume-id=pvc-a",
 		"--replica-id=r1",

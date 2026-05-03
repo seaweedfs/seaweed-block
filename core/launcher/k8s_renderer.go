@@ -63,9 +63,10 @@ func RenderBlockVolumeDeployments(plan lifecycle.BlockVolumeWorkloadPlan, cfg K8
 						DNSPolicy:    "ClusterFirstWithHostNet",
 						NodeSelector: map[string]string{"kubernetes.io/hostname": replica.ServerID},
 						Containers: []container{{
-							Name:  "blockvolume",
-							Image: cfg.Image,
-							Args:  blockVolumeArgs(plan, replica, cfg),
+							Name:    "blockvolume",
+							Image:   cfg.Image,
+							Command: []string{"/usr/local/bin/blockvolume"},
+							Args:    blockVolumeArgs(plan, replica, cfg),
 						}},
 					},
 				},
@@ -156,7 +157,8 @@ type podSpec struct {
 }
 
 type container struct {
-	Name  string   `yaml:"name"`
-	Image string   `yaml:"image"`
-	Args  []string `yaml:"args"`
+	Name    string   `yaml:"name"`
+	Image   string   `yaml:"image"`
+	Command []string `yaml:"command,omitempty"`
+	Args    []string `yaml:"args"`
 }
