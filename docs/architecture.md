@@ -1,8 +1,8 @@
 # Seaweed Block Architecture
 
 `seaweed-block` is a lightweight Kubernetes block-storage project. The current
-P15 alpha MVP is intentionally narrow: it proves the main control/data path
-before expanding into a full storage operator.
+alpha MVP is intentionally narrow: it proves the main control/data path before
+expanding into a full storage operator.
 
 ## Product Shape
 
@@ -95,7 +95,8 @@ apply/delete. A real controller/operator is a planned follow-up.
 
 ## Recovery And Replication
 
-P15 contains a deeper recovery stack than the Kubernetes MVP currently exposes:
+The current tree contains a deeper recovery stack than the Kubernetes MVP
+currently exposes:
 
 - dual-lane recovery data plane
 - single WAL egress ownership direction
@@ -120,4 +121,3 @@ systems become fragile when control-plane facts are conflated:
 
 These rules are enforced through unit tests, component tests, hardware tests,
 and TestOps scenarios.
-
