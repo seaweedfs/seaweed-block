@@ -80,3 +80,68 @@ func TestG15d_BlockmasterLauncherTickWritesBlockvolumeManifest(t *testing.T) {
 		t.Fatal("launcher tick must not mint authority")
 	}
 }
+
+func TestG15e_BlockmasterLauncherTickRemovesManifestAfterVolumeDelete(t *testing.T) {
+	h, err := master.New(master.Config{
+		AuthorityStoreDir: t.TempDir(),
+		LifecycleStoreDir: t.TempDir(),
+		Listen:            "127.0.0.1:0",
+	})
+	if err != nil {
+		t.Fatalf("master.New: %v", err)
+	}
+	h.Start()
+	defer func() { _ = h.Close(context.Background()) }()
+	stores := h.Lifecycle()
+	if _, err := stores.Volumes.CreateVolume(lifecycle.VolumeSpec{
+		VolumeID:          "pvc-a",
+		SizeBytes:         1 << 20,
+		ReplicationFactor: 1,
+	}); err != nil {
+		t.Fatalf("create volume: %v", err)
+	}
+	if _, err := stores.Nodes.RegisterNode(lifecycle.NodeRegistration{
+		ServerID: "m02",
+		DataAddr: "10.0.0.2:9201",
+		CtrlAddr: "10.0.0.2:9101",
+		Pools: []lifecycle.StoragePool{{
+			PoolID:     "default",
+			TotalBytes: 1 << 30,
+			FreeBytes:  1 << 30,
+			BlockSize:  4096,
+		}},
+	}); err != nil {
+		t.Fatalf("register node: %v", err)
+	}
+	if _, err := h.RunLifecycleProductTick(); err != nil {
+		t.Fatalf("product tick: %v", err)
+	}
+	outDir := t.TempDir()
+	f := flags{
+		launcherManifestDir:   outDir,
+		launcherNamespace:     "kube-system",
+		launcherImage:         "sw-block:test",
+		launcherMasterAddr:    "blockmaster.kube-system.svc.cluster.local:9333",
+		launcherDurableRoot:   "/var/lib/sw-block",
+		launcherISCSIPortBase: 3260,
+	}
+	path := filepath.Join(outDir, "sw-blockvolume-pvc-a-r1.yaml")
+	if err := runLifecycleLauncherTick(h, f); err != nil {
+		t.Fatalf("first launcher tick: %v", err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("manifest missing before delete: %v", err)
+	}
+	if err := stores.Placements.DeletePlacement("pvc-a"); err != nil {
+		t.Fatalf("delete placement: %v", err)
+	}
+	if err := stores.Volumes.DeleteVolume("pvc-a"); err != nil {
+		t.Fatalf("delete volume: %v", err)
+	}
+	if err := runLifecycleLauncherTick(h, f); err != nil {
+		t.Fatalf("second launcher tick: %v", err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("manifest still exists after delete or stat err=%v", err)
+	}
+}

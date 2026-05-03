@@ -42,3 +42,30 @@ func WriteRenderedManifests(dir string, manifests []RenderedManifest) error {
 	}
 	return nil
 }
+
+// SyncRenderedManifests makes dir contain exactly the rendered manifest set
+// managed by this launcher. It writes desired manifests first, then removes
+// stale *.yaml files, so a transient write failure does not erase the last
+// usable desired state.
+func SyncRenderedManifests(dir string, manifests []RenderedManifest) error {
+	if err := WriteRenderedManifests(dir, manifests); err != nil {
+		return err
+	}
+	desired := make(map[string]bool, len(manifests))
+	for _, manifest := range manifests {
+		desired[manifest.Name+".yaml"] = true
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return fmt.Errorf("launcher: readdir %q: %w", dir, err)
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".yaml" || desired[entry.Name()] {
+			continue
+		}
+		if err := os.Remove(filepath.Join(dir, entry.Name())); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("launcher: remove stale manifest %s: %w", entry.Name(), err)
+		}
+	}
+	return nil
+}
