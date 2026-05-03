@@ -61,6 +61,7 @@ func TestG15d_K8sRunner_AppliesLauncherGeneratedManifest(t *testing.T) {
 		"generated-blockvolume.yaml",
 		"kubectl apply -f \"$ARTIFACT_DIR/generated-blockvolume.yaml\"",
 		"kubectl -n kube-system wait --for=condition=available deploy -l app=sw-blockvolume",
+		"kubectl -n kube-system logs -l sw-block.seaweedfs.com/volume",
 		"PASS: dynamic PVC pod completed checksum write/read",
 	} {
 		if !strings.Contains(body, want) {

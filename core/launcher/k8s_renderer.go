@@ -57,7 +57,11 @@ func RenderBlockVolumeDeployments(plan lifecycle.BlockVolumeWorkloadPlan, cfg K8
 				Replicas: intPtr(1),
 				Selector: selector{MatchLabels: map[string]string{"app": name}},
 				Template: podTemplate{
-					Metadata: metadata{Labels: map[string]string{"app": name}},
+					Metadata: metadata{Labels: map[string]string{
+						"app":                            name,
+						"sw-block.seaweedfs.com/volume":  plan.VolumeID,
+						"sw-block.seaweedfs.com/replica": replica.ReplicaID,
+					}},
 					Spec: podSpec{
 						HostNetwork:  true,
 						DNSPolicy:    "ClusterFirstWithHostNet",
@@ -94,7 +98,7 @@ func blockVolumeArgs(plan lifecycle.BlockVolumeWorkloadPlan, replica lifecycle.B
 		fmt.Sprintf("--durable-blocks=%d", plan.SizeBytes/4096),
 		"--durable-blocksize=4096",
 		"--recovery-mode=" + cfg.RecoveryMode,
-		fmt.Sprintf("--iscsi-listen=0.0.0.0:%d", replica.ISCSIListenPort),
+		fmt.Sprintf("--iscsi-listen=127.0.0.1:%d", replica.ISCSIListenPort),
 		"--iscsi-iqn=" + replica.ISCSIQualifiedName,
 	}
 }

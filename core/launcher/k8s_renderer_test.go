@@ -33,7 +33,8 @@ func TestG15d_K8sRenderer_RendersBlockVolumeDeploymentArgs(t *testing.T) {
 		"--replica-id=r1",
 		"--durable-root=/var/lib/sw-block/pvc-a/r1",
 		"--recovery-mode=dual-lane",
-		"--iscsi-listen=0.0.0.0:3260",
+		"sw-block.seaweedfs.com/volume: pvc-a",
+		"--iscsi-listen=127.0.0.1:3260",
 		"--iscsi-iqn=iqn.test:pvc-a",
 	} {
 		if !strings.Contains(raw, want) {
@@ -50,7 +51,7 @@ func TestG15d_K8sRenderer_RF2UsesDistinctNamesAndPorts(t *testing.T) {
 	if manifests[0].Name == manifests[1].Name {
 		t.Fatalf("duplicate names: %q", manifests[0].Name)
 	}
-	if !strings.Contains(string(manifests[1].YAML), "--iscsi-listen=0.0.0.0:3261") {
+	if !strings.Contains(string(manifests[1].YAML), "--iscsi-listen=127.0.0.1:3261") {
 		t.Fatalf("second manifest missing port 3261:\n%s", manifests[1].YAML)
 	}
 }

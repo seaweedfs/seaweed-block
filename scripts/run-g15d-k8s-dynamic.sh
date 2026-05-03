@@ -32,14 +32,17 @@ kubectl version --client=true >"$ARTIFACT_DIR/kubectl-version.txt" 2>&1 || true
 kubectl get nodes -o wide >"$ARTIFACT_DIR/nodes.before.txt"
 
 cleanup() {
+  (
   set +e
   kubectl -n kube-system delete deploy -l app=sw-blockvolume --ignore-not-found=true >>"$ARTIFACT_DIR/cleanup.log" 2>&1
+  kubectl -n kube-system delete deploy sw-blockvolume-r1 sw-blockvolume-r2 --ignore-not-found=true >>"$ARTIFACT_DIR/cleanup.log" 2>&1
   kubectl delete -f "$ROOT/deploy/k8s/g15d/dynamic-pvc-pod.yaml" --ignore-not-found=true >>"$ARTIFACT_DIR/cleanup.log" 2>&1
   kubectl delete -f "$ROOT/deploy/k8s/g15b/csi-node.yaml" --ignore-not-found=true >>"$ARTIFACT_DIR/cleanup.log" 2>&1
   kubectl delete -f "$ROOT/deploy/k8s/g15d/csi-controller.yaml" --ignore-not-found=true >>"$ARTIFACT_DIR/cleanup.log" 2>&1
   kubectl delete -f "$ROOT/deploy/k8s/g15b/csi-driver.yaml" --ignore-not-found=true >>"$ARTIFACT_DIR/cleanup.log" 2>&1
   kubectl delete -f "$ROOT/deploy/k8s/g15d/rbac.yaml" --ignore-not-found=true >>"$ARTIFACT_DIR/cleanup.log" 2>&1
   kubectl delete -f "$STACK_RENDERED" --ignore-not-found=true >>"$ARTIFACT_DIR/cleanup.log" 2>&1
+  )
 }
 
 collect_daemon_logs() {
@@ -50,12 +53,13 @@ collect_daemon_logs() {
   kubectl -n kube-system logs deploy/sw-block-csi-controller -c block-csi >"$ARTIFACT_DIR/blockcsi-controller.log" 2>&1 || true
   kubectl -n kube-system logs deploy/sw-block-csi-controller -c csi-provisioner >"$ARTIFACT_DIR/csi-provisioner.log" 2>&1 || true
   kubectl -n kube-system logs deploy/sw-block-csi-controller -c csi-attacher >"$ARTIFACT_DIR/csi-attacher.log" 2>&1 || true
-  kubectl -n kube-system logs -l app=sw-blockvolume -c blockvolume --tail=-1 >"$ARTIFACT_DIR/blockvolume-generated.log" 2>&1 || true
+  kubectl -n kube-system logs -l sw-block.seaweedfs.com/volume -c blockvolume --tail=-1 >"$ARTIFACT_DIR/blockvolume-generated.log" 2>&1 || true
   kubectl -n kube-system get pods,deploy -o wide >"$ARTIFACT_DIR/kube-system-pods-deploys.txt" 2>&1 || true
   kubectl -n "$NAMESPACE" get sc,pv,pvc,pod -o wide >"$ARTIFACT_DIR/app-storage.txt" 2>&1 || true
   kubectl -n kube-system exec deploy/sw-blockmaster -c blockmaster -- sh -c 'cat /manifests/*.yaml' >"$ARTIFACT_DIR/generated-blockvolume.yaml" 2>"$ARTIFACT_DIR/generated-blockvolume.err" || true
 }
 
+cleanup
 trap 'collect_daemon_logs; cleanup' EXIT
 
 log "apply product stack without pre-created blockvolumes"

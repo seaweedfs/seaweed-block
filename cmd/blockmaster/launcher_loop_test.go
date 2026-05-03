@@ -70,7 +70,7 @@ func TestG15d_BlockmasterLauncherTickWritesBlockvolumeManifest(t *testing.T) {
 		"--master=blockmaster.kube-system.svc.cluster.local:9333",
 		"--volume-id=pvc-a",
 		"--replica-id=r1",
-		"--iscsi-listen=0.0.0.0:3260",
+		"--iscsi-listen=127.0.0.1:3260",
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("manifest missing %q:\n%s", want, body)
