@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/seaweedfs/seaweed-block/core/adapter"
 	"github.com/seaweedfs/seaweed-block/core/engine"
 	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
 )
@@ -136,6 +137,181 @@ func TestG9A_StatusProjection_EngineRecoveringMapsReplicationRole(t *testing.T) 
 	}
 }
 
+func TestG9B_StatusProjection_GenesisObservedBeforeAssignment_NotFrontendReady(t *testing.T) {
+	p := stubProjector{p: engine.ReplicaProjection{}}
+	s := NewStatusServer(NewAdapterProjectionView(p, "v1", "r1", nil))
+	addr, err := s.Start("127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer func() { _ = s.Close(context.Background()) }()
+	resp, err := http.Get("http://" + addr + "/status?volume=v1")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("status: got %d want 200", resp.StatusCode)
+	}
+	var body StatusProjection
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.FrontendPrimaryReady || body.Healthy {
+		t.Fatalf("observed process before assignment must not be frontend-ready: %+v", body)
+	}
+	if body.AuthorityRole != AuthorityRoleUnknown {
+		t.Fatalf("authority role = %q want %q", body.AuthorityRole, AuthorityRoleUnknown)
+	}
+}
+
+func TestG9B_StatusProjection_AssignmentConsumed_MakesFrontendPrimaryReady(t *testing.T) {
+	p := stubProjector{p: engine.ReplicaProjection{
+		Mode: engine.ModeHealthy, Epoch: 1, EndpointVersion: 1,
+	}}
+	s := NewStatusServer(NewAdapterProjectionView(p, "v1", "r1", nil))
+	addr, err := s.Start("127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer func() { _ = s.Close(context.Background()) }()
+	resp, err := http.Get("http://" + addr + "/status?volume=v1")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("status: got %d want 200", resp.StatusCode)
+	}
+	var body StatusProjection
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !body.FrontendPrimaryReady || !body.Healthy {
+		t.Fatalf("assignment-consumed healthy projection must be frontend-ready: %+v", body)
+	}
+	if body.AuthorityRole != AuthorityRolePrimary {
+		t.Fatalf("authority role = %q want %q", body.AuthorityRole, AuthorityRolePrimary)
+	}
+}
+
+func TestG9B_StatusProjection_ReturnedReplicaLifecycle_NotReadyRecoveringReady(t *testing.T) {
+	proj := &mutableProjector{p: engine.ReplicaProjection{
+		Mode:            engine.ModeDegraded,
+		Epoch:           3,
+		EndpointVersion: 2,
+	}}
+	h := &Host{cfg: Config{VolumeID: "v1", ReplicaID: "r2"}}
+	h.view = NewAdapterProjectionView(proj, "v1", "r2", h)
+	// Current authority line names r1, so r2 is a returned/registered
+	// replica candidate, not the frontend primary.
+	h.recordOtherLine(&control.AssignmentFact{
+		VolumeId:        "v1",
+		ReplicaId:       "r1",
+		Epoch:           3,
+		EndpointVersion: 2,
+	})
+	s := NewStatusServer(h.view)
+
+	body := s.statusProjection()
+	if body.AuthorityRole != AuthorityRoleUnknown {
+		t.Fatalf("candidate authority role = %q want %q", body.AuthorityRole, AuthorityRoleUnknown)
+	}
+	if body.ReplicationRole != ReplicationRoleNotReady {
+		t.Fatalf("candidate replication role = %q want %q", body.ReplicationRole, ReplicationRoleNotReady)
+	}
+	if body.FrontendPrimaryReady {
+		t.Fatalf("candidate must not be frontend ready: %+v", body)
+	}
+
+	proj.p = engine.ReplicaProjection{
+		Mode:             engine.ModeRecovering,
+		RecoveryDecision: engine.DecisionCatchUp,
+		SessionKind:      engine.SessionCatchUp,
+		SessionPhase:     engine.PhaseRunning,
+		Epoch:            3,
+		EndpointVersion:  2,
+	}
+	body = s.statusProjection()
+	if body.ReplicationRole != ReplicationRoleRecovering {
+		t.Fatalf("recovering replication role = %q want %q", body.ReplicationRole, ReplicationRoleRecovering)
+	}
+	if body.FrontendPrimaryReady {
+		t.Fatalf("recovering replica must not be frontend ready: %+v", body)
+	}
+
+	proj.p = engine.ReplicaProjection{
+		Mode:            engine.ModeHealthy,
+		Epoch:           3,
+		EndpointVersion: 2,
+	}
+	body = s.statusProjection()
+	if body.AuthorityRole != AuthorityRoleUnknown {
+		t.Fatalf("ready supporting replica authority role = %q want %q", body.AuthorityRole, AuthorityRoleUnknown)
+	}
+	if body.ReplicationRole != ReplicationRoleReady {
+		t.Fatalf("ready supporting replica role = %q want %q", body.ReplicationRole, ReplicationRoleReady)
+	}
+	if body.FrontendPrimaryReady {
+		t.Fatalf("supporting replica_ready must not be frontend primary ready: %+v", body)
+	}
+}
+
+func TestG9B_StatusProjection_ComponentAdapterLifecycle_NotReadyRecoveringReady(t *testing.T) {
+	exec := newG9BStatusExecutor()
+	a := adapter.NewVolumeReplicaAdapter(exec)
+	h := &Host{cfg: Config{VolumeID: "v1", ReplicaID: "r2"}}
+	h.view = NewAdapterProjectionView(a, "v1", "r2", h)
+	// Current frontend authority line names r1. r2 may become a
+	// supporting replica_ready after recovery, but never the frontend
+	// primary for this line.
+	h.recordOtherLine(&control.AssignmentFact{
+		VolumeId:        "v1",
+		ReplicaId:       "r1",
+		Epoch:           3,
+		EndpointVersion: 2,
+	})
+	s := NewStatusServer(h.view)
+
+	a.OnAssignment(adapter.AssignmentInfo{
+		VolumeID: "v1", ReplicaID: "r2", Epoch: 3, EndpointVersion: 2,
+		DataAddr: "d2", CtrlAddr: "c2",
+	})
+	exec.waitProbe(t)
+	body := s.statusProjection()
+	if body.ReplicationRole != ReplicationRoleNotReady {
+		t.Fatalf("post-assignment candidate role=%q want %q", body.ReplicationRole, ReplicationRoleNotReady)
+	}
+	if body.FrontendPrimaryReady {
+		t.Fatalf("post-assignment candidate must not be frontend ready: %+v", body)
+	}
+
+	a.OnProbeResult(adapter.ProbeResult{
+		ReplicaID: "r2", Success: true,
+		EndpointVersion: 2, TransportEpoch: 3,
+		ReplicaFlushedLSN: 4, PrimaryTailLSN: 1, PrimaryHeadLSN: 10,
+	})
+	body = s.statusProjection()
+	if body.ReplicationRole != ReplicationRoleRecovering {
+		t.Fatalf("after catch-up probe role=%q want %q", body.ReplicationRole, ReplicationRoleRecovering)
+	}
+	if exec.lastSessionID == 0 {
+		t.Fatal("catch-up probe did not start a recovery session")
+	}
+
+	exec.completeSession(adapter.SessionCloseResult{
+		ReplicaID: "r2", SessionID: exec.lastSessionID,
+		Success: true, AchievedLSN: 10,
+	})
+	body = s.statusProjection()
+	if body.ReplicationRole != ReplicationRoleReady {
+		t.Fatalf("after completed recovery role=%q want %q", body.ReplicationRole, ReplicationRoleReady)
+	}
+	if body.FrontendPrimaryReady {
+		t.Fatalf("supporting replica_ready must not become frontend primary: %+v", body)
+	}
+}
+
 func TestStatusServer_MissingVolume_Returns400(t *testing.T) {
 	s := NewStatusServer(NewAdapterProjectionView(stubProjector{}, "v1", "r1", nil))
 	addr, err := s.Start("127.0.0.1:0")
@@ -182,6 +358,93 @@ func TestIsLoopbackRemote(t *testing.T) {
 		if got := isLoopbackRemote(in); got != want {
 			t.Errorf("isLoopbackRemote(%q) = %v, want %v", in, got, want)
 		}
+	}
+}
+
+type g9bStatusExecutor struct {
+	onSessionStart  adapter.OnSessionStart
+	onSessionClose  adapter.OnSessionClose
+	onFenceComplete adapter.OnFenceComplete
+	lastSessionID   uint64
+	probeCh         chan struct{}
+}
+
+func newG9BStatusExecutor() *g9bStatusExecutor {
+	return &g9bStatusExecutor{probeCh: make(chan struct{}, 4)}
+}
+
+func (e *g9bStatusExecutor) SetOnSessionStart(fn adapter.OnSessionStart) {
+	e.onSessionStart = fn
+}
+
+func (e *g9bStatusExecutor) SetOnSessionClose(fn adapter.OnSessionClose) {
+	e.onSessionClose = fn
+}
+
+func (e *g9bStatusExecutor) SetOnFenceComplete(fn adapter.OnFenceComplete) {
+	e.onFenceComplete = fn
+}
+
+func (e *g9bStatusExecutor) Probe(replicaID, _dataAddr, _ctrlAddr string, _sessionID, epoch, endpointVersion uint64) adapter.ProbeResult {
+	e.probeCh <- struct{}{}
+	return adapter.ProbeResult{
+		ReplicaID:         replicaID,
+		Success:           true,
+		TransportEpoch:    epoch,
+		EndpointVersion:   endpointVersion,
+		ReplicaFlushedLSN: 0,
+		PrimaryTailLSN:    0,
+		PrimaryHeadLSN:    0,
+	}
+}
+
+func (e *g9bStatusExecutor) waitProbe(t *testing.T) {
+	t.Helper()
+	select {
+	case <-e.probeCh:
+	case <-time.After(time.Second):
+		t.Fatal("assignment did not dispatch probe")
+	}
+}
+
+func (e *g9bStatusExecutor) StartCatchUp(replicaID string, sessionID, _epoch, _endpointVersion, _fromLSN, _frontierHint uint64) error {
+	e.lastSessionID = sessionID
+	if e.onSessionStart != nil {
+		e.onSessionStart(adapter.SessionStartResult{ReplicaID: replicaID, SessionID: sessionID})
+	}
+	return nil
+}
+
+func (e *g9bStatusExecutor) StartRebuild(replicaID string, sessionID, epoch, endpointVersion, frontierHint uint64) error {
+	return e.StartCatchUp(replicaID, sessionID, epoch, endpointVersion, 0, frontierHint)
+}
+
+func (e *g9bStatusExecutor) StartRecoverySession(replicaID string, sessionID, epoch, endpointVersion, frontierHint uint64, _ engine.RecoveryContentKind, _ engine.RecoveryRuntimePolicy) error {
+	return e.StartCatchUp(replicaID, sessionID, epoch, endpointVersion, 0, frontierHint)
+}
+
+func (e *g9bStatusExecutor) InvalidateSession(string, uint64, string) {}
+
+func (e *g9bStatusExecutor) PublishHealthy(string) {}
+
+func (e *g9bStatusExecutor) PublishDegraded(string, string) {}
+
+func (e *g9bStatusExecutor) Fence(replicaID string, sessionID, epoch, endpointVersion uint64) error {
+	if e.onFenceComplete != nil {
+		e.onFenceComplete(adapter.FenceResult{
+			ReplicaID:       replicaID,
+			SessionID:       sessionID,
+			Epoch:           epoch,
+			EndpointVersion: endpointVersion,
+			Success:         true,
+		})
+	}
+	return nil
+}
+
+func (e *g9bStatusExecutor) completeSession(result adapter.SessionCloseResult) {
+	if e.onSessionClose != nil {
+		e.onSessionClose(result)
 	}
 }
 
