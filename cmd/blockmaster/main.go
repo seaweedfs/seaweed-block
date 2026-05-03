@@ -16,6 +16,7 @@ import (
 
 	"github.com/seaweedfs/seaweed-block/core/authority"
 	"github.com/seaweedfs/seaweed-block/core/host/master"
+	"github.com/seaweedfs/seaweed-block/core/launcher"
 	"github.com/seaweedfs/seaweed-block/core/lifecycle"
 )
 
@@ -30,6 +31,13 @@ type flags struct {
 	freshnessWindow        time.Duration
 	pendingGrace           time.Duration
 	lifecycleLoop          time.Duration
+	launcherLoop           time.Duration
+	launcherManifestDir    string
+	launcherNamespace      string
+	launcherImage          string
+	launcherMasterAddr     string
+	launcherDurableRoot    string
+	launcherISCSIPortBase  int
 	// printReadyLine: test-only flag that emits a single
 	// structured JSON line to stdout after the gRPC listener is
 	// bound, so L2 subprocess tests can parse the ready event.
@@ -50,6 +58,13 @@ func parseFlags(args []string) (flags, error) {
 	fs.DurationVar(&f.freshnessWindow, "freshness-window", 30*time.Second, "observation freshness window before a server's heartbeat expires")
 	fs.DurationVar(&f.pendingGrace, "pending-grace", 1*time.Second, "bootstrap/missing-observation grace before supportability reports unsupported")
 	fs.DurationVar(&f.lifecycleLoop, "lifecycle-product-loop-interval", 0, "optional G9G product-loop interval; disabled when 0")
+	fs.DurationVar(&f.launcherLoop, "launcher-loop-interval", 0, "optional G15d launcher planning/render loop interval; disabled when 0")
+	fs.StringVar(&f.launcherManifestDir, "launcher-manifest-dir", "", "optional G15d output directory for rendered blockvolume workload manifests")
+	fs.StringVar(&f.launcherNamespace, "launcher-namespace", "kube-system", "G15d rendered blockvolume manifest namespace")
+	fs.StringVar(&f.launcherImage, "launcher-image", "sw-block:local", "G15d rendered blockvolume container image")
+	fs.StringVar(&f.launcherMasterAddr, "launcher-master-addr", "", "G15d master address used in rendered blockvolume args; defaults to listener address after bind")
+	fs.StringVar(&f.launcherDurableRoot, "launcher-durable-root", "/var/lib/sw-block", "G15d rendered blockvolume durable root base")
+	fs.IntVar(&f.launcherISCSIPortBase, "launcher-iscsi-port-base", 3260, "G15d iSCSI port base for generated blockvolume workloads")
 	fs.BoolVar(&f.printReadyLine, "t0-print-ready", false, "internal test-only: emit one structured JSON line on stdout after listener bound")
 	fs.SetOutput(os.Stderr)
 	if err := fs.Parse(args); err != nil {
@@ -135,6 +150,9 @@ func run(f flags) int {
 	h.Start()
 	if f.lifecycleLoop > 0 {
 		go runLifecycleProductLoop(h, f.lifecycleLoop)
+	}
+	if f.launcherLoop > 0 {
+		go runLifecycleLauncherLoop(h, f, f.launcherLoop)
 	}
 
 	sig := make(chan os.Signal, 1)
@@ -234,4 +252,46 @@ func runLifecycleProductLoop(h *master.Host, interval time.Duration) {
 		}
 		<-ticker.C
 	}
+}
+
+func runLifecycleLauncherLoop(h *master.Host, f flags, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		if err := runLifecycleLauncherTick(h, f); err != nil {
+			fmt.Fprintln(os.Stderr, "blockmaster: lifecycle launcher loop:", err)
+		}
+		<-ticker.C
+	}
+}
+
+func runLifecycleLauncherTick(h *master.Host, f flags) error {
+	result, err := h.RunLifecycleWorkloadPlanTick(lifecycle.WorkloadPlanConfig{
+		ISCSIPortBase: f.launcherISCSIPortBase,
+	})
+	if err != nil {
+		return err
+	}
+	if f.launcherManifestDir == "" {
+		return nil
+	}
+	masterAddr := f.launcherMasterAddr
+	if masterAddr == "" {
+		masterAddr = h.Addr()
+	}
+	for _, plan := range result.Plans {
+		manifests, err := launcher.RenderBlockVolumeDeployments(plan, launcher.K8sRenderConfig{
+			Namespace:       f.launcherNamespace,
+			Image:           f.launcherImage,
+			MasterAddr:      masterAddr,
+			DurableRootBase: f.launcherDurableRoot,
+		})
+		if err != nil {
+			return err
+		}
+		if err := launcher.WriteRenderedManifests(f.launcherManifestDir, manifests); err != nil {
+			return err
+		}
+	}
+	return nil
 }
