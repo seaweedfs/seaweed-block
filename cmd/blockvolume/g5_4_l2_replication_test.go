@@ -169,16 +169,17 @@ func startG54Master(t *testing.T, bins l2bins, art string) (*proc, string) {
 }
 
 type volOpts struct {
-	masterAddr  string
-	serverID    string
-	replicaID   string
-	dataAddr    string
-	ctrlAddr    string
-	statusAddr  string
-	iscsiAddr   string
-	iscsiIQN    string
-	durableRoot string
-	logTag      string
+	masterAddr     string
+	serverID       string
+	replicaID      string
+	dataAddr       string
+	ctrlAddr       string
+	statusAddr     string
+	iscsiAddr      string
+	iscsiIQN       string
+	durableRoot    string
+	logTag         string
+	replicationAck string
 }
 
 func startG54Volume(t *testing.T, bins l2bins, art string, o volOpts) *proc {
@@ -209,6 +210,9 @@ func startG54Volume(t *testing.T, bins l2bins, art string, o volOpts) *proc {
 			"--iscsi-listen", o.iscsiAddr,
 			"--iscsi-iqn", o.iscsiIQN,
 		)
+	}
+	if o.replicationAck != "" {
+		cmd.Args = append(cmd.Args, "--replication-ack", o.replicationAck)
 	}
 	cmd.Stdout = lf
 	cmd.Stderr = lf
