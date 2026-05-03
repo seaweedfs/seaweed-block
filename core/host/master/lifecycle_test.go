@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/seaweedfs/seaweed-block/core/authority"
 	"github.com/seaweedfs/seaweed-block/core/lifecycle"
 )
 
@@ -78,11 +79,52 @@ func TestMasterLifecycleStore_OpensRegistrationStoresWithoutAuthority(t *testing
 		t.Fatalf("snapshot counts got volumes=%d nodes=%d placements=%d",
 			len(snapshot.Volumes), len(snapshot.Nodes), len(snapshot.Placements))
 	}
+	if _, ok := h.Publisher().VolumeAuthorityLine("vol-a"); ok {
+		t.Fatal("verified lifecycle snapshot must not mint authority")
+	}
+}
+
+func TestMasterLifecycleSnapshot_ExistingReplicaVerifiesFromObservationStore(t *testing.T) {
+	h := newTestMaster(t, t.TempDir())
+	defer closeTestMaster(t, h)
+	stores := h.Lifecycle()
+	if _, err := stores.Placements.ApplyPlan(lifecycle.PlacementPlan{
+		VolumeID:  "vol-a",
+		DesiredRF: 1,
+		Candidates: []lifecycle.PlacementCandidate{{
+			VolumeID:  "vol-a",
+			ServerID:  "node-a",
+			ReplicaID: "r2",
+			Source:    lifecycle.PlacementSourceExistingReplica,
+		}},
+	}); err != nil {
+		t.Fatalf("apply placement: %v", err)
+	}
+	if err := h.ObservationHost().Ingest(authority.Observation{
+		ServerID:   "node-a",
+		ObservedAt: time.Now().UTC(),
+		Slots: []authority.SlotFact{{
+			VolumeID:  "vol-a",
+			ReplicaID: "r2",
+			DataAddr:  "127.0.0.1:9201",
+			CtrlAddr:  "127.0.0.1:9101",
+		}},
+	}); err != nil {
+		t.Fatalf("ingest observation: %v", err)
+	}
+	snapshot, ok := h.LifecycleSnapshot()
+	if !ok {
+		t.Fatal("missing lifecycle snapshot")
+	}
 	if len(snapshot.VerifiedPlacements) != 1 || !snapshot.VerifiedPlacements[0].Verified {
 		t.Fatalf("verified placements=%+v want one verified", snapshot.VerifiedPlacements)
 	}
+	slot := snapshot.VerifiedPlacements[0].Slots[0]
+	if slot.DataAddr != "127.0.0.1:9201" || slot.CtrlAddr != "127.0.0.1:9101" {
+		t.Fatalf("slot addrs=%s/%s want observation addrs", slot.DataAddr, slot.CtrlAddr)
+	}
 	if _, ok := h.Publisher().VolumeAuthorityLine("vol-a"); ok {
-		t.Fatal("verified lifecycle snapshot must not mint authority")
+		t.Fatal("observation-backed verified placement must not mint authority")
 	}
 }
 
