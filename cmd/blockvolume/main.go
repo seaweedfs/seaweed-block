@@ -1,7 +1,6 @@
-// Command blockvolume is the block volume daemon — the P15 beta
-// product host for per-volume observation reporting and
-// assignment subscription. See sw-block/design/v3-phase-15-t0-sketch.md
-// §4.1 for the product-daemon contract.
+// Command blockvolume is the block volume daemon — the product
+// host for per-volume observation reporting and assignment
+// subscription.
 package main
 
 import (
@@ -50,74 +49,66 @@ type flags struct {
 	// addr on the ready line so the test harness can discover it.
 	enableT1Readiness bool
 	statusAddr        string
-	// statusRecovery — G5-5 opt-in: enable /status/recovery?volume=v1
+	// statusRecovery — opt-in: enable /status/recovery?volume=v1
 	// endpoint exposing engine.ReplicaProjection (Mode/R/S/H/Decision).
-	// Default off; production binaries do NOT enable. Used by the m01
-	// orchestration script for catch-up verification (R/H polling).
+	// Default off; production binaries do NOT enable. Used by hardware
+	// orchestration scripts for catch-up verification (R/H polling).
 	statusRecovery bool
 
-	// T2 iSCSI frontend flags. iscsiListen is the TCP address
-	// the iSCSI target binds on; empty disables the frontend.
-	// The bind is rejected at startup if it is not a loopback
-	// address — unauthenticated frontend on an external port
-	// would be a T2-scope safety regression. Per T2 assignment
-	// §3.2 "Defaults must be safe": no auth → loopback only.
+	// iSCSI frontend flags. iscsiListen is the TCP address the iSCSI
+	// target binds on; empty disables the frontend. The bind is
+	// rejected at startup if it is not a loopback address —
+	// unauthenticated frontend on an external port would be unsafe.
 	iscsiListen string
 	iscsiIQN    string
 	iscsiLUN    uint
 
-	// T2 NVMe/TCP frontend flags. Symmetric with iSCSI flags
-	// per QA note: same loopback-only safe-default rule, same
-	// auto-enable of --t1-readiness so the symmetry stays clean.
+	// NVMe/TCP frontend flags. Symmetric with iSCSI flags: same
+	// loopback-only safe-default rule, same auto-enable of
+	// --t1-readiness so the symmetry stays clean.
 	nvmeListen    string
 	nvmeSubsysNQN string
 	nvmeNS        uint
 
-	// T3b durable-backend flags. When --durable-root is set, the
-	// iSCSI and NVMe providers use DurableProvider instead of
-	// memback. --durable-impl selects walstore or smartwal
-	// (default smartwal per PM direction). --durable-blocks +
-	// --durable-blocksize are used on first-time storage create.
+	// Durable-backend flags. When --durable-root is set, the iSCSI
+	// and NVMe providers use DurableProvider instead of memback.
+	// --durable-impl selects walstore or smartwal (default smartwal).
+	// --durable-blocks + --durable-blocksize are used on first-time
+	// storage create.
 	durableRoot      string
 	durableImpl      string // "smartwal" | "walstore"
 	durableBlocks    uint
 	durableBlockSize uint
 
-	// G6 §1.A α: WAL retention window past checkpoint LSN. Zero =
-	// pre-G6 strict checkpoint-driven recycle (existing behavior).
-	// Non-zero = walstore relaxes recovery-scan recycle gate to
-	// fromLSN > checkpointLSN - walRetentionLSNs, giving a slow
-	// replica room to catch up while it lags within the window.
-	// Substrate semantics differ: see ProviderConfig.WALRetentionLSNs
-	// godoc. Pinned by INV-G6-RETENTION-POLICY-OPERATOR-VISIBLE.
+	// WAL retention window past checkpoint LSN. Zero = strict
+	// checkpoint-driven recycle. Non-zero = walstore relaxes the
+	// recovery-scan recycle gate to fromLSN > checkpointLSN -
+	// walRetentionLSNs, giving a slow replica room to catch up while
+	// it lags within the window. Substrate semantics differ: see
+	// ProviderConfig.WALRetentionLSNs godoc.
 	walRetentionLSNs uint64
 
-	// G5-5C degraded-peer probe loop (primary-side runtime recovery
-	// trigger). Off by default; --degraded-probe-interval=0 keeps the
-	// loop disabled so existing G5-4 deployments behave unchanged.
-	// When enabled (interval > 0), the loop iterates over peers in
-	// ReplicaDegraded at the given interval and dispatches an
-	// engine-ingress probe per peer (with per-peer cooldown). See
-	// architect mini-plan v0.5 §1.A binding 2026-04-27.
+	// Degraded-peer probe loop (primary-side runtime recovery trigger).
+	// Off by default; --degraded-probe-interval=0 keeps the loop
+	// disabled. When enabled (interval > 0), the loop iterates over
+	// peers in ReplicaDegraded at the given interval and dispatches
+	// an engine-ingress probe per peer (with per-peer cooldown).
 	degradedProbeInterval     time.Duration
 	degradedProbeCooldownBase time.Duration
 	degradedProbeCooldownCap  time.Duration
 
-	// G7-redo: recovery mode selector. "legacy" (default) keeps the
-	// existing single-lane core/transport rebuild path. "dual-lane"
-	// routes StartRebuild through core/recovery's PrimaryBridge,
-	// binding a separate listener at port=data-addr-port+1 per the
-	// deployment convention (docs/recovery-wiring-plan.md §4 Option A,
-	// architect ACK 2026-04-29).
+	// Recovery mode selector. "legacy" (default) keeps the single-lane
+	// core/transport rebuild path. "dual-lane" routes StartRebuild
+	// through core/recovery's PrimaryBridge, binding a separate
+	// listener at port=data-addr-port+1.
 	//
-	// Default flip from legacy → dual-lane is a separate operations PR
-	// after one milestone of dual-lane GREEN observed in CI / hardware
-	// (architect §11 Resolution 3).
+	// Default flip from legacy → dual-lane is a separate operations
+	// change after dual-lane is GREEN in CI / hardware.
 	recoveryMode string
 
-	// G9A: user-visible replication acknowledgement profile.
-	// best-effort is the beta default. sync-quorum / sync-all opt into
-	// foreground write ACK gating through the durable WriteObserver seam.
+	// Replication acknowledgement profile. best-effort is the beta
+	// default. sync-quorum / sync-all opt into foreground write ACK
+	// gating through the durable WriteObserver seam.
 	replicationAck string
 }
 
@@ -132,13 +123,13 @@ func parseFlags(args []string) (flags, error) {
 	fs.StringVar(&f.ctrlAddr, "ctrl-addr", "", "control-path address (required)")
 	fs.DurationVar(&f.hbInterval, "heartbeat-interval", 2*time.Second, "heartbeat send interval")
 	fs.BoolVar(&f.printReadyLine, "t0-print-ready", false, "internal test-only: emit one structured JSON line on stdout on first assignment")
-	fs.BoolVar(&f.enableT1Readiness, "t1-readiness", false, "enable T1 readiness bridge (HealthyPathExecutor) so adapter projection reaches Healthy")
+	fs.BoolVar(&f.enableT1Readiness, "t1-readiness", false, "enable readiness bridge (HealthyPathExecutor) so adapter projection reaches Healthy")
 	fs.StringVar(&f.statusAddr, "status-addr", "", "address for the status HTTP endpoint (e.g. 127.0.0.1:0); empty disables")
-	fs.BoolVar(&f.statusRecovery, "status-recovery", false, "G5-5 opt-in: expose /status/recovery?volume=<id> with engine.ReplicaProjection (Mode/R/S/H/RecoveryDecision); off by default; loopback-only; intended for hardware test orchestration")
-	fs.StringVar(&f.iscsiListen, "iscsi-listen", "", "iSCSI target bind address (e.g. 127.0.0.1:0); empty disables. Loopback-only in T2 scope (no auth)")
+	fs.BoolVar(&f.statusRecovery, "status-recovery", false, "expose /status/recovery?volume=<id> with engine.ReplicaProjection (Mode/R/S/H/RecoveryDecision); off by default; loopback-only; intended for hardware test orchestration")
+	fs.StringVar(&f.iscsiListen, "iscsi-listen", "", "iSCSI target bind address (e.g. 127.0.0.1:0); empty disables. Loopback-only (no auth)")
 	fs.StringVar(&f.iscsiIQN, "iscsi-iqn", "", "iSCSI target IQN (required if --iscsi-listen is set)")
 	fs.UintVar(&f.iscsiLUN, "iscsi-lun", 0, "iSCSI LUN id (default 0)")
-	fs.StringVar(&f.nvmeListen, "nvme-listen", "", "NVMe/TCP target bind address (e.g. 127.0.0.1:0); empty disables. Loopback-only in T2 scope (no auth)")
+	fs.StringVar(&f.nvmeListen, "nvme-listen", "", "NVMe/TCP target bind address (e.g. 127.0.0.1:0); empty disables. Loopback-only (no auth)")
 	fs.StringVar(&f.nvmeSubsysNQN, "nvme-subsysnqn", "", "NVMe subsystem NQN (required if --nvme-listen is set)")
 	fs.UintVar(&f.nvmeNS, "nvme-ns", 1, "NVMe namespace id (default 1)")
 	fs.StringVar(&f.durableRoot, "durable-root", "", "directory for persistent storage files; empty = memback (non-durable)")
@@ -146,8 +137,8 @@ func parseFlags(args []string) (flags, error) {
 	fs.UintVar(&f.durableBlocks, "durable-blocks", 2048, "number of blocks per volume on first create (ignored when opening existing)")
 	fs.UintVar(&f.durableBlockSize, "durable-blocksize", 4096, "block size in bytes on first create")
 	fs.Uint64Var(&f.walRetentionLSNs, "wal-retention-lsns", 0,
-		"G6 §1.A α: WAL retention window past checkpoint LSN (walstore only). "+
-			"Zero (default) preserves pre-G6 strict checkpoint-driven recycle. "+
+		"WAL retention window past checkpoint LSN (walstore only). "+
+			"Zero (default) preserves strict checkpoint-driven recycle. "+
 			"Non-zero relaxes the recovery-scan recycle gate so a replica lagging "+
 			"within the configured envelope still has a catch-up scan path; once a "+
 			"replica falls past this window the engine escalates to rebuild. "+
@@ -156,24 +147,24 @@ func parseFlags(args []string) (flags, error) {
 			"and ignores this flag. Recommended starting value for sustained-write "+
 			"workloads on walstore: 10000 LSNs (sized to expected replica lag).")
 	fs.DurationVar(&f.degradedProbeInterval, "degraded-probe-interval", 0,
-		"G5-5C primary-side degraded-peer probe loop interval; 0 = OFF (default; existing G5-4 behavior preserved). "+
+		"primary-side degraded-peer probe loop interval; 0 = OFF (default). "+
 			"Recommended production value: 5s. Distinct from --degraded-probe-cooldown-base: this is how often "+
 			"the loop wakes up; cooldown-base is how long a single peer is gated AFTER a probe attempt.")
 	fs.DurationVar(&f.degradedProbeCooldownBase, "degraded-probe-cooldown-base", 5*time.Second,
-		"G5-5C per-peer cooldown after a probe attempt (also the reset value after a successful probe). "+
+		"per-peer cooldown after a probe attempt (also the reset value after a successful probe). "+
 			"Doubled on consecutive failures up to --degraded-probe-cooldown-cap. "+
 			"Ignored when --degraded-probe-interval=0.")
 	fs.DurationVar(&f.degradedProbeCooldownCap, "degraded-probe-cooldown-cap", 60*time.Second,
-		"G5-5C per-peer cooldown ceiling for the consecutive-failure backoff. "+
+		"per-peer cooldown ceiling for the consecutive-failure backoff. "+
 			"Must be >= --degraded-probe-cooldown-base; values below base are normalized up to base. "+
 			"Ignored when --degraded-probe-interval=0.")
 	fs.StringVar(&f.recoveryMode, "recovery-mode", "legacy",
-		"G7-redo: recovery path. \"legacy\" (default) = single-lane "+
+		"recovery path. \"legacy\" (default) = single-lane "+
 			"core/transport rebuild. \"dual-lane\" = core/recovery PrimaryBridge "+
 			"with separate listener at data-addr port+1. Default flip is a "+
-			"separate ops PR after dual-lane GREEN milestone.")
+			"separate change after dual-lane is GREEN in CI/hardware.")
 	fs.StringVar(&f.replicationAck, "replication-ack", "best-effort",
-		"G9A replication acknowledgement profile: \"best-effort\" (default), \"sync-quorum\", or \"sync-all\". "+
+		"replication acknowledgement profile: \"best-effort\" (default), \"sync-quorum\", or \"sync-all\". "+
 			"sync-* modes fail foreground writes when required replica acknowledgement is unavailable.")
 	fs.SetOutput(os.Stderr)
 	if err := fs.Parse(args); err != nil {
@@ -252,13 +243,11 @@ func parseReplicationAckProfile(profile string) (replication.DurabilityMode, dur
 // computeFrontendVolumeSize returns the byte capacity an iSCSI/NVMe
 // target should advertise: durableBlocks × blockSize.
 //
-// G5-5C addendum (P0 product fix, architect ruling 2026-04-28):
-// without this, the frontend silently used 1 MiB defaults regardless
-// of the daemon's actual durable config, breaking any workload above
-// 1 MiB. Inscribed as INV-G5-FRONTEND-CAPACITY-FROM-DURABLE-CONFIG —
-// "iSCSI/NVMe externally-visible volume capacity and block count
-// must derive from --durable-blocks × --durable-blocksize, not
-// silently fall back to frontend defaults."
+// iSCSI/NVMe externally-visible volume capacity and block count must
+// derive from --durable-blocks × --durable-blocksize, not silently
+// fall back to frontend defaults — otherwise the frontend would use
+// 1 MiB defaults regardless of the daemon's actual durable config,
+// breaking any workload above 1 MiB.
 //
 // Overflow guard: blocks × blockSize is computed in uint64 and a
 // fits-in-uint64 check is applied (32×32 → 64 cannot overflow today
@@ -280,11 +269,10 @@ func computeFrontendVolumeSize(blocks uint, blockSize uint) (uint64, error) {
 	return out, nil
 }
 
-// enforceFrontendLoopbackBind mirrors volume.StatusServer's
-// guard for any T2 frontend (iscsi / nvme): refuses to bind on
-// anything other than 127.0.0.1 / ::1. T2 frontends are
-// unauthenticated (sketch §6); real-network exposure lands
-// with T8 (security).
+// enforceFrontendLoopbackBind mirrors volume.StatusServer's guard for
+// any frontend (iscsi / nvme): refuses to bind on anything other than
+// 127.0.0.1 / ::1. Frontends are currently unauthenticated;
+// real-network exposure waits on the security track.
 func enforceFrontendLoopbackBind(kind, addr string) error {
 	host, _, err := net.SplitHostPort(addr)
 	if err != nil {
@@ -295,7 +283,7 @@ func enforceFrontendLoopbackBind(kind, addr string) error {
 	}
 	ip := net.ParseIP(host)
 	if ip == nil || !ip.IsLoopback() {
-		return fmt.Errorf("--%s-listen %q is not loopback; T2 %s target is unauthenticated and refuses external binds", kind, addr, kind)
+		return fmt.Errorf("--%s-listen %q is not loopback; %s target is unauthenticated and refuses external binds", kind, addr, kind)
 	}
 	return nil
 }
@@ -413,7 +401,7 @@ func run(f flags) int {
 			StorageRoot:      f.durableRoot,
 			BlockSize:        int(f.durableBlockSize),
 			NumBlocks:        uint32(f.durableBlocks),
-			WALRetentionLSNs: f.walRetentionLSNs, // G6 §1.A α
+			WALRetentionLSNs: f.walRetentionLSNs,
 		}
 		dp, err := durable.NewDurableProvider(cfg, h.ProjectionView())
 		if err != nil {
@@ -429,9 +417,9 @@ func run(f flags) int {
 		durableProv = dp
 		provider = dp
 
-		// G5-4: open storage role-agnostically via EnsureStorage so
-		// replica roles (assigned to SUPPORTING, never reach Healthy
-		// via projection) can still expose LogicalStorage to
+		// Open storage role-agnostically via EnsureStorage so replica
+		// roles (assigned to SUPPORTING, never reach Healthy via
+		// projection) can still expose LogicalStorage to
 		// ReplicaListener. The Healthy-gated dp.Open path is reserved
 		// for frontend consumers (iSCSI / NVMe targets); they call it
 		// when they accept their first I/O. Primary role: dp.Open
@@ -464,11 +452,10 @@ func run(f flags) int {
 		provider = memback.NewProvider(h.ProjectionView())
 	}
 
-	// G5-4: bind the T4 replication stack — ReplicationVolume for
-	// outbound peer fan-out (primary role) + ReplicaListener for
-	// incoming WAL traffic (replica role). Both code paths are bound
-	// at startup; whichever role the master assignment selects is the
-	// active one (INV-BIN-WIRING-ROLE-FROM-ASSIGNMENT). Construction
+	// Bind the replication stack — ReplicationVolume for outbound peer
+	// fan-out (primary role) + ReplicaListener for incoming WAL traffic
+	// (replica role). Both code paths are bound at startup; whichever
+	// role the master assignment selects is the active one. Construction
 	// is post-dp.RecoverVolume because both borrow the same
 	// LogicalStorage the durable Backend wraps; the LogicalStorage
 	// isn't usable until recovery completes.
@@ -513,15 +500,15 @@ func run(f flags) int {
 		replVolume.SetDurabilityMode(repMode)
 		h.SetReplicationVolume(replVolume)
 
-		// G7-redo: when --recovery-mode=dual-lane, inject the dual-lane
-		// executor factory so per-peer BlockExecutors route StartRebuild
-		// through core/recovery's PrimaryBridge. Per-volume coordinator
-		// is shared across all peers so MinPinAcrossActiveSessions
-		// reflects the true minimum (wiring plan §5).
+		// When --recovery-mode=dual-lane, inject the dual-lane executor
+		// factory so per-peer BlockExecutors route StartRebuild through
+		// core/recovery's PrimaryBridge. Per-volume coordinator is
+		// shared across all peers so MinPinAcrossActiveSessions
+		// reflects the true minimum.
 		//
 		// Dual-lane address derivation: peer.DataAddr's port + 1.
 		// Convention only — production may eventually carry a separate
-		// dual-lane field in AssignmentFact. See wiring plan §4 Option A.
+		// dual-lane field in AssignmentFact.
 		if f.recoveryMode == "dual-lane" {
 			recoveryCoord := recovery.NewPeerShipCoordinator()
 			replVolume.SetDualLaneExecutorFactory(func(s storage.LogicalStorage, replicaAddr, replicaID string) *transport.BlockExecutor {
@@ -536,43 +523,39 @@ func run(f flags) int {
 				}
 				return transport.NewBlockExecutorWithDualLane(s, replicaAddr, peerDualLane, recoveryCoord, recovery.ReplicaID(replicaID))
 			})
-			// G7-redo 2.5: install the recycle-floor gate on the
-			// substrate so the WAL recycle path consults the
-			// per-volume coordinator's MinPinAcrossActiveSessions.
-			// Skipped silently when substrate doesn't implement
-			// RecycleFloorGate (BlockStore today, smartwal until it
-			// opts in). walstore + memorywal both satisfy.
+			// Install the recycle-floor gate on the substrate so the
+			// WAL recycle path consults the per-volume coordinator's
+			// MinPinAcrossActiveSessions. Skipped silently when
+			// substrate doesn't implement RecycleFloorGate.
+			// walstore + memorywal both satisfy.
 			if gate, ok := store.(storage.RecycleFloorGate); ok {
 				gate.SetRecycleFloorSource(recoveryCoord)
-				fmt.Fprintln(os.Stderr, "blockvolume: G7-redo 2.5 recycle gate installed (substrate honors min(pin_floor))")
+				fmt.Fprintln(os.Stderr, "blockvolume: dual-lane recycle gate installed (substrate honors min(pin_floor))")
 			} else {
-				fmt.Fprintln(os.Stderr, "blockvolume: G7-redo 2.5 substrate does not implement RecycleFloorGate; pin_floor advances unenforced at recycle")
+				fmt.Fprintln(os.Stderr, "blockvolume: dual-lane substrate does not implement RecycleFloorGate; pin_floor advances unenforced at recycle")
 			}
-			fmt.Fprintln(os.Stderr, "blockvolume: G7-redo recovery-mode=dual-lane (PrimaryBridge per-peer; coord per-volume)")
+			fmt.Fprintln(os.Stderr, "blockvolume: recovery-mode=dual-lane (PrimaryBridge per-peer; coord per-volume)")
 		}
 
-		// G5-5C: configure + start the degraded-peer probe loop if
-		// the operator opted in via --degraded-probe-interval > 0.
-		// Off by default — preserves G5-4 behavior. Architect-bound
-		// 2026-04-27 §1.A: probe loop owned by ReplicationVolume
-		// lifecycle; volume.Close stops the loop before peer
-		// teardown (already implemented in core/replication).
+		// Configure + start the degraded-peer probe loop if the
+		// operator opted in via --degraded-probe-interval > 0. Off by
+		// default. The probe loop is owned by ReplicationVolume
+		// lifecycle; volume.Close stops the loop before peer teardown.
 		//
-		// Self-check items (architect Batch #5 review 2026-04-27):
-		//   #1 interval=0 → don't Configure (loop stays absent)
-		//   #2 cooldown-base/cap normalized in NewProbeLoop (cap < base
-		//      is bumped up to base; 0 → defaults)
-		//   #3 production probeFn from volume.ProductionProbeFn —
-		//      releases peer.mu before transport call (loop discipline);
-		//      transport failure → non-nil err (advances backoff);
-		//      transport success → nil err (resets cooldown).
-		//   #4 Configure→Start ordering — Configure here, Start
-		//      ALSO here (peers may or may not exist yet; empty peer
-		//      set is safely no-op per Batch 3 HappyPath).
+		// Notes:
+		//   - interval=0 → don't Configure (loop stays absent)
+		//   - cooldown-base/cap normalized in NewProbeLoop (cap < base
+		//     is bumped up to base; 0 → defaults)
+		//   - production probeFn from volume.ProductionProbeFn —
+		//     releases peer.mu before transport call; transport failure
+		//     → non-nil err (advances backoff); transport success →
+		//     nil err (resets cooldown).
+		//   - Configure→Start ordering — both here (peers may or may
+		//     not exist yet; empty peer set is safely no-op).
 		if f.degradedProbeInterval > 0 {
-			// G5-5C Batch #7: per-peer adapter registry is the engine
-			// state holder for each admitted peer (NOT for the host's
-			// own slot, which already has h.Adapter()). The probe loop's
+			// Per-peer adapter registry is the engine state holder for
+			// each admitted peer (NOT for the host's own slot, which
+			// already has h.Adapter()). The probe loop's
 			// ProductionProbeFn routes per-peer via this registry so
 			// engine.checkReplicaID accepts the events.
 			peerRegistry := volume.NewPeerAdapterRegistry(f.volumeID, f.replicaID)
@@ -591,7 +574,7 @@ func run(f flags) int {
 
 			loopCfg := replication.ProbeLoopConfig{
 				Interval:      f.degradedProbeInterval,
-				MaxConcurrent: 1, // architect-bound v0.5 — only 1 supported
+				MaxConcurrent: 1, // only 1 supported in this version
 				CooldownBase:  f.degradedProbeCooldownBase,
 				CooldownCap:   f.degradedProbeCooldownCap,
 			}
@@ -626,9 +609,9 @@ func run(f flags) int {
 		}
 
 		// Wire the backend's WriteObserver eagerly via the Backend
-		// accessor (G5-4: same StorageBackend instance dp.Open returns
-		// later for primary-role frontend bind). Without this hook,
-		// primary writes would land locally but never ship to peers.
+		// accessor (same StorageBackend instance dp.Open returns later
+		// for primary-role frontend bind). Without this hook, primary
+		// writes would land locally but never ship to peers.
 		if sb := durableProv.Backend(f.volumeID); sb != nil {
 			sb.SetWriteObserver(replVolume)
 			sb.SetWriteAckPolicy(writeAck)
@@ -652,13 +635,13 @@ func run(f flags) int {
 		listener.Serve()
 		replListen = listener
 
-		// G7-redo: when --recovery-mode=dual-lane, also bind a separate
-		// listener at port=data-addr-port+1 for inbound dual-lane
-		// recover-session connections. Each accepted conn is handed to
-		// a fresh recovery.Receiver via ReplicaBridge.AcceptDualLaneLoop.
+		// When --recovery-mode=dual-lane, also bind a separate listener
+		// at port=data-addr-port+1 for inbound dual-lane recover-session
+		// connections. Each accepted conn is handed to a fresh
+		// recovery.Receiver via ReplicaBridge.AcceptDualLaneLoop.
 		// Listener lifecycle is goroutine-scoped here; daemon shutdown
 		// closes the underlying net.Listener via the deferred close
-		// added below (via the dualLaneListener variable + cleanup).
+		// added below.
 		if f.recoveryMode == "dual-lane" {
 			dualLaneAddr, err := deriveDualLaneAddr(f.dataAddr)
 			if err != nil {
@@ -695,24 +678,21 @@ func run(f flags) int {
 				dualLaneCancel()
 				_ = dlLn.Close()
 			}()
-			fmt.Fprintf(os.Stderr, "blockvolume: G7-redo dual-lane listener bound at %s\n", dualLaneAddr)
+			fmt.Fprintf(os.Stderr, "blockvolume: dual-lane listener bound at %s\n", dualLaneAddr)
 		}
 	}
 
-	// G5-5C addendum (architect ruling 2026-04-28): frontend volume
-	// capacity MUST derive from the daemon's --durable-blocks ×
-	// --durable-blocksize when --durable-root is set, not silently
-	// fall back to frontend defaults. Without this plumb-through,
-	// iSCSI/NVMe advertise 1 MiB regardless of the daemon's actual
-	// durable capacity, which breaks any workload > 1 MiB.
+	// Frontend volume capacity MUST derive from the daemon's
+	// --durable-blocks × --durable-blocksize when --durable-root is
+	// set, not silently fall back to frontend defaults. Without this
+	// plumb-through, iSCSI/NVMe advertise 1 MiB regardless of the
+	// daemon's actual durable capacity, which breaks any workload
+	// > 1 MiB.
 	//
 	// Memback path (--durable-root unset): keep frontend defaults.
 	// The frontend HandlerConfig zero-value path picks
 	// DefaultBlockSize=512 + DefaultVolumeBlocks=2048 (1 MiB) which
-	// is the historical memback contract and what the existing T2
-	// tests expect.
-	//
-	// Pinned by: INV-G5-FRONTEND-CAPACITY-FROM-DURABLE-CONFIG.
+	// is the historical memback contract.
 	var (
 		frontendBlockSize  uint32
 		frontendVolumeSize uint64
@@ -785,10 +765,10 @@ func run(f flags) int {
 			SubsysNQN: f.nvmeSubsysNQN,
 			VolumeID:  f.volumeID,
 			Provider:  prov,
-			// G5-5C addendum: capacity from durable config (see iSCSI block above).
+			// Capacity from durable config (see iSCSI block above).
 			// frontendBlockSize / frontendVolumeSize are 0 on memback
 			// path; nvme HandlerConfig zero-value defaulting preserves
-			// historical 1 MiB / 512 B contract for T2 tests.
+			// the historical 1 MiB / 512 B contract.
 			Handler: nvme.HandlerConfig{
 				NSID:       uint32(f.nvmeNS),
 				BlockSize:  frontendBlockSize,
@@ -834,10 +814,10 @@ func run(f flags) int {
 	if iscsiTarget != nil {
 		_ = iscsiTarget.Close()
 	}
-	// G5-4: tear down replication BEFORE durable storage close
-	// (INV-BIN-WIRING-LISTENER-LIFECYCLE-LIFO). Listener closes its
-	// accept loop + in-flight handler conns; ReplicationVolume closes
-	// its outbound peer connections. Both borrow LogicalStorage that
+	// Tear down replication BEFORE durable storage close (LIFO
+	// listener lifecycle). Listener closes its accept loop +
+	// in-flight handler conns; ReplicationVolume closes its outbound
+	// peer connections. Both borrow LogicalStorage that
 	// durableProv.Close will release; tearing them down first
 	// prevents use-after-free on the storage handle.
 	if replListen != nil {
