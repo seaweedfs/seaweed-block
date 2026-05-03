@@ -1,6 +1,6 @@
 # seaweed-block
 
-Alpha-stage block storage for Kubernetes.
+Alpha-stage CSI block storage for Kubernetes.
 
 <p align="center">
   <img src="docs/assets/seaweed-block-hero.svg" alt="seaweed-block alpha architecture: Kubernetes PVC to CSI, blockmaster, blockvolume, iSCSI, and WAL recovery" width="100%">
@@ -10,9 +10,14 @@ Alpha-stage block storage for Kubernetes.
   <strong>Alpha</strong> · Kubernetes CSI · iSCSI today · WAL-backed recovery design · RF=2/RF=3 roadmap
 </p>
 
-`seaweed-block` is an early block-storage project exploring a simpler path for
-small Kubernetes clusters that need persistent volumes without adopting a large
-storage platform on day one.
+`seaweed-block` is an early project for Kubernetes users who want simple
+PersistentVolumes backed by a small CSI block-storage service.
+
+The immediate target is practical: create a PVC, attach it through CSI, mount it
+through standard Linux iSCSI tooling, write data from a pod, read it back, and
+clean up. The longer-term target is a compact replicated block service for small
+clusters that want RF=2/RF=3 without adopting a large storage platform on day
+one.
 
 It is not production-ready. The current code can run a single-node Kubernetes
 alpha smoke path: dynamic PVC creation, CSI attach/stage, iSCSI mount, pod
@@ -22,15 +27,16 @@ hardening before it should be used for real workloads.
 
 ## Why This Exists
 
-Many teams want block storage that is easy to deploy and reason about:
+Many Kubernetes teams want persistent volumes that are easy to deploy and reason
+about:
 
 - small companies running a few Kubernetes nodes
-- developers who want a local or lab block service
+- developers who want a local or lab CSI storage service
 - teams that find Ceph too large for their first storage step
-- users who want CSI volumes without hiding recovery semantics behind a black box
+- users who want PVCs without hiding recovery semantics behind a black box
 
 The goal is not to replace mature storage systems today. The goal is to build a
-small, inspectable block service that can grow carefully toward RF=2/RF=3,
+small, inspectable CSI block service that can grow carefully toward RF=2/RF=3,
 failover, recovery, and Kubernetes-native operations.
 
 ## Technical Direction
