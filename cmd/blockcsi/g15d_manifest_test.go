@@ -62,7 +62,11 @@ func TestG15d_K8sRunner_AppliesLauncherGeneratedManifest(t *testing.T) {
 		"kubectl apply -f \"$ARTIFACT_DIR/generated-blockvolume.yaml\"",
 		"kubectl -n kube-system wait --for=condition=available deploy -l app=sw-blockvolume",
 		"kubectl -n kube-system logs -l sw-block.seaweedfs.com/volume",
-		"PASS: dynamic PVC pod completed checksum write/read",
+		"kubectl -n \"$NAMESPACE\" delete pvc sw-block-dynamic-v1",
+		"wait for launcher manifest cleanup after DeleteVolume",
+		"delete generated blockvolume Deployment after manifest cleanup",
+		"iscsi-sessions.after-delete.txt",
+		"PASS: dynamic PVC create/delete completed checksum write/read and cleanup",
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("runner missing %q", want)

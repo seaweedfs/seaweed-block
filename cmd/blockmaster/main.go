@@ -279,6 +279,7 @@ func runLifecycleLauncherTick(h *master.Host, f flags) error {
 	if masterAddr == "" {
 		masterAddr = h.Addr()
 	}
+	var rendered []launcher.RenderedManifest
 	for _, plan := range result.Plans {
 		manifests, err := launcher.RenderBlockVolumeDeployments(plan, launcher.K8sRenderConfig{
 			Namespace:       f.launcherNamespace,
@@ -289,9 +290,10 @@ func runLifecycleLauncherTick(h *master.Host, f flags) error {
 		if err != nil {
 			return err
 		}
-		if err := launcher.WriteRenderedManifests(f.launcherManifestDir, manifests); err != nil {
-			return err
-		}
+		rendered = append(rendered, manifests...)
+	}
+	if err := launcher.SyncRenderedManifests(f.launcherManifestDir, rendered); err != nil {
+		return err
 	}
 	return nil
 }

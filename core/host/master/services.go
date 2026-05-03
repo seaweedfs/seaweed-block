@@ -72,6 +72,9 @@ func (s *services) DeleteVolume(ctx context.Context, req *control.DeleteVolumeRe
 	if req.GetVolumeId() == "" {
 		return nil, status.Error(codes.InvalidArgument, "volume_id is required")
 	}
+	if err := stores.Placements.DeletePlacement(req.GetVolumeId()); err != nil {
+		return nil, lifecycleError("delete placement", err)
+	}
 	if err := stores.Volumes.DeleteVolume(req.GetVolumeId()); err != nil {
 		return nil, lifecycleError("delete volume", err)
 	}

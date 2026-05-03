@@ -5,6 +5,7 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/seaweedfs/seaweed-block/core/lifecycle"
 	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -79,6 +80,45 @@ func TestG15c_LifecycleService_DeleteVolumeRemovesDesiredIntent(t *testing.T) {
 	}
 	if _, ok := h.Lifecycle().Volumes.GetVolume("pvc-a"); ok {
 		t.Fatal("desired volume still present after delete")
+	}
+}
+
+func TestG15e_LifecycleService_DeleteVolumeRemovesPlacementIntent(t *testing.T) {
+	h := newTestMaster(t, t.TempDir())
+	defer closeTestMaster(t, h)
+	svc := newServices(h)
+	stores := h.Lifecycle()
+	if _, err := svc.CreateVolume(context.Background(), &control.CreateVolumeRequest{
+		VolumeId:          "pvc-a",
+		SizeBytes:         1 << 20,
+		ReplicationFactor: 1,
+	}); err != nil {
+		t.Fatalf("CreateVolume: %v", err)
+	}
+	if _, err := stores.Placements.ApplyPlan(lifecycle.PlacementPlan{
+		VolumeID:  "pvc-a",
+		DesiredRF: 1,
+		Candidates: []lifecycle.PlacementCandidate{{
+			VolumeID:  "pvc-a",
+			ServerID:  "m02",
+			PoolID:    "default",
+			ReplicaID: "r1",
+			Source:    lifecycle.PlacementSourceExistingReplica,
+		}},
+	}); err != nil {
+		t.Fatalf("ApplyPlan: %v", err)
+	}
+	if _, err := svc.DeleteVolume(context.Background(), &control.DeleteVolumeRequest{VolumeId: "pvc-a"}); err != nil {
+		t.Fatalf("DeleteVolume: %v", err)
+	}
+	if _, ok := stores.Volumes.GetVolume("pvc-a"); ok {
+		t.Fatal("desired volume still present after delete")
+	}
+	if _, ok := stores.Placements.GetPlacement("pvc-a"); ok {
+		t.Fatal("placement intent still present after delete")
+	}
+	if _, ok := h.Publisher().VolumeAuthorityLine("pvc-a"); ok {
+		t.Fatal("DeleteVolume must not mint or mutate authority")
 	}
 }
 
