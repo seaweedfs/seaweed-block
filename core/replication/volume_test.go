@@ -276,6 +276,53 @@ func TestG9A_ReplicationVolume_OnLocalWrite_SyncQuorumRF2FailsRecoveringPeer(t *
 	}
 }
 
+func TestG9A_ReplicationVolume_OnLocalWrite_SyncQuorumRF3ToleratesOneRecoveringPeer(t *testing.T) {
+	addr1, replica1 := replicaHarness(t, "r1")
+	addr2, _ := replicaHarness(t, "r2")
+	v := volumeHarness(t, "vol-g9a-sync-quorum-rf3-one-recovering")
+	v.SetDurabilityMode(DurabilitySyncQuorum)
+	if err := v.UpdateReplicaSet(0, []ReplicaTarget{
+		targetFor("r1", addr1, 1, 1),
+		targetFor("r2", addr2, 1, 1),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	v.mu.Lock()
+	v.peers["r2"].SetState(ReplicaCatchingUp)
+	v.mu.Unlock()
+
+	data := make([]byte, 4096)
+	data[0] = 0xD9
+	if err := v.OnLocalWrite(context.Background(), LocalWrite{LBA: 6, Data: data, LSN: 1}); err != nil {
+		t.Fatalf("sync_quorum RF=3 should tolerate one recovering peer, got %v", err)
+	}
+	waitForReplicaLBA(t, replica1, 6, 0xD9, 0x00, 2*time.Second)
+}
+
+func TestG9A_ReplicationVolume_OnLocalWrite_SyncQuorumRF3FailsTwoRecoveringPeers(t *testing.T) {
+	addr1, _ := replicaHarness(t, "r1")
+	addr2, _ := replicaHarness(t, "r2")
+	v := volumeHarness(t, "vol-g9a-sync-quorum-rf3-two-recovering")
+	v.SetDurabilityMode(DurabilitySyncQuorum)
+	if err := v.UpdateReplicaSet(0, []ReplicaTarget{
+		targetFor("r1", addr1, 1, 1),
+		targetFor("r2", addr2, 1, 1),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	v.mu.Lock()
+	v.peers["r1"].SetState(ReplicaCatchingUp)
+	v.peers["r2"].SetState(ReplicaCatchingUp)
+	v.mu.Unlock()
+
+	data := make([]byte, 4096)
+	data[0] = 0xE9
+	err := v.OnLocalWrite(context.Background(), LocalWrite{LBA: 7, Data: data, LSN: 1})
+	if !strings.Contains(fmt.Sprint(err), ErrDurabilityQuorumLost.Error()) {
+		t.Fatalf("sync_quorum RF=3 with two recovering peers should fail write ack, got %v", err)
+	}
+}
+
 // --- Test 5 ---
 
 // TestReplicationVolume_OnLocalWrite_PeerErrorDoesNotFailCaller —
