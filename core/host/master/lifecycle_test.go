@@ -2,6 +2,10 @@ package master
 
 import (
 	"context"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -64,6 +68,23 @@ func TestMasterLifecycleStore_OpensRegistrationStoresWithoutAuthority(t *testing
 	if _, ok := h.Publisher().VolumeAuthorityLine("vol-a"); ok {
 		t.Fatal("lifecycle registration must not mint authority")
 	}
+	snapshot, ok := h.LifecycleSnapshot()
+	if !ok {
+		t.Fatal("missing lifecycle snapshot")
+	}
+	if len(snapshot.Volumes) != 1 || len(snapshot.Nodes) != 2 || len(snapshot.Placements) != 1 {
+		t.Fatalf("snapshot counts got volumes=%d nodes=%d placements=%d",
+			len(snapshot.Volumes), len(snapshot.Nodes), len(snapshot.Placements))
+	}
+}
+
+func TestMasterLifecycleSnapshot_IsNotAuthorityShaped(t *testing.T) {
+	typ := mustParseStruct(t, "lifecycle_snapshot.go", "LifecycleSnapshot")
+	for _, forbidden := range []string{"Epoch", "EndpointVersion", "Assignment", "Ready", "Healthy", "Primary"} {
+		if _, ok := typ.Fields[forbidden]; ok {
+			t.Fatalf("LifecycleSnapshot must not carry %s", forbidden)
+		}
+	}
 }
 
 func newTestMaster(t *testing.T, lifecycleDir string) *Host {
@@ -78,6 +99,41 @@ func newTestMaster(t *testing.T, lifecycleDir string) *Host {
 	}
 	h.Start()
 	return h
+}
+
+type parsedStruct struct {
+	Fields map[string]struct{}
+}
+
+func mustParseStruct(t *testing.T, fileName, structName string) parsedStruct {
+	t.Helper()
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, filepath.Clean(fileName), nil, 0)
+	if err != nil {
+		t.Fatalf("parse %s: %v", fileName, err)
+	}
+	var out parsedStruct
+	ast.Inspect(file, func(n ast.Node) bool {
+		typeSpec, ok := n.(*ast.TypeSpec)
+		if !ok || typeSpec.Name.Name != structName {
+			return true
+		}
+		st, ok := typeSpec.Type.(*ast.StructType)
+		if !ok {
+			t.Fatalf("%s is not a struct", structName)
+		}
+		out.Fields = make(map[string]struct{})
+		for _, field := range st.Fields.List {
+			for _, name := range field.Names {
+				out.Fields[name.Name] = struct{}{}
+			}
+		}
+		return false
+	})
+	if out.Fields == nil {
+		t.Fatalf("struct %s not found in %s", structName, fileName)
+	}
+	return out
 }
 
 func closeTestMaster(t *testing.T, h *Host) {
