@@ -136,6 +136,64 @@ func TestG9A_StatusProjection_EngineRecoveringMapsReplicationRole(t *testing.T) 
 	}
 }
 
+func TestG9B_StatusProjection_GenesisObservedBeforeAssignment_NotFrontendReady(t *testing.T) {
+	p := stubProjector{p: engine.ReplicaProjection{}}
+	s := NewStatusServer(NewAdapterProjectionView(p, "v1", "r1", nil))
+	addr, err := s.Start("127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer func() { _ = s.Close(context.Background()) }()
+	resp, err := http.Get("http://" + addr + "/status?volume=v1")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("status: got %d want 200", resp.StatusCode)
+	}
+	var body StatusProjection
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.FrontendPrimaryReady || body.Healthy {
+		t.Fatalf("observed process before assignment must not be frontend-ready: %+v", body)
+	}
+	if body.AuthorityRole != AuthorityRoleUnknown {
+		t.Fatalf("authority role = %q want %q", body.AuthorityRole, AuthorityRoleUnknown)
+	}
+}
+
+func TestG9B_StatusProjection_AssignmentConsumed_MakesFrontendPrimaryReady(t *testing.T) {
+	p := stubProjector{p: engine.ReplicaProjection{
+		Mode: engine.ModeHealthy, Epoch: 1, EndpointVersion: 1,
+	}}
+	s := NewStatusServer(NewAdapterProjectionView(p, "v1", "r1", nil))
+	addr, err := s.Start("127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer func() { _ = s.Close(context.Background()) }()
+	resp, err := http.Get("http://" + addr + "/status?volume=v1")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("status: got %d want 200", resp.StatusCode)
+	}
+	var body StatusProjection
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !body.FrontendPrimaryReady || !body.Healthy {
+		t.Fatalf("assignment-consumed healthy projection must be frontend-ready: %+v", body)
+	}
+	if body.AuthorityRole != AuthorityRolePrimary {
+		t.Fatalf("authority role = %q want %q", body.AuthorityRole, AuthorityRolePrimary)
+	}
+}
+
 func TestStatusServer_MissingVolume_Returns400(t *testing.T) {
 	s := NewStatusServer(NewAdapterProjectionView(stubProjector{}, "v1", "r1", nil))
 	addr, err := s.Start("127.0.0.1:0")
