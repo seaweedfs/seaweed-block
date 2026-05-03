@@ -114,7 +114,9 @@ Currently demonstrated:
 - launcher-generated `blockvolume` Deployment
 - iSCSI frontend attach/mount
 - pod filesystem write/read checksum
-- CSI `DeleteVolume` cleanup path
+- CSI `DeleteVolume` cleanup path (the alpha smoke removes launcher-generated
+  blockvolume deployments today; a controller will replace this manual sweep,
+  see roadmap)
 - no dangling iSCSI session after cleanup in the lab run
 - TestOps registry and a minimal `cmd/sw-testops` CLI
 
