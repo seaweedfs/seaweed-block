@@ -102,6 +102,13 @@ func run(f flags) int {
 		fmt.Fprintln(os.Stderr, "blockmaster:", err)
 		return 1
 	}
+	if len(clusterImport.Nodes) > 0 {
+		if err := importLifecycleNodeInventory(h, clusterImport.Nodes); err != nil {
+			fmt.Fprintln(os.Stderr, "blockmaster:", err)
+			_ = h.Close(context.Background())
+			return 1
+		}
+	}
 	if len(clusterImport.Placements) > 0 {
 		if err := importLifecyclePlacementIntents(h, clusterImport.Placements); err != nil {
 			fmt.Fprintln(os.Stderr, "blockmaster:", err)
@@ -160,6 +167,19 @@ func loadProductInputs(f flags) (authority.AcceptedTopology, clusterSpecImport, 
 		return authority.AcceptedTopology{}, clusterSpecImport{}, err
 	}
 	return topo, imports, nil
+}
+
+func importLifecycleNodeInventory(h *master.Host, nodes []lifecycle.NodeRegistration) error {
+	stores := h.Lifecycle()
+	if stores == nil {
+		return fmt.Errorf("lifecycle node import requires --lifecycle-store")
+	}
+	for _, node := range nodes {
+		if _, err := stores.Nodes.RegisterNode(node); err != nil {
+			return fmt.Errorf("register lifecycle node %s: %w", node.ServerID, err)
+		}
+	}
+	return nil
 }
 
 func importLifecyclePlacementSeed(h *master.Host, path string) error {
