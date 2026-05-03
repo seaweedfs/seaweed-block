@@ -77,9 +77,20 @@ func NewAdapterProjectionView(a adapterProjector, volumeID, replicaID string, pr
 
 // Projection satisfies frontend.ProjectionView.
 func (v *AdapterProjectionView) Projection() frontend.Projection {
+	p, _ := v.projectionWithSupersede()
+	return p
+}
+
+// projectionWithSupersede returns the frontend projection plus the
+// reason bit that /status needs for G9A vocabulary. The frontend
+// still consumes Projection() above; this helper is package-local so
+// control-plane diagnostics can explain why Healthy is false without
+// changing the frontend contract.
+func (v *AdapterProjectionView) projectionWithSupersede() (frontend.Projection, bool) {
 	p := v.projector.Projection()
 	healthy := p.Mode == engine.ModeHealthy
-	if healthy && v.probe != nil && v.probe.IsSuperseded(v.replicaID, p.Epoch, p.EndpointVersion) {
+	superseded := healthy && v.probe != nil && v.probe.IsSuperseded(v.replicaID, p.Epoch, p.EndpointVersion)
+	if superseded {
 		healthy = false
 	}
 	return frontend.Projection{
@@ -88,7 +99,7 @@ func (v *AdapterProjectionView) Projection() frontend.Projection {
 		Epoch:           p.Epoch,
 		EndpointVersion: p.EndpointVersion,
 		Healthy:         healthy,
-	}
+	}, superseded
 }
 
 // EngineProjection returns the underlying engine.ReplicaProjection
