@@ -67,11 +67,13 @@ func RenderBlockVolumeDeployments(plan lifecycle.BlockVolumeWorkloadPlan, cfg K8
 						DNSPolicy:    "ClusterFirstWithHostNet",
 						NodeSelector: map[string]string{"kubernetes.io/hostname": replica.ServerID},
 						Containers: []container{{
-							Name:    "blockvolume",
-							Image:   cfg.Image,
-							Command: []string{"/usr/local/bin/blockvolume"},
-							Args:    blockVolumeArgs(plan, replica, cfg),
+							Name:         "blockvolume",
+							Image:        cfg.Image,
+							Command:      []string{"/usr/local/bin/blockvolume"},
+							Args:         blockVolumeArgs(plan, replica, cfg),
+							VolumeMounts: []volumeMount{{Name: "state", MountPath: "/var/lib/sw-block"}},
 						}},
+						Volumes: []volume{{Name: "state", EmptyDir: emptyDir{}}},
 					},
 				},
 			},
@@ -158,11 +160,25 @@ type podSpec struct {
 	DNSPolicy    string            `yaml:"dnsPolicy"`
 	NodeSelector map[string]string `yaml:"nodeSelector,omitempty"`
 	Containers   []container       `yaml:"containers"`
+	Volumes      []volume          `yaml:"volumes,omitempty"`
 }
 
 type container struct {
-	Name    string   `yaml:"name"`
-	Image   string   `yaml:"image"`
-	Command []string `yaml:"command,omitempty"`
-	Args    []string `yaml:"args"`
+	Name         string        `yaml:"name"`
+	Image        string        `yaml:"image"`
+	Command      []string      `yaml:"command,omitempty"`
+	Args         []string      `yaml:"args"`
+	VolumeMounts []volumeMount `yaml:"volumeMounts,omitempty"`
 }
+
+type volumeMount struct {
+	Name      string `yaml:"name"`
+	MountPath string `yaml:"mountPath"`
+}
+
+type volume struct {
+	Name     string   `yaml:"name"`
+	EmptyDir emptyDir `yaml:"emptyDir"`
+}
+
+type emptyDir struct{}
