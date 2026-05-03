@@ -144,7 +144,7 @@ export KUBECONFIG="${KUBECONFIG:-/etc/rancher/k3s/k3s.yaml}"
 Build local images:
 
 ```bash
-bash scripts/build-g15b-images.sh "$PWD"
+bash scripts/build-alpha-images.sh "$PWD"
 ```
 
 For k3s, import them:
@@ -163,7 +163,7 @@ bash scripts/run-k8s-alpha.sh "$PWD"
 Expected result:
 
 ```text
-[g15d] PASS: dynamic PVC create/delete completed checksum write/read and cleanup
+[alpha] PASS: dynamic PVC create/delete completed checksum write/read and cleanup
 ```
 
 For the manual `kubectl apply` flow, see:

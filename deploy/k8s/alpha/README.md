@@ -49,7 +49,7 @@ export KUBECONFIG="${KUBECONFIG:-/etc/rancher/k3s/k3s.yaml}"
 For local k3s/kind-style testing, build images with:
 
 ```bash
-bash scripts/build-g15b-images.sh "$PWD"
+bash scripts/build-alpha-images.sh "$PWD"
 ```
 
 For k3s, import them into containerd:

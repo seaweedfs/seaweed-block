@@ -4,12 +4,13 @@ set -euo pipefail
 ROOT="${1:-$(pwd)}"
 NAMESPACE="${G15D_NAMESPACE:-default}"
 ARTIFACT_DIR="${G15D_ARTIFACT_DIR:-/tmp/g15d-k8s-$(date -u +%Y%m%dT%H%M%SZ)}"
+RUN_LABEL="${SW_BLOCK_RUN_LABEL:-g15d}"
 
 mkdir -p "$ARTIFACT_DIR"
 POLL_LOG="$ARTIFACT_DIR/poll.log"
 
 log() {
-  printf '[g15d] %s\n' "$*" | tee -a "$ARTIFACT_DIR/run.log"
+  printf '[%s] %s\n' "$RUN_LABEL" "$*" | tee -a "$ARTIFACT_DIR/run.log"
 }
 
 require_cmd() {

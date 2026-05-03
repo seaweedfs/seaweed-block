@@ -217,10 +217,10 @@ func TestG15b_ImageBuildInputs_ContainExpectedBinariesAndNodeTools(t *testing.T)
 		}
 	}
 
-	buildScript := g15bReadScript(t, "build-g15b-images.sh")
+	buildScript := g15bReadScript(t, "build-alpha-images.sh")
 	for _, want := range []string{"Dockerfile.sw-block", "Dockerfile.blockcsi", "sw-block:local", "sw-block-csi:local"} {
 		if !strings.Contains(buildScript, want) {
-			t.Fatalf("build-g15b-images.sh missing %q", want)
+			t.Fatalf("build-alpha-images.sh missing %q", want)
 		}
 	}
 }
