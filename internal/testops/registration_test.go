@@ -136,6 +136,42 @@ func TestG15dK8sDynamicRegistrationBuildsShellDriver(t *testing.T) {
 	}
 }
 
+func TestG15eK8sDynamicCleanupRegistrationBuildsShellDriver(t *testing.T) {
+	repoRoot := findRepoRoot(t)
+	raw, err := os.Open(filepath.Join(repoRoot, "testops", "registry", "g15e-k8s-dynamic-cleanup.json"))
+	if err != nil {
+		t.Fatalf("open registration: %v", err)
+	}
+	defer raw.Close()
+
+	registration, err := DecodeRegistration(raw)
+	if err != nil {
+		t.Fatalf("DecodeRegistration: %v", err)
+	}
+	if registration.Scenario != "g15e-k8s-dynamic-cleanup" || registration.Driver.Type != "shell" {
+		t.Fatalf("registration=%+v", registration)
+	}
+	if registration.KnownGreenCommit != "ddec28c" {
+		t.Fatalf("known_green_commit=%q want ddec28c", registration.KnownGreenCommit)
+	}
+	driver, err := registration.NewDriver(repoRoot)
+	if err != nil {
+		t.Fatalf("NewDriver: %v", err)
+	}
+	shell, ok := driver.(ShellDriver)
+	if !ok {
+		t.Fatalf("driver type=%T want ShellDriver", driver)
+	}
+	if !filepath.IsAbs(shell.Path) || filepath.Base(shell.Path) != "run-g15d-k8s-dynamic.sh" {
+		t.Fatalf("shell path=%q", shell.Path)
+	}
+	for _, want := range []string{"delete-pvc.log", "delete-generated-blockvolume.log", "iscsi-sessions.after-delete.txt"} {
+		if !containsString(registration.Artifacts, want) {
+			t.Fatalf("registration artifacts missing %q: %v", want, registration.Artifacts)
+		}
+	}
+}
+
 func containsString(values []string, want string) bool {
 	for _, value := range values {
 		if value == want {
