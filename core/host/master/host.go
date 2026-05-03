@@ -263,6 +263,17 @@ func (h *Host) replicaSlotsFor(volumeID string) []string {
 		}
 		return out
 	}
+	if h.lifecycle != nil && h.lifecycle.Placements != nil {
+		if placement, ok := h.lifecycle.Placements.GetPlacement(volumeID); ok {
+			out := make([]string, 0, len(placement.Slots))
+			for _, slot := range placement.Slots {
+				if slot.ReplicaID != "" {
+					out = append(out, slot.ReplicaID)
+				}
+			}
+			return out
+		}
+	}
 	return nil
 }
 

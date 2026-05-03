@@ -87,6 +87,59 @@ func TestG15d_WorkloadPlan_IsIdempotentForSameInputs(t *testing.T) {
 	}
 }
 
+func TestG15d_MaterializePlacementFromWorkloadPlan_BlankPoolBecomesReplicaSlots(t *testing.T) {
+	placement := PlacementIntent{
+		VolumeID:  "pvc-a",
+		DesiredRF: 2,
+		Slots: []PlacementSlotIntent{
+			{ServerID: "node-a", PoolID: "pool-a", Source: PlacementSourceBlankPool},
+			{ServerID: "node-b", PoolID: "pool-b", Source: PlacementSourceBlankPool},
+		},
+	}
+	plan := BlockVolumeWorkloadPlan{
+		VolumeID: "pvc-a",
+		Replicas: []BlockVolumeReplicaWorkload{
+			{ServerID: "node-a", ReplicaID: "r1"},
+			{ServerID: "node-b", ReplicaID: "r2"},
+		},
+	}
+	got, err := MaterializePlacementFromWorkloadPlan(placement, plan)
+	if err != nil {
+		t.Fatalf("MaterializePlacementFromWorkloadPlan: %v", err)
+	}
+	if got.Slots[0].ReplicaID != "r1" || got.Slots[1].ReplicaID != "r2" {
+		t.Fatalf("replica ids=%q/%q want r1/r2", got.Slots[0].ReplicaID, got.Slots[1].ReplicaID)
+	}
+	for _, slot := range got.Slots {
+		if slot.Source != PlacementSourceExistingReplica {
+			t.Fatalf("slot=%+v want existing_replica after materialization", slot)
+		}
+	}
+	if placement.Slots[0].ReplicaID != "" || placement.Slots[0].Source != PlacementSourceBlankPool {
+		t.Fatalf("input mutated: %+v", placement.Slots[0])
+	}
+}
+
+func TestG15d_MaterializePlacementFromWorkloadPlan_FailsOnMismatchedServer(t *testing.T) {
+	_, err := MaterializePlacementFromWorkloadPlan(
+		PlacementIntent{
+			VolumeID:  "pvc-a",
+			DesiredRF: 1,
+			Slots:     []PlacementSlotIntent{{ServerID: "node-a", Source: PlacementSourceBlankPool}},
+		},
+		BlockVolumeWorkloadPlan{
+			VolumeID: "pvc-a",
+			Replicas: []BlockVolumeReplicaWorkload{{
+				ServerID:  "node-b",
+				ReplicaID: "r1",
+			}},
+		},
+	)
+	if err == nil {
+		t.Fatal("expected mismatch error")
+	}
+}
+
 func TestG15d_WorkloadPlan_IsNotAuthorityShaped(t *testing.T) {
 	for _, name := range []string{"BlockVolumeWorkloadPlan", "BlockVolumeReplicaWorkload"} {
 		typ := mustParseStruct(t, "workload_plan.go", name)
