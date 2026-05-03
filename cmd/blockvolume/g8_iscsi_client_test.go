@@ -82,10 +82,16 @@ func (c *g8IscsiClient) close(t *testing.T) {
 
 func (c *g8IscsiClient) write10(t *testing.T, lba uint32, payload []byte) {
 	t.Helper()
-	status, _ := c.scsi(t, g8WriteCDB10(lba, 1), payload, 0)
+	status := c.write10Status(t, lba, payload)
 	if status != iscsi.StatusGood {
 		t.Fatalf("iSCSI WRITE(10) status=0x%02x", status)
 	}
+}
+
+func (c *g8IscsiClient) write10Status(t *testing.T, lba uint32, payload []byte) uint8 {
+	t.Helper()
+	status, _ := c.scsi(t, g8WriteCDB10(lba, 1), payload, 0)
+	return status
 }
 
 func (c *g8IscsiClient) read10(t *testing.T, lba uint32, blocks uint16, bytesPerBlock int) []byte {

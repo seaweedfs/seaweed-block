@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/seaweedfs/seaweed-block/core/engine"
 	"github.com/seaweedfs/seaweed-block/core/frontend"
 )
 
@@ -46,6 +47,28 @@ type StatusServer struct {
 	srv             *http.Server
 	addr            string
 	recoveryEnabled bool // G5-5: gates /status/recovery; off by default
+}
+
+const (
+	AuthorityRolePrimary    = "primary"
+	AuthorityRoleSuperseded = "superseded"
+	AuthorityRoleUnknown    = "unknown"
+
+	ReplicationRoleNone       = "none"
+	ReplicationRoleRecovering = "recovering"
+	ReplicationRoleNotReady   = "not_ready"
+	ReplicationRoleUnknown    = "unknown"
+)
+
+// StatusProjection is the append-only /status shape. It embeds the
+// original frontend.Projection fields for wire compatibility, then
+// adds G9A control-plane vocabulary so operators/tests do not infer
+// replica readiness from authority movement.
+type StatusProjection struct {
+	frontend.Projection
+	FrontendPrimaryReady bool
+	AuthorityRole        string
+	ReplicationRole      string
 }
 
 // NewStatusServer wires a server to one volume host's view.
@@ -135,13 +158,36 @@ func (s *StatusServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing volume query param", http.StatusBadRequest)
 		return
 	}
-	p := s.view.Projection()
+	p := s.statusProjection()
 	if p.VolumeID != vol {
 		http.Error(w, fmt.Sprintf("volume %q not served by this host (serves %q)", vol, p.VolumeID), http.StatusNotFound)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(p)
+}
+
+func (s *StatusServer) statusProjection() StatusProjection {
+	p, superseded := s.view.projectionWithSupersede()
+	ep := s.view.EngineProjection()
+	authorityRole := AuthorityRoleUnknown
+	replicationRole := ReplicationRoleUnknown
+	switch {
+	case p.Healthy:
+		authorityRole = AuthorityRolePrimary
+		replicationRole = ReplicationRoleNone
+	case superseded:
+		authorityRole = AuthorityRoleSuperseded
+		replicationRole = ReplicationRoleNotReady
+	case ep.Mode == engine.ModeRecovering:
+		replicationRole = ReplicationRoleRecovering
+	}
+	return StatusProjection{
+		Projection:           p,
+		FrontendPrimaryReady: p.Healthy,
+		AuthorityRole:        authorityRole,
+		ReplicationRole:      replicationRole,
+	}
 }
 
 // handleStatusRecovery returns engine.ReplicaProjection for the
@@ -212,7 +258,7 @@ func isLoopbackRemote(remote string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
-// Ensure compile-time check that the type returned over the wire
-// matches frontend.Projection exactly (clients decode the same
-// struct).
-var _ frontend.Projection = frontend.Projection{}
+// Ensure StatusProjection remains a pure append-only wrapper around
+// frontend.Projection; existing clients can still decode /status into
+// frontend.Projection because json.Decoder ignores unknown fields.
+var _ = StatusProjection{Projection: frontend.Projection{}}

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/engine"
+	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
 )
 
 func TestStatusServer_RejectsNonLoopbackBind(t *testing.T) {
@@ -52,6 +53,86 @@ func TestStatusServer_AcceptsLoopbackBindAndServesJSON(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
 		t.Fatalf("loopback client status: %d want 200", resp.StatusCode)
+	}
+}
+
+func TestG9A_StatusProjection_ReturnedOldPrimarySupersededNotReady(t *testing.T) {
+	proj := &mutableProjector{p: engine.ReplicaProjection{
+		Mode: engine.ModeHealthy, Epoch: 1, EndpointVersion: 1,
+	}}
+	h := &Host{cfg: Config{VolumeID: "v1", ReplicaID: "r1"}}
+	h.view = NewAdapterProjectionView(proj, "v1", "r1", h)
+	h.recordOtherLine(&control.AssignmentFact{
+		VolumeId:        "v1",
+		ReplicaId:       "r2",
+		Epoch:           2,
+		EndpointVersion: 1,
+	})
+
+	s := NewStatusServer(h.view)
+	addr, err := s.Start("127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer func() { _ = s.Close(context.Background()) }()
+	resp, err := http.Get("http://" + addr + "/status?volume=v1")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("status: got %d want 200", resp.StatusCode)
+	}
+	var body StatusProjection
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Healthy {
+		t.Fatalf("returned old primary must fail closed: %+v", body)
+	}
+	if body.FrontendPrimaryReady {
+		t.Fatalf("returned old primary must not be frontend-primary-ready: %+v", body)
+	}
+	if body.AuthorityRole != AuthorityRoleSuperseded {
+		t.Fatalf("authority role = %q want %q", body.AuthorityRole, AuthorityRoleSuperseded)
+	}
+	if body.ReplicationRole != ReplicationRoleNotReady {
+		t.Fatalf("replication role = %q want %q", body.ReplicationRole, ReplicationRoleNotReady)
+	}
+}
+
+func TestG9A_StatusProjection_EngineRecoveringMapsReplicationRole(t *testing.T) {
+	p := stubProjector{p: engine.ReplicaProjection{
+		Mode:             engine.ModeRecovering,
+		RecoveryDecision: engine.DecisionCatchUp,
+		SessionKind:      engine.SessionCatchUp,
+		SessionPhase:     engine.PhaseRunning,
+		Epoch:            3,
+		EndpointVersion:  2,
+	}}
+	s := NewStatusServer(NewAdapterProjectionView(p, "v1", "r1", nil))
+	addr, err := s.Start("127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer func() { _ = s.Close(context.Background()) }()
+	resp, err := http.Get("http://" + addr + "/status?volume=v1")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("status: got %d want 200", resp.StatusCode)
+	}
+	var body StatusProjection
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Healthy || body.FrontendPrimaryReady {
+		t.Fatalf("recovering replica must not be frontend-primary-ready: %+v", body)
+	}
+	if body.ReplicationRole != ReplicationRoleRecovering {
+		t.Fatalf("replication role = %q want %q", body.ReplicationRole, ReplicationRoleRecovering)
 	}
 }
 

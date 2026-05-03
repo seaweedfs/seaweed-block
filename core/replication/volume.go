@@ -35,11 +35,11 @@ type LocalWrite struct {
 // Lifecycle: borrowed LogicalStorage — Provider owns the engine;
 // ReplicationVolume must NEVER call store.Close() (BUG-005 discipline).
 type ReplicationVolume struct {
-	volumeID string
-	store    storage.LogicalStorage // borrowed, NEVER closed by us
-	newExec     executorFactory        // test seam; default dials real TCP
+	volumeID    string
+	store       storage.LogicalStorage  // borrowed, NEVER closed by us
+	newExec     executorFactory         // test seam; default dials real TCP
 	newDualExec dualLaneExecutorFactory // optional dual-lane override; nil = use newExec
-	coord    *DurabilityCoordinator // used by Sync; stateless
+	coord       *DurabilityCoordinator  // used by Sync; stateless
 
 	mu                    sync.Mutex // serializes UpdateReplicaSet + OnLocalWrite entry AND fan-out AND Sync
 	peers                 map[string]*ReplicaPeer
@@ -58,9 +58,9 @@ type ReplicationVolume struct {
 	// during Close (before peer teardown) so an in-flight probe
 	// callback never lands on a closed volume / closed peer set.
 	// Read+written under v.mu.
-	probeLoop    *ProbeLoop
-	probeCfg     ProbeLoopConfig // remembered for SetProbeCooldownConfig push-down on UpdateReplicaSet
-	probeCfgSet  bool            // true after ConfigureProbeLoop succeeds
+	probeLoop   *ProbeLoop
+	probeCfg    ProbeLoopConfig // remembered for SetProbeCooldownConfig push-down on UpdateReplicaSet
+	probeCfgSet bool            // true after ConfigureProbeLoop succeeds
 
 	// G5-5C Batch #7 peer-lifecycle hook. Optional pair of callbacks
 	// invoked from UpdateReplicaSet on peer add / remove (including
@@ -433,16 +433,50 @@ func (v *ReplicationVolume) OnLocalWrite(ctx context.Context, w LocalWrite) erro
 	log.Printf("replication: OnLocalWrite volume=%s lba=%d lsn=%d peers=%d",
 		v.volumeID, w.LBA, w.LSN, len(v.peers))
 
+	mode := v.durabilityMode
+	rf := len(v.peers) + 1
+	successes := 0
+	failures := 0
+
 	// Fan out under the mutex — LSN-order invariant (Condition A).
 	// Lineage is informational; each peer uses its own registered
 	// lineage for authority framing (T4a-3 peer owns its session).
 	informational := transport.RecoveryLineage{}
 	for _, peer := range v.peers {
+		eligible := peer.State() == ReplicaHealthy
 		if err := peer.ShipEntry(ctx, informational, w.LBA, w.LSN, w.Data); err != nil {
 			log.Printf("replication: volume %s peer %s ship failed lsn=%d: %v",
 				v.volumeID, peer.Target().ReplicaID, w.LSN, err)
 			// Best-effort: continue iterating peers. Peer is already
 			// marked Degraded inside ShipEntry.
+			failures++
+			continue
+		}
+		if eligible {
+			successes++
+		} else {
+			failures++
+		}
+	}
+	if err := evaluateWriteAck(mode, rf, successes, failures); err != nil {
+		return err
+	}
+	return nil
+}
+
+func evaluateWriteAck(mode DurabilityMode, rf, peerSuccesses, peerFailures int) error {
+	switch mode {
+	case DurabilitySyncAll:
+		if peerFailures > 0 {
+			return fmt.Errorf("%w: %d of %d write acknowledgements unavailable",
+				ErrDurabilityBarrierFailed, peerFailures, rf-1)
+		}
+	case DurabilitySyncQuorum:
+		quorum := rf/2 + 1
+		durableNodes := 1 + peerSuccesses // local primary write already succeeded before Observe.
+		if durableNodes < quorum {
+			return fmt.Errorf("%w: %d durable of %d needed for write acknowledgement",
+				ErrDurabilityQuorumLost, durableNodes, quorum)
 		}
 	}
 	return nil
