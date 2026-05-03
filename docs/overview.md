@@ -10,18 +10,14 @@ This directory contains public and technical documentation.
 | `developer-architecture.md` | Deeper module-by-module architecture for contributors. |
 | `runtime-state-machines.md` | Mermaid state-machine and loop overview. |
 | `roadmap.md` | Alpha roadmap and non-claims. |
-| `qa-alpha-developer-test.md` | QA task for testing the public alpha as a new developer. |
-| `comment-alignment-checklist.md` | Checklist for keeping comments and public strings aligned with current vocabulary. |
 
-## Historical / Design Notes
+## Calibration Evidence
 
-Older files in this directory capture earlier design stages, audits, and
-calibration notes. They are useful for archaeology, but new contributors should
-start with the public/contributor docs above.
+`calibration/` contains evidence documents still referenced by calibration code.
+Keep them here until those references move to the shared design archive.
 
 ## Documentation Rule
 
 If a document is meant for external users, avoid internal phase or gate labels.
-If a document is historical, keep the history but do not link it as the primary
-onboarding path.
-
+Historical design notes should live in `sw-block/design/`, not in this public
+docs entry path.

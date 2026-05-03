@@ -360,10 +360,10 @@ func (h *Host) Close() error {
 
 // runHeartbeat sends a HeartbeatReport every HeartbeatInterval.
 // Send failures are logged with bounded backoff but do NOT panic
-// or hang the volume process (per sketch §8.2.1 test 4).
+// or hang the volume process.
 //
-// The loop shape is ported from weed/server/block_heartbeat_loop.go
-// — see docs/t0-port-audit.md §2.
+// The loop shape is intentionally simple: immediate first report,
+// then periodic reports until the host context is cancelled.
 func (h *Host) runHeartbeat(ctx context.Context) {
 	defer h.wg.Done()
 	tick := time.NewTicker(h.cfg.HeartbeatInterval)
