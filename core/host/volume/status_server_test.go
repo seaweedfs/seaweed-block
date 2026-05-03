@@ -194,6 +194,68 @@ func TestG9B_StatusProjection_AssignmentConsumed_MakesFrontendPrimaryReady(t *te
 	}
 }
 
+func TestG9B_StatusProjection_ReturnedReplicaLifecycle_NotReadyRecoveringReady(t *testing.T) {
+	proj := &mutableProjector{p: engine.ReplicaProjection{
+		Mode:            engine.ModeDegraded,
+		Epoch:           3,
+		EndpointVersion: 2,
+	}}
+	h := &Host{cfg: Config{VolumeID: "v1", ReplicaID: "r2"}}
+	h.view = NewAdapterProjectionView(proj, "v1", "r2", h)
+	// Current authority line names r1, so r2 is a returned/registered
+	// replica candidate, not the frontend primary.
+	h.recordOtherLine(&control.AssignmentFact{
+		VolumeId:        "v1",
+		ReplicaId:       "r1",
+		Epoch:           3,
+		EndpointVersion: 2,
+	})
+	s := NewStatusServer(h.view)
+
+	body := s.statusProjection()
+	if body.AuthorityRole != AuthorityRoleUnknown {
+		t.Fatalf("candidate authority role = %q want %q", body.AuthorityRole, AuthorityRoleUnknown)
+	}
+	if body.ReplicationRole != ReplicationRoleNotReady {
+		t.Fatalf("candidate replication role = %q want %q", body.ReplicationRole, ReplicationRoleNotReady)
+	}
+	if body.FrontendPrimaryReady {
+		t.Fatalf("candidate must not be frontend ready: %+v", body)
+	}
+
+	proj.p = engine.ReplicaProjection{
+		Mode:             engine.ModeRecovering,
+		RecoveryDecision: engine.DecisionCatchUp,
+		SessionKind:      engine.SessionCatchUp,
+		SessionPhase:     engine.PhaseRunning,
+		Epoch:            3,
+		EndpointVersion:  2,
+	}
+	body = s.statusProjection()
+	if body.ReplicationRole != ReplicationRoleRecovering {
+		t.Fatalf("recovering replication role = %q want %q", body.ReplicationRole, ReplicationRoleRecovering)
+	}
+	if body.FrontendPrimaryReady {
+		t.Fatalf("recovering replica must not be frontend ready: %+v", body)
+	}
+
+	proj.p = engine.ReplicaProjection{
+		Mode:            engine.ModeHealthy,
+		Epoch:           3,
+		EndpointVersion: 2,
+	}
+	body = s.statusProjection()
+	if body.AuthorityRole != AuthorityRoleUnknown {
+		t.Fatalf("ready supporting replica authority role = %q want %q", body.AuthorityRole, AuthorityRoleUnknown)
+	}
+	if body.ReplicationRole != ReplicationRoleReady {
+		t.Fatalf("ready supporting replica role = %q want %q", body.ReplicationRole, ReplicationRoleReady)
+	}
+	if body.FrontendPrimaryReady {
+		t.Fatalf("supporting replica_ready must not be frontend primary ready: %+v", body)
+	}
+}
+
 func TestStatusServer_MissingVolume_Returns400(t *testing.T) {
 	s := NewStatusServer(NewAdapterProjectionView(stubProjector{}, "v1", "r1", nil))
 	addr, err := s.Start("127.0.0.1:0")

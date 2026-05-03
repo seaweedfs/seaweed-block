@@ -11,6 +11,7 @@ import (
 
 	"github.com/seaweedfs/seaweed-block/core/engine"
 	"github.com/seaweedfs/seaweed-block/core/frontend"
+	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
 )
 
 // StatusServer exposes this volume host's frontend.ProjectionView
@@ -57,6 +58,7 @@ const (
 	ReplicationRoleNone       = "none"
 	ReplicationRoleRecovering = "recovering"
 	ReplicationRoleNotReady   = "not_ready"
+	ReplicationRoleReady      = "replica_ready"
 	ReplicationRoleUnknown    = "unknown"
 )
 
@@ -172,8 +174,9 @@ func (s *StatusServer) statusProjection() StatusProjection {
 	ep := s.view.EngineProjection()
 	authorityRole := AuthorityRoleUnknown
 	replicationRole := ReplicationRoleUnknown
+	supportingReady := s.supportingReplicaReady(p.Epoch, p.EndpointVersion)
 	switch {
-	case p.Healthy:
+	case p.Healthy && !superseded && !supportingReady:
 		authorityRole = AuthorityRolePrimary
 		replicationRole = ReplicationRoleNone
 	case superseded:
@@ -181,13 +184,36 @@ func (s *StatusServer) statusProjection() StatusProjection {
 		replicationRole = ReplicationRoleNotReady
 	case ep.Mode == engine.ModeRecovering:
 		replicationRole = ReplicationRoleRecovering
+	case ep.Mode == engine.ModeHealthy && supportingReady:
+		replicationRole = ReplicationRoleReady
+	case ep.Mode == engine.ModeDegraded || ep.Mode == engine.ModeIdle:
+		replicationRole = ReplicationRoleNotReady
 	}
 	return StatusProjection{
 		Projection:           p,
-		FrontendPrimaryReady: p.Healthy,
+		FrontendPrimaryReady: p.Healthy && !superseded && !supportingReady,
 		AuthorityRole:        authorityRole,
 		ReplicationRole:      replicationRole,
 	}
+}
+
+func (s *StatusServer) supportingReplicaReady(selfEpoch, selfEV uint64) bool {
+	if s.view == nil || s.view.probe == nil {
+		return false
+	}
+	probe, ok := s.view.probe.(interface {
+		LastOtherLine() *control.AssignmentFact
+	})
+	if !ok {
+		return false
+	}
+	other := probe.LastOtherLine()
+	if other == nil {
+		return false
+	}
+	return other.GetReplicaId() != s.view.replicaID &&
+		other.GetEpoch() == selfEpoch &&
+		other.GetEndpointVersion() == selfEV
 }
 
 // handleStatusRecovery returns engine.ReplicaProjection for the
