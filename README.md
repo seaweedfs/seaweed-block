@@ -2,6 +2,14 @@
 
 Alpha-stage block storage for Kubernetes.
 
+<p align="center">
+  <img src="docs/assets/seaweed-block-hero.svg" alt="seaweed-block alpha architecture: Kubernetes PVC to CSI, blockmaster, blockvolume, iSCSI, and WAL recovery" width="100%">
+</p>
+
+<p align="center">
+  <strong>Alpha</strong> · Kubernetes CSI · iSCSI today · WAL-backed recovery design · RF=2/RF=3 roadmap
+</p>
+
 `seaweed-block` is an early block-storage project exploring a simpler path for
 small Kubernetes clusters that need persistent volumes without adopting a large
 storage platform on day one.
