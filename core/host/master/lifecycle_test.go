@@ -76,6 +76,12 @@ func TestMasterLifecycleStore_OpensRegistrationStoresWithoutAuthority(t *testing
 		t.Fatalf("snapshot counts got volumes=%d nodes=%d placements=%d",
 			len(snapshot.Volumes), len(snapshot.Nodes), len(snapshot.Placements))
 	}
+	if len(snapshot.VerifiedPlacements) != 1 || !snapshot.VerifiedPlacements[0].Verified {
+		t.Fatalf("verified placements=%+v want one verified", snapshot.VerifiedPlacements)
+	}
+	if _, ok := h.Publisher().VolumeAuthorityLine("vol-a"); ok {
+		t.Fatal("verified lifecycle snapshot must not mint authority")
+	}
 }
 
 func TestMasterLifecycleSnapshot_IsNotAuthorityShaped(t *testing.T) {
@@ -84,6 +90,41 @@ func TestMasterLifecycleSnapshot_IsNotAuthorityShaped(t *testing.T) {
 		if _, ok := typ.Fields[forbidden]; ok {
 			t.Fatalf("LifecycleSnapshot must not carry %s", forbidden)
 		}
+	}
+}
+
+func TestMasterLifecycleSnapshot_PlacementWithoutNodeObservationIsNotVerified(t *testing.T) {
+	h := newTestMaster(t, t.TempDir())
+	defer closeTestMaster(t, h)
+	stores := h.Lifecycle()
+	if _, err := stores.Placements.ApplyPlan(lifecycle.PlacementPlan{
+		VolumeID:  "vol-a",
+		DesiredRF: 1,
+		Candidates: []lifecycle.PlacementCandidate{{
+			VolumeID: "vol-a",
+			ServerID: "node-a",
+			PoolID:   "pool-a",
+			Source:   lifecycle.PlacementSourceBlankPool,
+		}},
+	}); err != nil {
+		t.Fatalf("apply placement: %v", err)
+	}
+	snapshot, ok := h.LifecycleSnapshot()
+	if !ok {
+		t.Fatal("missing lifecycle snapshot")
+	}
+	if len(snapshot.VerifiedPlacements) != 1 {
+		t.Fatalf("verified count=%d want 1", len(snapshot.VerifiedPlacements))
+	}
+	got := snapshot.VerifiedPlacements[0]
+	if got.Verified {
+		t.Fatalf("placement without node observation verified: %+v", got)
+	}
+	if got.Reason != lifecycle.VerifyReasonMissingObservation {
+		t.Fatalf("reason=%q want %q", got.Reason, lifecycle.VerifyReasonMissingObservation)
+	}
+	if _, ok := h.Publisher().VolumeAuthorityLine("vol-a"); ok {
+		t.Fatal("unverified placement must not mint authority")
 	}
 }
 
