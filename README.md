@@ -205,6 +205,8 @@ Protocol/backend work:
 More detail:
 
 - [docs/architecture.md](docs/architecture.md)
+- [docs/developer-architecture.md](docs/developer-architecture.md)
+- [docs/runtime-state-machines.md](docs/runtime-state-machines.md)
 - [docs/roadmap.md](docs/roadmap.md)
 
 ## Repository Layout
@@ -252,4 +254,3 @@ a runnable Kubernetes smoke path and a serious recovery/control-plane design
 under construction.
 
 It should not be read as finished storage software.
-

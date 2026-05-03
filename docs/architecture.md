@@ -74,6 +74,11 @@ Current tested frontend: iSCSI.
 
 Current tested durable backend: `walstore`.
 
+For a deeper module-by-module explanation, see
+[`developer-architecture.md`](developer-architecture.md).
+For a process/state-machine map, see
+[`runtime-state-machines.md`](runtime-state-machines.md).
+
 ## Current Dynamic Provisioning Flow
 
 ```text
