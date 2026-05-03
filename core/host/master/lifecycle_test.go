@@ -36,7 +36,8 @@ func TestMasterLifecycleStore_OpensRegistrationStoresWithoutAuthority(t *testing
 	}
 	if _, err := stores.Nodes.RegisterNode(lifecycle.NodeRegistration{
 		ServerID: "node-a",
-		Addr:     "127.0.0.1:9101",
+		DataAddr: "127.0.0.1:9201",
+		CtrlAddr: "127.0.0.1:9101",
 		Pools: []lifecycle.StoragePool{{
 			PoolID:     "pool-a",
 			TotalBytes: 1 << 30,
@@ -48,7 +49,8 @@ func TestMasterLifecycleStore_OpensRegistrationStoresWithoutAuthority(t *testing
 	}
 	if _, err := stores.Nodes.RegisterNode(lifecycle.NodeRegistration{
 		ServerID: "node-b",
-		Addr:     "127.0.0.1:9102",
+		DataAddr: "127.0.0.1:9202",
+		CtrlAddr: "127.0.0.1:9102",
 		Pools: []lifecycle.StoragePool{{
 			PoolID:     "pool-b",
 			TotalBytes: 1 << 30,

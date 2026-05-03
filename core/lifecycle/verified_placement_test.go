@@ -37,7 +37,8 @@ func TestG9F_PlacementIntentWithStaleObservation_DoesNotVerify(t *testing.T) {
 	}
 	got := VerifyPlacementIntent(intent, []NodeRegistration{{
 		ServerID: "node-a",
-		Addr:     "127.0.0.1:9101",
+		DataAddr: "127.0.0.1:9201",
+		CtrlAddr: "127.0.0.1:9101",
 		SeenAt:   now.Add(-2 * time.Minute),
 	}}, VerificationConfig{Now: now, FreshnessWindow: time.Minute})
 	if got.Verified {
@@ -72,7 +73,8 @@ func TestG9F_BlankPoolIntentWithFreshObservation_VerifiesCreateNeededSlot(t *tes
 	}
 	got := VerifyPlacementIntent(intent, []NodeRegistration{{
 		ServerID: "node-a",
-		Addr:     "127.0.0.1:9101",
+		DataAddr: "127.0.0.1:9201",
+		CtrlAddr: "127.0.0.1:9101",
 		SeenAt:   now,
 	}}, VerificationConfig{Now: now, FreshnessWindow: time.Minute})
 	if !got.Verified {
@@ -87,6 +89,33 @@ func TestG9F_BlankPoolIntentWithFreshObservation_VerifiesCreateNeededSlot(t *tes
 	}
 	if slot.DataAddr == "" || slot.CtrlAddr == "" {
 		t.Fatalf("verified slot missing addresses: %+v", slot)
+	}
+	if slot.DataAddr != "127.0.0.1:9201" || slot.CtrlAddr != "127.0.0.1:9101" {
+		t.Fatalf("verified slot addresses=%s/%s want explicit data/control addrs", slot.DataAddr, slot.CtrlAddr)
+	}
+}
+
+func TestG9F_FreshObservationMissingControlAddress_DoesNotVerify(t *testing.T) {
+	now := time.Date(2026, 5, 2, 12, 0, 0, 0, time.UTC)
+	intent := PlacementIntent{
+		VolumeID:  "vol-a",
+		DesiredRF: 1,
+		Slots: []PlacementSlotIntent{{
+			ServerID: "node-a",
+			PoolID:   "pool-a",
+			Source:   PlacementSourceBlankPool,
+		}},
+	}
+	got := VerifyPlacementIntent(intent, []NodeRegistration{{
+		ServerID: "node-a",
+		DataAddr: "127.0.0.1:9201",
+		SeenAt:   now,
+	}}, VerificationConfig{Now: now, FreshnessWindow: time.Minute})
+	if got.Verified {
+		t.Fatalf("missing control address verified: %+v", got)
+	}
+	if got.Reason != VerifyReasonMissingAddress {
+		t.Fatalf("reason=%q want %q", got.Reason, VerifyReasonMissingAddress)
 	}
 }
 
@@ -103,7 +132,8 @@ func TestG9F_ExistingReplicaIntentWithWrongInventory_DoesNotVerify(t *testing.T)
 	}
 	got := VerifyPlacementIntent(intent, []NodeRegistration{{
 		ServerID: "node-a",
-		Addr:     "127.0.0.1:9101",
+		DataAddr: "127.0.0.1:9201",
+		CtrlAddr: "127.0.0.1:9101",
 		SeenAt:   now,
 		Replicas: []ReplicaInventory{{
 			VolumeID:  "vol-a",

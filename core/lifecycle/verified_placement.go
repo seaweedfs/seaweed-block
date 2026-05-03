@@ -71,7 +71,8 @@ func VerifyPlacementIntent(intent PlacementIntent, nodes []NodeRegistration, cfg
 			out.Reason = VerifyReasonStaleObservation
 			return out
 		}
-		if node.Addr == "" {
+		dataAddr, ctrlAddr := nodePlacementAddrs(node)
+		if dataAddr == "" || ctrlAddr == "" {
 			out.Reason = VerifyReasonMissingAddress
 			return out
 		}
@@ -80,8 +81,8 @@ func VerifyPlacementIntent(intent PlacementIntent, nodes []NodeRegistration, cfg
 			PoolID:     slot.PoolID,
 			ReplicaID:  slot.ReplicaID,
 			Source:     slot.Source,
-			DataAddr:   node.Addr,
-			CtrlAddr:   node.Addr,
+			DataAddr:   dataAddr,
+			CtrlAddr:   ctrlAddr,
 			VerifiedBy: VerifiedByNodeRegistration,
 		}
 		if slot.Source == PlacementSourceExistingReplica {
@@ -95,4 +96,11 @@ func VerifyPlacementIntent(intent PlacementIntent, nodes []NodeRegistration, cfg
 	}
 	out.Verified = true
 	return out
+}
+
+func nodePlacementAddrs(node NodeRegistration) (dataAddr, ctrlAddr string) {
+	if node.DataAddr != "" || node.CtrlAddr != "" {
+		return node.DataAddr, node.CtrlAddr
+	}
+	return node.Addr, node.Addr
 }

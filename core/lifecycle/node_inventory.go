@@ -41,8 +41,12 @@ type ReplicaInventory struct {
 // registration or heartbeat ingestion. It deliberately has no authority
 // fields.
 type NodeRegistration struct {
-	ServerID string             `json:"server_id"`
-	Addr     string             `json:"addr"`
+	ServerID string `json:"server_id"`
+	// Addr is legacy node-level address. DataAddr/CtrlAddr are the
+	// explicit block data/control endpoints used by G9F verification.
+	Addr     string             `json:"addr,omitempty"`
+	DataAddr string             `json:"data_addr,omitempty"`
+	CtrlAddr string             `json:"ctrl_addr,omitempty"`
 	Labels   map[string]string  `json:"labels,omitempty"`
 	Pools    []StoragePool      `json:"pools,omitempty"`
 	Replicas []ReplicaInventory `json:"replicas,omitempty"`
@@ -198,8 +202,8 @@ func validateNodeRegistration(reg NodeRegistration) error {
 	if err := validateServerID(reg.ServerID); err != nil {
 		return err
 	}
-	if reg.Addr == "" {
-		return fmt.Errorf("%w: empty addr", ErrInvalidNodeRegistration)
+	if reg.Addr == "" && (reg.DataAddr == "" || reg.CtrlAddr == "") {
+		return fmt.Errorf("%w: empty address; provide addr or data_addr+ctrl_addr", ErrInvalidNodeRegistration)
 	}
 	for _, pool := range reg.Pools {
 		if pool.PoolID == "" {
