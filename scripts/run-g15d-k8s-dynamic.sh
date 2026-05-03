@@ -47,16 +47,27 @@ cleanup() {
 
 collect_daemon_logs() {
   set +e
-  kubectl -n "$NAMESPACE" describe pod sw-block-dynamic-smoke >"$ARTIFACT_DIR/pod.describe.txt" 2>&1 || true
-  kubectl -n "$NAMESPACE" logs sw-block-dynamic-smoke >"$ARTIFACT_DIR/pod.log" 2>&1 || true
-  kubectl -n kube-system logs deploy/sw-blockmaster -c blockmaster >"$ARTIFACT_DIR/blockmaster.log" 2>&1 || true
-  kubectl -n kube-system logs deploy/sw-block-csi-controller -c block-csi >"$ARTIFACT_DIR/blockcsi-controller.log" 2>&1 || true
-  kubectl -n kube-system logs deploy/sw-block-csi-controller -c csi-provisioner >"$ARTIFACT_DIR/csi-provisioner.log" 2>&1 || true
-  kubectl -n kube-system logs deploy/sw-block-csi-controller -c csi-attacher >"$ARTIFACT_DIR/csi-attacher.log" 2>&1 || true
-  kubectl -n kube-system logs -l sw-block.seaweedfs.com/volume -c blockvolume --tail=-1 >"$ARTIFACT_DIR/blockvolume-generated.log" 2>&1 || true
-  kubectl -n kube-system get pods,deploy -o wide >"$ARTIFACT_DIR/kube-system-pods-deploys.txt" 2>&1 || true
-  kubectl -n "$NAMESPACE" get sc,pv,pvc,pod -o wide >"$ARTIFACT_DIR/app-storage.txt" 2>&1 || true
-  kubectl -n kube-system exec deploy/sw-blockmaster -c blockmaster -- sh -c 'cat /manifests/*.yaml' >"$ARTIFACT_DIR/generated-blockvolume.yaml" 2>"$ARTIFACT_DIR/generated-blockvolume.err" || true
+  capture_once "$ARTIFACT_DIR/pod.describe.txt" kubectl -n "$NAMESPACE" describe pod sw-block-dynamic-smoke
+  capture_once "$ARTIFACT_DIR/pod.log" kubectl -n "$NAMESPACE" logs sw-block-dynamic-smoke
+  capture_once "$ARTIFACT_DIR/blockmaster.log" kubectl -n kube-system logs deploy/sw-blockmaster -c blockmaster
+  capture_once "$ARTIFACT_DIR/blockcsi-controller.log" kubectl -n kube-system logs deploy/sw-block-csi-controller -c block-csi
+  capture_once "$ARTIFACT_DIR/csi-provisioner.log" kubectl -n kube-system logs deploy/sw-block-csi-controller -c csi-provisioner
+  capture_once "$ARTIFACT_DIR/csi-attacher.log" kubectl -n kube-system logs deploy/sw-block-csi-controller -c csi-attacher
+  capture_once "$ARTIFACT_DIR/blockvolume-generated.log" kubectl -n kube-system logs -l sw-block.seaweedfs.com/volume -c blockvolume --tail=-1
+  capture_once "$ARTIFACT_DIR/kube-system-pods-deploys.txt" kubectl -n kube-system get pods,deploy -o wide
+  capture_once "$ARTIFACT_DIR/app-storage.txt" kubectl -n "$NAMESPACE" get sc,pv,pvc,pod -o wide
+  if [[ ! -s "$ARTIFACT_DIR/generated-blockvolume.yaml" ]]; then
+    kubectl -n kube-system exec deploy/sw-blockmaster -c blockmaster -- sh -c 'cat /manifests/*.yaml' >"$ARTIFACT_DIR/generated-blockvolume.yaml" 2>"$ARTIFACT_DIR/generated-blockvolume.err" || true
+  fi
+}
+
+capture_once() {
+  local path="$1"
+  shift
+  if [[ -s "$path" ]]; then
+    return
+  fi
+  "$@" >"$path" 2>&1 || true
 }
 
 collect_post_delete_state() {
