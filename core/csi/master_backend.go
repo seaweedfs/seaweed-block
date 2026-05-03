@@ -19,6 +19,41 @@ func NewControlStatusLookup(client control.EvidenceServiceClient) *ControlStatus
 	return &ControlStatusLookup{client: client}
 }
 
+type ControlLifecycleProvisioner struct {
+	client control.LifecycleServiceClient
+}
+
+func NewControlLifecycleProvisioner(client control.LifecycleServiceClient) *ControlLifecycleProvisioner {
+	return &ControlLifecycleProvisioner{client: client}
+}
+
+func (p *ControlLifecycleProvisioner) CreateVolume(ctx context.Context, spec VolumeSpec) (VolumeSpec, error) {
+	if p == nil || p.client == nil {
+		return VolumeSpec{}, fmt.Errorf("csi: lifecycle provisioner not configured")
+	}
+	resp, err := p.client.CreateVolume(ctx, &control.CreateVolumeRequest{
+		VolumeId:          spec.VolumeID,
+		SizeBytes:         spec.SizeBytes,
+		ReplicationFactor: int32(spec.ReplicationFactor),
+	})
+	if err != nil {
+		return VolumeSpec{}, err
+	}
+	return VolumeSpec{
+		VolumeID:          resp.GetVolumeId(),
+		SizeBytes:         resp.GetSizeBytes(),
+		ReplicationFactor: int(resp.GetReplicationFactor()),
+	}, nil
+}
+
+func (p *ControlLifecycleProvisioner) DeleteVolume(ctx context.Context, volumeID string) error {
+	if p == nil || p.client == nil {
+		return fmt.Errorf("csi: lifecycle provisioner not configured")
+	}
+	_, err := p.client.DeleteVolume(ctx, &control.DeleteVolumeRequest{VolumeId: volumeID})
+	return err
+}
+
 func (l *ControlStatusLookup) LookupPublishTarget(ctx context.Context, volumeID, nodeID string) (PublishTarget, error) {
 	if l == nil || l.client == nil {
 		return PublishTarget{}, fmt.Errorf("csi: control status lookup not configured")

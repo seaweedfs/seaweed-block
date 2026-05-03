@@ -6,6 +6,7 @@ import (
 )
 
 var ErrPublishTargetNotFound = errors.New("csi: publish target not found")
+var ErrVolumeConflict = errors.New("csi: volume already exists with different spec")
 
 type Protocol string
 
@@ -33,6 +34,19 @@ type PublishTarget struct {
 
 type PublishTargetLookup interface {
 	LookupPublishTarget(ctx context.Context, volumeID, nodeID string) (PublishTarget, error)
+}
+
+// VolumeProvisioner records product-level desired volume intent. It must not
+// mint assignment, epoch, endpoint_version, readiness, or frontend facts.
+type VolumeProvisioner interface {
+	CreateVolume(ctx context.Context, spec VolumeSpec) (VolumeSpec, error)
+	DeleteVolume(ctx context.Context, volumeID string) error
+}
+
+type VolumeSpec struct {
+	VolumeID          string
+	SizeBytes         uint64
+	ReplicationFactor int
 }
 
 func publishContext(t PublishTarget) map[string]string {

@@ -4,6 +4,7 @@
 //   volume -> master:   ObservationService.ReportHeartbeat (unary)
 //   volume -> master:   AssignmentService.SubscribeAssignments (server-streaming)
 //   operator -> master: EvidenceService.QueryVolumeStatus (unary, read-only)
+//   CSI/operator -> master: LifecycleService.CreateVolume/DeleteVolume (desired intent only)
 //
 // Boundary (T0 sketch §3 load-bearing):
 //   - no message carries an AssignmentAsk
@@ -57,6 +58,14 @@ service AssignmentService {
 // EvidenceService — operator read-only projection + evidence.
 service EvidenceService {
     rpc QueryVolumeStatus(StatusRequest) returns (StatusResponse);
+}
+
+// LifecycleService — product lifecycle intent. This surface is for CSI /
+// operators to record desired volume state. It MUST NOT carry assignment,
+// epoch, endpoint_version, readiness, or primary facts.
+service LifecycleService {
+    rpc CreateVolume(CreateVolumeRequest) returns (CreateVolumeResponse);
+    rpc DeleteVolume(DeleteVolumeRequest) returns (DeleteVolumeResponse);
 }
 
 // HeartbeatReport — volume -> master observation fact. Field set
@@ -179,4 +188,23 @@ message StatusResponse {
     string last_unsupported_reason = 6;
     string last_convergence_stuck_at = 7;
     repeated FrontendTarget frontends = 8;
+}
+
+message CreateVolumeRequest {
+    string volume_id = 1;
+    uint64 size_bytes = 2;
+    int32 replication_factor = 3;
+}
+
+message CreateVolumeResponse {
+    string volume_id = 1;
+    uint64 size_bytes = 2;
+    int32 replication_factor = 3;
+}
+
+message DeleteVolumeRequest {
+    string volume_id = 1;
+}
+
+message DeleteVolumeResponse {
 }

@@ -15,6 +15,16 @@ func TestClusterSpec_ImportsDesiredVolumeNodeAndPlacement(t *testing.T) {
 	if len(imports.Topology.Volumes) != 1 || imports.Topology.Volumes[0].VolumeID != "v1" {
 		t.Fatalf("topology=%+v want one v1 volume", imports.Topology)
 	}
+	if len(imports.Nodes) != 1 {
+		t.Fatalf("nodes=%+v want one node", imports.Nodes)
+	}
+	node := imports.Nodes[0]
+	if node.ServerID != "s2" || node.DataAddr != "10.0.0.2:19080" || node.CtrlAddr != "10.0.0.2:19081" {
+		t.Fatalf("node=%+v want s2 with data/control addrs", node)
+	}
+	if len(node.Pools) != 1 || node.Pools[0].PoolID != "default" || node.Pools[0].FreeBytes != 1048576 {
+		t.Fatalf("node pools=%+v want default pool", node.Pools)
+	}
 	if len(imports.Topology.Volumes[0].Slots) != 1 || imports.Topology.Volumes[0].Slots[0].ReplicaID != "r2" {
 		t.Fatalf("topology slots=%+v want r2", imports.Topology.Volumes[0].Slots)
 	}
@@ -31,6 +41,15 @@ func writeClusterSpecForTest(t *testing.T) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "m01.yaml")
 	raw := []byte(`
+nodes:
+  - server_id: s2
+    data_addr: 10.0.0.2:19080
+    ctrl_addr: 10.0.0.2:19081
+    pools:
+      - pool_id: default
+        total_bytes: 1048576
+        free_bytes: 1048576
+        block_size: 4096
 volumes:
   - id: v1
     size_bytes: 1048576

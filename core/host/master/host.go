@@ -196,6 +196,7 @@ func New(cfg Config) (*Host, error) {
 	control.RegisterObservationServiceServer(grpcSrv, svc)
 	control.RegisterAssignmentServiceServer(grpcSrv, svc)
 	control.RegisterEvidenceServiceServer(grpcSrv, svc)
+	control.RegisterLifecycleServiceServer(grpcSrv, svc)
 	h.grpc = grpcSrv
 
 	lg.Printf("blockmaster: lock acquired, reloaded=%d, listen=%s",
@@ -261,6 +262,17 @@ func (h *Host) replicaSlotsFor(volumeID string) []string {
 			out = append(out, s.ReplicaID)
 		}
 		return out
+	}
+	if h.lifecycle != nil && h.lifecycle.Placements != nil {
+		if placement, ok := h.lifecycle.Placements.GetPlacement(volumeID); ok {
+			out := make([]string, 0, len(placement.Slots))
+			for _, slot := range placement.Slots {
+				if slot.ReplicaID != "" {
+					out = append(out, slot.ReplicaID)
+				}
+			}
+			return out
+		}
 	}
 	return nil
 }

@@ -1,7 +1,10 @@
 package master
 
+import "github.com/seaweedfs/seaweed-block/core/lifecycle"
+
 // LifecycleProductTickResult summarizes one explicit product-loop tick.
 type LifecycleProductTickResult struct {
+	ReconciledVolumes  int
 	VerifiedPlacements int
 	PublishedAsks      int
 	SkippedCurrent     int
@@ -18,9 +21,11 @@ func (h *Host) RunLifecycleProductTick() (LifecycleProductTickResult, error) {
 		return LifecycleProductTickResult{}, nil
 	}
 	nodes := stores.Nodes.ListNodes()
+	reconciled := lifecycle.ReconcilePlacement(stores.Volumes.ListVolumes(), nodes, stores.Placements)
 	placements := stores.Placements.ListPlacements()
 	verified := h.verifyPlacements(placements, nodes)
 	result := LifecycleProductTickResult{
+		ReconciledVolumes:  len(reconciled),
 		VerifiedPlacements: len(verified),
 	}
 	for _, placement := range verified {

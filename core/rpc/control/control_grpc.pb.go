@@ -4,6 +4,7 @@
 //   volume -> master:   ObservationService.ReportHeartbeat (unary)
 //   volume -> master:   AssignmentService.SubscribeAssignments (server-streaming)
 //   operator -> master: EvidenceService.QueryVolumeStatus (unary, read-only)
+//   CSI/operator -> master: LifecycleService.CreateVolume/DeleteVolume (desired intent only)
 //
 // Boundary (T0 sketch §3 load-bearing):
 //   - no message carries an AssignmentAsk
@@ -346,6 +347,133 @@ var EvidenceService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "QueryVolumeStatus",
 			Handler:    _EvidenceService_QueryVolumeStatus_Handler,
+		},
+	},
+	Streams:  []grpc.StreamDesc{},
+	Metadata: "control.proto",
+}
+
+const (
+	LifecycleService_CreateVolume_FullMethodName = "/seaweedfs.block.control.LifecycleService/CreateVolume"
+	LifecycleService_DeleteVolume_FullMethodName = "/seaweedfs.block.control.LifecycleService/DeleteVolume"
+)
+
+// LifecycleServiceClient is the client API for LifecycleService service.
+//
+// For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+type LifecycleServiceClient interface {
+	CreateVolume(ctx context.Context, in *CreateVolumeRequest, opts ...grpc.CallOption) (*CreateVolumeResponse, error)
+	DeleteVolume(ctx context.Context, in *DeleteVolumeRequest, opts ...grpc.CallOption) (*DeleteVolumeResponse, error)
+}
+
+type lifecycleServiceClient struct {
+	cc grpc.ClientConnInterface
+}
+
+func NewLifecycleServiceClient(cc grpc.ClientConnInterface) LifecycleServiceClient {
+	return &lifecycleServiceClient{cc}
+}
+
+func (c *lifecycleServiceClient) CreateVolume(ctx context.Context, in *CreateVolumeRequest, opts ...grpc.CallOption) (*CreateVolumeResponse, error) {
+	out := new(CreateVolumeResponse)
+	err := c.cc.Invoke(ctx, LifecycleService_CreateVolume_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *lifecycleServiceClient) DeleteVolume(ctx context.Context, in *DeleteVolumeRequest, opts ...grpc.CallOption) (*DeleteVolumeResponse, error) {
+	out := new(DeleteVolumeResponse)
+	err := c.cc.Invoke(ctx, LifecycleService_DeleteVolume_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// LifecycleServiceServer is the server API for LifecycleService service.
+// All implementations must embed UnimplementedLifecycleServiceServer
+// for forward compatibility
+type LifecycleServiceServer interface {
+	CreateVolume(context.Context, *CreateVolumeRequest) (*CreateVolumeResponse, error)
+	DeleteVolume(context.Context, *DeleteVolumeRequest) (*DeleteVolumeResponse, error)
+	mustEmbedUnimplementedLifecycleServiceServer()
+}
+
+// UnimplementedLifecycleServiceServer must be embedded to have forward compatible implementations.
+type UnimplementedLifecycleServiceServer struct {
+}
+
+func (UnimplementedLifecycleServiceServer) CreateVolume(context.Context, *CreateVolumeRequest) (*CreateVolumeResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method CreateVolume not implemented")
+}
+func (UnimplementedLifecycleServiceServer) DeleteVolume(context.Context, *DeleteVolumeRequest) (*DeleteVolumeResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method DeleteVolume not implemented")
+}
+func (UnimplementedLifecycleServiceServer) mustEmbedUnimplementedLifecycleServiceServer() {}
+
+// UnsafeLifecycleServiceServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to LifecycleServiceServer will
+// result in compilation errors.
+type UnsafeLifecycleServiceServer interface {
+	mustEmbedUnimplementedLifecycleServiceServer()
+}
+
+func RegisterLifecycleServiceServer(s grpc.ServiceRegistrar, srv LifecycleServiceServer) {
+	s.RegisterService(&LifecycleService_ServiceDesc, srv)
+}
+
+func _LifecycleService_CreateVolume_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CreateVolumeRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(LifecycleServiceServer).CreateVolume(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: LifecycleService_CreateVolume_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(LifecycleServiceServer).CreateVolume(ctx, req.(*CreateVolumeRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _LifecycleService_DeleteVolume_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DeleteVolumeRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(LifecycleServiceServer).DeleteVolume(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: LifecycleService_DeleteVolume_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(LifecycleServiceServer).DeleteVolume(ctx, req.(*DeleteVolumeRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+// LifecycleService_ServiceDesc is the grpc.ServiceDesc for LifecycleService service.
+// It's only intended for direct use with grpc.RegisterService,
+// and not to be introspected or modified (even as a copy)
+var LifecycleService_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "seaweedfs.block.control.LifecycleService",
+	HandlerType: (*LifecycleServiceServer)(nil),
+	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "CreateVolume",
+			Handler:    _LifecycleService_CreateVolume_Handler,
+		},
+		{
+			MethodName: "DeleteVolume",
+			Handler:    _LifecycleService_DeleteVolume_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

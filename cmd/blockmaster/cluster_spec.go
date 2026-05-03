@@ -9,7 +9,25 @@ import (
 )
 
 type clusterSpecFile struct {
+	Nodes   []clusterSpecNode   `yaml:"nodes"`
 	Volumes []clusterSpecVolume `yaml:"volumes"`
+}
+
+type clusterSpecNode struct {
+	ServerID string            `yaml:"server_id"`
+	Addr     string            `yaml:"addr"`
+	DataAddr string            `yaml:"data_addr"`
+	CtrlAddr string            `yaml:"ctrl_addr"`
+	Labels   map[string]string `yaml:"labels"`
+	Pools    []clusterSpecPool `yaml:"pools"`
+}
+
+type clusterSpecPool struct {
+	PoolID     string            `yaml:"pool_id"`
+	TotalBytes uint64            `yaml:"total_bytes"`
+	FreeBytes  uint64            `yaml:"free_bytes"`
+	BlockSize  uint64            `yaml:"block_size"`
+	Labels     map[string]string `yaml:"labels"`
 }
 
 type clusterSpecVolume struct {
@@ -27,6 +45,7 @@ type clusterSpecPlacementSlot struct {
 
 type clusterSpecImport struct {
 	Topology   topologyFile
+	Nodes      []lifecycle.NodeRegistration
 	Placements []lifecycle.PlacementIntent
 }
 
@@ -44,6 +63,32 @@ func loadClusterSpec(path string) (clusterSpecImport, error) {
 
 func clusterSpecToImports(spec clusterSpecFile) (clusterSpecImport, error) {
 	var out clusterSpecImport
+	for i, node := range spec.Nodes {
+		if node.ServerID == "" {
+			return clusterSpecImport{}, fmt.Errorf("cluster spec: node[%d] missing server_id", i)
+		}
+		reg := lifecycle.NodeRegistration{
+			ServerID: node.ServerID,
+			Addr:     node.Addr,
+			DataAddr: node.DataAddr,
+			CtrlAddr: node.CtrlAddr,
+			Labels:   node.Labels,
+			Pools:    make([]lifecycle.StoragePool, 0, len(node.Pools)),
+		}
+		for j, pool := range node.Pools {
+			if pool.PoolID == "" {
+				return clusterSpecImport{}, fmt.Errorf("cluster spec: node %q pool[%d] missing pool_id", node.ServerID, j)
+			}
+			reg.Pools = append(reg.Pools, lifecycle.StoragePool{
+				PoolID:     pool.PoolID,
+				TotalBytes: pool.TotalBytes,
+				FreeBytes:  pool.FreeBytes,
+				BlockSize:  pool.BlockSize,
+				Labels:     pool.Labels,
+			})
+		}
+		out.Nodes = append(out.Nodes, reg)
+	}
 	for i, vol := range spec.Volumes {
 		if vol.ID == "" {
 			return clusterSpecImport{}, fmt.Errorf("cluster spec: volume[%d] missing id", i)
