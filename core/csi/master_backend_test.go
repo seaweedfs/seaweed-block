@@ -91,3 +91,53 @@ func TestControlStatusLookup_MapsNVMeStatusFrontend(t *testing.T) {
 		t.Fatalf("target=%+v", got)
 	}
 }
+
+type fakeLifecycleClient struct {
+	control.LifecycleServiceClient
+	createReq *control.CreateVolumeRequest
+	deleteReq *control.DeleteVolumeRequest
+}
+
+func (f *fakeLifecycleClient) CreateVolume(_ context.Context, req *control.CreateVolumeRequest, _ ...grpc.CallOption) (*control.CreateVolumeResponse, error) {
+	f.createReq = req
+	return &control.CreateVolumeResponse{
+		VolumeId:          req.GetVolumeId(),
+		SizeBytes:         req.GetSizeBytes(),
+		ReplicationFactor: req.GetReplicationFactor(),
+	}, nil
+}
+
+func (f *fakeLifecycleClient) DeleteVolume(_ context.Context, req *control.DeleteVolumeRequest, _ ...grpc.CallOption) (*control.DeleteVolumeResponse, error) {
+	f.deleteReq = req
+	return &control.DeleteVolumeResponse{}, nil
+}
+
+func TestG15c_ControlLifecycleProvisioner_CreateVolumeRoundTrip(t *testing.T) {
+	client := &fakeLifecycleClient{}
+	prov := NewControlLifecycleProvisioner(client)
+	got, err := prov.CreateVolume(context.Background(), VolumeSpec{
+		VolumeID:          "pvc-a",
+		SizeBytes:         1 << 30,
+		ReplicationFactor: 2,
+	})
+	if err != nil {
+		t.Fatalf("CreateVolume: %v", err)
+	}
+	if client.createReq.GetVolumeId() != "pvc-a" || client.createReq.GetSizeBytes() != 1<<30 || client.createReq.GetReplicationFactor() != 2 {
+		t.Fatalf("request=%+v", client.createReq)
+	}
+	if got.VolumeID != "pvc-a" || got.SizeBytes != 1<<30 || got.ReplicationFactor != 2 {
+		t.Fatalf("spec=%+v", got)
+	}
+}
+
+func TestG15c_ControlLifecycleProvisioner_DeleteVolumeRoundTrip(t *testing.T) {
+	client := &fakeLifecycleClient{}
+	prov := NewControlLifecycleProvisioner(client)
+	if err := prov.DeleteVolume(context.Background(), "pvc-a"); err != nil {
+		t.Fatalf("DeleteVolume: %v", err)
+	}
+	if client.deleteReq.GetVolumeId() != "pvc-a" {
+		t.Fatalf("delete request=%+v", client.deleteReq)
+	}
+}

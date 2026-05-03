@@ -94,8 +94,9 @@ func run(f flags) int {
 	defer ln.Close()
 
 	var (
-		masterConn *grpc.ClientConn
-		lookup     blockcsi.PublishTargetLookup
+		masterConn  *grpc.ClientConn
+		lookup      blockcsi.PublishTargetLookup
+		provisioner blockcsi.VolumeProvisioner
 	)
 	if f.masterAddr != "" {
 		masterConn, err = grpc.NewClient(f.masterAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
@@ -105,11 +106,12 @@ func run(f flags) int {
 		}
 		defer masterConn.Close()
 		lookup = blockcsi.NewControlStatusLookup(control.NewEvidenceServiceClient(masterConn))
+		provisioner = blockcsi.NewControlLifecycleProvisioner(control.NewLifecycleServiceClient(masterConn))
 	}
 
 	srv := grpc.NewServer()
 	csipb.RegisterIdentityServer(srv, blockcsi.NewIdentityServer())
-	csipb.RegisterControllerServer(srv, blockcsi.NewControllerServer(lookup))
+	csipb.RegisterControllerServer(srv, blockcsi.NewControllerServerWithProvisioner(lookup, provisioner))
 	csipb.RegisterNodeServer(srv, blockcsi.NewDefaultNodeServer(f.nodeID, f.iqnPrefix))
 
 	if f.printReadyLine {

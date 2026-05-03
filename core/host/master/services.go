@@ -9,7 +9,10 @@ import (
 
 	"github.com/seaweedfs/seaweed-block/core/adapter"
 	"github.com/seaweedfs/seaweed-block/core/authority"
+	"github.com/seaweedfs/seaweed-block/core/lifecycle"
 	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -19,7 +22,7 @@ import (
 // adapter.AssignmentInfo is constructed on the master side —
 // values flow through unchanged from publisher state.
 
-// services is the master-side implementation of the three
+// services is the master-side implementation of the control-plane
 // gRPC services defined in core/rpc/proto/v3_control.proto.
 //
 // Boundary (T0 sketch §3): every handler here converts wire
@@ -30,6 +33,7 @@ type services struct {
 	control.UnimplementedObservationServiceServer
 	control.UnimplementedAssignmentServiceServer
 	control.UnimplementedEvidenceServiceServer
+	control.UnimplementedLifecycleServiceServer
 
 	host *Host
 	// seq is incremented per ReportHeartbeat handler invocation.
@@ -42,6 +46,36 @@ type services struct {
 
 func newServices(h *Host) *services {
 	return &services{host: h}
+}
+
+func (s *services) CreateVolume(ctx context.Context, req *control.CreateVolumeRequest) (*control.CreateVolumeResponse, error) {
+	stores := s.host.Lifecycle()
+	if stores == nil {
+		return nil, status.Error(codes.FailedPrecondition, "lifecycle store is not configured")
+	}
+	rec, err := stores.Volumes.CreateVolume(lifecycleSpecFromWire(req))
+	if err != nil {
+		return nil, lifecycleError("create volume", err)
+	}
+	return &control.CreateVolumeResponse{
+		VolumeId:          rec.Spec.VolumeID,
+		SizeBytes:         rec.Spec.SizeBytes,
+		ReplicationFactor: int32(rec.Spec.ReplicationFactor),
+	}, nil
+}
+
+func (s *services) DeleteVolume(ctx context.Context, req *control.DeleteVolumeRequest) (*control.DeleteVolumeResponse, error) {
+	stores := s.host.Lifecycle()
+	if stores == nil {
+		return nil, status.Error(codes.FailedPrecondition, "lifecycle store is not configured")
+	}
+	if req.GetVolumeId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "volume_id is required")
+	}
+	if err := stores.Volumes.DeleteVolume(req.GetVolumeId()); err != nil {
+		return nil, lifecycleError("delete volume", err)
+	}
+	return &control.DeleteVolumeResponse{}, nil
 }
 
 // ReportHeartbeat receives a volume's observation. It validates
@@ -60,6 +94,27 @@ func (s *services) ReportHeartbeat(ctx context.Context, r *control.HeartbeatRepo
 		AcceptedAt: timestamppb.Now(),
 		Sequence:   s.seq.Add(1),
 	}, nil
+}
+
+func lifecycleSpecFromWire(req *control.CreateVolumeRequest) lifecycle.VolumeSpec {
+	if req == nil {
+		return lifecycle.VolumeSpec{}
+	}
+	return lifecycle.VolumeSpec{
+		VolumeID:          req.GetVolumeId(),
+		SizeBytes:         req.GetSizeBytes(),
+		ReplicationFactor: int(req.GetReplicationFactor()),
+	}
+}
+
+func lifecycleError(op string, err error) error {
+	if errors.Is(err, lifecycle.ErrInvalidVolumeSpec) {
+		return status.Errorf(codes.InvalidArgument, "%s: %v", op, err)
+	}
+	if errors.Is(err, lifecycle.ErrVolumeConflict) {
+		return status.Errorf(codes.AlreadyExists, "%s: %v", op, err)
+	}
+	return status.Errorf(codes.Internal, "%s: %v", op, err)
 }
 
 // SubscribeAssignments is VOLUME-SCOPED, not replica-slot-scoped

@@ -97,6 +97,60 @@ func TestG9G_BlockvolumeSubscriptionReceivesProductLoopAssignment(t *testing.T) 
 	}
 }
 
+func TestG15c_ProductLoopReconcilesCreatedVolumeBeforePublishing(t *testing.T) {
+	h := newTestMaster(t, t.TempDir())
+	defer closeTestMaster(t, h)
+	stores := h.Lifecycle()
+	if _, err := stores.Volumes.CreateVolume(lifecycle.VolumeSpec{
+		VolumeID:          "pvc-a",
+		SizeBytes:         1 << 20,
+		ReplicationFactor: 1,
+	}); err != nil {
+		t.Fatalf("create desired volume: %v", err)
+	}
+	if _, err := stores.Nodes.RegisterNode(lifecycle.NodeRegistration{
+		ServerID: "node-a",
+		DataAddr: "127.0.0.1:9202",
+		CtrlAddr: "127.0.0.1:9102",
+		Replicas: []lifecycle.ReplicaInventory{{
+			VolumeID:  "pvc-a",
+			ReplicaID: "r2",
+			StoreUUID: "store-r2",
+			SizeBytes: 1 << 20,
+			State:     "existing",
+		}},
+	}); err != nil {
+		t.Fatalf("register node: %v", err)
+	}
+	if err := h.ObservationHost().Ingest(authority.Observation{
+		ServerID:   "node-a",
+		ObservedAt: time.Now().UTC(),
+		Slots: []authority.SlotFact{{
+			VolumeID:  "pvc-a",
+			ReplicaID: "r2",
+			DataAddr:  "127.0.0.1:9202",
+			CtrlAddr:  "127.0.0.1:9102",
+		}},
+	}); err != nil {
+		t.Fatalf("ingest observation: %v", err)
+	}
+
+	result, err := h.RunLifecycleProductTick()
+	if err != nil {
+		t.Fatalf("product tick: %v", err)
+	}
+	if result.ReconciledVolumes != 1 || result.PublishedAsks != 1 {
+		t.Fatalf("result=%+v want reconciled+published", result)
+	}
+	if _, ok := stores.Placements.GetPlacement("pvc-a"); !ok {
+		t.Fatal("placement intent not written from desired volume")
+	}
+	line := waitAuthorityLine(t, h.Publisher(), "pvc-a")
+	if line.ReplicaID != "r2" {
+		t.Fatalf("line=%+v want r2", line)
+	}
+}
+
 func seedVerifiedExistingReplicaPlacement(t *testing.T, h *Host) {
 	t.Helper()
 	stores := h.Lifecycle()

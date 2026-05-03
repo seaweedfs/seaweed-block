@@ -196,6 +196,7 @@ func New(cfg Config) (*Host, error) {
 	control.RegisterObservationServiceServer(grpcSrv, svc)
 	control.RegisterAssignmentServiceServer(grpcSrv, svc)
 	control.RegisterEvidenceServiceServer(grpcSrv, svc)
+	control.RegisterLifecycleServiceServer(grpcSrv, svc)
 	h.grpc = grpcSrv
 
 	lg.Printf("blockmaster: lock acquired, reloaded=%d, listen=%s",
