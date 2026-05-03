@@ -38,7 +38,20 @@ cleanup() {
   kubectl delete -f "$ROOT/deploy/k8s/g15b/rbac.yaml" --ignore-not-found=true >>"$ARTIFACT_DIR/cleanup.log" 2>&1
   kubectl delete -f "$ROOT/deploy/k8s/g15b/block-stack.yaml" --ignore-not-found=true >>"$ARTIFACT_DIR/cleanup.log" 2>&1
 }
-trap cleanup EXIT
+
+collect_daemon_logs() {
+  set +e
+  kubectl -n "$NAMESPACE" describe pod sw-block-static-smoke >"$ARTIFACT_DIR/pod.describe.txt" 2>&1 || true
+  kubectl -n "$NAMESPACE" logs sw-block-static-smoke >"$ARTIFACT_DIR/pod.log" 2>&1 || true
+  kubectl -n kube-system logs deploy/sw-blockmaster -c blockmaster >"$ARTIFACT_DIR/blockmaster.log" 2>&1 || true
+  kubectl -n kube-system logs deploy/sw-blockvolume-r1 -c blockvolume >"$ARTIFACT_DIR/blockvolume-r1.log" 2>&1 || true
+  kubectl -n kube-system logs deploy/sw-blockvolume-r2 -c blockvolume >"$ARTIFACT_DIR/blockvolume-r2.log" 2>&1 || true
+  kubectl -n kube-system logs deploy/sw-block-csi-controller -c block-csi >"$ARTIFACT_DIR/blockcsi-controller.log" 2>&1 || true
+  kubectl -n kube-system get pods -o wide >"$ARTIFACT_DIR/kube-system-pods.txt" 2>&1 || true
+  kubectl -n "$NAMESPACE" get pv,pvc,pod -o wide >"$ARTIFACT_DIR/app-pv-pvc-pod.txt" 2>&1 || true
+}
+
+trap 'collect_daemon_logs; cleanup' EXIT
 
 log "preflight: apply product stack"
 kubectl apply -f "$ROOT/deploy/k8s/g15b/block-stack.yaml" | tee "$ARTIFACT_DIR/apply-block-stack.log"
@@ -65,8 +78,6 @@ for _ in $(seq 1 180); do
     break
   fi
   if [[ "$phase" == "Failed" ]]; then
-    kubectl -n "$NAMESPACE" describe pod sw-block-static-smoke >"$ARTIFACT_DIR/pod.describe.txt" 2>&1 || true
-    kubectl -n "$NAMESPACE" logs sw-block-static-smoke >"$ARTIFACT_DIR/pod.log" 2>&1 || true
     echo "pod failed" >&2
     exit 1
   fi
@@ -75,20 +86,11 @@ done
 
 phase="$(kubectl -n "$NAMESPACE" get pod sw-block-static-smoke -o jsonpath='{.status.phase}')"
 if [[ "$phase" != "Succeeded" ]]; then
-  kubectl -n "$NAMESPACE" describe pod sw-block-static-smoke >"$ARTIFACT_DIR/pod.describe.txt" 2>&1 || true
-  kubectl -n "$NAMESPACE" logs sw-block-static-smoke >"$ARTIFACT_DIR/pod.log" 2>&1 || true
   echo "pod did not succeed; phase=$phase" >&2
   exit 1
 fi
 
-kubectl -n "$NAMESPACE" logs sw-block-static-smoke >"$ARTIFACT_DIR/pod.log"
-kubectl -n "$NAMESPACE" describe pod sw-block-static-smoke >"$ARTIFACT_DIR/pod.describe.txt"
-kubectl -n kube-system logs deploy/sw-blockmaster -c blockmaster >"$ARTIFACT_DIR/blockmaster.log" 2>&1 || true
-kubectl -n kube-system logs deploy/sw-blockvolume-r1 -c blockvolume >"$ARTIFACT_DIR/blockvolume-r1.log" 2>&1 || true
-kubectl -n kube-system logs deploy/sw-blockvolume-r2 -c blockvolume >"$ARTIFACT_DIR/blockvolume-r2.log" 2>&1 || true
-kubectl -n kube-system logs deploy/sw-block-csi-controller -c block-csi >"$ARTIFACT_DIR/blockcsi-controller.log" 2>&1 || true
-kubectl -n kube-system get pods -o wide >"$ARTIFACT_DIR/kube-system-pods.txt"
-kubectl -n "$NAMESPACE" get pv,pvc,pod -o wide >"$ARTIFACT_DIR/app-pv-pvc-pod.txt"
+collect_daemon_logs
 
 log "PASS: static PV pod completed checksum write/read"
 log "artifacts=$ARTIFACT_DIR"

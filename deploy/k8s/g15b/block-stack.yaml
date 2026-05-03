@@ -89,6 +89,7 @@ spec:
         app: sw-blockvolume-r1
     spec:
       hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
       containers:
         - name: blockvolume
           image: sw-block:local
@@ -133,6 +134,7 @@ spec:
         app: sw-blockvolume-r2
     spec:
       hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
       containers:
         - name: blockvolume
           image: sw-block:local

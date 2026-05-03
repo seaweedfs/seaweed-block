@@ -52,6 +52,17 @@ func TestG15b_Manifest_ProductStackSingleNodeLoopbackShape(t *testing.T) {
 	if strings.Contains(body, "--iscsi-listen=0.0.0.0") {
 		t.Fatalf("G15b must not weaken loopback-only iSCSI bind")
 	}
+
+	for _, name := range []string{"sw-blockvolume-r1", "sw-blockvolume-r2"} {
+		deploy := g15bFindDeployment(t, "block-stack.yaml", name)
+		spec := g15bMap(t, g15bMap(t, g15bMap(t, deploy, "spec"), "template"), "spec")
+		if got, ok := spec["hostNetwork"].(bool); !ok || !got {
+			t.Fatalf("%s hostNetwork=%v, want true", name, spec["hostNetwork"])
+		}
+		if got := spec["dnsPolicy"]; got != "ClusterFirstWithHostNet" {
+			t.Fatalf("%s dnsPolicy=%v, want ClusterFirstWithHostNet", name, got)
+		}
+	}
 }
 
 func TestG15b_Manifest_StaticPVDoesNotEmbedTargetFacts(t *testing.T) {
@@ -148,6 +159,25 @@ func TestG15b_ImageBuildInputs_ContainExpectedBinariesAndNodeTools(t *testing.T)
 	}
 }
 
+func TestG15b_Harness_CollectsDaemonLogsOnExit(t *testing.T) {
+	body := g15bReadScript(t, "run-g15b-k8s-static.sh")
+	for _, want := range []string{
+		"collect_daemon_logs()",
+		"trap 'collect_daemon_logs; cleanup' EXIT",
+		"blockmaster.log",
+		"blockvolume-r1.log",
+		"blockvolume-r2.log",
+		"blockcsi-controller.log",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("run-g15b-k8s-static.sh missing %q", want)
+		}
+	}
+	if strings.Contains(body, "trap cleanup EXIT") {
+		t.Fatalf("harness must collect daemon logs before cleanup")
+	}
+}
+
 func g15bReadManifest(t *testing.T, name string) string {
 	t.Helper()
 	return g15bReadDeployFile(t, name)
@@ -181,6 +211,21 @@ func g15bFindKind(t *testing.T, name, kind string) map[string]any {
 		}
 	}
 	t.Fatalf("%s: kind %s not found", name, kind)
+	return nil
+}
+
+func g15bFindDeployment(t *testing.T, name, deployName string) map[string]any {
+	t.Helper()
+	for _, doc := range g15bDecodeDocs(t, g15bReadManifest(t, name)) {
+		if doc["kind"] != "Deployment" {
+			continue
+		}
+		meta := g15bMap(t, doc, "metadata")
+		if meta["name"] == deployName {
+			return doc
+		}
+	}
+	t.Fatalf("%s: Deployment %s not found", name, deployName)
 	return nil
 }
 
