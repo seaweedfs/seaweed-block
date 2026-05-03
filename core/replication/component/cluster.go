@@ -109,13 +109,13 @@ type Cluster struct {
 	replicaN       int
 	primaryWrap    PrimaryStorageWrap // optional substrate wrap; nil = no wrap
 	withLiveShip   bool               // if true, primary spins up StorageBackend + ReplicationVolume
-	engineRecovery bool               // T4d hook (currently no-op + warning); see WithEngineDrivenRecovery
-	withApplyGate  bool               // T4d-2: install replication.ReplicaApplyGate on each replica's listener
-	dualLane       bool               // G7-redo: route StartRebuild via core/recovery PrimaryBridge
+	engineRecovery bool               // engine-driven recovery hook; see WithEngineDrivenRecovery
+	withApplyGate  bool               // install replication.ReplicaApplyGate on each replica's listener
+	dualLane       bool               // route StartRebuild via core/recovery PrimaryBridge
 
-	// G7-redo: per-volume coordinator + per-replica dual-lane
-	// listeners populated by Start() when dualLane=true. Tests can
-	// inspect Coord() to assert pin floor / phase.
+	// Per-volume coordinator + per-replica dual-lane listeners
+	// populated by Start() when dualLane=true. Tests can inspect
+	// Coord() to assert pin floor / phase.
 	coord                *recovery.PeerShipCoordinator
 	dualLaneReplicaAddrs []string // index-aligned with replicas[]; empty when dualLane=false
 
@@ -134,12 +134,12 @@ type Cluster struct {
 // go through `Backend` instead of `Store` so the WriteObserver hook
 // fires, driving the production live-ship path end-to-end.
 //
-// T4d-4 part B (round-47): when WithEngineDrivenRecovery is set,
-// PrimaryNode also owns one VolumeReplicaAdapter PER REPLICA. The
-// adapter is wired to its replica's executor (executor callbacks
-// flow into adapter.OnSessionClose etc); engine commands flow OUT
-// to the executor via the adapter's dispatch loop. Test scenarios
-// drive engine state by invoking adapter.OnAssignment +
+// When WithEngineDrivenRecovery is set, PrimaryNode also owns one
+// VolumeReplicaAdapter PER REPLICA. The adapter is wired to its
+// replica's executor (executor callbacks flow into
+// adapter.OnSessionClose etc); engine commands flow OUT to the
+// executor via the adapter's dispatch loop. Test scenarios drive
+// engine state by invoking adapter.OnAssignment +
 // adapter.OnProbeResult on the per-replica adapter.
 type PrimaryNode struct {
 	Store     storage.LogicalStorage
@@ -149,9 +149,9 @@ type PrimaryNode struct {
 	Backend *durable.StorageBackend
 	RepVol  *replication.ReplicationVolume
 
-	// T4d-4 part B: per-replica adapters for engine-driven recovery.
-	// Populated when cluster is built WithEngineDrivenRecovery; nil
-	// otherwise. Indexed by replica idx (matches executors slice).
+	// Per-replica adapters for engine-driven recovery. Populated
+	// when cluster is built WithEngineDrivenRecovery; nil otherwise.
+	// Indexed by replica idx (matches executors slice).
 	adapters []*adapter.VolumeReplicaAdapter
 
 	cleanup func()
@@ -169,7 +169,7 @@ type ReplicaNode struct {
 	// WithDualLaneRecovery; empty otherwise.
 	DualLaneAddr string
 
-	// ApplyGate is non-nil iff cluster was built WithApplyGate (T4d-2).
+	// ApplyGate is non-nil iff cluster was built WithApplyGate.
 	ApplyGate *replication.ReplicaApplyGate
 
 	cleanup func()
@@ -220,8 +220,8 @@ func (c *Cluster) WithPrimaryStorageWrap(wrap PrimaryStorageWrap) *Cluster {
 // (the frontend's data-plane entry) + ReplicationVolume (the
 // live-ship fan-out engine), and the WriteObserver hook fires on
 // every PrimaryWriteViaBackend call. Use this for scenarios that
-// need to exercise the live-ship path (T4a/T4b territory) rather
-// than direct executor-driven catch-up (T4c).
+// need to exercise the live-ship path rather than direct
+// executor-driven catch-up.
 //
 // When set, the primary's UpdateReplicaSet is auto-called with the
 // configured replicas at Start() so live-ship has peers to fan to.
@@ -230,28 +230,28 @@ func (c *Cluster) WithLiveShip() *Cluster {
 	return c
 }
 
-// WithApplyGate installs the T4d-2 `replication.ReplicaApplyGate`
-// on every replica's listener (lane-aware per-LBA stale-skip +
-// 2-map split + Option C hybrid AppliedLSNs seed). Required for
-// scenarios that pin round-43/44 stale-skip invariants.
+// WithApplyGate installs `replication.ReplicaApplyGate` on every
+// replica's listener (lane-aware per-LBA stale-skip + 2-map split +
+// hybrid AppliedLSNs seed). Required for scenarios that pin
+// stale-skip invariants.
 //
 // When NOT set, replica listeners use direct substrate.ApplyEntry
-// (preserves T4a/T4b/T4c scenario behavior).
+// (preserves the simpler scenario behavior).
 func (c *Cluster) WithApplyGate() *Cluster {
 	c.withApplyGate = true
 	return c
 }
 
-// ApplyGate returns the T4d-2 apply gate for the i-th replica
-// (nil if WithApplyGate not set or before Start). Used by tests
-// that assert on per-session gate state (recoveryCovered, etc.).
+// ApplyGate returns the apply gate for the i-th replica (nil if
+// WithApplyGate not set or before Start). Used by tests that assert
+// on per-session gate state (recoveryCovered, etc.).
 func (c *Cluster) ApplyGate(replicaIdx int) *replication.ReplicaApplyGate {
 	r := c.Replica(replicaIdx)
 	return r.ApplyGate
 }
 
 // WithEngineDrivenRecovery enables engine→adapter→executor recovery
-// flows. T4d-4 part B (round-47): this is REAL now. When set:
+// flows. When set:
 //   - Cluster.Start constructs one VolumeReplicaAdapter per replica
 //   - Each adapter is wired to its replica's BlockExecutor via the
 //     adapter constructor's executor-callback registration
@@ -308,9 +308,8 @@ func (c *Cluster) DualLaneReplicaAddr(i int) string {
 	return c.dualLaneReplicaAddrs[i]
 }
 
-// Adapter returns the per-replica VolumeReplicaAdapter (T4d-4 part B
-// / round-47). Returns nil if cluster was NOT built with
-// WithEngineDrivenRecovery.
+// Adapter returns the per-replica VolumeReplicaAdapter. Returns nil
+// if cluster was NOT built with WithEngineDrivenRecovery.
 //
 // Test scenarios use this to:
 //   - Inspect engine state via adapter.Projection() / adapter.Trace()
@@ -332,7 +331,7 @@ func (c *Cluster) Adapter(replicaIdx int) *adapter.VolumeReplicaAdapter {
 // ProbeReplica command (the standard fresh-assignment flow).
 // Returns the adapter's ApplyLog from the operation.
 //
-// T4d-4 part B helper for scenarios pinning engine-driven flows.
+// Helper for scenarios pinning engine-driven flows.
 func (c *Cluster) DriveAssignment(replicaIdx int, info adapter.AssignmentInfo) adapter.ApplyLog {
 	c.t.Helper()
 	a := c.Adapter(replicaIdx)
@@ -347,7 +346,7 @@ func (c *Cluster) DriveAssignment(replicaIdx int, info adapter.AssignmentInfo) a
 // runs decide() — may emit StartCatchUp / StartRebuild / FenceAtEpoch
 // per the recovery state.
 //
-// T4d-4 part B helper.
+// Helper for scenarios pinning engine-driven flows.
 func (c *Cluster) DriveProbeResult(replicaIdx int, result adapter.ProbeResult) adapter.ApplyLog {
 	c.t.Helper()
 	a := c.Adapter(replicaIdx)
@@ -383,8 +382,8 @@ func (c *Cluster) Start() *Cluster {
 		}
 		listener.Serve()
 
-		// G7-redo: when dual-lane is enabled, bind a SECOND listener
-		// per replica for inbound recover-session conns. Lifecycle is
+		// When dual-lane is enabled, bind a SECOND listener per
+		// replica for inbound recover-session conns. Lifecycle is
 		// goroutine-scoped here; replica cleanup tears it down.
 		var dualLaneAddr string
 		var dualLaneStop func()
@@ -444,12 +443,12 @@ func (c *Cluster) Start() *Cluster {
 		pStore = c.primaryWrap(pStoreRaw)
 	}
 
-	// G7-redo: when dual-lane is enabled, instantiate the per-volume
+	// When dual-lane is enabled, instantiate the per-volume
 	// coordinator BEFORE building executors so each executor
-	// captures the same instance. G7-redo 2.5: also install the
-	// recycle-floor gate on the primary substrate (walstore /
-	// memorywal both implement RecycleFloorGate) so checkpoint
-	// advancement clamps at min(pin_floor) during active sessions.
+	// captures the same instance. Also install the recycle-floor
+	// gate on the primary substrate (walstore / memorywal both
+	// implement RecycleFloorGate) so checkpoint advancement clamps
+	// at min(pin_floor) during active sessions.
 	if c.dualLane {
 		c.coord = recovery.NewPeerShipCoordinator()
 		if gate, ok := pStore.(storage.RecycleFloorGate); ok {
@@ -489,7 +488,6 @@ func (c *Cluster) Start() *Cluster {
 		c.startLiveShip()
 	}
 
-	// T4d-4 part B (round-47): engine-driven recovery is REAL now.
 	// Construct one VolumeReplicaAdapter per replica, wired to that
 	// replica's executor. Adapter constructor wires executor's
 	// session callbacks (OnSessionStart/Close/FenceComplete) →
@@ -684,11 +682,10 @@ func (c *Cluster) CatchUpReplica(replicaIdx int) adapter.SessionCloseResult {
 	exec.SetOnSessionClose(func(r adapter.SessionCloseResult) { closeCh <- r })
 
 	_, _, pH := c.primary.Store.Boundaries()
-	// T4d-3: framework helper passes fromLSN=1 for the genesis-style
+	// Framework helper passes fromLSN=1 for the genesis-style
 	// catch-up shape (test scaffold). Tests that need explicit
 	// R+1 threading drive the executor directly with a chosen
-	// fromLSN. Component scenarios pinning R+1 bandwidth will use
-	// the executor directly per G-1 §7 test matrix.
+	// fromLSN.
 	if err := exec.StartCatchUp(fmt.Sprintf("replica-%d", replicaIdx), 1, 1, 1, 1, pH); err != nil {
 		c.t.Fatalf("CatchUpReplica[%d] StartCatchUp: %v", replicaIdx, err)
 	}

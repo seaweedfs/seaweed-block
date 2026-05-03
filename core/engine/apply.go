@@ -519,8 +519,8 @@ func decide(st *ReplicaState, r *ApplyResult, trace func(string, string)) {
 		trace("decision", "catch_up (R >= S, R < H)")
 
 		if !hasActiveSession(st) {
-			// T4d-3: FromLSN = R + 1 — engine-owned "skip already-
-			// applied LSN" policy (G-1 §6.1 Option A; pins
+			// FromLSN = R + 1 — engine-owned "skip already-applied
+			// LSN" policy (pins
 			// INV-REPL-CATCHUP-FROMLSN-IS-REPLICA-FLUSHED-PLUS-1).
 			// Source is engine state Recovery.R, NOT the raw probe
 			// payload (INV-REPL-CATCHUP-FROMLSN-FROM-ENGINE-STATE-
@@ -631,8 +631,8 @@ func applySessionCompleted(st *ReplicaState, e SessionClosedCompleted, r *ApplyR
 	if e.AchievedLSN > st.Recovery.R {
 		st.Recovery.R = e.AchievedLSN // monotonic observed replica boundary
 	}
-	// T4c-3 retry-loop: success clears the attempt counter so a
-	// future independent recovery cycle starts with a fresh budget.
+	// Retry-loop: success clears the attempt counter so a future
+	// independent recovery cycle starts with a fresh budget.
 	st.Recovery.Attempts = 0
 	// A successful rebuild discharges the pinned-rebuild obligation
 	// (INV-REPL-REBUILD-DECISION-STICKY). Catch-up completion does
@@ -672,9 +672,8 @@ func applySessionFailed(st *ReplicaState, e SessionClosedFailed, r *ApplyResult,
 	st.Session.FailureReason = e.Reason
 	trace("session_failed", e.Reason)
 
-	// T4d-1 (architect HIGH v0.1 #1 + v0.3 boundary fix): branch on
-	// typed FailureKind, NOT substring match. `Reason` is diagnostic
-	// text only and engine MUST NOT parse it.
+	// Branch on typed FailureKind, NOT substring match. `Reason` is
+	// diagnostic text only and engine MUST NOT parse it.
 	//
 	// WALRecycled is a tier-class change — force recovery.Decision=
 	// Rebuild and reset Attempts so the next decide() pass emits a
@@ -707,11 +706,9 @@ func applySessionFailed(st *ReplicaState, e SessionClosedFailed, r *ApplyResult,
 		return
 	}
 
-	// T4c-3 §4.1 retry-loop wiring (round-38). Non-recycled failure:
-	// increment Attempts; if budget remaining, engine re-emits the
-	// matching Start* command on this same Apply (the recovery
-	// session was the active session; a new one for the same
-	// (decision, target) is in scope). Budget exhaustion publishes
+	// Retry-loop wiring. Non-recycled failure: increment Attempts;
+	// if budget remaining, engine re-emits the matching Start*
+	// command on this same Apply. Budget exhaustion publishes
 	// Degraded and clears the recovery decision so the next probe
 	// re-classifies.
 	//
@@ -720,9 +717,6 @@ func applySessionFailed(st *ReplicaState, e SessionClosedFailed, r *ApplyResult,
 	// that won't start is unlikely to help. Skip retry; let the
 	// adapter's higher-layer machinery (probe re-classification)
 	// drive recovery.
-	//
-	// T4d-1: branch on typed FailureKind (was: substring match on
-	// Reason text). Reason stays for diagnostics only.
 	if e.FailureKind == RecoveryFailureStartTimeout {
 		trace("start_timeout_no_retry", "FailureKind=StartTimeout — skip retry")
 		r.Commands = append(r.Commands, PublishDegraded{
@@ -731,18 +725,16 @@ func applySessionFailed(st *ReplicaState, e SessionClosedFailed, r *ApplyResult,
 		})
 		return
 	}
-	// G7-redo priority #3 [retry] Option A (architect 2026-04-29):
 	// PinUnderRetention is a mid-session pin/retention contract
-	// violation (recovery.FailurePinUnderRetention, see
-	// docs/recovery-pin-floor-wire.md §5). NOT retryable on the same
-	// lineage — retrying same fromLSN against an advanced primary S
-	// would either fail identically OR mask the situation that
-	// actually needs a fresh probe. Skip retry, leave Attempts
-	// untouched, and emit Degraded so the next probe mints a fresh
-	// lineage with fromLSN ≥ current S.
+	// violation (recovery.FailurePinUnderRetention). NOT retryable
+	// on the same lineage — retrying same fromLSN against an
+	// advanced primary S would either fail identically OR mask the
+	// situation that actually needs a fresh probe. Skip retry,
+	// leave Attempts untouched, and emit Degraded so the next probe
+	// mints a fresh lineage with fromLSN ≥ current S.
 	//
 	// Pinned by INV-PIN-COMPATIBLE-WITH-RETENTION at the engine
-	// retry-budget gate (see TestT4d_PinUnderRetention_BypassesRetryBudget).
+	// retry-budget gate.
 	if e.FailureKind == RecoveryFailurePinUnderRetention {
 		trace("pin_under_retention_no_retry",
 			"FailureKind=PinUnderRetention — skip retry; new lineage required")
@@ -763,11 +755,9 @@ func applySessionFailed(st *ReplicaState, e SessionClosedFailed, r *ApplyResult,
 		// from current Identity + recovery target.
 		switch st.Recovery.Decision {
 		case DecisionCatchUp:
-			// T4d-3 §6.2 architect Option A: retry re-emit reuses
-			// ORIGINAL Recovery.R + 1 (not re-probed). Apply gate
-			// (T4d-2) handles re-shipped gap via per-LBA stale-skip.
-			// Pinned by TestT4d3_RetryAfterReplicaAdvanced_OverScans
-			// HandledByApplyGate.
+			// Retry re-emit reuses ORIGINAL Recovery.R + 1 (not
+			// re-probed). The replica apply gate handles a
+			// re-shipped gap via per-LBA stale-skip.
 			r.Commands = append(r.Commands, StartCatchUp{
 				ReplicaID:       st.Identity.ReplicaID,
 				Epoch:           st.Identity.Epoch,
@@ -790,30 +780,25 @@ func applySessionFailed(st *ReplicaState, e SessionClosedFailed, r *ApplyResult,
 		return
 	}
 
-	// Budget exhausted. Per round-47 architect addition: catch-up
-	// budget exhaustion DIRECTLY ESCALATES to rebuild — engine emits
-	// StartRebuild without waiting for the next probe to re-classify.
-	// Pinned by INV-REPL-CATCHUP-EXHAUSTION-ESCALATES-TO-REBUILD.
+	// Budget exhausted. Catch-up budget exhaustion DIRECTLY ESCALATES
+	// to rebuild — engine emits StartRebuild without waiting for the
+	// next probe to re-classify. Pinned by
+	// INV-REPL-CATCHUP-EXHAUSTION-ESCALATES-TO-REBUILD.
 	//
-	// Pre-round-47 behavior: cleared Decision + emitted PublishDegraded;
-	// rebuild only fired if a fresh probe arrived showing R<S. That
-	// path was probe-dependent and could leave the replica idle for a
-	// probe interval before rebuild started.
+	// Catch-up exhaustion is itself the trigger; rebuild emission is
+	// automatic. Rebuild's MaxRetries=0 (per DefaultRuntimePolicyFor)
+	// means a rebuild failure terminates without further retry —
+	// clean terminal definition.
 	//
-	// Round-47 scope: the rebuild path becomes engine-driven
-	// end-to-end. Catch-up exhaustion is itself the trigger; rebuild
-	// emission is automatic. Rebuild's MaxRetries=0 (per
-	// DefaultRuntimePolicyFor) means a rebuild failure terminates
-	// without further retry — clean terminal definition.
 	// Use the FAILED session's kind, not current Recovery.Decision —
 	// a stray probe arriving mid-retry can re-classify Decision to
 	// Rebuild before exhaustion fires, which would route us to the
-	// terminal-degraded branch and miss the round-47 escalation.
-	// The session that just failed is the source of truth for what
-	// recovery mode was actually being attempted.
+	// terminal-degraded branch and miss the escalation. The session
+	// that just failed is the source of truth for what recovery
+	// mode was actually being attempted.
 	if st.Session.Kind == SessionCatchUp {
 		trace("retry_exhausted_escalate_to_rebuild",
-			fmt.Sprintf("attempts=%d > budget=%d → emit StartRebuild (round-47, pinned)",
+			fmt.Sprintf("attempts=%d > budget=%d → emit StartRebuild (pinned)",
 				st.Recovery.Attempts, budget))
 		st.Recovery.Attempts = 0
 		st.Recovery.Decision = DecisionRebuild
@@ -858,14 +843,10 @@ func contentKindFor(d RecoveryDecision) RecoveryContentKind {
 	return RecoveryContentWALDelta
 }
 
-// T4d-1: substring-match helpers `isWALRecycledFailure`,
-// `isStartTimeoutFailure`, and `containsAny` REMOVED. Engine now
-// branches on typed `e.FailureKind` (RecoveryFailureKind enum).
-//
-// `Reason` field on SessionClosedFailed is DIAGNOSTIC TEXT ONLY —
-// engine MUST NOT parse it. Substring matching was a temporary
-// T4c-2 contract; T4d-1 closes the binding per architect HIGH v0.1
-// #1 + v0.3 boundary discipline (engine→storage decoupling).
+// Engine branches on typed `e.FailureKind` (RecoveryFailureKind enum)
+// rather than substring-matching `Reason`. The `Reason` field on
+// SessionClosedFailed is DIAGNOSTIC TEXT ONLY — engine MUST NOT
+// parse it.
 //
 // Substrate-side classification lives in storage.RecoveryFailure +
 // storage.StorageRecoveryFailureKind. Transport extracts via
@@ -881,7 +862,7 @@ func applySessionInvalidated(st *ReplicaState, e SessionInvalidated, r *ApplyRes
 	trace("session_invalidated", e.Reason)
 }
 
-// --- Fence events (P14 S1) ---
+// --- Fence events ---
 
 func applyFenceCompleted(st *ReplicaState, e FenceCompleted, r *ApplyResult, trace func(string, string)) {
 	// Lineage check: the fence result must belong to the current
@@ -949,8 +930,8 @@ func derivePublication(st *ReplicaState, trace func(string, string)) {
 
 	switch {
 	case st.Recovery.Decision == DecisionNone && st.Reachability.Status == ProbeReachable:
-		// Caught-up branch. Ack-gated on fence completion (P14 S1):
-		// the operator-visible Healthy must not flip true until the
+		// Caught-up branch. Ack-gated on fence completion: the
+		// operator-visible Healthy must not flip true until the
 		// replica's lineage gate has observed Identity.Epoch via
 		// FenceCompleted. Otherwise stale old-epoch traffic could
 		// still land while the projection already reads healthy.

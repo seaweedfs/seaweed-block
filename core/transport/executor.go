@@ -52,11 +52,11 @@ type BlockExecutor struct {
 }
 
 // EmitProfile selects the wire encoder + frame format used by the
-// per-replica WalShipper's EmitFunc. P2d (architect 2026-04-30):
-// dual-lane connections use frameWALEntry; legacy steady connections
-// use MsgShipEntry. The profile is part of the emit context (alongside
-// conn + lineage) and switches when recovery sessions bracket the
-// shipper into the dual-lane port.
+// per-replica WalShipper's EmitFunc. Dual-lane connections use
+// frameWALEntry; legacy steady connections use MsgShipEntry. The
+// profile is part of the emit context (alongside conn + lineage) and
+// switches when recovery sessions bracket the shipper into the
+// dual-lane port.
 type EmitProfile int
 
 const (
@@ -125,7 +125,7 @@ type walShipperEntry struct {
 	// duck-types `WriteMu() *sync.Mutex` on the sink and uses this
 	// mutex for its own writeFrame calls.
 	//
-	// Lock hierarchy (architect §6.8 mechanical SINGLE-SERIALIZER):
+	// Lock hierarchy (mechanical SINGLE-SERIALIZER):
 	//
 	//   walShipper.shipMu  ───>  walShipperEntry.writeMu
 	//
@@ -256,11 +256,12 @@ func NewBlockExecutorWithDualLane(
 				cb(res)
 			}
 			if err == nil && ackCb != nil {
-				// G9C: session close proves the recovery window closed;
-				// replica_ready needs a subsequent durable progress fact
-				// so the engine knows the live feed still owns this peer.
-				// `achieved` is the receiver's durable BarrierResp witness,
-				// not the primary's frontier intent.
+				// Session close proves the recovery window closed;
+				// replica_ready needs a subsequent durable progress
+				// fact so the engine knows the live feed still owns
+				// this peer. `achieved` is the receiver's durable
+				// BarrierResp witness, not the primary's frontier
+				// intent.
 				_, primaryS, primaryH := e.primaryStore.Boundaries()
 				ackCb(adapter.DurableAckResult{
 					ReplicaID:      string(rid),
@@ -332,13 +333,13 @@ func (e *BlockExecutor) Fence(replicaID string, sessionID, epoch, endpointVersio
 		Epoch:           epoch,
 		EndpointVersion: endpointVersion,
 		// FrontierHint/TargetLSN is not semantically meaningful for
-		// fence (fence doesn't declare a recovery target), but post-T4b-1 the
+		// fence (fence doesn't declare a recovery target), but the
 		// barrier-ack wire demands every lineage field be non-zero
-		// (architect round-21 uniform rule applied at decode). Using
-		// the liveShipTargetLSN sentinel (1) keeps Fence composable
-		// with the stricter wire while preserving the "not a recovery
-		// target" intent — no TargetLSN-sensitive code in the fence
-		// path reads this value.
+		// (uniform decode rule). Using the liveShipTargetLSN
+		// sentinel (1) keeps Fence composable with the stricter wire
+		// while preserving the "not a recovery target" intent — no
+		// TargetLSN-sensitive code in the fence path reads this
+		// value.
 		TargetLSN: fenceSentinelTargetLSN,
 	}
 	go e.doFence(replicaID, lineage)
@@ -363,10 +364,10 @@ const fenceSentinelTargetLSN uint64 = 1
 //
 // Called by: BlockExecutor.doFence (async wrapper for legacy callback-
 // driven callers like the engine's recovery path) and
-// ReplicaPeer.Fence (T4b-3 wrapper for sync-style callers like
+// ReplicaPeer.Fence (sync-style wrapper for callers like
 // DurabilityCoordinator).
 // Owns: per-call conn dial + deadline; lineage validation against the
-// request lineage (round-21 uniform rule).
+// request lineage (uniform rule).
 // Borrows: lineage from caller.
 func (e *BlockExecutor) FenceSync(replicaID string, lineage RecoveryLineage) error {
 	conn, err := net.DialTimeout("tcp", e.replicaAddr, 2*time.Second)
@@ -381,13 +382,12 @@ func (e *BlockExecutor) FenceSync(replicaID string, lineage RecoveryLineage) err
 	resp, err := recvBarrierResp(conn, recoveryConnTimeout)
 	if err != nil {
 		// Short / zero-valued / field-order-malformed payloads are
-		// rejected at the T4b-1 decode layer as errors; they surface
-		// here without silent-accept (architect round 22 uniform rule
-		// at the first ack-consuming surface).
+		// rejected at the decode layer as errors; they surface here
+		// without silent-accept.
 		return fmt.Errorf("fence barrier resp: %w", err)
 	}
-	// T4b-2 round-22 lineage validation: the replica's echoed lineage
-	// MUST match the lineage we sent.
+	// Lineage validation: the replica's echoed lineage MUST match
+	// the lineage we sent.
 	if !resp.Lineage.Equivalent(lineage) {
 		log.Printf("executor: fence lineage mismatch replica=%s expected=%+v actual=%+v",
 			replicaID, lineage, resp.Lineage)
@@ -419,17 +419,16 @@ func (e *BlockExecutor) doFence(replicaID string, lineage RecoveryLineage) {
 // Returns the validated BarrierAck on success, or error on transport
 // failure / ack rejection.
 //
-// Architect round-21 uniform rule applies end-to-end:
+// Uniform full-lineage rule applies end-to-end:
 //   - decode rejects short / zeroed / field-order-malformed acks
-//     (T4b-1 wire)
 //   - this method rejects valid-decode-but-wrong-session acks via
-//     ErrBarrierLineageMismatch (T4b-2 ack-consumer validation)
+//     ErrBarrierLineageMismatch
 //
 // A future optimization MUST NOT weaken this to epoch-only; the
-// full-lineage rule is load-bearing for H5 LOCK.
+// full-lineage rule is load-bearing for the durability gate.
 //
-// Called by: DurabilityCoordinator.SyncLocalAndReplicas (T4b-3)
-// per-peer fan-out.
+// Called by: DurabilityCoordinator.SyncLocalAndReplicas per-peer
+// fan-out.
 // Owns: per-call conn deadline (recoveryConnTimeout); lineage binding;
 // ack validation against the session's registered lineage.
 // Borrows: session by replicaID + lineage.SessionID; BarrierAck
@@ -454,8 +453,8 @@ func (e *BlockExecutor) Barrier(replicaID string, lineage RecoveryLineage, front
 	conn := session.conn
 	e.mu.Unlock()
 
-	// Lazy-dial if no conn (same pattern as Ship, architect round-11
-	// Option B). Attach-under-mu with "first winner keeps" races.
+	// Lazy-dial if no conn (same pattern as Ship). Attach-under-mu
+	// with "first winner keeps" races.
 	if conn == nil {
 		dialed, err := net.DialTimeout("tcp", e.replicaAddr, shipDialTimeout)
 		if err != nil {
@@ -491,10 +490,9 @@ func (e *BlockExecutor) Barrier(replicaID string, lineage RecoveryLineage, front
 		return BarrierAck{}, fmt.Errorf("transport: barrier: recv replica=%s: %w", replicaID, err)
 	}
 
-	// Full-lineage validation (architect round-21 uniform rule).
-	// Stale or cross-session acks fail here. Diagnostic log format
-	// matches architect's round-21 text: peer ID + full expected /
-	// actual lineage tuple.
+	// Full-lineage validation. Stale or cross-session acks fail
+	// here. Diagnostic log format: peer ID + full expected / actual
+	// lineage tuple.
 	if !resp.Lineage.Equivalent(lineage) {
 		log.Printf("transport: barrier: lineage mismatch replica=%s expected=%+v actual=%+v",
 			replicaID, lineage, resp.Lineage)
@@ -519,19 +517,19 @@ func (e *BlockExecutor) fireFenceComplete(result adapter.FenceResult) {
 
 // ErrProbeLineageMismatch is returned by `BlockExecutor.Probe` when the
 // replica's response carries a lineage that does not match the request
-// lineage. Per architect round-21 + round-26 symmetric-pair rule, such
-// responses MUST NOT contribute to recovery facts — the executor surfaces
-// the error verbatim and the engine treats it as a probe failure.
+// lineage. Per the symmetric-pair rule, such responses MUST NOT
+// contribute to recovery facts — the executor surfaces the error
+// verbatim and the engine treats it as a probe failure.
 var ErrProbeLineageMismatch = errors.New("transport: probe: response lineage does not match request")
 
 // Probe dials the replica, sends a `MsgProbeReq` carrying the full
-// transient probe lineage (T4c-1 wire), and returns the replica's R/S/H
-// boundaries after validating the echoed lineage. Returns facts only —
-// never decides policy.
+// transient probe lineage, and returns the replica's R/S/H boundaries
+// after validating the echoed lineage. Returns facts only — never
+// decides policy.
 //
-// Per T4c-1 (architect Option D): sessionID is the adapter-minted
-// transient probe sessionID. It is NOT registered in `executor.sessions`,
-// NOT carried in any session-lifecycle event. The lineage built here:
+// sessionID is the adapter-minted transient probe sessionID. It is
+// NOT registered in `executor.sessions`, NOT carried in any
+// session-lifecycle event. The lineage built here:
 //
 //	RecoveryLineage{SessionID, Epoch, EndpointVersion, FrontierHint/TargetLSN: max(1, primaryH)}
 //
@@ -565,9 +563,9 @@ func (e *BlockExecutor) Probe(replicaID, dataAddr, ctrlAddr string, sessionID, e
 	// primaryS / primaryH are also returned in the ProbeResult.
 	_, primaryS, primaryH := e.primaryStore.Boundaries()
 
-	// Probe lineage construction (architect Option D). Floor frontier hint
-	// at 1 to honor architect's no-zero-TargetLSN rule even when the
-	// primary has not yet written any data.
+	// Probe lineage construction. Floor frontier hint at 1 to honor
+	// the no-zero-TargetLSN rule even when the primary has not yet
+	// written any data.
 	frontierHint := primaryH
 	if frontierHint == 0 {
 		frontierHint = 1
@@ -638,8 +636,8 @@ func (e *BlockExecutor) Probe(replicaID, dataAddr, ctrlAddr string, sessionID, e
 		}
 	}
 
-	// Echo validation (round-26 symmetric-pair rule, mirrors T4b-2's
-	// barrier echo check). Primary-side consumer MUST reject stale /
+	// Echo validation (symmetric-pair rule, mirrors the barrier echo
+	// check). Primary-side consumer MUST reject stale /
 	// cross-session / partial-zero responses by full lineage tuple.
 	if !resp.Lineage.Equivalent(requestLineage) {
 		log.Printf("transport: probe: lineage mismatch replica=%s expected=%+v actual=%+v",
@@ -808,16 +806,15 @@ func (e *BlockExecutor) AdvanceLiveShipCursor(replicaID string, achievedLSN uint
 // session start (RecoverySink) calls it to install the dual-lane
 // session context.
 //
-// Ordering invariant (architect P1 review #3): every code path
-// that ends in an emit (steady Ship, recovery-session DrainBacklog,
-// recovery-session NotifyAppend) MUST refresh this context BEFORE
-// the call that may emit. Otherwise EmitFunc emits with stale
-// lineage / nil conn / wrong profile.
+// Ordering invariant: every code path that ends in an emit (steady
+// Ship, recovery-session DrainBacklog, recovery-session NotifyAppend)
+// MUST refresh this context BEFORE the call that may emit. Otherwise
+// EmitFunc emits with stale lineage / nil conn / wrong profile.
 //
-// P2d (architect 2026-04-30): `profile` is part of the context —
-// SteadyMsgShip for legacy port, DualLaneWALFrame for dual-lane port.
-// The profile selects the encoder; legacy callers pass
-// EmitProfileSteadyMsgShip to preserve existing wire shape.
+// `profile` is part of the context — SteadyMsgShip for legacy port,
+// DualLaneWALFrame for dual-lane port. The profile selects the
+// encoder; legacy callers pass EmitProfileSteadyMsgShip to preserve
+// existing wire shape.
 //
 // No-op if the WalShipper hasn't been created yet (caller will
 // create via WalShipperFor and re-call).
@@ -861,8 +858,7 @@ func (e *BlockExecutor) SetWalShipperPostEmitHook(replicaID string, hook func(ls
 // WalShipperWriteMu returns the per-replica entry's writeMu — the
 // mutex EmitFunc holds during conn.Write. Recovery.Sender uses this
 // for its own writeFrame calls during a dual-lane session so both
-// writers serialize on the same conn (§6.8 #1 mechanical
-// SINGLE-SERIALIZER).
+// writers serialize on the same conn (mechanical SINGLE-SERIALIZER).
 //
 // Returns nil when no WalShipperEntry exists for replicaID — caller
 // (the sink) returns nil from WriteMu(), and recovery.Sender falls
@@ -921,13 +917,12 @@ func (e *BlockExecutor) DualLanePrimaryBridge() (*recovery.PrimaryBridge, recove
 	return e.dualLane.Bridge, e.dualLane.ReplicaID, true
 }
 
-// Registry lifecycle note (architect P1 review #4): walShippers
-// entries are never torn down today. For replica churn, lineage
-// invalidation, or executor reuse across distinct peer
-// generations, P3+ may add an explicit Forget(replicaID) /
-// teardown hook. Out of scope for MVP since current call sites
-// (cmd/blockvolume, tests) construct one BlockExecutor per
-// (volume, replica) lifecycle.
+// Registry lifecycle note: walShippers entries are never torn down
+// today. For replica churn, lineage invalidation, or executor reuse
+// across distinct peer generations, a future Forget(replicaID) /
+// teardown hook may be needed. Out of scope for MVP since current
+// call sites (cmd/blockvolume, tests) construct one BlockExecutor
+// per (volume, replica) lifecycle.
 
 func (e *BlockExecutor) registerSession(lineage RecoveryLineage) (*activeSession, error) {
 	e.mu.Lock()
@@ -1002,9 +997,8 @@ func (e *BlockExecutor) finishSession(replicaID string, session *activeSession, 
 		return
 	}
 	if err != nil {
-		// T4d-1 (architect HIGH v0.1 #1 + v0.3 boundary fix): extract
-		// substrate-side RecoveryFailure via errors.As + map to
-		// engine-owned RecoveryFailureKind. Engine MUST NOT import
+		// Extract substrate-side RecoveryFailure via errors.As + map
+		// to engine-owned RecoveryFailureKind. Engine MUST NOT import
 		// core/storage; transport does the mapping at the boundary
 		// (transport already imports both packages).
 		cb(adapter.SessionCloseResult{

@@ -9,28 +9,28 @@ import (
 	"time"
 )
 
-// ProbeLoop is the per-volume primary-side degraded-peer probe loop
-// (G5-5C). It iterates over peers in ReplicaDegraded state at a bounded
+// ProbeLoop is the per-volume primary-side degraded-peer probe loop.
+// It iterates over peers in ReplicaDegraded state at a bounded
 // interval, calls a host-injected probe function on each, and applies
 // per-peer cooldown (with backoff) so flapping peers do not cause a
 // retrigger storm.
 //
-// Layering (G5-5C §1.G): this loop is runtime / wiring. It owns the
-// timer, iteration discipline, cooldown progression, and in-flight
-// guard. It does NOT own the recovery FSM (engine), the probe
-// transport (BlockExecutor), or the peer state machine (ReplicaPeer).
-// A degraded peer's transition back to Healthy / CatchingUp /
+// Layering: this loop is runtime / wiring. It owns the timer,
+// iteration discipline, cooldown progression, and in-flight guard.
+// It does NOT own the recovery FSM (engine), the probe transport
+// (BlockExecutor), or the peer state machine (ReplicaPeer). A
+// degraded peer's transition back to Healthy / CatchingUp /
 // NeedsRebuild is driven by the engine on probe-result ingest, NOT
 // by this loop.
 //
-// Authority bound (G5-5C §1.E): the loop's peer source is a function
-// that snapshots the current ReplicationVolume.peers map under lock.
-// It does NOT consult master, does NOT enumerate network-discoverable
+// Authority bound: the loop's peer source is a function that
+// snapshots the current ReplicationVolume.peers map under lock. It
+// does NOT consult master, does NOT enumerate network-discoverable
 // addresses. Only master-admitted peers are eligible.
 //
-// Backoff (G5-5C §1.G #7): per-peer cooldown starts at base (5 s),
-// doubles on consecutive probe failures up to a cap (60 s), and
-// resets to base on first success.
+// Backoff: per-peer cooldown starts at base (5 s), doubles on
+// consecutive probe failures up to a cap (60 s), and resets to base
+// on first success.
 //
 // Pinned by:
 //   - INV-G5-5C-PRIMARY-RECOVERY-AUTHORITY-BOUNDED
@@ -51,18 +51,18 @@ type ProbeLoop struct {
 	state atomic.Uint32 // probeLoopState
 }
 
-// ProbeLoopConfig holds the loop's tuning knobs. Defaults match the
-// architect-bound G5-5C §1.A shape: 5 s interval, 1 max concurrent.
+// ProbeLoopConfig holds the loop's tuning knobs. Defaults: 5 s
+// interval, 1 max concurrent.
 type ProbeLoopConfig struct {
 	// Interval between iterations. Must be > 0; 0 disables the loop
 	// (Start returns without spawning a goroutine).
 	Interval time.Duration
 
 	// MaxConcurrent caps the number of probe calls in flight in a
-	// single iteration. v0.5 hard-binds MaxConcurrent=1 per architect
-	// G5-5C §1.A; values > 1 are rejected at construction so we
-	// never silently accept a knob the runtime ignores. Future
-	// scaling will revisit this constraint with explicit binding.
+	// single iteration. Currently hard-bound to 1; values > 1 are
+	// rejected at construction so we never silently accept a knob
+	// the runtime ignores. Future scaling will revisit this
+	// constraint with explicit binding.
 	MaxConcurrent int
 
 	// CooldownBase is the per-peer cooldown after a probe attempt.
@@ -74,7 +74,7 @@ type ProbeLoopConfig struct {
 	CooldownCap time.Duration
 }
 
-// DefaultProbeLoopConfig returns the architect-bound G5-5C defaults.
+// DefaultProbeLoopConfig returns the default probe-loop config.
 func DefaultProbeLoopConfig() ProbeLoopConfig {
 	return ProbeLoopConfig{
 		Interval:      5 * time.Second,
@@ -142,11 +142,11 @@ func NewProbeLoop(cfg ProbeLoopConfig, peersFn PeerSourceFn, probeFn ProbeFn, co
 	if cfg.MaxConcurrent <= 0 {
 		cfg.MaxConcurrent = 1
 	}
-	// v0.5 architect-bound: MaxConcurrent=1 only. Reject silently-
-	// accepted knobs that the runtime ignores.
+	// MaxConcurrent=1 only. Reject silently-accepted knobs that the
+	// runtime ignores.
 	if cfg.MaxConcurrent != 1 {
 		return nil, fmt.Errorf(
-			"replication: ProbeLoop: MaxConcurrent=%d not supported in G5-5C v0.5 (must be 1)",
+			"replication: ProbeLoop: MaxConcurrent=%d not supported (must be 1)",
 			cfg.MaxConcurrent)
 	}
 	if cfg.CooldownBase <= 0 {
@@ -270,8 +270,8 @@ func (l *ProbeLoop) tick() {
 		return
 	}
 
-	// Sequential dispatch in v0.5 (MaxConcurrent=1 default). Parallel
-	// dispatch is a future optimization; out of scope for G5-5C.
+	// Sequential dispatch (MaxConcurrent=1). Parallel dispatch is a
+	// future optimization.
 	for _, peer := range peers {
 		select {
 		case <-l.stopCh:

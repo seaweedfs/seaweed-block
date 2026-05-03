@@ -21,11 +21,10 @@ const (
 	mutationLaneRecovery
 )
 
-// ApplyHook is the T4d-2 plug-in seam for the replica recovery
-// apply gate. The hook is LANE-EXPLICIT per round-46 architect
-// ruling: caller (MsgShipEntry handler) decides lane from
-// connection/session handler context and invokes the matching
-// method. The hook does NOT inspect payload bytes for lane
+// ApplyHook is the plug-in seam for the replica recovery apply gate.
+// The hook is LANE-EXPLICIT: caller (MsgShipEntry handler) decides
+// lane from connection/session handler context and invokes the
+// matching method. The hook does NOT inspect payload bytes for lane
 // discrimination.
 //
 // Implementations: `replication.ReplicaApplyGate`. Interface lives
@@ -34,8 +33,8 @@ const (
 // existing one; this interface is the duck-type adapter).
 //
 // Returning a non-nil error → caller (handler) logs + closes conn.
-// Per round-44 INV-REPL-LIVE-LANE-STALE-FAILS-LOUD: live-lane stale
-// entries surface here as errors.
+// Per INV-REPL-LIVE-LANE-STALE-FAILS-LOUD: live-lane stale entries
+// surface here as errors.
 type ApplyHook interface {
 	// ApplyRecovery routes the entry through the recovery-lane apply
 	// path. Stale entries (LSN <= per-LBA applied) skip data + advance
@@ -54,7 +53,7 @@ type ReplicaListener struct {
 	listener  net.Listener
 	stopCh    chan struct{}
 	wg        sync.WaitGroup
-	applyHook ApplyHook // T4d-2: optional gate plug-in; nil = direct apply
+	applyHook ApplyHook // optional gate plug-in; nil = direct apply
 
 	mu            sync.Mutex
 	activeLineage RecoveryLineage
@@ -63,18 +62,17 @@ type ReplicaListener struct {
 
 // NewReplicaListener creates a listener on the given address.
 // No ApplyHook installed — MsgShipEntry handler calls store.ApplyEntry
-// directly (preserves T4a/T4b/T4c behavior; existing tests pass
-// unchanged).
+// directly (the simpler no-gate path).
 func NewReplicaListener(addr string, store storage.LogicalStorage) (*ReplicaListener, error) {
 	return NewReplicaListenerWithApplyHook(addr, store, nil)
 }
 
-// NewReplicaListenerWithApplyHook creates a listener with the T4d-2
+// NewReplicaListenerWithApplyHook creates a listener with the
 // apply-gate plug-in installed. The MsgShipEntry handler dispatches
 // caller-side to `hook.ApplyRecovery` or `hook.ApplyLive` based on
-// the connection/session lane it has established for this entry. The
-// hook itself is LANE-PURE per round-46 architect ruling — it does
-// not inspect payload bytes to decide lane.
+// the connection/session lane it has established for this entry.
+// The hook itself is LANE-PURE — it does not inspect payload bytes
+// to decide lane.
 //
 // Lane decision comes from handler context:
 //   - default legacy SWRP MsgShipEntry connections are live lane
@@ -144,9 +142,8 @@ func (r *ReplicaListener) Stop() {
 //
 // Safe to call multiple times. Idempotent.
 //
-// G5-5C #6 introduced this seam to make the restart-catch-up
-// component test deterministic without depending on remote-side
-// teardown.
+// This seam exists to make the restart-catch-up component test
+// deterministic without depending on remote-side teardown.
 func (r *ReplicaListener) StopHard() {
 	select {
 	case <-r.stopCh:
@@ -233,11 +230,10 @@ func (r *ReplicaListener) handleConn(conn net.Conn) {
 					entry.Lineage.SessionID, entry.Lineage.Epoch, entry.Lineage.EndpointVersion)
 				return
 			}
-			// T4d-2 + round-46 rework: if the apply-gate is installed,
-			// route through it. Caller (this handler) decides lane;
-			// gate is lane-pure. Live-lane stale entries return error
-			// here → log + close conn (round-44
-			// INV-REPL-LIVE-LANE-STALE-FAILS-LOUD).
+			// If the apply-gate is installed, route through it.
+			// Caller (this handler) decides lane; gate is lane-pure.
+			// Live-lane stale entries return error here → log +
+			// close conn (INV-REPL-LIVE-LANE-STALE-FAILS-LOUD).
 			if r.applyHook != nil {
 				var err error
 				if lane == mutationLaneRecovery {
@@ -251,18 +247,17 @@ func (r *ReplicaListener) handleConn(conn net.Conn) {
 				}
 				continue
 			}
-			// No hook: T4a/T4b/T4c behavior — direct apply.
+			// No hook: direct apply.
 			if err := r.store.ApplyEntry(entry.LBA, entry.Data, entry.LSN); err != nil {
 				log.Printf("replica: apply entry: %v", err)
 			}
 
 		case MsgProbeReq:
-			// T4c-1 wire upgrade: ProbeReq now carries full
-			// RecoveryLineage. Decode + validate + echo per round-26
-			// symmetric-pair rule. Failure to decode (short / zeroed
-			// lineage) closes the conn without echoing — the primary
-			// times out + treats as unreachable, which is the correct
-			// fail-closed surface.
+			// ProbeReq carries full RecoveryLineage. Decode + validate
+			// + echo via the symmetric-pair rule. Failure to decode
+			// (short / zeroed lineage) closes the conn without
+			// echoing — the primary times out + treats as
+			// unreachable, which is the correct fail-closed surface.
 			//
 			// Probe is non-mutating: validation gates zeros and clearly
 			// stale lineages but MUST NOT advance `activeLineage`.
@@ -285,7 +280,7 @@ func (r *ReplicaListener) handleConn(conn net.Conn) {
 			}
 			R, S, H := r.store.Boundaries()
 			resp := EncodeProbeResp(ProbeResponse{
-				Lineage:   req.Lineage, // echo per round-26 Item C.3
+				Lineage:   req.Lineage, // echo per symmetric-pair rule
 				SyncedLSN: R,
 				WalTail:   S,
 				WalHead:   H,
@@ -329,10 +324,7 @@ func (r *ReplicaListener) handleConn(conn net.Conn) {
 			r.store.AdvanceFrontier(lineage.EffectiveFrontierHint())
 			frontier, _ := r.store.Sync()
 			// Echo the request's full lineage in the rebuild-done ack
-			// per T4b-1 wire extension. T4b scope does not yet validate
-			// this lineage on the primary (catch-up/rebuild paths are
-			// T4c / T5), but the wire must already carry it so those
-			// validators can consume it when they land.
+			// so primary-side validators can consume it.
 			resp := EncodeBarrierResp(BarrierResponse{
 				Lineage:     lineage,
 				AchievedLSN: frontier,
@@ -354,11 +346,10 @@ func (r *ReplicaListener) handleConn(conn net.Conn) {
 				return
 			}
 			frontier, _ := r.store.Sync()
-			// Echo the request's full lineage in the barrier ack per
-			// T4b-1 wire extension (round-21 uniform rule + H5 LOCK).
-			// The primary's DurabilityCoordinator (T4b-2/T4b-3)
-			// validates this tuple against the session it is awaiting
-			// before counting the ack toward quorum.
+			// Echo the request's full lineage in the barrier ack.
+			// The primary's DurabilityCoordinator validates this
+			// tuple against the session it is awaiting before
+			// counting the ack toward quorum.
 			resp := EncodeBarrierResp(BarrierResponse{
 				Lineage:     lineage,
 				AchievedLSN: frontier,
@@ -385,7 +376,7 @@ func (r *ReplicaListener) handleConn(conn net.Conn) {
 // (epoch, endpointVersion) as activeLineage is always accepted for
 // echo, regardless of sessionID ordering.
 //
-// Called by: replica's MsgProbeReq handler (T4c-1).
+// Called by: replica's MsgProbeReq handler.
 // Owns: the read of activeLineage; no writes.
 // Borrows: nothing.
 func (r *ReplicaListener) validateProbeLineage(incoming RecoveryLineage) bool {

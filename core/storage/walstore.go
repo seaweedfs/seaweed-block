@@ -81,12 +81,12 @@ type WALStore struct {
 	pendingDirectFrontierLSN uint64
 
 	// recoveryRetentionLSNs is the operator-tunable retention window
-	// past checkpointLSN: the recovery scan accepts fromLSN as long as
-	// fromLSN > checkpointLSN - recoveryRetentionLSNs (G6 §1.A α).
-	// Zero means strict checkpoint-driven recycle (pre-G6 behavior).
-	// Operator sets via blockvolume's --wal-retention-lsns flag at
-	// store construction. Stored in-memory only — NOT persisted to
-	// the superblock; on restart the daemon re-applies the flag.
+	// past checkpointLSN: the recovery scan accepts fromLSN as long
+	// as fromLSN > checkpointLSN - recoveryRetentionLSNs. Zero means
+	// strict checkpoint-driven recycle. Operator sets via
+	// blockvolume's --wal-retention-lsns flag at store construction.
+	// Stored in-memory only — NOT persisted to the superblock; on
+	// restart the daemon re-applies the flag.
 	//
 	// Pinned by: INV-G6-RETENTION-POLICY-OPERATOR-VISIBLE.
 	recoveryRetentionLSNs uint64
@@ -271,13 +271,12 @@ func (s *WALStore) writeExtent(lba uint32, data []byte) error {
 // over-writes the extent with identical bytes. Wasteful but correct.
 func (s *WALStore) persistCheckpoint(highestLSN uint64) error {
 	s.mu.Lock()
-	// G7-redo 2.5: clamp the proposed checkpoint to the recycle
-	// floor reported by an external coordinator (e.g., the
-	// recovery package's PeerShipCoordinator). When a replica is
-	// in an active rebuild session and pin_floor < highestLSN, we
-	// hold the checkpoint at pin_floor so WAL entries the replica
-	// still depends on are retained. INV-RECYCLE-GATED-BY-MIN-
-	// ACTIVE-PIN.
+	// Clamp the proposed checkpoint to the recycle floor reported
+	// by an external coordinator (e.g., the recovery package's
+	// PeerShipCoordinator). When a replica is in an active rebuild
+	// session and pin_floor < highestLSN, we hold the checkpoint at
+	// pin_floor so WAL entries the replica still depends on are
+	// retained. INV-RECYCLE-GATED-BY-MIN-ACTIVE-PIN.
 	if s.recycleFloorSrc != nil {
 		if floor, anyActive := s.recycleFloorSrc.MinPinAcrossActiveSessions(); anyActive {
 			if highestLSN > floor {
@@ -551,8 +550,8 @@ func (s *WALStore) BlockSize() int { return int(s.sb.BlockSize) }
 
 // SetRecoveryRetentionLSNs configures the WAL retention window past
 // checkpointLSN. After this is set, the recovery scan accepts
-// fromLSN > checkpointLSN - retentionLSNs (G6 §1.A α). Zero (the
-// default) preserves pre-G6 strict checkpoint-driven recycle.
+// fromLSN > checkpointLSN - retentionLSNs. Zero (the default)
+// preserves strict checkpoint-driven recycle.
 //
 // Operator-tunable via blockvolume's --wal-retention-lsns flag.
 // In-memory only; not persisted (re-applied on restart from CLI).
@@ -676,9 +675,8 @@ func (s *WALStore) ApplyEntry(lba uint32, data []byte, lsn uint64) error {
 	return nil
 }
 
-// RecoveryMode reports walstore's recovery sub-mode (T4d-4 part A;
-// T4c §I row 6). walstore's ScanLBAs emits per-LSN entries from the
-// retained WAL — V2-faithful per-LSN replay.
+// RecoveryMode reports walstore's recovery sub-mode. walstore's
+// ScanLBAs emits per-LSN entries from the retained WAL.
 func (s *WALStore) RecoveryMode() RecoveryMode {
 	return RecoveryModeWALReplay
 }
@@ -689,17 +687,17 @@ func (s *WALStore) RecoveryMode() RecoveryMode {
 // entry is cleared, walstore loses per-LBA LSN tracking — the
 // extent stores data only, not per-LBA LSN.
 //
-// PARTIAL-VIEW LIMITATION (kickoff §2.5 #3 caveat): for full per-LBA
-// applied-LSN tracking, walstore would need a permanent per-LBA LSN
-// map (substrate refactor, out of T4d-1 scope). The replica recovery
-// apply gate (T4d-2) is the authoritative correctness boundary; this
-// partial seed is defense-in-depth — it correctly stale-skips
-// recovery entries for LBAs still in the WAL window, and falls back
-// to "appliedLSN[LBA] = 0" semantics for flushed LBAs (which means
-// recovery WILL apply them — acceptable when the gate's session-only
-// tracking + live-lane updates fill in the gap during the session).
+// PARTIAL-VIEW LIMITATION: for full per-LBA applied-LSN tracking,
+// walstore would need a permanent per-LBA LSN map (substrate
+// refactor). The replica recovery apply gate is the authoritative
+// correctness boundary; this partial seed is defense-in-depth —
+// it correctly stale-skips recovery entries for LBAs still in the
+// WAL window, and falls back to "appliedLSN[LBA] = 0" semantics
+// for flushed LBAs (which means recovery WILL apply them —
+// acceptable when the gate's session-only tracking + live-lane
+// updates fill in the gap during the session).
 //
-// Called by: T4d-2 replica recovery apply gate at session start.
+// Called by: replica recovery apply gate at session start.
 // Owns: per-call snapshot of dirty map (lock-free under shard locks).
 // Borrows: nothing (returned map is fresh and caller-owned).
 func (s *WALStore) AppliedLSNs() (map[uint32]uint64, error) {

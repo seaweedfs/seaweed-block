@@ -1,12 +1,7 @@
 package storage
 
-// T4c-2 production walstore recovery muscle: tier-1 `wal_replay`
-// (V2-faithful per-LSN) sub-mode of the `wal_delta` recovery content
-// kind (memo §13.0a).
-//
-// Promoted from T4c-pre-A POC code (commit `c1584c6`); G-1 V2 read
-// signed at `v3-phase-15-t4c-2-g1-v2-read.md`. Six invariants pinned
-// at T4c-2 close — see catalogue §3.3.
+// Walstore recovery muscle: per-LSN `wal_replay` sub-mode of the
+// `wal_delta` recovery content kind.
 //
 // Key difference from smartwal: walstore's WAL stores full entry
 // data (LBA + LSN + Data per record). Per-LSN replay is faithful —
@@ -24,22 +19,14 @@ import (
 // store's current `checkpointLSN` — those entries have been flushed
 // to extent and the WAL space may have been reused.
 //
-// V2-faithful per-LSN: 3 writes to the same LBA in [fromLSN, head]
-// produce 3 entries (no dedup). This is the `wal_replay` tier-1
-// sub-mode per memo §5.1 / §13.0a.
+// Per-LSN: 3 writes to the same LBA in [fromLSN, head] produce 3
+// entries (no dedup).
 //
-// POC scope (per design memo §12.2 capability #1):
-//   - basic LSN-range scan with no concurrent writer
-//   - ErrWALRecycled detection at checkpoint boundary
-//   - retention boundary characterization
+// Concurrent live-write + recovery-read is observable from caller;
+// walstore's WAL preserves per-LSN data so emitted entries carry
+// contemporaneous data — no smartwal-style staleness.
 //
-// Concurrent live-write + recovery-read (capability #3) is
-// observable from caller; walstore's WAL preserves per-LSN data so
-// emitted entries carry contemporaneous data — no smartwal-style
-// staleness. POC report §3.b documents.
-//
-// Called by: T4c-pre-A POC tests; future transport recovery
-// executor wal_replay path (post T4c-3 muscle port).
+// Called by: transport recovery executor wal_replay path.
 // Owns: per-call scan buffer; LSN-filter pass.
 // Borrows: fn callback — caller retains; ScanLBAs does not retain
 // references to fn or to RecoveryEntry.Data past the callback
@@ -60,18 +47,17 @@ func (s *WALStore) ScanLBAs(fromLSN uint64, fn func(RecoveryEntry) error) error 
 	retentionLSNs := s.recoveryRetentionLSNs
 	s.mu.RUnlock()
 
-	// G6 §1.A α retention gate: the strict pre-G6 recycle threshold
-	// is checkpointLSN; G6 introduces an operator-tunable retention
-	// window so a slow replica still has a recovery scan path while
-	// it lags within the configured envelope.
+	// Retention gate: by default the recycle threshold is
+	// checkpointLSN; an operator-tunable retention window lets a
+	// slow replica keep a recovery scan path while it lags within
+	// the configured envelope.
 	//
 	// Effective recycle floor:
 	//   floor = checkpointLSN - retentionLSNs   (saturating to 0)
 	//
-	// fromLSN is recycled when fromLSN <= floor (strict <= preserved
-	// from pre-G6 to keep the boundary semantic identical: an LSN
-	// equal to the floor IS recycled). retentionLSNs == 0 reduces to
-	// the pre-G6 'fromLSN <= checkpointLSN' gate exactly.
+	// fromLSN is recycled when fromLSN <= floor (strict <= — an LSN
+	// equal to the floor IS recycled). retentionLSNs == 0 reduces
+	// to the simple 'fromLSN <= checkpointLSN' gate.
 	//
 	// Pinned by: INV-G6-CATCHUP-CONVERGES-WITHIN-RETENTION (positive)
 	// + INV-G6-RETENTION-POLICY-OPERATOR-VISIBLE (the knob itself).
@@ -82,10 +68,9 @@ func (s *WALStore) ScanLBAs(fromLSN uint64, fn func(RecoveryEntry) error) error 
 		floor = checkpointLSN - retentionLSNs
 	}
 	if fromLSN <= floor && checkpointLSN > 0 {
-		// T4d-1: wrap in typed RecoveryFailure so transport can
-		// extract the kind via errors.As. errors.Is(err,
-		// ErrWALRecycled) still works via Unwrap, preserving
-		// pre-T4d-1 callers during the migration window.
+		// Wrap in typed RecoveryFailure so transport can extract
+		// the kind via errors.As. errors.Is(err, ErrWALRecycled)
+		// still works via Unwrap.
 		return NewWALRecycledFailure(
 			ErrWALRecycled,
 			fmt.Sprintf("fromLSN=%d checkpointLSN=%d headLSN=%d retentionLSNs=%d floor=%d",
