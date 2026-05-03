@@ -63,6 +63,40 @@ func TestG15bManifestRegistrationRunsGoTestAndWritesArtifacts(t *testing.T) {
 	}
 }
 
+func TestG15bK8sStaticRegistrationBuildsShellDriver(t *testing.T) {
+	repoRoot := findRepoRoot(t)
+	raw, err := os.Open(filepath.Join(repoRoot, "testops", "registry", "g15b-k8s-static.json"))
+	if err != nil {
+		t.Fatalf("open registration: %v", err)
+	}
+	defer raw.Close()
+
+	registration, err := DecodeRegistration(raw)
+	if err != nil {
+		t.Fatalf("DecodeRegistration: %v", err)
+	}
+	if registration.Scenario != "g15b-k8s-static" || registration.Driver.Type != "shell" {
+		t.Fatalf("registration=%+v", registration)
+	}
+	if registration.KnownGreenCommit != "95b7217" {
+		t.Fatalf("known_green_commit=%q want 95b7217", registration.KnownGreenCommit)
+	}
+	driver, err := registration.NewDriver(repoRoot)
+	if err != nil {
+		t.Fatalf("NewDriver: %v", err)
+	}
+	shell, ok := driver.(ShellDriver)
+	if !ok {
+		t.Fatalf("driver type=%T want ShellDriver", driver)
+	}
+	if !filepath.IsAbs(shell.Path) || filepath.Base(shell.Path) != "run-g15b-k8s-static.sh" {
+		t.Fatalf("shell path=%q", shell.Path)
+	}
+	if _, err := os.Stat(shell.Path); err != nil {
+		t.Fatalf("shell driver path missing: %v", err)
+	}
+}
+
 func findRepoRoot(t *testing.T) string {
 	t.Helper()
 	_, file, _, ok := runtime.Caller(0)

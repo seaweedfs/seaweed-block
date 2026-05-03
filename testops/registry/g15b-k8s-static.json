@@ -1,0 +1,52 @@
+{
+  "schema_version": "1.0",
+  "scenario": "g15b-k8s-static",
+  "gate": "G15b",
+  "layer": "L5-k8s",
+  "driver": {
+    "type": "shell",
+    "path": "scripts/run-g15b-k8s-static.sh"
+  },
+  "default_timeout_s": 600,
+  "required_capabilities": [
+    "bash",
+    "kubectl",
+    "privileged-k8s-node",
+    "iscsiadm",
+    "iscsi_tcp-loadable",
+    "mount"
+  ],
+  "required_images": [
+    "sw-block:local",
+    "sw-block-csi:local"
+  ],
+  "qa_instruction": "sw-block/design/test/v3-phase-15-g15b-k8s-qa-test-instruction.md",
+  "known_green_commit": "95b7217",
+  "artifacts": [
+    "run.log",
+    "kubectl-version.txt",
+    "nodes.before.txt",
+    "apply-block-stack.log",
+    "apply-csidriver.log",
+    "apply-csi-controller.log",
+    "apply-csi-node.log",
+    "apply-static.log",
+    "pod.log",
+    "pod.describe.txt",
+    "blockmaster.log",
+    "blockvolume-r1.log",
+    "blockvolume-r2.log",
+    "blockcsi-controller.log",
+    "kube-system-pods.txt",
+    "app-pv-pvc-pod.txt",
+    "cleanup.log"
+  ],
+  "non_claims": [
+    "Single-node Kubernetes only.",
+    "Static PV/PVC only; no dynamic provisioning.",
+    "Loopback iSCSI target exposure only.",
+    "No failover while pod remains mounted.",
+    "No CSI snapshot, clone, resize, or NVMe.",
+    "No performance or soak claim."
+  ]
+}
