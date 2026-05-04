@@ -40,7 +40,7 @@ cleanup() {
   set +e
   kubectl -n kube-system delete deploy -l app=sw-blockvolume --ignore-not-found=true >>"$ARTIFACT_DIR/cleanup.log" 2>&1
   kubectl -n kube-system delete deploy sw-blockvolume-r1 sw-blockvolume-r2 --ignore-not-found=true >>"$ARTIFACT_DIR/cleanup.log" 2>&1
-  kubectl delete -f "$DYNAMIC_PVC_MANIFEST" --ignore-not-found=true >>"$ARTIFACT_DIR/cleanup.log" 2>&1
+  kubectl -n "$NAMESPACE" delete -f "$DYNAMIC_PVC_MANIFEST" --ignore-not-found=true >>"$ARTIFACT_DIR/cleanup.log" 2>&1
   kubectl delete -f "$ROOT/deploy/k8s/g15b/csi-node.yaml" --ignore-not-found=true >>"$ARTIFACT_DIR/cleanup.log" 2>&1
   kubectl delete -f "$ROOT/deploy/k8s/g15d/csi-controller.yaml" --ignore-not-found=true >>"$ARTIFACT_DIR/cleanup.log" 2>&1
   kubectl delete -f "$ROOT/deploy/k8s/g15b/csi-driver.yaml" --ignore-not-found=true >>"$ARTIFACT_DIR/cleanup.log" 2>&1
@@ -103,7 +103,7 @@ kubectl -n kube-system wait --for=condition=available deploy/sw-block-csi-contro
 kubectl -n kube-system rollout status ds/sw-block-csi-node --timeout=120s
 
 log "apply dynamic StorageClass/PVC/pod"
-kubectl apply -f "$DYNAMIC_PVC_MANIFEST" | tee "$ARTIFACT_DIR/apply-dynamic.log"
+kubectl -n "$NAMESPACE" apply -f "$DYNAMIC_PVC_MANIFEST" | tee "$ARTIFACT_DIR/apply-dynamic.log"
 
 log "wait for launcher-generated blockvolume manifest"
 for _ in $(seq 1 180); do
