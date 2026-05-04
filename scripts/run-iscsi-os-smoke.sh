@@ -14,6 +14,7 @@ CTRL_ADDR="${SW_BLOCK_CTRL_ADDR:-127.0.0.1:19102}"
 STATUS_ADDR="${SW_BLOCK_STATUS_ADDR:-127.0.0.1:19103}"
 BLOCKS="${SW_BLOCK_DURABLE_BLOCKS:-65536}"      # 256 MiB at 4 KiB.
 BLOCK_SIZE="${SW_BLOCK_DURABLE_BLOCKSIZE:-4096}"
+ITERATIONS="${SW_BLOCK_ISCSI_ITERATIONS:-1}"
 
 BIN_DIR="${SW_BLOCK_BIN_DIR:-${WORK_DIR}/bin}"
 RUN_DIR="${WORK_DIR}/run"
@@ -59,6 +60,7 @@ log "artifact_dir=$ARTIFACT_DIR"
 log "iqn=$IQN"
 log "portal=127.0.0.1:${PORT}"
 log "size_blocks=${BLOCKS} block_size=${BLOCK_SIZE}"
+log "iterations=${ITERATIONS}"
 
 cd "$ROOT"
 git rev-parse --short HEAD >"$ARTIFACT_DIR/git-head.txt" 2>/dev/null || true
@@ -126,48 +128,60 @@ done
 bash -c "</dev/tcp/127.0.0.1/${PORT}" >/dev/null 2>&1
 sleep 2
 
-log "iscsi discovery/login"
-sudo iscsiadm -m discovery -t sendtargets -p "127.0.0.1:${PORT}" | tee "$ARTIFACT_DIR/discovery.log"
-sudo iscsiadm -m node -T "$IQN" -p "127.0.0.1:${PORT}" --login | tee "$ARTIFACT_DIR/login.log"
+run_iteration() {
+  local iter="$1"
+  local suffix="iter${iter}"
 
-log "wait kernel block device"
-DEV=""
-for _ in $(seq 1 100); do
-  DEV="$(ls $DEVLINK_GLOB 2>/dev/null | head -n1 || true)"
-  if [[ -n "$DEV" ]]; then
-    break
+  log "iteration ${iter}: iscsi discovery/login"
+  sudo iscsiadm -m discovery -t sendtargets -p "127.0.0.1:${PORT}" | tee "$ARTIFACT_DIR/discovery.${suffix}.log"
+  sudo iscsiadm -m node -T "$IQN" -p "127.0.0.1:${PORT}" --login | tee "$ARTIFACT_DIR/login.${suffix}.log"
+
+  log "iteration ${iter}: wait kernel block device"
+  local dev=""
+  for _ in $(seq 1 100); do
+    dev="$(ls $DEVLINK_GLOB 2>/dev/null | head -n1 || true)"
+    if [[ -n "$dev" ]]; then
+      break
+    fi
+    sleep 0.1
+  done
+  if [[ -z "$dev" ]]; then
+    ls -l /dev/disk/by-path >"$ARTIFACT_DIR/by-path.${suffix}.txt" 2>&1 || true
+    dmesg | tail -n 120 >"$ARTIFACT_DIR/dmesg.${suffix}.tail.txt" 2>&1 || true
+    echo "device not found for IQN ${IQN} on iteration ${iter}" >&2
+    exit 1
   fi
-  sleep 0.1
+  local real_dev
+  real_dev="$(readlink -f "$dev")"
+  log "iteration ${iter}: device=$dev real=$real_dev"
+  lsblk "$real_dev" >"$ARTIFACT_DIR/lsblk.${suffix}.txt" 2>&1 || true
+
+  log "iteration ${iter}: mkfs.ext4"
+  sudo mkfs.ext4 -F "$real_dev" >"$ARTIFACT_DIR/mkfs.${suffix}.log" 2>&1
+
+  log "iteration ${iter}: mount/write/read"
+  sudo mount "$real_dev" "$MOUNT_DIR"
+  sudo dd if=/dev/urandom of="$MOUNT_DIR/payload.${suffix}.bin" bs=4096 count=8 status=none
+  sync
+  sudo sha256sum "$MOUNT_DIR/payload.${suffix}.bin" | tee "$ARTIFACT_DIR/payload.${suffix}.sha256"
+  sudo sha256sum -c "$ARTIFACT_DIR/payload.${suffix}.sha256" | tee "$ARTIFACT_DIR/sha256-check.${suffix}.log"
+  sudo umount "$MOUNT_DIR"
+
+  log "iteration ${iter}: logout"
+  sudo iscsiadm -m node -T "$IQN" -p "127.0.0.1:${PORT}" --logout | tee "$ARTIFACT_DIR/logout.${suffix}.log"
+  sudo iscsiadm -m node -T "$IQN" -p "127.0.0.1:${PORT}" -o delete >>"$ARTIFACT_DIR/logout.${suffix}.log" 2>&1 || true
+  sudo iscsiadm -m session >"$ARTIFACT_DIR/iscsi-sessions.${suffix}.txt" 2>&1 || true
+  if ! grep -q "No active sessions" "$ARTIFACT_DIR/iscsi-sessions.${suffix}.txt"; then
+    cat "$ARTIFACT_DIR/iscsi-sessions.${suffix}.txt"
+    exit 1
+  fi
+}
+
+for iter in $(seq 1 "$ITERATIONS"); do
+  run_iteration "$iter"
 done
-if [[ -z "$DEV" ]]; then
-  ls -l /dev/disk/by-path >"$ARTIFACT_DIR/by-path.txt" 2>&1 || true
-  dmesg | tail -n 120 >"$ARTIFACT_DIR/dmesg.tail.txt" 2>&1 || true
-  echo "device not found for IQN ${IQN}" >&2
-  exit 1
-fi
-REAL_DEV="$(readlink -f "$DEV")"
-log "device=$DEV real=$REAL_DEV"
-lsblk "$REAL_DEV" >"$ARTIFACT_DIR/lsblk.before.txt" 2>&1 || true
 
-log "mkfs.ext4"
-sudo mkfs.ext4 -F "$REAL_DEV" >"$ARTIFACT_DIR/mkfs.log" 2>&1
+cp "$ARTIFACT_DIR/iscsi-sessions.iter${ITERATIONS}.txt" "$ARTIFACT_DIR/iscsi-sessions.final.txt"
 
-log "mount/write/read"
-sudo mount "$REAL_DEV" "$MOUNT_DIR"
-sudo dd if=/dev/urandom of="$MOUNT_DIR/payload.bin" bs=4096 count=8 status=none
-sync
-sudo sha256sum "$MOUNT_DIR/payload.bin" | tee "$ARTIFACT_DIR/payload.sha256"
-sudo sha256sum -c "$ARTIFACT_DIR/payload.sha256" | tee "$ARTIFACT_DIR/sha256-check.log"
-sudo umount "$MOUNT_DIR"
-
-log "logout"
-sudo iscsiadm -m node -T "$IQN" -p "127.0.0.1:${PORT}" --logout | tee "$ARTIFACT_DIR/logout.log"
-sudo iscsiadm -m node -T "$IQN" -p "127.0.0.1:${PORT}" -o delete >>"$ARTIFACT_DIR/logout.log" 2>&1 || true
-sudo iscsiadm -m session >"$ARTIFACT_DIR/iscsi-sessions.final.txt" 2>&1 || true
-if ! grep -q "No active sessions" "$ARTIFACT_DIR/iscsi-sessions.final.txt"; then
-  cat "$ARTIFACT_DIR/iscsi-sessions.final.txt"
-  exit 1
-fi
-
-log "PASS: iscsiadm mkfs mount write/read logout"
+log "PASS: ${ITERATIONS} x iscsiadm mkfs mount write/read logout"
 log "artifacts=$ARTIFACT_DIR"
