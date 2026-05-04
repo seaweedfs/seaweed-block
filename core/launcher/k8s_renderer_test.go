@@ -35,6 +35,7 @@ func TestG15d_K8sRenderer_RendersBlockVolumeDeploymentArgs(t *testing.T) {
 		"--volume-id=pvc-a",
 		"--replica-id=r1",
 		"--durable-root=/var/lib/sw-block/pvc-a/r1",
+		"--durable-impl=walstore",
 		"--recovery-mode=dual-lane",
 		"sw-block.seaweedfs.com/volume: pvc-a",
 		"--iscsi-listen=127.0.0.1:3260",
@@ -43,6 +44,23 @@ func TestG15d_K8sRenderer_RendersBlockVolumeDeploymentArgs(t *testing.T) {
 		if !strings.Contains(raw, want) {
 			t.Fatalf("manifest missing %q:\n%s", want, raw)
 		}
+	}
+}
+
+func TestG15d_K8sRenderer_RendersDurableImplOverride(t *testing.T) {
+	manifests, err := RenderBlockVolumeDeployments(sampleWorkloadPlan(), K8sRenderConfig{
+		MasterAddr:  "m:9333",
+		DurableImpl: "smartwal",
+	})
+	if err != nil {
+		t.Fatalf("RenderBlockVolumeDeployments: %v", err)
+	}
+	raw := string(manifests[0].YAML)
+	if !strings.Contains(raw, "--durable-impl=smartwal") {
+		t.Fatalf("manifest missing smartwal durable impl:\n%s", raw)
+	}
+	if strings.Contains(raw, "--durable-impl=walstore") {
+		t.Fatalf("manifest retained walstore durable impl:\n%s", raw)
 	}
 }
 
