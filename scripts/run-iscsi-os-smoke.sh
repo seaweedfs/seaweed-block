@@ -15,7 +15,7 @@ STATUS_ADDR="${SW_BLOCK_STATUS_ADDR:-127.0.0.1:19103}"
 BLOCKS="${SW_BLOCK_DURABLE_BLOCKS:-65536}"      # 256 MiB at 4 KiB.
 BLOCK_SIZE="${SW_BLOCK_DURABLE_BLOCKSIZE:-4096}"
 
-BIN_DIR="${WORK_DIR}/bin"
+BIN_DIR="${SW_BLOCK_BIN_DIR:-${WORK_DIR}/bin}"
 RUN_DIR="${WORK_DIR}/run"
 DEVLINK_GLOB="/dev/disk/by-path/*ip-127.0.0.1:${PORT}-iscsi-${IQN}-lun-0"
 
@@ -47,7 +47,6 @@ cleanup() {
 }
 trap cleanup EXIT
 
-require_cmd go
 require_cmd sudo
 require_cmd iscsiadm
 require_cmd mkfs.ext4
@@ -64,9 +63,14 @@ log "size_blocks=${BLOCKS} block_size=${BLOCK_SIZE}"
 cd "$ROOT"
 git rev-parse --short HEAD >"$ARTIFACT_DIR/git-head.txt" 2>/dev/null || true
 
-log "build binaries"
-go build -o "${BIN_DIR}/blockmaster" ./cmd/blockmaster
-go build -o "${BIN_DIR}/blockvolume" ./cmd/blockvolume
+if [[ -x "${BIN_DIR}/blockmaster" && -x "${BIN_DIR}/blockvolume" ]]; then
+  log "use prebuilt binaries from ${BIN_DIR}"
+else
+  require_cmd go
+  log "build binaries"
+  go build -o "${BIN_DIR}/blockmaster" ./cmd/blockmaster
+  go build -o "${BIN_DIR}/blockvolume" ./cmd/blockvolume
+fi
 
 cat >"$ARTIFACT_DIR/topology.yaml" <<YAML
 volumes:
