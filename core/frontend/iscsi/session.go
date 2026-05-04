@@ -21,6 +21,7 @@ import (
 	"io"
 	"net"
 	"sync/atomic"
+	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend"
 )
@@ -34,6 +35,13 @@ const (
 	SessionClosed
 )
 
+// maxPendingQueue bounds commands queued while a write is collecting
+// R2T-solicited Data-Out. Linux initiators can pipeline a later SCSI
+// command during an earlier write's Data-Out phase; queueing keeps that
+// legal shape from tearing down the session, while the bound prevents an
+// unbounded memory sink from a hostile initiator.
+const maxPendingQueue = 64
+
 // Session carries one iSCSI session's per-connection state.
 // Created by the Target on accept; driven by serve().
 //
@@ -42,14 +50,14 @@ const (
 //   - Login runs FIRST on every accepted connection. The
 //     frontend.Provider is NOT dialed before login.
 //   - After login succeeds:
-//       * Discovery session → skip backend open entirely.
-//         SendTargets / Logout / NOP-Out work without a backend.
-//         iscsiadm -m discovery succeeds even when the volume's
-//         adapter projection is still non-Healthy.
-//       * Normal session → open the backend via Provider; a
-//         Provider.Open failure (e.g. ErrNotReady) closes the
-//         session cleanly WITHOUT blocking subsequent discovery
-//         attempts.
+//   - Discovery session → skip backend open entirely.
+//     SendTargets / Logout / NOP-Out work without a backend.
+//     iscsiadm -m discovery succeeds even when the volume's
+//     adapter projection is still non-Healthy.
+//   - Normal session → open the backend via Provider; a
+//     Provider.Open failure (e.g. ErrNotReady) closes the
+//     session cleanly WITHOUT blocking subsequent discovery
+//     attempts.
 type Session struct {
 	conn    net.Conn
 	handler *SCSIHandler
@@ -65,10 +73,11 @@ type Session struct {
 	// negCfg + resolver + lister are injected by Target at
 	// construction so this layer stays unaware of the target's
 	// catalog.
-	negCfg    NegotiableConfig
-	resolver  TargetResolver
-	lister    TargetLister
-	negResult LoginResult
+	negCfg         NegotiableConfig
+	dataOutTimeout time.Duration
+	resolver       TargetResolver
+	lister         TargetLister
+	negResult      LoginResult
 
 	// Backend open is deferred to post-login, Normal-session
 	// only. provider + volumeID + hcfg are captured at session
@@ -83,6 +92,12 @@ type Session struct {
 
 	// Session lifetime.
 	closed atomic.Bool
+
+	// pending holds non-Data-Out PDUs read while collectWriteData is
+	// waiting for R2T-solicited Data-Out. The main loop drains this
+	// before reading the socket again, preserving serial command
+	// processing without rejecting initiator pipelining.
+	pending []*PDU
 }
 
 // Logger is a tiny abstraction so Target callers can pipe logs
@@ -96,17 +111,18 @@ type Logger interface {
 // provider + volumeID + hcfg are captured for post-login,
 // Normal-session-only backend open (residual-risk fix). The
 // backend is NOT opened at construction.
-func newSession(conn net.Conn, provider frontend.Provider, volumeID string, hcfg HandlerConfig, negCfg NegotiableConfig, resolver TargetResolver, lister TargetLister, logger Logger) *Session {
+func newSession(conn net.Conn, provider frontend.Provider, volumeID string, hcfg HandlerConfig, negCfg NegotiableConfig, dataOutTimeout time.Duration, resolver TargetResolver, lister TargetLister, logger Logger) *Session {
 	return &Session{
-		conn:     conn,
-		logger:   logger,
-		state:    SessionLogin,
-		negCfg:   negCfg,
-		resolver: resolver,
-		lister:   lister,
-		provider: provider,
-		volumeID: volumeID,
-		hcfg:     hcfg,
+		conn:           conn,
+		logger:         logger,
+		state:          SessionLogin,
+		negCfg:         negCfg,
+		dataOutTimeout: dataOutTimeout,
+		resolver:       resolver,
+		lister:         lister,
+		provider:       provider,
+		volumeID:       volumeID,
+		hcfg:           hcfg,
 	}
 }
 
@@ -178,7 +194,7 @@ func (s *Session) loginPhase() error {
 
 func (s *Session) fullFeatureLoop(ctx context.Context) error {
 	for s.state == SessionFullFeature {
-		pdu, err := ReadPDU(s.conn)
+		pdu, err := s.nextPDU()
 		if err != nil {
 			if err == io.EOF {
 				return nil
@@ -190,6 +206,17 @@ func (s *Session) fullFeatureLoop(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+func (s *Session) nextPDU() (*PDU, error) {
+	if len(s.pending) > 0 {
+		pdu := s.pending[0]
+		copy(s.pending, s.pending[1:])
+		s.pending[len(s.pending)-1] = nil
+		s.pending = s.pending[:len(s.pending)-1]
+		return pdu, nil
+	}
+	return ReadPDU(s.conn)
 }
 
 func (s *Session) dispatch(ctx context.Context, pdu *PDU) error {
@@ -243,11 +270,11 @@ func (s *Session) handleTextReq(req *PDU) error {
 // handleSCSICmd processes a SCSI-Cmd PDU.
 //
 //   - WRITE (FlagW): dataOut may arrive in two places:
-//       1. Immediate data in the SCSI-Cmd's data segment (when
-//          ImmediateData=Yes was negotiated).
-//       2. Remaining bytes solicited via R2T + Data-Out PDUs
-//          (T2 ckpt 10 port — enables iscsiadm writes larger
-//          than FirstBurstLength).
+//     1. Immediate data in the SCSI-Cmd's data segment (when
+//     ImmediateData=Yes was negotiated).
+//     2. Remaining bytes solicited via R2T + Data-Out PDUs
+//     (T2 ckpt 10 port — enables iscsiadm writes larger
+//     than FirstBurstLength).
 //     EDTL is validated against the CDB's transfer length BEFORE
 //     any allocation / R2T is issued — otherwise a hostile
 //     initiator could inflate EDTL vs. CDB and force
@@ -349,19 +376,14 @@ func (s *Session) validateWriteTransferLimits(req *PDU, edtl uint32) (SCSIResult
 // Each R2T's DesiredDataLength is capped by the negotiated
 // MaxBurstLength; the total WRITE EDTL may be larger.
 func (s *Session) collectWriteData(req *PDU, edtl uint32) ([]byte, error) {
-	buf := make([]byte, edtl)
-	var received uint32
-
-	// Immediate data from the SCSI-Cmd's data segment.
-	if n := uint32(len(req.DataSegment)); n > 0 {
-		if n > edtl {
-			return nil, fmt.Errorf("immediate data %d > EDTL %d", n, edtl)
+	collector := newDataOutCollector(edtl)
+	if len(req.DataSegment) > 0 {
+		if err := collector.addImmediate(req.DataSegment); err != nil {
+			return nil, err
 		}
-		copy(buf, req.DataSegment)
-		received = n
 	}
-	if received >= edtl {
-		return buf, nil
+	if collector.done() {
+		return collector.data(), nil
 	}
 
 	maxBurst := uint32(s.negResult.MaxBurstLength)
@@ -370,8 +392,9 @@ func (s *Session) collectWriteData(req *PDU, edtl uint32) ([]byte, error) {
 	}
 
 	var r2tsn uint32
-	for received < edtl {
-		remaining := edtl - received
+	for !collector.done() {
+		received := collector.receivedBytes()
+		remaining := collector.remaining()
 		desired := remaining
 		if desired > maxBurst {
 			desired = maxBurst
@@ -397,49 +420,37 @@ func (s *Session) collectWriteData(req *PDU, edtl uint32) ([]byte, error) {
 			return nil, fmt.Errorf("send R2T: %w", err)
 		}
 
-		// DataSN is scoped to the current R2T data sequence.
-		var nextDataSN uint32
-		for received < burstEnd {
+		if s.dataOutTimeout > 0 {
+			if err := s.conn.SetReadDeadline(time.Now().Add(s.dataOutTimeout)); err != nil {
+				return nil, fmt.Errorf("set Data-Out deadline: %w", err)
+			}
+		}
+
+		collector.beginR2T()
+		for collector.receivedBytes() < burstEnd {
 			pdu, err := ReadPDU(s.conn)
 			if err != nil {
 				return nil, fmt.Errorf("read Data-Out: %w", err)
 			}
 			if pdu.Opcode() != OpSCSIDataOut {
-				return nil, fmt.Errorf("expected Data-Out, got %s", OpcodeName(pdu.Opcode()))
+				if len(s.pending) >= maxPendingQueue {
+					return nil, fmt.Errorf("pending queue overflow (%d PDUs)", maxPendingQueue)
+				}
+				s.pending = append(s.pending, pdu)
+				continue
 			}
-			if pdu.TargetTransferTag() != ttt {
-				// R2T-solicited Data-Out MUST echo the target's TTT.
-				return nil, fmt.Errorf("Data-Out TTT=0x%08x does not echo R2T TTT=0x%08x",
-					pdu.TargetTransferTag(), ttt)
+			if err := collector.addDataOut(pdu, ttt, burstEnd); err != nil {
+				return nil, err
 			}
-			if pdu.DataSN() != nextDataSN {
-				return nil, fmt.Errorf("Data-Out DataSN=%d, expected %d",
-					pdu.DataSN(), nextDataSN)
-			}
-			nextDataSN++
-
-			offset := pdu.BufferOffset()
-			if offset != received {
-				return nil, fmt.Errorf("Data-Out BufferOffset=%d does not match received=%d",
-					offset, received)
-			}
-			data := pdu.DataSegment
-			end := offset + uint32(len(data))
-			if end > burstEnd {
-				return nil, fmt.Errorf("Data-Out extends past R2T burst: end=%d burstEnd=%d",
-					end, burstEnd)
-			}
-			copy(buf[offset:], data)
-			received = end
-
-			if pdu.OpSpecific1()&FlagF != 0 && received != burstEnd {
-				return nil, fmt.Errorf("Data-Out F-bit with received=%d < burstEnd=%d",
-					received, burstEnd)
+		}
+		if s.dataOutTimeout > 0 {
+			if err := s.conn.SetReadDeadline(time.Time{}); err != nil {
+				return nil, fmt.Errorf("clear Data-Out deadline: %w", err)
 			}
 		}
 		r2tsn++
 	}
-	return buf, nil
+	return collector.data(), nil
 }
 
 func (s *Session) sendDataInWithStatus(req *PDU, r SCSIResult) error {
