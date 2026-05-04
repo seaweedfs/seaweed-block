@@ -1,6 +1,6 @@
 # iSCSI OS Initiator Compatibility Plan
 
-Status: P1-A/B/C/D/E implemented on `fix/iscsi-os-initiator-compat`
+Status: P1-A/B/C/D/E/F implemented on `fix/iscsi-large-read-datain`
 
 Owner track: frontend compatibility
 
@@ -302,6 +302,30 @@ Only after WRITE/mkfs is green:
 - add read larger than MaxRecvDataSegmentLength,
 - then test filesystem reads under OS initiator.
 
+Implementation status:
+
+```text
+dataInWriter
+  splits READ data by negotiated MaxRecvDataSegmentLength
+  intermediate Data-In PDUs carry no S/F status bits
+  final Data-In PDU carries S/F + SCSI status
+  residual count is set on underflow/overflow
+
+TestP1_ISCSI_LargeRead_SplitsDataInByMaxRecvSegment
+  300 KiB READ
+  64 KiB MaxRecvDataSegmentLength
+  multiple Data-In PDUs
+  byte-equal payload
+```
+
+Evidence level:
+
+```text
+In-process iSCSI initiator proof: done.
+Linux OS-initiator large-read harness: forward-carry unless a later
+filesystem/fio scenario exposes a READ-side failure.
+```
+
 ## Recommended Implementation Order
 
 1. Write Slice A red test. Done.
@@ -309,7 +333,8 @@ Only after WRITE/mkfs is green:
 3. Extract V3-local `DataOutCollector`. Done.
 4. Add Data-Out timeout. Done.
 5. Run Linux OS initiator mkfs harness. Done.
-6. Add DataInWriter only if OS test or later fio/read test needs it.
+6. Add DataInWriter only if OS test or later fio/read test needs it. Done as a
+   conservative protocol-completeness slice after WRITE/mkfs was green.
 7. Then decide whether a txLoop is needed.
 
 ## Why Not Port txLoop First

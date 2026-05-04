@@ -454,29 +454,21 @@ func (s *Session) collectWriteData(req *PDU, edtl uint32) ([]byte, error) {
 }
 
 func (s *Session) sendDataInWithStatus(req *PDU, r SCSIResult) error {
-	p := &PDU{}
-	p.SetOpcode(OpSCSIDataIn)
-	// Set Final + Status bits (byte 1).
-	p.BHS[1] = FlagF | FlagS
-	p.SetLUN(req.LUN())
-	p.SetInitiatorTaskTag(req.InitiatorTaskTag())
-	// Target Transfer Tag = 0xFFFFFFFF for unsolicited Data-In.
-	p.SetTargetTransferTag(0xFFFFFFFF)
-	// StatSN advances only on PDUs that carry status.
-	s.statSN++
-	p.SetStatSN(s.statSN)
-	p.SetExpCmdSN(req.CmdSN() + 1)
-	p.SetMaxCmdSN(req.CmdSN() + 32)
-	// DataSN and BufferOffset: single Data-In → DataSN=0, offset=0.
-	p.SetDataSN(0)
-	p.SetBufferOffset(0)
-	// SCSI status byte (BHS[3]) rides with the S-bit.
-	p.SetSCSIStatusByte(r.Status)
-	// ResidualCount = 0 (exact fit) — a richer implementation
-	// would compute over/underflow.
-	p.SetResidualCount(0)
-	p.DataSegment = r.Data
-	return WritePDU(s.conn, p)
+	writer := newDataInWriter(s.negResult.MaxRecvDataSegLen)
+	pdus := writer.build(req, r)
+	for _, p := range pdus {
+		if p.OpSpecific1()&FlagS != 0 {
+			// StatSN advances only on the Data-In PDU carrying status.
+			s.statSN++
+			p.SetStatSN(s.statSN)
+		}
+		p.SetExpCmdSN(req.CmdSN() + 1)
+		p.SetMaxCmdSN(req.CmdSN() + 32)
+		if err := WritePDU(s.conn, p); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Session) sendSCSIResponse(req *PDU, r SCSIResult) error {
