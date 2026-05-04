@@ -151,6 +151,13 @@ The scripted version of this flow is:
 bash scripts/run-k8s-alpha.sh "$PWD"
 ```
 
+For a larger storage-path check that keeps the same stack but uses a 256 MiB
+PVC and writes a 4 MiB checksum payload:
+
+```bash
+bash scripts/run-k8s-alpha-large.sh "$PWD"
+```
+
 For a presentation-friendly app demo that uses the same storage stack but shows
 two ordinary app pods sharing one PVC over time:
 

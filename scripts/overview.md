@@ -7,6 +7,7 @@ This directory contains developer and QA helper scripts.
 | Script | Purpose |
 |---|---|
 | `run-k8s-alpha.sh` | Public alpha smoke wrapper. Prefer this in README/user docs. |
+| `run-k8s-alpha-large.sh` | Optional 256 MiB Kubernetes alpha smoke for larger iSCSI write coverage. |
 | `build-alpha-images.sh` | Builds local Docker images used by the Kubernetes alpha harness. |
 | `run-alpha-k8s-dynamic.sh` | Public dynamic PVC alpha smoke entry. |
 | `run-iscsi-os-smoke.sh` | Privileged Linux OS-initiator smoke: `iscsiadm` -> `mkfs.ext4` -> mount -> checksum -> logout on a 256 MiB target. |
