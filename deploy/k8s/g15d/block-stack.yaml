@@ -46,6 +46,7 @@ spec:
             - "--launcher-image=sw-block:local"
             - "--launcher-namespace=kube-system"
             - "--launcher-durable-root=/var/lib/sw-block"
+            - "--launcher-durable-impl=walstore"
             - "--launcher-iscsi-port-base=3260"
             - "--listen=0.0.0.0:9333"
             - "--expected-slots-per-volume=1"

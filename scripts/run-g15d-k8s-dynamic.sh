@@ -6,6 +6,7 @@ NAMESPACE="${G15D_NAMESPACE:-default}"
 ARTIFACT_DIR="${G15D_ARTIFACT_DIR:-/tmp/g15d-k8s-$(date -u +%Y%m%dT%H%M%SZ)}"
 RUN_LABEL="${SW_BLOCK_RUN_LABEL:-g15d}"
 DYNAMIC_PVC_MANIFEST="${SW_BLOCK_DYNAMIC_PVC_MANIFEST:-$ROOT/deploy/k8s/g15d/dynamic-pvc-pod.yaml}"
+LAUNCHER_DURABLE_IMPL="${SW_BLOCK_LAUNCHER_DURABLE_IMPL:-walstore}"
 
 mkdir -p "$ARTIFACT_DIR"
 POLL_LOG="$ARTIFACT_DIR/poll.log"
@@ -25,12 +26,16 @@ require_cmd kubectl
 
 NODE_NAME="$(kubectl get nodes -o jsonpath='{.items[0].metadata.name}')"
 STACK_RENDERED="$ARTIFACT_DIR/block-stack.rendered.yaml"
-sed "s/__NODE_NAME__/${NODE_NAME}/g" "$ROOT/deploy/k8s/g15d/block-stack.yaml" >"$STACK_RENDERED"
+sed \
+  -e "s/__NODE_NAME__/${NODE_NAME}/g" \
+  -e "s/--launcher-durable-impl=walstore/--launcher-durable-impl=${LAUNCHER_DURABLE_IMPL}/g" \
+  "$ROOT/deploy/k8s/g15d/block-stack.yaml" >"$STACK_RENDERED"
 
 log "artifact_dir=$ARTIFACT_DIR"
 log "root=$ROOT"
 log "namespace=$NAMESPACE"
 log "node=$NODE_NAME"
+log "launcher_durable_impl=$LAUNCHER_DURABLE_IMPL"
 log "dynamic_pvc_manifest=$DYNAMIC_PVC_MANIFEST"
 kubectl version --client=true >"$ARTIFACT_DIR/kubectl-version.txt" 2>&1 || true
 kubectl get nodes -o wide >"$ARTIFACT_DIR/nodes.before.txt"

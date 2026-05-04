@@ -9,6 +9,7 @@ This directory contains developer and QA helper scripts.
 | `run-k8s-alpha.sh` | Public alpha smoke wrapper. Prefer this in README/user docs. |
 | `run-k8s-alpha-large.sh` | Optional 256 MiB Kubernetes alpha smoke for larger iSCSI write coverage. |
 | `run-k8s-alpha-pgbench.sh` | Optional Kubernetes alpha smoke with a small PostgreSQL `pgbench` workload. |
+| `run-k8s-alpha-pgbench-smartwal.sh` | Optional `pgbench` smoke that switches launcher-generated blockvolumes to `smartwal`. |
 | `build-alpha-images.sh` | Builds local Docker images used by the Kubernetes alpha harness. |
 | `run-alpha-k8s-dynamic.sh` | Public dynamic PVC alpha smoke entry. |
 | `run-iscsi-os-smoke.sh` | Privileged Linux OS-initiator smoke: `iscsiadm` -> `mkfs.ext4` -> mount -> checksum -> logout on a 256 MiB target. |

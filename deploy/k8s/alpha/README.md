@@ -165,6 +165,13 @@ Seaweed Block PVC:
 bash scripts/run-k8s-alpha-pgbench.sh "$PWD"
 ```
 
+To run the same PostgreSQL workload against the experimental `smartwal`
+backend instead of the alpha default `walstore`:
+
+```bash
+bash scripts/run-k8s-alpha-pgbench-smartwal.sh "$PWD"
+```
+
 For a presentation-friendly app demo that uses the same storage stack but shows
 two ordinary app pods sharing one PVC over time:
 

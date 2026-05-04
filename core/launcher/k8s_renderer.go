@@ -14,6 +14,7 @@ type K8sRenderConfig struct {
 	Image           string
 	MasterAddr      string
 	DurableRootBase string
+	DurableImpl     string
 	RecoveryMode    string
 }
 
@@ -31,6 +32,9 @@ func RenderBlockVolumeDeployments(plan lifecycle.BlockVolumeWorkloadPlan, cfg K8
 	}
 	if cfg.DurableRootBase == "" {
 		cfg.DurableRootBase = "/var/lib/sw-block"
+	}
+	if cfg.DurableImpl == "" {
+		cfg.DurableImpl = "walstore"
 	}
 	if cfg.RecoveryMode == "" {
 		cfg.RecoveryMode = "dual-lane"
@@ -96,7 +100,7 @@ func blockVolumeArgs(plan lifecycle.BlockVolumeWorkloadPlan, replica lifecycle.B
 		"--data-addr=" + replica.DataAddr,
 		"--ctrl-addr=" + replica.CtrlAddr,
 		"--durable-root=" + strings.TrimRight(cfg.DurableRootBase, "/") + "/" + plan.VolumeID + "/" + replica.ReplicaID,
-		"--durable-impl=walstore",
+		"--durable-impl=" + cfg.DurableImpl,
 		fmt.Sprintf("--durable-blocks=%d", plan.SizeBytes/4096),
 		"--durable-blocksize=4096",
 		"--recovery-mode=" + cfg.RecoveryMode,

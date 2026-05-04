@@ -35,6 +35,7 @@ type flags struct {
 	launcherImage          string
 	launcherMasterAddr     string
 	launcherDurableRoot    string
+	launcherDurableImpl    string
 	launcherISCSIPortBase  int
 	// printReadyLine: test-only flag that emits a single
 	// structured JSON line to stdout after the gRPC listener is
@@ -62,6 +63,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.StringVar(&f.launcherImage, "launcher-image", "sw-block:local", "G15d rendered blockvolume container image")
 	fs.StringVar(&f.launcherMasterAddr, "launcher-master-addr", "", "G15d master address used in rendered blockvolume args; defaults to listener address after bind")
 	fs.StringVar(&f.launcherDurableRoot, "launcher-durable-root", "/var/lib/sw-block", "G15d rendered blockvolume durable root base")
+	fs.StringVar(&f.launcherDurableImpl, "launcher-durable-impl", "walstore", "rendered blockvolume durable backend: walstore (alpha default) or smartwal")
 	fs.IntVar(&f.launcherISCSIPortBase, "launcher-iscsi-port-base", 3260, "G15d iSCSI port base for generated blockvolume workloads")
 	fs.BoolVar(&f.printReadyLine, "t0-print-ready", false, "internal test-only: emit one structured JSON line on stdout after listener bound")
 	fs.SetOutput(os.Stderr)
@@ -284,6 +286,7 @@ func runLifecycleLauncherTick(h *master.Host, f flags) error {
 			Image:           f.launcherImage,
 			MasterAddr:      masterAddr,
 			DurableRootBase: f.launcherDurableRoot,
+			DurableImpl:     f.launcherDurableImpl,
 		})
 		if err != nil {
 			return err
