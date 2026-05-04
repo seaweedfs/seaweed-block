@@ -140,7 +140,18 @@ type r2tTrace struct {
 	Desired uint32
 }
 
+type dataInTrace struct {
+	Offset uint32
+	Length uint32
+	Flags  uint8
+}
+
 func (c *testClient) scsiCmdFullWithR2TTrace(t *testing.T, cdb [16]byte, immediate, solicited []byte, expectedDataIn int) (status uint8, dataIn []byte, traces []r2tTrace) {
+	status, dataIn, traces, _ = c.scsiCmdFullWithTrace(t, cdb, immediate, solicited, expectedDataIn)
+	return status, dataIn, traces
+}
+
+func (c *testClient) scsiCmdFullWithTrace(t *testing.T, cdb [16]byte, immediate, solicited []byte, expectedDataIn int) (status uint8, dataIn []byte, r2tTraces []r2tTrace, dataInTraces []dataInTrace) {
 	t.Helper()
 	totalWrite := len(immediate) + len(solicited)
 
@@ -187,7 +198,7 @@ func (c *testClient) scsiCmdFullWithR2TTrace(t *testing.T, cdb [16]byte, immedia
 			}
 			offset := resp.BufferOffset()
 			desired := resp.DesiredDataLength()
-			traces = append(traces, r2tTrace{Offset: offset, Desired: desired})
+			r2tTraces = append(r2tTraces, r2tTrace{Offset: offset, Desired: desired})
 			if int(offset)-solicitedOffset < 0 || int(offset)+int(desired)-solicitedOffset > len(solicited) {
 				t.Fatalf("R2T range (offset=%d desired=%d) outside solicited payload [%d, %d)",
 					offset, desired, solicitedOffset, solicitedOffset+len(solicited))
@@ -211,12 +222,17 @@ func (c *testClient) scsiCmdFullWithR2TTrace(t *testing.T, cdb [16]byte, immedia
 				t.Fatalf("write Data-Out: %v", err)
 			}
 		case iscsi.OpSCSIDataIn:
+			dataInTraces = append(dataInTraces, dataInTrace{
+				Offset: resp.BufferOffset(),
+				Length: uint32(len(resp.DataSegment)),
+				Flags:  resp.OpSpecific1(),
+			})
 			collected.Write(resp.DataSegment)
 			if resp.OpSpecific1()&iscsi.FlagS != 0 {
-				return resp.SCSIStatusByte(), collected.Bytes(), traces
+				return resp.SCSIStatusByte(), collected.Bytes(), r2tTraces, dataInTraces
 			}
 		case iscsi.OpSCSIResp:
-			return resp.SCSIStatusByte(), collected.Bytes(), traces
+			return resp.SCSIStatusByte(), collected.Bytes(), r2tTraces, dataInTraces
 		default:
 			t.Fatalf("unexpected resp opcode: %s", iscsi.OpcodeName(resp.Opcode()))
 		}
