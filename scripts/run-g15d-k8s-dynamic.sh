@@ -5,6 +5,7 @@ ROOT="${1:-$(pwd)}"
 NAMESPACE="${G15D_NAMESPACE:-default}"
 ARTIFACT_DIR="${G15D_ARTIFACT_DIR:-/tmp/g15d-k8s-$(date -u +%Y%m%dT%H%M%SZ)}"
 RUN_LABEL="${SW_BLOCK_RUN_LABEL:-g15d}"
+DYNAMIC_PVC_MANIFEST="${SW_BLOCK_DYNAMIC_PVC_MANIFEST:-$ROOT/deploy/k8s/g15d/dynamic-pvc-pod.yaml}"
 
 mkdir -p "$ARTIFACT_DIR"
 POLL_LOG="$ARTIFACT_DIR/poll.log"
@@ -30,6 +31,7 @@ log "artifact_dir=$ARTIFACT_DIR"
 log "root=$ROOT"
 log "namespace=$NAMESPACE"
 log "node=$NODE_NAME"
+log "dynamic_pvc_manifest=$DYNAMIC_PVC_MANIFEST"
 kubectl version --client=true >"$ARTIFACT_DIR/kubectl-version.txt" 2>&1 || true
 kubectl get nodes -o wide >"$ARTIFACT_DIR/nodes.before.txt"
 
@@ -38,7 +40,7 @@ cleanup() {
   set +e
   kubectl -n kube-system delete deploy -l app=sw-blockvolume --ignore-not-found=true >>"$ARTIFACT_DIR/cleanup.log" 2>&1
   kubectl -n kube-system delete deploy sw-blockvolume-r1 sw-blockvolume-r2 --ignore-not-found=true >>"$ARTIFACT_DIR/cleanup.log" 2>&1
-  kubectl delete -f "$ROOT/deploy/k8s/g15d/dynamic-pvc-pod.yaml" --ignore-not-found=true >>"$ARTIFACT_DIR/cleanup.log" 2>&1
+  kubectl -n "$NAMESPACE" delete -f "$DYNAMIC_PVC_MANIFEST" --ignore-not-found=true >>"$ARTIFACT_DIR/cleanup.log" 2>&1
   kubectl delete -f "$ROOT/deploy/k8s/g15b/csi-node.yaml" --ignore-not-found=true >>"$ARTIFACT_DIR/cleanup.log" 2>&1
   kubectl delete -f "$ROOT/deploy/k8s/g15d/csi-controller.yaml" --ignore-not-found=true >>"$ARTIFACT_DIR/cleanup.log" 2>&1
   kubectl delete -f "$ROOT/deploy/k8s/g15b/csi-driver.yaml" --ignore-not-found=true >>"$ARTIFACT_DIR/cleanup.log" 2>&1
@@ -101,7 +103,7 @@ kubectl -n kube-system wait --for=condition=available deploy/sw-block-csi-contro
 kubectl -n kube-system rollout status ds/sw-block-csi-node --timeout=120s
 
 log "apply dynamic StorageClass/PVC/pod"
-kubectl apply -f "$ROOT/deploy/k8s/g15d/dynamic-pvc-pod.yaml" | tee "$ARTIFACT_DIR/apply-dynamic.log"
+kubectl -n "$NAMESPACE" apply -f "$DYNAMIC_PVC_MANIFEST" | tee "$ARTIFACT_DIR/apply-dynamic.log"
 
 log "wait for launcher-generated blockvolume manifest"
 for _ in $(seq 1 180); do
