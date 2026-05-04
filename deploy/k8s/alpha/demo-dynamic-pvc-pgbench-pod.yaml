@@ -36,6 +36,7 @@ spec:
         - -c
         - |
           set -eu
+          set -o pipefail
           export PGDATA=/data/pgdata
           export PGHOST=/tmp
           export PGPORT=55432
@@ -51,8 +52,8 @@ spec:
             echo "fsync = on"
             echo "synchronous_commit = on"
           } >> "$PGDATA/postgresql.conf"
-          su postgres -c "pg_ctl -D '$PGDATA' -l /data/postgres.log start"
-          trap 'su postgres -c "pg_ctl -D \"$PGDATA\" -m fast stop" || true' EXIT
+          su postgres -c "pg_ctl -D '$PGDATA' -l /data/postgres.log -w start"
+          trap 'su postgres -c "pg_ctl -D \"$PGDATA\" -m fast -w stop" || true' EXIT
           su postgres -c "createdb -h /tmp -p 55432 benchdb"
           su postgres -c "pgbench -h /tmp -p 55432 -i -s 1 benchdb" | tee /data/pgbench-init.log
           su postgres -c "pgbench -h /tmp -p 55432 -c 4 -j 2 -T 60 benchdb" | tee /data/pgbench-run.log
