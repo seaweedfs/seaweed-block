@@ -2,6 +2,7 @@ package storage
 
 import (
 	"bytes"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -57,6 +58,117 @@ func TestFlusher_AdvancesCheckpointBeforeReadFromExtent(t *testing.T) {
 				i, got[0], want[0])
 		}
 	}
+}
+
+// TestFlusher_ReleasesWALPressureAfterCheckpoint pins the pressure
+// feedback loop: after dirty entries are flushed and checkpointed, the
+// circular WAL tail must advance so admission sees free space again.
+// Without this, long-running writers eventually hit "WAL region full"
+// even though the flusher is successfully writing data to the extent.
+func TestFlusher_ReleasesWALPressureAfterCheckpoint(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "store.bin")
+
+	s := createWALStoreWithWALSizeForTest(t, path, 128, 4096, 256*1024)
+	defer s.Close()
+
+	for i := uint32(0); i < 32; i++ {
+		if _, err := s.Write(i, makeBlock(4096, byte(0x80+i))); err != nil {
+			t.Fatalf("Write(%d): %v", i, err)
+		}
+	}
+	if _, err := s.Sync(); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	if got := s.wal.usedFraction(); got == 0 {
+		t.Fatal("test setup did not create WAL pressure")
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if s.CheckpointLSN() >= 32 && s.wal.usedFraction() == 0 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if got := s.CheckpointLSN(); got < 32 {
+		t.Fatalf("flusher never checkpointed writes: got %d, want >= 32", got)
+	}
+	if used := s.wal.usedFraction(); used != 0 {
+		t.Fatalf("WAL pressure after checkpoint = %.3f, want 0", used)
+	}
+}
+
+func TestWALWriter_AdvanceTailPastEntryIsIdempotent(t *testing.T) {
+	w := &walWriter{
+		walSize:     64,
+		logicalHead: 40,
+		logicalTail: 0,
+	}
+
+	w.advanceTailPastEntry(0, 10)
+	if got := w.logicalTailValue(); got != 10 {
+		t.Fatalf("first advance tail=%d, want 10", got)
+	}
+
+	w.advanceTailPastEntry(0, 10)
+	if got := w.logicalTailValue(); got != 10 {
+		t.Fatalf("repeated advance tail=%d, want still 10", got)
+	}
+}
+
+func TestWALWriter_AdvanceTailPastWrappedEntry(t *testing.T) {
+	w := &walWriter{
+		walSize:     64,
+		logicalHead: 80,
+		logicalTail: 60,
+	}
+
+	w.advanceTailPastEntry(0, 10)
+	if got := w.logicalTailValue(); got != 74 {
+		t.Fatalf("wrapped advance tail=%d, want 74", got)
+	}
+}
+
+func createWALStoreWithWALSizeForTest(t *testing.T, path string, numBlocks uint32, blockSize int, walSize uint64) *WALStore {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o644)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	sb, err := newSuperblock(uint64(numBlocks)*uint64(blockSize), createOptions{
+		BlockSize:   uint32(blockSize),
+		ExtentSize:  uint32(blockSize),
+		WALSize:     walSize,
+		ImplKind:    ImplKindWALStore,
+		ImplVersion: WALStoreImplVersion,
+	})
+	if err != nil {
+		_ = f.Close()
+		t.Fatalf("newSuperblock: %v", err)
+	}
+	totalSize := int64(superblockSize) + int64(sb.WALSize) + int64(sb.VolumeSize)
+	if err := f.Truncate(totalSize); err != nil {
+		_ = f.Close()
+		t.Fatalf("truncate: %v", err)
+	}
+	if _, err := sb.writeTo(f); err != nil {
+		_ = f.Close()
+		t.Fatalf("write superblock: %v", err)
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		t.Fatalf("sync superblock: %v", err)
+	}
+	s, err := openInitialized(path, f, &sb)
+	if err != nil {
+		_ = f.Close()
+		t.Fatalf("openInitialized: %v", err)
+	}
+	return s
 }
 
 // TestFlusher_RecoveryHonorsCheckpoint: after the flusher has
@@ -142,14 +254,14 @@ func TestCrashFamily_AbruptKillAtMultipleWindows(t *testing.T) {
 		},
 		{
 			name:      "kill_post_flush",
-			nBefore:   3,    // 3 writes + Sync, wait for flush, then kill
+			nBefore:   3, // 3 writes + Sync, wait for flush, then kill
 			nDuring:   0,
 			waitFlush: true,
 		},
 		{
 			name:      "kill_post_flush_then_more_unacked_writes",
-			nBefore:   3,    // first batch acked + flushed
-			nDuring:   2,    // second batch unacked
+			nBefore:   3, // first batch acked + flushed
+			nDuring:   2, // second batch unacked
 			waitFlush: true,
 		},
 	}
