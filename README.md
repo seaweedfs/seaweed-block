@@ -182,6 +182,16 @@ Expected result:
 [alpha] PASS: dynamic PVC create/delete completed checksum write/read and cleanup
 ```
 
+For a more presentation-friendly app demo, run:
+
+```bash
+bash scripts/run-alpha-app-demo.sh "$PWD"
+```
+
+That demo starts one app pod that writes to a PVC, deletes it, then starts a
+second app pod that mounts the same PVC and verifies the data. See
+[docs/kubernetes-app-demo.md](docs/kubernetes-app-demo.md).
+
 For the manual `kubectl apply` flow, see:
 
 - [deploy/k8s/alpha/README.md](deploy/k8s/alpha/README.md)
