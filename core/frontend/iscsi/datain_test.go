@@ -53,6 +53,24 @@ func TestDataInWriter_UnderflowResidual(t *testing.T) {
 	if got := pdus[0].ResidualCount(); got != 6 {
 		t.Fatalf("residual=%d want 6", got)
 	}
+	if flags := pdus[0].OpSpecific1(); flags&FlagU == 0 || flags&FlagO != 0 {
+		t.Fatalf("flags=0x%02x want underflow only", flags)
+	}
+}
+
+func TestDataInWriter_OverflowResidual(t *testing.T) {
+	w := newDataInWriter(16)
+	req := dataInReq(14, 4)
+	pdus := w.build(req, SCSIResult{Status: StatusGood, Data: []byte("abcdefghij")})
+	if len(pdus) != 1 {
+		t.Fatalf("pdus=%d want 1", len(pdus))
+	}
+	if got := pdus[0].ResidualCount(); got != 6 {
+		t.Fatalf("residual=%d want 6", got)
+	}
+	if flags := pdus[0].OpSpecific1(); flags&FlagO == 0 || flags&FlagU != 0 {
+		t.Fatalf("flags=0x%02x want overflow only", flags)
+	}
 }
 
 func TestDataInWriter_ZeroLengthReadCarriesStatus(t *testing.T) {
@@ -68,5 +86,8 @@ func TestDataInWriter_ZeroLengthReadCarriesStatus(t *testing.T) {
 	}
 	if p.ResidualCount() != 8 {
 		t.Fatalf("residual=%d want 8", p.ResidualCount())
+	}
+	if flags := p.OpSpecific1(); flags&FlagU == 0 || flags&FlagO != 0 {
+		t.Fatalf("flags=0x%02x want underflow only", flags)
 	}
 }

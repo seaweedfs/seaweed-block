@@ -17,7 +17,7 @@ func (w *dataInWriter) build(req *PDU, result SCSIResult) []*PDU {
 		p := w.basePDU(req)
 		p.BHS[1] = FlagF | FlagS
 		p.SetSCSIStatusByte(result.Status)
-		p.SetResidualCount(req.ExpectedDataTransferLength())
+		setResidualFlags(p, req.ExpectedDataTransferLength(), 0)
 		return []*PDU{p}
 	}
 
@@ -43,7 +43,7 @@ func (w *dataInWriter) build(req *PDU, result SCSIResult) []*PDU {
 		if final {
 			p.BHS[1] = FlagF | FlagS
 			p.SetSCSIStatusByte(result.Status)
-			p.SetResidualCount(residualCount(req.ExpectedDataTransferLength(), uint32(len(data))))
+			setResidualFlags(p, req.ExpectedDataTransferLength(), uint32(len(data)))
 		}
 		pdus = append(pdus, p)
 
@@ -62,12 +62,14 @@ func (w *dataInWriter) basePDU(req *PDU) *PDU {
 	return p
 }
 
-func residualCount(expected, actual uint32) uint32 {
+func setResidualFlags(p *PDU, expected, actual uint32) {
 	if expected > actual {
-		return expected - actual
+		p.BHS[1] |= FlagU
+		p.SetResidualCount(expected - actual)
+		return
 	}
 	if actual > expected {
-		return actual - expected
+		p.BHS[1] |= FlagO
+		p.SetResidualCount(actual - expected)
 	}
-	return 0
 }
