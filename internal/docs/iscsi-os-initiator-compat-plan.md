@@ -288,11 +288,13 @@ Harness note:
 
 ```text
 V:\share\iscsi-p1\run-p1-iscsi-os.sh
+scripts/run-iscsi-os-smoke.sh
 ```
 
-This is a share-driven QA harness, not a repository script yet. It starts a
-single-slot blockmaster/blockvolume pair with a 256 MiB durable target, then
-drives Linux `iscsiadm`, `mkfs.ext4`, mount, payload checksum, and cleanup.
+The share-driven harness captured the original P1 evidence. The repository
+script is the repeatable developer/QA entrypoint. Both start a single-slot
+blockmaster/blockvolume pair with a 256 MiB durable target, then drive Linux
+`iscsiadm`, `mkfs.ext4`, mount, payload checksum, and cleanup.
 
 ### Slice F: Large READ / DataInWriter
 
