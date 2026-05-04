@@ -41,10 +41,21 @@ docker save sw-block:local | sudo k3s ctr images import -
 docker save sw-block-csi:local | sudo k3s ctr images import -
 ```
 
+For an existing cluster that pulls images from a registry:
+
+```bash
+export SW_BLOCK_IMAGE=registry.example.com/storage/sw-block:alpha
+export SW_BLOCK_CSI_IMAGE=registry.example.com/storage/sw-block-csi:alpha
+
+bash scripts/build-alpha-images.sh "$PWD"
+docker push "$SW_BLOCK_IMAGE"
+docker push "$SW_BLOCK_CSI_IMAGE"
+```
+
 ## Run
 
 ```bash
-bash scripts/run-alpha-app-demo.sh "$PWD"
+bash scripts/run-k8s-demo.sh "$PWD"
 ```
 
 Expected final line:

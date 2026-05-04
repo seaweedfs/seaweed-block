@@ -5,6 +5,8 @@ ROOT="${1:-$(pwd)}"
 NAMESPACE="${SW_BLOCK_APP_NAMESPACE:-default}"
 ARTIFACT_DIR="${SW_BLOCK_ARTIFACT_DIR:-/tmp/sw-block-app-demo-$(date -u +%Y%m%dT%H%M%SZ)}"
 POLL_LOG="$ARTIFACT_DIR/poll.log"
+IMAGE="${SW_BLOCK_IMAGE:-sw-block:local}"
+CSI_IMAGE="${SW_BLOCK_CSI_IMAGE:-sw-block-csi:local}"
 
 mkdir -p "$ARTIFACT_DIR"
 
@@ -21,6 +23,10 @@ require_cmd() {
     echo "missing required command: $1" >&2
     exit 2
   fi
+}
+
+sed_escape() {
+  printf '%s' "$1" | sed 's/[\/&]/\\&/g'
 }
 
 capture_once() {
@@ -71,8 +77,8 @@ cleanup() {
   kubectl -n "$NAMESPACE" delete pod sw-block-demo-reader sw-block-demo-writer --ignore-not-found=true >>"$ARTIFACT_DIR/cleanup.log" 2>&1
   kubectl -n "$NAMESPACE" delete pvc sw-block-demo-pvc --ignore-not-found=true >>"$ARTIFACT_DIR/cleanup.log" 2>&1
   kubectl -n kube-system delete deploy -l app=sw-blockvolume --ignore-not-found=true >>"$ARTIFACT_DIR/cleanup.log" 2>&1
-  kubectl delete -f "$ROOT/deploy/k8s/alpha/csi-node.yaml" --ignore-not-found=true >>"$ARTIFACT_DIR/cleanup.log" 2>&1
-  kubectl delete -f "$ROOT/deploy/k8s/alpha/csi-controller.yaml" --ignore-not-found=true >>"$ARTIFACT_DIR/cleanup.log" 2>&1
+  kubectl delete -f "$CSI_NODE_RENDERED" --ignore-not-found=true >>"$ARTIFACT_DIR/cleanup.log" 2>&1
+  kubectl delete -f "$CSI_CONTROLLER_RENDERED" --ignore-not-found=true >>"$ARTIFACT_DIR/cleanup.log" 2>&1
   kubectl delete -f "$ROOT/deploy/k8s/alpha/csi-driver.yaml" --ignore-not-found=true >>"$ARTIFACT_DIR/cleanup.log" 2>&1
   kubectl delete -f "$ROOT/deploy/k8s/alpha/rbac.yaml" --ignore-not-found=true >>"$ARTIFACT_DIR/cleanup.log" 2>&1
   kubectl delete -f "$STACK_RENDERED" --ignore-not-found=true >>"$ARTIFACT_DIR/cleanup.log" 2>&1
@@ -101,12 +107,23 @@ require_cmd kubectl
 
 NODE_NAME="$(kubectl get nodes -o jsonpath='{.items[0].metadata.name}')"
 STACK_RENDERED="$ARTIFACT_DIR/block-stack.rendered.yaml"
-sed "s/__NODE_NAME__/${NODE_NAME}/g" "$ROOT/deploy/k8s/alpha/block-stack.yaml" >"$STACK_RENDERED"
+CSI_CONTROLLER_RENDERED="$ARTIFACT_DIR/csi-controller.rendered.yaml"
+CSI_NODE_RENDERED="$ARTIFACT_DIR/csi-node.rendered.yaml"
+IMAGE_SED="$(sed_escape "$IMAGE")"
+CSI_IMAGE_SED="$(sed_escape "$CSI_IMAGE")"
+sed -e "s/__NODE_NAME__/${NODE_NAME}/g" -e "s/sw-block:local/${IMAGE_SED}/g" \
+  "$ROOT/deploy/k8s/alpha/block-stack.yaml" >"$STACK_RENDERED"
+sed "s/sw-block-csi:local/${CSI_IMAGE_SED}/g" \
+  "$ROOT/deploy/k8s/alpha/csi-controller.yaml" >"$CSI_CONTROLLER_RENDERED"
+sed "s/sw-block-csi:local/${CSI_IMAGE_SED}/g" \
+  "$ROOT/deploy/k8s/alpha/csi-node.yaml" >"$CSI_NODE_RENDERED"
 
 log "artifact_dir=$ARTIFACT_DIR"
 log "root=$ROOT"
 log "namespace=$NAMESPACE"
 log "node=$NODE_NAME"
+log "image=$IMAGE"
+log "csi_image=$CSI_IMAGE"
 kubectl version --client=true >"$ARTIFACT_DIR/kubectl-version.txt" 2>&1 || true
 kubectl get nodes -o wide >"$ARTIFACT_DIR/nodes.before.txt"
 
@@ -120,8 +137,8 @@ kubectl -n kube-system wait --for=condition=available deploy/sw-blockmaster --ti
 log "apply CSI manifests"
 kubectl apply -f "$ROOT/deploy/k8s/alpha/rbac.yaml" | tee "$ARTIFACT_DIR/apply-rbac.log"
 kubectl apply -f "$ROOT/deploy/k8s/alpha/csi-driver.yaml" | tee "$ARTIFACT_DIR/apply-csidriver.log"
-kubectl apply -f "$ROOT/deploy/k8s/alpha/csi-controller.yaml" | tee "$ARTIFACT_DIR/apply-csi-controller.log"
-kubectl apply -f "$ROOT/deploy/k8s/alpha/csi-node.yaml" | tee "$ARTIFACT_DIR/apply-csi-node.log"
+kubectl apply -f "$CSI_CONTROLLER_RENDERED" | tee "$ARTIFACT_DIR/apply-csi-controller.log"
+kubectl apply -f "$CSI_NODE_RENDERED" | tee "$ARTIFACT_DIR/apply-csi-node.log"
 kubectl -n kube-system wait --for=condition=available deploy/sw-block-csi-controller --timeout=120s
 kubectl -n kube-system rollout status ds/sw-block-csi-node --timeout=120s
 
