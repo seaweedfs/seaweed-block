@@ -7,13 +7,12 @@ package iscsi
 //
 //   loginPhase() → dispatch() per incoming SCSI command.
 //
-// V2's production-grade session.go has rxLoop/txLoop split for
-// parallel tx, CmdSN ordering, R2T for large writes, NOP
-// heartbeats, etc. T2 L1 in-process component test needs none
-// of that — every WRITE(10) here fits in one Data-Out PDU and
-// every READ(10) fits in one Data-In PDU. Production extras
-// land in a later checkpoint when L2-OS real-initiator
-// compatibility drives the scope.
+// The current implementation intentionally keeps one goroutine per
+// connection, but it now supports the OS-initiator essentials:
+// discovery, login, R2T/Data-Out chunking for large writes, bounded
+// pending commands during Data-Out, Data-Out timeout, and split
+// Data-In for large reads. It still does not implement CHAP, ALUA,
+// MPIO, or mounted-volume failover.
 
 import (
 	"context"
