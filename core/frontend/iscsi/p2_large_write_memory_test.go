@@ -60,6 +60,7 @@ func startP2MemoryTarget(t *testing.T, backend frontend.Backend, volumeSize uint
 
 func currentHeapAlloc() uint64 {
 	runtime.GC()
+	runtime.GC()
 	var m runtime.MemStats
 	runtime.ReadMemStats(&m)
 	return m.HeapAlloc
