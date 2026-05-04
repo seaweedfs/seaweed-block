@@ -1,6 +1,6 @@
 # iSCSI OS Initiator Compatibility Plan
 
-Status: draft on `fix/iscsi-os-initiator-compat`
+Status: P1-A implemented on `fix/iscsi-os-initiator-compat`
 
 Owner track: frontend compatibility
 
@@ -168,6 +168,14 @@ Add a failing V3 test where:
 
 This test directly captures `expected Data-Out, got SCSI-Command`.
 
+Implementation status:
+
+```text
+TestP1_ISCSI_R2TDataOut_AllowsPipelinedCommand
+  old behavior: session failed with "expected Data-Out, got SCSI-Command"
+  fixed behavior: queued command is processed after WRITE completes
+```
+
 ### Slice B: V3 DataOutCollector
 
 Extract collector semantics and tests:
@@ -230,8 +238,9 @@ Only after WRITE/mkfs is green:
 
 ## Recommended Implementation Order
 
-1. Write Slice A red test.
-2. Add V3-local pending queue support in current serial session.
+1. Write Slice A red test. Done.
+2. Add V3-local pending queue support in current serial session. Done for the
+   single pipelined-command case; overflow test remains.
 3. Extract V3-local `DataOutCollector`.
 4. Add Data-Out timeout.
 5. Run Linux OS initiator mkfs harness.
@@ -277,4 +286,3 @@ This track can close when all are true:
 - mount + write/read byte-equal succeeds,
 - logout leaves no active iSCSI sessions,
 - public demo docs no longer need to warn that large OS format is blocked.
-

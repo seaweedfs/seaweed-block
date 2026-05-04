@@ -34,6 +34,13 @@ const (
 	SessionClosed
 )
 
+// maxPendingQueue bounds commands queued while a write is collecting
+// R2T-solicited Data-Out. Linux initiators can pipeline a later SCSI
+// command during an earlier write's Data-Out phase; queueing keeps that
+// legal shape from tearing down the session, while the bound prevents an
+// unbounded memory sink from a hostile initiator.
+const maxPendingQueue = 64
+
 // Session carries one iSCSI session's per-connection state.
 // Created by the Target on accept; driven by serve().
 //
@@ -83,6 +90,12 @@ type Session struct {
 
 	// Session lifetime.
 	closed atomic.Bool
+
+	// pending holds non-Data-Out PDUs read while collectWriteData is
+	// waiting for R2T-solicited Data-Out. The main loop drains this
+	// before reading the socket again, preserving serial command
+	// processing without rejecting initiator pipelining.
+	pending []*PDU
 }
 
 // Logger is a tiny abstraction so Target callers can pipe logs
@@ -178,7 +191,7 @@ func (s *Session) loginPhase() error {
 
 func (s *Session) fullFeatureLoop(ctx context.Context) error {
 	for s.state == SessionFullFeature {
-		pdu, err := ReadPDU(s.conn)
+		pdu, err := s.nextPDU()
 		if err != nil {
 			if err == io.EOF {
 				return nil
@@ -190,6 +203,17 @@ func (s *Session) fullFeatureLoop(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+func (s *Session) nextPDU() (*PDU, error) {
+	if len(s.pending) > 0 {
+		pdu := s.pending[0]
+		copy(s.pending, s.pending[1:])
+		s.pending[len(s.pending)-1] = nil
+		s.pending = s.pending[:len(s.pending)-1]
+		return pdu, nil
+	}
+	return ReadPDU(s.conn)
 }
 
 func (s *Session) dispatch(ctx context.Context, pdu *PDU) error {
@@ -405,7 +429,11 @@ func (s *Session) collectWriteData(req *PDU, edtl uint32) ([]byte, error) {
 				return nil, fmt.Errorf("read Data-Out: %w", err)
 			}
 			if pdu.Opcode() != OpSCSIDataOut {
-				return nil, fmt.Errorf("expected Data-Out, got %s", OpcodeName(pdu.Opcode()))
+				if len(s.pending) >= maxPendingQueue {
+					return nil, fmt.Errorf("pending queue overflow (%d PDUs)", maxPendingQueue)
+				}
+				s.pending = append(s.pending, pdu)
+				continue
 			}
 			if pdu.TargetTransferTag() != ttt {
 				// R2T-solicited Data-Out MUST echo the target's TTT.
