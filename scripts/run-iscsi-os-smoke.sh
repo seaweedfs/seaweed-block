@@ -153,7 +153,7 @@ run_iteration() {
   done
   if [[ -z "$dev" ]]; then
     ls -l /dev/disk/by-path >"$ARTIFACT_DIR/by-path.${suffix}.txt" 2>&1 || true
-    sudo dmesg | tail -n 120 >"$ARTIFACT_DIR/dmesg.${suffix}.tail.txt" 2>&1 || true
+    (sudo dmesg | tail -n 120) >"$ARTIFACT_DIR/dmesg.${suffix}.tail.txt" 2>&1 || true
     echo "device not found for IQN ${IQN} on iteration ${iter}" >&2
     exit 1
   fi
