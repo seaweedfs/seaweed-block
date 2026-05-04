@@ -16,7 +16,14 @@ func TestFileStore_CreateVolumePersistsAndIsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	spec := VolumeSpec{VolumeID: "vol-a", SizeBytes: 1 << 20, ReplicationFactor: 2}
+	spec := VolumeSpec{
+		VolumeID:          "vol-a",
+		SizeBytes:         1 << 20,
+		ReplicationFactor: 2,
+		PVCName:           "demo-pvc",
+		PVCNamespace:      "demo-ns",
+		PVName:            "pvc-a",
+	}
 	rec, err := s.CreateVolume(spec)
 	if err != nil {
 		t.Fatalf("create: %v", err)

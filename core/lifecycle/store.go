@@ -33,6 +33,9 @@ type VolumeSpec struct {
 	VolumeID          string `json:"volume_id"`
 	SizeBytes         uint64 `json:"size_bytes"`
 	ReplicationFactor int    `json:"replication_factor"`
+	PVCName           string `json:"pvc_name,omitempty"`
+	PVCNamespace      string `json:"pvc_namespace,omitempty"`
+	PVName            string `json:"pv_name,omitempty"`
 }
 
 // VolumeRecord is the durable lifecycle state for one volume.

@@ -59,6 +59,9 @@ func (s *services) CreateVolume(ctx context.Context, req *control.CreateVolumeRe
 		VolumeId:          rec.Spec.VolumeID,
 		SizeBytes:         rec.Spec.SizeBytes,
 		ReplicationFactor: int32(rec.Spec.ReplicationFactor),
+		PvcName:           rec.Spec.PVCName,
+		PvcNamespace:      rec.Spec.PVCNamespace,
+		PvName:            rec.Spec.PVName,
 	}, nil
 }
 
@@ -105,6 +108,9 @@ func lifecycleSpecFromWire(req *control.CreateVolumeRequest) lifecycle.VolumeSpe
 		VolumeID:          req.GetVolumeId(),
 		SizeBytes:         req.GetSizeBytes(),
 		ReplicationFactor: int(req.GetReplicationFactor()),
+		PVCName:           req.GetPvcName(),
+		PVCNamespace:      req.GetPvcNamespace(),
+		PVName:            req.GetPvName(),
 	}
 }
 

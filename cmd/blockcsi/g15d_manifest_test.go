@@ -31,10 +31,18 @@ func TestG15d_K8sCSIController_IncludesExternalProvisioner(t *testing.T) {
 		"registry.k8s.io/sig-storage/csi-provisioner:",
 		"name: csi-attacher",
 		"--csi-address=/csi/csi.sock",
+		"--extra-create-metadata=true",
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("csi-controller missing %q", want)
 		}
+	}
+}
+
+func TestAlphaK8sCSIController_IncludesCreateMetadata(t *testing.T) {
+	body := g15dReadFile(t, "deploy", "k8s", "alpha", "csi-controller.yaml")
+	if !strings.Contains(body, "--extra-create-metadata=true") {
+		t.Fatalf("alpha csi-controller must enable PVC metadata propagation:\n%s", body)
 	}
 }
 

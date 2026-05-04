@@ -47,6 +47,9 @@ type VolumeSpec struct {
 	VolumeID          string
 	SizeBytes         uint64
 	ReplicationFactor int
+	PVCName           string
+	PVCNamespace      string
+	PVName            string
 }
 
 func publishContext(t PublishTarget) map[string]string {

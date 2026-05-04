@@ -20,6 +20,9 @@ func TestG15c_LifecycleService_CreateVolumePersistsDesiredIntent(t *testing.T) {
 		VolumeId:          "pvc-a",
 		SizeBytes:         1 << 30,
 		ReplicationFactor: 2,
+		PvcName:           "demo-pvc",
+		PvcNamespace:      "demo-ns",
+		PvName:            "pvc-a",
 	})
 	if err != nil {
 		t.Fatalf("CreateVolume: %v", err)
@@ -27,12 +30,18 @@ func TestG15c_LifecycleService_CreateVolumePersistsDesiredIntent(t *testing.T) {
 	if resp.GetVolumeId() != "pvc-a" || resp.GetSizeBytes() != 1<<30 || resp.GetReplicationFactor() != 2 {
 		t.Fatalf("response=%+v", resp)
 	}
+	if resp.GetPvcName() != "demo-pvc" || resp.GetPvcNamespace() != "demo-ns" || resp.GetPvName() != "pvc-a" {
+		t.Fatalf("kubernetes metadata response=%+v", resp)
+	}
 	rec, ok := h.Lifecycle().Volumes.GetVolume("pvc-a")
 	if !ok {
 		t.Fatal("desired volume not persisted")
 	}
 	if rec.Spec.VolumeID != "pvc-a" || rec.Spec.SizeBytes != 1<<30 || rec.Spec.ReplicationFactor != 2 {
 		t.Fatalf("record=%+v", rec)
+	}
+	if rec.Spec.PVCName != "demo-pvc" || rec.Spec.PVCNamespace != "demo-ns" || rec.Spec.PVName != "pvc-a" {
+		t.Fatalf("kubernetes metadata record=%+v", rec)
 	}
 	if _, ok := h.Publisher().VolumeAuthorityLine("pvc-a"); ok {
 		t.Fatal("CreateVolume must not mint authority")

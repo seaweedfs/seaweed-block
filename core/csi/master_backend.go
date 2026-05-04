@@ -35,6 +35,9 @@ func (p *ControlLifecycleProvisioner) CreateVolume(ctx context.Context, spec Vol
 		VolumeId:          spec.VolumeID,
 		SizeBytes:         spec.SizeBytes,
 		ReplicationFactor: int32(spec.ReplicationFactor),
+		PvcName:           spec.PVCName,
+		PvcNamespace:      spec.PVCNamespace,
+		PvName:            spec.PVName,
 	})
 	if err != nil {
 		return VolumeSpec{}, err
@@ -43,6 +46,9 @@ func (p *ControlLifecycleProvisioner) CreateVolume(ctx context.Context, spec Vol
 		VolumeID:          resp.GetVolumeId(),
 		SizeBytes:         resp.GetSizeBytes(),
 		ReplicationFactor: int(resp.GetReplicationFactor()),
+		PVCName:           resp.GetPvcName(),
+		PVCNamespace:      resp.GetPvcNamespace(),
+		PVName:            resp.GetPvName(),
 	}, nil
 }
 
