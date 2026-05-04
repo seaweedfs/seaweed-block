@@ -118,10 +118,17 @@ If you need to clean up manually:
 kubectl delete pod sw-block-demo-writer sw-block-demo-reader --ignore-not-found=true
 kubectl delete pvc sw-block-demo-pvc --ignore-not-found=true
 kubectl -n kube-system delete deploy -l app=sw-blockvolume --ignore-not-found=true
-kubectl delete -f deploy/k8s/alpha/csi-node.yaml --ignore-not-found=true
-kubectl delete -f deploy/k8s/alpha/csi-controller.yaml --ignore-not-found=true
 kubectl delete -f deploy/k8s/alpha/csi-driver.yaml --ignore-not-found=true
 kubectl delete -f deploy/k8s/alpha/rbac.yaml --ignore-not-found=true
 kubectl delete -f /tmp/sw-block-stack.yaml --ignore-not-found=true
 sudo iscsiadm -m session || true
+```
+
+The scripted demo applies rendered manifests under its artifact directory. If
+you used custom image names, delete those rendered files instead of the source
+YAML:
+
+```bash
+kubectl delete -f "$ARTIFACT_DIR/csi-controller.rendered.yaml" --ignore-not-found=true
+kubectl delete -f "$ARTIFACT_DIR/csi-node.rendered.yaml" --ignore-not-found=true
 ```

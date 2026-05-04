@@ -35,11 +35,15 @@ CSI_CONTROLLER_RENDERED="$ARTIFACT_DIR/csi-controller.rendered.yaml"
 CSI_NODE_RENDERED="$ARTIFACT_DIR/csi-node.rendered.yaml"
 IMAGE_SED="$(sed_escape "$IMAGE")"
 CSI_IMAGE_SED="$(sed_escape "$CSI_IMAGE")"
-sed -e "s/__NODE_NAME__/${NODE_NAME}/g" -e "s/sw-block:local/${IMAGE_SED}/g" \
+sed -e "s/__NODE_NAME__/${NODE_NAME}/g" \
+  -e "s/sw-block:local/${IMAGE_SED}/g" \
+  -e "s/imagePullPolicy: Never/imagePullPolicy: IfNotPresent/g" \
   "$ROOT/deploy/k8s/g15d/block-stack.yaml" >"$STACK_RENDERED"
-sed "s/sw-block-csi:local/${CSI_IMAGE_SED}/g" \
+sed -e "s/sw-block-csi:local/${CSI_IMAGE_SED}/g" \
+  -e "s/imagePullPolicy: Never/imagePullPolicy: IfNotPresent/g" \
   "$ROOT/deploy/k8s/g15d/csi-controller.yaml" >"$CSI_CONTROLLER_RENDERED"
-sed "s/sw-block-csi:local/${CSI_IMAGE_SED}/g" \
+sed -e "s/sw-block-csi:local/${CSI_IMAGE_SED}/g" \
+  -e "s/imagePullPolicy: Never/imagePullPolicy: IfNotPresent/g" \
   "$ROOT/deploy/k8s/g15b/csi-node.yaml" >"$CSI_NODE_RENDERED"
 
 log "artifact_dir=$ARTIFACT_DIR"
