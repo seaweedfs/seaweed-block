@@ -95,6 +95,28 @@ func TestHandleTextRequest_NoSendTargets_EmptyResponse(t *testing.T) {
 	}
 }
 
+func TestTargetListTargets_UsesPortalAddrOverride(t *testing.T) {
+	rec := testback.NewRecordingBackend(frontend.Identity{
+		VolumeID: "v1", ReplicaID: "r1", Epoch: 1, EndpointVersion: 1,
+	})
+	prov := testback.NewStaticProvider(rec)
+
+	tg := iscsi.NewTarget(iscsi.TargetConfig{
+		Listen:     "127.0.0.1:3260",
+		IQN:        "iqn.2026-05.io.seaweedfs:v1",
+		PortalAddr: "192.168.1.184:3260,1",
+		VolumeID:   "v1",
+		Provider:   prov,
+	})
+	got := tg.ListTargets()
+	if len(got) != 1 {
+		t.Fatalf("ListTargets len = %d, want 1", len(got))
+	}
+	if got[0].Address != "192.168.1.184:3260,1" {
+		t.Fatalf("TargetAddress = %q, want portal override", got[0].Address)
+	}
+}
+
 // Component-level: open a Discovery session against a real
 // in-process Target, issue Text/SendTargets=All, verify the
 // target's IQN comes back. This is the iscsiadm discovery

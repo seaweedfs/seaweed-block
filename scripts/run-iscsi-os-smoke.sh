@@ -7,6 +7,8 @@ WORK_DIR="${SW_BLOCK_ISCSI_WORK_DIR:-/tmp/sw-block-iscsi-os}"
 ARTIFACT_DIR="${SW_BLOCK_ARTIFACT_DIR:-${WORK_DIR}/runs/${RUN_ID}}"
 IQN="${SW_BLOCK_ISCSI_IQN:-iqn.2026-05.io.seaweedfs:os-smoke-v1}"
 PORT="${SW_BLOCK_ISCSI_PORT:-3267}"
+PORTAL_ADDR="${SW_BLOCK_ISCSI_PORTAL_ADDR:-}"
+DATAOUT_TIMEOUT="${SW_BLOCK_ISCSI_DATAOUT_TIMEOUT:-}"
 MOUNT_DIR="${SW_BLOCK_ISCSI_MOUNT_DIR:-${WORK_DIR}/mnt}"
 MASTER_ADDR="${SW_BLOCK_MASTER_ADDR:-127.0.0.1:19333}"
 DATA_ADDR="${SW_BLOCK_DATA_ADDR:-127.0.0.1:19101}"
@@ -65,6 +67,12 @@ log "root=$ROOT"
 log "artifact_dir=$ARTIFACT_DIR"
 log "iqn=$IQN"
 log "portal=127.0.0.1:${PORT}"
+if [[ -n "$PORTAL_ADDR" ]]; then
+  log "advertised_portal=$PORTAL_ADDR"
+fi
+if [[ -n "$DATAOUT_TIMEOUT" ]]; then
+  log "dataout_timeout=$DATAOUT_TIMEOUT"
+fi
 log "size_blocks=${BLOCKS} block_size=${BLOCK_SIZE}"
 log "iterations=${ITERATIONS}"
 log "stress=${STRESS}"
@@ -107,6 +115,17 @@ setsid -f "${BIN_DIR}/blockmaster" \
 sleep 1
 
 log "start blockvolume iSCSI target"
+blockvolume_iscsi_args=(
+  --iscsi-listen "127.0.0.1:${PORT}"
+  --iscsi-iqn "$IQN"
+)
+if [[ -n "$PORTAL_ADDR" ]]; then
+  blockvolume_iscsi_args+=(--iscsi-portal-addr "$PORTAL_ADDR")
+fi
+if [[ -n "$DATAOUT_TIMEOUT" ]]; then
+  blockvolume_iscsi_args+=(--iscsi-dataout-timeout "$DATAOUT_TIMEOUT")
+fi
+
 setsid -f "${BIN_DIR}/blockvolume" \
   --master "$MASTER_ADDR" \
   --server-id s1 \
@@ -121,8 +140,7 @@ setsid -f "${BIN_DIR}/blockvolume" \
   --durable-impl smartwal \
   --durable-blocks "$BLOCKS" \
   --durable-blocksize "$BLOCK_SIZE" \
-  --iscsi-listen "127.0.0.1:${PORT}" \
-  --iscsi-iqn "$IQN" \
+  "${blockvolume_iscsi_args[@]}" \
   >"$ARTIFACT_DIR/blockvolume.log" 2>&1
 
 log "wait iSCSI listener"
