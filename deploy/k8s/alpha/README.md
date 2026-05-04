@@ -152,7 +152,7 @@ bash scripts/run-k8s-alpha.sh "$PWD"
 ```
 
 For a larger storage-path check that keeps the same stack but uses a 256 MiB
-PVC and writes a 4 MiB checksum payload:
+PVC and writes a 32 MiB checksum payload:
 
 ```bash
 bash scripts/run-k8s-alpha-large.sh "$PWD"

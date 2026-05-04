@@ -34,7 +34,7 @@ spec:
         - -c
         - |
           set -eu
-          dd if=/dev/urandom of=/data/payload.bin bs=1M count=4
+          dd if=/dev/urandom of=/data/payload.bin bs=1M count=32
           sha256sum /data/payload.bin > /data/payload.sha256
           sync
           sha256sum -c /data/payload.sha256
