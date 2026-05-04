@@ -151,6 +151,13 @@ The scripted version of this flow is:
 bash scripts/run-k8s-alpha.sh "$PWD"
 ```
 
+For a presentation-friendly app demo that uses the same storage stack but shows
+two ordinary app pods sharing one PVC over time:
+
+```bash
+bash scripts/run-alpha-app-demo.sh "$PWD"
+```
+
 Known green:
 
 - create/write/read: `a3d1e6a`

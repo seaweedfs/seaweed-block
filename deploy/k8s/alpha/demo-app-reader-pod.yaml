@@ -1,0 +1,27 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: sw-block-demo-reader
+  namespace: default
+spec:
+  restartPolicy: Never
+  containers:
+    - name: app
+      image: busybox:1.36
+      command:
+        - /bin/sh
+        - -c
+        - |
+          set -eu
+          echo "[app-reader] reading existing data from PVC mounted at /data"
+          test -s /data/demo.bin
+          test -s /data/demo.sha256
+          sha256sum -c /data/demo.sha256
+          echo "[app-reader] verified persisted /data/demo.bin"
+      volumeMounts:
+        - name: data
+          mountPath: /data
+  volumes:
+    - name: data
+      persistentVolumeClaim:
+        claimName: sw-block-demo-pvc

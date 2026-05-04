@@ -10,6 +10,8 @@ This directory contains public and technical documentation.
 | `developer-architecture.md` | Deeper module-by-module architecture for contributors. |
 | `runtime-state-machines.md` | Mermaid state-machine and loop overview. |
 | `roadmap.md` | Alpha roadmap and non-claims. |
+| `production-readiness-plan.md` | Post-alpha plan from current MVP to beta/production readiness. |
+| `kubernetes-app-demo.md` | Presentation-friendly Kubernetes app + PVC demo. |
 
 ## Calibration Evidence
 
