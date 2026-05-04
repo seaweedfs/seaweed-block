@@ -30,7 +30,32 @@ The writer and reader are not simultaneous. The PVC is `ReadWriteOnce`; the demo
 uses pod replacement to show that data is on the volume, not just inside the
 first pod.
 
-## Option A: Local k3s
+## Option A: Published Alpha Images
+
+Use this when your cluster can pull public images from GHCR.
+
+```bash
+export KUBECONFIG="${KUBECONFIG:-/etc/rancher/k3s/k3s.yaml}"
+
+bash scripts/run-k8s-demo-ghcr.sh "$PWD"
+```
+
+The script uses these images by default:
+
+```text
+ghcr.io/seaweedfs/seaweed-block:alpha
+ghcr.io/seaweedfs/seaweed-block-csi:alpha
+```
+
+If the GHCR packages are not public yet, use the local build path below.
+
+Expected final line:
+
+```text
+[app-demo] PASS: app pod wrote data, replacement app pod read it back through the same PVC, cleanup complete
+```
+
+## Option B: Local k3s
 
 Use this when your test node can build Docker images locally.
 
@@ -51,7 +76,7 @@ Expected final line:
 [app-demo] PASS: app pod wrote data, replacement app pod read it back through the same PVC, cleanup complete
 ```
 
-## Option B: Existing Cluster With Your Registry
+## Option C: Existing Cluster With Your Registry
 
 Use this when your cluster pulls images from a registry.
 

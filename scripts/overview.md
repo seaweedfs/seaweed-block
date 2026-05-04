@@ -7,6 +7,7 @@ This directory contains developer and QA helper scripts.
 | Script | Purpose |
 |---|---|
 | `run-k8s-demo.sh` | Public app-demo wrapper. Shows writer pod -> same PVC -> reader pod verification. |
+| `run-k8s-demo-ghcr.sh` | Public app-demo wrapper using published GHCR alpha images. |
 | `run-k8s-alpha.sh` | Public alpha smoke wrapper. Prefer this in README/user docs. |
 | `run-k8s-alpha-large.sh` | Optional 256 MiB Kubernetes alpha smoke for larger iSCSI write coverage. |
 | `build-alpha-images.sh` | Builds local Docker images used by the Kubernetes alpha harness. |
