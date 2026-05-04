@@ -247,7 +247,8 @@ Rationale: in-process clients do not perfectly model Linux kernel iSCSI behavior
 3. Add Test Slice C: real OS initiator harness and run on M02. Keep the
    default single-iteration path cheap, but support repeated
    `SW_BLOCK_ISCSI_ITERATIONS=N` login/mkfs/mount/logout loops for session
-   reconnect stability.
+   reconnect stability. Use `SW_BLOCK_ISCSI_STRESS=fio` or `dd` for sustained
+   filesystem write/read pressure once the basic loop is green.
 4. Only then raise K8s alpha PVC size from toy/smoke scale to 256MiB/1GiB.
 5. Track CHAP as iSCSI-P4, ALUA/MPIO as iSCSI-P6.
 

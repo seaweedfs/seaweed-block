@@ -16,7 +16,8 @@
     "iscsi_tcp-loadable",
     "mkfs.ext4",
     "mount",
-    "sha256sum"
+    "sha256sum",
+    "fio-optional"
   ],
   "qa_instruction": "internal/docs/iscsi-os-initiator-compat-plan.md",
   "known_green_commit": "869292b",
@@ -33,6 +34,8 @@
     "mkfs.iter1.log",
     "payload.iter1.sha256",
     "sha256-check.iter1.log",
+    "fio.iter1.log",
+    "dd.iter1.log",
     "logout.iter1.log",
     "iscsi-sessions.iter1.txt",
     "iscsi-sessions.final.txt",

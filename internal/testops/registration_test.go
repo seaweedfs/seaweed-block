@@ -204,7 +204,7 @@ func TestISCSIP2OSSmokeRegistrationBuildsShellDriver(t *testing.T) {
 	if _, err := os.Stat(shell.Path); err != nil {
 		t.Fatalf("shell driver path missing: %v", err)
 	}
-	for _, want := range []string{"mkfs.iter1.log", "sha256-check.iter1.log", "iscsi-sessions.final.txt"} {
+	for _, want := range []string{"mkfs.iter1.log", "sha256-check.iter1.log", "fio.iter1.log", "iscsi-sessions.final.txt"} {
 		if !containsString(registration.Artifacts, want) {
 			t.Fatalf("registration artifacts missing %q: %v", want, registration.Artifacts)
 		}
