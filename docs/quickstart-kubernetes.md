@@ -1,0 +1,134 @@
+# Kubernetes Quick Start
+
+This guide is for Kubernetes users who already have a test cluster and want to
+see what the current alpha can do.
+
+The current demo path is intentionally small:
+
+```text
+app pod -> PVC -> CSI -> iSCSI -> blockvolume -> WAL-backed storage
+```
+
+It proves that a normal application pod can mount a `seaweed-block` PVC, write
+data, exit, and then a second pod can mount the same PVC and read the data back.
+It does not claim production durability or failover-under-mount yet.
+
+## What Runs
+
+The demo deploys:
+
+- `blockmaster`: the control-plane service that tracks desired volumes and
+  publishes assignments.
+- `block-csi` controller: the CSI controller plugin plus Kubernetes CSI
+  sidecars.
+- `block-csi` node: the privileged CSI node plugin that runs `iscsiadm` and
+  mounts the device for kubelet.
+- one launcher-generated `blockvolume` Deployment for the PVC.
+- two ordinary BusyBox app pods: writer first, reader second.
+
+The writer and reader are not simultaneous. The PVC is `ReadWriteOnce`; the demo
+uses pod replacement to show that data is on the volume, not just inside the
+first pod.
+
+## Option A: Local k3s
+
+Use this when your test node can build Docker images locally.
+
+```bash
+export KUBECONFIG="${KUBECONFIG:-/etc/rancher/k3s/k3s.yaml}"
+
+bash scripts/build-alpha-images.sh "$PWD"
+
+docker save sw-block:local     | sudo k3s ctr images import -
+docker save sw-block-csi:local | sudo k3s ctr images import -
+
+bash scripts/run-k8s-demo.sh "$PWD"
+```
+
+Expected final line:
+
+```text
+[app-demo] PASS: app pod wrote data, replacement app pod read it back through the same PVC, cleanup complete
+```
+
+## Option B: Existing Cluster With Your Registry
+
+Use this when your cluster pulls images from a registry.
+
+```bash
+export SW_BLOCK_IMAGE=registry.example.com/storage/sw-block:alpha
+export SW_BLOCK_CSI_IMAGE=registry.example.com/storage/sw-block-csi:alpha
+
+bash scripts/build-alpha-images.sh "$PWD"
+docker push "$SW_BLOCK_IMAGE"
+docker push "$SW_BLOCK_CSI_IMAGE"
+
+bash scripts/run-k8s-demo.sh "$PWD"
+```
+
+The runner renders the Kubernetes manifests with those image names before
+applying them. The source manifests stay simple and still default to
+`sw-block:local` for local labs.
+
+## What To Show In A Demo
+
+The most understandable demo is:
+
+```bash
+bash scripts/run-k8s-demo.sh "$PWD"
+```
+
+Then show these artifacts:
+
+```bash
+cat /tmp/sw-block-app-demo-*/writer.log
+cat /tmp/sw-block-app-demo-*/reader.log
+sudo iscsiadm -m session || true
+kubectl get all -A | grep sw-block || true
+```
+
+The proof is that both app logs contain:
+
+```text
+/data/demo.bin: OK
+```
+
+The first pod wrote the file. The second pod mounted the same PVC later and
+verified it.
+
+## Current Alpha Limitations
+
+- The generated `blockvolume` workload is applied by the demo runner. A real
+  operator should own this reconciliation.
+- The demo uses single-node Kubernetes.
+- The alpha manifest uses non-durable pod-local state for the generated
+  `blockvolume`.
+- Failover while a PVC remains mounted is not claimed.
+- NVMe-oF is not part of this alpha path.
+- Performance numbers from this demo are not a product SLO.
+
+## Cleanup
+
+The runner performs cleanup automatically and records artifacts under
+`/tmp/sw-block-app-demo-*`.
+
+If you need to clean up manually:
+
+```bash
+kubectl delete pod sw-block-demo-writer sw-block-demo-reader --ignore-not-found=true
+kubectl delete pvc sw-block-demo-pvc --ignore-not-found=true
+kubectl -n kube-system delete deploy -l app=sw-blockvolume --ignore-not-found=true
+kubectl delete -f deploy/k8s/alpha/csi-driver.yaml --ignore-not-found=true
+kubectl delete -f deploy/k8s/alpha/rbac.yaml --ignore-not-found=true
+kubectl delete -f /tmp/sw-block-stack.yaml --ignore-not-found=true
+sudo iscsiadm -m session || true
+```
+
+The scripted demo applies rendered manifests under its artifact directory. If
+you used custom image names, delete those rendered files instead of the source
+YAML:
+
+```bash
+kubectl delete -f "$ARTIFACT_DIR/csi-controller.rendered.yaml" --ignore-not-found=true
+kubectl delete -f "$ARTIFACT_DIR/csi-node.rendered.yaml" --ignore-not-found=true
+```

@@ -59,6 +59,21 @@ docker save sw-block:local | sudo k3s ctr images import -
 docker save sw-block-csi:local | sudo k3s ctr images import -
 ```
 
+For a cluster that pulls from a registry, set the image names before running the
+scripted demo:
+
+```bash
+export SW_BLOCK_IMAGE=registry.example.com/storage/sw-block:alpha
+export SW_BLOCK_CSI_IMAGE=registry.example.com/storage/sw-block-csi:alpha
+
+bash scripts/build-alpha-images.sh "$PWD"
+docker push "$SW_BLOCK_IMAGE"
+docker push "$SW_BLOCK_CSI_IMAGE"
+```
+
+The scripted runners render manifests with these image names. If you apply the
+YAML files manually, replace `sw-block:local` and `sw-block-csi:local` yourself.
+
 ## Deploy
 
 The blockmaster manifest contains a `__NODE_NAME__` placeholder for the lab
@@ -162,7 +177,7 @@ For a presentation-friendly app demo that uses the same storage stack but shows
 two ordinary app pods sharing one PVC over time:
 
 ```bash
-bash scripts/run-alpha-app-demo.sh "$PWD"
+bash scripts/run-k8s-demo.sh "$PWD"
 ```
 
 Known green:

@@ -175,7 +175,37 @@ docker save sw-block:local     | sudo k3s ctr images import -
 docker save sw-block-csi:local | sudo k3s ctr images import -
 ```
 
-**Run the alpha smoke**
+If your cluster pulls from a registry instead of local k3s images:
+
+```bash
+export SW_BLOCK_IMAGE=registry.example.com/storage/sw-block:alpha
+export SW_BLOCK_CSI_IMAGE=registry.example.com/storage/sw-block-csi:alpha
+
+bash scripts/build-alpha-images.sh "$PWD"
+docker push "$SW_BLOCK_IMAGE"
+docker push "$SW_BLOCK_CSI_IMAGE"
+```
+
+The demo scripts render the manifests with those image names at runtime.
+
+**Run the app demo**
+
+```bash
+bash scripts/run-k8s-demo.sh "$PWD"
+```
+
+Expected result:
+
+```text
+[app-demo] PASS: app pod wrote data, replacement app pod read it back through the same PVC, cleanup complete
+```
+
+This is the best first demo for Kubernetes users: one app pod writes
+`/data/demo.bin`, a replacement app pod mounts the same PVC, and the replacement
+pod verifies the checksum. See
+[docs/quickstart-kubernetes.md](docs/quickstart-kubernetes.md).
+
+**Short smoke path**
 
 ```bash
 bash scripts/run-k8s-alpha.sh "$PWD"
@@ -187,15 +217,11 @@ Expected result:
 [alpha] PASS: dynamic PVC create/delete completed checksum write/read and cleanup
 ```
 
-**Demo: PVC survives pod replacement**
-
-```bash
-bash scripts/run-alpha-app-demo.sh "$PWD"
-```
-
-That demo writes from one pod, deletes it, then mounts the same PVC from a
-second pod and verifies the data. See
+The app-demo walkthrough is also available at
 [docs/kubernetes-app-demo.md](docs/kubernetes-app-demo.md).
+
+To adapt the PVC shape for your own app, start with
+[examples/kubernetes/basic-app](examples/kubernetes/basic-app).
 
 For the manual `kubectl apply` flow, see
 [deploy/k8s/alpha/README.md](deploy/k8s/alpha/README.md).
@@ -274,6 +300,7 @@ core/
 
 deploy/k8s/alpha/  alpha Kubernetes manifests and manual guide
 docs/              architecture and roadmap notes
+examples/          copyable Kubernetes app examples
 internal/          non-public support libraries and TestOps registry
 scripts/           build and smoke-test helpers
 ```

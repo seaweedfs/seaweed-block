@@ -6,6 +6,8 @@ NAMESPACE="${G15D_NAMESPACE:-default}"
 ARTIFACT_DIR="${G15D_ARTIFACT_DIR:-/tmp/g15d-k8s-$(date -u +%Y%m%dT%H%M%SZ)}"
 RUN_LABEL="${SW_BLOCK_RUN_LABEL:-g15d}"
 DYNAMIC_PVC_MANIFEST="${SW_BLOCK_DYNAMIC_PVC_MANIFEST:-$ROOT/deploy/k8s/g15d/dynamic-pvc-pod.yaml}"
+IMAGE="${SW_BLOCK_IMAGE:-sw-block:local}"
+CSI_IMAGE="${SW_BLOCK_CSI_IMAGE:-sw-block-csi:local}"
 
 mkdir -p "$ARTIFACT_DIR"
 POLL_LOG="$ARTIFACT_DIR/poll.log"
@@ -21,16 +23,35 @@ require_cmd() {
   fi
 }
 
+sed_escape() {
+  printf '%s' "$1" | sed 's/[\/&]/\\&/g'
+}
+
 require_cmd kubectl
 
 NODE_NAME="$(kubectl get nodes -o jsonpath='{.items[0].metadata.name}')"
 STACK_RENDERED="$ARTIFACT_DIR/block-stack.rendered.yaml"
-sed "s/__NODE_NAME__/${NODE_NAME}/g" "$ROOT/deploy/k8s/g15d/block-stack.yaml" >"$STACK_RENDERED"
+CSI_CONTROLLER_RENDERED="$ARTIFACT_DIR/csi-controller.rendered.yaml"
+CSI_NODE_RENDERED="$ARTIFACT_DIR/csi-node.rendered.yaml"
+IMAGE_SED="$(sed_escape "$IMAGE")"
+CSI_IMAGE_SED="$(sed_escape "$CSI_IMAGE")"
+sed -e "s/__NODE_NAME__/${NODE_NAME}/g" \
+  -e "s/sw-block:local/${IMAGE_SED}/g" \
+  -e "s/imagePullPolicy: Never/imagePullPolicy: IfNotPresent/g" \
+  "$ROOT/deploy/k8s/g15d/block-stack.yaml" >"$STACK_RENDERED"
+sed -e "s/sw-block-csi:local/${CSI_IMAGE_SED}/g" \
+  -e "s/imagePullPolicy: Never/imagePullPolicy: IfNotPresent/g" \
+  "$ROOT/deploy/k8s/g15d/csi-controller.yaml" >"$CSI_CONTROLLER_RENDERED"
+sed -e "s/sw-block-csi:local/${CSI_IMAGE_SED}/g" \
+  -e "s/imagePullPolicy: Never/imagePullPolicy: IfNotPresent/g" \
+  "$ROOT/deploy/k8s/g15b/csi-node.yaml" >"$CSI_NODE_RENDERED"
 
 log "artifact_dir=$ARTIFACT_DIR"
 log "root=$ROOT"
 log "namespace=$NAMESPACE"
 log "node=$NODE_NAME"
+log "image=$IMAGE"
+log "csi_image=$CSI_IMAGE"
 log "dynamic_pvc_manifest=$DYNAMIC_PVC_MANIFEST"
 kubectl version --client=true >"$ARTIFACT_DIR/kubectl-version.txt" 2>&1 || true
 kubectl get nodes -o wide >"$ARTIFACT_DIR/nodes.before.txt"
@@ -41,8 +62,8 @@ cleanup() {
   kubectl -n kube-system delete deploy -l app=sw-blockvolume --ignore-not-found=true >>"$ARTIFACT_DIR/cleanup.log" 2>&1
   kubectl -n kube-system delete deploy sw-blockvolume-r1 sw-blockvolume-r2 --ignore-not-found=true >>"$ARTIFACT_DIR/cleanup.log" 2>&1
   kubectl -n "$NAMESPACE" delete -f "$DYNAMIC_PVC_MANIFEST" --ignore-not-found=true >>"$ARTIFACT_DIR/cleanup.log" 2>&1
-  kubectl delete -f "$ROOT/deploy/k8s/g15b/csi-node.yaml" --ignore-not-found=true >>"$ARTIFACT_DIR/cleanup.log" 2>&1
-  kubectl delete -f "$ROOT/deploy/k8s/g15d/csi-controller.yaml" --ignore-not-found=true >>"$ARTIFACT_DIR/cleanup.log" 2>&1
+  kubectl delete -f "$CSI_NODE_RENDERED" --ignore-not-found=true >>"$ARTIFACT_DIR/cleanup.log" 2>&1
+  kubectl delete -f "$CSI_CONTROLLER_RENDERED" --ignore-not-found=true >>"$ARTIFACT_DIR/cleanup.log" 2>&1
   kubectl delete -f "$ROOT/deploy/k8s/g15b/csi-driver.yaml" --ignore-not-found=true >>"$ARTIFACT_DIR/cleanup.log" 2>&1
   kubectl delete -f "$ROOT/deploy/k8s/g15d/rbac.yaml" --ignore-not-found=true >>"$ARTIFACT_DIR/cleanup.log" 2>&1
   kubectl delete -f "$STACK_RENDERED" --ignore-not-found=true >>"$ARTIFACT_DIR/cleanup.log" 2>&1
@@ -97,8 +118,8 @@ kubectl -n kube-system wait --for=condition=available deploy/sw-blockmaster --ti
 log "apply CSI dynamic-provisioning manifests"
 kubectl apply -f "$ROOT/deploy/k8s/g15d/rbac.yaml" | tee "$ARTIFACT_DIR/apply-rbac.log"
 kubectl apply -f "$ROOT/deploy/k8s/g15b/csi-driver.yaml" | tee "$ARTIFACT_DIR/apply-csidriver.log"
-kubectl apply -f "$ROOT/deploy/k8s/g15d/csi-controller.yaml" | tee "$ARTIFACT_DIR/apply-csi-controller.log"
-kubectl apply -f "$ROOT/deploy/k8s/g15b/csi-node.yaml" | tee "$ARTIFACT_DIR/apply-csi-node.log"
+kubectl apply -f "$CSI_CONTROLLER_RENDERED" | tee "$ARTIFACT_DIR/apply-csi-controller.log"
+kubectl apply -f "$CSI_NODE_RENDERED" | tee "$ARTIFACT_DIR/apply-csi-node.log"
 kubectl -n kube-system wait --for=condition=available deploy/sw-block-csi-controller --timeout=120s
 kubectl -n kube-system rollout status ds/sw-block-csi-node --timeout=120s
 
