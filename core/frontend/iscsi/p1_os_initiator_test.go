@@ -230,3 +230,74 @@ func TestP1_ISCSI_R2TDataOut_PendingQueueBounded(t *testing.T) {
 		t.Fatalf("backend WriteCount=%d want 0 after overflow", rec.WriteCount())
 	}
 }
+
+func TestP1_ISCSI_R2TDataOut_TimesOutWhenInitiatorStalls(t *testing.T) {
+	const (
+		blocks    = 256
+		maxBurst  = 64 * 1024
+		blockSize = int(iscsi.DefaultBlockSize)
+	)
+	totalBytes := blocks * blockSize
+
+	rec := testback.NewRecordingBackend(frontend.Identity{VolumeID: "v1", ReplicaID: "r1"})
+	prov := testback.NewStaticProvider(rec)
+	neg := iscsi.DefaultNegotiableConfig()
+	neg.MaxBurstLength = maxBurst
+	neg.FirstBurstLength = 0
+	tg := iscsi.NewTarget(iscsi.TargetConfig{
+		Listen:         "127.0.0.1:0",
+		IQN:            "iqn.2026-04.example.v3:v1",
+		VolumeID:       "v1",
+		Provider:       prov,
+		Negotiation:    neg,
+		DataOutTimeout: 100 * time.Millisecond,
+	})
+	addr, err := tg.Start()
+	if err != nil {
+		t.Fatalf("target Start: %v", err)
+	}
+	defer tg.Close()
+
+	cli := dialAndLogin(t, addr)
+	defer cli.logout(t)
+
+	writeCmd := &iscsi.PDU{}
+	writeCmd.SetOpcode(iscsi.OpSCSICmd)
+	writeCmd.SetOpSpecific1(iscsi.FlagF | iscsi.FlagW)
+	writeCmd.SetLUN(0)
+	writeCmd.SetInitiatorTaskTag(cli.itt)
+	cli.itt++
+	writeCmd.SetExpectedDataTransferLength(uint32(totalBytes))
+	writeCmd.SetCmdSN(cli.cmdSN)
+	cli.cmdSN++
+	writeCmd.SetExpStatSN(cli.statSN + 1)
+	writeCmd.SetCDB(writeCDB10(0, uint16(blocks)))
+	if err := iscsi.WritePDU(cli.conn, writeCmd); err != nil {
+		t.Fatalf("write SCSI WRITE(10): %v", err)
+	}
+
+	r2t, err := iscsi.ReadPDU(cli.conn)
+	if err != nil {
+		t.Fatalf("read R2T: %v", err)
+	}
+	if r2t.Opcode() != iscsi.OpR2T {
+		t.Fatalf("first response opcode=%s want R2T", iscsi.OpcodeName(r2t.Opcode()))
+	}
+
+	start := time.Now()
+	_ = cli.conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, err = iscsi.ReadPDU(cli.conn)
+	if err == nil {
+		t.Fatal("expected connection close after Data-Out timeout")
+	}
+	elapsed := time.Since(start)
+	if elapsed < 50*time.Millisecond {
+		t.Fatalf("session closed too quickly: %s", elapsed)
+	}
+	if elapsed > time.Second {
+		t.Fatalf("Data-Out timeout took too long: %s", elapsed)
+	}
+	if rec.WriteCount() != 0 {
+		t.Fatalf("backend WriteCount=%d want 0 after timeout", rec.WriteCount())
+	}
+}

@@ -21,6 +21,7 @@ import (
 	"io"
 	"net"
 	"sync/atomic"
+	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend"
 )
@@ -72,10 +73,11 @@ type Session struct {
 	// negCfg + resolver + lister are injected by Target at
 	// construction so this layer stays unaware of the target's
 	// catalog.
-	negCfg    NegotiableConfig
-	resolver  TargetResolver
-	lister    TargetLister
-	negResult LoginResult
+	negCfg         NegotiableConfig
+	dataOutTimeout time.Duration
+	resolver       TargetResolver
+	lister         TargetLister
+	negResult      LoginResult
 
 	// Backend open is deferred to post-login, Normal-session
 	// only. provider + volumeID + hcfg are captured at session
@@ -109,17 +111,18 @@ type Logger interface {
 // provider + volumeID + hcfg are captured for post-login,
 // Normal-session-only backend open (residual-risk fix). The
 // backend is NOT opened at construction.
-func newSession(conn net.Conn, provider frontend.Provider, volumeID string, hcfg HandlerConfig, negCfg NegotiableConfig, resolver TargetResolver, lister TargetLister, logger Logger) *Session {
+func newSession(conn net.Conn, provider frontend.Provider, volumeID string, hcfg HandlerConfig, negCfg NegotiableConfig, dataOutTimeout time.Duration, resolver TargetResolver, lister TargetLister, logger Logger) *Session {
 	return &Session{
-		conn:     conn,
-		logger:   logger,
-		state:    SessionLogin,
-		negCfg:   negCfg,
-		resolver: resolver,
-		lister:   lister,
-		provider: provider,
-		volumeID: volumeID,
-		hcfg:     hcfg,
+		conn:           conn,
+		logger:         logger,
+		state:          SessionLogin,
+		negCfg:         negCfg,
+		dataOutTimeout: dataOutTimeout,
+		resolver:       resolver,
+		lister:         lister,
+		provider:       provider,
+		volumeID:       volumeID,
+		hcfg:           hcfg,
 	}
 }
 
@@ -415,6 +418,13 @@ func (s *Session) collectWriteData(req *PDU, edtl uint32) ([]byte, error) {
 		r2t.SetDesiredDataLength(desired)
 		if err := WritePDU(s.conn, r2t); err != nil {
 			return nil, fmt.Errorf("send R2T: %w", err)
+		}
+
+		if s.dataOutTimeout > 0 {
+			if err := s.conn.SetReadDeadline(time.Now().Add(s.dataOutTimeout)); err != nil {
+				return nil, fmt.Errorf("set Data-Out deadline: %w", err)
+			}
+			defer s.conn.SetReadDeadline(time.Time{})
 		}
 
 		collector.beginR2T()

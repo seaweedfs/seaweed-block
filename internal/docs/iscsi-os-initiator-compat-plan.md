@@ -1,6 +1,6 @@
 # iSCSI OS Initiator Compatibility Plan
 
-Status: P1-A/B/C implemented on `fix/iscsi-os-initiator-compat`
+Status: P1-A/B/C/D implemented on `fix/iscsi-os-initiator-compat`
 
 Owner track: frontend compatibility
 
@@ -230,6 +230,20 @@ Add timeout behavior:
 - session exits within configured timeout,
 - no goroutine leak.
 
+Implementation status:
+
+```text
+TargetConfig.DataOutTimeout
+  default: 30s
+  test override: 100ms
+
+TestP1_ISCSI_R2TDataOut_TimesOutWhenInitiatorStalls
+  target sends R2T
+  initiator sends no Data-Out
+  session closes within timeout
+  backend Write is not called
+```
+
 ### Slice E: Real OS Initiator Harness
 
 After A-D pass locally, run hardware:
@@ -259,7 +273,7 @@ Only after WRITE/mkfs is green:
 1. Write Slice A red test. Done.
 2. Add V3-local pending queue support in current serial session. Done.
 3. Extract V3-local `DataOutCollector`. Done.
-4. Add Data-Out timeout.
+4. Add Data-Out timeout. Done.
 5. Run Linux OS initiator mkfs harness.
 6. Add DataInWriter only if OS test or later fio/read test needs it.
 7. Then decide whether a txLoop is needed.

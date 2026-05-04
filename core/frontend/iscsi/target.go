@@ -15,6 +15,7 @@ import (
 	"log"
 	"net"
 	"sync"
+	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend"
 )
@@ -51,6 +52,12 @@ type TargetConfig struct {
 	// value = DefaultNegotiableConfig().
 	Negotiation NegotiableConfig
 
+	// DataOutTimeout bounds how long a session waits for
+	// R2T-solicited Data-Out after issuing R2T. Zero picks the
+	// default. This is a target-local resource protection knob, not
+	// an iSCSI login-negotiated value.
+	DataOutTimeout time.Duration
+
 	// Logger. Nil → log.Default wrapped for the session layer.
 	Logger *log.Logger
 }
@@ -77,6 +84,9 @@ func NewTarget(cfg TargetConfig) *Target {
 	}
 	if cfg.Negotiation == (NegotiableConfig{}) {
 		cfg.Negotiation = DefaultNegotiableConfig()
+	}
+	if cfg.DataOutTimeout == 0 {
+		cfg.DataOutTimeout = 30 * time.Second
 	}
 	return &Target{
 		cfg:    cfg,
@@ -194,7 +204,7 @@ func (t *Target) handleConn(conn net.Conn) {
 	// the backend after login succeeds, and only for Normal
 	// sessions.
 	sess := newSession(conn, t.cfg.Provider, t.cfg.VolumeID, t.cfg.Handler,
-		t.cfg.Negotiation, t, t, t.logger)
+		t.cfg.Negotiation, t.cfg.DataOutTimeout, t, t, t.logger)
 	if err := sess.serve(ctx); err != nil && !errors.Is(err, net.ErrClosed) {
 		t.logger.Printf("iscsi: session error (%s): %v", conn.RemoteAddr(), err)
 	}
