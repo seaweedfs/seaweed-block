@@ -129,3 +129,6 @@ A reasonable beta bar:
 - TestOps can run the smoke suite and produce stable artifacts.
 - Non-claims are documented and visible to users.
 
+For the detailed post-alpha execution plan, see
+[`production-readiness-plan.md`](production-readiness-plan.md).
+
