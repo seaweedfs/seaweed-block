@@ -46,6 +46,15 @@ For a default k3s install:
 export KUBECONFIG="${KUBECONFIG:-/etc/rancher/k3s/k3s.yaml}"
 ```
 
+For the fastest path, use the published alpha images:
+
+```bash
+bash scripts/run-k8s-demo-ghcr.sh "$PWD"
+```
+
+This uses `ghcr.io/seaweedfs/seaweed-block:alpha` and
+`ghcr.io/seaweedfs/seaweed-block-csi:alpha`.
+
 For local k3s/kind-style testing, build images with:
 
 ```bash
