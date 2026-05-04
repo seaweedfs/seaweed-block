@@ -1,155 +1,160 @@
-# seaweed-block
+# seaweed-block (Alpha)
 
-Alpha-stage CSI block storage for Kubernetes.
+**Kubernetes CSI · iSCSI today · WAL-backed recovery · RF=2/RF=3 roadmap**
 
 <p align="center">
   <img src="docs/assets/seaweed-block-hero.svg" alt="seaweed-block alpha architecture: Kubernetes PVC to CSI, blockmaster, blockvolume, iSCSI, and WAL recovery" width="100%">
 </p>
 
-<p align="center">
-  <strong>Alpha</strong> · Kubernetes CSI · iSCSI today · WAL-backed recovery design · RF=2/RF=3 roadmap
-</p>
+`seaweed-block` is a small, opinionated block storage service for Kubernetes.
 
-`seaweed-block` is an early project for Kubernetes users who want simple
-PersistentVolumes backed by a small CSI block-storage service.
+It's built for the middle path: teams who need replicated PersistentVolumes but
+find Ceph/Rook too heavy for a 3-node edge cluster, and find Local PVs too
+fragile for real workloads. The goal is a storage engine that's small enough to
+read, with recovery semantics you can actually reason about.
 
-The immediate target is practical: create a PVC, attach it through CSI, mount it
-through standard Linux iSCSI tooling, write data from a pod, read it back, and
-clean up. The longer-term target is a compact replicated block service for small
-clusters that want RF=2/RF=3 without adopting a large storage platform on day
-one.
+> **⚠️ Alpha.** Today this passes a single-node smoke path: dynamic PVC create →
+> CSI attach → iSCSI mount → pod write/read checksum → cleanup. It is **not**
+> production-ready. Multi-node failover, durable packaging, and failover-under-
+> mount are still ahead. If you need five-nines today, this isn't it yet.
 
-It is not production-ready. The current code can run a single-node Kubernetes
-alpha smoke path: dynamic PVC creation, CSI attach/stage, iSCSI mount, pod
-write/read checksum, and cleanup. The project still needs durable Kubernetes
-packaging, multi-node validation, failover-under-mount testing, and operational
-hardening before it should be used for real workloads.
+---
 
-## Why This Exists
+## Why build this?
 
-Many Kubernetes teams want persistent volumes that are easy to deploy and reason
-about:
+Storage in Kubernetes usually forces a choice between two extremes:
 
-- small companies running a few Kubernetes nodes
-- developers who want a local or lab CSI storage service
-- teams that find Ceph too large for their first storage step
-- users who want PVCs without hiding recovery semantics behind a black box
+- **The giants:** Ceph/Rook are mature and powerful, but operationally heavy
+  for small teams or lab environments.
+- **The basics:** Local PVs are simple but don't handle replication or node
+  failure gracefully.
 
-The goal is not to replace mature storage systems today. The goal is to build a
-small, inspectable CSI block service that can grow carefully toward RF=2/RF=3,
-failover, recovery, and Kubernetes-native operations.
+`seaweed-block` exists because we wanted a storage engine where the recovery
+logic isn't a black box — where you can trace how data moves between peers
+without a PhD in distributed systems.
 
-## Technical Direction
+---
 
-The new block design is built around three ideas.
+## The design (or: how we plan to not lose data)
 
-### WAL + Extent
+Three principles drive the architecture.
 
-Writes first go through a WAL-style path, then drain into extent storage. This
-keeps the local data process explicit:
+### 1. WAL + extent (write-ahead-log first)
+
+Writes don't disappear into a complex filesystem. They hit a WAL-style path
+first, then drain into extent storage:
 
 ```text
-write -> WAL -> flush/checkpoint -> extent
+write → WAL → flush/checkpoint → extent
 ```
 
-The current Kubernetes alpha uses `walstore`. A smarter WAL backend is planned,
-but it is not the default alpha path yet.
+This makes the local data lifecycle explicit and easy to debug when things go
+sideways. The current alpha uses `walstore`; a smarter WAL backend is on the
+roadmap behind an explicit test gate.
 
-### Dual-Lane Recovery
+### 2. Dual-lane recovery
 
-Recovery is designed as more than “copy until target LSN”. The newer path keeps
-base transfer and WAL/live-tail feeding separate enough to avoid blocking normal
-write flow, while still enforcing a single owner for WAL egress decisions.
+Recovery shouldn't choke the hot path. We separate base data transfers from
+live WAL feeding so normal writes keep flowing while a peer catches up.
 
-The important rule is:
+The rule that prevents the classic multi-sender bugs:
 
 ```text
 one peer, one monotonic WAL feeding owner
 ```
 
-This avoids the previous class of bugs where multiple senders tried to advance
-the same recovery truth.
+Only one peer is the source of truth for a recovery stream at any given time.
 
-### Protocol And Execution Separation
+### 3. Protocol and execution separation
 
-Control-plane facts, assignment authority, frontend protocol, and runtime
-execution are kept separate:
+Control-plane facts and data-plane execution stay strictly separated:
 
 ```text
-observation != authority
-placement intent != assignment
-authority moved != data continuity proven
-frontend fact != storage readiness
+observation        != authority
+placement intent   != assignment
+authority moved    != data continuity proven
+frontend fact      != storage readiness
 ```
 
-This makes the system slower to design, but easier to review. The aim is to keep
-iSCSI, future NVMe-oF, recovery, and placement from redefining each other's
+This is slower to design but much easier to audit. It's also what keeps iSCSI,
+future NVMe-oF, recovery, and placement from quietly redefining each other's
 contracts.
 
-## How It Compares
+---
 
-This is not a feature-complete comparison; it is the intended product position.
+## How it compares
+
+This isn't a feature comparison — it's the intended product position.
 
 | System | Strength | Tradeoff |
-|---|---|---|
-| Ceph/Rook | mature, powerful, broad storage platform | operationally heavy for small clusters |
-| OpenEBS-style local engines | Kubernetes-friendly, easier to start | behavior depends heavily on chosen engine/topology |
-| seaweed-block | aims to be small, inspectable, CSI-first, recovery-contract-driven | alpha, incomplete, not production-ready |
+| :--- | :--- | :--- |
+| **Ceph/Rook** | mature, powerful, broad storage platform | operationally heavy for small clusters |
+| **OpenEBS local engines** | Kubernetes-friendly, easy to start | behavior varies by chosen engine/topology |
+| **seaweed-block** | **small, inspectable, recovery-contract-driven** | **early alpha, incomplete** |
 
-The attraction of `seaweed-block`, if it succeeds, is a middle path:
+The pitch, if it lands: simpler than a full distributed storage platform, more
+structured than ad-hoc local disks, CSI-first, designed for RF=2/RF=3, iSCSI
+first with NVMe-oF later, and recovery semantics that are documented and
+testable.
 
-- simpler than a full distributed storage platform
-- more structured than ad hoc local disks
-- CSI-first for Kubernetes
-- designed for RF=2/RF=3 replication
-- iSCSI first, NVMe-oF later
-- recovery semantics documented and testable
+---
 
-## Current Progress
+## What actually works today
 
-Currently demonstrated:
+The current code can survive a single-node Kubernetes alpha smoke run:
 
-- CSI dynamic PVC `CreateVolume`
-- blockmaster lifecycle and placement flow
-- launcher-generated `blockvolume` Deployment
-- iSCSI frontend attach/mount
-- pod filesystem write/read checksum
-- CSI `DeleteVolume` cleanup path (the alpha smoke removes launcher-generated
-  blockvolume deployments today; a controller will replace this manual sweep,
-  see roadmap)
-- no dangling iSCSI session after cleanup in the lab run
-- TestOps registry and a minimal `cmd/sw-testops` CLI
+- ✅ CSI dynamic PVC `CreateVolume`
+- ✅ blockmaster lifecycle and automated placement
+- ✅ launcher-generated `blockvolume` Deployment
+- ✅ iSCSI frontend attach, mount, and pod write/read checksums
+- ✅ CSI `DeleteVolume` cleanup path (alpha smoke removes the launcher-generated
+  blockvolume Deployments today; an operator will replace this manual sweep)
+- ✅ no dangling iSCSI sessions after cleanup
+- ✅ TestOps registry and a minimal `cmd/sw-testops` CLI
 
 Current alpha defaults:
 
 - Kubernetes: single-node k3s lab
 - frontend: iSCSI
 - backend: `walstore`
-- dynamic volume state: launcher-generated blockvolume uses `emptyDir`
-- replication in the demo StorageClass: RF=1
+- launcher-generated blockvolume state: `emptyDir`
+- demo StorageClass replication: RF=1
 
-Important non-claims:
+### What's explicitly NOT claimed (yet)
+
+These boundaries matter for an alpha — read them before evaluating:
 
 - not production-ready
 - not multi-node validated as a Kubernetes product
 - not durable across blockvolume pod restart in the alpha manifest
-- not yet a full operator
+- not yet a full operator (a manifest launcher does the work today)
 - no failover-under-mounted-PVC claim
 - no NVMe-oF CSI claim yet
-- no performance/soak claim
+- no performance or soak-test claim
+
+### What's next on the to-do list
+
+- move the alpha manifest off `emptyDir` to a durable node-local path
+- ship a proper operator (replace the manual launcher)
+- multi-node validation for RF=2/RF=3
+- failover-under-load (pulling the rug while a pod is writing)
+- one-command install path
+- reduce noisy debug logs
+
+---
 
 ## Quick Start
 
-Use a Linux Kubernetes node where privileged CSI pods are allowed and
-`iscsi_tcp` is loadable.
+You need a Linux Kubernetes node where privileged CSI pods are allowed and
+`iscsi_tcp` is loadable. k3s works well for this.
 
-Quick Start prerequisites:
+**Prerequisites**
 
 - Docker
 - `kubectl`
-- a running Kubernetes cluster such as k3s
+- a running Kubernetes cluster (e.g. k3s)
 - `iscsi_tcp` loadable on the node
-- `KUBECONFIG` set for your cluster
+- `KUBECONFIG` pointing at your cluster
 
 For a default k3s install:
 
@@ -157,20 +162,20 @@ For a default k3s install:
 export KUBECONFIG="${KUBECONFIG:-/etc/rancher/k3s/k3s.yaml}"
 ```
 
-Build local images:
+**Build images**
 
 ```bash
 bash scripts/build-alpha-images.sh "$PWD"
 ```
 
-For k3s, import them:
+**Import (k3s example — both images)**
 
 ```bash
-docker save sw-block:local | sudo k3s ctr images import -
+docker save sw-block:local     | sudo k3s ctr images import -
 docker save sw-block-csi:local | sudo k3s ctr images import -
 ```
 
-Run the alpha smoke:
+**Run the alpha smoke**
 
 ```bash
 bash scripts/run-k8s-alpha.sh "$PWD"
@@ -182,13 +187,24 @@ Expected result:
 [alpha] PASS: dynamic PVC create/delete completed checksum write/read and cleanup
 ```
 
-For the manual `kubectl apply` flow, see:
+**Demo: PVC survives pod replacement**
 
-- [deploy/k8s/alpha/README.md](deploy/k8s/alpha/README.md)
+```bash
+bash scripts/run-alpha-app-demo.sh "$PWD"
+```
 
-## Simple User Manual
+That demo writes from one pod, deletes it, then mounts the same PVC from a
+second pod and verifies the data. See
+[docs/kubernetes-app-demo.md](docs/kubernetes-app-demo.md).
 
-The current alpha flow is:
+For the manual `kubectl apply` flow, see
+[deploy/k8s/alpha/README.md](deploy/k8s/alpha/README.md).
+
+---
+
+## Simple user manual
+
+The current alpha flow:
 
 1. Build `sw-block:local` and `sw-block-csi:local`.
 2. Deploy blockmaster, CSI controller, and CSI node manifests.
@@ -196,50 +212,49 @@ The current alpha flow is:
 4. Apply the launcher-generated blockvolume Deployment.
 5. Run a pod that mounts the PVC.
 6. Delete the pod and PVC.
-7. Confirm generated blockvolume workload and iSCSI sessions are gone.
+7. Confirm the launcher-generated blockvolume workload and iSCSI sessions are
+   gone.
 
-The script below performs that whole smoke path:
+`scripts/run-k8s-alpha.sh "$PWD"` runs that whole path. Still a lab workflow —
+a real operator should eventually replace the manual launcher step.
 
-```bash
-bash scripts/run-k8s-alpha.sh "$PWD"
-```
-
-This is still a lab workflow. A real operator should eventually replace the
-manual/harness step that applies generated blockvolume Deployments.
+---
 
 ## Roadmap
 
-Near-term work:
+**Near-term**
 
-- replace `emptyDir` in the alpha manifest with a durable node-local path
-- package a cleaner one-command install path
-- add a small operator/controller for generated blockvolume workloads
-- make TestOps remote K8s shell scenarios easier to run
-- reduce noisy debug logs
+- replace `emptyDir` with a durable node-local path
+- one-command install path
+- operator/controller for launcher-generated workloads
+- easier remote K8s shell scenarios in TestOps
+- reduce log noise
 
-Availability work:
+**Availability**
 
 - RF=2/RF=3 Kubernetes path
 - multi-node attach
-- failover while a pod remains mounted
+- failover while a pod stays mounted
 - returned-replica reintegration
-- WAL retention and flow-control behavior under pressure
+- WAL retention and flow-control under pressure
 
-Protocol/backend work:
+**Protocol/backend**
 
-- keep iSCSI as the MVP default
-- add protocol-neutral CSI dispatch
-- add NVMe-oF behind the same frontend-target model later
-- introduce smart WAL backend behind an explicit test gate
+- keep iSCSI as MVP default
+- protocol-neutral CSI dispatch
+- NVMe-oF behind the same frontend-target model
+- smart WAL backend behind an explicit test gate
 
-More detail:
+**More detail**
 
 - [docs/architecture.md](docs/architecture.md)
 - [docs/developer-architecture.md](docs/developer-architecture.md)
 - [docs/runtime-state-machines.md](docs/runtime-state-machines.md)
 - [docs/roadmap.md](docs/roadmap.md)
 
-## Repository Layout
+---
+
+## Repository layout
 
 ```text
 cmd/
@@ -257,20 +272,24 @@ core/
   recovery/       recovery execution components
   replication/    peer replication pieces
 
-deploy/k8s/alpha/ alpha Kubernetes manifests and manual guide
+deploy/k8s/alpha/  alpha Kubernetes manifests and manual guide
 docs/              architecture and roadmap notes
-internal/          non-public support libraries and test scenario registry
+internal/          non-public support libraries and TestOps registry
 scripts/           build and smoke-test helpers
 ```
 
-## Development Tests
+---
 
-Development tests additionally need Go installed.
+## Development tests
+
+Development tests need Go installed.
 
 Useful smoke tests:
 
 ```bash
-go test ./cmd/sw-testops ./internal/testops ./cmd/blockcsi ./core/launcher ./cmd/blockmaster ./core/host/master ./core/lifecycle -count=1
+go test ./cmd/sw-testops ./internal/testops ./cmd/blockcsi \
+        ./core/launcher ./cmd/blockmaster ./core/host/master \
+        ./core/lifecycle -count=1
 ```
 
 Kubernetes alpha smoke:
@@ -279,10 +298,11 @@ Kubernetes alpha smoke:
 bash scripts/run-k8s-alpha.sh "$PWD"
 ```
 
-## Honesty Note
+---
 
-This repository should currently be read as an alpha block-storage system with
-a runnable Kubernetes smoke path and a serious recovery/control-plane design
-under construction.
+## Honesty note
 
-It should not be read as finished storage software.
+Read this repo as an alpha block-storage system with a runnable Kubernetes
+smoke path and a serious recovery/control-plane design under construction.
+
+It is not finished storage software.
