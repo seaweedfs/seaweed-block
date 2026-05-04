@@ -1,6 +1,6 @@
 # iSCSI OS Initiator Compatibility Plan
 
-Status: P1-A/B/C/D implemented on `fix/iscsi-os-initiator-compat`
+Status: P1-A/B/C/D/E implemented on `fix/iscsi-os-initiator-compat`
 
 Owner track: frontend compatibility
 
@@ -260,6 +260,40 @@ logout
 
 This is the acceptance test. Go client tests are not enough.
 
+Implementation status:
+
+```text
+Run ID: 20260504T052809Z
+Tree: fix/iscsi-os-initiator-compat@1f13f8f
+Host: M02 Linux 6.17 / open-iscsi
+Artifacts: V:\share\iscsi-p1\runs\20260504T052809Z\
+
+Result:
+  iscsiadm discovery/login: PASS
+  device materialized: /dev/disk/by-path/...lun-0 -> /dev/sda
+  mkfs.ext4 on 256 MiB target: PASS
+  mount: PASS
+  32 KiB random payload write + sha256 read-back: PASS
+  logout: PASS
+  no dangling iSCSI session: PASS
+
+Server-side evidence:
+  mkfs.ext4 issued 4 MiB WRITE(10) commands
+    transferLen=1024, dataOut=4194304
+  target logged backend.Write ok for those writes
+  no "expected Data-Out" failure in the write path
+```
+
+Harness note:
+
+```text
+V:\share\iscsi-p1\run-p1-iscsi-os.sh
+```
+
+This is a share-driven QA harness, not a repository script yet. It starts a
+single-slot blockmaster/blockvolume pair with a 256 MiB durable target, then
+drives Linux `iscsiadm`, `mkfs.ext4`, mount, payload checksum, and cleanup.
+
 ### Slice F: Large READ / DataInWriter
 
 Only after WRITE/mkfs is green:
@@ -274,7 +308,7 @@ Only after WRITE/mkfs is green:
 2. Add V3-local pending queue support in current serial session. Done.
 3. Extract V3-local `DataOutCollector`. Done.
 4. Add Data-Out timeout. Done.
-5. Run Linux OS initiator mkfs harness.
+5. Run Linux OS initiator mkfs harness. Done.
 6. Add DataInWriter only if OS test or later fio/read test needs it.
 7. Then decide whether a txLoop is needed.
 
