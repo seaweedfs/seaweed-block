@@ -50,14 +50,14 @@ const maxPendingQueue = 64
 //   - Login runs FIRST on every accepted connection. The
 //     frontend.Provider is NOT dialed before login.
 //   - After login succeeds:
-//       * Discovery session → skip backend open entirely.
-//         SendTargets / Logout / NOP-Out work without a backend.
-//         iscsiadm -m discovery succeeds even when the volume's
-//         adapter projection is still non-Healthy.
-//       * Normal session → open the backend via Provider; a
-//         Provider.Open failure (e.g. ErrNotReady) closes the
-//         session cleanly WITHOUT blocking subsequent discovery
-//         attempts.
+//   - Discovery session → skip backend open entirely.
+//     SendTargets / Logout / NOP-Out work without a backend.
+//     iscsiadm -m discovery succeeds even when the volume's
+//     adapter projection is still non-Healthy.
+//   - Normal session → open the backend via Provider; a
+//     Provider.Open failure (e.g. ErrNotReady) closes the
+//     session cleanly WITHOUT blocking subsequent discovery
+//     attempts.
 type Session struct {
 	conn    net.Conn
 	handler *SCSIHandler
@@ -270,11 +270,11 @@ func (s *Session) handleTextReq(req *PDU) error {
 // handleSCSICmd processes a SCSI-Cmd PDU.
 //
 //   - WRITE (FlagW): dataOut may arrive in two places:
-//       1. Immediate data in the SCSI-Cmd's data segment (when
-//          ImmediateData=Yes was negotiated).
-//       2. Remaining bytes solicited via R2T + Data-Out PDUs
-//          (T2 ckpt 10 port — enables iscsiadm writes larger
-//          than FirstBurstLength).
+//     1. Immediate data in the SCSI-Cmd's data segment (when
+//     ImmediateData=Yes was negotiated).
+//     2. Remaining bytes solicited via R2T + Data-Out PDUs
+//     (T2 ckpt 10 port — enables iscsiadm writes larger
+//     than FirstBurstLength).
 //     EDTL is validated against the CDB's transfer length BEFORE
 //     any allocation / R2T is issued — otherwise a hostile
 //     initiator could inflate EDTL vs. CDB and force
@@ -424,7 +424,6 @@ func (s *Session) collectWriteData(req *PDU, edtl uint32) ([]byte, error) {
 			if err := s.conn.SetReadDeadline(time.Now().Add(s.dataOutTimeout)); err != nil {
 				return nil, fmt.Errorf("set Data-Out deadline: %w", err)
 			}
-			defer s.conn.SetReadDeadline(time.Time{})
 		}
 
 		collector.beginR2T()
@@ -442,6 +441,11 @@ func (s *Session) collectWriteData(req *PDU, edtl uint32) ([]byte, error) {
 			}
 			if err := collector.addDataOut(pdu, ttt, burstEnd); err != nil {
 				return nil, err
+			}
+		}
+		if s.dataOutTimeout > 0 {
+			if err := s.conn.SetReadDeadline(time.Time{}); err != nil {
+				return nil, fmt.Errorf("clear Data-Out deadline: %w", err)
 			}
 		}
 		r2tsn++
