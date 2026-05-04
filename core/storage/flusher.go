@@ -156,6 +156,8 @@ func (f *flusher) flushOnce() error {
 	}
 	var pendings []pending
 	var maxLSN uint64
+	var maxLSNPhys uint64
+	var maxLSNEntrySize uint64
 
 	for i, e := range entries {
 		hdrBuf := make([]byte, walEntryHeaderSize)
@@ -172,12 +174,14 @@ func (f *flusher) flushOnce() error {
 			continue
 		}
 		entryType := hdrBuf[16]
+		entrySize := uint64(walEntryHeaderSize)
 		switch entryType {
 		case walEntryWrite:
 			dataLen := parseLengthFromHeader(hdrBuf)
 			if dataLen == 0 {
 				continue
 			}
+			entrySize += uint64(dataLen)
 			pendings = append(pendings, pending{idx: i, dataLen: dataLen, isWrite: true})
 		case walEntryTrim:
 			pendings = append(pendings, pending{idx: i, isWrite: false})
@@ -187,6 +191,8 @@ func (f *flusher) flushOnce() error {
 		}
 		if e.LSN > maxLSN {
 			maxLSN = e.LSN
+			maxLSNPhys = e.WALOffset
+			maxLSNEntrySize = entrySize
 		}
 	}
 
@@ -225,6 +231,14 @@ func (f *flusher) flushOnce() error {
 	if maxLSN > 0 {
 		if err := store.persistCheckpoint(maxLSN); err != nil {
 			return fmt.Errorf("flusher: persist checkpoint %d: %w", maxLSN, err)
+		}
+		if store.CheckpointLSN() >= maxLSN {
+			store.wal.advanceTailPastEntry(maxLSNPhys, maxLSNEntrySize)
+			store.mu.Lock()
+			if maxLSN+1 > store.walTail {
+				store.walTail = maxLSN + 1
+			}
+			store.mu.Unlock()
 		}
 	}
 

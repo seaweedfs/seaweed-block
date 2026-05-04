@@ -144,6 +144,29 @@ func (w *walWriter) advanceTail(newPhysTail uint64) {
 	w.logicalTail += advance
 }
 
+// advanceTailPastEntry frees WAL bytes through the entry at entryPhys
+// with entryLen bytes. It advances in logical space, so entries that
+// end at the same physical offset as the current tail still release a
+// wrapped span.
+func (w *walWriter) advanceTailPastEntry(entryPhys, entryLen uint64) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	physTail := w.physicalPos(w.logicalTail)
+	var distanceToEntry uint64
+	if entryPhys >= physTail {
+		distanceToEntry = entryPhys - physTail
+	} else {
+		distanceToEntry = w.walSize - physTail + entryPhys
+	}
+	nextTail := w.logicalTail + distanceToEntry + entryLen
+	if nextTail > w.logicalHead {
+		nextTail = w.logicalHead
+	}
+	if nextTail > w.logicalTail {
+		w.logicalTail = nextTail
+	}
+}
+
 // reset truncates the writer to empty. Used after recovery decides
 // the WAL region should start fresh.
 func (w *walWriter) reset() {
