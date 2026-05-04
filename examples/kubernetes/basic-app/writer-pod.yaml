@@ -1,0 +1,27 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: sw-block-example-writer
+  namespace: default
+spec:
+  restartPolicy: Never
+  containers:
+    - name: app
+      image: busybox:1.36
+      command:
+        - /bin/sh
+        - -c
+        - |
+          set -eu
+          echo "[writer] writing through PVC mounted at /data"
+          dd if=/dev/urandom of=/data/demo.bin bs=4096 count=1
+          sha256sum /data/demo.bin > /data/demo.sha256
+          sync
+          sha256sum -c /data/demo.sha256
+      volumeMounts:
+        - name: data
+          mountPath: /data
+  volumes:
+    - name: data
+      persistentVolumeClaim:
+        claimName: sw-block-example-pvc

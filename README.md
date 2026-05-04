@@ -220,6 +220,9 @@ Expected result:
 The app-demo walkthrough is also available at
 [docs/kubernetes-app-demo.md](docs/kubernetes-app-demo.md).
 
+To adapt the PVC shape for your own app, start with
+[examples/kubernetes/basic-app](examples/kubernetes/basic-app).
+
 For the manual `kubectl apply` flow, see
 [deploy/k8s/alpha/README.md](deploy/k8s/alpha/README.md).
 
@@ -297,6 +300,7 @@ core/
 
 deploy/k8s/alpha/  alpha Kubernetes manifests and manual guide
 docs/              architecture and roadmap notes
+examples/          copyable Kubernetes app examples
 internal/          non-public support libraries and TestOps registry
 scripts/           build and smoke-test helpers
 ```
