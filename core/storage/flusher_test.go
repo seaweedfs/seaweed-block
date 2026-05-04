@@ -99,6 +99,37 @@ func TestFlusher_ReleasesWALPressureAfterCheckpoint(t *testing.T) {
 	}
 }
 
+func TestWALWriter_AdvanceTailPastEntryIsIdempotent(t *testing.T) {
+	w := &walWriter{
+		walSize:     64,
+		logicalHead: 40,
+		logicalTail: 0,
+	}
+
+	w.advanceTailPastEntry(0, 10)
+	if got := w.logicalTailValue(); got != 10 {
+		t.Fatalf("first advance tail=%d, want 10", got)
+	}
+
+	w.advanceTailPastEntry(0, 10)
+	if got := w.logicalTailValue(); got != 10 {
+		t.Fatalf("repeated advance tail=%d, want still 10", got)
+	}
+}
+
+func TestWALWriter_AdvanceTailPastWrappedEntry(t *testing.T) {
+	w := &walWriter{
+		walSize:     64,
+		logicalHead: 80,
+		logicalTail: 60,
+	}
+
+	w.advanceTailPastEntry(0, 10)
+	if got := w.logicalTailValue(); got != 74 {
+		t.Fatalf("wrapped advance tail=%d, want 74", got)
+	}
+}
+
 func createWALStoreWithWALSizeForTest(t *testing.T, path string, numBlocks uint32, blockSize int, walSize uint64) *WALStore {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -223,14 +254,14 @@ func TestCrashFamily_AbruptKillAtMultipleWindows(t *testing.T) {
 		},
 		{
 			name:      "kill_post_flush",
-			nBefore:   3,    // 3 writes + Sync, wait for flush, then kill
+			nBefore:   3, // 3 writes + Sync, wait for flush, then kill
 			nDuring:   0,
 			waitFlush: true,
 		},
 		{
 			name:      "kill_post_flush_then_more_unacked_writes",
-			nBefore:   3,    // first batch acked + flushed
-			nDuring:   2,    // second batch unacked
+			nBefore:   3, // first batch acked + flushed
+			nDuring:   2, // second batch unacked
 			waitFlush: true,
 		},
 	}

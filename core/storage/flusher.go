@@ -150,17 +150,17 @@ func (f *flusher) flushOnce() error {
 	// — skip such entries; they'll fall out via compare-and-delete
 	// below.
 	type pending struct {
-		idx      int
-		dataLen  uint32
-		isWrite  bool
+		idx     int
+		dataLen uint32
+		isWrite bool
 	}
 	var pendings []pending
 	var maxLSN uint64
 	var maxLSNPhys uint64
 	var maxLSNEntrySize uint64
 
+	hdrBuf := make([]byte, walEntryHeaderSize)
 	for i, e := range entries {
-		hdrBuf := make([]byte, walEntryHeaderSize)
 		absOff := int64(store.sb.WALOffset + e.WALOffset)
 		if _, err := store.fd.ReadAt(hdrBuf, absOff); err != nil {
 			return fmt.Errorf("flusher: read WAL header at %d: %w", e.WALOffset, err)

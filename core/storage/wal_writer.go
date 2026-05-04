@@ -158,13 +158,14 @@ func (w *walWriter) advanceTailPastEntry(entryPhys, entryLen uint64) {
 	} else {
 		distanceToEntry = w.walSize - physTail + entryPhys
 	}
-	nextTail := w.logicalTail + distanceToEntry + entryLen
-	if nextTail > w.logicalHead {
-		nextTail = w.logicalHead
+	advance := distanceToEntry + entryLen
+	if advance > w.used() {
+		// The entry is no longer within the live WAL window. This
+		// makes repeated flush/checkpoint cycles idempotent instead
+		// of wrapping around and releasing unflushed entries.
+		return
 	}
-	if nextTail > w.logicalTail {
-		w.logicalTail = nextTail
-	}
+	w.logicalTail += advance
 }
 
 // reset truncates the writer to empty. Used after recovery decides
