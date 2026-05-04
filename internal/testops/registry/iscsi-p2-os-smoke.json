@@ -1,0 +1,53 @@
+{
+  "schema_version": "1.0",
+  "scenario": "iscsi-p2-os-smoke",
+  "gate": "iSCSI-P2",
+  "layer": "L3-privileged-host",
+  "driver": {
+    "type": "shell",
+    "path": "scripts/run-iscsi-os-smoke.sh"
+  },
+  "default_timeout_s": 300,
+  "required_capabilities": [
+    "bash",
+    "linux",
+    "sudo",
+    "iscsiadm",
+    "iscsi_tcp-loadable",
+    "mkfs.ext4",
+    "mount",
+    "sha256sum",
+    "fio-optional"
+  ],
+  "qa_instruction": "internal/docs/iscsi-os-initiator-compat-plan.md",
+  "known_green_commit": "d25e7b4",
+  "artifacts": [
+    "run.log",
+    "git-head.txt",
+    "topology.yaml",
+    "blockmaster.log",
+    "blockvolume.log",
+    "iscsi-sessions.before.txt",
+    "discovery.iter1.log",
+    "login.iter1.log",
+    "lsblk.iter1.txt",
+    "mkfs.iter1.log",
+    "payload.iter1.sha256",
+    "sha256-check.iter1.log",
+    "fio.iter1.log",
+    "dd.iter1.log",
+    "logout.iter1.log",
+    "iscsi-sessions.iter1.txt",
+    "iscsi-sessions.final.txt",
+    "iscsi-sessions.after.txt",
+    "cleanup.log"
+  ],
+  "non_claims": [
+    "Single-host Linux initiator only.",
+    "Single replica and single iSCSI session only.",
+    "No CHAP, ALUA, MPIO, or mounted-volume failover claim.",
+    "No Windows initiator claim.",
+    "No performance, soak, or multi-client claim.",
+    "No Kubernetes CSI claim; K8s is covered by separate G15 scenarios."
+  ]
+}
