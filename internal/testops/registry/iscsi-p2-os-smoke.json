@@ -20,7 +20,7 @@
     "fio-optional"
   ],
   "qa_instruction": "internal/docs/iscsi-os-initiator-compat-plan.md",
-  "known_green_commit": "869292b",
+  "known_green_commit": "d25e7b4",
   "artifacts": [
     "run.log",
     "git-head.txt",

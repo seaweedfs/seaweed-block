@@ -187,8 +187,8 @@ func TestISCSIP2OSSmokeRegistrationBuildsShellDriver(t *testing.T) {
 	if registration.Scenario != "iscsi-p2-os-smoke" || registration.Driver.Type != "shell" {
 		t.Fatalf("registration=%+v", registration)
 	}
-	if registration.KnownGreenCommit != "869292b" {
-		t.Fatalf("known_green_commit=%q want 869292b", registration.KnownGreenCommit)
+	if registration.KnownGreenCommit != "d25e7b4" {
+		t.Fatalf("known_green_commit=%q want d25e7b4", registration.KnownGreenCommit)
 	}
 	driver, err := registration.NewDriver(repoRoot)
 	if err != nil {
