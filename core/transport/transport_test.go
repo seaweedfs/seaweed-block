@@ -1,5 +1,9 @@
 package transport
 
+// Completion oracle: recover(a,b) band — NOT recover(a) closure.
+// See sw-block/design/recover-semantics-adjustment-plan.md §8.1.
+// migrate-candidate: depends on primary.H semantics, see §8.1 Tier-5 migration
+
 import (
 	"bytes"
 	"net"
@@ -61,7 +65,8 @@ func TestTransport_Healthy_ProbeShowsCaughtUp(t *testing.T) {
 	replica.Sync()
 
 	exec := NewBlockExecutor(primary, listener.Addr())
-	result := exec.Probe("r1", listener.Addr(), listener.Addr(), 1, 1)
+	// T4c-1: Probe takes a transient adapter-minted sessionID.
+	result := exec.Probe("r1", listener.Addr(), listener.Addr(), 99, 1, 1)
 
 	if !result.Success {
 		t.Fatalf("probe failed: %s", result.FailReason)
@@ -89,7 +94,7 @@ func TestTransport_CatchUp_ShipsAndBarrierConfirms(t *testing.T) {
 	exec.SetOnSessionClose(func(r adapter.SessionCloseResult) { closeCh <- r })
 
 	_, _, pH := primary.Boundaries()
-	if err := exec.StartCatchUp("r1", 1, 1, 1, pH); err != nil {
+	if err := exec.StartCatchUp("r1", 1, 1, 1, 1, pH); err != nil {
 		t.Fatal(err)
 	}
 
@@ -191,7 +196,7 @@ func TestTransport_CatchUp_DialFailureDoesNotEmitStarted(t *testing.T) {
 	exec.SetOnSessionStart(func(r adapter.SessionStartResult) { startCh <- r })
 	exec.SetOnSessionClose(func(r adapter.SessionCloseResult) { closeCh <- r })
 
-	if err := exec.StartCatchUp("r1", 9, 1, 1, 4); err != nil {
+	if err := exec.StartCatchUp("r1", 9, 1, 1, 1, 4); err != nil {
 		t.Fatal(err)
 	}
 
@@ -316,7 +321,7 @@ func TestTransport_ReplicaRejectsStaleMutationLineage(t *testing.T) {
 	}
 }
 
-func TestTransport_RebuildBlock_UsesTargetLSNBeforeDone(t *testing.T) {
+func TestTransport_RebuildBlock_DoesNotAdvanceFrontierBeforeDone(t *testing.T) {
 	_, replica, listener := setupPrimaryReplica(t)
 
 	conn, err := net.Dial("tcp", listener.Addr())
@@ -348,8 +353,8 @@ func TestTransport_RebuildBlock_UsesTargetLSNBeforeDone(t *testing.T) {
 	}
 
 	_, _, h := replica.Boundaries()
-	if h != 77 {
-		t.Fatalf("rebuild block should advance walHead to targetLSN before done, got H=%d want 77", h)
+	if h != 0 {
+		t.Fatalf("rebuild base block must not advance walHead before done, got H=%d want 0", h)
 	}
 }
 

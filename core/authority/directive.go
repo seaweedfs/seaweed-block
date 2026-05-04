@@ -4,9 +4,9 @@
 // authoritative AssignmentInfo values to subscribers keyed by
 // (VolumeID, ReplicaID).
 //
-// The design note is docs/p14-s2-design.md. Three boundaries hold:
-//   1. S2 owns publication of authority truth.
-//   2. S2 does NOT own failover policy.
+// Three boundaries hold:
+//   1. The authority package owns publication of assignment truth.
+//   2. The authority package does NOT own failover policy.
 //   3. Engine and adapter remain consumers, not producers, of
 //      assignment truth.
 package authority
@@ -20,8 +20,8 @@ import (
 
 // AskIntent is the only control knob a Directive has. The publisher
 // uses it to decide which authoritative field to advance and by how
-// much. S2 supports exactly three intents. Retirement is deferred
-// (see docs/p14-s2-design.md "What we are NOT building").
+// much. The current publisher supports exactly three intents.
+// Retirement is deliberately not part of this input surface yet.
 type AskIntent int
 
 const (

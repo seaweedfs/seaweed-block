@@ -1,5 +1,8 @@
 package authority
 
+// Completion oracle: recover(a,b) band — NOT recover(a) closure.
+// See sw-block/design/recover-semantics-adjustment-plan.md §8.1.
+
 import (
 	"context"
 	"fmt"
@@ -73,7 +76,7 @@ func (e *restartExecutor) SetOnFenceComplete(fn adapter.OnFenceComplete) {
 	e.mu.Unlock()
 }
 
-func (e *restartExecutor) Probe(replicaID, dataAddr, ctrlAddr string, epoch, endpointVersion uint64) adapter.ProbeResult {
+func (e *restartExecutor) Probe(replicaID, dataAddr, ctrlAddr string, sessionID, epoch, endpointVersion uint64) adapter.ProbeResult {
 	return adapter.ProbeResult{
 		ReplicaID:         replicaID,
 		Success:           true,
@@ -85,10 +88,13 @@ func (e *restartExecutor) Probe(replicaID, dataAddr, ctrlAddr string, epoch, end
 	}
 }
 
-func (e *restartExecutor) StartCatchUp(replicaID string, sessionID, epoch, endpointVersion, targetLSN uint64) error {
+func (e *restartExecutor) StartCatchUp(replicaID string, sessionID, epoch, endpointVersion, fromLSN, targetLSN uint64) error {
 	return nil
 }
 func (e *restartExecutor) StartRebuild(replicaID string, sessionID, epoch, endpointVersion, targetLSN uint64) error {
+	return nil
+}
+func (e *restartExecutor) StartRecoverySession(replicaID string, sessionID, epoch, endpointVersion, targetLSN uint64, contentKind engine.RecoveryContentKind, policy engine.RecoveryRuntimePolicy) error {
 	return nil
 }
 func (e *restartExecutor) InvalidateSession(replicaID string, sessionID uint64, reason string) {}

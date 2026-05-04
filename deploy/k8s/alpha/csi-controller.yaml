@@ -1,0 +1,55 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sw-block-csi-controller
+  namespace: kube-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sw-block-csi-controller
+  template:
+    metadata:
+      labels:
+        app: sw-block-csi-controller
+    spec:
+      serviceAccountName: sw-block-csi
+      containers:
+        - name: block-csi
+          image: sw-block-csi:local
+          imagePullPolicy: Never
+          args:
+            - "--endpoint=unix:///csi/csi.sock"
+            - "--master=$(BLOCKMASTER_ADDR)"
+            - "--node-id=$(NODE_NAME)"
+          env:
+            - name: BLOCKMASTER_ADDR
+              value: "blockmaster.kube-system.svc.cluster.local:9333"
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+        - name: csi-provisioner
+          image: registry.k8s.io/sig-storage/csi-provisioner:v5.2.0
+          args:
+            - "--csi-address=/csi/csi.sock"
+            - "--timeout=30s"
+            - "--leader-election=true"
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+        - name: csi-attacher
+          image: registry.k8s.io/sig-storage/csi-attacher:v4.8.1
+          args:
+            - "--csi-address=/csi/csi.sock"
+            - "--timeout=30s"
+            - "--leader-election=true"
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+      volumes:
+        - name: socket-dir
+          emptyDir: {}

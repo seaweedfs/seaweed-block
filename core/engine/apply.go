@@ -61,6 +61,11 @@ func Apply(st *ReplicaState, ev Event) ApplyResult {
 			break
 		}
 		applyRecoveryFacts(st, e, &result, trace)
+	case DurableAckObserved:
+		if !checkReplicaID(st, e.ReplicaID, &result, trace) {
+			break
+		}
+		applyDurableAck(st, e, &result, trace)
 	case SessionPrepared:
 		if !checkReplicaID(st, e.ReplicaID, &result, trace) {
 			break
@@ -298,6 +303,129 @@ func applyRecoveryFacts(st *ReplicaState, e RecoveryFactsObserved, r *ApplyResul
 	decide(st, r, trace)
 }
 
+func applyDurableAck(st *ReplicaState, e DurableAckObserved, r *ApplyResult, trace func(string, string)) {
+	if stale, reason := staleTransportObservation(st, e.EndpointVersion, e.TransportEpoch); stale {
+		trace("stale_durable_ack", reason)
+		return
+	}
+	fact := e.ProgressFact()
+	updateDurableAckLagState(st, fact)
+	if fact.ReplicaR > st.Recovery.DurableAckR || !st.Recovery.DurableAckKnown {
+		st.Recovery.DurableAckR = fact.ReplicaR
+		st.Recovery.DurableAckKnown = true
+	}
+	if st.Recovery.RecoveryWindowClosed && fact.ReplicaR >= st.Recovery.R {
+		st.Recovery.PostCloseDurableAckKnown = true
+		if fact.ReplicaR > st.Recovery.PostCloseDurableAckR {
+			st.Recovery.PostCloseDurableAckR = fact.ReplicaR
+		}
+		trace("post_close_durable_ack",
+			fmt.Sprintf("R=%d closeR=%d", fact.ReplicaR, st.Recovery.R))
+	}
+	lag := durableAckLagDecision(st, fact)
+	st.Recovery.LagDecision = lag
+	trace("durable_ack_observed",
+		fmt.Sprintf("R=%d lag=%s stalled_samples=%d",
+			st.Recovery.DurableAckR, lag, st.Recovery.DurableAckStalledSample))
+
+	// A single lagging ack is normal. Only a durable-ack stall observed
+	// over the policy window becomes a coordinator action. This keeps
+	// feeder progress as the first answer and uses recovery only when
+	// progress stops while the primary head keeps moving.
+	if lag == LagDecisionStartCatchUp && canEmitRecoveryFromDurableAck(st) {
+		st.Recovery.R = st.Recovery.DurableAckR
+		st.Recovery.S = fact.PrimaryS
+		st.Recovery.H = fact.PrimaryH
+		st.Recovery.Decision = DecisionCatchUp
+		st.Recovery.DecisionReason = "durable_ack_stalled_within_wal"
+		r.Commands = append(r.Commands, StartCatchUp{
+			ReplicaID:       st.Identity.ReplicaID,
+			Epoch:           st.Identity.Epoch,
+			EndpointVersion: st.Identity.EndpointVersion,
+			FromLSN:         st.Recovery.DurableAckR + 1,
+			FrontierHint:    fact.PrimaryH,
+			TargetLSN:       fact.PrimaryH,
+		})
+		trace("command", "StartCatchUp (durable ack stalled)")
+	}
+	if lag == LagDecisionStartRebuild && canEmitRecoveryFromDurableAck(st) {
+		st.Recovery.R = st.Recovery.DurableAckR
+		st.Recovery.S = fact.PrimaryS
+		st.Recovery.H = fact.PrimaryH
+		st.Recovery.Decision = DecisionRebuild
+		st.Recovery.DecisionReason = "durable_ack_below_retention"
+		r.Commands = append(r.Commands, StartRebuild{
+			ReplicaID:       st.Identity.ReplicaID,
+			Epoch:           st.Identity.Epoch,
+			EndpointVersion: st.Identity.EndpointVersion,
+			FrontierHint:    fact.PrimaryH,
+			TargetLSN:       fact.PrimaryH,
+		})
+		trace("command", "StartRebuild (durable ack below retention)")
+	}
+	if st.Recovery.PostCloseDurableAckKnown {
+		decide(st, r, trace)
+	}
+}
+
+func updateDurableAckLagState(st *ReplicaState, fact ReplicaProgressFact) {
+	previousKnown := st.Recovery.DurableAckKnown
+	previousR := st.Recovery.DurableAckR
+	previousH := st.Recovery.DurableAckPrimaryH
+
+	currentR := previousR
+	if !previousKnown || fact.ReplicaR > currentR {
+		currentR = fact.ReplicaR
+	}
+	st.Recovery.DurableAckPrimaryH = fact.PrimaryH
+
+	switch {
+	case !previousKnown:
+		st.Recovery.DurableAckStalledSample = 1
+	case currentR > previousR:
+		st.Recovery.DurableAckStalledSample = 1
+	case fact.PrimaryH > previousH:
+		st.Recovery.DurableAckStalledSample++
+	}
+}
+
+func durableAckLagDecision(st *ReplicaState, fact ReplicaProgressFact) LagDecision {
+	facts := make([]ReplicaProgressFact, 0, 3)
+	if st.Recovery.DurableAckStalledSample >= 3 {
+		facts = append(facts,
+			durableAckPolicyFact(st.Recovery.DurableAckR, fact.PrimaryS, subtractSaturating(fact.PrimaryH, 2)),
+			durableAckPolicyFact(st.Recovery.DurableAckR, fact.PrimaryS, subtractSaturating(fact.PrimaryH, 1)),
+		)
+	}
+	facts = append(facts, durableAckPolicyFact(st.Recovery.DurableAckR, fact.PrimaryS, fact.PrimaryH))
+	return EvaluateLagPolicy(LagPolicy{StalledSamples: 3}, facts)
+}
+
+func canEmitRecoveryFromDurableAck(st *ReplicaState) bool {
+	return st.Identity.MemberPresent &&
+		st.Reachability.Status == ProbeReachable &&
+		!hasActiveSession(st)
+}
+
+func subtractSaturating(v, delta uint64) uint64 {
+	if v < delta {
+		return 0
+	}
+	return v - delta
+}
+
+func durableAckPolicyFact(replicaR, primaryS, primaryH uint64) ReplicaProgressFact {
+	return ReplicaProgressFact{
+		ReplicaR:           replicaR,
+		ReplicaRKnown:      true,
+		PrimaryS:           primaryS,
+		PrimaryH:           primaryH,
+		PrimaryBoundsKnown: true,
+		Source:             ProgressFromDurableAck,
+		Confidence:         ProgressLiveWire,
+	}
+}
+
 // decide runs the core bounded decision logic.
 func decide(st *ReplicaState, r *ApplyResult, trace func(string, string)) {
 	if !st.Identity.MemberPresent {
@@ -314,17 +442,49 @@ func decide(st *ReplicaState, r *ApplyResult, trace func(string, string)) {
 		return
 	}
 
-	R, S, H := st.Recovery.R, st.Recovery.S, st.Recovery.H
+	fact := RecoveryFactsObserved{
+		ReplicaID:       st.Identity.ReplicaID,
+		EndpointVersion: st.Identity.EndpointVersion,
+		R:               st.Recovery.R,
+		S:               st.Recovery.S,
+		H:               st.Recovery.H,
+	}.ProgressFact()
+	H := fact.PrimaryH
 
-	if R == 0 && S == 0 && H == 0 {
+	// Sticky rebuild (INV-REPL-REBUILD-DECISION-STICKY): once a
+	// catch-up failure has escalated to rebuild (WALRecycled or
+	// retry exhaustion), a subsequent probe with R>=S MUST NOT
+	// downgrade back to catch_up. The rebuild stays pinned until
+	// it completes successfully (or identity resets).
+	if st.Recovery.RebuildPinned {
+		st.Recovery.Decision = DecisionRebuild
+		if st.Recovery.DecisionReason == "" {
+			st.Recovery.DecisionReason = "rebuild_pinned"
+		}
+		trace("decision", "rebuild (pinned)")
+		if !hasActiveSession(st) {
+			r.Commands = append(r.Commands, StartRebuild{
+				ReplicaID:       st.Identity.ReplicaID,
+				Epoch:           st.Identity.Epoch,
+				EndpointVersion: st.Identity.EndpointVersion,
+				FrontierHint:    H,
+				TargetLSN:       H,
+			})
+			trace("command", "StartRebuild (pinned)")
+		}
+		return
+	}
+
+	class := ClassifyProgress(fact)
+	if class == DecisionUnknown && !fact.PrimaryBoundsKnown {
 		st.Recovery.Decision = DecisionUnknown
 		st.Recovery.DecisionReason = "no_boundaries"
 		trace("decision", "unknown (no R/S/H)")
 		return
 	}
 
-	switch {
-	case R >= H:
+	switch class {
+	case DecisionNone:
 		st.Recovery.Decision = DecisionNone
 		st.Recovery.DecisionReason = "caught_up"
 		trace("decision", "none (R >= H)")
@@ -346,27 +506,37 @@ func decide(st *ReplicaState, r *ApplyResult, trace func(string, string)) {
 					EndpointVersion: st.Identity.EndpointVersion,
 				})
 				trace("command", "FenceAtEpoch")
+			} else if recoveredReplicaWaitingForPostCloseAck(st) {
+				trace("publish_healthy_held", "waiting for post-close durable ack")
 			} else {
 				r.Commands = append(r.Commands, PublishHealthy{ReplicaID: st.Identity.ReplicaID})
 			}
 		}
 
-	case R >= S && R < H:
+	case DecisionCatchUp:
 		st.Recovery.Decision = DecisionCatchUp
 		st.Recovery.DecisionReason = "gap_within_wal"
 		trace("decision", "catch_up (R >= S, R < H)")
 
 		if !hasActiveSession(st) {
+			// FromLSN = R + 1 — engine-owned "skip already-applied
+			// LSN" policy (pins
+			// INV-REPL-CATCHUP-FROMLSN-IS-REPLICA-FLUSHED-PLUS-1).
+			// Source is engine state Recovery.R, NOT the raw probe
+			// payload (INV-REPL-CATCHUP-FROMLSN-FROM-ENGINE-STATE-
+			// NOT-PROBE).
 			r.Commands = append(r.Commands, StartCatchUp{
 				ReplicaID:       st.Identity.ReplicaID,
 				Epoch:           st.Identity.Epoch,
 				EndpointVersion: st.Identity.EndpointVersion,
+				FromLSN:         fact.ReplicaR + 1,
+				FrontierHint:    H,
 				TargetLSN:       H,
 			})
 			trace("command", "StartCatchUp")
 		}
 
-	case R < S:
+	case DecisionRebuild:
 		st.Recovery.Decision = DecisionRebuild
 		st.Recovery.DecisionReason = "gap_beyond_wal"
 		trace("decision", "rebuild (R < S)")
@@ -376,6 +546,7 @@ func decide(st *ReplicaState, r *ApplyResult, trace func(string, string)) {
 				ReplicaID:       st.Identity.ReplicaID,
 				Epoch:           st.Identity.Epoch,
 				EndpointVersion: st.Identity.EndpointVersion,
+				FrontierHint:    H,
 				TargetLSN:       H,
 			})
 			trace("command", "StartRebuild")
@@ -387,6 +558,10 @@ func hasActiveSession(st *ReplicaState) bool {
 	return st.Session.Phase == PhaseStarting || st.Session.Phase == PhaseRunning
 }
 
+func recoveredReplicaWaitingForPostCloseAck(st *ReplicaState) bool {
+	return st.Recovery.RecoveryWindowClosed && !st.Recovery.PostCloseDurableAckKnown
+}
+
 // --- Session lifecycle ---
 
 func applySessionPrepared(st *ReplicaState, e SessionPrepared, r *ApplyResult, trace func(string, string)) {
@@ -395,12 +570,20 @@ func applySessionPrepared(st *ReplicaState, e SessionPrepared, r *ApplyResult, t
 		trace("stale_session_prepared", "session ID too old")
 		return
 	}
-	st.Session = SessionTruth{
-		SessionID: e.SessionID,
-		Kind:      e.Kind,
-		TargetLSN: e.TargetLSN,
-		Phase:     PhaseStarting,
+	frontierHint := e.FrontierHint
+	if frontierHint == 0 {
+		frontierHint = e.TargetLSN
 	}
+	st.Session = SessionTruth{
+		SessionID:    e.SessionID,
+		Kind:         e.Kind,
+		FrontierHint: frontierHint,
+		TargetLSN:    frontierHint,
+		Phase:        PhaseStarting,
+	}
+	st.Recovery.RecoveryWindowClosed = false
+	st.Recovery.PostCloseDurableAckKnown = false
+	st.Recovery.PostCloseDurableAckR = 0
 	trace("session_prepared", string(e.Kind))
 }
 
@@ -445,7 +628,25 @@ func applySessionCompleted(st *ReplicaState, e SessionClosedCompleted, r *ApplyR
 	}
 	st.Session.Phase = PhaseCompleted
 	st.Session.AchievedLSN = e.AchievedLSN
-	st.Recovery.R = e.AchievedLSN // advance replica boundary
+	if e.AchievedLSN > st.Recovery.R {
+		st.Recovery.R = e.AchievedLSN // monotonic observed replica boundary
+	}
+	// Retry-loop: success clears the attempt counter so a future
+	// independent recovery cycle starts with a fresh budget.
+	st.Recovery.Attempts = 0
+	// A successful rebuild discharges the pinned-rebuild obligation
+	// (INV-REPL-REBUILD-DECISION-STICKY). Catch-up completion does
+	// NOT clear it (a sticky rebuild remains pending if catch-up
+	// somehow completed instead — defensive; the rebuild gate also
+	// prevents catch-up from being emitted while pinned).
+	if st.Session.Kind == SessionRebuild {
+		st.Recovery.RebuildPinned = false
+	}
+	if st.Session.Kind == SessionCatchUp || st.Session.Kind == SessionRebuild {
+		st.Recovery.RecoveryWindowClosed = true
+		st.Recovery.PostCloseDurableAckKnown = false
+		st.Recovery.PostCloseDurableAckR = 0
+	}
 	// A successful catch-up/rebuild session sent mutating traffic
 	// at the current identity epoch, so the replica's lineage gate
 	// is now at this epoch. Treat completion as an implicit fence.
@@ -471,11 +672,186 @@ func applySessionFailed(st *ReplicaState, e SessionClosedFailed, r *ApplyResult,
 	st.Session.FailureReason = e.Reason
 	trace("session_failed", e.Reason)
 
+	// Branch on typed FailureKind, NOT substring match. `Reason` is
+	// diagnostic text only and engine MUST NOT parse it.
+	//
+	// WALRecycled is a tier-class change — force recovery.Decision=
+	// Rebuild and reset Attempts so the next decide() pass emits a
+	// fresh StartRebuild rather than counting toward the catch-up
+	// retry budget.
+	if e.FailureKind == RecoveryFailureWALRecycled {
+		st.Recovery.Decision = DecisionRebuild
+		st.Recovery.DecisionReason = "wal_recycled"
+		st.Recovery.Attempts = 0
+		st.Recovery.RebuildPinned = true
+		trace("recycle_escalation", "FailureKind=WALRecycled → recovery.Decision=Rebuild (pinned)")
+		// Diagnostic surface: caller-visible degraded reason.
+		r.Commands = append(r.Commands, PublishDegraded{
+			ReplicaID: e.ReplicaID,
+			Reason:    "session_failed: " + e.Reason,
+		})
+		// INV-REPL-REBUILD-EMITTED-ON-WAL-RECYCLED: emit StartRebuild
+		// immediately. Subsequent probes can't downgrade (RebuildPinned).
+		// Skip if a rebuild session already exists.
+		if !hasActiveSession(st) {
+			r.Commands = append(r.Commands, StartRebuild{
+				ReplicaID:       st.Identity.ReplicaID,
+				Epoch:           st.Identity.Epoch,
+				EndpointVersion: st.Identity.EndpointVersion,
+				FrontierHint:    st.Recovery.H,
+				TargetLSN:       st.Recovery.H,
+			})
+			trace("command", "StartRebuild (wal_recycled escalation)")
+		}
+		return
+	}
+
+	// Retry-loop wiring. Non-recycled failure: increment Attempts;
+	// if budget remaining, engine re-emits the matching Start*
+	// command on this same Apply. Budget exhaustion publishes
+	// Degraded and clears the recovery decision so the next probe
+	// re-classifies.
+	//
+	// Exception: watchdog-synthesized start_timeout means the
+	// executor never even started the session — retrying an executor
+	// that won't start is unlikely to help. Skip retry; let the
+	// adapter's higher-layer machinery (probe re-classification)
+	// drive recovery.
+	if e.FailureKind == RecoveryFailureStartTimeout {
+		trace("start_timeout_no_retry", "FailureKind=StartTimeout — skip retry")
+		r.Commands = append(r.Commands, PublishDegraded{
+			ReplicaID: e.ReplicaID,
+			Reason:    "session_failed: " + e.Reason,
+		})
+		return
+	}
+	// PinUnderRetention is a mid-session pin/retention contract
+	// violation (recovery.FailurePinUnderRetention). NOT retryable
+	// on the same lineage — retrying same fromLSN against an
+	// advanced primary S would either fail identically OR mask the
+	// situation that actually needs a fresh probe. Skip retry,
+	// leave Attempts untouched, and emit Degraded so the next probe
+	// mints a fresh lineage with fromLSN ≥ current S.
+	//
+	// Pinned by INV-PIN-COMPATIBLE-WITH-RETENTION at the engine
+	// retry-budget gate.
+	if e.FailureKind == RecoveryFailurePinUnderRetention {
+		trace("pin_under_retention_no_retry",
+			"FailureKind=PinUnderRetention — skip retry; new lineage required")
+		r.Commands = append(r.Commands, PublishDegraded{
+			ReplicaID: e.ReplicaID,
+			Reason:    "session_failed: " + e.Reason,
+		})
+		return
+	}
+	st.Recovery.Attempts++
+	policy := DefaultRuntimePolicyFor(contentKindFor(st.Recovery.Decision))
+	budget := policy.MaxRetries
+	if st.Recovery.Attempts <= budget {
+		trace("retry_attempt",
+			fmt.Sprintf("attempt=%d budget=%d decision=%s",
+				st.Recovery.Attempts, budget, st.Recovery.Decision))
+		// Re-emit the appropriate Start* command. Lineage fields come
+		// from current Identity + recovery target.
+		switch st.Recovery.Decision {
+		case DecisionCatchUp:
+			// Retry re-emit reuses ORIGINAL Recovery.R + 1 (not
+			// re-probed). The replica apply gate handles a
+			// re-shipped gap via per-LBA stale-skip.
+			r.Commands = append(r.Commands, StartCatchUp{
+				ReplicaID:       st.Identity.ReplicaID,
+				Epoch:           st.Identity.Epoch,
+				EndpointVersion: st.Identity.EndpointVersion,
+				FromLSN:         st.Recovery.R + 1,
+				FrontierHint:    st.Recovery.H,
+				TargetLSN:       st.Recovery.H,
+			})
+			trace("command", "StartCatchUp (retry)")
+		case DecisionRebuild:
+			r.Commands = append(r.Commands, StartRebuild{
+				ReplicaID:       st.Identity.ReplicaID,
+				Epoch:           st.Identity.Epoch,
+				EndpointVersion: st.Identity.EndpointVersion,
+				FrontierHint:    st.Recovery.H,
+				TargetLSN:       st.Recovery.H,
+			})
+			trace("command", "StartRebuild (retry)")
+		}
+		return
+	}
+
+	// Budget exhausted. Catch-up budget exhaustion DIRECTLY ESCALATES
+	// to rebuild — engine emits StartRebuild without waiting for the
+	// next probe to re-classify. Pinned by
+	// INV-REPL-CATCHUP-EXHAUSTION-ESCALATES-TO-REBUILD.
+	//
+	// Catch-up exhaustion is itself the trigger; rebuild emission is
+	// automatic. Rebuild's MaxRetries=0 (per DefaultRuntimePolicyFor)
+	// means a rebuild failure terminates without further retry —
+	// clean terminal definition.
+	//
+	// Use the FAILED session's kind, not current Recovery.Decision —
+	// a stray probe arriving mid-retry can re-classify Decision to
+	// Rebuild before exhaustion fires, which would route us to the
+	// terminal-degraded branch and miss the escalation. The session
+	// that just failed is the source of truth for what recovery
+	// mode was actually being attempted.
+	if st.Session.Kind == SessionCatchUp {
+		trace("retry_exhausted_escalate_to_rebuild",
+			fmt.Sprintf("attempts=%d > budget=%d → emit StartRebuild (pinned)",
+				st.Recovery.Attempts, budget))
+		st.Recovery.Attempts = 0
+		st.Recovery.Decision = DecisionRebuild
+		st.Recovery.DecisionReason = "catchup_budget_exhausted"
+		st.Recovery.RebuildPinned = true
+		r.Commands = append(r.Commands, StartRebuild{
+			ReplicaID:       st.Identity.ReplicaID,
+			Epoch:           st.Identity.Epoch,
+			EndpointVersion: st.Identity.EndpointVersion,
+			FrontierHint:    st.Recovery.H,
+			TargetLSN:       st.Recovery.H,
+		})
+		return
+	}
+
+	// Rebuild exhaustion (or any non-catch-up exhaustion):
+	// terminal — emit Degraded; no further retry. Rebuild's
+	// MaxRetries=0 makes this the natural termination point.
+	trace("retry_exhausted_terminal",
+		fmt.Sprintf("attempts=%d > budget=%d decision=%s — terminal",
+			st.Recovery.Attempts, budget, st.Recovery.Decision))
+	st.Recovery.Attempts = 0
+	st.Recovery.Decision = DecisionUnknown
+	st.Recovery.DecisionReason = "retry_budget_exhausted"
 	r.Commands = append(r.Commands, PublishDegraded{
 		ReplicaID: e.ReplicaID,
-		Reason:    "session_failed: " + e.Reason,
+		Reason:    "retry_budget_exhausted: " + e.Reason,
 	})
 }
+
+// contentKindFor maps the engine's recovery Decision to the
+// RecoveryContentKind whose RuntimePolicy the retry budget comes
+// from. wal_delta covers catch-up; full_extent covers rebuild;
+// partial_lba is Stage 2 and not yet emitted by the engine.
+func contentKindFor(d RecoveryDecision) RecoveryContentKind {
+	switch d {
+	case DecisionCatchUp:
+		return RecoveryContentWALDelta
+	case DecisionRebuild:
+		return RecoveryContentFullExtent
+	}
+	return RecoveryContentWALDelta
+}
+
+// Engine branches on typed `e.FailureKind` (RecoveryFailureKind enum)
+// rather than substring-matching `Reason`. The `Reason` field on
+// SessionClosedFailed is DIAGNOSTIC TEXT ONLY — engine MUST NOT
+// parse it.
+//
+// Substrate-side classification lives in storage.RecoveryFailure +
+// storage.StorageRecoveryFailureKind. Transport extracts via
+// errors.As and maps to engine.RecoveryFailureKind at the boundary.
+// Adapter copies the typed field through SessionCloseResult.
 
 func applySessionInvalidated(st *ReplicaState, e SessionInvalidated, r *ApplyResult, trace func(string, string)) {
 	if e.SessionID != st.Session.SessionID {
@@ -486,7 +862,7 @@ func applySessionInvalidated(st *ReplicaState, e SessionInvalidated, r *ApplyRes
 	trace("session_invalidated", e.Reason)
 }
 
-// --- Fence events (P14 S1) ---
+// --- Fence events ---
 
 func applyFenceCompleted(st *ReplicaState, e FenceCompleted, r *ApplyResult, trace func(string, string)) {
 	// Lineage check: the fence result must belong to the current
@@ -554,12 +930,12 @@ func derivePublication(st *ReplicaState, trace func(string, string)) {
 
 	switch {
 	case st.Recovery.Decision == DecisionNone && st.Reachability.Status == ProbeReachable:
-		// Caught-up branch. Ack-gated on fence completion (P14 S1):
-		// the operator-visible Healthy must not flip true until the
+		// Caught-up branch. Ack-gated on fence completion: the
+		// operator-visible Healthy must not flip true until the
 		// replica's lineage gate has observed Identity.Epoch via
 		// FenceCompleted. Otherwise stale old-epoch traffic could
 		// still land while the projection already reads healthy.
-		if st.Identity.Epoch > st.Reachability.FencedEpoch {
+		if st.Identity.Epoch > st.Reachability.FencedEpoch || recoveredReplicaWaitingForPostCloseAck(st) {
 			st.Publication.Healthy = false
 			st.Publication.Degraded = false
 			st.Publication.NeedsAttention = true

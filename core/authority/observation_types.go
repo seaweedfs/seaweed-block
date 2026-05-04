@@ -47,6 +47,7 @@ type SlotFact struct {
 	ReplicaID       string
 	DataAddr        string
 	CtrlAddr        string
+	Frontends       []FrontendTargetFact
 	Reachable       bool
 	ReadyForPrimary bool
 	Eligible        bool
@@ -58,6 +59,19 @@ type SlotFact struct {
 	// Primary for the same volume is the
 	// ReasonConflictingPrimaryClaim trigger.
 	LocalRoleClaim LocalRoleClaim
+}
+
+// FrontendTargetFact is a read-only fact reported by a volume
+// process after it has bound a frontend target. It is intentionally
+// NOT an authority, placement, or readiness input; CSI/controller
+// surfaces may use it only to publish an already-running endpoint.
+type FrontendTargetFact struct {
+	Protocol string
+	Addr     string
+	IQN      string
+	NQN      string
+	LUN      uint32
+	NSID     uint32
 }
 
 // LocalRoleClaim is the raw role claim a server makes about

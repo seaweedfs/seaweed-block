@@ -1,0 +1,72 @@
+name: t0-hosting-smoke
+purpose: PG8 — T0 product-process hosting end-to-end smoke
+# Scenario shape only. Full testrunner integration (DSL parser +
+# subprocess orchestrator) is deferred to Final Gate. A Go-native
+# replay lives at core/host/t0_scenario_replay_test.go and walks
+# these phases against the real compiled blockmaster/blockvolume
+# binaries.
+#
+# Binary names use the block-repo naming (blockmaster / blockvolume).
+# No "v3" appears in product artifacts — this repo has no v1/v2.
+phases:
+  - name: setup
+    actions:
+      - start: cmd/blockmaster
+        flags:
+          - --authority-store=${artifact_dir}/store
+          - --listen=127.0.0.1:0
+          - --topology=${artifact_dir}/topology.yaml
+          - --t0-print-ready
+      - start: cmd/blockvolume
+        instance: r1
+        flags:
+          - --master=${master_addr}
+          - --server-id=s1
+          - --volume-id=v1
+          - --replica-id=r1
+          - --data-addr=127.0.0.1:7041
+          - --ctrl-addr=127.0.0.1:7141
+      - start: cmd/blockvolume
+        instance: r2
+        flags:
+          - --master=${master_addr}
+          - --server-id=s2
+          - --volume-id=v1
+          - --replica-id=r2
+          - --data-addr=127.0.0.1:7042
+          - --ctrl-addr=127.0.0.1:7142
+      - start: cmd/blockvolume
+        instance: r3
+        flags:
+          - --master=${master_addr}
+          - --server-id=s3
+          - --volume-id=v1
+          - --replica-id=r3
+          - --data-addr=127.0.0.1:7043
+          - --ctrl-addr=127.0.0.1:7143
+      - wait_until: all three volumes visible in master topology view
+  - name: initial_assignment
+    actions:
+      - wait_until: v1 has an assigned authority line (poll EvidenceService.QueryVolumeStatus)
+      - assert: assignment delivered over AssignmentService to at least one volume
+      - snapshot: authority_timeline → artifact
+  - name: kill_restart_cycles
+    repeat: 20
+    actions:
+      - signal: master SIGKILL
+      - wait: 200ms
+      - restart: master
+      - wait_until: authority line reloaded (Assigned=true on new master)
+      - assert: authority tuple (volume_id, replica_id, epoch, endpoint_version) equals pre-kill snapshot
+      - snapshot: authority_timeline → artifact
+  - name: verify_final
+    actions:
+      - assert: no double-primary in authority timeline
+      - assert: no orphan assignment
+      - assert: all 20 cycles produced identical authority tuple
+artifacts:
+  - blockmaster.log
+  - blockvolume-s1.log
+  - blockvolume-s2.log
+  - blockvolume-s3.log
+  - authority_timeline.txt

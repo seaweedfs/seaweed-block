@@ -26,14 +26,115 @@ import (
 // rebuild hook so the host can re-synthesize reactively
 // (sketch §11).
 type ObservationStore struct {
-	config     FreshnessConfig
-	now        func() time.Time
-	startedAt  time.Time
+	config    FreshnessConfig
+	now       func() time.Time
+	startedAt time.Time
 
 	mu           sync.Mutex
 	observations map[string]Observation // key: ServerID
 	revision     uint64
 	onMutation   func()
+
+	// supersededCount counts heartbeat ingests that were dropped
+	// because a newer ObservedAt was already stored for the same
+	// ServerID. Diagnostic only — PCDD-DELAYED-HB-001 evidence
+	// surface. Not an authority input; publisher / controller /
+	// evidence minting paths MUST NOT read it. Exposed via
+	// SupersededCount().
+	supersededCount uint64
+}
+
+// SupersededCount returns the total number of ingests that were
+// dropped because a newer observation from the same server was
+// already stored. Diagnostic surface for PCDD-DELAYED-HB-001.
+// NOT authority input. Monotonic across the lifetime of the store.
+func (s *ObservationStore) SupersededCount() uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.supersededCount
+}
+
+// SlotFact returns the most-recently-observed SlotFact for a
+// (volumeID, replicaID) pair across all reporting servers, or
+// (zero, false) if no server has reported that slot.
+//
+// Used by master-side peer-set construction (G5-5A): supporting
+// replicas don't have a published authority line (Publisher.apply
+// only mints for the bound replica), so master falls back to the
+// last-heartbeat-observed DataAddr/CtrlAddr to populate
+// AssignmentFact.peers for primary fan-out. Topology membership is
+// the allow-list — the caller must confirm the (volumeID, replicaID)
+// is a declared slot before consulting this method.
+//
+// The returned SlotFact is the value reported by the LATEST
+// observation across all servers — multiple servers may report the
+// same (volumeID, replicaID) (e.g., during reassignment or topology
+// confusion). The caller's authority/topology gates upstream of
+// this method enforce the membership invariant; this method just
+// answers "what addr did the cluster last hear about for this
+// (volume, replica)?".
+//
+// Returns (zero, false) when:
+//   - no observation has reported any slot for this (volumeID, replicaID), OR
+//   - observations exist but the matching slot has empty DataAddr
+//     (caller-side fail-closed: skip the peer rather than synthesize
+//     a descriptor with an unusable addr), OR
+//   - all matching observations are EXPIRED (now > obs.ExpiresAt) per
+//     architect round 54 finding-1: "expired heartbeat addr should
+//     fail closed" — same discipline as snapshot synthesis.
+//
+// NOT authority input. Read-only; safe to call concurrently.
+func (s *ObservationStore) SlotFact(volumeID, replicaID string) (SlotFact, bool) {
+	if volumeID == "" || replicaID == "" {
+		return SlotFact{}, false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := s.now()
+	var (
+		best      SlotFact
+		bestObsAt time.Time
+		found     bool
+	)
+	for _, obs := range s.observations {
+		// Fail-closed on stale heartbeats (architect round 54
+		// finding-1). An expired observation's DataAddr cannot be
+		// trusted for primary→replica dial; skip and let caller
+		// surface the slot as "no observation" until the next
+		// fresh heartbeat lands.
+		if !obs.ExpiresAt.IsZero() && now.After(obs.ExpiresAt) {
+			continue
+		}
+		for _, slot := range obs.Slots {
+			if slot.VolumeID != volumeID || slot.ReplicaID != replicaID {
+				continue
+			}
+			if slot.DataAddr == "" {
+				// Fail-closed: an observation that names the slot but
+				// without a usable DataAddr is unusable for primary
+				// fan-out.
+				continue
+			}
+			if !found || obs.ObservedAt.After(bestObsAt) {
+				best = slot
+				best.Frontends = append([]FrontendTargetFact(nil), slot.Frontends...)
+				bestObsAt = obs.ObservedAt
+				found = true
+			}
+		}
+	}
+	return best, found
+}
+
+// SetNowForTest replaces the store's clock source. Tests use this
+// to drive expiry / freshness deterministically. Symmetric with
+// authority.TopologyController.SetNowForTest. Production code
+// MUST NOT call this; a boundary-guard test enforces that the
+// identifier appears only in _test.go files.
+func (s *ObservationStore) SetNowForTest(now func() time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.now = now
 }
 
 // NewObservationStore constructs a store with the given freshness
@@ -99,6 +200,14 @@ func (s *ObservationStore) Ingest(obs Observation) error {
 		if prev.ObservedAt.After(obs.ObservedAt) {
 			// Out-of-order ingest: keep the newer one already
 			// stored. No mutation fired.
+			//
+			// Diagnostic counter for PCDD-DELAYED-HB-001. Not an
+			// authority input. Must never be read by publisher /
+			// controller / evidence minting path — it exists so
+			// tests and operators can see that a superseded
+			// heartbeat was observed and recorded-as-superseded,
+			// distinct from "silently dropped".
+			s.supersededCount++
 			s.mu.Unlock()
 			return nil
 		}
@@ -120,13 +229,13 @@ func (s *ObservationStore) Ingest(obs Observation) error {
 // API boundary that keeps supportability logic off the
 // synthesized-output back-edge (sketch §12 one-way pipeline).
 type storeSnapshot struct {
-	observations     map[string]Observation
-	serverFreshness  map[string]ServerFreshness
-	revision         uint64
-	evaluatedAt      time.Time
-	startedAt        time.Time
-	pendingGrace     time.Duration
-	freshnessWindow  time.Duration
+	observations    map[string]Observation
+	serverFreshness map[string]ServerFreshness
+	revision        uint64
+	evaluatedAt     time.Time
+	startedAt       time.Time
+	pendingGrace    time.Duration
+	freshnessWindow time.Duration
 }
 
 // ServerFreshness is the derived freshness state of one ServerID

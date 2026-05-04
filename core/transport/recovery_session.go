@@ -1,0 +1,192 @@
+package transport
+
+import (
+	"errors"
+	"fmt"
+	"strings"
+
+	"github.com/seaweedfs/seaweed-block/core/engine"
+	"github.com/seaweedfs/seaweed-block/core/recovery"
+	"github.com/seaweedfs/seaweed-block/core/storage"
+)
+
+// classifyRecoveryFailure is the T4d-1 boundary mapper: extracts the
+// substrate-side `*storage.RecoveryFailure` typed error via
+// `errors.As` and maps its `StorageRecoveryFailureKind` to the
+// engine-owned `engine.RecoveryFailureKind`. Engine MUST NOT import
+// core/storage; transport does the mapping at the boundary because
+// transport already imports both packages.
+//
+// Architect-locked (kickoff §9 / mini-plan v0.3): storage owns
+// substrate-side classification; transport maps; engine consumes its
+// own type. See `feedback_engine_no_storage_import.md`.
+//
+// Fallback heuristics for errors that aren't typed `*RecoveryFailure`:
+//   - errSessionInvalidated → RecoveryFailureSessionInvalidated
+//   - legacy error mentioning "target" + "not reached" →
+//     RecoveryFailureTargetNotReached. Current catch-up sender no
+//     longer uses target-band completion; this branch exists only to
+//     classify older/runtime diagnostic strings without making engine
+//     parse text.
+//   - everything else → RecoveryFailureTransport (retryable per
+//     RecoveryRuntimePolicy)
+//
+// Recovery-package failure mapping (recovery.Failure → engine.RecoveryFailureKind):
+// Per architect Option A 2026-04-29 (priority #3 [retry] bug-fix
+// shape), only `recovery.FailurePinUnderRetention` is mapped here
+// today. Full lossless mapping (Wire / Protocol / Substrate /
+// Contract / Cancelled / SingleFlight / Unknown) is the deliverable
+// of Option B kickoff — until then those kinds fall through to the
+// existing `RecoveryFailureTransport` retryable default. Adding new
+// branches is a single-line edit in the switch below + an engine
+// kind in `events.go`.
+//
+// Called by: BlockExecutor.finishSession at session close path.
+// Owns: nothing; pure mapping.
+// Borrows: err is consumed read-only (errors.As doesn't mutate).
+func classifyRecoveryFailure(err error) engine.RecoveryFailureKind {
+	if err == nil {
+		return engine.RecoveryFailureUnknown
+	}
+	// Typed substrate failure — preferred path.
+	var rf *storage.RecoveryFailure
+	if errors.As(err, &rf) {
+		switch rf.Kind {
+		case storage.StorageRecoveryFailureWALRecycled:
+			return engine.RecoveryFailureWALRecycled
+		case storage.StorageRecoveryFailureSubstrateIO:
+			return engine.RecoveryFailureSubstrateIO
+		}
+		return engine.RecoveryFailureTransport
+	}
+	// Recovery-package typed failure — Option A scope: PinUnderRetention
+	// only. Documented non-retryable in core/recovery/failure.go; engine
+	// MUST NOT classify it as Transport (which is retryable). Other
+	// kinds in `recovery.FailureKind` deferred to Option B kickoff.
+	var rcf *recovery.Failure
+	if errors.As(err, &rcf) {
+		switch rcf.Kind {
+		case recovery.FailurePinUnderRetention:
+			return engine.RecoveryFailurePinUnderRetention
+		}
+		// Fall through: unmapped recovery kinds use the transport
+		// fallback below. Option B closes this gap.
+	}
+	// Session invalidation is a transport-internal sentinel.
+	if errors.Is(err, errSessionInvalidated) {
+		return engine.RecoveryFailureSessionInvalidated
+	}
+	// Legacy "target N not reached" wrap. Transport owns this
+	// compatibility classifier; engine still branches only on the typed
+	// FailureKind we set here.
+	msg := err.Error()
+	if strings.Contains(msg, "target") && strings.Contains(msg, "not reached") {
+		return engine.RecoveryFailureTargetNotReached
+	}
+	return engine.RecoveryFailureTransport
+}
+
+// StartRecoverySession is the unified recovery dispatch entry per
+// design memo §7a (T4c-pre-B). One semantic command, per-content-kind
+// runtime envelope.
+//
+// Per round-30 architect refinement: the unification is at the COMMAND
+// boundary, not at runtime. ContentKind selects which substrate
+// primitive (and therefore which sender goroutine) executes; policy
+// carries the per-kind execution envelope.
+//
+// Today (T4c-pre-B scope):
+//   - wal_delta   → bridges to existing doCatchUp (catch-up ship+barrier)
+//   - full_extent → bridges to existing doRebuild (rebuild stream)
+//   - partial_lba → not implemented (Stage 2; returns explicit error)
+//
+// The legacy `StartCatchUp` / `StartRebuild` methods remain as thin
+// wrappers (see catchup_sender.go and rebuild_sender.go) and dispatch
+// through this method. T4c-3 muscle port migrates engine emission
+// from `StartCatchUp` / `StartRebuild` to `StartRecovery`; at that
+// point the legacy methods can be removed.
+//
+// RuntimePolicy honoring (current scope): the existing senders use
+// the package-level `recoveryConnTimeout` constant. Per-policy
+// timeout splitting is deferred to T4c-3 (memo §7a.1a). This method
+// validates the policy is non-zero / has a known cancellation mode
+// but does not yet enforce per-call timeouts. POC report
+// `v3-phase-15-t4c-pre-poc-report.md` §3.b documents this gap.
+func (e *BlockExecutor) StartRecoverySession(
+	replicaID string,
+	sessionID, epoch, endpointVersion, frontierHint uint64,
+	contentKind engine.RecoveryContentKind,
+	policy engine.RecoveryRuntimePolicy,
+) error {
+	if err := validateRecoveryPolicy(contentKind, policy); err != nil {
+		return err
+	}
+
+	switch contentKind {
+	case engine.RecoveryContentWALDelta:
+		// Bridge to existing catch-up sender.
+		// T4d-3: legacy bridge — `StartRecoverySession` doesn't carry
+		// FromLSN today (engine emits StartCatchUp directly with
+		// FromLSN; this bridge path is for the unified
+		// StartRecovery command shape, where FromLSN is implied as
+		// "scan from start of retention"). Pass 1 (≥1 floor) so
+		// sender doesn't trip the substrate's fromLSN==0 spurious
+		// recycle. Future StartRecovery extension can carry an
+		// explicit FromLSN field.
+		return e.StartCatchUp(replicaID, sessionID, epoch, endpointVersion, 1, frontierHint)
+
+	case engine.RecoveryContentFullExtent:
+		// Bridge to existing rebuild sender.
+		return e.StartRebuild(replicaID, sessionID, epoch, endpointVersion, frontierHint)
+
+	case engine.RecoveryContentPartialLBA:
+		// Stage 2 — archive-driven LBA dump fetch. Not implemented
+		// in T4c-pre-B. Engine MUST NOT emit StartRecovery with this
+		// kind during Stage 1; if it does, fail closed.
+		return fmt.Errorf(
+			"transport: StartRecoverySession partial_lba is Stage 2 scope (replica=%s session=%d)",
+			replicaID, sessionID,
+		)
+
+	default:
+		return fmt.Errorf(
+			"transport: StartRecoverySession unknown content kind %q (replica=%s session=%d)",
+			contentKind, replicaID, sessionID,
+		)
+	}
+}
+
+// validateRecoveryPolicy checks the runtime policy is well-formed
+// for the given content kind. Round-30 invariant: every recovery
+// session carries an envelope; zero-value policies are a programmer
+// error (engine should always populate via DefaultRuntimePolicyFor).
+func validateRecoveryPolicy(
+	kind engine.RecoveryContentKind,
+	policy engine.RecoveryRuntimePolicy,
+) error {
+	if policy.CancellationMode == "" {
+		return fmt.Errorf(
+			"transport: StartRecoverySession kind=%q missing cancellation mode",
+			kind,
+		)
+	}
+	if policy.ExpectedDurationClass == "" {
+		return fmt.Errorf(
+			"transport: StartRecoverySession kind=%q missing expected duration class",
+			kind,
+		)
+	}
+	// Per memo §7a.1a: wal_delta uses CancelOnTimeout (Timeout > 0
+	// required); full_extent / partial_lba use CancelOnProgressStall
+	// (Timeout MAY be 0). Validate the wal_delta path; leave the
+	// stall-driven paths permissive — the executor falls back to
+	// recoveryConnTimeout for the per-frame deadline.
+	if kind == engine.RecoveryContentWALDelta &&
+		policy.CancellationMode == engine.CancelOnTimeout &&
+		policy.Timeout == 0 {
+		return fmt.Errorf(
+			"transport: StartRecoverySession wal_delta with CancelOnTimeout requires Timeout > 0",
+		)
+	}
+	return nil
+}

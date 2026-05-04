@@ -1,0 +1,348 @@
+package recovery
+
+import (
+	"errors"
+	"fmt"
+	"io"
+	"log"
+	"time"
+
+	"github.com/seaweedfs/seaweed-block/core/storage"
+)
+
+// Default cadence for recovery durable-progress ack emission. After
+// every K base-lane blocks applied OR every T elapsed, the receiver
+// emits one BaseBatchAck frame so the primary can advance pin_floor
+// from the durable WAL frontier. Mandatory acks (MarkBaseComplete,
+// BarrierReq) bypass the cadence guard.
+//
+// Per docs/recovery-pin-floor-wire.md §3. Tunable via
+// NewReceiverWithCadence.
+const (
+	DefaultCadenceK uint32        = 256
+	DefaultCadenceT time.Duration = 100 * time.Millisecond
+)
+
+// Receiver is the replica-side reader for one rebuild session. It
+// owns the connection's read side, decodes frames, dispatches to a
+// fresh `RebuildSession`, and emits the barrier response.
+//
+// One Receiver per inbound recover-session connection. Caller spawns
+// it in its own goroutine; Run blocks until barrier ack is sent or
+// the connection errors.
+type Receiver struct {
+	store storage.LogicalStorage
+	conn  io.ReadWriter
+
+	// Populated after frameSessionStart.
+	session   *RebuildSession
+	sessionID uint64
+	// recvFromLSN/appliedWalLSN: wire-level LSN monotonicity gate (§IV.0 T4,
+	// v3-recovery-unified-wal-stream-kickoff.md §5.1). After SessionStart,
+	// appliedWalLSN == FromLSN until the first WAL frame advances it; only
+	// lsn == appliedWalLSN+1 is accepted.
+	recvFromLSN   uint64
+	appliedWalLSN uint64
+
+	// Durable-progress ack cadence config + state (per docs/recovery-pin-floor-wire.md §3).
+	cadenceK           uint32
+	cadenceT           time.Duration
+	blocksSinceLastAck uint32
+	lastAckTime        time.Time
+	baseInstalledUpper uint32 // highest base LBA installed; advisory only in BaseBatchAck
+}
+
+// NewReceiver constructs a receiver bound to the replica's substrate
+// with default durable-progress ack cadence (DefaultCadenceK blocks,
+// DefaultCadenceT).
+// `conn` is the wire — caller's responsibility to close.
+func NewReceiver(store storage.LogicalStorage, conn io.ReadWriter) *Receiver {
+	return NewReceiverWithCadence(store, conn, DefaultCadenceK, DefaultCadenceT)
+}
+
+// NewReceiverWithCadence is NewReceiver with explicit cadence
+// parameters. Tests use this for deterministic ack timing.
+func NewReceiverWithCadence(store storage.LogicalStorage, conn io.ReadWriter, k uint32, t time.Duration) *Receiver {
+	return &Receiver{
+		store:    store,
+		conn:     conn,
+		cadenceK: k,
+		cadenceT: t,
+	}
+}
+
+// checkMonotonic enforces contiguous recover-wire LSNs after the session FromLSN
+// watermark (§IV.0 T4; kickoff §5.1). Only used when replica substrate reports
+// RecoveryModeWALReplay — BlockStore/smartwal convergence scans synthesize LSN.
+func (r *Receiver) checkMonotonic(lsn uint64) error {
+	expected := r.appliedWalLSN + 1
+	if lsn == expected {
+		return nil
+	}
+	if lsn > expected {
+		return newFailure(FailureContract, PhaseRecvDispatch,
+			fmt.Errorf("WAL gap: got LSN=%d, expected=%d (appliedWalLSN=%d)", lsn, expected, r.appliedWalLSN))
+	}
+	if lsn == r.appliedWalLSN {
+		return newFailure(FailureProtocol, PhaseRecvDispatch,
+			fmt.Errorf("WAL exact-duplicate on wire: LSN=%d (appliedWalLSN=%d)", lsn, r.appliedWalLSN))
+	}
+	return newFailure(FailureProtocol, PhaseRecvDispatch,
+		fmt.Errorf("WAL backward: got LSN=%d < appliedWalLSN=%d", lsn, r.appliedWalLSN))
+}
+
+func (r *Receiver) enforceWalWireMonotonic(lsn uint64) error {
+	switch r.store.RecoveryMode() {
+	case storage.RecoveryModeWALReplay:
+		return r.checkMonotonic(lsn)
+	default:
+		// State convergence: ScanLBAs may attach the same frontier LSN to many
+		// RecoveryEntry payloads (storage/store.go §ScanLBAs, smartwal semantics).
+		return nil
+	}
+}
+
+// Session returns the active session (nil if SessionStart not yet
+// received). Test/diagnostic accessor.
+func (r *Receiver) Session() *RebuildSession { return r.session }
+
+// Run reads frames until the barrier round-trip completes, the peer
+// closes the conn, or a fatal error occurs. Returns the
+// `(achievedLSN, nil)` reported on the wire after a successful
+// barrier; returns an error on protocol violation or apply failure.
+func (r *Receiver) Run() (achievedLSN uint64, err error) {
+	log.Printf("g7-debug: Receiver.Run entry")
+	var baseCount, walCount uint64
+	for {
+		ft, payload, err := readFrame(r.conn)
+		if err != nil {
+			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+				log.Printf("g7-debug: Receiver.Run peer closed baseCount=%d walCount=%d sessionID=%d err=%v", baseCount, walCount, r.sessionID, err)
+				return 0, newFailure(FailureWire, PhaseRecvDispatch,
+					fmt.Errorf("peer closed before barrier: %w", err))
+			}
+			log.Printf("g7-debug: Receiver.Run readFrame err baseCount=%d walCount=%d sessionID=%d err=%v", baseCount, walCount, r.sessionID, err)
+			return 0, newFailure(FailureWire, PhaseRecvDispatch, err)
+		}
+
+		switch ft {
+		case frameSessionStart:
+			s, decErr := decodeSessionStart(payload)
+			if decErr != nil {
+				return 0, newFailure(FailureProtocol, PhaseRecvDispatch, decErr)
+			}
+			if r.session != nil {
+				return 0, newFailure(FailureProtocol, PhaseRecvDispatch,
+					errors.New("duplicate SessionStart"))
+			}
+			// numBlocks is sent by primary so receiver sizes the bitmap
+			// matching primary's view; if the substrate disagrees, the
+			// session would silently mis-arbitrate, so we sanity-check.
+			if got := r.store.NumBlocks(); got != s.NumBlocks {
+				log.Printf("g7-debug: Receiver.Run numBlocks mismatch primary=%d local=%d", s.NumBlocks, got)
+				return 0, newFailure(FailureContract, PhaseRecvDispatch,
+					fmt.Errorf("numBlocks mismatch primary=%d local=%d", s.NumBlocks, got))
+			}
+			r.sessionID = s.SessionID
+			// Wire compat: sessionStart still carries TargetLSN in
+			// the legacy fourth slot, but BASE frontier comes from
+			// FromLSN. In dual-lane rebuild, FromLSN is the
+			// primary's BasePinLSN: the durable cut through which
+			// the BASE snapshot is valid. TargetLSN is retained only
+			// as a compat/frontier-hint band and MUST NOT drive BASE
+			// AdvanceFrontier.
+			r.session = NewRebuildSession(r.store, s.FromLSN)
+			// Seed walApplied with fromLSN so AchievedLSN remains a
+			// monotonic observation even when no WAL frames arrive.
+			// Completion itself is baseDone + BarrierReq witness; the
+			// seed is no longer a target-crossing trick.
+			r.session.SeedWalApplied(s.FromLSN)
+			r.recvFromLSN = s.FromLSN
+			r.appliedWalLSN = s.FromLSN
+			log.Printf("g7-debug: Receiver.Run frameSessionStart sessionID=%d fromLSN=%d targetLSN=%d numBlocks=%d", s.SessionID, s.FromLSN, s.TargetLSN, s.NumBlocks)
+
+		case frameBaseBlock:
+			if r.session == nil {
+				return 0, newFailure(FailureProtocol, PhaseRecvDispatch,
+					errors.New("BaseBlock before SessionStart"))
+			}
+			lba, data, decErr := decodeBaseBlock(payload)
+			if decErr != nil {
+				return 0, newFailure(FailureProtocol, PhaseRecvDispatch, decErr)
+			}
+			if _, applyErr := r.session.ApplyBaseBlock(lba, data); applyErr != nil {
+				log.Printf("g7-debug: Receiver.Run ApplyBaseBlock err lba=%d err=%v", lba, applyErr)
+				return 0, newFailure(FailureSubstrate, PhaseRecvApply,
+					fmt.Errorf("apply base lba=%d: %w", lba, applyErr))
+			}
+			if lba+1 > r.baseInstalledUpper {
+				r.baseInstalledUpper = lba + 1
+			}
+			r.blocksSinceLastAck++
+			baseCount++
+			if baseCount%4096 == 0 {
+				log.Printf("g7-debug: Receiver.Run base progress lba=%d baseCount=%d", lba, baseCount)
+			}
+			if r.shouldAck() {
+				if ackErr := r.sendAck(); ackErr != nil {
+					log.Printf("g7-debug: Receiver.Run sendAck err err=%v", ackErr)
+					return 0, ackErr
+				}
+			}
+
+		case frameWALEntry:
+			if r.session == nil {
+				return 0, newFailure(FailureProtocol, PhaseRecvDispatch,
+					errors.New("WALEntry before SessionStart"))
+			}
+			kind, lba, lsn, data, decErr := decodeWALEntry(payload)
+			if decErr != nil {
+				return 0, newFailure(FailureProtocol, PhaseRecvDispatch, decErr)
+			}
+			if err := r.enforceWalWireMonotonic(lsn); err != nil {
+				log.Printf("g7-debug: Receiver.Run enforceWalWireMonotonic err lsn=%d appliedWalLSN=%d err=%v", lsn, r.appliedWalLSN, err)
+				return 0, err
+			}
+			if applyErr := r.session.ApplyWALEntry(kind, lba, data, lsn); applyErr != nil {
+				log.Printf("g7-debug: Receiver.Run ApplyWALEntry err lsn=%d err=%v", lsn, applyErr)
+				return 0, newFailure(FailureSubstrate, PhaseRecvApply,
+					fmt.Errorf("apply wal kind=%s lba=%d lsn=%d: %w", kind, lba, lsn, applyErr))
+			}
+			if lsn > r.appliedWalLSN {
+				r.appliedWalLSN = lsn
+			}
+			walCount++
+			if walCount%256 == 0 {
+				log.Printf("g7-debug: Receiver.Run wal progress lsn=%d walCount=%d", lsn, walCount)
+			}
+
+		case frameBaseDone:
+			if r.session == nil {
+				return 0, newFailure(FailureProtocol, PhaseRecvDispatch,
+					errors.New("BaseDone before SessionStart"))
+			}
+			log.Printf("g7-debug: Receiver.Run frameBaseDone baseCount=%d walCount=%d", baseCount, walCount)
+			r.session.MarkBaseComplete()
+			// Mandatory final base-lane ack — base done means primary
+			// expects to know our base-installed cursor before drain
+			// even if cadence wouldn't have triggered yet.
+			if ackErr := r.sendAck(); ackErr != nil {
+				return 0, ackErr
+			}
+
+		case frameBarrierReq:
+			if r.session == nil {
+				return 0, newFailure(FailureProtocol, PhaseRecvDispatch,
+					errors.New("BarrierReq before SessionStart"))
+			}
+			log.Printf("g7-debug: Receiver.Run frameBarrierReq sessionID=%d baseCount=%d walCount=%d appliedWalLSN=%d", r.sessionID, baseCount, walCount, r.appliedWalLSN)
+			// Sync substrate so AchievedLSN reflects durable state.
+			frontier, syncErr := r.store.Sync()
+			if syncErr != nil {
+				log.Printf("g7-debug: Receiver.Run Sync err err=%v", syncErr)
+				return 0, newFailure(FailureSubstrate, PhaseRecvSync, syncErr)
+			}
+			// §IV.2.1 / recover-semantics-adjustment-plan §1 A-class:
+			// latch the barrier-arrival witness BEFORE the layer-1
+			// closure check. BarrierReq arrival = primary attests
+			// PrimaryWalLegOk under serializer lock (§IV.2.1
+			// disjunction); layer-1 TryComplete makes that explicit
+			// in the conjunct.
+			r.session.WitnessBarrier()
+			// Layer-1 closure check (necessary, not sufficient — the
+			// system close is the primary's CanEmitSessionComplete
+			// after reading our response).
+			achieved, done := r.session.TryComplete()
+			if !done {
+				st := r.session.Status()
+				log.Printf("g7-debug: Receiver.Run TryComplete=false st=%+v", st)
+				return 0, newFailure(FailureContract, PhaseRecvSync,
+					fmt.Errorf("barrier req but layer-1 not done: %+v", st))
+			}
+			durableAchieved := achieved
+			if frontier < durableAchieved {
+				durableAchieved = frontier
+			}
+			log.Printf("g7-debug: Receiver.Run TryComplete=true achieved=%d frontier=%d durableAchieved=%d", achieved, frontier, durableAchieved)
+			if writeErr := writeFrame(r.conn, frameBarrierResp, encodeBarrierResp(durableAchieved)); writeErr != nil {
+				log.Printf("g7-debug: Receiver.Run BarrierResp write err err=%v", writeErr)
+				return 0, newFailure(FailureWire, PhaseRecvSync, writeErr)
+			}
+			log.Printf("g7-debug: Receiver.Run frameBarrierResp written, returning durableAchieved=%d", durableAchieved)
+			return durableAchieved, nil
+
+		case frameBarrierResp:
+			return 0, newFailure(FailureProtocol, PhaseRecvDispatch,
+				errors.New("unexpected BarrierResp from primary"))
+
+		default:
+			return 0, newFailure(FailureProtocol, PhaseRecvDispatch,
+				fmt.Errorf("unknown frame type %d", ft))
+		}
+	}
+}
+
+// shouldAck evaluates the cadence rule per docs/recovery-pin-floor-wire.md §3.
+// Returns true on the FIRST trigger (K blocks accumulated OR T elapsed since
+// last ack). Idempotent: returns false if neither K nor T threshold reached.
+//
+// Special case: lastAckTime zero means "no ack sent yet" — don't trigger on
+// elapsed alone, otherwise the very first frame triggers ack which churns
+// for tests with very small K. Wait until at least 1 block has been applied.
+func (r *Receiver) shouldAck() bool {
+	if r.cadenceK > 0 && r.blocksSinceLastAck >= r.cadenceK {
+		return true
+	}
+	if r.cadenceT > 0 && r.blocksSinceLastAck > 0 {
+		if !r.lastAckTime.IsZero() && time.Since(r.lastAckTime) >= r.cadenceT {
+			return true
+		}
+		// First-ever ack: trigger by elapsed using session age (for
+		// tests that set tiny K and T) — but only after at least one
+		// block has been applied.
+		if r.lastAckTime.IsZero() {
+			// We don't track session start time; for the POC, the
+			// elapsed-since-zero case is captured the next time around.
+			// This deliberate undercount is harmless: K-trigger will
+			// catch typical workloads.
+		}
+	}
+	return false
+}
+
+// sendAck writes a frameBaseBatchAck. The frame name is historical:
+// AcknowledgedLSN is the authoritative durable WAL frontier used for
+// pin-floor movement; BaseLBAUpper is advisory base progress only.
+// Resets cadence counters.
+//
+// AcknowledgedLSN semantics: receiver ack is a durable claim, not an
+// in-memory apply claim. The replica first flushes its local substrate,
+// then reports min(session WALApplied, syncedLSN-at-ack-time). This is
+// the value the primary uses to advance pin_floor; over-claiming here
+// can recycle WAL that the replica has not actually made durable.
+func (r *Receiver) sendAck() error {
+	if r.session == nil {
+		return newFailure(FailureProtocol, PhaseRecvAckWrite,
+			errors.New("sendAck before SessionStart"))
+	}
+	st := r.session.Status()
+	syncedLSN, err := r.store.Sync()
+	if err != nil {
+		return newFailure(FailureSubstrate, PhaseRecvAckWrite, err)
+	}
+	acknowledgedLSN := st.WALApplied
+	if syncedLSN < acknowledgedLSN {
+		acknowledgedLSN = syncedLSN
+	}
+	payload := encodeBaseBatchAck(baseBatchAckPayload{
+		SessionID:       r.sessionID,
+		AcknowledgedLSN: acknowledgedLSN,
+		BaseLBAUpper:    r.baseInstalledUpper,
+	})
+	if err := writeFrame(r.conn, frameBaseBatchAck, payload); err != nil {
+		return newFailure(FailureWire, PhaseRecvAckWrite, err)
+	}
+	r.blocksSinceLastAck = 0
+	r.lastAckTime = time.Now()
+	return nil
+}

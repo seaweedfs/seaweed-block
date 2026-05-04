@@ -73,13 +73,30 @@ type RecoveryFactsObserved struct {
 
 func (RecoveryFactsObserved) eventKind() string { return "RecoveryFactsObserved" }
 
+// DurableAckObserved reports a replica durable frontier learned from
+// recovery-session feedback (for example BaseBatchAck). It is not probe
+// reachability and does not by itself decide health or start recovery.
+type DurableAckObserved struct {
+	ReplicaID       string
+	EndpointVersion uint64
+	TransportEpoch  uint64
+	DurableLSN      uint64
+	PrimaryTailLSN  uint64
+	PrimaryHeadLSN  uint64
+}
+
+func (DurableAckObserved) eventKind() string { return "DurableAckObserved" }
+
 // --- Session events (authority: session owner / executor) ---
 
 // SessionPrepared: a recovery session has been planned but not started.
 type SessionPrepared struct {
-	ReplicaID string
-	SessionID uint64
-	Kind      SessionKind
+	ReplicaID    string
+	SessionID    uint64
+	Kind         SessionKind
+	FrontierHint uint64
+	// TargetLSN is a legacy alias kept while adapter/executor/wire
+	// vocabulary migrates. Prefer FrontierHint for new engine code.
 	TargetLSN uint64
 }
 
@@ -112,12 +129,114 @@ type SessionClosedCompleted struct {
 
 func (SessionClosedCompleted) eventKind() string { return "SessionClosedCompleted" }
 
+// RecoveryFailureKind is the engine-owned classification of why a
+// recovery session failed. Engine MUST NOT import core/storage —
+// substrate-side classification (`storage.StorageRecoveryFailureKind`)
+// is mapped at the transport boundary into this engine-local enum.
+//
+// Per architect kickoff §9.3 + T4d mini-plan v0.3 boundary discipline:
+// engine consumes its own type; storage owns its type; transport does
+// the mapping. See `feedback_engine_no_storage_import.md`.
+type RecoveryFailureKind int
+
+const (
+	// RecoveryFailureUnknown — default zero value; treat as generic
+	// failure (retryable per RecoveryRuntimePolicy.MaxRetries).
+	RecoveryFailureUnknown RecoveryFailureKind = iota
+
+	// RecoveryFailureWALRecycled — substrate's retention boundary
+	// crossed. Engine escalates to Decision=Rebuild (skips retry
+	// budget; tier-class change).
+	RecoveryFailureWALRecycled
+
+	// RecoveryFailureTransport — transport / connection error.
+	// Retryable up to RecoveryRuntimePolicy.MaxRetries.
+	RecoveryFailureTransport
+
+	// RecoveryFailureSubstrateIO — substrate IO failure during the
+	// scan (read error, decode error mid-scan). Retryable.
+	RecoveryFailureSubstrateIO
+
+	// RecoveryFailureTargetNotReached — legacy diagnostic for old
+	// catch-up senders that explicitly failed a target-band compare.
+	// Current recover(a) transport should prefer concrete causes such
+	// as WALRecycled, ack-behind-last-sent (Transport), or SubstrateIO.
+	// Retryable while the legacy kind remains accepted.
+	RecoveryFailureTargetNotReached
+
+	// RecoveryFailureStartTimeout — adapter watchdog: executor
+	// never signaled SessionStart within the configured window.
+	// Engine's applySessionFailed BYPASSES retry for this kind
+	// (executor never started; retrying an unreachable executor
+	// doesn't help).
+	RecoveryFailureStartTimeout
+
+	// RecoveryFailureSessionInvalidated — session canceled by
+	// control path (identity changed, peer removed, etc.). Not
+	// retried as a recovery failure; engine handles via the
+	// invalidation path.
+	RecoveryFailureSessionInvalidated
+
+	// RecoveryFailurePinUnderRetention — mid-session contract
+	// violation observed by sender: a `BaseBatchAck` arrived with
+	// `AcknowledgedLSN` below primary's current S boundary, so
+	// `coord.SetPinFloor(replicaID, ack, primaryS)` returned the
+	// typed `recovery.Failure(PinUnderRetention)`. The peer's
+	// progress fell behind the primary's WAL retention while the
+	// session was streaming — see INV-PIN-COMPATIBLE-WITH-RETENTION,
+	// docs/recovery-pin-floor-wire.md §5, and feedback round-43
+	// `INV-REPL-RECOVERY-STALE-ENTRY-SKIP-PER-LBA`.
+	//
+	// NOT RETRYABLE on the same lineage. Engine MUST treat this as
+	// terminal for the active recovery: skip the retry budget,
+	// emit `PublishDegraded`, and rely on the next probe to mint a
+	// fresh lineage with `fromLSN ≥ current S`. Same shape as
+	// `RecoveryFailureStartTimeout` — see `applySessionFailed` in
+	// apply.go.
+	//
+	// Mapping ratified by architect 2026-04-29 (Option A: bug-fix
+	// shape). Distinct from `RecoveryFailureWALRecycled` because
+	// WALRecycled is a cold-start scan failure (escalates to
+	// Rebuild); PinUnderRetention is a mid-session violation
+	// (terminal for current lineage, no auto-escalation).
+	RecoveryFailurePinUnderRetention
+)
+
+// String returns the human-readable kind name for diagnostics. NOT
+// parsed by anyone — typed branching uses the int constants directly.
+func (k RecoveryFailureKind) String() string {
+	switch k {
+	case RecoveryFailureWALRecycled:
+		return "WALRecycled"
+	case RecoveryFailureTransport:
+		return "Transport"
+	case RecoveryFailureSubstrateIO:
+		return "SubstrateIO"
+	case RecoveryFailureTargetNotReached:
+		return "TargetNotReached"
+	case RecoveryFailureStartTimeout:
+		return "StartTimeout"
+	case RecoveryFailureSessionInvalidated:
+		return "SessionInvalidated"
+	case RecoveryFailurePinUnderRetention:
+		return "PinUnderRetention"
+	default:
+		return "Unknown"
+	}
+}
+
 // SessionClosedFailed: the session failed.
 // This is one of only two terminal session events.
+//
+// Per T4d-1 (architect HIGH v0.1 #1 + v0.3 boundary fix): `FailureKind`
+// carries the typed classification engine branches on. `Reason` is
+// DIAGNOSTIC TEXT ONLY — engine MUST NOT parse it. Engine reads
+// `FailureKind` to decide retry vs escalate.
 type SessionClosedFailed struct {
-	ReplicaID string
-	SessionID uint64
-	Reason    string
+	ReplicaID   string
+	SessionID   uint64
+	FailureKind RecoveryFailureKind // typed branch field
+	Reason      string              // DIAGNOSTIC TEXT ONLY — do NOT parse
 }
 
 func (SessionClosedFailed) eventKind() string { return "SessionClosedFailed" }

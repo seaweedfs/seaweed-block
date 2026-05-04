@@ -1,0 +1,297 @@
+package transport
+
+import (
+	"bytes"
+	"context"
+	"net"
+	"testing"
+	"time"
+
+	"github.com/seaweedfs/seaweed-block/core/adapter"
+	"github.com/seaweedfs/seaweed-block/core/recovery"
+	"github.com/seaweedfs/seaweed-block/core/storage"
+)
+
+// runDualLaneListener spins up a TCP listener on 127.0.0.1:0 that
+// accepts dual-lane recover connections and dispatches each to a
+// fresh recovery.Receiver via recovery.ReplicaBridge.Serve. Returns
+// the bound address and a stop function.
+//
+// In production, cmd/blockvolume.main does the equivalent. Inlined
+// here so the test can exercise the dual-lane wire path end-to-end
+// without a daemon binary.
+func runDualLaneListener(t *testing.T, store storage.LogicalStorage) (addr string, stop func()) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	bridge := recovery.NewReplicaBridge(store)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		bridge.AcceptDualLaneLoop(ctx, ln)
+	}()
+	return ln.Addr().String(), func() {
+		cancel()
+		_ = ln.Close()
+		<-done
+	}
+}
+
+// TestDualLane_BlockExecutor_StartRebuild proves that
+// NewBlockExecutorWithDualLane delegates StartRebuild through
+// recovery.PrimaryBridge correctly:
+//
+//   - Dials the replica's separate dual-lane port (Option A).
+//   - Coordinator's StartSession fires synchronously before return.
+//   - OnSessionStart / OnSessionClose callbacks fire with adapter-shaped
+//     results (so existing engine code consumes them transparently).
+//   - achievedLSN == primary's H.
+//   - Replica's substrate matches primary byte-for-byte after barrier.
+//
+// What this test does NOT cover (out of scope per wiring plan §10):
+//
+//   - §3.2 #3 single-queue real-time interleave.
+//   - WAL recycle path consuming MinPinAcrossActiveSessions (priority 2.5).
+//   - cmd flag wiring (production daemon path).
+func TestDualLane_BlockExecutor_StartRebuild(t *testing.T) {
+	const numBlocks = 64
+	const blockSize = 4096
+
+	primary := storage.NewBlockStore(numBlocks, blockSize)
+	replica := storage.NewBlockStore(numBlocks, blockSize)
+
+	// Seed primary with 30 LBAs of distinguishable bytes.
+	for lba := uint32(0); lba < 30; lba++ {
+		data := make([]byte, blockSize)
+		data[0] = byte(0x80 | lba)
+		_, _ = primary.Write(lba, data)
+	}
+	_, _ = primary.Sync()
+
+	// Replica-side dual-lane listener.
+	dualLaneAddr, stop := runDualLaneListener(t, replica)
+	defer stop()
+
+	// Coordinator (per wiring plan §5: per-volume, here per-test).
+	coord := recovery.NewPeerShipCoordinator()
+
+	// Executor in dual-lane mode. legacy replicaAddr is bogus — this
+	// test only exercises StartRebuild, which routes via dualLaneAddr.
+	exec := NewBlockExecutorWithDualLane(
+		primary,
+		"127.0.0.1:0", // legacy port, unused in this test
+		dualLaneAddr,
+		coord,
+		recovery.ReplicaID("r1"),
+	)
+
+	startCh := make(chan adapter.SessionStartResult, 1)
+	type recoveryEvent struct {
+		kind  string
+		close adapter.SessionCloseResult
+		ack   adapter.DurableAckResult
+	}
+	eventCh := make(chan recoveryEvent, 8)
+	exec.SetOnSessionStart(func(r adapter.SessionStartResult) { startCh <- r })
+	exec.SetOnSessionClose(func(r adapter.SessionCloseResult) {
+		eventCh <- recoveryEvent{kind: "close", close: r}
+	})
+	exec.SetOnDurableAck(func(r adapter.DurableAckResult) {
+		eventCh <- recoveryEvent{kind: "ack", ack: r}
+	})
+
+	_, _, primaryH := primary.Boundaries()
+	if err := exec.StartRebuild("r1", 7, 1, 1, primaryH); err != nil {
+		t.Fatalf("StartRebuild: %v", err)
+	}
+
+	// OnSessionStart should fire fast (bridge invokes it synchronously
+	// before the goroutine spawns).
+	select {
+	case got := <-startCh:
+		if got.SessionID != 7 {
+			t.Errorf("OnSessionStart: SessionID=%d want 7", got.SessionID)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("OnSessionStart did not fire within 2s")
+	}
+
+	// OnSessionClose: success with achievedLSN == primary H.
+	var closeResult adapter.SessionCloseResult
+	closeDeadline := time.After(5 * time.Second)
+	for {
+		select {
+		case ev := <-eventCh:
+			if ev.kind != "close" {
+				continue
+			}
+			closeResult = ev.close
+			if !closeResult.Success {
+				t.Fatalf("OnSessionClose: not Success; FailReason=%q", closeResult.FailReason)
+			}
+			if closeResult.AchievedLSN != primaryH {
+				t.Errorf("OnSessionClose: achievedLSN=%d want %d", closeResult.AchievedLSN, primaryH)
+			}
+			goto closeObserved
+		case <-closeDeadline:
+			t.Fatal("OnSessionClose did not fire within 5s")
+		}
+	}
+closeObserved:
+
+	// G9C: the real dual-lane executor must emit a durable progress
+	// fact AFTER the recovery close, so engine readiness can distinguish
+	// recovery-window closure from live-feed continuity.
+	select {
+	case ev := <-eventCh:
+		if ev.kind != "ack" {
+			t.Fatalf("event after close=%s want ack", ev.kind)
+		}
+		if ev.ack.DurableLSN != closeResult.AchievedLSN {
+			t.Fatalf("post-close durable ack LSN=%d want close achieved %d",
+				ev.ack.DurableLSN, closeResult.AchievedLSN)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("post-close durable ack did not fire within 2s")
+	}
+
+	// Replica matches primary on the rebuilt range.
+	for lba := uint32(0); lba < 30; lba++ {
+		pd, _ := primary.Read(lba)
+		rd, _ := replica.Read(lba)
+		if !bytes.Equal(pd, rd) {
+			t.Fatalf("lba %d mismatch: primary[0]=%02x replica[0]=%02x", lba, pd[0], rd[0])
+		}
+	}
+
+	// Coordinator returned to Idle (session ended cleanly).
+	if got := coord.Phase("r1"); got != recovery.PhaseIdle {
+		t.Errorf("post-session phase=%s want Idle", got)
+	}
+}
+
+func TestDualLane_StartRebuildPinned_SeparatesBasePinFromFrontierHint(t *testing.T) {
+	primary := storage.NewBlockStore(8, 4096)
+	coord := recovery.NewPeerShipCoordinator()
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		conn, _ := ln.Accept()
+		accepted <- conn
+	}()
+
+	exec := NewBlockExecutorWithDualLane(
+		primary,
+		"127.0.0.1:0",
+		ln.Addr().String(),
+		coord,
+		recovery.ReplicaID("r1"),
+	)
+
+	const (
+		basePinLSN   = uint64(3)
+		frontierHint = uint64(9)
+	)
+	if err := exec.StartRebuildPinned("r1", 17, 1, 1, basePinLSN, frontierHint); err != nil {
+		t.Fatalf("StartRebuildPinned: %v", err)
+	}
+
+	st, ok := coord.Status("r1")
+	if !ok {
+		t.Fatal("coordinator has no active session")
+	}
+	if st.FromLSN != basePinLSN {
+		t.Fatalf("coordinator FromLSN=%d want base pin %d", st.FromLSN, basePinLSN)
+	}
+	if st.TargetLSN != frontierHint {
+		t.Fatalf("coordinator TargetLSN=%d want frontier hint %d", st.TargetLSN, frontierHint)
+	}
+
+	select {
+	case conn := <-accepted:
+		if conn != nil {
+			_ = conn.Close()
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("dual-lane listener did not accept connection")
+	}
+}
+
+func TestDualLane_StartRebuild_DerivesBasePinFromPrimarySync(t *testing.T) {
+	primary := storage.NewBlockStore(16, 4096)
+	for lba := uint32(0); lba < 4; lba++ {
+		data := bytes.Repeat([]byte{byte(lba + 1)}, 4096)
+		if _, err := primary.Write(lba, data); err != nil {
+			t.Fatalf("Write: %v", err)
+		}
+	}
+	_, _, preH := primary.Boundaries()
+	if preH == 0 {
+		t.Fatal("test premise: primary head must be non-zero")
+	}
+	coord := recovery.NewPeerShipCoordinator()
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		conn, _ := ln.Accept()
+		accepted <- conn
+	}()
+
+	exec := NewBlockExecutorWithDualLane(
+		primary,
+		"127.0.0.1:0",
+		ln.Addr().String(),
+		coord,
+		recovery.ReplicaID("r1"),
+	)
+
+	const frontierHint = uint64(99)
+	if err := exec.StartRebuild("r1", 18, 1, 1, frontierHint); err != nil {
+		t.Fatalf("StartRebuild: %v", err)
+	}
+
+	st, ok := coord.Status("r1")
+	if !ok {
+		t.Fatal("coordinator has no active session")
+	}
+	if st.FromLSN != preH {
+		t.Fatalf("coordinator FromLSN=%d want synced primary H/base pin %d", st.FromLSN, preH)
+	}
+	if st.TargetLSN != frontierHint {
+		t.Fatalf("coordinator TargetLSN=%d want frontier hint %d", st.TargetLSN, frontierHint)
+	}
+
+	select {
+	case conn := <-accepted:
+		if conn != nil {
+			_ = conn.Close()
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("dual-lane listener did not accept connection")
+	}
+}
+
+// TestDualLane_LegacyConstructorIsNotDualLane verifies the
+// existing NewBlockExecutor path is unchanged: e.dualLane is nil,
+// StartRebuild falls through to the legacy single-lane code (no
+// behavior change for callers using the legacy constructor).
+func TestDualLane_LegacyConstructorIsNotDualLane(t *testing.T) {
+	primary := storage.NewBlockStore(8, 4096)
+	exec := NewBlockExecutor(primary, "127.0.0.1:0")
+	if exec.dualLane != nil {
+		t.Errorf("legacy NewBlockExecutor: dualLane=%v want nil", exec.dualLane)
+	}
+}

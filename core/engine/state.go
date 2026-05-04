@@ -82,11 +82,68 @@ const (
 
 // RecoveryTruth: what recovery is needed. Authority: primary.
 type RecoveryTruth struct {
-	R              uint64           // replica durable/achieved boundary
-	S              uint64           // primary recoverable start boundary (WAL tail)
-	H              uint64           // primary target boundary (head)
+	R              uint64 // replica durable/achieved boundary
+	S              uint64 // primary recoverable start boundary (WAL tail)
+	H              uint64 // primary target boundary (head)
 	Decision       RecoveryDecision
 	DecisionReason string
+
+	// DurableAckR is the latest replica durable-ack frontier observed
+	// by the engine. It is progress telemetry for lag policy and WAL
+	// release authority, not a recovery-class predicate by itself.
+	DurableAckR             uint64
+	DurableAckKnown         bool
+	DurableAckPrimaryH      uint64
+	DurableAckStalledSample int
+
+	// LagDecision records the latest coordinator interpretation of durable
+	// ack progress. This is policy state only; the raw recovery class still
+	// comes from R/S/H facts and ClassifyProgress.
+	LagDecision LagDecision
+
+	// RecoveryWindowClosed is set when a catch-up/rebuild session closes
+	// successfully. For rebuild, SessionClosedCompleted is the aggregate
+	// receiver proof that base + WAL + barrier closed; engine does not
+	// need a separate base-complete event in this slice.
+	RecoveryWindowClosed bool
+
+	// PostCloseDurableAckKnown means the primary observed durable progress
+	// after the recovery window closed. A recovered replica is not ready
+	// for publication until this confirms live-feed continuity beyond the
+	// recovery close point.
+	PostCloseDurableAckKnown bool
+	PostCloseDurableAckR     uint64
+
+	// Attempts tracks how many StartCatchUp / StartRecovery commands
+	// the engine has emitted for the current Decision. Engine
+	// SessionFailed handler increments on close-with-non-recycled-
+	// error; cleared by SessionCompleted (success), by ErrWALRecycled
+	// escalation (Decision flips to Rebuild), and by identity changes
+	// (Recovery is reset wholesale).
+	//
+	// Per T4c-2 G-1 §4.1 architect Option B (retry budget lives in
+	// RuntimePolicy) + T4c-3 retry-loop wiring (round-38, this batch):
+	// when Attempts exceeds DefaultRuntimePolicyFor(kind).MaxRetries,
+	// the engine stops emitting fresh StartCatchUp and either escalates
+	// to Rebuild (if applicable) or falls back to Degraded.
+	Attempts int
+
+	// RebuildPinned makes the rebuild decision sticky against probe
+	// re-classification. Set by:
+	//   - WALRecycled escalation (catch-up failed because primary
+	//     truncated the requested LSN range — gap is unrecoverable
+	//     via WAL replay)
+	//   - catch-up retry-budget exhaustion (round-47:
+	//     INV-REPL-CATCHUP-EXHAUSTION-ESCALATES-TO-REBUILD)
+	// Cleared by:
+	//   - successful rebuild SessionCompleted
+	//   - identity change / assignment reset
+	//
+	// While set, decide() forces Decision=Rebuild regardless of
+	// R/S/H — pins INV-REPL-REBUILD-DECISION-STICKY so a stale
+	// auto-probe arriving mid-flight cannot downgrade back to
+	// CatchUp before the rebuild lands.
+	RebuildPinned bool
 }
 
 // SessionKind identifies the type of recovery session.
@@ -113,7 +170,8 @@ const (
 type SessionTruth struct {
 	SessionID     uint64
 	Kind          SessionKind
-	TargetLSN     uint64
+	FrontierHint  uint64
+	TargetLSN     uint64 // legacy alias for FrontierHint
 	AchievedLSN   uint64
 	Phase         SessionPhase
 	FailureReason string

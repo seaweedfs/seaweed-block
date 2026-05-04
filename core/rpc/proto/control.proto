@@ -1,0 +1,210 @@
+// Master-volume control-plane RPC for the block system.
+//
+// Direction:
+//   volume -> master:   ObservationService.ReportHeartbeat (unary)
+//   volume -> master:   AssignmentService.SubscribeAssignments (server-streaming)
+//   operator -> master: EvidenceService.QueryVolumeStatus (unary, read-only)
+//   CSI/operator -> master: LifecycleService.CreateVolume/DeleteVolume (desired intent only)
+//
+// Boundary (T0 sketch §3 load-bearing):
+//   - no message carries an AssignmentAsk
+//   - no message field maps to Epoch / EndpointVersion as an INPUT from the volume side
+//   - Epoch / EndpointVersion appear only INSIDE AssignmentFact, which is master-minted and
+//     consumed by the volume read-only
+//   - AssignmentFact has NO Intent field; Intent lives on AssignmentAsk, internal to the
+//     authority package, and never crosses the wire
+syntax = "proto3";
+
+package seaweedfs.block.control;
+
+option go_package = "github.com/seaweedfs/seaweed-block/core/rpc/control;control";
+
+import "google/protobuf/timestamp.proto";
+
+// ObservationService — volume reports local facts to master.
+service ObservationService {
+    // Periodic unary heartbeat. Master validates, converts to
+    // authority.HeartbeatMessage, calls ObservationHost.Ingest.
+    // Ack is diagnostic only.
+    rpc ReportHeartbeat(HeartbeatReport) returns (HeartbeatAck);
+}
+
+// AssignmentService — master publishes minted AssignmentInfo to
+// subscribing volume processes. Delivery is VOLUME-SCOPED: every
+// stream carries the current authority line for the requested
+// volume regardless of which replica that line targets.
+// replica_id on the request identifies the CALLER (for its own
+// self-filter / demotion detection), not the subscription key.
+//
+// Rationale (round-4 architect high fix): per-(vol, rid)
+// subscriptions let a superseded replica keep seeing its own
+// old line and never learn that the volume's authority has
+// moved to another replica. Volume-scoped fan-in plus a
+// self-replica-id filter in the volume host makes
+// "you've been superseded" observable without a separate
+// demotion message type.
+service AssignmentService {
+    // Server-streaming. Master sends the current volume
+    // authority line on subscribe (catch-up) and every mint
+    // thereafter. Current-line replay on fresh subscribe is
+    // permitted (T0 sketch §8.2.1 test 3); per-(Epoch,
+    // EndpointVersion) dedupe inside the master ensures the
+    // client never sees the same line twice or in reverse
+    // order, while RefreshEndpoint (same Epoch, higher
+    // EndpointVersion) still flows through.
+    rpc SubscribeAssignments(SubscribeRequest) returns (stream AssignmentFact);
+}
+
+// EvidenceService — operator read-only projection + evidence.
+service EvidenceService {
+    rpc QueryVolumeStatus(StatusRequest) returns (StatusResponse);
+}
+
+// LifecycleService — product lifecycle intent. This surface is for CSI /
+// operators to record desired volume state. It MUST NOT carry assignment,
+// epoch, endpoint_version, readiness, or primary facts.
+service LifecycleService {
+    rpc CreateVolume(CreateVolumeRequest) returns (CreateVolumeResponse);
+    rpc DeleteVolume(DeleteVolumeRequest) returns (DeleteVolumeResponse);
+}
+
+// HeartbeatReport — volume -> master observation fact. Field set
+// field-compatible with authority.HeartbeatMessage (P14 S4 wire).
+// No authority-mutation fields of any kind.
+message HeartbeatReport {
+    string server_id = 1;
+    google.protobuf.Timestamp sent_at = 2;
+    bool reachable = 3;
+    bool eligible = 4;
+    repeated HeartbeatSlot slots = 5;
+}
+
+// HeartbeatSlot — per-replica slot fact. local_role_claim is the
+// V2-shaped "I think I am Primary/Candidate" flag, carried RAW;
+// the observation layer may treat conflicting-primary as
+// ReasonConflictingPrimaryClaim but NEVER treats it as authority.
+message HeartbeatSlot {
+    string volume_id = 1;
+    string replica_id = 2;
+    string data_addr = 3;
+    string ctrl_addr = 4;
+    bool reachable = 5;
+    bool ready_for_primary = 6;
+    bool eligible = 7;
+    bool withdrawn = 8;
+    uint64 evidence_score = 9;
+    uint32 local_role_claim = 10; // authority.LocalRoleClaim enum value
+    repeated FrontendTarget frontends = 11;
+}
+
+// FrontendTarget — read-only frontend publication fact reported by
+// a blockvolume process. This is an observation/status fact only:
+// CSI may consume it to publish an already-running target, but
+// master/authority MUST NOT treat it as an assignment, readiness, or
+// placement input.
+message FrontendTarget {
+    string protocol = 1; // "iscsi" | "nvme"
+    string addr = 2;
+    string iqn = 3;
+    string nqn = 4;
+    uint32 lun = 5;
+    uint32 nsid = 6;
+}
+
+message HeartbeatAck {
+    google.protobuf.Timestamp accepted_at = 1;
+    uint64 sequence = 2;
+}
+
+message SubscribeRequest {
+    string volume_id = 1;
+    string replica_id = 2;
+    uint64 resume_epoch = 3; // delivery hint only; does NOT influence authority
+}
+
+// ReplicaDescriptor — one entry in an AssignmentFact.peers list.
+// Carries the authoritative lineage + addressing for a single peer
+// replica. Used by primary to configure its replication fan-out
+// (see ReplicationVolume.UpdateReplicaSet). Master-minted; hosts
+// MUST NOT construct or accumulate these from local observations
+// (option R rejected in v3-phase-15-t4a-5-0-host-callback-discovery.md
+// §9.5).
+message ReplicaDescriptor {
+    string replica_id = 1;
+    uint64 epoch = 2;
+    uint64 endpoint_version = 3;
+    string data_addr = 4;
+    string ctrl_addr = 5;
+}
+
+// AssignmentFact — master-minted AssignmentInfo fact carried to a
+// subscribed volume. Identity fields (1-6) mirror
+// adapter.AssignmentInfo and MUST be decoded via the sole permitted
+// site core/host/volume/subscribe.go:decodeAssignmentFact (guarded
+// by the TestNoOtherAssignmentInfoConstruction AST fence).
+//
+// Peer-set fields (7-8) are consumed via a separate host-only
+// decoder decodeReplicaTargets in the same file — they do NOT
+// transit through AssignmentInfo or the adapter/engine layers
+// (guardrail #2 of T4a-5.0 decision). This keeps the narrow
+// identity-truth seam untouched while unlocking the primary-side
+// replication fan-out that ReplicationVolume.UpdateReplicaSet needs.
+message AssignmentFact {
+    string volume_id = 1;
+    string replica_id = 2;
+    uint64 epoch = 3;
+    uint64 endpoint_version = 4;
+    string data_addr = 5;
+    string ctrl_addr = 6;
+
+    // peers — full authoritative peer set for this volume's current
+    // line. MAY be empty (legal: standalone / RF=1 / pre-peer
+    // bootstrap / operator-drained maintenance). self-replica is
+    // implicitly excluded from peers (the primary does not ship to
+    // itself).
+    repeated ReplicaDescriptor peers = 7;
+
+    // peer_set_generation — monotonic per-volume counter minted by
+    // master. Production master MUST emit peer_set_generation >= 1.
+    // ReplicationVolume.UpdateReplicaSet uses this for stale-replay
+    // protection; fake-master / test harnesses MAY use 0 for
+    // unversioned apply (does not advance the monotonic guard).
+    uint64 peer_set_generation = 8;
+}
+
+message StatusRequest {
+    string volume_id = 1;
+}
+
+// StatusResponse — operator read-only view. T0 surface is intentionally
+// thin: publisher's current line + controller's per-volume evidence.
+// Mode / fence / probe / session facts are G3/G4+ territory.
+message StatusResponse {
+    string volume_id = 1;
+    string replica_id = 2;
+    uint64 epoch = 3;
+    uint64 endpoint_version = 4;
+    bool assigned = 5;
+    string last_unsupported_reason = 6;
+    string last_convergence_stuck_at = 7;
+    repeated FrontendTarget frontends = 8;
+}
+
+message CreateVolumeRequest {
+    string volume_id = 1;
+    uint64 size_bytes = 2;
+    int32 replication_factor = 3;
+}
+
+message CreateVolumeResponse {
+    string volume_id = 1;
+    uint64 size_bytes = 2;
+    int32 replication_factor = 3;
+}
+
+message DeleteVolumeRequest {
+    string volume_id = 1;
+}
+
+message DeleteVolumeResponse {
+}

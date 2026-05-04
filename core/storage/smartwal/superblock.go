@@ -10,16 +10,34 @@ import (
 
 // File-format identity. Distinct from the WALStore magic so the two
 // backends can never accidentally open each other's files.
+//
+// Version history:
+//   1: initial layout.
+//   2: T3a Addendum A — added ImplKind + ImplVersion so the
+//      DurableProvider can self-identify this as a smartwal file
+//      via a uniform field shape parallel to walstore's superblock.
+//      Opening a v1 file with v2 code returns errBadVersion
+//      (one-way bump; no compat read path).
 const (
 	headerSize    = 4096
 	headerMagic   = "SWAW" // SmartWAL: "SW" + AW
-	headerVersion = 1
+	headerVersion = 2
 )
+
+// implKindSmartWAL matches core/storage.ImplKindSmartWAL (=2).
+// Duplicated as a raw byte constant here to avoid a reverse
+// import; the shared wire value is documented in storage.ImplKind.
+const implKindSmartWAL uint8 = 2
+
+// smartwalImplVersion is this package's per-impl schema version.
+// Independent from headerVersion (superblock-format version).
+const smartwalImplVersion uint32 = 1
 
 var (
 	errBadMagic    = errors.New("smartwal: not a smartwal store (bad magic)")
 	errBadVersion  = errors.New("smartwal: unsupported version")
 	errBadGeometry = errors.New("smartwal: invalid geometry")
+	errBadImpl     = errors.New("smartwal: wrong impl kind on disk")
 )
 
 // header is the 4KB preamble of a smartwal store file. It records
@@ -35,14 +53,21 @@ type header struct {
 	NumBlocks uint32 // total addressable blocks
 	WALSlots  uint64 // number of 32-byte slots in the ring
 	CreatedAt uint64 // unix nanoseconds
+	// T3a Addendum A — impl self-identity (parallel to walstore's
+	// superblock ImplKind + ImplVersion fields). Always set to
+	// implKindSmartWAL + smartwalImplVersion on new files.
+	ImplKind    uint8
+	ImplVersion uint32
 }
 
 func newHeader(blockSize uint32, numBlocks uint32, walSlots uint64) (header, error) {
 	h := header{
-		Version:   headerVersion,
-		BlockSize: blockSize,
-		NumBlocks: numBlocks,
-		WALSlots:  walSlots,
+		Version:     headerVersion,
+		BlockSize:   blockSize,
+		NumBlocks:   numBlocks,
+		WALSlots:    walSlots,
+		ImplKind:    implKindSmartWAL,
+		ImplVersion: smartwalImplVersion,
 	}
 	copy(h.Magic[:], headerMagic)
 	if _, err := rand.Read(h.UUID[:]); err != nil {
@@ -67,6 +92,12 @@ func (h *header) writeTo(w io.Writer) error {
 	binary.LittleEndian.PutUint64(buf[off:], h.WALSlots)
 	off += 8
 	binary.LittleEndian.PutUint64(buf[off:], h.CreatedAt)
+	off += 8
+	// T3a Addendum A — ImplKind + ImplVersion.
+	buf[off] = h.ImplKind
+	off++
+	off += 3 // reserved for future kind expansion / alignment
+	binary.LittleEndian.PutUint32(buf[off:], h.ImplVersion)
 	if _, err := w.Write(buf); err != nil {
 		return fmt.Errorf("smartwal: write header: %w", err)
 	}
@@ -101,6 +132,12 @@ func readHeader(r io.Reader) (header, error) {
 	h.WALSlots = binary.LittleEndian.Uint64(buf[off:])
 	off += 8
 	h.CreatedAt = binary.LittleEndian.Uint64(buf[off:])
+	off += 8
+	// T3a Addendum A — ImplKind + ImplVersion.
+	h.ImplKind = buf[off]
+	off++
+	off += 3 // reserved
+	h.ImplVersion = binary.LittleEndian.Uint32(buf[off:])
 	return h, nil
 }
 
@@ -116,6 +153,10 @@ func (h *header) validate() error {
 	}
 	if h.WALSlots == 0 {
 		return fmt.Errorf("%w: WALSlots=0", errBadGeometry)
+	}
+	// T3a Addendum A — ImplKind must match smartwal.
+	if h.ImplKind != implKindSmartWAL {
+		return fmt.Errorf("%w: got %d, want %d", errBadImpl, h.ImplKind, implKindSmartWAL)
 	}
 	return nil
 }

@@ -114,6 +114,104 @@ func (s *BlockStore) Close() error {
 // callers of LogicalStorage can transparently use either backend.
 var _ LogicalStorage = (*BlockStore)(nil)
 
+// ScanLBAs satisfies the LogicalStorage tier-1 recovery contract.
+// BlockStore is in-memory and has NO WAL retention — it cannot
+// distinguish "LBA was written at LSN N" from "LBA holds bytes that
+// happen to look like X." For T4c-2 catch-up scenarios that use
+// BlockStore (transport tests + calibration harness), the substrate
+// behaves as a state_convergence-equivalent: emit one entry per
+// currently-stored LBA, carrying the current bytes and the current
+// frontier LSN. fromLSN is effectively a "scan start hint"; we
+// honor the at-or-ahead-of-head shortcut (returns nil) but otherwise
+// do not enforce a retention boundary. Real production substrates
+// (walstore, smartwal) have proper retention + ErrWALRecycled
+// semantics.
+//
+// Per memo §13.0a, BlockStore reports its mode as
+// `RecoveryModeStateConvergence` for observability; callers that
+// require V2-faithful per-LSN replay MUST NOT use BlockStore as the
+// recovery substrate.
+//
+// Called by: transport.BlockExecutor.doCatchUp (T4c-2) when the
+// primary's substrate is BlockStore (test/calibration scenarios).
+// Owns: per-call snapshot of stored LBAs.
+// Borrows: fn callback — caller retains.
+func (s *BlockStore) ScanLBAs(fromLSN uint64, fn func(RecoveryEntry) error) error {
+	if fn == nil {
+		return nil
+	}
+	s.mu.RLock()
+	if fromLSN >= s.nextLSN {
+		s.mu.RUnlock()
+		return nil // caller is at-or-ahead of head; nothing to ship
+	}
+	// Snapshot the LBA-data map under the lock.
+	snapshot := make(map[uint32][]byte, len(s.blocks))
+	for lba, data := range s.blocks {
+		buf := make([]byte, len(data))
+		copy(buf, data)
+		snapshot[lba] = buf
+	}
+	// Synthesized scan-time LSN = walHead (the newest LSN actually
+	// written). nextLSN = walHead+1 would push every entry past the
+	// caller's targetLSN (typically equal to walHead) and cause the
+	// catch-up callback to skip everything via the
+	// `entry.LSN > targetLSN` cap.
+	frontierLSN := s.walHead
+	if frontierLSN == 0 {
+		frontierLSN = 1
+	}
+	s.mu.RUnlock()
+
+	// Emit in LBA order so behavior is deterministic across runs.
+	lbas := make([]uint32, 0, len(snapshot))
+	for lba := range snapshot {
+		lbas = append(lbas, lba)
+	}
+	for i := 1; i < len(lbas); i++ {
+		j := i
+		for j > 0 && lbas[j-1] > lbas[j] {
+			lbas[j-1], lbas[j] = lbas[j], lbas[j-1]
+			j--
+		}
+	}
+	// Use the frontier LSN as the synthesized scan-time LSN. This
+	// matches smartwal state_convergence semantic: emitted LSN is
+	// scan-time, not write-time.
+	for _, lba := range lbas {
+		entry := RecoveryEntry{
+			LSN:   frontierLSN,
+			LBA:   lba,
+			Flags: RecoveryEntryWrite,
+			Data:  snapshot[lba],
+		}
+		if err := fn(entry); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// RecoveryMode reports BlockStore's recovery sub-mode (T4d-4 part A;
+// T4c §I row 6). BlockStore is in-memory; its ScanLBAs synthesizes
+// entries from current state — closest to state-convergence.
+func (s *BlockStore) RecoveryMode() RecoveryMode {
+	return RecoveryModeStateConvergence
+}
+
+// AppliedLSNs satisfies the T4d-1 LogicalStorage extension. BlockStore
+// is in-memory and does NOT track per-LBA applied LSN — explicit
+// not-tracked return per kickoff §2.5 #1 architect Option C hybrid.
+// The replica recovery apply gate (T4d-2) handles the sentinel by
+// falling back to session-only tracking.
+//
+// Called by: T4d-2 replica recovery apply gate at session start.
+// Owns: nothing (returns sentinel + nil map).
+// Borrows: nothing.
+func (s *BlockStore) AppliedLSNs() (map[uint32]uint64, error) {
+	return nil, ErrAppliedLSNsNotTracked
+}
+
 // Boundaries returns the current R/S/H recovery boundaries.
 //   - R (syncedLSN): what's durable on this node
 //   - S (walTail): oldest retained LSN
@@ -183,7 +281,37 @@ func (s *BlockStore) ApplyEntry(lba uint32, data []byte, lsn uint64) error {
 	if lsn >= s.nextLSN {
 		s.nextLSN = lsn + 1
 	}
-	s.walHead = lsn
+	// Round-43 substrate hardening (defense-in-depth): walHead is
+	// the "stable frontier never goes backward" boundary per
+	// LogicalStorage contract §3 rule 3. Older-LSN ApplyEntry must
+	// NOT regress walHead. The replica recovery apply gate (T4d-2
+	// primary fix) prevents the older-LSN apply from reaching this
+	// path under recovery flow; this guard is the substrate-level
+	// safety net for any path that bypasses the gate (live duplicate,
+	// retry, future cross-substrate scenarios).
+	if lsn > s.walHead {
+		s.walHead = lsn
+	}
+	return nil
+}
+
+// WriteExtentDirect installs bytes into the in-memory block map without
+// advancing nextLSN or walHead — INV-RECV-BITMAP-CORE (§6.10): BASE
+// lane bypasses the LSN-tracked WAL apply path. The recovery receiver
+// pairs this with AdvanceFrontier(targetLSN) in MarkBaseComplete to
+// keep post-rebuild frontier reporting honest.
+func (s *BlockStore) WriteExtentDirect(lba uint32, data []byte) error {
+	if lba >= s.numBlocks {
+		return fmt.Errorf("storage: WriteExtentDirect LBA %d out of range", lba)
+	}
+	if len(data) != s.blockSize {
+		return fmt.Errorf("storage: WriteExtentDirect data size %d != block size %d", len(data), s.blockSize)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cp := make([]byte, s.blockSize)
+	copy(cp, data)
+	s.blocks[lba] = cp
 	return nil
 }
 

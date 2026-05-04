@@ -1,0 +1,83 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sw-block-cluster-spec
+  namespace: kube-system
+data:
+  cluster-spec.yaml: |
+    nodes:
+      - server_id: __NODE_NAME__
+        data_addr: 127.0.0.1:19101
+        ctrl_addr: 127.0.0.1:19102
+        pools:
+          - pool_id: default
+            total_bytes: 1073741824
+            free_bytes: 1073741824
+            block_size: 4096
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sw-blockmaster
+  namespace: kube-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sw-blockmaster
+  template:
+    metadata:
+      labels:
+        app: sw-blockmaster
+    spec:
+      containers:
+        - name: blockmaster
+          image: sw-block:local
+          imagePullPolicy: Never
+          command: ["/usr/local/bin/blockmaster"]
+          args:
+            - "--authority-store=/var/lib/sw-block/authority"
+            - "--lifecycle-store=/var/lib/sw-block/lifecycle"
+            - "--cluster-spec=/config/cluster-spec.yaml"
+            - "--lifecycle-product-loop-interval=100ms"
+            - "--launcher-loop-interval=100ms"
+            - "--launcher-manifest-dir=/manifests"
+            - "--launcher-master-addr=blockmaster.kube-system.svc.cluster.local:9333"
+            - "--launcher-image=sw-block:local"
+            - "--launcher-namespace=kube-system"
+            - "--launcher-durable-root=/var/lib/sw-block"
+            - "--launcher-iscsi-port-base=3260"
+            - "--listen=0.0.0.0:9333"
+            - "--expected-slots-per-volume=1"
+          ports:
+            - name: grpc
+              containerPort: 9333
+          volumeMounts:
+            - name: cluster-spec
+              mountPath: /config
+              readOnly: true
+            - name: state
+              mountPath: /var/lib/sw-block
+            - name: manifests
+              mountPath: /manifests
+      volumes:
+        - name: cluster-spec
+          configMap:
+            name: sw-block-cluster-spec
+        - name: state
+          emptyDir: {}
+        - name: manifests
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: blockmaster
+  namespace: kube-system
+spec:
+  selector:
+    app: sw-blockmaster
+  ports:
+    - name: grpc
+      port: 9333
+      targetPort: 9333

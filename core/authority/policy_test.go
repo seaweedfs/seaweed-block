@@ -1,5 +1,8 @@
 package authority
 
+// Completion oracle: recover(a,b) band — NOT recover(a) closure.
+// See sw-block/design/recover-semantics-adjustment-plan.md §8.1.
+
 import (
 	"context"
 	"errors"
@@ -941,7 +944,7 @@ func (e *policyClosureExecutor) SetOnFenceComplete(fn adapter.OnFenceComplete) {
 	e.mu.Unlock()
 }
 
-func (e *policyClosureExecutor) Probe(replicaID, dataAddr, ctrlAddr string, epoch, endpointVersion uint64) adapter.ProbeResult {
+func (e *policyClosureExecutor) Probe(replicaID, dataAddr, ctrlAddr string, sessionID, epoch, endpointVersion uint64) adapter.ProbeResult {
 	return adapter.ProbeResult{
 		ReplicaID: replicaID, Success: true,
 		EndpointVersion: endpointVersion, TransportEpoch: epoch,
@@ -949,10 +952,13 @@ func (e *policyClosureExecutor) Probe(replicaID, dataAddr, ctrlAddr string, epoc
 	}
 }
 
-func (e *policyClosureExecutor) StartCatchUp(replicaID string, sessionID, epoch, endpointVersion, targetLSN uint64) error {
+func (e *policyClosureExecutor) StartCatchUp(replicaID string, sessionID, epoch, endpointVersion, fromLSN, targetLSN uint64) error {
 	return nil
 }
 func (e *policyClosureExecutor) StartRebuild(replicaID string, sessionID, epoch, endpointVersion, targetLSN uint64) error {
+	return nil
+}
+func (e *policyClosureExecutor) StartRecoverySession(replicaID string, sessionID, epoch, endpointVersion, targetLSN uint64, contentKind engine.RecoveryContentKind, policy engine.RecoveryRuntimePolicy) error {
 	return nil
 }
 func (e *policyClosureExecutor) InvalidateSession(replicaID string, sessionID uint64, reason string) {}

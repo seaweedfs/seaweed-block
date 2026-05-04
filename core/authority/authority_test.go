@@ -1,5 +1,8 @@
 package authority
 
+// Completion oracle: recover(a,b) band — NOT recover(a) closure.
+// See sw-block/design/recover-semantics-adjustment-plan.md §8.1.
+
 import (
 	"context"
 	"errors"
@@ -673,7 +676,7 @@ func (e *closureExecutor) SetOnSessionStart(fn adapter.OnSessionStart)     { e.o
 func (e *closureExecutor) SetOnSessionClose(fn adapter.OnSessionClose)     { e.onClose = fn }
 func (e *closureExecutor) SetOnFenceComplete(fn adapter.OnFenceComplete)   { e.onFenceComplete = fn }
 
-func (e *closureExecutor) Probe(replicaID, dataAddr, ctrlAddr string, epoch, endpointVersion uint64) adapter.ProbeResult {
+func (e *closureExecutor) Probe(replicaID, dataAddr, ctrlAddr string, sessionID, epoch, endpointVersion uint64) adapter.ProbeResult {
 	return adapter.ProbeResult{
 		ReplicaID:       replicaID,
 		Success:         true,
@@ -686,10 +689,13 @@ func (e *closureExecutor) Probe(replicaID, dataAddr, ctrlAddr string, epoch, end
 	}
 }
 
-func (e *closureExecutor) StartCatchUp(replicaID string, sessionID, epoch, endpointVersion, targetLSN uint64) error {
+func (e *closureExecutor) StartCatchUp(replicaID string, sessionID, epoch, endpointVersion, fromLSN, targetLSN uint64) error {
 	return nil
 }
 func (e *closureExecutor) StartRebuild(replicaID string, sessionID, epoch, endpointVersion, targetLSN uint64) error {
+	return nil
+}
+func (e *closureExecutor) StartRecoverySession(replicaID string, sessionID, epoch, endpointVersion, targetLSN uint64, contentKind engine.RecoveryContentKind, policy engine.RecoveryRuntimePolicy) error {
 	return nil
 }
 func (e *closureExecutor) InvalidateSession(replicaID string, sessionID uint64, reason string) {}
@@ -761,6 +767,20 @@ var nonForgeabilityAllowedPackageSuffixes = []string{
 	string(filepath.Separator) + "core" + string(filepath.Separator) + "calibration" + string(filepath.Separator),
 	string(filepath.Separator) + "core" + string(filepath.Separator) + "conformance" + string(filepath.Separator),
 	string(filepath.Separator) + "core" + string(filepath.Separator) + "schema" + string(filepath.Separator),
+	// core/host/volume is permitted to construct adapter.AssignmentInfo
+	// ONLY via the named decoder decodeAssignmentFact in subscribe.go,
+	// which field-copies a master-minted AssignmentFact arriving on
+	// the SubscribeAssignments stream. This repo-wide guard grants
+	// the directory-level permission; the STRICTER package-local
+	// guard in core/host/volume/boundary_guard_test.go
+	// (TestNoOtherAssignmentInfoConstruction) enforces that exactly
+	// one composite literal exists, inside exactly that named
+	// function. The two guards compose:
+	//   - repo-wide: "host/volume is an allowed directory"
+	//   - package-local: "and only ONE function inside it, named"
+	// See sw-block/design/v3-phase-15-t0-sketch.md §3.1 / §6.4 / §9
+	// and core/host/volume/subscribe.go for the decode boundary.
+	string(filepath.Separator) + "core" + string(filepath.Separator) + "host" + string(filepath.Separator) + "volume" + string(filepath.Separator),
 	// core/adapter is the package that defines AssignmentInfo; it
 	// is the type owner and must name the type in field and method
 	// signatures. The AST check below permits references (type

@@ -49,11 +49,12 @@ func DeriveProjection(st *ReplicaState) ReplicaProjection {
 		p.Mode = ModeHealthy
 	case st.Recovery.Decision == DecisionNone &&
 		st.Reachability.Status == ProbeReachable &&
-		st.Identity.Epoch > st.Reachability.FencedEpoch:
+		(st.Identity.Epoch > st.Reachability.FencedEpoch ||
+			recoveredReplicaWaitingForPostCloseAck(st)):
 		// P14 S1: caught-up but fence not yet acked. Transitional
-		// — not healthy yet, but nothing is wrong. Show as
-		// recovering rather than degraded so operators read the
-		// transition correctly.
+		// — not healthy yet, but nothing is wrong. G9C extends the
+		// same transitional shape to a recovered replica waiting for
+		// post-close durable ack / live-feed continuity evidence.
 		p.Mode = ModeRecovering
 	default:
 		p.Mode = ModeDegraded

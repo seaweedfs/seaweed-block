@@ -25,11 +25,11 @@ type TopologyController struct {
 	reader AuthorityBasisReader
 	queue  *assignmentQueue
 
-	mu                sync.Mutex
-	desired           map[string]DesiredAssignment
-	unsupported       map[string]UnsupportedEvidence
-	convergenceStuck  map[string]*ConvergenceStuckEvidence
-	now               func() time.Time
+	mu               sync.Mutex
+	desired          map[string]DesiredAssignment
+	unsupported      map[string]UnsupportedEvidence
+	convergenceStuck map[string]*ConvergenceStuckEvidence
+	now              func() time.Time
 }
 
 func NewTopologyController(config TopologyControllerConfig, reader AuthorityBasisReader) *TopologyController {
@@ -312,6 +312,17 @@ func (c *TopologyController) Next(ctx context.Context) (AssignmentAsk, error) {
 	return c.queue.next(ctx)
 }
 
+// SubmitAssignmentAsk appends a controller-verified ask to the publisher
+// directive queue. It is intentionally still an ask-level seam: Publisher
+// remains the only epoch / endpoint-version author.
+func (c *TopologyController) SubmitAssignmentAsk(ask AssignmentAsk) error {
+	if err := validateAsk(ask); err != nil {
+		return err
+	}
+	c.queue.enqueue(ask)
+	return nil
+}
+
 // LastUnsupported returns the most recent unsupported evidence for
 // one volume, if any.
 func (c *TopologyController) LastUnsupported(volumeID string) (UnsupportedEvidence, bool) {
@@ -352,8 +363,11 @@ func (c *TopologyController) DesiredFor(volumeID string) (DesiredAssignment, boo
 }
 
 func (c *TopologyController) clearDesiredLocked(volumeID string) {
+	_, hadDesired := c.desired[volumeID]
 	delete(c.desired, volumeID)
-	c.queue.discard(volumeID)
+	if hadDesired {
+		c.queue.discard(volumeID)
+	}
 	// §10 clearing rule 1 / 2 / 3: whenever the desired clears
 	// (confirmed, superseded, supportability-driven), the stuck
 	// evidence clears with it. Supportability regaining does NOT

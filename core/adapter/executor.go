@@ -1,5 +1,7 @@
 package adapter
 
+import "github.com/seaweedfs/seaweed-block/core/engine"
+
 // CommandExecutor is the interface that runtime muscles must satisfy.
 // Each method corresponds to one engine command. The adapter calls
 // these after engine.Apply() emits commands.
@@ -26,17 +28,65 @@ type CommandExecutor interface {
 	// Probe dials the replica and collects transport/recovery facts.
 	// Returns a ProbeResult with success/failure and R/S/H boundaries.
 	// Must NOT decide recovery class — that's the engine's job.
-	Probe(replicaID, dataAddr, ctrlAddr string, epoch, endpointVersion uint64) ProbeResult
+	//
+	// Per T4c-1 (architect Option D): sessionID is a transient probe
+	// session minted by the adapter (parallel to FenceAtEpoch). The
+	// executor uses it to construct the wire-level RecoveryLineage for
+	// the symmetric ProbeReq + ProbeResponse pair. The probe sessionID
+	// is NOT registered in any executor session table, NOT represented
+	// in engine session truth, and NOT carried in OnSessionStart /
+	// OnSessionClose callbacks. Probe is non-mutating.
+	Probe(replicaID, dataAddr, ctrlAddr string, sessionID, epoch, endpointVersion uint64) ProbeResult
 
-	// StartCatchUp begins a catch-up session with the given sessionID and targetLSN.
+	// StartCatchUp begins a catch-up session with the given sessionID,
+	// fromLSN (T4d-3), and frontierHint.
 	// The sessionID is assigned by the adapter (matches the engine's session truth).
+	// fromLSN is the LSN the executor scans FROM (inclusive); engine
+	// populates as Recovery.R + 1 per G-1 §6.1 architect Option A.
+	// frontierHint is advisory/compat lineage data, not a completion
+	// predicate and not the WAL scan stop line.
 	// Runs asynchronously; completion/failure MUST be reported via the
 	// registered OnSessionClose callback using the SAME sessionID.
-	StartCatchUp(replicaID string, sessionID, epoch, endpointVersion, targetLSN uint64) error
+	StartCatchUp(replicaID string, sessionID, epoch, endpointVersion, fromLSN, frontierHint uint64) error
 
-	// StartRebuild begins a full rebuild session with the given sessionID and targetLSN.
+	// StartRebuild begins a full rebuild session with the given sessionID
+	// and frontierHint. The transport chooses/syncs the BASE pin itself.
 	// Same contract as StartCatchUp.
-	StartRebuild(replicaID string, sessionID, epoch, endpointVersion, targetLSN uint64) error
+	StartRebuild(replicaID string, sessionID, epoch, endpointVersion, frontierHint uint64) error
+
+	// StartRecoverySession begins a recovery session for the given content
+	// kind under the given runtime policy. Per design memo §7a (T4c-pre-B):
+	// unifies catch-up / rebuild / partial-LBA execution behind one entry.
+	//
+	// ContentKind selects the substrate primitive:
+	//   - RecoveryContentWALDelta   → tier-1 WAL-window scan
+	//                                 (catch-up; subsumes StartCatchUp).
+	//   - RecoveryContentFullExtent → tier-3 full-extent fill
+	//                                 (rebuild; subsumes StartRebuild).
+	//   - RecoveryContentPartialLBA → tier-2 archive dump (Stage 2;
+	//                                 implementations may return error).
+	//
+	// RuntimePolicy carries the per-content-kind execution envelope
+	// (timeout / progress cadence / cancellation mode); see engine
+	// `DefaultRuntimePolicyFor`. The executor MUST honor the policy
+	// (no hard-coded timeouts that contradict it).
+	//
+	// Async lifecycle: same contract as StartCatchUp / StartRebuild —
+	// completion / failure MUST be reported via the registered
+	// OnSessionClose callback using the SAME sessionID.
+	//
+	// Transition note (T4c-pre-B): existing `StartCatchUp` /
+	// `StartRebuild` remain as the wire-level entry points until
+	// T4c-3 muscle port migrates engine emission to `StartRecovery`.
+	// Adapters / executors MAY implement `StartCatchUp` and
+	// `StartRebuild` as thin wrappers that build a `StartRecovery`
+	// command and dispatch through `StartRecoverySession`.
+	StartRecoverySession(
+		replicaID string,
+		sessionID, epoch, endpointVersion, frontierHint uint64,
+		contentKind engine.RecoveryContentKind,
+		policy engine.RecoveryRuntimePolicy,
+	) error
 
 	// InvalidateSession cancels an active session.
 	InvalidateSession(replicaID string, sessionID uint64, reason string)
@@ -73,6 +123,12 @@ type OnSessionClose func(SessionCloseResult)
 // tied to actual execution start instead of command issuance alone.
 type OnSessionStart func(SessionStartResult)
 
+// OnDurableAck is the callback signature for non-terminal durable
+// progress. It is intentionally separate from OnSessionClose: durable
+// ack can drive lag policy / pin authority, but does not complete a
+// recovery session by itself.
+type OnDurableAck func(DurableAckResult)
+
 // OnFenceComplete is the callback signature for FenceAtEpoch outcomes.
 // Fires exactly once per Fence call. Success=true advances
 // Reachability.FencedEpoch; Success=false leaves it unchanged and
@@ -87,4 +143,23 @@ type FenceResult struct {
 	EndpointVersion uint64
 	Success         bool
 	FailReason      string
+}
+
+// DurableAckResult reports a replica durable frontier observed during an
+// active recovery session.
+type DurableAckResult struct {
+	ReplicaID       string
+	SessionID       uint64
+	EndpointVersion uint64
+	TransportEpoch  uint64
+	DurableLSN      uint64
+	PrimaryTailLSN  uint64
+	PrimaryHeadLSN  uint64
+}
+
+// DurableAckCallbackSetter is optionally implemented by executors that
+// can report mid-session durable progress. CommandExecutor does not
+// require this so existing mocks and muscles remain source-compatible.
+type DurableAckCallbackSetter interface {
+	SetOnDurableAck(fn OnDurableAck)
 }

@@ -74,6 +74,33 @@ type WALStore struct {
 	// only by the flusher.
 	checkpointLSN uint64
 
+	// pendingDirectFrontierLSN is set by AdvanceFrontier after direct
+	// extent writes (rebuild BASE lane). It is persisted as checkpoint
+	// metadata only after a successful Sync, so an un-synced BASE install
+	// cannot be mistaken for durable recovery progress after a crash.
+	pendingDirectFrontierLSN uint64
+
+	// recoveryRetentionLSNs is the operator-tunable retention window
+	// past checkpointLSN: the recovery scan accepts fromLSN as long
+	// as fromLSN > checkpointLSN - recoveryRetentionLSNs. Zero means
+	// strict checkpoint-driven recycle. Operator sets via
+	// blockvolume's --wal-retention-lsns flag at store construction.
+	// Stored in-memory only — NOT persisted to the superblock; on
+	// restart the daemon re-applies the flag.
+	//
+	// Pinned by: INV-G6-RETENTION-POLICY-OPERATOR-VISIBLE.
+	recoveryRetentionLSNs uint64
+
+	// recycleFloorSrc gates `persistCheckpoint` advancement when
+	// non-nil: the proposed checkpoint cannot exceed the source's
+	// reported `MinPinAcrossActiveSessions`. Set via
+	// SetRecycleFloorSource at daemon wiring time when
+	// --recovery-mode=dual-lane.
+	//
+	// nil = no gate (legacy behavior). Per docs/recovery-wiring-plan.md
+	// §6 + INV-RECYCLE-GATED-BY-MIN-ACTIVE-PIN.
+	recycleFloorSrc RecycleFloorSource
+
 	syncs atomic.Uint64 // total fsync operations performed (test/diagnostic)
 }
 
@@ -97,8 +124,10 @@ func CreateWALStore(path string, numBlocks uint32, blockSize int) (*WALStore, er
 
 	volumeBytes := uint64(numBlocks) * uint64(blockSize)
 	sb, err := newSuperblock(volumeBytes, createOptions{
-		BlockSize:  uint32(blockSize),
-		ExtentSize: uint32(blockSize), // one block per extent slot keeps math trivial
+		BlockSize:   uint32(blockSize),
+		ExtentSize:  uint32(blockSize), // one block per extent slot keeps math trivial
+		ImplKind:    ImplKindWALStore,
+		ImplVersion: WALStoreImplVersion,
 	})
 	if err != nil {
 		_ = f.Close()
@@ -242,6 +271,19 @@ func (s *WALStore) writeExtent(lba uint32, data []byte) error {
 // over-writes the extent with identical bytes. Wasteful but correct.
 func (s *WALStore) persistCheckpoint(highestLSN uint64) error {
 	s.mu.Lock()
+	// Clamp the proposed checkpoint to the recycle floor reported
+	// by an external coordinator (e.g., the recovery package's
+	// PeerShipCoordinator). When a replica is in an active rebuild
+	// session and pin_floor < highestLSN, we hold the checkpoint at
+	// pin_floor so WAL entries the replica still depends on are
+	// retained. INV-RECYCLE-GATED-BY-MIN-ACTIVE-PIN.
+	if s.recycleFloorSrc != nil {
+		if floor, anyActive := s.recycleFloorSrc.MinPinAcrossActiveSessions(); anyActive {
+			if highestLSN > floor {
+				highestLSN = floor
+			}
+		}
+	}
 	if highestLSN <= s.checkpointLSN {
 		s.mu.Unlock()
 		return nil
@@ -456,7 +498,30 @@ func (s *WALStore) Sync() (uint64, error) {
 		s.syncedLSN = s.walHead
 	}
 	frontier := s.syncedLSN
+	var sbBytes []byte
+	if s.pendingDirectFrontierLSN > s.checkpointLSN && s.pendingDirectFrontierLSN <= s.syncedLSN {
+		s.checkpointLSN = s.pendingDirectFrontierLSN
+		s.sb.WALCheckpointLSN = s.pendingDirectFrontierLSN
+		if s.walHead > s.sb.WALHead {
+			s.sb.WALHead = s.walHead
+		}
+		buf := newSimpleByteBuf()
+		if _, err := s.sb.writeTo(buf); err != nil {
+			s.mu.Unlock()
+			return 0, fmt.Errorf("storage: encode superblock: %w", err)
+		}
+		sbBytes = buf.bytes()
+		s.pendingDirectFrontierLSN = 0
+	}
 	s.mu.Unlock()
+	if len(sbBytes) > 0 {
+		if _, err := s.fd.WriteAt(sbBytes, 0); err != nil {
+			return 0, fmt.Errorf("storage: pwrite direct frontier superblock: %w", err)
+		}
+		if err := s.fd.Sync(); err != nil {
+			return 0, fmt.Errorf("storage: fsync direct frontier superblock: %w", err)
+		}
+	}
 	return frontier, nil
 }
 
@@ -483,6 +548,45 @@ func (s *WALStore) NumBlocks() uint32 {
 // BlockSize returns the IO unit size in bytes.
 func (s *WALStore) BlockSize() int { return int(s.sb.BlockSize) }
 
+// SetRecoveryRetentionLSNs configures the WAL retention window past
+// checkpointLSN. After this is set, the recovery scan accepts
+// fromLSN > checkpointLSN - retentionLSNs. Zero (the default)
+// preserves strict checkpoint-driven recycle.
+//
+// Operator-tunable via blockvolume's --wal-retention-lsns flag.
+// In-memory only; not persisted (re-applied on restart from CLI).
+//
+// Called by: DurableProvider construction path after walstore is
+// opened, with the operator-supplied value from cmd/blockvolume.
+// Owns: recoveryRetentionLSNs field under s.mu.
+// SetRecycleFloorSource installs the gate consulted in
+// persistCheckpoint to clamp checkpoint advancement against active
+// recover-session pin floors. Pass nil to disable.
+//
+// Idempotent. Safe to call at any time — the gate is read under
+// s.mu so concurrent persistCheckpoint sees a consistent value.
+//
+// Implements storage.RecycleFloorGate.
+func (s *WALStore) SetRecycleFloorSource(src RecycleFloorSource) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.recycleFloorSrc = src
+}
+
+func (s *WALStore) SetRecoveryRetentionLSNs(n uint64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.recoveryRetentionLSNs = n
+}
+
+// RecoveryRetentionLSNs returns the currently-configured retention
+// window past checkpointLSN. Test/diagnostic accessor.
+func (s *WALStore) RecoveryRetentionLSNs() uint64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.recoveryRetentionLSNs
+}
+
 // AdvanceFrontier bumps the recorded frontier without writing data.
 // Used by the rebuild server to declare the replica's frontier
 // matches the primary's head once base blocks are installed.
@@ -495,6 +599,9 @@ func (s *WALStore) AdvanceFrontier(lsn uint64) {
 	if lsn > s.walHead {
 		s.walHead = lsn
 	}
+	if lsn > s.pendingDirectFrontierLSN {
+		s.pendingDirectFrontierLSN = lsn
+	}
 }
 
 // AdvanceWALTail moves the retained-window tail forward. After this,
@@ -506,6 +613,29 @@ func (s *WALStore) AdvanceWALTail(newTail uint64) {
 	if newTail > s.walTail {
 		s.walTail = newTail
 	}
+}
+
+// WriteExtentDirect installs a base block directly into the extent
+// without going through the WAL append path — INV-RECV-BITMAP-CORE
+// (§6.10). The receiver's per-session bitmap is the sole arbiter of
+// BASE-vs-WAL conflict at this LBA; substrate-level WAL replay /
+// stale-skip is intentionally bypassed.
+//
+// No LSN is recorded. nextLSN / walHead / dirtyMap are NOT advanced.
+// The recovery layer pairs this with AdvanceFrontier(targetLSN) at
+// MarkBaseComplete to keep post-rebuild frontier reporting honest.
+//
+// Durability follows the same rule as Write: bytes become durable
+// only on the next successful Sync (the extent fsync covers them).
+func (s *WALStore) WriteExtentDirect(lba uint32, data []byte) error {
+	maxLBA := uint32(s.sb.VolumeSize / uint64(s.sb.BlockSize))
+	if lba >= maxLBA {
+		return fmt.Errorf("storage: WriteExtentDirect LBA %d out of range", lba)
+	}
+	if len(data) != int(s.sb.BlockSize) {
+		return fmt.Errorf("storage: WriteExtentDirect data size %d != block size %d", len(data), s.sb.BlockSize)
+	}
+	return s.writeExtent(lba, data)
 }
 
 // ApplyEntry writes a replicated block with the source's LSN rather
@@ -543,6 +673,43 @@ func (s *WALStore) ApplyEntry(lba uint32, data []byte, lsn uint64) error {
 		s.walHead = lsn
 	}
 	return nil
+}
+
+// RecoveryMode reports walstore's recovery sub-mode. walstore's
+// ScanLBAs emits per-LSN entries from the retained WAL.
+func (s *WALStore) RecoveryMode() RecoveryMode {
+	return RecoveryModeWALReplay
+}
+
+// AppliedLSNs returns a partial view of per-LBA applied LSN: only
+// LBAs whose latest write is still in the WAL (not yet flushed to
+// extent) are reported. Once an entry is flushed and the dirty-map
+// entry is cleared, walstore loses per-LBA LSN tracking — the
+// extent stores data only, not per-LBA LSN.
+//
+// PARTIAL-VIEW LIMITATION: for full per-LBA applied-LSN tracking,
+// walstore would need a permanent per-LBA LSN map (substrate
+// refactor). The replica recovery apply gate is the authoritative
+// correctness boundary; this partial seed is defense-in-depth —
+// it correctly stale-skips recovery entries for LBAs still in the
+// WAL window, and falls back to "appliedLSN[LBA] = 0" semantics
+// for flushed LBAs (which means recovery WILL apply them —
+// acceptable when the gate's session-only tracking + live-lane
+// updates fill in the gap during the session).
+//
+// Called by: replica recovery apply gate at session start.
+// Owns: per-call snapshot of dirty map (lock-free under shard locks).
+// Borrows: nothing (returned map is fresh and caller-owned).
+func (s *WALStore) AppliedLSNs() (map[uint32]uint64, error) {
+	entries := s.dm.snapshot()
+	out := make(map[uint32]uint64, len(entries))
+	for _, e := range entries {
+		lba := uint32(e.LBA)
+		if existing, ok := out[lba]; !ok || e.LSN > existing {
+			out[lba] = e.LSN
+		}
+	}
+	return out, nil
 }
 
 // AllBlocks snapshots every written LBA's current bytes. Reads

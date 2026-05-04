@@ -339,6 +339,39 @@ func (s *Store) AdvanceWALTail(newTail uint64) {
 	}
 }
 
+// WriteExtentDirect installs a base block directly into the extent
+// without going through the WAL ring append path — INV-RECV-BITMAP-
+// CORE (§6.10). The receiver's per-session bitmap is the sole arbiter
+// of BASE-vs-WAL conflict at this LBA; substrate-level WAL replay /
+// stale-skip is intentionally bypassed.
+//
+// No LSN is recorded; the ring is NOT touched. nextLSN / walHead are
+// NOT advanced. The recovery layer pairs this with AdvanceFrontier
+// (targetLSN) at MarkBaseComplete to keep post-rebuild frontier
+// reporting honest.
+//
+// Durability follows the same rule as Write: bytes become durable
+// only on the next successful Sync.
+func (s *Store) WriteExtentDirect(lba uint32, data []byte) error {
+	if lba >= s.hdr.NumBlocks {
+		return fmt.Errorf("smartwal: WriteExtentDirect LBA %d out of range", lba)
+	}
+	if len(data) != int(s.hdr.BlockSize) {
+		return fmt.Errorf("smartwal: WriteExtentDirect data size %d != block size %d", len(data), s.hdr.BlockSize)
+	}
+	s.mu.RLock()
+	if s.closed {
+		s.mu.RUnlock()
+		return errors.New("smartwal: WriteExtentDirect after Close")
+	}
+	s.mu.RUnlock()
+	offset := s.extentBase + int64(lba)*int64(s.hdr.BlockSize)
+	if _, err := s.fd.WriteAt(data, offset); err != nil {
+		return fmt.Errorf("smartwal: WriteExtentDirect extent LBA %d: %w", lba, err)
+	}
+	return nil
+}
+
 // ApplyEntry writes a replicated block with the source's LSN.
 func (s *Store) ApplyEntry(lba uint32, data []byte, lsn uint64) error {
 	if lba >= s.hdr.NumBlocks {
@@ -359,6 +392,43 @@ func (s *Store) ApplyEntry(lba uint32, data []byte, lsn uint64) error {
 		s.walHead = lsn
 	}
 	return nil
+}
+
+// RecoveryMode reports smartwal's recovery sub-mode (T4d-4 part A;
+// T4c §I row 6). smartwal's ScanLBAs emits per-LBA last-writer-wins
+// with scan-time LSN — state-convergence semantics.
+func (s *Store) RecoveryMode() storage.RecoveryMode {
+	return storage.RecoveryModeStateConvergence
+}
+
+// AppliedLSNs returns per-LBA latest-applied-LSN derived from the
+// ring's valid records. smartwal's ring is capacity-bounded: records
+// older than (head - capacity) have been overwritten, so the returned
+// map is "best-effort within retention" — LBAs whose latest write has
+// rolled out of the ring are not reported.
+//
+// PARTIAL-VIEW NOTE (kickoff §2.5 #3 caveat): smartwal's ring
+// retention is typically larger than walstore's WAL window, so this
+// view is more complete than walstore's `AppliedLSNs()`. Still
+// defense-in-depth — the apply gate (T4d-2) is the authoritative
+// correctness boundary.
+//
+// Called by: T4d-2 replica recovery apply gate at session start.
+// Owns: per-call snapshot from `ring.scanValid()` reduced per-LBA
+// last-writer-wins.
+// Borrows: nothing (returned map is fresh and caller-owned).
+func (s *Store) AppliedLSNs() (map[uint32]uint64, error) {
+	records, err := s.ring.scanValid()
+	if err != nil {
+		return nil, fmt.Errorf("smartwal: AppliedLSNs ring scan: %w", err)
+	}
+	out := make(map[uint32]uint64, len(records))
+	for _, rec := range records {
+		if existing, ok := out[rec.LBA]; !ok || rec.LSN > existing {
+			out[rec.LBA] = rec.LSN
+		}
+	}
+	return out, nil
 }
 
 // AllBlocks snapshots every LBA's current bytes by reading directly

@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/seaweedfs/seaweed-block/core/adapter"
+	"github.com/seaweedfs/seaweed-block/core/engine"
 )
 
 // newTestServer builds a live httptest.Server wrapping the ops handlers.
@@ -200,11 +201,14 @@ type nopExecutor struct {
 func (e *nopExecutor) SetOnSessionStart(fn adapter.OnSessionStart)   { e.onStart = fn }
 func (e *nopExecutor) SetOnSessionClose(fn adapter.OnSessionClose)   { e.onClose = fn }
 func (e *nopExecutor) SetOnFenceComplete(fn adapter.OnFenceComplete) { e.onFence = fn }
-func (e *nopExecutor) Probe(string, string, string, uint64, uint64) adapter.ProbeResult {
+func (e *nopExecutor) Probe(string, string, string, uint64, uint64, uint64) adapter.ProbeResult {
 	return adapter.ProbeResult{Success: false, FailReason: "nop"}
 }
-func (e *nopExecutor) StartCatchUp(string, uint64, uint64, uint64, uint64) error { return nil }
+func (e *nopExecutor) StartCatchUp(string, uint64, uint64, uint64, uint64, uint64) error { return nil }
 func (e *nopExecutor) StartRebuild(string, uint64, uint64, uint64, uint64) error { return nil }
+func (e *nopExecutor) StartRecoverySession(string, uint64, uint64, uint64, uint64, engine.RecoveryContentKind, engine.RecoveryRuntimePolicy) error {
+	return nil
+}
 func (e *nopExecutor) Fence(string, uint64, uint64, uint64) error                { return nil }
 func (e *nopExecutor) InvalidateSession(string, uint64, string)                  {}
 func (e *nopExecutor) PublishHealthy(string)                                     {}

@@ -113,9 +113,96 @@ type LogicalStorage interface {
 	// path so frontier tracking stays coherent with the source.
 	ApplyEntry(lba uint32, data []byte, lsn uint64) error
 
+	// WriteExtentDirect installs one block's bytes directly into the
+	// substrate's extent, bypassing the WAL apply path entirely. Used
+	// by the recovery receiver's BASE lane (rebuild snapshot install)
+	// so the substrate's own per-LBA stale-skip / WAL-record machinery
+	// does NOT interpret BASE bytes as a competing-LSN write.
+	//
+	// Per v3-recovery-algorithm-consensus.md §6.10:
+	//   - INV-RECV-BITMAP-CORE: the receiver's per-session bitmap is
+	//     the SOLE arbiter of "BASE vs WAL won this LBA"; substrate
+	//     stale-skip is irrelevant for BASE because BASE doesn't go
+	//     through the WAL apply path.
+	//   - BASE writes are LSN-less at this layer. Substrates that
+	//     internally key records by LSN MUST synthesize a sensible
+	//     non-conflicting LSN (e.g., 0 or below current retention) or
+	//     write to a pure extent surface; the on-wire BASE frame
+	//     carries no LSN.
+	//
+	// Frontier (R/S/H boundaries) is NOT advanced by this call —
+	// BASE-only sessions that need post-rebuild frontier reporting
+	// at >= fromLSN MUST pair this with an explicit AdvanceFrontier
+	// (the recovery layer does this in MarkBaseComplete).
+	//
+	// Returns an error if the substrate cannot honor the bypass
+	// semantics (e.g., a future read-only WAL substrate with no
+	// extent surface). Callers MUST surface the error rather than
+	// silently fall back to ApplyEntry — fallback re-introduces the
+	// stale-skip race the spec explicitly forbids.
+	WriteExtentDirect(lba uint32, data []byte) error
+
 	// AllBlocks snapshots every written LBA's current bytes. Used by
 	// the rebuild server to enumerate what to ship.
 	AllBlocks() map[uint32][]byte
+
+	// ScanLBAs is the T4c-2 tier-1 recovery contract. Emits a
+	// RecoveryEntry callback for each modification the substrate
+	// retains within [fromLSN, head). Called by the catch-up sender
+	// (`transport.BlockExecutor.doCatchUp`) to stream the missing
+	// retained-WAL window to a replica.
+	//
+	// Substrate sub-mode (memo §5.1 / §13.0a):
+	//   - walstore: `wal_replay` (V2-faithful per-LSN; 3 writes to
+	//     LBA=L produce 3 entries)
+	//   - smartwal: `state_convergence` (per-LBA dedup; 3 writes to
+	//     LBA=L produce 1 entry, LSN is scan-time)
+	//   - BlockStore (in-memory): state_convergence-equivalent
+	//     synthesis (no real retention; emits current contents)
+	//
+	// Returns ErrWALRecycled (sentinel from this package) if fromLSN
+	// is at or below the substrate's retention boundary. Callers
+	// MUST treat ErrWALRecycled as a tier-class change (escalate to
+	// rebuild); other errors are stream-level and may be retried.
+	//
+	// The callback's return value follows V2 walstore semantics: a
+	// non-nil error from `fn` STOPS the scan and is returned to the
+	// caller; a `nil` return continues the scan past the current
+	// entry (used by the sender to skip entries past targetLSN
+	// without breaking the loop) — INV-REPL-CATCHUP-CALLBACK-RETURN-
+	// NIL-CONTINUES.
+	ScanLBAs(fromLSN uint64, fn func(RecoveryEntry) error) error
+
+	// RecoveryMode returns the substrate's tier-1 recovery sub-mode
+	// (memo §5.1 / §13.0a). Replaces the duck-typed `CheckpointLSN`
+	// probe that T4c-2 used to distinguish walstore from smartwal.
+	// Per T4c §I row 6 + T4d-4 part A: substrate-reported value
+	// survives the component framework's storage-wrap pattern (the
+	// embedded interface forwards `RecoveryMode()` cleanly, where
+	// `CheckpointLSN` was a substrate-extension method that wraps
+	// did NOT forward).
+	//
+	// Implementations:
+	//   - walstore → RecoveryModeWALReplay (V2-faithful per-LSN)
+	//   - smartwal → RecoveryModeStateConvergence (per-LBA dedup)
+	//   - BlockStore → RecoveryModeStateConvergence (synthesis)
+	RecoveryMode() RecoveryMode
+
+	// AppliedLSNs returns the substrate's per-LBA latest-applied-LSN
+	// snapshot. T4d-2 replica recovery apply gate calls this at
+	// session start to seed its in-memory `appliedLSN[LBA]` map
+	// (Option C hybrid per kickoff §2.5 #1: substrate-query path
+	// where available; fallback to session-only tracking otherwise).
+	//
+	// Substrates that do NOT maintain per-LBA applied-LSN metadata
+	// MUST return `(nil, ErrAppliedLSNsNotTracked)` explicitly. The
+	// gate handles the sentinel (logs INFO once, falls back). NOT a
+	// panic; NOT silent degradation.
+	//
+	// Returned map ownership: caller MAY mutate the returned map.
+	// Substrate implementations MUST snapshot internal state into a
+	// fresh map (don't share internal storage).
+	AppliedLSNs() (map[uint32]uint64, error)
 
 	// --- Lifecycle ---
 

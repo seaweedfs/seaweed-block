@@ -1,0 +1,35 @@
+{
+  "schema_version": "1.0",
+  "scenario": "g15b-manifest",
+  "gate": "G15b",
+  "layer": "L1-manifest",
+  "driver": {
+    "type": "go-test",
+    "package": "./cmd/blockcsi",
+    "run": "TestG15b_Manifest|TestG15b_Harness",
+    "args": [
+      "-count=1",
+      "-v"
+    ]
+  },
+  "default_timeout_s": 120,
+  "required_capabilities": [
+    "go",
+    "repo-worktree"
+  ],
+  "required_images": [],
+  "qa_instruction": "sw-block/design/test/v3-phase-15-g15b-k8s-qa-test-instruction.md",
+  "known_green_commit": "eb13105",
+  "artifacts": [
+    "run-request.json",
+    "result.json",
+    "test-stdout.log",
+    "test-stderr.log"
+  ],
+  "non_claims": [
+    "Does not run Kubernetes.",
+    "Does not prove privileged NodeStage or real mount.",
+    "Does not prove external-attacher behavior.",
+    "Does not mint authority directly from TestOps."
+  ]
+}

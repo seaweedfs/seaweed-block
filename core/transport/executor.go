@@ -9,22 +9,153 @@ import (
 	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/adapter"
+	"github.com/seaweedfs/seaweed-block/core/recovery"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 )
+
+var _ adapter.DurableAckCallbackSetter = (*BlockExecutor)(nil)
 
 // BlockExecutor implements adapter.CommandExecutor using real TCP
 // transport and a primary-side LogicalStorage. It is the "muscle"
 // layer — it executes commands but never decides policy.
+//
+// Recovery mode: nil DualLane => legacy single-lane path (rebuild
+// streams MsgRebuildBlock and rejects live ship during rebuild).
+// non-nil DualLane => StartRebuild delegates to recovery package's
+// PrimaryBridge, dialing the replica's separate dual-lane port (per
+// docs/recovery-wiring-plan.md §4 Option A — separate ports).
+// Architect ACK on parallel-flag strategy (2026-04-29).
 type BlockExecutor struct {
 	primaryStore storage.LogicalStorage
-	replicaAddr  string // replica's TCP address
+	replicaAddr  string // replica's legacy port (rebuild + ship + barrier + probe)
 
-	mu               sync.Mutex
-	onSessionStart   adapter.OnSessionStart
-	onSessionClose   adapter.OnSessionClose
-	onFenceComplete  adapter.OnFenceComplete
-	sessions         map[uint64]*activeSession
-	stepDelay        time.Duration
+	// dualLane is non-nil when this executor is configured for
+	// dual-lane recovery. StartRebuild branches on this; ship +
+	// probe + fence always use the legacy path on replicaAddr.
+	dualLane *DualLaneConfig
+
+	mu              sync.Mutex
+	onSessionStart  adapter.OnSessionStart
+	onSessionClose  adapter.OnSessionClose
+	onDurableAck    adapter.OnDurableAck
+	onFenceComplete adapter.OnFenceComplete
+	sessions        map[uint64]*activeSession
+	stepDelay       time.Duration
+
+	// walShippers is the per-replica WalShipper registry per
+	// v3-recovery-wal-shipper-spec.md §3 INV-SINGLE: at most one
+	// WalShipper per (volume, replicaID). Get-or-create via
+	// WalShipperFor. Each entry owns a shipper + a mutable emit-conn
+	// pointer that Ship() updates before delegating NotifyAppend.
+	walShipperMu sync.Mutex
+	walShippers  map[string]*walShipperEntry
+}
+
+// EmitProfile selects the wire encoder + frame format used by the
+// per-replica WalShipper's EmitFunc. Dual-lane connections use
+// frameWALEntry; legacy steady connections use MsgShipEntry. The
+// profile is part of the emit context (alongside conn + lineage) and
+// switches when recovery sessions bracket the shipper into the
+// dual-lane port.
+type EmitProfile int
+
+const (
+	// EmitProfileSteadyMsgShip — legacy port WAL ship: SWRP envelope
+	// (`WriteMsg(MsgShipEntry, EncodeShipEntry(...))`). Used outside
+	// recovery sessions and by Ship() in steady state.
+	EmitProfileSteadyMsgShip EmitProfile = iota
+	// EmitProfileDualLaneWALFrame — recovery dual-lane port: 5-byte
+	// recovery frame header + encodeWALEntry payload (via
+	// recovery.WriteWALEntryFrame). Used inside recovery sessions on
+	// the dual-lane connection. Kind tag derives from the EmitKind
+	// passed by WalShipper: Backlog or SessionLive.
+	EmitProfileDualLaneWALFrame
+)
+
+func (p EmitProfile) String() string {
+	switch p {
+	case EmitProfileSteadyMsgShip:
+		return "SteadyMsgShip"
+	case EmitProfileDualLaneWALFrame:
+		return "DualLaneWALFrame"
+	default:
+		return fmt.Sprintf("EmitProfile(%d)", int(p))
+	}
+}
+
+// walShipperEntry pairs a per-replica WalShipper with its mutable
+// wire-emit context (conn + lineage + profile). Ship() / recovery-
+// session initialization updates the context under emitCtxMu before
+// delegating to the shipper; the EmitFunc reads it under the same
+// mutex.
+//
+// Architect P1 review (2026-04-29 #1): encoding MUST happen INSIDE
+// the EmitFunc, not by the caller before NotifyAppend. WalShipper
+// hands `(kind, lba, lsn, raw block bytes)` to EmitFunc; EmitFunc
+// owns the encoding so steady Ship() AND recovery-session emits
+// feed the SAME EmitFunc, with the profile selecting which wire
+// frame format to emit.
+//
+// emitLineage is the lineage embedded in MsgShipEntry payloads
+// (steady profile only — frameWALEntry has no lineage field).
+// For steady-state ship, Ship() updates it from the active session
+// per call. For recovery-session emits, the session-installer
+// (RecoverySink) updates context at StartSession and restores
+// steady context at EndSession.
+type walShipperEntry struct {
+	shipper *WalShipper
+
+	emitCtxMu   sync.Mutex
+	emitConn    net.Conn
+	emitLineage RecoveryLineage
+	emitProfile EmitProfile
+	// postEmit fires after a successful conn.Write; recovery sessions
+	// install a callback that calls coord.RecordShipped(replicaID, lsn)
+	// so shipCursor advances atomically with emit. nil = no-op.
+	postEmit func(lsn uint64)
+
+	// writeMu serializes conn.Write on the entry's emitConn across
+	// EmitFunc and any external writer that shares this conn (notably
+	// recovery.Sender's writeFrame during a dual-lane session). Without
+	// this shared mutex, concurrent header+payload writes from the two
+	// paths can interleave and punch through frame boundaries.
+	//
+	// In steady state (Ship → only one writer per legacy conn), the
+	// mutex is uncontended. In dual-lane sessions, recovery.Sender
+	// duck-types `WriteMu() *sync.Mutex` on the sink and uses this
+	// mutex for its own writeFrame calls.
+	//
+	// Lock hierarchy (mechanical SINGLE-SERIALIZER):
+	//
+	//   walShipper.shipMu  ───>  walShipperEntry.writeMu
+	//
+	//   - WalShipper holds shipMu around mode/cursor mutations and
+	//     calls EmitFunc under it (NotifyAppend Realtime, DrainBacklog
+	//     scan callback, drainOpportunity scan callback). EmitFunc
+	//     then acquires writeMu for the wire write — shipMu is
+	//     OUTERMOST.
+	//   - recovery.Sender.writeFrame acquires only writeMu (Sender
+	//     does not hold shipMu).
+	//
+	// Therefore: any code path that holds shipMu may acquire writeMu,
+	// but NEVER the reverse. Reversing this order risks deadlock.
+	writeMu sync.Mutex
+}
+
+// DualLaneConfig holds the wiring for routing StartRebuild through
+// the core/recovery dual-lane mechanism. Constructed at cmd / daemon
+// startup when --recovery-mode=dual-lane.
+type DualLaneConfig struct {
+	// Bridge is the primary-side adapter built once per executor
+	// (bridge captures executor's callback redirections via closures
+	// in NewBlockExecutorWithDualLane).
+	Bridge *recovery.PrimaryBridge
+	// DialAddr is the replica's dual-lane listen address (separate
+	// port from replicaAddr per the wiring plan §4 Option A).
+	DialAddr string
+	// ReplicaID identifies this replica in the coordinator's
+	// per-peer state. Must match the receiver's session view.
+	ReplicaID recovery.ReplicaID
 }
 
 type activeSession struct {
@@ -37,7 +168,8 @@ var errSessionInvalidated = errors.New("session invalidated")
 
 const recoveryConnTimeout = 5 * time.Second
 
-// NewBlockExecutor creates an executor for one primary -> replica pair.
+// NewBlockExecutor creates a legacy-mode executor for one primary -> replica
+// pair. StartRebuild uses the existing single-lane MsgRebuildBlock path.
 func NewBlockExecutor(primaryStore storage.LogicalStorage, replicaAddr string) *BlockExecutor {
 	return &BlockExecutor{
 		primaryStore: primaryStore,
@@ -46,12 +178,135 @@ func NewBlockExecutor(primaryStore storage.LogicalStorage, replicaAddr string) *
 	}
 }
 
+// NewBlockExecutorWithDualLane creates a dual-lane-mode executor.
+// StartRebuild routes through the recovery package's PrimaryBridge,
+// dialing dualLaneAddr (the replica's separate listen port). All other
+// methods (Probe / Fence / StartCatchUp / ship via Ship()) continue to
+// use replicaAddr's legacy port.
+//
+// `coord` must be a per-volume coordinator shared across all replicas
+// of the same volume so MinPinAcrossActiveSessions reflects the true
+// minimum (per wiring plan §5).
+//
+// `replicaID` MUST match the SessionStart payload the replica decodes;
+// in production it is the engine's per-peer identifier as a string.
+//
+// The bridge captures executor-state closures so that subsequent
+// SetOnSessionStart / SetOnSessionClose calls on this executor
+// propagate to bridge callbacks dynamically.
+func NewBlockExecutorWithDualLane(
+	primaryStore storage.LogicalStorage,
+	replicaAddr string,
+	dualLaneAddr string,
+	coord *recovery.PeerShipCoordinator,
+	replicaID recovery.ReplicaID,
+) *BlockExecutor {
+	e := NewBlockExecutor(primaryStore, replicaAddr)
+	bridge := recovery.NewPrimaryBridge(
+		primaryStore,
+		coord,
+		func(rid recovery.ReplicaID, sid uint64) {
+			e.mu.Lock()
+			cb := e.onSessionStart
+			e.mu.Unlock()
+			if cb != nil {
+				// ReplicaID MUST be populated; without it the engine's
+				// checkReplicaID drops the event as wrong_replica
+				// (Identity.ReplicaID won't match empty), session
+				// Phase stays at Starting forever, hasActiveSession
+				// returns true permanently, and subsequent rebuild
+				// dispatches are silently suppressed. Hardware-validated
+				// 2026-05-02 (g7-20260502T012553Z trace).
+				cb(adapter.SessionStartResult{
+					ReplicaID: string(rid),
+					SessionID: sid,
+				})
+			}
+		},
+		func(rid recovery.ReplicaID, sid uint64, achieved uint64, err error) {
+			// Hardware-harness completion marker (matches the legacy
+			// doRebuild Printf form so QA's wait_until_rebuild_complete
+			// helper regex catches the dual-lane path identically). The
+			// "blocks sent" count is the dense streamBase coverage (==
+			// volume's NumBlocks); future sparse base lane would emit
+			// the actual count.
+			if err == nil {
+				log.Printf("executor: rebuild complete, sent %d blocks (targetLSN=%d)",
+					e.primaryStore.NumBlocks(), achieved)
+			}
+			e.mu.Lock()
+			cb := e.onSessionClose
+			ackCb := e.onDurableAck
+			e.mu.Unlock()
+			// ReplicaID MUST be populated — see start lambda above for
+			// the full failure mode (engine drops as wrong_replica;
+			// session Phase stuck; hasActiveSession blocks future
+			// dispatches). Hardware-validated 2026-05-02.
+			res := adapter.SessionCloseResult{
+				ReplicaID:   string(rid),
+				SessionID:   sid,
+				AchievedLSN: achieved,
+			}
+			if err == nil {
+				res.Success = true
+			} else {
+				res.FailReason = err.Error()
+			}
+			if cb != nil {
+				cb(res)
+			}
+			if err == nil && ackCb != nil {
+				// Session close proves the recovery window closed;
+				// replica_ready needs a subsequent durable progress
+				// fact so the engine knows the live feed still owns
+				// this peer. `achieved` is the receiver's durable
+				// BarrierResp witness, not the primary's frontier
+				// intent.
+				_, primaryS, primaryH := e.primaryStore.Boundaries()
+				ackCb(adapter.DurableAckResult{
+					ReplicaID:      string(rid),
+					SessionID:      sid,
+					DurableLSN:     achieved,
+					PrimaryTailLSN: primaryS,
+					PrimaryHeadLSN: primaryH,
+				})
+			}
+		},
+	)
+	bridge.SetOnDurableAck(func(rid recovery.ReplicaID, sid, acknowledgedLSN, primaryS, primaryH uint64) {
+		e.mu.Lock()
+		cb := e.onDurableAck
+		e.mu.Unlock()
+		if cb != nil {
+			cb(adapter.DurableAckResult{
+				ReplicaID:      string(rid),
+				SessionID:      sid,
+				DurableLSN:     acknowledgedLSN,
+				PrimaryTailLSN: primaryS,
+				PrimaryHeadLSN: primaryH,
+			})
+		}
+	})
+	e.dualLane = &DualLaneConfig{
+		Bridge:    bridge,
+		DialAddr:  dualLaneAddr,
+		ReplicaID: replicaID,
+	}
+	return e
+}
+
 func (e *BlockExecutor) SetOnSessionClose(fn adapter.OnSessionClose) {
 	e.onSessionClose = fn
 }
 
 func (e *BlockExecutor) SetOnSessionStart(fn adapter.OnSessionStart) {
 	e.onSessionStart = fn
+}
+
+func (e *BlockExecutor) SetOnDurableAck(fn adapter.OnDurableAck) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.onDurableAck = fn
 }
 
 func (e *BlockExecutor) SetStepDelay(d time.Duration) {
@@ -77,11 +332,69 @@ func (e *BlockExecutor) Fence(replicaID string, sessionID, epoch, endpointVersio
 		SessionID:       sessionID,
 		Epoch:           epoch,
 		EndpointVersion: endpointVersion,
-		// TargetLSN is not used by acceptMutationLineage for order
-		// comparison; set to 0 to signal "fence, no recovery target."
-		TargetLSN: 0,
+		// FrontierHint/TargetLSN is not semantically meaningful for
+		// fence (fence doesn't declare a recovery target), but the
+		// barrier-ack wire demands every lineage field be non-zero
+		// (uniform decode rule). Using the liveShipTargetLSN
+		// sentinel (1) keeps Fence composable with the stricter wire
+		// while preserving the "not a recovery target" intent — no
+		// TargetLSN-sensitive code in the fence path reads this
+		// value.
+		TargetLSN: fenceSentinelTargetLSN,
 	}
 	go e.doFence(replicaID, lineage)
+	return nil
+}
+
+// fenceSentinelTargetLSN is the legacy lineage.TargetLSN wire value used for
+// fence requests. Arbitrary non-zero value; matches the
+// liveShipTargetLSN convention on the peer-level live ship path.
+// See Fence() godoc for why this is non-zero.
+const fenceSentinelTargetLSN uint64 = 1
+
+// FenceSync performs a synchronous fence exchange against the replica:
+// dial a fresh conn, send MsgBarrierReq at the given lineage, read
+// MsgBarrierResp, validate the full-lineage echo, and return. Returns
+// nil on success or a descriptive error on any dial / send / recv /
+// lineage-mismatch failure.
+//
+// Does NOT go through the session registry — fence is a single barrier
+// exchange, not a recovery session. Does NOT fire OnFenceComplete; the
+// async entry point Fence() wraps FenceSync and handles the callback.
+//
+// Called by: BlockExecutor.doFence (async wrapper for legacy callback-
+// driven callers like the engine's recovery path) and
+// ReplicaPeer.Fence (sync-style wrapper for callers like
+// DurabilityCoordinator).
+// Owns: per-call conn dial + deadline; lineage validation against the
+// request lineage (uniform rule).
+// Borrows: lineage from caller.
+func (e *BlockExecutor) FenceSync(replicaID string, lineage RecoveryLineage) error {
+	conn, err := net.DialTimeout("tcp", e.replicaAddr, 2*time.Second)
+	if err != nil {
+		return fmt.Errorf("fence dial: %w", err)
+	}
+	defer conn.Close()
+
+	if err := sendBarrierReq(conn, lineage, recoveryConnTimeout); err != nil {
+		return fmt.Errorf("fence barrier send: %w", err)
+	}
+	resp, err := recvBarrierResp(conn, recoveryConnTimeout)
+	if err != nil {
+		// Short / zero-valued / field-order-malformed payloads are
+		// rejected at the decode layer as errors; they surface here
+		// without silent-accept.
+		return fmt.Errorf("fence barrier resp: %w", err)
+	}
+	// Lineage validation: the replica's echoed lineage MUST match
+	// the lineage we sent.
+	if !resp.Lineage.Equivalent(lineage) {
+		log.Printf("executor: fence lineage mismatch replica=%s expected=%+v actual=%+v",
+			replicaID, lineage, resp.Lineage)
+		return fmt.Errorf("fence barrier resp lineage mismatch: expected=%+v actual=%+v",
+			lineage, resp.Lineage)
+	}
+	log.Printf("executor: fence complete replica=%s epoch=%d", replicaID, lineage.Epoch)
 	return nil
 }
 
@@ -92,34 +405,105 @@ func (e *BlockExecutor) doFence(replicaID string, lineage RecoveryLineage) {
 		Epoch:           lineage.Epoch,
 		EndpointVersion: lineage.EndpointVersion,
 	}
-
-	conn, err := net.DialTimeout("tcp", e.replicaAddr, 2*time.Second)
-	if err != nil {
+	if err := e.FenceSync(replicaID, lineage); err != nil {
 		result.Success = false
-		result.FailReason = fmt.Sprintf("fence dial: %v", err)
-		e.fireFenceComplete(result)
-		return
+		result.FailReason = err.Error()
+	} else {
+		result.Success = true
 	}
-	defer conn.Close()
+	e.fireFenceComplete(result)
+}
 
+// Barrier issues a per-peer barrier round-trip carrying the session
+// lineage. Blocks until the response arrives or the deadline fires.
+// Returns the validated BarrierAck on success, or error on transport
+// failure / ack rejection.
+//
+// Uniform full-lineage rule applies end-to-end:
+//   - decode rejects short / zeroed / field-order-malformed acks
+//   - this method rejects valid-decode-but-wrong-session acks via
+//     ErrBarrierLineageMismatch
+//
+// A future optimization MUST NOT weaken this to epoch-only; the
+// full-lineage rule is load-bearing for the durability gate.
+//
+// Called by: DurabilityCoordinator.SyncLocalAndReplicas per-peer
+// fan-out.
+// Owns: per-call conn deadline (recoveryConnTimeout); lineage binding;
+// ack validation against the session's registered lineage.
+// Borrows: session by replicaID + lineage.SessionID; BarrierAck
+// payload fields are value-copied into the returned struct.
+func (e *BlockExecutor) Barrier(replicaID string, lineage RecoveryLineage, frontierHint uint64) (BarrierAck, error) {
+	// Session lookup + epoch-== fence (same pattern as Ship).
+	e.mu.Lock()
+	session, ok := e.sessions[lineage.SessionID]
+	if !ok || session == nil {
+		e.mu.Unlock()
+		return BarrierAck{}, fmt.Errorf("transport: barrier: no session for replica=%s sessionID=%d",
+			replicaID, lineage.SessionID)
+	}
+	if lineage.Epoch != session.lineage.Epoch {
+		sessionEpoch := session.lineage.Epoch
+		e.mu.Unlock()
+		log.Printf("transport: barrier: dropping frontier_hint=%d replica=%s stale epoch %d (session epoch %d)",
+			frontierHint, replicaID, lineage.Epoch, sessionEpoch)
+		return BarrierAck{}, fmt.Errorf("transport: barrier: stale epoch %d (session %d)",
+			lineage.Epoch, sessionEpoch)
+	}
+	conn := session.conn
+	e.mu.Unlock()
+
+	// Lazy-dial if no conn (same pattern as Ship). Attach-under-mu
+	// with "first winner keeps" races.
+	if conn == nil {
+		dialed, err := net.DialTimeout("tcp", e.replicaAddr, shipDialTimeout)
+		if err != nil {
+			return BarrierAck{}, fmt.Errorf("transport: barrier: dial replica=%s sessionID=%d: %w",
+				replicaID, lineage.SessionID, err)
+		}
+		e.mu.Lock()
+		current, stillActive := e.sessions[lineage.SessionID]
+		switch {
+		case !stillActive || current != session:
+			e.mu.Unlock()
+			_ = dialed.Close()
+			return BarrierAck{}, fmt.Errorf("transport: barrier: session %d invalidated during dial",
+				lineage.SessionID)
+		case session.conn != nil:
+			conn = session.conn
+			e.mu.Unlock()
+			_ = dialed.Close()
+		default:
+			session.conn = dialed
+			conn = dialed
+			e.mu.Unlock()
+		}
+	}
+
+	// Send request + receive response with deadlines on both sides
+	// (sendBarrierReq / recvBarrierResp already set conn deadline).
 	if err := sendBarrierReq(conn, lineage, recoveryConnTimeout); err != nil {
-		result.Success = false
-		result.FailReason = fmt.Sprintf("fence barrier send: %v", err)
-		e.fireFenceComplete(result)
-		return
+		return BarrierAck{}, fmt.Errorf("transport: barrier: send replica=%s: %w", replicaID, err)
 	}
 	resp, err := recvBarrierResp(conn, recoveryConnTimeout)
 	if err != nil {
-		result.Success = false
-		result.FailReason = fmt.Sprintf("fence barrier resp: %v", err)
-		e.fireFenceComplete(result)
-		return
+		return BarrierAck{}, fmt.Errorf("transport: barrier: recv replica=%s: %w", replicaID, err)
 	}
-	_ = resp // AchievedLSN is not used by fence — we only needed the replica's ack
 
-	result.Success = true
-	log.Printf("executor: fence complete replica=%s epoch=%d", replicaID, lineage.Epoch)
-	e.fireFenceComplete(result)
+	// Full-lineage validation. Stale or cross-session acks fail
+	// here. Diagnostic log format: peer ID + full expected / actual
+	// lineage tuple.
+	if !resp.Lineage.Equivalent(lineage) {
+		log.Printf("transport: barrier: lineage mismatch replica=%s expected=%+v actual=%+v",
+			replicaID, lineage, resp.Lineage)
+		return BarrierAck{}, ErrBarrierLineageMismatch
+	}
+
+	return BarrierAck{
+		Lineage:     resp.Lineage,
+		AchievedLSN: resp.AchievedLSN,
+		Success:     true,
+	}, nil
 }
 
 func (e *BlockExecutor) fireFenceComplete(result adapter.FenceResult) {
@@ -131,12 +515,80 @@ func (e *BlockExecutor) fireFenceComplete(result adapter.FenceResult) {
 	}
 }
 
-// Probe dials the replica, sends a probe request, and returns the
-// replica's R/S/H boundaries. Returns facts only — never decides policy.
-func (e *BlockExecutor) Probe(replicaID, dataAddr, ctrlAddr string, epoch, endpointVersion uint64) adapter.ProbeResult {
+// ErrProbeLineageMismatch is returned by `BlockExecutor.Probe` when the
+// replica's response carries a lineage that does not match the request
+// lineage. Per the symmetric-pair rule, such responses MUST NOT
+// contribute to recovery facts — the executor surfaces the error
+// verbatim and the engine treats it as a probe failure.
+var ErrProbeLineageMismatch = errors.New("transport: probe: response lineage does not match request")
+
+// Probe dials the replica, sends a `MsgProbeReq` carrying the full
+// transient probe lineage, and returns the replica's R/S/H boundaries
+// after validating the echoed lineage. Returns facts only — never
+// decides policy.
+//
+// sessionID is the adapter-minted transient probe sessionID. It is
+// NOT registered in `executor.sessions`, NOT carried in any
+// session-lifecycle event. The lineage built here:
+//
+//	RecoveryLineage{SessionID, Epoch, EndpointVersion, FrontierHint/TargetLSN: max(1, primaryH)}
+//
+// is consumed only by the wire pair. `primaryH` comes from
+// `primaryStore.Boundaries()`; the `max(1, ...)` floor ensures the
+// wire lineage's fourth slot is non-zero even on an empty primary.
+//
+// The replica's `acceptMutationLineage` accepts a fresh higher-tuple
+// lineage normally — probe lineages monotonically advance with the
+// minted sessionID counter, so they don't masquerade as stale.
+//
+// Echo validation uses RecoveryLineage.Equivalent so the new FrontierHint
+// name and the legacy TargetLSN wire alias compare as the same fourth slot.
+// Mismatches return `ErrProbeLineageMismatch`. Catches stale / cross-session /
+// partially-zeroed responses (the latter already caught at decode, but a
+// valid-decode-but-wrong-session ack is the load-bearing case here).
+//
+// Called by: adapter.executeCommand at engine.ProbeReplica dispatch.
+// Owns: dial timeout (2s); per-call conn deadline (3s); transient
+// probe lineage construction.
+// Borrows: primaryStore (boundaries snapshot for frontier-hint floor and
+// for R/S/H facts).
+func (e *BlockExecutor) Probe(replicaID, dataAddr, ctrlAddr string, sessionID, epoch, endpointVersion uint64) adapter.ProbeResult {
 	addr := e.replicaAddr
 	if dataAddr != "" {
 		addr = dataAddr
+	}
+
+	// Get primary's boundaries before dialing — the head is needed to
+	// build a non-zero frontier hint for the request lineage, and the
+	// primaryS / primaryH are also returned in the ProbeResult.
+	_, primaryS, primaryH := e.primaryStore.Boundaries()
+
+	// Probe lineage construction. Floor frontier hint at 1 to honor
+	// the no-zero-TargetLSN rule even when the primary has not yet
+	// written any data.
+	frontierHint := primaryH
+	if frontierHint == 0 {
+		frontierHint = 1
+	}
+	requestLineage := RecoveryLineage{
+		SessionID:       sessionID,
+		Epoch:           epoch,
+		EndpointVersion: endpointVersion,
+		FrontierHint:    frontierHint,
+		TargetLSN:       frontierHint,
+	}
+	if requestLineage.SessionID == 0 || requestLineage.Epoch == 0 ||
+		requestLineage.EndpointVersion == 0 {
+		// Fail-closed: adapter must mint a non-zero sessionID; engine
+		// must populate non-zero epoch + endpointVersion before
+		// emitting ProbeReplica. A zero here is a programmer error.
+		return adapter.ProbeResult{
+			ReplicaID:       replicaID,
+			Success:         false,
+			EndpointVersion: endpointVersion,
+			TransportEpoch:  epoch,
+			FailReason:      fmt.Sprintf("probe lineage has zero field: %+v", requestLineage),
+		}
 	}
 
 	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
@@ -152,7 +604,7 @@ func (e *BlockExecutor) Probe(replicaID, dataAddr, ctrlAddr string, epoch, endpo
 	defer conn.Close()
 	conn.SetDeadline(time.Now().Add(3 * time.Second))
 
-	if err := WriteMsg(conn, MsgProbeReq, nil); err != nil {
+	if err := WriteMsg(conn, MsgProbeReq, EncodeProbeReq(ProbeRequest{Lineage: requestLineage})); err != nil {
 		return adapter.ProbeResult{
 			ReplicaID:       replicaID,
 			Success:         false,
@@ -184,8 +636,21 @@ func (e *BlockExecutor) Probe(replicaID, dataAddr, ctrlAddr string, epoch, endpo
 		}
 	}
 
-	// Get primary's boundaries for R/S/H.
-	_, primaryS, primaryH := e.primaryStore.Boundaries()
+	// Echo validation (symmetric-pair rule, mirrors the barrier echo
+	// check). Primary-side consumer MUST reject stale /
+	// cross-session / partial-zero responses by full lineage tuple.
+	if !resp.Lineage.Equivalent(requestLineage) {
+		log.Printf("transport: probe: lineage mismatch replica=%s expected=%+v actual=%+v",
+			replicaID, requestLineage, resp.Lineage)
+		return adapter.ProbeResult{
+			ReplicaID:       replicaID,
+			Success:         false,
+			EndpointVersion: endpointVersion,
+			TransportEpoch:  epoch,
+			FailReason: fmt.Sprintf("%v: expected=%+v actual=%+v",
+				ErrProbeLineageMismatch, requestLineage, resp.Lineage),
+		}
+	}
 
 	log.Printf("executor: probe %s success R=%d S=%d H=%d",
 		replicaID, resp.SyncedLSN, primaryS, primaryH)
@@ -195,8 +660,8 @@ func (e *BlockExecutor) Probe(replicaID, dataAddr, ctrlAddr string, epoch, endpo
 		EndpointVersion:   endpointVersion,
 		TransportEpoch:    epoch,
 		ReplicaFlushedLSN: resp.SyncedLSN, // R
-		PrimaryTailLSN:    primaryS,        // S
-		PrimaryHeadLSN:    primaryH,         // H
+		PrimaryTailLSN:    primaryS,       // S
+		PrimaryHeadLSN:    primaryH,       // H
 	}
 }
 
@@ -224,6 +689,240 @@ func (e *BlockExecutor) PublishHealthy(replicaID string) {
 func (e *BlockExecutor) PublishDegraded(replicaID string, reason string) {
 	log.Printf("executor: publish degraded for %s: %s", replicaID, reason)
 }
+
+// WalShipperFor returns the per-replica WalShipper for replicaID,
+// creating one on first call. Idempotent: subsequent calls for the
+// same replicaID return the same instance (INV-SINGLE per
+// v3-recovery-wal-shipper-spec.md §3).
+//
+// The returned WalShipper is in Realtime mode immediately (Activate
+// at cursor=0). Steady-state Ship() delegates here. Recovery
+// sessions can later transition the same shipper into Backlog mode
+// via StartSession (P2 wiring).
+//
+// Concurrent calls for the same replicaID linearize through
+// walShipperMu; all callers observe the same instance.
+func (e *BlockExecutor) WalShipperFor(replicaID string) *WalShipper {
+	e.walShipperMu.Lock()
+	defer e.walShipperMu.Unlock()
+
+	if e.walShippers == nil {
+		e.walShippers = make(map[string]*walShipperEntry)
+	}
+	if entry, ok := e.walShippers[replicaID]; ok {
+		return entry.shipper
+	}
+
+	entry := &walShipperEntry{}
+	emit := func(kind EmitKind, lba uint32, lsn uint64, data []byte) error {
+		entry.emitCtxMu.Lock()
+		conn := entry.emitConn
+		lineage := entry.emitLineage
+		profile := entry.emitProfile
+		postEmit := entry.postEmit
+		entry.emitCtxMu.Unlock()
+		if conn == nil {
+			// No emit context yet (Ship hasn't run; recovery session
+			// hasn't installed session context). Drop silently — same
+			// semantics as ModeIdle. Caller's NotifyAppend returns nil;
+			// entry remains in primary substrate and will be picked up
+			// by the next emit context's drain (recovery DrainBacklog
+			// scan or steady catch-up). This avoids racing against
+			// session-bracket installation when callers inject live
+			// writes via PushLiveWrite during the WalShipperFor →
+			// sink.StartSession window.
+			return nil
+		}
+
+		// C1 (§6.8 #1 mechanical SINGLE-SERIALIZER): hold writeMu
+		// across the wire write so concurrent recovery.Sender.writeFrame
+		// (also acquiring the same mutex via WalShipperSink.WriteMu())
+		// can't interleave header+payload of two frames. In steady
+		// state this is uncontended (only Ship writes); in dual-lane
+		// sessions it serializes Sender + WalShipper writers.
+		entry.writeMu.Lock()
+		_ = conn.SetWriteDeadline(time.Now().Add(shipWriteDeadline))
+		var err error
+		switch profile {
+		case EmitProfileSteadyMsgShip:
+			payload := EncodeShipEntry(ShipEntry{
+				Lineage: lineage,
+				LBA:     lba,
+				LSN:     lsn,
+				Data:    data,
+			})
+			err = WriteMsg(conn, MsgShipEntry, payload)
+		case EmitProfileDualLaneWALFrame:
+			// Map EmitKind → recovery WALEntryKind. Backlog scan emits
+			// → WALKindBacklog; Realtime / NotifyAppend emits during
+			// session → WALKindSessionLive (the kind tag drives the
+			// receiver's BacklogApplied vs SessionLiveApplied counters
+			// — observability only; apply behavior identical).
+			var walKind recovery.WALEntryKind
+			if kind == EmitKindBacklog {
+				walKind = recovery.WALKindBacklog
+			} else {
+				walKind = recovery.WALKindSessionLive
+			}
+			err = recovery.WriteWALEntryFrame(conn, walKind, lba, lsn, data)
+		default:
+			err = fmt.Errorf("transport: WalShipper for replica %s has unknown emit profile %s", replicaID, profile)
+		}
+		_ = conn.SetWriteDeadline(time.Time{})
+		entry.writeMu.Unlock()
+
+		// C1 post-emit hook: on successful wire write, fire the
+		// callback installed by the session installer (recovery.Sender)
+		// so coord.RecordShipped advances the per-replica shipCursor.
+		// Fired OUTSIDE writeMu so the callback doesn't deadlock with
+		// itself or block the next writer.
+		if err == nil && postEmit != nil {
+			postEmit(lsn)
+		}
+		return err
+	}
+	s := NewWalShipper(replicaID, HeadSourceFromStorage(e.primaryStore), e.primaryStore, emit)
+	// Activate immediately into Realtime — first Ship's lsn > 0 will
+	// emit cleanly. Recovery sessions later StartSession to transition
+	// to Backlog.
+	_ = s.Activate(0)
+	entry.shipper = s
+	e.walShippers[replicaID] = entry
+	return s
+}
+
+// AdvanceLiveShipCursor records that recovery has durably carried the
+// replica through achievedLSN, so the next steady live write can start
+// at achievedLSN+1 instead of tripping the resident WalShipper's tail
+// gap guard. The cursor only moves forward.
+func (e *BlockExecutor) AdvanceLiveShipCursor(replicaID string, achievedLSN uint64) {
+	s := e.WalShipperFor(replicaID)
+	s.AdvanceRecoveredCursor(achievedLSN)
+}
+
+// updateWalShipperEmitContext sets the wire conn + lineage + profile
+// that the per-replica WalShipper's EmitFunc will use on its next
+// emit. Ship() calls this before delegating NotifyAppend; recovery
+// session start (RecoverySink) calls it to install the dual-lane
+// session context.
+//
+// Ordering invariant: every code path that ends in an emit (steady
+// Ship, recovery-session DrainBacklog, recovery-session NotifyAppend)
+// MUST refresh this context BEFORE the call that may emit. Otherwise
+// EmitFunc emits with stale lineage / nil conn / wrong profile.
+//
+// `profile` is part of the context — SteadyMsgShip for legacy port,
+// DualLaneWALFrame for dual-lane port. The profile selects the
+// encoder; legacy callers pass EmitProfileSteadyMsgShip to preserve
+// existing wire shape.
+//
+// No-op if the WalShipper hasn't been created yet (caller will
+// create via WalShipperFor and re-call).
+func (e *BlockExecutor) updateWalShipperEmitContext(replicaID string, conn net.Conn, lineage RecoveryLineage, profile EmitProfile) {
+	e.walShipperMu.Lock()
+	entry, ok := e.walShippers[replicaID]
+	e.walShipperMu.Unlock()
+	if !ok {
+		return
+	}
+	entry.emitCtxMu.Lock()
+	entry.emitConn = conn
+	entry.emitLineage = lineage
+	entry.emitProfile = profile
+	entry.emitCtxMu.Unlock()
+}
+
+// SetWalShipperPostEmitHook installs (or clears, if hook==nil) the
+// per-emit callback that fires after a successful wire write. Recovery
+// sessions use it to translate "this LSN reached the wire" into
+// `coord.RecordShipped(replicaID, lsn)` — advances per-peer shipCursor
+// in lockstep with emit.
+//
+// Set BEFORE StartSession so the first emit fires the hook; clear
+// (nil) at EndSession so post-session emits don't call into a
+// torn-down coordinator state.
+//
+// No-op if no WalShipperEntry exists for replicaID.
+func (e *BlockExecutor) SetWalShipperPostEmitHook(replicaID string, hook func(lsn uint64)) {
+	e.walShipperMu.Lock()
+	entry, ok := e.walShippers[replicaID]
+	e.walShipperMu.Unlock()
+	if !ok {
+		return
+	}
+	entry.emitCtxMu.Lock()
+	entry.postEmit = hook
+	entry.emitCtxMu.Unlock()
+}
+
+// WalShipperWriteMu returns the per-replica entry's writeMu — the
+// mutex EmitFunc holds during conn.Write. Recovery.Sender uses this
+// for its own writeFrame calls during a dual-lane session so both
+// writers serialize on the same conn (mechanical SINGLE-SERIALIZER).
+//
+// Returns nil when no WalShipperEntry exists for replicaID — caller
+// (the sink) returns nil from WriteMu(), and recovery.Sender falls
+// back to its own private mutex.
+func (e *BlockExecutor) WalShipperWriteMu(replicaID string) *sync.Mutex {
+	e.walShipperMu.Lock()
+	entry, ok := e.walShippers[replicaID]
+	e.walShipperMu.Unlock()
+	if !ok {
+		return nil
+	}
+	return &entry.writeMu
+}
+
+// SnapshotEmitContext returns the per-replica WalShipper's current
+// emit conn + lineage + profile under the same mutex production code
+// uses (emitCtxMu). Intended for callers that need to capture the
+// steady-state context BEFORE constructing a RecoverySink — so
+// EndSession's rule-2 restore lands the right values rather than
+// zero / nil.
+//
+// Returns (nil, zero RecoveryLineage, EmitProfileSteadyMsgShip) when
+// no WalShipperEntry exists for replicaID (i.e., no Ship has run yet
+// for this replica). That is honest: the steady restore is "no
+// context yet, default to steady profile" — matching what a fresh
+// Ship() call would set.
+//
+// Called by: production wiring layer (e.g., transport.startRebuildDualLane)
+// right before NewRecoverySink, so the snapshot is consistent with
+// what's currently driving Ship().
+func (e *BlockExecutor) SnapshotEmitContext(replicaID string) (net.Conn, RecoveryLineage, EmitProfile) {
+	e.walShipperMu.Lock()
+	entry, ok := e.walShippers[replicaID]
+	e.walShipperMu.Unlock()
+	if !ok {
+		return nil, RecoveryLineage{}, EmitProfileSteadyMsgShip
+	}
+	entry.emitCtxMu.Lock()
+	defer entry.emitCtxMu.Unlock()
+	return entry.emitConn, entry.emitLineage, entry.emitProfile
+}
+
+// DualLanePrimaryBridge returns the recovery PrimaryBridge plus the
+// coordinator replica key when this executor was built with
+// NewBlockExecutorWithDualLane. Legacy executors return (_, _, false).
+//
+// Integration tests (e.g. core/replication/component) use this to drive
+// PushLiveWrite during an engine-dispatched rebuild. Production should
+// ideally route session-lane writes via a single control plane; this
+// accessor exists so tests can close the bridge/coordinator seam without
+// duplicating cluster executor construction.
+func (e *BlockExecutor) DualLanePrimaryBridge() (*recovery.PrimaryBridge, recovery.ReplicaID, bool) {
+	if e.dualLane == nil {
+		return nil, "", false
+	}
+	return e.dualLane.Bridge, e.dualLane.ReplicaID, true
+}
+
+// Registry lifecycle note: walShippers entries are never torn down
+// today. For replica churn, lineage invalidation, or executor reuse
+// across distinct peer generations, a future Forget(replicaID) /
+// teardown hook may be needed. Out of scope for MVP since current
+// call sites (cmd/blockvolume, tests) construct one BlockExecutor
+// per (volume, replica) lifecycle.
 
 func (e *BlockExecutor) registerSession(lineage RecoveryLineage) (*activeSession, error) {
 	e.mu.Lock()
@@ -298,11 +997,16 @@ func (e *BlockExecutor) finishSession(replicaID string, session *activeSession, 
 		return
 	}
 	if err != nil {
+		// Extract substrate-side RecoveryFailure via errors.As + map
+		// to engine-owned RecoveryFailureKind. Engine MUST NOT import
+		// core/storage; transport does the mapping at the boundary
+		// (transport already imports both packages).
 		cb(adapter.SessionCloseResult{
-			ReplicaID:  replicaID,
-			SessionID:  session.lineage.SessionID,
-			Success:    false,
-			FailReason: err.Error(),
+			ReplicaID:   replicaID,
+			SessionID:   session.lineage.SessionID,
+			Success:     false,
+			FailureKind: classifyRecoveryFailure(err),
+			FailReason:  err.Error(),
 		})
 		return
 	}

@@ -67,16 +67,16 @@ func parseFlags(args []string) (options, error) {
 	fs.BoolVar(&opts.json, "json", false, "emit machine-readable JSON output")
 	fs.IntVar(&opts.runs, "runs", 1, "repeat the validation path N times")
 	fs.StringVar(&opts.httpAddr, "http", "", "start read-only HTTP ops server on ADDR")
-	fs.BoolVar(&opts.calibrate, "calibrate", false, "run the Phase 06 calibration package")
+	fs.BoolVar(&opts.calibrate, "calibrate", false, "run the calibration package")
 	fs.BoolVar(&opts.persistDemo, "persist-demo", false, "run the single-node persistence demonstration")
 	fs.StringVar(&opts.persistDir, "persist-dir", "", "directory for --persist-demo backing file")
-	fs.StringVar(&opts.authorityStore, "authority-store", "", "directory for P14 S5 durable authority records")
-	fs.BoolVar(&opts.s5Bootstrap, "s5-bootstrap", false, "run the P14 S5 durable authority bootstrap (requires --authority-store)")
-	// --s7-restart-smoke is a test-only entry for the P14 S7 real-
-	// subprocess restart smoke. It is intentionally undocumented in
-	// operator tooling; the flag help string is terse so running
-	// sparrow with --help doesn't advertise it as a workflow.
-	fs.BoolVar(&opts.s7RestartSmoke, "s7-restart-smoke", false, "internal test-only: P14 S7 restart smoke (requires --authority-store)")
+	fs.StringVar(&opts.authorityStore, "authority-store", "", "directory for durable authority records")
+	fs.BoolVar(&opts.s5Bootstrap, "s5-bootstrap", false, "run the durable authority bootstrap (requires --authority-store)")
+	// --s7-restart-smoke is a test-only entry for the real-subprocess
+	// restart smoke. It is intentionally undocumented in operator
+	// tooling; the flag help string is terse so running sparrow with
+	// --help doesn't advertise it as a workflow.
+	fs.BoolVar(&opts.s7RestartSmoke, "s7-restart-smoke", false, "internal test-only: restart smoke (requires --authority-store)")
 	fs.SetOutput(ioDiscard{})
 	if err := fs.Parse(args); err != nil {
 		return options{}, err

@@ -1,280 +1,288 @@
 # seaweed-block
 
-Block Storage for Kubernetes
+Alpha-stage CSI block storage for Kubernetes.
 
-`seaweed-block` is a standalone block-storage experiment built around a
-deterministic semantic core. The current repository is the first public
-runnable slice of that work: a narrow block sparrow that proves one clean
-recovery route end-to-end.
+<p align="center">
+  <img src="docs/assets/seaweed-block-hero.svg" alt="seaweed-block alpha architecture: Kubernetes PVC to CSI, blockmaster, blockvolume, iSCSI, and WAL recovery" width="100%">
+</p>
 
-```text
-facts -> engine decision -> adapter command -> runtime execution -> session close
-```
+<p align="center">
+  <strong>Alpha</strong> · Kubernetes CSI · iSCSI today · WAL-backed recovery design · RF=2/RF=3 roadmap
+</p>
 
-## Product Vision
+`seaweed-block` is an early project for Kubernetes users who want simple
+PersistentVolumes backed by a small CSI block-storage service.
 
-`seaweed-block` aims to make block storage for Kubernetes much lighter, easier,
-and more flexible than traditional storage stacks.
+The immediate target is practical: create a PVC, attach it through CSI, mount it
+through standard Linux iSCSI tooling, write data from a pod, read it back, and
+clean up. The longer-term target is a compact replicated block service for small
+clusters that want RF=2/RF=3 without adopting a large storage platform on day
+one.
 
-The product direction is:
+It is not production-ready. The current code can run a single-node Kubernetes
+alpha smoke path: dynamic PVC creation, CSI attach/stage, iSCSI mount, pod
+write/read checksum, and cleanup. The project still needs durable Kubernetes
+packaging, multi-node validation, failover-under-mount testing, and operational
+hardening before it should be used for real workloads.
 
-1. simpler to understand and operate than heavyweight systems such as Ceph
-2. lighter to start and iterate on for developers and platform teams
-3. flexible enough to grow from a small cluster service into a practical Kubernetes block platform
-4. easier to reason about during failure and recovery, without a maze of hidden control-plane behavior
+## Why This Exists
 
-In short:
+Many Kubernetes teams want persistent volumes that are easy to deploy and reason
+about:
 
-1. easier than heavyweight storage systems
-2. more direct than control-plane-heavy designs
-3. still structured enough to grow into serious replicated block storage
+- small companies running a few Kubernetes nodes
+- developers who want a local or lab CSI storage service
+- teams that find Ceph too large for their first storage step
+- users who want PVCs without hiding recovery semantics behind a black box
 
-## Design Philosophy
+The goal is not to replace mature storage systems today. The goal is to build a
+small, inspectable CSI block service that can grow carefully toward RF=2/RF=3,
+failover, recovery, and Kubernetes-native operations.
 
-The technical design is intentionally shaped around a few strict choices:
+## Technical Direction
 
-1. semantic core first: recovery meaning is defined in a deterministic engine before broad system growth
-2. one route only: observation, decision, execution, and terminal close follow one explicit path
-3. strict authority boundaries: engine decides, adapter normalizes, runtime executes
-4. terminal truth is narrow: recovery is not "successful" until explicit session close says so
-5. reviewable growth: the project is phase-driven so new features do not silently pollute the core
-6. runtime must not silently redefine semantics, including widening engine-issued recovery targets
+The new block design is built around three ideas.
 
-## Why This Approach
+### WAL + Extent
 
-Many storage systems become difficult because recovery semantics, transport
-mechanics, retries, and product features get mixed together.
-
-`seaweed-block` is an attempt to separate those layers more cleanly:
-
-1. facts determine semantics
-2. transport does not silently redefine policy
-3. the system can be tested and reviewed from the semantic contract outward
-4. the same semantic model should later support broader runtime work without changing its meaning
-
-Current status:
-
-1. semantic core: present
-2. replay/conformance runtime: present
-3. adapter-backed route: present
-4. runnable block sparrow: present
-5. operations UX: not yet built out
-6. persistence / crash recovery: not yet built out
-
-## What Works Today
-
-The current repository can run one narrow block slice end-to-end through real
-TCP transport.
-
-Demonstrated paths:
-
-1. healthy: replica is already caught up
-2. catch-up: replica is behind within retained window
-3. rebuild: replica is behind beyond retained window
-
-The current route stays intentionally narrow:
-
-1. one semantic route
-2. one active session at a time
-3. one terminal-close authority
-4. executor honors the engine-issued `targetLSN`
-
-## What This Repo Is Not Yet
-
-This repository is not yet:
-
-1. production-ready storage
-2. a full SeaweedFS block product
-3. a complete frontend protocol implementation
-4. a broad operations shell or UI
-5. a replacement claim over the current `V2` baseline
-
-Current limitations:
-
-1. storage is in-memory only
-2. no persistence or crash recovery
-3. no master service; assignment is hardcoded in the demo
-4. no iSCSI or NVMe-oF frontend
-5. no concurrent write path during replication
-6. no broad timeout / reconnect / hardening logic
-
-## Repo Layout
+Writes first go through a WAL-style path, then drain into extent storage. This
+keeps the local data process explicit:
 
 ```text
-cmd/
-  sparrow/        runnable Phase 04 demo entry point
-
-core/
-  engine/         deterministic semantic core
-  schema/         conformance case schema and conversion
-  runtime/        replay runner
-  conformance/    YAML semantic cases
-  adapter/        single-route adapter boundary
-  storage/        minimal in-memory block store
-  transport/      minimal TCP transport for the runnable sparrow
+write -> WAL -> flush/checkpoint -> extent
 ```
 
-`core/` is the public-facing semantic center path for this repository.
+The current Kubernetes alpha uses `walstore`. A smarter WAL backend is planned,
+but it is not the default alpha path yet.
 
-For a full taxonomy of events, commands, truth domains, and operator
-enums — and why there is no single unified state diagram — see
-[docs/surface.md](docs/surface.md).
+### Dual-Lane Recovery
+
+Recovery is designed as more than “copy until target LSN”. The newer path keeps
+base transfer and WAL/live-tail feeding separate enough to avoid blocking normal
+write flow, while still enforcing a single owner for WAL egress decisions.
+
+The important rule is:
+
+```text
+one peer, one monotonic WAL feeding owner
+```
+
+This avoids the previous class of bugs where multiple senders tried to advance
+the same recovery truth.
+
+### Protocol And Execution Separation
+
+Control-plane facts, assignment authority, frontend protocol, and runtime
+execution are kept separate:
+
+```text
+observation != authority
+placement intent != assignment
+authority moved != data continuity proven
+frontend fact != storage readiness
+```
+
+This makes the system slower to design, but easier to review. The aim is to keep
+iSCSI, future NVMe-oF, recovery, and placement from redefining each other's
+contracts.
+
+## How It Compares
+
+This is not a feature-complete comparison; it is the intended product position.
+
+| System | Strength | Tradeoff |
+|---|---|---|
+| Ceph/Rook | mature, powerful, broad storage platform | operationally heavy for small clusters |
+| OpenEBS-style local engines | Kubernetes-friendly, easier to start | behavior depends heavily on chosen engine/topology |
+| seaweed-block | aims to be small, inspectable, CSI-first, recovery-contract-driven | alpha, incomplete, not production-ready |
+
+The attraction of `seaweed-block`, if it succeeds, is a middle path:
+
+- simpler than a full distributed storage platform
+- more structured than ad hoc local disks
+- CSI-first for Kubernetes
+- designed for RF=2/RF=3 replication
+- iSCSI first, NVMe-oF later
+- recovery semantics documented and testable
+
+## Current Progress
+
+Currently demonstrated:
+
+- CSI dynamic PVC `CreateVolume`
+- blockmaster lifecycle and placement flow
+- launcher-generated `blockvolume` Deployment
+- iSCSI frontend attach/mount
+- pod filesystem write/read checksum
+- CSI `DeleteVolume` cleanup path (the alpha smoke removes launcher-generated
+  blockvolume deployments today; a controller will replace this manual sweep,
+  see roadmap)
+- no dangling iSCSI session after cleanup in the lab run
+- TestOps registry and a minimal `cmd/sw-testops` CLI
+
+Current alpha defaults:
+
+- Kubernetes: single-node k3s lab
+- frontend: iSCSI
+- backend: `walstore`
+- dynamic volume state: launcher-generated blockvolume uses `emptyDir`
+- replication in the demo StorageClass: RF=1
+
+Important non-claims:
+
+- not production-ready
+- not multi-node validated as a Kubernetes product
+- not durable across blockvolume pod restart in the alpha manifest
+- not yet a full operator
+- no failover-under-mounted-PVC claim
+- no NVMe-oF CSI claim yet
+- no performance/soak claim
 
 ## Quick Start
 
-Requirements:
+Use a Linux Kubernetes node where privileged CSI pods are allowed and
+`iscsi_tcp` is loadable.
 
-1. Go `1.23+`
+Quick Start prerequisites:
 
-Run the runnable sparrow:
+- Docker
+- `kubectl`
+- a running Kubernetes cluster such as k3s
+- `iscsi_tcp` loadable on the node
+- `KUBECONFIG` set for your cluster
 
-```bash
-go run ./cmd/sparrow
-```
-
-Expected outcome:
-
-1. healthy demo passes
-2. catch-up demo passes
-3. rebuild demo passes
-
-Run the test suite:
+For a default k3s install:
 
 ```bash
-go test ./...
+export KUBECONFIG="${KUBECONFIG:-/etc/rancher/k3s/k3s.yaml}"
 ```
 
-## Operations
-
-The sparrow supports optional flags for repeatable validation and
-read-only inspection. Defaults are unchanged from the Phase 04 demo:
+Build local images:
 
 ```bash
-go run ./cmd/sparrow                       # three demos, text output (default)
-go run ./cmd/sparrow --help                # authoritative scope statement
-go run ./cmd/sparrow --json                # machine-readable output for CI
-go run ./cmd/sparrow --runs 10             # repeat the full demo N times
-go run ./cmd/sparrow --http :9090          # add read-only HTTP inspection
-go run ./cmd/sparrow --calibrate           # Phase 06 calibration pass (C1-C5)
-go run ./cmd/sparrow --calibrate --json    # machine-readable calibration Report
-go run ./cmd/sparrow --persist-demo --persist-dir DIR    # Phase 07 single-node persistence demo
+bash scripts/build-alpha-images.sh "$PWD"
 ```
 
-HTTP endpoints (read-only): `GET /` returns the self-describing surface
-map; `GET /status`, `GET /projection`, `GET /trace`, `GET /watchdog`,
-`GET /diagnose` expose the bounded single-node inspection surface. Every
-mutation verb returns 501 with an explicit read-only ops-surface body.
-
-See [docs/single-node-surface.md](docs/single-node-surface.md) for the
-bounded single-node product surface, or
-[docs/bootstrap-validation.md](docs/bootstrap-validation.md) for the
-full list of supported flags, endpoints, and exit codes.
-
-This binary is a development and validation entry point only. The
-production operations surface is `weed shell` after integration.
-
-## Calibration
-
-Phase 06 adds a small calibration set that drives the accepted route
-through five scenario families (C1-C5) and records expected-versus-
-observed evidence. Run it with:
+For k3s, import them:
 
 ```bash
-go run ./cmd/sparrow --calibrate          # text report
-go run ./cmd/sparrow --calibrate --json   # machine-readable Report
+docker save sw-block:local | sudo k3s ctr images import -
+docker save sw-block-csi:local | sudo k3s ctr images import -
 ```
 
-Evidence artifacts:
-
-- [docs/calibration/scenario-map.md](docs/calibration/scenario-map.md)
-- [docs/calibration/divergence-log.md](docs/calibration/divergence-log.md)
-
-If a case diverges, record it in `divergence-log.md` before changing
-the route or the expectations.
-
-## Persistence and the local data process
-
-A bounded local data process owns read, write, flush, checkpoint,
-and recovery on one node, behind the `LogicalStorage` interface.
-Acked writes survive abrupt process kill; recovery is deterministic;
-a background flusher drains the WAL into the extent and advances
-the on-disk checkpoint.
+Run the alpha smoke:
 
 ```bash
-go run ./cmd/sparrow --persist-demo --persist-dir /tmp/sparrow-persist
+bash scripts/run-k8s-alpha.sh "$PWD"
 ```
 
-What's proven (single-node):
+Expected result:
 
-- Acked writes survive process kill (verified by simulated-kill tests
-  that bypass `Close()` and a crash family across four windows).
-- Recovery is deterministic across reopens of the same on-disk state.
-- Unacked writes may vanish but never corrupt acked data.
+```text
+[alpha] PASS: dynamic PVC create/delete completed checksum write/read and cleanup
+```
 
-What's NOT in scope: distributed durability across nodes;
-power-loss durability beyond what `fsync` guarantees at the
-OS+device boundary; bit-rot detection in the extent.
+For the manual `kubectl apply` flow, see:
 
-For details:
+- [deploy/k8s/alpha/README.md](deploy/k8s/alpha/README.md)
 
-- [docs/local-data-process.md](docs/local-data-process.md) — the institution, what it owns, the crash model, carry-forward
-- [docs/persistence.md](docs/persistence.md) — backend implementation details, on-disk format, exit codes, NVMe/raw-device path
+## Simple User Manual
 
-## Replication institutions
+The current alpha flow is:
 
-The current replicated path is documented as two bounded lower institutions:
+1. Build `sw-block:local` and `sw-block-csi:local`.
+2. Deploy blockmaster, CSI controller, and CSI node manifests.
+3. Create a PVC using the `sw-block-dynamic` StorageClass.
+4. Apply the launcher-generated blockvolume Deployment.
+5. Run a pod that mounts the PVC.
+6. Delete the pod and PVC.
+7. Confirm generated blockvolume workload and iSCSI sessions are gone.
 
-- [docs/data-sync-institution.md](docs/data-sync-institution.md) — byte movement, wire protocol, lineage gate, achieved-frontier report
-- [docs/recovery-execution-institution.md](docs/recovery-execution-institution.md) — command admission, real execution start, invalidation, close-path lifecycle truth
+The script below performs that whole smoke path:
 
-## Single-node product surface
+```bash
+bash scripts/run-k8s-alpha.sh "$PWD"
+```
 
-Above the three lower institutions (local data, data sync,
-recovery execution) sits one bounded single-node operator
-surface — start / inspect / validate / diagnose — exposed as six
-read-only HTTP endpoints plus the sparrow CLI. No cluster-shaped
-wording; no mutation authority.
+This is still a lab workflow. A real operator should eventually replace the
+manual/harness step that applies generated blockvolume Deployments.
 
-- [docs/single-node-surface.md](docs/single-node-surface.md) — surface map, workflow, honesty rules, carry-forward
+## Roadmap
 
-## Replicated durable slice
+Near-term work:
 
-The first bounded product capability beyond single-node operation:
-one old-primary → new-primary → rejoin path that converges with
-explicit fencing and stale-lineage rejection. Mechanism, not policy
-— who becomes primary and when to fail over belong to later phases.
+- replace `emptyDir` in the alpha manifest with a durable node-local path
+- package a cleaner one-command install path
+- add a small operator/controller for generated blockvolume workloads
+- make TestOps remote K8s shell scenarios easier to run
+- reduce noisy debug logs
 
-- [docs/replicated-slice.md](docs/replicated-slice.md) — the bounded route, authority boundary, durability claim, known limitations, carry-forward
+Availability work:
 
-## Design Rules
+- RF=2/RF=3 Kubernetes path
+- multi-node attach
+- failover while a pod remains mounted
+- returned-replica reintegration
+- WAL retention and flow-control behavior under pressure
 
-The current implementation is intentionally shaped around a few strict rules:
+Protocol/backend work:
 
-1. timers trigger observation; facts determine semantics
-2. the engine owns semantic recovery decisions
-3. the adapter/runtime may execute, but may not redefine policy
-4. terminal truth comes only from explicit session close
-5. session `targetLSN` is fixed by the engine and must not be silently widened by the executor
+- keep iSCSI as the MVP default
+- add protocol-neutral CSI dispatch
+- add NVMe-oF behind the same frontend-target model later
+- introduce smart WAL backend behind an explicit test gate
 
-## Near-Term Direction
+More detail:
 
-The next planned steps are:
+- [docs/architecture.md](docs/architecture.md)
+- [docs/developer-architecture.md](docs/developer-architecture.md)
+- [docs/runtime-state-machines.md](docs/runtime-state-machines.md)
+- [docs/roadmap.md](docs/roadmap.md)
 
-1. freeze and stabilize the first public runnable shape under `core/`
-2. add minimal operations and test interfaces
-3. calibrate against selected high-value scenarios from the existing benchmark path
-4. expand only after the semantic boundary stays clean
+## Repository Layout
+
+```text
+cmd/
+  blockmaster/    control plane daemon
+  blockvolume/    per-replica data/frontend daemon
+  blockcsi/       CSI controller/node plugin
+  sw-testops/     minimal TestOps scenario runner
+
+core/
+  authority/      assignment publication and observation model
+  csi/            CSI implementation
+  host/           composed master/volume hosts
+  lifecycle/      desired volume, node inventory, placement intent
+  launcher/       Kubernetes manifest renderer
+  recovery/       recovery execution components
+  replication/    peer replication pieces
+
+deploy/k8s/alpha/ alpha Kubernetes manifests and manual guide
+docs/              architecture and roadmap notes
+internal/          non-public support libraries and test scenario registry
+scripts/           build and smoke-test helpers
+```
+
+## Development Tests
+
+Development tests additionally need Go installed.
+
+Useful smoke tests:
+
+```bash
+go test ./cmd/sw-testops ./internal/testops ./cmd/blockcsi ./core/launcher ./cmd/blockmaster ./core/host/master ./core/lifecycle -count=1
+```
+
+Kubernetes alpha smoke:
+
+```bash
+bash scripts/run-k8s-alpha.sh "$PWD"
+```
 
 ## Honesty Note
 
-This repository should currently be read as:
+This repository should currently be read as an alpha block-storage system with
+a runnable Kubernetes smoke path and a serious recovery/control-plane design
+under construction.
 
-1. a runnable semantic-core-first block prototype
-2. a clean recovery-route reference
-3. a base for future operations, calibration, and storage work
-
-It should not yet be read as:
-
-1. finished block product
-2. production-ready replicated storage
-3. complete protocol or deployment surface
+It should not be read as finished storage software.

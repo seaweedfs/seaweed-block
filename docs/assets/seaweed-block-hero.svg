@@ -1,0 +1,98 @@
+<svg width="1120" height="420" viewBox="0 0 1120 420" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc">
+  <title id="title">seaweed-block alpha architecture</title>
+  <desc id="desc">A Kubernetes CSI block storage flow from PVC to blockmaster, blockvolume, iSCSI, WAL, and recovery.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1120" y2="420" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#07151A"/>
+      <stop offset="0.5" stop-color="#0B2024"/>
+      <stop offset="1" stop-color="#12301F"/>
+    </linearGradient>
+    <linearGradient id="panel" x1="90" y1="80" x2="1030" y2="340" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#14333A" stop-opacity="0.9"/>
+      <stop offset="1" stop-color="#163A25" stop-opacity="0.84"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="150" y1="0" x2="980" y2="0" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#7DD3C7"/>
+      <stop offset="0.52" stop-color="#A3E635"/>
+      <stop offset="1" stop-color="#F7C948"/>
+    </linearGradient>
+    <filter id="glow" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="7" result="blur"/>
+      <feColorMatrix in="blur" type="matrix" values="0 0 0 0 0.49 0 0 0 0 0.83 0 0 0 0 0.78 0 0 0 0.75 0"/>
+      <feMerge>
+        <feMergeNode/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <style>
+      .title { font: 700 44px ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif; fill: #F5FFE8; letter-spacing: -0.03em; }
+      .subtitle { font: 500 17px ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif; fill: #BFD7C9; }
+      .label { font: 700 15px ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif; fill: #ECFFE4; }
+      .small { font: 500 12px ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif; fill: #A8C9BC; }
+      .chip { font: 700 12px ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif; fill: #092016; }
+    </style>
+  </defs>
+
+  <rect width="1120" height="420" rx="32" fill="url(#bg)"/>
+  <path d="M0 320C170 250 250 390 420 315C585 242 650 270 820 214C970 165 1045 195 1120 150V420H0V320Z" fill="#153F2B" opacity="0.55"/>
+  <path d="M0 72C178 112 254 38 421 82C622 135 714 57 900 90C1013 110 1070 86 1120 70" stroke="#7DD3C7" stroke-opacity="0.15" stroke-width="2"/>
+  <path d="M40 365C220 304 320 357 466 300C634 234 716 260 872 210C978 176 1045 182 1100 157" stroke="#A3E635" stroke-opacity="0.18" stroke-width="2"/>
+
+  <rect x="70" y="58" width="980" height="304" rx="28" fill="url(#panel)" stroke="#B7F7B1" stroke-opacity="0.2"/>
+  <rect x="95" y="83" width="930" height="254" rx="20" fill="#071E22" fill-opacity="0.34" stroke="#E8FFB7" stroke-opacity="0.08"/>
+
+  <text x="116" y="137" class="title">seaweed-block</text>
+  <text x="118" y="168" class="subtitle">Alpha block storage for Kubernetes: CSI + iSCSI today, recovery-first design underneath.</text>
+
+  <g transform="translate(118 197)">
+    <rect width="74" height="26" rx="13" fill="#C9F55B"/>
+    <text x="17" y="18" class="chip">ALPHA</text>
+    <rect x="86" width="124" height="26" rx="13" fill="#7DD3C7"/>
+    <text x="104" y="18" class="chip">Kubernetes CSI</text>
+    <rect x="222" width="72" height="26" rx="13" fill="#F7C948"/>
+    <text x="239" y="18" class="chip">iSCSI</text>
+    <rect x="306" width="112" height="26" rx="13" fill="#B7F7B1"/>
+    <text x="326" y="18" class="chip">WAL backed</text>
+  </g>
+
+  <g transform="translate(116 253)" filter="url(#glow)">
+    <path d="M83 37H789" stroke="url(#accent)" stroke-width="4" stroke-linecap="round"/>
+    <path d="M244 37L260 25L260 49L244 37Z" fill="#A3E635"/>
+    <path d="M408 37L424 25L424 49L408 37Z" fill="#A3E635"/>
+    <path d="M574 37L590 25L590 49L574 37Z" fill="#A3E635"/>
+    <path d="M735 37L751 25L751 49L735 37Z" fill="#A3E635"/>
+  </g>
+
+  <g transform="translate(116 241)">
+    <rect width="142" height="72" rx="16" fill="#0B2A30" stroke="#7DD3C7" stroke-opacity="0.55"/>
+    <text x="22" y="31" class="label">PVC / Pod</text>
+    <text x="22" y="52" class="small">Kubernetes app</text>
+
+    <rect x="166" width="142" height="72" rx="16" fill="#0B2A30" stroke="#7DD3C7" stroke-opacity="0.55"/>
+    <text x="198" y="31" class="label">blockcsi</text>
+    <text x="190" y="52" class="small">attach + mount</text>
+
+    <rect x="332" width="142" height="72" rx="16" fill="#102B25" stroke="#A3E635" stroke-opacity="0.6"/>
+    <text x="360" y="31" class="label">blockmaster</text>
+    <text x="354" y="52" class="small">intent + authority</text>
+
+    <rect x="498" width="142" height="72" rx="16" fill="#102B25" stroke="#A3E635" stroke-opacity="0.6"/>
+    <text x="526" y="31" class="label">blockvolume</text>
+    <text x="526" y="52" class="small">replica daemon</text>
+
+    <rect x="664" width="142" height="72" rx="16" fill="#192C1F" stroke="#F7C948" stroke-opacity="0.58"/>
+    <text x="709" y="31" class="label">iSCSI</text>
+    <text x="692" y="52" class="small">Linux frontend</text>
+
+    <rect x="830" width="142" height="72" rx="16" fill="#192C1F" stroke="#F7C948" stroke-opacity="0.58"/>
+    <text x="867" y="31" class="label">WAL</text>
+    <text x="858" y="52" class="small">write + recover</text>
+  </g>
+
+  <g transform="translate(748 103)">
+    <rect width="226" height="88" rx="18" fill="#071E22" fill-opacity="0.72" stroke="#7DD3C7" stroke-opacity="0.24"/>
+    <text x="22" y="32" class="label">Design rules</text>
+    <text x="22" y="54" class="small">observation != authority</text>
+    <text x="22" y="73" class="small">one peer, one WAL feeder</text>
+  </g>
+</svg>
