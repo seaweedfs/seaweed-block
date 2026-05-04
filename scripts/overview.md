@@ -6,6 +6,9 @@ This directory contains developer and QA helper scripts.
 
 | Script | Purpose |
 |---|---|
+| `install-k8s-alpha.sh` | Installs the alpha blockmaster and CSI stack, leaving it running for user PVCs. |
+| `apply-k8s-alpha-blockvolumes.sh` | Temporary operator substitute: applies blockvolume workloads generated after PVC creation. |
+| `uninstall-k8s-alpha.sh` | Removes the alpha stack and generated blockvolume workloads. |
 | `run-k8s-demo.sh` | Public app-demo wrapper. Shows writer pod -> same PVC -> reader pod verification. |
 | `run-k8s-demo-ghcr.sh` | Public app-demo wrapper using published GHCR alpha images. |
 | `run-k8s-alpha.sh` | Public alpha smoke wrapper. Prefer this in README/user docs. |

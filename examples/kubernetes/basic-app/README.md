@@ -13,10 +13,17 @@ For the full install-and-demo flow, run:
 bash scripts/run-k8s-demo.sh "$PWD"
 ```
 
+To install the alpha stack and keep it running for this example:
+
+```bash
+bash scripts/install-k8s-alpha.sh "$PWD"
+```
+
 ## Apply
 
 ```bash
 kubectl apply -f storageclass-pvc.yaml
+bash ../../../scripts/apply-k8s-alpha-blockvolumes.sh
 kubectl apply -f writer-pod.yaml
 ```
 
