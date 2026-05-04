@@ -158,6 +158,12 @@ PVC and writes a 32 MiB checksum payload:
 bash scripts/run-k8s-alpha-large.sh "$PWD"
 ```
 
+For a sustained 60 second randrw check through the same PVC path:
+
+```bash
+bash scripts/run-k8s-alpha-fio.sh "$PWD"
+```
+
 For a presentation-friendly app demo that uses the same storage stack but shows
 two ordinary app pods sharing one PVC over time:
 

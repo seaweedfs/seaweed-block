@@ -146,8 +146,8 @@ collect_daemon_logs
 log "dynamic PVC pod completed checksum write/read"
 
 log "delete dynamic pod and PVC"
-kubectl -n "$NAMESPACE" delete pod sw-block-dynamic-smoke --wait=true --timeout=120s | tee "$ARTIFACT_DIR/delete-pod.log"
-kubectl -n "$NAMESPACE" delete pvc sw-block-dynamic-v1 --wait=true --timeout=120s | tee "$ARTIFACT_DIR/delete-pvc.log"
+kubectl -n "$NAMESPACE" delete pod sw-block-dynamic-smoke --ignore-not-found=true --wait=true --timeout=120s | tee "$ARTIFACT_DIR/delete-pod.log"
+kubectl -n "$NAMESPACE" delete pvc sw-block-dynamic-v1 --ignore-not-found=true --wait=true --timeout=120s | tee "$ARTIFACT_DIR/delete-pvc.log"
 
 log "wait for launcher manifest cleanup after DeleteVolume"
 for _ in $(seq 1 180); do
