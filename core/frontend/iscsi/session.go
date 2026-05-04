@@ -327,10 +327,10 @@ func cdbExpectedWriteBytes(cdb [16]byte, blockSize uint32) (uint64, bool) {
 }
 
 func (s *Session) validateWriteTransferLimits(req *PDU, edtl uint32) (SCSIResult, bool) {
-	if maxBurst := s.negResult.MaxBurstLength; maxBurst > 0 && uint64(edtl) > uint64(maxBurst) {
+	if uint64(edtl) > uint64(MaxDataSegmentLength) {
 		return illegalRequest(
 			ASCInvalidFieldInCDB, 0x00,
-			"EDTL exceeds negotiated MaxBurstLength"), false
+			"EDTL exceeds target write buffer limit"), false
 	}
 	if firstBurst := s.negResult.FirstBurstLength; firstBurst > 0 &&
 		uint64(len(req.DataSegment)) > uint64(firstBurst) {
@@ -345,10 +345,9 @@ func (s *Session) validateWriteTransferLimits(req *PDU, edtl uint32) (SCSIResult
 // data (carried in the SCSI-Cmd) + any Data-Out PDUs solicited
 // via R2T. Returns the full edtl-sized buffer on success.
 //
-// T2 scope: single R2T for all remaining bytes. V2 supports
-// MaxBurstLength-chunked multi-R2T; we'll port that chunking
-// only if an OS initiator actually exposes the need — per the
-// assignment §4.3 rule "port the smallest required R2T path".
+// Large writes are collected as one or more R2T data sequences.
+// Each R2T's DesiredDataLength is capped by the negotiated
+// MaxBurstLength; the total WRITE EDTL may be larger.
 func (s *Session) collectWriteData(req *PDU, edtl uint32) ([]byte, error) {
 	buf := make([]byte, edtl)
 	var received uint32
@@ -365,77 +364,80 @@ func (s *Session) collectWriteData(req *PDU, edtl uint32) ([]byte, error) {
 		return buf, nil
 	}
 
-	// Solicit the remainder with one R2T. TargetTransferTag is
-	// arbitrary per-target scope; 1 is fine while a session only
-	// has one outstanding write at a time (T2 minimal session).
-	const ttt uint32 = 1
-	r2t := &PDU{}
-	r2t.SetOpcode(OpR2T)
-	r2t.SetOpSpecific1(FlagF)
-	r2t.SetLUN(req.LUN())
-	r2t.SetInitiatorTaskTag(req.InitiatorTaskTag())
-	r2t.SetTargetTransferTag(ttt)
-	// StatSN on R2T is a snapshot of the current StatSN (no
-	// increment — R2T doesn't carry status).
-	r2t.SetStatSN(s.statSN)
-	r2t.SetExpCmdSN(req.CmdSN() + 1)
-	r2t.SetMaxCmdSN(req.CmdSN() + 32)
-	r2t.SetR2TSN(0)
-	r2t.SetBufferOffset(received)
-	r2t.SetDesiredDataLength(edtl - received)
-	if err := WritePDU(s.conn, r2t); err != nil {
-		return nil, fmt.Errorf("send R2T: %w", err)
+	maxBurst := uint32(s.negResult.MaxBurstLength)
+	if maxBurst == 0 {
+		maxBurst = edtl
 	}
 
-	// Read Data-Out PDU(s) until we have edtl bytes. V2 enforces
-	// DataSN + BufferOffset ordering (DataPDUInOrder /
-	// DataSequenceInOrder both default Yes); we do the same.
-	var nextDataSN uint32
+	var r2tsn uint32
 	for received < edtl {
-		pdu, err := ReadPDU(s.conn)
-		if err != nil {
-			return nil, fmt.Errorf("read Data-Out: %w", err)
+		remaining := edtl - received
+		desired := remaining
+		if desired > maxBurst {
+			desired = maxBurst
 		}
-		if pdu.Opcode() != OpSCSIDataOut {
-			return nil, fmt.Errorf("expected Data-Out, got %s", OpcodeName(pdu.Opcode()))
-		}
-		if pdu.TargetTransferTag() != ttt {
-			// R2T-solicited Data-Out MUST echo the target's TTT
-			// from the R2T. 0xFFFFFFFF signals unsolicited
-			// Data-Out, which we disable via InitialR2T=Yes —
-			// accepting it here would silently weaken the
-			// negotiated "solicited-only" discipline (architect
-			// review 2026-04-21 ckpt 10 Medium finding).
-			return nil, fmt.Errorf("Data-Out TTT=0x%08x does not echo R2T TTT=0x%08x",
-				pdu.TargetTransferTag(), ttt)
-		}
-		if pdu.DataSN() != nextDataSN {
-			return nil, fmt.Errorf("Data-Out DataSN=%d, expected %d",
-				pdu.DataSN(), nextDataSN)
-		}
-		nextDataSN++
+		burstEnd := received + desired
+		ttt := uint32(1) + r2tsn
 
-		offset := pdu.BufferOffset()
-		if offset != received {
-			return nil, fmt.Errorf("Data-Out BufferOffset=%d does not match received=%d",
-				offset, received)
+		r2t := &PDU{}
+		r2t.SetOpcode(OpR2T)
+		r2t.SetOpSpecific1(FlagF)
+		r2t.SetLUN(req.LUN())
+		r2t.SetInitiatorTaskTag(req.InitiatorTaskTag())
+		r2t.SetTargetTransferTag(ttt)
+		// StatSN on R2T is a snapshot of the current StatSN (no
+		// increment — R2T doesn't carry status).
+		r2t.SetStatSN(s.statSN)
+		r2t.SetExpCmdSN(req.CmdSN() + 1)
+		r2t.SetMaxCmdSN(req.CmdSN() + 32)
+		r2t.SetR2TSN(r2tsn)
+		r2t.SetBufferOffset(received)
+		r2t.SetDesiredDataLength(desired)
+		if err := WritePDU(s.conn, r2t); err != nil {
+			return nil, fmt.Errorf("send R2T: %w", err)
 		}
-		data := pdu.DataSegment
-		end := offset + uint32(len(data))
-		if end > edtl {
-			return nil, fmt.Errorf("Data-Out extends past EDTL: end=%d edtl=%d",
-				end, edtl)
-		}
-		copy(buf[offset:], data)
-		received = end
 
-		// F-bit on Data-Out marks the last PDU of the sequence.
-		// We accept it as a hint but trust received == edtl as
-		// the authoritative termination condition.
-		if pdu.OpSpecific1()&FlagF != 0 && received != edtl {
-			return nil, fmt.Errorf("Data-Out F-bit with received=%d < edtl=%d",
-				received, edtl)
+		// DataSN is scoped to the current R2T data sequence.
+		var nextDataSN uint32
+		for received < burstEnd {
+			pdu, err := ReadPDU(s.conn)
+			if err != nil {
+				return nil, fmt.Errorf("read Data-Out: %w", err)
+			}
+			if pdu.Opcode() != OpSCSIDataOut {
+				return nil, fmt.Errorf("expected Data-Out, got %s", OpcodeName(pdu.Opcode()))
+			}
+			if pdu.TargetTransferTag() != ttt {
+				// R2T-solicited Data-Out MUST echo the target's TTT.
+				return nil, fmt.Errorf("Data-Out TTT=0x%08x does not echo R2T TTT=0x%08x",
+					pdu.TargetTransferTag(), ttt)
+			}
+			if pdu.DataSN() != nextDataSN {
+				return nil, fmt.Errorf("Data-Out DataSN=%d, expected %d",
+					pdu.DataSN(), nextDataSN)
+			}
+			nextDataSN++
+
+			offset := pdu.BufferOffset()
+			if offset != received {
+				return nil, fmt.Errorf("Data-Out BufferOffset=%d does not match received=%d",
+					offset, received)
+			}
+			data := pdu.DataSegment
+			end := offset + uint32(len(data))
+			if end > burstEnd {
+				return nil, fmt.Errorf("Data-Out extends past R2T burst: end=%d burstEnd=%d",
+					end, burstEnd)
+			}
+			copy(buf[offset:], data)
+			received = end
+
+			if pdu.OpSpecific1()&FlagF != 0 && received != burstEnd {
+				return nil, fmt.Errorf("Data-Out F-bit with received=%d < burstEnd=%d",
+					received, burstEnd)
+			}
 		}
+		r2tsn++
 	}
 	return buf, nil
 }

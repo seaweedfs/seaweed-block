@@ -20,7 +20,7 @@ func TestCDBExpectedWriteBytes_Write16UsesUint64(t *testing.T) {
 	}
 }
 
-func TestSessionValidateWriteTransferLimitsRejectsOversizedEDTL(t *testing.T) {
+func TestSessionValidateWriteTransferLimitsAcceptsEDTLAboveMaxBurst(t *testing.T) {
 	s := &Session{
 		negResult: LoginResult{
 			MaxBurstLength:   64 * 1024,
@@ -31,8 +31,25 @@ func TestSessionValidateWriteTransferLimitsRejectsOversizedEDTL(t *testing.T) {
 	req.DataSegment = make([]byte, 4*1024)
 
 	result, ok := s.validateWriteTransferLimits(req, 128*1024)
+	if !ok {
+		t.Fatalf("EDTL above MaxBurst should be chunked via R2T, got status=0x%02x asc=0x%02x",
+			result.Status, result.ASC)
+	}
+}
+
+func TestSessionValidateWriteTransferLimitsRejectsTargetBufferLimit(t *testing.T) {
+	s := &Session{
+		negResult: LoginResult{
+			MaxBurstLength:   64 * 1024,
+			FirstBurstLength: 16 * 1024,
+		},
+	}
+	req := &PDU{}
+	req.DataSegment = make([]byte, 4*1024)
+
+	result, ok := s.validateWriteTransferLimits(req, MaxDataSegmentLength+1)
 	if ok {
-		t.Fatal("oversized EDTL accepted")
+		t.Fatal("write above target buffer limit accepted")
 	}
 	if result.Status != StatusCheckCondition || result.ASC != ASCInvalidFieldInCDB {
 		t.Fatalf("unexpected result: status=0x%02x asc=0x%02x", result.Status, result.ASC)

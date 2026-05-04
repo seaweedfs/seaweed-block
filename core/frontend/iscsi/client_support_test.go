@@ -131,6 +131,17 @@ func (c *testClient) scsiCmd(t *testing.T, cdb [16]byte, immediate []byte, expec
 // drive the R2T → Data-Out path.
 func (c *testClient) scsiCmdFull(t *testing.T, cdb [16]byte, immediate, solicited []byte, expectedDataIn int) (status uint8, dataIn []byte) {
 	t.Helper()
+	status, dataIn, _ = c.scsiCmdFullWithR2TTrace(t, cdb, immediate, solicited, expectedDataIn)
+	return status, dataIn
+}
+
+type r2tTrace struct {
+	Offset  uint32
+	Desired uint32
+}
+
+func (c *testClient) scsiCmdFullWithR2TTrace(t *testing.T, cdb [16]byte, immediate, solicited []byte, expectedDataIn int) (status uint8, dataIn []byte, traces []r2tTrace) {
+	t.Helper()
 	totalWrite := len(immediate) + len(solicited)
 
 	req := &iscsi.PDU{}
@@ -164,7 +175,6 @@ func (c *testClient) scsiCmdFull(t *testing.T, cdb [16]byte, immediate, solicite
 	// the one with S-bit.
 	var collected bytes.Buffer
 	solicitedOffset := len(immediate) // where in the logical write stream Data-Out starts
-	var dataSN uint32
 	for {
 		resp, err := iscsi.ReadPDU(c.conn)
 		if err != nil {
@@ -177,6 +187,7 @@ func (c *testClient) scsiCmdFull(t *testing.T, cdb [16]byte, immediate, solicite
 			}
 			offset := resp.BufferOffset()
 			desired := resp.DesiredDataLength()
+			traces = append(traces, r2tTrace{Offset: offset, Desired: desired})
 			if int(offset)-solicitedOffset < 0 || int(offset)+int(desired)-solicitedOffset > len(solicited) {
 				t.Fatalf("R2T range (offset=%d desired=%d) outside solicited payload [%d, %d)",
 					offset, desired, solicitedOffset, solicitedOffset+len(solicited))
@@ -191,8 +202,8 @@ func (c *testClient) scsiCmdFull(t *testing.T, cdb [16]byte, immediate, solicite
 			out.SetLUN(0)
 			out.SetInitiatorTaskTag(itt)
 			out.SetTargetTransferTag(resp.TargetTransferTag())
-			out.SetDataSN(dataSN)
-			dataSN++
+			// DataSN is scoped to the current R2T data sequence.
+			out.SetDataSN(0)
 			out.SetBufferOffset(offset)
 			out.SetExpStatSN(c.statSN + 1)
 			out.DataSegment = chunk
@@ -202,10 +213,10 @@ func (c *testClient) scsiCmdFull(t *testing.T, cdb [16]byte, immediate, solicite
 		case iscsi.OpSCSIDataIn:
 			collected.Write(resp.DataSegment)
 			if resp.OpSpecific1()&iscsi.FlagS != 0 {
-				return resp.SCSIStatusByte(), collected.Bytes()
+				return resp.SCSIStatusByte(), collected.Bytes(), traces
 			}
 		case iscsi.OpSCSIResp:
-			return resp.SCSIStatusByte(), collected.Bytes()
+			return resp.SCSIStatusByte(), collected.Bytes(), traces
 		default:
 			t.Fatalf("unexpected resp opcode: %s", iscsi.OpcodeName(resp.Opcode()))
 		}

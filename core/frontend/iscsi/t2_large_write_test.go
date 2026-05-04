@@ -110,6 +110,68 @@ func TestT2Route_ISCSI_LargeWrite_R2TPath_Component(t *testing.T) {
 	}
 }
 
+// TestT2Route_ISCSI_LargeWrite_ChunksR2TByMaxBurst:
+// Linux initiators issue filesystem writes larger than one
+// negotiated MaxBurstLength. The target must chunk the transfer
+// across multiple R2Ts instead of rejecting the command or
+// emitting one oversized R2T for the whole EDTL.
+func TestT2Route_ISCSI_LargeWrite_ChunksR2TByMaxBurst(t *testing.T) {
+	const blocks = 1024 // 512 KiB at the default 512-byte SCSI block size.
+	const maxBurst = 64 * 1024
+	const blockSize = uint32(iscsi.DefaultBlockSize)
+	const totalBytes = int(blockSize) * blocks
+
+	rec := testback.NewRecordingBackend(frontend.Identity{
+		VolumeID: "v1", ReplicaID: "r1", Epoch: 5, EndpointVersion: 3,
+	})
+	prov := testback.NewStaticProvider(rec)
+	neg := iscsi.DefaultNegotiableConfig()
+	neg.MaxBurstLength = maxBurst
+	neg.FirstBurstLength = maxBurst
+	tg := iscsi.NewTarget(iscsi.TargetConfig{
+		Listen:      "127.0.0.1:0",
+		IQN:         "iqn.2026-04.example.v3:v1",
+		VolumeID:    "v1",
+		Provider:    prov,
+		Negotiation: neg,
+	})
+	addr, err := tg.Start()
+	if err != nil {
+		t.Fatalf("target Start: %v", err)
+	}
+	defer tg.Close()
+
+	cli := dialAndLogin(t, addr)
+	defer cli.logout(t)
+
+	payload := make([]byte, totalBytes)
+	for i := range payload {
+		payload[i] = byte((i * 17) % 251)
+	}
+
+	status, _, traces := cli.scsiCmdFullWithR2TTrace(t, writeCDB10(0, uint16(blocks)), nil, payload, 0)
+	expectGood(t, status, "large WRITE(10) chunked by MaxBurst")
+	if len(traces) < 2 {
+		t.Fatalf("R2T count=%d want multiple chunks", len(traces))
+	}
+	for i, tr := range traces {
+		if tr.Desired > maxBurst {
+			t.Fatalf("R2T[%d] DesiredDataLength=%d exceeds MaxBurstLength=%d", i, tr.Desired, maxBurst)
+		}
+	}
+
+	if rec.WriteCount() != 1 {
+		t.Fatalf("backend Write invoked %d times, want 1", rec.WriteCount())
+	}
+	w := rec.WriteAt(0)
+	if len(w.Data) != totalBytes {
+		t.Fatalf("backend Write len=%d want %d", len(w.Data), totalBytes)
+	}
+	if !bytes.Equal(w.Data, payload) {
+		t.Fatal("chunked R2T write payload mismatch")
+	}
+}
+
 // TestT2Route_ISCSI_LargeWrite_OnStaleBackend_RejectsAfterR2T:
 // stale-lineage invariant holds even when the write goes
 // through the R2T path. The target MUST collect the full
