@@ -19,7 +19,7 @@
     "sha256sum"
   ],
   "qa_instruction": "internal/docs/iscsi-os-initiator-compat-plan.md",
-  "known_green_commit": "854d912",
+  "known_green_commit": "869292b",
   "artifacts": [
     "run.log",
     "git-head.txt",
