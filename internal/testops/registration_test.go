@@ -172,6 +172,45 @@ func TestG15eK8sDynamicCleanupRegistrationBuildsShellDriver(t *testing.T) {
 	}
 }
 
+func TestISCSIP2OSSmokeRegistrationBuildsShellDriver(t *testing.T) {
+	repoRoot := findRepoRoot(t)
+	raw, err := os.Open(registrationPath(repoRoot, "iscsi-p2-os-smoke.json"))
+	if err != nil {
+		t.Fatalf("open registration: %v", err)
+	}
+	defer raw.Close()
+
+	registration, err := DecodeRegistration(raw)
+	if err != nil {
+		t.Fatalf("DecodeRegistration: %v", err)
+	}
+	if registration.Scenario != "iscsi-p2-os-smoke" || registration.Driver.Type != "shell" {
+		t.Fatalf("registration=%+v", registration)
+	}
+	if registration.KnownGreenCommit != "854d912" {
+		t.Fatalf("known_green_commit=%q want 854d912", registration.KnownGreenCommit)
+	}
+	driver, err := registration.NewDriver(repoRoot)
+	if err != nil {
+		t.Fatalf("NewDriver: %v", err)
+	}
+	shell, ok := driver.(ShellDriver)
+	if !ok {
+		t.Fatalf("driver type=%T want ShellDriver", driver)
+	}
+	if !filepath.IsAbs(shell.Path) || filepath.Base(shell.Path) != "run-iscsi-os-smoke.sh" {
+		t.Fatalf("shell path=%q", shell.Path)
+	}
+	if _, err := os.Stat(shell.Path); err != nil {
+		t.Fatalf("shell driver path missing: %v", err)
+	}
+	for _, want := range []string{"mkfs.log", "sha256-check.log", "iscsi-sessions.final.txt"} {
+		if !containsString(registration.Artifacts, want) {
+			t.Fatalf("registration artifacts missing %q: %v", want, registration.Artifacts)
+		}
+	}
+}
+
 func containsString(values []string, want string) bool {
 	for _, value := range values {
 		if value == want {
