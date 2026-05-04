@@ -2,7 +2,9 @@ package iscsi_test
 
 import (
 	"bytes"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend"
 	"github.com/seaweedfs/seaweed-block/core/frontend/iscsi"
@@ -142,5 +144,89 @@ func TestP1_ISCSI_R2TDataOut_AllowsPipelinedCommand(t *testing.T) {
 	}
 	if got := rec.WriteAt(0).Data; !bytes.Equal(got, payload) {
 		t.Fatalf("backend write payload mismatch: got %d bytes want %d", len(got), len(payload))
+	}
+}
+
+func TestP1_ISCSI_R2TDataOut_PendingQueueBounded(t *testing.T) {
+	const (
+		blocks    = 256
+		maxBurst  = 64 * 1024
+		blockSize = int(iscsi.DefaultBlockSize)
+	)
+	totalBytes := blocks * blockSize
+
+	rec := testback.NewRecordingBackend(frontend.Identity{VolumeID: "v1", ReplicaID: "r1"})
+	prov := testback.NewStaticProvider(rec)
+	neg := iscsi.DefaultNegotiableConfig()
+	neg.MaxBurstLength = maxBurst
+	neg.FirstBurstLength = 0
+	tg := iscsi.NewTarget(iscsi.TargetConfig{
+		Listen:      "127.0.0.1:0",
+		IQN:         "iqn.2026-04.example.v3:v1",
+		VolumeID:    "v1",
+		Provider:    prov,
+		Negotiation: neg,
+	})
+	addr, err := tg.Start()
+	if err != nil {
+		t.Fatalf("target Start: %v", err)
+	}
+	defer tg.Close()
+
+	cli := dialAndLogin(t, addr)
+	defer cli.logout(t)
+
+	writeCmd := &iscsi.PDU{}
+	writeCmd.SetOpcode(iscsi.OpSCSICmd)
+	writeCmd.SetOpSpecific1(iscsi.FlagF | iscsi.FlagW)
+	writeCmd.SetLUN(0)
+	writeCmd.SetInitiatorTaskTag(cli.itt)
+	cli.itt++
+	writeCmd.SetExpectedDataTransferLength(uint32(totalBytes))
+	writeCmd.SetCmdSN(cli.cmdSN)
+	cli.cmdSN++
+	writeCmd.SetExpStatSN(cli.statSN + 1)
+	writeCmd.SetCDB(writeCDB10(0, uint16(blocks)))
+	if err := iscsi.WritePDU(cli.conn, writeCmd); err != nil {
+		t.Fatalf("write SCSI WRITE(10): %v", err)
+	}
+
+	r2t, err := iscsi.ReadPDU(cli.conn)
+	if err != nil {
+		t.Fatalf("read R2T: %v", err)
+	}
+	if r2t.Opcode() != iscsi.OpR2T {
+		t.Fatalf("first response opcode=%s want R2T", iscsi.OpcodeName(r2t.Opcode()))
+	}
+
+	for i := 0; i <= 64; i++ {
+		tur := &iscsi.PDU{}
+		tur.SetOpcode(iscsi.OpSCSICmd)
+		tur.SetOpSpecific1(iscsi.FlagF)
+		tur.SetLUN(0)
+		tur.SetInitiatorTaskTag(cli.itt)
+		cli.itt++
+		tur.SetCmdSN(cli.cmdSN)
+		cli.cmdSN++
+		tur.SetExpStatSN(cli.statSN + 1)
+		tur.SetCDB([16]byte{iscsi.ScsiTestUnitReady})
+		if err := iscsi.WritePDU(cli.conn, tur); err != nil {
+			t.Fatalf("write pipelined command %d: %v", i, err)
+		}
+	}
+
+	_ = cli.conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, err = iscsi.ReadPDU(cli.conn)
+	if err == nil {
+		t.Fatal("expected connection close after pending queue overflow")
+	}
+	if !strings.Contains(err.Error(), "connection") &&
+		!strings.Contains(err.Error(), "forcibly closed") &&
+		!strings.Contains(err.Error(), "reset") &&
+		!strings.Contains(err.Error(), "EOF") {
+		t.Fatalf("unexpected read error after overflow: %v", err)
+	}
+	if rec.WriteCount() != 0 {
+		t.Fatalf("backend WriteCount=%d want 0 after overflow", rec.WriteCount())
 	}
 }

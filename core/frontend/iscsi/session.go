@@ -373,19 +373,14 @@ func (s *Session) validateWriteTransferLimits(req *PDU, edtl uint32) (SCSIResult
 // Each R2T's DesiredDataLength is capped by the negotiated
 // MaxBurstLength; the total WRITE EDTL may be larger.
 func (s *Session) collectWriteData(req *PDU, edtl uint32) ([]byte, error) {
-	buf := make([]byte, edtl)
-	var received uint32
-
-	// Immediate data from the SCSI-Cmd's data segment.
-	if n := uint32(len(req.DataSegment)); n > 0 {
-		if n > edtl {
-			return nil, fmt.Errorf("immediate data %d > EDTL %d", n, edtl)
+	collector := newDataOutCollector(edtl)
+	if len(req.DataSegment) > 0 {
+		if err := collector.addImmediate(req.DataSegment); err != nil {
+			return nil, err
 		}
-		copy(buf, req.DataSegment)
-		received = n
 	}
-	if received >= edtl {
-		return buf, nil
+	if collector.done() {
+		return collector.data(), nil
 	}
 
 	maxBurst := uint32(s.negResult.MaxBurstLength)
@@ -394,8 +389,9 @@ func (s *Session) collectWriteData(req *PDU, edtl uint32) ([]byte, error) {
 	}
 
 	var r2tsn uint32
-	for received < edtl {
-		remaining := edtl - received
+	for !collector.done() {
+		received := collector.receivedBytes()
+		remaining := collector.remaining()
 		desired := remaining
 		if desired > maxBurst {
 			desired = maxBurst
@@ -421,9 +417,8 @@ func (s *Session) collectWriteData(req *PDU, edtl uint32) ([]byte, error) {
 			return nil, fmt.Errorf("send R2T: %w", err)
 		}
 
-		// DataSN is scoped to the current R2T data sequence.
-		var nextDataSN uint32
-		for received < burstEnd {
+		collector.beginR2T()
+		for collector.receivedBytes() < burstEnd {
 			pdu, err := ReadPDU(s.conn)
 			if err != nil {
 				return nil, fmt.Errorf("read Data-Out: %w", err)
@@ -435,39 +430,13 @@ func (s *Session) collectWriteData(req *PDU, edtl uint32) ([]byte, error) {
 				s.pending = append(s.pending, pdu)
 				continue
 			}
-			if pdu.TargetTransferTag() != ttt {
-				// R2T-solicited Data-Out MUST echo the target's TTT.
-				return nil, fmt.Errorf("Data-Out TTT=0x%08x does not echo R2T TTT=0x%08x",
-					pdu.TargetTransferTag(), ttt)
-			}
-			if pdu.DataSN() != nextDataSN {
-				return nil, fmt.Errorf("Data-Out DataSN=%d, expected %d",
-					pdu.DataSN(), nextDataSN)
-			}
-			nextDataSN++
-
-			offset := pdu.BufferOffset()
-			if offset != received {
-				return nil, fmt.Errorf("Data-Out BufferOffset=%d does not match received=%d",
-					offset, received)
-			}
-			data := pdu.DataSegment
-			end := offset + uint32(len(data))
-			if end > burstEnd {
-				return nil, fmt.Errorf("Data-Out extends past R2T burst: end=%d burstEnd=%d",
-					end, burstEnd)
-			}
-			copy(buf[offset:], data)
-			received = end
-
-			if pdu.OpSpecific1()&FlagF != 0 && received != burstEnd {
-				return nil, fmt.Errorf("Data-Out F-bit with received=%d < burstEnd=%d",
-					received, burstEnd)
+			if err := collector.addDataOut(pdu, ttt, burstEnd); err != nil {
+				return nil, err
 			}
 		}
 		r2tsn++
 	}
-	return buf, nil
+	return collector.data(), nil
 }
 
 func (s *Session) sendDataInWithStatus(req *PDU, r SCSIResult) error {

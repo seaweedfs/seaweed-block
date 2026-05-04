@@ -1,6 +1,6 @@
 # iSCSI OS Initiator Compatibility Plan
 
-Status: P1-A implemented on `fix/iscsi-os-initiator-compat`
+Status: P1-A/B/C implemented on `fix/iscsi-os-initiator-compat`
 
 Owner track: frontend compatibility
 
@@ -192,6 +192,16 @@ Extract collector semantics and tests:
 This is mostly portable from V2 tests, but rewritten in V3 naming and error
 style.
 
+Implementation status:
+
+```text
+dataOutCollector
+  immediate + R2T: covered
+  multi-PDU Data-Out: covered
+  wrong TTT / DataSN / BufferOffset: covered
+  overflow / beyond-burst / premature F-bit: covered
+```
+
 ### Slice C: Bounded Pending Queue
 
 Add queue behavior:
@@ -202,6 +212,14 @@ Add queue behavior:
 
 Use V2's `maxPendingQueue = 64` as a reference, not as a blindly inherited
 constant. The exact value is less important than having a bound and a test.
+
+Implementation status:
+
+```text
+TestP1_ISCSI_R2TDataOut_PendingQueueBounded
+  64 queued non-Data-Out PDUs allowed
+  65th fails the session before backend Write
+```
 
 ### Slice D: Data-Out Timeout
 
@@ -239,9 +257,8 @@ Only after WRITE/mkfs is green:
 ## Recommended Implementation Order
 
 1. Write Slice A red test. Done.
-2. Add V3-local pending queue support in current serial session. Done for the
-   single pipelined-command case; overflow test remains.
-3. Extract V3-local `DataOutCollector`.
+2. Add V3-local pending queue support in current serial session. Done.
+3. Extract V3-local `DataOutCollector`. Done.
 4. Add Data-Out timeout.
 5. Run Linux OS initiator mkfs harness.
 6. Add DataInWriter only if OS test or later fio/read test needs it.
