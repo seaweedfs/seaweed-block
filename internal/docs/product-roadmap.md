@@ -66,7 +66,7 @@ This is the short internal roadmap. Keep it current and readable.
 
 - Current: OS initiator correctness, session stability, product-backed K8s
   fio/attach-detach, and CHAP are implemented and evidenced.
-- Next: CSI lifecycle and restart behavior.
+- Next: CSI lifecycle and restart behavior under real Kubernetes.
 - Later: ALUA/MPIO and mounted failover.
 
 ### Track C: Durable State

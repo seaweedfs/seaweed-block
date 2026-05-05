@@ -289,6 +289,45 @@ func TestISCSIP3K8sFioRegistrationBuildsShellDriver(t *testing.T) {
 	}
 }
 
+func TestISCSIP5CSINodeRestartRegistrationBuildsShellDriver(t *testing.T) {
+	repoRoot := findRepoRoot(t)
+	raw, err := os.Open(registrationPath(repoRoot, "iscsi-p5-csi-node-restart.json"))
+	if err != nil {
+		t.Fatalf("open registration: %v", err)
+	}
+	defer raw.Close()
+
+	registration, err := DecodeRegistration(raw)
+	if err != nil {
+		t.Fatalf("DecodeRegistration: %v", err)
+	}
+	if registration.Scenario != "iscsi-p5-csi-node-restart" || registration.Driver.Type != "shell" {
+		t.Fatalf("registration=%+v", registration)
+	}
+	driver, err := registration.NewDriver(repoRoot)
+	if err != nil {
+		t.Fatalf("NewDriver: %v", err)
+	}
+	shell, ok := driver.(ShellDriver)
+	if !ok {
+		t.Fatalf("driver type=%T want ShellDriver", driver)
+	}
+	if !filepath.IsAbs(shell.Path) || filepath.Base(shell.Path) != "run-k8s-csi-node-restart.sh" {
+		t.Fatalf("shell path=%q", shell.Path)
+	}
+	if _, err := os.Stat(shell.Path); err != nil {
+		t.Fatalf("shell driver path missing: %v", err)
+	}
+	for _, want := range []string{"restart-csi-node-status.log", "writer.log", "reader.log", "iscsi-sessions.after-delete.txt"} {
+		if !containsString(registration.Artifacts, want) {
+			t.Fatalf("registration artifacts missing %q: %v", want, registration.Artifacts)
+		}
+	}
+	if got := registration.ScenarioDefaultParams["SW_BLOCK_LAUNCHER_PVC_OWNER_REF"]; got != "1" {
+		t.Fatalf("owner-ref default=%q want 1", got)
+	}
+}
+
 func containsString(values []string, want string) bool {
 	for _, value := range values {
 		if value == want {

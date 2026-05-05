@@ -8,6 +8,8 @@ POLL_LOG="$ARTIFACT_DIR/poll.log"
 IMAGE="${SW_BLOCK_IMAGE:-sw-block:local}"
 CSI_IMAGE="${SW_BLOCK_CSI_IMAGE:-sw-block-csi:local}"
 LAUNCHER_PVC_OWNER_REF="${SW_BLOCK_LAUNCHER_PVC_OWNER_REF:-0}"
+RESTART_CSI_NODE_BEFORE_READER="${SW_BLOCK_RESTART_CSI_NODE_BEFORE_READER:-0}"
+DEMO_APP_MANIFEST="${SW_BLOCK_DEMO_APP_MANIFEST:-$ROOT/deploy/k8s/alpha/demo-app-pvc.yaml}"
 BLOCKVOLUME_NAMESPACE="kube-system"
 if [[ "$LAUNCHER_PVC_OWNER_REF" == "1" || "$LAUNCHER_PVC_OWNER_REF" == "true" ]]; then
   BLOCKVOLUME_NAMESPACE="$NAMESPACE"
@@ -80,7 +82,7 @@ cleanup() {
   (
   set +e
   kubectl delete -f "$ROOT/deploy/k8s/alpha/demo-app-reader-pod.yaml" --ignore-not-found=true >>"$ARTIFACT_DIR/cleanup.log" 2>&1
-  kubectl delete -f "$ROOT/deploy/k8s/alpha/demo-app-pvc.yaml" --ignore-not-found=true >>"$ARTIFACT_DIR/cleanup.log" 2>&1
+  kubectl delete -f "$DEMO_APP_MANIFEST" --ignore-not-found=true >>"$ARTIFACT_DIR/cleanup.log" 2>&1
   kubectl -n "$NAMESPACE" delete pod sw-block-demo-reader sw-block-demo-writer --ignore-not-found=true >>"$ARTIFACT_DIR/cleanup.log" 2>&1
   kubectl -n "$NAMESPACE" delete pvc sw-block-demo-pvc --ignore-not-found=true >>"$ARTIFACT_DIR/cleanup.log" 2>&1
   kubectl -n kube-system delete deploy -l app=sw-blockvolume --ignore-not-found=true >>"$ARTIFACT_DIR/cleanup.log" 2>&1
@@ -108,6 +110,25 @@ wait_pod_succeeded() {
     sleep 1
   done
   echo "pod $pod did not complete before timeout" >&2
+  return 1
+}
+
+wait_pod_log_contains() {
+  local pod="$1"
+  local pattern="$2"
+  local timeout_s="$3"
+  for _ in $(seq 1 "$timeout_s"); do
+    if kubectl -n "$NAMESPACE" logs "$pod" 2>/dev/null | grep -F -q "$pattern"; then
+      return 0
+    fi
+    phase="$(kubectl -n "$NAMESPACE" get pod "$pod" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
+    if [[ "$phase" == "Failed" ]]; then
+      echo "pod $pod failed before log pattern $pattern" >&2
+      return 1
+    fi
+    sleep 1
+  done
+  echo "pod $pod did not emit log pattern $pattern before timeout" >&2
   return 1
 }
 
@@ -148,6 +169,8 @@ log "image=$IMAGE"
 log "csi_image=$CSI_IMAGE"
 log "blockvolume_namespace=$BLOCKVOLUME_NAMESPACE"
 log "launcher_pvc_owner_ref=$LAUNCHER_PVC_OWNER_REF"
+log "restart_csi_node_before_reader=$RESTART_CSI_NODE_BEFORE_READER"
+log "demo_app_manifest=$DEMO_APP_MANIFEST"
 kubectl version --client=true >"$ARTIFACT_DIR/kubectl-version.txt" 2>&1 || true
 kubectl get nodes -o wide >"$ARTIFACT_DIR/nodes.before.txt"
 
@@ -167,7 +190,7 @@ kubectl -n kube-system wait --for=condition=available deploy/sw-block-csi-contro
 kubectl -n kube-system rollout status ds/sw-block-csi-node --timeout=120s
 
 log "apply demo app PVC and writer pod"
-kubectl apply -f "$ROOT/deploy/k8s/alpha/demo-app-pvc.yaml" | tee "$ARTIFACT_DIR/apply-demo-app.log"
+kubectl apply -f "$DEMO_APP_MANIFEST" | tee "$ARTIFACT_DIR/apply-demo-app.log"
 
 log "wait for launcher-generated blockvolume manifest"
 for _ in $(seq 1 180); do
@@ -187,8 +210,19 @@ kubectl apply -f "$ARTIFACT_DIR/generated-blockvolume.yaml" | tee "$ARTIFACT_DIR
 kubectl -n "$BLOCKVOLUME_NAMESPACE" wait --for=condition=available deploy -l app=sw-blockvolume --timeout=120s
 
 log "wait for app writer completion"
-wait_pod_succeeded sw-block-demo-writer 240
+if [[ "$RESTART_CSI_NODE_BEFORE_READER" == "1" || "$RESTART_CSI_NODE_BEFORE_READER" == "true" ]]; then
+  wait_pod_log_contains sw-block-demo-writer "[app-writer] wrote and verified /data/demo.bin" 240
+else
+  wait_pod_succeeded sw-block-demo-writer 240
+fi
 kubectl -n "$NAMESPACE" logs sw-block-demo-writer | tee "$ARTIFACT_DIR/writer.log"
+
+if [[ "$RESTART_CSI_NODE_BEFORE_READER" == "1" || "$RESTART_CSI_NODE_BEFORE_READER" == "true" ]]; then
+  log "restart CSI node DaemonSet before replacing the app pod"
+  kubectl -n kube-system rollout restart ds/sw-block-csi-node | tee "$ARTIFACT_DIR/restart-csi-node.log"
+  kubectl -n kube-system rollout status ds/sw-block-csi-node --timeout=180s | tee "$ARTIFACT_DIR/restart-csi-node-status.log"
+  kubectl -n kube-system get pods -l app=sw-block-csi-node -o wide >"$ARTIFACT_DIR/csi-node-pods.after-restart.txt" 2>&1 || true
+fi
 
 log "delete writer pod but keep PVC"
 kubectl -n "$NAMESPACE" delete pod sw-block-demo-writer --wait=true --timeout=120s | tee "$ARTIFACT_DIR/delete-writer.log"

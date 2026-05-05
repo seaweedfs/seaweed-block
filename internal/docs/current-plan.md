@@ -34,12 +34,12 @@ References:
   - includes RX/TX stability tests, large write memory tests, OS smoke script,
     loop mode, stress mode, TestOps registry entry, and sustained sync smoke.
 - iSCSI-P2 supplemental session guards:
-  - status: local on `iscsi/frontend-completeness`, pending milestone PR.
+  - status: done in PR #41.
   - includes rapid login/logout goroutine budget, concurrent target close
     idempotency, target same-address restart, and NOP-Out queued during
     Data-Out.
 - iSCSI-P3 attach/detach loop tooling:
-  - status: local on `iscsi/frontend-completeness`, pending milestone PR.
+  - status: done in PR #41.
   - includes `scripts/run-k8s-attach-detach-loop.sh` and TestOps registry
     scenario `iscsi-p3-attach-detach-loop`.
 - iSCSI-P2/P3 lab validation:
@@ -59,6 +59,10 @@ References:
 - Owner-reference alpha default:
   - status: done in PR #40.
   - relevant to K8s cleanup and alpha install flow.
+- iSCSI-P4 CHAP / Access Control:
+  - status: done in PR #41.
+  - includes target-side CHAP, CSI node CHAP, Kubernetes Secret wiring, and
+    QA evidence.
 
 ## Recently Closed Milestone: iSCSI-P2 Stability
 
@@ -71,8 +75,7 @@ References:
 - Tasks:
   - add RX/TX stability test pack:
     - status: done in PR #26.
-    - supplemental guards: local on `iscsi/frontend-completeness`, pending
-      milestone PR.
+    - supplemental guards: done in PR #41.
     - rapid login/logout without goroutine leak,
     - many concurrent sessions,
     - target close while I/O is active,
@@ -122,8 +125,7 @@ References:
     behavior, not only protocol fakes.
 
 - Tasks:
-  - status: QA green on `iscsi/frontend-completeness@e7c95ee`, pending
-    milestone PR.
+  - status: done in PR #41.
   - sustained write/read through mounted filesystem,
   - `SYNCHRONIZE_CACHE` pressure,
   - multiple sessions sharing a volume if supported,
@@ -148,16 +150,15 @@ References:
   - default loop count comes from `SW_BLOCK_ATTACH_DETACH_ITERATIONS`.
   - #QA status: PASS on M02, 3 iterations.
 
-## Current Active Milestone: iSCSI-P4 CHAP / Access Control
+## Recently Closed Milestone: iSCSI-P4 CHAP / Access Control
 
 - Goal:
   - reach V2-level iSCSI auth behavior before any security-facing claim.
 
 - Tasks:
-  - status: QA green on `iscsi/frontend-completeness@9a1fe07`, pending
-    milestone PR.
+  - status: done in PR #41.
   - target-side CHAP login negotiation:
-    - status: local implementation + unit tests.
+    - status: done in PR #41.
     - direct LoginOp is rejected when CHAP is required,
     - `AuthMethod=None` is rejected when CHAP is required,
     - target emits CHAP MD5 challenge,
@@ -165,7 +166,7 @@ References:
     - wrong response fails closed,
     - missing `CHAP_R` fails closed.
   - `cmd/blockvolume` opt-in flags:
-    - status: local implementation + parse tests.
+    - status: done in PR #41.
     - `--iscsi-chap-username`,
     - `--iscsi-chap-secret`,
     - flags require `--iscsi-listen`,
@@ -179,7 +180,7 @@ References:
     - CSI node consumes CHAP credentials from `NodeStageVolumeRequest.Secrets`,
     - controller publish path must not copy CHAP secrets into `publish_context`,
     - node configures `iscsiadm` CHAP settings after discovery and before login.
-    - launcher can render target-side CHAP args from a Kubernetes Secret,
+    - launcher can render target-side CHAP env vars from a Kubernetes Secret,
     - alpha runner can create the Secret and inject StorageClass
       node-stage secret refs.
   - replayed challenge rejected if supported by the protocol path,
@@ -199,13 +200,15 @@ References:
     - default non-CHAP regression PASS on M02.
   - V2 CHAP tests are the reference coverage inventory.
 
-## Milestone: iSCSI-P5 CSI Node Lifecycle
+## Current Active Milestone: iSCSI-P5 CSI Node Lifecycle
 
 - Goal:
   - make kubelet retry/restart behavior safe enough for real clusters.
 
 - Tasks:
-  - status: active on `iscsi/frontend-completeness`.
+  - status: active on `iscsi/csi-node-lifecycle`.
+  - local CSI node lifecycle guards:
+    - status: done in PR #41.
   - NodeStage idempotency,
     - mounted staging path must belong to the same volume,
     - mounted staging path for another volume fails closed.
@@ -225,6 +228,10 @@ References:
     - local 3-cycle stage/unstage test leaves no staged state,
       `.volume`, or `.transport`.
   - wrong volume at staging path fails closed.
+  - #QA CSI node restart while PVC remains,
+    - script prepared: `scripts/run-k8s-csi-node-restart.sh`,
+    - TestOps scenario prepared: `iscsi-p5-csi-node-restart`,
+    - assignment: `internal/docs/qa-assignments/iscsi-p5-csi-node-lifecycle-validation.md`.
 
 - Close bar:
   - kubelet retries do not wedge the node plugin,
@@ -232,7 +239,8 @@ References:
   - repeated create/delete works without manual host cleanup.
 
 - QA/tooling:
-  - #QA needs K8s scenario scripts or TestOps entries.
+  - #QA needs M02 or equivalent K8s run of
+    `scripts/run-k8s-csi-node-restart.sh`.
   - manual kubelet poking is allowed only for first reproduction.
 
 ## Milestone: iSCSI-P6 ALUA / MPIO / Mounted Failover
