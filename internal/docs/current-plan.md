@@ -38,6 +38,10 @@ References:
   - includes rapid login/logout goroutine budget, concurrent target close
     idempotency, target same-address restart, and NOP-Out queued during
     Data-Out.
+- iSCSI-P3 attach/detach loop tooling:
+  - status: local on `iscsi/frontend-completeness`, pending milestone PR.
+  - includes `scripts/run-k8s-attach-detach-loop.sh` and TestOps registry
+    scenario `iscsi-p3-attach-detach-loop`.
 - iSCSI smoke harness cleanup:
   - status: done in PR #27.
 - Larger alpha PVC smoke:
@@ -124,6 +128,7 @@ References:
   - reconnect after logout/login,
   - repeated attach/detach loop,
     - script prepared: `scripts/run-k8s-attach-detach-loop.sh`,
+    - TestOps scenario prepared: `iscsi-p3-attach-detach-loop`,
   - app writer pod replaced by reader pod on the same PVC,
   - blockvolume restart and reattach once durable state is ready.
 
@@ -136,6 +141,8 @@ References:
 - QA/tooling:
   - repeated attach/detach script exists:
     `scripts/run-k8s-attach-detach-loop.sh`.
+  - TestOps registry entry exists:
+    `internal/testops/registry/iscsi-p3-attach-detach-loop.json`.
   - default loop count comes from `SW_BLOCK_ATTACH_DETACH_ITERATIONS`.
   - QA should run it on M02 before P3 close and return the artifact dir.
 

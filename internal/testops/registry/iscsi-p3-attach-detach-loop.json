@@ -1,0 +1,50 @@
+{
+  "schema_version": "1.0",
+  "scenario": "iscsi-p3-attach-detach-loop",
+  "gate": "iSCSI-P3",
+  "layer": "L5-k8s",
+  "driver": {
+    "type": "shell",
+    "path": "scripts/run-k8s-attach-detach-loop.sh"
+  },
+  "default_timeout_s": 2400,
+  "required_capabilities": [
+    "bash",
+    "kubectl",
+    "privileged-k8s-node",
+    "iscsiadm",
+    "iscsi_tcp-loadable",
+    "mount"
+  ],
+  "required_images": [
+    "sw-block:local",
+    "sw-block-csi:local"
+  ],
+  "qa_instruction": "internal/docs/current-plan.md",
+  "known_green_commit": "",
+  "scenario_default_params": {
+    "SW_BLOCK_ATTACH_DETACH_ITERATIONS": "3",
+    "SW_BLOCK_LAUNCHER_PVC_OWNER_REF": "1"
+  },
+  "artifacts": [
+    "summary.log",
+    "iter-*/run.log",
+    "iter-*/writer.log",
+    "iter-*/reader.log",
+    "iter-*/generated-blockvolume.yaml",
+    "iter-*/blockmaster.log",
+    "iter-*/blockcsi-controller.log",
+    "iter-*/csi-provisioner.log",
+    "iter-*/csi-attacher.log",
+    "iter-*/blockvolume-generated.log",
+    "iter-*/iscsi-sessions.after-delete.txt",
+    "iter-*/cleanup.log"
+  ],
+  "non_claims": [
+    "Single-node Kubernetes only.",
+    "Repeated create/write/read/delete loop only; no mounted failover claim.",
+    "No blockvolume restart durability claim.",
+    "No CHAP, ALUA, MPIO, NVMe, or multi-node claim.",
+    "No performance or soak claim."
+  ]
+}

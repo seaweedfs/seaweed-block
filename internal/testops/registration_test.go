@@ -211,6 +211,45 @@ func TestISCSIP2OSSmokeRegistrationBuildsShellDriver(t *testing.T) {
 	}
 }
 
+func TestISCSIP3AttachDetachLoopRegistrationBuildsShellDriver(t *testing.T) {
+	repoRoot := findRepoRoot(t)
+	raw, err := os.Open(registrationPath(repoRoot, "iscsi-p3-attach-detach-loop.json"))
+	if err != nil {
+		t.Fatalf("open registration: %v", err)
+	}
+	defer raw.Close()
+
+	registration, err := DecodeRegistration(raw)
+	if err != nil {
+		t.Fatalf("DecodeRegistration: %v", err)
+	}
+	if registration.Scenario != "iscsi-p3-attach-detach-loop" || registration.Driver.Type != "shell" {
+		t.Fatalf("registration=%+v", registration)
+	}
+	driver, err := registration.NewDriver(repoRoot)
+	if err != nil {
+		t.Fatalf("NewDriver: %v", err)
+	}
+	shell, ok := driver.(ShellDriver)
+	if !ok {
+		t.Fatalf("driver type=%T want ShellDriver", driver)
+	}
+	if !filepath.IsAbs(shell.Path) || filepath.Base(shell.Path) != "run-k8s-attach-detach-loop.sh" {
+		t.Fatalf("shell path=%q", shell.Path)
+	}
+	if _, err := os.Stat(shell.Path); err != nil {
+		t.Fatalf("shell driver path missing: %v", err)
+	}
+	for _, want := range []string{"summary.log", "iter-*/writer.log", "iter-*/reader.log", "iter-*/iscsi-sessions.after-delete.txt"} {
+		if !containsString(registration.Artifacts, want) {
+			t.Fatalf("registration artifacts missing %q: %v", want, registration.Artifacts)
+		}
+	}
+	if got := registration.ScenarioDefaultParams["SW_BLOCK_ATTACH_DETACH_ITERATIONS"]; got != "3" {
+		t.Fatalf("default iterations=%q want 3", got)
+	}
+}
+
 func containsString(values []string, want string) bool {
 	for _, value := range values {
 		if value == want {
