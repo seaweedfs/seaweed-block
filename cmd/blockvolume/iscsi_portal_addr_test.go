@@ -80,6 +80,51 @@ func TestParseFlags_IscsiDataOutTimeoutPlumbed(t *testing.T) {
 	}
 }
 
+func TestParseFlags_IscsiCHAPRequiresListen(t *testing.T) {
+	args := append(requiredBlockvolumeArgs(),
+		"--iscsi-chap-username", "user1",
+		"--iscsi-chap-secret", "secret1",
+	)
+	_, err := parseFlags(args)
+	if err == nil {
+		t.Fatal("parseFlags succeeded; want CHAP without --iscsi-listen rejected")
+	}
+	if !strings.Contains(err.Error(), "require --iscsi-listen") {
+		t.Fatalf("error = %q, want CHAP/listen requirement", err)
+	}
+}
+
+func TestParseFlags_IscsiCHAPRequiresUserAndSecret(t *testing.T) {
+	args := append(requiredBlockvolumeArgs(),
+		"--iscsi-listen", "127.0.0.1:3260",
+		"--iscsi-iqn", "iqn.2026-05.io.seaweedfs:test-v1",
+		"--iscsi-chap-username", "user1",
+	)
+	_, err := parseFlags(args)
+	if err == nil {
+		t.Fatal("parseFlags succeeded; want username without secret rejected")
+	}
+	if !strings.Contains(err.Error(), "must be set together") {
+		t.Fatalf("error = %q, want paired CHAP flag requirement", err)
+	}
+}
+
+func TestParseFlags_IscsiCHAPPlumbed(t *testing.T) {
+	args := append(requiredBlockvolumeArgs(),
+		"--iscsi-listen", "127.0.0.1:3260",
+		"--iscsi-iqn", "iqn.2026-05.io.seaweedfs:test-v1",
+		"--iscsi-chap-username", "user1",
+		"--iscsi-chap-secret", "secret1",
+	)
+	got, err := parseFlags(args)
+	if err != nil {
+		t.Fatalf("parseFlags: %v", err)
+	}
+	if got.iscsiCHAPUser != "user1" || got.iscsiCHAPSecret != "secret1" {
+		t.Fatalf("CHAP flags = %q/%q", got.iscsiCHAPUser, got.iscsiCHAPSecret)
+	}
+}
+
 func requiredBlockvolumeArgs() []string {
 	return []string{
 		"--master", "127.0.0.1:9333",

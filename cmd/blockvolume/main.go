@@ -64,6 +64,8 @@ type flags struct {
 	iscsiPortalAddr string
 	iscsiDataOutTTL time.Duration
 	iscsiLUN        uint
+	iscsiCHAPUser   string
+	iscsiCHAPSecret string
 
 	// NVMe/TCP frontend flags. Symmetric with iSCSI flags: same
 	// loopback-only safe-default rule, same auto-enable of
@@ -128,11 +130,13 @@ func parseFlags(args []string) (flags, error) {
 	fs.BoolVar(&f.enableT1Readiness, "t1-readiness", false, "enable readiness bridge (HealthyPathExecutor) so adapter projection reaches Healthy")
 	fs.StringVar(&f.statusAddr, "status-addr", "", "address for the status HTTP endpoint (e.g. 127.0.0.1:0); empty disables")
 	fs.BoolVar(&f.statusRecovery, "status-recovery", false, "expose /status/recovery?volume=<id> with engine.ReplicaProjection (Mode/R/S/H/RecoveryDecision); off by default; loopback-only; intended for hardware test orchestration")
-	fs.StringVar(&f.iscsiListen, "iscsi-listen", "", "iSCSI target bind address (e.g. 127.0.0.1:0); empty disables. Loopback-only (no auth)")
+	fs.StringVar(&f.iscsiListen, "iscsi-listen", "", "iSCSI target bind address (e.g. 127.0.0.1:0); empty disables. Loopback-only unless paired with an operator-managed proxy")
 	fs.StringVar(&f.iscsiIQN, "iscsi-iqn", "", "iSCSI target IQN (required if --iscsi-listen is set)")
 	fs.StringVar(&f.iscsiPortalAddr, "iscsi-portal-addr", "", "iSCSI TargetAddress advertised in SendTargets responses (e.g. 192.168.1.184:3260,1). Defaults to the bound listen address. Does not change the loopback-only bind policy")
 	fs.DurationVar(&f.iscsiDataOutTTL, "iscsi-dataout-timeout", 0, "iSCSI R2T/Data-Out wait timeout. 0 uses the target default. Bounds how long a session waits for solicited Data-Out from an initiator")
 	fs.UintVar(&f.iscsiLUN, "iscsi-lun", 0, "iSCSI LUN id (default 0)")
+	fs.StringVar(&f.iscsiCHAPUser, "iscsi-chap-username", "", "iSCSI target-side CHAP username. Requires --iscsi-chap-secret and --iscsi-listen")
+	fs.StringVar(&f.iscsiCHAPSecret, "iscsi-chap-secret", "", "iSCSI target-side CHAP secret. Requires --iscsi-chap-username and --iscsi-listen")
 	fs.StringVar(&f.nvmeListen, "nvme-listen", "", "NVMe/TCP target bind address (e.g. 127.0.0.1:0); empty disables. Loopback-only (no auth)")
 	fs.StringVar(&f.nvmeSubsysNQN, "nvme-subsysnqn", "", "NVMe subsystem NQN (required if --nvme-listen is set)")
 	fs.UintVar(&f.nvmeNS, "nvme-ns", 1, "NVMe namespace id (default 1)")
@@ -210,10 +214,15 @@ func parseFlags(args []string) (flags, error) {
 			fmt.Fprintln(os.Stderr, "blockvolume: iscsi enabled: t1-readiness auto-enabled")
 		}
 		f.enableT1Readiness = true
+		if (f.iscsiCHAPUser == "") != (f.iscsiCHAPSecret == "") {
+			return flags{}, fmt.Errorf("--iscsi-chap-username and --iscsi-chap-secret must be set together")
+		}
 	} else if f.iscsiPortalAddr != "" {
 		return flags{}, fmt.Errorf("--iscsi-portal-addr requires --iscsi-listen")
 	} else if f.iscsiDataOutTTL != 0 {
 		return flags{}, fmt.Errorf("--iscsi-dataout-timeout requires --iscsi-listen")
+	} else if f.iscsiCHAPUser != "" || f.iscsiCHAPSecret != "" {
+		return flags{}, fmt.Errorf("--iscsi-chap-username/--iscsi-chap-secret require --iscsi-listen")
 	}
 	if f.nvmeListen != "" {
 		if f.nvmeSubsysNQN == "" {
@@ -729,12 +738,21 @@ func run(f flags) int {
 	var frontendTargets []*control.FrontendTarget
 	if f.iscsiListen != "" {
 		prov := provider
+		negotiation := iscsi.NegotiableConfig{}
+		if f.iscsiCHAPSecret != "" {
+			negotiation = iscsi.DefaultNegotiableConfig()
+			negotiation.CHAP = iscsi.CHAPConfig{
+				Username: f.iscsiCHAPUser,
+				Secret:   f.iscsiCHAPSecret,
+			}
+		}
 		iscsiTarget = iscsi.NewTarget(iscsi.TargetConfig{
 			Listen:         f.iscsiListen,
 			IQN:            f.iscsiIQN,
 			PortalAddr:     f.iscsiPortalAddr,
 			VolumeID:       f.volumeID,
 			Provider:       prov,
+			Negotiation:    negotiation,
 			DataOutTimeout: f.iscsiDataOutTTL,
 			Handler: iscsi.HandlerConfig{
 				BlockSize:  frontendBlockSize,

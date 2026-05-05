@@ -57,10 +57,10 @@ References:
   - status: done in PR #39.
   - relevant to CSI/K8s cleanup, not core iSCSI protocol.
 - Owner-reference alpha default:
-  - status: open in PR #40.
+  - status: done in PR #40.
   - relevant to K8s cleanup and alpha install flow.
 
-## Current Active Milestone: iSCSI-P2 Stability
+## Recently Closed Milestone: iSCSI-P2 Stability
 
 - Goal:
   - prevent session breakage, leaks, and unbounded memory behavior under real
@@ -122,7 +122,8 @@ References:
     behavior, not only protocol fakes.
 
 - Tasks:
-  - status: next development milestone after P2 close.
+  - status: QA green on `iscsi/frontend-completeness@e7c95ee`, pending
+    milestone PR.
   - sustained write/read through mounted filesystem,
   - `SYNCHRONIZE_CACHE` pressure,
   - multiple sessions sharing a volume if supported,
@@ -147,19 +148,38 @@ References:
   - default loop count comes from `SW_BLOCK_ATTACH_DETACH_ITERATIONS`.
   - #QA status: PASS on M02, 3 iterations.
 
-## Milestone: iSCSI-P4 CHAP / Access Control
+## Current Active Milestone: iSCSI-P4 CHAP / Access Control
 
 - Goal:
   - reach V2-level iSCSI auth behavior before any security-facing claim.
 
 - Tasks:
-  - status: planned.
-  - CHAP config validation,
-  - login success with correct secret,
-  - wrong username/password fail closed,
-  - missing CHAP fields fail closed,
+  - status: active on `iscsi/frontend-completeness`, pending milestone PR.
+  - target-side CHAP login negotiation:
+    - status: local implementation + unit tests.
+    - direct LoginOp is rejected when CHAP is required,
+    - `AuthMethod=None` is rejected when CHAP is required,
+    - target emits CHAP MD5 challenge,
+    - correct username/response advances to LoginOp,
+    - wrong response fails closed,
+    - missing `CHAP_R` fails closed.
+  - `cmd/blockvolume` opt-in flags:
+    - status: local implementation + parse tests.
+    - `--iscsi-chap-username`,
+    - `--iscsi-chap-secret`,
+    - flags require `--iscsi-listen`,
+    - username and secret must be set together.
+  - OS initiator CHAP smoke script:
+    - status: next.
+    - add `scripts/run-iscsi-chap-smoke.sh` or extend
+      `scripts/run-iscsi-os-smoke.sh` behind an explicit env flag.
+    - configure `iscsiadm` node auth before login,
+    - prove correct secret succeeds and wrong secret fails without residue.
+  - Kubernetes / CSI Secret integration:
+    - status: planned after OS smoke.
+    - do not expose secrets through ordinary logs or publish_context unless a
+      deliberate alpha tradeoff is documented.
   - replayed challenge rejected if supported by the protocol path,
-  - Kubernetes Secret integration for CSI later.
 
 - Close bar:
   - unauthenticated access fails when CHAP is required,
@@ -167,7 +187,7 @@ References:
   - failed auth leaves no partial session/device state.
 
 - QA/tooling:
-  - #QA needs CHAP-capable initiator script once implementation starts.
+  - #QA needs CHAP-capable initiator script once OS smoke lands.
   - V2 CHAP tests are the reference coverage inventory.
 
 ## Milestone: iSCSI-P5 CSI Node Lifecycle

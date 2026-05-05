@@ -82,7 +82,7 @@ func NewTarget(cfg TargetConfig) *Target {
 	if lg == nil {
 		lg = log.Default()
 	}
-	if cfg.Negotiation == (NegotiableConfig{}) {
+	if cfg.Negotiation.isZero() {
 		cfg.Negotiation = DefaultNegotiableConfig()
 	}
 	if cfg.DataOutTimeout == 0 {
