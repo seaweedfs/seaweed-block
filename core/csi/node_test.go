@@ -14,6 +14,7 @@ import (
 
 type mockISCSIUtil struct {
 	discoveryErr    error
+	configureErr    error
 	loginErr        error
 	logoutErr       error
 	getDeviceResult string
@@ -29,6 +30,11 @@ func newMockISCSIUtil() *mockISCSIUtil {
 func (m *mockISCSIUtil) Discovery(_ context.Context, portal string) error {
 	m.calls = append(m.calls, "discovery:"+portal)
 	return m.discoveryErr
+}
+
+func (m *mockISCSIUtil) ConfigureCHAP(_ context.Context, iqn, portal string, auth ISCSIAuth) error {
+	m.calls = append(m.calls, "chap:"+iqn+":"+portal+":"+auth.Username+":"+auth.Secret)
+	return m.configureErr
 }
 
 func (m *mockISCSIUtil) Login(_ context.Context, iqn, portal string) error {
@@ -151,6 +157,69 @@ func TestNodeStage_UsesPublishContextBeforeVolumeContext(t *testing.T) {
 	info := ns.staged["v1"]
 	if info == nil || info.iqn != "iqn.fresh:v1" {
 		t.Fatalf("staged info=%+v", info)
+	}
+}
+
+func TestNodeStage_ConfiguresCHAPBeforeLogin(t *testing.T) {
+	mi, mm := newMockISCSIUtil(), newMockMountUtil()
+	ns := newTestNode(mi, mm)
+	staging := t.TempDir()
+
+	_, err := ns.NodeStageVolume(context.Background(), &csipb.NodeStageVolumeRequest{
+		VolumeId:          "v1",
+		StagingTargetPath: staging,
+		VolumeCapability:  testVolumeCapability(),
+		PublishContext: map[string]string{
+			"iscsiAddr": "127.0.0.1:3260",
+			"iqn":       "iqn.v1",
+		},
+		Secrets: map[string]string{
+			"chapUsername": "user1",
+			"chapSecret":   "secret1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("NodeStageVolume: %v", err)
+	}
+	want := []string{
+		"isloggedin:iqn.v1",
+		"discovery:127.0.0.1:3260",
+		"chap:iqn.v1:127.0.0.1:3260:user1:secret1",
+		"login:iqn.v1:127.0.0.1:3260",
+		"getdevice:iqn.v1",
+	}
+	for i, w := range want {
+		if i >= len(mi.calls) || mi.calls[i] != w {
+			t.Fatalf("calls=%v want prefix=%v", mi.calls, want)
+		}
+	}
+}
+
+func TestNodeStage_RejectsPartialCHAPContext(t *testing.T) {
+	mi, mm := newMockISCSIUtil(), newMockMountUtil()
+	ns := newTestNode(mi, mm)
+
+	_, err := ns.NodeStageVolume(context.Background(), &csipb.NodeStageVolumeRequest{
+		VolumeId:          "v1",
+		StagingTargetPath: t.TempDir(),
+		VolumeCapability:  testVolumeCapability(),
+		PublishContext: map[string]string{
+			"iscsiAddr": "127.0.0.1:3260",
+			"iqn":       "iqn.v1",
+		},
+		Secrets: map[string]string{
+			"chapUsername": "user1",
+		},
+	})
+	if err == nil {
+		t.Fatal("expected partial CHAP context to fail")
+	}
+	st, _ := status.FromError(err)
+	if st.Code() != codes.FailedPrecondition {
+		t.Fatalf("code=%v want FailedPrecondition", st.Code())
+	}
+	if len(mi.calls) != 0 {
+		t.Fatalf("expected fail before iscsi calls, got %v", mi.calls)
 	}
 }
 

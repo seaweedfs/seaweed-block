@@ -175,9 +175,11 @@ References:
     - configure `iscsiadm` node auth before login,
     - prove correct secret succeeds and wrong secret fails without residue.
   - Kubernetes / CSI Secret integration:
-    - status: planned after OS smoke.
-    - do not expose secrets through ordinary logs or publish_context unless a
-      deliberate alpha tradeoff is documented.
+    - status: local NodeStage seam + unit tests.
+    - CSI node consumes CHAP credentials from `NodeStageVolumeRequest.Secrets`,
+    - controller publish path must not copy CHAP secrets into `publish_context`,
+    - node configures `iscsiadm` CHAP settings after discovery and before login.
+    - #QA K8s Secret / StorageClass end-to-end wiring is still pending.
   - replayed challenge rejected if supported by the protocol path,
 
 - Close bar:

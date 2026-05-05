@@ -21,11 +21,17 @@ const (
 
 type ISCSIUtil interface {
 	Discovery(ctx context.Context, portal string) error
+	ConfigureCHAP(ctx context.Context, iqn, portal string, auth ISCSIAuth) error
 	Login(ctx context.Context, iqn, portal string) error
 	Logout(ctx context.Context, iqn string) error
 	GetDeviceByIQN(ctx context.Context, iqn string) (string, error)
 	IsLoggedIn(ctx context.Context, iqn string) (bool, error)
 	RescanDevice(ctx context.Context, iqn string) error
+}
+
+type ISCSIAuth struct {
+	Username string
+	Secret   string
 }
 
 type MountUtil interface {
@@ -103,11 +109,21 @@ func (s *NodeServer) NodeStageVolume(ctx context.Context, req *csipb.NodeStageVo
 	}
 
 	portal, iqn := iscsiFromContext(req.GetPublishContext())
+	auth := iscsiAuthFromContext(req.GetSecrets())
+	if auth == (ISCSIAuth{}) {
+		auth = iscsiAuthFromContext(req.GetPublishContext())
+	}
 	if portal == "" || iqn == "" {
 		portal, iqn = iscsiFromContext(req.GetVolumeContext())
+		if auth == (ISCSIAuth{}) {
+			auth = iscsiAuthFromContext(req.GetVolumeContext())
+		}
 	}
 	if portal == "" || iqn == "" {
 		return nil, status.Error(codes.FailedPrecondition, "no iSCSI publish target")
+	}
+	if err := validateISCSIAuth(auth); err != nil {
+		return nil, err
 	}
 
 	loggedIn, err := s.iscsiUtil.IsLoggedIn(ctx, iqn)
@@ -118,6 +134,11 @@ func (s *NodeServer) NodeStageVolume(ctx context.Context, req *csipb.NodeStageVo
 	if !loggedIn {
 		if err := s.iscsiUtil.Discovery(ctx, portal); err != nil {
 			return nil, status.Errorf(codes.Internal, "iscsi discovery: %v", err)
+		}
+		if auth.Secret != "" {
+			if err := s.iscsiUtil.ConfigureCHAP(ctx, iqn, portal, auth); err != nil {
+				return nil, status.Errorf(codes.Internal, "iscsi chap config: %v", err)
+			}
 		}
 		if err := s.iscsiUtil.Login(ctx, iqn, portal); err != nil {
 			return nil, status.Errorf(codes.Internal, "iscsi login: %v", err)
@@ -303,6 +324,23 @@ func iscsiFromContext(ctx map[string]string) (portal, iqn string) {
 		return "", ""
 	}
 	return ctx["iscsiAddr"], ctx["iqn"]
+}
+
+func iscsiAuthFromContext(ctx map[string]string) ISCSIAuth {
+	if ctx == nil {
+		return ISCSIAuth{}
+	}
+	return ISCSIAuth{
+		Username: ctx["chapUsername"],
+		Secret:   ctx["chapSecret"],
+	}
+}
+
+func validateISCSIAuth(auth ISCSIAuth) error {
+	if (auth.Username == "") != (auth.Secret == "") {
+		return status.Error(codes.FailedPrecondition, "iSCSI CHAP username and secret must be set together")
+	}
+	return nil
 }
 
 func writeTransportFile(stagingPath, transport string) error {

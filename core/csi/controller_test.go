@@ -87,6 +87,35 @@ func TestControllerPublish_ReturnsISCSIPublishContextFromTargetFact(t *testing.T
 	}
 }
 
+func TestControllerPublish_DoesNotExposeCHAPSecretsInPublishContext(t *testing.T) {
+	lookup := &stubLookup{target: PublishTarget{
+		VolumeID:  "v1",
+		ReplicaID: "r1",
+		Protocol:  ProtocolISCSI,
+		ISCSIAddr: "127.0.0.1:3260",
+		IQN:       "iqn.2026-05.example.v3:v1",
+	}}
+	s := NewControllerServer(lookup)
+
+	resp, err := s.ControllerPublishVolume(context.Background(), &csipb.ControllerPublishVolumeRequest{
+		VolumeId: "v1",
+		NodeId:   "node-a",
+		Secrets: map[string]string{
+			"chapUsername": "user1",
+			"chapSecret":   "secret1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("ControllerPublishVolume: %v", err)
+	}
+	if _, ok := resp.GetPublishContext()["chapUsername"]; ok {
+		t.Fatalf("chapUsername leaked in publish_context: %+v", resp.GetPublishContext())
+	}
+	if _, ok := resp.GetPublishContext()["chapSecret"]; ok {
+		t.Fatalf("chapSecret leaked in publish_context: %+v", resp.GetPublishContext())
+	}
+}
+
 func TestControllerPublish_FailsClosedWithoutVerifiedTarget(t *testing.T) {
 	s := NewControllerServer(&stubLookup{err: ErrPublishTargetNotFound})
 	_, err := s.ControllerPublishVolume(context.Background(), &csipb.ControllerPublishVolumeRequest{
@@ -107,6 +136,10 @@ func TestControllerPublish_FailsClosedWhenTargetHasNoFrontendFact(t *testing.T) 
 	_, err := s.ControllerPublishVolume(context.Background(), &csipb.ControllerPublishVolumeRequest{
 		VolumeId: "v1",
 		NodeId:   "node-a",
+		Secrets: map[string]string{
+			"chapUsername": "user1",
+			"chapSecret":   "secret1",
+		},
 	})
 	if err == nil {
 		t.Fatal("expected error")
