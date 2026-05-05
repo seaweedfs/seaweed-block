@@ -43,6 +43,10 @@ type VolumeProvisioner interface {
 	DeleteVolume(ctx context.Context, volumeID string) error
 }
 
+type KubernetesMetadataResolver interface {
+	ResolvePVCUID(ctx context.Context, name, namespace string) (string, error)
+}
+
 type VolumeSpec struct {
 	VolumeID          string
 	SizeBytes         uint64
