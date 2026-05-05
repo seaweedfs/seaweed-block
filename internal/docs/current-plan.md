@@ -42,6 +42,10 @@ References:
   - status: local on `iscsi/frontend-completeness`, pending milestone PR.
   - includes `scripts/run-k8s-attach-detach-loop.sh` and TestOps registry
     scenario `iscsi-p3-attach-detach-loop`.
+- iSCSI-P2/P3 lab validation:
+  - status: QA green on `iscsi/frontend-completeness@e7c95ee`.
+  - OS repeat, OS fio, K8s fio, and K8s attach/detach all passed on M02.
+  - evidence: `internal/docs/qa-assignments/iscsi-p2-p3-lab-validation.md`.
 - iSCSI smoke harness cleanup:
   - status: done in PR #27.
 - Larger alpha PVC smoke:
@@ -87,10 +91,9 @@ References:
     - artifact path printed,
     - no active sessions after every loop.
   - #QA run K8s validation after local tests:
-    - status: partially done.
+    - status: QA green on `iscsi/frontend-completeness@e7c95ee`.
     - larger PVC smoke: done in PR #28.
-    - 60s fio: script prepared locally as `scripts/run-k8s-alpha-fio.sh`,
-      pending QA rerun / milestone PR.
+    - 60s fio: QA PASS on M02.
     - larger PVC,
     - 60s fio,
     - daemon logs and iSCSI state captured,
@@ -110,6 +113,7 @@ References:
 
 - #QA assignment:
   - `internal/docs/qa-assignments/iscsi-p2-p3-lab-validation.md`.
+  - status: QA green.
 
 ## Milestone: iSCSI-P3 Product-Backed Stability
 
@@ -141,7 +145,7 @@ References:
   - TestOps registry entry exists:
     `internal/testops/registry/iscsi-p3-attach-detach-loop.json`.
   - default loop count comes from `SW_BLOCK_ATTACH_DETACH_ITERATIONS`.
-  - #QA should run it on M02 before P3 close and return the artifact dir.
+  - #QA status: PASS on M02, 3 iterations.
 
 ## Milestone: iSCSI-P4 CHAP / Access Control
 

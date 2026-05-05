@@ -1,8 +1,10 @@
 # QA Assignment: iSCSI P2/P3 Lab Validation
 
-Status: assigned.
+Status: QA green.
 
 Branch under test: `iscsi/frontend-completeness`.
+Verified commit: `e7c95ee44863f34b304995fa977a4ff57ab3e649`.
+Host: M02 (`192.168.1.184`).
 
 Purpose: validate the local iSCSI P2/P3 test/tooling work on a real Linux/K8s
 lab. This is not a performance claim and not a failover claim.
@@ -25,6 +27,14 @@ lab. This is not a performance claim and not a failover claim.
 - Or QA explicitly records the GHCR image tags/digests used.
 
 ## Test 1: OS Initiator Repeat Loop
+
+- Result: PASS.
+- Artifact:
+  `/mnt/smb/work/share/g15d-k8s/20260505T062122Z-iscsi-p2-test1-os-repeat`.
+- Final line:
+  `[iscsi-os] PASS: 5 x iscsiadm mkfs mount write/read logout`.
+- Cleanup: `iscsi-sessions.final.txt` reports no active sessions.
+- `expected Data-Out` errors in `blockvolume.log`: 0.
 
 - Command:
 
@@ -50,6 +60,18 @@ lab. This is not a performance claim and not a failover claim.
 
 ## Test 2: OS Initiator fio Mode
 
+- Result: PASS.
+- Artifact:
+  `/mnt/smb/work/share/g15d-k8s/20260505T062159Z-iscsi-p2-test2-os-fio60s`.
+- fio summary:
+  - read IOPS=122, BW=490KiB/s,
+  - write IOPS=123, BW=494KiB/s,
+  - runtime=60.004s,
+  - err=0,
+  - `fio.iter1.log` present.
+- Cleanup: `iscsi-sessions.final.txt` reports no active sessions.
+- `expected Data-Out` errors in `blockvolume.log`: 0.
+
 - Command:
 
   ```bash
@@ -67,6 +89,20 @@ lab. This is not a performance claim and not a failover claim.
   - no session errors in `blockvolume.log`.
 
 ## Test 3: Kubernetes fio Smoke
+
+- Result: PASS.
+- Artifact:
+  `/mnt/smb/work/share/g15d-k8s/20260505T062334Z-iscsi-p3-test3-k8s-fio`.
+- Pod evidence:
+  - `pod.log` shows Alpine `apk` install of fio,
+  - 60s randrw run,
+  - READ BW=13.0MiB/s, 782MiB total,
+  - WRITE BW=13.1MiB/s, 787MiB total,
+  - err=0,
+  - util=96.36%.
+- Final line:
+  `[alpha-fio] PASS: dynamic PVC create/delete completed checksum write/read and cleanup`.
+- Cleanup: no PVC, no sw-block deployments, no active iSCSI sessions.
 
 - Command:
 
@@ -87,6 +123,17 @@ lab. This is not a performance claim and not a failover claim.
     failure.
 
 ## Test 4: Kubernetes Attach/Detach Loop
+
+- Result: PASS.
+- Artifact:
+  `/mnt/smb/work/share/g15d-k8s/20260505T062606Z-iscsi-p3-test4-attach-detach`.
+- Iterations:
+  - iter-1 PASS: writer wrote and verified `/data/demo.bin`; reader read-back OK; no active iSCSI sessions after delete.
+  - iter-2 PASS: same.
+  - iter-3 PASS: same.
+- Final line:
+  `[attach-loop] PASS: 3 attach/detach app PVC cycles completed`.
+- Cleanup: no PVC, no sw-block deployments, no active iSCSI sessions.
 
 - Command:
 
@@ -149,3 +196,14 @@ Test 4 K8s attach/detach:
 Findings:
 - ...
 ```
+
+## Lab Notes
+
+- M02 initially had no Go installation.
+- QA installed Go 1.25.0 to `/usr/local/go` and symlinked
+  `/usr/local/bin/go`.
+- K8s tests used locally rebuilt images:
+  - `sw-block:local` sha256 `dcb621e4447a`,
+  - `sw-block-csi:local` sha256 `84fab78dc05a`.
+- No GHCR images were used.
+- Test 3 requires pod network egress for `apk add fio`; M02 had egress.
