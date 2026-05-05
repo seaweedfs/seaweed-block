@@ -86,7 +86,7 @@ References:
     - `SW_BLOCK_ISCSI_STRESS=dd|fio`,
     - artifact path printed,
     - no active sessions after every loop.
-  - run K8s validation after local tests:
+  - #QA run K8s validation after local tests:
     - status: partially done.
     - larger PVC smoke: done in PR #28.
     - 60s fio: script prepared locally as `scripts/run-k8s-alpha-fio.sh`,
@@ -108,12 +108,8 @@ References:
   - no session leaks,
   - no unbounded buffer or memory behavior.
 
-- QA tasks:
-  - run `scripts/run-iscsi-os-smoke.sh` with `SW_BLOCK_ISCSI_ITERATIONS=5`.
-  - run iSCSI fio mode through existing script or TestOps entry.
-  - return artifact paths and cleanup state.
-  - if current script cannot run fio repeatably, QA should ask for a script
-    fix instead of doing manual-only commands.
+- #QA assignment:
+  - `internal/docs/qa-assignments/iscsi-p2-p3-lab-validation.md`.
 
 ## Milestone: iSCSI-P3 Product-Backed Stability
 
@@ -127,7 +123,7 @@ References:
   - `SYNCHRONIZE_CACHE` pressure,
   - multiple sessions sharing a volume if supported,
   - reconnect after logout/login,
-  - repeated attach/detach loop,
+  - #QA repeated attach/detach loop,
     - script prepared: `scripts/run-k8s-attach-detach-loop.sh`,
     - TestOps scenario prepared: `iscsi-p3-attach-detach-loop`,
   - app writer pod replaced by reader pod on the same PVC,
@@ -145,7 +141,7 @@ References:
   - TestOps registry entry exists:
     `internal/testops/registry/iscsi-p3-attach-detach-loop.json`.
   - default loop count comes from `SW_BLOCK_ATTACH_DETACH_ITERATIONS`.
-  - QA should run it on M02 before P3 close and return the artifact dir.
+  - #QA should run it on M02 before P3 close and return the artifact dir.
 
 ## Milestone: iSCSI-P4 CHAP / Access Control
 
@@ -167,7 +163,7 @@ References:
   - failed auth leaves no partial session/device state.
 
 - QA/tooling:
-  - needs CHAP-capable initiator script once implementation starts.
+  - #QA needs CHAP-capable initiator script once implementation starts.
   - V2 CHAP tests are the reference coverage inventory.
 
 ## Milestone: iSCSI-P5 CSI Node Lifecycle
@@ -192,7 +188,7 @@ References:
   - repeated create/delete works without manual host cleanup.
 
 - QA/tooling:
-  - needs K8s scenario scripts or TestOps entries.
+  - #QA needs K8s scenario scripts or TestOps entries.
   - manual kubelet poking is allowed only for first reproduction.
 
 ## Milestone: iSCSI-P6 ALUA / MPIO / Mounted Failover
@@ -225,8 +221,8 @@ References:
   - no stale-primary success.
 
 - QA/tooling:
-  - needs real initiator multipath setup script.
-  - needs mounted workload failover script.
+  - #QA needs real initiator multipath setup script.
+  - #QA needs mounted workload failover script.
   - do not rely on in-process protocol tests only.
 
 ## Milestone: iSCSI-P7 Performance And Backend Matrix
@@ -250,7 +246,7 @@ References:
   - results are labelled experimental until SLOs exist.
 
 - QA/tooling:
-  - needs TestOps scenario that records network, backend, block size, fio job,
+  - #QA needs TestOps scenario that records network, backend, block size, fio job,
     and cleanup state.
   - avoid manual benchmark notes without a repeatable scenario.
 
