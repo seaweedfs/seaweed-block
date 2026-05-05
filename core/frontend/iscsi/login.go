@@ -441,7 +441,6 @@ func (ln *LoginNegotiator) handleCHAPSecurity(req *Params, resp *PDU, respParams
 			return false
 		}
 		ln.chapOK = true
-		respParams.Set("AuthMethod", "CHAP")
 		return true
 	}
 	if alg, hasAlg := req.Get("CHAP_A"); hasAlg {

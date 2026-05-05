@@ -255,8 +255,8 @@ func TestLoginNegotiator_CHAP_ChallengeThenLoginOp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseParams round 3: %v", err)
 	}
-	if v, _ := resp3Params.Get("AuthMethod"); v != "CHAP" {
-		t.Fatalf("round 3 AuthMethod=%q want CHAP", v)
+	if v, ok := resp3Params.Get("AuthMethod"); ok {
+		t.Fatalf("round 3 AuthMethod=%q should not be echoed after CHAP_R", v)
 	}
 	if neg.Phase() != iscsi.LoginPhaseOperational {
 		t.Fatalf("phase=%v want Operational", neg.Phase())
