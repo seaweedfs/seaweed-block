@@ -166,6 +166,8 @@ For the copyable YAML, see
 
 - The generated `blockvolume` workload is applied by the demo runner. A real
   operator should own this reconciliation.
+- By default, generated `blockvolume` Deployments carry a PVC owner reference,
+  so Kubernetes garbage collection removes them after the PVC is deleted.
 - The demo uses single-node Kubernetes.
 - The alpha manifest uses non-durable pod-local state for the generated
   `blockvolume`.
@@ -183,7 +185,7 @@ If you need to clean up manually:
 ```bash
 kubectl delete pod sw-block-demo-writer sw-block-demo-reader --ignore-not-found=true
 kubectl delete pvc sw-block-demo-pvc --ignore-not-found=true
-kubectl -n kube-system delete deploy -l app=sw-blockvolume --ignore-not-found=true
+kubectl delete deploy -A -l app=sw-blockvolume --ignore-not-found=true
 kubectl delete -f deploy/k8s/alpha/csi-driver.yaml --ignore-not-found=true
 kubectl delete -f deploy/k8s/alpha/rbac.yaml --ignore-not-found=true
 kubectl delete -f /tmp/sw-block-stack.yaml --ignore-not-found=true

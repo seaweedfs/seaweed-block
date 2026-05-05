@@ -105,6 +105,40 @@ func TestAlphaScripts_OwnerRefModeInjectsBothLauncherAndCSILookupFlags(t *testin
 	}
 }
 
+func TestPublicAlphaWrappers_DefaultToPVCOwnerReferenceCleanup(t *testing.T) {
+	for _, script := range []string{"run-k8s-alpha.sh", "run-k8s-demo.sh"} {
+		t.Run(script, func(t *testing.T) {
+			body := g15dReadFile(t, "scripts", script)
+			if !strings.Contains(body, `SW_BLOCK_LAUNCHER_PVC_OWNER_REF="${SW_BLOCK_LAUNCHER_PVC_OWNER_REF:-1}"`) {
+				t.Fatalf("%s must default SW_BLOCK_LAUNCHER_PVC_OWNER_REF to 1", script)
+			}
+		})
+	}
+}
+
+func TestInstallAlpha_DefaultsToPVCOwnerReferenceCleanup(t *testing.T) {
+	body := g15dReadFile(t, "scripts", "install-k8s-alpha.sh")
+	for _, want := range []string{
+		`LAUNCHER_PVC_OWNER_REF="${SW_BLOCK_LAUNCHER_PVC_OWNER_REF:-1}"`,
+		"--launcher-pvc-owner-ref",
+		"--kubernetes-pvc-uid-lookup",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("install script missing %q", want)
+		}
+	}
+}
+
+func TestApplyAlphaBlockvolumes_WaitsForGeneratedManifestInsteadOfKubeSystem(t *testing.T) {
+	body := g15dReadFile(t, "scripts", "apply-k8s-alpha-blockvolumes.sh")
+	if !strings.Contains(body, `kubectl wait -f "$ARTIFACT_DIR/generated-blockvolume.yaml" --for=condition=available`) {
+		t.Fatalf("apply script must wait using generated manifest:\n%s", body)
+	}
+	if strings.Contains(body, "kubectl -n kube-system wait --for=condition=available deploy -l app=sw-blockvolume") {
+		t.Fatalf("apply script must not hardcode kube-system generated workloads:\n%s", body)
+	}
+}
+
 func g15dReadFile(t *testing.T, parts ...string) string {
 	t.Helper()
 	root := g15bRepoRoot(t)
