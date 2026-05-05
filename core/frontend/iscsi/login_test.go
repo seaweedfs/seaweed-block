@@ -253,6 +253,40 @@ func TestLoginNegotiator_CHAP_ChallengeThenLoginOp(t *testing.T) {
 	}
 }
 
+func TestLoginNegotiator_CHAP_ChallengeIgnoresPrematureTransit(t *testing.T) {
+	challenge := []byte("1234567890abcdef")
+	cfg := iscsi.DefaultNegotiableConfig()
+	cfg.CHAP = iscsi.CHAPConfig{Username: "user1", Secret: "secret1", Challenge: challenge}
+	neg := iscsi.NewLoginNegotiator(cfg)
+	resolver := &fakeResolver{names: map[string]bool{"iqn.example:t1": true}}
+
+	params := iscsi.NewParams()
+	params.Set("InitiatorName", "iqn.example.host:1")
+	params.Set("SessionType", "Normal")
+	params.Set("TargetName", "iqn.example:t1")
+	params.Set("AuthMethod", "CHAP")
+	req := mkLoginReq(iscsi.StageSecurityNeg, iscsi.StageLoginOp, true, params)
+
+	resp := neg.HandleLoginPDU(req, resolver)
+	if resp.LoginStatusClass() != iscsi.LoginStatusSuccess {
+		t.Fatalf("status=0x%02x detail=0x%02x want Success",
+			resp.LoginStatusClass(), resp.LoginStatusDetail())
+	}
+	if resp.LoginTransit() {
+		t.Fatal("response should not transit before CHAP_N/CHAP_R is verified")
+	}
+	if neg.Phase() != iscsi.LoginPhaseSecurity {
+		t.Fatalf("phase=%v want Security", neg.Phase())
+	}
+	respParams, err := iscsi.ParseParams(resp.DataSegment)
+	if err != nil {
+		t.Fatalf("ParseParams: %v", err)
+	}
+	if v, _ := respParams.Get("CHAP_C"); v != "0x"+hex.EncodeToString(challenge) {
+		t.Fatalf("CHAP_C=%q want deterministic challenge", v)
+	}
+}
+
 func TestLoginNegotiator_CHAP_MissingResponseRejected(t *testing.T) {
 	challenge := []byte("1234567890abcdef")
 	cfg := iscsi.DefaultNegotiableConfig()

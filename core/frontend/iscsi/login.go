@@ -234,13 +234,19 @@ func (ln *LoginNegotiator) HandleLoginPDU(req *PDU, resolver TargetResolver) *PD
 		}
 		if transit {
 			if ln.chapRequiredForSession() && !ln.chapOK {
-				setLoginReject(resp, LoginStatusInitiatorErr, LoginDetailAuthFailed)
-				return resp
+				if _, challenged := respParams.Get("CHAP_C"); challenged {
+					transit = false
+				} else {
+					setLoginReject(resp, LoginStatusInitiatorErr, LoginDetailAuthFailed)
+					return resp
+				}
 			}
-			if nsg == StageLoginOp {
-				ln.phase = LoginPhaseOperational
-			} else if nsg == StageFullFeature {
-				ln.phase = LoginPhaseDone
+			if transit {
+				if nsg == StageLoginOp {
+					ln.phase = LoginPhaseOperational
+				} else if nsg == StageFullFeature {
+					ln.phase = LoginPhaseDone
+				}
 			}
 		}
 	case StageLoginOp:
@@ -274,7 +280,6 @@ func (ln *LoginNegotiator) HandleLoginPDU(req *PDU, resolver TargetResolver) *PD
 	if transit {
 		resp.SetLoginTransit(true)
 	}
-	resp.BHS[1] |= FlagF
 	resp.SetLoginStatus(LoginStatusSuccess, LoginDetailSuccess)
 
 	if ln.tsih == 0 {
