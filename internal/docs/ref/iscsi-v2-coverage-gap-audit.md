@@ -25,7 +25,7 @@ V3 paths compared:
 - `core/csi/*_test.go`
 - `cmd/blockcsi/*_test.go`
 - `cmd/blockvolume/*_test.go`
-- `internal/docs/iscsi-os-initiator-compat-plan.md`
+- `internal/docs/ref/iscsi-os-initiator-compat-plan.md`
 
 ## What V3 Already Covers Well
 

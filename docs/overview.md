@@ -10,7 +10,6 @@ This directory contains public and technical documentation.
 | `developer-architecture.md` | Deeper module-by-module architecture for contributors. |
 | `runtime-state-machines.md` | Mermaid state-machine and loop overview. |
 | `roadmap.md` | Alpha roadmap and non-claims. |
-| `production-readiness-plan.md` | Post-alpha plan from current MVP to beta/production readiness. |
 | `kubernetes-app-demo.md` | Presentation-friendly Kubernetes app + PVC demo. |
 
 ## Calibration Evidence
@@ -21,5 +20,5 @@ Keep them here until those references move to the shared design archive.
 ## Documentation Rule
 
 If a document is meant for external users, avoid internal phase or gate labels.
-Historical design notes should live in `sw-block/design/`, not in this public
-docs entry path.
+Internal planning, readiness tracking, audits, and historical design notes
+belong under `internal/docs/`, not in this public docs entry path.
