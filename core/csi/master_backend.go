@@ -37,6 +37,7 @@ func (p *ControlLifecycleProvisioner) CreateVolume(ctx context.Context, spec Vol
 		ReplicationFactor: int32(spec.ReplicationFactor),
 		PvcName:           spec.PVCName,
 		PvcNamespace:      spec.PVCNamespace,
+		PvcUid:            spec.PVCUID,
 		PvName:            spec.PVName,
 	})
 	if err != nil {
@@ -48,6 +49,7 @@ func (p *ControlLifecycleProvisioner) CreateVolume(ctx context.Context, spec Vol
 		ReplicationFactor: int(resp.GetReplicationFactor()),
 		PVCName:           resp.GetPvcName(),
 		PVCNamespace:      resp.GetPvcNamespace(),
+		PVCUID:            resp.GetPvcUid(),
 		PVName:            resp.GetPvName(),
 	}, nil
 }

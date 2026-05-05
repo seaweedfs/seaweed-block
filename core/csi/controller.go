@@ -163,6 +163,7 @@ func volumeSpecFromCreateRequest(req *csipb.CreateVolumeRequest) (VolumeSpec, er
 		ReplicationFactor: rf,
 		PVCName:           req.GetParameters()["csi.storage.k8s.io/pvc/name"],
 		PVCNamespace:      req.GetParameters()["csi.storage.k8s.io/pvc/namespace"],
+		PVCUID:            req.GetParameters()["csi.storage.k8s.io/pvc/uid"],
 		PVName:            req.GetParameters()["csi.storage.k8s.io/pv/name"],
 	}, nil
 }

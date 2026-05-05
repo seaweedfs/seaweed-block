@@ -35,6 +35,7 @@ type VolumeSpec struct {
 	ReplicationFactor int    `json:"replication_factor"`
 	PVCName           string `json:"pvc_name,omitempty"`
 	PVCNamespace      string `json:"pvc_namespace,omitempty"`
+	PVCUID            string `json:"pvc_uid,omitempty"`
 	PVName            string `json:"pv_name,omitempty"`
 }
 

@@ -22,6 +22,7 @@ func TestFileStore_CreateVolumePersistsAndIsIdempotent(t *testing.T) {
 		ReplicationFactor: 2,
 		PVCName:           "demo-pvc",
 		PVCNamespace:      "demo-ns",
+		PVCUID:            "uid-123",
 		PVName:            "pvc-a",
 	}
 	rec, err := s.CreateVolume(spec)

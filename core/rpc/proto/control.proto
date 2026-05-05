@@ -197,6 +197,7 @@ message CreateVolumeRequest {
     string pvc_name = 4;
     string pvc_namespace = 5;
     string pv_name = 6;
+    string pvc_uid = 7;
 }
 
 message CreateVolumeResponse {
@@ -206,6 +207,7 @@ message CreateVolumeResponse {
     string pvc_name = 4;
     string pvc_namespace = 5;
     string pv_name = 6;
+    string pvc_uid = 7;
 }
 
 message DeleteVolumeRequest {

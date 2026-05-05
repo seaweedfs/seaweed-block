@@ -178,7 +178,7 @@ func TestG15c_ControllerCreateVolume_RecordsDesiredIntentOnly(t *testing.T) {
 			"csi.storage.k8s.io/pvc/name":            "demo-pvc",
 			"csi.storage.k8s.io/pvc/namespace":       "demo-ns",
 			"csi.storage.k8s.io/pv/name":             "pvc-a",
-			"csi.storage.k8s.io/pvc/uid":             "uid-not-yet-persisted",
+			"csi.storage.k8s.io/pvc/uid":             "uid-123",
 			"csi.storage.k8s.io/serviceAccount.name": "ignored",
 		},
 		VolumeCapabilities: []*csipb.VolumeCapability{
@@ -194,7 +194,7 @@ func TestG15c_ControllerCreateVolume_RecordsDesiredIntentOnly(t *testing.T) {
 	if got := prov.calls[0]; got.VolumeID != "pvc-a" || got.SizeBytes != 1<<30 || got.ReplicationFactor != 2 {
 		t.Fatalf("spec=%+v", got)
 	}
-	if got := prov.calls[0]; got.PVCName != "demo-pvc" || got.PVCNamespace != "demo-ns" || got.PVName != "pvc-a" {
+	if got := prov.calls[0]; got.PVCName != "demo-pvc" || got.PVCNamespace != "demo-ns" || got.PVCUID != "uid-123" || got.PVName != "pvc-a" {
 		t.Fatalf("kubernetes metadata not preserved: %+v", got)
 	}
 	vol := resp.GetVolume()

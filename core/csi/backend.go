@@ -49,6 +49,7 @@ type VolumeSpec struct {
 	ReplicationFactor int
 	PVCName           string
 	PVCNamespace      string
+	PVCUID            string
 	PVName            string
 }
 
