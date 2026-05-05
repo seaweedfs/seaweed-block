@@ -154,7 +154,8 @@ References:
   - reach V2-level iSCSI auth behavior before any security-facing claim.
 
 - Tasks:
-  - status: active on `iscsi/frontend-completeness`, pending milestone PR.
+  - status: QA green on `iscsi/frontend-completeness@9a1fe07`, pending
+    milestone PR.
   - target-side CHAP login negotiation:
     - status: local implementation + unit tests.
     - direct LoginOp is rejected when CHAP is required,
@@ -170,12 +171,11 @@ References:
     - flags require `--iscsi-listen`,
     - username and secret must be set together.
   - OS initiator CHAP smoke script:
-    - status: local implementation in `scripts/run-iscsi-os-smoke.sh`,
-      dev preflight green on M02 at `d0c62e6`, pending QA sign.
+    - status: QA green.
     - configure `iscsiadm` node auth before login,
     - prove correct secret succeeds and wrong secret fails without residue.
   - Kubernetes / CSI Secret integration:
-    - status: local implementation + unit tests, pending QA.
+    - status: QA green on M02 at `9a1fe07`.
     - CSI node consumes CHAP credentials from `NodeStageVolumeRequest.Secrets`,
     - controller publish path must not copy CHAP secrets into `publish_context`,
     - node configures `iscsiadm` CHAP settings after discovery and before login.
@@ -194,6 +194,9 @@ References:
     `internal/docs/qa-assignments/iscsi-p4-chap-lab-validation.md`.
   - #QA assignment:
     `internal/docs/qa-assignments/iscsi-p4-k8s-chap-validation.md`.
+  - #QA status:
+    - K8s CHAP dynamic PVC PASS on M02.
+    - default non-CHAP regression PASS on M02.
   - V2 CHAP tests are the reference coverage inventory.
 
 ## Milestone: iSCSI-P5 CSI Node Lifecycle
@@ -202,13 +205,19 @@ References:
   - make kubelet retry/restart behavior safe enough for real clusters.
 
 - Tasks:
-  - status: planned.
+  - status: active on `iscsi/frontend-completeness`.
   - NodeStage idempotency,
+    - mounted staging path must belong to the same volume,
+    - mounted staging path for another volume fails closed.
   - NodeUnstage idempotency,
+    - unmounted staging path still logs out and removes local state.
   - login failure cleanup,
+    - login failure does not record staged state.
   - mkfs failure cleanup,
+    - already covered: successful login is logged out when mount fails.
   - stale session detection,
   - plugin restart fallback,
+    - existing transport-file fallback covers unstage after restart.
   - repeated stage/unstage,
   - wrong volume at staging path fails closed.
 
