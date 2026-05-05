@@ -170,9 +170,8 @@ References:
     - flags require `--iscsi-listen`,
     - username and secret must be set together.
   - OS initiator CHAP smoke script:
-    - status: next.
-    - add `scripts/run-iscsi-chap-smoke.sh` or extend
-      `scripts/run-iscsi-os-smoke.sh` behind an explicit env flag.
+    - status: local implementation in `scripts/run-iscsi-os-smoke.sh`,
+      pending QA.
     - configure `iscsiadm` node auth before login,
     - prove correct secret succeeds and wrong secret fails without residue.
   - Kubernetes / CSI Secret integration:
@@ -187,7 +186,8 @@ References:
   - failed auth leaves no partial session/device state.
 
 - QA/tooling:
-  - #QA needs CHAP-capable initiator script once OS smoke lands.
+  - #QA assignment:
+    `internal/docs/qa-assignments/iscsi-p4-chap-lab-validation.md`.
   - V2 CHAP tests are the reference coverage inventory.
 
 ## Milestone: iSCSI-P5 CSI Node Lifecycle

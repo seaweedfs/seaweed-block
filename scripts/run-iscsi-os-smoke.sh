@@ -9,6 +9,9 @@ IQN="${SW_BLOCK_ISCSI_IQN:-iqn.2026-05.io.seaweedfs:os-smoke-v1}"
 PORT="${SW_BLOCK_ISCSI_PORT:-3267}"
 PORTAL_ADDR="${SW_BLOCK_ISCSI_PORTAL_ADDR:-}"
 DATAOUT_TIMEOUT="${SW_BLOCK_ISCSI_DATAOUT_TIMEOUT:-}"
+CHAP_USERNAME="${SW_BLOCK_ISCSI_CHAP_USERNAME:-}"
+CHAP_SECRET="${SW_BLOCK_ISCSI_CHAP_SECRET:-}"
+CHAP_BAD_SECRET="${SW_BLOCK_ISCSI_CHAP_BAD_SECRET:-}"
 MOUNT_DIR="${SW_BLOCK_ISCSI_MOUNT_DIR:-${WORK_DIR}/mnt}"
 MASTER_ADDR="${SW_BLOCK_MASTER_ADDR:-127.0.0.1:19333}"
 DATA_ADDR="${SW_BLOCK_DATA_ADDR:-127.0.0.1:19101}"
@@ -44,6 +47,7 @@ cleanup() {
   mountpoint -q "$MOUNT_DIR" && sudo umount "$MOUNT_DIR" >>"$ARTIFACT_DIR/cleanup.log" 2>&1
   sudo iscsiadm -m node -T "$IQN" -p "127.0.0.1:${PORT}" --logout >>"$ARTIFACT_DIR/cleanup.log" 2>&1 || true
   sudo iscsiadm -m node -T "$IQN" -p "127.0.0.1:${PORT}" -o delete >>"$ARTIFACT_DIR/cleanup.log" 2>&1 || true
+  sudo iscsiadm -m discoverydb -t sendtargets -p "127.0.0.1:${PORT}" -o delete >>"$ARTIFACT_DIR/cleanup.log" 2>&1 || true
   pkill -TERM -f "${BIN_DIR}/blockvolume" >>"$ARTIFACT_DIR/cleanup.log" 2>&1 || true
   pkill -TERM -f "${BIN_DIR}/blockmaster" >>"$ARTIFACT_DIR/cleanup.log" 2>&1 || true
   sleep 1
@@ -72,6 +76,16 @@ if [[ -n "$PORTAL_ADDR" ]]; then
 fi
 if [[ -n "$DATAOUT_TIMEOUT" ]]; then
   log "dataout_timeout=$DATAOUT_TIMEOUT"
+fi
+if [[ -n "$CHAP_USERNAME" || -n "$CHAP_SECRET" ]]; then
+  if [[ -z "$CHAP_USERNAME" || -z "$CHAP_SECRET" ]]; then
+    echo "SW_BLOCK_ISCSI_CHAP_USERNAME and SW_BLOCK_ISCSI_CHAP_SECRET must be set together" >&2
+    exit 2
+  fi
+  log "chap=enabled username=${CHAP_USERNAME}"
+  if [[ -n "$CHAP_BAD_SECRET" ]]; then
+    log "chap_negative_login=enabled"
+  fi
 fi
 log "size_blocks=${BLOCKS} block_size=${BLOCK_SIZE}"
 log "iterations=${ITERATIONS}"
@@ -103,6 +117,7 @@ pkill -KILL -f "${BIN_DIR}/blockvolume" >/dev/null 2>&1 || true
 pkill -KILL -f "${BIN_DIR}/blockmaster" >/dev/null 2>&1 || true
 sudo iscsiadm -m node -T "$IQN" -p "127.0.0.1:${PORT}" --logout >/dev/null 2>&1 || true
 sudo iscsiadm -m node -T "$IQN" -p "127.0.0.1:${PORT}" -o delete >/dev/null 2>&1 || true
+sudo iscsiadm -m discoverydb -t sendtargets -p "127.0.0.1:${PORT}" -o delete >/dev/null 2>&1 || true
 sudo iscsiadm -m session >"$ARTIFACT_DIR/iscsi-sessions.before.txt" 2>&1 || true
 
 log "start blockmaster"
@@ -124,6 +139,10 @@ if [[ -n "$PORTAL_ADDR" ]]; then
 fi
 if [[ -n "$DATAOUT_TIMEOUT" ]]; then
   blockvolume_iscsi_args+=(--iscsi-dataout-timeout "$DATAOUT_TIMEOUT")
+fi
+if [[ -n "$CHAP_SECRET" ]]; then
+  blockvolume_iscsi_args+=(--iscsi-chap-username "$CHAP_USERNAME")
+  blockvolume_iscsi_args+=(--iscsi-chap-secret "$CHAP_SECRET")
 fi
 
 setsid -f "${BIN_DIR}/blockvolume" \
@@ -157,7 +176,28 @@ run_iteration() {
   local suffix="iter${iter}"
 
   log "iteration ${iter}: iscsi discovery/login"
-  sudo iscsiadm -m discovery -t sendtargets -p "127.0.0.1:${PORT}" | tee "$ARTIFACT_DIR/discovery.${suffix}.log"
+  if [[ -n "$CHAP_SECRET" ]]; then
+    sudo iscsiadm -m discoverydb -t sendtargets -p "127.0.0.1:${PORT}" -o new >>"$ARTIFACT_DIR/discoverydb.${suffix}.log" 2>&1 || true
+    sudo iscsiadm -m discoverydb -t sendtargets -p "127.0.0.1:${PORT}" --op=update -n discovery.sendtargets.auth.authmethod -v CHAP >>"$ARTIFACT_DIR/discoverydb.${suffix}.log" 2>&1
+    sudo iscsiadm -m discoverydb -t sendtargets -p "127.0.0.1:${PORT}" --op=update -n discovery.sendtargets.auth.username -v "$CHAP_USERNAME" >>"$ARTIFACT_DIR/discoverydb.${suffix}.log" 2>&1
+    sudo iscsiadm -m discoverydb -t sendtargets -p "127.0.0.1:${PORT}" --op=update -n discovery.sendtargets.auth.password -v "$CHAP_SECRET" >>"$ARTIFACT_DIR/discoverydb.${suffix}.log" 2>&1
+    sudo iscsiadm -m discoverydb -t sendtargets -p "127.0.0.1:${PORT}" --discover | tee "$ARTIFACT_DIR/discovery.${suffix}.log"
+    sudo iscsiadm -m node -T "$IQN" -p "127.0.0.1:${PORT}" --op=update -n node.session.auth.authmethod -v CHAP >>"$ARTIFACT_DIR/node-auth.${suffix}.log" 2>&1
+    sudo iscsiadm -m node -T "$IQN" -p "127.0.0.1:${PORT}" --op=update -n node.session.auth.username -v "$CHAP_USERNAME" >>"$ARTIFACT_DIR/node-auth.${suffix}.log" 2>&1
+    sudo iscsiadm -m node -T "$IQN" -p "127.0.0.1:${PORT}" --op=update -n node.session.auth.password -v "$CHAP_SECRET" >>"$ARTIFACT_DIR/node-auth.${suffix}.log" 2>&1
+    if [[ "$iter" == "1" && -n "$CHAP_BAD_SECRET" ]]; then
+      log "iteration ${iter}: verify wrong CHAP secret fails"
+      sudo iscsiadm -m node -T "$IQN" -p "127.0.0.1:${PORT}" --op=update -n node.session.auth.password -v "$CHAP_BAD_SECRET" >>"$ARTIFACT_DIR/node-auth-bad.${suffix}.log" 2>&1
+      if sudo iscsiadm -m node -T "$IQN" -p "127.0.0.1:${PORT}" --login >"$ARTIFACT_DIR/login-bad.${suffix}.log" 2>&1; then
+        echo "wrong CHAP secret unexpectedly logged in" >&2
+        exit 1
+      fi
+      sudo iscsiadm -m session >"$ARTIFACT_DIR/iscsi-sessions.bad-auth.${suffix}.txt" 2>&1 || true
+      sudo iscsiadm -m node -T "$IQN" -p "127.0.0.1:${PORT}" --op=update -n node.session.auth.password -v "$CHAP_SECRET" >>"$ARTIFACT_DIR/node-auth.${suffix}.log" 2>&1
+    fi
+  else
+    sudo iscsiadm -m discovery -t sendtargets -p "127.0.0.1:${PORT}" | tee "$ARTIFACT_DIR/discovery.${suffix}.log"
+  fi
   sudo iscsiadm -m node -T "$IQN" -p "127.0.0.1:${PORT}" --login | tee "$ARTIFACT_DIR/login.${suffix}.log"
 
   log "iteration ${iter}: wait kernel block device"

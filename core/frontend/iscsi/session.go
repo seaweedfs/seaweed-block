@@ -11,8 +11,9 @@ package iscsi
 // connection, but it now supports the OS-initiator essentials:
 // discovery, login, R2T/Data-Out chunking for large writes, bounded
 // pending commands during Data-Out, Data-Out timeout, and split
-// Data-In for large reads. It still does not implement CHAP, ALUA,
-// MPIO, or mounted-volume failover.
+// Data-In for large reads. Target-side CHAP login auth is implemented
+// in login.go. ALUA, MPIO, and mounted-volume failover are later
+// frontend milestones.
 
 import (
 	"context"
