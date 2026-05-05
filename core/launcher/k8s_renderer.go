@@ -16,6 +16,13 @@ type K8sRenderConfig struct {
 	DurableRootBase     string
 	RecoveryMode        string
 	OwnerReferenceToPVC bool
+	ISCSICHAP           CHAPSecretRef
+}
+
+type CHAPSecretRef struct {
+	Name        string
+	UsernameKey string
+	SecretKey   string
 }
 
 type RenderedManifest struct {
@@ -81,6 +88,7 @@ func RenderBlockVolumeDeployments(plan lifecycle.BlockVolumeWorkloadPlan, cfg K8
 							Image:        cfg.Image,
 							Command:      []string{"/usr/local/bin/blockvolume"},
 							Args:         blockVolumeArgs(plan, replica, cfg),
+							Env:          blockVolumeEnv(cfg),
 							VolumeMounts: []volumeMount{{Name: "state", MountPath: "/var/lib/sw-block"}},
 						}},
 						Volumes: []volume{{Name: "state", EmptyDir: emptyDir{}}},
@@ -114,7 +122,7 @@ func ownerReferences(plan lifecycle.BlockVolumeWorkloadPlan, cfg K8sRenderConfig
 }
 
 func blockVolumeArgs(plan lifecycle.BlockVolumeWorkloadPlan, replica lifecycle.BlockVolumeReplicaWorkload, cfg K8sRenderConfig) []string {
-	return []string{
+	args := []string{
 		"--master=" + cfg.MasterAddr,
 		"--server-id=" + replica.ServerID,
 		"--volume-id=" + plan.VolumeID,
@@ -128,6 +136,42 @@ func blockVolumeArgs(plan lifecycle.BlockVolumeWorkloadPlan, replica lifecycle.B
 		"--recovery-mode=" + cfg.RecoveryMode,
 		fmt.Sprintf("--iscsi-listen=127.0.0.1:%d", replica.ISCSIListenPort),
 		"--iscsi-iqn=" + replica.ISCSIQualifiedName,
+	}
+	if cfg.ISCSICHAP.Name != "" {
+		args = append(args,
+			"--iscsi-chap-username=$(SW_BLOCK_ISCSI_CHAP_USERNAME)",
+			"--iscsi-chap-secret=$(SW_BLOCK_ISCSI_CHAP_SECRET)",
+		)
+	}
+	return args
+}
+
+func blockVolumeEnv(cfg K8sRenderConfig) []envVar {
+	ref := cfg.ISCSICHAP
+	if ref.Name == "" {
+		return nil
+	}
+	if ref.UsernameKey == "" {
+		ref.UsernameKey = "chapUsername"
+	}
+	if ref.SecretKey == "" {
+		ref.SecretKey = "chapSecret"
+	}
+	return []envVar{
+		{
+			Name: "SW_BLOCK_ISCSI_CHAP_USERNAME",
+			ValueFrom: &envVarSource{SecretKeyRef: secretKeySelector{
+				Name: ref.Name,
+				Key:  ref.UsernameKey,
+			}},
+		},
+		{
+			Name: "SW_BLOCK_ISCSI_CHAP_SECRET",
+			ValueFrom: &envVarSource{SecretKeyRef: secretKeySelector{
+				Name: ref.Name,
+				Key:  ref.SecretKey,
+			}},
+		},
 	}
 }
 
@@ -205,7 +249,22 @@ type container struct {
 	Image        string        `yaml:"image"`
 	Command      []string      `yaml:"command,omitempty"`
 	Args         []string      `yaml:"args"`
+	Env          []envVar      `yaml:"env,omitempty"`
 	VolumeMounts []volumeMount `yaml:"volumeMounts,omitempty"`
+}
+
+type envVar struct {
+	Name      string        `yaml:"name"`
+	ValueFrom *envVarSource `yaml:"valueFrom,omitempty"`
+}
+
+type envVarSource struct {
+	SecretKeyRef secretKeySelector `yaml:"secretKeyRef"`
+}
+
+type secretKeySelector struct {
+	Name string `yaml:"name"`
+	Key  string `yaml:"key"`
 }
 
 type volumeMount struct {

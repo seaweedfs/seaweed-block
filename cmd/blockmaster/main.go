@@ -37,6 +37,9 @@ type flags struct {
 	launcherDurableRoot    string
 	launcherISCSIPortBase  int
 	launcherPVCOwnerRef    bool
+	launcherCHAPSecretName string
+	launcherCHAPUserKey    string
+	launcherCHAPSecretKey  string
 	// printReadyLine: test-only flag that emits a single
 	// structured JSON line to stdout after the gRPC listener is
 	// bound, so L2 subprocess tests can parse the ready event.
@@ -65,6 +68,9 @@ func parseFlags(args []string) (flags, error) {
 	fs.StringVar(&f.launcherDurableRoot, "launcher-durable-root", "/var/lib/sw-block", "G15d rendered blockvolume durable root base")
 	fs.IntVar(&f.launcherISCSIPortBase, "launcher-iscsi-port-base", 3260, "G15d iSCSI port base for generated blockvolume workloads")
 	fs.BoolVar(&f.launcherPVCOwnerRef, "launcher-pvc-owner-ref", false, "render generated blockvolume Deployments in the source PVC namespace with a PVC ownerReference; disabled by default for alpha harness compatibility")
+	fs.StringVar(&f.launcherCHAPSecretName, "launcher-iscsi-chap-secret-name", "", "optional Kubernetes Secret name used by generated blockvolume Deployments for target-side iSCSI CHAP")
+	fs.StringVar(&f.launcherCHAPUserKey, "launcher-iscsi-chap-username-key", "chapUsername", "Kubernetes Secret key for generated blockvolume iSCSI CHAP username")
+	fs.StringVar(&f.launcherCHAPSecretKey, "launcher-iscsi-chap-secret-key", "chapSecret", "Kubernetes Secret key for generated blockvolume iSCSI CHAP secret")
 	fs.BoolVar(&f.printReadyLine, "t0-print-ready", false, "internal test-only: emit one structured JSON line on stdout after listener bound")
 	fs.SetOutput(os.Stderr)
 	if err := fs.Parse(args); err != nil {
@@ -287,6 +293,11 @@ func runLifecycleLauncherTick(h *master.Host, f flags) error {
 			MasterAddr:          masterAddr,
 			DurableRootBase:     f.launcherDurableRoot,
 			OwnerReferenceToPVC: f.launcherPVCOwnerRef,
+			ISCSICHAP: launcher.CHAPSecretRef{
+				Name:        f.launcherCHAPSecretName,
+				UsernameKey: f.launcherCHAPUserKey,
+				SecretKey:   f.launcherCHAPSecretKey,
+			},
 		})
 		if err != nil {
 			return err

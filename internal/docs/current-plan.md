@@ -175,11 +175,13 @@ References:
     - configure `iscsiadm` node auth before login,
     - prove correct secret succeeds and wrong secret fails without residue.
   - Kubernetes / CSI Secret integration:
-    - status: local NodeStage seam + unit tests.
+    - status: local implementation + unit tests, pending QA.
     - CSI node consumes CHAP credentials from `NodeStageVolumeRequest.Secrets`,
     - controller publish path must not copy CHAP secrets into `publish_context`,
     - node configures `iscsiadm` CHAP settings after discovery and before login.
-    - #QA K8s Secret / StorageClass end-to-end wiring is still pending.
+    - launcher can render target-side CHAP args from a Kubernetes Secret,
+    - alpha runner can create the Secret and inject StorageClass
+      node-stage secret refs.
   - replayed challenge rejected if supported by the protocol path,
 
 - Close bar:
@@ -190,6 +192,8 @@ References:
 - QA/tooling:
   - #QA assignment:
     `internal/docs/qa-assignments/iscsi-p4-chap-lab-validation.md`.
+  - #QA assignment:
+    `internal/docs/qa-assignments/iscsi-p4-k8s-chap-validation.md`.
   - V2 CHAP tests are the reference coverage inventory.
 
 ## Milestone: iSCSI-P5 CSI Node Lifecycle

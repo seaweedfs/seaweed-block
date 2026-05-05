@@ -102,6 +102,32 @@ func TestG15d_K8sRenderer_PVCOwnerReferenceRequiresKubernetesMetadata(t *testing
 	}
 }
 
+func TestG15d_K8sRenderer_CanWireCHAPSecret(t *testing.T) {
+	manifests, err := RenderBlockVolumeDeployments(sampleWorkloadPlan(), K8sRenderConfig{
+		MasterAddr: "m:9333",
+		ISCSICHAP: CHAPSecretRef{
+			Name: "sw-block-iscsi-chap",
+		},
+	})
+	if err != nil {
+		t.Fatalf("RenderBlockVolumeDeployments: %v", err)
+	}
+	raw := string(manifests[0].YAML)
+	for _, want := range []string{
+		"--iscsi-chap-username=$(SW_BLOCK_ISCSI_CHAP_USERNAME)",
+		"--iscsi-chap-secret=$(SW_BLOCK_ISCSI_CHAP_SECRET)",
+		"name: SW_BLOCK_ISCSI_CHAP_USERNAME",
+		"name: SW_BLOCK_ISCSI_CHAP_SECRET",
+		"name: sw-block-iscsi-chap",
+		"key: chapUsername",
+		"key: chapSecret",
+	} {
+		if !strings.Contains(raw, want) {
+			t.Fatalf("manifest missing %q:\n%s", want, raw)
+		}
+	}
+}
+
 func TestG15d_K8sRenderer_OutputIsNotAuthorityShaped(t *testing.T) {
 	manifests, err := RenderBlockVolumeDeployments(sampleWorkloadPlan(), K8sRenderConfig{MasterAddr: "m:9333"})
 	if err != nil {
