@@ -547,6 +547,48 @@ func TestNodeUnstage_RestartFallbackUsesTransportFileAndDerivedIQN(t *testing.T)
 	}
 }
 
+func TestNodeStageUnstage_RepeatedCyclesLeaveNoLocalState(t *testing.T) {
+	mi, mm := newMockISCSIUtil(), newMockMountUtil()
+	ns := newTestNode(mi, mm)
+	staging := t.TempDir()
+	req := &csipb.NodeStageVolumeRequest{
+		VolumeId:          "v1",
+		StagingTargetPath: staging,
+		VolumeCapability:  testVolumeCapability(),
+		PublishContext: map[string]string{
+			"iscsiAddr": "127.0.0.1:3260",
+			"iqn":       "iqn.v1",
+		},
+	}
+
+	for i := 0; i < 3; i++ {
+		if _, err := ns.NodeStageVolume(context.Background(), req); err != nil {
+			t.Fatalf("stage iter %d: %v", i, err)
+		}
+		if ns.staged["v1"] == nil {
+			t.Fatalf("stage iter %d did not record staged state", i)
+		}
+		if got := readVolumeFile(staging); got != "v1" {
+			t.Fatalf("stage iter %d volume file=%q", i, got)
+		}
+		if _, err := ns.NodeUnstageVolume(context.Background(), &csipb.NodeUnstageVolumeRequest{
+			VolumeId:          "v1",
+			StagingTargetPath: staging,
+		}); err != nil {
+			t.Fatalf("unstage iter %d: %v", i, err)
+		}
+		if ns.staged["v1"] != nil {
+			t.Fatalf("unstage iter %d left staged state: %+v", i, ns.staged["v1"])
+		}
+		if got := readVolumeFile(staging); got != "" {
+			t.Fatalf("unstage iter %d left volume file=%q", i, got)
+		}
+		if got := readTransportFile(staging); got != "" {
+			t.Fatalf("unstage iter %d left transport file=%q", i, got)
+		}
+	}
+}
+
 func TestTransportFileRejectsGarbage(t *testing.T) {
 	staging := t.TempDir()
 	if err := writeTransportFile(staging, "nvme\n"); err != nil {

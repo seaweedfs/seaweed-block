@@ -222,6 +222,8 @@ References:
     - existing transport-file fallback covers unstage after restart.
     - NodeStage restart identity is covered by `.volume`.
   - repeated stage/unstage,
+    - local 3-cycle stage/unstage test leaves no staged state,
+      `.volume`, or `.transport`.
   - wrong volume at staging path fails closed.
 
 - Close bar:
