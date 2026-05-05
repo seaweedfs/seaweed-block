@@ -23,6 +23,7 @@ Current alpha constraints:
 - `walstore` backend only
 - launcher-generated blockvolume state uses `emptyDir`
 - harness applies generated blockvolume manifests
+- generated blockvolume Deployments can use PVC owner references for cleanup
 - no production operator yet
 
 ## Near-Term MVP Hardening
@@ -43,7 +44,7 @@ Current alpha constraints:
 
    - watch generated workload intent or lifecycle state
    - apply/delete blockvolume Deployments
-   - stop requiring the harness to act as operator
+   - stop requiring the harness to apply generated workloads
 
 4. Improve TestOps usability.
 

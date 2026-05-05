@@ -40,7 +40,7 @@ kubectl -n kube-system exec deploy/sw-blockmaster -c blockmaster -- sh -c 'cat /
 
 log "apply generated blockvolume workloads"
 kubectl apply -f "$ARTIFACT_DIR/generated-blockvolume.yaml" | tee "$ARTIFACT_DIR/apply-generated-blockvolume.log"
-kubectl -n kube-system wait --for=condition=available deploy -l app=sw-blockvolume --timeout=120s
+kubectl wait -f "$ARTIFACT_DIR/generated-blockvolume.yaml" --for=condition=available --timeout=120s
 
 log "PASS: generated blockvolume workloads are available"
 log "artifacts=$ARTIFACT_DIR"
