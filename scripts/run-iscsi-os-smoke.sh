@@ -177,11 +177,7 @@ run_iteration() {
 
   log "iteration ${iter}: iscsi discovery/login"
   if [[ -n "$CHAP_SECRET" ]]; then
-    sudo iscsiadm -m discoverydb -t sendtargets -p "127.0.0.1:${PORT}" -o new >>"$ARTIFACT_DIR/discoverydb.${suffix}.log" 2>&1 || true
-    sudo iscsiadm -m discoverydb -t sendtargets -p "127.0.0.1:${PORT}" --op=update -n discovery.sendtargets.auth.authmethod -v CHAP >>"$ARTIFACT_DIR/discoverydb.${suffix}.log" 2>&1
-    sudo iscsiadm -m discoverydb -t sendtargets -p "127.0.0.1:${PORT}" --op=update -n discovery.sendtargets.auth.username -v "$CHAP_USERNAME" >>"$ARTIFACT_DIR/discoverydb.${suffix}.log" 2>&1
-    sudo iscsiadm -m discoverydb -t sendtargets -p "127.0.0.1:${PORT}" --op=update -n discovery.sendtargets.auth.password -v "$CHAP_SECRET" >>"$ARTIFACT_DIR/discoverydb.${suffix}.log" 2>&1
-    sudo iscsiadm -m discoverydb -t sendtargets -p "127.0.0.1:${PORT}" --discover | tee "$ARTIFACT_DIR/discovery.${suffix}.log"
+    sudo iscsiadm -m discovery -t sendtargets -p "127.0.0.1:${PORT}" | tee "$ARTIFACT_DIR/discovery.${suffix}.log"
     sudo iscsiadm -m node -T "$IQN" -p "127.0.0.1:${PORT}" --op=update -n node.session.auth.authmethod -v CHAP >>"$ARTIFACT_DIR/node-auth.${suffix}.log" 2>&1
     sudo iscsiadm -m node -T "$IQN" -p "127.0.0.1:${PORT}" --op=update -n node.session.auth.username -v "$CHAP_USERNAME" >>"$ARTIFACT_DIR/node-auth.${suffix}.log" 2>&1
     sudo iscsiadm -m node -T "$IQN" -p "127.0.0.1:${PORT}" --op=update -n node.session.auth.password -v "$CHAP_SECRET" >>"$ARTIFACT_DIR/node-auth.${suffix}.log" 2>&1

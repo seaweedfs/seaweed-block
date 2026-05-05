@@ -148,6 +148,28 @@ func TestLoginNegotiator_CHAP_DirectLoginOpRejected(t *testing.T) {
 	}
 }
 
+func TestLoginNegotiator_CHAP_DiscoverySessionDoesNotRequireAuth(t *testing.T) {
+	cfg := iscsi.DefaultNegotiableConfig()
+	cfg.CHAP = iscsi.CHAPConfig{Username: "user1", Secret: "secret1", Challenge: []byte("1234567890abcdef")}
+	neg := iscsi.NewLoginNegotiator(cfg)
+	resolver := &fakeResolver{names: map[string]bool{}}
+
+	params := iscsi.NewParams()
+	params.Set("InitiatorName", "iqn.example.host:1")
+	params.Set("SessionType", iscsi.SessionTypeDiscovery)
+	params.Set("AuthMethod", "None")
+	req := mkLoginReq(iscsi.StageSecurityNeg, iscsi.StageFullFeature, true, params)
+
+	resp := neg.HandleLoginPDU(req, resolver)
+	if resp.LoginStatusClass() != iscsi.LoginStatusSuccess {
+		t.Fatalf("status=0x%02x detail=0x%02x want Success",
+			resp.LoginStatusClass(), resp.LoginStatusDetail())
+	}
+	if !neg.Done() {
+		t.Fatalf("Done()=false after discovery login")
+	}
+}
+
 func TestLoginNegotiator_CHAP_RejectsAuthMethodNone(t *testing.T) {
 	cfg := iscsi.DefaultNegotiableConfig()
 	cfg.CHAP = iscsi.CHAPConfig{Username: "user1", Secret: "secret1", Challenge: []byte("1234567890abcdef")}

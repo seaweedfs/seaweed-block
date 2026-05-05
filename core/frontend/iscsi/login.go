@@ -225,7 +225,7 @@ func (ln *LoginNegotiator) HandleLoginPDU(req *PDU, resolver TargetResolver) *PD
 			return resp
 		}
 		ln.isid = req.ISID()
-		if ln.chapRequired() {
+		if ln.chapRequiredForSession() {
 			if !ln.handleCHAPSecurity(params, resp, respParams) {
 				return resp
 			}
@@ -233,7 +233,7 @@ func (ln *LoginNegotiator) HandleLoginPDU(req *PDU, resolver TargetResolver) *PD
 			respParams.Set("AuthMethod", "None")
 		}
 		if transit {
-			if ln.chapRequired() && !ln.chapOK {
+			if ln.chapRequiredForSession() && !ln.chapOK {
 				setLoginReject(resp, LoginStatusInitiatorErr, LoginDetailAuthFailed)
 				return resp
 			}
@@ -248,11 +248,11 @@ func (ln *LoginNegotiator) HandleLoginPDU(req *PDU, resolver TargetResolver) *PD
 		// skipped. Same here: capture identity in this PDU if not
 		// done yet.
 		if ln.phase == LoginPhaseStart {
-			if ln.chapRequired() {
-				setLoginReject(resp, LoginStatusInitiatorErr, LoginDetailAuthFailed)
+			if !ln.captureSessionIdentity(params, resolver, resp) {
 				return resp
 			}
-			if !ln.captureSessionIdentity(params, resolver, resp) {
+			if ln.chapRequiredForSession() {
+				setLoginReject(resp, LoginStatusInitiatorErr, LoginDetailAuthFailed)
 				return resp
 			}
 			ln.isid = req.ISID()
@@ -403,6 +403,10 @@ func (ln *LoginNegotiator) negotiateOperational(req, resp *Params) {
 
 func (ln *LoginNegotiator) chapRequired() bool {
 	return ln.config.CHAP.Secret != ""
+}
+
+func (ln *LoginNegotiator) chapRequiredForSession() bool {
+	return ln.chapRequired() && ln.SessionType != SessionTypeDiscovery
 }
 
 func (ln *LoginNegotiator) handleCHAPSecurity(req *Params, resp *PDU, respParams *Params) bool {
