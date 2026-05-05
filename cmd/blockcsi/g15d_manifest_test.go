@@ -86,6 +86,24 @@ func TestG15d_K8sRunner_AppliesLauncherGeneratedManifest(t *testing.T) {
 	}
 }
 
+func TestAlphaScripts_OwnerRefModeInjectsBothLauncherAndCSILookupFlags(t *testing.T) {
+	for _, script := range []string{"run-g15d-k8s-dynamic.sh", "run-alpha-app-demo.sh"} {
+		t.Run(script, func(t *testing.T) {
+			body := g15dReadFile(t, "scripts", script)
+			for _, want := range []string{
+				"SW_BLOCK_LAUNCHER_PVC_OWNER_REF",
+				"--launcher-pvc-owner-ref",
+				"--kubernetes-pvc-uid-lookup",
+				"BLOCKVOLUME_NAMESPACE=\"$NAMESPACE\"",
+			} {
+				if !strings.Contains(body, want) {
+					t.Fatalf("%s missing %q", script, want)
+				}
+			}
+		})
+	}
+}
+
 func g15dReadFile(t *testing.T, parts ...string) string {
 	t.Helper()
 	root := g15bRepoRoot(t)
