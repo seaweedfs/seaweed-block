@@ -89,7 +89,8 @@ References:
   - run K8s validation after local tests:
     - status: partially done.
     - larger PVC smoke: done in PR #28.
-    - 60s fio: QA verified, needs TestOps/script pin if not already committed.
+    - 60s fio: script prepared locally as `scripts/run-k8s-alpha-fio.sh`,
+      pending QA rerun / milestone PR.
     - larger PVC,
     - 60s fio,
     - daemon logs and iSCSI state captured,

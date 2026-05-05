@@ -1,0 +1,51 @@
+{
+  "schema_version": "1.0",
+  "scenario": "iscsi-p3-k8s-fio",
+  "gate": "iSCSI-P3",
+  "layer": "L5-k8s",
+  "driver": {
+    "type": "shell",
+    "path": "scripts/run-k8s-alpha-fio.sh"
+  },
+  "default_timeout_s": 1200,
+  "required_capabilities": [
+    "bash",
+    "kubectl",
+    "privileged-k8s-node",
+    "iscsiadm",
+    "iscsi_tcp-loadable",
+    "mount",
+    "pod-egress-for-apk"
+  ],
+  "required_images": [
+    "sw-block:local",
+    "sw-block-csi:local",
+    "alpine:3.20"
+  ],
+  "qa_instruction": "internal/docs/current-plan.md",
+  "known_green_commit": "",
+  "artifacts": [
+    "run.log",
+    "block-stack.rendered.yaml",
+    "csi-controller.rendered.yaml",
+    "csi-node.rendered.yaml",
+    "generated-blockvolume.yaml",
+    "pod.log",
+    "pod.describe.txt",
+    "blockmaster.log",
+    "blockcsi-controller.log",
+    "csi-provisioner.log",
+    "csi-attacher.log",
+    "blockvolume-generated.log",
+    "iscsi-sessions.after-delete.txt",
+    "cleanup.log",
+    "poll.log"
+  ],
+  "non_claims": [
+    "Single-node Kubernetes only.",
+    "fio is a stability smoke, not a performance claim.",
+    "Requires pod egress to install fio with apk.",
+    "No mounted failover, CHAP, ALUA, MPIO, NVMe, or multi-node claim.",
+    "No durable restart claim."
+  ]
+}
