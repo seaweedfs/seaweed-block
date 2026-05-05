@@ -5,6 +5,16 @@ Branch: `iscsi/frontend-completeness`.
 Scope: target-side CHAP login auth through the real Linux `iscsiadm`
 initiator. No Kubernetes Secret or CSI CHAP claim in this assignment.
 
+Dev preflight:
+
+- commit: `d0c62e6`
+- host: M02
+- command: Test 2 below
+- artifact:
+  `/mnt/smb/work/share/g15d-k8s/20260505T072921Z-iscsi-p4-chap`
+- result: PASS, including wrong-secret failure, correct-secret login,
+  `mkfs.ext4`, mount, checksum, 32 MiB dd, logout, and no active sessions.
+
 ## Preconditions
 
 - Host: M02 or equivalent Linux host with `sudo`, `iscsiadm`, `mkfs.ext4`,

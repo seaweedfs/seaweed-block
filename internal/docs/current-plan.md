@@ -171,7 +171,7 @@ References:
     - username and secret must be set together.
   - OS initiator CHAP smoke script:
     - status: local implementation in `scripts/run-iscsi-os-smoke.sh`,
-      pending QA.
+      dev preflight green on M02 at `d0c62e6`, pending QA sign.
     - configure `iscsiadm` node auth before login,
     - prove correct secret succeeds and wrong secret fails without residue.
   - Kubernetes / CSI Secret integration:
