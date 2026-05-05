@@ -137,12 +137,6 @@ func blockVolumeArgs(plan lifecycle.BlockVolumeWorkloadPlan, replica lifecycle.B
 		fmt.Sprintf("--iscsi-listen=127.0.0.1:%d", replica.ISCSIListenPort),
 		"--iscsi-iqn=" + replica.ISCSIQualifiedName,
 	}
-	if cfg.ISCSICHAP.Name != "" {
-		args = append(args,
-			"--iscsi-chap-username=$(SW_BLOCK_ISCSI_CHAP_USERNAME)",
-			"--iscsi-chap-secret=$(SW_BLOCK_ISCSI_CHAP_SECRET)",
-		)
-	}
 	return args
 }
 

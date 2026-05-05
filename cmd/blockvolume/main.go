@@ -132,7 +132,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.BoolVar(&f.statusRecovery, "status-recovery", false, "expose /status/recovery?volume=<id> with engine.ReplicaProjection (Mode/R/S/H/RecoveryDecision); off by default; loopback-only; intended for hardware test orchestration")
 	fs.StringVar(&f.iscsiListen, "iscsi-listen", "", "iSCSI target bind address (e.g. 127.0.0.1:0); empty disables. Loopback-only unless paired with an operator-managed proxy")
 	fs.StringVar(&f.iscsiIQN, "iscsi-iqn", "", "iSCSI target IQN (required if --iscsi-listen is set)")
-	fs.StringVar(&f.iscsiPortalAddr, "iscsi-portal-addr", "", "iSCSI TargetAddress advertised in SendTargets responses (e.g. 192.168.1.184:3260,1). Defaults to the bound listen address. Does not change the loopback-only bind policy")
+	fs.StringVar(&f.iscsiPortalAddr, "iscsi-portal-addr", "", "iSCSI TargetAddress advertised in SendTargets responses (e.g. 203.0.113.10:3260,1). Defaults to the bound listen address. Does not change the loopback-only bind policy")
 	fs.DurationVar(&f.iscsiDataOutTTL, "iscsi-dataout-timeout", 0, "iSCSI R2T/Data-Out wait timeout. 0 uses the target default. Bounds how long a session waits for solicited Data-Out from an initiator")
 	fs.UintVar(&f.iscsiLUN, "iscsi-lun", 0, "iSCSI LUN id (default 0)")
 	fs.StringVar(&f.iscsiCHAPUser, "iscsi-chap-username", "", "iSCSI target-side CHAP username. Requires --iscsi-chap-secret and --iscsi-listen")
@@ -183,6 +183,12 @@ func parseFlags(args []string) (flags, error) {
 	}
 	if _, _, err := parseReplicationAckProfile(f.replicationAck); err != nil {
 		return flags{}, err
+	}
+	if f.iscsiCHAPUser == "" {
+		f.iscsiCHAPUser = os.Getenv("SW_BLOCK_ISCSI_CHAP_USERNAME")
+	}
+	if f.iscsiCHAPSecret == "" {
+		f.iscsiCHAPSecret = os.Getenv("SW_BLOCK_ISCSI_CHAP_SECRET")
 	}
 	missing := []string{}
 	for name, val := range map[string]string{

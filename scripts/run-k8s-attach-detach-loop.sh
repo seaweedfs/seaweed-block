@@ -35,7 +35,7 @@ for iter in $(seq 1 "$ITERATIONS"); do
     exit 1
   fi
   if [[ -f "$iter_dir/iscsi-sessions.after-delete.txt" ]] &&
-     ! grep -q "No active sessions" "$iter_dir/iscsi-sessions.after-delete.txt"; then
+     grep -q "iqn.2026-05.io.seaweedfs" "$iter_dir/iscsi-sessions.after-delete.txt"; then
     log "iteration ${iter}: dangling iSCSI session"
     cat "$iter_dir/iscsi-sessions.after-delete.txt" | tee -a "$SUMMARY"
     exit 1

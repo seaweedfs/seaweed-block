@@ -93,7 +93,7 @@ type CHAPConfig struct {
 	Challenge []byte
 }
 
-func (c NegotiableConfig) isZero() bool {
+func (c NegotiableConfig) isZeroExceptCHAP() bool {
 	return c.MaxRecvDataSegmentLength == 0 &&
 		c.MaxBurstLength == 0 &&
 		c.FirstBurstLength == 0 &&
@@ -107,10 +107,7 @@ func (c NegotiableConfig) isZero() bool {
 		!c.DataSequenceInOrder &&
 		c.ErrorRecoveryLevel == 0 &&
 		c.TargetPortalGroupTag == 0 &&
-		c.TargetAlias == "" &&
-		c.CHAP.Username == "" &&
-		c.CHAP.Secret == "" &&
-		len(c.CHAP.Challenge) == 0
+		c.TargetAlias == ""
 }
 
 // DefaultNegotiableConfig returns a profile that interoperates

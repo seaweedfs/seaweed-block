@@ -9,8 +9,9 @@ This is the short internal roadmap. Keep it current and readable.
 - Target early users running lab or small Kubernetes clusters.
 - Keep alpha claims narrow: dynamic PVC, iSCSI path, app write/read, clean
   teardown.
-- Do not claim production HA, seamless mounted failover, performance, CHAP,
-  multipath, or NVMe-oF readiness until separately tested.
+- CHAP is implemented for target-side iSCSI and CSI node staging, with lab
+  validation. Do not claim production HA, seamless mounted failover,
+  performance, multipath, or NVMe-oF readiness until separately tested.
 
 ## Product Phases
 
@@ -63,9 +64,10 @@ This is the short internal roadmap. Keep it current and readable.
 
 ### Track B: iSCSI Frontend Stability
 
-- Current: iSCSI-P1 OS initiator correctness is implemented and evidenced.
-- Next: iSCSI-P2 session stability and memory-pressure coverage.
-- Later: product-backed iSCSI stability, CHAP, CSI lifecycle, ALUA/MPIO.
+- Current: OS initiator correctness, session stability, product-backed K8s
+  fio/attach-detach, and CHAP are implemented and evidenced.
+- Next: CSI lifecycle and restart behavior.
+- Later: ALUA/MPIO and mounted failover.
 
 ### Track C: Durable State
 

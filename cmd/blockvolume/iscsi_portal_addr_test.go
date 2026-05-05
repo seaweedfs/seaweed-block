@@ -8,7 +8,7 @@ import (
 
 func TestParseFlags_IscsiPortalAddrRequiresListen(t *testing.T) {
 	args := append(requiredBlockvolumeArgs(),
-		"--iscsi-portal-addr", "192.168.1.184:3260,1",
+		"--iscsi-portal-addr", "203.0.113.10:3260,1",
 	)
 	_, err := parseFlags(args)
 	if err == nil {
@@ -23,13 +23,13 @@ func TestParseFlags_IscsiPortalAddrDoesNotChangeLoopbackBind(t *testing.T) {
 	args := append(requiredBlockvolumeArgs(),
 		"--iscsi-listen", "127.0.0.1:3260",
 		"--iscsi-iqn", "iqn.2026-05.io.seaweedfs:test-v1",
-		"--iscsi-portal-addr", "192.168.1.184:3260,1",
+		"--iscsi-portal-addr", "203.0.113.10:3260,1",
 	)
 	got, err := parseFlags(args)
 	if err != nil {
 		t.Fatalf("parseFlags: %v", err)
 	}
-	if got.iscsiPortalAddr != "192.168.1.184:3260,1" {
+	if got.iscsiPortalAddr != "203.0.113.10:3260,1" {
 		t.Fatalf("iscsiPortalAddr = %q", got.iscsiPortalAddr)
 	}
 	if !got.enableT1Readiness {
@@ -39,9 +39,9 @@ func TestParseFlags_IscsiPortalAddrDoesNotChangeLoopbackBind(t *testing.T) {
 
 func TestParseFlags_IscsiPortalAddrStillRejectsExternalBind(t *testing.T) {
 	args := append(requiredBlockvolumeArgs(),
-		"--iscsi-listen", "192.168.1.184:3260",
+		"--iscsi-listen", "203.0.113.10:3260",
 		"--iscsi-iqn", "iqn.2026-05.io.seaweedfs:test-v1",
-		"--iscsi-portal-addr", "192.168.1.184:3260,1",
+		"--iscsi-portal-addr", "203.0.113.10:3260,1",
 	)
 	_, err := parseFlags(args)
 	if err == nil {
@@ -122,6 +122,22 @@ func TestParseFlags_IscsiCHAPPlumbed(t *testing.T) {
 	}
 	if got.iscsiCHAPUser != "user1" || got.iscsiCHAPSecret != "secret1" {
 		t.Fatalf("CHAP flags = %q/%q", got.iscsiCHAPUser, got.iscsiCHAPSecret)
+	}
+}
+
+func TestParseFlags_IscsiCHAPFromEnvironment(t *testing.T) {
+	t.Setenv("SW_BLOCK_ISCSI_CHAP_USERNAME", "env-user")
+	t.Setenv("SW_BLOCK_ISCSI_CHAP_SECRET", "env-secret")
+	args := append(requiredBlockvolumeArgs(),
+		"--iscsi-listen", "127.0.0.1:3260",
+		"--iscsi-iqn", "iqn.2026-05.io.seaweedfs:test-v1",
+	)
+	got, err := parseFlags(args)
+	if err != nil {
+		t.Fatalf("parseFlags: %v", err)
+	}
+	if got.iscsiCHAPUser != "env-user" || got.iscsiCHAPSecret != "env-secret" {
+		t.Fatalf("CHAP env = %q/%q", got.iscsiCHAPUser, got.iscsiCHAPSecret)
 	}
 }
 

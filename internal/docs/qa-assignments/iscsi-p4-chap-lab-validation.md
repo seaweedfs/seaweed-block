@@ -8,10 +8,10 @@ initiator. No Kubernetes Secret or CSI CHAP claim in this assignment.
 Dev preflight:
 
 - commit: `d0c62e6`
-- host: M02
+- host: M02 or equivalent Linux lab host
 - command: Test 2 below
 - artifact:
-  `/mnt/smb/work/share/g15d-k8s/20260505T072921Z-iscsi-p4-chap`
+  `[artifact-root]/20260505T072921Z-iscsi-p4-chap`
 - result: PASS, including wrong-secret failure, correct-secret login,
   `mkfs.ext4`, mount, checksum, 32 MiB dd, logout, and no active sessions.
 
@@ -19,7 +19,7 @@ Dev preflight:
 
 - Host: M02 or equivalent Linux host with `sudo`, `iscsiadm`, `mkfs.ext4`,
   `mount`, `sha256sum`, and optional `fio`.
-- Worktree: `C:\work\seaweed_block` branch `iscsi/frontend-completeness`,
+- Worktree: local `seaweed-block` checkout on branch `iscsi/frontend-completeness`,
   or archived copy of the same commit on the Linux host.
 - Lab must start clean:
   - `sudo iscsiadm -m session` reports no active sessions, or only unrelated

@@ -4,7 +4,7 @@ Status: QA green.
 
 Branch under test: `iscsi/frontend-completeness`.
 Verified commit: `e7c95ee44863f34b304995fa977a4ff57ab3e649`.
-Host: M02 (`192.168.1.184`).
+Host: M02 (lab address redacted).
 
 Purpose: validate the local iSCSI P2/P3 test/tooling work on a real Linux/K8s
 lab. This is not a performance claim and not a failover claim.
@@ -30,7 +30,7 @@ lab. This is not a performance claim and not a failover claim.
 
 - Result: PASS.
 - Artifact:
-  `/mnt/smb/work/share/g15d-k8s/20260505T062122Z-iscsi-p2-test1-os-repeat`.
+  `[artifact-root]/20260505T062122Z-iscsi-p2-test1-os-repeat`.
 - Final line:
   `[iscsi-os] PASS: 5 x iscsiadm mkfs mount write/read logout`.
 - Cleanup: `iscsi-sessions.final.txt` reports no active sessions.
@@ -62,7 +62,7 @@ lab. This is not a performance claim and not a failover claim.
 
 - Result: PASS.
 - Artifact:
-  `/mnt/smb/work/share/g15d-k8s/20260505T062159Z-iscsi-p2-test2-os-fio60s`.
+  `[artifact-root]/20260505T062159Z-iscsi-p2-test2-os-fio60s`.
 - fio summary:
   - read IOPS=122, BW=490KiB/s,
   - write IOPS=123, BW=494KiB/s,
@@ -92,7 +92,7 @@ lab. This is not a performance claim and not a failover claim.
 
 - Result: PASS.
 - Artifact:
-  `/mnt/smb/work/share/g15d-k8s/20260505T062334Z-iscsi-p3-test3-k8s-fio`.
+  `[artifact-root]/20260505T062334Z-iscsi-p3-test3-k8s-fio`.
 - Pod evidence:
   - `pod.log` shows Alpine `apk` install of fio,
   - 60s randrw run,
@@ -126,7 +126,7 @@ lab. This is not a performance claim and not a failover claim.
 
 - Result: PASS.
 - Artifact:
-  `/mnt/smb/work/share/g15d-k8s/20260505T062606Z-iscsi-p3-test4-attach-detach`.
+  `[artifact-root]/20260505T062606Z-iscsi-p3-test4-attach-detach`.
 - Iterations:
   - iter-1 PASS: writer wrote and verified `/data/demo.bin`; reader read-back OK; no active iSCSI sessions after delete.
   - iter-2 PASS: same.

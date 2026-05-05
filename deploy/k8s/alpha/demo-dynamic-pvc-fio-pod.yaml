@@ -26,9 +26,19 @@ metadata:
   name: sw-block-dynamic-smoke
 spec:
   restartPolicy: Never
+  securityContext:
+    seccompProfile:
+      type: RuntimeDefault
   containers:
     - name: writer
       image: alpine:3.20
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop:
+            - ALL
+        seccompProfile:
+          type: RuntimeDefault
       command:
         - /bin/sh
         - -c

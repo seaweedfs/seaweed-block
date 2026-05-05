@@ -308,10 +308,11 @@ func TestLoginNegotiator_CHAP_ChallengeIgnoresPrematureTransit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseParams: %v", err)
 	}
-	if v, _ := respParams.Get("CHAP_C"); v != "0x"+hex.EncodeToString(challenge) {
-		if v, _ := respParams.Get("AuthMethod"); v != "CHAP" {
-			t.Fatalf("AuthMethod=%q want CHAP", v)
-		}
+	if v, _ := respParams.Get("AuthMethod"); v != "CHAP" {
+		t.Fatalf("AuthMethod=%q want CHAP", v)
+	}
+	if v, ok := respParams.Get("CHAP_C"); ok {
+		t.Fatalf("CHAP_C=%q should not be emitted before CHAP_A is offered", v)
 	}
 }
 

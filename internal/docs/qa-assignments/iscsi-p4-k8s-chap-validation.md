@@ -34,7 +34,7 @@ Run first to prove the default alpha path still works.
 
 ```bash
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-iscsi-p4-k8s-default"
-SW_BLOCK_ARTIFACT_DIR="/mnt/smb/work/share/g15d-k8s/$RUN_ID" \
+SW_BLOCK_ARTIFACT_DIR="/tmp/sw-block-artifacts/$RUN_ID" \
   bash scripts/run-k8s-alpha.sh "$PWD"
 ```
 
@@ -50,7 +50,7 @@ Expected:
 
 ```bash
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-iscsi-p4-k8s-chap"
-SW_BLOCK_ARTIFACT_DIR="/mnt/smb/work/share/g15d-k8s/$RUN_ID" \
+SW_BLOCK_ARTIFACT_DIR="/tmp/sw-block-artifacts/$RUN_ID" \
   SW_BLOCK_ISCSI_CHAP_USERNAME=swchap \
   SW_BLOCK_ISCSI_CHAP_SECRET=swchap-secret \
   bash scripts/run-k8s-alpha.sh "$PWD"
@@ -62,10 +62,11 @@ Expected:
 - `dynamic-pvc-pod.rendered.yaml` contains:
   - `csi.storage.k8s.io/node-stage-secret-name`,
   - `csi.storage.k8s.io/node-stage-secret-namespace`.
+- `generated-blockvolume.yaml` does not contain `--iscsi-chap-`.
 - `generated-blockvolume.yaml` contains:
-  - `--iscsi-chap-username=$(SW_BLOCK_ISCSI_CHAP_USERNAME)`,
-  - `--iscsi-chap-secret=$(SW_BLOCK_ISCSI_CHAP_SECRET)`,
   - `secretKeyRef`,
+  - `SW_BLOCK_ISCSI_CHAP_USERNAME`,
+  - `SW_BLOCK_ISCSI_CHAP_SECRET`,
   - `chapUsername`,
   - `chapSecret`.
 - pod log contains `/data/payload.bin: OK`.

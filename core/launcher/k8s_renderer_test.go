@@ -114,8 +114,6 @@ func TestG15d_K8sRenderer_CanWireCHAPSecret(t *testing.T) {
 	}
 	raw := string(manifests[0].YAML)
 	for _, want := range []string{
-		"--iscsi-chap-username=$(SW_BLOCK_ISCSI_CHAP_USERNAME)",
-		"--iscsi-chap-secret=$(SW_BLOCK_ISCSI_CHAP_SECRET)",
 		"name: SW_BLOCK_ISCSI_CHAP_USERNAME",
 		"name: SW_BLOCK_ISCSI_CHAP_SECRET",
 		"name: sw-block-iscsi-chap",
@@ -124,6 +122,14 @@ func TestG15d_K8sRenderer_CanWireCHAPSecret(t *testing.T) {
 	} {
 		if !strings.Contains(raw, want) {
 			t.Fatalf("manifest missing %q:\n%s", want, raw)
+		}
+	}
+	for _, forbidden := range []string{
+		"--iscsi-chap-username=$(SW_BLOCK_ISCSI_CHAP_USERNAME)",
+		"--iscsi-chap-secret=$(SW_BLOCK_ISCSI_CHAP_SECRET)",
+	} {
+		if strings.Contains(raw, forbidden) {
+			t.Fatalf("manifest must not put CHAP secret material in process args %q:\n%s", forbidden, raw)
 		}
 	}
 }
