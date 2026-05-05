@@ -1,9 +1,24 @@
 # QA Assignment: iSCSI P5 CSI Node Lifecycle Validation
 
-Status: ready for QA.
+Status: QA green.
 Branch: `iscsi/csi-node-lifecycle`.
+Verified commit: `4ee35c065f257f0097917eb372deacff646f426f`.
 Scope: Kubernetes CSI node restart while a writer pod is holding the PVC mount,
 then replacement app pod reads the same PVC.
+
+## QA Result
+
+- Result: PASS.
+- Host: M02 or equivalent Linux Kubernetes lab node.
+- Artifact:
+  `[artifact-root]/20260505T231321Z-iscsi-p5-csi-node-restart`.
+- Final line:
+  `[app-demo] PASS: app pod wrote data, replacement app pod read it back through the same PVC, cleanup complete`.
+- `restart-csi-node-status.log` shows the `sw-block-csi-node` DaemonSet rolled
+  out after a real pod replacement.
+- `writer.log` and `reader.log` both contain `/data/demo.bin: OK`.
+- Cleanup: no sw-block iSCSI sessions, no PVC residue, no generated
+  `sw-blockvolume` Deployment.
 
 ## What This Verifies
 

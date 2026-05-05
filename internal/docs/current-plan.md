@@ -200,13 +200,13 @@ References:
     - default non-CHAP regression PASS on M02.
   - V2 CHAP tests are the reference coverage inventory.
 
-## Current Active Milestone: iSCSI-P5 CSI Node Lifecycle
+## Recently Closed Milestone: iSCSI-P5 CSI Node Lifecycle
 
 - Goal:
   - make kubelet retry/restart behavior safe enough for real clusters.
 
 - Tasks:
-  - status: active on `iscsi/csi-node-lifecycle`.
+  - status: QA green on `iscsi/csi-node-lifecycle@4ee35c0`.
   - local CSI node lifecycle guards:
     - status: done in PR #41.
   - NodeStage idempotency,
@@ -231,7 +231,8 @@ References:
   - #QA CSI node restart while PVC remains,
     - script prepared: `scripts/run-k8s-csi-node-restart.sh`,
     - TestOps scenario prepared: `iscsi-p5-csi-node-restart`,
-    - assignment: `internal/docs/qa-assignments/iscsi-p5-csi-node-lifecycle-validation.md`.
+    - assignment: `internal/docs/qa-assignments/iscsi-p5-csi-node-lifecycle-validation.md`,
+    - status: QA PASS on M02.
 
 - Close bar:
   - kubelet retries do not wedge the node plugin,
@@ -239,18 +240,17 @@ References:
   - repeated create/delete works without manual host cleanup.
 
 - QA/tooling:
-  - #QA needs M02 or equivalent K8s run of
-    `scripts/run-k8s-csi-node-restart.sh`.
+  - #QA status: PASS on M02.
   - manual kubelet poking is allowed only for first reproduction.
 
-## Milestone: iSCSI-P6 ALUA / MPIO / Mounted Failover
+## Current Active Milestone: iSCSI-P6 ALUA / MPIO / Mounted Failover
 
 - Goal:
   - make mounted-volume failover a real frontend behavior instead of only a
     reconnect story.
 
 - Tasks:
-  - status: planned.
+  - status: active after P5 QA green.
   - ALUA state model:
     - active,
     - standby,
