@@ -238,8 +238,8 @@ func TestLoginNegotiator_CHAP_ChallengeThenLoginOp(t *testing.T) {
 	if v, _ := resp2Params.Get("CHAP_C"); v != "0x"+hex.EncodeToString(challenge) {
 		t.Fatalf("CHAP_C=%q want deterministic challenge", v)
 	}
-	if v, ok := resp2Params.Get("TargetPortalGroupTag"); ok {
-		t.Fatalf("TargetPortalGroupTag=%q should not be sent during CHAP SecurityNeg", v)
+	if v, _ := resp2Params.Get("TargetPortalGroupTag"); v != "1" {
+		t.Fatalf("TargetPortalGroupTag=%q want 1", v)
 	}
 
 	r3Params := iscsi.NewParams()
@@ -310,6 +310,45 @@ func TestLoginNegotiator_CHAP_ChallengeIgnoresPrematureTransit(t *testing.T) {
 	}
 	if v, _ := respParams.Get("AuthMethod"); v != "CHAP" {
 		t.Fatalf("AuthMethod=%q want CHAP", v)
+	}
+	if v, _ := respParams.Get("TargetPortalGroupTag"); v != "1" {
+		t.Fatalf("TargetPortalGroupTag=%q want 1", v)
+	}
+	if v, ok := respParams.Get("CHAP_C"); ok {
+		t.Fatalf("CHAP_C=%q should not be emitted before CHAP_A is offered", v)
+	}
+}
+
+func TestLoginNegotiator_CHAP_EmptySecurityRequestOffersMethod(t *testing.T) {
+	challenge := []byte("1234567890abcdef")
+	cfg := iscsi.DefaultNegotiableConfig()
+	cfg.CHAP = iscsi.CHAPConfig{Username: "user1", Secret: "secret1", Challenge: challenge}
+	neg := iscsi.NewLoginNegotiator(cfg)
+	resolver := &fakeResolver{names: map[string]bool{"iqn.example:t1": true}}
+
+	params := iscsi.NewParams()
+	params.Set("InitiatorName", "iqn.example.host:1")
+	params.Set("SessionType", "Normal")
+	params.Set("TargetName", "iqn.example:t1")
+	req := mkLoginReq(iscsi.StageSecurityNeg, iscsi.StageLoginOp, true, params)
+
+	resp := neg.HandleLoginPDU(req, resolver)
+	if resp.LoginStatusClass() != iscsi.LoginStatusSuccess {
+		t.Fatalf("status=0x%02x detail=0x%02x want Success",
+			resp.LoginStatusClass(), resp.LoginStatusDetail())
+	}
+	if resp.LoginTransit() {
+		t.Fatal("response should not transit before CHAP method is accepted")
+	}
+	respParams, err := iscsi.ParseParams(resp.DataSegment)
+	if err != nil {
+		t.Fatalf("ParseParams: %v", err)
+	}
+	if v, _ := respParams.Get("AuthMethod"); v != "CHAP" {
+		t.Fatalf("AuthMethod=%q want CHAP", v)
+	}
+	if v, _ := respParams.Get("TargetPortalGroupTag"); v != "1" {
+		t.Fatalf("TargetPortalGroupTag=%q want 1", v)
 	}
 	if v, ok := respParams.Get("CHAP_C"); ok {
 		t.Fatalf("CHAP_C=%q should not be emitted before CHAP_A is offered", v)

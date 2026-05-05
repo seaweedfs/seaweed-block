@@ -290,9 +290,7 @@ func (ln *LoginNegotiator) HandleLoginPDU(req *PDU, resolver TargetResolver) *PD
 	if tpgt <= 0 {
 		tpgt = 1
 	}
-	if !(csg == StageSecurityNeg && ln.chapRequiredForSession()) {
-		respParams.Set("TargetPortalGroupTag", strconv.Itoa(tpgt))
-	}
+	respParams.Set("TargetPortalGroupTag", strconv.Itoa(tpgt))
 
 	if respParams.Len() > 0 {
 		resp.DataSegment = respParams.Encode()
@@ -463,8 +461,8 @@ func (ln *LoginNegotiator) handleCHAPSecurity(req *Params, resp *PDU, respParams
 	}
 
 	if !ln.chapMethodOK {
-		setLoginReject(resp, LoginStatusInitiatorErr, LoginDetailAuthFailed)
-		return false
+		respParams.Set("AuthMethod", "CHAP")
+		return true
 	}
 	respParams.Set("AuthMethod", "CHAP")
 	return true
