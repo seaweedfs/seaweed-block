@@ -292,7 +292,9 @@ func (ln *LoginNegotiator) HandleLoginPDU(req *PDU, resolver TargetResolver) *PD
 	if tpgt <= 0 {
 		tpgt = 1
 	}
-	respParams.Set("TargetPortalGroupTag", strconv.Itoa(tpgt))
+	if !(csg == StageSecurityNeg && ln.chapRequiredForSession()) {
+		respParams.Set("TargetPortalGroupTag", strconv.Itoa(tpgt))
+	}
 
 	if respParams.Len() > 0 {
 		resp.DataSegment = respParams.Encode()

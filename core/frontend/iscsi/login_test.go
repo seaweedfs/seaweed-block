@@ -225,6 +225,9 @@ func TestLoginNegotiator_CHAP_ChallengeThenLoginOp(t *testing.T) {
 	if v, _ := resp1Params.Get("CHAP_C"); v != "0x"+hex.EncodeToString(challenge) {
 		t.Fatalf("CHAP_C=%q want deterministic challenge", v)
 	}
+	if v, ok := resp1Params.Get("TargetPortalGroupTag"); ok {
+		t.Fatalf("TargetPortalGroupTag=%q should not be sent during CHAP SecurityNeg", v)
+	}
 
 	r2Params := iscsi.NewParams()
 	r2Params.Set("CHAP_N", "user1")
