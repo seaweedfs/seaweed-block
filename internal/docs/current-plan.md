@@ -251,6 +251,14 @@ References:
 
 - Tasks:
   - status: active after P5 QA green.
+  - #design(iscsi-p6-alua-mpio-design) ALUA/MPIO policy and protocol shape:
+    - owner: dev.
+    - output: `internal/docs/iscsi-p6-alua-mpio-design.md`.
+    - must be reviewed before changing protocol behavior.
+  - #design(iscsi-p6-qa-assignment) real initiator validation shape:
+    - owner: dev.
+    - output: `internal/docs/qa-assignments/iscsi-p6-alua-mpio-lab-validation.md`.
+    - must define the lab command, non-claims, and pass/fail criteria.
   - ALUA state model:
     - active,
     - standby,
@@ -273,8 +281,8 @@ References:
   - no stale-primary success.
 
 - QA/tooling:
-  - #QA needs real initiator multipath setup script.
-  - #QA needs mounted workload failover script.
+  - #QA needs real initiator multipath setup script after design is accepted.
+  - #QA needs mounted workload failover script after design is accepted.
   - do not rely on in-process protocol tests only.
 
 ## Milestone: iSCSI-P7 Performance And Backend Matrix
