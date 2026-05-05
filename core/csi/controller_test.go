@@ -48,6 +48,17 @@ func (s *stubProvisioner) DeleteVolume(_ context.Context, volumeID string) error
 	return s.err
 }
 
+type stubMetadataResolver struct {
+	uid   string
+	err   error
+	calls []string
+}
+
+func (s *stubMetadataResolver) ResolvePVCUID(_ context.Context, name, namespace string) (string, error) {
+	s.calls = append(s.calls, namespace+"/"+name)
+	return s.uid, s.err
+}
+
 func TestControllerPublish_ReturnsISCSIPublishContextFromTargetFact(t *testing.T) {
 	lookup := &stubLookup{target: PublishTarget{
 		VolumeID:  "v1",
@@ -173,7 +184,14 @@ func TestG15c_ControllerCreateVolume_RecordsDesiredIntentOnly(t *testing.T) {
 		CapacityRange: &csipb.CapacityRange{
 			RequiredBytes: 1 << 30,
 		},
-		Parameters: map[string]string{"replicationFactor": "2"},
+		Parameters: map[string]string{
+			"replicationFactor":                      "2",
+			"csi.storage.k8s.io/pvc/name":            "demo-pvc",
+			"csi.storage.k8s.io/pvc/namespace":       "demo-ns",
+			"csi.storage.k8s.io/pv/name":             "pvc-a",
+			"csi.storage.k8s.io/pvc/uid":             "uid-123",
+			"csi.storage.k8s.io/serviceAccount.name": "ignored",
+		},
 		VolumeCapabilities: []*csipb.VolumeCapability{
 			testVolumeCapability(),
 		},
@@ -187,12 +205,76 @@ func TestG15c_ControllerCreateVolume_RecordsDesiredIntentOnly(t *testing.T) {
 	if got := prov.calls[0]; got.VolumeID != "pvc-a" || got.SizeBytes != 1<<30 || got.ReplicationFactor != 2 {
 		t.Fatalf("spec=%+v", got)
 	}
+	if got := prov.calls[0]; got.PVCName != "demo-pvc" || got.PVCNamespace != "demo-ns" || got.PVCUID != "uid-123" || got.PVName != "pvc-a" {
+		t.Fatalf("kubernetes metadata not preserved: %+v", got)
+	}
 	vol := resp.GetVolume()
 	if vol.GetVolumeId() != "pvc-a" || vol.GetCapacityBytes() != 1<<30 {
 		t.Fatalf("volume=%+v", vol)
 	}
 	if err := authorityContextGuard(vol.GetVolumeContext()); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestG15c_ControllerCreateVolume_ResolvesPVCUIDWhenConfigured(t *testing.T) {
+	prov := &stubProvisioner{}
+	resolver := &stubMetadataResolver{uid: "uid-from-api"}
+	s := NewControllerServerWithProvisionerAndMetadataResolver(&stubLookup{}, prov, resolver)
+
+	_, err := s.CreateVolume(context.Background(), &csipb.CreateVolumeRequest{
+		Name: "pvc-a",
+		CapacityRange: &csipb.CapacityRange{
+			RequiredBytes: 1 << 30,
+		},
+		Parameters: map[string]string{
+			"replicationFactor":                "1",
+			"csi.storage.k8s.io/pvc/name":      "demo-pvc",
+			"csi.storage.k8s.io/pvc/namespace": "demo-ns",
+			"csi.storage.k8s.io/pv/name":       "pvc-a",
+		},
+		VolumeCapabilities: []*csipb.VolumeCapability{
+			testVolumeCapability(),
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateVolume: %v", err)
+	}
+	if len(resolver.calls) != 1 || resolver.calls[0] != "demo-ns/demo-pvc" {
+		t.Fatalf("resolver calls=%v", resolver.calls)
+	}
+	if got := prov.calls[0]; got.PVCUID != "uid-from-api" {
+		t.Fatalf("pvc uid=%q", got.PVCUID)
+	}
+}
+
+func TestG15c_ControllerCreateVolume_FailsWhenConfiguredPVCUIDLookupFails(t *testing.T) {
+	prov := &stubProvisioner{}
+	s := NewControllerServerWithProvisionerAndMetadataResolver(&stubLookup{}, prov, &stubMetadataResolver{err: errors.New("boom")})
+
+	_, err := s.CreateVolume(context.Background(), &csipb.CreateVolumeRequest{
+		Name: "pvc-a",
+		CapacityRange: &csipb.CapacityRange{
+			RequiredBytes: 1 << 30,
+		},
+		Parameters: map[string]string{
+			"replicationFactor":                "1",
+			"csi.storage.k8s.io/pvc/name":      "demo-pvc",
+			"csi.storage.k8s.io/pvc/namespace": "demo-ns",
+		},
+		VolumeCapabilities: []*csipb.VolumeCapability{
+			testVolumeCapability(),
+		},
+	})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	st, _ := status.FromError(err)
+	if st.Code() != codes.Internal {
+		t.Fatalf("code=%v want Internal", st.Code())
+	}
+	if len(prov.calls) != 0 {
+		t.Fatalf("provisioner must not be called after uid lookup failure: %+v", prov.calls)
 	}
 }
 

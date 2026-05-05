@@ -38,6 +38,7 @@ spec:
             - "--csi-address=/csi/csi.sock"
             - "--timeout=30s"
             - "--leader-election=true"
+            - "--extra-create-metadata=true"
           volumeMounts:
             - name: socket-dir
               mountPath: /csi

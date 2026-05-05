@@ -7,6 +7,9 @@ func TestG15d_WorkloadPlan_BlankPoolRF2CreatesReplicaWorkloads(t *testing.T) {
 		VolumeID:          "pvc-a",
 		SizeBytes:         1 << 20,
 		ReplicationFactor: 2,
+		PVCName:           "demo-pvc",
+		PVCNamespace:      "default",
+		PVCUID:            "uid-123",
 	}}
 	placement := PlacementIntent{
 		VolumeID:  "pvc-a",
@@ -25,6 +28,9 @@ func TestG15d_WorkloadPlan_BlankPoolRF2CreatesReplicaWorkloads(t *testing.T) {
 	}
 	if plan.VolumeID != "pvc-a" || plan.SizeBytes != 1<<20 || len(plan.Replicas) != 2 {
 		t.Fatalf("plan=%+v", plan)
+	}
+	if plan.PVCName != "demo-pvc" || plan.PVCNamespace != "default" || plan.PVCUID != "uid-123" {
+		t.Fatalf("pvc metadata=%+v", plan)
 	}
 	if plan.Replicas[0].ReplicaID != "r1" || plan.Replicas[1].ReplicaID != "r2" {
 		t.Fatalf("replica ids=%q/%q want r1/r2", plan.Replicas[0].ReplicaID, plan.Replicas[1].ReplicaID)

@@ -66,6 +66,42 @@ func TestG15d_K8sRenderer_RequiresMasterAddr(t *testing.T) {
 	}
 }
 
+func TestG15d_K8sRenderer_CanAttachPVCOwnerReference(t *testing.T) {
+	manifests, err := RenderBlockVolumeDeployments(sampleWorkloadPlan(), K8sRenderConfig{
+		MasterAddr:          "m:9333",
+		OwnerReferenceToPVC: true,
+	})
+	if err != nil {
+		t.Fatalf("RenderBlockVolumeDeployments: %v", err)
+	}
+	raw := string(manifests[0].YAML)
+	for _, want := range []string{
+		"namespace: default",
+		"ownerReferences:",
+		"apiVersion: v1",
+		"kind: PersistentVolumeClaim",
+		"name: demo-pvc",
+		"uid: uid-123",
+		"controller: true",
+	} {
+		if !strings.Contains(raw, want) {
+			t.Fatalf("manifest missing %q:\n%s", want, raw)
+		}
+	}
+}
+
+func TestG15d_K8sRenderer_PVCOwnerReferenceRequiresKubernetesMetadata(t *testing.T) {
+	plan := sampleWorkloadPlan()
+	plan.PVCUID = ""
+	_, err := RenderBlockVolumeDeployments(plan, K8sRenderConfig{
+		MasterAddr:          "m:9333",
+		OwnerReferenceToPVC: true,
+	})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+}
+
 func TestG15d_K8sRenderer_OutputIsNotAuthorityShaped(t *testing.T) {
 	manifests, err := RenderBlockVolumeDeployments(sampleWorkloadPlan(), K8sRenderConfig{MasterAddr: "m:9333"})
 	if err != nil {
@@ -81,8 +117,11 @@ func TestG15d_K8sRenderer_OutputIsNotAuthorityShaped(t *testing.T) {
 
 func sampleWorkloadPlan() lifecycle.BlockVolumeWorkloadPlan {
 	return lifecycle.BlockVolumeWorkloadPlan{
-		VolumeID:  "pvc-a",
-		SizeBytes: 1 << 20,
+		VolumeID:     "pvc-a",
+		SizeBytes:    1 << 20,
+		PVCName:      "demo-pvc",
+		PVCNamespace: "default",
+		PVCUID:       "uid-123",
 		Replicas: []lifecycle.BlockVolumeReplicaWorkload{
 			{
 				ServerID:           "m02",

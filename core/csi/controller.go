@@ -12,8 +12,9 @@ import (
 
 type ControllerServer struct {
 	csipb.UnimplementedControllerServer
-	lookup      PublishTargetLookup
-	provisioner VolumeProvisioner
+	lookup           PublishTargetLookup
+	provisioner      VolumeProvisioner
+	metadataResolver KubernetesMetadataResolver
 }
 
 func NewControllerServer(lookup PublishTargetLookup) *ControllerServer {
@@ -24,12 +25,19 @@ func NewControllerServerWithProvisioner(lookup PublishTargetLookup, provisioner 
 	return &ControllerServer{lookup: lookup, provisioner: provisioner}
 }
 
+func NewControllerServerWithProvisionerAndMetadataResolver(lookup PublishTargetLookup, provisioner VolumeProvisioner, resolver KubernetesMetadataResolver) *ControllerServer {
+	return &ControllerServer{lookup: lookup, provisioner: provisioner, metadataResolver: resolver}
+}
+
 func (s *ControllerServer) CreateVolume(ctx context.Context, req *csipb.CreateVolumeRequest) (*csipb.CreateVolumeResponse, error) {
 	if s.provisioner == nil {
 		return nil, status.Error(codes.Unimplemented, "dynamic provisioning is not configured")
 	}
 	spec, err := volumeSpecFromCreateRequest(req)
 	if err != nil {
+		return nil, err
+	}
+	if err := s.resolveKubernetesMetadata(ctx, &spec); err != nil {
 		return nil, err
 	}
 	created, err := s.provisioner.CreateVolume(ctx, spec)
@@ -48,6 +56,21 @@ func (s *ControllerServer) CreateVolume(ctx context.Context, req *csipb.CreateVo
 			},
 		},
 	}, nil
+}
+
+func (s *ControllerServer) resolveKubernetesMetadata(ctx context.Context, spec *VolumeSpec) error {
+	if s.metadataResolver == nil || spec == nil || spec.PVCUID != "" || spec.PVCName == "" || spec.PVCNamespace == "" {
+		return nil
+	}
+	uid, err := s.metadataResolver.ResolvePVCUID(ctx, spec.PVCName, spec.PVCNamespace)
+	if err != nil {
+		return status.Errorf(codes.Internal, "lookup pvc uid: %v", err)
+	}
+	if uid == "" {
+		return status.Errorf(codes.Internal, "lookup pvc uid: empty uid for %s/%s", spec.PVCNamespace, spec.PVCName)
+	}
+	spec.PVCUID = uid
+	return nil
 }
 
 func (s *ControllerServer) DeleteVolume(ctx context.Context, req *csipb.DeleteVolumeRequest) (*csipb.DeleteVolumeResponse, error) {
@@ -161,6 +184,10 @@ func volumeSpecFromCreateRequest(req *csipb.CreateVolumeRequest) (VolumeSpec, er
 		VolumeID:          req.GetName(),
 		SizeBytes:         uint64(size),
 		ReplicationFactor: rf,
+		PVCName:           req.GetParameters()["csi.storage.k8s.io/pvc/name"],
+		PVCNamespace:      req.GetParameters()["csi.storage.k8s.io/pvc/namespace"],
+		PVCUID:            req.GetParameters()["csi.storage.k8s.io/pvc/uid"],
+		PVName:            req.GetParameters()["csi.storage.k8s.io/pv/name"],
 	}, nil
 }
 

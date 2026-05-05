@@ -28,6 +28,7 @@ type flags struct {
 	masterAddr     string
 	nodeID         string
 	iqnPrefix      string
+	pvcUIDLookup   bool
 	printReadyLine bool
 }
 
@@ -38,6 +39,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.StringVar(&f.masterAddr, "master", "", "blockmaster gRPC address for read-only publish-target lookup")
 	fs.StringVar(&f.nodeID, "node-id", "", "CSI node ID; defaults to hostname")
 	fs.StringVar(&f.iqnPrefix, "iqn-prefix", "iqn.2026-05.io.seaweedfs", "fallback IQN prefix for unstage after plugin restart")
+	fs.BoolVar(&f.pvcUIDLookup, "kubernetes-pvc-uid-lookup", false, "opt-in: resolve PVC UID through the in-cluster Kubernetes API before CreateVolume is sent to blockmaster")
 	fs.BoolVar(&f.printReadyLine, "t0-print-ready", false, "internal test-only: emit one structured JSON ready line after listener bind")
 	fs.SetOutput(os.Stderr)
 	if err := fs.Parse(args); err != nil {
@@ -97,6 +99,7 @@ func run(f flags) int {
 		masterConn  *grpc.ClientConn
 		lookup      blockcsi.PublishTargetLookup
 		provisioner blockcsi.VolumeProvisioner
+		resolver    blockcsi.KubernetesMetadataResolver
 	)
 	if f.masterAddr != "" {
 		masterConn, err = grpc.NewClient(f.masterAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
@@ -108,10 +111,17 @@ func run(f flags) int {
 		lookup = blockcsi.NewControlStatusLookup(control.NewEvidenceServiceClient(masterConn))
 		provisioner = blockcsi.NewControlLifecycleProvisioner(control.NewLifecycleServiceClient(masterConn))
 	}
+	if f.pvcUIDLookup && provisioner != nil {
+		resolver, err = blockcsi.NewInClusterPVCMetadataResolver()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "blockcsi: pvc uid lookup:", err)
+			return 1
+		}
+	}
 
 	srv := grpc.NewServer()
 	csipb.RegisterIdentityServer(srv, blockcsi.NewIdentityServer())
-	csipb.RegisterControllerServer(srv, blockcsi.NewControllerServerWithProvisioner(lookup, provisioner))
+	csipb.RegisterControllerServer(srv, blockcsi.NewControllerServerWithProvisionerAndMetadataResolver(lookup, provisioner, resolver))
 	csipb.RegisterNodeServer(srv, blockcsi.NewDefaultNodeServer(f.nodeID, f.iqnPrefix))
 
 	if f.printReadyLine {

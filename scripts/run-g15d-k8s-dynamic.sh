@@ -8,6 +8,11 @@ RUN_LABEL="${SW_BLOCK_RUN_LABEL:-g15d}"
 DYNAMIC_PVC_MANIFEST="${SW_BLOCK_DYNAMIC_PVC_MANIFEST:-$ROOT/deploy/k8s/g15d/dynamic-pvc-pod.yaml}"
 IMAGE="${SW_BLOCK_IMAGE:-sw-block:local}"
 CSI_IMAGE="${SW_BLOCK_CSI_IMAGE:-sw-block-csi:local}"
+LAUNCHER_PVC_OWNER_REF="${SW_BLOCK_LAUNCHER_PVC_OWNER_REF:-0}"
+BLOCKVOLUME_NAMESPACE="kube-system"
+if [[ "$LAUNCHER_PVC_OWNER_REF" == "1" || "$LAUNCHER_PVC_OWNER_REF" == "true" ]]; then
+  BLOCKVOLUME_NAMESPACE="$NAMESPACE"
+fi
 
 mkdir -p "$ARTIFACT_DIR"
 POLL_LOG="$ARTIFACT_DIR/poll.log"
@@ -39,9 +44,19 @@ sed -e "s/__NODE_NAME__/${NODE_NAME}/g" \
   -e "s/sw-block:local/${IMAGE_SED}/g" \
   -e "s/imagePullPolicy: Never/imagePullPolicy: IfNotPresent/g" \
   "$ROOT/deploy/k8s/g15d/block-stack.yaml" >"$STACK_RENDERED"
+if [[ "$BLOCKVOLUME_NAMESPACE" != "kube-system" ]]; then
+  awk '/--launcher-namespace=/{print; print "            - \"--launcher-pvc-owner-ref\""; next} {print}' "$STACK_RENDERED" >"$STACK_RENDERED.tmp"
+  mv "$STACK_RENDERED.tmp" "$STACK_RENDERED"
+  grep -q -- '--launcher-pvc-owner-ref' "$STACK_RENDERED" || { echo "failed to inject --launcher-pvc-owner-ref into $STACK_RENDERED" >&2; exit 1; }
+fi
 sed -e "s/sw-block-csi:local/${CSI_IMAGE_SED}/g" \
   -e "s/imagePullPolicy: Never/imagePullPolicy: IfNotPresent/g" \
   "$ROOT/deploy/k8s/g15d/csi-controller.yaml" >"$CSI_CONTROLLER_RENDERED"
+if [[ "$BLOCKVOLUME_NAMESPACE" != "kube-system" ]]; then
+  awk '/--node-id=\$\(NODE_NAME\)/{print; print "            - \"--kubernetes-pvc-uid-lookup\""; next} {print}' "$CSI_CONTROLLER_RENDERED" >"$CSI_CONTROLLER_RENDERED.tmp"
+  mv "$CSI_CONTROLLER_RENDERED.tmp" "$CSI_CONTROLLER_RENDERED"
+  grep -q -- '--kubernetes-pvc-uid-lookup' "$CSI_CONTROLLER_RENDERED" || { echo "failed to inject --kubernetes-pvc-uid-lookup into $CSI_CONTROLLER_RENDERED" >&2; exit 1; }
+fi
 sed -e "s/sw-block-csi:local/${CSI_IMAGE_SED}/g" \
   -e "s/imagePullPolicy: Never/imagePullPolicy: IfNotPresent/g" \
   "$ROOT/deploy/k8s/g15b/csi-node.yaml" >"$CSI_NODE_RENDERED"
@@ -52,6 +67,8 @@ log "namespace=$NAMESPACE"
 log "node=$NODE_NAME"
 log "image=$IMAGE"
 log "csi_image=$CSI_IMAGE"
+log "blockvolume_namespace=$BLOCKVOLUME_NAMESPACE"
+log "launcher_pvc_owner_ref=$LAUNCHER_PVC_OWNER_REF"
 log "dynamic_pvc_manifest=$DYNAMIC_PVC_MANIFEST"
 kubectl version --client=true >"$ARTIFACT_DIR/kubectl-version.txt" 2>&1 || true
 kubectl get nodes -o wide >"$ARTIFACT_DIR/nodes.before.txt"
@@ -60,6 +77,7 @@ cleanup() {
   (
   set +e
   kubectl -n kube-system delete deploy -l app=sw-blockvolume --ignore-not-found=true >>"$ARTIFACT_DIR/cleanup.log" 2>&1
+  kubectl -n "$NAMESPACE" delete deploy -l app=sw-blockvolume --ignore-not-found=true >>"$ARTIFACT_DIR/cleanup.log" 2>&1
   kubectl -n kube-system delete deploy sw-blockvolume-r1 sw-blockvolume-r2 --ignore-not-found=true >>"$ARTIFACT_DIR/cleanup.log" 2>&1
   kubectl -n "$NAMESPACE" delete -f "$DYNAMIC_PVC_MANIFEST" --ignore-not-found=true >>"$ARTIFACT_DIR/cleanup.log" 2>&1
   kubectl delete -f "$CSI_NODE_RENDERED" --ignore-not-found=true >>"$ARTIFACT_DIR/cleanup.log" 2>&1
@@ -78,8 +96,9 @@ collect_daemon_logs() {
   capture_once "$ARTIFACT_DIR/blockcsi-controller.log" kubectl -n kube-system logs deploy/sw-block-csi-controller -c block-csi
   capture_once "$ARTIFACT_DIR/csi-provisioner.log" kubectl -n kube-system logs deploy/sw-block-csi-controller -c csi-provisioner
   capture_once "$ARTIFACT_DIR/csi-attacher.log" kubectl -n kube-system logs deploy/sw-block-csi-controller -c csi-attacher
-  capture_once "$ARTIFACT_DIR/blockvolume-generated.log" kubectl -n kube-system logs -l sw-block.seaweedfs.com/volume -c blockvolume --tail=-1
+  capture_once "$ARTIFACT_DIR/blockvolume-generated.log" kubectl -n "$BLOCKVOLUME_NAMESPACE" logs -l sw-block.seaweedfs.com/volume -c blockvolume --tail=-1
   capture_once "$ARTIFACT_DIR/kube-system-pods-deploys.txt" kubectl -n kube-system get pods,deploy -o wide
+  capture_once "$ARTIFACT_DIR/blockvolume-namespace-pods-deploys.txt" kubectl -n "$BLOCKVOLUME_NAMESPACE" get pods,deploy -o wide
   capture_once "$ARTIFACT_DIR/app-storage.txt" kubectl -n "$NAMESPACE" get sc,pv,pvc,pod -o wide
   if [[ ! -s "$ARTIFACT_DIR/generated-blockvolume.yaml" ]]; then
     kubectl -n kube-system exec deploy/sw-blockmaster -c blockmaster -- sh -c 'cat /manifests/*.yaml' >"$ARTIFACT_DIR/generated-blockvolume.yaml" 2>"$ARTIFACT_DIR/generated-blockvolume.err" || true
@@ -98,6 +117,7 @@ capture_once() {
 collect_post_delete_state() {
   set +e
   kubectl -n kube-system get pods,deploy -o wide >"$ARTIFACT_DIR/kube-system-pods-deploys.after-delete.txt" 2>&1 || true
+  kubectl -n "$BLOCKVOLUME_NAMESPACE" get pods,deploy -o wide >"$ARTIFACT_DIR/blockvolume-namespace-pods-deploys.after-delete.txt" 2>&1 || true
   kubectl -n "$NAMESPACE" get sc,pv,pvc,pod -o wide >"$ARTIFACT_DIR/app-storage.after-delete.txt" 2>&1 || true
   if command -v sudo >/dev/null 2>&1; then
     sudo iscsiadm -m session >"$ARTIFACT_DIR/iscsi-sessions.after-delete.txt" 2>&1 || true
@@ -141,7 +161,7 @@ kubectl -n kube-system exec deploy/sw-blockmaster -c blockmaster -- sh -c 'cat /
 
 log "apply generated blockvolume manifests"
 kubectl apply -f "$ARTIFACT_DIR/generated-blockvolume.yaml" | tee "$ARTIFACT_DIR/apply-generated-blockvolume.log"
-kubectl -n kube-system wait --for=condition=available deploy -l app=sw-blockvolume --timeout=120s
+kubectl -n "$BLOCKVOLUME_NAMESPACE" wait --for=condition=available deploy -l app=sw-blockvolume --timeout=120s
 
 log "wait for dynamic pod completion"
 for _ in $(seq 1 240); do
@@ -182,12 +202,22 @@ if ! kubectl -n kube-system exec deploy/sw-blockmaster -c blockmaster -- sh -c '
   exit 1
 fi
 
-log "delete generated blockvolume Deployment after manifest cleanup"
-kubectl -n kube-system delete deploy -l app=sw-blockvolume --ignore-not-found=true --wait=true --timeout=120s | tee "$ARTIFACT_DIR/delete-generated-blockvolume.log"
+if [[ "$BLOCKVOLUME_NAMESPACE" == "kube-system" ]]; then
+  log "delete generated blockvolume Deployment after manifest cleanup"
+  kubectl -n kube-system delete deploy -l app=sw-blockvolume --ignore-not-found=true --wait=true --timeout=120s | tee "$ARTIFACT_DIR/delete-generated-blockvolume.log"
+else
+  log "wait for Kubernetes GC to delete PVC-owned blockvolume Deployment"
+  for _ in $(seq 1 180); do
+    if ! kubectl -n "$BLOCKVOLUME_NAMESPACE" get deploy -l app=sw-blockvolume --no-headers 2>/dev/null | grep -q .; then
+      break
+    fi
+    sleep 1
+  done
+fi
 
 collect_post_delete_state
 
-if kubectl -n kube-system get deploy -l app=sw-blockvolume --no-headers 2>/dev/null | grep -q .; then
+if kubectl -n "$BLOCKVOLUME_NAMESPACE" get deploy -l app=sw-blockvolume --no-headers 2>/dev/null | grep -q .; then
   echo "generated blockvolume deployment still present" >&2
   exit 1
 fi

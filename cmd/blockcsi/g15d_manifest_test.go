@@ -31,10 +31,18 @@ func TestG15d_K8sCSIController_IncludesExternalProvisioner(t *testing.T) {
 		"registry.k8s.io/sig-storage/csi-provisioner:",
 		"name: csi-attacher",
 		"--csi-address=/csi/csi.sock",
+		"--extra-create-metadata=true",
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("csi-controller missing %q", want)
 		}
+	}
+}
+
+func TestAlphaK8sCSIController_IncludesCreateMetadata(t *testing.T) {
+	body := g15dReadFile(t, "deploy", "k8s", "alpha", "csi-controller.yaml")
+	if !strings.Contains(body, "--extra-create-metadata=true") {
+		t.Fatalf("alpha csi-controller must enable PVC metadata propagation:\n%s", body)
 	}
 }
 
@@ -59,18 +67,41 @@ func TestG15d_K8sRunner_AppliesLauncherGeneratedManifest(t *testing.T) {
 	body := g15dReadFile(t, "scripts", "run-g15d-k8s-dynamic.sh")
 	for _, want := range []string{
 		"generated-blockvolume.yaml",
+		"SW_BLOCK_LAUNCHER_PVC_OWNER_REF",
+		"BLOCKVOLUME_NAMESPACE=\"kube-system\"",
+		"--kubernetes-pvc-uid-lookup",
+		"--launcher-pvc-owner-ref",
 		"kubectl apply -f \"$ARTIFACT_DIR/generated-blockvolume.yaml\"",
-		"kubectl -n kube-system wait --for=condition=available deploy -l app=sw-blockvolume",
-		"kubectl -n kube-system logs -l sw-block.seaweedfs.com/volume",
+		"kubectl -n \"$BLOCKVOLUME_NAMESPACE\" wait --for=condition=available deploy -l app=sw-blockvolume",
+		"kubectl -n \"$BLOCKVOLUME_NAMESPACE\" logs -l sw-block.seaweedfs.com/volume",
 		"kubectl -n \"$NAMESPACE\" delete pvc sw-block-dynamic-v1",
 		"wait for launcher manifest cleanup after DeleteVolume",
 		"delete generated blockvolume Deployment after manifest cleanup",
+		"wait for Kubernetes GC to delete PVC-owned blockvolume Deployment",
 		"iscsi-sessions.after-delete.txt",
 		"PASS: dynamic PVC create/delete completed checksum write/read and cleanup",
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("runner missing %q", want)
 		}
+	}
+}
+
+func TestAlphaScripts_OwnerRefModeInjectsBothLauncherAndCSILookupFlags(t *testing.T) {
+	for _, script := range []string{"run-g15d-k8s-dynamic.sh", "run-alpha-app-demo.sh"} {
+		t.Run(script, func(t *testing.T) {
+			body := g15dReadFile(t, "scripts", script)
+			for _, want := range []string{
+				"SW_BLOCK_LAUNCHER_PVC_OWNER_REF",
+				"--launcher-pvc-owner-ref",
+				"--kubernetes-pvc-uid-lookup",
+				"BLOCKVOLUME_NAMESPACE=\"$NAMESPACE\"",
+			} {
+				if !strings.Contains(body, want) {
+					t.Fatalf("%s missing %q", script, want)
+				}
+			}
+		})
 	}
 }
 
