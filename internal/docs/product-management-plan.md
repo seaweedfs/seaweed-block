@@ -142,7 +142,7 @@ Default answer to #7 is yes for all product fixes after the MVP merge.
 | V2 frontend gap audit | `docs/v2-frontend-protocol-gap-audit.md`. |
 | Runtime state machines | `docs/runtime-state-machines.md`. |
 | Roadmap | `docs/roadmap.md`. |
-| Production readiness detail | `docs/production-readiness-plan.md`. |
+| Production readiness detail | `internal/docs/ref/production-readiness-plan.md`. |
 | Calibration evidence | `docs/calibration/`. |
 
 ## Current Immediate Recommendation

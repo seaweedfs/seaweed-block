@@ -3,6 +3,7 @@ package csi
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -14,6 +15,7 @@ import (
 
 type mockISCSIUtil struct {
 	discoveryErr    error
+	configureErr    error
 	loginErr        error
 	logoutErr       error
 	getDeviceResult string
@@ -29,6 +31,11 @@ func newMockISCSIUtil() *mockISCSIUtil {
 func (m *mockISCSIUtil) Discovery(_ context.Context, portal string) error {
 	m.calls = append(m.calls, "discovery:"+portal)
 	return m.discoveryErr
+}
+
+func (m *mockISCSIUtil) ConfigureCHAP(_ context.Context, iqn, portal string, auth ISCSIAuth) error {
+	m.calls = append(m.calls, "chap:"+iqn+":"+portal+":"+auth.Username+":"+auth.Secret)
+	return m.configureErr
 }
 
 func (m *mockISCSIUtil) Login(_ context.Context, iqn, portal string) error {
@@ -65,6 +72,7 @@ type mockMountUtil struct {
 	formatAndMountErr error
 	bindMountErr      error
 	unmountErr        error
+	isMountedErr      error
 	mounted           map[string]bool
 	calls             []string
 }
@@ -101,6 +109,9 @@ func (m *mockMountUtil) Unmount(_ context.Context, target string) error {
 }
 
 func (m *mockMountUtil) IsMounted(_ context.Context, target string) (bool, error) {
+	if m.isMountedErr != nil {
+		return false, m.isMountedErr
+	}
 	return m.mounted[target], nil
 }
 
@@ -154,11 +165,75 @@ func TestNodeStage_UsesPublishContextBeforeVolumeContext(t *testing.T) {
 	}
 }
 
+func TestNodeStage_ConfiguresCHAPBeforeLogin(t *testing.T) {
+	mi, mm := newMockISCSIUtil(), newMockMountUtil()
+	ns := newTestNode(mi, mm)
+	staging := t.TempDir()
+
+	_, err := ns.NodeStageVolume(context.Background(), &csipb.NodeStageVolumeRequest{
+		VolumeId:          "v1",
+		StagingTargetPath: staging,
+		VolumeCapability:  testVolumeCapability(),
+		PublishContext: map[string]string{
+			"iscsiAddr": "127.0.0.1:3260",
+			"iqn":       "iqn.v1",
+		},
+		Secrets: map[string]string{
+			"chapUsername": "user1",
+			"chapSecret":   "secret1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("NodeStageVolume: %v", err)
+	}
+	want := []string{
+		"isloggedin:iqn.v1",
+		"discovery:127.0.0.1:3260",
+		"chap:iqn.v1:127.0.0.1:3260:user1:secret1",
+		"login:iqn.v1:127.0.0.1:3260",
+		"getdevice:iqn.v1",
+	}
+	for i, w := range want {
+		if i >= len(mi.calls) || mi.calls[i] != w {
+			t.Fatalf("calls=%v want prefix=%v", mi.calls, want)
+		}
+	}
+}
+
+func TestNodeStage_RejectsPartialCHAPContext(t *testing.T) {
+	mi, mm := newMockISCSIUtil(), newMockMountUtil()
+	ns := newTestNode(mi, mm)
+
+	_, err := ns.NodeStageVolume(context.Background(), &csipb.NodeStageVolumeRequest{
+		VolumeId:          "v1",
+		StagingTargetPath: t.TempDir(),
+		VolumeCapability:  testVolumeCapability(),
+		PublishContext: map[string]string{
+			"iscsiAddr": "127.0.0.1:3260",
+			"iqn":       "iqn.v1",
+		},
+		Secrets: map[string]string{
+			"chapUsername": "user1",
+		},
+	})
+	if err == nil {
+		t.Fatal("expected partial CHAP context to fail")
+	}
+	st, _ := status.FromError(err)
+	if st.Code() != codes.FailedPrecondition {
+		t.Fatalf("code=%v want FailedPrecondition", st.Code())
+	}
+	if len(mi.calls) != 0 {
+		t.Fatalf("expected fail before iscsi calls, got %v", mi.calls)
+	}
+}
+
 func TestNodeStage_IdempotentWhenAlreadyMounted(t *testing.T) {
 	mi, mm := newMockISCSIUtil(), newMockMountUtil()
 	ns := newTestNode(mi, mm)
 	staging := t.TempDir()
 	mm.mounted[staging] = true
+	ns.staged["v1"] = &stagedVolumeInfo{iqn: "iqn.v1", iscsiAddr: "127.0.0.1:3260", transport: transportISCSI, stagingPath: staging}
 
 	_, err := ns.NodeStageVolume(context.Background(), &csipb.NodeStageVolumeRequest{
 		VolumeId:          "v1",
@@ -174,6 +249,97 @@ func TestNodeStage_IdempotentWhenAlreadyMounted(t *testing.T) {
 	}
 	if len(mi.calls) != 0 {
 		t.Fatalf("expected no iscsi calls, got %v", mi.calls)
+	}
+}
+
+func TestNodeStage_FailsClosedWhenStagingPathMountedForAnotherVolume(t *testing.T) {
+	mi, mm := newMockISCSIUtil(), newMockMountUtil()
+	ns := newTestNode(mi, mm)
+	staging := t.TempDir()
+	mm.mounted[staging] = true
+	ns.staged["v1"] = &stagedVolumeInfo{iqn: "iqn.v1", iscsiAddr: "127.0.0.1:3260", transport: transportISCSI, stagingPath: staging}
+
+	_, err := ns.NodeStageVolume(context.Background(), &csipb.NodeStageVolumeRequest{
+		VolumeId:          "v2",
+		StagingTargetPath: staging,
+		VolumeCapability:  testVolumeCapability(),
+		PublishContext: map[string]string{
+			"iscsiAddr": "127.0.0.1:3261",
+			"iqn":       "iqn.v2",
+		},
+	})
+	if err == nil {
+		t.Fatal("expected mounted staging path for another volume to fail closed")
+	}
+	st, _ := status.FromError(err)
+	if st.Code() != codes.FailedPrecondition {
+		t.Fatalf("code=%v want FailedPrecondition", st.Code())
+	}
+	if len(mi.calls) != 0 {
+		t.Fatalf("expected fail before iscsi calls, got %v", mi.calls)
+	}
+}
+
+func TestNodeStage_FailsClosedOnStaleLoggedInSessionWithoutStagedIdentity(t *testing.T) {
+	mi, mm := newMockISCSIUtil(), newMockMountUtil()
+	mi.loggedIn["iqn.v1"] = true
+	ns := newTestNode(mi, mm)
+
+	_, err := ns.NodeStageVolume(context.Background(), &csipb.NodeStageVolumeRequest{
+		VolumeId:          "v1",
+		StagingTargetPath: t.TempDir(),
+		VolumeCapability:  testVolumeCapability(),
+		PublishContext: map[string]string{
+			"iscsiAddr": "127.0.0.1:3260",
+			"iqn":       "iqn.v1",
+		},
+	})
+	if err == nil {
+		t.Fatal("expected stale logged-in session without staged identity to fail closed")
+	}
+	st, _ := status.FromError(err)
+	if st.Code() != codes.FailedPrecondition {
+		t.Fatalf("code=%v want FailedPrecondition", st.Code())
+	}
+	for _, call := range mi.calls {
+		if strings.HasPrefix(call, "getdevice:") {
+			t.Fatalf("must fail before using stale session device, calls=%v", mi.calls)
+		}
+	}
+}
+
+func TestNodeStage_AllowsLoggedInSessionWithRestartIdentityFile(t *testing.T) {
+	mi, mm := newMockISCSIUtil(), newMockMountUtil()
+	mi.loggedIn["iqn.v1"] = true
+	ns := newTestNode(mi, mm)
+	staging := t.TempDir()
+	if err := writeVolumeFile(staging, "v1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeTransportFile(staging, transportISCSI); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := ns.NodeStageVolume(context.Background(), &csipb.NodeStageVolumeRequest{
+		VolumeId:          "v1",
+		StagingTargetPath: staging,
+		VolumeCapability:  testVolumeCapability(),
+		PublishContext: map[string]string{
+			"iscsiAddr": "127.0.0.1:3260",
+			"iqn":       "iqn.v1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("NodeStageVolume: %v", err)
+	}
+	wantPrefix := []string{
+		"isloggedin:iqn.v1",
+		"getdevice:iqn.v1",
+	}
+	for i, w := range wantPrefix {
+		if i >= len(mi.calls) || mi.calls[i] != w {
+			t.Fatalf("calls=%v want prefix=%v", mi.calls, wantPrefix)
+		}
 	}
 }
 
@@ -205,6 +371,96 @@ func TestNodeStage_CleansUpLoginWhenMountFails(t *testing.T) {
 	}
 }
 
+func TestNodeStage_DoesNotRecordStagedEntryWhenLoginFails(t *testing.T) {
+	mi, mm := newMockISCSIUtil(), newMockMountUtil()
+	mi.loginErr = errors.New("auth rejected")
+	ns := newTestNode(mi, mm)
+
+	_, err := ns.NodeStageVolume(context.Background(), &csipb.NodeStageVolumeRequest{
+		VolumeId:          "v1",
+		StagingTargetPath: t.TempDir(),
+		VolumeCapability:  testVolumeCapability(),
+		PublishContext: map[string]string{
+			"iscsiAddr": "127.0.0.1:3260",
+			"iqn":       "iqn.v1",
+		},
+	})
+	if err == nil {
+		t.Fatal("expected login error")
+	}
+	if ns.staged["v1"] != nil {
+		t.Fatalf("staged entry must not be recorded after login failure: %+v", ns.staged["v1"])
+	}
+	if got := strings.Join(mi.calls, ","); strings.Contains(got, "logout:iqn.v1") {
+		t.Fatalf("login failure must not logout a session it did not start successfully: %v", mi.calls)
+	}
+}
+
+func TestNodeStage_CleansUpLoginWhenGetDeviceFails(t *testing.T) {
+	mi, mm := newMockISCSIUtil(), newMockMountUtil()
+	mi.getDeviceErr = errors.New("device never appeared")
+	ns := newTestNode(mi, mm)
+
+	_, err := ns.NodeStageVolume(context.Background(), &csipb.NodeStageVolumeRequest{
+		VolumeId:          "v1",
+		StagingTargetPath: t.TempDir(),
+		VolumeCapability:  testVolumeCapability(),
+		PublishContext: map[string]string{
+			"iscsiAddr": "127.0.0.1:3260",
+			"iqn":       "iqn.v1",
+		},
+	})
+	if err == nil {
+		t.Fatal("expected get device error")
+	}
+	foundLogout := false
+	for _, call := range mi.calls {
+		if call == "logout:iqn.v1" {
+			foundLogout = true
+		}
+	}
+	if !foundLogout {
+		t.Fatalf("expected cleanup logout after get device failure, calls=%v", mi.calls)
+	}
+	if ns.staged["v1"] != nil {
+		t.Fatalf("staged entry must not be recorded after get device failure: %+v", ns.staged["v1"])
+	}
+}
+
+func TestNodeStage_CleansUpLoginWhenCreateStagingDirFails(t *testing.T) {
+	mi, mm := newMockISCSIUtil(), newMockMountUtil()
+	ns := newTestNode(mi, mm)
+	parentFile := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(parentFile, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := ns.NodeStageVolume(context.Background(), &csipb.NodeStageVolumeRequest{
+		VolumeId:          "v1",
+		StagingTargetPath: filepath.Join(parentFile, "staging"),
+		VolumeCapability:  testVolumeCapability(),
+		PublishContext: map[string]string{
+			"iscsiAddr": "127.0.0.1:3260",
+			"iqn":       "iqn.v1",
+		},
+	})
+	if err == nil {
+		t.Fatal("expected create staging dir error")
+	}
+	foundLogout := false
+	for _, call := range mi.calls {
+		if call == "logout:iqn.v1" {
+			foundLogout = true
+		}
+	}
+	if !foundLogout {
+		t.Fatalf("expected cleanup logout after mkdir failure, calls=%v", mi.calls)
+	}
+	if ns.staged["v1"] != nil {
+		t.Fatalf("staged entry must not be recorded after mkdir failure: %+v", ns.staged["v1"])
+	}
+}
+
 func TestNodeUnstage_PreservesStagedEntryOnFailure(t *testing.T) {
 	mi, mm := newMockISCSIUtil(), newMockMountUtil()
 	mm.unmountErr = errors.New("device busy")
@@ -220,6 +476,42 @@ func TestNodeUnstage_PreservesStagedEntryOnFailure(t *testing.T) {
 	}
 	if ns.staged["v1"] == nil {
 		t.Fatal("staged entry should be preserved for retry")
+	}
+}
+
+func TestNodeUnstage_NotMountedStillLogsOutAndCleansState(t *testing.T) {
+	mi, mm := newMockISCSIUtil(), newMockMountUtil()
+	ns := newTestNode(mi, mm)
+	staging := t.TempDir()
+	if err := writeTransportFile(staging, transportISCSI); err != nil {
+		t.Fatal(err)
+	}
+	ns.staged["v1"] = &stagedVolumeInfo{iqn: "iqn.v1", iscsiAddr: "127.0.0.1:3260", transport: transportISCSI, stagingPath: staging}
+
+	_, err := ns.NodeUnstageVolume(context.Background(), &csipb.NodeUnstageVolumeRequest{
+		VolumeId:          "v1",
+		StagingTargetPath: staging,
+	})
+	if err != nil {
+		t.Fatalf("NodeUnstageVolume: %v", err)
+	}
+	if ns.staged["v1"] != nil {
+		t.Fatalf("staged entry should be removed after idempotent unstage: %+v", ns.staged["v1"])
+	}
+	if got := readTransportFile(staging); got != "" {
+		t.Fatalf("transport file should be removed, got %q", got)
+	}
+	if got := readVolumeFile(staging); got != "" {
+		t.Fatalf("volume file should be removed, got %q", got)
+	}
+	foundLogout := false
+	for _, call := range mi.calls {
+		if call == "logout:iqn.v1" {
+			foundLogout = true
+		}
+	}
+	if !foundLogout {
+		t.Fatalf("expected logout even when staging path was not mounted, calls=%v", mi.calls)
 	}
 }
 
@@ -249,6 +541,51 @@ func TestNodeUnstage_RestartFallbackUsesTransportFileAndDerivedIQN(t *testing.T)
 	}
 	if got := readTransportFile(staging); got != "" {
 		t.Fatalf("transport file should be removed, got %q", got)
+	}
+	if got := readVolumeFile(staging); got != "" {
+		t.Fatalf("volume file should be removed, got %q", got)
+	}
+}
+
+func TestNodeStageUnstage_RepeatedCyclesLeaveNoLocalState(t *testing.T) {
+	mi, mm := newMockISCSIUtil(), newMockMountUtil()
+	ns := newTestNode(mi, mm)
+	staging := t.TempDir()
+	req := &csipb.NodeStageVolumeRequest{
+		VolumeId:          "v1",
+		StagingTargetPath: staging,
+		VolumeCapability:  testVolumeCapability(),
+		PublishContext: map[string]string{
+			"iscsiAddr": "127.0.0.1:3260",
+			"iqn":       "iqn.v1",
+		},
+	}
+
+	for i := 0; i < 3; i++ {
+		if _, err := ns.NodeStageVolume(context.Background(), req); err != nil {
+			t.Fatalf("stage iter %d: %v", i, err)
+		}
+		if ns.staged["v1"] == nil {
+			t.Fatalf("stage iter %d did not record staged state", i)
+		}
+		if got := readVolumeFile(staging); got != "v1" {
+			t.Fatalf("stage iter %d volume file=%q", i, got)
+		}
+		if _, err := ns.NodeUnstageVolume(context.Background(), &csipb.NodeUnstageVolumeRequest{
+			VolumeId:          "v1",
+			StagingTargetPath: staging,
+		}); err != nil {
+			t.Fatalf("unstage iter %d: %v", i, err)
+		}
+		if ns.staged["v1"] != nil {
+			t.Fatalf("unstage iter %d left staged state: %+v", i, ns.staged["v1"])
+		}
+		if got := readVolumeFile(staging); got != "" {
+			t.Fatalf("unstage iter %d left volume file=%q", i, got)
+		}
+		if got := readTransportFile(staging); got != "" {
+			t.Fatalf("unstage iter %d left transport file=%q", i, got)
+		}
 	}
 }
 

@@ -1,23 +1,28 @@
 # Production Readiness Plan
 
-This document is the post-alpha plan for moving `seaweed-block` from the
-current Kubernetes alpha MVP toward a small production-usable block service.
+This document is the internal post-alpha plan for moving `seaweed-block` from
+the current Kubernetes alpha MVP toward a small production-usable block service.
 
-It consolidates the useful parts of the internal planning notes without
-carrying their phase/gate labels into public documentation.
+It keeps the global product view, current protocol tracks, and readiness bars in
+one place. Public docs should expose the stable user-facing subset, not this
+full internal execution ledger.
 
-## Current Baseline
+## Product Phases
 
-The alpha MVP can already demonstrate:
+### Phase 0: Alpha Preview
 
-- dynamic PVC create/delete through CSI,
-- launcher-generated `blockvolume` workloads,
-- iSCSI attach/mount through Linux tooling,
-- pod filesystem write/read checksum,
-- cleanup with no dangling iSCSI sessions,
-- recovery/failover components tested below the Kubernetes surface.
+Status: current.
 
-The strongest current evidence is the fresh-user Kubernetes smoke run:
+User-facing bar:
+
+- README quick start passes on a fresh single-node k3s lab.
+- Dynamic PVC create/delete works through CSI.
+- A normal app pod writes and reads data through the mounted PVC.
+- Cleanup leaves no active iSCSI sessions and no visible Kubernetes resources.
+- Limitations are visible: single-node evidence, iSCSI only, `walstore` only,
+  no production HA claim.
+
+Current strongest evidence:
 
 ```text
 tree: seaweed-block@59277f9
@@ -27,7 +32,47 @@ result: [alpha] PASS: dynamic PVC create/delete completed checksum write/read an
 artifacts: V:\share\sw-block-final-close\20260504T000127Z\
 ```
 
-This is enough for an alpha preview. It is not enough for production.
+### Phase 1: Alpha Stabilization
+
+Goal: make the alpha useful for early Kubernetes users without the test harness
+acting as the operator.
+
+Bar:
+
+- generated `blockvolume` workloads are created and cleaned by product logic,
+  not by smoke-test script sweeps,
+- PVC owner-reference cleanup is the default alpha path,
+- repeated create/write/read/delete is stable,
+- larger-volume iSCSI filesystem operations work with real OS initiators,
+- artifact collection is standard enough for QA and external bug reports.
+
+### Phase 2: Beta Candidate
+
+Goal: make the service credible for small lab clusters and early contributor
+testing beyond a single-node demo.
+
+Bar:
+
+- multi-node Kubernetes attach works,
+- data survives `blockvolume` pod restart,
+- basic failover is tested under an attached workload,
+- returned replica lifecycle is explicit,
+- ACK profile behavior is named and test-pinned,
+- TestOps can run the smoke suite by scenario name.
+
+### Phase 3: Production Candidate
+
+Goal: make operational limits, failure behavior, and upgrade/cleanup semantics
+clear enough for real deployments.
+
+Bar:
+
+- soak and fault testing,
+- security/resource hardening,
+- upgrade/uninstall story,
+- documented operational limits,
+- reproducible release artifacts/images,
+- observability sufficient for diagnosis without source-level debugging.
 
 ## Product Rule
 
@@ -39,7 +84,7 @@ user intent -> placement -> authority -> runtime execution -> progress facts
             -> recovery / failover / cleanup -> operator-visible status
 ```
 
-The control plane should keep these facts distinct:
+The control plane must keep these facts distinct:
 
 - placement intent is not authority,
 - authority movement is not data continuity,
@@ -49,6 +94,149 @@ The control plane should keep these facts distinct:
 
 These boundaries protect the project from over-claiming availability before the
 data path and operator story are actually proven.
+
+## Current iSCSI Steps
+
+The iSCSI track should stay aligned with V2 coverage at the behavior/test level,
+not by copying V2 control-plane code.
+
+### iSCSI-P1: OS Initiator Correctness
+
+Status: implemented and evidenced.
+
+Scope:
+
+- Linux `iscsiadm` login,
+- 256 MiB target,
+- `mkfs.ext4`,
+- mount,
+- write/read checksum,
+- logout,
+- no dangling session,
+- large WRITE R2T/Data-Out handling,
+- large READ Data-In splitting.
+
+Key implemented slices:
+
+- pending SCSI command during Data-Out is queued, not fatal,
+- V3-local DataOutCollector validates DataSN, BufferOffset, F-bit, overflow,
+- bounded pending queue,
+- Data-Out timeout,
+- real Linux OS initiator smoke,
+- DataInWriter large-read split.
+
+Next validation before considering P1 fully stable:
+
+- repeat OS smoke several times,
+- run 256 MiB K8s PVC path,
+- run 60s `fio` randrw,
+- run Windows iSCSI Initiator format if we want a Windows demo claim.
+
+### iSCSI-P2: Session Stability And Memory Pressure
+
+Goal: close the high-value V2 RX/TX coverage gap.
+
+Test coverage to add or port by behavior:
+
+- many concurrent sessions,
+- close while active I/O is in flight,
+- repeated open/close,
+- non-Data-Out PDUs during Data-Out,
+- NOP-Out during Data-Out,
+- StatSN monotonicity and error-response StatSN,
+- response backpressure,
+- target close while active sessions exist,
+- new session after target close,
+- 10 x 4 MiB writes without unbounded heap growth,
+- slow backend does not accumulate unbounded buffers.
+
+Close bar:
+
+- local protocol tests green,
+- real OS harness supports loop count,
+- no session goroutine leak,
+- no unbounded memory growth under large writes.
+
+### iSCSI-P3: Product-Backed Stability
+
+Goal: verify iSCSI through real `blockvolume`, WAL, CSI, and Kubernetes paths.
+
+Scenarios:
+
+- sustained filesystem write/read on `walstore`,
+- `SYNCHRONIZE_CACHE` pressure,
+- K8s 256 MiB PVC write/read,
+- 60s `fio` randrw,
+- app writer pod replaced by reader pod on same PVC,
+- repeated attach/detach loop,
+- reconnect after initiator logout/login.
+
+Close bar:
+
+- no iSCSI session errors,
+- no dangling sessions after cleanup,
+- no Kubernetes residue,
+- data checksum passes through pod path.
+
+### iSCSI-P4: Security And Access Control
+
+Goal: match the useful V2 CHAP behavior without pulling V2 control-plane
+semantics into V3.
+
+Scope:
+
+- CHAP config validation,
+- auth success/failure tests,
+- wrong-secret and missing-secret negative tests,
+- Kubernetes Secret integration later,
+- clear docs that CHAP is disabled by default in alpha.
+
+Close bar:
+
+- unauthenticated access fails when CHAP is required,
+- authenticated access passes,
+- auth failure does not leak sessions or partially open devices.
+
+### iSCSI-P5: CSI Node Lifecycle Hardening
+
+Goal: make iSCSI reliable under normal Kubernetes node-plugin behavior.
+
+Scope:
+
+- NodeStage idempotency,
+- NodeUnstage cleanup,
+- plugin restart cleanup,
+- stale device/session detection,
+- failed attach cleanup,
+- repeated attach/detach,
+- clear host requirements for `iscsi_tcp`, privileged mode, and mount tools.
+
+Close bar:
+
+- kubelet retries do not wedge the node plugin,
+- failed attach leaves no device/session leak,
+- repeated PVC create/delete works without manual host cleanup.
+
+### iSCSI-P6: Multipath / Failover Frontend
+
+Goal: support mounted-volume failover semantics instead of only reconnect-based
+single-path behavior.
+
+Scope:
+
+- ALUA/MPIO for iSCSI,
+- standby/active target state,
+- REPORT TARGET PORT GROUPS behavior,
+- path failure and recovery,
+- failover while mounted,
+- old primary cannot serve stale successful I/O.
+
+Close bar:
+
+- authority/failover facts are stable enough to drive frontend path state,
+- failover while mounted has byte-equal proof,
+- no stale-primary success,
+- no claim before ALUA/MPIO behavior is tested with real initiators.
 
 ## Production Tracks
 
@@ -65,7 +253,7 @@ Required work:
   node-local path,
 - add a small controller/operator to create and delete generated `blockvolume`
   workloads,
-- make `DeleteVolume` cleanup fully controller-owned instead of harness-owned,
+- make `DeleteVolume` cleanup fully controller-owned,
 - keep the README quick start as a smoke test for every release candidate.
 
 Pass bar:
@@ -187,14 +375,9 @@ Goal: users diagnose state without reading internal debug logs.
 
 Required work:
 
-- add a status endpoint or CLI for:
-  - frontend readiness,
-  - authority role,
-  - replication role,
-  - durable ack frontier,
-  - recovery phase,
-  - placement reason,
-  - unsupported/degraded reason,
+- add a status endpoint or CLI for frontend readiness, authority role,
+  replication role, durable ack frontier, recovery phase, placement reason, and
+  degraded reason,
 - add concise structured logs for assignment, attach, recovery, and cleanup,
 - keep TestOps artifact bundles stable.
 

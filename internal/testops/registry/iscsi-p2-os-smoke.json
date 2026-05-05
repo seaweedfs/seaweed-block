@@ -19,7 +19,7 @@
     "sha256sum",
     "fio-optional"
   ],
-  "qa_instruction": "internal/docs/iscsi-os-initiator-compat-plan.md",
+  "qa_instruction": "internal/docs/ref/iscsi-os-initiator-compat-plan.md",
   "known_green_commit": "d25e7b4",
   "artifacts": [
     "run.log",

@@ -1,0 +1,71 @@
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: sw-block-dynamic
+provisioner: block.csi.seaweedfs.com
+volumeBindingMode: Immediate
+allowVolumeExpansion: false
+parameters:
+  replicationFactor: "1"
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: sw-block-dynamic-v1
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: sw-block-dynamic
+  resources:
+    requests:
+      storage: 256Mi
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: sw-block-dynamic-smoke
+spec:
+  restartPolicy: Never
+  securityContext:
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: writer
+      image: alpine:3.20
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop:
+            - ALL
+        seccompProfile:
+          type: RuntimeDefault
+      command:
+        - /bin/sh
+        - -c
+        - |
+          set -eu
+          apk add --no-cache fio
+          fio --name=sw-block-alpha \
+            --directory=/data \
+            --filename=fio.bin \
+            --rw=randrw \
+            --rwmixread=50 \
+            --bs=128k \
+            --size=64M \
+            --runtime=60 \
+            --time_based \
+            --iodepth=1 \
+            --numjobs=1 \
+            --direct=0 \
+            --fsync=1 \
+            --group_reporting \
+            --output=/data/fio.log
+          tail -n +1 /data/fio.log
+          sync
+      volumeMounts:
+        - name: data
+          mountPath: /data
+  volumes:
+    - name: data
+      persistentVolumeClaim:
+        claimName: sw-block-dynamic-v1

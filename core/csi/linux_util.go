@@ -29,6 +29,25 @@ func (r *realISCSIUtil) Discovery(ctx context.Context, portal string) error {
 	return nil
 }
 
+func (r *realISCSIUtil) ConfigureCHAP(ctx context.Context, iqn, portal string, auth ISCSIAuth) error {
+	updates := []struct {
+		key   string
+		value string
+	}{
+		{key: "node.session.auth.authmethod", value: "CHAP"},
+		{key: "node.session.auth.username", value: auth.Username},
+		{key: "node.session.auth.password", value: auth.Secret},
+	}
+	for _, update := range updates {
+		cmd := exec.CommandContext(ctx, "iscsiadm", "-m", "node", "-T", iqn, "-p", portal, "--op=update", "-n", update.key, "-v", update.value)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("iscsiadm configure CHAP %s: %s: %w", update.key, string(out), err)
+		}
+	}
+	return nil
+}
+
 func (r *realISCSIUtil) Login(ctx context.Context, iqn, portal string) error {
 	cmd := exec.CommandContext(ctx, "iscsiadm", "-m", "node", "-T", iqn, "-p", portal, "--login")
 	out, err := cmd.CombinedOutput()

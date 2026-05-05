@@ -9,9 +9,20 @@ DYNAMIC_PVC_MANIFEST="${SW_BLOCK_DYNAMIC_PVC_MANIFEST:-$ROOT/deploy/k8s/g15d/dyn
 IMAGE="${SW_BLOCK_IMAGE:-sw-block:local}"
 CSI_IMAGE="${SW_BLOCK_CSI_IMAGE:-sw-block-csi:local}"
 LAUNCHER_PVC_OWNER_REF="${SW_BLOCK_LAUNCHER_PVC_OWNER_REF:-0}"
+CHAP_USERNAME="${SW_BLOCK_ISCSI_CHAP_USERNAME:-}"
+CHAP_SECRET="${SW_BLOCK_ISCSI_CHAP_SECRET:-}"
+CHAP_SECRET_NAME="${SW_BLOCK_ISCSI_CHAP_SECRET_NAME:-sw-block-iscsi-chap}"
 BLOCKVOLUME_NAMESPACE="kube-system"
 if [[ "$LAUNCHER_PVC_OWNER_REF" == "1" || "$LAUNCHER_PVC_OWNER_REF" == "true" ]]; then
   BLOCKVOLUME_NAMESPACE="$NAMESPACE"
+fi
+CHAP_ENABLED=0
+if [[ -n "$CHAP_USERNAME" || -n "$CHAP_SECRET" ]]; then
+  if [[ -z "$CHAP_USERNAME" || -z "$CHAP_SECRET" ]]; then
+    echo "SW_BLOCK_ISCSI_CHAP_USERNAME and SW_BLOCK_ISCSI_CHAP_SECRET must be set together" >&2
+    exit 2
+  fi
+  CHAP_ENABLED=1
 fi
 
 mkdir -p "$ARTIFACT_DIR"
@@ -38,6 +49,7 @@ NODE_NAME="$(kubectl get nodes -o jsonpath='{.items[0].metadata.name}')"
 STACK_RENDERED="$ARTIFACT_DIR/block-stack.rendered.yaml"
 CSI_CONTROLLER_RENDERED="$ARTIFACT_DIR/csi-controller.rendered.yaml"
 CSI_NODE_RENDERED="$ARTIFACT_DIR/csi-node.rendered.yaml"
+DYNAMIC_RENDERED="$ARTIFACT_DIR/dynamic-pvc-pod.rendered.yaml"
 IMAGE_SED="$(sed_escape "$IMAGE")"
 CSI_IMAGE_SED="$(sed_escape "$CSI_IMAGE")"
 sed -e "s/__NODE_NAME__/${NODE_NAME}/g" \
@@ -48,6 +60,11 @@ if [[ "$BLOCKVOLUME_NAMESPACE" != "kube-system" ]]; then
   awk '/--launcher-namespace=/{print; print "            - \"--launcher-pvc-owner-ref\""; next} {print}' "$STACK_RENDERED" >"$STACK_RENDERED.tmp"
   mv "$STACK_RENDERED.tmp" "$STACK_RENDERED"
   grep -q -- '--launcher-pvc-owner-ref' "$STACK_RENDERED" || { echo "failed to inject --launcher-pvc-owner-ref into $STACK_RENDERED" >&2; exit 1; }
+fi
+if [[ "$CHAP_ENABLED" == "1" ]]; then
+  awk -v secret="$CHAP_SECRET_NAME" '/--launcher-iscsi-port-base=/{print; print "            - \"--launcher-iscsi-chap-secret-name=" secret "\""; next} {print}' "$STACK_RENDERED" >"$STACK_RENDERED.tmp"
+  mv "$STACK_RENDERED.tmp" "$STACK_RENDERED"
+  grep -q -- '--launcher-iscsi-chap-secret-name' "$STACK_RENDERED" || { echo "failed to inject --launcher-iscsi-chap-secret-name into $STACK_RENDERED" >&2; exit 1; }
 fi
 sed -e "s/sw-block-csi:local/${CSI_IMAGE_SED}/g" \
   -e "s/imagePullPolicy: Never/imagePullPolicy: IfNotPresent/g" \
@@ -60,6 +77,19 @@ fi
 sed -e "s/sw-block-csi:local/${CSI_IMAGE_SED}/g" \
   -e "s/imagePullPolicy: Never/imagePullPolicy: IfNotPresent/g" \
   "$ROOT/deploy/k8s/g15b/csi-node.yaml" >"$CSI_NODE_RENDERED"
+cp "$DYNAMIC_PVC_MANIFEST" "$DYNAMIC_RENDERED"
+if [[ "$CHAP_ENABLED" == "1" ]]; then
+  awk -v secret="$CHAP_SECRET_NAME" -v ns="$NAMESPACE" '
+    /^parameters:/ {
+      print
+      print "  csi.storage.k8s.io/node-stage-secret-name: \"" secret "\""
+      print "  csi.storage.k8s.io/node-stage-secret-namespace: \"" ns "\""
+      next
+    }
+    {print}
+  ' "$DYNAMIC_RENDERED" >"$DYNAMIC_RENDERED.tmp"
+  mv "$DYNAMIC_RENDERED.tmp" "$DYNAMIC_RENDERED"
+fi
 
 log "artifact_dir=$ARTIFACT_DIR"
 log "root=$ROOT"
@@ -69,6 +99,7 @@ log "image=$IMAGE"
 log "csi_image=$CSI_IMAGE"
 log "blockvolume_namespace=$BLOCKVOLUME_NAMESPACE"
 log "launcher_pvc_owner_ref=$LAUNCHER_PVC_OWNER_REF"
+log "chap_enabled=$CHAP_ENABLED"
 log "dynamic_pvc_manifest=$DYNAMIC_PVC_MANIFEST"
 kubectl version --client=true >"$ARTIFACT_DIR/kubectl-version.txt" 2>&1 || true
 kubectl get nodes -o wide >"$ARTIFACT_DIR/nodes.before.txt"
@@ -79,7 +110,9 @@ cleanup() {
   kubectl -n kube-system delete deploy -l app=sw-blockvolume --ignore-not-found=true >>"$ARTIFACT_DIR/cleanup.log" 2>&1
   kubectl -n "$NAMESPACE" delete deploy -l app=sw-blockvolume --ignore-not-found=true >>"$ARTIFACT_DIR/cleanup.log" 2>&1
   kubectl -n kube-system delete deploy sw-blockvolume-r1 sw-blockvolume-r2 --ignore-not-found=true >>"$ARTIFACT_DIR/cleanup.log" 2>&1
-  kubectl -n "$NAMESPACE" delete -f "$DYNAMIC_PVC_MANIFEST" --ignore-not-found=true >>"$ARTIFACT_DIR/cleanup.log" 2>&1
+  kubectl -n "$NAMESPACE" delete -f "$DYNAMIC_RENDERED" --ignore-not-found=true >>"$ARTIFACT_DIR/cleanup.log" 2>&1
+  kubectl -n "$NAMESPACE" delete secret "$CHAP_SECRET_NAME" --ignore-not-found=true >>"$ARTIFACT_DIR/cleanup.log" 2>&1
+  kubectl -n "$BLOCKVOLUME_NAMESPACE" delete secret "$CHAP_SECRET_NAME" --ignore-not-found=true >>"$ARTIFACT_DIR/cleanup.log" 2>&1
   kubectl delete -f "$CSI_NODE_RENDERED" --ignore-not-found=true >>"$ARTIFACT_DIR/cleanup.log" 2>&1
   kubectl delete -f "$CSI_CONTROLLER_RENDERED" --ignore-not-found=true >>"$ARTIFACT_DIR/cleanup.log" 2>&1
   kubectl delete -f "$ROOT/deploy/k8s/g15b/csi-driver.yaml" --ignore-not-found=true >>"$ARTIFACT_DIR/cleanup.log" 2>&1
@@ -143,8 +176,18 @@ kubectl apply -f "$CSI_NODE_RENDERED" | tee "$ARTIFACT_DIR/apply-csi-node.log"
 kubectl -n kube-system wait --for=condition=available deploy/sw-block-csi-controller --timeout=120s
 kubectl -n kube-system rollout status ds/sw-block-csi-node --timeout=120s
 
+if [[ "$CHAP_ENABLED" == "1" ]]; then
+  log "apply iSCSI CHAP Secret"
+  for secret_ns in "$NAMESPACE" "$BLOCKVOLUME_NAMESPACE"; do
+    kubectl -n "$secret_ns" create secret generic "$CHAP_SECRET_NAME" \
+      --from-literal=chapUsername="$CHAP_USERNAME" \
+      --from-literal=chapSecret="$CHAP_SECRET" \
+      --dry-run=client -o yaml | kubectl apply -f - | tee -a "$ARTIFACT_DIR/apply-chap-secret.log"
+  done
+fi
+
 log "apply dynamic StorageClass/PVC/pod"
-kubectl -n "$NAMESPACE" apply -f "$DYNAMIC_PVC_MANIFEST" | tee "$ARTIFACT_DIR/apply-dynamic.log"
+kubectl -n "$NAMESPACE" apply -f "$DYNAMIC_RENDERED" | tee "$ARTIFACT_DIR/apply-dynamic.log"
 
 log "wait for launcher-generated blockvolume manifest"
 for _ in $(seq 1 180); do

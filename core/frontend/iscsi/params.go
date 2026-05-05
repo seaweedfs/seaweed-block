@@ -5,8 +5,9 @@ package iscsi
 //
 // Ported from weed/storage/blockvol/iscsi/params.go per T2
 // assignment §4.3 ckpt 9 allowlist (parameter negotiation
-// mechanism only). CHAP / authentication helpers from V2 are
-// intentionally NOT ported — auth is T8.
+// mechanism only). Target-side CHAP auth is implemented in
+// login.go; this file intentionally stays as generic text
+// parameter parsing / negotiation helpers.
 
 import (
 	"errors"

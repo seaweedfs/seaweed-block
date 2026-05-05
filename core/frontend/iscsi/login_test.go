@@ -5,6 +5,8 @@
 package iscsi_test
 
 import (
+	"crypto/md5"
+	"encoding/hex"
 	"testing"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend/iscsi"
@@ -24,6 +26,14 @@ func mkLoginReq(csg, nsg uint8, transit bool, params *iscsi.Params) *iscsi.PDU {
 		p.DataSegment = params.Encode()
 	}
 	return p
+}
+
+func chapResponse(id byte, secret string, challenge []byte) string {
+	h := md5.New()
+	h.Write([]byte{id})
+	h.Write([]byte(secret))
+	h.Write(challenge)
+	return "0x" + hex.EncodeToString(h.Sum(nil))
 }
 
 // Single-round LoginOp → FullFeature, no SecurityNeg. Mirrors
@@ -115,6 +125,282 @@ func TestLoginNegotiator_MultiRound_SecurityThenLoginOp(t *testing.T) {
 	}
 	if !neg.Done() {
 		t.Fatalf("Done()=false after FullFeature transit")
+	}
+}
+
+func TestLoginNegotiator_CHAP_DirectLoginOpRejected(t *testing.T) {
+	cfg := iscsi.DefaultNegotiableConfig()
+	cfg.CHAP = iscsi.CHAPConfig{Username: "user1", Secret: "secret1"}
+	neg := iscsi.NewLoginNegotiator(cfg)
+	resolver := &fakeResolver{names: map[string]bool{"iqn.example:t1": true}}
+
+	params := iscsi.NewParams()
+	params.Set("InitiatorName", "iqn.example.host:1")
+	params.Set("SessionType", "Normal")
+	params.Set("TargetName", "iqn.example:t1")
+	req := mkLoginReq(iscsi.StageLoginOp, iscsi.StageFullFeature, true, params)
+
+	resp := neg.HandleLoginPDU(req, resolver)
+	if resp.LoginStatusClass() != iscsi.LoginStatusInitiatorErr ||
+		resp.LoginStatusDetail() != iscsi.LoginDetailAuthFailed {
+		t.Fatalf("status=0x%02x detail=0x%02x want InitiatorErr/AuthFailed",
+			resp.LoginStatusClass(), resp.LoginStatusDetail())
+	}
+}
+
+func TestLoginNegotiator_CHAP_DiscoverySessionDoesNotRequireAuth(t *testing.T) {
+	cfg := iscsi.DefaultNegotiableConfig()
+	cfg.CHAP = iscsi.CHAPConfig{Username: "user1", Secret: "secret1", Challenge: []byte("1234567890abcdef")}
+	neg := iscsi.NewLoginNegotiator(cfg)
+	resolver := &fakeResolver{names: map[string]bool{}}
+
+	params := iscsi.NewParams()
+	params.Set("InitiatorName", "iqn.example.host:1")
+	params.Set("SessionType", iscsi.SessionTypeDiscovery)
+	params.Set("AuthMethod", "None")
+	req := mkLoginReq(iscsi.StageSecurityNeg, iscsi.StageFullFeature, true, params)
+
+	resp := neg.HandleLoginPDU(req, resolver)
+	if resp.LoginStatusClass() != iscsi.LoginStatusSuccess {
+		t.Fatalf("status=0x%02x detail=0x%02x want Success",
+			resp.LoginStatusClass(), resp.LoginStatusDetail())
+	}
+	if !neg.Done() {
+		t.Fatalf("Done()=false after discovery login")
+	}
+}
+
+func TestLoginNegotiator_CHAP_RejectsAuthMethodNone(t *testing.T) {
+	cfg := iscsi.DefaultNegotiableConfig()
+	cfg.CHAP = iscsi.CHAPConfig{Username: "user1", Secret: "secret1", Challenge: []byte("1234567890abcdef")}
+	neg := iscsi.NewLoginNegotiator(cfg)
+	resolver := &fakeResolver{names: map[string]bool{"iqn.example:t1": true}}
+
+	params := iscsi.NewParams()
+	params.Set("InitiatorName", "iqn.example.host:1")
+	params.Set("SessionType", "Normal")
+	params.Set("TargetName", "iqn.example:t1")
+	params.Set("AuthMethod", "None")
+	req := mkLoginReq(iscsi.StageSecurityNeg, iscsi.StageSecurityNeg, false, params)
+
+	resp := neg.HandleLoginPDU(req, resolver)
+	if resp.LoginStatusClass() != iscsi.LoginStatusInitiatorErr ||
+		resp.LoginStatusDetail() != iscsi.LoginDetailAuthFailed {
+		t.Fatalf("status=0x%02x detail=0x%02x want InitiatorErr/AuthFailed",
+			resp.LoginStatusClass(), resp.LoginStatusDetail())
+	}
+}
+
+func TestLoginNegotiator_CHAP_ChallengeThenLoginOp(t *testing.T) {
+	challenge := []byte("1234567890abcdef")
+	cfg := iscsi.DefaultNegotiableConfig()
+	cfg.CHAP = iscsi.CHAPConfig{Username: "user1", Secret: "secret1", Challenge: challenge}
+	neg := iscsi.NewLoginNegotiator(cfg)
+	resolver := &fakeResolver{names: map[string]bool{"iqn.example:t1": true}}
+
+	r1Params := iscsi.NewParams()
+	r1Params.Set("InitiatorName", "iqn.example.host:1")
+	r1Params.Set("SessionType", "Normal")
+	r1Params.Set("TargetName", "iqn.example:t1")
+	r1Params.Set("AuthMethod", "CHAP")
+	r1 := mkLoginReq(iscsi.StageSecurityNeg, iscsi.StageSecurityNeg, false, r1Params)
+	resp1 := neg.HandleLoginPDU(r1, resolver)
+	if resp1.LoginStatusClass() != iscsi.LoginStatusSuccess {
+		t.Fatalf("round 1 status=0x%02x detail=0x%02x",
+			resp1.LoginStatusClass(), resp1.LoginStatusDetail())
+	}
+	resp1Params, err := iscsi.ParseParams(resp1.DataSegment)
+	if err != nil {
+		t.Fatalf("ParseParams round 1: %v", err)
+	}
+	if v, _ := resp1Params.Get("AuthMethod"); v != "CHAP" {
+		t.Fatalf("AuthMethod=%q want CHAP", v)
+	}
+
+	r2Params := iscsi.NewParams()
+	r2Params.Set("CHAP_A", "5")
+	r2 := mkLoginReq(iscsi.StageSecurityNeg, iscsi.StageSecurityNeg, false, r2Params)
+	resp2 := neg.HandleLoginPDU(r2, resolver)
+	if resp2.LoginStatusClass() != iscsi.LoginStatusSuccess {
+		t.Fatalf("round 2 status=0x%02x detail=0x%02x",
+			resp2.LoginStatusClass(), resp2.LoginStatusDetail())
+	}
+	resp2Params, err := iscsi.ParseParams(resp2.DataSegment)
+	if err != nil {
+		t.Fatalf("ParseParams round 2: %v", err)
+	}
+	if v, _ := resp2Params.Get("CHAP_A"); v != "5" {
+		t.Fatalf("CHAP_A=%q want 5", v)
+	}
+	if v, _ := resp2Params.Get("CHAP_I"); v != "1" {
+		t.Fatalf("CHAP_I=%q want 1", v)
+	}
+	if v, _ := resp2Params.Get("CHAP_C"); v != "0x"+hex.EncodeToString(challenge) {
+		t.Fatalf("CHAP_C=%q want deterministic challenge", v)
+	}
+	if v, _ := resp2Params.Get("TargetPortalGroupTag"); v != "1" {
+		t.Fatalf("TargetPortalGroupTag=%q want 1", v)
+	}
+
+	r3Params := iscsi.NewParams()
+	r3Params.Set("CHAP_N", "user1")
+	r3Params.Set("CHAP_R", chapResponse(1, "secret1", challenge))
+	r3 := mkLoginReq(iscsi.StageSecurityNeg, iscsi.StageLoginOp, true, r3Params)
+	resp3 := neg.HandleLoginPDU(r3, resolver)
+	if resp3.LoginStatusClass() != iscsi.LoginStatusSuccess {
+		t.Fatalf("round 3 status=0x%02x detail=0x%02x",
+			resp3.LoginStatusClass(), resp3.LoginStatusDetail())
+	}
+	resp3Params, err := iscsi.ParseParams(resp3.DataSegment)
+	if err != nil {
+		t.Fatalf("ParseParams round 3: %v", err)
+	}
+	if v, ok := resp3Params.Get("AuthMethod"); ok {
+		t.Fatalf("round 3 AuthMethod=%q should not be echoed after CHAP_R", v)
+	}
+	if neg.Phase() != iscsi.LoginPhaseOperational {
+		t.Fatalf("phase=%v want Operational", neg.Phase())
+	}
+
+	r4Params := iscsi.NewParams()
+	r4Params.Set("HeaderDigest", "None")
+	r4Params.Set("DataDigest", "None")
+	r4 := mkLoginReq(iscsi.StageLoginOp, iscsi.StageFullFeature, true, r4Params)
+	resp4 := neg.HandleLoginPDU(r4, resolver)
+	if resp4.LoginStatusClass() != iscsi.LoginStatusSuccess {
+		t.Fatalf("round 4 status=0x%02x detail=0x%02x",
+			resp4.LoginStatusClass(), resp4.LoginStatusDetail())
+	}
+	if !neg.Done() {
+		t.Fatalf("Done()=false after CHAP + LoginOp")
+	}
+}
+
+func TestLoginNegotiator_CHAP_ChallengeIgnoresPrematureTransit(t *testing.T) {
+	challenge := []byte("1234567890abcdef")
+	cfg := iscsi.DefaultNegotiableConfig()
+	cfg.CHAP = iscsi.CHAPConfig{Username: "user1", Secret: "secret1", Challenge: challenge}
+	neg := iscsi.NewLoginNegotiator(cfg)
+	resolver := &fakeResolver{names: map[string]bool{"iqn.example:t1": true}}
+
+	params := iscsi.NewParams()
+	params.Set("InitiatorName", "iqn.example.host:1")
+	params.Set("SessionType", "Normal")
+	params.Set("TargetName", "iqn.example:t1")
+	params.Set("AuthMethod", "CHAP")
+	req := mkLoginReq(iscsi.StageSecurityNeg, iscsi.StageLoginOp, true, params)
+
+	resp := neg.HandleLoginPDU(req, resolver)
+	if resp.LoginStatusClass() != iscsi.LoginStatusSuccess {
+		t.Fatalf("status=0x%02x detail=0x%02x want Success",
+			resp.LoginStatusClass(), resp.LoginStatusDetail())
+	}
+	if resp.LoginTransit() {
+		t.Fatal("response should not transit before CHAP_N/CHAP_R is verified")
+	}
+	if resp.LoginNSG() != iscsi.StageSecurityNeg {
+		t.Fatalf("NSG=%d want SecurityNeg while challenge is outstanding", resp.LoginNSG())
+	}
+	if neg.Phase() != iscsi.LoginPhaseSecurity {
+		t.Fatalf("phase=%v want Security", neg.Phase())
+	}
+	respParams, err := iscsi.ParseParams(resp.DataSegment)
+	if err != nil {
+		t.Fatalf("ParseParams: %v", err)
+	}
+	if v, _ := respParams.Get("AuthMethod"); v != "CHAP" {
+		t.Fatalf("AuthMethod=%q want CHAP", v)
+	}
+	if v, _ := respParams.Get("TargetPortalGroupTag"); v != "1" {
+		t.Fatalf("TargetPortalGroupTag=%q want 1", v)
+	}
+	if v, ok := respParams.Get("CHAP_C"); ok {
+		t.Fatalf("CHAP_C=%q should not be emitted before CHAP_A is offered", v)
+	}
+}
+
+func TestLoginNegotiator_CHAP_EmptySecurityRequestOffersMethod(t *testing.T) {
+	challenge := []byte("1234567890abcdef")
+	cfg := iscsi.DefaultNegotiableConfig()
+	cfg.CHAP = iscsi.CHAPConfig{Username: "user1", Secret: "secret1", Challenge: challenge}
+	neg := iscsi.NewLoginNegotiator(cfg)
+	resolver := &fakeResolver{names: map[string]bool{"iqn.example:t1": true}}
+
+	params := iscsi.NewParams()
+	params.Set("InitiatorName", "iqn.example.host:1")
+	params.Set("SessionType", "Normal")
+	params.Set("TargetName", "iqn.example:t1")
+	req := mkLoginReq(iscsi.StageSecurityNeg, iscsi.StageLoginOp, true, params)
+
+	resp := neg.HandleLoginPDU(req, resolver)
+	if resp.LoginStatusClass() != iscsi.LoginStatusSuccess {
+		t.Fatalf("status=0x%02x detail=0x%02x want Success",
+			resp.LoginStatusClass(), resp.LoginStatusDetail())
+	}
+	if resp.LoginTransit() {
+		t.Fatal("response should not transit before CHAP method is accepted")
+	}
+	respParams, err := iscsi.ParseParams(resp.DataSegment)
+	if err != nil {
+		t.Fatalf("ParseParams: %v", err)
+	}
+	if v, _ := respParams.Get("AuthMethod"); v != "CHAP" {
+		t.Fatalf("AuthMethod=%q want CHAP", v)
+	}
+	if v, _ := respParams.Get("TargetPortalGroupTag"); v != "1" {
+		t.Fatalf("TargetPortalGroupTag=%q want 1", v)
+	}
+	if v, ok := respParams.Get("CHAP_C"); ok {
+		t.Fatalf("CHAP_C=%q should not be emitted before CHAP_A is offered", v)
+	}
+}
+
+func TestLoginNegotiator_CHAP_MissingResponseRejected(t *testing.T) {
+	challenge := []byte("1234567890abcdef")
+	cfg := iscsi.DefaultNegotiableConfig()
+	cfg.CHAP = iscsi.CHAPConfig{Username: "user1", Secret: "secret1", Challenge: challenge}
+	neg := iscsi.NewLoginNegotiator(cfg)
+	resolver := &fakeResolver{names: map[string]bool{"iqn.example:t1": true}}
+
+	r1Params := iscsi.NewParams()
+	r1Params.Set("InitiatorName", "iqn.example.host:1")
+	r1Params.Set("SessionType", "Normal")
+	r1Params.Set("TargetName", "iqn.example:t1")
+	r1Params.Set("AuthMethod", "CHAP")
+	neg.HandleLoginPDU(mkLoginReq(iscsi.StageSecurityNeg, iscsi.StageSecurityNeg, false, r1Params), resolver)
+
+	r2Params := iscsi.NewParams()
+	r2Params.Set("CHAP_N", "user1")
+	resp := neg.HandleLoginPDU(mkLoginReq(iscsi.StageSecurityNeg, iscsi.StageLoginOp, true, r2Params), resolver)
+	if resp.LoginStatusClass() != iscsi.LoginStatusInitiatorErr ||
+		resp.LoginStatusDetail() != iscsi.LoginDetailMissingParam {
+		t.Fatalf("status=0x%02x detail=0x%02x want InitiatorErr/MissingParam",
+			resp.LoginStatusClass(), resp.LoginStatusDetail())
+	}
+}
+
+func TestLoginNegotiator_CHAP_BadResponseRejected(t *testing.T) {
+	challenge := []byte("1234567890abcdef")
+	cfg := iscsi.DefaultNegotiableConfig()
+	cfg.CHAP = iscsi.CHAPConfig{Username: "user1", Secret: "secret1", Challenge: challenge}
+	neg := iscsi.NewLoginNegotiator(cfg)
+	resolver := &fakeResolver{names: map[string]bool{"iqn.example:t1": true}}
+
+	r1Params := iscsi.NewParams()
+	r1Params.Set("InitiatorName", "iqn.example.host:1")
+	r1Params.Set("SessionType", "Normal")
+	r1Params.Set("TargetName", "iqn.example:t1")
+	r1Params.Set("AuthMethod", "CHAP")
+	neg.HandleLoginPDU(mkLoginReq(iscsi.StageSecurityNeg, iscsi.StageSecurityNeg, false, r1Params), resolver)
+
+	r2Params := iscsi.NewParams()
+	r2Params.Set("CHAP_N", "user1")
+	r2Params.Set("CHAP_R", chapResponse(1, "wrong-secret", challenge))
+	resp := neg.HandleLoginPDU(mkLoginReq(iscsi.StageSecurityNeg, iscsi.StageLoginOp, true, r2Params), resolver)
+	if resp.LoginStatusClass() != iscsi.LoginStatusInitiatorErr ||
+		resp.LoginStatusDetail() != iscsi.LoginDetailAuthFailed {
+		t.Fatalf("status=0x%02x detail=0x%02x want InitiatorErr/AuthFailed",
+			resp.LoginStatusClass(), resp.LoginStatusDetail())
 	}
 }
 

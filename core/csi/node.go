@@ -17,15 +17,22 @@ const (
 	transportISCSI = "iscsi"
 	transportNVMe  = "nvme"
 	transportFile  = ".transport"
+	volumeFile     = ".volume"
 )
 
 type ISCSIUtil interface {
 	Discovery(ctx context.Context, portal string) error
+	ConfigureCHAP(ctx context.Context, iqn, portal string, auth ISCSIAuth) error
 	Login(ctx context.Context, iqn, portal string) error
 	Logout(ctx context.Context, iqn string) error
 	GetDeviceByIQN(ctx context.Context, iqn string) (string, error)
 	IsLoggedIn(ctx context.Context, iqn string) (bool, error)
 	RescanDevice(ctx context.Context, iqn string) error
+}
+
+type ISCSIAuth struct {
+	Username string
+	Secret   string
 }
 
 type MountUtil interface {
@@ -98,26 +105,47 @@ func (s *NodeServer) NodeStageVolume(ctx context.Context, req *csipb.NodeStageVo
 		return nil, status.Errorf(codes.Internal, "check mount: %v", err)
 	}
 	if mounted {
+		if err := s.validateMountedStagingVolume(volumeID, stagingPath); err != nil {
+			return nil, err
+		}
 		s.logger.Printf("NodeStageVolume: %s already mounted at %s", volumeID, stagingPath)
 		return &csipb.NodeStageVolumeResponse{}, nil
 	}
 
 	portal, iqn := iscsiFromContext(req.GetPublishContext())
+	auth := iscsiAuthFromContext(req.GetSecrets())
+	if auth == (ISCSIAuth{}) {
+		auth = iscsiAuthFromContext(req.GetPublishContext())
+	}
 	if portal == "" || iqn == "" {
 		portal, iqn = iscsiFromContext(req.GetVolumeContext())
+		if auth == (ISCSIAuth{}) {
+			auth = iscsiAuthFromContext(req.GetVolumeContext())
+		}
 	}
 	if portal == "" || iqn == "" {
 		return nil, status.Error(codes.FailedPrecondition, "no iSCSI publish target")
+	}
+	if err := validateISCSIAuth(auth); err != nil {
+		return nil, err
 	}
 
 	loggedIn, err := s.iscsiUtil.IsLoggedIn(ctx, iqn)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "check iscsi login: %v", err)
 	}
+	if loggedIn && !s.hasStagedIdentity(volumeID, stagingPath) {
+		return nil, status.Errorf(codes.FailedPrecondition, "iSCSI session for %q is already logged in without staged volume identity", iqn)
+	}
 	loginStarted := false
 	if !loggedIn {
 		if err := s.iscsiUtil.Discovery(ctx, portal); err != nil {
 			return nil, status.Errorf(codes.Internal, "iscsi discovery: %v", err)
+		}
+		if auth.Secret != "" {
+			if err := s.iscsiUtil.ConfigureCHAP(ctx, iqn, portal, auth); err != nil {
+				return nil, status.Errorf(codes.Internal, "iscsi chap config: %v", err)
+			}
 		}
 		if err := s.iscsiUtil.Login(ctx, iqn, portal); err != nil {
 			return nil, status.Errorf(codes.Internal, "iscsi login: %v", err)
@@ -150,6 +178,9 @@ func (s *NodeServer) NodeStageVolume(ctx context.Context, req *csipb.NodeStageVo
 		return nil, status.Errorf(codes.Internal, "format and mount: %v", err)
 	}
 	if err := writeTransportFile(stagingPath, transportISCSI); err != nil {
+		s.logger.Printf("NodeStageVolume: %s: %v (non-fatal)", volumeID, err)
+	}
+	if err := writeVolumeFile(stagingPath, volumeID); err != nil {
 		s.logger.Printf("NodeStageVolume: %s: %v (non-fatal)", volumeID, err)
 	}
 
@@ -212,6 +243,7 @@ func (s *NodeServer) NodeUnstageVolume(ctx context.Context, req *csipb.NodeUnsta
 	}
 
 	_ = os.Remove(filepath.Join(stagingPath, transportFile))
+	_ = os.Remove(filepath.Join(stagingPath, volumeFile))
 	s.stagedMu.Lock()
 	delete(s.staged, volumeID)
 	s.stagedMu.Unlock()
@@ -305,8 +337,71 @@ func iscsiFromContext(ctx map[string]string) (portal, iqn string) {
 	return ctx["iscsiAddr"], ctx["iqn"]
 }
 
+func iscsiAuthFromContext(ctx map[string]string) ISCSIAuth {
+	if ctx == nil {
+		return ISCSIAuth{}
+	}
+	return ISCSIAuth{
+		Username: ctx["chapUsername"],
+		Secret:   ctx["chapSecret"],
+	}
+}
+
+func (s *NodeServer) validateMountedStagingVolume(volumeID, stagingPath string) error {
+	s.stagedMu.Lock()
+	info := s.staged[volumeID]
+	if info != nil && info.stagingPath == stagingPath {
+		s.stagedMu.Unlock()
+		return nil
+	}
+	for otherVolume, otherInfo := range s.staged {
+		if otherVolume != volumeID && otherInfo != nil && otherInfo.stagingPath == stagingPath {
+			s.stagedMu.Unlock()
+			return status.Errorf(codes.FailedPrecondition, "staging path %q is already mounted for volume %q", stagingPath, otherVolume)
+		}
+	}
+	s.stagedMu.Unlock()
+
+	if got := readVolumeFile(stagingPath); got == volumeID {
+		return nil
+	} else if got != "" {
+		return status.Errorf(codes.FailedPrecondition, "staging path %q is already mounted for volume %q", stagingPath, got)
+	}
+	return status.Errorf(codes.FailedPrecondition, "staging path %q is already mounted without sw-block volume identity", stagingPath)
+}
+
+func (s *NodeServer) hasStagedIdentity(volumeID, stagingPath string) bool {
+	s.stagedMu.Lock()
+	info := s.staged[volumeID]
+	if info != nil && info.stagingPath == stagingPath {
+		s.stagedMu.Unlock()
+		return true
+	}
+	s.stagedMu.Unlock()
+	return readVolumeFile(stagingPath) == volumeID
+}
+
+func validateISCSIAuth(auth ISCSIAuth) error {
+	if (auth.Username == "") != (auth.Secret == "") {
+		return status.Error(codes.FailedPrecondition, "iSCSI CHAP username and secret must be set together")
+	}
+	return nil
+}
+
 func writeTransportFile(stagingPath, transport string) error {
 	return os.WriteFile(filepath.Join(stagingPath, transportFile), []byte(transport), 0o600)
+}
+
+func writeVolumeFile(stagingPath, volumeID string) error {
+	return os.WriteFile(filepath.Join(stagingPath, volumeFile), []byte(volumeID), 0o600)
+}
+
+func readVolumeFile(stagingPath string) string {
+	b, err := os.ReadFile(filepath.Join(stagingPath, volumeFile))
+	if err != nil {
+		return ""
+	}
+	return string(b)
 }
 
 func readTransportFile(stagingPath string) string {

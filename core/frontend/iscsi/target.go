@@ -82,8 +82,10 @@ func NewTarget(cfg TargetConfig) *Target {
 	if lg == nil {
 		lg = log.Default()
 	}
-	if cfg.Negotiation == (NegotiableConfig{}) {
+	if cfg.Negotiation.isZeroExceptCHAP() {
+		chap := cfg.Negotiation.CHAP
 		cfg.Negotiation = DefaultNegotiableConfig()
+		cfg.Negotiation.CHAP = chap
 	}
 	if cfg.DataOutTimeout == 0 {
 		cfg.DataOutTimeout = 30 * time.Second
