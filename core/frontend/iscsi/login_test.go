@@ -275,6 +275,9 @@ func TestLoginNegotiator_CHAP_ChallengeIgnoresPrematureTransit(t *testing.T) {
 	if resp.LoginTransit() {
 		t.Fatal("response should not transit before CHAP_N/CHAP_R is verified")
 	}
+	if resp.LoginNSG() != iscsi.StageSecurityNeg {
+		t.Fatalf("NSG=%d want SecurityNeg while challenge is outstanding", resp.LoginNSG())
+	}
 	if neg.Phase() != iscsi.LoginPhaseSecurity {
 		t.Fatalf("phase=%v want Security", neg.Phase())
 	}

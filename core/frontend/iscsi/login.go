@@ -236,6 +236,7 @@ func (ln *LoginNegotiator) HandleLoginPDU(req *PDU, resolver TargetResolver) *PD
 			if ln.chapRequiredForSession() && !ln.chapOK {
 				if _, challenged := respParams.Get("CHAP_C"); challenged {
 					transit = false
+					nsg = StageSecurityNeg
 				} else {
 					setLoginReject(resp, LoginStatusInitiatorErr, LoginDetailAuthFailed)
 					return resp
