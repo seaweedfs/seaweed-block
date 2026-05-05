@@ -123,6 +123,7 @@ References:
   - multiple sessions sharing a volume if supported,
   - reconnect after logout/login,
   - repeated attach/detach loop,
+    - script prepared: `scripts/run-k8s-attach-detach-loop.sh`,
   - app writer pod replaced by reader pod on the same PVC,
   - blockvolume restart and reattach once durable state is ready.
 
@@ -133,8 +134,10 @@ References:
   - product logs are enough to diagnose failures.
 
 - QA/tooling:
-  - prefer TestOps scenario for repeated attach/detach.
-  - if missing, prepare a script first and let QA run it on M02.
+  - repeated attach/detach script exists:
+    `scripts/run-k8s-attach-detach-loop.sh`.
+  - default loop count comes from `SW_BLOCK_ATTACH_DETACH_ITERATIONS`.
+  - QA should run it on M02 before P3 close and return the artifact dir.
 
 ## Milestone: iSCSI-P4 CHAP / Access Control
 
