@@ -280,6 +280,69 @@ func TestNodeStage_FailsClosedWhenStagingPathMountedForAnotherVolume(t *testing.
 	}
 }
 
+func TestNodeStage_FailsClosedOnStaleLoggedInSessionWithoutStagedIdentity(t *testing.T) {
+	mi, mm := newMockISCSIUtil(), newMockMountUtil()
+	mi.loggedIn["iqn.v1"] = true
+	ns := newTestNode(mi, mm)
+
+	_, err := ns.NodeStageVolume(context.Background(), &csipb.NodeStageVolumeRequest{
+		VolumeId:          "v1",
+		StagingTargetPath: t.TempDir(),
+		VolumeCapability:  testVolumeCapability(),
+		PublishContext: map[string]string{
+			"iscsiAddr": "127.0.0.1:3260",
+			"iqn":       "iqn.v1",
+		},
+	})
+	if err == nil {
+		t.Fatal("expected stale logged-in session without staged identity to fail closed")
+	}
+	st, _ := status.FromError(err)
+	if st.Code() != codes.FailedPrecondition {
+		t.Fatalf("code=%v want FailedPrecondition", st.Code())
+	}
+	for _, call := range mi.calls {
+		if strings.HasPrefix(call, "getdevice:") {
+			t.Fatalf("must fail before using stale session device, calls=%v", mi.calls)
+		}
+	}
+}
+
+func TestNodeStage_AllowsLoggedInSessionWithRestartIdentityFile(t *testing.T) {
+	mi, mm := newMockISCSIUtil(), newMockMountUtil()
+	mi.loggedIn["iqn.v1"] = true
+	ns := newTestNode(mi, mm)
+	staging := t.TempDir()
+	if err := writeVolumeFile(staging, "v1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeTransportFile(staging, transportISCSI); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := ns.NodeStageVolume(context.Background(), &csipb.NodeStageVolumeRequest{
+		VolumeId:          "v1",
+		StagingTargetPath: staging,
+		VolumeCapability:  testVolumeCapability(),
+		PublishContext: map[string]string{
+			"iscsiAddr": "127.0.0.1:3260",
+			"iqn":       "iqn.v1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("NodeStageVolume: %v", err)
+	}
+	wantPrefix := []string{
+		"isloggedin:iqn.v1",
+		"getdevice:iqn.v1",
+	}
+	for i, w := range wantPrefix {
+		if i >= len(mi.calls) || mi.calls[i] != w {
+			t.Fatalf("calls=%v want prefix=%v", mi.calls, wantPrefix)
+		}
+	}
+}
+
 func TestNodeStage_CleansUpLoginWhenMountFails(t *testing.T) {
 	mi, mm := newMockISCSIUtil(), newMockMountUtil()
 	mm.formatAndMountErr = errors.New("mkfs failed")

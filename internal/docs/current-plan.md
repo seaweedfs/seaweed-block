@@ -216,8 +216,11 @@ References:
   - mkfs failure cleanup,
     - already covered: successful login is logged out when mount fails.
   - stale session detection,
+    - existing iSCSI login without staged volume identity fails closed,
+    - plugin restart may reuse an existing login only when `.volume` matches.
   - plugin restart fallback,
     - existing transport-file fallback covers unstage after restart.
+    - NodeStage restart identity is covered by `.volume`.
   - repeated stage/unstage,
   - wrong volume at staging path fails closed.
 

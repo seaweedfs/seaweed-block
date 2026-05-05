@@ -134,6 +134,9 @@ func (s *NodeServer) NodeStageVolume(ctx context.Context, req *csipb.NodeStageVo
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "check iscsi login: %v", err)
 	}
+	if loggedIn && !s.hasStagedIdentity(volumeID, stagingPath) {
+		return nil, status.Errorf(codes.FailedPrecondition, "iSCSI session for %q is already logged in without staged volume identity", iqn)
+	}
 	loginStarted := false
 	if !loggedIn {
 		if err := s.iscsiUtil.Discovery(ctx, portal); err != nil {
@@ -365,6 +368,17 @@ func (s *NodeServer) validateMountedStagingVolume(volumeID, stagingPath string) 
 		return status.Errorf(codes.FailedPrecondition, "staging path %q is already mounted for volume %q", stagingPath, got)
 	}
 	return status.Errorf(codes.FailedPrecondition, "staging path %q is already mounted without sw-block volume identity", stagingPath)
+}
+
+func (s *NodeServer) hasStagedIdentity(volumeID, stagingPath string) bool {
+	s.stagedMu.Lock()
+	info := s.staged[volumeID]
+	if info != nil && info.stagingPath == stagingPath {
+		s.stagedMu.Unlock()
+		return true
+	}
+	s.stagedMu.Unlock()
+	return readVolumeFile(stagingPath) == volumeID
 }
 
 func validateISCSIAuth(auth ISCSIAuth) error {
