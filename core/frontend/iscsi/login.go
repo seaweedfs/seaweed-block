@@ -164,6 +164,7 @@ type LoginNegotiator struct {
 
 	chapID        byte
 	chapChallenge []byte
+	chapMethodOK  bool
 	chapOK        bool
 }
 
@@ -234,7 +235,7 @@ func (ln *LoginNegotiator) HandleLoginPDU(req *PDU, resolver TargetResolver) *PD
 		}
 		if transit {
 			if ln.chapRequiredForSession() && !ln.chapOK {
-				if _, challenged := respParams.Get("CHAP_C"); challenged {
+				if authInProgress(respParams) {
 					transit = false
 					nsg = StageSecurityNeg
 				} else {
@@ -422,9 +423,12 @@ func (ln *LoginNegotiator) handleCHAPSecurity(req *Params, resp *PDU, respParams
 		setLoginReject(resp, LoginStatusTargetErr, LoginDetailTargetError)
 		return false
 	}
-	if method, ok := req.Get("AuthMethod"); ok && !authMethodIncludes(method, "CHAP") {
-		setLoginReject(resp, LoginStatusInitiatorErr, LoginDetailAuthFailed)
-		return false
+	if method, ok := req.Get("AuthMethod"); ok {
+		if !valueListIncludes(method, "CHAP") {
+			setLoginReject(resp, LoginStatusInitiatorErr, LoginDetailAuthFailed)
+			return false
+		}
+		ln.chapMethodOK = true
 	}
 	if name, hasName := req.Get("CHAP_N"); hasName {
 		gotResp, hasResp := req.Get("CHAP_R")
@@ -440,22 +444,33 @@ func (ln *LoginNegotiator) handleCHAPSecurity(req *Params, resp *PDU, respParams
 		respParams.Set("AuthMethod", "CHAP")
 		return true
 	}
-
-	if ln.chapChallenge == nil {
-		challenge, err := ln.newCHAPChallenge()
-		if err != nil {
-			setLoginReject(resp, LoginStatusTargetErr, LoginDetailTargetError)
+	if alg, hasAlg := req.Get("CHAP_A"); hasAlg {
+		if !ln.chapMethodOK || !valueListIncludes(alg, "5") {
+			setLoginReject(resp, LoginStatusInitiatorErr, LoginDetailAuthFailed)
 			return false
 		}
-		ln.chapChallenge = challenge
+		if ln.chapChallenge == nil {
+			challenge, err := ln.newCHAPChallenge()
+			if err != nil {
+				setLoginReject(resp, LoginStatusTargetErr, LoginDetailTargetError)
+				return false
+			}
+			ln.chapChallenge = challenge
+		}
+		if ln.chapID == 0 {
+			ln.chapID = 1
+		}
+		respParams.Set("CHAP_A", "5")
+		respParams.Set("CHAP_I", strconv.Itoa(int(ln.chapID)))
+		respParams.Set("CHAP_C", "0x"+hex.EncodeToString(ln.chapChallenge))
+		return true
 	}
-	if ln.chapID == 0 {
-		ln.chapID = 1
+
+	if !ln.chapMethodOK {
+		setLoginReject(resp, LoginStatusInitiatorErr, LoginDetailAuthFailed)
+		return false
 	}
 	respParams.Set("AuthMethod", "CHAP")
-	respParams.Set("CHAP_A", "5")
-	respParams.Set("CHAP_I", strconv.Itoa(int(ln.chapID)))
-	respParams.Set("CHAP_C", "0x"+hex.EncodeToString(ln.chapChallenge))
 	return true
 }
 
@@ -483,7 +498,13 @@ func (ln *LoginNegotiator) verifyCHAP(username, response string) bool {
 	return ok && strings.EqualFold(got, want)
 }
 
-func authMethodIncludes(value, want string) bool {
+func authInProgress(params *Params) bool {
+	_, hasMethod := params.Get("AuthMethod")
+	_, hasChallenge := params.Get("CHAP_C")
+	return hasMethod || hasChallenge
+}
+
+func valueListIncludes(value, want string) bool {
 	for _, part := range strings.Split(value, ",") {
 		if strings.TrimSpace(part) == want {
 			return true

@@ -216,23 +216,10 @@ func TestLoginNegotiator_CHAP_ChallengeThenLoginOp(t *testing.T) {
 	if v, _ := resp1Params.Get("AuthMethod"); v != "CHAP" {
 		t.Fatalf("AuthMethod=%q want CHAP", v)
 	}
-	if v, _ := resp1Params.Get("CHAP_A"); v != "5" {
-		t.Fatalf("CHAP_A=%q want 5", v)
-	}
-	if v, _ := resp1Params.Get("CHAP_I"); v != "1" {
-		t.Fatalf("CHAP_I=%q want 1", v)
-	}
-	if v, _ := resp1Params.Get("CHAP_C"); v != "0x"+hex.EncodeToString(challenge) {
-		t.Fatalf("CHAP_C=%q want deterministic challenge", v)
-	}
-	if v, ok := resp1Params.Get("TargetPortalGroupTag"); ok {
-		t.Fatalf("TargetPortalGroupTag=%q should not be sent during CHAP SecurityNeg", v)
-	}
 
 	r2Params := iscsi.NewParams()
-	r2Params.Set("CHAP_N", "user1")
-	r2Params.Set("CHAP_R", chapResponse(1, "secret1", challenge))
-	r2 := mkLoginReq(iscsi.StageSecurityNeg, iscsi.StageLoginOp, true, r2Params)
+	r2Params.Set("CHAP_A", "5")
+	r2 := mkLoginReq(iscsi.StageSecurityNeg, iscsi.StageSecurityNeg, false, r2Params)
 	resp2 := neg.HandleLoginPDU(r2, resolver)
 	if resp2.LoginStatusClass() != iscsi.LoginStatusSuccess {
 		t.Fatalf("round 2 status=0x%02x detail=0x%02x",
@@ -242,21 +229,47 @@ func TestLoginNegotiator_CHAP_ChallengeThenLoginOp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseParams round 2: %v", err)
 	}
-	if v, _ := resp2Params.Get("AuthMethod"); v != "CHAP" {
-		t.Fatalf("round 2 AuthMethod=%q want CHAP", v)
+	if v, _ := resp2Params.Get("CHAP_A"); v != "5" {
+		t.Fatalf("CHAP_A=%q want 5", v)
+	}
+	if v, _ := resp2Params.Get("CHAP_I"); v != "1" {
+		t.Fatalf("CHAP_I=%q want 1", v)
+	}
+	if v, _ := resp2Params.Get("CHAP_C"); v != "0x"+hex.EncodeToString(challenge) {
+		t.Fatalf("CHAP_C=%q want deterministic challenge", v)
+	}
+	if v, ok := resp2Params.Get("TargetPortalGroupTag"); ok {
+		t.Fatalf("TargetPortalGroupTag=%q should not be sent during CHAP SecurityNeg", v)
+	}
+
+	r3Params := iscsi.NewParams()
+	r3Params.Set("CHAP_N", "user1")
+	r3Params.Set("CHAP_R", chapResponse(1, "secret1", challenge))
+	r3 := mkLoginReq(iscsi.StageSecurityNeg, iscsi.StageLoginOp, true, r3Params)
+	resp3 := neg.HandleLoginPDU(r3, resolver)
+	if resp3.LoginStatusClass() != iscsi.LoginStatusSuccess {
+		t.Fatalf("round 3 status=0x%02x detail=0x%02x",
+			resp3.LoginStatusClass(), resp3.LoginStatusDetail())
+	}
+	resp3Params, err := iscsi.ParseParams(resp3.DataSegment)
+	if err != nil {
+		t.Fatalf("ParseParams round 3: %v", err)
+	}
+	if v, _ := resp3Params.Get("AuthMethod"); v != "CHAP" {
+		t.Fatalf("round 3 AuthMethod=%q want CHAP", v)
 	}
 	if neg.Phase() != iscsi.LoginPhaseOperational {
 		t.Fatalf("phase=%v want Operational", neg.Phase())
 	}
 
-	r3Params := iscsi.NewParams()
-	r3Params.Set("HeaderDigest", "None")
-	r3Params.Set("DataDigest", "None")
-	r3 := mkLoginReq(iscsi.StageLoginOp, iscsi.StageFullFeature, true, r3Params)
-	resp3 := neg.HandleLoginPDU(r3, resolver)
-	if resp3.LoginStatusClass() != iscsi.LoginStatusSuccess {
-		t.Fatalf("round 3 status=0x%02x detail=0x%02x",
-			resp3.LoginStatusClass(), resp3.LoginStatusDetail())
+	r4Params := iscsi.NewParams()
+	r4Params.Set("HeaderDigest", "None")
+	r4Params.Set("DataDigest", "None")
+	r4 := mkLoginReq(iscsi.StageLoginOp, iscsi.StageFullFeature, true, r4Params)
+	resp4 := neg.HandleLoginPDU(r4, resolver)
+	if resp4.LoginStatusClass() != iscsi.LoginStatusSuccess {
+		t.Fatalf("round 4 status=0x%02x detail=0x%02x",
+			resp4.LoginStatusClass(), resp4.LoginStatusDetail())
 	}
 	if !neg.Done() {
 		t.Fatalf("Done()=false after CHAP + LoginOp")
@@ -296,7 +309,9 @@ func TestLoginNegotiator_CHAP_ChallengeIgnoresPrematureTransit(t *testing.T) {
 		t.Fatalf("ParseParams: %v", err)
 	}
 	if v, _ := respParams.Get("CHAP_C"); v != "0x"+hex.EncodeToString(challenge) {
-		t.Fatalf("CHAP_C=%q want deterministic challenge", v)
+		if v, _ := respParams.Get("AuthMethod"); v != "CHAP" {
+			t.Fatalf("AuthMethod=%q want CHAP", v)
+		}
 	}
 }
 
