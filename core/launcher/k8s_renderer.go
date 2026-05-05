@@ -10,11 +10,12 @@ import (
 )
 
 type K8sRenderConfig struct {
-	Namespace       string
-	Image           string
-	MasterAddr      string
-	DurableRootBase string
-	RecoveryMode    string
+	Namespace           string
+	Image               string
+	MasterAddr          string
+	DurableRootBase     string
+	RecoveryMode        string
+	OwnerReferenceToPVC bool
 }
 
 type RenderedManifest struct {
@@ -38,6 +39,14 @@ func RenderBlockVolumeDeployments(plan lifecycle.BlockVolumeWorkloadPlan, cfg K8
 	if cfg.MasterAddr == "" {
 		return nil, fmt.Errorf("launcher: master addr is required")
 	}
+	namespace := cfg.Namespace
+	ownerRefs, err := ownerReferences(plan, cfg)
+	if err != nil {
+		return nil, err
+	}
+	if cfg.OwnerReferenceToPVC {
+		namespace = plan.PVCNamespace
+	}
 	out := make([]RenderedManifest, 0, len(plan.Replicas))
 	for _, replica := range plan.Replicas {
 		name := workloadName(plan.VolumeID, replica.ReplicaID)
@@ -46,12 +55,13 @@ func RenderBlockVolumeDeployments(plan lifecycle.BlockVolumeWorkloadPlan, cfg K8
 			Kind:       "Deployment",
 			Metadata: metadata{
 				Name:      name,
-				Namespace: cfg.Namespace,
+				Namespace: namespace,
 				Labels: map[string]string{
 					"app":                            "sw-blockvolume",
 					"sw-block.seaweedfs.com/volume":  plan.VolumeID,
 					"sw-block.seaweedfs.com/replica": replica.ReplicaID,
 				},
+				OwnerReferences: ownerRefs,
 			},
 			Spec: deploymentSpec{
 				Replicas: intPtr(1),
@@ -85,6 +95,22 @@ func RenderBlockVolumeDeployments(plan lifecycle.BlockVolumeWorkloadPlan, cfg K8
 		out = append(out, RenderedManifest{Name: name, YAML: raw})
 	}
 	return out, nil
+}
+
+func ownerReferences(plan lifecycle.BlockVolumeWorkloadPlan, cfg K8sRenderConfig) ([]ownerReference, error) {
+	if !cfg.OwnerReferenceToPVC {
+		return nil, nil
+	}
+	if plan.PVCName == "" || plan.PVCNamespace == "" || plan.PVCUID == "" {
+		return nil, fmt.Errorf("launcher: pvc owner reference requires pvc name, namespace, and uid")
+	}
+	return []ownerReference{{
+		APIVersion: "v1",
+		Kind:       "PersistentVolumeClaim",
+		Name:       plan.PVCName,
+		UID:        plan.PVCUID,
+		Controller: boolPtr(true),
+	}}, nil
 }
 
 func blockVolumeArgs(plan lifecycle.BlockVolumeWorkloadPlan, replica lifecycle.BlockVolumeReplicaWorkload, cfg K8sRenderConfig) []string {
@@ -127,6 +153,8 @@ func dnsLabel(s string) string {
 
 func intPtr(v int) *int { return &v }
 
+func boolPtr(v bool) *bool { return &v }
+
 type blockVolumeDeployment struct {
 	APIVersion string         `yaml:"apiVersion"`
 	Kind       string         `yaml:"kind"`
@@ -135,9 +163,18 @@ type blockVolumeDeployment struct {
 }
 
 type metadata struct {
-	Name      string            `yaml:"name,omitempty"`
-	Namespace string            `yaml:"namespace,omitempty"`
-	Labels    map[string]string `yaml:"labels,omitempty"`
+	Name            string            `yaml:"name,omitempty"`
+	Namespace       string            `yaml:"namespace,omitempty"`
+	Labels          map[string]string `yaml:"labels,omitempty"`
+	OwnerReferences []ownerReference  `yaml:"ownerReferences,omitempty"`
+}
+
+type ownerReference struct {
+	APIVersion string `yaml:"apiVersion"`
+	Kind       string `yaml:"kind"`
+	Name       string `yaml:"name"`
+	UID        string `yaml:"uid"`
+	Controller *bool  `yaml:"controller,omitempty"`
 }
 
 type deploymentSpec struct {

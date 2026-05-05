@@ -36,6 +36,7 @@ type flags struct {
 	launcherMasterAddr     string
 	launcherDurableRoot    string
 	launcherISCSIPortBase  int
+	launcherPVCOwnerRef    bool
 	// printReadyLine: test-only flag that emits a single
 	// structured JSON line to stdout after the gRPC listener is
 	// bound, so L2 subprocess tests can parse the ready event.
@@ -63,6 +64,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.StringVar(&f.launcherMasterAddr, "launcher-master-addr", "", "G15d master address used in rendered blockvolume args; defaults to listener address after bind")
 	fs.StringVar(&f.launcherDurableRoot, "launcher-durable-root", "/var/lib/sw-block", "G15d rendered blockvolume durable root base")
 	fs.IntVar(&f.launcherISCSIPortBase, "launcher-iscsi-port-base", 3260, "G15d iSCSI port base for generated blockvolume workloads")
+	fs.BoolVar(&f.launcherPVCOwnerRef, "launcher-pvc-owner-ref", false, "render generated blockvolume Deployments in the source PVC namespace with a PVC ownerReference; disabled by default for alpha harness compatibility")
 	fs.BoolVar(&f.printReadyLine, "t0-print-ready", false, "internal test-only: emit one structured JSON line on stdout after listener bound")
 	fs.SetOutput(os.Stderr)
 	if err := fs.Parse(args); err != nil {
@@ -280,10 +282,11 @@ func runLifecycleLauncherTick(h *master.Host, f flags) error {
 	var rendered []launcher.RenderedManifest
 	for _, plan := range result.Plans {
 		manifests, err := launcher.RenderBlockVolumeDeployments(plan, launcher.K8sRenderConfig{
-			Namespace:       f.launcherNamespace,
-			Image:           f.launcherImage,
-			MasterAddr:      masterAddr,
-			DurableRootBase: f.launcherDurableRoot,
+			Namespace:           f.launcherNamespace,
+			Image:               f.launcherImage,
+			MasterAddr:          masterAddr,
+			DurableRootBase:     f.launcherDurableRoot,
+			OwnerReferenceToPVC: f.launcherPVCOwnerRef,
 		})
 		if err != nil {
 			return err
