@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -51,7 +52,7 @@ func NewInClusterPVCMetadataResolver() (*InClusterPVCMetadataResolver, error) {
 				MinVersion: tls.VersionTLS12,
 			}},
 		},
-		host:  "https://" + host + ":" + port,
+		host:  "https://" + net.JoinHostPort(host, port),
 		token: strings.TrimSpace(string(tokenBytes)),
 	}, nil
 }

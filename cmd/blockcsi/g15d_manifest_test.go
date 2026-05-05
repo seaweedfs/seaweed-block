@@ -70,6 +70,7 @@ func TestG15d_K8sRunner_AppliesLauncherGeneratedManifest(t *testing.T) {
 		"SW_BLOCK_LAUNCHER_PVC_OWNER_REF",
 		"BLOCKVOLUME_NAMESPACE=\"kube-system\"",
 		"--kubernetes-pvc-uid-lookup",
+		"--launcher-pvc-owner-ref",
 		"kubectl apply -f \"$ARTIFACT_DIR/generated-blockvolume.yaml\"",
 		"kubectl -n \"$BLOCKVOLUME_NAMESPACE\" wait --for=condition=available deploy -l app=sw-blockvolume",
 		"kubectl -n \"$BLOCKVOLUME_NAMESPACE\" logs -l sw-block.seaweedfs.com/volume",

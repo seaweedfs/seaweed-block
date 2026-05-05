@@ -111,7 +111,7 @@ func run(f flags) int {
 		lookup = blockcsi.NewControlStatusLookup(control.NewEvidenceServiceClient(masterConn))
 		provisioner = blockcsi.NewControlLifecycleProvisioner(control.NewLifecycleServiceClient(masterConn))
 	}
-	if f.pvcUIDLookup {
+	if f.pvcUIDLookup && provisioner != nil {
 		resolver, err = blockcsi.NewInClusterPVCMetadataResolver()
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "blockcsi: pvc uid lookup:", err)

@@ -79,8 +79,17 @@ func (s *FileStore) CreateVolume(spec VolumeSpec) (VolumeRecord, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if existing, ok := s.records[spec.VolumeID]; ok {
-		if existing.Spec != spec {
+		if !volumeSpecsCompatible(existing.Spec, spec) {
 			return VolumeRecord{}, ErrVolumeConflict
+		}
+		merged := existing
+		merged.Spec = mergeVolumeSpecMetadata(existing.Spec, spec)
+		if merged.Spec != existing.Spec {
+			if err := s.putLocked(merged); err != nil {
+				return VolumeRecord{}, err
+			}
+			s.records[spec.VolumeID] = merged
+			return merged, nil
 		}
 		return existing, nil
 	}
@@ -90,6 +99,29 @@ func (s *FileStore) CreateVolume(spec VolumeSpec) (VolumeRecord, error) {
 	}
 	s.records[spec.VolumeID] = rec
 	return rec, nil
+}
+
+func volumeSpecsCompatible(a, b VolumeSpec) bool {
+	return a.VolumeID == b.VolumeID &&
+		a.SizeBytes == b.SizeBytes &&
+		a.ReplicationFactor == b.ReplicationFactor
+}
+
+func mergeVolumeSpecMetadata(existing, incoming VolumeSpec) VolumeSpec {
+	out := existing
+	if out.PVCName == "" {
+		out.PVCName = incoming.PVCName
+	}
+	if out.PVCNamespace == "" {
+		out.PVCNamespace = incoming.PVCNamespace
+	}
+	if out.PVCUID == "" {
+		out.PVCUID = incoming.PVCUID
+	}
+	if out.PVName == "" {
+		out.PVName = incoming.PVName
+	}
+	return out
 }
 
 // DeleteVolume removes a desired volume record. Missing volumes are a

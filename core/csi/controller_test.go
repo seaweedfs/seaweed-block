@@ -269,6 +269,10 @@ func TestG15c_ControllerCreateVolume_FailsWhenConfiguredPVCUIDLookupFails(t *tes
 	if err == nil {
 		t.Fatal("expected error")
 	}
+	st, _ := status.FromError(err)
+	if st.Code() != codes.Internal {
+		t.Fatalf("code=%v want Internal", st.Code())
+	}
 	if len(prov.calls) != 0 {
 		t.Fatalf("provisioner must not be called after uid lookup failure: %+v", prov.calls)
 	}

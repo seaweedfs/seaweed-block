@@ -67,6 +67,45 @@ func TestFileStore_CreateVolumeRejectsConflictingSpec(t *testing.T) {
 	}
 }
 
+func TestFileStore_CreateVolumeMergesMissingKubernetesMetadata(t *testing.T) {
+	dir := t.TempDir()
+	s, err := OpenFileStore(dir)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	base := VolumeSpec{
+		VolumeID:          "vol-a",
+		SizeBytes:         1 << 20,
+		ReplicationFactor: 2,
+		PVCName:           "demo-pvc",
+		PVCNamespace:      "demo-ns",
+		PVName:            "pvc-a",
+	}
+	if _, err := s.CreateVolume(base); err != nil {
+		t.Fatalf("create base: %v", err)
+	}
+	withUID := base
+	withUID.PVCUID = "uid-123"
+	rec, err := s.CreateVolume(withUID)
+	if err != nil {
+		t.Fatalf("create with uid: %v", err)
+	}
+	if rec.Spec.PVCUID != "uid-123" {
+		t.Fatalf("pvc uid=%q", rec.Spec.PVCUID)
+	}
+	reopened, err := OpenFileStore(dir)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	got, ok := reopened.GetVolume("vol-a")
+	if !ok {
+		t.Fatal("reopened store missing volume")
+	}
+	if got.Spec.PVCUID != "uid-123" {
+		t.Fatalf("persisted pvc uid=%q", got.Spec.PVCUID)
+	}
+}
+
 func TestFileStore_AttachDetachAreIdempotent(t *testing.T) {
 	s, err := OpenFileStore(t.TempDir())
 	if err != nil {
