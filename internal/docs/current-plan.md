@@ -11,6 +11,8 @@ References:
 - `ref/iscsi-v2-coverage-gap-audit.md`
 - `ref/iscsi-os-initiator-compat-plan.md`
 - `ref/v2-frontend-protocol-gap-audit.md`
+- `ref/iscsi-p6-alua-mpio-design.md`
+- `ref/iscsi-alua-technical-note.md`
 
 ## Product Goal
 
@@ -253,7 +255,7 @@ References:
   - status: active after P5 QA green.
   - #design(iscsi-p6-alua-mpio-design) ALUA/MPIO policy and protocol shape:
     - owner: dev.
-    - output: `internal/docs/iscsi-p6-alua-mpio-design.md`.
+    - output: `internal/docs/ref/iscsi-p6-alua-mpio-design.md`.
     - must be reviewed before changing protocol behavior.
   - #design(iscsi-p6-qa-assignment) real initiator validation shape:
     - owner: dev.
