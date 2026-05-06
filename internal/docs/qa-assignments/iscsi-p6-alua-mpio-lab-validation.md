@@ -1,6 +1,6 @@
 # QA Assignment: iSCSI P6 ALUA / MPIO Lab Validation
 
-Status: Test 1B QA green; Test 2 executable.
+Status: Test 1B and Test 2 QA green.
 Branch: `iscsi/csi-node-lifecycle`.
 Scope: real Linux initiator validation for ALUA/MPIO and mounted failover.
 
@@ -115,7 +115,7 @@ Non-claim:
 
 ## Test 2: Mounted Workload Failover
 
-Status: ready for first lab run.
+Status: PASS on `iscsi/csi-node-lifecycle@d1025f1`.
 
 Run:
 
@@ -134,6 +134,26 @@ Expected:
 - old primary path cannot acknowledge stale successful I/O.
 - cleanup leaves no sw-block iSCSI sessions and no multipath residue.
 
+QA evidence:
+
+- host: M02, Ubuntu 24.04.3 LTS, kernel 6.17.0-22-generic.
+- artifact:
+  `/mnt/smb/work/share/g15d-k8s/20260506T094503Z-iscsi-p6-mounted-failover`.
+- final line:
+  `[iscsi-failover] PASS: mounted multipath workload read/wrote through r1->r2 failover`.
+- wire proof:
+  - before failover: r1 AAS `0x00`, r2 AAS `0x02`.
+  - after killing r1: r2 AAS `0x00`.
+  - `multipath -ll`: same `mpatha` map served the mounted filesystem.
+  - r2 status after failover: `Epoch=2`, `AuthorityRole=primary`,
+    `Healthy=true`, `FrontendPrimaryReady=true`.
+  - pre-failover `pre.bin` checksum read back after failover.
+  - post-failover `post.bin` checksum written and verified.
+  - r1 log showed stale primary lineage rejections for post-promotion
+    WRITE/SYNCHRONIZE_CACHE attempts.
+  - cleanup left no active iSCSI sessions, no multipath map, and no stray
+    blockmaster/blockvolume processes.
+
 Evidence to collect:
 
 - pre-failover and post-failover checksum logs.
@@ -150,6 +170,8 @@ Non-claim:
 - Test 2 does not prove Kubernetes-mounted failover.
 - Test 2 does not prove Windows MPIO.
 - Test 2 does not claim production HA soak.
+- Test 2 covers one volume and one RF=2 pair, not multi-volume soak or
+  repeated fault injection.
 
 ## Report Format
 

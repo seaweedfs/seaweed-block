@@ -252,7 +252,7 @@ References:
     reconnect story.
 
 - Tasks:
-  - status: active after P5 QA green.
+  - status: QA green on `iscsi/csi-node-lifecycle@d1025f1`.
   - #design(iscsi-p6-alua-mpio-design) ALUA/MPIO policy and protocol shape:
     - owner: dev.
     - output: `internal/docs/ref/iscsi-p6-alua-mpio-design.md`.
@@ -336,16 +336,23 @@ References:
         grouped both paths under `mpatha`.
     - non-claim: mounted workload failover still needs P6-E.
   - primary failover while mounted:
-    - status: P6-E script prepared; awaiting QA lab run.
+    - status: QA green on `iscsi/csi-node-lifecycle@d1025f1`.
     - script: `scripts/run-iscsi-alua-mounted-failover-smoke.sh`.
     - assignment: `internal/docs/qa-assignments/iscsi-p6-alua-mpio-lab-validation.md`.
-    - current claim under test: mounted Linux multipath device can read a
+    - verified claim: mounted Linux multipath device can read a
       pre-failover checksum and write a post-failover checksum after r1 is
       killed and r2 reaches `Healthy=true` at a newer epoch.
-    - #QA run Test 2 on M02 or another Linux host with `multipath-tools`.
+    - #QA Test 2 PASS on M02:
+      - artifact:
+        `/mnt/smb/work/share/g15d-k8s/20260506T094503Z-iscsi-p6-mounted-failover`.
+      - evidence: `/dev/mapper/mpatha` mounted, pre-failover checksum read
+        after failover, post-failover checksum written and verified, r2
+        promoted to `Epoch=2`, old r1 gate-rejected stale writes/syncs, no
+        active sessions or multipath residue after cleanup.
   - old primary cannot serve stale successful I/O:
-    - status: partially covered by killing r1 in P6-E script; returned old
-      primary stale-success proof remains pending.
+    - status: QA green for killed-old-primary path on `d1025f1`.
+    - old-primary-return proof remains future soak/fault coverage, not required
+      for P6 alpha close.
 
 - Close bar:
   - real initiator sees correct ALUA/MPIO behavior,
@@ -356,7 +363,8 @@ References:
 
 - QA/tooling:
   - #QA active-path ALUA OS script is ready.
-  - #QA needs mounted workload failover script after design is accepted.
+  - #QA two-path multipath script is green on M02.
+  - #QA mounted multipath failover script is green on M02.
   - do not rely on in-process protocol tests only.
 
 ## Milestone: iSCSI-P7 Performance And Backend Matrix
