@@ -91,7 +91,7 @@ func TestP6ALUA_NoProviderDoesNotAdvertiseALUA(t *testing.T) {
 	}
 }
 
-func TestP6ALUA_NonWritableStatesAllowReadButRejectWriteAndSync(t *testing.T) {
+func TestP6ALUA_NonActiveStatesRejectDataPath(t *testing.T) {
 	for _, state := range []iscsi.ALUAState{
 		iscsi.ALUAStandby,
 		iscsi.ALUAUnavailable,
@@ -107,8 +107,15 @@ func TestP6ALUA_NonWritableStatesAllowReadButRejectWriteAndSync(t *testing.T) {
 			h := iscsi.NewSCSIHandler(iscsi.HandlerConfig{Backend: rec, ALUA: prov})
 
 			read := h.HandleCommand(context.Background(), readCDB(0, 1), nil)
-			if read.Status != iscsi.StatusGood {
-				t.Fatalf("READ should support path probing: %v", read.AsError())
+			if read.Status != iscsi.StatusCheckCondition {
+				t.Fatalf("READ status=0x%02x want CheckCondition", read.Status)
+			}
+			if read.SenseKey != iscsi.SenseNotReady || read.ASC != iscsi.ASCNotReady || read.ASCQ != iscsi.ASCQTargetPortStandby {
+				t.Fatalf("READ sense=%02x/%02x/%02x want NotReady/04/0B",
+					read.SenseKey, read.ASC, read.ASCQ)
+			}
+			if rec.ReadCount() != 0 {
+				t.Fatalf("READ reached backend %d times", rec.ReadCount())
 			}
 
 			write := h.HandleCommand(context.Background(), writeCDB(0, 1), payload)
@@ -126,6 +133,31 @@ func TestP6ALUA_NonWritableStatesAllowReadButRejectWriteAndSync(t *testing.T) {
 			}
 			if rec.SyncCount() != 0 {
 				t.Fatalf("SYNC reached backend %d times", rec.SyncCount())
+			}
+		})
+	}
+}
+
+func TestP6ALUA_ActiveStatesAllowDataPath(t *testing.T) {
+	for _, state := range []iscsi.ALUAState{
+		iscsi.ALUAActiveOptimized,
+		iscsi.ALUAActiveNonOptimized,
+	} {
+		t.Run(state.String(), func(t *testing.T) {
+			rec := testback.NewRecordingBackend(frontend.Identity{VolumeID: "v1", ReplicaID: "r1"})
+			payload := bytes.Repeat([]byte{0x5a}, int(iscsi.DefaultBlockSize))
+			if _, err := rec.Write(context.Background(), 0, payload); err != nil {
+				t.Fatalf("seed Write: %v", err)
+			}
+			h := iscsi.NewSCSIHandler(iscsi.HandlerConfig{Backend: rec, ALUA: aluaTestProvider(state)})
+
+			read := h.HandleCommand(context.Background(), readCDB(0, 1), nil)
+			if read.Status != iscsi.StatusGood {
+				t.Fatalf("READ active path: %v", read.AsError())
+			}
+			write := h.HandleCommand(context.Background(), writeCDB(0, 1), payload)
+			if write.Status != iscsi.StatusGood {
+				t.Fatalf("WRITE active path: %v", write.AsError())
 			}
 		})
 	}
@@ -166,6 +198,19 @@ func TestP6ALUA_ActiveAdvertisesTPGSAndServesReportTPG(t *testing.T) {
 	}
 	if rtp := binary.BigEndian.Uint16(rtpg.Data[14:16]); rtp != prov.rtpID {
 		t.Fatalf("REPORT TPG relative target port=%d want %d", rtp, prov.rtpID)
+	}
+}
+
+func TestP6ALUA_ReportTPGHonorsZeroAllocationLength(t *testing.T) {
+	rec := testback.NewRecordingBackend(frontend.Identity{VolumeID: "v1", ReplicaID: "r1"})
+	h := iscsi.NewSCSIHandler(iscsi.HandlerConfig{Backend: rec, ALUA: aluaTestProvider(iscsi.ALUAActiveOptimized)})
+
+	rtpg := h.HandleCommand(context.Background(), reportTPGCDB(0), nil)
+	if rtpg.Status != iscsi.StatusGood {
+		t.Fatalf("REPORT TPG alloc=0: %v", rtpg.AsError())
+	}
+	if len(rtpg.Data) != 0 {
+		t.Fatalf("REPORT TPG alloc=0 len=%d want 0", len(rtpg.Data))
 	}
 }
 

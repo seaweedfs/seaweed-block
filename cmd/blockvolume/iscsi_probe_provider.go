@@ -29,5 +29,5 @@ func (p *durableProbeProvider) ProbeBackend(_ context.Context, volumeID string) 
 	if b := p.provider.Backend(volumeID); b != nil {
 		return b, nil
 	}
-	return nil, fmt.Errorf("%w: no probe backend for %s", frontend.ErrNotReady, volumeID)
+	return nil, fmt.Errorf("no probe backend for %s after EnsureStorage", volumeID)
 }

@@ -193,9 +193,12 @@ func (h *SCSIHandler) HandleCommand(ctx context.Context, cdb [16]byte, dataOut [
 	case ScsiReadCapacity10:
 		return h.readCapacity10()
 	case ScsiRead10:
+		if r := h.aluaDataReject("read"); r != nil {
+			return *r
+		}
 		return h.read10(ctx, cdb)
 	case ScsiWrite10:
-		if r := h.aluaWriteReject(); r != nil {
+		if r := h.aluaDataReject("write"); r != nil {
 			return *r
 		}
 		return h.write10(ctx, cdb, dataOut)
@@ -206,7 +209,7 @@ func (h *SCSIHandler) HandleCommand(ctx context.Context, cdb [16]byte, dataOut [
 	// rule §3.6 (error-faithful Sync wire) makes data-integrity
 	// hazards visible to the host.
 	case ScsiSyncCache10, ScsiSyncCache16:
-		if r := h.aluaWriteReject(); r != nil {
+		if r := h.aluaDataReject("sync"); r != nil {
 			return *r
 		}
 		log.Printf("iscsi: SCSI SYNCHRONIZE_CACHE handler entry opcode=0x%02x", cdb[0])
@@ -224,9 +227,12 @@ func (h *SCSIHandler) HandleCommand(ctx context.Context, cdb [16]byte, dataOut [
 		return SCSIResult{Status: StatusGood}
 	// Batch 10.5: 16-byte data variants (64-bit LBA).
 	case ScsiRead16:
+		if r := h.aluaDataReject("read"); r != nil {
+			return *r
+		}
 		return h.read16(ctx, cdb)
 	case ScsiWrite16:
-		if r := h.aluaWriteReject(); r != nil {
+		if r := h.aluaDataReject("write"); r != nil {
 			return *r
 		}
 		return h.write16(ctx, cdb, dataOut)
@@ -474,12 +480,19 @@ func (h *SCSIHandler) inquiryVPD83(allocLen uint16) SCSIResult {
 	descs := make([]byte, 0, 28)
 	descs = append(descs, naaDesc...)
 	if h.alua != nil {
+		const (
+			vpdCodeSetBinary        = 0x01
+			vpdAssociationTarget    = 0x10
+			vpdDesignatorTypeRTP    = 0x04
+			vpdDesignatorTypeTPG    = 0x05
+			vpdDesignatorIdentifier = 0x04
+		)
 		tpgID := h.alua.TargetPortGroupID()
 		rtpID := h.alua.RelativeTargetPortID()
 		descs = append(descs,
-			0x01, 0x15, 0x00, 0x04,
+			vpdCodeSetBinary, vpdAssociationTarget|vpdDesignatorTypeTPG, 0x00, vpdDesignatorIdentifier,
 			0x00, 0x00, byte(tpgID>>8), byte(tpgID),
-			0x01, 0x14, 0x00, 0x04,
+			vpdCodeSetBinary, vpdAssociationTarget|vpdDesignatorTypeRTP, 0x00, vpdDesignatorIdentifier,
 			0x00, 0x00, byte(rtpID>>8), byte(rtpID),
 		)
 	}

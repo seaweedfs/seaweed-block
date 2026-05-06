@@ -60,8 +60,8 @@ func TestProjectionALUAProvider_IdentityIsStableAndPathSpecific(t *testing.T) {
 		"r2",
 		nil,
 	)
-	r1 := newProjectionALUAProvider(view1, "v1", "r1")
-	r2 := newProjectionALUAProvider(view2, "v1", "r2")
+	r1 := newProjectionALUAProvider(view1, "v1", "r1", "iqn.2026-05.io.seaweedfs:v1")
+	r2 := newProjectionALUAProvider(view2, "v1", "r2", "iqn.2026-05.io.seaweedfs:v1")
 
 	if got := r1.DeviceNAA()[0] & 0xf0; got != 0x60 {
 		t.Fatalf("DeviceNAA high nibble=%#x want 0x60", got)
@@ -74,6 +74,21 @@ func TestProjectionALUAProvider_IdentityIsStableAndPathSpecific(t *testing.T) {
 	}
 	if r1.RelativeTargetPortID() == r2.RelativeTargetPortID() {
 		t.Fatalf("replica paths should have distinct relative target port ids: %d", r1.RelativeTargetPortID())
+	}
+}
+
+func TestProjectionALUAProvider_DeviceNAAIncludesExportSeed(t *testing.T) {
+	view := volume.NewAdapterProjectionView(
+		aluaProjector{p: engine.ReplicaProjection{Mode: engine.ModeHealthy}},
+		"v1",
+		"r1",
+		nil,
+	)
+	a := newProjectionALUAProvider(view, "v1", "r1", "iqn.2026-05.io.seaweedfs:cluster-a:v1")
+	b := newProjectionALUAProvider(view, "v1", "r1", "iqn.2026-05.io.seaweedfs:cluster-b:v1")
+
+	if a.DeviceNAA() == b.DeviceNAA() {
+		t.Fatalf("same volume id with different export seeds produced same DeviceNAA: %x", a.DeviceNAA())
 	}
 }
 

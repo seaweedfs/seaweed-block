@@ -162,6 +162,9 @@ func TestAlphaAppDemo_CanRestartCSINodeBeforeReader(t *testing.T) {
 	if !strings.Contains(wrapper, "demo-app-pvc-writer-hold.yaml") {
 		t.Fatalf("restart wrapper must use mounted-writer manifest:\n%s", wrapper)
 	}
+	if !strings.Contains(wrapper, "export SW_BLOCK_RESTART_CSI_NODE_BEFORE_READER=1") {
+		t.Fatalf("restart wrapper must enable restart mode:\n%s", wrapper)
+	}
 }
 
 func g15dReadFile(t *testing.T, parts ...string) string {

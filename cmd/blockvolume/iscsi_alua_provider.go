@@ -11,18 +11,27 @@ import (
 )
 
 type projectionALUAProvider struct {
-	view      *volume.AdapterProjectionView
-	volumeID  string
-	replicaID string
+	view       *volume.AdapterProjectionView
+	volumeID   string
+	replicaID  string
+	deviceSeed string
 }
 
 var _ iscsi.ALUAProvider = (*projectionALUAProvider)(nil)
 
-func newProjectionALUAProvider(view *volume.AdapterProjectionView, volumeID, replicaID string) *projectionALUAProvider {
+func newProjectionALUAProvider(view *volume.AdapterProjectionView, volumeID, replicaID string, deviceSeed ...string) *projectionALUAProvider {
+	seed := volumeID
+	for _, candidate := range deviceSeed {
+		if candidate != "" {
+			seed = candidate
+			break
+		}
+	}
 	return &projectionALUAProvider{
-		view:      view,
-		volumeID:  volumeID,
-		replicaID: replicaID,
+		view:       view,
+		volumeID:   volumeID,
+		replicaID:  replicaID,
+		deviceSeed: seed,
 	}
 }
 
@@ -56,15 +65,15 @@ func (p *projectionALUAProvider) ALUAState() iscsi.ALUAState {
 }
 
 func (p *projectionALUAProvider) TargetPortGroupID() uint16 {
-	return stableALUAID("tpg", p.volumeID, p.replicaID)
+	return stableALUAID("tpg", p.deviceSeed, p.volumeID, p.replicaID)
 }
 
 func (p *projectionALUAProvider) RelativeTargetPortID() uint16 {
-	return stableALUAID("rtp", p.volumeID, p.replicaID)
+	return stableALUAID("rtp", p.deviceSeed, p.volumeID, p.replicaID)
 }
 
 func (p *projectionALUAProvider) DeviceNAA() [8]byte {
-	sum := sha256.Sum256([]byte(p.volumeID))
+	sum := sha256.Sum256([]byte(strings.Join([]string{"naa", p.deviceSeed, p.volumeID}, "\x00")))
 	var out [8]byte
 	out[0] = 0x60 | (sum[0] & 0x0f)
 	copy(out[1:], sum[1:8])

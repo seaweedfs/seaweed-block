@@ -40,7 +40,7 @@ type ALUAProvider interface {
 	DeviceNAA() [8]byte
 }
 
-func (h *SCSIHandler) aluaWriteReject() *SCSIResult {
+func (h *SCSIHandler) aluaDataReject(op string) *SCSIResult {
 	if h.alua == nil {
 		return nil
 	}
@@ -53,7 +53,7 @@ func (h *SCSIHandler) aluaWriteReject() *SCSIResult {
 			SenseKey: SenseNotReady,
 			ASC:      ASCNotReady,
 			ASCQ:     ASCQTargetPortStandby,
-			Reason:   "ALUA path is not writable",
+			Reason:   "ALUA path is not active for " + op,
 		}
 		return &r
 	}
@@ -100,7 +100,7 @@ func (h *SCSIHandler) reportTargetPortGroups(cdb [16]byte) SCSIResult {
 	data[11] = 0x01
 	binary.BigEndian.PutUint16(data[14:16], h.alua.RelativeTargetPortID())
 
-	if allocLen > 0 && allocLen < uint32(len(data)) {
+	if allocLen < uint32(len(data)) {
 		data = data[:allocLen]
 	}
 	return SCSIResult{Status: StatusGood, Data: data}

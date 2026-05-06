@@ -63,11 +63,13 @@ cleanup() {
 trap cleanup EXIT
 
 require_cmd sudo
+require_cmd curl
 require_cmd iscsiadm
 require_cmd multipath
 require_cmd sg_inq
 require_cmd sg_rtpg
 require_cmd dd
+require_cmd python3
 
 log "run_id=$RUN_ID"
 log "root=$ROOT"
@@ -156,17 +158,52 @@ wait_port() {
   exit 1
 }
 
+wait_status_role() {
+  local status_addr="$1"
+  local replica="$2"
+  local role="$3"
+  local out="$ARTIFACT_DIR/status-${replica}-${role}.json"
+  for _ in $(seq 1 120); do
+    if curl -fsS "http://${status_addr}/status?volume=v1" >"$out.tmp" 2>/dev/null; then
+      if python3 - "$out.tmp" "$replica" "$role" <<'PY'
+import json, sys
+path, replica, role = sys.argv[1], sys.argv[2], sys.argv[3]
+body = json.load(open(path))
+if str(body.get("ReplicaID", "")) != replica:
+    sys.exit(1)
+authority_role = str(body.get("AuthorityRole", ""))
+frontend_ready = bool(body.get("FrontendPrimaryReady"))
+replication_role = str(body.get("ReplicationRole", ""))
+if role == "primary":
+    sys.exit(0 if authority_role == "primary" and frontend_ready else 1)
+if role == "standby":
+    ok = authority_role == "superseded" or replication_role in ("not_ready", "replica_ready", "recovering")
+    sys.exit(0 if ok and authority_role != "primary" else 1)
+sys.exit(1)
+PY
+      then
+        mv "$out.tmp" "$out"
+        return 0
+      fi
+    fi
+    sleep 0.25
+  done
+  curl -fsS "http://${status_addr}/status?volume=v1" >"$ARTIFACT_DIR/status-${replica}-last.json" 2>/dev/null || true
+  echo "timed out waiting for ${replica} ${role} projection" >&2
+  exit 1
+}
+
 log "start r1 iSCSI path"
 start_blockvolume r1 s1 "$PORT1" "$R1_DATA_ADDR" "$R1_CTRL_ADDR" "$R1_STATUS_ADDR" \
   "${RUN_DIR}/r1-store" "$ARTIFACT_DIR/blockvolume-r1.log"
 wait_port "$PORT1"
-sleep 2
+wait_status_role "$R1_STATUS_ADDR" r1 primary
 
 log "start r2 iSCSI path"
 start_blockvolume r2 s2 "$PORT2" "$R2_DATA_ADDR" "$R2_CTRL_ADDR" "$R2_STATUS_ADDR" \
   "${RUN_DIR}/r2-store" "$ARTIFACT_DIR/blockvolume-r2.log"
 wait_port "$PORT2"
-sleep 3
+wait_status_role "$R2_STATUS_ADDR" r2 standby
 
 discover_login() {
   local port="$1"

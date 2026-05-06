@@ -9,10 +9,17 @@ IMAGE="${SW_BLOCK_IMAGE:-sw-block:local}"
 CSI_IMAGE="${SW_BLOCK_CSI_IMAGE:-sw-block-csi:local}"
 LAUNCHER_PVC_OWNER_REF="${SW_BLOCK_LAUNCHER_PVC_OWNER_REF:-0}"
 RESTART_CSI_NODE_BEFORE_READER="${SW_BLOCK_RESTART_CSI_NODE_BEFORE_READER:-0}"
-DEMO_APP_MANIFEST="${SW_BLOCK_DEMO_APP_MANIFEST:-$ROOT/deploy/k8s/alpha/demo-app-pvc.yaml}"
+DEFAULT_DEMO_APP_MANIFEST="$ROOT/deploy/k8s/alpha/demo-app-pvc.yaml"
+DEMO_APP_MANIFEST="${SW_BLOCK_DEMO_APP_MANIFEST:-$DEFAULT_DEMO_APP_MANIFEST}"
 BLOCKVOLUME_NAMESPACE="kube-system"
 if [[ "$LAUNCHER_PVC_OWNER_REF" == "1" || "$LAUNCHER_PVC_OWNER_REF" == "true" ]]; then
   BLOCKVOLUME_NAMESPACE="$NAMESPACE"
+fi
+if [[ "$RESTART_CSI_NODE_BEFORE_READER" == "1" || "$RESTART_CSI_NODE_BEFORE_READER" == "true" ]]; then
+  if [[ "$DEMO_APP_MANIFEST" == "$DEFAULT_DEMO_APP_MANIFEST" || "$(basename "$DEMO_APP_MANIFEST")" == "demo-app-pvc.yaml" ]]; then
+    echo "restart mode requires a writer manifest that keeps the PVC mounted, e.g. deploy/k8s/alpha/demo-app-pvc-writer-hold.yaml" >&2
+    exit 2
+  fi
 fi
 
 mkdir -p "$ARTIFACT_DIR"

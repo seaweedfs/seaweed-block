@@ -191,6 +191,35 @@ PY
   exit 1
 }
 
+wait_status_projected() {
+  local status_addr="$1"
+  local replica="$2"
+  local out="$ARTIFACT_DIR/status-${replica}-projected.json"
+  for _ in $(seq 1 120); do
+    if curl -fsS "http://${status_addr}/status?volume=v1" >"$out.tmp" 2>/dev/null; then
+      if python3 - "$out.tmp" "$replica" <<'PY'
+import json, sys
+path, replica = sys.argv[1], sys.argv[2]
+body = json.load(open(path))
+if str(body.get("ReplicaID", "")) != replica:
+    sys.exit(1)
+authority_role = str(body.get("AuthorityRole", ""))
+replication_role = str(body.get("ReplicationRole", ""))
+ok = authority_role != "unknown" or replication_role != "unknown"
+sys.exit(0 if ok else 1)
+PY
+      then
+        mv "$out.tmp" "$out"
+        return 0
+      fi
+    fi
+    sleep 0.25
+  done
+  curl -fsS "http://${status_addr}/status?volume=v1" >"$ARTIFACT_DIR/status-${replica}-last.json" 2>/dev/null || true
+  echo "timed out waiting for ${replica} projection" >&2
+  exit 1
+}
+
 pid_for_replica() {
   local replica="$1"
   pgrep -f "${BIN_DIR}/blockvolume.*--replica-id ${replica}" | head -n1
@@ -200,14 +229,14 @@ log "start r1 active path"
 start_blockvolume r1 s1 "$PORT1" "$R1_DATA_ADDR" "$R1_CTRL_ADDR" "$R1_STATUS_ADDR" \
   "${RUN_DIR}/r1-store" "$ARTIFACT_DIR/blockvolume-r1.log"
 wait_port "$PORT1"
-sleep 2
+wait_status_healthy "$R1_STATUS_ADDR" r1 1
 
 log "start r2 standby path"
 start_blockvolume r2 s2 "$PORT2" "$R2_DATA_ADDR" "$R2_CTRL_ADDR" "$R2_STATUS_ADDR" \
   "${RUN_DIR}/r2-store" "$ARTIFACT_DIR/blockvolume-r2.log"
 wait_port "$PORT2"
-sleep 3
 wait_status_healthy "$R1_STATUS_ADDR" r1 1
+wait_status_projected "$R2_STATUS_ADDR" r2
 
 discover_login() {
   local port="$1"

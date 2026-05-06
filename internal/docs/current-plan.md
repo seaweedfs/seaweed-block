@@ -245,14 +245,15 @@ References:
   - #QA status: PASS on M02.
   - manual kubelet poking is allowed only for first reproduction.
 
-## Current Active Milestone: iSCSI-P6 ALUA / MPIO / Mounted Failover
+## Recently Closed Milestone: iSCSI-P6 ALUA / MPIO / Mounted Failover
 
 - Goal:
   - make mounted-volume failover a real frontend behavior instead of only a
     reconnect story.
 
 - Tasks:
-  - status: QA green on `iscsi/csi-node-lifecycle@d1025f1`.
+  - status: completed in PR #42 scope; QA green on
+    `iscsi/csi-node-lifecycle@d1025f1`.
   - #design(iscsi-p6-alua-mpio-design) ALUA/MPIO policy and protocol shape:
     - owner: dev.
     - output: `internal/docs/ref/iscsi-p6-alua-mpio-design.md`.
