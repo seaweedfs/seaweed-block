@@ -314,17 +314,22 @@ References:
       - target port group and relative target port are stable per
         volume/replica path.
   - multipath initiator test:
-    - status: P6-D active-path OS script prepared.
+    - status: P6-D two-path script prepared; awaiting QA lab run.
     - script: `scripts/run-iscsi-alua-os-smoke.sh`.
+    - script: `scripts/run-iscsi-alua-multipath-smoke.sh`.
     - assignment: `internal/docs/qa-assignments/iscsi-p6-alua-mpio-lab-validation.md`.
     - current claim: one active path reports ALUA through real Linux `sg_inq`
       and `sg_rtpg`, then completes mkfs/mount/checksum/logout.
+    - current two-path claim: two iSCSI portals for one volume can be logged
+      in by Linux, report active/standby ALUA state, reject standby WRITE,
+      and appear as one logical device in `multipath -ll`.
     - standby/probe session prerequisite: local P6-D slice implemented.
       Non-active ALUA paths may use a borrowed metadata backend after
       `Provider.Open` returns not-ready, so Linux can probe INQUIRY/VPD/RTPG
       without allowing writes.
-    - non-claim: two-path Linux `multipathd` grouping still needs QA lab
-      evidence.
+    - #QA run Test 1 and Test 1B on M02 or another Linux host with
+      `multipath-tools`.
+    - non-claim: mounted workload failover still needs P6-E.
   - primary failover while mounted:
     - status: pending P6-E.
   - old primary cannot serve stale successful I/O:

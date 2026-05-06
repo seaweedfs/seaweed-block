@@ -1,6 +1,6 @@
 # QA Assignment: iSCSI P6 ALUA / MPIO Lab Validation
 
-Status: Test 1 executable; Test 2 still blocked by mounted failover work.
+Status: Test 1 and Test 1B executable; Test 2 still blocked by mounted failover work.
 Branch: `iscsi/csi-node-lifecycle`.
 Scope: real Linux initiator validation for ALUA/MPIO and mounted failover.
 
@@ -60,17 +60,27 @@ Non-claim:
 
 ## Test 1B: Two-Path Multipath Identity
 
-Status: blocked until the standby path can be represented to Linux without
-blocking Normal-session backend open.
+Status: ready.
 
-Expected when unblocked:
+Run:
+
+```bash
+RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-iscsi-p6-alua-mpath" \
+SW_BLOCK_ARTIFACT_DIR="/mnt/smb/work/share/g15d-k8s/${RUN_ID}" \
+bash scripts/run-iscsi-alua-multipath-smoke.sh "$PWD"
+```
+
+Expected:
 
 - initiator discovers two target paths for one volume.
 - `multipath -ll` shows one logical device.
-- same volume -> same NAA.
-- different paths -> distinct target port / target port group identity.
+- standard INQUIRY / VPD 0x83 / REPORT TARGET PORT GROUPS can be queried
+  through both paths.
+- one path reports active/optimized.
+- one path reports standby.
+- VPD 0x83 exposes volume identity plus target-port identity for each path.
 - standby path does not accept normal WRITE as GOOD.
-- standby path still accepts metadata/path-probing commands and READ.
+- cleanup leaves no sw-block iSCSI sessions.
 
 Evidence to collect:
 
@@ -79,6 +89,13 @@ Evidence to collect:
 - `sg_inq -p 0x83` from each path.
 - `sg_rtpg` from each path.
 - standby write rejection evidence.
+- final `iscsiadm -m session`.
+
+Non-claim:
+
+- Test 1B does not prove mounted workload failover.
+- Test 1B does not prove Windows MPIO.
+- Test 1B does not prove primary movement while the filesystem is mounted.
 
 ## Test 2: Mounted Workload Failover
 
