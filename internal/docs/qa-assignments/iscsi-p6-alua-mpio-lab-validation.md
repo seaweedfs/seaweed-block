@@ -1,6 +1,6 @@
 # QA Assignment: iSCSI P6 ALUA / MPIO Lab Validation
 
-Status: Test 1B QA green; Test 2 still blocked by mounted failover work.
+Status: Test 1B QA green; Test 2 executable.
 Branch: `iscsi/csi-node-lifecycle`.
 Scope: real Linux initiator validation for ALUA/MPIO and mounted failover.
 
@@ -115,12 +115,20 @@ Non-claim:
 
 ## Test 2: Mounted Workload Failover
 
-Status: blocked until P6-E.
+Status: ready for first lab run.
 
-Expected when unblocked:
+Run:
+
+```bash
+RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-iscsi-p6-mounted-failover" \
+SW_BLOCK_ARTIFACT_DIR="/mnt/smb/work/share/g15d-k8s/${RUN_ID}" \
+bash scripts/run-iscsi-alua-mounted-failover-smoke.sh "$PWD"
+```
+
+Expected:
 
 - workload starts on mounted multipath device.
-- active path failure triggers documented path-state change.
+- active path failure triggers authority movement to the replica path.
 - authority moves only after data-continuity prerequisites are met.
 - final read-back is byte-equal.
 - old primary path cannot acknowledge stale successful I/O.
@@ -128,12 +136,20 @@ Expected when unblocked:
 
 Evidence to collect:
 
-- workload log before and after active-path failure.
-- target logs showing old primary write rejection after state change.
-- `multipath -ll` before failure, during transition, and after recovery.
+- pre-failover and post-failover checksum logs.
+- r1/r2 target logs.
+- r2 `/status` after failover showing `Healthy=true` and `Epoch>=2`.
+- `multipath -ll` before and after failover.
 - `sg_rtpg` before failure, during transition, and after recovery.
-- checksum or byte-equal read-back proof.
+- `iscsiadm -m session -P 3` before and after failover.
 - cleanup commands and final empty session/device state.
+
+Non-claim:
+
+- Test 2 is Linux multipath evidence only.
+- Test 2 does not prove Kubernetes-mounted failover.
+- Test 2 does not prove Windows MPIO.
+- Test 2 does not claim production HA soak.
 
 ## Report Format
 

@@ -22,6 +22,7 @@ This directory contains developer and QA helper scripts.
 | `run-iscsi-os-smoke.sh` | Privileged Linux OS-initiator smoke: `iscsiadm` -> `mkfs.ext4` -> mount -> checksum -> logout on a 256 MiB target. |
 | `run-iscsi-alua-os-smoke.sh` | Privileged Linux OS-initiator smoke for ALUA reporting: `iscsiadm` -> `sg_inq`/`sg_rtpg` -> mount -> checksum -> logout. |
 | `run-iscsi-alua-multipath-smoke.sh` | Privileged Linux OS-initiator smoke for two iSCSI paths: two portals -> ALUA active/standby evidence -> standby write reject -> `multipath -ll`. |
+| `run-iscsi-alua-mounted-failover-smoke.sh` | Privileged Linux OS-initiator smoke for mounted multipath failover: mount `/dev/mapper/*`, kill active path, wait r2 primary, verify checksum read/write. |
 | `build-g15b-images.sh` | Compatibility wrapper for older QA scripts. |
 | `run-g15b-k8s-static.sh` | Historical static PV Kubernetes harness. |
 | `run-g15d-k8s-dynamic.sh` | Historical dynamic PVC harness used by compatibility scenarios. |

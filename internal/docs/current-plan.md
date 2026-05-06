@@ -336,9 +336,16 @@ References:
         grouped both paths under `mpatha`.
     - non-claim: mounted workload failover still needs P6-E.
   - primary failover while mounted:
-    - status: pending P6-E.
+    - status: P6-E script prepared; awaiting QA lab run.
+    - script: `scripts/run-iscsi-alua-mounted-failover-smoke.sh`.
+    - assignment: `internal/docs/qa-assignments/iscsi-p6-alua-mpio-lab-validation.md`.
+    - current claim under test: mounted Linux multipath device can read a
+      pre-failover checksum and write a post-failover checksum after r1 is
+      killed and r2 reaches `Healthy=true` at a newer epoch.
+    - #QA run Test 2 on M02 or another Linux host with `multipath-tools`.
   - old primary cannot serve stale successful I/O:
-    - status: pending P6-D/P6-E.
+    - status: partially covered by killing r1 in P6-E script; returned old
+      primary stale-success proof remains pending.
 
 - Close bar:
   - real initiator sees correct ALUA/MPIO behavior,
