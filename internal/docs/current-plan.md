@@ -314,7 +314,13 @@ References:
       - target port group and relative target port are stable per
         volume/replica path.
   - multipath initiator test:
-    - status: next P6-D / #QA script.
+    - status: P6-D active-path OS script prepared.
+    - script: `scripts/run-iscsi-alua-os-smoke.sh`.
+    - assignment: `internal/docs/qa-assignments/iscsi-p6-alua-mpio-lab-validation.md`.
+    - current claim: one active path reports ALUA through real Linux `sg_inq`
+      and `sg_rtpg`, then completes mkfs/mount/checksum/logout.
+    - non-claim: two-path Linux `multipathd` grouping remains blocked until
+      standby path representation is solved.
   - primary failover while mounted:
     - status: pending P6-E.
   - old primary cannot serve stale successful I/O:
@@ -328,7 +334,7 @@ References:
   - no stale-primary success.
 
 - QA/tooling:
-  - #QA needs real initiator multipath setup script after design is accepted.
+  - #QA active-path ALUA OS script is ready.
   - #QA needs mounted workload failover script after design is accepted.
   - do not rely on in-process protocol tests only.
 

@@ -20,6 +20,7 @@ This directory contains developer and QA helper scripts.
 | `run-alpha-k8s-dynamic.sh` | Public dynamic PVC alpha smoke entry. |
 | `run-alpha-app-demo.sh` | App-demo implementation used by `run-k8s-demo.sh`. |
 | `run-iscsi-os-smoke.sh` | Privileged Linux OS-initiator smoke: `iscsiadm` -> `mkfs.ext4` -> mount -> checksum -> logout on a 256 MiB target. |
+| `run-iscsi-alua-os-smoke.sh` | Privileged Linux OS-initiator smoke for ALUA reporting: `iscsiadm` -> `sg_inq`/`sg_rtpg` -> mount -> checksum -> logout. |
 | `build-g15b-images.sh` | Compatibility wrapper for older QA scripts. |
 | `run-g15b-k8s-static.sh` | Historical static PV Kubernetes harness. |
 | `run-g15d-k8s-dynamic.sh` | Historical dynamic PVC harness used by compatibility scenarios. |
