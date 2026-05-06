@@ -319,8 +319,12 @@ References:
     - assignment: `internal/docs/qa-assignments/iscsi-p6-alua-mpio-lab-validation.md`.
     - current claim: one active path reports ALUA through real Linux `sg_inq`
       and `sg_rtpg`, then completes mkfs/mount/checksum/logout.
-    - non-claim: two-path Linux `multipathd` grouping remains blocked until
-      standby path representation is solved.
+    - standby/probe session prerequisite: local P6-D slice implemented.
+      Non-active ALUA paths may use a borrowed metadata backend after
+      `Provider.Open` returns not-ready, so Linux can probe INQUIRY/VPD/RTPG
+      without allowing writes.
+    - non-claim: two-path Linux `multipathd` grouping still needs QA lab
+      evidence.
   - primary failover while mounted:
     - status: pending P6-E.
   - old primary cannot serve stale successful I/O:

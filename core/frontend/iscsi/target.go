@@ -20,6 +20,13 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/frontend"
 )
 
+// ProbeBackendProvider supplies a borrowed backend for metadata-only ALUA path
+// probing when the write-ready Provider.Open path is not available. The backend
+// must still fail data I/O closed through its own readiness/lineage gates.
+type ProbeBackendProvider interface {
+	ProbeBackend(ctx context.Context, volumeID string) (frontend.Backend, error)
+}
+
 // TargetConfig configures a Target.
 type TargetConfig struct {
 	// Listen is the TCP address the Target binds on.
@@ -42,6 +49,14 @@ type TargetConfig struct {
 
 	// Provider supplies the frontend.Backend each session uses.
 	Provider frontend.Provider
+
+	// ProbeProvider is optional. If a Normal-session Provider.Open returns
+	// frontend.ErrNotReady and ALUA reports a non-active path, the session may
+	// use this borrowed backend to answer metadata/path-probing commands
+	// (INQUIRY, VPD, RTPG, capacity). Writes remain rejected by ALUA and the
+	// backend's own readiness gates. Nil preserves the historical close-on-open
+	// failure behavior.
+	ProbeProvider ProbeBackendProvider
 
 	// Backend handler config (block size, volume size, INQUIRY
 	// vendor/product strings). Optional — zero values get the
@@ -205,7 +220,7 @@ func (t *Target) handleConn(conn net.Conn) {
 	// it should at least return SendTargets. The session opens
 	// the backend after login succeeds, and only for Normal
 	// sessions.
-	sess := newSession(conn, t.cfg.Provider, t.cfg.VolumeID, t.cfg.Handler,
+	sess := newSession(conn, t.cfg.Provider, t.cfg.ProbeProvider, t.cfg.VolumeID, t.cfg.Handler,
 		t.cfg.Negotiation, t.cfg.DataOutTimeout, t, t, t.logger)
 	if err := sess.serve(ctx); err != nil && !errors.Is(err, net.ErrClosed) {
 		t.logger.Printf("iscsi: session error (%s): %v", conn.RemoteAddr(), err)

@@ -143,6 +143,15 @@ authority, placement, and replica readiness.
 
 - Linux initiator with `open-iscsi` and `multipath-tools`.
 - Two target paths for one volume.
+- First executable slice:
+  - one active path reports ALUA through real `sg_inq` / `sg_rtpg`,
+  - `mkfs.ext4`, mount, checksum write/read, logout, and cleanup succeed.
+- Standby/probe session slice:
+  - a non-active ALUA path may use a metadata-only borrowed backend when the
+    write-ready `Provider.Open` path is not ready,
+  - this is only for path probing commands such as INQUIRY, VPD, RTPG,
+    capacity, and mode sense,
+  - writes and sync still fail closed through ALUA and backend readiness.
 - Expected:
   - multipath sees one logical device,
   - active path accepts workload,
@@ -158,6 +167,8 @@ authority, placement, and replica readiness.
 
 ### P6-E: Mounted Failover
 
+- Status:
+  - not started beyond the standby/probe session prerequisite.
 - Start a mounted workload through the multipath device.
 - Kill or close the active primary path.
 - Drive authority movement to the replica path.

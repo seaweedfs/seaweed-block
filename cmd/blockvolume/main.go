@@ -744,6 +744,10 @@ func run(f flags) int {
 	var frontendTargets []*control.FrontendTarget
 	if f.iscsiListen != "" {
 		prov := provider
+		var probeProvider iscsi.ProbeBackendProvider
+		if durableProv != nil {
+			probeProvider = &durableProbeProvider{provider: durableProv}
+		}
 		negotiation := iscsi.NegotiableConfig{}
 		if f.iscsiCHAPSecret != "" {
 			negotiation = iscsi.DefaultNegotiableConfig()
@@ -758,6 +762,7 @@ func run(f flags) int {
 			PortalAddr:     f.iscsiPortalAddr,
 			VolumeID:       f.volumeID,
 			Provider:       prov,
+			ProbeProvider:  probeProvider,
 			Negotiation:    negotiation,
 			DataOutTimeout: f.iscsiDataOutTTL,
 			Handler: iscsi.HandlerConfig{
