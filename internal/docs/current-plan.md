@@ -11,6 +11,7 @@ References:
 - `ref/iscsi-v2-coverage-gap-audit.md`
 - `ref/iscsi-os-initiator-compat-plan.md`
 - `ref/v2-frontend-protocol-gap-audit.md`
+- `ref/iscsi-csi-alua-review-guide.md`
 - `ref/iscsi-p6-alua-mpio-design.md`
 - `ref/iscsi-alua-technical-note.md`
 
