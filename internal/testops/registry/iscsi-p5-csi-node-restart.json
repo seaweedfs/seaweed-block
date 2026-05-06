@@ -1,0 +1,52 @@
+{
+  "schema_version": "1.0",
+  "scenario": "iscsi-p5-csi-node-restart",
+  "gate": "iSCSI-P5",
+  "layer": "L5-k8s",
+  "driver": {
+    "type": "shell",
+    "path": "scripts/run-k8s-csi-node-restart.sh"
+  },
+  "default_timeout_s": 900,
+  "required_capabilities": [
+    "bash",
+    "kubectl",
+    "privileged-k8s-node",
+    "iscsiadm",
+    "iscsi_tcp-loadable",
+    "mount"
+  ],
+  "required_images": [
+    "sw-block:local",
+    "sw-block-csi:local"
+  ],
+  "qa_instruction": "internal/docs/qa-assignments/iscsi-p5-csi-node-lifecycle-validation.md",
+  "known_green_commit": "",
+  "scenario_default_params": {
+    "SW_BLOCK_LAUNCHER_PVC_OWNER_REF": "1"
+  },
+  "artifacts": [
+    "run.log",
+    "writer.log",
+    "writer.describe.txt",
+    "reader.log",
+    "restart-csi-node.log",
+    "restart-csi-node-status.log",
+    "csi-node-pods.after-restart.txt",
+    "generated-blockvolume.yaml",
+    "blockmaster.log",
+    "blockcsi-controller.log",
+    "csi-provisioner.log",
+    "csi-attacher.log",
+    "blockvolume-generated.log",
+    "iscsi-sessions.after-delete.txt",
+    "cleanup.log"
+  ],
+  "non_claims": [
+    "Single-node Kubernetes only.",
+    "CSI node restart while the writer pod holds the PVC mount.",
+    "No blockvolume restart durability claim.",
+    "No mounted failover, ALUA, MPIO, NVMe, or multi-node claim.",
+    "No performance or soak claim."
+  ]
+}

@@ -65,9 +65,12 @@ This is the short internal roadmap. Keep it current and readable.
 ### Track B: iSCSI Frontend Stability
 
 - Current: OS initiator correctness, session stability, product-backed K8s
-  fio/attach-detach, and CHAP are implemented and evidenced.
-- Next: CSI lifecycle and restart behavior.
-- Later: ALUA/MPIO and mounted failover.
+  fio/attach-detach, CHAP, CSI node restart, ALUA/MPIO, and mounted failover
+  are implemented and evidenced in PR #42.
+- Next: backend comparison and repeatability evidence for regular WAL versus
+  smartwal.
+- Later: larger compatibility coverage across host distros and initiator
+  versions.
 
 ### Track C: Durable State
 

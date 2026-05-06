@@ -17,6 +17,7 @@ package iscsi
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -83,9 +84,10 @@ type Session struct {
 	// only. provider + volumeID + hcfg are captured at session
 	// construction; the session calls provider.Open() after
 	// login succeeds and builds the SCSIHandler then.
-	provider frontend.Provider
-	volumeID string
-	hcfg     HandlerConfig
+	provider      frontend.Provider
+	probeProvider ProbeBackendProvider
+	volumeID      string
+	hcfg          HandlerConfig
 	// backend holds the opened backend so serve() can Close it
 	// on exit. nil for Discovery sessions.
 	backend frontend.Backend
@@ -111,7 +113,7 @@ type Logger interface {
 // provider + volumeID + hcfg are captured for post-login,
 // Normal-session-only backend open (residual-risk fix). The
 // backend is NOT opened at construction.
-func newSession(conn net.Conn, provider frontend.Provider, volumeID string, hcfg HandlerConfig, negCfg NegotiableConfig, dataOutTimeout time.Duration, resolver TargetResolver, lister TargetLister, logger Logger) *Session {
+func newSession(conn net.Conn, provider frontend.Provider, probeProvider ProbeBackendProvider, volumeID string, hcfg HandlerConfig, negCfg NegotiableConfig, dataOutTimeout time.Duration, resolver TargetResolver, lister TargetLister, logger Logger) *Session {
 	return &Session{
 		conn:           conn,
 		logger:         logger,
@@ -121,6 +123,7 @@ func newSession(conn net.Conn, provider frontend.Provider, volumeID string, hcfg
 		resolver:       resolver,
 		lister:         lister,
 		provider:       provider,
+		probeProvider:  probeProvider,
 		volumeID:       volumeID,
 		hcfg:           hcfg,
 	}
@@ -138,16 +141,9 @@ func (s *Session) serve(ctx context.Context) error {
 	// need SendTargets, which comes from the TargetLister that
 	// was wired at construction.
 	if s.negResult.SessionType == SessionTypeNormal {
-		backend, err := s.provider.Open(ctx, s.volumeID)
+		backend, err := s.openBackendForNormalSession(ctx)
 		if err != nil {
-			// Clean close — do NOT hold the socket. A parallel
-			// discovery attempt on the listen addr must still
-			// make progress.
-			if s.logger != nil {
-				s.logger.Printf("iscsi: Provider.Open(%s): %v (closing Normal session)",
-					s.volumeID, err)
-			}
-			return fmt.Errorf("provider open: %w", err)
+			return err
 		}
 		s.backend = backend
 		hcfg := s.hcfg
@@ -156,6 +152,48 @@ func (s *Session) serve(ctx context.Context) error {
 	}
 	// Phase 3: Full-Feature dispatch loop.
 	return s.fullFeatureLoop(ctx)
+}
+
+func (s *Session) openBackendForNormalSession(ctx context.Context) (frontend.Backend, error) {
+	backend, err := s.provider.Open(ctx, s.volumeID)
+	if err == nil {
+		return backend, nil
+	}
+	if probeBackend, ok := s.tryProbeBackend(ctx, err); ok {
+		return probeBackend, nil
+	}
+	// Clean close — do NOT hold the socket. A parallel discovery attempt on
+	// the listen addr must still make progress.
+	if s.logger != nil {
+		s.logger.Printf("iscsi: Provider.Open(%s): %v (closing Normal session)",
+			s.volumeID, err)
+	}
+	return nil, fmt.Errorf("provider open: %w", err)
+}
+
+func (s *Session) tryProbeBackend(ctx context.Context, openErr error) (frontend.Backend, bool) {
+	if s.probeProvider == nil || !errors.Is(openErr, frontend.ErrNotReady) {
+		return nil, false
+	}
+	alua := s.hcfg.ALUA
+	if alua == nil {
+		return nil, false
+	}
+	switch alua.ALUAState() {
+	case ALUAActiveOptimized, ALUAActiveNonOptimized:
+		return nil, false
+	}
+	backend, err := s.probeProvider.ProbeBackend(ctx, s.volumeID)
+	if err != nil {
+		if s.logger != nil {
+			s.logger.Printf("iscsi: ProbeBackend(%s): %v", s.volumeID, err)
+		}
+		return nil, false
+	}
+	if s.logger != nil {
+		s.logger.Printf("iscsi: Provider.Open(%s): %v; using ALUA metadata probe backend", s.volumeID, openErr)
+	}
+	return backend, true
 }
 
 func (s *Session) loginPhase() error {
