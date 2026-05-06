@@ -1,8 +1,23 @@
 # QA Assignment: iSCSI P8 Compatibility Soak
 
-Status: ready.
+Status: QA green on `iscsi/frontend-hardening@38ff850`.
 Branch: `iscsi/frontend-hardening`.
 Scope: repeatable soak evidence for the current iSCSI frontend stack.
+
+Verified on M02:
+
+- run ID: `20260506T223240Z-iscsi-p8-soak-38ff850`
+- artifact:
+  `/mnt/smb/work/share/g15d-k8s/20260506T223240Z-iscsi-p8-soak-38ff850`
+- final line: `[iscsi-soak] PASS: compatibility soak completed`
+- steps:
+  - `os-fio-repeat`: PASS,
+  - `k8s-fio`: PASS,
+  - `k8s-attach-detach`: PASS.
+- cleanup:
+  - no active iSCSI sessions,
+  - no sw-block PVC/deployment residue,
+  - no stray `blockmaster` / `blockvolume` processes.
 
 ## Preconditions
 

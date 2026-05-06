@@ -411,7 +411,7 @@ References:
     record the network path in the report.
   - avoid manual benchmark notes without a repeatable scenario.
 
-## Current Active Milestone: iSCSI-P8 Compatibility And Soak
+## Recently Closed Milestone: iSCSI-P8 Compatibility And Soak
 
 - Goal:
   - turn the current alpha iSCSI feature set into repeatable compatibility and
@@ -421,22 +421,33 @@ References:
 
 - Tasks:
   - local ALUA concurrency guard:
-    - status: in progress on `iscsi/frontend-hardening`.
+    - status: done on `iscsi/frontend-hardening`.
     - cover concurrent REPORT TARGET PORT GROUPS while data READ/WRITE on a
       standby path is rejected.
     - closes the P6 pending item for concurrent RTPG plus standby reject.
   - OS initiator soak:
-    - #QA pending.
+    - #QA green on `iscsi/frontend-hardening@38ff850`.
     - repeat `run-iscsi-os-smoke.sh` with fio for a longer runtime.
     - record session errors, fio summary, goroutine/process cleanup, and
       final `iscsiadm -m session`.
+    - artifact:
+      `/mnt/smb/work/share/g15d-k8s/20260506T223240Z-iscsi-p8-soak-38ff850`.
+    - evidence:
+      - 2 iterations,
+      - 120s fio per iteration,
+      - `iscsiadm mkfs mount write/read logout` PASS,
+      - no active sessions after final cleanup.
   - K8s CSI soak:
-    - #QA pending.
+    - #QA green on `iscsi/frontend-hardening@38ff850`.
     - repeat attach/detach and fio paths with explicit iteration/runtime
       values.
     - record whether launcher owner-reference cleanup remains clean.
+    - evidence:
+      - `[alpha-fio] PASS`,
+      - `[attach-loop] PASS: 3 attach/detach app PVC cycles completed`,
+      - no sw-block PVC or deployment residue.
   - compatibility matrix:
-    - #QA pending.
+    - #QA green for M02.
     - document exact host distro, kernel, open-iscsi version, fio version,
       and sg3-utils/multipath versions when used.
     - add more hosts only when the first soak is repeatable.
@@ -451,6 +462,48 @@ References:
   - prefer wrappers with env knobs over manual command sequences.
   - label all runtime/throughput numbers as soak evidence, not benchmark
     claims.
+  - #QA assignment:
+    `internal/docs/qa-assignments/iscsi-p8-compat-soak-validation.md`.
+  - #QA status:
+    - PASS on M02 at `38ff850`.
+    - final line:
+      `[iscsi-soak] PASS: compatibility soak completed`.
+    - non-claim:
+      compatibility probe only, not a long-running soak or performance claim.
+
+## Current Active Milestone: TestOps For Frontend Lab Gates
+
+- Goal:
+  - reduce false failures from manual multi-step lab runs by moving P8-style
+    gates into one TestOps entry point.
+  - keep existing shell scripts as the execution backend first; do not rewrite
+    all harness logic before the gate is stable.
+
+- Tasks:
+  - #QA package P8 compatibility soak as a TestOps scenario:
+    - status: next assignment.
+    - must record commit SHA, command, artifact root, step result, final line,
+      and cleanup status in a single result file.
+    - initial scenario may call `scripts/run-iscsi-compat-soak.sh`.
+  - define the minimal result contract:
+    - scenario name,
+    - repository SHA,
+    - host,
+    - step table,
+    - artifact paths,
+    - cleanup checks.
+  - keep product development unblocked:
+    - TestOps work should not change iSCSI protocol code.
+    - product branches can continue using scripts until TestOps reaches parity.
+
+- Close bar:
+  - one command runs the P8 full lab gate,
+  - old-commit/stale-binary ambiguity is impossible or explicitly reported,
+  - result file is enough for review without reading raw terminal output.
+
+- QA/tooling:
+  - #QA assignment should be written before implementation.
+  - prefer small TestOps wrapper over a wholesale scenario DSL rewrite.
 
 ## Cross-Cutting Technical Rules
 
