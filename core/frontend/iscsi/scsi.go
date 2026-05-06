@@ -501,6 +501,13 @@ func (h *SCSIHandler) inquiryVPD83(allocLen uint16) SCSIResult {
 // sha256(VolumeID) truncated to fit. Deterministic (same VolumeID
 // → same NAA across process restarts) and collision-free for
 // realistic volume counts (T2 single-volume is trivially safe).
+//
+// Note: SPC-4 §7.6.6 specifies NAA-6 (Registered Extended) as a
+// 16-byte designator; this helper produces 8 bytes, which is
+// formally NAA-5 (Registered) shape with NAA-6 prefix. Linux
+// multipathd accepts it and the existing T2 tests pin this exact
+// shape; widening to a true 16-byte NAA-6 is tracked separately
+// from the RTPG offset fix and is not part of this change.
 func naaFromVolumeID(volumeID string) [8]byte {
 	sum := sha256.Sum256([]byte(volumeID))
 	var out [8]byte

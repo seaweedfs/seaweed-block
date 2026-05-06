@@ -161,7 +161,7 @@ if ! grep -Eiq "TPGS|target port group|asymmetric" "$ARTIFACT_DIR/sg_inq.standar
   echo "ALUA evidence missing from sg_inq/sg_rtpg output" >&2
   exit 1
 fi
-if ! grep -Eiq "active|optimized" "$ARTIFACT_DIR/sg_rtpg.txt"; then
+if ! grep -Eiq "asymmetric access state[[:space:]]*:[[:space:]]*0x0[01]|active|optimized" "$ARTIFACT_DIR/sg_rtpg.txt"; then
   echo "REPORT TARGET PORT GROUPS did not report active/optimized state" >&2
   exit 1
 fi

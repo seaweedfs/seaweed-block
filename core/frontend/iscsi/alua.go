@@ -76,11 +76,28 @@ func (h *SCSIHandler) reportTargetPortGroups(cdb [16]byte) SCSIResult {
 	allocLen := binary.BigEndian.Uint32(cdb[6:10])
 	data := make([]byte, 16)
 
-	binary.BigEndian.PutUint32(data[0:4], 12) // return data length, excluding header
+	// Layout per SPC-4 §6.27 Table 175. The 4-byte parameter list header
+	// is followed by one Target Port Group descriptor (12 bytes), with
+	// one Target Port descriptor inside it (4 bytes).
+	//
+	// data[0:4] : parameter list length = 12
+	// data[4]   : descriptor byte 0 — PREF | reserved | AAS (bits 3:0)
+	// data[5]   : descriptor byte 1 — T_SUP|O_SUP|LBD_SUP|U_SUP|S_SUP|AN_SUP|AO_SUP|Reserved
+	// data[6:8] : descriptor bytes 2-3 — Target Port Group
+	// data[8]   : descriptor byte 4 — Reserved
+	// data[9]   : descriptor byte 5 — Status Code
+	// data[10]  : descriptor byte 6 — Vendor Unique
+	// data[11]  : descriptor byte 7 — Target Port Count (= 1)
+	// data[12:16]: target port descriptor 0
+	//   data[12:14] : obsolete
+	//   data[14:16] : Relative Target Port Identifier
+	binary.BigEndian.PutUint32(data[0:4], 12)
 	data[4] = uint8(h.alua.ALUAState()) & 0x0f
-	data[5] = 0x8f // A/O, A/NO, Standby, Unavailable, Transitioning supported.
-	binary.BigEndian.PutUint16(data[8:10], h.alua.TargetPortGroupID())
-	data[11] = 0x01 // one target port descriptor
+	// Support flags: T_SUP (bit 7) | U_SUP (bit 4) | S_SUP (bit 3) | AN_SUP (bit 2) | AO_SUP (bit 1).
+	// bit 0 is reserved and must be 0.
+	data[5] = 0x9e
+	binary.BigEndian.PutUint16(data[6:8], h.alua.TargetPortGroupID())
+	data[11] = 0x01
 	binary.BigEndian.PutUint16(data[14:16], h.alua.RelativeTargetPortID())
 
 	if allocLen > 0 && allocLen < uint32(len(data)) {

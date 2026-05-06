@@ -151,11 +151,18 @@ func TestP6ALUA_ActiveAdvertisesTPGSAndServesReportTPG(t *testing.T) {
 	if len(rtpg.Data) != 16 {
 		t.Fatalf("REPORT TPG len=%d want 16", len(rtpg.Data))
 	}
+	// Layout per SPC-4 §6.27 Table 175 (parameter list header + descriptor):
+	//   [4]   AAS, [5] support flags, [6:8] Target Port Group,
+	//   [9]   status code, [11] target port count,
+	//   [14:16] Relative Target Port Identifier.
 	if state := iscsi.ALUAState(rtpg.Data[4] & 0x0f); state != iscsi.ALUAActiveOptimized {
 		t.Fatalf("REPORT TPG state=%02x want active optimized", state)
 	}
-	if tpg := binary.BigEndian.Uint16(rtpg.Data[8:10]); tpg != prov.tpgID {
+	if tpg := binary.BigEndian.Uint16(rtpg.Data[6:8]); tpg != prov.tpgID {
 		t.Fatalf("REPORT TPG id=%d want %d", tpg, prov.tpgID)
+	}
+	if status := rtpg.Data[9]; status != 0 {
+		t.Fatalf("REPORT TPG status code=0x%02x want 0 (no transition)", status)
 	}
 	if rtp := binary.BigEndian.Uint16(rtpg.Data[14:16]); rtp != prov.rtpID {
 		t.Fatalf("REPORT TPG relative target port=%d want %d", rtp, prov.rtpID)
