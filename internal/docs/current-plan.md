@@ -410,6 +410,47 @@ References:
     record the network path in the report.
   - avoid manual benchmark notes without a repeatable scenario.
 
+## Current Active Milestone: iSCSI-P8 Compatibility And Soak
+
+- Goal:
+  - turn the current alpha iSCSI feature set into repeatable compatibility and
+    soak evidence without making performance claims.
+  - keep frontend protocol behavior stable while K8s and backend tests get
+    longer and more varied.
+
+- Tasks:
+  - local ALUA concurrency guard:
+    - status: in progress on `iscsi/frontend-hardening`.
+    - cover concurrent REPORT TARGET PORT GROUPS while data READ/WRITE on a
+      standby path is rejected.
+    - closes the P6 pending item for concurrent RTPG plus standby reject.
+  - OS initiator soak:
+    - #QA pending.
+    - repeat `run-iscsi-os-smoke.sh` with fio for a longer runtime.
+    - record session errors, fio summary, goroutine/process cleanup, and
+      final `iscsiadm -m session`.
+  - K8s CSI soak:
+    - #QA pending.
+    - repeat attach/detach and fio paths with explicit iteration/runtime
+      values.
+    - record whether launcher owner-reference cleanup remains clean.
+  - compatibility matrix:
+    - #QA pending.
+    - document exact host distro, kernel, open-iscsi version, fio version,
+      and sg3-utils/multipath versions when used.
+    - add more hosts only when the first soak is repeatable.
+
+- Close bar:
+  - local protocol concurrency tests green,
+  - one OS fio soak green,
+  - one K8s attach/detach or fio soak green,
+  - all runs leave no active sessions, mounts, multipath maps, or K8s residue.
+
+- QA/tooling:
+  - prefer wrappers with env knobs over manual command sequences.
+  - label all runtime/throughput numbers as soak evidence, not benchmark
+    claims.
+
 ## Cross-Cutting Technical Rules
 
 - Protocol code must not decide authority.
