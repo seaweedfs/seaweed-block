@@ -29,7 +29,7 @@ func TestProjectionALUAProvider_StateMapping(t *testing.T) {
 		{name: "superseded healthy", mode: engine.ModeHealthy, superseded: true, want: iscsi.ALUAStandby},
 		{name: "recovering", mode: engine.ModeRecovering, want: iscsi.ALUATransitioning},
 		{name: "degraded", mode: engine.ModeDegraded, want: iscsi.ALUAUnavailable},
-		{name: "idle", mode: engine.ModeIdle, want: iscsi.ALUAUnavailable},
+		{name: "idle", mode: engine.ModeIdle, want: iscsi.ALUAStandby},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

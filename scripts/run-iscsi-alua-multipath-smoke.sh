@@ -272,7 +272,7 @@ sleep 2
 sudo multipath -ll >"$ARTIFACT_DIR/multipath.ll.txt" 2>&1 || true
 
 if ! awk -v a="$base1" -v b="$base2" '
-  /^[^[:space:]]/ {
+  /^[[:alnum:]_.:-]+[[:space:]]+\(/ {
     if (seen && hasA && hasB) {
       print map
       found=1

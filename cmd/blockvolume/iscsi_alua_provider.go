@@ -43,7 +43,12 @@ func (p *projectionALUAProvider) ALUAState() iscsi.ALUAState {
 		return iscsi.ALUATransitioning
 	case engine.ModeHealthy:
 		return iscsi.ALUAStandby
-	case engine.ModeDegraded, engine.ModeIdle:
+	case engine.ModeIdle:
+		// Supporting replicas can remain engine-idle while still serving
+		// ALUA/VPD path probes through the metadata probe backend. They are
+		// standby paths, not frontend-write-ready paths.
+		return iscsi.ALUAStandby
+	case engine.ModeDegraded:
 		return iscsi.ALUAUnavailable
 	default:
 		return iscsi.ALUATransitioning
