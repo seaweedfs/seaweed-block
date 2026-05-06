@@ -328,6 +328,48 @@ func TestISCSIP5CSINodeRestartRegistrationBuildsShellDriver(t *testing.T) {
 	}
 }
 
+func TestISCSIP7BackendFioMatrixRegistrationBuildsShellDriver(t *testing.T) {
+	repoRoot := findRepoRoot(t)
+	raw, err := os.Open(registrationPath(repoRoot, "iscsi-p7-backend-fio-matrix.json"))
+	if err != nil {
+		t.Fatalf("open registration: %v", err)
+	}
+	defer raw.Close()
+
+	registration, err := DecodeRegistration(raw)
+	if err != nil {
+		t.Fatalf("DecodeRegistration: %v", err)
+	}
+	if registration.Scenario != "iscsi-p7-backend-fio-matrix" || registration.Driver.Type != "shell" {
+		t.Fatalf("registration=%+v", registration)
+	}
+	driver, err := registration.NewDriver(repoRoot)
+	if err != nil {
+		t.Fatalf("NewDriver: %v", err)
+	}
+	shell, ok := driver.(ShellDriver)
+	if !ok {
+		t.Fatalf("driver type=%T want ShellDriver", driver)
+	}
+	if !filepath.IsAbs(shell.Path) || filepath.Base(shell.Path) != "run-iscsi-backend-fio-matrix.sh" {
+		t.Fatalf("shell path=%q", shell.Path)
+	}
+	if _, err := os.Stat(shell.Path); err != nil {
+		t.Fatalf("shell driver path missing: %v", err)
+	}
+	for _, want := range []string{"summary.md", "walstore/fio.iter*.log", "smartwal/fio.iter*.log"} {
+		if !containsString(registration.Artifacts, want) {
+			t.Fatalf("registration artifacts missing %q: %v", want, registration.Artifacts)
+		}
+	}
+	if got := registration.ScenarioDefaultParams["SW_BLOCK_BACKEND_MATRIX"]; got != "walstore smartwal" {
+		t.Fatalf("backend matrix default=%q want walstore smartwal", got)
+	}
+	if !containsString(registration.NonClaims, "No product performance claim.") {
+		t.Fatalf("registration must keep performance non-claim: %v", registration.NonClaims)
+	}
+}
+
 func containsString(values []string, want string) bool {
 	for _, value := range values {
 		if value == want {

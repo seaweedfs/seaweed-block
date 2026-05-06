@@ -19,6 +19,7 @@ CTRL_ADDR="${SW_BLOCK_CTRL_ADDR:-127.0.0.1:19102}"
 STATUS_ADDR="${SW_BLOCK_STATUS_ADDR:-127.0.0.1:19103}"
 BLOCKS="${SW_BLOCK_DURABLE_BLOCKS:-65536}"      # 256 MiB at 4 KiB.
 BLOCK_SIZE="${SW_BLOCK_DURABLE_BLOCKSIZE:-4096}"
+DURABLE_IMPL="${SW_BLOCK_DURABLE_IMPL:-smartwal}"
 ITERATIONS="${SW_BLOCK_ISCSI_ITERATIONS:-1}"
 STRESS="${SW_BLOCK_ISCSI_STRESS:-none}"         # none | fio | dd
 FIO_SIZE="${SW_BLOCK_ISCSI_FIO_SIZE:-32m}"
@@ -88,6 +89,7 @@ if [[ -n "$CHAP_USERNAME" || -n "$CHAP_SECRET" ]]; then
   fi
 fi
 log "size_blocks=${BLOCKS} block_size=${BLOCK_SIZE}"
+log "durable_impl=${DURABLE_IMPL}"
 log "iterations=${ITERATIONS}"
 log "stress=${STRESS}"
 
@@ -156,7 +158,7 @@ setsid -f "${BIN_DIR}/blockvolume" \
   --heartbeat-interval 200ms \
   --t1-readiness \
   --durable-root "${RUN_DIR}/volume-store" \
-  --durable-impl smartwal \
+  --durable-impl "$DURABLE_IMPL" \
   --durable-blocks "$BLOCKS" \
   --durable-blocksize "$BLOCK_SIZE" \
   "${blockvolume_iscsi_args[@]}" \

@@ -1,0 +1,51 @@
+{
+  "schema_version": "1.0",
+  "scenario": "iscsi-p7-backend-fio-matrix",
+  "gate": "iSCSI-P7",
+  "layer": "L3-privileged-host",
+  "driver": {
+    "type": "shell",
+    "path": "scripts/run-iscsi-backend-fio-matrix.sh"
+  },
+  "default_timeout_s": 1800,
+  "required_capabilities": [
+    "bash",
+    "linux",
+    "sudo",
+    "iscsiadm",
+    "iscsi_tcp-loadable",
+    "mkfs.ext4",
+    "mount",
+    "fio"
+  ],
+  "scenario_default_params": {
+    "SW_BLOCK_BACKEND_FIO_RUNTIME": "60",
+    "SW_BLOCK_BACKEND_FIO_SIZE": "128m",
+    "SW_BLOCK_BACKEND_MATRIX": "walstore smartwal"
+  },
+  "qa_instruction": "internal/docs/qa-assignments/iscsi-p7-backend-fio-matrix-validation.md",
+  "known_green_commit": "",
+  "artifacts": [
+    "run.log",
+    "summary.md",
+    "walstore/run.log",
+    "walstore/blockmaster.log",
+    "walstore/blockvolume.log",
+    "walstore/fio.iter*.log",
+    "walstore/iscsi-sessions.final.txt",
+    "walstore/cleanup.log",
+    "smartwal/run.log",
+    "smartwal/blockmaster.log",
+    "smartwal/blockvolume.log",
+    "smartwal/fio.iter*.log",
+    "smartwal/iscsi-sessions.final.txt",
+    "smartwal/cleanup.log"
+  ],
+  "non_claims": [
+    "Experimental comparison harness only.",
+    "No product performance claim.",
+    "Single-host Linux iSCSI only.",
+    "No Kubernetes performance claim.",
+    "No RoCE/25GbE claim unless the QA report explicitly records that path."
+  ]
+}

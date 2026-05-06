@@ -374,13 +374,16 @@ References:
     product claims.
 
 - Tasks:
-  - status: planned.
+  - status: first matrix script prepared; awaiting QA lab run.
   - walstore baseline fio,
   - smartwal fio behind explicit flag,
   - RoCE / 10.0.0.x lab path if available,
   - 1GbE vs 25GbE comparison,
   - pgbench scenario,
   - record CPU, memory, latency, bandwidth, and cleanup state.
+  - script: `scripts/run-iscsi-backend-fio-matrix.sh`.
+  - assignment:
+    `internal/docs/qa-assignments/iscsi-p7-backend-fio-matrix-validation.md`.
 
 - Close bar:
   - same test runner scenario can compare backends,
@@ -388,8 +391,9 @@ References:
   - results are labelled experimental until SLOs exist.
 
 - QA/tooling:
-  - #QA needs TestOps scenario that records network, backend, block size, fio job,
-    and cleanup state.
+  - #QA run the backend matrix on M02 first.
+  - #QA if RoCE is available, rerun with explicit 10.0.0.x portal path and
+    record the network path in the report.
   - avoid manual benchmark notes without a repeatable scenario.
 
 ## Cross-Cutting Technical Rules
