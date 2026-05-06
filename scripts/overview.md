@@ -20,6 +20,7 @@ This directory contains developer and QA helper scripts.
 | `run-alpha-k8s-dynamic.sh` | Public dynamic PVC alpha smoke entry. |
 | `run-alpha-app-demo.sh` | App-demo implementation used by `run-k8s-demo.sh`. |
 | `run-iscsi-os-smoke.sh` | Privileged Linux OS-initiator smoke: `iscsiadm` -> `mkfs.ext4` -> mount -> checksum -> logout on a 256 MiB target. |
+| `run-iscsi-backend-fio-matrix.sh` | Privileged Linux OS-initiator backend matrix: runs the same fio workload against `walstore` and `smartwal`, writing per-backend artifacts and an experimental summary. |
 | `run-iscsi-alua-os-smoke.sh` | Privileged Linux OS-initiator smoke for ALUA reporting: `iscsiadm` -> `sg_inq`/`sg_rtpg` -> mount -> checksum -> logout. |
 | `run-iscsi-alua-multipath-smoke.sh` | Privileged Linux OS-initiator smoke for two iSCSI paths: two portals -> ALUA active/standby evidence -> standby write reject -> `multipath -ll`. |
 | `run-iscsi-alua-mounted-failover-smoke.sh` | Privileged Linux OS-initiator smoke for mounted multipath failover: mount `/dev/mapper/*`, kill active path, wait r2 primary, verify checksum read/write. |
