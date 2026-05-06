@@ -1,0 +1,63 @@
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: sw-block-dynamic
+provisioner: block.csi.seaweedfs.com
+volumeBindingMode: Immediate
+allowVolumeExpansion: false
+parameters:
+  replicationFactor: "1"
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: sw-block-demo-pvc
+  namespace: default
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: sw-block-dynamic
+  resources:
+    requests:
+      storage: 1Mi
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: sw-block-demo-writer
+  namespace: default
+spec:
+  restartPolicy: Never
+  securityContext:
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: app
+      image: busybox:1.36
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop:
+            - ALL
+        seccompProfile:
+          type: RuntimeDefault
+      command:
+        - /bin/sh
+        - -c
+        - |
+          set -eu
+          echo "[app-writer] writing through PVC mounted at /data"
+          dd if=/dev/urandom of=/data/demo.bin bs=4096 count=1
+          sha256sum /data/demo.bin > /data/demo.sha256
+          sync
+          sha256sum -c /data/demo.sha256
+          echo "[app-writer] wrote and verified /data/demo.bin"
+          echo "[app-writer] holding pod so CSI node restart happens while PVC is mounted"
+          sleep 3600
+      volumeMounts:
+        - name: data
+          mountPath: /data
+  volumes:
+    - name: data
+      persistentVolumeClaim:
+        claimName: sw-block-demo-pvc

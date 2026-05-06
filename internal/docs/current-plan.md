@@ -11,6 +11,8 @@ References:
 - `ref/iscsi-v2-coverage-gap-audit.md`
 - `ref/iscsi-os-initiator-compat-plan.md`
 - `ref/v2-frontend-protocol-gap-audit.md`
+- `ref/iscsi-p6-alua-mpio-design.md`
+- `ref/iscsi-alua-technical-note.md`
 
 ## Product Goal
 
@@ -34,12 +36,12 @@ References:
   - includes RX/TX stability tests, large write memory tests, OS smoke script,
     loop mode, stress mode, TestOps registry entry, and sustained sync smoke.
 - iSCSI-P2 supplemental session guards:
-  - status: local on `iscsi/frontend-completeness`, pending milestone PR.
+  - status: done in PR #41.
   - includes rapid login/logout goroutine budget, concurrent target close
     idempotency, target same-address restart, and NOP-Out queued during
     Data-Out.
 - iSCSI-P3 attach/detach loop tooling:
-  - status: local on `iscsi/frontend-completeness`, pending milestone PR.
+  - status: done in PR #41.
   - includes `scripts/run-k8s-attach-detach-loop.sh` and TestOps registry
     scenario `iscsi-p3-attach-detach-loop`.
 - iSCSI-P2/P3 lab validation:
@@ -59,6 +61,10 @@ References:
 - Owner-reference alpha default:
   - status: done in PR #40.
   - relevant to K8s cleanup and alpha install flow.
+- iSCSI-P4 CHAP / Access Control:
+  - status: done in PR #41.
+  - includes target-side CHAP, CSI node CHAP, Kubernetes Secret wiring, and
+    QA evidence.
 
 ## Recently Closed Milestone: iSCSI-P2 Stability
 
@@ -71,8 +77,7 @@ References:
 - Tasks:
   - add RX/TX stability test pack:
     - status: done in PR #26.
-    - supplemental guards: local on `iscsi/frontend-completeness`, pending
-      milestone PR.
+    - supplemental guards: done in PR #41.
     - rapid login/logout without goroutine leak,
     - many concurrent sessions,
     - target close while I/O is active,
@@ -122,8 +127,7 @@ References:
     behavior, not only protocol fakes.
 
 - Tasks:
-  - status: QA green on `iscsi/frontend-completeness@e7c95ee`, pending
-    milestone PR.
+  - status: done in PR #41.
   - sustained write/read through mounted filesystem,
   - `SYNCHRONIZE_CACHE` pressure,
   - multiple sessions sharing a volume if supported,
@@ -148,16 +152,15 @@ References:
   - default loop count comes from `SW_BLOCK_ATTACH_DETACH_ITERATIONS`.
   - #QA status: PASS on M02, 3 iterations.
 
-## Current Active Milestone: iSCSI-P4 CHAP / Access Control
+## Recently Closed Milestone: iSCSI-P4 CHAP / Access Control
 
 - Goal:
   - reach V2-level iSCSI auth behavior before any security-facing claim.
 
 - Tasks:
-  - status: QA green on `iscsi/frontend-completeness@9a1fe07`, pending
-    milestone PR.
+  - status: done in PR #41.
   - target-side CHAP login negotiation:
-    - status: local implementation + unit tests.
+    - status: done in PR #41.
     - direct LoginOp is rejected when CHAP is required,
     - `AuthMethod=None` is rejected when CHAP is required,
     - target emits CHAP MD5 challenge,
@@ -165,7 +168,7 @@ References:
     - wrong response fails closed,
     - missing `CHAP_R` fails closed.
   - `cmd/blockvolume` opt-in flags:
-    - status: local implementation + parse tests.
+    - status: done in PR #41.
     - `--iscsi-chap-username`,
     - `--iscsi-chap-secret`,
     - flags require `--iscsi-listen`,
@@ -179,7 +182,7 @@ References:
     - CSI node consumes CHAP credentials from `NodeStageVolumeRequest.Secrets`,
     - controller publish path must not copy CHAP secrets into `publish_context`,
     - node configures `iscsiadm` CHAP settings after discovery and before login.
-    - launcher can render target-side CHAP args from a Kubernetes Secret,
+    - launcher can render target-side CHAP env vars from a Kubernetes Secret,
     - alpha runner can create the Secret and inject StorageClass
       node-stage secret refs.
   - replayed challenge rejected if supported by the protocol path,
@@ -199,13 +202,15 @@ References:
     - default non-CHAP regression PASS on M02.
   - V2 CHAP tests are the reference coverage inventory.
 
-## Milestone: iSCSI-P5 CSI Node Lifecycle
+## Recently Closed Milestone: iSCSI-P5 CSI Node Lifecycle
 
 - Goal:
   - make kubelet retry/restart behavior safe enough for real clusters.
 
 - Tasks:
-  - status: active on `iscsi/frontend-completeness`.
+  - status: QA green on `iscsi/csi-node-lifecycle@4ee35c0`.
+  - local CSI node lifecycle guards:
+    - status: done in PR #41.
   - NodeStage idempotency,
     - mounted staging path must belong to the same volume,
     - mounted staging path for another volume fails closed.
@@ -225,6 +230,11 @@ References:
     - local 3-cycle stage/unstage test leaves no staged state,
       `.volume`, or `.transport`.
   - wrong volume at staging path fails closed.
+  - #QA CSI node restart while PVC remains,
+    - script prepared: `scripts/run-k8s-csi-node-restart.sh`,
+    - TestOps scenario prepared: `iscsi-p5-csi-node-restart`,
+    - assignment: `internal/docs/qa-assignments/iscsi-p5-csi-node-lifecycle-validation.md`,
+    - status: QA PASS on M02.
 
 - Close bar:
   - kubelet retries do not wedge the node plugin,
@@ -232,30 +242,117 @@ References:
   - repeated create/delete works without manual host cleanup.
 
 - QA/tooling:
-  - #QA needs K8s scenario scripts or TestOps entries.
+  - #QA status: PASS on M02.
   - manual kubelet poking is allowed only for first reproduction.
 
-## Milestone: iSCSI-P6 ALUA / MPIO / Mounted Failover
+## Current Active Milestone: iSCSI-P6 ALUA / MPIO / Mounted Failover
 
 - Goal:
   - make mounted-volume failover a real frontend behavior instead of only a
     reconnect story.
 
 - Tasks:
-  - status: planned.
+  - status: QA green on `iscsi/csi-node-lifecycle@d1025f1`.
+  - #design(iscsi-p6-alua-mpio-design) ALUA/MPIO policy and protocol shape:
+    - owner: dev.
+    - output: `internal/docs/ref/iscsi-p6-alua-mpio-design.md`.
+    - must be reviewed before changing protocol behavior.
+  - #design(iscsi-p6-qa-assignment) real initiator validation shape:
+    - owner: dev.
+    - output: `internal/docs/qa-assignments/iscsi-p6-alua-mpio-lab-validation.md`.
+    - must define the lab command, non-claims, and pass/fail criteria.
+  - V2 coverage alignment:
+    - status: design inventory added.
+    - do not copy V2 role/state ownership,
+    - do match V2 externally visible ALUA/MPIO protocol coverage unless V3
+      explicitly rejects a behavior.
   - ALUA state model:
-    - active,
+    - status: local protocol slice done on `iscsi/csi-node-lifecycle`.
+    - active optimized,
+    - active non-optimized,
     - standby,
     - unavailable,
     - transitioning.
-  - standby metadata commands allowed,
-  - standby write/read policy pinned,
-  - REPORT TARGET PORT GROUPS,
-  - VPD 0x83 target-port identity,
-  - state change while I/O is in flight,
-  - multipath initiator test,
-  - primary failover while mounted,
-  - old primary cannot serve stale successful I/O.
+  - standby command policy:
+    - status: local protocol slice done.
+    - metadata/path probing allowed,
+    - READ allowed for initiator path probing,
+    - WRITE and SYNCHRONIZE_CACHE fail closed.
+  - standard INQUIRY TPGS discipline:
+    - status: local protocol slice done.
+    - TPGS stays off until REPORT TARGET PORT GROUPS and ALUA VPD identity
+      are implemented,
+    - when enabled, advertise implicit ALUA only unless explicit transitions
+      are implemented.
+  - REPORT TARGET PORT GROUPS:
+    - status: local protocol slice done.
+    - no-provider rejection,
+    - short allocation truncation,
+    - five-state reporting.
+  - VPD 0x83 target-port identity:
+    - status: local protocol slice done.
+    - NAA stable per volume,
+    - target port group and relative target port distinguish paths,
+    - short allocation length and no-ALUA branches tested.
+  - VPD 0x00 remains advertised-pages-equal-implemented-pages:
+    - status: local protocol slice done.
+  - state change while I/O is in flight:
+    - status: local protocol state-change test done.
+  - concurrent REPORT TARGET PORT GROUPS and standby write reject tests:
+    - status: pending.
+  - frontend state provider wiring:
+    - status: local P6-C slice done on `iscsi/csi-node-lifecycle`.
+    - connect ALUA provider to current V3 frontend facts without importing
+      authority or placement.
+    - mapping:
+      - frontend Healthy => active optimized,
+      - locally healthy but superseded/non-writable => standby,
+      - recovering => transitioning,
+      - idle supporting path => standby for metadata/path probing,
+      - degraded/identity mismatch => unavailable.
+    - path identity:
+      - NAA is stable per volume,
+      - target port group and relative target port are stable per
+        volume/replica path.
+  - multipath initiator test:
+    - status: QA green on `iscsi/csi-node-lifecycle@88e9301`.
+    - script: `scripts/run-iscsi-alua-os-smoke.sh`.
+    - script: `scripts/run-iscsi-alua-multipath-smoke.sh`.
+    - assignment: `internal/docs/qa-assignments/iscsi-p6-alua-mpio-lab-validation.md`.
+    - current claim: one active path reports ALUA through real Linux `sg_inq`
+      and `sg_rtpg`, then completes mkfs/mount/checksum/logout.
+    - current two-path claim: two iSCSI portals for one volume can be logged
+      in by Linux, report active/standby ALUA state, reject standby WRITE,
+      and appear as one logical device in `multipath -ll`.
+    - standby/probe session prerequisite: local P6-D slice implemented.
+      Non-active ALUA paths may use a borrowed metadata backend after
+      `Provider.Open` returns not-ready, so Linux can probe INQUIRY/VPD/RTPG
+      without allowing writes.
+    - #QA Test 1B PASS on M02:
+      - artifact:
+        `/mnt/smb/work/share/g15d-k8s/20260506T093732Z-iscsi-p6-alua-mpath-fix`.
+      - evidence: two iSCSI paths, common NAA, distinct TPG/RTP, r1
+        active/optimized, r2 standby, standby WRITE rejected, `multipath -ll`
+        grouped both paths under `mpatha`.
+    - non-claim: mounted workload failover still needs P6-E.
+  - primary failover while mounted:
+    - status: QA green on `iscsi/csi-node-lifecycle@d1025f1`.
+    - script: `scripts/run-iscsi-alua-mounted-failover-smoke.sh`.
+    - assignment: `internal/docs/qa-assignments/iscsi-p6-alua-mpio-lab-validation.md`.
+    - verified claim: mounted Linux multipath device can read a
+      pre-failover checksum and write a post-failover checksum after r1 is
+      killed and r2 reaches `Healthy=true` at a newer epoch.
+    - #QA Test 2 PASS on M02:
+      - artifact:
+        `/mnt/smb/work/share/g15d-k8s/20260506T094503Z-iscsi-p6-mounted-failover`.
+      - evidence: `/dev/mapper/mpatha` mounted, pre-failover checksum read
+        after failover, post-failover checksum written and verified, r2
+        promoted to `Epoch=2`, old r1 gate-rejected stale writes/syncs, no
+        active sessions or multipath residue after cleanup.
+  - old primary cannot serve stale successful I/O:
+    - status: QA green for killed-old-primary path on `d1025f1`.
+    - old-primary-return proof remains future soak/fault coverage, not required
+      for P6 alpha close.
 
 - Close bar:
   - real initiator sees correct ALUA/MPIO behavior,
@@ -265,8 +362,9 @@ References:
   - no stale-primary success.
 
 - QA/tooling:
-  - #QA needs real initiator multipath setup script.
-  - #QA needs mounted workload failover script.
+  - #QA active-path ALUA OS script is ready.
+  - #QA two-path multipath script is green on M02.
+  - #QA mounted multipath failover script is green on M02.
   - do not rely on in-process protocol tests only.
 
 ## Milestone: iSCSI-P7 Performance And Backend Matrix

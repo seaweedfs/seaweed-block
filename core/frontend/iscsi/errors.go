@@ -11,9 +11,9 @@ import "fmt"
 // SCSI status byte values (SPC-5 §6). Only the subset we use
 // directly is declared.
 const (
-	StatusGood           uint8 = 0x00
-	StatusCheckCondition uint8 = 0x02
-	StatusBusy           uint8 = 0x08
+	StatusGood                uint8 = 0x00
+	StatusCheckCondition      uint8 = 0x02
+	StatusBusy                uint8 = 0x08
 	StatusReservationConflict uint8 = 0x18
 )
 
@@ -31,11 +31,12 @@ const (
 
 // ASC/ASCQ (selected — full tables live in spc-5 Annex F).
 const (
-	ASCInvalidOpcode       uint8 = 0x20
-	ASCInvalidFieldInCDB   uint8 = 0x24
-	ASCLBAOutOfRange       uint8 = 0x21
-	ASCNotReady            uint8 = 0x04
-	ASCNotReadyManualIntv  uint8 = 0x03
+	ASCInvalidOpcode      uint8 = 0x20
+	ASCInvalidFieldInCDB  uint8 = 0x24
+	ASCLBAOutOfRange      uint8 = 0x21
+	ASCNotReady           uint8 = 0x04
+	ASCNotReadyManualIntv uint8 = 0x03
+	ASCQTargetPortStandby uint8 = 0x0B
 	// ASCWriteError — T3b: SYNC_CACHE backend-sync failure maps
 	// here per SPC-5 §D.2.14 ("WRITE ERROR" 0x0C/00).
 	ASCWriteError uint8 = 0x0C
@@ -62,11 +63,11 @@ const (
 // with non-empty sense key; stale READ returns CHECK CONDITION
 // and does NOT return data to initiator".
 type SCSIError struct {
-	Status    uint8
-	SenseKey  uint8
-	ASC       uint8
-	ASCQ      uint8
-	Reason    string // free-form; diagnostic only
+	Status   uint8
+	SenseKey uint8
+	ASC      uint8
+	ASCQ     uint8
+	Reason   string // free-form; diagnostic only
 }
 
 func (e *SCSIError) Error() string {

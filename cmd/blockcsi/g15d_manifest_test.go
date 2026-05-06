@@ -144,6 +144,26 @@ func TestApplyAlphaBlockvolumes_WaitsForGeneratedManifestInsteadOfKubeSystem(t *
 	}
 }
 
+func TestAlphaAppDemo_CanRestartCSINodeBeforeReader(t *testing.T) {
+	body := g15dReadFile(t, "scripts", "run-alpha-app-demo.sh")
+	for _, want := range []string{
+		"SW_BLOCK_RESTART_CSI_NODE_BEFORE_READER",
+		"SW_BLOCK_DEMO_APP_MANIFEST",
+		"rollout restart ds/sw-block-csi-node",
+		"restart-csi-node-status.log",
+		"wait_pod_log_contains sw-block-demo-writer",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("app demo script missing %q", want)
+		}
+	}
+
+	wrapper := g15dReadFile(t, "scripts", "run-k8s-csi-node-restart.sh")
+	if !strings.Contains(wrapper, "demo-app-pvc-writer-hold.yaml") {
+		t.Fatalf("restart wrapper must use mounted-writer manifest:\n%s", wrapper)
+	}
+}
+
 func g15dReadFile(t *testing.T, parts ...string) string {
 	t.Helper()
 	root := g15bRepoRoot(t)
