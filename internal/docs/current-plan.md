@@ -275,10 +275,10 @@ References:
     - unavailable,
     - transitioning.
   - standby command policy:
-    - status: local protocol slice done.
+    - status: local protocol slice done; tightened by PR #42 review fix.
     - metadata/path probing allowed,
-    - READ allowed for initiator path probing,
-    - WRITE and SYNCHRONIZE_CACHE fail closed.
+    - data READ, WRITE, and SYNCHRONIZE_CACHE fail closed on non-active
+      paths.
   - standard INQUIRY TPGS discipline:
     - status: local protocol slice done.
     - TPGS stays off until REPORT TARGET PORT GROUPS and ALUA VPD identity
@@ -328,7 +328,7 @@ References:
     - standby/probe session prerequisite: local P6-D slice implemented.
       Non-active ALUA paths may use a borrowed metadata backend after
       `Provider.Open` returns not-ready, so Linux can probe INQUIRY/VPD/RTPG
-      without allowing writes.
+      without allowing data I/O.
     - #QA Test 1B PASS on M02:
       - artifact:
         `/mnt/smb/work/share/g15d-k8s/20260506T093732Z-iscsi-p6-alua-mpath-fix`.
@@ -368,23 +368,36 @@ References:
   - #QA mounted multipath failover script is green on M02.
   - do not rely on in-process protocol tests only.
 
-## Milestone: iSCSI-P7 Performance And Backend Matrix
+## Recently Closed Milestone: iSCSI-P7 Performance And Backend Matrix
 
 - Goal:
   - make performance experiments comparable without turning early numbers into
     product claims.
 
 - Tasks:
-  - status: first matrix script prepared; awaiting QA lab run.
+  - status: QA green on `iscsi/p7-performance-matrix-clean@6826139`.
   - walstore baseline fio,
   - smartwal fio behind explicit flag,
-  - RoCE / 10.0.0.x lab path if available,
-  - 1GbE vs 25GbE comparison,
-  - pgbench scenario,
-  - record CPU, memory, latency, bandwidth, and cleanup state.
+  - Linux iSCSI loopback matrix,
+  - record fio summary and cleanup state.
+  - deferred:
+    - RoCE / 10.0.0.x lab path if available,
+    - 1GbE vs 25GbE comparison,
+    - pgbench scenario,
+    - CPU, memory, latency, and bandwidth sweep.
   - script: `scripts/run-iscsi-backend-fio-matrix.sh`.
   - assignment:
     `internal/docs/qa-assignments/iscsi-p7-backend-fio-matrix-validation.md`.
+  - #QA PASS on M02:
+    - artifact:
+      `/mnt/smb/work/share/g15d-k8s/20260506T215457Z-iscsi-p7-backend-fio`.
+    - fio profile: 4 KiB randrw, psync, iodepth=1, size=128m,
+      runtime=60s.
+    - walstore: PASS, about 124 read IOPS / 124 write IOPS.
+    - smartwal: PASS, about 124 read IOPS / 125 write IOPS.
+    - cleanup: no active iSCSI sessions and no blockmaster/blockvolume
+      processes.
+    - non-claim: single-host loopback only, not a product performance claim.
 
 - Close bar:
   - same test runner scenario can compare backends,
