@@ -259,16 +259,34 @@ References:
     - owner: dev.
     - output: `internal/docs/qa-assignments/iscsi-p6-alua-mpio-lab-validation.md`.
     - must define the lab command, non-claims, and pass/fail criteria.
+  - V2 coverage alignment:
+    - status: design inventory added.
+    - do not copy V2 role/state ownership,
+    - do match V2 externally visible ALUA/MPIO protocol coverage unless V3
+      explicitly rejects a behavior.
   - ALUA state model:
-    - active,
+    - active optimized,
+    - active non-optimized,
     - standby,
     - unavailable,
     - transitioning.
-  - standby metadata commands allowed,
-  - standby write/read policy pinned,
+  - standby command policy:
+    - metadata/path probing allowed,
+    - READ allowed for initiator path probing,
+    - WRITE and SYNCHRONIZE_CACHE fail closed.
+  - standard INQUIRY TPGS discipline:
+    - TPGS stays off until REPORT TARGET PORT GROUPS and ALUA VPD identity
+      are implemented,
+    - when enabled, advertise implicit ALUA only unless explicit transitions
+      are implemented.
   - REPORT TARGET PORT GROUPS,
-  - VPD 0x83 target-port identity,
+  - VPD 0x83 target-port identity:
+    - NAA stable per volume,
+    - target port group and relative target port distinguish paths,
+    - short allocation length and no-ALUA branches tested.
+  - VPD 0x00 remains advertised-pages-equal-implemented-pages,
   - state change while I/O is in flight,
+  - concurrent REPORT TARGET PORT GROUPS and standby write reject tests,
   - multipath initiator test,
   - primary failover while mounted,
   - old primary cannot serve stale successful I/O.
