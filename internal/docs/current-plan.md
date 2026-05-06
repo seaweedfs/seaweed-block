@@ -265,31 +265,49 @@ References:
     - do match V2 externally visible ALUA/MPIO protocol coverage unless V3
       explicitly rejects a behavior.
   - ALUA state model:
+    - status: local protocol slice done on `iscsi/csi-node-lifecycle`.
     - active optimized,
     - active non-optimized,
     - standby,
     - unavailable,
     - transitioning.
   - standby command policy:
+    - status: local protocol slice done.
     - metadata/path probing allowed,
     - READ allowed for initiator path probing,
     - WRITE and SYNCHRONIZE_CACHE fail closed.
   - standard INQUIRY TPGS discipline:
+    - status: local protocol slice done.
     - TPGS stays off until REPORT TARGET PORT GROUPS and ALUA VPD identity
       are implemented,
     - when enabled, advertise implicit ALUA only unless explicit transitions
       are implemented.
-  - REPORT TARGET PORT GROUPS,
+  - REPORT TARGET PORT GROUPS:
+    - status: local protocol slice done.
+    - no-provider rejection,
+    - short allocation truncation,
+    - five-state reporting.
   - VPD 0x83 target-port identity:
+    - status: local protocol slice done.
     - NAA stable per volume,
     - target port group and relative target port distinguish paths,
     - short allocation length and no-ALUA branches tested.
-  - VPD 0x00 remains advertised-pages-equal-implemented-pages,
-  - state change while I/O is in flight,
-  - concurrent REPORT TARGET PORT GROUPS and standby write reject tests,
-  - multipath initiator test,
-  - primary failover while mounted,
-  - old primary cannot serve stale successful I/O.
+  - VPD 0x00 remains advertised-pages-equal-implemented-pages:
+    - status: local protocol slice done.
+  - state change while I/O is in flight:
+    - status: local protocol state-change test done.
+  - concurrent REPORT TARGET PORT GROUPS and standby write reject tests:
+    - status: pending.
+  - frontend state provider wiring:
+    - status: next.
+    - connect ALUA provider to current V3 frontend facts without importing
+      authority or placement.
+  - multipath initiator test:
+    - status: pending P6-C.
+  - primary failover while mounted:
+    - status: pending P6-E.
+  - old primary cannot serve stale successful I/O:
+    - status: pending P6-C/P6-E.
 
 - Close bar:
   - real initiator sees correct ALUA/MPIO behavior,

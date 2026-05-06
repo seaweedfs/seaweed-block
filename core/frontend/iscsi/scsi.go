@@ -34,11 +34,13 @@ const (
 	ScsiSyncCache16       uint8 = 0x91
 	ScsiServiceActionIn16 uint8 = 0x9e
 	ScsiReportLuns        uint8 = 0xa0
+	ScsiMaintenanceIn     uint8 = 0xa3
 )
 
-// Service Action codes for SERVICE ACTION IN(16) opcode 0x9e.
+// Service Action codes used by supported SCSI service-action commands.
 const (
-	SaiReadCapacity16 uint8 = 0x10
+	SaiReadCapacity16         uint8 = 0x10
+	SaiReportTargetPortGroups uint8 = 0x0a
 )
 
 // Fixed block size for the T2 contract backend. Real volumes
@@ -102,6 +104,7 @@ type SCSIHandler struct {
 	vendorID   string // 8 bytes
 	productID  string // 16 bytes
 	serialNo   string
+	alua       ALUAProvider
 }
 
 // HandlerConfig configures an SCSIHandler. Zero values pick
@@ -113,6 +116,7 @@ type HandlerConfig struct {
 	VendorID   string
 	ProductID  string
 	SerialNo   string
+	ALUA       ALUAProvider
 }
 
 // NewSCSIHandler constructs a handler. Backend MUST be non-nil.
@@ -150,6 +154,7 @@ func NewSCSIHandler(cfg HandlerConfig) *SCSIHandler {
 		vendorID:   vendor,
 		productID:  product,
 		serialNo:   cfg.SerialNo,
+		alua:       cfg.ALUA,
 	}
 }
 
@@ -190,6 +195,9 @@ func (h *SCSIHandler) HandleCommand(ctx context.Context, cdb [16]byte, dataOut [
 	case ScsiRead10:
 		return h.read10(ctx, cdb)
 	case ScsiWrite10:
+		if r := h.aluaWriteReject(); r != nil {
+			return *r
+		}
 		return h.write10(ctx, cdb, dataOut)
 	// T3b wire: SYNCHRONIZE_CACHE(10) / (16) dispatches to
 	// Backend.Sync(ctx). Durable backends flush the WAL; memback
@@ -198,6 +206,9 @@ func (h *SCSIHandler) HandleCommand(ctx context.Context, cdb [16]byte, dataOut [
 	// rule §3.6 (error-faithful Sync wire) makes data-integrity
 	// hazards visible to the host.
 	case ScsiSyncCache10, ScsiSyncCache16:
+		if r := h.aluaWriteReject(); r != nil {
+			return *r
+		}
 		log.Printf("iscsi: SCSI SYNCHRONIZE_CACHE handler entry opcode=0x%02x", cdb[0])
 		if err := h.backend.Sync(ctx); err != nil {
 			log.Printf("iscsi: SCSI SYNCHRONIZE_CACHE backend.Sync FAILED: %v", err)
@@ -215,6 +226,9 @@ func (h *SCSIHandler) HandleCommand(ctx context.Context, cdb [16]byte, dataOut [
 	case ScsiRead16:
 		return h.read16(ctx, cdb)
 	case ScsiWrite16:
+		if r := h.aluaWriteReject(); r != nil {
+			return *r
+		}
 		return h.write16(ctx, cdb, dataOut)
 	case ScsiServiceActionIn16:
 		sa := cdb[1] & 0x1f
@@ -225,6 +239,8 @@ func (h *SCSIHandler) HandleCommand(ctx context.Context, cdb [16]byte, dataOut [
 			fmt.Sprintf("unsupported SAI16 service action 0x%02x", sa))
 	case ScsiReportLuns:
 		return h.reportLuns(cdb)
+	case ScsiMaintenanceIn:
+		return h.maintenanceIn(cdb)
 	default:
 		return illegalRequest(ASCInvalidOpcode, 0x00, fmt.Sprintf("unsupported opcode 0x%02x", cdb[0]))
 	}
@@ -325,18 +341,21 @@ func (h *SCSIHandler) requestSense(cdb [16]byte) SCSIResult {
 // response (PM Medium finding 2026-04-22).
 //
 // Key V2 parity bytes we now emit:
-//   byte 4  = 91     Additional length (96 - 5)
-//   byte 7  = 0x02   CmdQue=1 — command queuing supported
-//   bytes 8-15      Vendor ID, 8 bytes, space-padded
-//   bytes 16-31     Product ID, 16 bytes, space-padded
-//   bytes 32-35     Product revision "0001"
-//   bytes 36-95     Reserved / zero
 //
-// Skip list compliance (ports plan §3.2):
-//   byte 5 bit 4 (TPGS implicit) — NOT set (ALUA is skip-list)
-//   byte 6 / other tuning bits   — zero (V2 sets some for
-//     enclosure/multiPort/vendor-specific; T2 has no reason
-//     to advertise them)
+//	byte 4  = 91     Additional length (96 - 5)
+//	byte 7  = 0x02   CmdQue=1 — command queuing supported
+//	bytes 8-15      Vendor ID, 8 bytes, space-padded
+//	bytes 16-31     Product ID, 16 bytes, space-padded
+//	bytes 32-35     Product revision "0001"
+//	bytes 36-95     Reserved / zero
+//
+// ALUA discipline:
+//
+//	byte 5 bit 4 (TPGS implicit) is set only when HandlerConfig.ALUA is
+//	  present and REPORT TARGET PORT GROUPS is served.
+//	byte 6 / other tuning bits stay zero (V2 sets some for
+//	  enclosure/multiPort/vendor-specific; T2 has no reason
+//	  to advertise them)
 //
 // NOTE: the prior 36-byte minimal response still worked for
 // iscsiadm attach, but under-advertised CmdQue and forced the
@@ -359,7 +378,11 @@ func (h *SCSIHandler) inquiry(cdb [16]byte) SCSIResult {
 	data[2] = 0x06 // Version: SPC-4
 	data[3] = 0x02 // Response data format (SPC-2+)
 	data[4] = 91   // Additional length (96 - 5)
-	// byte 5: SCCS / ACC / TPGS / 3PC — all zero in T2 (no ALUA)
+	// byte 5: SCCS / ACC / TPGS / 3PC. TPGS is enabled only when
+	// an ALUA provider is configured and REPORT TPG is served.
+	if h.alua != nil {
+		data[5] = 0x10 // TPGS=01b, implicit ALUA
+	}
 	// byte 6: reserved / EncServ / VS / MultiP — zero
 	data[7] = 0x02 // BQue=0, CmdQue=1
 	copy(data[8:16], padRight(h.vendorID, 8))
@@ -372,9 +395,9 @@ func (h *SCSIHandler) inquiry(cdb [16]byte) SCSIResult {
 	return SCSIResult{Status: StatusGood, Data: data}
 }
 
-// Batch 10.5: INQUIRY VPD. Approved pages: 0x00 (supported list),
-// 0x80 (unit serial number), 0x83 (device identification, non-ALUA
-// branch only). VPD 0xB0 / 0xB2 are explicitly NOT implemented
+// Batch 10.5 / P6: INQUIRY VPD. Approved pages: 0x00 (supported list),
+// 0x80 (unit serial number), 0x83 (device identification). VPD 0xB0 / 0xB2
+// are explicitly NOT implemented
 // and NOT advertised (port plan §3.3 N3 — advertised list must
 // match implemented set or kernel logs errors on every probe).
 func (h *SCSIHandler) inquiryVPD(pageCode uint8, allocLen uint16) SCSIResult {
@@ -418,7 +441,7 @@ func (h *SCSIHandler) inquiryVPD(pageCode uint8, allocLen uint16) SCSIResult {
 		}
 		return SCSIResult{Status: StatusGood, Data: data}
 
-	case 0x83: // Device Identification (non-ALUA branch only)
+	case 0x83: // Device Identification
 		return h.inquiryVPD83(allocLen)
 
 	default:
@@ -427,20 +450,19 @@ func (h *SCSIHandler) inquiryVPD(pageCode uint8, allocLen uint16) SCSIResult {
 	}
 }
 
-// inquiryVPD83 emits ONE NAA-6 Registered Extended designator
-// derived from the volume identity. V2 has an ALUA branch (TPG /
-// RTP descriptors); that's skipped in Batch 10.5 (ALUA is
-// skip-list). V2's fallback stub NAA was a hardcoded constant —
-// unusable for T2 because all volumes would report the same
-// unique ID and Linux multipath / udev would conflate them
-// (port plan §3.3 N1). Instead we derive a per-volume NAA from
-// sha256(VolumeID)[:7] prefixed with 0x60 (NAA-6).
+// inquiryVPD83 emits an NAA-6 Registered Extended designator derived from
+// the volume identity. When HandlerConfig.ALUA is present, it also emits the
+// target port group and relative target port designators needed by
+// multipath. Without ALUA, it preserves the single-descriptor VPD 0x83 shape.
 func (h *SCSIHandler) inquiryVPD83(allocLen uint16) SCSIResult {
 	// Designator 1: NAA-6 identifier (8 bytes). Derive from the
 	// frontend.Backend's captured VolumeID — stable across the
-	// backend's lifetime and the only authoritative identity
-	// the handler has access to (no extra config threading).
+	// backend's lifetime. ALUA providers may override it with the
+	// frontend path's explicit device identity.
 	naa := naaFromVolumeID(h.backend.Identity().VolumeID)
+	if h.alua != nil {
+		naa = h.alua.DeviceNAA()
+	}
 	naaDesc := []byte{
 		0x01, // code set = binary
 		0x03, // PIV=0, association=00 (logical unit), type=3 (NAA)
@@ -449,11 +471,24 @@ func (h *SCSIHandler) inquiryVPD83(allocLen uint16) SCSIResult {
 	}
 	naaDesc = append(naaDesc, naa[:]...)
 
-	data := make([]byte, 4+len(naaDesc))
+	descs := make([]byte, 0, 28)
+	descs = append(descs, naaDesc...)
+	if h.alua != nil {
+		tpgID := h.alua.TargetPortGroupID()
+		rtpID := h.alua.RelativeTargetPortID()
+		descs = append(descs,
+			0x01, 0x15, 0x00, 0x04,
+			0x00, 0x00, byte(tpgID>>8), byte(tpgID),
+			0x01, 0x14, 0x00, 0x04,
+			0x00, 0x00, byte(rtpID>>8), byte(rtpID),
+		)
+	}
+
+	data := make([]byte, 4+len(descs))
 	data[0] = 0x00
 	data[1] = 0x83
-	binary.BigEndian.PutUint16(data[2:4], uint16(len(naaDesc)))
-	copy(data[4:], naaDesc)
+	binary.BigEndian.PutUint16(data[2:4], uint16(len(descs)))
+	copy(data[4:], descs)
 	if int(allocLen) < len(data) {
 		data = data[:allocLen]
 	}
