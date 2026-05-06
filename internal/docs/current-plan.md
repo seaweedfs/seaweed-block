@@ -308,13 +308,14 @@ References:
       - frontend Healthy => active optimized,
       - locally healthy but superseded/non-writable => standby,
       - recovering => transitioning,
-      - degraded/idle/identity mismatch => unavailable.
+      - idle supporting path => standby for metadata/path probing,
+      - degraded/identity mismatch => unavailable.
     - path identity:
       - NAA is stable per volume,
       - target port group and relative target port are stable per
         volume/replica path.
   - multipath initiator test:
-    - status: P6-D two-path script prepared; awaiting QA lab run.
+    - status: QA green on `iscsi/csi-node-lifecycle@88e9301`.
     - script: `scripts/run-iscsi-alua-os-smoke.sh`.
     - script: `scripts/run-iscsi-alua-multipath-smoke.sh`.
     - assignment: `internal/docs/qa-assignments/iscsi-p6-alua-mpio-lab-validation.md`.
@@ -327,8 +328,12 @@ References:
       Non-active ALUA paths may use a borrowed metadata backend after
       `Provider.Open` returns not-ready, so Linux can probe INQUIRY/VPD/RTPG
       without allowing writes.
-    - #QA run Test 1 and Test 1B on M02 or another Linux host with
-      `multipath-tools`.
+    - #QA Test 1B PASS on M02:
+      - artifact:
+        `/mnt/smb/work/share/g15d-k8s/20260506T093732Z-iscsi-p6-alua-mpath-fix`.
+      - evidence: two iSCSI paths, common NAA, distinct TPG/RTP, r1
+        active/optimized, r2 standby, standby WRITE rejected, `multipath -ll`
+        grouped both paths under `mpatha`.
     - non-claim: mounted workload failover still needs P6-E.
   - primary failover while mounted:
     - status: pending P6-E.

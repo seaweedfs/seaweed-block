@@ -1,6 +1,6 @@
 # QA Assignment: iSCSI P6 ALUA / MPIO Lab Validation
 
-Status: Test 1 and Test 1B executable; Test 2 still blocked by mounted failover work.
+Status: Test 1B QA green; Test 2 still blocked by mounted failover work.
 Branch: `iscsi/csi-node-lifecycle`.
 Scope: real Linux initiator validation for ALUA/MPIO and mounted failover.
 
@@ -60,7 +60,7 @@ Non-claim:
 
 ## Test 1B: Two-Path Multipath Identity
 
-Status: ready.
+Status: PASS on `iscsi/csi-node-lifecycle@88e9301`.
 
 Run:
 
@@ -81,6 +81,22 @@ Expected:
 - VPD 0x83 exposes volume identity plus target-port identity for each path.
 - standby path does not accept normal WRITE as GOOD.
 - cleanup leaves no sw-block iSCSI sessions.
+
+QA evidence:
+
+- host: M02, Ubuntu 24.04.3 LTS, kernel 6.17.0-22-generic.
+- artifact:
+  `/mnt/smb/work/share/g15d-k8s/20260506T093732Z-iscsi-p6-alua-mpath-fix`.
+- final line:
+  `[iscsi-mpath] PASS: two iSCSI paths report ALUA and multipath groups one logical device`.
+- wire proof:
+  - common NAA: `36bfc269594ef6492`.
+  - r1: TPG `0x9866`, RTP `0x6b22`, AAS `0x00`.
+  - r2: TPG `0xf866`, RTP `0xdff0`, AAS `0x02`.
+  - `multipath -ll`: `mpatha` contains both `sda` and `sdb` with
+    `hwhandler='1 alua'`.
+  - standby path raw WRITE returned I/O error.
+  - cleanup left no active iSCSI sessions.
 
 Evidence to collect:
 
