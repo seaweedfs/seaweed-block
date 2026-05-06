@@ -763,6 +763,7 @@ func run(f flags) int {
 			Handler: iscsi.HandlerConfig{
 				BlockSize:  frontendBlockSize,
 				VolumeSize: frontendVolumeSize,
+				ALUA:       newProjectionALUAProvider(h.ProjectionView(), f.volumeID, f.replicaID),
 			},
 		})
 		iscsiAddr, err := iscsiTarget.Start()

@@ -301,15 +301,24 @@ References:
   - concurrent REPORT TARGET PORT GROUPS and standby write reject tests:
     - status: pending.
   - frontend state provider wiring:
-    - status: next.
+    - status: local P6-C slice done on `iscsi/csi-node-lifecycle`.
     - connect ALUA provider to current V3 frontend facts without importing
       authority or placement.
+    - mapping:
+      - frontend Healthy => active optimized,
+      - locally healthy but superseded/non-writable => standby,
+      - recovering => transitioning,
+      - degraded/idle/identity mismatch => unavailable.
+    - path identity:
+      - NAA is stable per volume,
+      - target port group and relative target port are stable per
+        volume/replica path.
   - multipath initiator test:
-    - status: pending P6-C.
+    - status: next P6-D / #QA script.
   - primary failover while mounted:
     - status: pending P6-E.
   - old primary cannot serve stale successful I/O:
-    - status: pending P6-C/P6-E.
+    - status: pending P6-D/P6-E.
 
 - Close bar:
   - real initiator sees correct ALUA/MPIO behavior,
