@@ -1,6 +1,18 @@
 package main
 
-import "testing"
+import (
+	"context"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/seaweedfs/seaweed-block/core/host/master"
+	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
+)
 
 func TestParseFlags_LifecycleStoreOptional(t *testing.T) {
 	f, err := parseFlags([]string{
@@ -40,5 +52,49 @@ func TestParseFlags_ClusterSpecOptional(t *testing.T) {
 	}
 	if f.clusterSpec != "m01.yaml" {
 		t.Fatalf("clusterSpec=%q want m01.yaml", f.clusterSpec)
+	}
+}
+
+func TestBlockmasterBareTopologyRegistersVolumeControlServices(t *testing.T) {
+	h, err := master.New(master.Config{
+		AuthorityStoreDir: t.TempDir(),
+		Listen:            "127.0.0.1:0",
+	})
+	if err != nil {
+		t.Fatalf("master.New: %v", err)
+	}
+	h.Start()
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_ = h.Close(ctx)
+	}()
+
+	conn, err := grpc.NewClient(h.Addr(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatalf("grpc.NewClient: %v", err)
+	}
+	defer conn.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	_, err = control.NewObservationServiceClient(conn).ReportHeartbeat(ctx, &control.HeartbeatReport{})
+	if err == nil {
+		t.Fatal("ReportHeartbeat with empty report unexpectedly succeeded")
+	}
+	if status.Code(err) == codes.Unimplemented || strings.Contains(err.Error(), "unknown service") {
+		t.Fatalf("ObservationService not registered on bare blockmaster: %v", err)
+	}
+
+	stream, err := control.NewAssignmentServiceClient(conn).SubscribeAssignments(ctx, &control.SubscribeRequest{})
+	if err == nil {
+		_, err = stream.Recv()
+	}
+	if err == nil {
+		t.Fatal("SubscribeAssignments with empty request unexpectedly succeeded")
+	}
+	if status.Code(err) == codes.Unimplemented || strings.Contains(err.Error(), "unknown service") {
+		t.Fatalf("AssignmentService not registered on bare blockmaster: %v", err)
 	}
 }
