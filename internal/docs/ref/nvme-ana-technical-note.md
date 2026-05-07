@@ -1,0 +1,86 @@
+# NVMe ANA Technical Note
+
+Status: reference for NVMe-P3/P4 work.
+
+## What ANA Is
+
+- ANA means Asymmetric Namespace Access.
+- It is the NVMe equivalent of iSCSI ALUA: the target tells the host which
+  path to prefer for a namespace, and which paths are usable only for
+  failover or not usable at all.
+- Linux NVMe multipath reads ANA information from Identify Controller,
+  Identify Namespace, and the ANA log page. If those surfaces disagree, the
+  host can make bad path decisions.
+
+## V3 Product Meaning
+
+- V3 authority decides which replica may acknowledge writes.
+- NVMe protocol code must only report frontend path facts derived from product
+  state. It must not elect authority or decide replica readiness.
+- The primary serving path should report optimized access.
+- A replica path that is caught up enough for failover probing but not writable
+  should report a non-writable ANA state according to the policy we choose.
+- A stale or degraded path must never report a state that lets the host send
+  successful writes.
+
+## Minimum Wire Surfaces
+
+- Identify Controller:
+  - `CMIC` must advertise ANA only when ANA is implemented.
+  - `ANACAP`, `ANAGRPMAX`, and `NANAGRPID` must be non-zero only with a real
+    ANA log implementation.
+- Identify Namespace:
+  - `ANAGRPID` must point at the ANA group used by the namespace.
+- Get Log Page:
+  - log page `0x0c` must return an ANA group descriptor for the namespace.
+  - the group must include current ANA state and a change count.
+- I/O status mapping:
+  - stale primary lineage maps to a path-related status, not success.
+  - inaccessible / transition states must fail writes safely.
+
+## Current V3 State
+
+- V3 intentionally zeros ANA Identify fields today.
+- Existing tests pin that zero state so we do not advertise ANA before the log
+  page and state model exist.
+- V3 already maps stale lineage to NVMe path-related status for I/O errors.
+- V3 does not yet expose an ANA provider equivalent to the iSCSI ALUA provider.
+
+## V2 Reference Behavior
+
+- V2 has an `ANAProvider` with `ANAState()` and `ANAGroupID()`.
+- V2 Identify advertises ANA fields.
+- V2 Get Log Page `0x0c` returns a single ANA group.
+- V2 gates writes based on ANA state.
+
+V3 should use V2 as the coverage inventory, not as a direct code transplant.
+V3 state must come from frontend projection facts and authority lineage, not
+from V2 role ownership.
+
+## Design Risks
+
+- Advertising ANA too early is worse than not supporting it: Linux may enable
+  multipath policy based on incomplete data.
+- A single hard-coded group is acceptable for a first RF=2 path if the state is
+  correct, but it must not hide future multi-volume/multi-namespace needs.
+- ANA state changes need host-visible evidence. Unit tests alone are not
+  enough; P4 must include real `nvme-cli` / Linux multipath validation.
+- Reads and writes may have different safety policy. The chosen policy must be
+  explicit before code lands.
+
+## Development Order
+
+- P3-A: add provider interface and state mapping tests without advertising ANA.
+- P3-B: implement ANA log page and keep Identify ANA fields off.
+- P3-C: flip Identify Controller / Namespace fields only after the log page
+  tests pass.
+- P3-D: add Linux `nvme get-log` / `nvme id-ctrl` / `nvme id-ns` QA assignment.
+- P4: add two-path Linux multipath validation and mounted failover evidence.
+
+## Non-Goals For P3
+
+- No NVMe/RDMA claim.
+- No Kubernetes CSI protocol switch.
+- No performance claim.
+- No multi-volume namespace management.
+- No host-visible failover claim until P4 passes.

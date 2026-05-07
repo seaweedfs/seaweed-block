@@ -16,6 +16,7 @@ References:
 - `ref/iscsi-alua-technical-note.md`
 - `ref/nvme-ana-parity-plan.md`
 - `ref/nvme-v2-coverage-gap-audit.md`
+- `ref/nvme-ana-technical-note.md`
 
 ## Product Goal
 
