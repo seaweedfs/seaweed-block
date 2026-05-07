@@ -70,6 +70,11 @@ frontend boundaries.
   - no current NVMe multipath mounted failover gate,
   - no RoCE or 25 GbE claim.
 
+See `nvme-v2-coverage-gap-audit.md` for the P0 classification table. The
+important correction from that audit: V2's target-side `writeWithRetry` is not
+automatically a V3 goal. V3 currently rejects target-side retry by design; any
+change there needs a separate product decision.
+
 ## Design Rules
 
 - Standard first:
@@ -242,6 +247,8 @@ frontend boundaries.
 
 - Did V2 ever use a custom NVMe admin/vendor command for data, or was the
   remembered fast path standard in-capsule data?
+  - P0 initial answer: no custom vendor/admin data command was found in the V2
+    NVMe package; the visible fast path is standard in-capsule data.
 - Should V3 expose NVMe alpha before CSI integration, or keep it internal until
   K8s has a user-facing switch?
 - Do we want ANA before K8s NVMe, or K8s single-path NVMe before ANA?

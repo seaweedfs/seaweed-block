@@ -15,6 +15,7 @@ References:
 - `ref/iscsi-p6-alua-mpio-design.md`
 - `ref/iscsi-alua-technical-note.md`
 - `ref/nvme-ana-parity-plan.md`
+- `ref/nvme-v2-coverage-gap-audit.md`
 
 ## Product Goal
 
@@ -516,15 +517,18 @@ References:
 
 - Reference:
   - `internal/docs/ref/nvme-ana-parity-plan.md`.
+  - `internal/docs/ref/nvme-v2-coverage-gap-audit.md`.
 
 - Tasks:
   - NVMe-P0 audit:
-    - status: next dev task.
+    - status: initial audit done; keep updating as code lands.
     - compare V2 NVMe implementation and scenarios against current V3.
     - classify every visible feature as present, missing, intentionally
       deferred, or rejected with product reason.
     - specifically answer whether the remembered "control API carries data"
       path was standard NVMe/TCP in-capsule data or a custom V2 shortcut.
+    - initial answer: standard in-capsule data; no custom V2 vendor/admin data
+      command found in the NVMe package.
   - NVMe-P1 OS kernel baseline:
     - status: after P0.
     - build a repeatable `nvme connect -> mkfs -> mount -> fio/checksum ->
