@@ -810,6 +810,7 @@ func run(f flags) int {
 			VolumeID:      f.volumeID,
 			Provider:      prov,
 			ProbeProvider: probeProvider,
+			ControllerID:  nvmeControllerIDFromReplicaID(f.replicaID),
 			// Capacity from durable config (see iSCSI block above).
 			// frontendBlockSize / frontendVolumeSize are 0 on memback
 			// path; nvme HandlerConfig zero-value defaulting preserves

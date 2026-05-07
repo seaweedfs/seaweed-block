@@ -46,6 +46,12 @@ type TargetConfig struct {
 	// by a metadata-only IOHandler.
 	ProbeProvider ProbeBackendProvider
 
+	// ControllerID is the first CNTLID allocated by this target. Zero uses 1.
+	// Multi-path deployments must configure distinct values per target serving
+	// the same SubsysNQN; Linux rejects duplicate controller IDs inside one
+	// subsystem.
+	ControllerID uint16
+
 	// IO handler tunables (block size, volume size, NSID).
 	// Zero values pick T2 defaults.
 	Handler HandlerConfig
@@ -83,12 +89,16 @@ func NewTarget(cfg TargetConfig) *Target {
 	if lg == nil {
 		lg = log.Default()
 	}
+	nextCntlID := cfg.ControllerID
+	if nextCntlID == 0 || nextCntlID == 0xffff {
+		nextCntlID = 1
+	}
 	return &Target{
 		cfg:        cfg,
 		logger:     stdlogAdapter{l: lg},
 		closed:     make(chan struct{}),
 		ctrls:      map[uint16]*adminController{},
-		nextCntlID: 1, // 0 is reserved per NVMe-oF; host may also read 0xFFFF as "request new"
+		nextCntlID: nextCntlID, // 0 is reserved; 0xFFFF is "request new" on Connect.
 	}
 }
 

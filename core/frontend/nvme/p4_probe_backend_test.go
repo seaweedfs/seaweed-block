@@ -119,3 +119,27 @@ func TestP4NVMe_StandbyProbePathRejectsDataCommands(t *testing.T) {
 		t.Fatalf("standby write reached probe backend; writes=%d", rec.WriteCount())
 	}
 }
+
+func TestP4NVMe_ConfiguredControllerIDIsAdvertisedOnConnect(t *testing.T) {
+	rec := testback.NewRecordingBackend(frontend.Identity{
+		VolumeID: "v1", ReplicaID: "r2", Epoch: 1, EndpointVersion: 1,
+	})
+	tg := nvme.NewTarget(nvme.TargetConfig{
+		Listen:       "127.0.0.1:0",
+		SubsysNQN:    "nqn.2026-04.example.v3:subsys",
+		VolumeID:     "v1",
+		Provider:     testback.NewStaticProvider(rec),
+		ControllerID: 2,
+	})
+	addr, err := tg.Start()
+	if err != nil {
+		t.Fatalf("Target.Start: %v", err)
+	}
+	defer tg.Close()
+
+	cli := dialAndConnectOpts(t, addr, connectOptions{SkipIOQueue: true})
+	defer cli.close()
+	if cli.cntlID != 2 {
+		t.Fatalf("admin Connect CNTLID=%d want configured controller id 2", cli.cntlID)
+	}
+}
