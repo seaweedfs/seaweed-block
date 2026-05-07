@@ -8,8 +8,8 @@ package nvme
 //
 //   D1  Serial "SWF00001" stub → derived from VolumeID (R1, §3.3 N1)
 //   D2  CMIC=0x0a / ANACAP / ANAGRPMAX=1 / NANAGRPID=1 /
-//        Identify NS ANAGRPID → conditional on ANAProvider. Without
-//        a provider these fields remain zero so "advertised ==
+//        Identify NS NMIC.SHARED + ANAGRPID → conditional on ANAProvider.
+//        Without a provider these fields remain zero so "advertised ==
 //        implemented" stays true.
 //   D3  ONCS=0x0C (WriteZeros + DSM) → 0 (neither opcode implemented)
 //   D4  Identify NS NSFEAT=0x01 (thin-prov / Trim advertised) → 0
@@ -305,13 +305,18 @@ func (s *Session) buildIdentifyNamespace(nsid uint32) []byte {
 	// zeros). Deallocate not implemented → 0.
 	buf[28] = 0x00
 
+	ana := s.handler.ANAProvider()
 	// byte 30: NMIC (Namespace Multi-path I/O Capabilities).
-	// 0 = single controller. T2 single-session-per-subsystem.
-	buf[30] = 0
+	// Bit 0 marks NSID=1 as shareable across controllers. Linux native
+	// multipath rejects a second controller exposing the same NSID unless
+	// this bit is set.
+	if ana != nil {
+		buf[30] = 0x01
+	}
 
 	// bytes 92-95: ANAGRPID. Non-zero only when ANA log support
 	// is wired; otherwise the namespace must not advertise ANA.
-	if ana := s.handler.ANAProvider(); ana != nil {
+	if ana != nil {
 		groupID := ana.ANAGroupID()
 		if groupID == 0 {
 			groupID = 1

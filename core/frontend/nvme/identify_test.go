@@ -265,6 +265,9 @@ func TestNVMeIdentifyNamespace_ANAGRPIDZeroWithoutProvider(t *testing.T) {
 	defer tg.Close()
 	defer cli.close()
 	_, data := cli.adminIdentify(t, 0x00, 1)
+	if got := data[30]; got != 0 {
+		t.Fatalf("Identify NS NMIC=0x%02x want 0 without ANA provider", got)
+	}
 	// D2: Identify NS ANAGRPID (92-95) must be 0.
 	got := binary.LittleEndian.Uint32(data[92:96])
 	if got != 0 {
@@ -272,13 +275,16 @@ func TestNVMeIdentifyNamespace_ANAGRPIDZeroWithoutProvider(t *testing.T) {
 	}
 }
 
-func TestNVMeIdentifyNamespace_ANAGRPIDAdvertisedWithProvider(t *testing.T) {
+func TestNVMeIdentifyNamespace_ANAFieldsAdvertisedWithProvider(t *testing.T) {
 	_, cli := newANAHarness(t, testANAProvider{
 		state:       nvme.ANAOptimized,
 		groupID:     1,
 		changeCount: 1,
 	})
 	_, data := cli.adminIdentify(t, 0x00, 1)
+	if got := data[30]; got != 0x01 {
+		t.Fatalf("Identify NS NMIC=0x%02x want 0x01 (shared namespace)", got)
+	}
 	got := binary.LittleEndian.Uint32(data[92:96])
 	if got != 1 {
 		t.Fatalf("Identify NS ANAGRPID=%d want 1", got)

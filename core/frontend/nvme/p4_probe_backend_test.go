@@ -71,6 +71,9 @@ func TestP4NVMe_StandbyPathUsesProbeBackendForAdminMetadata(t *testing.T) {
 
 	status, ns := cli.adminIdentify(t, 0x00, 1)
 	expectStatusSuccess(t, status, "standby Identify Namespace")
+	if got := ns[30]; got != 0x01 {
+		t.Fatalf("Identify NS NMIC=0x%02x want shared namespace bit", got)
+	}
 	if got := binary.LittleEndian.Uint32(ns[92:96]); got != 1 {
 		t.Fatalf("Identify NS ANAGRPID=%d want 1", got)
 	}
