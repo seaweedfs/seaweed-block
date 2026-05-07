@@ -289,6 +289,7 @@ for i in $(seq 1 "$ITERATIONS"); do
   sudo cp "$ARTIFACT_DIR/payload.iter${i}.bin" "$MOUNT_DIR/payload.bin"
   sudo sync
   sudo cp "$MOUNT_DIR/payload.bin" /tmp/sw-block-nvme-payload.bin
+  sudo chown "$(id -u):$(id -g)" /tmp/sw-block-nvme-payload.bin
   sha256sum -c "$ARTIFACT_DIR/payload.iter${i}.sha256" >"$ARTIFACT_DIR/sha256.iter${i}.log"
   rm -f /tmp/sw-block-nvme-payload.bin
 
