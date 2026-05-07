@@ -530,7 +530,10 @@ References:
     - initial answer: standard in-capsule data; no custom V2 vendor/admin data
       command found in the NVMe package.
   - NVMe-P1 OS kernel baseline:
-    - status: after P0.
+    - status: script prepared; waiting for QA.
+    - script: `scripts/run-nvme-os-smoke.sh`.
+    - #QA assignment:
+      `internal/docs/qa-assignments/nvme-p1-os-smoke-validation.md`.
     - build a repeatable `nvme connect -> mkfs -> mount -> fio/checksum ->
       disconnect` script.
     - dynamic ports only.
@@ -560,7 +563,8 @@ References:
   - no ANA or performance claim is enabled before matching host evidence.
 
 - QA/tooling:
-  - #QA starts after P1 script exists.
+  - #QA starts with:
+    `internal/docs/qa-assignments/nvme-p1-os-smoke-validation.md`.
   - TestOps wrapper work can proceed independently on P8 soak while dev works
     on NVMe-P0/P1.
 
