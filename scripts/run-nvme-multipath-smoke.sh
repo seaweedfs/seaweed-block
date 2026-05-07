@@ -193,14 +193,24 @@ PY
 }
 
 wait_nvme_paths() {
-  for _ in $(seq 1 900); do
+  log "wait_nvme_paths: enter (180s budget)"
+  local i
+  for i in $(seq 1 900); do
     if count="$(parse_nvme_subsys path_count 2>/dev/null)" && [[ "${count:-0}" -ge 2 ]]; then
+      log "wait_nvme_paths: ok at iter=$i count=$count"
       return 0
+    fi
+    if (( i % 25 == 0 )); then
+      log "wait_nvme_paths: iter=$i count=${count:-empty}"
+      sudo nvme list-subsys -o json >>"$ARTIFACT_DIR/wait-debug.json" 2>&1 || true
+      printf '\n--- iter %s ---\n' "$i" >>"$ARTIFACT_DIR/wait-debug.json" 2>&1 || true
     fi
     sleep 0.2
   done
+  log "wait_nvme_paths: timeout after 900 iters (last count=${count:-empty})"
   sudo nvme list-subsys -o json >"$ARTIFACT_DIR/nvme-list-subsys.timeout.json" 2>&1 || true
   if count="$(parse_nvme_subsys path_count 2>/dev/null)" && [[ "${count:-0}" -ge 2 ]]; then
+    log "wait_nvme_paths: ok on post-timeout recheck count=$count"
     return 0
   fi
   echo "timed out waiting for two NVMe paths for ${SUBSYS_NQN}" >&2
@@ -379,11 +389,32 @@ wait_status_role "$R1_STATUS_ADDR" r1 primary
 wait_status_role "$R2_STATUS_ADDR" r2 secondary
 
 log "connect first NVMe path"
+set +e
 sudo nvme connect -t tcp -a 127.0.0.1 -s "$PORT1" -n "$SUBSYS_NQN" \
   >"$ARTIFACT_DIR/nvme-connect-r1.log" 2>&1
+rc1=$?
+set -e
+log "connect first NVMe path: rc=$rc1"
+if [[ $rc1 -ne 0 ]]; then
+  cat "$ARTIFACT_DIR/nvme-connect-r1.log" >&2 || true
+  echo "first nvme connect failed rc=$rc1" >&2
+  exit 1
+fi
 log "connect second NVMe path"
+set +e
 sudo nvme connect -t tcp -a 127.0.0.1 -s "$PORT2" -n "$SUBSYS_NQN" \
   >"$ARTIFACT_DIR/nvme-connect-r2.log" 2>&1
+rc2=$?
+set -e
+log "connect second NVMe path: rc=$rc2"
+if [[ $rc2 -ne 0 ]]; then
+  cat "$ARTIFACT_DIR/nvme-connect-r2.log" >&2 || true
+  sudo nvme list-subsys -o json >"$ARTIFACT_DIR/nvme-list-subsys.connect-failed.json" 2>&1 || true
+  echo "second nvme connect failed rc=$rc2" >&2
+  exit 1
+fi
+log "post-connect snapshot"
+sudo nvme list-subsys -o json >"$ARTIFACT_DIR/nvme-list-subsys.post-connect.json" 2>&1 || true
 
 wait_nvme_paths
 sudo nvme list >"$ARTIFACT_DIR/nvme-list.txt" 2>&1 || true
