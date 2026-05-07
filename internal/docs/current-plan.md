@@ -558,8 +558,7 @@ References:
     - add visible counters or artifacts for inline vs R2T writes.
     - compare iSCSI and NVMe only under labelled network/backend conditions.
   - NVMe-P3 ANA identity and log page:
-    - status: ANA provider, blockvolume wiring, log page, and conditional
-      Identify advertisement implemented locally.
+    - status: QA green on M02 at `d330e89`.
     - provider: `core/frontend/nvme.ANAProvider`.
     - product wiring: `cmd/blockvolume` derives ANA state from the same
       frontend projection used by iSCSI ALUA.
@@ -578,6 +577,12 @@ References:
     - OAES ANA Change Notice remains off; no async event producer exists yet.
     - #QA assignment:
       `internal/docs/qa-assignments/nvme-p3-ana-log-validation.md`.
+    - #QA evidence:
+      - ANA log `group_id=1`, `state=0x01`, `nsid=1`,
+      - Identify Controller `cmic=0x8`, `anagrpmax=1`, `nanagrpid=1`,
+      - Identify Namespace `anagrpid=1`,
+      - no `nvme_parse_ana_log` kernel warning,
+      - mkfs/mount/checksum PASS after ANA advertisement is enabled.
   - NVMe-P4 multipath and mounted failover:
     - status: planned.
     - reach the iSCSI P6 bar for NVMe multipath.
