@@ -15,6 +15,7 @@ ITERATIONS="${SW_BLOCK_NVME_ITERATIONS:-1}"
 STRESS="${SW_BLOCK_NVME_STRESS:-none}"          # none | fio | dd
 FIO_SIZE="${SW_BLOCK_NVME_FIO_SIZE:-32m}"
 FIO_RUNTIME="${SW_BLOCK_NVME_FIO_RUNTIME:-10}"
+COLLECT_ANA="${SW_BLOCK_NVME_COLLECT_ANA:-0}"
 
 BIN_DIR="${SW_BLOCK_BIN_DIR:-${WORK_DIR}/bin}"
 RUN_DIR="${WORK_DIR}/run"
@@ -158,6 +159,9 @@ require_cmd sha256sum
 if [[ "$STRESS" == "fio" ]]; then
   require_cmd fio
 fi
+if [[ "$COLLECT_ANA" == "1" ]]; then
+  require_cmd python3
+fi
 
 log "run_id=$RUN_ID"
 log "root=$ROOT"
@@ -173,6 +177,7 @@ log "size_blocks=${BLOCKS} block_size=${BLOCK_SIZE}"
 log "durable_impl=${DURABLE_IMPL}"
 log "iterations=${ITERATIONS}"
 log "stress=${STRESS}"
+log "collect_ana=${COLLECT_ANA}"
 
 cd "$ROOT"
 git rev-parse --short HEAD >"$ARTIFACT_DIR/git-head.txt" 2>/dev/null || true
@@ -277,6 +282,58 @@ for i in $(seq 1 "$ITERATIONS"); do
   sudo nvme list >"$ARTIFACT_DIR/nvme-list.iter${i}.txt" 2>&1 || true
   sudo nvme id-ctrl "$DEV" >"$ARTIFACT_DIR/nvme-id-ctrl.iter${i}.txt" 2>&1 || true
   sudo nvme id-ns "$DEV" >"$ARTIFACT_DIR/nvme-id-ns.iter${i}.txt" 2>&1 || true
+  if [[ "$COLLECT_ANA" == "1" ]]; then
+    log "iteration ${i}/${ITERATIONS}: collect ANA log page"
+    sudo nvme get-log "$DEV" -i 0x0c -l 40 -b \
+      >"$ARTIFACT_DIR/nvme-ana-log.iter${i}.bin" \
+      2>"$ARTIFACT_DIR/nvme-ana-log.iter${i}.stderr"
+    python3 - "$ARTIFACT_DIR/nvme-ana-log.iter${i}.bin" "$NSID" \
+      >"$ARTIFACT_DIR/nvme-ana-log.iter${i}.summary" <<'PY'
+import struct
+import sys
+
+path = sys.argv[1]
+want_nsid = int(sys.argv[2], 0)
+data = open(path, "rb").read()
+if len(data) < 40:
+    raise SystemExit(f"ANA log too short: {len(data)} bytes, want at least 40")
+
+state_names = {
+    0x01: "optimized",
+    0x02: "non_optimized",
+    0x03: "inaccessible",
+    0x04: "persistent_loss",
+    0x0F: "change",
+}
+
+change_count = struct.unpack_from("<Q", data, 0)[0]
+group_count = struct.unpack_from("<H", data, 8)[0]
+group_id = struct.unpack_from("<I", data, 16)[0]
+nsid_count = struct.unpack_from("<I", data, 20)[0]
+group_change_count = struct.unpack_from("<Q", data, 24)[0]
+state = data[32]
+nsid = struct.unpack_from("<I", data, 36)[0]
+
+print(f"ana_change_count={change_count}")
+print(f"ana_group_count={group_count}")
+print(f"ana_group_id={group_id}")
+print(f"ana_nsid_count={nsid_count}")
+print(f"ana_group_change_count={group_change_count}")
+print(f"ana_state=0x{state:02x} {state_names.get(state, 'unknown')}")
+print(f"ana_nsid={nsid}")
+
+if group_count != 1:
+    raise SystemExit(f"ANA group count={group_count}, want 1")
+if group_id == 0:
+    raise SystemExit("ANA group id is 0")
+if nsid_count != 1:
+    raise SystemExit(f"ANA NSID count={nsid_count}, want 1")
+if nsid != want_nsid:
+    raise SystemExit(f"ANA NSID={nsid}, want {want_nsid}")
+if state not in state_names:
+    raise SystemExit(f"ANA state=0x{state:02x} is not recognized")
+PY
+  fi
 
   log "iteration ${i}/${ITERATIONS}: mkfs/mount"
   sudo mkfs.ext4 -F "$DEV" >"$ARTIFACT_DIR/mkfs.iter${i}.log" 2>&1

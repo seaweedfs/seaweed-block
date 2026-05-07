@@ -565,6 +565,8 @@ References:
       P3-C flips them with Linux host evidence.
     - do not advertise ANA until Identify fields and Get Log Page ANA are both
       implemented and kernel-verified.
+    - #QA assignment:
+      `internal/docs/qa-assignments/nvme-p3-ana-log-validation.md`.
   - NVMe-P4 multipath and mounted failover:
     - status: planned.
     - reach the iSCSI P6 bar for NVMe multipath.
