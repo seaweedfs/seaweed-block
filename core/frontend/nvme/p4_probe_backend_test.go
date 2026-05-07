@@ -65,8 +65,8 @@ func TestP4NVMe_StandbyPathUsesProbeBackendForAdminMetadata(t *testing.T) {
 
 	status, ctrl := cli.adminIdentify(t, 0x01, 0)
 	expectStatusSuccess(t, status, "standby Identify Controller")
-	if got := ctrl[76]; got != 0x08 {
-		t.Fatalf("CMIC=0x%02x want ANA reporting bit", got)
+	if got := ctrl[76]; got != 0x0a {
+		t.Fatalf("CMIC=0x%02x want multi-controller + ANA reporting bits", got)
 	}
 
 	status, ns := cli.adminIdentify(t, 0x00, 1)

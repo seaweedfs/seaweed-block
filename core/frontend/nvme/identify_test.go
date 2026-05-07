@@ -96,8 +96,8 @@ func TestNVMeIdentifyController_ANAFieldsAdvertisedWithProvider(t *testing.T) {
 	})
 	_, data := cli.adminIdentify(t, 0x01, 0)
 
-	if got := data[76]; got != 0x08 {
-		t.Fatalf("CMIC=0x%02x want 0x08 (ANA reporting supported)", got)
+	if got := data[76]; got != 0x0a {
+		t.Fatalf("CMIC=0x%02x want 0x0a (multi-controller + ANA reporting)", got)
 	}
 	if got := data[341]; got != 0x17 {
 		t.Fatalf("ANACAP=0x%02x want 0x17 (optimized/non-optimized/inaccessible/change)", got)

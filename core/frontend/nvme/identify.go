@@ -7,7 +7,7 @@ package nvme
 // deep-read findings (D1–D11, 2026-04-22):
 //
 //   D1  Serial "SWF00001" stub → derived from VolumeID (R1, §3.3 N1)
-//   D2  CMIC=0x08 / ANACAP / ANAGRPMAX=1 / NANAGRPID=1 /
+//   D2  CMIC=0x0a / ANACAP / ANAGRPMAX=1 / NANAGRPID=1 /
 //        Identify NS ANAGRPID → conditional on ANAProvider. Without
 //        a provider these fields remain zero so "advertised ==
 //        implemented" stays true.
@@ -103,10 +103,11 @@ func (s *Session) buildIdentifyController() []byte {
 
 	ana := s.handler.ANAProvider()
 	// byte 76: CMIC (Controller Multi-Path I/O Capabilities).
-	// Bit 3 advertises ANA reporting. Keep it off unless the
-	// handler can also serve ANA log page 0x0c.
+	// Bit 1 advertises multi-controller support and bit 3 advertises ANA
+	// reporting. Linux native multipath rejects a second controller under the
+	// same SubNQN unless bit 1 is set.
 	if ana != nil {
-		buf[76] = 0x08
+		buf[76] = 0x0a
 	}
 
 	// byte 77: MDTS (Maximum Data Transfer Size, 2^MDTS × min page).
