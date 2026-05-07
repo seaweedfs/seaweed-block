@@ -60,7 +60,7 @@ func TestNVMeANALogPage_NoProviderRejected(t *testing.T) {
 func TestNVMeANALogPage_ReportsProviderState(t *testing.T) {
 	_, cli := newANAHarness(t, testANAProvider{
 		state:       nvme.ANANonOptimized,
-		groupID:     7,
+		groupID:     1,
 		changeCount: 42,
 	})
 	status, data := cli.adminGetLogPage(t, 0x0C, 9) // 10 dwords = 40 bytes.
@@ -74,8 +74,8 @@ func TestNVMeANALogPage_ReportsProviderState(t *testing.T) {
 	if got := binary.LittleEndian.Uint16(data[8:10]); got != 1 {
 		t.Fatalf("ANA NGRPS=%d want 1", got)
 	}
-	if got := binary.LittleEndian.Uint32(data[16:20]); got != 7 {
-		t.Fatalf("ANA group id=%d want 7", got)
+	if got := binary.LittleEndian.Uint32(data[16:20]); got != 1 {
+		t.Fatalf("ANA group id=%d want 1", got)
 	}
 	if got := binary.LittleEndian.Uint32(data[20:24]); got != 1 {
 		t.Fatalf("ANA NNSID=%d want 1", got)

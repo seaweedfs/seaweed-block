@@ -51,7 +51,7 @@ Expected final line:
 - `nvme-ana-log.iter1.bin` exists and is 40 bytes.
 - `nvme-ana-log.iter1.summary` exists and contains:
   - `ana_group_count=1`,
-  - `ana_group_id=<non-zero>`,
+  - `ana_group_id=1`,
   - `ana_nsid_count=1`,
   - `ana_state=0x01 optimized` for the single primary path,
   - `ana_nsid=1`.

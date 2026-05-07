@@ -39,31 +39,21 @@ func TestProjectionANAProvider_StateMapping(t *testing.T) {
 	}
 }
 
-func TestProjectionANAProvider_GroupIDIsStableAndPathSpecific(t *testing.T) {
+func TestProjectionANAProvider_GroupIDIsDenseAndWithinAdvertisedRange(t *testing.T) {
 	view1 := volume.NewAdapterProjectionView(
 		aluaProjector{p: engine.ReplicaProjection{Mode: engine.ModeHealthy}},
 		"v1",
 		"r1",
 		nil,
 	)
-	view2 := volume.NewAdapterProjectionView(
-		aluaProjector{p: engine.ReplicaProjection{Mode: engine.ModeHealthy}},
-		"v1",
-		"r2",
-		nil,
-	)
 	r1a := newProjectionANAProvider(view1, "v1", "r1", "nqn.2026-05.io.seaweedfs:v1")
 	r1b := newProjectionANAProvider(view1, "v1", "r1", "nqn.2026-05.io.seaweedfs:v1")
-	r2 := newProjectionANAProvider(view2, "v1", "r2", "nqn.2026-05.io.seaweedfs:v1")
 
-	if r1a.ANAGroupID() == 0 {
-		t.Fatal("ANAGroupID() returned 0")
+	if got := r1a.ANAGroupID(); got != 1 {
+		t.Fatalf("ANAGroupID()=%d want 1 for single-group ANA", got)
 	}
 	if r1a.ANAGroupID() != r1b.ANAGroupID() {
 		t.Fatalf("same replica produced unstable ANA group: %d vs %d", r1a.ANAGroupID(), r1b.ANAGroupID())
-	}
-	if r1a.ANAGroupID() == r2.ANAGroupID() {
-		t.Fatalf("replica paths should have distinct ANA groups: %d", r1a.ANAGroupID())
 	}
 }
 

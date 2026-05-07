@@ -73,7 +73,9 @@ from V2 role ownership.
 - Advertising ANA too early is worse than not supporting it: Linux may enable
   multipath policy based on incomplete data.
 - A single hard-coded group is acceptable for a first RF=2 path if the state is
-  correct, but it must not hide future multi-volume/multi-namespace needs.
+  correct and the Identify limits match it. Linux validates ANA group id
+  against `ANAGRPMAX` / `NANAGRPID`; for the current single-group target the
+  dense group id must be `1`, not a hash-derived value.
 - ANA state changes need host-visible evidence. Unit tests alone are not
   enough; P4 must include real `nvme-cli` / Linux multipath validation.
 - Reads and writes may have different safety policy. The chosen policy must be

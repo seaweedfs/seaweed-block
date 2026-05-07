@@ -91,7 +91,7 @@ func TestNVMeIdentifyController_ANAFieldsZeroWithoutProvider(t *testing.T) {
 func TestNVMeIdentifyController_ANAFieldsAdvertisedWithProvider(t *testing.T) {
 	_, cli := newANAHarness(t, testANAProvider{
 		state:       nvme.ANAOptimized,
-		groupID:     0xce836866,
+		groupID:     1,
 		changeCount: 1,
 	})
 	_, data := cli.adminIdentify(t, 0x01, 0)
@@ -275,13 +275,13 @@ func TestNVMeIdentifyNamespace_ANAGRPIDZeroWithoutProvider(t *testing.T) {
 func TestNVMeIdentifyNamespace_ANAGRPIDAdvertisedWithProvider(t *testing.T) {
 	_, cli := newANAHarness(t, testANAProvider{
 		state:       nvme.ANAOptimized,
-		groupID:     0xce836866,
+		groupID:     1,
 		changeCount: 1,
 	})
 	_, data := cli.adminIdentify(t, 0x00, 1)
 	got := binary.LittleEndian.Uint32(data[92:96])
-	if got != 0xce836866 {
-		t.Fatalf("Identify NS ANAGRPID=%d want %d", got, uint32(0xce836866))
+	if got != 1 {
+		t.Fatalf("Identify NS ANAGRPID=%d want 1", got)
 	}
 }
 

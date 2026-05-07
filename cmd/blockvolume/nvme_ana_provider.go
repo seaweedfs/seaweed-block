@@ -1,10 +1,6 @@
 package main
 
 import (
-	"crypto/sha256"
-	"encoding/binary"
-	"strings"
-
 	"github.com/seaweedfs/seaweed-block/core/engine"
 	"github.com/seaweedfs/seaweed-block/core/frontend/nvme"
 	"github.com/seaweedfs/seaweed-block/core/host/volume"
@@ -14,24 +10,15 @@ type projectionANAProvider struct {
 	view      *volume.AdapterProjectionView
 	volumeID  string
 	replicaID string
-	seed      string
 }
 
 var _ nvme.ANAProvider = (*projectionANAProvider)(nil)
 
-func newProjectionANAProvider(view *volume.AdapterProjectionView, volumeID, replicaID string, exportSeed ...string) *projectionANAProvider {
-	seed := volumeID
-	for _, candidate := range exportSeed {
-		if candidate != "" {
-			seed = candidate
-			break
-		}
-	}
+func newProjectionANAProvider(view *volume.AdapterProjectionView, volumeID, replicaID string, _ ...string) *projectionANAProvider {
 	return &projectionANAProvider{
 		view:      view,
 		volumeID:  volumeID,
 		replicaID: replicaID,
-		seed:      seed,
 	}
 }
 
@@ -60,7 +47,10 @@ func (p *projectionANAProvider) ANAState() nvme.ANAState {
 }
 
 func (p *projectionANAProvider) ANAGroupID() uint32 {
-	return stableANAID("ana", p.seed, p.volumeID, p.replicaID)
+	// Linux validates ANA group descriptors against Identify Controller's
+	// ANAGRPMAX/NANAGRPID. The current target exposes one namespace and one ANA
+	// group, so the only valid advertised group id is the dense group 1.
+	return 1
 }
 
 func (p *projectionANAProvider) ANAChangeCount() uint64 {
@@ -73,13 +63,4 @@ func (p *projectionANAProvider) ANAChangeCount() uint64 {
 		return 1
 	}
 	return count
-}
-
-func stableANAID(parts ...string) uint32 {
-	sum := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
-	id := binary.BigEndian.Uint32(sum[:4])
-	if id == 0 {
-		return 1
-	}
-	return id
 }
