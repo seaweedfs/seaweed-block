@@ -531,21 +531,30 @@ References:
     - initial answer: standard in-capsule data; no custom V2 vendor/admin data
       command found in the NVMe package.
   - NVMe-P1 OS kernel baseline:
-    - status: script prepared; waiting for QA.
+    - status: QA green on M02.
     - script: `scripts/run-nvme-os-smoke.sh`.
     - #QA assignment:
       `internal/docs/qa-assignments/nvme-p1-os-smoke-validation.md`.
+    - #QA evidence:
+      - basic OS path PASS on M02,
+      - 60s fio PASS on M02,
+      - loopback 4 KiB fio used inline writes only,
+      - no test NQN or process residue after cleanup.
     - build a repeatable `nvme connect -> mkfs -> mount -> fio/checksum ->
       disconnect` script.
     - dynamic ports only.
     - no stale sessions or target processes.
   - NVMe-P2 in-capsule / R2T performance path:
-    - status: target stats instrumentation implemented locally; waiting for
-      QA host evidence from NVMe-P1.
+    - status: inline path observed by QA; explicit R2T validation assigned.
     - target now reports transport counters in `blockvolume.log` on close:
       inline writes, R2T writes, H2C/C2H PDU counts, and read/write/flush
       command counts.
+    - P1 observation: Linux `fio --bs=4k` used inline writes exclusively on
+      M02 (`r2t_writes=0`).
+    - #QA assignment:
+      `internal/docs/qa-assignments/nvme-p2-inline-r2t-validation.md`.
     - prove whether Linux uses inline data for small writes.
+    - run 128 KiB+ profiles to force or classify the R2T path.
     - add visible counters or artifacts for inline vs R2T writes.
     - compare iSCSI and NVMe only under labelled network/backend conditions.
   - NVMe-P3 ANA identity and log page:

@@ -15,6 +15,9 @@ ITERATIONS="${SW_BLOCK_NVME_ITERATIONS:-1}"
 STRESS="${SW_BLOCK_NVME_STRESS:-none}"          # none | fio | dd
 FIO_SIZE="${SW_BLOCK_NVME_FIO_SIZE:-32m}"
 FIO_RUNTIME="${SW_BLOCK_NVME_FIO_RUNTIME:-10}"
+FIO_BS="${SW_BLOCK_NVME_FIO_BS:-4k}"
+DD_BS="${SW_BLOCK_NVME_DD_BS:-1M}"
+DD_COUNT="${SW_BLOCK_NVME_DD_COUNT:-32}"
 COLLECT_ANA="${SW_BLOCK_NVME_COLLECT_ANA:-0}"
 
 BIN_DIR="${SW_BLOCK_BIN_DIR:-${WORK_DIR}/bin}"
@@ -177,6 +180,8 @@ log "size_blocks=${BLOCKS} block_size=${BLOCK_SIZE}"
 log "durable_impl=${DURABLE_IMPL}"
 log "iterations=${ITERATIONS}"
 log "stress=${STRESS}"
+log "fio_bs=${FIO_BS}"
+log "dd_bs=${DD_BS} dd_count=${DD_COUNT}"
 log "collect_ana=${COLLECT_ANA}"
 
 cd "$ROOT"
@@ -355,7 +360,7 @@ PY
       ;;
     dd)
       log "iteration ${i}/${ITERATIONS}: dd stress"
-      sudo dd if=/dev/zero of="$MOUNT_DIR/dd-stress.bin" bs=1M count=32 conv=fsync \
+      sudo dd if=/dev/zero of="$MOUNT_DIR/dd-stress.bin" bs="$DD_BS" count="$DD_COUNT" conv=fsync \
         >"$ARTIFACT_DIR/dd.iter${i}.log" 2>&1
       ;;
     fio)
@@ -364,7 +369,7 @@ PY
         --directory="$MOUNT_DIR" \
         --rw=randrw \
         --rwmixread=50 \
-        --bs=4k \
+        --bs="$FIO_BS" \
         --ioengine=psync \
         --iodepth=1 \
         --numjobs=1 \
