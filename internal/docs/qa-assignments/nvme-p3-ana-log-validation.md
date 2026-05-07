@@ -1,17 +1,20 @@
-# QA Assignment: NVMe P3 ANA Log Validation
+# QA Assignment: NVMe P3 ANA Identify / Log Validation
 
 Status: ready for QA.
 Branch: `frontend/nvme-ana-parity-plan`.
-Scope: first real Linux `nvme-cli` validation of the V3 ANA log page.
+Scope: first real Linux `nvme-cli` validation of V3 ANA Identify fields plus
+ANA log page.
 
 ## Goal
 
 - Prove a real Linux host can explicitly read NVMe ANA log page `0x0c` from
   `blockvolume`.
+- Prove Identify Controller and Identify Namespace advertise ANA only after the
+  log page and product state provider are wired.
 - Confirm the target reports one valid ANA group with a non-zero group id,
   namespace count `1`, the expected NSID, and a recognized ANA state.
-- Keep Identify ANA advertisement off for this assignment. This is not a
-  multipath claim.
+- This is not a multipath claim. It only validates the single-path primary
+  state and Identify/log consistency.
 
 ## Preconditions
 
@@ -53,10 +56,15 @@ Expected final line:
   - `ana_state=0x01 optimized` for the single primary path,
   - `ana_nsid=1`.
 - `nvme-id-ctrl.iter1.txt` and `nvme-id-ns.iter1.txt` are captured.
-- Identify ANA advertisement remains off in this slice:
-  - report the controller ANA-related lines from `nvme-id-ctrl.iter1.txt`,
-  - report the namespace ANA-related line if `nvme-cli` prints one,
-  - do not treat missing human-readable ANA labels as failure.
+- Identify ANA advertisement is on and consistent with the log page:
+  - controller `cmic` shows ANA support,
+  - controller `anacap` is non-zero,
+  - controller `anagrpmax=1`,
+  - controller `nanagrpid=1`,
+  - namespace `anagrpid` matches `ana_group_id` from
+    `nvme-ana-log.iter1.summary`.
+- OAES ANA Change Notice must remain off unless an async event producer is
+  implemented. Do not fail because OAES is zero.
 - Cleanup state is the same as P1:
   - final subsystem list does not contain the test NQN,
   - no `blockmaster` / `blockvolume` processes from this run remain.
@@ -78,6 +86,6 @@ Expected final line:
 
 - This is not Linux NVMe multipath.
 - This is not mounted failover.
-- This does not enable ANA Identify advertisement.
+- This does not validate ANA Change Notice events.
 - This is not Kubernetes CSI.
 - This is not a performance test.

@@ -51,8 +51,11 @@ Status: reference for NVMe-P3/P4 work.
   - ANA change means recovering,
   - inaccessible means degraded, mismatched identity, or missing projection.
 - V3 now implements ANA Get Log Page `0x0c` behind the provider seam.
-- Identify ANA fields remain off until Linux host validation proves the three
-  surfaces agree.
+- Identify ANA fields are conditional:
+  - no ANA provider => all ANA Identify fields stay zero,
+  - ANA provider present => Identify Controller advertises ANA and Identify
+    Namespace carries the provider's ANA group.
+- OAES ANA Change Notice remains off until an async event producer exists.
 
 ## V2 Reference Behavior
 
@@ -86,6 +89,7 @@ from V2 role ownership.
   - status: done.
 - P3-C: flip Identify Controller / Namespace fields only after the log page
   tests pass.
+  - status: done locally; waiting for host validation at current branch HEAD.
 - P3-D: add Linux `nvme get-log` / `nvme id-ctrl` / `nvme id-ns` QA assignment.
 - P4: add two-path Linux multipath validation and mounted failover evidence.
 

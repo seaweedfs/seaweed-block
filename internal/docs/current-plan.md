@@ -558,8 +558,8 @@ References:
     - add visible counters or artifacts for inline vs R2T writes.
     - compare iSCSI and NVMe only under labelled network/backend conditions.
   - NVMe-P3 ANA identity and log page:
-    - status: ANA provider, blockvolume wiring, and log page implemented
-      locally; Identify advertisement still intentionally off.
+    - status: ANA provider, blockvolume wiring, log page, and conditional
+      Identify advertisement implemented locally.
     - provider: `core/frontend/nvme.ANAProvider`.
     - product wiring: `cmd/blockvolume` derives ANA state from the same
       frontend projection used by iSCSI ALUA.
@@ -570,10 +570,12 @@ References:
       - superseded healthy / idle supporting path => non-optimized,
       - recovering => ANA change,
       - degraded / identity mismatch => inaccessible.
-    - guard: Identify Controller / Namespace ANA fields remain zero until
-      P3-C flips them with Linux host evidence.
-    - do not advertise ANA until Identify fields and Get Log Page ANA are both
-      implemented and kernel-verified.
+    - guard: Identify Controller / Namespace ANA fields remain zero without a
+      provider.
+    - P3-C behavior: with a provider, Identify Controller advertises ANA,
+      Identify Namespace carries the provider's ANA group, and Get Log Page ANA
+      reports the same group/state.
+    - OAES ANA Change Notice remains off; no async event producer exists yet.
     - #QA assignment:
       `internal/docs/qa-assignments/nvme-p3-ana-log-validation.md`.
   - NVMe-P4 multipath and mounted failover:

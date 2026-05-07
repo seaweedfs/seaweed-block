@@ -67,16 +67,10 @@ func TestT2V2Port_NVMe_IdentifyCtrl_OAESAllBitsZero(t *testing.T) {
 }
 
 func TestT2V2Port_NVMe_IdentifyCtrl_OAESANACrossConsistency(t *testing.T) {
-	// Symmetric pin: OAES bit 11 (ANA Change Notice) fires ONLY if
-	// ANA is implemented. Since sw's TestT2Batch11a_..._ANAFieldsAllZero
-	// already pins ANA fields (CMIC/ANACAP/ANAGRPMAX/NANAGRPID) to 0,
-	// OAES bit 11 MUST also be 0. This test makes the linkage
-	// mechanical: if someone flips one side without the other, the
-	// pair is detected inconsistent before silently-broken
-	// behavior reaches the OS.
-	//
-	// 11c conditional ANA port would flip BOTH sides together; this
-	// test must be updated in the same commit.
+	// OAES bit 11 is ANA Change Notice, an async event source. It is
+	// stronger than ANA log support and must not be advertised unless an event
+	// producer exists. ANA Identify fields may become non-zero before OAES bit
+	// 11; the reverse is invalid.
 	_, cli := targetForNVMe(t, "nqn.2026-04.m01:sub1", "v1")
 	_, data := cli.adminIdentify(t, 0x01, 0)
 
@@ -91,11 +85,6 @@ func TestT2V2Port_NVMe_IdentifyCtrl_OAESANACrossConsistency(t *testing.T) {
 		t.Fatal("OAES bit 11 (ANA Change Notice) set but ANA fields all zero — " +
 			"advertising an event source that cannot exist (inconsistent)")
 	}
-	if !anaChangeNoticeBit && !anaFieldsAllZero {
-		t.Fatalf("ANA fields non-zero (cmic-ana=%v anacap=0x%02x grpMax=%d numGrp=%d) but "+
-			"OAES bit 11 clear — implemented without advertising the event (inconsistent)",
-			cmicANA, anacapByte, anaGrpMax, numGrp)
-	}
-	// Both zero (Batch 11 expected) or both non-zero (11c+ ANA) —
-	// consistent either way.
+	// Both zero (no ANA) and ANA-without-OAES are valid. OAES-without-ANA is
+	// the invalid combination guarded above.
 }
