@@ -301,7 +301,7 @@ References:
   - state change while I/O is in flight:
     - status: local protocol state-change test done.
   - concurrent REPORT TARGET PORT GROUPS and standby write reject tests:
-    - status: pending.
+    - status: done in PR #43.
   - frontend state provider wiring:
     - status: local P6-C slice done on `iscsi/csi-node-lifecycle`.
     - connect ALUA provider to current V3 frontend facts without importing

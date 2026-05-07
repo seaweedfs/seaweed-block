@@ -86,6 +86,9 @@ func TestBlockmasterBareTopologyRegistersVolumeControlServices(t *testing.T) {
 	if status.Code(err) == codes.Unimplemented || strings.Contains(err.Error(), "unknown service") {
 		t.Fatalf("ObservationService not registered on bare blockmaster: %v", err)
 	}
+	if status.Code(err) == codes.Unavailable || status.Code(err) == codes.DeadlineExceeded {
+		t.Fatalf("transport error while checking ObservationService registration: %v", err)
+	}
 
 	stream, err := control.NewAssignmentServiceClient(conn).SubscribeAssignments(ctx, &control.SubscribeRequest{})
 	if err == nil {
@@ -96,5 +99,8 @@ func TestBlockmasterBareTopologyRegistersVolumeControlServices(t *testing.T) {
 	}
 	if status.Code(err) == codes.Unimplemented || strings.Contains(err.Error(), "unknown service") {
 		t.Fatalf("AssignmentService not registered on bare blockmaster: %v", err)
+	}
+	if status.Code(err) == codes.Unavailable || status.Code(err) == codes.DeadlineExceeded {
+		t.Fatalf("transport error while checking AssignmentService registration: %v", err)
 	}
 }

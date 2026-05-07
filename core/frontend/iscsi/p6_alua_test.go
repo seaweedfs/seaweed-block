@@ -337,7 +337,7 @@ func TestP8ALUA_ConcurrentReportTPGAndStandbyDataReject(t *testing.T) {
 	wg.Wait()
 	close(errCh)
 	for msg := range errCh {
-		t.Fatal(msg)
+		t.Error(msg)
 	}
 	if rec.ReadCount() != 0 {
 		t.Fatalf("standby READ reached backend %d times", rec.ReadCount())

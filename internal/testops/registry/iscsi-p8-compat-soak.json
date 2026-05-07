@@ -24,7 +24,7 @@
     "SW_BLOCK_P8_OS_FIO_SIZE": "128m"
   },
   "qa_instruction": "internal/docs/qa-assignments/iscsi-p8-compat-soak-validation.md",
-  "known_green_commit": "",
+  "known_green_commit": "38ff850",
   "artifacts": [
     "summary.md",
     "run.log",

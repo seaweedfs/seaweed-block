@@ -207,7 +207,6 @@ metadata before the actual protocol surface exists.
 
 - No NVMe-oF ANA.
 - No performance claim.
-- No production HA claim.
 - No production HA claim from the P6-E alpha lab alone.
 - No long-running soak claim.
 - No multi-node Kubernetes failure claim.

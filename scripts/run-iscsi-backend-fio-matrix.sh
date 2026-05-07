@@ -70,7 +70,7 @@ for backend in $BACKENDS; do
   master_port=$((BASE_MASTER_PORT + idx - 1))
   data_port=$((BASE_DATA_PORT + (idx - 1) * 10))
   child_art="$ARTIFACT_ROOT/${backend}"
-  child_work="$WORK_DIR/work-${backend}"
+  child_work="$WORK_DIR/work-${RUN_ID}-${backend}"
   mkdir -p "$child_art" "$child_work"
 
   log "run backend=${backend} iscsi_port=${iscsi_port}"

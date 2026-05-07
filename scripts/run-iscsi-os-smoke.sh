@@ -25,18 +25,35 @@ RUN_DIR="${WORK_DIR}/run"
 
 mkdir -p "$ARTIFACT_DIR" "$BIN_DIR" "$RUN_DIR" "$MOUNT_DIR"
 
+_USED_PORTS=()
+
 pick_free_port() {
+  local candidate
   if command -v python3 >/dev/null 2>&1; then
-    python3 - <<'PY'
+    while true; do
+      candidate="$(python3 - <<'PY'
 import socket
 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 s.bind(("127.0.0.1", 0))
 print(s.getsockname()[1])
 s.close()
 PY
-    return
+)"
+      if [[ ! " ${_USED_PORTS[*]} " =~ " ${candidate} " ]]; then
+        _USED_PORTS+=("$candidate")
+        printf '%s\n' "$candidate"
+        return
+      fi
+    done
   fi
-  shuf -i 20000-60999 -n 1
+  while true; do
+    candidate="$(shuf -i 20000-60999 -n 1)"
+    if [[ ! " ${_USED_PORTS[*]} " =~ " ${candidate} " ]]; then
+      _USED_PORTS+=("$candidate")
+      printf '%s\n' "$candidate"
+      return
+    fi
+  done
 }
 
 PORT="${SW_BLOCK_ISCSI_PORT:-$(pick_free_port)}"
@@ -59,10 +76,25 @@ require_cmd() {
   fi
 }
 
+cleanup_iqn_records() {
+  local portal portal_no_tpgt
+  sudo iscsiadm -m session 2>/dev/null | awk -v iqn="$IQN" '$0 ~ iqn {print $3}' | while read -r portal; do
+    [[ -z "$portal" ]] && continue
+    sudo iscsiadm -m node -T "$IQN" -p "$portal" --logout >>"$ARTIFACT_DIR/cleanup.log" 2>&1 || true
+  done
+  sudo iscsiadm -m node 2>/dev/null | awk -v iqn="$IQN" '$0 ~ iqn {print $1}' | while read -r portal; do
+    [[ -z "$portal" ]] && continue
+    portal_no_tpgt="${portal%%,*}"
+    sudo iscsiadm -m node -T "$IQN" -p "$portal" -o delete >>"$ARTIFACT_DIR/cleanup.log" 2>&1 || true
+    sudo iscsiadm -m discoverydb -t sendtargets -p "$portal_no_tpgt" -o delete >>"$ARTIFACT_DIR/cleanup.log" 2>&1 || true
+  done
+}
+
 cleanup() {
   set +e
   log "cleanup"
   mountpoint -q "$MOUNT_DIR" && sudo umount "$MOUNT_DIR" >>"$ARTIFACT_DIR/cleanup.log" 2>&1
+  cleanup_iqn_records
   sudo iscsiadm -m node -T "$IQN" -p "127.0.0.1:${PORT}" --logout >>"$ARTIFACT_DIR/cleanup.log" 2>&1 || true
   sudo iscsiadm -m node -T "$IQN" -p "127.0.0.1:${PORT}" -o delete >>"$ARTIFACT_DIR/cleanup.log" 2>&1 || true
   sudo iscsiadm -m discoverydb -t sendtargets -p "127.0.0.1:${PORT}" -o delete >>"$ARTIFACT_DIR/cleanup.log" 2>&1 || true
@@ -142,6 +174,7 @@ rm -rf "${RUN_DIR}/master-store" "${RUN_DIR}/volume-store"
 mkdir -p "${RUN_DIR}/master-store" "${RUN_DIR}/volume-store"
 pkill -KILL -f "${BIN_DIR}/blockvolume" >/dev/null 2>&1 || true
 pkill -KILL -f "${BIN_DIR}/blockmaster" >/dev/null 2>&1 || true
+cleanup_iqn_records
 sudo iscsiadm -m node -T "$IQN" -p "127.0.0.1:${PORT}" --logout >/dev/null 2>&1 || true
 sudo iscsiadm -m node -T "$IQN" -p "127.0.0.1:${PORT}" -o delete >/dev/null 2>&1 || true
 sudo iscsiadm -m discoverydb -t sendtargets -p "127.0.0.1:${PORT}" -o delete >/dev/null 2>&1 || true
