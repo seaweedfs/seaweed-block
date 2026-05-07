@@ -6,19 +6,15 @@ RUN_ID="${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
 WORK_DIR="${SW_BLOCK_ISCSI_WORK_DIR:-/tmp/sw-block-iscsi-os}"
 ARTIFACT_DIR="${SW_BLOCK_ARTIFACT_DIR:-${WORK_DIR}/runs/${RUN_ID}}"
 IQN="${SW_BLOCK_ISCSI_IQN:-iqn.2026-05.io.seaweedfs:os-smoke-v1}"
-PORT="${SW_BLOCK_ISCSI_PORT:-3267}"
 PORTAL_ADDR="${SW_BLOCK_ISCSI_PORTAL_ADDR:-}"
 DATAOUT_TIMEOUT="${SW_BLOCK_ISCSI_DATAOUT_TIMEOUT:-}"
 CHAP_USERNAME="${SW_BLOCK_ISCSI_CHAP_USERNAME:-}"
 CHAP_SECRET="${SW_BLOCK_ISCSI_CHAP_SECRET:-}"
 CHAP_BAD_SECRET="${SW_BLOCK_ISCSI_CHAP_BAD_SECRET:-}"
 MOUNT_DIR="${SW_BLOCK_ISCSI_MOUNT_DIR:-${WORK_DIR}/mnt}"
-MASTER_ADDR="${SW_BLOCK_MASTER_ADDR:-127.0.0.1:19333}"
-DATA_ADDR="${SW_BLOCK_DATA_ADDR:-127.0.0.1:19101}"
-CTRL_ADDR="${SW_BLOCK_CTRL_ADDR:-127.0.0.1:19102}"
-STATUS_ADDR="${SW_BLOCK_STATUS_ADDR:-127.0.0.1:19103}"
 BLOCKS="${SW_BLOCK_DURABLE_BLOCKS:-65536}"      # 256 MiB at 4 KiB.
 BLOCK_SIZE="${SW_BLOCK_DURABLE_BLOCKSIZE:-4096}"
+DURABLE_IMPL="${SW_BLOCK_DURABLE_IMPL:-smartwal}"
 ITERATIONS="${SW_BLOCK_ISCSI_ITERATIONS:-1}"
 STRESS="${SW_BLOCK_ISCSI_STRESS:-none}"         # none | fio | dd
 FIO_SIZE="${SW_BLOCK_ISCSI_FIO_SIZE:-32m}"
@@ -26,9 +22,48 @@ FIO_RUNTIME="${SW_BLOCK_ISCSI_FIO_RUNTIME:-10}"
 
 BIN_DIR="${SW_BLOCK_BIN_DIR:-${WORK_DIR}/bin}"
 RUN_DIR="${WORK_DIR}/run"
-DEVLINK_GLOB="/dev/disk/by-path/*ip-127.0.0.1:${PORT}-iscsi-${IQN}-lun-0"
 
 mkdir -p "$ARTIFACT_DIR" "$BIN_DIR" "$RUN_DIR" "$MOUNT_DIR"
+
+_USED_PORTS=()
+
+pick_free_port() {
+  local candidate
+  if command -v python3 >/dev/null 2>&1; then
+    while true; do
+      candidate="$(python3 - <<'PY'
+import socket
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.bind(("127.0.0.1", 0))
+print(s.getsockname()[1])
+s.close()
+PY
+)"
+      if [[ ! " ${_USED_PORTS[*]} " =~ " ${candidate} " ]]; then
+        _USED_PORTS+=("$candidate")
+        printf '%s\n' "$candidate"
+        return
+      fi
+    done
+  fi
+  while true; do
+    candidate="$(shuf -i 20000-60999 -n 1)"
+    if [[ ! " ${_USED_PORTS[*]} " =~ " ${candidate} " ]]; then
+      _USED_PORTS+=("$candidate")
+      printf '%s\n' "$candidate"
+      return
+    fi
+  done
+}
+
+PORT="${SW_BLOCK_ISCSI_PORT:-$(pick_free_port)}"
+MASTER_ADDR="${SW_BLOCK_MASTER_ADDR:-127.0.0.1:$(pick_free_port)}"
+DATA_ADDR="${SW_BLOCK_DATA_ADDR:-127.0.0.1:$(pick_free_port)}"
+CTRL_ADDR="${SW_BLOCK_CTRL_ADDR:-127.0.0.1:$(pick_free_port)}"
+STATUS_ADDR="${SW_BLOCK_STATUS_ADDR:-127.0.0.1:$(pick_free_port)}"
+DEVLINK_GLOB="/dev/disk/by-path/*ip-127.0.0.1:${PORT}-iscsi-${IQN}-lun-0"
+MASTER_PID=""
+VOLUME_PID=""
 
 log() {
   printf '[iscsi-os] %s\n' "$*" | tee -a "$ARTIFACT_DIR/run.log"
@@ -41,16 +76,35 @@ require_cmd() {
   fi
 }
 
+cleanup_iqn_records() {
+  local portal portal_no_tpgt
+  sudo iscsiadm -m session 2>/dev/null | awk -v iqn="$IQN" '$0 ~ iqn {print $3}' | while read -r portal; do
+    [[ -z "$portal" ]] && continue
+    sudo iscsiadm -m node -T "$IQN" -p "$portal" --logout >>"$ARTIFACT_DIR/cleanup.log" 2>&1 || true
+  done
+  sudo iscsiadm -m node 2>/dev/null | awk -v iqn="$IQN" '$0 ~ iqn {print $1}' | while read -r portal; do
+    [[ -z "$portal" ]] && continue
+    portal_no_tpgt="${portal%%,*}"
+    sudo iscsiadm -m node -T "$IQN" -p "$portal" -o delete >>"$ARTIFACT_DIR/cleanup.log" 2>&1 || true
+    sudo iscsiadm -m discoverydb -t sendtargets -p "$portal_no_tpgt" -o delete >>"$ARTIFACT_DIR/cleanup.log" 2>&1 || true
+  done
+}
+
 cleanup() {
   set +e
   log "cleanup"
   mountpoint -q "$MOUNT_DIR" && sudo umount "$MOUNT_DIR" >>"$ARTIFACT_DIR/cleanup.log" 2>&1
+  cleanup_iqn_records
   sudo iscsiadm -m node -T "$IQN" -p "127.0.0.1:${PORT}" --logout >>"$ARTIFACT_DIR/cleanup.log" 2>&1 || true
   sudo iscsiadm -m node -T "$IQN" -p "127.0.0.1:${PORT}" -o delete >>"$ARTIFACT_DIR/cleanup.log" 2>&1 || true
   sudo iscsiadm -m discoverydb -t sendtargets -p "127.0.0.1:${PORT}" -o delete >>"$ARTIFACT_DIR/cleanup.log" 2>&1 || true
+  [[ -n "$VOLUME_PID" ]] && kill "$VOLUME_PID" >>"$ARTIFACT_DIR/cleanup.log" 2>&1 || true
+  [[ -n "$MASTER_PID" ]] && kill "$MASTER_PID" >>"$ARTIFACT_DIR/cleanup.log" 2>&1 || true
   pkill -TERM -f "${BIN_DIR}/blockvolume" >>"$ARTIFACT_DIR/cleanup.log" 2>&1 || true
   pkill -TERM -f "${BIN_DIR}/blockmaster" >>"$ARTIFACT_DIR/cleanup.log" 2>&1 || true
   sleep 1
+  [[ -n "$VOLUME_PID" ]] && kill -KILL "$VOLUME_PID" >>"$ARTIFACT_DIR/cleanup.log" 2>&1 || true
+  [[ -n "$MASTER_PID" ]] && kill -KILL "$MASTER_PID" >>"$ARTIFACT_DIR/cleanup.log" 2>&1 || true
   pkill -KILL -f "${BIN_DIR}/blockvolume" >>"$ARTIFACT_DIR/cleanup.log" 2>&1 || true
   pkill -KILL -f "${BIN_DIR}/blockmaster" >>"$ARTIFACT_DIR/cleanup.log" 2>&1 || true
   sudo iscsiadm -m session >"$ARTIFACT_DIR/iscsi-sessions.after.txt" 2>&1 || true
@@ -71,6 +125,10 @@ log "root=$ROOT"
 log "artifact_dir=$ARTIFACT_DIR"
 log "iqn=$IQN"
 log "portal=127.0.0.1:${PORT}"
+log "master=${MASTER_ADDR}"
+log "data_addr=${DATA_ADDR}"
+log "ctrl_addr=${CTRL_ADDR}"
+log "status_addr=${STATUS_ADDR}"
 if [[ -n "$PORTAL_ADDR" ]]; then
   log "advertised_portal=$PORTAL_ADDR"
 fi
@@ -88,6 +146,7 @@ if [[ -n "$CHAP_USERNAME" || -n "$CHAP_SECRET" ]]; then
   fi
 fi
 log "size_blocks=${BLOCKS} block_size=${BLOCK_SIZE}"
+log "durable_impl=${DURABLE_IMPL}"
 log "iterations=${ITERATIONS}"
 log "stress=${STRESS}"
 
@@ -115,19 +174,37 @@ rm -rf "${RUN_DIR}/master-store" "${RUN_DIR}/volume-store"
 mkdir -p "${RUN_DIR}/master-store" "${RUN_DIR}/volume-store"
 pkill -KILL -f "${BIN_DIR}/blockvolume" >/dev/null 2>&1 || true
 pkill -KILL -f "${BIN_DIR}/blockmaster" >/dev/null 2>&1 || true
+cleanup_iqn_records
 sudo iscsiadm -m node -T "$IQN" -p "127.0.0.1:${PORT}" --logout >/dev/null 2>&1 || true
 sudo iscsiadm -m node -T "$IQN" -p "127.0.0.1:${PORT}" -o delete >/dev/null 2>&1 || true
 sudo iscsiadm -m discoverydb -t sendtargets -p "127.0.0.1:${PORT}" -o delete >/dev/null 2>&1 || true
 sudo iscsiadm -m session >"$ARTIFACT_DIR/iscsi-sessions.before.txt" 2>&1 || true
 
 log "start blockmaster"
-setsid -f "${BIN_DIR}/blockmaster" \
+"${BIN_DIR}/blockmaster" \
   --authority-store "${RUN_DIR}/master-store" \
   --listen "$MASTER_ADDR" \
   --topology "$ARTIFACT_DIR/topology.yaml" \
   --expected-slots-per-volume 1 \
-  >"$ARTIFACT_DIR/blockmaster.log" 2>&1
-sleep 1
+  --t0-print-ready \
+  >"$ARTIFACT_DIR/blockmaster.log" 2>&1 &
+MASTER_PID=$!
+for _ in $(seq 1 100); do
+  if ! kill -0 "$MASTER_PID" >/dev/null 2>&1; then
+    cat "$ARTIFACT_DIR/blockmaster.log" >&2 || true
+    echo "blockmaster exited during startup" >&2
+    exit 1
+  fi
+  if grep -q '"component":"blockmaster".*"phase":"listening"' "$ARTIFACT_DIR/blockmaster.log"; then
+    break
+  fi
+  sleep 0.1
+done
+if ! grep -q '"component":"blockmaster".*"phase":"listening"' "$ARTIFACT_DIR/blockmaster.log"; then
+  cat "$ARTIFACT_DIR/blockmaster.log" >&2 || true
+  echo "blockmaster did not report ready" >&2
+  exit 1
+fi
 
 log "start blockvolume iSCSI target"
 blockvolume_iscsi_args=(
@@ -145,7 +222,7 @@ if [[ -n "$CHAP_SECRET" ]]; then
   blockvolume_iscsi_args+=(--iscsi-chap-secret "$CHAP_SECRET")
 fi
 
-setsid -f "${BIN_DIR}/blockvolume" \
+"${BIN_DIR}/blockvolume" \
   --master "$MASTER_ADDR" \
   --server-id s1 \
   --volume-id v1 \
@@ -156,19 +233,30 @@ setsid -f "${BIN_DIR}/blockvolume" \
   --heartbeat-interval 200ms \
   --t1-readiness \
   --durable-root "${RUN_DIR}/volume-store" \
-  --durable-impl smartwal \
+  --durable-impl "$DURABLE_IMPL" \
   --durable-blocks "$BLOCKS" \
   --durable-blocksize "$BLOCK_SIZE" \
   "${blockvolume_iscsi_args[@]}" \
-  >"$ARTIFACT_DIR/blockvolume.log" 2>&1
+  >"$ARTIFACT_DIR/blockvolume.log" 2>&1 &
+VOLUME_PID=$!
 
 log "wait iSCSI listener"
 for _ in $(seq 1 100); do
+  if ! kill -0 "$VOLUME_PID" >/dev/null 2>&1; then
+    cat "$ARTIFACT_DIR/blockvolume.log" >&2 || true
+    echo "blockvolume exited during startup" >&2
+    exit 1
+  fi
   if bash -c "</dev/tcp/127.0.0.1/${PORT}" >/dev/null 2>&1; then
     break
   fi
   sleep 0.1
 done
+if ! bash -c "</dev/tcp/127.0.0.1/${PORT}" >/dev/null 2>&1; then
+  cat "$ARTIFACT_DIR/blockvolume.log" >&2 || true
+  echo "iSCSI listener did not open on 127.0.0.1:${PORT}" >&2
+  exit 1
+fi
 sleep 2
 
 run_iteration() {

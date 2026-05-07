@@ -1,0 +1,45 @@
+{
+  "schema_version": "1.0",
+  "scenario": "iscsi-p8-compat-soak",
+  "gate": "iSCSI-P8",
+  "layer": "L3-privileged-host",
+  "driver": {
+    "type": "shell",
+    "path": "scripts/run-iscsi-compat-soak.sh"
+  },
+  "default_timeout_s": 3600,
+  "required_capabilities": [
+    "bash",
+    "linux",
+    "sudo",
+    "iscsiadm",
+    "iscsi_tcp-loadable",
+    "mkfs.ext4",
+    "mount",
+    "fio"
+  ],
+  "scenario_default_params": {
+    "SW_BLOCK_P8_OS_ITERATIONS": "2",
+    "SW_BLOCK_P8_OS_FIO_RUNTIME": "120",
+    "SW_BLOCK_P8_OS_FIO_SIZE": "128m"
+  },
+  "qa_instruction": "internal/docs/qa-assignments/iscsi-p8-compat-soak-validation.md",
+  "known_green_commit": "38ff850",
+  "artifacts": [
+    "summary.md",
+    "run.log",
+    "os-fio-repeat/run.log",
+    "os-fio-repeat/blockmaster.log",
+    "os-fio-repeat/blockvolume.log",
+    "os-fio-repeat/fio.iter*.log",
+    "os-fio-repeat/iscsi-sessions.final.txt",
+    "k8s-fio/run.log",
+    "k8s-attach-detach/summary.log"
+  ],
+  "non_claims": [
+    "Compatibility and soak evidence only.",
+    "Not a product performance claim.",
+    "Default path is single-host Linux iSCSI.",
+    "Kubernetes steps are opt-in and single-node unless stated otherwise."
+  ]
+}

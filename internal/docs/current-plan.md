@@ -11,6 +11,7 @@ References:
 - `ref/iscsi-v2-coverage-gap-audit.md`
 - `ref/iscsi-os-initiator-compat-plan.md`
 - `ref/v2-frontend-protocol-gap-audit.md`
+- `ref/iscsi-csi-alua-review-guide.md`
 - `ref/iscsi-p6-alua-mpio-design.md`
 - `ref/iscsi-alua-technical-note.md`
 
@@ -275,10 +276,10 @@ References:
     - unavailable,
     - transitioning.
   - standby command policy:
-    - status: local protocol slice done.
+    - status: local protocol slice done; tightened by PR #42 review fix.
     - metadata/path probing allowed,
-    - READ allowed for initiator path probing,
-    - WRITE and SYNCHRONIZE_CACHE fail closed.
+    - data READ, WRITE, and SYNCHRONIZE_CACHE fail closed on non-active
+      paths.
   - standard INQUIRY TPGS discipline:
     - status: local protocol slice done.
     - TPGS stays off until REPORT TARGET PORT GROUPS and ALUA VPD identity
@@ -300,7 +301,7 @@ References:
   - state change while I/O is in flight:
     - status: local protocol state-change test done.
   - concurrent REPORT TARGET PORT GROUPS and standby write reject tests:
-    - status: pending.
+    - status: done in PR #43.
   - frontend state provider wiring:
     - status: local P6-C slice done on `iscsi/csi-node-lifecycle`.
     - connect ALUA provider to current V3 frontend facts without importing
@@ -328,7 +329,7 @@ References:
     - standby/probe session prerequisite: local P6-D slice implemented.
       Non-active ALUA paths may use a borrowed metadata backend after
       `Provider.Open` returns not-ready, so Linux can probe INQUIRY/VPD/RTPG
-      without allowing writes.
+      without allowing data I/O.
     - #QA Test 1B PASS on M02:
       - artifact:
         `/mnt/smb/work/share/g15d-k8s/20260506T093732Z-iscsi-p6-alua-mpath-fix`.
@@ -368,20 +369,36 @@ References:
   - #QA mounted multipath failover script is green on M02.
   - do not rely on in-process protocol tests only.
 
-## Milestone: iSCSI-P7 Performance And Backend Matrix
+## Recently Closed Milestone: iSCSI-P7 Performance And Backend Matrix
 
 - Goal:
   - make performance experiments comparable without turning early numbers into
     product claims.
 
 - Tasks:
-  - status: planned.
+  - status: QA green on `iscsi/p7-performance-matrix-clean@6826139`.
   - walstore baseline fio,
   - smartwal fio behind explicit flag,
-  - RoCE / 10.0.0.x lab path if available,
-  - 1GbE vs 25GbE comparison,
-  - pgbench scenario,
-  - record CPU, memory, latency, bandwidth, and cleanup state.
+  - Linux iSCSI loopback matrix,
+  - record fio summary and cleanup state.
+  - deferred:
+    - RoCE / 10.0.0.x lab path if available,
+    - 1GbE vs 25GbE comparison,
+    - pgbench scenario,
+    - CPU, memory, latency, and bandwidth sweep.
+  - script: `scripts/run-iscsi-backend-fio-matrix.sh`.
+  - assignment:
+    `internal/docs/qa-assignments/iscsi-p7-backend-fio-matrix-validation.md`.
+  - #QA PASS on M02:
+    - artifact:
+      `/mnt/smb/work/share/g15d-k8s/20260506T215457Z-iscsi-p7-backend-fio`.
+    - fio profile: 4 KiB randrw, psync, iodepth=1, size=128m,
+      runtime=60s.
+    - walstore: PASS, about 124 read IOPS / 124 write IOPS.
+    - smartwal: PASS, about 124 read IOPS / 125 write IOPS.
+    - cleanup: no active iSCSI sessions and no blockmaster/blockvolume
+      processes.
+    - non-claim: single-host loopback only, not a product performance claim.
 
 - Close bar:
   - same test runner scenario can compare backends,
@@ -389,9 +406,104 @@ References:
   - results are labelled experimental until SLOs exist.
 
 - QA/tooling:
-  - #QA needs TestOps scenario that records network, backend, block size, fio job,
-    and cleanup state.
+  - #QA run the backend matrix on M02 first.
+  - #QA if RoCE is available, rerun with explicit 10.0.0.x portal path and
+    record the network path in the report.
   - avoid manual benchmark notes without a repeatable scenario.
+
+## Recently Closed Milestone: iSCSI-P8 Compatibility And Soak
+
+- Goal:
+  - turn the current alpha iSCSI feature set into repeatable compatibility and
+    soak evidence without making performance claims.
+  - keep frontend protocol behavior stable while K8s and backend tests get
+    longer and more varied.
+
+- Tasks:
+  - local ALUA concurrency guard:
+    - status: done on `iscsi/frontend-hardening`.
+    - cover concurrent REPORT TARGET PORT GROUPS while data READ/WRITE on a
+      standby path is rejected.
+    - closes the P6 pending item for concurrent RTPG plus standby reject.
+  - OS initiator soak:
+    - #QA green on `iscsi/frontend-hardening@38ff850`.
+    - repeat `run-iscsi-os-smoke.sh` with fio for a longer runtime.
+    - record session errors, fio summary, goroutine/process cleanup, and
+      final `iscsiadm -m session`.
+    - artifact:
+      `/mnt/smb/work/share/g15d-k8s/20260506T223240Z-iscsi-p8-soak-38ff850`.
+    - evidence:
+      - 2 iterations,
+      - 120s fio per iteration,
+      - `iscsiadm mkfs mount write/read logout` PASS,
+      - no active sessions after final cleanup.
+  - K8s CSI soak:
+    - #QA green on `iscsi/frontend-hardening@38ff850`.
+    - repeat attach/detach and fio paths with explicit iteration/runtime
+      values.
+    - record whether launcher owner-reference cleanup remains clean.
+    - evidence:
+      - `[alpha-fio] PASS`,
+      - `[attach-loop] PASS: 3 attach/detach app PVC cycles completed`,
+      - no sw-block PVC or deployment residue.
+  - compatibility matrix:
+    - #QA green for M02.
+    - document exact host distro, kernel, open-iscsi version, fio version,
+      and sg3-utils/multipath versions when used.
+    - add more hosts only when the first soak is repeatable.
+
+- Close bar:
+  - local protocol concurrency tests green,
+  - one OS fio soak green,
+  - one K8s attach/detach or fio soak green,
+  - all runs leave no active sessions, mounts, multipath maps, or K8s residue.
+
+- QA/tooling:
+  - prefer wrappers with env knobs over manual command sequences.
+  - label all runtime/throughput numbers as soak evidence, not benchmark
+    claims.
+  - #QA assignment:
+    `internal/docs/qa-assignments/iscsi-p8-compat-soak-validation.md`.
+  - #QA status:
+    - PASS on M02 at `38ff850`.
+    - final line:
+      `[iscsi-soak] PASS: compatibility soak completed`.
+    - non-claim:
+      compatibility probe only, not a long-running soak or performance claim.
+
+## Current Active Milestone: TestOps For Frontend Lab Gates
+
+- Goal:
+  - reduce false failures from manual multi-step lab runs by moving P8-style
+    gates into one TestOps entry point.
+  - keep existing shell scripts as the execution backend first; do not rewrite
+    all harness logic before the gate is stable.
+
+- Tasks:
+  - #QA package P8 compatibility soak as a TestOps scenario:
+    - status: next assignment.
+    - must record commit SHA, command, artifact root, step result, final line,
+      and cleanup status in a single result file.
+    - initial scenario may call `scripts/run-iscsi-compat-soak.sh`.
+  - define the minimal result contract:
+    - scenario name,
+    - repository SHA,
+    - host,
+    - step table,
+    - artifact paths,
+    - cleanup checks.
+  - keep product development unblocked:
+    - TestOps work should not change iSCSI protocol code.
+    - product branches can continue using scripts until TestOps reaches parity.
+
+- Close bar:
+  - one command runs the P8 full lab gate,
+  - old-commit/stale-binary ambiguity is impossible or explicitly reported,
+  - result file is enough for review without reading raw terminal output.
+
+- QA/tooling:
+  - #QA assignment should be written before implementation.
+  - prefer small TestOps wrapper over a wholesale scenario DSL rewrite.
 
 ## Cross-Cutting Technical Rules
 

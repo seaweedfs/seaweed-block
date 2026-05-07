@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"sync"
 	"testing"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend"
@@ -280,5 +281,68 @@ func TestP6ALUA_ReportTPGReflectsStateChanges(t *testing.T) {
 		if got := iscsi.ALUAState(rtpg.Data[4] & 0x0f); got != state {
 			t.Fatalf("REPORT TPG state=%02x want %02x", got, state)
 		}
+	}
+}
+
+func TestP8ALUA_ConcurrentReportTPGAndStandbyDataReject(t *testing.T) {
+	rec := testback.NewRecordingBackend(frontend.Identity{VolumeID: "v1", ReplicaID: "r2"})
+	payload := bytes.Repeat([]byte{0x7b}, int(iscsi.DefaultBlockSize))
+	if _, err := rec.Write(context.Background(), 0, payload); err != nil {
+		t.Fatalf("seed Write: %v", err)
+	}
+	prov := aluaTestProvider(iscsi.ALUAStandby)
+	h := iscsi.NewSCSIHandler(iscsi.HandlerConfig{Backend: rec, ALUA: prov})
+
+	const workers = 8
+	const iterations = 200
+	var wg sync.WaitGroup
+	errCh := make(chan string, workers*3)
+	for i := 0; i < workers; i++ {
+		wg.Add(3)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < iterations; j++ {
+				rtpg := h.HandleCommand(context.Background(), reportTPGCDB(64), nil)
+				if rtpg.Status != iscsi.StatusGood {
+					errCh <- "REPORT TPG failed"
+					return
+				}
+				if state := iscsi.ALUAState(rtpg.Data[4] & 0x0f); state != iscsi.ALUAStandby {
+					errCh <- "REPORT TPG state changed"
+					return
+				}
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			for j := 0; j < iterations; j++ {
+				read := h.HandleCommand(context.Background(), readCDB(0, 1), nil)
+				if read.Status != iscsi.StatusCheckCondition {
+					errCh <- "standby READ was not rejected"
+					return
+				}
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			for j := 0; j < iterations; j++ {
+				write := h.HandleCommand(context.Background(), writeCDB(0, 1), payload)
+				if write.Status != iscsi.StatusCheckCondition {
+					errCh <- "standby WRITE was not rejected"
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	close(errCh)
+	for msg := range errCh {
+		t.Error(msg)
+	}
+	if rec.ReadCount() != 0 {
+		t.Fatalf("standby READ reached backend %d times", rec.ReadCount())
+	}
+	if rec.WriteCount() != 1 {
+		t.Fatalf("standby WRITE reached backend; WriteCount=%d want seed-only 1", rec.WriteCount())
 	}
 }

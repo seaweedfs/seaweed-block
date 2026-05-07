@@ -9,7 +9,7 @@ logical device, but the paths are not equivalent.
 
 - Active optimized: preferred path; can serve normal read/write.
 - Active non-optimized: usable path but less preferred.
-- Standby: visible path for probing/failover, but not writable.
+- Standby: visible path for probing/failover metadata, but not a data path.
 - Unavailable: path exists but should fail fast.
 - Transitioning: path state is moving; do not silently accept writes.
 
@@ -36,9 +36,10 @@ This keeps the boundary:
 - frontend facts expose current path truth,
 - iSCSI translates that truth into SCSI-visible ALUA behavior.
 
-## Current P6 Local Protocol Slice
+## Current P6 Protocol And Product Slice
 
-Implemented on `iscsi/csi-node-lifecycle` in commit `bfffbbe`.
+Implemented through the P6 work on `iscsi/csi-node-lifecycle` and merged in
+PR #42.
 
 - No provider:
   - TPGS remains off,
@@ -50,8 +51,9 @@ Implemented on `iscsi/csi-node-lifecycle` in commit `bfffbbe`.
     relative target port ID,
   - VPD 0x83 adds target-port-group and relative-target-port descriptors,
   - active optimized / active non-optimized can write,
-  - standby / unavailable / transitioning reject WRITE and SYNCHRONIZE_CACHE,
-  - non-writable states still allow READ for path probing.
+  - standby / unavailable / transitioning reject data READ, WRITE, and
+    SYNCHRONIZE_CACHE,
+  - non-active states allow metadata/path probing commands only.
 
 ## State Mapping Target
 
@@ -73,7 +75,7 @@ provider.
     port.
 - Write safety:
   - old primary must never return successful WRITE after authority moved.
-  - standby read probing must not become stale data leakage.
+  - standby metadata probing must not become stale data leakage.
 - Transition timing:
   - authority moved is not enough;
   - data continuity and frontend readiness must be closed before a path becomes
@@ -90,8 +92,8 @@ provider.
   - REPORT TPG rejected without provider.
   - VPD 0x83 non-ALUA branch unchanged.
   - all five ALUA states report correctly.
-  - standby / unavailable / transitioning reject WRITE/SYNC.
-  - standby / transitioning READ works for path probing.
+  - standby / unavailable / transitioning reject data READ/WRITE/SYNC.
+  - standby / transitioning metadata commands work for path probing.
   - VPD 0x00 unchanged.
   - VPD 0x83 truncates safely.
 - Product wiring:
@@ -105,3 +107,8 @@ provider.
   - `sg_rtpg` confirms path states.
   - `multipath -ll` sees one device with multiple paths.
   - mounted failover proves byte-equal read-back and no stale-primary success.
+
+See also:
+
+- `iscsi-csi-alua-review-guide.md`
+- `iscsi-p6-alua-mpio-design.md`

@@ -1,6 +1,6 @@
 # iSCSI P6 ALUA / MPIO / Mounted Failover Design
 
-Status: design draft.
+Status: design record.
 Branch: `iscsi/csi-node-lifecycle`.
 
 ## Goal
@@ -10,7 +10,7 @@ Make mounted-volume failover a deliberate frontend behavior. P6 is not only
 there are multiple paths, one path is active, another is standby, and authority
 moves.
 
-## Current State
+## Starting State
 
 - V3 iSCSI currently advertises no ALUA:
   - standard INQUIRY TPGS bits are zero,
@@ -65,7 +65,7 @@ authority, placement, and replica readiness.
 - In-process protocol tests are necessary but not sufficient; P6 closes only
   with a real Linux initiator/multipath run.
 
-## P6 Milestones
+## P6 Milestones And Final Policy
 
 ### P6-A: ALUA Contract Pinning
 
@@ -79,15 +79,15 @@ authority, placement, and replica readiness.
 - Define command policy by state:
   - INQUIRY, VPD, REPORT LUNS, TEST UNIT READY, READ CAPACITY, MODE SENSE,
     REQUEST SENSE, and REPORT TARGET PORT GROUPS: allowed on visible paths.
-  - READ is allowed on standby/transitioning for OS path probing and must not
-    leak stale data beyond what the underlying frontend provider allows.
-  - WRITE and SYNCHRONIZE_CACHE are allowed only on active paths.
-  - standby, unavailable, and transitioning WRITE must fail with stable NOT
-    READY sense, not GOOD.
+  - Data READ, WRITE, and SYNCHRONIZE_CACHE are allowed only on active paths.
+  - Standby, unavailable, and transitioning data I/O must fail with stable
+    NOT READY sense, not GOOD.
+  - Standby probing uses metadata commands only. Earlier drafts allowed
+    standby READ for probing; final P6 policy rejects it to avoid stale data
+    leakage.
 - Red tests:
-  - standby WRITE cannot return GOOD.
-  - standby READ/READ(16) is allowed for probing.
-  - unavailable and transitioning WRITE cannot return GOOD.
+  - standby data READ/WRITE cannot return GOOD.
+  - unavailable and transitioning data READ/WRITE cannot return GOOD.
   - state change from active -> standby -> active -> transitioning is observed
     immediately by command handling and REPORT TARGET PORT GROUPS.
   - TPGS bits are not enabled until REPORT TARGET PORT GROUPS and VPD identity
@@ -151,7 +151,8 @@ authority, placement, and replica readiness.
     write-ready `Provider.Open` path is not ready,
   - this is only for path probing commands such as INQUIRY, VPD, RTPG,
     capacity, and mode sense,
-  - writes and sync still fail closed through ALUA and backend readiness.
+  - data READ, writes, and sync still fail closed through ALUA and backend
+    readiness.
 - Expected:
   - multipath sees one logical device,
   - active path accepts workload,
@@ -168,7 +169,7 @@ authority, placement, and replica readiness.
 ### P6-E: Mounted Failover
 
 - Status:
-  - not started beyond the standby/probe session prerequisite.
+  - QA green on M02 at `d1025f1`.
 - Start a mounted workload through the multipath device.
 - Kill or close the active primary path.
 - Drive authority movement to the replica path.
@@ -179,6 +180,15 @@ authority, placement, and replica readiness.
   - byte-equal read-back after failover,
   - old primary cannot acknowledge stale successful I/O,
   - no dangling sessions after cleanup.
+- Evidence:
+  - artifact:
+    `/mnt/smb/work/share/g15d-k8s/20260506T094503Z-iscsi-p6-mounted-failover`,
+  - mounted `/dev/mapper/mpatha`,
+  - r1 active before failover,
+  - r2 promoted to active/optimized at a higher epoch,
+  - pre-failover checksum read after failover,
+  - post-failover checksum written and verified,
+  - old r1 gate-rejected stale writes/syncs.
 
 ## First Implementation Slice
 
@@ -197,5 +207,10 @@ metadata before the actual protocol surface exists.
 
 - No NVMe-oF ANA.
 - No performance claim.
-- No production HA claim.
-- No silent failover claim until P6-E passes with real OS initiator evidence.
+- No production HA claim from the P6-E alpha lab alone.
+- No long-running soak claim.
+- No multi-node Kubernetes failure claim.
+
+See also:
+
+- `iscsi-csi-alua-review-guide.md`
