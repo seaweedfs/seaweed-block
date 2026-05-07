@@ -161,27 +161,34 @@ def iter_subsystems(node):
         for item in node:
             yield from iter_subsystems(item)
 
+matched = False
+all_paths = []
+all_names = []
 for sub in iter_subsystems(doc):
     if sub.get("NQN") != nqn:
         continue
+    matched = True
     paths = sub.get("Paths", [])
-    names = []
+    all_paths.extend(paths)
     for path in paths:
         name = path.get("Name") or ""
         base = name.split("/")[-1]
         if re.fullmatch(r"nvme[0-9]+n[0-9]+", base):
-            names.append("/dev/" + base)
+            all_names.append("/dev/" + base)
         elif re.fullmatch(r"nvme[0-9]+", base):
-            names.append("/dev/" + base + "n1")
-    if field == "path_count":
-        print(len(paths))
-    elif field == "devices":
-        print("\n".join(sorted(set(names))))
-    elif field == "paths":
-        for path in paths:
-            print(path)
-    sys.exit(0)
-sys.exit(1)
+            all_names.append("/dev/" + base + "n1")
+if not matched:
+    sys.exit(1)
+if field == "path_count":
+    print(len(all_paths))
+elif field == "devices":
+    print("\n".join(sorted(set(all_names))))
+elif field == "paths":
+    for path in all_paths:
+        print(path)
+else:
+    sys.exit(1)
+sys.exit(0)
 PY
 }
 
