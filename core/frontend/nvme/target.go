@@ -17,6 +17,12 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/frontend"
 )
 
+// ProbeBackendProvider supplies a borrowed backend for metadata-only ANA path
+// probing when the write-ready Provider.Open path is not available.
+type ProbeBackendProvider interface {
+	ProbeBackend(ctx context.Context, volumeID string) (frontend.Backend, error)
+}
+
 // TargetConfig configures an NVMe/TCP Target.
 type TargetConfig struct {
 	// Listen TCP address (":0" for tests).
@@ -33,6 +39,12 @@ type TargetConfig struct {
 
 	// Provider supplies the frontend.Backend per session.
 	Provider frontend.Provider
+
+	// ProbeProvider is optional. If Provider.Open returns ErrNotReady and ANA
+	// reports a non-optimized path, the target uses this backend for admin
+	// connect / Identify / ANA log visibility. Data commands remain rejected
+	// by a metadata-only IOHandler.
+	ProbeProvider ProbeBackendProvider
 
 	// IO handler tunables (block size, volume size, NSID).
 	// Zero values pick T2 defaults.
@@ -198,10 +210,15 @@ func (t *Target) handleConn(conn net.Conn) {
 		}
 	}()
 
+	metadataOnly := false
 	backend, err := t.cfg.Provider.Open(ctx, t.cfg.VolumeID)
 	if err != nil {
-		t.logger.Printf("nvme: Provider.Open(%s): %v", t.cfg.VolumeID, err)
-		return
+		var ok bool
+		backend, metadataOnly, ok = t.tryProbeBackend(ctx, err)
+		if !ok {
+			t.logger.Printf("nvme: Provider.Open(%s): %v", t.cfg.VolumeID, err)
+			return
+		}
 	}
 	// BUG-005 fix (2026-04-22): do NOT close the Backend here.
 	// The Provider owns Backend lifecycle — `DurableProvider`
@@ -213,12 +230,34 @@ func (t *Target) handleConn(conn net.Conn) {
 
 	hcfg := t.cfg.Handler
 	hcfg.Backend = backend
+	hcfg.MetadataOnly = metadataOnly
 	handler := NewIOHandler(hcfg)
 
 	sess := newSession(conn, handler, t, t.cfg.SubsysNQN, t.logger)
 	if err := sess.serve(ctx); err != nil && !errors.Is(err, net.ErrClosed) {
 		t.logger.Printf("nvme: session error (%s): %v", conn.RemoteAddr(), err)
 	}
+}
+
+func (t *Target) tryProbeBackend(ctx context.Context, openErr error) (frontend.Backend, bool, bool) {
+	if t.cfg.ProbeProvider == nil || !errors.Is(openErr, frontend.ErrNotReady) {
+		return nil, false, false
+	}
+	ana := t.cfg.Handler.ANA
+	if ana == nil {
+		return nil, false, false
+	}
+	switch ana.ANAState() {
+	case ANAOptimized:
+		return nil, false, false
+	}
+	backend, err := t.cfg.ProbeProvider.ProbeBackend(ctx, t.cfg.VolumeID)
+	if err != nil {
+		t.logger.Printf("nvme: ProbeBackend(%s): %v", t.cfg.VolumeID, err)
+		return nil, false, false
+	}
+	t.logger.Printf("nvme: Provider.Open(%s): %v; using ANA metadata probe backend", t.cfg.VolumeID, openErr)
+	return backend, true, true
 }
 
 type stdlogAdapter struct{ l *log.Logger }

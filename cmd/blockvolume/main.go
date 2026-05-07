@@ -800,11 +800,16 @@ func run(f flags) int {
 	var nvmeTarget *nvme.Target
 	if f.nvmeListen != "" {
 		prov := provider
+		var probeProvider nvme.ProbeBackendProvider
+		if durableProv != nil {
+			probeProvider = &durableProbeProvider{provider: durableProv}
+		}
 		nvmeTarget = nvme.NewTarget(nvme.TargetConfig{
-			Listen:    f.nvmeListen,
-			SubsysNQN: f.nvmeSubsysNQN,
-			VolumeID:  f.volumeID,
-			Provider:  prov,
+			Listen:        f.nvmeListen,
+			SubsysNQN:     f.nvmeSubsysNQN,
+			VolumeID:      f.volumeID,
+			Provider:      prov,
+			ProbeProvider: probeProvider,
 			// Capacity from durable config (see iSCSI block above).
 			// frontendBlockSize / frontendVolumeSize are 0 on memback
 			// path; nvme HandlerConfig zero-value defaulting preserves
