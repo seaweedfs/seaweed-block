@@ -137,6 +137,7 @@ PY
     sleep 0.25
   done
   curl -fsS "http://${status_addr}/status?volume=v1" >"$ARTIFACT_DIR/status-${replica}-last.json" 2>/dev/null || true
+  pgrep -af "${BIN_DIR}/blockmaster|${BIN_DIR}/blockvolume" >"$ARTIFACT_DIR/processes.${replica}.${role}.timeout.txt" 2>&1 || true
   echo "timed out waiting for ${replica} ${role} projection" >&2
   exit 1
 }
@@ -348,13 +349,15 @@ start_blockvolume r1 s1 "$PORT1" "$R1_DATA_ADDR" "$R1_CTRL_ADDR" "$R1_STATUS_ADD
   "${RUN_DIR}/r1-store" "$ARTIFACT_DIR/blockvolume-r1.log"
 R1_PID=$!
 wait_port "$PORT1"
-wait_status_role "$R1_STATUS_ADDR" r1 primary
 
 log "start r2 NVMe path"
 start_blockvolume r2 s2 "$PORT2" "$R2_DATA_ADDR" "$R2_CTRL_ADDR" "$R2_STATUS_ADDR" \
   "${RUN_DIR}/r2-store" "$ARTIFACT_DIR/blockvolume-r2.log"
 R2_PID=$!
 wait_port "$PORT2"
+
+log "wait authority projections"
+wait_status_role "$R1_STATUS_ADDR" r1 primary
 wait_status_role "$R2_STATUS_ADDR" r2 secondary
 
 log "connect first NVMe path"
