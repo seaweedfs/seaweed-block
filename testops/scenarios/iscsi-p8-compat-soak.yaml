@@ -1,0 +1,234 @@
+name: iscsi-p8-compat-soak
+timeout: 30m
+
+# TestOps wrapper for the iSCSI P8 compatibility soak.
+#
+# Replaces scripts/run-iscsi-compat-soak.sh's bash orchestration with a
+# single sw-test-runner scenario. The leaf bash scripts
+# (run-iscsi-os-smoke.sh / run-k8s-alpha-fio.sh / run-k8s-attach-detach-loop.sh)
+# are unchanged — this scenario only orchestrates them and adds:
+#
+#   - one run-bundle for everything (manifest.json + provenance.json +
+#     result.json/.xml + per-phase artifact subdirs);
+#   - git_sha + dirty + binary sha256 + image digest pinned automatically
+#     in provenance.json;
+#   - forced fresh build at scenario start (no stale-binary or
+#     stale-image risk);
+#   - cleanup as actions, not bash trap (a leaked iSCSI session or
+#     leftover blockmaster process fails the run).
+#
+# Required:
+#   --env product_root=<absolute path to seaweed-block worktree>
+#
+# Run:
+#   sw-test-runner run testops/scenarios/iscsi-p8-compat-soak.yaml \
+#     --env product_root=$PWD \
+#     --results-dir /mnt/smb/work/share/g15d-k8s
+#
+# Acceptance:
+#   - one bundle dir
+#   - 3 phases run + 4 framing phases (build, pre_clean, cleanup x 1)
+#   - provenance.json contains 2 binaries (blockmaster, blockvolume)
+#     with sha256, 2 images (sw-block:local, sw-block-csi:local) with
+#     content digests
+#   - leaf bash scripts each emit their PASS marker, scraped via
+#     grep_log
+#   - final cleanup is asserted, not just attempted
+
+env:
+  # Overridden by --env product_root=...; placeholder makes the YAML
+  # self-documenting for `validate`.
+  product_root: "PROVIDE_VIA_--env=product_root"
+
+topology:
+  nodes:
+    local:
+      host: 127.0.0.1
+      is_local: true
+
+phases:
+  # -----------------------------------------------------------------
+  # Phase 1: pin_build
+  #
+  # Force fresh OS-side binaries and K8s-side images, recorded in
+  # provenance.json with sha256 / image digest. The bash scripts'
+  # internal cache hits {{ bundle_dir }}/bin and the docker daemon's
+  # local store.
+  # -----------------------------------------------------------------
+  - name: pin_build
+    actions:
+      - action: go_build
+        node: local
+        cwd: "{{ product_root }}"
+        package: ./cmd/blockmaster
+        out: "{{ bundle_dir }}/bin/blockmaster"
+        save_as: blockmaster_bin
+
+      - action: go_build
+        node: local
+        cwd: "{{ product_root }}"
+        package: ./cmd/blockvolume
+        out: "{{ bundle_dir }}/bin/blockvolume"
+        save_as: blockvolume_bin
+
+      - action: docker_build
+        node: local
+        cwd: "{{ product_root }}"
+        dockerfile: deploy/k8s/g15b/Dockerfile.sw-block
+        tag: sw-block:local
+        save_as: block_image
+
+      - action: docker_build
+        node: local
+        cwd: "{{ product_root }}"
+        dockerfile: deploy/k8s/g15b/Dockerfile.blockcsi
+        tag: sw-block-csi:local
+        save_as: csi_image
+
+      - action: ctr_load
+        node: local
+        runtime: k3s
+        images: "sw-block:local,sw-block-csi:local"
+
+  # -----------------------------------------------------------------
+  # Phase 2: pre_clean
+  #
+  # Best-effort: probe lab state at scenario start. Both checks are
+  # warn-only (ignore_error: true) — a leftover session or daemon
+  # from a previous run is recorded in result.json but does not block
+  # this run. Hard gating happens later: each substep ends with its
+  # own asserts, and the final `cleanup` phase fails the scenario if
+  # anything leaked. This split lets the wrapper run on a slightly
+  # dirty host and clean it up rather than refuse to start.
+  # -----------------------------------------------------------------
+  - name: pre_clean
+    actions:
+      - action: assert_no_active_iscsi_sessions
+        node: local
+        ignore_error: true
+      - action: assert_no_processes
+        node: local
+        pattern: "blockmaster|blockvolume"
+        ignore_error: true
+
+  # -----------------------------------------------------------------
+  # Phase 3: os_fio_repeat
+  #
+  # 2× 120 s fio randrw 4k psync iodepth=1 size=128m via the OS
+  # initiator. Bash leaf does discovery/login/mkfs/mount/checksum
+  # /fio/logout per iteration; the scenario only adds gate +
+  # cleanup assertions.
+  # -----------------------------------------------------------------
+  - name: os_fio_repeat
+    actions:
+      - action: exec
+        node: local
+        cmd: "bash {{ product_root }}/scripts/run-iscsi-os-smoke.sh {{ product_root }}"
+        env.SW_BLOCK_BIN_DIR: "{{ bundle_dir }}/bin"
+        env.SW_BLOCK_ARTIFACT_DIR: "{{ bundle_dir }}/phases/os_fio_repeat"
+        env.SW_BLOCK_ISCSI_ITERATIONS: "2"
+        env.SW_BLOCK_ISCSI_STRESS: "fio"
+        env.SW_BLOCK_ISCSI_FIO_RUNTIME: "120"
+        env.SW_BLOCK_ISCSI_FIO_SIZE: "128m"
+        timeout: 8m
+
+      - action: grep_log
+        node: local
+        path: "{{ bundle_dir }}/phases/os_fio_repeat/run.log"
+        pattern: '\[iscsi-os\] PASS:'
+        expect_match: "true"
+
+      - action: assert_no_active_iscsi_sessions
+        node: local
+
+      - action: assert_no_processes
+        node: local
+        pattern: "blockmaster --listen|blockvolume --master"
+
+  # -----------------------------------------------------------------
+  # Phase 4: k8s_fio
+  #
+  # K8s alpha fio dynamic-PVC smoke. Reuses sw-block:local and
+  # sw-block-csi:local images that pin_build loaded into k3s
+  # containerd.
+  # -----------------------------------------------------------------
+  - name: k8s_fio
+    actions:
+      - action: exec
+        node: local
+        cmd: "bash {{ product_root }}/scripts/run-k8s-alpha-fio.sh {{ product_root }}"
+        env.SW_BLOCK_ARTIFACT_DIR: "{{ bundle_dir }}/phases/k8s_fio"
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+        timeout: 5m
+
+      - action: grep_log
+        node: local
+        path: "{{ bundle_dir }}/phases/k8s_fio/run.log"
+        pattern: '\[alpha-fio\] PASS:'
+        expect_match: "true"
+
+      - action: assert_no_active_iscsi_sessions
+        node: local
+
+      - action: kubectl_assert_not_exists
+        node: local
+        resource: pvc/sw-block-dynamic-v1
+        namespace: default
+
+  # -----------------------------------------------------------------
+  # Phase 5: k8s_attach_detach
+  #
+  # 3× attach/detach cycles: writer pod writes, deleted, replacement
+  # reader pod verifies, PVC + Deployment cleaned each iter.
+  # -----------------------------------------------------------------
+  - name: k8s_attach_detach
+    actions:
+      - action: exec
+        node: local
+        cmd: "bash {{ product_root }}/scripts/run-k8s-attach-detach-loop.sh {{ product_root }}"
+        env.SW_BLOCK_ARTIFACT_DIR: "{{ bundle_dir }}/phases/k8s_attach_detach"
+        env.SW_BLOCK_ATTACH_DETACH_ITERATIONS: "3"
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+        timeout: 10m
+
+      - action: grep_log
+        node: local
+        path: "{{ bundle_dir }}/phases/k8s_attach_detach/run.log"
+        pattern: '\[attach-loop\] PASS: 3 attach/detach'
+        expect_match: "true"
+
+      - action: assert_no_active_iscsi_sessions
+        node: local
+
+      - action: kubectl_assert_not_exists
+        node: local
+        resource: pvc/sw-block-demo-pvc
+        namespace: default
+
+  # -----------------------------------------------------------------
+  # Phase 6: cleanup
+  #
+  # always:true — runs even when an earlier phase failed. Final state
+  # of the host is asserted, not just attempted, so a leaked daemon
+  # or session fails the run rather than silently leaving a polluted
+  # lab for the next caller.
+  # -----------------------------------------------------------------
+  - name: cleanup
+    always: true
+    actions:
+      - action: exec
+        node: local
+        cmd: "bash {{ product_root }}/scripts/uninstall-k8s-alpha.sh {{ product_root }}"
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+        ignore_error: true   # uninstall is best-effort; assertions below are the gate.
+
+      - action: assert_no_active_iscsi_sessions
+        node: local
+
+      - action: assert_no_processes
+        node: local
+        pattern: "blockmaster --listen|blockvolume --master"
+
+      - action: collect_artifacts
+        node: local
+        on_failure: "true"
