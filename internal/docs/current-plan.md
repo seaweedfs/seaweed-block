@@ -584,8 +584,16 @@ References:
       - no `nvme_parse_ana_log` kernel warning,
       - mkfs/mount/checksum PASS after ANA advertisement is enabled.
   - NVMe-P4 multipath and mounted failover:
-    - status: planned.
+    - status: design/QA skeleton prepared; script not implemented yet.
+    - #design:
+      `internal/docs/ref/nvme-p4-multipath-failover-design.md`.
+    - #QA assignment:
+      `internal/docs/qa-assignments/nvme-p4-multipath-lab-validation.md`.
     - reach the iSCSI P6 bar for NVMe multipath.
+    - first decision point:
+      - confirm Linux native NVMe multipath availability on M02,
+      - discover whether P3's single ANA group is enough for two-path identity
+        or whether P4 needs dense multi-group allocation.
   - NVMe-P5 CSI integration:
     - status: planned.
     - allow StorageClass protocol selection without changing the app.
