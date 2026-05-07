@@ -144,10 +144,12 @@ PY
 
 parse_nvme_subsys() {
   local field="$1"
-  sudo nvme list-subsys -o json 2>/dev/null | python3 - "$SUBSYS_NQN" "$field" <<'PY'
-import json, re, sys
-nqn, field = sys.argv[1], sys.argv[2]
-raw = sys.stdin.read().strip()
+  local raw
+  raw="$(sudo nvme list-subsys -o json 2>/dev/null)"
+  python3 - "$SUBSYS_NQN" "$field" "$raw" <<'PY'
+import glob, json, os, re, sys
+nqn, field, raw = sys.argv[1], sys.argv[2], sys.argv[3]
+raw = raw.strip()
 if not raw:
     sys.exit(1)
 doc = json.loads(raw)
@@ -163,26 +165,35 @@ def iter_subsystems(node):
 
 matched = False
 all_paths = []
-all_names = []
+subsys_dirs = []
 for sub in iter_subsystems(doc):
     if sub.get("NQN") != nqn:
         continue
     matched = True
-    paths = sub.get("Paths", [])
-    all_paths.extend(paths)
-    for path in paths:
-        name = path.get("Name") or ""
-        base = name.split("/")[-1]
-        if re.fullmatch(r"nvme[0-9]+n[0-9]+", base):
-            all_names.append("/dev/" + base)
-        elif re.fullmatch(r"nvme[0-9]+", base):
-            all_names.append("/dev/" + base + "n1")
+    all_paths.extend(sub.get("Paths", []))
 if not matched:
     sys.exit(1)
+
+# Namespace devices live under the SUBSYSTEM (post-merge under native
+# multipath), not under each controller path. Resolve via sysfs:
+# /sys/class/nvme-subsystem/<sub>/subsysnqn matches our NQN, then
+# list direct nvmeXnY children.
+ns_devices = []
+for nqn_file in glob.glob("/sys/class/nvme-subsystem/*/subsysnqn"):
+    try:
+        if open(nqn_file).read().strip() != nqn:
+            continue
+    except OSError:
+        continue
+    sub_dir = os.path.dirname(nqn_file)
+    for entry in os.listdir(sub_dir):
+        if re.fullmatch(r"nvme[0-9]+n[0-9]+", entry):
+            ns_devices.append("/dev/" + entry)
+
 if field == "path_count":
     print(len(all_paths))
 elif field == "devices":
-    print("\n".join(sorted(set(all_names))))
+    print("\n".join(sorted(set(ns_devices))))
 elif field == "paths":
     for path in all_paths:
         print(path)
