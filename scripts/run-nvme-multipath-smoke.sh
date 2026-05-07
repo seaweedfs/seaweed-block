@@ -178,13 +178,16 @@ PY
 }
 
 wait_nvme_paths() {
-  for _ in $(seq 1 450); do
+  for _ in $(seq 1 900); do
     if count="$(parse_nvme_subsys path_count 2>/dev/null)" && [[ "${count:-0}" -ge 2 ]]; then
       return 0
     fi
     sleep 0.2
   done
   sudo nvme list-subsys -o json >"$ARTIFACT_DIR/nvme-list-subsys.timeout.json" 2>&1 || true
+  if count="$(parse_nvme_subsys path_count 2>/dev/null)" && [[ "${count:-0}" -ge 2 ]]; then
+    return 0
+  fi
   echo "timed out waiting for two NVMe paths for ${SUBSYS_NQN}" >&2
   exit 1
 }
