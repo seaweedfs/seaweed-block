@@ -591,7 +591,7 @@ References:
       - no `nvme_parse_ana_log` kernel warning,
       - mkfs/mount/checksum PASS after ANA advertisement is enabled.
   - NVMe-P4 multipath and mounted failover:
-    - status: Test 1/2 QA green; mounted failover script ready for QA.
+    - status: fully QA green on M02 at `e1e0e0c`.
     - #design:
       `internal/docs/ref/nvme-p4-multipath-failover-design.md`.
     - #QA assignment:
@@ -612,18 +612,23 @@ References:
       - decision: single ANA group is sufficient for the current two-path
         native multipath identity model.
     - mounted failover:
-      - status: script ready; awaiting QA.
+      - status: QA green on M02 at `e1e0e0c`.
       - script: `scripts/run-nvme-mounted-failover-smoke.sh`.
       - local guard:
         - metadata-only standby NVMe path continues to reject I/O before
           promotion,
         - after ANA state becomes optimized, the same session can pass I/O to
           the backend.
-      - expected evidence:
-        - mounted namespace device survives active r1 kill,
-        - pre-failover checksum reads after r2 promotion,
-        - post-failover write succeeds,
-        - cleanup leaves no NVMe connection or target process.
+      - #QA evidence:
+        - run ID `20260507T170000Z-nvme-p4-mounted-failover`,
+        - two TCP paths registered and Linux native multipath merged them to
+          `/dev/nvme1n1`,
+        - mounted ext4 workload survived active r1 kill,
+        - r2 promoted to `Epoch=2`, `AuthorityRole=primary`,
+          `FrontendPrimaryReady=true`,
+        - `pre.bin` checksum remained OK after failover,
+        - `post.bin` write/read/verify succeeded after failover,
+        - cleanup left no test NQN and no blockmaster/blockvolume process.
   - NVMe-P5 CSI integration:
     - status: planned.
     - allow StorageClass protocol selection without changing the app.

@@ -1,6 +1,6 @@
 # QA Assignment: NVMe P4 Multipath Lab Validation
 
-Status: Test 1/2 QA green; Test 3 ready for QA.
+Status: Test 1/2/3 QA green.
 Branch: `frontend/nvme-ana-parity-plan`.
 Scope: real Linux NVMe/TCP two-path and native multipath validation.
 
@@ -88,7 +88,7 @@ Evidence:
 
 ## Test 3: Mounted Failover
 
-Status: ready.
+Status: PASS on `frontend/nvme-ana-parity-plan@e1e0e0c`.
 
 Command:
 
@@ -117,6 +117,20 @@ Acceptance:
 - `status-r2-primary.json` shows r2 primary at epoch `>=2`.
 - `nvme-list-subsys.final.json` has no test NQN.
 - `processes.after.txt` has no live `blockmaster` or `blockvolume`.
+
+Observed evidence:
+
+- run ID: `20260507T170000Z-nvme-p4-mounted-failover`.
+- two TCP paths registered and Linux native multipath merged them to
+  `/dev/nvme1n1`.
+- `mkfs.ext4`, mount, pre-failover write, and SHA256 capture completed before
+  failure injection.
+- active r1 was killed; r2 promoted to `Epoch=2`, `AuthorityRole=primary`,
+  `FrontendPrimaryReady=true`.
+- `pre-check-after-failover.log` reported `/pre.bin: OK`.
+- `post-check.log` reported `/post.bin: OK`.
+- final cleanup disconnected the test NQN and left no
+  `blockmaster`/`blockvolume` process.
 
 Failure evidence:
 

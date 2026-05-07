@@ -1,6 +1,6 @@
 # NVMe P4 Multipath / Mounted Failover Design
 
-Status: Test 1/2 validated; mounted failover pending QA.
+Status: fully validated on M02.
 Branch: `frontend/nvme-ana-parity-plan`.
 
 ## Goal
@@ -18,9 +18,7 @@ Branch: `frontend/nvme-ana-parity-plan`.
   - Identify advertises ANA only when `ANAProvider` is wired,
   - ANA log group id is dense `1`, matching `ANAGRPMAX=1` and `NANAGRPID=1`,
   - Linux accepts the controller into ANA-aware init.
-- Missing:
-  - mounted failover through the native multipath namespace is ready for QA
-    but not yet validated.
+- P4: native multipath discovery and mounted failover are QA green on M02.
 
 ## Linux Multipath Model
 
@@ -118,7 +116,7 @@ Status: PASS on M02 at `a5ef1a5`.
 
 ### P4-C: Mounted Failover
 
-Status: script ready; awaiting QA.
+Status: PASS on M02 at `e1e0e0c`.
 
 - Mount through the native multipath namespace.
 - Write and checksum pre-failover data.
@@ -129,6 +127,15 @@ Status: script ready; awaiting QA.
   - post-failover write succeeds,
   - old primary cannot acknowledge stale writes,
   - cleanup leaves no NVMe connections or processes.
+- Evidence:
+  - run ID `20260507T170000Z-nvme-p4-mounted-failover`,
+  - final line:
+    `[nvme-failover] PASS: mounted NVMe multipath workload read/wrote through r1->r2 failover`,
+  - Linux native multipath merged two TCP paths to `/dev/nvme1n1`,
+  - r2 promoted to `Epoch=2` with `FrontendPrimaryReady=true`,
+  - pre-failover checksum read after failover,
+  - post-failover write/read/verify succeeded,
+  - final cleanup removed the test NQN and target processes.
 
 ## Non-Goals
 
@@ -139,14 +146,9 @@ Status: script ready; awaiting QA.
 - No long soak.
 - No OAES ANA Change Notice until an async event producer exists.
 
-## Open Technical Risks
+## Follow-Up Risks
 
-- Linux may require multiple ANA groups to represent different states across
-  paths. P3's single dense group is valid for one path, but may be insufficient
-  for P4.
-- Linux native NVMe multipath setup may require host reboot or kernel parameter
-  changes. QA must report this explicitly.
-- Two targets with the same SubNQN/NGUID must not collide in the controller
-  registry or in host cleanup.
-- Mounted failover depends on V3 authority/data-continuity timing, not only
-  protocol metadata.
+- Longer soak is still required before any HA durability claim.
+- Kubernetes CSI protocol switching is not covered by P4.
+- RoCE and real network path behavior remain outside this milestone.
+- OAES ANA Change Notice remains off until an async event producer exists.
