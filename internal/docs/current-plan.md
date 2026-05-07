@@ -1,10 +1,10 @@
-# Current Plan: iSCSI Frontend Completeness
+# Current Plan: Frontend Completeness
 
 Status: active.
 
 Rule: V2 frontend coverage is the minimum height for V3 unless we explicitly
 drop a feature with a product reason. V3 should keep its own architecture, but
-the user-visible iSCSI capability should reach and then exceed V2.
+the user-visible frontend capability should reach and then exceed V2.
 
 References:
 
@@ -14,6 +14,7 @@ References:
 - `ref/iscsi-csi-alua-review-guide.md`
 - `ref/iscsi-p6-alua-mpio-design.md`
 - `ref/iscsi-alua-technical-note.md`
+- `ref/nvme-ana-parity-plan.md`
 
 ## Product Goal
 
@@ -504,6 +505,60 @@ References:
 - QA/tooling:
   - #QA assignment should be written before implementation.
   - prefer small TestOps wrapper over a wholesale scenario DSL rewrite.
+
+## Current Dev Milestone: NVMe-oF / ANA Parity Planning
+
+- Goal:
+  - bring NVMe-oF up to the same product discipline as the now-green iSCSI
+    frontend.
+  - treat V2 NVMe behavior as the feature floor, not code to copy blindly.
+  - understand the old high-performance path before touching protocol code.
+
+- Reference:
+  - `internal/docs/ref/nvme-ana-parity-plan.md`.
+
+- Tasks:
+  - NVMe-P0 audit:
+    - status: next dev task.
+    - compare V2 NVMe implementation and scenarios against current V3.
+    - classify every visible feature as present, missing, intentionally
+      deferred, or rejected with product reason.
+    - specifically answer whether the remembered "control API carries data"
+      path was standard NVMe/TCP in-capsule data or a custom V2 shortcut.
+  - NVMe-P1 OS kernel baseline:
+    - status: after P0.
+    - build a repeatable `nvme connect -> mkfs -> mount -> fio/checksum ->
+      disconnect` script.
+    - dynamic ports only.
+    - no stale sessions or target processes.
+  - NVMe-P2 in-capsule / R2T performance path:
+    - status: planned.
+    - prove whether Linux uses inline data for small writes.
+    - add visible counters or artifacts for inline vs R2T writes.
+    - compare iSCSI and NVMe only under labelled network/backend conditions.
+  - NVMe-P3 ANA identity and log page:
+    - status: planned.
+    - do not advertise ANA until Identify fields and Get Log Page ANA are both
+      implemented and kernel-verified.
+  - NVMe-P4 multipath and mounted failover:
+    - status: planned.
+    - reach the iSCSI P6 bar for NVMe multipath.
+  - NVMe-P5 CSI integration:
+    - status: planned.
+    - allow StorageClass protocol selection without changing the app.
+  - NVMe-P6 RoCE / network performance matrix:
+    - status: planned.
+    - only after correctness gates are green.
+
+- Close bar for the planning slice:
+  - audit table exists,
+  - next code task has a red test or lab reproduction,
+  - no ANA or performance claim is enabled before matching host evidence.
+
+- QA/tooling:
+  - #QA starts after P1 script exists.
+  - TestOps wrapper work can proceed independently on P8 soak while dev works
+    on NVMe-P0/P1.
 
 ## Cross-Cutting Technical Rules
 
