@@ -31,14 +31,19 @@ const (
 	// NVM admin opcode subset. Batch 11a introduces Identify
 	// (0x06). SetFeatures / GetFeatures / KeepAlive / AsyncEventRequest
 	// land with Batch 11b per port plan §7.
-	adminGetLogPage    uint8 = 0x02
-	adminIdentify      uint8 = 0x06
-	adminAbort         uint8 = 0x08
-	adminSetFeatures   uint8 = 0x09
-	adminGetFeatures   uint8 = 0x0A
-	adminAsyncEvent    uint8 = 0x0C
-	adminKeepAlive     uint8 = 0x18
-	adminFabric        uint8 = 0x7F // Fabric-specific commands
+	adminGetLogPage  uint8 = 0x02
+	adminIdentify    uint8 = 0x06
+	adminAbort       uint8 = 0x08
+	adminSetFeatures uint8 = 0x09
+	adminGetFeatures uint8 = 0x0A
+	adminAsyncEvent  uint8 = 0x0C
+	adminKeepAlive   uint8 = 0x18
+	adminFabric      uint8 = 0x7F // Fabric-specific commands
+)
+
+// Log page identifiers.
+const (
+	logPageANA uint8 = 0x0C
 )
 
 // Fabric command types (FCType).

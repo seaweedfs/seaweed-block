@@ -51,7 +51,7 @@ const (
 // Fields match the NVMe IO Read/Write CDW10-13 layout:
 //   - SLBA  = CDW10 (low) + CDW11 (high) — 64-bit starting LBA
 //   - NLB   = CDW12[15:0] + 1  (Number of Logical Blocks, zero-based on wire,
-//                               one-based in this struct for readability)
+//     one-based in this struct for readability)
 //   - NSID  = command header Namespace Identifier
 //
 // Data is the host-provided write payload (nil for Read).
@@ -92,6 +92,7 @@ type IOHandler struct {
 	backend    frontend.Backend
 	blockSize  uint32
 	volumeSize uint64
+	ana        ANAProvider
 	// nsid is the single namespace ID this handler serves. T2
 	// advertises NSID=1 (the canonical "first namespace" in
 	// NVMe discovery); commands for any other NSID are
@@ -106,6 +107,7 @@ type HandlerConfig struct {
 	BlockSize  uint32
 	VolumeSize uint64
 	NSID       uint32
+	ANA        ANAProvider
 }
 
 // NewIOHandler builds a handler. Backend MUST be non-nil.
@@ -129,6 +131,7 @@ func NewIOHandler(cfg HandlerConfig) *IOHandler {
 		backend:    cfg.Backend,
 		blockSize:  bs,
 		volumeSize: vs,
+		ana:        cfg.ANA,
 		nsid:       nsid,
 	}
 }
@@ -141,6 +144,15 @@ func (h *IOHandler) VolumeSize() uint64 { return h.volumeSize }
 
 // NSID exposes the namespace this handler serves.
 func (h *IOHandler) NSID() uint32 { return h.nsid }
+
+// ANAProvider exposes the optional path-state provider used by admin log page
+// 0x0c. Nil means ANA is not implemented for this handler.
+func (h *IOHandler) ANAProvider() ANAProvider {
+	if h == nil {
+		return nil
+	}
+	return h.ana
+}
 
 // Handle dispatches one IOCommand. Minimal T2 opcode set:
 // Read, Write, Flush. Everything else → Invalid Opcode.

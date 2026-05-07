@@ -414,6 +414,8 @@ func (s *Session) bufferInterleaved() error {
 func (s *Session) adminDispatch(ctx context.Context, req *Request) error {
 	cmd := &req.capsule
 	switch cmd.OpCode {
+	case adminGetLogPage:
+		return s.handleGetLogPage(req)
 	case adminIdentify:
 		return s.handleAdminIdentify(req)
 	case adminSetFeatures:

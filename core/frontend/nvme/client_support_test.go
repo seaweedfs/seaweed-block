@@ -10,6 +10,7 @@
 //     Alive/AER in 11b) go here.
 //   - ioConn (QID>0): IO Connect cites the CNTLID; Read/
 //     Write/Flush go here.
+//
 // Tests that only need IO round-trip see the existing API
 // (writeCmd/readCmd dispatch through ioConn); tests that
 // exercise admin opcodes use adminCmd.
@@ -29,13 +30,13 @@ import (
 type nvmeClient struct {
 	t *testing.T
 
-	admin     net.Conn
-	adminR    *nvme.Reader
-	adminW    *nvme.Writer
+	admin  net.Conn
+	adminR *nvme.Reader
+	adminW *nvme.Writer
 
-	io     net.Conn
-	ioR    *nvme.Reader
-	ioW    *nvme.Writer
+	io  net.Conn
+	ioR *nvme.Reader
+	ioW *nvme.Writer
 
 	cid    atomic.Uint32 // command identifier counter (shared across queues)
 	cntlID uint16        // assigned by admin Connect; echoed by IO Connect
@@ -360,6 +361,47 @@ func (c *nvmeClient) adminIdentify(t *testing.T, cns uint8, nsid uint32) (uint16
 	resp := recvCapsuleResp(t, c.adminR)
 	if resp.CID != cid {
 		t.Fatalf("Identify resp CID=%d want %d", resp.CID, cid)
+	}
+	return resp.Status, data
+}
+
+// adminGetLogPage issues Get Log Page and returns C2H data + status.
+// numd is the zero-based DWORD count encoded into CDW10/11.
+func (c *nvmeClient) adminGetLogPage(t *testing.T, lid uint8, numd uint32) (uint16, []byte) {
+	t.Helper()
+	cid := uint16(c.cid.Add(1))
+	cmd := nvme.CapsuleCommand{
+		OpCode: 0x02, // adminGetLogPage
+		CID:    cid,
+		D10:    uint32(lid) | ((numd & 0xFFFF) << 16),
+		D11:    (numd >> 16) & 0xFFFF,
+	}
+	if err := c.adminW.SendHeaderOnly(0x4, &cmd, 64); err != nil {
+		t.Fatalf("send GetLogPage: %v", err)
+	}
+	ch, err := c.adminR.Dequeue()
+	if err != nil {
+		t.Fatalf("read GetLogPage resp hdr: %v", err)
+	}
+	if ch.Type == 0x5 {
+		var resp nvme.CapsuleResponse
+		_ = c.adminR.Receive(&resp)
+		return resp.Status, nil
+	}
+	if ch.Type != 0x7 {
+		t.Fatalf("expected C2HData, got 0x%x", ch.Type)
+	}
+	var dh nvme.C2HDataHeader
+	if err := c.adminR.Receive(&dh); err != nil {
+		t.Fatalf("recv GetLogPage C2HData: %v", err)
+	}
+	data := make([]byte, c.adminR.Length())
+	if err := c.adminR.ReceiveData(data); err != nil {
+		t.Fatalf("read GetLogPage data: %v", err)
+	}
+	resp := recvCapsuleResp(t, c.adminR)
+	if resp.CID != cid {
+		t.Fatalf("GetLogPage resp CID=%d want %d", resp.CID, cid)
 	}
 	return resp.Status, data
 }
