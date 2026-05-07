@@ -151,28 +151,36 @@ raw = sys.stdin.read().strip()
 if not raw:
     sys.exit(1)
 doc = json.loads(raw)
-hosts = [doc] if isinstance(doc, dict) else doc
-for host in hosts:
-    for sub in host.get("Subsystems", []):
-        if sub.get("NQN") != nqn:
-            continue
-        paths = sub.get("Paths", [])
-        names = []
+def iter_subsystems(node):
+    if isinstance(node, dict):
+        if "NQN" in node and "Paths" in node:
+            yield node
+        for sub in node.get("Subsystems", []):
+            yield sub
+    elif isinstance(node, list):
+        for item in node:
+            yield from iter_subsystems(item)
+
+for sub in iter_subsystems(doc):
+    if sub.get("NQN") != nqn:
+        continue
+    paths = sub.get("Paths", [])
+    names = []
+    for path in paths:
+        name = path.get("Name") or ""
+        base = name.split("/")[-1]
+        if re.fullmatch(r"nvme[0-9]+n[0-9]+", base):
+            names.append("/dev/" + base)
+        elif re.fullmatch(r"nvme[0-9]+", base):
+            names.append("/dev/" + base + "n1")
+    if field == "path_count":
+        print(len(paths))
+    elif field == "devices":
+        print("\n".join(sorted(set(names))))
+    elif field == "paths":
         for path in paths:
-            name = path.get("Name") or ""
-            base = name.split("/")[-1]
-            if re.fullmatch(r"nvme[0-9]+n[0-9]+", base):
-                names.append("/dev/" + base)
-            elif re.fullmatch(r"nvme[0-9]+", base):
-                names.append("/dev/" + base + "n1")
-        if field == "path_count":
-            print(len(paths))
-        elif field == "devices":
-            print("\n".join(sorted(set(names))))
-        elif field == "paths":
-            for path in paths:
-                print(path)
-        sys.exit(0)
+            print(path)
+    sys.exit(0)
 sys.exit(1)
 PY
 }
