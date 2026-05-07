@@ -57,6 +57,30 @@ func TestNVMeANALogPage_NoProviderRejected(t *testing.T) {
 	}
 }
 
+func TestNVMeSMARTLogPage_ReturnsMinimalHealthLog(t *testing.T) {
+	_, cli := newANAHarness(t, nil)
+	status, data := cli.adminGetLogPage(t, 0x02, 127) // 128 dwords = 512 bytes.
+	expectStatusSuccess(t, status, "GetLogPage(SMART)")
+	if len(data) != 512 {
+		t.Fatalf("SMART log len=%d want 512", len(data))
+	}
+	if got := data[0]; got != 0 {
+		t.Fatalf("SMART critical_warning=0x%02x want 0", got)
+	}
+	if got := binary.LittleEndian.Uint16(data[1:3]); got != 300 {
+		t.Fatalf("SMART temperature=%d want 300K", got)
+	}
+	if got := data[3]; got != 100 {
+		t.Fatalf("SMART available_spare=%d want 100", got)
+	}
+	if got := data[4]; got != 10 {
+		t.Fatalf("SMART spare_threshold=%d want 10", got)
+	}
+	if got := data[5]; got != 0 {
+		t.Fatalf("SMART percentage_used=%d want 0", got)
+	}
+}
+
 func TestNVMeANALogPage_ReportsProviderState(t *testing.T) {
 	_, cli := newANAHarness(t, testANAProvider{
 		state:       nvme.ANANonOptimized,

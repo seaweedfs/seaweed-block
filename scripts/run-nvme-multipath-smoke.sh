@@ -178,7 +178,7 @@ PY
 }
 
 wait_nvme_paths() {
-  for _ in $(seq 1 150); do
+  for _ in $(seq 1 450); do
     if count="$(parse_nvme_subsys path_count 2>/dev/null)" && [[ "${count:-0}" -ge 2 ]]; then
       return 0
     fi

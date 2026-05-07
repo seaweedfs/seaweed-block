@@ -43,7 +43,8 @@ const (
 
 // Log page identifiers.
 const (
-	logPageANA uint8 = 0x0C
+	logPageSMART uint8 = 0x02
+	logPageANA   uint8 = 0x0C
 )
 
 // Fabric command types (FCType).
