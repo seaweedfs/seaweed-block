@@ -539,7 +539,11 @@ References:
     - dynamic ports only.
     - no stale sessions or target processes.
   - NVMe-P2 in-capsule / R2T performance path:
-    - status: planned.
+    - status: target stats instrumentation implemented locally; waiting for
+      QA host evidence from NVMe-P1.
+    - target now reports transport counters in `blockvolume.log` on close:
+      inline writes, R2T writes, H2C/C2H PDU counts, and read/write/flush
+      command counts.
     - prove whether Linux uses inline data for small writes.
     - add visible counters or artifacts for inline vs R2T writes.
     - compare iSCSI and NVMe only under labelled network/backend conditions.

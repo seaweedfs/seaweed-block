@@ -72,6 +72,10 @@ Expected final line:
 - `processes.after.txt` has no live `blockmaster` or `blockvolume` process
   from this run.
 - `blockvolume.log` has no NVMe session panic and no repeated protocol errors.
+- `blockvolume.log` contains one `nvme: stats ...` line with non-zero
+  `writes`.
+- Report whether the host used `inline_writes` or `r2t_writes` for the
+  workload. This is evidence for NVMe-P2, not a pass/fail performance claim.
 
 ## Evidence To Report
 
@@ -84,6 +88,7 @@ Expected final line:
 - `sha256.iter1.log`,
 - fio summary for Test 2,
 - final `nvme list-subsys -o json` state,
+- final `nvme: stats ...` line from `blockvolume.log`,
 - cleanup state.
 
 ## Non-Claims

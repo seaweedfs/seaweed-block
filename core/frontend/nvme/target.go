@@ -58,6 +58,8 @@ type Target struct {
 	ctrlMu     sync.Mutex
 	ctrls      map[uint16]*adminController
 	nextCntlID uint16 // monotonic allocator; never reuses a CNTLID within a Target lifetime
+
+	stats targetStats
 }
 
 // NewTarget builds a Target. Provider must be non-nil.
@@ -145,7 +147,23 @@ func (t *Target) Close() error {
 		_ = ln.Close()
 	}
 	t.sessions.Wait()
+	st := t.Stats()
+	t.logger.Printf("nvme: stats sessions=%d admin_connects=%d io_connects=%d reads=%d writes=%d flushes=%d inline_writes=%d inline_bytes=%d r2t_writes=%d r2t_bytes=%d h2c_pdus=%d h2c_bytes=%d c2h_pdus=%d c2h_bytes=%d",
+		st.SessionsAccepted, st.AdminConnects, st.IOConnects,
+		st.ReadCommands, st.WriteCommands, st.FlushCommands,
+		st.InlineWriteCommands, st.InlineWriteBytes,
+		st.R2TWriteCommands, st.R2TWriteBytes,
+		st.H2CDataPDUs, st.H2CDataBytes,
+		st.C2HDataPDUs, st.C2HDataBytes)
 	return nil
+}
+
+// Stats returns a point-in-time transport counter snapshot.
+func (t *Target) Stats() Stats {
+	if t == nil {
+		return Stats{}
+	}
+	return t.stats.snapshot()
 }
 
 func (t *Target) acceptLoop(ln net.Listener) {
@@ -168,6 +186,7 @@ func (t *Target) acceptLoop(ln net.Listener) {
 func (t *Target) handleConn(conn net.Conn) {
 	defer t.sessions.Done()
 	defer conn.Close()
+	t.stats.sessionsAccepted.Add(1)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
