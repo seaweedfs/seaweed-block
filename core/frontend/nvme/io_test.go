@@ -2,7 +2,8 @@
 // sw may NOT modify this file without architect approval via §8B.4 Discovery Bridge.
 // See: sw-block/design/v3-phase-15-t2-test-spec.md
 // Maps to ledger rows: INV-FRONTEND-NVME-001, INV-FRONTEND-PROTOCOL-001,
-//                      INV-FRONTEND-PROTOCOL-002.WRITE, INV-FRONTEND-PROTOCOL-002.READ
+//
+//	INV-FRONTEND-PROTOCOL-002.WRITE, INV-FRONTEND-PROTOCOL-002.READ
 //
 // Test layer: Unit (L0)
 // Protocol: NVMe/TCP
@@ -27,6 +28,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"sync/atomic"
 	"testing"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend"
@@ -41,6 +43,17 @@ const (
 	opWrite = 0x01
 	opFlush = 0x00
 )
+
+type mutableTestANAProvider struct {
+	state atomic.Uint32
+}
+
+func (p *mutableTestANAProvider) ANAState() nvme.ANAState {
+	return nvme.ANAState(p.state.Load())
+}
+
+func (p *mutableTestANAProvider) ANAGroupID() uint32     { return 1 }
+func (p *mutableTestANAProvider) ANAChangeCount() uint64 { return 1 }
 
 // T2.L0.n1 — Read and Write route through frontend.Backend.
 func TestT2NVMe_CommandReadWrite_UsesFrontendBackend(t *testing.T) {
@@ -203,6 +216,40 @@ func TestT2NVMe_BackendClosed_DistinctFromStale(t *testing.T) {
 	}
 	if r.SC != nvme.SCPathAsymAccessInaccessible {
 		t.Fatalf("closed-backend: SC=0x%02x want ANAInaccessible (0x02)", r.SC)
+	}
+}
+
+func TestP4NVMe_MetadataOnlyPathAllowsIOAfterPromotion(t *testing.T) {
+	rec := testback.NewRecordingBackend(frontend.Identity{VolumeID: "v1"})
+	ana := &mutableTestANAProvider{}
+	ana.state.Store(uint32(nvme.ANANonOptimized))
+	h := nvme.NewIOHandler(nvme.HandlerConfig{
+		Backend:      rec,
+		ANA:          ana,
+		MetadataOnly: true,
+	})
+	ctx := context.Background()
+	payload := make([]byte, nvme.DefaultBlockSize)
+
+	before := h.Handle(ctx, nvme.IOCommand{
+		Opcode: opWrite, NSID: 1, SLBA: 0, NLB: 1, Data: payload,
+	})
+	if before.SCT != nvme.SCTPathRelated || before.SC != nvme.SCPathAsymAccessInaccessible {
+		t.Fatalf("pre-promotion write status=(%d,0x%02x), want Path/Inaccessible", before.SCT, before.SC)
+	}
+	if rec.WriteCount() != 0 {
+		t.Fatalf("pre-promotion metadata-only write reached backend; writes=%d", rec.WriteCount())
+	}
+
+	ana.state.Store(uint32(nvme.ANAOptimized))
+	after := h.Handle(ctx, nvme.IOCommand{
+		Opcode: opWrite, NSID: 1, SLBA: 0, NLB: 1, Data: payload,
+	})
+	if err := after.AsError(); err != nil {
+		t.Fatalf("post-promotion write: %v", err)
+	}
+	if rec.WriteCount() != 1 {
+		t.Fatalf("post-promotion write count=%d want 1", rec.WriteCount())
 	}
 }
 

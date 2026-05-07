@@ -17,6 +17,7 @@ References:
 - `ref/nvme-ana-parity-plan.md`
 - `ref/nvme-v2-coverage-gap-audit.md`
 - `ref/nvme-ana-technical-note.md`
+- `ref/nvme-p4-multipath-failover-design.md`
 
 ## Product Goal
 
@@ -590,17 +591,39 @@ References:
       - no `nvme_parse_ana_log` kernel warning,
       - mkfs/mount/checksum PASS after ANA advertisement is enabled.
   - NVMe-P4 multipath and mounted failover:
-    - status: design/QA skeleton prepared; script not implemented yet.
+    - status: Test 1/2 QA green; mounted failover script ready for QA.
     - #design:
       `internal/docs/ref/nvme-p4-multipath-failover-design.md`.
     - #QA assignment:
       `internal/docs/qa-assignments/nvme-p4-multipath-lab-validation.md`.
     - reach the iSCSI P6 bar for NVMe multipath.
-    - first decision point:
-      - Linux native NVMe multipath is available on M02
-        (`/sys/module/nvme_core/parameters/multipath=Y`),
-      - discover whether P3's single ANA group is enough for two-path identity
-        or whether P4 needs dense multi-group allocation.
+    - Test 1/2 discovery and native grouping:
+      - status: QA green on M02 at `a5ef1a5`.
+      - script: `scripts/run-nvme-multipath-smoke.sh`.
+      - evidence:
+        - run ID `20260507T161800Z-test`,
+        - two NVMe/TCP paths registered immediately,
+        - native Linux multipath exposed one namespace device,
+        - ANA log `group_id=1`, `state=0x01 optimized`, `nsid=1`,
+        - identity `nguid=24634c35194743419febbb18e06446be`,
+          `eui64=24634c3519474341`, `anagrpid=1`,
+        - final line:
+          `[nvme-mpath] PASS: two NVMe/TCP paths expose one ANA-aware namespace`.
+      - decision: single ANA group is sufficient for the current two-path
+        native multipath identity model.
+    - mounted failover:
+      - status: script ready; awaiting QA.
+      - script: `scripts/run-nvme-mounted-failover-smoke.sh`.
+      - local guard:
+        - metadata-only standby NVMe path continues to reject I/O before
+          promotion,
+        - after ANA state becomes optimized, the same session can pass I/O to
+          the backend.
+      - expected evidence:
+        - mounted namespace device survives active r1 kill,
+        - pre-failover checksum reads after r2 promotion,
+        - post-failover write succeeds,
+        - cleanup leaves no NVMe connection or target process.
   - NVMe-P5 CSI integration:
     - status: planned.
     - allow StorageClass protocol selection without changing the app.

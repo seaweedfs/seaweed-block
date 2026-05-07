@@ -209,6 +209,9 @@ func (h *IOHandler) metadataOnlyReject(op string) *IOResult {
 	if h == nil || !h.metadataOnly {
 		return nil
 	}
+	if h.ana != nil && h.ana.ANAState() == ANAOptimized {
+		return nil
+	}
 	return &IOResult{
 		SCT:    SCTPathRelated,
 		SC:     SCPathAsymAccessInaccessible,

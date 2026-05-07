@@ -1,6 +1,6 @@
 # QA Assignment: NVMe P4 Multipath Lab Validation
 
-Status: ready for QA Test 1/2.
+Status: Test 1/2 QA green; Test 3 ready for QA.
 Branch: `frontend/nvme-ana-parity-plan`.
 Scope: real Linux NVMe/TCP two-path and native multipath validation.
 
@@ -28,7 +28,7 @@ Scope: real Linux NVMe/TCP two-path and native multipath validation.
 
 ## Test 1: Two-Path Discovery
 
-Status: ready.
+Status: PASS on `frontend/nvme-ana-parity-plan@a5ef1a5`.
 
 Expected script shape:
 
@@ -57,9 +57,20 @@ Evidence:
 - final line:
   `[nvme-mpath] PASS: two NVMe/TCP paths expose one ANA-aware namespace`.
 
+Observed evidence:
+
+- run ID: `20260507T161800Z-test`.
+- `wait_nvme_paths: ok at iter=1 count=2`.
+- `nvme_namespace_devices=1`.
+- ANA log: `group_count=1`, `group_id=1`, `state=0x01 optimized`,
+  `nsid=1`.
+- identity: `nguid=24634c35194743419febbb18e06446be`,
+  `eui64=24634c3519474341`, `anagrpid=1`.
+- cleanup: clean disconnect, `EXIT=0`.
+
 ## Test 2: Native Multipath Grouping
 
-Status: ready with Test 1.
+Status: PASS with Test 1 on `a5ef1a5`.
 
 Expected:
 
@@ -77,7 +88,15 @@ Evidence:
 
 ## Test 3: Mounted Failover
 
-Status: future, do not run until Test 1/2 pass.
+Status: ready.
+
+Command:
+
+```bash
+RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-nvme-p4-mounted-failover" \
+SW_BLOCK_ARTIFACT_DIR="/mnt/smb/work/share/g15d-k8s/${RUN_ID}" \
+bash scripts/run-nvme-mounted-failover-smoke.sh "$PWD"
+```
 
 Expected:
 
@@ -88,6 +107,25 @@ Expected:
 - post-failover read/write succeeds,
 - old primary rejects stale writes,
 - cleanup leaves no NVMe connections or target processes.
+
+Acceptance:
+
+- final line:
+  `[nvme-failover] PASS: mounted NVMe multipath workload read/wrote through r1->r2 failover`.
+- `pre-check-after-failover.log` reports `/pre.bin: OK`.
+- `post-check.log` reports `/post.bin: OK`.
+- `status-r2-primary.json` shows r2 primary at epoch `>=2`.
+- `nvme-list-subsys.final.json` has no test NQN.
+- `processes.after.txt` has no live `blockmaster` or `blockvolume`.
+
+Failure evidence:
+
+- `blockvolume-r1.log`, `blockvolume-r2.log`, `blockmaster.log`.
+- `nvme-list-subsys.before-failover.json`.
+- `nvme-list-subsys.after-failover.json`.
+- `path-summary.before-failover.txt`.
+- `path-summary.after-failover.txt`.
+- `dmesg` delta if the script captures one or if QA observes a kernel error.
 
 ## Non-Claims
 

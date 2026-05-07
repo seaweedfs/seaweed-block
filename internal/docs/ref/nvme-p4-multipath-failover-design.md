@@ -1,6 +1,6 @@
 # NVMe P4 Multipath / Mounted Failover Design
 
-Status: design record.
+Status: Test 1/2 validated; mounted failover pending QA.
 Branch: `frontend/nvme-ana-parity-plan`.
 
 ## Goal
@@ -19,9 +19,8 @@ Branch: `frontend/nvme-ana-parity-plan`.
   - ANA log group id is dense `1`, matching `ANAGRPMAX=1` and `NANAGRPID=1`,
   - Linux accepts the controller into ANA-aware init.
 - Missing:
-  - no two-path NVMe/TCP script,
-  - no Linux native NVMe multipath proof,
-  - no mounted failover through `/dev/nvme...` or `/dev/disk/by-id/...`.
+  - mounted failover through the native multipath namespace is ready for QA
+    but not yet validated.
 
 ## Linux Multipath Model
 
@@ -65,9 +64,29 @@ P4 should start with discovery evidence before deciding. If Linux groups two
 paths with the current single group and both are optimized, that is not
 failover-ready; it is only identity proof.
 
+Decision after QA on M02:
+
+- Single ANA group id `1` is sufficient for the current two-path native
+  multipath identity model.
+- Linux accepted:
+  - one SubNQN,
+  - distinct controller IDs,
+  - CMIC multi-controller + ANA bits,
+  - NMIC shared namespace,
+  - common NGUID/EUI64,
+  - ANA log group id `1`.
+- Evidence:
+  - branch `frontend/nvme-ana-parity-plan`,
+  - commit `a5ef1a5`,
+  - run `20260507T161800Z-test`,
+  - final line:
+    `[nvme-mpath] PASS: two NVMe/TCP paths expose one ANA-aware namespace`.
+
 ## Milestones
 
 ### P4-A: Two-Path Discovery / Identity
+
+Status: PASS on M02 at `a5ef1a5`.
 
 - Start one blockmaster and two blockvolume frontends for one volume.
 - Expose two NVMe/TCP portals to the same Linux host.
@@ -86,6 +105,8 @@ failover-ready; it is only identity proof.
 
 ### P4-B: Native Multipath Grouping
 
+Status: PASS on M02 at `a5ef1a5`.
+
 - Preconditions:
   - Linux native NVMe multipath enabled.
 - Expected:
@@ -96,6 +117,8 @@ failover-ready; it is only identity proof.
   - no failover yet.
 
 ### P4-C: Mounted Failover
+
+Status: script ready; awaiting QA.
 
 - Mount through the native multipath namespace.
 - Write and checksum pre-failover data.
