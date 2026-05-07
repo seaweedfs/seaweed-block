@@ -545,17 +545,23 @@ References:
     - dynamic ports only.
     - no stale sessions or target processes.
   - NVMe-P2 in-capsule / R2T performance path:
-    - status: inline path observed by QA; explicit R2T validation assigned.
+    - status: QA green on M02 with host-specific classification.
     - target now reports transport counters in `blockvolume.log` on close:
       inline writes, R2T writes, H2C/C2H PDU counts, and read/write/flush
       command counts.
     - P1 observation: Linux `fio --bs=4k` used inline writes exclusively on
       M02 (`r2t_writes=0`).
+    - P2 observation: Linux kernel 6.17.0-19 on M02 did not trigger R2T even
+      for `fio --bs=128k` or `dd bs=1M`; all writes were fragmented into
+      inline/in-capsule transfers.
     - #QA assignment:
       `internal/docs/qa-assignments/nvme-p2-inline-r2t-validation.md`.
     - prove whether Linux uses inline data for small writes.
     - run 128 KiB+ profiles to force or classify the R2T path.
     - add visible counters or artifacts for inline vs R2T writes.
+    - follow-up:
+      - R2T requires a different initiator/profile or target-side test knob;
+        current M02 kernel behavior is not a product failure.
     - compare iSCSI and NVMe only under labelled network/backend conditions.
   - NVMe-P3 ANA identity and log page:
     - status: QA green on M02 at `d330e89`.
@@ -591,7 +597,8 @@ References:
       `internal/docs/qa-assignments/nvme-p4-multipath-lab-validation.md`.
     - reach the iSCSI P6 bar for NVMe multipath.
     - first decision point:
-      - confirm Linux native NVMe multipath availability on M02,
+      - Linux native NVMe multipath is available on M02
+        (`/sys/module/nvme_core/parameters/multipath=Y`),
       - discover whether P3's single ANA group is enough for two-path identity
         or whether P4 needs dense multi-group allocation.
   - NVMe-P5 CSI integration:

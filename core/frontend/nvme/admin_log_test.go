@@ -91,6 +91,36 @@ func TestNVMeANALogPage_ReportsProviderState(t *testing.T) {
 	}
 }
 
+func TestNVMeANAIdentifyAndLogGroupIDsAreConsistent(t *testing.T) {
+	_, cli := newANAHarness(t, testANAProvider{
+		state:       nvme.ANAOptimized,
+		groupID:     1,
+		changeCount: 42,
+	})
+
+	status, ctrl := cli.adminIdentify(t, 0x01, 0)
+	expectStatusSuccess(t, status, "Identify Controller")
+	status, ns := cli.adminIdentify(t, 0x00, 1)
+	expectStatusSuccess(t, status, "Identify Namespace")
+	status, logData := cli.adminGetLogPage(t, 0x0C, 9)
+	expectStatusSuccess(t, status, "GetLogPage(ANA)")
+
+	anaGrpMax := binary.LittleEndian.Uint32(ctrl[344:348])
+	anaGrpCount := binary.LittleEndian.Uint32(ctrl[348:352])
+	nsGroupID := binary.LittleEndian.Uint32(ns[92:96])
+	logGroupID := binary.LittleEndian.Uint32(logData[16:20])
+
+	if anaGrpMax != 1 || anaGrpCount != 1 {
+		t.Fatalf("Identify ANA limits mismatch: ANAGRPMAX=%d NANAGRPID=%d want 1/1", anaGrpMax, anaGrpCount)
+	}
+	if logGroupID == 0 || logGroupID > anaGrpMax {
+		t.Fatalf("ANA log group id=%d outside advertised range 1..%d", logGroupID, anaGrpMax)
+	}
+	if nsGroupID != logGroupID {
+		t.Fatalf("Identify NS ANAGRPID=%d does not match ANA log group id=%d", nsGroupID, logGroupID)
+	}
+}
+
 func TestNVMeANALogPage_TruncatesToRequestedLength(t *testing.T) {
 	_, cli := newANAHarness(t, testANAProvider{
 		state:       nvme.ANAOptimized,
