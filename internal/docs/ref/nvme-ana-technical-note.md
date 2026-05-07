@@ -44,7 +44,15 @@ Status: reference for NVMe-P3/P4 work.
 - Existing tests pin that zero state so we do not advertise ANA before the log
   page and state model exist.
 - V3 already maps stale lineage to NVMe path-related status for I/O errors.
-- V3 does not yet expose an ANA provider equivalent to the iSCSI ALUA provider.
+- V3 now has an ANA provider seam and a blockvolume projection provider:
+  - optimized means the frontend projection is healthy,
+  - non-optimized means the path is present for probing/failover but not the
+    optimized write path,
+  - ANA change means recovering,
+  - inaccessible means degraded, mismatched identity, or missing projection.
+- V3 now implements ANA Get Log Page `0x0c` behind the provider seam.
+- Identify ANA fields remain off until Linux host validation proves the three
+  surfaces agree.
 
 ## V2 Reference Behavior
 
@@ -71,7 +79,11 @@ from V2 role ownership.
 ## Development Order
 
 - P3-A: add provider interface and state mapping tests without advertising ANA.
+  - status: done.
 - P3-B: implement ANA log page and keep Identify ANA fields off.
+  - status: done.
+- P3-B2: wire blockvolume projection state into the ANA provider.
+  - status: done.
 - P3-C: flip Identify Controller / Namespace fields only after the log page
   tests pass.
 - P3-D: add Linux `nvme get-log` / `nvme id-ctrl` / `nvme id-ns` QA assignment.

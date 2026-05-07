@@ -813,6 +813,7 @@ func run(f flags) int {
 				NSID:       uint32(f.nvmeNS),
 				BlockSize:  frontendBlockSize,
 				VolumeSize: frontendVolumeSize,
+				ANA:        newProjectionANAProvider(h.ProjectionView(), f.volumeID, f.replicaID, f.nvmeSubsysNQN),
 			},
 		})
 		nvmeAddr, err := nvmeTarget.Start()
