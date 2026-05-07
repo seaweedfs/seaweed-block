@@ -1,6 +1,6 @@
 # QA Assignment: NVMe P4 Multipath Lab Validation
 
-Status: draft, blocked until P2 and P4-A script are ready.
+Status: ready for QA Test 1/2.
 Branch: `frontend/nvme-ana-parity-plan`.
 Scope: real Linux NVMe/TCP two-path and native multipath validation.
 
@@ -28,7 +28,7 @@ Scope: real Linux NVMe/TCP two-path and native multipath validation.
 
 ## Test 1: Two-Path Discovery
 
-Status: needs script.
+Status: ready.
 
 Expected script shape:
 
@@ -54,10 +54,12 @@ Evidence:
 - `nvme id-ns` per path if addressable.
 - ANA log summary per path.
 - `dmesg` delta for `nvme_parse_ana_log`, reset, or I/O errors.
+- final line:
+  `[nvme-mpath] PASS: two NVMe/TCP paths expose one ANA-aware namespace`.
 
 ## Test 2: Native Multipath Grouping
 
-Status: blocked on Test 1 and host multipath setting.
+Status: ready with Test 1.
 
 Expected:
 
