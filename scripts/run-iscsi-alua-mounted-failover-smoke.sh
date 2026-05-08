@@ -374,8 +374,14 @@ timeout 15s sudo iscsiadm -m session -P 3 >"$ARTIFACT_DIR/iscsi-session-P3.after
 
 log "verify mounted workload after failover"
 sudo sha256sum -c "$ARTIFACT_DIR/pre.sha256" | tee "$ARTIFACT_DIR/pre-check-after-failover.log"
-sudo dd if=/dev/urandom of="$MOUNT_DIR/post.bin" bs=4096 count=64 status=none
-sync
+if ! timeout 60s sudo dd if=/dev/urandom of="$MOUNT_DIR/post.bin" bs=4096 count=64 status=none >"$ARTIFACT_DIR/post-write.stdout" 2>"$ARTIFACT_DIR/post-write.stderr"; then
+  echo "post-failover write did not complete" >&2
+  exit 1
+fi
+if ! timeout 60s sync; then
+  echo "post-failover sync did not complete" >&2
+  exit 1
+fi
 sudo sha256sum "$MOUNT_DIR/post.bin" | tee "$ARTIFACT_DIR/post.sha256"
 sudo sha256sum -c "$ARTIFACT_DIR/post.sha256" | tee "$ARTIFACT_DIR/post-check.log"
 
