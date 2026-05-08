@@ -1,0 +1,259 @@
+# Runner-native iSCSI P6 ALUA multipath + mounted failover chain.
+#
+# Keeps the existing privileged OS-initiator bash payloads as the product
+# truth, while sw-test-runner owns:
+#   pre-clean -> pin-build binaries -> ALUA multipath discovery
+#   -> mounted failover -> final cleanup/asserts -> shared artifact collection.
+#
+# Expected invocation from sw-test-runner-standalone:
+#   swblock run testops/scenarios/iscsi-p6-alua-failover-chain.yaml \
+#     --env product_root=/path/to/seaweed_block/on/m02 \
+#     --env ssh_key=/path/to/testdev_key/on/controller
+
+name: iscsi-p6-alua-failover-chain
+timeout: 25m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: pre_clean
+    actions:
+      - action: pre_run_cleanup
+        node: m02
+        kill_patterns: "blockmaster,blockvolume,iscsi-target"
+        nvme_disconnect: "true"
+        iscsi_logout_prefix: "iqn.2026-05.io.seaweedfs"
+      - action: exec
+        node: m02
+        cmd: "rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-p6-chain && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-p6-chain/bin /mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-p6-chain/pin_build /mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-p6-chain/alua_multipath /mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-p6-chain/mounted_failover"
+      - action: assert_no_active_iscsi_sessions
+        node: m02
+        iqn_substr: "io.seaweedfs"
+      - action: assert_no_processes
+        node: m02
+        pattern: "[/]blockmaster --|[/]blockvolume --|^blockmaster |^blockvolume "
+
+  - name: pin_build
+    actions:
+      - action: exec
+        node: m02
+        timeout: 8m
+        cmd: "cd {{ product_root }} && go build -o /mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-p6-chain/bin/blockmaster ./cmd/blockmaster && go build -o /mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-p6-chain/bin/blockvolume ./cmd/blockvolume"
+      - action: exec
+        node: m02
+        cmd: "cd {{ product_root }} && git rev-parse HEAD > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-p6-chain/pin_build/git.sha && git status --short > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-p6-chain/pin_build/git.status && /mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-p6-chain/bin/blockmaster --version > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-p6-chain/pin_build/blockmaster.version.txt && /mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-p6-chain/bin/blockvolume --version > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-p6-chain/pin_build/blockvolume.version.txt"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-p6-chain/pin_build/blockvolume.version.txt"
+        pattern: "blockvolume revision="
+        save_as: blockvolume_version_count
+      - action: assert_greater
+        actual: "{{ blockvolume_version_count }}"
+        threshold: "0"
+
+  - name: alua_multipath
+    actions:
+      - action: exec
+        node: m02
+        timeout: 8m
+        cmd: "cd {{ product_root }} && bash scripts/run-iscsi-alua-multipath-smoke.sh {{ product_root }}"
+        env.SW_BLOCK_ARTIFACT_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-p6-chain/alua_multipath"
+        env.SW_BLOCK_BIN_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-p6-chain/bin"
+
+      # Bash-level gate: smoke's own PASS line ran.
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-p6-chain/alua_multipath/run.log"
+        pattern: "\\[iscsi-mpath\\] PASS:"
+        save_as: alua_pass_count
+      - action: assert_greater
+        actual: "{{ alua_pass_count }}"
+        threshold: "0"
+
+      # Field-level gate: one path reports Active/Optimized.
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-p6-chain/alua_multipath/run.log"
+        pattern: "rtpg_state_r1=0x00"
+        save_as: r1_active_optimized_count
+      - action: assert_greater
+        actual: "{{ r1_active_optimized_count }}"
+        threshold: "0"
+
+      # Field-level gate: standby path reports ALUA standby, not unavailable.
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-p6-chain/alua_multipath/run.log"
+        pattern: "rtpg_state_r2=0x02"
+        save_as: r2_standby_count
+      - action: assert_greater
+        actual: "{{ r2_standby_count }}"
+        threshold: "0"
+
+      # Field-level gate: VPD 0x83 contains path-distinguishing identity.
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-p6-chain/alua_multipath/sg_inq.r1.vpd83.txt"
+        pattern: "target port group|relative target port|NAA"
+        save_as: r1_vpd83_identity_count
+      - action: assert_greater
+        actual: "{{ r1_vpd83_identity_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-p6-chain/alua_multipath/sg_inq.r2.vpd83.txt"
+        pattern: "target port group|relative target port|NAA"
+        save_as: r2_vpd83_identity_count
+      - action: assert_greater
+        actual: "{{ r2_vpd83_identity_count }}"
+        threshold: "0"
+
+      # Field-level gate: standby raw writes are rejected and surfaced as I/O errors.
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-p6-chain/alua_multipath/standby-write.stderr"
+        pattern: "Input/output error"
+        save_as: standby_write_reject_count
+      - action: assert_greater
+        actual: "{{ standby_write_reject_count }}"
+        threshold: "0"
+
+      # Field-level gate: multipath groups both paths as one ALUA-handled map.
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-p6-chain/alua_multipath/multipath-map-name.txt"
+        pattern: ".+"
+        save_as: multipath_map_name_count
+      - action: assert_greater
+        actual: "{{ multipath_map_name_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-p6-chain/alua_multipath/multipath.ll.txt"
+        pattern: "hwhandler='1 alua'"
+        save_as: alua_handler_count
+      - action: assert_greater
+        actual: "{{ alua_handler_count }}"
+        threshold: "0"
+
+      - action: assert_no_active_iscsi_sessions
+        node: m02
+        iqn_substr: "io.seaweedfs"
+      - action: assert_no_processes
+        node: m02
+        pattern: "[/]blockmaster --|[/]blockvolume --|^blockmaster |^blockvolume "
+
+  - name: mounted_failover
+    actions:
+      - action: exec
+        node: m02
+        timeout: 8m
+        cmd: "cd {{ product_root }} && bash scripts/run-iscsi-alua-mounted-failover-smoke.sh {{ product_root }}"
+        env.SW_BLOCK_ARTIFACT_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-p6-chain/mounted_failover"
+        env.SW_BLOCK_BIN_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-p6-chain/bin"
+
+      # Bash-level gate: smoke's own PASS line ran.
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-p6-chain/mounted_failover/run.log"
+        pattern: "\\[iscsi-failover\\] PASS:"
+        save_as: failover_pass_count
+      - action: assert_greater
+        actual: "{{ failover_pass_count }}"
+        threshold: "0"
+
+      # Mounted workload survived the primary kill.
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-p6-chain/mounted_failover/pre-check-after-failover.log"
+        pattern: "/pre.bin: OK"
+        save_as: pre_checksum_count
+      - action: assert_greater
+        actual: "{{ pre_checksum_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-p6-chain/mounted_failover/post-check.log"
+        pattern: "/post.bin: OK"
+        save_as: post_checksum_count
+      - action: assert_greater
+        actual: "{{ post_checksum_count }}"
+        threshold: "0"
+
+      # Field-level gate: r2 promoted at epoch 2 and is frontend-ready.
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-p6-chain/mounted_failover/status-r2-healthy.json"
+        pattern: "\"Epoch\":2"
+        save_as: r2_epoch2_count
+      - action: assert_greater
+        actual: "{{ r2_epoch2_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-p6-chain/mounted_failover/status-r2-healthy.json"
+        pattern: "\"AuthorityRole\":\"primary\""
+        save_as: r2_role_primary_count
+      - action: assert_greater
+        actual: "{{ r2_role_primary_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-p6-chain/mounted_failover/status-r2-healthy.json"
+        pattern: "\"FrontendPrimaryReady\":true"
+        save_as: r2_frontend_ready_count
+      - action: assert_greater
+        actual: "{{ r2_frontend_ready_count }}"
+        threshold: "0"
+
+      # Field-level gate: r2's ALUA state becomes Active/Optimized after failover.
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-p6-chain/mounted_failover/sg_rtpg.r2.after.txt"
+        pattern: "asymmetric access state\\s*:\\s*0x00"
+        save_as: r2_after_active_optimized_count
+      - action: assert_greater
+        actual: "{{ r2_after_active_optimized_count }}"
+        threshold: "0"
+
+      - action: assert_no_active_iscsi_sessions
+        node: m02
+        iqn_substr: "io.seaweedfs"
+      - action: assert_no_processes
+        node: m02
+        pattern: "[/]blockmaster --|[/]blockvolume --|^blockmaster |^blockvolume "
+
+  - name: final_asserts
+    actions:
+      - action: exec
+        node: m02
+        cmd: "sudo iscsiadm -m session > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-p6-chain/iscsi-sessions.final.txt 2>&1 || true; sudo multipath -ll > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-p6-chain/multipath.final.txt 2>&1 || true"
+      - action: assert_no_active_iscsi_sessions
+        node: m02
+        iqn_substr: "io.seaweedfs"
+      - action: assert_no_processes
+        node: m02
+        pattern: "[/]blockmaster --|[/]blockvolume --|^blockmaster |^blockvolume "
+
+  - name: collect_and_cleanup
+    always: true
+    actions:
+      - action: pre_run_cleanup
+        node: m02
+        kill_patterns: "blockmaster,blockvolume,iscsi-target"
+        nvme_disconnect: "true"
+        iscsi_logout_prefix: "iqn.2026-05.io.seaweedfs"
+      - action: collect_path
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-p6-chain"
+        name: "remote-phases"
+        ignore_error: true
