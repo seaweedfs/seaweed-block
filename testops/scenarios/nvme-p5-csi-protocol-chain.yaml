@@ -7,20 +7,22 @@
 #
 # Expected invocation from sw-test-runner-standalone:
 #   swblock run testops/scenarios/nvme-p5-csi-protocol-chain.yaml \
-#     --env product_root=/path/to/seaweed_block/on/m02
+#     --env product_root=/path/to/seaweed_block/on/m02 \
+#     --env ssh_key=/path/to/testdev_key/on/controller
 
 name: nvme-p5-csi-protocol-chain
 timeout: 25m
 
 env:
   product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
 
 topology:
   nodes:
     m02:
       host: 192.168.1.184
       user: testdev
-      key: C:\work\dev_server\testdev_key
+      key: "{{ ssh_key }}"
 
 phases:
   - name: pre_clean

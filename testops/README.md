@@ -17,7 +17,8 @@ Example:
 
 ```bash
 swblock run testops/scenarios/nvme-p5-csi-protocol-chain.yaml \
-  --env product_root=/path/to/seaweed_block/on/m02
+  --env product_root=/path/to/seaweed_block/on/m02 \
+  --env ssh_key=/path/to/testdev_key/on/controller
 ```
 
 The scenario still shells out to existing bash payloads. That is deliberate:
