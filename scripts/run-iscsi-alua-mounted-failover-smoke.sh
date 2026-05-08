@@ -229,12 +229,13 @@ log "start r1 active path"
 start_blockvolume r1 s1 "$PORT1" "$R1_DATA_ADDR" "$R1_CTRL_ADDR" "$R1_STATUS_ADDR" \
   "${RUN_DIR}/r1-store" "$ARTIFACT_DIR/blockvolume-r1.log"
 wait_port "$PORT1"
-wait_status_healthy "$R1_STATUS_ADDR" r1 1
 
 log "start r2 standby path"
 start_blockvolume r2 s2 "$PORT2" "$R2_DATA_ADDR" "$R2_CTRL_ADDR" "$R2_STATUS_ADDR" \
   "${RUN_DIR}/r2-store" "$ARTIFACT_DIR/blockvolume-r2.log"
 wait_port "$PORT2"
+
+log "wait authority projections"
 wait_status_healthy "$R1_STATUS_ADDR" r1 1
 wait_status_projected "$R2_STATUS_ADDR" r2
 
