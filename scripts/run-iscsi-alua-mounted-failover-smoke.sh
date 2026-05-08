@@ -220,6 +220,20 @@ PY
   exit 1
 }
 
+wait_log_pattern() {
+  local path="$1"
+  local pattern="$2"
+  local label="$3"
+  for _ in $(seq 1 160); do
+    if grep -q "$pattern" "$path" 2>/dev/null; then
+      return 0
+    fi
+    sleep 0.25
+  done
+  echo "timed out waiting for ${label}" >&2
+  exit 1
+}
+
 pid_for_replica() {
   local replica="$1"
   pgrep -f "${BIN_DIR}/blockvolume.*--replica-id ${replica}" | head -n1
@@ -238,6 +252,7 @@ wait_port "$PORT2"
 log "wait authority projections"
 wait_status_healthy "$R1_STATUS_ADDR" r1 1
 wait_status_projected "$R2_STATUS_ADDR" r2
+wait_log_pattern "$ARTIFACT_DIR/blockvolume-r2.log" "authority is now" "r2 standby authority observation"
 
 discover_login() {
   local port="$1"
