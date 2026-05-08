@@ -2,6 +2,8 @@
 
 Branch: `frontend/nvme-ana-parity-plan`.
 
+Status: QA green at `8e0a28f`.
+
 Scope: prove Kubernetes dynamic provisioning can select the NVMe frontend with
 the same PVC/app smoke shape used by alpha iSCSI. This is a CSI integration
 gate, not a new NVMe protocol gate.
@@ -16,8 +18,14 @@ gate, not a new NVMe protocol gate.
   - Docker image build/load path for `sw-block:local` and
     `sw-block-csi:local`.
 - Rebuild both images from the branch under test before running.
+- For k3s, import both rebuilt images into k3s containerd before running
+  (`docker save ... | sudo k3s ctr images import -`). The scripts gate
+  `blockmaster`, `blockcsi`, and generated `blockvolume` `--version` output
+  against `git HEAD` to catch stale runtime images.
 
 ## Test 1: NVMe Dynamic PVC
+
+QA result: PASS at `69a1d20` with rebuilt and k3s-imported images.
 
 Command:
 
@@ -68,6 +76,8 @@ Expected:
   - `processes` are clean if separately checked.
 
 ## Test 2: Default iSCSI Regression
+
+QA result: PASS at `8e0a28f` with rebuilt and k3s-imported images.
 
 Command:
 

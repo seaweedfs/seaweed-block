@@ -630,7 +630,7 @@ References:
         - `post.bin` write/read/verify succeeded after failover,
         - cleanup left no test NQN and no blockmaster/blockvolume process.
   - NVMe-P5 CSI integration:
-    - status: active local slice on `frontend/nvme-ana-parity-plan`.
+    - status: QA green on `frontend/nvme-ana-parity-plan@8e0a28f`.
     - latest QA:
       - red at `622fae7`: StorageClass rendered `protocol: nvme`, but
         lifecycle intent had no protocol and generated blockvolume still used
@@ -642,6 +642,10 @@ References:
       - green at `69a1d20`: Test 1 NVMe dynamic PVC passed after rebuilt and
         k3s-imported images; lifecycle persisted `protocol: "nvme"` and
         launcher emitted NVMe args only.
+      - green at `8e0a28f`: Test 2 default iSCSI regression passed; all three
+        version gates matched HEAD, lifecycle persisted `protocol: "iscsi"`,
+        generated manifest used iSCSI args only, and cleanup left no iSCSI or
+        NVMe residue.
       - current fix: prefer product-scoped
         `sw-block.seaweedfs.com/protocol`, keep `protocol` as compatibility,
         delete stale cluster-scoped StorageClass before apply, capture
@@ -665,6 +669,10 @@ References:
         StorageClass parameter.
     - #QA assignment:
       `internal/docs/qa-assignments/nvme-p5-csi-protocol-selection-validation.md`.
+    - platform lesson:
+      - stale k3s images cost multiple lab rounds; TestOps pin-build/import
+        should make build, k3s image import, digest capture, and component
+        version verification one required step for future release gates.
   - NVMe-P6 RoCE / network performance matrix:
     - status: planned.
     - only after correctness gates are green.
