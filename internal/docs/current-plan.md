@@ -639,10 +639,14 @@ References:
         persisted lifecycle JSON still had no `protocol`; current source has
         protocol on CSI/RPC/lifecycle, so the harness now gates component
         `--version` output to catch stale K8s images before protocol checks.
+      - green at `69a1d20`: Test 1 NVMe dynamic PVC passed after rebuilt and
+        k3s-imported images; lifecycle persisted `protocol: "nvme"` and
+        launcher emitted NVMe args only.
       - current fix: prefer product-scoped
         `sw-block.seaweedfs.com/protocol`, keep `protocol` as compatibility,
-        delete stale cluster-scoped StorageClass before apply, and capture
-        `storageclass.live.yaml` before judging generated launcher output.
+        delete stale cluster-scoped StorageClass before apply, capture
+        `storageclass.live.yaml`, and record `--version` for blockmaster,
+        blockcsi, and generated blockvolume before judging launcher output.
     - allow StorageClass protocol selection without changing the app.
     - default StorageClass path stays iSCSI.
     - `parameters.sw-block.seaweedfs.com/protocol: nvme` selects NVMe target

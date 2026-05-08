@@ -78,6 +78,7 @@ func TestG15d_K8sRunner_AppliesLauncherGeneratedManifest(t *testing.T) {
 		"expected_git_revision=${EXPECTED_GIT_REVISION:-unknown}",
 		"blockmaster.version.txt",
 		"blockcsi.version.txt",
+		"blockvolume.version.txt",
 		"kube-system-imageids.txt",
 		"image revision mismatch",
 		"delete-storageclass-before-apply.log",

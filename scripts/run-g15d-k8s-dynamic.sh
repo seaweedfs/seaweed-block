@@ -166,6 +166,7 @@ collect_daemon_logs() {
   capture_once "$ARTIFACT_DIR/csi-provisioner.log" kubectl -n kube-system logs deploy/sw-block-csi-controller -c csi-provisioner
   capture_once "$ARTIFACT_DIR/csi-attacher.log" kubectl -n kube-system logs deploy/sw-block-csi-controller -c csi-attacher
   capture_once "$ARTIFACT_DIR/blockvolume-generated.log" kubectl -n "$BLOCKVOLUME_NAMESPACE" logs -l sw-block.seaweedfs.com/volume -c blockvolume --tail=-1
+  capture_once "$ARTIFACT_DIR/blockvolume.version.txt" kubectl -n "$BLOCKVOLUME_NAMESPACE" exec deploy -l app=sw-blockvolume -c blockvolume -- /usr/local/bin/blockvolume --version
   capture_once "$ARTIFACT_DIR/kube-system-pods-deploys.txt" kubectl -n kube-system get pods,deploy -o wide
   capture_once "$ARTIFACT_DIR/kube-system-imageids.txt" kubectl -n kube-system get pod -l 'app in (sw-blockmaster,sw-block-csi-controller,sw-block-csi-node)' -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{range .status.containerStatuses[*]}{"  "}{.name}{" imageID="}{.imageID}{"\n"}{end}{end}'
   capture_once "$ARTIFACT_DIR/blockvolume-namespace-pods-deploys.txt" kubectl -n "$BLOCKVOLUME_NAMESPACE" get pods,deploy -o wide
@@ -284,6 +285,11 @@ fi
 log "apply generated blockvolume manifests"
 kubectl apply -f "$ARTIFACT_DIR/generated-blockvolume.yaml" | tee "$ARTIFACT_DIR/apply-generated-blockvolume.log"
 kubectl -n "$BLOCKVOLUME_NAMESPACE" wait --for=condition=available deploy -l app=sw-blockvolume --timeout=120s
+if ! kubectl -n "$BLOCKVOLUME_NAMESPACE" exec deploy -l app=sw-blockvolume -c blockvolume -- /usr/local/bin/blockvolume --version >"$ARTIFACT_DIR/blockvolume.version.txt" 2>"$ARTIFACT_DIR/blockvolume.version.err"; then
+  echo "blockvolume image does not expose --version; rebuild and reload sw-block image from current branch" >&2
+  exit 1
+fi
+verify_revision "blockvolume" "$ARTIFACT_DIR/blockvolume.version.txt"
 
 log "wait for dynamic pod completion"
 for _ in $(seq 1 240); do

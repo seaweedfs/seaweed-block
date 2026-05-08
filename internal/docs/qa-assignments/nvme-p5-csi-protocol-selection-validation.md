@@ -42,8 +42,8 @@ Expected:
     live cluster-scoped StorageClass was updated before provisioning evidence is
     evaluated.
 - Image provenance:
-  - `blockmaster.version.txt` and `blockcsi.version.txt` contain the branch
-    commit under test,
+  - `blockmaster.version.txt`, `blockcsi.version.txt`, and
+    `blockvolume.version.txt` contain the branch commit under test,
   - `kube-system-imageids.txt` is present for stale-image forensics.
 - `generated-blockvolume.yaml` contains:
   - `--nvme-listen=`,
