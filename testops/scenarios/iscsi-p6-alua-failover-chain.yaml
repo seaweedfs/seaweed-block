@@ -30,6 +30,7 @@ phases:
       - action: pre_run_cleanup
         node: m02
         kill_patterns: "blockmaster,blockvolume,iscsi-target"
+        unmount: "/tmp/sw-block-iscsi-failover/mnt,/tmp/sw-block-iscsi-mpath/mnt"
         nvme_disconnect: "true"
         iscsi_logout_prefix: "iqn.2026-05.io.seaweedfs"
       - action: exec
@@ -250,6 +251,7 @@ phases:
       - action: pre_run_cleanup
         node: m02
         kill_patterns: "blockmaster,blockvolume,iscsi-target"
+        unmount: "/tmp/sw-block-iscsi-failover/mnt,/tmp/sw-block-iscsi-mpath/mnt"
         nvme_disconnect: "true"
         iscsi_logout_prefix: "iqn.2026-05.io.seaweedfs"
       - action: collect_path
