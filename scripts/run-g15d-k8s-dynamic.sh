@@ -67,6 +67,18 @@ verify_revision() {
   fi
 }
 
+capture_blockvolume_version() {
+  local out="$1"
+  local err="$2"
+  local deploy
+  deploy="$(kubectl -n "$BLOCKVOLUME_NAMESPACE" get deploy -l app=sw-blockvolume -o name 2>"$err" | head -n 1)"
+  if [[ -z "$deploy" ]]; then
+    echo "generated blockvolume Deployment not found for version capture" >>"$err"
+    return 1
+  fi
+  kubectl -n "$BLOCKVOLUME_NAMESPACE" exec "$deploy" -c blockvolume -- /usr/local/bin/blockvolume --version >"$out" 2>>"$err"
+}
+
 NODE_NAME="$(kubectl get nodes -o jsonpath='{.items[0].metadata.name}')"
 STACK_RENDERED="$ARTIFACT_DIR/block-stack.rendered.yaml"
 CSI_CONTROLLER_RENDERED="$ARTIFACT_DIR/csi-controller.rendered.yaml"
@@ -166,7 +178,9 @@ collect_daemon_logs() {
   capture_once "$ARTIFACT_DIR/csi-provisioner.log" kubectl -n kube-system logs deploy/sw-block-csi-controller -c csi-provisioner
   capture_once "$ARTIFACT_DIR/csi-attacher.log" kubectl -n kube-system logs deploy/sw-block-csi-controller -c csi-attacher
   capture_once "$ARTIFACT_DIR/blockvolume-generated.log" kubectl -n "$BLOCKVOLUME_NAMESPACE" logs -l sw-block.seaweedfs.com/volume -c blockvolume --tail=-1
-  capture_once "$ARTIFACT_DIR/blockvolume.version.txt" kubectl -n "$BLOCKVOLUME_NAMESPACE" exec deploy -l app=sw-blockvolume -c blockvolume -- /usr/local/bin/blockvolume --version
+  if [[ ! -s "$ARTIFACT_DIR/blockvolume.version.txt" ]]; then
+    capture_blockvolume_version "$ARTIFACT_DIR/blockvolume.version.txt" "$ARTIFACT_DIR/blockvolume.version.err" || true
+  fi
   capture_once "$ARTIFACT_DIR/kube-system-pods-deploys.txt" kubectl -n kube-system get pods,deploy -o wide
   capture_once "$ARTIFACT_DIR/kube-system-imageids.txt" kubectl -n kube-system get pod -l 'app in (sw-blockmaster,sw-block-csi-controller,sw-block-csi-node)' -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{range .status.containerStatuses[*]}{"  "}{.name}{" imageID="}{.imageID}{"\n"}{end}{end}'
   capture_once "$ARTIFACT_DIR/blockvolume-namespace-pods-deploys.txt" kubectl -n "$BLOCKVOLUME_NAMESPACE" get pods,deploy -o wide
@@ -285,8 +299,8 @@ fi
 log "apply generated blockvolume manifests"
 kubectl apply -f "$ARTIFACT_DIR/generated-blockvolume.yaml" | tee "$ARTIFACT_DIR/apply-generated-blockvolume.log"
 kubectl -n "$BLOCKVOLUME_NAMESPACE" wait --for=condition=available deploy -l app=sw-blockvolume --timeout=120s
-if ! kubectl -n "$BLOCKVOLUME_NAMESPACE" exec deploy -l app=sw-blockvolume -c blockvolume -- /usr/local/bin/blockvolume --version >"$ARTIFACT_DIR/blockvolume.version.txt" 2>"$ARTIFACT_DIR/blockvolume.version.err"; then
-  echo "blockvolume image does not expose --version; rebuild and reload sw-block image from current branch" >&2
+if ! capture_blockvolume_version "$ARTIFACT_DIR/blockvolume.version.txt" "$ARTIFACT_DIR/blockvolume.version.err"; then
+  echo "failed to capture generated blockvolume version; see $ARTIFACT_DIR/blockvolume.version.err" >&2
   exit 1
 fi
 verify_revision "blockvolume" "$ARTIFACT_DIR/blockvolume.version.txt"
