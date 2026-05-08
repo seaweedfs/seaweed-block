@@ -40,6 +40,10 @@ Expected:
   - `--nvme-subsysnqn=`,
   - `--nvme-ns=1`,
   - no `--iscsi-listen`.
+- `lifecycle-volumes.json` contains:
+  - `"protocol": "nvme"`.
+- `blockcsi-controller.log` or `blockmaster.log` contains a `CreateVolume`
+  line with `protocol="nvme"`.
 - CSI node evidence:
   - `csi-node.rendered.yaml` includes `modprobe nvme_tcp`,
   - CSI node image includes `nvme-cli`.

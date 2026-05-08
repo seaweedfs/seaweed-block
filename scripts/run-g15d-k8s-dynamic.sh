@@ -154,6 +154,7 @@ collect_daemon_logs() {
   capture_once "$ARTIFACT_DIR/kube-system-pods-deploys.txt" kubectl -n kube-system get pods,deploy -o wide
   capture_once "$ARTIFACT_DIR/blockvolume-namespace-pods-deploys.txt" kubectl -n "$BLOCKVOLUME_NAMESPACE" get pods,deploy -o wide
   capture_once "$ARTIFACT_DIR/app-storage.txt" kubectl -n "$NAMESPACE" get sc,pv,pvc,pod -o wide
+  capture_once "$ARTIFACT_DIR/lifecycle-volumes.json" kubectl -n kube-system exec deploy/sw-blockmaster -c blockmaster -- sh -c 'cat /var/lib/sw-block/lifecycle/volumes/*.json'
   if [[ ! -s "$ARTIFACT_DIR/generated-blockvolume.yaml" ]]; then
     kubectl -n kube-system exec deploy/sw-blockmaster -c blockmaster -- sh -c 'cat /manifests/*.yaml' >"$ARTIFACT_DIR/generated-blockvolume.yaml" 2>"$ARTIFACT_DIR/generated-blockvolume.err" || true
   fi
@@ -225,6 +226,26 @@ if ! kubectl -n kube-system exec deploy/sw-blockmaster -c blockmaster -- sh -c '
   exit 1
 fi
 kubectl -n kube-system exec deploy/sw-blockmaster -c blockmaster -- sh -c 'cat /manifests/*.yaml' >"$ARTIFACT_DIR/generated-blockvolume.yaml"
+kubectl -n kube-system exec deploy/sw-blockmaster -c blockmaster -- sh -c 'cat /var/lib/sw-block/lifecycle/volumes/*.json' >"$ARTIFACT_DIR/lifecycle-volumes.json" 2>"$ARTIFACT_DIR/lifecycle-volumes.err" || true
+
+if [[ "$FRONTEND_PROTOCOL" == "nvme" ]]; then
+  for want in "--nvme-listen=" "--nvme-subsysnqn=" "--nvme-ns=1"; do
+    if ! grep -q -- "$want" "$ARTIFACT_DIR/generated-blockvolume.yaml"; then
+      echo "generated blockvolume manifest missing NVMe arg $want" >&2
+      exit 1
+    fi
+  done
+  if grep -q -- "--iscsi-listen=" "$ARTIFACT_DIR/generated-blockvolume.yaml"; then
+    echo "generated blockvolume manifest rendered iSCSI args while frontend_protocol=nvme" >&2
+    exit 1
+  fi
+  log "verified generated blockvolume frontend protocol=nvme"
+else
+  if ! grep -q -- "--iscsi-listen=" "$ARTIFACT_DIR/generated-blockvolume.yaml"; then
+    echo "generated blockvolume manifest missing iSCSI args while frontend_protocol=iscsi" >&2
+    exit 1
+  fi
+fi
 
 log "apply generated blockvolume manifests"
 kubectl apply -f "$ARTIFACT_DIR/generated-blockvolume.yaml" | tee "$ARTIFACT_DIR/apply-generated-blockvolume.log"

@@ -3,6 +3,7 @@ package csi
 import (
 	"context"
 	"errors"
+	"log"
 	"strconv"
 
 	csipb "github.com/container-storage-interface/spec/lib/go/csi"
@@ -40,6 +41,7 @@ func (s *ControllerServer) CreateVolume(ctx context.Context, req *csipb.CreateVo
 	if err := s.resolveKubernetesMetadata(ctx, &spec); err != nil {
 		return nil, err
 	}
+	log.Printf("blockcsi: CreateVolume volume=%q protocol=%q replication_factor=%d pvc=%q namespace=%q", spec.VolumeID, spec.Protocol, spec.ReplicationFactor, spec.PVCName, spec.PVCNamespace)
 	created, err := s.provisioner.CreateVolume(ctx, spec)
 	if err != nil {
 		if errors.Is(err, ErrVolumeConflict) {

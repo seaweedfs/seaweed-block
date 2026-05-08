@@ -51,7 +51,9 @@ func (s *services) CreateVolume(ctx context.Context, req *control.CreateVolumeRe
 	if stores == nil {
 		return nil, status.Error(codes.FailedPrecondition, "lifecycle store is not configured")
 	}
-	rec, err := stores.Volumes.CreateVolume(lifecycleSpecFromWire(req))
+	spec := lifecycleSpecFromWire(req)
+	s.host.log.Printf("blockmaster: CreateVolume volume=%q protocol=%q replication_factor=%d pvc=%q namespace=%q", spec.VolumeID, spec.Protocol, spec.ReplicationFactor, spec.PVCName, spec.PVCNamespace)
+	rec, err := stores.Volumes.CreateVolume(spec)
 	if err != nil {
 		return nil, lifecycleError("create volume", err)
 	}
