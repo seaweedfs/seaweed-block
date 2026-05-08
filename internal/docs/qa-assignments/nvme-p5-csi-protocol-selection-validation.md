@@ -18,10 +18,16 @@ gate, not a new NVMe protocol gate.
   - Docker image build/load path for `sw-block:local` and
     `sw-block-csi:local`.
 - Rebuild both images from the branch under test before running.
-- For k3s, import both rebuilt images into k3s containerd before running
-  (`docker save ... | sudo k3s ctr images import -`). The scripts gate
-  `blockmaster`, `blockcsi`, and generated `blockvolume` `--version` output
-  against `git HEAD` to catch stale runtime images.
+- For k3s, use the pinned build/import path before running:
+
+  ```bash
+  SW_BLOCK_IMPORT_K3S=1 \
+  SW_BLOCK_ARTIFACT_DIR=/mnt/smb/work/share/g15d-k8s/pin-build-$(date -u +%Y%m%dT%H%M%SZ) \
+    bash scripts/build-alpha-images.sh "$PWD"
+  ```
+
+  The scripts gate `blockmaster`, `blockcsi`, and generated `blockvolume`
+  `--version` output against `git HEAD` to catch stale runtime images.
 
 ## Test 1: NVMe Dynamic PVC
 

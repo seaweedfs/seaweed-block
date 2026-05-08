@@ -61,12 +61,16 @@ For local k3s/kind-style testing, build images with:
 bash scripts/build-alpha-images.sh "$PWD"
 ```
 
-For k3s, import them into containerd:
+For k3s, prefer the pinned build/import form:
 
 ```bash
-docker save sw-block:local | sudo k3s ctr images import -
-docker save sw-block-csi:local | sudo k3s ctr images import -
+SW_BLOCK_IMPORT_K3S=1 \
+SW_BLOCK_ARTIFACT_DIR=/tmp/sw-block-alpha-build \
+  bash scripts/build-alpha-images.sh "$PWD"
 ```
+
+The artifact directory records image IDs and component `--version` output, so a
+later smoke failure can distinguish product behavior from a stale runtime image.
 
 For a cluster that pulls from a registry, set the image names before running the
 scripted demo:

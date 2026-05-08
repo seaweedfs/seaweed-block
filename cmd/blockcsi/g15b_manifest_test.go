@@ -226,6 +226,32 @@ func TestG15b_ImageBuildInputs_ContainExpectedBinariesAndNodeTools(t *testing.T)
 			t.Fatalf("build-alpha-images.sh missing %q", want)
 		}
 	}
+	for _, want := range []string{
+		"SW_BLOCK_IMPORT_K3S",
+		"sudo k3s ctr images import -",
+		"docker image inspect",
+		"alpha-images.env",
+		"blockmaster.version.txt",
+		"blockvolume.version.txt",
+		"blockcsi.version.txt",
+	} {
+		if !strings.Contains(buildScript, want) {
+			t.Fatalf("build-alpha-images.sh missing pin-build/import contract %q", want)
+		}
+	}
+
+	pinBuild := g15bReadScript(t, "testops-pin-alpha-images.sh")
+	for _, want := range []string{
+		"run-request.json",
+		"SW_BLOCK_IMPORT_K3S",
+		"pin-build",
+		"alpha image pin-build/import failed",
+		"result.json",
+	} {
+		if !strings.Contains(pinBuild, want) {
+			t.Fatalf("testops-pin-alpha-images.sh missing %q", want)
+		}
+	}
 }
 
 func TestG15b_Harness_CollectsDaemonLogsOnExit(t *testing.T) {

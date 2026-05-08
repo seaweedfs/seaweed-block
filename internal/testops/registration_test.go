@@ -412,6 +412,48 @@ func TestISCSIP8CompatSoakRegistrationBuildsShellDriver(t *testing.T) {
 	}
 }
 
+func TestAlphaImagesPinBuildRegistrationBuildsShellDriver(t *testing.T) {
+	repoRoot := findRepoRoot(t)
+	raw, err := os.Open(registrationPath(repoRoot, "alpha-images-pin-build.json"))
+	if err != nil {
+		t.Fatalf("open registration: %v", err)
+	}
+	defer raw.Close()
+
+	registration, err := DecodeRegistration(raw)
+	if err != nil {
+		t.Fatalf("DecodeRegistration: %v", err)
+	}
+	if registration.Scenario != "alpha-images-pin-build" || registration.Driver.Type != "shell" {
+		t.Fatalf("registration=%+v", registration)
+	}
+	driver, err := registration.NewDriver(repoRoot)
+	if err != nil {
+		t.Fatalf("NewDriver: %v", err)
+	}
+	shell, ok := driver.(ShellDriver)
+	if !ok {
+		t.Fatalf("driver type=%T want ShellDriver", driver)
+	}
+	if !filepath.IsAbs(shell.Path) || filepath.Base(shell.Path) != "testops-pin-alpha-images.sh" {
+		t.Fatalf("shell path=%q", shell.Path)
+	}
+	if _, err := os.Stat(shell.Path); err != nil {
+		t.Fatalf("shell driver path missing: %v", err)
+	}
+	for _, want := range []string{"pin-build/alpha-images.env", "pin-build/blockmaster.version.txt", "pin-build/k3s-import-sw-block.log"} {
+		if !containsString(registration.Artifacts, want) {
+			t.Fatalf("registration artifacts missing %q: %v", want, registration.Artifacts)
+		}
+	}
+	if !containsString(registration.RequiredCapabilities, "k3s") {
+		t.Fatalf("registration must call out k3s import requirement: %v", registration.RequiredCapabilities)
+	}
+	if !containsString(registration.NonClaims, "Does not replace protocol-specific smoke tests.") {
+		t.Fatalf("registration must keep smoke-test non-claim: %v", registration.NonClaims)
+	}
+}
+
 func containsString(values []string, want string) bool {
 	for _, value := range values {
 		if value == want {

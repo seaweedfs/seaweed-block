@@ -485,10 +485,26 @@ References:
 
 - Tasks:
   - #QA package P8 compatibility soak as a TestOps scenario:
-    - status: next assignment.
+    - status: done; wrapper proven green in standalone runner and carried back
+      into the product planning flow.
     - must record commit SHA, command, artifact root, step result, final line,
       and cleanup status in a single result file.
     - initial scenario may call `scripts/run-iscsi-compat-soak.sh`.
+  - pin alpha image build/import before K8s frontend gates:
+    - status: active in this branch.
+    - script: `scripts/build-alpha-images.sh`.
+    - TestOps scenario: `alpha-images-pin-build`.
+    - contract:
+      - build `sw-block:local` and `sw-block-csi:local`,
+      - optionally import both images into k3s containerd with
+        `SW_BLOCK_IMPORT_K3S=1`,
+      - record Docker image IDs,
+      - record `blockmaster`, `blockvolume`, and `blockcsi` `--version`
+        output,
+      - fail before protocol smoke tests if build/import/version capture fails.
+    - reason:
+      - NVMe-P5 showed that stale k3s images can mimic product protocol bugs.
+        The build/import step must be one reviewed gate, not manual lab memory.
   - define the minimal result contract:
     - scenario name,
     - repository SHA,
