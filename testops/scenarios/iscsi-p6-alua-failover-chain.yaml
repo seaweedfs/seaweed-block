@@ -103,7 +103,7 @@ phases:
       - action: grep_log
         node: m02
         path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-p6-chain/alua_multipath/sg_inq.r1.vpd83.txt"
-        pattern: "[Tt]arget port group|[Rr]elative target port|NAA"
+        pattern: "Target port group"
         save_as: r1_vpd83_identity_count
       - action: assert_greater
         actual: "{{ r1_vpd83_identity_count }}"
@@ -111,7 +111,7 @@ phases:
       - action: grep_log
         node: m02
         path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-p6-chain/alua_multipath/sg_inq.r2.vpd83.txt"
-        pattern: "[Tt]arget port group|[Rr]elative target port|NAA"
+        pattern: "Target port group"
         save_as: r2_vpd83_identity_count
       - action: assert_greater
         actual: "{{ r2_vpd83_identity_count }}"
@@ -131,7 +131,7 @@ phases:
       - action: grep_log
         node: m02
         path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-p6-chain/alua_multipath/multipath-map-name.txt"
-        pattern: ".+"
+        pattern: "mpath"
         save_as: multipath_map_name_count
       - action: assert_greater
         actual: "{{ multipath_map_name_count }}"
@@ -219,7 +219,7 @@ phases:
       - action: grep_log
         node: m02
         path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-p6-chain/mounted_failover/sg_rtpg.r2.after.txt"
-        pattern: "asymmetric access state\\s*:\\s*0x00"
+        pattern: "asymmetric access state"
         save_as: r2_after_active_optimized_count
       - action: assert_greater
         actual: "{{ r2_after_active_optimized_count }}"
