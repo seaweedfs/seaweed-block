@@ -120,12 +120,13 @@ body = json.load(open(path))
 if str(body.get("ReplicaID", "")) != replica:
     sys.exit(1)
 authority_role = str(body.get("AuthorityRole", ""))
+epoch = int(body.get("Epoch", 0))
 frontend_ready = bool(body.get("FrontendPrimaryReady"))
 replication_role = str(body.get("ReplicationRole", ""))
 if role == "primary":
     sys.exit(0 if authority_role == "primary" and frontend_ready else 1)
 if role == "secondary":
-    ok = authority_role != "primary" and replication_role in ("not_ready", "replica_ready", "recovering")
+    ok = epoch > 0 and authority_role != "primary" and replication_role in ("not_ready", "replica_ready", "recovering")
     sys.exit(0 if ok else 1)
 sys.exit(1)
 PY
