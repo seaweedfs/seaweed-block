@@ -103,7 +103,7 @@ phases:
       - action: grep_log
         node: m02
         path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-p6-chain/alua_multipath/sg_inq.r1.vpd83.txt"
-        pattern: "target port group|relative target port|NAA"
+        pattern: "[Tt]arget port group|[Rr]elative target port|NAA"
         save_as: r1_vpd83_identity_count
       - action: assert_greater
         actual: "{{ r1_vpd83_identity_count }}"
@@ -111,7 +111,7 @@ phases:
       - action: grep_log
         node: m02
         path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-p6-chain/alua_multipath/sg_inq.r2.vpd83.txt"
-        pattern: "target port group|relative target port|NAA"
+        pattern: "[Tt]arget port group|[Rr]elative target port|NAA"
         save_as: r2_vpd83_identity_count
       - action: assert_greater
         actual: "{{ r2_vpd83_identity_count }}"
