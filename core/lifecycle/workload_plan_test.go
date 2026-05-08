@@ -29,6 +29,9 @@ func TestG15d_WorkloadPlan_BlankPoolRF2CreatesReplicaWorkloads(t *testing.T) {
 	if plan.VolumeID != "pvc-a" || plan.SizeBytes != 1<<20 || len(plan.Replicas) != 2 {
 		t.Fatalf("plan=%+v", plan)
 	}
+	if plan.Protocol != "iscsi" {
+		t.Fatalf("protocol=%q want iscsi", plan.Protocol)
+	}
 	if plan.PVCName != "demo-pvc" || plan.PVCNamespace != "default" || plan.PVCUID != "uid-123" {
 		t.Fatalf("pvc metadata=%+v", plan)
 	}
@@ -40,6 +43,42 @@ func TestG15d_WorkloadPlan_BlankPoolRF2CreatesReplicaWorkloads(t *testing.T) {
 	}
 	if plan.Replicas[0].ISCSIQualifiedName != "iqn.test:pvc-a" {
 		t.Fatalf("iqn=%q", plan.Replicas[0].ISCSIQualifiedName)
+	}
+}
+
+func TestG15d_WorkloadPlan_NVMeProtocolCreatesNVMeTargets(t *testing.T) {
+	volume := VolumeRecord{Spec: VolumeSpec{
+		VolumeID:          "pvc-a",
+		SizeBytes:         1 << 20,
+		ReplicationFactor: 1,
+		Protocol:          "nvme",
+	}}
+	placement := PlacementIntent{
+		VolumeID:  "pvc-a",
+		DesiredRF: 1,
+		Slots: []PlacementSlotIntent{{
+			ServerID: "node-a",
+			PoolID:   "pool-a",
+			Source:   PlacementSourceBlankPool,
+		}},
+	}
+	plan, err := PlanBlockVolumeWorkloads(volume, placement, []NodeRegistration{
+		nodeForWorkload("node-a", "10.0.0.1:9201", "10.0.0.1:9101"),
+	}, WorkloadPlanConfig{NVMePortBase: 4420, NQNPrefix: "nqn.test"})
+	if err != nil {
+		t.Fatalf("PlanBlockVolumeWorkloads: %v", err)
+	}
+	if plan.Protocol != "nvme" {
+		t.Fatalf("protocol=%q want nvme", plan.Protocol)
+	}
+	if got := plan.Replicas[0].NVMeListenPort; got != 4420 {
+		t.Fatalf("nvme port=%d want 4420", got)
+	}
+	if got := plan.Replicas[0].NVMeSubsystemNQN; got != "nqn.test:pvc-a" {
+		t.Fatalf("nqn=%q", got)
+	}
+	if got := plan.Replicas[0].NVMeNSID; got != 1 {
+		t.Fatalf("nsid=%d want 1", got)
 	}
 }
 

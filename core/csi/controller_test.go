@@ -238,6 +238,9 @@ func TestG15c_ControllerCreateVolume_RecordsDesiredIntentOnly(t *testing.T) {
 	if got := prov.calls[0]; got.VolumeID != "pvc-a" || got.SizeBytes != 1<<30 || got.ReplicationFactor != 2 {
 		t.Fatalf("spec=%+v", got)
 	}
+	if got := prov.calls[0]; got.Protocol != ProtocolISCSI {
+		t.Fatalf("protocol=%q want iscsi", got.Protocol)
+	}
 	if got := prov.calls[0]; got.PVCName != "demo-pvc" || got.PVCNamespace != "demo-ns" || got.PVCUID != "uid-123" || got.PVName != "pvc-a" {
 		t.Fatalf("kubernetes metadata not preserved: %+v", got)
 	}
@@ -247,6 +250,56 @@ func TestG15c_ControllerCreateVolume_RecordsDesiredIntentOnly(t *testing.T) {
 	}
 	if err := authorityContextGuard(vol.GetVolumeContext()); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestG15c_ControllerCreateVolume_RecordsProtocolSelection(t *testing.T) {
+	prov := &stubProvisioner{}
+	s := NewControllerServerWithProvisioner(&stubLookup{}, prov)
+
+	resp, err := s.CreateVolume(context.Background(), &csipb.CreateVolumeRequest{
+		Name: "pvc-a",
+		CapacityRange: &csipb.CapacityRange{
+			RequiredBytes: 1 << 30,
+		},
+		Parameters: map[string]string{
+			"protocol": "nvme",
+		},
+		VolumeCapabilities: []*csipb.VolumeCapability{
+			testVolumeCapability(),
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateVolume: %v", err)
+	}
+	if got := prov.calls[0].Protocol; got != ProtocolNVMe {
+		t.Fatalf("protocol=%q want nvme", got)
+	}
+	if got := resp.GetVolume().GetVolumeContext()["protocol"]; got != "nvme" {
+		t.Fatalf("response protocol=%q want nvme", got)
+	}
+}
+
+func TestG15c_ControllerCreateVolume_RejectsInvalidProtocol(t *testing.T) {
+	s := NewControllerServerWithProvisioner(&stubLookup{}, &stubProvisioner{})
+	_, err := s.CreateVolume(context.Background(), &csipb.CreateVolumeRequest{
+		Name: "pvc-a",
+		CapacityRange: &csipb.CapacityRange{
+			RequiredBytes: 1 << 30,
+		},
+		Parameters: map[string]string{
+			"protocol": "nfs",
+		},
+		VolumeCapabilities: []*csipb.VolumeCapability{
+			testVolumeCapability(),
+		},
+	})
+	if err == nil {
+		t.Fatal("expected invalid protocol error")
+	}
+	st, _ := status.FromError(err)
+	if st.Code() != codes.InvalidArgument {
+		t.Fatalf("code=%v want InvalidArgument", st.Code())
 	}
 }
 

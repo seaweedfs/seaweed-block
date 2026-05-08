@@ -18,6 +18,7 @@ const (
 	transportNVMe  = "nvme"
 	transportFile  = ".transport"
 	volumeFile     = ".volume"
+	targetFile     = ".target"
 )
 
 type ISCSIUtil interface {
@@ -28,6 +29,13 @@ type ISCSIUtil interface {
 	GetDeviceByIQN(ctx context.Context, iqn string) (string, error)
 	IsLoggedIn(ctx context.Context, iqn string) (bool, error)
 	RescanDevice(ctx context.Context, iqn string) error
+}
+
+type NVMeUtil interface {
+	Connect(ctx context.Context, addr, nqn string) error
+	Disconnect(ctx context.Context, nqn string) error
+	GetDeviceByNQN(ctx context.Context, nqn string) (string, error)
+	IsConnected(ctx context.Context, nqn string) (bool, error)
 }
 
 type ISCSIAuth struct {
@@ -45,6 +53,8 @@ type MountUtil interface {
 type stagedVolumeInfo struct {
 	iqn         string
 	iscsiAddr   string
+	nqn         string
+	nvmeAddr    string
 	transport   string
 	fsType      string
 	stagingPath string
@@ -55,6 +65,7 @@ type NodeServer struct {
 	nodeID    string
 	iqnPrefix string
 	iscsiUtil ISCSIUtil
+	nvmeUtil  NVMeUtil
 	mountUtil MountUtil
 	logger    *log.Logger
 
@@ -66,6 +77,7 @@ type NodeConfig struct {
 	NodeID    string
 	IQNPrefix string
 	ISCSIUtil ISCSIUtil
+	NVMeUtil  NVMeUtil
 	MountUtil MountUtil
 	Logger    *log.Logger
 }
@@ -79,6 +91,7 @@ func NewNodeServer(cfg NodeConfig) *NodeServer {
 		nodeID:    cfg.NodeID,
 		iqnPrefix: cfg.IQNPrefix,
 		iscsiUtil: cfg.ISCSIUtil,
+		nvmeUtil:  cfg.NVMeUtil,
 		mountUtil: cfg.MountUtil,
 		logger:    lg,
 		staged:    make(map[string]*stagedVolumeInfo),
@@ -97,7 +110,7 @@ func (s *NodeServer) NodeStageVolume(ctx context.Context, req *csipb.NodeStageVo
 	if req.GetVolumeCapability() == nil {
 		return nil, status.Error(codes.InvalidArgument, "volume capability is required")
 	}
-	if s.iscsiUtil == nil || s.mountUtil == nil {
+	if s.mountUtil == nil {
 		return nil, status.Error(codes.FailedPrecondition, "node attach utilities are not configured")
 	}
 	mounted, err := s.mountUtil.IsMounted(ctx, stagingPath)
@@ -112,6 +125,17 @@ func (s *NodeServer) NodeStageVolume(ctx context.Context, req *csipb.NodeStageVo
 		return &csipb.NodeStageVolumeResponse{}, nil
 	}
 
+	transport := transportFromContext(req.GetPublishContext(), req.GetVolumeContext())
+	if transport == transportNVMe {
+		return s.stageNVMe(ctx, req, volumeID, stagingPath)
+	}
+	return s.stageISCSI(ctx, req, volumeID, stagingPath)
+}
+
+func (s *NodeServer) stageISCSI(ctx context.Context, req *csipb.NodeStageVolumeRequest, volumeID, stagingPath string) (*csipb.NodeStageVolumeResponse, error) {
+	if s.iscsiUtil == nil {
+		return nil, status.Error(codes.FailedPrecondition, "iSCSI attach utility is not configured")
+	}
 	portal, iqn := iscsiFromContext(req.GetPublishContext())
 	auth := iscsiAuthFromContext(req.GetSecrets())
 	if auth == (ISCSIAuth{}) {
@@ -183,12 +207,88 @@ func (s *NodeServer) NodeStageVolume(ctx context.Context, req *csipb.NodeStageVo
 	if err := writeVolumeFile(stagingPath, volumeID); err != nil {
 		s.logger.Printf("NodeStageVolume: %s: %v (non-fatal)", volumeID, err)
 	}
+	if err := writeTargetFile(stagingPath, iqn); err != nil {
+		s.logger.Printf("NodeStageVolume: %s: %v (non-fatal)", volumeID, err)
+	}
 
 	s.stagedMu.Lock()
 	s.staged[volumeID] = &stagedVolumeInfo{
 		iqn:         iqn,
 		iscsiAddr:   portal,
 		transport:   transportISCSI,
+		fsType:      fsType,
+		stagingPath: stagingPath,
+	}
+	s.stagedMu.Unlock()
+
+	success = true
+	return &csipb.NodeStageVolumeResponse{}, nil
+}
+
+func (s *NodeServer) stageNVMe(ctx context.Context, req *csipb.NodeStageVolumeRequest, volumeID, stagingPath string) (*csipb.NodeStageVolumeResponse, error) {
+	if s.nvmeUtil == nil {
+		return nil, status.Error(codes.FailedPrecondition, "NVMe attach utility is not configured")
+	}
+	addr, nqn := nvmeFromContext(req.GetPublishContext())
+	if addr == "" || nqn == "" {
+		addr, nqn = nvmeFromContext(req.GetVolumeContext())
+	}
+	if addr == "" || nqn == "" {
+		return nil, status.Error(codes.FailedPrecondition, "no NVMe publish target")
+	}
+	connected, err := s.nvmeUtil.IsConnected(ctx, nqn)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "check nvme connect: %v", err)
+	}
+	if connected && !s.hasStagedIdentity(volumeID, stagingPath) {
+		return nil, status.Errorf(codes.FailedPrecondition, "NVMe subsystem %q is already connected without staged volume identity", nqn)
+	}
+	connectStarted := false
+	if !connected {
+		if err := s.nvmeUtil.Connect(ctx, addr, nqn); err != nil {
+			return nil, status.Errorf(codes.Internal, "nvme connect: %v", err)
+		}
+		connectStarted = true
+	}
+	success := false
+	defer func() {
+		if !success && connectStarted {
+			_ = s.nvmeUtil.Disconnect(context.Background(), nqn)
+		}
+	}()
+
+	device, err := s.nvmeUtil.GetDeviceByNQN(ctx, nqn)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "get nvme device: %v", err)
+	}
+	if device == "" {
+		return nil, status.Error(codes.Internal, "get nvme device: empty path")
+	}
+	if err := os.MkdirAll(stagingPath, 0o750); err != nil {
+		return nil, status.Errorf(codes.Internal, "create staging dir: %v", err)
+	}
+	fsType := "ext4"
+	if mnt := req.GetVolumeCapability().GetMount(); mnt != nil && mnt.FsType != "" {
+		fsType = mnt.FsType
+	}
+	if err := s.mountUtil.FormatAndMount(ctx, device, stagingPath, fsType); err != nil {
+		return nil, status.Errorf(codes.Internal, "format and mount: %v", err)
+	}
+	if err := writeTransportFile(stagingPath, transportNVMe); err != nil {
+		s.logger.Printf("NodeStageVolume: %s: %v (non-fatal)", volumeID, err)
+	}
+	if err := writeVolumeFile(stagingPath, volumeID); err != nil {
+		s.logger.Printf("NodeStageVolume: %s: %v (non-fatal)", volumeID, err)
+	}
+	if err := writeTargetFile(stagingPath, nqn); err != nil {
+		s.logger.Printf("NodeStageVolume: %s: %v (non-fatal)", volumeID, err)
+	}
+
+	s.stagedMu.Lock()
+	s.staged[volumeID] = &stagedVolumeInfo{
+		nqn:         nqn,
+		nvmeAddr:    addr,
+		transport:   transportNVMe,
 		fsType:      fsType,
 		stagingPath: stagingPath,
 	}
@@ -228,6 +328,12 @@ func (s *NodeServer) NodeUnstageVolume(ctx context.Context, req *csipb.NodeUnsta
 	if transport == "" {
 		transport = transportISCSI
 	}
+	nqn := ""
+	if info != nil {
+		nqn = info.nqn
+	} else if transport == transportNVMe {
+		nqn = readTargetFile(stagingPath)
+	}
 
 	var firstErr error
 	if err := s.mountUtil.Unmount(ctx, stagingPath); err != nil {
@@ -238,12 +344,18 @@ func (s *NodeServer) NodeUnstageVolume(ctx context.Context, req *csipb.NodeUnsta
 			firstErr = err
 		}
 	}
+	if transport == transportNVMe && nqn != "" && s.nvmeUtil != nil {
+		if err := s.nvmeUtil.Disconnect(ctx, nqn); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
 	if firstErr != nil {
 		return nil, status.Errorf(codes.Internal, "unstage: %v", firstErr)
 	}
 
 	_ = os.Remove(filepath.Join(stagingPath, transportFile))
 	_ = os.Remove(filepath.Join(stagingPath, volumeFile))
+	_ = os.Remove(filepath.Join(stagingPath, targetFile))
 	s.stagedMu.Lock()
 	delete(s.staged, volumeID)
 	s.stagedMu.Unlock()
@@ -337,6 +449,33 @@ func iscsiFromContext(ctx map[string]string) (portal, iqn string) {
 	return ctx["iscsiAddr"], ctx["iqn"]
 }
 
+func nvmeFromContext(ctx map[string]string) (addr, nqn string) {
+	if ctx == nil {
+		return "", ""
+	}
+	return ctx["nvmeAddr"], ctx["nqn"]
+}
+
+func transportFromContext(contexts ...map[string]string) string {
+	for _, ctx := range contexts {
+		if ctx == nil {
+			continue
+		}
+		switch ctx["protocol"] {
+		case transportNVMe:
+			return transportNVMe
+		case transportISCSI:
+			return transportISCSI
+		}
+	}
+	for _, ctx := range contexts {
+		if _, ok := ctx["nvmeAddr"]; ok && ctx["nqn"] != "" {
+			return transportNVMe
+		}
+	}
+	return transportISCSI
+}
+
 func iscsiAuthFromContext(ctx map[string]string) ISCSIAuth {
 	if ctx == nil {
 		return ISCSIAuth{}
@@ -396,8 +535,20 @@ func writeVolumeFile(stagingPath, volumeID string) error {
 	return os.WriteFile(filepath.Join(stagingPath, volumeFile), []byte(volumeID), 0o600)
 }
 
+func writeTargetFile(stagingPath, target string) error {
+	return os.WriteFile(filepath.Join(stagingPath, targetFile), []byte(target), 0o600)
+}
+
 func readVolumeFile(stagingPath string) string {
 	b, err := os.ReadFile(filepath.Join(stagingPath, volumeFile))
+	if err != nil {
+		return ""
+	}
+	return string(b)
+}
+
+func readTargetFile(stagingPath string) string {
+	b, err := os.ReadFile(filepath.Join(stagingPath, targetFile))
 	if err != nil {
 		return ""
 	}

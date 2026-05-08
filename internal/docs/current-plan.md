@@ -630,8 +630,24 @@ References:
         - `post.bin` write/read/verify succeeded after failover,
         - cleanup left no test NQN and no blockmaster/blockvolume process.
   - NVMe-P5 CSI integration:
-    - status: planned.
+    - status: active local slice on `frontend/nvme-ana-parity-plan`.
     - allow StorageClass protocol selection without changing the app.
+    - default StorageClass path stays iSCSI.
+    - `parameters.protocol: nvme` selects NVMe target facts end-to-end:
+      - CSI CreateVolume records protocol in lifecycle intent,
+      - master lifecycle RPC carries protocol,
+      - launcher renders `blockvolume` with `--nvme-listen`,
+        `--nvme-subsysnqn`, and `--nvme-ns`,
+      - CSI ControllerPublish returns `protocol=nvme`, `nvmeAddr`, and `nqn`,
+      - CSI NodeStage uses `nvme connect`, formats/mounts the NVMe namespace,
+        and disconnects by NQN on NodeUnstage.
+    - K8s harness:
+      - script: `scripts/run-k8s-alpha-nvme.sh`,
+      - underlying env knob: `SW_BLOCK_FRONTEND_PROTOCOL=nvme`,
+      - dynamic PVC/app manifest remains unchanged except injected
+        StorageClass parameter.
+    - #QA assignment:
+      `internal/docs/qa-assignments/nvme-p5-csi-protocol-selection-validation.md`.
   - NVMe-P6 RoCE / network performance matrix:
     - status: planned.
     - only after correctness gates are green.

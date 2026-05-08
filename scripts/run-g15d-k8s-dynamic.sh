@@ -12,6 +12,7 @@ LAUNCHER_PVC_OWNER_REF="${SW_BLOCK_LAUNCHER_PVC_OWNER_REF:-0}"
 CHAP_USERNAME="${SW_BLOCK_ISCSI_CHAP_USERNAME:-}"
 CHAP_SECRET="${SW_BLOCK_ISCSI_CHAP_SECRET:-}"
 CHAP_SECRET_NAME="${SW_BLOCK_ISCSI_CHAP_SECRET_NAME:-sw-block-iscsi-chap}"
+FRONTEND_PROTOCOL="${SW_BLOCK_FRONTEND_PROTOCOL:-iscsi}"
 BLOCKVOLUME_NAMESPACE="kube-system"
 if [[ "$LAUNCHER_PVC_OWNER_REF" == "1" || "$LAUNCHER_PVC_OWNER_REF" == "true" ]]; then
   BLOCKVOLUME_NAMESPACE="$NAMESPACE"
@@ -23,6 +24,14 @@ if [[ -n "$CHAP_USERNAME" || -n "$CHAP_SECRET" ]]; then
     exit 2
   fi
   CHAP_ENABLED=1
+fi
+if [[ "$FRONTEND_PROTOCOL" != "iscsi" && "$FRONTEND_PROTOCOL" != "nvme" ]]; then
+  echo "SW_BLOCK_FRONTEND_PROTOCOL must be iscsi or nvme" >&2
+  exit 2
+fi
+if [[ "$FRONTEND_PROTOCOL" == "nvme" && "$CHAP_ENABLED" == "1" ]]; then
+  echo "iSCSI CHAP is not compatible with SW_BLOCK_FRONTEND_PROTOCOL=nvme" >&2
+  exit 2
 fi
 
 mkdir -p "$ARTIFACT_DIR"
@@ -90,6 +99,17 @@ if [[ "$CHAP_ENABLED" == "1" ]]; then
   ' "$DYNAMIC_RENDERED" >"$DYNAMIC_RENDERED.tmp"
   mv "$DYNAMIC_RENDERED.tmp" "$DYNAMIC_RENDERED"
 fi
+if [[ "$FRONTEND_PROTOCOL" == "nvme" ]]; then
+  awk '
+    /^parameters:/ {
+      print
+      print "  protocol: \"nvme\""
+      next
+    }
+    {print}
+  ' "$DYNAMIC_RENDERED" >"$DYNAMIC_RENDERED.tmp"
+  mv "$DYNAMIC_RENDERED.tmp" "$DYNAMIC_RENDERED"
+fi
 
 log "artifact_dir=$ARTIFACT_DIR"
 log "root=$ROOT"
@@ -100,6 +120,7 @@ log "csi_image=$CSI_IMAGE"
 log "blockvolume_namespace=$BLOCKVOLUME_NAMESPACE"
 log "launcher_pvc_owner_ref=$LAUNCHER_PVC_OWNER_REF"
 log "chap_enabled=$CHAP_ENABLED"
+log "frontend_protocol=$FRONTEND_PROTOCOL"
 log "dynamic_pvc_manifest=$DYNAMIC_PVC_MANIFEST"
 kubectl version --client=true >"$ARTIFACT_DIR/kubectl-version.txt" 2>&1 || true
 kubectl get nodes -o wide >"$ARTIFACT_DIR/nodes.before.txt"
@@ -154,10 +175,13 @@ collect_post_delete_state() {
   kubectl -n "$NAMESPACE" get sc,pv,pvc,pod -o wide >"$ARTIFACT_DIR/app-storage.after-delete.txt" 2>&1 || true
   if command -v sudo >/dev/null 2>&1; then
     sudo iscsiadm -m session >"$ARTIFACT_DIR/iscsi-sessions.after-delete.txt" 2>&1 || true
+    sudo nvme list-subsys -o json >"$ARTIFACT_DIR/nvme-list-subsys.after-delete.json" 2>&1 || true
   elif command -v iscsiadm >/dev/null 2>&1; then
     iscsiadm -m session >"$ARTIFACT_DIR/iscsi-sessions.after-delete.txt" 2>&1 || true
+    nvme list-subsys -o json >"$ARTIFACT_DIR/nvme-list-subsys.after-delete.json" 2>&1 || true
   else
     echo "iscsiadm unavailable" >"$ARTIFACT_DIR/iscsi-sessions.after-delete.txt"
+    echo "nvme unavailable" >"$ARTIFACT_DIR/nvme-list-subsys.after-delete.json"
   fi
 }
 
@@ -270,6 +294,10 @@ if kubectl -n "$NAMESPACE" get pvc sw-block-dynamic-v1 >/dev/null 2>&1; then
 fi
 if grep -q 'iqn.2026-05.io.seaweedfs' "$ARTIFACT_DIR/iscsi-sessions.after-delete.txt" 2>/dev/null; then
   echo "dangling sw-block iSCSI session after delete" >&2
+  exit 1
+fi
+if grep -q 'nqn.2026-05.io.seaweedfs' "$ARTIFACT_DIR/nvme-list-subsys.after-delete.json" 2>/dev/null; then
+  echo "dangling sw-block NVMe subsystem after delete" >&2
   exit 1
 fi
 

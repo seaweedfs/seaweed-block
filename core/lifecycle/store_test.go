@@ -20,6 +20,7 @@ func TestFileStore_CreateVolumePersistsAndIsIdempotent(t *testing.T) {
 		VolumeID:          "vol-a",
 		SizeBytes:         1 << 20,
 		ReplicationFactor: 2,
+		Protocol:          "iscsi",
 		PVCName:           "demo-pvc",
 		PVCNamespace:      "demo-ns",
 		PVCUID:            "uid-123",
@@ -64,6 +65,9 @@ func TestFileStore_CreateVolumeRejectsConflictingSpec(t *testing.T) {
 	}
 	if _, err := s.CreateVolume(VolumeSpec{VolumeID: "vol-a", SizeBytes: 2 << 20, ReplicationFactor: 2}); err == nil {
 		t.Fatal("conflicting create must fail")
+	}
+	if _, err := s.CreateVolume(VolumeSpec{VolumeID: "vol-a", SizeBytes: 1 << 20, ReplicationFactor: 2, Protocol: "nvme"}); err == nil {
+		t.Fatal("conflicting protocol create must fail")
 	}
 }
 

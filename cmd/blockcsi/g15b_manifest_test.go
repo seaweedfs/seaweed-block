@@ -150,13 +150,16 @@ func TestG15b_Manifest_NodePluginPrivilegedShape(t *testing.T) {
 	}
 }
 
-func TestG15b_Manifest_NodePluginLoadsISCSITCPModule(t *testing.T) {
+func TestG15b_Manifest_NodePluginLoadsFrontendKernelModules(t *testing.T) {
 	doc := g15bFindKind(t, "csi-node.yaml", "DaemonSet")
 	podSpec := g15bMap(t, g15bMap(t, g15bMap(t, doc, "spec"), "template"), "spec")
 	initContainers := g15bSlice(t, podSpec, "initContainers")
 	loader := g15bContainer(t, initContainers, "load-iscsi-tcp")
-	if got := strings.Join(g15bStringSlice(t, loader, "args"), " "); !strings.Contains(got, "modprobe iscsi_tcp") {
-		t.Fatalf("load-iscsi-tcp args=%q, want modprobe iscsi_tcp", got)
+	got := strings.Join(g15bStringSlice(t, loader, "args"), " ")
+	for _, want := range []string{"modprobe iscsi_tcp", "modprobe nvme_tcp"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("load-iscsi-tcp args=%q, want %s", got, want)
+		}
 	}
 	sec := g15bMap(t, loader, "securityContext")
 	if got, ok := sec["privileged"].(bool); !ok || !got {
@@ -211,7 +214,7 @@ func TestG15b_ImageBuildInputs_ContainExpectedBinariesAndNodeTools(t *testing.T)
 	}
 
 	csi := g15bReadDeployFile(t, "Dockerfile.blockcsi")
-	for _, want := range []string{"./cmd/blockcsi", "open-iscsi", "e2fsprogs", "kmod", "util-linux", "/usr/local/bin/blockcsi"} {
+	for _, want := range []string{"./cmd/blockcsi", "open-iscsi", "nvme-cli", "e2fsprogs", "kmod", "util-linux", "/usr/local/bin/blockcsi"} {
 		if !strings.Contains(csi, want) {
 			t.Fatalf("Dockerfile.blockcsi missing %q", want)
 		}

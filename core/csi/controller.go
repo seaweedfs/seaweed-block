@@ -47,12 +47,14 @@ func (s *ControllerServer) CreateVolume(ctx context.Context, req *csipb.CreateVo
 		}
 		return nil, status.Errorf(codes.Internal, "create volume intent: %v", err)
 	}
+	protocol := normalizeProtocol(created.Protocol)
 	return &csipb.CreateVolumeResponse{
 		Volume: &csipb.Volume{
 			VolumeId:      created.VolumeID,
 			CapacityBytes: int64(created.SizeBytes),
 			VolumeContext: map[string]string{
 				"replicationFactor": strconv.Itoa(created.ReplicationFactor),
+				"protocol":          string(protocol),
 			},
 		},
 	}, nil
@@ -180,10 +182,20 @@ func volumeSpecFromCreateRequest(req *csipb.CreateVolumeRequest) (VolumeSpec, er
 		}
 		rf = v
 	}
+	protocol := ProtocolISCSI
+	if raw := req.GetParameters()["protocol"]; raw != "" {
+		switch Protocol(raw) {
+		case ProtocolISCSI, ProtocolNVMe:
+			protocol = Protocol(raw)
+		default:
+			return VolumeSpec{}, status.Errorf(codes.InvalidArgument, "invalid protocol %q", raw)
+		}
+	}
 	return VolumeSpec{
 		VolumeID:          req.GetName(),
 		SizeBytes:         uint64(size),
 		ReplicationFactor: rf,
+		Protocol:          protocol,
 		PVCName:           req.GetParameters()["csi.storage.k8s.io/pvc/name"],
 		PVCNamespace:      req.GetParameters()["csi.storage.k8s.io/pvc/namespace"],
 		PVCUID:            req.GetParameters()["csi.storage.k8s.io/pvc/uid"],

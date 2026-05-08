@@ -21,7 +21,7 @@ spec:
           imagePullPolicy: Never
           command: ["/bin/sh", "-c"]
           args:
-            - "modprobe iscsi_tcp || true"
+            - "modprobe iscsi_tcp || true; modprobe nvme_tcp || true"
           securityContext:
             privileged: true
           volumeMounts:

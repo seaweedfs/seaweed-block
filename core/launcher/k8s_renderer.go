@@ -134,8 +134,19 @@ func blockVolumeArgs(plan lifecycle.BlockVolumeWorkloadPlan, replica lifecycle.B
 		fmt.Sprintf("--durable-blocks=%d", plan.SizeBytes/4096),
 		"--durable-blocksize=4096",
 		"--recovery-mode=" + cfg.RecoveryMode,
-		fmt.Sprintf("--iscsi-listen=127.0.0.1:%d", replica.ISCSIListenPort),
-		"--iscsi-iqn=" + replica.ISCSIQualifiedName,
+	}
+	switch plan.Protocol {
+	case "nvme":
+		args = append(args,
+			fmt.Sprintf("--nvme-listen=127.0.0.1:%d", replica.NVMeListenPort),
+			"--nvme-subsysnqn="+replica.NVMeSubsystemNQN,
+			fmt.Sprintf("--nvme-ns=%d", replica.NVMeNSID),
+		)
+	default:
+		args = append(args,
+			fmt.Sprintf("--iscsi-listen=127.0.0.1:%d", replica.ISCSIListenPort),
+			"--iscsi-iqn="+replica.ISCSIQualifiedName,
+		)
 	}
 	return args
 }

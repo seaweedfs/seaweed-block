@@ -33,6 +33,7 @@ type VolumeSpec struct {
 	VolumeID          string `json:"volume_id"`
 	SizeBytes         uint64 `json:"size_bytes"`
 	ReplicationFactor int    `json:"replication_factor"`
+	Protocol          string `json:"protocol,omitempty"`
 	PVCName           string `json:"pvc_name,omitempty"`
 	PVCNamespace      string `json:"pvc_namespace,omitempty"`
 	PVCUID            string `json:"pvc_uid,omitempty"`
@@ -73,6 +74,7 @@ func OpenFileStore(dir string) (*FileStore, error) {
 // CreateVolume records desired volume state. Repeating the same spec is
 // idempotent; changing a previously-created spec is rejected.
 func (s *FileStore) CreateVolume(spec VolumeSpec) (VolumeRecord, error) {
+	spec = normalizeVolumeSpec(spec)
 	if err := validateSpec(spec); err != nil {
 		return VolumeRecord{}, err
 	}
@@ -102,9 +104,12 @@ func (s *FileStore) CreateVolume(spec VolumeSpec) (VolumeRecord, error) {
 }
 
 func volumeSpecsCompatible(a, b VolumeSpec) bool {
+	a = normalizeVolumeSpec(a)
+	b = normalizeVolumeSpec(b)
 	return a.VolumeID == b.VolumeID &&
 		a.SizeBytes == b.SizeBytes &&
-		a.ReplicationFactor == b.ReplicationFactor
+		a.ReplicationFactor == b.ReplicationFactor &&
+		a.Protocol == b.Protocol
 }
 
 func mergeVolumeSpecMetadata(existing, incoming VolumeSpec) VolumeSpec {
@@ -233,6 +238,7 @@ func (s *FileStore) load() error {
 		if err := validateSpec(rec.Spec); err != nil {
 			return fmt.Errorf("lifecycle: invalid record %q: %w", path, err)
 		}
+		rec.Spec = normalizeVolumeSpec(rec.Spec)
 		if filepath.Base(s.path(rec.Spec.VolumeID)) != entry.Name() {
 			return fmt.Errorf("lifecycle: record filename %q does not match volume_id %q", entry.Name(), rec.Spec.VolumeID)
 		}
@@ -277,6 +283,7 @@ func (s *FileStore) path(volumeID string) string {
 }
 
 func validateSpec(spec VolumeSpec) error {
+	spec = normalizeVolumeSpec(spec)
 	if err := validateVolumeID(spec.VolumeID); err != nil {
 		return err
 	}
@@ -286,7 +293,19 @@ func validateSpec(spec VolumeSpec) error {
 	if spec.ReplicationFactor <= 0 {
 		return fmt.Errorf("%w: replication_factor must be > 0", ErrInvalidVolumeSpec)
 	}
+	switch spec.Protocol {
+	case "iscsi", "nvme":
+	default:
+		return fmt.Errorf("%w: protocol must be iscsi or nvme", ErrInvalidVolumeSpec)
+	}
 	return nil
+}
+
+func normalizeVolumeSpec(spec VolumeSpec) VolumeSpec {
+	if spec.Protocol == "" {
+		spec.Protocol = "iscsi"
+	}
+	return spec
 }
 
 func validateVolumeID(volumeID string) error {
