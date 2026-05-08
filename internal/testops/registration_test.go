@@ -460,20 +460,23 @@ func TestNVMeP5CSIRegistrationsBuildShellDrivers(t *testing.T) {
 		file       string
 		scenario   string
 		scriptBase string
+		driverEnv  string
 		wantCap    string
 		wantArt    string
 	}{
 		{
 			file:       "nvme-p5-csi-dynamic.json",
 			scenario:   "nvme-p5-csi-dynamic",
-			scriptBase: "run-k8s-alpha-nvme.sh",
+			scriptBase: "testops-run-alpha-k8s.sh",
+			driverEnv:  "SW_BLOCK_TESTOPS_WORKLOAD_SCRIPT=scripts/run-k8s-alpha-nvme.sh",
 			wantCap:    "nvme_tcp-loadable",
 			wantArt:    "nvme-list-subsys.after-delete.json",
 		},
 		{
 			file:       "nvme-p5-default-iscsi-regression.json",
 			scenario:   "nvme-p5-default-iscsi-regression",
-			scriptBase: "run-k8s-alpha.sh",
+			scriptBase: "testops-run-alpha-k8s.sh",
+			driverEnv:  "SW_BLOCK_TESTOPS_WORKLOAD_SCRIPT=scripts/run-k8s-alpha.sh",
 			wantCap:    "iscsi_tcp-loadable",
 			wantArt:    "iscsi-sessions.after-delete.txt",
 		},
@@ -502,6 +505,9 @@ func TestNVMeP5CSIRegistrationsBuildShellDrivers(t *testing.T) {
 			}
 			if !filepath.IsAbs(shell.Path) || filepath.Base(shell.Path) != tc.scriptBase {
 				t.Fatalf("shell path=%q", shell.Path)
+			}
+			if !containsString(registration.Driver.Env, tc.driverEnv) {
+				t.Fatalf("registration driver env missing %q: %v", tc.driverEnv, registration.Driver.Env)
 			}
 			if !containsString(registration.RequiredCapabilities, tc.wantCap) {
 				t.Fatalf("registration capabilities missing %q: %v", tc.wantCap, registration.RequiredCapabilities)

@@ -5,7 +5,10 @@
   "layer": "L5-k8s",
   "driver": {
     "type": "shell",
-    "path": "scripts/run-k8s-alpha.sh"
+    "path": "scripts/testops-run-alpha-k8s.sh",
+    "env": [
+      "SW_BLOCK_TESTOPS_WORKLOAD_SCRIPT=scripts/run-k8s-alpha.sh"
+    ]
   },
   "default_timeout_s": 900,
   "required_capabilities": [
