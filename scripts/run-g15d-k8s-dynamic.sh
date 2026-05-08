@@ -2,6 +2,15 @@
 set -euo pipefail
 
 ROOT="${1:-$(pwd)}"
+ALPHA_IMAGES_ENV="${SW_BLOCK_ALPHA_IMAGES_ENV:-${SW_BLOCK_PIN_BUILD_ENV:-}}"
+if [[ -n "$ALPHA_IMAGES_ENV" ]]; then
+  if [[ ! -f "$ALPHA_IMAGES_ENV" ]]; then
+    echo "SW_BLOCK_ALPHA_IMAGES_ENV points to missing file: $ALPHA_IMAGES_ENV" >&2
+    exit 2
+  fi
+  # shellcheck source=/dev/null
+  source "$ALPHA_IMAGES_ENV"
+fi
 NAMESPACE="${G15D_NAMESPACE:-default}"
 ARTIFACT_DIR="${G15D_ARTIFACT_DIR:-/tmp/g15d-k8s-$(date -u +%Y%m%dT%H%M%SZ)}"
 RUN_LABEL="${SW_BLOCK_RUN_LABEL:-g15d}"
@@ -35,6 +44,9 @@ if [[ "$FRONTEND_PROTOCOL" == "nvme" && "$CHAP_ENABLED" == "1" ]]; then
 fi
 
 mkdir -p "$ARTIFACT_DIR"
+if [[ -n "$ALPHA_IMAGES_ENV" ]]; then
+  cp "$ALPHA_IMAGES_ENV" "$ARTIFACT_DIR/alpha-images.env"
+fi
 POLL_LOG="$ARTIFACT_DIR/poll.log"
 EXPECTED_GIT_REVISION="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || true)"
 
@@ -138,6 +150,9 @@ if [[ "$FRONTEND_PROTOCOL" == "nvme" ]]; then
 fi
 
 log "artifact_dir=$ARTIFACT_DIR"
+if [[ -n "$ALPHA_IMAGES_ENV" ]]; then
+  log "alpha_images_env=$ALPHA_IMAGES_ENV"
+fi
 log "root=$ROOT"
 log "namespace=$NAMESPACE"
 log "node=$NODE_NAME"

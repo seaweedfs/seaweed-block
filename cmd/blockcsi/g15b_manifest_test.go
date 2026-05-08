@@ -254,6 +254,21 @@ func TestG15b_ImageBuildInputs_ContainExpectedBinariesAndNodeTools(t *testing.T)
 	}
 }
 
+func TestG15dHarnessConsumesPinnedAlphaImagesEnv(t *testing.T) {
+	body := g15bReadScript(t, "run-g15d-k8s-dynamic.sh")
+	for _, want := range []string{
+		"SW_BLOCK_ALPHA_IMAGES_ENV",
+		"SW_BLOCK_PIN_BUILD_ENV",
+		"source \"$ALPHA_IMAGES_ENV\"",
+		"alpha-images.env",
+		"alpha_images_env=",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("run-g15d-k8s-dynamic.sh missing pinned image env contract %q", want)
+		}
+	}
+}
+
 func TestG15b_Harness_CollectsDaemonLogsOnExit(t *testing.T) {
 	body := g15bReadScript(t, "run-g15b-k8s-static.sh")
 	for _, want := range []string{

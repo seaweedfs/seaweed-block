@@ -491,7 +491,8 @@ References:
       and cleanup status in a single result file.
     - initial scenario may call `scripts/run-iscsi-compat-soak.sh`.
   - pin alpha image build/import before K8s frontend gates:
-    - status: active in this branch.
+    - status: QA green at `c3a6e28`; workload composition hook active in this
+      branch.
     - script: `scripts/build-alpha-images.sh`.
     - TestOps scenario: `alpha-images-pin-build`.
     - contract:
@@ -501,6 +502,8 @@ References:
       - record Docker image IDs,
       - record `blockmaster`, `blockvolume`, and `blockcsi` `--version`
         output,
+      - downstream K8s harnesses may consume the build output with
+        `SW_BLOCK_ALPHA_IMAGES_ENV=/path/to/pin-build/alpha-images.env`,
       - fail before protocol smoke tests if build/import/version capture fails.
     - reason:
       - NVMe-P5 showed that stale k3s images can mimic product protocol bugs.

@@ -28,6 +28,14 @@ gate, not a new NVMe protocol gate.
 
   The scripts gate `blockmaster`, `blockcsi`, and generated `blockvolume`
   `--version` output against `git HEAD` to catch stale runtime images.
+- When a pin-build artifact exists, pass it into Test 1 and Test 2 with:
+
+  ```bash
+  export SW_BLOCK_ALPHA_IMAGES_ENV=/path/to/pin-build/alpha-images.env
+  ```
+
+  The dynamic K8s harness copies that file into each workload artifact
+  directory and renders manifests from the recorded image names.
 
 ## Test 1: NVMe Dynamic PVC
 
@@ -37,6 +45,7 @@ Command:
 
 ```bash
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-nvme-p5-csi-dynamic"
+SW_BLOCK_ALPHA_IMAGES_ENV="/mnt/smb/work/share/g15d-k8s/alpha-pin-build-c3a6e28/pin-build/alpha-images.env" \
 SW_BLOCK_ARTIFACT_DIR="/mnt/smb/work/share/g15d-k8s/${RUN_ID}" \
   bash scripts/run-k8s-alpha-nvme.sh "$PWD"
 ```
@@ -89,6 +98,7 @@ Command:
 
 ```bash
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-nvme-p5-default-iscsi-regression"
+SW_BLOCK_ALPHA_IMAGES_ENV="/mnt/smb/work/share/g15d-k8s/alpha-pin-build-c3a6e28/pin-build/alpha-images.env" \
 SW_BLOCK_ARTIFACT_DIR="/mnt/smb/work/share/g15d-k8s/${RUN_ID}" \
   bash scripts/run-k8s-alpha.sh "$PWD"
 ```
