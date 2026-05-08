@@ -352,10 +352,10 @@ fi
 
 log "wait r2 failover"
 wait_status_healthy "$R2_STATUS_ADDR" r2 2
-sudo sg_rtpg "$real2" >"$ARTIFACT_DIR/sg_rtpg.r2.after.txt" 2>&1 || true
-sudo multipath -r >"$ARTIFACT_DIR/multipath.reload.after.txt" 2>&1 || true
-sudo multipath -ll >"$ARTIFACT_DIR/multipath.ll.after.txt" 2>&1 || true
-sudo iscsiadm -m session -P 3 >"$ARTIFACT_DIR/iscsi-session-P3.after-failover.txt" 2>&1 || true
+timeout 15s sudo sg_rtpg "$real2" >"$ARTIFACT_DIR/sg_rtpg.r2.after.txt" 2>&1 || true
+timeout 15s sudo multipath -r >"$ARTIFACT_DIR/multipath.reload.after.txt" 2>&1 || true
+timeout 15s sudo multipath -ll >"$ARTIFACT_DIR/multipath.ll.after.txt" 2>&1 || true
+timeout 15s sudo iscsiadm -m session -P 3 >"$ARTIFACT_DIR/iscsi-session-P3.after-failover.txt" 2>&1 || true
 
 log "verify mounted workload after failover"
 sudo sha256sum -c "$ARTIFACT_DIR/pre.sha256" | tee "$ARTIFACT_DIR/pre-check-after-failover.log"
