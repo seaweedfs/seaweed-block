@@ -506,9 +506,11 @@ References:
         `SW_BLOCK_ALPHA_IMAGES_ENV=/path/to/pin-build/alpha-images.env`,
       - fail before protocol smoke tests if build/import/version capture fails.
     - composed TestOps workload scenarios:
+      - status: QA green at `cf9183a`.
       - `nvme-p5-csi-dynamic`,
       - `nvme-p5-default-iscsi-regression`.
     - developer-owned suite:
+      - status: implemented at `67592f2`; pending lab run.
       - `scripts/testops-run-nvme-p5-suite.sh`,
       - runs pin-build, then both P5 workload scenarios,
       - passes `alpha-images.env` forward mechanically,
@@ -516,6 +518,18 @@ References:
     - reason:
       - NVMe-P5 showed that stale k3s images can mimic product protocol bugs.
         The build/import step must be one reviewed gate, not manual lab memory.
+  - platform extraction target:
+    - status: next after product-side suite is green.
+    - port this V3 reference implementation into reusable runner primitives:
+      - `testops_pin_build` for build/import/version/image provenance,
+      - `consume_pin` for passing pinned outputs between phases,
+      - `assert_revision_matches` for component/runtime SHA checks,
+      - suite linkage that passes prior phase outputs without ad-hoc env-file
+        conventions.
+    - reference hardware evidence:
+      - `alpha-images-pin-build` PASS at `cf9183a`,
+      - `nvme-p5-csi-dynamic` PASS at `cf9183a`,
+      - `nvme-p5-default-iscsi-regression` PASS at `cf9183a`.
   - define the minimal result contract:
     - scenario name,
     - repository SHA,
