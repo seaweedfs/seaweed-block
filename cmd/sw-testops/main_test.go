@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -18,6 +19,36 @@ func TestSWTestOpsListShowsRegisteredScenario(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "g15e-k8s-dynamic-cleanup") {
 		t.Fatalf("list output missing g15e scenario:\n%s", stdout.String())
+	}
+}
+
+func TestSWTestOpsPassesScenarioParams(t *testing.T) {
+	repoRoot := findRepoRoot(t)
+	artDir := filepath.Join(t.TempDir(), "art")
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"--repo-root", repoRoot,
+		"--scenario", "g15b-manifest",
+		"--artifact-dir", artDir,
+		"--run-id", "cli-param-unit",
+		"--commit", "test-commit",
+		"--param", "SW_BLOCK_ALPHA_IMAGES_ENV=/tmp/pin/alpha-images.env",
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	raw, err := os.ReadFile(filepath.Join(artDir, "run-request.json"))
+	if err != nil {
+		t.Fatalf("read run-request: %v", err)
+	}
+	var req struct {
+		ScenarioParams map[string]string `json:"scenario_params"`
+	}
+	if err := json.Unmarshal(raw, &req); err != nil {
+		t.Fatalf("decode run-request: %v", err)
+	}
+	if got := req.ScenarioParams["SW_BLOCK_ALPHA_IMAGES_ENV"]; got != "/tmp/pin/alpha-images.env" {
+		t.Fatalf("scenario param=%q", got)
 	}
 }
 

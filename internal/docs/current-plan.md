@@ -505,6 +505,9 @@ References:
       - downstream K8s harnesses may consume the build output with
         `SW_BLOCK_ALPHA_IMAGES_ENV=/path/to/pin-build/alpha-images.env`,
       - fail before protocol smoke tests if build/import/version capture fails.
+    - composed TestOps workload scenarios:
+      - `nvme-p5-csi-dynamic`,
+      - `nvme-p5-default-iscsi-regression`.
     - reason:
       - NVMe-P5 showed that stale k3s images can mimic product protocol bugs.
         The build/import step must be one reviewed gate, not manual lab memory.

@@ -41,7 +41,18 @@ gate, not a new NVMe protocol gate.
 
 QA result: PASS at `69a1d20` with rebuilt and k3s-imported images.
 
-Command:
+TestOps command after `alpha-images-pin-build`:
+
+```bash
+go run ./cmd/sw-testops \
+  --scenario nvme-p5-csi-dynamic \
+  --commit "$(git rev-parse --short HEAD)" \
+  --run-id nvme-p5-csi-dynamic-$(date -u +%Y%m%dT%H%M%SZ) \
+  --artifact-dir "/mnt/smb/work/share/g15d-k8s/nvme-p5-csi-dynamic-$(date -u +%Y%m%dT%H%M%SZ)" \
+  --param SW_BLOCK_ALPHA_IMAGES_ENV=/path/to/pin-build/alpha-images.env
+```
+
+Equivalent script command:
 
 ```bash
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-nvme-p5-csi-dynamic"
@@ -94,7 +105,18 @@ Expected:
 
 QA result: PASS at `8e0a28f` with rebuilt and k3s-imported images.
 
-Command:
+TestOps command after `alpha-images-pin-build`:
+
+```bash
+go run ./cmd/sw-testops \
+  --scenario nvme-p5-default-iscsi-regression \
+  --commit "$(git rev-parse --short HEAD)" \
+  --run-id nvme-p5-default-iscsi-$(date -u +%Y%m%dT%H%M%SZ) \
+  --artifact-dir "/mnt/smb/work/share/g15d-k8s/nvme-p5-default-iscsi-$(date -u +%Y%m%dT%H%M%SZ)" \
+  --param SW_BLOCK_ALPHA_IMAGES_ENV=/path/to/pin-build/alpha-images.env
+```
+
+Equivalent script command:
 
 ```bash
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-nvme-p5-default-iscsi-regression"

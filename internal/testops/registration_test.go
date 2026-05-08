@@ -454,6 +454,73 @@ func TestAlphaImagesPinBuildRegistrationBuildsShellDriver(t *testing.T) {
 	}
 }
 
+func TestNVMeP5CSIRegistrationsBuildShellDrivers(t *testing.T) {
+	repoRoot := findRepoRoot(t)
+	for _, tc := range []struct {
+		file       string
+		scenario   string
+		scriptBase string
+		wantCap    string
+		wantArt    string
+	}{
+		{
+			file:       "nvme-p5-csi-dynamic.json",
+			scenario:   "nvme-p5-csi-dynamic",
+			scriptBase: "run-k8s-alpha-nvme.sh",
+			wantCap:    "nvme_tcp-loadable",
+			wantArt:    "nvme-list-subsys.after-delete.json",
+		},
+		{
+			file:       "nvme-p5-default-iscsi-regression.json",
+			scenario:   "nvme-p5-default-iscsi-regression",
+			scriptBase: "run-k8s-alpha.sh",
+			wantCap:    "iscsi_tcp-loadable",
+			wantArt:    "iscsi-sessions.after-delete.txt",
+		},
+	} {
+		t.Run(tc.scenario, func(t *testing.T) {
+			raw, err := os.Open(registrationPath(repoRoot, tc.file))
+			if err != nil {
+				t.Fatalf("open registration: %v", err)
+			}
+			defer raw.Close()
+
+			registration, err := DecodeRegistration(raw)
+			if err != nil {
+				t.Fatalf("DecodeRegistration: %v", err)
+			}
+			if registration.Scenario != tc.scenario || registration.Driver.Type != "shell" {
+				t.Fatalf("registration=%+v", registration)
+			}
+			driver, err := registration.NewDriver(repoRoot)
+			if err != nil {
+				t.Fatalf("NewDriver: %v", err)
+			}
+			shell, ok := driver.(ShellDriver)
+			if !ok {
+				t.Fatalf("driver type=%T want ShellDriver", driver)
+			}
+			if !filepath.IsAbs(shell.Path) || filepath.Base(shell.Path) != tc.scriptBase {
+				t.Fatalf("shell path=%q", shell.Path)
+			}
+			if !containsString(registration.RequiredCapabilities, tc.wantCap) {
+				t.Fatalf("registration capabilities missing %q: %v", tc.wantCap, registration.RequiredCapabilities)
+			}
+			for _, want := range []string{"alpha-images.env", "blockmaster.version.txt", "generated-blockvolume.yaml", tc.wantArt} {
+				if !containsString(registration.Artifacts, want) {
+					t.Fatalf("registration artifacts missing %q: %v", want, registration.Artifacts)
+				}
+			}
+			if got := registration.ScenarioDefaultParams["SW_BLOCK_LAUNCHER_PVC_OWNER_REF"]; got != "1" {
+				t.Fatalf("owner-ref default=%q want 1", got)
+			}
+			if !containsString(registration.NonClaims, "Requires a fresh pin-build artifact passed with --param SW_BLOCK_ALPHA_IMAGES_ENV=...") {
+				t.Fatalf("registration must document pin-build dependency: %v", registration.NonClaims)
+			}
+		})
+	}
+}
+
 func containsString(values []string, want string) bool {
 	for _, value := range values {
 		if value == want {

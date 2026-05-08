@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 )
 
 type ShellDriver struct {
@@ -32,7 +33,7 @@ func (d ShellDriver) Run(ctx context.Context, req RunRequest) (Result, error) {
 	cmd := exec.CommandContext(ctx, d.Path, reqPath)
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	cmd.Env = append(os.Environ(), d.Env...)
+	cmd.Env = shellEnv(d.Env, req.ScenarioParams)
 	err := cmd.Run()
 
 	if stdout.Len() > 0 {
@@ -58,6 +59,23 @@ func (d ShellDriver) Run(ctx context.Context, req RunRequest) (Result, error) {
 		return NewResult(req, StatusError, fmt.Sprintf("driver failed before writing result.json: %v", err)), err
 	}
 	return NewResult(req, StatusError, "driver did not write result.json"), fmt.Errorf("testops: shell driver %s did not write result.json", d.Path)
+}
+
+func shellEnv(driverEnv []string, params map[string]string) []string {
+	env := append([]string{}, os.Environ()...)
+	env = append(env, driverEnv...)
+	if len(params) == 0 {
+		return env
+	}
+	keys := make([]string, 0, len(params))
+	for key := range params {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		env = append(env, key+"="+params[key])
+	}
+	return env
 }
 
 func writeJSON(path string, v any) error {

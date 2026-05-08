@@ -22,6 +22,7 @@ type options struct {
 	artifactDir string
 	runID       string
 	commit      string
+	params      paramFlag
 	list        bool
 }
 
@@ -39,6 +40,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	fs.StringVar(&opts.artifactDir, "artifact-dir", "", "artifact output directory")
 	fs.StringVar(&opts.runID, "run-id", "", "stable run id")
 	fs.StringVar(&opts.commit, "commit", "", "source commit label; defaults to git HEAD")
+	fs.Var(&opts.params, "param", "scenario parameter KEY=VALUE; may be repeated")
 	fs.BoolVar(&opts.list, "list", false, "list registered scenarios")
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -73,6 +75,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		Scenario:       registration.Scenario,
 		Source:         testops.SourceSpec{Repo: "seaweed_block", Commit: opts.commit},
 		Binaries:       testops.BinarySpec{Build: false},
+		ScenarioParams: mergedParams(registration.ScenarioDefaultParams, opts.params),
 		ArtifactDir:    opts.artifactDir,
 		RunID:          opts.runID,
 		TimeoutSeconds: registration.DefaultTimeoutSeconds,
@@ -96,6 +99,50 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	return 0
+}
+
+type paramFlag map[string]string
+
+func (p *paramFlag) String() string {
+	if p == nil || len(*p) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(*p))
+	for key := range *p {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, key := range keys {
+		parts = append(parts, key+"="+(*p)[key])
+	}
+	return strings.Join(parts, ",")
+}
+
+func (p *paramFlag) Set(value string) error {
+	key, val, ok := strings.Cut(value, "=")
+	if !ok || key == "" {
+		return fmt.Errorf("expected KEY=VALUE")
+	}
+	if *p == nil {
+		*p = make(map[string]string)
+	}
+	(*p)[key] = val
+	return nil
+}
+
+func mergedParams(defaults map[string]string, overrides map[string]string) map[string]string {
+	if len(defaults) == 0 && len(overrides) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(defaults)+len(overrides))
+	for key, value := range defaults {
+		out[key] = value
+	}
+	for key, value := range overrides {
+		out[key] = value
+	}
+	return out
 }
 
 func (o *options) normalize() error {
