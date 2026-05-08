@@ -36,6 +36,7 @@ fi
 
 mkdir -p "$ARTIFACT_DIR"
 POLL_LOG="$ARTIFACT_DIR/poll.log"
+EXPECTED_GIT_REVISION="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || true)"
 
 log() {
   printf '[%s] %s\n' "$RUN_LABEL" "$*" | tee -a "$ARTIFACT_DIR/run.log"
@@ -53,6 +54,18 @@ sed_escape() {
 }
 
 require_cmd kubectl
+
+verify_revision() {
+  local component="$1"
+  local path="$2"
+  if [[ -z "$EXPECTED_GIT_REVISION" ]]; then
+    return
+  fi
+  if ! grep -q "$EXPECTED_GIT_REVISION" "$path"; then
+    echo "$component image revision mismatch: expected $EXPECTED_GIT_REVISION, got $(cat "$path" 2>/dev/null || true)" >&2
+    exit 1
+  fi
+}
 
 NODE_NAME="$(kubectl get nodes -o jsonpath='{.items[0].metadata.name}')"
 STACK_RENDERED="$ARTIFACT_DIR/block-stack.rendered.yaml"
@@ -122,6 +135,7 @@ log "blockvolume_namespace=$BLOCKVOLUME_NAMESPACE"
 log "launcher_pvc_owner_ref=$LAUNCHER_PVC_OWNER_REF"
 log "chap_enabled=$CHAP_ENABLED"
 log "frontend_protocol=$FRONTEND_PROTOCOL"
+log "expected_git_revision=${EXPECTED_GIT_REVISION:-unknown}"
 log "dynamic_pvc_manifest=$DYNAMIC_PVC_MANIFEST"
 kubectl version --client=true >"$ARTIFACT_DIR/kubectl-version.txt" 2>&1 || true
 kubectl get nodes -o wide >"$ARTIFACT_DIR/nodes.before.txt"
@@ -153,6 +167,7 @@ collect_daemon_logs() {
   capture_once "$ARTIFACT_DIR/csi-attacher.log" kubectl -n kube-system logs deploy/sw-block-csi-controller -c csi-attacher
   capture_once "$ARTIFACT_DIR/blockvolume-generated.log" kubectl -n "$BLOCKVOLUME_NAMESPACE" logs -l sw-block.seaweedfs.com/volume -c blockvolume --tail=-1
   capture_once "$ARTIFACT_DIR/kube-system-pods-deploys.txt" kubectl -n kube-system get pods,deploy -o wide
+  capture_once "$ARTIFACT_DIR/kube-system-imageids.txt" kubectl -n kube-system get pod -l 'app in (sw-blockmaster,sw-block-csi-controller,sw-block-csi-node)' -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{range .status.containerStatuses[*]}{"  "}{.name}{" imageID="}{.imageID}{"\n"}{end}{end}'
   capture_once "$ARTIFACT_DIR/blockvolume-namespace-pods-deploys.txt" kubectl -n "$BLOCKVOLUME_NAMESPACE" get pods,deploy -o wide
   capture_once "$ARTIFACT_DIR/app-storage.txt" kubectl -n "$NAMESPACE" get sc,pv,pvc,pod -o wide
   capture_once "$ARTIFACT_DIR/lifecycle-volumes.json" kubectl -n kube-system exec deploy/sw-blockmaster -c blockmaster -- sh -c 'cat /var/lib/sw-block/lifecycle/volumes/*.json'
@@ -193,6 +208,11 @@ trap 'collect_daemon_logs; cleanup' EXIT
 log "apply product stack without pre-created blockvolumes"
 kubectl apply -f "$STACK_RENDERED" | tee "$ARTIFACT_DIR/apply-block-stack.log"
 kubectl -n kube-system wait --for=condition=available deploy/sw-blockmaster --timeout=120s
+if ! kubectl -n kube-system exec deploy/sw-blockmaster -c blockmaster -- /usr/local/bin/blockmaster --version >"$ARTIFACT_DIR/blockmaster.version.txt" 2>"$ARTIFACT_DIR/blockmaster.version.err"; then
+  echo "blockmaster image does not expose --version; rebuild and reload sw-block image from current branch" >&2
+  exit 1
+fi
+verify_revision "blockmaster" "$ARTIFACT_DIR/blockmaster.version.txt"
 
 log "apply CSI dynamic-provisioning manifests"
 kubectl apply -f "$ROOT/deploy/k8s/g15d/rbac.yaml" | tee "$ARTIFACT_DIR/apply-rbac.log"
@@ -201,6 +221,11 @@ kubectl apply -f "$CSI_CONTROLLER_RENDERED" | tee "$ARTIFACT_DIR/apply-csi-contr
 kubectl apply -f "$CSI_NODE_RENDERED" | tee "$ARTIFACT_DIR/apply-csi-node.log"
 kubectl -n kube-system wait --for=condition=available deploy/sw-block-csi-controller --timeout=120s
 kubectl -n kube-system rollout status ds/sw-block-csi-node --timeout=120s
+if ! kubectl -n kube-system exec deploy/sw-block-csi-controller -c block-csi -- /usr/local/bin/blockcsi --version >"$ARTIFACT_DIR/blockcsi.version.txt" 2>"$ARTIFACT_DIR/blockcsi.version.err"; then
+  echo "blockcsi image does not expose --version; rebuild and reload sw-block-csi image from current branch" >&2
+  exit 1
+fi
+verify_revision "blockcsi" "$ARTIFACT_DIR/blockcsi.version.txt"
 
 if [[ "$CHAP_ENABLED" == "1" ]]; then
   log "apply iSCSI CHAP Secret"

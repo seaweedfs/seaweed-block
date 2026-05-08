@@ -16,6 +16,7 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/host/master"
 	"github.com/seaweedfs/seaweed-block/core/launcher"
 	"github.com/seaweedfs/seaweed-block/core/lifecycle"
+	"github.com/seaweedfs/seaweed-block/internal/buildinfo"
 )
 
 type flags struct {
@@ -41,6 +42,7 @@ type flags struct {
 	launcherCHAPSecretName string
 	launcherCHAPUserKey    string
 	launcherCHAPSecretKey  string
+	version                bool
 	// printReadyLine: test-only flag that emits a single
 	// structured JSON line to stdout after the gRPC listener is
 	// bound, so L2 subprocess tests can parse the ready event.
@@ -73,10 +75,14 @@ func parseFlags(args []string) (flags, error) {
 	fs.StringVar(&f.launcherCHAPSecretName, "launcher-iscsi-chap-secret-name", "", "optional Kubernetes Secret name used by generated blockvolume Deployments for target-side iSCSI CHAP")
 	fs.StringVar(&f.launcherCHAPUserKey, "launcher-iscsi-chap-username-key", "chapUsername", "Kubernetes Secret key for generated blockvolume iSCSI CHAP username")
 	fs.StringVar(&f.launcherCHAPSecretKey, "launcher-iscsi-chap-secret-key", "chapSecret", "Kubernetes Secret key for generated blockvolume iSCSI CHAP secret")
+	fs.BoolVar(&f.version, "version", false, "print build provenance and exit")
 	fs.BoolVar(&f.printReadyLine, "t0-print-ready", false, "internal test-only: emit one structured JSON line on stdout after listener bound")
 	fs.SetOutput(os.Stderr)
 	if err := fs.Parse(args); err != nil {
 		return flags{}, err
+	}
+	if f.version {
+		return f, nil
 	}
 	if f.authorityStore == "" {
 		return flags{}, fmt.Errorf("--authority-store is required")
@@ -89,6 +95,10 @@ func main() {
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "blockmaster:", err)
 		os.Exit(2)
+	}
+	if f.version {
+		fmt.Println(buildinfo.Version("blockmaster"))
+		return
 	}
 	os.Exit(run(f))
 }

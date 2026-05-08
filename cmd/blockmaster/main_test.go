@@ -27,6 +27,16 @@ func TestParseFlags_LifecycleStoreOptional(t *testing.T) {
 	}
 }
 
+func TestParseFlags_VersionDoesNotRequireStores(t *testing.T) {
+	f, err := parseFlags([]string{"--version"})
+	if err != nil {
+		t.Fatalf("parseFlags --version: %v", err)
+	}
+	if !f.version {
+		t.Fatal("version flag not set")
+	}
+}
+
 func TestParseFlags_LifecyclePlacementSeedOptional(t *testing.T) {
 	f, err := parseFlags([]string{
 		"--authority-store", "authority-dir",

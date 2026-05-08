@@ -27,6 +27,7 @@ import (
 	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 	"github.com/seaweedfs/seaweed-block/core/transport"
+	"github.com/seaweedfs/seaweed-block/internal/buildinfo"
 )
 
 type flags struct {
@@ -114,6 +115,7 @@ type flags struct {
 	// default. sync-quorum / sync-all opt into foreground write ACK
 	// gating through the durable WriteObserver seam.
 	replicationAck string
+	version        bool
 }
 
 func parseFlags(args []string) (flags, error) {
@@ -174,9 +176,13 @@ func parseFlags(args []string) (flags, error) {
 	fs.StringVar(&f.replicationAck, "replication-ack", "best-effort",
 		"replication acknowledgement profile: \"best-effort\" (default), \"sync-quorum\", or \"sync-all\". "+
 			"sync-* modes fail foreground writes when required replica acknowledgement is unavailable.")
+	fs.BoolVar(&f.version, "version", false, "print build provenance and exit")
 	fs.SetOutput(os.Stderr)
 	if err := fs.Parse(args); err != nil {
 		return flags{}, err
+	}
+	if f.version {
+		return f, nil
 	}
 	if f.recoveryMode != "legacy" && f.recoveryMode != "dual-lane" {
 		return flags{}, fmt.Errorf("--recovery-mode=%q invalid; want \"legacy\" or \"dual-lane\"", f.recoveryMode)
@@ -316,6 +322,10 @@ func main() {
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "blockvolume:", err)
 		os.Exit(2)
+	}
+	if f.version {
+		fmt.Println(buildinfo.Version("blockvolume"))
+		return
 	}
 	os.Exit(run(f))
 }

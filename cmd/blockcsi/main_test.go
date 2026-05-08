@@ -83,6 +83,16 @@ func TestBlockCSI_BinaryStartsAndServesIdentity(t *testing.T) {
 	}
 }
 
+func TestParseFlags_VersionDoesNotRequireEndpoint(t *testing.T) {
+	f, err := parseFlags([]string{"--version"})
+	if err != nil {
+		t.Fatalf("parseFlags --version: %v", err)
+	}
+	if !f.version {
+		t.Fatal("version flag not set")
+	}
+}
+
 func TestG15a_BlockCSIControllerPublishUsesMasterFrontendFact(t *testing.T) {
 	if testing.Short() {
 		t.Skip("L2 subprocess test; -short skip")

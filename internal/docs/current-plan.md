@@ -635,6 +635,10 @@ References:
       - red at `622fae7`: StorageClass rendered `protocol: nvme`, but
         lifecycle intent had no protocol and generated blockvolume still used
         iSCSI args.
+      - red at `a1d5201`: live StorageClass carried both protocol keys, but
+        persisted lifecycle JSON still had no `protocol`; current source has
+        protocol on CSI/RPC/lifecycle, so the harness now gates component
+        `--version` output to catch stale K8s images before protocol checks.
       - current fix: prefer product-scoped
         `sw-block.seaweedfs.com/protocol`, keep `protocol` as compatibility,
         delete stale cluster-scoped StorageClass before apply, and capture

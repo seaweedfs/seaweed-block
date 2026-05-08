@@ -41,6 +41,10 @@ Expected:
   - `sw-block.seaweedfs.com/protocol: nvme` or `protocol: nvme`, proving the
     live cluster-scoped StorageClass was updated before provisioning evidence is
     evaluated.
+- Image provenance:
+  - `blockmaster.version.txt` and `blockcsi.version.txt` contain the branch
+    commit under test,
+  - `kube-system-imageids.txt` is present for stale-image forensics.
 - `generated-blockvolume.yaml` contains:
   - `--nvme-listen=`,
   - `--nvme-subsysnqn=`,

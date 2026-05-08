@@ -19,6 +19,7 @@ import (
 	csipb "github.com/container-storage-interface/spec/lib/go/csi"
 	blockcsi "github.com/seaweedfs/seaweed-block/core/csi"
 	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
+	"github.com/seaweedfs/seaweed-block/internal/buildinfo"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
@@ -29,6 +30,7 @@ type flags struct {
 	nodeID         string
 	iqnPrefix      string
 	pvcUIDLookup   bool
+	version        bool
 	printReadyLine bool
 }
 
@@ -40,10 +42,14 @@ func parseFlags(args []string) (flags, error) {
 	fs.StringVar(&f.nodeID, "node-id", "", "CSI node ID; defaults to hostname")
 	fs.StringVar(&f.iqnPrefix, "iqn-prefix", "iqn.2026-05.io.seaweedfs", "fallback IQN prefix for unstage after plugin restart")
 	fs.BoolVar(&f.pvcUIDLookup, "kubernetes-pvc-uid-lookup", false, "opt-in: resolve PVC UID through the in-cluster Kubernetes API before CreateVolume is sent to blockmaster")
+	fs.BoolVar(&f.version, "version", false, "print build provenance and exit")
 	fs.BoolVar(&f.printReadyLine, "t0-print-ready", false, "internal test-only: emit one structured JSON ready line after listener bind")
 	fs.SetOutput(os.Stderr)
 	if err := fs.Parse(args); err != nil {
 		return flags{}, err
+	}
+	if f.version {
+		return f, nil
 	}
 	if f.endpoint == "" {
 		return flags{}, fmt.Errorf("--endpoint is required")
@@ -63,6 +69,10 @@ func main() {
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "blockcsi:", err)
 		os.Exit(2)
+	}
+	if f.version {
+		fmt.Println(buildinfo.Version("blockcsi"))
+		return
 	}
 	os.Exit(run(f))
 }
