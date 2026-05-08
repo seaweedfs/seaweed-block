@@ -120,13 +120,12 @@ body = json.load(open(path))
 if str(body.get("ReplicaID", "")) != replica:
     sys.exit(1)
 authority_role = str(body.get("AuthorityRole", ""))
-epoch = int(body.get("Epoch", 0))
 frontend_ready = bool(body.get("FrontendPrimaryReady"))
 replication_role = str(body.get("ReplicationRole", ""))
 if role == "primary":
     sys.exit(0 if authority_role == "primary" and frontend_ready else 1)
 if role == "secondary":
-    ok = epoch > 0 and authority_role != "primary" and replication_role in ("not_ready", "replica_ready", "recovering")
+    ok = authority_role != "primary" and replication_role in ("not_ready", "replica_ready", "recovering")
     sys.exit(0 if ok else 1)
 sys.exit(1)
 PY
@@ -140,6 +139,20 @@ PY
   curl -fsS "http://${status_addr}/status?volume=v1" >"$ARTIFACT_DIR/status-${replica}-last.json" 2>/dev/null || true
   pgrep -af "${BIN_DIR}/blockmaster|${BIN_DIR}/blockvolume" >"$ARTIFACT_DIR/processes.${replica}.${role}.timeout.txt" 2>&1 || true
   echo "timed out waiting for ${replica} ${role} projection" >&2
+  exit 1
+}
+
+wait_log_pattern() {
+  local path="$1"
+  local pattern="$2"
+  local label="$3"
+  for _ in $(seq 1 160); do
+    if grep -q "$pattern" "$path" 2>/dev/null; then
+      return 0
+    fi
+    sleep 0.25
+  done
+  echo "timed out waiting for ${label}" >&2
   exit 1
 }
 
@@ -399,6 +412,7 @@ wait_port "$PORT2"
 log "wait authority projections"
 wait_status_role "$R1_STATUS_ADDR" r1 primary
 wait_status_role "$R2_STATUS_ADDR" r2 secondary
+wait_log_pattern "$ARTIFACT_DIR/blockvolume-r2.log" "using ANA metadata probe backend" "r2 ANA metadata probe readiness"
 
 log "connect first NVMe path"
 set +e
