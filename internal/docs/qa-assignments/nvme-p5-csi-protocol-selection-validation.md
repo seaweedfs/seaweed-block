@@ -34,7 +34,13 @@ Expected:
   - final line:
     `[alpha-nvme] PASS: dynamic PVC create/delete completed checksum write/read and cleanup`.
 - `dynamic-pvc-pod.rendered.yaml` contains:
+  - `sw-block.seaweedfs.com/protocol: "nvme"` under the StorageClass
+    `parameters`,
   - `protocol: "nvme"` under the StorageClass `parameters`.
+- `storageclass.live.yaml` contains:
+  - `sw-block.seaweedfs.com/protocol: nvme` or `protocol: nvme`, proving the
+    live cluster-scoped StorageClass was updated before provisioning evidence is
+    evaluated.
 - `generated-blockvolume.yaml` contains:
   - `--nvme-listen=`,
   - `--nvme-subsysnqn=`,

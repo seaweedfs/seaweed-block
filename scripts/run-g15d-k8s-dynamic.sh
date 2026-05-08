@@ -103,6 +103,7 @@ if [[ "$FRONTEND_PROTOCOL" == "nvme" ]]; then
   awk '
     /^parameters:/ {
       print
+      print "  sw-block.seaweedfs.com/protocol: \"nvme\""
       print "  protocol: \"nvme\""
       next
     }
@@ -212,7 +213,15 @@ if [[ "$CHAP_ENABLED" == "1" ]]; then
 fi
 
 log "apply dynamic StorageClass/PVC/pod"
+kubectl delete storageclass sw-block-dynamic --ignore-not-found=true | tee "$ARTIFACT_DIR/delete-storageclass-before-apply.log"
 kubectl -n "$NAMESPACE" apply -f "$DYNAMIC_RENDERED" | tee "$ARTIFACT_DIR/apply-dynamic.log"
+kubectl get storageclass sw-block-dynamic -o yaml >"$ARTIFACT_DIR/storageclass.live.yaml"
+if [[ "$FRONTEND_PROTOCOL" == "nvme" ]]; then
+  if ! grep -Eq 'sw-block\.seaweedfs\.com/protocol: "?nvme"?|protocol: "?nvme"?' "$ARTIFACT_DIR/storageclass.live.yaml"; then
+    echo "live StorageClass missing NVMe protocol parameter" >&2
+    exit 1
+  fi
+fi
 
 log "wait for launcher-generated blockvolume manifest"
 for _ in $(seq 1 180); do

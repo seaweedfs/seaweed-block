@@ -254,29 +254,39 @@ func TestG15c_ControllerCreateVolume_RecordsDesiredIntentOnly(t *testing.T) {
 }
 
 func TestG15c_ControllerCreateVolume_RecordsProtocolSelection(t *testing.T) {
-	prov := &stubProvisioner{}
-	s := NewControllerServerWithProvisioner(&stubLookup{}, prov)
+	for _, tc := range []struct {
+		name   string
+		params map[string]string
+	}{
+		{name: "product-prefixed", params: map[string]string{storageClassProtocolParameter: "nvme"}},
+		{name: "legacy-protocol", params: map[string]string{"protocol": "nvme"}},
+		{name: "frontendProtocol", params: map[string]string{"frontendProtocol": "nvme"}},
+		{name: "prefixed-wins", params: map[string]string{storageClassProtocolParameter: "nvme", "protocol": "iscsi"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			prov := &stubProvisioner{}
+			s := NewControllerServerWithProvisioner(&stubLookup{}, prov)
 
-	resp, err := s.CreateVolume(context.Background(), &csipb.CreateVolumeRequest{
-		Name: "pvc-a",
-		CapacityRange: &csipb.CapacityRange{
-			RequiredBytes: 1 << 30,
-		},
-		Parameters: map[string]string{
-			"protocol": "nvme",
-		},
-		VolumeCapabilities: []*csipb.VolumeCapability{
-			testVolumeCapability(),
-		},
-	})
-	if err != nil {
-		t.Fatalf("CreateVolume: %v", err)
-	}
-	if got := prov.calls[0].Protocol; got != ProtocolNVMe {
-		t.Fatalf("protocol=%q want nvme", got)
-	}
-	if got := resp.GetVolume().GetVolumeContext()["protocol"]; got != "nvme" {
-		t.Fatalf("response protocol=%q want nvme", got)
+			resp, err := s.CreateVolume(context.Background(), &csipb.CreateVolumeRequest{
+				Name: "pvc-a",
+				CapacityRange: &csipb.CapacityRange{
+					RequiredBytes: 1 << 30,
+				},
+				Parameters: tc.params,
+				VolumeCapabilities: []*csipb.VolumeCapability{
+					testVolumeCapability(),
+				},
+			})
+			if err != nil {
+				t.Fatalf("CreateVolume: %v", err)
+			}
+			if got := prov.calls[0].Protocol; got != ProtocolNVMe {
+				t.Fatalf("protocol=%q want nvme", got)
+			}
+			if got := resp.GetVolume().GetVolumeContext()["protocol"]; got != "nvme" {
+				t.Fatalf("response protocol=%q want nvme", got)
+			}
+		})
 	}
 }
 

@@ -631,9 +631,18 @@ References:
         - cleanup left no test NQN and no blockmaster/blockvolume process.
   - NVMe-P5 CSI integration:
     - status: active local slice on `frontend/nvme-ana-parity-plan`.
+    - latest QA:
+      - red at `622fae7`: StorageClass rendered `protocol: nvme`, but
+        lifecycle intent had no protocol and generated blockvolume still used
+        iSCSI args.
+      - current fix: prefer product-scoped
+        `sw-block.seaweedfs.com/protocol`, keep `protocol` as compatibility,
+        delete stale cluster-scoped StorageClass before apply, and capture
+        `storageclass.live.yaml` before judging generated launcher output.
     - allow StorageClass protocol selection without changing the app.
     - default StorageClass path stays iSCSI.
-    - `parameters.protocol: nvme` selects NVMe target facts end-to-end:
+    - `parameters.sw-block.seaweedfs.com/protocol: nvme` selects NVMe target
+      facts end-to-end:
       - CSI CreateVolume records protocol in lifecycle intent,
       - master lifecycle RPC carries protocol,
       - launcher renders `blockvolume` with `--nvme-listen`,

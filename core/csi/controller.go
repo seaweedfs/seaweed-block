@@ -11,6 +11,8 @@ import (
 	"google.golang.org/grpc/status"
 )
 
+const storageClassProtocolParameter = "sw-block.seaweedfs.com/protocol"
+
 type ControllerServer struct {
 	csipb.UnimplementedControllerServer
 	lookup           PublishTargetLookup
@@ -184,14 +186,9 @@ func volumeSpecFromCreateRequest(req *csipb.CreateVolumeRequest) (VolumeSpec, er
 		}
 		rf = v
 	}
-	protocol := ProtocolISCSI
-	if raw := req.GetParameters()["protocol"]; raw != "" {
-		switch Protocol(raw) {
-		case ProtocolISCSI, ProtocolNVMe:
-			protocol = Protocol(raw)
-		default:
-			return VolumeSpec{}, status.Errorf(codes.InvalidArgument, "invalid protocol %q", raw)
-		}
+	protocol, err := protocolFromParameters(req.GetParameters())
+	if err != nil {
+		return VolumeSpec{}, err
 	}
 	return VolumeSpec{
 		VolumeID:          req.GetName(),
@@ -203,6 +200,26 @@ func volumeSpecFromCreateRequest(req *csipb.CreateVolumeRequest) (VolumeSpec, er
 		PVCUID:            req.GetParameters()["csi.storage.k8s.io/pvc/uid"],
 		PVName:            req.GetParameters()["csi.storage.k8s.io/pv/name"],
 	}, nil
+}
+
+func protocolFromParameters(params map[string]string) (Protocol, error) {
+	for _, key := range []string{
+		storageClassProtocolParameter,
+		"protocol",
+		"frontendProtocol",
+	} {
+		raw := params[key]
+		if raw == "" {
+			continue
+		}
+		switch Protocol(raw) {
+		case ProtocolISCSI, ProtocolNVMe:
+			return Protocol(raw), nil
+		default:
+			return "", status.Errorf(codes.InvalidArgument, "invalid protocol %q", raw)
+		}
+	}
+	return ProtocolISCSI, nil
 }
 
 func supportsVolumeCapabilities(caps []*csipb.VolumeCapability) bool {

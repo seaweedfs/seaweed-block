@@ -40,8 +40,8 @@ func TestG15c_BlockCSICreateVolumeWritesMasterLifecycleIntent(t *testing.T) {
 			RequiredBytes: 1 << 20,
 		},
 		Parameters: map[string]string{
-			"replicationFactor": "2",
-			"protocol":          "nvme",
+			"replicationFactor":               "2",
+			"sw-block.seaweedfs.com/protocol": "nvme",
 		},
 		VolumeCapabilities: []*csipb.VolumeCapability{
 			testMountCapability(),
