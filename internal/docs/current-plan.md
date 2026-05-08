@@ -508,6 +508,11 @@ References:
     - composed TestOps workload scenarios:
       - `nvme-p5-csi-dynamic`,
       - `nvme-p5-default-iscsi-regression`.
+    - developer-owned suite:
+      - `scripts/testops-run-nvme-p5-suite.sh`,
+      - runs pin-build, then both P5 workload scenarios,
+      - passes `alpha-images.env` forward mechanically,
+      - writes one suite-level `result.json`.
     - reason:
       - NVMe-P5 showed that stale k3s images can mimic product protocol bugs.
         The build/import step must be one reviewed gate, not manual lab memory.
@@ -528,7 +533,9 @@ References:
   - result file is enough for review without reading raw terminal output.
 
 - QA/tooling:
-  - #QA assignment should be written before implementation.
+  - Dev owns the core test content and uses TestOps as the primary dev loop.
+  - QA may run the same scenarios, add lab automation, and improve collection,
+    but should not be the only path that can execute a gate end-to-end.
   - prefer small TestOps wrapper over a wholesale scenario DSL rewrite.
 
 ## Current Dev Milestone: NVMe-oF / ANA Parity Planning

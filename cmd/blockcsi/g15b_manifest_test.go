@@ -252,6 +252,20 @@ func TestG15b_ImageBuildInputs_ContainExpectedBinariesAndNodeTools(t *testing.T)
 			t.Fatalf("testops-pin-alpha-images.sh missing %q", want)
 		}
 	}
+
+	suite := g15bReadScript(t, "testops-run-nvme-p5-suite.sh")
+	for _, want := range []string{
+		"alpha-images-pin-build",
+		"nvme-p5-csi-dynamic",
+		"nvme-p5-default-iscsi-regression",
+		"SW_BLOCK_ALPHA_IMAGES_ENV=$PIN_ENV",
+		"nvme-p5-csi-suite",
+		"result.json",
+	} {
+		if !strings.Contains(suite, want) {
+			t.Fatalf("testops-run-nvme-p5-suite.sh missing %q", want)
+		}
+	}
 }
 
 func TestG15dHarnessConsumesPinnedAlphaImagesEnv(t *testing.T) {

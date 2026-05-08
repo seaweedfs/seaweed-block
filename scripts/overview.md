@@ -17,6 +17,7 @@ This directory contains developer and QA helper scripts.
 | `run-k8s-attach-detach-loop.sh` | QA loop wrapper. Repeats the app PVC attach/write/read/delete flow and stores per-iteration artifacts. |
 | `run-k8s-csi-node-restart.sh` | QA wrapper. Restarts the CSI node DaemonSet between writer and reader pods using the same PVC. |
 | `build-alpha-images.sh` | Builds local Docker images used by the Kubernetes alpha harness. |
+| `testops-run-nvme-p5-suite.sh` | Developer-owned TestOps suite: pin-builds alpha images, then runs NVMe dynamic PVC and default iSCSI regression with the pinned image env. |
 | `run-alpha-k8s-dynamic.sh` | Public dynamic PVC alpha smoke entry. |
 | `run-alpha-app-demo.sh` | App-demo implementation used by `run-k8s-demo.sh`. |
 | `run-iscsi-os-smoke.sh` | Privileged Linux OS-initiator smoke: `iscsiadm` -> `mkfs.ext4` -> mount -> checksum -> logout on a 256 MiB target. |
