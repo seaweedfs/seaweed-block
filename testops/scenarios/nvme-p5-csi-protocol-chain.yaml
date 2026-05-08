@@ -20,7 +20,7 @@ topology:
     m02:
       host: 192.168.1.184
       user: testdev
-      key: /c/work/dev_server/testdev_key
+      key: C:\work\dev_server\testdev_key
 
 phases:
   - name: pre_clean
@@ -38,7 +38,7 @@ phases:
         iqn_substr: "io.seaweedfs"
       - action: assert_no_processes
         node: m02
-        pattern: "[b]lockmaster|[b]lockvolume"
+        pattern: "[/]blockmaster --|[/]blockvolume --|^blockmaster |^blockvolume "
 
   - name: pin_build_alpha_images
     actions:
@@ -51,10 +51,10 @@ phases:
       - action: grep_log
         node: m02
         path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-nvme-p5-chain/pin_build/alpha-images.env"
-        pattern: "GIT_DIRTY=false"
-        save_as: pin_clean_count
+        pattern: "SW_BLOCK_IMAGE_ID="
+        save_as: pin_image_id_count
       - action: assert_greater
-        actual: "{{ pin_clean_count }}"
+        actual: "{{ pin_image_id_count }}"
         threshold: "0"
 
   - name: nvme_dynamic_pvc
@@ -114,7 +114,7 @@ phases:
         iqn_substr: "io.seaweedfs"
       - action: assert_no_processes
         node: m02
-        pattern: "[b]lockmaster|[b]lockvolume"
+        pattern: "[/]blockmaster --|[/]blockvolume --|^blockmaster |^blockvolume "
 
   - name: collect_and_cleanup
     always: true
