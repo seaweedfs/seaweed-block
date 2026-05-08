@@ -21,6 +21,14 @@ swblock run testops/scenarios/nvme-p5-csi-protocol-chain.yaml \
   --env ssh_key=/path/to/testdev_key/on/controller
 ```
 
+The same runner-native shape is used for the longer iSCSI P8 soak:
+
+```bash
+swblock run testops/scenarios/iscsi-p8-compat-soak-chain.yaml \
+  --env product_root=/path/to/seaweed_block/on/m02 \
+  --env ssh_key=/path/to/testdev_key/on/controller
+```
+
 The scenario still shells out to existing bash payloads. That is deliberate:
 the first migration step is to move orchestration and evidence collection into
 the runner without rewriting the product smoke tests.

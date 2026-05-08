@@ -1,0 +1,157 @@
+# Runner-native iSCSI P8 compatibility soak.
+#
+# The scenario keeps the existing product bash payloads, but lets
+# sw-test-runner own orchestration, pin-build, cleanup gates, and artifact
+# collection.
+#
+# Expected invocation from sw-test-runner-standalone:
+#   swblock run testops/scenarios/iscsi-p8-compat-soak-chain.yaml \
+#     --env product_root=/path/to/seaweed_block/on/m02 \
+#     --env ssh_key=/path/to/testdev_key/on/controller
+
+name: iscsi-p8-compat-soak-chain
+timeout: 35m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+  os_iterations: "2"
+  os_fio_runtime: "120"
+  os_fio_size: "128m"
+  attach_iterations: "3"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: pre_clean
+    actions:
+      - action: pre_run_cleanup
+        node: m02
+        kill_patterns: "blockmaster,blockvolume,iscsi-target"
+        nvme_disconnect: "true"
+        iscsi_logout_prefix: "iqn.2026-05.io.seaweedfs"
+      - action: exec
+        node: m02
+        cmd: "rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-p8-chain && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-p8-chain/bin /mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-p8-chain/pin_build /mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-p8-chain/os_fio_repeat /mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-p8-chain/k8s_fio /mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-p8-chain/k8s_attach_detach"
+      - action: assert_no_active_iscsi_sessions
+        node: m02
+        iqn_substr: "io.seaweedfs"
+      - action: assert_no_processes
+        node: m02
+        pattern: "[/]blockmaster --|[/]blockvolume --|^blockmaster |^blockvolume "
+
+  - name: pin_build
+    actions:
+      - action: exec
+        node: m02
+        timeout: 8m
+        cmd: "cd {{ product_root }} && go build -o /mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-p8-chain/bin/blockmaster ./cmd/blockmaster && go build -o /mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-p8-chain/bin/blockvolume ./cmd/blockvolume"
+      - action: exec
+        node: m02
+        timeout: 8m
+        cmd: "cd {{ product_root }} && bash scripts/build-alpha-images.sh {{ product_root }}"
+        env.SW_BLOCK_IMPORT_K3S: "1"
+        env.SW_BLOCK_ARTIFACT_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-p8-chain/pin_build"
+      - action: exec
+        node: m02
+        cmd: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-p8-chain/bin/blockmaster --version > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-p8-chain/pin_build/blockmaster.version.txt && /mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-p8-chain/bin/blockvolume --version > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-p8-chain/pin_build/blockvolume.version.txt"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-p8-chain/pin_build/alpha-images.env"
+        pattern: "SW_BLOCK_IMAGE_ID="
+        save_as: pin_image_id_count
+      - action: assert_greater
+        actual: "{{ pin_image_id_count }}"
+        threshold: "0"
+
+  - name: os_fio_repeat
+    actions:
+      - action: exec
+        node: m02
+        timeout: 12m
+        cmd: "cd {{ product_root }} && bash scripts/run-iscsi-os-smoke.sh {{ product_root }}"
+        env.SW_BLOCK_ARTIFACT_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-p8-chain/os_fio_repeat"
+        env.SW_BLOCK_BIN_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-p8-chain/bin"
+        env.SW_BLOCK_ISCSI_ITERATIONS: "{{ os_iterations }}"
+        env.SW_BLOCK_ISCSI_STRESS: "fio"
+        env.SW_BLOCK_ISCSI_FIO_RUNTIME: "{{ os_fio_runtime }}"
+        env.SW_BLOCK_ISCSI_FIO_SIZE: "{{ os_fio_size }}"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-p8-chain/os_fio_repeat/run.log"
+        pattern: "\\[iscsi-os\\] PASS:"
+        save_as: os_pass_count
+      - action: assert_greater
+        actual: "{{ os_pass_count }}"
+        threshold: "0"
+      - action: assert_no_active_iscsi_sessions
+        node: m02
+        iqn_substr: "io.seaweedfs"
+      - action: assert_no_processes
+        node: m02
+        pattern: "[/]blockmaster --|[/]blockvolume --|^blockmaster |^blockvolume "
+
+  - name: k8s_fio
+    actions:
+      - action: exec
+        node: m02
+        timeout: 8m
+        cmd: "cd {{ product_root }} && bash scripts/run-k8s-alpha-fio.sh {{ product_root }}"
+        env.SW_BLOCK_ALPHA_IMAGES_ENV: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-p8-chain/pin_build/alpha-images.env"
+        env.SW_BLOCK_ARTIFACT_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-p8-chain/k8s_fio"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-p8-chain/k8s_fio/run.log"
+        pattern: "\\[alpha-fio\\] PASS:"
+        save_as: k8s_fio_pass_count
+      - action: assert_greater
+        actual: "{{ k8s_fio_pass_count }}"
+        threshold: "0"
+      - action: assert_no_active_iscsi_sessions
+        node: m02
+        iqn_substr: "io.seaweedfs"
+      - action: assert_no_processes
+        node: m02
+        pattern: "[/]blockmaster --|[/]blockvolume --|^blockmaster |^blockvolume "
+
+  - name: k8s_attach_detach
+    actions:
+      - action: exec
+        node: m02
+        timeout: 12m
+        cmd: "cd {{ product_root }} && set -a && . /mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-p8-chain/pin_build/alpha-images.env && set +a && bash scripts/run-k8s-attach-detach-loop.sh {{ product_root }}"
+        env.SW_BLOCK_ATTACH_DETACH_ITERATIONS: "{{ attach_iterations }}"
+        env.SW_BLOCK_ARTIFACT_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-p8-chain/k8s_attach_detach"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-p8-chain/k8s_attach_detach/summary.log"
+        pattern: "\\[attach-loop\\] PASS:"
+        save_as: attach_pass_count
+      - action: assert_greater
+        actual: "{{ attach_pass_count }}"
+        threshold: "0"
+      - action: assert_no_active_iscsi_sessions
+        node: m02
+        iqn_substr: "io.seaweedfs"
+      - action: assert_no_processes
+        node: m02
+        pattern: "[/]blockmaster --|[/]blockvolume --|^blockmaster |^blockvolume "
+
+  - name: collect_and_cleanup
+    always: true
+    actions:
+      - action: pre_run_cleanup
+        node: m02
+        kill_patterns: "blockmaster,blockvolume,iscsi-target"
+        nvme_disconnect: "true"
+        iscsi_logout_prefix: "iqn.2026-05.io.seaweedfs"
+      - action: collect_path
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-p8-chain"
+        name: "remote-phases"
+        ignore_error: true
