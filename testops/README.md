@@ -43,7 +43,9 @@ The product-owned release gate composes the current protocol chains:
 - `iscsi-p8-compat-soak-chain`
 
 Run it from the Windows controller, pointing it at the standalone runner and
-the remote product checkout on m02:
+the remote product checkout on m02. The PowerShell wrapper supports both
+Windows PowerShell 5.1 and PowerShell 7+; native runner stderr is captured into
+the child artifact directory instead of being treated as a PowerShell exception.
 
 ```powershell
 .\scripts\testops-run-protocol-release-gate.ps1 `

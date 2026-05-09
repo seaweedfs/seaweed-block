@@ -129,6 +129,51 @@ function Write-SuiteResult {
     $statusDoc | ConvertTo-Json -Depth 8 | Set-Content -Path (Join-Path $ArtifactRoot "status.json")
 }
 
+function ConvertTo-NativeArgument {
+    param([string]$Argument)
+    if ($null -eq $Argument) {
+        return '""'
+    }
+    if ($Argument -notmatch '[\s"]') {
+        return $Argument
+    }
+    $escaped = $Argument -replace '(\\*)"', '$1$1\"'
+    $escaped = $escaped -replace '(\\+)$', '$1$1'
+    return '"' + $escaped + '"'
+}
+
+function Invoke-NativeRedirect {
+    param(
+        [string]$FilePath,
+        [string[]]$Arguments,
+        [string]$WorkingDirectory,
+        [string]$StdoutPath,
+        [string]$StderrPath
+    )
+    $cmd = Get-Command $FilePath -ErrorAction Stop
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $cmd.Source
+    $psi.Arguments = (($Arguments | ForEach-Object { ConvertTo-NativeArgument $_ }) -join " ")
+    if (![string]::IsNullOrWhiteSpace($WorkingDirectory)) {
+        $psi.WorkingDirectory = $WorkingDirectory
+    }
+    $psi.UseShellExecute = $false
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+
+    $p = New-Object System.Diagnostics.Process
+    $p.StartInfo = $psi
+    if (!$p.Start()) {
+        throw "failed to start $FilePath"
+    }
+    $stdoutTask = $p.StandardOutput.ReadToEndAsync()
+    $stderrTask = $p.StandardError.ReadToEndAsync()
+    $p.WaitForExit()
+    Set-Content -Path $StdoutPath -Value $stdoutTask.Result
+    Set-Content -Path $StderrPath -Value $stderrTask.Result
+    return $p.ExitCode
+}
+
 function Invoke-Chain {
     param(
         [string]$Step,
@@ -154,16 +199,9 @@ function Invoke-Chain {
     $rc = 0
     try {
         if (Test-Path $RunnerRoot) {
-            Push-Location $RunnerRoot
-            try {
-                & go run ./cmd/swblock @swblockArgs > $stdout 2> $stderr
-                $rc = $LASTEXITCODE
-            } finally {
-                Pop-Location
-            }
+            $rc = Invoke-NativeRedirect -FilePath "go" -Arguments (@("run", "./cmd/swblock") + $swblockArgs) -WorkingDirectory $RunnerRoot -StdoutPath $stdout -StderrPath $stderr
         } else {
-            & swblock @swblockArgs > $stdout 2> $stderr
-            $rc = $LASTEXITCODE
+            $rc = Invoke-NativeRedirect -FilePath "swblock" -Arguments $swblockArgs -WorkingDirectory $ProductRepoRoot -StdoutPath $stdout -StderrPath $stderr
         }
     } catch {
         $rc = 1
@@ -176,6 +214,9 @@ function Invoke-Chain {
     if (Test-Path $latestPath) {
         $childRun = (Get-Content -Raw $latestPath).Trim()
         Set-Content -Path (Join-Path $stepDir "child-run.txt") -Value $childRun
+    } elseif ($rc -eq 0) {
+        $rc = 1
+        Add-Content -Path $stderr -Value "swblock exited 0 but did not write latest run pointer: $latestPath"
     }
 
     if ($rc -ne 0) {

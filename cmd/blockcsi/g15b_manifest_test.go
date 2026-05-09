@@ -291,6 +291,7 @@ func TestG15b_ImageBuildInputs_ContainExpectedBinariesAndNodeTools(t *testing.T)
 		"iscsi-p8-compat-soak-chain.yaml",
 		"child-run.txt",
 		"result.json",
+		"Invoke-NativeRedirect",
 	} {
 		if !strings.Contains(releaseGatePS, want) {
 			t.Fatalf("testops-run-protocol-release-gate.ps1 missing %q", want)
