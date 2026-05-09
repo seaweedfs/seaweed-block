@@ -19,7 +19,7 @@ Already demonstrated:
 Current alpha constraints:
 
 - single-node Kubernetes lab evidence
-- iSCSI frontend only
+- iSCSI and NVMe-oF frontends are release-gated on a single-node lab
 - `walstore` backend only
 - launcher-generated blockvolume state uses `emptyDir`
 - harness applies generated blockvolume manifests
@@ -81,14 +81,14 @@ Current alpha constraints:
 
 ## Protocol And Backend Roadmap
 
-1. iSCSI remains the MVP frontend.
+1. iSCSI and NVMe-oF are the current release-gated frontends.
 
-   It is the currently tested Kubernetes path and should stay the default until
-   the install and cleanup experience is stable.
+   iSCSI remains the default path for broad compatibility. NVMe-oF is now
+   covered by ANA-aware multipath/failover and CSI protocol-selection gates.
 
-2. NVMe-oF is a follow-up frontend.
+2. CSI dispatch is protocol-aware.
 
-   The CSI layer should dispatch by frontend target protocol:
+   The CSI layer dispatches by frontend target protocol:
 
    ```text
    protocol=iscsi -> iscsiadm path
@@ -116,7 +116,7 @@ Requires deeper storage context:
 - WAL retention and flow control
 - replica reintegration
 - multi-node authority/publisher changes
-- NVMe-oF frontend support
+- broader V2 parity and long-running protocol regression coverage
 
 ## Definition Of Beta
 
@@ -127,7 +127,7 @@ A reasonable beta bar:
 - Volume data survives blockvolume pod restart.
 - Multi-node attach works.
 - Basic failover is tested under an attached workload.
-- TestOps can run the smoke suite and produce stable artifacts.
+- TestOps can run the protocol release gate and produce stable artifacts.
 - Non-claims are documented and visible to users.
 
 Detailed post-alpha execution planning is kept in `internal/docs/` so the

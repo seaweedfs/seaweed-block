@@ -42,10 +42,36 @@ The product-owned release gate composes the current protocol chains:
 - `nvme-p5-csi-protocol-chain`
 - `iscsi-p8-compat-soak-chain`
 
-Run it from the Windows controller, pointing it at the standalone runner and
-the remote product checkout on m02. The PowerShell wrapper supports both
-Windows PowerShell 5.1 and PowerShell 7+; native runner stderr is captured into
-the child artifact directory instead of being treated as a PowerShell exception.
+The primary operator path is the runner-native suite command. Run it from the
+controller, pointing it at the remote product checkout on m02:
+
+```powershell
+swblock suite `
+  --results-dir V:/share/g15d-k8s/testops-runs/protocol-release-gate-native `
+  --env product_root=/tmp/seaweed-block-nvme-p4l `
+  --env ssh_key=C:/work/dev_server/testdev_key `
+  C:/work/seaweed_block/testops/suites/protocol-release-gate.yaml
+```
+
+Validate the bundle before manual artifact review:
+
+```powershell
+swblock validate-bundle --profile protocol-release-gate `
+  V:/share/g15d-k8s/testops-runs/protocol-release-gate-native/<run-id>
+```
+
+QA close evidence:
+
+- product commit: `033028e74c1ac3bc06f19c0563bc2e6a0495af59`,
+- runner commit: `3c1b6603aefcf4c1bf0b22f9a9c081a67e786d8d`,
+- suite run: `20260509-151531-9c6c`,
+- result: PASS, validated by `swblock validate-bundle --profile
+  protocol-release-gate`.
+
+The older wrappers remain available for compatibility and local debugging. The
+PowerShell wrapper supports both Windows PowerShell 5.1 and PowerShell 7+;
+native runner stderr is captured into the child artifact directory instead of
+being treated as a PowerShell exception.
 
 ```powershell
 .\scripts\testops-run-protocol-release-gate.ps1 `

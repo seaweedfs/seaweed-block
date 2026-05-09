@@ -1,6 +1,6 @@
-# Current Plan: Frontend Completeness
+# Current Plan: Frontend Completeness And V2 Parity
 
-Status: active.
+Status: active, with the iSCSI/NVMe protocol-readiness slice closed.
 
 Rule: V2 frontend coverage is the minimum height for V3 unless we explicitly
 drop a feature with a product reason. V3 should keep its own architecture, but
@@ -19,11 +19,42 @@ References:
 - `ref/nvme-ana-technical-note.md`
 - `ref/nvme-p4-multipath-failover-design.md`
 
+## Current Status: Protocol Readiness Closed
+
+As of 2026-05-09, the current iSCSI/NVMe frontend protocol-readiness plan is
+closed for this branch.
+
+Close evidence:
+
+- Runner-native protocol release gate PASS on M02:
+  - product commit: `033028e74c1ac3bc06f19c0563bc2e6a0495af59`,
+  - runner commit: `3c1b6603aefcf4c1bf0b22f9a9c081a67e786d8d`,
+  - suite run: `20260509-151531-9c6c`,
+  - wall clock: 1415.97 seconds,
+  - children: `iscsi-p6-alua-failover`, `nvme-p4-multipath-failover`,
+    `nvme-p5-csi-protocol`, and `iscsi-p8-compat-soak`, all PASS.
+- `swblock validate-bundle --profile protocol-release-gate` classified the
+  native suite bundle as VALID.
+- Post-run M02 cleanup was clean: no V3 processes and all child
+  `collect_and_cleanup` phases ran.
+
+Decision:
+
+- iSCSI and NVMe are now release-gated protocol frontends, not active bring-up
+  work.
+- Future iSCSI/NVMe changes should enter through regression tests, V2 parity
+  backlog items, or broader availability/performance gates.
+- Do not treat this as full V2 product parity. Remaining work belongs to
+  parity/hardening: rebuild/reintegration matrices, operator lifecycle,
+  multi-node/cloud scale, longer soak/performance, and scenario corpus
+  migration.
+
 ## Product Goal
 
-- Make iSCSI a credible Kubernetes block frontend, not only a smoke-test path.
+- Keep iSCSI and NVMe credible Kubernetes block frontends, not only smoke-test
+  paths.
 - Support real OS initiators, filesystem workloads, stress, auth, lifecycle,
-  and eventually multipath/failover.
+  multipath, and mounted failover.
 - Keep protocol code separate from authority and replica readiness decisions.
 - Use V2 tests as the coverage inventory, not as code to blindly copy.
 
@@ -475,7 +506,7 @@ References:
     - non-claim:
       compatibility probe only, not a long-running soak or performance claim.
 
-## Current Active Milestone: TestOps For Frontend Lab Gates
+## Recently Closed Milestone: TestOps For Frontend Lab Gates
 
 - Goal:
   - reduce false failures from manual multi-step lab runs by moving P8-style
@@ -509,8 +540,8 @@ References:
       - status: QA green at `cf9183a`.
       - `nvme-p5-csi-dynamic`,
       - `nvme-p5-default-iscsi-regression`.
-    - developer-owned suite:
-      - status: implemented at `67592f2`; pending lab run.
+    - developer-owned P5 suite:
+      - status: QA green at `67592f2`.
       - `scripts/testops-run-nvme-p5-suite.sh`,
       - runs pin-build, then both P5 workload scenarios,
       - passes `alpha-images.env` forward mechanically,
@@ -519,7 +550,8 @@ References:
       - NVMe-P5 showed that stale k3s images can mimic product protocol bugs.
         The build/import step must be one reviewed gate, not manual lab memory.
   - platform extraction target:
-    - status: next after product-side suite is green.
+    - status: seed shape extracted into standalone runner and native suite
+      flow; continue hardening in runner repo.
     - port this V3 reference implementation into reusable runner primitives:
       - `testops_pin_build` for build/import/version/image provenance,
       - `consume_pin` for passing pinned outputs between phases,
@@ -530,6 +562,19 @@ References:
       - `alpha-images-pin-build` PASS at `cf9183a`,
       - `nvme-p5-csi-dynamic` PASS at `cf9183a`,
       - `nvme-p5-default-iscsi-regression` PASS at `cf9183a`.
+  - runner-native protocol release suite:
+    - status: QA green on M02 at product `033028e` and runner `3c1b660`.
+    - suite: `testops/suites/protocol-release-gate.yaml`.
+    - command shape:
+      `swblock suite --results-dir <root> --env product_root=<remote-root>
+      --env ssh_key=<key> testops/suites/protocol-release-gate.yaml`.
+    - children:
+      - `iscsi-p6-alua-failover-chain`,
+      - `nvme-p4-multipath-failover-chain`,
+      - `nvme-p5-csi-protocol-chain`,
+      - `iscsi-p8-compat-soak-chain`.
+    - validation:
+      `swblock validate-bundle --profile protocol-release-gate <suite-run>`.
   - define the minimal result contract:
     - scenario name,
     - repository SHA,
@@ -545,6 +590,8 @@ References:
   - one command runs the P8 full lab gate,
   - old-commit/stale-binary ambiguity is impossible or explicitly reported,
   - result file is enough for review without reading raw terminal output.
+  - one runner-native command runs the full iSCSI/NVMe/CSI/soak release gate,
+    and `validate-bundle --profile protocol-release-gate` accepts the bundle.
 
 - QA/tooling:
   - Dev owns the core test content and uses TestOps as the primary dev loop.
@@ -552,7 +599,7 @@ References:
     but should not be the only path that can execute a gate end-to-end.
   - prefer small TestOps wrapper over a wholesale scenario DSL rewrite.
 
-## Current Dev Milestone: NVMe-oF / ANA Parity Planning
+## Recently Closed Milestone: NVMe-oF / ANA Parity Planning
 
 - Goal:
   - bring NVMe-oF up to the same product discipline as the now-green iSCSI
@@ -717,8 +764,9 @@ References:
         should make build, k3s image import, digest capture, and component
         version verification one required step for future release gates.
   - NVMe-P6 RoCE / network performance matrix:
-    - status: planned.
-    - only after correctness gates are green.
+    - status: deferred to future network/performance plan.
+    - correctness gates are green; RoCE is no longer part of protocol
+      readiness closure.
 
 - Close bar for the planning slice:
   - audit table exists,
@@ -726,10 +774,43 @@ References:
   - no ANA or performance claim is enabled before matching host evidence.
 
 - QA/tooling:
-  - #QA starts with:
-    `internal/docs/qa-assignments/nvme-p1-os-smoke-validation.md`.
-  - TestOps wrapper work can proceed independently on P8 soak while dev works
-    on NVMe-P0/P1.
+  - protocol assignments remain as historical evidence under
+    `internal/docs/qa-assignments/`.
+  - future protocol changes should update the runner-native release gate rather
+    than adding manual-only QA instructions.
+
+## Current Active Milestone: V2 Parity And Hardening Backlog
+
+- Goal:
+  - keep iSCSI/NVMe protocol readiness protected by the release gate while
+    moving active development to remaining V2 parity, product hardening, and
+    TestOps platform work.
+
+- Work buckets:
+  - V2 parity audit:
+    - compare the old `weed/storage/blockvol` scenario corpus against current
+      V3 capabilities,
+    - classify each gap as already covered by the release gate, still missing,
+      intentionally deferred, or rejected with product reason.
+  - availability/recovery hardening:
+    - replica return and reintegration,
+    - RF2/RF3 rebuild and failover matrices,
+    - WAL retention and flow-control pressure,
+    - longer soak and failure-injection runs.
+  - Kubernetes/operator hardening:
+    - durable blockvolume state beyond throwaway alpha defaults,
+    - operator/controller lifecycle,
+    - multi-node attach and non-loopback frontend addressing.
+  - TestOps platform:
+    - keep product-owned scenarios in this repo,
+    - move repeated primitives into the standalone runner,
+    - use native suite/run-control/validate-bundle for release evidence,
+    - explore controller/agent mode separately from the open SSH runner path.
+
+- Close bar for the next planning slice:
+  - a V2 parity matrix exists with explicit disposition per feature/scenario,
+  - at least one non-protocol hardening gate is runner-native and repeatable,
+  - protocol release gate remains green after unrelated hardening changes.
 
 ## Cross-Cutting Technical Rules
 
@@ -760,8 +841,8 @@ References:
 
 - Use milestone PRs, not one PR per tiny fix.
 - Target one or two PRs per day at most.
-- For the current active milestone, keep iSCSI-P2 local tests and required
-  protocol fixes in one coherent PR if possible.
+- For the current active milestone, keep parity matrix updates, non-protocol
+  hardening gates, and runner scenario changes grouped by reviewable outcome.
 - Split OS/K8s harness work only if it becomes too large to review cleanly.
 
 ## Finish Action
