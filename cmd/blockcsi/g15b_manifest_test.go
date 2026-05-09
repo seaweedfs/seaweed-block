@@ -266,6 +266,36 @@ func TestG15b_ImageBuildInputs_ContainExpectedBinariesAndNodeTools(t *testing.T)
 			t.Fatalf("testops-run-nvme-p5-suite.sh missing %q", want)
 		}
 	}
+
+	releaseGate := g15bReadScript(t, "testops-run-protocol-release-gate.sh")
+	for _, want := range []string{
+		"protocol-release-gate-suite",
+		"iscsi-p6-alua-failover-chain.yaml",
+		"nvme-p4-multipath-failover-chain.yaml",
+		"nvme-p5-csi-protocol-chain.yaml",
+		"iscsi-p8-compat-soak-chain.yaml",
+		"child-run.txt",
+		"result.json",
+	} {
+		if !strings.Contains(releaseGate, want) {
+			t.Fatalf("testops-run-protocol-release-gate.sh missing %q", want)
+		}
+	}
+
+	releaseGatePS := g15bReadScript(t, "testops-run-protocol-release-gate.ps1")
+	for _, want := range []string{
+		"protocol-release-gate-suite",
+		"iscsi-p6-alua-failover-chain.yaml",
+		"nvme-p4-multipath-failover-chain.yaml",
+		"nvme-p5-csi-protocol-chain.yaml",
+		"iscsi-p8-compat-soak-chain.yaml",
+		"child-run.txt",
+		"result.json",
+	} {
+		if !strings.Contains(releaseGatePS, want) {
+			t.Fatalf("testops-run-protocol-release-gate.ps1 missing %q", want)
+		}
+	}
 }
 
 func TestG15dHarnessConsumesPinnedAlphaImagesEnv(t *testing.T) {

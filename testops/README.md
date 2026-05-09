@@ -32,3 +32,38 @@ swblock run testops/scenarios/iscsi-p8-compat-soak-chain.yaml \
 The scenario still shells out to existing bash payloads. That is deliberate:
 the first migration step is to move orchestration and evidence collection into
 the runner without rewriting the product smoke tests.
+
+## Protocol Release Gate
+
+The product-owned release gate composes the current protocol chains:
+
+- `iscsi-p6-alua-failover-chain`
+- `nvme-p4-multipath-failover-chain`
+- `nvme-p5-csi-protocol-chain`
+- `iscsi-p8-compat-soak-chain`
+
+Run it from the Windows controller, pointing it at the standalone runner and
+the remote product checkout on m02:
+
+```powershell
+.\scripts\testops-run-protocol-release-gate.ps1 `
+  -RunnerRoot C:\work\seaweedfs\learn\sw-test-runner-standalone `
+  -RemoteProductRoot /tmp/seaweed-block-nvme-p4l `
+  -SshKey C:\work\dev_server\testdev_key `
+  -ArtifactRoot C:\work\tmp\protocol-release-gate-$(Get-Date -Format yyyyMMddTHHmmssZ)
+```
+
+Linux / Git Bash controllers can use the bash wrapper:
+
+```bash
+SWBLOCK_RUNNER_ROOT=/c/work/seaweedfs/learn/sw-test-runner-standalone \
+SW_BLOCK_REMOTE_PRODUCT_ROOT=/tmp/seaweed-block-nvme-p4l \
+SW_BLOCK_SSH_KEY='C:\work\dev_server\testdev_key' \
+SW_BLOCK_ARTIFACT_DIR=/c/work/tmp/protocol-release-gate-$(date -u +%Y%m%dT%H%M%SZ) \
+  bash scripts/testops-run-protocol-release-gate.sh "$PWD"
+```
+
+The suite writes a top-level `result.json` and preserves every child runner
+bundle under `<suite-artifact>/<step>/runs/<child-run-id>/`. Each child bundle
+still owns its own `status.json`, `result.json`, `scenario.yaml`, and collected
+remote artifacts.
