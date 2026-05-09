@@ -29,6 +29,7 @@ Public-facing docs belong in `docs/`.
 | `current-plan.md` | Active development plan. Follow this first. |
 | `product-management-plan.md` | Older product goals, priorities, evidence links, and decision rules. |
 | `qa-assignments/` | Concrete QA tasks with commands, pass criteria, and report templates. |
+| `ref/frontend-protocol-readiness-plan-finished.md` | Historical iSCSI/NVMe protocol-readiness plan closed by the protocol release gate. |
 | `ref/production-readiness-plan.md` | Longer readiness reference and iSCSI P1-P6 detail. |
 | `ref/iscsi-os-initiator-compat-plan.md` | Detailed iSCSI P1 OS-initiator compatibility plan and evidence. |
 | `ref/iscsi-v2-coverage-gap-audit.md` | V2-to-V3 iSCSI coverage gap audit and prioritized test backlog. |
