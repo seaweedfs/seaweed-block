@@ -1,0 +1,23 @@
+name: protocol-release-gate-suite
+mode: chain
+
+# Runner-native equivalent of scripts/testops-run-protocol-release-gate.*.
+# The suite CLI supplies the common env values, for example:
+#   swblock suite --results-dir <root> \
+#     --env product_root=/tmp/seaweed-block-nvme-p4l \
+#     --env ssh_key=C:/work/dev_server/testdev_key \
+#     testops/suites/protocol-release-gate.yaml
+#
+# Each child scenario owns its own product-level assertions and artifact
+# collection. The suite layer only sequences them and emits top-level
+# status/result metadata with child run pointers.
+
+scenarios:
+  - id: iscsi-p6-alua-failover
+    path: ../scenarios/iscsi-p6-alua-failover-chain.yaml
+  - id: nvme-p4-multipath-failover
+    path: ../scenarios/nvme-p4-multipath-failover-chain.yaml
+  - id: nvme-p5-csi-protocol
+    path: ../scenarios/nvme-p5-csi-protocol-chain.yaml
+  - id: iscsi-p8-compat-soak
+    path: ../scenarios/iscsi-p8-compat-soak-chain.yaml
