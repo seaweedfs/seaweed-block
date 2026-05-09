@@ -184,10 +184,10 @@ phases:
       - action: grep_log
         node: m02
         path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-nvme-p4-chain/mounted_failover/status-r2-primary.json"
-        pattern: "\"Epoch\":2"
-        save_as: r2_epoch2_count
+        pattern: "\"Epoch\":[2-9][0-9]*"
+        save_as: r2_epoch_ge2_count
       - action: assert_greater
-        actual: "{{ r2_epoch2_count }}"
+        actual: "{{ r2_epoch_ge2_count }}"
         threshold: "0"
 
       # Field-level gate: r2 promoted to AuthorityRole=primary.

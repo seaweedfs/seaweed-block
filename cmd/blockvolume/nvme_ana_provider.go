@@ -1,6 +1,9 @@
 package main
 
 import (
+	"encoding/binary"
+	"hash/fnv"
+
 	"github.com/seaweedfs/seaweed-block/core/engine"
 	"github.com/seaweedfs/seaweed-block/core/frontend/nvme"
 	"github.com/seaweedfs/seaweed-block/core/host/volume"
@@ -58,7 +61,20 @@ func (p *projectionANAProvider) ANAChangeCount() uint64 {
 		return 1
 	}
 	ep := p.view.EngineProjection()
-	count := ep.Epoch<<32 | ep.EndpointVersion
+	const maxUint32 = uint64(^uint32(0))
+	if ep.Epoch <= maxUint32 && ep.EndpointVersion <= maxUint32 {
+		count := uint64(uint32(ep.Epoch))<<32 | uint64(uint32(ep.EndpointVersion))
+		if count == 0 {
+			return 1
+		}
+		return count
+	}
+	var buf [16]byte
+	binary.LittleEndian.PutUint64(buf[0:8], ep.Epoch)
+	binary.LittleEndian.PutUint64(buf[8:16], ep.EndpointVersion)
+	h := fnv.New64a()
+	_, _ = h.Write(buf[:])
+	count := h.Sum64()
 	if count == 0 {
 		return 1
 	}

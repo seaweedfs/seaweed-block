@@ -12,8 +12,8 @@ func nvmeControllerIDFromReplicaID(replicaID string) uint16 {
 		if n == 0 {
 			return 1
 		}
-		if n > maxNVMeControllerID {
-			n = maxNVMeControllerID
+		if n > uint64(maxNVMeControllerID) {
+			n = uint64(maxNVMeControllerID)
 		}
 		return uint16(n)
 	}
@@ -22,7 +22,7 @@ func nvmeControllerIDFromReplicaID(replicaID string) uint16 {
 	return uint16(h.Sum32()%maxNVMeControllerID + 1)
 }
 
-func trailingDecimal(s string) (uint32, bool) {
+func trailingDecimal(s string) (uint64, bool) {
 	if s == "" {
 		return 0, false
 	}
@@ -33,9 +33,9 @@ func trailingDecimal(s string) (uint32, bool) {
 	if start == len(s) {
 		return 0, false
 	}
-	n, err := strconv.ParseUint(s[start:], 10, 32)
+	n, err := strconv.ParseUint(s[start:], 10, 64)
 	if err != nil {
 		return 0, false
 	}
-	return uint32(n), true
+	return n, true
 }

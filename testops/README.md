@@ -103,7 +103,7 @@ After a run, validate the suite bundle offline before manual artifact review:
 .\scripts\testops-validate-latest-protocol-release-gate.ps1 `
   -RunnerRoot C:\work\seaweedfs\learn\sw-test-runner-standalone `
   -ArtifactRoot C:\work\tmp\protocol-release-gate-20260509T000000Z `
-  -ExpectCommit a0175f8
+  -ExpectCommit 033028e74c1ac3bc06f19c0563bc2e6a0495af59
 ```
 
 Linux / Git Bash:
@@ -111,7 +111,7 @@ Linux / Git Bash:
 ```bash
 SWBLOCK_RUNNER_ROOT=/c/work/seaweedfs/learn/sw-test-runner-standalone \
 SW_BLOCK_ARTIFACT_DIR=/c/work/tmp/protocol-release-gate-20260509T000000Z \
-SW_BLOCK_EXPECT_COMMIT=a0175f8 \
+SW_BLOCK_EXPECT_COMMIT=033028e74c1ac3bc06f19c0563bc2e6a0495af59 \
   bash scripts/testops-validate-latest-protocol-release-gate.sh "$PWD"
 ```
 
@@ -119,7 +119,7 @@ The wrapper calls the platform validator profile:
 
 ```bash
 swblock validate-bundle --profile protocol-release-gate \
-  --expect-commit a0175f8 \
+  --expect-commit 033028e74c1ac3bc06f19c0563bc2e6a0495af59 \
   /path/to/protocol-release-gate-artifact
 ```
 
@@ -129,7 +129,7 @@ debugging but is no longer the primary operator path:
 ```bash
 python3 scripts/testops-validate-protocol-release-gate.py \
   /path/to/protocol-release-gate-artifact \
-  --expect-product-commit a0175f8
+  --expect-product-commit 033028e74c1ac3bc06f19c0563bc2e6a0495af59
 ```
 
 Use `--allow-fail` when validating the schema of an intentionally failed or

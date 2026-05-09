@@ -659,7 +659,7 @@ func run(f flags) int {
 			dualLaneAddr, err := deriveDualLaneAddr(f.dataAddr)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, "blockvolume: dual-lane listen addr derive:", err)
-				_ = replListen.Stop
+				replListen.Stop()
 				_ = replVolume.Close()
 				_ = durableProv.Close()
 				if status != nil {
@@ -673,7 +673,7 @@ func run(f flags) int {
 			dlLn, err := net.Listen("tcp", dualLaneAddr)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, "blockvolume: dual-lane listen:", err)
-				_ = replListen.Stop
+				replListen.Stop()
 				_ = replVolume.Close()
 				_ = durableProv.Close()
 				if status != nil {

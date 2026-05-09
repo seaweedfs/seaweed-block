@@ -280,6 +280,9 @@ func TestG15c_ControllerCreateVolume_RecordsProtocolSelection(t *testing.T) {
 			if err != nil {
 				t.Fatalf("CreateVolume: %v", err)
 			}
+			if len(prov.calls) != 1 {
+				t.Fatalf("provisioner calls=%d want 1", len(prov.calls))
+			}
 			if got := prov.calls[0].Protocol; got != ProtocolNVMe {
 				t.Fatalf("protocol=%q want nvme", got)
 			}

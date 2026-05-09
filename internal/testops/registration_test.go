@@ -506,6 +506,9 @@ func TestNVMeP5CSIRegistrationsBuildShellDrivers(t *testing.T) {
 			if !filepath.IsAbs(shell.Path) || filepath.Base(shell.Path) != tc.scriptBase {
 				t.Fatalf("shell path=%q", shell.Path)
 			}
+			if _, err := os.Stat(shell.Path); err != nil {
+				t.Fatalf("shell path %q missing: %v", shell.Path, err)
+			}
 			if !containsString(registration.Driver.Env, tc.driverEnv) {
 				t.Fatalf("registration driver env missing %q: %v", tc.driverEnv, registration.Driver.Env)
 			}

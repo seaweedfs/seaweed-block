@@ -24,10 +24,12 @@ func newStatsTarget(t *testing.T) (*nvme.Target, *nvmeClient) {
 	if err != nil {
 		t.Fatalf("Target.Start: %v", err)
 	}
+	t.Cleanup(func() {
+		_ = tg.Close()
+	})
 	cli := dialAndConnect(t, addr)
 	t.Cleanup(func() {
 		cli.close()
-		_ = tg.Close()
 	})
 	return tg, cli
 }

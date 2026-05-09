@@ -252,7 +252,7 @@ wait_port "$PORT2"
 log "wait authority projections"
 wait_status_healthy "$R1_STATUS_ADDR" r1 1
 wait_status_projected "$R2_STATUS_ADDR" r2
-wait_log_pattern "$ARTIFACT_DIR/blockvolume-r2.log" "authority is now" "r2 standby authority observation"
+wait_log_pattern "$ARTIFACT_DIR/blockvolume-r2.log" "authority is now .*not this replica" "r2 standby authority observation"
 
 discover_login() {
   local port="$1"
