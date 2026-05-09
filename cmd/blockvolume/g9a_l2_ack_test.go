@@ -1,4 +1,4 @@
-//go:build integration
+//go:build subprocess
 
 package main_test
 

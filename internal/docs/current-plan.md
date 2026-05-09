@@ -828,15 +828,18 @@ Decision:
 - Prefer scripts or TestOps scenarios over manual command sequences.
 - Manual testing is allowed for first reproduction, but convert the result into
   a repeatable script or scenario.
-- Keep default `go test` focused on unit/component coverage. Tests that build
-  product binaries, spawn `blockmaster`/`blockvolume`, use OS initiators, or
-  wait on multi-process timing must use an explicit integration tag or move into
-  a runner-native scenario.
-- When an integration test fails, first ask whether its assertion can be moved
-  down to a component seam such as authority, engine projection, frontend
-  protocol adapter, lifecycle rendering, or ready-assignment handling. Keep only
-  binary wiring, real frontend I/O, process lifecycle, and lab cleanup in the
-  integration/runner layer.
+- Keep default `go test` focused on unit/component coverage.
+- Local binary wiring tests that build product binaries, spawn
+  `blockmaster`/`blockvolume`, and use loopback protocol clients must use the
+  explicit `subprocess` build tag. These are not m01/m02 lab integration tests.
+- Linux OS/K8s/lab tests that use `iscsiadm`, `nvme-cli`, kernel initiators,
+  mounts, `sudo`, or m01/m02 cleanup state belong in runner-native TestOps
+  scenarios, not default `go test` and not the local `subprocess` tag.
+- When a subprocess or runner integration test fails, first ask whether its
+  assertion can be moved down to a component seam such as authority, engine
+  projection, frontend protocol adapter, lifecycle rendering, or
+  ready-assignment handling. Keep only binary wiring, real OS frontend I/O,
+  process lifecycle, and lab cleanup in the runner layer.
 - QA report must include:
   - branch and commit,
   - command,

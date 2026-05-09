@@ -26,7 +26,7 @@
 //
 // Sign-off tier per this checkpoint: T2B-NVMe-provisional
 // (QA Owner + sw lead per §8B.9). Product-ready requires L2-OS.
-//go:build integration
+//go:build subprocess
 
 package nvme_test
 

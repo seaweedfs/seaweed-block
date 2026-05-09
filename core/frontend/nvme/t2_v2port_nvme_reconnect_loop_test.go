@@ -1,4 +1,4 @@
-//go:build integration
+//go:build subprocess
 
 // Ownership: QA (L1B-1 inventory item, landed early per QA parallel
 // capacity during Batch 11c sign prep).
@@ -20,7 +20,7 @@
 // T3 perf gate.
 //
 // Test layer: L2 subprocess (real cmd/blockmaster + cmd/blockvolume).
-// Build tag: integration. Default go test is kept to unit/component scope;
+// Build tag: subprocess. Default go test is kept to unit/component scope;
 // runner suites should own this style of expensive process test.
 
 package nvme_test
