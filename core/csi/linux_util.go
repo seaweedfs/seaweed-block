@@ -2,9 +2,12 @@ package csi
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -14,6 +17,7 @@ func NewDefaultNodeServer(nodeID, iqnPrefix string) *NodeServer {
 		NodeID:    nodeID,
 		IQNPrefix: iqnPrefix,
 		ISCSIUtil: &realISCSIUtil{},
+		NVMeUtil:  &realNVMeUtil{},
 		MountUtil: &realMountUtil{},
 	})
 }
@@ -121,6 +125,146 @@ func (r *realISCSIUtil) RescanDevice(ctx context.Context, iqn string) error {
 		return fmt.Errorf("iscsiadm rescan: %s: %w", string(out), err)
 	}
 	return nil
+}
+
+type realNVMeUtil struct{}
+
+func (r *realNVMeUtil) Connect(ctx context.Context, addr, nqn string) error {
+	host, port, err := splitHostPort(addr)
+	if err != nil {
+		return err
+	}
+	cmd := exec.CommandContext(ctx, "nvme", "connect", "-t", "tcp", "-a", host, "-s", port, "-n", nqn)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("nvme connect: %s: %w", string(out), err)
+	}
+	return nil
+}
+
+func (r *realNVMeUtil) Disconnect(ctx context.Context, nqn string) error {
+	cmd := exec.CommandContext(ctx, "nvme", "disconnect", "-n", nqn)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		outStr := string(out)
+		if strings.Contains(outStr, "No such") || strings.Contains(outStr, "not found") {
+			return nil
+		}
+		return fmt.Errorf("nvme disconnect: %s: %w", outStr, err)
+	}
+	return nil
+}
+
+func (r *realNVMeUtil) IsConnected(ctx context.Context, nqn string) (bool, error) {
+	doc, err := nvmeListSubsystems(ctx)
+	if err != nil {
+		return false, err
+	}
+	return nvmeSubsystemPathCount(doc, nqn) > 0, nil
+}
+
+func (r *realNVMeUtil) GetDeviceByNQN(ctx context.Context, nqn string) (string, error) {
+	deadline := time.After(30 * time.Second)
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-deadline:
+			return "", fmt.Errorf("timeout waiting for NVMe namespace for NQN %s", nqn)
+		case <-ticker.C:
+			devices, err := nvmeNamespaceDevices(nqn)
+			if err != nil {
+				continue
+			}
+			if len(devices) > 0 {
+				return devices[0], nil
+			}
+		}
+	}
+}
+
+func splitHostPort(addr string) (string, string, error) {
+	parts := strings.LastIndex(addr, ":")
+	if parts <= 0 || parts == len(addr)-1 {
+		return "", "", fmt.Errorf("nvme address %q must be host:port", addr)
+	}
+	return addr[:parts], addr[parts+1:], nil
+}
+
+func nvmeListSubsystems(ctx context.Context) (any, error) {
+	cmd := exec.CommandContext(ctx, "nvme", "list-subsys", "-o", "json")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf("nvme list-subsys: %s: %w", string(out), err)
+	}
+	var doc any
+	if err := json.Unmarshal(out, &doc); err != nil {
+		return nil, fmt.Errorf("parse nvme list-subsys: %w", err)
+	}
+	return doc, nil
+}
+
+func nvmeSubsystemPathCount(doc any, nqn string) int {
+	total := 0
+	for _, sub := range iterNVMeSubsystems(doc) {
+		if got, _ := sub["NQN"].(string); got != nqn {
+			continue
+		}
+		if paths, ok := sub["Paths"].([]any); ok {
+			total += len(paths)
+		}
+	}
+	return total
+}
+
+func iterNVMeSubsystems(node any) []map[string]any {
+	var out []map[string]any
+	switch v := node.(type) {
+	case map[string]any:
+		if _, hasNQN := v["NQN"]; hasNQN {
+			if _, hasPaths := v["Paths"]; hasPaths {
+				out = append(out, v)
+			}
+		}
+		if subs, ok := v["Subsystems"].([]any); ok {
+			for _, sub := range subs {
+				out = append(out, iterNVMeSubsystems(sub)...)
+			}
+		}
+	case []any:
+		for _, item := range v {
+			out = append(out, iterNVMeSubsystems(item)...)
+		}
+	}
+	return out
+}
+
+func nvmeNamespaceDevices(nqn string) ([]string, error) {
+	nqnFiles, err := filepath.Glob("/sys/class/nvme-subsystem/*/subsysnqn")
+	if err != nil {
+		return nil, err
+	}
+	nsPattern := regexp.MustCompile(`^nvme[0-9]+n[0-9]+$`)
+	var devices []string
+	for _, nqnFile := range nqnFiles {
+		raw, err := os.ReadFile(nqnFile)
+		if err != nil || strings.TrimSpace(string(raw)) != nqn {
+			continue
+		}
+		entries, err := os.ReadDir(filepath.Dir(nqnFile))
+		if err != nil {
+			continue
+		}
+		for _, entry := range entries {
+			name := entry.Name()
+			if nsPattern.MatchString(name) {
+				devices = append(devices, filepath.Join("/dev", name))
+			}
+		}
+	}
+	return devices, nil
 }
 
 type realMountUtil struct{}

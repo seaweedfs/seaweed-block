@@ -3,12 +3,15 @@ package csi
 import (
 	"context"
 	"errors"
+	"log"
 	"strconv"
 
 	csipb "github.com/container-storage-interface/spec/lib/go/csi"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
+
+const storageClassProtocolParameter = "sw-block.seaweedfs.com/protocol"
 
 type ControllerServer struct {
 	csipb.UnimplementedControllerServer
@@ -40,6 +43,7 @@ func (s *ControllerServer) CreateVolume(ctx context.Context, req *csipb.CreateVo
 	if err := s.resolveKubernetesMetadata(ctx, &spec); err != nil {
 		return nil, err
 	}
+	log.Printf("blockcsi: CreateVolume volume=%q protocol=%q replication_factor=%d pvc=%q namespace=%q", spec.VolumeID, spec.Protocol, spec.ReplicationFactor, spec.PVCName, spec.PVCNamespace)
 	created, err := s.provisioner.CreateVolume(ctx, spec)
 	if err != nil {
 		if errors.Is(err, ErrVolumeConflict) {
@@ -47,12 +51,14 @@ func (s *ControllerServer) CreateVolume(ctx context.Context, req *csipb.CreateVo
 		}
 		return nil, status.Errorf(codes.Internal, "create volume intent: %v", err)
 	}
+	protocol := normalizeProtocol(created.Protocol)
 	return &csipb.CreateVolumeResponse{
 		Volume: &csipb.Volume{
 			VolumeId:      created.VolumeID,
 			CapacityBytes: int64(created.SizeBytes),
 			VolumeContext: map[string]string{
 				"replicationFactor": strconv.Itoa(created.ReplicationFactor),
+				"protocol":          string(protocol),
 			},
 		},
 	}, nil
@@ -180,15 +186,40 @@ func volumeSpecFromCreateRequest(req *csipb.CreateVolumeRequest) (VolumeSpec, er
 		}
 		rf = v
 	}
+	protocol, err := protocolFromParameters(req.GetParameters())
+	if err != nil {
+		return VolumeSpec{}, err
+	}
 	return VolumeSpec{
 		VolumeID:          req.GetName(),
 		SizeBytes:         uint64(size),
 		ReplicationFactor: rf,
+		Protocol:          protocol,
 		PVCName:           req.GetParameters()["csi.storage.k8s.io/pvc/name"],
 		PVCNamespace:      req.GetParameters()["csi.storage.k8s.io/pvc/namespace"],
 		PVCUID:            req.GetParameters()["csi.storage.k8s.io/pvc/uid"],
 		PVName:            req.GetParameters()["csi.storage.k8s.io/pv/name"],
 	}, nil
+}
+
+func protocolFromParameters(params map[string]string) (Protocol, error) {
+	for _, key := range []string{
+		storageClassProtocolParameter,
+		"protocol",
+		"frontendProtocol",
+	} {
+		raw := params[key]
+		if raw == "" {
+			continue
+		}
+		switch Protocol(raw) {
+		case ProtocolISCSI, ProtocolNVMe:
+			return Protocol(raw), nil
+		default:
+			return "", status.Errorf(codes.InvalidArgument, "invalid protocol %q", raw)
+		}
+	}
+	return ProtocolISCSI, nil
 }
 
 func supportsVolumeCapabilities(caps []*csipb.VolumeCapability) bool {

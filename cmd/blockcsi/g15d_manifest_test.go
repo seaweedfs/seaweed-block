@@ -70,7 +70,23 @@ func TestG15d_K8sRunner_AppliesLauncherGeneratedManifest(t *testing.T) {
 		"SW_BLOCK_LAUNCHER_PVC_OWNER_REF",
 		"SW_BLOCK_ISCSI_CHAP_USERNAME",
 		"SW_BLOCK_ISCSI_CHAP_SECRET",
+		"SW_BLOCK_FRONTEND_PROTOCOL",
 		"csi.storage.k8s.io/node-stage-secret-name",
+		`sw-block.seaweedfs.com/protocol: \"nvme\"`,
+		`protocol: \"nvme\"`,
+		"frontend_protocol=$FRONTEND_PROTOCOL",
+		"expected_git_revision=${EXPECTED_GIT_REVISION:-unknown}",
+		"blockmaster.version.txt",
+		"blockcsi.version.txt",
+		"blockvolume.version.txt",
+		"kube-system-imageids.txt",
+		"image revision mismatch",
+		"delete-storageclass-before-apply.log",
+		"storageclass.live.yaml",
+		"live StorageClass missing NVMe protocol parameter",
+		"lifecycle-volumes.json",
+		"verified generated blockvolume frontend protocol=nvme",
+		"generated blockvolume manifest rendered iSCSI args while frontend_protocol=nvme",
 		"--launcher-iscsi-chap-secret-name",
 		"BLOCKVOLUME_NAMESPACE=\"kube-system\"",
 		"--kubernetes-pvc-uid-lookup",
@@ -84,10 +100,33 @@ func TestG15d_K8sRunner_AppliesLauncherGeneratedManifest(t *testing.T) {
 		"delete generated blockvolume Deployment after manifest cleanup",
 		"wait for Kubernetes GC to delete PVC-owned blockvolume Deployment",
 		"iscsi-sessions.after-delete.txt",
+		"nvme-list-subsys.after-delete.json",
 		"PASS: dynamic PVC create/delete completed checksum write/read and cleanup",
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("runner missing %q", want)
+		}
+	}
+}
+
+func TestG15d_K8sRunner_NVMeProtocolWrapper(t *testing.T) {
+	body := g15dReadFile(t, "scripts", "run-k8s-alpha-nvme.sh")
+	for _, want := range []string{
+		"SW_BLOCK_FRONTEND_PROTOCOL=nvme",
+		"SW_BLOCK_LAUNCHER_PVC_OWNER_REF",
+		"run-alpha-k8s-dynamic.sh",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("nvme alpha wrapper missing %q:\n%s", want, body)
+		}
+	}
+}
+
+func TestAlphaCSINode_LoadsBothFrontendKernelModules(t *testing.T) {
+	body := g15dReadFile(t, "deploy", "k8s", "alpha", "csi-node.yaml")
+	for _, want := range []string{"modprobe iscsi_tcp", "modprobe nvme_tcp"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("alpha csi-node missing %q", want)
 		}
 	}
 }

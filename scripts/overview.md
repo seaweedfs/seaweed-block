@@ -17,6 +17,7 @@ This directory contains developer and QA helper scripts.
 | `run-k8s-attach-detach-loop.sh` | QA loop wrapper. Repeats the app PVC attach/write/read/delete flow and stores per-iteration artifacts. |
 | `run-k8s-csi-node-restart.sh` | QA wrapper. Restarts the CSI node DaemonSet between writer and reader pods using the same PVC. |
 | `build-alpha-images.sh` | Builds local Docker images used by the Kubernetes alpha harness. |
+| `testops-run-nvme-p5-suite.sh` | Developer-owned TestOps suite: pin-builds alpha images, then runs NVMe dynamic PVC and default iSCSI regression with the pinned image env. |
 | `run-alpha-k8s-dynamic.sh` | Public dynamic PVC alpha smoke entry. |
 | `run-alpha-app-demo.sh` | App-demo implementation used by `run-k8s-demo.sh`. |
 | `run-iscsi-os-smoke.sh` | Privileged Linux OS-initiator smoke: `iscsiadm` -> `mkfs.ext4` -> mount -> checksum -> logout on a 256 MiB target. |
@@ -25,6 +26,8 @@ This directory contains developer and QA helper scripts.
 | `run-iscsi-alua-os-smoke.sh` | Privileged Linux OS-initiator smoke for ALUA reporting: `iscsiadm` -> `sg_inq`/`sg_rtpg` -> mount -> checksum -> logout. |
 | `run-iscsi-alua-multipath-smoke.sh` | Privileged Linux OS-initiator smoke for two iSCSI paths: two portals -> ALUA active/standby evidence -> standby write reject -> `multipath -ll`. |
 | `run-iscsi-alua-mounted-failover-smoke.sh` | Privileged Linux OS-initiator smoke for mounted multipath failover: mount `/dev/mapper/*`, kill active path, wait r2 primary, verify checksum read/write. |
+| `run-nvme-os-smoke.sh` | Privileged Linux OS-initiator smoke: `nvme connect` -> `mkfs.ext4` -> mount -> checksum/fio/dd -> disconnect. |
+| `run-nvme-multipath-smoke.sh` | Privileged Linux OS-initiator smoke for two NVMe/TCP paths: two portals -> ANA/identity evidence -> native multipath grouping check. |
 | `build-g15b-images.sh` | Compatibility wrapper for older QA scripts. |
 | `run-g15b-k8s-static.sh` | Historical static PV Kubernetes harness. |
 | `run-g15d-k8s-dynamic.sh` | Historical dynamic PVC harness used by compatibility scenarios. |

@@ -1,0 +1,37 @@
+{
+  "schema_version": "1.0",
+  "scenario": "alpha-images-pin-build",
+  "gate": "M1",
+  "layer": "L0-build",
+  "driver": {
+    "type": "shell",
+    "path": "scripts/testops-pin-alpha-images.sh"
+  },
+  "default_timeout_s": 1200,
+  "required_capabilities": [
+    "bash",
+    "docker",
+    "k3s",
+    "sudo"
+  ],
+  "required_images": [
+    "sw-block:local",
+    "sw-block-csi:local"
+  ],
+  "known_green_commit": "8e0a28f",
+  "artifacts": [
+    "pin-build/build.stdout.log",
+    "pin-build/build.stderr.log",
+    "pin-build/alpha-images.env",
+    "pin-build/blockmaster.version.txt",
+    "pin-build/blockvolume.version.txt",
+    "pin-build/blockcsi.version.txt",
+    "pin-build/k3s-import-sw-block.log",
+    "pin-build/k3s-import-sw-block-csi.log"
+  ],
+  "non_claims": [
+    "Build/import provenance only; no Kubernetes workload or storage data-path claim.",
+    "Does not prove published registry images.",
+    "Does not replace protocol-specific smoke tests."
+  ]
+}

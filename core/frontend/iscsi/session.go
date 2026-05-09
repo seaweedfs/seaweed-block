@@ -522,12 +522,23 @@ func (s *Session) sendSCSIResponse(req *PDU, r SCSIResult) error {
 	p.SetStatSN(s.statSN)
 	p.SetExpCmdSN(req.CmdSN() + 1)
 	p.SetMaxCmdSN(req.CmdSN() + 32)
-	// For CHECK CONDITION responses, sense data rides in the
-	// data segment as fixed-format sense (18 bytes).
+	// iSCSI SCSI Response data segment carries a two-byte
+	// SenseLength followed by fixed-format sense data (RFC 7143
+	// §10.4.7). REQUEST SENSE still returns raw SPC sense bytes;
+	// only the iSCSI response wrapper gets this prefix.
 	if r.Status == StatusCheckCondition {
-		p.DataSegment = buildSenseData(r.SenseKey, r.ASC, r.ASCQ)
+		p.DataSegment = buildSCSIResponseSenseSegment(r.SenseKey, r.ASC, r.ASCQ)
 	}
 	return WritePDU(s.conn, p)
+}
+
+func buildSCSIResponseSenseSegment(key, asc, ascq uint8) []byte {
+	sense := buildSenseData(key, asc, ascq)
+	out := make([]byte, 2+len(sense))
+	out[0] = byte(len(sense) >> 8)
+	out[1] = byte(len(sense))
+	copy(out[2:], sense)
+	return out
 }
 
 func (s *Session) handleLogout(req *PDU) error {

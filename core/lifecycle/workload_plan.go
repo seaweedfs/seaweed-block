@@ -11,6 +11,7 @@ import (
 type BlockVolumeWorkloadPlan struct {
 	VolumeID     string
 	SizeBytes    uint64
+	Protocol     string
 	PVCName      string
 	PVCNamespace string
 	PVCUID       string
@@ -26,6 +27,9 @@ type BlockVolumeReplicaWorkload struct {
 	CtrlAddr           string
 	ISCSIListenPort    int
 	ISCSIQualifiedName string
+	NVMeListenPort     int
+	NVMeSubsystemNQN   string
+	NVMeNSID           int
 }
 
 // PlanBlockVolumeWorkloads converts desired lifecycle state plus placement
@@ -47,6 +51,16 @@ func PlanBlockVolumeWorkloads(volume VolumeRecord, placement PlacementIntent, no
 	if cfg.IQNPrefix == "" {
 		cfg.IQNPrefix = "iqn.2026-05.io.seaweedfs"
 	}
+	if cfg.NVMePortBase == 0 {
+		cfg.NVMePortBase = 4420
+	}
+	if cfg.NQNPrefix == "" {
+		cfg.NQNPrefix = "nqn.2026-05.io.seaweedfs"
+	}
+	protocol := volume.Spec.Protocol
+	if protocol == "" {
+		protocol = "iscsi"
+	}
 	nodeByID := make(map[string]NodeRegistration, len(nodes))
 	for _, node := range nodes {
 		nodeByID[node.ServerID] = node
@@ -55,6 +69,7 @@ func PlanBlockVolumeWorkloads(volume VolumeRecord, placement PlacementIntent, no
 	out := BlockVolumeWorkloadPlan{
 		VolumeID:     volume.Spec.VolumeID,
 		SizeBytes:    volume.Spec.SizeBytes,
+		Protocol:     protocol,
 		PVCName:      volume.Spec.PVCName,
 		PVCNamespace: volume.Spec.PVCNamespace,
 		PVCUID:       volume.Spec.PVCUID,
@@ -79,6 +94,9 @@ func PlanBlockVolumeWorkloads(volume VolumeRecord, placement PlacementIntent, no
 			CtrlAddr:           ctrlAddr,
 			ISCSIListenPort:    cfg.ISCSIPortBase + i,
 			ISCSIQualifiedName: fmt.Sprintf("%s:%s", cfg.IQNPrefix, volume.Spec.VolumeID),
+			NVMeListenPort:     cfg.NVMePortBase + i,
+			NVMeSubsystemNQN:   fmt.Sprintf("%s:%s", cfg.NQNPrefix, volume.Spec.VolumeID),
+			NVMeNSID:           1,
 		})
 	}
 	return out, nil
@@ -87,6 +105,8 @@ func PlanBlockVolumeWorkloads(volume VolumeRecord, placement PlacementIntent, no
 type WorkloadPlanConfig struct {
 	ISCSIPortBase int
 	IQNPrefix     string
+	NVMePortBase  int
+	NQNPrefix     string
 }
 
 func SortWorkloadPlans(plans []BlockVolumeWorkloadPlan) {

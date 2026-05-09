@@ -59,6 +59,33 @@ func TestG15d_K8sRenderer_RF2UsesDistinctNamesAndPorts(t *testing.T) {
 	}
 }
 
+func TestG15d_K8sRenderer_RendersNVMeBlockVolumeArgs(t *testing.T) {
+	plan := sampleWorkloadPlan()
+	plan.Protocol = "nvme"
+	manifests, err := RenderBlockVolumeDeployments(plan, K8sRenderConfig{MasterAddr: "m:9333"})
+	if err != nil {
+		t.Fatalf("RenderBlockVolumeDeployments: %v", err)
+	}
+	raw := string(manifests[0].YAML)
+	for _, want := range []string{
+		"--nvme-listen=127.0.0.1:4420",
+		"--nvme-subsysnqn=nqn.test:pvc-a",
+		"--nvme-ns=1",
+	} {
+		if !strings.Contains(raw, want) {
+			t.Fatalf("manifest missing %q:\n%s", want, raw)
+		}
+	}
+	for _, forbidden := range []string{
+		"--iscsi-listen=",
+		"--iscsi-iqn=",
+	} {
+		if strings.Contains(raw, forbidden) {
+			t.Fatalf("nvme manifest must not contain %q:\n%s", forbidden, raw)
+		}
+	}
+}
+
 func TestG15d_K8sRenderer_RequiresMasterAddr(t *testing.T) {
 	_, err := RenderBlockVolumeDeployments(sampleWorkloadPlan(), K8sRenderConfig{})
 	if err == nil {
@@ -151,6 +178,7 @@ func sampleWorkloadPlan() lifecycle.BlockVolumeWorkloadPlan {
 	return lifecycle.BlockVolumeWorkloadPlan{
 		VolumeID:     "pvc-a",
 		SizeBytes:    1 << 20,
+		Protocol:     "iscsi",
 		PVCName:      "demo-pvc",
 		PVCNamespace: "default",
 		PVCUID:       "uid-123",
@@ -164,6 +192,9 @@ func sampleWorkloadPlan() lifecycle.BlockVolumeWorkloadPlan {
 				CtrlAddr:           "10.0.0.1:9101",
 				ISCSIListenPort:    3260,
 				ISCSIQualifiedName: "iqn.test:pvc-a",
+				NVMeListenPort:     4420,
+				NVMeSubsystemNQN:   "nqn.test:pvc-a",
+				NVMeNSID:           1,
 			},
 			{
 				ServerID:           "m02",
@@ -174,6 +205,9 @@ func sampleWorkloadPlan() lifecycle.BlockVolumeWorkloadPlan {
 				CtrlAddr:           "10.0.0.1:9102",
 				ISCSIListenPort:    3261,
 				ISCSIQualifiedName: "iqn.test:pvc-a",
+				NVMeListenPort:     4421,
+				NVMeSubsystemNQN:   "nqn.test:pvc-a",
+				NVMeNSID:           1,
 			},
 		},
 	}

@@ -6,6 +6,16 @@ import (
 	"time"
 )
 
+func TestParseFlags_VersionDoesNotRequireVolumeArgs(t *testing.T) {
+	got, err := parseFlags([]string{"--version"})
+	if err != nil {
+		t.Fatalf("parseFlags --version: %v", err)
+	}
+	if !got.version {
+		t.Fatal("version flag not set")
+	}
+}
+
 func TestParseFlags_IscsiPortalAddrRequiresListen(t *testing.T) {
 	args := append(requiredBlockvolumeArgs(),
 		"--iscsi-portal-addr", "203.0.113.10:3260,1",

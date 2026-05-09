@@ -51,7 +51,7 @@ const (
 // Fields match the NVMe IO Read/Write CDW10-13 layout:
 //   - SLBA  = CDW10 (low) + CDW11 (high) — 64-bit starting LBA
 //   - NLB   = CDW12[15:0] + 1  (Number of Logical Blocks, zero-based on wire,
-//                               one-based in this struct for readability)
+//     one-based in this struct for readability)
 //   - NSID  = command header Namespace Identifier
 //
 // Data is the host-provided write payload (nil for Read).
@@ -89,9 +89,11 @@ func (r IOResult) AsError() *StatusError {
 // .Write so the per-op lineage fence fires exactly once per
 // NVMe command. Stateless with respect to the backend.
 type IOHandler struct {
-	backend    frontend.Backend
-	blockSize  uint32
-	volumeSize uint64
+	backend      frontend.Backend
+	blockSize    uint32
+	volumeSize   uint64
+	ana          ANAProvider
+	metadataOnly bool
 	// nsid is the single namespace ID this handler serves. T2
 	// advertises NSID=1 (the canonical "first namespace" in
 	// NVMe discovery); commands for any other NSID are
@@ -106,6 +108,10 @@ type HandlerConfig struct {
 	BlockSize  uint32
 	VolumeSize uint64
 	NSID       uint32
+	ANA        ANAProvider
+	// MetadataOnly serves admin/Identify/ANA discovery on a standby path but
+	// rejects all namespace data commands before touching Backend.
+	MetadataOnly bool
 }
 
 // NewIOHandler builds a handler. Backend MUST be non-nil.
@@ -126,10 +132,12 @@ func NewIOHandler(cfg HandlerConfig) *IOHandler {
 		nsid = 1
 	}
 	return &IOHandler{
-		backend:    cfg.Backend,
-		blockSize:  bs,
-		volumeSize: vs,
-		nsid:       nsid,
+		backend:      cfg.Backend,
+		blockSize:    bs,
+		volumeSize:   vs,
+		ana:          cfg.ANA,
+		metadataOnly: cfg.MetadataOnly,
+		nsid:         nsid,
 	}
 }
 
@@ -141,6 +149,15 @@ func (h *IOHandler) VolumeSize() uint64 { return h.volumeSize }
 
 // NSID exposes the namespace this handler serves.
 func (h *IOHandler) NSID() uint32 { return h.nsid }
+
+// ANAProvider exposes the optional path-state provider used by admin log page
+// 0x0c. Nil means ANA is not implemented for this handler.
+func (h *IOHandler) ANAProvider() ANAProvider {
+	if h == nil {
+		return nil
+	}
+	return h.ana
+}
 
 // Handle dispatches one IOCommand. Minimal T2 opcode set:
 // Read, Write, Flush. Everything else → Invalid Opcode.
@@ -157,10 +174,19 @@ func (h *IOHandler) Handle(ctx context.Context, cmd IOCommand) IOResult {
 	}
 	switch cmd.Opcode {
 	case ioRead:
+		if r := h.metadataOnlyReject("read"); r != nil {
+			return *r
+		}
 		return h.read(ctx, cmd)
 	case ioWrite:
+		if r := h.metadataOnlyReject("write"); r != nil {
+			return *r
+		}
 		return h.write(ctx, cmd)
 	case ioFlush:
+		if r := h.metadataOnlyReject("flush"); r != nil {
+			return *r
+		}
 		// T3b wire: dispatch to Backend.Sync. Durable backends
 		// flush the WAL; memback Sync is a no-op (returns nil).
 		// Errors propagate as InternalError (NVMe 1.4 §4.5; SCT=0
@@ -176,6 +202,20 @@ func (h *IOHandler) Handle(ctx context.Context, cmd IOCommand) IOResult {
 			SC:     SCInvalidOpcode,
 			Reason: fmt.Sprintf("unsupported opcode 0x%02x", cmd.Opcode),
 		}
+	}
+}
+
+func (h *IOHandler) metadataOnlyReject(op string) *IOResult {
+	if h == nil || !h.metadataOnly {
+		return nil
+	}
+	if h.ana != nil && h.ana.ANAState() == ANAOptimized {
+		return nil
+	}
+	return &IOResult{
+		SCT:    SCTPathRelated,
+		SC:     SCPathAsymAccessInaccessible,
+		Reason: "ANA metadata-only path rejects " + op,
 	}
 }
 

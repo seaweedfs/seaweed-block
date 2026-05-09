@@ -94,11 +94,10 @@ func oaesBit(t *testing.T, data []byte, bit uint) bool {
 	return idCtrlU32LE(t, data, idCtrlOffsetOAES)&(1<<bit) != 0
 }
 
-// cmicANASupported reports CMIC bit 1 (ANA Reporting Supported). A11.2
-// ANA-zero sub-test pins this to false.
+// cmicANASupported reports CMIC bit 3 (ANA Reporting Supported).
 func cmicANASupported(t *testing.T, data []byte) bool {
 	t.Helper()
-	return idCtrlByte(t, data, idCtrlOffsetCMIC)&(1<<1) != 0
+	return idCtrlByte(t, data, idCtrlOffsetCMIC)&(1<<3) != 0
 }
 
 // anacap returns the ANACAP byte. A11.2 pins this to 0 until ANA lands

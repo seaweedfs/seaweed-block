@@ -193,17 +193,34 @@ PY
   exit 1
 }
 
+wait_log_pattern() {
+  local path="$1"
+  local pattern="$2"
+  local label="$3"
+  for _ in $(seq 1 160); do
+    if grep -q "$pattern" "$path" 2>/dev/null; then
+      return 0
+    fi
+    sleep 0.25
+  done
+  echo "timed out waiting for ${label}" >&2
+  exit 1
+}
+
 log "start r1 iSCSI path"
 start_blockvolume r1 s1 "$PORT1" "$R1_DATA_ADDR" "$R1_CTRL_ADDR" "$R1_STATUS_ADDR" \
   "${RUN_DIR}/r1-store" "$ARTIFACT_DIR/blockvolume-r1.log"
 wait_port "$PORT1"
-wait_status_role "$R1_STATUS_ADDR" r1 primary
 
 log "start r2 iSCSI path"
 start_blockvolume r2 s2 "$PORT2" "$R2_DATA_ADDR" "$R2_CTRL_ADDR" "$R2_STATUS_ADDR" \
   "${RUN_DIR}/r2-store" "$ARTIFACT_DIR/blockvolume-r2.log"
 wait_port "$PORT2"
+
+log "wait authority projections"
+wait_status_role "$R1_STATUS_ADDR" r1 primary
 wait_status_role "$R2_STATUS_ADDR" r2 standby
+wait_log_pattern "$ARTIFACT_DIR/blockvolume-r2.log" "authority is now .*not this replica" "r2 standby authority observation"
 
 discover_login() {
   local port="$1"

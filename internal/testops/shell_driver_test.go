@@ -33,6 +33,35 @@ JSON
 	}
 }
 
+func TestShellDriverExportsScenarioParams(t *testing.T) {
+	dir := t.TempDir()
+	script := writeEnvEchoDriverScript(t, dir)
+	req := RunRequest{
+		SchemaVersion: SchemaVersion,
+		Scenario:      "shell-scenario",
+		Source:        SourceSpec{Repo: "seaweed_block", Commit: "abc123"},
+		ArtifactDir:   filepath.Join(dir, "art"),
+		RunID:         "shell-run",
+		ScenarioParams: map[string]string{
+			"SW_BLOCK_ALPHA_IMAGES_ENV": "/tmp/pin/alpha-images.env",
+		},
+	}
+	res, err := ShellDriver{Path: script}.Run(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Status != StatusPass {
+		t.Fatalf("status=%s", res.Status)
+	}
+	raw, err := os.ReadFile(filepath.Join(req.ArtifactDir, "env.txt"))
+	if err != nil {
+		t.Fatalf("read env evidence: %v", err)
+	}
+	if string(raw) != "/tmp/pin/alpha-images.env" {
+		t.Fatalf("env evidence=%q", string(raw))
+	}
+}
+
 func TestShellDriverReportsErrorWhenNoResult(t *testing.T) {
 	dir := t.TempDir()
 	script := writeTestDriverScript(t, dir, 3, `echo nope >&2`)
@@ -53,6 +82,26 @@ func TestShellDriverReportsErrorWhenNoResult(t *testing.T) {
 	if _, statErr := os.Stat(filepath.Join(req.ArtifactDir, "driver-stderr.log")); statErr != nil {
 		t.Fatalf("stderr log missing: %v", statErr)
 	}
+}
+
+func writeEnvEchoDriverScript(t *testing.T, dir string) string {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		path := filepath.Join(dir, "driver.cmd")
+		script := "@echo off\r\n" +
+			"powershell -NoProfile -Command \"$req = Get-Content '%1' | ConvertFrom-Json; $art=$req.artifact_dir; New-Item -ItemType Directory -Force -Path $art | Out-Null; Set-Content -NoNewline -Path (Join-Path $art 'env.txt') -Value $env:SW_BLOCK_ALPHA_IMAGES_ENV; Set-Content -Path (Join-Path $art 'result.json') -Value ('{\\\"schema_version\\\":\\\"1.0\\\",\\\"run_id\\\":\\\"shell-run\\\",\\\"scenario\\\":\\\"shell-scenario\\\",\\\"source_commit\\\":\\\"abc123\\\",\\\"status\\\":\\\"pass\\\",\\\"summary\\\":\\\"script pass\\\",\\\"artifact_dir\\\":\\\"' + ($art -replace '\\\\','\\\\') + '\\\"}')\"\r\n"
+		if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+			t.Fatalf("write script: %v", err)
+		}
+		return path
+	}
+
+	path := filepath.Join(dir, "driver.sh")
+	script := "#!/usr/bin/env bash\nset -euo pipefail\nREQ=\"$1\"\nART=$(python3 - <<'PY' \"$REQ\"\nimport json,sys\nprint(json.load(open(sys.argv[1]))['artifact_dir'])\nPY\n)\nmkdir -p \"$ART\"\nprintf '%s' \"$SW_BLOCK_ALPHA_IMAGES_ENV\" > \"$ART/env.txt\"\ncat > \"$ART/result.json\" <<JSON\n{\"schema_version\":\"1.0\",\"run_id\":\"shell-run\",\"scenario\":\"shell-scenario\",\"source_commit\":\"abc123\",\"status\":\"pass\",\"summary\":\"script pass\",\"artifact_dir\":\"$ART\"}\nJSON\n"
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+	return path
 }
 
 func writeTestDriverScript(t *testing.T, dir string, exitCode int, body string) string {

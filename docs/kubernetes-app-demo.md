@@ -35,11 +35,14 @@ Same as the README quick start:
 Build and import local images first:
 
 ```bash
-bash scripts/build-alpha-images.sh "$PWD"
-
-docker save sw-block:local | sudo k3s ctr images import -
-docker save sw-block-csi:local | sudo k3s ctr images import -
+SW_BLOCK_IMPORT_K3S=1 \
+SW_BLOCK_ARTIFACT_DIR=/tmp/sw-block-alpha-build \
+  bash scripts/build-alpha-images.sh "$PWD"
 ```
+
+The build artifact directory records image IDs and component `--version`
+output, which is the useful evidence when a demo host might have stale k3s
+containerd images.
 
 For an existing cluster that pulls images from a registry:
 

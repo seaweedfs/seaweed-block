@@ -7,10 +7,10 @@ package nvme
 // deep-read findings (D1–D11, 2026-04-22):
 //
 //   D1  Serial "SWF00001" stub → derived from VolumeID (R1, §3.3 N1)
-//   D2  CMIC=0x08 / ANACAP=0x08 / ANAGRPMAX=1 / NANAGRPID=1 /
-//        Identify NS ANAGRPID=1 → ALL ZERO in 11a/11b per QA
-//        finding #3 (Get Log Page ANA is 11c-conditional; advertising
-//        ANA before that commit ships would violate §6 stop-rule #4)
+//   D2  CMIC=0x0a / ANACAP / ANAGRPMAX=1 / NANAGRPID=1 /
+//        Identify NS NMIC.SHARED + ANAGRPID → conditional on ANAProvider.
+//        Without a provider these fields remain zero so "advertised ==
+//        implemented" stays true.
 //   D3  ONCS=0x0C (WriteZeros + DSM) → 0 (neither opcode implemented)
 //   D4  Identify NS NSFEAT=0x01 (thin-prov / Trim advertised) → 0
 //        (Dataset Management not in T2 scope)
@@ -101,10 +101,14 @@ func (s *Session) buildIdentifyController() []byte {
 
 	// bytes 73-75: IEEE OUI (0 — not a registered manufacturer)
 
+	ana := s.handler.ANAProvider()
 	// byte 76: CMIC (Controller Multi-Path I/O Capabilities).
-	// D2 fix: V2 sets bit 3 (ANA reporting supported); we set 0
-	// because ANA log is 11c-conditional per QA finding #3.
-	buf[76] = 0x00
+	// Bit 1 advertises multi-controller support and bit 3 advertises ANA
+	// reporting. Linux native multipath rejects a second controller under the
+	// same SubNQN unless bit 1 is set.
+	if ana != nil {
+		buf[76] = 0x0a
+	}
 
 	// byte 77: MDTS (Maximum Data Transfer Size, 2^MDTS × min page).
 	// MDTS=3 → 32 KiB with 4 KiB min-page. Matches our
@@ -173,14 +177,18 @@ func (s *Session) buildIdentifyController() []byte {
 	binary.LittleEndian.PutUint16(buf[320:], 1)
 
 	// byte 341: ANACAP (ANA Capabilities).
-	// D2 fix: V2 sets bit 3 (Optimized state reported); we zero
-	// the whole byte until 11c ANA log ships.
-	buf[341] = 0x00
+	// Advertise the states V3 can report through ANAProvider:
+	// optimized, non-optimized, inaccessible, and ANA change.
+	// Persistent loss stays off until a product state maps to it.
+	if ana != nil {
+		buf[341] = 0x17
+	}
 
-	// bytes 344-347: ANAGRPMAX. D2: 0.
-	binary.LittleEndian.PutUint32(buf[344:], 0)
-	// bytes 348-351: NANAGRPID. D2: 0.
-	binary.LittleEndian.PutUint32(buf[348:], 0)
+	// bytes 344-347: ANAGRPMAX; bytes 348-351: NANAGRPID.
+	if ana != nil {
+		binary.LittleEndian.PutUint32(buf[344:], 1)
+		binary.LittleEndian.PutUint32(buf[348:], 1)
+	}
 
 	// byte 512: SQES (Submission Queue Entry Size).
 	// Low nibble = min power-of-2 (6 = 64 B); high nibble = max.
@@ -297,13 +305,24 @@ func (s *Session) buildIdentifyNamespace(nsid uint32) []byte {
 	// zeros). Deallocate not implemented → 0.
 	buf[28] = 0x00
 
+	ana := s.handler.ANAProvider()
 	// byte 30: NMIC (Namespace Multi-path I/O Capabilities).
-	// 0 = single controller. T2 single-session-per-subsystem.
-	buf[30] = 0
+	// Bit 0 marks NSID=1 as shareable across controllers. Linux native
+	// multipath rejects a second controller exposing the same NSID unless
+	// this bit is set.
+	if ana != nil {
+		buf[30] = 0x01
+	}
 
-	// bytes 92-95: ANAGRPID. D2 fix: V2 sets 1; we zero until
-	// ANA log ships.
-	binary.LittleEndian.PutUint32(buf[92:], 0)
+	// bytes 92-95: ANAGRPID. Non-zero only when ANA log support
+	// is wired; otherwise the namespace must not advertise ANA.
+	if ana != nil {
+		groupID := ana.ANAGroupID()
+		if groupID == 0 {
+			groupID = 1
+		}
+		binary.LittleEndian.PutUint32(buf[92:], groupID)
+	}
 
 	// bytes 104-119: NGUID (16 bytes). R1: per-(SubsysNQN,
 	// VolumeID) deterministic derivation.
@@ -400,13 +419,14 @@ func (s *Session) ctrlVolumeID() string {
 // nguidFromIdentity builds a 16-byte NGUID from SubsysNQN +
 // VolumeID. Algorithm (R1, port plan §3.3 N1):
 //
-//   NGUID = sha256(SubsysNQN + "\x00" + VolumeID)[:16]
+//	NGUID = sha256(SubsysNQN + "\x00" + VolumeID)[:16]
 //
 // QA pins four invariants (TestT2V2Port_NVMe_IdentifyNamespaceDescriptor_Deterministic):
-//   (a) same (SubsysNQN, VolumeID) → same NGUID across handler lifetimes
-//   (b) same VolumeID, different SubsysNQN → different NGUID
-//   (c) same SubsysNQN, different VolumeID → different NGUID
-//   (d) EUI-64 = NGUID[:8] always
+//
+//	(a) same (SubsysNQN, VolumeID) → same NGUID across handler lifetimes
+//	(b) same VolumeID, different SubsysNQN → different NGUID
+//	(c) same SubsysNQN, different VolumeID → different NGUID
+//	(d) EUI-64 = NGUID[:8] always
 //
 // No IEEE OUI prefix enforcement — sha256 bytes serve as an
 // opaque identifier. If Linux requires a registered OUI we

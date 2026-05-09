@@ -16,6 +16,7 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/host/master"
 	"github.com/seaweedfs/seaweed-block/core/launcher"
 	"github.com/seaweedfs/seaweed-block/core/lifecycle"
+	"github.com/seaweedfs/seaweed-block/internal/buildinfo"
 )
 
 type flags struct {
@@ -36,10 +37,12 @@ type flags struct {
 	launcherMasterAddr     string
 	launcherDurableRoot    string
 	launcherISCSIPortBase  int
+	launcherNVMePortBase   int
 	launcherPVCOwnerRef    bool
 	launcherCHAPSecretName string
 	launcherCHAPUserKey    string
 	launcherCHAPSecretKey  string
+	version                bool
 	// printReadyLine: test-only flag that emits a single
 	// structured JSON line to stdout after the gRPC listener is
 	// bound, so L2 subprocess tests can parse the ready event.
@@ -67,14 +70,19 @@ func parseFlags(args []string) (flags, error) {
 	fs.StringVar(&f.launcherMasterAddr, "launcher-master-addr", "", "G15d master address used in rendered blockvolume args; defaults to listener address after bind")
 	fs.StringVar(&f.launcherDurableRoot, "launcher-durable-root", "/var/lib/sw-block", "G15d rendered blockvolume durable root base")
 	fs.IntVar(&f.launcherISCSIPortBase, "launcher-iscsi-port-base", 3260, "G15d iSCSI port base for generated blockvolume workloads")
+	fs.IntVar(&f.launcherNVMePortBase, "launcher-nvme-port-base", 4420, "G15d NVMe/TCP port base for generated blockvolume workloads")
 	fs.BoolVar(&f.launcherPVCOwnerRef, "launcher-pvc-owner-ref", false, "render generated blockvolume Deployments in the source PVC namespace with a PVC ownerReference; disabled by default for alpha harness compatibility")
 	fs.StringVar(&f.launcherCHAPSecretName, "launcher-iscsi-chap-secret-name", "", "optional Kubernetes Secret name used by generated blockvolume Deployments for target-side iSCSI CHAP")
 	fs.StringVar(&f.launcherCHAPUserKey, "launcher-iscsi-chap-username-key", "chapUsername", "Kubernetes Secret key for generated blockvolume iSCSI CHAP username")
 	fs.StringVar(&f.launcherCHAPSecretKey, "launcher-iscsi-chap-secret-key", "chapSecret", "Kubernetes Secret key for generated blockvolume iSCSI CHAP secret")
+	fs.BoolVar(&f.version, "version", false, "print build provenance and exit")
 	fs.BoolVar(&f.printReadyLine, "t0-print-ready", false, "internal test-only: emit one structured JSON line on stdout after listener bound")
 	fs.SetOutput(os.Stderr)
 	if err := fs.Parse(args); err != nil {
 		return flags{}, err
+	}
+	if f.version {
+		return f, nil
 	}
 	if f.authorityStore == "" {
 		return flags{}, fmt.Errorf("--authority-store is required")
@@ -87,6 +95,10 @@ func main() {
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "blockmaster:", err)
 		os.Exit(2)
+	}
+	if f.version {
+		fmt.Println(buildinfo.Version("blockmaster"))
+		return
 	}
 	os.Exit(run(f))
 }
@@ -274,6 +286,7 @@ func runLifecycleLauncherLoop(h *master.Host, f flags, interval time.Duration) {
 func runLifecycleLauncherTick(h *master.Host, f flags) error {
 	result, err := h.RunLifecycleWorkloadPlanTick(lifecycle.WorkloadPlanConfig{
 		ISCSIPortBase: f.launcherISCSIPortBase,
+		NVMePortBase:  f.launcherNVMePortBase,
 	})
 	if err != nil {
 		return err

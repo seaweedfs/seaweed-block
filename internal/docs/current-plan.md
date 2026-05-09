@@ -1,10 +1,10 @@
-# Current Plan: iSCSI Frontend Completeness
+# Current Plan: Frontend Completeness And V2 Parity
 
-Status: active.
+Status: active, with the iSCSI/NVMe protocol-readiness slice closed.
 
 Rule: V2 frontend coverage is the minimum height for V3 unless we explicitly
 drop a feature with a product reason. V3 should keep its own architecture, but
-the user-visible iSCSI capability should reach and then exceed V2.
+the user-visible frontend capability should reach and then exceed V2.
 
 References:
 
@@ -14,12 +14,47 @@ References:
 - `ref/iscsi-csi-alua-review-guide.md`
 - `ref/iscsi-p6-alua-mpio-design.md`
 - `ref/iscsi-alua-technical-note.md`
+- `ref/nvme-ana-parity-plan.md`
+- `ref/nvme-v2-coverage-gap-audit.md`
+- `ref/nvme-ana-technical-note.md`
+- `ref/nvme-p4-multipath-failover-design.md`
+
+## Current Status: Protocol Readiness Closed
+
+As of 2026-05-09, the current iSCSI/NVMe frontend protocol-readiness plan is
+closed for this branch.
+
+Close evidence:
+
+- Runner-native protocol release gate PASS on M02:
+  - product commit: `033028e74c1ac3bc06f19c0563bc2e6a0495af59`,
+  - runner commit: `3c1b6603aefcf4c1bf0b22f9a9c081a67e786d8d`,
+  - suite run: `20260509-151531-9c6c`,
+  - wall clock: 1415.97 seconds,
+  - children: `iscsi-p6-alua-failover`, `nvme-p4-multipath-failover`,
+    `nvme-p5-csi-protocol`, and `iscsi-p8-compat-soak`, all PASS.
+- `swblock validate-bundle --profile protocol-release-gate` classified the
+  native suite bundle as VALID.
+- Post-run M02 cleanup was clean: no V3 processes and all child
+  `collect_and_cleanup` phases ran.
+
+Decision:
+
+- iSCSI and NVMe are now release-gated protocol frontends, not active bring-up
+  work.
+- Future iSCSI/NVMe changes should enter through regression tests, V2 parity
+  backlog items, or broader availability/performance gates.
+- Do not treat this as full V2 product parity. Remaining work belongs to
+  parity/hardening: rebuild/reintegration matrices, operator lifecycle,
+  multi-node/cloud scale, longer soak/performance, and scenario corpus
+  migration.
 
 ## Product Goal
 
-- Make iSCSI a credible Kubernetes block frontend, not only a smoke-test path.
+- Keep iSCSI and NVMe credible Kubernetes block frontends, not only smoke-test
+  paths.
 - Support real OS initiators, filesystem workloads, stress, auth, lifecycle,
-  and eventually multipath/failover.
+  multipath, and mounted failover.
 - Keep protocol code separate from authority and replica readiness decisions.
 - Use V2 tests as the coverage inventory, not as code to blindly copy.
 
@@ -471,7 +506,7 @@ References:
     - non-claim:
       compatibility probe only, not a long-running soak or performance claim.
 
-## Current Active Milestone: TestOps For Frontend Lab Gates
+## Recently Closed Milestone: TestOps For Frontend Lab Gates
 
 - Goal:
   - reduce false failures from manual multi-step lab runs by moving P8-style
@@ -481,10 +516,65 @@ References:
 
 - Tasks:
   - #QA package P8 compatibility soak as a TestOps scenario:
-    - status: next assignment.
+    - status: done; wrapper proven green in standalone runner and carried back
+      into the product planning flow.
     - must record commit SHA, command, artifact root, step result, final line,
       and cleanup status in a single result file.
     - initial scenario may call `scripts/run-iscsi-compat-soak.sh`.
+  - pin alpha image build/import before K8s frontend gates:
+    - status: QA green at `c3a6e28`; workload composition hook active in this
+      branch.
+    - script: `scripts/build-alpha-images.sh`.
+    - TestOps scenario: `alpha-images-pin-build`.
+    - contract:
+      - build `sw-block:local` and `sw-block-csi:local`,
+      - optionally import both images into k3s containerd with
+        `SW_BLOCK_IMPORT_K3S=1`,
+      - record Docker image IDs,
+      - record `blockmaster`, `blockvolume`, and `blockcsi` `--version`
+        output,
+      - downstream K8s harnesses may consume the build output with
+        `SW_BLOCK_ALPHA_IMAGES_ENV=/path/to/pin-build/alpha-images.env`,
+      - fail before protocol smoke tests if build/import/version capture fails.
+    - composed TestOps workload scenarios:
+      - status: QA green at `cf9183a`.
+      - `nvme-p5-csi-dynamic`,
+      - `nvme-p5-default-iscsi-regression`.
+    - developer-owned P5 suite:
+      - status: QA green at `67592f2`.
+      - `scripts/testops-run-nvme-p5-suite.sh`,
+      - runs pin-build, then both P5 workload scenarios,
+      - passes `alpha-images.env` forward mechanically,
+      - writes one suite-level `result.json`.
+    - reason:
+      - NVMe-P5 showed that stale k3s images can mimic product protocol bugs.
+        The build/import step must be one reviewed gate, not manual lab memory.
+  - platform extraction target:
+    - status: seed shape extracted into standalone runner and native suite
+      flow; continue hardening in runner repo.
+    - port this V3 reference implementation into reusable runner primitives:
+      - `testops_pin_build` for build/import/version/image provenance,
+      - `consume_pin` for passing pinned outputs between phases,
+      - `assert_revision_matches` for component/runtime SHA checks,
+      - suite linkage that passes prior phase outputs without ad-hoc env-file
+        conventions.
+    - reference hardware evidence:
+      - `alpha-images-pin-build` PASS at `cf9183a`,
+      - `nvme-p5-csi-dynamic` PASS at `cf9183a`,
+      - `nvme-p5-default-iscsi-regression` PASS at `cf9183a`.
+  - runner-native protocol release suite:
+    - status: QA green on M02 at product `033028e` and runner `3c1b660`.
+    - suite: `testops/suites/protocol-release-gate.yaml`.
+    - command shape:
+      `swblock suite --results-dir <root> --env product_root=<remote-root>
+      --env ssh_key=<key> testops/suites/protocol-release-gate.yaml`.
+    - children:
+      - `iscsi-p6-alua-failover-chain`,
+      - `nvme-p4-multipath-failover-chain`,
+      - `nvme-p5-csi-protocol-chain`,
+      - `iscsi-p8-compat-soak-chain`.
+    - validation:
+      `swblock validate-bundle --profile protocol-release-gate <suite-run>`.
   - define the minimal result contract:
     - scenario name,
     - repository SHA,
@@ -500,10 +590,227 @@ References:
   - one command runs the P8 full lab gate,
   - old-commit/stale-binary ambiguity is impossible or explicitly reported,
   - result file is enough for review without reading raw terminal output.
+  - one runner-native command runs the full iSCSI/NVMe/CSI/soak release gate,
+    and `validate-bundle --profile protocol-release-gate` accepts the bundle.
 
 - QA/tooling:
-  - #QA assignment should be written before implementation.
+  - Dev owns the core test content and uses TestOps as the primary dev loop.
+  - QA may run the same scenarios, add lab automation, and improve collection,
+    but should not be the only path that can execute a gate end-to-end.
   - prefer small TestOps wrapper over a wholesale scenario DSL rewrite.
+
+## Recently Closed Milestone: NVMe-oF / ANA Parity Planning
+
+- Goal:
+  - bring NVMe-oF up to the same product discipline as the now-green iSCSI
+    frontend.
+  - treat V2 NVMe behavior as the feature floor, not code to copy blindly.
+  - understand the old high-performance path before touching protocol code.
+
+- Reference:
+  - `internal/docs/ref/nvme-ana-parity-plan.md`.
+  - `internal/docs/ref/nvme-v2-coverage-gap-audit.md`.
+
+- Tasks:
+  - NVMe-P0 audit:
+    - status: initial audit done; keep updating as code lands.
+    - compare V2 NVMe implementation and scenarios against current V3.
+    - classify every visible feature as present, missing, intentionally
+      deferred, or rejected with product reason.
+    - specifically answer whether the remembered "control API carries data"
+      path was standard NVMe/TCP in-capsule data or a custom V2 shortcut.
+    - initial answer: standard in-capsule data; no custom V2 vendor/admin data
+      command found in the NVMe package.
+  - NVMe-P1 OS kernel baseline:
+    - status: QA green on M02.
+    - script: `scripts/run-nvme-os-smoke.sh`.
+    - #QA assignment:
+      `internal/docs/qa-assignments/nvme-p1-os-smoke-validation.md`.
+    - #QA evidence:
+      - basic OS path PASS on M02,
+      - 60s fio PASS on M02,
+      - loopback 4 KiB fio used inline writes only,
+      - no test NQN or process residue after cleanup.
+    - build a repeatable `nvme connect -> mkfs -> mount -> fio/checksum ->
+      disconnect` script.
+    - dynamic ports only.
+    - no stale sessions or target processes.
+  - NVMe-P2 in-capsule / R2T performance path:
+    - status: QA green on M02 with host-specific classification.
+    - target now reports transport counters in `blockvolume.log` on close:
+      inline writes, R2T writes, H2C/C2H PDU counts, and read/write/flush
+      command counts.
+    - P1 observation: Linux `fio --bs=4k` used inline writes exclusively on
+      M02 (`r2t_writes=0`).
+    - P2 observation: Linux kernel 6.17.0-19 on M02 did not trigger R2T even
+      for `fio --bs=128k` or `dd bs=1M`; all writes were fragmented into
+      inline/in-capsule transfers.
+    - #QA assignment:
+      `internal/docs/qa-assignments/nvme-p2-inline-r2t-validation.md`.
+    - prove whether Linux uses inline data for small writes.
+    - run 128 KiB+ profiles to force or classify the R2T path.
+    - add visible counters or artifacts for inline vs R2T writes.
+    - follow-up:
+      - R2T requires a different initiator/profile or target-side test knob;
+        current M02 kernel behavior is not a product failure.
+    - compare iSCSI and NVMe only under labelled network/backend conditions.
+  - NVMe-P3 ANA identity and log page:
+    - status: QA green on M02 at `d330e89`.
+    - provider: `core/frontend/nvme.ANAProvider`.
+    - product wiring: `cmd/blockvolume` derives ANA state from the same
+      frontend projection used by iSCSI ALUA.
+    - log page: admin Get Log Page `0x0c` returns one ANA group when a
+      provider is configured.
+    - mapping:
+      - frontend Healthy => optimized,
+      - superseded healthy / idle supporting path => non-optimized,
+      - recovering => ANA change,
+      - degraded / identity mismatch => inaccessible.
+    - guard: Identify Controller / Namespace ANA fields remain zero without a
+      provider.
+    - P3-C behavior: with a provider, Identify Controller advertises ANA,
+      Identify Namespace carries the provider's ANA group, and Get Log Page ANA
+      reports the same group/state.
+    - OAES ANA Change Notice remains off; no async event producer exists yet.
+    - #QA assignment:
+      `internal/docs/qa-assignments/nvme-p3-ana-log-validation.md`.
+    - #QA evidence:
+      - ANA log `group_id=1`, `state=0x01`, `nsid=1`,
+      - Identify Controller `cmic=0x8`, `anagrpmax=1`, `nanagrpid=1`,
+      - Identify Namespace `anagrpid=1`,
+      - no `nvme_parse_ana_log` kernel warning,
+      - mkfs/mount/checksum PASS after ANA advertisement is enabled.
+  - NVMe-P4 multipath and mounted failover:
+    - status: fully QA green on M02 at `e1e0e0c`.
+    - #design:
+      `internal/docs/ref/nvme-p4-multipath-failover-design.md`.
+    - #QA assignment:
+      `internal/docs/qa-assignments/nvme-p4-multipath-lab-validation.md`.
+    - reach the iSCSI P6 bar for NVMe multipath.
+    - Test 1/2 discovery and native grouping:
+      - status: QA green on M02 at `a5ef1a5`.
+      - script: `scripts/run-nvme-multipath-smoke.sh`.
+      - evidence:
+        - run ID `20260507T161800Z-test`,
+        - two NVMe/TCP paths registered immediately,
+        - native Linux multipath exposed one namespace device,
+        - ANA log `group_id=1`, `state=0x01 optimized`, `nsid=1`,
+        - identity `nguid=24634c35194743419febbb18e06446be`,
+          `eui64=24634c3519474341`, `anagrpid=1`,
+        - final line:
+          `[nvme-mpath] PASS: two NVMe/TCP paths expose one ANA-aware namespace`.
+      - decision: single ANA group is sufficient for the current two-path
+        native multipath identity model.
+    - mounted failover:
+      - status: QA green on M02 at `e1e0e0c`.
+      - script: `scripts/run-nvme-mounted-failover-smoke.sh`.
+      - local guard:
+        - metadata-only standby NVMe path continues to reject I/O before
+          promotion,
+        - after ANA state becomes optimized, the same session can pass I/O to
+          the backend.
+      - #QA evidence:
+        - run ID `20260507T170000Z-nvme-p4-mounted-failover`,
+        - two TCP paths registered and Linux native multipath merged them to
+          `/dev/nvme1n1`,
+        - mounted ext4 workload survived active r1 kill,
+        - r2 promoted to `Epoch=2`, `AuthorityRole=primary`,
+          `FrontendPrimaryReady=true`,
+        - `pre.bin` checksum remained OK after failover,
+        - `post.bin` write/read/verify succeeded after failover,
+        - cleanup left no test NQN and no blockmaster/blockvolume process.
+  - NVMe-P5 CSI integration:
+    - status: QA green on `frontend/nvme-ana-parity-plan@8e0a28f`.
+    - latest QA:
+      - red at `622fae7`: StorageClass rendered `protocol: nvme`, but
+        lifecycle intent had no protocol and generated blockvolume still used
+        iSCSI args.
+      - red at `a1d5201`: live StorageClass carried both protocol keys, but
+        persisted lifecycle JSON still had no `protocol`; current source has
+        protocol on CSI/RPC/lifecycle, so the harness now gates component
+        `--version` output to catch stale K8s images before protocol checks.
+      - green at `69a1d20`: Test 1 NVMe dynamic PVC passed after rebuilt and
+        k3s-imported images; lifecycle persisted `protocol: "nvme"` and
+        launcher emitted NVMe args only.
+      - green at `8e0a28f`: Test 2 default iSCSI regression passed; all three
+        version gates matched HEAD, lifecycle persisted `protocol: "iscsi"`,
+        generated manifest used iSCSI args only, and cleanup left no iSCSI or
+        NVMe residue.
+      - current fix: prefer product-scoped
+        `sw-block.seaweedfs.com/protocol`, keep `protocol` as compatibility,
+        delete stale cluster-scoped StorageClass before apply, capture
+        `storageclass.live.yaml`, and record `--version` for blockmaster,
+        blockcsi, and generated blockvolume before judging launcher output.
+    - allow StorageClass protocol selection without changing the app.
+    - default StorageClass path stays iSCSI.
+    - `parameters.sw-block.seaweedfs.com/protocol: nvme` selects NVMe target
+      facts end-to-end:
+      - CSI CreateVolume records protocol in lifecycle intent,
+      - master lifecycle RPC carries protocol,
+      - launcher renders `blockvolume` with `--nvme-listen`,
+        `--nvme-subsysnqn`, and `--nvme-ns`,
+      - CSI ControllerPublish returns `protocol=nvme`, `nvmeAddr`, and `nqn`,
+      - CSI NodeStage uses `nvme connect`, formats/mounts the NVMe namespace,
+        and disconnects by NQN on NodeUnstage.
+    - K8s harness:
+      - script: `scripts/run-k8s-alpha-nvme.sh`,
+      - underlying env knob: `SW_BLOCK_FRONTEND_PROTOCOL=nvme`,
+      - dynamic PVC/app manifest remains unchanged except injected
+        StorageClass parameter.
+    - #QA assignment:
+      `internal/docs/qa-assignments/nvme-p5-csi-protocol-selection-validation.md`.
+    - platform lesson:
+      - stale k3s images cost multiple lab rounds; TestOps pin-build/import
+        should make build, k3s image import, digest capture, and component
+        version verification one required step for future release gates.
+  - NVMe-P6 RoCE / network performance matrix:
+    - status: deferred to future network/performance plan.
+    - correctness gates are green; RoCE is no longer part of protocol
+      readiness closure.
+
+- Close bar for the planning slice:
+  - audit table exists,
+  - next code task has a red test or lab reproduction,
+  - no ANA or performance claim is enabled before matching host evidence.
+
+- QA/tooling:
+  - protocol assignments remain as historical evidence under
+    `internal/docs/qa-assignments/`.
+  - future protocol changes should update the runner-native release gate rather
+    than adding manual-only QA instructions.
+
+## Current Active Milestone: V2 Parity And Hardening Backlog
+
+- Goal:
+  - keep iSCSI/NVMe protocol readiness protected by the release gate while
+    moving active development to remaining V2 parity, product hardening, and
+    TestOps platform work.
+
+- Work buckets:
+  - V2 parity audit:
+    - compare the old `weed/storage/blockvol` scenario corpus against current
+      V3 capabilities,
+    - classify each gap as already covered by the release gate, still missing,
+      intentionally deferred, or rejected with product reason.
+  - availability/recovery hardening:
+    - replica return and reintegration,
+    - RF2/RF3 rebuild and failover matrices,
+    - WAL retention and flow-control pressure,
+    - longer soak and failure-injection runs.
+  - Kubernetes/operator hardening:
+    - durable blockvolume state beyond throwaway alpha defaults,
+    - operator/controller lifecycle,
+    - multi-node attach and non-loopback frontend addressing.
+  - TestOps platform:
+    - keep product-owned scenarios in this repo,
+    - move repeated primitives into the standalone runner,
+    - use native suite/run-control/validate-bundle for release evidence,
+    - explore controller/agent mode separately from the open SSH runner path.
+
+- Close bar for the next planning slice:
+  - a V2 parity matrix exists with explicit disposition per feature/scenario,
+  - at least one non-protocol hardening gate is runner-native and repeatable,
+  - protocol release gate remains green after unrelated hardening changes.
 
 ## Cross-Cutting Technical Rules
 
@@ -521,6 +828,18 @@ References:
 - Prefer scripts or TestOps scenarios over manual command sequences.
 - Manual testing is allowed for first reproduction, but convert the result into
   a repeatable script or scenario.
+- Keep default `go test` focused on unit/component coverage.
+- Local binary wiring tests that build product binaries, spawn
+  `blockmaster`/`blockvolume`, and use loopback protocol clients must use the
+  explicit `subprocess` build tag. These are not m01/m02 lab integration tests.
+- Linux OS/K8s/lab tests that use `iscsiadm`, `nvme-cli`, kernel initiators,
+  mounts, `sudo`, or m01/m02 cleanup state belong in runner-native TestOps
+  scenarios, not default `go test` and not the local `subprocess` tag.
+- When a subprocess or runner integration test fails, first ask whether its
+  assertion can be moved down to a component seam such as authority, engine
+  projection, frontend protocol adapter, lifecycle rendering, or
+  ready-assignment handling. Keep only binary wiring, real OS frontend I/O,
+  process lifecycle, and lab cleanup in the runner layer.
 - QA report must include:
   - branch and commit,
   - command,
@@ -534,8 +853,8 @@ References:
 
 - Use milestone PRs, not one PR per tiny fix.
 - Target one or two PRs per day at most.
-- For the current active milestone, keep iSCSI-P2 local tests and required
-  protocol fixes in one coherent PR if possible.
+- For the current active milestone, keep parity matrix updates, non-protocol
+  hardening gates, and runner scenario changes grouped by reviewable outcome.
 - Split OS/K8s harness work only if it becomes too large to review cleanly.
 
 ## Finish Action

@@ -297,9 +297,15 @@ func (s *Session) dispatchFromRx(ctx context.Context, req *Request) error {
 	// IO queue. For Write without inline data, collect R2T data
 	// inline FIRST (this is where pendingCapsules gets populated
 	// via bufferInterleaved during recvH2CData), THEN dispatch.
-	if cmd.OpCode == ioWrite && len(req.payload) == 0 {
-		if err := s.collectR2TData(req); err != nil {
-			return err
+	if cmd.OpCode == ioWrite {
+		totalBytes := req.capsule.LbaLength() * s.handler.BlockSize()
+		if len(req.payload) == 0 {
+			s.recordR2TWrite(totalBytes)
+			if err := s.collectR2TData(req); err != nil {
+				return err
+			}
+		} else {
+			s.recordInlineWrite(uint32(len(req.payload)))
 		}
 	}
 
@@ -386,6 +392,7 @@ func (s *Session) recvH2CData(totalBytes uint32) ([]byte, error) {
 		if err := s.r.ReceiveData(buf[h2c.DATAO : h2c.DATAO+dataLen]); err != nil {
 			return nil, fmt.Errorf("recvH2CData: receive data: %w", err)
 		}
+		s.recordH2CData(dataLen)
 		received += dataLen
 	}
 	return buf, nil
@@ -407,6 +414,8 @@ func (s *Session) bufferInterleaved() error {
 func (s *Session) adminDispatch(ctx context.Context, req *Request) error {
 	cmd := &req.capsule
 	switch cmd.OpCode {
+	case adminGetLogPage:
+		return s.handleGetLogPage(req)
 	case adminIdentify:
 		return s.handleAdminIdentify(req)
 	case adminSetFeatures:
@@ -434,6 +443,7 @@ func (s *Session) dispatchIO(ctx context.Context, req *Request) {
 	case ioWrite:
 		s.handleWrite(ctx, req)
 	case ioFlush:
+		s.recordFlushCommand()
 		// T3b wire: dispatch to IOHandler.Handle which calls
 		// Backend.Sync(ctx) — error propagates to CapsuleResp
 		// status instead of silent Success.
@@ -508,6 +518,7 @@ func (s *Session) writeResponse(resp *response) error {
 	}
 
 	if len(resp.c2hData) > 0 {
+		s.recordC2HData(uint32(len(resp.c2hData)))
 		hdr := C2HDataHeader{
 			CCCID: resp.resp.CID,
 			DATAO: 0,
@@ -530,6 +541,7 @@ func (s *Session) enqueueResponse(resp *response) {
 // ---------- IO handlers (run in goroutines) ----------
 
 func (s *Session) handleRead(ctx context.Context, req *Request) {
+	s.recordReadCommand()
 	res := s.handler.Handle(ctx, IOCommand{
 		Opcode: req.capsule.OpCode,
 		NSID:   req.capsule.NSID,
@@ -545,6 +557,7 @@ func (s *Session) handleRead(ctx context.Context, req *Request) {
 }
 
 func (s *Session) handleWrite(ctx context.Context, req *Request) {
+	s.recordWriteCommand()
 	res := s.handler.Handle(ctx, IOCommand{
 		Opcode: req.capsule.OpCode,
 		NSID:   req.capsule.NSID,
@@ -645,6 +658,9 @@ func (s *Session) handleAdminConnect(req *Request, cd *ConnectData, qid, queueSi
 	// constraint #2 keeps this store-only, no timer).
 	ctrl.setKATO(req.capsule.D12)
 	s.connected.Store(true)
+	if s.target != nil {
+		s.target.stats.adminConnects.Add(1)
+	}
 	if s.logger != nil {
 		s.logger.Printf("nvme: admin Connect accepted host=%q subsys=%q cntlid=%d qsize=%d kato=%d",
 			cd.HostNQN, cd.SubNQN, ctrl.cntlID, queueSize, req.capsule.D12)
@@ -685,6 +701,9 @@ func (s *Session) handleIOConnect(req *Request, cd *ConnectData, qid, queueSize 
 	s.queueSize = queueSize
 	s.flowCtlOff = flowCtlOff
 	s.connected.Store(true)
+	if s.target != nil {
+		s.target.stats.ioConnects.Add(1)
+	}
 	if s.logger != nil {
 		s.logger.Printf("nvme: IO Connect accepted host=%q subsys=%q cntlid=%d qid=%d qsize=%d",
 			cd.HostNQN, cd.SubNQN, ctrl.cntlID, qid, queueSize)
@@ -693,6 +712,52 @@ func (s *Session) handleIOConnect(req *Request, cd *ConnectData, qid, queueSize 
 	req.resp.DW0 = uint32(ctrl.cntlID)
 	s.enqueueResponse(&response{resp: req.resp})
 	return nil
+}
+
+func (s *Session) recordReadCommand() {
+	if s.target != nil {
+		s.target.stats.readCommands.Add(1)
+	}
+}
+
+func (s *Session) recordWriteCommand() {
+	if s.target != nil {
+		s.target.stats.writeCommands.Add(1)
+	}
+}
+
+func (s *Session) recordFlushCommand() {
+	if s.target != nil {
+		s.target.stats.flushCommands.Add(1)
+	}
+}
+
+func (s *Session) recordInlineWrite(bytes uint32) {
+	if s.target != nil {
+		s.target.stats.inlineWriteCommands.Add(1)
+		s.target.stats.inlineWriteBytes.Add(uint64(bytes))
+	}
+}
+
+func (s *Session) recordR2TWrite(bytes uint32) {
+	if s.target != nil {
+		s.target.stats.r2tWriteCommands.Add(1)
+		s.target.stats.r2tWriteBytes.Add(uint64(bytes))
+	}
+}
+
+func (s *Session) recordH2CData(bytes uint32) {
+	if s.target != nil {
+		s.target.stats.h2cDataPDUs.Add(1)
+		s.target.stats.h2cDataBytes.Add(uint64(bytes))
+	}
+}
+
+func (s *Session) recordC2HData(bytes uint32) {
+	if s.target != nil {
+		s.target.stats.c2hDataPDUs.Add(1)
+		s.target.stats.c2hDataBytes.Add(uint64(bytes))
+	}
 }
 
 // handleDisconnect (BUG-002).

@@ -1,0 +1,53 @@
+{
+  "schema_version": "1.0",
+  "scenario": "nvme-p5-csi-dynamic",
+  "gate": "NVMe-P5",
+  "layer": "L5-k8s",
+  "driver": {
+    "type": "shell",
+    "path": "scripts/testops-run-alpha-k8s.sh",
+    "env": [
+      "SW_BLOCK_TESTOPS_WORKLOAD_SCRIPT=scripts/run-k8s-alpha-nvme.sh"
+    ]
+  },
+  "default_timeout_s": 900,
+  "required_capabilities": [
+    "bash",
+    "kubectl",
+    "privileged-k8s-node",
+    "nvme-cli",
+    "nvme_tcp-loadable",
+    "mount"
+  ],
+  "required_images": [
+    "sw-block:local",
+    "sw-block-csi:local"
+  ],
+  "qa_instruction": "internal/docs/qa-assignments/nvme-p5-csi-protocol-selection-validation.md",
+  "known_green_commit": "ce657d5",
+  "scenario_default_params": {
+    "SW_BLOCK_LAUNCHER_PVC_OWNER_REF": "1"
+  },
+  "artifacts": [
+    "run.log",
+    "alpha-images.env",
+    "blockmaster.version.txt",
+    "blockcsi.version.txt",
+    "blockvolume.version.txt",
+    "storageclass.live.yaml",
+    "lifecycle-volumes.json",
+    "generated-blockvolume.yaml",
+    "pod.log",
+    "blockmaster.log",
+    "blockcsi-controller.log",
+    "blockvolume-generated.log",
+    "nvme-list-subsys.after-delete.json",
+    "cleanup.log"
+  ],
+  "non_claims": [
+    "Single-node Kubernetes only.",
+    "Dynamic PVC protocol-selection smoke only.",
+    "Requires a fresh pin-build artifact passed with --param SW_BLOCK_ALPHA_IMAGES_ENV=...",
+    "Not an ANA multipath, mounted failover, or performance gate."
+  ]
+}

@@ -104,6 +104,7 @@ func (f *fakeLifecycleClient) CreateVolume(_ context.Context, req *control.Creat
 		VolumeId:          req.GetVolumeId(),
 		SizeBytes:         req.GetSizeBytes(),
 		ReplicationFactor: req.GetReplicationFactor(),
+		Protocol:          req.GetProtocol(),
 		PvcName:           req.GetPvcName(),
 		PvcNamespace:      req.GetPvcNamespace(),
 		PvcUid:            req.GetPvcUid(),
@@ -123,6 +124,7 @@ func TestG15c_ControlLifecycleProvisioner_CreateVolumeRoundTrip(t *testing.T) {
 		VolumeID:          "pvc-a",
 		SizeBytes:         1 << 30,
 		ReplicationFactor: 2,
+		Protocol:          ProtocolNVMe,
 		PVCName:           "demo-pvc",
 		PVCNamespace:      "demo-ns",
 		PVCUID:            "uid-123",
@@ -134,11 +136,17 @@ func TestG15c_ControlLifecycleProvisioner_CreateVolumeRoundTrip(t *testing.T) {
 	if client.createReq.GetVolumeId() != "pvc-a" || client.createReq.GetSizeBytes() != 1<<30 || client.createReq.GetReplicationFactor() != 2 {
 		t.Fatalf("request=%+v", client.createReq)
 	}
+	if client.createReq.GetProtocol() != "nvme" {
+		t.Fatalf("protocol=%q want nvme", client.createReq.GetProtocol())
+	}
 	if client.createReq.GetPvcName() != "demo-pvc" || client.createReq.GetPvcNamespace() != "demo-ns" || client.createReq.GetPvcUid() != "uid-123" || client.createReq.GetPvName() != "pvc-a" {
 		t.Fatalf("kubernetes metadata request=%+v", client.createReq)
 	}
 	if got.VolumeID != "pvc-a" || got.SizeBytes != 1<<30 || got.ReplicationFactor != 2 {
 		t.Fatalf("spec=%+v", got)
+	}
+	if got.Protocol != ProtocolNVMe {
+		t.Fatalf("protocol=%q want nvme", got.Protocol)
 	}
 	if got.PVCName != "demo-pvc" || got.PVCNamespace != "demo-ns" || got.PVCUID != "uid-123" || got.PVName != "pvc-a" {
 		t.Fatalf("kubernetes metadata spec=%+v", got)

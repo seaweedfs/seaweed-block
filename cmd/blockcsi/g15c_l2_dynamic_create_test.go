@@ -39,7 +39,10 @@ func TestG15c_BlockCSICreateVolumeWritesMasterLifecycleIntent(t *testing.T) {
 		CapacityRange: &csipb.CapacityRange{
 			RequiredBytes: 1 << 20,
 		},
-		Parameters: map[string]string{"replicationFactor": "2"},
+		Parameters: map[string]string{
+			"replicationFactor":               "2",
+			"sw-block.seaweedfs.com/protocol": "nvme",
+		},
 		VolumeCapabilities: []*csipb.VolumeCapability{
 			testMountCapability(),
 		},
@@ -59,6 +62,7 @@ func TestG15c_BlockCSICreateVolumeWritesMasterLifecycleIntent(t *testing.T) {
 			VolumeID          string `json:"volume_id"`
 			SizeBytes         uint64 `json:"size_bytes"`
 			ReplicationFactor int    `json:"replication_factor"`
+			Protocol          string `json:"protocol"`
 		} `json:"spec"`
 	}
 	if err := json.Unmarshal(raw, &rec); err != nil {
@@ -66,6 +70,12 @@ func TestG15c_BlockCSICreateVolumeWritesMasterLifecycleIntent(t *testing.T) {
 	}
 	if rec.Spec.VolumeID != "pvc-a" || rec.Spec.SizeBytes != 1<<20 || rec.Spec.ReplicationFactor != 2 {
 		t.Fatalf("record=%+v", rec.Spec)
+	}
+	if rec.Spec.Protocol != "nvme" {
+		t.Fatalf("record protocol=%q want nvme", rec.Spec.Protocol)
+	}
+	if got := resp.GetVolume().GetVolumeContext()["protocol"]; got != "nvme" {
+		t.Fatalf("response protocol=%q want nvme", got)
 	}
 }
 

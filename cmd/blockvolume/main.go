@@ -27,6 +27,7 @@ import (
 	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
 	"github.com/seaweedfs/seaweed-block/core/storage"
 	"github.com/seaweedfs/seaweed-block/core/transport"
+	"github.com/seaweedfs/seaweed-block/internal/buildinfo"
 )
 
 type flags struct {
@@ -114,6 +115,7 @@ type flags struct {
 	// default. sync-quorum / sync-all opt into foreground write ACK
 	// gating through the durable WriteObserver seam.
 	replicationAck string
+	version        bool
 }
 
 func parseFlags(args []string) (flags, error) {
@@ -174,9 +176,13 @@ func parseFlags(args []string) (flags, error) {
 	fs.StringVar(&f.replicationAck, "replication-ack", "best-effort",
 		"replication acknowledgement profile: \"best-effort\" (default), \"sync-quorum\", or \"sync-all\". "+
 			"sync-* modes fail foreground writes when required replica acknowledgement is unavailable.")
+	fs.BoolVar(&f.version, "version", false, "print build provenance and exit")
 	fs.SetOutput(os.Stderr)
 	if err := fs.Parse(args); err != nil {
 		return flags{}, err
+	}
+	if f.version {
+		return f, nil
 	}
 	if f.recoveryMode != "legacy" && f.recoveryMode != "dual-lane" {
 		return flags{}, fmt.Errorf("--recovery-mode=%q invalid; want \"legacy\" or \"dual-lane\"", f.recoveryMode)
@@ -317,6 +323,10 @@ func main() {
 		fmt.Fprintln(os.Stderr, "blockvolume:", err)
 		os.Exit(2)
 	}
+	if f.version {
+		fmt.Println(buildinfo.Version("blockvolume"))
+		return
+	}
 	os.Exit(run(f))
 }
 
@@ -350,10 +360,7 @@ type nvmeReadyLine struct {
 }
 
 func run(f flags) int {
-	var readyCh chan adapter.AssignmentInfo
-	if f.printReadyLine {
-		readyCh = make(chan adapter.AssignmentInfo, 1)
-	}
+	readyCh := make(chan adapter.AssignmentInfo, 16)
 
 	h, err := volume.New(volume.Config{
 		MasterAddr:        f.masterAddr,
@@ -391,24 +398,6 @@ func run(f flags) int {
 			Phase:      "status-listening",
 			StatusAddr: bound,
 		})
-	}
-
-	if readyCh != nil {
-		go func() {
-			select {
-			case info := <-readyCh:
-				_ = json.NewEncoder(os.Stdout).Encode(readyLine{
-					Component:       "blockvolume",
-					Phase:           "assignment-received",
-					VolumeID:        info.VolumeID,
-					ReplicaID:       info.ReplicaID,
-					Epoch:           info.Epoch,
-					EndpointVersion: info.EndpointVersion,
-				})
-			case <-time.After(60 * time.Second):
-				// no assignment arrived — exit caller's concern
-			}
-		}()
 	}
 
 	// T3b: pick Provider per --durable-root flag. When the flag is
@@ -474,6 +463,7 @@ func run(f flags) int {
 		// SCSI command granularity.
 		provider = memback.NewProvider(h.ProjectionView())
 	}
+	startReadyAssignmentLoop(readyCh, f, durableProv, os.Stdout, os.Stderr)
 
 	// Bind the replication stack — ReplicationVolume for outbound peer
 	// fan-out (primary role) + ReplicaListener for incoming WAL traffic
@@ -669,7 +659,7 @@ func run(f flags) int {
 			dualLaneAddr, err := deriveDualLaneAddr(f.dataAddr)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, "blockvolume: dual-lane listen addr derive:", err)
-				_ = replListen.Stop
+				replListen.Stop()
 				_ = replVolume.Close()
 				_ = durableProv.Close()
 				if status != nil {
@@ -683,7 +673,7 @@ func run(f flags) int {
 			dlLn, err := net.Listen("tcp", dualLaneAddr)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, "blockvolume: dual-lane listen:", err)
-				_ = replListen.Stop
+				replListen.Stop()
 				_ = replVolume.Close()
 				_ = durableProv.Close()
 				if status != nil {
@@ -800,11 +790,17 @@ func run(f flags) int {
 	var nvmeTarget *nvme.Target
 	if f.nvmeListen != "" {
 		prov := provider
+		var probeProvider nvme.ProbeBackendProvider
+		if durableProv != nil {
+			probeProvider = &durableProbeProvider{provider: durableProv}
+		}
 		nvmeTarget = nvme.NewTarget(nvme.TargetConfig{
-			Listen:    f.nvmeListen,
-			SubsysNQN: f.nvmeSubsysNQN,
-			VolumeID:  f.volumeID,
-			Provider:  prov,
+			Listen:        f.nvmeListen,
+			SubsysNQN:     f.nvmeSubsysNQN,
+			VolumeID:      f.volumeID,
+			Provider:      prov,
+			ProbeProvider: probeProvider,
+			ControllerID:  nvmeControllerIDFromReplicaID(f.replicaID),
 			// Capacity from durable config (see iSCSI block above).
 			// frontendBlockSize / frontendVolumeSize are 0 on memback
 			// path; nvme HandlerConfig zero-value defaulting preserves
@@ -813,6 +809,7 @@ func run(f flags) int {
 				NSID:       uint32(f.nvmeNS),
 				BlockSize:  frontendBlockSize,
 				VolumeSize: frontendVolumeSize,
+				ANA:        newProjectionANAProvider(h.ProjectionView(), f.volumeID, f.replicaID, f.nvmeSubsysNQN),
 			},
 		})
 		nvmeAddr, err := nvmeTarget.Start()

@@ -62,13 +62,15 @@ Use this when your test node can build Docker images locally.
 ```bash
 export KUBECONFIG="${KUBECONFIG:-/etc/rancher/k3s/k3s.yaml}"
 
-bash scripts/build-alpha-images.sh "$PWD"
-
-docker save sw-block:local     | sudo k3s ctr images import -
-docker save sw-block-csi:local | sudo k3s ctr images import -
+SW_BLOCK_IMPORT_K3S=1 \
+SW_BLOCK_ARTIFACT_DIR=/tmp/sw-block-alpha-build \
+  bash scripts/build-alpha-images.sh "$PWD"
 
 bash scripts/run-k8s-demo.sh "$PWD"
 ```
+
+`SW_BLOCK_ARTIFACT_DIR` records the local image IDs and `blockmaster`,
+`blockvolume`, and `blockcsi` version output used by the cluster.
 
 Expected final line:
 

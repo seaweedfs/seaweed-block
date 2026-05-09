@@ -150,13 +150,16 @@ func TestG15b_Manifest_NodePluginPrivilegedShape(t *testing.T) {
 	}
 }
 
-func TestG15b_Manifest_NodePluginLoadsISCSITCPModule(t *testing.T) {
+func TestG15b_Manifest_NodePluginLoadsFrontendKernelModules(t *testing.T) {
 	doc := g15bFindKind(t, "csi-node.yaml", "DaemonSet")
 	podSpec := g15bMap(t, g15bMap(t, g15bMap(t, doc, "spec"), "template"), "spec")
 	initContainers := g15bSlice(t, podSpec, "initContainers")
 	loader := g15bContainer(t, initContainers, "load-iscsi-tcp")
-	if got := strings.Join(g15bStringSlice(t, loader, "args"), " "); !strings.Contains(got, "modprobe iscsi_tcp") {
-		t.Fatalf("load-iscsi-tcp args=%q, want modprobe iscsi_tcp", got)
+	got := strings.Join(g15bStringSlice(t, loader, "args"), " ")
+	for _, want := range []string{"modprobe iscsi_tcp", "modprobe nvme_tcp"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("load-iscsi-tcp args=%q, want %s", got, want)
+		}
 	}
 	sec := g15bMap(t, loader, "securityContext")
 	if got, ok := sec["privileged"].(bool); !ok || !got {
@@ -211,7 +214,7 @@ func TestG15b_ImageBuildInputs_ContainExpectedBinariesAndNodeTools(t *testing.T)
 	}
 
 	csi := g15bReadDeployFile(t, "Dockerfile.blockcsi")
-	for _, want := range []string{"./cmd/blockcsi", "open-iscsi", "e2fsprogs", "kmod", "util-linux", "/usr/local/bin/blockcsi"} {
+	for _, want := range []string{"./cmd/blockcsi", "open-iscsi", "nvme-cli", "e2fsprogs", "kmod", "util-linux", "/usr/local/bin/blockcsi"} {
 		if !strings.Contains(csi, want) {
 			t.Fatalf("Dockerfile.blockcsi missing %q", want)
 		}
@@ -221,6 +224,142 @@ func TestG15b_ImageBuildInputs_ContainExpectedBinariesAndNodeTools(t *testing.T)
 	for _, want := range []string{"Dockerfile.sw-block", "Dockerfile.blockcsi", "sw-block:local", "sw-block-csi:local"} {
 		if !strings.Contains(buildScript, want) {
 			t.Fatalf("build-alpha-images.sh missing %q", want)
+		}
+	}
+	for _, want := range []string{
+		"SW_BLOCK_IMPORT_K3S",
+		"sudo k3s ctr images import -",
+		"docker image inspect",
+		"alpha-images.env",
+		"blockmaster.version.txt",
+		"blockvolume.version.txt",
+		"blockcsi.version.txt",
+	} {
+		if !strings.Contains(buildScript, want) {
+			t.Fatalf("build-alpha-images.sh missing pin-build/import contract %q", want)
+		}
+	}
+
+	pinBuild := g15bReadScript(t, "testops-pin-alpha-images.sh")
+	for _, want := range []string{
+		"run-request.json",
+		"SW_BLOCK_IMPORT_K3S",
+		"pin-build",
+		"alpha image pin-build/import failed",
+		"result.json",
+	} {
+		if !strings.Contains(pinBuild, want) {
+			t.Fatalf("testops-pin-alpha-images.sh missing %q", want)
+		}
+	}
+
+	suite := g15bReadScript(t, "testops-run-nvme-p5-suite.sh")
+	for _, want := range []string{
+		"alpha-images-pin-build",
+		"nvme-p5-csi-dynamic",
+		"nvme-p5-default-iscsi-regression",
+		"SW_BLOCK_ALPHA_IMAGES_ENV=$PIN_ENV",
+		"nvme-p5-csi-suite",
+		"result.json",
+	} {
+		if !strings.Contains(suite, want) {
+			t.Fatalf("testops-run-nvme-p5-suite.sh missing %q", want)
+		}
+	}
+
+	releaseGate := g15bReadScript(t, "testops-run-protocol-release-gate.sh")
+	for _, want := range []string{
+		"protocol-release-gate-suite",
+		"iscsi-p6-alua-failover-chain.yaml",
+		"nvme-p4-multipath-failover-chain.yaml",
+		"nvme-p5-csi-protocol-chain.yaml",
+		"iscsi-p8-compat-soak-chain.yaml",
+		"child-run.txt",
+		"result.json",
+		"wall_clock_s",
+		"started_at",
+		"swblock exited 0 but did not write latest run pointer",
+	} {
+		if !strings.Contains(releaseGate, want) {
+			t.Fatalf("testops-run-protocol-release-gate.sh missing %q", want)
+		}
+	}
+
+	releaseGatePS := g15bReadScript(t, "testops-run-protocol-release-gate.ps1")
+	for _, want := range []string{
+		"protocol-release-gate-suite",
+		"iscsi-p6-alua-failover-chain.yaml",
+		"nvme-p4-multipath-failover-chain.yaml",
+		"nvme-p5-csi-protocol-chain.yaml",
+		"iscsi-p8-compat-soak-chain.yaml",
+		"child-run.txt",
+		"result.json",
+		"wall_clock_s",
+		"started_at",
+		"Invoke-NativeRedirect",
+	} {
+		if !strings.Contains(releaseGatePS, want) {
+			t.Fatalf("testops-run-protocol-release-gate.ps1 missing %q", want)
+		}
+	}
+
+	releaseGateValidate := g15bReadScript(t, "testops-validate-protocol-release-gate.py")
+	for _, want := range []string{
+		"protocol-release-gate-suite",
+		"EXPECTED_CHILDREN",
+		"iscsi-p6-alua-failover",
+		"nvme-p4-multipath-failover",
+		"nvme-p5-csi-protocol",
+		"iscsi-p8-compat-soak",
+		"wall_clock_s",
+		"--expect-product-commit",
+		"--allow-fail",
+	} {
+		if !strings.Contains(releaseGateValidate, want) {
+			t.Fatalf("testops-validate-protocol-release-gate.py missing %q", want)
+		}
+	}
+
+	releaseGateValidatePS := g15bReadScript(t, "testops-validate-latest-protocol-release-gate.ps1")
+	for _, want := range []string{
+		"validate-bundle",
+		"--profile",
+		"protocol-release-gate",
+		"--expect-commit",
+		"Find-LatestProtocolGateArtifact",
+		"Invoke-Native",
+	} {
+		if !strings.Contains(releaseGateValidatePS, want) {
+			t.Fatalf("testops-validate-latest-protocol-release-gate.ps1 missing %q", want)
+		}
+	}
+
+	releaseGateValidateSH := g15bReadScript(t, "testops-validate-latest-protocol-release-gate.sh")
+	for _, want := range []string{
+		"validate-bundle",
+		"--profile",
+		"protocol-release-gate",
+		"--expect-commit",
+		"find_latest_protocol_gate_artifact",
+		"SWBLOCK_RUNNER_ROOT",
+	} {
+		if !strings.Contains(releaseGateValidateSH, want) {
+			t.Fatalf("testops-validate-latest-protocol-release-gate.sh missing %q", want)
+		}
+	}
+}
+
+func TestG15dHarnessConsumesPinnedAlphaImagesEnv(t *testing.T) {
+	body := g15bReadScript(t, "run-g15d-k8s-dynamic.sh")
+	for _, want := range []string{
+		"SW_BLOCK_ALPHA_IMAGES_ENV",
+		"SW_BLOCK_PIN_BUILD_ENV",
+		"source \"$ALPHA_IMAGES_ENV\"",
+		"alpha-images.env",
+		"alpha_images_env=",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("run-g15d-k8s-dynamic.sh missing pinned image env contract %q", want)
 		}
 	}
 }

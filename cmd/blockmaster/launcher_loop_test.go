@@ -81,6 +81,73 @@ func TestG15d_BlockmasterLauncherTickWritesBlockvolumeManifest(t *testing.T) {
 	}
 }
 
+func TestG15d_BlockmasterLauncherTickRendersNVMeManifestFromLifecycleProtocol(t *testing.T) {
+	h, err := master.New(master.Config{
+		AuthorityStoreDir: t.TempDir(),
+		LifecycleStoreDir: t.TempDir(),
+		Listen:            "127.0.0.1:0",
+	})
+	if err != nil {
+		t.Fatalf("master.New: %v", err)
+	}
+	h.Start()
+	defer func() { _ = h.Close(context.Background()) }()
+	stores := h.Lifecycle()
+	if _, err := stores.Volumes.CreateVolume(lifecycle.VolumeSpec{
+		VolumeID:          "pvc-a",
+		SizeBytes:         1 << 20,
+		ReplicationFactor: 1,
+		Protocol:          "nvme",
+	}); err != nil {
+		t.Fatalf("create volume: %v", err)
+	}
+	if _, err := stores.Nodes.RegisterNode(lifecycle.NodeRegistration{
+		ServerID: "m02",
+		DataAddr: "10.0.0.2:9201",
+		CtrlAddr: "10.0.0.2:9101",
+		Pools: []lifecycle.StoragePool{{
+			PoolID:     "default",
+			TotalBytes: 1 << 30,
+			FreeBytes:  1 << 30,
+			BlockSize:  4096,
+		}},
+	}); err != nil {
+		t.Fatalf("register node: %v", err)
+	}
+	if _, err := h.RunLifecycleProductTick(); err != nil {
+		t.Fatalf("product tick: %v", err)
+	}
+
+	outDir := t.TempDir()
+	if err := runLifecycleLauncherTick(h, flags{
+		launcherManifestDir:  outDir,
+		launcherNamespace:    "kube-system",
+		launcherImage:        "sw-block:test",
+		launcherMasterAddr:   "blockmaster.kube-system.svc.cluster.local:9333",
+		launcherDurableRoot:  "/var/lib/sw-block",
+		launcherNVMePortBase: 4420,
+	}); err != nil {
+		t.Fatalf("launcher tick: %v", err)
+	}
+	raw, err := os.ReadFile(filepath.Join(outDir, "sw-blockvolume-pvc-a-r1.yaml"))
+	if err != nil {
+		t.Fatalf("read manifest: %v", err)
+	}
+	body := string(raw)
+	for _, want := range []string{
+		"--nvme-listen=127.0.0.1:4420",
+		"--nvme-subsysnqn=nqn.2026-05.io.seaweedfs:pvc-a",
+		"--nvme-ns=1",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("nvme manifest missing %q:\n%s", want, body)
+		}
+	}
+	if strings.Contains(body, "--iscsi-listen=") || strings.Contains(body, "--iscsi-iqn=") {
+		t.Fatalf("nvme manifest must not render iscsi args:\n%s", body)
+	}
+}
+
 func TestG15e_BlockmasterLauncherTickRemovesManifestAfterVolumeDelete(t *testing.T) {
 	h, err := master.New(master.Config{
 		AuthorityStoreDir: t.TempDir(),

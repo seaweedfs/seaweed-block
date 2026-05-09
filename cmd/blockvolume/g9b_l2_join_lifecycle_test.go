@@ -1,3 +1,5 @@
+//go:build subprocess
+
 package main_test
 
 import (

@@ -99,12 +99,17 @@ If the GHCR packages are not public yet, use the local build path below.
 bash scripts/build-alpha-images.sh "$PWD"
 ```
 
-For k3s, import both images:
+For k3s, build and import both images into k3s containerd in one pinned step:
 
 ```bash
-docker save sw-block:local     | sudo k3s ctr images import -
-docker save sw-block-csi:local | sudo k3s ctr images import -
+SW_BLOCK_IMPORT_K3S=1 \
+SW_BLOCK_ARTIFACT_DIR=/tmp/sw-block-alpha-build \
+  bash scripts/build-alpha-images.sh "$PWD"
 ```
+
+The artifact directory records image IDs and component `--version` output. This
+is the preferred local path because it prevents stale k3s images from being
+mistaken for the current checkout.
 
 ### Run the smoke test
 

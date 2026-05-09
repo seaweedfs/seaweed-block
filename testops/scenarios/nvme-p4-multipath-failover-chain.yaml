@@ -1,0 +1,241 @@
+# Runner-native NVMe P4 multipath + mounted failover chain.
+#
+# Keeps the existing privileged OS-initiator bash payloads as the product
+# truth, while sw-test-runner owns:
+#   pre-clean -> pin-build binaries -> multipath discovery -> mounted failover
+#   -> final cleanup/asserts -> shared artifact collection.
+#
+# Expected invocation from sw-test-runner-standalone:
+#   swblock run testops/scenarios/nvme-p4-multipath-failover-chain.yaml \
+#     --env product_root=/path/to/seaweed_block/on/m02 \
+#     --env ssh_key=/path/to/testdev_key/on/controller
+
+name: nvme-p4-multipath-failover-chain
+timeout: 25m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: pre_clean
+    actions:
+      - action: pre_run_cleanup
+        node: m02
+        kill_patterns: "blockmaster,blockvolume,iscsi-target"
+        nvme_disconnect: "true"
+        iscsi_logout_prefix: "iqn.2026-05.io.seaweedfs"
+      - action: exec
+        node: m02
+        cmd: "rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-nvme-p4-chain && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-nvme-p4-chain/bin /mnt/smb/work/share/g15d-k8s/{{ run_id }}-nvme-p4-chain/pin_build /mnt/smb/work/share/g15d-k8s/{{ run_id }}-nvme-p4-chain/multipath_discovery /mnt/smb/work/share/g15d-k8s/{{ run_id }}-nvme-p4-chain/mounted_failover"
+      - action: assert_no_active_iscsi_sessions
+        node: m02
+        iqn_substr: "io.seaweedfs"
+      - action: assert_no_processes
+        node: m02
+        pattern: "[/]blockmaster --|[/]blockvolume --|^blockmaster |^blockvolume "
+
+  - name: pin_build
+    actions:
+      - action: exec
+        node: m02
+        timeout: 8m
+        cmd: "cd {{ product_root }} && go build -o /mnt/smb/work/share/g15d-k8s/{{ run_id }}-nvme-p4-chain/bin/blockmaster ./cmd/blockmaster && go build -o /mnt/smb/work/share/g15d-k8s/{{ run_id }}-nvme-p4-chain/bin/blockvolume ./cmd/blockvolume"
+      - action: exec
+        node: m02
+        cmd: "cd {{ product_root }} && git rev-parse HEAD > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-nvme-p4-chain/pin_build/git.sha && git status --short > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-nvme-p4-chain/pin_build/git.status && /mnt/smb/work/share/g15d-k8s/{{ run_id }}-nvme-p4-chain/bin/blockmaster --version > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-nvme-p4-chain/pin_build/blockmaster.version.txt && /mnt/smb/work/share/g15d-k8s/{{ run_id }}-nvme-p4-chain/bin/blockvolume --version > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-nvme-p4-chain/pin_build/blockvolume.version.txt"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-nvme-p4-chain/pin_build/blockvolume.version.txt"
+        pattern: "blockvolume revision="
+        save_as: blockvolume_version_count
+      - action: assert_greater
+        actual: "{{ blockvolume_version_count }}"
+        threshold: "0"
+
+  - name: multipath_discovery
+    actions:
+      - action: exec
+        node: m02
+        timeout: 8m
+        cmd: "cd {{ product_root }} && bash scripts/run-nvme-multipath-smoke.sh {{ product_root }}"
+        env.SW_BLOCK_ARTIFACT_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-nvme-p4-chain/multipath_discovery"
+        env.SW_BLOCK_BIN_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-nvme-p4-chain/bin"
+
+      # Bash-level gate: smoke's own PASS line ran.
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-nvme-p4-chain/multipath_discovery/run.log"
+        pattern: "\\[nvme-mpath\\] PASS:"
+        save_as: multipath_pass_count
+      - action: assert_greater
+        actual: "{{ multipath_pass_count }}"
+        threshold: "0"
+
+      # Field-level gate: cross-path identity ANAGRPID == 1 (was
+      # the only field bash already gated; kept for parity).
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-nvme-p4-chain/multipath_discovery/identity-summary.txt"
+        pattern: "anagrpid=1"
+        save_as: multipath_anagrpid_count
+      - action: assert_greater
+        actual: "{{ multipath_anagrpid_count }}"
+        threshold: "0"
+
+      # Field-level gate: CMIC = 0xa (multi-controller bit + ANA
+      # bit). A revert of c0e4a6a flips this back; kernel rejects
+      # the second connect with "Subsystem does not support
+      # multiple controllers." Bash never gated the value, only
+      # observed it in id-ctrl text.
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-nvme-p4-chain/multipath_discovery/nvme-id-ctrl.dev1.txt"
+        pattern: "^cmic\\s*:\\s*0xa$"
+        save_as: cmic_match_count
+      - action: assert_greater
+        actual: "{{ cmic_match_count }}"
+        threshold: "0"
+
+      # Field-level gate: NMIC.SHARED bit on Identify Namespace.
+      # Revert of 035702f flips this to 0x0; kernel rejects with
+      # "Duplicate unshared namespace 1." Bash never gated.
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-nvme-p4-chain/multipath_discovery/nvme-id-ns.dev1.txt"
+        pattern: "^nmic\\s*:\\s*0x1$"
+        save_as: nmic_match_count
+      - action: assert_greater
+        actual: "{{ nmic_match_count }}"
+        threshold: "0"
+
+      # Field-level gate: ANA state = 0x01 optimized (strict).
+      # The bash summarize_ana_log only checked the state was a
+      # recognized value (any of 0x01/0x02/0x03/0x04/0x0F);
+      # post-promotion drift to non_optimized would have slipped.
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-nvme-p4-chain/multipath_discovery/nvme-ana-log.dev1.summary"
+        pattern: "^ana_state=0x01 optimized$"
+        save_as: ana_optimized_count
+      - action: assert_greater
+        actual: "{{ ana_optimized_count }}"
+        threshold: "0"
+
+      # Field-level gate: single ANA group reported.
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-nvme-p4-chain/multipath_discovery/nvme-ana-log.dev1.summary"
+        pattern: "^ana_group_count=1$"
+        save_as: ana_group_count_match
+      - action: assert_greater
+        actual: "{{ ana_group_count_match }}"
+        threshold: "0"
+
+      - action: assert_no_processes
+        node: m02
+        pattern: "[/]blockmaster --|[/]blockvolume --|^blockmaster |^blockvolume "
+
+  - name: mounted_failover
+    actions:
+      - action: exec
+        node: m02
+        timeout: 8m
+        cmd: "cd {{ product_root }} && bash scripts/run-nvme-mounted-failover-smoke.sh {{ product_root }}"
+        env.SW_BLOCK_ARTIFACT_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-nvme-p4-chain/mounted_failover"
+        env.SW_BLOCK_BIN_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-nvme-p4-chain/bin"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-nvme-p4-chain/mounted_failover/run.log"
+        pattern: "\\[nvme-failover\\] PASS:"
+        save_as: failover_pass_count
+      - action: assert_greater
+        actual: "{{ failover_pass_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-nvme-p4-chain/mounted_failover/pre-check-after-failover.log"
+        pattern: "/pre.bin: OK"
+        save_as: pre_checksum_count
+      - action: assert_greater
+        actual: "{{ pre_checksum_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-nvme-p4-chain/mounted_failover/post-check.log"
+        pattern: "/post.bin: OK"
+        save_as: post_checksum_count
+      - action: assert_greater
+        actual: "{{ post_checksum_count }}"
+        threshold: "0"
+
+      # Field-level gate: r2 epoch must be >= 2 after promotion.
+      # Split-brain discipline requires r2 to mint an epoch
+      # strictly greater than the demoted-r1 epoch (which started
+      # at 1). A regression in assignment-epoch logic surfaces as
+      # Epoch=0 or Epoch=1.
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-nvme-p4-chain/mounted_failover/status-r2-primary.json"
+        pattern: "\"Epoch\":[2-9][0-9]*"
+        save_as: r2_epoch_ge2_count
+      - action: assert_greater
+        actual: "{{ r2_epoch_ge2_count }}"
+        threshold: "0"
+
+      # Field-level gate: r2 promoted to AuthorityRole=primary.
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-nvme-p4-chain/mounted_failover/status-r2-primary.json"
+        pattern: "\"AuthorityRole\":\"primary\""
+        save_as: r2_role_primary_count
+      - action: assert_greater
+        actual: "{{ r2_role_primary_count }}"
+        threshold: "0"
+
+      # Field-level gate: r2's frontend reports ready (the bit
+      # the metadata-only standby gate flips to true after
+      # promotion; gates the e1e0e0c product fix). Without this,
+      # r2 could be authoritative-primary while still rejecting
+      # I/O.
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-nvme-p4-chain/mounted_failover/status-r2-primary.json"
+        pattern: "\"FrontendPrimaryReady\":true"
+        save_as: r2_frontend_ready_count
+      - action: assert_greater
+        actual: "{{ r2_frontend_ready_count }}"
+        threshold: "0"
+
+  - name: final_asserts
+    actions:
+      - action: exec
+        node: m02
+        cmd: "sudo nvme list-subsys -o json > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-nvme-p4-chain/nvme-list-subsys.final.json"
+      - action: assert_no_active_iscsi_sessions
+        node: m02
+        iqn_substr: "io.seaweedfs"
+      - action: assert_no_processes
+        node: m02
+        pattern: "[/]blockmaster --|[/]blockvolume --|^blockmaster |^blockvolume "
+
+  - name: collect_and_cleanup
+    always: true
+    actions:
+      - action: pre_run_cleanup
+        node: m02
+        kill_patterns: "blockmaster,blockvolume,iscsi-target"
+        nvme_disconnect: "true"
+        iscsi_logout_prefix: "iqn.2026-05.io.seaweedfs"
+      - action: collect_path
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-nvme-p4-chain"
+        name: "remote-phases"
+        ignore_error: true

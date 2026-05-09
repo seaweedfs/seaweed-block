@@ -15,6 +15,13 @@ const (
 	ProtocolNVMe  Protocol = "nvme"
 )
 
+func normalizeProtocol(p Protocol) Protocol {
+	if p == "" {
+		return ProtocolISCSI
+	}
+	return p
+}
+
 // PublishTarget is a read-only frontend target fact. It is deliberately
 // not authority-shaped: no epoch/endpoint_version inputs, no assignment
 // intent, no publisher call surface.
@@ -51,6 +58,7 @@ type VolumeSpec struct {
 	VolumeID          string
 	SizeBytes         uint64
 	ReplicationFactor int
+	Protocol          Protocol
 	PVCName           string
 	PVCNamespace      string
 	PVCUID            string
@@ -59,6 +67,9 @@ type VolumeSpec struct {
 
 func publishContext(t PublishTarget) map[string]string {
 	ctx := map[string]string{}
+	if t.Protocol != "" {
+		ctx["protocol"] = string(t.Protocol)
+	}
 	if t.ISCSIAddr != "" && t.IQN != "" {
 		ctx["iscsiAddr"] = t.ISCSIAddr
 		ctx["iqn"] = t.IQN

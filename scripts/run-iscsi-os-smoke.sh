@@ -78,11 +78,11 @@ require_cmd() {
 
 cleanup_iqn_records() {
   local portal portal_no_tpgt
-  sudo iscsiadm -m session 2>/dev/null | awk -v iqn="$IQN" '$0 ~ iqn {print $3}' | while read -r portal; do
+  { sudo iscsiadm -m session 2>/dev/null || true; } | awk -v iqn="$IQN" '$0 ~ iqn {print $3}' | while read -r portal; do
     [[ -z "$portal" ]] && continue
     sudo iscsiadm -m node -T "$IQN" -p "$portal" --logout >>"$ARTIFACT_DIR/cleanup.log" 2>&1 || true
   done
-  sudo iscsiadm -m node 2>/dev/null | awk -v iqn="$IQN" '$0 ~ iqn {print $1}' | while read -r portal; do
+  { sudo iscsiadm -m node 2>/dev/null || true; } | awk -v iqn="$IQN" '$0 ~ iqn {print $1}' | while read -r portal; do
     [[ -z "$portal" ]] && continue
     portal_no_tpgt="${portal%%,*}"
     sudo iscsiadm -m node -T "$IQN" -p "$portal" -o delete >>"$ARTIFACT_DIR/cleanup.log" 2>&1 || true

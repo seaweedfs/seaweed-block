@@ -2,6 +2,15 @@
 set -euo pipefail
 
 ROOT="${1:-$(pwd)}"
+ALPHA_IMAGES_ENV="${SW_BLOCK_ALPHA_IMAGES_ENV:-${SW_BLOCK_PIN_BUILD_ENV:-}}"
+if [[ -n "$ALPHA_IMAGES_ENV" ]]; then
+  if [[ ! -f "$ALPHA_IMAGES_ENV" ]]; then
+    echo "SW_BLOCK_ALPHA_IMAGES_ENV points to missing file: $ALPHA_IMAGES_ENV" >&2
+    exit 2
+  fi
+  # shellcheck source=/dev/null
+  source "$ALPHA_IMAGES_ENV"
+fi
 NAMESPACE="${G15D_NAMESPACE:-default}"
 ARTIFACT_DIR="${G15D_ARTIFACT_DIR:-/tmp/g15d-k8s-$(date -u +%Y%m%dT%H%M%SZ)}"
 RUN_LABEL="${SW_BLOCK_RUN_LABEL:-g15d}"
@@ -12,6 +21,7 @@ LAUNCHER_PVC_OWNER_REF="${SW_BLOCK_LAUNCHER_PVC_OWNER_REF:-0}"
 CHAP_USERNAME="${SW_BLOCK_ISCSI_CHAP_USERNAME:-}"
 CHAP_SECRET="${SW_BLOCK_ISCSI_CHAP_SECRET:-}"
 CHAP_SECRET_NAME="${SW_BLOCK_ISCSI_CHAP_SECRET_NAME:-sw-block-iscsi-chap}"
+FRONTEND_PROTOCOL="${SW_BLOCK_FRONTEND_PROTOCOL:-iscsi}"
 BLOCKVOLUME_NAMESPACE="kube-system"
 if [[ "$LAUNCHER_PVC_OWNER_REF" == "1" || "$LAUNCHER_PVC_OWNER_REF" == "true" ]]; then
   BLOCKVOLUME_NAMESPACE="$NAMESPACE"
@@ -24,9 +34,21 @@ if [[ -n "$CHAP_USERNAME" || -n "$CHAP_SECRET" ]]; then
   fi
   CHAP_ENABLED=1
 fi
+if [[ "$FRONTEND_PROTOCOL" != "iscsi" && "$FRONTEND_PROTOCOL" != "nvme" ]]; then
+  echo "SW_BLOCK_FRONTEND_PROTOCOL must be iscsi or nvme" >&2
+  exit 2
+fi
+if [[ "$FRONTEND_PROTOCOL" == "nvme" && "$CHAP_ENABLED" == "1" ]]; then
+  echo "iSCSI CHAP is not compatible with SW_BLOCK_FRONTEND_PROTOCOL=nvme" >&2
+  exit 2
+fi
 
 mkdir -p "$ARTIFACT_DIR"
+if [[ -n "$ALPHA_IMAGES_ENV" ]]; then
+  cp "$ALPHA_IMAGES_ENV" "$ARTIFACT_DIR/alpha-images.env"
+fi
 POLL_LOG="$ARTIFACT_DIR/poll.log"
+EXPECTED_GIT_REVISION="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || true)"
 
 log() {
   printf '[%s] %s\n' "$RUN_LABEL" "$*" | tee -a "$ARTIFACT_DIR/run.log"
@@ -44,6 +66,30 @@ sed_escape() {
 }
 
 require_cmd kubectl
+
+verify_revision() {
+  local component="$1"
+  local path="$2"
+  if [[ -z "$EXPECTED_GIT_REVISION" ]]; then
+    return
+  fi
+  if ! grep -q "$EXPECTED_GIT_REVISION" "$path"; then
+    echo "$component image revision mismatch: expected $EXPECTED_GIT_REVISION, got $(cat "$path" 2>/dev/null || true)" >&2
+    exit 1
+  fi
+}
+
+capture_blockvolume_version() {
+  local out="$1"
+  local err="$2"
+  local deploy
+  deploy="$(kubectl -n "$BLOCKVOLUME_NAMESPACE" get deploy -l app=sw-blockvolume -o name 2>"$err" | head -n 1)"
+  if [[ -z "$deploy" ]]; then
+    echo "generated blockvolume Deployment not found for version capture" >>"$err"
+    return 1
+  fi
+  kubectl -n "$BLOCKVOLUME_NAMESPACE" exec "$deploy" -c blockvolume -- /usr/local/bin/blockvolume --version >"$out" 2>>"$err"
+}
 
 NODE_NAME="$(kubectl get nodes -o jsonpath='{.items[0].metadata.name}')"
 STACK_RENDERED="$ARTIFACT_DIR/block-stack.rendered.yaml"
@@ -90,8 +136,23 @@ if [[ "$CHAP_ENABLED" == "1" ]]; then
   ' "$DYNAMIC_RENDERED" >"$DYNAMIC_RENDERED.tmp"
   mv "$DYNAMIC_RENDERED.tmp" "$DYNAMIC_RENDERED"
 fi
+if [[ "$FRONTEND_PROTOCOL" == "nvme" ]]; then
+  awk '
+    /^parameters:/ {
+      print
+      print "  sw-block.seaweedfs.com/protocol: \"nvme\""
+      print "  protocol: \"nvme\""
+      next
+    }
+    {print}
+  ' "$DYNAMIC_RENDERED" >"$DYNAMIC_RENDERED.tmp"
+  mv "$DYNAMIC_RENDERED.tmp" "$DYNAMIC_RENDERED"
+fi
 
 log "artifact_dir=$ARTIFACT_DIR"
+if [[ -n "$ALPHA_IMAGES_ENV" ]]; then
+  log "alpha_images_env=$ALPHA_IMAGES_ENV"
+fi
 log "root=$ROOT"
 log "namespace=$NAMESPACE"
 log "node=$NODE_NAME"
@@ -100,6 +161,8 @@ log "csi_image=$CSI_IMAGE"
 log "blockvolume_namespace=$BLOCKVOLUME_NAMESPACE"
 log "launcher_pvc_owner_ref=$LAUNCHER_PVC_OWNER_REF"
 log "chap_enabled=$CHAP_ENABLED"
+log "frontend_protocol=$FRONTEND_PROTOCOL"
+log "expected_git_revision=${EXPECTED_GIT_REVISION:-unknown}"
 log "dynamic_pvc_manifest=$DYNAMIC_PVC_MANIFEST"
 kubectl version --client=true >"$ARTIFACT_DIR/kubectl-version.txt" 2>&1 || true
 kubectl get nodes -o wide >"$ARTIFACT_DIR/nodes.before.txt"
@@ -130,9 +193,14 @@ collect_daemon_logs() {
   capture_once "$ARTIFACT_DIR/csi-provisioner.log" kubectl -n kube-system logs deploy/sw-block-csi-controller -c csi-provisioner
   capture_once "$ARTIFACT_DIR/csi-attacher.log" kubectl -n kube-system logs deploy/sw-block-csi-controller -c csi-attacher
   capture_once "$ARTIFACT_DIR/blockvolume-generated.log" kubectl -n "$BLOCKVOLUME_NAMESPACE" logs -l sw-block.seaweedfs.com/volume -c blockvolume --tail=-1
+  if [[ ! -s "$ARTIFACT_DIR/blockvolume.version.txt" ]]; then
+    capture_blockvolume_version "$ARTIFACT_DIR/blockvolume.version.txt" "$ARTIFACT_DIR/blockvolume.version.err" || true
+  fi
   capture_once "$ARTIFACT_DIR/kube-system-pods-deploys.txt" kubectl -n kube-system get pods,deploy -o wide
+  capture_once "$ARTIFACT_DIR/kube-system-imageids.txt" kubectl -n kube-system get pod -l 'app in (sw-blockmaster,sw-block-csi-controller,sw-block-csi-node)' -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{range .status.containerStatuses[*]}{"  "}{.name}{" imageID="}{.imageID}{"\n"}{end}{end}'
   capture_once "$ARTIFACT_DIR/blockvolume-namespace-pods-deploys.txt" kubectl -n "$BLOCKVOLUME_NAMESPACE" get pods,deploy -o wide
   capture_once "$ARTIFACT_DIR/app-storage.txt" kubectl -n "$NAMESPACE" get sc,pv,pvc,pod -o wide
+  capture_once "$ARTIFACT_DIR/lifecycle-volumes.json" kubectl -n kube-system exec deploy/sw-blockmaster -c blockmaster -- sh -c 'cat /var/lib/sw-block/lifecycle/volumes/*.json'
   if [[ ! -s "$ARTIFACT_DIR/generated-blockvolume.yaml" ]]; then
     kubectl -n kube-system exec deploy/sw-blockmaster -c blockmaster -- sh -c 'cat /manifests/*.yaml' >"$ARTIFACT_DIR/generated-blockvolume.yaml" 2>"$ARTIFACT_DIR/generated-blockvolume.err" || true
   fi
@@ -154,10 +222,13 @@ collect_post_delete_state() {
   kubectl -n "$NAMESPACE" get sc,pv,pvc,pod -o wide >"$ARTIFACT_DIR/app-storage.after-delete.txt" 2>&1 || true
   if command -v sudo >/dev/null 2>&1; then
     sudo iscsiadm -m session >"$ARTIFACT_DIR/iscsi-sessions.after-delete.txt" 2>&1 || true
+    sudo nvme list-subsys -o json >"$ARTIFACT_DIR/nvme-list-subsys.after-delete.json" 2>&1 || true
   elif command -v iscsiadm >/dev/null 2>&1; then
     iscsiadm -m session >"$ARTIFACT_DIR/iscsi-sessions.after-delete.txt" 2>&1 || true
+    nvme list-subsys -o json >"$ARTIFACT_DIR/nvme-list-subsys.after-delete.json" 2>&1 || true
   else
     echo "iscsiadm unavailable" >"$ARTIFACT_DIR/iscsi-sessions.after-delete.txt"
+    echo "nvme unavailable" >"$ARTIFACT_DIR/nvme-list-subsys.after-delete.json"
   fi
 }
 
@@ -167,6 +238,11 @@ trap 'collect_daemon_logs; cleanup' EXIT
 log "apply product stack without pre-created blockvolumes"
 kubectl apply -f "$STACK_RENDERED" | tee "$ARTIFACT_DIR/apply-block-stack.log"
 kubectl -n kube-system wait --for=condition=available deploy/sw-blockmaster --timeout=120s
+if ! kubectl -n kube-system exec deploy/sw-blockmaster -c blockmaster -- /usr/local/bin/blockmaster --version >"$ARTIFACT_DIR/blockmaster.version.txt" 2>"$ARTIFACT_DIR/blockmaster.version.err"; then
+  echo "blockmaster image does not expose --version; rebuild and reload sw-block image from current branch" >&2
+  exit 1
+fi
+verify_revision "blockmaster" "$ARTIFACT_DIR/blockmaster.version.txt"
 
 log "apply CSI dynamic-provisioning manifests"
 kubectl apply -f "$ROOT/deploy/k8s/g15d/rbac.yaml" | tee "$ARTIFACT_DIR/apply-rbac.log"
@@ -175,6 +251,11 @@ kubectl apply -f "$CSI_CONTROLLER_RENDERED" | tee "$ARTIFACT_DIR/apply-csi-contr
 kubectl apply -f "$CSI_NODE_RENDERED" | tee "$ARTIFACT_DIR/apply-csi-node.log"
 kubectl -n kube-system wait --for=condition=available deploy/sw-block-csi-controller --timeout=120s
 kubectl -n kube-system rollout status ds/sw-block-csi-node --timeout=120s
+if ! kubectl -n kube-system exec deploy/sw-block-csi-controller -c block-csi -- /usr/local/bin/blockcsi --version >"$ARTIFACT_DIR/blockcsi.version.txt" 2>"$ARTIFACT_DIR/blockcsi.version.err"; then
+  echo "blockcsi image does not expose --version; rebuild and reload sw-block-csi image from current branch" >&2
+  exit 1
+fi
+verify_revision "blockcsi" "$ARTIFACT_DIR/blockcsi.version.txt"
 
 if [[ "$CHAP_ENABLED" == "1" ]]; then
   log "apply iSCSI CHAP Secret"
@@ -187,7 +268,15 @@ if [[ "$CHAP_ENABLED" == "1" ]]; then
 fi
 
 log "apply dynamic StorageClass/PVC/pod"
+kubectl delete storageclass sw-block-dynamic --ignore-not-found=true | tee "$ARTIFACT_DIR/delete-storageclass-before-apply.log"
 kubectl -n "$NAMESPACE" apply -f "$DYNAMIC_RENDERED" | tee "$ARTIFACT_DIR/apply-dynamic.log"
+kubectl get storageclass sw-block-dynamic -o yaml >"$ARTIFACT_DIR/storageclass.live.yaml"
+if [[ "$FRONTEND_PROTOCOL" == "nvme" ]]; then
+  if ! grep -Eq 'sw-block\.seaweedfs\.com/protocol: "?nvme"?|protocol: "?nvme"?' "$ARTIFACT_DIR/storageclass.live.yaml"; then
+    echo "live StorageClass missing NVMe protocol parameter" >&2
+    exit 1
+  fi
+fi
 
 log "wait for launcher-generated blockvolume manifest"
 for _ in $(seq 1 180); do
@@ -201,10 +290,35 @@ if ! kubectl -n kube-system exec deploy/sw-blockmaster -c blockmaster -- sh -c '
   exit 1
 fi
 kubectl -n kube-system exec deploy/sw-blockmaster -c blockmaster -- sh -c 'cat /manifests/*.yaml' >"$ARTIFACT_DIR/generated-blockvolume.yaml"
+kubectl -n kube-system exec deploy/sw-blockmaster -c blockmaster -- sh -c 'cat /var/lib/sw-block/lifecycle/volumes/*.json' >"$ARTIFACT_DIR/lifecycle-volumes.json" 2>"$ARTIFACT_DIR/lifecycle-volumes.err" || true
+
+if [[ "$FRONTEND_PROTOCOL" == "nvme" ]]; then
+  for want in "--nvme-listen=" "--nvme-subsysnqn=" "--nvme-ns=1"; do
+    if ! grep -q -- "$want" "$ARTIFACT_DIR/generated-blockvolume.yaml"; then
+      echo "generated blockvolume manifest missing NVMe arg $want" >&2
+      exit 1
+    fi
+  done
+  if grep -q -- "--iscsi-listen=" "$ARTIFACT_DIR/generated-blockvolume.yaml"; then
+    echo "generated blockvolume manifest rendered iSCSI args while frontend_protocol=nvme" >&2
+    exit 1
+  fi
+  log "verified generated blockvolume frontend protocol=nvme"
+else
+  if ! grep -q -- "--iscsi-listen=" "$ARTIFACT_DIR/generated-blockvolume.yaml"; then
+    echo "generated blockvolume manifest missing iSCSI args while frontend_protocol=iscsi" >&2
+    exit 1
+  fi
+fi
 
 log "apply generated blockvolume manifests"
 kubectl apply -f "$ARTIFACT_DIR/generated-blockvolume.yaml" | tee "$ARTIFACT_DIR/apply-generated-blockvolume.log"
 kubectl -n "$BLOCKVOLUME_NAMESPACE" wait --for=condition=available deploy -l app=sw-blockvolume --timeout=120s
+if ! capture_blockvolume_version "$ARTIFACT_DIR/blockvolume.version.txt" "$ARTIFACT_DIR/blockvolume.version.err"; then
+  echo "failed to capture generated blockvolume version; see $ARTIFACT_DIR/blockvolume.version.err" >&2
+  exit 1
+fi
+verify_revision "blockvolume" "$ARTIFACT_DIR/blockvolume.version.txt"
 
 log "wait for dynamic pod completion"
 for _ in $(seq 1 240); do
@@ -270,6 +384,10 @@ if kubectl -n "$NAMESPACE" get pvc sw-block-dynamic-v1 >/dev/null 2>&1; then
 fi
 if grep -q 'iqn.2026-05.io.seaweedfs' "$ARTIFACT_DIR/iscsi-sessions.after-delete.txt" 2>/dev/null; then
   echo "dangling sw-block iSCSI session after delete" >&2
+  exit 1
+fi
+if grep -q 'nqn.2026-05.io.seaweedfs' "$ARTIFACT_DIR/nvme-list-subsys.after-delete.json" 2>/dev/null; then
+  echo "dangling sw-block NVMe subsystem after delete" >&2
   exit 1
 fi
 

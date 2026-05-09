@@ -1,0 +1,143 @@
+# QA Assignment: NVMe P5 CSI Protocol Selection
+
+Branch: `frontend/nvme-ana-parity-plan`.
+
+Status: QA green at `8e0a28f`.
+
+Scope: prove Kubernetes dynamic provisioning can select the NVMe frontend with
+the same PVC/app smoke shape used by alpha iSCSI. This is a CSI integration
+gate, not a new NVMe protocol gate.
+
+## Preconditions
+
+- Host: M02 k3s lab or equivalent single-node k3s host.
+- Required host tools:
+  - `kubectl`,
+  - `nvme-cli`,
+  - loadable `nvme_tcp`,
+  - Docker image build/load path for `sw-block:local` and
+    `sw-block-csi:local`.
+- Rebuild both images from the branch under test before running.
+- For k3s, use the pinned build/import path before running:
+
+  ```bash
+  SW_BLOCK_IMPORT_K3S=1 \
+  SW_BLOCK_ARTIFACT_DIR=/mnt/smb/work/share/g15d-k8s/pin-build-$(date -u +%Y%m%dT%H%M%SZ) \
+    bash scripts/build-alpha-images.sh "$PWD"
+  ```
+
+  The scripts gate `blockmaster`, `blockcsi`, and generated `blockvolume`
+  `--version` output against `git HEAD` to catch stale runtime images.
+- When a pin-build artifact exists, pass it into Test 1 and Test 2 with:
+
+  ```bash
+  export SW_BLOCK_ALPHA_IMAGES_ENV=/path/to/pin-build/alpha-images.env
+  ```
+
+  The dynamic K8s harness copies that file into each workload artifact
+  directory and renders manifests from the recorded image names.
+
+## Test 1: NVMe Dynamic PVC
+
+QA result: PASS at `69a1d20` with rebuilt and k3s-imported images.
+
+TestOps command after `alpha-images-pin-build`:
+
+```bash
+go run ./cmd/sw-testops \
+  --scenario nvme-p5-csi-dynamic \
+  --commit "$(git rev-parse --short HEAD)" \
+  --run-id nvme-p5-csi-dynamic-$(date -u +%Y%m%dT%H%M%SZ) \
+  --artifact-dir "/mnt/smb/work/share/g15d-k8s/nvme-p5-csi-dynamic-$(date -u +%Y%m%dT%H%M%SZ)" \
+  --param SW_BLOCK_ALPHA_IMAGES_ENV=/path/to/pin-build/alpha-images.env
+```
+
+Equivalent script command:
+
+```bash
+RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-nvme-p5-csi-dynamic"
+SW_BLOCK_ALPHA_IMAGES_ENV="/mnt/smb/work/share/g15d-k8s/alpha-pin-build-c3a6e28/pin-build/alpha-images.env" \
+SW_BLOCK_ARTIFACT_DIR="/mnt/smb/work/share/g15d-k8s/${RUN_ID}" \
+  bash scripts/run-k8s-alpha-nvme.sh "$PWD"
+```
+
+Expected:
+
+- `run.log` contains:
+  - `[alpha-nvme] frontend_protocol=nvme`,
+  - final line:
+    `[alpha-nvme] PASS: dynamic PVC create/delete completed checksum write/read and cleanup`.
+- `dynamic-pvc-pod.rendered.yaml` contains:
+  - `sw-block.seaweedfs.com/protocol: "nvme"` under the StorageClass
+    `parameters`,
+  - `protocol: "nvme"` under the StorageClass `parameters`.
+- `storageclass.live.yaml` contains:
+  - `sw-block.seaweedfs.com/protocol: nvme` or `protocol: nvme`, proving the
+    live cluster-scoped StorageClass was updated before provisioning evidence is
+    evaluated.
+- Image provenance:
+  - `blockmaster.version.txt`, `blockcsi.version.txt`, and
+    `blockvolume.version.txt` contain the branch commit under test,
+  - `kube-system-imageids.txt` is present for stale-image forensics.
+- `generated-blockvolume.yaml` contains:
+  - `--nvme-listen=`,
+  - `--nvme-subsysnqn=`,
+  - `--nvme-ns=1`,
+  - no `--iscsi-listen`.
+- `lifecycle-volumes.json` contains:
+  - `"protocol": "nvme"`.
+- `blockcsi-controller.log` or `blockmaster.log` contains a `CreateVolume`
+  line with `protocol="nvme"`.
+- CSI node evidence:
+  - `csi-node.rendered.yaml` includes `modprobe nvme_tcp`,
+  - CSI node image includes `nvme-cli`.
+- Workload evidence:
+  - `pod.log` shows checksum verification succeeded.
+- Cleanup:
+  - `nvme-list-subsys.after-delete.json` has no
+    `nqn.2026-05.io.seaweedfs` test subsystem,
+  - `app-storage.after-delete.txt` shows no PVC residue,
+  - `blockvolume-namespace-pods-deploys.after-delete.txt` shows no
+    generated `sw-blockvolume` deployment residue,
+  - `processes` are clean if separately checked.
+
+## Test 2: Default iSCSI Regression
+
+QA result: PASS at `8e0a28f` with rebuilt and k3s-imported images.
+
+TestOps command after `alpha-images-pin-build`:
+
+```bash
+go run ./cmd/sw-testops \
+  --scenario nvme-p5-default-iscsi-regression \
+  --commit "$(git rev-parse --short HEAD)" \
+  --run-id nvme-p5-default-iscsi-$(date -u +%Y%m%dT%H%M%SZ) \
+  --artifact-dir "/mnt/smb/work/share/g15d-k8s/nvme-p5-default-iscsi-$(date -u +%Y%m%dT%H%M%SZ)" \
+  --param SW_BLOCK_ALPHA_IMAGES_ENV=/path/to/pin-build/alpha-images.env
+```
+
+Equivalent script command:
+
+```bash
+RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-nvme-p5-default-iscsi-regression"
+SW_BLOCK_ALPHA_IMAGES_ENV="/mnt/smb/work/share/g15d-k8s/alpha-pin-build-c3a6e28/pin-build/alpha-images.env" \
+SW_BLOCK_ARTIFACT_DIR="/mnt/smb/work/share/g15d-k8s/${RUN_ID}" \
+  bash scripts/run-k8s-alpha.sh "$PWD"
+```
+
+Expected:
+
+- `run.log` contains:
+  - `[alpha] frontend_protocol=iscsi`,
+  - final alpha PASS line.
+- `dynamic-pvc-pod.rendered.yaml` does not contain `protocol: "nvme"`.
+- `generated-blockvolume.yaml` contains `--iscsi-listen=` and `--iscsi-iqn=`.
+- Cleanup leaves no PVC, generated Deployment, iSCSI session, or NVMe test
+  subsystem residue.
+
+## Non-Claims
+
+- Not a new ANA / native multipath gate.
+- Not mounted failover.
+- Not performance evidence.
+- Single-node k3s only.

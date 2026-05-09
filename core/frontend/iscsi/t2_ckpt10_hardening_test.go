@@ -1,14 +1,14 @@
 // Ownership: sw regression tests for architect review 2026-04-21
 // ckpt 10 Medium findings:
 //
-//   #1  EDTL/CDB consistency check MUST run before the target
-//       allocates memory or issues R2T (was: alloc edtl bytes
-//       upfront, then discover mismatch only when SCSI handler
-//       validated CDB).
+//	#1  EDTL/CDB consistency check MUST run before the target
+//	    allocates memory or issues R2T (was: alloc edtl bytes
+//	    upfront, then discover mismatch only when SCSI handler
+//	    validated CDB).
 //
-//   #2  R2T-solicited Data-Out must reject TTT=0xFFFFFFFF
-//       (unsolicited marker) — previously accepted, weakening
-//       the InitialR2T=Yes negotiated discipline.
+//	#2  R2T-solicited Data-Out must reject TTT=0xFFFFFFFF
+//	    (unsolicited marker) — previously accepted, weakening
+//	    the InitialR2T=Yes negotiated discipline.
 //
 // Both tests drive a real in-process target via the existing
 // Go test client; the second bypasses the normal test client's
@@ -31,7 +31,7 @@ import (
 // times Write was invoked. Used to confirm a pre-flight EDTL
 // rejection NEVER reaches the backend.
 type countingBackend struct {
-	inner *testback.RecordingBackend
+	inner  *testback.RecordingBackend
 	writes atomic.Int32
 }
 
@@ -127,12 +127,19 @@ func TestT2Route_ISCSI_LargeWrite_EDTLCDBMismatch_RejectsWithoutAllocating(t *te
 	if resp.SCSIStatusByte() != iscsi.StatusCheckCondition {
 		t.Fatalf("status=0x%02x want CHECK CONDITION", resp.SCSIStatusByte())
 	}
-	// Sense data rides in the data segment as fixed-format.
-	if len(resp.DataSegment) < 14 {
+	// iSCSI SCSI-Response prefixes fixed-format sense with a
+	// two-byte SenseLength. Linux validates this wrapper before
+	// passing sense up to SCSI.
+	if len(resp.DataSegment) < 16 {
 		t.Fatalf("response missing sense data: len=%d", len(resp.DataSegment))
 	}
-	senseKey := resp.DataSegment[2] & 0x0f
-	asc := resp.DataSegment[12]
+	senseLen := int(resp.DataSegment[0])<<8 | int(resp.DataSegment[1])
+	if senseLen != 18 || len(resp.DataSegment) != 2+senseLen {
+		t.Fatalf("sense wrapper length=%d dataSegmentLen=%d, want 18/20", senseLen, len(resp.DataSegment))
+	}
+	sense := resp.DataSegment[2:]
+	senseKey := sense[2] & 0x0f
+	asc := sense[12]
 	if senseKey != iscsi.SenseIllegalRequest {
 		t.Fatalf("sense key=0x%02x want IllegalRequest", senseKey)
 	}

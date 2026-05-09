@@ -67,7 +67,7 @@ func TestT2Batch11a_IdentifyController_SerialIsNotStub(t *testing.T) {
 	}
 }
 
-func TestT2Batch11a_IdentifyController_ANAFieldsAllZero(t *testing.T) {
+func TestNVMeIdentifyController_ANAFieldsZeroWithoutProvider(t *testing.T) {
 	tg, _, cli := newIdentifyHarness(t)
 	defer tg.Close()
 	defer cli.close()
@@ -85,6 +85,28 @@ func TestT2Batch11a_IdentifyController_ANAFieldsAllZero(t *testing.T) {
 	}
 	if got := binary.LittleEndian.Uint32(data[348:352]); got != 0 {
 		t.Fatalf("NANAGRPID=%d want 0", got)
+	}
+}
+
+func TestNVMeIdentifyController_ANAFieldsAdvertisedWithProvider(t *testing.T) {
+	_, cli := newANAHarness(t, testANAProvider{
+		state:       nvme.ANAOptimized,
+		groupID:     1,
+		changeCount: 1,
+	})
+	_, data := cli.adminIdentify(t, 0x01, 0)
+
+	if got := data[76]; got != 0x0a {
+		t.Fatalf("CMIC=0x%02x want 0x0a (multi-controller + ANA reporting)", got)
+	}
+	if got := data[341]; got != 0x17 {
+		t.Fatalf("ANACAP=0x%02x want 0x17 (optimized/non-optimized/inaccessible/change)", got)
+	}
+	if got := binary.LittleEndian.Uint32(data[344:348]); got != 1 {
+		t.Fatalf("ANAGRPMAX=%d want 1", got)
+	}
+	if got := binary.LittleEndian.Uint32(data[348:352]); got != 1 {
+		t.Fatalf("NANAGRPID=%d want 1", got)
 	}
 }
 
@@ -238,15 +260,34 @@ func TestT2Batch11a_IdentifyNamespace_NSFEATAndDLFEATZero(t *testing.T) {
 	}
 }
 
-func TestT2Batch11a_IdentifyNamespace_ANAGRPIDZero(t *testing.T) {
+func TestNVMeIdentifyNamespace_ANAGRPIDZeroWithoutProvider(t *testing.T) {
 	tg, _, cli := newIdentifyHarness(t)
 	defer tg.Close()
 	defer cli.close()
 	_, data := cli.adminIdentify(t, 0x00, 1)
+	if got := data[30]; got != 0 {
+		t.Fatalf("Identify NS NMIC=0x%02x want 0 without ANA provider", got)
+	}
 	// D2: Identify NS ANAGRPID (92-95) must be 0.
 	got := binary.LittleEndian.Uint32(data[92:96])
 	if got != 0 {
 		t.Fatalf("Identify NS ANAGRPID=%d want 0", got)
+	}
+}
+
+func TestNVMeIdentifyNamespace_ANAFieldsAdvertisedWithProvider(t *testing.T) {
+	_, cli := newANAHarness(t, testANAProvider{
+		state:       nvme.ANAOptimized,
+		groupID:     1,
+		changeCount: 1,
+	})
+	_, data := cli.adminIdentify(t, 0x00, 1)
+	if got := data[30]; got != 0x01 {
+		t.Fatalf("Identify NS NMIC=0x%02x want 0x01 (shared namespace)", got)
+	}
+	got := binary.LittleEndian.Uint32(data[92:96])
+	if got != 1 {
+		t.Fatalf("Identify NS ANAGRPID=%d want 1", got)
 	}
 }
 

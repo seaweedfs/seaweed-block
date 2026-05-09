@@ -17,6 +17,12 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/frontend"
 )
 
+// ProbeBackendProvider supplies a borrowed backend for metadata-only ANA path
+// probing when the write-ready Provider.Open path is not available.
+type ProbeBackendProvider interface {
+	ProbeBackend(ctx context.Context, volumeID string) (frontend.Backend, error)
+}
+
 // TargetConfig configures an NVMe/TCP Target.
 type TargetConfig struct {
 	// Listen TCP address (":0" for tests).
@@ -33,6 +39,18 @@ type TargetConfig struct {
 
 	// Provider supplies the frontend.Backend per session.
 	Provider frontend.Provider
+
+	// ProbeProvider is optional. If Provider.Open returns ErrNotReady and ANA
+	// reports a non-optimized path, the target uses this backend for admin
+	// connect / Identify / ANA log visibility. Data commands remain rejected
+	// by a metadata-only IOHandler.
+	ProbeProvider ProbeBackendProvider
+
+	// ControllerID is the first CNTLID allocated by this target. Zero uses 1.
+	// Multi-path deployments must configure distinct values per target serving
+	// the same SubsysNQN; Linux rejects duplicate controller IDs inside one
+	// subsystem.
+	ControllerID uint16
 
 	// IO handler tunables (block size, volume size, NSID).
 	// Zero values pick T2 defaults.
@@ -58,6 +76,8 @@ type Target struct {
 	ctrlMu     sync.Mutex
 	ctrls      map[uint16]*adminController
 	nextCntlID uint16 // monotonic allocator; never reuses a CNTLID within a Target lifetime
+
+	stats targetStats
 }
 
 // NewTarget builds a Target. Provider must be non-nil.
@@ -69,12 +89,16 @@ func NewTarget(cfg TargetConfig) *Target {
 	if lg == nil {
 		lg = log.Default()
 	}
+	nextCntlID := cfg.ControllerID
+	if nextCntlID == 0 || nextCntlID == 0xffff {
+		nextCntlID = 1
+	}
 	return &Target{
 		cfg:        cfg,
 		logger:     stdlogAdapter{l: lg},
 		closed:     make(chan struct{}),
 		ctrls:      map[uint16]*adminController{},
-		nextCntlID: 1, // 0 is reserved per NVMe-oF; host may also read 0xFFFF as "request new"
+		nextCntlID: nextCntlID, // 0 is reserved; 0xFFFF is "request new" on Connect.
 	}
 }
 
@@ -145,7 +169,23 @@ func (t *Target) Close() error {
 		_ = ln.Close()
 	}
 	t.sessions.Wait()
+	st := t.Stats()
+	t.logger.Printf("nvme: stats sessions=%d admin_connects=%d io_connects=%d reads=%d writes=%d flushes=%d inline_writes=%d inline_bytes=%d r2t_writes=%d r2t_bytes=%d h2c_pdus=%d h2c_bytes=%d c2h_pdus=%d c2h_bytes=%d",
+		st.SessionsAccepted, st.AdminConnects, st.IOConnects,
+		st.ReadCommands, st.WriteCommands, st.FlushCommands,
+		st.InlineWriteCommands, st.InlineWriteBytes,
+		st.R2TWriteCommands, st.R2TWriteBytes,
+		st.H2CDataPDUs, st.H2CDataBytes,
+		st.C2HDataPDUs, st.C2HDataBytes)
 	return nil
+}
+
+// Stats returns a point-in-time transport counter snapshot.
+func (t *Target) Stats() Stats {
+	if t == nil {
+		return Stats{}
+	}
+	return t.stats.snapshot()
 }
 
 func (t *Target) acceptLoop(ln net.Listener) {
@@ -168,6 +208,7 @@ func (t *Target) acceptLoop(ln net.Listener) {
 func (t *Target) handleConn(conn net.Conn) {
 	defer t.sessions.Done()
 	defer conn.Close()
+	t.stats.sessionsAccepted.Add(1)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -179,10 +220,15 @@ func (t *Target) handleConn(conn net.Conn) {
 		}
 	}()
 
+	metadataOnly := false
 	backend, err := t.cfg.Provider.Open(ctx, t.cfg.VolumeID)
 	if err != nil {
-		t.logger.Printf("nvme: Provider.Open(%s): %v", t.cfg.VolumeID, err)
-		return
+		var ok bool
+		backend, metadataOnly, ok = t.tryProbeBackend(ctx, err)
+		if !ok {
+			t.logger.Printf("nvme: Provider.Open(%s): %v", t.cfg.VolumeID, err)
+			return
+		}
 	}
 	// BUG-005 fix (2026-04-22): do NOT close the Backend here.
 	// The Provider owns Backend lifecycle — `DurableProvider`
@@ -194,12 +240,34 @@ func (t *Target) handleConn(conn net.Conn) {
 
 	hcfg := t.cfg.Handler
 	hcfg.Backend = backend
+	hcfg.MetadataOnly = metadataOnly
 	handler := NewIOHandler(hcfg)
 
 	sess := newSession(conn, handler, t, t.cfg.SubsysNQN, t.logger)
 	if err := sess.serve(ctx); err != nil && !errors.Is(err, net.ErrClosed) {
 		t.logger.Printf("nvme: session error (%s): %v", conn.RemoteAddr(), err)
 	}
+}
+
+func (t *Target) tryProbeBackend(ctx context.Context, openErr error) (frontend.Backend, bool, bool) {
+	if t.cfg.ProbeProvider == nil || !errors.Is(openErr, frontend.ErrNotReady) {
+		return nil, false, false
+	}
+	ana := t.cfg.Handler.ANA
+	if ana == nil {
+		return nil, false, false
+	}
+	switch ana.ANAState() {
+	case ANAOptimized:
+		return nil, false, false
+	}
+	backend, err := t.cfg.ProbeProvider.ProbeBackend(ctx, t.cfg.VolumeID)
+	if err != nil {
+		t.logger.Printf("nvme: ProbeBackend(%s): %v", t.cfg.VolumeID, err)
+		return nil, false, false
+	}
+	t.logger.Printf("nvme: Provider.Open(%s): %v; using ANA metadata probe backend", t.cfg.VolumeID, openErr)
+	return backend, true, true
 }
 
 type stdlogAdapter struct{ l *log.Logger }

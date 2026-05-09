@@ -20,6 +20,8 @@
 // frontend client (iSCSI/NVMe). Subprocess test verifies the wiring +
 // steady-state role split; G5-5 m01 hardware exercises the data path.
 
+//go:build subprocess
+
 package main_test
 
 import (

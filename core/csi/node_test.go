@@ -77,6 +77,47 @@ type mockMountUtil struct {
 	calls             []string
 }
 
+type mockNVMeUtil struct {
+	connectErr      error
+	disconnectErr   error
+	getDeviceResult string
+	getDeviceErr    error
+	connected       map[string]bool
+	calls           []string
+}
+
+func newMockNVMeUtil() *mockNVMeUtil {
+	return &mockNVMeUtil{connected: map[string]bool{}, getDeviceResult: "/dev/nvme1n1"}
+}
+
+func (m *mockNVMeUtil) Connect(_ context.Context, addr, nqn string) error {
+	m.calls = append(m.calls, "connect:"+addr+":"+nqn)
+	if m.connectErr != nil {
+		return m.connectErr
+	}
+	m.connected[nqn] = true
+	return nil
+}
+
+func (m *mockNVMeUtil) Disconnect(_ context.Context, nqn string) error {
+	m.calls = append(m.calls, "disconnect:"+nqn)
+	if m.disconnectErr != nil {
+		return m.disconnectErr
+	}
+	delete(m.connected, nqn)
+	return nil
+}
+
+func (m *mockNVMeUtil) GetDeviceByNQN(_ context.Context, nqn string) (string, error) {
+	m.calls = append(m.calls, "getdevice:"+nqn)
+	return m.getDeviceResult, m.getDeviceErr
+}
+
+func (m *mockNVMeUtil) IsConnected(_ context.Context, nqn string) (bool, error) {
+	m.calls = append(m.calls, "isconnected:"+nqn)
+	return m.connected[nqn], nil
+}
+
 func newMockMountUtil() *mockMountUtil {
 	return &mockMountUtil{mounted: map[string]bool{}}
 }
@@ -124,6 +165,16 @@ func newTestNode(mi *mockISCSIUtil, mm *mockMountUtil) *NodeServer {
 	})
 }
 
+func newTestNodeWithNVMe(mi *mockISCSIUtil, mn *mockNVMeUtil, mm *mockMountUtil) *NodeServer {
+	return NewNodeServer(NodeConfig{
+		NodeID:    "node-a",
+		IQNPrefix: "iqn.2026-05.example.v3",
+		ISCSIUtil: mi,
+		NVMeUtil:  mn,
+		MountUtil: mm,
+	})
+}
+
 func testVolumeCapability() *csipb.VolumeCapability {
 	return &csipb.VolumeCapability{
 		AccessType: &csipb.VolumeCapability_Mount{
@@ -162,6 +213,78 @@ func TestNodeStage_UsesPublishContextBeforeVolumeContext(t *testing.T) {
 	info := ns.staged["v1"]
 	if info == nil || info.iqn != "iqn.fresh:v1" {
 		t.Fatalf("staged info=%+v", info)
+	}
+}
+
+func TestNodeStage_NVMeProtocolUsesNVMeTarget(t *testing.T) {
+	mi, mn, mm := newMockISCSIUtil(), newMockNVMeUtil(), newMockMountUtil()
+	ns := newTestNodeWithNVMe(mi, mn, mm)
+	staging := t.TempDir()
+
+	_, err := ns.NodeStageVolume(context.Background(), &csipb.NodeStageVolumeRequest{
+		VolumeId:          "v1",
+		StagingTargetPath: staging,
+		VolumeCapability:  testVolumeCapability(),
+		PublishContext: map[string]string{
+			"protocol": "nvme",
+			"nvmeAddr": "127.0.0.1:4420",
+			"nqn":      "nqn.2026-05.io.seaweedfs:v1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("NodeStageVolume: %v", err)
+	}
+	want := []string{
+		"isconnected:nqn.2026-05.io.seaweedfs:v1",
+		"connect:127.0.0.1:4420:nqn.2026-05.io.seaweedfs:v1",
+		"getdevice:nqn.2026-05.io.seaweedfs:v1",
+	}
+	for i, w := range want {
+		if i >= len(mn.calls) || mn.calls[i] != w {
+			t.Fatalf("nvme calls=%v want prefix=%v", mn.calls, want)
+		}
+	}
+	if len(mi.calls) != 0 {
+		t.Fatalf("nvme path must not call iscsi util, calls=%v", mi.calls)
+	}
+	if got := readTransportFile(staging); got != transportNVMe {
+		t.Fatalf("transport=%q want nvme", got)
+	}
+	info := ns.staged["v1"]
+	if info == nil || info.transport != transportNVMe || info.nqn != "nqn.2026-05.io.seaweedfs:v1" {
+		t.Fatalf("staged info=%+v", info)
+	}
+}
+
+func TestNodeStage_NVMeCleansUpConnectWhenMountFails(t *testing.T) {
+	_, mn, mm := newMockISCSIUtil(), newMockNVMeUtil(), newMockMountUtil()
+	mm.formatAndMountErr = errors.New("mkfs failed")
+	ns := newTestNodeWithNVMe(newMockISCSIUtil(), mn, mm)
+
+	_, err := ns.NodeStageVolume(context.Background(), &csipb.NodeStageVolumeRequest{
+		VolumeId:          "v1",
+		StagingTargetPath: t.TempDir(),
+		VolumeCapability:  testVolumeCapability(),
+		PublishContext: map[string]string{
+			"protocol": "nvme",
+			"nvmeAddr": "127.0.0.1:4420",
+			"nqn":      "nqn.2026-05.io.seaweedfs:v1",
+		},
+	})
+	if err == nil {
+		t.Fatal("expected mount failure")
+	}
+	foundDisconnect := false
+	for _, call := range mn.calls {
+		if call == "disconnect:nqn.2026-05.io.seaweedfs:v1" {
+			foundDisconnect = true
+		}
+	}
+	if !foundDisconnect {
+		t.Fatalf("expected cleanup disconnect, calls=%v", mn.calls)
+	}
+	if ns.staged["v1"] != nil {
+		t.Fatalf("staged entry must not be recorded after mount failure: %+v", ns.staged["v1"])
 	}
 }
 
@@ -512,6 +635,70 @@ func TestNodeUnstage_NotMountedStillLogsOutAndCleansState(t *testing.T) {
 	}
 	if !foundLogout {
 		t.Fatalf("expected logout even when staging path was not mounted, calls=%v", mi.calls)
+	}
+}
+
+func TestNodeUnstage_NVMeDisconnectsAndCleansState(t *testing.T) {
+	mn, mm := newMockNVMeUtil(), newMockMountUtil()
+	ns := newTestNodeWithNVMe(newMockISCSIUtil(), mn, mm)
+	staging := t.TempDir()
+	if err := writeTransportFile(staging, transportNVMe); err != nil {
+		t.Fatal(err)
+	}
+	ns.staged["v1"] = &stagedVolumeInfo{
+		nqn:         "nqn.2026-05.io.seaweedfs:v1",
+		nvmeAddr:    "127.0.0.1:4420",
+		transport:   transportNVMe,
+		stagingPath: staging,
+	}
+
+	_, err := ns.NodeUnstageVolume(context.Background(), &csipb.NodeUnstageVolumeRequest{
+		VolumeId:          "v1",
+		StagingTargetPath: staging,
+	})
+	if err != nil {
+		t.Fatalf("NodeUnstageVolume: %v", err)
+	}
+	foundDisconnect := false
+	for _, call := range mn.calls {
+		if call == "disconnect:nqn.2026-05.io.seaweedfs:v1" {
+			foundDisconnect = true
+		}
+	}
+	if !foundDisconnect {
+		t.Fatalf("expected nvme disconnect, calls=%v", mn.calls)
+	}
+	if ns.staged["v1"] != nil {
+		t.Fatalf("staged entry should be removed after unstage: %+v", ns.staged["v1"])
+	}
+	if got := readTransportFile(staging); got != "" {
+		t.Fatalf("transport file should be removed, got %q", got)
+	}
+}
+
+func TestNodeUnstage_NVMeRestartFallbackUsesTargetFile(t *testing.T) {
+	mn, mm := newMockNVMeUtil(), newMockMountUtil()
+	ns := newTestNodeWithNVMe(newMockISCSIUtil(), mn, mm)
+	staging := t.TempDir()
+	if err := writeTransportFile(staging, transportNVMe); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeTargetFile(staging, "nqn.2026-05.io.seaweedfs:v1"); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := ns.NodeUnstageVolume(context.Background(), &csipb.NodeUnstageVolumeRequest{
+		VolumeId:          "v1",
+		StagingTargetPath: staging,
+	})
+	if err != nil {
+		t.Fatalf("NodeUnstageVolume: %v", err)
+	}
+	if len(mn.calls) != 1 || mn.calls[0] != "disconnect:nqn.2026-05.io.seaweedfs:v1" {
+		t.Fatalf("nvme calls=%v", mn.calls)
+	}
+	if got := readTargetFile(staging); got != "" {
+		t.Fatalf("target file should be removed, got %q", got)
 	}
 }
 
