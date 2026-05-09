@@ -276,6 +276,9 @@ func TestG15b_ImageBuildInputs_ContainExpectedBinariesAndNodeTools(t *testing.T)
 		"iscsi-p8-compat-soak-chain.yaml",
 		"child-run.txt",
 		"result.json",
+		"wall_clock_s",
+		"started_at",
+		"swblock exited 0 but did not write latest run pointer",
 	} {
 		if !strings.Contains(releaseGate, want) {
 			t.Fatalf("testops-run-protocol-release-gate.sh missing %q", want)
@@ -291,6 +294,8 @@ func TestG15b_ImageBuildInputs_ContainExpectedBinariesAndNodeTools(t *testing.T)
 		"iscsi-p8-compat-soak-chain.yaml",
 		"child-run.txt",
 		"result.json",
+		"wall_clock_s",
+		"started_at",
 		"Invoke-NativeRedirect",
 	} {
 		if !strings.Contains(releaseGatePS, want) {

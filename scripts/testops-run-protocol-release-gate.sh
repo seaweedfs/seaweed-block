@@ -9,6 +9,8 @@ REMOTE_PRODUCT_ROOT="${SW_BLOCK_REMOTE_PRODUCT_ROOT:-/tmp/seaweed-block-nvme-p4l
 SSH_KEY="${SW_BLOCK_SSH_KEY:-C:\\work\\dev_server\\testdev_key}"
 SWBLOCK_CMD="${SWBLOCK_CMD:-swblock}"
 SWBLOCK_RUNNER_ROOT="${SWBLOCK_RUNNER_ROOT:-}"
+SUITE_STARTED_EPOCH="$(date -u +%s)"
+SUITE_STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 PRODUCT_COMMIT="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"
 RUNNER_COMMIT="unknown"
 
@@ -29,7 +31,7 @@ fi
 mkdir -p "$ARTIFACT_ROOT" "$RESULTS_ROOT"
 
 log() {
-  printf '[protocol-gate] %s\n' "$*" | tee -a "$ARTIFACT_ROOT/suite.log"
+  printf '[%s] [protocol-gate] %s\n' "$(date -u +%H:%M:%S)" "$*" | tee -a "$ARTIFACT_ROOT/suite.log"
 }
 
 run_swblock() {
@@ -47,17 +49,41 @@ json_escape() {
 write_result() {
   local status="$1"
   local summary="$2"
-  python3 - "$ARTIFACT_ROOT" "$RUN_ID" "$status" "$summary" "$PRODUCT_COMMIT" "$RUNNER_COMMIT" "$REMOTE_PRODUCT_ROOT" <<'PY'
+  local current_phase="${3:-}"
+  local now_epoch
+  now_epoch="$(date -u +%s)"
+  python3 - "$ARTIFACT_ROOT" "$RUN_ID" "$status" "$summary" "$current_phase" "$PRODUCT_COMMIT" "$RUNNER_COMMIT" "$REMOTE_PRODUCT_ROOT" "$SUITE_STARTED_EPOCH" "$SUITE_STARTED_AT" "$now_epoch" <<'PY'
 import json
 import pathlib
 import sys
 from datetime import datetime, timezone
 
 root = pathlib.Path(sys.argv[1])
-run_id, status, summary, product_commit, runner_commit, remote_product_root = sys.argv[2:8]
+run_id, status, summary, current_phase, product_commit, runner_commit, remote_product_root = sys.argv[2:9]
+started_epoch = int(sys.argv[9])
+started_at = sys.argv[10]
+now_epoch = int(sys.argv[11])
+order = [
+    "iscsi-p6-alua-failover",
+    "nvme-p4-multipath-failover",
+    "nvme-p5-csi-protocol",
+    "iscsi-p8-compat-soak",
+]
 steps = []
-for child in root.glob("*/child-run.txt"):
-    step_dir = child.parent
+for step in order:
+    step_dir = root / step
+    child = step_dir / "child-run.txt"
+    if not child.exists():
+        steps.append({
+            "name": step,
+            "status": "running" if step == current_phase else "pending",
+            "run_id": None,
+            "artifact_dir": str(step_dir),
+            "run_dir": None,
+            "phases_done": None,
+            "phases_total": None,
+        })
+        continue
     child_run = child.read_text(encoding="utf-8").strip()
     status_path = step_dir / "runs" / child_run / "status.json"
     child_status = "error"
@@ -77,17 +103,7 @@ for child in root.glob("*/child-run.txt"):
         "phases_done": phases_done,
         "phases_total": phases_total,
     })
-steps.sort(key=lambda s: [
-    "iscsi-p6-alua-failover",
-    "nvme-p4-multipath-failover",
-    "nvme-p5-csi-protocol",
-    "iscsi-p8-compat-soak",
-].index(s["name"]) if s["name"] in {
-    "iscsi-p6-alua-failover",
-    "nvme-p4-multipath-failover",
-    "nvme-p5-csi-protocol",
-    "iscsi-p8-compat-soak",
-} else 999)
+ended_at = None if status == "running" else datetime.now(timezone.utc).isoformat()
 res = {
     "schema_version": "1.0",
     "run_id": run_id,
@@ -98,6 +114,9 @@ res = {
     "remote_product_root": remote_product_root,
     "status": status,
     "summary": summary,
+    "started_at": started_at,
+    "ended_at": ended_at,
+    "wall_clock_s": float(now_epoch - started_epoch),
     "phase_results": steps,
     "artifact_dir": str(root),
     "artifacts": {
@@ -116,11 +135,14 @@ status_doc = {
     "schema_version": 1,
     "run_id": run_id,
     "scenario": "protocol-release-gate-suite",
-    "state": "pass" if status == "pass" else "fail",
-    "current_phase": "",
+    "state": "pass" if status == "pass" else ("running" if status == "running" else "fail"),
+    "current_phase": current_phase,
     "phases_total": 4,
     "phases_done": sum(1 for s in steps if s["status"] in terminal),
     "phases": steps,
+    "started_at": started_at,
+    "ended_at": ended_at,
+    "wall_clock_s": float(now_epoch - started_epoch),
     "product_commit": product_commit,
     "runner_commit": runner_commit,
     "remote_product_root": remote_product_root,
@@ -140,6 +162,7 @@ run_chain() {
   mkdir -p "$step_dir" "$step_results"
 
   log "run step=$step scenario=$scenario"
+  write_result running "running $step" "$step"
   set +e
   run_swblock run \
     --env "product_root=$REMOTE_PRODUCT_ROOT" \
@@ -156,16 +179,21 @@ run_chain() {
   if [[ -f "$step_results/latest" ]]; then
     child_run="$(tr -d '\r\n' < "$step_results/latest")"
     printf '%s\n' "$child_run" >"$step_dir/child-run.txt"
+  elif [[ "$rc" -eq 0 ]]; then
+    rc=1
+    printf 'swblock exited 0 but did not write latest run pointer: %s\n' "$step_results/latest" >>"$step_dir/swblock.stderr.log"
   fi
 
   if [[ "$rc" -ne 0 ]]; then
     log "FAIL step=$step rc=$rc child_run=${child_run:-unknown}"
-    write_result fail "release gate failed at $step"
+    write_result fail "release gate failed at $step" "$step"
     return "$rc"
   fi
   log "PASS step=$step child_run=${child_run:-unknown}"
+  write_result running "completed $step"
 }
 
+write_result running "protocol release gate queued"
 log "run_id=$RUN_ID"
 log "root=$ROOT"
 log "artifact_root=$ARTIFACT_ROOT"

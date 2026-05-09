@@ -18,6 +18,7 @@ if ([string]::IsNullOrWhiteSpace($ArtifactRoot)) {
 
 New-Item -ItemType Directory -Force -Path $ArtifactRoot | Out-Null
 $SuiteLog = Join-Path $ArtifactRoot "suite.log"
+$SuiteStartedAt = (Get-Date).ToUniversalTime()
 $ProductCommit = "unknown"
 $RunnerCommit = "unknown"
 try { $ProductCommit = (& git -C $ProductRepoRoot rev-parse HEAD).Trim() } catch {}
@@ -29,7 +30,8 @@ try {
 
 function Write-SuiteLog {
     param([string]$Message)
-    $line = "[protocol-gate] $Message"
+    $ts = (Get-Date).ToUniversalTime().ToString("HH:mm:ss")
+    $line = "[$ts] [protocol-gate] $Message"
     Write-Host $line
     Add-Content -Path $SuiteLog -Value $line
 }
@@ -94,6 +96,9 @@ function Write-SuiteResult {
         remote_product_root = $RemoteProductRoot
         status = $Status
         summary = $Summary
+        started_at = $SuiteStartedAt.ToString("o")
+        ended_at = $(if ($Status -eq "running") { $null } else { (Get-Date).ToUniversalTime().ToString("o") })
+        wall_clock_s = [math]::Round(((Get-Date).ToUniversalTime() - $SuiteStartedAt).TotalSeconds, 3)
         phase_results = $steps
         artifact_dir = $ArtifactRoot
         artifacts = [ordered]@{
@@ -119,6 +124,9 @@ function Write-SuiteResult {
         phases_total = $order.Count
         phases_done = $phasesDone
         phases = $steps
+        started_at = $SuiteStartedAt.ToString("o")
+        ended_at = $(if ($Status -eq "running") { $null } else { (Get-Date).ToUniversalTime().ToString("o") })
+        wall_clock_s = [math]::Round(((Get-Date).ToUniversalTime() - $SuiteStartedAt).TotalSeconds, 3)
         product_commit = $ProductCommit
         runner_commit = $RunnerCommit
         remote_product_root = $RemoteProductRoot

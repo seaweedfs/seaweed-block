@@ -65,7 +65,8 @@ SW_BLOCK_ARTIFACT_DIR=/c/work/tmp/protocol-release-gate-$(date -u +%Y%m%dT%H%M%S
   bash scripts/testops-run-protocol-release-gate.sh "$PWD"
 ```
 
-The suite writes a top-level `result.json` and preserves every child runner
-bundle under `<suite-artifact>/<step>/runs/<child-run-id>/`. Each child bundle
-still owns its own `status.json`, `result.json`, `scenario.yaml`, and collected
-remote artifacts.
+The suite writes a top-level `result.json` and `status.json` with
+`started_at`, `ended_at`, `wall_clock_s`, child run IDs, per-child PASS/FAIL,
+and artifact pointers. Each child bundle still owns its own `status.json`,
+`result.json`, `scenario.yaml`, and collected remote artifacts under
+`<suite-artifact>/<step>/runs/<child-run-id>/`.
