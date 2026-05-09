@@ -302,6 +302,23 @@ func TestG15b_ImageBuildInputs_ContainExpectedBinariesAndNodeTools(t *testing.T)
 			t.Fatalf("testops-run-protocol-release-gate.ps1 missing %q", want)
 		}
 	}
+
+	releaseGateValidate := g15bReadScript(t, "testops-validate-protocol-release-gate.py")
+	for _, want := range []string{
+		"protocol-release-gate-suite",
+		"EXPECTED_CHILDREN",
+		"iscsi-p6-alua-failover",
+		"nvme-p4-multipath-failover",
+		"nvme-p5-csi-protocol",
+		"iscsi-p8-compat-soak",
+		"wall_clock_s",
+		"--expect-product-commit",
+		"--allow-fail",
+	} {
+		if !strings.Contains(releaseGateValidate, want) {
+			t.Fatalf("testops-validate-protocol-release-gate.py missing %q", want)
+		}
+	}
 }
 
 func TestG15dHarnessConsumesPinnedAlphaImagesEnv(t *testing.T) {

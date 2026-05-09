@@ -70,3 +70,15 @@ The suite writes a top-level `result.json` and `status.json` with
 and artifact pointers. Each child bundle still owns its own `status.json`,
 `result.json`, `scenario.yaml`, and collected remote artifacts under
 `<suite-artifact>/<step>/runs/<child-run-id>/`.
+
+After a run, validate the suite bundle offline before manual artifact review:
+
+```bash
+python3 scripts/testops-validate-protocol-release-gate.py \
+  /path/to/protocol-release-gate-artifact \
+  --expect-product-commit a0175f8
+```
+
+Use `--allow-fail` when validating the schema of an intentionally failed or
+cancelled run; without it the checker requires all four child chains to be
+`pass` with complete phase counts.
