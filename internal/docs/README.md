@@ -12,8 +12,9 @@ Public-facing docs belong in `docs/`.
 - `product-roadmap.md` is the short global product plan.
 - `current-plan.md` is the active execution plan. Development should track this
   file.
-- When a current plan closes, rename it to `*-plan-finished.md` and create a new
-  `current-plan.md`.
+- When a current plan closes, move it under `finished-plans/` with a
+  phase/topic filename such as `phase1_finishedplan_frontend_protocol_readiness.md`,
+  then create a new `current-plan.md`.
 - Long audits and historical plans live under `ref/`. They are references, not
   the day-to-day driver.
 - QA assignments live under `qa-assignments/` and should be linked from
@@ -29,6 +30,8 @@ Public-facing docs belong in `docs/`.
 | `current-plan.md` | Active development plan. Follow this first. |
 | `product-management-plan.md` | Older product goals, priorities, evidence links, and decision rules. |
 | `qa-assignments/` | Concrete QA tasks with commands, pass criteria, and report templates. |
+| `finished-plans/` | Closed phase/topic plans retained for PM history. |
+| `finished-plans/phase1_finishedplan_frontend_protocol_readiness.md` | Historical iSCSI/NVMe protocol-readiness plan closed by the protocol release gate. |
 | `ref/production-readiness-plan.md` | Longer readiness reference and iSCSI P1-P6 detail. |
 | `ref/iscsi-os-initiator-compat-plan.md` | Detailed iSCSI P1 OS-initiator compatibility plan and evidence. |
 | `ref/iscsi-v2-coverage-gap-audit.md` | V2-to-V3 iSCSI coverage gap audit and prioritized test backlog. |
