@@ -73,6 +73,33 @@ and artifact pointers. Each child bundle still owns its own `status.json`,
 
 After a run, validate the suite bundle offline before manual artifact review:
 
+```powershell
+.\scripts\testops-validate-latest-protocol-release-gate.ps1 `
+  -RunnerRoot C:\work\seaweedfs\learn\sw-test-runner-standalone `
+  -ArtifactRoot C:\work\tmp\protocol-release-gate-20260509T000000Z `
+  -ExpectCommit a0175f8
+```
+
+Linux / Git Bash:
+
+```bash
+SWBLOCK_RUNNER_ROOT=/c/work/seaweedfs/learn/sw-test-runner-standalone \
+SW_BLOCK_ARTIFACT_DIR=/c/work/tmp/protocol-release-gate-20260509T000000Z \
+SW_BLOCK_EXPECT_COMMIT=a0175f8 \
+  bash scripts/testops-validate-latest-protocol-release-gate.sh "$PWD"
+```
+
+The wrapper calls the platform validator profile:
+
+```bash
+swblock validate-bundle --profile protocol-release-gate \
+  --expect-commit a0175f8 \
+  /path/to/protocol-release-gate-artifact
+```
+
+The older product-specific Python checker remains available for local
+debugging but is no longer the primary operator path:
+
 ```bash
 python3 scripts/testops-validate-protocol-release-gate.py \
   /path/to/protocol-release-gate-artifact \

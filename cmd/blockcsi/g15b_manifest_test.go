@@ -319,6 +319,34 @@ func TestG15b_ImageBuildInputs_ContainExpectedBinariesAndNodeTools(t *testing.T)
 			t.Fatalf("testops-validate-protocol-release-gate.py missing %q", want)
 		}
 	}
+
+	releaseGateValidatePS := g15bReadScript(t, "testops-validate-latest-protocol-release-gate.ps1")
+	for _, want := range []string{
+		"validate-bundle",
+		"--profile",
+		"protocol-release-gate",
+		"--expect-commit",
+		"Find-LatestProtocolGateArtifact",
+		"Invoke-Native",
+	} {
+		if !strings.Contains(releaseGateValidatePS, want) {
+			t.Fatalf("testops-validate-latest-protocol-release-gate.ps1 missing %q", want)
+		}
+	}
+
+	releaseGateValidateSH := g15bReadScript(t, "testops-validate-latest-protocol-release-gate.sh")
+	for _, want := range []string{
+		"validate-bundle",
+		"--profile",
+		"protocol-release-gate",
+		"--expect-commit",
+		"find_latest_protocol_gate_artifact",
+		"SWBLOCK_RUNNER_ROOT",
+	} {
+		if !strings.Contains(releaseGateValidateSH, want) {
+			t.Fatalf("testops-validate-latest-protocol-release-gate.sh missing %q", want)
+		}
+	}
 }
 
 func TestG15dHarnessConsumesPinnedAlphaImagesEnv(t *testing.T) {
