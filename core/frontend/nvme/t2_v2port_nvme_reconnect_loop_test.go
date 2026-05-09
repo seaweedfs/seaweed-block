@@ -1,3 +1,5 @@
+//go:build integration
+
 // Ownership: QA (L1B-1 inventory item, landed early per QA parallel
 // capacity during Batch 11c sign prep).
 // sw may NOT modify without architect approval via §8B.4 Discovery
@@ -18,7 +20,8 @@
 // T3 perf gate.
 //
 // Test layer: L2 subprocess (real cmd/blockmaster + cmd/blockvolume).
-// Tagged with testing.Short() skip so CI-short runs exclude it.
+// Build tag: integration. Default go test is kept to unit/component scope;
+// runner suites should own this style of expensive process test.
 
 package nvme_test
 

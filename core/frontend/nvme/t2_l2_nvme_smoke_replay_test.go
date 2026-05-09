@@ -16,6 +16,8 @@
 //   - YAML ops: write (seed-derived payload), read (asserts
 //     seed-derived expected bytes)
 
+//go:build integration
+
 package nvme_test
 
 import (
