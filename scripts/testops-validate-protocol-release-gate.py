@@ -57,6 +57,11 @@ def require(condition: bool, message: str, errors: list[str]) -> None:
         errors.append(message)
 
 
+def positive_number(doc: dict[str, Any], key: str) -> bool:
+    value = doc.get(key)
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0
+
+
 def validate(root: pathlib.Path, expect_product_commit: str | None, require_pass: bool) -> list[str]:
     errors: list[str] = []
     result = load_json(root / "result.json")
@@ -78,6 +83,8 @@ def validate(root: pathlib.Path, expect_product_commit: str | None, require_pass
     for key in ("started_at", "ended_at", "wall_clock_s", "artifact_dir"):
         require(key in result, f"result.json missing {key}", errors)
         require(key in status, f"status.json missing {key}", errors)
+    require(positive_number(result, "wall_clock_s"), "result.json wall_clock_s must be > 0", errors)
+    require(positive_number(status, "wall_clock_s"), "status.json wall_clock_s must be > 0", errors)
 
     if require_pass:
         require(result.get("status") == "pass", f"result status is {result.get('status')}, expected pass", errors)
@@ -102,12 +109,16 @@ def validate(root: pathlib.Path, expect_product_commit: str | None, require_pass
 
         run_dir_value = r_phase.get("run_dir")
         require(isinstance(run_dir_value, str) and run_dir_value, f"{child}: missing run_dir", errors)
-        if isinstance(run_dir_value, str) and run_dir_value:
-            run_dir = pathlib.Path(run_dir_value)
-            if not run_dir.is_absolute():
-                run_dir = root / run_dir
-            require((run_dir / "status.json").exists(), f"{child}: missing child status.json at {run_dir}", errors)
-            require((run_dir / "result.json").exists(), f"{child}: missing child result.json at {run_dir}", errors)
+        child_run_id = r_phase.get("run_id")
+        require(isinstance(child_run_id, str) and child_run_id, f"{child}: missing run_id", errors)
+        if isinstance(child_run_id, str) and child_run_id:
+            # Validate the bundle being inspected, not only the absolute run_dir
+            # pointer recorded when the suite was first produced. QA often copies
+            # bundles before mutating them for negative tests; stale absolute
+            # pointers must not make a broken copy look valid.
+            canonical_run_dir = root / child / "runs" / child_run_id
+            require((canonical_run_dir / "status.json").exists(), f"{child}: missing child status.json at {canonical_run_dir}", errors)
+            require((canonical_run_dir / "result.json").exists(), f"{child}: missing child result.json at {canonical_run_dir}", errors)
 
     return errors
 
