@@ -360,10 +360,7 @@ type nvmeReadyLine struct {
 }
 
 func run(f flags) int {
-	var readyCh chan adapter.AssignmentInfo
-	if f.printReadyLine {
-		readyCh = make(chan adapter.AssignmentInfo, 1)
-	}
+	readyCh := make(chan adapter.AssignmentInfo, 16)
 
 	h, err := volume.New(volume.Config{
 		MasterAddr:        f.masterAddr,
@@ -401,24 +398,6 @@ func run(f flags) int {
 			Phase:      "status-listening",
 			StatusAddr: bound,
 		})
-	}
-
-	if readyCh != nil {
-		go func() {
-			select {
-			case info := <-readyCh:
-				_ = json.NewEncoder(os.Stdout).Encode(readyLine{
-					Component:       "blockvolume",
-					Phase:           "assignment-received",
-					VolumeID:        info.VolumeID,
-					ReplicaID:       info.ReplicaID,
-					Epoch:           info.Epoch,
-					EndpointVersion: info.EndpointVersion,
-				})
-			case <-time.After(60 * time.Second):
-				// no assignment arrived — exit caller's concern
-			}
-		}()
 	}
 
 	// T3b: pick Provider per --durable-root flag. When the flag is
@@ -484,6 +463,7 @@ func run(f flags) int {
 		// SCSI command granularity.
 		provider = memback.NewProvider(h.ProjectionView())
 	}
+	startReadyAssignmentLoop(readyCh, f, durableProv, os.Stdout, os.Stderr)
 
 	// Bind the replication stack — ReplicationVolume for outbound peer
 	// fan-out (primary role) + ReplicaListener for incoming WAL traffic
