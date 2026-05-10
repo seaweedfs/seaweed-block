@@ -102,6 +102,10 @@ Rules:
 - If a single-step TestOps validation is enough and the runner binary plus lab
   access are available, developer should run it first and use the feedback
   immediately.
+- Every non-trivial slice gets an adversarial review before it is treated as
+  complete. The reviewer should challenge whether the test proves the claim,
+  whether field-level artifacts exist, whether QA is actually needed, and
+  whether an integration check can be replaced by a component check.
 - Every QA-found regression gets a component test unless the behavior is only
   observable through an OS/kernel/lab surface.
 - Every runner suite must assert fields and artifacts, not only a PASS line.

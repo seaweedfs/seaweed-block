@@ -67,6 +67,7 @@ phases:
         cmd: "cd {{ product_root }} && bash scripts/run-k8s-blockvolume-restart.sh {{ product_root }}"
         env.SW_BLOCK_ALPHA_IMAGES_ENV: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-chain/pin_build/alpha-images.env"
         env.SW_BLOCK_ARTIFACT_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-chain/durable_blockvolume_restart"
+        env.SW_BLOCK_LAUNCHER_STATE_HOSTPATH: "/var/lib/sw-block/testops-{{ run_id }}-csi-rf1-restart"
       - action: grep_log
         node: m02
         path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-chain/durable_blockvolume_restart/run.log"
@@ -86,7 +87,7 @@ phases:
       - action: grep_log
         node: m02
         path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-chain/durable_blockvolume_restart/block-stack.rendered.yaml"
-        pattern: "--launcher-state-hostpath=/var/lib/sw-block"
+        pattern: "--launcher-state-hostpath=/var/lib/sw-block/testops-{{ run_id }}-csi-rf1-restart"
         save_as: launcher_state_hostpath_count
       - action: assert_greater
         actual: "{{ launcher_state_hostpath_count }}"
@@ -112,6 +113,20 @@ phases:
         cmd: "! grep -q 'emptyDir:' /mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-chain/durable_blockvolume_restart/generated-blockvolume.yaml"
       - action: grep_log
         node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-chain/durable_blockvolume_restart/writer.log"
+        pattern: "\\[app-writer\\] wrote and verified /data/demo.bin"
+        save_as: writer_checksum_count
+      - action: assert_greater
+        actual: "{{ writer_checksum_count }}"
+        threshold: "0"
+      - action: exec
+        node: m02
+        cmd: "test -s /mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-chain/durable_blockvolume_restart/blockvolume-pod-ids.before-restart.tsv && test -s /mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-chain/durable_blockvolume_restart/blockvolume-pod-ids.after-restart.tsv && ! cmp -s /mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-chain/durable_blockvolume_restart/blockvolume-pod-ids.before-restart.tsv /mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-chain/durable_blockvolume_restart/blockvolume-pod-ids.after-restart.tsv"
+      - action: exec
+        node: m02
+        cmd: "! grep -q 'iqn.2026-05.io.seaweedfs' /mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-chain/durable_blockvolume_restart/iscsi-sessions.before-blockvolume-restart.txt"
+      - action: grep_log
+        node: m02
         path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-chain/durable_blockvolume_restart/restart-blockvolume-status.log"
         pattern: "successfully rolled out"
         save_as: blockvolume_rollout_count
@@ -126,6 +141,22 @@ phases:
       - action: assert_greater
         actual: "{{ reader_checksum_count }}"
         threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-chain/durable_blockvolume_restart/iscsi-sessions.after-reader.txt"
+        pattern: "iqn.2026-05.io.seaweedfs"
+        save_as: reader_iscsi_session_count
+      - action: assert_greater
+        actual: "{{ reader_iscsi_session_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-chain/durable_blockvolume_restart/lifecycle-volumes.after-blockvolume-restart.json"
+        pattern: "\"protocol\"[[:space:]]*:[[:space:]]*\"iscsi\""
+        save_as: lifecycle_after_restart_protocol_count
+      - action: assert_greater
+        actual: "{{ lifecycle_after_restart_protocol_count }}"
+        threshold: "0"
 
   - name: final_asserts
     actions:
@@ -135,6 +166,9 @@ phases:
       - action: assert_no_processes
         node: m02
         pattern: "[/]blockmaster --|[/]blockvolume --|^blockmaster |^blockvolume "
+      - action: exec
+        node: m02
+        cmd: "test ! -e /var/lib/sw-block/testops-{{ run_id }}-csi-rf1-restart"
 
   - name: collect_and_cleanup
     always: true

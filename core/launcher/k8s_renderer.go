@@ -3,11 +3,14 @@ package launcher
 import (
 	"bytes"
 	"fmt"
+	"path"
 	"strings"
 
 	"github.com/seaweedfs/seaweed-block/core/lifecycle"
 	"gopkg.in/yaml.v3"
 )
+
+const stateMountPath = "/var/lib/sw-block"
 
 type K8sRenderConfig struct {
 	Namespace           string
@@ -39,7 +42,10 @@ func RenderBlockVolumeDeployments(plan lifecycle.BlockVolumeWorkloadPlan, cfg K8
 		cfg.Image = "sw-block:local"
 	}
 	if cfg.DurableRootBase == "" {
-		cfg.DurableRootBase = "/var/lib/sw-block"
+		cfg.DurableRootBase = stateMountPath
+	}
+	if cfg.StateHostPathBase != "" && strings.TrimRight(cfg.DurableRootBase, "/") != stateMountPath {
+		return nil, fmt.Errorf("launcher: state hostPath requires durable root base %q, got %q", stateMountPath, cfg.DurableRootBase)
 	}
 	if cfg.RecoveryMode == "" {
 		cfg.RecoveryMode = "dual-lane"
@@ -92,7 +98,7 @@ func RenderBlockVolumeDeployments(plan lifecycle.BlockVolumeWorkloadPlan, cfg K8
 							Command:      []string{"/usr/local/bin/blockvolume"},
 							Args:         blockVolumeArgs(plan, replica, cfg),
 							Env:          blockVolumeEnv(cfg),
-							VolumeMounts: []volumeMount{{Name: "state", MountPath: "/var/lib/sw-block"}},
+							VolumeMounts: []volumeMount{{Name: "state", MountPath: stateMountPath}},
 						}},
 						Volumes: []volume{stateVolume(cfg)},
 					},
@@ -176,14 +182,14 @@ func blockVolumeInitContainers(plan lifecycle.BlockVolumeWorkloadPlan, replica l
 		Args:    []string{fmt.Sprintf("mkdir -p %q && chown -R 65532:65532 %q", root, root)},
 		VolumeMounts: []volumeMount{{
 			Name:      "state",
-			MountPath: "/var/lib/sw-block",
+			MountPath: stateMountPath,
 		}},
 		SecurityContext: &containerSecurityContext{RunAsUser: int64Ptr(0)},
 	}}
 }
 
 func durableRoot(plan lifecycle.BlockVolumeWorkloadPlan, replica lifecycle.BlockVolumeReplicaWorkload, cfg K8sRenderConfig) string {
-	return strings.TrimRight(cfg.DurableRootBase, "/") + "/" + plan.VolumeID + "/" + replica.ReplicaID
+	return path.Join(cfg.DurableRootBase, plan.VolumeID, replica.ReplicaID)
 }
 
 func blockVolumeEnv(cfg K8sRenderConfig) []envVar {

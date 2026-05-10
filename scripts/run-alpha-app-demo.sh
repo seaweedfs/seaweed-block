@@ -97,6 +97,45 @@ collect_post_delete_state() {
   fi
 }
 
+capture_iscsi_sessions_to() {
+  local path="$1"
+  if command -v sudo >/dev/null 2>&1; then
+    sudo iscsiadm -m session >"$path" 2>&1 || true
+  elif command -v iscsiadm >/dev/null 2>&1; then
+    iscsiadm -m session >"$path" 2>&1 || true
+  else
+    echo "iscsiadm unavailable" >"$path"
+  fi
+}
+
+wait_no_swblock_iscsi_sessions() {
+  local path="$1"
+  local timeout_s="$2"
+  for _ in $(seq 1 "$timeout_s"); do
+    capture_iscsi_sessions_to "$path"
+    if ! grep -q 'iqn.2026-05.io.seaweedfs' "$path" 2>/dev/null; then
+      return
+    fi
+    sleep 1
+  done
+  capture_iscsi_sessions_to "$path"
+  if grep -q 'iqn.2026-05.io.seaweedfs' "$path" 2>/dev/null; then
+    echo "sw-block iSCSI session still active before blockvolume restart" >&2
+    cat "$path" >&2 || true
+    exit 1
+  fi
+}
+
+capture_blockvolume_pod_ids() {
+  local path="$1"
+  kubectl -n "$BLOCKVOLUME_NAMESPACE" get pods -l sw-block.seaweedfs.com/volume -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.metadata.uid}{"\t"}{.status.startTime}{"\n"}{end}' >"$path" 2>&1 || true
+}
+
+blockvolume_pod_uids() {
+  local path="$1"
+  awk 'NF >= 2 { print $2 }' "$path" | sort
+}
+
 cleanup() {
   (
   set +e
@@ -111,6 +150,17 @@ cleanup() {
   kubectl delete -f "$ROOT/deploy/k8s/alpha/csi-driver.yaml" --ignore-not-found=true >>"$ARTIFACT_DIR/cleanup.log" 2>&1
   kubectl delete -f "$ROOT/deploy/k8s/alpha/rbac.yaml" --ignore-not-found=true >>"$ARTIFACT_DIR/cleanup.log" 2>&1
   kubectl delete -f "$STACK_RENDERED" --ignore-not-found=true >>"$ARTIFACT_DIR/cleanup.log" 2>&1
+  if [[ "$RESTART_BLOCKVOLUME_BEFORE_READER" == "1" || "$RESTART_BLOCKVOLUME_BEFORE_READER" == "true" ]]; then
+    case "$LAUNCHER_STATE_HOSTPATH" in
+      /var/lib/sw-block/testops-*)
+        if command -v sudo >/dev/null 2>&1; then
+          sudo rm -rf -- "$LAUNCHER_STATE_HOSTPATH" >>"$ARTIFACT_DIR/cleanup.log" 2>&1 || true
+        else
+          rm -rf -- "$LAUNCHER_STATE_HOSTPATH" >>"$ARTIFACT_DIR/cleanup.log" 2>&1 || true
+        fi
+        ;;
+    esac
+  fi
   )
 }
 
@@ -259,17 +309,34 @@ restart_blockvolume_deployment() {
   fi
   echo "$BLOCKVOLUME_DEPLOY" >"$ARTIFACT_DIR/blockvolume-deploy.before-restart.txt"
   kubectl -n "$BLOCKVOLUME_NAMESPACE" get "$BLOCKVOLUME_DEPLOY" -o yaml >"$ARTIFACT_DIR/blockvolume-deploy.before-restart.yaml"
-  kubectl -n "$BLOCKVOLUME_NAMESPACE" get pods -l app=sw-blockvolume -o wide >"$ARTIFACT_DIR/blockvolume-pods.before-restart.txt" 2>&1 || true
+  kubectl -n "$BLOCKVOLUME_NAMESPACE" get pods -l sw-block.seaweedfs.com/volume -o wide >"$ARTIFACT_DIR/blockvolume-pods.before-restart.txt" 2>&1 || true
+  capture_blockvolume_pod_ids "$ARTIFACT_DIR/blockvolume-pod-ids.before-restart.tsv"
+  if [[ -z "$(blockvolume_pod_uids "$ARTIFACT_DIR/blockvolume-pod-ids.before-restart.tsv")" ]]; then
+    echo "no blockvolume pod UID captured before restart" >&2
+    exit 1
+  fi
   kubectl -n "$BLOCKVOLUME_NAMESPACE" rollout restart "$BLOCKVOLUME_DEPLOY" | tee "$ARTIFACT_DIR/restart-blockvolume.log"
   kubectl -n "$BLOCKVOLUME_NAMESPACE" rollout status "$BLOCKVOLUME_DEPLOY" --timeout=180s | tee "$ARTIFACT_DIR/restart-blockvolume-status.log"
-  kubectl -n "$BLOCKVOLUME_NAMESPACE" get pods -l app=sw-blockvolume -o wide >"$ARTIFACT_DIR/blockvolume-pods.after-restart.txt" 2>&1 || true
+  kubectl -n "$BLOCKVOLUME_NAMESPACE" get pods -l sw-block.seaweedfs.com/volume -o wide >"$ARTIFACT_DIR/blockvolume-pods.after-restart.txt" 2>&1 || true
+  capture_blockvolume_pod_ids "$ARTIFACT_DIR/blockvolume-pod-ids.after-restart.tsv"
+  if [[ -z "$(blockvolume_pod_uids "$ARTIFACT_DIR/blockvolume-pod-ids.after-restart.tsv")" ]]; then
+    echo "no blockvolume pod UID captured after restart" >&2
+    exit 1
+  fi
+  if [[ "$(blockvolume_pod_uids "$ARTIFACT_DIR/blockvolume-pod-ids.before-restart.tsv")" == "$(blockvolume_pod_uids "$ARTIFACT_DIR/blockvolume-pod-ids.after-restart.tsv")" ]]; then
+    echo "blockvolume pod UID did not change across rollout restart" >&2
+    exit 1
+  fi
   kubectl -n kube-system exec deploy/sw-blockmaster -c blockmaster -- sh -c 'cat /var/lib/sw-block/lifecycle/volumes/*.json' >"$ARTIFACT_DIR/lifecycle-volumes.after-blockvolume-restart.json" 2>"$ARTIFACT_DIR/lifecycle-volumes.after-blockvolume-restart.err" || true
+  kubectl -n "$BLOCKVOLUME_NAMESPACE" logs -l sw-block.seaweedfs.com/volume -c blockvolume --tail=-1 >"$ARTIFACT_DIR/blockvolume-generated.after-restart.log" 2>&1 || true
 }
 
 log "delete writer pod but keep PVC"
 kubectl -n "$NAMESPACE" delete pod sw-block-demo-writer --wait=true --timeout=120s | tee "$ARTIFACT_DIR/delete-writer.log"
 
 if [[ "$RESTART_BLOCKVOLUME_BEFORE_READER" == "1" || "$RESTART_BLOCKVOLUME_BEFORE_READER" == "true" ]]; then
+  log "wait for writer unstage before blockvolume restart"
+  wait_no_swblock_iscsi_sessions "$ARTIFACT_DIR/iscsi-sessions.before-blockvolume-restart.txt" 120
   restart_blockvolume_deployment
 fi
 
@@ -277,6 +344,8 @@ log "start reader pod on the same PVC"
 kubectl apply -f "$ROOT/deploy/k8s/alpha/demo-app-reader-pod.yaml" | tee "$ARTIFACT_DIR/apply-reader.log"
 wait_pod_succeeded sw-block-demo-reader 240
 kubectl -n "$NAMESPACE" logs sw-block-demo-reader | tee "$ARTIFACT_DIR/reader.log"
+capture_iscsi_sessions_to "$ARTIFACT_DIR/iscsi-sessions.after-reader.txt"
+kubectl -n kube-system logs -l app=sw-block-csi-node -c block-csi --tail=-1 >"$ARTIFACT_DIR/blockcsi-node.log" 2>&1 || true
 
 log "reader verified data written by previous app pod"
 

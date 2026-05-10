@@ -64,7 +64,7 @@ func TestG15d_K8sRenderer_CanUseHostPathStateVolume(t *testing.T) {
 	manifests, err := RenderBlockVolumeDeployments(sampleWorkloadPlan(), K8sRenderConfig{
 		MasterAddr:        "m:9333",
 		DurableRootBase:   "/var/lib/sw-block",
-		StateHostPathBase: "/var/lib/sw-block",
+		StateHostPathBase: "/var/lib/sw-block/test-run",
 	})
 	if err != nil {
 		t.Fatalf("RenderBlockVolumeDeployments: %v", err)
@@ -72,7 +72,7 @@ func TestG15d_K8sRenderer_CanUseHostPathStateVolume(t *testing.T) {
 	raw := string(manifests[0].YAML)
 	for _, want := range []string{
 		"hostPath:",
-		"path: /var/lib/sw-block",
+		"path: /var/lib/sw-block/test-run",
 		"type: DirectoryOrCreate",
 		"initContainers:",
 		"name: state-permissions",
@@ -87,6 +87,20 @@ func TestG15d_K8sRenderer_CanUseHostPathStateVolume(t *testing.T) {
 	}
 	if strings.Contains(raw, "emptyDir:") {
 		t.Fatalf("hostPath state volume must not render emptyDir:\n%s", raw)
+	}
+}
+
+func TestG15d_K8sRenderer_RejectsHostPathWithDifferentContainerDurableRoot(t *testing.T) {
+	_, err := RenderBlockVolumeDeployments(sampleWorkloadPlan(), K8sRenderConfig{
+		MasterAddr:        "m:9333",
+		DurableRootBase:   "/tmp/sw-block",
+		StateHostPathBase: "/var/lib/sw-block/test-run",
+	})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "state hostPath requires durable root base") {
+		t.Fatalf("error=%v", err)
 	}
 }
 
