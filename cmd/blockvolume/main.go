@@ -428,6 +428,9 @@ func run(f flags) int {
 		}
 		durableProv = dp
 		provider = dp
+		if status != nil {
+			status.SetDurableStatusSource(dp)
+		}
 
 		// Open storage role-agnostically via EnsureStorage so replica
 		// roles (assigned to SUPPORTING, never reach Healthy via

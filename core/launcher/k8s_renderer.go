@@ -153,6 +153,7 @@ func blockVolumeArgs(plan lifecycle.BlockVolumeWorkloadPlan, replica lifecycle.B
 		fmt.Sprintf("--durable-blocks=%d", plan.SizeBytes/4096),
 		"--durable-blocksize=4096",
 		"--recovery-mode=" + cfg.RecoveryMode,
+		fmt.Sprintf("--status-addr=127.0.0.1:%d", blockVolumeStatusPort(plan, replica)),
 	}
 	switch plan.Protocol {
 	case "nvme":
@@ -168,6 +169,16 @@ func blockVolumeArgs(plan lifecycle.BlockVolumeWorkloadPlan, replica lifecycle.B
 		)
 	}
 	return args
+}
+
+func blockVolumeStatusPort(plan lifecycle.BlockVolumeWorkloadPlan, replica lifecycle.BlockVolumeReplicaWorkload) int {
+	if plan.Protocol == "nvme" && replica.NVMeListenPort > 0 {
+		return replica.NVMeListenPort + 20000
+	}
+	if replica.ISCSIListenPort > 0 {
+		return replica.ISCSIListenPort + 20000
+	}
+	return 19080
 }
 
 func blockVolumeInitContainers(plan lifecycle.BlockVolumeWorkloadPlan, replica lifecycle.BlockVolumeReplicaWorkload, cfg K8sRenderConfig) []container {

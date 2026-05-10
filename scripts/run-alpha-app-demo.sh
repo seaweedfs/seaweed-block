@@ -149,6 +149,78 @@ wait_blockvolume_log_pattern() {
   exit 1
 }
 
+generated_blockvolume_arg() {
+  local name="$1"
+  sed -n "s/.*--${name}=\\([^\"[:space:]]*\\).*/\\1/p" "$ARTIFACT_DIR/generated-blockvolume.yaml" | head -n 1
+}
+
+wait_blockvolume_durable_status() {
+  local volume_id="$1"
+  local status_addr="$2"
+  local out="$3"
+  local timeout_s="$4"
+  local tmp="${out}.tmp"
+  if [[ -z "$volume_id" || -z "$status_addr" ]]; then
+    echo "missing blockvolume durable status input: volume_id=${volume_id:-<empty>} status_addr=${status_addr:-<empty>}" >&2
+    exit 1
+  fi
+  for _ in $(seq 1 "$timeout_s"); do
+    if python3 - "$volume_id" "http://${status_addr}/status/durable?volume=${volume_id}" "$tmp" <<'PY'
+import json
+import sys
+import urllib.request
+
+volume_id, url, out = sys.argv[1:4]
+try:
+    with urllib.request.urlopen(url, timeout=2) as resp:
+        raw = resp.read()
+except Exception as exc:
+    print(f"status query failed: {exc}", file=sys.stderr)
+    sys.exit(1)
+
+with open(out, "wb") as f:
+    f.write(raw)
+body = json.loads(raw.decode("utf-8"))
+if body.get("VolumeID") != volume_id:
+    print(f"status volume mismatch: {body.get('VolumeID')} != {volume_id}", file=sys.stderr)
+    sys.exit(2)
+for vol in body.get("Volumes") or []:
+    if (
+        vol.get("VolumeID") == volume_id
+        and vol.get("Latched") is True
+        and vol.get("Operational") is True
+        and int(vol.get("Epoch") or 0) >= 1
+        and int(vol.get("EndpointVersion") or 0) >= 1
+    ):
+        sys.exit(0)
+print(f"durable status not ready: {body}", file=sys.stderr)
+sys.exit(3)
+PY
+    then
+      mv "$tmp" "$out"
+      return 0
+    fi
+    sleep 1
+  done
+  python3 - "http://${status_addr}/status/durable?volume=${volume_id}" "$tmp" <<'PY' || true
+import sys
+import urllib.request
+
+url, out = sys.argv[1:3]
+try:
+    with urllib.request.urlopen(url, timeout=2) as resp:
+        raw = resp.read()
+    with open(out, "wb") as f:
+        f.write(raw)
+    print(raw.decode("utf-8", errors="replace"), file=sys.stderr)
+except Exception as exc:
+    print(f"final status query failed: {exc}", file=sys.stderr)
+PY
+  [[ -s "$tmp" ]] && mv "$tmp" "$out"
+  echo "timed out waiting for blockvolume durable status at ${status_addr}" >&2
+  exit 1
+}
+
 blockvolume_pod_uids() {
   local path="$1"
   awk 'NF >= 2 { print $2 }' "$path" | sort
@@ -347,7 +419,11 @@ restart_blockvolume_deployment() {
     exit 1
   fi
   kubectl -n kube-system exec deploy/sw-blockmaster -c blockmaster -- sh -c 'cat /var/lib/sw-block/lifecycle/volumes/*.json' >"$ARTIFACT_DIR/lifecycle-volumes.after-blockvolume-restart.json" 2>"$ARTIFACT_DIR/lifecycle-volumes.after-blockvolume-restart.err" || true
-  wait_blockvolume_log_pattern "$BLOCKVOLUME_DEPLOY" "durable primary lineage ensured" "$ARTIFACT_DIR/blockvolume-generated.after-restart.log" 120
+  BLOCKVOLUME_VOLUME_ID="$(generated_blockvolume_arg "volume-id")"
+  BLOCKVOLUME_STATUS_ADDR="$(generated_blockvolume_arg "status-addr")"
+  echo "$BLOCKVOLUME_STATUS_ADDR" >"$ARTIFACT_DIR/blockvolume-status-addr.txt"
+  wait_blockvolume_durable_status "$BLOCKVOLUME_VOLUME_ID" "$BLOCKVOLUME_STATUS_ADDR" "$ARTIFACT_DIR/status-durable-after-blockvolume-restart.json" 120
+  wait_blockvolume_log_pattern "$BLOCKVOLUME_DEPLOY" "\"phase\":\"iscsi-listening\"" "$ARTIFACT_DIR/blockvolume-generated.after-restart.log" 120
 }
 
 log "delete writer pod but keep PVC"

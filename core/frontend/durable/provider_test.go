@@ -273,3 +273,49 @@ func TestDurableProvider_EnsureStorage_ConcurrentSameVolumeReturnsSingleHandle(t
 		})
 	}
 }
+
+func TestDurableProvider_DurableStatuses_ReportLineageAndOperationalState(t *testing.T) {
+	for _, impl := range implMatrix() {
+		impl := impl
+		t.Run(string(impl), func(t *testing.T) {
+			p, _, root := newProvider(t, impl)
+			if _, err := p.Open(context.Background(), "v1"); err != nil {
+				t.Fatalf("Open: %v", err)
+			}
+
+			before := p.DurableStatuses()
+			if len(before) != 1 {
+				t.Fatalf("status count before recover=%d want 1: %+v", len(before), before)
+			}
+			if before[0].VolumeID != "v1" || before[0].ReplicaID != "r1" || before[0].Epoch != 1 || before[0].EndpointVersion != 1 {
+				t.Fatalf("unexpected lineage before recover: %+v", before[0])
+			}
+			if !before[0].Latched {
+				t.Fatalf("status should report latched lineage after Open: %+v", before[0])
+			}
+			if before[0].Operational {
+				t.Fatalf("status should not be operational before RecoverVolume: %+v", before[0])
+			}
+			if before[0].Impl != string(impl) {
+				t.Fatalf("impl=%q want %q", before[0].Impl, impl)
+			}
+			if before[0].Path != filepath.Join(root, "v1.bin") {
+				t.Fatalf("path=%q want %q", before[0].Path, filepath.Join(root, "v1.bin"))
+			}
+
+			if _, err := p.RecoverVolume(context.Background(), "v1"); err != nil {
+				t.Fatalf("RecoverVolume: %v", err)
+			}
+			after := p.DurableStatuses()
+			if len(after) != 1 {
+				t.Fatalf("status count after recover=%d want 1: %+v", len(after), after)
+			}
+			if !after[0].Operational || !after[0].Latched {
+				t.Fatalf("status should report recovered durable lineage: %+v", after[0])
+			}
+			if after[0].Evidence == "" {
+				t.Fatalf("status should include recovery evidence: %+v", after[0])
+			}
+		})
+	}
+}

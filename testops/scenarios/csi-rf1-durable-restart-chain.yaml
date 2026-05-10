@@ -108,6 +108,14 @@ phases:
       - action: assert_greater
         actual: "{{ generated_hostpath_type_count }}"
         threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-chain/durable_blockvolume_restart/generated-blockvolume.yaml"
+        pattern: "--status-addr=127.0.0.1:"
+        save_as: generated_status_addr_count
+      - action: assert_greater
+        actual: "{{ generated_status_addr_count }}"
+        threshold: "0"
       - action: exec
         node: m02
         cmd: "! grep -q 'emptyDir:' /mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-chain/durable_blockvolume_restart/generated-blockvolume.yaml"
@@ -151,11 +159,35 @@ phases:
         threshold: "0"
       - action: grep_log
         node: m02
-        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-chain/durable_blockvolume_restart/blockvolume-generated.after-restart.log"
-        pattern: "durable primary lineage ensured"
-        save_as: blockvolume_recovered_primary_count
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-chain/durable_blockvolume_restart/status-durable-after-blockvolume-restart.json"
+        pattern: "\"ReplicaID\"[[:space:]]*:[[:space:]]*\"r1\""
+        save_as: durable_status_replica_count
       - action: assert_greater
-        actual: "{{ blockvolume_recovered_primary_count }}"
+        actual: "{{ durable_status_replica_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-chain/durable_blockvolume_restart/status-durable-after-blockvolume-restart.json"
+        pattern: "\"Epoch\"[[:space:]]*:[[:space:]]*1"
+        save_as: durable_status_epoch_count
+      - action: assert_greater
+        actual: "{{ durable_status_epoch_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-chain/durable_blockvolume_restart/status-durable-after-blockvolume-restart.json"
+        pattern: "\"Latched\"[[:space:]]*:[[:space:]]*true"
+        save_as: durable_status_latched_count
+      - action: assert_greater
+        actual: "{{ durable_status_latched_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-chain/durable_blockvolume_restart/status-durable-after-blockvolume-restart.json"
+        pattern: "\"Operational\"[[:space:]]*:[[:space:]]*true"
+        save_as: durable_status_operational_count
+      - action: assert_greater
+        actual: "{{ durable_status_operational_count }}"
         threshold: "0"
       - action: grep_log
         node: m02

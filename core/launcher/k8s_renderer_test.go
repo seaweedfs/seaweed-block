@@ -37,6 +37,7 @@ func TestG15d_K8sRenderer_RendersBlockVolumeDeploymentArgs(t *testing.T) {
 		"--replica-id=r1",
 		"--durable-root=/var/lib/sw-block/pvc-a/r1",
 		"--recovery-mode=dual-lane",
+		"--status-addr=127.0.0.1:23260",
 		"sw-block.seaweedfs.com/volume: pvc-a",
 		"--iscsi-listen=127.0.0.1:3260",
 		"--iscsi-iqn=iqn.test:pvc-a",
@@ -116,6 +117,7 @@ func TestG15d_K8sRenderer_RendersNVMeBlockVolumeArgs(t *testing.T) {
 		"--nvme-listen=127.0.0.1:4420",
 		"--nvme-subsysnqn=nqn.test:pvc-a",
 		"--nvme-ns=1",
+		"--status-addr=127.0.0.1:24420",
 	} {
 		if !strings.Contains(raw, want) {
 			t.Fatalf("manifest missing %q:\n%s", want, raw)

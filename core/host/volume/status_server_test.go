@@ -13,6 +13,7 @@ import (
 
 	"github.com/seaweedfs/seaweed-block/core/adapter"
 	"github.com/seaweedfs/seaweed-block/core/engine"
+	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
 	"github.com/seaweedfs/seaweed-block/core/replication"
 	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
 )
@@ -624,5 +625,74 @@ func TestStatusServer_PeerStatusEndpoint_EnabledAfterStart_ReturnsPeerStates(t *
 	}
 	if len(body.Peers) != 1 || body.Peers[0].ReplicaID != "r1" || body.Peers[0].State != "healthy" || body.Peers[0].Epoch != 2 {
 		t.Fatalf("unexpected peer body: %+v", body.Peers)
+	}
+}
+
+type stubDurableStatusSource struct {
+	vols []durable.VolumeStatus
+}
+
+func (s stubDurableStatusSource) DurableStatuses() []durable.VolumeStatus {
+	return append([]durable.VolumeStatus(nil), s.vols...)
+}
+
+func TestStatusServer_DurableStatusEndpoint_Disabled_Returns404(t *testing.T) {
+	s := NewStatusServer(NewAdapterProjectionView(stubProjector{}, "v1", "r1", nil))
+	addr, err := s.Start("127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer func() { _ = s.Close(context.Background()) }()
+	resp, err := http.Get("http://" + addr + "/status/durable?volume=v1")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 404 {
+		t.Fatalf("disabled durable endpoint: got %d want 404", resp.StatusCode)
+	}
+}
+
+func TestStatusServer_DurableStatusEndpoint_EnabledAfterStart_ReturnsLineage(t *testing.T) {
+	s := NewStatusServer(NewAdapterProjectionView(stubProjector{}, "v1", "r1", nil))
+	addr, err := s.Start("127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer func() { _ = s.Close(context.Background()) }()
+	s.SetDurableStatusSource(stubDurableStatusSource{vols: []durable.VolumeStatus{{
+		VolumeID:        "v1",
+		Path:            "/tmp/v1.bin",
+		Impl:            "smartwal",
+		ReplicaID:       "r1",
+		Epoch:           1,
+		EndpointVersion: 1,
+		Latched:         true,
+		Operational:     true,
+		Evidence:        "recovered LSN=0",
+	}}})
+
+	resp, err := http.Get("http://" + addr + "/status/durable?volume=v1")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("enabled durable: got %d want 200", resp.StatusCode)
+	}
+	var body struct {
+		VolumeID    string
+		ReplicaID   string
+		VolumeCount int
+		Volumes     []durable.VolumeStatus
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.VolumeID != "v1" || body.ReplicaID != "r1" || body.VolumeCount != 1 {
+		t.Fatalf("unexpected durable body header: %+v", body)
+	}
+	if len(body.Volumes) != 1 || !body.Volumes[0].Latched || !body.Volumes[0].Operational || body.Volumes[0].Epoch != 1 {
+		t.Fatalf("unexpected durable volume body: %+v", body.Volumes)
 	}
 }

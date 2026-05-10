@@ -11,6 +11,7 @@ import (
 
 	"github.com/seaweedfs/seaweed-block/core/engine"
 	"github.com/seaweedfs/seaweed-block/core/frontend"
+	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
 	"github.com/seaweedfs/seaweed-block/core/replication"
 )
 
@@ -49,10 +50,15 @@ type StatusServer struct {
 	addr            string
 	recoveryEnabled bool // G5-5: gates /status/recovery; off by default
 	peerSource      peerStatusSource
+	durableSource   durableStatusSource
 }
 
 type peerStatusSource interface {
 	PeerStatuses() []replication.ReplicaPeerStatus
+}
+
+type durableStatusSource interface {
+	DurableStatuses() []durable.VolumeStatus
 }
 
 const (
@@ -114,6 +120,14 @@ func (s *StatusServer) SetPeerStatusSource(src peerStatusSource) {
 	s.peerSource = src
 }
 
+// SetDurableStatusSource enables /status/durable by wiring the durable
+// provider's read-only status surface. It may be called before or after Start.
+func (s *StatusServer) SetDurableStatusSource(src durableStatusSource) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.durableSource = src
+}
+
 // Start binds on addr and spawns the HTTP serve goroutine.
 // addr MUST be a loopback host (empty-host is rejected; any
 // non-loopback IP returns an error). Returns the bound addr
@@ -138,6 +152,7 @@ func (s *StatusServer) Start(addr string) (string, error) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/status", s.handleStatus)
 	mux.HandleFunc("/status/peers", s.handleStatusPeers)
+	mux.HandleFunc("/status/durable", s.handleStatusDurable)
 	if s.recoveryEnabled {
 		mux.HandleFunc("/status/recovery", s.handleStatusRecovery)
 	}
@@ -287,6 +302,53 @@ func (s *StatusServer) handleStatusPeers(w http.ResponseWriter, r *http.Request)
 		ReplicaID: fp.ReplicaID,
 		PeerCount: len(peers),
 		Peers:     peers,
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(body)
+}
+
+func (s *StatusServer) handleStatusDurable(w http.ResponseWriter, r *http.Request) {
+	if !isLoopbackRemote(r.RemoteAddr) {
+		http.Error(w, "status endpoint restricted to loopback", http.StatusForbidden)
+		return
+	}
+	vol := r.URL.Query().Get("volume")
+	if vol == "" {
+		http.Error(w, "missing volume query param", http.StatusBadRequest)
+		return
+	}
+	fp := s.view.Projection()
+	if fp.VolumeID != vol {
+		http.Error(w, fmt.Sprintf("volume %q not served by this host (serves %q)", vol, fp.VolumeID), http.StatusNotFound)
+		return
+	}
+	s.mu.Lock()
+	src := s.durableSource
+	s.mu.Unlock()
+	if src == nil {
+		http.NotFound(w, r)
+		return
+	}
+	var vols []durable.VolumeStatus
+	for _, st := range src.DurableStatuses() {
+		if st.VolumeID == vol {
+			vols = append(vols, st)
+		}
+	}
+	if len(vols) == 0 {
+		http.NotFound(w, r)
+		return
+	}
+	body := struct {
+		VolumeID    string
+		ReplicaID   string
+		VolumeCount int
+		Volumes     []durable.VolumeStatus
+	}{
+		VolumeID:    fp.VolumeID,
+		ReplicaID:   fp.ReplicaID,
+		VolumeCount: len(vols),
+		Volumes:     vols,
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(body)
