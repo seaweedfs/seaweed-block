@@ -13,6 +13,18 @@ onto Kubernetes storage. This closes the gap where the workload had a
 Any scenario that claims data survives `blockvolume` restart must use a durable
 state volume and must capture the rendered manifest proving it.
 
+Durable restart is not only a local storage check. For Kubernetes product
+behavior, the gate must include:
+
+```text
+blockvolume restart
+-> local durable recovery
+-> blockmaster re-observation
+-> refreshed frontend target facts
+-> CSI rediscovery / reattach
+-> checksum verification
+```
+
 ## Container Layout
 
 Inside the `blockvolume` container:
@@ -97,10 +109,51 @@ A durable restart/reattach QA bundle must include:
 - generated `blockvolume` manifest,
 - proof the state volume is not `emptyDir`,
 - `--durable-root` argument,
+- blockmaster status before and after restart,
+- proof the restarted replica re-registered frontend target facts,
+- CSI ControllerPublish / NodeStage evidence after restart or reattach,
 - pre-restart checksum,
 - post-restart checksum,
 - blockvolume version,
 - cleanup state.
+
+## Replica-Factor Scope
+
+### RF=1 Reliable Restart
+
+RF=1 proves:
+
+```text
+same replica + same node + same durable root + master re-observation
+=> CSI can reattach and bytes survive
+```
+
+Master behavior:
+
+- observe heartbeat loss,
+- mark frontend unavailable,
+- keep volume intent,
+- observe the same replica after restart,
+- record fresh status / endpoint version / frontend facts,
+- allow CSI to rediscover the target.
+
+Master does not promote another replica because none exists.
+
+### RF=2 / RF=3 Restart And Reintegration
+
+RF=2/3 is a different gate. It must prove:
+
+```text
+primary loss
+-> master promotion
+-> old primary fenced on return
+-> returned replica reports recovered frontier
+-> catch-up completes
+-> ready / ACK / promotion eligibility restored
+```
+
+The old primary must not serve writes just because its local durable root
+recovered. It must first be classified and caught up.
 
 ## Non-Claims
 

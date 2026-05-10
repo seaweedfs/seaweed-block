@@ -69,9 +69,12 @@ Required child gates:
 2. `csi-lifecycle-component-gate`
    - adversarial CSI controller/node component tests.
 3. `durable-restart-reattach-chain`
-   - dynamic PVC data survives `blockvolume` restart / reattach.
+   - RF=1 dynamic PVC data survives `blockvolume` restart / reattach.
+   - master re-observes the restarted replica and refreshes frontend target
+     facts so CSI can rediscover/reattach.
 4. `returned-replica-reintegration-chain`
-   - returned replica state and stale-primary fencing are explicit.
+   - RF=2/3 promotion, stale-primary fencing, returned replica state, and
+     catch-up eligibility are explicit.
 5. `operations-status-diagnostics-chain`
    - status, diagnostics, and cleanup evidence exist.
 6. `cleanup-residue-chain`
@@ -112,8 +115,8 @@ Gate matrix:
 |---|---|---|
 | CSI lifecycle | `go test ./core/csi` adversarial cases | CSI lifecycle runner chain |
 | Protocol readiness | protocol component + field tests | `protocol-release-gate` |
-| Durable root/restart | storage contract tests | restart/reattach runner chain |
-| Returned replica | state-machine component tests | reintegration runner chain |
+| Durable root/restart | storage contract tests | RF=1 restart/reattach runner chain with master re-observation |
+| Returned replica | state-machine component tests | RF=2/3 promotion/fencing/reintegration runner chain |
 | Operations layer | status/diagnostic schema tests | operations diagnostics chain |
 | TestOps scale | runner unit tests + validate-bundle | suite status/result bundle |
 | RDMA later | transport contract tests | perf/soak comparison gate |
@@ -285,6 +288,11 @@ Goal: make failover and returned-replica behavior explicit enough for beta.
 
 Tasks:
 
+- Separate restart gates by replica factor:
+  - RF=1: durable restart, master re-observation, target rediscovery, and CSI
+    reattach.
+  - RF=2/3: promotion, stale-primary fencing, catch-up, and ACK/promotion
+    eligibility.
 - Define returned-replica states:
   - observed,
   - candidate,
@@ -304,9 +312,18 @@ Tasks:
 
 Near-term steps:
 
-1. Write the returned-replica state-machine note.
-2. Add component tests for promotion, stale primary, and returned replica.
-3. Add a runner scenario only after component tests define the expected facts.
+1. Write the RF=1 reliable restart state-machine note:
+   - `blockvolume` recovers local durable root,
+   - master records fresh observation/status,
+   - frontend target facts are available again,
+   - CSI can reattach and verify data.
+2. Write the RF=2/3 returned-replica state-machine note:
+   - primary loss promotes another eligible replica,
+   - old primary returns fenced/superseded,
+   - returned replica reports recovered frontier,
+   - catch-up gates ready/ACK/promotion eligibility.
+3. Add component tests for promotion, stale primary, and returned replica.
+4. Add runner scenarios only after component tests define the expected facts.
 
 Close bar:
 
@@ -539,6 +556,8 @@ Non-claim:
    - first contract defines `emptyDir` as throwaway smoke mode and hostPath
      state as durable lab mode.
 4. Define returned-replica state-machine facts and tests.
+   - include RF=1 master re-observation / CSI rediscovery and RF=2/3
+     promotion / fencing / reintegration as separate gates.
 5. Add a storage-engine coupling note and contract-test outline.
 6. Add the operations-layer status model and release feedback loop to the
    public/internal roadmap.
