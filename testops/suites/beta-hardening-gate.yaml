@@ -15,7 +15,6 @@ mode: chain
 #     testops/suites/beta-hardening-gate.yaml
 #
 # Not yet final-close complete:
-#   - cleanup-residue-chain still needs a product-owned scenario/profile,
 #   - validate-bundle --profile beta-hardening is a runner-side follow-up.
 
 scenarios:
@@ -37,3 +36,5 @@ scenarios:
     path: ../scenarios/returned-replica-component-gate.yaml
   - id: iscsi-returned-replica
     path: ../scenarios/iscsi-returned-replica-chain.yaml
+  - id: cleanup-residue
+    path: ../scenarios/cleanup-residue-chain.yaml

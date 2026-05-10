@@ -41,8 +41,8 @@ Beta-hardening seed evidence:
 
 - `testops/suites/beta-hardening-gate.yaml` exists as the first suite shell for
   the active plan.
-- It composes current executable children only; cleanup-residue profile and
-  `validate-bundle --profile beta-hardening` remain explicit open work.
+- It composes current executable children only; runner-side
+  `validate-bundle --profile beta-hardening` remains explicit open work.
 
 Known product constraints:
 
@@ -93,6 +93,9 @@ Required child gates:
    - status, diagnostics, and cleanup evidence exist.
 6. `cleanup-residue-chain`
    - no iSCSI sessions, NVMe subsystems, V3 processes, or K8s residue.
+   - hostPath residue audit records all `/var/lib/sw-block` entries, but only
+     fails on runner-owned `testops-*` durable roots to avoid old manual files
+     masking current cleanup behavior.
 
 Pass criteria:
 
@@ -658,7 +661,12 @@ Non-claim:
      base status, recovery status, peer status, and durable status as
      status-server component evidence. Returned-replica frontend/durable split
      remains owned by `returned-replica-component-gate`.
-7. Keep `protocol-release-gate` as a periodic/release gate, not a default
+7. Add the explicit cleanup residue gate to the beta suite.
+   - status: `cleanup-residue-chain` now audits first and only cleans in the
+     always phase, so suite-child leaks are not hidden before assertion. It
+     fails on Seaweed Block iSCSI sessions, NVMe subsystems, V3 processes, K8s
+     resources, or runner-owned hostPath durable roots.
+8. Keep `protocol-release-gate` as a periodic/release gate, not a default
    developer test.
 
 ## QA Assignments To Prepare Next

@@ -199,6 +199,7 @@ component/restart/reintegration gates:
 - `operations-status-diagnostics-chain`
 - `returned-replica-component-gate`
 - `iscsi-returned-replica-chain`
+- `cleanup-residue-chain`
 
 Run shape:
 
@@ -211,5 +212,4 @@ swblock suite `
 ```
 
 This suite is a seed, not the final beta close gate. Before the plan closes it
-still needs an explicit cleanup residue child/profile and runner-side
-`validate-bundle --profile beta-hardening`.
+still needs runner-side `validate-bundle --profile beta-hardening`.
