@@ -261,7 +261,7 @@ func TestG15c_ControllerCreateVolume_RecordsProtocolSelection(t *testing.T) {
 		{name: "product-prefixed", params: map[string]string{storageClassProtocolParameter: "nvme"}},
 		{name: "legacy-protocol", params: map[string]string{"protocol": "nvme"}},
 		{name: "frontendProtocol", params: map[string]string{"frontendProtocol": "nvme"}},
-		{name: "prefixed-wins", params: map[string]string{storageClassProtocolParameter: "nvme", "protocol": "iscsi"}},
+		{name: "matching-duplicate-keys", params: map[string]string{storageClassProtocolParameter: "nvme", "protocol": "nvme"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			prov := &stubProvisioner{}
@@ -290,6 +290,30 @@ func TestG15c_ControllerCreateVolume_RecordsProtocolSelection(t *testing.T) {
 				t.Fatalf("response protocol=%q want nvme", got)
 			}
 		})
+	}
+}
+
+func TestG15c_ControllerCreateVolume_RejectsConflictingProtocolParameters(t *testing.T) {
+	s := NewControllerServerWithProvisioner(&stubLookup{}, &stubProvisioner{})
+	_, err := s.CreateVolume(context.Background(), &csipb.CreateVolumeRequest{
+		Name: "pvc-a",
+		CapacityRange: &csipb.CapacityRange{
+			RequiredBytes: 1 << 30,
+		},
+		Parameters: map[string]string{
+			storageClassProtocolParameter: "nvme",
+			"protocol":                    "iscsi",
+		},
+		VolumeCapabilities: []*csipb.VolumeCapability{
+			testVolumeCapability(),
+		},
+	})
+	if err == nil {
+		t.Fatal("expected conflicting protocol parameters to fail")
+	}
+	st, _ := status.FromError(err)
+	if st.Code() != codes.InvalidArgument {
+		t.Fatalf("code=%v want InvalidArgument", st.Code())
 	}
 }
 

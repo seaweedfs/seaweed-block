@@ -203,6 +203,8 @@ func volumeSpecFromCreateRequest(req *csipb.CreateVolumeRequest) (VolumeSpec, er
 }
 
 func protocolFromParameters(params map[string]string) (Protocol, error) {
+	protocol := Protocol("")
+	source := ""
 	for _, key := range []string{
 		storageClassProtocolParameter,
 		"protocol",
@@ -214,10 +216,17 @@ func protocolFromParameters(params map[string]string) (Protocol, error) {
 		}
 		switch Protocol(raw) {
 		case ProtocolISCSI, ProtocolNVMe:
-			return Protocol(raw), nil
+			if protocol != "" && protocol != Protocol(raw) {
+				return "", status.Errorf(codes.InvalidArgument, "conflicting protocol parameters %q=%q and %q=%q", source, protocol, key, raw)
+			}
+			protocol = Protocol(raw)
+			source = key
 		default:
 			return "", status.Errorf(codes.InvalidArgument, "invalid protocol %q", raw)
 		}
+	}
+	if protocol != "" {
+		return protocol, nil
 	}
 	return ProtocolISCSI, nil
 }

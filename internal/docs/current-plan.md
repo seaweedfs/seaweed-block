@@ -322,7 +322,15 @@ Close bar:
 ## Immediate Sequence
 
 1. Refresh V2 gap audits against the now-closed protocol baseline.
+   - status: started 2026-05-09.
+   - first pass updates `ref/v2-frontend-protocol-gap-audit.md`,
+     `ref/iscsi-v2-coverage-gap-audit.md`, and
+     `ref/nvme-v2-coverage-gap-audit.md` so closed protocol-readiness work is
+     not re-opened as active beta work.
 2. Pick one high-value CSI lifecycle gap and implement it as component-first.
+   - status: started 2026-05-09.
+   - first component seam: conflicting CSI protocol parameters now fail closed
+     instead of silently preferring one key.
 3. Write the durable root layout contract for generated `blockvolume`
    workloads.
 4. Define returned-replica state-machine facts and tests.

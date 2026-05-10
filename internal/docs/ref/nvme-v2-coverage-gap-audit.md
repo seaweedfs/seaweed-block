@@ -8,7 +8,38 @@ implementation. This is a product-facing coverage audit, not a port request.
 Rule: copy expectations first, not code. If V3 rejects a V2 behavior, the audit
 must say why.
 
-## Summary
+## 2026-05-09 Refresh: Current Classification
+
+The audit below was written before the NVMe protocol-readiness phase completed.
+Current state:
+
+- NVMe OS smoke, inline/R2T classification, ANA Identify/Get Log Page, native
+  multipath discovery, mounted failover, and CSI dynamic PVC protocol selection
+  are release-gated.
+- The Linux kernel accepted the ANA-aware, multi-controller, shared-namespace
+  shape after the controller ID, CMIC, NMIC, standby metadata, and script parser
+  fixes.
+- The remaining NVMe work is not basic protocol enablement. It is beta
+  hardening:
+  - broader kernel/distro compatibility,
+  - labelled performance/queue profiles,
+  - backend pressure behavior,
+  - advanced optional commands such as DSM/Write Zeroes,
+  - keeping CSI lifecycle component tests protocol-neutral.
+
+Updated classifications:
+
+| Area | Current classification | Next action |
+|---|---|---|
+| IC / Fabric Connect / queue separation | Present and host-gated. | Keep component coverage. |
+| ANA Identify + ANA log | Release-gated. | Keep field-level P3/P4 assertions. |
+| Multipath mounted failover | Release-gated. | Keep P4 chain periodic. |
+| CSI NVMe path | Release-gated. | Keep P5 chain and component propagation tests. |
+| In-capsule / R2T | Inline path host-gated; R2T not triggered by current Linux profile. | Keep explicit "not triggered" classification; use alternate initiator or target mode before claiming R2T evidence. |
+| WAL pressure / write retry | Active backend concern; target-side retry intentionally rejected. | Define storage-engine pressure contract. |
+| Performance sweeps | Not beta-complete. | Add later after correctness and lifecycle hardening. |
+
+## Historical Summary
 
 - V3 already has a substantial NVMe/TCP protocol core:
   - IC handshake,
