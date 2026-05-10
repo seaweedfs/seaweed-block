@@ -73,6 +73,10 @@ func TestG15d_K8sRenderer_CanUseHostPathStateVolume(t *testing.T) {
 		"hostPath:",
 		"path: /var/lib/sw-block",
 		"type: DirectoryOrCreate",
+		"initContainers:",
+		"name: state-permissions",
+		"runAsUser: 0",
+		"mkdir -p \"/var/lib/sw-block/pvc-a/r1\" && chown -R 65532:65532 \"/var/lib/sw-block/pvc-a/r1\"",
 		"mountPath: /var/lib/sw-block",
 		"--durable-root=/var/lib/sw-block/pvc-a/r1",
 	} {

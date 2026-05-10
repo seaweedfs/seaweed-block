@@ -81,9 +81,10 @@ func RenderBlockVolumeDeployments(plan lifecycle.BlockVolumeWorkloadPlan, cfg K8
 						"sw-block.seaweedfs.com/replica": replica.ReplicaID,
 					}},
 					Spec: podSpec{
-						HostNetwork:  true,
-						DNSPolicy:    "ClusterFirstWithHostNet",
-						NodeSelector: map[string]string{"kubernetes.io/hostname": replica.ServerID},
+						HostNetwork:    true,
+						DNSPolicy:      "ClusterFirstWithHostNet",
+						NodeSelector:   map[string]string{"kubernetes.io/hostname": replica.ServerID},
+						InitContainers: blockVolumeInitContainers(plan, replica, cfg),
 						Containers: []container{{
 							Name:         "blockvolume",
 							Image:        cfg.Image,
@@ -140,7 +141,7 @@ func blockVolumeArgs(plan lifecycle.BlockVolumeWorkloadPlan, replica lifecycle.B
 		"--replica-id=" + replica.ReplicaID,
 		"--data-addr=" + replica.DataAddr,
 		"--ctrl-addr=" + replica.CtrlAddr,
-		"--durable-root=" + strings.TrimRight(cfg.DurableRootBase, "/") + "/" + plan.VolumeID + "/" + replica.ReplicaID,
+		"--durable-root=" + durableRoot(plan, replica, cfg),
 		"--durable-impl=walstore",
 		fmt.Sprintf("--durable-blocks=%d", plan.SizeBytes/4096),
 		"--durable-blocksize=4096",
@@ -160,6 +161,28 @@ func blockVolumeArgs(plan lifecycle.BlockVolumeWorkloadPlan, replica lifecycle.B
 		)
 	}
 	return args
+}
+
+func blockVolumeInitContainers(plan lifecycle.BlockVolumeWorkloadPlan, replica lifecycle.BlockVolumeReplicaWorkload, cfg K8sRenderConfig) []container {
+	if cfg.StateHostPathBase == "" {
+		return nil
+	}
+	root := durableRoot(plan, replica, cfg)
+	return []container{{
+		Name:    "state-permissions",
+		Image:   cfg.Image,
+		Command: []string{"/bin/sh", "-c"},
+		Args:    []string{fmt.Sprintf("mkdir -p %q && chown -R 65532:65532 %q", root, root)},
+		VolumeMounts: []volumeMount{{
+			Name:      "state",
+			MountPath: "/var/lib/sw-block",
+		}},
+		SecurityContext: &containerSecurityContext{RunAsUser: int64Ptr(0)},
+	}}
+}
+
+func durableRoot(plan lifecycle.BlockVolumeWorkloadPlan, replica lifecycle.BlockVolumeReplicaWorkload, cfg K8sRenderConfig) string {
+	return strings.TrimRight(cfg.DurableRootBase, "/") + "/" + plan.VolumeID + "/" + replica.ReplicaID
 }
 
 func blockVolumeEnv(cfg K8sRenderConfig) []envVar {
@@ -213,6 +236,8 @@ func dnsLabel(s string) string {
 
 func intPtr(v int) *int { return &v }
 
+func int64Ptr(v int64) *int64 { return &v }
+
 func boolPtr(v bool) *bool { return &v }
 
 type blockVolumeDeployment struct {
@@ -253,20 +278,26 @@ type podTemplate struct {
 }
 
 type podSpec struct {
-	HostNetwork  bool              `yaml:"hostNetwork"`
-	DNSPolicy    string            `yaml:"dnsPolicy"`
-	NodeSelector map[string]string `yaml:"nodeSelector,omitempty"`
-	Containers   []container       `yaml:"containers"`
-	Volumes      []volume          `yaml:"volumes,omitempty"`
+	HostNetwork    bool              `yaml:"hostNetwork"`
+	DNSPolicy      string            `yaml:"dnsPolicy"`
+	NodeSelector   map[string]string `yaml:"nodeSelector,omitempty"`
+	InitContainers []container       `yaml:"initContainers,omitempty"`
+	Containers     []container       `yaml:"containers"`
+	Volumes        []volume          `yaml:"volumes,omitempty"`
 }
 
 type container struct {
-	Name         string        `yaml:"name"`
-	Image        string        `yaml:"image"`
-	Command      []string      `yaml:"command,omitempty"`
-	Args         []string      `yaml:"args"`
-	Env          []envVar      `yaml:"env,omitempty"`
-	VolumeMounts []volumeMount `yaml:"volumeMounts,omitempty"`
+	Name            string                    `yaml:"name"`
+	Image           string                    `yaml:"image"`
+	Command         []string                  `yaml:"command,omitempty"`
+	Args            []string                  `yaml:"args"`
+	Env             []envVar                  `yaml:"env,omitempty"`
+	VolumeMounts    []volumeMount             `yaml:"volumeMounts,omitempty"`
+	SecurityContext *containerSecurityContext `yaml:"securityContext,omitempty"`
+}
+
+type containerSecurityContext struct {
+	RunAsUser *int64 `yaml:"runAsUser,omitempty"`
 }
 
 type envVar struct {
