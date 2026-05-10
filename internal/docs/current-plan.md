@@ -257,8 +257,8 @@ Goal: stop depending on harness behavior for product lifecycle.
 Tasks:
 
 - Define durable root layout for generated `blockvolume` workloads.
-- Replace default `emptyDir` with explicit durable-state configuration for
-  non-throwaway scenarios.
+- Keep default `emptyDir` for throwaway smoke, but add explicit durable-state
+  configuration for non-throwaway scenarios.
 - Add product-owned controller/operator behavior for generated workloads.
 - Keep owner-reference cleanup, but do not rely on smoke scripts as the
   lifecycle controller.
@@ -272,9 +272,12 @@ Tasks:
 Near-term steps:
 
 1. Write the durable root layout contract.
-2. Add a lab scenario proving blockvolume pod restart preserves data.
-3. Define the minimum operator/controller loop before implementing it.
-4. Update alpha manifests only after the lifecycle contract is explicit.
+2. Wire generated workloads so a durable gate can set
+   `--launcher-state-hostpath=/var/lib/sw-block` and prove the manifest uses
+   `hostPath`.
+3. Add a lab scenario proving blockvolume pod restart preserves data.
+4. Define the minimum operator/controller loop before implementing it.
+5. Update alpha manifests only after the lifecycle contract is explicit.
 
 Close bar:
 

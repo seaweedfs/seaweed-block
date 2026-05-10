@@ -36,6 +36,7 @@ type flags struct {
 	launcherImage          string
 	launcherMasterAddr     string
 	launcherDurableRoot    string
+	launcherStateHostPath  string
 	launcherISCSIPortBase  int
 	launcherNVMePortBase   int
 	launcherPVCOwnerRef    bool
@@ -69,6 +70,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.StringVar(&f.launcherImage, "launcher-image", "sw-block:local", "G15d rendered blockvolume container image")
 	fs.StringVar(&f.launcherMasterAddr, "launcher-master-addr", "", "G15d master address used in rendered blockvolume args; defaults to listener address after bind")
 	fs.StringVar(&f.launcherDurableRoot, "launcher-durable-root", "/var/lib/sw-block", "G15d rendered blockvolume durable root base")
+	fs.StringVar(&f.launcherStateHostPath, "launcher-state-hostpath", "", "optional hostPath base mounted at the blockvolume durable root; empty keeps generated blockvolume state on throwaway emptyDir")
 	fs.IntVar(&f.launcherISCSIPortBase, "launcher-iscsi-port-base", 3260, "G15d iSCSI port base for generated blockvolume workloads")
 	fs.IntVar(&f.launcherNVMePortBase, "launcher-nvme-port-base", 4420, "G15d NVMe/TCP port base for generated blockvolume workloads")
 	fs.BoolVar(&f.launcherPVCOwnerRef, "launcher-pvc-owner-ref", false, "render generated blockvolume Deployments in the source PVC namespace with a PVC ownerReference; disabled by default for alpha harness compatibility")
@@ -305,6 +307,7 @@ func runLifecycleLauncherTick(h *master.Host, f flags) error {
 			Image:               f.launcherImage,
 			MasterAddr:          masterAddr,
 			DurableRootBase:     f.launcherDurableRoot,
+			StateHostPathBase:   f.launcherStateHostPath,
 			OwnerReferenceToPVC: f.launcherPVCOwnerRef,
 			ISCSICHAP: launcher.CHAPSecretRef{
 				Name:        f.launcherCHAPSecretName,

@@ -98,6 +98,15 @@ host:      /var/lib/sw-block/pvc-a/r1
 container: /var/lib/sw-block/pvc-a/r1
 ```
 
+`blockmaster` exposes this through:
+
+```text
+--launcher-state-hostpath=/var/lib/sw-block
+```
+
+Leaving the flag empty keeps the throwaway `emptyDir` rendering. Durable
+restart gates must set the flag explicitly and capture the generated manifest.
+
 This is acceptable for single-node and node-local lab evidence. Multi-node
 behavior must ensure the same replica is scheduled back onto the node that owns
 its hostPath state, or use a real persistent volume per replica.
