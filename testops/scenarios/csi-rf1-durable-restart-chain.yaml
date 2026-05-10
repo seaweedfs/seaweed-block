@@ -1,0 +1,151 @@
+# Runner-native RF=1 durable blockvolume restart chain.
+#
+# Goal:
+#   clean target -> build/import alpha images -> run dynamic PVC with durable
+#   generated blockvolume hostPath state -> restart generated blockvolume
+#   Deployment -> verify replacement app pod reads pre-restart bytes -> collect.
+#
+# Expected invocation from sw-test-runner-standalone:
+#   swblock run testops/scenarios/csi-rf1-durable-restart-chain.yaml \
+#     --env product_root=/path/to/seaweed_block/on/m02 \
+#     --env ssh_key=/path/to/testdev_key/on/controller
+
+name: csi-rf1-durable-restart-chain
+timeout: 18m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: pre_clean
+    actions:
+      - action: pre_run_cleanup
+        node: m02
+        kill_patterns: "blockmaster,blockvolume,iscsi-target"
+        nvme_disconnect: "true"
+        iscsi_logout_prefix: "iqn.2026-05.io.seaweedfs"
+      - action: exec
+        node: m02
+        cmd: "rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-chain && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-chain"
+      - action: assert_no_active_iscsi_sessions
+        node: m02
+        iqn_substr: "io.seaweedfs"
+      - action: assert_no_processes
+        node: m02
+        pattern: "[/]blockmaster --|[/]blockvolume --|^blockmaster |^blockvolume "
+
+  - name: pin_build_alpha_images
+    actions:
+      - action: exec
+        node: m02
+        timeout: 8m
+        cmd: "cd {{ product_root }} && bash scripts/build-alpha-images.sh {{ product_root }}"
+        env.SW_BLOCK_IMPORT_K3S: "1"
+        env.SW_BLOCK_ARTIFACT_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-chain/pin_build"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-chain/pin_build/alpha-images.env"
+        pattern: "SW_BLOCK_IMAGE_ID="
+        save_as: pin_image_id_count
+      - action: assert_greater
+        actual: "{{ pin_image_id_count }}"
+        threshold: "0"
+
+  - name: durable_blockvolume_restart
+    actions:
+      - action: exec
+        node: m02
+        timeout: 10m
+        cmd: "cd {{ product_root }} && bash scripts/run-k8s-blockvolume-restart.sh {{ product_root }}"
+        env.SW_BLOCK_ALPHA_IMAGES_ENV: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-chain/pin_build/alpha-images.env"
+        env.SW_BLOCK_ARTIFACT_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-chain/durable_blockvolume_restart"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-chain/durable_blockvolume_restart/run.log"
+        pattern: "\\[app-demo\\] PASS:"
+        save_as: app_pass_count
+      - action: assert_greater
+        actual: "{{ app_pass_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-chain/durable_blockvolume_restart/run.log"
+        pattern: "restart_blockvolume_before_reader=1"
+        save_as: restart_mode_count
+      - action: assert_greater
+        actual: "{{ restart_mode_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-chain/durable_blockvolume_restart/block-stack.rendered.yaml"
+        pattern: "--launcher-state-hostpath=/var/lib/sw-block"
+        save_as: launcher_state_hostpath_count
+      - action: assert_greater
+        actual: "{{ launcher_state_hostpath_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-chain/durable_blockvolume_restart/generated-blockvolume.yaml"
+        pattern: "hostPath:"
+        save_as: generated_hostpath_count
+      - action: assert_greater
+        actual: "{{ generated_hostpath_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-chain/durable_blockvolume_restart/generated-blockvolume.yaml"
+        pattern: "type: DirectoryOrCreate"
+        save_as: generated_hostpath_type_count
+      - action: assert_greater
+        actual: "{{ generated_hostpath_type_count }}"
+        threshold: "0"
+      - action: exec
+        node: m02
+        cmd: "! grep -q 'emptyDir:' /mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-chain/durable_blockvolume_restart/generated-blockvolume.yaml"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-chain/durable_blockvolume_restart/restart-blockvolume-status.log"
+        pattern: "successfully rolled out"
+        save_as: blockvolume_rollout_count
+      - action: assert_greater
+        actual: "{{ blockvolume_rollout_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-chain/durable_blockvolume_restart/reader.log"
+        pattern: "/data/demo.bin: OK"
+        save_as: reader_checksum_count
+      - action: assert_greater
+        actual: "{{ reader_checksum_count }}"
+        threshold: "0"
+
+  - name: final_asserts
+    actions:
+      - action: assert_no_active_iscsi_sessions
+        node: m02
+        iqn_substr: "io.seaweedfs"
+      - action: assert_no_processes
+        node: m02
+        pattern: "[/]blockmaster --|[/]blockvolume --|^blockmaster |^blockvolume "
+
+  - name: collect_and_cleanup
+    always: true
+    actions:
+      - action: pre_run_cleanup
+        node: m02
+        kill_patterns: "blockmaster,blockvolume,iscsi-target"
+        nvme_disconnect: "true"
+        iscsi_logout_prefix: "iqn.2026-05.io.seaweedfs"
+      - action: collect_path
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-chain"
+        name: "remote-phases"
+        ignore_error: true

@@ -277,6 +277,8 @@ Near-term steps:
    `hostPath`.
 3. Add a lab scenario proving blockvolume pod restart preserves data.
    - Initial script hook: `scripts/run-k8s-blockvolume-restart.sh`.
+   - Runner-native scenario:
+     `testops/scenarios/csi-rf1-durable-restart-chain.yaml`.
    - QA contract:
      `internal/docs/qa-assignments/csi-rf1-durable-blockvolume-restart-validation.md`.
 4. Define the minimum operator/controller loop before implementing it.
