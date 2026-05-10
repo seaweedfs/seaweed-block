@@ -791,6 +791,9 @@ func TestNodePublish_BindMountsAndIsIdempotent(t *testing.T) {
 	ns := newTestNode(mi, mm)
 	staging := t.TempDir()
 	target := filepath.Join(t.TempDir(), "pod-target")
+	if err := writeVolumeFile(staging, "v1"); err != nil {
+		t.Fatal(err)
+	}
 
 	_, err := ns.NodePublishVolume(context.Background(), &csipb.NodePublishVolumeRequest{
 		VolumeId:          "v1",
@@ -814,6 +817,59 @@ func TestNodePublish_BindMountsAndIsIdempotent(t *testing.T) {
 	}
 	if len(mm.calls) != before {
 		t.Fatalf("idempotent publish should not bind again: %v", mm.calls)
+	}
+}
+
+func TestNodePublish_FailsClosedWithoutStagingIdentity(t *testing.T) {
+	mi, mm := newMockISCSIUtil(), newMockMountUtil()
+	ns := newTestNode(mi, mm)
+	staging := t.TempDir()
+	target := filepath.Join(t.TempDir(), "pod-target")
+
+	_, err := ns.NodePublishVolume(context.Background(), &csipb.NodePublishVolumeRequest{
+		VolumeId:          "v1",
+		StagingTargetPath: staging,
+		TargetPath:        target,
+	})
+	if err == nil {
+		t.Fatal("expected missing staging identity to fail")
+	}
+	st, _ := status.FromError(err)
+	if st.Code() != codes.FailedPrecondition {
+		t.Fatalf("code=%v want FailedPrecondition", st.Code())
+	}
+	for _, call := range mm.calls {
+		if strings.HasPrefix(call, "bindmount:") {
+			t.Fatalf("must fail before bind mount, calls=%v", mm.calls)
+		}
+	}
+}
+
+func TestNodePublish_FailsClosedWhenStagingPathBelongsToAnotherVolume(t *testing.T) {
+	mi, mm := newMockISCSIUtil(), newMockMountUtil()
+	ns := newTestNode(mi, mm)
+	staging := t.TempDir()
+	target := filepath.Join(t.TempDir(), "pod-target")
+	if err := writeVolumeFile(staging, "v2"); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := ns.NodePublishVolume(context.Background(), &csipb.NodePublishVolumeRequest{
+		VolumeId:          "v1",
+		StagingTargetPath: staging,
+		TargetPath:        target,
+	})
+	if err == nil {
+		t.Fatal("expected wrong staging identity to fail")
+	}
+	st, _ := status.FromError(err)
+	if st.Code() != codes.FailedPrecondition {
+		t.Fatalf("code=%v want FailedPrecondition", st.Code())
+	}
+	for _, call := range mm.calls {
+		if strings.HasPrefix(call, "bindmount:") {
+			t.Fatalf("must fail before bind mount, calls=%v", mm.calls)
+		}
 	}
 }
 

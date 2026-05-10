@@ -378,6 +378,9 @@ func (s *NodeServer) NodePublishVolume(ctx context.Context, req *csipb.NodePubli
 	if s.mountUtil == nil {
 		return nil, status.Error(codes.FailedPrecondition, "mount utility is not configured")
 	}
+	if err := s.validatePublishStagingVolume(volumeID, stagingPath); err != nil {
+		return nil, err
+	}
 	mounted, err := s.mountUtil.IsMounted(ctx, targetPath)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "check mount: %v", err)
@@ -507,6 +510,29 @@ func (s *NodeServer) validateMountedStagingVolume(volumeID, stagingPath string) 
 		return status.Errorf(codes.FailedPrecondition, "staging path %q is already mounted for volume %q", stagingPath, got)
 	}
 	return status.Errorf(codes.FailedPrecondition, "staging path %q is already mounted without sw-block volume identity", stagingPath)
+}
+
+func (s *NodeServer) validatePublishStagingVolume(volumeID, stagingPath string) error {
+	s.stagedMu.Lock()
+	info := s.staged[volumeID]
+	if info != nil && info.stagingPath == stagingPath {
+		s.stagedMu.Unlock()
+		return nil
+	}
+	for otherVolume, otherInfo := range s.staged {
+		if otherVolume != volumeID && otherInfo != nil && otherInfo.stagingPath == stagingPath {
+			s.stagedMu.Unlock()
+			return status.Errorf(codes.FailedPrecondition, "staging path %q belongs to volume %q", stagingPath, otherVolume)
+		}
+	}
+	s.stagedMu.Unlock()
+
+	if got := readVolumeFile(stagingPath); got == volumeID {
+		return nil
+	} else if got != "" {
+		return status.Errorf(codes.FailedPrecondition, "staging path %q belongs to volume %q", stagingPath, got)
+	}
+	return status.Errorf(codes.FailedPrecondition, "staging path %q has no sw-block volume identity", stagingPath)
 }
 
 func (s *NodeServer) hasStagedIdentity(volumeID, stagingPath string) bool {

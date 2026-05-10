@@ -47,6 +47,76 @@ Known product constraints:
 - Protocol gates prove frontend correctness; they do not prove broad distro
   compatibility, long soak, performance, upgrade safety, or production HA.
 
+## Whole-Plan Delivery Gate
+
+The plan is delivered when Seaweed Block moves from protocol-release-gated to
+beta-hardening-release-gated.
+
+Final suite:
+
+```text
+beta-hardening-gate
+```
+
+Required child gates:
+
+1. `protocol-release-gate`
+   - iSCSI P6,
+   - NVMe P4,
+   - NVMe P5,
+   - iSCSI P8.
+2. `csi-lifecycle-component-gate`
+   - adversarial CSI controller/node component tests.
+3. `durable-restart-reattach-chain`
+   - dynamic PVC data survives `blockvolume` restart / reattach.
+4. `returned-replica-reintegration-chain`
+   - returned replica state and stale-primary fencing are explicit.
+5. `operations-status-diagnostics-chain`
+   - status, diagnostics, and cleanup evidence exist.
+6. `cleanup-residue-chain`
+   - no iSCSI sessions, NVMe subsystems, V3 processes, or K8s residue.
+
+Pass criteria:
+
+- all child gates PASS,
+- suite-level `status.json` and `result.json` are consistent,
+- `swblock validate-bundle --profile beta-hardening` returns VALID,
+- shared product commit and runner commit are pinned,
+- artifacts include status and diagnostic evidence,
+- suite passes twice back-to-back in a clean lab,
+- docs include claims and non-claims.
+
+## TDD / Anti-Drift Rule
+
+Every workstream must map to executable proof.
+
+Rules:
+
+- If behavior can be checked in unit/component tests, do not start with m01/m02.
+- If Linux/K8s/kernel behavior is required, create or update a TestOps scenario
+  before relying on manual QA.
+- Every QA-found regression gets a component test unless the behavior is only
+  observable through an OS/kernel/lab surface.
+- Every runner suite must assert fields and artifacts, not only a PASS line.
+- Every plan item maps to at least one of:
+  - component test,
+  - `subprocess` test,
+  - runner scenario,
+  - bundle validator check,
+  - documented non-claim.
+
+Gate matrix:
+
+| Plan area | Local proof | Release proof |
+|---|---|---|
+| CSI lifecycle | `go test ./core/csi` adversarial cases | CSI lifecycle runner chain |
+| Protocol readiness | protocol component + field tests | `protocol-release-gate` |
+| Durable root/restart | storage contract tests | restart/reattach runner chain |
+| Returned replica | state-machine component tests | reintegration runner chain |
+| Operations layer | status/diagnostic schema tests | operations diagnostics chain |
+| TestOps scale | runner unit tests + validate-bundle | suite status/result bundle |
+| RDMA later | transport contract tests | perf/soak comparison gate |
+
 ## Operating Insights
 
 ### Integration tests are expensive by design
