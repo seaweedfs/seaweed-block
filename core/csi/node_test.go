@@ -776,6 +776,121 @@ func TestNodeStageUnstage_RepeatedCyclesLeaveNoLocalState(t *testing.T) {
 	}
 }
 
+func TestG15e_CSIReattachUsesFreshPublishTargetAfterUnstage(t *testing.T) {
+	mi, mm := newMockISCSIUtil(), newMockMountUtil()
+	ns := newTestNode(mi, mm)
+	lookup := &stubLookup{target: PublishTarget{
+		VolumeID:  "v1",
+		ReplicaID: "r1",
+		Protocol:  ProtocolISCSI,
+		ISCSIAddr: "127.0.0.1:3260",
+		IQN:       "iqn.2026-05.example.v3:v1-old",
+	}}
+	controller := NewControllerServer(lookup)
+	staging := t.TempDir()
+	target1 := filepath.Join(t.TempDir(), "pod-a")
+	target2 := filepath.Join(t.TempDir(), "pod-b")
+
+	firstPublish, err := controller.ControllerPublishVolume(context.Background(), &csipb.ControllerPublishVolumeRequest{
+		VolumeId: "v1",
+		NodeId:   "node-a",
+	})
+	if err != nil {
+		t.Fatalf("first ControllerPublishVolume: %v", err)
+	}
+	if _, err := ns.NodeStageVolume(context.Background(), &csipb.NodeStageVolumeRequest{
+		VolumeId:          "v1",
+		StagingTargetPath: staging,
+		VolumeCapability:  testVolumeCapability(),
+		PublishContext:    firstPublish.GetPublishContext(),
+	}); err != nil {
+		t.Fatalf("first NodeStageVolume: %v", err)
+	}
+	if _, err := ns.NodePublishVolume(context.Background(), &csipb.NodePublishVolumeRequest{
+		VolumeId:          "v1",
+		StagingTargetPath: staging,
+		TargetPath:        target1,
+	}); err != nil {
+		t.Fatalf("first NodePublishVolume: %v", err)
+	}
+	if _, err := ns.NodeUnpublishVolume(context.Background(), &csipb.NodeUnpublishVolumeRequest{
+		VolumeId:   "v1",
+		TargetPath: target1,
+	}); err != nil {
+		t.Fatalf("NodeUnpublishVolume: %v", err)
+	}
+	if _, err := ns.NodeUnstageVolume(context.Background(), &csipb.NodeUnstageVolumeRequest{
+		VolumeId:          "v1",
+		StagingTargetPath: staging,
+	}); err != nil {
+		t.Fatalf("NodeUnstageVolume: %v", err)
+	}
+	if mi.loggedIn["iqn.2026-05.example.v3:v1-old"] {
+		t.Fatalf("old IQN still logged in after unstage")
+	}
+	if ns.staged["v1"] != nil {
+		t.Fatalf("unstage left staged state: %+v", ns.staged["v1"])
+	}
+
+	lookup.target = PublishTarget{
+		VolumeID:  "v1",
+		ReplicaID: "r1",
+		Protocol:  ProtocolISCSI,
+		ISCSIAddr: "127.0.0.2:3260",
+		IQN:       "iqn.2026-05.example.v3:v1-new",
+	}
+	secondPublish, err := controller.ControllerPublishVolume(context.Background(), &csipb.ControllerPublishVolumeRequest{
+		VolumeId: "v1",
+		NodeId:   "node-a",
+	})
+	if err != nil {
+		t.Fatalf("second ControllerPublishVolume: %v", err)
+	}
+	if got := secondPublish.GetPublishContext()["iqn"]; got != "iqn.2026-05.example.v3:v1-new" {
+		t.Fatalf("second publish_context iqn=%q", got)
+	}
+	if _, err := ns.NodeStageVolume(context.Background(), &csipb.NodeStageVolumeRequest{
+		VolumeId:          "v1",
+		StagingTargetPath: staging,
+		VolumeCapability:  testVolumeCapability(),
+		PublishContext:    secondPublish.GetPublishContext(),
+	}); err != nil {
+		t.Fatalf("second NodeStageVolume: %v", err)
+	}
+	if _, err := ns.NodePublishVolume(context.Background(), &csipb.NodePublishVolumeRequest{
+		VolumeId:          "v1",
+		StagingTargetPath: staging,
+		TargetPath:        target2,
+	}); err != nil {
+		t.Fatalf("second NodePublishVolume: %v", err)
+	}
+	if !mi.loggedIn["iqn.2026-05.example.v3:v1-new"] {
+		t.Fatalf("fresh IQN was not logged in after reattach; loggedIn=%v", mi.loggedIn)
+	}
+	if got := readTargetFile(staging); got != "iqn.2026-05.example.v3:v1-new" {
+		t.Fatalf("target file=%q want fresh IQN", got)
+	}
+	if len(lookup.calls) != 2 {
+		t.Fatalf("ControllerPublish should be called once per attach cycle, calls=%v", lookup.calls)
+	}
+	for _, want := range []string{
+		"logout:iqn.2026-05.example.v3:v1-old",
+		"discovery:127.0.0.2:3260",
+		"login:iqn.2026-05.example.v3:v1-new:127.0.0.2:3260",
+	} {
+		found := false
+		for _, call := range mi.calls {
+			if call == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("missing call %q in %v", want, mi.calls)
+		}
+	}
+}
+
 func TestTransportFileRejectsGarbage(t *testing.T) {
 	staging := t.TempDir()
 	if err := writeTransportFile(staging, "nvme\n"); err != nil {
