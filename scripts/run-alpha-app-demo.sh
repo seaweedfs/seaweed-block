@@ -236,7 +236,7 @@ kubectl apply -f "$ARTIFACT_DIR/generated-blockvolume.yaml" | tee "$ARTIFACT_DIR
 kubectl -n "$BLOCKVOLUME_NAMESPACE" wait --for=condition=available deploy -l app=sw-blockvolume --timeout=120s
 
 log "wait for app writer completion"
-if [[ "$RESTART_CSI_NODE_BEFORE_READER" == "1" || "$RESTART_CSI_NODE_BEFORE_READER" == "true" ]]; then
+if [[ "$RESTART_CSI_NODE_BEFORE_READER" == "1" || "$RESTART_CSI_NODE_BEFORE_READER" == "true" || "$RESTART_BLOCKVOLUME_BEFORE_READER" == "1" || "$RESTART_BLOCKVOLUME_BEFORE_READER" == "true" ]]; then
   wait_pod_log_contains sw-block-demo-writer "[app-writer] wrote and verified /data/demo.bin" 240
 else
   wait_pod_succeeded sw-block-demo-writer 240
