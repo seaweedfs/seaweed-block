@@ -143,11 +143,27 @@ phases:
         threshold: "0"
       - action: grep_log
         node: m02
-        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-chain/durable_blockvolume_restart/iscsi-sessions.after-reader.txt"
-        pattern: "iqn.2026-05.io.seaweedfs"
-        save_as: reader_iscsi_session_count
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-chain/durable_blockvolume_restart/reader.describe.before-delete.txt"
+        pattern: "Status:[[:space:]]+Succeeded"
+        save_as: reader_succeeded_describe_count
       - action: assert_greater
-        actual: "{{ reader_iscsi_session_count }}"
+        actual: "{{ reader_succeeded_describe_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-chain/durable_blockvolume_restart/blockvolume-generated.after-restart.log"
+        pattern: "durable primary lineage ensured"
+        save_as: blockvolume_recovered_primary_count
+      - action: assert_greater
+        actual: "{{ blockvolume_recovered_primary_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-chain/durable_blockvolume_restart/blockvolume-generated.after-restart.log"
+        pattern: "\"phase\":\"iscsi-listening\""
+        save_as: blockvolume_iscsi_listening_count
+      - action: assert_greater
+        actual: "{{ blockvolume_iscsi_listening_count }}"
         threshold: "0"
       - action: grep_log
         node: m02

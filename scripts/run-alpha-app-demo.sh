@@ -292,6 +292,7 @@ else
   wait_pod_succeeded sw-block-demo-writer 240
 fi
 kubectl -n "$NAMESPACE" logs sw-block-demo-writer | tee "$ARTIFACT_DIR/writer.log"
+kubectl -n "$NAMESPACE" describe pod sw-block-demo-writer >"$ARTIFACT_DIR/writer.describe.before-delete.txt" 2>&1 || true
 
 if [[ "$RESTART_CSI_NODE_BEFORE_READER" == "1" || "$RESTART_CSI_NODE_BEFORE_READER" == "true" ]]; then
   log "restart CSI node DaemonSet before replacing the app pod"
@@ -344,6 +345,7 @@ log "start reader pod on the same PVC"
 kubectl apply -f "$ROOT/deploy/k8s/alpha/demo-app-reader-pod.yaml" | tee "$ARTIFACT_DIR/apply-reader.log"
 wait_pod_succeeded sw-block-demo-reader 240
 kubectl -n "$NAMESPACE" logs sw-block-demo-reader | tee "$ARTIFACT_DIR/reader.log"
+kubectl -n "$NAMESPACE" describe pod sw-block-demo-reader >"$ARTIFACT_DIR/reader.describe.before-delete.txt" 2>&1 || true
 capture_iscsi_sessions_to "$ARTIFACT_DIR/iscsi-sessions.after-reader.txt"
 kubectl -n kube-system logs -l app=sw-block-csi-node -c block-csi --tail=-1 >"$ARTIFACT_DIR/blockcsi-node.log" 2>&1 || true
 

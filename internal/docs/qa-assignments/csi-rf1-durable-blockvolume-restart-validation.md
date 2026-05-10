@@ -72,9 +72,14 @@ Expected:
   the PVC volume spec with `protocol: "iscsi"`.
 - `reader.log` contains:
   - `/data/demo.bin: OK`.
-- `iscsi-sessions.after-reader.txt` contains `iqn.2026-05.io.seaweedfs`.
-  This proves the replacement reader pod caused CSI to reattach after the
-  restarted target had re-observed.
+- `reader.describe.before-delete.txt` shows `Status: Succeeded`.
+- `blockvolume-generated.after-restart.log` contains:
+  - `phase":"iscsi-listening"`,
+  - `durable primary lineage ensured`.
+  Together with the reader checksum, this proves the restarted target recovered
+  and the replacement reader pod reattached/read after restart. Do not require a
+  live iSCSI session after the one-shot reader exits; Kubernetes may unstage and
+  logout immediately after the pod reaches `Succeeded`.
 - Cleanup:
   - no generated `sw-blockvolume` Deployment remains,
   - demo PVC is gone,
