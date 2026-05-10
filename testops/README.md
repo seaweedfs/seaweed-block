@@ -183,3 +183,32 @@ python3 scripts/testops-validate-protocol-release-gate.py \
 Use `--allow-fail` when validating the schema of an intentionally failed or
 cancelled run; without it the checker requires all four child chains to be
 `pass` with complete phase counts.
+
+## Beta Hardening Gate
+
+`testops/suites/beta-hardening-gate.yaml` is the seed suite for the current
+beta-hardening plan. It composes the protocol release children plus the new
+component/restart/reintegration gates:
+
+- `iscsi-p6-alua-failover-chain`
+- `nvme-p4-multipath-failover-chain`
+- `nvme-p5-csi-protocol-chain`
+- `iscsi-p8-compat-soak-chain`
+- `csi-lifecycle-component-gate`
+- `csi-rf1-durable-restart-chain`
+- `returned-replica-component-gate`
+- `iscsi-returned-replica-chain`
+
+Run shape:
+
+```powershell
+swblock suite `
+  --results-dir V:/share/g15d-k8s/testops-runs/beta-hardening-gate `
+  --env product_root=/tmp/seaweed-block-plan-roadmap-refresh-devrun `
+  --env ssh_key=C:/work/dev_server/testdev_key `
+  C:/work/seaweed_block/testops/suites/beta-hardening-gate.yaml
+```
+
+This suite is a seed, not the final beta close gate. Before the plan closes it
+still needs an operations diagnostics child, an explicit cleanup residue
+child/profile, and runner-side `validate-bundle --profile beta-hardening`.

@@ -37,6 +37,14 @@ Closed protocol evidence:
 - `iscsi-p8-compat-soak-chain`: PASS.
 - Runner-native `protocol-release-gate` suite: PASS and bundle-valid.
 
+Beta-hardening seed evidence:
+
+- `testops/suites/beta-hardening-gate.yaml` exists as the first suite shell for
+  the active plan.
+- It composes current executable children only; operations diagnostics,
+  cleanup-residue profile, and `validate-bundle --profile beta-hardening` remain
+  explicit open work.
+
 Known product constraints:
 
 - Evidence is still primarily single-node lab evidence.
@@ -642,6 +650,8 @@ Non-claim:
 4. Define returned-replica state-machine facts and tests.
    - include RF=1 master re-observation / CSI rediscovery and RF=2/3
      promotion / fencing / reintegration as separate gates.
+   - status: returned supporting replica can now be locally durable-ready while
+     frontend-fenced, pinned by `returned-replica-component-gate`.
 5. Add a storage-engine coupling note and contract-test outline.
 6. Add the operations-layer status model and release feedback loop to the
    public/internal roadmap.
