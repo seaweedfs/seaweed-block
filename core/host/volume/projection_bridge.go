@@ -3,6 +3,7 @@ package volume
 import (
 	"github.com/seaweedfs/seaweed-block/core/engine"
 	"github.com/seaweedfs/seaweed-block/core/frontend"
+	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
 )
 
 // adapterProjector is the narrow seam this bridge needs. Keeps
@@ -51,11 +52,18 @@ type SupersedeProbe interface {
 // Healthy rule (fail-closed):
 //
 //	Healthy = (engine.Mode == ModeHealthy) AND NOT superseded
+//	AND NOT supporting-replica-ready
 //
 // If the engine is locally Healthy but master has named another
 // replica as primary at a newer lineage, Healthy flips to false.
 // This closes the cross-replica authority-move gap architect
 // review flagged on 2026-04-21.
+//
+// If the engine is locally Healthy and master has named another
+// replica as primary at the SAME lineage, this replica may be a
+// recovered supporting replica, but it still must not serve frontend
+// I/O. Status surfaces that as replication_role=replica_ready; the
+// frontend projection fails closed by reporting Healthy=false.
 type AdapterProjectionView struct {
 	projector adapterProjector
 	volumeID  string
@@ -90,7 +98,7 @@ func (v *AdapterProjectionView) projectionWithSupersede() (frontend.Projection, 
 	p := v.projector.Projection()
 	healthy := p.Mode == engine.ModeHealthy
 	superseded := healthy && v.probe != nil && v.probe.IsSuperseded(v.replicaID, p.Epoch, p.EndpointVersion)
-	if superseded {
+	if superseded || (healthy && v.supportingReplicaReady(p.Epoch, p.EndpointVersion)) {
 		healthy = false
 	}
 	return frontend.Projection{
@@ -100,6 +108,25 @@ func (v *AdapterProjectionView) projectionWithSupersede() (frontend.Projection, 
 		EndpointVersion: p.EndpointVersion,
 		Healthy:         healthy,
 	}, superseded
+}
+
+func (v *AdapterProjectionView) supportingReplicaReady(selfEpoch, selfEV uint64) bool {
+	if v == nil || v.probe == nil {
+		return false
+	}
+	probe, ok := v.probe.(interface {
+		LastOtherLine() *control.AssignmentFact
+	})
+	if !ok {
+		return false
+	}
+	other := probe.LastOtherLine()
+	if other == nil {
+		return false
+	}
+	return other.GetReplicaId() != v.replicaID &&
+		other.GetEpoch() == selfEpoch &&
+		other.GetEndpointVersion() == selfEV
 }
 
 // EngineProjection returns the underlying engine.ReplicaProjection

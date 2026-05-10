@@ -11,7 +11,6 @@ import (
 
 	"github.com/seaweedfs/seaweed-block/core/engine"
 	"github.com/seaweedfs/seaweed-block/core/frontend"
-	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
 )
 
 // StatusServer exposes this volume host's frontend.ProjectionView
@@ -198,22 +197,7 @@ func (s *StatusServer) statusProjection() StatusProjection {
 }
 
 func (s *StatusServer) supportingReplicaReady(selfEpoch, selfEV uint64) bool {
-	if s.view == nil || s.view.probe == nil {
-		return false
-	}
-	probe, ok := s.view.probe.(interface {
-		LastOtherLine() *control.AssignmentFact
-	})
-	if !ok {
-		return false
-	}
-	other := probe.LastOtherLine()
-	if other == nil {
-		return false
-	}
-	return other.GetReplicaId() != s.view.replicaID &&
-		other.GetEpoch() == selfEpoch &&
-		other.GetEndpointVersion() == selfEV
+	return s.view.supportingReplicaReady(selfEpoch, selfEV)
 }
 
 // handleStatusRecovery returns engine.ReplicaProjection for the

@@ -77,6 +77,9 @@ Required child gates:
    - master re-observes the restarted replica and refreshes frontend target
      facts so CSI can rediscover/reattach.
 4. `returned-replica-reintegration-chain`
+   - component gate first: returned supporting replicas may become
+     `replica_ready`, but frontend `Healthy=false` and durable backend I/O is
+     fenced unless this replica owns current authority.
    - RF=2/3 promotion, stale-primary fencing, returned replica state, and
      catch-up eligibility are explicit.
 5. `operations-status-diagnostics-chain`
