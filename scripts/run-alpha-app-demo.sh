@@ -165,6 +165,7 @@ wait_blockvolume_durable_status() {
     exit 1
   fi
   for _ in $(seq 1 "$timeout_s"); do
+    rm -f "$tmp"
     if python3 - "$volume_id" "http://${status_addr}/status/durable?volume=${volume_id}" "$tmp" <<'PY'
 import json
 import sys
@@ -202,6 +203,7 @@ PY
     fi
     sleep 1
   done
+  rm -f "$tmp"
   python3 - "http://${status_addr}/status/durable?volume=${volume_id}" "$tmp" <<'PY' || true
 import sys
 import urllib.request
@@ -312,6 +314,11 @@ if [[ -n "$LAUNCHER_STATE_HOSTPATH" ]]; then
   awk -v hostpath="$LAUNCHER_STATE_HOSTPATH" '/--launcher-durable-root=/{print; print "            - \"--launcher-state-hostpath=" hostpath "\""; next} {print}' "$STACK_RENDERED" >"$STACK_RENDERED.tmp"
   mv "$STACK_RENDERED.tmp" "$STACK_RENDERED"
   grep -q -- '--launcher-state-hostpath=' "$STACK_RENDERED" || { echo "failed to inject --launcher-state-hostpath into $STACK_RENDERED" >&2; exit 1; }
+fi
+if [[ "$RESTART_BLOCKVOLUME_BEFORE_READER" == "1" || "$RESTART_BLOCKVOLUME_BEFORE_READER" == "true" ]]; then
+  awk '/--launcher-durable-root=/{print; print "            - \"--launcher-status\""; next} {print}' "$STACK_RENDERED" >"$STACK_RENDERED.tmp"
+  mv "$STACK_RENDERED.tmp" "$STACK_RENDERED"
+  grep -q -- '--launcher-status' "$STACK_RENDERED" || { echo "failed to inject --launcher-status into $STACK_RENDERED" >&2; exit 1; }
 fi
 sed -e "s/sw-block-csi:local/${CSI_IMAGE_SED}/g" \
   -e "s/imagePullPolicy: Never/imagePullPolicy: IfNotPresent/g" \

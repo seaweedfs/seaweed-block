@@ -40,6 +40,7 @@ type flags struct {
 	launcherISCSIPortBase  int
 	launcherNVMePortBase   int
 	launcherPVCOwnerRef    bool
+	launcherStatus         bool
 	launcherCHAPSecretName string
 	launcherCHAPUserKey    string
 	launcherCHAPSecretKey  string
@@ -74,6 +75,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.IntVar(&f.launcherISCSIPortBase, "launcher-iscsi-port-base", 3260, "G15d iSCSI port base for generated blockvolume workloads")
 	fs.IntVar(&f.launcherNVMePortBase, "launcher-nvme-port-base", 4420, "G15d NVMe/TCP port base for generated blockvolume workloads")
 	fs.BoolVar(&f.launcherPVCOwnerRef, "launcher-pvc-owner-ref", false, "render generated blockvolume Deployments in the source PVC namespace with a PVC ownerReference; disabled by default for alpha harness compatibility")
+	fs.BoolVar(&f.launcherStatus, "launcher-status", false, "render loopback-only blockvolume status endpoints in generated workload manifests; intended for TestOps/diagnostics")
 	fs.StringVar(&f.launcherCHAPSecretName, "launcher-iscsi-chap-secret-name", "", "optional Kubernetes Secret name used by generated blockvolume Deployments for target-side iSCSI CHAP")
 	fs.StringVar(&f.launcherCHAPUserKey, "launcher-iscsi-chap-username-key", "chapUsername", "Kubernetes Secret key for generated blockvolume iSCSI CHAP username")
 	fs.StringVar(&f.launcherCHAPSecretKey, "launcher-iscsi-chap-secret-key", "chapSecret", "Kubernetes Secret key for generated blockvolume iSCSI CHAP secret")
@@ -309,6 +311,7 @@ func runLifecycleLauncherTick(h *master.Host, f flags) error {
 			DurableRootBase:     f.launcherDurableRoot,
 			StateHostPathBase:   f.launcherStateHostPath,
 			OwnerReferenceToPVC: f.launcherPVCOwnerRef,
+			EnableStatus:        f.launcherStatus,
 			ISCSICHAP: launcher.CHAPSecretRef{
 				Name:        f.launcherCHAPSecretName,
 				UsernameKey: f.launcherCHAPUserKey,

@@ -20,6 +20,7 @@ type K8sRenderConfig struct {
 	StateHostPathBase   string
 	RecoveryMode        string
 	OwnerReferenceToPVC bool
+	EnableStatus        bool
 	ISCSICHAP           CHAPSecretRef
 }
 
@@ -64,6 +65,10 @@ func RenderBlockVolumeDeployments(plan lifecycle.BlockVolumeWorkloadPlan, cfg K8
 	out := make([]RenderedManifest, 0, len(plan.Replicas))
 	for _, replica := range plan.Replicas {
 		name := workloadName(plan.VolumeID, replica.ReplicaID)
+		args, err := blockVolumeArgs(plan, replica, cfg)
+		if err != nil {
+			return nil, err
+		}
 		deploy := blockVolumeDeployment{
 			APIVersion: "apps/v1",
 			Kind:       "Deployment",
@@ -96,7 +101,7 @@ func RenderBlockVolumeDeployments(plan lifecycle.BlockVolumeWorkloadPlan, cfg K8
 							Name:         "blockvolume",
 							Image:        cfg.Image,
 							Command:      []string{"/usr/local/bin/blockvolume"},
-							Args:         blockVolumeArgs(plan, replica, cfg),
+							Args:         args,
 							Env:          blockVolumeEnv(cfg),
 							VolumeMounts: []volumeMount{{Name: "state", MountPath: stateMountPath}},
 						}},
@@ -140,7 +145,7 @@ func ownerReferences(plan lifecycle.BlockVolumeWorkloadPlan, cfg K8sRenderConfig
 	}}, nil
 }
 
-func blockVolumeArgs(plan lifecycle.BlockVolumeWorkloadPlan, replica lifecycle.BlockVolumeReplicaWorkload, cfg K8sRenderConfig) []string {
+func blockVolumeArgs(plan lifecycle.BlockVolumeWorkloadPlan, replica lifecycle.BlockVolumeReplicaWorkload, cfg K8sRenderConfig) ([]string, error) {
 	args := []string{
 		"--master=" + cfg.MasterAddr,
 		"--server-id=" + replica.ServerID,
@@ -153,7 +158,13 @@ func blockVolumeArgs(plan lifecycle.BlockVolumeWorkloadPlan, replica lifecycle.B
 		fmt.Sprintf("--durable-blocks=%d", plan.SizeBytes/4096),
 		"--durable-blocksize=4096",
 		"--recovery-mode=" + cfg.RecoveryMode,
-		fmt.Sprintf("--status-addr=127.0.0.1:%d", blockVolumeStatusPort(plan, replica)),
+	}
+	if cfg.EnableStatus {
+		port, err := blockVolumeStatusPort(plan, replica)
+		if err != nil {
+			return nil, err
+		}
+		args = append(args, fmt.Sprintf("--status-addr=127.0.0.1:%d", port))
 	}
 	switch plan.Protocol {
 	case "nvme":
@@ -168,17 +179,23 @@ func blockVolumeArgs(plan lifecycle.BlockVolumeWorkloadPlan, replica lifecycle.B
 			"--iscsi-iqn="+replica.ISCSIQualifiedName,
 		)
 	}
-	return args
+	return args, nil
 }
 
-func blockVolumeStatusPort(plan lifecycle.BlockVolumeWorkloadPlan, replica lifecycle.BlockVolumeReplicaWorkload) int {
+func blockVolumeStatusPort(plan lifecycle.BlockVolumeWorkloadPlan, replica lifecycle.BlockVolumeReplicaWorkload) (int, error) {
+	const offset = 20000
+	base := replica.ISCSIListenPort
 	if plan.Protocol == "nvme" && replica.NVMeListenPort > 0 {
-		return replica.NVMeListenPort + 20000
+		base = replica.NVMeListenPort
 	}
-	if replica.ISCSIListenPort > 0 {
-		return replica.ISCSIListenPort + 20000
+	if base <= 0 {
+		return 0, fmt.Errorf("launcher: status endpoint requires a positive frontend port for volume=%s replica=%s", plan.VolumeID, replica.ReplicaID)
 	}
-	return 19080
+	port := base + offset
+	if port > 65535 {
+		return 0, fmt.Errorf("launcher: derived status port %d overflows TCP port range for volume=%s replica=%s frontend_port=%d", port, plan.VolumeID, replica.ReplicaID, base)
+	}
+	return port, nil
 }
 
 func blockVolumeInitContainers(plan lifecycle.BlockVolumeWorkloadPlan, replica lifecycle.BlockVolumeReplicaWorkload, cfg K8sRenderConfig) []container {

@@ -87,6 +87,14 @@ phases:
       - action: grep_log
         node: m02
         path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-chain/durable_blockvolume_restart/block-stack.rendered.yaml"
+        pattern: "--launcher-status"
+        save_as: launcher_status_count
+      - action: assert_greater
+        actual: "{{ launcher_status_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-chain/durable_blockvolume_restart/block-stack.rendered.yaml"
         pattern: "--launcher-state-hostpath=/var/lib/sw-block/testops-{{ run_id }}-csi-rf1-restart"
         save_as: launcher_state_hostpath_count
       - action: assert_greater
@@ -168,7 +176,7 @@ phases:
       - action: grep_log
         node: m02
         path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-chain/durable_blockvolume_restart/status-durable-after-blockvolume-restart.json"
-        pattern: "\"Epoch\"[[:space:]]*:[[:space:]]*1"
+        pattern: "\"Epoch\"[[:space:]]*:[[:space:]]*1[,}]"
         save_as: durable_status_epoch_count
       - action: assert_greater
         actual: "{{ durable_status_epoch_count }}"
