@@ -104,6 +104,12 @@ container: /var/lib/sw-block/pvc-a/r1
 --launcher-state-hostpath=/var/lib/sw-block
 ```
 
+The alpha install/dynamic scripts expose the same choice through:
+
+```text
+SW_BLOCK_LAUNCHER_STATE_HOSTPATH=/var/lib/sw-block
+```
+
 Leaving the flag empty keeps the throwaway `emptyDir` rendering. Durable
 restart gates must set the flag explicitly and capture the generated manifest.
 
