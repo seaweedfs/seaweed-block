@@ -250,7 +250,7 @@ if [[ "$RESTART_CSI_NODE_BEFORE_READER" == "1" || "$RESTART_CSI_NODE_BEFORE_READ
   kubectl -n kube-system get pods -l app=sw-block-csi-node -o wide >"$ARTIFACT_DIR/csi-node-pods.after-restart.txt" 2>&1 || true
 fi
 
-if [[ "$RESTART_BLOCKVOLUME_BEFORE_READER" == "1" || "$RESTART_BLOCKVOLUME_BEFORE_READER" == "true" ]]; then
+restart_blockvolume_deployment() {
   log "restart generated blockvolume Deployment before replacing the app pod"
   BLOCKVOLUME_DEPLOY="$(kubectl -n "$BLOCKVOLUME_NAMESPACE" get deploy -l app=sw-blockvolume -o name | head -n 1)"
   if [[ -z "$BLOCKVOLUME_DEPLOY" ]]; then
@@ -264,10 +264,14 @@ if [[ "$RESTART_BLOCKVOLUME_BEFORE_READER" == "1" || "$RESTART_BLOCKVOLUME_BEFOR
   kubectl -n "$BLOCKVOLUME_NAMESPACE" rollout status "$BLOCKVOLUME_DEPLOY" --timeout=180s | tee "$ARTIFACT_DIR/restart-blockvolume-status.log"
   kubectl -n "$BLOCKVOLUME_NAMESPACE" get pods -l app=sw-blockvolume -o wide >"$ARTIFACT_DIR/blockvolume-pods.after-restart.txt" 2>&1 || true
   kubectl -n kube-system exec deploy/sw-blockmaster -c blockmaster -- sh -c 'cat /var/lib/sw-block/lifecycle/volumes/*.json' >"$ARTIFACT_DIR/lifecycle-volumes.after-blockvolume-restart.json" 2>"$ARTIFACT_DIR/lifecycle-volumes.after-blockvolume-restart.err" || true
-fi
+}
 
 log "delete writer pod but keep PVC"
 kubectl -n "$NAMESPACE" delete pod sw-block-demo-writer --wait=true --timeout=120s | tee "$ARTIFACT_DIR/delete-writer.log"
+
+if [[ "$RESTART_BLOCKVOLUME_BEFORE_READER" == "1" || "$RESTART_BLOCKVOLUME_BEFORE_READER" == "true" ]]; then
+  restart_blockvolume_deployment
+fi
 
 log "start reader pod on the same PVC"
 kubectl apply -f "$ROOT/deploy/k8s/alpha/demo-app-reader-pod.yaml" | tee "$ARTIFACT_DIR/apply-reader.log"

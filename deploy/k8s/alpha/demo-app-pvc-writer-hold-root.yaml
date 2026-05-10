@@ -42,7 +42,7 @@ spec:
           sync
           sha256sum -c /data/demo.sha256
           echo "[app-writer] wrote and verified /data/demo.bin"
-          echo "[app-writer] holding pod so blockvolume restart happens while PVC is mounted"
+          echo "[app-writer] holding pod until the harness deletes it before blockvolume restart"
           sleep 3600
       volumeMounts:
         - name: data
