@@ -165,7 +165,7 @@ phases:
       - action: grep_log
         node: m02
         path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-returned-chain/returned_failover/blockvolume-r2.log"
-        pattern: "executor: (catch-up|rebuild) complete.*replica=r1|executor: rebuild complete"
+        pattern: "executor: rebuild complete"
         save_as: r1_recovery_complete_count
       - action: assert_greater
         actual: "{{ r1_recovery_complete_count }}"
