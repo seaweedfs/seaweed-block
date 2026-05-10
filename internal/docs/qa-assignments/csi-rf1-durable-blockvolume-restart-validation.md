@@ -42,6 +42,7 @@ Expected:
 - `run.log` contains:
   - `launcher_state_hostpath=/var/lib/sw-block`,
   - `restart_blockvolume_before_reader=1`,
+  - `demo-app-pvc-writer-hold-root.yaml`,
   - `restart generated blockvolume Deployment before replacing the app pod`,
   - final line:
     `[app-demo] PASS: app pod wrote data, replacement app pod read it back through the same PVC, cleanup complete`.
