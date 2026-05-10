@@ -696,3 +696,95 @@ func TestStatusServer_DurableStatusEndpoint_EnabledAfterStart_ReturnsLineage(t *
 		t.Fatalf("unexpected durable volume body: %+v", body.Volumes)
 	}
 }
+
+func TestG9B_StatusProjection_ReturnedReplicaCanBeDurableReadyButFrontendNotReady(t *testing.T) {
+	proj := &mutableProjector{p: engine.ReplicaProjection{
+		Mode:            engine.ModeHealthy,
+		Epoch:           2,
+		EndpointVersion: 1,
+	}}
+	h := &Host{cfg: Config{VolumeID: "v1", ReplicaID: "r1"}}
+	h.view = NewAdapterProjectionView(proj, "v1", "r1", h)
+	// Same lineage as this replica, but authority names r2. This is a
+	// returned supporting replica: local durable state may be recovered and
+	// usable by replication, but frontend I/O must remain fenced.
+	h.recordOtherLine(&control.AssignmentFact{
+		VolumeId:        "v1",
+		ReplicaId:       "r2",
+		Epoch:           2,
+		EndpointVersion: 1,
+	})
+	s := NewStatusServer(h.view)
+	s.SetDurableStatusSource(stubDurableStatusSource{vols: []durable.VolumeStatus{{
+		VolumeID:        "v1",
+		Path:            "/tmp/v1.bin",
+		Impl:            "smartwal",
+		ReplicaID:       "r1",
+		Epoch:           2,
+		EndpointVersion: 1,
+		Latched:         true,
+		Operational:     true,
+		Evidence:        "recovered LSN=12",
+	}}})
+	addr, err := s.Start("127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer func() { _ = s.Close(context.Background()) }()
+
+	statusResp, err := http.Get("http://" + addr + "/status?volume=v1")
+	if err != nil {
+		t.Fatalf("get status: %v", err)
+	}
+	defer statusResp.Body.Close()
+	if statusResp.StatusCode != 200 {
+		t.Fatalf("status: got %d want 200", statusResp.StatusCode)
+	}
+	var statusBody StatusProjection
+	if err := json.NewDecoder(statusResp.Body).Decode(&statusBody); err != nil {
+		t.Fatalf("decode status: %v", err)
+	}
+	if statusBody.VolumeID != "v1" || statusBody.ReplicaID != "r1" || statusBody.Epoch != 2 || statusBody.EndpointVersion != 1 {
+		t.Fatalf("returned replica status reported wrong lineage: %+v", statusBody)
+	}
+	if statusBody.Healthy || statusBody.FrontendPrimaryReady {
+		t.Fatalf("returned replica must not be frontend-ready: %+v", statusBody)
+	}
+	if statusBody.AuthorityRole != AuthorityRoleUnknown {
+		t.Fatalf("authority role=%q want %q", statusBody.AuthorityRole, AuthorityRoleUnknown)
+	}
+	if statusBody.ReplicationRole != ReplicationRoleReady {
+		t.Fatalf("replication role=%q want %q", statusBody.ReplicationRole, ReplicationRoleReady)
+	}
+
+	durableResp, err := http.Get("http://" + addr + "/status/durable?volume=v1")
+	if err != nil {
+		t.Fatalf("get durable: %v", err)
+	}
+	defer durableResp.Body.Close()
+	if durableResp.StatusCode != 200 {
+		t.Fatalf("durable: got %d want 200", durableResp.StatusCode)
+	}
+	var durableBody struct {
+		VolumeID    string
+		ReplicaID   string
+		VolumeCount int
+		Volumes     []durable.VolumeStatus
+	}
+	if err := json.NewDecoder(durableResp.Body).Decode(&durableBody); err != nil {
+		t.Fatalf("decode durable: %v", err)
+	}
+	if durableBody.VolumeID != "v1" || durableBody.ReplicaID != "r1" || durableBody.VolumeCount != 1 {
+		t.Fatalf("returned replica durable header reported wrong identity: %+v", durableBody)
+	}
+	if len(durableBody.Volumes) != 1 {
+		t.Fatalf("durable volume count=%d want 1: %+v", len(durableBody.Volumes), durableBody.Volumes)
+	}
+	gotDurable := durableBody.Volumes[0]
+	if gotDurable.VolumeID != "v1" || gotDurable.ReplicaID != "r1" || gotDurable.Epoch != 2 || gotDurable.EndpointVersion != 1 {
+		t.Fatalf("returned replica durable status reported wrong lineage: %+v", gotDurable)
+	}
+	if !gotDurable.Latched || !gotDurable.Operational {
+		t.Fatalf("returned replica must expose local durable readiness separately: %+v", durableBody.Volumes)
+	}
+}

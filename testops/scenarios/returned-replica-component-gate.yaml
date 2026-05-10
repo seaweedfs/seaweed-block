@@ -62,6 +62,14 @@ phases:
       - action: grep_log
         node: m02
         path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-returned-replica-component/core-host-volume-go-test.log"
+        pattern: "--- PASS: TestG9B_StatusProjection_ReturnedReplicaCanBeDurableReadyButFrontendNotReady"
+        save_as: returned_durable_ready_frontend_fenced_count
+      - action: assert_greater
+        actual: "{{ returned_durable_ready_frontend_fenced_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-returned-replica-component/core-host-volume-go-test.log"
         pattern: "--- PASS: TestG9C_StatusProjection_DualLaneRecoveredReplicaReadyAfterPostCloseAck"
         save_as: dual_lane_ready_count
       - action: assert_greater
