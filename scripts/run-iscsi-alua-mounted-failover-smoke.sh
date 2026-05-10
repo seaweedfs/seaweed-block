@@ -18,6 +18,9 @@ R2_STATUS_ADDR="${SW_BLOCK_R2_STATUS_ADDR:-127.0.0.1:19613}"
 BLOCKS="${SW_BLOCK_DURABLE_BLOCKS:-65536}"
 BLOCK_SIZE="${SW_BLOCK_DURABLE_BLOCKSIZE:-4096}"
 RETURN_R1_AFTER_FAILOVER="${SW_BLOCK_RETURN_R1_AFTER_FAILOVER:-0}"
+DEGRADED_PROBE_INTERVAL="${SW_BLOCK_DEGRADED_PROBE_INTERVAL:-0}"
+DEGRADED_PROBE_COOLDOWN_BASE="${SW_BLOCK_DEGRADED_PROBE_COOLDOWN_BASE:-1s}"
+DEGRADED_PROBE_COOLDOWN_CAP="${SW_BLOCK_DEGRADED_PROBE_COOLDOWN_CAP:-3s}"
 BIN_DIR="${SW_BLOCK_BIN_DIR:-${WORK_DIR}/bin}"
 RUN_DIR="${WORK_DIR}/run"
 MOUNT_DIR="${SW_BLOCK_ISCSI_MOUNT_DIR:-${WORK_DIR}/mnt}"
@@ -81,6 +84,7 @@ log "artifact_dir=$ARTIFACT_DIR"
 log "iqn=$IQN"
 log "portals=$(portal_for "$PORT1"),$(portal_for "$PORT2")"
 log "return_r1_after_failover=$RETURN_R1_AFTER_FAILOVER"
+log "degraded_probe_interval=$DEGRADED_PROBE_INTERVAL"
 
 cd "$ROOT"
 git rev-parse --short HEAD >"$ARTIFACT_DIR/git-head.txt" 2>/dev/null || true
@@ -134,6 +138,15 @@ start_blockvolume() {
   local store="$7"
   local log_file="$8"
 
+  local extra_args=()
+  if [[ "$DEGRADED_PROBE_INTERVAL" != "0" && "$DEGRADED_PROBE_INTERVAL" != "0s" ]]; then
+    extra_args+=(
+      --degraded-probe-interval "$DEGRADED_PROBE_INTERVAL"
+      --degraded-probe-cooldown-base "$DEGRADED_PROBE_COOLDOWN_BASE"
+      --degraded-probe-cooldown-cap "$DEGRADED_PROBE_COOLDOWN_CAP"
+    )
+  fi
+
   setsid -f "${BIN_DIR}/blockvolume" \
     --master "$MASTER_ADDR" \
     --server-id "$server" \
@@ -150,6 +163,7 @@ start_blockvolume() {
     --durable-blocksize "$BLOCK_SIZE" \
     --iscsi-listen "127.0.0.1:${port}" \
     --iscsi-iqn "$IQN" \
+    "${extra_args[@]}" \
     >"$log_file" 2>&1
 }
 
@@ -426,6 +440,8 @@ if [[ "$RETURN_R1_AFTER_FAILOVER" == "1" || "$RETURN_R1_AFTER_FAILOVER" == "true
   wait_port "$PORT1"
   wait_status_returned "$R1_STATUS_ADDR" r1
   wait_log_pattern "$ARTIFACT_DIR/blockvolume-r1-returned.log" "authority is now .*not this replica" "r1 returned authority observation"
+  wait_log_pattern "$ARTIFACT_DIR/blockvolume-r2.log" "executor: catch-up complete replica=r1" "primary completed r1 catch-up"
+  wait_log_pattern "$ARTIFACT_DIR/blockvolume-r2.log" "executor: publish healthy for r1" "primary marked r1 peer healthy"
   curl -fsS "http://${R2_STATUS_ADDR}/status?volume=v1" >"$ARTIFACT_DIR/status-r2-after-r1-return.json" 2>/dev/null || true
 fi
 

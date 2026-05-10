@@ -71,6 +71,9 @@ phases:
         env.SW_BLOCK_BIN_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-returned-chain/bin"
         env.SW_BLOCK_ISCSI_FAILOVER_WORK_DIR: "/tmp/sw-block-iscsi-returned"
         env.SW_BLOCK_RETURN_R1_AFTER_FAILOVER: "1"
+        env.SW_BLOCK_DEGRADED_PROBE_INTERVAL: "1s"
+        env.SW_BLOCK_DEGRADED_PROBE_COOLDOWN_BASE: "1s"
+        env.SW_BLOCK_DEGRADED_PROBE_COOLDOWN_CAP: "3s"
       - action: grep_log
         node: m02
         path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-returned-chain/returned_failover/run.log"
@@ -142,6 +145,38 @@ phases:
         save_as: r2_still_primary_count
       - action: assert_greater
         actual: "{{ r2_still_primary_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-returned-chain/returned_failover/status-r2-after-r1-return.json"
+        pattern: "\"FrontendPrimaryReady\":true"
+        save_as: r2_still_frontend_ready_count
+      - action: assert_greater
+        actual: "{{ r2_still_frontend_ready_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-returned-chain/returned_failover/status-r2-after-r1-return.json"
+        pattern: "\"Healthy\":true"
+        save_as: r2_still_healthy_count
+      - action: assert_greater
+        actual: "{{ r2_still_healthy_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-returned-chain/returned_failover/blockvolume-r2.log"
+        pattern: "executor: catch-up complete replica=r1"
+        save_as: r1_catchup_complete_count
+      - action: assert_greater
+        actual: "{{ r1_catchup_complete_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-returned-chain/returned_failover/blockvolume-r2.log"
+        pattern: "executor: publish healthy for r1"
+        save_as: r1_peer_healthy_count
+      - action: assert_greater
+        actual: "{{ r1_peer_healthy_count }}"
         threshold: "0"
       - action: assert_no_active_iscsi_sessions
         node: m02
