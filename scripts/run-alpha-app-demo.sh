@@ -8,7 +8,9 @@ POLL_LOG="$ARTIFACT_DIR/poll.log"
 IMAGE="${SW_BLOCK_IMAGE:-sw-block:local}"
 CSI_IMAGE="${SW_BLOCK_CSI_IMAGE:-sw-block-csi:local}"
 LAUNCHER_PVC_OWNER_REF="${SW_BLOCK_LAUNCHER_PVC_OWNER_REF:-0}"
+LAUNCHER_STATE_HOSTPATH="${SW_BLOCK_LAUNCHER_STATE_HOSTPATH:-}"
 RESTART_CSI_NODE_BEFORE_READER="${SW_BLOCK_RESTART_CSI_NODE_BEFORE_READER:-0}"
+RESTART_BLOCKVOLUME_BEFORE_READER="${SW_BLOCK_RESTART_BLOCKVOLUME_BEFORE_READER:-0}"
 DEFAULT_DEMO_APP_MANIFEST="$ROOT/deploy/k8s/alpha/demo-app-pvc.yaml"
 DEMO_APP_MANIFEST="${SW_BLOCK_DEMO_APP_MANIFEST:-$DEFAULT_DEMO_APP_MANIFEST}"
 BLOCKVOLUME_NAMESPACE="kube-system"
@@ -18,6 +20,16 @@ fi
 if [[ "$RESTART_CSI_NODE_BEFORE_READER" == "1" || "$RESTART_CSI_NODE_BEFORE_READER" == "true" ]]; then
   if [[ "$DEMO_APP_MANIFEST" == "$DEFAULT_DEMO_APP_MANIFEST" || "$(basename "$DEMO_APP_MANIFEST")" == "demo-app-pvc.yaml" ]]; then
     echo "restart mode requires a writer manifest that keeps the PVC mounted, e.g. deploy/k8s/alpha/demo-app-pvc-writer-hold.yaml" >&2
+    exit 2
+  fi
+fi
+if [[ "$RESTART_BLOCKVOLUME_BEFORE_READER" == "1" || "$RESTART_BLOCKVOLUME_BEFORE_READER" == "true" ]]; then
+  if [[ "$DEMO_APP_MANIFEST" == "$DEFAULT_DEMO_APP_MANIFEST" || "$(basename "$DEMO_APP_MANIFEST")" == "demo-app-pvc.yaml" ]]; then
+    echo "blockvolume restart mode requires a writer manifest that keeps the PVC mounted, e.g. deploy/k8s/alpha/demo-app-pvc-writer-hold.yaml" >&2
+    exit 2
+  fi
+  if [[ -z "$LAUNCHER_STATE_HOSTPATH" ]]; then
+    echo "blockvolume restart mode requires SW_BLOCK_LAUNCHER_STATE_HOSTPATH so generated blockvolume state is durable" >&2
     exit 2
   fi
 fi
@@ -156,6 +168,11 @@ if [[ "$BLOCKVOLUME_NAMESPACE" != "kube-system" ]]; then
   mv "$STACK_RENDERED.tmp" "$STACK_RENDERED"
   grep -q -- '--launcher-pvc-owner-ref' "$STACK_RENDERED" || { echo "failed to inject --launcher-pvc-owner-ref into $STACK_RENDERED" >&2; exit 1; }
 fi
+if [[ -n "$LAUNCHER_STATE_HOSTPATH" ]]; then
+  awk -v hostpath="$LAUNCHER_STATE_HOSTPATH" '/--launcher-durable-root=/{print; print "            - \"--launcher-state-hostpath=" hostpath "\""; next} {print}' "$STACK_RENDERED" >"$STACK_RENDERED.tmp"
+  mv "$STACK_RENDERED.tmp" "$STACK_RENDERED"
+  grep -q -- '--launcher-state-hostpath=' "$STACK_RENDERED" || { echo "failed to inject --launcher-state-hostpath into $STACK_RENDERED" >&2; exit 1; }
+fi
 sed -e "s/sw-block-csi:local/${CSI_IMAGE_SED}/g" \
   -e "s/imagePullPolicy: Never/imagePullPolicy: IfNotPresent/g" \
   "$ROOT/deploy/k8s/alpha/csi-controller.yaml" >"$CSI_CONTROLLER_RENDERED"
@@ -176,7 +193,9 @@ log "image=$IMAGE"
 log "csi_image=$CSI_IMAGE"
 log "blockvolume_namespace=$BLOCKVOLUME_NAMESPACE"
 log "launcher_pvc_owner_ref=$LAUNCHER_PVC_OWNER_REF"
+log "launcher_state_hostpath=${LAUNCHER_STATE_HOSTPATH:-<emptyDir>}"
 log "restart_csi_node_before_reader=$RESTART_CSI_NODE_BEFORE_READER"
+log "restart_blockvolume_before_reader=$RESTART_BLOCKVOLUME_BEFORE_READER"
 log "demo_app_manifest=$DEMO_APP_MANIFEST"
 kubectl version --client=true >"$ARTIFACT_DIR/kubectl-version.txt" 2>&1 || true
 kubectl get nodes -o wide >"$ARTIFACT_DIR/nodes.before.txt"
@@ -229,6 +248,22 @@ if [[ "$RESTART_CSI_NODE_BEFORE_READER" == "1" || "$RESTART_CSI_NODE_BEFORE_READ
   kubectl -n kube-system rollout restart ds/sw-block-csi-node | tee "$ARTIFACT_DIR/restart-csi-node.log"
   kubectl -n kube-system rollout status ds/sw-block-csi-node --timeout=180s | tee "$ARTIFACT_DIR/restart-csi-node-status.log"
   kubectl -n kube-system get pods -l app=sw-block-csi-node -o wide >"$ARTIFACT_DIR/csi-node-pods.after-restart.txt" 2>&1 || true
+fi
+
+if [[ "$RESTART_BLOCKVOLUME_BEFORE_READER" == "1" || "$RESTART_BLOCKVOLUME_BEFORE_READER" == "true" ]]; then
+  log "restart generated blockvolume Deployment before replacing the app pod"
+  BLOCKVOLUME_DEPLOY="$(kubectl -n "$BLOCKVOLUME_NAMESPACE" get deploy -l app=sw-blockvolume -o name | head -n 1)"
+  if [[ -z "$BLOCKVOLUME_DEPLOY" ]]; then
+    echo "generated blockvolume Deployment not found before restart" >&2
+    exit 1
+  fi
+  echo "$BLOCKVOLUME_DEPLOY" >"$ARTIFACT_DIR/blockvolume-deploy.before-restart.txt"
+  kubectl -n "$BLOCKVOLUME_NAMESPACE" get "$BLOCKVOLUME_DEPLOY" -o yaml >"$ARTIFACT_DIR/blockvolume-deploy.before-restart.yaml"
+  kubectl -n "$BLOCKVOLUME_NAMESPACE" get pods -l app=sw-blockvolume -o wide >"$ARTIFACT_DIR/blockvolume-pods.before-restart.txt" 2>&1 || true
+  kubectl -n "$BLOCKVOLUME_NAMESPACE" rollout restart "$BLOCKVOLUME_DEPLOY" | tee "$ARTIFACT_DIR/restart-blockvolume.log"
+  kubectl -n "$BLOCKVOLUME_NAMESPACE" rollout status "$BLOCKVOLUME_DEPLOY" --timeout=180s | tee "$ARTIFACT_DIR/restart-blockvolume-status.log"
+  kubectl -n "$BLOCKVOLUME_NAMESPACE" get pods -l app=sw-blockvolume -o wide >"$ARTIFACT_DIR/blockvolume-pods.after-restart.txt" 2>&1 || true
+  kubectl -n kube-system exec deploy/sw-blockmaster -c blockmaster -- sh -c 'cat /var/lib/sw-block/lifecycle/volumes/*.json' >"$ARTIFACT_DIR/lifecycle-volumes.after-blockvolume-restart.json" 2>"$ARTIFACT_DIR/lifecycle-volumes.after-blockvolume-restart.err" || true
 fi
 
 log "delete writer pod but keep PVC"

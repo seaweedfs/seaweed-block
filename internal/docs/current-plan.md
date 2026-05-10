@@ -276,6 +276,9 @@ Near-term steps:
    `--launcher-state-hostpath=/var/lib/sw-block` and prove the manifest uses
    `hostPath`.
 3. Add a lab scenario proving blockvolume pod restart preserves data.
+   - Initial script hook: `scripts/run-k8s-blockvolume-restart.sh`.
+   - QA contract:
+     `internal/docs/qa-assignments/csi-rf1-durable-blockvolume-restart-validation.md`.
 4. Define the minimum operator/controller loop before implementing it.
 5. Update alpha manifests only after the lifecycle contract is explicit.
 
