@@ -99,6 +99,9 @@ Rules:
 - If behavior can be checked in unit/component tests, do not start with m01/m02.
 - If Linux/K8s/kernel behavior is required, create or update a TestOps scenario
   before relying on manual QA.
+- If a single-step TestOps validation is enough and the runner binary plus lab
+  access are available, developer should run it first and use the feedback
+  immediately.
 - Every QA-found regression gets a component test unless the behavior is only
   observable through an OS/kernel/lab surface.
 - Every runner suite must assert fields and artifacts, not only a PASS line.
@@ -120,6 +123,42 @@ Gate matrix:
 | Operations layer | status/diagnostic schema tests | operations diagnostics chain |
 | TestOps scale | runner unit tests + validate-bundle | suite status/result bundle |
 | RDMA later | transport contract tests | perf/soak comparison gate |
+
+## Dev / QA TestOps Split
+
+Developer-owned loop:
+
+- write or update product test content,
+- run unit/component tests locally,
+- run `swblock validate` for scenario syntax when the runner binary is
+  available,
+- run single-step `swblock run` checks when the lab is reachable and the result
+  can directly shorten the implementation loop,
+- fix product or scenario issues found by that immediate feedback.
+
+QA-owned assignments:
+
+- validate a milestone or release gate independently,
+- run long soak / repeatability / back-to-back suites,
+- validate runner features that affect operator trust,
+- design or refine a complex scenario when the expected lab behavior is not yet
+  obvious,
+- provide authoritative result bundles and cleanup evidence from m01/m02.
+
+Runner-platform tasks for QA:
+
+- help validate new TestOps actions or bundle-schema changes,
+- verify Windows/Linux controller behavior,
+- verify artifact collection, cancellation, status, and cleanup behavior,
+- report gaps in operator ergonomics before they become product debugging
+  overhead.
+
+Default rule:
+
+```text
+small single-step validation -> developer runs with swblock if possible
+milestone / long / ambiguous / trust-critical validation -> QA assignment
+```
 
 ## Operating Insights
 

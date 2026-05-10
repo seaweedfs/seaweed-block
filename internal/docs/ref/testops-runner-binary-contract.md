@@ -146,3 +146,24 @@ Developer:
 - writes product-owned scenario content,
 - keeps gates narrow and evidence-based,
 - uses `swblock validate`/`run` locally when the binary is available.
+
+## QA Assignment Policy
+
+Use developer self-run for short feedback loops:
+
+- `swblock validate` on a new or edited scenario,
+- one child scenario run when the target lab is reachable,
+- a focused re-run after a small scenario/product fix.
+
+Assign QA when independence or lab discipline matters:
+
+- milestone validation,
+- release-gate validation,
+- long soak / repeatability runs,
+- runner feature validation such as status, cancellation, collection, or bundle
+  validation,
+- complex scenario design where the product behavior and lab evidence still
+  need shaping.
+
+This keeps TestOps productive: developers use the runner for immediate feedback,
+while QA owns authoritative evidence and complex validation.
