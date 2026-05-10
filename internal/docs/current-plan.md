@@ -68,8 +68,10 @@ Required child gates:
    - iSCSI P8.
 2. `csi-lifecycle-component-gate`
    - adversarial CSI controller/node component tests.
-   - publish/stage/publish/unpublish/unstage/reattach cycles use fresh target
-     facts and leave no stale staged identity.
+   - component-level iSCSI publish/stage/publish/unpublish/unstage/reattach
+     cycles use fresh target facts and leave no stale staged identity.
+   - real master/frontend refresh, persisted node restart state, NVMe, and OS
+     initiator behavior remain covered by runner integration gates.
 3. `durable-restart-reattach-chain`
    - RF=1 dynamic PVC data survives `blockvolume` restart / reattach.
    - master re-observes the restarted replica and refreshes frontend target

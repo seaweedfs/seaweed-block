@@ -42,7 +42,7 @@ phases:
       - action: exec
         node: m02
         timeout: 3m
-        cmd: "cd {{ product_root }} && go test -v ./core/csi | tee /mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-lifecycle-component/core-csi-go-test.log"
+        cmd: "cd {{ product_root }} && bash -o pipefail -c 'go test -v ./core/csi | tee /mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-lifecycle-component/core-csi-go-test.log'"
       - action: grep_log
         node: m02
         path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-lifecycle-component/core-csi-go-test.log"

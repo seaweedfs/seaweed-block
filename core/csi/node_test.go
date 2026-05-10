@@ -819,6 +819,12 @@ func TestG15e_CSIReattachUsesFreshPublishTargetAfterUnstage(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("NodeUnpublishVolume: %v", err)
 	}
+	if _, err := controller.ControllerUnpublishVolume(context.Background(), &csipb.ControllerUnpublishVolumeRequest{
+		VolumeId: "v1",
+		NodeId:   "node-a",
+	}); err != nil {
+		t.Fatalf("ControllerUnpublishVolume: %v", err)
+	}
 	if _, err := ns.NodeUnstageVolume(context.Background(), &csipb.NodeUnstageVolumeRequest{
 		VolumeId:          "v1",
 		StagingTargetPath: staging,
