@@ -131,6 +131,24 @@ capture_blockvolume_pod_ids() {
   kubectl -n "$BLOCKVOLUME_NAMESPACE" get pods -l sw-block.seaweedfs.com/volume -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.metadata.uid}{"\t"}{.status.startTime}{"\n"}{end}' >"$path" 2>&1 || true
 }
 
+wait_blockvolume_log_pattern() {
+  local deploy="$1"
+  local pattern="$2"
+  local out="$3"
+  local timeout_s="$4"
+  for _ in $(seq 1 "$timeout_s"); do
+    kubectl -n "$BLOCKVOLUME_NAMESPACE" logs "$deploy" -c blockvolume --tail=-1 >"$out" 2>&1 || true
+    if grep -q "$pattern" "$out" 2>/dev/null; then
+      return 0
+    fi
+    sleep 1
+  done
+  kubectl -n "$BLOCKVOLUME_NAMESPACE" logs "$deploy" -c blockvolume --tail=-1 >"$out" 2>&1 || true
+  echo "timed out waiting for blockvolume log pattern: $pattern" >&2
+  cat "$out" >&2 || true
+  exit 1
+}
+
 blockvolume_pod_uids() {
   local path="$1"
   awk 'NF >= 2 { print $2 }' "$path" | sort
@@ -329,7 +347,7 @@ restart_blockvolume_deployment() {
     exit 1
   fi
   kubectl -n kube-system exec deploy/sw-blockmaster -c blockmaster -- sh -c 'cat /var/lib/sw-block/lifecycle/volumes/*.json' >"$ARTIFACT_DIR/lifecycle-volumes.after-blockvolume-restart.json" 2>"$ARTIFACT_DIR/lifecycle-volumes.after-blockvolume-restart.err" || true
-  kubectl -n "$BLOCKVOLUME_NAMESPACE" logs -l sw-block.seaweedfs.com/volume -c blockvolume --tail=-1 >"$ARTIFACT_DIR/blockvolume-generated.after-restart.log" 2>&1 || true
+  wait_blockvolume_log_pattern "$BLOCKVOLUME_DEPLOY" "durable primary lineage ensured" "$ARTIFACT_DIR/blockvolume-generated.after-restart.log" 120
 }
 
 log "delete writer pod but keep PVC"
