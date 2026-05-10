@@ -73,6 +73,7 @@ func RenderBlockVolumeDeployments(plan lifecycle.BlockVolumeWorkloadPlan, cfg K8
 			},
 			Spec: deploymentSpec{
 				Replicas: intPtr(1),
+				Strategy: deploymentStrategy{Type: "Recreate"},
 				Selector: selector{MatchLabels: map[string]string{"app": name}},
 				Template: podTemplate{
 					Metadata: metadata{Labels: map[string]string{
@@ -263,9 +264,14 @@ type ownerReference struct {
 }
 
 type deploymentSpec struct {
-	Replicas *int        `yaml:"replicas"`
-	Selector selector    `yaml:"selector"`
-	Template podTemplate `yaml:"template"`
+	Replicas *int               `yaml:"replicas"`
+	Strategy deploymentStrategy `yaml:"strategy"`
+	Selector selector           `yaml:"selector"`
+	Template podTemplate        `yaml:"template"`
+}
+
+type deploymentStrategy struct {
+	Type string `yaml:"type"`
 }
 
 type selector struct {

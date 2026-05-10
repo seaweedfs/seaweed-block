@@ -25,6 +25,7 @@ func TestG15d_K8sRenderer_RendersBlockVolumeDeploymentArgs(t *testing.T) {
 	for _, want := range []string{
 		"kind: Deployment",
 		"name: sw-blockvolume-pvc-a-r1",
+		"type: Recreate",
 		"hostNetwork: true",
 		"dnsPolicy: ClusterFirstWithHostNet",
 		"- /usr/local/bin/blockvolume",
