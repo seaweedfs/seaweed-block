@@ -11,6 +11,7 @@ import (
 
 	"github.com/seaweedfs/seaweed-block/core/engine"
 	"github.com/seaweedfs/seaweed-block/core/frontend"
+	"github.com/seaweedfs/seaweed-block/core/replication"
 )
 
 // StatusServer exposes this volume host's frontend.ProjectionView
@@ -47,6 +48,11 @@ type StatusServer struct {
 	srv             *http.Server
 	addr            string
 	recoveryEnabled bool // G5-5: gates /status/recovery; off by default
+	peerSource      peerStatusSource
+}
+
+type peerStatusSource interface {
+	PeerStatuses() []replication.ReplicaPeerStatus
 }
 
 const (
@@ -97,6 +103,17 @@ func (s *StatusServer) EnableRecoveryEndpoint() {
 	s.recoveryEnabled = true
 }
 
+// SetPeerStatusSource enables /status/peers by wiring a primary-side
+// replication status source. It may be called before or after Start:
+// the route is registered at Start, and returns 404 until a source is
+// installed. This fits blockvolume startup, where the status listener
+// binds before durable storage and ReplicationVolume are constructed.
+func (s *StatusServer) SetPeerStatusSource(src peerStatusSource) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.peerSource = src
+}
+
 // Start binds on addr and spawns the HTTP serve goroutine.
 // addr MUST be a loopback host (empty-host is rejected; any
 // non-loopback IP returns an error). Returns the bound addr
@@ -120,6 +137,7 @@ func (s *StatusServer) Start(addr string) (string, error) {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/status", s.handleStatus)
+	mux.HandleFunc("/status/peers", s.handleStatusPeers)
 	if s.recoveryEnabled {
 		mux.HandleFunc("/status/recovery", s.handleStatusRecovery)
 	}
@@ -234,6 +252,44 @@ func (s *StatusServer) handleStatusRecovery(w http.ResponseWriter, r *http.Reque
 	ep := s.view.EngineProjection()
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(ep)
+}
+
+func (s *StatusServer) handleStatusPeers(w http.ResponseWriter, r *http.Request) {
+	if !isLoopbackRemote(r.RemoteAddr) {
+		http.Error(w, "status endpoint restricted to loopback", http.StatusForbidden)
+		return
+	}
+	vol := r.URL.Query().Get("volume")
+	if vol == "" {
+		http.Error(w, "missing volume query param", http.StatusBadRequest)
+		return
+	}
+	fp := s.view.Projection()
+	if fp.VolumeID != vol {
+		http.Error(w, fmt.Sprintf("volume %q not served by this host (serves %q)", vol, fp.VolumeID), http.StatusNotFound)
+		return
+	}
+	s.mu.Lock()
+	src := s.peerSource
+	s.mu.Unlock()
+	if src == nil {
+		http.NotFound(w, r)
+		return
+	}
+	peers := src.PeerStatuses()
+	body := struct {
+		VolumeID  string
+		ReplicaID string
+		PeerCount int
+		Peers     []replication.ReplicaPeerStatus
+	}{
+		VolumeID:  fp.VolumeID,
+		ReplicaID: fp.ReplicaID,
+		PeerCount: len(peers),
+		Peers:     peers,
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(body)
 }
 
 // enforceLoopbackBind refuses to bind on anything other than

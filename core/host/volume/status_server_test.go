@@ -13,6 +13,7 @@ import (
 
 	"github.com/seaweedfs/seaweed-block/core/adapter"
 	"github.com/seaweedfs/seaweed-block/core/engine"
+	"github.com/seaweedfs/seaweed-block/core/replication"
 	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
 )
 
@@ -556,5 +557,72 @@ func TestStatusServer_RecoveryEndpoint_WrongVolume_Returns404(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != 404 {
 		t.Fatalf("wrong volume: got %d want 404", resp.StatusCode)
+	}
+}
+
+type stubPeerStatusSource struct {
+	peers []replication.ReplicaPeerStatus
+}
+
+func (s stubPeerStatusSource) PeerStatuses() []replication.ReplicaPeerStatus {
+	return append([]replication.ReplicaPeerStatus(nil), s.peers...)
+}
+
+func TestStatusServer_PeerStatusEndpoint_Disabled_Returns404(t *testing.T) {
+	s := NewStatusServer(NewAdapterProjectionView(stubProjector{}, "v1", "r1", nil))
+	addr, err := s.Start("127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer func() { _ = s.Close(context.Background()) }()
+	resp, err := http.Get("http://" + addr + "/status/peers?volume=v1")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 404 {
+		t.Fatalf("disabled peers endpoint: got %d want 404", resp.StatusCode)
+	}
+}
+
+func TestStatusServer_PeerStatusEndpoint_EnabledAfterStart_ReturnsPeerStates(t *testing.T) {
+	s := NewStatusServer(NewAdapterProjectionView(stubProjector{}, "v1", "r2", nil))
+	addr, err := s.Start("127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer func() { _ = s.Close(context.Background()) }()
+	s.SetPeerStatusSource(stubPeerStatusSource{peers: []replication.ReplicaPeerStatus{{
+		ReplicaID:       "r1",
+		State:           "healthy",
+		Epoch:           2,
+		EndpointVersion: 1,
+		DataAddr:        "127.0.0.1:19601",
+		CtrlAddr:        "127.0.0.1:19602",
+		SessionID:       5,
+	}}})
+
+	resp, err := http.Get("http://" + addr + "/status/peers?volume=v1")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("enabled peers: got %d want 200", resp.StatusCode)
+	}
+	var body struct {
+		VolumeID  string
+		ReplicaID string
+		PeerCount int
+		Peers     []replication.ReplicaPeerStatus
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.VolumeID != "v1" || body.ReplicaID != "r2" || body.PeerCount != 1 {
+		t.Fatalf("unexpected peers body header: %+v", body)
+	}
+	if len(body.Peers) != 1 || body.Peers[0].ReplicaID != "r1" || body.Peers[0].State != "healthy" || body.Peers[0].Epoch != 2 {
+		t.Fatalf("unexpected peer body: %+v", body.Peers)
 	}
 }

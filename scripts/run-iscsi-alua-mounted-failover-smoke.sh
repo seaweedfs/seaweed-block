@@ -268,6 +268,40 @@ PY
   exit 1
 }
 
+wait_peer_healthy() {
+  local status_addr="$1"
+  local peer="$2"
+  local min_epoch="$3"
+  local out="$ARTIFACT_DIR/status-r2-peers-after-${peer}-return.json"
+  for _ in $(seq 1 240); do
+    if curl -fsS "http://${status_addr}/status/peers?volume=v1" >"$out.tmp" 2>/dev/null; then
+      if python3 - "$out.tmp" "$peer" "$min_epoch" <<'PY'
+import json, sys
+path, peer, min_epoch = sys.argv[1], sys.argv[2], int(sys.argv[3])
+body = json.load(open(path))
+for p in body.get("Peers", []):
+    if str(p.get("ReplicaID", "")) != peer:
+        continue
+    state = str(p.get("State", ""))
+    epoch = int(p.get("Epoch", 0))
+    in_flight = bool(p.get("ProbeInFlight"))
+    closed = bool(p.get("Closed"))
+    ok = state == "healthy" and epoch >= min_epoch and not in_flight and not closed
+    sys.exit(0 if ok else 1)
+sys.exit(1)
+PY
+      then
+        mv "$out.tmp" "$out"
+        return 0
+      fi
+    fi
+    sleep 0.25
+  done
+  curl -fsS "http://${status_addr}/status/peers?volume=v1" >"$ARTIFACT_DIR/status-r2-peers-after-${peer}-return-last.json" 2>/dev/null || true
+  echo "timed out waiting for primary peer ${peer} healthy" >&2
+  exit 1
+}
+
 wait_log_pattern() {
   local path="$1"
   local pattern="$2"
@@ -440,8 +474,7 @@ if [[ "$RETURN_R1_AFTER_FAILOVER" == "1" || "$RETURN_R1_AFTER_FAILOVER" == "true
   wait_port "$PORT1"
   wait_status_returned "$R1_STATUS_ADDR" r1
   wait_log_pattern "$ARTIFACT_DIR/blockvolume-r1-returned.log" "authority is now .*not this replica" "r1 returned authority observation"
-  wait_log_pattern "$ARTIFACT_DIR/blockvolume-r2.log" "executor: rebuild complete" "primary completed r1 rebuild"
-  wait_log_pattern "$ARTIFACT_DIR/blockvolume-r2.log" "replication: peer r1 state catching_up.*healthy" "primary marked r1 peer healthy"
+  wait_peer_healthy "$R2_STATUS_ADDR" r1 2
   curl -fsS "http://${R2_STATUS_ADDR}/status?volume=v1" >"$ARTIFACT_DIR/status-r2-after-r1-return.json" 2>/dev/null || true
 fi
 

@@ -164,19 +164,43 @@ phases:
         threshold: "0"
       - action: grep_log
         node: m02
-        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-returned-chain/returned_failover/blockvolume-r2.log"
-        pattern: "executor: rebuild complete"
-        save_as: r1_recovery_complete_count
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-returned-chain/returned_failover/status-r2-peers-after-r1-return.json"
+        pattern: "\"ReplicaID\":\"r1\""
+        save_as: r1_peer_present_count
       - action: assert_greater
-        actual: "{{ r1_recovery_complete_count }}"
+        actual: "{{ r1_peer_present_count }}"
         threshold: "0"
       - action: grep_log
         node: m02
-        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-returned-chain/returned_failover/blockvolume-r2.log"
-        pattern: "replication: peer r1 state catching_up.*healthy"
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-returned-chain/returned_failover/status-r2-peers-after-r1-return.json"
+        pattern: "\"State\":\"healthy\""
         save_as: r1_peer_healthy_count
       - action: assert_greater
         actual: "{{ r1_peer_healthy_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-returned-chain/returned_failover/status-r2-peers-after-r1-return.json"
+        pattern: "\"Epoch\":2"
+        save_as: r1_peer_epoch_count
+      - action: assert_greater
+        actual: "{{ r1_peer_epoch_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-returned-chain/returned_failover/status-r2-peers-after-r1-return.json"
+        pattern: "\"ProbeInFlight\":false"
+        save_as: r1_peer_probe_idle_count
+      - action: assert_greater
+        actual: "{{ r1_peer_probe_idle_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-returned-chain/returned_failover/status-r2-peers-after-r1-return.json"
+        pattern: "\"Closed\":false"
+        save_as: r1_peer_open_count
+      - action: assert_greater
+        actual: "{{ r1_peer_open_count }}"
         threshold: "0"
       - action: assert_no_active_iscsi_sessions
         node: m02

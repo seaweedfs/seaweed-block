@@ -498,6 +498,9 @@ func run(f flags) int {
 			return 1
 		}
 		replVolume = replication.NewReplicationVolume(f.volumeID, store)
+		if status != nil {
+			status.SetPeerStatusSource(replVolume)
+		}
 		repMode, writeAck, err := parseReplicationAckProfile(f.replicationAck)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "blockvolume:", err)

@@ -170,6 +170,22 @@ type ReplicaPeer struct {
 	probeInFlight     bool              // true while a probe attempt is dispatched and not yet recorded
 }
 
+// ReplicaPeerStatus is a diagnostic snapshot of one peer tracked by a
+// primary-side ReplicationVolume. It is intentionally read-only and
+// append-only: status endpoints and TestOps gates use it to assert
+// peer recovery state without scraping logs.
+type ReplicaPeerStatus struct {
+	ReplicaID       string
+	State           string
+	Epoch           uint64
+	EndpointVersion uint64
+	DataAddr        string
+	CtrlAddr        string
+	SessionID       uint64
+	ProbeInFlight   bool
+	Closed          bool
+}
+
 // NewReplicaPeer constructs a per-replica runtime handle and registers
 // a live-ship session against the given executor. The session's
 // lineage is derived from target.{Epoch, EndpointVersion}, a freshly
@@ -473,6 +489,25 @@ func (p *ReplicaPeer) State() ReplicaState {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.state
+}
+
+// Status returns a point-in-time diagnostic snapshot of the peer.
+// It does not mutate peer state and is safe to call concurrently with
+// write, barrier, probe, recovery, and close paths.
+func (p *ReplicaPeer) Status() ReplicaPeerStatus {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return ReplicaPeerStatus{
+		ReplicaID:       p.target.ReplicaID,
+		State:           p.state.String(),
+		Epoch:           p.target.Epoch,
+		EndpointVersion: p.target.EndpointVersion,
+		DataAddr:        p.target.DataAddr,
+		CtrlAddr:        p.target.ControlAddr,
+		SessionID:       p.sessionID,
+		ProbeInFlight:   p.probeInFlight,
+		Closed:          p.closed,
+	}
 }
 
 // ShipEntry ships one live WAL entry to this peer via its BlockExecutor.

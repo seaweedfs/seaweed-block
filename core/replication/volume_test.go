@@ -71,6 +71,39 @@ func TestReplicationVolume_UpdateReplicaSet_AddPeer(t *testing.T) {
 	}
 }
 
+func TestReplicationVolume_PeerStatuses_SortedStateSnapshot(t *testing.T) {
+	addr2, _ := replicaHarness(t, "r2")
+	addr1, _ := replicaHarness(t, "r1")
+	v := volumeHarness(t, "vol1")
+	if err := v.UpdateReplicaSet(42, []ReplicaTarget{
+		targetFor("r2", addr2, 3, 2),
+		targetFor("r1", addr1, 3, 2),
+	}); err != nil {
+		t.Fatalf("UpdateReplicaSet: %v", err)
+	}
+	v.mu.Lock()
+	r2 := v.peers["r2"]
+	v.mu.Unlock()
+	r2.SetState(ReplicaDegraded)
+
+	got := v.PeerStatuses()
+	if len(got) != 2 {
+		t.Fatalf("PeerStatuses len=%d want 2: %+v", len(got), got)
+	}
+	if got[0].ReplicaID != "r1" || got[1].ReplicaID != "r2" {
+		t.Fatalf("PeerStatuses not sorted by replica_id: %+v", got)
+	}
+	if got[0].State != "healthy" {
+		t.Fatalf("r1 state=%q want healthy", got[0].State)
+	}
+	if got[1].State != "degraded" {
+		t.Fatalf("r2 state=%q want degraded", got[1].State)
+	}
+	if got[1].Epoch != 3 || got[1].EndpointVersion != 2 || got[1].DataAddr == "" || got[1].SessionID == 0 {
+		t.Fatalf("r2 status missing lineage/address/session: %+v", got[1])
+	}
+}
+
 // --- Test 2: Opt-3 three-assertion pin ---
 
 // TestReplicationVolume_UpdateReplicaSet_RemovePeer_ExecutorTornDown —
