@@ -258,6 +258,12 @@ sys.exit(0 if ok else 1)
 PY
       then
         mv "$out.tmp" "$out"
+        {
+          echo "replica=${replica}"
+          echo "authority_non_primary=true"
+          echo "frontend_primary_ready=false"
+          echo "healthy=false"
+        } >"$ARTIFACT_DIR/status-${replica}-returned.summary"
         return 0
       fi
     fi
@@ -265,6 +271,79 @@ PY
   done
   curl -fsS "http://${status_addr}/status?volume=v1" >"$ARTIFACT_DIR/status-${replica}-returned-last.json" 2>/dev/null || true
   echo "timed out waiting for ${replica} returned non-frontend projection" >&2
+  exit 1
+}
+
+wait_durable_ready() {
+  local status_addr="$1"
+  local replica="$2"
+  local min_epoch="$3"
+  local suffix="$4"
+  local out="$ARTIFACT_DIR/status-durable-${replica}-${suffix}.json"
+  for _ in $(seq 1 240); do
+    if curl -fsS "http://${status_addr}/status/durable?volume=v1" >"$out.tmp" 2>/dev/null; then
+      if python3 - "$out.tmp" "$replica" "$min_epoch" <<'PY'
+import json, sys
+path, replica, min_epoch = sys.argv[1], sys.argv[2], int(sys.argv[3])
+body = json.load(open(path))
+if str(body.get("ReplicaID", "")) != replica:
+    sys.exit(1)
+vols = body.get("Volumes", [])
+if not vols:
+    sys.exit(1)
+for v in vols:
+    if str(v.get("VolumeID", "")) != "v1" or str(v.get("ReplicaID", "")) != replica:
+        continue
+    epoch = int(v.get("Epoch", 0))
+    latched = bool(v.get("Latched"))
+    operational = bool(v.get("Operational"))
+    closed = bool(v.get("Closed"))
+    evidence = str(v.get("Evidence", ""))
+    ok = epoch >= min_epoch and latched and operational and not closed and evidence != ""
+    sys.exit(0 if ok else 1)
+sys.exit(1)
+PY
+      then
+        mv "$out.tmp" "$out"
+        python3 - "$out" "$replica" "$min_epoch" >"$ARTIFACT_DIR/status-durable-${replica}-${suffix}.summary" <<'PY'
+import json, sys
+path, replica, min_epoch = sys.argv[1], sys.argv[2], int(sys.argv[3])
+body = json.load(open(path))
+for v in body.get("Volumes", []):
+    if str(v.get("VolumeID", "")) == "v1" and str(v.get("ReplicaID", "")) == replica:
+        epoch = int(v.get("Epoch", 0))
+        print(f"replica={replica}")
+        print(f"epoch={epoch}")
+        print(f"epoch_gte_{min_epoch}={str(epoch >= min_epoch).lower()}")
+        print(f"latched={str(bool(v.get('Latched'))).lower()}")
+        print(f"operational={str(bool(v.get('Operational'))).lower()}")
+        print(f"closed={str(bool(v.get('Closed'))).lower()}")
+        sys.exit(0)
+sys.exit(1)
+PY
+        return 0
+      fi
+    fi
+    sleep 0.25
+  done
+  curl -fsS "http://${status_addr}/status/durable?volume=v1" >"$ARTIFACT_DIR/status-durable-${replica}-${suffix}-last.json" 2>/dev/null || true
+  echo "timed out waiting for ${replica} durable ready status" >&2
+  exit 1
+}
+
+capture_durable_status() {
+  local status_addr="$1"
+  local replica="$2"
+  local suffix="$3"
+  local out="$ARTIFACT_DIR/status-durable-${replica}-${suffix}.json"
+  for _ in $(seq 1 40); do
+    if curl -fsS "http://${status_addr}/status/durable?volume=v1" >"$out.tmp" 2>/dev/null; then
+      mv "$out.tmp" "$out"
+      return 0
+    fi
+    sleep 0.25
+  done
+  echo "failed to capture ${replica} durable status" >&2
   exit 1
 }
 
@@ -474,7 +553,10 @@ if [[ "$RETURN_R1_AFTER_FAILOVER" == "1" || "$RETURN_R1_AFTER_FAILOVER" == "true
   wait_port "$PORT1"
   wait_status_returned "$R1_STATUS_ADDR" r1
   wait_log_pattern "$ARTIFACT_DIR/blockvolume-r1-returned.log" "authority is now .*not this replica" "r1 returned authority observation"
+  wait_log_pattern "$ARTIFACT_DIR/blockvolume-r1-returned.log" "durable recovered: recovered LSN=" "r1 returned local recovery"
   wait_peer_healthy "$R2_STATUS_ADDR" r1 2
+  capture_durable_status "$R1_STATUS_ADDR" r1 "returned"
+  wait_durable_ready "$R2_STATUS_ADDR" r2 2 "primary-after-r1-return"
   curl -fsS "http://${R2_STATUS_ADDR}/status?volume=v1" >"$ARTIFACT_DIR/status-r2-after-r1-return.json" 2>/dev/null || true
 fi
 

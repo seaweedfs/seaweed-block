@@ -116,27 +116,27 @@ phases:
         threshold: "0"
       - action: grep_log
         node: m02
-        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-returned-chain/returned_failover/status-r1-returned.json"
-        pattern: "\"AuthorityRole\":\"unknown\""
-        save_as: r1_nonprimary_authority_count
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-returned-chain/returned_failover/status-r1-returned.summary"
+        pattern: "^authority_non_primary=true$"
+        save_as: r1_nonprimary_summary_count
       - action: assert_greater
-        actual: "{{ r1_nonprimary_authority_count }}"
+        actual: "{{ r1_nonprimary_summary_count }}"
         threshold: "0"
       - action: grep_log
         node: m02
-        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-returned-chain/returned_failover/status-r1-returned.json"
-        pattern: "\"FrontendPrimaryReady\":false"
-        save_as: r1_frontend_not_ready_count
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-returned-chain/returned_failover/status-r1-returned.summary"
+        pattern: "^frontend_primary_ready=false$"
+        save_as: r1_frontend_not_ready_summary_count
       - action: assert_greater
-        actual: "{{ r1_frontend_not_ready_count }}"
+        actual: "{{ r1_frontend_not_ready_summary_count }}"
         threshold: "0"
       - action: grep_log
         node: m02
-        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-returned-chain/returned_failover/status-r1-returned.json"
-        pattern: "\"Healthy\":false"
-        save_as: r1_not_healthy_count
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-returned-chain/returned_failover/status-r1-returned.summary"
+        pattern: "^healthy=false$"
+        save_as: r1_not_healthy_summary_count
       - action: assert_greater
-        actual: "{{ r1_not_healthy_count }}"
+        actual: "{{ r1_not_healthy_summary_count }}"
         threshold: "0"
       - action: grep_log
         node: m02
@@ -201,6 +201,46 @@ phases:
         save_as: r1_peer_open_count
       - action: assert_greater
         actual: "{{ r1_peer_open_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-returned-chain/returned_failover/blockvolume-r1-returned.log"
+        pattern: "durable recovered: recovered LSN="
+        save_as: r1_returned_local_recovery_count
+      - action: assert_greater
+        actual: "{{ r1_returned_local_recovery_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-returned-chain/returned_failover/blockvolume-r1-returned.log"
+        pattern: "authority is now .*not this replica"
+        save_as: r1_returned_supersede_observed_count
+      - action: assert_greater
+        actual: "{{ r1_returned_supersede_observed_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-returned-chain/returned_failover/status-durable-r2-primary-after-r1-return.summary"
+        pattern: "^replica=r2$"
+        save_as: r2_durable_replica_count
+      - action: assert_greater
+        actual: "{{ r2_durable_replica_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-returned-chain/returned_failover/status-durable-r2-primary-after-r1-return.summary"
+        pattern: "^epoch_gte_2=true$"
+        save_as: r2_durable_epoch_gte_2_count
+      - action: assert_greater
+        actual: "{{ r2_durable_epoch_gte_2_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-returned-chain/returned_failover/status-durable-r2-primary-after-r1-return.summary"
+        pattern: "^operational=true$"
+        save_as: r2_durable_operational_count
+      - action: assert_greater
+        actual: "{{ r2_durable_operational_count }}"
         threshold: "0"
       - action: assert_no_active_iscsi_sessions
         node: m02
