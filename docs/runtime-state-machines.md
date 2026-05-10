@@ -6,6 +6,44 @@ time. It is descriptive, not a normative protocol specification.
 The key idea: `seaweed-block` is not one giant state machine. It is a group of
 smaller loops with explicit ownership boundaries.
 
+## Mini-Protocol Model
+
+The runtime should be treated as a cluster of small protocols running at the
+same time, not as one large protocol layer.
+
+The authority/epoch substrate is shared, but each lifecycle has its own
+protocol rules:
+
+| Mini-protocol | Owns |
+|---|---|
+| Authority | identity, epoch, assignment lineage, stale-owner fencing |
+| Replication | peer probing, degraded/catching-up/healthy state, rebuild eligibility |
+| Frontend iSCSI | login/session, ALUA metadata, SCSI read/write/sync behavior |
+| Frontend NVMe | Connect, Identify, ANA, controller/namespace identity |
+| CSI lifecycle | provision, publish, stage, mount, unstage, delete |
+| TestOps | run status, provenance, cleanup, artifact bundle validation |
+
+Design rule:
+
+```text
+do not create a grand protocol layer until two mini-protocols truly share a
+state transition; instead, make each mini-protocol explicit, observable, and
+test-pinned.
+```
+
+For any lifecycle that can affect safety or operator trust, the expected shape
+is:
+
+1. explicit state names,
+2. narrow transition points,
+3. structured status or artifact evidence,
+4. component tests for illegal transitions,
+5. runner-native gates for OS/Kubernetes/kernel behavior.
+
+This keeps protocol-specific semantics out of the storage engine while still
+preventing hidden state machines from growing inside scattered conditionals and
+log-only assertions.
+
 ## System Map
 
 ```mermaid

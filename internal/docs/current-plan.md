@@ -173,6 +173,32 @@ milestone / long / ambiguous / trust-critical validation -> QA assignment
 
 ## Operating Insights
 
+### The product is a cluster of mini-protocols
+
+The right boundary is not a single generic protocol layer. Seaweed Block has a
+shared authority/epoch substrate plus several smaller protocols running at the
+same time:
+
+- authority: identity, epoch, assignment, stale-owner fencing,
+- replication: peer probe, degraded/catching-up/healthy, rebuild eligibility,
+- iSCSI: session/login, ALUA metadata, SCSI I/O semantics,
+- NVMe: Connect, Identify, ANA, controller and namespace identity,
+- CSI: provision, publish, stage, mount, unstage, delete,
+- TestOps: run lifecycle, provenance, cleanup, bundle validation.
+
+Refactor rule:
+
+```text
+make each mini-protocol explicit, observable, and test-pinned before extracting
+a shared abstraction.
+```
+
+This means new lifecycle work should prefer small state objects, structured
+status endpoints/artifacts, component tests for illegal transitions, and
+runner gates only for the OS/Kubernetes/kernel parts. The `/status/peers`
+returned-replica gate is the reference shape: expose the primary-side recovery
+state directly instead of proving reintegration through log scraping.
+
 ### Integration tests are expensive by design
 
 Linux initiators, mounts, K8s, `iscsiadm`, `nvme-cli`, cleanup state, and
