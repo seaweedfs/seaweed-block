@@ -13,6 +13,41 @@ The intended boundary is:
 - QA can run the same YAML locally or from CI; developers can run it before
   pushing to avoid stale-image / stale-process / scattered-artifact loops.
 
+## Runner Binary
+
+`swblock` is the `sw-test-runner` binary used for Seaweed Block / V3 tests.
+
+- Source repo: `pingqiu/sw-test-runner`
+- Source path: `cmd/swblock/main.go`
+- Build command from the runner repo:
+
+  ```bash
+  go build -o swblock ./cmd/swblock
+  ```
+
+- Windows QA convention: `C:\work\swblock.exe`
+- Linux controller convention: put `swblock` on `PATH`, or set a shell alias to
+  the built binary.
+
+`swblock` is not built from this product repo. If a developer only has
+`seaweed_block` checked out, runner-native scenarios can still be authored and
+statically reviewed here, but `swblock validate`, `swblock run`, and
+`swblock suite` require the external runner binary.
+
+Related runner binaries share the same engine but link different product/action
+sets:
+
+- `swblock`: V3 / Seaweed Block product pack.
+- `weedblock`: V2 product pack.
+- `cmd/sw-test-runner`: kitchen-sink/dev binary.
+
+Recommended local check before running scenarios:
+
+```bash
+swblock list
+swblock validate testops/scenarios/csi-rf1-durable-restart-chain.yaml
+```
+
 Example:
 
 ```bash
