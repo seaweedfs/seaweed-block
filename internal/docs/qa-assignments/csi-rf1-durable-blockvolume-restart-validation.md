@@ -72,7 +72,9 @@ Expected:
   the PVC volume spec with `protocol: "iscsi"`.
 - `reader.log` contains:
   - `/data/demo.bin: OK`.
-- `reader.describe.before-delete.txt` shows `Status: Succeeded`.
+- `reader.describe.before-delete.txt` shows:
+  - `Status:           Succeeded`,
+  - `SuccessfulAttachVolume`.
 - `blockvolume-generated.after-restart.log` contains:
   - `phase":"iscsi-listening"`,
   - `durable primary lineage ensured`.

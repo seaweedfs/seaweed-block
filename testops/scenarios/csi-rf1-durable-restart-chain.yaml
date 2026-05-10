@@ -144,10 +144,18 @@ phases:
       - action: grep_log
         node: m02
         path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-chain/durable_blockvolume_restart/reader.describe.before-delete.txt"
-        pattern: "Status:[[:space:]]+Succeeded"
+        pattern: "Status:           Succeeded"
         save_as: reader_succeeded_describe_count
       - action: assert_greater
         actual: "{{ reader_succeeded_describe_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-chain/durable_blockvolume_restart/reader.describe.before-delete.txt"
+        pattern: "SuccessfulAttachVolume"
+        save_as: reader_attach_success_count
+      - action: assert_greater
+        actual: "{{ reader_attach_success_count }}"
         threshold: "0"
       - action: grep_log
         node: m02
