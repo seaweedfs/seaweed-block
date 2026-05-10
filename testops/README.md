@@ -34,6 +34,19 @@ The intended boundary is:
 statically reviewed here, but `swblock validate`, `swblock run`, and
 `swblock suite` require the external runner binary.
 
+Convenience build helpers are available when the runner source is accessible:
+
+```powershell
+.\internal\tools\build-swblock.ps1
+```
+
+```bash
+bash internal/tools/build-swblock.sh
+```
+
+They build into `.tools/swblock(.exe)`, write `.tools/swblock.path`, and print
+the final binary path.
+
 Related runner binaries share the same engine but link different product/action
 sets:
 

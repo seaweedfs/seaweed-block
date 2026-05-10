@@ -45,6 +45,44 @@ binary.
 The product repo should not vendor the runner binary. The product repo owns
 scenario content; the runner repo owns execution.
 
+## Product-Side Build Helper
+
+This product repo includes a helper for developer/QA convenience. It does not
+vendor the binary; it builds from a local `sw-test-runner` checkout or clones
+the runner repo when allowed.
+
+Windows:
+
+```powershell
+.\internal\tools\build-swblock.ps1
+```
+
+Linux / Git Bash:
+
+```bash
+bash internal/tools/build-swblock.sh
+```
+
+Useful options:
+
+```powershell
+.\internal\tools\build-swblock.ps1 -RunnerRoot C:\work\sw-test-runner
+.\internal\tools\build-swblock.ps1 -NoClone
+```
+
+```bash
+bash internal/tools/build-swblock.sh --runner-root /path/to/sw-test-runner
+bash internal/tools/build-swblock.sh --no-clone
+```
+
+Default output:
+
+```text
+<product-root>/.tools/swblock.exe   # Windows
+<product-root>/.tools/swblock       # Linux
+<product-root>/.tools/swblock.path  # file containing the built binary path
+```
+
 ## Expected Commands
 
 Validate a product-owned scenario:
