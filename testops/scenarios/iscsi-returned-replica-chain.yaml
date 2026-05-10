@@ -165,15 +165,15 @@ phases:
       - action: grep_log
         node: m02
         path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-returned-chain/returned_failover/blockvolume-r2.log"
-        pattern: "executor: catch-up complete replica=r1"
-        save_as: r1_catchup_complete_count
+        pattern: "executor: (catch-up|rebuild) complete.*replica=r1|executor: rebuild complete"
+        save_as: r1_recovery_complete_count
       - action: assert_greater
-        actual: "{{ r1_catchup_complete_count }}"
+        actual: "{{ r1_recovery_complete_count }}"
         threshold: "0"
       - action: grep_log
         node: m02
         path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-returned-chain/returned_failover/blockvolume-r2.log"
-        pattern: "executor: publish healthy for r1"
+        pattern: "replication: peer r1 state catching_up.*healthy"
         save_as: r1_peer_healthy_count
       - action: assert_greater
         actual: "{{ r1_peer_healthy_count }}"

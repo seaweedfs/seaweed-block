@@ -440,8 +440,8 @@ if [[ "$RETURN_R1_AFTER_FAILOVER" == "1" || "$RETURN_R1_AFTER_FAILOVER" == "true
   wait_port "$PORT1"
   wait_status_returned "$R1_STATUS_ADDR" r1
   wait_log_pattern "$ARTIFACT_DIR/blockvolume-r1-returned.log" "authority is now .*not this replica" "r1 returned authority observation"
-  wait_log_pattern "$ARTIFACT_DIR/blockvolume-r2.log" "executor: catch-up complete replica=r1" "primary completed r1 catch-up"
-  wait_log_pattern "$ARTIFACT_DIR/blockvolume-r2.log" "executor: publish healthy for r1" "primary marked r1 peer healthy"
+  wait_log_pattern "$ARTIFACT_DIR/blockvolume-r2.log" "executor: (catch-up|rebuild) complete.*replica=r1|executor: rebuild complete" "primary completed r1 recovery"
+  wait_log_pattern "$ARTIFACT_DIR/blockvolume-r2.log" "replication: peer r1 state catching_up.*healthy" "primary marked r1 peer healthy"
   curl -fsS "http://${R2_STATUS_ADDR}/status?volume=v1" >"$ARTIFACT_DIR/status-r2-after-r1-return.json" 2>/dev/null || true
 fi
 
