@@ -319,6 +319,137 @@ Close bar:
 - stale image / wrong commit / missing child evidence fails before debugging
   product code.
 
+## Workstream G: Operations Layer
+
+Goal: make the system operable, not only testable.
+
+Why this is separate:
+
+- Data-path gates prove that I/O can work.
+- Operations decides whether a user can install, observe, upgrade, repair, and
+  safely clean up the system.
+- Without this layer, the product can pass protocol tests and still be unsafe
+  to run outside our lab.
+
+Scope:
+
+- install / upgrade / uninstall,
+- generated `blockvolume` ownership,
+- durable root management,
+- volume and replica status,
+- frontend path status,
+- rebuild / reintegration progress,
+- degraded/healthy conditions,
+- diagnostics bundle,
+- admin controls such as drain, force-detach, replace replica, and cleanup stale
+  attachment.
+
+Near-term steps:
+
+1. Define the minimum operator-visible status model.
+2. Define the generated-workload ownership model before writing a controller.
+3. Add diagnostic bundle requirements to runner artifacts and product docs.
+4. Keep admin actions explicit and conservative until fencing/reintegration
+   facts are test-pinned.
+
+Close bar:
+
+- users can tell what is healthy, degraded, rebuilding, or stuck,
+- cleanup and uninstall are product-owned, not harness-owned,
+- a failed lab run produces enough status/artifacts for diagnosis without
+  source-level debugging.
+
+## Workstream H: Iterative Release And Feedback Loop
+
+Goal: avoid building an enterprise block product in isolation.
+
+Principle:
+
+- Every hardening milestone should produce a narrow, usable release slice.
+- Public docs must say what works, what is gated, and what is not claimed.
+- TestOps evidence is necessary, but it is not a substitute for real users,
+  issues, installs, and external feedback.
+
+Release slices:
+
+1. Alpha public slice:
+   - single-node k3s,
+   - dynamic PVC,
+   - iSCSI default,
+   - app write/read,
+   - clean teardown,
+   - visible non-claims.
+2. Protocol preview slice:
+   - optional NVMe,
+   - iSCSI/NVMe release-gate evidence,
+   - multipath/failover documented as lab-gated, not production HA.
+3. Beta lab slice:
+   - durable root layout,
+   - restart/reattach survives,
+   - CSI lifecycle hardening,
+   - one-command TestOps validation.
+4. Operations preview slice:
+   - Helm/operator direction,
+   - status conditions,
+   - diagnostics bundle,
+   - upgrade/uninstall path.
+5. HA preview slice:
+   - multi-node attach,
+   - mounted failover,
+   - stale-primary fencing,
+   - returned replica state.
+6. Performance preview slice:
+   - baseline perf matrix,
+   - backend pressure behavior,
+   - optional RDMA/KV-backed data-plane experiment.
+
+Open-source boundary idea:
+
+- Keep the basic product and SSH/YAML runner open enough to earn trust.
+- Keep advanced fleet/agent TestOps, large private scenario corpus, hosted
+  validation, enterprise operations, advanced HA policy, and cloud-scale
+  automation as possible enterprise layers.
+
+Close bar:
+
+- every roadmap phase has a user-visible slice,
+- release notes include non-claims,
+- feedback from real installs influences the next hardening step.
+
+## Later Track: RDMA / Data Plane Acceleration
+
+Goal: use RDMA only after the storage/control boundary is clear.
+
+RDMA can help:
+
+- lower CPU and latency for remote storage I/O,
+- remote replica writes,
+- rebuild / catch-up transfer,
+- remote reads from storage nodes,
+- shared RDMA KV-backed storage engine experiments.
+
+RDMA does not fix:
+
+- ambiguous authority,
+- stale-primary fencing,
+- CSI lifecycle bugs,
+- unbounded WAL/replay behavior,
+- unclear operator status,
+- inefficient storage-engine write amplification.
+
+Roadmap placement:
+
+1. Current plan: define durable state, storage-engine contracts, operations, and
+   recovery facts.
+2. Next storage phase: split frontend/controller/storage responsibilities and
+   define backend pressure/delta/image behavior.
+3. Later acceleration phase: integrate RDMA/KV as an optional data plane and
+   compare against TCP under the same correctness gates.
+
+Non-claim:
+
+- Do not sell RDMA as a substitute for storage-engine or operations hardening.
+
 ## Immediate Sequence
 
 1. Refresh V2 gap audits against the now-closed protocol baseline.
@@ -335,7 +466,9 @@ Close bar:
    workloads.
 4. Define returned-replica state-machine facts and tests.
 5. Add a storage-engine coupling note and contract-test outline.
-6. Keep `protocol-release-gate` as a periodic/release gate, not a default
+6. Add the operations-layer status model and release feedback loop to the
+   public/internal roadmap.
+7. Keep `protocol-release-gate` as a periodic/release gate, not a default
    developer test.
 
 ## QA Assignments To Prepare Next

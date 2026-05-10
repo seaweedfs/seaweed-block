@@ -56,6 +56,18 @@ This is the short internal roadmap. Keep it current and readable.
 - Reproducible release images.
 - Documented operational limits.
 
+### Iterative Release Rule
+
+- Do not wait for the full enterprise block vision before publishing useful
+  slices.
+- Every hardening phase should have a user-visible preview with clear
+  non-claims.
+- TestOps evidence is release evidence, but user installs and issues are the
+  feedback loop.
+- Keep the basic block product and basic runner open enough to build trust;
+  reserve advanced fleet automation, private scenario corpus, hosted
+  validation, and enterprise operations as possible enterprise layers.
+
 ## Priority Tracks
 
 ### Track A: Kubernetes Install And Cleanup
@@ -97,7 +109,16 @@ This is the short internal roadmap. Keep it current and readable.
   the MVP backend.
 - Next: storage-engine boundary tests, backend pressure behavior, and
   smartwal/delta experiments behind explicit gates.
-- Later: semantic storage protocols only after the block core is mature.
+- Later: RDMA/KV-backed data-plane experiments and semantic storage protocols
+  only after the block core is mature.
+
+### Track F: Operations Layer
+
+- Current: operations are split across scripts, TestOps, and product logs.
+- Next: define install/upgrade/uninstall, generated workload ownership,
+  operator-visible status, diagnostics bundle, and conservative admin controls.
+- Later: enterprise operations, hosted validation, fleet automation, and
+  cloud-scale test lifecycle.
 
 ## PR Cadence
 
