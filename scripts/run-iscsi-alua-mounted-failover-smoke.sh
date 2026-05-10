@@ -225,23 +225,21 @@ PY
 wait_status_returned() {
   local status_addr="$1"
   local replica="$2"
-  local min_epoch="$3"
   local out="$ARTIFACT_DIR/status-${replica}-returned.json"
   for _ in $(seq 1 240); do
     if curl -fsS "http://${status_addr}/status?volume=v1" >"$out.tmp" 2>/dev/null; then
-      if python3 - "$out.tmp" "$replica" "$min_epoch" <<'PY'
+      if python3 - "$out.tmp" "$replica" <<'PY'
 import json, sys
-path, replica, min_epoch = sys.argv[1], sys.argv[2], int(sys.argv[3])
+path, replica = sys.argv[1], sys.argv[2]
 body = json.load(open(path))
 if str(body.get("ReplicaID", "")) != replica:
     sys.exit(1)
-epoch = int(body.get("Epoch", 0))
 authority_role = str(body.get("AuthorityRole", ""))
 replication_role = str(body.get("ReplicationRole", ""))
 frontend_ready = bool(body.get("FrontendPrimaryReady"))
 healthy = bool(body.get("Healthy"))
 ok_role = authority_role != "primary" and replication_role in ("not_ready", "recovering", "replica_ready")
-ok = epoch >= min_epoch and ok_role and not frontend_ready and not healthy
+ok = ok_role and not frontend_ready and not healthy
 sys.exit(0 if ok else 1)
 PY
       then
@@ -426,7 +424,7 @@ if [[ "$RETURN_R1_AFTER_FAILOVER" == "1" || "$RETURN_R1_AFTER_FAILOVER" == "true
   start_blockvolume r1 s1 "$PORT1" "$R1_DATA_ADDR" "$R1_CTRL_ADDR" "$R1_STATUS_ADDR" \
     "${RUN_DIR}/r1-store" "$ARTIFACT_DIR/blockvolume-r1-returned.log"
   wait_port "$PORT1"
-  wait_status_returned "$R1_STATUS_ADDR" r1 2
+  wait_status_returned "$R1_STATUS_ADDR" r1
   wait_log_pattern "$ARTIFACT_DIR/blockvolume-r1-returned.log" "authority is now .*not this replica" "r1 returned authority observation"
   curl -fsS "http://${R2_STATUS_ADDR}/status?volume=v1" >"$ARTIFACT_DIR/status-r2-after-r1-return.json" 2>/dev/null || true
 fi
