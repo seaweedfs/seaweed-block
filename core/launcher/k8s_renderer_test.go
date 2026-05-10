@@ -59,6 +59,32 @@ func TestG15d_K8sRenderer_RF2UsesDistinctNamesAndPorts(t *testing.T) {
 	}
 }
 
+func TestG15d_K8sRenderer_CanUseHostPathStateVolume(t *testing.T) {
+	manifests, err := RenderBlockVolumeDeployments(sampleWorkloadPlan(), K8sRenderConfig{
+		MasterAddr:        "m:9333",
+		DurableRootBase:   "/var/lib/sw-block",
+		StateHostPathBase: "/var/lib/sw-block",
+	})
+	if err != nil {
+		t.Fatalf("RenderBlockVolumeDeployments: %v", err)
+	}
+	raw := string(manifests[0].YAML)
+	for _, want := range []string{
+		"hostPath:",
+		"path: /var/lib/sw-block",
+		"type: DirectoryOrCreate",
+		"mountPath: /var/lib/sw-block",
+		"--durable-root=/var/lib/sw-block/pvc-a/r1",
+	} {
+		if !strings.Contains(raw, want) {
+			t.Fatalf("manifest missing %q:\n%s", want, raw)
+		}
+	}
+	if strings.Contains(raw, "emptyDir:") {
+		t.Fatalf("hostPath state volume must not render emptyDir:\n%s", raw)
+	}
+}
+
 func TestG15d_K8sRenderer_RendersNVMeBlockVolumeArgs(t *testing.T) {
 	plan := sampleWorkloadPlan()
 	plan.Protocol = "nvme"

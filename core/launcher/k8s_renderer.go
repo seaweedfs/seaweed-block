@@ -14,6 +14,7 @@ type K8sRenderConfig struct {
 	Image               string
 	MasterAddr          string
 	DurableRootBase     string
+	StateHostPathBase   string
 	RecoveryMode        string
 	OwnerReferenceToPVC bool
 	ISCSICHAP           CHAPSecretRef
@@ -91,7 +92,7 @@ func RenderBlockVolumeDeployments(plan lifecycle.BlockVolumeWorkloadPlan, cfg K8
 							Env:          blockVolumeEnv(cfg),
 							VolumeMounts: []volumeMount{{Name: "state", MountPath: "/var/lib/sw-block"}},
 						}},
-						Volumes: []volume{{Name: "state", EmptyDir: emptyDir{}}},
+						Volumes: []volume{stateVolume(cfg)},
 					},
 				},
 			},
@@ -103,6 +104,16 @@ func RenderBlockVolumeDeployments(plan lifecycle.BlockVolumeWorkloadPlan, cfg K8
 		out = append(out, RenderedManifest{Name: name, YAML: raw})
 	}
 	return out, nil
+}
+
+func stateVolume(cfg K8sRenderConfig) volume {
+	if cfg.StateHostPathBase == "" {
+		return volume{Name: "state", EmptyDir: &emptyDir{}}
+	}
+	return volume{Name: "state", HostPath: &hostPath{
+		Path: strings.TrimRight(cfg.StateHostPathBase, "/"),
+		Type: "DirectoryOrCreate",
+	}}
 }
 
 func ownerReferences(plan lifecycle.BlockVolumeWorkloadPlan, cfg K8sRenderConfig) ([]ownerReference, error) {
@@ -278,8 +289,14 @@ type volumeMount struct {
 }
 
 type volume struct {
-	Name     string   `yaml:"name"`
-	EmptyDir emptyDir `yaml:"emptyDir"`
+	Name     string    `yaml:"name"`
+	EmptyDir *emptyDir `yaml:"emptyDir,omitempty"`
+	HostPath *hostPath `yaml:"hostPath,omitempty"`
 }
 
 type emptyDir struct{}
+
+type hostPath struct {
+	Path string `yaml:"path"`
+	Type string `yaml:"type,omitempty"`
+}

@@ -24,6 +24,7 @@ is to turn that into a credible beta-quality block product.
 - `ref/iscsi-v2-coverage-gap-audit.md`
 - `ref/nvme-v2-coverage-gap-audit.md`
 - `ref/storage-layer-architecture-learning.md`
+- `ref/durable-root-layout-contract.md`
 - `ref/production-readiness-plan.md`
 
 ## Current Baseline
@@ -534,6 +535,9 @@ Non-claim:
      instead of silently preferring one key.
 3. Write the durable root layout contract for generated `blockvolume`
    workloads.
+   - status: started 2026-05-09.
+   - first contract defines `emptyDir` as throwaway smoke mode and hostPath
+     state as durable lab mode.
 4. Define returned-replica state-machine facts and tests.
 5. Add a storage-engine coupling note and contract-test outline.
 6. Add the operations-layer status model and release feedback loop to the
