@@ -41,9 +41,8 @@ Beta-hardening seed evidence:
 
 - `testops/suites/beta-hardening-gate.yaml` exists as the first suite shell for
   the active plan.
-- It composes current executable children only; operations diagnostics,
-  cleanup-residue profile, and `validate-bundle --profile beta-hardening` remain
-  explicit open work.
+- It composes current executable children only; cleanup-residue profile and
+  `validate-bundle --profile beta-hardening` remain explicit open work.
 
 Known product constraints:
 
@@ -655,6 +654,10 @@ Non-claim:
 5. Add a storage-engine coupling note and contract-test outline.
 6. Add the operations-layer status model and release feedback loop to the
    public/internal roadmap.
+   - status: `operations-status-diagnostics-chain` now pins loopback guarding,
+     base status, recovery status, peer status, and durable status as
+     status-server component evidence. Returned-replica frontend/durable split
+     remains owned by `returned-replica-component-gate`.
 7. Keep `protocol-release-gate` as a periodic/release gate, not a default
    developer test.
 

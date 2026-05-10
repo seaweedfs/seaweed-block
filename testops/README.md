@@ -196,6 +196,7 @@ component/restart/reintegration gates:
 - `iscsi-p8-compat-soak-chain`
 - `csi-lifecycle-component-gate`
 - `csi-rf1-durable-restart-chain`
+- `operations-status-diagnostics-chain`
 - `returned-replica-component-gate`
 - `iscsi-returned-replica-chain`
 
@@ -210,5 +211,5 @@ swblock suite `
 ```
 
 This suite is a seed, not the final beta close gate. Before the plan closes it
-still needs an operations diagnostics child, an explicit cleanup residue
-child/profile, and runner-side `validate-bundle --profile beta-hardening`.
+still needs an explicit cleanup residue child/profile and runner-side
+`validate-bundle --profile beta-hardening`.

@@ -15,7 +15,6 @@ mode: chain
 #     testops/suites/beta-hardening-gate.yaml
 #
 # Not yet final-close complete:
-#   - operations-status-diagnostics-chain still needs to be added,
 #   - cleanup-residue-chain still needs a product-owned scenario/profile,
 #   - validate-bundle --profile beta-hardening is a runner-side follow-up.
 
@@ -32,6 +31,8 @@ scenarios:
     path: ../scenarios/csi-lifecycle-component-gate.yaml
   - id: csi-rf1-durable-restart
     path: ../scenarios/csi-rf1-durable-restart-chain.yaml
+  - id: operations-status-diagnostics
+    path: ../scenarios/operations-status-diagnostics-chain.yaml
   - id: returned-replica-component
     path: ../scenarios/returned-replica-component-gate.yaml
   - id: iscsi-returned-replica
