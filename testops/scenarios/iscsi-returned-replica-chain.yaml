@@ -1,0 +1,175 @@
+# Runner-native iSCSI returned-replica reintegration chain.
+#
+# Goal:
+#   Exercise a real RF=2 iSCSI ALUA mounted failover, then restart the old
+#   primary and assert it returns as a non-frontend replica while r2 remains
+#   primary. This is the integration companion to returned-replica-component-gate.
+#
+# Expected invocation:
+#   swblock run testops/scenarios/iscsi-returned-replica-chain.yaml \
+#     --env product_root=/path/to/seaweed_block/on/m02 \
+#     --env ssh_key=/path/to/testdev_key/on/controller
+
+name: iscsi-returned-replica-chain
+timeout: 18m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: pre_clean
+    actions:
+      - action: pre_run_cleanup
+        node: m02
+        kill_patterns: "blockmaster,blockvolume,iscsi-target"
+        unmount: "/tmp/sw-block-iscsi-returned/mnt"
+        nvme_disconnect: "true"
+        iscsi_logout_prefix: "iqn.2026-05.io.seaweedfs"
+      - action: exec
+        node: m02
+        cmd: "rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-returned-chain && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-returned-chain/bin /mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-returned-chain/pin_build /mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-returned-chain/returned_failover"
+      - action: assert_no_active_iscsi_sessions
+        node: m02
+        iqn_substr: "io.seaweedfs"
+      - action: assert_no_processes
+        node: m02
+        pattern: "[/]blockmaster --|[/]blockvolume --|^blockmaster |^blockvolume "
+
+  - name: pin_build
+    actions:
+      - action: exec
+        node: m02
+        timeout: 8m
+        cmd: "cd {{ product_root }} && go build -o /mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-returned-chain/bin/blockmaster ./cmd/blockmaster && go build -o /mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-returned-chain/bin/blockvolume ./cmd/blockvolume"
+      - action: exec
+        node: m02
+        cmd: "cd {{ product_root }} && git rev-parse HEAD > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-returned-chain/pin_build/git.sha && git status --short > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-returned-chain/pin_build/git.status && /mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-returned-chain/bin/blockmaster --version > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-returned-chain/pin_build/blockmaster.version.txt && /mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-returned-chain/bin/blockvolume --version > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-returned-chain/pin_build/blockvolume.version.txt"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-returned-chain/pin_build/blockvolume.version.txt"
+        pattern: "blockvolume revision="
+        save_as: blockvolume_version_count
+      - action: assert_greater
+        actual: "{{ blockvolume_version_count }}"
+        threshold: "0"
+
+  - name: returned_failover
+    actions:
+      - action: exec
+        node: m02
+        timeout: 10m
+        cmd: "cd {{ product_root }} && bash scripts/run-iscsi-alua-mounted-failover-smoke.sh {{ product_root }}"
+        env.SW_BLOCK_ARTIFACT_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-returned-chain/returned_failover"
+        env.SW_BLOCK_BIN_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-returned-chain/bin"
+        env.SW_BLOCK_ISCSI_FAILOVER_WORK_DIR: "/tmp/sw-block-iscsi-returned"
+        env.SW_BLOCK_RETURN_R1_AFTER_FAILOVER: "1"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-returned-chain/returned_failover/run.log"
+        pattern: "\\[iscsi-failover\\] PASS:"
+        save_as: failover_pass_count
+      - action: assert_greater
+        actual: "{{ failover_pass_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-returned-chain/returned_failover/run.log"
+        pattern: "restart returned r1 after r2 promotion"
+        save_as: r1_return_phase_count
+      - action: assert_greater
+        actual: "{{ r1_return_phase_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-returned-chain/returned_failover/pre-check-after-failover.log"
+        pattern: "/pre.bin: OK"
+        save_as: pre_checksum_count
+      - action: assert_greater
+        actual: "{{ pre_checksum_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-returned-chain/returned_failover/post-check.log"
+        pattern: "/post.bin: OK"
+        save_as: post_checksum_count
+      - action: assert_greater
+        actual: "{{ post_checksum_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-returned-chain/returned_failover/status-r2-healthy.json"
+        pattern: "\"AuthorityRole\":\"primary\""
+        save_as: r2_primary_count
+      - action: assert_greater
+        actual: "{{ r2_primary_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-returned-chain/returned_failover/status-r1-returned.json"
+        pattern: "\"AuthorityRole\":\"unknown\""
+        save_as: r1_nonprimary_authority_count
+      - action: assert_greater
+        actual: "{{ r1_nonprimary_authority_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-returned-chain/returned_failover/status-r1-returned.json"
+        pattern: "\"FrontendPrimaryReady\":false"
+        save_as: r1_frontend_not_ready_count
+      - action: assert_greater
+        actual: "{{ r1_frontend_not_ready_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-returned-chain/returned_failover/status-r1-returned.json"
+        pattern: "\"Healthy\":false"
+        save_as: r1_not_healthy_count
+      - action: assert_greater
+        actual: "{{ r1_not_healthy_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-returned-chain/returned_failover/status-r2-after-r1-return.json"
+        pattern: "\"AuthorityRole\":\"primary\""
+        save_as: r2_still_primary_count
+      - action: assert_greater
+        actual: "{{ r2_still_primary_count }}"
+        threshold: "0"
+      - action: assert_no_active_iscsi_sessions
+        node: m02
+        iqn_substr: "io.seaweedfs"
+      - action: assert_no_processes
+        node: m02
+        pattern: "[/]blockmaster --|[/]blockvolume --|^blockmaster |^blockvolume "
+
+  - name: final_asserts
+    actions:
+      - action: assert_no_active_iscsi_sessions
+        node: m02
+        iqn_substr: "io.seaweedfs"
+      - action: assert_no_processes
+        node: m02
+        pattern: "[/]blockmaster --|[/]blockvolume --|^blockmaster |^blockvolume "
+
+  - name: collect_and_cleanup
+    always: true
+    actions:
+      - action: pre_run_cleanup
+        node: m02
+        kill_patterns: "blockmaster,blockvolume,iscsi-target"
+        unmount: "/tmp/sw-block-iscsi-returned/mnt"
+        nvme_disconnect: "true"
+        iscsi_logout_prefix: "iqn.2026-05.io.seaweedfs"
+      - action: collect_path
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-returned-chain"
+        name: "remote-phases"
+        ignore_error: true
