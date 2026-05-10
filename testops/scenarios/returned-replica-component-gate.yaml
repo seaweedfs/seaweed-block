@@ -1,8 +1,9 @@
 # Runner-native returned-replica component gate.
 #
 # Goal:
-#   Run fast host/volume component tests that pin RF=2/3 returned-replica
-#   safety before adding expensive Kubernetes or initiator scenarios.
+#   Run fast host/volume component tests that pin returned-replica frontend
+#   safety semantics before adding expensive RF=2/3 Kubernetes or initiator
+#   scenarios.
 #
 # Expected invocation:
 #   swblock run testops/scenarios/returned-replica-component-gate.yaml \
@@ -41,7 +42,7 @@ phases:
       - action: exec
         node: m02
         timeout: 3m
-        cmd: "cd {{ product_root }} && bash -o pipefail -c 'go test -v ./core/host/volume | tee /mnt/smb/work/share/g15d-k8s/{{ run_id }}-returned-replica-component/core-host-volume-go-test.log'"
+        cmd: "cd {{ product_root }} && bash -o pipefail -c 'go test -count=1 -v ./core/host/volume | tee /mnt/smb/work/share/g15d-k8s/{{ run_id }}-returned-replica-component/core-host-volume-go-test.log'"
       - action: grep_log
         node: m02
         path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-returned-replica-component/core-host-volume-go-test.log"
