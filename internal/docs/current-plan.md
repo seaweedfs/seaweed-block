@@ -81,13 +81,13 @@ This plan is complete when:
 Purpose: determine whether the current branch already passes the real initiator
 path.
 
-Status: Linux/m02 baseline is green at product commit `0da42ff`.
+Status: Linux/m02 baseline is green at product commit `9e8ffab`.
 
 Evidence:
 
 - Runner command:
   `swblock run testops/scenarios/iscsi-os-initiator-compat-chain.yaml`.
-- Run ID: `20260511-010537-3e2b`.
+- Run ID: `20260511-014714-eca5`.
 - Result: `PASS` in `1m13s`, `22/22` actions passed.
 - Workload: one Linux open-iscsi attach, `mkfs.ext4`, mount, checksum
   write/read, `fio` randrw for 60 seconds against a 256 MiB target.
@@ -109,6 +109,8 @@ Harness note:
 - Commit `8e220e5` fixed the gate by using dmesg timestamps and reran green.
 - Commit `0da42ff` added target-only support for external initiator
   validation and reran the Linux gate green.
+- Commit `9e8ffab` added `target-ready.env` for QA orchestration and reran
+  the Linux gate green.
 
 Tasks:
 
@@ -206,7 +208,8 @@ Support added:
   an SSH local port-forward. The product guard still refuses unauthenticated
   non-loopback target binds, which is the safer default.
 - Target-only startup check passed on m02 with `SW_BLOCK_ISCSI_TARGET_ONLY=1`
-  and `SW_BLOCK_ISCSI_TARGET_HOLD_SECONDS=1`.
+  and `SW_BLOCK_ISCSI_TARGET_HOLD_SECONDS=1`; it emitted
+  `target-ready.env` with IQN, portal, listener, and artifact path.
 
 Final pass must state:
 
