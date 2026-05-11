@@ -52,7 +52,7 @@ phases:
       - action: exec
         node: m02
         timeout: 3m
-        cmd: "cd {{ product_root }} && bash -o pipefail -c 'go test -count=1 -json -run \"^TestBuildVolumeStatusReport_(ComposesExistingStatusSurfaces|JSONKeepsZeroValuedFrontendIdentity|UsesMasterFrontendFacts|MarksUnavailableInputsExplicitly|CopiesInputSlices)$\" ./core/ops | tee /mnt/smb/work/share/g15d-k8s/{{ run_id }}-ops-volume-status-report/report-component-go-test.jsonl'"
+        cmd: "cd {{ product_root }} && bash -o pipefail -c 'SW_BLOCK_OPS_STATUS_REPORT_OUT=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-ops-volume-status-report/volume-status-report.json go test -count=1 -json -run \"^TestBuildVolumeStatusReport_(ComposesExistingStatusSurfaces|JSONKeepsZeroValuedFrontendIdentity|UsesMasterFrontendFacts|MarksUnavailableInputsExplicitly|CopiesInputSlices|WritesSampleReportArtifact)$\" ./core/ops | tee /mnt/smb/work/share/g15d-k8s/{{ run_id }}-ops-volume-status-report/report-component-go-test.jsonl'"
       - action: grep_log
         node: m02
         path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-ops-volume-status-report/report-component-go-test.jsonl"
@@ -92,6 +92,46 @@ phases:
         save_as: report_copy_count
       - action: assert_greater
         actual: "{{ report_copy_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-ops-volume-status-report/report-component-go-test.jsonl"
+        pattern: "\"Action\":\"pass\".*\"Test\":\"TestBuildVolumeStatusReport_WritesSampleReportArtifact\""
+        save_as: report_artifact_test_count
+      - action: assert_greater
+        actual: "{{ report_artifact_test_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-ops-volume-status-report/volume-status-report.json"
+        pattern: "\"schema_version\": \"1.0\""
+        save_as: report_artifact_schema_count
+      - action: assert_greater
+        actual: "{{ report_artifact_schema_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-ops-volume-status-report/volume-status-report.json"
+        pattern: "\"volume_id\": \"v1\""
+        save_as: report_artifact_volume_count
+      - action: assert_greater
+        actual: "{{ report_artifact_volume_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-ops-volume-status-report/volume-status-report.json"
+        pattern: "\"lun\": 0"
+        save_as: report_artifact_lun_count
+      - action: assert_greater
+        actual: "{{ report_artifact_lun_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-ops-volume-status-report/volume-status-report.json"
+        pattern: "\"last_error\": \"unavailable\""
+        save_as: report_artifact_unavailable_count
+      - action: assert_greater
+        actual: "{{ report_artifact_unavailable_count }}"
         threshold: "0"
 
   - name: final_asserts

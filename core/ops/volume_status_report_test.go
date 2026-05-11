@@ -2,6 +2,9 @@ package ops
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -251,6 +254,102 @@ func TestBuildVolumeStatusReport_CopiesInputSlices(t *testing.T) {
 	}
 	if report.Replication.Peers[0].ReplicaID != "r2" || report.Durable[0].VolumeID != "v1" {
 		t.Fatalf("peer/durable copy mismatch: peers=%+v durable=%+v", report.Replication.Peers, report.Durable)
+	}
+}
+
+func TestBuildVolumeStatusReport_WritesSampleReportArtifact(t *testing.T) {
+	out := os.Getenv("SW_BLOCK_OPS_STATUS_REPORT_OUT")
+	if out == "" {
+		out = filepath.Join(t.TempDir(), "volume-status-report.json")
+	}
+
+	report := BuildVolumeStatusReport(VolumeStatusReportInput{
+		CapturedAt: time.Date(2026, 5, 11, 19, 0, 0, 0, time.UTC),
+		Source: ReportSource{
+			Component: "core/ops",
+			Host:      "m02",
+			Scenario:  "operations-volume-status-report-component-gate",
+		},
+		ProductRevision: "product-for-report-artifact",
+		RunnerRevision:  "runner-for-report-artifact",
+		MasterStatus: &control.StatusResponse{
+			VolumeId:        "v1",
+			ReplicaId:       "r1",
+			Epoch:           7,
+			EndpointVersion: 2,
+			Assigned:        true,
+			Frontends: []*control.FrontendTarget{
+				{Protocol: "iscsi", Addr: "127.0.0.1:3260", Iqn: "iqn.2026-05.io.seaweedfs:v1", Lun: 0},
+				{Protocol: "nvme", Addr: "127.0.0.1:4420", Nqn: "nqn.2026-05.io.seaweedfs:v1", Nsid: 1},
+			},
+		},
+		LocalStatus: &hostvolume.StatusProjection{
+			Projection: frontend.Projection{
+				VolumeID:        "v1",
+				ReplicaID:       "r1",
+				Epoch:           7,
+				EndpointVersion: 2,
+				Healthy:         true,
+			},
+			FrontendPrimaryReady: true,
+			AuthorityRole:        hostvolume.AuthorityRolePrimary,
+			ReplicationRole:      hostvolume.ReplicationRoleNone,
+		},
+		Peers: []replication.ReplicaPeerStatus{
+			{ReplicaID: "r2", State: "healthy", Epoch: 7, EndpointVersion: 2},
+		},
+		Durable: []durable.VolumeStatus{
+			{
+				VolumeID:        "v1",
+				Impl:            "smartwal",
+				Path:            "/var/lib/sw-block/v1.blk",
+				ReplicaID:       "r1",
+				Epoch:           7,
+				EndpointVersion: 2,
+				Latched:         true,
+				Operational:     true,
+			},
+		},
+	})
+
+	raw, err := json.MarshalIndent(report, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal report: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(out), 0o755); err != nil {
+		t.Fatalf("mkdir artifact dir: %v", err)
+	}
+	if err := os.WriteFile(out, append(raw, '\n'), 0o644); err != nil {
+		t.Fatalf("write report artifact: %v", err)
+	}
+
+	written, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatalf("read report artifact: %v", err)
+	}
+	var decoded VolumeStatusReport
+	if err := json.Unmarshal(written, &decoded); err != nil {
+		t.Fatalf("decode report artifact: %v", err)
+	}
+	if decoded.SchemaVersion != VolumeStatusReportSchemaVersion {
+		t.Fatalf("schema_version=%q want %q", decoded.SchemaVersion, VolumeStatusReportSchemaVersion)
+	}
+	if decoded.Volume.VolumeID != "v1" || decoded.Authority.AuthorityRole != hostvolume.AuthorityRolePrimary {
+		t.Fatalf("decoded report lost key fields: %+v", decoded)
+	}
+
+	text := string(written)
+	for _, want := range []string{
+		`"schema_version": "1.0"`,
+		`"volume_id": "v1"`,
+		`"lun": 0`,
+		`"nsid": 1`,
+		`"last_error": "unavailable"`,
+		`"iscsi_sessions": []`,
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("report artifact missing %s:\n%s", want, text)
+		}
 	}
 }
 
