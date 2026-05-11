@@ -104,6 +104,25 @@ Reason: this sits between pure protocol tests and full OS initiator/suite
 gates. It exercises durable storage plus frontend session lifecycle without
 requiring a long lab run.
 
+First delivery:
+
+- Added `TestISCSI_L2DurableRestartReconnect_PreservesData`.
+- Layer: subprocess L2, no Kubernetes, no OS initiator.
+- Path:
+  - start single-slot `blockmaster`,
+  - start `blockvolume` with `--durable-root`, `walstore`, and iSCSI,
+  - write one 4 KiB block through an iSCSI session,
+  - stop `blockvolume`,
+  - restart `blockvolume` with the same durable root and same iSCSI address,
+  - reconnect over iSCSI and read the same LBA,
+  - assert byte equality.
+- Targeted run:
+  `go test -tags subprocess ./cmd/blockvolume -run TestISCSI_L2DurableRestartReconnect_PreservesData -count=1 -v`
+- Result: PASS in `18.15s`.
+- Adjacent run:
+  `go test -tags subprocess ./cmd/blockvolume -run 'TestISCSI_L2DurableRestartReconnect_PreservesData|TestG8B_L2PrimaryKill_NewPrimaryReadsAcknowledgedISCSIWrite|TestG15a_BlockvolumeReportsFrontendTargetsToMasterStatus' -count=1`
+- Result: PASS in `52.344s`.
+
 ## Workstream B: Existing Gate Hygiene
 
 Purpose: keep the expensive gates useful but not overused.
