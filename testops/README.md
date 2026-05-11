@@ -61,6 +61,27 @@ swblock list
 swblock validate testops/scenarios/csi-rf1-durable-restart-chain.yaml
 ```
 
+## Which Gate To Run
+
+Use the smallest gate that can prove the contract you changed.
+
+| Change type | Default gate | Why |
+| --- | --- | --- |
+| Package-local logic, parser, renderer, state-machine helper | `go test -count=1 ./<touched-package>` | Fastest feedback; no m02 or runner dependency. |
+| CSI protocol propagation, lifecycle persistence, launcher render shape | `swblock run testops/scenarios/nvme-p5-protocol-component-gate.yaml` | Proves the known NVMe/iSCSI protocol-shape contracts with a runner bundle in seconds. |
+| RF=1 restart contract, durable-root/status manifest shape | `swblock run testops/scenarios/csi-rf1-durable-restart-component-gate.yaml` | Proves restart/recovery contract shape without a full K8s restart. |
+| Kernel initiator, k3s, mounted filesystem, failover, or stale-session behavior | The matching child chain, for example `nvme-p5-csi-protocol-chain` or `csi-rf1-durable-restart-chain` | These require real Linux/K8s/initiator behavior. |
+| Milestone readiness or cross-protocol release confidence | `swblock suite testops/suites/beta-hardening-gate.yaml` plus `swblock validate-bundle --profile beta-hardening` | Slow, evidence-heavy gate. Use for release/milestone claims, not first debugging. |
+
+Default ownership:
+
+- Developers run unit/component tests, fast runner-native component gates, and
+  single-child chains while iterating.
+- QA runs full-suite repeatability, long soak, ambiguous lab failures, and
+  independent milestone validation.
+- If QA would only execute a single known command and return stdout, run it
+  yourself and reserve QA for scenario design or trust-critical validation.
+
 Example:
 
 ```bash
@@ -233,5 +254,17 @@ swblock suite `
   C:/work/seaweed_block/testops/suites/beta-hardening-gate.yaml
 ```
 
-This suite is a seed, not the final beta close gate. Before the plan closes it
-still needs runner-side `validate-bundle --profile beta-hardening`.
+Repeatability evidence:
+
+- product commit:
+  `8822f20e91c2b88727ead9e49f9bf75eec28c791`
+- runner commit:
+  `cf65daaf2ce5cf500e1efa48b411f7cb66dbac0b`
+- run 1: `20260511-031605-8258`, PASS, `21m46s`,
+  `validate-bundle --profile beta-hardening` VALID.
+- run 2: `20260511-040412-ac38`, PASS, `22m55s`,
+  `validate-bundle --profile beta-hardening` VALID.
+- no manual cleanup between runs; final residue audit clean.
+
+Use this suite for milestone readiness or release-candidate confidence. Do not
+use it as the first debug loop for a package-level change.

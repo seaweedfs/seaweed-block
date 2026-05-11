@@ -129,6 +129,14 @@ Deliverable:
 - Add or update docs so this selection rule is visible from `testops/README.md`
   and this plan.
 
+Implementation:
+
+- `testops/README.md` now includes a "Which Gate To Run" table that maps
+  package-local, fast component, child integration, and milestone/release
+  changes to the smallest appropriate gate.
+- The README also records the beta-hardening repeatability evidence so the
+  full suite is clearly a milestone gate, not the default developer loop.
+
 ## Workstream C: Operations Contract Selection
 
 Purpose: start the operations layer from observable facts, not operator code.
