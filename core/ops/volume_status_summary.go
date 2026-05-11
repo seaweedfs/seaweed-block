@@ -22,10 +22,8 @@ const (
 // unavailable health evidence is not a clean pass.
 func ClassifyVolumeStatusReport(r VolumeStatusReport) int {
 	issues := VolumeStatusReportIssues(r)
-	for _, issue := range issues {
-		if strings.HasPrefix(issue, "invalid:") {
-			return VolumeStatusExitInvalid
-		}
+	if hasInvalidIssue(issues) {
+		return VolumeStatusExitInvalid
 	}
 	if len(issues) > 0 {
 		return VolumeStatusExitUnhealthy
@@ -38,10 +36,9 @@ func ClassifyVolumeStatusReport(r VolumeStatusReport) int {
 func RenderVolumeStatusSummary(r VolumeStatusReport) string {
 	issues := VolumeStatusReportIssues(r)
 	status := "ok"
-	switch ClassifyVolumeStatusReport(r) {
-	case VolumeStatusExitInvalid:
+	if hasInvalidIssue(issues) {
 		status = "invalid"
-	case VolumeStatusExitUnhealthy:
+	} else if len(issues) > 0 {
 		status = "unhealthy"
 	}
 
@@ -101,6 +98,12 @@ func VolumeStatusReportIssues(r VolumeStatusReport) []string {
 	}
 	if r.ProductRevision == "" || r.ProductRevision == Unavailable {
 		issues = append(issues, "product_revision unavailable")
+	}
+	for _, errText := range r.CollectionErrors {
+		if errText == "" {
+			continue
+		}
+		issues = append(issues, fmt.Sprintf("collection_error: %s", errText))
 	}
 	if r.Authority.AuthorityRole == "" || r.Authority.AuthorityRole == Unavailable {
 		issues = append(issues, "authority_role unavailable")
@@ -172,6 +175,15 @@ func VolumeStatusReportIssues(r VolumeStatusReport) []string {
 		issues = append(issues, fmt.Sprintf("residue storage_paths=%d", n))
 	}
 	return issues
+}
+
+func hasInvalidIssue(issues []string) bool {
+	for _, issue := range issues {
+		if strings.HasPrefix(issue, "invalid:") {
+			return true
+		}
+	}
+	return false
 }
 
 func emptyAsDash(s string) string {

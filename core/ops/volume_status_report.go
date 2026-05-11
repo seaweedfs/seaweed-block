@@ -41,16 +41,17 @@ type ReportSource struct {
 }
 
 type VolumeStatusReport struct {
-	SchemaVersion   string            `json:"schema_version"`
-	CapturedAt      time.Time         `json:"captured_at"`
-	Source          ReportSource      `json:"source"`
-	ProductRevision string            `json:"product_revision"`
-	RunnerRevision  string            `json:"runner_revision,omitempty"`
-	Volume          VolumeReport      `json:"volume"`
-	Authority       AuthorityReport   `json:"authority"`
-	Replication     ReplicationReport `json:"replication"`
-	Durable         []DurableReport   `json:"durable"`
-	Residue         ResidueReport     `json:"residue"`
+	SchemaVersion    string            `json:"schema_version"`
+	CapturedAt       time.Time         `json:"captured_at"`
+	Source           ReportSource      `json:"source"`
+	ProductRevision  string            `json:"product_revision"`
+	RunnerRevision   string            `json:"runner_revision,omitempty"`
+	CollectionErrors []string          `json:"collection_errors,omitempty"`
+	Volume           VolumeReport      `json:"volume"`
+	Authority        AuthorityReport   `json:"authority"`
+	Replication      ReplicationReport `json:"replication"`
+	Durable          []DurableReport   `json:"durable"`
+	Residue          ResidueReport     `json:"residue"`
 }
 
 type VolumeReport struct {

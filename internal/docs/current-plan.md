@@ -118,6 +118,22 @@ Milestone gate only if needed:
     defines the stable rendering/classification contract the operator-facing
     command will use.
 
+2026-05-11 follow-up:
+
+- Added `WriteVolumeStatusArtifacts(ctx, dir, collector)` as the reusable
+  command/script seam.
+- It writes:
+  - `volume-status-report.json`
+  - `volume-status-summary.txt`
+- It preserves partial report artifacts when a read-only source fails, records
+  the collection error in JSON, and includes the same error in the summary
+  issue list.
+- Validation:
+  - `go test ./core/ops -count=1`
+- Non-claim:
+  - This still does not open network connections or collect from a live
+    blockvolume/master. Live source wiring is the next slice.
+
 ## Delivery Gate
 
 This plan is complete when:
