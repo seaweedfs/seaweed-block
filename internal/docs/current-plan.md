@@ -52,6 +52,17 @@ Closed phase 4 evidence:
   - field gates:
     `schema_version=1.0`, `volume_id=v1`, `lun=0`, and
     `last_error=unavailable`.
+- `operations-volume-status-report-component-gate` after adding JSON schema
+  shape pinning:
+  - run id:
+    `20260511-000155-b27d`,
+  - product commit:
+    `171d872`,
+  - result: PASS,
+  - wall clock: `1.226s`,
+  - actions: `30/30`,
+  - added gate:
+    `TestBuildVolumeStatusReport_JSONSchemaShapeIsStable`.
 - `swblock validate` passes for all scenario YAMLs.
 
 Relevant references:
@@ -142,6 +153,20 @@ Tasks:
 - Decide whether to keep direct DTO imports or introduce a smaller
   `ReportInput` DTO layer owned by `core/ops`.
 - Keep all schema changes append-only.
+
+Implementation status:
+
+- `TestBuildVolumeStatusReport_JSONSchemaShapeIsStable` pins the schema-1.0
+  operator-facing JSON keys for:
+  - top-level report metadata,
+  - source,
+  - volume and frontend identity,
+  - authority state,
+  - replication peer state,
+  - durable lineage,
+  - residue sections.
+- The fast runner gate includes this test, so accidental key rename/removal is
+  caught before any integration suite.
 
 ## Workstream D: Operations Non-Claims
 
