@@ -1,692 +1,238 @@
-# Current Plan: Beta Hardening, V2 Parity, And TestOps Scale
+# Current Plan: Beta Seed Stabilization And Cost Reduction
 
-Status: active.
+Status: active. Started after the first full `beta-hardening-gate` PASS on
+2026-05-11.
 
-This plan starts after the iSCSI/NVMe protocol-readiness slice closed on
-2026-05-09. The project now has release-gated protocol frontends; the next work
-is to turn that into a credible beta-quality block product.
+The previous beta-hardening seed plan is archived in
+`finished-plans/phase2_finishedplan_beta_hardening_seed.md`.
 
-## Decision
+## Goal
 
-- Treat iSCSI and NVMe-oF as guarded product capabilities, not active bring-up.
-- Use V2 as a coverage and behavior inventory, not as code to blindly copy.
-- Move expensive Linux/K8s/kernel validation into runner-native TestOps suites.
-- Keep default `go test` focused on unit and component seams.
-- Split storage-engine responsibilities before pursuing hardware acceleration
-  or application-semantic protocols.
+Turn the first green beta seed suite into a stable, repeatable, lower-cost
+release gate.
 
-## Reference Inputs
-
-- `product-roadmap.md`
-- `docs/roadmap.md`
-- `finished-plans/phase1_finishedplan_frontend_protocol_readiness.md`
-- `ref/v2-frontend-protocol-gap-audit.md`
-- `ref/iscsi-v2-coverage-gap-audit.md`
-- `ref/nvme-v2-coverage-gap-audit.md`
-- `ref/storage-layer-architecture-learning.md`
-- `ref/durable-root-layout-contract.md`
-- `ref/production-readiness-plan.md`
+This plan is about proof quality and iteration speed, not adding another large
+feature surface.
 
 ## Current Baseline
 
-Closed protocol evidence:
+Closed evidence:
 
-- `iscsi-p6-alua-failover-chain`: PASS.
-- `nvme-p4-multipath-failover-chain`: PASS.
-- `nvme-p5-csi-protocol-chain`: PASS.
-- `iscsi-p8-compat-soak-chain`: PASS.
-- Runner-native `protocol-release-gate` suite: PASS and bundle-valid.
+- `protocol-release-gate`: PASS and bundle-valid.
+- `beta-hardening-gate`: first full PASS.
+- Product commit for first beta green:
+  `8822f20e91c2b88727ead9e49f9bf75eec28c791`.
+- Runner commit for first beta green:
+  `cf65daaf2ce5cf500e1efa48b411f7cb66dbac0b`.
+- QA run id: `20260511-031605-8258`.
+- `swblock validate-bundle --profile beta-hardening --expect-commit 8822f20`:
+  VALID.
 
-Beta-hardening seed evidence:
+## Delivery Gate
 
-- `testops/suites/beta-hardening-gate.yaml` exists as the first suite shell for
-  the active plan.
-- It composes current executable children only; runner-side
-  `validate-bundle --profile beta-hardening` remains explicit open work.
+This plan is complete when:
 
-Known product constraints:
+1. `beta-hardening-gate` passes twice back-to-back without manual cleanup.
+2. The second bundle validates with `--profile beta-hardening`.
+3. The second run records the same expected product commit and runner commit.
+4. The final `cleanup-residue` child passes.
+5. Any repeatability failure is either fixed or documented as a scoped product
+   follow-up with a lower-level test.
+6. The beta suite cost map is documented with at least one concrete
+   componentization target for the next plan.
 
-- Evidence is still primarily single-node lab evidence.
-- Generated `blockvolume` workloads still depend on alpha/harness paths in
-  several flows.
-- `walstore` is still the MVP backend.
-- Durable state layout, restart semantics, returned-replica lifecycle, and
-  operator ownership are not yet beta-complete.
-- Protocol gates prove frontend correctness; they do not prove broad distro
-  compatibility, long soak, performance, upgrade safety, or production HA.
+If the second run fails and a fix changes the product or runner commit, the
+repeatability clock restarts at the new commit pair. The close claim must always
+be two consecutive PASS runs at the same product commit and runner commit.
 
-## Whole-Plan Delivery Gate
+## Immediate Next Step
 
-The plan is delivered when Seaweed Block moves from protocol-release-gated to
-beta-hardening-release-gated.
-
-Final suite:
+Assign QA one repeatability run:
 
 ```text
-beta-hardening-gate
+swblock suite --results-dir <beta-root> \
+  --env product_root=/tmp/seaweed-block-plan-roadmap-refresh-devrun \
+  --env ssh_key=C:/work/dev_server/testdev_key \
+  testops/suites/beta-hardening-gate.yaml
+
+swblock validate-bundle --profile beta-hardening \
+  --expect-commit 8822f20 \
+  <suite-run-dir>
 ```
 
-Required child gates:
+Acceptance:
 
-1. `protocol-release-gate`
-   - iSCSI P6,
-   - NVMe P4,
-   - NVMe P5,
-   - iSCSI P8.
-2. `csi-lifecycle-component-gate`
-   - adversarial CSI controller/node component tests.
-   - component-level iSCSI publish/stage/publish/unpublish/unstage/reattach
-     cycles use fresh target facts and leave no stale staged identity.
-   - real master/frontend refresh, persisted node restart state, NVMe, and OS
-     initiator behavior remain covered by runner integration gates.
-3. `durable-restart-reattach-chain`
-   - RF=1 dynamic PVC data survives `blockvolume` restart / reattach.
-   - master re-observes the restarted replica and refreshes frontend target
-     facts so CSI can rediscover/reattach.
-4. `returned-replica-reintegration-chain`
-   - component gate first: returned supporting replicas may become
-     `replica_ready`, but frontend `Healthy=false` and durable backend I/O is
-     fenced unless this replica owns current authority.
-   - RF=2/3 promotion, stale-primary fencing, returned replica state, and
-     catch-up eligibility are explicit.
-5. `operations-status-diagnostics-chain`
-   - status, diagnostics, and cleanup evidence exist.
-6. `cleanup-residue-chain`
-   - no iSCSI sessions, NVMe subsystems, V3 processes, or K8s residue.
-   - hostPath residue audit records all `/var/lib/sw-block` entries, but only
-     fails on runner-owned `testops-*` durable roots to avoid old manual files
-     masking current cleanup behavior.
+- suite status: PASS,
+- 10/10 children PASS,
+- bundle validator: VALID,
+- `product_commit=8822f20e91c2b88727ead9e49f9bf75eec28c791`,
+- `runner_commit=cf65daaf2ce5cf500e1efa48b411f7cb66dbac0b`,
+- no manual cleanup between the prior green run and this run,
+- final cleanup residue child passes.
 
-Pass criteria:
+## Workstream A: Repeatability Stamp
 
-- all child gates PASS,
-- suite-level `status.json` and `result.json` are consistent,
-- `swblock validate-bundle --profile beta-hardening` returns VALID,
-- shared product commit and runner commit are pinned,
-- artifacts include status and diagnostic evidence,
-- suite passes twice back-to-back in a clean lab,
-- docs include claims and non-claims.
+Purpose: prove the suite is stable enough to be a milestone gate.
 
-## TDD / Anti-Drift Rule
+Tasks:
 
-Every workstream must map to executable proof.
+- Wait for QA's second back-to-back beta run.
+- If PASS:
+  - record the second run id and wall clock here,
+  - mark the seed suite stable,
+  - keep `beta-hardening-gate` as the milestone suite.
+- If FAIL:
+  - classify as product, scenario, runner, or lab residue,
+  - reproduce with the smallest child chain possible,
+  - add a component test if the failure is not inherently Linux/K8s/kernel-only,
+  - rerun only the failed child before asking QA for the full suite again.
 
-Rules:
+## Workstream B: Suite Cost Map
 
-- If behavior can be checked in unit/component tests, do not start with m01/m02.
-- If Linux/K8s/kernel behavior is required, create or update a TestOps scenario
-  before relying on manual QA.
-- If a single-step TestOps validation is enough and the runner binary plus lab
-  access are available, developer should run it first and use the feedback
-  immediately.
-- Every non-trivial slice gets an adversarial review before it is treated as
-  complete. The reviewer should challenge whether the test proves the claim,
-  whether field-level artifacts exist, whether QA is actually needed, and
-  whether an integration check can be replaced by a component check.
-- Every QA-found regression gets a component test unless the behavior is only
-  observable through an OS/kernel/lab surface.
-- Every runner suite must assert fields and artifacts, not only a PASS line.
-- Every plan item maps to at least one of:
-  - component test,
-  - `subprocess` test,
-  - runner scenario,
-  - bundle validator check,
-  - documented non-claim.
+Purpose: prevent the release gate from becoming the default developer loop.
 
-Gate matrix:
+Current beta suite cost is about 20-22 minutes.
 
-| Plan area | Local proof | Release proof |
-|---|---|---|
-| CSI lifecycle | `go test ./core/csi` adversarial cases | CSI lifecycle runner chain |
-| Protocol readiness | protocol component + field tests | `protocol-release-gate` |
-| Durable root/restart | storage contract tests | RF=1 restart/reattach runner chain with master re-observation |
-| Returned replica | state-machine component tests | RF=2/3 promotion/fencing/reintegration runner chain |
-| Operations layer | status/diagnostic schema tests | operations diagnostics chain |
-| TestOps scale | runner unit tests + validate-bundle | suite status/result bundle |
-| RDMA later | transport contract tests | perf/soak comparison gate |
+Tasks:
 
-## Dev / QA TestOps Split
+- Record per-child wall clock from QA's repeatability run.
+- Classify each child:
+  - keep integration,
+  - componentize next,
+  - split into smoke + deep gate,
+  - periodic only.
+- Identify the top 1-2 expensive children where assertions can move lower.
 
-Developer-owned loop:
+Likely candidates:
 
-- write or update product test content,
-- run unit/component tests locally,
-- run `swblock validate` for scenario syntax when the runner binary is
-  available,
-- run single-step `swblock run` checks when the lab is reachable and the result
-  can directly shorten the implementation loop,
-- fix product or scenario issues found by that immediate feedback.
+- `iscsi-p8-compat-soak`: keep as release/periodic; add smaller component gates
+  for any specific failures it discovers.
+- `nvme-p5-csi-protocol`: keep K8s path for protocol propagation; lower manifest
+  rendering and lifecycle persistence checks into component tests.
+- `nvme-p4-multipath-failover`: keep kernel multipath path; keep CMIC/NMIC/ANA
+  field checks in component/assert helpers.
 
-QA-owned assignments:
+## Workstream C: Operations Layer Prep
 
-- validate a milestone or release gate independently,
-- run long soak / repeatability / back-to-back suites,
-- validate runner features that affect operator trust,
-- design or refine a complex scenario when the expected lab behavior is not yet
-  obvious,
-- provide authoritative result bundles and cleanup evidence from m01/m02.
+Scope for this plan: context and next-plan input only.
 
-Runner-platform tasks for QA:
+Purpose: make the product operable, not only testable.
 
-- help validate new TestOps actions or bundle-schema changes,
-- verify Windows/Linux controller behavior,
-- verify artifact collection, cancellation, status, and cleanup behavior,
-- report gaps in operator ergonomics before they become product debugging
-  overhead.
+Near-term scope:
+
+- status model:
+  - volume,
+  - replica,
+  - frontend,
+  - peer/rebuild,
+  - durable lineage,
+  - cleanup residue.
+- diagnostics bundle:
+  - product version,
+  - scenario provenance,
+  - status endpoint snapshots,
+  - host initiator state,
+  - K8s resources,
+  - cleanup actions.
+- admin lifecycle:
+  - install,
+  - uninstall,
+  - cleanup stale attachment,
+  - force detach only after fencing semantics are pinned.
+
+Deliverable for this plan:
+
+- identify the first operations-layer contract to pull into the next active
+  plan after repeatability closes.
+
+This work should start as docs and component contracts before operator code, but
+operator implementation is not in this plan's close gate.
+
+## Workstream D: Mini-Protocol Stabilization
+
+Scope for this plan: context and next-plan input only.
+
+Purpose: keep lifecycle protocols explicit instead of hiding state transitions
+inside logs or incidental readiness flags.
+
+Mini-protocols to keep visible:
+
+- authority: identity, epoch, assignment, stale-owner fencing,
+- replication: peer probe, degraded/catching-up/healthy, returned replica,
+- CSI: provision, publish, stage, mount, unstage, delete,
+- iSCSI: login/session, ALUA metadata, SCSI I/O,
+- NVMe: Connect, Identify, ANA, controller/namespace identity,
+- TestOps: run lifecycle, provenance, cleanup, validation.
+
+Rule:
+
+```text
+make each mini-protocol explicit, observable, and component-pinned before
+extracting shared abstractions.
+```
+
+Near-term target:
+
+- write the returned-replica state-machine note:
+  - old primary returns fenced/superseded,
+  - local durable recovery is not the same as authority readiness,
+  - primary-side peer status owns rejoin evidence,
+  - promotion eligibility remains gated by epoch/frontier rules.
+
+Deliverable for this plan:
+
+- decide whether returned-replica state-machine notes are the next active plan
+  after repeatability, or whether suite cost reduction comes first.
+
+## Workstream E: Future Storage And Performance Direction
+
+Scope for this plan: context only.
+
+Purpose: keep RDMA/delta/backend work grounded in correctness gates.
+
+Current position:
+
+- RDMA can improve data-plane latency/CPU once storage/control boundaries are
+  clean.
+- RDMA does not fix authority, fencing, CSI lifecycle, cleanup, or operations.
+- Delta/image storage can improve write efficiency, but it needs explicit
+  storage-engine contracts before frontend protocols depend on it.
+
+Next storage work is not in this immediate plan unless a beta gate exposes a
+backend-pressure bug.
+
+## Dev / QA Split
+
+Developer handles:
+
+- component tests,
+- scenario syntax,
+- single-child runner checks,
+- reviewer-assisted changes,
+- small runner/product fixes.
+
+QA handles by default:
+
+- second full beta suite run,
+- long soak,
+- independent milestone validation,
+- ambiguous lab behavior,
+- Windows/Linux controller trust checks.
+
+Only the second full beta suite run is an active QA assignment for this plan.
+The other items are default ownership rules for later work.
 
 Default rule:
 
 ```text
-small single-step validation -> developer runs with swblock if possible
-milestone / long / ambiguous / trust-critical validation -> QA assignment
+single child or fast proof -> developer runs
+full suite / repeatability / trust-critical proof -> QA runs
 ```
-
-## Operating Insights
-
-### The product is a cluster of mini-protocols
-
-The right boundary is not a single generic protocol layer. Seaweed Block has a
-shared authority/epoch substrate plus several smaller protocols running at the
-same time:
-
-- authority: identity, epoch, assignment, stale-owner fencing,
-- replication: peer probe, degraded/catching-up/healthy, rebuild eligibility,
-- iSCSI: session/login, ALUA metadata, SCSI I/O semantics,
-- NVMe: Connect, Identify, ANA, controller and namespace identity,
-- CSI: provision, publish, stage, mount, unstage, delete,
-- TestOps: run lifecycle, provenance, cleanup, bundle validation.
-
-Refactor rule:
-
-```text
-make each mini-protocol explicit, observable, and test-pinned before extracting
-a shared abstraction.
-```
-
-This means new lifecycle work should prefer small state objects, structured
-status endpoints/artifacts, component tests for illegal transitions, and
-runner gates only for the OS/Kubernetes/kernel parts. The `/status/peers`
-returned-replica gate is the reference shape: expose the primary-side recovery
-state directly instead of proving reintegration through log scraping.
-
-### Integration tests are expensive by design
-
-Linux initiators, mounts, K8s, `iscsiadm`, `nvme-cli`, cleanup state, and
-multi-process timing belong in TestOps. They are necessary, but they should be
-release gates, not the default developer loop.
-
-Default development loop:
-
-```text
-unit/component go test -> local subprocess tag when needed -> runner suite
-```
-
-Rules:
-
-- default `go test`: pure unit/component coverage,
-- `go test -tags subprocess`: local binary wiring on loopback,
-- `swblock suite`: real Linux/K8s/lab integration.
-
-When a runner failure happens, first ask whether the assertion can move down to
-a component seam: authority projection, lifecycle rendering, protocol adapter,
-ready assignment, frontend state, or storage-engine contract.
-
-### V2 parity means behavior parity
-
-V2 is useful because it encodes years of protocol and lifecycle edge cases.
-V3 should reuse the inventory and expectations, while preserving V3 boundaries:
-
-```text
-placement intent != authority
-authority movement != data continuity
-frontend ready != replica ready
-heartbeat observation != rebuild completion
-best-effort ACK != full durability
-```
-
-### Storage architecture is the next leverage point
-
-Lakebase/Neon-style systems win by moving the application/storage boundary, not
-by making a generic block device magically understand database WAL. V3 should
-not claim transparent Postgres WAL reduction through iSCSI/NVMe.
-
-What does apply:
-
-- block-delta foreground writes,
-- background block-image materialization,
-- bounded replay chains,
-- compaction and checkpointing independent of frontend protocol state,
-- clean interfaces between frontend, replica controller, and storage engine.
-
-## Workstream A: Test Layering And Release Gates
-
-Goal: keep the developer loop fast while retaining real product evidence.
-
-Tasks:
-
-- Maintain `protocol-release-gate` as the top-level product readiness gate for
-  iSCSI + NVMe + CSI + soak.
-- Keep `swblock validate-bundle --profile protocol-release-gate` as the
-  post-run trust check.
-- Convert expensive Go subprocess tests to either:
-  - focused component tests, or
-  - explicit `subprocess` tests only when binary wiring is the actual subject.
-- Add component-level tests for each runner-discovered regression before
-  accepting long-term runner-only coverage.
-- Keep runner suites responsible for:
-  - Linux kernel initiators,
-  - K8s PVC lifecycle,
-  - mounted filesystem workloads,
-  - process cleanup,
-  - artifact bundle provenance.
-
-Near-term steps:
-
-1. Audit current `subprocess` tests and tag each as keep / componentize /
-   replace-by-runner.
-2. Add a short scenario-to-component map for P4, P5, P6, and P8.
-3. Make slow gates opt-in locally and required only in release/QA workflows.
-
-Close bar:
-
-- default targeted Go packages stay under a few seconds,
-- every release-gate failure has a lower-level follow-up test or an explicit
-  reason it cannot be lowered,
-- QA can run one suite and validate one bundle for protocol readiness.
-
-## Workstream B: V2 Parity Closure
-
-Goal: close the remaining behavior/test gaps that matter for beta.
-
-Focus areas:
-
-- CSI node lifecycle:
-  - NodeStage / NodeUnstage idempotency,
-  - failed login cleanup,
-  - mkfs failure cleanup,
-  - node-plugin restart cleanup,
-  - wrong-volume-at-staging-path guards,
-  - concurrent stage/unstage.
-- Durable backend pressure:
-  - repeated larger writes,
-  - slow backend behavior,
-  - WAL retention pressure,
-  - explicit error policy under full/slow storage.
-- Frontend regression breadth:
-  - iSCSI session stress,
-  - NVMe queue and namespace identity consistency,
-  - protocol-neutral CSI dispatch invariants.
-- Host compatibility:
-  - Ubuntu remains primary,
-  - add at least one second Linux distro or kernel profile before beta claim,
-  - Windows initiator remains optional unless explicitly product-scoped.
-
-Near-term steps:
-
-1. Refresh the V2 gap audits now that iSCSI/NVMe protocol readiness is closed.
-2. Mark each gap as closed / component-test needed / runner-gate needed /
-   intentionally deferred.
-3. Pull the highest-value CSI lifecycle gaps into a focused PR.
-4. Pull backend pressure gaps into storage-engine tests before adding new
-   protocol features.
-
-Close bar:
-
-- no active P0/P1 V2 parity gaps without an owner or deferral reason,
-- CSI lifecycle has adversarial component coverage,
-- backend pressure behavior is named and test-pinned.
-
-## Workstream C: Kubernetes Productization
-
-Goal: stop depending on harness behavior for product lifecycle.
-
-Tasks:
-
-- Define durable root layout for generated `blockvolume` workloads.
-- Keep default `emptyDir` for throwaway smoke, but add explicit durable-state
-  configuration for non-throwaway scenarios.
-- Add product-owned controller/operator behavior for generated workloads.
-- Keep owner-reference cleanup, but do not rely on smoke scripts as the
-  lifecycle controller.
-- Make install and uninstall behavior repeatable:
-  - image names,
-  - required host modules,
-  - privileged mounts,
-  - cleanup expectations,
-  - result diagnostics.
-
-Near-term steps:
-
-1. Write the durable root layout contract.
-2. Wire generated workloads so a durable gate can set
-   `--launcher-state-hostpath=/var/lib/sw-block` and prove the manifest uses
-   `hostPath`.
-3. Add a lab scenario proving blockvolume pod restart preserves data.
-   - Initial script hook: `scripts/run-k8s-blockvolume-restart.sh`.
-   - Runner-native scenario:
-     `testops/scenarios/csi-rf1-durable-restart-chain.yaml`.
-   - QA contract:
-     `internal/docs/qa-assignments/csi-rf1-durable-blockvolume-restart-validation.md`.
-4. Define the minimum operator/controller loop before implementing it.
-5. Update alpha manifests only after the lifecycle contract is explicit.
-
-Close bar:
-
-- dynamic PVC data survives `blockvolume` pod restart,
-- generated workloads are applied/removed by product-owned logic,
-- install/cleanup docs match actual behavior.
-
-## Workstream D: Availability, Recovery, And Reintegration
-
-Goal: make failover and returned-replica behavior explicit enough for beta.
-
-Tasks:
-
-- Separate restart gates by replica factor:
-  - RF=1: durable restart, master re-observation, target rediscovery, and CSI
-    reattach.
-  - RF=2/3: promotion, stale-primary fencing, catch-up, and ACK/promotion
-    eligibility.
-- Define returned-replica states:
-  - observed,
-  - candidate,
-  - syncing/rebuilding,
-  - ready,
-  - fenced/stale.
-- Define ACK profiles:
-  - best-effort,
-  - quorum,
-  - full-ack,
-  - unavailable/degraded policy.
-- Pin stale-primary fencing behavior:
-  - old primary must not accept writes after losing authority,
-  - standby metadata sessions remain allowed where protocol requires them.
-- Add rebuild/reintegration tests below the K8s surface first.
-- Add mounted workload tests only after state-machine facts are component-pinned.
-
-Near-term steps:
-
-1. Write the RF=1 reliable restart state-machine note:
-   - `blockvolume` recovers local durable root,
-   - master records fresh observation/status,
-   - frontend target facts are available again,
-   - CSI can reattach and verify data.
-2. Write the RF=2/3 returned-replica state-machine note:
-   - primary loss promotes another eligible replica,
-   - old primary returns fenced/superseded,
-   - returned replica reports recovered frontier,
-   - catch-up gates ready/ACK/promotion eligibility.
-3. Add component tests for promotion, stale primary, and returned replica.
-4. Add runner scenarios only after component tests define the expected facts.
-
-Close bar:
-
-- state-machine facts are visible in status/artifacts,
-- mounted failover remains green,
-- returned replica can rejoin without unsafe writes or ambiguous readiness.
-
-## Workstream E: Storage Engine Boundary
-
-Goal: prepare for better backend behavior without turning frontend protocols
-into storage engines.
-
-Tasks:
-
-- Separate interfaces conceptually, then in code:
-  - frontend target,
-  - replica controller,
-  - storage engine,
-  - compactor/checkpointer.
-- Define block-delta write path:
-  - foreground append,
-  - background materialization,
-  - bounded read replay,
-  - compaction safety.
-- Keep database-semantic protocols out of the block frontend scope until the
-  block storage core is mature.
-- Do not claim Postgres WAL reduction from generic block storage.
-
-Near-term steps:
-
-1. Document current `blockvolume` coupling points.
-2. Add storage-engine contract tests around write, flush, image, replay, and
-   compaction boundaries.
-3. Prototype delta/image behavior behind an explicit backend gate only after
-   contract tests exist.
-
-Close bar:
-
-- frontend protocol code no longer needs to know backend compaction details,
-- storage pressure behavior is test-pinned,
-- backend experiments do not change iSCSI/NVMe semantics silently.
-
-## Workstream F: TestOps Platform Direction
-
-Goal: make the product family testable by scenario contract, not manual lab
-memory.
-
-Tasks:
-
-- Keep the open/basic runner surface useful:
-  - YAML scenarios,
-  - SSH execution,
-  - result bundles,
-  - run control,
-  - bundle validation.
-- Keep advanced agent/fleet capabilities as future optional scope:
-  - remote agents,
-  - shared KV/FUSE control plane,
-  - binary distribution cache,
-  - elastic AWS-scale test clusters,
-  - long-running scenario corpus.
-- Keep product-specific scenario corpus separate from platform primitives where
-  possible.
-
-Near-term steps:
-
-1. Move repeated patterns into platform primitives:
-   - `pin_build`,
-   - `consume_pin`,
-   - `assert_revision_matches`,
-   - `collect_remote_bundle`,
-   - `assert_protocol_shape`,
-   - `assert_no_residue`.
-2. Keep the protocol release suite as the reference scenario.
-3. Add dashboard-friendly run summaries only after the schema is stable.
-
-Close bar:
-
-- one command can run and validate product readiness,
-- result bundles are self-contained enough for QA and developer triage,
-- stale image / wrong commit / missing child evidence fails before debugging
-  product code.
-
-## Workstream G: Operations Layer
-
-Goal: make the system operable, not only testable.
-
-Why this is separate:
-
-- Data-path gates prove that I/O can work.
-- Operations decides whether a user can install, observe, upgrade, repair, and
-  safely clean up the system.
-- Without this layer, the product can pass protocol tests and still be unsafe
-  to run outside our lab.
-
-Scope:
-
-- install / upgrade / uninstall,
-- generated `blockvolume` ownership,
-- durable root management,
-- volume and replica status,
-- frontend path status,
-- rebuild / reintegration progress,
-- degraded/healthy conditions,
-- diagnostics bundle,
-- admin controls such as drain, force-detach, replace replica, and cleanup stale
-  attachment.
-
-Near-term steps:
-
-1. Define the minimum operator-visible status model.
-2. Define the generated-workload ownership model before writing a controller.
-3. Add diagnostic bundle requirements to runner artifacts and product docs.
-4. Keep admin actions explicit and conservative until fencing/reintegration
-   facts are test-pinned.
-
-Close bar:
-
-- users can tell what is healthy, degraded, rebuilding, or stuck,
-- cleanup and uninstall are product-owned, not harness-owned,
-- a failed lab run produces enough status/artifacts for diagnosis without
-  source-level debugging.
-
-## Workstream H: Iterative Release And Feedback Loop
-
-Goal: avoid building an enterprise block product in isolation.
-
-Principle:
-
-- Every hardening milestone should produce a narrow, usable release slice.
-- Public docs must say what works, what is gated, and what is not claimed.
-- TestOps evidence is necessary, but it is not a substitute for real users,
-  issues, installs, and external feedback.
-
-Release slices:
-
-1. Alpha public slice:
-   - single-node k3s,
-   - dynamic PVC,
-   - iSCSI default,
-   - app write/read,
-   - clean teardown,
-   - visible non-claims.
-2. Protocol preview slice:
-   - optional NVMe,
-   - iSCSI/NVMe release-gate evidence,
-   - multipath/failover documented as lab-gated, not production HA.
-3. Beta lab slice:
-   - durable root layout,
-   - restart/reattach survives,
-   - CSI lifecycle hardening,
-   - one-command TestOps validation.
-4. Operations preview slice:
-   - Helm/operator direction,
-   - status conditions,
-   - diagnostics bundle,
-   - upgrade/uninstall path.
-5. HA preview slice:
-   - multi-node attach,
-   - mounted failover,
-   - stale-primary fencing,
-   - returned replica state.
-6. Performance preview slice:
-   - baseline perf matrix,
-   - backend pressure behavior,
-   - optional RDMA/KV-backed data-plane experiment.
-
-Open-source boundary idea:
-
-- Keep the basic product and SSH/YAML runner open enough to earn trust.
-- Keep advanced fleet/agent TestOps, large private scenario corpus, hosted
-  validation, enterprise operations, advanced HA policy, and cloud-scale
-  automation as possible enterprise layers.
-
-Close bar:
-
-- every roadmap phase has a user-visible slice,
-- release notes include non-claims,
-- feedback from real installs influences the next hardening step.
-
-## Later Track: RDMA / Data Plane Acceleration
-
-Goal: use RDMA only after the storage/control boundary is clear.
-
-RDMA can help:
-
-- lower CPU and latency for remote storage I/O,
-- remote replica writes,
-- rebuild / catch-up transfer,
-- remote reads from storage nodes,
-- shared RDMA KV-backed storage engine experiments.
-
-RDMA does not fix:
-
-- ambiguous authority,
-- stale-primary fencing,
-- CSI lifecycle bugs,
-- unbounded WAL/replay behavior,
-- unclear operator status,
-- inefficient storage-engine write amplification.
-
-Roadmap placement:
-
-1. Current plan: define durable state, storage-engine contracts, operations, and
-   recovery facts.
-2. Next storage phase: split frontend/controller/storage responsibilities and
-   define backend pressure/delta/image behavior.
-3. Later acceleration phase: integrate RDMA/KV as an optional data plane and
-   compare against TCP under the same correctness gates.
-
-Non-claim:
-
-- Do not sell RDMA as a substitute for storage-engine or operations hardening.
-
-## Immediate Sequence
-
-1. Refresh V2 gap audits against the now-closed protocol baseline.
-   - status: started 2026-05-09.
-   - first pass updates `ref/v2-frontend-protocol-gap-audit.md`,
-     `ref/iscsi-v2-coverage-gap-audit.md`, and
-     `ref/nvme-v2-coverage-gap-audit.md` so closed protocol-readiness work is
-     not re-opened as active beta work.
-2. Pick one high-value CSI lifecycle gap and implement it as component-first.
-   - status: started 2026-05-09.
-   - first component seam: conflicting CSI protocol parameters now fail closed
-     instead of silently preferring one key.
-3. Write the durable root layout contract for generated `blockvolume`
-   workloads.
-   - status: started 2026-05-09.
-   - first contract defines `emptyDir` as throwaway smoke mode and hostPath
-     state as durable lab mode.
-4. Define returned-replica state-machine facts and tests.
-   - include RF=1 master re-observation / CSI rediscovery and RF=2/3
-     promotion / fencing / reintegration as separate gates.
-   - status: returned supporting replica can now be locally durable-ready while
-     frontend-fenced, pinned by `returned-replica-component-gate`.
-5. Add a storage-engine coupling note and contract-test outline.
-6. Add the operations-layer status model and release feedback loop to the
-   public/internal roadmap.
-   - status: `operations-status-diagnostics-chain` now pins loopback guarding,
-     base status, recovery status, peer status, and durable status as
-     status-server component evidence. Returned-replica frontend/durable split
-     remains owned by `returned-replica-component-gate`.
-7. Add the explicit cleanup residue gate to the beta suite.
-   - status: `cleanup-residue-chain` now audits first and only cleans in the
-     always phase, so suite-child leaks are not hidden before assertion. It
-     fails on Seaweed Block iSCSI sessions, NVMe subsystems, V3 processes, K8s
-     resources, or runner-owned hostPath durable roots.
-8. Keep `protocol-release-gate` as a periodic/release gate, not a default
-   developer test.
-
-## QA Assignments To Prepare Next
-
-- Durable restart / reattach validation:
-  - prove data survives `blockvolume` pod restart under dynamic PVC.
-- Returned-replica reintegration validation:
-  - prove stale primary fencing and safe returned-replica state.
-- Multi-node attach validation:
-  - prove pod on a non-host-local node can attach through advertised frontend
-    address.
-- Protocol release gate repeatability:
-  - keep as regression evidence after significant frontend/CSI changes.
 
 ## Non-Claims
 
 - This plan does not claim production HA.
 - This plan does not claim broad distro compatibility.
 - This plan does not claim performance readiness.
-- This plan does not claim transparent database WAL reduction.
-- This plan does not require an immediate process split.
-- This plan does not replace the public roadmap; it is the internal execution
-  driver.
+- This plan does not deliver an operator.
+- This plan does not replace user feedback or iterative release planning.
