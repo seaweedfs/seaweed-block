@@ -30,7 +30,10 @@ phases:
     actions:
       - action: exec
         node: m02
-        cmd: "rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-cleanup-residue && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-cleanup-residue/uninstall"
+        cmd: "rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-cleanup-residue && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-cleanup-residue/uninstall /mnt/smb/work/share/g15d-k8s/{{ run_id }}-cleanup-residue/pin_build"
+      - action: exec
+        node: m02
+        cmd: "cd {{ product_root }} && git rev-parse HEAD > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-cleanup-residue/pin_build/git.sha && git status --porcelain > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-cleanup-residue/pin_build/git.status && test ! -s /mnt/smb/work/share/g15d-k8s/{{ run_id }}-cleanup-residue/pin_build/git.status"
       - action: exec
         node: m02
         cmd: "command -v iscsiadm >/dev/null && (sudo -n iscsiadm -m session > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-cleanup-residue/iscsi-sessions.after-cleanup.txt 2>&1 || grep -q 'No active sessions' /mnt/smb/work/share/g15d-k8s/{{ run_id }}-cleanup-residue/iscsi-sessions.after-cleanup.txt)"

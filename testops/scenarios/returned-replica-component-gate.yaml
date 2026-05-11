@@ -35,7 +35,13 @@ phases:
         pattern: "[/]blockmaster --|[/]blockvolume --|^blockmaster |^blockvolume "
       - action: exec
         node: m02
-        cmd: "rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-returned-replica-component && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-returned-replica-component"
+        cmd: "rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-returned-replica-component && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-returned-replica-component/pin_build"
+
+  - name: pin_build
+    actions:
+      - action: exec
+        node: m02
+        cmd: "cd {{ product_root }} && git rev-parse HEAD > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-returned-replica-component/pin_build/git.sha && git status --porcelain > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-returned-replica-component/pin_build/git.status && test ! -s /mnt/smb/work/share/g15d-k8s/{{ run_id }}-returned-replica-component/pin_build/git.status"
 
   - name: returned_replica_component_tests
     actions:
