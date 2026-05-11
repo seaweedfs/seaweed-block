@@ -74,9 +74,9 @@ The command should produce:
 - `volume-status-summary.txt`,
 - optional raw source snapshots,
 - clear exit code:
-  - `0`: report collected and parsed,
-  - `1`: report collected but unhealthy state detected,
-  - `2`: collection failed or inputs invalid.
+  - `0`: report collected, parsed, and classified clean,
+  - `1`: report collected but unhealthy/incomplete/residue evidence detected,
+  - `2`: collection failed or the report identity/schema is invalid.
 
 ## Test Strategy
 
@@ -96,6 +96,27 @@ Product-backed only after component green:
 Milestone gate only if needed:
 
 - include the command in `beta-hardening-gate` only after the command is stable.
+
+## Progress
+
+2026-05-11:
+
+- Added the component-level summary/classifier slice for
+  `VolumeStatusReport`.
+- Delivery shape:
+  - `RenderVolumeStatusSummary(report)` emits deterministic operator-readable
+    text.
+  - `ClassifyVolumeStatusReport(report)` maps report evidence to exit-code
+    intent: `0` clean, `1` unhealthy/needs inspection, `2` invalid report
+    identity or schema.
+  - `VolumeStatusReportIssues(report)` exposes the exact reasons behind
+    non-zero classification for future CLI/script output.
+- Validation:
+  - `go test ./core/ops -count=1`
+- Non-claim:
+  - This slice does not collect live state and does not add a CLI yet. It only
+    defines the stable rendering/classification contract the operator-facing
+    command will use.
 
 ## Delivery Gate
 
