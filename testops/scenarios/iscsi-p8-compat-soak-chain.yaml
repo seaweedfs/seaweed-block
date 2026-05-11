@@ -5,9 +5,10 @@
 # collection.
 #
 # Expected invocation from sw-test-runner-standalone:
-#   swblock run testops/scenarios/iscsi-p8-compat-soak-chain.yaml \
-#     --env product_root=/path/to/seaweed_block/on/m02 \
-#     --env ssh_key=/path/to/testdev_key/on/controller
+#   swblock run \
+#     -env product_root=/path/to/seaweed_block/on/m02 \
+#     -env ssh_key=/path/to/testdev_key/on/controller \
+#     testops/scenarios/iscsi-p8-compat-soak-chain.yaml
 
 name: iscsi-p8-compat-soak-chain
 timeout: 35m

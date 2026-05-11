@@ -6,9 +6,10 @@
 #   -> final cleanup/asserts -> shared artifact collection.
 #
 # Expected invocation from sw-test-runner-standalone:
-#   swblock run testops/scenarios/nvme-p4-multipath-failover-chain.yaml \
-#     --env product_root=/path/to/seaweed_block/on/m02 \
-#     --env ssh_key=/path/to/testdev_key/on/controller
+#   swblock run \
+#     -env product_root=/path/to/seaweed_block/on/m02 \
+#     -env ssh_key=/path/to/testdev_key/on/controller \
+#     testops/scenarios/nvme-p4-multipath-failover-chain.yaml
 
 name: nvme-p4-multipath-failover-chain
 timeout: 25m

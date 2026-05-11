@@ -1,0 +1,137 @@
+# Runner-native iSCSI OS-initiator compatibility gate.
+#
+# Goal:
+#   Prove the Linux open-iscsi path against a real kernel initiator:
+#   iscsiadm discovery/login -> mkfs.ext4 -> mount -> write/read checksum
+#   -> optional fio stress -> logout -> no residue.
+#
+# This is an iSCSI correctness gate. It is not a performance, HA, multipath,
+# Windows, or Kubernetes claim.
+#
+# Expected invocation:
+#   swblock run \
+#     -env product_root=/path/to/seaweed_block/on/m02 \
+#     -env ssh_key=/path/to/testdev_key/on/controller \
+#     testops/scenarios/iscsi-os-initiator-compat-chain.yaml
+
+name: iscsi-os-initiator-compat-chain
+timeout: 20m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+  os_iterations: "1"
+  os_stress: "fio"
+  os_fio_runtime: "60"
+  os_fio_size: "128m"
+  durable_blocks: "65536"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: pre_clean
+    actions:
+      - action: pre_run_cleanup
+        node: m02
+        kill_patterns: "blockmaster,blockvolume,iscsi-target"
+        nvme_disconnect: "true"
+        iscsi_logout_prefix: "iqn.2026-05.io.seaweedfs"
+      - action: exec
+        node: m02
+        cmd: "rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-os-compat && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-os-compat/bin /mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-os-compat/pin_build /mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-os-compat/os_smoke"
+      - action: assert_no_active_iscsi_sessions
+        node: m02
+        iqn_substr: "io.seaweedfs"
+      - action: assert_no_processes
+        node: m02
+        pattern: "[/]blockmaster --|[/]blockvolume --|^blockmaster |^blockvolume "
+
+  - name: pin_build
+    actions:
+      - action: exec
+        node: m02
+        timeout: 8m
+        cmd: "cd {{ product_root }} && git rev-parse HEAD > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-os-compat/pin_build/git.sha && git status --porcelain > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-os-compat/pin_build/git.status && test ! -s /mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-os-compat/pin_build/git.status && go build -o /mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-os-compat/bin/blockmaster ./cmd/blockmaster && go build -o /mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-os-compat/bin/blockvolume ./cmd/blockvolume"
+      - action: exec
+        node: m02
+        cmd: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-os-compat/bin/blockmaster --version > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-os-compat/pin_build/blockmaster.version.txt && /mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-os-compat/bin/blockvolume --version > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-os-compat/pin_build/blockvolume.version.txt"
+
+  - name: os_initiator_smoke
+    actions:
+      - action: exec
+        node: m02
+        cmd: "sudo dmesg > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-os-compat/os_smoke/dmesg.before.txt 2>&1 || true"
+      - action: exec
+        node: m02
+        timeout: 12m
+        cmd: "cd {{ product_root }} && bash scripts/run-iscsi-os-smoke.sh {{ product_root }}"
+        env.SW_BLOCK_ARTIFACT_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-os-compat/os_smoke"
+        env.SW_BLOCK_BIN_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-os-compat/bin"
+        env.SW_BLOCK_ISCSI_ITERATIONS: "{{ os_iterations }}"
+        env.SW_BLOCK_ISCSI_STRESS: "{{ os_stress }}"
+        env.SW_BLOCK_ISCSI_FIO_RUNTIME: "{{ os_fio_runtime }}"
+        env.SW_BLOCK_ISCSI_FIO_SIZE: "{{ os_fio_size }}"
+        env.SW_BLOCK_DURABLE_BLOCKS: "{{ durable_blocks }}"
+      - action: exec
+        node: m02
+        cmd: "sudo dmesg > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-os-compat/os_smoke/dmesg.after.txt 2>&1 || true"
+      - action: exec
+        node: m02
+        cmd: "python3 - <<'PY'\nimport re, sys\nbase = '/mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-os-compat/os_smoke'\nts_re = re.compile(r'^\\[\\s*([0-9]+(?:\\.[0-9]+)?)\\]')\ndef read_lines(name):\n    with open(base + '/' + name, encoding='utf-8', errors='replace') as f:\n        return f.read().splitlines()\ndef ts(line):\n    m = ts_re.match(line)\n    return float(m.group(1)) if m else None\nbefore = read_lines('dmesg.before.txt')\nafter = read_lines('dmesg.after.txt')\nbefore_ts = [v for v in (ts(line) for line in before) if v is not None]\nif before_ts:\n    cutoff = max(before_ts)\n    new = [line for line in after if (ts(line) is not None and ts(line) > cutoff)]\nelse:\n    i = 0\n    while i < len(before) and i < len(after) and before[i] == after[i]:\n        i += 1\n    new = after[i:]\nwith open(base + '/dmesg.new.txt', 'w', encoding='utf-8') as f:\n    f.write('\\n'.join(new))\n    if new:\n        f.write('\\n')\nbad = re.compile(r'DID_BAD_TARGET|I/O error|Buffer I/O|rejecting I/O|blk_update_request|connection.*failed', re.I)\nhits = [line for line in new if bad.search(line)]\nif hits:\n    print('\\n'.join(hits), file=sys.stderr)\n    sys.exit(1)\nPY"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-os-compat/os_smoke/run.log"
+        pattern: "\\[iscsi-os\\] PASS:"
+        save_as: os_pass_count
+      - action: assert_greater
+        actual: "{{ os_pass_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-os-compat/os_smoke/mkfs.iter1.log"
+        pattern: "Writing superblocks and filesystem accounting information"
+        save_as: mkfs_success_count
+      - action: assert_greater
+        actual: "{{ mkfs_success_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-os-compat/os_smoke/sha256-check.iter1.log"
+        pattern: "payload.iter1.bin: OK"
+        save_as: checksum_success_count
+      - action: assert_greater
+        actual: "{{ checksum_success_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-os-compat/os_smoke/fio.iter1.log"
+        pattern: "err= 0"
+        save_as: fio_success_count
+      - action: assert_greater
+        actual: "{{ fio_success_count }}"
+        threshold: "0"
+      - action: assert_no_active_iscsi_sessions
+        node: m02
+        iqn_substr: "io.seaweedfs"
+      - action: assert_no_processes
+        node: m02
+        pattern: "[/]blockmaster --|[/]blockvolume --|^blockmaster |^blockvolume "
+
+  - name: collect_and_cleanup
+    always: true
+    actions:
+      - action: pre_run_cleanup
+        node: m02
+        kill_patterns: "blockmaster,blockvolume,iscsi-target"
+        nvme_disconnect: "true"
+        iscsi_logout_prefix: "iqn.2026-05.io.seaweedfs"
+      - action: collect_path
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-os-compat"
+        name: "remote-phases"
+        ignore_error: true

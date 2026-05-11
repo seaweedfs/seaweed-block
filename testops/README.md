@@ -13,20 +13,127 @@ The intended boundary is:
 - QA can run the same YAML locally or from CI; developers can run it before
   pushing to avoid stale-image / stale-process / scattered-artifact loops.
 
+## Runner Binary
+
+`swblock` is the `sw-test-runner` binary used for Seaweed Block / V3 tests.
+
+- Source repo: `pingqiu/sw-test-runner`
+- Source path: `cmd/swblock/main.go`
+- Build command from the runner repo:
+
+  ```bash
+  go build -o swblock ./cmd/swblock
+  ```
+
+- Windows QA convention: `C:\work\swblock.exe`
+- Linux controller convention: put `swblock` on `PATH`, or set a shell alias to
+  the built binary.
+
+`swblock` is not built from this product repo. If a developer only has
+`seaweed_block` checked out, runner-native scenarios can still be authored and
+statically reviewed here, but `swblock validate`, `swblock run`, and
+`swblock suite` require the external runner binary.
+
+Convenience build helpers are available when the runner source is accessible:
+
+```powershell
+.\internal\tools\build-swblock.ps1
+```
+
+```bash
+bash internal/tools/build-swblock.sh
+```
+
+They build into `.tools/swblock(.exe)`, write `.tools/swblock.path`, and print
+the final binary path.
+
+Related runner binaries share the same engine but link different product/action
+sets:
+
+- `swblock`: V3 / Seaweed Block product pack.
+- `weedblock`: V2 product pack.
+- `cmd/sw-test-runner`: kitchen-sink/dev binary.
+
+Recommended local check before running scenarios:
+
+```bash
+swblock list
+swblock validate testops/scenarios/csi-rf1-durable-restart-chain.yaml
+```
+
+## Which Gate To Run
+
+Use the smallest gate that can prove the contract you changed.
+
+| Change type | Default gate | Why |
+| --- | --- | --- |
+| Package-local logic, parser, renderer, state-machine helper | `go test -count=1 ./<touched-package>` | Fastest feedback; no m02 or runner dependency. |
+| CSI protocol propagation, lifecycle persistence, launcher render shape | `swblock run testops/scenarios/nvme-p5-protocol-component-gate.yaml` | Proves the known NVMe/iSCSI protocol-shape contracts with a runner bundle in seconds. |
+| RF=1 restart contract, durable-root/status manifest shape | `swblock run testops/scenarios/csi-rf1-durable-restart-component-gate.yaml` | Proves restart/recovery contract shape without a full K8s restart. |
+| Operations read-only volume status report shape | `swblock run testops/scenarios/operations-volume-status-report-component-gate.yaml` | Proves schema, frontend identity, unavailable fields, and residue copy behavior without starting product processes. |
+| Kernel initiator, k3s, mounted filesystem, failover, or stale-session behavior | The matching child chain, for example `nvme-p5-csi-protocol-chain` or `csi-rf1-durable-restart-chain` | These require real Linux/K8s/initiator behavior. |
+| Milestone readiness or cross-protocol release confidence | `swblock suite testops/suites/beta-hardening-gate.yaml` plus `swblock validate-bundle --profile beta-hardening` | Slow, evidence-heavy gate. Use for release/milestone claims, not first debugging. |
+
+Default ownership:
+
+- Developers run unit/component tests, fast runner-native component gates, and
+  single-child chains while iterating.
+- QA runs full-suite repeatability, long soak, ambiguous lab failures, and
+  independent milestone validation.
+- If QA would only execute a single known command and return stdout, run it
+  yourself and reserve QA for scenario design or trust-critical validation.
+
 Example:
 
 ```bash
-swblock run testops/scenarios/nvme-p5-csi-protocol-chain.yaml \
-  --env product_root=/path/to/seaweed_block/on/m02 \
-  --env ssh_key=/path/to/testdev_key/on/controller
+swblock run \
+  -env product_root=/path/to/seaweed_block/on/m02 \
+  -env ssh_key=/path/to/testdev_key/on/controller \
+  testops/scenarios/nvme-p5-csi-protocol-chain.yaml
+```
+
+Fast component gates are available for developer loops before running the
+heavier K8s or initiator paths. For example, the NVMe-P5 protocol component
+gate pins CSI protocol extraction, lifecycle protocol planning, and launcher
+protocol persistence/planning, plus launcher NVMe/iSCSI manifest shape without
+launching k3s:
+
+```bash
+swblock run \
+  -env product_root=/path/to/seaweed_block/on/m02 \
+  -env ssh_key=/path/to/testdev_key/on/controller \
+  testops/scenarios/nvme-p5-protocol-component-gate.yaml
+```
+
+The RF=1 durable restart path also has a component gate that checks restart
+wrapper shape, generated hostPath/status manifest behavior, master frontend
+projection, and durable status lineage without doing the full K8s restart:
+
+```bash
+swblock run \
+  -env product_root=/path/to/seaweed_block/on/m02 \
+  -env ssh_key=/path/to/testdev_key/on/controller \
+  testops/scenarios/csi-rf1-durable-restart-component-gate.yaml
+```
+
+The first operations-layer status report contract has its own component gate.
+It is read-only, does not start product processes, and is not a block/data
+snapshot:
+
+```bash
+swblock run \
+  -env product_root=/path/to/seaweed_block/on/m02 \
+  -env ssh_key=/path/to/testdev_key/on/controller \
+  testops/scenarios/operations-volume-status-report-component-gate.yaml
 ```
 
 The same runner-native shape is used for the longer iSCSI P8 soak:
 
 ```bash
-swblock run testops/scenarios/iscsi-p8-compat-soak-chain.yaml \
-  --env product_root=/path/to/seaweed_block/on/m02 \
-  --env ssh_key=/path/to/testdev_key/on/controller
+swblock run \
+  -env product_root=/path/to/seaweed_block/on/m02 \
+  -env ssh_key=/path/to/testdev_key/on/controller \
+  testops/scenarios/iscsi-p8-compat-soak-chain.yaml
 ```
 
 The scenario still shells out to existing bash payloads. That is deliberate:
@@ -135,3 +242,45 @@ python3 scripts/testops-validate-protocol-release-gate.py \
 Use `--allow-fail` when validating the schema of an intentionally failed or
 cancelled run; without it the checker requires all four child chains to be
 `pass` with complete phase counts.
+
+## Beta Hardening Gate
+
+`testops/suites/beta-hardening-gate.yaml` is the seed suite for the current
+beta-hardening plan. It composes the protocol release children plus the new
+component/restart/reintegration gates:
+
+- `iscsi-p6-alua-failover-chain`
+- `nvme-p4-multipath-failover-chain`
+- `nvme-p5-csi-protocol-chain`
+- `iscsi-p8-compat-soak-chain`
+- `csi-lifecycle-component-gate`
+- `csi-rf1-durable-restart-chain`
+- `operations-status-diagnostics-chain`
+- `returned-replica-component-gate`
+- `iscsi-returned-replica-chain`
+- `cleanup-residue-chain`
+
+Run shape:
+
+```powershell
+swblock suite `
+  --results-dir V:/share/g15d-k8s/testops-runs/beta-hardening-gate `
+  --env product_root=/tmp/seaweed-block-plan-roadmap-refresh-devrun `
+  --env ssh_key=C:/work/dev_server/testdev_key `
+  C:/work/seaweed_block/testops/suites/beta-hardening-gate.yaml
+```
+
+Repeatability evidence:
+
+- product commit:
+  `8822f20e91c2b88727ead9e49f9bf75eec28c791`
+- runner commit:
+  `cf65daaf2ce5cf500e1efa48b411f7cb66dbac0b`
+- run 1: `20260511-031605-8258`, PASS, `21m46s`,
+  `validate-bundle --profile beta-hardening` VALID.
+- run 2: `20260511-040412-ac38`, PASS, `22m55s`,
+  `validate-bundle --profile beta-hardening` VALID.
+- no manual cleanup between runs; final residue audit clean.
+
+Use this suite for milestone readiness or release-candidate confidence. Do not
+use it as the first debug loop for a package-level change.

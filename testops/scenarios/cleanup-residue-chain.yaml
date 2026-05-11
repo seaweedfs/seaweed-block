@@ -1,0 +1,84 @@
+# Runner-native cleanup residue audit.
+#
+# Goal:
+#   Prove the lab is clean before the next workload starts. This is not an
+#   install/uninstall functional test; it is a repeatability guard for beta
+#   suites that should fail when stale iSCSI/NVMe/K8s/process state leaks from
+#   earlier children.
+#
+# Expected invocation:
+#   swblock run \
+#     -env product_root=/path/to/seaweed_block/on/m02 \
+#     -env ssh_key=/path/to/testdev_key/on/controller \
+#     testops/scenarios/cleanup-residue-chain.yaml
+
+name: cleanup-residue-chain
+timeout: 6m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: host_protocol_residue
+    actions:
+      - action: exec
+        node: m02
+        cmd: "rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-cleanup-residue && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-cleanup-residue/uninstall /mnt/smb/work/share/g15d-k8s/{{ run_id }}-cleanup-residue/pin_build"
+      - action: exec
+        node: m02
+        cmd: "cd {{ product_root }} && git rev-parse HEAD > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-cleanup-residue/pin_build/git.sha && git status --porcelain > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-cleanup-residue/pin_build/git.status && test ! -s /mnt/smb/work/share/g15d-k8s/{{ run_id }}-cleanup-residue/pin_build/git.status"
+      - action: exec
+        node: m02
+        cmd: "command -v iscsiadm >/dev/null && (sudo -n iscsiadm -m session > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-cleanup-residue/iscsi-sessions.after-cleanup.txt 2>&1 || grep -q 'No active sessions' /mnt/smb/work/share/g15d-k8s/{{ run_id }}-cleanup-residue/iscsi-sessions.after-cleanup.txt)"
+      - action: assert_no_active_iscsi_sessions
+        node: m02
+        iqn_substr: "io.seaweedfs"
+      - action: exec
+        node: m02
+        cmd: "sudo nvme list-subsys -o json > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-cleanup-residue/nvme-list-subsys.after-cleanup.json 2> /mnt/smb/work/share/g15d-k8s/{{ run_id }}-cleanup-residue/nvme-list-subsys.after-cleanup.err && ! grep -Ei 'nqn\\.[^[:space:]\"}]*seaweedfs|nqn\\.[^[:space:]\"}]*sw-block|nqn\\.[^[:space:]\"}]*weedblock' /mnt/smb/work/share/g15d-k8s/{{ run_id }}-cleanup-residue/nvme-list-subsys.after-cleanup.json"
+      - action: assert_no_processes
+        node: m02
+        pattern: "[/]blockmaster --|[/]blockvolume --|[/]blockcsi |[/]iscsi-target |^blockmaster |^blockvolume |^blockcsi |^iscsi-target "
+
+  - name: kubernetes_residue
+    actions:
+      - action: exec
+        node: m02
+        cmd: "bash -e -c 'kubectl get deploy,daemonset,statefulset,pod,svc,pvc,pv -A -o name > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-cleanup-residue/k8s-resources.after-cleanup.txt 2> /mnt/smb/work/share/g15d-k8s/{{ run_id }}-cleanup-residue/k8s-resources.after-cleanup.err; kubectl get storageclass,csidriver -o name >> /mnt/smb/work/share/g15d-k8s/{{ run_id }}-cleanup-residue/k8s-resources.after-cleanup.txt 2>> /mnt/smb/work/share/g15d-k8s/{{ run_id }}-cleanup-residue/k8s-resources.after-cleanup.err; if grep -E \"(sw-block|seaweed-block|block\\.csi\\.seaweedfs\\.com)\" /mnt/smb/work/share/g15d-k8s/{{ run_id }}-cleanup-residue/k8s-resources.after-cleanup.txt > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-cleanup-residue/k8s-residue.after-cleanup.txt; then exit 1; fi'"
+
+  - name: hostpath_residue
+    actions:
+      - action: exec
+        node: m02
+        cmd: "if sudo test -d /var/lib/sw-block; then sudo find /var/lib/sw-block -maxdepth 1 -mindepth 1 -print > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-cleanup-residue/sw-block-hostpath.all.txt; sudo find /var/lib/sw-block -maxdepth 1 -mindepth 1 -type d -name 'testops-*' -print > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-cleanup-residue/sw-block-hostpath-testops-residue.txt; else : > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-cleanup-residue/sw-block-hostpath.all.txt; : > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-cleanup-residue/sw-block-hostpath-testops-residue.txt; fi; test ! -s /mnt/smb/work/share/g15d-k8s/{{ run_id }}-cleanup-residue/sw-block-hostpath-testops-residue.txt"
+
+  - name: collect_and_cleanup
+    always: true
+    actions:
+      - action: exec
+        node: m02
+        timeout: 3m
+        cmd: "cd {{ product_root }} && bash scripts/uninstall-k8s-alpha.sh {{ product_root }}"
+        env.SW_BLOCK_ARTIFACT_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-cleanup-residue/uninstall"
+      - action: exec
+        node: m02
+        cmd: "kubectl delete storageclass sw-block sw-block-example sw-block-dynamic sw-block-dynamic-nvme --ignore-not-found=true > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-cleanup-residue/delete-storageclasses.log 2>&1 || true"
+      - action: pre_run_cleanup
+        node: m02
+        kill_patterns: "blockmaster,blockvolume,blockcsi,iscsi-target"
+        unmount: "/tmp/sw-block-iscsi-os/mnt,/tmp/sw-block-iscsi-failover/mnt,/tmp/sw-block-iscsi-mpath/mnt,/tmp/sw-block-nvme-failover/mnt"
+        nvme_disconnect: "true"
+        iscsi_logout_prefix: "iqn.2026-05.io.seaweedfs"
+      - action: collect_path
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-cleanup-residue"
+        name: "remote-phases"
+        ignore_error: true

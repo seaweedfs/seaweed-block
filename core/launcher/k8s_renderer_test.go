@@ -25,6 +25,7 @@ func TestG15d_K8sRenderer_RendersBlockVolumeDeploymentArgs(t *testing.T) {
 	for _, want := range []string{
 		"kind: Deployment",
 		"name: sw-blockvolume-pvc-a-r1",
+		"type: Recreate",
 		"hostNetwork: true",
 		"dnsPolicy: ClusterFirstWithHostNet",
 		"- /usr/local/bin/blockvolume",
@@ -44,6 +45,18 @@ func TestG15d_K8sRenderer_RendersBlockVolumeDeploymentArgs(t *testing.T) {
 			t.Fatalf("manifest missing %q:\n%s", want, raw)
 		}
 	}
+	for _, forbidden := range []string{
+		"--nvme-listen=",
+		"--nvme-subsysnqn=",
+		"--nvme-ns=",
+	} {
+		if strings.Contains(raw, forbidden) {
+			t.Fatalf("iscsi manifest must not contain %q:\n%s", forbidden, raw)
+		}
+	}
+	if strings.Contains(raw, "--status-addr=") {
+		t.Fatalf("status endpoint must be opt-in for generated manifests:\n%s", raw)
+	}
 }
 
 func TestG15d_K8sRenderer_RF2UsesDistinctNamesAndPorts(t *testing.T) {
@@ -56,6 +69,50 @@ func TestG15d_K8sRenderer_RF2UsesDistinctNamesAndPorts(t *testing.T) {
 	}
 	if !strings.Contains(string(manifests[1].YAML), "--iscsi-listen=127.0.0.1:3261") {
 		t.Fatalf("second manifest missing port 3261:\n%s", manifests[1].YAML)
+	}
+}
+
+func TestG15d_K8sRenderer_CanUseHostPathStateVolume(t *testing.T) {
+	manifests, err := RenderBlockVolumeDeployments(sampleWorkloadPlan(), K8sRenderConfig{
+		MasterAddr:        "m:9333",
+		DurableRootBase:   "/var/lib/sw-block/",
+		StateHostPathBase: "/var/lib/sw-block/test-run/",
+	})
+	if err != nil {
+		t.Fatalf("RenderBlockVolumeDeployments: %v", err)
+	}
+	raw := string(manifests[0].YAML)
+	for _, want := range []string{
+		"hostPath:",
+		"path: /var/lib/sw-block/test-run",
+		"type: DirectoryOrCreate",
+		"initContainers:",
+		"name: state-permissions",
+		"runAsUser: 0",
+		"mkdir -p \"/var/lib/sw-block/pvc-a/r1\" && chown -R 65532:65532 \"/var/lib/sw-block/pvc-a/r1\"",
+		"mountPath: /var/lib/sw-block",
+		"--durable-root=/var/lib/sw-block/pvc-a/r1",
+	} {
+		if !strings.Contains(raw, want) {
+			t.Fatalf("manifest missing %q:\n%s", want, raw)
+		}
+	}
+	if strings.Contains(raw, "emptyDir:") {
+		t.Fatalf("hostPath state volume must not render emptyDir:\n%s", raw)
+	}
+}
+
+func TestG15d_K8sRenderer_RejectsHostPathWithDifferentContainerDurableRoot(t *testing.T) {
+	_, err := RenderBlockVolumeDeployments(sampleWorkloadPlan(), K8sRenderConfig{
+		MasterAddr:        "m:9333",
+		DurableRootBase:   "/tmp/sw-block",
+		StateHostPathBase: "/var/lib/sw-block/test-run",
+	})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "state hostPath requires durable root base") {
+		t.Fatalf("error=%v", err)
 	}
 }
 
@@ -83,6 +140,37 @@ func TestG15d_K8sRenderer_RendersNVMeBlockVolumeArgs(t *testing.T) {
 		if strings.Contains(raw, forbidden) {
 			t.Fatalf("nvme manifest must not contain %q:\n%s", forbidden, raw)
 		}
+	}
+}
+
+func TestG15d_K8sRenderer_CanOptIntoBlockVolumeStatusEndpoint(t *testing.T) {
+	manifests, err := RenderBlockVolumeDeployments(sampleWorkloadPlan(), K8sRenderConfig{
+		MasterAddr:   "m:9333",
+		EnableStatus: true,
+	})
+	if err != nil {
+		t.Fatalf("RenderBlockVolumeDeployments: %v", err)
+	}
+	if !strings.Contains(string(manifests[0].YAML), "--status-addr=127.0.0.1:23260") {
+		t.Fatalf("first manifest missing status addr:\n%s", manifests[0].YAML)
+	}
+	if !strings.Contains(string(manifests[1].YAML), "--status-addr=127.0.0.1:23261") {
+		t.Fatalf("second manifest missing distinct status addr:\n%s", manifests[1].YAML)
+	}
+}
+
+func TestG15d_K8sRenderer_StatusEndpointRejectsPortOverflow(t *testing.T) {
+	plan := sampleWorkloadPlan()
+	plan.Replicas[0].ISCSIListenPort = 60000
+	_, err := RenderBlockVolumeDeployments(plan, K8sRenderConfig{
+		MasterAddr:   "m:9333",
+		EnableStatus: true,
+	})
+	if err == nil {
+		t.Fatal("expected status port overflow error")
+	}
+	if !strings.Contains(err.Error(), "overflows TCP port range") {
+		t.Fatalf("error=%v", err)
 	}
 }
 

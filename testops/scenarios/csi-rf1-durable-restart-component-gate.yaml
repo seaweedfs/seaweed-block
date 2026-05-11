@@ -1,0 +1,112 @@
+# Runner-native RF=1 durable restart component gate.
+#
+# Goal:
+#   Pin the cheap contracts behind csi-rf1-durable-restart-chain without
+#   launching k3s: restart wrapper shape, generated hostPath/status manifests,
+#   master frontend status projection, and durable status endpoint lineage.
+#   The full csi-rf1-durable-restart-chain remains the end-to-end proof for
+#   pod restart, reattach timing, and mounted data continuity.
+#
+# Expected invocation:
+#   swblock run \
+#     -env product_root=/path/to/seaweed_block/on/m02 \
+#     -env ssh_key=/path/to/testdev_key/on/controller \
+#     testops/scenarios/csi-rf1-durable-restart-component-gate.yaml
+
+name: csi-rf1-durable-restart-component-gate
+timeout: 5m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: pre_clean
+    actions:
+      - action: assert_no_active_iscsi_sessions
+        node: m02
+        iqn_substr: "io.seaweedfs"
+      - action: assert_no_processes
+        node: m02
+        pattern: "[/]blockmaster --|[/]blockvolume --|^blockmaster |^blockvolume "
+      - action: exec
+        node: m02
+        cmd: "rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-component && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-component/pin_build"
+
+  - name: pin_build
+    actions:
+      - action: exec
+        node: m02
+        cmd: "cd {{ product_root }} && git rev-parse HEAD > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-component/pin_build/git.sha && git status --porcelain > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-component/pin_build/git.status && test ! -s /mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-component/pin_build/git.status"
+
+  - name: restart_component_tests
+    actions:
+      - action: exec
+        node: m02
+        timeout: 3m
+        cmd: "cd {{ product_root }} && bash -o pipefail -c 'go test -count=1 -json -run \"^(TestCSIRF1DurableRestartScripts_PinBlockvolumeRestartContract|TestG15d_K8sRenderer_CanUseHostPathStateVolume|TestG15d_K8sRenderer_CanOptIntoBlockVolumeStatusEndpoint|TestStatusFrontendsForAssignedLine_ReturnsObservedFrontendFacts|TestStatusServer_DurableStatusEndpoint_EnabledAfterStart_ReturnsLineage)$\" ./internal/testops ./core/host/master ./core/host/volume ./core/launcher | tee /mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-component/restart-component-go-test.jsonl'"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-component/restart-component-go-test.jsonl"
+        pattern: "\"Action\":\"pass\".*\"Test\":\"TestCSIRF1DurableRestartScripts_PinBlockvolumeRestartContract\""
+        save_as: restart_wrapper_shape_count
+      - action: assert_greater
+        actual: "{{ restart_wrapper_shape_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-component/restart-component-go-test.jsonl"
+        pattern: "\"Action\":\"pass\".*\"Test\":\"TestG15d_K8sRenderer_CanUseHostPathStateVolume\""
+        save_as: hostpath_render_count
+      - action: assert_greater
+        actual: "{{ hostpath_render_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-component/restart-component-go-test.jsonl"
+        pattern: "\"Action\":\"pass\".*\"Test\":\"TestG15d_K8sRenderer_CanOptIntoBlockVolumeStatusEndpoint\""
+        save_as: status_render_count
+      - action: assert_greater
+        actual: "{{ status_render_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-component/restart-component-go-test.jsonl"
+        pattern: "\"Action\":\"pass\".*\"Test\":\"TestStatusFrontendsForAssignedLine_ReturnsObservedFrontendFacts\""
+        save_as: master_frontend_projection_count
+      - action: assert_greater
+        actual: "{{ master_frontend_projection_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-component/restart-component-go-test.jsonl"
+        pattern: "\"Action\":\"pass\".*\"Test\":\"TestStatusServer_DurableStatusEndpoint_EnabledAfterStart_ReturnsLineage\""
+        save_as: durable_status_lineage_count
+      - action: assert_greater
+        actual: "{{ durable_status_lineage_count }}"
+        threshold: "0"
+
+  - name: final_asserts
+    actions:
+      - action: assert_no_active_iscsi_sessions
+        node: m02
+        iqn_substr: "io.seaweedfs"
+      - action: assert_no_processes
+        node: m02
+        pattern: "[/]blockmaster --|[/]blockvolume --|^blockmaster |^blockvolume "
+
+  - name: collect_and_cleanup
+    always: true
+    actions:
+      - action: collect_path
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-component"
+        name: "remote-phases"
+        ignore_error: true

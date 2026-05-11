@@ -86,6 +86,12 @@ Current alpha constraints:
    iSCSI remains the default path for broad compatibility. NVMe-oF is now
    covered by ANA-aware multipath/failover and CSI protocol-selection gates.
 
+   The runtime should be managed as a cluster of explicit mini-protocols:
+   authority/epoch, replication recovery, iSCSI, NVMe, CSI lifecycle, and
+   TestOps run-control. Each mini-protocol needs structured status and tests;
+   avoid a single large protocol abstraction until repeated transition logic
+   proves it is worth extracting. See `runtime-state-machines.md`.
+
 2. CSI dispatch is protocol-aware.
 
    The CSI layer dispatches by frontend target protocol:

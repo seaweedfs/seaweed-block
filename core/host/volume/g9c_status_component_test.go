@@ -31,7 +31,7 @@ func TestG9C_StatusProjection_DualLaneRecoveredReplicaReadyAfterPostCloseAck(t *
 		h.view = NewAdapterProjectionView(a, "v1", "replica-0", h)
 		// The current frontend authority line names another replica at the
 		// same lineage. This process can become a supporting replica_ready,
-		// but must never report frontend-primary-ready.
+		// but must never report frontend-primary-ready or frontend Healthy.
 		h.recordOtherLine(&control.AssignmentFact{
 			VolumeId:        "v1",
 			ReplicaId:       "primary-r1",
@@ -73,8 +73,8 @@ func TestG9C_StatusProjection_DualLaneRecoveredReplicaReadyAfterPostCloseAck(t *
 		ready := waitG9CStatus(t, addr, 5*time.Second, func(p StatusProjection) bool {
 			return p.ReplicationRole == ReplicationRoleReady && !p.FrontendPrimaryReady
 		})
-		if !ready.Healthy {
-			t.Fatalf("replica_ready should expose Healthy=true for support consumers: %+v", ready)
+		if ready.Healthy {
+			t.Fatalf("replica_ready must remain frontend-unhealthy for support-only consumers: %+v", ready)
 		}
 	})
 }

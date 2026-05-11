@@ -45,12 +45,12 @@ import_k3s_image() {
   local image="$1"
   local log_name="$2"
   local -a ctr=()
-  if command -v k3s >/dev/null 2>&1 && k3s --version >/dev/null 2>&1; then
+  if command -v sudo >/dev/null 2>&1 && sudo -n k3s --version >/dev/null 2>&1; then
+    ctr=(sudo -n k3s ctr images import -)
+  elif command -v k3s >/dev/null 2>&1 && k3s --version >/dev/null 2>&1; then
     ctr=(k3s ctr images import -)
-  elif command -v sudo >/dev/null 2>&1 && sudo k3s --version >/dev/null 2>&1; then
-    ctr=(sudo k3s ctr images import -)
   else
-    echo "SW_BLOCK_IMPORT_K3S=1 requires k3s or sudo k3s on PATH" >&2
+    echo "SW_BLOCK_IMPORT_K3S=1 requires k3s or passwordless sudo k3s on PATH" >&2
     exit 2
   fi
 

@@ -556,6 +556,22 @@ func (v *ReplicationVolume) PeerCount() int {
 	return len(v.peers)
 }
 
+// PeerStatuses returns a stable, sorted diagnostic snapshot of all
+// currently tracked peers. This is intentionally a status surface, not
+// a control surface: callers cannot mutate the returned peer state.
+func (v *ReplicationVolume) PeerStatuses() []ReplicaPeerStatus {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	out := make([]ReplicaPeerStatus, 0, len(v.peers))
+	for _, peer := range v.peers {
+		out = append(out, peer.Status())
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].ReplicaID < out[j].ReplicaID
+	})
+	return out
+}
+
 // ConfigureProbeLoop installs the per-volume degraded-peer probe loop.
 // NOT idempotent — calling Configure twice is rejected to prevent
 // silent replacement of an active loop. Configure once at volume

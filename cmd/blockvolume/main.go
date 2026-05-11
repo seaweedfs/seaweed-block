@@ -428,6 +428,9 @@ func run(f flags) int {
 		}
 		durableProv = dp
 		provider = dp
+		if status != nil {
+			status.SetDurableStatusSource(dp)
+		}
 
 		// Open storage role-agnostically via EnsureStorage so replica
 		// roles (assigned to SUPPORTING, never reach Healthy via
@@ -498,6 +501,9 @@ func run(f flags) int {
 			return 1
 		}
 		replVolume = replication.NewReplicationVolume(f.volumeID, store)
+		if status != nil {
+			status.SetPeerStatusSource(replVolume)
+		}
 		repMode, writeAck, err := parseReplicationAckProfile(f.replicationAck)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "blockvolume:", err)

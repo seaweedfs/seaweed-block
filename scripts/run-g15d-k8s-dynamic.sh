@@ -18,6 +18,7 @@ DYNAMIC_PVC_MANIFEST="${SW_BLOCK_DYNAMIC_PVC_MANIFEST:-$ROOT/deploy/k8s/g15d/dyn
 IMAGE="${SW_BLOCK_IMAGE:-sw-block:local}"
 CSI_IMAGE="${SW_BLOCK_CSI_IMAGE:-sw-block-csi:local}"
 LAUNCHER_PVC_OWNER_REF="${SW_BLOCK_LAUNCHER_PVC_OWNER_REF:-0}"
+LAUNCHER_STATE_HOSTPATH="${SW_BLOCK_LAUNCHER_STATE_HOSTPATH:-}"
 CHAP_USERNAME="${SW_BLOCK_ISCSI_CHAP_USERNAME:-}"
 CHAP_SECRET="${SW_BLOCK_ISCSI_CHAP_SECRET:-}"
 CHAP_SECRET_NAME="${SW_BLOCK_ISCSI_CHAP_SECRET_NAME:-sw-block-iscsi-chap}"
@@ -107,6 +108,11 @@ if [[ "$BLOCKVOLUME_NAMESPACE" != "kube-system" ]]; then
   mv "$STACK_RENDERED.tmp" "$STACK_RENDERED"
   grep -q -- '--launcher-pvc-owner-ref' "$STACK_RENDERED" || { echo "failed to inject --launcher-pvc-owner-ref into $STACK_RENDERED" >&2; exit 1; }
 fi
+if [[ -n "$LAUNCHER_STATE_HOSTPATH" ]]; then
+  SW_BLOCK_AWK_HOSTPATH="$LAUNCHER_STATE_HOSTPATH" awk 'BEGIN{hostpath=ENVIRON["SW_BLOCK_AWK_HOSTPATH"]; gsub(/\\/, "\\\\", hostpath); gsub(/"/, "\\\"", hostpath)} /--launcher-durable-root=/{print; print "            - \"--launcher-state-hostpath=" hostpath "\""; next} {print}' "$STACK_RENDERED" >"$STACK_RENDERED.tmp"
+  mv "$STACK_RENDERED.tmp" "$STACK_RENDERED"
+  grep -q -- '--launcher-state-hostpath=' "$STACK_RENDERED" || { echo "failed to inject --launcher-state-hostpath into $STACK_RENDERED" >&2; exit 1; }
+fi
 if [[ "$CHAP_ENABLED" == "1" ]]; then
   awk -v secret="$CHAP_SECRET_NAME" '/--launcher-iscsi-port-base=/{print; print "            - \"--launcher-iscsi-chap-secret-name=" secret "\""; next} {print}' "$STACK_RENDERED" >"$STACK_RENDERED.tmp"
   mv "$STACK_RENDERED.tmp" "$STACK_RENDERED"
@@ -160,6 +166,7 @@ log "image=$IMAGE"
 log "csi_image=$CSI_IMAGE"
 log "blockvolume_namespace=$BLOCKVOLUME_NAMESPACE"
 log "launcher_pvc_owner_ref=$LAUNCHER_PVC_OWNER_REF"
+log "launcher_state_hostpath=${LAUNCHER_STATE_HOSTPATH:-<emptyDir>}"
 log "chap_enabled=$CHAP_ENABLED"
 log "frontend_protocol=$FRONTEND_PROTOCOL"
 log "expected_git_revision=${EXPECTED_GIT_REVISION:-unknown}"

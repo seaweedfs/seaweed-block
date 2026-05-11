@@ -1,0 +1,242 @@
+# Runner-native RF=1 durable blockvolume restart chain.
+#
+# Goal:
+#   clean target -> build/import alpha images -> run dynamic PVC with durable
+#   generated blockvolume hostPath state -> restart generated blockvolume
+#   Deployment -> verify replacement app pod reads pre-restart bytes -> collect.
+#
+# Expected invocation from sw-test-runner-standalone:
+#   swblock run \
+#     -env product_root=/path/to/seaweed_block/on/m02 \
+#     -env ssh_key=/path/to/testdev_key/on/controller \
+#     testops/scenarios/csi-rf1-durable-restart-chain.yaml
+
+name: csi-rf1-durable-restart-chain
+timeout: 18m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: pre_clean
+    actions:
+      - action: pre_run_cleanup
+        node: m02
+        kill_patterns: "blockmaster,blockvolume,iscsi-target"
+        nvme_disconnect: "true"
+        iscsi_logout_prefix: "iqn.2026-05.io.seaweedfs"
+      - action: exec
+        node: m02
+        cmd: "rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-chain && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-chain"
+      - action: assert_no_active_iscsi_sessions
+        node: m02
+        iqn_substr: "io.seaweedfs"
+      - action: assert_no_processes
+        node: m02
+        pattern: "[/]blockmaster --|[/]blockvolume --|^blockmaster |^blockvolume "
+
+  - name: pin_build_alpha_images
+    actions:
+      - action: exec
+        node: m02
+        timeout: 8m
+        cmd: "cd {{ product_root }} && bash scripts/build-alpha-images.sh {{ product_root }}"
+        env.SW_BLOCK_IMPORT_K3S: "1"
+        env.SW_BLOCK_ARTIFACT_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-chain/pin_build"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-chain/pin_build/alpha-images.env"
+        pattern: "SW_BLOCK_IMAGE_ID="
+        save_as: pin_image_id_count
+      - action: assert_greater
+        actual: "{{ pin_image_id_count }}"
+        threshold: "0"
+
+  - name: durable_blockvolume_restart
+    actions:
+      - action: exec
+        node: m02
+        timeout: 10m
+        cmd: "cd {{ product_root }} && bash scripts/run-k8s-blockvolume-restart.sh {{ product_root }}"
+        env.SW_BLOCK_ALPHA_IMAGES_ENV: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-chain/pin_build/alpha-images.env"
+        env.SW_BLOCK_ARTIFACT_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-chain/durable_blockvolume_restart"
+        env.SW_BLOCK_LAUNCHER_STATE_HOSTPATH: "/var/lib/sw-block/testops-{{ run_id }}-csi-rf1-restart"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-chain/durable_blockvolume_restart/run.log"
+        pattern: "\\[app-demo\\] PASS:"
+        save_as: app_pass_count
+      - action: assert_greater
+        actual: "{{ app_pass_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-chain/durable_blockvolume_restart/run.log"
+        pattern: "restart_blockvolume_before_reader=1"
+        save_as: restart_mode_count
+      - action: assert_greater
+        actual: "{{ restart_mode_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-chain/durable_blockvolume_restart/block-stack.rendered.yaml"
+        pattern: "--launcher-status"
+        save_as: launcher_status_count
+      - action: assert_greater
+        actual: "{{ launcher_status_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-chain/durable_blockvolume_restart/block-stack.rendered.yaml"
+        pattern: "--launcher-state-hostpath=/var/lib/sw-block/testops-{{ run_id }}-csi-rf1-restart"
+        save_as: launcher_state_hostpath_count
+      - action: assert_greater
+        actual: "{{ launcher_state_hostpath_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-chain/durable_blockvolume_restart/generated-blockvolume.yaml"
+        pattern: "hostPath:"
+        save_as: generated_hostpath_count
+      - action: assert_greater
+        actual: "{{ generated_hostpath_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-chain/durable_blockvolume_restart/generated-blockvolume.yaml"
+        pattern: "type: DirectoryOrCreate"
+        save_as: generated_hostpath_type_count
+      - action: assert_greater
+        actual: "{{ generated_hostpath_type_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-chain/durable_blockvolume_restart/generated-blockvolume.yaml"
+        pattern: "--status-addr=127.0.0.1:"
+        save_as: generated_status_addr_count
+      - action: assert_greater
+        actual: "{{ generated_status_addr_count }}"
+        threshold: "0"
+      - action: exec
+        node: m02
+        cmd: "awk 'BEGIN{in_volumes=0;in_state=0;bad=0} /^[[:space:]]*volumes:[[:space:]]*$/{in_volumes=1;next} in_volumes && /^[^[:space:]]/{in_volumes=0;in_state=0} in_volumes && /^[[:space:]]*-[[:space:]]*name:[[:space:]]*state[[:space:]]*$/{in_state=1;next} in_state && /^[[:space:]]*-[[:space:]]*name:[[:space:]]*/{in_state=0} in_state && /emptyDir:/{bad=1} END{exit bad}' /mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-chain/durable_blockvolume_restart/generated-blockvolume.yaml"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-chain/durable_blockvolume_restart/writer.log"
+        pattern: "\\[app-writer\\] wrote and verified /data/demo.bin"
+        save_as: writer_checksum_count
+      - action: assert_greater
+        actual: "{{ writer_checksum_count }}"
+        threshold: "0"
+      - action: exec
+        node: m02
+        cmd: "test -s /mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-chain/durable_blockvolume_restart/blockvolume-pod-ids.before-restart.tsv && test -s /mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-chain/durable_blockvolume_restart/blockvolume-pod-ids.after-restart.tsv && ! cmp -s /mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-chain/durable_blockvolume_restart/blockvolume-pod-ids.before-restart.tsv /mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-chain/durable_blockvolume_restart/blockvolume-pod-ids.after-restart.tsv"
+      - action: exec
+        node: m02
+        cmd: "! grep -q 'iqn.2026-05.io.seaweedfs' /mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-chain/durable_blockvolume_restart/iscsi-sessions.before-blockvolume-restart.txt"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-chain/durable_blockvolume_restart/restart-blockvolume-status.log"
+        pattern: "successfully rolled out"
+        save_as: blockvolume_rollout_count
+      - action: assert_greater
+        actual: "{{ blockvolume_rollout_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-chain/durable_blockvolume_restart/reader.log"
+        pattern: "/data/demo.bin: OK"
+        save_as: reader_checksum_count
+      - action: assert_greater
+        actual: "{{ reader_checksum_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-chain/durable_blockvolume_restart/reader.describe.before-delete.txt"
+        pattern: "Status:           Succeeded"
+        save_as: reader_succeeded_describe_count
+      - action: assert_greater
+        actual: "{{ reader_succeeded_describe_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-chain/durable_blockvolume_restart/status-durable-after-blockvolume-restart.json"
+        pattern: "\"ReplicaID\"[[:space:]]*:[[:space:]]*\"r1\""
+        save_as: durable_status_replica_count
+      - action: assert_greater
+        actual: "{{ durable_status_replica_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-chain/durable_blockvolume_restart/status-durable-after-blockvolume-restart.json"
+        pattern: "\"Epoch\"[[:space:]]*:[[:space:]]*[1-9][0-9]*"
+        save_as: durable_status_epoch_count
+      - action: assert_greater
+        actual: "{{ durable_status_epoch_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-chain/durable_blockvolume_restart/status-durable-after-blockvolume-restart.json"
+        pattern: "\"Latched\"[[:space:]]*:[[:space:]]*true"
+        save_as: durable_status_latched_count
+      - action: assert_greater
+        actual: "{{ durable_status_latched_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-chain/durable_blockvolume_restart/status-durable-after-blockvolume-restart.json"
+        pattern: "\"Operational\"[[:space:]]*:[[:space:]]*true"
+        save_as: durable_status_operational_count
+      - action: assert_greater
+        actual: "{{ durable_status_operational_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-chain/durable_blockvolume_restart/blockvolume-generated.after-restart.log"
+        pattern: "\"phase\":\"iscsi-listening\""
+        save_as: blockvolume_iscsi_listening_count
+      - action: assert_greater
+        actual: "{{ blockvolume_iscsi_listening_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-chain/durable_blockvolume_restart/lifecycle-volumes.after-blockvolume-restart.json"
+        pattern: "\"protocol\"[[:space:]]*:[[:space:]]*\"iscsi\""
+        save_as: lifecycle_after_restart_protocol_count
+      - action: assert_greater
+        actual: "{{ lifecycle_after_restart_protocol_count }}"
+        threshold: "0"
+
+  - name: final_asserts
+    actions:
+      - action: assert_no_active_iscsi_sessions
+        node: m02
+        iqn_substr: "io.seaweedfs"
+      - action: assert_no_processes
+        node: m02
+        pattern: "[/]blockmaster --|[/]blockvolume --|^blockmaster |^blockvolume "
+      - action: exec
+        node: m02
+        cmd: "test ! -e /var/lib/sw-block/testops-{{ run_id }}-csi-rf1-restart"
+
+  - name: collect_and_cleanup
+    always: true
+    actions:
+      - action: pre_run_cleanup
+        node: m02
+        kill_patterns: "blockmaster,blockvolume,iscsi-target"
+        nvme_disconnect: "true"
+        iscsi_logout_prefix: "iqn.2026-05.io.seaweedfs"
+      - action: collect_path
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-chain"
+        name: "remote-phases"
+        ignore_error: true

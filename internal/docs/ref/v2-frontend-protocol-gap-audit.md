@@ -16,7 +16,31 @@ Kubernetes / CSI
 The purpose is to identify protocol-executor behavior that was already learned
 in V2 and must not be accidentally lost in V3.
 
-## Current Finding
+## 2026-05-09 Refresh: Post Protocol Release Gate
+
+The original finding below is historical. The P0/P1 iSCSI and NVMe frontend
+bring-up gaps were closed by the runner-native protocol release gate:
+
+- iSCSI large write, Data-Out collection, pending queue, timeout, and large
+  Data-In splitting are implemented and covered.
+- CHAP is implemented for target-side iSCSI and CSI node staging.
+- iSCSI ALUA / mounted failover is release-gated by
+  `iscsi-p6-alua-failover-chain`.
+- NVMe ANA, multipath discovery, mounted failover, and CSI protocol selection
+  are release-gated by `nvme-p4-multipath-failover-chain` and
+  `nvme-p5-csi-protocol-chain`.
+- `iscsi-p8-compat-soak-chain` provides the current compatibility soak gate.
+
+Remaining V2-parity work is no longer "make the frontend boot." It is beta
+hardening:
+
+- CSI node lifecycle adversarial coverage,
+- backend pressure and WAL/durable-store behavior,
+- returned-replica rebuild/reintegration,
+- broader host/kernel compatibility matrix,
+- longer soak and labelled performance evidence.
+
+## Historical Finding
 
 V3 can pass small K8s alpha writes, but a real OS initiator can still expose
 protocol gaps.
@@ -41,6 +65,20 @@ initiator state machine, especially command pipelining during Data-Out/R2T.
 
 ## iSCSI Gap Table
 
+Post-refresh classification:
+
+| Area | Current classification | Next action |
+|---|---|---|
+| Data-Out collection / R2T / pending queue / timeout | Closed for current release gate. | Keep component tests; use runner only for OS evidence. |
+| Multi Data-In reads | Closed for current release gate. | Keep large-read component coverage. |
+| CHAP | Closed for target + CSI node staging. | Keep secret propagation and fail-closed tests. |
+| ALUA / mounted failover | Release-gated. | Keep P6 chain; add component tests for any new state-machine change. |
+| CmdSN / TX ownership / RXTX stress | Partially covered. | Add focused component stress only where missing; avoid new lab gates first. |
+| Product-backed durable pressure | Still active. | Move to storage-engine/backend pressure tests. |
+| CSI lifecycle hardening | Still active. | Component-first PRs for adversarial node lifecycle. |
+
+Historical table:
+
 | Area | V2 Shape | V3 Shape | Product Risk | Priority |
 |---|---|---|---|---|
 | Data-Out collection | `DataOutCollector` in `iscsi/dataio.go`, reusable and tested. | Inlined inside `Session.collectWriteData`. | Harder to reason about R2T/F-bit/DataSN edge cases. | P0 |
@@ -55,6 +93,20 @@ initiator state machine, especially command pipelining during Data-Out/R2T.
 | QA coverage | V2 has smoke, stability, session storm, memory tests. | V3 has good component tests but fewer OS-initiator tests. | Go test client can miss kernel behavior. | P0 |
 
 ## NVMe Gap Table
+
+Post-refresh classification:
+
+| Area | Current classification | Next action |
+|---|---|---|
+| ANA Identify + Get Log Page | Release-gated. | Keep P3/P4 field-level asserts. |
+| Multipath mounted failover | Release-gated. | Keep P4 chain periodic, not default developer loop. |
+| CSI dynamic PVC protocol path | Release-gated. | Keep P5 chain and protocol propagation component tests. |
+| Target-side write retry | Intentionally rejected for V3. | Surface backend errors; test storage pressure explicitly. |
+| WAL pressure throttle | Active backend concern. | Define storage-engine pressure contract. |
+| IO queue / performance matrix | Not beta-complete. | Add labelled perf/soak only after correctness. |
+| DSM / Write Zeroes / advanced commands | Deferred. | Separate storage feature, not current beta blocker. |
+
+Historical table:
 
 | Area | V2 Shape | V3 Shape | Product Risk | Priority |
 |---|---|---|---|---|

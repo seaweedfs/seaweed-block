@@ -9,15 +9,20 @@ import (
 
 	"github.com/seaweedfs/seaweed-block/core/engine"
 	"github.com/seaweedfs/seaweed-block/core/frontend"
+	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
 )
 
 type stubProjector struct{ p engine.ReplicaProjection }
 
 func (s stubProjector) Projection() engine.ReplicaProjection { return s.p }
 
-type stubProbe struct{ yes bool }
+type stubProbe struct {
+	yes   bool
+	other *control.AssignmentFact
+}
 
 func (s stubProbe) IsSuperseded(string, uint64, uint64) bool { return s.yes }
+func (s stubProbe) LastOtherLine() *control.AssignmentFact   { return s.other }
 
 func TestAdapterProjectionView_LocalHealthyAndNotSuperseded_IsHealthy(t *testing.T) {
 	p := stubProjector{p: engine.ReplicaProjection{Mode: engine.ModeHealthy, Epoch: 1, EndpointVersion: 1}}
@@ -37,6 +42,20 @@ func TestAdapterProjectionView_SupersededOverridesLocalHealthy(t *testing.T) {
 	}
 	if got.Epoch != 1 || got.EndpointVersion != 1 {
 		t.Fatalf("lineage lost under supersede: %+v", got)
+	}
+}
+
+func TestAdapterProjectionView_SupportingReplicaReadyIsNotFrontendHealthy(t *testing.T) {
+	p := stubProjector{p: engine.ReplicaProjection{Mode: engine.ModeHealthy, Epoch: 2, EndpointVersion: 1}}
+	v := NewAdapterProjectionView(p, "v1", "r1", stubProbe{other: &control.AssignmentFact{
+		VolumeId: "v1", ReplicaId: "r2", Epoch: 2, EndpointVersion: 1,
+	}})
+	got := v.Projection()
+	if got.Healthy {
+		t.Fatalf("supporting replica at same lineage must not be frontend Healthy: %+v", got)
+	}
+	if got.Epoch != 2 || got.EndpointVersion != 1 {
+		t.Fatalf("lineage lost under supporting replica gate: %+v", got)
 	}
 }
 

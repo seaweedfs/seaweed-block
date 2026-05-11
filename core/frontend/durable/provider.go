@@ -32,6 +32,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 
@@ -112,6 +113,22 @@ type volHandle struct {
 	storage storage.LogicalStorage
 	backend *StorageBackend
 	path    string
+}
+
+// VolumeStatus is a read-only diagnostic snapshot of one durable volume
+// handle. It intentionally exposes lineage and readiness facts without giving
+// callers a control surface.
+type VolumeStatus struct {
+	VolumeID        string
+	Path            string
+	Impl            string
+	ReplicaID       string
+	Epoch           uint64
+	EndpointVersion uint64
+	Latched         bool
+	Operational     bool
+	Evidence        string
+	Closed          bool
 }
 
 // NewDurableProvider constructs a provider. view is the ONLY
@@ -289,6 +306,28 @@ func (p *DurableProvider) Backend(volumeID string) *StorageBackend {
 		return nil
 	}
 	return h.backend
+}
+
+// DurableStatuses returns stable, sorted diagnostic snapshots for all opened
+// volume handles. This is used by status endpoints and TestOps gates to prove
+// durable lineage latching without scraping logs.
+func (p *DurableProvider) DurableStatuses() []VolumeStatus {
+	p.mu.Lock()
+	handles := make(map[string]*volHandle, len(p.volumes))
+	for volumeID, h := range p.volumes {
+		handles[volumeID] = h
+	}
+	impl := string(p.cfg.Impl)
+	p.mu.Unlock()
+
+	out := make([]VolumeStatus, 0, len(handles))
+	for volumeID, h := range handles {
+		out = append(out, h.backend.durableStatus(volumeID, h.path, impl))
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].VolumeID < out[j].VolumeID
+	})
+	return out
 }
 
 // waitHealthy polls the projection until it reports Healthy for

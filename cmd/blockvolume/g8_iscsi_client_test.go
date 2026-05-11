@@ -103,6 +103,14 @@ func (c *g8IscsiClient) read10(t *testing.T, lba uint32, blocks uint16, bytesPer
 	return data
 }
 
+func (c *g8IscsiClient) syncCache10(t *testing.T) {
+	t.Helper()
+	status, _ := c.scsi(t, g8SyncCacheCDB10(), nil, 0)
+	if status != iscsi.StatusGood {
+		t.Fatalf("iSCSI SYNCHRONIZE CACHE(10) status=0x%02x", status)
+	}
+}
+
 func (c *g8IscsiClient) scsi(t *testing.T, cdb [16]byte, writePayload []byte, expectedDataIn int) (uint8, []byte) {
 	t.Helper()
 	req := &iscsi.PDU{}
@@ -161,5 +169,11 @@ func g8ReadCDB10(lba uint32, blocks uint16) [16]byte {
 	cdb[0] = iscsi.ScsiRead10
 	binary.BigEndian.PutUint32(cdb[2:6], lba)
 	binary.BigEndian.PutUint16(cdb[7:9], blocks)
+	return cdb
+}
+
+func g8SyncCacheCDB10() [16]byte {
+	var cdb [16]byte
+	cdb[0] = iscsi.ScsiSyncCache10
 	return cdb
 }

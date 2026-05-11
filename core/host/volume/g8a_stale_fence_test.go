@@ -87,3 +87,39 @@ func TestG8A_StaleSupersedeFact_DoesNotFenceCurrentPrimaryBackend(t *testing.T) 
 		t.Fatalf("current primary write after stale supersede: n=%d err=%v", n, err)
 	}
 }
+
+func TestG8A_ReturnedSupportingReplica_DoesNotServeFrontendBackend(t *testing.T) {
+	proj := &mutableProjector{p: engine.ReplicaProjection{
+		Mode: engine.ModeHealthy, Epoch: 2, EndpointVersion: 1,
+	}}
+	h := &Host{cfg: Config{VolumeID: "v1", ReplicaID: "r1"}}
+	h.view = NewAdapterProjectionView(proj, "v1", "r1", h)
+
+	id := frontend.Identity{VolumeID: "v1", ReplicaID: "r1", Epoch: 2, EndpointVersion: 1}
+	store := memorywal.NewStore(8, 4096)
+	t.Cleanup(func() { _ = store.Close() })
+	backend := durable.NewStorageBackend(store, h.view, id)
+	backend.SetOperational(true, "g8 returned supporting baseline")
+
+	// Same lineage as this replica, but authority names r2. This is the
+	// recovered/supporting replica shape: safe for replication consumers,
+	// never safe for frontend writes.
+	h.recordOtherLine(&control.AssignmentFact{
+		VolumeId:        "v1",
+		ReplicaId:       "r2",
+		Epoch:           2,
+		EndpointVersion: 1,
+		DataAddr:        "r2-data",
+		CtrlAddr:        "r2-ctrl",
+	})
+
+	if p := h.view.Projection(); p.Healthy {
+		t.Fatalf("supporting returned replica projection must fail closed for frontend: %+v", p)
+	}
+	if _, err := backend.Write(context.Background(), 0, []byte("must-not-write")); !errors.Is(err, frontend.ErrStalePrimary) {
+		t.Fatalf("supporting returned replica write: got %v want ErrStalePrimary", err)
+	}
+	if _, err := backend.Read(context.Background(), 0, make([]byte, 4)); !errors.Is(err, frontend.ErrStalePrimary) {
+		t.Fatalf("supporting returned replica read: got %v want ErrStalePrimary", err)
+	}
+}

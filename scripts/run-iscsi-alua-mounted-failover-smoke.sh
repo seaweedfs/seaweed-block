@@ -17,6 +17,10 @@ R2_CTRL_ADDR="${SW_BLOCK_R2_CTRL_ADDR:-127.0.0.1:19612}"
 R2_STATUS_ADDR="${SW_BLOCK_R2_STATUS_ADDR:-127.0.0.1:19613}"
 BLOCKS="${SW_BLOCK_DURABLE_BLOCKS:-65536}"
 BLOCK_SIZE="${SW_BLOCK_DURABLE_BLOCKSIZE:-4096}"
+RETURN_R1_AFTER_FAILOVER="${SW_BLOCK_RETURN_R1_AFTER_FAILOVER:-0}"
+DEGRADED_PROBE_INTERVAL="${SW_BLOCK_DEGRADED_PROBE_INTERVAL:-0}"
+DEGRADED_PROBE_COOLDOWN_BASE="${SW_BLOCK_DEGRADED_PROBE_COOLDOWN_BASE:-1s}"
+DEGRADED_PROBE_COOLDOWN_CAP="${SW_BLOCK_DEGRADED_PROBE_COOLDOWN_CAP:-3s}"
 BIN_DIR="${SW_BLOCK_BIN_DIR:-${WORK_DIR}/bin}"
 RUN_DIR="${WORK_DIR}/run"
 MOUNT_DIR="${SW_BLOCK_ISCSI_MOUNT_DIR:-${WORK_DIR}/mnt}"
@@ -79,6 +83,8 @@ log "root=$ROOT"
 log "artifact_dir=$ARTIFACT_DIR"
 log "iqn=$IQN"
 log "portals=$(portal_for "$PORT1"),$(portal_for "$PORT2")"
+log "return_r1_after_failover=$RETURN_R1_AFTER_FAILOVER"
+log "degraded_probe_interval=$DEGRADED_PROBE_INTERVAL"
 
 cd "$ROOT"
 git rev-parse --short HEAD >"$ARTIFACT_DIR/git-head.txt" 2>/dev/null || true
@@ -132,6 +138,15 @@ start_blockvolume() {
   local store="$7"
   local log_file="$8"
 
+  local extra_args=()
+  if [[ "$DEGRADED_PROBE_INTERVAL" != "0" && "$DEGRADED_PROBE_INTERVAL" != "0s" ]]; then
+    extra_args+=(
+      --degraded-probe-interval "$DEGRADED_PROBE_INTERVAL"
+      --degraded-probe-cooldown-base "$DEGRADED_PROBE_COOLDOWN_BASE"
+      --degraded-probe-cooldown-cap "$DEGRADED_PROBE_COOLDOWN_CAP"
+    )
+  fi
+
   setsid -f "${BIN_DIR}/blockvolume" \
     --master "$MASTER_ADDR" \
     --server-id "$server" \
@@ -148,6 +163,7 @@ start_blockvolume() {
     --durable-blocksize "$BLOCK_SIZE" \
     --iscsi-listen "127.0.0.1:${port}" \
     --iscsi-iqn "$IQN" \
+    "${extra_args[@]}" \
     >"$log_file" 2>&1
 }
 
@@ -217,6 +233,151 @@ PY
   done
   curl -fsS "http://${status_addr}/status?volume=v1" >"$ARTIFACT_DIR/status-${replica}-last.json" 2>/dev/null || true
   echo "timed out waiting for ${replica} projection" >&2
+  exit 1
+}
+
+wait_status_returned() {
+  local status_addr="$1"
+  local replica="$2"
+  local out="$ARTIFACT_DIR/status-${replica}-returned.json"
+  for _ in $(seq 1 240); do
+    if curl -fsS "http://${status_addr}/status?volume=v1" >"$out.tmp" 2>/dev/null; then
+      if python3 - "$out.tmp" "$replica" <<'PY'
+import json, sys
+path, replica = sys.argv[1], sys.argv[2]
+body = json.load(open(path))
+if str(body.get("ReplicaID", "")) != replica:
+    sys.exit(1)
+authority_role = str(body.get("AuthorityRole", ""))
+replication_role = str(body.get("ReplicationRole", ""))
+frontend_ready = bool(body.get("FrontendPrimaryReady"))
+healthy = bool(body.get("Healthy"))
+ok_role = authority_role != "primary" and replication_role in ("not_ready", "recovering", "replica_ready")
+ok = ok_role and not frontend_ready and not healthy
+sys.exit(0 if ok else 1)
+PY
+      then
+        mv "$out.tmp" "$out"
+        {
+          echo "replica=${replica}"
+          echo "authority_non_primary=true"
+          echo "frontend_primary_ready=false"
+          echo "healthy=false"
+        } >"$ARTIFACT_DIR/status-${replica}-returned.summary"
+        return 0
+      fi
+    fi
+    sleep 0.25
+  done
+  curl -fsS "http://${status_addr}/status?volume=v1" >"$ARTIFACT_DIR/status-${replica}-returned-last.json" 2>/dev/null || true
+  echo "timed out waiting for ${replica} returned non-frontend projection" >&2
+  exit 1
+}
+
+wait_durable_ready() {
+  local status_addr="$1"
+  local replica="$2"
+  local min_epoch="$3"
+  local suffix="$4"
+  local out="$ARTIFACT_DIR/status-durable-${replica}-${suffix}.json"
+  for _ in $(seq 1 240); do
+    if curl -fsS "http://${status_addr}/status/durable?volume=v1" >"$out.tmp" 2>/dev/null; then
+      if python3 - "$out.tmp" "$replica" "$min_epoch" <<'PY'
+import json, sys
+path, replica, min_epoch = sys.argv[1], sys.argv[2], int(sys.argv[3])
+body = json.load(open(path))
+if str(body.get("ReplicaID", "")) != replica:
+    sys.exit(1)
+vols = body.get("Volumes", [])
+if not vols:
+    sys.exit(1)
+for v in vols:
+    if str(v.get("VolumeID", "")) != "v1" or str(v.get("ReplicaID", "")) != replica:
+        continue
+    epoch = int(v.get("Epoch", 0))
+    latched = bool(v.get("Latched"))
+    operational = bool(v.get("Operational"))
+    closed = bool(v.get("Closed"))
+    evidence = str(v.get("Evidence", ""))
+    ok = epoch >= min_epoch and latched and operational and not closed and evidence != ""
+    sys.exit(0 if ok else 1)
+sys.exit(1)
+PY
+      then
+        mv "$out.tmp" "$out"
+        python3 - "$out" "$replica" "$min_epoch" >"$ARTIFACT_DIR/status-durable-${replica}-${suffix}.summary" <<'PY'
+import json, sys
+path, replica, min_epoch = sys.argv[1], sys.argv[2], int(sys.argv[3])
+body = json.load(open(path))
+for v in body.get("Volumes", []):
+    if str(v.get("VolumeID", "")) == "v1" and str(v.get("ReplicaID", "")) == replica:
+        epoch = int(v.get("Epoch", 0))
+        print(f"replica={replica}")
+        print(f"epoch={epoch}")
+        print(f"epoch_gte_{min_epoch}={str(epoch >= min_epoch).lower()}")
+        print(f"latched={str(bool(v.get('Latched'))).lower()}")
+        print(f"operational={str(bool(v.get('Operational'))).lower()}")
+        print(f"closed={str(bool(v.get('Closed'))).lower()}")
+        sys.exit(0)
+sys.exit(1)
+PY
+        return 0
+      fi
+    fi
+    sleep 0.25
+  done
+  curl -fsS "http://${status_addr}/status/durable?volume=v1" >"$ARTIFACT_DIR/status-durable-${replica}-${suffix}-last.json" 2>/dev/null || true
+  echo "timed out waiting for ${replica} durable ready status" >&2
+  exit 1
+}
+
+capture_durable_status() {
+  local status_addr="$1"
+  local replica="$2"
+  local suffix="$3"
+  local out="$ARTIFACT_DIR/status-durable-${replica}-${suffix}.json"
+  for _ in $(seq 1 40); do
+    if curl -fsS "http://${status_addr}/status/durable?volume=v1" >"$out.tmp" 2>/dev/null; then
+      mv "$out.tmp" "$out"
+      return 0
+    fi
+    sleep 0.25
+  done
+  echo "failed to capture ${replica} durable status" >&2
+  exit 1
+}
+
+wait_peer_healthy() {
+  local status_addr="$1"
+  local peer="$2"
+  local min_epoch="$3"
+  local out="$ARTIFACT_DIR/status-r2-peers-after-${peer}-return.json"
+  for _ in $(seq 1 240); do
+    if curl -fsS "http://${status_addr}/status/peers?volume=v1" >"$out.tmp" 2>/dev/null; then
+      if python3 - "$out.tmp" "$peer" "$min_epoch" <<'PY'
+import json, sys
+path, peer, min_epoch = sys.argv[1], sys.argv[2], int(sys.argv[3])
+body = json.load(open(path))
+for p in body.get("Peers", []):
+    if str(p.get("ReplicaID", "")) != peer:
+        continue
+    state = str(p.get("State", ""))
+    epoch = int(p.get("Epoch", 0))
+    in_flight = bool(p.get("ProbeInFlight"))
+    closed = bool(p.get("Closed"))
+    ok = state == "healthy" and epoch >= min_epoch and not in_flight and not closed
+    sys.exit(0 if ok else 1)
+sys.exit(1)
+PY
+      then
+        mv "$out.tmp" "$out"
+        return 0
+      fi
+    fi
+    sleep 0.25
+  done
+  curl -fsS "http://${status_addr}/status/peers?volume=v1" >"$ARTIFACT_DIR/status-r2-peers-after-${peer}-return-last.json" 2>/dev/null || true
+  echo "timed out waiting for primary peer ${peer} healthy" >&2
   exit 1
 }
 
@@ -384,6 +545,20 @@ if ! timeout 60s sync; then
 fi
 sudo sha256sum "$MOUNT_DIR/post.bin" | tee "$ARTIFACT_DIR/post.sha256"
 sudo sha256sum -c "$ARTIFACT_DIR/post.sha256" | tee "$ARTIFACT_DIR/post-check.log"
+
+if [[ "$RETURN_R1_AFTER_FAILOVER" == "1" || "$RETURN_R1_AFTER_FAILOVER" == "true" ]]; then
+  log "restart returned r1 after r2 promotion"
+  start_blockvolume r1 s1 "$PORT1" "$R1_DATA_ADDR" "$R1_CTRL_ADDR" "$R1_STATUS_ADDR" \
+    "${RUN_DIR}/r1-store" "$ARTIFACT_DIR/blockvolume-r1-returned.log"
+  wait_port "$PORT1"
+  wait_status_returned "$R1_STATUS_ADDR" r1
+  wait_log_pattern "$ARTIFACT_DIR/blockvolume-r1-returned.log" "authority is now .*not this replica" "r1 returned authority observation"
+  wait_log_pattern "$ARTIFACT_DIR/blockvolume-r1-returned.log" "durable recovered: recovered LSN=" "r1 returned local recovery"
+  wait_peer_healthy "$R2_STATUS_ADDR" r1 2
+  capture_durable_status "$R1_STATUS_ADDR" r1 "returned"
+  wait_durable_ready "$R2_STATUS_ADDR" r2 2 "primary-after-r1-return"
+  curl -fsS "http://${R2_STATUS_ADDR}/status?volume=v1" >"$ARTIFACT_DIR/status-r2-after-r1-return.json" 2>/dev/null || true
+fi
 
 log "unmount"
 sudo umount "$MOUNT_DIR"

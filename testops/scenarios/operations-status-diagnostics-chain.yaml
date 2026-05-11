@@ -1,0 +1,109 @@
+# Runner-native operations/status diagnostics component gate.
+#
+# Goal:
+#   Prove the status-server diagnostic surfaces are present and explicitly
+#   guarded at component level before relying on them in beta-hardening suites.
+#
+# Expected invocation:
+#   swblock run \
+#     -env product_root=/path/to/seaweed_block/on/m02 \
+#     -env ssh_key=/path/to/testdev_key/on/controller \
+#     testops/scenarios/operations-status-diagnostics-chain.yaml
+
+name: operations-status-diagnostics-chain
+timeout: 5m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: pre_clean
+    actions:
+      - action: assert_no_active_iscsi_sessions
+        node: m02
+        iqn_substr: "io.seaweedfs"
+      - action: assert_no_processes
+        node: m02
+        pattern: "[/]blockmaster --|[/]blockvolume --|^blockmaster |^blockvolume "
+      - action: exec
+        node: m02
+        cmd: "rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-operations-status && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-operations-status/pin_build"
+
+  - name: pin_build
+    actions:
+      - action: exec
+        node: m02
+        cmd: "cd {{ product_root }} && git rev-parse HEAD > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-operations-status/pin_build/git.sha && git status --porcelain > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-operations-status/pin_build/git.status && test ! -s /mnt/smb/work/share/g15d-k8s/{{ run_id }}-operations-status/pin_build/git.status"
+
+  - name: status_diagnostics_component_tests
+    actions:
+      - action: exec
+        node: m02
+        timeout: 3m
+        cmd: "cd {{ product_root }} && bash -o pipefail -c 'go test -count=1 -json -run \"TestStatusServer_(RejectsNonLoopbackBind|AcceptsLoopbackBindAndServesJSON|RecoveryEndpoint_Enabled_ReturnsEngineProjection|PeerStatusEndpoint_EnabledAfterStart_ReturnsPeerStates|DurableStatusEndpoint_EnabledAfterStart_ReturnsLineage)$\" ./core/host/volume | tee /mnt/smb/work/share/g15d-k8s/{{ run_id }}-operations-status/status-server-go-test.jsonl'"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-operations-status/status-server-go-test.jsonl"
+        pattern: "\"Action\":\"pass\".*\"Test\":\"TestStatusServer_RejectsNonLoopbackBind\""
+        save_as: status_loopback_guard_count
+      - action: assert_greater
+        actual: "{{ status_loopback_guard_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-operations-status/status-server-go-test.jsonl"
+        pattern: "\"Action\":\"pass\".*\"Test\":\"TestStatusServer_AcceptsLoopbackBindAndServesJSON\""
+        save_as: status_base_json_count
+      - action: assert_greater
+        actual: "{{ status_base_json_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-operations-status/status-server-go-test.jsonl"
+        pattern: "\"Action\":\"pass\".*\"Test\":\"TestStatusServer_RecoveryEndpoint_Enabled_ReturnsEngineProjection\""
+        save_as: status_recovery_endpoint_count
+      - action: assert_greater
+        actual: "{{ status_recovery_endpoint_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-operations-status/status-server-go-test.jsonl"
+        pattern: "\"Action\":\"pass\".*\"Test\":\"TestStatusServer_PeerStatusEndpoint_EnabledAfterStart_ReturnsPeerStates\""
+        save_as: status_peers_endpoint_count
+      - action: assert_greater
+        actual: "{{ status_peers_endpoint_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-operations-status/status-server-go-test.jsonl"
+        pattern: "\"Action\":\"pass\".*\"Test\":\"TestStatusServer_DurableStatusEndpoint_EnabledAfterStart_ReturnsLineage\""
+        save_as: status_durable_endpoint_count
+      - action: assert_greater
+        actual: "{{ status_durable_endpoint_count }}"
+        threshold: "0"
+
+  - name: final_asserts
+    actions:
+      - action: assert_no_active_iscsi_sessions
+        node: m02
+        iqn_substr: "io.seaweedfs"
+      - action: assert_no_processes
+        node: m02
+        pattern: "[/]blockmaster --|[/]blockvolume --|^blockmaster |^blockvolume "
+
+  - name: collect_and_cleanup
+    always: true
+    actions:
+      - action: collect_path
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-operations-status"
+        name: "remote-phases"
+        ignore_error: true

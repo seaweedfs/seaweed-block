@@ -1,0 +1,102 @@
+# Runner-native returned-replica component gate.
+#
+# Goal:
+#   Run fast host/volume component tests that pin returned-replica frontend
+#   safety semantics before adding expensive RF=2/3 Kubernetes or initiator
+#   scenarios.
+#
+# Expected invocation:
+#   swblock run \
+#     -env product_root=/path/to/seaweed_block/on/m02 \
+#     -env ssh_key=/path/to/testdev_key/on/controller \
+#     testops/scenarios/returned-replica-component-gate.yaml
+
+name: returned-replica-component-gate
+timeout: 5m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: pre_clean
+    actions:
+      - action: assert_no_active_iscsi_sessions
+        node: m02
+        iqn_substr: "io.seaweedfs"
+      - action: assert_no_processes
+        node: m02
+        pattern: "[/]blockmaster --|[/]blockvolume --|^blockmaster |^blockvolume "
+      - action: exec
+        node: m02
+        cmd: "rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-returned-replica-component && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-returned-replica-component/pin_build"
+
+  - name: pin_build
+    actions:
+      - action: exec
+        node: m02
+        cmd: "cd {{ product_root }} && git rev-parse HEAD > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-returned-replica-component/pin_build/git.sha && git status --porcelain > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-returned-replica-component/pin_build/git.status && test ! -s /mnt/smb/work/share/g15d-k8s/{{ run_id }}-returned-replica-component/pin_build/git.status"
+
+  - name: returned_replica_component_tests
+    actions:
+      - action: exec
+        node: m02
+        timeout: 3m
+        cmd: "cd {{ product_root }} && bash -o pipefail -c 'go test -count=1 -v ./core/host/volume | tee /mnt/smb/work/share/g15d-k8s/{{ run_id }}-returned-replica-component/core-host-volume-go-test.log'"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-returned-replica-component/core-host-volume-go-test.log"
+        pattern: "--- PASS: TestG8A_ReturnedSupportingReplica_DoesNotServeFrontendBackend"
+        save_as: supporting_frontend_fence_count
+      - action: assert_greater
+        actual: "{{ supporting_frontend_fence_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-returned-replica-component/core-host-volume-go-test.log"
+        pattern: "--- PASS: TestG9B_StatusProjection_ComponentAdapterLifecycle_NotReadyRecoveringReady"
+        save_as: returned_lifecycle_count
+      - action: assert_greater
+        actual: "{{ returned_lifecycle_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-returned-replica-component/core-host-volume-go-test.log"
+        pattern: "--- PASS: TestG9B_StatusProjection_ReturnedReplicaCanBeDurableReadyButFrontendNotReady"
+        save_as: returned_durable_ready_frontend_fenced_count
+      - action: assert_greater
+        actual: "{{ returned_durable_ready_frontend_fenced_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-returned-replica-component/core-host-volume-go-test.log"
+        pattern: "--- PASS: TestG9C_StatusProjection_DualLaneRecoveredReplicaReadyAfterPostCloseAck"
+        save_as: dual_lane_ready_count
+      - action: assert_greater
+        actual: "{{ dual_lane_ready_count }}"
+        threshold: "0"
+
+  - name: final_asserts
+    actions:
+      - action: assert_no_active_iscsi_sessions
+        node: m02
+        iqn_substr: "io.seaweedfs"
+      - action: assert_no_processes
+        node: m02
+        pattern: "[/]blockmaster --|[/]blockvolume --|^blockmaster |^blockvolume "
+
+  - name: collect_and_cleanup
+    always: true
+    actions:
+      - action: collect_path
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-returned-replica-component"
+        name: "remote-phases"
+        ignore_error: true

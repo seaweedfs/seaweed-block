@@ -1,0 +1,94 @@
+# Runner-native CSI lifecycle component gate.
+#
+# Goal:
+#   Run the fast CSI controller/node component tests that pin publish,
+#   stage, unpublish, unstage, and reattach semantics without requiring a
+#   privileged Linux initiator or Kubernetes workload.
+#
+# Expected invocation:
+#   swblock run \
+#     -env product_root=/path/to/seaweed_block/on/m02 \
+#     -env ssh_key=/path/to/testdev_key/on/controller \
+#     testops/scenarios/csi-lifecycle-component-gate.yaml
+
+name: csi-lifecycle-component-gate
+timeout: 5m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: pre_clean
+    actions:
+      - action: assert_no_active_iscsi_sessions
+        node: m02
+        iqn_substr: "io.seaweedfs"
+      - action: assert_no_processes
+        node: m02
+        pattern: "[/]blockmaster --|[/]blockvolume --|^blockmaster |^blockvolume "
+      - action: exec
+        node: m02
+        cmd: "rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-lifecycle-component && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-lifecycle-component/pin_build"
+
+  - name: pin_build
+    actions:
+      - action: exec
+        node: m02
+        cmd: "cd {{ product_root }} && git rev-parse HEAD > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-lifecycle-component/pin_build/git.sha && git status --porcelain > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-lifecycle-component/pin_build/git.status && test ! -s /mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-lifecycle-component/pin_build/git.status"
+
+  - name: csi_component_tests
+    actions:
+      - action: exec
+        node: m02
+        timeout: 3m
+        cmd: "cd {{ product_root }} && bash -o pipefail -c 'go test -count=1 -v ./core/csi | tee /mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-lifecycle-component/core-csi-go-test.log'"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-lifecycle-component/core-csi-go-test.log"
+        pattern: "--- PASS: TestG15e_CSIReattachUsesFreshPublishTargetAfterUnstage"
+        save_as: reattach_component_count
+      - action: assert_greater
+        actual: "{{ reattach_component_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-lifecycle-component/core-csi-go-test.log"
+        pattern: "--- PASS: TestNodeStage_FailsClosedOnStaleLoggedInSessionWithoutStagedIdentity"
+        save_as: stale_session_component_count
+      - action: assert_greater
+        actual: "{{ stale_session_component_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-lifecycle-component/core-csi-go-test.log"
+        pattern: "--- PASS: TestNodeStageUnstage_RepeatedCyclesLeaveNoLocalState"
+        save_as: repeated_cycle_component_count
+      - action: assert_greater
+        actual: "{{ repeated_cycle_component_count }}"
+        threshold: "0"
+
+  - name: final_asserts
+    actions:
+      - action: assert_no_active_iscsi_sessions
+        node: m02
+        iqn_substr: "io.seaweedfs"
+      - action: assert_no_processes
+        node: m02
+        pattern: "[/]blockmaster --|[/]blockvolume --|^blockmaster |^blockvolume "
+
+  - name: collect_and_cleanup
+    always: true
+    actions:
+      - action: collect_path
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-lifecycle-component"
+        name: "remote-phases"
+        ignore_error: true

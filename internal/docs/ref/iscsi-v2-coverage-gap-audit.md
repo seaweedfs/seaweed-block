@@ -68,7 +68,26 @@ Representative V3 tests:
 - `core/frontend/iscsi/p1_large_read_test.go`
 - `core/frontend/iscsi/datain_test.go`
 
-## High-Value Gaps From V2
+## 2026-05-09 Refresh: Current Classification
+
+The protocol-readiness phase closed several gaps that were open when this audit
+was written:
+
+| Gap | Current classification | Evidence / next action |
+|---|---|---|
+| RX/TX session stress | Mostly covered by component tests and P8 soak. | Keep adding focused component tests for specific regressions. |
+| Large-write memory / slow backend | Partially covered at protocol level; backend pressure remains active. | Move next work to storage-engine pressure contracts. |
+| Product-backed iSCSI stability | Release-gated. | `iscsi-p8-compat-soak-chain` is the runner gate. |
+| CHAP | Closed. | Target-side CHAP and CSI node CHAP are implemented and lab-validated. |
+| ALUA / MPIO foundation | Release-gated. | `iscsi-p6-alua-failover-chain` covers ALUA + mounted failover. |
+| CSI node lifecycle hardening | Still active. | Component-first beta hardening work. |
+| NVMe QA breadth | Release-gated for ANA/multipath/CSI path; perf breadth remains active. | Keep P4/P5 gates; defer perf matrix. |
+
+The next iSCSI/V2-parity work should not re-open protocol bring-up. It should
+focus on CSI lifecycle, backend pressure, returned-replica behavior, and host
+compatibility breadth.
+
+## Historical High-Value Gaps From V2
 
 ### Gap 1: iSCSI RX/TX session stress
 

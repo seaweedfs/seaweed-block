@@ -7,6 +7,10 @@ WORK_DIR="${SW_BLOCK_ISCSI_WORK_DIR:-/tmp/sw-block-iscsi-os}"
 ARTIFACT_DIR="${SW_BLOCK_ARTIFACT_DIR:-${WORK_DIR}/runs/${RUN_ID}}"
 IQN="${SW_BLOCK_ISCSI_IQN:-iqn.2026-05.io.seaweedfs:os-smoke-v1}"
 PORTAL_ADDR="${SW_BLOCK_ISCSI_PORTAL_ADDR:-}"
+LISTEN_HOST="${SW_BLOCK_ISCSI_LISTEN_HOST:-127.0.0.1}"
+INITIATOR_PORTAL_ADDR="${SW_BLOCK_ISCSI_INITIATOR_PORTAL_ADDR:-}"
+TARGET_ONLY="${SW_BLOCK_ISCSI_TARGET_ONLY:-0}"
+TARGET_HOLD_SECONDS="${SW_BLOCK_ISCSI_TARGET_HOLD_SECONDS:-900}"
 DATAOUT_TIMEOUT="${SW_BLOCK_ISCSI_DATAOUT_TIMEOUT:-}"
 CHAP_USERNAME="${SW_BLOCK_ISCSI_CHAP_USERNAME:-}"
 CHAP_SECRET="${SW_BLOCK_ISCSI_CHAP_SECRET:-}"
@@ -57,11 +61,19 @@ PY
 }
 
 PORT="${SW_BLOCK_ISCSI_PORT:-$(pick_free_port)}"
+if [[ -z "$INITIATOR_PORTAL_ADDR" ]]; then
+  INITIATOR_PORTAL_ADDR="127.0.0.1:${PORT}"
+fi
+INITIATOR_PORTAL_HOST="${INITIATOR_PORTAL_ADDR%%:*}"
+LISTENER_CHECK_HOST="$LISTEN_HOST"
+if [[ "$LISTENER_CHECK_HOST" == "0.0.0.0" ]]; then
+  LISTENER_CHECK_HOST="127.0.0.1"
+fi
 MASTER_ADDR="${SW_BLOCK_MASTER_ADDR:-127.0.0.1:$(pick_free_port)}"
 DATA_ADDR="${SW_BLOCK_DATA_ADDR:-127.0.0.1:$(pick_free_port)}"
 CTRL_ADDR="${SW_BLOCK_CTRL_ADDR:-127.0.0.1:$(pick_free_port)}"
 STATUS_ADDR="${SW_BLOCK_STATUS_ADDR:-127.0.0.1:$(pick_free_port)}"
-DEVLINK_GLOB="/dev/disk/by-path/*ip-127.0.0.1:${PORT}-iscsi-${IQN}-lun-0"
+DEVLINK_GLOB="/dev/disk/by-path/*ip-${INITIATOR_PORTAL_HOST}:${PORT}-iscsi-${IQN}-lun-0"
 MASTER_PID=""
 VOLUME_PID=""
 
@@ -95,9 +107,9 @@ cleanup() {
   log "cleanup"
   mountpoint -q "$MOUNT_DIR" && sudo umount "$MOUNT_DIR" >>"$ARTIFACT_DIR/cleanup.log" 2>&1
   cleanup_iqn_records
-  sudo iscsiadm -m node -T "$IQN" -p "127.0.0.1:${PORT}" --logout >>"$ARTIFACT_DIR/cleanup.log" 2>&1 || true
-  sudo iscsiadm -m node -T "$IQN" -p "127.0.0.1:${PORT}" -o delete >>"$ARTIFACT_DIR/cleanup.log" 2>&1 || true
-  sudo iscsiadm -m discoverydb -t sendtargets -p "127.0.0.1:${PORT}" -o delete >>"$ARTIFACT_DIR/cleanup.log" 2>&1 || true
+  sudo iscsiadm -m node -T "$IQN" -p "$INITIATOR_PORTAL_ADDR" --logout >>"$ARTIFACT_DIR/cleanup.log" 2>&1 || true
+  sudo iscsiadm -m node -T "$IQN" -p "$INITIATOR_PORTAL_ADDR" -o delete >>"$ARTIFACT_DIR/cleanup.log" 2>&1 || true
+  sudo iscsiadm -m discoverydb -t sendtargets -p "$INITIATOR_PORTAL_ADDR" -o delete >>"$ARTIFACT_DIR/cleanup.log" 2>&1 || true
   [[ -n "$VOLUME_PID" ]] && kill "$VOLUME_PID" >>"$ARTIFACT_DIR/cleanup.log" 2>&1 || true
   [[ -n "$MASTER_PID" ]] && kill "$MASTER_PID" >>"$ARTIFACT_DIR/cleanup.log" 2>&1 || true
   pkill -TERM -f "${BIN_DIR}/blockvolume" >>"$ARTIFACT_DIR/cleanup.log" 2>&1 || true
@@ -124,7 +136,8 @@ log "run_id=$RUN_ID"
 log "root=$ROOT"
 log "artifact_dir=$ARTIFACT_DIR"
 log "iqn=$IQN"
-log "portal=127.0.0.1:${PORT}"
+log "portal=${INITIATOR_PORTAL_ADDR}"
+log "listen=${LISTEN_HOST}:${PORT}"
 log "master=${MASTER_ADDR}"
 log "data_addr=${DATA_ADDR}"
 log "ctrl_addr=${CTRL_ADDR}"
@@ -178,6 +191,9 @@ cleanup_iqn_records
 sudo iscsiadm -m node -T "$IQN" -p "127.0.0.1:${PORT}" --logout >/dev/null 2>&1 || true
 sudo iscsiadm -m node -T "$IQN" -p "127.0.0.1:${PORT}" -o delete >/dev/null 2>&1 || true
 sudo iscsiadm -m discoverydb -t sendtargets -p "127.0.0.1:${PORT}" -o delete >/dev/null 2>&1 || true
+sudo iscsiadm -m node -T "$IQN" -p "$INITIATOR_PORTAL_ADDR" --logout >/dev/null 2>&1 || true
+sudo iscsiadm -m node -T "$IQN" -p "$INITIATOR_PORTAL_ADDR" -o delete >/dev/null 2>&1 || true
+sudo iscsiadm -m discoverydb -t sendtargets -p "$INITIATOR_PORTAL_ADDR" -o delete >/dev/null 2>&1 || true
 sudo iscsiadm -m session >"$ARTIFACT_DIR/iscsi-sessions.before.txt" 2>&1 || true
 
 log "start blockmaster"
@@ -208,7 +224,7 @@ fi
 
 log "start blockvolume iSCSI target"
 blockvolume_iscsi_args=(
-  --iscsi-listen "127.0.0.1:${PORT}"
+  --iscsi-listen "${LISTEN_HOST}:${PORT}"
   --iscsi-iqn "$IQN"
 )
 if [[ -n "$PORTAL_ADDR" ]]; then
@@ -247,17 +263,33 @@ for _ in $(seq 1 100); do
     echo "blockvolume exited during startup" >&2
     exit 1
   fi
-  if bash -c "</dev/tcp/127.0.0.1/${PORT}" >/dev/null 2>&1; then
+  if bash -c "</dev/tcp/${LISTENER_CHECK_HOST}/${PORT}" >/dev/null 2>&1; then
     break
   fi
   sleep 0.1
 done
-if ! bash -c "</dev/tcp/127.0.0.1/${PORT}" >/dev/null 2>&1; then
+if ! bash -c "</dev/tcp/${LISTENER_CHECK_HOST}/${PORT}" >/dev/null 2>&1; then
   cat "$ARTIFACT_DIR/blockvolume.log" >&2 || true
-  echo "iSCSI listener did not open on 127.0.0.1:${PORT}" >&2
+  echo "iSCSI listener did not open on ${LISTEN_HOST}:${PORT}" >&2
   exit 1
 fi
 sleep 2
+
+if [[ "$TARGET_ONLY" == "1" ]]; then
+  cat >"$ARTIFACT_DIR/target-ready.env" <<ENV
+SW_BLOCK_ISCSI_TARGET_READY=1
+SW_BLOCK_ISCSI_IQN=${IQN}
+SW_BLOCK_ISCSI_PORTAL=${PORTAL_ADDR:-${INITIATOR_PORTAL_ADDR}}
+SW_BLOCK_ISCSI_LISTEN=${LISTEN_HOST}:${PORT}
+SW_BLOCK_ISCSI_ARTIFACT_DIR=${ARTIFACT_DIR}
+ENV
+  log "target-only mode: hold ${TARGET_HOLD_SECONDS}s for external initiator"
+  log "target-only portal=${PORTAL_ADDR:-${INITIATOR_PORTAL_ADDR}} iqn=${IQN}"
+  log "target-only ready_file=${ARTIFACT_DIR}/target-ready.env"
+  sleep "$TARGET_HOLD_SECONDS"
+  log "target-only hold complete"
+  exit 0
+fi
 
 run_iteration() {
   local iter="$1"
@@ -265,24 +297,24 @@ run_iteration() {
 
   log "iteration ${iter}: iscsi discovery/login"
   if [[ -n "$CHAP_SECRET" ]]; then
-    sudo iscsiadm -m discovery -t sendtargets -p "127.0.0.1:${PORT}" | tee "$ARTIFACT_DIR/discovery.${suffix}.log"
-    sudo iscsiadm -m node -T "$IQN" -p "127.0.0.1:${PORT}" --op=update -n node.session.auth.authmethod -v CHAP >>"$ARTIFACT_DIR/node-auth.${suffix}.log" 2>&1
-    sudo iscsiadm -m node -T "$IQN" -p "127.0.0.1:${PORT}" --op=update -n node.session.auth.username -v "$CHAP_USERNAME" >>"$ARTIFACT_DIR/node-auth.${suffix}.log" 2>&1
-    sudo iscsiadm -m node -T "$IQN" -p "127.0.0.1:${PORT}" --op=update -n node.session.auth.password -v "$CHAP_SECRET" >>"$ARTIFACT_DIR/node-auth.${suffix}.log" 2>&1
+    sudo iscsiadm -m discovery -t sendtargets -p "$INITIATOR_PORTAL_ADDR" | tee "$ARTIFACT_DIR/discovery.${suffix}.log"
+    sudo iscsiadm -m node -T "$IQN" -p "$INITIATOR_PORTAL_ADDR" --op=update -n node.session.auth.authmethod -v CHAP >>"$ARTIFACT_DIR/node-auth.${suffix}.log" 2>&1
+    sudo iscsiadm -m node -T "$IQN" -p "$INITIATOR_PORTAL_ADDR" --op=update -n node.session.auth.username -v "$CHAP_USERNAME" >>"$ARTIFACT_DIR/node-auth.${suffix}.log" 2>&1
+    sudo iscsiadm -m node -T "$IQN" -p "$INITIATOR_PORTAL_ADDR" --op=update -n node.session.auth.password -v "$CHAP_SECRET" >>"$ARTIFACT_DIR/node-auth.${suffix}.log" 2>&1
     if [[ "$iter" == "1" && -n "$CHAP_BAD_SECRET" ]]; then
       log "iteration ${iter}: verify wrong CHAP secret fails"
-      sudo iscsiadm -m node -T "$IQN" -p "127.0.0.1:${PORT}" --op=update -n node.session.auth.password -v "$CHAP_BAD_SECRET" >>"$ARTIFACT_DIR/node-auth-bad.${suffix}.log" 2>&1
-      if sudo iscsiadm -m node -T "$IQN" -p "127.0.0.1:${PORT}" --login >"$ARTIFACT_DIR/login-bad.${suffix}.log" 2>&1; then
+      sudo iscsiadm -m node -T "$IQN" -p "$INITIATOR_PORTAL_ADDR" --op=update -n node.session.auth.password -v "$CHAP_BAD_SECRET" >>"$ARTIFACT_DIR/node-auth-bad.${suffix}.log" 2>&1
+      if sudo iscsiadm -m node -T "$IQN" -p "$INITIATOR_PORTAL_ADDR" --login >"$ARTIFACT_DIR/login-bad.${suffix}.log" 2>&1; then
         echo "wrong CHAP secret unexpectedly logged in" >&2
         exit 1
       fi
       sudo iscsiadm -m session >"$ARTIFACT_DIR/iscsi-sessions.bad-auth.${suffix}.txt" 2>&1 || true
-      sudo iscsiadm -m node -T "$IQN" -p "127.0.0.1:${PORT}" --op=update -n node.session.auth.password -v "$CHAP_SECRET" >>"$ARTIFACT_DIR/node-auth.${suffix}.log" 2>&1
+      sudo iscsiadm -m node -T "$IQN" -p "$INITIATOR_PORTAL_ADDR" --op=update -n node.session.auth.password -v "$CHAP_SECRET" >>"$ARTIFACT_DIR/node-auth.${suffix}.log" 2>&1
     fi
   else
-    sudo iscsiadm -m discovery -t sendtargets -p "127.0.0.1:${PORT}" | tee "$ARTIFACT_DIR/discovery.${suffix}.log"
+    sudo iscsiadm -m discovery -t sendtargets -p "$INITIATOR_PORTAL_ADDR" | tee "$ARTIFACT_DIR/discovery.${suffix}.log"
   fi
-  sudo iscsiadm -m node -T "$IQN" -p "127.0.0.1:${PORT}" --login | tee "$ARTIFACT_DIR/login.${suffix}.log"
+  sudo iscsiadm -m node -T "$IQN" -p "$INITIATOR_PORTAL_ADDR" --login | tee "$ARTIFACT_DIR/login.${suffix}.log"
 
   log "iteration ${iter}: wait kernel block device"
   local dev=""
@@ -348,8 +380,8 @@ run_iteration() {
   sudo umount "$MOUNT_DIR"
 
   log "iteration ${iter}: logout"
-  sudo iscsiadm -m node -T "$IQN" -p "127.0.0.1:${PORT}" --logout | tee "$ARTIFACT_DIR/logout.${suffix}.log"
-  sudo iscsiadm -m node -T "$IQN" -p "127.0.0.1:${PORT}" -o delete >>"$ARTIFACT_DIR/logout.${suffix}.log" 2>&1 || true
+  sudo iscsiadm -m node -T "$IQN" -p "$INITIATOR_PORTAL_ADDR" --logout | tee "$ARTIFACT_DIR/logout.${suffix}.log"
+  sudo iscsiadm -m node -T "$IQN" -p "$INITIATOR_PORTAL_ADDR" -o delete >>"$ARTIFACT_DIR/logout.${suffix}.log" 2>&1 || true
   sudo iscsiadm -m session >"$ARTIFACT_DIR/iscsi-sessions.${suffix}.txt" 2>&1 || true
   if ! grep -q "No active sessions" "$ARTIFACT_DIR/iscsi-sessions.${suffix}.txt"; then
     cat "$ARTIFACT_DIR/iscsi-sessions.${suffix}.txt"

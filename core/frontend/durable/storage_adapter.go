@@ -219,6 +219,26 @@ func (b *StorageBackend) SetIdentity(id frontend.Identity) bool {
 	return true
 }
 
+func (b *StorageBackend) durableStatus(volumeID, path, impl string) VolumeStatus {
+	b.mu.Lock()
+	id := b.id
+	closed := b.closed
+	b.mu.Unlock()
+	evidence, _ := b.opEvidence.Load().(string)
+	return VolumeStatus{
+		VolumeID:        volumeID,
+		Path:            path,
+		Impl:            impl,
+		ReplicaID:       id.ReplicaID,
+		Epoch:           id.Epoch,
+		EndpointVersion: id.EndpointVersion,
+		Latched:         id.Epoch > 0 && id.EndpointVersion > 0,
+		Operational:     b.operational.Load(),
+		Evidence:        evidence,
+		Closed:          closed,
+	}
+}
+
 // Close marks the backend closed. All subsequent I/O + Sync
 // return ErrBackendClosed. Does NOT close the underlying
 // storage — the Provider owns LogicalStorage lifecycle.

@@ -1,0 +1,40 @@
+name: beta-hardening-gate
+mode: chain
+
+# Seed runner-native beta-hardening suite.
+#
+# This composes the gates that are already executable today. It intentionally
+# keeps each child scenario as the owner of its own cleanup and artifact
+# collection. The suite layer only sequences them and emits top-level
+# status/result metadata with child run pointers.
+#
+# Expected invocation from the controller:
+#   swblock suite --results-dir <root> \
+#     --env product_root=/tmp/seaweed-block-plan-roadmap-refresh-devrun \
+#     --env ssh_key=C:/work/dev_server/testdev_key \
+#     testops/suites/beta-hardening-gate.yaml
+#
+# Not yet final-close complete:
+#   - validate-bundle --profile beta-hardening is a runner-side follow-up.
+
+scenarios:
+  - id: iscsi-p6-alua-failover
+    path: ../scenarios/iscsi-p6-alua-failover-chain.yaml
+  - id: nvme-p4-multipath-failover
+    path: ../scenarios/nvme-p4-multipath-failover-chain.yaml
+  - id: nvme-p5-csi-protocol
+    path: ../scenarios/nvme-p5-csi-protocol-chain.yaml
+  - id: iscsi-p8-compat-soak
+    path: ../scenarios/iscsi-p8-compat-soak-chain.yaml
+  - id: csi-lifecycle-component
+    path: ../scenarios/csi-lifecycle-component-gate.yaml
+  - id: csi-rf1-durable-restart
+    path: ../scenarios/csi-rf1-durable-restart-chain.yaml
+  - id: operations-status-diagnostics
+    path: ../scenarios/operations-status-diagnostics-chain.yaml
+  - id: returned-replica-component
+    path: ../scenarios/returned-replica-component-gate.yaml
+  - id: iscsi-returned-replica
+    path: ../scenarios/iscsi-returned-replica-chain.yaml
+  - id: cleanup-residue
+    path: ../scenarios/cleanup-residue-chain.yaml

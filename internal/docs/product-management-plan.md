@@ -50,7 +50,7 @@ Non-promise for the current alpha:
 | App-facing demo | Users can see normal pods using a PVC, not only storage internals. | Done. |
 | Clean teardown | Smoke leaves no iSCSI sessions and no visible K8s resources. | Mostly done; generated workload cleanup still harness-assisted. |
 | Public docs | Users understand architecture, roadmap, and non-claims. | In progress. |
-| OS initiator compatibility | Linux/Windows iSCSI should survive real mkfs/format-sized writes. | Active hardening. |
+| OS initiator compatibility | Linux/Windows iSCSI should survive real mkfs/format-sized writes. | Closed for Linux + Windows single-host validation. |
 
 ### Required For Beta
 
@@ -78,7 +78,7 @@ Priority definitions:
 |---|---|---|---|
 | README quick start fresh-user pass | First impression. | Done | Final close run: `20260504T000127Z`. |
 | App PVC demo | Explains value to K8s users. | Done | `scripts/run-alpha-app-demo.sh`, `docs/kubernetes-app-demo.md`. |
-| iSCSI large write / mkfs compatibility | Windows/Linux format failure kills demos. | Active | `frontend: chunk iSCSI R2T writes by MaxBurst`; needs OS retest. |
+| iSCSI large write / mkfs compatibility | Windows/Linux format failure kills demos. | Closed for current alpha claim | Linux runner-native gate passes with mkfs, mount, checksum, fio, cleanup, and clean dmesg delta. Windows 11 built-in Initiator validated NTFS format and 4 MiB checksum over SSH tunnel. |
 | Remove misleading internal labels from public docs/comments | Open-source readers should not see internal phase jargon. | Active | Keep public docs free of internal gate names. |
 | Branch/PR discipline after MVP merge | Product fixes need reviewable slices. | Active | New product fixes should use branch + PR. |
 
@@ -147,22 +147,21 @@ Default answer to #7 is yes for all product fixes after the MVP merge.
 
 ## Current Immediate Recommendation
 
-Do not start new feature work until the iSCSI OS-initiator compatibility issue
-is verified.
+The iSCSI OS-initiator compatibility issue is closed for the current alpha
+claim.
 
 The next concrete product step is:
 
 ```text
-Run a real Linux/Windows initiator against a meaningful volume size.
-mkfs/format it.
-Write/read data.
-Confirm no DID_BAD_TARGET / I/O error.
+Move remaining iSCSI work to component-first session/backend pressure tests and
+keep long OS-initiator runs as milestone gates.
 ```
 
-If it fails, keep the work in an iSCSI compatibility branch and port the missing
-V2 execution pieces with tests:
+Current state:
 
-- multi Data-In read splitting,
-- CmdSN window and pending queue,
-- Data-Out timeout,
-- additional mkfs/fio regression scenarios.
+- Linux/open-iscsi gate is green at product commit `9e8ffab`.
+- Windows 11 built-in Initiator validation is green at product commit
+  `9e8ffab`.
+- V2 execution deltas are not reopened while the OS gates are green.
+- Future failures should be reduced to fast component/protocol tests before
+  adding more long integration loops.
