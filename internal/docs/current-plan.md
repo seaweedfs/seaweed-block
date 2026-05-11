@@ -1,115 +1,118 @@
-# Current Plan: Main Merge PR Readiness
+# Current Plan: Operations Layer Usability Seed
 
 Status: active. Started after closing
-`finished-plans/phase7_finishedplan_iscsi_session_backend_pressure.md` on
-2026-05-11.
+`finished-plans/phase8_finishedplan_main_merge_pr_readiness.md` on 2026-05-11.
 
 ## Goal
 
-Prepare `plan-roadmap-refresh` for a meaningful PR to `main`.
+Turn the newly merged read-only status/report surfaces into a small,
+operator-facing workflow.
 
-This is not a new feature phase. The development work has already produced the
-beta hardening, operations observability, iSCSI/NVMe/CSI gates, and iSCSI
-pressure hardening evidence. This plan is the closeout layer that turns that
-work into a reviewable integration PR.
-
-## PR Scope
-
-The PR should be framed as:
+The beta-hardening PR gave us evidence and diagnostics primitives. The next
+step is not another protocol bring-up. The next step is making a developer or
+early user answer basic operational questions without spelunking through raw
+logs:
 
 ```text
-testops: add beta hardening gates and storage readiness evidence
+what volumes exist -> what frontend targets exist -> what is unhealthy ->
+what artifact bundle should I attach to an issue
 ```
 
-Main claims:
+## Why This Is Next
 
-- runner-native protocol and beta hardening gates,
-- CSI lifecycle and RF1 durable restart coverage,
-- iSCSI/NVMe protocol release gates,
-- returned-replica and failover evidence gates,
-- read-only operations status report support,
-- Linux and Windows iSCSI OS initiator validation path,
-- fast iSCSI L2 durable restart/reconnect coverage,
-- planning docs organized into roadmap, finished phases, and current plan.
+The roadmap now has protocol, CSI, failover, returned-replica, and iSCSI OS
+initiator gates recorded. The remaining weakness is usability:
 
-## Required Close Checks
+- operations are still split across scripts, TestOps, status endpoints, and
+  manual artifact paths,
+- the read-only status report exists but is not yet a simple operator command,
+- users need a small workflow before they can give useful feedback,
+- enterprise operations can come later, but basic diagnostics should be open and
+  easy to run.
 
-Before opening or updating the PR:
+This contributes to roadmap Track F: Operations Layer.
 
-1. Branch points at `main`.
-2. Local branch is pushed.
-3. Working tree has no tracked modifications.
-4. Current finished-plan chain is coherent:
-   - phase1 frontend protocol readiness,
-   - phase2 beta hardening seed,
-   - phase3 beta seed stabilization,
-   - phase4 fast gates and operations contract prep,
-   - phase5 read-only operations status report,
-   - phase6 iSCSI OS initiator compatibility,
-   - phase7 iSCSI session/backend pressure hardening.
-5. Core fast checks still pass or are explicitly listed as not rerun.
-6. PR description is simple and human-readable.
-7. Merge strategy is squash merge, so `main` does not receive the full
-   development commit train.
+## Scope
 
-## Suggested Validation Before PR
+Build a minimal operations layer seed around existing read-only data.
 
-Fast local checks:
+In scope:
+
+- a simple command or script that collects volume status report JSON,
+- a human-readable summary view for the same data,
+- a diagnostic bundle shape suitable for bug reports,
+- TestOps scenario coverage for the command,
+- docs showing when to use it and what it does not prove.
+
+Out of scope:
+
+- Kubernetes operator,
+- web UI,
+- mutating admin actions,
+- upgrade/uninstall automation,
+- fleet agent,
+- cloud-scale test controller,
+- performance dashboards.
+
+## Candidate Delivery
+
+Preferred first slice:
 
 ```text
-go test ./core/frontend/iscsi -run 'TestP2_ISCSI|TestP1_ISCSI|TestDataInWriter|TestDataOut' -count=1
-go test -tags subprocess ./cmd/blockvolume -run 'TestISCSI_L2Durable(RestartReconnect_(PreservesData|RepeatedCycles)|SyncCacheRestart_AcceptsSyncAndPreservesWrites)' -count=1
+sw-block ops status --volume <id> --master <addr> --out <dir>
 ```
 
-Branch/PR checks:
+Equivalent script is acceptable if the product CLI surface is not ready:
 
 ```text
-git status --short --branch
-git rev-list --count origin/main..HEAD
-git diff --stat origin/main..HEAD
+scripts/collect-ops-status-report.sh
 ```
 
-Optional if time allows:
+The command should produce:
 
-```text
-swblock validate-bundle --profile beta-hardening <latest known green bundle>
-```
+- `volume-status-report.json`,
+- `volume-status-summary.txt`,
+- optional raw source snapshots,
+- clear exit code:
+  - `0`: report collected and parsed,
+  - `1`: report collected but unhealthy state detected,
+  - `2`: collection failed or inputs invalid.
 
-Do not rerun long suites unless review asks for fresh evidence. The beta and
-protocol suites already have real-hardware green evidence in the finished
-plans.
+## Test Strategy
 
-## PR Description Draft
+Component first:
 
-```md
-## Summary
+- unit tests for summary rendering from fixed JSON,
+- unit tests for exit-code classification,
+- component tests for missing fields / unknown states,
+- no Kubernetes required.
 
-Adds the beta-hardening test and operations foundation for Seaweed Block.
+Product-backed only after component green:
 
-This includes runner-native protocol and beta gates, CSI lifecycle and durable
-restart coverage, iSCSI/NVMe protocol release gates, returned-replica evidence,
-read-only operations status reports, OS initiator compatibility gates, and fast
-iSCSI L2 durable restart/reconnect coverage.
+- run the existing operations status report component gate,
+- add one runner-native scenario that invokes the operator-facing command and
+  asserts the JSON plus summary artifact exists.
 
-The branch also reorganizes planning docs into roadmap, finished plans, and a
-current plan so future work has a clear PM trail.
+Milestone gate only if needed:
 
-## Validation
+- include the command in `beta-hardening-gate` only after the command is stable.
 
-- beta-hardening-gate: PASS twice back-to-back on m02
-- protocol-release-gate: PASS on m02
-- iSCSI OS initiator compatibility: Linux PASS, Windows 11 PASS
-- iSCSI L2 restart/reconnect pack: PASS
-- fast iSCSI protocol pressure pack: PASS
+## Delivery Gate
 
-## Notes
+This plan is complete when:
 
-Please squash-merge this PR into main.
-```
+1. An operator-facing status collection command or script exists.
+2. It emits both machine-readable JSON and human-readable summary output.
+3. It has component tests for summary and exit-code classification.
+4. A TestOps scenario captures the command artifacts.
+5. The operator guide documents usage and non-claims.
+6. No mutating control-plane action is added under this plan.
 
 ## Non-Claims
 
-- This plan does not add new runtime behavior.
-- This plan does not add new test coverage beyond final closeout edits.
-- This plan does not require another full beta suite run unless reviewers ask.
-- This plan does not decide the next product feature phase after merge.
+- Not a full UI.
+- Not an operator.
+- Not upgrade/uninstall.
+- Not automated repair.
+- Not performance monitoring.
+- Not enterprise fleet automation.
