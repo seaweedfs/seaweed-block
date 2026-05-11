@@ -32,6 +32,12 @@ Public-facing docs belong in `docs/`.
 | `qa-assignments/` | Concrete QA tasks with commands, pass criteria, and report templates. |
 | `finished-plans/` | Closed phase/topic plans retained for PM history. |
 | `finished-plans/phase1_finishedplan_frontend_protocol_readiness.md` | Historical iSCSI/NVMe protocol-readiness plan closed by the protocol release gate. |
+| `finished-plans/phase2_finishedplan_beta_hardening_seed.md` | Historical beta hardening seed plan. |
+| `finished-plans/phase3_finishedplan_beta_seed_stabilization.md` | Historical beta seed stabilization plan. |
+| `finished-plans/phase4_finishedplan_fast_gates_operations_contract_prep.md` | Historical fast-gates and operations contract prep plan. |
+| `finished-plans/phase5_finishedplan_read_only_operations_status_report.md` | Historical read-only operations status report plan. |
+| `finished-plans/phase6_finishedplan_iscsi_os_initiator_compatibility.md` | Historical iSCSI OS initiator compatibility plan closed by Linux and Windows validation. |
+| `finished-plans/phase7_finishedplan_iscsi_session_backend_pressure.md` | Historical iSCSI session/backend pressure plan closed by fast protocol, L2 restart, and Linux OS initiator gates. |
 | `ref/production-readiness-plan.md` | Longer readiness reference and iSCSI P1-P6 detail. |
 | `ref/iscsi-os-initiator-compat-plan.md` | Detailed iSCSI P1 OS-initiator compatibility plan and evidence. |
 | `ref/iscsi-v2-coverage-gap-audit.md` | V2-to-V3 iSCSI coverage gap audit and prioritized test backlog. |
