@@ -52,7 +52,7 @@ phases:
       - action: exec
         node: m02
         timeout: 3m
-        cmd: "cd {{ product_root }} && bash -o pipefail -c 'SW_BLOCK_OPS_STATUS_REPORT_OUT=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-ops-volume-status-report/volume-status-report.json go test -count=1 -json -run \"^TestBuildVolumeStatusReport_(ComposesExistingStatusSurfaces|JSONKeepsZeroValuedFrontendIdentity|JSONSchemaShapeIsStable|UsesMasterFrontendFacts|MarksUnavailableInputsExplicitly|CopiesInputSlices|WritesSampleReportArtifact)$\" ./core/ops | tee /mnt/smb/work/share/g15d-k8s/{{ run_id }}-ops-volume-status-report/report-component-go-test.jsonl'"
+        cmd: "cd {{ product_root }} && bash -o pipefail -c 'SW_BLOCK_OPS_STATUS_REPORT_OUT=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-ops-volume-status-report/volume-status-report.json go test -count=1 -json -run \"^(TestBuildVolumeStatusReport_(ComposesExistingStatusSurfaces|JSONKeepsZeroValuedFrontendIdentity|JSONSchemaShapeIsStable|UsesMasterFrontendFacts|MarksUnavailableInputsExplicitly|CopiesInputSlices|WritesSampleReportArtifact)|TestVolumeStatusReportCollector_(CollectsInjectedReadOnlySources|ReturnsPartialReportWithSourceErrors|NilSourcesProduceUnavailableReport))$\" ./core/ops | tee /mnt/smb/work/share/g15d-k8s/{{ run_id }}-ops-volume-status-report/report-component-go-test.jsonl'"
       - action: grep_log
         node: m02
         path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-ops-volume-status-report/report-component-go-test.jsonl"
@@ -108,6 +108,30 @@ phases:
         save_as: report_artifact_test_count
       - action: assert_greater
         actual: "{{ report_artifact_test_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-ops-volume-status-report/report-component-go-test.jsonl"
+        pattern: "\"Action\":\"pass\".*\"Test\":\"TestVolumeStatusReportCollector_CollectsInjectedReadOnlySources\""
+        save_as: report_collector_success_count
+      - action: assert_greater
+        actual: "{{ report_collector_success_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-ops-volume-status-report/report-component-go-test.jsonl"
+        pattern: "\"Action\":\"pass\".*\"Test\":\"TestVolumeStatusReportCollector_ReturnsPartialReportWithSourceErrors\""
+        save_as: report_collector_partial_count
+      - action: assert_greater
+        actual: "{{ report_collector_partial_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-ops-volume-status-report/report-component-go-test.jsonl"
+        pattern: "\"Action\":\"pass\".*\"Test\":\"TestVolumeStatusReportCollector_NilSourcesProduceUnavailableReport\""
+        save_as: report_collector_nil_count
+      - action: assert_greater
+        actual: "{{ report_collector_nil_count }}"
         threshold: "0"
       - action: grep_log
         node: m02
