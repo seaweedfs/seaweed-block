@@ -5,9 +5,10 @@
 #   guarded at component level before relying on them in beta-hardening suites.
 #
 # Expected invocation:
-#   swblock run testops/scenarios/operations-status-diagnostics-chain.yaml \
-#     --env product_root=/path/to/seaweed_block/on/m02 \
-#     --env ssh_key=/path/to/testdev_key/on/controller
+#   swblock run \
+#     -env product_root=/path/to/seaweed_block/on/m02 \
+#     -env ssh_key=/path/to/testdev_key/on/controller \
+#     testops/scenarios/operations-status-diagnostics-chain.yaml
 
 name: operations-status-diagnostics-chain
 timeout: 5m

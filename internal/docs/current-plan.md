@@ -31,7 +31,7 @@ Closed milestone evidence:
   `cf65daaf2ce5cf500e1efa48b411f7cb66dbac0b`.
 - No manual cleanup between runs; no residue after run 2.
 
-Forward-work commits after that baseline added two fast gates:
+Forward-work commits after that baseline added fast gates:
 
 - `testops/scenarios/nvme-p5-protocol-component-gate.yaml`
 - `testops/scenarios/csi-rf1-durable-restart-component-gate.yaml`
@@ -47,9 +47,15 @@ Fast gate validation evidence at product commit
 | --- | --- | --- | ---: | --- |
 | `nvme-p5-protocol-component-gate` | `20260510-214940-d726` | PASS | `1.486s` | collected |
 | `csi-rf1-durable-restart-component-gate` | `20260510-214947-206b` | PASS | `1.034s` | collected |
+| `operations-volume-status-snapshot-component-gate` | `20260510-222618-0452` | PASS | `1.113s` | collected |
 
-Both runs recorded `pin_build/git.sha=b926b7e50c522665b66a81a2990a3fe925364365`
-and empty `pin_build/git.status`.
+The first two fast gate runs recorded
+`pin_build/git.sha=b926b7e50c522665b66a81a2990a3fe925364365` and empty
+`pin_build/git.status`.
+
+The operations snapshot gate recorded
+`pin_build/git.sha=c4426ca1d0ad46d47773c1cd1185edd9f944cf4f` and empty
+`pin_build/git.status`.
 
 Static validation:
 
@@ -65,11 +71,12 @@ Static validation:
 
 This plan is complete when:
 
-1. The two new fast component gates run successfully through `swblock run` on
-   m02 from a clean product checkout. Done at `b926b7e`.
+1. The fast component gates run successfully through `swblock run` on m02 from
+   a clean product checkout. Done for the first two gates at `b926b7e`; done
+   for the operations snapshot gate at `c4426ca`.
 2. Each fast gate validates with `swblock validate` and collects a complete run
-   bundle. Done for run IDs `20260510-214940-d726` and
-   `20260510-214947-206b`.
+   bundle. Done for run IDs `20260510-214940-d726`,
+   `20260510-214947-206b`, and `20260510-222618-0452`.
 3. The current plan documents when to run:
    - unit/component tests,
    - fast runner-native component gates,
@@ -93,7 +100,7 @@ Tasks:
 - Validate locally:
   - `go test -count=1 ./core/csi ./core/host/master ./core/lifecycle ./core/launcher`
   - `go test -count=1 -run <rf1-fast-regex> ./internal/testops ./core/host/master ./core/host/volume ./core/launcher`
-  - `swblock validate` for both fast gate YAML files.
+  - `swblock validate` for fast gate YAML files.
 - After the branch is present on m02, run:
   - `swblock run testops/scenarios/nvme-p5-protocol-component-gate.yaml`
   - `swblock run testops/scenarios/csi-rf1-durable-restart-component-gate.yaml`
@@ -192,7 +199,8 @@ Implementation seed:
   - `go test -count=1 ./core/ops`: PASS.
 - Runner-native fast gate:
   - `testops/scenarios/operations-volume-status-snapshot-component-gate.yaml`
-    added; static `swblock validate` PASS, m02 run pending.
+    added; static `swblock validate` PASS, m02 run
+    `20260510-222618-0452` PASS in `1.113s`.
 
 ## Workstream D: Mini-Protocol Notes
 

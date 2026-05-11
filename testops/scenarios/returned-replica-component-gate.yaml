@@ -6,9 +6,10 @@
 #   scenarios.
 #
 # Expected invocation:
-#   swblock run testops/scenarios/returned-replica-component-gate.yaml \
-#     --env product_root=/path/to/seaweed_block/on/m02 \
-#     --env ssh_key=/path/to/testdev_key/on/controller
+#   swblock run \
+#     -env product_root=/path/to/seaweed_block/on/m02 \
+#     -env ssh_key=/path/to/testdev_key/on/controller \
+#     testops/scenarios/returned-replica-component-gate.yaml
 
 name: returned-replica-component-gate
 timeout: 5m

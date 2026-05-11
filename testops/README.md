@@ -86,9 +86,10 @@ Default ownership:
 Example:
 
 ```bash
-swblock run testops/scenarios/nvme-p5-csi-protocol-chain.yaml \
-  --env product_root=/path/to/seaweed_block/on/m02 \
-  --env ssh_key=/path/to/testdev_key/on/controller
+swblock run \
+  -env product_root=/path/to/seaweed_block/on/m02 \
+  -env ssh_key=/path/to/testdev_key/on/controller \
+  testops/scenarios/nvme-p5-csi-protocol-chain.yaml
 ```
 
 Fast component gates are available for developer loops before running the
@@ -98,9 +99,10 @@ protocol persistence/planning, plus launcher NVMe/iSCSI manifest shape without
 launching k3s:
 
 ```bash
-swblock run testops/scenarios/nvme-p5-protocol-component-gate.yaml \
-  --env product_root=/path/to/seaweed_block/on/m02 \
-  --env ssh_key=/path/to/testdev_key/on/controller
+swblock run \
+  -env product_root=/path/to/seaweed_block/on/m02 \
+  -env ssh_key=/path/to/testdev_key/on/controller \
+  testops/scenarios/nvme-p5-protocol-component-gate.yaml
 ```
 
 The RF=1 durable restart path also has a component gate that checks restart
@@ -108,26 +110,29 @@ wrapper shape, generated hostPath/status manifest behavior, master frontend
 projection, and durable status lineage without doing the full K8s restart:
 
 ```bash
-swblock run testops/scenarios/csi-rf1-durable-restart-component-gate.yaml \
-  --env product_root=/path/to/seaweed_block/on/m02 \
-  --env ssh_key=/path/to/testdev_key/on/controller
+swblock run \
+  -env product_root=/path/to/seaweed_block/on/m02 \
+  -env ssh_key=/path/to/testdev_key/on/controller \
+  testops/scenarios/csi-rf1-durable-restart-component-gate.yaml
 ```
 
 The first operations-layer snapshot contract has its own component gate. It is
 read-only and does not start product processes:
 
 ```bash
-swblock run testops/scenarios/operations-volume-status-snapshot-component-gate.yaml \
-  --env product_root=/path/to/seaweed_block/on/m02 \
-  --env ssh_key=/path/to/testdev_key/on/controller
+swblock run \
+  -env product_root=/path/to/seaweed_block/on/m02 \
+  -env ssh_key=/path/to/testdev_key/on/controller \
+  testops/scenarios/operations-volume-status-snapshot-component-gate.yaml
 ```
 
 The same runner-native shape is used for the longer iSCSI P8 soak:
 
 ```bash
-swblock run testops/scenarios/iscsi-p8-compat-soak-chain.yaml \
-  --env product_root=/path/to/seaweed_block/on/m02 \
-  --env ssh_key=/path/to/testdev_key/on/controller
+swblock run \
+  -env product_root=/path/to/seaweed_block/on/m02 \
+  -env ssh_key=/path/to/testdev_key/on/controller \
+  testops/scenarios/iscsi-p8-compat-soak-chain.yaml
 ```
 
 The scenario still shells out to existing bash payloads. That is deliberate:

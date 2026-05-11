@@ -7,9 +7,10 @@
 #   earlier children.
 #
 # Expected invocation:
-#   swblock run testops/scenarios/cleanup-residue-chain.yaml \
-#     --env product_root=/path/to/seaweed_block/on/m02 \
-#     --env ssh_key=/path/to/testdev_key/on/controller
+#   swblock run \
+#     -env product_root=/path/to/seaweed_block/on/m02 \
+#     -env ssh_key=/path/to/testdev_key/on/controller \
+#     testops/scenarios/cleanup-residue-chain.yaml
 
 name: cleanup-residue-chain
 timeout: 6m

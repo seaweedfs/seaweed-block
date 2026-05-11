@@ -6,9 +6,10 @@
 #   chain remains the end-to-end proof; this gate is the fast developer loop.
 #
 # Expected invocation:
-#   swblock run testops/scenarios/nvme-p5-protocol-component-gate.yaml \
-#     --env product_root=/path/to/seaweed_block/on/m02 \
-#     --env ssh_key=/path/to/testdev_key/on/controller
+#   swblock run \
+#     -env product_root=/path/to/seaweed_block/on/m02 \
+#     -env ssh_key=/path/to/testdev_key/on/controller \
+#     testops/scenarios/nvme-p5-protocol-component-gate.yaml
 
 name: nvme-p5-protocol-component-gate
 timeout: 5m
