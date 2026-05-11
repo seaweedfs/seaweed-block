@@ -16,6 +16,8 @@ func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
 }
 
+var opsStatusRunCommand = ops.DefaultRunCommand
+
 func run(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
 		usage(stderr)
@@ -80,6 +82,7 @@ func runOpsStatus(args []string, stdout, stderr io.Writer) int {
 		StatusAddr:      statusAddr,
 		ProductRevision: productRevision,
 		RunnerRevision:  runnerRevision,
+		RunCommand:      opsStatusRunCommand,
 	})
 	report, code, err := ops.WriteVolumeStatusArtifacts(ctx, outDir, collector)
 	if err != nil {

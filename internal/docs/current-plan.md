@@ -75,8 +75,10 @@ The command should produce:
 - optional raw source snapshots,
 - clear exit code:
   - `0`: report collected, parsed, and classified clean,
-  - `1`: report collected but unhealthy/incomplete/residue evidence detected,
-  - `2`: collection failed or the report identity/schema is invalid.
+  - `1`: report collected but unhealthy/incomplete/residue or collection-error
+    evidence detected,
+  - `2`: required input is invalid, artifact writing failed, or the report
+    identity/schema is invalid.
 
 ## Test Strategy
 
@@ -149,9 +151,9 @@ Milestone gate only if needed:
   stdout.
 - The first command version requires both `--master` and `--status-addr` so a
   clean exit does not hide missing master or local blockvolume evidence.
-- Host/Kubernetes residue collection is intentionally marked incomplete in the
-  live command path; the command records this as `collection_errors` and returns
-  `1` until residue collection is wired.
+- The live command now collects host-side iSCSI and NVMe initiator residue via
+  local read-only commands. Process, Kubernetes, and storage-path residue are
+  reported as unchecked in this CLI slice and remain covered by TestOps gates.
 - Validation:
   - `go test ./core/ops ./cmd/sw-block ./cmd/sw-testops -count=1`
 - Non-claim:

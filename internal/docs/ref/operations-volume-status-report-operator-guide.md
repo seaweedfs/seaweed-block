@@ -70,10 +70,10 @@ surface. That status surface is loopback-only and unauthenticated by design; do
 not expose it on a public interface. Use SSH port forwarding or a trusted
 operator-side tunnel when collecting remotely.
 
-Current limitation: the live command does not yet collect host/Kubernetes
-residue directly. It records that as a `collection_errors` entry, so the first
-live version should return `1` rather than a clean `0` until residue collection
-is wired.
+Current limitation: the live command collects host-side iSCSI and NVMe
+initiator residue using local read-only commands. It reports process,
+Kubernetes, and storage-path residue classes as unchecked; release gates that
+need those facts should keep using TestOps cleanup/residue scenarios.
 
 ## Safe Operator Questions
 

@@ -72,6 +72,9 @@ func RenderVolumeStatusSummary(r VolumeStatusReport) string {
 		len(r.Residue.Processes),
 		len(r.Residue.Kubernetes),
 		len(r.Residue.StoragePaths))
+	if len(r.Residue.Unchecked) > 0 {
+		fmt.Fprintf(&b, "residue_unchecked: %s\n", strings.Join(r.Residue.Unchecked, ","))
+	}
 	if len(issues) == 0 {
 		b.WriteString("issues: none\n")
 		return b.String()

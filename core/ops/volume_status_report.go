@@ -118,6 +118,7 @@ type ResidueReport struct {
 	Processes     []string             `json:"processes"`
 	Kubernetes    []string             `json:"kubernetes"`
 	StoragePaths  []string             `json:"storage_paths"`
+	Unchecked     []string             `json:"unchecked,omitempty"`
 }
 
 type HostInitiatorResidue struct {
@@ -290,6 +291,7 @@ func copyResidue(in ResidueReport) ResidueReport {
 		Processes:    copyStringSlice(in.Processes),
 		Kubernetes:   copyStringSlice(in.Kubernetes),
 		StoragePaths: copyStringSlice(in.StoragePaths),
+		Unchecked:    copyStringSlice(in.Unchecked),
 	}
 }
 

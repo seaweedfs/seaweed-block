@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -22,6 +24,10 @@ import (
 )
 
 func TestOpsStatusWritesArtifactsAndReturnsClean(t *testing.T) {
+	oldRunCommand := opsStatusRunCommand
+	opsStatusRunCommand = cleanCmdResidueCommand
+	defer func() { opsStatusRunCommand = oldRunCommand }()
+
 	masterAddr, closeMaster := startCmdFakeMaster(t)
 	defer closeMaster()
 	statusServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -64,15 +70,15 @@ func TestOpsStatusWritesArtifactsAndReturnsClean(t *testing.T) {
 		"--product-revision", "product-rev",
 		"--runner-revision", "runner-rev",
 	}, &stdout, &stderr)
-	if code != ops.VolumeStatusExitUnhealthy {
-		t.Fatalf("exit=%d want %d stderr=%s stdout=%s", code, ops.VolumeStatusExitUnhealthy, stderr.String(), stdout.String())
+	if code != ops.VolumeStatusExitOK {
+		t.Fatalf("exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
 	}
 	for _, name := range []string{ops.VolumeStatusReportArtifact, ops.VolumeStatusSummaryArtifact} {
 		if _, err := os.Stat(filepath.Join(outDir, name)); err != nil {
 			t.Fatalf("missing artifact %s: %v", name, err)
 		}
 	}
-	if !strings.Contains(stdout.String(), "status: unhealthy") {
+	if !strings.Contains(stdout.String(), "status: ok") {
 		t.Fatalf("stdout missing summary:\n%s", stdout.String())
 	}
 	raw, err := os.ReadFile(filepath.Join(outDir, ops.VolumeStatusReportArtifact))
@@ -86,8 +92,21 @@ func TestOpsStatusWritesArtifactsAndReturnsClean(t *testing.T) {
 	if report.Volume.VolumeID != "v1" || len(report.Volume.Frontends) != 1 {
 		t.Fatalf("report mismatch: %+v", report)
 	}
-	if len(report.CollectionErrors) != 1 || !strings.Contains(report.CollectionErrors[0], "residue collection not implemented") {
-		t.Fatalf("expected residue collection non-claim in report: %+v", report.CollectionErrors)
+	if len(report.CollectionErrors) != 0 {
+		t.Fatalf("unexpected collection errors: %+v", report.CollectionErrors)
+	}
+}
+
+func cleanCmdResidueCommand(_ context.Context, name string, args ...string) ([]byte, error) {
+	switch name {
+	case "iscsiadm":
+		return []byte("iscsiadm: No active sessions.\n"), errors.New("exit status 21")
+	case "nvme":
+		return []byte(`{"Subsystems":[]}`), nil
+	case "ps", "tasklist":
+		return []byte("PID ARGS\n1 unrelated\n"), nil
+	default:
+		return nil, fmt.Errorf("unexpected command %s", name)
 	}
 }
 

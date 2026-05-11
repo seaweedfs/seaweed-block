@@ -3,11 +3,11 @@ package ops
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"strings"
 	"testing"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend"
@@ -59,12 +59,10 @@ func TestNewLiveVolumeStatusReportCollector_CollectsHTTPAndMasterSources(t *test
 		StatusAddr:      statusServer.URL,
 		ProductRevision: "product-rev",
 		RunnerRevision:  "runner-rev",
+		RunCommand:      cleanResidueCommand,
 	}).Collect(context.Background())
-	if err == nil {
-		t.Fatal("expected residue non-claim collection error")
-	}
-	if !strings.Contains(err.Error(), "residue collection not implemented") {
-		t.Fatalf("unexpected error: %v", err)
+	if err != nil {
+		t.Fatalf("collect: %v", err)
 	}
 	if report.Volume.VolumeID != "v1" || report.Volume.ReplicaID != "r1" {
 		t.Fatalf("volume identity mismatch: %+v", report.Volume)
@@ -106,12 +104,10 @@ func TestNewLiveVolumeStatusReportCollector_TreatsOptionalPeerAndDurable404AsEmp
 		VolumeID:        "v1",
 		StatusAddr:      statusServer.URL,
 		ProductRevision: "product-rev",
+		RunCommand:      cleanResidueCommand,
 	}).Collect(context.Background())
-	if err == nil {
-		t.Fatal("expected residue non-claim collection error")
-	}
-	if !strings.Contains(err.Error(), "residue collection not implemented") {
-		t.Fatalf("unexpected error: %v", err)
+	if err != nil {
+		t.Fatalf("collect: %v", err)
 	}
 	if len(report.Replication.Peers) != 0 || report.Replication.Peers == nil {
 		t.Fatalf("404 peers should collect as empty array: %+v", report.Replication.Peers)
@@ -147,6 +143,71 @@ func TestStatusEndpointPreservesBasePath(t *testing.T) {
 	if u.Path != "/proxy/base/status/peers" || u.Query().Get("volume") != "v1" {
 		t.Fatalf("endpoint=%q", got)
 	}
+}
+
+func TestCollectLocalResidueFindsHostInitiatorLines(t *testing.T) {
+	residue, err := collectLocalResidueForOS(context.Background(), func(_ context.Context, name string, args ...string) ([]byte, error) {
+		switch name {
+		case "iscsiadm":
+			return []byte("tcp: [1] 127.0.0.1:3260 iqn.2026-05.io.seaweedfs:v1\n"), nil
+		case "nvme":
+			return []byte(`{"Subsystems":[{"NQN":"nqn.2026-05.io.seaweedfs:v1"}]}`), nil
+		default:
+			return nil, fmt.Errorf("unexpected command %s", name)
+		}
+	}, "linux")
+	if err != nil {
+		t.Fatalf("collect residue: %v", err)
+	}
+	if len(residue.HostInitiator.ISCSISessions) != 1 {
+		t.Fatalf("iscsi residue=%v", residue.HostInitiator.ISCSISessions)
+	}
+	if len(residue.HostInitiator.NVMESubsystems) != 1 {
+		t.Fatalf("nvme residue=%v", residue.HostInitiator.NVMESubsystems)
+	}
+	if len(residue.Processes) != 0 {
+		t.Fatalf("process residue should not be checked by live status: %v", residue.Processes)
+	}
+	if !containsString(residue.Unchecked, "processes") || !containsString(residue.Unchecked, "kubernetes") || !containsString(residue.Unchecked, "storage_paths") {
+		t.Fatalf("unchecked residue classes missing: %v", residue.Unchecked)
+	}
+}
+
+func TestCollectLocalResidueTreatsMissingToolsAsUnchecked(t *testing.T) {
+	residue, err := collectLocalResidueForOS(context.Background(), func(_ context.Context, name string, args ...string) ([]byte, error) {
+		return nil, fmt.Errorf("exec: %q: executable file not found in PATH", name)
+	}, "linux")
+	if err != nil {
+		t.Fatalf("missing host initiator tools should be unchecked, not fatal: %v", err)
+	}
+	if len(residue.HostInitiator.ISCSISessions) != 0 || len(residue.HostInitiator.NVMESubsystems) != 0 || len(residue.Processes) != 0 {
+		t.Fatalf("missing tools should not invent residue: %+v", residue)
+	}
+	if !containsString(residue.Unchecked, "iscsi_sessions") || !containsString(residue.Unchecked, "nvme_subsystems") {
+		t.Fatalf("missing tool classes should be unchecked: %v", residue.Unchecked)
+	}
+}
+
+func cleanResidueCommand(_ context.Context, name string, args ...string) ([]byte, error) {
+	switch name {
+	case "iscsiadm":
+		return []byte("iscsiadm: No active sessions.\n"), fmt.Errorf("exit status 21")
+	case "nvme":
+		return []byte(`{"Subsystems":[]}`), nil
+	case "ps", "tasklist":
+		return []byte("PID ARGS\n1 unrelated\n"), nil
+	default:
+		return nil, fmt.Errorf("unexpected command %s", name)
+	}
+}
+
+func containsString(items []string, want string) bool {
+	for _, item := range items {
+		if item == want {
+			return true
+		}
+	}
+	return false
 }
 
 type opsFakeEvidenceServer struct {

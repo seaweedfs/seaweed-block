@@ -1,13 +1,16 @@
 package ops
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
+	"os/exec"
 	pathpkg "path"
+	"runtime"
 	"strings"
 	"time"
 
@@ -27,12 +30,17 @@ type LiveVolumeStatusConfig struct {
 	RunnerRevision  string
 	Source          ReportSource
 	HTTPClient      *http.Client
+	RunCommand      func(context.Context, string, ...string) ([]byte, error)
 }
 
 func NewLiveVolumeStatusReportCollector(cfg LiveVolumeStatusConfig) VolumeStatusReportCollector {
 	httpClient := cfg.HTTPClient
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 5 * time.Second}
+	}
+	runCommand := cfg.RunCommand
+	if runCommand == nil {
+		runCommand = DefaultRunCommand
 	}
 	source := cfg.Source
 	if source.Component == "" {
@@ -80,16 +88,8 @@ func NewLiveVolumeStatusReportCollector(cfg LiveVolumeStatusConfig) VolumeStatus
 			return out.Volumes, nil
 		}
 	}
-	c.Residue = func(context.Context) (ResidueReport, error) {
-		return ResidueReport{
-			HostInitiator: HostInitiatorResidue{
-				ISCSISessions:  []string{},
-				NVMESubsystems: []string{},
-			},
-			Processes:    []string{},
-			Kubernetes:   []string{},
-			StoragePaths: []string{},
-		}, errors.New("residue collection not implemented for live ops status")
+	c.Residue = func(ctx context.Context) (ResidueReport, error) {
+		return collectLocalResidue(ctx, runCommand)
 	}
 	return c
 }
@@ -147,4 +147,84 @@ func statusEndpoint(base, path, volumeID string) (string, error) {
 	q.Set("volume", volumeID)
 	u.RawQuery = q.Encode()
 	return u.String(), nil
+}
+
+func collectLocalResidue(ctx context.Context, run func(context.Context, string, ...string) ([]byte, error)) (ResidueReport, error) {
+	return collectLocalResidueForOS(ctx, run, runtime.GOOS)
+}
+
+func collectLocalResidueForOS(ctx context.Context, run func(context.Context, string, ...string) ([]byte, error), goos string) (ResidueReport, error) {
+	var errs []string
+	iscsi := []byte{}
+	nvme := []byte{}
+	unchecked := []string{"processes", "kubernetes", "storage_paths"}
+	if goos == "windows" {
+		unchecked = append(unchecked, "iscsi_sessions", "nvme_subsystems")
+	} else {
+		var err error
+		iscsi, err = run(ctx, "iscsiadm", "-m", "session")
+		if err != nil {
+			if bytes.Contains(iscsi, []byte("No active sessions")) {
+				err = nil
+			} else if isCommandNotFound(err) {
+				unchecked = append(unchecked, "iscsi_sessions")
+			} else {
+				errs = append(errs, fmt.Sprintf("iscsiadm session: %v", err))
+			}
+		}
+		nvme, err = run(ctx, "nvme", "list-subsys", "-o", "json")
+		if err != nil {
+			if isCommandNotFound(err) {
+				unchecked = append(unchecked, "nvme_subsystems")
+			} else {
+				errs = append(errs, fmt.Sprintf("nvme list-subsys: %v", err))
+			}
+		}
+	}
+	out := ResidueReport{
+		HostInitiator: HostInitiatorResidue{
+			ISCSISessions:  filterLines(string(iscsi), []string{"io.seaweedfs", "sw-block", "weedblock"}),
+			NVMESubsystems: filterLines(string(nvme), []string{"seaweedfs", "sw-block", "weedblock"}),
+		},
+		Processes:    []string{},
+		Kubernetes:   []string{},
+		StoragePaths: []string{},
+		Unchecked:    unchecked,
+	}
+	if len(errs) > 0 {
+		return out, errors.New(strings.Join(errs, "; "))
+	}
+	return out, nil
+}
+
+func isCommandNotFound(err error) bool {
+	return err != nil && strings.Contains(strings.ToLower(err.Error()), "executable file not found")
+}
+
+func filterLines(raw string, needles []string) []string {
+	var out []string
+	for _, line := range strings.Split(raw, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		lower := strings.ToLower(line)
+		for _, needle := range needles {
+			if strings.Contains(lower, strings.ToLower(needle)) {
+				out = append(out, line)
+				break
+			}
+		}
+	}
+	if out == nil {
+		return []string{}
+	}
+	return out
+}
+
+// DefaultRunCommand executes a local read-only probe command and returns its
+// combined output for residue collection.
+func DefaultRunCommand(ctx context.Context, name string, args ...string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, name, args...)
+	return cmd.CombinedOutput()
 }
