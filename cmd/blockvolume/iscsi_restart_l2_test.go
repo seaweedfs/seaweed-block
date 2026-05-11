@@ -3,9 +3,12 @@
 package main_test
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -40,6 +43,7 @@ func TestISCSI_L2DurableRestartReconnect_PreservesData(t *testing.T) {
 		logTag:      "iscsi-restart-r1-initial",
 	})
 	waitHealthyReplica(t, statusAddr, "r1", 10*time.Second)
+	waitProductIscsiReady(t, iscsiAddr, 5*time.Second)
 
 	const durableBlockSize = 4096
 	payload := bytes.Repeat([]byte{0x6d}, durableBlockSize)
@@ -66,6 +70,7 @@ func TestISCSI_L2DurableRestartReconnect_PreservesData(t *testing.T) {
 	})
 	_ = r1Restart
 	waitHealthyReplica(t, statusAddr, "r1", 10*time.Second)
+	waitProductIscsiReady(t, iscsiAddr, 5*time.Second)
 
 	c2 := dialG8Iscsi(t, iscsiAddr, iqn)
 	got := c2.read10(t, 11, 1, durableBlockSize)
@@ -105,6 +110,7 @@ func TestISCSI_L2DurableRestartReconnect_RepeatedCycles(t *testing.T) {
 			logTag:      tag,
 		})
 		waitHealthyReplica(t, statusAddr, "r1", 10*time.Second)
+		waitProductIscsiReady(t, iscsiAddr, 5*time.Second)
 	}
 	stop := func() {
 		t.Helper()
@@ -147,7 +153,7 @@ func TestISCSI_L2DurableRestartReconnect_RepeatedCycles(t *testing.T) {
 	}
 }
 
-func TestISCSI_L2DurableSyncCacheRestart_PreservesSyncedWrites(t *testing.T) {
+func TestISCSI_L2DurableSyncCacheRestart_AcceptsSyncAndPreservesWrites(t *testing.T) {
 	if testing.Short() {
 		t.Skip("L2 subprocess durable sync-cache restart test; -short skip")
 	}
@@ -174,6 +180,7 @@ func TestISCSI_L2DurableSyncCacheRestart_PreservesSyncedWrites(t *testing.T) {
 		logTag:      "iscsi-sync-restart-r1-initial",
 	})
 	waitHealthyReplica(t, statusAddr, "r1", 10*time.Second)
+	waitProductIscsiReady(t, iscsiAddr, 5*time.Second)
 
 	const durableBlockSize = 4096
 	expected := make(map[uint32][]byte)
@@ -208,13 +215,14 @@ func TestISCSI_L2DurableSyncCacheRestart_PreservesSyncedWrites(t *testing.T) {
 		logTag:      "iscsi-sync-restart-r1-restarted",
 	})
 	waitHealthyReplica(t, statusAddr, "r1", 10*time.Second)
+	waitProductIscsiReady(t, iscsiAddr, 5*time.Second)
 
 	cli2 := dialG8Iscsi(t, iscsiAddr, iqn)
 	defer cli2.close(t)
-	for _, lba := range []uint32{40, 43, 44, 47, 51} {
+	for lba, want := range expected {
 		got := cli2.read10(t, lba, 1, durableBlockSize)
-		if !bytes.Equal(got, expected[lba]) {
-			t.Fatalf("synced LBA %d mismatch after restart: got prefix=%x want prefix=%x", lba, got[:32], expected[lba][:32])
+		if !bytes.Equal(got, want) {
+			t.Fatalf("synced LBA %d mismatch after restart: got prefix=%x want prefix=%x", lba, got[:32], want[:32])
 		}
 	}
 }
@@ -251,24 +259,34 @@ func startSingleSlotMaster(t *testing.T, bins l2bins, art string) (*proc, string
 	p := &proc{cmd: cmd, logPath: logPath}
 	t.Cleanup(func() { p.stop(t); lf.Close() })
 
-	buf := make([]byte, 512)
-	n, _ := stdout.Read(buf)
+	br := bufio.NewReader(stdout)
+	type readyResult struct {
+		line []byte
+		err  error
+	}
+	readyCh := make(chan readyResult, 1)
 	go func() {
-		for {
-			b := make([]byte, 1024)
-			if _, err := stdout.Read(b); err != nil {
-				return
-			}
-		}
+		line, err := br.ReadBytes('\n')
+		readyCh <- readyResult{line: line, err: err}
 	}()
+	var ready readyResult
+	select {
+	case ready = <-readyCh:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("master ready line timeout")
+	}
+	if ready.err != nil {
+		t.Fatalf("master ready line: %v", ready.err)
+	}
+	go func() { _, _ = io.Copy(io.Discard, br) }()
 	var rl struct {
 		Component, Phase, Addr string
 	}
-	if err := json.Unmarshal(buf[:n], &rl); err != nil {
-		t.Fatalf("parse master ready %q: %v", buf[:n], err)
+	if err := json.Unmarshal(ready.line, &rl); err != nil {
+		t.Fatalf("parse master ready %q: %v", ready.line, err)
 	}
 	if rl.Addr == "" {
-		t.Fatalf("master ready: empty addr (line=%q)", buf[:n])
+		t.Fatalf("master ready: empty addr (line=%q)", ready.line)
 	}
 	return p, rl.Addr
 }
@@ -302,4 +320,20 @@ func waitHealthyReplica(t *testing.T, statusAddr, replicaID string, deadline tim
 		t.Fatalf("%s: Healthy=true expected; got status=%v", replicaID, got)
 	}
 	return got
+}
+
+func waitProductIscsiReady(t *testing.T, iscsiAddr string, deadline time.Duration) {
+	t.Helper()
+	end := time.Now().Add(deadline)
+	var lastErr error
+	for time.Now().Before(end) {
+		conn, err := net.DialTimeout("tcp", iscsiAddr, 200*time.Millisecond)
+		if err == nil {
+			_ = conn.Close()
+			return
+		}
+		lastErr = err
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("iSCSI listener %s not reachable within %s: last error: %v", iscsiAddr, deadline, lastErr)
 }

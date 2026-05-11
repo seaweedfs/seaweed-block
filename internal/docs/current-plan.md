@@ -145,7 +145,7 @@ Second delivery:
 
 Third delivery:
 
-- Added `TestISCSI_L2DurableSyncCacheRestart_PreservesSyncedWrites`.
+- Added `TestISCSI_L2DurableSyncCacheRestart_AcceptsSyncAndPreservesWrites`.
 - Layer: subprocess L2, no Kubernetes, no OS initiator.
 - Path:
   - start single-slot product stack,
@@ -153,15 +153,30 @@ Third delivery:
   - issue `SYNCHRONIZE CACHE(10)` every four writes plus a final sync,
   - stop `blockvolume`,
   - restart with the same durable root and iSCSI address,
-  - reconnect and verify representative synced LBAs.
+  - reconnect and verify all written LBAs.
 - Helper added:
   - `g8IscsiClient.syncCache10`.
 - Targeted run:
-  `go test -tags subprocess ./cmd/blockvolume -run TestISCSI_L2DurableSyncCacheRestart_PreservesSyncedWrites -count=1 -v`
+  `go test -tags subprocess ./cmd/blockvolume -run TestISCSI_L2DurableSyncCacheRestart_AcceptsSyncAndPreservesWrites -count=1 -v`
 - Result: PASS in `17.81s`.
 - Restart/sync pack run:
-  `go test -tags subprocess ./cmd/blockvolume -run 'TestISCSI_L2Durable(RestartReconnect_(PreservesData|RepeatedCycles)|SyncCacheRestart_PreservesSyncedWrites)' -count=1 -v`
+  `go test -tags subprocess ./cmd/blockvolume -run 'TestISCSI_L2Durable(RestartReconnect_(PreservesData|RepeatedCycles)|SyncCacheRestart_AcceptsSyncAndPreservesWrites)' -count=1 -v`
 - Result: PASS in `64.126s`.
+
+Review follow-up:
+
+- Added explicit iSCSI listener readiness polling after product status reports
+  the replica healthy. Status readiness alone is not a TCP/listener contract.
+- Hardened single-slot master startup parsing with a ready-line timeout and
+  read-error check.
+- Narrowed the Sync Cache claim: this test proves the product iSCSI stack
+  accepts `SYNCHRONIZE CACHE(10)` and preserves writes across a clean durable
+  restart. It is not crash, FUA, or power-loss durability evidence.
+- Expanded restart verification from representative LBAs to all 12 written
+  LBAs.
+- Review-follow-up run:
+  `go test -tags subprocess ./cmd/blockvolume -run 'TestISCSI_L2Durable(RestartReconnect_(PreservesData|RepeatedCycles)|SyncCacheRestart_AcceptsSyncAndPreservesWrites)' -count=1 -v`
+- Result: PASS in `64.151s`.
 
 ## Workstream B: Existing Gate Hygiene
 
