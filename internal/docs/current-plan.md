@@ -4,6 +4,9 @@ Status: active. Started after closing
 `finished-plans/phase5_finishedplan_read_only_operations_status_report.md` on
 2026-05-11.
 
+Archive target after closure:
+`finished-plans/phase6_finishedplan_iscsi_os_initiator_compatibility.md`.
+
 ## Goal
 
 Close the highest-risk alpha credibility gap: real OS iSCSI initiators must be
