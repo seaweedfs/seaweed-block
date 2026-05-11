@@ -30,11 +30,12 @@ Fast gate validation:
 | --- | --- | --- | --- | ---: | --- |
 | `nvme-p5-protocol-component-gate` | `20260510-214940-d726` | `b926b7e50c522665b66a81a2990a3fe925364365` | PASS | `1.486s` | collected |
 | `csi-rf1-durable-restart-component-gate` | `20260510-214947-206b` | `b926b7e50c522665b66a81a2990a3fe925364365` | PASS | `1.034s` | collected |
-| `operations-volume-status-report-component-gate` | `20260510-222618-0452` | `c4426ca1d0ad46d47773c1cd1185edd9f944cf4f` | PASS | `1.113s` | collected |
+| `operations-volume-status-report-component-gate` | `20260510-232649-03fd` | `c8a27ac4ca35e4686420ce068bb67811b9a95fd9` | PASS | `1.081s` | collected |
 
-The third row was named `operations-volume-status-snapshot-component-gate` at
-the time of the run. It was renamed to `status-report` immediately after to
-avoid conflict with real block/data snapshot terminology.
+The operations gate was initially named
+`operations-volume-status-snapshot-component-gate`. It was renamed to
+`status-report` and revalidated to avoid conflict with real block/data snapshot
+terminology.
 
 All three fast gates passed `swblock validate`.
 

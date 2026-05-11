@@ -32,12 +32,12 @@ Closed phase 4 evidence:
 - `core/ops.BuildVolumeStatusReport`: implemented.
 - `go test -count=1 ./core/ops`: PASS.
 - `operations-volume-status-report-component-gate`:
-  - previous run id before the rename:
-    `20260510-222618-0452`,
+  - run id:
+    `20260510-232649-03fd`,
   - product commit:
-    `c4426ca1d0ad46d47773c1cd1185edd9f944cf4f`,
+    `c8a27ac4ca35e4686420ce068bb67811b9a95fd9`,
   - result: PASS,
-  - wall clock: `1.113s`,
+  - wall clock: `1.081s`,
   - bundle collected.
 - `swblock validate` passes for all scenario YAMLs.
 
