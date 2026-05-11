@@ -225,6 +225,24 @@ Final pass must state:
   - multi-node readiness,
   - Windows support if deferred.
 
+Close checklist:
+
+- If QA Windows validation passes:
+  - record the Windows run evidence in this plan,
+  - archive this file as
+    `internal/docs/finished-plans/phase6_finishedplan_iscsi_os_initiator_compatibility.md`,
+  - update `product-management-plan.md` from pending to closed,
+  - keep future iSCSI session/backend pressure work under a new plan.
+- If QA Windows validation fails:
+  - keep this plan active,
+  - classify the first failing point from the QA assignment,
+  - add the smallest component/protocol test that reproduces the failure,
+  - rerun the Windows gate only after that fast test is green.
+- If Windows validation is deferred:
+  - state the reason and exact non-claim,
+  - close only the Linux/open-iscsi claim,
+  - keep Windows as a separate compatibility follow-up.
+
 ## Dev / QA Split
 
 Developer handles:

@@ -79,11 +79,11 @@ This is the short internal roadmap. Keep it current and readable.
 
 ### Track B: iSCSI Frontend Stability
 
-- Current: OS initiator correctness, session stability, product-backed K8s
-  fio/attach-detach, CHAP, CSI node restart, ALUA/MPIO, mounted failover, and
-  compatibility soak are release-gated.
-- Next: V2 parity audit refresh, backend pressure behavior, and repeatability
-  evidence for regular WAL versus smartwal.
+- Current: Linux OS initiator correctness is runner-gated with mkfs, mount,
+  checksum, fio, cleanup, and dmesg-delta evidence. Windows built-in Initiator
+  validation is pending through a loopback target plus SSH tunnel.
+- Next: close or explicitly defer Windows, then move remaining iSCSI work to
+  component-first session/backend pressure tests instead of broad V2 porting.
 - Later: larger compatibility coverage across host distros and initiator
   versions.
 
