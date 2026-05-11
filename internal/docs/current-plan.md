@@ -164,6 +164,19 @@ Deliverable:
 - choose the first operations contract and write it as a reference note for the
   next active plan.
 
+Implementation seed:
+
+- `core/ops.BuildVolumeStatusSnapshot` assembles the selected contract from:
+  - master `StatusResponse` frontend facts,
+  - local volume `StatusProjection`,
+  - replication peer status,
+  - durable volume status,
+  - synthetic residue inputs.
+- Missing role/revision inputs are represented as explicit `unavailable`
+  strings rather than silent zero-value success.
+- Component validation:
+  - `go test -count=1 ./core/ops`: PASS.
+
 ## Workstream D: Mini-Protocol Notes
 
 Purpose: keep the product's concurrent protocols explicit.
