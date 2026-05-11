@@ -139,6 +139,15 @@ credible light-use product:
 - Safe admin controls: repair/promote/cleanup actions must wait until the
   read-only observation model is stable and release-gated.
 
+### Track G: Test Management Control Plane
+
+- Current: runner scenarios write result/status bundles, but M01/M02 shared lab
+  ownership is still mostly implicit.
+- Next: add simple shared-drive control data for active runs, history, locks,
+  artifact pointers, commits, target nodes, and stale-run detection.
+- Later: scenario library indexing, queueing, remote agents on lab nodes,
+  matrix scheduling, hosted validation, and discovery-agent ingestion.
+
 ## PR Cadence
 
 - Prefer one coherent milestone PR, not one PR per tiny fix.

@@ -108,6 +108,21 @@ In scope:
 - TestOps command-boundary gate,
 - operator guide and non-claims.
 
+Required TestOps support for closing the loop:
+
+- simple control data for the shared M01/M02 lab,
+- active run record with run id, scenario, state, current phase, artifact dir,
+  product/runner commit, target nodes, ports if known, and updated timestamp,
+- resource-group lock metadata for tests that share global lab resources such
+  as `node:m02`, `iscsi:m02`, `nvme:m02`, or `k3s:m02`,
+- terminal move from active to history,
+- enough CLI/status surface for dev/QA to answer:
+  - what is running,
+  - which build is running,
+  - which resources it owns,
+  - where artifacts are,
+  - whether the run is stale.
+
 Out of scope for this plan:
 
 - mutating admin commands,
@@ -118,6 +133,7 @@ Out of scope for this plan:
 - performance monitoring,
 - fleet agent,
 - cloud-scale test controller.
+- full TestOps scheduler or remote agent.
 
 ## Deliverables
 
@@ -180,6 +196,32 @@ The guide must explain:
 - what residue and `unchecked` mean,
 - what this command does not prove.
 
+### D5: TestOps Control Data For Shared Lab Runs
+
+The runner should maintain minimal shared-drive control data when executing
+scenario gates that consume M01/M02 resources:
+
+```text
+testops-control/
+  active/<run_id>.json
+  history/<run_id>.json
+  locks/<resource>.lock
+  events.jsonl
+```
+
+The first version is not a scheduler. It is visibility and safety:
+
+- create an active record at run start,
+- update state/current phase at phase boundaries,
+- record artifact dir and known commit evidence,
+- refuse or clearly report conflicting resource locks,
+- release locks and move the record to history on terminal exit,
+- leave stale active records visible if the runner crashes.
+
+This supports the product usability loop because QA/dev cannot validate user
+experience reliably if M01/M02 has invisible old tests, stale ports, or unknown
+builds still running.
+
 ## Current Progress
 
 Completed:
@@ -204,8 +246,12 @@ Remaining in this plan:
 1. Add `ops-status-bundle.json`.
 2. Gate the bundle metadata in `operations-volume-status-cli-gate`.
 3. Update operator guide with the bundle workflow.
-4. Run focused tests and scenario validation.
-5. Close this plan into `finished-plans/`.
+4. Add minimal TestOps control data for shared lab visibility and stale-run
+   detection.
+5. Gate the control-data behavior with component tests and one QA validation
+   assignment.
+6. Run focused tests and scenario validation.
+7. Close this plan into `finished-plans/`.
 
 ## Deferred Roadmap Items
 
@@ -218,6 +264,7 @@ Move these to future plans, not this one:
 - Prometheus metrics and dashboard/UI.
 - Agent-based fleet operations.
 - Hosted/cloud TestOps controller.
+- Advanced TestOps scheduler, queueing, or remote agent.
 
 ## Gate To Close
 
@@ -227,8 +274,10 @@ This plan closes only when:
 2. The command emits report, summary, and bundle metadata.
 3. The bundle is self-describing enough to attach to an issue.
 4. TestOps validates the command-boundary bundle shape.
-5. The operator guide documents the exact workflow and non-claims.
-6. No mutating control-plane action is added.
+5. Shared-lab TestOps runs publish enough active/history/lock control data that
+   dev/QA can see what is running and avoid colliding scenarios.
+6. The operator guide documents the exact workflow and non-claims.
+7. No mutating product control-plane action is added.
 
 ## Success Statement
 
