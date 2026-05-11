@@ -143,6 +143,26 @@ Second delivery:
   `go test -tags subprocess ./cmd/blockvolume -run 'TestISCSI_L2DurableRestartReconnect_(PreservesData|RepeatedCycles)' -count=1 -v`
 - Result: PASS in `46.552s`.
 
+Third delivery:
+
+- Added `TestISCSI_L2DurableSyncCacheRestart_PreservesSyncedWrites`.
+- Layer: subprocess L2, no Kubernetes, no OS initiator.
+- Path:
+  - start single-slot product stack,
+  - write 12 distinct 4 KiB LBAs through iSCSI,
+  - issue `SYNCHRONIZE CACHE(10)` every four writes plus a final sync,
+  - stop `blockvolume`,
+  - restart with the same durable root and iSCSI address,
+  - reconnect and verify representative synced LBAs.
+- Helper added:
+  - `g8IscsiClient.syncCache10`.
+- Targeted run:
+  `go test -tags subprocess ./cmd/blockvolume -run TestISCSI_L2DurableSyncCacheRestart_PreservesSyncedWrites -count=1 -v`
+- Result: PASS in `17.81s`.
+- Restart/sync pack run:
+  `go test -tags subprocess ./cmd/blockvolume -run 'TestISCSI_L2Durable(RestartReconnect_(PreservesData|RepeatedCycles)|SyncCacheRestart_PreservesSyncedWrites)' -count=1 -v`
+- Result: PASS in `64.126s`.
+
 ## Workstream B: Existing Gate Hygiene
 
 Purpose: keep the expensive gates useful but not overused.

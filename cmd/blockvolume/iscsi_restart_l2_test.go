@@ -147,6 +147,78 @@ func TestISCSI_L2DurableRestartReconnect_RepeatedCycles(t *testing.T) {
 	}
 }
 
+func TestISCSI_L2DurableSyncCacheRestart_PreservesSyncedWrites(t *testing.T) {
+	if testing.Short() {
+		t.Skip("L2 subprocess durable sync-cache restart test; -short skip")
+	}
+	bins := buildG54Binaries(t)
+	art := t.TempDir()
+
+	_, masterAddr := startSingleSlotMaster(t, bins, art)
+
+	iqn := "iqn.2026-05.example.sync-restart:v1"
+	store := filepath.Join(art, "r1-store")
+	dataAddr, ctrlAddr := pickAddr(t), pickAddr(t)
+	statusAddr, iscsiAddr := pickAddr(t), pickAddr(t)
+
+	r1 := startG54Volume(t, bins, art, volOpts{
+		masterAddr:  masterAddr,
+		serverID:    "s1",
+		replicaID:   "r1",
+		dataAddr:    dataAddr,
+		ctrlAddr:    ctrlAddr,
+		statusAddr:  statusAddr,
+		iscsiAddr:   iscsiAddr,
+		iscsiIQN:    iqn,
+		durableRoot: store,
+		logTag:      "iscsi-sync-restart-r1-initial",
+	})
+	waitHealthyReplica(t, statusAddr, "r1", 10*time.Second)
+
+	const durableBlockSize = 4096
+	expected := make(map[uint32][]byte)
+	cli := dialG8Iscsi(t, iscsiAddr, iqn)
+	for i := 0; i < 12; i++ {
+		lba := uint32(40 + i)
+		payload := bytes.Repeat([]byte{byte(0x30 + i)}, durableBlockSize)
+		copy(payload, []byte("iscsi-durable-sync-cache-restart-payload"))
+		payload[len(payload)-1] = byte(i)
+		cli.write10(t, lba, payload)
+		expected[lba] = payload
+		if (i+1)%4 == 0 {
+			cli.syncCache10(t)
+		}
+	}
+	cli.syncCache10(t)
+	cli.close(t)
+
+	r1.stop(t)
+	time.Sleep(500 * time.Millisecond)
+
+	_ = startG54Volume(t, bins, art, volOpts{
+		masterAddr:  masterAddr,
+		serverID:    "s1",
+		replicaID:   "r1",
+		dataAddr:    dataAddr,
+		ctrlAddr:    ctrlAddr,
+		statusAddr:  statusAddr,
+		iscsiAddr:   iscsiAddr,
+		iscsiIQN:    iqn,
+		durableRoot: store,
+		logTag:      "iscsi-sync-restart-r1-restarted",
+	})
+	waitHealthyReplica(t, statusAddr, "r1", 10*time.Second)
+
+	cli2 := dialG8Iscsi(t, iscsiAddr, iqn)
+	defer cli2.close(t)
+	for _, lba := range []uint32{40, 43, 44, 47, 51} {
+		got := cli2.read10(t, lba, 1, durableBlockSize)
+		if !bytes.Equal(got, expected[lba]) {
+			t.Fatalf("synced LBA %d mismatch after restart: got prefix=%x want prefix=%x", lba, got[:32], expected[lba][:32])
+		}
+	}
+}
+
 func startSingleSlotMaster(t *testing.T, bins l2bins, art string) (*proc, string) {
 	t.Helper()
 	storeDir := filepath.Join(art, "master-store")
