@@ -19,8 +19,9 @@ Public-facing docs belong in `docs/`.
   the day-to-day driver.
 - QA assignments live under `qa-assignments/` and should be linked from
   `current-plan.md` with `#QA`.
-- When a plan closes, move its finished plan and related references into a
-  dedicated subdirectory, for example `finished/iscsi-p2/`.
+- When a plan closes, keep the finished markdown plan in `finished-plans/`.
+  Link supporting audits, QA requests, and larger references from that plan
+  under `ref/` or `qa-assignments/`.
 
 ## Current Index
 

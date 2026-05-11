@@ -22,8 +22,8 @@ component first -> product-backed gate only when the component boundary is green
 
 | Gate | Status | Evidence |
 | --- | --- | --- |
-| Fast iSCSI protocol pressure pack | PASS | `go test ./core/frontend/iscsi -run 'TestP2_ISCSI|TestP1_ISCSI|TestDataInWriter|TestDataOut' -count=1`, `0.466s` |
-| Product-backed durable restart L2 pack | PASS | `go test -tags subprocess ./cmd/blockvolume -run 'TestISCSI_L2Durable(RestartReconnect_(PreservesData|RepeatedCycles)|SyncCacheRestart_AcceptsSyncAndPreservesWrites)' -count=1 -v`, `64.151s` |
+| Fast iSCSI protocol pressure pack | PASS | `go test ./core/frontend/iscsi -run 'TestP2_ISCSI\|TestP1_ISCSI\|TestDataInWriter\|TestDataOut' -count=1`, `0.466s` |
+| Product-backed durable restart L2 pack | PASS | `go test -tags subprocess ./cmd/blockvolume -run 'TestISCSI_L2Durable(RestartReconnect_(PreservesData\|RepeatedCycles)\|SyncCacheRestart_AcceptsSyncAndPreservesWrites)' -count=1 -v`, `64.151s` |
 | Internal review | PASS | Reviewer found no blocking issues after readiness/test-claim fixes |
 | Linux open-iscsi milestone gate | PASS | `iscsi-os-initiator-compat-chain`, run `20260511-091432-d7f6`, `22/22` actions, `1m13s`, product `a0550be` |
 

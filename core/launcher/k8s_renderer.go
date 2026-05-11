@@ -45,7 +45,7 @@ func RenderBlockVolumeDeployments(plan lifecycle.BlockVolumeWorkloadPlan, cfg K8
 	if cfg.DurableRootBase == "" {
 		cfg.DurableRootBase = stateMountPath
 	}
-	if cfg.StateHostPathBase != "" && strings.TrimRight(cfg.DurableRootBase, "/") != stateMountPath {
+	if cfg.StateHostPathBase != "" && path.Clean(cfg.DurableRootBase) != stateMountPath {
 		return nil, fmt.Errorf("launcher: state hostPath requires durable root base %q, got %q", stateMountPath, cfg.DurableRootBase)
 	}
 	if cfg.RecoveryMode == "" {
@@ -124,7 +124,7 @@ func stateVolume(cfg K8sRenderConfig) volume {
 		return volume{Name: "state", EmptyDir: &emptyDir{}}
 	}
 	return volume{Name: "state", HostPath: &hostPath{
-		Path: strings.TrimRight(cfg.StateHostPathBase, "/"),
+		Path: path.Clean(cfg.StateHostPathBase),
 		Type: "DirectoryOrCreate",
 	}}
 }

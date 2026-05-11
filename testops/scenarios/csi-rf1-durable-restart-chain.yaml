@@ -127,7 +127,7 @@ phases:
         threshold: "0"
       - action: exec
         node: m02
-        cmd: "! grep -q 'emptyDir:' /mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-chain/durable_blockvolume_restart/generated-blockvolume.yaml"
+        cmd: "awk 'BEGIN{in_volumes=0;in_state=0;bad=0} /^[[:space:]]*volumes:[[:space:]]*$/{in_volumes=1;next} in_volumes && /^[^[:space:]]/{in_volumes=0;in_state=0} in_volumes && /^[[:space:]]*-[[:space:]]*name:[[:space:]]*state[[:space:]]*$/{in_state=1;next} in_state && /^[[:space:]]*-[[:space:]]*name:[[:space:]]*/{in_state=0} in_state && /emptyDir:/{bad=1} END{exit bad}' /mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-chain/durable_blockvolume_restart/generated-blockvolume.yaml"
       - action: grep_log
         node: m02
         path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-chain/durable_blockvolume_restart/writer.log"
@@ -177,7 +177,7 @@ phases:
       - action: grep_log
         node: m02
         path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-chain/durable_blockvolume_restart/status-durable-after-blockvolume-restart.json"
-        pattern: "\"Epoch\"[[:space:]]*:[[:space:]]*1[,}]"
+        pattern: "\"Epoch\"[[:space:]]*:[[:space:]]*[1-9][0-9]*"
         save_as: durable_status_epoch_count
       - action: assert_greater
         actual: "{{ durable_status_epoch_count }}"

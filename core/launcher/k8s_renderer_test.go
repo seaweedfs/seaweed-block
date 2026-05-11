@@ -75,8 +75,8 @@ func TestG15d_K8sRenderer_RF2UsesDistinctNamesAndPorts(t *testing.T) {
 func TestG15d_K8sRenderer_CanUseHostPathStateVolume(t *testing.T) {
 	manifests, err := RenderBlockVolumeDeployments(sampleWorkloadPlan(), K8sRenderConfig{
 		MasterAddr:        "m:9333",
-		DurableRootBase:   "/var/lib/sw-block",
-		StateHostPathBase: "/var/lib/sw-block/test-run",
+		DurableRootBase:   "/var/lib/sw-block/",
+		StateHostPathBase: "/var/lib/sw-block/test-run/",
 	})
 	if err != nil {
 		t.Fatalf("RenderBlockVolumeDeployments: %v", err)

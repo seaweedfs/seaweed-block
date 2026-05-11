@@ -76,7 +76,7 @@ func TestISCSI_L2DurableRestartReconnect_PreservesData(t *testing.T) {
 	got := c2.read10(t, 11, 1, durableBlockSize)
 	c2.close(t)
 	if !bytes.Equal(got, payload) {
-		t.Fatalf("read after blockvolume durable restart mismatch: got prefix=%x want prefix=%x", got[:32], payload[:32])
+		t.Fatalf("read after blockvolume durable restart mismatch: got prefix=%x want prefix=%x", bytePrefix(got, 32), bytePrefix(payload, 32))
 	}
 }
 
@@ -133,7 +133,7 @@ func TestISCSI_L2DurableRestartReconnect_RepeatedCycles(t *testing.T) {
 			got := cli.read10(t, priorLBA, 1, durableBlockSize)
 			if !bytes.Equal(got, want) {
 				cli.close(t)
-				t.Fatalf("cycle %d prior LBA %d mismatch: got prefix=%x want prefix=%x", cycle, priorLBA, got[:32], want[:32])
+				t.Fatalf("cycle %d prior LBA %d mismatch: got prefix=%x want prefix=%x", cycle, priorLBA, bytePrefix(got, 32), bytePrefix(want, 32))
 			}
 		}
 		cli.close(t)
@@ -148,7 +148,7 @@ func TestISCSI_L2DurableRestartReconnect_RepeatedCycles(t *testing.T) {
 	for lba, want := range writes {
 		got := cli.read10(t, lba, 1, durableBlockSize)
 		if !bytes.Equal(got, want) {
-			t.Fatalf("final LBA %d mismatch: got prefix=%x want prefix=%x", lba, got[:32], want[:32])
+			t.Fatalf("final LBA %d mismatch: got prefix=%x want prefix=%x", lba, bytePrefix(got, 32), bytePrefix(want, 32))
 		}
 	}
 }
@@ -222,7 +222,7 @@ func TestISCSI_L2DurableSyncCacheRestart_AcceptsSyncAndPreservesWrites(t *testin
 	for lba, want := range expected {
 		got := cli2.read10(t, lba, 1, durableBlockSize)
 		if !bytes.Equal(got, want) {
-			t.Fatalf("synced LBA %d mismatch after restart: got prefix=%x want prefix=%x", lba, got[:32], want[:32])
+			t.Fatalf("synced LBA %d mismatch after restart: got prefix=%x want prefix=%x", lba, bytePrefix(got, 32), bytePrefix(want, 32))
 		}
 	}
 }
@@ -230,7 +230,9 @@ func TestISCSI_L2DurableSyncCacheRestart_AcceptsSyncAndPreservesWrites(t *testin
 func startSingleSlotMaster(t *testing.T, bins l2bins, art string) (*proc, string) {
 	t.Helper()
 	storeDir := filepath.Join(art, "master-store")
-	_ = os.MkdirAll(storeDir, 0o755)
+	if err := os.MkdirAll(storeDir, 0o755); err != nil {
+		t.Fatalf("master store dir %s: %v", storeDir, err)
+	}
 	topo := writeSingleSlotTopology(t, art)
 	logPath := filepath.Join(art, "master-single-slot.log")
 	lf, err := os.Create(logPath)
@@ -336,4 +338,11 @@ func waitProductIscsiReady(t *testing.T, iscsiAddr string, deadline time.Duratio
 		time.Sleep(100 * time.Millisecond)
 	}
 	t.Fatalf("iSCSI listener %s not reachable within %s: last error: %v", iscsiAddr, deadline, lastErr)
+}
+
+func bytePrefix(b []byte, n int) []byte {
+	if len(b) < n {
+		return b
+	}
+	return b[:n]
 }

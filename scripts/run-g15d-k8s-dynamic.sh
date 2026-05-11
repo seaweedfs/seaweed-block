@@ -109,7 +109,7 @@ if [[ "$BLOCKVOLUME_NAMESPACE" != "kube-system" ]]; then
   grep -q -- '--launcher-pvc-owner-ref' "$STACK_RENDERED" || { echo "failed to inject --launcher-pvc-owner-ref into $STACK_RENDERED" >&2; exit 1; }
 fi
 if [[ -n "$LAUNCHER_STATE_HOSTPATH" ]]; then
-  awk -v hostpath="$LAUNCHER_STATE_HOSTPATH" '/--launcher-durable-root=/{print; print "            - \"--launcher-state-hostpath=" hostpath "\""; next} {print}' "$STACK_RENDERED" >"$STACK_RENDERED.tmp"
+  SW_BLOCK_AWK_HOSTPATH="$LAUNCHER_STATE_HOSTPATH" awk 'BEGIN{hostpath=ENVIRON["SW_BLOCK_AWK_HOSTPATH"]; gsub(/\\/, "\\\\", hostpath); gsub(/"/, "\\\"", hostpath)} /--launcher-durable-root=/{print; print "            - \"--launcher-state-hostpath=" hostpath "\""; next} {print}' "$STACK_RENDERED" >"$STACK_RENDERED.tmp"
   mv "$STACK_RENDERED.tmp" "$STACK_RENDERED"
   grep -q -- '--launcher-state-hostpath=' "$STACK_RENDERED" || { echo "failed to inject --launcher-state-hostpath into $STACK_RENDERED" >&2; exit 1; }
 fi

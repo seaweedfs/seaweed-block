@@ -138,7 +138,7 @@ wait_blockvolume_log_pattern() {
   local timeout_s="$4"
   for _ in $(seq 1 "$timeout_s"); do
     kubectl -n "$BLOCKVOLUME_NAMESPACE" logs "$deploy" -c blockvolume --tail=-1 >"$out" 2>&1 || true
-    if grep -q "$pattern" "$out" 2>/dev/null; then
+    if grep -F -q "$pattern" "$out" 2>/dev/null; then
       return 0
     fi
     sleep 1

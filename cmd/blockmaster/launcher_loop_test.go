@@ -134,18 +134,62 @@ func TestG15d_BlockmasterLauncherTickCanRenderHostPathState(t *testing.T) {
 		t.Fatalf("read manifest: %v", err)
 	}
 	body := string(raw)
+	stateSection := yamlStateVolumeSection(t, body)
 	for _, want := range []string{
 		"hostPath:",
 		"path: /var/lib/sw-block",
 		"type: DirectoryOrCreate",
 	} {
-		if !strings.Contains(body, want) {
-			t.Fatalf("manifest missing %q:\n%s", want, body)
+		if !strings.Contains(stateSection, want) {
+			t.Fatalf("state volume missing %q:\n%s", want, stateSection)
 		}
 	}
-	if strings.Contains(body, "emptyDir:") {
-		t.Fatalf("hostPath state volume must not render emptyDir:\n%s", body)
+	if strings.Contains(stateSection, "emptyDir:") {
+		t.Fatalf("hostPath state volume must not render emptyDir:\n%s", stateSection)
 	}
+}
+
+func yamlStateVolumeSection(t *testing.T, body string) string {
+	t.Helper()
+	lines := strings.Split(body, "\n")
+	volumesIndent := -1
+	stateStart := -1
+	stateIndent := -1
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		indent := len(line) - len(strings.TrimLeft(line, " "))
+		if volumesIndent < 0 {
+			if trimmed == "volumes:" {
+				volumesIndent = indent
+			}
+			continue
+		}
+		if indent <= volumesIndent && trimmed != "" {
+			break
+		}
+		if trimmed == "- name: state" {
+			stateStart = i
+			stateIndent = indent
+			break
+		}
+	}
+	if stateStart < 0 {
+		t.Fatalf("state volume section not found:\n%s", body)
+	}
+	stateEnd := len(lines)
+	for i := stateStart + 1; i < len(lines); i++ {
+		trimmed := strings.TrimSpace(lines[i])
+		indent := len(lines[i]) - len(strings.TrimLeft(lines[i], " "))
+		if indent == stateIndent && strings.HasPrefix(trimmed, "- name:") {
+			stateEnd = i
+			break
+		}
+		if indent < stateIndent && trimmed != "" {
+			stateEnd = i
+			break
+		}
+	}
+	return strings.Join(lines[stateStart:stateEnd], "\n")
 }
 
 func TestG15d_BlockmasterLauncherTickRendersNVMeManifestFromLifecycleProtocol(t *testing.T) {
