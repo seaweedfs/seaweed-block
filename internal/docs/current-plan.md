@@ -93,9 +93,19 @@ Purpose: prevent the release gate from becoming the default developer loop.
 
 Current beta suite cost is about 20-22 minutes.
 
+Reference evidence:
+
+- Cost map: `ref/beta-hardening-suite-cost-map.md`.
+- Source run: `20260511-031605-8258`.
+- Top cost drivers:
+  - `iscsi-p8-compat-soak`: `659s` (`50.5%`),
+  - `nvme-p5-csi-protocol`: `273s` (`20.9%`),
+  - `csi-rf1-durable-restart`: `165s` (`12.6%`),
+  - `nvme-p4-multipath-failover`: `138s` (`10.6%`).
+
 Tasks:
 
-- Record per-child wall clock from QA's repeatability run.
+- Record per-child wall clock from the first full green run.
 - Classify each child:
   - keep integration,
   - componentize next,
@@ -103,7 +113,8 @@ Tasks:
   - periodic only.
 - Identify the top 1-2 expensive children where assertions can move lower.
 
-Likely candidates:
+Top-candidate summary. The full ten-child classification is recorded in
+`ref/beta-hardening-suite-cost-map.md`.
 
 - `iscsi-p8-compat-soak`: keep as release/periodic; add smaller component gates
   for any specific failures it discovers.
@@ -111,6 +122,19 @@ Likely candidates:
   rendering and lifecycle persistence checks into component tests.
 - `nvme-p4-multipath-failover`: keep kernel multipath path; keep CMIC/NMIC/ANA
   field checks in component/assert helpers.
+
+First componentization target for the next plan:
+
+- `nvme-p5-csi-protocol` protocol propagation contract:
+  - CSI protocol parameter extraction,
+  - lifecycle `protocol` persistence,
+  - launcher NVMe/iSCSI argument render shape,
+  - stale-image/version gate behavior.
+
+Second target:
+
+- `csi-rf1-durable-restart` restart-state contracts around durable identity,
+  status/projection refresh, and safe reattach.
 
 ## Workstream C: Operations Layer Prep
 
