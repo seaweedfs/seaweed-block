@@ -42,6 +42,10 @@ Expected target-side setup:
 
 - `run.log` prints `target-only mode`.
 - `run.log` prints portal `127.0.0.1:<PORT>`.
+- `target-ready.env` exists and contains:
+  - `SW_BLOCK_ISCSI_TARGET_READY=1`,
+  - `SW_BLOCK_ISCSI_IQN=...`,
+  - `SW_BLOCK_ISCSI_PORTAL=...`.
 - `blockvolume.log` has the iSCSI listener and no startup error.
 - Target holds for the configured time, then cleans itself up.
 

@@ -276,8 +276,16 @@ fi
 sleep 2
 
 if [[ "$TARGET_ONLY" == "1" ]]; then
+  cat >"$ARTIFACT_DIR/target-ready.env" <<ENV
+SW_BLOCK_ISCSI_TARGET_READY=1
+SW_BLOCK_ISCSI_IQN=${IQN}
+SW_BLOCK_ISCSI_PORTAL=${PORTAL_ADDR:-${INITIATOR_PORTAL_ADDR}}
+SW_BLOCK_ISCSI_LISTEN=${LISTEN_HOST}:${PORT}
+SW_BLOCK_ISCSI_ARTIFACT_DIR=${ARTIFACT_DIR}
+ENV
   log "target-only mode: hold ${TARGET_HOLD_SECONDS}s for external initiator"
   log "target-only portal=${PORTAL_ADDR:-${INITIATOR_PORTAL_ADDR}} iqn=${IQN}"
+  log "target-only ready_file=${ARTIFACT_DIR}/target-ready.env"
   sleep "$TARGET_HOLD_SECONDS"
   log "target-only hold complete"
   exit 0
