@@ -59,7 +59,12 @@ func TestOpsStatusWritesArtifactsAndReturnsClean(t *testing.T) {
 	}))
 	defer statusServer.Close()
 
-	outDir := t.TempDir()
+	outDir := os.Getenv("SW_BLOCK_OPS_STATUS_CLI_ARTIFACT_DIR")
+	if outDir == "" {
+		outDir = t.TempDir()
+	} else if err := os.MkdirAll(outDir, 0o755); err != nil {
+		t.Fatalf("create artifact dir: %v", err)
+	}
 	var stdout, stderr bytes.Buffer
 	code := run([]string{
 		"ops", "status",

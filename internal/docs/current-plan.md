@@ -160,6 +160,24 @@ Milestone gate only if needed:
   - This is still diagnostic-only. It does not mutate volume state, perform
     cleanup, replace TestOps, or provide a web UI/operator.
 
+2026-05-11 CLI TestOps gate:
+
+- Added `operations-volume-status-cli-gate`.
+- The gate runs the `sw-block ops status` command contract through
+  `cmd/sw-block` against in-test fake master/status endpoints and writes the
+  resulting operator artifacts into the TestOps artifact tree.
+- It asserts:
+  - `volume-status-report.json` exists and carries schema/version/volume facts,
+  - `volume-status-summary.txt` reports `status: ok`,
+  - the summary preserves volume/replica/epoch identity,
+  - the summary reports `issues: none`.
+- Validation:
+  - `go test ./cmd/sw-block -run TestOpsStatusWritesArtifactsAndReturnsClean -count=1`
+  - `swblock validate testops/scenarios/operations-volume-status-cli-gate.yaml`
+- Non-claim:
+  - This is a command-boundary component gate, not a live product deployment
+    gate. It prevents CLI/artifact drift before spending lab time.
+
 ## Delivery Gate
 
 This plan is complete when:
