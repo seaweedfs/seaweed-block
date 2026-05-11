@@ -1,266 +1,189 @@
-# Current Plan: Read-Only Operations Status Report Integration
+# Current Plan: iSCSI OS-Initiator Compatibility Closure
 
 Status: active. Started after closing
-`finished-plans/phase4_finishedplan_fast_gates_operations_contract_prep.md` on
+`finished-plans/phase5_finishedplan_read_only_operations_status_report.md` on
 2026-05-11.
 
 ## Goal
 
-Turn the component-level volume status report contract into useful read-only
-operational evidence.
+Close the highest-risk alpha credibility gap: real OS iSCSI initiators must be
+able to format, mount, write, read, and cleanly detach a meaningful Seaweed
+Block volume without `DID_BAD_TARGET`, `I/O error`, dangling sessions, or hidden
+harness-only success.
 
-This is an observability report. It is not a V2-style block/data snapshot,
-clone, backup, rollback point, or restore feature.
+This plan is intentionally narrow. It is about iSCSI correctness with real
+initiators. It is not a performance claim, production HA claim, multi-node
+claim, NVMe claim, or operator-completeness claim.
 
-The goal is not to build an operator yet. The goal is to make one stable report
-answer:
+## Why This Is Next
+
+`product-management-plan.md` currently says:
 
 ```text
-What volume/replica is this host serving, what role does it believe it has,
-what frontend facts are exposed, what durable lineage is latched, what peers
-are known, and what residue would make a cleanup or failover decision unsafe?
+Do not start new feature work until the iSCSI OS-initiator compatibility issue
+is verified.
 ```
 
-This plan contributes to the product roadmap's operations layer by converting
-facts currently scattered across status endpoints, TestOps artifacts, and host
-residue checks into a single schema-controlled evidence object.
+The user-visible failure is severe: if a normal Linux or Windows initiator
+cannot format or write a volume reliably, the alpha PVC/demo story is not
+trustworthy even if component tests and protocol gates pass.
 
-## Baseline
+This contributes to the roadmap:
 
-Closed phase 4 evidence:
+- Track B: iSCSI frontend stability.
+- Alpha Stabilization: real OS initiator compatibility and larger filesystem
+  writes.
+- Beta Foundation: durable restart and failover only matter after the basic
+  attached filesystem path is credible.
 
-- `core/ops.BuildVolumeStatusReport`: implemented.
-- `go test -count=1 ./core/ops`: PASS.
-- `operations-volume-status-report-component-gate`:
-  - run id:
-    `20260510-232649-03fd`,
-  - product commit:
-    `c8a27ac4ca35e4686420ce068bb67811b9a95fd9`,
-  - result: PASS,
-  - wall clock: `1.081s`,
-  - bundle collected.
-- `operations-volume-status-report-component-gate` after adding collected JSON
-  artifact:
-  - run id:
-    `20260510-233106-cfb9`,
-  - product commit:
-    `569855f`,
-  - result: PASS,
-  - wall clock: `1.201s`,
-  - collected artifact:
-    `volume-status-report.json`,
-  - field gates:
-    `schema_version=1.0`, `volume_id=v1`, `lun=0`, and
-    `last_error=unavailable`.
-- `operations-volume-status-report-component-gate` after adding JSON schema
-  shape pinning:
-  - run id:
-    `20260511-000155-b27d`,
-  - product commit:
-    `171d872`,
-  - result: PASS,
-  - wall clock: `1.226s`,
-  - actions: `30/30`,
-  - added gate:
-    `TestBuildVolumeStatusReport_JSONSchemaShapeIsStable`.
-- `operations-volume-status-report-component-gate` after adding the read-only
-  collector seam:
-  - run id:
-    `20260511-001715-9921`,
-  - product commit:
-    `c18489e`,
-  - result: PASS,
-  - wall clock: `1.288s`,
-  - actions: `36/36`,
-  - added gates:
-    `TestVolumeStatusReportCollector_CollectsInjectedReadOnlySources`,
-    `TestVolumeStatusReportCollector_ReturnsPartialReportWithSourceErrors`,
-    `TestVolumeStatusReportCollector_NilSourcesProduceUnavailableReport`.
-- `operations-volume-status-report-component-gate` after adding the returned
-  replica durable-ready/frontend-fenced case:
-  - run id:
-    `20260511-002427-09ff`,
-  - product commit:
-    `be45263`,
-  - result: PASS,
-  - wall clock: `1.368s`,
-  - actions: `38/38`,
-  - added gate:
-    `TestVolumeStatusReportCollector_ReturnedReplicaDurableReadyButFrontendFenced`.
-- `swblock validate` passes for all scenario YAMLs.
+## Current Known Risk
 
-Relevant references:
+Earlier findings point at possible iSCSI execution gaps:
 
-- `ref/operations-volume-status-report-contract.md`
-- `ref/operations-volume-status-report-operator-guide.md`
-- `ref/beta-hardening-suite-cost-map.md`
-- `product-roadmap.md`, Track F: Operations Layer
+- large write / mkfs compatibility has been active hardening,
+- V2 has reference behavior for iSCSI execution paths,
+- possible V3 gaps include:
+  - multi Data-In read splitting,
+  - CmdSN window and pending queue behavior,
+  - Data-Out timeout handling,
+  - larger write burst/R2T behavior,
+  - OS initiator cleanup and reattach behavior.
+
+Do not assume the problem is fixed because component tests pass. The gate must
+use a real OS initiator.
 
 ## Delivery Gate
 
 This plan is complete when:
 
-1. A product-side read-only collector can produce a `VolumeStatusReport` from
-   existing status inputs without starting new authority paths.
-2. The collector has component tests for:
-   - happy-path primary with protocol frontends,
-   - returned/non-primary replica with durable lineage but frontend-fenced,
-   - missing peer/durable inputs represented explicitly,
-   - residue arrays emitted as empty arrays instead of `null`.
-3. A runner-native fast gate validates the collector path and collects a sample
-   status report artifact.
-4. No endpoint or command added in this plan mutates authority, lifecycle,
-   storage, iSCSI/NVMe sessions, or Kubernetes resources.
-5. Documentation states what an operator may inspect from the report and what
-   it must not infer.
+1. A Linux OS initiator gate formats or mounts an iSCSI Seaweed Block volume,
+   writes and reads a meaningful payload, verifies checksum, disconnects, and
+   leaves no iSCSI sessions or V3 processes.
+2. A Windows OS initiator check is either:
+   - validated with explicit evidence, or
+   - documented as deferred with a precise non-claim and QA assignment.
+3. If the OS gate fails, the failure is reduced to one or more fast component
+   or protocol tests before another long integration loop is added.
+4. V2 comparison is documented only where it changes the fix:
+   - what behavior V2 has,
+   - what V3 lacks,
+   - what test proves the port/fix.
+5. The final evidence bundle includes:
+   - initiator logs,
+   - target logs,
+   - dmesg or Windows event evidence when applicable,
+   - fio or checksum output,
+   - session cleanup proof,
+   - product and runner commit provenance.
 
-## Workstream A: Status Report Collector
+## Workstream A: Evidence Baseline
 
-Purpose: make the report useful outside pure unit tests while preserving the
-read-only boundary.
-
-Target shape:
-
-- Define a small collector seam that accepts already-collected inputs:
-  - master status response,
-  - local status projection,
-  - peer status,
-  - durable status,
-  - residue facts,
-  - product/runner revision metadata.
-- Keep collection and assembly separate:
-  - assembly is `core/ops.BuildVolumeStatusReport`,
-  - collection is a thin caller-owned layer,
-  - no authority decisions inside ops.
-- Prefer component tests with fake inputs before adding any live endpoint.
-
-Non-goal:
-
-- Do not add force-detach, cleanup, promote, demote, or restart controls.
-
-Implementation status:
-
-- `VolumeStatusReportCollector` is an injectable read-only seam.
-- Source functions provide already-existing facts:
-  master status, local projection, peer status, durable status, and residue.
-- `Collect` returns a partial report plus a joined source error when one input
-  source fails, preserving useful evidence without hiding collection failure.
-- The collector does not start product processes, contact authority paths, or
-  mutate lifecycle/storage/frontend state.
-- `TestVolumeStatusReportCollector_ReturnedReplicaDurableReadyButFrontendFenced`
-  covers the important non-primary state: durable lineage can be latched and
-  operational while the replica remains not healthy and
-  `frontend_primary_ready=false`.
-
-## Workstream B: Runner Evidence Artifact
-
-Purpose: make TestOps bundles carry the same operational evidence a human would
-ask for during a failure.
-
-Target shape:
-
-- Extend the operations status report component gate or add a sibling gate that:
-  - emits one JSON report artifact,
-  - validates `schema_version`,
-  - validates frontend identity fields including zero-valued `lun`,
-  - validates explicit `unavailable` markers,
-  - archives the artifact under the run bundle.
-
-This remains a fast gate. It should stay seconds-scale and should not require
-k3s, kernel initiators, or product process startup.
-
-Implementation status:
-
-- `operations-volume-status-report-component-gate` now emits
-  `volume-status-report.json`.
-- The gate validates the artifact directly, not only `go test` output.
-- The artifact is collected under `remote-phases.tgz` for the run bundle.
-
-## Workstream C: Schema Boundary Hardening
-
-Purpose: keep the operations schema stable as product DTOs evolve.
-
-Known risk from review:
-
-- `core/ops` currently imports host/volume, durable, replication, and control
-  DTO packages directly. This is acceptable for the seed but can couple the ops
-  schema too tightly to implementation DTOs if the package grows.
+Purpose: determine whether the current branch already passes the real initiator
+path.
 
 Tasks:
 
-- Add JSON-shape tests for the fields operators care about.
-- Decide whether to keep direct DTO imports or introduce a smaller
-  `ReportInput` DTO layer owned by `core/ops`.
-- Keep all schema changes append-only.
+- Identify the current best Linux iSCSI OS smoke scenario and command.
+- Run it from TestOps when possible so result/provenance is structured.
+- Capture exact failure if it fails:
+  - initiator error,
+  - target-side log,
+  - kernel/dmesg evidence,
+  - last successful SCSI/iSCSI phase.
+- Avoid changing product code until the failure shape is known.
 
-Implementation status:
+Developer default:
 
-- `TestBuildVolumeStatusReport_JSONSchemaShapeIsStable` pins the schema-1.0
-  operator-facing JSON keys for:
-  - top-level report metadata,
-  - source,
-  - volume and frontend identity,
-  - authority state,
-  - replication peer state,
-  - durable lineage,
-  - residue sections.
-- The fast runner gate includes this test, so accidental key rename/removal is
-  caught before any integration suite.
+- Run the Linux/m02 path directly when it is a single TestOps command.
+- Ask QA only for independent Windows validation, ambiguous initiator behavior,
+  or milestone repeatability.
 
-## Workstream D: Operations Non-Claims
+## Workstream B: V2 Comparison
 
-Purpose: prevent the report from becoming an unsafe pseudo-operator.
+Purpose: avoid speculative rewrites by comparing only the failing behavior.
 
-Rules:
+Tasks:
 
-- Report is evidence only.
-- Report can block unsafe action; it cannot authorize destructive action by
-  itself.
-- Any future admin control must have a separate protocol with fencing and
-  authority semantics.
-- A stale report must be treated as stale evidence, not current truth.
+- Inspect V2 iSCSI handling for the specific failing path.
+- Compare against V3:
+  - command sequencing,
+  - read/write segmentation,
+  - R2T/Data-Out handling,
+  - CmdSN/pending window,
+  - timeout/error mapping.
+- Write down the minimum behavioral delta needed for V3.
 
-Implementation status:
+Non-goal:
 
-- `ref/operations-volume-status-report-operator-guide.md` defines what an
-  operator may inspect:
-  volume identity, frontend facts, authority role/epoch, peer state, durable
-  lineage, residue, and provenance.
-- The same guide defines unsafe conclusions:
-  no force detach, durable deletion, promotion/demotion, stale-primary fencing,
-  HA, workload durability, rollback, clone, backup, or cleanup authorization
-  may be inferred from this report alone.
-- The guide provides escalation paths for conflicting authority, durable
-  lineage mismatch, frontend/durable inconsistency, residue, and provenance
-  mismatch.
+- Do not port broad V2 architecture unless the failing evidence requires it.
+
+## Workstream C: Fast Regression Tests
+
+Purpose: keep long OS-initiator runs as milestone gates, not the only debugging
+loop.
+
+Tasks:
+
+- For each concrete protocol bug, add a unit/component test around the smallest
+  executable boundary.
+- Prefer component tests for segmentation/windowing/timeout behavior.
+- Use runner-native integration only for the final real initiator proof.
+
+Rule:
+
+```text
+Long integration failure -> reduce to component/protocol test -> fix -> rerun
+the OS gate once.
+```
+
+## Workstream D: Final Gate And Non-Claims
+
+Purpose: produce product-facing evidence without overclaiming.
+
+Final pass must state:
+
+- Linux initiator result.
+- Windows initiator result or explicit deferral.
+- Volume size and workload profile.
+- What cleanup was verified.
+- What this does not prove:
+  - performance,
+  - HA,
+  - broad distro matrix,
+  - upgrade safety,
+  - multi-node readiness,
+  - Windows support if deferred.
 
 ## Dev / QA Split
 
 Developer handles:
 
-- component tests,
-- fast runner-native status report gate,
-- schema and docs,
-- reviewer-assisted changes.
+- identifying/running single-command Linux TestOps gates,
+- V2 code comparison for concrete failures,
+- component/protocol tests,
+- product fixes.
 
 QA handles:
 
-- independent validation if the report is added to a full integration chain,
-- ambiguous differences between report facts and live lab state,
-- milestone evidence if this becomes part of a release gate.
+- independent milestone validation,
+- Windows initiator validation,
+- ambiguous lab behavior,
+- repeatability claims after the first green.
 
 Default rule:
 
 ```text
-status report schema/component proof -> developer runs
-status report in long integration/milestone suite -> QA validates
+single TestOps command with clear pass/fail -> developer runs
+cross-OS, ambiguous, or milestone repeatability -> QA validates
 ```
 
 ## Non-Claims
 
-- This plan does not deliver a block/data snapshot feature.
+- This plan does not deliver NVMe changes.
+- This plan does not deliver performance benchmarks.
+- This plan does not claim production HA.
+- This plan does not prove multi-node attach.
+- This plan does not prove broad distro compatibility.
 - This plan does not deliver an operator.
-- This plan does not claim HA.
-- This plan does not define force detach.
-- This plan does not change `beta-hardening-gate`.
-- This plan does not introduce a public unauthenticated operations API.
+- This plan does not replace the beta-hardening suite.
+
