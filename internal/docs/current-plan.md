@@ -76,6 +76,17 @@ Closed phase 4 evidence:
     `TestVolumeStatusReportCollector_CollectsInjectedReadOnlySources`,
     `TestVolumeStatusReportCollector_ReturnsPartialReportWithSourceErrors`,
     `TestVolumeStatusReportCollector_NilSourcesProduceUnavailableReport`.
+- `operations-volume-status-report-component-gate` after adding the returned
+  replica durable-ready/frontend-fenced case:
+  - run id:
+    `20260511-002427-09ff`,
+  - product commit:
+    `be45263`,
+  - result: PASS,
+  - wall clock: `1.368s`,
+  - actions: `38/38`,
+  - added gate:
+    `TestVolumeStatusReportCollector_ReturnedReplicaDurableReadyButFrontendFenced`.
 - `swblock validate` passes for all scenario YAMLs.
 
 Relevant references:
@@ -136,6 +147,10 @@ Implementation status:
   source fails, preserving useful evidence without hiding collection failure.
 - The collector does not start product processes, contact authority paths, or
   mutate lifecycle/storage/frontend state.
+- `TestVolumeStatusReportCollector_ReturnedReplicaDurableReadyButFrontendFenced`
+  covers the important non-primary state: durable lineage can be latched and
+  operational while the replica remains not healthy and
+  `frontend_primary_ready=false`.
 
 ## Workstream B: Runner Evidence Artifact
 
