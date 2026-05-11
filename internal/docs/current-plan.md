@@ -81,6 +81,33 @@ This plan is complete when:
 Purpose: determine whether the current branch already passes the real initiator
 path.
 
+Status: Linux/m02 baseline is green at product commit `8e220e5`.
+
+Evidence:
+
+- Runner command:
+  `swblock run testops/scenarios/iscsi-os-initiator-compat-chain.yaml`.
+- Run ID: `20260511-005745-1437`.
+- Result: `PASS` in `1m14s`, `22/22` actions passed.
+- Workload: one Linux open-iscsi attach, `mkfs.ext4`, mount, checksum
+  write/read, `fio` randrw for 60 seconds against a 256 MiB target.
+- Kernel device: `/dev/sda`, 65,536 4 KiB logical blocks.
+- `fio.iter1.log`: `err= 0`, read/write completed for the full 60 seconds.
+- `sha256-check.iter1.log`: payload checksum verified.
+- `iscsi-sessions.after.txt`: `iscsiadm: No active sessions.`
+- Process cleanup: `assert_no_processes` passed for `blockmaster` and
+  `blockvolume`.
+- `dmesg.new.txt`: only new attach, ext4 mount/unmount, cache sync, and ALUA
+  detach lines; no `DID_BAD_TARGET`, `I/O error`, `Buffer I/O`, or rejecting
+  I/O.
+
+Harness note:
+
+- Commit `eaba13c` added a dmesg-delta gate but compared the before/after
+  files by common prefix, which misclassified old rotated kernel messages as
+  new.
+- Commit `8e220e5` fixed the gate by using dmesg timestamps and reran green.
+
 Tasks:
 
 - Identify the current best Linux iSCSI OS smoke scenario and command.
@@ -186,4 +213,3 @@ cross-OS, ambiguous, or milestone repeatability -> QA validates
 - This plan does not prove broad distro compatibility.
 - This plan does not deliver an operator.
 - This plan does not replace the beta-hardening suite.
-
