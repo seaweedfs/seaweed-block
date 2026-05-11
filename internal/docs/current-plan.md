@@ -81,14 +81,14 @@ This plan is complete when:
 Purpose: determine whether the current branch already passes the real initiator
 path.
 
-Status: Linux/m02 baseline is green at product commit `8e220e5`.
+Status: Linux/m02 baseline is green at product commit `0da42ff`.
 
 Evidence:
 
 - Runner command:
   `swblock run testops/scenarios/iscsi-os-initiator-compat-chain.yaml`.
-- Run ID: `20260511-005745-1437`.
-- Result: `PASS` in `1m14s`, `22/22` actions passed.
+- Run ID: `20260511-010537-3e2b`.
+- Result: `PASS` in `1m13s`, `22/22` actions passed.
 - Workload: one Linux open-iscsi attach, `mkfs.ext4`, mount, checksum
   write/read, `fio` randrw for 60 seconds against a 256 MiB target.
 - Kernel device: `/dev/sda`, 65,536 4 KiB logical blocks.
@@ -107,6 +107,8 @@ Harness note:
   files by common prefix, which misclassified old rotated kernel messages as
   new.
 - Commit `8e220e5` fixed the gate by using dmesg timestamps and reran green.
+- Commit `0da42ff` added target-only support for external initiator
+  validation and reran the Linux gate green.
 
 Tasks:
 
@@ -199,8 +201,12 @@ Support added:
   - `SW_BLOCK_ISCSI_INITIATOR_PORTAL_ADDR`,
   - `SW_BLOCK_ISCSI_TARGET_ONLY=1`,
   - `SW_BLOCK_ISCSI_TARGET_HOLD_SECONDS`.
-- This keeps the Linux gate unchanged while allowing QA to hold a V3 target on
-  m02 and drive it from the Windows built-in iSCSI Initiator.
+- This keeps the Linux gate unchanged while allowing QA to hold a loopback V3
+  target on m02 and drive it from the Windows built-in iSCSI Initiator through
+  an SSH local port-forward. The product guard still refuses unauthenticated
+  non-loopback target binds, which is the safer default.
+- Target-only startup check passed on m02 with `SW_BLOCK_ISCSI_TARGET_ONLY=1`
+  and `SW_BLOCK_ISCSI_TARGET_HOLD_SECONDS=1`.
 
 Final pass must state:
 

@@ -26,11 +26,10 @@ Run on m02 from the product checkout:
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-iscsi-windows-target"
 PORT=36260
 ART="/mnt/smb/work/share/g15d-k8s/${RUN_ID}"
+WORK="/tmp/sw-block-iscsi-windows-target-${RUN_ID}"
 
 SW_BLOCK_ARTIFACT_DIR="$ART" \
-SW_BLOCK_ISCSI_LISTEN_HOST=0.0.0.0 \
-SW_BLOCK_ISCSI_INITIATOR_PORTAL_ADDR="192.168.1.184:${PORT}" \
-SW_BLOCK_ISCSI_PORTAL_ADDR="192.168.1.184:${PORT}" \
+SW_BLOCK_ISCSI_WORK_DIR="$WORK" \
 SW_BLOCK_ISCSI_PORT="${PORT}" \
 SW_BLOCK_ISCSI_TARGET_ONLY=1 \
 SW_BLOCK_ISCSI_TARGET_HOLD_SECONDS=900 \
@@ -42,9 +41,21 @@ bash scripts/run-iscsi-os-smoke.sh "$PWD"
 Expected target-side setup:
 
 - `run.log` prints `target-only mode`.
-- `run.log` prints portal `192.168.1.184:<PORT>`.
+- `run.log` prints portal `127.0.0.1:<PORT>`.
 - `blockvolume.log` has the iSCSI listener and no startup error.
 - Target holds for the configured time, then cleans itself up.
+
+Keep the target loopback-only. The product intentionally refuses
+unauthenticated external binds. For Windows validation, use an SSH local
+forward from the Windows controller:
+
+```powershell
+ssh -i C:/work/dev_server/testdev_key `
+  -N -L 36260:127.0.0.1:36260 `
+  testdev@192.168.1.184
+```
+
+Leave that SSH process running while executing the Windows initiator steps.
 
 ## Windows Initiator Steps
 
@@ -52,7 +63,7 @@ Run from administrator PowerShell. Adjust `$Portal` and `$Port` if the target
 command used different values.
 
 ```powershell
-$Portal = "192.168.1.184"
+$Portal = "127.0.0.1"
 $Port = 36260
 $IQN = "iqn.2026-05.io.seaweedfs:os-smoke-v1"
 $Mount = "S"
