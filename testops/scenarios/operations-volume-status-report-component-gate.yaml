@@ -52,7 +52,7 @@ phases:
       - action: exec
         node: m02
         timeout: 3m
-        cmd: "cd {{ product_root }} && bash -o pipefail -c 'SW_BLOCK_OPS_STATUS_REPORT_OUT=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-ops-volume-status-report/volume-status-report.json go test -count=1 -json -run \"^TestBuildVolumeStatusReport_(ComposesExistingStatusSurfaces|JSONKeepsZeroValuedFrontendIdentity|UsesMasterFrontendFacts|MarksUnavailableInputsExplicitly|CopiesInputSlices|WritesSampleReportArtifact)$\" ./core/ops | tee /mnt/smb/work/share/g15d-k8s/{{ run_id }}-ops-volume-status-report/report-component-go-test.jsonl'"
+        cmd: "cd {{ product_root }} && bash -o pipefail -c 'SW_BLOCK_OPS_STATUS_REPORT_OUT=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-ops-volume-status-report/volume-status-report.json go test -count=1 -json -run \"^TestBuildVolumeStatusReport_(ComposesExistingStatusSurfaces|JSONKeepsZeroValuedFrontendIdentity|JSONSchemaShapeIsStable|UsesMasterFrontendFacts|MarksUnavailableInputsExplicitly|CopiesInputSlices|WritesSampleReportArtifact)$\" ./core/ops | tee /mnt/smb/work/share/g15d-k8s/{{ run_id }}-ops-volume-status-report/report-component-go-test.jsonl'"
       - action: grep_log
         node: m02
         path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-ops-volume-status-report/report-component-go-test.jsonl"
@@ -68,6 +68,14 @@ phases:
         save_as: report_zero_identity_count
       - action: assert_greater
         actual: "{{ report_zero_identity_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-ops-volume-status-report/report-component-go-test.jsonl"
+        pattern: "\"Action\":\"pass\".*\"Test\":\"TestBuildVolumeStatusReport_JSONSchemaShapeIsStable\""
+        save_as: report_schema_shape_count
+      - action: assert_greater
+        actual: "{{ report_schema_shape_count }}"
         threshold: "0"
       - action: grep_log
         node: m02

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -168,6 +169,110 @@ func TestBuildVolumeStatusReport_JSONKeepsZeroValuedFrontendIdentity(t *testing.
 	if _, ok := decoded.Volume.Frontends[1]["nsid"]; !ok {
 		t.Fatalf("NVMe frontend JSON omitted nsid=1: %s", raw)
 	}
+}
+
+func TestBuildVolumeStatusReport_JSONSchemaShapeIsStable(t *testing.T) {
+	report := BuildVolumeStatusReport(VolumeStatusReportInput{
+		CapturedAt:      time.Date(2026, 5, 11, 20, 0, 0, 0, time.UTC),
+		ProductRevision: "product-rev",
+		RunnerRevision:  "runner-rev",
+		Source:          ReportSource{Component: "component-test", Host: "m02", Scenario: "schema-shape"},
+		MasterStatus: &control.StatusResponse{
+			VolumeId:        "v1",
+			ReplicaId:       "r1",
+			Epoch:           3,
+			EndpointVersion: 4,
+			Assigned:        true,
+			Frontends: []*control.FrontendTarget{
+				{Protocol: "iscsi", Addr: "127.0.0.1:3260", Iqn: "iqn.2026-05.io.seaweedfs:v1", Lun: 0},
+				{Protocol: "nvme", Addr: "127.0.0.1:4420", Nqn: "nqn.2026-05.io.seaweedfs:v1", Nsid: 1},
+			},
+		},
+		LocalStatus: &hostvolume.StatusProjection{
+			Projection: frontend.Projection{
+				VolumeID:        "v1",
+				ReplicaID:       "r1",
+				Epoch:           3,
+				EndpointVersion: 4,
+				Healthy:         true,
+			},
+			FrontendPrimaryReady: true,
+			AuthorityRole:        hostvolume.AuthorityRolePrimary,
+			ReplicationRole:      hostvolume.ReplicationRoleNone,
+		},
+		Peers: []replication.ReplicaPeerStatus{
+			{ReplicaID: "r2", State: "healthy", DataAddr: "127.0.0.1:10001", CtrlAddr: "127.0.0.1:10002", SessionID: 10},
+		},
+		Durable: []durable.VolumeStatus{
+			{VolumeID: "v1", Impl: "smartwal", Path: "/var/lib/sw-block/v1.blk", ReplicaID: "r1", Epoch: 3, EndpointVersion: 4, Latched: true, Operational: true},
+		},
+		Residue: ResidueReport{
+			HostInitiator: HostInitiatorResidue{ISCSISessions: []string{}, NVMESubsystems: []string{}},
+			Processes:     []string{},
+			Kubernetes:    []string{},
+			StoragePaths:  []string{},
+		},
+	})
+
+	raw, err := json.Marshal(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatal(err)
+	}
+
+	assertJSONKeys(t, "top-level", doc, []string{
+		"schema_version",
+		"captured_at",
+		"source",
+		"product_revision",
+		"runner_revision",
+		"volume",
+		"authority",
+		"replication",
+		"durable",
+		"residue",
+	})
+	assertJSONKeys(t, "source", asMap(t, doc["source"]), []string{"component", "host", "scenario"})
+	assertJSONKeys(t, "volume", asMap(t, doc["volume"]), []string{"volume_id", "replica_id", "protocols", "frontends"})
+	assertJSONKeys(t, "frontend", firstMap(t, doc["volume"], "frontends"), []string{"protocol", "addr", "iqn", "lun", "nsid"})
+	assertJSONKeys(t, "authority", asMap(t, doc["authority"]), []string{
+		"epoch",
+		"endpoint_version",
+		"assigned",
+		"authority_role",
+		"frontend_primary_ready",
+		"healthy",
+	})
+	assertJSONKeys(t, "replication", asMap(t, doc["replication"]), []string{"replication_role", "peers"})
+	assertJSONKeys(t, "peer", firstMap(t, doc["replication"], "peers"), []string{
+		"replica_id",
+		"state",
+		"data_addr",
+		"ctrl_addr",
+		"healthy",
+		"epoch",
+		"endpoint_version",
+		"session_id",
+		"probe_in_flight",
+		"closed",
+		"last_error",
+	})
+	assertJSONKeys(t, "durable", firstMapFromSlice(t, doc["durable"]), []string{
+		"volume_id",
+		"impl",
+		"path",
+		"replica_id",
+		"epoch",
+		"endpoint_version",
+		"latched",
+		"operational",
+		"closed",
+	})
+	assertJSONKeys(t, "residue", asMap(t, doc["residue"]), []string{"host_initiator", "processes", "kubernetes", "storage_paths"})
+	assertJSONKeys(t, "host_initiator", asMap(t, asMap(t, doc["residue"])["host_initiator"]), []string{"iscsi_sessions", "nvme_subsystems"})
 }
 
 func TestBuildVolumeStatusReport_UsesMasterFrontendFacts(t *testing.T) {
@@ -363,4 +468,58 @@ func stringSlicesEqual(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+func assertJSONKeys(t *testing.T, label string, got map[string]any, want []string) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("%s keys=%v want exactly %v", label, sortedMapKeys(got), want)
+	}
+	for _, key := range want {
+		if _, ok := got[key]; !ok {
+			t.Fatalf("%s missing JSON key %q in %v", label, key, sortedMapKeys(got))
+		}
+	}
+}
+
+func sortedMapKeys(m map[string]any) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func asMap(t *testing.T, v any) map[string]any {
+	t.Helper()
+	m, ok := v.(map[string]any)
+	if !ok {
+		t.Fatalf("expected map, got %T", v)
+	}
+	return m
+}
+
+func firstMap(t *testing.T, parent any, field string) map[string]any {
+	t.Helper()
+	items, ok := asMap(t, parent)[field].([]any)
+	if !ok {
+		t.Fatalf("expected %s array", field)
+	}
+	if len(items) == 0 {
+		t.Fatalf("expected %s to be non-empty", field)
+	}
+	return asMap(t, items[0])
+}
+
+func firstMapFromSlice(t *testing.T, v any) map[string]any {
+	t.Helper()
+	items, ok := v.([]any)
+	if !ok {
+		t.Fatalf("expected array, got %T", v)
+	}
+	if len(items) == 0 {
+		t.Fatal("expected array to be non-empty")
+	}
+	return asMap(t, items[0])
 }
