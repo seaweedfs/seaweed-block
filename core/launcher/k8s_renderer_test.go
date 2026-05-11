@@ -45,6 +45,15 @@ func TestG15d_K8sRenderer_RendersBlockVolumeDeploymentArgs(t *testing.T) {
 			t.Fatalf("manifest missing %q:\n%s", want, raw)
 		}
 	}
+	for _, forbidden := range []string{
+		"--nvme-listen=",
+		"--nvme-subsysnqn=",
+		"--nvme-ns=",
+	} {
+		if strings.Contains(raw, forbidden) {
+			t.Fatalf("iscsi manifest must not contain %q:\n%s", forbidden, raw)
+		}
+	}
 	if strings.Contains(raw, "--status-addr=") {
 		t.Fatalf("status endpoint must be opt-in for generated manifests:\n%s", raw)
 	}

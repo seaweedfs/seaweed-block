@@ -54,6 +54,50 @@ func TestFileStore_CreateVolumePersistsAndIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestFileStore_CreateVolumePersistsProtocolSelection(t *testing.T) {
+	s, err := OpenFileStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	for _, tc := range []struct {
+		name string
+		spec VolumeSpec
+		want string
+	}{
+		{
+			name: "default-iscsi",
+			spec: VolumeSpec{VolumeID: "vol-iscsi", SizeBytes: 1 << 20, ReplicationFactor: 1},
+			want: "iscsi",
+		},
+		{
+			name: "explicit-nvme",
+			spec: VolumeSpec{VolumeID: "vol-nvme", SizeBytes: 1 << 20, ReplicationFactor: 1, Protocol: "nvme"},
+			want: "nvme",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec, err := s.CreateVolume(tc.spec)
+			if err != nil {
+				t.Fatalf("create: %v", err)
+			}
+			if rec.Spec.Protocol != tc.want {
+				t.Fatalf("protocol=%q want %q", rec.Spec.Protocol, tc.want)
+			}
+			reopened, err := OpenFileStore(s.dir)
+			if err != nil {
+				t.Fatalf("reopen: %v", err)
+			}
+			got, ok := reopened.GetVolume(tc.spec.VolumeID)
+			if !ok {
+				t.Fatalf("reopened store missing %s", tc.spec.VolumeID)
+			}
+			if got.Spec.Protocol != tc.want {
+				t.Fatalf("persisted protocol=%q want %q", got.Spec.Protocol, tc.want)
+			}
+		})
+	}
+}
+
 func TestFileStore_CreateVolumeRejectsConflictingSpec(t *testing.T) {
 	s, err := OpenFileStore(t.TempDir())
 	if err != nil {

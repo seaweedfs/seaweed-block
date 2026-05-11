@@ -1,0 +1,141 @@
+# Runner-native NVMe-P5 protocol component gate.
+#
+# Goal:
+#   Pin the StorageClass/CSI/lifecycle/launcher protocol-shape contract without
+#   launching k3s or attaching an initiator. The full nvme-p5-csi-protocol
+#   chain remains the end-to-end proof; this gate is the fast developer loop.
+#
+# Expected invocation:
+#   swblock run testops/scenarios/nvme-p5-protocol-component-gate.yaml \
+#     --env product_root=/path/to/seaweed_block/on/m02 \
+#     --env ssh_key=/path/to/testdev_key/on/controller
+
+name: nvme-p5-protocol-component-gate
+timeout: 5m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: pre_clean
+    actions:
+      - action: assert_no_active_iscsi_sessions
+        node: m02
+        iqn_substr: "io.seaweedfs"
+      - action: assert_no_processes
+        node: m02
+        pattern: "[/]blockmaster --|[/]blockvolume --|^blockmaster |^blockvolume "
+      - action: exec
+        node: m02
+        cmd: "rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-nvme-p5-protocol-component && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-nvme-p5-protocol-component/pin_build"
+
+  - name: pin_build
+    actions:
+      - action: exec
+        node: m02
+        cmd: "cd {{ product_root }} && git rev-parse HEAD > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-nvme-p5-protocol-component/pin_build/git.sha && git status --porcelain > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-nvme-p5-protocol-component/pin_build/git.status && test ! -s /mnt/smb/work/share/g15d-k8s/{{ run_id }}-nvme-p5-protocol-component/pin_build/git.status"
+
+  - name: protocol_component_tests
+    actions:
+      - action: exec
+        node: m02
+        timeout: 3m
+        cmd: "cd {{ product_root }} && bash -o pipefail -c 'go test -count=1 -v ./core/csi ./core/host/master ./core/lifecycle ./core/launcher | tee /mnt/smb/work/share/g15d-k8s/{{ run_id }}-nvme-p5-protocol-component/protocol-component-go-test.log'"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-nvme-p5-protocol-component/protocol-component-go-test.log"
+        pattern: "PASS: TestG15c_ControllerCreateVolume_RecordsProtocolSelection"
+        save_as: csi_protocol_selection_count
+      - action: assert_greater
+        actual: "{{ csi_protocol_selection_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-nvme-p5-protocol-component/protocol-component-go-test.log"
+        pattern: "PASS: TestG15c_ControllerCreateVolume_RejectsConflictingProtocolParameters"
+        save_as: csi_protocol_conflict_count
+      - action: assert_greater
+        actual: "{{ csi_protocol_conflict_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-nvme-p5-protocol-component/protocol-component-go-test.log"
+        pattern: "PASS: TestG15c_ControllerCreateVolume_RejectsInvalidProtocol"
+        save_as: csi_protocol_invalid_count
+      - action: assert_greater
+        actual: "{{ csi_protocol_invalid_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-nvme-p5-protocol-component/protocol-component-go-test.log"
+        pattern: "PASS: TestG15c_LifecycleService_CreateVolumePersistsDesiredIntent"
+        save_as: master_lifecycle_protocol_count
+      - action: assert_greater
+        actual: "{{ master_lifecycle_protocol_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-nvme-p5-protocol-component/protocol-component-go-test.log"
+        pattern: "PASS: TestFileStore_CreateVolumePersistsProtocolSelection"
+        save_as: lifecycle_store_protocol_count
+      - action: assert_greater
+        actual: "{{ lifecycle_store_protocol_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-nvme-p5-protocol-component/protocol-component-go-test.log"
+        pattern: "PASS: TestG15d_WorkloadPlan_NVMeProtocolCreatesNVMeTargets"
+        save_as: lifecycle_nvme_plan_count
+      - action: assert_greater
+        actual: "{{ lifecycle_nvme_plan_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-nvme-p5-protocol-component/protocol-component-go-test.log"
+        pattern: "PASS: TestG15d_WorkloadPlan_BlankPoolRF2CreatesReplicaWorkloads"
+        save_as: lifecycle_default_iscsi_count
+      - action: assert_greater
+        actual: "{{ lifecycle_default_iscsi_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-nvme-p5-protocol-component/protocol-component-go-test.log"
+        pattern: "PASS: TestG15d_K8sRenderer_RendersNVMeBlockVolumeArgs"
+        save_as: launcher_nvme_render_count
+      - action: assert_greater
+        actual: "{{ launcher_nvme_render_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-nvme-p5-protocol-component/protocol-component-go-test.log"
+        pattern: "PASS: TestG15d_K8sRenderer_RendersBlockVolumeDeploymentArgs"
+        save_as: launcher_iscsi_render_count
+      - action: assert_greater
+        actual: "{{ launcher_iscsi_render_count }}"
+        threshold: "0"
+
+  - name: final_asserts
+    actions:
+      - action: assert_no_active_iscsi_sessions
+        node: m02
+        iqn_substr: "io.seaweedfs"
+      - action: assert_no_processes
+        node: m02
+        pattern: "[/]blockmaster --|[/]blockvolume --|^blockmaster |^blockvolume "
+
+  - name: collect_and_cleanup
+    always: true
+    actions:
+      - action: collect_path
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-nvme-p5-protocol-component"
+        name: "remote-phases"
+        ignore_error: true

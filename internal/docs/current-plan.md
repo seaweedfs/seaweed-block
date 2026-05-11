@@ -130,6 +130,7 @@ First componentization target for the next plan:
   - lifecycle `protocol` persistence,
   - launcher NVMe/iSCSI argument render shape,
   - stale-image/version gate behavior.
+  - initial fast gate: `testops/scenarios/nvme-p5-protocol-component-gate.yaml`.
 
 Second target:
 

@@ -294,49 +294,84 @@ func TestG15c_ControllerCreateVolume_RecordsProtocolSelection(t *testing.T) {
 }
 
 func TestG15c_ControllerCreateVolume_RejectsConflictingProtocolParameters(t *testing.T) {
-	s := NewControllerServerWithProvisioner(&stubLookup{}, &stubProvisioner{})
-	_, err := s.CreateVolume(context.Background(), &csipb.CreateVolumeRequest{
-		Name: "pvc-a",
-		CapacityRange: &csipb.CapacityRange{
-			RequiredBytes: 1 << 30,
+	for _, tc := range []struct {
+		name   string
+		params map[string]string
+	}{
+		{
+			name: "product-prefixed-vs-legacy",
+			params: map[string]string{
+				storageClassProtocolParameter: "nvme",
+				"protocol":                    "iscsi",
+			},
 		},
-		Parameters: map[string]string{
-			storageClassProtocolParameter: "nvme",
-			"protocol":                    "iscsi",
+		{
+			name: "product-prefixed-vs-frontendProtocol",
+			params: map[string]string{
+				storageClassProtocolParameter: "iscsi",
+				"frontendProtocol":            "nvme",
+			},
 		},
-		VolumeCapabilities: []*csipb.VolumeCapability{
-			testVolumeCapability(),
+		{
+			name: "legacy-vs-frontendProtocol",
+			params: map[string]string{
+				"protocol":         "nvme",
+				"frontendProtocol": "iscsi",
+			},
 		},
-	})
-	if err == nil {
-		t.Fatal("expected conflicting protocol parameters to fail")
-	}
-	st, _ := status.FromError(err)
-	if st.Code() != codes.InvalidArgument {
-		t.Fatalf("code=%v want InvalidArgument", st.Code())
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := NewControllerServerWithProvisioner(&stubLookup{}, &stubProvisioner{})
+			_, err := s.CreateVolume(context.Background(), &csipb.CreateVolumeRequest{
+				Name: "pvc-a",
+				CapacityRange: &csipb.CapacityRange{
+					RequiredBytes: 1 << 30,
+				},
+				Parameters: tc.params,
+				VolumeCapabilities: []*csipb.VolumeCapability{
+					testVolumeCapability(),
+				},
+			})
+			if err == nil {
+				t.Fatal("expected conflicting protocol parameters to fail")
+			}
+			st, _ := status.FromError(err)
+			if st.Code() != codes.InvalidArgument {
+				t.Fatalf("code=%v want InvalidArgument", st.Code())
+			}
+		})
 	}
 }
 
 func TestG15c_ControllerCreateVolume_RejectsInvalidProtocol(t *testing.T) {
-	s := NewControllerServerWithProvisioner(&stubLookup{}, &stubProvisioner{})
-	_, err := s.CreateVolume(context.Background(), &csipb.CreateVolumeRequest{
-		Name: "pvc-a",
-		CapacityRange: &csipb.CapacityRange{
-			RequiredBytes: 1 << 30,
-		},
-		Parameters: map[string]string{
-			"protocol": "nfs",
-		},
-		VolumeCapabilities: []*csipb.VolumeCapability{
-			testVolumeCapability(),
-		},
-	})
-	if err == nil {
-		t.Fatal("expected invalid protocol error")
-	}
-	st, _ := status.FromError(err)
-	if st.Code() != codes.InvalidArgument {
-		t.Fatalf("code=%v want InvalidArgument", st.Code())
+	for _, tc := range []struct {
+		name   string
+		params map[string]string
+	}{
+		{name: "legacy", params: map[string]string{"protocol": "nfs"}},
+		{name: "product-prefixed", params: map[string]string{storageClassProtocolParameter: "nfs"}},
+		{name: "frontendProtocol", params: map[string]string{"frontendProtocol": "nfs"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := NewControllerServerWithProvisioner(&stubLookup{}, &stubProvisioner{})
+			_, err := s.CreateVolume(context.Background(), &csipb.CreateVolumeRequest{
+				Name: "pvc-a",
+				CapacityRange: &csipb.CapacityRange{
+					RequiredBytes: 1 << 30,
+				},
+				Parameters: tc.params,
+				VolumeCapabilities: []*csipb.VolumeCapability{
+					testVolumeCapability(),
+				},
+			})
+			if err == nil {
+				t.Fatal("expected invalid protocol error")
+			}
+			st, _ := status.FromError(err)
+			if st.Code() != codes.InvalidArgument {
+				t.Fatalf("code=%v want InvalidArgument", st.Code())
+			}
+		})
 	}
 }
 

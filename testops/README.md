@@ -69,6 +69,18 @@ swblock run testops/scenarios/nvme-p5-csi-protocol-chain.yaml \
   --env ssh_key=/path/to/testdev_key/on/controller
 ```
 
+Fast component gates are available for developer loops before running the
+heavier K8s or initiator paths. For example, the NVMe-P5 protocol component
+gate pins CSI protocol extraction, lifecycle protocol planning, and launcher
+protocol persistence/planning, plus launcher NVMe/iSCSI manifest shape without
+launching k3s:
+
+```bash
+swblock run testops/scenarios/nvme-p5-protocol-component-gate.yaml \
+  --env product_root=/path/to/seaweed_block/on/m02 \
+  --env ssh_key=/path/to/testdev_key/on/controller
+```
+
 The same runner-native shape is used for the longer iSCSI P8 soak:
 
 ```bash

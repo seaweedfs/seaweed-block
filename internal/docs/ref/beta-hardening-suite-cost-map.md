@@ -109,6 +109,8 @@ After beta repeatability is stamped, start with the `nvme-p5-csi-protocol`
 component contract slice. The delivery should be:
 
 - fast component tests for protocol extraction, persistence, and render shape,
+- runner-native fast gate:
+  `testops/scenarios/nvme-p5-protocol-component-gate.yaml`,
 - the existing runner-native P5 child still passing,
 - a short doc note explaining which failures now fail in seconds and which still
   intentionally require K8s.
