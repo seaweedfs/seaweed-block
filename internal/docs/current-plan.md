@@ -63,6 +63,19 @@ Closed phase 4 evidence:
   - actions: `30/30`,
   - added gate:
     `TestBuildVolumeStatusReport_JSONSchemaShapeIsStable`.
+- `operations-volume-status-report-component-gate` after adding the read-only
+  collector seam:
+  - run id:
+    `20260511-001715-9921`,
+  - product commit:
+    `c18489e`,
+  - result: PASS,
+  - wall clock: `1.288s`,
+  - actions: `36/36`,
+  - added gates:
+    `TestVolumeStatusReportCollector_CollectsInjectedReadOnlySources`,
+    `TestVolumeStatusReportCollector_ReturnsPartialReportWithSourceErrors`,
+    `TestVolumeStatusReportCollector_NilSourcesProduceUnavailableReport`.
 - `swblock validate` passes for all scenario YAMLs.
 
 Relevant references:
@@ -112,6 +125,16 @@ Target shape:
 Non-goal:
 
 - Do not add force-detach, cleanup, promote, demote, or restart controls.
+
+Implementation status:
+
+- `VolumeStatusReportCollector` is an injectable read-only seam.
+- Source functions provide already-existing facts:
+  master status, local projection, peer status, durable status, and residue.
+- `Collect` returns a partial report plus a joined source error when one input
+  source fails, preserving useful evidence without hiding collection failure.
+- The collector does not start product processes, contact authority paths, or
+  mutate lifecycle/storage/frontend state.
 
 ## Workstream B: Runner Evidence Artifact
 
