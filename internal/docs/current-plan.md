@@ -111,7 +111,7 @@ In scope:
 Required TestOps support for closing the loop:
 
 - simple control data for the shared M01/M02 lab,
-- active run record with run id, scenario, state, current phase, artifact dir,
+- active run record with run id, scenario, state, artifact dir,
   product/runner commit, target nodes, ports if known, and updated timestamp,
 - resource-group lock metadata for tests that share global lab resources such
   as `node:m02`, `iscsi:m02`, `nvme:m02`, or `k3s:m02`,
@@ -121,7 +121,8 @@ Required TestOps support for closing the loop:
   - which build is running,
   - which resources it owns,
   - where artifacts are,
-  - whether the run is stale.
+  - whether a run may be stale because an active record/lock remains after the
+    expected owner exited.
 
 Out of scope for this plan:
 
@@ -212,7 +213,7 @@ testops-control/
 The first version is not a scheduler. It is visibility and safety:
 
 - create an active record at run start,
-- update state/current phase at phase boundaries,
+- update state at start and terminal exit,
 - record artifact dir and known commit evidence,
 - refuse or clearly report conflicting resource locks,
 - release locks and move the record to history on terminal exit,
@@ -239,17 +240,23 @@ Completed:
 - Local host iSCSI/NVMe residue observation.
 - Explicit `unchecked` residue classes for process/K8s/storage paths.
 - Self-describing `ops-status-bundle.json` manifest.
+- Product-local TestOps control data:
+  - `active/<run_id>.json`,
+  - `history/<run_id>.json`,
+  - `locks/<resource>.lock`,
+  - `events.jsonl`,
+  - `sw-testops --control-list`.
+- Resource metadata for representative shared-lab iSCSI/NVMe/K8s scenarios.
+- QA validation assignment for the control-data behavior.
 - Operator guide.
 - Component and CLI TestOps gates.
 
 Remaining in this plan:
 
-1. Add minimal TestOps control data for shared lab visibility and stale-run
-   detection.
-2. Gate the control-data behavior with component tests and one QA validation
-   assignment.
-3. Run focused tests and scenario validation.
-4. Close this plan into `finished-plans/`.
+1. QA validates TestOps control-data behavior on a real/shared control
+   directory.
+2. Run focused tests and scenario validation.
+3. Close this plan into `finished-plans/`.
 
 ## Deferred Roadmap Items
 

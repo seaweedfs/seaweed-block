@@ -21,6 +21,26 @@ func TestDecodeRegistrationRejectsAuthorityShapedDriver(t *testing.T) {
 	}
 }
 
+func TestDecodeRegistrationAcceptsResourceMetadata(t *testing.T) {
+	raw := `{
+	  "schema_version":"1.0",
+	  "scenario":"resourceful",
+	  "driver":{"type":"go-test","package":"./internal/testops"},
+	  "resources":{
+	    "group":"m02-block-lab",
+	    "exclusive":["node:m02","iscsi:m02"],
+	    "ports":[3260]
+	  }
+	}`
+	reg, err := DecodeRegistration(strings.NewReader(raw))
+	if err != nil {
+		t.Fatalf("DecodeRegistration: %v", err)
+	}
+	if reg.Resources.Group != "m02-block-lab" || !containsString(reg.Resources.Exclusive, "iscsi:m02") || len(reg.Resources.Ports) != 1 || reg.Resources.Ports[0] != 3260 {
+		t.Fatalf("resources mismatch: %+v", reg.Resources)
+	}
+}
+
 func TestG15bManifestRegistrationRunsGoTestAndWritesArtifacts(t *testing.T) {
 	repoRoot := findRepoRoot(t)
 	raw, err := os.Open(registrationPath(repoRoot, "g15b-manifest.json"))

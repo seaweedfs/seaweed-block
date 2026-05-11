@@ -18,6 +18,17 @@
     "mount",
     "fio"
   ],
+  "resources": {
+    "group": "m02-block-lab",
+    "exclusive": [
+      "node:m02",
+      "iscsi:m02",
+      "k3s:m02"
+    ],
+    "ports": [
+      3260
+    ]
+  },
   "scenario_default_params": {
     "SW_BLOCK_P8_OS_ITERATIONS": "2",
     "SW_BLOCK_P8_OS_FIO_RUNTIME": "120",

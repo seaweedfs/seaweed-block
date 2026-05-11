@@ -21,6 +21,13 @@ type Registration struct {
 	Artifacts             []string          `json:"artifacts,omitempty"`
 	NonClaims             []string          `json:"non_claims,omitempty"`
 	ScenarioDefaultParams map[string]string `json:"scenario_default_params,omitempty"`
+	Resources             ResourceSpec      `json:"resources,omitempty"`
+}
+
+type ResourceSpec struct {
+	Group     string   `json:"group,omitempty"`
+	Exclusive []string `json:"exclusive,omitempty"`
+	Ports     []int    `json:"ports,omitempty"`
 }
 
 type DriverSpec struct {
