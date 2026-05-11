@@ -139,6 +139,82 @@ func TestVolumeStatusReportCollector_ReturnsPartialReportWithSourceErrors(t *tes
 	}
 }
 
+func TestVolumeStatusReportCollector_ReturnedReplicaDurableReadyButFrontendFenced(t *testing.T) {
+	report, err := VolumeStatusReportCollector{
+		Now:             func() time.Time { return time.Date(2026, 5, 11, 22, 30, 0, 0, time.UTC) },
+		Source:          ReportSource{Component: "collector-test", Scenario: "returned-replica"},
+		ProductRevision: "product-rev",
+		MasterStatus: func(context.Context) (*control.StatusResponse, error) {
+			return &control.StatusResponse{
+				VolumeId:        "v1",
+				ReplicaId:       "r1",
+				Epoch:           12,
+				EndpointVersion: 9,
+				Assigned:        true,
+				Frontends: []*control.FrontendTarget{
+					{Protocol: "iscsi", Addr: "127.0.0.1:3260", Iqn: "iqn.2026-05.io.seaweedfs:v1", Lun: 0},
+				},
+			}, nil
+		},
+		LocalStatus: func(context.Context) (*hostvolume.StatusProjection, error) {
+			return &hostvolume.StatusProjection{
+				Projection: frontend.Projection{
+					VolumeID:        "v1",
+					ReplicaID:       "r2",
+					Epoch:           12,
+					EndpointVersion: 9,
+					Healthy:         false,
+				},
+				FrontendPrimaryReady: false,
+				AuthorityRole:        hostvolume.AuthorityRoleUnknown,
+				ReplicationRole:      hostvolume.ReplicationRoleReady,
+			}, nil
+		},
+		Durable: func(context.Context) ([]durable.VolumeStatus, error) {
+			return []durable.VolumeStatus{{
+				VolumeID:        "v1",
+				Impl:            "smartwal",
+				Path:            "/var/lib/sw-block/v1.blk",
+				ReplicaID:       "r2",
+				Epoch:           12,
+				EndpointVersion: 9,
+				Latched:         true,
+				Operational:     true,
+				Evidence:        "returned replica recovered durable frontier",
+			}}, nil
+		},
+	}.Collect(context.Background())
+
+	if err != nil {
+		t.Fatalf("collect: %v", err)
+	}
+	if report.Volume.VolumeID != "v1" || report.Volume.ReplicaID != "r2" {
+		t.Fatalf("returned replica identity mismatch: %+v", report.Volume)
+	}
+	if report.Authority.AuthorityRole != hostvolume.AuthorityRoleUnknown {
+		t.Fatalf("authority role=%q want %q", report.Authority.AuthorityRole, hostvolume.AuthorityRoleUnknown)
+	}
+	if report.Authority.FrontendPrimaryReady || report.Authority.Healthy {
+		t.Fatalf("returned replica must remain frontend-fenced: %+v", report.Authority)
+	}
+	if report.Replication.ReplicationRole != hostvolume.ReplicationRoleReady {
+		t.Fatalf("replication role=%q want %q", report.Replication.ReplicationRole, hostvolume.ReplicationRoleReady)
+	}
+	if len(report.Durable) != 1 {
+		t.Fatalf("durable entries=%d want 1", len(report.Durable))
+	}
+	gotDurable := report.Durable[0]
+	if gotDurable.ReplicaID != "r2" || gotDurable.Epoch != 12 || gotDurable.EndpointVersion != 9 {
+		t.Fatalf("durable lineage mismatch: %+v", gotDurable)
+	}
+	if !gotDurable.Latched || !gotDurable.Operational || gotDurable.Closed {
+		t.Fatalf("durable readiness mismatch: %+v", gotDurable)
+	}
+	if len(report.Volume.Frontends) != 1 || report.Volume.Frontends[0].LUN != 0 {
+		t.Fatalf("frontend facts should remain visible for evidence: %+v", report.Volume.Frontends)
+	}
+}
+
 func TestVolumeStatusReportCollector_NilSourcesProduceUnavailableReport(t *testing.T) {
 	report, err := VolumeStatusReportCollector{
 		Now: func() time.Time { return time.Date(2026, 5, 11, 22, 0, 0, 0, time.UTC) },

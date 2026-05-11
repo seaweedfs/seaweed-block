@@ -52,7 +52,7 @@ phases:
       - action: exec
         node: m02
         timeout: 3m
-        cmd: "cd {{ product_root }} && bash -o pipefail -c 'SW_BLOCK_OPS_STATUS_REPORT_OUT=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-ops-volume-status-report/volume-status-report.json go test -count=1 -json -run \"^(TestBuildVolumeStatusReport_(ComposesExistingStatusSurfaces|JSONKeepsZeroValuedFrontendIdentity|JSONSchemaShapeIsStable|UsesMasterFrontendFacts|MarksUnavailableInputsExplicitly|CopiesInputSlices|WritesSampleReportArtifact)|TestVolumeStatusReportCollector_(CollectsInjectedReadOnlySources|ReturnsPartialReportWithSourceErrors|NilSourcesProduceUnavailableReport))$\" ./core/ops | tee /mnt/smb/work/share/g15d-k8s/{{ run_id }}-ops-volume-status-report/report-component-go-test.jsonl'"
+        cmd: "cd {{ product_root }} && bash -o pipefail -c 'SW_BLOCK_OPS_STATUS_REPORT_OUT=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-ops-volume-status-report/volume-status-report.json go test -count=1 -json -run \"^(TestBuildVolumeStatusReport_(ComposesExistingStatusSurfaces|JSONKeepsZeroValuedFrontendIdentity|JSONSchemaShapeIsStable|UsesMasterFrontendFacts|MarksUnavailableInputsExplicitly|CopiesInputSlices|WritesSampleReportArtifact)|TestVolumeStatusReportCollector_(CollectsInjectedReadOnlySources|ReturnsPartialReportWithSourceErrors|ReturnedReplicaDurableReadyButFrontendFenced|NilSourcesProduceUnavailableReport))$\" ./core/ops | tee /mnt/smb/work/share/g15d-k8s/{{ run_id }}-ops-volume-status-report/report-component-go-test.jsonl'"
       - action: grep_log
         node: m02
         path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-ops-volume-status-report/report-component-go-test.jsonl"
@@ -124,6 +124,14 @@ phases:
         save_as: report_collector_partial_count
       - action: assert_greater
         actual: "{{ report_collector_partial_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-ops-volume-status-report/report-component-go-test.jsonl"
+        pattern: "\"Action\":\"pass\".*\"Test\":\"TestVolumeStatusReportCollector_ReturnedReplicaDurableReadyButFrontendFenced\""
+        save_as: report_collector_returned_count
+      - action: assert_greater
+        actual: "{{ report_collector_returned_count }}"
         threshold: "0"
       - action: grep_log
         node: m02
