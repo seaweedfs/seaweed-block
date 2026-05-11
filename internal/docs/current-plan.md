@@ -123,6 +123,26 @@ First delivery:
   `go test -tags subprocess ./cmd/blockvolume -run 'TestISCSI_L2DurableRestartReconnect_PreservesData|TestG8B_L2PrimaryKill_NewPrimaryReadsAcknowledgedISCSIWrite|TestG15a_BlockvolumeReportsFrontendTargetsToMasterStatus' -count=1`
 - Result: PASS in `52.344s`.
 
+Second delivery:
+
+- Added `TestISCSI_L2DurableRestartReconnect_RepeatedCycles`.
+- Layer: subprocess L2, no Kubernetes, no OS initiator.
+- Path:
+  - start single-slot product stack,
+  - connect over iSCSI,
+  - write a distinct 4 KiB LBA,
+  - read all prior LBAs,
+  - logout,
+  - restart `blockvolume` with the same durable root and iSCSI address,
+  - repeat for three cycles,
+  - final reconnect verifies every written LBA.
+- Targeted run:
+  `go test -tags subprocess ./cmd/blockvolume -run TestISCSI_L2DurableRestartReconnect_RepeatedCycles -count=1 -v`
+- Result: PASS in `29.08s`.
+- Restart pack run:
+  `go test -tags subprocess ./cmd/blockvolume -run 'TestISCSI_L2DurableRestartReconnect_(PreservesData|RepeatedCycles)' -count=1 -v`
+- Result: PASS in `46.552s`.
+
 ## Workstream B: Existing Gate Hygiene
 
 Purpose: keep the expensive gates useful but not overused.

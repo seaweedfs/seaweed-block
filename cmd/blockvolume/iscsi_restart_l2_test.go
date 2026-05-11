@@ -5,6 +5,7 @@ package main_test
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -71,6 +72,78 @@ func TestISCSI_L2DurableRestartReconnect_PreservesData(t *testing.T) {
 	c2.close(t)
 	if !bytes.Equal(got, payload) {
 		t.Fatalf("read after blockvolume durable restart mismatch: got prefix=%x want prefix=%x", got[:32], payload[:32])
+	}
+}
+
+func TestISCSI_L2DurableRestartReconnect_RepeatedCycles(t *testing.T) {
+	if testing.Short() {
+		t.Skip("L2 subprocess durable restart cycle test; -short skip")
+	}
+	bins := buildG54Binaries(t)
+	art := t.TempDir()
+
+	_, masterAddr := startSingleSlotMaster(t, bins, art)
+
+	iqn := "iqn.2026-05.example.restart-cycles:v1"
+	store := filepath.Join(art, "r1-store")
+	dataAddr, ctrlAddr := pickAddr(t), pickAddr(t)
+	statusAddr, iscsiAddr := pickAddr(t), pickAddr(t)
+
+	var r1 *proc
+	start := func(tag string) {
+		t.Helper()
+		r1 = startG54Volume(t, bins, art, volOpts{
+			masterAddr:  masterAddr,
+			serverID:    "s1",
+			replicaID:   "r1",
+			dataAddr:    dataAddr,
+			ctrlAddr:    ctrlAddr,
+			statusAddr:  statusAddr,
+			iscsiAddr:   iscsiAddr,
+			iscsiIQN:    iqn,
+			durableRoot: store,
+			logTag:      tag,
+		})
+		waitHealthyReplica(t, statusAddr, "r1", 10*time.Second)
+	}
+	stop := func() {
+		t.Helper()
+		r1.stop(t)
+		time.Sleep(500 * time.Millisecond)
+	}
+
+	start("iscsi-restart-cycle-0")
+	const durableBlockSize = 4096
+	writes := make(map[uint32][]byte)
+	for cycle := 0; cycle < 3; cycle++ {
+		lba := uint32(20 + cycle)
+		payload := bytes.Repeat([]byte{byte(0x70 + cycle)}, durableBlockSize)
+		copy(payload, []byte("iscsi-durable-restart-repeated-cycle"))
+		payload[len(payload)-1] = byte(cycle)
+
+		cli := dialG8Iscsi(t, iscsiAddr, iqn)
+		cli.write10(t, lba, payload)
+		for priorLBA, want := range writes {
+			got := cli.read10(t, priorLBA, 1, durableBlockSize)
+			if !bytes.Equal(got, want) {
+				cli.close(t)
+				t.Fatalf("cycle %d prior LBA %d mismatch: got prefix=%x want prefix=%x", cycle, priorLBA, got[:32], want[:32])
+			}
+		}
+		cli.close(t)
+
+		writes[lba] = payload
+		stop()
+		start(fmt.Sprintf("iscsi-restart-cycle-%d", cycle+1))
+	}
+
+	cli := dialG8Iscsi(t, iscsiAddr, iqn)
+	defer cli.close(t)
+	for lba, want := range writes {
+		got := cli.read10(t, lba, 1, durableBlockSize)
+		if !bytes.Equal(got, want) {
+			t.Fatalf("final LBA %d mismatch: got prefix=%x want prefix=%x", lba, got[:32], want[:32])
+		}
 	}
 }
 
