@@ -129,6 +129,25 @@ Developer default:
 
 Purpose: avoid speculative rewrites by comparing only the failing behavior.
 
+Status: no new V2 port is required for the current closure.
+
+Decision:
+
+- The Linux OS-initiator gate is green with the current V3 protocol executor.
+- The existing V2 comparison docs already identify the historical deltas:
+  Data-Out collection, bounded pending queue, Data-Out timeout, and multi-PDU
+  Data-In.
+- Those deltas are already implemented/tested in the current V3 track or are
+  classified as future component stress coverage.
+- Because there is no current red OS-initiator behavior, do not port broader V2
+  session/txLoop architecture in this plan.
+
+Forward carry:
+
+- If a future OS or soak failure shows `expected Data-Out`, CmdSN/window,
+  StatSN, or Data-In segmentation symptoms, reduce that failure to a focused
+  component test first and compare that exact state transition against V2.
+
 Tasks:
 
 - Inspect V2 iSCSI handling for the specific failing path.
@@ -166,6 +185,22 @@ the OS gate once.
 ## Workstream D: Final Gate And Non-Claims
 
 Purpose: produce product-facing evidence without overclaiming.
+
+Status: Linux evidence is present; Windows evidence is assigned to QA.
+
+QA assignment:
+
+- `internal/docs/qa-assignments/iscsi-os-windows-initiator-validation.md`
+
+Support added:
+
+- `scripts/run-iscsi-os-smoke.sh` now supports external initiators with:
+  - `SW_BLOCK_ISCSI_LISTEN_HOST`,
+  - `SW_BLOCK_ISCSI_INITIATOR_PORTAL_ADDR`,
+  - `SW_BLOCK_ISCSI_TARGET_ONLY=1`,
+  - `SW_BLOCK_ISCSI_TARGET_HOLD_SECONDS`.
+- This keeps the Linux gate unchanged while allowing QA to hold a V3 target on
+  m02 and drive it from the Windows built-in iSCSI Initiator.
 
 Final pass must state:
 
