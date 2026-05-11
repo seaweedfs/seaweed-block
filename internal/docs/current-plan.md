@@ -163,7 +163,7 @@ The output directory should contain:
 - `volume-status-summary.txt`,
 - `ops-status-bundle.json`.
 
-`ops-status-bundle.json` is the remaining close-loop item. It should record:
+`ops-status-bundle.json` records:
 
 - schema version,
 - command name,
@@ -238,20 +238,18 @@ Completed:
 - `sw-block ops status` command.
 - Local host iSCSI/NVMe residue observation.
 - Explicit `unchecked` residue classes for process/K8s/storage paths.
+- Self-describing `ops-status-bundle.json` manifest.
 - Operator guide.
 - Component and CLI TestOps gates.
 
 Remaining in this plan:
 
-1. Add `ops-status-bundle.json`.
-2. Gate the bundle metadata in `operations-volume-status-cli-gate`.
-3. Update operator guide with the bundle workflow.
-4. Add minimal TestOps control data for shared lab visibility and stale-run
+1. Add minimal TestOps control data for shared lab visibility and stale-run
    detection.
-5. Gate the control-data behavior with component tests and one QA validation
+2. Gate the control-data behavior with component tests and one QA validation
    assignment.
-6. Run focused tests and scenario validation.
-7. Close this plan into `finished-plans/`.
+3. Run focused tests and scenario validation.
+4. Close this plan into `finished-plans/`.
 
 ## Deferred Roadmap Items
 

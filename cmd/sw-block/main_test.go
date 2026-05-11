@@ -86,6 +86,9 @@ func TestOpsStatusWritesArtifactsAndReturnsClean(t *testing.T) {
 	if !strings.Contains(stdout.String(), "status: ok") {
 		t.Fatalf("stdout missing summary:\n%s", stdout.String())
 	}
+	if !strings.Contains(stdout.String(), ops.OpsStatusBundleArtifact) {
+		t.Fatalf("stdout missing bundle artifact:\n%s", stdout.String())
+	}
 	raw, err := os.ReadFile(filepath.Join(outDir, ops.VolumeStatusReportArtifact))
 	if err != nil {
 		t.Fatal(err)
@@ -99,6 +102,23 @@ func TestOpsStatusWritesArtifactsAndReturnsClean(t *testing.T) {
 	}
 	if len(report.CollectionErrors) != 0 {
 		t.Fatalf("unexpected collection errors: %+v", report.CollectionErrors)
+	}
+	rawBundle, err := os.ReadFile(filepath.Join(outDir, ops.OpsStatusBundleArtifact))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var bundle ops.OpsStatusBundle
+	if err := json.Unmarshal(rawBundle, &bundle); err != nil {
+		t.Fatal(err)
+	}
+	if bundle.Command != "sw-block ops status" || bundle.VolumeID != "v1" || bundle.ProductRevision != "product-rev" || bundle.RunnerRevision != "runner-rev" {
+		t.Fatalf("bundle mismatch: %+v", bundle)
+	}
+	if bundle.ExitCode != ops.VolumeStatusExitOK || bundle.Status != "ok" {
+		t.Fatalf("bundle classification mismatch: %+v", bundle)
+	}
+	if bundle.CollectionErrors == nil || bundle.Unchecked == nil || len(bundle.NonClaims) == 0 {
+		t.Fatalf("bundle should include stable arrays and non-claims: %+v", bundle)
 	}
 }
 

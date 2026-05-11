@@ -57,6 +57,32 @@ func TestWriteVolumeStatusArtifacts_WritesJSONAndSummary(t *testing.T) {
 			t.Fatalf("summary missing %q:\n%s", want, summary)
 		}
 	}
+
+	rawBundle, err := os.ReadFile(filepath.Join(dir, OpsStatusBundleArtifact))
+	if err != nil {
+		t.Fatalf("read bundle artifact: %v", err)
+	}
+	var bundle OpsStatusBundle
+	if err := json.Unmarshal(rawBundle, &bundle); err != nil {
+		t.Fatalf("decode bundle artifact: %v", err)
+	}
+	if bundle.SchemaVersion != "1.0" || bundle.Command != "sw-block ops status" || bundle.VolumeID != "v1" {
+		t.Fatalf("bundle identity mismatch: %+v", bundle)
+	}
+	if bundle.ExitCode != VolumeStatusExitOK || bundle.Status != "ok" {
+		t.Fatalf("bundle classification mismatch: %+v", bundle)
+	}
+	if !containsString(bundle.Unchecked, "processes") {
+		t.Fatalf("bundle unchecked classes missing: %+v", bundle.Unchecked)
+	}
+	if !bundleHasArtifact(bundle, VolumeStatusReportArtifact) ||
+		!bundleHasArtifact(bundle, VolumeStatusSummaryArtifact) ||
+		!bundleHasArtifact(bundle, OpsStatusBundleArtifact) {
+		t.Fatalf("bundle artifact list incomplete: %+v", bundle.Artifacts)
+	}
+	if len(bundle.NonClaims) == 0 {
+		t.Fatalf("bundle should carry explicit non-claims: %+v", bundle)
+	}
 }
 
 func TestWriteVolumeStatusArtifacts_PreservesPartialReportOnCollectionError(t *testing.T) {
@@ -96,6 +122,20 @@ func TestWriteVolumeStatusArtifacts_PreservesPartialReportOnCollectionError(t *t
 	}
 	if !strings.Contains(string(rawSummary), "collection_error: collect master status: master temporarily unavailable") {
 		t.Fatalf("summary should include collection error:\n%s", rawSummary)
+	}
+	rawBundle, err := os.ReadFile(filepath.Join(dir, OpsStatusBundleArtifact))
+	if err != nil {
+		t.Fatalf("partial bundle artifact missing: %v", err)
+	}
+	var bundle OpsStatusBundle
+	if err := json.Unmarshal(rawBundle, &bundle); err != nil {
+		t.Fatalf("decode partial bundle artifact: %v", err)
+	}
+	if bundle.ExitCode != VolumeStatusExitUnhealthy || bundle.Status != "unhealthy" {
+		t.Fatalf("partial bundle classification mismatch: %+v", bundle)
+	}
+	if len(bundle.CollectionErrors) != 1 || !strings.Contains(bundle.CollectionErrors[0], "collect master status: master temporarily unavailable") {
+		t.Fatalf("partial bundle collection errors missing source failure: %+v", bundle.CollectionErrors)
 	}
 }
 
@@ -189,7 +229,17 @@ func artifactTestCollector(masterErr error) VolumeStatusReportCollector {
 				Processes:    []string{},
 				Kubernetes:   []string{},
 				StoragePaths: []string{},
+				Unchecked:    []string{"processes"},
 			}, nil
 		},
 	}
+}
+
+func bundleHasArtifact(bundle OpsStatusBundle, name string) bool {
+	for _, artifact := range bundle.Artifacts {
+		if artifact.Name == name {
+			return true
+		}
+	}
+	return false
 }

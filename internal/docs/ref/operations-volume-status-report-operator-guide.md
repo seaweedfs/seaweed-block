@@ -49,8 +49,15 @@ The command writes:
 
 - `volume-status-report.json`
 - `volume-status-summary.txt`
+- `ops-status-bundle.json`
 
 It also prints the human-readable summary to stdout.
+
+`ops-status-bundle.json` is the top-level support-bundle manifest. It records
+the command name, captured time, volume id, product/runner revisions, exit
+classification, artifact list, unchecked residue classes, collection errors,
+and non-claims. Attach the whole output directory to an issue; start triage from
+the bundle manifest and summary, then inspect the raw report only when needed.
 
 Exit codes:
 

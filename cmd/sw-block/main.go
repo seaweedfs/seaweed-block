@@ -55,7 +55,7 @@ func runOpsStatus(args []string, stdout, stderr io.Writer) int {
 	fs.StringVar(&volumeID, "volume", "", "volume id to inspect")
 	fs.StringVar(&masterAddr, "master", "", "blockmaster gRPC address for read-only QueryVolumeStatus")
 	fs.StringVar(&statusAddr, "status-addr", "", "blockvolume loopback status address or URL")
-	fs.StringVar(&outDir, "out", "", "directory for volume-status-report.json and volume-status-summary.txt")
+	fs.StringVar(&outDir, "out", "", "directory for volume-status-report.json, volume-status-summary.txt, and ops-status-bundle.json")
 	fs.StringVar(&productRevision, "product-revision", "", "product revision label to include in the report")
 	fs.StringVar(&runnerRevision, "runner-revision", "", "runner revision label to include in the report")
 	fs.DurationVar(&timeout, "timeout", 5*time.Second, "collection timeout")
@@ -90,7 +90,7 @@ func runOpsStatus(args []string, stdout, stderr io.Writer) int {
 	}
 	fmt.Fprint(stdout, ops.RenderVolumeStatusSummary(report))
 	if code != ops.VolumeStatusExitInvalid {
-		fmt.Fprintf(stdout, "artifacts: %s %s\n", ops.VolumeStatusReportArtifact, ops.VolumeStatusSummaryArtifact)
+		fmt.Fprintf(stdout, "artifacts: %s %s %s\n", ops.VolumeStatusReportArtifact, ops.VolumeStatusSummaryArtifact, ops.OpsStatusBundleArtifact)
 	}
 	return code
 }

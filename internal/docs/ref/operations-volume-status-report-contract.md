@@ -183,6 +183,43 @@ Residue is diagnostic and should not trigger destructive action by itself.
 - A future `force_detach` or cleanup command must not be built only on this
   report. It needs fencing semantics and a separate admin protocol.
 
+## Support Bundle Manifest
+
+`sw-block ops status` writes a small manifest beside the report:
+
+```text
+ops-status-bundle.json
+```
+
+The manifest makes the output directory self-describing for issue reports and
+QA artifacts. It is not the source of truth for volume state; it points to the
+state report and records how the bundle was produced.
+
+Required fields:
+
+- `schema_version`
+- `command`
+- `captured_at`
+- `volume_id`
+- `product_revision`
+- `runner_revision`, when available
+- `exit_code`
+- `status`
+  - `ok`
+  - `unhealthy`
+  - `invalid`
+- `artifacts`
+  - `volume-status-report.json`
+  - `volume-status-summary.txt`
+  - `ops-status-bundle.json`
+- `unchecked`
+  - residue classes not collected by this command invocation
+- `collection_errors`
+  - source collection failures, if any
+- `non_claims`
+  - explicit reminders that the bundle is read-only evidence, not a repair or
+    block-data snapshot.
+
 ## Non-Claims
 
 - This is not a block/data snapshot.
