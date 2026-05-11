@@ -79,11 +79,11 @@ This is the short internal roadmap. Keep it current and readable.
 
 ### Track B: iSCSI Frontend Stability
 
-- Current: Linux OS initiator correctness is runner-gated with mkfs, mount,
-  checksum, fio, cleanup, and dmesg-delta evidence. Windows built-in Initiator
-  validation is pending through a loopback target plus SSH tunnel.
-- Next: close or explicitly defer Windows, then move remaining iSCSI work to
-  component-first session/backend pressure tests instead of broad V2 porting.
+- Current: Linux/open-iscsi and Windows 11 built-in Initiator correctness are
+  validated for the current alpha claim. Evidence includes mkfs/NTFS format,
+  checksum write/read, cleanup, and Linux dmesg-delta checks.
+- Next: move remaining iSCSI work to component-first session/backend pressure
+  tests instead of broad V2 porting.
 - Later: larger compatibility coverage across host distros and initiator
   versions.
 

@@ -1,7 +1,8 @@
 # Current Plan: iSCSI OS-Initiator Compatibility Closure
 
-Status: active. Started after closing
+Status: closed. Started after closing
 `finished-plans/phase5_finishedplan_read_only_operations_status_report.md` on
+2026-05-11. Closed after Linux and Windows OS initiator validation on
 2026-05-11.
 
 Archive target after closure:
@@ -193,11 +194,50 @@ the OS gate once.
 
 Purpose: produce product-facing evidence without overclaiming.
 
-Status: Linux evidence is present; Windows evidence is assigned to QA.
+Status: Linux and Windows evidence are present.
 
 QA assignment:
 
 - `internal/docs/qa-assignments/iscsi-os-windows-initiator-validation.md`
+
+Windows QA evidence:
+
+- Result: PASS.
+- Product commit on m02: `9e8ffab`.
+- Windows host: Windows 11 Pro (`PING-R13`).
+- m02 kernel: `6.17.0-19-generic`, Ubuntu 24.04.3 LTS.
+- Target artifact:
+  `/mnt/smb/work/share/g15d-k8s/20260511T085158Z-iscsi-windows-target/`.
+- Target-only mode printed in `run.log`.
+- `target-ready.env` had `SW_BLOCK_ISCSI_TARGET_READY=1`, IQN, and portal.
+- `blockvolume.log` had iSCSI listener and no startup error.
+- Windows discovered the target IQN and connected with
+  `IsConnected=True`, `NumberOfConnections=1`.
+- Exactly one new iSCSI disk came online.
+- NTFS format succeeded: 240 MiB NTFS on `S:`.
+- 4 MiB write/copy/read checksum matched.
+- Disconnect succeeded.
+- Target self-exited at hold window and cleaned up.
+- `Get-IscsiSession` was empty after cleanup.
+- m02 `pgrep` showed no lingering `blockmaster` or `blockvolume`.
+
+Windows claim:
+
+```text
+Windows 11 Pro built-in iSCSI Initiator can discover, connect to, format NTFS,
+write/read with byte-exact checksum, and cleanly disconnect from a V3 iSCSI
+target at commit 9e8ffab over an SSH local-forward tunnel to a loopback-bound
+m02 target.
+```
+
+Windows non-claims:
+
+- Not performance.
+- Not MPIO.
+- Not CHAP.
+- Not failover.
+- Not a Windows Server matrix.
+- Tested with a 4 MiB single-file round trip.
 
 Support added:
 
@@ -231,10 +271,10 @@ Final pass must state:
 Close checklist:
 
 - If QA Windows validation passes:
-  - record the Windows run evidence in this plan,
+  - record the Windows run evidence in this plan. Done.
   - archive this file as
-    `internal/docs/finished-plans/phase6_finishedplan_iscsi_os_initiator_compatibility.md`,
-  - update `product-management-plan.md` from pending to closed,
+    `internal/docs/finished-plans/phase6_finishedplan_iscsi_os_initiator_compatibility.md`. Done.
+  - update `product-management-plan.md` from pending to closed. Done.
   - keep future iSCSI session/backend pressure work under a new plan.
 - If QA Windows validation fails:
   - keep this plan active,

@@ -1,8 +1,7 @@
-# Finished Plan Draft: iSCSI OS-Initiator Compatibility
+# Finished Plan: iSCSI OS-Initiator Compatibility
 
-Status: draft, not closed. This file is staged as the eventual archive for
-`../current-plan.md` after Windows validation either passes or is explicitly
-deferred.
+Status: historical reference. Closed on 2026-05-11 after both Linux/open-iscsi
+and Windows built-in iSCSI Initiator validation passed.
 
 Current work remains tracked in `../current-plan.md`.
 
@@ -25,7 +24,7 @@ upgrade safety, or production readiness.
 | Gate | Status | Evidence |
 | --- | --- | --- |
 | Linux open-iscsi OS initiator | PASS | `iscsi-os-initiator-compat-chain`, run `20260511-014714-eca5`, product `9e8ffab` |
-| Windows built-in iSCSI Initiator | Pending QA | `../qa-assignments/iscsi-os-windows-initiator-validation.md` |
+| Windows built-in iSCSI Initiator | PASS | Target artifact `/mnt/smb/work/share/g15d-k8s/20260511T085158Z-iscsi-windows-target/`, product `9e8ffab` |
 | External target hold mode | PASS | m02 target-only startup emitted `target-ready.env` at product `9e8ffab` |
 | V2 comparison decision | Done | No broad V2 port while Linux OS gate is green; future failures reduce to focused component tests |
 
@@ -66,22 +65,57 @@ Artifact claims:
 
 ## Windows Evidence
 
-Pending QA.
+QA result: PASS.
 
-Expected validation shape:
+Environment:
 
-- Hold a V3 iSCSI target on m02 in target-only mode.
-- Keep the target loopback-only.
-- Use SSH local port-forward from Windows to m02.
-- Use Windows built-in iSCSI Initiator to discover/connect.
-- Initialize/format NTFS.
-- Write/read checksum.
-- Disconnect and verify no session/process residue.
+- Product commit on m02: `9e8ffab`.
+- Windows host: Windows 11 Pro (`PING-R13`).
+- m02 kernel: `6.17.0-19-generic`, Ubuntu 24.04.3 LTS.
+- Target artifact:
+  `/mnt/smb/work/share/g15d-k8s/20260511T085158Z-iscsi-windows-target/`.
 
-If this passes, update this section with run ID, host version, target artifact
-path, and cleanup evidence. If it fails, do not close this plan; classify the
-first failing point and add a fast component/protocol regression before another
-long validation loop.
+Validation shape:
+
+- Held a V3 iSCSI target on m02 in target-only mode.
+- Kept the target loopback-only.
+- Used SSH local port-forward from Windows to m02.
+- Used Windows built-in iSCSI Initiator to discover/connect.
+- Initialized/formatted NTFS.
+- Wrote, copied, and read back a 4 MiB payload with byte-exact checksum.
+- Disconnected and verified no session/process residue.
+
+Evidence:
+
+- `run.log`: target-only mode, portal `127.0.0.1:36260`, hold complete,
+  cleanup.
+- `target-ready.env`: `SW_BLOCK_ISCSI_TARGET_READY=1`, IQN, portal.
+- `blockvolume.log`: iSCSI listener and per-LBA durable write dispatches during
+  NTFS journal and payload/copy writes.
+- Windows: target IQN discovered; connect succeeded with `IsConnected=True`,
+  `NumberOfConnections=1`.
+- Windows: exactly one new iSCSI disk online.
+- Windows: NTFS format succeeded, 240 MiB on `S:`.
+- Windows: 4 MiB write/copy/read checksum matched.
+- Windows: disconnect succeeded; `Get-IscsiSession` empty after cleanup.
+- m02: target self-exited at hold window; no lingering `blockmaster` or
+  `blockvolume`.
+
+Claim:
+
+```text
+Windows 11 Pro built-in iSCSI Initiator can discover, connect to, format NTFS,
+write/read with byte-exact checksum, and cleanly disconnect from a V3 iSCSI
+target at commit 9e8ffab over an SSH local-forward tunnel to a loopback-bound
+m02 target.
+```
+
+QA found two documentation portability issues and the assignment was corrected:
+
+- PowerShell 5.1 lacks static `RandomNumberGenerator.Fill`; use
+  `RNGCryptoServiceProvider.GetBytes`.
+- `Remove-IscsiTargetPortal -TargetPortalPortNumber` needs a `[UInt16]` cast on
+  PowerShell 5.1.
 
 ## Harness Changes
 

@@ -92,7 +92,9 @@ Format-Volume -DriveLetter $Mount -FileSystem NTFS -Confirm:$false
 $path = "${Mount}:\payload.bin"
 $copy = "${Mount}:\payload.copy.bin"
 $bytes = New-Object byte[] (4MB)
-[System.Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
+$rng = [System.Security.Cryptography.RNGCryptoServiceProvider]::Create()
+$rng.GetBytes($bytes)
+$rng.Dispose()
 [IO.File]::WriteAllBytes($path, $bytes)
 Copy-Item $path $copy
 $h1 = (Get-FileHash $path -Algorithm SHA256).Hash
@@ -102,7 +104,7 @@ if ($h1 -ne $h2) { throw "checksum mismatch" }
 Remove-Item $path, $copy -Force
 Remove-Partition -DriveLetter $Mount -Confirm:$false
 Disconnect-IscsiTarget -NodeAddress $IQN -Confirm:$false
-Remove-IscsiTargetPortal -TargetPortalAddress $Portal -TargetPortalPortNumber $Port -Confirm:$false
+Remove-IscsiTargetPortal -TargetPortalAddress $Portal -TargetPortalPortNumber ([UInt16]$Port) -Confirm:$false
 ```
 
 ## Expected Result
