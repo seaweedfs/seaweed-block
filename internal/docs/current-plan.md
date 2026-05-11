@@ -39,6 +39,19 @@ Closed phase 4 evidence:
   - result: PASS,
   - wall clock: `1.081s`,
   - bundle collected.
+- `operations-volume-status-report-component-gate` after adding collected JSON
+  artifact:
+  - run id:
+    `20260510-233106-cfb9`,
+  - product commit:
+    `569855f`,
+  - result: PASS,
+  - wall clock: `1.201s`,
+  - collected artifact:
+    `volume-status-report.json`,
+  - field gates:
+    `schema_version=1.0`, `volume_id=v1`, `lun=0`, and
+    `last_error=unavailable`.
 - `swblock validate` passes for all scenario YAMLs.
 
 Relevant references:
@@ -105,6 +118,13 @@ Target shape:
 
 This remains a fast gate. It should stay seconds-scale and should not require
 k3s, kernel initiators, or product process startup.
+
+Implementation status:
+
+- `operations-volume-status-report-component-gate` now emits
+  `volume-status-report.json`.
+- The gate validates the artifact directly, not only `go test` output.
+- The artifact is collected under `remote-phases.tgz` for the run bundle.
 
 ## Workstream C: Schema Boundary Hardening
 
