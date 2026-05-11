@@ -134,6 +134,30 @@ Milestone gate only if needed:
   - This still does not open network connections or collect from a live
     blockvolume/master. Live source wiring is the next slice.
 
+2026-05-11 live-source slice:
+
+- Added `cmd/sw-block` with:
+  - `sw-block --version`
+  - `sw-block ops status --volume <id> --master <addr> --status-addr <addr|url>
+    --out <dir>`
+- Added live read-only sources for:
+  - blockmaster `EvidenceService.QueryVolumeStatus`,
+  - blockvolume `/status`,
+  - blockvolume `/status/peers`,
+  - blockvolume `/status/durable`.
+- The command writes the report/summary artifact pair and prints the summary to
+  stdout.
+- The first command version requires both `--master` and `--status-addr` so a
+  clean exit does not hide missing master or local blockvolume evidence.
+- Host/Kubernetes residue collection is intentionally marked incomplete in the
+  live command path; the command records this as `collection_errors` and returns
+  `1` until residue collection is wired.
+- Validation:
+  - `go test ./core/ops ./cmd/sw-block ./cmd/sw-testops -count=1`
+- Non-claim:
+  - This is still diagnostic-only. It does not mutate volume state, perform
+    cleanup, replace TestOps, or provide a web UI/operator.
+
 ## Delivery Gate
 
 This plan is complete when:

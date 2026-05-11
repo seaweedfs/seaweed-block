@@ -151,7 +151,7 @@ PVC is deleted.
 ## Repository layout
 
 ```text
-cmd/        command entry points (blockmaster, blockvolume, blockcsi)
+cmd/        command entry points (blockmaster, blockvolume, blockcsi, sw-block)
 core/       core storage logic (authority, csi, host, lifecycle, recovery, replication)
 internal/   non-public packages and TestOps registry
 deploy/     Kubernetes manifests
