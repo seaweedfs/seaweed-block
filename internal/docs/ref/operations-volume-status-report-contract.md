@@ -1,7 +1,10 @@
-# Operations Contract: Volume Status Snapshot
+# Operations Contract: Volume Status Report
 
 Status: selected first operations-layer contract. This is a contract target for
-the next active plan, not an operator implementation.
+the active plan, not an operator implementation.
+
+This is an observability/status report. It is not a V2-style block/data
+snapshot, clone, backup, rollback point, or data-preservation feature.
 
 ## Purpose
 
@@ -73,7 +76,7 @@ Current product surfaces:
   - K8s resource state,
   - cleanup actions.
 
-## Snapshot Shape
+## Report Shape
 
 The contract should produce an append-only JSON object with these sections.
 
@@ -170,17 +173,20 @@ Residue is diagnostic and should not trigger destructive action by itself.
 
 ## Safety Rules
 
-- Snapshot is read-only.
-- Snapshot must not mutate authority, lifecycle, storage, sessions, or K8s.
-- Snapshot must be append-only; new fields are allowed, existing field meaning
-  is not.
+- Report generation is read-only.
+- Report generation must not mutate authority, lifecycle, storage, sessions, or
+  K8s.
+- Report schema must be append-only; new fields are allowed, existing field
+  meaning is not.
 - Missing optional inputs must be represented explicitly as unavailable, not
   silently omitted.
 - A future `force_detach` or cleanup command must not be built only on this
-  snapshot. It needs fencing semantics and a separate admin protocol.
+  report. It needs fencing semantics and a separate admin protocol.
 
 ## Non-Claims
 
+- This is not a block/data snapshot.
+- This is not a clone, backup, rollback, or restore feature.
 - This is not an operator.
 - This is not a production API.
 - This does not authorize force detach.
@@ -190,8 +196,8 @@ Residue is diagnostic and should not trigger destructive action by itself.
 
 ## First Implementation Target
 
-For the next plan, start with a component-level collector that can assemble the
-snapshot from existing in-process/status-test data:
+Start with a component-level collector that can assemble the report from
+existing in-process/status-test data:
 
 - status projection,
 - durable status,

@@ -12,17 +12,18 @@ import (
 )
 
 const (
-	// VolumeStatusSnapshotSchemaVersion is the first append-only ops snapshot
-	// contract. The snapshot is read-only evidence, not an admin command input.
-	VolumeStatusSnapshotSchemaVersion = "1.0"
-	Unavailable                       = "unavailable"
+	// VolumeStatusReportSchemaVersion is the first append-only ops status
+	// report contract. The report is read-only evidence, not an admin command
+	// input and not a block/data snapshot.
+	VolumeStatusReportSchemaVersion = "1.0"
+	Unavailable                     = "unavailable"
 )
 
-// VolumeStatusSnapshotInput is the component-test seam for assembling the first
-// operations-layer volume status snapshot from existing product facts.
-type VolumeStatusSnapshotInput struct {
+// VolumeStatusReportInput is the component-test seam for assembling the first
+// operations-layer volume status report from existing product facts.
+type VolumeStatusReportInput struct {
 	CapturedAt      time.Time
-	Source          SnapshotSource
+	Source          ReportSource
 	ProductRevision string
 	RunnerRevision  string
 
@@ -30,36 +31,36 @@ type VolumeStatusSnapshotInput struct {
 	LocalStatus  *hostvolume.StatusProjection
 	Peers        []replication.ReplicaPeerStatus
 	Durable      []durable.VolumeStatus
-	Residue      ResidueSnapshot
+	Residue      ResidueReport
 }
 
-type SnapshotSource struct {
+type ReportSource struct {
 	Component string `json:"component"`
 	Host      string `json:"host,omitempty"`
 	Scenario  string `json:"scenario,omitempty"`
 }
 
-type VolumeStatusSnapshot struct {
-	SchemaVersion   string              `json:"schema_version"`
-	CapturedAt      time.Time           `json:"captured_at"`
-	Source          SnapshotSource      `json:"source"`
-	ProductRevision string              `json:"product_revision"`
-	RunnerRevision  string              `json:"runner_revision,omitempty"`
-	Volume          VolumeSnapshot      `json:"volume"`
-	Authority       AuthoritySnapshot   `json:"authority"`
-	Replication     ReplicationSnapshot `json:"replication"`
-	Durable         []DurableSnapshot   `json:"durable"`
-	Residue         ResidueSnapshot     `json:"residue"`
+type VolumeStatusReport struct {
+	SchemaVersion   string            `json:"schema_version"`
+	CapturedAt      time.Time         `json:"captured_at"`
+	Source          ReportSource      `json:"source"`
+	ProductRevision string            `json:"product_revision"`
+	RunnerRevision  string            `json:"runner_revision,omitempty"`
+	Volume          VolumeReport      `json:"volume"`
+	Authority       AuthorityReport   `json:"authority"`
+	Replication     ReplicationReport `json:"replication"`
+	Durable         []DurableReport   `json:"durable"`
+	Residue         ResidueReport     `json:"residue"`
 }
 
-type VolumeSnapshot struct {
-	VolumeID  string             `json:"volume_id"`
-	ReplicaID string             `json:"replica_id"`
-	Protocols []string           `json:"protocols"`
-	Frontends []FrontendSnapshot `json:"frontends"`
+type VolumeReport struct {
+	VolumeID  string           `json:"volume_id"`
+	ReplicaID string           `json:"replica_id"`
+	Protocols []string         `json:"protocols"`
+	Frontends []FrontendReport `json:"frontends"`
 }
 
-type FrontendSnapshot struct {
+type FrontendReport struct {
 	Protocol string `json:"protocol"`
 	Addr     string `json:"addr,omitempty"`
 	IQN      string `json:"iqn,omitempty"`
@@ -68,7 +69,7 @@ type FrontendSnapshot struct {
 	NSID     uint32 `json:"nsid"`
 }
 
-type AuthoritySnapshot struct {
+type AuthorityReport struct {
 	Epoch                  uint64 `json:"epoch"`
 	EndpointVersion        uint64 `json:"endpoint_version"`
 	Assigned               bool   `json:"assigned"`
@@ -79,12 +80,12 @@ type AuthoritySnapshot struct {
 	LastConvergenceStuckAt string `json:"last_convergence_stuck_at,omitempty"`
 }
 
-type ReplicationSnapshot struct {
-	ReplicationRole string         `json:"replication_role"`
-	Peers           []PeerSnapshot `json:"peers"`
+type ReplicationReport struct {
+	ReplicationRole string       `json:"replication_role"`
+	Peers           []PeerReport `json:"peers"`
 }
 
-type PeerSnapshot struct {
+type PeerReport struct {
 	ReplicaID       string `json:"replica_id"`
 	State           string `json:"state"`
 	DataAddr        string `json:"data_addr,omitempty"`
@@ -98,7 +99,7 @@ type PeerSnapshot struct {
 	LastError       string `json:"last_error"`
 }
 
-type DurableSnapshot struct {
+type DurableReport struct {
 	VolumeID        string `json:"volume_id"`
 	Impl            string `json:"impl"`
 	Path            string `json:"path"`
@@ -111,7 +112,7 @@ type DurableSnapshot struct {
 	Evidence        string `json:"evidence,omitempty"`
 }
 
-type ResidueSnapshot struct {
+type ResidueReport struct {
 	HostInitiator HostInitiatorResidue `json:"host_initiator"`
 	Processes     []string             `json:"processes"`
 	Kubernetes    []string             `json:"kubernetes"`
@@ -123,10 +124,10 @@ type HostInitiatorResidue struct {
 	NVMESubsystems []string `json:"nvme_subsystems"`
 }
 
-// BuildVolumeStatusSnapshot normalizes existing status surfaces into the first
+// BuildVolumeStatusReport normalizes existing status surfaces into the first
 // operations-layer JSON contract. It must not collect or mutate anything; all
 // inputs are supplied by callers/tests.
-func BuildVolumeStatusSnapshot(in VolumeStatusSnapshotInput) VolumeStatusSnapshot {
+func BuildVolumeStatusReport(in VolumeStatusReportInput) VolumeStatusReport {
 	capturedAt := in.CapturedAt
 	if capturedAt.IsZero() {
 		capturedAt = time.Now().UTC()
@@ -140,13 +141,13 @@ func BuildVolumeStatusSnapshot(in VolumeStatusSnapshotInput) VolumeStatusSnapsho
 	source := in.Source
 	source.Component = explicitUnavailable(source.Component)
 
-	return VolumeStatusSnapshot{
-		SchemaVersion:   VolumeStatusSnapshotSchemaVersion,
+	return VolumeStatusReport{
+		SchemaVersion:   VolumeStatusReportSchemaVersion,
 		CapturedAt:      capturedAt,
 		Source:          source,
 		ProductRevision: explicitUnavailable(in.ProductRevision),
 		RunnerRevision:  in.RunnerRevision,
-		Volume: VolumeSnapshot{
+		Volume: VolumeReport{
 			VolumeID:  volumeID,
 			ReplicaID: replicaID,
 			Protocols: protocols,
@@ -159,7 +160,7 @@ func BuildVolumeStatusSnapshot(in VolumeStatusSnapshotInput) VolumeStatusSnapsho
 	}
 }
 
-func volumeIdentity(in VolumeStatusSnapshotInput) (volumeID, replicaID string) {
+func volumeIdentity(in VolumeStatusReportInput) (volumeID, replicaID string) {
 	if in.LocalStatus != nil {
 		volumeID = in.LocalStatus.VolumeID
 		replicaID = in.LocalStatus.ReplicaID
@@ -179,13 +180,13 @@ func volumeIdentity(in VolumeStatusSnapshotInput) (volumeID, replicaID string) {
 	return explicitUnavailable(volumeID), explicitUnavailable(replicaID)
 }
 
-func frontendSnapshots(targets []*control.FrontendTarget) []FrontendSnapshot {
-	out := make([]FrontendSnapshot, 0, len(targets))
+func frontendSnapshots(targets []*control.FrontendTarget) []FrontendReport {
+	out := make([]FrontendReport, 0, len(targets))
 	for _, t := range targets {
 		if t == nil {
 			continue
 		}
-		out = append(out, FrontendSnapshot{
+		out = append(out, FrontendReport{
 			Protocol: t.GetProtocol(),
 			Addr:     t.GetAddr(),
 			IQN:      t.GetIqn(),
@@ -197,7 +198,7 @@ func frontendSnapshots(targets []*control.FrontendTarget) []FrontendSnapshot {
 	return out
 }
 
-func frontendProtocols(frontends []FrontendSnapshot) []string {
+func frontendProtocols(frontends []FrontendReport) []string {
 	seen := map[string]bool{}
 	for _, f := range frontends {
 		if f.Protocol == "" {
@@ -213,8 +214,8 @@ func frontendProtocols(frontends []FrontendSnapshot) []string {
 	return out
 }
 
-func authoritySnapshot(master *control.StatusResponse, local *hostvolume.StatusProjection) AuthoritySnapshot {
-	s := AuthoritySnapshot{
+func authoritySnapshot(master *control.StatusResponse, local *hostvolume.StatusProjection) AuthorityReport {
+	s := AuthorityReport{
 		AuthorityRole: Unavailable,
 	}
 	if master != nil {
@@ -234,16 +235,16 @@ func authoritySnapshot(master *control.StatusResponse, local *hostvolume.StatusP
 	return s
 }
 
-func replicationSnapshot(local *hostvolume.StatusProjection, peers []replication.ReplicaPeerStatus) ReplicationSnapshot {
-	s := ReplicationSnapshot{
+func replicationSnapshot(local *hostvolume.StatusProjection, peers []replication.ReplicaPeerStatus) ReplicationReport {
+	s := ReplicationReport{
 		ReplicationRole: Unavailable,
-		Peers:           make([]PeerSnapshot, 0, len(peers)),
+		Peers:           make([]PeerReport, 0, len(peers)),
 	}
 	if local != nil {
 		s.ReplicationRole = explicitUnavailable(local.ReplicationRole)
 	}
 	for _, p := range peers {
-		s.Peers = append(s.Peers, PeerSnapshot{
+		s.Peers = append(s.Peers, PeerReport{
 			ReplicaID:       p.ReplicaID,
 			State:           p.State,
 			DataAddr:        p.DataAddr,
@@ -260,10 +261,10 @@ func replicationSnapshot(local *hostvolume.StatusProjection, peers []replication
 	return s
 }
 
-func durableSnapshots(statuses []durable.VolumeStatus) []DurableSnapshot {
-	out := make([]DurableSnapshot, 0, len(statuses))
+func durableSnapshots(statuses []durable.VolumeStatus) []DurableReport {
+	out := make([]DurableReport, 0, len(statuses))
 	for _, st := range statuses {
-		out = append(out, DurableSnapshot{
+		out = append(out, DurableReport{
 			VolumeID:        st.VolumeID,
 			Impl:            st.Impl,
 			Path:            st.Path,
@@ -279,8 +280,8 @@ func durableSnapshots(statuses []durable.VolumeStatus) []DurableSnapshot {
 	return out
 }
 
-func copyResidue(in ResidueSnapshot) ResidueSnapshot {
-	return ResidueSnapshot{
+func copyResidue(in ResidueReport) ResidueReport {
+	return ResidueReport{
 		HostInitiator: HostInitiatorResidue{
 			ISCSISessions:  copyStringSlice(in.HostInitiator.ISCSISessions),
 			NVMESubsystems: copyStringSlice(in.HostInitiator.NVMESubsystems),

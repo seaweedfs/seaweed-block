@@ -70,7 +70,7 @@ Use the smallest gate that can prove the contract you changed.
 | Package-local logic, parser, renderer, state-machine helper | `go test -count=1 ./<touched-package>` | Fastest feedback; no m02 or runner dependency. |
 | CSI protocol propagation, lifecycle persistence, launcher render shape | `swblock run testops/scenarios/nvme-p5-protocol-component-gate.yaml` | Proves the known NVMe/iSCSI protocol-shape contracts with a runner bundle in seconds. |
 | RF=1 restart contract, durable-root/status manifest shape | `swblock run testops/scenarios/csi-rf1-durable-restart-component-gate.yaml` | Proves restart/recovery contract shape without a full K8s restart. |
-| Operations read-only volume status snapshot shape | `swblock run testops/scenarios/operations-volume-status-snapshot-component-gate.yaml` | Proves schema, frontend identity, unavailable fields, and residue copy behavior without starting product processes. |
+| Operations read-only volume status report shape | `swblock run testops/scenarios/operations-volume-status-report-component-gate.yaml` | Proves schema, frontend identity, unavailable fields, and residue copy behavior without starting product processes. |
 | Kernel initiator, k3s, mounted filesystem, failover, or stale-session behavior | The matching child chain, for example `nvme-p5-csi-protocol-chain` or `csi-rf1-durable-restart-chain` | These require real Linux/K8s/initiator behavior. |
 | Milestone readiness or cross-protocol release confidence | `swblock suite testops/suites/beta-hardening-gate.yaml` plus `swblock validate-bundle --profile beta-hardening` | Slow, evidence-heavy gate. Use for release/milestone claims, not first debugging. |
 
@@ -116,14 +116,15 @@ swblock run \
   testops/scenarios/csi-rf1-durable-restart-component-gate.yaml
 ```
 
-The first operations-layer snapshot contract has its own component gate. It is
-read-only and does not start product processes:
+The first operations-layer status report contract has its own component gate.
+It is read-only, does not start product processes, and is not a block/data
+snapshot:
 
 ```bash
 swblock run \
   -env product_root=/path/to/seaweed_block/on/m02 \
   -env ssh_key=/path/to/testdev_key/on/controller \
-  testops/scenarios/operations-volume-status-snapshot-component-gate.yaml
+  testops/scenarios/operations-volume-status-report-component-gate.yaml
 ```
 
 The same runner-native shape is used for the longer iSCSI P8 soak:

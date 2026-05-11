@@ -1,11 +1,13 @@
 # Finished Plan: Fast Gates And Operations Contract Prep
 
 Status: historical reference. Closed on 2026-05-11 after the fast gates and the
-first operations snapshot contract were validated on m02.
+first operations status report contract were validated on m02.
 
 This phase turned the repeatable beta milestone suite into a more practical
 developer workflow and seeded the operations layer with a read-only volume
-status snapshot contract.
+status report contract.
+
+This report is observability evidence. It is not a block/data snapshot.
 
 Current work is tracked in `../current-plan.md`.
 
@@ -28,7 +30,11 @@ Fast gate validation:
 | --- | --- | --- | --- | ---: | --- |
 | `nvme-p5-protocol-component-gate` | `20260510-214940-d726` | `b926b7e50c522665b66a81a2990a3fe925364365` | PASS | `1.486s` | collected |
 | `csi-rf1-durable-restart-component-gate` | `20260510-214947-206b` | `b926b7e50c522665b66a81a2990a3fe925364365` | PASS | `1.034s` | collected |
-| `operations-volume-status-snapshot-component-gate` | `20260510-222618-0452` | `c4426ca1d0ad46d47773c1cd1185edd9f944cf4f` | PASS | `1.113s` | collected |
+| `operations-volume-status-report-component-gate` | `20260510-222618-0452` | `c4426ca1d0ad46d47773c1cd1185edd9f944cf4f` | PASS | `1.113s` | collected |
+
+The third row was named `operations-volume-status-snapshot-component-gate` at
+the time of the run. It was renamed to `status-report` immediately after to
+avoid conflict with real block/data snapshot terminology.
 
 All three fast gates passed `swblock validate`.
 
@@ -37,7 +43,7 @@ All three fast gates passed `swblock validate`.
 1. Developers now have runner-native component gates for:
    - CSI/NVMe/iSCSI protocol propagation,
    - RF=1 durable restart contract shape,
-   - the first operations volume status snapshot contract.
+   - the first operations volume status report contract.
 2. `testops/README.md` documents which gate to run:
    - package-local `go test`,
    - fast runner-native component gate,
@@ -46,8 +52,8 @@ All three fast gates passed `swblock validate`.
 3. The full `beta-hardening-gate` remains a milestone/release gate, not the
    default debugging loop.
 4. The first operations contract is documented at
-   `../ref/operations-volume-status-snapshot-contract.md`.
-5. `core/ops.BuildVolumeStatusSnapshot` assembles the snapshot from existing
+   `../ref/operations-volume-status-report-contract.md`.
+5. `core/ops.BuildVolumeStatusReport` assembles the report from existing
    read-only facts:
    - master `StatusResponse` frontend targets,
    - local `StatusProjection`,
@@ -59,16 +65,17 @@ All three fast gates passed `swblock validate`.
 
 ## Important Non-Claims
 
+- This phase does not deliver a block/data snapshot.
 - This phase does not deliver an operator.
 - This phase does not add force-detach or cleanup commands.
 - This phase does not claim production HA.
 - This phase does not change the beta milestone suite.
-- The operations snapshot is read-only evidence, not authority or a mutation
-  precondition by itself.
+- The operations status report is read-only evidence, not authority or a
+  mutation precondition by itself.
 
 ## Follow-Up Decisions
 
-- Move from pure snapshot builder to a read-only collection surface.
+- Move from pure status-report builder to a read-only collection surface.
 - Keep the current direct DTO imports acceptable for the seed, but consider a
   thinner schema/input DTO boundary if the operations package grows.
 - Continue lowering expensive suite assertions into fast component gates when
