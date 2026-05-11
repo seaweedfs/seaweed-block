@@ -73,7 +73,9 @@ This is the short internal roadmap. Keep it current and readable.
 ### Track A: Kubernetes Install And Cleanup
 
 - Current: owner-reference cleanup is being defaulted for alpha scripts.
-- Next: avoid harness-only cleanup paths.
+- Next: avoid harness-only cleanup paths and define the light-use install loop:
+  install product, create StorageClass/PVC, run an app pod, delete resources,
+  and verify product-owned cleanup without TestOps acting as the operator.
 - Later: add a small controller/operator for generated `blockvolume`
   workloads.
 
@@ -114,11 +116,28 @@ This is the short internal roadmap. Keep it current and readable.
 
 ### Track F: Operations Layer
 
-- Current: operations are split across scripts, TestOps, and product logs.
-- Next: define install/upgrade/uninstall, generated workload ownership,
-  operator-visible status, diagnostics bundle, and conservative admin controls.
-- Later: enterprise operations, hosted validation, fleet automation, and
-  cloud-scale test lifecycle.
+- Current: first read-only operator loop is active: `sw-block ops status`
+  collects one volume's master/frontend/durable/residue evidence and emits a
+  JSON report plus human summary.
+- Next: finish the self-describing support bundle for one volume, then move to
+  cluster-wide list/status and product-owned lifecycle visibility.
+- Later: observation API/UI, metrics, conservative admin controls, enterprise
+  operations, hosted validation, fleet automation, and cloud-scale test
+  lifecycle.
+
+### Top Light-Use Product Blockers
+
+These are the main gaps between the current functional block substrate and a
+credible light-use product:
+
+- Product-owned generated workload lifecycle: scripts/TestOps still own too
+  much cleanup and run-scoped state management.
+- Install/upgrade/uninstall: alpha scripts work for tests, but users need a
+  normal K8s add-on flow.
+- Observation beyond one volume: the current CLI is one-volume read-only
+  diagnosis; users will need cluster-wide list/status and eventually metrics/UI.
+- Safe admin controls: repair/promote/cleanup actions must wait until the
+  read-only observation model is stable and release-gated.
 
 ## PR Cadence
 
