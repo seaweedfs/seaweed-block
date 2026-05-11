@@ -81,6 +81,7 @@ Closed phase 4 evidence:
 Relevant references:
 
 - `ref/operations-volume-status-report-contract.md`
+- `ref/operations-volume-status-report-operator-guide.md`
 - `ref/beta-hardening-suite-cost-map.md`
 - `product-roadmap.md`, Track F: Operations Layer
 
@@ -203,6 +204,20 @@ Rules:
 - Any future admin control must have a separate protocol with fencing and
   authority semantics.
 - A stale report must be treated as stale evidence, not current truth.
+
+Implementation status:
+
+- `ref/operations-volume-status-report-operator-guide.md` defines what an
+  operator may inspect:
+  volume identity, frontend facts, authority role/epoch, peer state, durable
+  lineage, residue, and provenance.
+- The same guide defines unsafe conclusions:
+  no force detach, durable deletion, promotion/demotion, stale-primary fencing,
+  HA, workload durability, rollback, clone, backup, or cleanup authorization
+  may be inferred from this report alone.
+- The guide provides escalation paths for conflicting authority, durable
+  lineage mismatch, frontend/durable inconsistency, residue, and provenance
+  mismatch.
 
 ## Dev / QA Split
 
