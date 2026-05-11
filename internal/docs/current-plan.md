@@ -35,6 +35,7 @@ Forward-work commits after that baseline added two fast gates:
 
 - `testops/scenarios/nvme-p5-protocol-component-gate.yaml`
 - `testops/scenarios/csi-rf1-durable-restart-component-gate.yaml`
+- `testops/scenarios/operations-volume-status-snapshot-component-gate.yaml`
 
 These gates are for developer iteration. They do not replace the milestone
 suite until they have their own validation history.
@@ -55,6 +56,9 @@ Static validation:
 - `swblock validate testops/scenarios/nvme-p5-protocol-component-gate.yaml`:
   VALID.
 - `swblock validate testops/scenarios/csi-rf1-durable-restart-component-gate.yaml`:
+  VALID.
+- `swblock validate
+  testops/scenarios/operations-volume-status-snapshot-component-gate.yaml`:
   VALID.
 
 ## Delivery Gate
@@ -93,6 +97,8 @@ Tasks:
 - After the branch is present on m02, run:
   - `swblock run testops/scenarios/nvme-p5-protocol-component-gate.yaml`
   - `swblock run testops/scenarios/csi-rf1-durable-restart-component-gate.yaml`
+  - `swblock run
+    testops/scenarios/operations-volume-status-snapshot-component-gate.yaml`
 - Record run IDs, wall clocks, and whether the collected bundles include
   `pin_build/git.sha`, `git.status`, and the Go test JSON/log artifact.
 
@@ -184,6 +190,9 @@ Implementation seed:
   strings rather than silent zero-value success.
 - Component validation:
   - `go test -count=1 ./core/ops`: PASS.
+- Runner-native fast gate:
+  - `testops/scenarios/operations-volume-status-snapshot-component-gate.yaml`
+    added; static `swblock validate` PASS, m02 run pending.
 
 ## Workstream D: Mini-Protocol Notes
 

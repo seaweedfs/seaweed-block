@@ -1,0 +1,110 @@
+# Runner-native operations volume-status snapshot component gate.
+#
+# Goal:
+#   Pin the first operations-layer read-only snapshot contract without starting
+#   blockmaster/blockvolume, k3s, iSCSI, or NVMe. This proves schema shape,
+#   frontend identity preservation, unavailable-field handling, and residue copy
+#   behavior before any operator surface is built around it.
+#
+# Expected invocation:
+#   swblock run testops/scenarios/operations-volume-status-snapshot-component-gate.yaml \
+#     --env product_root=/path/to/seaweed_block/on/m02 \
+#     --env ssh_key=/path/to/testdev_key/on/controller
+
+name: operations-volume-status-snapshot-component-gate
+timeout: 5m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: pre_clean
+    actions:
+      - action: assert_no_active_iscsi_sessions
+        node: m02
+        iqn_substr: "io.seaweedfs"
+      - action: assert_no_processes
+        node: m02
+        pattern: "[/]blockmaster --|[/]blockvolume --|^blockmaster |^blockvolume "
+      - action: exec
+        node: m02
+        cmd: "rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-ops-volume-status-snapshot && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-ops-volume-status-snapshot/pin_build"
+
+  - name: pin_build
+    actions:
+      - action: exec
+        node: m02
+        cmd: "cd {{ product_root }} && git rev-parse HEAD > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-ops-volume-status-snapshot/pin_build/git.sha && git status --porcelain > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-ops-volume-status-snapshot/pin_build/git.status && test ! -s /mnt/smb/work/share/g15d-k8s/{{ run_id }}-ops-volume-status-snapshot/pin_build/git.status"
+
+  - name: snapshot_component_tests
+    actions:
+      - action: exec
+        node: m02
+        timeout: 3m
+        cmd: "cd {{ product_root }} && bash -o pipefail -c 'go test -count=1 -json -run \"^TestBuildVolumeStatusSnapshot_(ComposesExistingStatusSurfaces|JSONKeepsZeroValuedFrontendIdentity|UsesMasterFrontendFacts|MarksUnavailableInputsExplicitly|CopiesInputSlices)$\" ./core/ops | tee /mnt/smb/work/share/g15d-k8s/{{ run_id }}-ops-volume-status-snapshot/snapshot-component-go-test.jsonl'"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-ops-volume-status-snapshot/snapshot-component-go-test.jsonl"
+        pattern: "\"Action\":\"pass\".*\"Test\":\"TestBuildVolumeStatusSnapshot_ComposesExistingStatusSurfaces\""
+        save_as: snapshot_composition_count
+      - action: assert_greater
+        actual: "{{ snapshot_composition_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-ops-volume-status-snapshot/snapshot-component-go-test.jsonl"
+        pattern: "\"Action\":\"pass\".*\"Test\":\"TestBuildVolumeStatusSnapshot_JSONKeepsZeroValuedFrontendIdentity\""
+        save_as: snapshot_zero_identity_count
+      - action: assert_greater
+        actual: "{{ snapshot_zero_identity_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-ops-volume-status-snapshot/snapshot-component-go-test.jsonl"
+        pattern: "\"Action\":\"pass\".*\"Test\":\"TestBuildVolumeStatusSnapshot_UsesMasterFrontendFacts\""
+        save_as: snapshot_master_frontend_count
+      - action: assert_greater
+        actual: "{{ snapshot_master_frontend_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-ops-volume-status-snapshot/snapshot-component-go-test.jsonl"
+        pattern: "\"Action\":\"pass\".*\"Test\":\"TestBuildVolumeStatusSnapshot_MarksUnavailableInputsExplicitly\""
+        save_as: snapshot_unavailable_count
+      - action: assert_greater
+        actual: "{{ snapshot_unavailable_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-ops-volume-status-snapshot/snapshot-component-go-test.jsonl"
+        pattern: "\"Action\":\"pass\".*\"Test\":\"TestBuildVolumeStatusSnapshot_CopiesInputSlices\""
+        save_as: snapshot_copy_count
+      - action: assert_greater
+        actual: "{{ snapshot_copy_count }}"
+        threshold: "0"
+
+  - name: final_asserts
+    actions:
+      - action: assert_no_active_iscsi_sessions
+        node: m02
+        iqn_substr: "io.seaweedfs"
+      - action: assert_no_processes
+        node: m02
+        pattern: "[/]blockmaster --|[/]blockvolume --|^blockmaster |^blockvolume "
+
+  - name: collect_and_cleanup
+    always: true
+    actions:
+      - action: collect_path
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-ops-volume-status-snapshot"
+        name: "remote-phases"
+        ignore_error: true
