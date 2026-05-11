@@ -39,14 +39,33 @@ Forward-work commits after that baseline added two fast gates:
 These gates are for developer iteration. They do not replace the milestone
 suite until they have their own validation history.
 
+Fast gate validation evidence at product commit
+`b926b7e50c522665b66a81a2990a3fe925364365`:
+
+| Gate | Run ID | Result | Wall Clock | Bundle |
+| --- | --- | --- | ---: | --- |
+| `nvme-p5-protocol-component-gate` | `20260510-214940-d726` | PASS | `1.486s` | collected |
+| `csi-rf1-durable-restart-component-gate` | `20260510-214947-206b` | PASS | `1.034s` | collected |
+
+Both runs recorded `pin_build/git.sha=b926b7e50c522665b66a81a2990a3fe925364365`
+and empty `pin_build/git.status`.
+
+Static validation:
+
+- `swblock validate testops/scenarios/nvme-p5-protocol-component-gate.yaml`:
+  VALID.
+- `swblock validate testops/scenarios/csi-rf1-durable-restart-component-gate.yaml`:
+  VALID.
+
 ## Delivery Gate
 
 This plan is complete when:
 
 1. The two new fast component gates run successfully through `swblock run` on
-   m02 from a clean product checkout.
+   m02 from a clean product checkout. Done at `b926b7e`.
 2. Each fast gate validates with `swblock validate` and collects a complete run
-   bundle.
+   bundle. Done for run IDs `20260510-214940-d726` and
+   `20260510-214947-206b`.
 3. The current plan documents when to run:
    - unit/component tests,
    - fast runner-native component gates,
@@ -114,9 +133,11 @@ Deliverable:
 
 Purpose: start the operations layer from observable facts, not operator code.
 
-Candidate first contract:
+Selected first contract:
 
 - `volume status snapshot`
+
+Reference: `ref/operations-volume-status-snapshot-contract.md`.
 
 Required fields:
 
