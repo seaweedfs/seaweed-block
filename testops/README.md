@@ -81,6 +81,16 @@ swblock run testops/scenarios/nvme-p5-protocol-component-gate.yaml \
   --env ssh_key=/path/to/testdev_key/on/controller
 ```
 
+The RF=1 durable restart path also has a component gate that checks restart
+wrapper shape, generated hostPath/status manifest behavior, master frontend
+projection, and durable status lineage without doing the full K8s restart:
+
+```bash
+swblock run testops/scenarios/csi-rf1-durable-restart-component-gate.yaml \
+  --env product_root=/path/to/seaweed_block/on/m02 \
+  --env ssh_key=/path/to/testdev_key/on/controller
+```
+
 The same runner-native shape is used for the longer iSCSI P8 soak:
 
 ```bash

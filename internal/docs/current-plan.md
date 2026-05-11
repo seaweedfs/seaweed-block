@@ -136,6 +136,8 @@ Second target:
 
 - `csi-rf1-durable-restart` restart-state contracts around durable identity,
   status/projection refresh, and safe reattach.
+  - initial fast gate:
+    `testops/scenarios/csi-rf1-durable-restart-component-gate.yaml`.
 
 ## Workstream C: Operations Layer Prep
 

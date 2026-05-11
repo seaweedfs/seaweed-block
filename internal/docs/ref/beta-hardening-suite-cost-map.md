@@ -92,6 +92,9 @@ Reason:
 Keep one live restart scenario because process death, master observation, and
 K8s attachment timing are integration concerns.
 
+Initial runner-native fast gate:
+`testops/scenarios/csi-rf1-durable-restart-component-gate.yaml`.
+
 ## Do Not Componentize These Away
 
 - `nvme-p4-multipath-failover`: requires Linux NVMe/TCP multipath and ANA
