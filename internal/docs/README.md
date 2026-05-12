@@ -40,6 +40,7 @@ Public-facing docs belong in `docs/`.
 | `finished-plans/phase6_finishedplan_iscsi_os_initiator_compatibility.md` | Historical iSCSI OS initiator compatibility plan closed by Linux and Windows validation. |
 | `finished-plans/phase7_finishedplan_iscsi_session_backend_pressure.md` | Historical iSCSI session/backend pressure plan closed by fast protocol, L2 restart, and Linux OS initiator gates. |
 | `finished-plans/phase8_finishedplan_main_merge_pr_readiness.md` | Historical main-merge readiness plan closed by PR #46 squash merge. |
+| `finished-plans/phase9_finishedplan_light_use_operations_mvp.md` | Historical light-use operations MVP plan closed by local CLI, bundle, and TestOps control-data validation. |
 | `ref/production-readiness-plan.md` | Longer readiness reference and iSCSI P1-P6 detail. |
 | `ref/iscsi-os-initiator-compat-plan.md` | Detailed iSCSI P1 OS-initiator compatibility plan and evidence. |
 | `ref/iscsi-v2-coverage-gap-audit.md` | V2-to-V3 iSCSI coverage gap audit and prioritized test backlog. |
