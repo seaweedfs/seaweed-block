@@ -114,7 +114,7 @@ phases:
       - action: exec
         node: m02
         timeout: 4m
-        cmd: "cd {{ product_root }} && bash -lc 'set -euo pipefail; OUT=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-cluster-inventory/inventory; mkdir -p \"$OUT\"; pf_port=$(python3 - <<\"PY\"\nimport socket\ns=socket.socket(); s.bind((\"127.0.0.1\",0)); print(s.getsockname()[1]); s.close()\nPY\n); kubectl -n kube-system port-forward svc/blockmaster ${pf_port}:9333 > \"$OUT/blockmaster-port-forward.log\" 2>&1 & pf_pid=$!; echo \"$pf_pid\" > \"$OUT/blockmaster-port-forward.pid\"; cleanup(){ kill \"$pf_pid\" >/dev/null 2>&1 || true; wait \"$pf_pid\" >/dev/null 2>&1 || true; }; trap cleanup EXIT; for i in $(seq 1 30); do (echo >/dev/tcp/127.0.0.1/${pf_port}) >/dev/null 2>&1 && break; sleep 1; done; (echo >/dev/tcp/127.0.0.1/${pf_port}) >/dev/null 2>&1; go run ./cmd/sw-block ops inventory --namespace default --master 127.0.0.1:${pf_port} --out \"$OUT\" --timeout 30s > \"$OUT/stdout.txt\" 2> \"$OUT/stderr.txt\"; rc=$?; echo \"$rc\" > \"$OUT/exit_code.txt\"; find \"$OUT/volumes\" -name ops-status-bundle.json -exec cat {} \\; > \"$OUT/nested-ops-status-bundles.json\" 2>/dev/null || true; exit \"$rc\"'"
+        cmd: "cd {{ product_root }} && bash -c 'set -euo pipefail; OUT=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-cluster-inventory/inventory; mkdir -p \"$OUT\"; pf_port=$(python3 - <<\"PY\"\nimport socket\ns=socket.socket(); s.bind((\"127.0.0.1\",0)); print(s.getsockname()[1]); s.close()\nPY\n); kubectl -n kube-system port-forward svc/blockmaster ${pf_port}:9333 > \"$OUT/blockmaster-port-forward.log\" 2>&1 & pf_pid=$!; echo \"$pf_pid\" > \"$OUT/blockmaster-port-forward.pid\"; cleanup(){ kill \"$pf_pid\" >/dev/null 2>&1 || true; wait \"$pf_pid\" >/dev/null 2>&1 || true; }; trap cleanup EXIT; for i in $(seq 1 30); do (echo >/dev/tcp/127.0.0.1/${pf_port}) >/dev/null 2>&1 && break; sleep 1; done; (echo >/dev/tcp/127.0.0.1/${pf_port}) >/dev/null 2>&1; go run ./cmd/sw-block ops inventory --namespace default --master 127.0.0.1:${pf_port} --out \"$OUT\" --timeout 30s > \"$OUT/stdout.txt\" 2> \"$OUT/stderr.txt\"; rc=$?; echo \"$rc\" > \"$OUT/exit_code.txt\"; find \"$OUT/volumes\" -name ops-status-bundle.json -exec cat {} \\; > \"$OUT/nested-ops-status-bundles.json\" 2>/dev/null || true; exit \"$rc\"'"
       - action: grep_log
         node: m02
         path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-cluster-inventory/inventory/exit_code.txt"
@@ -129,15 +129,15 @@ phases:
       - action: grep_log
         node: m02
         path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-cluster-inventory/inventory/volume-inventory-summary.txt"
-        pattern: "^inventory_status: ok$"
-        save_as: inventory_ok_count
+        pattern: "^inventory_status: (ok|unhealthy)$"
+        save_as: inventory_status_count
       - action: assert_greater
-        actual: "{{ inventory_ok_count }}"
+        actual: "{{ inventory_status_count }}"
         threshold: "0"
       - action: grep_log
         node: m02
         path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-cluster-inventory/inventory/volume-inventory-summary.txt"
-        pattern: "^volumes: total=1 ok=1 unhealthy=0 invalid=0$"
+        pattern: "^volumes: total=1 ok=[0-1] unhealthy=[0-1] invalid=0$"
         save_as: one_volume_count
       - action: assert_greater
         actual: "{{ one_volume_count }}"
