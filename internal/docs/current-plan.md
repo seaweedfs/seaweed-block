@@ -147,8 +147,9 @@ the end-to-end user claim.
 
 ### D1: First-Volume Runbook
 
-Status: draft attached in `docs/quickstart-kubernetes.md`; needs fresh-run
-validation before it can be treated as the final user path.
+Status: draft attached in `docs/quickstart-kubernetes.md`; dev-run validated
+through `light-use-first-volume-chain` at run
+`20260511-180107-1f37`. Still needs QA new-user review before final close.
 
 Update or add a concise runbook that answers:
 
@@ -167,7 +168,22 @@ Preferred source to refresh first: `docs/quickstart-kubernetes.md`.
 ### D2: Runner-Native First-Volume Scenario
 
 Status: initial scenario attached as
-`testops/scenarios/light-use-first-volume-chain.yaml`; needs validation on m02.
+`testops/scenarios/light-use-first-volume-chain.yaml`.
+
+Dev validation:
+
+```text
+run_id: 20260511-180107-1f37
+result: PASS
+wall:   1m12s
+actions: 35/35 passed
+host: m02
+```
+
+The scenario proved preflight, alpha image build/import, documented
+`run-k8s-demo.sh`, writer checksum, reader replacement checksum, generated
+iSCSI blockvolume manifest, no active iSCSI session after delete, cleanup
+attribution, and final process/session assertions.
 
 Add a TestOps scenario for the same user path.
 
@@ -188,6 +204,12 @@ The scenario should emit normal result/status bundles and participate in the
 shared control-data lock model.
 
 ### D3: Product-vs-Harness Cleanup Evidence
+
+Status: initial attribution artifact attached in the runner-native scenario.
+Dev run found the important boundary: active iSCSI sessions are removed by the
+demo flow, but an iSCSI node database entry can remain until TestOps guardrail
+cleanup deletes it. That is recorded as guardrail cleanup, not product-owned
+cleanup.
 
 The artifact bundle should include a short cleanup summary:
 
