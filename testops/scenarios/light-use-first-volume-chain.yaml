@@ -52,7 +52,7 @@ phases:
       - action: grep_log
         node: m02
         path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-first-volume/preflight.txt"
-        pattern: "Client Version|Kustomize Version|NAME"
+        pattern: "Client Version:"
         save_as: preflight_count
       - action: assert_greater
         actual: "{{ preflight_count }}"
