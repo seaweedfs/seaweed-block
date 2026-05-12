@@ -168,6 +168,25 @@ phases:
       - action: grep_log
         node: m02
         path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-cluster-inventory/inventory/volume-inventory-summary.txt"
+        pattern: "rf=1 desired=1 observed=1"
+        save_as: two_observed_volume_count
+      - action: assert_greater
+        actual: "{{ two_observed_volume_count }}"
+        threshold: "1"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-cluster-inventory/inventory/volume-inventory-summary.txt"
+        pattern: "protocols=iscsi"
+        save_as: two_iscsi_protocol_count
+      - action: assert_greater
+        actual: "{{ two_iscsi_protocol_count }}"
+        threshold: "1"
+      - action: exec
+        node: m02
+        cmd: "! grep -q 'generated_deployment_missing\\|observed_replicas=0 desired_replicas=1\\|replica_slot_missing' /mnt/smb/work/share/g15d-k8s/{{ run_id }}-cluster-inventory/inventory/volume-inventory-summary.txt"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-cluster-inventory/inventory/volume-inventory-summary.txt"
         pattern: "pvc=sw-block-demo-pvc"
         save_as: pvc_identity_count
       - action: assert_greater

@@ -114,6 +114,7 @@ func RenderBlockVolumeDeployments(plan lifecycle.BlockVolumeWorkloadPlan, cfg K8
 		if err != nil {
 			return nil, fmt.Errorf("launcher: marshal %s: %w", name, err)
 		}
+		raw = append([]byte("---\n"), raw...)
 		out = append(out, RenderedManifest{Name: name, YAML: raw})
 	}
 	return out, nil

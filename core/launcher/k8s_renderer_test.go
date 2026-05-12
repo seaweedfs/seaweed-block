@@ -72,6 +72,24 @@ func TestG15d_K8sRenderer_RF2UsesDistinctNamesAndPorts(t *testing.T) {
 	}
 }
 
+func TestG15d_K8sRenderer_ManifestsAreSafeToConcatenate(t *testing.T) {
+	manifests, err := RenderBlockVolumeDeployments(sampleWorkloadPlan(), K8sRenderConfig{MasterAddr: "m:9333"})
+	if err != nil {
+		t.Fatalf("RenderBlockVolumeDeployments: %v", err)
+	}
+	var combined strings.Builder
+	for _, manifest := range manifests {
+		raw := string(manifest.YAML)
+		if !strings.HasPrefix(raw, "---\n") {
+			t.Fatalf("manifest %s missing YAML document separator:\n%s", manifest.Name, raw)
+		}
+		combined.WriteString(raw)
+	}
+	if got := strings.Count(combined.String(), "\nkind: Deployment\n"); got != len(manifests) {
+		t.Fatalf("deployment document count=%d want %d:\n%s", got, len(manifests), combined.String())
+	}
+}
+
 func TestG15d_K8sRenderer_CanUseHostPathStateVolume(t *testing.T) {
 	manifests, err := RenderBlockVolumeDeployments(sampleWorkloadPlan(), K8sRenderConfig{
 		MasterAddr:        "m:9333",
