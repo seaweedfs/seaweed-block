@@ -33,6 +33,7 @@ type VolumeInventoryVolumeInput struct {
 	SupportBundle     string
 	CollectionErrors  []string
 	Residue           ResidueReport
+	Issues            []string
 	Replicas          []VolumeInventoryReplicaInput
 }
 
@@ -198,7 +199,7 @@ func buildInventoryVolume(productRevision string, in VolumeInventoryVolumeInput)
 		SupportBundle:     in.SupportBundle,
 		Replicas:          replicas,
 	}
-	volume.Issues = volumeInventoryVolumeIssues(volume)
+	volume.Issues = append(copyStringSlice(in.Issues), volumeInventoryVolumeIssues(volume)...)
 	volume.Status = inventoryIssueStatus(volume.Issues)
 	return volume
 }
@@ -251,6 +252,10 @@ func VolumeInventoryIssues(in VolumeInventory) []string {
 	}
 	for _, errText := range in.CollectionErrors {
 		if errText != "" {
+			if strings.HasPrefix(errText, "kubernetes_unreachable:") {
+				issues = append(issues, fmt.Sprintf("invalid: %s", errText))
+				continue
+			}
 			issues = append(issues, fmt.Sprintf("collection_error: %s", errText))
 		}
 	}

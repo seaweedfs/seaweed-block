@@ -79,8 +79,8 @@ func TestWriteVolumeInventoryArtifacts_PreservesCollectionErrors(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected collection error")
 	}
-	if code != VolumeStatusExitUnhealthy {
-		t.Fatalf("code=%d want %d", code, VolumeStatusExitUnhealthy)
+	if code != VolumeStatusExitInvalid {
+		t.Fatalf("code=%d want %d", code, VolumeStatusExitInvalid)
 	}
 	rawBundle, readErr := os.ReadFile(filepath.Join(dir, OpsInventoryBundleArtifact))
 	if readErr != nil {

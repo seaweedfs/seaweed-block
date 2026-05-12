@@ -16,7 +16,10 @@ func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
 }
 
-var opsStatusRunCommand = ops.DefaultRunCommand
+var (
+	opsStatusRunCommand    = ops.DefaultRunCommand
+	opsInventoryRunCommand = ops.DefaultRunCommand
+)
 
 func run(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
@@ -132,10 +135,11 @@ func runOpsInventory(args []string, stdout, stderr io.Writer) int {
 
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	collector := ops.StaticVolumeInventoryCollector(ops.VolumeInventoryInput{
-		Source:          ops.ReportSource{Component: "sw-block ops inventory", Scenario: "namespace=" + namespace},
+	collector := ops.NewKubernetesVolumeInventoryCollector(ops.KubernetesInventoryConfig{
+		Namespace:       namespace,
 		ProductRevision: productRevision,
 		RunnerRevision:  runnerRevision,
+		RunCommand:      opsInventoryRunCommand,
 	})
 	inventory, code, err := ops.WriteVolumeInventoryArtifacts(ctx, outDir, collector)
 	if err != nil {

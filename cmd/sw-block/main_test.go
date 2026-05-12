@@ -123,6 +123,14 @@ func TestOpsStatusWritesArtifactsAndReturnsClean(t *testing.T) {
 }
 
 func TestOpsInventoryWritesEmptyClusterArtifacts(t *testing.T) {
+	oldRunCommand := opsInventoryRunCommand
+	opsInventoryRunCommand = fixtureCmdKubectl(map[string]string{
+		"kubectl -n default get pvc -o json":                          `{"items":[]}`,
+		"kubectl get pv -o json":                                      `{"items":[]}`,
+		"kubectl -n default get deploy -l app=sw-blockvolume -o json": `{"items":[]}`,
+	})
+	defer func() { opsInventoryRunCommand = oldRunCommand }()
+
 	outDir := t.TempDir()
 	var stdout, stderr bytes.Buffer
 	code := run([]string{
@@ -171,6 +179,14 @@ func TestOpsInventoryWritesEmptyClusterArtifacts(t *testing.T) {
 }
 
 func TestOpsListAliasesInventory(t *testing.T) {
+	oldRunCommand := opsInventoryRunCommand
+	opsInventoryRunCommand = fixtureCmdKubectl(map[string]string{
+		"kubectl -n default get pvc -o json":                          `{"items":[]}`,
+		"kubectl get pv -o json":                                      `{"items":[]}`,
+		"kubectl -n default get deploy -l app=sw-blockvolume -o json": `{"items":[]}`,
+	})
+	defer func() { opsInventoryRunCommand = oldRunCommand }()
+
 	var stdout, stderr bytes.Buffer
 	code := run([]string{"ops", "list", "--out", t.TempDir(), "--product-revision", "product-rev"}, &stdout, &stderr)
 	if code != ops.VolumeStatusExitOK {
@@ -178,6 +194,32 @@ func TestOpsListAliasesInventory(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "inventory_status: ok") {
 		t.Fatalf("stdout=%s", stdout.String())
+	}
+}
+
+func TestOpsInventoryClusterUnreachableReturnsInvalidWithBundle(t *testing.T) {
+	oldRunCommand := opsInventoryRunCommand
+	opsInventoryRunCommand = func(context.Context, string, ...string) ([]byte, error) {
+		return []byte("The connection to the server 127.0.0.1:6443 was refused\n"), errors.New("exit status 1")
+	}
+	defer func() { opsInventoryRunCommand = oldRunCommand }()
+
+	outDir := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ops", "inventory", "--out", outDir, "--product-revision", "product-rev"}, &stdout, &stderr)
+	if code != ops.VolumeStatusExitInvalid {
+		t.Fatalf("exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "kubernetes_unreachable") ||
+		!strings.Contains(stdout.String(), "inventory_status: invalid") {
+		t.Fatalf("stdout=%s stderr=%s", stdout.String(), stderr.String())
+	}
+	raw, err := os.ReadFile(filepath.Join(outDir, ops.OpsInventoryBundleArtifact))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), "kubernetes_unreachable") {
+		t.Fatalf("bundle missing unreachable evidence:\n%s", raw)
 	}
 }
 
@@ -202,6 +244,17 @@ func cleanCmdResidueCommand(_ context.Context, name string, args ...string) ([]b
 		return []byte("PID ARGS\n1 unrelated\n"), nil
 	default:
 		return nil, fmt.Errorf("unexpected command %s", name)
+	}
+}
+
+func fixtureCmdKubectl(outputs map[string]string) func(context.Context, string, ...string) ([]byte, error) {
+	return func(_ context.Context, name string, args ...string) ([]byte, error) {
+		key := strings.TrimSpace(name + " " + strings.Join(args, " "))
+		out, ok := outputs[key]
+		if !ok {
+			return nil, fmt.Errorf("unexpected command %q", key)
+		}
+		return []byte(out), nil
 	}
 }
 
