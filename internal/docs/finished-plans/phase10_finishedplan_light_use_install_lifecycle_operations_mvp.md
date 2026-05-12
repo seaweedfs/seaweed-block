@@ -1,8 +1,6 @@
 # Finished Plan: Light-Use Install And Lifecycle Operations MVP
 
-Status: close candidate. Initial QA close report passed at product commit
-`9a49992`; strict QA reading later found three close-gate gaps. Dev fixes are
-attached after `9a49992`; strict QA revalidation is pending.
+Status: finished. Strict QA close passed at product commit `fe0de8d`.
 
 Opened after closing
 `finished-plans/phase9_finishedplan_light_use_operations_mvp.md`.
@@ -389,7 +387,7 @@ Close evidence:
 - Scenario consistency run: `20260511-225935-0ff4`.
 
 Initial QA cleared all HG-0 through HG-12 clauses. A later strict reading found
-three gaps and dev addressed them:
+three gaps; dev addressed them and QA revalidated them as strict PASS:
 
 - HG-2: `docs/quickstart-kubernetes.md` now verifies
   `apply-k8s-alpha-blockvolumes.sh` with an explicit generated Deployment
@@ -401,4 +399,13 @@ three gaps and dev addressed them:
   named `rerun_after_success_no_cleanup` phase for "successful run, run again
   immediately".
 
-Strict close is pending QA revalidation of these three deltas.
+Strict close revalidation:
+
+```text
+run_id: 20260512-005836-0998
+result: PASS
+phases: 9/9
+actions: 50/50
+```
+
+QA re-issued the close report as `PASS (strict)`.

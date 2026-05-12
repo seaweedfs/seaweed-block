@@ -4,35 +4,43 @@ This is the formal close report against
 `internal/docs/qa-assignments/light-use-mvp-close-hard-gate.md`.
 
 ```text
-Product commit:       9a49992 (docs: record first-volume qa consistency)
-Runner commit:        sw-test-runner-standalone @ 6ec7abd (swblock build used: 15.9 MB Windows binary)
+Product commit:       fe0de8d (docs: tighten light-use close gates)
+Runner commit:        sw-test-runner-standalone @ 6ec7abd (swblock build: 15.9 MB Windows binary)
 Host:                 m02 (192.168.1.184) — Ubuntu 24.04.3 LTS / k3s v1.34.4+k3s1 / kernel 6.17.0-19-generic
 Runbook path:         docs/quickstart-kubernetes.md (First Volume In 10 Minutes section)
-Scenario run_id:      20260511-225935-0ff4   (QA-owned light-use-first-volume-chain run on commit ec76385)
-Manual run artifact:  /tmp/sw-block-app-demo-20260512T055732Z   (QA-owned cold runbook follow on m02)
-Scenario artifact:    /mnt/smb/work/share/g15d-k8s/20260511-225935-0ff4-first-volume
+Scenario run_ids:     20260511-225935-0ff4   (HG-7/HG-12 light-use-first-volume-chain @ ec76385, QA)
+                      20260512-005836-0998   (HG-9 light-use-first-volume-retry-chain @ fe0de8d, QA)
+Manual run artifact:  /tmp/sw-block-app-demo-20260512T055732Z   (QA-owned cold runbook follow)
 ```
 
 ## Verdict
 
 ```text
-PASS
+PASS (strict)
 ```
 
-The plan's user-facing operational loop on the supported single-node Kubernetes
-shape is exercised end to end, the runbook and the runner-native scenario are
-observably consistent, every named non-claim is honestly disclaimed, and the
-failure-bundle mechanism produces a useful triage artifact under a real
-broken-attach scenario.
+All 13 HG clauses pass the strict binary criteria in
+`light-use-mvp-close-hard-gate.md`. The plan's user-facing operational loop on
+the supported single-node Kubernetes shape is exercised end to end, the
+runbook and the runner-native scenario are observably consistent, every named
+non-claim is honestly disclaimed, the failure-bundle mechanism produces a
+useful triage artifact under a real broken-attach scenario, and the runbook's
+per-boundary verification commands match the boundaries enumerated in HG-4.
+
+This verdict supersedes the earlier "MOSTLY PASS / PARTIAL" wording, which
+introduced soft categories not present in the gate. Two strict gaps (HG-2
+post-step boundary check, HG-4 per-boundary commands) and one fixture-coverage
+gap (HG-9 case 2) were closed by commit `fe0de8d` and re-verified by QA
+before this verdict was issued.
 
 ## HG clause table
 
 ```text
 HG-0  single entry point:                  PASS
 HG-1  runnable preflight:                  PASS
-HG-2  one happy path:                      MOSTLY PASS (non-blocking note 1)
+HG-2  one happy path:                      PASS
 HG-3  image fallback honest:               PASS
-HG-4  boundary verification:               PARTIAL (non-blocking note 2)
+HG-4  boundary verification:               PASS
 HG-5  failure bundle reachable:            PASS
 HG-6  bundle self-explanatory:             PASS
 HG-7  line-level cleanup attribution:      PASS
@@ -40,7 +48,7 @@ HG-8  scoped cleanup commands:             PASS
 HG-9  idempotency / retry:                 PASS
 HG-10 ≥3 break classes:                    PASS
 HG-11 claims match what was tested:        PASS
-HG-12 runbook vs scenario consistency:     PASS (with documented residue)
+HG-12 runbook vs scenario consistency:     PASS (residue documented)
 ```
 
 ### HG-0 single entry point — PASS
@@ -74,14 +82,21 @@ The break-classes scenario (HG-10) also exercises the FAIL path: the
 `checked name=iscsiadm status=FAIL`, the `Install open-iscsi/iscsiadm`
 remediation line, and exit code 2.
 
-### HG-2 one happy path — MOSTLY PASS
+### HG-2 one happy path — PASS
 
-The default demo path is one command (`bash scripts/run-k8s-demo.sh`). The
-"Use Your Own App" section now numbers `bash scripts/apply-k8s-alpha-blockvolumes.sh`
-as step 3 of a 4-step flow with an explicit *"Until the operator exists"*
-justification — the side-quest is elevated, not footnoted. The gate's
-strict-pass condition asked for a boundary check after that step; none is
-present. Counted as MOSTLY PASS, non-blocking note 1 below.
+The default demo path is one command (`bash scripts/run-k8s-demo.sh`). In
+"Use Your Own App", `bash scripts/apply-k8s-alpha-blockvolumes.sh` is now a
+numbered step followed by a documented boundary check (commit `fe0de8d`):
+
+```bash
+kubectl get deploy -n default -l app=sw-blockvolume \
+  -o jsonpath='{.items[0].status.readyReplicas}/{.items[0].status.replicas}{"\n"}'
+# expected: 1/1
+```
+
+The OR-branch of the gate ("numbered, verified step with its own boundary
+check") is now fully satisfied: numbered, verified, with explicit expected
+output. Strict PASS.
 
 ### HG-3 image fallback honest — PASS
 
@@ -92,14 +107,26 @@ commands. The break-classes scenario validates the GHCR-fails branch via
 `SW_BLOCK_IMAGE=ghcr.io/seaweedfs/does-not-exist:no-such-tag`, captured in
 run `20260511-210727-5cb9` under `image-failure/image-pull-evidence.txt`.
 
-### HG-4 boundary verification — PARTIAL
+### HG-4 boundary verification — PASS
 
-After-run evidence ladder + artifact table + cleanup-attribution lines are
-present. Each boundary maps to a specific artifact file with the expected
-content (e.g., writer/reader checksum lines, generated-blockvolume.yaml,
-iscsi-sessions.after-delete.txt). During-run `kubectl get sc,pv,pvc,pod`
-commands per individual state transition are not enumerated. Acceptable
-for the demo's batch-evidence model; non-blocking note 2 below.
+After-run evidence ladder + artifact table + cleanup-attribution lines remain.
+Additionally, commit `fe0de8d` adds a per-boundary during-run table covering
+all 8 boundaries the gate enumerates (plus residue):
+
+| Boundary | Command | Expected output |
+|---|---|---|
+| CSI controller Ready | `kubectl -n kube-system get deploy sw-block-csi-controller -o jsonpath='{.status.readyReplicas}/{.status.replicas}{"\n"}'` | `1/1` |
+| CSI node DaemonSet rolled out | `kubectl -n kube-system rollout status ds/sw-block-csi-node` | `daemon set ... successfully rolled out` |
+| StorageClass present | `kubectl get sc sw-block-dynamic -o jsonpath='{.provisioner}{"\n"}'` | `block.csi.seaweedfs.com` |
+| PVC Bound | `kubectl get pvc sw-block-demo-pvc -o jsonpath='{.status.phase}{"\n"}'` | `Bound` |
+| Generated blockvolume Deployment Ready | `kubectl -n default get deploy -l app=sw-blockvolume -o jsonpath='{.items[0].status.readyReplicas}/{.items[0].status.replicas}{"\n"}'` | `1/1` |
+| Writer pod Succeeded | `kubectl get pod sw-block-demo-writer -o jsonpath='{.status.phase}{"\n"}'` | `Succeeded` |
+| Reader checksum OK | `kubectl logs sw-block-demo-reader` | `/data/demo.bin: OK` |
+| Delete returned clean | `kubectl get pvc sw-block-demo-pvc` | `Error from server (NotFound): persistentvolumeclaims "sw-block-demo-pvc" not found` |
+| Residue absent | `sudo iscsiadm -m session` | `iscsiadm: No active sessions.` |
+
+Each row has the exact command and the exact expected output line. Strict
+PASS.
 
 ### HG-5 failure bundle reachable — PASS
 
@@ -178,19 +205,42 @@ artifacts:
   `[app-demo] PASS: app pod wrote data, replacement app pod read it back through the same PVC, cleanup complete`
   — the retry attempt succeeds after the cleanup.
 
-The gate's three retry cases were specified as (1) run install, kill it
-mid-way, re-run; (2) run install successfully, run again immediately;
-(3) run install with a stale PVC of the same name still present. The
-scenario primarily exercises (1) and the cleanup-before-retry pathway
-covers the stale-state-clears branch of (3). Case (2) "run again
-immediately after successful run" is implicitly covered by the runner-native
-chain pre_clean + happy-path flow, but is not a separate explicit fixture.
-Not a blocker; non-blocking note 3 below.
+The gate's three retry cases — (1) run install, kill mid-way, re-run;
+(2) run install successfully, run again immediately; (3) run install with a
+stale PVC of the same name still present — are now all covered by named
+phases:
 
-Note: HG-9 evidence is dev-produced, not QA-rerun, per the user's
-instruction to use existing evidence. The scenario YAML
-(`testops/scenarios/light-use-first-volume-retry-chain.yaml`) was reviewed
-by QA and its assertions match the gate property under test.
+- Case (1): `partial_first_attempt` → `cleanup_before_retry` → `retry_first_volume_demo`
+- Case (2): `rerun_after_success_no_cleanup` (added by commit `fe0de8d`)
+- Case (3): covered by the cleanup-before-retry pathway (stale-state cleared
+  by documented `uninstall-k8s-alpha.sh`, then retry succeeds)
+
+QA-owned re-run on commit `fe0de8d`, run `20260512-005836-0998`:
+
+```text
+state=pass   phases=9/9   actions=50/50
+  pass   pre_clean
+  pass   preflight
+  pass   pin_build_alpha_images
+  pass   partial_first_attempt
+  pass   cleanup_before_retry
+  pass   retry_first_volume_demo
+  pass   rerun_after_success_no_cleanup   (5m05s)
+  pass   final_asserts
+  pass   collect_and_cleanup
+```
+
+The `rerun_after_success_no_cleanup` phase ran a full demo cycle (writer
+pod, reader pod, cleanup) immediately after `retry_first_volume_demo`
+succeeded, with no explicit uninstall in between. Live evidence:
+
+```text
+success_rerun/run.log:    [app-demo] PASS: app pod wrote data, replacement app pod read it back through the same PVC, cleanup complete
+success_rerun/writer.log: /data/demo.bin: OK
+success_rerun/reader.log: /data/demo.bin: OK
+```
+
+Strict PASS.
 
 ### HG-10 ≥3 break classes — PASS
 
@@ -320,27 +370,24 @@ None.
 
 ## Non-blocking findings
 
-1. **HG-2 boundary check after `apply-k8s-alpha-blockvolumes.sh` is missing.**
-   The "Use Your Own App" path now elevates the script to a numbered step,
-   but the gate's strict pass condition also asked for a boundary
-   verification command after that step. Suggest adding a one-liner like
-   `kubectl get deploy -n default -l app=sw-blockvolume -o wide` and the
-   expected `Ready` column to the runbook.
+Items 1-3 below were earlier flagged as strict-gate gaps (HG-2 post-step
+boundary check, HG-4 per-boundary commands, HG-9 case 2). All three were
+closed by commit `fe0de8d` and re-verified live before this strict PASS
+verdict was issued. They are no longer residual issues. Listed here for
+audit traceability only:
 
-2. **HG-4 during-run kubectl boundary commands are not enumerated.**
-   The runbook's "Boundary checks" section is post-run, against the artifact
-   directory. A user who is stuck mid-run has no list of per-state
-   `kubectl get ...` commands with expected output lines. Acceptable for
-   the demo's batch-evidence model, but worth a future doc pass.
+1. ~~HG-2 boundary check after `apply-k8s-alpha-blockvolumes.sh`.~~
+   Closed by `fe0de8d`: `docs/quickstart-kubernetes.md` now has the verify
+   command + expected `1/1` output between step 3 and step 4 of "Use Your
+   Own App."
 
-3. **HG-9 third retry case is implicit, not explicit.**
-   The gate listed three retry fixtures: (1) Ctrl-C and retry, (2) double
-   run, (3) stale PVC of same name. The retry chain explicitly covers (1)
-   and the cleanup-before-retry pathway covers the stale-state-clears
-   branch. Case (2) "successful run, run again immediately" is not a named
-   phase but is implicitly covered by the normal happy-path scenario plus
-   pre_clean idempotency. Not a blocker; could be one additional retry
-   phase in a future pass.
+2. ~~HG-4 per-boundary during-run kubectl commands.~~ Closed by `fe0de8d`:
+   9-row table added covering all gate boundaries with exact command +
+   exact expected output line each.
+
+3. ~~HG-9 case 2 not a named fixture.~~ Closed by `fe0de8d`:
+   `rerun_after_success_no_cleanup` phase added to retry chain; verified
+   live in QA-owned run `20260512-005836-0998`.
 
 4. **`/var/lib/sw-block` is not cleaned by `uninstall-k8s-alpha.sh`.**
    Stale per-PVC paths can accumulate across runs for a runbook-only user.
@@ -350,8 +397,8 @@ None.
 5. **`iscsi-sessions.after-reader.txt` exists in both runs.**
    This is now listed in the First-Volume Evidence Ladder artifact table.
 
-None of these are close blockers under the gate. Items 4 and 5 were resolved
-before staging this close report; items 1-3 remain future doc/scope polish.
+None of these are close blockers under the gate. Items 1-3 are closed;
+items 4 and 5 are resolved in the runbook before staging this close report.
 
 ## Provenance of evidence
 
@@ -359,28 +406,32 @@ before staging this close report; items 1-3 remain future doc/scope polish.
 |---|---|---|
 | `sw-block-app-demo-20260512T055732Z` | HG-12 manual cold runbook follow | QA |
 | `20260511-225935-0ff4` | HG-12 / HG-7 scenario back-to-back | QA |
+| `20260512-005836-0998` | HG-9 retry chain (incl. new case 2 phase) on `fe0de8d` | QA |
 | `20260511-203619-885f` | HG-6 failure-bundle slice verification | QA |
 | `20260511-200544-dca5` | Happy-path live validation | Dev (scenario YAML reviewed by QA) |
-| `20260511-204348-ccc4` | HG-9 retry chain | Dev (scenario YAML reviewed by QA) |
+| `20260511-204348-ccc4` | HG-9 retry chain (pre-`fe0de8d`, original 8 phases) | Dev (scenario YAML reviewed by QA) |
 | `20260511-210727-5cb9` | HG-10 break classes | Dev (scenario YAML reviewed by QA) |
 
 Per the user's instruction to use existing evidence, the dev-owned runs
 above were spot-checked by QA against their scenario YAMLs and against the
-gate fixtures; QA did not personally re-execute those scenarios. The
-underlying YAMLs and the artifact contents both line up with the gate
-properties.
+gate fixtures; QA did not personally re-execute the happy-path and
+break-classes scenarios. The HG-9 retry chain was personally re-run by QA
+on commit `fe0de8d` to exercise the new `rerun_after_success_no_cleanup`
+phase. The underlying YAMLs and the artifact contents line up with the
+gate properties.
 
 ## Close recommendation
 
-PASS — the plan is clear to move from `current-plan.md` to
-`finished-plans/`. The remaining non-blocking findings should be tracked as
-follow-up doc polish but do not gate the close.
+PASS (strict) — the plan is clear to move from `current-plan.md` to
+`finished-plans/`. All 13 HG clauses pass the binary criteria in the
+hard-gate doc. The remaining non-blocking findings (items 4 and 5) are
+optional follow-up doc polish; they do not gate the close.
 
-## Dev Strict-Gate Follow-Up
+## Strict-Gate Revalidation Audit Trail
 
-After this report, QA re-read
+After the initial draft of this report, QA re-read
 `internal/docs/qa-assignments/light-use-mvp-close-hard-gate.md` as a strict
-binary gate and found three gaps:
+binary gate (no "MOSTLY PASS" / "PARTIAL" categories) and found three gaps:
 
 ```text
 HG-2: apply-k8s-alpha-blockvolumes was elevated but lacked its own boundary check.
@@ -388,14 +439,26 @@ HG-4: the runbook lacked per-boundary commands with exact expected lines.
 HG-9: "successful run, run again immediately" was implicit, not a named fixture.
 ```
 
-Dev addressed those gaps after the initial report:
+Dev addressed those gaps in commit `fe0de8d`:
 
-- `docs/quickstart-kubernetes.md` now includes a verified
-  `apply-k8s-alpha-blockvolumes.sh` boundary check with expected `1/1` output.
-- `docs/quickstart-kubernetes.md` now includes direct per-boundary commands and
-  expected output lines for CSI controller, CSI node, StorageClass, PVC,
-  generated Deployment, writer, reader, delete, and residue.
-- `testops/scenarios/light-use-first-volume-retry-chain.yaml` now includes a
-  named `rerun_after_success_no_cleanup` phase.
+- `docs/quickstart-kubernetes.md` adds a verified
+  `apply-k8s-alpha-blockvolumes.sh` boundary check with expected `1/1` output
+  (HG-2).
+- `docs/quickstart-kubernetes.md` adds a 9-row per-boundary table with exact
+  command and exact expected output line (HG-4).
+- `testops/scenarios/light-use-first-volume-retry-chain.yaml` adds a named
+  `rerun_after_success_no_cleanup` phase (HG-9 case 2).
 
-Strict close should be re-issued by QA after validating those three deltas.
+QA revalidation:
+
+- HG-2 / HG-4: cold-read of the updated `docs/quickstart-kubernetes.md`
+  sections; both satisfy the strict pass criteria.
+- HG-9: QA personally re-ran the retry chain on `fe0de8d`. Result:
+  `20260512-005836-0998`, state=pass, phases=9/9, actions=50/50. The new
+  `rerun_after_success_no_cleanup` phase passed (5m05s) with no manual
+  cleanup between the prior successful demo and the re-run; live PASS line
+  and writer + reader checksums captured.
+
+Strict PASS verdict above (the Verdict section) was issued after this
+revalidation; it supersedes the initial "PASS with MOSTLY/PARTIAL" wording
+that introduced soft categories not present in the gate.
