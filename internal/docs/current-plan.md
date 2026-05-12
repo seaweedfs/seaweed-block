@@ -47,6 +47,33 @@ What is still weak for a light-use product:
 - There is no single user-facing "first volume" claim with one fresh-run gate.
 - Failure diagnosis is not yet stitched into the first-volume workflow.
 
+## Research Baseline
+
+See `ref/light-use-block-storage-ux-research.md`.
+
+The useful comparison set is Longhorn, OpenEBS, Rook/Ceph, Piraeus/LINSTOR, and
+EKS EBS CSI. The common light-user shape is:
+
+```text
+preflight -> install -> wait/verify components -> create StorageClass/PVC ->
+create app -> verify bound/running/I/O -> inspect status -> teardown ->
+collect support data on failure
+```
+
+Design rules for this plan:
+
+- Pick one default path first: iSCSI + `walstore` + single-node k3s.
+- Add preflight checks before install instead of discovering missing host
+  dependencies late.
+- Verify every boundary, not just final PASS: pods, StorageClass, PVC,
+  generated `blockvolume`, app checksum, status bundle, cleanup.
+- Treat `sw-block ops status` as the support-bundle step for failures after
+  volume identity exists.
+- Keep cleanup attribution explicit: product/Kubernetes cleanup vs TestOps
+  guardrail cleanup.
+- Do not start a UI/dashboard in this plan; stabilize CLI/runbook/status
+  contracts first.
+
 ## Target User Experience
 
 An early user should be able to:
@@ -119,9 +146,11 @@ the end-to-end user claim.
 
 Update or add a concise runbook that answers:
 
+- preflight checks,
 - prerequisites,
 - exact launch/install command path,
 - exact app/PVC path,
+- boundary verification commands after install/PVC/app/cleanup,
 - expected success line,
 - expected cleanup result,
 - how to collect `sw-block ops status` artifacts,

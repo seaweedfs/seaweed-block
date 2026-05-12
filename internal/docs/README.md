@@ -42,6 +42,7 @@ Public-facing docs belong in `docs/`.
 | `finished-plans/phase8_finishedplan_main_merge_pr_readiness.md` | Historical main-merge readiness plan closed by PR #46 squash merge. |
 | `finished-plans/phase9_finishedplan_light_use_operations_mvp.md` | Historical light-use operations MVP plan closed by local CLI, bundle, and TestOps control-data validation. |
 | `ref/production-readiness-plan.md` | Longer readiness reference and iSCSI P1-P6 detail. |
+| `ref/light-use-block-storage-ux-research.md` | Comparison of Longhorn, OpenEBS, Rook/Ceph, Piraeus/LINSTOR, and EBS CSI light-user install/operations UX. |
 | `ref/iscsi-os-initiator-compat-plan.md` | Detailed iSCSI P1 OS-initiator compatibility plan and evidence. |
 | `ref/iscsi-v2-coverage-gap-audit.md` | V2-to-V3 iSCSI coverage gap audit and prioritized test backlog. |
 | `ref/v2-frontend-protocol-gap-audit.md` | Broader V2 frontend protocol feature gap audit. |
