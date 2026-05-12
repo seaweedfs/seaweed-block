@@ -9,8 +9,12 @@ command and live Kubernetes discovery. D3 reuses the existing one-volume
 `ops status` collector from the inventory command when a replica exposes a
 status endpoint. D4 added the user-facing quickstart inspection flow. D5 was
 green on m02 for the one-volume boundary via QA run `20260512-145129-5c2c` at
-product commit `b795f30`; it has now been tightened to cover two concurrent
-PVCs for HG-5 and needs a fresh QA rerun.
+product commit `b795f30`. QA then tightened HG-5 to two concurrent PVCs and
+found a real launcher bug at `9457e74`: both generated blockvolume workloads
+used the same node-local data/control/frontend/status ports on the single-node
+hostNetwork alpha path. The current slice fixes workload planning so multiple
+blockvolume workloads on the same server receive distinct node-local ports.
+D5 now needs a fresh QA rerun of the same two-PVC inventory chain.
 D6 fast RF/missing-replica fixtures are in place and now use the same
 machine-readable issue vocabulary as the QA hard gate.
 
