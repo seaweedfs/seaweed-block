@@ -166,6 +166,9 @@ Preferred source to refresh first: `docs/quickstart-kubernetes.md`.
 
 ### D2: Runner-Native First-Volume Scenario
 
+Status: initial scenario attached as
+`testops/scenarios/light-use-first-volume-chain.yaml`; needs validation on m02.
+
 Add a TestOps scenario for the same user path.
 
 Expected scenario shape:

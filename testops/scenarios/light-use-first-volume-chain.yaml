@@ -1,0 +1,193 @@
+# Runner-native light-use first-volume chain.
+#
+# Goal:
+#   Prove the documented Kubernetes quickstart path as a user-facing product
+#   loop, not just as an internal smoke:
+#     build/import -> launch alpha stack -> create PVC/app -> write/read ->
+#     delete -> verify cleanup attribution -> collect artifacts.
+#
+# Expected invocation:
+#   swblock run \
+#     -env product_root=/path/to/seaweed_block/on/m02 \
+#     -env ssh_key=/path/to/testdev_key/on/controller \
+#     testops/scenarios/light-use-first-volume-chain.yaml
+
+name: light-use-first-volume-chain
+timeout: 18m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: pre_clean
+    actions:
+      - action: pre_run_cleanup
+        node: m02
+        kill_patterns: "blockmaster,blockvolume,blockcsi,iscsi-target"
+        nvme_disconnect: "true"
+        iscsi_logout_prefix: "iqn.2026-05.io.seaweedfs"
+      - action: exec
+        node: m02
+        cmd: "rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-first-volume && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-first-volume/pin_build /mnt/smb/work/share/g15d-k8s/{{ run_id }}-first-volume/demo"
+      - action: assert_no_active_iscsi_sessions
+        node: m02
+        iqn_substr: "io.seaweedfs"
+      - action: assert_no_processes
+        node: m02
+        pattern: "[/]blockmaster --|[/]blockvolume --|[/]blockcsi |[/]iscsi-target |^blockmaster |^blockvolume |^blockcsi |^iscsi-target "
+
+  - name: preflight
+    actions:
+      - action: exec
+        node: m02
+        cmd: "bash -e -c 'command -v bash; command -v kubectl; command -v docker; command -v iscsiadm; kubectl version --client=true; kubectl get nodes -o wide; sudo -n k3s ctr images ls >/dev/null' > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-first-volume/preflight.txt 2>&1"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-first-volume/preflight.txt"
+        pattern: "Client Version|Kustomize Version|NAME"
+        save_as: preflight_count
+      - action: assert_greater
+        actual: "{{ preflight_count }}"
+        threshold: "0"
+
+  - name: pin_build_alpha_images
+    actions:
+      - action: exec
+        node: m02
+        timeout: 8m
+        cmd: "cd {{ product_root }} && bash scripts/build-alpha-images.sh {{ product_root }}"
+        env.SW_BLOCK_IMPORT_K3S: "1"
+        env.SW_BLOCK_ARTIFACT_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-first-volume/pin_build"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-first-volume/pin_build/alpha-images.env"
+        pattern: "SW_BLOCK_IMAGE_ID="
+        save_as: sw_block_image_id_count
+      - action: assert_greater
+        actual: "{{ sw_block_image_id_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-first-volume/pin_build/alpha-images.env"
+        pattern: "SW_BLOCK_CSI_IMAGE_ID="
+        save_as: sw_block_csi_image_id_count
+      - action: assert_greater
+        actual: "{{ sw_block_csi_image_id_count }}"
+        threshold: "0"
+
+  - name: first_volume_demo
+    actions:
+      - action: exec
+        node: m02
+        timeout: 10m
+        cmd: "cd {{ product_root }} && bash -lc 'set -a; source /mnt/smb/work/share/g15d-k8s/{{ run_id }}-first-volume/pin_build/alpha-images.env; set +a; bash scripts/run-k8s-demo.sh {{ product_root }}'"
+        env.SW_BLOCK_ARTIFACT_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-first-volume/demo"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-first-volume/demo/run.log"
+        pattern: "\\[app-demo\\] PASS: app pod wrote data, replacement app pod read it back through the same PVC, cleanup complete"
+        save_as: first_volume_pass_count
+      - action: assert_greater
+        actual: "{{ first_volume_pass_count }}"
+        threshold: "0"
+
+  - name: boundary_asserts
+    actions:
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-first-volume/demo/writer.log"
+        pattern: "/data/demo.bin: OK"
+        save_as: writer_checksum_count
+      - action: assert_greater
+        actual: "{{ writer_checksum_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-first-volume/demo/reader.log"
+        pattern: "/data/demo.bin: OK"
+        save_as: reader_checksum_count
+      - action: assert_greater
+        actual: "{{ reader_checksum_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-first-volume/demo/generated-blockvolume.yaml"
+        pattern: "--volume-id="
+        save_as: generated_volume_id_count
+      - action: assert_greater
+        actual: "{{ generated_volume_id_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-first-volume/demo/generated-blockvolume.yaml"
+        pattern: "--iscsi-listen="
+        save_as: generated_iscsi_count
+      - action: assert_greater
+        actual: "{{ generated_iscsi_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-first-volume/demo/iscsi-sessions.after-delete.txt"
+        pattern: "No active sessions|^$"
+        save_as: no_iscsi_session_count
+      - action: assert_greater
+        actual: "{{ no_iscsi_session_count }}"
+        threshold: "0"
+
+  - name: cleanup_attribution
+    actions:
+      - action: exec
+        node: m02
+        cmd: "cat > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-first-volume/cleanup-attribution.txt <<'EOF'\nproduct_or_kubernetes_cleanup:\n- PVC delete requested by demo script.\n- blockmaster launcher manifest cleanup waited after DeleteVolume.\n- generated blockvolume Deployment absence asserted after delete.\n- iSCSI session residue checked after delete.\n\ntestops_guardrail_cleanup:\n- demo script trap deletes known demo resources on exit.\n- chain pre_clean/collect_and_cleanup remove stale protocol sessions and processes.\n\nnon_claims:\n- not a production operator cleanup claim.\n- not a multi-node or HA lifecycle claim.\n- not an upgrade/uninstall claim.\nEOF"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-first-volume/cleanup-attribution.txt"
+        pattern: "product_or_kubernetes_cleanup:"
+        save_as: product_cleanup_count
+      - action: assert_greater
+        actual: "{{ product_cleanup_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-first-volume/cleanup-attribution.txt"
+        pattern: "testops_guardrail_cleanup:"
+        save_as: testops_cleanup_count
+      - action: assert_greater
+        actual: "{{ testops_cleanup_count }}"
+        threshold: "0"
+
+  - name: final_asserts
+    actions:
+      - action: assert_no_active_iscsi_sessions
+        node: m02
+        iqn_substr: "io.seaweedfs"
+      - action: assert_no_processes
+        node: m02
+        pattern: "[/]blockmaster --|[/]blockvolume --|[/]blockcsi |[/]iscsi-target |^blockmaster |^blockvolume |^blockcsi |^iscsi-target "
+
+  - name: collect_and_cleanup
+    always: true
+    actions:
+      - action: exec
+        node: m02
+        timeout: 3m
+        cmd: "cd {{ product_root }} && bash scripts/uninstall-k8s-alpha.sh {{ product_root }}"
+        env.SW_BLOCK_ARTIFACT_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-first-volume/uninstall"
+      - action: pre_run_cleanup
+        node: m02
+        kill_patterns: "blockmaster,blockvolume,blockcsi,iscsi-target"
+        nvme_disconnect: "true"
+        iscsi_logout_prefix: "iqn.2026-05.io.seaweedfs"
+      - action: collect_path
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-first-volume"
+        name: "remote-phases"
+        ignore_error: true
