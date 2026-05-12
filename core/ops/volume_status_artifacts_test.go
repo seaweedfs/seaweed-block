@@ -85,6 +85,28 @@ func TestWriteVolumeStatusArtifacts_WritesJSONAndSummary(t *testing.T) {
 	}
 }
 
+func TestWriteVolumeStatusArtifacts_ChmodFailureDoesNotDropEvidence(t *testing.T) {
+	oldChmod := chmodTempFile
+	chmodTempFile = func(*os.File, os.FileMode) error {
+		return errors.New("operation not permitted")
+	}
+	t.Cleanup(func() { chmodTempFile = oldChmod })
+
+	dir := t.TempDir()
+	report, code, err := WriteVolumeStatusArtifacts(context.Background(), dir, artifactTestCollector(nil))
+	if err != nil {
+		t.Fatalf("write artifacts despite chmod failure: %v", err)
+	}
+	if code != VolumeStatusExitOK || report.Volume.VolumeID != "v1" {
+		t.Fatalf("code=%d report=%+v", code, report.Volume)
+	}
+	for _, name := range []string{VolumeStatusReportArtifact, VolumeStatusSummaryArtifact, OpsStatusBundleArtifact} {
+		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+			t.Fatalf("missing artifact %s after chmod failure: %v", name, err)
+		}
+	}
+}
+
 func TestWriteVolumeStatusArtifacts_PreservesPartialReportOnCollectionError(t *testing.T) {
 	dir := t.TempDir()
 	collector := artifactTestCollector(errors.New("master temporarily unavailable"))

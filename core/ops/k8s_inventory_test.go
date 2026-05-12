@@ -175,6 +175,19 @@ func TestKubernetesInventoryCollector_KubernetesUnreachableIsInvalid(t *testing.
 	}
 }
 
+func TestLoopbackStatusPortOnlyRewritesGeneratedAddresses(t *testing.T) {
+	port, ok := loopbackStatusPort("127.0.0.1:23260")
+	if !ok || port != "23260" {
+		t.Fatalf("generated loopback addr port=%q ok=%t", port, ok)
+	}
+	if port, ok := loopbackStatusPort("http://127.0.0.1:23260"); ok || port != "" {
+		t.Fatalf("explicit URL should be treated as caller-reachable, port=%q ok=%t", port, ok)
+	}
+	if port, ok := loopbackStatusPort("10.0.0.5:23260"); ok || port != "" {
+		t.Fatalf("non-loopback addr port=%q ok=%t", port, ok)
+	}
+}
+
 func fixtureKubectl(outputs map[string]string) func(context.Context, string, ...string) ([]byte, error) {
 	return func(_ context.Context, name string, args ...string) ([]byte, error) {
 		key := strings.TrimSpace(name + " " + strings.Join(args, " "))

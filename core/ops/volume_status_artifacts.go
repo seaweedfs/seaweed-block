@@ -151,10 +151,10 @@ func writeFileViaTemp(path string, data []byte, perm os.FileMode) error {
 		_ = tmp.Close()
 		return err
 	}
-	if err := tmp.Chmod(perm); err != nil {
-		_ = tmp.Close()
-		return err
-	}
+	// SMB/CIFS-backed lab shares commonly reject chmod even though create,
+	// write, close, and rename are supported. Permissions are best-effort for
+	// support artifacts; refusing to write the bundle would lose the evidence.
+	_ = chmodTempFile(tmp, perm)
 	if err := tmp.Close(); err != nil {
 		return err
 	}
@@ -166,4 +166,8 @@ func writeFileViaTemp(path string, data []byte, perm os.FileMode) error {
 	}
 	cleanup = false
 	return nil
+}
+
+var chmodTempFile = func(file *os.File, perm os.FileMode) error {
+	return file.Chmod(perm)
 }

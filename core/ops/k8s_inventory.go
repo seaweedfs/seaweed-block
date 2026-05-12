@@ -4,8 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
+	"net/url"
+	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"time"
 )
 
 const seaweedBlockCSIDriver = "block.csi.seaweedfs.com"
@@ -132,15 +138,24 @@ func collectKubernetesReplicaStatusBundles(ctx context.Context, cfg KubernetesIn
 			relBundle := filepath.ToSlash(filepath.Join("volumes", safePathSegment(volumeID), safePathSegment(replica.ReplicaID)))
 			replica.SupportBundle = relBundle
 			bundleDir := filepath.Join(cfg.StatusBundleRoot, filepath.FromSlash(relBundle))
+			statusAddr, cleanup, statusAddrErr := statusAddressForKubernetesInventory(ctx, cfg, bundleDir, *replica)
+			if statusAddrErr != nil {
+				replica.Issues = append(replica.Issues, "status_endpoint_unreachable="+replica.StatusAddress)
+				replica.CollectionErrors = append(replica.CollectionErrors, prefixErrorMessages("ops_status", statusAddrErr)...)
+				continue
+			}
 			_, code, err := WriteVolumeStatusArtifacts(ctx, bundleDir, NewLiveVolumeStatusReportCollector(LiveVolumeStatusConfig{
 				VolumeID:        volumeID,
 				MasterAddr:      cfg.MasterAddr,
-				StatusAddr:      replica.StatusAddress,
+				StatusAddr:      statusAddr,
 				ProductRevision: cfg.ProductRevision,
 				RunnerRevision:  cfg.RunnerRevision,
 				Source:          ReportSource{Component: "sw-block ops inventory", Scenario: "replica-status"},
 				RunCommand:      cfg.RunCommand,
 			}))
+			if cleanup != nil {
+				cleanup()
+			}
 			if code != VolumeStatusExitOK {
 				replica.Issues = append(replica.Issues, "ops_status="+inventoryExitLabel(code))
 			}
@@ -151,6 +166,114 @@ func collectKubernetesReplicaStatusBundles(ctx context.Context, cfg KubernetesIn
 		}
 	}
 	return volumes
+}
+
+func statusAddressForKubernetesInventory(ctx context.Context, cfg KubernetesInventoryConfig, bundleDir string, replica VolumeInventoryReplicaInput) (string, func(), error) {
+	remotePort, ok := loopbackStatusPort(replica.StatusAddress)
+	if !ok {
+		return replica.StatusAddress, nil, nil
+	}
+	if replica.GeneratedDeployment == "" || replica.GeneratedDeployment == Unavailable {
+		return "", nil, fmt.Errorf("status endpoint %s is loopback and generated deployment is unavailable", replica.StatusAddress)
+	}
+	if err := os.MkdirAll(bundleDir, 0o755); err != nil {
+		return "", nil, fmt.Errorf("create replica status bundle dir: %w", err)
+	}
+	localPort, err := chooseInventoryLocalPort()
+	if err != nil {
+		return "", nil, err
+	}
+	logPath := filepath.Join(bundleDir, "status-port-forward.log")
+	logFile, err := os.Create(logPath)
+	if err != nil {
+		return "", nil, fmt.Errorf("create status port-forward log: %w", err)
+	}
+	cmd := exec.CommandContext(ctx, "kubectl", "-n", cfg.Namespace, "port-forward", "deploy/"+replica.GeneratedDeployment, fmt.Sprintf("%d:%s", localPort, remotePort))
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
+	if err := cmd.Start(); err != nil {
+		_ = logFile.Close()
+		return "", nil, fmt.Errorf("start status port-forward deploy/%s: %w", replica.GeneratedDeployment, err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		done <- cmd.Wait()
+		_ = logFile.Close()
+	}()
+	cleanup := func() {
+		if cmd.Process != nil && cmd.ProcessState == nil {
+			_ = cmd.Process.Kill()
+		}
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+		}
+	}
+	if err := waitInventoryTCPReady(ctx, "127.0.0.1", localPort, done); err != nil {
+		cleanup()
+		return "", nil, fmt.Errorf("status port-forward deploy/%s %d:%s not ready: %w", replica.GeneratedDeployment, localPort, remotePort, err)
+	}
+	return fmt.Sprintf("127.0.0.1:%d", localPort), cleanup, nil
+}
+
+func loopbackStatusPort(raw string) (string, bool) {
+	if raw == "" {
+		return "", false
+	}
+	if strings.Contains(raw, "://") {
+		return "", false
+	}
+	raw = "http://" + raw
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "", false
+	}
+	host, port, err := net.SplitHostPort(u.Host)
+	if err != nil || port == "" {
+		return "", false
+	}
+	if host == "127.0.0.1" || host == "localhost" || host == "::1" {
+		return port, true
+	}
+	return "", false
+}
+
+func chooseInventoryLocalPort() (int, error) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return 0, fmt.Errorf("choose local status port: %w", err)
+	}
+	defer ln.Close()
+	return ln.Addr().(*net.TCPAddr).Port, nil
+}
+
+func waitInventoryTCPReady(ctx context.Context, host string, port int, done <-chan error) error {
+	addr := net.JoinHostPort(host, strconv.Itoa(port))
+	deadline := time.Now().Add(20 * time.Second)
+	var lastErr error
+	for time.Now().Before(deadline) {
+		select {
+		case err := <-done:
+			if err == nil {
+				return fmt.Errorf("port-forward exited before readiness")
+			}
+			return err
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		conn, err := net.DialTimeout("tcp", addr, 500*time.Millisecond)
+		if err == nil {
+			_ = conn.Close()
+			return nil
+		}
+		lastErr = err
+		time.Sleep(250 * time.Millisecond)
+	}
+	if lastErr != nil {
+		return lastErr
+	}
+	return fmt.Errorf("timed out")
 }
 
 func prefixErrorMessages(prefix string, err error) []string {
