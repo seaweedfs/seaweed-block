@@ -7,7 +7,8 @@ Current task: D5 runner-native inventory gate. D1 defined the multi-volume/RF-
 aware inventory contract and summary shape. D2 added the operator-facing
 command and live Kubernetes discovery. D3 reuses the existing one-volume
 `ops status` collector from the inventory command when a replica exposes a
-status endpoint. D4 added the user-facing quickstart inspection flow.
+status endpoint. D4 added the user-facing quickstart inspection flow. D5 now
+has a runner-native scenario shell; it still needs a live m02 run before close.
 
 ## Product Question
 
