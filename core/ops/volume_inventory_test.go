@@ -152,6 +152,7 @@ func TestBuildVolumeInventory_MissingReplicaIsUnhealthyNotCollapsed(t *testing.T
 	}
 	for _, want := range []string{
 		"observed_replicas=1 desired_replicas=2",
+		"replica_slot_missing=r2",
 		"replica r2 missing",
 	} {
 		if !containsString(volume.Issues, want) {
@@ -172,6 +173,7 @@ func TestBuildVolumeInventory_MissingReplicaIsUnhealthyNotCollapsed(t *testing.T
 		"volume: id=pvc-rf2 namespace=default pvc=app-rf2 pv=unavailable rf=2 desired=2 observed=1 primary=r1 status=unhealthy",
 		"replica: volume=pvc-rf2 replica=r2 server=s2 node=node-b observed=false status=missing",
 		"- volume pvc-rf2 observed_replicas=1 desired_replicas=2",
+		"- volume pvc-rf2 replica_slot_missing=r2",
 		"- volume pvc-rf2 replica r2 missing",
 	} {
 		if !strings.Contains(summary, want) {

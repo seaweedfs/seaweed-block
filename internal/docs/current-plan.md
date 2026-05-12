@@ -9,6 +9,8 @@ command and live Kubernetes discovery. D3 reuses the existing one-volume
 `ops status` collector from the inventory command when a replica exposes a
 status endpoint. D4 added the user-facing quickstart inspection flow. D5 now
 has a runner-native scenario shell; it still needs a live m02 run before close.
+D6 fast RF/missing-replica fixtures are in place and now use the same
+machine-readable issue vocabulary as the QA hard gate.
 
 ## Product Question
 

@@ -363,9 +363,18 @@ func volumeInventoryVolumeIssues(volume VolumeInventoryVolume) []string {
 		}
 	}
 	for _, replica := range volume.Replicas {
+		switch replica.Status {
+		case "missing":
+			issues = append(issues, fmt.Sprintf("replica_slot_missing=%s", replica.ReplicaID))
+		case "unhealthy", "invalid":
+			issues = append(issues, fmt.Sprintf("replica_unhealthy=%s", replica.ReplicaID))
+		}
 		for _, issue := range replica.Issues {
 			issues = append(issues, fmt.Sprintf("replica %s %s", replica.ReplicaID, issue))
 		}
+	}
+	if volume.ObservedReplicas < volume.DesiredReplicas && len(volume.Replicas) == volume.ObservedReplicas {
+		issues = append(issues, "replica_slot_missing=unknown")
 	}
 	return issues
 }
