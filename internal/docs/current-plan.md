@@ -222,13 +222,17 @@ Minimum replica fields:
 - `status_address`,
 - `data_addr`,
 - `ctrl_addr`,
+- `observed`,
+- `status`,
 - `authority_role`,
 - `healthy`,
+- `frontend_primary_ready`,
 - `replication_role`,
 - `epoch`,
 - `endpoint_version`,
 - `residue`,
-- `issues`.
+- `issues`,
+- `collection_errors`.
 
 The contract must state non-claims: read-only observation, not repair; alpha
 single-cluster scope; best-effort partial discovery; RF=2/RF=3 Kubernetes live
