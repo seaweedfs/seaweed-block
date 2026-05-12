@@ -51,6 +51,7 @@ Non-promise for the current alpha:
 | Clean teardown | Smoke leaves no iSCSI sessions and no visible K8s resources. | Mostly done; generated workload cleanup still harness-assisted. |
 | Public docs | Users understand architecture, roadmap, and non-claims. | In progress. |
 | OS initiator compatibility | Linux/Windows iSCSI should survive real mkfs/format-sized writes. | Closed for Linux + Windows single-host validation. |
+| First-volume user loop | User can follow one runbook to launch, create a PVC, write/read, delete, and collect a failure bundle. | Closed for supported single-node alpha path. |
 
 ### Required For Beta
 
@@ -92,7 +93,7 @@ Priority definitions:
 | Failover under mounted workload | Availability claim must be proven at app path. | Planned | Build after multi-node attach. |
 | Replica reintegration policy | Returned replicas must not become ready from heartbeat alone. | Partially designed | G9 lifecycle work informs this. |
 | ACK profile rules | Avoid “best-effort” being mistaken for full durability. | Designed, not enforced | See production readiness plan. |
-| Observability/status surface | Users need diagnosis without reading debug logs. | Planned | CLI or HTTP status. |
+| Observability/status surface | Users need diagnosis without reading debug logs. | Active | Current plan: cluster operations inventory and lifecycle visibility. |
 
 ### P2: Expansion
 
@@ -153,15 +154,17 @@ claim.
 The next concrete product step is:
 
 ```text
-Move remaining iSCSI work to component-first session/backend pressure tests and
-keep long OS-initiator runs as milestone gates.
+Build cluster operations inventory: let an operator list Seaweed Block volumes,
+map them to PVC/PV/generated workloads, see protocol/endpoints/health, and
+collect a support bundle without reading TestOps artifacts.
 ```
 
 Current state:
 
-- Linux/open-iscsi gate is green at product commit `9e8ffab`.
-- Windows 11 built-in Initiator validation is green at product commit
-  `9e8ffab`.
-- V2 execution deltas are not reopened while the OS gates are green.
-- Future failures should be reduced to fast component/protocol tests before
-  adding more long integration loops.
+- Light-use first-volume path is formally closed at product commit `9a49992`.
+- Linux/open-iscsi and Windows 11 built-in Initiator gates are green for the
+  current alpha claim.
+- `sw-block ops status` is useful for one known volume, but discovery still
+  depends on generated manifests or run artifacts.
+- The active plan is `Cluster Operations Inventory And Lifecycle Visibility
+  MVP`.

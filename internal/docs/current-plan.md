@@ -1,368 +1,291 @@
-# Current Plan: Light-Use Install And Lifecycle Operations MVP
+# Current Plan: Cluster Operations Inventory And Lifecycle Visibility MVP
 
 Status: active. Opened after closing
-`finished-plans/phase9_finishedplan_light_use_operations_mvp.md`.
+`finished-plans/phase10_finishedplan_light_use_install_lifecycle_operations_mvp.md`.
 
-Current task: D1 first-volume runbook. The first slice is to make the user path
-and boundary evidence explicit before adding more runner automation.
+Current task: D1 operations inventory contract. The first slice is to define
+the operator-facing view before adding more CLI or scenario automation.
 
 ## Product Question
 
-Can an early developer use Seaweed Block as a basic Kubernetes block product
-without reading internal scripts, and can they diagnose the first failure with
-one product-owned status bundle?
+Can an early developer or operator look at a running Seaweed Block alpha cluster
+and answer the basic lifecycle questions without reading generated manifests,
+pod logs, or TestOps artifacts?
 
-The previous plan proved the observe/report/coordinate loop. This plan must
-prove the user-facing operational loop:
+The previous plan proved the first-volume user loop:
 
 ```text
-install/launch -> create PVC -> attach app pod -> write/read -> delete ->
-verify cleanup -> collect status bundle on failure
+install/launch -> create PVC -> app write/read -> delete -> cleanup evidence
+```
+
+This plan moves the operations layer from one known volume to cluster-visible
+inventory:
+
+```text
+list volumes -> map PVC/PV/frontends -> show lifecycle/health -> point to a
+support bundle -> identify stale or missing cleanup
 ```
 
 If this plan closes, the claim is still narrow:
 
 ```text
-Single-node Kubernetes light-use path: a user can install/launch the alpha
-stack, create one PVC, run app write/read, delete resources, and verify cleanup
-with a documented command path and TestOps gate.
+On the supported single-node Kubernetes alpha path, an operator can run a
+read-only command to see Seaweed Block volumes, their Kubernetes ownership,
+frontend/status endpoints, lifecycle health, residue hints, and support-bundle
+pointers.
 ```
 
-It is not a production HA, performance, upgrade, multi-node, or operator-grade
-claim.
+It is not a full operator, repair controller, UI, metrics pipeline, upgrade
+story, multi-node scheduling, or mutating admin surface.
 
 ## Current Honest State
 
-What already works in separate gates:
+What already works:
 
-- CSI dynamic PVC create/delete works.
-- iSCSI and NVMe protocol paths are release-gated.
-- App write/read through PVC exists in the K8s demo path.
-- Linux and Windows OS iSCSI initiator compatibility have evidence.
-- `sw-block ops status` can produce a self-describing bundle for one volume.
-- TestOps can coordinate shared-lab runs with active/history records and locks.
+- `sw-block ops status` can produce a useful support bundle for one known
+  volume when the caller already has the volume id and status address.
+- The first-volume quickstart and TestOps chain produce line-level cleanup
+  attribution.
+- TestOps can prove happy path, retry, failure bundle, and break-class behavior.
+- The generated `blockvolume` manifests include useful identity and endpoint
+  flags.
 
-What is still weak for a light-use product:
+What is still weak:
 
-- The user path is scattered across docs, alpha scripts, TestOps scenarios, and
-  QA reports.
-- Cleanup is partly product behavior and partly harness discipline.
-- There is no single user-facing "first volume" claim with one fresh-run gate.
-- Failure diagnosis is not yet stitched into the first-volume workflow.
+- A user cannot ask "what Seaweed Block volumes exist?" through one product
+  command.
+- `sw-block ops status` is not discoverable; it needs volume/status endpoint
+  inputs from artifacts or generated YAML.
+- Kubernetes ownership, PVC/PV identity, frontend protocol, status endpoint,
+  and cleanup residue are scattered across different files and commands.
+- There is no compact cluster support bundle for "send me the current state of
+  the alpha install."
+- The product has no read-only operational API/UI; CLI is the right first step.
 
-## Research Baseline
+## Product Value
 
-See `ref/light-use-block-storage-ux-research.md`.
-
-The useful comparison set is Longhorn, OpenEBS, Rook/Ceph, Piraeus/LINSTOR, and
-EKS EBS CSI. The common light-user shape is:
+This plan affects user experience directly. After it, an operator should be
+able to run a small number of commands:
 
 ```text
-preflight -> install -> wait/verify components -> create StorageClass/PVC ->
-create app -> verify bound/running/I/O -> inspect status -> teardown ->
-collect support data on failure
+sw-block ops list ...
+sw-block ops inspect --volume <id> ...
+sw-block ops bundle ...
 ```
 
-Design rules for this plan:
+and understand:
 
-- Pick one default path first: iSCSI + `walstore` + single-node k3s.
-- Add preflight checks before install instead of discovering missing host
-  dependencies late.
-- Verify every boundary, not just final PASS: pods, StorageClass, PVC,
-  generated `blockvolume`, app checksum, status bundle, cleanup.
-- Treat `sw-block ops status` as the support-bundle step for failures after
-  volume identity exists.
-- Keep cleanup attribution explicit: product/Kubernetes cleanup vs TestOps
-  guardrail cleanup.
-- Do not start a UI/dashboard in this plan; stabilize CLI/runbook/status
-  contracts first.
-
-## Target User Experience
-
-An early user should be able to:
-
-1. Start from a fresh checkout or released artifact on the supported lab shape.
-2. Run one documented launch/install path.
-3. Apply or generate a StorageClass/PVC and an app pod.
-4. Observe the PVC becoming usable.
-5. Write data, replace the app pod, and read the data back.
-6. Delete the app/PVC resources.
-7. Verify no obvious product or host residue remains.
-8. If the flow fails, run or receive a status bundle that explains what was
-   checked, what was unchecked, and what artifacts to attach.
+- which PVC/PV maps to which Seaweed Block volume,
+- whether the generated `blockvolume` workload exists,
+- which protocol and frontend/status address it exposes,
+- whether authority/replication/frontend status is healthy,
+- whether cleanup left active residue,
+- where the shareable support bundle lives.
 
 ## Scope
 
 In scope:
 
-- Refresh the first-volume quickstart/runbook around the actual supported path.
-- Make the claimed path executable by a TestOps scenario.
-- Separate product-owned lifecycle behavior from TestOps-only cleanup.
-- Add or tighten fast tests for any new parser, wrapper, or artifact contract.
-- Keep the operations status bundle wired into the failure path.
-- Add QA assignment for adversarial user-path validation.
+- Define a stable read-only inventory schema.
+- Add a product CLI surface for cluster/volume inventory.
+- Reuse the existing one-volume `ops status` report where possible.
+- Keep the command fail-closed: partial reports are allowed, false OK is not.
+- Add fast unit/component tests before integration.
+- Add a runner-native scenario that creates at least one real PVC and validates
+  inventory output.
+- Add a QA assignment focused on new-user/operator usability and adversarial
+  stale-state cases.
 
 Out of scope:
 
-- Full Kubernetes operator/controller.
-- Upgrade/uninstall story.
-- Multi-node attach.
-- HA failover claim for this user path.
-- Performance/SLO claim.
-- UI/dashboard.
-- Mutating repair/admin controls.
+- Mutating repair commands.
+- Automatic cleanup.
+- Full Kubernetes operator reconciliation.
+- Web UI.
+- Prometheus metrics.
+- Multi-node scheduler or placement policy.
+- Upgrade/uninstall safety.
 
 ## Top Blocking Issues
 
-### P0: First-Volume Path Must Be One Coherent User Story
+### P0: Inventory Discovery Must Not Depend On Test Artifacts
 
-Today the pieces exist, but the user story is fragmented.
+Today the best evidence is in scenario artifact directories. A real operator
+starts from the cluster, not from a successful test run.
 
-Close requirement: one runbook and one scenario prove the same flow.
+Close requirement: the product CLI discovers live alpha resources from
+Kubernetes/master/status endpoints and emits an inventory even when no TestOps
+artifact path is provided.
 
-### P0: Lifecycle Cleanup Must Be Attributed Correctly
+### P0: Volume Identity Must Be Human-Mappable
 
-The plan must not hide script-owned cleanup behind a product claim.
+Volume id alone is not enough. Users think in PVC namespace/name, PV name, app
+pod, and generated workload.
 
-Close requirement: the final evidence explicitly marks which cleanup happened
-because Kubernetes/product ownership worked and which cleanup was TestOps
-guardrail cleanup.
+Close requirement: inventory rows include Kubernetes owner identity when
+available: namespace, PVC, PV, generated deployment, protocol, and endpoint
+addresses.
 
-### P0: Failure Bundle Must Be Attached To The User Path
+### P0: Partial Failure Must Be Actionable
 
-The previous plan built `sw-block ops status`; this plan must show where it fits
-when the first-volume path fails.
+Inventory will often run while a PVC is half-created, a pod is crashlooping, or
+a status endpoint is unreachable.
 
-Close requirement: the TestOps scenario captures the relevant status/support
-artifacts on failure or records why they are unavailable.
+Close requirement: partial rows carry `status`, `issues`, `unchecked`, and
+`collection_errors`; the command exits non-zero only when the command itself
+cannot produce a trustworthy report.
 
-### P1: Keep Integration Time Under Control
+### P1: Keep Long Integration Small
 
-The scenario may use M01/M02 or k3s, but most logic should be component-tested.
+Most inventory logic should be tested with fixtures. The hardware/k3s gate
+should only prove the real Kubernetes/resource discovery boundary.
 
-Close requirement: new code has fast tests; long integration is reserved for
-the end-to-end user claim.
+Close requirement: schema parsing, issue classification, and bundle writing
+have fast tests; the TestOps scenario is a final user-path gate.
 
 ## Deliverables
 
-### D1: First-Volume Runbook
+### D1: Operations Inventory Contract
 
-Status: draft attached in `docs/quickstart-kubernetes.md`; dev-run validated
-through hardened `light-use-first-volume-chain` at run
-`20260511-200544-dca5`. Still needs QA new-user review before final close.
+Define `volume-inventory.json` and a human summary format.
 
-Update or add a concise runbook that answers:
+Minimum row fields:
 
-- preflight checks,
-- prerequisites,
-- exact launch/install command path,
-- exact app/PVC path,
-- boundary verification commands after install/PVC/app/cleanup,
-- expected success line,
-- expected cleanup result,
-- how to collect `sw-block ops status` artifacts,
-- non-claims.
+- `volume_id`,
+- `namespace`,
+- `pvc_name`,
+- `pv_name`,
+- `generated_deployment`,
+- `protocol`,
+- `frontend_address`,
+- `status_address`,
+- `authority_role`,
+- `healthy`,
+- `replication_role`,
+- `product_revision`,
+- `residue`,
+- `issues`,
+- `unchecked`,
+- `collection_errors`.
 
-Preferred source to refresh first: `docs/quickstart-kubernetes.md`.
+The contract must state non-claims: read-only observation, not repair; alpha
+single-cluster scope; best-effort partial discovery.
 
-### D2: Runner-Native First-Volume Scenario
+### D2: Product CLI Surface
 
-Status: initial scenario attached as
-`testops/scenarios/light-use-first-volume-chain.yaml`.
-
-Dev validation:
+Add the first discoverable command shape, expected to be one of:
 
 ```text
-run_id: 20260511-200544-dca5
-result: PASS
-wall:   3m30s
-actions: 35/35 passed
-host: m02
+sw-block ops list --namespace <ns> --out <dir>
+sw-block ops inventory --namespace <ns> --out <dir>
 ```
 
-The scenario proved runnable structured preflight, alpha image build/import,
-documented `run-k8s-demo.sh`, writer checksum, reader replacement checksum,
-generated iSCSI blockvolume manifest, no active iSCSI session after delete,
-line-level cleanup attribution, and final process/session assertions.
+The exact name can change during implementation, but the user experience must
+stay simple:
 
-Add a TestOps scenario for the same user path.
+- default to the alpha namespace/resource labels where possible,
+- print a compact table or summary to stdout,
+- write JSON and bundle metadata to `--out`,
+- do not require TestOps-specific paths.
 
-Expected scenario shape:
+### D3: Status Reuse / Per-Volume Inspect
+
+For each discovered live volume with a status endpoint, call or reuse the
+existing `ops status` collector and attach the per-volume report to the
+inventory bundle.
+
+Expected behavior:
+
+- healthy live volume: row is `status=ok`;
+- unreachable endpoint: row remains present with an issue and collection error;
+- missing generated workload: row remains present if PVC/PV identity exists;
+- stale residue: row marks residue without claiming product cleanup.
+
+### D4: Runbook Update
+
+Update `docs/quickstart-kubernetes.md` with a short operator section:
+
+```text
+After the demo starts, run:
+  sw-block ops list ...
+
+If something fails, attach:
+  <inventory bundle dir>
+  <per-volume ops status bundle>
+```
+
+The docs must show expected output for:
+
+- normal one-volume demo,
+- after PVC delete,
+- one partial/failure state.
+
+### D5: Runner-Native Inventory Gate
+
+Add a TestOps scenario that:
 
 ```text
 pre_clean
-pin_or_verify_build
-install_or_launch
-create_pvc_and_app
-verify_write_read
-delete_and_verify_cleanup
-collect_ops_bundle_on_failure
+pin/build alpha
+run first-volume demo to live volume boundary
+run ops inventory/list
+assert PVC/PV/volume/protocol/status endpoint fields
+delete PVC
+run inventory/list again
+assert cleanup state or documented absence
 collect_and_cleanup(always)
 ```
 
-The scenario should emit normal result/status bundles and participate in the
-shared control-data lock model.
+The scenario should be short enough to run as part of the light-use suite.
 
-### D3: Product-vs-Harness Cleanup Evidence
+### D6: Fast Tests And Review
 
-Status: line-level attribution script attached as
-`scripts/summarize-alpha-demo-cleanup.sh`; scenario now uses it. Dev run found
-the important boundary: active iSCSI sessions are removed by the demo flow, but
-an iSCSI node database entry can remain until TestOps guardrail cleanup deletes
-it. That is recorded as guardrail cleanup, not product-owned cleanup.
+Use TDD before wiring the live path:
 
-The artifact bundle should include a short cleanup summary:
+- fixture tests for Kubernetes object parsing,
+- fixture tests for generated manifest parsing,
+- inventory schema tests,
+- partial-error classification tests,
+- bundle writer tests.
 
-- Kubernetes resources deleted by normal owner references,
-- iSCSI/NVMe host residue check,
-- generated blockvolume deployment/state residue check,
-- TestOps cleanup actions, if any,
-- non-claims.
-
-### D4: Failure Diagnosis Hook
-
-Status: controlled failure-bundle path attached as
-`testops/scenarios/light-use-first-volume-failure-bundle-chain.yaml`.
-
-Dev validation:
-
-```text
-run_id: 20260511-202259-86e9
-result: PASS
-wall:   1m05s
-actions: 38/38 passed
-host: m02
-```
-
-The chain stops the first-volume demo after the generated blockvolume target is
-ready, collects `sw-block ops status` while the target is still live, verifies
-`ops-status-bundle.json` and `volume-status-summary.txt`, then proves cleanup in
-both normal and always-phase assertions. The collected bundle may be
-`status=unhealthy` at this stop point because the writer has not completed yet;
-that is expected and still useful diagnostic evidence.
-
-When the first-volume flow fails after a volume identity is known, capture the
-operations status bundle or a clear explanation:
-
-```text
-ops-status-unavailable: no volume id reached
-ops-status-collected: <path>
-```
-
-### D5: Fast Gates And Review
-
-Use TDD for new parsing/wrapper/status logic:
-
-- component tests for artifact summary parsing,
-- component tests for cleanup-attribution summary,
-- validate scenario YAML,
-- internal review agent before merge if code changes are non-trivial.
-
-### D6: Retry / Idempotency Gate
-
-Status: attached as
-`testops/scenarios/light-use-first-volume-retry-chain.yaml`.
-
-Dev validation:
-
-```text
-run_id: 20260511-204348-ccc4
-result: PASS
-wall:   4m10s
-actions: 43/43 passed
-host: m02
-```
-
-The chain starts from a verified clean state, intentionally stops the
-first-volume demo after the generated blockvolume is ready, keeps the PVC and
-generated blockvolume Deployment in place, runs the documented uninstall path,
-proves those stale resources are gone, and then reruns the normal first-volume
-demo successfully with writer and reader checksum evidence.
-
-The user-facing uninstall path now deletes the demo PVC-scoped generated
-blockvolume by volume label. Broad `app=sw-blockvolume` deletion is only enabled
-when TestOps sets `SW_BLOCK_UNINSTALL_DELETE_ALL_BLOCKVOLUMES=1`, so broad lab
-guardrails stay separate from user cleanup.
+Use an internal review agent before merge for the schema and CLI semantics.
 
 ### D7: QA Close Assignment
 
-Ask QA to validate as a new user, not just as an executor:
+Ask QA to validate as an operator, not just as a command executor:
 
-- run the documented path from a clean state,
-- run the runner-native scenario,
-- inspect the cleanup attribution,
-- intentionally break one prerequisite and confirm the failure bundle is useful,
-- report any confusing step or over-claim.
-
-### D8: Adversarial Break-Class Gate
-
-Status: attached as
-`testops/scenarios/light-use-first-volume-breaks-chain.yaml`.
-
-Dev validation:
-
-```text
-run_id: 20260511-210727-5cb9
-result: PASS
-wall:   3m57s
-actions: 36/36 passed
-host: m02
-```
-
-This chain covers the three HG-10 fixtures:
-
-- forced missing `iscsiadm` preflight, with remediation text;
-- unpullable product image, with `ops-status-unavailable: no volume id reached`
-  and `no-such-tag` image evidence;
-- mid-app attach failure by deleting the generated blockvolume via the
-  generated volume label, with a collected `sw-block ops status` bundle showing
-  status endpoint connection refusal and no host residue.
-
-The scenario also validates final cleanup and uses scoped generated-volume
-deletion for the attach break instead of broad `app=sw-blockvolume` sweeps.
-
-### D9: Manual Runbook / Scenario Consistency
-
-Status: QA PASS at product commit `ec76385`.
-
-QA ran the documented runbook manually and the runner-native
-`light-use-first-volume-chain` back-to-back on m02:
-
-```text
-manual run:   sw-block-app-demo-20260512T055732Z
-scenario run: 20260511-225935-0ff4
-result:       PASS / PASS
-```
-
-The demo artifact file list was identical inside the artifact directory. The
-final PASS line was byte-identical, writer and reader checksums matched, and
-the only functional differences were run id, timestamp, PVC UUID, and I/O
-timing noise. QA found one documented residue boundary: manual uninstall can
-leave non-active iSCSI node database entries or `/var/lib/sw-block/` clean-lab
-state, while TestOps guardrails attribute and remove that residue.
+- run the documented first-volume path,
+- run the inventory command without looking at TestOps artifacts,
+- confirm a stranger can map PVC -> Seaweed Block volume -> frontend/status,
+- create one stale/partial state and verify inventory names it clearly,
+- verify no false OK when endpoints are unreachable,
+- report confusing output or over-claims.
 
 ## Gates To Close
 
 This plan closes only when:
 
-1. The first-volume runbook is accurate from a fresh supported lab state.
-2. A runner-native scenario proves the same flow.
-3. The app write/read and pod replacement check pass.
-4. Delete/cleanup evidence is explicit and attributed.
-5. The operations status bundle is captured on failure, or the bundle explains
-   why no volume identity existed yet.
-6. Fast tests cover new logic.
-7. QA validates the user experience independently and reports no blocking
+1. The inventory schema is documented and covered by fast tests.
+2. The product CLI can discover at least the supported alpha resources without
+   TestOps artifact inputs.
+3. A live first-volume run produces a useful inventory row with PVC/PV,
+   generated deployment, protocol, status endpoint, and health fields.
+4. A partial/failure state produces actionable issues and collection errors.
+5. The command writes a support bundle suitable for issue reports.
+6. The quickstart shows how and when an operator runs the command.
+7. QA validates the operator experience independently and reports no blocking
    usability issue.
 
 ## Success Statement
 
-After this plan, Seaweed Block can make a narrow light-use product claim:
+After this plan, Seaweed Block can make a narrow operations claim:
 
 ```text
-On the supported single-node Kubernetes lab shape, an early user can follow one
-documented path to launch the alpha stack, create and use one block-backed PVC,
-delete it, verify cleanup, and collect a useful support bundle if it fails.
+On the supported single-node Kubernetes alpha path, an operator can discover
+the Seaweed Block volumes in the cluster, map them to Kubernetes PVC/PV
+objects, see health and endpoint status, and collect a shareable read-only
+support bundle without digging through generated YAML or TestOps artifacts.
 ```
 
-That is the bridge from "our tests pass" to "a user can try the product."
+This is the next step from "a first volume works" to "a user can operate and
+debug the alpha product."

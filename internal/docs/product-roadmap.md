@@ -72,10 +72,11 @@ This is the short internal roadmap. Keep it current and readable.
 
 ### Track A: Kubernetes Install And Cleanup
 
-- Current: the active plan is defining the light-use install/lifecycle loop:
-  install product, create StorageClass/PVC, run an app pod, delete resources,
-  and verify product-owned cleanup without TestOps acting as the operator.
-- Next: make cleanup ownership explicit and avoid harness-only cleanup paths.
+- Current: the light-use install/lifecycle loop is closed for the supported
+  single-node alpha path: install/launch, create PVC, run app write/read,
+  delete resources, verify cleanup attribution, and collect a failure bundle.
+- Next: keep cleanup ownership explicit while the operations layer learns to
+  discover live cluster state without TestOps artifacts.
 - Later: add a small controller/operator for generated `blockvolume`
   workloads.
 
@@ -116,11 +117,12 @@ This is the short internal roadmap. Keep it current and readable.
 
 ### Track F: Operations Layer
 
-- Current: first read-only operator loop is closed: `sw-block ops status`
-  collects one volume's master/frontend/durable/residue evidence and emits a
-  self-describing JSON report, human summary, and support bundle.
-- Next: wire that status bundle into the first-volume install/lifecycle path,
-  then move to cluster-wide list/status and product-owned lifecycle visibility.
+- Current: first-volume support-bundle wiring is closed. The active plan is
+  cluster operations inventory: discover live Seaweed Block volumes from the
+  alpha Kubernetes install, map them to PVC/PV/generated workloads, and attach
+  per-volume health/status evidence without relying on TestOps artifact paths.
+- Next: expand from read-only inventory to product-owned lifecycle visibility
+  and eventually conservative admin actions.
 - Later: observation API/UI, metrics, conservative admin controls, enterprise
   operations, hosted validation, fleet automation, and cloud-scale test
   lifecycle.
