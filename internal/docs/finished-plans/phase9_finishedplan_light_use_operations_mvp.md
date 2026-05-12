@@ -30,6 +30,11 @@ The answer after this plan is narrower but materially better:
   ownership, cluster-wide observation, and UI/API operations remain future
   work.
 
+Close decision: this plan is closed as `Light-Use Operations MVP`, not as
+`Light-Use Product MVP`. It proves observe/report/coordinate. It does not prove
+that a new user can provision, attach, format, mount, write, delete, and recover
+through one documented product workflow.
+
 ## Delivered User Experience
 
 As a user or developer, I can now:
@@ -183,3 +188,14 @@ collection of internal scripts plus TestOps cleanup discipline
 ```
 
 Candidate next plan: `Light-Use Install And Lifecycle MVP`.
+
+The cheapest useful next close loop is a "first volume in 10 minutes" path:
+
+```text
+install/launch -> create PVC -> attach app pod -> write/read -> delete ->
+verify cleanup -> collect status bundle if anything fails
+```
+
+Existing quickstart and K8s demo paths are promising, but the next plan should
+make the claim explicit, fresh-run it, and separate product-owned behavior from
+TestOps-only cleanup.
