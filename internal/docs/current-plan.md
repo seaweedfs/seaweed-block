@@ -3,6 +3,9 @@
 Status: active. Opened after closing
 `finished-plans/phase9_finishedplan_light_use_operations_mvp.md`.
 
+Current task: D1 first-volume runbook. The first slice is to make the user path
+and boundary evidence explicit before adding more runner automation.
+
 ## Product Question
 
 Can an early developer use Seaweed Block as a basic Kubernetes block product
@@ -143,6 +146,9 @@ the end-to-end user claim.
 ## Deliverables
 
 ### D1: First-Volume Runbook
+
+Status: draft attached in `docs/quickstart-kubernetes.md`; needs fresh-run
+validation before it can be treated as the final user path.
 
 Update or add a concise runbook that answers:
 
