@@ -172,6 +172,7 @@ The demo records the useful files under `/tmp/sw-block-app-demo-*`:
 | `writer.log` | First app pod wrote and verified `/data/demo.bin`. |
 | `reader.log` | Replacement app pod read and verified the same data. |
 | `app-storage.txt` | StorageClass/PV/PVC/pod state during the run. |
+| `iscsi-sessions.after-reader.txt` | Host iSCSI session state after the replacement reader verifies data. |
 | `app-storage.after-delete.txt` | App/PVC state after delete. |
 | `blockvolume-namespace-pods-deploys.after-delete.txt` | Generated blockvolume cleanup evidence. |
 | `iscsi-sessions.after-delete.txt` | Host iSCSI session residue check. |
@@ -356,6 +357,11 @@ This removes the demo app resources, the demo PVC-scoped generated
 `blockvolume`, CSI resources, and the blockmaster stack. It does not broadly
 delete every `app=sw-blockvolume` Deployment unless
 `SW_BLOCK_UNINSTALL_DELETE_ALL_BLOCKVOLUMES=1` is set by a TestOps guardrail.
+
+Some alpha or test paths can leave persistent blockvolume state under
+`/var/lib/sw-block/`. This quickstart does not claim upgrade or uninstall
+safety; remove those paths only when you need a clean lab and know no other run
+owns that state.
 
 ## Retry After A Partial Run
 

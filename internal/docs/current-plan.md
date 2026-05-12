@@ -321,6 +321,26 @@ This chain covers the three HG-10 fixtures:
 The scenario also validates final cleanup and uses scoped generated-volume
 deletion for the attach break instead of broad `app=sw-blockvolume` sweeps.
 
+### D9: Manual Runbook / Scenario Consistency
+
+Status: QA PASS at product commit `ec76385`.
+
+QA ran the documented runbook manually and the runner-native
+`light-use-first-volume-chain` back-to-back on m02:
+
+```text
+manual run:   sw-block-app-demo-20260512T055732Z
+scenario run: 20260511-225935-0ff4
+result:       PASS / PASS
+```
+
+The demo artifact file list was identical inside the artifact directory. The
+final PASS line was byte-identical, writer and reader checksums matched, and
+the only functional differences were run id, timestamp, PVC UUID, and I/O
+timing noise. QA found one documented residue boundary: manual uninstall can
+leave non-active iSCSI node database entries or `/var/lib/sw-block/` clean-lab
+state, while TestOps guardrails attribute and remove that residue.
+
 ## Gates To Close
 
 This plan closes only when:
