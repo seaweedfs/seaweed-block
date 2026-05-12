@@ -72,10 +72,10 @@ This is the short internal roadmap. Keep it current and readable.
 
 ### Track A: Kubernetes Install And Cleanup
 
-- Current: owner-reference cleanup is being defaulted for alpha scripts.
-- Next: avoid harness-only cleanup paths and define the light-use install loop:
+- Current: the active plan is defining the light-use install/lifecycle loop:
   install product, create StorageClass/PVC, run an app pod, delete resources,
   and verify product-owned cleanup without TestOps acting as the operator.
+- Next: make cleanup ownership explicit and avoid harness-only cleanup paths.
 - Later: add a small controller/operator for generated `blockvolume`
   workloads.
 
@@ -116,11 +116,11 @@ This is the short internal roadmap. Keep it current and readable.
 
 ### Track F: Operations Layer
 
-- Current: first read-only operator loop is active: `sw-block ops status`
+- Current: first read-only operator loop is closed: `sw-block ops status`
   collects one volume's master/frontend/durable/residue evidence and emits a
-  JSON report plus human summary.
-- Next: finish the self-describing support bundle for one volume, then move to
-  cluster-wide list/status and product-owned lifecycle visibility.
+  self-describing JSON report, human summary, and support bundle.
+- Next: wire that status bundle into the first-volume install/lifecycle path,
+  then move to cluster-wide list/status and product-owned lifecycle visibility.
 - Later: observation API/UI, metrics, conservative admin controls, enterprise
   operations, hosted validation, fleet automation, and cloud-scale test
   lifecycle.
