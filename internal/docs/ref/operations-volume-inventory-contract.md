@@ -82,6 +82,7 @@ Each `replicas[]` entry contains:
 - `protocol`
 - `frontend_address`
 - `status_address`
+- `support_bundle`
 - `data_addr`
 - `ctrl_addr`
 - `observed`
@@ -137,7 +138,8 @@ support bundles. It must include:
 - one line per volume with PVC/PV, RF, desired/observed counts, primary, and
   status,
 - one line per replica with server/node, observed flag, role, replication role,
-  health, epoch, endpoint version, frontend, and status endpoint,
+  health, epoch, endpoint version, frontend, status endpoint, and status
+  support-bundle pointer,
 - issue lines that name the volume and replica.
 
 ## Support Bundle Manifest
@@ -154,6 +156,18 @@ Required artifacts:
 - `volume-inventory-summary.txt`
 - `ops-inventory-bundle.json`
 
+When `sw-block ops inventory --master <addr>` discovers a live replica with a
+status endpoint, it also writes that replica's normal `sw-block ops status`
+bundle under:
+
+```text
+volumes/<volume_id>/<replica_id>/
+```
+
+The replica row's `support_bundle` field points at that nested directory. The
+nested bundle must keep the same semantics as standalone `sw-block ops status`;
+inventory may aggregate it, but must not redefine its fields or issue meaning.
+
 Required manifest fields:
 
 - `schema_version`
@@ -163,6 +177,7 @@ Required manifest fields:
 - `runner_revision`, when available
 - `exit_code`
 - `status`
+- `inventory_status`
 - `volume_count`
 - `artifacts`
 - `collection_errors`

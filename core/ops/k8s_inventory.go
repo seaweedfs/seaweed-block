@@ -4,16 +4,19 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"strings"
 )
 
 const seaweedBlockCSIDriver = "block.csi.seaweedfs.com"
 
 type KubernetesInventoryConfig struct {
-	Namespace       string
-	ProductRevision string
-	RunnerRevision  string
-	RunCommand      func(context.Context, string, ...string) ([]byte, error)
+	Namespace        string
+	MasterAddr       string
+	StatusBundleRoot string
+	ProductRevision  string
+	RunnerRevision   string
+	RunCommand       func(context.Context, string, ...string) ([]byte, error)
 }
 
 func NewKubernetesVolumeInventoryCollector(cfg KubernetesInventoryConfig) VolumeInventoryCollector {
@@ -103,6 +106,7 @@ func collectKubernetesVolumeInventory(ctx context.Context, cfg KubernetesInvento
 		}
 		volumes = append(volumes, volume)
 	}
+	volumes = collectKubernetesReplicaStatusBundles(ctx, cfg, volumes)
 
 	return BuildVolumeInventory(VolumeInventoryInput{
 		Source:          ReportSource{Component: "sw-block ops inventory", Scenario: "namespace=" + cfg.Namespace},
@@ -110,6 +114,51 @@ func collectKubernetesVolumeInventory(ctx context.Context, cfg KubernetesInvento
 		RunnerRevision:  cfg.RunnerRevision,
 		Volumes:         volumes,
 	}), nil
+}
+
+func collectKubernetesReplicaStatusBundles(ctx context.Context, cfg KubernetesInventoryConfig, volumes []VolumeInventoryVolumeInput) []VolumeInventoryVolumeInput {
+	if cfg.MasterAddr == "" || cfg.StatusBundleRoot == "" {
+		return volumes
+	}
+	for vi := range volumes {
+		volumeID := volumes[vi].VolumeID
+		for ri := range volumes[vi].Replicas {
+			replica := &volumes[vi].Replicas[ri]
+			if strings.TrimSpace(replica.StatusAddress) == "" {
+				replica.Issues = append(replica.Issues, "status_endpoint_unavailable")
+				replica.CollectionErrors = append(replica.CollectionErrors, "ops_status: status_address unavailable")
+				continue
+			}
+			relBundle := filepath.ToSlash(filepath.Join("volumes", safePathSegment(volumeID), safePathSegment(replica.ReplicaID)))
+			replica.SupportBundle = relBundle
+			bundleDir := filepath.Join(cfg.StatusBundleRoot, filepath.FromSlash(relBundle))
+			_, code, err := WriteVolumeStatusArtifacts(ctx, bundleDir, NewLiveVolumeStatusReportCollector(LiveVolumeStatusConfig{
+				VolumeID:        volumeID,
+				MasterAddr:      cfg.MasterAddr,
+				StatusAddr:      replica.StatusAddress,
+				ProductRevision: cfg.ProductRevision,
+				RunnerRevision:  cfg.RunnerRevision,
+				Source:          ReportSource{Component: "sw-block ops inventory", Scenario: "replica-status"},
+				RunCommand:      cfg.RunCommand,
+			}))
+			if code != VolumeStatusExitOK {
+				replica.Issues = append(replica.Issues, "ops_status="+inventoryExitLabel(code))
+			}
+			if err != nil {
+				replica.Issues = append(replica.Issues, "status_endpoint_unreachable="+replica.StatusAddress)
+				replica.CollectionErrors = append(replica.CollectionErrors, prefixErrorMessages("ops_status", err)...)
+			}
+		}
+	}
+	return volumes
+}
+
+func prefixErrorMessages(prefix string, err error) []string {
+	var out []string
+	for _, msg := range splitErrorMessages(err) {
+		out = append(out, prefix+": "+msg)
+	}
+	return out
 }
 
 func isSeaweedBlockPVC(pvc k8sPVC, pv k8sPV, hasPV bool) bool {
@@ -228,6 +277,15 @@ func max(a, b int) int {
 		return a
 	}
 	return b
+}
+
+func safePathSegment(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "unavailable"
+	}
+	replacer := strings.NewReplacer("/", "_", "\\", "_", ":", "_", "..", "_")
+	return replacer.Replace(value)
 }
 
 type k8sObjectMeta struct {

@@ -38,6 +38,7 @@ type OpsInventoryBundle struct {
 	RunnerRevision   string                       `json:"runner_revision,omitempty"`
 	ExitCode         int                          `json:"exit_code"`
 	Status           string                       `json:"status"`
+	InventoryStatus  string                       `json:"inventory_status"`
 	VolumeCount      int                          `json:"volume_count"`
 	Artifacts        []OpsStatusBundleArtifactRef `json:"artifacts"`
 	CollectionErrors []string                     `json:"collection_errors"`
@@ -61,6 +62,7 @@ func WriteVolumeInventoryArtifacts(ctx context.Context, dir string, collector Vo
 	}
 	classification := ClassifyVolumeInventory(inventory)
 	inventory.Status = inventoryExitLabel(classification)
+	commandExit := inventoryCommandExitCode(classification)
 
 	raw, err := json.MarshalIndent(inventory, "", "  ")
 	if err != nil {
@@ -72,7 +74,7 @@ func WriteVolumeInventoryArtifacts(ctx context.Context, dir string, collector Vo
 	if err := writeFileViaTemp(filepath.Join(dir, VolumeInventorySummaryArtifact), []byte(RenderVolumeInventorySummary(inventory)), 0o644); err != nil {
 		return inventory, VolumeStatusExitInvalid, fmt.Errorf("write %s: %w", VolumeInventorySummaryArtifact, err)
 	}
-	bundleRaw, err := json.MarshalIndent(BuildOpsInventoryBundle(inventory, classification), "", "  ")
+	bundleRaw, err := json.MarshalIndent(BuildOpsInventoryBundle(inventory, commandExit), "", "  ")
 	if err != nil {
 		return inventory, VolumeStatusExitInvalid, fmt.Errorf("marshal ops inventory bundle: %w", err)
 	}
@@ -80,9 +82,9 @@ func WriteVolumeInventoryArtifacts(ctx context.Context, dir string, collector Vo
 		return inventory, VolumeStatusExitInvalid, fmt.Errorf("write %s: %w", OpsInventoryBundleArtifact, err)
 	}
 	if collectErr != nil {
-		return inventory, classification, collectErr
+		return inventory, commandExit, collectErr
 	}
-	return inventory, classification, nil
+	return inventory, commandExit, nil
 }
 
 func BuildOpsInventoryBundle(inventory VolumeInventory, exitCode int) OpsInventoryBundle {
@@ -94,11 +96,19 @@ func BuildOpsInventoryBundle(inventory VolumeInventory, exitCode int) OpsInvento
 		RunnerRevision:   inventory.RunnerRevision,
 		ExitCode:         exitCode,
 		Status:           inventoryExitLabel(exitCode),
+		InventoryStatus:  inventory.Status,
 		VolumeCount:      len(inventory.Volumes),
 		Artifacts:        opsInventoryBundleArtifacts(),
 		CollectionErrors: copyStringSlice(inventory.CollectionErrors),
 		NonClaims:        copyStringSlice(inventory.NonClaims),
 	}
+}
+
+func inventoryCommandExitCode(classification int) int {
+	if classification == VolumeStatusExitInvalid {
+		return VolumeStatusExitInvalid
+	}
+	return VolumeStatusExitOK
 }
 
 func opsInventoryBundleArtifacts() []OpsStatusBundleArtifactRef {

@@ -3,8 +3,17 @@ package ops
 import (
 	"context"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/seaweedfs/seaweed-block/core/frontend"
+	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
+	hostvolume "github.com/seaweedfs/seaweed-block/core/host/volume"
+	"github.com/seaweedfs/seaweed-block/core/replication"
 )
 
 func TestKubernetesInventoryCollector_MapsTwoPVCsToDeployments(t *testing.T) {
@@ -78,6 +87,75 @@ func TestKubernetesInventoryCollector_OrphanPVCIsActionable(t *testing.T) {
 	}
 }
 
+func TestKubernetesInventoryCollector_AttachesReplicaStatusBundles(t *testing.T) {
+	masterAddr, closeMaster := startOpsFakeMaster(t)
+	defer closeMaster()
+	statusServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Query().Get("volume"); got != "pvc-a" {
+			t.Fatalf("volume query=%q want pvc-a", got)
+		}
+		switch r.URL.Path {
+		case "/status":
+			writeLiveJSON(t, w, hostvolume.StatusProjection{
+				Projection: frontend.Projection{
+					VolumeID:        "pvc-a",
+					ReplicaID:       "r1",
+					Epoch:           7,
+					EndpointVersion: 2,
+					Healthy:         true,
+				},
+				FrontendPrimaryReady: true,
+				AuthorityRole:        hostvolume.AuthorityRolePrimary,
+				ReplicationRole:      hostvolume.ReplicationRoleNone,
+			})
+		case "/status/peers":
+			writeLiveJSON(t, w, struct {
+				Peers []replication.ReplicaPeerStatus
+			}{Peers: []replication.ReplicaPeerStatus{}})
+		case "/status/durable":
+			writeLiveJSON(t, w, struct {
+				Volumes []durable.VolumeStatus
+			}{Volumes: []durable.VolumeStatus{{VolumeID: "pvc-a", ReplicaID: "r1", Latched: true, Operational: true}}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer statusServer.Close()
+	dir := t.TempDir()
+
+	collector := NewKubernetesVolumeInventoryCollector(KubernetesInventoryConfig{
+		Namespace:        "default",
+		MasterAddr:       masterAddr,
+		StatusBundleRoot: dir,
+		ProductRevision:  "product-rev",
+		RunnerRevision:   "runner-rev",
+		RunCommand: fixtureKubectl(map[string]string{
+			"kubectl -n default get pvc -o json":                          singlePVCListJSON,
+			"kubectl get pv -o json":                                      singlePVListJSON,
+			"kubectl -n default get deploy -l app=sw-blockvolume -o json": fmt.Sprintf(singleDeploymentListJSONTemplate, statusServer.URL),
+			"iscsiadm -m session":                                         "iscsiadm: No active sessions.\n",
+			"nvme list-subsys -o json":                                    `{"Subsystems":[]}`,
+		}),
+	})
+
+	inventory, err := collector.Collect(context.Background())
+	if err != nil {
+		t.Fatalf("collect: %v", err)
+	}
+	if inventory.Status != "ok" {
+		t.Fatalf("status=%s issues=%v", inventory.Status, VolumeInventoryIssues(inventory))
+	}
+	replica := inventory.Volumes[0].Replicas[0]
+	if replica.SupportBundle != "volumes/pvc-a/r1" {
+		t.Fatalf("support bundle=%q", replica.SupportBundle)
+	}
+	for _, name := range []string{VolumeStatusReportArtifact, VolumeStatusSummaryArtifact, OpsStatusBundleArtifact} {
+		if _, err := os.Stat(filepath.Join(dir, "volumes", "pvc-a", "r1", name)); err != nil {
+			t.Fatalf("missing status artifact %s: %v", name, err)
+		}
+	}
+}
+
 func TestKubernetesInventoryCollector_KubernetesUnreachableIsInvalid(t *testing.T) {
 	collector := NewKubernetesVolumeInventoryCollector(KubernetesInventoryConfig{
 		Namespace:       "default",
@@ -121,6 +199,33 @@ const pvListJSON = `{
     {"metadata":{"name":"pvc-a"},"spec":{"claimRef":{"namespace":"default","name":"app-a","uid":"uid-a"},"csi":{"driver":"block.csi.seaweedfs.com","volumeHandle":"pvc-a"}}},
     {"metadata":{"name":"pvc-b"},"spec":{"claimRef":{"namespace":"default","name":"app-b","uid":"uid-b"},"csi":{"driver":"block.csi.seaweedfs.com","volumeHandle":"pvc-b"}}},
     {"metadata":{"name":"pv-unrelated"},"spec":{"claimRef":{"namespace":"default","name":"unrelated","uid":"uid-x"},"csi":{"driver":"other.example.com","volumeHandle":"pv-unrelated"}}}
+  ]
+}`
+
+const singlePVCListJSON = `{
+  "items": [
+    {"metadata":{"name":"app-a","namespace":"default","uid":"uid-a"},"spec":{"volumeName":"pvc-a","storageClassName":"sw-block-dynamic"},"status":{"phase":"Bound"}}
+  ]
+}`
+
+const singlePVListJSON = `{
+  "items": [
+    {"metadata":{"name":"pvc-a"},"spec":{"claimRef":{"namespace":"default","name":"app-a","uid":"uid-a"},"csi":{"driver":"block.csi.seaweedfs.com","volumeHandle":"pvc-a"}}}
+  ]
+}`
+
+const singleDeploymentListJSONTemplate = `{
+  "items": [
+    {
+      "metadata":{
+        "name":"sw-blockvolume-pvc-a-r1",
+        "namespace":"default",
+        "labels":{"app":"sw-blockvolume","sw-block.seaweedfs.com/volume":"pvc-a","sw-block.seaweedfs.com/replica":"r1"},
+        "ownerReferences":[{"kind":"PersistentVolumeClaim","name":"app-a","uid":"uid-a"}]
+      },
+      "spec":{"template":{"spec":{"nodeSelector":{"kubernetes.io/hostname":"m02"},"containers":[{"name":"blockvolume","args":["--server-id=m02","--volume-id=pvc-a","--replica-id=r1","--data-addr=127.0.0.1:19101","--ctrl-addr=127.0.0.1:19102","--status-addr=%s","--iscsi-listen=127.0.0.1:3260","--iscsi-iqn=iqn.2026-05.io.seaweedfs:pvc-a"]}]}}},
+      "status":{"replicas":1,"readyReplicas":1}
+    }
   ]
 }`
 

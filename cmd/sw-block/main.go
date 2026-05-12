@@ -112,12 +112,14 @@ func runOpsInventory(args []string, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	var (
 		namespace       string
+		masterAddr      string
 		outDir          string
 		productRevision string
 		runnerRevision  string
 		timeout         time.Duration
 	)
 	fs.StringVar(&namespace, "namespace", "default", "Kubernetes namespace to inspect once live discovery is enabled")
+	fs.StringVar(&masterAddr, "master", "", "optional blockmaster gRPC address; when set, collect per-replica ops status bundles for replicas with --status-addr")
 	fs.StringVar(&outDir, "out", "", "directory for volume-inventory.json, volume-inventory-summary.txt, and ops-inventory-bundle.json")
 	fs.StringVar(&productRevision, "product-revision", "", "product revision label to include in the inventory")
 	fs.StringVar(&runnerRevision, "runner-revision", "", "runner revision label to include in the inventory")
@@ -136,10 +138,12 @@ func runOpsInventory(args []string, stdout, stderr io.Writer) int {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	collector := ops.NewKubernetesVolumeInventoryCollector(ops.KubernetesInventoryConfig{
-		Namespace:       namespace,
-		ProductRevision: productRevision,
-		RunnerRevision:  runnerRevision,
-		RunCommand:      opsInventoryRunCommand,
+		Namespace:        namespace,
+		MasterAddr:       masterAddr,
+		StatusBundleRoot: outDir,
+		ProductRevision:  productRevision,
+		RunnerRevision:   runnerRevision,
+		RunCommand:       opsInventoryRunCommand,
 	})
 	inventory, code, err := ops.WriteVolumeInventoryArtifacts(ctx, outDir, collector)
 	if err != nil {
@@ -156,5 +160,5 @@ func usage(w io.Writer) {
 	fmt.Fprintln(w, "usage:")
 	fmt.Fprintln(w, "  sw-block --version")
 	fmt.Fprintln(w, "  sw-block ops status --volume <id> --master <addr> --status-addr <addr|url> --out <dir>")
-	fmt.Fprintln(w, "  sw-block ops inventory --namespace <ns> --out <dir>")
+	fmt.Fprintln(w, "  sw-block ops inventory --namespace <ns> [--master <addr>] --out <dir>")
 }

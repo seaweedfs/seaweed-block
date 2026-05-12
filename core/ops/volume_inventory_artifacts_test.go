@@ -91,6 +91,53 @@ func TestWriteVolumeInventoryArtifacts_PreservesCollectionErrors(t *testing.T) {
 	}
 }
 
+func TestWriteVolumeInventoryArtifacts_UnhealthyRowsStillExitOK(t *testing.T) {
+	dir := t.TempDir()
+	inventory, code, err := WriteVolumeInventoryArtifacts(context.Background(), dir, StaticVolumeInventoryCollector(VolumeInventoryInput{
+		CapturedAt:      time.Date(2026, 5, 12, 12, 0, 0, 0, time.UTC),
+		Source:          ReportSource{Component: "component-test"},
+		ProductRevision: "product-rev",
+		Volumes: []VolumeInventoryVolumeInput{{
+			VolumeID:          "v1",
+			Namespace:         "default",
+			PVCName:           "app",
+			PVName:            "pv-v1",
+			ReplicationFactor: 2,
+			Replicas: []VolumeInventoryReplicaInput{{
+				ReplicaID:            "r1",
+				ServerID:             "m02",
+				NodeName:             "m02",
+				GeneratedDeployment:  "sw-blockvolume-v1-r1",
+				Protocol:             "iscsi",
+				FrontendAddress:      "127.0.0.1:3260",
+				StatusAddress:        "127.0.0.1:23260",
+				Observed:             true,
+				AuthorityRole:        "primary",
+				Healthy:              true,
+				FrontendPrimaryReady: true,
+				ReplicationRole:      "none",
+			}},
+		}},
+	}))
+	if err != nil {
+		t.Fatalf("write artifacts: %v", err)
+	}
+	if code != VolumeStatusExitOK || inventory.Status != "unhealthy" {
+		t.Fatalf("code=%d status=%s issues=%v", code, inventory.Status, VolumeInventoryIssues(inventory))
+	}
+	rawBundle, err := os.ReadFile(filepath.Join(dir, OpsInventoryBundleArtifact))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var bundle OpsInventoryBundle
+	if err := json.Unmarshal(rawBundle, &bundle); err != nil {
+		t.Fatal(err)
+	}
+	if bundle.ExitCode != VolumeStatusExitOK || bundle.Status != "ok" || bundle.InventoryStatus != "unhealthy" {
+		t.Fatalf("bundle=%+v", bundle)
+	}
+}
+
 func TestWriteVolumeInventoryArtifacts_RequiresArtifactDir(t *testing.T) {
 	_, code, err := WriteVolumeInventoryArtifacts(context.Background(), "", StaticVolumeInventoryCollector(VolumeInventoryInput{}))
 	if err == nil {

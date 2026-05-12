@@ -45,6 +45,7 @@ type VolumeInventoryReplicaInput struct {
 	Protocol             string
 	FrontendAddress      string
 	StatusAddress        string
+	SupportBundle        string
 	DataAddr             string
 	CtrlAddr             string
 	Observed             bool
@@ -99,6 +100,7 @@ type VolumeInventoryReplica struct {
 	Protocol             string        `json:"protocol"`
 	FrontendAddress      string        `json:"frontend_address"`
 	StatusAddress        string        `json:"status_address"`
+	SupportBundle        string        `json:"support_bundle"`
 	DataAddr             string        `json:"data_addr"`
 	CtrlAddr             string        `json:"ctrl_addr"`
 	Observed             bool          `json:"observed"`
@@ -213,6 +215,7 @@ func buildInventoryReplica(in VolumeInventoryReplicaInput) VolumeInventoryReplic
 		Protocol:             explicitUnavailable(in.Protocol),
 		FrontendAddress:      explicitUnavailable(in.FrontendAddress),
 		StatusAddress:        explicitUnavailable(in.StatusAddress),
+		SupportBundle:        explicitUnavailable(in.SupportBundle),
 		DataAddr:             explicitUnavailable(in.DataAddr),
 		CtrlAddr:             explicitUnavailable(in.CtrlAddr),
 		Observed:             in.Observed,
@@ -312,7 +315,7 @@ func RenderVolumeInventorySummary(in VolumeInventory) string {
 			strings.Join(volume.Protocols, ","),
 			len(volume.Replicas))
 		for _, replica := range volume.Replicas {
-			fmt.Fprintf(&b, "replica: volume=%s replica=%s server=%s node=%s observed=%t status=%s role=%s replication=%s healthy=%t epoch=%d endpoint_version=%d frontend=%s status_addr=%s\n",
+			fmt.Fprintf(&b, "replica: volume=%s replica=%s server=%s node=%s observed=%t status=%s role=%s replication=%s healthy=%t epoch=%d endpoint_version=%d frontend=%s status_addr=%s support_bundle=%s\n",
 				volume.VolumeID,
 				replica.ReplicaID,
 				replica.ServerID,
@@ -325,7 +328,8 @@ func RenderVolumeInventorySummary(in VolumeInventory) string {
 				replica.Epoch,
 				replica.EndpointVersion,
 				replica.FrontendAddress,
-				replica.StatusAddress)
+				replica.StatusAddress,
+				replica.SupportBundle)
 		}
 	}
 	if len(issues) == 0 {

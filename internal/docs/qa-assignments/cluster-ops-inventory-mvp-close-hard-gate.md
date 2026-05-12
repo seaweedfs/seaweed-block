@@ -77,12 +77,12 @@ Plan's P0: "Inventory Discovery Must Not Depend On Test Artifacts."
 
 **HG-3  All required volume-level and replica-level fields present.**
 
-Plan §D1 enumerates 17 volume fields and 20 replica fields. Every row at
+Plan §D1 enumerates 17 volume fields and 21 replica fields. Every row at
 every level must carry every field, with documented sentinels for absent
 values.
 
 - Fail: a volume row is missing one of the 17 fields, a replica row inside
-  `replicas:` is missing one of the 20 fields, or a field is silently
+  `replicas:` is missing one of the 21 fields, or a field is silently
   `null`/empty without an explicit `unavailable` / `unknown` sentinel
   or a matching entry in the row's `unchecked` list.
 - Pass: a one-volume one-replica row from a healthy demo has every named
@@ -233,6 +233,8 @@ report to the inventory bundle."
   replication, durable evidence, residue evidence, issue classification, and
   collection errors. Differences allowed only in surrounding inventory metadata
   (volume aggregation, file paths), not in per-replica evidence semantics.
+  The replica row's `support_bundle` points to the nested status bundle
+  directory, for example `volumes/<volume_id>/<replica_id>/`.
 
 ### Step 12 — Read-only contract proven
 
