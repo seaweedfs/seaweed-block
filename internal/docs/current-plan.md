@@ -205,11 +205,11 @@ shared control-data lock model.
 
 ### D3: Product-vs-Harness Cleanup Evidence
 
-Status: initial attribution artifact attached in the runner-native scenario.
-Dev run found the important boundary: active iSCSI sessions are removed by the
-demo flow, but an iSCSI node database entry can remain until TestOps guardrail
-cleanup deletes it. That is recorded as guardrail cleanup, not product-owned
-cleanup.
+Status: line-level attribution script attached as
+`scripts/summarize-alpha-demo-cleanup.sh`; scenario now uses it. Dev run found
+the important boundary: active iSCSI sessions are removed by the demo flow, but
+an iSCSI node database entry can remain until TestOps guardrail cleanup deletes
+it. That is recorded as guardrail cleanup, not product-owned cleanup.
 
 The artifact bundle should include a short cleanup summary:
 

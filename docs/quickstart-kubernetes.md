@@ -30,62 +30,43 @@ The writer and reader are not simultaneous. The PVC is `ReadWriteOnce`; the demo
 uses pod replacement to show that data is on the volume, not just inside the
 first pod.
 
-## Before You Start
+## First Volume In 10 Minutes
 
 This quick start is intentionally a single-node Kubernetes alpha path. Use it to
 prove the first-volume workflow, not production readiness.
 
-Preflight:
-
-```bash
-kubectl version --client=true
-kubectl get nodes -o wide
-command -v bash
-command -v kubectl
-```
-
-For the default iSCSI path, the node running the CSI node plugin also needs an
-iSCSI initiator. On Ubuntu/k3s labs this is normally `open-iscsi`:
-
-```bash
-command -v iscsiadm || echo "install open-iscsi before using the iSCSI path"
-```
-
-For local k3s image builds, Docker and k3s image import must be available:
-
-```bash
-command -v docker
-command -v sudo
-sudo k3s ctr images ls >/dev/null
-```
-
-If any preflight command fails, fix that first. Otherwise the storage failure
-will be mixed with environment setup failure.
-
-## Option A: Published Alpha Images
-
-Use this when your cluster can pull public images from GHCR.
+Recommended path: local k3s build. This avoids relying on public GHCR alpha
+packages and records the exact image IDs used by the cluster.
 
 ```bash
 export KUBECONFIG="${KUBECONFIG:-/etc/rancher/k3s/k3s.yaml}"
 
-bash scripts/run-k8s-demo-ghcr.sh "$PWD"
+bash scripts/preflight-k8s-alpha.sh --local-k3s
+
+SW_BLOCK_IMPORT_K3S=1 \
+SW_BLOCK_ARTIFACT_DIR=/tmp/sw-block-alpha-build \
+  bash scripts/build-alpha-images.sh "$PWD"
+
+bash scripts/run-k8s-demo.sh "$PWD"
 ```
-
-The script uses these images by default:
-
-```text
-ghcr.io/seaweedfs/seaweed-block:alpha
-ghcr.io/seaweedfs/seaweed-block-csi:alpha
-```
-
-If the GHCR packages are not public yet, use the local build path below.
 
 Expected final line:
 
 ```text
 [app-demo] PASS: app pod wrote data, replacement app pod read it back through the same PVC, cleanup complete
 ```
+
+The preflight command emits structured lines:
+
+```text
+[preflight] checked name=kubectl status=PASS ...
+[preflight] checked name=iscsiadm status=PASS ...
+[preflight] unchecked name=ghcr_pull reason="local-k3s path selected"
+[preflight] summary status=PASS checked=... failed=0 unchecked=... mode=local-k3s
+```
+
+If any preflight command fails, fix that first. Otherwise the storage failure
+will be mixed with environment setup failure.
 
 Boundary checks:
 
@@ -100,29 +81,6 @@ cat "$ARTIFACT_DIR/app-storage.after-delete.txt"
 cat "$ARTIFACT_DIR/iscsi-sessions.after-delete.txt"
 ```
 
-## Option B: Local k3s
-
-Use this when your test node can build Docker images locally.
-
-```bash
-export KUBECONFIG="${KUBECONFIG:-/etc/rancher/k3s/k3s.yaml}"
-
-SW_BLOCK_IMPORT_K3S=1 \
-SW_BLOCK_ARTIFACT_DIR=/tmp/sw-block-alpha-build \
-  bash scripts/build-alpha-images.sh "$PWD"
-
-bash scripts/run-k8s-demo.sh "$PWD"
-```
-
-`SW_BLOCK_ARTIFACT_DIR` records the local image IDs and `blockmaster`,
-`blockvolume`, and `blockcsi` version output used by the cluster.
-
-Expected final line:
-
-```text
-[app-demo] PASS: app pod wrote data, replacement app pod read it back through the same PVC, cleanup complete
-```
-
 The build artifact directory records image IDs and binary versions. The demo
 artifact directory records the first-volume evidence.
 
@@ -132,7 +90,38 @@ ARTIFACT_DIR="$(ls -td /tmp/sw-block-app-demo-* | head -1)"
 cat "$ARTIFACT_DIR/run.log"
 ```
 
-## Option C: Existing Cluster With Your Registry
+## Alternate Image Paths
+
+Use these only after the local k3s path is understood.
+
+### Published Alpha Images
+
+Use this when your cluster can pull public images from GHCR:
+
+```bash
+bash scripts/preflight-k8s-alpha.sh --ghcr
+bash scripts/run-k8s-demo-ghcr.sh "$PWD"
+```
+
+The script uses:
+
+```text
+ghcr.io/seaweedfs/seaweed-block:alpha
+ghcr.io/seaweedfs/seaweed-block-csi:alpha
+```
+
+If the images are not public or your cluster cannot pull them, app pods or
+Seaweed Block pods may show `ImagePullBackOff`. Inspect with:
+
+```bash
+kubectl -n kube-system describe pod -l app=sw-blockmaster
+kubectl -n kube-system describe pod -l app=sw-block-csi-controller
+```
+
+Remediation: use the local k3s path above, or push images to a registry your
+cluster can pull.
+
+### Existing Cluster With Your Registry
 
 Use this when your cluster pulls images from a registry.
 
@@ -190,13 +179,17 @@ The demo records the useful files under `/tmp/sw-block-app-demo-*`:
 
 Cleanup attribution:
 
-- Product/Kubernetes-owned cleanup: the PVC is deleted, blockmaster removes the
-  generated manifest, and PVC owner references allow generated `blockvolume`
-  workloads to be garbage-collected when that path is enabled.
-- Test guardrail cleanup: the demo script also deletes known demo resources and
-  captures residue files so a failed run is easier to inspect.
-- Non-claim: script cleanup succeeding is not the same as a production operator
-  owning all lifecycle reconciliation.
+```text
+pvc:sw-block-demo-pvc state=deleted deleted_by=demo-script-kubectl-delete evidence=demo/delete-pvc.log
+blockmaster-manifest:<volume-id> state=removed waited_by=demo-script-after-DeleteVolume evidence=demo/poll.log
+blockvolume-deploy:<name> namespace=default state=deleted deleted_by=pvc-owner-ref-or-demo-guard evidence=demo/blockvolume-namespace-pods-deploys.after-delete.txt
+iscsi-session:<iqn> state=absent released_by=csi-node-unstage evidence=demo/iscsi-sessions.after-delete.txt
+iscsi-node-db:<iqn> state=present_before_guardrail cleaned_by=testops-guardrail evidence=iscsi-nodes.after-demo.txt
+```
+
+Product/Kubernetes cleanup and TestOps guardrail cleanup are intentionally
+separate. An active iSCSI session must be gone after delete. A non-active iSCSI
+node database entry may remain until guardrail cleanup removes it.
 
 ## What To Show In A Demo
 
@@ -328,6 +321,8 @@ For the copyable YAML, see
   `blockvolume`.
 - Failover while a PVC remains mounted is not claimed.
 - NVMe-oF is not part of this alpha path.
+- Operator-grade reconciliation is not claimed.
+- Upgrade and uninstall safety are not claimed.
 - Performance numbers from this demo are not a product SLO.
 
 ## Cleanup
@@ -338,14 +333,18 @@ The runner performs cleanup automatically and records artifacts under
 If you need to clean up manually:
 
 ```bash
-kubectl delete pod sw-block-demo-writer sw-block-demo-reader --ignore-not-found=true
-kubectl delete pvc sw-block-demo-pvc --ignore-not-found=true
-kubectl delete deploy -A -l app=sw-blockvolume --ignore-not-found=true
+kubectl -n default delete pod sw-block-demo-writer sw-block-demo-reader --ignore-not-found=true
+kubectl -n default delete pvc sw-block-demo-pvc --ignore-not-found=true
+kubectl -n default delete deploy -l app=sw-blockvolume --ignore-not-found=true
 kubectl delete -f deploy/k8s/alpha/csi-driver.yaml --ignore-not-found=true
 kubectl delete -f deploy/k8s/alpha/rbac.yaml --ignore-not-found=true
 kubectl delete -f /tmp/sw-block-stack.yaml --ignore-not-found=true
 sudo iscsiadm -m session || true
 ```
+
+Do not use global cleanup commands such as `kubectl delete deploy -A -l
+app=sw-blockvolume` in a shared cluster. Broad sweeps are TestOps guardrails,
+not user-facing cleanup.
 
 For a full alpha stack uninstall:
 

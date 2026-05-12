@@ -48,11 +48,11 @@ phases:
     actions:
       - action: exec
         node: m02
-        cmd: "bash -e -c 'command -v bash; command -v kubectl; command -v docker; command -v iscsiadm; kubectl version --client=true; kubectl get nodes -o wide; sudo -n k3s ctr images ls >/dev/null' > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-first-volume/preflight.txt 2>&1"
+        cmd: "cd {{ product_root }} && bash scripts/preflight-k8s-alpha.sh --local-k3s > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-first-volume/preflight.txt 2>&1"
       - action: grep_log
         node: m02
         path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-first-volume/preflight.txt"
-        pattern: "Client Version:"
+        pattern: "summary status=PASS"
         save_as: preflight_count
       - action: assert_greater
         actual: "{{ preflight_count }}"
@@ -146,11 +146,11 @@ phases:
     actions:
       - action: exec
         node: m02
-        cmd: "sudo -n iscsiadm -m node > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-first-volume/iscsi-nodes.after-demo.txt 2>&1 || true; cat > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-first-volume/cleanup-attribution.txt <<'EOF'\nproduct_or_kubernetes_cleanup:\n- PVC delete requested by demo script.\n- blockmaster launcher manifest cleanup waited after DeleteVolume.\n- generated blockvolume Deployment absence asserted after delete.\n- active iSCSI session absence asserted after delete.\n\ntestops_guardrail_cleanup:\n- demo script trap deletes known demo resources on exit.\n- chain pre_clean/collect_and_cleanup remove stale protocol sessions, iSCSI node database entries, and processes.\n- iscsi-nodes.after-demo.txt records whether non-active initiator node records remained before guardrail cleanup.\n\nnon_claims:\n- not a production operator cleanup claim.\n- not a multi-node or HA lifecycle claim.\n- not an upgrade/uninstall claim.\nEOF"
+        cmd: "sudo -n iscsiadm -m node > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-first-volume/iscsi-nodes.after-demo.txt 2>&1 || true; cd {{ product_root }} && bash scripts/summarize-alpha-demo-cleanup.sh /mnt/smb/work/share/g15d-k8s/{{ run_id }}-first-volume/demo /mnt/smb/work/share/g15d-k8s/{{ run_id }}-first-volume/cleanup-attribution.txt /mnt/smb/work/share/g15d-k8s/{{ run_id }}-first-volume/iscsi-nodes.after-demo.txt"
       - action: grep_log
         node: m02
         path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-first-volume/cleanup-attribution.txt"
-        pattern: "product_or_kubernetes_cleanup:"
+        pattern: "^pvc:sw-block-demo-pvc state=deleted"
         save_as: product_cleanup_count
       - action: assert_greater
         actual: "{{ product_cleanup_count }}"
@@ -158,7 +158,7 @@ phases:
       - action: grep_log
         node: m02
         path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-first-volume/cleanup-attribution.txt"
-        pattern: "testops_guardrail_cleanup:"
+        pattern: "cleaned_by=testops-guardrail"
         save_as: testops_cleanup_count
       - action: assert_greater
         actual: "{{ testops_cleanup_count }}"
