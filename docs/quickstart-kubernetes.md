@@ -352,6 +352,48 @@ For a full alpha stack uninstall:
 bash scripts/uninstall-k8s-alpha.sh "$PWD"
 ```
 
+This removes the demo app resources, the demo PVC-scoped generated
+`blockvolume`, CSI resources, and the blockmaster stack. It does not broadly
+delete every `app=sw-blockvolume` Deployment unless
+`SW_BLOCK_UNINSTALL_DELETE_ALL_BLOCKVOLUMES=1` is set by a TestOps guardrail.
+
+## Retry After A Partial Run
+
+If you interrupt the demo after the PVC or generated `blockvolume` appears,
+clean up before retrying:
+
+```bash
+bash scripts/uninstall-k8s-alpha.sh "$PWD"
+```
+
+Then verify the retry boundary is clean:
+
+```bash
+kubectl -n default get pvc sw-block-demo-pvc
+kubectl -n default get deploy -l app=sw-blockvolume
+sudo iscsiadm -m session
+```
+
+Expected result:
+
+```text
+Error from server (NotFound): persistentvolumeclaims "sw-block-demo-pvc" not found
+No resources found in default namespace.
+iscsiadm: No active sessions.
+```
+
+After that, rerun the same demo command:
+
+```bash
+bash scripts/run-k8s-demo.sh "$PWD"
+```
+
+The retry behavior is gated by
+`testops/scenarios/light-use-first-volume-retry-chain.yaml`: it intentionally
+stops after the generated `blockvolume` is ready, leaves the PVC and
+`blockvolume` Deployment in place, runs the uninstall path, and then proves the
+same first-volume demo passes on retry.
+
 The scripted demo applies rendered manifests under its artifact directory. If
 you used custom image names, delete those rendered files instead of the source
 YAML:

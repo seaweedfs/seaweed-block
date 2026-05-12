@@ -13,6 +13,7 @@ RESTART_CSI_NODE_BEFORE_READER="${SW_BLOCK_RESTART_CSI_NODE_BEFORE_READER:-0}"
 RESTART_BLOCKVOLUME_BEFORE_READER="${SW_BLOCK_RESTART_BLOCKVOLUME_BEFORE_READER:-0}"
 DEMO_STOP_AFTER="${SW_BLOCK_DEMO_STOP_AFTER:-}"
 COLLECT_OPS_STATUS="${SW_BLOCK_DEMO_COLLECT_OPS_STATUS:-0}"
+KEEP_ON_STOP="${SW_BLOCK_DEMO_KEEP_ON_STOP:-0}"
 DEFAULT_DEMO_APP_MANIFEST="$ROOT/deploy/k8s/alpha/demo-app-pvc.yaml"
 DEMO_APP_MANIFEST="${SW_BLOCK_DEMO_APP_MANIFEST:-$DEFAULT_DEMO_APP_MANIFEST}"
 BLOCKVOLUME_NAMESPACE="kube-system"
@@ -37,6 +38,10 @@ if [[ "$RESTART_BLOCKVOLUME_BEFORE_READER" == "1" || "$RESTART_BLOCKVOLUME_BEFOR
 fi
 if [[ -n "$DEMO_STOP_AFTER" && "$DEMO_STOP_AFTER" != "blockvolume-ready" ]]; then
   echo "unsupported SW_BLOCK_DEMO_STOP_AFTER value: $DEMO_STOP_AFTER" >&2
+  exit 2
+fi
+if [[ -z "$DEMO_STOP_AFTER" && ( "$KEEP_ON_STOP" == "1" || "$KEEP_ON_STOP" == "true" ) ]]; then
+  echo "SW_BLOCK_DEMO_KEEP_ON_STOP requires SW_BLOCK_DEMO_STOP_AFTER" >&2
   exit 2
 fi
 
@@ -450,6 +455,7 @@ log "restart_csi_node_before_reader=$RESTART_CSI_NODE_BEFORE_READER"
 log "restart_blockvolume_before_reader=$RESTART_BLOCKVOLUME_BEFORE_READER"
 log "demo_stop_after=${DEMO_STOP_AFTER:-<none>}"
 log "collect_ops_status=$COLLECT_OPS_STATUS"
+log "keep_on_stop=$KEEP_ON_STOP"
 log "demo_app_manifest=$DEMO_APP_MANIFEST"
 kubectl version --client=true >"$ARTIFACT_DIR/kubectl-version.txt" 2>&1 || true
 kubectl get nodes -o wide >"$ARTIFACT_DIR/nodes.before.txt"
@@ -492,6 +498,15 @@ kubectl -n "$BLOCKVOLUME_NAMESPACE" wait --for=condition=available deploy -l app
 if [[ "$DEMO_STOP_AFTER" == "blockvolume-ready" ]]; then
   log "controlled stop after blockvolume ready"
   collect_ops_status_bundle
+  if [[ "$KEEP_ON_STOP" == "1" || "$KEEP_ON_STOP" == "true" ]]; then
+    log "keeping resources for retry validation"
+    {
+      echo "resources-kept: true"
+      echo "cleanup-required: bash scripts/uninstall-k8s-alpha.sh \"$ROOT\""
+    } >>"$ARTIFACT_DIR/controlled-stop.txt"
+    collect_logs
+    trap - EXIT
+  fi
   exit 42
 fi
 

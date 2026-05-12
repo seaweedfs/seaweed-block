@@ -258,7 +258,33 @@ Use TDD for new parsing/wrapper/status logic:
 - validate scenario YAML,
 - internal review agent before merge if code changes are non-trivial.
 
-### D6: QA Close Assignment
+### D6: Retry / Idempotency Gate
+
+Status: attached as
+`testops/scenarios/light-use-first-volume-retry-chain.yaml`.
+
+Dev validation:
+
+```text
+run_id: 20260511-204348-ccc4
+result: PASS
+wall:   4m10s
+actions: 43/43 passed
+host: m02
+```
+
+The chain starts from a verified clean state, intentionally stops the
+first-volume demo after the generated blockvolume is ready, keeps the PVC and
+generated blockvolume Deployment in place, runs the documented uninstall path,
+proves those stale resources are gone, and then reruns the normal first-volume
+demo successfully with writer and reader checksum evidence.
+
+The user-facing uninstall path now deletes the demo PVC-scoped generated
+blockvolume by volume label. Broad `app=sw-blockvolume` deletion is only enabled
+when TestOps sets `SW_BLOCK_UNINSTALL_DELETE_ALL_BLOCKVOLUMES=1`, so broad lab
+guardrails stay separate from user cleanup.
+
+### D7: QA Close Assignment
 
 Ask QA to validate as a new user, not just as an executor:
 

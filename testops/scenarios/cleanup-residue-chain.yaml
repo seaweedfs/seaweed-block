@@ -68,6 +68,7 @@ phases:
         timeout: 3m
         cmd: "cd {{ product_root }} && bash scripts/uninstall-k8s-alpha.sh {{ product_root }}"
         env.SW_BLOCK_ARTIFACT_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-cleanup-residue/uninstall"
+        env.SW_BLOCK_UNINSTALL_DELETE_ALL_BLOCKVOLUMES: "1"
       - action: exec
         node: m02
         cmd: "kubectl delete storageclass sw-block sw-block-example sw-block-dynamic sw-block-dynamic-nvme --ignore-not-found=true > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-cleanup-residue/delete-storageclasses.log 2>&1 || true"

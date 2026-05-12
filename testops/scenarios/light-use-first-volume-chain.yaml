@@ -181,6 +181,7 @@ phases:
         timeout: 3m
         cmd: "cd {{ product_root }} && bash scripts/uninstall-k8s-alpha.sh {{ product_root }}"
         env.SW_BLOCK_ARTIFACT_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-first-volume/uninstall"
+        env.SW_BLOCK_UNINSTALL_DELETE_ALL_BLOCKVOLUMES: "1"
       - action: pre_run_cleanup
         node: m02
         kill_patterns: "blockmaster,blockvolume,blockcsi,iscsi-target"
