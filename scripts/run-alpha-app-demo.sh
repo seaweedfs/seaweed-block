@@ -11,6 +11,8 @@ LAUNCHER_PVC_OWNER_REF="${SW_BLOCK_LAUNCHER_PVC_OWNER_REF:-0}"
 LAUNCHER_STATE_HOSTPATH="${SW_BLOCK_LAUNCHER_STATE_HOSTPATH:-}"
 RESTART_CSI_NODE_BEFORE_READER="${SW_BLOCK_RESTART_CSI_NODE_BEFORE_READER:-0}"
 RESTART_BLOCKVOLUME_BEFORE_READER="${SW_BLOCK_RESTART_BLOCKVOLUME_BEFORE_READER:-0}"
+DEMO_STOP_AFTER="${SW_BLOCK_DEMO_STOP_AFTER:-}"
+COLLECT_OPS_STATUS="${SW_BLOCK_DEMO_COLLECT_OPS_STATUS:-0}"
 DEFAULT_DEMO_APP_MANIFEST="$ROOT/deploy/k8s/alpha/demo-app-pvc.yaml"
 DEMO_APP_MANIFEST="${SW_BLOCK_DEMO_APP_MANIFEST:-$DEFAULT_DEMO_APP_MANIFEST}"
 BLOCKVOLUME_NAMESPACE="kube-system"
@@ -32,6 +34,10 @@ if [[ "$RESTART_BLOCKVOLUME_BEFORE_READER" == "1" || "$RESTART_BLOCKVOLUME_BEFOR
     echo "blockvolume restart mode requires SW_BLOCK_LAUNCHER_STATE_HOSTPATH so generated blockvolume state is durable" >&2
     exit 2
   fi
+fi
+if [[ -n "$DEMO_STOP_AFTER" && "$DEMO_STOP_AFTER" != "blockvolume-ready" ]]; then
+  echo "unsupported SW_BLOCK_DEMO_STOP_AFTER value: $DEMO_STOP_AFTER" >&2
+  exit 2
 fi
 
 mkdir -p "$ARTIFACT_DIR"
@@ -152,6 +158,105 @@ wait_blockvolume_log_pattern() {
 generated_blockvolume_arg() {
   local name="$1"
   sed -n "s/.*--${name}=\\([^\"[:space:]]*\\).*/\\1/p" "$ARTIFACT_DIR/generated-blockvolume.yaml" | head -n 1
+}
+
+wait_tcp_ready() {
+  local host="$1"
+  local port="$2"
+  local timeout_s="$3"
+  for _ in $(seq 1 "$timeout_s"); do
+    if (echo >/dev/tcp/"$host"/"$port") >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
+choose_local_port() {
+  python3 - <<'PY'
+import socket
+
+s = socket.socket()
+s.bind(("127.0.0.1", 0))
+try:
+    print(s.getsockname()[1])
+finally:
+    s.close()
+PY
+}
+
+run_sw_block_ops_status() {
+  local volume_id="$1"
+  local master_addr="$2"
+  local status_addr="$3"
+  local out_dir="$4"
+  local product_revision="${5:-unknown}"
+  if command -v sw-block >/dev/null 2>&1; then
+    sw-block ops status --volume "$volume_id" --master "$master_addr" --status-addr "$status_addr" --out "$out_dir" --product-revision "$product_revision" --timeout 15s
+    return $?
+  fi
+  go run ./cmd/sw-block ops status --volume "$volume_id" --master "$master_addr" --status-addr "$status_addr" --out "$out_dir" --product-revision "$product_revision" --timeout 15s
+}
+
+collect_ops_status_bundle() {
+  set +e
+  local out_dir="$ARTIFACT_DIR/ops-status"
+  local work_dir
+  local marker="$ARTIFACT_DIR/controlled-stop.txt"
+  local volume_id
+  local status_addr
+  local product_revision
+  local pf_port
+  local pf_pid
+  mkdir -p "$out_dir"
+  volume_id="$(generated_blockvolume_arg "volume-id")"
+  status_addr="$(generated_blockvolume_arg "status-addr")"
+  product_revision="${GIT_REVISION:-}"
+  if [[ -z "$product_revision" ]]; then
+    product_revision="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || true)"
+  fi
+  product_revision="${product_revision:-${SW_BLOCK_IMAGE_ID:-unknown}}"
+  work_dir="$(mktemp -d /tmp/sw-block-ops-status.XXXXXX)"
+  pf_port="${SW_BLOCK_OPS_STATUS_MASTER_PORT:-$(choose_local_port)}"
+  {
+    echo "phase=blockvolume-ready"
+    echo "volume_id=${volume_id:-<empty>}"
+    echo "status_addr=${status_addr:-<empty>}"
+    echo "ops_status_dir=$out_dir"
+    echo "ops_status_work_dir=$work_dir"
+  } >"$marker"
+  if [[ -z "$volume_id" || -z "$status_addr" ]]; then
+    echo "ops-status-unavailable: missing volume-id or status-addr" >>"$marker"
+    rm -rf "$work_dir"
+    return 0
+  fi
+  kubectl -n kube-system port-forward svc/blockmaster "${pf_port}:9333" >"$out_dir/blockmaster-port-forward.log" 2>&1 &
+  pf_pid=$!
+  echo "$pf_pid" >"$out_dir/blockmaster-port-forward.pid"
+  if ! wait_tcp_ready 127.0.0.1 "$pf_port" 20 || ! kill -0 "$pf_pid" >/dev/null 2>&1; then
+    echo "ops-status-unavailable: blockmaster port-forward did not become ready" >>"$marker"
+    kill "$pf_pid" >/dev/null 2>&1 || true
+    wait "$pf_pid" >/dev/null 2>&1 || true
+    rm -rf "$work_dir"
+    return 0
+  fi
+  (
+    cd "$ROOT"
+    run_sw_block_ops_status "$volume_id" "127.0.0.1:${pf_port}" "$status_addr" "$work_dir" "$product_revision"
+  ) >"$work_dir/stdout.txt" 2>"$work_dir/stderr.txt"
+  local rc=$?
+  echo "$rc" >"$work_dir/exit_code.txt"
+  cp -f "$work_dir"/* "$out_dir"/ 2>>"$marker" || true
+  kill "$pf_pid" >/dev/null 2>&1 || true
+  wait "$pf_pid" >/dev/null 2>&1 || true
+  if [[ -s "$out_dir/ops-status-bundle.json" ]]; then
+    echo "ops-status-collected: $out_dir exit_code=$rc" >>"$marker"
+  else
+    echo "ops-status-failed: exit_code=$rc dir=$out_dir" >>"$marker"
+  fi
+  rm -rf "$work_dir"
+  return 0
 }
 
 wait_blockvolume_durable_status() {
@@ -315,7 +420,7 @@ if [[ -n "$LAUNCHER_STATE_HOSTPATH" ]]; then
   mv "$STACK_RENDERED.tmp" "$STACK_RENDERED"
   grep -q -- '--launcher-state-hostpath=' "$STACK_RENDERED" || { echo "failed to inject --launcher-state-hostpath into $STACK_RENDERED" >&2; exit 1; }
 fi
-if [[ "$RESTART_BLOCKVOLUME_BEFORE_READER" == "1" || "$RESTART_BLOCKVOLUME_BEFORE_READER" == "true" ]]; then
+if [[ "$RESTART_BLOCKVOLUME_BEFORE_READER" == "1" || "$RESTART_BLOCKVOLUME_BEFORE_READER" == "true" || "$COLLECT_OPS_STATUS" == "1" || "$COLLECT_OPS_STATUS" == "true" || -n "$DEMO_STOP_AFTER" ]]; then
   awk '/--launcher-durable-root=/{print; print "            - \"--launcher-status\""; next} {print}' "$STACK_RENDERED" >"$STACK_RENDERED.tmp"
   mv "$STACK_RENDERED.tmp" "$STACK_RENDERED"
   grep -q -- '--launcher-status' "$STACK_RENDERED" || { echo "failed to inject --launcher-status into $STACK_RENDERED" >&2; exit 1; }
@@ -343,6 +448,8 @@ log "launcher_pvc_owner_ref=$LAUNCHER_PVC_OWNER_REF"
 log "launcher_state_hostpath=${LAUNCHER_STATE_HOSTPATH:-<emptyDir>}"
 log "restart_csi_node_before_reader=$RESTART_CSI_NODE_BEFORE_READER"
 log "restart_blockvolume_before_reader=$RESTART_BLOCKVOLUME_BEFORE_READER"
+log "demo_stop_after=${DEMO_STOP_AFTER:-<none>}"
+log "collect_ops_status=$COLLECT_OPS_STATUS"
 log "demo_app_manifest=$DEMO_APP_MANIFEST"
 kubectl version --client=true >"$ARTIFACT_DIR/kubectl-version.txt" 2>&1 || true
 kubectl get nodes -o wide >"$ARTIFACT_DIR/nodes.before.txt"
@@ -381,6 +488,12 @@ kubectl -n kube-system exec deploy/sw-blockmaster -c blockmaster -- sh -c 'cat /
 log "apply generated blockvolume workload"
 kubectl apply -f "$ARTIFACT_DIR/generated-blockvolume.yaml" | tee "$ARTIFACT_DIR/apply-generated-blockvolume.log"
 kubectl -n "$BLOCKVOLUME_NAMESPACE" wait --for=condition=available deploy -l app=sw-blockvolume --timeout=120s
+
+if [[ "$DEMO_STOP_AFTER" == "blockvolume-ready" ]]; then
+  log "controlled stop after blockvolume ready"
+  collect_ops_status_bundle
+  exit 42
+fi
 
 log "wait for app writer completion"
 if [[ "$RESTART_CSI_NODE_BEFORE_READER" == "1" || "$RESTART_CSI_NODE_BEFORE_READER" == "true" || "$RESTART_BLOCKVOLUME_BEFORE_READER" == "1" || "$RESTART_BLOCKVOLUME_BEFORE_READER" == "true" ]]; then

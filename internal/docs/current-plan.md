@@ -221,6 +221,26 @@ The artifact bundle should include a short cleanup summary:
 
 ### D4: Failure Diagnosis Hook
 
+Status: controlled failure-bundle path attached as
+`testops/scenarios/light-use-first-volume-failure-bundle-chain.yaml`.
+
+Dev validation:
+
+```text
+run_id: 20260511-202259-86e9
+result: PASS
+wall:   1m05s
+actions: 38/38 passed
+host: m02
+```
+
+The chain stops the first-volume demo after the generated blockvolume target is
+ready, collects `sw-block ops status` while the target is still live, verifies
+`ops-status-bundle.json` and `volume-status-summary.txt`, then proves cleanup in
+both normal and always-phase assertions. The collected bundle may be
+`status=unhealthy` at this stop point because the writer has not completed yet;
+that is expected and still useful diagnostic evidence.
+
 When the first-volume flow fails after a volume identity is known, capture the
 operations status bundle or a clear explanation:
 
