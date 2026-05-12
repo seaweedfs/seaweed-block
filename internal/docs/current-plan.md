@@ -294,6 +294,33 @@ Ask QA to validate as a new user, not just as an executor:
 - intentionally break one prerequisite and confirm the failure bundle is useful,
 - report any confusing step or over-claim.
 
+### D8: Adversarial Break-Class Gate
+
+Status: attached as
+`testops/scenarios/light-use-first-volume-breaks-chain.yaml`.
+
+Dev validation:
+
+```text
+run_id: 20260511-210727-5cb9
+result: PASS
+wall:   3m57s
+actions: 36/36 passed
+host: m02
+```
+
+This chain covers the three HG-10 fixtures:
+
+- forced missing `iscsiadm` preflight, with remediation text;
+- unpullable product image, with `ops-status-unavailable: no volume id reached`
+  and `no-such-tag` image evidence;
+- mid-app attach failure by deleting the generated blockvolume via the
+  generated volume label, with a collected `sw-block ops status` bundle showing
+  status endpoint connection refusal and no host residue.
+
+The scenario also validates final cleanup and uses scoped generated-volume
+deletion for the attach break instead of broad `app=sw-blockvolume` sweeps.
+
 ## Gates To Close
 
 This plan closes only when:

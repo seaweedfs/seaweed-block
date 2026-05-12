@@ -1,0 +1,190 @@
+# Runner-native HG-10 adversarial break-class chain.
+#
+# Goal:
+#   Exercise the three close-gate break classes from
+#   internal/docs/qa-assignments/light-use-mvp-close-hard-gate.md and prove
+#   each failure leaves actionable evidence instead of a silent timeout.
+
+name: light-use-first-volume-breaks-chain
+timeout: 25m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: pre_clean
+    actions:
+      - action: pre_run_cleanup
+        node: m02
+        kill_patterns: "blockmaster,blockvolume,blockcsi,iscsi-target"
+        nvme_disconnect: "true"
+        iscsi_logout_prefix: "iqn.2026-05.io.seaweedfs"
+      - action: exec
+        node: m02
+        cmd: "rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-first-volume-breaks && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-first-volume-breaks/preflight-missing-iscsiadm /mnt/smb/work/share/g15d-k8s/{{ run_id }}-first-volume-breaks/image-failure /mnt/smb/work/share/g15d-k8s/{{ run_id }}-first-volume-breaks/attach-failure /mnt/smb/work/share/g15d-k8s/{{ run_id }}-first-volume-breaks/pin_build"
+      - action: exec
+        node: m02
+        timeout: 3m
+        cmd: "cd {{ product_root }} && bash scripts/uninstall-k8s-alpha.sh {{ product_root }}"
+        env.SW_BLOCK_ARTIFACT_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-first-volume-breaks/pre_clean_uninstall"
+        env.SW_BLOCK_UNINSTALL_DELETE_ALL_BLOCKVOLUMES: "1"
+      - action: exec
+        node: m02
+        cmd: "pkill -f 'kubectl.*port-forward.*svc/blockmaste[r]' >/dev/null 2>&1 || true"
+      - action: assert_no_active_iscsi_sessions
+        node: m02
+        iqn_substr: "io.seaweedfs"
+      - action: assert_no_processes
+        node: m02
+        pattern: "[/]blockmaster --|[/]blockvolume --|[/]blockcsi |[/]iscsi-target |[/]kubectl .*port-forward .*svc/blockmaste[r]|^blockmaster |^blockvolume |^blockcsi |^iscsi-target "
+
+  - name: break_preflight_missing_iscsiadm
+    actions:
+      - action: exec
+        node: m02
+        cmd: "cd {{ product_root }} && bash -lc 'set +e; SW_BLOCK_PREFLIGHT_FORCE_MISSING=iscsiadm bash scripts/preflight-k8s-alpha.sh --local-k3s > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-first-volume-breaks/preflight-missing-iscsiadm/preflight.txt 2>&1; rc=$?; echo $rc > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-first-volume-breaks/preflight-missing-iscsiadm/exit_code.txt; test \"$rc\" -eq 2'"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-first-volume-breaks/preflight-missing-iscsiadm/preflight.txt"
+        pattern: "checked name=iscsiadm status=FAIL"
+        save_as: missing_iscsiadm_count
+      - action: assert_greater
+        actual: "{{ missing_iscsiadm_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-first-volume-breaks/preflight-missing-iscsiadm/preflight.txt"
+        pattern: "Install open-iscsi/iscsiadm"
+        save_as: missing_iscsiadm_remediation_count
+      - action: assert_greater
+        actual: "{{ missing_iscsiadm_remediation_count }}"
+        threshold: "0"
+
+  - name: pin_build_alpha_images
+    actions:
+      - action: exec
+        node: m02
+        timeout: 8m
+        cmd: "cd {{ product_root }} && bash scripts/build-alpha-images.sh {{ product_root }}"
+        env.SW_BLOCK_IMPORT_K3S: "1"
+        env.SW_BLOCK_ARTIFACT_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-first-volume-breaks/pin_build"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-first-volume-breaks/pin_build/alpha-images.env"
+        pattern: "SW_BLOCK_IMAGE_ID="
+        save_as: sw_block_image_id_count
+      - action: assert_greater
+        actual: "{{ sw_block_image_id_count }}"
+        threshold: "0"
+
+  - name: break_mid_install_bad_image
+    actions:
+      - action: exec
+        node: m02
+        timeout: 5m
+        cmd: "cd {{ product_root }} && bash -lc 'set +e; SW_BLOCK_IMAGE=ghcr.io/seaweedfs/does-not-exist:no-such-tag SW_BLOCK_CSI_IMAGE=ghcr.io/seaweedfs/does-not-exist:no-such-tag SW_BLOCK_DEMO_COLLECT_OPS_STATUS=1 bash scripts/run-k8s-demo.sh {{ product_root }}; rc=$?; echo $rc > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-first-volume-breaks/image-failure/exit_code.txt; test \"$rc\" -ne 0'"
+        env.SW_BLOCK_ARTIFACT_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-first-volume-breaks/image-failure"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-first-volume-breaks/image-failure/controlled-stop.txt"
+        pattern: "ops-status-unavailable: no volume id reached"
+        save_as: image_ops_unavailable_count
+      - action: assert_greater
+        actual: "{{ image_ops_unavailable_count }}"
+        threshold: "0"
+      - action: exec
+        node: m02
+        cmd: "grep -E 'ImagePullBackOff|ErrImagePull|does-not-exist|no-such-tag' /mnt/smb/work/share/g15d-k8s/{{ run_id }}-first-volume-breaks/image-failure/kube-system-pods-deploys.txt /mnt/smb/work/share/g15d-k8s/{{ run_id }}-first-volume-breaks/image-failure/*.describe.txt > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-first-volume-breaks/image-failure/image-pull-evidence.txt 2>&1"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-first-volume-breaks/image-failure/image-pull-evidence.txt"
+        pattern: "no-such-tag"
+        save_as: image_failure_evidence_count
+      - action: assert_greater
+        actual: "{{ image_failure_evidence_count }}"
+        threshold: "0"
+      - action: exec
+        node: m02
+        timeout: 3m
+        cmd: "cd {{ product_root }} && bash scripts/uninstall-k8s-alpha.sh {{ product_root }}"
+        env.SW_BLOCK_ARTIFACT_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-first-volume-breaks/image-failure-cleanup"
+        env.SW_BLOCK_UNINSTALL_DELETE_ALL_BLOCKVOLUMES: "1"
+
+  - name: break_mid_app_attach
+    actions:
+      - action: exec
+        node: m02
+        timeout: 6m
+        cmd: "cd {{ product_root }} && bash -lc 'set -a; source /mnt/smb/work/share/g15d-k8s/{{ run_id }}-first-volume-breaks/pin_build/alpha-images.env; set +a; set +e; SW_BLOCK_DEMO_COLLECT_OPS_STATUS=1 SW_BLOCK_DEMO_WRITER_TIMEOUT=45 SW_BLOCK_DEMO_BREAK_AFTER_BLOCKVOLUME_READY=delete-generated-blockvolume bash scripts/run-k8s-demo.sh {{ product_root }}; rc=$?; echo $rc > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-first-volume-breaks/attach-failure/exit_code.txt; test \"$rc\" -ne 0'"
+        env.SW_BLOCK_ARTIFACT_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-first-volume-breaks/attach-failure"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-first-volume-breaks/attach-failure/run.log"
+        pattern: "\\[app-demo\\] delete generated blockvolume after ready"
+        save_as: attach_hook_count
+      - action: assert_greater
+        actual: "{{ attach_hook_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-first-volume-breaks/attach-failure/run.log"
+        pattern: "\\[app-demo\\] collect ops status after failure"
+        save_as: attach_collect_count
+      - action: assert_greater
+        actual: "{{ attach_collect_count }}"
+        threshold: "0"
+      - action: exec
+        node: m02
+        cmd: "test -s /mnt/smb/work/share/g15d-k8s/{{ run_id }}-first-volume-breaks/attach-failure/ops-status/ops-status-bundle.json"
+      - action: exec
+        node: m02
+        timeout: 3m
+        cmd: "cd {{ product_root }} && bash scripts/uninstall-k8s-alpha.sh {{ product_root }}"
+        env.SW_BLOCK_ARTIFACT_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-first-volume-breaks/attach-failure-cleanup"
+        env.SW_BLOCK_UNINSTALL_DELETE_ALL_BLOCKVOLUMES: "1"
+
+  - name: final_asserts
+    actions:
+      - action: assert_no_active_iscsi_sessions
+        node: m02
+        iqn_substr: "io.seaweedfs"
+      - action: assert_no_processes
+        node: m02
+        pattern: "[/]blockmaster --|[/]blockvolume --|[/]blockcsi |[/]iscsi-target |[/]kubectl .*port-forward .*svc/blockmaste[r]|^blockmaster |^blockvolume |^blockcsi |^iscsi-target "
+
+  - name: collect_and_cleanup
+    always: true
+    actions:
+      - action: exec
+        node: m02
+        timeout: 3m
+        cmd: "cd {{ product_root }} && bash scripts/uninstall-k8s-alpha.sh {{ product_root }}"
+        env.SW_BLOCK_ARTIFACT_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-first-volume-breaks/uninstall"
+        env.SW_BLOCK_UNINSTALL_DELETE_ALL_BLOCKVOLUMES: "1"
+      - action: pre_run_cleanup
+        node: m02
+        kill_patterns: "blockmaster,blockvolume,blockcsi,iscsi-target"
+        nvme_disconnect: "true"
+        iscsi_logout_prefix: "iqn.2026-05.io.seaweedfs"
+      - action: exec
+        node: m02
+        cmd: "pkill -f 'kubectl.*port-forward.*svc/blockmaste[r]' >/dev/null 2>&1 || true"
+      - action: assert_no_active_iscsi_sessions
+        node: m02
+        iqn_substr: "io.seaweedfs"
+      - action: assert_no_processes
+        node: m02
+        pattern: "[/]blockmaster --|[/]blockvolume --|[/]blockcsi |[/]iscsi-target |[/]kubectl .*port-forward .*svc/blockmaste[r]|^blockmaster |^blockvolume |^blockcsi |^iscsi-target "
+      - action: collect_path
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-first-volume-breaks"
+        name: "remote-phases"
+        ignore_error: true

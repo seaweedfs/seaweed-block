@@ -14,6 +14,10 @@ RESTART_BLOCKVOLUME_BEFORE_READER="${SW_BLOCK_RESTART_BLOCKVOLUME_BEFORE_READER:
 DEMO_STOP_AFTER="${SW_BLOCK_DEMO_STOP_AFTER:-}"
 COLLECT_OPS_STATUS="${SW_BLOCK_DEMO_COLLECT_OPS_STATUS:-0}"
 KEEP_ON_STOP="${SW_BLOCK_DEMO_KEEP_ON_STOP:-0}"
+AFTER_BLOCKVOLUME_READY_CMD="${SW_BLOCK_DEMO_AFTER_BLOCKVOLUME_READY_CMD:-}"
+BREAK_AFTER_BLOCKVOLUME_READY="${SW_BLOCK_DEMO_BREAK_AFTER_BLOCKVOLUME_READY:-}"
+WRITER_TIMEOUT="${SW_BLOCK_DEMO_WRITER_TIMEOUT:-240}"
+DELETE_ALL_BLOCKVOLUMES="${SW_BLOCK_UNINSTALL_DELETE_ALL_BLOCKVOLUMES:-0}"
 DEFAULT_DEMO_APP_MANIFEST="$ROOT/deploy/k8s/alpha/demo-app-pvc.yaml"
 DEMO_APP_MANIFEST="${SW_BLOCK_DEMO_APP_MANIFEST:-$DEFAULT_DEMO_APP_MANIFEST}"
 BLOCKVOLUME_NAMESPACE="kube-system"
@@ -40,12 +44,17 @@ if [[ -n "$DEMO_STOP_AFTER" && "$DEMO_STOP_AFTER" != "blockvolume-ready" ]]; the
   echo "unsupported SW_BLOCK_DEMO_STOP_AFTER value: $DEMO_STOP_AFTER" >&2
   exit 2
 fi
+if [[ -n "$BREAK_AFTER_BLOCKVOLUME_READY" && "$BREAK_AFTER_BLOCKVOLUME_READY" != "delete-generated-blockvolume" ]]; then
+  echo "unsupported SW_BLOCK_DEMO_BREAK_AFTER_BLOCKVOLUME_READY value: $BREAK_AFTER_BLOCKVOLUME_READY" >&2
+  exit 2
+fi
 if [[ -z "$DEMO_STOP_AFTER" && ( "$KEEP_ON_STOP" == "1" || "$KEEP_ON_STOP" == "true" ) ]]; then
   echo "SW_BLOCK_DEMO_KEEP_ON_STOP requires SW_BLOCK_DEMO_STOP_AFTER" >&2
   exit 2
 fi
 
 mkdir -p "$ARTIFACT_DIR"
+OPS_STATUS_COLLECTION_ATTEMPTED=0
 
 if [[ -z "${KUBECONFIG:-}" && -f /etc/rancher/k3s/k3s.yaml ]]; then
   export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
@@ -206,6 +215,7 @@ run_sw_block_ops_status() {
 
 collect_ops_status_bundle() {
   set +e
+  OPS_STATUS_COLLECTION_ATTEMPTED=1
   local out_dir="$ARTIFACT_DIR/ops-status"
   local work_dir
   local marker="$ARTIFACT_DIR/controlled-stop.txt"
@@ -262,6 +272,17 @@ collect_ops_status_bundle() {
   fi
   rm -rf "$work_dir"
   return 0
+}
+
+record_ops_status_unavailable() {
+  local reason="$1"
+  mkdir -p "$ARTIFACT_DIR"
+  {
+    echo "phase=failure"
+    echo "volume_id=<unavailable>"
+    echo "status_addr=<unavailable>"
+    echo "ops-status-unavailable: $reason"
+  } >"$ARTIFACT_DIR/controlled-stop.txt"
 }
 
 wait_blockvolume_durable_status() {
@@ -345,8 +366,14 @@ cleanup() {
   kubectl delete -f "$DEMO_APP_MANIFEST" --ignore-not-found=true >>"$ARTIFACT_DIR/cleanup.log" 2>&1
   kubectl -n "$NAMESPACE" delete pod sw-block-demo-reader sw-block-demo-writer --ignore-not-found=true >>"$ARTIFACT_DIR/cleanup.log" 2>&1
   kubectl -n "$NAMESPACE" delete pvc sw-block-demo-pvc --ignore-not-found=true >>"$ARTIFACT_DIR/cleanup.log" 2>&1
-  kubectl -n kube-system delete deploy -l app=sw-blockvolume --ignore-not-found=true >>"$ARTIFACT_DIR/cleanup.log" 2>&1
-  kubectl -n "$NAMESPACE" delete deploy -l app=sw-blockvolume --ignore-not-found=true >>"$ARTIFACT_DIR/cleanup.log" 2>&1
+  if [[ -s "$ARTIFACT_DIR/generated-blockvolume.yaml" ]]; then
+    kubectl delete -f "$ARTIFACT_DIR/generated-blockvolume.yaml" --ignore-not-found=true >>"$ARTIFACT_DIR/cleanup.log" 2>&1
+  elif [[ "$DELETE_ALL_BLOCKVOLUMES" == "1" || "$DELETE_ALL_BLOCKVOLUMES" == "true" ]]; then
+    kubectl -n kube-system delete deploy -l app=sw-blockvolume --ignore-not-found=true >>"$ARTIFACT_DIR/cleanup.log" 2>&1
+    kubectl -n "$NAMESPACE" delete deploy -l app=sw-blockvolume --ignore-not-found=true >>"$ARTIFACT_DIR/cleanup.log" 2>&1
+  else
+    echo "skip broad app=sw-blockvolume cleanup; no generated manifest captured" >>"$ARTIFACT_DIR/cleanup.log"
+  fi
   kubectl delete -f "$CSI_NODE_RENDERED" --ignore-not-found=true >>"$ARTIFACT_DIR/cleanup.log" 2>&1
   kubectl delete -f "$CSI_CONTROLLER_RENDERED" --ignore-not-found=true >>"$ARTIFACT_DIR/cleanup.log" 2>&1
   kubectl delete -f "$ROOT/deploy/k8s/alpha/csi-driver.yaml" --ignore-not-found=true >>"$ARTIFACT_DIR/cleanup.log" 2>&1
@@ -456,12 +483,30 @@ log "restart_blockvolume_before_reader=$RESTART_BLOCKVOLUME_BEFORE_READER"
 log "demo_stop_after=${DEMO_STOP_AFTER:-<none>}"
 log "collect_ops_status=$COLLECT_OPS_STATUS"
 log "keep_on_stop=$KEEP_ON_STOP"
+log "after_blockvolume_ready_cmd=${AFTER_BLOCKVOLUME_READY_CMD:-<none>}"
+log "break_after_blockvolume_ready=${BREAK_AFTER_BLOCKVOLUME_READY:-<none>}"
+log "writer_timeout=$WRITER_TIMEOUT"
 log "demo_app_manifest=$DEMO_APP_MANIFEST"
 kubectl version --client=true >"$ARTIFACT_DIR/kubectl-version.txt" 2>&1 || true
 kubectl get nodes -o wide >"$ARTIFACT_DIR/nodes.before.txt"
 
+on_exit() {
+  local rc=$?
+  if [[ "$rc" -ne 0 && ( "$COLLECT_OPS_STATUS" == "1" || "$COLLECT_OPS_STATUS" == "true" ) && "$OPS_STATUS_COLLECTION_ATTEMPTED" -eq 0 ]]; then
+    if [[ -s "$ARTIFACT_DIR/generated-blockvolume.yaml" ]]; then
+      log "collect ops status after failure"
+      collect_ops_status_bundle
+    else
+      record_ops_status_unavailable "no volume id reached"
+    fi
+  fi
+  collect_logs
+  cleanup
+  exit "$rc"
+}
+
 cleanup
-trap 'collect_logs; cleanup' EXIT
+trap on_exit EXIT
 
 log "apply seaweed-block service stack"
 kubectl apply -f "$STACK_RENDERED" | tee "$ARTIFACT_DIR/apply-block-stack.log"
@@ -495,6 +540,17 @@ log "apply generated blockvolume workload"
 kubectl apply -f "$ARTIFACT_DIR/generated-blockvolume.yaml" | tee "$ARTIFACT_DIR/apply-generated-blockvolume.log"
 kubectl -n "$BLOCKVOLUME_NAMESPACE" wait --for=condition=available deploy -l app=sw-blockvolume --timeout=120s
 
+if [[ "$BREAK_AFTER_BLOCKVOLUME_READY" == "delete-generated-blockvolume" ]]; then
+  log "delete generated blockvolume after ready"
+  BLOCKVOLUME_VOLUME_ID="$(generated_blockvolume_arg "volume-id")"
+  kubectl -n "$BLOCKVOLUME_NAMESPACE" delete deploy -l "sw-block.seaweedfs.com/volume=${BLOCKVOLUME_VOLUME_ID}" --wait=true --timeout=60s | tee "$ARTIFACT_DIR/delete-generated-blockvolume-after-ready.log"
+fi
+
+if [[ -n "$AFTER_BLOCKVOLUME_READY_CMD" ]]; then
+  log "run after-blockvolume-ready hook"
+  bash -lc "$AFTER_BLOCKVOLUME_READY_CMD" | tee "$ARTIFACT_DIR/after-blockvolume-ready-hook.log"
+fi
+
 if [[ "$DEMO_STOP_AFTER" == "blockvolume-ready" ]]; then
   log "controlled stop after blockvolume ready"
   collect_ops_status_bundle
@@ -512,9 +568,9 @@ fi
 
 log "wait for app writer completion"
 if [[ "$RESTART_CSI_NODE_BEFORE_READER" == "1" || "$RESTART_CSI_NODE_BEFORE_READER" == "true" || "$RESTART_BLOCKVOLUME_BEFORE_READER" == "1" || "$RESTART_BLOCKVOLUME_BEFORE_READER" == "true" ]]; then
-  wait_pod_log_contains sw-block-demo-writer "[app-writer] wrote and verified /data/demo.bin" 240
+  wait_pod_log_contains sw-block-demo-writer "[app-writer] wrote and verified /data/demo.bin" "$WRITER_TIMEOUT"
 else
-  wait_pod_succeeded sw-block-demo-writer 240
+  wait_pod_succeeded sw-block-demo-writer "$WRITER_TIMEOUT"
 fi
 kubectl -n "$NAMESPACE" logs sw-block-demo-writer | tee "$ARTIFACT_DIR/writer.log"
 kubectl -n "$NAMESPACE" describe pod sw-block-demo-writer >"$ARTIFACT_DIR/writer.describe.before-delete.txt" 2>&1 || true

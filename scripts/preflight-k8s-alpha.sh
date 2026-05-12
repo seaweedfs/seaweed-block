@@ -18,6 +18,7 @@ fi
 CHECKED=0
 FAILED=0
 UNCHECKED=0
+FORCE_MISSING=",${SW_BLOCK_PREFLIGHT_FORCE_MISSING:-},"
 
 pass() {
   CHECKED=$((CHECKED + 1))
@@ -38,6 +39,10 @@ unchecked() {
 check_cmd() {
   local name="$1"
   local remediation="$2"
+  if [[ "$FORCE_MISSING" == *",$name,"* ]]; then
+    fail "$name" "$remediation"
+    return
+  fi
   if command -v "$name" >/dev/null 2>&1; then
     pass "$name" "$(command -v "$name")"
   else
