@@ -189,6 +189,7 @@ have fast tests; the TestOps scenario is a final user-path gate.
 ### D1: Operations Inventory Contract
 
 Define `volume-inventory.json` and a human summary format.
+Reference: `internal/docs/ref/operations-volume-inventory-contract.md`.
 
 Minimum volume fields:
 
