@@ -122,6 +122,76 @@ func TestOpsStatusWritesArtifactsAndReturnsClean(t *testing.T) {
 	}
 }
 
+func TestOpsInventoryWritesEmptyClusterArtifacts(t *testing.T) {
+	outDir := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"ops", "inventory",
+		"--namespace", "default",
+		"--out", outDir,
+		"--product-revision", "product-rev",
+		"--runner-revision", "runner-rev",
+	}, &stdout, &stderr)
+	if code != ops.VolumeStatusExitOK {
+		t.Fatalf("exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	for _, name := range []string{ops.VolumeInventoryArtifact, ops.VolumeInventorySummaryArtifact, ops.OpsInventoryBundleArtifact} {
+		if _, err := os.Stat(filepath.Join(outDir, name)); err != nil {
+			t.Fatalf("missing artifact %s: %v", name, err)
+		}
+	}
+	if !strings.Contains(stdout.String(), "inventory_status: ok") ||
+		!strings.Contains(stdout.String(), "volumes: total=0") ||
+		!strings.Contains(stdout.String(), ops.OpsInventoryBundleArtifact) {
+		t.Fatalf("stdout missing inventory evidence:\n%s", stdout.String())
+	}
+
+	raw, err := os.ReadFile(filepath.Join(outDir, ops.VolumeInventoryArtifact))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var inventory ops.VolumeInventory
+	if err := json.Unmarshal(raw, &inventory); err != nil {
+		t.Fatal(err)
+	}
+	if inventory.ProductRevision != "product-rev" || inventory.RunnerRevision != "runner-rev" || len(inventory.Volumes) != 0 {
+		t.Fatalf("inventory mismatch: %+v", inventory)
+	}
+	rawBundle, err := os.ReadFile(filepath.Join(outDir, ops.OpsInventoryBundleArtifact))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var bundle ops.OpsInventoryBundle
+	if err := json.Unmarshal(rawBundle, &bundle); err != nil {
+		t.Fatal(err)
+	}
+	if bundle.Command != "sw-block ops inventory" || bundle.Status != "ok" || bundle.VolumeCount != 0 {
+		t.Fatalf("bundle mismatch: %+v", bundle)
+	}
+}
+
+func TestOpsListAliasesInventory(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ops", "list", "--out", t.TempDir(), "--product-revision", "product-rev"}, &stdout, &stderr)
+	if code != ops.VolumeStatusExitOK {
+		t.Fatalf("exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "inventory_status: ok") {
+		t.Fatalf("stdout=%s", stdout.String())
+	}
+}
+
+func TestOpsInventoryMissingOutReturnsInvalid(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ops", "inventory"}, &stdout, &stderr)
+	if code != ops.VolumeStatusExitInvalid {
+		t.Fatalf("exit=%d want %d", code, ops.VolumeStatusExitInvalid)
+	}
+	if !strings.Contains(stderr.String(), "--out is required") {
+		t.Fatalf("stderr=%s", stderr.String())
+	}
+}
+
 func cleanCmdResidueCommand(_ context.Context, name string, args ...string) ([]byte, error) {
 	switch name {
 	case "iscsiadm":

@@ -3,10 +3,10 @@
 Status: active. Opened after closing
 `finished-plans/phase10_finishedplan_light_use_install_lifecycle_operations_mvp.md`.
 
-Current task: D1 operations inventory contract. The first slice is to define
-the operator-facing view before adding more CLI or scenario automation. The
-contract must be multi-volume and RF-aware from day one; the first live gate may
-still run on the supported single-node alpha path.
+Current task: D2 product CLI surface. D1 defined the multi-volume/RF-aware
+inventory contract and summary shape. The D2 first slice adds the
+operator-facing command and support-bundle shell before wiring Kubernetes live
+discovery.
 
 ## Product Question
 

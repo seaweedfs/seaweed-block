@@ -140,6 +140,38 @@ support bundles. It must include:
   health, epoch, endpoint version, frontend, and status endpoint,
 - issue lines that name the volume and replica.
 
+## Support Bundle Manifest
+
+`sw-block ops inventory` writes a small manifest beside the inventory:
+
+```text
+ops-inventory-bundle.json
+```
+
+Required artifacts:
+
+- `volume-inventory.json`
+- `volume-inventory-summary.txt`
+- `ops-inventory-bundle.json`
+
+Required manifest fields:
+
+- `schema_version`
+- `command`
+- `captured_at`
+- `product_revision`
+- `runner_revision`, when available
+- `exit_code`
+- `status`
+- `volume_count`
+- `artifacts`
+- `collection_errors`
+- `non_claims`
+
+An empty cluster is a valid inventory result. It should emit `status=ok`,
+`volume_count=0`, and an empty `volumes` array; it must not look like a hang or
+a failed command.
+
 ## Non-Claims
 
 - Read-only inventory; it does not mutate product state.
@@ -149,4 +181,3 @@ support bundles. It must include:
 - Not a live RF=2/RF=3 Kubernetes claim unless a runner gate proves it.
 - Missing inputs are reported as issues or unchecked evidence, not inferred as
   healthy.
-

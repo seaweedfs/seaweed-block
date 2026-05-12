@@ -254,9 +254,6 @@ func VolumeInventoryIssues(in VolumeInventory) []string {
 			issues = append(issues, fmt.Sprintf("collection_error: %s", errText))
 		}
 	}
-	if len(in.Volumes) == 0 {
-		issues = append(issues, "inventory has no volumes")
-	}
 	for _, volume := range in.Volumes {
 		for _, issue := range volume.Issues {
 			if strings.HasPrefix(issue, "invalid:") {

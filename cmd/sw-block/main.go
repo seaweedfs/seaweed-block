@@ -32,12 +32,21 @@ func run(args []string, stdout, stderr io.Writer) int {
 		usage(stderr)
 		return ops.VolumeStatusExitInvalid
 	}
-	if len(args) < 2 || args[1] != "status" {
-		fmt.Fprintln(stderr, "sw-block: expected subcommand ops status")
+	if len(args) < 2 {
+		fmt.Fprintln(stderr, "sw-block: expected subcommand ops status|inventory|list")
 		usage(stderr)
 		return ops.VolumeStatusExitInvalid
 	}
-	return runOpsStatus(args[2:], stdout, stderr)
+	switch args[1] {
+	case "status":
+		return runOpsStatus(args[2:], stdout, stderr)
+	case "inventory", "list":
+		return runOpsInventory(args[2:], stdout, stderr)
+	default:
+		fmt.Fprintf(stderr, "sw-block: unknown ops subcommand %q\n", args[1])
+		usage(stderr)
+		return ops.VolumeStatusExitInvalid
+	}
 }
 
 func runOpsStatus(args []string, stdout, stderr io.Writer) int {
@@ -95,8 +104,53 @@ func runOpsStatus(args []string, stdout, stderr io.Writer) int {
 	return code
 }
 
+func runOpsInventory(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("sw-block ops inventory", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	var (
+		namespace       string
+		outDir          string
+		productRevision string
+		runnerRevision  string
+		timeout         time.Duration
+	)
+	fs.StringVar(&namespace, "namespace", "default", "Kubernetes namespace to inspect once live discovery is enabled")
+	fs.StringVar(&outDir, "out", "", "directory for volume-inventory.json, volume-inventory-summary.txt, and ops-inventory-bundle.json")
+	fs.StringVar(&productRevision, "product-revision", "", "product revision label to include in the inventory")
+	fs.StringVar(&runnerRevision, "runner-revision", "", "runner revision label to include in the inventory")
+	fs.DurationVar(&timeout, "timeout", 5*time.Second, "collection timeout")
+	if err := fs.Parse(args); err != nil {
+		return ops.VolumeStatusExitInvalid
+	}
+	if outDir == "" {
+		fmt.Fprintln(stderr, "sw-block ops inventory: --out is required")
+		return ops.VolumeStatusExitInvalid
+	}
+	if productRevision == "" {
+		productRevision = buildinfo.Version("sw-block")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	collector := ops.StaticVolumeInventoryCollector(ops.VolumeInventoryInput{
+		Source:          ops.ReportSource{Component: "sw-block ops inventory", Scenario: "namespace=" + namespace},
+		ProductRevision: productRevision,
+		RunnerRevision:  runnerRevision,
+	})
+	inventory, code, err := ops.WriteVolumeInventoryArtifacts(ctx, outDir, collector)
+	if err != nil {
+		fmt.Fprintf(stderr, "sw-block ops inventory: %v\n", err)
+	}
+	fmt.Fprint(stdout, ops.RenderVolumeInventorySummary(inventory))
+	if code != ops.VolumeStatusExitInvalid {
+		fmt.Fprintf(stdout, "artifacts: %s %s %s\n", ops.VolumeInventoryArtifact, ops.VolumeInventorySummaryArtifact, ops.OpsInventoryBundleArtifact)
+	}
+	return code
+}
+
 func usage(w io.Writer) {
 	fmt.Fprintln(w, "usage:")
 	fmt.Fprintln(w, "  sw-block --version")
 	fmt.Fprintln(w, "  sw-block ops status --volume <id> --master <addr> --status-addr <addr|url> --out <dir>")
+	fmt.Fprintln(w, "  sw-block ops inventory --namespace <ns> --out <dir>")
 }

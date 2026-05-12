@@ -96,6 +96,31 @@ func TestBuildVolumeInventory_MultiVolumeRFShapes(t *testing.T) {
 	}
 }
 
+func TestBuildVolumeInventory_EmptyClusterIsTrustworthyOK(t *testing.T) {
+	inventory := BuildVolumeInventory(VolumeInventoryInput{
+		CapturedAt:      time.Date(2026, 5, 12, 12, 0, 0, 0, time.UTC),
+		Source:          ReportSource{Component: "component-test", Host: "m02", Scenario: "empty"},
+		ProductRevision: "product-rev",
+	})
+
+	if got := ClassifyVolumeInventory(inventory); got != VolumeStatusExitOK {
+		t.Fatalf("exit=%d issues=%v", got, VolumeInventoryIssues(inventory))
+	}
+	if inventory.Status != "ok" || len(inventory.Volumes) != 0 {
+		t.Fatalf("inventory status=%s volumes=%d", inventory.Status, len(inventory.Volumes))
+	}
+	summary := RenderVolumeInventorySummary(inventory)
+	for _, want := range []string{
+		"inventory_status: ok",
+		"volumes: total=0 ok=0 unhealthy=0 invalid=0",
+		"issues: none",
+	} {
+		if !strings.Contains(summary, want) {
+			t.Fatalf("summary missing %q:\n%s", want, summary)
+		}
+	}
+}
+
 func TestBuildVolumeInventory_MissingReplicaIsUnhealthyNotCollapsed(t *testing.T) {
 	inventory := BuildVolumeInventory(VolumeInventoryInput{
 		CapturedAt:      time.Date(2026, 5, 12, 12, 0, 0, 0, time.UTC),
