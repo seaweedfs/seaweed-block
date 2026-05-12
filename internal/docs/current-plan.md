@@ -3,11 +3,11 @@
 Status: active. Opened after closing
 `finished-plans/phase10_finishedplan_light_use_install_lifecycle_operations_mvp.md`.
 
-Current task: D3 status reuse / per-replica inspect. D1 defined the
-multi-volume/RF-aware inventory contract and summary shape. D2 added the
-operator-facing command and live Kubernetes discovery. D3 now reuses the
-existing one-volume `ops status` collector from the inventory command when a
-replica exposes a status endpoint.
+Current task: D5 runner-native inventory gate. D1 defined the multi-volume/RF-
+aware inventory contract and summary shape. D2 added the operator-facing
+command and live Kubernetes discovery. D3 reuses the existing one-volume
+`ops status` collector from the inventory command when a replica exposes a
+status endpoint. D4 added the user-facing quickstart inspection flow.
 
 ## Product Question
 

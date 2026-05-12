@@ -105,6 +105,64 @@ ARTIFACT_DIR="$(ls -td /tmp/sw-block-app-demo-* | head -1)"
 cat "$ARTIFACT_DIR/run.log"
 ```
 
+## Inspect The Cluster
+
+After the alpha stack is installed, use the read-only inventory command to see
+the Seaweed Block volumes Kubernetes can currently discover:
+
+```bash
+kubectl -n kube-system port-forward svc/blockmaster 9333:9333
+```
+
+In another terminal:
+
+```bash
+sw-block ops inventory \
+  --namespace default \
+  --master 127.0.0.1:9333 \
+  --out /tmp/sw-block-inventory
+```
+
+The command does not need a TestOps artifact directory or a known volume id. It
+discovers PVC/PV ownership and generated `blockvolume` Deployments from
+Kubernetes. When `--master` is supplied and a replica has `--status-addr`, it
+also writes that replica's normal `sw-block ops status` bundle under
+`/tmp/sw-block-inventory/volumes/<volume_id>/<replica_id>/`.
+
+Expected one-volume shape while the demo PVC is live:
+
+```text
+inventory_status: ok
+volumes: total=1 ok=1 unhealthy=0 invalid=0
+volume: id=pvc-... namespace=default pvc=sw-block-demo-pvc pv=pvc-... rf=1 desired=1 observed=1 primary=r1 status=ok protocols=iscsi replicas=1
+replica: volume=pvc-... replica=r1 server=... node=... observed=true status=ok role=primary replication=none healthy=true ... frontend=127.0.0.1:3260 status_addr=127.0.0.1:... support_bundle=volumes/pvc-.../r1
+issues: none
+artifacts: volume-inventory.json volume-inventory-summary.txt ops-inventory-bundle.json
+```
+
+Expected empty shape after the demo PVC is deleted:
+
+```text
+inventory_status: ok
+volumes: total=0 ok=0 unhealthy=0 invalid=0
+issues: none
+```
+
+Expected partial/failure shape if the PVC exists but no generated
+`blockvolume` Deployment is present:
+
+```text
+inventory_status: unhealthy
+volume: id=pvc-... namespace=default pvc=<name> ... observed=0 primary=unavailable status=unhealthy protocols= replicas=0
+issues:
+- volume pvc-... generated_deployment_missing
+```
+
+Attach the whole inventory directory when filing an issue. The top-level
+inventory answers "what exists?", while each nested replica status bundle
+answers "what did this replica report?" using the same schema as
+`sw-block ops status`.
+
 ## Alternate Image Paths
 
 Use these only after the local k3s path is understood.
@@ -284,6 +342,15 @@ kubectl -n kube-system port-forward svc/blockmaster 9333:9333
 Attach the whole artifact directory when filing an issue. If no volume identity
 was reached, attach the directory anyway; the useful boundary is then install,
 PVC, or manifest generation rather than data-path status.
+
+If the cluster is still reachable, also collect the inventory bundle:
+
+```bash
+sw-block ops inventory \
+  --namespace default \
+  --master 127.0.0.1:9333 \
+  --out "$ARTIFACT_DIR/ops-inventory"
+```
 
 ## Use Your Own App
 
