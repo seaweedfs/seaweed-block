@@ -148,8 +148,8 @@ the end-to-end user claim.
 ### D1: First-Volume Runbook
 
 Status: draft attached in `docs/quickstart-kubernetes.md`; dev-run validated
-through `light-use-first-volume-chain` at run
-`20260511-180107-1f37`. Still needs QA new-user review before final close.
+through hardened `light-use-first-volume-chain` at run
+`20260511-200544-dca5`. Still needs QA new-user review before final close.
 
 Update or add a concise runbook that answers:
 
@@ -173,17 +173,17 @@ Status: initial scenario attached as
 Dev validation:
 
 ```text
-run_id: 20260511-180107-1f37
+run_id: 20260511-200544-dca5
 result: PASS
-wall:   1m12s
+wall:   3m30s
 actions: 35/35 passed
 host: m02
 ```
 
-The scenario proved preflight, alpha image build/import, documented
-`run-k8s-demo.sh`, writer checksum, reader replacement checksum, generated
-iSCSI blockvolume manifest, no active iSCSI session after delete, cleanup
-attribution, and final process/session assertions.
+The scenario proved runnable structured preflight, alpha image build/import,
+documented `run-k8s-demo.sh`, writer checksum, reader replacement checksum,
+generated iSCSI blockvolume manifest, no active iSCSI session after delete,
+line-level cleanup attribution, and final process/session assertions.
 
 Add a TestOps scenario for the same user path.
 
