@@ -11,8 +11,8 @@ Cluster Operations Inventory And Lifecycle Visibility MVP
 ```
 
 This is not the final close gate. It proves the first live inventory boundary:
-an operator can inspect a live alpha Kubernetes volume from the cluster itself
-and get nested per-replica `sw-block ops status` bundles through
+an operator can inspect two concurrent live alpha Kubernetes volumes from the
+cluster itself and get nested per-replica `sw-block ops status` bundles through
 `sw-block ops inventory`.
 
 ## Precondition
@@ -51,6 +51,7 @@ All seven phases should reach terminal PASS:
 - `preflight`
 - `pin_build_alpha_images`
 - `live_volume_boundary`
+- `second_volume_boundary`
 - `inventory_live_cluster`
 - `inventory_asserts`
 - `collect_and_cleanup`
@@ -65,6 +66,7 @@ Report these exact fields:
 - final scenario state,
 - `volume-inventory-summary.txt` first 15 lines,
 - `volume-inventory.json` contains `pvc_name=sw-block-demo-pvc`,
+- `volume-inventory.json` contains `pvc_name=sw-block-demo-pvc-2`,
 - replica row contains `support_bundle=volumes/<volume>/<replica>`,
 - nested `ops-status-bundle.json` exists and has
   `"command": "sw-block ops status"`,
@@ -81,6 +83,7 @@ Fail the assignment if any of these happen:
 - nested per-replica status bundle is missing,
 - cleanup leaves active iSCSI sessions or sw-block processes,
 - the scenario passes but the inventory is empty while the demo PVC is live.
+- the scenario passes with only one volume row while both PVCs are live.
 
 ## Report Template
 
@@ -98,6 +101,7 @@ Phase table:
   preflight:
   pin_build_alpha_images:
   live_volume_boundary:
+  second_volume_boundary:
   inventory_live_cluster:
   inventory_asserts:
   collect_and_cleanup:
@@ -105,8 +109,10 @@ Phase table:
 Inventory evidence:
   inventory_status:
   volume_count:
-  pvc:
-  volume_id:
+  pvc_1:
+  volume_id_1:
+  pvc_2:
+  volume_id_2:
   status_address:
   support_bundle:
   nested ops-status command:
