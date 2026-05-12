@@ -3,20 +3,18 @@
 Status: active. Opened after closing
 `finished-plans/phase10_finishedplan_light_use_install_lifecycle_operations_mvp.md`.
 
-Current task: D5 runner-native inventory gate. D1 defined the multi-volume/RF-
+Current task: close-readiness cleanup after D5. D1 defined the multi-volume/RF-
 aware inventory contract and summary shape. D2 added the operator-facing
 command and live Kubernetes discovery. D3 reuses the existing one-volume
 `ops status` collector from the inventory command when a replica exposes a
-status endpoint. D4 added the user-facing quickstart inspection flow. D5 was
-green on m02 for the one-volume boundary via QA run `20260512-145129-5c2c` at
-product commit `b795f30`. QA then tightened HG-5 to two concurrent PVCs and
-found a real launcher bug at `9457e74`: both generated blockvolume workloads
-used the same node-local data/control/frontend/status ports on the single-node
-hostNetwork alpha path. The current slice fixes workload planning so multiple
-blockvolume workloads on the same server receive distinct node-local ports.
-D5 now needs a fresh QA rerun of the same two-PVC inventory chain.
-D6 fast RF/missing-replica fixtures are in place and now use the same
-machine-readable issue vocabulary as the QA hard gate.
+status endpoint. D4 added the user-facing quickstart inspection flow. D5 is now
+strict PASS: QA run `20260512-162943-77fe` at product commit `2e521b3` proved
+two concurrent live PVCs on the alpha k3s path, with distinct volume IDs,
+generated Deployments, iSCSI frontend ports, status endpoint ports, and nested
+support bundles. D6 fast RF/missing-replica fixtures are in place and now use
+the same machine-readable issue vocabulary as the QA hard gate. The current
+cleanup slice tightens HG-14 non-claim labels so the close report can validate
+them mechanically.
 
 QA slice assignment for D5 live validation:
 `internal/docs/qa-assignments/cluster-ops-inventory-chain-validation.md`.

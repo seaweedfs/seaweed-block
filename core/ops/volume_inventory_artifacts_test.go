@@ -42,6 +42,18 @@ func TestWriteVolumeInventoryArtifacts_EmptyClusterBundle(t *testing.T) {
 	if len(decoded.Volumes) != 0 || len(decoded.NonClaims) == 0 {
 		t.Fatalf("decoded inventory=%+v", decoded)
 	}
+	for _, want := range []string{
+		"read-only-observation:",
+		"single-cluster-alpha-scope:",
+		"best-effort-partial-discovery:",
+		"no-mutating-admin:",
+		"no-multi-node-scheduling:",
+		"rf2-rf3-live-kubernetes-operation:",
+	} {
+		if !containsStringPrefix(decoded.NonClaims, want) {
+			t.Fatalf("non_claims missing prefix %q: %v", want, decoded.NonClaims)
+		}
+	}
 
 	summary, err := os.ReadFile(filepath.Join(dir, VolumeInventorySummaryArtifact))
 	if err != nil {
@@ -65,6 +77,15 @@ func TestWriteVolumeInventoryArtifacts_EmptyClusterBundle(t *testing.T) {
 	if len(bundle.Artifacts) != 3 || len(bundle.NonClaims) == 0 {
 		t.Fatalf("bundle artifacts/nonclaims=%+v", bundle)
 	}
+}
+
+func containsStringPrefix(values []string, prefix string) bool {
+	for _, value := range values {
+		if strings.HasPrefix(value, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func TestWriteVolumeInventoryArtifacts_PreservesCollectionErrors(t *testing.T) {

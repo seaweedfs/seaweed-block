@@ -189,10 +189,11 @@ a failed command.
 
 ## Non-Claims
 
-- Read-only inventory; it does not mutate product state.
-- Not repair, cleanup, failover, backup, or restore.
-- Not a Kubernetes operator.
-- Not open node auto-placement.
-- Not a live RF=2/RF=3 Kubernetes claim unless a runner gate proves it.
-- Missing inputs are reported as issues or unchecked evidence, not inferred as
-  healthy.
+Every `non_claims` block uses stable machine-readable prefixes:
+
+- `read-only-observation`: inventory does not mutate product state.
+- `single-cluster-alpha-scope`: discovery is scoped to one alpha Kubernetes cluster.
+- `best-effort-partial-discovery`: missing inputs are reported as issues or unchecked evidence, not inferred as healthy.
+- `no-mutating-admin`: inventory is not repair, cleanup, failover, backup, or restore.
+- `no-multi-node-scheduling`: inventory observes placement; it does not schedule or rebalance replicas.
+- `rf2-rf3-live-kubernetes-operation`: non-claim unless a runner gate explicitly proves it.

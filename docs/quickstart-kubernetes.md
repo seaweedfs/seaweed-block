@@ -163,6 +163,15 @@ inventory answers "what exists?", while each nested replica status bundle
 answers "what did this replica report?" using the same schema as
 `sw-block ops status`.
 
+Inventory non-claims are explicit in every bundle:
+
+- `read-only-observation`: inventory does not mutate product state.
+- `single-cluster-alpha-scope`: discovery is scoped to one alpha Kubernetes cluster.
+- `best-effort-partial-discovery`: missing inputs are reported as issues or unchecked evidence, not inferred as healthy.
+- `no-mutating-admin`: inventory is not repair, cleanup, failover, backup, or restore.
+- `no-multi-node-scheduling`: inventory observes placement; it does not schedule or rebalance replicas.
+- `rf2-rf3-live-kubernetes-operation`: live RF=2/RF=3 Kubernetes operation is not claimed unless a runner gate explicitly proves it.
+
 ## Alternate Image Paths
 
 Use these only after the local k3s path is understood.

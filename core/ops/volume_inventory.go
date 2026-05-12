@@ -135,10 +135,12 @@ func BuildVolumeInventory(in VolumeInventoryInput) VolumeInventory {
 		CollectionErrors: copyStringSlice(in.CollectionErrors),
 		Volumes:          make([]VolumeInventoryVolume, 0, len(in.Volumes)),
 		NonClaims: []string{
-			"Read-only inventory; it does not mutate product state.",
-			"Inventory is not repair, cleanup, failover, backup, or restore.",
-			"RF=2/RF=3 live Kubernetes operation is claimed only when a runner gate explicitly proves it.",
-			"Missing inputs are reported as issues or unchecked evidence, not inferred as healthy.",
+			"read-only-observation: inventory does not mutate product state",
+			"single-cluster-alpha-scope: discovery is scoped to one alpha Kubernetes cluster",
+			"best-effort-partial-discovery: missing inputs are reported as issues or unchecked evidence, not inferred as healthy",
+			"no-mutating-admin: inventory is not repair, cleanup, failover, backup, or restore",
+			"no-multi-node-scheduling: inventory observes placement, it does not schedule or rebalance replicas",
+			"rf2-rf3-live-kubernetes-operation: non-claim unless a runner gate explicitly proves it",
 		},
 	}
 	for _, volume := range in.Volumes {
