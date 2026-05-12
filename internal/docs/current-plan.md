@@ -12,6 +12,9 @@ has a runner-native scenario shell; it still needs a live m02 run before close.
 D6 fast RF/missing-replica fixtures are in place and now use the same
 machine-readable issue vocabulary as the QA hard gate.
 
+QA slice assignment for D5 live validation:
+`internal/docs/qa-assignments/cluster-ops-inventory-chain-validation.md`.
+
 ## Product Question
 
 Can an early developer or operator look at a running Seaweed Block alpha cluster
