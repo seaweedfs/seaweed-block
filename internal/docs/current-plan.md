@@ -4,7 +4,9 @@ Status: active. Opened after closing
 `finished-plans/phase10_finishedplan_light_use_install_lifecycle_operations_mvp.md`.
 
 Current task: D1 operations inventory contract. The first slice is to define
-the operator-facing view before adding more CLI or scenario automation.
+the operator-facing view before adding more CLI or scenario automation. The
+contract must be multi-volume and RF-aware from day one; the first live gate may
+still run on the supported single-node alpha path.
 
 ## Product Question
 
@@ -29,10 +31,11 @@ support bundle -> identify stale or missing cleanup
 If this plan closes, the claim is still narrow:
 
 ```text
-On the supported single-node Kubernetes alpha path, an operator can run a
-read-only command to see Seaweed Block volumes, their Kubernetes ownership,
+On the supported alpha Kubernetes path, an operator can run a read-only command
+to see Seaweed Block volumes and replicas, their Kubernetes ownership,
 frontend/status endpoints, lifecycle health, residue hints, and support-bundle
-pointers.
+pointers. The first live gate may use single-node k3s, but the inventory schema
+and tests cover multiple volumes and RF=1/2/3 shapes.
 ```
 
 It is not a full operator, repair controller, UI, metrics pipeline, upgrade
@@ -62,6 +65,30 @@ What is still weak:
   the alpha install."
 - The product has no read-only operational API/UI; CLI is the right first step.
 
+## Master / RF Reality Check
+
+Current code already has dynamic process registration, but not open-ended
+placement.
+
+- A `blockvolume` joins a running master by starting with `--master`,
+  `--server-id`, `--volume-id`, `--replica-id`, `--data-addr`, and
+  `--ctrl-addr`; it heartbeats through `ReportHeartbeat` and subscribes to
+  assignments through `SubscribeAssignments`.
+- Master accepts heartbeat observations, but heartbeat alone is not authority.
+  The accepted slot set comes from `--topology`, `--cluster-spec`, or lifecycle
+  placement stores. This is intentional safety: observed process does not mean
+  safe placement.
+- `SubscribeAssignments` is volume-scoped. If the volume is not in accepted
+  topology or lifecycle placement, the master refuses the stream instead of
+  silently assigning it.
+- RF=2 operation is already represented by tests and smokes: join lifecycle,
+  ALUA/multipath, mounted failover, and replicated write paths all exercise
+  two-slot behavior. The alpha Kubernetes first-volume path still defaults to
+  RF=1.
+- Therefore this plan must not build a one-volume/single-replica view. The live
+  usability gate can start with single-node execution, but the contract, tests,
+  and summaries must represent multiple volumes and RF=1/2/3.
+
 ## Product Value
 
 This plan affects user experience directly. After it, an operator should be
@@ -87,12 +114,14 @@ and understand:
 In scope:
 
 - Define a stable read-only inventory schema.
+- Make the schema multi-volume and replica-aware.
 - Add a product CLI surface for cluster/volume inventory.
 - Reuse the existing one-volume `ops status` report where possible.
 - Keep the command fail-closed: partial reports are allowed, false OK is not.
 - Add fast unit/component tests before integration.
-- Add a runner-native scenario that creates at least one real PVC and validates
-  inventory output.
+- Add a runner-native scenario that creates at least two real PVCs where the
+  alpha path supports it and validates inventory output without cross-volume
+  confusion.
 - Add a QA assignment focused on new-user/operator usability and adversarial
   stale-state cases.
 
@@ -105,6 +134,8 @@ Out of scope:
 - Prometheus metrics.
 - Multi-node scheduler or placement policy.
 - Upgrade/uninstall safety.
+- Claiming live RF=2/RF=3 Kubernetes lifecycle until a runner gate proves that
+  path; RF=2/RF=3 inventory shapes are still required in contract tests.
 
 ## Top Blocking Issues
 
@@ -116,6 +147,16 @@ starts from the cluster, not from a successful test run.
 Close requirement: the product CLI discovers live alpha resources from
 Kubernetes/master/status endpoints and emits an inventory even when no TestOps
 artifact path is provided.
+
+### P0: Inventory Must Be Multi-Volume And Replica-Aware
+
+Single-node execution is not the same as a single-volume model. Operators need
+to distinguish volumes, replicas, expected RF, observed RF, and primary/replica
+health.
+
+Close requirement: the inventory contract supports at least RF=1, RF=2, and
+RF=3 fixture shapes, reports multiple volumes in one bundle, and marks missing
+or stale replicas without collapsing them into one volume-level status.
 
 ### P0: Volume Identity Must Be Human-Mappable
 
@@ -149,27 +190,48 @@ have fast tests; the TestOps scenario is a final user-path gate.
 
 Define `volume-inventory.json` and a human summary format.
 
-Minimum row fields:
+Minimum volume fields:
 
 - `volume_id`,
 - `namespace`,
 - `pvc_name`,
 - `pv_name`,
+- `replication_factor`,
+- `desired_replicas`,
+- `observed_replicas`,
+- `primary_replica_id`,
+- `protocols`,
+- `product_revision`,
+- `status`,
+- `residue`,
+- `issues`,
+- `unchecked`,
+- `collection_errors`,
+- `support_bundle`,
+- `replicas`.
+
+Minimum replica fields:
+
+- `replica_id`,
+- `server_id`,
+- `node_name`,
 - `generated_deployment`,
 - `protocol`,
 - `frontend_address`,
 - `status_address`,
+- `data_addr`,
+- `ctrl_addr`,
 - `authority_role`,
 - `healthy`,
 - `replication_role`,
-- `product_revision`,
+- `epoch`,
+- `endpoint_version`,
 - `residue`,
-- `issues`,
-- `unchecked`,
-- `collection_errors`.
+- `issues`.
 
 The contract must state non-claims: read-only observation, not repair; alpha
-single-cluster scope; best-effort partial discovery.
+single-cluster scope; best-effort partial discovery; RF=2/RF=3 Kubernetes live
+operation only when a live gate explicitly proves it.
 
 ### D2: Product CLI Surface
 
@@ -190,15 +252,18 @@ stay simple:
 
 ### D3: Status Reuse / Per-Volume Inspect
 
-For each discovered live volume with a status endpoint, call or reuse the
-existing `ops status` collector and attach the per-volume report to the
-inventory bundle.
+For each discovered live replica with a status endpoint, call or reuse the
+existing `ops status` collector and attach the per-replica report to the
+inventory bundle. Aggregate those reports into a volume-level view.
 
 Expected behavior:
 
-- healthy live volume: row is `status=ok`;
-- unreachable endpoint: row remains present with an issue and collection error;
-- missing generated workload: row remains present if PVC/PV identity exists;
+- healthy live volume: volume row is `status=ok` and replicas show their roles;
+- unreachable replica endpoint: replica remains present with an issue and
+  collection error;
+- missing generated workload: volume remains present if PVC/PV identity exists;
+- missing or stale RF slot: volume marks `observed_replicas < desired_replicas`
+  and names the affected replica;
 - stale residue: row marks residue without claiming product cleanup.
 
 ### D4: Runbook Update
@@ -228,8 +293,11 @@ Add a TestOps scenario that:
 pre_clean
 pin/build alpha
 run first-volume demo to live volume boundary
+create a second PVC/volume when supported by the alpha path
 run ops inventory/list
+assert at least two volume rows where supported
 assert PVC/PV/volume/protocol/status endpoint fields
+assert per-replica fields and desired/observed replica counts
 delete PVC
 run inventory/list again
 assert cleanup state or documented absence
@@ -237,6 +305,9 @@ collect_and_cleanup(always)
 ```
 
 The scenario should be short enough to run as part of the light-use suite.
+If RF=2 live Kubernetes creation is not yet reliable in the alpha path, keep the
+live scenario RF=1 multi-volume and require RF=2/RF=3 contract/component gates
+in D6. Do not imply RF=2/RF=3 live support until a runner gate proves it.
 
 ### D6: Fast Tests And Review
 
@@ -244,6 +315,9 @@ Use TDD before wiring the live path:
 
 - fixture tests for Kubernetes object parsing,
 - fixture tests for generated manifest parsing,
+- fixture tests for multiple volumes in one inventory,
+- fixture tests for RF=1, RF=2, and RF=3 volume shapes,
+- fixture tests for missing/stale replica slots,
 - inventory schema tests,
 - partial-error classification tests,
 - bundle writer tests.
@@ -257,6 +331,9 @@ Ask QA to validate as an operator, not just as a command executor:
 - run the documented first-volume path,
 - run the inventory command without looking at TestOps artifacts,
 - confirm a stranger can map PVC -> Seaweed Block volume -> frontend/status,
+- confirm two volumes do not collapse into one row or cross-link ownership,
+- confirm RF-aware output is honest: either live RF=2 is proven or RF=2/RF=3
+  remain contract-tested non-claims,
 - create one stale/partial state and verify inventory names it clearly,
 - verify no false OK when endpoints are unreachable,
 - report confusing output or over-claims.
@@ -268,12 +345,18 @@ This plan closes only when:
 1. The inventory schema is documented and covered by fast tests.
 2. The product CLI can discover at least the supported alpha resources without
    TestOps artifact inputs.
-3. A live first-volume run produces a useful inventory row with PVC/PV,
-   generated deployment, protocol, status endpoint, and health fields.
-4. A partial/failure state produces actionable issues and collection errors.
-5. The command writes a support bundle suitable for issue reports.
-6. The quickstart shows how and when an operator runs the command.
-7. QA validates the operator experience independently and reports no blocking
+3. Fast tests cover multiple volumes, RF=1, RF=2, RF=3, and missing/stale
+   replica slots.
+4. A live run produces useful inventory rows with PVC/PV, generated deployment,
+   protocol, status endpoint, replica count, and health fields. The preferred
+   gate has at least two volumes; if the current alpha path cannot create two
+   volumes reliably, that limitation must be explicit.
+5. RF=2/RF=3 are not claimed as live Kubernetes operation unless a runner gate
+   proves them.
+6. A partial/failure state produces actionable issues and collection errors.
+7. The command writes a support bundle suitable for issue reports.
+8. The quickstart shows how and when an operator runs the command.
+9. QA validates the operator experience independently and reports no blocking
    usability issue.
 
 ## Success Statement
@@ -281,11 +364,15 @@ This plan closes only when:
 After this plan, Seaweed Block can make a narrow operations claim:
 
 ```text
-On the supported single-node Kubernetes alpha path, an operator can discover
-the Seaweed Block volumes in the cluster, map them to Kubernetes PVC/PV
-objects, see health and endpoint status, and collect a shareable read-only
-support bundle without digging through generated YAML or TestOps artifacts.
+On the supported alpha Kubernetes path, an operator can discover Seaweed Block
+volumes and replicas in the cluster, map them to Kubernetes PVC/PV objects, see
+per-volume and per-replica health and endpoint status, and collect a shareable
+read-only support bundle without digging through generated YAML or TestOps
+artifacts.
 ```
 
 This is the next step from "a first volume works" to "a user can operate and
-debug the alpha product."
+debug the alpha product." It is not a claim of open node auto-placement:
+new `blockvolume` processes can dynamically register with master, but master
+only operates on replicas that are admitted by topology, cluster-spec, or
+lifecycle placement.
