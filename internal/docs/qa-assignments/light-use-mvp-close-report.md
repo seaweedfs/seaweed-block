@@ -375,3 +375,27 @@ properties.
 PASS — the plan is clear to move from `current-plan.md` to
 `finished-plans/`. The remaining non-blocking findings should be tracked as
 follow-up doc polish but do not gate the close.
+
+## Dev Strict-Gate Follow-Up
+
+After this report, QA re-read
+`internal/docs/qa-assignments/light-use-mvp-close-hard-gate.md` as a strict
+binary gate and found three gaps:
+
+```text
+HG-2: apply-k8s-alpha-blockvolumes was elevated but lacked its own boundary check.
+HG-4: the runbook lacked per-boundary commands with exact expected lines.
+HG-9: "successful run, run again immediately" was implicit, not a named fixture.
+```
+
+Dev addressed those gaps after the initial report:
+
+- `docs/quickstart-kubernetes.md` now includes a verified
+  `apply-k8s-alpha-blockvolumes.sh` boundary check with expected `1/1` output.
+- `docs/quickstart-kubernetes.md` now includes direct per-boundary commands and
+  expected output lines for CSI controller, CSI node, StorageClass, PVC,
+  generated Deployment, writer, reader, delete, and residue.
+- `testops/scenarios/light-use-first-volume-retry-chain.yaml` now includes a
+  named `rerun_after_success_no_cleanup` phase.
+
+Strict close should be re-issued by QA after validating those three deltas.

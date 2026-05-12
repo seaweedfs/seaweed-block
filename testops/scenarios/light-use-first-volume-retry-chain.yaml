@@ -2,7 +2,8 @@
 #
 # Goal:
 #   Prove a user can recover from a partial first-volume attempt by running the
-#   documented cleanup path, then re-run the same demo successfully.
+#   documented cleanup path, then re-run the same demo successfully. Also prove
+#   a successful run can be repeated immediately without a manual cleanup step.
 #
 # Expected invocation:
 #   swblock run \
@@ -11,7 +12,7 @@
 #     testops/scenarios/light-use-first-volume-retry-chain.yaml
 
 name: light-use-first-volume-retry-chain
-timeout: 20m
+timeout: 30m
 
 env:
   product_root: "/tmp/seaweed_block"
@@ -34,7 +35,7 @@ phases:
         iscsi_logout_prefix: "iqn.2026-05.io.seaweedfs"
       - action: exec
         node: m02
-        cmd: "rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-first-volume-retry && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-first-volume-retry/pin_build /mnt/smb/work/share/g15d-k8s/{{ run_id }}-first-volume-retry/partial /mnt/smb/work/share/g15d-k8s/{{ run_id }}-first-volume-retry/retry_cleanup /mnt/smb/work/share/g15d-k8s/{{ run_id }}-first-volume-retry/retry_demo"
+        cmd: "rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-first-volume-retry && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-first-volume-retry/pin_build /mnt/smb/work/share/g15d-k8s/{{ run_id }}-first-volume-retry/partial /mnt/smb/work/share/g15d-k8s/{{ run_id }}-first-volume-retry/retry_cleanup /mnt/smb/work/share/g15d-k8s/{{ run_id }}-first-volume-retry/retry_demo /mnt/smb/work/share/g15d-k8s/{{ run_id }}-first-volume-retry/success_rerun"
       - action: exec
         node: m02
         cmd: "pkill -f 'kubectl.*port-forward.*svc/blockmaste[r]' >/dev/null 2>&1 || true"
@@ -180,6 +181,38 @@ phases:
         save_as: retry_reader_checksum_count
       - action: assert_greater
         actual: "{{ retry_reader_checksum_count }}"
+        threshold: "0"
+
+  - name: rerun_after_success_no_cleanup
+    actions:
+      - action: exec
+        node: m02
+        timeout: 10m
+        cmd: "cd {{ product_root }} && bash -lc 'set -a; source /mnt/smb/work/share/g15d-k8s/{{ run_id }}-first-volume-retry/pin_build/alpha-images.env; set +a; bash scripts/run-k8s-demo.sh {{ product_root }}'"
+        env.SW_BLOCK_ARTIFACT_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-first-volume-retry/success_rerun"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-first-volume-retry/success_rerun/run.log"
+        pattern: "\\[app-demo\\] PASS: app pod wrote data, replacement app pod read it back through the same PVC, cleanup complete"
+        save_as: success_rerun_pass_count
+      - action: assert_greater
+        actual: "{{ success_rerun_pass_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-first-volume-retry/success_rerun/writer.log"
+        pattern: "/data/demo.bin: OK"
+        save_as: success_rerun_writer_checksum_count
+      - action: assert_greater
+        actual: "{{ success_rerun_writer_checksum_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-first-volume-retry/success_rerun/reader.log"
+        pattern: "/data/demo.bin: OK"
+        save_as: success_rerun_reader_checksum_count
+      - action: assert_greater
+        actual: "{{ success_rerun_reader_checksum_count }}"
         threshold: "0"
 
   - name: final_asserts

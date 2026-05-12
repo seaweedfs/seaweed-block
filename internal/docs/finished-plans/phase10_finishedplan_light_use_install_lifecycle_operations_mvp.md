@@ -1,7 +1,8 @@
 # Finished Plan: Light-Use Install And Lifecycle Operations MVP
 
-Status: finished. Closed after QA formal close report at product commit
-`9a49992`.
+Status: close candidate. Initial QA close report passed at product commit
+`9a49992`; strict QA reading later found three close-gate gaps. Dev fixes are
+attached after `9a49992`; strict QA revalidation is pending.
 
 Opened after closing
 `finished-plans/phase9_finishedplan_light_use_operations_mvp.md`.
@@ -387,8 +388,17 @@ Close evidence:
 - Manual runbook: `sw-block-app-demo-20260512T055732Z`.
 - Scenario consistency run: `20260511-225935-0ff4`.
 
-QA cleared all HG-0 through HG-12 clauses. Remaining notes are nonblocking
-doc/scope polish: a more explicit boundary check after
-`apply-k8s-alpha-blockvolumes.sh`, more during-run `kubectl` checks, and a
-more explicit separate retry fixture for "successful run, run again
-immediately".
+Initial QA cleared all HG-0 through HG-12 clauses. A later strict reading found
+three gaps and dev addressed them:
+
+- HG-2: `docs/quickstart-kubernetes.md` now verifies
+  `apply-k8s-alpha-blockvolumes.sh` with an explicit generated Deployment
+  readiness command and expected `1/1` output.
+- HG-4: `docs/quickstart-kubernetes.md` now includes per-boundary commands and
+  expected lines for CSI controller, CSI node, StorageClass, PVC, generated
+  Deployment, writer, reader, delete, and iSCSI residue.
+- HG-9: `testops/scenarios/light-use-first-volume-retry-chain.yaml` now has a
+  named `rerun_after_success_no_cleanup` phase for "successful run, run again
+  immediately".
+
+Strict close is pending QA revalidation of these three deltas.

@@ -81,6 +81,21 @@ cat "$ARTIFACT_DIR/app-storage.after-delete.txt"
 cat "$ARTIFACT_DIR/iscsi-sessions.after-delete.txt"
 ```
 
+If you want to watch each boundary directly while the demo is running, use
+these checks. The expected output is intentionally small and copyable:
+
+| Boundary | Command | Expected output line |
+|---|---|---|
+| CSI controller Ready | `kubectl -n kube-system get deploy sw-block-csi-controller -o jsonpath='{.status.readyReplicas}/{.status.replicas}{"\n"}'` | `1/1` |
+| CSI node DaemonSet rolled out | `kubectl -n kube-system rollout status ds/sw-block-csi-node` | `daemon set "sw-block-csi-node" successfully rolled out` |
+| StorageClass present | `kubectl get sc sw-block-dynamic -o jsonpath='{.provisioner}{"\n"}'` | `block.csi.seaweedfs.com` |
+| PVC Bound | `kubectl get pvc sw-block-demo-pvc -o jsonpath='{.status.phase}{"\n"}'` | `Bound` |
+| Generated blockvolume Deployment Ready | `kubectl -n default get deploy -l app=sw-blockvolume -o jsonpath='{.items[0].status.readyReplicas}/{.items[0].status.replicas}{"\n"}'` | `1/1` |
+| Writer pod Succeeded | `kubectl get pod sw-block-demo-writer -o jsonpath='{.status.phase}{"\n"}'` | `Succeeded` |
+| Reader checksum OK | `kubectl logs sw-block-demo-reader` | `/data/demo.bin: OK` |
+| Delete returned clean | `kubectl get pvc sw-block-demo-pvc` | `Error from server (NotFound): persistentvolumeclaims "sw-block-demo-pvc" not found` |
+| Residue absent | `sudo iscsiadm -m session` | `iscsiadm: No active sessions.` |
+
 The build artifact directory records image IDs and binary versions. The demo
 artifact directory records the first-volume evidence.
 
@@ -289,6 +304,18 @@ blockmaster:
 
 ```bash
 bash scripts/apply-k8s-alpha-blockvolumes.sh
+```
+
+Verify the generated workload is Ready before starting your app:
+
+```bash
+kubectl get deploy -n default -l app=sw-blockvolume -o jsonpath='{.items[0].status.readyReplicas}/{.items[0].status.replicas}{"\n"}'
+```
+
+Expected output:
+
+```text
+1/1
 ```
 
 Then start an app pod that mounts the PVC:
