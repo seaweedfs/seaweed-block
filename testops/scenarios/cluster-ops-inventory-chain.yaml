@@ -129,7 +129,7 @@ phases:
       - action: grep_log
         node: m02
         path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-cluster-inventory/inventory/volume-inventory-summary.txt"
-        pattern: "^inventory_status: (ok|unhealthy)$"
+        pattern: "^inventory_status: \\(ok\\|unhealthy\\)$"
         save_as: inventory_status_count
       - action: assert_greater
         actual: "{{ inventory_status_count }}"
