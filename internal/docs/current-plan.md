@@ -253,8 +253,8 @@ Completed:
 
 Remaining in this plan:
 
-1. QA validates TestOps control-data behavior on a real/shared control
-   directory.
+1. QA validates the full Light-Use Operations MVP close assignment:
+   `qa-assignments/light-use-operations-mvp-close-validation.md`.
 2. Run focused tests and scenario validation.
 3. Close this plan into `finished-plans/`.
 
