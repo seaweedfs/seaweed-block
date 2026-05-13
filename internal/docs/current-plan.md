@@ -1,6 +1,6 @@
 # Current Plan: Cluster Operations Inventory And Lifecycle Visibility MVP
 
-Status: active. Opened after closing
+Status: active, close-prep. Opened after closing
 `finished-plans/phase10_finishedplan_light_use_install_lifecycle_operations_mvp.md`.
 
 Current task: close-readiness cleanup after D5. D1 defined the multi-volume/RF-
@@ -11,13 +11,17 @@ status endpoint. D4 added the user-facing quickstart inspection flow. D5 is now
 strict PASS: QA run `20260512-162943-77fe` at product commit `2e521b3` proved
 two concurrent live PVCs on the alpha k3s path, with distinct volume IDs,
 generated Deployments, iSCSI frontend ports, status endpoint ports, and nested
-support bundles. D6 fast RF/missing-replica fixtures are in place and now use
-the same machine-readable issue vocabulary as the QA hard gate. The current
-cleanup slice tightens HG-14 non-claim labels so the close report can validate
-them mechanically.
+support bundles. D6 fast RF/missing-replica fixtures are in place and use the
+same machine-readable issue vocabulary as the QA hard gate. The current cleanup
+slice tightens HG-10 residue labels and HG-14 non-claim labels so the close
+report can validate them mechanically.
 
 QA slice assignment for D5 live validation:
 `internal/docs/qa-assignments/cluster-ops-inventory-chain-validation.md`.
+
+Next QA checkpoint: formal close report against
+`internal/docs/qa-assignments/cluster-ops-inventory-mvp-close-hard-gate.md`
+after close-prep is committed.
 
 ## Product Question
 
@@ -58,23 +62,29 @@ What already works:
 
 - `sw-block ops status` can produce a useful support bundle for one known
   volume when the caller already has the volume id and status address.
+- `sw-block ops inventory` can discover supported alpha Kubernetes resources
+  without TestOps artifact paths and emit a cluster inventory bundle.
 - The first-volume quickstart and TestOps chain produce line-level cleanup
   attribution.
 - TestOps can prove happy path, retry, failure bundle, and break-class behavior.
 - The generated `blockvolume` manifests include useful identity and endpoint
   flags.
+- The live D5 gate proves two concurrent PVCs on the alpha k3s path without
+  cross-volume identity or port collision.
+- Fast fixtures cover RF=1/RF=2/RF=3, missing replica slots, orphan PVCs, and
+  Kubernetes-visible orphan blockvolume Deployments.
 
 What is still weak:
 
-- A user cannot ask "what Seaweed Block volumes exist?" through one product
-  command.
-- `sw-block ops status` is not discoverable; it needs volume/status endpoint
-  inputs from artifacts or generated YAML.
-- Kubernetes ownership, PVC/PV identity, frontend protocol, status endpoint,
-  and cleanup residue are scattered across different files and commands.
-- There is no compact cluster support bundle for "send me the current state of
-  the alpha install."
-- The product has no read-only operational API/UI; CLI is the right first step.
+- The close report still needs a QA-owned cold run against the full hard gate.
+- Read-only behavior needs the HG-12 repeated-run proof at close time.
+- Per-replica nested bundle reuse needs the HG-11 normalized comparison at
+  close time.
+- Pure standalone `blockvolume` heartbeat-without-placement discovery still
+  needs a master observation-list API if we want a literal non-Kubernetes
+  residue fixture; the supported alpha Kubernetes path now reports the
+  Kubernetes-visible equivalent.
+- The product still has no API/UI; CLI is the right first step for this plan.
 
 ## Master / RF Reality Check
 

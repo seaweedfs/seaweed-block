@@ -87,6 +87,48 @@ func TestKubernetesInventoryCollector_OrphanPVCIsActionable(t *testing.T) {
 	}
 }
 
+func TestKubernetesInventoryCollector_OrphanDeploymentIsActionable(t *testing.T) {
+	collector := NewKubernetesVolumeInventoryCollector(KubernetesInventoryConfig{
+		Namespace:       "default",
+		ProductRevision: "product-rev",
+		RunCommand: fixtureKubectl(map[string]string{
+			"kubectl -n default get pvc -o json":                          `{"items":[]}`,
+			"kubectl get pv -o json":                                      `{"items":[]}`,
+			"kubectl -n default get deploy -l app=sw-blockvolume -o json": orphanDeploymentListJSON,
+		}),
+	})
+
+	inventory, err := collector.Collect(context.Background())
+	if err != nil {
+		t.Fatalf("collect: %v", err)
+	}
+	if got := ClassifyVolumeInventory(inventory); got != VolumeStatusExitUnhealthy {
+		t.Fatalf("exit=%d issues=%v", got, VolumeInventoryIssues(inventory))
+	}
+	if len(inventory.Volumes) != 1 {
+		t.Fatalf("volumes=%d want orphan deployment row", len(inventory.Volumes))
+	}
+	volume := inventory.Volumes[0]
+	for _, want := range []string{
+		"orphan-blockvolume-deploy=sw-blockvolume-pvc-orphan-r1",
+		"heartbeat-without-placement=m02 state=unadmitted-by-master reason=no-matching-pvc-or-pv",
+	} {
+		if !containsString(volume.Issues, want) {
+			t.Fatalf("volume issues missing %q: %v", want, volume.Issues)
+		}
+	}
+	summary := RenderVolumeInventorySummary(inventory)
+	for _, want := range []string{
+		"volume: id=pvc-orphan namespace=default pvc=unavailable pv=unavailable rf=1 desired=1 observed=1",
+		"- volume pvc-orphan orphan-blockvolume-deploy=sw-blockvolume-pvc-orphan-r1",
+		"- volume pvc-orphan heartbeat-without-placement=m02 state=unadmitted-by-master reason=no-matching-pvc-or-pv",
+	} {
+		if !strings.Contains(summary, want) {
+			t.Fatalf("summary missing %q:\n%s", want, summary)
+		}
+	}
+}
+
 func TestKubernetesInventoryCollector_AttachesReplicaStatusBundles(t *testing.T) {
 	masterAddr, closeMaster := startOpsFakeMaster(t)
 	defer closeMaster()
@@ -262,6 +304,20 @@ const deploymentListJSON = `{
         "ownerReferences":[{"kind":"PersistentVolumeClaim","name":"app-b","uid":"uid-b"}]
       },
       "spec":{"template":{"spec":{"nodeSelector":{"kubernetes.io/hostname":"m02"},"containers":[{"name":"blockvolume","args":["--server-id=m02","--volume-id=pvc-b","--replica-id=r1","--data-addr=127.0.0.1:19111","--ctrl-addr=127.0.0.1:19112","--status-addr=127.0.0.1:23261","--iscsi-listen=127.0.0.1:3261","--iscsi-iqn=iqn.2026-05.io.seaweedfs:pvc-b"]}]}}},
+      "status":{"replicas":1,"readyReplicas":1}
+    }
+  ]
+}`
+
+const orphanDeploymentListJSON = `{
+  "items": [
+    {
+      "metadata":{
+        "name":"sw-blockvolume-pvc-orphan-r1",
+        "namespace":"default",
+        "labels":{"app":"sw-blockvolume","sw-block.seaweedfs.com/volume":"pvc-orphan","sw-block.seaweedfs.com/replica":"r1"}
+      },
+      "spec":{"template":{"spec":{"nodeSelector":{"kubernetes.io/hostname":"m02"},"containers":[{"name":"blockvolume","args":["--server-id=m02","--volume-id=pvc-orphan","--replica-id=r1","--data-addr=127.0.0.1:19101","--ctrl-addr=127.0.0.1:19102","--status-addr=127.0.0.1:23260","--iscsi-listen=127.0.0.1:3260","--iscsi-iqn=iqn.2026-05.io.seaweedfs:pvc-orphan"]}]}}},
       "status":{"replicas":1,"readyReplicas":1}
     }
   ]

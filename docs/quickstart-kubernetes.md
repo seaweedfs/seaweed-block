@@ -158,6 +158,17 @@ issues:
 - volume pvc-... generated_deployment_missing
 ```
 
+Expected residue shape if a generated `blockvolume` Deployment remains after
+its PVC/PV disappeared:
+
+```text
+inventory_status: unhealthy
+volume: id=pvc-... namespace=default pvc=unavailable pv=unavailable ... observed=1 status=unhealthy protocols=iscsi replicas=1
+issues:
+- volume pvc-... orphan-blockvolume-deploy=sw-blockvolume-pvc-...-r1
+- volume pvc-... heartbeat-without-placement=<server> state=unadmitted-by-master reason=no-matching-pvc-or-pv
+```
+
 Attach the whole inventory directory when filing an issue. The top-level
 inventory answers "what exists?", while each nested replica status bundle
 answers "what did this replica report?" using the same schema as

@@ -85,6 +85,7 @@ func collectKubernetesVolumeInventory(ctx context.Context, cfg KubernetesInvento
 	}
 
 	volumes := make([]VolumeInventoryVolumeInput, 0, len(pvcs))
+	claimedVolumeIDs := map[string]bool{}
 	for _, pvc := range pvcs {
 		pv, hasPV := pvByClaim[claimKey(pvc.Metadata.Namespace, pvc.Metadata.Name)]
 		if !isSeaweedBlockPVC(pvc, pv, hasPV) {
@@ -111,6 +112,26 @@ func collectKubernetesVolumeInventory(ctx context.Context, cfg KubernetesInvento
 			volume.Issues = append(volume.Issues, "generated_deployment_missing")
 		}
 		volumes = append(volumes, volume)
+		claimedVolumeIDs[volumeID] = true
+	}
+	for volumeID, replicas := range replicasByVolume {
+		if claimedVolumeIDs[volumeID] {
+			continue
+		}
+		orphan := VolumeInventoryVolumeInput{
+			VolumeID:          volumeID,
+			Namespace:         cfg.Namespace,
+			PVCName:           Unavailable,
+			PVName:            Unavailable,
+			ReplicationFactor: max(1, len(replicas)),
+			SupportBundle:     "volumes/" + volumeID,
+			Replicas:          replicas,
+			Issues: []string{
+				"orphan-blockvolume-deploy=" + strings.Join(replicaDeploymentNames(replicas), ","),
+				"heartbeat-without-placement=" + strings.Join(replicaServerIDs(replicas), ",") + " state=unadmitted-by-master reason=no-matching-pvc-or-pv",
+			},
+		}
+		volumes = append(volumes, orphan)
 	}
 	volumes = collectKubernetesReplicaStatusBundles(ctx, cfg, volumes)
 
@@ -120,6 +141,22 @@ func collectKubernetesVolumeInventory(ctx context.Context, cfg KubernetesInvento
 		RunnerRevision:  cfg.RunnerRevision,
 		Volumes:         volumes,
 	}), nil
+}
+
+func replicaDeploymentNames(replicas []VolumeInventoryReplicaInput) []string {
+	names := make([]string, 0, len(replicas))
+	for _, replica := range replicas {
+		names = append(names, explicitUnavailable(replica.GeneratedDeployment))
+	}
+	return names
+}
+
+func replicaServerIDs(replicas []VolumeInventoryReplicaInput) []string {
+	ids := make([]string, 0, len(replicas))
+	for _, replica := range replicas {
+		ids = append(ids, explicitUnavailable(replica.ServerID))
+	}
+	return ids
 }
 
 func collectKubernetesReplicaStatusBundles(ctx context.Context, cfg KubernetesInventoryConfig, volumes []VolumeInventoryVolumeInput) []VolumeInventoryVolumeInput {

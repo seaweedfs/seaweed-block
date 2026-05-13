@@ -203,10 +203,11 @@ healthy replica.
 - Pass: each residue class is a row (or a `residue:` field on the closest
   identity row) with an explicit shape, e.g.:
   ```text
-  orphan-pvc:<ns>/<pvc>                       state=no-generated-deployment age=<duration>
+  generated_deployment_missing
   orphan-iscsi-session:<iqn>                  state=session-without-volume   cleaned_by=testops-guardrail
-  orphan-blockvolume-deploy:<name>            state=no-matching-pvc
-  heartbeat-without-placement:<server_id>     state=unadmitted-by-master     reason=topology-or-cluster-spec-mismatch
+  orphan-blockvolume-deploy=<name>
+  heartbeat-without-placement=<server_id>     state=unadmitted-by-master     reason=topology-or-cluster-spec-mismatch
+  heartbeat-without-placement=<server_id>     state=unadmitted-by-master     reason=no-matching-pvc-or-pv
   ```
   Inventory does not claim cleanup it didn't perform; it names the
   testops-guardrail boundary the same way the prior plan's

@@ -127,6 +127,25 @@ Current product behavior:
 - Inventory should report both sides honestly: observed processes are evidence,
   but authority only applies to admitted replicas.
 
+## Partial And Residue Issue Vocabulary
+
+Inventory must prefer explicit degraded rows over disappearance. The following
+issue prefixes are part of the operator-facing contract:
+
+- `generated_deployment_missing`: a Seaweed Block PVC/PV exists, but no
+  generated `blockvolume` Deployment was observed for that volume.
+- `orphan-blockvolume-deploy=<name>[,<name>...]`: one or more generated
+  `blockvolume` Deployments exist without a matching Seaweed Block PVC/PV row.
+- `heartbeat-without-placement=<server_id>[,<server_id>...] state=unadmitted-by-master reason=no-matching-pvc-or-pv`:
+  a Kubernetes-visible blockvolume workload is observed, but inventory cannot
+  map it to admitted PVC/PV placement. This is residue/degraded evidence, not
+  authority.
+- `status_endpoint_unreachable=<addr>`: a replica advertises a status endpoint,
+  but inventory cannot collect the nested `sw-block ops status` bundle.
+
+These issue prefixes are intentionally machine-readable. They may appear in a
+volume's `issues` array and in the human summary's `issues:` section.
+
 ## Human Summary
 
 `RenderVolumeInventorySummary` emits stable plain text suitable for logs and
