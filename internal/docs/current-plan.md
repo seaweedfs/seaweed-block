@@ -2,13 +2,14 @@
 
 Status: active, opened after closing
 `finished-plans/phase13_finishedplan_durable_volume_restart_reattach_mvp.md`,
-62% implementation.
+72% implementation.
 
 QA needed now: yes for D4/D5 live gates. Assignment:
 `internal/docs/qa-assignments/same-node-alpha-attach-validation.md`.
-Dev can continue with D6 docs while QA runs it.
+Formal close gate:
+`internal/docs/qa-assignments/multi-node-attach-placement-mvp-close-hard-gate.md`.
 
-Current dev slice: D7 QA close-gate prep.
+Current dev slice: waiting on QA D4/D5 run, then close report/fixes.
 
 ## Product Question
 
@@ -275,6 +276,9 @@ Ask QA to validate:
 - the negative fixture produces a useful bundle,
 - cleanup covers all participating nodes,
 - docs do not over-claim HA or node-loss durability.
+
+Output: formal hard gate added at
+`internal/docs/qa-assignments/multi-node-attach-placement-mvp-close-hard-gate.md`.
 
 ## Gates To Close
 
