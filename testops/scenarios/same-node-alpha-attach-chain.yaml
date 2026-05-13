@@ -170,7 +170,7 @@ phases:
         threshold: "0"
       - action: exec
         node: m02
-        cmd: "APP_NODE=$(sed -n 's/.*app_node=//p' /mnt/smb/work/share/g15d-k8s/{{ run_id }}-same-node-attach/demo/run.log | tail -1); test -n \"$APP_NODE\"; grep -q \"node=${APP_NODE}\" /mnt/smb/work/share/g15d-k8s/{{ run_id }}-same-node-attach/demo/ops-inventory-reader-verified/volume-inventory-summary.txt"
+        cmd: "APP_NODE=$(sed -n 's/^.*] app_node=//p' /mnt/smb/work/share/g15d-k8s/{{ run_id }}-same-node-attach/demo/run.log | tail -1); test -n \"$APP_NODE\"; grep -q \"node=${APP_NODE}\" /mnt/smb/work/share/g15d-k8s/{{ run_id }}-same-node-attach/demo/ops-inventory-reader-verified/volume-inventory-summary.txt"
       - action: grep_log
         node: m02
         path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-same-node-attach/demo/ops-inventory-reader-verified/volume-inventory-summary.txt"
