@@ -1,300 +1,248 @@
-# Current Plan: Product-Owned Blockvolume Lifecycle MVP
+# Current Plan: Durable Volume Restart And Reattach MVP
 
-Status: active, D1-D7 implemented and live runner-native gate passed, 90%
-implementation. Opened after closing
-`finished-plans/phase11_finishedplan_cluster_ops_inventory_lifecycle_visibility_mvp.md`.
+Status: active, newly opened after closing
+`finished-plans/phase12_finishedplan_product_owned_blockvolume_lifecycle_mvp.md`,
+0% implementation.
 
-QA needed now: yes, for D8 formal close validation against
-`qa-assignments/product-owned-blockvolume-lifecycle-mvp-close-hard-gate.md`.
+QA needed now: no. First QA checkpoint is after a runner-native restart gate
+passes once from dev.
 
-Current dev slice: D8 QA close validation and any close-report fixes.
+Current dev slice: D1 durable root contract refresh, then D2 fast tests for
+generated workload durable-root ownership.
 
 ## Product Question
 
-Can an early Kubernetes user create and delete Seaweed Block PVCs without
-running a separate manifest-apply script, while still getting the same
-observable inventory and cleanup evidence?
+Can an early Kubernetes user keep data after the generated `blockvolume`
+workload restarts, using the same product-owned lifecycle path and inventory
+evidence established by the previous plan?
 
-The last two plans proved:
+The last three plans proved:
 
 ```text
-first volume works -> read-only cluster inventory is useful
+first volume works -> inventory explains cluster state -> product owns
+generated blockvolume Deployment lifecycle
 ```
 
-This plan moves the next user-visible gap:
+This plan moves the next visible user gap:
 
 ```text
-PVC appears -> product creates/updates blockvolume workload -> inventory shows it
-PVC deleted -> product removes blockvolume workload -> inventory shows cleanup
+PVC writes data -> blockvolume restarts -> same PVC reattaches -> data is still
+readable -> inventory/support bundle explains durable state
 ```
 
 The narrow claim after this plan should be:
 
 ```text
-On the supported alpha Kubernetes path, generated blockvolume workloads are
-product-owned by a small reconciler/operator path instead of a user-run apply
-script. Users still use normal Kubernetes PVCs, and `sw-block ops inventory`
-shows the lifecycle state and evidence.
+On the supported single-node alpha Kubernetes path, a generated RF=1 iSCSI
+blockvolume can restart and reattach to the same PVC without losing data,
+when configured with the documented durable host path.
 ```
 
-This is still not a full production operator. It does not claim multi-node
-scheduling, upgrade safety, repair, rebuild, live RF=2/RF=3 Kubernetes
-operation, metrics, or UI.
+This is still not production HA. It does not claim node loss, multi-node
+scheduling, live RF=2/RF=3 Kubernetes operation, upgrade safety, rebuild,
+failover, performance, or UI.
 
 ## Why This Is Next
 
-The current user experience still has one awkward manual step:
+The product now feels closer to a normal Kubernetes storage product: users
+create PVCs and the product materializes backing `blockvolume` workloads. But
+several docs still honestly say the default alpha path uses throwaway pod-local
+state in some paths. That blocks a stronger light-use product claim.
 
-```text
-bash scripts/apply-k8s-alpha-blockvolumes.sh
-```
+A storage product must survive at least its own workload restart before users
+can trust it for light use. We already have partial restart machinery and
+operations evidence:
 
-That is acceptable for TestOps but not for a normal product loop. A light-use
-user expects the product to own generated workloads once the install is done.
-The inventory plan made this visible: it can now detect missing generated
-Deployments, orphan Deployments, unplaced processes, stale status endpoints,
-and per-volume support bundles. The next step is to reduce how often users hit
-those states by making lifecycle reconciliation product-owned.
+- `scripts/run-k8s-blockvolume-restart.sh` exists as a restart-oriented wrapper.
+- `scripts/run-alpha-app-demo.sh` has `SW_BLOCK_RESTART_BLOCKVOLUME_BEFORE_READER`
+  and `SW_BLOCK_LAUNCHER_STATE_HOSTPATH` hooks.
+- `sw-block ops status` reports durable entries, latched state, epoch, and
+  endpoint version.
+- `sw-block ops inventory` now maps PVCs to generated workloads and nested
+  status bundles.
+
+This plan turns those pieces into a product-facing durable restart path.
 
 ## Current Honest State
 
 What already works:
 
-- Dynamic PVC provisioning can create PV/PVC identity and blockmaster manifest
-  output.
-- Generated blockvolume manifests are multi-doc safe and can support two
-  concurrent PVCs on one alpha node with distinct ports.
-- `sw-block ops inventory` can observe multiple PVCs, generated Deployments,
-  status endpoints, nested status bundles, and stale/orphan residue.
-- The quickstart and TestOps scenarios can still use scripts as guardrails.
-- The live lifecycle gate
-  `cluster-ops-inventory-chain` passed on m02 as run
-  `20260512-202811-1aa7`: two PVCs reconciled through the product-owned path,
-  inventory reported PVC owner references, and deleting one PVC left the other
-  visible and untouched.
+- Product-owned generated workload reconciliation is live-gated.
+- Two PVCs can coexist on one alpha node with distinct ports.
+- Inventory exposes PVC owner references and per-replica support bundles.
+- The demo can run a writer then replacement reader through the same PVC.
+- Restart hooks exist in scripts, and the prior hardening work validated
+  durable status fields in smaller slices.
 
 What is still weak:
 
-- QA has not yet independently cold-run the quickstart and operations manual
-  for this product-owned lifecycle wording.
-- Delete/uninstall ownership is split between product objects, scripts, and
-  TestOps guardrails.
-- We need to keep the first version conservative: no broad cluster sweeps, no
-  admin repair commands, no hidden cleanup of unrelated resources.
+- The default quickstart still frames generated blockvolume storage as
+  non-durable pod-local state.
+- Durable root selection is not yet a simple, documented user path.
+- Restart evidence is scattered across scripts and prior QA reports rather
+  than one current product gate.
+- Inventory must prove durable readiness in a way a user can understand
+  without reading blockvolume logs.
+- Cleanup must not erase retained durable data unless the user explicitly asks
+  for a clean lab.
 
 ## Scope
 
 In scope:
 
-- Define the lifecycle ownership contract for generated blockvolume workloads.
-- Add or wire a minimal reconciler path that applies blockmaster-generated
-  blockvolume manifests for the supported alpha namespace/labels.
-- Make deletion scoped and attributable: PVC/PV disappearance should remove or
-  mark only the matching generated workload.
-- Keep `sw-block ops inventory` as the observation gate for every lifecycle
-  state.
-- Update quickstart so the happy path no longer requires a separate
-  `apply-k8s-alpha-blockvolumes.sh` step.
-- Add a v1 user operations manual for install, first volume, inventory,
-  delete, failure bundle collection, cleanup, and known limits.
-- Add fast tests first, then one runner-native lifecycle gate.
+- Define the durable root layout and ownership for the supported alpha restart
+  path.
+- Make the operations manual show how to enable durable host-path storage for
+  the alpha path.
+- Ensure generated `blockvolume` Deployments carry the durable-root and
+  lifecycle arguments needed for restart.
+- Add or tighten fast tests around durable-root rendering, hostpath injection,
+  and inventory/status fields.
+- Add a runner-native gate that writes data, restarts the generated
+  `blockvolume`, reattaches/replaces the app pod, and verifies checksum.
+- Use `sw-block ops inventory` and nested `sw-block ops status` bundles to
+  prove durable state after restart.
+- Keep cleanup scoped and explicit about retained `/var/lib/sw-block` state.
 
 Out of scope:
 
-- Full Kubernetes operator with CRDs and leader election.
-- Multi-node placement policy.
-- Repair/promote/rebuild/admin actions.
-- Upgrade/uninstall safety beyond the alpha path.
-- RF=2/RF=3 live Kubernetes lifecycle.
+- Node loss.
+- Multi-node scheduling.
+- Live RF=2/RF=3 Kubernetes lifecycle.
+- Rebuild or returned-replica reintegration.
+- Upgrade/uninstall safety.
+- Performance SLO.
 - UI/metrics.
 
 ## Top Blocking Issues
 
-### P0: Manual Apply Script Blocks Product Feel
+### P0: Durable Storage Must Be User-Selectable And Visible
 
-Users should not have to know that blockmaster writes files under `/manifests`
-and then run a separate script.
+Users need one documented way to say "keep the blockvolume state here" and one
+way to verify it is actually used.
 
-Close requirement: the documented happy path creates a PVC and reaches a ready
-blockvolume workload without asking the user to run
-`apply-k8s-alpha-blockvolumes.sh`.
+Close requirement: `docs/operations-v1.md` and the live gate both use an
+explicit durable host path, and generated manifests show the durable-root
+mapping.
 
-### P0: Lifecycle Ownership Must Be Scoped
+### P0: Restart Must Preserve Data Through The Normal PVC Path
 
-A reconciler must only touch Seaweed Block resources it owns. Broad namespace
-or cluster cleanup is not acceptable as product behavior.
+The proof must go through Kubernetes PVC attach/read, not just a direct file or
+status endpoint check.
 
-Close requirement: generated workloads carry stable labels/owner identity and
-delete/update logic targets only the matching volume/PVC identity.
+Close requirement: a writer pod writes and verifies data, the generated
+`blockvolume` Deployment restarts, a replacement reader pod mounts the same PVC
+and verifies the same checksum.
 
-### P0: Inventory Must Prove The Lifecycle
+### P0: Inventory Must Explain Durable State
 
-The previous plan made inventory the operational truth surface. This plan
-should not add hidden behavior that only works if logs are inspected.
+A passing restart is not enough if operators cannot tell what persisted.
 
-Close requirement: every lifecycle gate asserts inventory rows for created,
-updated, deleted, partial, and orphan states.
+Close requirement: inventory/support bundles show durable entry evidence
+including operational/latched state, epoch/endpoint evidence when available,
+and no contradictory health wording.
 
-### P1: Keep Reconciler Small And Testable
+### P1: Cleanup Must Preserve The Right Boundary
 
-The first product-owned lifecycle loop should be mostly component-tested. The
-long k3s gate should prove the user boundary, not every branch.
+Normal demo cleanup should remove Kubernetes resources and active sessions.
+Durable data retention must be explicit, not accidental.
 
-Close requirement: manifest selection, apply/delete scoping, idempotency, and
-orphan handling are covered by fast tests.
+Close requirement: cleanup artifacts state whether the durable host path was
+retained or removed, and broad deletion remains a TestOps guardrail only.
 
 ## Deliverables
 
-### D1: Lifecycle Ownership Contract
+### D1: Durable Root Contract Refresh
 
-Document the exact ownership model:
+Review and update `ref/durable-root-layout-contract.md` for the current
+product-owned lifecycle path:
 
-- which labels identify generated blockvolume workloads,
-- which PVC/PV fields map to volume id and replica id,
-- which component owns create/update/delete,
-- which states remain explicit non-claims.
+- generated Deployment hostPath/volumeMount layout,
+- mapping from PVC/volume ID to durable replica path,
+- ownership of retained data,
+- cleanup and non-claims.
 
-Reference:
-`ref/blockvolume-lifecycle-ownership-contract.md`.
+### D2: Fast Rendering And Status Tests
 
-### D2: Minimal Reconciler Implementation
+Add or tighten fast tests for:
 
-Implement the smallest product-owned path that can:
+- `--launcher-state-hostpath` rendering,
+- generated Deployment hostPath and durable-root args,
+- PVC owner references preserved with durable host path enabled,
+- inventory/status summary fields that prove durable entry state.
 
-- discover blockmaster-generated manifests or equivalent desired state,
-- apply/update generated Deployments for supported alpha PVCs,
-- avoid touching unrelated Deployments,
-- delete or mark stale owned Deployments when the corresponding PVC/PV is gone,
-- emit enough logs/events for TestOps and operators.
+### D3: Operations Manual Update
 
-The implementation can start as a controller-side loop or a dedicated command,
-but the user-facing runbook should not require manual manifest apply.
-
-### D3: Inventory Integration
-
-Ensure `sw-block ops inventory` clearly reports:
-
-- reconciled workload present,
-- workload missing,
-- workload stale/orphaned,
-- delete pending or cleanup complete,
-- non-claims for states still handled by TestOps guardrails.
-
-### D4: Quickstart Update
-
-Update `docs/quickstart-kubernetes.md` so the primary happy path is:
+Update `docs/operations-v1.md` with a "durable restart path" section:
 
 ```text
-preflight -> install/launch -> create PVC/app -> inventory -> delete -> inventory
+set SW_BLOCK_LAUNCHER_STATE_HOSTPATH -> run demo restart wrapper -> inspect
+inventory/status durable entry -> cleanup/retention notes
 ```
 
-The old apply script can remain as an internal fallback, but it must not be the
-main user path.
+Keep the default quickstart honest: the durable restart path is supported when
+configured, not an implicit production durability claim.
 
-### D5: V1 User Operations Manual
+### D4: Runner-Native Restart Gate
 
-Add a concise user-facing operations manual that answers:
-
-- how to install or launch the alpha path,
-- how to create the first PVC and confirm the backing `blockvolume` exists,
-- how to run `sw-block ops inventory` and read the output,
-- how to delete one PVC and confirm scoped cleanup,
-- how to collect a support bundle when the volume is unhealthy,
-- how to retry safely after an interrupted run,
-- what is explicitly not claimed: upgrade safety, broad uninstall safety,
-  multi-node scheduling, live RF=2/RF=3 Kubernetes operation, repair, metrics,
-  and UI.
-
-This manual can link to the quickstart, but it must stand on its own as the
-operator-facing v1 path for a light user.
-
-The manual must be based on
-`ref/light-use-block-storage-ux-research.md`, especially the common
-operational ladder:
-
-```text
-preflight/prereqs -> install -> wait/verify components -> create StorageClass ->
-create PVC + app -> verify bound/running/I/O -> inspect status -> teardown ->
-collect support data on failure
-```
-
-Minimum manual sections:
-
-- prerequisites and runnable preflight,
-- one default path first: iSCSI + `walstore` + supported alpha Kubernetes,
-- install and component readiness checks,
-- first PVC and app I/O verification,
-- cluster inventory and per-volume support bundle collection,
-- delete/teardown with scoped cleanup checks,
-- retry after interrupted or partial runs,
-- support bundle instructions for failure after volume identity exists,
-- clear `ops-status-unavailable` guidance when no volume identity was reached,
-- retained-state and non-claim section matching the research: no production HA,
-  no broad distro matrix, no upgrade/uninstall safety, no live RF=2/RF=3
-  Kubernetes claim, no performance SLO, no UI/operator-grade reconciliation.
-
-### D6: Fast Tests
-
-Add component tests for:
-
-- manifest ownership labels,
-- idempotent apply/update,
-- scoped delete,
-- orphan detection,
-- two PVCs on one node,
-- no mutation of unrelated workloads.
-
-### D7: Runner-Native Lifecycle Gate
-
-Add or update a TestOps scenario that:
+Add or tighten a TestOps scenario that:
 
 ```text
 pre_clean
-install/launch alpha product
-create PVC without manual apply script
-wait for generated blockvolume workload
-run writer/reader or attach smoke
-run inventory and assert lifecycle fields
-delete PVC
-run inventory and assert scoped cleanup or documented pending state
+build/import alpha images
+install/launch with product-owned lifecycle and durable host path
+create PVC/app writer
+wait for blockvolume ready
+restart generated blockvolume Deployment
+wait for durable status readiness
+delete writer and start replacement reader
+verify checksum
+run inventory and assert durable support bundle evidence
+delete PVC and cleanup
 collect_and_cleanup(always)
 ```
 
-### D8: QA Close Gate
+### D5: Failure/Partial-State Evidence
 
-Ask QA to validate as a new user:
+Add at least one focused failure fixture or assertion for:
 
-- follow the quickstart without manual apply,
-- follow the v1 operations manual without implementation knowledge,
-- create two PVCs and confirm both reconcile,
-- delete one PVC and confirm the other remains untouched,
-- inspect inventory before and after delete,
-- inject one orphan/stale generated workload and confirm it is named or cleaned
-  only if owned,
-- report any over-claim or confusing lifecycle state.
+- durable host path missing/unwritable, or
+- status endpoint unavailable after restart, or
+- durable status not latched/operational after restart timeout.
+
+The goal is a useful bundle, not a broad chaos matrix.
+
+### D6: QA Close Gate
+
+Ask QA to validate as a user:
+
+- follow the durable restart section in the operations manual,
+- run the runner-native restart gate,
+- confirm writer/reader checksum across blockvolume restart,
+- confirm inventory/support bundle durable evidence,
+- confirm cleanup and retained-state wording are honest,
+- report any over-claim or confusing durable-state wording.
 
 ## Gates To Close
 
 This plan closes only when:
 
-1. The ownership contract is documented.
-2. The primary quickstart no longer requires manual blockvolume manifest apply.
-3. A v1 user operations manual exists and matches the implemented path.
-4. Fast tests cover idempotent create/update/delete and no unrelated mutation.
-5. A live runner-native gate creates a usable PVC through the product-owned
-   lifecycle path.
-6. Two PVCs can coexist without port or identity collision.
-7. Deleting one PVC does not delete or corrupt the other.
-8. Inventory proves create/delete/stale states without log spelunking.
-9. QA validates the user experience independently and reports no blocking
-   usability issue.
+1. Durable host-path layout and non-claims are documented.
+2. Fast tests cover durable-root rendering and status/inventory evidence.
+3. The operations manual shows the durable restart path.
+4. A live runner-native gate proves write -> blockvolume restart -> reattach ->
+   read checksum.
+5. Inventory/support bundles prove durable entry state after restart.
+6. Cleanup artifacts distinguish Kubernetes cleanup from durable data
+   retention/removal.
+7. QA validates independently and reports no blocking usability issue.
 
 ## Success Statement
 
 After this plan, Seaweed Block can make a stronger light-use claim:
 
 ```text
-On the supported alpha Kubernetes path, users create and delete PVCs through
-normal Kubernetes objects while Seaweed Block owns the generated blockvolume
-workload lifecycle. Operators can verify the result with read-only inventory.
+On the supported single-node alpha Kubernetes path, users can configure a
+durable host path and verify that a generated RF=1 iSCSI blockvolume survives
+its own workload restart with data still readable through the PVC.
 ```
