@@ -1,10 +1,14 @@
 # Current Plan: Product-Owned Blockvolume Lifecycle MVP
 
-Status: active, D1 complete, 10% implementation. Opened after closing
+Status: active, D1 complete and D2 core reconciliation seam started, 20%
+implementation. Opened after closing
 `finished-plans/phase11_finishedplan_cluster_ops_inventory_lifecycle_visibility_mvp.md`.
 
 QA needed now: no. Next QA checkpoint is after D6 produces a live
 runner-native lifecycle gate, then D7 formal close validation.
+
+Current dev slice: D2b live Kubernetes wiring for the reconciler seam in
+`core/launcher/k8s_reconciler.go`.
 
 ## Product Question
 
