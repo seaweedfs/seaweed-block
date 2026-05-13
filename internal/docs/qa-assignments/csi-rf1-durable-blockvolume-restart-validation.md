@@ -1,11 +1,13 @@
 # QA Assignment: CSI RF=1 Durable Blockvolume Restart Validation
 
-Status: draft, waiting for first lab run.
-Branch: `plan-roadmap-refresh`.
+Status: ready for QA repeatability validation after dev run
+`20260512-211604-1339` passed at product commit `e90ce49`.
+Branch: `docs/post-merge-plan`.
 
 Scope: prove a single-replica dynamic PVC survives a generated `blockvolume`
-pod restart when the launcher renders durable host state. This is the first
-RF=1 reliable-restart gate for the beta-hardening plan.
+pod restart when the launcher renders durable host state, and prove the
+operator can read the post-restart durable state through `sw-block ops
+inventory` and nested `sw-block ops status` bundles.
 
 ## Preconditions
 
@@ -42,8 +44,9 @@ SW_BLOCK_LAUNCHER_STATE_HOSTPATH="/var/lib/sw-block/testops-${RUN_ID}" \
 Expected:
 
 - `run.log` contains:
-  - `launcher_state_hostpath=/var/lib/sw-block`,
+  - `launcher_state_hostpath=/var/lib/sw-block/testops-${RUN_ID}`,
   - `restart_blockvolume_before_reader=1`,
+  - `collect_inventory_after_restart=1`,
   - `demo-app-pvc-writer-hold-root.yaml`,
   - `delete writer pod but keep PVC`,
   - `restart generated blockvolume Deployment before replacing the app pod`,
@@ -82,6 +85,21 @@ Expected:
   and the replacement reader pod reattached/read after restart. Do not require a
   live iSCSI session after the one-shot reader exits; Kubernetes may unstage and
   logout immediately after the pod reaches `Succeeded`.
+- `ops-inventory-after-restart/volume-inventory-summary.txt` exists and
+  contains:
+  - a `volume:` row for `pvc=sw-block-demo-pvc`,
+  - `protocols=iscsi`,
+  - a `replica:` row with `lifecycle_owner=pvc-owner-ref
+    owner_ref=PersistentVolumeClaim/default/sw-block-demo-pvc`,
+  - `support_bundle=volumes/<volume>/<replica>`.
+- `ops-inventory-after-restart/nested-ops-status-bundles.json` contains:
+  - `"command": "sw-block ops status"`.
+- At least one nested
+  `ops-inventory-after-restart/volumes/<volume>/<replica>/volume-status-summary.txt`
+  contains:
+  - `durable_entry:`,
+  - `latched=true`,
+  - `operational=true`.
 - Cleanup:
   - no generated `sw-blockvolume` Deployment remains,
   - demo PVC is gone,
@@ -95,6 +113,10 @@ Expected:
 - `blockmaster` remains in the loop: the restarted workload must re-observe and
   keep enough lifecycle/frontend state for CSI to rediscover and reattach.
 - A replacement app pod can read data written before the restart.
+- Inventory maps the restarted PVC to its generated workload and support
+  bundle.
+- The nested status bundle shows the durable entry is latched and operational
+  after restart.
 
 ## What This Does Not Prove
 
@@ -118,5 +140,6 @@ QA should report:
 - writer and reader checksum lines,
 - blockvolume rollout evidence,
 - master/lifecycle evidence after restart,
+- inventory summary and nested status durable-entry evidence,
 - cleanup state,
 - any CSI, kubelet, iSCSI, or blockvolume errors.

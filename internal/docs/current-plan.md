@@ -1,15 +1,15 @@
 # Current Plan: Durable Volume Restart And Reattach MVP
 
 Status: active, D1 durable contract, D2 fast rendering coverage, D3
-operations manual update, and D4 restart-gate implementation complete, 50%
+operations manual update, and D4 dev restart gate complete, 60%
 implementation. Opened after closing
 `finished-plans/phase12_finishedplan_product_owned_blockvolume_lifecycle_mvp.md`.
 
-QA needed now: no. First QA checkpoint is after a runner-native restart gate
-passes once from dev.
+QA needed now: yes, for a D4 repeatability run using
+`qa-assignments/csi-rf1-durable-blockvolume-restart-validation.md`. Dev can
+continue D5 in parallel.
 
-Current dev slice: run the D4 restart gate once from dev, then move to D5
-failure/partial-state evidence.
+Current dev slice: D5 failure/partial-state evidence.
 
 ## Product Question
 
@@ -208,7 +208,8 @@ delete PVC and cleanup
 collect_and_cleanup(always)
 ```
 
-Status: implementation complete. The restart wrapper now collects
+Status: dev gate passed. Run `20260512-211604-1339` on m02 passed 5/5 phases
+and 59/59 actions at commit `e90ce49`. The restart wrapper collects
 `ops-inventory-after-restart` during the live post-restart window, and the
 runner-native chain asserts inventory, PVC owner reference, nested
 `sw-block ops status` bundle, and durable entry evidence.
