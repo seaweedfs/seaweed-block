@@ -18,6 +18,7 @@ KEEP_ON_STOP="${SW_BLOCK_DEMO_KEEP_ON_STOP:-0}"
 MANUAL_APPLY_BLOCKVOLUMES="${SW_BLOCK_DEMO_MANUAL_APPLY_BLOCKVOLUMES:-0}"
 AFTER_BLOCKVOLUME_READY_CMD="${SW_BLOCK_DEMO_AFTER_BLOCKVOLUME_READY_CMD:-}"
 BREAK_AFTER_BLOCKVOLUME_READY="${SW_BLOCK_DEMO_BREAK_AFTER_BLOCKVOLUME_READY:-}"
+BREAK_AFTER_BLOCKVOLUME_RESTART="${SW_BLOCK_DEMO_BREAK_AFTER_BLOCKVOLUME_RESTART:-}"
 WRITER_TIMEOUT="${SW_BLOCK_DEMO_WRITER_TIMEOUT:-240}"
 DELETE_ALL_BLOCKVOLUMES="${SW_BLOCK_UNINSTALL_DELETE_ALL_BLOCKVOLUMES:-0}"
 DEFAULT_DEMO_APP_MANIFEST="$ROOT/deploy/k8s/alpha/demo-app-pvc.yaml"
@@ -48,6 +49,10 @@ if [[ -n "$DEMO_STOP_AFTER" && "$DEMO_STOP_AFTER" != "blockvolume-ready" ]]; the
 fi
 if [[ -n "$BREAK_AFTER_BLOCKVOLUME_READY" && "$BREAK_AFTER_BLOCKVOLUME_READY" != "delete-generated-blockvolume" ]]; then
   echo "unsupported SW_BLOCK_DEMO_BREAK_AFTER_BLOCKVOLUME_READY value: $BREAK_AFTER_BLOCKVOLUME_READY" >&2
+  exit 2
+fi
+if [[ -n "$BREAK_AFTER_BLOCKVOLUME_RESTART" && "$BREAK_AFTER_BLOCKVOLUME_RESTART" != "scale-generated-blockvolume-to-zero" ]]; then
+  echo "unsupported SW_BLOCK_DEMO_BREAK_AFTER_BLOCKVOLUME_RESTART value: $BREAK_AFTER_BLOCKVOLUME_RESTART" >&2
   exit 2
 fi
 if [[ -z "$DEMO_STOP_AFTER" && ( "$KEEP_ON_STOP" == "1" || "$KEEP_ON_STOP" == "true" ) ]]; then
@@ -527,6 +532,7 @@ log "keep_on_stop=$KEEP_ON_STOP"
 log "manual_apply_blockvolumes=$MANUAL_APPLY_BLOCKVOLUMES"
 log "after_blockvolume_ready_cmd=${AFTER_BLOCKVOLUME_READY_CMD:-<none>}"
 log "break_after_blockvolume_ready=${BREAK_AFTER_BLOCKVOLUME_READY:-<none>}"
+log "break_after_blockvolume_restart=${BREAK_AFTER_BLOCKVOLUME_RESTART:-<none>}"
 log "writer_timeout=$WRITER_TIMEOUT"
 log "demo_app_manifest=$DEMO_APP_MANIFEST"
 kubectl version --client=true >"$ARTIFACT_DIR/kubectl-version.txt" 2>&1 || true
@@ -667,6 +673,14 @@ restart_blockvolume_deployment() {
   echo "$BLOCKVOLUME_STATUS_ADDR" >"$ARTIFACT_DIR/blockvolume-status-addr.txt"
   wait_blockvolume_durable_status "$BLOCKVOLUME_VOLUME_ID" "$BLOCKVOLUME_STATUS_ADDR" "$ARTIFACT_DIR/status-durable-after-blockvolume-restart.json" 120
   wait_blockvolume_log_pattern "$BLOCKVOLUME_DEPLOY" "\"phase\":\"iscsi-listening\"" "$ARTIFACT_DIR/blockvolume-generated.after-restart.log" 120
+  if [[ "$BREAK_AFTER_BLOCKVOLUME_RESTART" == "scale-generated-blockvolume-to-zero" ]]; then
+    log "break after blockvolume restart: scale generated blockvolume to zero"
+    kubectl -n "$BLOCKVOLUME_NAMESPACE" scale "$BLOCKVOLUME_DEPLOY" --replicas=0 | tee "$ARTIFACT_DIR/scale-blockvolume-zero-after-restart.log"
+    kubectl -n "$BLOCKVOLUME_NAMESPACE" rollout status "$BLOCKVOLUME_DEPLOY" --timeout=60s | tee "$ARTIFACT_DIR/scale-blockvolume-zero-after-restart-status.log"
+    log "collect inventory after forced blockvolume unavailability"
+    collect_ops_inventory_after_restart
+    exit 43
+  fi
   if [[ "$COLLECT_INVENTORY_AFTER_RESTART" == "1" || "$COLLECT_INVENTORY_AFTER_RESTART" == "true" ]]; then
     log "collect inventory after blockvolume restart"
     collect_ops_inventory_after_restart
