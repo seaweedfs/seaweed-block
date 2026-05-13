@@ -1,265 +1,253 @@
-# Current Plan: Durable Volume Restart And Reattach MVP
+# Current Plan: Multi-Node Attach And Placement MVP
 
-Status: active, D1 durable contract, D2 fast rendering coverage, D3
-operations manual update, D4 dev restart gate, D5 failure evidence, and D6
-close-gate assignment complete, 85%
-implementation. Opened after closing
-`finished-plans/phase12_finishedplan_product_owned_blockvolume_lifecycle_mvp.md`.
+Status: active, opened after closing
+`finished-plans/phase13_finishedplan_durable_volume_restart_reattach_mvp.md`,
+5% implementation.
 
-QA needed now: yes, for formal close using
-`qa-assignments/durable-volume-restart-reattach-mvp-close-hard-gate.md`.
+QA needed now: no. First QA checkpoint is after a dev-owned substrate audit and
+one runner-native multi-node attach gate design are ready.
 
-Current dev slice: wait for QA close, then address findings or close plan.
+Current dev slice: D1 multi-node attach reality audit.
 
 ## Product Question
 
-Can an early Kubernetes user keep data after the generated `blockvolume`
-workload restarts, using the same product-owned lifecycle path and inventory
-evidence established by the previous plan?
+Can an early Kubernetes user run Seaweed Block on a small multi-node cluster,
+create a PVC, run an app pod on a selected node, and understand where the
+backing `blockvolume` landed and how the app attached to it?
 
-The last three plans proved:
+The last plans proved the single-node alpha loop:
 
 ```text
-first volume works -> inventory explains cluster state -> product owns
-generated blockvolume Deployment lifecycle
+install -> product-owned blockvolume lifecycle -> inventory -> durable
+blockvolume restart -> same PVC reattaches and reads data
 ```
 
 This plan moves the next visible user gap:
 
 ```text
-PVC writes data -> blockvolume restarts -> same PVC reattaches -> data is still
-readable -> inventory/support bundle explains durable state
+two-node Kubernetes lab -> PVC -> placement is explicit -> app pod attaches
+through the normal CSI path -> inventory explains node/endpoint ownership
 ```
 
 The narrow claim after this plan should be:
 
 ```text
-On the supported single-node alpha Kubernetes path, a generated RF=1 iSCSI
-blockvolume can restart and reattach to the same PVC without losing data,
-when configured with the documented durable host path.
+On a supported two-node alpha Kubernetes lab, a generated RF=1 iSCSI
+blockvolume can be placed on a known node, an app pod can attach through the
+normal CSI path, write/read data, and `sw-block ops inventory` can explain the
+PVC, blockvolume node, frontend endpoint, and support bundle.
 ```
 
-This is still not production HA. It does not claim node loss, multi-node
-scheduling, live RF=2/RF=3 Kubernetes operation, upgrade safety, rebuild,
-failover, performance, or UI.
+This is not HA. It does not claim node-loss survival, automatic rescheduling,
+RF=2/RF=3 live Kubernetes operation, cross-node failover, rebuild, performance,
+upgrade safety, or UI.
 
 ## Why This Is Next
 
-The product now feels closer to a normal Kubernetes storage product: users
-create PVCs and the product materializes backing `blockvolume` workloads. But
-several docs still honestly say the default alpha path uses throwaway pod-local
-state in some paths. That blocks a stronger light-use product claim.
+A Kubernetes block product cannot remain credible if every proof is
+single-node-only. After durable restart, the next user-facing question is not
+"can RF=3 rebuild?" yet; it is simpler:
 
-A storage product must survive at least its own workload restart before users
-can trust it for light use. We already have partial restart machinery and
-operations evidence:
+```text
+When my cluster has more than one node, can I see and control placement well
+enough to use the block safely?
+```
 
-- `scripts/run-k8s-blockvolume-restart.sh` exists as a restart-oriented wrapper.
-- `scripts/run-alpha-app-demo.sh` has `SW_BLOCK_RESTART_BLOCKVOLUME_BEFORE_READER`
-  and `SW_BLOCK_LAUNCHER_STATE_HOSTPATH` hooks.
-- `sw-block ops status` reports durable entries, latched state, epoch, and
-  endpoint version.
-- `sw-block ops inventory` now maps PVCs to generated workloads and nested
-  status bundles.
+This also de-risks later availability work. Basic failover and returned-replica
+rebuild depend on a correct placement and endpoint model:
 
-This plan turns those pieces into a product-facing durable restart path.
+- which Kubernetes node owns the `blockvolume` process,
+- which frontend address the CSI node plugin should attach to,
+- whether loopback-only endpoints are still acceptable,
+- how inventory reports desired vs observed placement,
+- what happens when an app pod and blockvolume are not on the same node.
+
+If this layer is fuzzy, RF=2/RF=3 work will produce ambiguous failures.
 
 ## Current Honest State
 
 What already works:
 
-- Product-owned generated workload reconciliation is live-gated.
+- Single-node dynamic PVC create/write/read/delete is gated.
 - Two PVCs can coexist on one alpha node with distinct ports.
-- Inventory exposes PVC owner references and per-replica support bundles.
-- The demo can run a writer then replacement reader through the same PVC.
-- Restart hooks exist in scripts, and the prior hardening work validated
-  durable status fields in smaller slices.
+- Generated `blockvolume` Deployments are product-owned and PVC-owned.
+- Durable hostPath restart works for RF=1 on the single-node alpha path.
+- Inventory reports Kubernetes node, server, frontend, status address,
+  lifecycle owner, and support bundle.
 
-What is still weak:
+What is still weak or unknown:
 
-- The default quickstart still frames generated blockvolume storage as
-  non-durable pod-local state.
-- Durable root selection is not yet a simple, documented user path.
-- Restart evidence is scattered across scripts and prior QA reports rather
-  than one current product gate.
-- Inventory must prove durable readiness in a way a user can understand
-  without reading blockvolume logs.
-- Cleanup must not erase retained durable data unless the user explicitly asks
-  for a clean lab.
+- The alpha path has historically used loopback frontend addresses such as
+  `127.0.0.1:3260`; that is probably not valid when the app pod lands on a
+  different node from the `blockvolume`.
+- The product may need explicit placement constraints before multi-node attach
+  can be claimed honestly.
+- The current quickstart does not tell users how to reason about node
+  placement.
+- Inventory can report node/server fields, but the multi-node correctness of
+  those fields is not yet release-gated.
+- Cleanup and residue checks must cover both nodes, not only m02.
 
 ## Scope
 
 In scope:
 
-- Define the durable root layout and ownership for the supported alpha restart
-  path.
-- Make the operations manual show how to enable durable host-path storage for
-  the alpha path.
-- Ensure generated `blockvolume` Deployments carry the durable-root and
-  lifecycle arguments needed for restart.
-- Add or tighten fast tests around durable-root rendering, hostpath injection,
-  and inventory/status fields.
-- Add a runner-native gate that writes data, restarts the generated
-  `blockvolume`, reattaches/replaces the app pod, and verifies checksum.
-- Use `sw-block ops inventory` and nested `sw-block ops status` bundles to
-  prove durable state after restart.
-- Keep cleanup scoped and explicit about retained `/var/lib/sw-block` state.
+- Audit current multi-node attach behavior before changing code.
+- Define the supported alpha placement model for RF=1 multi-node Kubernetes:
+  same-node attach only, remote-node attach, or both.
+- Make frontend/status endpoint selection explicit for multi-node labs.
+- Add fast tests for generated Deployment placement fields and endpoint
+  rendering.
+- Add a runner-native two-node gate that creates a PVC, runs writer/reader on
+  the supported node placement, and asserts inventory explains placement.
+- Add at least one negative/partial-state fixture where placement or endpoint
+  reachability is wrong and the bundle explains it.
+- Update `docs/operations-v1.md` with a small multi-node alpha section and
+  non-claims.
 
 Out of scope:
 
-- Node loss.
-- Multi-node scheduling.
-- Live RF=2/RF=3 Kubernetes lifecycle.
-- Rebuild or returned-replica reintegration.
-- Upgrade/uninstall safety.
-- Performance SLO.
+- Node failure or reboot survival.
+- Automatic blockvolume rescheduling.
+- RF=2/RF=3 live Kubernetes lifecycle.
+- Cross-node failover while mounted.
+- Rebuild/returned-replica reintegration.
+- Performance SLOs.
+- Production operator UX.
 - UI/metrics.
 
 ## Top Blocking Issues
 
-### P0: Durable Storage Must Be User-Selectable And Visible
+### P0: Placement Model Must Be Honest
 
-Users need one documented way to say "keep the blockvolume state here" and one
-way to verify it is actually used.
+Users need to know whether the app pod must run on the same Kubernetes node as
+the generated `blockvolume`, or whether remote iSCSI attach is supported.
 
-Close requirement: `docs/operations-v1.md` and the live gate both use an
-explicit durable host path, and generated manifests show the durable-root
-mapping.
+Close requirement: the plan documents and gates one supported model. Any other
+model is an explicit non-claim.
 
-### P0: Restart Must Preserve Data Through The Normal PVC Path
+### P0: Frontend Endpoint Must Be Reachable For The Claimed Model
 
-The proof must go through Kubernetes PVC attach/read, not just a direct file or
-status endpoint check.
+Loopback endpoints are fine for single-node local attach, but they are not a
+general multi-node endpoint.
 
-Close requirement: a writer pod writes and verifies data, the generated
-`blockvolume` Deployment restarts, a replacement reader pod mounts the same PVC
-and verifies the same checksum.
+Close requirement: the generated manifest and inventory expose endpoint
+addresses that are reachable for the claimed placement model, or the gate
+proves same-node placement prevents unsafe remote attach.
 
-### P0: Inventory Must Explain Durable State
+### P0: Inventory Must Explain Placement
 
-A passing restart is not enough if operators cannot tell what persisted.
+If a user opens a support bundle, they should see PVC, PV, app node,
+blockvolume node, server ID, frontend/status endpoints, desired vs observed
+replicas, and support bundle path.
 
-Close requirement: inventory/support bundles show durable entry evidence
-including operational/latched state, epoch/endpoint evidence when available,
-and no contradictory health wording.
+Close requirement: inventory assertions include node and endpoint fields, not
+just PASS lines.
 
-### P1: Cleanup Must Preserve The Right Boundary
+### P1: Cleanup Must Cover Both Nodes
 
-Normal demo cleanup should remove Kubernetes resources and active sessions.
-Durable data retention must be explicit, not accidental.
+Multi-node tests can leave iSCSI sessions or processes on either node.
 
-Close requirement: cleanup artifacts state whether the durable host path was
-retained or removed, and broad deletion remains a TestOps guardrail only.
+Close requirement: cleanup and residue assertions cover every participating lab
+node.
 
 ## Deliverables
 
-### D1: Durable Root Contract Refresh
+### D1: Multi-Node Attach Reality Audit
 
-Review and update `ref/durable-root-layout-contract.md` for the current
-product-owned lifecycle path:
+Run and document a read-only audit of current behavior:
 
-- generated Deployment hostPath/volumeMount layout,
-- mapping from PVC/volume ID to durable replica path,
-- ownership of retained data,
-- cleanup and non-claims.
+- available lab nodes and labels,
+- current generated `blockvolume` node placement,
+- current app pod node placement,
+- current frontend/status addresses,
+- whether remote-node attach works, fails, or is unsafe,
+- current inventory fields for node/server/frontend/status endpoint.
 
-### D2: Fast Rendering And Status Tests
+Output: update this plan with the honest current state and choose the supported
+alpha model for D2-D6.
 
-Add or tighten fast tests for:
+### D2: Placement And Endpoint Contract
 
-- `--launcher-state-hostpath` rendering,
-- generated Deployment hostPath and durable-root args,
-- PVC owner references preserved with durable host path enabled,
-- inventory/status summary fields that prove durable entry state.
+Add or update a reference doc under `internal/docs/ref/` describing:
 
-### D3: Operations Manual Update
+- supported RF=1 multi-node alpha placement model,
+- node labels/selectors/tolerations used by generated workloads,
+- frontend address strategy for iSCSI,
+- status endpoint strategy for inventory,
+- what is deliberately not claimed.
 
-Update `docs/operations-v1.md` with a "durable restart path" section:
+### D3: Fast Tests
 
-```text
-set SW_BLOCK_LAUNCHER_STATE_HOSTPATH -> run demo restart wrapper -> inspect
-inventory/status durable entry -> cleanup/retention notes
-```
+Add tests for:
 
-Keep the default quickstart honest: the durable restart path is supported when
-configured, not an implicit production durability claim.
+- generated `blockvolume` Deployment placement fields,
+- endpoint rendering for the supported model,
+- inventory node/server/frontend/status fields,
+- failure wording for unreachable endpoint or unsupported cross-node attach.
 
-Status: complete. The operations manual now documents a run-scoped durable
-hostPath, restart wrapper, durable status evidence, inventory bundle collection,
-and cleanup/retention semantics. The Kubernetes quickstart links to that path
-and keeps the default first-volume claim separate from restart durability.
+### D4: Runner-Native Multi-Node Attach Gate
 
-### D4: Runner-Native Restart Gate
-
-Add or tighten a TestOps scenario that:
+Add a runner-native gate that:
 
 ```text
-pre_clean
+pre_clean all nodes
 build/import alpha images
-install/launch with product-owned lifecycle and durable host path
-create PVC/app writer
-wait for blockvolume ready
-restart generated blockvolume Deployment
-wait for durable status readiness
-delete writer and start replacement reader
-verify checksum
-run inventory and assert durable support bundle evidence
+install alpha stack
+create PVC
+wait for generated blockvolume placement
+run writer pod under the supported node placement
+run replacement reader pod
+collect inventory
+assert PVC/PV/app node/blockvolume node/frontend/status/support bundle fields
 delete PVC and cleanup
 collect_and_cleanup(always)
 ```
 
-Status: dev gate passed. Run `20260512-211604-1339` on m02 passed 5/5 phases
-and 59/59 actions at commit `e90ce49`. The restart wrapper collects
-`ops-inventory-after-restart` during the live post-restart window, and the
-runner-native chain asserts inventory, PVC owner reference, nested
-`sw-block ops status` bundle, and durable entry evidence.
+### D5: Partial-State / Negative Fixture
 
-### D5: Failure/Partial-State Evidence
+Add one focused fixture for a realistic multi-node mistake:
 
-Add at least one focused failure fixture or assertion for:
+- app pod scheduled away from an unsupported loopback blockvolume endpoint, or
+- generated blockvolume placed on an unavailable node, or
+- status endpoint unreachable from inventory.
 
-- durable host path missing/unwritable, or
-- status endpoint unavailable after restart, or
-- durable status not latched/operational after restart timeout.
+The result should be an actionable inventory/support bundle, not just a timeout.
 
-The goal is a useful bundle, not a broad chaos matrix.
+### D6: Operations Manual Update
 
-Status: dev gate passed. Run `20260512-214412-860a` on m02 passed 5/5 phases
-and 26/26 actions at commit `aae2e53`. The new
-`csi-rf1-durable-restart-failure-chain` uses an unwritable durable hostPath,
-expects the user workflow to fail, collects `ops-inventory-on-failure`, and
-asserts an unhealthy inventory with the PVC row, actionable issue, inventory
-bundle, and `collection_error: ops_status` evidence.
+Update `docs/operations-v1.md` and `docs/quickstart-kubernetes.md` to explain:
 
-### D6: QA Close Gate
+- when multi-node alpha is supported,
+- required node labels or scheduling constraints,
+- expected inventory placement fields,
+- how to collect a bundle,
+- non-claims for HA, node loss, RF=2/RF=3, and failover.
 
-Ask QA to validate as a user:
+### D7: QA Close Gate
 
-- follow the durable restart section in the operations manual,
-- run the runner-native restart gate,
-- confirm writer/reader checksum across blockvolume restart,
-- confirm inventory/support bundle durable evidence,
-- confirm cleanup and retained-state wording are honest,
-- report any over-claim or confusing durable-state wording.
+Ask QA to validate:
 
-Status: assignment complete. The hard gate lives at
-`qa-assignments/durable-volume-restart-reattach-mvp-close-hard-gate.md` and
-covers runbook discoverability, durable manifest evidence, PVC data survival
-across restart, durable status, inventory/support bundle, cleanup boundary,
-bad-hostPath failure bundle, and non-claims.
+- the runbook is understandable without knowing implementation details,
+- the runner-native multi-node attach gate passes,
+- inventory explains placement and endpoint reachability,
+- the negative fixture produces a useful bundle,
+- cleanup covers all participating nodes,
+- docs do not over-claim HA or node-loss durability.
 
 ## Gates To Close
 
 This plan closes only when:
 
-1. Durable host-path layout and non-claims are documented.
-2. Fast tests cover durable-root rendering and status/inventory evidence.
-3. The operations manual shows the durable restart path.
-4. A live runner-native gate proves write -> blockvolume restart -> reattach ->
-   read checksum.
-5. Inventory/support bundles prove durable entry state after restart.
-6. Cleanup artifacts distinguish Kubernetes cleanup from durable data
-   retention/removal.
+1. The supported multi-node alpha placement model is documented.
+2. Fast tests cover placement and endpoint rendering.
+3. A live runner-native two-node gate proves app write/read through the normal
+   PVC path under the supported placement model.
+4. Inventory/support bundles expose node/server/frontend/status/support-bundle
+   evidence.
+5. A negative fixture proves unsupported placement or endpoint failure is
+   actionable.
+6. Cleanup covers all participating nodes.
 7. QA validates independently and reports no blocking usability issue.
 
 ## Success Statement
@@ -267,7 +255,8 @@ This plan closes only when:
 After this plan, Seaweed Block can make a stronger light-use claim:
 
 ```text
-On the supported single-node alpha Kubernetes path, users can configure a
-durable host path and verify that a generated RF=1 iSCSI blockvolume survives
-its own workload restart with data still readable through the PVC.
+On a supported two-node alpha Kubernetes lab, users can create an RF=1 iSCSI
+PVC, run an app through the normal CSI path under the documented placement
+model, and use inventory/support bundles to understand exactly where the volume
+is running and how it is attached.
 ```

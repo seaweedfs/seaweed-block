@@ -40,7 +40,8 @@ This is the short internal roadmap. Keep it current and readable.
 ### Beta Candidate
 
 - Multi-node Kubernetes attach.
-- Durable volume state across `blockvolume` restart.
+- Durable volume state across `blockvolume` restart. (Closed for supported
+  single-node RF=1 alpha path in phase 13.)
 - Basic failover with an attached workload.
 - Returned replica lifecycle: observed -> candidate -> syncing/rebuilding ->
   ready.
@@ -92,18 +93,21 @@ This is the short internal roadmap. Keep it current and readable.
 
 ### Track C: Durable State
 
-- Current: alpha generated workloads still use throwaway storage in several
-  paths.
-- Next: define durable root layout for generated `blockvolume` workloads and
-  prove restart/reattach preserves data.
+- Current: durable hostPath restart/reattach is closed for the supported
+  single-node RF=1 alpha path. Users can configure a run-scoped durable path,
+  restart the generated `blockvolume`, reattach through the PVC, and verify
+  durable status/inventory evidence.
+- Next: keep durable evidence wired into multi-node attach and later
+  availability gates.
 - Later: integrate returned-replica rebuild and storage-engine compaction.
 
 ### Track D: Availability And Recovery
 
 - Current: iSCSI and NVMe mounted failover are release-gated in single-node lab
-  scenarios.
-- Next: returned-replica state machine, old-primary stale I/O fencing, and
-  multi-node attach/reconnect path.
+  scenarios, and RF=1 durable `blockvolume` restart is now closed for the
+  single-node alpha path.
+- Next: multi-node Kubernetes attach and placement visibility, before claiming
+  failover or returned-replica behavior in Kubernetes.
 - Later: rebuild/reintegration and longer soak under failure.
 
 ### Track E: Protocol / Backend Expansion
@@ -120,9 +124,10 @@ This is the short internal roadmap. Keep it current and readable.
 - Current: cluster operations inventory is closed for the supported alpha path:
   it discovers live Seaweed Block volumes from Kubernetes, maps them to
   PVC/PV/generated workloads, attaches per-replica status bundles, and names
-  stale/orphan residue without relying on TestOps artifacts.
-- Next: use that inventory as the proof surface for product-owned generated
-  workload lifecycle.
+  stale/orphan residue without relying on TestOps artifacts. It also serves as
+  the proof surface for product-owned lifecycle and durable restart evidence.
+- Next: use inventory as the proof surface for multi-node placement and
+  endpoint reachability.
 - Later: observation API/UI, metrics, conservative admin controls, enterprise
   operations, hosted validation, fleet automation, and cloud-scale test
   lifecycle.
