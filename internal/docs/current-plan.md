@@ -1,14 +1,13 @@
 # Current Plan: Product-Owned Blockvolume Lifecycle MVP
 
-Status: active, D1-D6 implemented and D7 runner-native gate prepared, 75%
+Status: active, D1-D7 implemented and live runner-native gate passed, 90%
 implementation. Opened after closing
 `finished-plans/phase11_finishedplan_cluster_ops_inventory_lifecycle_visibility_mvp.md`.
 
-QA needed now: no. Next QA checkpoint is after the D7 live runner-native
-lifecycle gate, then D8 formal close validation.
+QA needed now: yes, for D8 formal close validation against
+`qa-assignments/product-owned-blockvolume-lifecycle-mvp-close-hard-gate.md`.
 
-Current dev slice: D7 live runner-native lifecycle gate, then D8 QA close
-validation.
+Current dev slice: D8 QA close validation and any close-report fixes.
 
 ## Product Question
 
@@ -68,12 +67,16 @@ What already works:
 - `sw-block ops inventory` can observe multiple PVCs, generated Deployments,
   status endpoints, nested status bundles, and stale/orphan residue.
 - The quickstart and TestOps scenarios can still use scripts as guardrails.
+- The live lifecycle gate
+  `cluster-ops-inventory-chain` passed on m02 as run
+  `20260512-202811-1aa7`: two PVCs reconciled through the product-owned path,
+  inventory reported PVC owner references, and deleting one PVC left the other
+  visible and untouched.
 
 What is still weak:
 
-- The happy-path scripts now wait for product-owned reconciliation, but the
-  live runner-native lifecycle gate has not yet proven the full create/delete
-  path without manual apply.
+- QA has not yet independently cold-run the quickstart and operations manual
+  for this product-owned lifecycle wording.
 - Delete/uninstall ownership is split between product objects, scripts, and
   TestOps guardrails.
 - We need to keep the first version conservative: no broad cluster sweeps, no
