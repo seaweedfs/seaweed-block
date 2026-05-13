@@ -181,7 +181,7 @@ func collectKubernetesReplicaStatusBundles(ctx context.Context, cfg KubernetesIn
 				replica.CollectionErrors = append(replica.CollectionErrors, prefixErrorMessages("ops_status", statusAddrErr)...)
 				continue
 			}
-			_, code, err := WriteVolumeStatusArtifacts(ctx, bundleDir, NewLiveVolumeStatusReportCollector(LiveVolumeStatusConfig{
+			report, code, err := WriteVolumeStatusArtifacts(ctx, bundleDir, NewLiveVolumeStatusReportCollector(LiveVolumeStatusConfig{
 				VolumeID:        volumeID,
 				MasterAddr:      cfg.MasterAddr,
 				StatusAddr:      statusAddr,
@@ -193,8 +193,9 @@ func collectKubernetesReplicaStatusBundles(ctx context.Context, cfg KubernetesIn
 			if cleanup != nil {
 				cleanup()
 			}
+			applyStatusReportToInventoryReplica(replica, report)
 			if code != VolumeStatusExitOK {
-				replica.Issues = append(replica.Issues, opsStatusInventoryIssue(code, *replica))
+				replica.Issues = append(replica.Issues, opsStatusInventoryIssue(code, report))
 			}
 			if err != nil {
 				replica.Issues = append(replica.Issues, "status_endpoint_unreachable="+replica.StatusAddress)
@@ -205,12 +206,61 @@ func collectKubernetesReplicaStatusBundles(ctx context.Context, cfg KubernetesIn
 	return volumes
 }
 
-func opsStatusInventoryIssue(code int, replica VolumeInventoryReplicaInput) string {
+func applyStatusReportToInventoryReplica(replica *VolumeInventoryReplicaInput, report VolumeStatusReport) {
+	if replica == nil || report.SchemaVersion == "" {
+		return
+	}
+	replica.AuthorityRole = report.Authority.AuthorityRole
+	replica.Healthy = report.Authority.Healthy
+	replica.FrontendPrimaryReady = report.Authority.FrontendPrimaryReady
+	replica.ReplicationRole = report.Replication.ReplicationRole
+	replica.Epoch = report.Authority.Epoch
+	replica.EndpointVersion = report.Authority.EndpointVersion
+	if report.Volume.ReplicaID != "" && report.Volume.ReplicaID != Unavailable {
+		replica.ReplicaID = report.Volume.ReplicaID
+	}
+	if len(report.Volume.Protocols) > 0 {
+		replica.Protocol = strings.Join(report.Volume.Protocols, ",")
+	}
+	if len(report.Volume.Frontends) > 0 && report.Volume.Frontends[0].Addr != "" {
+		replica.FrontendAddress = report.Volume.Frontends[0].Addr
+	}
+}
+
+func opsStatusInventoryIssue(code int, report VolumeStatusReport) string {
 	label := "ops_status=" + inventoryExitLabel(code)
-	if code == VolumeStatusExitUnhealthy && replica.Healthy && replica.Epoch == 0 && replica.EndpointVersion == 0 {
-		return label + " reason=authority_not_assigned epoch=0 endpoint_version=0"
+	if code == VolumeStatusExitUnhealthy && !report.Authority.Assigned {
+		return fmt.Sprintf("%s reason=authority_not_assigned assigned=false epoch=%d endpoint_version=%d", label, report.Authority.Epoch, report.Authority.EndpointVersion)
+	}
+	if code != VolumeStatusExitOK {
+		issues := VolumeStatusReportIssues(report)
+		if len(issues) > 0 {
+			return label + " reason=" + inventoryReasonToken(issues[0])
+		}
 	}
 	return label
+}
+
+func inventoryReasonToken(issue string) string {
+	var b strings.Builder
+	lastUnderscore := false
+	for _, r := range strings.ToLower(issue) {
+		ok := (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9')
+		if ok {
+			b.WriteRune(r)
+			lastUnderscore = false
+			continue
+		}
+		if !lastUnderscore {
+			b.WriteByte('_')
+			lastUnderscore = true
+		}
+	}
+	out := strings.Trim(b.String(), "_")
+	if out == "" {
+		return "unspecified"
+	}
+	return out
 }
 
 func statusAddressForKubernetesInventory(ctx context.Context, cfg KubernetesInventoryConfig, bundleDir string, replica VolumeInventoryReplicaInput) (string, func(), error) {

@@ -14,6 +14,7 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
 	hostvolume "github.com/seaweedfs/seaweed-block/core/host/volume"
 	"github.com/seaweedfs/seaweed-block/core/replication"
+	"github.com/seaweedfs/seaweed-block/core/rpc/control"
 )
 
 func TestKubernetesInventoryCollector_MapsTwoPVCsToDeployments(t *testing.T) {
@@ -191,10 +192,36 @@ func TestKubernetesInventoryCollector_AttachesReplicaStatusBundles(t *testing.T)
 	if replica.SupportBundle != "volumes/pvc-a/r1" {
 		t.Fatalf("support bundle=%q", replica.SupportBundle)
 	}
+	if replica.Epoch != 7 || replica.EndpointVersion != 2 {
+		t.Fatalf("replica status was not refreshed from nested report: epoch=%d ev=%d", replica.Epoch, replica.EndpointVersion)
+	}
 	for _, name := range []string{VolumeStatusReportArtifact, VolumeStatusSummaryArtifact, OpsStatusBundleArtifact} {
 		if _, err := os.Stat(filepath.Join(dir, "volumes", "pvc-a", "r1", name)); err != nil {
 			t.Fatalf("missing status artifact %s: %v", name, err)
 		}
+	}
+}
+
+func TestOpsStatusInventoryIssue_UsesReportEvidence(t *testing.T) {
+	report := BuildVolumeStatusReport(VolumeStatusReportInput{
+		ProductRevision: "product-rev",
+		MasterStatus:    &control.StatusResponse{VolumeId: "pvc-a", ReplicaId: "r1", Assigned: false},
+		LocalStatus: &hostvolume.StatusProjection{
+			Projection: frontend.Projection{
+				VolumeID:  "pvc-a",
+				ReplicaID: "r1",
+				Healthy:   true,
+			},
+			AuthorityRole:        hostvolume.AuthorityRolePrimary,
+			FrontendPrimaryReady: true,
+			ReplicationRole:      hostvolume.ReplicationRoleNone,
+		},
+	})
+
+	issue := opsStatusInventoryIssue(VolumeStatusExitUnhealthy, report)
+	want := "ops_status=unhealthy reason=authority_not_assigned assigned=false epoch=0 endpoint_version=0"
+	if issue != want {
+		t.Fatalf("issue=%q want %q", issue, want)
 	}
 }
 

@@ -177,7 +177,7 @@ readiness, not as a contradictory health failure:
 replica: volume=pvc-... replica=r1 ... observed=true status=unhealthy role=primary healthy=true epoch=0 endpoint_version=0 ...
 issues:
 - volume pvc-... replica_degraded=r1 status=unhealthy
-- volume pvc-... replica r1 ops_status=unhealthy reason=authority_not_assigned epoch=0 endpoint_version=0
+- volume pvc-... replica r1 ops_status=unhealthy reason=authority_not_assigned assigned=false epoch=0 endpoint_version=0
 ```
 
 Attach the whole inventory directory when filing an issue. The top-level

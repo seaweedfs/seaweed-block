@@ -186,7 +186,7 @@ func TestBuildVolumeInventory_DegradedReplicaExplainsHealthyButUnready(t *testin
 	replica := healthyInventoryReplica("r1", "s1", "node-a", "primary")
 	replica.Epoch = 0
 	replica.EndpointVersion = 0
-	replica.Issues = append(replica.Issues, "ops_status=unhealthy reason=authority_not_assigned epoch=0 endpoint_version=0")
+	replica.Issues = append(replica.Issues, "ops_status=unhealthy reason=authority_not_assigned assigned=false epoch=0 endpoint_version=0")
 	inventory := BuildVolumeInventory(VolumeInventoryInput{
 		CapturedAt:      time.Date(2026, 5, 12, 12, 0, 0, 0, time.UTC),
 		Source:          ReportSource{Component: "component-test"},
@@ -208,7 +208,7 @@ func TestBuildVolumeInventory_DegradedReplicaExplainsHealthyButUnready(t *testin
 	}
 	for _, want := range []string{
 		"replica_degraded=r1 status=unhealthy",
-		"replica r1 ops_status=unhealthy reason=authority_not_assigned epoch=0 endpoint_version=0",
+		"replica r1 ops_status=unhealthy reason=authority_not_assigned assigned=false epoch=0 endpoint_version=0",
 	} {
 		if !containsString(volume.Issues, want) {
 			t.Fatalf("volume issues missing %q: %v", want, volume.Issues)
@@ -223,7 +223,7 @@ func TestBuildVolumeInventory_DegradedReplicaExplainsHealthyButUnready(t *testin
 	for _, want := range []string{
 		"replica: volume=pvc-ready-pod replica=r1 server=s1 node=node-a observed=true status=unhealthy role=primary replication=none healthy=true epoch=0 endpoint_version=0",
 		"- volume pvc-ready-pod replica_degraded=r1 status=unhealthy",
-		"- volume pvc-ready-pod replica r1 ops_status=unhealthy reason=authority_not_assigned epoch=0 endpoint_version=0",
+		"- volume pvc-ready-pod replica r1 ops_status=unhealthy reason=authority_not_assigned assigned=false epoch=0 endpoint_version=0",
 	} {
 		if !strings.Contains(summary, want) {
 			t.Fatalf("summary missing %q:\n%s", want, summary)

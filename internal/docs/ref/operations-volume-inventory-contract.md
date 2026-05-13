@@ -146,10 +146,11 @@ issue prefixes are part of the operator-facing contract:
   replica whose own `status` is not clean. This intentionally does not mean the
   replica's `healthy` boolean is false; read the replica issue line for the
   reason.
-- `ops_status=unhealthy reason=authority_not_assigned epoch=0 endpoint_version=0`:
+- `ops_status=unhealthy reason=authority_not_assigned assigned=false epoch=<n> endpoint_version=<n>`:
   the nested `sw-block ops status` bundle classified the replica as unhealthy
-  because product authority readiness was not established, even if Kubernetes
-  observed the pod as ready and the replica row has `healthy=true`.
+  because product authority assignment was not established, even if Kubernetes
+  observed the pod as ready and the replica row has `healthy=true`. The epoch
+  fields come from the nested status report, not from the Deployment manifest.
 
 These issue prefixes are intentionally machine-readable. They may appear in a
 volume's `issues` array and in the human summary's `issues:` section.
