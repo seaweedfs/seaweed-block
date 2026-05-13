@@ -120,6 +120,41 @@ func TestG15d_K8sRenderer_CanUseHostPathStateVolume(t *testing.T) {
 	}
 }
 
+func TestG15d_K8sRenderer_DurableHostPathPreservesOwnerRefAndStatus(t *testing.T) {
+	manifests, err := RenderBlockVolumeDeployments(sampleWorkloadPlan(), K8sRenderConfig{
+		MasterAddr:          "blockmaster.kube-system.svc.cluster.local:9333",
+		DurableRootBase:     "/var/lib/sw-block",
+		StateHostPathBase:   "/var/lib/sw-block/testops-run",
+		OwnerReferenceToPVC: true,
+		EnableStatus:        true,
+	})
+	if err != nil {
+		t.Fatalf("RenderBlockVolumeDeployments: %v", err)
+	}
+	raw := string(manifests[0].YAML)
+	for _, want := range []string{
+		"namespace: default",
+		"ownerReferences:",
+		"kind: PersistentVolumeClaim",
+		"name: demo-pvc",
+		"uid: uid-123",
+		"controller: true",
+		"hostPath:",
+		"path: /var/lib/sw-block/testops-run",
+		"type: DirectoryOrCreate",
+		"mountPath: /var/lib/sw-block",
+		"--durable-root=/var/lib/sw-block/pvc-a/r1",
+		"--status-addr=127.0.0.1:23260",
+	} {
+		if !strings.Contains(raw, want) {
+			t.Fatalf("manifest missing %q:\n%s", want, raw)
+		}
+	}
+	if strings.Contains(raw, "emptyDir:") {
+		t.Fatalf("durable owner-ref manifest must not render emptyDir:\n%s", raw)
+	}
+}
+
 func TestG15d_K8sRenderer_RejectsHostPathWithDifferentContainerDurableRoot(t *testing.T) {
 	_, err := RenderBlockVolumeDeployments(sampleWorkloadPlan(), K8sRenderConfig{
 		MasterAddr:        "m:9333",

@@ -1,14 +1,13 @@
 # Current Plan: Durable Volume Restart And Reattach MVP
 
-Status: active, newly opened after closing
-`finished-plans/phase12_finishedplan_product_owned_blockvolume_lifecycle_mvp.md`,
-0% implementation.
+Status: active, D1 contract refreshed and D2 fast rendering coverage started,
+20% implementation. Opened after closing
+`finished-plans/phase12_finishedplan_product_owned_blockvolume_lifecycle_mvp.md`.
 
 QA needed now: no. First QA checkpoint is after a runner-native restart gate
 passes once from dev.
 
-Current dev slice: D1 durable root contract refresh, then D2 fast tests for
-generated workload durable-root ownership.
+Current dev slice: finish D2 fast tests and D3 operations manual update.
 
 ## Product Question
 
