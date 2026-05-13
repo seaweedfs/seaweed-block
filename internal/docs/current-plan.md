@@ -1,6 +1,6 @@
 # Current Plan: Product-Owned Blockvolume Lifecycle MVP
 
-Status: active, 0% implementation. Opened after closing
+Status: active, D1 complete, 10% implementation. Opened after closing
 `finished-plans/phase11_finishedplan_cluster_ops_inventory_lifecycle_visibility_mvp.md`.
 
 QA needed now: no. Next QA checkpoint is after D6 produces a live
@@ -145,6 +145,9 @@ Document the exact ownership model:
 - which PVC/PV fields map to volume id and replica id,
 - which component owns create/update/delete,
 - which states remain explicit non-claims.
+
+Reference:
+`ref/blockvolume-lifecycle-ownership-contract.md`.
 
 ### D2: Minimal Reconciler Implementation
 
