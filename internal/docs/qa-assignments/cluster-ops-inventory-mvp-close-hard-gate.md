@@ -149,7 +149,7 @@ all present and consistent.**
 - Pass: volume row carries all three. When they diverge, the volume's
   top-level `status` is not `ok`, the `issues:` list names the deficit
   (`replica_slot_missing=<replica_id>` or
-  `replica_unhealthy=<replica_id>`), and the affected replica row in
+  `replica_degraded=<replica_id> status=<status>`), and the affected replica row in
   `replicas:` carries its own `issues:` entry. A volume with
   `desired_replicas=2 observed_replicas=1` cannot have volume `status=ok`.
 

@@ -194,7 +194,7 @@ func collectKubernetesReplicaStatusBundles(ctx context.Context, cfg KubernetesIn
 				cleanup()
 			}
 			if code != VolumeStatusExitOK {
-				replica.Issues = append(replica.Issues, "ops_status="+inventoryExitLabel(code))
+				replica.Issues = append(replica.Issues, opsStatusInventoryIssue(code, *replica))
 			}
 			if err != nil {
 				replica.Issues = append(replica.Issues, "status_endpoint_unreachable="+replica.StatusAddress)
@@ -203,6 +203,14 @@ func collectKubernetesReplicaStatusBundles(ctx context.Context, cfg KubernetesIn
 		}
 	}
 	return volumes
+}
+
+func opsStatusInventoryIssue(code int, replica VolumeInventoryReplicaInput) string {
+	label := "ops_status=" + inventoryExitLabel(code)
+	if code == VolumeStatusExitUnhealthy && replica.Healthy && replica.Epoch == 0 && replica.EndpointVersion == 0 {
+		return label + " reason=authority_not_assigned epoch=0 endpoint_version=0"
+	}
+	return label
 }
 
 func statusAddressForKubernetesInventory(ctx context.Context, cfg KubernetesInventoryConfig, bundleDir string, replica VolumeInventoryReplicaInput) (string, func(), error) {

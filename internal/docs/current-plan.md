@@ -13,8 +13,8 @@ two concurrent live PVCs on the alpha k3s path, with distinct volume IDs,
 generated Deployments, iSCSI frontend ports, status endpoint ports, and nested
 support bundles. D6 fast RF/missing-replica fixtures are in place and use the
 same machine-readable issue vocabulary as the QA hard gate. The current cleanup
-slice tightens HG-10 residue labels and HG-14 non-claim labels so the close
-report can validate them mechanically.
+slice tightens HG-10 residue labels, HG-14 non-claim labels, and the HG-6/HG-7
+degraded-replica wording so the close report can validate them mechanically.
 
 QA slice assignment for D5 live validation:
 `internal/docs/qa-assignments/cluster-ops-inventory-chain-validation.md`.

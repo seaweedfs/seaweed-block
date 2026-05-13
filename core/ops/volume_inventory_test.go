@@ -182,6 +182,55 @@ func TestBuildVolumeInventory_MissingReplicaIsUnhealthyNotCollapsed(t *testing.T
 	}
 }
 
+func TestBuildVolumeInventory_DegradedReplicaExplainsHealthyButUnready(t *testing.T) {
+	replica := healthyInventoryReplica("r1", "s1", "node-a", "primary")
+	replica.Epoch = 0
+	replica.EndpointVersion = 0
+	replica.Issues = append(replica.Issues, "ops_status=unhealthy reason=authority_not_assigned epoch=0 endpoint_version=0")
+	inventory := BuildVolumeInventory(VolumeInventoryInput{
+		CapturedAt:      time.Date(2026, 5, 12, 12, 0, 0, 0, time.UTC),
+		Source:          ReportSource{Component: "component-test"},
+		ProductRevision: "product-rev",
+		Volumes: []VolumeInventoryVolumeInput{
+			{
+				VolumeID:          "pvc-ready-pod",
+				Namespace:         "default",
+				PVCName:           "app-ready-pod",
+				ReplicationFactor: 1,
+				Replicas:          []VolumeInventoryReplicaInput{replica},
+			},
+		},
+	})
+
+	volume := inventory.Volumes[0]
+	if volume.Status != "unhealthy" || volume.Replicas[0].Status != "unhealthy" || !volume.Replicas[0].Healthy {
+		t.Fatalf("unexpected status shape: volume=%+v replica=%+v", volume, volume.Replicas[0])
+	}
+	for _, want := range []string{
+		"replica_degraded=r1 status=unhealthy",
+		"replica r1 ops_status=unhealthy reason=authority_not_assigned epoch=0 endpoint_version=0",
+	} {
+		if !containsString(volume.Issues, want) {
+			t.Fatalf("volume issues missing %q: %v", want, volume.Issues)
+		}
+	}
+	for _, got := range volume.Issues {
+		if strings.Contains(got, "replica_unhealthy") {
+			t.Fatalf("ambiguous issue survived: %v", volume.Issues)
+		}
+	}
+	summary := RenderVolumeInventorySummary(inventory)
+	for _, want := range []string{
+		"replica: volume=pvc-ready-pod replica=r1 server=s1 node=node-a observed=true status=unhealthy role=primary replication=none healthy=true epoch=0 endpoint_version=0",
+		"- volume pvc-ready-pod replica_degraded=r1 status=unhealthy",
+		"- volume pvc-ready-pod replica r1 ops_status=unhealthy reason=authority_not_assigned epoch=0 endpoint_version=0",
+	} {
+		if !strings.Contains(summary, want) {
+			t.Fatalf("summary missing %q:\n%s", want, summary)
+		}
+	}
+}
+
 func TestBuildVolumeInventory_InvalidIdentityAndCollectionErrors(t *testing.T) {
 	inventory := BuildVolumeInventory(VolumeInventoryInput{
 		Source:          ReportSource{},

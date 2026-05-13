@@ -142,6 +142,14 @@ issue prefixes are part of the operator-facing contract:
   authority.
 - `status_endpoint_unreachable=<addr>`: a replica advertises a status endpoint,
   but inventory cannot collect the nested `sw-block ops status` bundle.
+- `replica_degraded=<replica_id> status=<status>`: volume-level rollup for a
+  replica whose own `status` is not clean. This intentionally does not mean the
+  replica's `healthy` boolean is false; read the replica issue line for the
+  reason.
+- `ops_status=unhealthy reason=authority_not_assigned epoch=0 endpoint_version=0`:
+  the nested `sw-block ops status` bundle classified the replica as unhealthy
+  because product authority readiness was not established, even if Kubernetes
+  observed the pod as ready and the replica row has `healthy=true`.
 
 These issue prefixes are intentionally machine-readable. They may appear in a
 volume's `issues` array and in the human summary's `issues:` section.
