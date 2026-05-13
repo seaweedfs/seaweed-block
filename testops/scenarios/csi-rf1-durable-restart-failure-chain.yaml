@@ -112,11 +112,11 @@ phases:
         threshold: "0"
       - action: grep_log
         node: m02
-        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-failure/restart_failure/ops-inventory-on-failure/nested-ops-status-bundles.json"
-        pattern: "\"command\": \"sw-block ops status\""
-        save_as: nested_status_bundle_count
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-failure/restart_failure/ops-inventory-on-failure/volume-inventory-summary.txt"
+        pattern: "collection_error: ops_status:"
+        save_as: collection_error_count
       - action: assert_greater
-        actual: "{{ nested_status_bundle_count }}"
+        actual: "{{ collection_error_count }}"
         threshold: "0"
 
   - name: final_asserts
