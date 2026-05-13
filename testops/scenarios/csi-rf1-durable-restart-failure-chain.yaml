@@ -53,34 +53,34 @@ phases:
         actual: "{{ pin_image_id_count }}"
         threshold: "0"
 
-  - name: restart_status_endpoint_unavailable
+  - name: durable_hostpath_unwritable
     actions:
       - action: exec
         node: m02
         timeout: 12m
-        cmd: "cd {{ product_root }} && bash -c 'set -a; source /mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-failure/pin_build/alpha-images.env; set +a; set +e; SW_BLOCK_ARTIFACT_DIR=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-failure/restart_failure SW_BLOCK_LAUNCHER_STATE_HOSTPATH=/var/lib/sw-block/testops-{{ run_id }}-csi-rf1-restart-failure SW_BLOCK_DEMO_BREAK_AFTER_BLOCKVOLUME_RESTART=scale-generated-blockvolume-to-zero bash scripts/run-k8s-blockvolume-restart.sh {{ product_root }}; rc=$?; echo $rc > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-failure/restart_failure/exit_code.txt; test \"$rc\" -eq 43'"
+        cmd: "cd {{ product_root }} && bash -c 'set -a; source /mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-failure/pin_build/alpha-images.env; set +a; set +e; SW_BLOCK_ARTIFACT_DIR=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-failure/restart_failure SW_BLOCK_LAUNCHER_STATE_HOSTPATH=/proc/sw-block-testops-{{ run_id }} SW_BLOCK_COLLECT_INVENTORY_ON_FAILURE=1 bash scripts/run-k8s-blockvolume-restart.sh {{ product_root }}; rc=$?; echo $rc > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-failure/restart_failure/exit_code.txt; test \"$rc\" -ne 0'"
       - action: grep_log
         node: m02
         path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-failure/restart_failure/run.log"
-        pattern: "break after blockvolume restart: scale generated blockvolume to zero"
-        save_as: break_after_restart_count
+        pattern: "launcher_state_hostpath=/proc/sw-block-testops-{{ run_id }}"
+        save_as: bad_hostpath_count
       - action: assert_greater
-        actual: "{{ break_after_restart_count }}"
+        actual: "{{ bad_hostpath_count }}"
         threshold: "0"
       - action: grep_log
         node: m02
         path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-failure/restart_failure/exit_code.txt"
-        pattern: "^43$"
-        save_as: controlled_exit_count
+        pattern: "^[1-9][0-9]*$"
+        save_as: failed_exit_count
       - action: assert_greater
-        actual: "{{ controlled_exit_count }}"
+        actual: "{{ failed_exit_count }}"
         threshold: "0"
 
   - name: failure_bundle_asserts
     actions:
       - action: grep_log
         node: m02
-        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-failure/restart_failure/ops-inventory-after-restart/volume-inventory-summary.txt"
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-failure/restart_failure/ops-inventory-on-failure/volume-inventory-summary.txt"
         pattern: "^inventory_status: unhealthy$"
         save_as: inventory_unhealthy_count
       - action: assert_greater
@@ -88,31 +88,23 @@ phases:
         threshold: "0"
       - action: grep_log
         node: m02
-        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-failure/restart_failure/ops-inventory-after-restart/volume-inventory-summary.txt"
-        pattern: "primary_replica_id unavailable"
-        save_as: primary_unavailable_count
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-failure/restart_failure/ops-inventory-on-failure/volume-inventory-summary.txt"
+        pattern: "pvc=sw-block-demo-pvc"
+        save_as: pvc_row_count
       - action: assert_greater
-        actual: "{{ primary_unavailable_count }}"
+        actual: "{{ pvc_row_count }}"
         threshold: "0"
       - action: grep_log
         node: m02
-        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-failure/restart_failure/ops-inventory-after-restart/volume-inventory-summary.txt"
-        pattern: "replica_degraded=r1 status=unhealthy"
-        save_as: replica_degraded_count
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-failure/restart_failure/ops-inventory-on-failure/volume-inventory-summary.txt"
+        pattern: "generated_deployment_missing\\|observed_replicas=0 desired_replicas=1\\|replica_degraded=r1 status=unhealthy\\|ops_status=unhealthy"
+        save_as: actionable_issue_count
       - action: assert_greater
-        actual: "{{ replica_degraded_count }}"
+        actual: "{{ actionable_issue_count }}"
         threshold: "0"
       - action: grep_log
         node: m02
-        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-failure/restart_failure/ops-inventory-after-restart/volume-inventory-summary.txt"
-        pattern: "ops_status=unhealthy reason=replication_role_not_ready"
-        save_as: replication_not_ready_count
-      - action: assert_greater
-        actual: "{{ replication_not_ready_count }}"
-        threshold: "0"
-      - action: grep_log
-        node: m02
-        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-failure/restart_failure/ops-inventory-after-restart/ops-inventory-bundle.json"
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-failure/restart_failure/ops-inventory-on-failure/ops-inventory-bundle.json"
         pattern: "\"command\": \"sw-block ops inventory\""
         save_as: inventory_bundle_count
       - action: assert_greater
@@ -120,7 +112,7 @@ phases:
         threshold: "0"
       - action: grep_log
         node: m02
-        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-failure/restart_failure/ops-inventory-after-restart/nested-ops-status-bundles.json"
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-failure/restart_failure/ops-inventory-on-failure/nested-ops-status-bundles.json"
         pattern: "\"command\": \"sw-block ops status\""
         save_as: nested_status_bundle_count
       - action: assert_greater

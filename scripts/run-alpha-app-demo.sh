@@ -12,6 +12,7 @@ LAUNCHER_STATE_HOSTPATH="${SW_BLOCK_LAUNCHER_STATE_HOSTPATH:-}"
 RESTART_CSI_NODE_BEFORE_READER="${SW_BLOCK_RESTART_CSI_NODE_BEFORE_READER:-0}"
 RESTART_BLOCKVOLUME_BEFORE_READER="${SW_BLOCK_RESTART_BLOCKVOLUME_BEFORE_READER:-0}"
 COLLECT_INVENTORY_AFTER_RESTART="${SW_BLOCK_COLLECT_INVENTORY_AFTER_RESTART:-0}"
+COLLECT_INVENTORY_ON_FAILURE="${SW_BLOCK_COLLECT_INVENTORY_ON_FAILURE:-0}"
 DEMO_STOP_AFTER="${SW_BLOCK_DEMO_STOP_AFTER:-}"
 COLLECT_OPS_STATUS="${SW_BLOCK_DEMO_COLLECT_OPS_STATUS:-0}"
 KEEP_ON_STOP="${SW_BLOCK_DEMO_KEEP_ON_STOP:-0}"
@@ -292,8 +293,8 @@ collect_ops_status_bundle() {
   return 0
 }
 
-collect_ops_inventory_after_restart() {
-  local out_dir="$ARTIFACT_DIR/ops-inventory-after-restart"
+collect_ops_inventory_bundle() {
+  local out_dir="$1"
   local pf_port
   local pf_pid
   mkdir -p "$out_dir"
@@ -317,6 +318,14 @@ collect_ops_inventory_after_restart() {
   kill "$pf_pid" >/dev/null 2>&1 || true
   wait "$pf_pid" >/dev/null 2>&1 || true
   return "$rc"
+}
+
+collect_ops_inventory_after_restart() {
+  collect_ops_inventory_bundle "$ARTIFACT_DIR/ops-inventory-after-restart"
+}
+
+collect_ops_inventory_on_failure() {
+  collect_ops_inventory_bundle "$ARTIFACT_DIR/ops-inventory-on-failure"
 }
 
 record_ops_status_unavailable() {
@@ -526,6 +535,7 @@ log "launcher_state_hostpath=${LAUNCHER_STATE_HOSTPATH:-<emptyDir>}"
 log "restart_csi_node_before_reader=$RESTART_CSI_NODE_BEFORE_READER"
 log "restart_blockvolume_before_reader=$RESTART_BLOCKVOLUME_BEFORE_READER"
 log "collect_inventory_after_restart=$COLLECT_INVENTORY_AFTER_RESTART"
+log "collect_inventory_on_failure=$COLLECT_INVENTORY_ON_FAILURE"
 log "demo_stop_after=${DEMO_STOP_AFTER:-<none>}"
 log "collect_ops_status=$COLLECT_OPS_STATUS"
 log "keep_on_stop=$KEEP_ON_STOP"
@@ -547,6 +557,10 @@ on_exit() {
     else
       record_ops_status_unavailable "no volume id reached"
     fi
+  fi
+  if [[ "$rc" -ne 0 && ( "$COLLECT_INVENTORY_ON_FAILURE" == "1" || "$COLLECT_INVENTORY_ON_FAILURE" == "true" ) && -s "$ARTIFACT_DIR/generated-blockvolume.yaml" ]]; then
+    log "collect inventory after failure"
+    collect_ops_inventory_on_failure || true
   fi
   collect_logs
   cleanup
