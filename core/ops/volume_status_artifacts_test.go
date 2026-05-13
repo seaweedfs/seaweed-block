@@ -18,9 +18,6 @@ import (
 
 func TestWriteVolumeStatusArtifacts_WritesJSONAndSummary(t *testing.T) {
 	dir := t.TempDir()
-	if out := os.Getenv("SW_BLOCK_OPS_STATUS_ARTIFACT_DIR"); out != "" {
-		dir = out
-	}
 	collector := artifactTestCollector(nil)
 
 	report, code, err := WriteVolumeStatusArtifacts(context.Background(), dir, collector)

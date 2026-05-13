@@ -3,6 +3,7 @@ package launcher
 import (
 	"context"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -150,5 +151,32 @@ metadata:
 	})
 	if err == nil {
 		t.Fatal("expected invalid desired manifest error")
+	}
+}
+
+func TestK8sReconciler_RejectsDesiredManifestOutsideManagedNamespace(t *testing.T) {
+	client := &recordingDeploymentClient{}
+	_, err := ReconcileBlockVolumeDeployments(context.Background(), ReconcileDeploymentsInput{
+		Namespace: "default",
+		Desired: []RenderedManifest{{
+			Name: "sw-blockvolume-pvc-a-r1",
+			YAML: []byte(`apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sw-blockvolume-pvc-a-r1
+  namespace: other
+  labels:
+    app: sw-blockvolume
+    sw-block.seaweedfs.com/volume: pvc-a
+    sw-block.seaweedfs.com/replica: r1
+`),
+		}},
+		Client: client,
+	})
+	if err == nil || !strings.Contains(err.Error(), `namespace="other" does not match managed namespace="default"`) {
+		t.Fatalf("expected namespace mismatch error, got %v", err)
+	}
+	if len(client.applied) != 0 {
+		t.Fatalf("mismatched namespace manifest should not be applied: %v", client.applied)
 	}
 }

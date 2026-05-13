@@ -219,16 +219,22 @@ is_loopback_endpoint() {
 check_same_node_loopback_contract() {
   local blockvolume_node
   local frontend
+  local app_node
   local issue_file="$ARTIFACT_DIR/unsupported-cross-node-loopback-attach.txt"
   blockvolume_node="$(generated_blockvolume_node)"
   frontend="$(generated_blockvolume_arg "iscsi-listen")"
+  app_node="$APP_NODE_NAME"
+  if [[ "$PIN_APP_NODE" != "1" && "$PIN_APP_NODE" != "true" ]]; then
+    app_node="$(kubectl -n "$NAMESPACE" get pod sw-block-demo-writer -o jsonpath='{.spec.nodeName}' 2>/dev/null || true)"
+    app_node="${app_node:-$APP_NODE_NAME}"
+  fi
   if [[ -z "$blockvolume_node" || -z "$frontend" ]]; then
     return 0
   fi
-  if is_loopback_endpoint "$frontend" && [[ "$APP_NODE_NAME" != "$blockvolume_node" ]]; then
+  if is_loopback_endpoint "$frontend" && [[ "$app_node" != "$blockvolume_node" ]]; then
     {
       echo "issue=unsupported_cross_node_loopback_attach"
-      echo "app_node=$APP_NODE_NAME"
+      echo "app_node=$app_node"
       echo "blockvolume_node=$blockvolume_node"
       echo "frontend=$frontend"
       echo "volume_id=$(generated_blockvolume_arg "volume-id")"
@@ -236,7 +242,7 @@ check_same_node_loopback_contract() {
       echo "reason=loopback frontend requires app pod and blockvolume on the same node"
       echo "ops_inventory_dir=$ARTIFACT_DIR/ops-inventory-unsupported-placement"
     } >"$issue_file"
-    log "unsupported cross-node loopback attach: app_node=$APP_NODE_NAME blockvolume_node=$blockvolume_node frontend=$frontend"
+    log "unsupported cross-node loopback attach: app_node=$app_node blockvolume_node=$blockvolume_node frontend=$frontend"
     collect_ops_inventory_bundle "$ARTIFACT_DIR/ops-inventory-unsupported-placement" || true
     exit 45
   fi

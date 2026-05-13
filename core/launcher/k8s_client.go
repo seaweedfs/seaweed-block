@@ -34,20 +34,40 @@ type KubernetesDeploymentClient struct {
 	token        string
 	fieldManager string
 	httpClient   *http.Client
+	configErr    error
 }
 
 func NewKubernetesDeploymentClient(cfg KubernetesDeploymentClientConfig) *KubernetesDeploymentClient {
 	if cfg.FieldManager == "" {
 		cfg.FieldManager = defaultFieldManager
 	}
+	var configErr error
 	if cfg.HTTPClient == nil {
-		cfg.HTTPClient = &http.Client{Timeout: 10 * time.Second}
+		transport := http.DefaultTransport.(*http.Transport).Clone()
+		if cfg.CAFile != "" {
+			caRaw, err := os.ReadFile(cfg.CAFile)
+			if err != nil {
+				configErr = fmt.Errorf("launcher: read Kubernetes CA file: %w", err)
+			} else {
+				pool := x509.NewCertPool()
+				if !pool.AppendCertsFromPEM(caRaw) {
+					configErr = fmt.Errorf("launcher: parse Kubernetes CA file %s", cfg.CAFile)
+				} else {
+					transport.TLSClientConfig = &tls.Config{
+						RootCAs:    pool,
+						MinVersion: tls.VersionTLS12,
+					}
+				}
+			}
+		}
+		cfg.HTTPClient = &http.Client{Transport: transport, Timeout: 10 * time.Second}
 	}
 	return &KubernetesDeploymentClient{
 		baseURL:      strings.TrimRight(cfg.BaseURL, "/"),
 		token:        cfg.Token,
 		fieldManager: cfg.FieldManager,
 		httpClient:   cfg.HTTPClient,
+		configErr:    configErr,
 	}
 }
 
@@ -69,7 +89,10 @@ func NewInClusterDeploymentClient() (*KubernetesDeploymentClient, error) {
 		if !pool.AppendCertsFromPEM(caRaw) {
 			return nil, fmt.Errorf("launcher: parse service account ca.crt")
 		}
-		transport.TLSClientConfig = &tls.Config{RootCAs: pool}
+		transport.TLSClientConfig = &tls.Config{
+			RootCAs:    pool,
+			MinVersion: tls.VersionTLS12,
+		}
 	}
 	return NewKubernetesDeploymentClient(KubernetesDeploymentClientConfig{
 		BaseURL:    "https://" + host + ":" + port,
@@ -173,6 +196,9 @@ func (c *KubernetesDeploymentClient) do(req *http.Request, want ...int) error {
 }
 
 func (c *KubernetesDeploymentClient) send(req *http.Request) (*http.Response, error) {
+	if c.configErr != nil {
+		return nil, c.configErr
+	}
 	if c.token != "" {
 		req.Header.Set("Authorization", "Bearer "+c.token)
 	}

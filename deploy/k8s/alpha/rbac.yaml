@@ -11,25 +11,27 @@ metadata:
   namespace: kube-system
 ---
 apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
+kind: Role
 metadata:
   name: sw-block-master-launcher
+  namespace: kube-system
 rules:
   - apiGroups: ["apps"]
     resources: ["deployments"]
     verbs: ["get", "list", "watch", "create", "delete", "update", "patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
+kind: RoleBinding
 metadata:
   name: sw-block-master-launcher
+  namespace: kube-system
 subjects:
   - kind: ServiceAccount
     name: sw-block-master
     namespace: kube-system
 roleRef:
   apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
+  kind: Role
   name: sw-block-master-launcher
 ---
 apiVersion: rbac.authorization.k8s.io/v1

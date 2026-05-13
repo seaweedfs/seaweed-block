@@ -48,8 +48,8 @@ func (m ControlManager) Start(req RunRequest, resources ResourceSpec) (ControlRe
 	if root == "" {
 		return ControlRecord{}, fmt.Errorf("testops control: root is required")
 	}
-	if req.RunID == "" {
-		return ControlRecord{}, fmt.Errorf("testops control: run_id is required")
+	if err := validateRunID(req.RunID); err != nil {
+		return ControlRecord{}, fmt.Errorf("testops control: invalid run_id: %w", err)
 	}
 	if err := os.MkdirAll(filepath.Join(root, "active"), 0o755); err != nil {
 		return ControlRecord{}, err
@@ -92,6 +92,9 @@ func (m ControlManager) Complete(rec ControlRecord, status Status, err error) er
 	root := m.root()
 	now := m.now()
 	defer m.releaseLocks(rec.Locks)
+	if err := validateRunID(rec.RunID); err != nil {
+		return fmt.Errorf("testops control: invalid run_id: %w", err)
+	}
 	rec.State = string(status)
 	if rec.State == "" {
 		rec.State = "error"
@@ -247,6 +250,16 @@ func lockNames(resources ResourceSpec) []string {
 func sanitizeLockName(name string) string {
 	replacer := strings.NewReplacer(":", "_", "/", "_", "\\", "_", " ", "_")
 	return replacer.Replace(name)
+}
+
+func validateRunID(runID string) error {
+	if runID == "" {
+		return fmt.Errorf("run_id is required")
+	}
+	if filepath.Base(runID) != runID || strings.Contains(runID, "..") {
+		return fmt.Errorf("must not contain path traversal components")
+	}
+	return nil
 }
 
 func indexOf(items []string, want string) int {

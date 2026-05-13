@@ -1,13 +1,7 @@
-# Current Plan: Product-Owned Blockvolume Lifecycle MVP
+# Finished Plan: Product-Owned Blockvolume Lifecycle MVP
 
-Status: active, D1-D7 implemented and live runner-native gate passed, 90%
-implementation. Opened after closing
+Status: closed. Opened after closing
 `finished-plans/phase11_finishedplan_cluster_ops_inventory_lifecycle_visibility_mvp.md`.
-
-QA needed now: yes, for D8 formal close validation against
-`qa-assignments/product-owned-blockvolume-lifecycle-mvp-close-hard-gate.md`.
-
-Current dev slice: D8 QA close validation and any close-report fixes.
 
 ## Product Question
 

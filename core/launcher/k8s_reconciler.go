@@ -63,6 +63,12 @@ func ReconcileBlockVolumeDeployments(ctx context.Context, in ReconcileDeployment
 		if err := validateManagedDeployment(identity); err != nil {
 			return result, fmt.Errorf("launcher: desired manifest %s: %w", manifest.Name, err)
 		}
+		if in.Namespace != "" && identity.Namespace != in.Namespace {
+			return result, fmt.Errorf(
+				"launcher: desired manifest %s namespace=%q does not match managed namespace=%q",
+				manifest.Name, identity.Namespace, in.Namespace,
+			)
+		}
 		if err := in.Client.ApplyDeployment(ctx, manifest); err != nil {
 			return result, fmt.Errorf("launcher: apply %s: %w", manifest.Name, err)
 		}

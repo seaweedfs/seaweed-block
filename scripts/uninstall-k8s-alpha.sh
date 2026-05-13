@@ -33,7 +33,11 @@ DEMO_PVC_UID="$(kubectl -n "$NAMESPACE" get pvc sw-block-demo-pvc -o jsonpath='{
 
 log "delete generated blockvolume workloads for demo PVC"
 if [[ -n "$DEMO_PVC_UID" ]]; then
-  kubectl -n "$NAMESPACE" delete deploy -l "sw-block.seaweedfs.com/volume=pvc-${DEMO_PVC_UID}" --ignore-not-found=true --wait=true --timeout=120s | tee "$ARTIFACT_DIR/delete-blockvolumes-demo-pvc.log"
+  DEMO_BLOCKVOLUME_SELECTOR="sw-block.seaweedfs.com/volume=pvc-${DEMO_PVC_UID}"
+  kubectl -n "$NAMESPACE" delete deploy -l "$DEMO_BLOCKVOLUME_SELECTOR" --ignore-not-found=true --wait=true --timeout=120s | tee "$ARTIFACT_DIR/delete-blockvolumes-demo-pvc.log"
+  if [[ "$NAMESPACE" != "kube-system" ]]; then
+    kubectl -n kube-system delete deploy -l "$DEMO_BLOCKVOLUME_SELECTOR" --ignore-not-found=true --wait=true --timeout=120s | tee -a "$ARTIFACT_DIR/delete-blockvolumes-demo-pvc.log"
+  fi
 else
   echo "demo PVC not found; no demo PVC-scoped blockvolume selector available" | tee "$ARTIFACT_DIR/delete-blockvolumes-demo-pvc.log"
 fi

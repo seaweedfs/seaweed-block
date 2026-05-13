@@ -133,7 +133,7 @@ For the demo, the app node defaults to the same value:
 ```bash
 export SW_BLOCK_ALPHA_NODE_NAME=m02
 export SW_BLOCK_DEMO_APP_NODE_NAME=m02
-bash scripts/run-k8s-demo.sh "$PWD"
+bash scripts/run-alpha-app-demo.sh "$PWD"
 ```
 
 Keep `SW_BLOCK_DEMO_PIN_APP_NODE=1` for the supported happy path. Setting it to
@@ -146,7 +146,7 @@ frontend is loopback, is a negative-fixture path and should produce an
 The fastest full check is the demo script:
 
 ```bash
-bash scripts/run-k8s-demo.sh "$PWD"
+bash scripts/run-alpha-app-demo.sh "$PWD"
 ```
 
 Expected final line:
@@ -418,7 +418,7 @@ iscsiadm: No active sessions.
 Then rerun:
 
 ```bash
-bash scripts/run-k8s-demo.sh "$PWD"
+bash scripts/run-alpha-app-demo.sh "$PWD"
 ```
 
 ## 10. Full Alpha Uninstall

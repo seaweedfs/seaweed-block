@@ -158,11 +158,18 @@ func writeFileViaTemp(path string, data []byte, perm os.FileMode) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		return err
-	}
 	if err := os.Rename(tmpName, path); err != nil {
-		return err
+		// Some platforms/filesystems do not overwrite on rename. Keep the
+		// previous artifact unless the fallback remove+rename succeeds.
+		if !os.IsExist(err) {
+			return err
+		}
+		if rmErr := os.Remove(path); rmErr != nil && !os.IsNotExist(rmErr) {
+			return err
+		}
+		if retryErr := os.Rename(tmpName, path); retryErr != nil {
+			return retryErr
+		}
 	}
 	cleanup = false
 	return nil

@@ -357,12 +357,12 @@ metadata:
 `),
 		},
 	}
-	namespaces := renderedNamespaces(rendered, "kube-system")
+	namespaces, byNamespace := renderedManifestsByNamespace(rendered, "kube-system")
 	wantNamespaces := []string{"kube-system", "default", "apps"}
 	if !reflect.DeepEqual(namespaces, wantNamespaces) {
 		t.Fatalf("namespaces=%v want %v", namespaces, wantNamespaces)
 	}
-	defaultRendered := renderedForNamespace(rendered, "default")
+	defaultRendered := byNamespace["default"]
 	if len(defaultRendered) != 1 || defaultRendered[0].Name != "sw-blockvolume-pvc-a-r1" {
 		t.Fatalf("default rendered=%+v", defaultRendered)
 	}

@@ -24,7 +24,7 @@ Live RF coverage:     RF=1 live (×2 PVCs); RF=2 and RF=3 fixture-only (not live
 PASS (strict)
 ```
 
-All 14 HG clauses pass the binary criteria. The product loop the plan set out
+All 15 HG clauses pass the binary criteria. The product loop the plan set out
 to deliver — read-only multi-volume / multi-replica inventory with PVC↔volume↔
 replica mapping, partial-state honesty, residue attribution, byte-equal
 per-replica reuse of `sw-block ops status`, and provable read-only behavior —
@@ -341,7 +341,7 @@ None.
 
 2. **HG-10 F5 cosmetic: garbled issue-line prefix when source field is empty.**
    For the `heartbeat-without-placement` and `blockvolume-process-without-placement` issue classes, when one of the data sources contributes an empty server-id, the resulting issue line looks like:
-   ```
+   ```text
    - volume qa-fake-volume blockvolume-process-without-placement====",qa-fake-server
    - volume qa-fake-volume heartbeat-without-placement====",qa-fake-server state=unadmitted-by-master
    ```

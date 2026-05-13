@@ -106,6 +106,25 @@ func TestControlManagerStartCleansPartialLockOnWriteFailure(t *testing.T) {
 	}
 }
 
+func TestControlManagerRejectsInvalidRunID(t *testing.T) {
+	root := t.TempDir()
+	mgr := NewControlManager(root)
+	for _, runID := range []string{"../run-1", "nested/run-1", `nested\run-1`, "run..1"} {
+		_, err := mgr.Start(controlTestRequest(runID), ResourceSpec{})
+		if err == nil {
+			t.Fatalf("Start(%q) succeeded, expected invalid run_id", runID)
+		}
+	}
+	if entries, err := os.ReadDir(filepath.Join(root, "active")); err != nil && !os.IsNotExist(err) {
+		t.Fatalf("read active dir: %v", err)
+	} else if len(entries) != 0 {
+		t.Fatalf("invalid run_id should not create active records: %v", entries)
+	}
+	if _, err := mgr.Start(controlTestRequest("run-1"), ResourceSpec{}); err != nil {
+		t.Fatalf("valid run_id rejected: %v", err)
+	}
+}
+
 func TestControlManagerRejectsConflictingLock(t *testing.T) {
 	root := t.TempDir()
 	mgr := NewControlManager(root)

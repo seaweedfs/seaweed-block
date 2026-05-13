@@ -335,8 +335,9 @@ func runLifecycleLauncherTick(h *master.Host, f flags) error {
 		if err != nil {
 			return err
 		}
-		for _, namespace := range renderedNamespaces(rendered, f.launcherNamespace) {
-			desired := renderedForNamespace(rendered, namespace)
+		namespaces, renderedByNamespace := renderedManifestsByNamespace(rendered, f.launcherNamespace)
+		for _, namespace := range namespaces {
+			desired := renderedByNamespace[namespace]
 			existing, err := client.ListBlockVolumeDeployments(context.Background(), namespace)
 			if err != nil {
 				return err
@@ -356,9 +357,10 @@ func runLifecycleLauncherTick(h *master.Host, f flags) error {
 	return nil
 }
 
-func renderedNamespaces(rendered []launcher.RenderedManifest, fallback string) []string {
+func renderedManifestsByNamespace(rendered []launcher.RenderedManifest, fallback string) ([]string, map[string][]launcher.RenderedManifest) {
 	seen := map[string]bool{}
 	var out []string
+	byNamespace := map[string][]launcher.RenderedManifest{}
 	add := func(namespace string) {
 		if namespace == "" {
 			namespace = fallback
@@ -376,20 +378,7 @@ func renderedNamespaces(rendered []launcher.RenderedManifest, fallback string) [
 			continue
 		}
 		add(identity.Namespace)
+		byNamespace[identity.Namespace] = append(byNamespace[identity.Namespace], manifest)
 	}
-	return out
-}
-
-func renderedForNamespace(rendered []launcher.RenderedManifest, namespace string) []launcher.RenderedManifest {
-	var out []launcher.RenderedManifest
-	for _, manifest := range rendered {
-		identity, err := launcher.DecodeRenderedDeploymentIdentity(manifest)
-		if err != nil {
-			continue
-		}
-		if identity.Namespace == namespace {
-			out = append(out, manifest)
-		}
-	}
-	return out
+	return out, byNamespace
 }

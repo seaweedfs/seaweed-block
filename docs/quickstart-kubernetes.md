@@ -59,7 +59,7 @@ SW_BLOCK_IMPORT_K3S=1 \
 SW_BLOCK_ARTIFACT_DIR=/tmp/sw-block-alpha-build \
   bash scripts/build-alpha-images.sh "$PWD"
 
-bash scripts/run-k8s-demo.sh "$PWD"
+bash scripts/run-alpha-app-demo.sh "$PWD"
 ```
 
 Expected final line:
@@ -270,7 +270,7 @@ bash scripts/build-alpha-images.sh "$PWD"
 docker push "$SW_BLOCK_IMAGE"
 docker push "$SW_BLOCK_CSI_IMAGE"
 
-bash scripts/run-k8s-demo.sh "$PWD"
+bash scripts/run-alpha-app-demo.sh "$PWD"
 ```
 
 The runner renders the Kubernetes manifests with those image names before
@@ -337,7 +337,7 @@ node database entry may remain until guardrail cleanup removes it.
 The most understandable demo is:
 
 ```bash
-bash scripts/run-k8s-demo.sh "$PWD"
+bash scripts/run-alpha-app-demo.sh "$PWD"
 ```
 
 Then show these artifacts:
@@ -564,7 +564,7 @@ iscsiadm: No active sessions.
 After that, rerun the same demo command:
 
 ```bash
-bash scripts/run-k8s-demo.sh "$PWD"
+bash scripts/run-alpha-app-demo.sh "$PWD"
 ```
 
 The retry behavior is gated by

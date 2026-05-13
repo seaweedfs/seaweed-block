@@ -42,15 +42,16 @@ The inventory/support bundle must let a reader answer:
 ## Required Fields
 
 Inventory summary and JSON should expose these facts for each live RF=1
-blockvolume:
+blockvolume. Summary lines may use short aliases; JSON should use the canonical
+inventory contract field names:
 
 - `namespace`
-- `pvc`
-- `pv`
+- `pvc` summary alias for JSON `pvc_name`
+- `pv` summary alias for JSON `pv_name`
 - `volume_id`
-- `rf`
-- `desired`
-- `observed`
+- `rf` summary alias for JSON `replication_factor`
+- `desired` summary alias for JSON `desired_replicas`
+- `observed` summary alias for JSON `observed_replicas`
 - `replica_id`
 - `server`
 - `node`
