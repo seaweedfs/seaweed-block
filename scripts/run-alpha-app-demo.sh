@@ -11,6 +11,7 @@ LAUNCHER_PVC_OWNER_REF="${SW_BLOCK_LAUNCHER_PVC_OWNER_REF:-0}"
 LAUNCHER_STATE_HOSTPATH="${SW_BLOCK_LAUNCHER_STATE_HOSTPATH:-}"
 RESTART_CSI_NODE_BEFORE_READER="${SW_BLOCK_RESTART_CSI_NODE_BEFORE_READER:-0}"
 RESTART_BLOCKVOLUME_BEFORE_READER="${SW_BLOCK_RESTART_BLOCKVOLUME_BEFORE_READER:-0}"
+COLLECT_INVENTORY_AFTER_RESTART="${SW_BLOCK_COLLECT_INVENTORY_AFTER_RESTART:-0}"
 DEMO_STOP_AFTER="${SW_BLOCK_DEMO_STOP_AFTER:-}"
 COLLECT_OPS_STATUS="${SW_BLOCK_DEMO_COLLECT_OPS_STATUS:-0}"
 KEEP_ON_STOP="${SW_BLOCK_DEMO_KEEP_ON_STOP:-0}"
@@ -214,6 +215,17 @@ run_sw_block_ops_status() {
   go run ./cmd/sw-block ops status --volume "$volume_id" --master "$master_addr" --status-addr "$status_addr" --out "$out_dir" --product-revision "$product_revision" --timeout 15s
 }
 
+run_sw_block_ops_inventory() {
+  local namespace="$1"
+  local master_addr="$2"
+  local out_dir="$3"
+  if command -v sw-block >/dev/null 2>&1; then
+    sw-block ops inventory --namespace "$namespace" --master "$master_addr" --out "$out_dir" --timeout 30s
+    return $?
+  fi
+  go run ./cmd/sw-block ops inventory --namespace "$namespace" --master "$master_addr" --out "$out_dir" --timeout 30s
+}
+
 collect_ops_status_bundle() {
   set +e
   OPS_STATUS_COLLECTION_ATTEMPTED=1
@@ -273,6 +285,33 @@ collect_ops_status_bundle() {
   fi
   rm -rf "$work_dir"
   return 0
+}
+
+collect_ops_inventory_after_restart() {
+  local out_dir="$ARTIFACT_DIR/ops-inventory-after-restart"
+  local pf_port
+  local pf_pid
+  mkdir -p "$out_dir"
+  pf_port="${SW_BLOCK_OPS_INVENTORY_MASTER_PORT:-$(choose_local_port)}"
+  kubectl -n kube-system port-forward svc/blockmaster "${pf_port}:9333" >"$out_dir/blockmaster-port-forward.log" 2>&1 &
+  pf_pid=$!
+  echo "$pf_pid" >"$out_dir/blockmaster-port-forward.pid"
+  if ! wait_tcp_ready 127.0.0.1 "$pf_port" 20 || ! kill -0 "$pf_pid" >/dev/null 2>&1; then
+    echo "ops-inventory-after-restart-unavailable: blockmaster port-forward did not become ready" >"$out_dir/unavailable.txt"
+    kill "$pf_pid" >/dev/null 2>&1 || true
+    wait "$pf_pid" >/dev/null 2>&1 || true
+    return 1
+  fi
+  (
+    cd "$ROOT"
+    run_sw_block_ops_inventory "$NAMESPACE" "127.0.0.1:${pf_port}" "$out_dir"
+  ) >"$out_dir/stdout.txt" 2>"$out_dir/stderr.txt"
+  local rc=$?
+  echo "$rc" >"$out_dir/exit_code.txt"
+  find "$out_dir/volumes" -name ops-status-bundle.json -exec cat {} \; >"$out_dir/nested-ops-status-bundles.json" 2>/dev/null || true
+  kill "$pf_pid" >/dev/null 2>&1 || true
+  wait "$pf_pid" >/dev/null 2>&1 || true
+  return "$rc"
 }
 
 record_ops_status_unavailable() {
@@ -481,6 +520,7 @@ log "launcher_pvc_owner_ref=$LAUNCHER_PVC_OWNER_REF"
 log "launcher_state_hostpath=${LAUNCHER_STATE_HOSTPATH:-<emptyDir>}"
 log "restart_csi_node_before_reader=$RESTART_CSI_NODE_BEFORE_READER"
 log "restart_blockvolume_before_reader=$RESTART_BLOCKVOLUME_BEFORE_READER"
+log "collect_inventory_after_restart=$COLLECT_INVENTORY_AFTER_RESTART"
 log "demo_stop_after=${DEMO_STOP_AFTER:-<none>}"
 log "collect_ops_status=$COLLECT_OPS_STATUS"
 log "keep_on_stop=$KEEP_ON_STOP"
@@ -627,6 +667,10 @@ restart_blockvolume_deployment() {
   echo "$BLOCKVOLUME_STATUS_ADDR" >"$ARTIFACT_DIR/blockvolume-status-addr.txt"
   wait_blockvolume_durable_status "$BLOCKVOLUME_VOLUME_ID" "$BLOCKVOLUME_STATUS_ADDR" "$ARTIFACT_DIR/status-durable-after-blockvolume-restart.json" 120
   wait_blockvolume_log_pattern "$BLOCKVOLUME_DEPLOY" "\"phase\":\"iscsi-listening\"" "$ARTIFACT_DIR/blockvolume-generated.after-restart.log" 120
+  if [[ "$COLLECT_INVENTORY_AFTER_RESTART" == "1" || "$COLLECT_INVENTORY_AFTER_RESTART" == "true" ]]; then
+    log "collect inventory after blockvolume restart"
+    collect_ops_inventory_after_restart
+  fi
 }
 
 log "delete writer pod but keep PVC"
