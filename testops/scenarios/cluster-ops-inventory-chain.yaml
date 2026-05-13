@@ -184,6 +184,9 @@ phases:
       - action: exec
         node: m02
         cmd: "! grep -q 'generated_deployment_missing\\|observed_replicas=0 desired_replicas=1\\|replica_slot_missing' /mnt/smb/work/share/g15d-k8s/{{ run_id }}-cluster-inventory/inventory/volume-inventory-summary.txt"
+      - action: exec
+        node: m02
+        cmd: "! grep -q 'replica_unhealthy' /mnt/smb/work/share/g15d-k8s/{{ run_id }}-cluster-inventory/inventory/volume-inventory-summary.txt"
       - action: grep_log
         node: m02
         path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-cluster-inventory/inventory/volume-inventory-summary.txt"
