@@ -1,16 +1,15 @@
 # Current Plan: Durable Volume Restart And Reattach MVP
 
 Status: active, D1 durable contract, D2 fast rendering coverage, D3
-operations manual update, D4 dev restart gate, and D5 failure evidence
-complete, 75%
+operations manual update, D4 dev restart gate, D5 failure evidence, and D6
+close-gate assignment complete, 85%
 implementation. Opened after closing
 `finished-plans/phase12_finishedplan_product_owned_blockvolume_lifecycle_mvp.md`.
 
-QA needed now: yes, for D4 repeatability and D5 failure-bundle review. Use
-`qa-assignments/csi-rf1-durable-blockvolume-restart-validation.md` for D4;
-D6 will turn both dev gates into a formal close assignment.
+QA needed now: yes, for formal close using
+`qa-assignments/durable-volume-restart-reattach-mvp-close-hard-gate.md`.
 
-Current dev slice: D6 QA close gate.
+Current dev slice: wait for QA close, then address findings or close plan.
 
 ## Product Question
 
@@ -242,6 +241,12 @@ Ask QA to validate as a user:
 - confirm inventory/support bundle durable evidence,
 - confirm cleanup and retained-state wording are honest,
 - report any over-claim or confusing durable-state wording.
+
+Status: assignment complete. The hard gate lives at
+`qa-assignments/durable-volume-restart-reattach-mvp-close-hard-gate.md` and
+covers runbook discoverability, durable manifest evidence, PVC data survival
+across restart, durable status, inventory/support bundle, cleanup boundary,
+bad-hostPath failure bundle, and non-claims.
 
 ## Gates To Close
 
