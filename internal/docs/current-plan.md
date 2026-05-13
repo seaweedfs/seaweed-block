@@ -15,6 +15,8 @@ support bundles. D6 fast RF/missing-replica fixtures are in place and use the
 same machine-readable issue vocabulary as the QA hard gate. The current cleanup
 slice tightens HG-10 residue labels, HG-14 non-claim labels, and the HG-6/HG-7
 degraded-replica wording so the close report can validate them mechanically.
+The live inventory chain also now rejects stale Deployment-only status in rows
+classified as `ok`; OK rows must be backed by nested product status evidence.
 
 QA slice assignment for D5 live validation:
 `internal/docs/qa-assignments/cluster-ops-inventory-chain-validation.md`.
