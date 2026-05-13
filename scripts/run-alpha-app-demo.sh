@@ -22,6 +22,7 @@ BREAK_AFTER_BLOCKVOLUME_READY="${SW_BLOCK_DEMO_BREAK_AFTER_BLOCKVOLUME_READY:-}"
 BREAK_AFTER_BLOCKVOLUME_RESTART="${SW_BLOCK_DEMO_BREAK_AFTER_BLOCKVOLUME_RESTART:-}"
 WRITER_TIMEOUT="${SW_BLOCK_DEMO_WRITER_TIMEOUT:-240}"
 DELETE_ALL_BLOCKVOLUMES="${SW_BLOCK_UNINSTALL_DELETE_ALL_BLOCKVOLUMES:-0}"
+PIN_APP_NODE="${SW_BLOCK_DEMO_PIN_APP_NODE:-1}"
 DEFAULT_DEMO_APP_MANIFEST="$ROOT/deploy/k8s/alpha/demo-app-pvc.yaml"
 DEMO_APP_MANIFEST="${SW_BLOCK_DEMO_APP_MANIFEST:-$DEFAULT_DEMO_APP_MANIFEST}"
 BLOCKVOLUME_NAMESPACE="kube-system"
@@ -44,7 +45,7 @@ if [[ "$RESTART_BLOCKVOLUME_BEFORE_READER" == "1" || "$RESTART_BLOCKVOLUME_BEFOR
     exit 2
   fi
 fi
-if [[ -n "$DEMO_STOP_AFTER" && "$DEMO_STOP_AFTER" != "blockvolume-ready" ]]; then
+if [[ -n "$DEMO_STOP_AFTER" && "$DEMO_STOP_AFTER" != "blockvolume-ready" && "$DEMO_STOP_AFTER" != "reader-verified" ]]; then
   echo "unsupported SW_BLOCK_DEMO_STOP_AFTER value: $DEMO_STOP_AFTER" >&2
   exit 2
 fi
@@ -81,6 +82,27 @@ require_cmd() {
 
 sed_escape() {
   printf '%s' "$1" | sed 's/[\/&]/\\&/g'
+}
+
+render_pods_with_node_selector() {
+  local input="$1"
+  local output="$2"
+  local node="$3"
+  if [[ "$PIN_APP_NODE" != "1" && "$PIN_APP_NODE" != "true" ]]; then
+    cp "$input" "$output"
+    return
+  fi
+  awk -v node="$node" '
+    /^[[:space:]]*kind:[[:space:]]*Pod[[:space:]]*$/ { in_pod=1 }
+    {
+      print
+      if (in_pod && /^[[:space:]]*spec:[[:space:]]*$/) {
+        print "  nodeSelector:"
+        print "    kubernetes.io/hostname: " node
+        in_pod=0
+      }
+    }
+  ' "$input" >"$output"
 }
 
 capture_once() {
@@ -486,10 +508,13 @@ wait_pod_log_contains() {
 
 require_cmd kubectl
 
-NODE_NAME="$(kubectl get nodes -o jsonpath='{.items[0].metadata.name}')"
+NODE_NAME="${SW_BLOCK_ALPHA_NODE_NAME:-$(kubectl get nodes -o jsonpath='{.items[0].metadata.name}')}"
+APP_NODE_NAME="${SW_BLOCK_DEMO_APP_NODE_NAME:-$NODE_NAME}"
 STACK_RENDERED="$ARTIFACT_DIR/block-stack.rendered.yaml"
 CSI_CONTROLLER_RENDERED="$ARTIFACT_DIR/csi-controller.rendered.yaml"
 CSI_NODE_RENDERED="$ARTIFACT_DIR/csi-node.rendered.yaml"
+DEMO_APP_RENDERED="$ARTIFACT_DIR/demo-app.rendered.yaml"
+READER_RENDERED="$ARTIFACT_DIR/demo-app-reader.rendered.yaml"
 IMAGE_SED="$(sed_escape "$IMAGE")"
 CSI_IMAGE_SED="$(sed_escape "$CSI_IMAGE")"
 sed -e "s/__NODE_NAME__/${NODE_NAME}/g" \
@@ -522,11 +547,15 @@ fi
 sed -e "s/sw-block-csi:local/${CSI_IMAGE_SED}/g" \
   -e "s/imagePullPolicy: Never/imagePullPolicy: IfNotPresent/g" \
   "$ROOT/deploy/k8s/alpha/csi-node.yaml" >"$CSI_NODE_RENDERED"
+render_pods_with_node_selector "$DEMO_APP_MANIFEST" "$DEMO_APP_RENDERED" "$APP_NODE_NAME"
+render_pods_with_node_selector "$ROOT/deploy/k8s/alpha/demo-app-reader-pod.yaml" "$READER_RENDERED" "$APP_NODE_NAME"
 
 log "artifact_dir=$ARTIFACT_DIR"
 log "root=$ROOT"
 log "namespace=$NAMESPACE"
 log "node=$NODE_NAME"
+log "app_node=$APP_NODE_NAME"
+log "pin_app_node=$PIN_APP_NODE"
 log "image=$IMAGE"
 log "csi_image=$CSI_IMAGE"
 log "blockvolume_namespace=$BLOCKVOLUME_NAMESPACE"
@@ -585,7 +614,7 @@ kubectl -n kube-system wait --for=condition=available deploy/sw-block-csi-contro
 kubectl -n kube-system rollout status ds/sw-block-csi-node --timeout=120s
 
 log "apply demo app PVC and writer pod"
-kubectl apply -f "$DEMO_APP_MANIFEST" | tee "$ARTIFACT_DIR/apply-demo-app.log"
+kubectl apply -f "$DEMO_APP_RENDERED" | tee "$ARTIFACT_DIR/apply-demo-app.log"
 
 log "wait for launcher-generated blockvolume manifest"
 for _ in $(seq 1 180); do
@@ -718,7 +747,7 @@ if [[ "$RESTART_BLOCKVOLUME_BEFORE_READER" == "1" || "$RESTART_BLOCKVOLUME_BEFOR
 fi
 
 log "start reader pod on the same PVC"
-kubectl apply -f "$ROOT/deploy/k8s/alpha/demo-app-reader-pod.yaml" | tee "$ARTIFACT_DIR/apply-reader.log"
+kubectl apply -f "$READER_RENDERED" | tee "$ARTIFACT_DIR/apply-reader.log"
 wait_pod_succeeded sw-block-demo-reader 240
 kubectl -n "$NAMESPACE" logs sw-block-demo-reader | tee "$ARTIFACT_DIR/reader.log"
 kubectl -n "$NAMESPACE" describe pod sw-block-demo-reader >"$ARTIFACT_DIR/reader.describe.before-delete.txt" 2>&1 || true
@@ -726,6 +755,14 @@ capture_iscsi_sessions_to "$ARTIFACT_DIR/iscsi-sessions.after-reader.txt"
 kubectl -n kube-system logs -l app=sw-block-csi-node -c block-csi --tail=-1 >"$ARTIFACT_DIR/blockcsi-node.log" 2>&1 || true
 
 log "reader verified data written by previous app pod"
+
+if [[ "$DEMO_STOP_AFTER" == "reader-verified" ]]; then
+  log "controlled stop after reader verified"
+  collect_ops_inventory_bundle "$ARTIFACT_DIR/ops-inventory-reader-verified" || true
+  echo "phase=reader-verified" >"$ARTIFACT_DIR/controlled-stop-reader-verified.txt"
+  echo "ops_inventory_dir=$ARTIFACT_DIR/ops-inventory-reader-verified" >>"$ARTIFACT_DIR/controlled-stop-reader-verified.txt"
+  exit 44
+fi
 
 log "delete reader pod and PVC"
 kubectl -n "$NAMESPACE" delete pod sw-block-demo-reader --wait=true --timeout=120s | tee "$ARTIFACT_DIR/delete-reader.log"

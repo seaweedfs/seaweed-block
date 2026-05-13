@@ -31,7 +31,7 @@ sed_escape() {
 
 require_cmd kubectl
 
-NODE_NAME="$(kubectl get nodes -o jsonpath='{.items[0].metadata.name}')"
+NODE_NAME="${SW_BLOCK_ALPHA_NODE_NAME:-$(kubectl get nodes -o jsonpath='{.items[0].metadata.name}')}"
 STACK_RENDERED="$ARTIFACT_DIR/block-stack.rendered.yaml"
 CSI_CONTROLLER_RENDERED="$ARTIFACT_DIR/csi-controller.rendered.yaml"
 CSI_NODE_RENDERED="$ARTIFACT_DIR/csi-node.rendered.yaml"

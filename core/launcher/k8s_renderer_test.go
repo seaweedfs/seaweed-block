@@ -72,6 +72,29 @@ func TestG15d_K8sRenderer_RF2UsesDistinctNamesAndPorts(t *testing.T) {
 	}
 }
 
+func TestG15d_K8sRenderer_SameNodeLoopbackPlacementContract(t *testing.T) {
+	manifests, err := RenderBlockVolumeDeployments(sampleWorkloadPlan(), K8sRenderConfig{
+		MasterAddr:   "m:9333",
+		EnableStatus: true,
+	})
+	if err != nil {
+		t.Fatalf("RenderBlockVolumeDeployments: %v", err)
+	}
+	raw := string(manifests[0].YAML)
+	for _, want := range []string{
+		"hostNetwork: true",
+		"kubernetes.io/hostname: m02",
+		"--data-addr=10.0.0.1:9201",
+		"--ctrl-addr=10.0.0.1:9101",
+		"--iscsi-listen=127.0.0.1:3260",
+		"--status-addr=127.0.0.1:23260",
+	} {
+		if !strings.Contains(raw, want) {
+			t.Fatalf("same-node placement contract missing %q:\n%s", want, raw)
+		}
+	}
+}
+
 func TestG15d_K8sRenderer_ManifestsAreSafeToConcatenate(t *testing.T) {
 	manifests, err := RenderBlockVolumeDeployments(sampleWorkloadPlan(), K8sRenderConfig{MasterAddr: "m:9333"})
 	if err != nil {

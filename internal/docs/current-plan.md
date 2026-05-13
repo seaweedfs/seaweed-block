@@ -2,13 +2,13 @@
 
 Status: active, opened after closing
 `finished-plans/phase13_finishedplan_durable_volume_restart_reattach_mvp.md`,
-12% implementation.
+40% implementation.
 
-QA needed now: no. The D1 audit found a product/lab constraint, not a QA
-execution question. First QA checkpoint is after D2/D3 define and test the
-same-node placement contract, or after a true two-node lab is available.
+QA needed now: yes for D4 live gate. Assignment:
+`internal/docs/qa-assignments/same-node-alpha-attach-validation.md`.
+Dev can continue with D5 while QA runs it.
 
-Current dev slice: D2 placement and endpoint contract.
+Current dev slice: D5 negative fixture for unsupported placement.
 
 ## Product Question
 
@@ -101,6 +101,9 @@ What is still weak or unknown:
 The detailed D1 audit is captured in
 `internal/docs/ref/multi-node-attach-placement-audit.md`.
 
+The D2 placement contract is captured in
+`internal/docs/ref/same-node-alpha-placement-contract.md`.
+
 ## Scope
 
 In scope:
@@ -192,6 +195,9 @@ Add or update a reference doc under `internal/docs/ref/` describing:
 - status endpoint strategy for inventory,
 - what is deliberately not claimed.
 
+Output: completed in
+`internal/docs/ref/same-node-alpha-placement-contract.md`.
+
 ### D3: Fast Tests
 
 Add tests for:
@@ -201,6 +207,10 @@ Add tests for:
 - app pod co-location or documented user scheduling constraint,
 - inventory node/server/frontend/status fields,
 - failure wording for unreachable endpoint or unsupported cross-node attach.
+
+Output: initial fast tests pin renderer same-node loopback fields and inventory
+node/frontend/support-bundle evidence. The demo script now pins writer and
+reader pods to the same selected node by default.
 
 ### D4: Runner-Native Multi-Node Attach Gate
 
@@ -219,6 +229,11 @@ assert PVC/PV/app node/blockvolume node/frontend/status/support bundle fields
 delete PVC and cleanup
 collect_and_cleanup(always)
 ```
+
+Output: `testops/scenarios/same-node-alpha-attach-chain.yaml` added. It runs
+the real demo to reader verification, captures live inventory before cleanup,
+and asserts node pinning, loopback frontend, PVC identity, support-bundle, and
+nested status-bundle evidence.
 
 ### D5: Partial-State / Negative Fixture
 

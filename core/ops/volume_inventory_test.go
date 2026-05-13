@@ -231,6 +231,39 @@ func TestBuildVolumeInventory_DegradedReplicaExplainsHealthyButUnready(t *testin
 	}
 }
 
+func TestBuildVolumeInventory_SameNodeAttachEvidenceIsVisible(t *testing.T) {
+	replica := healthyInventoryReplica("r1", "m02", "m02", "primary")
+	replica.SupportBundle = "volumes/pvc-a/r1"
+	inventory := BuildVolumeInventory(VolumeInventoryInput{
+		ProductRevision: "product-rev",
+		Volumes: []VolumeInventoryVolumeInput{
+			{
+				VolumeID:          "pvc-a",
+				Namespace:         "default",
+				PVCName:           "sw-block-demo-pvc",
+				PVName:            "pvc-a",
+				ReplicationFactor: 1,
+				SupportBundle:     "volumes/pvc-a",
+				Replicas:          []VolumeInventoryReplicaInput{replica},
+			},
+		},
+	})
+
+	if inventory.Status != "ok" {
+		t.Fatalf("status=%s issues=%v", inventory.Status, VolumeInventoryIssues(inventory))
+	}
+	summary := RenderVolumeInventorySummary(inventory)
+	for _, want := range []string{
+		"volume: id=pvc-a namespace=default pvc=sw-block-demo-pvc pv=pvc-a rf=1 desired=1 observed=1 primary=r1 status=ok protocols=iscsi replicas=1",
+		"replica: volume=pvc-a replica=r1 server=m02 node=m02 observed=true status=ok",
+		"frontend=127.0.0.1:3260 status_addr=127.0.0.1:23260 support_bundle=volumes/pvc-a/r1",
+	} {
+		if !strings.Contains(summary, want) {
+			t.Fatalf("summary missing %q:\n%s", want, summary)
+		}
+	}
+}
+
 func TestBuildVolumeInventory_InvalidIdentityAndCollectionErrors(t *testing.T) {
 	inventory := BuildVolumeInventory(VolumeInventoryInput{
 		Source:          ReportSource{},
