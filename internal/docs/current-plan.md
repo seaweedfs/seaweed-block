@@ -2,13 +2,13 @@
 
 Status: active, opened after closing
 `finished-plans/phase13_finishedplan_durable_volume_restart_reattach_mvp.md`,
-40% implementation.
+52% implementation.
 
-QA needed now: yes for D4 live gate. Assignment:
+QA needed now: yes for D4/D5 live gates. Assignment:
 `internal/docs/qa-assignments/same-node-alpha-attach-validation.md`.
-Dev can continue with D5 while QA runs it.
+Dev can continue with D6 docs while QA runs it.
 
-Current dev slice: D5 negative fixture for unsupported placement.
+Current dev slice: D6 operations manual update.
 
 ## Product Question
 
@@ -244,6 +244,11 @@ Add one focused fixture for a realistic multi-node mistake:
 - status endpoint unreachable from inventory.
 
 The result should be an actionable inventory/support bundle, not just a timeout.
+
+Output: `testops/scenarios/same-node-alpha-attach-negative-chain.yaml` added.
+The demo script now fails fast with
+`unsupported_cross_node_loopback_attach` when the app node differs from the
+blockvolume node while the frontend is loopback.
 
 ### D6: Operations Manual Update
 

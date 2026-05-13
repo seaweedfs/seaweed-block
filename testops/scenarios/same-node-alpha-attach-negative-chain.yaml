@@ -1,0 +1,173 @@
+# Runner-native negative fixture for same-node alpha attach.
+#
+# Goal:
+#   Prove unsupported cross-node loopback placement fails with an actionable
+#   bundle instead of a writer/attach timeout. The fixture deliberately renders
+#   the app pod to a different node name than the generated blockvolume node.
+
+name: same-node-alpha-attach-negative-chain
+timeout: 16m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: pre_clean
+    actions:
+      - action: pre_run_cleanup
+        node: m02
+        kill_patterns: "blockmaster,blockvolume,blockcsi,iscsi-target"
+        nvme_disconnect: "true"
+        iscsi_logout_prefix: "iqn.2026-05.io.seaweedfs"
+      - action: exec
+        node: m02
+        cmd: "rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-same-node-negative && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-same-node-negative/pin_build /mnt/smb/work/share/g15d-k8s/{{ run_id }}-same-node-negative/demo"
+      - action: exec
+        node: m02
+        cmd: "pkill -f 'kubectl.*port-forward.*svc/blockmaste[r]' >/dev/null 2>&1 || true"
+      - action: assert_no_active_iscsi_sessions
+        node: m02
+        iqn_substr: "io.seaweedfs"
+      - action: assert_no_processes
+        node: m02
+        pattern: "[/]blockmaster --|[/]blockvolume --|[/]blockcsi |[/]iscsi-target |^blockmaster |^blockvolume |^blockcsi |^iscsi-target "
+
+  - name: preflight
+    actions:
+      - action: exec
+        node: m02
+        cmd: "cd {{ product_root }} && bash scripts/preflight-k8s-alpha.sh --local-k3s > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-same-node-negative/preflight.txt 2>&1"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-same-node-negative/preflight.txt"
+        pattern: "summary status=PASS"
+        save_as: preflight_count
+      - action: assert_greater
+        actual: "{{ preflight_count }}"
+        threshold: "0"
+
+  - name: pin_build_alpha_images
+    actions:
+      - action: exec
+        node: m02
+        timeout: 8m
+        cmd: "cd {{ product_root }} && bash scripts/build-alpha-images.sh {{ product_root }}"
+        env.SW_BLOCK_IMPORT_K3S: "1"
+        env.SW_BLOCK_ARTIFACT_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-same-node-negative/pin_build"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-same-node-negative/pin_build/alpha-images.env"
+        pattern: "SW_BLOCK_IMAGE_ID="
+        save_as: sw_block_image_id_count
+      - action: assert_greater
+        actual: "{{ sw_block_image_id_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-same-node-negative/pin_build/alpha-images.env"
+        pattern: "SW_BLOCK_CSI_IMAGE_ID="
+        save_as: sw_block_csi_image_id_count
+      - action: assert_greater
+        actual: "{{ sw_block_csi_image_id_count }}"
+        threshold: "0"
+
+  - name: unsupported_cross_node_loopback
+    actions:
+      - action: exec
+        node: m02
+        timeout: 8m
+        cmd: "cd {{ product_root }} && bash -c 'set -a; source /mnt/smb/work/share/g15d-k8s/{{ run_id }}-same-node-negative/pin_build/alpha-images.env; set +a; set +e; SW_BLOCK_DEMO_APP_NODE_NAME=sw-block-not-the-blockvolume-node bash scripts/run-k8s-demo.sh {{ product_root }}; rc=$?; echo $rc > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-same-node-negative/demo/exit_code.txt; test \"$rc\" -eq 45'"
+        env.SW_BLOCK_ARTIFACT_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-same-node-negative/demo"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-same-node-negative/demo/run.log"
+        pattern: "unsupported cross-node loopback attach"
+        save_as: unsupported_log_count
+      - action: assert_greater
+        actual: "{{ unsupported_log_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-same-node-negative/demo/unsupported-cross-node-loopback-attach.txt"
+        pattern: "^issue=unsupported_cross_node_loopback_attach$"
+        save_as: issue_class_count
+      - action: assert_greater
+        actual: "{{ issue_class_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-same-node-negative/demo/unsupported-cross-node-loopback-attach.txt"
+        pattern: "^app_node=sw-block-not-the-blockvolume-node$"
+        save_as: issue_app_node_count
+      - action: assert_greater
+        actual: "{{ issue_app_node_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-same-node-negative/demo/unsupported-cross-node-loopback-attach.txt"
+        pattern: "^blockvolume_node="
+        save_as: issue_blockvolume_node_count
+      - action: assert_greater
+        actual: "{{ issue_blockvolume_node_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-same-node-negative/demo/unsupported-cross-node-loopback-attach.txt"
+        pattern: "^frontend=127.0.0.1:"
+        save_as: issue_frontend_count
+      - action: assert_greater
+        actual: "{{ issue_frontend_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-same-node-negative/demo/unsupported-cross-node-loopback-attach.txt"
+        pattern: "reason=loopback frontend requires app pod and blockvolume on the same node"
+        save_as: issue_reason_count
+      - action: assert_greater
+        actual: "{{ issue_reason_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-same-node-negative/demo/ops-inventory-unsupported-placement/volume-inventory-summary.txt"
+        pattern: "pvc=sw-block-demo-pvc"
+        save_as: inventory_pvc_count
+      - action: assert_greater
+        actual: "{{ inventory_pvc_count }}"
+        threshold: "0"
+
+  - name: collect_and_cleanup
+    always: true
+    actions:
+      - action: exec
+        node: m02
+        timeout: 3m
+        cmd: "cd {{ product_root }} && bash scripts/uninstall-k8s-alpha.sh {{ product_root }}"
+        env.SW_BLOCK_ARTIFACT_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-same-node-negative/uninstall"
+        env.SW_BLOCK_UNINSTALL_DELETE_ALL_BLOCKVOLUMES: "1"
+      - action: pre_run_cleanup
+        node: m02
+        kill_patterns: "blockmaster,blockvolume,blockcsi,iscsi-target"
+        nvme_disconnect: "true"
+        iscsi_logout_prefix: "iqn.2026-05.io.seaweedfs"
+      - action: exec
+        node: m02
+        cmd: "pkill -f 'kubectl.*port-forward.*svc/blockmaste[r]' >/dev/null 2>&1 || true"
+      - action: assert_no_active_iscsi_sessions
+        node: m02
+        iqn_substr: "io.seaweedfs"
+      - action: assert_no_processes
+        node: m02
+        pattern: "[/]blockmaster --|[/]blockvolume --|[/]blockcsi |[/]iscsi-target |[/]kubectl .*port-forward .*svc/blockmaste[r]|^blockmaster |^blockvolume |^blockcsi |^iscsi-target "
+      - action: collect_path
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-same-node-negative"
+        name: "remote-phases"
+        ignore_error: true

@@ -2,8 +2,8 @@
 
 ## Purpose
 
-Validate the D4 runner-native gate for the current
-Multi-Node Attach And Placement MVP.
+Validate the D4 runner-native same-node attach gate and D5 negative fixture for
+the current Multi-Node Attach And Placement MVP.
 
 This is not a remote-node attach claim. It proves the supported alpha model:
 
@@ -25,6 +25,8 @@ node is not required because this gate validates same-node loopback attach.
 
 ## Command
 
+Happy path:
+
 ```powershell
 swblock run `
   --results-dir V:/share/g15d-k8s/testops-runs/same-node-alpha-attach `
@@ -33,9 +35,19 @@ swblock run `
   C:/work/seaweed_block/testops/scenarios/same-node-alpha-attach-chain.yaml
 ```
 
+Negative fixture:
+
+```powershell
+swblock run `
+  --results-dir V:/share/g15d-k8s/testops-runs/same-node-alpha-attach-negative `
+  --env product_root=/tmp/seaweed_block `
+  --env ssh_key=C:/work/dev_server/testdev_key `
+  C:/work/seaweed_block/testops/scenarios/same-node-alpha-attach-negative-chain.yaml
+```
+
 Adjust `product_root` only if the product checkout on m02 is elsewhere.
 
-## Expected PASS Shape
+## Expected Happy-Path PASS Shape
 
 Scenario:
 
@@ -95,7 +107,29 @@ Report as lab/precondition if:
 - m02 k3s preflight fails before product install,
 - `swblock` runner cannot execute runner-native scenarios.
 
+## Expected Negative-Fixture PASS Shape
+
+Scenario `same-node-alpha-attach-negative-chain` should also end in state
+`pass`. It deliberately makes the app node differ from the blockvolume node and
+expects the demo script to stop before writer attach with exit code `45`.
+
+Required evidence:
+
+- `demo/run.log` contains `unsupported cross-node loopback attach`.
+- `demo/unsupported-cross-node-loopback-attach.txt` contains:
+  - `issue=unsupported_cross_node_loopback_attach`
+  - `app_node=sw-block-not-the-blockvolume-node`
+  - `blockvolume_node=<actual node>`
+  - `frontend=127.0.0.1:<port>`
+  - `reason=loopback frontend requires app pod and blockvolume on the same node`
+- `demo/ops-inventory-unsupported-placement/volume-inventory-summary.txt`
+  contains `pvc=sw-block-demo-pvc`.
+- cleanup leaves no iSCSI sessions, sw-block processes, or port-forwards.
+
+Report as blocking if this fixture turns into a pod scheduling timeout without
+the issue file and inventory bundle.
+
 ## QA Needed After This
 
-If this passes, D4 is validated. Dev can proceed to D5 negative fixture for an
-unsupported cross-node/loopback placement bundle.
+If both scenarios pass, D4 and D5 are validated. Dev can proceed to the
+operations manual update and close-gate prep.

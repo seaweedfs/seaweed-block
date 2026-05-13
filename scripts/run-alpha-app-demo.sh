@@ -204,6 +204,44 @@ generated_blockvolume_arg() {
   sed -n "s/.*--${name}=\\([^\"[:space:]]*\\).*/\\1/p" "$ARTIFACT_DIR/generated-blockvolume.yaml" | head -n 1
 }
 
+generated_blockvolume_node() {
+  sed -n 's/^[[:space:]]*kubernetes.io\/hostname:[[:space:]]*\([^[:space:]]*\).*/\1/p' "$ARTIFACT_DIR/generated-blockvolume.yaml" | head -n 1
+}
+
+is_loopback_endpoint() {
+  local addr="$1"
+  case "$addr" in
+    127.0.0.1:*|localhost:*|\[::1\]:*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+check_same_node_loopback_contract() {
+  local blockvolume_node
+  local frontend
+  local issue_file="$ARTIFACT_DIR/unsupported-cross-node-loopback-attach.txt"
+  blockvolume_node="$(generated_blockvolume_node)"
+  frontend="$(generated_blockvolume_arg "iscsi-listen")"
+  if [[ -z "$blockvolume_node" || -z "$frontend" ]]; then
+    return 0
+  fi
+  if is_loopback_endpoint "$frontend" && [[ "$APP_NODE_NAME" != "$blockvolume_node" ]]; then
+    {
+      echo "issue=unsupported_cross_node_loopback_attach"
+      echo "app_node=$APP_NODE_NAME"
+      echo "blockvolume_node=$blockvolume_node"
+      echo "frontend=$frontend"
+      echo "volume_id=$(generated_blockvolume_arg "volume-id")"
+      echo "replica_id=$(generated_blockvolume_arg "replica-id")"
+      echo "reason=loopback frontend requires app pod and blockvolume on the same node"
+      echo "ops_inventory_dir=$ARTIFACT_DIR/ops-inventory-unsupported-placement"
+    } >"$issue_file"
+    log "unsupported cross-node loopback attach: app_node=$APP_NODE_NAME blockvolume_node=$blockvolume_node frontend=$frontend"
+    collect_ops_inventory_bundle "$ARTIFACT_DIR/ops-inventory-unsupported-placement" || true
+    exit 45
+  fi
+}
+
 wait_tcp_ready() {
   local host="$1"
   local port="$2"
@@ -640,6 +678,7 @@ else
   } >"$ARTIFACT_DIR/apply-generated-blockvolume.log" 2>&1
 fi
 kubectl -n "$BLOCKVOLUME_NAMESPACE" wait --for=condition=available deploy -l app=sw-blockvolume --timeout=120s
+check_same_node_loopback_contract
 
 if [[ "$BREAK_AFTER_BLOCKVOLUME_READY" == "delete-generated-blockvolume" ]]; then
   log "delete generated blockvolume after ready"
