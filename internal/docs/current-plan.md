@@ -1,13 +1,13 @@
 # Current Plan: Durable Volume Restart And Reattach MVP
 
-Status: active, D1 contract refreshed and D2 fast rendering coverage started,
-20% implementation. Opened after closing
+Status: active, D1 durable contract, D2 fast rendering coverage, and D3
+operations manual update complete, 35% implementation. Opened after closing
 `finished-plans/phase12_finishedplan_product_owned_blockvolume_lifecycle_mvp.md`.
 
 QA needed now: no. First QA checkpoint is after a runner-native restart gate
 passes once from dev.
 
-Current dev slice: finish D2 fast tests and D3 operations manual update.
+Current dev slice: D4 runner-native restart gate.
 
 ## Product Question
 
@@ -181,6 +181,11 @@ inventory/status durable entry -> cleanup/retention notes
 
 Keep the default quickstart honest: the durable restart path is supported when
 configured, not an implicit production durability claim.
+
+Status: complete. The operations manual now documents a run-scoped durable
+hostPath, restart wrapper, durable status evidence, inventory bundle collection,
+and cleanup/retention semantics. The Kubernetes quickstart links to that path
+and keeps the default first-volume claim separate from restart durability.
 
 ### D4: Runner-Native Restart Gate
 

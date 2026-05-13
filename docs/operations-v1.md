@@ -18,12 +18,15 @@ Claimed in this manual:
 - one single-node Kubernetes alpha cluster,
 - one or more RF=1 PVCs on the supported alpha path,
 - product-owned reconciliation of generated `blockvolume` Deployments,
+- durable restart of a generated RF=1 `blockvolume` when an explicit
+  launcher hostPath is configured,
 - read-only cluster inventory with per-replica support bundles,
 - scoped cleanup checks for the demo PVC and generated workload.
 
 Not claimed:
 
 - production HA,
+- node loss or host-disk failure,
 - multi-node scheduling,
 - live RF=2/RF=3 Kubernetes lifecycle,
 - upgrade or broad uninstall safety,
@@ -132,7 +135,102 @@ is active. The demo keeps the old manual apply fallback behind
 `SW_BLOCK_DEMO_MANUAL_APPLY_BLOCKVOLUMES=1`, but that is not the normal user
 path.
 
-## 5. Inspect Cluster Inventory
+## 5. Prove Durable Blockvolume Restart
+
+Use this path when you want to prove the generated `blockvolume` can restart
+and the same PVC can still read the bytes written before the restart. This is
+the first durable alpha path. It is still single-node and RF=1.
+
+Use a run-scoped host path unless you intentionally want to retain data after
+the demo:
+
+```bash
+RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
+export SW_BLOCK_LAUNCHER_STATE_HOSTPATH="/var/lib/sw-block/testops-${RUN_ID}-restart"
+bash scripts/run-k8s-blockvolume-restart.sh "$PWD"
+```
+
+Expected final line:
+
+```text
+[app-demo] PASS: app pod wrote data, replacement app pod read it back through the same PVC, cleanup complete
+```
+
+The restart wrapper enables the same product-owned lifecycle path as the normal
+demo, but it also:
+
+- injects the launcher state hostPath into the generated `blockvolume`
+  workload,
+- restarts the generated `blockvolume` Deployment after the writer pod exits,
+- waits for durable status to become ready after the restart,
+- starts a replacement reader pod on the same PVC and verifies the checksum.
+
+Check the concrete restart evidence:
+
+```bash
+ARTIFACT_DIR="$(ls -td /tmp/sw-block-app-demo-* | head -1)"
+
+grep 'restart_blockvolume_before_reader=1' "$ARTIFACT_DIR/run.log"
+grep 'hostPath:' "$ARTIFACT_DIR/generated-blockvolume.yaml"
+grep 'type: DirectoryOrCreate' "$ARTIFACT_DIR/generated-blockvolume.yaml"
+grep -- '--durable-root=/var/lib/sw-block/' "$ARTIFACT_DIR/generated-blockvolume.yaml"
+grep '/data/demo.bin: OK' "$ARTIFACT_DIR/reader.log"
+grep '"Latched"[[:space:]]*:[[:space:]]*true' "$ARTIFACT_DIR/status-durable-after-blockvolume-restart.json"
+grep '"Operational"[[:space:]]*:[[:space:]]*true' "$ARTIFACT_DIR/status-durable-after-blockvolume-restart.json"
+```
+
+Useful restart artifacts:
+
+- `blockvolume-pod-ids.before-restart.tsv`
+- `blockvolume-pod-ids.after-restart.tsv`
+- `restart-blockvolume.log`
+- `restart-blockvolume-status.log`
+- `status-durable-after-blockvolume-restart.json`
+- `blockvolume-generated.after-restart.log`
+- `lifecycle-volumes.after-blockvolume-restart.json`
+
+For a support bundle after the restart, run inventory while the cluster is
+still reachable:
+
+```bash
+kubectl -n kube-system port-forward svc/blockmaster 9333:9333
+```
+
+In another terminal:
+
+```bash
+sw-block ops inventory \
+  --namespace default \
+  --master 127.0.0.1:9333 \
+  --out "$ARTIFACT_DIR/ops-inventory-after-restart"
+
+cat "$ARTIFACT_DIR/ops-inventory-after-restart/volume-inventory-summary.txt"
+```
+
+If inventory records a `support_bundle=volumes/<volume>/<replica>` path, inspect
+the nested durable status summary:
+
+```bash
+cat "$ARTIFACT_DIR/ops-inventory-after-restart/volumes/<volume>/<replica>/volume-status-summary.txt"
+```
+
+Cleanup semantics:
+
+- Run-scoped paths under `/var/lib/sw-block/testops-*` are treated as test-owned
+  and are removed by the restart wrapper cleanup.
+- A stable host path such as `/var/lib/sw-block/sw-block-alpha-restart` is
+  treated as user-owned retained data. Remove it only when you intentionally
+  want a clean lab:
+
+```bash
+sudo rm -rf -- "$SW_BLOCK_LAUNCHER_STATE_HOSTPATH"
+```
+
+Do not point `SW_BLOCK_LAUNCHER_STATE_HOSTPATH` at a shared or production data
+directory in this alpha path. This is a restart durability proof, not upgrade,
+node-loss, backup, or restore safety.
+
+## 6. Inspect Cluster Inventory
 
 Port-forward blockmaster:
 
@@ -178,7 +276,7 @@ Attach the entire inventory directory to issues. It contains:
 - `ops-inventory-bundle.json`,
 - nested `sw-block ops status` artifacts when status endpoints are reachable.
 
-## 6. Delete And Verify Scoped Cleanup
+## 7. Delete And Verify Scoped Cleanup
 
 For the demo resources:
 
@@ -215,7 +313,7 @@ Do not use broad cleanup such as `kubectl delete deploy -A -l
 app=sw-blockvolume` in a shared cluster. Product-owned cleanup and PVC
 owner-reference cleanup should only affect matching Seaweed Block workloads.
 
-## 7. Failure Collection
+## 8. Failure Collection
 
 If the PVC or generated `blockvolume` exists, collect inventory first:
 
@@ -253,7 +351,7 @@ ops-status-unavailable: no volume id/status address reached
 Then attach the install/demo artifact directory anyway. The failure is then in
 install, PVC binding, or blockvolume generation rather than replica status.
 
-## 8. Retry After Interruption
+## 9. Retry After Interruption
 
 If a run is interrupted, use the alpha uninstall before retrying:
 
@@ -283,7 +381,7 @@ Then rerun:
 bash scripts/run-k8s-demo.sh "$PWD"
 ```
 
-## 9. Full Alpha Uninstall
+## 10. Full Alpha Uninstall
 
 ```bash
 bash scripts/uninstall-k8s-alpha.sh "$PWD"
@@ -300,7 +398,7 @@ you know no other run owns it:
 sudo find /var/lib/sw-block -maxdepth 3 -type f -o -type d
 ```
 
-## 10. What To Report
+## 11. What To Report
 
 For a useful issue report, include:
 
@@ -308,5 +406,7 @@ For a useful issue report, include:
 - `/tmp/sw-block-alpha-build/alpha-images.env`,
 - the latest `/tmp/sw-block-app-demo-*` directory,
 - `/tmp/sw-block-inventory` if inventory was collected,
+- `status-durable-after-blockvolume-restart.json` when using the durable
+  restart path,
 - whether `sudo iscsiadm -m session` shows any active Seaweed Block session,
 - any explicit `ops-status-unavailable` marker.

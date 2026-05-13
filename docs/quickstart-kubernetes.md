@@ -14,7 +14,9 @@ app pod -> PVC -> CSI -> iSCSI -> blockvolume -> WAL-backed storage
 
 It proves that a normal application pod can mount a `seaweed-block` PVC, write
 data, exit, and then a second pod can mount the same PVC and read the data back.
-It does not claim production durability or failover-under-mount yet.
+It does not claim production durability or failover-under-mount yet. For the
+explicit blockvolume restart durability path, see
+[`operations-v1.md`](operations-v1.md#5-prove-durable-blockvolume-restart).
 
 ## What Runs
 
@@ -58,6 +60,11 @@ Expected final line:
 ```text
 [app-demo] PASS: app pod wrote data, replacement app pod read it back through the same PVC, cleanup complete
 ```
+
+This default demo proves PVC write/read through pod replacement. To also prove
+that the generated `blockvolume` can restart and reattach with data intact, use
+the durable restart workflow in
+[`operations-v1.md`](operations-v1.md#5-prove-durable-blockvolume-restart).
 
 The preflight command emits structured lines:
 
@@ -291,6 +298,7 @@ The demo records the useful files under `/tmp/sw-block-app-demo-*`:
 | `apply-generated-blockvolume.log` | Generated blockvolume workload was reconciled by blockmaster, or applied manually when the fallback env is enabled. |
 | `writer.log` | First app pod wrote and verified `/data/demo.bin`. |
 | `reader.log` | Replacement app pod read and verified the same data. |
+| `status-durable-after-blockvolume-restart.json` | Present only in the durable restart workflow; durable entry was latched and operational after generated `blockvolume` restart. |
 | `app-storage.txt` | StorageClass/PV/PVC/pod state during the run. |
 | `iscsi-sessions.after-reader.txt` | Host iSCSI session state after the replacement reader verifies data. |
 | `app-storage.after-delete.txt` | App/PVC state after delete. |
@@ -467,8 +475,11 @@ For the copyable YAML, see
 - By default, generated `blockvolume` Deployments carry a PVC owner reference,
   so Kubernetes garbage collection removes them after the PVC is deleted.
 - The demo uses single-node Kubernetes.
-- The alpha manifest uses non-durable pod-local state for the generated
-  `blockvolume`.
+- The default quickstart is a first-volume path. Durable generated
+  `blockvolume` restart is supported only when
+  `SW_BLOCK_LAUNCHER_STATE_HOSTPATH` is configured as described in
+  `operations-v1.md`; it is not a production durability, node-loss, backup, or
+  restore claim.
 - Failover while a PVC remains mounted is not claimed.
 - NVMe-oF is not part of this alpha path.
 - Operator-grade reconciliation is not claimed.
