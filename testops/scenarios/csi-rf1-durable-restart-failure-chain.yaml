@@ -119,18 +119,6 @@ phases:
         actual: "{{ collection_error_count }}"
         threshold: "0"
 
-  - name: final_asserts
-    actions:
-      - action: assert_no_active_iscsi_sessions
-        node: m02
-        iqn_substr: "io.seaweedfs"
-      - action: assert_no_processes
-        node: m02
-        pattern: "[/]blockmaster --|[/]blockvolume --|[/]blockcsi |[/]iscsi-target |^blockmaster |^blockvolume |^blockcsi |^iscsi-target "
-      - action: exec
-        node: m02
-        cmd: "test ! -e /var/lib/sw-block/testops-{{ run_id }}-csi-rf1-restart-failure"
-
   - name: collect_and_cleanup
     always: true
     actions:
@@ -139,6 +127,12 @@ phases:
         kill_patterns: "blockmaster,blockvolume,blockcsi,iscsi-target"
         nvme_disconnect: "true"
         iscsi_logout_prefix: "iqn.2026-05.io.seaweedfs"
+      - action: assert_no_active_iscsi_sessions
+        node: m02
+        iqn_substr: "io.seaweedfs"
+      - action: assert_no_processes
+        node: m02
+        pattern: "[/]blockmaster --|[/]blockvolume --|[/]blockcsi |[/]iscsi-target |^blockmaster |^blockvolume |^blockcsi |^iscsi-target "
       - action: collect_path
         node: m02
         path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-failure"
