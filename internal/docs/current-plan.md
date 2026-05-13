@@ -1,14 +1,14 @@
 # Current Plan: Product-Owned Blockvolume Lifecycle MVP
 
-Status: active, D1-D5 implemented on the fast path, 65% implementation.
-Opened after closing
+Status: active, D1-D6 implemented and D7 runner-native gate prepared, 75%
+implementation. Opened after closing
 `finished-plans/phase11_finishedplan_cluster_ops_inventory_lifecycle_visibility_mvp.md`.
 
 QA needed now: no. Next QA checkpoint is after D6 produces a live
 runner-native lifecycle gate, then D7 formal close validation.
 
-Current dev slice: D6 fast/lifecycle gate tightening, followed by D7 live
-runner-native lifecycle gate.
+Current dev slice: D7 live runner-native lifecycle gate, then D8 QA close
+validation.
 
 ## Product Question
 
