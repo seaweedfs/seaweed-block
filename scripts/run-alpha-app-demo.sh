@@ -677,6 +677,13 @@ restart_blockvolume_deployment() {
     log "break after blockvolume restart: scale generated blockvolume to zero"
     kubectl -n "$BLOCKVOLUME_NAMESPACE" scale "$BLOCKVOLUME_DEPLOY" --replicas=0 | tee "$ARTIFACT_DIR/scale-blockvolume-zero-after-restart.log"
     kubectl -n "$BLOCKVOLUME_NAMESPACE" rollout status "$BLOCKVOLUME_DEPLOY" --timeout=60s | tee "$ARTIFACT_DIR/scale-blockvolume-zero-after-restart-status.log"
+    for _ in $(seq 1 60); do
+      if ! kubectl -n "$BLOCKVOLUME_NAMESPACE" get pods -l "sw-block.seaweedfs.com/volume=${BLOCKVOLUME_VOLUME_ID}" --no-headers 2>/dev/null | grep -q .; then
+        break
+      fi
+      sleep 1
+    done
+    kubectl -n "$BLOCKVOLUME_NAMESPACE" get pods -l "sw-block.seaweedfs.com/volume=${BLOCKVOLUME_VOLUME_ID}" -o wide >"$ARTIFACT_DIR/blockvolume-pods.after-scale-zero.txt" 2>&1 || true
     log "collect inventory after forced blockvolume unavailability"
     collect_ops_inventory_after_restart
     exit 43
