@@ -30,6 +30,7 @@ spec:
       labels:
         app: sw-blockmaster
     spec:
+      serviceAccountName: sw-block-master
       containers:
         - name: blockmaster
           image: sw-block:local
@@ -47,6 +48,7 @@ spec:
             - "--launcher-namespace=kube-system"
             - "--launcher-durable-root=/var/lib/sw-block"
             - "--launcher-iscsi-port-base=3260"
+            - "--launcher-kubernetes-apply"
             - "--listen=0.0.0.0:9333"
             - "--expected-slots-per-volume=1"
           ports:
