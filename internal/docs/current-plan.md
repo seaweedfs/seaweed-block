@@ -93,6 +93,8 @@ In scope:
   state.
 - Update quickstart so the happy path no longer requires a separate
   `apply-k8s-alpha-blockvolumes.sh` step.
+- Add a v1 user operations manual for install, first volume, inventory,
+  delete, failure bundle collection, cleanup, and known limits.
 - Add fast tests first, then one runner-native lifecycle gate.
 
 Out of scope:
@@ -187,7 +189,24 @@ preflight -> install/launch -> create PVC/app -> inventory -> delete -> inventor
 The old apply script can remain as an internal fallback, but it must not be the
 main user path.
 
-### D5: Fast Tests
+### D5: V1 User Operations Manual
+
+Add a concise user-facing operations manual that answers:
+
+- how to install or launch the alpha path,
+- how to create the first PVC and confirm the backing `blockvolume` exists,
+- how to run `sw-block ops inventory` and read the output,
+- how to delete one PVC and confirm scoped cleanup,
+- how to collect a support bundle when the volume is unhealthy,
+- how to retry safely after an interrupted run,
+- what is explicitly not claimed: upgrade safety, broad uninstall safety,
+  multi-node scheduling, live RF=2/RF=3 Kubernetes operation, repair, metrics,
+  and UI.
+
+This manual can link to the quickstart, but it must stand on its own as the
+operator-facing v1 path for a light user.
+
+### D6: Fast Tests
 
 Add component tests for:
 
@@ -198,7 +217,7 @@ Add component tests for:
 - two PVCs on one node,
 - no mutation of unrelated workloads.
 
-### D6: Runner-Native Lifecycle Gate
+### D7: Runner-Native Lifecycle Gate
 
 Add or update a TestOps scenario that:
 
@@ -214,11 +233,12 @@ run inventory and assert scoped cleanup or documented pending state
 collect_and_cleanup(always)
 ```
 
-### D7: QA Close Gate
+### D8: QA Close Gate
 
 Ask QA to validate as a new user:
 
 - follow the quickstart without manual apply,
+- follow the v1 operations manual without implementation knowledge,
 - create two PVCs and confirm both reconcile,
 - delete one PVC and confirm the other remains untouched,
 - inspect inventory before and after delete,
@@ -232,13 +252,14 @@ This plan closes only when:
 
 1. The ownership contract is documented.
 2. The primary quickstart no longer requires manual blockvolume manifest apply.
-3. Fast tests cover idempotent create/update/delete and no unrelated mutation.
-4. A live runner-native gate creates a usable PVC through the product-owned
+3. A v1 user operations manual exists and matches the implemented path.
+4. Fast tests cover idempotent create/update/delete and no unrelated mutation.
+5. A live runner-native gate creates a usable PVC through the product-owned
    lifecycle path.
-5. Two PVCs can coexist without port or identity collision.
-6. Deleting one PVC does not delete or corrupt the other.
-7. Inventory proves create/delete/stale states without log spelunking.
-8. QA validates the user experience independently and reports no blocking
+6. Two PVCs can coexist without port or identity collision.
+7. Deleting one PVC does not delete or corrupt the other.
+8. Inventory proves create/delete/stale states without log spelunking.
+9. QA validates the user experience independently and reports no blocking
    usability issue.
 
 ## Success Statement
