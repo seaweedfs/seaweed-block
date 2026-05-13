@@ -53,6 +53,9 @@ func TestKubernetesInventoryCollector_MapsTwoPVCsToDeployments(t *testing.T) {
 		if replica.GeneratedDeployment == Unavailable || replica.ServerID != "m02" || replica.Protocol != "iscsi" {
 			t.Fatalf("bad replica identity: %+v", replica)
 		}
+		if replica.LifecycleOwner != "pvc-owner-ref" || !strings.HasPrefix(replica.OwnerReference, "PersistentVolumeClaim/default/app-") {
+			t.Fatalf("bad lifecycle ownership: %+v", replica)
+		}
 		if !strings.HasPrefix(replica.FrontendAddress, "127.0.0.1:") ||
 			!strings.HasPrefix(replica.StatusAddress, "127.0.0.1:") {
 			t.Fatalf("bad endpoints: %+v", replica)
@@ -165,7 +168,7 @@ func TestKubernetesInventoryCollector_LocalProcessWithoutPlacementIsActionable(t
 	summary := RenderVolumeInventorySummary(inventory)
 	for _, want := range []string{
 		"volume: id=pvc-unplaced namespace=default pvc=unavailable pv=unavailable rf=1 desired=1 observed=1",
-		"replica: volume=pvc-unplaced replica=r1 server=sx node=sx observed=true status=unhealthy",
+		"replica: volume=pvc-unplaced replica=r1 server=sx node=sx observed=true status=unhealthy lifecycle_owner=unavailable owner_ref=unavailable",
 		"- volume pvc-unplaced heartbeat-without-placement=sx state=unadmitted-by-master reason=local-process-without-pvc-or-pv",
 	} {
 		if !strings.Contains(summary, want) {

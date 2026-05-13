@@ -1,14 +1,14 @@
 # Current Plan: Product-Owned Blockvolume Lifecycle MVP
 
-Status: active, D1 complete and D2 minimal live reconciliation implemented,
-35% implementation. Opened after closing
+Status: active, D1-D5 implemented on the fast path, 65% implementation.
+Opened after closing
 `finished-plans/phase11_finishedplan_cluster_ops_inventory_lifecycle_visibility_mvp.md`.
 
 QA needed now: no. Next QA checkpoint is after D6 produces a live
 runner-native lifecycle gate, then D7 formal close validation.
 
-Current dev slice: D3 inventory/readiness integration for product-owned
-lifecycle states, followed by D4 quickstart update.
+Current dev slice: D6 fast/lifecycle gate tightening, followed by D7 live
+runner-native lifecycle gate.
 
 ## Product Question
 
@@ -71,12 +71,11 @@ What already works:
 
 What is still weak:
 
-- Users must run the apply script to materialize generated blockvolume
-  Deployments.
+- The happy-path scripts now wait for product-owned reconciliation, but the
+  live runner-native lifecycle gate has not yet proven the full create/delete
+  path without manual apply.
 - Delete/uninstall ownership is split between product objects, scripts, and
   TestOps guardrails.
-- There is no small product-owned reconciler loop that turns desired PVC/PV
-  state into actual blockvolume workloads.
 - We need to keep the first version conservative: no broad cluster sweeps, no
   admin repair commands, no hidden cleanup of unrelated resources.
 

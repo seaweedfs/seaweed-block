@@ -42,6 +42,8 @@ type VolumeInventoryReplicaInput struct {
 	ServerID             string
 	NodeName             string
 	GeneratedDeployment  string
+	LifecycleOwner       string
+	OwnerReference       string
 	Protocol             string
 	FrontendAddress      string
 	StatusAddress        string
@@ -97,6 +99,8 @@ type VolumeInventoryReplica struct {
 	ServerID             string        `json:"server_id"`
 	NodeName             string        `json:"node_name"`
 	GeneratedDeployment  string        `json:"generated_deployment"`
+	LifecycleOwner       string        `json:"lifecycle_owner"`
+	OwnerReference       string        `json:"owner_reference"`
 	Protocol             string        `json:"protocol"`
 	FrontendAddress      string        `json:"frontend_address"`
 	StatusAddress        string        `json:"status_address"`
@@ -214,6 +218,8 @@ func buildInventoryReplica(in VolumeInventoryReplicaInput) VolumeInventoryReplic
 		ServerID:             explicitUnavailable(in.ServerID),
 		NodeName:             explicitUnavailable(in.NodeName),
 		GeneratedDeployment:  explicitUnavailable(in.GeneratedDeployment),
+		LifecycleOwner:       explicitUnavailable(in.LifecycleOwner),
+		OwnerReference:       explicitUnavailable(in.OwnerReference),
 		Protocol:             explicitUnavailable(in.Protocol),
 		FrontendAddress:      explicitUnavailable(in.FrontendAddress),
 		StatusAddress:        explicitUnavailable(in.StatusAddress),
@@ -317,13 +323,15 @@ func RenderVolumeInventorySummary(in VolumeInventory) string {
 			strings.Join(volume.Protocols, ","),
 			len(volume.Replicas))
 		for _, replica := range volume.Replicas {
-			fmt.Fprintf(&b, "replica: volume=%s replica=%s server=%s node=%s observed=%t status=%s role=%s replication=%s healthy=%t epoch=%d endpoint_version=%d frontend=%s status_addr=%s support_bundle=%s\n",
+			fmt.Fprintf(&b, "replica: volume=%s replica=%s server=%s node=%s observed=%t status=%s lifecycle_owner=%s owner_ref=%s role=%s replication=%s healthy=%t epoch=%d endpoint_version=%d frontend=%s status_addr=%s support_bundle=%s\n",
 				volume.VolumeID,
 				replica.ReplicaID,
 				replica.ServerID,
 				replica.NodeName,
 				replica.Observed,
 				replica.Status,
+				replica.LifecycleOwner,
+				replica.OwnerReference,
 				replica.AuthorityRole,
 				replica.ReplicationRole,
 				replica.Healthy,

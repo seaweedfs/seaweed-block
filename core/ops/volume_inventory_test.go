@@ -171,7 +171,7 @@ func TestBuildVolumeInventory_MissingReplicaIsUnhealthyNotCollapsed(t *testing.T
 		"inventory_status: unhealthy",
 		"volumes: total=1 ok=0 unhealthy=1 invalid=0",
 		"volume: id=pvc-rf2 namespace=default pvc=app-rf2 pv=unavailable rf=2 desired=2 observed=1 primary=r1 status=unhealthy",
-		"replica: volume=pvc-rf2 replica=r2 server=s2 node=node-b observed=false status=missing",
+		"replica: volume=pvc-rf2 replica=r2 server=s2 node=node-b observed=false status=missing lifecycle_owner=unavailable owner_ref=unavailable",
 		"- volume pvc-rf2 observed_replicas=1 desired_replicas=2",
 		"- volume pvc-rf2 replica_slot_missing=r2",
 		"- volume pvc-rf2 replica r2 missing",
@@ -221,7 +221,7 @@ func TestBuildVolumeInventory_DegradedReplicaExplainsHealthyButUnready(t *testin
 	}
 	summary := RenderVolumeInventorySummary(inventory)
 	for _, want := range []string{
-		"replica: volume=pvc-ready-pod replica=r1 server=s1 node=node-a observed=true status=unhealthy role=primary replication=none healthy=true epoch=0 endpoint_version=0",
+		"replica: volume=pvc-ready-pod replica=r1 server=s1 node=node-a observed=true status=unhealthy lifecycle_owner=pvc-owner-ref owner_ref=PersistentVolumeClaim/default/app-r1 role=primary replication=none healthy=true epoch=0 endpoint_version=0",
 		"- volume pvc-ready-pod replica_degraded=r1 status=unhealthy",
 		"- volume pvc-ready-pod replica r1 ops_status=unhealthy reason=authority_not_assigned assigned=false epoch=0 endpoint_version=0",
 	} {
@@ -276,6 +276,8 @@ func healthyInventoryReplica(replicaID, serverID, nodeName, role string) VolumeI
 		ServerID:             serverID,
 		NodeName:             nodeName,
 		GeneratedDeployment:  "sw-blockvolume-" + replicaID,
+		LifecycleOwner:       "pvc-owner-ref",
+		OwnerReference:       "PersistentVolumeClaim/default/app-" + replicaID,
 		Protocol:             "iscsi",
 		FrontendAddress:      "127.0.0.1:3260",
 		StatusAddress:        "127.0.0.1:23260",

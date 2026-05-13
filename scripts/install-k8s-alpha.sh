@@ -90,5 +90,5 @@ kubectl -n kube-system wait --for=condition=available deploy/sw-block-csi-contro
 kubectl -n kube-system rollout status ds/sw-block-csi-node --timeout=120s
 
 log "PASS: seaweed-block alpha stack installed"
-log "next: create a PVC, then run scripts/apply-k8s-alpha-blockvolumes.sh"
+log "next: create a PVC; blockmaster reconciles the generated blockvolume workload"
 log "artifacts=$ARTIFACT_DIR"

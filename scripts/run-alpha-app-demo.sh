@@ -14,6 +14,7 @@ RESTART_BLOCKVOLUME_BEFORE_READER="${SW_BLOCK_RESTART_BLOCKVOLUME_BEFORE_READER:
 DEMO_STOP_AFTER="${SW_BLOCK_DEMO_STOP_AFTER:-}"
 COLLECT_OPS_STATUS="${SW_BLOCK_DEMO_COLLECT_OPS_STATUS:-0}"
 KEEP_ON_STOP="${SW_BLOCK_DEMO_KEEP_ON_STOP:-0}"
+MANUAL_APPLY_BLOCKVOLUMES="${SW_BLOCK_DEMO_MANUAL_APPLY_BLOCKVOLUMES:-0}"
 AFTER_BLOCKVOLUME_READY_CMD="${SW_BLOCK_DEMO_AFTER_BLOCKVOLUME_READY_CMD:-}"
 BREAK_AFTER_BLOCKVOLUME_READY="${SW_BLOCK_DEMO_BREAK_AFTER_BLOCKVOLUME_READY:-}"
 WRITER_TIMEOUT="${SW_BLOCK_DEMO_WRITER_TIMEOUT:-240}"
@@ -483,6 +484,7 @@ log "restart_blockvolume_before_reader=$RESTART_BLOCKVOLUME_BEFORE_READER"
 log "demo_stop_after=${DEMO_STOP_AFTER:-<none>}"
 log "collect_ops_status=$COLLECT_OPS_STATUS"
 log "keep_on_stop=$KEEP_ON_STOP"
+log "manual_apply_blockvolumes=$MANUAL_APPLY_BLOCKVOLUMES"
 log "after_blockvolume_ready_cmd=${AFTER_BLOCKVOLUME_READY_CMD:-<none>}"
 log "break_after_blockvolume_ready=${BREAK_AFTER_BLOCKVOLUME_READY:-<none>}"
 log "writer_timeout=$WRITER_TIMEOUT"
@@ -538,8 +540,16 @@ if ! kubectl -n kube-system exec deploy/sw-blockmaster -c blockmaster -- sh -c '
 fi
 kubectl -n kube-system exec deploy/sw-blockmaster -c blockmaster -- sh -c 'cat /manifests/*.yaml' >"$ARTIFACT_DIR/generated-blockvolume.yaml"
 
-log "apply generated blockvolume workload"
-kubectl apply -f "$ARTIFACT_DIR/generated-blockvolume.yaml" | tee "$ARTIFACT_DIR/apply-generated-blockvolume.log"
+if [[ "$MANUAL_APPLY_BLOCKVOLUMES" == "1" || "$MANUAL_APPLY_BLOCKVOLUMES" == "true" ]]; then
+  log "apply generated blockvolume workload"
+  kubectl apply -f "$ARTIFACT_DIR/generated-blockvolume.yaml" | tee "$ARTIFACT_DIR/apply-generated-blockvolume.log"
+else
+  log "wait for product-owned blockvolume workload"
+  {
+    echo "product-owned lifecycle path: blockmaster reconciler applies generated blockvolume workloads"
+    kubectl -n "$BLOCKVOLUME_NAMESPACE" get deploy -l app=sw-blockvolume -o wide || true
+  } >"$ARTIFACT_DIR/apply-generated-blockvolume.log" 2>&1
+fi
 kubectl -n "$BLOCKVOLUME_NAMESPACE" wait --for=condition=available deploy -l app=sw-blockvolume --timeout=120s
 
 if [[ "$BREAK_AFTER_BLOCKVOLUME_READY" == "delete-generated-blockvolume" ]]; then

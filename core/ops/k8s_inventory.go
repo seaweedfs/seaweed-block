@@ -492,11 +492,14 @@ func replicaFromDeployment(deploy k8sDeployment) VolumeInventoryReplicaInput {
 	if replicaID == "" {
 		replicaID = argValue(args, "--replica-id")
 	}
+	lifecycleOwner, ownerRef := deploymentLifecycleOwnership(deploy)
 	return VolumeInventoryReplicaInput{
 		ReplicaID:            replicaID,
 		ServerID:             firstNonEmpty(argValue(args, "--server-id"), deploy.Spec.Template.Spec.NodeSelector["kubernetes.io/hostname"]),
 		NodeName:             firstNonEmpty(deploy.Spec.Template.Spec.NodeSelector["kubernetes.io/hostname"], argValue(args, "--server-id")),
 		GeneratedDeployment:  deploy.Metadata.Name,
+		LifecycleOwner:       lifecycleOwner,
+		OwnerReference:       ownerRef,
 		Protocol:             protocol,
 		FrontendAddress:      frontend,
 		StatusAddress:        argValue(args, "--status-addr"),
@@ -508,6 +511,18 @@ func replicaFromDeployment(deploy k8sDeployment) VolumeInventoryReplicaInput {
 		FrontendPrimaryReady: ready,
 		ReplicationRole:      hostReplicationFromReadiness(ready),
 	}
+}
+
+func deploymentLifecycleOwnership(deploy k8sDeployment) (string, string) {
+	for _, owner := range deploy.Metadata.OwnerReferences {
+		if owner.Kind == "PersistentVolumeClaim" && owner.Name != "" {
+			return "pvc-owner-ref", "PersistentVolumeClaim/" + firstNonEmpty(deploy.Metadata.Namespace, "default") + "/" + owner.Name
+		}
+	}
+	if deploy.Metadata.Labels["app"] == "sw-blockvolume" && deploy.Metadata.Labels["sw-block.seaweedfs.com/volume"] != "" {
+		return "launcher-managed", Unavailable
+	}
+	return Unavailable, Unavailable
 }
 
 func deploymentArgs(deploy k8sDeployment) []string {
