@@ -89,18 +89,26 @@ phases:
       - action: grep_log
         node: m02
         path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-failure/restart_failure/ops-inventory-after-restart/volume-inventory-summary.txt"
-        pattern: "observed_replicas=0 desired_replicas=1"
-        save_as: observed_deficit_count
+        pattern: "primary_replica_id unavailable"
+        save_as: primary_unavailable_count
       - action: assert_greater
-        actual: "{{ observed_deficit_count }}"
+        actual: "{{ primary_unavailable_count }}"
         threshold: "0"
       - action: grep_log
         node: m02
         path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-failure/restart_failure/ops-inventory-after-restart/volume-inventory-summary.txt"
-        pattern: "status_endpoint_unavailable\\|status_endpoint_unreachable"
-        save_as: status_endpoint_issue_count
+        pattern: "replica_degraded=r1 status=unhealthy"
+        save_as: replica_degraded_count
       - action: assert_greater
-        actual: "{{ status_endpoint_issue_count }}"
+        actual: "{{ replica_degraded_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-failure/restart_failure/ops-inventory-after-restart/volume-inventory-summary.txt"
+        pattern: "ops_status=unhealthy reason=replication_role_not_ready"
+        save_as: replication_not_ready_count
+      - action: assert_greater
+        actual: "{{ replication_not_ready_count }}"
         threshold: "0"
       - action: grep_log
         node: m02
@@ -109,6 +117,14 @@ phases:
         save_as: inventory_bundle_count
       - action: assert_greater
         actual: "{{ inventory_bundle_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-failure/restart_failure/ops-inventory-after-restart/nested-ops-status-bundles.json"
+        pattern: "\"command\": \"sw-block ops status\""
+        save_as: nested_status_bundle_count
+      - action: assert_greater
+        actual: "{{ nested_status_bundle_count }}"
         threshold: "0"
 
   - name: final_asserts
