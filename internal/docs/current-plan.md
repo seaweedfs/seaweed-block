@@ -2,12 +2,13 @@
 
 Status: active, opened after closing
 `finished-plans/phase13_finishedplan_durable_volume_restart_reattach_mvp.md`,
-5% implementation.
+12% implementation.
 
-QA needed now: no. First QA checkpoint is after a dev-owned substrate audit and
-one runner-native multi-node attach gate design are ready.
+QA needed now: no. The D1 audit found a product/lab constraint, not a QA
+execution question. First QA checkpoint is after D2/D3 define and test the
+same-node placement contract, or after a true two-node lab is available.
 
-Current dev slice: D1 multi-node attach reality audit.
+Current dev slice: D2 placement and endpoint contract.
 
 ## Product Question
 
@@ -25,20 +26,24 @@ blockvolume restart -> same PVC reattaches and reads data
 This plan moves the next visible user gap:
 
 ```text
-two-node Kubernetes lab -> PVC -> placement is explicit -> app pod attaches
-through the normal CSI path -> inventory explains node/endpoint ownership
+Kubernetes lab -> PVC -> placement is explicit -> app pod is co-located with
+the blockvolume for loopback attach -> inventory explains node/endpoint
+ownership
 ```
 
 The narrow claim after this plan should be:
 
 ```text
-On a supported two-node alpha Kubernetes lab, a generated RF=1 iSCSI
-blockvolume can be placed on a known node, an app pod can attach through the
-normal CSI path, write/read data, and `sw-block ops inventory` can explain the
-PVC, blockvolume node, frontend endpoint, and support bundle.
+On a supported alpha Kubernetes lab, a generated RF=1 iSCSI blockvolume can be
+placed on a known node, an app pod can be scheduled onto that same node, attach
+through the normal CSI path, write/read data, and `sw-block ops inventory` can
+explain the PVC, app node, blockvolume node, frontend endpoint, and support
+bundle.
 ```
 
-This is not HA. It does not claim node-loss survival, automatic rescheduling,
+This is not HA and it is not remote-node attach. It does not claim app pods can
+attach from a different Kubernetes node while the blockvolume publishes loopback
+frontends. It does not claim node-loss survival, automatic rescheduling,
 RF=2/RF=3 live Kubernetes operation, cross-node failover, rebuild, performance,
 upgrade safety, or UI.
 
@@ -49,8 +54,9 @@ single-node-only. After durable restart, the next user-facing question is not
 "can RF=3 rebuild?" yet; it is simpler:
 
 ```text
-When my cluster has more than one node, can I see and control placement well
-enough to use the block safely?
+When my cluster has one or more nodes, can I see and control placement well
+enough to use the block safely without accidentally depending on an unsupported
+remote loopback attach?
 ```
 
 This also de-risks later availability work. Basic failover and returned-replica
@@ -77,24 +83,31 @@ What already works:
 
 What is still weak or unknown:
 
-- The alpha path has historically used loopback frontend addresses such as
-  `127.0.0.1:3260`; that is probably not valid when the app pod lands on a
-  different node from the `blockvolume`.
-- The product may need explicit placement constraints before multi-node attach
-  can be claimed honestly.
+- D1 audit result: the alpha path publishes loopback frontend/status addresses
+  such as `127.0.0.1:3260` and `127.0.0.1:23260`.
+- D1 audit result: CSI publish lookup accepts `nodeID` but currently does not
+  use it to reject or select node-local frontend targets.
+- D1 audit result: the current m02 k3s lab has only one Kubernetes node; SSH to
+  the presumed second node timed out, so a true two-node live gate needs lab
+  setup before QA can run it.
+- The supported model for this plan is therefore same-node RF=1 attach:
+  blockvolume and app pod must be co-located while frontends are loopback.
 - The current quickstart does not tell users how to reason about node
   placement.
 - Inventory can report node/server fields, but the multi-node correctness of
   those fields is not yet release-gated.
 - Cleanup and residue checks must cover both nodes, not only m02.
 
+The detailed D1 audit is captured in
+`internal/docs/ref/multi-node-attach-placement-audit.md`.
+
 ## Scope
 
 In scope:
 
 - Audit current multi-node attach behavior before changing code.
-- Define the supported alpha placement model for RF=1 multi-node Kubernetes:
-  same-node attach only, remote-node attach, or both.
+- Define the supported alpha placement model for RF=1 Kubernetes: same-node
+  attach only while frontends are loopback.
 - Make frontend/status endpoint selection explicit for multi-node labs.
 - Add fast tests for generated Deployment placement fields and endpoint
   rendering.
@@ -121,19 +134,20 @@ Out of scope:
 ### P0: Placement Model Must Be Honest
 
 Users need to know whether the app pod must run on the same Kubernetes node as
-the generated `blockvolume`, or whether remote iSCSI attach is supported.
+the generated `blockvolume`. Remote iSCSI attach is not supported while the
+alpha publishes loopback frontend endpoints.
 
-Close requirement: the plan documents and gates one supported model. Any other
-model is an explicit non-claim.
+Close requirement: the plan documents and gates same-node RF=1 attach. Remote
+node attach is an explicit non-claim until a routable frontend strategy exists.
 
 ### P0: Frontend Endpoint Must Be Reachable For The Claimed Model
 
-Loopback endpoints are fine for single-node local attach, but they are not a
-general multi-node endpoint.
+Loopback endpoints are fine for same-node local attach, but they are not a
+general remote-node endpoint.
 
-Close requirement: the generated manifest and inventory expose endpoint
-addresses that are reachable for the claimed placement model, or the gate
-proves same-node placement prevents unsafe remote attach.
+Close requirement: the generated manifest, app scheduling, and inventory expose
+enough node and endpoint evidence to prove same-node attach, and the negative
+fixture explains unsupported cross-node placement.
 
 ### P0: Inventory Must Explain Placement
 
@@ -164,8 +178,9 @@ Run and document a read-only audit of current behavior:
 - whether remote-node attach works, fails, or is unsafe,
 - current inventory fields for node/server/frontend/status endpoint.
 
-Output: update this plan with the honest current state and choose the supported
-alpha model for D2-D6.
+Output: completed in
+`internal/docs/ref/multi-node-attach-placement-audit.md`. Chosen model for D2-D6
+is same-node RF=1 attach while frontend/status endpoints are loopback.
 
 ### D2: Placement And Endpoint Contract
 
@@ -183,6 +198,7 @@ Add tests for:
 
 - generated `blockvolume` Deployment placement fields,
 - endpoint rendering for the supported model,
+- app pod co-location or documented user scheduling constraint,
 - inventory node/server/frontend/status fields,
 - failure wording for unreachable endpoint or unsupported cross-node attach.
 
@@ -196,7 +212,7 @@ build/import alpha images
 install alpha stack
 create PVC
 wait for generated blockvolume placement
-run writer pod under the supported node placement
+run writer pod under the supported same-node placement
 run replacement reader pod
 collect inventory
 assert PVC/PV/app node/blockvolume node/frontend/status/support bundle fields
@@ -218,7 +234,7 @@ The result should be an actionable inventory/support bundle, not just a timeout.
 
 Update `docs/operations-v1.md` and `docs/quickstart-kubernetes.md` to explain:
 
-- when multi-node alpha is supported,
+- when same-node alpha attach is supported in a multi-node-capable cluster,
 - required node labels or scheduling constraints,
 - expected inventory placement fields,
 - how to collect a bundle,
@@ -239,10 +255,11 @@ Ask QA to validate:
 
 This plan closes only when:
 
-1. The supported multi-node alpha placement model is documented.
+1. The supported alpha placement model is documented.
 2. Fast tests cover placement and endpoint rendering.
-3. A live runner-native two-node gate proves app write/read through the normal
-   PVC path under the supported placement model.
+3. A runner-native gate proves app write/read through the normal PVC path under
+   the supported same-node placement model. A true two-node live gate remains
+   required before claiming two-node remote behavior.
 4. Inventory/support bundles expose node/server/frontend/status/support-bundle
    evidence.
 5. A negative fixture proves unsupported placement or endpoint failure is
@@ -255,8 +272,8 @@ This plan closes only when:
 After this plan, Seaweed Block can make a stronger light-use claim:
 
 ```text
-On a supported two-node alpha Kubernetes lab, users can create an RF=1 iSCSI
-PVC, run an app through the normal CSI path under the documented placement
-model, and use inventory/support bundles to understand exactly where the volume
-is running and how it is attached.
+On a supported alpha Kubernetes lab, users can create an RF=1 iSCSI PVC, run an
+app through the normal CSI path under the documented same-node placement model,
+and use inventory/support bundles to understand exactly where the volume is
+running and how it is attached.
 ```
