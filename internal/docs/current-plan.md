@@ -1,15 +1,16 @@
 # Current Plan: Durable Volume Restart And Reattach MVP
 
 Status: active, D1 durable contract, D2 fast rendering coverage, D3
-operations manual update, and D4 dev restart gate complete, 60%
+operations manual update, D4 dev restart gate, and D5 failure evidence
+complete, 75%
 implementation. Opened after closing
 `finished-plans/phase12_finishedplan_product_owned_blockvolume_lifecycle_mvp.md`.
 
-QA needed now: yes, for a D4 repeatability run using
-`qa-assignments/csi-rf1-durable-blockvolume-restart-validation.md`. Dev can
-continue D5 in parallel.
+QA needed now: yes, for D4 repeatability and D5 failure-bundle review. Use
+`qa-assignments/csi-rf1-durable-blockvolume-restart-validation.md` for D4;
+D6 will turn both dev gates into a formal close assignment.
 
-Current dev slice: D5 failure/partial-state evidence.
+Current dev slice: D6 QA close gate.
 
 ## Product Question
 
@@ -223,6 +224,13 @@ Add at least one focused failure fixture or assertion for:
 - durable status not latched/operational after restart timeout.
 
 The goal is a useful bundle, not a broad chaos matrix.
+
+Status: dev gate passed. Run `20260512-214412-860a` on m02 passed 5/5 phases
+and 26/26 actions at commit `aae2e53`. The new
+`csi-rf1-durable-restart-failure-chain` uses an unwritable durable hostPath,
+expects the user workflow to fail, collects `ops-inventory-on-failure`, and
+asserts an unhealthy inventory with the PVC row, actionable issue, inventory
+bundle, and `collection_error: ops_status` evidence.
 
 ### D6: QA Close Gate
 
