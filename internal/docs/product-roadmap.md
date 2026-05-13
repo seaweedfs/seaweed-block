@@ -42,6 +42,8 @@ This is the short internal roadmap. Keep it current and readable.
 - Multi-node Kubernetes attach.
 - Durable volume state across `blockvolume` restart. (Closed for supported
   single-node RF=1 alpha path in phase 13.)
+- Same-node multi-node-capable attach and placement visibility. (Closed for
+  the supported RF=1 loopback alpha path in phase 14.)
 - Basic failover with an attached workload.
 - Returned replica lifecycle: observed -> candidate -> syncing/rebuilding ->
   ready.
@@ -103,11 +105,12 @@ This is the short internal roadmap. Keep it current and readable.
 
 ### Track D: Availability And Recovery
 
-- Current: iSCSI and NVMe mounted failover are release-gated in single-node lab
-  scenarios, and RF=1 durable `blockvolume` restart is now closed for the
-  single-node alpha path.
-- Next: multi-node Kubernetes attach and placement visibility, before claiming
-  failover or returned-replica behavior in Kubernetes.
+- Current: iSCSI and NVMe mounted failover are release-gated in protocol lab
+  scenarios, RF=1 durable `blockvolume` restart is closed for the alpha
+  Kubernetes path, and same-node placement/attach is now visible and gated.
+- Next: connect those pieces into a basic mounted failover/reattach MVP through
+  the app/PVC path, with an explicit ACK profile and safe stale-primary
+  evidence.
 - Later: rebuild/reintegration and longer soak under failure.
 
 ### Track E: Protocol / Backend Expansion
@@ -125,9 +128,10 @@ This is the short internal roadmap. Keep it current and readable.
   it discovers live Seaweed Block volumes from Kubernetes, maps them to
   PVC/PV/generated workloads, attaches per-replica status bundles, and names
   stale/orphan residue without relying on TestOps artifacts. It also serves as
-  the proof surface for product-owned lifecycle and durable restart evidence.
-- Next: use inventory as the proof surface for multi-node placement and
-  endpoint reachability.
+  the proof surface for product-owned lifecycle, durable restart evidence, and
+  same-node placement/attach evidence.
+- Next: use inventory as the proof surface for mounted failover/reattach,
+  stale-primary fencing, returned-replica eligibility, and safe refusal.
 - Later: observation API/UI, metrics, conservative admin controls, enterprise
   operations, hosted validation, fleet automation, and cloud-scale test
   lifecycle.
