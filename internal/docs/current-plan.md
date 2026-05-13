@@ -206,6 +206,31 @@ Add a concise user-facing operations manual that answers:
 This manual can link to the quickstart, but it must stand on its own as the
 operator-facing v1 path for a light user.
 
+The manual must be based on
+`ref/light-use-block-storage-ux-research.md`, especially the common
+operational ladder:
+
+```text
+preflight/prereqs -> install -> wait/verify components -> create StorageClass ->
+create PVC + app -> verify bound/running/I/O -> inspect status -> teardown ->
+collect support data on failure
+```
+
+Minimum manual sections:
+
+- prerequisites and runnable preflight,
+- one default path first: iSCSI + `walstore` + supported alpha Kubernetes,
+- install and component readiness checks,
+- first PVC and app I/O verification,
+- cluster inventory and per-volume support bundle collection,
+- delete/teardown with scoped cleanup checks,
+- retry after interrupted or partial runs,
+- support bundle instructions for failure after volume identity exists,
+- clear `ops-status-unavailable` guidance when no volume identity was reached,
+- retained-state and non-claim section matching the research: no production HA,
+  no broad distro matrix, no upgrade/uninstall safety, no live RF=2/RF=3
+  Kubernetes claim, no performance SLO, no UI/operator-grade reconciliation.
+
 ### D6: Fast Tests
 
 Add component tests for:
