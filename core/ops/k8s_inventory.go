@@ -83,6 +83,7 @@ func collectKubernetesVolumeInventory(ctx context.Context, cfg KubernetesInvento
 		}
 		replicasByVolume[volumeID] = append(replicasByVolume[volumeID], replica)
 	}
+	processReplicasByVolume := localBlockvolumeProcessReplicas(ctx, cfg.RunCommand)
 
 	volumes := make([]VolumeInventoryVolumeInput, 0, len(pvcs))
 	claimedVolumeIDs := map[string]bool{}
@@ -133,6 +134,25 @@ func collectKubernetesVolumeInventory(ctx context.Context, cfg KubernetesInvento
 		}
 		volumes = append(volumes, orphan)
 	}
+	for volumeID, replicas := range processReplicasByVolume {
+		if claimedVolumeIDs[volumeID] || len(replicasByVolume[volumeID]) > 0 {
+			continue
+		}
+		orphan := VolumeInventoryVolumeInput{
+			VolumeID:          volumeID,
+			Namespace:         cfg.Namespace,
+			PVCName:           Unavailable,
+			PVName:            Unavailable,
+			ReplicationFactor: max(1, len(replicas)),
+			SupportBundle:     "volumes/" + volumeID,
+			Replicas:          replicas,
+			Issues: []string{
+				"blockvolume-process-without-placement=" + strings.Join(replicaServerIDs(replicas), ","),
+				"heartbeat-without-placement=" + strings.Join(replicaServerIDs(replicas), ",") + " state=unadmitted-by-master reason=local-process-without-pvc-or-pv",
+			},
+		}
+		volumes = append(volumes, orphan)
+	}
 	volumes = collectKubernetesReplicaStatusBundles(ctx, cfg, volumes)
 
 	return BuildVolumeInventory(VolumeInventoryInput{
@@ -141,6 +161,58 @@ func collectKubernetesVolumeInventory(ctx context.Context, cfg KubernetesInvento
 		RunnerRevision:  cfg.RunnerRevision,
 		Volumes:         volumes,
 	}), nil
+}
+
+func localBlockvolumeProcessReplicas(ctx context.Context, run func(context.Context, string, ...string) ([]byte, error)) map[string][]VolumeInventoryReplicaInput {
+	out := map[string][]VolumeInventoryReplicaInput{}
+	if run == nil {
+		return out
+	}
+	raw, err := run(ctx, "ps", "-eo", "args")
+	if err != nil {
+		return out
+	}
+	for _, line := range strings.Split(string(raw), "\n") {
+		replica, volumeID, ok := replicaFromProcessArgs(line)
+		if !ok {
+			continue
+		}
+		out[volumeID] = append(out[volumeID], replica)
+	}
+	return out
+}
+
+func replicaFromProcessArgs(line string) (VolumeInventoryReplicaInput, string, bool) {
+	line = strings.TrimSpace(line)
+	if line == "" || !strings.Contains(line, "blockvolume") || !strings.Contains(line, "--volume-id") {
+		return VolumeInventoryReplicaInput{}, "", false
+	}
+	args := strings.Fields(line)
+	volumeID := argValue(args, "--volume-id")
+	replicaID := argValue(args, "--replica-id")
+	serverID := argValue(args, "--server-id")
+	if volumeID == "" || replicaID == "" || serverID == "" {
+		return VolumeInventoryReplicaInput{}, "", false
+	}
+	protocol := "iscsi"
+	frontend := argValue(args, "--iscsi-listen")
+	if nvme := argValue(args, "--nvme-listen"); nvme != "" {
+		protocol = "nvme"
+		frontend = nvme
+	}
+	return VolumeInventoryReplicaInput{
+		ReplicaID:           replicaID,
+		ServerID:            serverID,
+		NodeName:            serverID,
+		GeneratedDeployment: Unavailable,
+		Protocol:            protocol,
+		FrontendAddress:     frontend,
+		StatusAddress:       argValue(args, "--status-addr"),
+		DataAddr:            argValue(args, "--data-addr"),
+		CtrlAddr:            argValue(args, "--ctrl-addr"),
+		Observed:            true,
+		Issues:              []string{"local_process_without_kubernetes_placement"},
+	}, volumeID, true
 }
 
 func replicaDeploymentNames(replicas []VolumeInventoryReplicaInput) []string {

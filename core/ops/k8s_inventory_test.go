@@ -130,6 +130,50 @@ func TestKubernetesInventoryCollector_OrphanDeploymentIsActionable(t *testing.T)
 	}
 }
 
+func TestKubernetesInventoryCollector_LocalProcessWithoutPlacementIsActionable(t *testing.T) {
+	collector := NewKubernetesVolumeInventoryCollector(KubernetesInventoryConfig{
+		Namespace:       "default",
+		ProductRevision: "product-rev",
+		RunCommand: fixtureKubectl(map[string]string{
+			"kubectl -n default get pvc -o json":                          `{"items":[]}`,
+			"kubectl get pv -o json":                                      `{"items":[]}`,
+			"kubectl -n default get deploy -l app=sw-blockvolume -o json": `{"items":[]}`,
+			"ps -eo args": "blockvolume --master=127.0.0.1:9333 --server-id=sx --volume-id=pvc-unplaced --replica-id=r1 --data-addr=127.0.0.1:19101 --ctrl-addr=127.0.0.1:19102 --status-addr=127.0.0.1:23260 --iscsi-listen=127.0.0.1:3260\n",
+		}),
+	})
+
+	inventory, err := collector.Collect(context.Background())
+	if err != nil {
+		t.Fatalf("collect: %v", err)
+	}
+	if got := ClassifyVolumeInventory(inventory); got != VolumeStatusExitUnhealthy {
+		t.Fatalf("exit=%d issues=%v", got, VolumeInventoryIssues(inventory))
+	}
+	if len(inventory.Volumes) != 1 {
+		t.Fatalf("volumes=%d want local process residue row", len(inventory.Volumes))
+	}
+	volume := inventory.Volumes[0]
+	for _, want := range []string{
+		"blockvolume-process-without-placement=sx",
+		"heartbeat-without-placement=sx state=unadmitted-by-master reason=local-process-without-pvc-or-pv",
+		"replica r1 local_process_without_kubernetes_placement",
+	} {
+		if !containsString(volume.Issues, want) {
+			t.Fatalf("volume issues missing %q: %v", want, volume.Issues)
+		}
+	}
+	summary := RenderVolumeInventorySummary(inventory)
+	for _, want := range []string{
+		"volume: id=pvc-unplaced namespace=default pvc=unavailable pv=unavailable rf=1 desired=1 observed=1",
+		"replica: volume=pvc-unplaced replica=r1 server=sx node=sx observed=true status=unhealthy",
+		"- volume pvc-unplaced heartbeat-without-placement=sx state=unadmitted-by-master reason=local-process-without-pvc-or-pv",
+	} {
+		if !strings.Contains(summary, want) {
+			t.Fatalf("summary missing %q:\n%s", want, summary)
+		}
+	}
+}
+
 func TestKubernetesInventoryCollector_AttachesReplicaStatusBundles(t *testing.T) {
 	masterAddr, closeMaster := startOpsFakeMaster(t)
 	defer closeMaster()

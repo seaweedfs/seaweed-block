@@ -140,6 +140,13 @@ issue prefixes are part of the operator-facing contract:
   a Kubernetes-visible blockvolume workload is observed, but inventory cannot
   map it to admitted PVC/PV placement. This is residue/degraded evidence, not
   authority.
+- `blockvolume-process-without-placement=<server_id>[,<server_id>...]`:
+  a host-local `blockvolume` process is visible in the process table, but no
+  matching Kubernetes PVC/PV or generated Deployment is visible.
+- `heartbeat-without-placement=<server_id>[,<server_id>...] state=unadmitted-by-master reason=local-process-without-pvc-or-pv`:
+  host-local process evidence points at master, but inventory cannot map that
+  process to admitted placement. This is best-effort local evidence; master
+  authority still comes only from the nested status or master read-only APIs.
 - `status_endpoint_unreachable=<addr>`: a replica advertises a status endpoint,
   but inventory cannot collect the nested `sw-block ops status` bundle.
 - `replica_degraded=<replica_id> status=<status>`: volume-level rollup for a

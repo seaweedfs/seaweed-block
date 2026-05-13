@@ -208,6 +208,8 @@ healthy replica.
   orphan-blockvolume-deploy=<name>
   heartbeat-without-placement=<server_id>     state=unadmitted-by-master     reason=topology-or-cluster-spec-mismatch
   heartbeat-without-placement=<server_id>     state=unadmitted-by-master     reason=no-matching-pvc-or-pv
+  blockvolume-process-without-placement=<server_id>
+  heartbeat-without-placement=<server_id>     state=unadmitted-by-master     reason=local-process-without-pvc-or-pv
   ```
   Inventory does not claim cleanup it didn't perform; it names the
   testops-guardrail boundary the same way the prior plan's
@@ -354,7 +356,8 @@ together tell the operator what is wrong without grepping logs.
 5. **Heartbeat without placement** (HG-10). Start a `blockvolume` process
    that points `--master` at the running master but uses a `--server-id`
    not in `--topology` / `--cluster-spec`. Run inventory. Expected:
-   `heartbeat-without-placement:<server_id> state=unadmitted-by-master`
+   `blockvolume-process-without-placement=<server_id>` and
+   `heartbeat-without-placement=<server_id> state=unadmitted-by-master`
    row appears as residue, NOT as a healthy replica of any volume.
 
 ## Report Template

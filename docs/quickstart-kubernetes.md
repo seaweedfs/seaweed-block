@@ -169,6 +169,17 @@ issues:
 - volume pvc-... heartbeat-without-placement=<server> state=unadmitted-by-master reason=no-matching-pvc-or-pv
 ```
 
+Expected residue shape if a host-local `blockvolume` process exists without a
+matching PVC/PV placement:
+
+```text
+inventory_status: unhealthy
+volume: id=pvc-... namespace=default pvc=unavailable pv=unavailable ... observed=1 status=unhealthy
+issues:
+- volume pvc-... blockvolume-process-without-placement=<server>
+- volume pvc-... heartbeat-without-placement=<server> state=unadmitted-by-master reason=local-process-without-pvc-or-pv
+```
+
 If a replica pod is observed as ready but the nested product status has not
 confirmed authority assignment yet, inventory should name that as degraded
 readiness, not as a contradictory health failure:

@@ -82,10 +82,11 @@ What is still weak:
 - Read-only behavior needs the HG-12 repeated-run proof at close time.
 - Per-replica nested bundle reuse needs the HG-11 normalized comparison at
   close time.
-- Pure standalone `blockvolume` heartbeat-without-placement discovery still
-  needs a master observation-list API if we want a literal non-Kubernetes
-  residue fixture; the supported alpha Kubernetes path now reports the
-  Kubernetes-visible equivalent.
+- Pure standalone master heartbeat listing would still need a master
+  observation-list API, but the inventory now covers the close-gate practical
+  fixture: a host-local `blockvolume` process without PVC/PV placement is
+  reported as `blockvolume-process-without-placement` plus
+  `heartbeat-without-placement`.
 - The product still has no API/UI; CLI is the right first step for this plan.
 
 ## Master / RF Reality Check
