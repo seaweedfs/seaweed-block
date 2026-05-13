@@ -39,7 +39,7 @@ phases:
         pattern: "[/]blockmaster --|[/]blockvolume --|^blockmaster |^blockvolume "
       - action: exec
         node: m02
-        cmd: "rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-ops-volume-status-report && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-ops-volume-status-report/pin_build"
+        cmd: "rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-ops-volume-status-report && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-ops-volume-status-report/pin_build /mnt/smb/work/share/g15d-k8s/{{ run_id }}-ops-volume-status-report/sample /mnt/smb/work/share/g15d-k8s/{{ run_id }}-ops-volume-status-report/ops-artifacts"
 
   - name: pin_build
     actions:
@@ -52,7 +52,7 @@ phases:
       - action: exec
         node: m02
         timeout: 3m
-        cmd: "cd {{ product_root }} && bash -o pipefail -c 'SW_BLOCK_OPS_STATUS_REPORT_OUT=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-ops-volume-status-report/volume-status-report.json go test -count=1 -json -run \"^(TestBuildVolumeStatusReport_(ComposesExistingStatusSurfaces|JSONKeepsZeroValuedFrontendIdentity|JSONSchemaShapeIsStable|UsesMasterFrontendFacts|MarksUnavailableInputsExplicitly|CopiesInputSlices|WritesSampleReportArtifact)|TestVolumeStatusReportCollector_(CollectsInjectedReadOnlySources|ReturnsPartialReportWithSourceErrors|ReturnedReplicaDurableReadyButFrontendFenced|NilSourcesProduceUnavailableReport))$\" ./core/ops | tee /mnt/smb/work/share/g15d-k8s/{{ run_id }}-ops-volume-status-report/report-component-go-test.jsonl'"
+        cmd: "cd {{ product_root }} && bash -o pipefail -c 'SW_BLOCK_OPS_STATUS_REPORT_OUT=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-ops-volume-status-report/sample/volume-status-report.json SW_BLOCK_OPS_STATUS_ARTIFACT_DIR=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-ops-volume-status-report/ops-artifacts go test -count=1 -json -run \"^(TestBuildVolumeStatusReport_(ComposesExistingStatusSurfaces|JSONKeepsZeroValuedFrontendIdentity|JSONSchemaShapeIsStable|UsesMasterFrontendFacts|MarksUnavailableInputsExplicitly|CopiesInputSlices|WritesSampleReportArtifact)|TestVolumeStatusReportCollector_(CollectsInjectedReadOnlySources|ReturnsPartialReportWithSourceErrors|ReturnedReplicaDurableReadyButFrontendFenced|NilSourcesProduceUnavailableReport)|TestVolumeStatusSummary_(OKReport|UnhealthyReport|SupportingReplicaReadyIsClean|MissingReplicationRoleIsUnhealthy|InconsistentAuthorityReplicationPairIsUnhealthy|InvalidReport)|TestWriteVolumeStatusArtifacts_(WritesJSONAndSummary|PreservesPartialReportOnCollectionError|SplitsJoinedCollectionErrors|RequiresArtifactDir))$\" ./core/ops | tee /mnt/smb/work/share/g15d-k8s/{{ run_id }}-ops-volume-status-report/report-component-go-test.jsonl'"
       - action: grep_log
         node: m02
         path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-ops-volume-status-report/report-component-go-test.jsonl"
@@ -143,7 +143,47 @@ phases:
         threshold: "0"
       - action: grep_log
         node: m02
-        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-ops-volume-status-report/volume-status-report.json"
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-ops-volume-status-report/report-component-go-test.jsonl"
+        pattern: "\"Action\":\"pass\".*\"Test\":\"TestVolumeStatusSummary_SupportingReplicaReadyIsClean\""
+        save_as: report_summary_supporting_count
+      - action: assert_greater
+        actual: "{{ report_summary_supporting_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-ops-volume-status-report/report-component-go-test.jsonl"
+        pattern: "\"Action\":\"pass\".*\"Test\":\"TestVolumeStatusSummary_InconsistentAuthorityReplicationPairIsUnhealthy\""
+        save_as: report_summary_pairing_count
+      - action: assert_greater
+        actual: "{{ report_summary_pairing_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-ops-volume-status-report/report-component-go-test.jsonl"
+        pattern: "\"Action\":\"pass\".*\"Test\":\"TestWriteVolumeStatusArtifacts_WritesJSONAndSummary\""
+        save_as: report_writer_success_count
+      - action: assert_greater
+        actual: "{{ report_writer_success_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-ops-volume-status-report/report-component-go-test.jsonl"
+        pattern: "\"Action\":\"pass\".*\"Test\":\"TestWriteVolumeStatusArtifacts_PreservesPartialReportOnCollectionError\""
+        save_as: report_writer_partial_count
+      - action: assert_greater
+        actual: "{{ report_writer_partial_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-ops-volume-status-report/report-component-go-test.jsonl"
+        pattern: "\"Action\":\"pass\".*\"Test\":\"TestWriteVolumeStatusArtifacts_SplitsJoinedCollectionErrors\""
+        save_as: report_writer_joined_errors_count
+      - action: assert_greater
+        actual: "{{ report_writer_joined_errors_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-ops-volume-status-report/sample/volume-status-report.json"
         pattern: "\"schema_version\": \"1.0\""
         save_as: report_artifact_schema_count
       - action: assert_greater
@@ -151,7 +191,7 @@ phases:
         threshold: "0"
       - action: grep_log
         node: m02
-        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-ops-volume-status-report/volume-status-report.json"
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-ops-volume-status-report/sample/volume-status-report.json"
         pattern: "\"volume_id\": \"v1\""
         save_as: report_artifact_volume_count
       - action: assert_greater
@@ -159,7 +199,7 @@ phases:
         threshold: "0"
       - action: grep_log
         node: m02
-        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-ops-volume-status-report/volume-status-report.json"
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-ops-volume-status-report/sample/volume-status-report.json"
         pattern: "\"lun\": 0"
         save_as: report_artifact_lun_count
       - action: assert_greater
@@ -167,11 +207,35 @@ phases:
         threshold: "0"
       - action: grep_log
         node: m02
-        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-ops-volume-status-report/volume-status-report.json"
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-ops-volume-status-report/sample/volume-status-report.json"
         pattern: "\"last_error\": \"unavailable\""
         save_as: report_artifact_unavailable_count
       - action: assert_greater
         actual: "{{ report_artifact_unavailable_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-ops-volume-status-report/ops-artifacts/volume-status-report.json"
+        pattern: "\"source\": {"
+        save_as: report_writer_json_count
+      - action: assert_greater
+        actual: "{{ report_writer_json_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-ops-volume-status-report/ops-artifacts/volume-status-summary.txt"
+        pattern: "^status: ok$"
+        save_as: report_summary_status_count
+      - action: assert_greater
+        actual: "{{ report_summary_status_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-ops-volume-status-report/ops-artifacts/volume-status-summary.txt"
+        pattern: "^issues: none$"
+        save_as: report_summary_issues_count
+      - action: assert_greater
+        actual: "{{ report_summary_issues_count }}"
         threshold: "0"
 
   - name: final_asserts

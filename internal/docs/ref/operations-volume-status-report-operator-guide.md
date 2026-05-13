@@ -23,6 +23,65 @@ The report is read-only. Collection must not promote, demote, detach, clean,
 restart, create sessions, remove sessions, create Kubernetes resources, or
 delete Kubernetes resources.
 
+## Minimal Command
+
+The first operator-facing command is:
+
+```text
+sw-block ops status \
+  --volume <volume-id> \
+  --master <blockmaster-grpc-addr> \
+  --status-addr <blockvolume-loopback-status-addr-or-url> \
+  --out <artifact-dir>
+```
+
+Example:
+
+```text
+sw-block ops status \
+  --volume v1 \
+  --master 127.0.0.1:18080 \
+  --status-addr 127.0.0.1:23260 \
+  --out /tmp/sw-block-ops-v1
+```
+
+The command writes:
+
+- `volume-status-report.json`
+- `volume-status-summary.txt`
+- `ops-status-bundle.json`
+
+It also prints the human-readable summary to stdout.
+
+`ops-status-bundle.json` is the top-level support-bundle manifest. It records
+the command name, captured time, volume id, product/runner revisions, exit
+classification, artifact list, unchecked residue classes, collection errors,
+and non-claims. Attach the whole output directory to an issue; start triage from
+the bundle manifest and summary, then inspect the raw report only when needed.
+
+Exit codes:
+
+- `0`: report collected, parsed, and classified clean.
+- `1`: report collected but unhealthy, incomplete, residue, or collection-error
+  evidence was observed.
+- `2`: required inputs were missing, artifact writing failed, or the report
+  identity/schema is invalid.
+
+`--master` and `--status-addr` are read-only sources. Both are required for the
+first command version so a clean exit cannot hide missing master
+frontend/publication facts or missing local blockvolume authority, replication,
+and durable facts.
+
+`--status-addr` points at the existing `blockvolume --status-addr` HTTP
+surface. That status surface is loopback-only and unauthenticated by design; do
+not expose it on a public interface. Use SSH port forwarding or a trusted
+operator-side tunnel when collecting remotely.
+
+Current limitation: the live command collects host-side iSCSI and NVMe
+initiator residue using local read-only commands. It reports process,
+Kubernetes, and storage-path residue classes as unchecked; release gates that
+need those facts should keep using TestOps cleanup/residue scenarios.
+
 ## Safe Operator Questions
 
 The report may be used to answer these questions:

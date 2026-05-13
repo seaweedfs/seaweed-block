@@ -1,0 +1,340 @@
+# Runner-native cluster operations inventory chain.
+#
+# Goal:
+#   Prove that an operator can discover the live alpha Kubernetes volume from
+#   the cluster itself, not from TestOps artifacts, and collect nested
+#   per-replica status bundles through sw-block ops inventory.
+#
+# Expected invocation:
+#   swblock run \
+#     -env product_root=/path/to/seaweed_block/on/m02 \
+#     -env ssh_key=/path/to/testdev_key/on/controller \
+#     testops/scenarios/cluster-ops-inventory-chain.yaml
+
+name: cluster-ops-inventory-chain
+timeout: 22m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: pre_clean
+    actions:
+      - action: pre_run_cleanup
+        node: m02
+        kill_patterns: "blockmaster,blockvolume,blockcsi,iscsi-target"
+        nvme_disconnect: "true"
+        iscsi_logout_prefix: "iqn.2026-05.io.seaweedfs"
+      - action: exec
+        node: m02
+        cmd: "rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-cluster-inventory && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-cluster-inventory/pin_build /mnt/smb/work/share/g15d-k8s/{{ run_id }}-cluster-inventory/demo /mnt/smb/work/share/g15d-k8s/{{ run_id }}-cluster-inventory/inventory"
+      - action: exec
+        node: m02
+        cmd: "pkill -f 'kubectl.*port-forward.*svc/blockmaste[r]' >/dev/null 2>&1 || true"
+      - action: assert_no_active_iscsi_sessions
+        node: m02
+        iqn_substr: "io.seaweedfs"
+      - action: assert_no_processes
+        node: m02
+        pattern: "[/]blockmaster --|[/]blockvolume --|[/]blockcsi |[/]iscsi-target |^blockmaster |^blockvolume |^blockcsi |^iscsi-target "
+
+  - name: preflight
+    actions:
+      - action: exec
+        node: m02
+        cmd: "cd {{ product_root }} && bash scripts/preflight-k8s-alpha.sh --local-k3s > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-cluster-inventory/preflight.txt 2>&1"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-cluster-inventory/preflight.txt"
+        pattern: "summary status=PASS"
+        save_as: preflight_count
+      - action: assert_greater
+        actual: "{{ preflight_count }}"
+        threshold: "0"
+
+  - name: pin_build_alpha_images
+    actions:
+      - action: exec
+        node: m02
+        timeout: 8m
+        cmd: "cd {{ product_root }} && bash scripts/build-alpha-images.sh {{ product_root }}"
+        env.SW_BLOCK_IMPORT_K3S: "1"
+        env.SW_BLOCK_ARTIFACT_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-cluster-inventory/pin_build"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-cluster-inventory/pin_build/alpha-images.env"
+        pattern: "SW_BLOCK_IMAGE_ID="
+        save_as: sw_block_image_id_count
+      - action: assert_greater
+        actual: "{{ sw_block_image_id_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-cluster-inventory/pin_build/alpha-images.env"
+        pattern: "SW_BLOCK_CSI_IMAGE_ID="
+        save_as: sw_block_csi_image_id_count
+      - action: assert_greater
+        actual: "{{ sw_block_csi_image_id_count }}"
+        threshold: "0"
+
+  - name: live_volume_boundary
+    actions:
+      - action: exec
+        node: m02
+        timeout: 10m
+        cmd: "cd {{ product_root }} && bash -lc 'set -a; source /mnt/smb/work/share/g15d-k8s/{{ run_id }}-cluster-inventory/pin_build/alpha-images.env; set +a; set +e; SW_BLOCK_DEMO_STOP_AFTER=blockvolume-ready SW_BLOCK_DEMO_KEEP_ON_STOP=1 bash scripts/run-k8s-demo.sh {{ product_root }}; rc=$?; echo $rc > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-cluster-inventory/demo/controlled-stop.exit_code; test \"$rc\" -eq 42'"
+        env.SW_BLOCK_ARTIFACT_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-cluster-inventory/demo"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-cluster-inventory/demo/run.log"
+        pattern: "\\[app-demo\\] controlled stop after blockvolume ready"
+        save_as: controlled_stop_count
+      - action: assert_greater
+        actual: "{{ controlled_stop_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-cluster-inventory/demo/generated-blockvolume.yaml"
+        pattern: "--status-addr="
+        save_as: generated_status_addr_count
+      - action: assert_greater
+        actual: "{{ generated_status_addr_count }}"
+        threshold: "0"
+
+  - name: second_volume_boundary
+    actions:
+      - action: exec
+        node: m02
+        timeout: 5m
+        cmd: "cat > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-cluster-inventory/second-pvc.yaml <<'YAML'\napiVersion: v1\nkind: PersistentVolumeClaim\nmetadata:\n  name: sw-block-demo-pvc-2\n  namespace: default\nspec:\n  accessModes:\n    - ReadWriteOnce\n  storageClassName: sw-block-dynamic\n  resources:\n    requests:\n      storage: 1Mi\nYAML\nkubectl apply -f /mnt/smb/work/share/g15d-k8s/{{ run_id }}-cluster-inventory/second-pvc.yaml > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-cluster-inventory/apply-second-pvc.log 2>&1\nkubectl -n default wait --for=jsonpath='{.status.phase}'=Bound pvc/sw-block-demo-pvc-2 --timeout=120s >> /mnt/smb/work/share/g15d-k8s/{{ run_id }}-cluster-inventory/apply-second-pvc.log 2>&1\nfor i in $(seq 1 120); do count=$(kubectl -n default get deploy -l app=sw-blockvolume --no-headers 2>/dev/null | wc -l); test \"$count\" -ge 2 && break; sleep 1; done\ncount=$(kubectl -n default get deploy -l app=sw-blockvolume --no-headers 2>/dev/null | wc -l); test \"$count\" -ge 2\nkubectl -n default wait --for=condition=available deploy -l app=sw-blockvolume --timeout=120s >> /mnt/smb/work/share/g15d-k8s/{{ run_id }}-cluster-inventory/apply-second-pvc.log 2>&1\nkubectl -n kube-system exec deploy/sw-blockmaster -c blockmaster -- sh -c 'cat /manifests/*.yaml' > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-cluster-inventory/second-volume-generated-blockvolume.yaml 2> /mnt/smb/work/share/g15d-k8s/{{ run_id }}-cluster-inventory/second-volume-generated-blockvolume.err\nkubectl -n default get deploy -l app=sw-blockvolume -o wide > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-cluster-inventory/product-owned-blockvolumes.after-second-pvc.txt"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-cluster-inventory/apply-second-pvc.log"
+        pattern: "persistentvolumeclaim/sw-block-demo-pvc-2 created"
+        save_as: second_pvc_created_count
+      - action: assert_greater
+        actual: "{{ second_pvc_created_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-cluster-inventory/product-owned-blockvolumes.after-second-pvc.txt"
+        pattern: "^sw-blockvolume-"
+        save_as: second_volume_ready_count
+      - action: assert_greater
+        actual: "{{ second_volume_ready_count }}"
+        threshold: "1"
+      - action: exec
+        node: m02
+        cmd: "test ! -e /mnt/smb/work/share/g15d-k8s/{{ run_id }}-cluster-inventory/second-volume/apply.log"
+
+  - name: inventory_live_cluster
+    actions:
+      - action: exec
+        node: m02
+        timeout: 4m
+        cmd: "cd {{ product_root }} && bash -c 'set -euo pipefail; OUT=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-cluster-inventory/inventory; mkdir -p \"$OUT\"; pf_port=$(python3 - <<\"PY\"\nimport socket\ns=socket.socket(); s.bind((\"127.0.0.1\",0)); print(s.getsockname()[1]); s.close()\nPY\n); kubectl -n kube-system port-forward svc/blockmaster ${pf_port}:9333 > \"$OUT/blockmaster-port-forward.log\" 2>&1 & pf_pid=$!; echo \"$pf_pid\" > \"$OUT/blockmaster-port-forward.pid\"; cleanup(){ kill \"$pf_pid\" >/dev/null 2>&1 || true; wait \"$pf_pid\" >/dev/null 2>&1 || true; }; trap cleanup EXIT; for i in $(seq 1 30); do (echo >/dev/tcp/127.0.0.1/${pf_port}) >/dev/null 2>&1 && break; sleep 1; done; (echo >/dev/tcp/127.0.0.1/${pf_port}) >/dev/null 2>&1; go run ./cmd/sw-block ops inventory --namespace default --master 127.0.0.1:${pf_port} --out \"$OUT\" --timeout 30s > \"$OUT/stdout.txt\" 2> \"$OUT/stderr.txt\"; rc=$?; echo \"$rc\" > \"$OUT/exit_code.txt\"; find \"$OUT/volumes\" -name ops-status-bundle.json -exec cat {} \\; > \"$OUT/nested-ops-status-bundles.json\" 2>/dev/null || true; exit \"$rc\"'"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-cluster-inventory/inventory/exit_code.txt"
+        pattern: "^0$"
+        save_as: inventory_exit_zero_count
+      - action: assert_greater
+        actual: "{{ inventory_exit_zero_count }}"
+        threshold: "0"
+
+  - name: inventory_asserts
+    actions:
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-cluster-inventory/inventory/volume-inventory-summary.txt"
+        pattern: "^inventory_status: \\(ok\\|unhealthy\\)$"
+        save_as: inventory_status_count
+      - action: assert_greater
+        actual: "{{ inventory_status_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-cluster-inventory/inventory/volume-inventory-summary.txt"
+        pattern: "^volumes: total=2 ok=[0-2] unhealthy=[0-2] invalid=0$"
+        save_as: two_volume_count
+      - action: assert_greater
+        actual: "{{ two_volume_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-cluster-inventory/inventory/volume-inventory-summary.txt"
+        pattern: "rf=1 desired=1 observed=1"
+        save_as: two_observed_volume_count
+      - action: assert_greater
+        actual: "{{ two_observed_volume_count }}"
+        threshold: "1"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-cluster-inventory/inventory/volume-inventory-summary.txt"
+        pattern: "protocols=iscsi"
+        save_as: two_iscsi_protocol_count
+      - action: assert_greater
+        actual: "{{ two_iscsi_protocol_count }}"
+        threshold: "1"
+      - action: exec
+        node: m02
+        cmd: "! grep -q 'generated_deployment_missing\\|observed_replicas=0 desired_replicas=1\\|replica_slot_missing' /mnt/smb/work/share/g15d-k8s/{{ run_id }}-cluster-inventory/inventory/volume-inventory-summary.txt"
+      - action: exec
+        node: m02
+        cmd: "! grep -q 'replica_unhealthy' /mnt/smb/work/share/g15d-k8s/{{ run_id }}-cluster-inventory/inventory/volume-inventory-summary.txt"
+      - action: exec
+        node: m02
+        cmd: "! grep -E 'replica: .*status=ok .*epoch=0 endpoint_version=0' /mnt/smb/work/share/g15d-k8s/{{ run_id }}-cluster-inventory/inventory/volume-inventory-summary.txt"
+      - action: exec
+        node: m02
+        cmd: "! grep -q 'ops_status=unhealthy reason=authority_not_assigned epoch=' /mnt/smb/work/share/g15d-k8s/{{ run_id }}-cluster-inventory/inventory/volume-inventory-summary.txt"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-cluster-inventory/inventory/volume-inventory-summary.txt"
+        pattern: "lifecycle_owner=pvc-owner-ref"
+        save_as: lifecycle_owner_count
+      - action: assert_greater
+        actual: "{{ lifecycle_owner_count }}"
+        threshold: "1"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-cluster-inventory/inventory/volume-inventory-summary.txt"
+        pattern: "owner_ref=PersistentVolumeClaim/default/sw-block-demo-pvc"
+        save_as: pvc_owner_ref_count
+      - action: assert_greater
+        actual: "{{ pvc_owner_ref_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-cluster-inventory/inventory/volume-inventory-summary.txt"
+        pattern: "owner_ref=PersistentVolumeClaim/default/sw-block-demo-pvc-2"
+        save_as: second_pvc_owner_ref_count
+      - action: assert_greater
+        actual: "{{ second_pvc_owner_ref_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-cluster-inventory/inventory/volume-inventory-summary.txt"
+        pattern: "pvc=sw-block-demo-pvc"
+        save_as: pvc_identity_count
+      - action: assert_greater
+        actual: "{{ pvc_identity_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-cluster-inventory/inventory/volume-inventory-summary.txt"
+        pattern: "pvc=sw-block-demo-pvc-2"
+        save_as: second_pvc_identity_count
+      - action: assert_greater
+        actual: "{{ second_pvc_identity_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-cluster-inventory/inventory/volume-inventory-summary.txt"
+        pattern: "support_bundle=volumes/"
+        save_as: replica_support_bundle_count
+      - action: assert_greater
+        actual: "{{ replica_support_bundle_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-cluster-inventory/inventory/volume-inventory.json"
+        pattern: "\"pvc_name\": \"sw-block-demo-pvc\""
+        save_as: json_pvc_count
+      - action: assert_greater
+        actual: "{{ json_pvc_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-cluster-inventory/inventory/volume-inventory.json"
+        pattern: "\"pvc_name\": \"sw-block-demo-pvc-2\""
+        save_as: json_second_pvc_count
+      - action: assert_greater
+        actual: "{{ json_second_pvc_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-cluster-inventory/inventory/volume-inventory.json"
+        pattern: "\"status_address\": \"127.0.0.1:"
+        save_as: json_status_addr_count
+      - action: assert_greater
+        actual: "{{ json_status_addr_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-cluster-inventory/inventory/nested-ops-status-bundles.json"
+        pattern: "\"command\": \"sw-block ops status\""
+        save_as: nested_status_bundle_count
+      - action: assert_greater
+        actual: "{{ nested_status_bundle_count }}"
+        threshold: "0"
+
+  - name: scoped_delete_inventory
+    actions:
+      - action: exec
+        node: m02
+        timeout: 4m
+        cmd: "kubectl -n default delete pvc sw-block-demo-pvc-2 --wait=true --timeout=120s > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-cluster-inventory/delete-second-pvc.log 2>&1\nfor i in $(seq 1 120); do if ! kubectl -n default get deploy -l app=sw-blockvolume -o jsonpath='{range .items[*]}{.metadata.ownerReferences[0].name}{\"\\n\"}{end}' 2>/dev/null | grep -q '^sw-block-demo-pvc-2$'; then break; fi; sleep 1; done\nif kubectl -n default get deploy -l app=sw-blockvolume -o jsonpath='{range .items[*]}{.metadata.ownerReferences[0].name}{\"\\n\"}{end}' 2>/dev/null | grep -q '^sw-block-demo-pvc-2$'; then echo 'second PVC-owned deployment still present after delete' >&2; exit 1; fi\nkubectl -n default get deploy -l app=sw-blockvolume -o wide > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-cluster-inventory/blockvolumes.after-delete-second-pvc.txt"
+      - action: exec
+        node: m02
+        timeout: 4m
+        cmd: "cd {{ product_root }} && bash -c 'set -euo pipefail; OUT=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-cluster-inventory/inventory-after-delete; mkdir -p \"$OUT\"; pf_port=$(python3 - <<\"PY\"\nimport socket\ns=socket.socket(); s.bind((\"127.0.0.1\",0)); print(s.getsockname()[1]); s.close()\nPY\n); kubectl -n kube-system port-forward svc/blockmaster ${pf_port}:9333 > \"$OUT/blockmaster-port-forward.log\" 2>&1 & pf_pid=$!; echo \"$pf_pid\" > \"$OUT/blockmaster-port-forward.pid\"; cleanup(){ kill \"$pf_pid\" >/dev/null 2>&1 || true; wait \"$pf_pid\" >/dev/null 2>&1 || true; }; trap cleanup EXIT; for i in $(seq 1 30); do (echo >/dev/tcp/127.0.0.1/${pf_port}) >/dev/null 2>&1 && break; sleep 1; done; (echo >/dev/tcp/127.0.0.1/${pf_port}) >/dev/null 2>&1; go run ./cmd/sw-block ops inventory --namespace default --master 127.0.0.1:${pf_port} --out \"$OUT\" --timeout 30s > \"$OUT/stdout.txt\" 2> \"$OUT/stderr.txt\"; rc=$?; echo \"$rc\" > \"$OUT/exit_code.txt\"; exit \"$rc\"'"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-cluster-inventory/inventory-after-delete/volume-inventory-summary.txt"
+        pattern: "^volumes: total=1 ok=[0-1] unhealthy=[0-1] invalid=0$"
+        save_as: one_volume_after_delete_count
+      - action: assert_greater
+        actual: "{{ one_volume_after_delete_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-cluster-inventory/inventory-after-delete/volume-inventory-summary.txt"
+        pattern: "pvc=sw-block-demo-pvc"
+        save_as: surviving_pvc_count
+      - action: assert_greater
+        actual: "{{ surviving_pvc_count }}"
+        threshold: "0"
+      - action: exec
+        node: m02
+        cmd: "! grep -q 'pvc=sw-block-demo-pvc-2\\|owner_ref=PersistentVolumeClaim/default/sw-block-demo-pvc-2\\|generated_deployment_missing\\|orphan-blockvolume-deploy' /mnt/smb/work/share/g15d-k8s/{{ run_id }}-cluster-inventory/inventory-after-delete/volume-inventory-summary.txt"
+
+  - name: collect_and_cleanup
+    always: true
+    actions:
+      - action: exec
+        node: m02
+        cmd: "kubectl -n default delete pvc sw-block-demo-pvc-2 --ignore-not-found=true --wait=true --timeout=120s > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-cluster-inventory/delete-second-pvc.log 2>&1 || true"
+      - action: exec
+        node: m02
+        timeout: 3m
+        cmd: "cd {{ product_root }} && bash scripts/uninstall-k8s-alpha.sh {{ product_root }}"
+        env.SW_BLOCK_ARTIFACT_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-cluster-inventory/uninstall"
+        env.SW_BLOCK_UNINSTALL_DELETE_ALL_BLOCKVOLUMES: "1"
+      - action: pre_run_cleanup
+        node: m02
+        kill_patterns: "blockmaster,blockvolume,blockcsi,iscsi-target"
+        nvme_disconnect: "true"
+        iscsi_logout_prefix: "iqn.2026-05.io.seaweedfs"
+      - action: exec
+        node: m02
+        cmd: "pkill -f 'kubectl.*port-forward.*svc/blockmaste[r]' >/dev/null 2>&1 || true"
+      - action: assert_no_active_iscsi_sessions
+        node: m02
+        iqn_substr: "io.seaweedfs"
+      - action: assert_no_processes
+        node: m02
+        pattern: "[/]blockmaster --|[/]blockvolume --|[/]blockcsi |[/]iscsi-target |[/]kubectl .*port-forward .*svc/blockmaste[r]|^blockmaster |^blockvolume |^blockcsi |^iscsi-target "
+      - action: collect_path
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-cluster-inventory"
+        name: "remote-phases"
+        ignore_error: true

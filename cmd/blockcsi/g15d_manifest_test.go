@@ -166,9 +166,33 @@ func TestInstallAlpha_DefaultsToPVCOwnerReferenceCleanup(t *testing.T) {
 		`LAUNCHER_PVC_OWNER_REF="${SW_BLOCK_LAUNCHER_PVC_OWNER_REF:-1}"`,
 		"--launcher-pvc-owner-ref",
 		"--kubernetes-pvc-uid-lookup",
+		`log "apply RBAC"`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("install script missing %q", want)
+		}
+	}
+}
+
+func TestAlphaBlockStack_EnablesProductOwnedLauncherApply(t *testing.T) {
+	body := g15dReadFile(t, "deploy", "k8s", "alpha", "block-stack.yaml")
+	for _, want := range []string{
+		"serviceAccountName: sw-block-master",
+		"--launcher-kubernetes-apply",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("alpha block stack missing %q", want)
+		}
+	}
+	rbac := g15dReadFile(t, "deploy", "k8s", "alpha", "rbac.yaml")
+	for _, want := range []string{
+		"name: sw-block-master",
+		"name: sw-block-master-launcher",
+		`resources: ["deployments"]`,
+		`verbs: ["get", "list", "watch", "create", "delete", "update", "patch"]`,
+	} {
+		if !strings.Contains(rbac, want) {
+			t.Fatalf("alpha rbac missing %q", want)
 		}
 	}
 }

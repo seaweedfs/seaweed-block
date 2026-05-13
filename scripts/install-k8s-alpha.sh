@@ -31,7 +31,7 @@ sed_escape() {
 
 require_cmd kubectl
 
-NODE_NAME="$(kubectl get nodes -o jsonpath='{.items[0].metadata.name}')"
+NODE_NAME="${SW_BLOCK_ALPHA_NODE_NAME:-$(kubectl get nodes -o jsonpath='{.items[0].metadata.name}')}"
 STACK_RENDERED="$ARTIFACT_DIR/block-stack.rendered.yaml"
 CSI_CONTROLLER_RENDERED="$ARTIFACT_DIR/csi-controller.rendered.yaml"
 CSI_NODE_RENDERED="$ARTIFACT_DIR/csi-node.rendered.yaml"
@@ -75,12 +75,14 @@ log "launcher_state_hostpath=${LAUNCHER_STATE_HOSTPATH:-<emptyDir>}"
 kubectl version --client=true >"$ARTIFACT_DIR/kubectl-version.txt" 2>&1 || true
 kubectl get nodes -o wide >"$ARTIFACT_DIR/nodes.before.txt"
 
+log "apply RBAC"
+kubectl apply -f "$ROOT/deploy/k8s/alpha/rbac.yaml" | tee "$ARTIFACT_DIR/apply-rbac.log"
+
 log "apply seaweed-block control plane"
 kubectl apply -f "$STACK_RENDERED" | tee "$ARTIFACT_DIR/apply-block-stack.log"
 kubectl -n kube-system wait --for=condition=available deploy/sw-blockmaster --timeout=120s
 
 log "apply CSI components"
-kubectl apply -f "$ROOT/deploy/k8s/alpha/rbac.yaml" | tee "$ARTIFACT_DIR/apply-rbac.log"
 kubectl apply -f "$ROOT/deploy/k8s/alpha/csi-driver.yaml" | tee "$ARTIFACT_DIR/apply-csidriver.log"
 kubectl apply -f "$CSI_CONTROLLER_RENDERED" | tee "$ARTIFACT_DIR/apply-csi-controller.log"
 kubectl apply -f "$CSI_NODE_RENDERED" | tee "$ARTIFACT_DIR/apply-csi-node.log"
@@ -88,5 +90,5 @@ kubectl -n kube-system wait --for=condition=available deploy/sw-block-csi-contro
 kubectl -n kube-system rollout status ds/sw-block-csi-node --timeout=120s
 
 log "PASS: seaweed-block alpha stack installed"
-log "next: create a PVC, then run scripts/apply-k8s-alpha-blockvolumes.sh"
+log "next: create a PVC; blockmaster reconciles the generated blockvolume workload"
 log "artifacts=$ARTIFACT_DIR"

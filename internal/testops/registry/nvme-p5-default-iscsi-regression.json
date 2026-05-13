@@ -23,6 +23,17 @@
     "sw-block:local",
     "sw-block-csi:local"
   ],
+  "resources": {
+    "group": "m02-block-lab",
+    "exclusive": [
+      "node:m02",
+      "iscsi:m02",
+      "k3s:m02"
+    ],
+    "ports": [
+      3260
+    ]
+  },
   "qa_instruction": "internal/docs/qa-assignments/nvme-p5-csi-protocol-selection-validation.md",
   "known_green_commit": "ce657d5",
   "scenario_default_params": {

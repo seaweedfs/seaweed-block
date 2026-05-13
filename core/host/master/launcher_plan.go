@@ -1,6 +1,11 @@
 package master
 
-import "github.com/seaweedfs/seaweed-block/core/lifecycle"
+import (
+	"net"
+	"strconv"
+
+	"github.com/seaweedfs/seaweed-block/core/lifecycle"
+)
 
 // LifecycleWorkloadPlanTickResult summarizes the launcher planning seam. Plans
 // are workload intents only; they do not mint authority.
@@ -29,6 +34,7 @@ func (h *Host) RunLifecycleWorkloadPlanTick(cfg lifecycle.WorkloadPlanConfig) (L
 	}
 	nodes := stores.Nodes.ListNodes()
 	var result LifecycleWorkloadPlanTickResult
+	portAllocator := newWorkloadPortAllocator()
 	for _, placement := range stores.Placements.ListPlacements() {
 		volume, ok := volumeByID[placement.VolumeID]
 		if !ok {
@@ -40,6 +46,7 @@ func (h *Host) RunLifecycleWorkloadPlanTick(cfg lifecycle.WorkloadPlanConfig) (L
 			result.SkippedMissingInventory++
 			continue
 		}
+		portAllocator.assign(&plan)
 		result.Plans = append(result.Plans, plan)
 		result.PlannedVolumes++
 		if placementHasBlankPool(placement) {
@@ -54,6 +61,51 @@ func (h *Host) RunLifecycleWorkloadPlanTick(cfg lifecycle.WorkloadPlanConfig) (L
 		}
 	}
 	return result, nil
+}
+
+type workloadPortAllocator struct {
+	nextOrdinalByServer map[string]int
+}
+
+func newWorkloadPortAllocator() *workloadPortAllocator {
+	return &workloadPortAllocator{nextOrdinalByServer: make(map[string]int)}
+}
+
+func (a *workloadPortAllocator) assign(plan *lifecycle.BlockVolumeWorkloadPlan) {
+	if a == nil || plan == nil {
+		return
+	}
+	for i := range plan.Replicas {
+		replica := &plan.Replicas[i]
+		ordinal := a.nextOrdinalByServer[replica.ServerID]
+		a.nextOrdinalByServer[replica.ServerID] = ordinal + 1
+		shiftReplicaNodeLocalPorts(replica, ordinal)
+	}
+}
+
+func shiftReplicaNodeLocalPorts(replica *lifecycle.BlockVolumeReplicaWorkload, ordinal int) {
+	if replica == nil || ordinal <= 0 {
+		return
+	}
+	replica.ISCSIListenPort += ordinal
+	replica.NVMeListenPort += ordinal
+	replica.DataAddr = addPortOffset(replica.DataAddr, ordinal*2)
+	replica.CtrlAddr = addPortOffset(replica.CtrlAddr, ordinal*2)
+}
+
+func addPortOffset(addr string, offset int) string {
+	if addr == "" || offset == 0 {
+		return addr
+	}
+	host, portText, err := net.SplitHostPort(addr)
+	if err != nil {
+		return addr
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil {
+		return addr
+	}
+	return net.JoinHostPort(host, strconv.Itoa(port+offset))
 }
 
 func placementHasBlankPool(intent lifecycle.PlacementIntent) bool {

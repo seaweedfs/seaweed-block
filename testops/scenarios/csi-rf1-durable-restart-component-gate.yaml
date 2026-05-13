@@ -51,7 +51,7 @@ phases:
       - action: exec
         node: m02
         timeout: 3m
-        cmd: "cd {{ product_root }} && bash -o pipefail -c 'go test -count=1 -json -run \"^(TestCSIRF1DurableRestartScripts_PinBlockvolumeRestartContract|TestG15d_K8sRenderer_CanUseHostPathStateVolume|TestG15d_K8sRenderer_CanOptIntoBlockVolumeStatusEndpoint|TestStatusFrontendsForAssignedLine_ReturnsObservedFrontendFacts|TestStatusServer_DurableStatusEndpoint_EnabledAfterStart_ReturnsLineage)$\" ./internal/testops ./core/host/master ./core/host/volume ./core/launcher | tee /mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-component/restart-component-go-test.jsonl'"
+        cmd: "cd {{ product_root }} && bash -o pipefail -c 'go test -count=1 -json -run \"^(TestCSIRF1DurableRestartScripts_PinBlockvolumeRestartContract|TestG15d_K8sRenderer_CanUseHostPathStateVolume|TestG15d_K8sRenderer_DurableHostPathPreservesOwnerRefAndStatus|TestG15d_K8sRenderer_CanOptIntoBlockVolumeStatusEndpoint|TestStatusFrontendsForAssignedLine_ReturnsObservedFrontendFacts|TestStatusServer_DurableStatusEndpoint_EnabledAfterStart_ReturnsLineage)$\" ./internal/testops ./core/host/master ./core/host/volume ./core/launcher | tee /mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-component/restart-component-go-test.jsonl'"
       - action: grep_log
         node: m02
         path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-component/restart-component-go-test.jsonl"
@@ -67,6 +67,14 @@ phases:
         save_as: hostpath_render_count
       - action: assert_greater
         actual: "{{ hostpath_render_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-component/restart-component-go-test.jsonl"
+        pattern: "\"Action\":\"pass\".*\"Test\":\"TestG15d_K8sRenderer_DurableHostPathPreservesOwnerRefAndStatus\""
+        save_as: hostpath_owner_ref_status_count
+      - action: assert_greater
+        actual: "{{ hostpath_owner_ref_status_count }}"
         threshold: "0"
       - action: grep_log
         node: m02

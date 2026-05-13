@@ -10,6 +10,8 @@ This directory contains public and technical documentation.
 | `developer-architecture.md` | Deeper module-by-module architecture for contributors. |
 | `runtime-state-machines.md` | Mermaid state-machine and loop overview. |
 | `roadmap.md` | Alpha roadmap and non-claims. |
+| `quickstart-kubernetes.md` | First-volume Kubernetes quickstart. |
+| `operations-v1.md` | V1 alpha operations manual for install, first PVC, inventory, cleanup, and support bundles. |
 | `kubernetes-app-demo.md` | Presentation-friendly Kubernetes app + PVC demo. |
 
 ## Calibration Evidence

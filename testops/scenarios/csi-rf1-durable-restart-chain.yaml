@@ -69,6 +69,7 @@ phases:
         env.SW_BLOCK_ALPHA_IMAGES_ENV: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-chain/pin_build/alpha-images.env"
         env.SW_BLOCK_ARTIFACT_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-chain/durable_blockvolume_restart"
         env.SW_BLOCK_LAUNCHER_STATE_HOSTPATH: "/var/lib/sw-block/testops-{{ run_id }}-csi-rf1-restart"
+        env.SW_BLOCK_COLLECT_INVENTORY_AFTER_RESTART: "1"
       - action: grep_log
         node: m02
         path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-chain/durable_blockvolume_restart/run.log"
@@ -214,6 +215,41 @@ phases:
       - action: assert_greater
         actual: "{{ lifecycle_after_restart_protocol_count }}"
         threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-chain/durable_blockvolume_restart/ops-inventory-after-restart/volume-inventory-summary.txt"
+        pattern: "^volume: .*pvc=sw-block-demo-pvc .*protocols=iscsi"
+        save_as: inventory_after_restart_volume_count
+      - action: assert_greater
+        actual: "{{ inventory_after_restart_volume_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-chain/durable_blockvolume_restart/ops-inventory-after-restart/volume-inventory-summary.txt"
+        pattern: "^replica: .*support_bundle=volumes/"
+        save_as: inventory_after_restart_support_bundle_count
+      - action: assert_greater
+        actual: "{{ inventory_after_restart_support_bundle_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-chain/durable_blockvolume_restart/ops-inventory-after-restart/volume-inventory-summary.txt"
+        pattern: "lifecycle_owner=pvc-owner-ref owner_ref=PersistentVolumeClaim/default/sw-block-demo-pvc"
+        save_as: inventory_after_restart_owner_ref_count
+      - action: assert_greater
+        actual: "{{ inventory_after_restart_owner_ref_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-chain/durable_blockvolume_restart/ops-inventory-after-restart/nested-ops-status-bundles.json"
+        pattern: "\"command\": \"sw-block ops status\""
+        save_as: nested_ops_status_bundle_count
+      - action: assert_greater
+        actual: "{{ nested_ops_status_bundle_count }}"
+        threshold: "0"
+      - action: exec
+        node: m02
+        cmd: "find /mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-chain/durable_blockvolume_restart/ops-inventory-after-restart/volumes -name volume-status-summary.txt -exec grep -q '^durable_entry: .*latched=true .*operational=true' {} \\; -print | grep -q ."
 
   - name: final_asserts
     actions:

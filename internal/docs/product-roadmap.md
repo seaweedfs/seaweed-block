@@ -40,7 +40,10 @@ This is the short internal roadmap. Keep it current and readable.
 ### Beta Candidate
 
 - Multi-node Kubernetes attach.
-- Durable volume state across `blockvolume` restart.
+- Durable volume state across `blockvolume` restart. (Closed for supported
+  single-node RF=1 alpha path in phase 13.)
+- Same-node multi-node-capable attach and placement visibility. (Closed for
+  the supported RF=1 loopback alpha path in phase 14.)
 - Basic failover with an attached workload.
 - Returned replica lifecycle: observed -> candidate -> syncing/rebuilding ->
   ready.
@@ -72,10 +75,13 @@ This is the short internal roadmap. Keep it current and readable.
 
 ### Track A: Kubernetes Install And Cleanup
 
-- Current: owner-reference cleanup is being defaulted for alpha scripts.
-- Next: avoid harness-only cleanup paths.
-- Later: add a small controller/operator for generated `blockvolume`
-  workloads.
+- Current: the light-use install/lifecycle loop is closed for the supported
+  single-node alpha path: install/launch, create PVC, run app write/read,
+  delete resources, verify cleanup attribution, and collect a failure bundle.
+- Next: make generated `blockvolume` workload lifecycle product-owned so the
+  user does not run a separate manifest-apply script.
+- Later: turn the minimal lifecycle loop into a small controller/operator with
+  scoped reconciliation and upgrade-safe ownership.
 
 ### Track B: iSCSI Frontend Stability
 
@@ -89,18 +95,22 @@ This is the short internal roadmap. Keep it current and readable.
 
 ### Track C: Durable State
 
-- Current: alpha generated workloads still use throwaway storage in several
-  paths.
-- Next: define durable root layout for generated `blockvolume` workloads and
-  prove restart/reattach preserves data.
+- Current: durable hostPath restart/reattach is closed for the supported
+  single-node RF=1 alpha path. Users can configure a run-scoped durable path,
+  restart the generated `blockvolume`, reattach through the PVC, and verify
+  durable status/inventory evidence.
+- Next: keep durable evidence wired into multi-node attach and later
+  availability gates.
 - Later: integrate returned-replica rebuild and storage-engine compaction.
 
 ### Track D: Availability And Recovery
 
-- Current: iSCSI and NVMe mounted failover are release-gated in single-node lab
-  scenarios.
-- Next: returned-replica state machine, old-primary stale I/O fencing, and
-  multi-node attach/reconnect path.
+- Current: iSCSI and NVMe mounted failover are release-gated in protocol lab
+  scenarios, RF=1 durable `blockvolume` restart is closed for the alpha
+  Kubernetes path, and same-node placement/attach is now visible and gated.
+- Next: connect those pieces into a basic mounted failover/reattach MVP through
+  the app/PVC path, with an explicit ACK profile and safe stale-primary
+  evidence.
 - Later: rebuild/reintegration and longer soak under failure.
 
 ### Track E: Protocol / Backend Expansion
@@ -114,11 +124,40 @@ This is the short internal roadmap. Keep it current and readable.
 
 ### Track F: Operations Layer
 
-- Current: operations are split across scripts, TestOps, and product logs.
-- Next: define install/upgrade/uninstall, generated workload ownership,
-  operator-visible status, diagnostics bundle, and conservative admin controls.
-- Later: enterprise operations, hosted validation, fleet automation, and
-  cloud-scale test lifecycle.
+- Current: cluster operations inventory is closed for the supported alpha path:
+  it discovers live Seaweed Block volumes from Kubernetes, maps them to
+  PVC/PV/generated workloads, attaches per-replica status bundles, and names
+  stale/orphan residue without relying on TestOps artifacts. It also serves as
+  the proof surface for product-owned lifecycle, durable restart evidence, and
+  same-node placement/attach evidence.
+- Next: use inventory as the proof surface for mounted failover/reattach,
+  stale-primary fencing, returned-replica eligibility, and safe refusal.
+- Later: observation API/UI, metrics, conservative admin controls, enterprise
+  operations, hosted validation, fleet automation, and cloud-scale test
+  lifecycle.
+
+### Top Light-Use Product Blockers
+
+These are the main gaps between the current functional block substrate and a
+credible light-use product:
+
+- Product-owned generated workload lifecycle: scripts/TestOps still own too
+  much apply/cleanup and run-scoped state management.
+- Install/upgrade/uninstall: alpha scripts work for tests, but users need a
+  normal K8s add-on flow.
+- Observation beyond one volume: the read-only CLI now covers cluster inventory;
+  users will still need lifecycle status, metrics, and eventually UI.
+- Safe admin controls: repair/promote/cleanup actions must wait until the
+  read-only observation model is stable and release-gated.
+
+### Track G: Test Management Control Plane
+
+- Current: runner scenarios write result/status bundles, but M01/M02 shared lab
+  ownership is still mostly implicit.
+- Next: add simple shared-drive control data for active runs, history, locks,
+  artifact pointers, commits, target nodes, and stale-run detection.
+- Later: scenario library indexing, queueing, remote agents on lab nodes,
+  matrix scheduling, hosted validation, and discovery-agent ingestion.
 
 ## PR Cadence
 

@@ -228,7 +228,7 @@ func TestG15b_ImageBuildInputs_ContainExpectedBinariesAndNodeTools(t *testing.T)
 	}
 	for _, want := range []string{
 		"SW_BLOCK_IMPORT_K3S",
-		"sudo k3s ctr images import -",
+		"sudo -n k3s ctr images import -",
 		"docker image inspect",
 		"alpha-images.env",
 		"blockmaster.version.txt",

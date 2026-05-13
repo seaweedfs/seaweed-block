@@ -1,0 +1,140 @@
+# Runner-native RF=1 durable restart partial-state chain.
+#
+# Goal:
+#   Prove that a controlled post-restart blockvolume outage produces an
+#   actionable inventory bundle instead of a silent reader timeout.
+
+name: csi-rf1-durable-restart-failure-chain
+timeout: 18m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: pre_clean
+    actions:
+      - action: pre_run_cleanup
+        node: m02
+        kill_patterns: "blockmaster,blockvolume,blockcsi,iscsi-target"
+        nvme_disconnect: "true"
+        iscsi_logout_prefix: "iqn.2026-05.io.seaweedfs"
+      - action: exec
+        node: m02
+        cmd: "rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-failure && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-failure/pin_build /mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-failure/restart_failure"
+      - action: assert_no_active_iscsi_sessions
+        node: m02
+        iqn_substr: "io.seaweedfs"
+      - action: assert_no_processes
+        node: m02
+        pattern: "[/]blockmaster --|[/]blockvolume --|[/]blockcsi |[/]iscsi-target |^blockmaster |^blockvolume |^blockcsi |^iscsi-target "
+
+  - name: pin_build_alpha_images
+    actions:
+      - action: exec
+        node: m02
+        timeout: 8m
+        cmd: "cd {{ product_root }} && bash scripts/build-alpha-images.sh {{ product_root }}"
+        env.SW_BLOCK_IMPORT_K3S: "1"
+        env.SW_BLOCK_ARTIFACT_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-failure/pin_build"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-failure/pin_build/alpha-images.env"
+        pattern: "SW_BLOCK_IMAGE_ID="
+        save_as: pin_image_id_count
+      - action: assert_greater
+        actual: "{{ pin_image_id_count }}"
+        threshold: "0"
+
+  - name: durable_hostpath_unwritable
+    actions:
+      - action: exec
+        node: m02
+        timeout: 12m
+        cmd: "cd {{ product_root }} && bash -c 'set -a; source /mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-failure/pin_build/alpha-images.env; set +a; set +e; SW_BLOCK_ARTIFACT_DIR=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-failure/restart_failure SW_BLOCK_LAUNCHER_STATE_HOSTPATH=/proc/sw-block-testops-{{ run_id }} SW_BLOCK_COLLECT_INVENTORY_ON_FAILURE=1 bash scripts/run-k8s-blockvolume-restart.sh {{ product_root }}; rc=$?; echo $rc > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-failure/restart_failure/exit_code.txt; test \"$rc\" -ne 0'"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-failure/restart_failure/run.log"
+        pattern: "launcher_state_hostpath=/proc/sw-block-testops-{{ run_id }}"
+        save_as: bad_hostpath_count
+      - action: assert_greater
+        actual: "{{ bad_hostpath_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-failure/restart_failure/exit_code.txt"
+        pattern: "^[1-9][0-9]*$"
+        save_as: failed_exit_count
+      - action: assert_greater
+        actual: "{{ failed_exit_count }}"
+        threshold: "0"
+
+  - name: failure_bundle_asserts
+    actions:
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-failure/restart_failure/ops-inventory-on-failure/volume-inventory-summary.txt"
+        pattern: "^inventory_status: unhealthy$"
+        save_as: inventory_unhealthy_count
+      - action: assert_greater
+        actual: "{{ inventory_unhealthy_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-failure/restart_failure/ops-inventory-on-failure/volume-inventory-summary.txt"
+        pattern: "pvc=sw-block-demo-pvc"
+        save_as: pvc_row_count
+      - action: assert_greater
+        actual: "{{ pvc_row_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-failure/restart_failure/ops-inventory-on-failure/volume-inventory-summary.txt"
+        pattern: "generated_deployment_missing\\|observed_replicas=0 desired_replicas=1\\|replica_degraded=r1 status=unhealthy\\|ops_status=unhealthy"
+        save_as: actionable_issue_count
+      - action: assert_greater
+        actual: "{{ actionable_issue_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-failure/restart_failure/ops-inventory-on-failure/ops-inventory-bundle.json"
+        pattern: "\"command\": \"sw-block ops inventory\""
+        save_as: inventory_bundle_count
+      - action: assert_greater
+        actual: "{{ inventory_bundle_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-failure/restart_failure/ops-inventory-on-failure/volume-inventory-summary.txt"
+        pattern: "collection_error: ops_status:"
+        save_as: collection_error_count
+      - action: assert_greater
+        actual: "{{ collection_error_count }}"
+        threshold: "0"
+
+  - name: collect_and_cleanup
+    always: true
+    actions:
+      - action: pre_run_cleanup
+        node: m02
+        kill_patterns: "blockmaster,blockvolume,blockcsi,iscsi-target"
+        nvme_disconnect: "true"
+        iscsi_logout_prefix: "iqn.2026-05.io.seaweedfs"
+      - action: assert_no_active_iscsi_sessions
+        node: m02
+        iqn_substr: "io.seaweedfs"
+      - action: assert_no_processes
+        node: m02
+        pattern: "[/]blockmaster --|[/]blockvolume --|[/]blockcsi |[/]iscsi-target |^blockmaster |^blockvolume |^blockcsi |^iscsi-target "
+      - action: collect_path
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-csi-rf1-restart-failure"
+        name: "remote-phases"
+        ignore_error: true

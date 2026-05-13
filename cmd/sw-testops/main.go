@@ -22,8 +22,10 @@ type options struct {
 	artifactDir string
 	runID       string
 	commit      string
+	controlDir  string
 	params      paramFlag
 	list        bool
+	controlList bool
 }
 
 func main() {
@@ -40,14 +42,19 @@ func run(args []string, stdout, stderr io.Writer) int {
 	fs.StringVar(&opts.artifactDir, "artifact-dir", "", "artifact output directory")
 	fs.StringVar(&opts.runID, "run-id", "", "stable run id")
 	fs.StringVar(&opts.commit, "commit", "", "source commit label; defaults to git HEAD")
+	fs.StringVar(&opts.controlDir, "control-dir", "", "testops control directory for active/history/lock records")
 	fs.Var(&opts.params, "param", "scenario parameter KEY=VALUE; may be repeated")
 	fs.BoolVar(&opts.list, "list", false, "list registered scenarios")
+	fs.BoolVar(&opts.controlList, "control-list", false, "list testops control records from --control-dir")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 	if err := opts.normalize(); err != nil {
 		fmt.Fprintln(stderr, "sw-testops:", err)
 		return 2
+	}
+	if opts.controlList {
+		return listControlRecords(opts.controlDir, stdout, stderr)
 	}
 	registrations, err := loadRegistrations(opts.repoRoot, opts.registryDir)
 	if err != nil {
@@ -56,7 +63,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 	if opts.list {
 		for _, reg := range registrations {
-			fmt.Fprintf(stdout, "%s\t%s\t%s\t%s\n", reg.Scenario, reg.Gate, reg.Layer, reg.Driver.Type)
+			fmt.Fprintf(stdout, "%s\t%s\t%s\t%s\t%s\n", reg.Scenario, reg.Gate, reg.Layer, reg.Driver.Type, strings.Join(reg.Resources.Exclusive, ","))
 		}
 		return 0
 	}
@@ -80,9 +87,30 @@ func run(args []string, stdout, stderr io.Writer) int {
 		RunID:          opts.runID,
 		TimeoutSeconds: registration.DefaultTimeoutSeconds,
 	}
+	var control testops.ControlManager
+	var controlRec testops.ControlRecord
+	if opts.controlDir != "" {
+		control = testops.NewControlManager(opts.controlDir)
+		var startErr error
+		controlRec, startErr = control.Start(req, registration.Resources)
+		if startErr != nil {
+			fmt.Fprintf(stderr, "sw-testops: control start failed: %v\n", startErr)
+			return 2
+		}
+	}
 	res, err := registry.Run(context.Background(), req)
 	if writeErr := writeResult(opts.artifactDir, res); writeErr != nil && err == nil {
 		err = writeErr
+		res.Status = testops.StatusError
+		res.Summary = fmt.Sprintf("write result failed: %v", writeErr)
+	}
+	if opts.controlDir != "" {
+		if completeErr := control.Complete(controlRec, res.Status, err); completeErr != nil && err == nil {
+			err = completeErr
+			res.Status = testops.StatusError
+			res.Summary = fmt.Sprintf("control complete failed: %v", completeErr)
+			_ = writeResult(opts.artifactDir, res)
+		}
 	}
 	if err != nil {
 		fmt.Fprintf(stderr, "sw-testops: %s failed: %v\n", opts.scenario, err)
@@ -154,7 +182,7 @@ func (o *options) normalize() error {
 	if !filepath.IsAbs(o.registryDir) {
 		o.registryDir = filepath.Join(o.repoRoot, o.registryDir)
 	}
-	if o.list {
+	if o.list || o.controlList {
 		return nil
 	}
 	if o.scenario == "" {
@@ -170,6 +198,29 @@ func (o *options) normalize() error {
 		o.commit = gitHead(o.repoRoot)
 	}
 	return nil
+}
+
+func listControlRecords(controlDir string, stdout, stderr io.Writer) int {
+	if controlDir == "" {
+		fmt.Fprintln(stderr, "sw-testops: --control-dir is required with --control-list")
+		return 2
+	}
+	records, err := testops.NewControlManager(controlDir).List()
+	if err != nil {
+		fmt.Fprintf(stderr, "sw-testops: control list failed: %v\n", err)
+		return 2
+	}
+	for _, rec := range records {
+		fmt.Fprintf(stdout, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			rec.State,
+			rec.RunID,
+			rec.Scenario,
+			rec.SourceCommit,
+			rec.UpdatedAt.UTC().Format(time.RFC3339),
+			strings.Join(rec.Locks, ","),
+			rec.ArtifactDir)
+	}
+	return 0
 }
 
 func loadRegistrations(repoRoot, registryDir string) ([]testops.Registration, error) {

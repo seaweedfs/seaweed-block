@@ -4,10 +4,12 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/seaweedfs/seaweed-block/core/host/master"
+	"github.com/seaweedfs/seaweed-block/core/launcher"
 	"github.com/seaweedfs/seaweed-block/core/lifecycle"
 )
 
@@ -321,5 +323,47 @@ func TestG15e_BlockmasterLauncherTickRemovesManifestAfterVolumeDelete(t *testing
 	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatalf("manifest still exists after delete or stat err=%v", err)
+	}
+}
+
+func TestLifecycleLauncherKubernetesApplyTracksRenderedNamespaces(t *testing.T) {
+	rendered := []launcher.RenderedManifest{
+		{
+			Name: "sw-blockvolume-pvc-a-r1",
+			YAML: []byte(`---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sw-blockvolume-pvc-a-r1
+  namespace: default
+  labels:
+    app: sw-blockvolume
+    sw-block.seaweedfs.com/volume: pvc-a
+    sw-block.seaweedfs.com/replica: r1
+`),
+		},
+		{
+			Name: "sw-blockvolume-pvc-b-r1",
+			YAML: []byte(`---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sw-blockvolume-pvc-b-r1
+  namespace: apps
+  labels:
+    app: sw-blockvolume
+    sw-block.seaweedfs.com/volume: pvc-b
+    sw-block.seaweedfs.com/replica: r1
+`),
+		},
+	}
+	namespaces, byNamespace := renderedManifestsByNamespace(rendered, "kube-system")
+	wantNamespaces := []string{"kube-system", "default", "apps"}
+	if !reflect.DeepEqual(namespaces, wantNamespaces) {
+		t.Fatalf("namespaces=%v want %v", namespaces, wantNamespaces)
+	}
+	defaultRendered := byNamespace["default"]
+	if len(defaultRendered) != 1 || defaultRendered[0].Name != "sw-blockvolume-pvc-a-r1" {
+		t.Fatalf("default rendered=%+v", defaultRendered)
 	}
 }

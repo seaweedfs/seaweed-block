@@ -51,6 +51,7 @@ Non-promise for the current alpha:
 | Clean teardown | Smoke leaves no iSCSI sessions and no visible K8s resources. | Mostly done; generated workload cleanup still harness-assisted. |
 | Public docs | Users understand architecture, roadmap, and non-claims. | In progress. |
 | OS initiator compatibility | Linux/Windows iSCSI should survive real mkfs/format-sized writes. | Closed for Linux + Windows single-host validation. |
+| First-volume user loop | User can follow one runbook to launch, create a PVC, write/read, delete, and collect a failure bundle. | Closed for supported single-node alpha path. |
 
 ### Required For Beta
 
@@ -88,11 +89,11 @@ Priority definitions:
 |---|---|---|---|
 | Controller-owned generated workload cleanup | Current harness cleanup is not a product controller. | Planned | Roadmap item. |
 | Durable node-local volume state | `emptyDir` is not a production storage story. | Planned | Required before real data-retention claim. |
-| Multi-node K8s attach | Single-node loopback hides networking and placement problems. | Planned | Needs lab scenario. |
-| Failover under mounted workload | Availability claim must be proven at app path. | Planned | Build after multi-node attach. |
+| Multi-node K8s attach | Single-node loopback hides networking and placement problems. | Closed for same-node loopback alpha path | Phase 14 proves app/blockvolume co-location, normal CSI attach, inventory placement evidence, and unsupported remote-loopback attach as a non-claim. |
+| Failover under mounted workload | Availability claim must be proven at app path. | Active | Current plan: basic mounted failover and reattach MVP. |
 | Replica reintegration policy | Returned replicas must not become ready from heartbeat alone. | Partially designed | G9 lifecycle work informs this. |
 | ACK profile rules | Avoid “best-effort” being mistaken for full durability. | Designed, not enforced | See production readiness plan. |
-| Observability/status surface | Users need diagnosis without reading debug logs. | Planned | CLI or HTTP status. |
+| Observability/status surface | Users need diagnosis without reading debug logs. | Active | Current plan: cluster operations inventory and lifecycle visibility. |
 
 ### P2: Expansion
 
@@ -147,21 +148,28 @@ Default answer to #7 is yes for all product fixes after the MVP merge.
 
 ## Current Immediate Recommendation
 
-The iSCSI OS-initiator compatibility issue is closed for the current alpha
-claim.
+The light-use operations ladder is now closed through same-node placement and
+attach:
+
+- first-volume runbook and failure bundle are closed,
+- cluster inventory is closed,
+- product-owned generated workload lifecycle is closed,
+- durable RF=1 restart/reattach is closed,
+- same-node alpha attach and placement visibility are closed.
 
 The next concrete product step is:
 
 ```text
-Move remaining iSCSI work to component-first session/backend pressure tests and
-keep long OS-initiator runs as milestone gates.
+Build a basic mounted failover and reattach MVP: prove through the app/PVC path
+that a controlled primary failure either recovers with data verified after
+reattach, or fails closed with inventory/support-bundle evidence that explains
+why recovery is not claimed.
 ```
 
 Current state:
 
-- Linux/open-iscsi gate is green at product commit `9e8ffab`.
-- Windows 11 built-in Initiator validation is green at product commit
-  `9e8ffab`.
-- V2 execution deltas are not reopened while the OS gates are green.
-- Future failures should be reduced to fast component/protocol tests before
-  adding more long integration loops.
+- Protocol-level iSCSI/NVMe failover gates exist, but the Kubernetes app/PVC
+  recovery claim is not yet closed.
+- The ACK profile and stale-primary/returned-replica evidence must be explicit
+  before any availability claim.
+- The active plan is `Basic Mounted Failover And Reattach MVP`.

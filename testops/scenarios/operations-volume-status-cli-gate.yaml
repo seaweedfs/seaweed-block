@@ -1,0 +1,239 @@
+# Runner-native operations volume-status CLI gate.
+#
+# Goal:
+#   Exercise the operator-facing `sw-block ops status` command boundary and
+#   prove it writes the support-bundle artifacts expected by the operations
+#   usability plan. This remains component-fast: the command talks to in-test
+#   fake master/status endpoints, not a live blockvolume deployment.
+#
+# Expected invocation:
+#   swblock run \
+#     -env product_root=/path/to/seaweed_block/on/m02 \
+#     -env ssh_key=/path/to/testdev_key/on/controller \
+#     testops/scenarios/operations-volume-status-cli-gate.yaml
+
+name: operations-volume-status-cli-gate
+timeout: 5m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: pre_clean
+    actions:
+      - action: assert_no_active_iscsi_sessions
+        node: m02
+        iqn_substr: "io.seaweedfs"
+      - action: assert_no_processes
+        node: m02
+        pattern: "[/]blockmaster --|[/]blockvolume --|^blockmaster |^blockvolume "
+      - action: exec
+        node: m02
+        cmd: "rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-ops-volume-status-cli && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-ops-volume-status-cli/pin_build /mnt/smb/work/share/g15d-k8s/{{ run_id }}-ops-volume-status-cli/ops-artifacts"
+
+  - name: pin_build
+    actions:
+      - action: exec
+        node: m02
+        cmd: "cd {{ product_root }} && git rev-parse HEAD > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-ops-volume-status-cli/pin_build/git.sha && git status --porcelain > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-ops-volume-status-cli/pin_build/git.status && test ! -s /mnt/smb/work/share/g15d-k8s/{{ run_id }}-ops-volume-status-cli/pin_build/git.status"
+
+  - name: ops_status_cli
+    actions:
+      - action: exec
+        node: m02
+        timeout: 3m
+        cmd: "cd {{ product_root }} && bash -o pipefail -c 'SW_BLOCK_OPS_STATUS_CLI_ARTIFACT_DIR=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-ops-volume-status-cli/ops-artifacts go test -count=1 -json -run \"^TestOpsStatusWritesArtifactsAndReturnsClean$\" ./cmd/sw-block | tee /mnt/smb/work/share/g15d-k8s/{{ run_id }}-ops-volume-status-cli/ops-status-cli-go-test.jsonl'"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-ops-volume-status-cli/ops-status-cli-go-test.jsonl"
+        pattern: "\"Action\":\"pass\".*\"Test\":\"TestOpsStatusWritesArtifactsAndReturnsClean\""
+        save_as: ops_status_cli_pass_count
+      - action: assert_greater
+        actual: "{{ ops_status_cli_pass_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-ops-volume-status-cli/ops-artifacts/volume-status-report.json"
+        pattern: "\"schema_version\": \"1.0\""
+        save_as: ops_status_report_schema_count
+      - action: assert_greater
+        actual: "{{ ops_status_report_schema_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-ops-volume-status-cli/ops-artifacts/volume-status-report.json"
+        pattern: "\"volume_id\": \"v1\""
+        save_as: ops_status_report_volume_count
+      - action: assert_greater
+        actual: "{{ ops_status_report_volume_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-ops-volume-status-cli/ops-artifacts/volume-status-report.json"
+        pattern: "\"product_revision\": \"product-rev\""
+        save_as: ops_status_report_product_revision_count
+      - action: assert_greater
+        actual: "{{ ops_status_report_product_revision_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-ops-volume-status-cli/ops-artifacts/ops-status-bundle.json"
+        pattern: "\"schema_version\": \"1.0\""
+        save_as: ops_status_bundle_schema_count
+      - action: assert_greater
+        actual: "{{ ops_status_bundle_schema_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-ops-volume-status-cli/ops-artifacts/ops-status-bundle.json"
+        pattern: "\"command\": \"sw-block ops status\""
+        save_as: ops_status_bundle_command_count
+      - action: assert_greater
+        actual: "{{ ops_status_bundle_command_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-ops-volume-status-cli/ops-artifacts/ops-status-bundle.json"
+        pattern: "\"volume_id\": \"v1\""
+        save_as: ops_status_bundle_volume_count
+      - action: assert_greater
+        actual: "{{ ops_status_bundle_volume_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-ops-volume-status-cli/ops-artifacts/ops-status-bundle.json"
+        pattern: "\"product_revision\": \"product-rev\""
+        save_as: ops_status_bundle_product_revision_count
+      - action: assert_greater
+        actual: "{{ ops_status_bundle_product_revision_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-ops-volume-status-cli/ops-artifacts/ops-status-bundle.json"
+        pattern: "\"runner_revision\": \"runner-rev\""
+        save_as: ops_status_bundle_runner_revision_count
+      - action: assert_greater
+        actual: "{{ ops_status_bundle_runner_revision_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-ops-volume-status-cli/ops-artifacts/ops-status-bundle.json"
+        pattern: "\"exit_code\": 0"
+        save_as: ops_status_bundle_exit_count
+      - action: assert_greater
+        actual: "{{ ops_status_bundle_exit_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-ops-volume-status-cli/ops-artifacts/ops-status-bundle.json"
+        pattern: "\"status\": \"ok\""
+        save_as: ops_status_bundle_status_count
+      - action: assert_greater
+        actual: "{{ ops_status_bundle_status_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-ops-volume-status-cli/ops-artifacts/ops-status-bundle.json"
+        pattern: "\"name\": \"volume-status-report.json\""
+        save_as: ops_status_bundle_report_artifact_count
+      - action: assert_greater
+        actual: "{{ ops_status_bundle_report_artifact_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-ops-volume-status-cli/ops-artifacts/ops-status-bundle.json"
+        pattern: "\"name\": \"volume-status-summary.txt\""
+        save_as: ops_status_bundle_summary_artifact_count
+      - action: assert_greater
+        actual: "{{ ops_status_bundle_summary_artifact_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-ops-volume-status-cli/ops-artifacts/ops-status-bundle.json"
+        pattern: "\"name\": \"ops-status-bundle.json\""
+        save_as: ops_status_bundle_self_artifact_count
+      - action: assert_greater
+        actual: "{{ ops_status_bundle_self_artifact_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-ops-volume-status-cli/ops-artifacts/ops-status-bundle.json"
+        pattern: "\"unchecked\":"
+        save_as: ops_status_bundle_unchecked_count
+      - action: assert_greater
+        actual: "{{ ops_status_bundle_unchecked_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-ops-volume-status-cli/ops-artifacts/ops-status-bundle.json"
+        pattern: "\"collection_errors\":"
+        save_as: ops_status_bundle_collection_errors_count
+      - action: assert_greater
+        actual: "{{ ops_status_bundle_collection_errors_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-ops-volume-status-cli/ops-artifacts/ops-status-bundle.json"
+        pattern: "\"non_claims\":"
+        save_as: ops_status_bundle_non_claims_count
+      - action: assert_greater
+        actual: "{{ ops_status_bundle_non_claims_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-ops-volume-status-cli/ops-artifacts/volume-status-summary.txt"
+        pattern: "^status: ok$"
+        save_as: ops_status_summary_ok_count
+      - action: assert_greater
+        actual: "{{ ops_status_summary_ok_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-ops-volume-status-cli/ops-artifacts/volume-status-summary.txt"
+        pattern: "^volume: id=v1 replica=r1 protocols=iscsi frontends=1$"
+        save_as: ops_status_summary_volume_count
+      - action: assert_greater
+        actual: "{{ ops_status_summary_volume_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-ops-volume-status-cli/ops-artifacts/volume-status-summary.txt"
+        pattern: "^authority: role=primary healthy=true primary_ready=true assigned=true epoch=7 endpoint_version=2$"
+        save_as: ops_status_summary_authority_count
+      - action: assert_greater
+        actual: "{{ ops_status_summary_authority_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-ops-volume-status-cli/ops-artifacts/volume-status-summary.txt"
+        pattern: "^issues: none$"
+        save_as: ops_status_summary_issues_count
+      - action: assert_greater
+        actual: "{{ ops_status_summary_issues_count }}"
+        threshold: "0"
+
+  - name: final_asserts
+    actions:
+      - action: assert_no_active_iscsi_sessions
+        node: m02
+        iqn_substr: "io.seaweedfs"
+      - action: assert_no_processes
+        node: m02
+        pattern: "[/]blockmaster --|[/]blockvolume --|^blockmaster |^blockvolume "
+
+  - name: collect_and_cleanup
+    always: true
+    actions:
+      - action: collect_path
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-ops-volume-status-cli"
+        name: "remote-phases"
+        ignore_error: true

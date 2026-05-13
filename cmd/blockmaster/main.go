@@ -20,31 +20,32 @@ import (
 )
 
 type flags struct {
-	authorityStore         string
-	lifecycleStore         string
-	lifecyclePlacementSeed string
-	clusterSpec            string
-	listen                 string
-	topology               string
-	expectedSlotsPerVol    int
-	freshnessWindow        time.Duration
-	pendingGrace           time.Duration
-	lifecycleLoop          time.Duration
-	launcherLoop           time.Duration
-	launcherManifestDir    string
-	launcherNamespace      string
-	launcherImage          string
-	launcherMasterAddr     string
-	launcherDurableRoot    string
-	launcherStateHostPath  string
-	launcherISCSIPortBase  int
-	launcherNVMePortBase   int
-	launcherPVCOwnerRef    bool
-	launcherStatus         bool
-	launcherCHAPSecretName string
-	launcherCHAPUserKey    string
-	launcherCHAPSecretKey  string
-	version                bool
+	authorityStore          string
+	lifecycleStore          string
+	lifecyclePlacementSeed  string
+	clusterSpec             string
+	listen                  string
+	topology                string
+	expectedSlotsPerVol     int
+	freshnessWindow         time.Duration
+	pendingGrace            time.Duration
+	lifecycleLoop           time.Duration
+	launcherLoop            time.Duration
+	launcherManifestDir     string
+	launcherNamespace       string
+	launcherImage           string
+	launcherMasterAddr      string
+	launcherDurableRoot     string
+	launcherStateHostPath   string
+	launcherISCSIPortBase   int
+	launcherNVMePortBase    int
+	launcherPVCOwnerRef     bool
+	launcherStatus          bool
+	launcherKubernetesApply bool
+	launcherCHAPSecretName  string
+	launcherCHAPUserKey     string
+	launcherCHAPSecretKey   string
+	version                 bool
 	// printReadyLine: test-only flag that emits a single
 	// structured JSON line to stdout after the gRPC listener is
 	// bound, so L2 subprocess tests can parse the ready event.
@@ -76,6 +77,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.IntVar(&f.launcherNVMePortBase, "launcher-nvme-port-base", 4420, "G15d NVMe/TCP port base for generated blockvolume workloads")
 	fs.BoolVar(&f.launcherPVCOwnerRef, "launcher-pvc-owner-ref", false, "render generated blockvolume Deployments in the source PVC namespace with a PVC ownerReference; disabled by default for alpha harness compatibility")
 	fs.BoolVar(&f.launcherStatus, "launcher-status", false, "render loopback-only blockvolume status endpoints in generated workload manifests; intended for TestOps/diagnostics")
+	fs.BoolVar(&f.launcherKubernetesApply, "launcher-kubernetes-apply", false, "apply/delete generated blockvolume Deployments through the in-cluster Kubernetes API; scoped to app=sw-blockvolume and generated volume/replica labels")
 	fs.StringVar(&f.launcherCHAPSecretName, "launcher-iscsi-chap-secret-name", "", "optional Kubernetes Secret name used by generated blockvolume Deployments for target-side iSCSI CHAP")
 	fs.StringVar(&f.launcherCHAPUserKey, "launcher-iscsi-chap-username-key", "chapUsername", "Kubernetes Secret key for generated blockvolume iSCSI CHAP username")
 	fs.StringVar(&f.launcherCHAPSecretKey, "launcher-iscsi-chap-secret-key", "chapSecret", "Kubernetes Secret key for generated blockvolume iSCSI CHAP secret")
@@ -295,7 +297,7 @@ func runLifecycleLauncherTick(h *master.Host, f flags) error {
 	if err != nil {
 		return err
 	}
-	if f.launcherManifestDir == "" {
+	if f.launcherManifestDir == "" && !f.launcherKubernetesApply {
 		return nil
 	}
 	masterAddr := f.launcherMasterAddr
@@ -323,8 +325,60 @@ func runLifecycleLauncherTick(h *master.Host, f flags) error {
 		}
 		rendered = append(rendered, manifests...)
 	}
-	if err := launcher.SyncRenderedManifests(f.launcherManifestDir, rendered); err != nil {
-		return err
+	if f.launcherManifestDir != "" {
+		if err := launcher.SyncRenderedManifests(f.launcherManifestDir, rendered); err != nil {
+			return err
+		}
+	}
+	if f.launcherKubernetesApply {
+		client, err := launcher.NewInClusterDeploymentClient()
+		if err != nil {
+			return err
+		}
+		namespaces, renderedByNamespace := renderedManifestsByNamespace(rendered, f.launcherNamespace)
+		for _, namespace := range namespaces {
+			desired := renderedByNamespace[namespace]
+			existing, err := client.ListBlockVolumeDeployments(context.Background(), namespace)
+			if err != nil {
+				return err
+			}
+			reconcileResult, err := launcher.ReconcileBlockVolumeDeployments(context.Background(), launcher.ReconcileDeploymentsInput{
+				Namespace: namespace,
+				Desired:   desired,
+				Existing:  existing,
+				Client:    client,
+			})
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(os.Stderr, "blockmaster: launcher kubernetes reconcile namespace=%s applied=%d deleted=%d skipped=%d\n", namespace, reconcileResult.Applied, reconcileResult.Deleted, reconcileResult.Skipped)
+		}
 	}
 	return nil
+}
+
+func renderedManifestsByNamespace(rendered []launcher.RenderedManifest, fallback string) ([]string, map[string][]launcher.RenderedManifest) {
+	seen := map[string]bool{}
+	var out []string
+	byNamespace := map[string][]launcher.RenderedManifest{}
+	add := func(namespace string) {
+		if namespace == "" {
+			namespace = fallback
+		}
+		if namespace == "" || seen[namespace] {
+			return
+		}
+		seen[namespace] = true
+		out = append(out, namespace)
+	}
+	add(fallback)
+	for _, manifest := range rendered {
+		identity, err := launcher.DecodeRenderedDeploymentIdentity(manifest)
+		if err != nil {
+			continue
+		}
+		add(identity.Namespace)
+		byNamespace[identity.Namespace] = append(byNamespace[identity.Namespace], manifest)
+	}
+	return out, byNamespace
 }
