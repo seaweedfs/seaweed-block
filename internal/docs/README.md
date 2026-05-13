@@ -41,6 +41,8 @@ Public-facing docs belong in `docs/`.
 | `finished-plans/phase7_finishedplan_iscsi_session_backend_pressure.md` | Historical iSCSI session/backend pressure plan closed by fast protocol, L2 restart, and Linux OS initiator gates. |
 | `finished-plans/phase8_finishedplan_main_merge_pr_readiness.md` | Historical main-merge readiness plan closed by PR #46 squash merge. |
 | `finished-plans/phase9_finishedplan_light_use_operations_mvp.md` | Historical light-use operations MVP plan closed by local CLI, bundle, and TestOps control-data validation. |
+| `finished-plans/phase10_finishedplan_light_use_install_lifecycle_operations_mvp.md` | Historical light-use install/lifecycle operations MVP plan closed by strict first-volume runbook and scenario validation. |
+| `finished-plans/phase11_finishedplan_cluster_ops_inventory_lifecycle_visibility_mvp.md` | Historical cluster operations inventory and lifecycle visibility MVP plan closed by strict multi-volume inventory validation. |
 | `ref/production-readiness-plan.md` | Longer readiness reference and iSCSI P1-P6 detail. |
 | `ref/light-use-block-storage-ux-research.md` | Comparison of Longhorn, OpenEBS, Rook/Ceph, Piraeus/LINSTOR, and EBS CSI light-user install/operations UX. |
 | `ref/iscsi-os-initiator-compat-plan.md` | Detailed iSCSI P1 OS-initiator compatibility plan and evidence. |

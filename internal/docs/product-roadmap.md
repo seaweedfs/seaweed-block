@@ -75,10 +75,10 @@ This is the short internal roadmap. Keep it current and readable.
 - Current: the light-use install/lifecycle loop is closed for the supported
   single-node alpha path: install/launch, create PVC, run app write/read,
   delete resources, verify cleanup attribution, and collect a failure bundle.
-- Next: keep cleanup ownership explicit while the operations layer learns to
-  discover live cluster state without TestOps artifacts.
-- Later: add a small controller/operator for generated `blockvolume`
-  workloads.
+- Next: make generated `blockvolume` workload lifecycle product-owned so the
+  user does not run a separate manifest-apply script.
+- Later: turn the minimal lifecycle loop into a small controller/operator with
+  scoped reconciliation and upgrade-safe ownership.
 
 ### Track B: iSCSI Frontend Stability
 
@@ -117,12 +117,12 @@ This is the short internal roadmap. Keep it current and readable.
 
 ### Track F: Operations Layer
 
-- Current: first-volume support-bundle wiring is closed. The active plan is
-  cluster operations inventory: discover live Seaweed Block volumes from the
-  alpha Kubernetes install, map them to PVC/PV/generated workloads, and attach
-  per-volume health/status evidence without relying on TestOps artifact paths.
-- Next: expand from read-only inventory to product-owned lifecycle visibility
-  and eventually conservative admin actions.
+- Current: cluster operations inventory is closed for the supported alpha path:
+  it discovers live Seaweed Block volumes from Kubernetes, maps them to
+  PVC/PV/generated workloads, attaches per-replica status bundles, and names
+  stale/orphan residue without relying on TestOps artifacts.
+- Next: use that inventory as the proof surface for product-owned generated
+  workload lifecycle.
 - Later: observation API/UI, metrics, conservative admin controls, enterprise
   operations, hosted validation, fleet automation, and cloud-scale test
   lifecycle.
@@ -133,11 +133,11 @@ These are the main gaps between the current functional block substrate and a
 credible light-use product:
 
 - Product-owned generated workload lifecycle: scripts/TestOps still own too
-  much cleanup and run-scoped state management.
+  much apply/cleanup and run-scoped state management.
 - Install/upgrade/uninstall: alpha scripts work for tests, but users need a
   normal K8s add-on flow.
-- Observation beyond one volume: the current CLI is one-volume read-only
-  diagnosis; users will need cluster-wide list/status and eventually metrics/UI.
+- Observation beyond one volume: the read-only CLI now covers cluster inventory;
+  users will still need lifecycle status, metrics, and eventually UI.
 - Safe admin controls: repair/promote/cleanup actions must wait until the
   read-only observation model is stable and release-gated.
 
