@@ -2,13 +2,13 @@
 
 Status: active, opened after closing
 `finished-plans/phase13_finishedplan_durable_volume_restart_reattach_mvp.md`,
-52% implementation.
+62% implementation.
 
 QA needed now: yes for D4/D5 live gates. Assignment:
 `internal/docs/qa-assignments/same-node-alpha-attach-validation.md`.
 Dev can continue with D6 docs while QA runs it.
 
-Current dev slice: D6 operations manual update.
+Current dev slice: D7 QA close-gate prep.
 
 ## Product Question
 
@@ -259,6 +259,11 @@ Update `docs/operations-v1.md` and `docs/quickstart-kubernetes.md` to explain:
 - expected inventory placement fields,
 - how to collect a bundle,
 - non-claims for HA, node loss, RF=2/RF=3, and failover.
+
+Output: operations and quickstart docs now describe same-node loopback attach,
+`SW_BLOCK_ALPHA_NODE_NAME`, `SW_BLOCK_DEMO_APP_NODE_NAME`, rendered app
+`nodeSelector` evidence, and the `unsupported_cross_node_loopback_attach`
+failure class.
 
 ### D7: QA Close Gate
 

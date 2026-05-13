@@ -37,14 +37,21 @@ first pod.
 
 ## First Volume In 10 Minutes
 
-This quick start is intentionally a single-node Kubernetes alpha path. Use it to
-prove the first-volume workflow, not production readiness.
+This quick start is intentionally a same-node Kubernetes alpha path. On a
+single-node cluster that is automatic. On a multi-node-capable cluster, the app
+pod and generated `blockvolume` must be pinned to the same selected node because
+the alpha iSCSI frontend is loopback (`127.0.0.1:<port>`). Use it to prove the
+first-volume workflow, not production readiness.
 
 Recommended path: local k3s build. This avoids relying on public GHCR alpha
 packages and records the exact image IDs used by the cluster.
 
 ```bash
 export KUBECONFIG="${KUBECONFIG:-/etc/rancher/k3s/k3s.yaml}"
+
+# Optional. Defaults to the first Kubernetes node.
+export SW_BLOCK_ALPHA_NODE_NAME="${SW_BLOCK_ALPHA_NODE_NAME:-m02}"
+export SW_BLOCK_DEMO_APP_NODE_NAME="${SW_BLOCK_DEMO_APP_NODE_NAME:-$SW_BLOCK_ALPHA_NODE_NAME}"
 
 bash scripts/preflight-k8s-alpha.sh --local-k3s
 
@@ -87,6 +94,9 @@ grep 'PASS:' "$ARTIFACT_DIR/run.log"
 grep '/data/demo.bin: OK' "$ARTIFACT_DIR/writer.log"
 grep '/data/demo.bin: OK' "$ARTIFACT_DIR/reader.log"
 grep -- '--volume-id=' "$ARTIFACT_DIR/generated-blockvolume.yaml"
+grep 'app_node=' "$ARTIFACT_DIR/run.log"
+grep 'nodeSelector:' "$ARTIFACT_DIR/demo-app.rendered.yaml"
+grep 'nodeSelector:' "$ARTIFACT_DIR/demo-app-reader.rendered.yaml"
 cat "$ARTIFACT_DIR/app-storage.after-delete.txt"
 cat "$ARTIFACT_DIR/iscsi-sessions.after-delete.txt"
 ```
@@ -295,6 +305,8 @@ The demo records the useful files under `/tmp/sw-block-app-demo-*`:
 | `apply-block-stack.log` | Control-plane manifest applied. |
 | `apply-csi-controller.log`, `apply-csi-node.log` | CSI components applied. |
 | `generated-blockvolume.yaml` | Master generated the per-PVC blockvolume workload. |
+| `demo-app.rendered.yaml` | Writer pod rendered with the selected app-node `nodeSelector`. |
+| `demo-app-reader.rendered.yaml` | Reader pod rendered with the selected app-node `nodeSelector`. |
 | `apply-generated-blockvolume.log` | Generated blockvolume workload was reconciled by blockmaster, or applied manually when the fallback env is enabled. |
 | `writer.log` | First app pod wrote and verified `/data/demo.bin`. |
 | `reader.log` | Replacement app pod read and verified the same data. |
@@ -474,7 +486,8 @@ For the copyable YAML, see
   full production operator.
 - By default, generated `blockvolume` Deployments carry a PVC owner reference,
   so Kubernetes garbage collection removes them after the PVC is deleted.
-- The demo uses single-node Kubernetes.
+- The demo uses same-node loopback attach. Remote-node attach to a
+  loopback-published `blockvolume` is not claimed.
 - The default quickstart is a first-volume path. Durable generated
   `blockvolume` restart is supported only when
   `SW_BLOCK_LAUNCHER_STATE_HOSTPATH` is configured as described in

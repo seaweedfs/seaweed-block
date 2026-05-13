@@ -16,6 +16,8 @@ fails.
 Claimed in this manual:
 
 - one single-node Kubernetes alpha cluster,
+- same-node RF=1 attach on a multi-node-capable alpha cluster when the app pod
+  and generated `blockvolume` are pinned to the same selected node,
 - one or more RF=1 PVCs on the supported alpha path,
 - product-owned reconciliation of generated `blockvolume` Deployments,
 - durable restart of a generated RF=1 `blockvolume` when an explicit
@@ -27,7 +29,8 @@ Not claimed:
 
 - production HA,
 - node loss or host-disk failure,
-- multi-node scheduling,
+- remote-node attach to a loopback-published `blockvolume`,
+- automatic multi-node scheduling, rescheduling, or rebalancing,
 - live RF=2/RF=3 Kubernetes lifecycle,
 - upgrade or broad uninstall safety,
 - repair, rebuild, promote, backup, or restore commands,
@@ -105,6 +108,39 @@ daemon set "sw-block-csi-node" successfully rolled out
 block.csi.seaweedfs.com
 ```
 
+### Same-Node Placement Control
+
+The alpha iSCSI frontend is loopback by default:
+
+```text
+--iscsi-listen=127.0.0.1:<port>
+```
+
+That means the app pod must run on the same Kubernetes node as the generated
+`blockvolume`. The scripts enforce this on the demo path by rendering writer
+and reader pods with a `nodeSelector` matching the selected alpha node.
+
+Default node selection uses the first Kubernetes node. To choose the node
+explicitly:
+
+```bash
+export SW_BLOCK_ALPHA_NODE_NAME=m02
+bash scripts/install-k8s-alpha.sh "$PWD"
+```
+
+For the demo, the app node defaults to the same value:
+
+```bash
+export SW_BLOCK_ALPHA_NODE_NAME=m02
+export SW_BLOCK_DEMO_APP_NODE_NAME=m02
+bash scripts/run-k8s-demo.sh "$PWD"
+```
+
+Keep `SW_BLOCK_DEMO_PIN_APP_NODE=1` for the supported happy path. Setting it to
+`0`, or setting `SW_BLOCK_DEMO_APP_NODE_NAME` to a different node while the
+frontend is loopback, is a negative-fixture path and should produce an
+`unsupported_cross_node_loopback_attach` bundle instead of a timeout.
+
 ## 4. Create A First PVC And Prove I/O
 
 The fastest full check is the demo script:
@@ -128,6 +164,9 @@ grep '/data/demo.bin: OK' "$ARTIFACT_DIR/writer.log"
 grep '/data/demo.bin: OK' "$ARTIFACT_DIR/reader.log"
 grep -- '--volume-id=' "$ARTIFACT_DIR/generated-blockvolume.yaml"
 cat "$ARTIFACT_DIR/apply-generated-blockvolume.log"
+grep 'app_node=' "$ARTIFACT_DIR/run.log"
+grep 'nodeSelector:' "$ARTIFACT_DIR/demo-app.rendered.yaml"
+grep 'nodeSelector:' "$ARTIFACT_DIR/demo-app-reader.rendered.yaml"
 ```
 
 `apply-generated-blockvolume.log` should say the product-owned lifecycle path
@@ -339,6 +378,7 @@ orphan-blockvolume-deploy=<deployment>
 blockvolume-process-without-placement=<server>
 status_endpoint_unavailable
 status_endpoint_unreachable=<addr>
+unsupported_cross_node_loopback_attach
 ops_status=unhealthy reason=authority_not_assigned ...
 ```
 
