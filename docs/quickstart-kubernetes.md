@@ -171,6 +171,7 @@ cluster snapshot:
 kubectl -n kube-system port-forward deploy/sw-blockmaster 9333:9333
 sw-block ops cluster --master-api 127.0.0.1:9333 -o json \
   > /tmp/sw-block-cluster-evidence.json
+sw-block ops report --master-api 127.0.0.1:9333 --out /tmp/sw-block-report
 ```
 
 Use this file together with the inventory directory when filing an issue. The
@@ -178,6 +179,10 @@ cluster evidence contains master-owned events such as placement verification,
 promotion candidate evaluation, authority publication, and CSI reattach
 observation. The inventory directory contains Kubernetes discovery and nested
 per-replica status bundles.
+The report directory contains a local read-only `index.html` plus machine
+artifacts (`cluster-evidence.json`, `timeline.jsonl`, and `summary.txt`) that
+can be attached to a support request or opened by a PM/user without a hosted
+dashboard.
 
 The command does not need a TestOps artifact directory or a known volume id. It
 discovers PVC/PV ownership and generated `blockvolume` Deployments from

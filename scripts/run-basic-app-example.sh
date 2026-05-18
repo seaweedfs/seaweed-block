@@ -150,7 +150,13 @@ collect_status_evidence() {
   if [[ "$rc" -eq 0 ]] && ! sw_block_cmd ops inventory --namespace "$NAMESPACE" --master "127.0.0.1:${MASTER_PORT}" --out "$out/inventory" --timeout 30s >"$out/inventory.stdout.txt" 2>"$out/inventory.stderr.txt"; then
     rc=1
   fi
+  if [[ "$rc" -eq 0 ]] && ! sw_block_cmd ops report --from-bundle "$ARTIFACT_DIR" --out "$out/report" >"$out/report.stdout.txt" 2>"$out/report.stderr.txt"; then
+    rc=1
+  fi
   if [[ ! -s "$out/cluster-evidence.json" || ! -s "$out/inventory/volume-inventory-summary.txt" ]]; then
+    rc=1
+  fi
+  if [[ ! -s "$out/report/index.html" || ! -s "$out/report/cluster-evidence.json" ]]; then
     rc=1
   fi
   stop_port_forward
@@ -204,6 +210,7 @@ write_summary() {
     echo "status_evidence=status/cluster-evidence.json,status/inventory"
     echo "cluster_evidence=status/cluster-evidence.json"
     echo "inventory_bundle=status/inventory"
+    echo "status_report=status/report/index.html"
     echo "cleanup_status=$CLEANUP_STATUS"
   } >"$ARTIFACT_DIR/first-volume-summary.txt"
 }

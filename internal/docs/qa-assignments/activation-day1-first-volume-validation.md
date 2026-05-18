@@ -35,6 +35,10 @@ The `basic-app` artifact directory must contain:
 - `status/cluster-evidence.json`
 - `status/inventory/volume-inventory-summary.txt`
 - `status/inventory/ops-inventory-bundle.json`
+- `status/report/index.html`
+- `status/report/cluster-evidence.json`
+- `status/report/timeline.jsonl`
+- `status/report/summary.txt`
 
 `first-volume-summary.txt` must include:
 
@@ -46,6 +50,7 @@ reader_verified=true
 status_evidence=status/cluster-evidence.json,status/inventory
 cluster_evidence=status/cluster-evidence.json
 inventory_bundle=status/inventory
+status_report=status/report/index.html
 cleanup_status=ok
 ```
 
@@ -60,6 +65,8 @@ cleanup_status=ok
 - The reader pod logs `/data/demo.bin: OK` after the writer pod is deleted.
 - Product-owned cluster evidence is collected from `sw-block ops cluster`.
 - Inventory evidence maps the PVC to the generated volume.
+- A local read-only status report is generated from the same evidence and
+  includes `read_only=true`.
 - The helper cleans up the example reader, writer, PVC, and StorageClass.
 - Cleanup leaves no active `io.seaweedfs` iSCSI sessions.
 - Cleanup leaves no `blockmaster`, `blockvolume`, `blockcsi`, or `iscsi-target`

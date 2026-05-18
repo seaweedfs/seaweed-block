@@ -41,7 +41,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return ops.VolumeStatusExitInvalid
 	}
 	if len(args) < 2 {
-		fmt.Fprintln(stderr, "sw-block: expected subcommand ops status|inventory|list|describe|timeline|explain")
+		fmt.Fprintln(stderr, "sw-block: expected subcommand ops status|inventory|list|cluster|volumes|describe|timeline|explain|report")
 		usage(stderr)
 		return ops.VolumeStatusExitInvalid
 	}
@@ -60,6 +60,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runOpsTimeline(args[2:], stdout, stderr)
 	case "explain":
 		return runOpsExplain(args[2:], stdout, stderr)
+	case "report":
+		return runOpsReport(args[2:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "sw-block: unknown ops subcommand %q\n", args[1])
 		usage(stderr)
@@ -525,6 +527,97 @@ func runOpsExplain(args []string, stdout, stderr io.Writer) int {
 	return ops.VolumeStatusExitOK
 }
 
+func runOpsReport(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("sw-block ops report", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	var (
+		fromBundle       string
+		namespace        string
+		masterAddr       string
+		masterAPIAddr    string
+		outDir           string
+		evidenceOutDir   string
+		productRevision  string
+		claimProfile     string
+		requiredFrontier requiredFrontierFlags
+		timeout          time.Duration
+	)
+	fs.StringVar(&fromBundle, "from-bundle", "", "existing inventory/support bundle directory to render")
+	fs.StringVar(&namespace, "namespace", "default", "Kubernetes namespace for live read-only inventory")
+	fs.StringVar(&masterAddr, "master", "", "optional blockmaster gRPC address for live per-replica status evidence")
+	fs.StringVar(&masterAPIAddr, "master-api", "", "optional blockmaster gRPC address for ClusterEvidenceService read-only snapshot")
+	fs.StringVar(&outDir, "out", "", "directory for index.html, cluster-evidence.json, timeline.jsonl, and summary.txt")
+	fs.StringVar(&evidenceOutDir, "evidence-out", "", "optional directory for nested live status evidence")
+	fs.StringVar(&productRevision, "product-revision", "", "product revision label for live evidence")
+	fs.StringVar(&claimProfile, "claim-profile", "", "promotion-readiness claim profile for live evidence")
+	fs.Var(&requiredFrontier, "required-frontier", "required frontier as volume_id=lsn; repeat for multiple volumes")
+	fs.DurationVar(&timeout, "timeout", 5*time.Second, "live collection timeout")
+	if err := fs.Parse(args); err != nil {
+		return ops.VolumeStatusExitInvalid
+	}
+	if fs.NArg() != 0 {
+		fmt.Fprintf(stderr, "sw-block ops report: unexpected args %s\n", strings.Join(fs.Args(), " "))
+		return ops.VolumeStatusExitInvalid
+	}
+	if outDir == "" {
+		fmt.Fprintln(stderr, "sw-block ops report: --out is required")
+		return ops.VolumeStatusExitInvalid
+	}
+
+	var (
+		cluster ops.ClusterEvidence
+		err     error
+	)
+	switch {
+	case fromBundle != "":
+		cluster, err = ops.BuildObservationFromBundle(ops.ObservationBundleOptions{Dir: fromBundle})
+	case masterAPIAddr != "":
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+		cluster, err = readMasterClusterEvidence(ctx, masterAPIAddr)
+	default:
+		if productRevision == "" {
+			productRevision = buildinfo.Version("sw-block")
+		}
+		if !ops.PromotionClaimProfileAccepted(claimProfile) {
+			fmt.Fprintf(stderr, "sw-block ops report: --claim-profile=%q invalid; want %q, %q, or %q\n", claimProfile, ops.PromotionClaimBetaRecovery, ops.PromotionClaimControlledBestEffortDemo, ops.PromotionClaimStage2ISCSIALUAMultipath)
+			return ops.VolumeStatusExitInvalid
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+		collector := ops.NewKubernetesVolumeInventoryCollector(ops.KubernetesInventoryConfig{
+			Namespace:         namespace,
+			MasterAddr:        masterAddr,
+			StatusBundleRoot:  evidenceOutDir,
+			ProductRevision:   productRevision,
+			ClaimProfile:      claimProfile,
+			RequiredFrontiers: requiredFrontier.values,
+			RunCommand:        opsInventoryRunCommand,
+		})
+		inventory, collectErr := collector.Collect(ctx)
+		if collectErr != nil {
+			inventory.CollectionErrors = append(inventory.CollectionErrors, strings.Split(collectErr.Error(), "\n")...)
+		}
+		cluster, err = ops.BuildObservationFromInventory(inventory, "", evidenceOutDir)
+	}
+	if err != nil {
+		fmt.Fprintf(stderr, "sw-block ops report: %v\n", err)
+		return ops.VolumeStatusExitInvalid
+	}
+	if err := ops.WriteObservationReportArtifacts(outDir, cluster); err != nil {
+		fmt.Fprintf(stderr, "sw-block ops report: %v\n", err)
+		return ops.VolumeStatusExitInvalid
+	}
+	fmt.Fprintf(stdout, "report_status=ok\n")
+	fmt.Fprintf(stdout, "report_dir=%s\n", outDir)
+	fmt.Fprintf(stdout, "html=%s\n", ops.ObservationReportHTMLArtifact)
+	fmt.Fprintf(stdout, "cluster_evidence=%s\n", ops.ObservationReportJSONArtifact)
+	fmt.Fprintf(stdout, "timeline=%s\n", ops.ObservationReportJSONLArtifact)
+	fmt.Fprintf(stdout, "summary=%s\n", ops.ObservationReportTextArtifact)
+	fmt.Fprintf(stdout, "read_only=true\n")
+	return ops.VolumeStatusExitOK
+}
+
 func loadObservationVolume(command string, args []string, stderr io.Writer) (ops.ClusterEvidence, string, int) {
 	if len(args) == 0 || args[0] != "volume" {
 		fmt.Fprintf(stderr, "%s: expected volume [--from-bundle <dir>|--namespace <ns>] <volume-id>\n", command)
@@ -654,6 +747,8 @@ func usage(w io.Writer) {
 	fmt.Fprintln(w, "  sw-block ops timeline volume --from-bundle <dir> <volume-id> [-o jsonl]")
 	fmt.Fprintln(w, "  sw-block ops explain volume --from-bundle <dir> <volume-id>")
 	fmt.Fprintln(w, "  sw-block ops explain volume <volume-id> --namespace <ns> [--master <addr>] [--out <dir>]")
+	fmt.Fprintln(w, "  sw-block ops report --from-bundle <dir> --out <dir>")
+	fmt.Fprintln(w, "  sw-block ops report --master-api <addr> --out <dir>")
 }
 
 func emptyCLI(value string) string {

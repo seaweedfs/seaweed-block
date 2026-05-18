@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend"
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
@@ -297,6 +298,100 @@ func TestOpsDescribeVolumeFromBundle(t *testing.T) {
 	}
 }
 
+func TestOpsDescribeVolumeFromBundlePrefersProductClusterEvidence(t *testing.T) {
+	dir := writeCmdProductClusterBundle(t)
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ops", "describe", "volume", "--from-bundle", dir, "pvc-product"}, &stdout, &stderr)
+	if code != ops.VolumeStatusExitOK {
+		t.Fatalf("exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	for _, want := range []string{
+		"cluster status=ok volumes=1 nodes=1",
+		"volume pvc-product status=ok rf=3 ack=sync-quorum",
+		"primary r2 on m02 frontend=192.168.1.184:3260",
+	} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("stdout missing %q:\n%s", want, stdout.String())
+		}
+	}
+	if strings.Contains(stdout.String(), "pvc-observed") {
+		t.Fatalf("describe should prefer product cluster evidence over fallback inventory:\n%s", stdout.String())
+	}
+}
+
+func TestOpsReportFromBundleWritesStaticReadOnlyArtifacts(t *testing.T) {
+	dir := writeCmdProductClusterBundle(t)
+	outDir := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ops", "report", "--from-bundle", dir, "--out", outDir}, &stdout, &stderr)
+	if code != ops.VolumeStatusExitOK {
+		t.Fatalf("exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	for _, name := range []string{
+		ops.ObservationReportHTMLArtifact,
+		ops.ObservationReportJSONArtifact,
+		ops.ObservationReportJSONLArtifact,
+		ops.ObservationReportTextArtifact,
+	} {
+		if _, err := os.Stat(filepath.Join(outDir, name)); err != nil {
+			t.Fatalf("missing report artifact %s: %v", name, err)
+		}
+	}
+	html, err := os.ReadFile(filepath.Join(outDir, ops.ObservationReportHTMLArtifact))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"sw-block read-only status",
+		"pvc-product",
+		"192.168.1.184:3260",
+		"This report is observation-only",
+	} {
+		if !strings.Contains(string(html), want) {
+			t.Fatalf("html missing %q:\n%s", want, html)
+		}
+	}
+	summary, err := os.ReadFile(filepath.Join(outDir, ops.ObservationReportTextArtifact))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(summary), "read_only=true") || !strings.Contains(string(summary), "volume=pvc-product") {
+		t.Fatalf("summary missing report evidence:\n%s", summary)
+	}
+	if !strings.Contains(stdout.String(), "report_status=ok") || !strings.Contains(stdout.String(), "html=index.html") {
+		t.Fatalf("stdout missing report paths:\n%s", stdout.String())
+	}
+}
+
+func TestOpsReportFromBundleAllowsEmptyClusterEvidence(t *testing.T) {
+	dir := t.TempDir()
+	productDir := filepath.Join(dir, "demo", "product-observation")
+	if err := os.MkdirAll(productDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cluster := ops.NewClusterEvidence(time.Date(2026, 5, 17, 21, 0, 0, 0, time.UTC))
+	raw, err := ops.MarshalObservationJSON(cluster)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(productDir, ops.ClusterEvidenceArtifact), raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	outDir := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ops", "report", "--from-bundle", dir, "--out", outDir}, &stdout, &stderr)
+	if code != ops.VolumeStatusExitOK {
+		t.Fatalf("exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	summary, err := os.ReadFile(filepath.Join(outDir, ops.ObservationReportTextArtifact))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(summary), "volumes=0") || !strings.Contains(string(summary), "read_only=true") {
+		t.Fatalf("summary missing empty-cluster evidence:\n%s", summary)
+	}
+}
+
 func TestOpsTimelineVolumeFromBundleJSONL(t *testing.T) {
 	dir := writeCmdObservationBundle(t)
 	var stdout, stderr bytes.Buffer
@@ -510,6 +605,65 @@ func writeCmdObservationBundle(t *testing.T) string {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, "demo", ops.ControlPlaneTimelineArtifact), []byte("event=authority_published from=r1 to=r2 primary=r2 primary_count=1 volume=pvc-observed\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+func writeCmdProductClusterBundle(t *testing.T) string {
+	t.Helper()
+	dir := writeCmdObservationBundle(t)
+	productDir := filepath.Join(dir, "demo", "product-observation")
+	if err := os.MkdirAll(productDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cluster := ops.NewClusterEvidence(time.Date(2026, 5, 17, 20, 0, 0, 0, time.UTC))
+	cluster.ProductRevision = "product-cluster-rev"
+	cluster.Status = ops.ObservationStatusOK
+	cluster.Nodes = []ops.NodeEvidence{{
+		NodeName:      "m02",
+		InternalIP:    "192.168.1.184",
+		Schedulable:   true,
+		Ready:         true,
+		ReplicaCount:  1,
+		MissingImages: nil,
+	}}
+	cluster.Volumes = []ops.VolumeEvidence{{
+		VolumeID:          "pvc-product",
+		Namespace:         "default",
+		PVCName:           "sw-block-example-pvc",
+		ReplicationFactor: 3,
+		AckProfile:        ops.PromotionAckProfileSyncQuorum,
+		DesiredReplicas:   3,
+		ObservedReplicas:  3,
+		Status:            ops.ObservationStatusOK,
+		PrimaryReplica:    "r2",
+		PrimaryNode:       "m02",
+		PublishTarget:     "192.168.1.184:3260",
+		Replicas: []ops.ReplicaEvidence{{
+			ReplicaID:      "r2",
+			KubernetesNode: "m02",
+			Observed:       true,
+			Role:           "primary",
+			FrontendAddr:   "192.168.1.184:3260",
+		}},
+	}}
+	cluster.Events = []ops.ClusterEvent{{
+		EventID:   "master-1",
+		EventTime: time.Date(2026, 5, 17, 20, 1, 0, 0, time.UTC),
+		VolumeID:  "pvc-product",
+		ReplicaID: "r2",
+		Type:      ops.EventTypeCSIReattachObserved,
+		Severity:  "info",
+		Reason:    ops.EventTypeCSIReattachObserved,
+		Message:   "CSI staged volume on node",
+		NewValue:  "192.168.1.184:3260",
+	}}
+	raw, err := ops.MarshalObservationJSON(cluster)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(productDir, ops.ClusterEvidenceArtifact), raw, 0o644); err != nil {
 		t.Fatal(err)
 	}
 	return dir
