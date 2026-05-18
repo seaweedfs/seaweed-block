@@ -214,6 +214,50 @@ sw-block ops inventory --namespace <ns> --master <addr> --out <dir>
   - no hosted dashboard unless implemented and gated.
 - The documented quick path must match the commands the close gate runs.
 
+### D7: TestOps Controller / Agent Evidence Loop
+
+- Treat TestOps as product infrastructure for this phase, not as ad-hoc
+  scripting. The current runner is already the Windows-side controller: it owns
+  `run_id`, phase/action status, timeouts, cleanup, and the central result
+  bundle.
+- Add a controller/agent track rather than relying only on SSH:
+  - controller stays on the Windows/dev workstation and runs scenarios,
+    distributes binaries/scripts, owns cancellation, and writes the final
+    bundle;
+  - Linux node agents on m01/m02/tp01 collect local evidence and eventually
+    execute bounded jobs;
+  - SSH remains fallback until the agent proves stable.
+- First useful agent capability:
+  - `/healthz` with node name, version, uptime;
+  - `collect_node_snapshot` for process, iSCSI sessions, multipath, NVMe,
+    mounts, disk, kernel tail, network, containerd/k3s images, and kubelet
+    status;
+  - `collect_path` for local artifact pickup;
+  - cancellation-aware bounded command execution later, after snapshot is
+    proven.
+- K8s/block failure auto-collect should become a gate rule:
+  - on phase failure, collect node snapshots from involved nodes,
+  - collect Kubernetes state (`kubectl get`, `describe`, events, selected logs,
+    rendered manifests vs live objects),
+  - collect product state (`sw-block ops cluster`, inventory, timeline/events),
+  - then run cleanup and collect after-clean state.
+- Why this is in the plan: Day-1 first-volume r1/r2 showed that without
+  automatic evidence, a timeout is ambiguous; with `writer-describe.txt`, the
+  root cause was immediately visible as loopback publish target vs cross-node
+  writer placement.
+- Open-source analogs to learn from, not copy blindly:
+  - Sonobuoy: Kubernetes aggregator plus job/daemonset plugins; useful model
+    for cluster-wide collection and per-node log gatherers.
+  - Ansible Runner / AWX execution nodes: useful model for transmit -> worker
+    -> process and central artifact handling.
+  - Jenkins controller/agent: useful model for scheduling jobs onto prepared
+    nodes.
+  - Robot Framework remote libraries: useful model for remote capability
+    exposure, but too generic for block-specific node snapshots.
+- Non-goal for Phase 20: do not rewrite the runner. Add snapshot collection and
+  failure auto-collect first; move remote exec to agent only after the evidence
+  loop is stable.
+
 ## Non-Claims
 
 This plan does not claim:
@@ -245,6 +289,8 @@ The close gate should run from a fresh supported Kubernetes lab and prove:
 8. Cleanup/uninstall leaves no active iSCSI sessions, stale blockvolume
    Deployments, stale port-forwards, or unexpected product pods.
 9. README quick path matches the commands used by the gate.
+10. Failure bundles include automatic K8s/product/node evidence sufficient to
+    explain at least one failed first-volume run without manual SSH.
 
 ## Suggested Close Claim
 
