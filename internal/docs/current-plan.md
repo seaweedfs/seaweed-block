@@ -221,6 +221,10 @@ sw-block ops inventory --namespace <ns> --master <addr> --out <dir>
   - no mutating admin operations,
   - no hosted dashboard unless implemented and gated.
 - The documented quick path must match the commands the close gate runs.
+- Dev slice: README and `docs/quickstart-kubernetes.md` were rewritten around
+  the end-user path: activate, first PVC, writer/reader verification, local
+  read-only report, troubleshooting evidence, and cleanup. Internal gate
+  details remain in QA docs instead of the user tutorial.
 
 ### D7: TestOps Controller / Agent Evidence Loop
 
