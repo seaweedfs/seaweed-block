@@ -123,6 +123,16 @@ kubectl apply -f examples/kubernetes/basic-app/storageclass-pvc.yaml
 kubectl get pvc
 ```
 
+To run the full first-volume user loop after activation:
+
+```bash
+bash scripts/run-basic-app-example.sh "$PWD"
+cat "$(ls -td /tmp/sw-block-basic-app-* | head -1)/first-volume-summary.txt"
+```
+
+The helper creates the example PVC, runs writer/reader checksum pods, captures
+cluster and inventory evidence, and cleans the example resources by default.
+
 The activation script writes `/tmp/sw-block-activation-*/activation-summary.txt`
 with the blockmaster, CSI controller, CSI node, StorageClass, protocol, ACK
 profile, and next inspection commands.
