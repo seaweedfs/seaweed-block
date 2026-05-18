@@ -5,19 +5,20 @@ to evaluate, by hand, the "install Seaweed Block on Kubernetes and run a
 volume" experience that Phase 20 ships.
 
 Time required: ~10 minutes if everything works, ~30 minutes if you also do
-the optional teardown and re-evaluate the user-readable summary.
+the optional teardown and re-evaluate the user-readable summaries.
 
-You will NOT need to understand the internals. You will run four commands
-and judge whether what comes back is good enough to ship.
+You will NOT need to understand the internals. You will run a small documented
+command sequence plus one optional cleanup command and judge whether what comes
+back is good enough to ship.
 
 ## What you are evaluating
 
 The Phase 20 product claim is:
 
 > A new operator can stand up Seaweed Block on a Kubernetes cluster with ONE
-> documented command and reach a state where the next step is "create a
-> volume" — without reading the source code or following more than the
-> documented runbook.
+> documented command, create a first PVC-backed volume, verify writer/reader
+> data through Kubernetes, and collect a readable status report — without
+> reading the source code or following more than the documented runbook.
 
 Your job is to validate that claim against the live lab. Not the unit tests,
 not the docs alone — the actual install you would run on a customer's
@@ -141,7 +142,40 @@ help, should answer all five of these questions:
 
 If you cannot answer all five, that is a documentation/product-summary gap.
 
-## Step 3 — Confirm cluster state through the new product CLI
+## Step 3 — Create the first PVC and verify writer/reader data
+
+Run the documented first-volume helper:
+
+```bash
+cd /tmp/seaweed_block
+bash scripts/run-basic-app-example.sh /tmp/seaweed_block
+```
+
+**What you should see**:
+
+- the example StorageClass and PVC are applied,
+- PVC `sw-block-example-pvc` reaches `Bound`,
+- writer pod logs `/data/demo.bin: OK`,
+- writer pod is deleted,
+- reader pod logs `/data/demo.bin: OK` against the same PVC,
+- status evidence is collected,
+- a final `first-volume-summary.txt` block is printed.
+
+**Pass criteria for step 3**:
+
+- `first_volume_status=ok`,
+- `writer_verified=true`,
+- `reader_verified=true`,
+- `inventory_status=ok`,
+- `cleanup_status=ok`,
+- `status_report=status/report/index.html`.
+
+If the writer or reader times out, preserve the artifact directory printed by
+the script. It should contain `diagnostics/<writer-or-reader>/writer-describe.txt`
+or equivalent Kubernetes event evidence so engineering can diagnose without
+manual SSH guessing.
+
+## Step 4 — Inspect cluster state and the local read-only report
 
 The `sw-block` CLI is not installed to `/usr/local/bin` by the Day-1 script
 (only the in-cluster blockmaster/CSI images are). You have two options to
@@ -153,6 +187,7 @@ cd /tmp/seaweed_block
 kubectl -n kube-system port-forward deploy/sw-blockmaster 9333:9333 &
 sleep 5
 go run ./cmd/sw-block ops cluster --master-api 127.0.0.1:9333
+go run ./cmd/sw-block ops report --master-api 127.0.0.1:9333 --out /tmp/sw-block-report
 
 # Option B — build a one-off binary to /tmp:
 cd /tmp/seaweed_block
@@ -160,14 +195,19 @@ go build -o /tmp/sw-block ./cmd/sw-block
 kubectl -n kube-system port-forward deploy/sw-blockmaster 9333:9333 &
 sleep 5
 /tmp/sw-block ops cluster --master-api 127.0.0.1:9333
+/tmp/sw-block ops report --master-api 127.0.0.1:9333 --out /tmp/sw-block-report
 ```
 
 **What you should see**:
 
 - a cluster-level status line (`status=ok` or `status=blocked reason=...`),
 - a list of three nodes with their IPs and Ready=true,
-- zero or one volumes (zero is correct right after Day-1 install),
+- zero or one volumes,
 - a "next action" line.
+- `/tmp/sw-block-report/index.html`,
+- `/tmp/sw-block-report/cluster-evidence.json`,
+- `/tmp/sw-block-report/timeline.jsonl`,
+- `/tmp/sw-block-report/summary.txt`.
 
 When done:
 
@@ -175,11 +215,13 @@ When done:
 kill %1 2>/dev/null
 ```
 
-**Pass criteria for step 3** — the CLI output is human-readable, no
-engineering jargon required to interpret. If you would not feel comfortable
-copy-pasting this into a support ticket, that is a gap.
+**Pass criteria for step 4** — the CLI output and local HTML report are
+human-readable, no engineering jargon required to interpret. If you would not
+feel comfortable attaching `/tmp/sw-block-report` to a support ticket, that is
+a gap. The report must stay read-only: no promote, repair, delete, rebuild, or
+cleanup controls.
 
-## Step 4 — Confirm the explicit non-claims
+## Step 5 — Confirm the explicit non-claims
 
 The product is alpha and must NOT claim things it can't do. Open this file:
 
@@ -189,7 +231,7 @@ cat /tmp/seaweed_block/docs/operations-v1.md | less
 
 (Search for "non-claim", or scroll through the Stage sections.)
 
-**Pass criteria for step 4** — the docs explicitly say the alpha install
+**Pass criteria for step 5** — the docs explicitly say the alpha install
 does NOT provide any of these:
 
 - hosted dashboard,
@@ -205,7 +247,7 @@ If any of these is missing from the docs, or worse, if the install summary
 implies something the docs disclaim, that is a customer-trust risk and a
 blocker.
 
-## Step 5 — Optional: tear it down and confirm the lab is clean
+## Step 6 — Optional: tear it down and confirm the lab is clean
 
 ```bash
 bash scripts/uninstall-k8s-alpha.sh /tmp/seaweed_block
@@ -236,21 +278,24 @@ If anything is left behind, file it as a cleanup gap.
 | "Does the cluster survive losing a node?" | 3 nodes (RF=3 sync-quorum recovery — Phase 18) |
 
 If your context block says `1-node`, you can complete steps 1–5 of this
-guide and answer the first question. Skip evaluations of recovery on a
+guide and answer the first question plus the first-volume path. Skip
+evaluations of recovery on a
 1-node lab — they are not what this lab is configured to prove. If your
 context block says `3-node`, you can answer all three questions.
 
 ## Overall ship recommendation rubric
 
-After steps 1–4 (step 5 is optional but recommended), use this:
+After steps 1–5 (step 6 is optional but recommended), use this:
 
 | Outcome | Ship? |
 |---|---|
-| Steps 1–4 all pass, summary is reader-friendly | YES — Phase 20 D1 is a real Day-1 experience |
-| Steps 1–3 pass but step 4 non-claims weak | NO — fix docs first; risk of overpromising |
+| Steps 1–5 all pass, summaries/report are reader-friendly | YES — Phase 20 is a real Day-1 install-to-first-volume experience |
+| Steps 1–4 pass but step 5 non-claims weak | NO — fix docs first; risk of overpromising |
 | Step 1 fails (manual fixups required) | NO — the one-command claim is not real yet |
 | Step 2 fails (you need help reading the summary) | NO — product summary needs an iteration |
-| Steps 1–4 pass but step 5 leaves residue | YES with a known follow-up bug; cleanup is operational, not customer-blocking |
+| Step 3 fails (PVC writer/reader does not pass) | NO — first-volume claim is not real yet |
+| Step 4 fails (status/report is missing or unreadable) | NO — supportability claim is not real yet |
+| Steps 1–5 pass but step 6 leaves residue | YES with a known follow-up bug; cleanup is operational, not customer-blocking |
 
 ## PM result template (required fields)
 
@@ -266,6 +311,8 @@ Repo branch/commit:
 
 activation-summary.txt path:
 cluster-evidence.json path:
+first-volume-summary.txt path:
+status report directory:
 delete-storageclass.log path:
 artifact directory from step 1:
 
@@ -278,14 +325,15 @@ Top P2 polish:
 
 So you know what you're stepping into:
 
-- The runner-native scenario `testops/scenarios/activation-day1-install-chain.yaml`
-  was run on the same lab on 2026-05-17. Run id `20260517-170032-431a`.
-- All 11 substantive activation assertions PASS.
-- The cluster reached ready state in ~36 seconds.
-- The cleanup evidence routing bug in `uninstall-k8s-alpha.sh` was patched:
-  `delete-storageclass.log` is now written in both delete and not-found paths.
-  QA should rerun `activation-day1-install-chain.yaml` to confirm strict green.
-- iSCSI sessions and `sw-block` processes are zero after cleanup.
+- The runner-native first-volume scenario
+  `testops/scenarios/activation-day1-first-volume-chain.yaml` was run on the
+  same 3-node lab on 2026-05-17. Run id `20260517-212358-bfba`.
+- It passed 5/5 phases and 27/27 actions in 42.5 seconds.
+- The first-volume path verified PVC Bound, writer checksum, reader checksum,
+  product `cluster-evidence.json`, inventory bundle, and strict cleanup.
+- The new `status/report/` directory contained `index.html`,
+  `cluster-evidence.json`, `timeline.jsonl`, and `summary.txt`.
+- iSCSI sessions and `sw-block` processes were zero after cleanup.
 
 If your manual run reproduces those numbers (and especially if step 1's
 summary block reads sensibly to you), you have product-level corroboration
@@ -300,9 +348,10 @@ Escalate during your run if:
   the chain is stuck),
 - step 1 exits non-zero with no clear human-readable error,
 - step 2's summary file is missing or empty,
-- step 3's `sw-block ops cluster` cannot reach the port-forward
+- step 3's first-volume helper does not print `first_volume_status=ok`,
+- step 4's `sw-block ops cluster` cannot reach the port-forward
   (check `kubectl get svc -n kube-system blockmaster` — should exist),
-- step 4 surfaces a docs/install contradiction (the install summary claims
+- step 5 surfaces a docs/install contradiction (the install summary claims
   something the docs disclaim).
 
 Provide engineering with the artifact directory printed at the end of
