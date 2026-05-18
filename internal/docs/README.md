@@ -59,12 +59,6 @@ Public-facing docs belong in `docs/`.
 | `finished-plans/phase17_finishedplan_stage2_transparent_multipath_host_failover_mvp.md` | Historical Stage 2 transparent mounted failover plan: RF=3 sync-quorum iSCSI ALUA/dm-multipath recovery without pod recreate. |
 | `finished-plans/phase18_finishedplan_node_loss_survival_mvp.md` | Historical Node-Loss Survival plan: RF=3 sync-quorum Kubernetes-node-loss recovery through CSI/pod recreate on a surviving node. |
 | `finished-plans/phase19_finishedplan_control_plane_observation_ai_readable_ops_mvp.md` | Historical Control-Plane Observation plan: read-only master evidence API, AI-readable CLI export, product-owned event stream, and support-bundle evidence. |
-| `qa-assignments/stage2-transparent-multipath-host-failover-close-hard-gate.md` | Strict Stage 2 close gate: multipath recovery without pod recreate, stale-primary fencing, and support-bundle evidence. |
-| `qa-assignments/stage2-transparent-multipath-host-failover-close-report.md` | Strict Stage 2 close report: all HG-0 through HG-13 clauses passed. |
-| `qa-assignments/node-loss-survival-mvp-close-hard-gate.md` | Strict node-loss survival close gate: distinct-node placement, non-loopback frontends, CSI reattach recovery, stale-primary fencing, and cleanup. |
-| `qa-assignments/node-loss-survival-mvp-close-report.md` | Strict Node-Loss Survival close report: all HG-0 through HG-12 clauses passed. |
-| `qa-assignments/control-plane-observation-ai-readable-ops-mvp-close-hard-gate.md` | Strict Control-Plane Observation close gate: product-owned event export, master-minted events, CSI reattach evidence, read-only boundary, bundle explanation, and cleanup. |
-| `qa-assignments/control-plane-observation-ai-readable-ops-mvp-close-report.md` | Strict Control-Plane Observation close report: all HG-0 through HG-12 clauses passed. |
 | `ref/production-readiness-plan.md` | Longer readiness reference and iSCSI P1-P6 detail. |
 | `ref/light-use-block-storage-ux-research.md` | Comparison of Longhorn, OpenEBS, Rook/Ceph, Piraeus/LINSTOR, and EBS CSI light-user install/operations UX. |
 | `ref/blockvolume-lifecycle-ownership-contract.md` | Product-owned generated blockvolume workload lifecycle ownership contract for the current plan. |

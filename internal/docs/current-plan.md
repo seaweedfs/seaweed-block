@@ -7,7 +7,7 @@ finished-plans is the remaining bookkeeping step.
 Previous closed capability:
 
 - `finished-plans/phase19_finishedplan_control_plane_observation_ai_readable_ops_mvp.md`
-- `qa-assignments/control-plane-observation-ai-readable-ops-mvp-close-report.md`
+- Control-plane observation QA evidence: run `20260517-011004-4b79`.
 
 ## Release Ladder From Here
 
@@ -111,9 +111,8 @@ codes.
     inventory commands.
 - Failed install should explain the blocker: missing tool, missing k3s access,
   image import failure, pod not ready, or node prerequisite mismatch.
-- QA slice: `testops/scenarios/activation-day1-install-chain.yaml` and
-  `qa-assignments/activation-day1-install-validation.md` validate the D1
-  install-to-ready path.
+- QA slice: `testops/scenarios/activation-day1-install-chain.yaml` validates
+  the D1 install-to-ready path.
 
 ### D2: Node Readiness
 
@@ -154,9 +153,8 @@ PVC -> PV -> volume_id -> replicas -> primary -> frontend -> events -> bundle
   `examples/kubernetes/basic-app` PVC/writer/reader loop, collects
   `sw-block ops cluster` and `sw-block ops inventory` evidence, and writes
   `first-volume-summary.txt`.
-- QA slice: `testops/scenarios/activation-day1-first-volume-chain.yaml` and
-  `qa-assignments/activation-day1-first-volume-validation.md` validate the
-  published-image Day-1 first-volume path.
+- QA slice: `testops/scenarios/activation-day1-first-volume-chain.yaml`
+  validates the published-image Day-1 first-volume path.
 
 ### D4: Read-Only Status / Dashboard View
 
