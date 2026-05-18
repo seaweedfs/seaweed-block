@@ -24,8 +24,8 @@ This is the short internal roadmap. Keep it current and readable.
   lab gates. This is an engineering alpha, not a polished install product.
 - `v0.2-alpha`: Day-1 activation. A supported user can run the script-based
   activation path, create a first PVC, verify writer/reader data, generate a
-  local read-only report, and clean up. This is the current user-facing alpha
-  packaging boundary.
+  local read-only report, and clean up. This is the current shipped
+  user-facing alpha packaging boundary.
 - `v0.3-alpha`: Helm activation. Package the same supported Day-1 path as a
   normal Kubernetes add-on: chart values, immutable images, CHAP/external
   iSCSI configuration, StorageClass, readiness output, first-volume smoke, and
@@ -100,12 +100,12 @@ lifecycle.
 
 ### Track A: Kubernetes Install And Cleanup
 
-- Current: v0.2 alpha closes the script-based Day-1 loop for the supported
+- Closed: v0.2 alpha closes the script-based Day-1 loop for the supported
   Kubernetes path: activate, verify node readiness, create a first PVC, run
   writer/reader verification, inspect status/report evidence, and clean up.
   Product-owned generated `blockvolume` workload lifecycle is also closed for
   the supported alpha path.
-- Next: v0.3 Helm activation. Package the same Day-1 path as a chart while
+- Active: v0.3 Helm activation. Package the same Day-1 path as a chart while
   keeping preflight and host cleanup explicit:
   - charted blockmaster, CSI controller/node, RBAC, CSI driver, StorageClass,
     CHAP Secret, and cluster spec,

@@ -1,427 +1,226 @@
-# Current Plan: Phase 20 - Activation / Day-1 Ops MVP
+# Current Plan: Phase 21 - Helm Activation MVP
 
-Status: implementation and QA slices passed for the script-based v0.2 alpha
-path. Release notes and user docs are in place. Formal close report / move to
-finished-plans is the remaining bookkeeping step.
+Status: planning starts from `main` after the v0.2 Day-1 activation merge.
 
 Previous closed capability:
 
-- `finished-plans/phase19_finishedplan_control_plane_observation_ai_readable_ops_mvp.md`
-- Control-plane observation QA evidence: run `20260517-011004-4b79`.
-
-## Release Ladder From Here
-
-- `v0.2-alpha` (this plan): script-based Day-1 activation and first-volume
-  loop. Users can activate the stack, create one PVC, verify writer/reader
-  data, generate a local read-only report, and clean up.
-- `v0.3-alpha` (next): Helm activation. Convert the supported install path into
-  a Kubernetes-native chart while preserving preflight, first-volume smoke,
-  report generation, and cleanup evidence.
-- `v0.4-beta-candidate` (after Helm): Operator lifecycle. Add CRDs,
-  Conditions, Events, and day-2 reconciliation for install status, node
-  eligibility, volume lifecycle, recovery observation, and safe cleanup.
-
-Product guidance: do not jump directly from scripts to operator. Helm is the
-right next release because it makes installation regular and reviewable without
-locking us into a CRD/operator lifecycle contract too early. The operator
-release is more meaningful as a product milestone because it can close the
-Kubernetes lifecycle loop, but it should build on a charted install contract.
+- `finished-plans/phase20_finishedplan_activation_day1_ops_mvp.md`
+- v0.2 alpha Day-1 activation: script install, first PVC, writer/reader
+  checksum, read-only report, and strict cleanup.
 
 ## Product Question
 
-Can a new Kubernetes user complete one understandable block-storage activation
-loop without reading internal docs or SSHing into every node?
+Can a Kubernetes user install Seaweed Block through a normal Helm path and
+complete the same first-volume product loop without treating repo-local scripts
+as the primary install surface?
 
 ```text
 preflight
--> install
--> node readiness
+-> generate values.day1.yaml
+-> helm install
+-> rollout readiness
 -> create PVC
--> volume ready
--> write/read app
--> status/timeline/evidence
--> cleanup
+-> writer/reader checksum
+-> sw-block ops report
+-> helm uninstall
+-> host cleanup verification
 ```
 
-Expanded product loop:
+## Release Target
 
-```text
-install Seaweed Block from one documented path
--> verify node readiness and blockers
--> create one PVC-backed volume through Kubernetes
--> run an app write/read check
--> inspect read-only CLI/status evidence
--> collect product evidence, inventory, logs, and support bundle
--> uninstall cleanly
-```
+`v0.3-alpha`: Helm activation for supported Kubernetes labs.
 
-This plan is about activation and day-1 operations. It should not add new HA,
-backup, restore, repair, or mutating admin claims.
+The release should make the install contract regular, reviewable, and closer to
+what users expect from a Kubernetes storage product. It should not introduce an
+operator lifecycle contract yet.
 
 ## Core Thesis
 
-The product is now strong enough in recovery and observation that the next
-highest-friction gap is the user journey around it. A good block product needs
-more than a working CSI path: users need to install it, understand whether each
-node is usable, create volumes, see what happened, and capture evidence when it
-is not healthy.
+v0.2 proved the product loop with scripts. v0.3 should package that loop as a
+Kubernetes-native chart while preserving the same evidence discipline:
+readiness, PVC creation, data check, product-owned report, and cleanup.
 
-The implementation should reuse the Phase 19 observation surface. Dashboard,
-CLI, logs, and bundles should all describe the same facts with stable reason
-codes.
+Helm is the right next step before an operator because:
 
-## Scope
-
-### D1: Install Loop
-
-- Keep `scripts/install-k8s-alpha.sh` as the implementation substrate for this
-  phase.
-- Add a simpler documented wrapper path if needed. This should wrap preflight,
-  local image build/import, install, rollout wait, and summary. It may be a
-  script first; a `sw-block install k8s-alpha` CLI is optional and should not
-  block the first gate.
-  - Dev slice: `scripts/activate-k8s-alpha.sh` is the first wrapper path. It
-    calls `preflight-k8s-alpha.sh`, `build-alpha-images.sh`,
-    `install-k8s-alpha.sh`, applies the alpha StorageClass, captures rollout
-    readiness, and writes `activation-summary.txt`.
-  - Image path split:
-    - `SW_BLOCK_ACTIVATION_IMAGE_MODE=local` (default) builds/imports
-      `sw-block:local` and `sw-block-csi:local` for dev and QA work-tree
-      validation.
-    - `SW_BLOCK_ACTIVATION_IMAGE_MODE=published` skips local build/import,
-      runs GHCR preflight, and installs `ghcr.io/seaweedfs/seaweed-block:alpha`
-      plus `ghcr.io/seaweedfs/seaweed-block-csi:alpha` unless overridden.
-      This is the PM/user-path test surface. Prefer `sha-<commit>` or release
-      tags over mutable `:alpha` for close validation.
-
-- Add a user-facing install path in README/docs that makes prerequisites,
-  expected components, and verification commands explicit.
-- Emit a concise install summary:
-  - master ready,
-  - CSI controller ready,
-  - CSI node ready count,
-  - StorageClass present,
-  - selected protocol,
-  - selected ACK profile,
-  - known non-claims.
-  - Dev slice: summary fields are stable key/value lines:
-    `activation_status`, `master_ready_replicas`,
-    `csi_controller_ready_replicas`, `csi_node_ready`,
-    `storageclass_provider`, `protocol`, `ack_profile`, and next status /
-    inventory commands.
-- Failed install should explain the blocker: missing tool, missing k3s access,
-  image import failure, pod not ready, or node prerequisite mismatch.
-- QA slice: `testops/scenarios/activation-day1-install-chain.yaml` validates
-  the D1 install-to-ready path.
-
-### D2: Node Readiness
-
-- Provide a read-only node readiness view before claiming add-node automation.
-- A node row should make clear:
-  - Kubernetes node name,
-  - CSI node pod status,
-  - iSCSI / multipath prerequisite status where applicable,
-  - whether the node is eligible for blockvolume placement,
-  - frontend address mode: loopback or non-loopback,
-  - blocker reason if not eligible.
-- If this phase adds an `add-node` command, it must be conservative: preflight
-  and explain eligibility first; mutating scheduling or rebalance behavior is
-  out of scope unless separately gated.
-
-### D3: Add-Volume Loop
-
-- Document the canonical dynamic PVC path as the normal volume creation path.
-- Provide a minimal user-facing "add volume" path. This can be a documented
-  PVC YAML template first. A CLI helper is optional and, if added, must be a
-  thin generator around Kubernetes PVC creation. It must not bypass PVC/CSI.
-
-```bash
-kubectl apply -f examples/kubernetes/basic-app/storageclass-pvc.yaml
-```
-
-- The close gate must prove at least two volumes can be created and listed
-  without attribution or port/status collisions.
-- Add or improve a small command/view that maps:
-
-```text
-PVC -> PV -> volume_id -> replicas -> primary -> frontend -> events -> bundle
-```
-
-- The user should be able to create one PVC, watch it become ready, and see the
-  same volume appear in CLI/dashboard evidence.
-- Dev slice: `scripts/run-basic-app-example.sh` runs the canonical
-  `examples/kubernetes/basic-app` PVC/writer/reader loop, collects
-  `sw-block ops cluster` and `sw-block ops inventory` evidence, and writes
-  `first-volume-summary.txt`.
-- QA slice: `testops/scenarios/activation-day1-first-volume-chain.yaml`
-  validates the published-image Day-1 first-volume path.
-
-### D4: Read-Only Status / Dashboard View
-
-- Dashboard/status view is read-only for this plan.
-- It may be a local web view, static report, or CLI-driven status page. Do not
-  make the close depend on a full hosted UI unless that implementation is
-  deliberately chosen.
-- Product positioning:
-
-```text
-V2 UI shape:
-cluster / servers / volumes / ops
-
-V3 sw-block data model:
-PVC / PV / volume_id / replica / primary / frontend / epoch /
-event timeline / bundle / reason codes
-```
-
-- Build a read-only block dashboard/status view modeled after the SeaweedFS
-  `/block/` information architecture, backed by the Phase 19 observation API,
-  with no mutating admin actions.
-- Dev slice: `sw-block ops report` renders a static read-only status page from
-  either live `--master-api` evidence or a saved support bundle. It writes
-  `index.html`, `cluster-evidence.json`, `timeline.jsonl`, and `summary.txt`
-  from the shared observation core.
-- Day-1 helper slice: `scripts/run-basic-app-example.sh` now generates
-  `status/report/index.html` after writer/reader verification, so the first
-  volume bundle contains a user-readable status page and machine-readable
-  evidence together.
-- Reuse lessons from the V2 SeaweedFS block UI where useful:
-  - reference files:
-    `C:\work\seaweedfs\weed\server\master_server_handlers_block_ui.go`,
-    `C:\work\seaweedfs\weed\server\master_server.go`,
-    `C:\work\seaweedfs\weed\storage\blockvol\blockapi\types.go`,
-  - useful read-only shape: cluster cards, server table, volume table,
-    replica details, health counters, barrier/failover/rebuild counters,
-  - do not copy mutating V2 operations into this phase: create, delete,
-    promote, expand, assign, or force actions.
-- Minimum pages or panels:
-  - cluster summary,
-  - node readiness,
-  - volumes table,
-  - volume detail,
-  - event timeline,
-  - support bundle / log links.
-- The dashboard must consume product-owned observation data, not scrape random
-  pod logs as its primary source.
-- Logs are supporting evidence, not authority.
-- Mutating actions such as promote, repair, delete, rebuild, failback, and
-  cleanup buttons are explicitly out of scope.
-- Enterprise UI boundary: first ship observation. Add admin workflows only
-  after each workflow has a separate product spec, RBAC/audit model, and strict
-  QA gate.
-
-### D5: Status / Logs / Bundle Loop
-
-- The default CLI path should stay useful without the dashboard:
-
-```text
-sw-block ops cluster --master-api <addr>
-sw-block ops volumes
-sw-block ops describe volume <id>
-sw-block ops timeline volume <id>
-sw-block ops inventory --namespace <ns> --master <addr> --out <dir>
-```
-
-- Text output should be human-readable and AI-readable.
-- JSON/JSONL output should remain stable enough for dashboard, CI, and support
-  assistant use.
-- Every unhealthy state should include a reason code and next inspection step.
-
-### D6: README And User Path
-
-- README must present Seaweed Block as an alpha/early-beta product loop, not a
-  collection of internal gates.
-- README must keep claims narrow:
-  - not production-ready,
-  - no full HA claim,
-  - no backup/restore,
-  - no upgrade safety,
-  - no mutating admin operations,
-  - no hosted dashboard unless implemented and gated.
-- The documented quick path must match the commands the close gate runs.
-- Dev slice: README and `docs/quickstart-kubernetes.md` were rewritten around
-  the end-user path: activate, first PVC, writer/reader verification, local
-  read-only report, troubleshooting evidence, and cleanup. Internal gate
-  details remain in QA docs instead of the user tutorial.
-
-### D7: TestOps Controller / Agent Evidence Loop
-
-- Treat TestOps as product infrastructure for this phase, not as ad-hoc
-  scripting. The current runner is already the Windows-side controller: it owns
-  `run_id`, phase/action status, timeouts, cleanup, and the central result
-  bundle.
-- Add a controller/agent track rather than relying only on SSH:
-  - controller stays on the Windows/dev workstation and runs scenarios,
-    distributes binaries/scripts, owns cancellation, and writes the final
-    bundle;
-  - Linux node agents on m01/m02/tp01 collect local evidence and eventually
-    execute bounded jobs;
-  - SSH remains fallback until the agent proves stable.
-- First useful agent capability:
-  - `/healthz` with node name, version, uptime;
-  - `collect_node_snapshot` for process, iSCSI sessions, multipath, NVMe,
-    mounts, disk, kernel tail, network, containerd/k3s images, and kubelet
-    status;
-  - `collect_path` for local artifact pickup;
-  - cancellation-aware bounded command execution later, after snapshot is
-    proven.
-- K8s/block failure auto-collect should become a gate rule:
-  - on phase failure, collect node snapshots from involved nodes,
-  - collect Kubernetes state (`kubectl get`, `describe`, events, selected logs,
-    rendered manifests vs live objects),
-  - collect product state (`sw-block ops cluster`, inventory, timeline/events),
-  - then run cleanup and collect after-clean state.
-- Why this is in the plan: Day-1 first-volume r1/r2 showed that without
-  automatic evidence, a timeout is ambiguous; with `writer-describe.txt`, the
-  root cause was immediately visible as loopback publish target vs cross-node
-  writer placement.
-- Open-source analogs to learn from, not copy blindly:
-  - Sonobuoy: Kubernetes aggregator plus job/daemonset plugins; useful model
-    for cluster-wide collection and per-node log gatherers.
-  - Ansible Runner / AWX execution nodes: useful model for transmit -> worker
-    -> process and central artifact handling.
-  - Jenkins controller/agent: useful model for scheduling jobs onto prepared
-    nodes.
-  - Robot Framework remote libraries: useful model for remote capability
-    exposure, but too generic for block-specific node snapshots.
-- Non-goal for Phase 20: do not rewrite the runner. Add snapshot collection and
-  failure auto-collect first; move remote exec to agent only after the evidence
-  loop is stable.
+- it gives users a standard install/uninstall surface,
+- it makes values, RBAC, images, StorageClass, and CHAP settings explicit,
+- it keeps lifecycle logic simple while the product contract is still moving,
+- it creates a stable base for a later operator with CRDs and Conditions.
 
 ## Non-Claims
 
-This plan does not claim:
+Do not claim:
 
-- production installer/operator lifecycle,
-- full Helm/operator packaging unless explicitly chosen as the implementation,
-- online upgrade or rollback safety,
-- mutating dashboard actions,
-- automatic repair/rebuild/failback,
-- backup/snapshot/restore,
-- new HA semantics beyond closed RF=3 gates,
-- transparent node-loss failover beyond existing closed claims,
-- broad distro/kernel compatibility.
+- production readiness,
+- operator / CRD lifecycle management,
+- automatic upgrades or rollback safety,
+- backup, snapshot, or restore,
+- mutating dashboard/admin actions,
+- broad Kubernetes distro support,
+- broad performance SLOs,
+- physical-host-loss survival beyond the gated node-loss claim,
+- transparent node-loss failover beyond already gated Stage 2/Node-Loss scopes,
+- NVMe ANA parity.
 
-## Hard Gate
+## Scope
 
-The close gate should run from a fresh supported Kubernetes lab and prove:
+### D1: Helm Chart Skeleton
 
-1. One documented command path runs preflight, install, rollout wait, and
-   install summary.
-2. Node readiness view identifies at least one eligible node and explains any
-   blockers.
-3. A PVC is created through the documented Kubernetes path.
-4. The generated product-owned volume becomes ready.
-5. An app writes and reads data through the mounted PVC.
-6. `sw-block` status/evidence explains PVC -> volume -> replica -> primary ->
-   frontend -> timeline.
-7. Product evidence and inventory/support bundle are collected.
-8. Cleanup/uninstall leaves no active iSCSI sessions, stale blockvolume
-   Deployments, stale port-forwards, or unexpected product pods.
-9. README quick path matches the commands used by the gate.
-10. Failure bundles include automatic K8s/product/node evidence sufficient to
-    explain at least one failed first-volume run without manual SSH.
+Create `charts/seaweed-block/` with templates for the existing install
+surface:
 
-## Suggested Close Claim
+- blockmaster Deployment and Service,
+- CSI controller Deployment,
+- CSI node DaemonSet,
+- RBAC / ServiceAccounts / ClusterRoleBindings,
+- CSIDriver,
+- StorageClass,
+- cluster-spec ConfigMap,
+- optional CHAP Secret,
+- image, pull policy, tag, and digest values,
+- namespace and naming overrides,
+- ACK profile and expected slots per volume,
+- external iSCSI/status settings,
+- Stage 2 multipath opt-in settings,
+- launcher state hostPath settings.
 
-Seaweed Block provides an alpha install-to-operate loop for Kubernetes users:
-from a fresh supported lab, run one documented install path, create a
-PVC-backed block volume, verify app write/read, inspect read-only status and
-timeline evidence, collect support artifacts, and uninstall cleanly.
+The chart should template existing semantics. It must not fork product behavior
+from `scripts/install-k8s-alpha.sh`.
 
-## Next Product Choices After This
+### D2: Day-1 Values Generator and Preflight
 
-- Phase 21: Helm Activation MVP.
-- Phase 22: Operator Lifecycle MVP.
-- Backup / Snapshot / Restore MVP for data protection.
-- Rebuild / Reintegration / Failback MVP for returned replicas.
-- Mutating admin controls with RBAC/audit hard gates.
-
-## Phase 21 Candidate: Helm Activation MVP
-
-Product question:
+Add a small user-facing helper that turns a live cluster into a Helm values
+file:
 
 ```text
-Can a Kubernetes user install Seaweed Block as a normal chart, create a first
-PVC, inspect status/report evidence, and uninstall without relying on internal
-script-only manifest mutation?
+scripts/generate-helm-values-day1.sh
 ```
 
-Scope:
+Required behavior:
 
-- Add `charts/seaweed-block/` for blockmaster, CSI controller/node, CSI driver,
-  RBAC, StorageClass, CHAP Secret, and cluster-spec ConfigMap.
-- Add `values.yaml` and `values.schema.json` for:
-  - images and immutable tags/digests,
-  - namespace and StorageClass name,
-  - ACK profile,
-  - frontend protocol,
-  - external iSCSI/status,
-  - CHAP configuration,
-  - cluster/node specs,
-  - Stage 2 multipath,
-  - resource requests and tolerations/node selectors where needed.
-- Keep `scripts/activate-k8s-alpha.sh` as a wrapper that can generate
-  `values.day1.yaml`, run preflight, call `helm install`, run the first-volume
-  smoke, generate `sw-block ops report`, and verify cleanup.
-- Do not claim upgrade safety until a separate Helm upgrade/rollback smoke
-  passes.
+- detect Ready schedulable nodes and InternalIP values,
+- choose loopback mode for single-node labs,
+- choose external iSCSI/status + CHAP for multi-node labs,
+- write a `values.day1.yaml`,
+- print a concise activation summary,
+- fail closed on missing Kubernetes access, missing iSCSI prerequisites, or
+  unsafe topology,
+- preserve the v0.2 distinction between local/internal images and immutable
+  GHCR release images.
 
-Hard gate:
+### D3: Helm Install First-Volume Gate
 
-1. Fresh supported cluster passes preflight.
-2. `helm install` with generated Day-1 values reaches blockmaster and CSI
-   readiness.
-3. First PVC writer/reader loop passes.
-4. `sw-block ops report` is generated from live product evidence.
-5. `helm uninstall` plus host cleanup leaves no iSCSI sessions, product pods,
-   generated blockvolume Deployments, or unexpected StorageClass residue.
-6. README/quickstart describe Helm as the preferred user install path and keep
-   scripts as dev/TestOps helpers.
-
-Non-claims:
-
-- no operator/CRD lifecycle yet,
-- no online upgrade/rollback safety until gated,
-- no mutating admin actions,
-- no backup/restore or rebuild/failback claim.
-
-## Phase 22 Candidate: Operator Lifecycle MVP
-
-Product question:
+Create a TestOps scenario that exercises the PM/user path:
 
 ```text
-Can Seaweed Block become a Kubernetes-native product loop where users see
-cluster, node, volume, and recovery lifecycle through CRDs, Conditions, Events,
-and read-only dashboard/API evidence?
+helm install sw-block charts/seaweed-block -f values.day1.yaml
+-> wait for blockmaster, CSI controller, CSI node, StorageClass
+-> create PVC through Kubernetes
+-> writer pod writes /data/demo.bin
+-> reader pod verifies /data/demo.bin
+-> sw-block ops report emits HTML + JSON + JSONL timeline
 ```
 
-Scope:
+Acceptance:
 
-- Add CRDs such as `SeaweedBlockCluster`, `SeaweedBlockNode`, and/or
-  `SeaweedBlockVolume` only after the exact lifecycle ownership is specified.
-- Operator owns install/upgrade status, node eligibility, desired StorageClass,
-  CHAP Secret references, blockmaster/CSI rollout state, and cleanup
-  reconciliation.
-- Conditions must be first-class and user-readable:
-  `Ready`, `Degraded`, `Recovering`, `Blocked`, `CleanupPending`, with stable
-  reason codes.
-- Events must mirror Phase 19 product observation semantics where possible.
-- Mutating actions such as repair, rebuild, promote, failback, or delete remain
-  out of scope unless each has a separate fencing/RBAC/audit gate.
+- PVC is Bound,
+- blockvolume Deployment is stable,
+- writer and reader checksum pass,
+- report directory contains `index.html`, `cluster-evidence.json`,
+  `timeline.jsonl`, and `summary.txt`,
+- report is read-only and has no mutating actions,
+- first-volume summary names the chart release, namespace, image tags/digests,
+  StorageClass, PVC, volume ID, writer/reader results, and report path.
 
-Hard gate:
+### D4: Helm Uninstall and Host Cleanup Gate
 
-1. Apply one CR creates the supported stack.
-2. Status Conditions show install progress and node eligibility without SSH.
-3. First PVC writer/reader loop passes.
-4. A controlled failure updates CR status/events and support evidence.
-5. Delete CR cleans Kubernetes resources and verifies host/session cleanup via
-   documented guardrails.
-6. Helm-to-operator migration or coexistence boundary is documented.
+Helm uninstall only removes Kubernetes objects. The product still needs a
+documented host cleanup/check step for iSCSI and multipath residue.
 
-Why this release matters:
+Acceptance:
 
-Operator is the first release that can make Seaweed Block feel like a complete
-Kubernetes storage product: installation, status, lifecycle ownership, cleanup,
-and user-visible diagnosis are managed by a product control plane instead of a
-collection of scripts.
+- `helm uninstall sw-block` completes,
+- StorageClass and product workloads are gone,
+- demo PVC/pods are removed by the scenario,
+- no active iSCSI sessions remain,
+- no stale iSCSI node records remain for the test IQNs,
+- no matching blockmaster/blockvolume/blockcsi processes remain,
+- no test-scoped hostPath residue remains,
+- cleanup failures produce support evidence instead of silent success.
+
+### D5: Published Image Release Validation
+
+Keep two image paths:
+
+- local/internal images for fast engineering QA,
+- immutable GHCR `sha-<commit>` images for PM/release validation.
+
+Acceptance:
+
+- Helm values support image tags and digests,
+- activation/report output records both configured image and observed digest,
+- mutable `:alpha` is documented as smoke/demo only,
+- release validation uses immutable `sha-<commit>` tags.
+
+### D6: User Docs and README
+
+After D1-D5 are green:
+
+- README default install path should become Helm,
+- script activation should move to dev/lab fallback language,
+- tutorial should show one-node and three-node expectations clearly,
+- release note should identify `v0.3-alpha` as Helm activation, not new HA,
+- non-claims must remain explicit.
+
+## Test Strategy
+
+Use TDD at the packaging boundary:
+
+- chart render tests or golden `helm template` checks,
+- preflight/values-generator unit checks for one-node and multi-node examples,
+- TestOps red/green scenarios for install, first volume, report, and uninstall,
+- local/internal image run before any GHCR validation,
+- immutable GHCR run before release note.
+
+Candidate scenarios:
+
+- `testops/scenarios/helm-activation-install-chain.yaml`
+- `testops/scenarios/helm-first-volume-chain.yaml`
+- `testops/scenarios/helm-uninstall-cleanup-chain.yaml`
+
+## Guardrails
+
+- Do not add operator/CRD work in this phase.
+- Do not add mutating dashboard actions.
+- Do not hide host cleanup behind Helm if Helm cannot actually enforce it.
+- Do not weaken existing safe-refusal, sync-quorum, or observation contracts.
+- Do not make Helm values drift from the script path; if behavior differs,
+  document and gate it explicitly.
+
+## Known Risks
+
+- RBAC scope may need one more tightening pass before public release. The chart
+  should make namespace, ServiceAccounts, and ClusterRole use visible rather
+  than implicit.
+- Helm cannot verify host iSCSI/multipath cleanup by itself. The close gate must
+  include a cleanup verifier.
+- Multi-node defaults can regress into loopback mistakes. The values generator
+  must make network mode and target IPs visible in the summary.
+- Published image drift can reappear if release validation uses mutable tags.
+
+## Definition of Done
+
+Phase 21 closes only when a cold user/PM path can run:
+
+```text
+preflight
+generate values.day1.yaml
+helm install
+first PVC writer/reader checksum
+sw-block ops report
+helm uninstall
+cleanup verification
+```
+
+and the resulting bundle self-explains install status, volume status, report
+artifacts, image identity, and cleanup result without SSH log spelunking.
