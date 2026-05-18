@@ -1,5 +1,9 @@
 # Seaweed Block
 
+<p align="center">
+  <img src="docs/assets/seaweed-block-hero.svg" alt="Seaweed Block alpha architecture: Kubernetes PVC to CSI, blockmaster, blockvolume, iSCSI, and WAL-backed recovery" width="100%">
+</p>
+
 Seaweed Block is an experimental Kubernetes block storage service built around
 normal Kubernetes PVCs, a CSI driver, and SeaweedFS block components.
 
@@ -17,6 +21,7 @@ install on Kubernetes
 Start with the Kubernetes tutorial:
 
 - [First volume on Kubernetes](docs/quickstart-kubernetes.md)
+- [Release notes](docs/releases/README.md)
 
 ## Status
 
@@ -209,6 +214,7 @@ bash scripts/run-k8s-alpha.sh "$PWD"
 
 More detail:
 
+- [docs/releases/README.md](docs/releases/README.md)
 - [docs/architecture.md](docs/architecture.md)
 - [docs/developer-architecture.md](docs/developer-architecture.md)
 - [docs/runtime-state-machines.md](docs/runtime-state-machines.md)
