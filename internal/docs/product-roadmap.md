@@ -16,6 +16,30 @@ This is the short internal roadmap. Keep it current and readable.
 
 ## Product Phases
 
+### Release Ladder
+
+- `v0.1-alpha`: Kubernetes block foundation. CSI/PVC path, product-owned
+  blockvolume lifecycle, inventory, recovery gates, iSCSI ALUA/dm-multipath,
+  node-loss recovery, and read-only control-plane observation are proven in
+  lab gates. This is an engineering alpha, not a polished install product.
+- `v0.2-alpha`: Day-1 activation. A supported user can run the script-based
+  activation path, create a first PVC, verify writer/reader data, generate a
+  local read-only report, and clean up. This is the current user-facing alpha
+  packaging boundary.
+- `v0.3-alpha`: Helm activation. Package the same supported Day-1 path as a
+  normal Kubernetes add-on: chart values, immutable images, CHAP/external
+  iSCSI configuration, StorageClass, readiness output, first-volume smoke, and
+  uninstall hygiene. Helm is the next installer milestone.
+- `v0.4-beta-candidate`: Operator lifecycle. Add a Kubernetes-native control
+  plane with CRDs/Conditions/Events for install, node eligibility, volume
+  lifecycle, recovery observation, safe cleanup, and eventually gated repair or
+  rebuild workflows. This is the first release boundary that can credibly feel
+  like a complete Kubernetes product loop rather than an install script.
+
+Do not skip from scripts directly to an operator. Helm should stabilize the
+installation contract before an in-cluster controller owns upgrades and day-2
+lifecycle.
+
 ### Alpha Preview
 
 - Status: protocol-gated; moving toward beta hardening.
@@ -76,17 +100,22 @@ This is the short internal roadmap. Keep it current and readable.
 
 ### Track A: Kubernetes Install And Cleanup
 
-- Current: the light-use install/lifecycle loop is closed for the supported
-  single-node alpha path: install/launch, create PVC, run app write/read,
-  delete resources, verify cleanup attribution, and collect a failure bundle.
+- Current: v0.2 alpha closes the script-based Day-1 loop for the supported
+  Kubernetes path: activate, verify node readiness, create a first PVC, run
+  writer/reader verification, inspect status/report evidence, and clean up.
   Product-owned generated `blockvolume` workload lifecycle is also closed for
   the supported alpha path.
-- Next: turn the scattered alpha commands into one install-to-operate user
-  journey: install, verify node readiness, admit or explain storage-node
-  eligibility, create a PVC-backed volume, inspect status/timeline/logs, collect
-  a support bundle, and uninstall cleanly.
-- Later: turn the minimal lifecycle loop into a small controller/operator with
-  scoped reconciliation and upgrade-safe ownership.
+- Next: v0.3 Helm activation. Package the same Day-1 path as a chart while
+  keeping preflight and host cleanup explicit:
+  - charted blockmaster, CSI controller/node, RBAC, CSI driver, StorageClass,
+    CHAP Secret, and cluster spec,
+  - values for image tags/digests, ACK profile, external iSCSI/status,
+    Stage 2 multipath, namespace, and StorageClass,
+  - generated Day-1 values file for multi-node labs,
+  - `helm install` + first PVC smoke + `sw-block ops report`,
+  - `helm uninstall` plus explicit host cleanup verification.
+- Later: v0.4 operator lifecycle. Introduce CRDs/Conditions/Events and scoped
+  reconciliation only after the Helm contract is stable.
 
 ### Track B: iSCSI Frontend Stability
 
@@ -176,8 +205,9 @@ credible light-use product:
 
 - Product-owned generated workload lifecycle: scripts/TestOps still own too
   much apply/cleanup and run-scoped state management.
-- Install/upgrade/uninstall: alpha scripts work for tests, but users need a
-  normal K8s add-on flow.
+- Install/upgrade/uninstall: v0.2 script activation works, but users need a
+  normal Kubernetes add-on flow. Helm is the next packaging blocker; operator
+  lifecycle comes after the Helm contract is stable.
 - Observation beyond one volume: the read-only CLI now covers cluster inventory;
   users will still need lifecycle status, metrics, and eventually UI.
 - Safe admin controls: repair/promote/cleanup actions must wait until the
