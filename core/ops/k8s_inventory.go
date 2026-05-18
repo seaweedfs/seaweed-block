@@ -17,12 +17,14 @@ import (
 const seaweedBlockCSIDriver = "block.csi.seaweedfs.com"
 
 type KubernetesInventoryConfig struct {
-	Namespace        string
-	MasterAddr       string
-	StatusBundleRoot string
-	ProductRevision  string
-	RunnerRevision   string
-	RunCommand       func(context.Context, string, ...string) ([]byte, error)
+	Namespace         string
+	MasterAddr        string
+	StatusBundleRoot  string
+	ProductRevision   string
+	RunnerRevision    string
+	ClaimProfile      string
+	RequiredFrontiers map[string]uint64
+	RunCommand        func(context.Context, string, ...string) ([]byte, error)
 }
 
 func NewKubernetesVolumeInventoryCollector(cfg KubernetesInventoryConfig) VolumeInventoryCollector {
@@ -94,24 +96,32 @@ func collectKubernetesVolumeInventory(ctx context.Context, cfg KubernetesInvento
 		}
 		volumeID := pvc.Spec.VolumeName
 		pvName := pvc.Spec.VolumeName
+		replicationFactor := max(1, len(replicasByVolume[volumeID]))
+		var replicationFactorIssue string
 		if hasPV {
 			pvName = pv.Metadata.Name
 			if pv.Spec.CSI.VolumeHandle != "" {
 				volumeID = pv.Spec.CSI.VolumeHandle
 			}
+			replicationFactor, replicationFactorIssue = replicationFactorFromVolumeAttributes(pv.Spec.CSI.VolumeAttributes, replicationFactor)
 		}
 		volume := VolumeInventoryVolumeInput{
 			VolumeID:          volumeID,
 			Namespace:         pvc.Metadata.Namespace,
 			PVCName:           pvc.Metadata.Name,
 			PVName:            pvName,
-			ReplicationFactor: max(1, len(replicasByVolume[volumeID])),
+			ReplicationFactor: replicationFactor,
 			SupportBundle:     "volumes/" + volumeID,
 			Replicas:          replicasByVolume[volumeID],
+		}
+		if replicationFactorIssue != "" {
+			volume.Issues = append(volume.Issues, replicationFactorIssue)
 		}
 		if len(volume.Replicas) == 0 {
 			volume.Issues = append(volume.Issues, "generated_deployment_missing")
 		}
+		applyRequiredFrontierEvidence(&volume, cfg.RequiredFrontiers)
+		applyClaimProfile(&volume, cfg.ClaimProfile)
 		volumes = append(volumes, volume)
 		claimedVolumeIDs[volumeID] = true
 	}
@@ -132,6 +142,7 @@ func collectKubernetesVolumeInventory(ctx context.Context, cfg KubernetesInvento
 				"heartbeat-without-placement=" + strings.Join(replicaServerIDs(replicas), ",") + " state=unadmitted-by-master reason=no-matching-pvc-or-pv",
 			},
 		}
+		applyClaimProfile(&orphan, cfg.ClaimProfile)
 		volumes = append(volumes, orphan)
 	}
 	for volumeID, replicas := range processReplicasByVolume {
@@ -151,6 +162,7 @@ func collectKubernetesVolumeInventory(ctx context.Context, cfg KubernetesInvento
 				"heartbeat-without-placement=" + strings.Join(replicaServerIDs(replicas), ",") + " state=unadmitted-by-master reason=local-process-without-pvc-or-pv",
 			},
 		}
+		applyClaimProfile(&orphan, cfg.ClaimProfile)
 		volumes = append(volumes, orphan)
 	}
 	volumes = collectKubernetesReplicaStatusBundles(ctx, cfg, volumes)
@@ -161,6 +173,29 @@ func collectKubernetesVolumeInventory(ctx context.Context, cfg KubernetesInvento
 		RunnerRevision:  cfg.RunnerRevision,
 		Volumes:         volumes,
 	}), nil
+}
+
+func applyRequiredFrontierEvidence(volume *VolumeInventoryVolumeInput, required map[string]uint64) {
+	if volume == nil || len(required) == 0 {
+		return
+	}
+	lsn, ok := required[volume.VolumeID]
+	if !ok {
+		return
+	}
+	for i := range volume.Replicas {
+		volume.Replicas[i].RequiredFrontierKnown = true
+		volume.Replicas[i].RequiredFrontierLSN = lsn
+	}
+}
+
+func applyClaimProfile(volume *VolumeInventoryVolumeInput, claimProfile string) {
+	if volume == nil || claimProfile == "" {
+		return
+	}
+	for i := range volume.Replicas {
+		volume.Replicas[i].ClaimProfile = claimProfile
+	}
 }
 
 func localBlockvolumeProcessReplicas(ctx context.Context, run func(context.Context, string, ...string) ([]byte, error)) map[string][]VolumeInventoryReplicaInput {
@@ -208,6 +243,7 @@ func replicaFromProcessArgs(line string) (VolumeInventoryReplicaInput, string, b
 		Protocol:            protocol,
 		FrontendAddress:     frontend,
 		StatusAddress:       argValue(args, "--status-addr"),
+		AckProfile:          defaultString(argValue(args, "--replication-ack"), PromotionAckProfileBestEffort),
 		DataAddr:            argValue(args, "--data-addr"),
 		CtrlAddr:            argValue(args, "--ctrl-addr"),
 		Observed:            true,
@@ -288,13 +324,22 @@ func applyStatusReportToInventoryReplica(replica *VolumeInventoryReplicaInput, r
 	replica.ReplicationRole = report.Replication.ReplicationRole
 	replica.Epoch = report.Authority.Epoch
 	replica.EndpointVersion = report.Authority.EndpointVersion
-	if report.Volume.ReplicaID != "" && report.Volume.ReplicaID != Unavailable {
-		replica.ReplicaID = report.Volume.ReplicaID
+	for _, durable := range report.Durable {
+		if durable.ReplicaID == report.Volume.ReplicaID || durable.ReplicaID == replica.ReplicaID {
+			replica.DurableLatched = durable.Latched
+			replica.DurableOperational = durable.Operational
+			if durable.FrontierKnown {
+				replica.CandidateFrontierKnown = true
+				replica.CandidateFrontierLSN = durable.DurableLSN
+			}
+			break
+		}
 	}
 	if len(report.Volume.Protocols) > 0 {
 		replica.Protocol = strings.Join(report.Volume.Protocols, ",")
 	}
-	if len(report.Volume.Frontends) > 0 && report.Volume.Frontends[0].Addr != "" {
+	if (replica.FrontendAddress == "" || replica.FrontendAddress == Unavailable) &&
+		len(report.Volume.Frontends) > 0 && report.Volume.Frontends[0].Addr != "" {
 		replica.FrontendAddress = report.Volume.Frontends[0].Addr
 	}
 }
@@ -503,6 +548,7 @@ func replicaFromDeployment(deploy k8sDeployment) VolumeInventoryReplicaInput {
 		Protocol:             protocol,
 		FrontendAddress:      frontend,
 		StatusAddress:        argValue(args, "--status-addr"),
+		AckProfile:           defaultString(argValue(args, "--replication-ack"), PromotionAckProfileBestEffort),
 		DataAddr:             argValue(args, "--data-addr"),
 		CtrlAddr:             argValue(args, "--ctrl-addr"),
 		Observed:             true,
@@ -577,6 +623,18 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
+func replicationFactorFromVolumeAttributes(attrs map[string]string, fallback int) (int, string) {
+	raw := strings.TrimSpace(attrs["replicationFactor"])
+	if raw == "" {
+		return max(1, fallback), ""
+	}
+	rf, err := strconv.Atoi(raw)
+	if err != nil || rf <= 0 {
+		return max(1, fallback), "invalid: replication_factor_attribute=" + raw
+	}
+	return rf, ""
+}
+
 func max(a, b int) int {
 	if a > b {
 		return a
@@ -625,8 +683,9 @@ type k8sPV struct {
 			UID       string `json:"uid"`
 		} `json:"claimRef"`
 		CSI struct {
-			Driver       string `json:"driver"`
-			VolumeHandle string `json:"volumeHandle"`
+			Driver           string            `json:"driver"`
+			VolumeHandle     string            `json:"volumeHandle"`
+			VolumeAttributes map[string]string `json:"volumeAttributes"`
 		} `json:"csi"`
 	} `json:"spec"`
 }

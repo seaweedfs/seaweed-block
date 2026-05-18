@@ -23,6 +23,20 @@ func (p *recordingPrimaryOpenProvider) Open(_ context.Context, volumeID string) 
 	return nil, p.err
 }
 
+type recordingLatchProvider struct {
+	recordingPrimaryOpenProvider
+	latchVolumeID string
+	latchCalls    int
+	latchChanged  bool
+	latchErr      error
+}
+
+func (p *recordingLatchProvider) LatchVolumeIdentity(volumeID string) (bool, error) {
+	p.latchCalls++
+	p.latchVolumeID = volumeID
+	return p.latchChanged, p.latchErr
+}
+
 func TestReadyAssignment_PrimaryEnsuresDurableLineageAndPrintsReadyLine(t *testing.T) {
 	prov := &recordingPrimaryOpenProvider{}
 	var stdout, stderr bytes.Buffer
@@ -45,6 +59,27 @@ func TestReadyAssignment_PrimaryEnsuresDurableLineageAndPrintsReadyLine(t *testi
 	}
 }
 
+func TestReadyAssignment_UsesDurableIdentityLatchWhenAvailable(t *testing.T) {
+	prov := &recordingLatchProvider{latchChanged: true}
+	var stderr bytes.Buffer
+
+	handleReadyAssignment(adapter.AssignmentInfo{
+		VolumeID: "v1", ReplicaID: "r2", Epoch: 2, EndpointVersion: 1,
+	}, flags{
+		volumeID: "v1", replicaID: "r2",
+	}, prov, nil, &stderr)
+
+	if prov.latchCalls != 1 || prov.latchVolumeID != "v1" {
+		t.Fatalf("LatchVolumeIdentity calls=%d volume=%q, want 1/v1", prov.latchCalls, prov.latchVolumeID)
+	}
+	if prov.calls != 0 {
+		t.Fatalf("Open must not be called when durable identity latch is available: %d", prov.calls)
+	}
+	if got := stderr.String(); !strings.Contains(got, "durable lineage latched volume=v1 replica=r2 epoch=2 ev=1 changed=true") {
+		t.Fatalf("latch log mismatch: %s", got)
+	}
+}
+
 func TestReadyAssignment_IgnoresOtherReplica(t *testing.T) {
 	prov := &recordingPrimaryOpenProvider{}
 
@@ -57,6 +92,16 @@ func TestReadyAssignment_IgnoresOtherReplica(t *testing.T) {
 	if prov.calls != 0 {
 		t.Fatalf("Open called for other replica: %d", prov.calls)
 	}
+}
+
+func TestReadyAssignment_IgnoresTypedNilProvider(t *testing.T) {
+	var prov *recordingPrimaryOpenProvider
+
+	handleReadyAssignment(adapter.AssignmentInfo{
+		VolumeID: "v1", ReplicaID: "r2", Epoch: 2, EndpointVersion: 1,
+	}, flags{
+		volumeID: "v1", replicaID: "r2",
+	}, prov, nil, nil)
 }
 
 func TestReadyAssignment_ReportsDurableEnsureFailure(t *testing.T) {

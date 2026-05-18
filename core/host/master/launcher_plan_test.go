@@ -3,6 +3,7 @@ package master
 import (
 	"testing"
 
+	"github.com/seaweedfs/seaweed-block/core/authority"
 	"github.com/seaweedfs/seaweed-block/core/lifecycle"
 )
 
@@ -122,6 +123,289 @@ func TestG15d_WorkloadPlanTickAllocatesDistinctNodeLocalPortsAcrossVolumes(t *te
 	}
 	if _, ok := h.Publisher().VolumeAuthorityLine("pvc-b"); ok {
 		t.Fatal("workload planning must not mint authority for pvc-b")
+	}
+}
+
+func TestMountedFailover_WorkloadPlanSupportsLogicalServersOnOneKubernetesNode(t *testing.T) {
+	h := newTestMaster(t, t.TempDir())
+	defer closeTestMaster(t, h)
+	stores := h.Lifecycle()
+	if _, err := stores.Volumes.CreateVolume(lifecycle.VolumeSpec{
+		VolumeID:          "pvc-rf2",
+		SizeBytes:         1 << 20,
+		ReplicationFactor: 2,
+	}); err != nil {
+		t.Fatalf("create volume: %v", err)
+	}
+	for _, reg := range []lifecycle.NodeRegistration{
+		{
+			ServerID: "m02-r1",
+			DataAddr: "127.0.0.1:19101",
+			CtrlAddr: "127.0.0.1:19102",
+			Labels: map[string]string{
+				lifecycle.KubernetesNodeNameLabel: "m02",
+			},
+			Pools: []lifecycle.StoragePool{{
+				PoolID:     "default-r1",
+				TotalBytes: 1 << 30,
+				FreeBytes:  1 << 30,
+				BlockSize:  4096,
+			}},
+		},
+		{
+			ServerID: "m02-r2",
+			DataAddr: "127.0.0.1:19103",
+			CtrlAddr: "127.0.0.1:19104",
+			Labels: map[string]string{
+				lifecycle.KubernetesNodeNameLabel: "m02",
+			},
+			Pools: []lifecycle.StoragePool{{
+				PoolID:     "default-r2",
+				TotalBytes: 1 << 30,
+				FreeBytes:  1 << 30,
+				BlockSize:  4096,
+			}},
+		},
+	} {
+		if _, err := stores.Nodes.RegisterNode(reg); err != nil {
+			t.Fatalf("register node %s: %v", reg.ServerID, err)
+		}
+	}
+	if _, err := h.RunLifecycleProductTick(); err != nil {
+		t.Fatalf("product tick: %v", err)
+	}
+
+	result, err := h.RunLifecycleWorkloadPlanTick(lifecycle.WorkloadPlanConfig{
+		ISCSIPortBase: 3260,
+		NVMePortBase:  4420,
+	})
+	if err != nil {
+		t.Fatalf("workload plan tick: %v", err)
+	}
+	if len(result.Plans) != 1 || len(result.Plans[0].Replicas) != 2 {
+		t.Fatalf("plans=%+v want one RF2 workload plan", result.Plans)
+	}
+	for _, replica := range result.Plans[0].Replicas {
+		if replica.KubernetesNodeName != "m02" {
+			t.Fatalf("replica %s kube node=%q want m02", replica.ReplicaID, replica.KubernetesNodeName)
+		}
+		if replica.ServerID == replica.KubernetesNodeName {
+			t.Fatalf("replica %s collapsed server identity into k8s node name", replica.ReplicaID)
+		}
+	}
+}
+
+func TestMountedFailover_WorkloadPlanAllocatesPortsByKubernetesNode(t *testing.T) {
+	h := newTestMaster(t, t.TempDir())
+	defer closeTestMaster(t, h)
+	stores := h.Lifecycle()
+	for _, volumeID := range []string{"pvc-rf2-a", "pvc-rf2-b"} {
+		if _, err := stores.Volumes.CreateVolume(lifecycle.VolumeSpec{
+			VolumeID:          volumeID,
+			SizeBytes:         1 << 20,
+			ReplicationFactor: 2,
+		}); err != nil {
+			t.Fatalf("create volume %s: %v", volumeID, err)
+		}
+	}
+	for _, reg := range []lifecycle.NodeRegistration{
+		{
+			ServerID: "m02-r1",
+			DataAddr: "127.0.0.1:19101",
+			CtrlAddr: "127.0.0.1:19102",
+			Labels:   map[string]string{lifecycle.KubernetesNodeNameLabel: "m02"},
+			Pools: []lifecycle.StoragePool{{
+				PoolID: "default-r1", TotalBytes: 1 << 30, FreeBytes: 1 << 30, BlockSize: 4096,
+			}},
+		},
+		{
+			ServerID: "m02-r2",
+			DataAddr: "127.0.0.1:19103",
+			CtrlAddr: "127.0.0.1:19104",
+			Labels:   map[string]string{lifecycle.KubernetesNodeNameLabel: "m02"},
+			Pools: []lifecycle.StoragePool{{
+				PoolID: "default-r2", TotalBytes: 1 << 30, FreeBytes: 1 << 30, BlockSize: 4096,
+			}},
+		},
+	} {
+		if _, err := stores.Nodes.RegisterNode(reg); err != nil {
+			t.Fatalf("register node %s: %v", reg.ServerID, err)
+		}
+	}
+	if _, err := h.RunLifecycleProductTick(); err != nil {
+		t.Fatalf("product tick: %v", err)
+	}
+
+	result, err := h.RunLifecycleWorkloadPlanTick(lifecycle.WorkloadPlanConfig{
+		ISCSIPortBase: 3260,
+		NVMePortBase:  4420,
+	})
+	if err != nil {
+		t.Fatalf("workload plan tick: %v", err)
+	}
+	var ports []int
+	for _, plan := range result.Plans {
+		for _, replica := range plan.Replicas {
+			ports = append(ports, replica.ISCSIListenPort)
+			if replica.KubernetesNodeName != "m02" {
+				t.Fatalf("replica %s kube node=%q want m02", replica.ReplicaID, replica.KubernetesNodeName)
+			}
+		}
+	}
+	if len(ports) != 4 {
+		t.Fatalf("ports=%v want four RF2 replicas across two volumes", ports)
+	}
+	want := map[int]bool{3260: true, 3261: true, 3262: true, 3263: true}
+	for _, port := range ports {
+		if !want[port] {
+			t.Fatalf("unexpected or duplicate host-network port %d in %v", port, ports)
+		}
+		delete(want, port)
+	}
+	if len(want) != 0 {
+		t.Fatalf("missing expected ports: %v from got %v", want, ports)
+	}
+}
+
+func TestMountedFailover_WorkloadPlanAllocatesPortsByPhysicalNodeAcrossRF2Volumes(t *testing.T) {
+	h := newTestMaster(t, t.TempDir())
+	defer closeTestMaster(t, h)
+	stores := h.Lifecycle()
+	for _, volumeID := range []string{"pvc-rf2-a", "pvc-rf2-b"} {
+		if _, err := stores.Volumes.CreateVolume(lifecycle.VolumeSpec{
+			VolumeID:          volumeID,
+			SizeBytes:         1 << 20,
+			ReplicationFactor: 2,
+		}); err != nil {
+			t.Fatalf("create volume %s: %v", volumeID, err)
+		}
+	}
+	for _, reg := range []lifecycle.NodeRegistration{
+		{
+			ServerID: "node-a",
+			DataAddr: "10.0.0.1:19101",
+			CtrlAddr: "10.0.0.1:19102",
+			Labels:   map[string]string{lifecycle.KubernetesNodeNameLabel: "k8s-a"},
+			Pools: []lifecycle.StoragePool{{
+				PoolID: "pool-a", TotalBytes: 1 << 30, FreeBytes: 1 << 30, BlockSize: 4096,
+			}},
+		},
+		{
+			ServerID: "node-b",
+			DataAddr: "10.0.0.2:19101",
+			CtrlAddr: "10.0.0.2:19102",
+			Labels:   map[string]string{lifecycle.KubernetesNodeNameLabel: "k8s-b"},
+			Pools: []lifecycle.StoragePool{{
+				PoolID: "pool-b", TotalBytes: 1 << 30, FreeBytes: 1 << 30, BlockSize: 4096,
+			}},
+		},
+	} {
+		if _, err := stores.Nodes.RegisterNode(reg); err != nil {
+			t.Fatalf("register node %s: %v", reg.ServerID, err)
+		}
+	}
+	if _, err := h.RunLifecycleProductTick(); err != nil {
+		t.Fatalf("product tick: %v", err)
+	}
+
+	result, err := h.RunLifecycleWorkloadPlanTick(lifecycle.WorkloadPlanConfig{
+		ISCSIPortBase: 3260,
+		NVMePortBase:  4420,
+	})
+	if err != nil {
+		t.Fatalf("workload plan tick: %v", err)
+	}
+	portsByNode := map[string]map[int]bool{}
+	dataByNode := map[string]map[string]bool{}
+	for _, plan := range result.Plans {
+		for _, replica := range plan.Replicas {
+			node := replica.KubernetesNodeName
+			if portsByNode[node] == nil {
+				portsByNode[node] = map[int]bool{}
+				dataByNode[node] = map[string]bool{}
+			}
+			if portsByNode[node][replica.ISCSIListenPort] {
+				t.Fatalf("duplicate iscsi port %d on node %s", replica.ISCSIListenPort, node)
+			}
+			portsByNode[node][replica.ISCSIListenPort] = true
+			if dataByNode[node][replica.DataAddr] {
+				t.Fatalf("duplicate data addr %s on node %s", replica.DataAddr, node)
+			}
+			dataByNode[node][replica.DataAddr] = true
+		}
+	}
+	for _, node := range []string{"k8s-a", "k8s-b"} {
+		for _, want := range []int{3260, 3261} {
+			if !portsByNode[node][want] {
+				t.Fatalf("node %s ports=%v missing %d", node, portsByNode[node], want)
+			}
+		}
+	}
+}
+
+func TestMountedFailover_ProductTickPreservesMaterializedRF2Placement(t *testing.T) {
+	h := newTestMasterWithControllerConfig(t, t.TempDir(), authority.TopologyControllerConfig{
+		ExpectedSlotsPerVolume: 2,
+	})
+	defer closeTestMaster(t, h)
+	stores := h.Lifecycle()
+	if _, err := stores.Volumes.CreateVolume(lifecycle.VolumeSpec{
+		VolumeID:          "pvc-rf2",
+		SizeBytes:         1 << 20,
+		ReplicationFactor: 2,
+	}); err != nil {
+		t.Fatalf("create volume: %v", err)
+	}
+	for _, reg := range []lifecycle.NodeRegistration{
+		{
+			ServerID: "m02-r1",
+			DataAddr: "127.0.0.1:19101",
+			CtrlAddr: "127.0.0.1:19102",
+			Labels:   map[string]string{lifecycle.KubernetesNodeNameLabel: "m02"},
+			Pools: []lifecycle.StoragePool{{
+				PoolID: "default-r1", TotalBytes: 1 << 30, FreeBytes: 1 << 30, BlockSize: 4096,
+			}},
+		},
+		{
+			ServerID: "m02-r2",
+			DataAddr: "127.0.0.1:19103",
+			CtrlAddr: "127.0.0.1:19104",
+			Labels:   map[string]string{lifecycle.KubernetesNodeNameLabel: "m02"},
+			Pools: []lifecycle.StoragePool{{
+				PoolID: "default-r2", TotalBytes: 1 << 30, FreeBytes: 1 << 30, BlockSize: 4096,
+			}},
+		},
+	} {
+		if _, err := stores.Nodes.RegisterNode(reg); err != nil {
+			t.Fatalf("register node %s: %v", reg.ServerID, err)
+		}
+	}
+	if _, err := h.RunLifecycleProductTick(); err != nil {
+		t.Fatalf("product tick: %v", err)
+	}
+	if _, err := h.RunLifecycleWorkloadPlanTick(lifecycle.WorkloadPlanConfig{}); err != nil {
+		t.Fatalf("workload plan tick: %v", err)
+	}
+	before, ok := stores.Placements.GetPlacement("pvc-rf2")
+	if !ok {
+		t.Fatal("missing materialized placement")
+	}
+	for _, slot := range before.Slots {
+		if slot.Source != lifecycle.PlacementSourceExistingReplica || slot.ReplicaID == "" {
+			t.Fatalf("placement not materialized before product tick: %+v", before)
+		}
+	}
+	if _, err := h.RunLifecycleProductTick(); err != nil {
+		t.Fatalf("second product tick: %v", err)
+	}
+	after, ok := stores.Placements.GetPlacement("pvc-rf2")
+	if !ok {
+		t.Fatal("placement disappeared")
+	}
+	for _, slot := range after.Slots {
+		if slot.Source != lifecycle.PlacementSourceExistingReplica || slot.ReplicaID == "" {
+			t.Fatalf("product tick overwrote materialized placement: before=%+v after=%+v", before, after)
+		}
 	}
 }
 

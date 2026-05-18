@@ -38,9 +38,10 @@ func (s *stubObs) SlotFact(volumeID, replicaID string) (authority.SlotFact, bool
 
 // TestResolvePeers_R1Bound_R2ObservedOnly_R2InPeersWithHeartbeatAddr
 // is the headline G5-5A pin per architect binding 2026-04-27:
-//   "with r1 bound and r2 only heartbeat-observed as a supporting
-//    slot member, the assignment fact delivered to r1 includes r2 in
-//    peers with its heartbeat-reported DataAddr"
+//
+//	"with r1 bound and r2 only heartbeat-observed as a supporting
+//	 slot member, the assignment fact delivered to r1 includes r2 in
+//	 peers with its heartbeat-reported DataAddr"
 func TestResolvePeers_R1Bound_R2ObservedOnly_R2InPeersWithHeartbeatAddr(t *testing.T) {
 	pub := &stubPub{state: map[[2]string]adapter.AssignmentInfo{
 		{"v1", "r1"}: {VolumeID: "v1", ReplicaID: "r1", Epoch: 1, EndpointVersion: 1, DataAddr: "10.0.0.1:9220", CtrlAddr: "10.0.0.1:9210"},

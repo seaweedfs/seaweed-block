@@ -22,3 +22,8 @@ coverage.out
 /blockmaster.exe
 /blockvolume
 /blockvolume.exe
+
+# Local test runner outputs and ad-hoc Windows builds. Formal QA evidence lives
+# under internal/docs/qa-assignments or external shared artifacts, not here.
+/results/
+/sw-testops.exe

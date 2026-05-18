@@ -179,6 +179,44 @@ func TestReconcilePlacement_DesiredRFChangeUpdatesExistingIntent(t *testing.T) {
 	}
 }
 
+func TestReconcilePlacement_PreservesMaterializedReplicaPlacement(t *testing.T) {
+	store, err := OpenPlacementIntentStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	if _, err := store.ApplyPlan(PlacementPlan{
+		VolumeID:  "vol-a",
+		DesiredRF: 2,
+		Candidates: []PlacementCandidate{
+			{VolumeID: "vol-a", ServerID: "node-a", ReplicaID: "r1", Source: PlacementSourceExistingReplica},
+			{VolumeID: "vol-a", ServerID: "node-b", ReplicaID: "r2", Source: PlacementSourceExistingReplica},
+		},
+	}); err != nil {
+		t.Fatalf("seed materialized placement: %v", err)
+	}
+	nodes := []NodeRegistration{
+		nodeWithPool("node-a", "pool-a", 1<<30),
+		nodeWithPool("node-b", "pool-b", 1<<30),
+	}
+	results := ReconcilePlacement([]VolumeRecord{{Spec: VolumeSpec{
+		VolumeID:          "vol-a",
+		SizeBytes:         1 << 20,
+		ReplicationFactor: 2,
+	}}}, nodes, store)
+	if len(results) != 1 || !results[0].Applied {
+		t.Fatalf("reconcile failed: %+v", results)
+	}
+	got, ok := store.GetPlacement("vol-a")
+	if !ok {
+		t.Fatal("missing placement")
+	}
+	for _, slot := range got.Slots {
+		if slot.Source != PlacementSourceExistingReplica || slot.ReplicaID == "" {
+			t.Fatalf("materialized placement was overwritten: %+v", got)
+		}
+	}
+}
+
 func TestReconcilePlacement_ExistingIntentSameInputsOverwritesSameValue(t *testing.T) {
 	store, err := OpenPlacementIntentStore(t.TempDir())
 	if err != nil {

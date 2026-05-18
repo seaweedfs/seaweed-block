@@ -32,6 +32,7 @@ type services struct {
 	control.UnimplementedObservationServiceServer
 	control.UnimplementedAssignmentServiceServer
 	control.UnimplementedEvidenceServiceServer
+	control.UnimplementedClusterEvidenceServiceServer
 	control.UnimplementedLifecycleServiceServer
 
 	host *Host
@@ -303,7 +304,12 @@ func (s *services) QueryVolumeStatus(ctx context.Context, req *control.StatusReq
 		resp.ReplicaId = line.ReplicaID
 		resp.Epoch = line.Epoch
 		resp.EndpointVersion = line.EndpointVersion
-		resp.Frontends = statusFrontendsForAssignedLine(s.host.obs, req.VolumeId, line.ReplicaID, line.Assigned)
+		replicaIDs := s.host.replicaSlotsFor(req.VolumeId)
+		if len(replicaIDs) == 0 && line.ReplicaID != "" {
+			replicaIDs = []string{line.ReplicaID}
+		}
+		replicaIDs = primaryFirstReplicaIDs(replicaIDs, line.ReplicaID)
+		resp.Frontends = statusFrontendsForAssignedVolume(s.host.obs, req.VolumeId, replicaIDs, line.Assigned)
 	}
 	if ev, ok := ctrl.LastUnsupported(req.VolumeId); ok {
 		resp.LastUnsupportedReason = ev.Reason
@@ -315,13 +321,67 @@ func (s *services) QueryVolumeStatus(ctx context.Context, req *control.StatusReq
 }
 
 func statusFrontendsForAssignedLine(obs *authority.ObservationHost, volumeID, replicaID string, assigned bool) []*control.FrontendTarget {
+	return statusFrontendsForAssignedVolume(obs, volumeID, []string{replicaID}, assigned)
+}
+
+func primaryFirstReplicaIDs(replicaIDs []string, primaryReplicaID string) []string {
+	if primaryReplicaID == "" || len(replicaIDs) == 0 {
+		return replicaIDs
+	}
+	out := make([]string, 0, len(replicaIDs))
+	seenPrimary := false
+	for _, replicaID := range replicaIDs {
+		if replicaID == primaryReplicaID {
+			if !seenPrimary {
+				out = append(out, replicaID)
+				seenPrimary = true
+			}
+			continue
+		}
+	}
+	if !seenPrimary {
+		out = append(out, primaryReplicaID)
+	}
+	for _, replicaID := range replicaIDs {
+		if replicaID == "" || replicaID == primaryReplicaID {
+			continue
+		}
+		out = append(out, replicaID)
+	}
+	return out
+}
+
+func statusFrontendsForAssignedVolume(obs *authority.ObservationHost, volumeID string, replicaIDs []string, assigned bool) []*control.FrontendTarget {
 	if !assigned || obs == nil {
 		return nil
 	}
-	if slot, ok := obs.Store().SlotFact(volumeID, replicaID); ok {
-		return frontendTargetsToWire(slot.Frontends)
+	out := make([]*control.FrontendTarget, 0, len(replicaIDs))
+	seen := map[string]struct{}{}
+	for _, replicaID := range replicaIDs {
+		if replicaID == "" {
+			continue
+		}
+		slot, ok := obs.Store().SlotFact(volumeID, replicaID)
+		if !ok {
+			continue
+		}
+		for _, ft := range frontendTargetsToWire(slot.Frontends) {
+			key := frontendTargetKey(ft)
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			out = append(out, ft)
+		}
 	}
-	return nil
+	return out
+}
+
+func frontendTargetKey(ft *control.FrontendTarget) string {
+	if ft == nil {
+		return ""
+	}
+	return fmt.Sprintf("%s|%s|%s|%s|%d|%d", ft.GetProtocol(), ft.GetAddr(), ft.GetIqn(), ft.GetNqn(), ft.GetLun(), ft.GetNsid())
 }
 
 // validateHeartbeat rejects reports that are missing required

@@ -32,6 +32,7 @@ func TestKubernetesDeploymentClient_ListApplyDelete(t *testing.T) {
 							LabelReplica: "r1",
 						},
 					},
+					"spec": map[string]any{"replicas": 0},
 				}},
 			})
 		case r.Method == http.MethodPatch && r.URL.Path == "/apis/apps/v1/namespaces/default/deployments/sw-blockvolume-pvc-a-r1":
@@ -62,6 +63,9 @@ func TestKubernetesDeploymentClient_ListApplyDelete(t *testing.T) {
 	}
 	if len(existing) != 1 || existing[0].Name != "sw-blockvolume-pvc-a-r1" {
 		t.Fatalf("existing=%+v", existing)
+	}
+	if existing[0].SpecReplicas == nil || *existing[0].SpecReplicas != 0 {
+		t.Fatalf("existing replicas=%v want 0", existing[0].SpecReplicas)
 	}
 	manifest := RenderedManifest{
 		Name: "sw-blockvolume-pvc-a-r1",

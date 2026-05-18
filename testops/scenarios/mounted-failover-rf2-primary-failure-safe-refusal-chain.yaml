@@ -1,0 +1,296 @@
+# Runner-native mounted failover MVP controlled-primary-failure safe-refusal gate.
+#
+# Goal:
+#   Write data through the RF=2 Kubernetes app/PVC path, identify the current
+#   primary, inject a scoped primary blockvolume stop before the replacement
+#   reader attaches, and require an explicit safe-refusal bundle. This does not
+#   claim recovery; it proves the product refuses to promote a not-ready
+#   candidate silently.
+
+name: mounted-failover-rf2-primary-failure-safe-refusal-chain
+timeout: 22m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: pre_clean
+    actions:
+      - action: pre_run_cleanup
+        node: m02
+        kill_patterns: "blockmaster,blockvolume,blockcsi,iscsi-target"
+        nvme_disconnect: "true"
+        iscsi_logout_prefix: "iqn.2026-05.io.seaweedfs"
+      - action: exec
+        node: m02
+        cmd: "rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf2-primary-safe-refusal && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf2-primary-safe-refusal/pin_build /mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf2-primary-safe-refusal/demo"
+      - action: exec
+        node: m02
+        cmd: "kubectl -n default delete pod sw-block-demo-reader sw-block-demo-writer --ignore-not-found=true --wait=true --timeout=120s >/dev/null 2>&1 || true; kubectl -n default delete pvc sw-block-demo-pvc --ignore-not-found=true --wait=true --timeout=120s >/dev/null 2>&1 || true; kubectl delete sc sw-block-dynamic --ignore-not-found=true >/dev/null 2>&1 || true; pkill -f 'kubectl.*port-forward.*svc/blockmaste[r]' >/dev/null 2>&1 || true"
+      - action: assert_no_active_iscsi_sessions
+        node: m02
+        iqn_substr: "io.seaweedfs"
+      - action: assert_no_processes
+        node: m02
+        pattern: "[/]blockmaster --|[/]blockvolume --|[/]blockcsi |[/]iscsi-target |^blockmaster |^blockvolume |^blockcsi |^iscsi-target "
+
+  - name: preflight
+    actions:
+      - action: exec
+        node: m02
+        cmd: "cd {{ product_root }} && bash scripts/preflight-k8s-alpha.sh --local-k3s > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf2-primary-safe-refusal/preflight.txt 2>&1"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf2-primary-safe-refusal/preflight.txt"
+        pattern: "summary status=PASS"
+        save_as: preflight_count
+      - action: assert_greater
+        actual: "{{ preflight_count }}"
+        threshold: "0"
+
+  - name: pin_build_alpha_images
+    actions:
+      - action: exec
+        node: m02
+        timeout: 8m
+        cmd: "cd {{ product_root }} && bash scripts/build-alpha-images.sh {{ product_root }}"
+        env.SW_BLOCK_IMPORT_K3S: "1"
+        env.SW_BLOCK_ARTIFACT_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf2-primary-safe-refusal/pin_build"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf2-primary-safe-refusal/pin_build/alpha-images.env"
+        pattern: "SW_BLOCK_IMAGE_ID="
+        save_as: sw_block_image_id_count
+      - action: assert_greater
+        actual: "{{ sw_block_image_id_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf2-primary-safe-refusal/pin_build/alpha-images.env"
+        pattern: "SW_BLOCK_CSI_IMAGE_ID="
+        save_as: sw_block_csi_image_id_count
+      - action: assert_greater
+        actual: "{{ sw_block_csi_image_id_count }}"
+        threshold: "0"
+
+  - name: render_rf2_demo_manifest
+    actions:
+      - action: exec
+        node: m02
+        cmd: "cd {{ product_root }} && sed 's/replicationFactor: \"1\"/replicationFactor: \"2\"/' deploy/k8s/alpha/demo-app-pvc.yaml > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf2-primary-safe-refusal/demo/demo-app-rf2.yaml"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf2-primary-safe-refusal/demo/demo-app-rf2.yaml"
+        pattern: "replicationFactor: \"2\""
+        save_as: rf2_manifest_count
+      - action: assert_greater
+        actual: "{{ rf2_manifest_count }}"
+        threshold: "0"
+
+  - name: rf2_primary_failure_safe_refusal
+    actions:
+      - action: exec
+        node: m02
+        timeout: 12m
+        cmd: "cd {{ product_root }} && bash -c 'set -a; source /mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf2-primary-safe-refusal/pin_build/alpha-images.env; set +a; set +e; SW_BLOCK_ARTIFACT_DIR=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf2-primary-safe-refusal/demo SW_BLOCK_DEMO_APP_MANIFEST=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf2-primary-safe-refusal/demo/demo-app-rf2.yaml SW_BLOCK_ALPHA_LOGICAL_SERVERS=2 SW_BLOCK_ALPHA_EXPECTED_SLOTS_PER_VOLUME=2 SW_BLOCK_ALPHA_REPLICATION_ACK=sync-quorum SW_BLOCK_LAUNCHER_STATE_HOSTPATH=/var/lib/sw-block/testops-{{ run_id }}-rf2-primary-safe-refusal SW_BLOCK_DEMO_FAIL_PRIMARY_BEFORE_READER=scale-primary-to-zero bash scripts/run-k8s-demo.sh {{ product_root }}; rc=$?; echo $rc > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf2-primary-safe-refusal/demo/exit_code.txt; test \"$rc\" -eq 46'"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf2-primary-safe-refusal/demo/run.log"
+        pattern: "fail_primary_before_reader=scale-primary-to-zero"
+        save_as: fail_primary_mode_count
+      - action: assert_greater
+        actual: "{{ fail_primary_mode_count }}"
+        threshold: "0"
+
+  - name: safe_refusal_asserts
+    actions:
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf2-primary-safe-refusal/demo/writer.log"
+        pattern: "\\[app-writer\\] wrote and verified /data/demo.bin"
+        save_as: writer_checksum_count
+      - action: assert_greater
+        actual: "{{ writer_checksum_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf2-primary-safe-refusal/demo/primary-failure-safe-refusal.txt"
+        pattern: "failover_status: refused"
+        save_as: failover_refused_count
+      - action: assert_greater
+        actual: "{{ failover_refused_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf2-primary-safe-refusal/demo/primary-failure-safe-refusal.txt"
+        pattern: "ack_profile: sync-quorum"
+        save_as: safe_refusal_sync_quorum_count
+      - action: assert_greater
+        actual: "{{ safe_refusal_sync_quorum_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf2-primary-safe-refusal/demo/generated-blockvolume.yaml"
+        pattern: "--replication-ack=sync-quorum"
+        save_as: generated_sync_quorum_count
+      - action: assert_greater
+        actual: "{{ generated_sync_quorum_count }}"
+        threshold: "1"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf2-primary-safe-refusal/demo/primary-failure-safe-refusal.txt"
+        pattern: "failure_class=primary-blockvolume-controlled-stop"
+        save_as: failure_class_count
+      - action: assert_greater
+        actual: "{{ failure_class_count }}"
+        threshold: "0"
+      - action: exec
+        node: m02
+        cmd: "MARKER=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf2-primary-safe-refusal/demo/primary-failure-safe-refusal.txt; before=$(sed -n 's/^before_primary_replica=//p' \"$MARKER\"); failed=$(sed -n 's/^failed_replica=//p' \"$MARKER\"); test -n \"$before\" && test \"$before\" = \"$failed\""
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf2-primary-safe-refusal/demo/primary-failure-safe-refusal.txt"
+        pattern: "candidate_ready=false"
+        save_as: candidate_not_ready_count
+      - action: assert_greater
+        actual: "{{ candidate_not_ready_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf2-primary-safe-refusal/demo/mounted-writer-required-frontier.txt"
+        pattern: "^pvc-.*=[0-9][0-9]*$"
+        save_as: mounted_writer_frontier_count
+      - action: assert_greater
+        actual: "{{ mounted_writer_frontier_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf2-primary-safe-refusal/demo/primary-failure-safe-refusal.txt"
+        pattern: "required_frontier=pvc-"
+        save_as: safe_refusal_required_frontier_count
+      - action: assert_greater
+        actual: "{{ safe_refusal_required_frontier_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf2-primary-safe-refusal/demo/ops-inventory-before-primary-failure/volume-inventory-summary.txt"
+        pattern: "required_frontier_known=true"
+        save_as: before_required_frontier_known_count
+      - action: assert_greater
+        actual: "{{ before_required_frontier_known_count }}"
+        threshold: "0"
+      - action: exec
+        node: m02
+        cmd: "! grep -q 'required_frontier_missing' /mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf2-primary-safe-refusal/demo/ops-inventory-before-primary-failure/volume-inventory-summary.txt"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf2-primary-safe-refusal/demo/primary-failure-safe-refusal.txt"
+        pattern: "candidate_promotion_evidence=promotion: .* candidate_ready=false"
+        save_as: candidate_promotion_evidence_count
+      - action: assert_greater
+        actual: "{{ candidate_promotion_evidence_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf2-primary-safe-refusal/demo/primary-failure-safe-refusal.txt"
+        pattern: "reason=replication_role_not_ready"
+        save_as: safe_refusal_exact_reason_count
+      - action: assert_greater
+        actual: "{{ safe_refusal_exact_reason_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf2-primary-safe-refusal/demo/primary-failure-safe-refusal.txt"
+        pattern: "candidate_evidence=.*replication=not_ready"
+        save_as: candidate_evidence_count
+      - action: assert_greater
+        actual: "{{ candidate_evidence_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf2-primary-safe-refusal/demo/primary-failure-safe-refusal.txt"
+        pattern: "data_check_after_failover=not_claimed"
+        save_as: no_recovery_claim_count
+      - action: assert_greater
+        actual: "{{ no_recovery_claim_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf2-primary-safe-refusal/demo/primary-failure-safe-refusal.txt"
+        pattern: "target_ready_replicas=0"
+        save_as: target_scaled_zero_count
+      - action: assert_greater
+        actual: "{{ target_scaled_zero_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf2-primary-safe-refusal/demo/ops-inventory-before-primary-failure/volume-inventory-summary.txt"
+        pattern: "rf=2 desired=2 observed=2"
+        save_as: before_rf2_count
+      - action: assert_greater
+        actual: "{{ before_rf2_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf2-primary-safe-refusal/demo/ops-inventory-before-primary-failure/volume-inventory-summary.txt"
+        pattern: " role=primary "
+        save_as: before_primary_count
+      - action: assert_greater
+        actual: "{{ before_primary_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf2-primary-safe-refusal/demo/ops-inventory-after-primary-failure/volume-inventory-summary.txt"
+        pattern: "inventory_status: unhealthy"
+        save_as: after_unhealthy_count
+      - action: assert_greater
+        actual: "{{ after_unhealthy_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf2-primary-safe-refusal/demo/primary-failure-safe-refusal.txt"
+        pattern: "after_issue_evidence="
+        save_as: after_issue_evidence_count
+      - action: assert_greater
+        actual: "{{ after_issue_evidence_count }}"
+        threshold: "0"
+      - action: exec
+        node: m02
+        cmd: "! grep -q '/data/demo.bin: OK' /mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf2-primary-safe-refusal/demo/reader.log 2>/dev/null"
+
+  - name: collect_and_cleanup
+    always: true
+    actions:
+      - action: exec
+        node: m02
+        timeout: 3m
+        cmd: "cd {{ product_root }} && bash scripts/uninstall-k8s-alpha.sh {{ product_root }}"
+        env.SW_BLOCK_ARTIFACT_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf2-primary-safe-refusal/uninstall"
+        env.SW_BLOCK_UNINSTALL_DELETE_ALL_BLOCKVOLUMES: "1"
+      - action: pre_run_cleanup
+        node: m02
+        kill_patterns: "blockmaster,blockvolume,blockcsi,iscsi-target"
+        nvme_disconnect: "true"
+        iscsi_logout_prefix: "iqn.2026-05.io.seaweedfs"
+      - action: exec
+        node: m02
+        cmd: "find /var/lib/sw-block -maxdepth 1 -type d -name 'testops-{{ run_id }}-*' -exec rm -rf {} + 2>/dev/null || true; pkill -f 'kubectl.*port-forward.*svc/blockmaste[r]' >/dev/null 2>&1 || true"
+      - action: assert_no_active_iscsi_sessions
+        node: m02
+        iqn_substr: "io.seaweedfs"
+      - action: assert_no_processes
+        node: m02
+        pattern: "[/]blockmaster --|[/]blockvolume --|[/]blockcsi |[/]iscsi-target |[/]kubectl .*port-forward .*svc/blockmaste[r]|^blockmaster |^blockvolume |^blockcsi |^iscsi-target "
+      - action: collect_path
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf2-primary-safe-refusal"
+        name: "remote-phases"
+        ignore_error: true

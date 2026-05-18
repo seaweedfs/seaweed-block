@@ -15,9 +15,10 @@ const (
 )
 
 type DeploymentIdentity struct {
-	Namespace string
-	Name      string
-	Labels    map[string]string
+	Namespace    string
+	Name         string
+	Labels       map[string]string
+	SpecReplicas *int
 }
 
 type DeploymentClient interface {
@@ -55,6 +56,10 @@ func ReconcileBlockVolumeDeployments(ctx context.Context, in ReconcileDeployment
 	}
 	var result ReconcileDeploymentsResult
 	desiredKeys := make(map[string]bool, len(in.Desired))
+	existingByKey := make(map[string]DeploymentIdentity, len(in.Existing))
+	for _, existing := range in.Existing {
+		existingByKey[deploymentKey(existing)] = existing
+	}
 	for _, manifest := range in.Desired {
 		identity, err := DecodeRenderedDeploymentIdentity(manifest)
 		if err != nil {
@@ -69,6 +74,17 @@ func ReconcileBlockVolumeDeployments(ctx context.Context, in ReconcileDeployment
 				manifest.Name, identity.Namespace, in.Namespace,
 			)
 		}
+		desiredKeys[deploymentKey(identity)] = true
+		if existing, ok := existingByKey[deploymentKey(identity)]; ok && existing.SpecReplicas != nil && *existing.SpecReplicas == 0 {
+			result.Skipped++
+			result.Actions = append(result.Actions, ReconcileDeploymentAction{
+				Action:    "skip",
+				Namespace: identity.Namespace,
+				Name:      identity.Name,
+				Reason:    "preserve-replicas-zero",
+			})
+			continue
+		}
 		if err := in.Client.ApplyDeployment(ctx, manifest); err != nil {
 			return result, fmt.Errorf("launcher: apply %s: %w", manifest.Name, err)
 		}
@@ -79,7 +95,6 @@ func ReconcileBlockVolumeDeployments(ctx context.Context, in ReconcileDeployment
 			Name:      identity.Name,
 			Reason:    "desired",
 		})
-		desiredKeys[deploymentKey(identity)] = true
 	}
 
 	for _, existing := range in.Existing {

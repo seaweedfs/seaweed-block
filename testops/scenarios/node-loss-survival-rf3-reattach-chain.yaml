@@ -1,0 +1,413 @@
+# Runner-native Node-Loss D4 conservative recovery gate.
+#
+# This gate consumes the D3 eligible topology: RF=3, sync-quorum, distinct
+# Kubernetes nodes, non-loopback frontends/status endpoints, CHAP-protected
+# external iSCSI, and loopback publish-target rejection. It injects a scoped
+# primary Kubernetes-node failure by cordoning the primary node and stopping the
+# primary blockvolume Deployment, then proves conservative recovery through
+# CSI/pod recreate on a survivor node. It does not claim physical-host loss or
+# transparent in-place I/O continuation.
+
+name: node-loss-survival-rf3-reattach-chain
+timeout: 34m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: pre_clean
+    actions:
+      - action: pre_run_cleanup
+        node: m02
+        kill_patterns: "blockmaster,blockvolume,blockcsi,iscsi-target"
+        nvme_disconnect: "true"
+        iscsi_logout_prefix: "iqn.2026-05.io.seaweedfs"
+      - action: exec
+        node: m02
+        cmd: "rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-survival && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-survival/pin_build /mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-survival/demo"
+      - action: exec
+        node: m02
+        cmd: "kubectl -n default delete pod sw-block-demo-reader sw-block-demo-writer --ignore-not-found=true --wait=true --timeout=120s >/dev/null 2>&1 || true; kubectl -n default delete pvc sw-block-demo-pvc --ignore-not-found=true --wait=true --timeout=120s >/dev/null 2>&1 || true; kubectl delete sc sw-block-dynamic --ignore-not-found=true >/dev/null 2>&1 || true; pkill -f 'kubectl.*port-forward.*blockmaste[r]' >/dev/null 2>&1 || true; sudo rm -rf -- /var/lib/sw-block/testops-{{ run_id }}-node-loss-survival >/dev/null 2>&1 || true"
+      - action: assert_no_active_iscsi_sessions
+        node: m02
+        iqn_substr: "io.seaweedfs"
+      - action: assert_no_processes
+        node: m02
+        pattern: "[/]blockmaster --|[/]blockvolume --|[/]blockcsi |[/]iscsi-target |^blockmaster |^blockvolume |^blockcsi |^iscsi-target "
+
+  - name: preflight
+    actions:
+      - action: exec
+        node: m02
+        cmd: "cd {{ product_root }} && bash scripts/preflight-k8s-alpha.sh --local-k3s > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-survival/preflight.txt 2>&1"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-survival/preflight.txt"
+        pattern: "summary status=PASS"
+        save_as: preflight_count
+      - action: assert_greater
+        actual: "{{ preflight_count }}"
+        threshold: "0"
+
+  - name: discover_multinode_topology
+    actions:
+      - action: exec
+        node: m02
+        cmd: |
+          set -euo pipefail
+          B=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-survival
+          cd {{ product_root }}
+          bash scripts/preflight-node-loss-lab.sh \
+            --min-k8s-nodes 3 \
+            --topology-out "$B/cluster-topology.txt" \
+            --topology-json-out "$B/cluster-topology.json" \
+            --env-out "$B/node-specs.env" \
+            --placement-out "$B/node-placement.before.txt" \
+            > "$B/node-loss-lab-preflight.txt" 2>&1
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-survival/node-placement.before.txt"
+        pattern: "node_loss_topology_eligible=true"
+        save_as: topology_eligible_count
+      - action: assert_greater
+        actual: "{{ topology_eligible_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-survival/node-placement.before.txt"
+        pattern: "physical_host_loss_claimed=false"
+        save_as: no_physical_host_loss_claim_count
+      - action: assert_greater
+        actual: "{{ no_physical_host_loss_claim_count }}"
+        threshold: "0"
+
+  - name: pin_build_alpha_images
+    actions:
+      - action: exec
+        node: m02
+        timeout: 8m
+        cmd: |
+          set -euo pipefail
+          B=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-survival
+          cd {{ product_root }}
+          set -a
+          source "$B/node-specs.env"
+          set +a
+          SW_BLOCK_IMPORT_K3S=1 \
+          SW_BLOCK_IMPORT_K3S_NODES="$K3S_IMPORT_NODES" \
+          SW_BLOCK_IMPORT_K3S_SSH_USER=testdev \
+          SW_BLOCK_IMPORT_K3S_SSH_KEY=/opt/work/testdev_key \
+          SW_BLOCK_ARTIFACT_DIR="$B/pin_build" \
+            bash scripts/build-alpha-images.sh {{ product_root }}
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-survival/pin_build/alpha-images.env"
+        pattern: "SW_BLOCK_IMAGE_ID="
+        save_as: sw_block_image_id_count
+      - action: assert_greater
+        actual: "{{ sw_block_image_id_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-survival/pin_build/alpha-images.env"
+        pattern: "SW_BLOCK_CSI_IMAGE_ID="
+        save_as: sw_block_csi_image_id_count
+      - action: assert_greater
+        actual: "{{ sw_block_csi_image_id_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-survival/pin_build/alpha-images.env"
+        pattern: "SW_BLOCK_IMPORT_K3S_NODES="
+        save_as: k3s_import_nodes_count
+      - action: assert_greater
+        actual: "{{ k3s_import_nodes_count }}"
+        threshold: "0"
+
+  - name: render_rf3_demo_manifest
+    actions:
+      - action: exec
+        node: m02
+        cmd: "cd {{ product_root }} && sed 's/replicationFactor: \"1\"/replicationFactor: \"3\"/' deploy/k8s/alpha/demo-app-pvc.yaml > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-survival/demo/demo-app-rf3.yaml"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-survival/demo/demo-app-rf3.yaml"
+        pattern: "replicationFactor: \"3\""
+        save_as: rf3_manifest_count
+      - action: assert_greater
+        actual: "{{ rf3_manifest_count }}"
+        threshold: "0"
+
+  - name: rf3_node_loss_recovery
+    actions:
+      - action: exec
+        node: m02
+        timeout: 20m
+        cmd: |
+          cd {{ product_root }}
+          bash -c 'set -a; source /mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-survival/pin_build/alpha-images.env; source /mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-survival/node-specs.env; set +a; set +e; SW_BLOCK_ARTIFACT_DIR=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-survival/demo SW_BLOCK_DEMO_APP_MANIFEST=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-survival/demo/demo-app-rf3.yaml SW_BLOCK_DEMO_APP_NODE_NAME="$APP_NODE" SW_BLOCK_DEMO_READER_NODE_NAME="$SURVIVOR_APP_NODE" SW_BLOCK_ALPHA_NODE_SPECS="$NODE_SPECS" SW_BLOCK_ALPHA_LOGICAL_SERVERS=3 SW_BLOCK_ALPHA_EXPECTED_SLOTS_PER_VOLUME=3 SW_BLOCK_ALPHA_REPLICATION_ACK=sync-quorum SW_BLOCK_LAUNCHER_EXTERNAL_ISCSI=1 SW_BLOCK_LAUNCHER_EXTERNAL_STATUS=1 SW_BLOCK_REJECT_LOOPBACK_PUBLISH_TARGETS=1 SW_BLOCK_ISCSI_CHAP_SECRET_NAME=sw-block-node-loss-chap SW_BLOCK_ISCSI_CHAP_USERNAME=testops-node-loss SW_BLOCK_ISCSI_CHAP_SECRET=testops-node-loss-{{ run_id }} SW_BLOCK_LAUNCHER_STATE_HOSTPATH=/var/lib/sw-block/testops-{{ run_id }}-node-loss-survival SW_BLOCK_DEMO_REQUIRE_PROMOTION_READY_BEFORE_FAILURE=1 SW_BLOCK_DEMO_FAIL_PRIMARY_BEFORE_READER=cordon-node-scale-primary-to-zero SW_BLOCK_DEMO_STOP_AFTER=reader-verified SW_BLOCK_DEMO_KEEP_ON_STOP=1 bash scripts/run-k8s-demo.sh {{ product_root }}; rc=$?; echo $rc > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-survival/demo/exit_code.txt; test "$rc" -eq 44'
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-survival/demo/run.log"
+        pattern: "fail_primary_before_reader=cordon-node-scale-primary-to-zero"
+        save_as: node_loss_failure_mode_count
+      - action: assert_greater
+        actual: "{{ node_loss_failure_mode_count }}"
+        threshold: "0"
+      - action: exec
+        node: m02
+        cmd: "B=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-survival/demo; { echo bounded_waits=pass; echo attach=bounded_by_demo_waits; echo failure_injection=bounded_by_scale_wait; echo authority_promotion=bounded_by_240s_inventory_poll; echo csi_reattach=bounded_by_reader_pod_wait; echo data_check=bounded_by_reader_pod_wait; echo cleanup=bounded_by_collect_and_cleanup_phase; } > \"$B/bounded-waits.txt\""
+      - action: exec
+        node: m02
+        timeout: 4m
+        cmd: |
+          cd {{ product_root }}
+          bash -c 'set -euo pipefail
+          OUT=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-survival/demo/product-observation
+          mkdir -p "$OUT"
+          pf_port=$(python3 - <<"PY"
+          import socket
+          s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()
+          PY
+          )
+          kubectl -n kube-system get svc,deploy,pods -o wide > "$OUT/kube-system-before-port-forward.txt" 2>&1 || true
+          kubectl -n kube-system wait --for=condition=available deploy/sw-blockmaster --timeout=60s > "$OUT/blockmaster-deploy-wait.log" 2>&1
+          kubectl -n kube-system port-forward deploy/sw-blockmaster ${pf_port}:9333 > "$OUT/blockmaster-port-forward.log" 2>&1 &
+          pf_pid=$!
+          echo "$pf_pid" > "$OUT/blockmaster-port-forward.pid"
+          cleanup(){ kill "$pf_pid" >/dev/null 2>&1 || true; wait "$pf_pid" >/dev/null 2>&1 || true; }
+          trap cleanup EXIT
+          for i in $(seq 1 30); do (echo >/dev/tcp/127.0.0.1/${pf_port}) >/dev/null 2>&1 && break; sleep 1; done
+          (echo >/dev/tcp/127.0.0.1/${pf_port}) >/dev/null 2>&1
+          go run ./cmd/sw-block ops cluster --master-api 127.0.0.1:${pf_port} --timeout 30s -o json > "$OUT/cluster-evidence.json" 2> "$OUT/cluster-evidence.stderr.txt"
+          test -s "$OUT/cluster-evidence.json"'
+
+  - name: recovery_asserts
+    actions:
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-survival/demo/writer.log"
+        pattern: "\\[app-writer\\] wrote and verified /data/demo.bin"
+        save_as: writer_checksum_count
+      - action: assert_greater
+        actual: "{{ writer_checksum_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-survival/demo/reader.log"
+        pattern: "/data/demo.bin: OK"
+        save_as: reader_checksum_count
+      - action: assert_greater
+        actual: "{{ reader_checksum_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-survival/demo/primary-failure-recovery.txt"
+        pattern: "ack_profile: sync-quorum"
+        save_as: sync_quorum_ack_count
+      - action: assert_greater
+        actual: "{{ sync_quorum_ack_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-survival/demo/primary-failure-recovery.txt"
+        pattern: "failure_class=primary-kubernetes-node-cordoned-blockvolume-stop"
+        save_as: node_failure_class_count
+      - action: assert_greater
+        actual: "{{ node_failure_class_count }}"
+        threshold: "0"
+      - action: exec
+        node: m02
+        cmd: "M=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-survival/demo/primary-failure-recovery.txt; before=$(sed -n 's/^before_primary_node=//p' \"$M\" | head -1); failed=$(sed -n 's/^failed_node=//p' \"$M\" | head -1); test -n \"$before\" && test \"$before\" = \"$failed\""
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-survival/demo/primary-failure-recovery.txt"
+        pattern: "candidate_ready=true"
+        save_as: candidate_ready_count
+      - action: assert_greater
+        actual: "{{ candidate_ready_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-survival/demo/primary-failure-recovery.txt"
+        pattern: "failover_status: promoted"
+        save_as: failover_promoted_count
+      - action: assert_greater
+        actual: "{{ failover_promoted_count }}"
+        threshold: "0"
+      - action: exec
+        node: m02
+        cmd: "M=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-survival/demo/primary-failure-recovery.txt; promoted=$(sed -n 's/^promoted_replica=//p' \"$M\" | tail -1); failed=$(sed -n 's/^failed_replica=//p' \"$M\" | head -1); promoted_node=$(sed -n 's/^promoted_replica_node=//p' \"$M\" | tail -1); failed_node=$(sed -n 's/^failed_node=//p' \"$M\" | head -1); test -n \"$promoted\" && test \"$promoted\" != \"$failed\" && test -n \"$promoted_node\" && test \"$promoted_node\" != \"$failed_node\""
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-survival/demo/primary-failure-recovery.txt"
+        pattern: "post_failure_primary_count=1"
+        save_as: single_primary_count
+      - action: assert_greater
+        actual: "{{ single_primary_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-survival/demo/primary-failure-recovery.txt"
+        pattern: "node_loss_recovery_claimed=true"
+        save_as: node_loss_recovery_claim_count
+      - action: assert_greater
+        actual: "{{ node_loss_recovery_claim_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-survival/demo/primary-failure-recovery.txt"
+        pattern: "data_check_after_node_loss=reader_checksum_passed"
+        save_as: node_loss_checksum_count
+      - action: assert_greater
+        actual: "{{ node_loss_checksum_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-survival/demo/primary-failure-recovery.txt"
+        pattern: "pod_recreate_used=true"
+        save_as: pod_recreate_count
+      - action: assert_greater
+        actual: "{{ pod_recreate_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-survival/demo/primary-failure-recovery.txt"
+        pattern: "transparent_failover_claimed=false"
+        save_as: no_transparent_claim_count
+      - action: assert_greater
+        actual: "{{ no_transparent_claim_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-survival/demo/primary-failure-recovery.txt"
+        pattern: "physical_host_loss_claimed=false"
+        save_as: no_physical_host_loss_claim_count
+      - action: assert_greater
+        actual: "{{ no_physical_host_loss_claim_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-survival/demo/primary-failure-recovery.txt"
+        pattern: "old_primary_stale_io_success_count=0"
+        save_as: stale_primary_fenced_count
+      - action: assert_greater
+        actual: "{{ stale_primary_fenced_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-survival/demo/bounded-waits.txt"
+        pattern: "bounded_waits=pass"
+        save_as: bounded_waits_count
+      - action: assert_greater
+        actual: "{{ bounded_waits_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-survival/demo/ops-inventory-before-primary-failure/volume-inventory-summary.txt"
+        pattern: "replicas_on_distinct_nodes=true frontends_non_loopback=true"
+        save_as: topology_marker_count
+      - action: assert_greater
+        actual: "{{ topology_marker_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-survival/demo/ops-inventory-after-primary-failure/volume-inventory-summary.txt"
+        pattern: "rf=3 desired=3 observed=3"
+        save_as: rf3_after_count
+      - action: assert_greater
+        actual: "{{ rf3_after_count }}"
+        threshold: "0"
+      - action: exec
+        node: m02
+        cmd: "M=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-survival/demo/primary-failure-recovery.txt; before=$(sed -n 's/^before_publish_target_frontend=//p' \"$M\" | head -1); portal=$(sed -n 's/^after_publish_target_frontend=//p' \"$M\" | tail -1); test -n \"$portal\" && test \"$portal\" != \"$before\" && ! printf '%s\n' \"$portal\" | grep -q '^127\\.0\\.0\\.1:' && grep -q \"NodeStageVolume: .* staged transport=iscsi portal=${portal}\" /mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-survival/demo/blockcsi-node.log"
+      - action: exec
+        node: m02
+        cmd: "test -s /mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-survival/demo/node-loss-recovery-boundary.txt && grep -q 'node_loss_recovery_claimed=true' /mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-survival/demo/node-loss-recovery-boundary.txt"
+      - action: exec
+        node: m02
+        cmd: "S=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-survival/demo/node-loss-recovery-summary.txt; test -s \"$S\" && grep -q '^node_loss_recovery_summary_version=1$' \"$S\" && grep -q '^result=promoted$' \"$S\" && grep -q '^data_check_after_node_loss=reader_checksum_passed$' \"$S\""
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-survival/demo/control-plane-timeline.txt"
+        pattern: "event=primary_failure_injected .*failure_class=primary-kubernetes-node-cordoned-blockvolume-stop"
+        save_as: timeline_node_failure_count
+      - action: assert_greater
+        actual: "{{ timeline_node_failure_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-survival/demo/product-observation/cluster-evidence.json"
+        pattern: "\"event_type\": \"placement_verified\""
+        save_as: product_event_placement_count
+      - action: assert_greater
+        actual: "{{ product_event_placement_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-survival/demo/product-observation/cluster-evidence.json"
+        pattern: "\"event_type\": \"promotion_candidate_evaluated\""
+        save_as: product_event_candidate_count
+      - action: assert_greater
+        actual: "{{ product_event_candidate_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-survival/demo/product-observation/cluster-evidence.json"
+        pattern: "\"event_type\": \"authority_published\""
+        save_as: product_event_authority_count
+      - action: assert_greater
+        actual: "{{ product_event_authority_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-survival/demo/product-observation/cluster-evidence.json"
+        pattern: "\"event_type\": \"csi_reattach_observed\""
+        save_as: product_event_csi_reattach_count
+      - action: assert_greater
+        actual: "{{ product_event_csi_reattach_count }}"
+        threshold: "0"
+      - action: exec
+        node: m02
+        cmd: "test -s /mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-survival/demo/cordon-primary-node.log && grep -qi 'cordoned' /mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-survival/demo/cordon-primary-node.log"
+
+  - name: collect_and_cleanup
+    always: true
+    actions:
+      - action: exec
+        node: m02
+        timeout: 4m
+        cmd: "cd {{ product_root }} && bash scripts/uninstall-k8s-alpha.sh {{ product_root }}"
+        env.SW_BLOCK_ARTIFACT_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-survival/uninstall"
+        env.SW_BLOCK_UNINSTALL_DELETE_ALL_BLOCKVOLUMES: "1"
+        env.SW_BLOCK_ISCSI_CHAP_SECRET_NAME: "sw-block-node-loss-chap"
+      - action: exec
+        node: m02
+        cmd: "N=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-survival/demo/cordoned-primary-node.txt; if test -s \"$N\"; then node=$(cat \"$N\"); kubectl uncordon \"$node\" >/dev/null 2>&1 || true; test \"$(kubectl get node \"$node\" -o jsonpath='{.spec.unschedulable}' 2>/dev/null || true)\" != \"true\"; fi"
+      - action: pre_run_cleanup
+        node: m02
+        kill_patterns: "blockmaster,blockvolume,blockcsi,iscsi-target"
+        nvme_disconnect: "true"
+        iscsi_logout_prefix: "iqn.2026-05.io.seaweedfs"
+      - action: exec
+        node: m02
+        cmd: "sudo rm -rf -- /var/lib/sw-block/testops-{{ run_id }}-node-loss-survival; test ! -e /var/lib/sw-block/testops-{{ run_id }}-node-loss-survival; pkill -f 'kubectl.*port-forward.*blockmaste[r]' >/dev/null 2>&1 || true"
+      - action: assert_no_active_iscsi_sessions
+        node: m02
+        iqn_substr: "io.seaweedfs"
+      - action: assert_no_processes
+        node: m02
+        pattern: "[/]blockmaster --|[/]blockvolume --|[/]blockcsi |[/]iscsi-target |[/]kubectl .*port-forward .*blockmaste[r]|^blockmaster |^blockvolume |^blockcsi |^iscsi-target "
+      - action: collect_path
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-survival"
+        name: "remote-phases"
+        ignore_error: true

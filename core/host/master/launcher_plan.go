@@ -64,11 +64,22 @@ func (h *Host) RunLifecycleWorkloadPlanTick(cfg lifecycle.WorkloadPlanConfig) (L
 }
 
 type workloadPortAllocator struct {
-	nextOrdinalByServer map[string]int
+	nextOrdinalByNode map[string]int
+	baseByNode        map[string]nodePortBase
+}
+
+type nodePortBase struct {
+	iscsi int
+	nvme  int
+	data  string
+	ctrl  string
 }
 
 func newWorkloadPortAllocator() *workloadPortAllocator {
-	return &workloadPortAllocator{nextOrdinalByServer: make(map[string]int)}
+	return &workloadPortAllocator{
+		nextOrdinalByNode: make(map[string]int),
+		baseByNode:        make(map[string]nodePortBase),
+	}
 }
 
 func (a *workloadPortAllocator) assign(plan *lifecycle.BlockVolumeWorkloadPlan) {
@@ -77,20 +88,27 @@ func (a *workloadPortAllocator) assign(plan *lifecycle.BlockVolumeWorkloadPlan) 
 	}
 	for i := range plan.Replicas {
 		replica := &plan.Replicas[i]
-		ordinal := a.nextOrdinalByServer[replica.ServerID]
-		a.nextOrdinalByServer[replica.ServerID] = ordinal + 1
-		shiftReplicaNodeLocalPorts(replica, ordinal)
+		key := replica.KubernetesNodeName
+		if key == "" {
+			key = replica.ServerID
+		}
+		base, ok := a.baseByNode[key]
+		if !ok {
+			base = nodePortBase{
+				iscsi: replica.ISCSIListenPort - i,
+				nvme:  replica.NVMeListenPort - i,
+				data:  replica.DataAddr,
+				ctrl:  replica.CtrlAddr,
+			}
+			a.baseByNode[key] = base
+		}
+		ordinal := a.nextOrdinalByNode[key]
+		a.nextOrdinalByNode[key] = ordinal + 1
+		replica.ISCSIListenPort = base.iscsi + ordinal
+		replica.NVMeListenPort = base.nvme + ordinal
+		replica.DataAddr = addPortOffset(base.data, ordinal*2)
+		replica.CtrlAddr = addPortOffset(base.ctrl, ordinal*2)
 	}
-}
-
-func shiftReplicaNodeLocalPorts(replica *lifecycle.BlockVolumeReplicaWorkload, ordinal int) {
-	if replica == nil || ordinal <= 0 {
-		return
-	}
-	replica.ISCSIListenPort += ordinal
-	replica.NVMeListenPort += ordinal
-	replica.DataAddr = addPortOffset(replica.DataAddr, ordinal*2)
-	replica.CtrlAddr = addPortOffset(replica.CtrlAddr, ordinal*2)
 }
 
 func addPortOffset(addr string, offset int) string {

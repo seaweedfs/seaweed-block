@@ -53,11 +53,8 @@ export KUBECONFIG="${KUBECONFIG:-/etc/rancher/k3s/k3s.yaml}"
 export SW_BLOCK_ALPHA_NODE_NAME="${SW_BLOCK_ALPHA_NODE_NAME:-m02}"
 export SW_BLOCK_DEMO_APP_NODE_NAME="${SW_BLOCK_DEMO_APP_NODE_NAME:-$SW_BLOCK_ALPHA_NODE_NAME}"
 
-bash scripts/preflight-k8s-alpha.sh --local-k3s
-
-SW_BLOCK_IMPORT_K3S=1 \
-SW_BLOCK_ARTIFACT_DIR=/tmp/sw-block-alpha-build \
-  bash scripts/build-alpha-images.sh "$PWD"
+bash scripts/activate-k8s-alpha.sh "$PWD"
+cat "$(ls -td /tmp/sw-block-activation-* | head -1)/activation-summary.txt"
 
 bash scripts/run-alpha-app-demo.sh "$PWD"
 ```
@@ -73,7 +70,22 @@ that the generated `blockvolume` can restart and reattach with data intact, use
 the durable restart workflow in
 [`operations-v1.md`](operations-v1.md#5-prove-durable-blockvolume-restart).
 
-The preflight command emits structured lines:
+The activation command wraps preflight, local image build/import, alpha stack
+install, rollout checks, and the default alpha StorageClass. Its summary emits
+stable fields such as:
+
+```text
+activation_status=ok
+master_ready_replicas=1
+csi_controller_ready_replicas=1
+csi_node_ready=1/1
+storageclass=sw-block-dynamic
+storageclass_provider=block.csi.seaweedfs.com
+protocol=iscsi
+ack_profile=best-effort
+```
+
+The wrapped preflight command emits structured lines:
 
 ```text
 [preflight] checked name=kubectl status=PASS ...
@@ -116,11 +128,14 @@ these checks. The expected output is intentionally small and copyable:
 | Delete returned clean | `kubectl get pvc sw-block-demo-pvc` | `Error from server (NotFound): persistentvolumeclaims "sw-block-demo-pvc" not found` |
 | Residue absent | `sudo iscsiadm -m session` | `iscsiadm: No active sessions.` |
 
-The build artifact directory records image IDs and binary versions. The demo
+The activation artifact directory records preflight/build/install logs, image
+IDs, binary versions, rollout readiness, and next status commands. The demo
 artifact directory records the first-volume evidence.
 
 ```bash
-cat /tmp/sw-block-alpha-build/alpha-images.env
+ACTIVATION_DIR="$(ls -td /tmp/sw-block-activation-* | head -1)"
+cat "$ACTIVATION_DIR/build/alpha-images.env"
+cat "$ACTIVATION_DIR/activation-summary.txt"
 ARTIFACT_DIR="$(ls -td /tmp/sw-block-app-demo-* | head -1)"
 cat "$ARTIFACT_DIR/run.log"
 ```
@@ -142,6 +157,22 @@ sw-block ops inventory \
   --master 127.0.0.1:9333 \
   --out /tmp/sw-block-inventory
 ```
+
+To capture the product-owned control-plane evidence that a dashboard or support
+assistant should read, port-forward the `blockmaster` Deployment and export the
+cluster snapshot:
+
+```bash
+kubectl -n kube-system port-forward deploy/sw-blockmaster 9333:9333
+sw-block ops cluster --master-api 127.0.0.1:9333 -o json \
+  > /tmp/sw-block-cluster-evidence.json
+```
+
+Use this file together with the inventory directory when filing an issue. The
+cluster evidence contains master-owned events such as placement verification,
+promotion candidate evaluation, authority publication, and CSI reattach
+observation. The inventory directory contains Kubernetes discovery and nested
+per-replica status bundles.
 
 The command does not need a TestOps artifact directory or a known volume id. It
 discovers PVC/PV ownership and generated `blockvolume` Deployments from
@@ -229,15 +260,19 @@ Inventory non-claims are explicit in every bundle:
 
 ## Alternate Image Paths
 
-Use these only after the local k3s path is understood.
+Use published images for QA/PM user-path testing and for clusters that can pull
+from GHCR. Use the local build/import path for development labs and unmerged
+work-tree validation.
 
 ### Published Alpha Images
 
 Use this when your cluster can pull public images from GHCR:
 
 ```bash
-bash scripts/preflight-k8s-alpha.sh --ghcr
-bash scripts/run-k8s-demo-ghcr.sh "$PWD"
+SW_BLOCK_ACTIVATION_IMAGE_MODE=published \
+  bash scripts/activate-k8s-alpha.sh "$PWD"
+
+kubectl apply -f examples/kubernetes/basic-app/storageclass-pvc.yaml
 ```
 
 The script uses:
@@ -245,6 +280,15 @@ The script uses:
 ```text
 ghcr.io/seaweedfs/seaweed-block:alpha
 ghcr.io/seaweedfs/seaweed-block-csi:alpha
+```
+
+For release-candidate testing, prefer immutable tags:
+
+```bash
+export SW_BLOCK_ACTIVATION_IMAGE_MODE=published
+export SW_BLOCK_IMAGE=ghcr.io/seaweedfs/seaweed-block:sha-<commit>
+export SW_BLOCK_CSI_IMAGE=ghcr.io/seaweedfs/seaweed-block-csi:sha-<commit>
+bash scripts/activate-k8s-alpha.sh "$PWD"
 ```
 
 If the images are not public or your cluster cannot pull them, app pods or

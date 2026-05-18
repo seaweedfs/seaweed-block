@@ -312,6 +312,15 @@ func (a *VolumeReplicaAdapter) Projection() engine.ReplicaProjection {
 	return engine.DeriveProjection(&a.state)
 }
 
+// PromotionReadyFact returns the control-facing promotion readiness fact from
+// engine truth domains. Unlike Projection(), this is safe to feed to authority
+// because it does not pass through the operator-facing ReplicaProjection shape.
+func (a *VolumeReplicaAdapter) PromotionReadyFact() engine.PromotionReadyFact {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return engine.BuildPromotionReadyFact(&a.state)
+}
+
 // Diagnostics is an adapter-local inspection snapshot. It may include runtime
 // observations that are NOT engine truth (for example flow-control verdicts).
 // Callers must not feed this back into the engine as control input.

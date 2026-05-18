@@ -127,6 +127,10 @@ type VolumeStatus struct {
 	EndpointVersion uint64
 	Latched         bool
 	Operational     bool
+	FrontierKnown   bool
+	DurableLSN      uint64
+	RetainedLSN     uint64
+	HeadLSN         uint64
 	Evidence        string
 	Closed          bool
 }
@@ -197,12 +201,17 @@ func (p *DurableProvider) Open(ctx context.Context, volumeID string) (frontend.B
 	proj := p.view.Projection()
 	log.Printf("durable: dp.Open latching identity from projection volume=%s replica=%s epoch=%d ev=%d (post-waitHealthy)",
 		proj.VolumeID, proj.ReplicaID, proj.Epoch, proj.EndpointVersion)
-	h.backend.SetIdentity(frontend.Identity{
+	target := frontend.Identity{
 		VolumeID:        proj.VolumeID,
 		ReplicaID:       proj.ReplicaID,
 		Epoch:           proj.Epoch,
 		EndpointVersion: proj.EndpointVersion,
-	})
+	}
+	if !h.backend.SetIdentity(target) {
+		if got := h.backend.Identity(); got != target {
+			return nil, durableIdentityConflict(got, target)
+		}
+	}
 	return h.backend, nil
 }
 
@@ -306,6 +315,47 @@ func (p *DurableProvider) Backend(volumeID string) *StorageBackend {
 		return nil
 	}
 	return h.backend
+}
+
+// LatchVolumeIdentity latches an already-open durable backend to the current
+// projection lineage without requiring frontend Healthy. Supporting replicas
+// intentionally remain frontend-unhealthy while the primary line names another
+// replica, but they still need durable lineage evidence for promotion-readiness
+// and support-bundle diagnostics.
+func (p *DurableProvider) LatchVolumeIdentity(volumeID string) (bool, error) {
+	p.mu.Lock()
+	h, ok := p.volumes[volumeID]
+	p.mu.Unlock()
+	if !ok {
+		return false, ErrVolumeNotOpen
+	}
+	proj := p.view.Projection()
+	if proj.VolumeID != volumeID {
+		return false, fmt.Errorf("durable: projection volume %q does not match %q", proj.VolumeID, volumeID)
+	}
+	if proj.Epoch == 0 || proj.EndpointVersion == 0 {
+		return false, fmt.Errorf("durable: projection lineage missing for volume=%s replica=%s epoch=%d ev=%d",
+			proj.VolumeID, proj.ReplicaID, proj.Epoch, proj.EndpointVersion)
+	}
+	target := frontend.Identity{
+		VolumeID:        proj.VolumeID,
+		ReplicaID:       proj.ReplicaID,
+		Epoch:           proj.Epoch,
+		EndpointVersion: proj.EndpointVersion,
+	}
+	if h.backend.SetIdentity(target) {
+		return true, nil
+	}
+	if got := h.backend.Identity(); got != target {
+		return false, durableIdentityConflict(got, target)
+	}
+	return false, nil
+}
+
+func durableIdentityConflict(got, want frontend.Identity) error {
+	return fmt.Errorf("durable: backend already latched to volume=%s replica=%s epoch=%d ev=%d; refusing projection volume=%s replica=%s epoch=%d ev=%d",
+		got.VolumeID, got.ReplicaID, got.Epoch, got.EndpointVersion,
+		want.VolumeID, want.ReplicaID, want.Epoch, want.EndpointVersion)
 }
 
 // DurableStatuses returns stable, sorted diagnostic snapshots for all opened

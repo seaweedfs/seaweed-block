@@ -521,9 +521,10 @@ func TestT3a_MatrixCoverage(t *testing.T) {
 
 // G5-5 test: SetIdentity latches a zero-Epoch backend (the
 // pre-assignment shape that EnsureStorage produces — VolumeID +
-// ReplicaID set from CLI config, Epoch=0+EV=0). Drift past the
-// latched value is rejected so lineageCheck fail-closed still
-// catches failover.
+// ReplicaID set from CLI config, Epoch=0+EV=0). Same-replica
+// authority advances are accepted, while backward or cross-replica
+// drift is rejected so lineageCheck fail-closed still catches stale
+// writers.
 func TestG5_5_SetIdentity_LatchFromZeroEpoch(t *testing.T) {
 	for _, f := range logicalStorageFactories() {
 		f := f
@@ -548,11 +549,26 @@ func TestG5_5_SetIdentity_LatchFromZeroEpoch(t *testing.T) {
 				t.Error("SetIdentity after latch must return false")
 			}
 			id2 := frontend.Identity{VolumeID: "v1", ReplicaID: "r1", Epoch: 2, EndpointVersion: 1}
-			if b.SetIdentity(id2) {
-				t.Error("SetIdentity drift must return false (lineageCheck still fail-closed)")
+			if !b.SetIdentity(id2) {
+				t.Error("SetIdentity same-replica epoch advance must return true")
 			}
-			if got := b.Identity(); got != id1 {
-				t.Errorf("drift attempt mutated identity: got %+v want %+v", got, id1)
+			if got := b.Identity(); got != id2 {
+				t.Errorf("epoch advance did not mutate identity: got %+v want %+v", got, id2)
+			}
+			id3 := frontend.Identity{VolumeID: "v1", ReplicaID: "r1", Epoch: 2, EndpointVersion: 2}
+			if !b.SetIdentity(id3) {
+				t.Error("SetIdentity same-epoch endpoint-version advance must return true")
+			}
+			idOld := frontend.Identity{VolumeID: "v1", ReplicaID: "r1", Epoch: 1, EndpointVersion: 9}
+			if b.SetIdentity(idOld) {
+				t.Error("SetIdentity backward epoch must return false")
+			}
+			idOtherReplica := frontend.Identity{VolumeID: "v1", ReplicaID: "r2", Epoch: 3, EndpointVersion: 1}
+			if b.SetIdentity(idOtherReplica) {
+				t.Error("SetIdentity cross-replica drift must return false")
+			}
+			if got := b.Identity(); got != id3 {
+				t.Errorf("rejected drift mutated identity: got %+v want %+v", got, id3)
 			}
 		})
 	}

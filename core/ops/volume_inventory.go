@@ -2,6 +2,8 @@ package ops
 
 import (
 	"fmt"
+	"net"
+	"net/netip"
 	"sort"
 	"strings"
 	"time"
@@ -34,32 +36,41 @@ type VolumeInventoryVolumeInput struct {
 	CollectionErrors  []string
 	Residue           ResidueReport
 	Issues            []string
+	FailoverTimeline  []VolumeInventoryFailoverEvent
 	Replicas          []VolumeInventoryReplicaInput
 }
 
 type VolumeInventoryReplicaInput struct {
-	ReplicaID            string
-	ServerID             string
-	NodeName             string
-	GeneratedDeployment  string
-	LifecycleOwner       string
-	OwnerReference       string
-	Protocol             string
-	FrontendAddress      string
-	StatusAddress        string
-	SupportBundle        string
-	DataAddr             string
-	CtrlAddr             string
-	Observed             bool
-	AuthorityRole        string
-	Healthy              bool
-	FrontendPrimaryReady bool
-	ReplicationRole      string
-	Epoch                uint64
-	EndpointVersion      uint64
-	Residue              ResidueReport
-	CollectionErrors     []string
-	Issues               []string
+	ReplicaID              string
+	ServerID               string
+	NodeName               string
+	GeneratedDeployment    string
+	LifecycleOwner         string
+	OwnerReference         string
+	Protocol               string
+	FrontendAddress        string
+	StatusAddress          string
+	SupportBundle          string
+	DataAddr               string
+	CtrlAddr               string
+	Observed               bool
+	AuthorityRole          string
+	Healthy                bool
+	FrontendPrimaryReady   bool
+	ReplicationRole        string
+	Epoch                  uint64
+	EndpointVersion        uint64
+	ClaimProfile           string
+	AckProfile             string
+	DurableLatched         bool
+	DurableOperational     bool
+	RequiredFrontierLSN    uint64
+	RequiredFrontierKnown  bool
+	CandidateFrontierLSN   uint64
+	CandidateFrontierKnown bool
+	Residue                ResidueReport
+	CollectionErrors       []string
+	Issues                 []string
 }
 
 type VolumeInventory struct {
@@ -75,49 +86,64 @@ type VolumeInventory struct {
 }
 
 type VolumeInventoryVolume struct {
-	VolumeID          string                   `json:"volume_id"`
-	Namespace         string                   `json:"namespace"`
-	PVCName           string                   `json:"pvc_name"`
-	PVName            string                   `json:"pv_name"`
-	ReplicationFactor int                      `json:"replication_factor"`
-	DesiredReplicas   int                      `json:"desired_replicas"`
-	ObservedReplicas  int                      `json:"observed_replicas"`
-	PrimaryReplicaID  string                   `json:"primary_replica_id"`
-	Protocols         []string                 `json:"protocols"`
-	ProductRevision   string                   `json:"product_revision"`
-	Status            string                   `json:"status"`
-	Residue           ResidueReport            `json:"residue"`
-	Issues            []string                 `json:"issues"`
-	Unchecked         []string                 `json:"unchecked"`
-	CollectionErrors  []string                 `json:"collection_errors"`
-	SupportBundle     string                   `json:"support_bundle"`
-	Replicas          []VolumeInventoryReplica `json:"replicas"`
+	VolumeID                string                         `json:"volume_id"`
+	Namespace               string                         `json:"namespace"`
+	PVCName                 string                         `json:"pvc_name"`
+	PVName                  string                         `json:"pv_name"`
+	ReplicationFactor       int                            `json:"replication_factor"`
+	DesiredReplicas         int                            `json:"desired_replicas"`
+	ObservedReplicas        int                            `json:"observed_replicas"`
+	PrimaryReplicaID        string                         `json:"primary_replica_id"`
+	Protocols               []string                       `json:"protocols"`
+	ProductRevision         string                         `json:"product_revision"`
+	Status                  string                         `json:"status"`
+	ReplicasOnDistinctNodes bool                           `json:"replicas_on_distinct_nodes"`
+	FrontendsNonLoopback    bool                           `json:"frontends_non_loopback"`
+	Residue                 ResidueReport                  `json:"residue"`
+	Issues                  []string                       `json:"issues"`
+	Unchecked               []string                       `json:"unchecked"`
+	CollectionErrors        []string                       `json:"collection_errors"`
+	SupportBundle           string                         `json:"support_bundle"`
+	FailoverTimeline        []VolumeInventoryFailoverEvent `json:"failover_timeline,omitempty"`
+	Replicas                []VolumeInventoryReplica       `json:"replicas"`
+}
+
+type VolumeInventoryFailoverEvent struct {
+	Phase           string `json:"phase"`
+	ReplicaID       string `json:"replica_id"`
+	Role            string `json:"role"`
+	Epoch           uint64 `json:"epoch"`
+	EndpointVersion uint64 `json:"endpoint_version"`
+	Status          string `json:"status"`
+	Reason          string `json:"reason,omitempty"`
 }
 
 type VolumeInventoryReplica struct {
-	ReplicaID            string        `json:"replica_id"`
-	ServerID             string        `json:"server_id"`
-	NodeName             string        `json:"node_name"`
-	GeneratedDeployment  string        `json:"generated_deployment"`
-	LifecycleOwner       string        `json:"lifecycle_owner"`
-	OwnerReference       string        `json:"owner_reference"`
-	Protocol             string        `json:"protocol"`
-	FrontendAddress      string        `json:"frontend_address"`
-	StatusAddress        string        `json:"status_address"`
-	SupportBundle        string        `json:"support_bundle"`
-	DataAddr             string        `json:"data_addr"`
-	CtrlAddr             string        `json:"ctrl_addr"`
-	Observed             bool          `json:"observed"`
-	Status               string        `json:"status"`
-	AuthorityRole        string        `json:"authority_role"`
-	Healthy              bool          `json:"healthy"`
-	FrontendPrimaryReady bool          `json:"frontend_primary_ready"`
-	ReplicationRole      string        `json:"replication_role"`
-	Epoch                uint64        `json:"epoch"`
-	EndpointVersion      uint64        `json:"endpoint_version"`
-	Residue              ResidueReport `json:"residue"`
-	Issues               []string      `json:"issues"`
-	CollectionErrors     []string      `json:"collection_errors"`
+	ReplicaID            string                   `json:"replica_id"`
+	ServerID             string                   `json:"server_id"`
+	NodeName             string                   `json:"node_name"`
+	GeneratedDeployment  string                   `json:"generated_deployment"`
+	LifecycleOwner       string                   `json:"lifecycle_owner"`
+	OwnerReference       string                   `json:"owner_reference"`
+	Protocol             string                   `json:"protocol"`
+	FrontendAddress      string                   `json:"frontend_address"`
+	StatusAddress        string                   `json:"status_address"`
+	SupportBundle        string                   `json:"support_bundle"`
+	DataAddr             string                   `json:"data_addr"`
+	CtrlAddr             string                   `json:"ctrl_addr"`
+	Observed             bool                     `json:"observed"`
+	Status               string                   `json:"status"`
+	AuthorityRole        string                   `json:"authority_role"`
+	Healthy              bool                     `json:"healthy"`
+	FrontendPrimaryReady bool                     `json:"frontend_primary_ready"`
+	ReplicationRole      string                   `json:"replication_role"`
+	Epoch                uint64                   `json:"epoch"`
+	EndpointVersion      uint64                   `json:"endpoint_version"`
+	AckProfile           string                   `json:"ack_profile"`
+	PromotionReadiness   PromotionReadinessReport `json:"promotion_readiness"`
+	Residue              ResidueReport            `json:"residue"`
+	Issues               []string                 `json:"issues"`
+	CollectionErrors     []string                 `json:"collection_errors"`
 }
 
 func BuildVolumeInventory(in VolumeInventoryInput) VolumeInventory {
@@ -191,21 +217,24 @@ func buildInventoryVolume(productRevision string, in VolumeInventoryVolumeInput)
 	sort.Strings(protocols)
 
 	volume := VolumeInventoryVolume{
-		VolumeID:          explicitUnavailable(in.VolumeID),
-		Namespace:         explicitUnavailable(in.Namespace),
-		PVCName:           explicitUnavailable(in.PVCName),
-		PVName:            explicitUnavailable(in.PVName),
-		ReplicationFactor: desired,
-		DesiredReplicas:   desired,
-		ObservedReplicas:  observed,
-		PrimaryReplicaID:  primary,
-		Protocols:         protocols,
-		ProductRevision:   productRevision,
-		Residue:           copyResidue(in.Residue),
-		Unchecked:         copyStringSlice(in.Residue.Unchecked),
-		CollectionErrors:  copyStringSlice(in.CollectionErrors),
-		SupportBundle:     in.SupportBundle,
-		Replicas:          replicas,
+		VolumeID:                explicitUnavailable(in.VolumeID),
+		Namespace:               explicitUnavailable(in.Namespace),
+		PVCName:                 explicitUnavailable(in.PVCName),
+		PVName:                  explicitUnavailable(in.PVName),
+		ReplicationFactor:       desired,
+		DesiredReplicas:         desired,
+		ObservedReplicas:        observed,
+		PrimaryReplicaID:        primary,
+		Protocols:               protocols,
+		ProductRevision:         productRevision,
+		ReplicasOnDistinctNodes: replicasOnDistinctNodes(replicas, desired),
+		FrontendsNonLoopback:    frontendsNonLoopback(replicas, desired),
+		Residue:                 copyResidue(in.Residue),
+		Unchecked:               copyStringSlice(in.Residue.Unchecked),
+		CollectionErrors:        copyStringSlice(in.CollectionErrors),
+		SupportBundle:           in.SupportBundle,
+		FailoverTimeline:        copyFailoverTimeline(in.FailoverTimeline),
+		Replicas:                replicas,
 	}
 	volume.Issues = append(copyStringSlice(in.Issues), volumeInventoryVolumeIssues(volume)...)
 	volume.Status = inventoryIssueStatus(volume.Issues)
@@ -233,10 +262,26 @@ func buildInventoryReplica(in VolumeInventoryReplicaInput) VolumeInventoryReplic
 		ReplicationRole:      explicitUnavailable(in.ReplicationRole),
 		Epoch:                in.Epoch,
 		EndpointVersion:      in.EndpointVersion,
+		AckProfile:           explicitUnavailable(defaultString(in.AckProfile, PromotionAckProfileBestEffort)),
 		Residue:              copyResidue(in.Residue),
 		Issues:               copyStringSlice(in.Issues),
 		CollectionErrors:     copyStringSlice(in.CollectionErrors),
 	}
+	replica.PromotionReadiness = EvaluatePromotionReadiness(PromotionReadinessInput{
+		CandidateReplicaID:     replica.ReplicaID,
+		ClaimProfile:           in.ClaimProfile,
+		AckProfile:             replica.AckProfile,
+		Observed:               replica.Observed,
+		Reachable:              !containsIssuePrefix(replica.Issues, "status_endpoint_unavailable") && !containsIssuePrefix(replica.Issues, "status_endpoint_unreachable="),
+		AuthorityRole:          replica.AuthorityRole,
+		ReplicationRole:        replica.ReplicationRole,
+		DurableLatched:         in.DurableLatched,
+		DurableOperational:     in.DurableOperational,
+		RequiredFrontierLSN:    in.RequiredFrontierLSN,
+		RequiredFrontierKnown:  in.RequiredFrontierKnown,
+		CandidateFrontierLSN:   in.CandidateFrontierLSN,
+		CandidateFrontierKnown: in.CandidateFrontierKnown,
+	})
 	replica.Issues = append(replica.Issues, volumeInventoryReplicaIssues(replica)...)
 	replica.Status = inventoryReplicaStatus(replica)
 	return replica
@@ -322,6 +367,10 @@ func RenderVolumeInventorySummary(in VolumeInventory) string {
 			volume.Status,
 			strings.Join(volume.Protocols, ","),
 			len(volume.Replicas))
+		fmt.Fprintf(&b, "eligibility: volume=%s replicas_on_distinct_nodes=%t frontends_non_loopback=%t\n",
+			volume.VolumeID,
+			volume.ReplicasOnDistinctNodes,
+			volume.FrontendsNonLoopback)
 		for _, replica := range volume.Replicas {
 			fmt.Fprintf(&b, "replica: volume=%s replica=%s server=%s node=%s observed=%t status=%s lifecycle_owner=%s owner_ref=%s role=%s replication=%s healthy=%t epoch=%d endpoint_version=%d frontend=%s status_addr=%s support_bundle=%s\n",
 				volume.VolumeID,
@@ -340,6 +389,29 @@ func RenderVolumeInventorySummary(in VolumeInventory) string {
 				replica.FrontendAddress,
 				replica.StatusAddress,
 				replica.SupportBundle)
+			fmt.Fprintf(&b, "promotion: volume=%s replica=%s candidate_ready=%t reason=%s claim_profile=%s ack_profile=%s required_frontier_known=%t required_frontier_lsn=%d candidate_frontier_known=%t candidate_frontier_lsn=%d frontier_covered=%t\n",
+				volume.VolumeID,
+				replica.ReplicaID,
+				replica.PromotionReadiness.CandidateReady,
+				replica.PromotionReadiness.Reason,
+				replica.PromotionReadiness.ClaimProfile,
+				replica.PromotionReadiness.AckProfile,
+				replica.PromotionReadiness.RequiredFrontierKnown,
+				replica.PromotionReadiness.RequiredFrontierLSN,
+				replica.PromotionReadiness.CandidateFrontierKnown,
+				replica.PromotionReadiness.CandidateFrontierLSN,
+				replica.PromotionReadiness.FrontierCovered)
+		}
+		for _, ev := range volume.FailoverTimeline {
+			fmt.Fprintf(&b, "failover: volume=%s phase=%s replica=%s role=%s epoch=%d endpoint_version=%d status=%s reason=%s\n",
+				volume.VolumeID,
+				explicitUnavailable(ev.Phase),
+				explicitUnavailable(ev.ReplicaID),
+				explicitUnavailable(ev.Role),
+				ev.Epoch,
+				ev.EndpointVersion,
+				explicitUnavailable(ev.Status),
+				emptyAsDash(ev.Reason))
 		}
 	}
 	if len(issues) == 0 {
@@ -367,6 +439,16 @@ func volumeInventoryVolumeIssues(volume VolumeInventoryVolume) []string {
 	if volume.PrimaryReplicaID == Unavailable && volume.ObservedReplicas > 0 {
 		issues = append(issues, "primary_replica_id unavailable")
 	}
+	var primaryReplicas []string
+	for _, replica := range volume.Replicas {
+		if replica.Observed && replica.AuthorityRole == hostvolume.AuthorityRolePrimary {
+			primaryReplicas = append(primaryReplicas, replica.ReplicaID)
+		}
+	}
+	if len(primaryReplicas) > 1 {
+		sort.Strings(primaryReplicas)
+		issues = append(issues, "conflicting_primary_replicas="+strings.Join(primaryReplicas, ","))
+	}
 	for _, errText := range volume.CollectionErrors {
 		if errText != "" {
 			issues = append(issues, fmt.Sprintf("collection_error: %s", errText))
@@ -382,11 +464,79 @@ func volumeInventoryVolumeIssues(volume VolumeInventoryVolume) []string {
 		for _, issue := range replica.Issues {
 			issues = append(issues, fmt.Sprintf("replica %s %s", replica.ReplicaID, issue))
 		}
+		if volume.DesiredReplicas > 1 &&
+			replica.Observed &&
+			replica.AuthorityRole != hostvolume.AuthorityRolePrimary &&
+			!replica.PromotionReadiness.CandidateReady {
+			issues = append(issues, fmt.Sprintf("candidate_not_promotion_ready=%s reason=%s ack_profile=%s",
+				replica.ReplicaID,
+				replica.PromotionReadiness.Reason,
+				replica.PromotionReadiness.AckProfile))
+		}
 	}
 	if volume.ObservedReplicas < volume.DesiredReplicas && len(volume.Replicas) == volume.ObservedReplicas {
 		issues = append(issues, "replica_slot_missing=unknown")
 	}
 	return issues
+}
+
+func replicasOnDistinctNodes(replicas []VolumeInventoryReplica, desired int) bool {
+	if desired <= 1 {
+		return true
+	}
+	seen := map[string]struct{}{}
+	observed := 0
+	for _, replica := range replicas {
+		if !replica.Observed {
+			continue
+		}
+		node := strings.TrimSpace(replica.NodeName)
+		if node == "" || node == Unavailable {
+			return false
+		}
+		if _, ok := seen[node]; ok {
+			return false
+		}
+		seen[node] = struct{}{}
+		observed++
+	}
+	return observed >= desired
+}
+
+func frontendsNonLoopback(replicas []VolumeInventoryReplica, desired int) bool {
+	if desired <= 0 {
+		return false
+	}
+	observed := 0
+	for _, replica := range replicas {
+		if !replica.Observed {
+			continue
+		}
+		observed++
+		if !endpointHostNonLoopback(replica.FrontendAddress) {
+			return false
+		}
+	}
+	return observed >= desired
+}
+
+func endpointHostNonLoopback(addr string) bool {
+	addr = strings.TrimSpace(addr)
+	if addr == "" || addr == Unavailable {
+		return false
+	}
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false
+	}
+	host = strings.Trim(host, "[]")
+	if host == "" || strings.EqualFold(host, "localhost") {
+		return false
+	}
+	if ip, err := netip.ParseAddr(host); err == nil {
+		return !ip.IsLoopback() && !ip.IsUnspecified()
+	}
+	return true
 }
 
 func volumeInventoryReplicaIssues(replica VolumeInventoryReplica) []string {
@@ -409,6 +559,27 @@ func volumeInventoryReplicaIssues(replica VolumeInventoryReplica) []string {
 	}
 	if replica.AuthorityRole == hostvolume.AuthorityRolePrimary && !replica.FrontendPrimaryReady {
 		issues = append(issues, "primary frontend_primary_ready=false")
+	}
+	if replica.AuthorityRole == hostvolume.AuthorityRolePrimary && replica.ReplicationRole != hostvolume.ReplicationRoleNone {
+		issues = append(issues, fmt.Sprintf("primary replication_role=%s want %s",
+			replica.ReplicationRole, hostvolume.ReplicationRoleNone))
+	}
+	if replica.AuthorityRole != "" &&
+		replica.AuthorityRole != Unavailable &&
+		replica.AuthorityRole != hostvolume.AuthorityRolePrimary &&
+		replica.FrontendPrimaryReady {
+		if replica.AuthorityRole == hostvolume.AuthorityRoleSuperseded {
+			issues = append(issues, fmt.Sprintf("stale_primary_frontend_ready=true role=%s epoch=%d endpoint_version=%d",
+				replica.AuthorityRole, replica.Epoch, replica.EndpointVersion))
+		}
+		issues = append(issues, fmt.Sprintf("non-primary authority_role=%s frontend_primary_ready=true", replica.AuthorityRole))
+	}
+	if replica.AuthorityRole != "" &&
+		replica.AuthorityRole != Unavailable &&
+		replica.AuthorityRole != hostvolume.AuthorityRolePrimary &&
+		replica.ReplicationRole == hostvolume.ReplicationRoleNone {
+		issues = append(issues, fmt.Sprintf("non-primary authority_role=%s replication_role=%s",
+			replica.AuthorityRole, replica.ReplicationRole))
 	}
 	for _, errText := range replica.CollectionErrors {
 		if errText != "" {
@@ -459,4 +630,29 @@ func inventoryExitLabel(code int) string {
 	default:
 		return "invalid"
 	}
+}
+
+func defaultString(value, fallback string) string {
+	if strings.TrimSpace(value) == "" {
+		return fallback
+	}
+	return value
+}
+
+func containsIssuePrefix(issues []string, prefix string) bool {
+	for _, issue := range issues {
+		if strings.HasPrefix(issue, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func copyFailoverTimeline(in []VolumeInventoryFailoverEvent) []VolumeInventoryFailoverEvent {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]VolumeInventoryFailoverEvent, len(in))
+	copy(out, in)
+	return out
 }

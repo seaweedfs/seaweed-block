@@ -117,6 +117,9 @@ func (c *KubernetesDeploymentClient) ListBlockVolumeDeployments(ctx context.Cont
 				Namespace string            `json:"namespace"`
 				Labels    map[string]string `json:"labels"`
 			} `json:"metadata"`
+			Spec struct {
+				Replicas *int `json:"replicas"`
+			} `json:"spec"`
 		} `json:"items"`
 	}
 	if err := c.doJSON(req, http.StatusOK, &out); err != nil {
@@ -125,9 +128,10 @@ func (c *KubernetesDeploymentClient) ListBlockVolumeDeployments(ctx context.Cont
 	identities := make([]DeploymentIdentity, 0, len(out.Items))
 	for _, item := range out.Items {
 		identities = append(identities, DeploymentIdentity{
-			Namespace: item.Metadata.Namespace,
-			Name:      item.Metadata.Name,
-			Labels:    item.Metadata.Labels,
+			Namespace:    item.Metadata.Namespace,
+			Name:         item.Metadata.Name,
+			Labels:       item.Metadata.Labels,
+			SpecReplicas: item.Spec.Replicas,
 		})
 	}
 	return identities, nil

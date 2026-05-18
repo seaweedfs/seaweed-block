@@ -404,11 +404,29 @@ func (h *Host) buildReport() *control.HeartbeatReport {
 				CtrlAddr:        h.cfg.CtrlAddr,
 				Frontends:       h.frontendTargetsSnapshot(),
 				Reachable:       true,
-				ReadyForPrimary: true,
+				ReadyForPrimary: h.readyForPrimaryFact(),
 				Eligible:        true,
 			},
 		},
 	}
+}
+
+// readyForPrimaryFact is the volume-side promotion-readiness fact used by the
+// authority controller for failover/rebalance candidates. A live process or
+// Kubernetes Ready pod is not enough; the adapter must expose an engine
+// truth-domain promotion fact, and this replica must not have been superseded by
+// a newer authority line. Supporting replica-ready at the same lineage is still
+// a valid candidate fact even though it remains frontend-unhealthy until
+// authority moves.
+func (h *Host) readyForPrimaryFact() bool {
+	if h == nil || h.view == nil {
+		return false
+	}
+	fact := h.view.PromotionReadyFact()
+	if !fact.Ready {
+		return false
+	}
+	return !h.view.isSupersededLine(fact.Epoch, fact.EndpointVersion)
 }
 
 // runSubscribe maintains a SubscribeAssignments stream. Reconnects
@@ -498,14 +516,14 @@ func (h *Host) streamOnce(ctx context.Context) error {
 //  2. Otherwise (self-replica fact):
 //     a. Install replication peer set first (if configured).
 //     b. On UpdateReplicaSet failure, LOG and RETURN WITHOUT
-//        calling OnAssignment. The adapter's projection stays at
-//        its prior (not-Healthy until first successful install)
-//        state; StorageBackend.lineageCheck keeps writes blocked.
-//        Master's stream replay redelivers this fact on the next
-//        cycle; natural eventual convergence.
+//     calling OnAssignment. The adapter's projection stays at
+//     its prior (not-Healthy until first successful install)
+//     state; StorageBackend.lineageCheck keeps writes blocked.
+//     Master's stream replay redelivers this fact on the next
+//     cycle; natural eventual convergence.
 //     c. Only after replication install succeeds (or observer-only
-//        mode): apply OnAssignment, driving the adapter's
-//        projection to Healthy.
+//     mode): apply OnAssignment, driving the adapter's
+//     projection to Healthy.
 //
 // This preserves the V2 BlockVol.SetReplicaAddrs-then-admit-writes
 // atomicity that V3 lost when adapter + ReplicationVolume got split
@@ -514,10 +532,25 @@ func (h *Host) streamOnce(ctx context.Context) error {
 // installed, admitting local-only writes with zero fan-out.
 func (h *Host) applyFact(fact *control.AssignmentFact) {
 	if fact.ReplicaId != h.cfg.ReplicaID {
-		// Superseded. The volume currently serving
-		// (vid, self.ReplicaID) is no longer the current
-		// authoritative line for this volume.
+		// Another replica is authoritative for this volume line. Record that
+		// line first so AdapterProjectionView can keep this replica frontend-
+		// unhealthy even if its local engine is otherwise caught up.
 		h.recordOtherLine(fact)
+		if info, ok := decodeSelfPeerAssignment(fact, h.cfg.ReplicaID); ok {
+			h.adpt.OnAssignment(info)
+			h.log.Printf("blockvolume: volume %s admitted as SUPPORTING replica %s at epoch=%d EV=%d behind primary %s; frontend remains gated",
+				h.cfg.VolumeID, info.ReplicaID, info.Epoch, info.EndpointVersion, fact.ReplicaId)
+			// Supporting replicas need durable lineage latching for promotion-readiness,
+			// but this must not consume the primary readyOnce. A later promotion to
+			// PRIMARY has to emit its own marker for the promoted lineage.
+			if h.cfg.ReadyMarker != nil && info.Epoch > 0 {
+				select {
+				case h.cfg.ReadyMarker <- info:
+				default:
+				}
+			}
+			return
+		}
 		h.log.Printf("blockvolume: volume %s authority is now %s@%d (not this replica %s); recording supersede, not applying to adapter",
 			h.cfg.VolumeID, fact.ReplicaId, fact.Epoch, h.cfg.ReplicaID)
 		return

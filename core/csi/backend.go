@@ -3,6 +3,7 @@ package csi
 import (
 	"context"
 	"errors"
+	"strings"
 )
 
 var ErrPublishTargetNotFound = errors.New("csi: publish target not found")
@@ -13,6 +14,9 @@ type Protocol string
 const (
 	ProtocolISCSI Protocol = "iscsi"
 	ProtocolNVMe  Protocol = "nvme"
+
+	EventTypeCSIReattachObserved = "csi_reattach_observed"
+	EventSeverityInfo            = "info"
 )
 
 func normalizeProtocol(p Protocol) Protocol {
@@ -22,17 +26,22 @@ func normalizeProtocol(p Protocol) Protocol {
 	return p
 }
 
-// PublishTarget is a read-only frontend target fact. It is deliberately
-// not authority-shaped: no epoch/endpoint_version inputs, no assignment
-// intent, no publisher call surface.
+// PublishTarget is a read-only frontend target fact. Epoch and
+// EndpointVersion are evidence copied from master status so recovery gates can
+// compare before/after target generations. They are not exposed in CSI
+// publish_context and do not give CSI authority mutation capability.
 type PublishTarget struct {
-	VolumeID  string
-	ReplicaID string
-	Protocol  Protocol
+	VolumeID        string
+	ReplicaID       string
+	Epoch           uint64
+	EndpointVersion uint64
+	Protocol        Protocol
 
-	ISCSIAddr string
-	IQN       string
-	LUN       uint32
+	ISCSIAddr  string
+	ISCSIAddrs []string
+	IQN        string
+	LUN        uint32
+	Multipath  bool
 
 	NVMeAddr string
 	NQN      string
@@ -41,6 +50,26 @@ type PublishTarget struct {
 
 type PublishTargetLookup interface {
 	LookupPublishTarget(ctx context.Context, volumeID, nodeID string) (PublishTarget, error)
+}
+
+type ClusterEvent struct {
+	VolumeID        string
+	ReplicaID       string
+	NodeName        string
+	Type            string
+	Severity        string
+	Message         string
+	Reason          string
+	OldValue        string
+	NewValue        string
+	Epoch           uint64
+	EndpointVersion uint64
+	CorrelationID   string
+	EvidenceRef     string
+}
+
+type EventReporter interface {
+	ReportEvent(ctx context.Context, event ClusterEvent) error
 }
 
 // VolumeProvisioner records product-level desired volume intent. It must not
@@ -73,6 +102,16 @@ func publishContext(t PublishTarget) map[string]string {
 	if t.ISCSIAddr != "" && t.IQN != "" {
 		ctx["iscsiAddr"] = t.ISCSIAddr
 		ctx["iqn"] = t.IQN
+	}
+	if len(t.ISCSIAddrs) > 0 && t.IQN != "" {
+		ctx["iscsiAddrs"] = strings.Join(t.ISCSIAddrs, ",")
+		if ctx["iscsiAddr"] == "" {
+			ctx["iscsiAddr"] = t.ISCSIAddrs[0]
+		}
+		ctx["iqn"] = t.IQN
+	}
+	if t.Multipath {
+		ctx["stage2_multipath"] = "true"
 	}
 	if t.NVMeAddr != "" && t.NQN != "" {
 		ctx["nvmeAddr"] = t.NVMeAddr

@@ -23,15 +23,21 @@ Claimed in this manual:
 - durable restart of a generated RF=1 `blockvolume` when an explicit
   launcher hostPath is configured,
 - read-only cluster inventory with per-replica support bundles,
+- RF=2 `best-effort` controlled recovery as a development/TestOps demo profile,
+- RF=3 `sync-quorum` mounted recovery through CSI/pod recreate as the Stage 1
+  beta recovery target,
+- gated RF=3 `sync-quorum` Kubernetes node-loss recovery through CSI/pod
+  recreate when the Node-Loss Survival gate artifacts are present,
 - scoped cleanup checks for the demo PVC and generated workload.
 
 Not claimed:
 
-- production HA,
-- node loss or host-disk failure,
+- transparent production HA without pod recreate,
+- transparent node-loss, physical-host loss, or host-disk failure,
 - remote-node attach to a loopback-published `blockvolume`,
 - automatic multi-node scheduling, rescheduling, or rebalancing,
-- live RF=2/RF=3 Kubernetes lifecycle,
+- RF=2 quorum HA after primary failure,
+- transparent in-place mounted I/O continuation,
 - upgrade or broad uninstall safety,
 - repair, rebuild, promote, backup, or restore commands,
 - performance SLOs,
@@ -315,6 +321,126 @@ Attach the entire inventory directory to issues. It contains:
 - `ops-inventory-bundle.json`,
 - nested `sw-block ops status` artifacts when status endpoints are reachable.
 
+### AI-Readable Control-Plane Status
+
+The read-only inventory bundle above remains the safest support artifact for
+replica-level details. The newer control-plane observation path adds a
+product-owned cluster snapshot and timeline that a user, support engineer,
+dashboard, CI job, or AI assistant can read without reconstructing events from
+TestOps logs.
+
+Port-forward the running `blockmaster` Deployment:
+
+```bash
+kubectl -n kube-system port-forward deploy/sw-blockmaster 9333:9333
+```
+
+Then export the master-owned cluster evidence:
+
+```bash
+sw-block ops cluster --master-api 127.0.0.1:9333 -o json \
+  > /tmp/sw-block-cluster-evidence.json
+```
+
+The JSON contains:
+
+- `nodes`: Kubernetes nodes and product server identities known to
+  `blockmaster`,
+- `volumes`: PVC/volume/replica placement, primary, publish target, epoch, and
+  endpoint version,
+- `events`: product-owned timeline events with stable reason codes,
+  master-minted `event_id`, and `event_time`.
+
+For support, attach `/tmp/sw-block-cluster-evidence.json` together with the
+inventory directory. The cluster evidence answers what the control plane
+believes happened; the inventory bundle answers what Kubernetes and each
+replica reported at collection time.
+
+User-facing commands follow this shape:
+
+```bash
+sw-block ops cluster
+sw-block ops cluster --master-api 127.0.0.1:9333 -o json
+sw-block ops volumes
+sw-block ops describe volume <volume-id>
+sw-block ops timeline volume <volume-id>
+sw-block ops timeline volume <volume-id> -o jsonl
+sw-block ops explain volume <volume-id>
+sw-block ops inventory --namespace default --master 127.0.0.1:9333 --out /tmp/sw-block-inventory
+```
+
+`sw-block ops cluster --master-api` reads the product-owned master API.
+`sw-block ops inventory` and bundle-backed `describe`/`timeline`/`explain`
+commands remain useful when diagnosing from saved artifacts.
+
+The long-term design is one shared observation core with three consumers:
+
+- `sw-block ops ...` text for users, support, QA, and AI,
+- `sw-block ops ... -o json|jsonl` for automation and support bundles,
+- master read-only API for a future dashboard.
+
+The dashboard view should answer five questions without requiring internal
+knowledge:
+
+- Which PVC and volume are affected?
+- Which replica is primary, and on which Kubernetes node?
+- Is the volume `ok`, `degraded`, `recovering`, or `blocked`?
+- If recovery happened, which frontend did CSI attach to before and after?
+- What is the next operator action?
+
+Example healthy shape:
+
+```text
+volume pvc-... status=ok rf=3 ack=sync-quorum
+pvc default/mysql-data
+primary r1 on m01 frontend=192.168.1.181:3260
+replicas desired=3 observed=3
+r1 m01 primary ready durable_lsn=44
+r2 m02 replica_ready candidate_ready=true durable_lsn=44
+r3 tp01 replica_ready candidate_ready=true durable_lsn=44
+next action: none
+```
+
+Example recovering shape:
+
+```text
+volume pvc-... status=recovering reason=primary_node_lost
+old primary r1 on m01 unavailable
+promoted primary r2 on m02 epoch=2 endpoint_version=1
+CSI target changed 192.168.1.181:3260 -> 192.168.1.184:3260
+reattach method: pod_recreate
+next action: wait for app pod readiness, then collect support bundle if stuck
+```
+
+Example blocked shape:
+
+```text
+volume pvc-... status=blocked reason=no_promotion_ready_candidate
+r2 candidate_ready=false reason=durable_frontier_missing
+r3 candidate_ready=false reason=candidate_frontier_behind
+next action: collect support bundle; do not force promote without support review
+```
+
+Example attach/install blocked shape:
+
+```text
+volume pvc-... status=blocked reason=csi_node_image_pull_failed
+node m02 missing image sw-block-csi:local
+pod kube-system/sw-block-csi-node-... waiting=ImagePullBackOff
+impact: PVC attach cannot proceed on workloads scheduled to m02
+next action: import the image to m02 or use a registry reachable by all nodes
+```
+
+The first dashboard and AI assistant path must stay read-only. It should not
+expose promote, repair, rebuild, backup, restore, or cleanup buttons until
+those actions have separate strict gates.
+
+Support bundles for attach/install failures should include Kubernetes runtime
+evidence in addition to Seaweed Block inventory: `kubectl get pods -A -o wide`,
+recent namespace events, `kubectl describe pod` for `sw-blockmaster`,
+`sw-block-csi-*`, generated `sw-blockvolume` pods, CSI logs, blockmaster logs,
+and per-node product image presence.
+
 ## 7. Delete And Verify Scoped Cleanup
 
 For the demo resources:
@@ -374,6 +500,8 @@ Common issue classes:
 
 ```text
 generated_deployment_missing
+observed_replicas=0 desired_replicas=2
+replica_slot_missing=unknown
 orphan-blockvolume-deploy=<deployment>
 blockvolume-process-without-placement=<server>
 status_endpoint_unavailable
@@ -381,6 +509,267 @@ status_endpoint_unreachable=<addr>
 unsupported_cross_node_loopback_attach
 ops_status=unhealthy reason=authority_not_assigned ...
 ```
+
+### Mounted Recovery ACK Profiles
+
+Stage 1 mounted recovery has two validated ACK profiles. Keep them separate
+when reporting results or setting user expectations.
+
+| Profile | Claim label | Validated meaning |
+| --- | --- | --- |
+| RF=2 `best-effort` | `controlled-best-effort-demo` | Development/TestOps recovery demonstration. It proves the mounted app path, scoped primary stop, master promotion, CSI/pod recreate, and reader checksum for the gated bytes. It is not a quorum durability claim. |
+| RF=3 `sync-quorum` | `beta-recovery` | Stage 1 durable mounted recovery target. It proves candidate promotion only after the sync ACK frontier is covered, single-primary authority publication, CSI/pod recreate re-stage to the promoted frontend, and post-failure reader checksum. |
+
+Stage 1 recovery still uses CSI/node reattach through pod recreate. It does not
+claim transparent in-place I/O continuation. Transparent host-path switching
+requires the later multipath line: iSCSI ALUA plus dm-multipath, or NVMe ANA
+plus native multipath.
+
+Reserved Stage 2 claim profile:
+
+| Profile | Claim label | Validation status |
+| --- | --- | --- |
+| RF=3 `sync-quorum` + iSCSI ALUA | `stage2-iscsi-alua-multipath` | Reserved for the dm-multipath path where the mounted workload stays in place and recovery is proven through ALUA path-state evidence plus a post-failure data check. It is not valid with `best-effort`; the close gate must prove it before it becomes an external recovery claim. |
+
+#### Stage 2 iSCSI ALUA / dm-multipath Mounted Failover
+
+Stage 2 is the transparent mounted-host-path recovery line. It is different
+from Stage 1: the workload pod is not recreated, CSI does not re-stage the
+volume, and the Linux host must keep one dm-multipath device online while ALUA
+path state moves from the failed primary path to the promoted path.
+
+The validated Stage 2 contract is:
+
+```text
+protocol=iscsi
+host_multipath=dm-multipath
+ack_profile=sync-quorum
+claim_profile=stage2-iscsi-alua-multipath
+replication=RF3
+recovery=mounted workload verifies data without pod recreate
+```
+
+Host prerequisites for this path:
+
+```text
+iscsiadm present
+multipath present
+sg_rtpg or equivalent RTPG reader present
+sg_inq present
+kernel modules: iscsi_tcp, dm_multipath, scsi_dh_alua
+udev device state available under /run/udev
+```
+
+The support bundle must show:
+
+```text
+pod_recreate_used=false
+transparent_failover_claimed=true
+before_primary_replica=<rN>
+promoted_replica=<rM>
+post_failure_primary_count=1
+old_primary_stale_io_success_count=0
+data_check_after_failover=mounted_workload_checksum_passed
+bounded_waits=pass
+```
+
+Host-path evidence must include one shared iSCSI IQN with multiple portals, one
+dm-multipath device with multiple paths, and RTPG/ALUA state showing the
+primary path changed after promotion. A recovery that only succeeds after pod
+recreate belongs to Stage 1 and must not be reported as Stage 2.
+
+Stage 2 still does not claim node loss, NVMe ANA Kubernetes recovery, Windows
+MPIO, broad distro compatibility, performance/RTO SLOs, or automatic
+repair/rebuild/failback.
+
+#### Stage 3 Node-Loss Survival Gate
+
+Stage 3 is the Kubernetes node-loss recovery line. It is different from Stage
+2: the first node-loss close uses CSI/pod recreate reattach, not transparent
+mounted I/O continuation. The storage control plane must promote a surviving
+RF=3 `sync-quorum` replica, and the replacement pod must attach to the promoted
+non-loopback frontend on a surviving Kubernetes node.
+
+The active gate contract is:
+
+```text
+protocol=iscsi
+replication=RF3
+ack_profile=sync-quorum
+frontends=non-loopback
+topology=3 Kubernetes nodes; physical-host/fault-domain sharing disclosed
+failure=controlled primary Kubernetes node loss or equivalent node isolation
+recovery=CSI/pod recreate reattach to surviving promoted frontend
+transparent_failover_claimed=false
+node_loss_recovery_claimed=true
+```
+
+The current lab validation is TCP/iSCSI over the LAN (`192.168.1.x`). It does
+not use the RoCE/RDMA fabric (`10.0.0.x`), and it does not support NVMe/RDMA or
+performance claims.
+
+The support bundle must show:
+
+```text
+node-loss-recovery-summary.txt
+replicas_on_distinct_nodes=true
+frontends_non_loopback=true
+before_primary_replica=<rN>
+before_primary_node=<node-a>
+failed_replica=<same rN>
+failed_node=<same node-a>
+promoted_replica=<rM>
+promoted_replica_node=<node-b>
+post_failure_primary_count=1
+before_publish_target_frontend=<node-a-ip:port>
+after_publish_target_frontend=<node-b-ip:port>
+pod_recreate_used=true
+transparent_failover_claimed=false
+node_loss_recovery_claimed=true
+data_check_after_node_loss=reader_checksum_passed
+old_primary_stale_io_success_count=0
+bounded_waits=pass
+physical_host_loss_claimed=false
+```
+
+This gate does not claim transparent node-loss, NVMe ANA node-loss, arbitrary
+network partition tolerance, rebuild/failback, RTO/SLO, or production HA
+outside the tested topology. If three Kubernetes nodes share fewer physical
+machines, the report must keep `physical_host_loss_claimed=false`; that is a
+Kubernetes-node-loss proof, not a full physical-host-loss proof.
+
+#### RF=2 Mounted Failover Status
+
+RF=2 Kubernetes lifecycle has three validated alpha boundaries:
+
+1. On the default single-logical-server alpha topology, an RF=2 PVC is refused
+   safely. The PVC may bind, but the product must not launch a partial
+   one-replica `blockvolume` and call it healthy.
+2. On the development/TestOps two-logical-server alpha topology, the mounted
+   app path can write and read through an RF=2 PVC while inventory sees two
+   generated replicas. Controlled primary failure is still a safe-refusal path
+   when the peer replica is not promotion-ready.
+3. On the same development/TestOps topology with `ack_profile=best-effort` and
+   `claim_profile=controlled-best-effort-demo`, controlled primary failure can
+   promote a ready peer and recover through CSI/pod recreate with a reader
+   checksum. This is a demo profile only; it must not be described as quorum
+   HA.
+
+The safe-refusal behavior remains valid when the peer is not promotion-ready:
+
+```text
+writer writes and verifies data
+before-failure inventory identifies primary=r1
+r2 is visible but not promotion-ready
+r1 blockvolume is stopped in a scoped way
+product emits failover_status: refused
+data_check_after_failover=not_claimed
+reason=candidate_not_ready_for_primary
+```
+
+The product must not start a replacement reader and claim checksum recovery
+unless a separate gate proves a ready candidate, authority movement, and
+reattach/readback.
+
+Default single-logical-server refusal shape:
+
+The supported operator check is inventory:
+
+```text
+inventory_status: unhealthy
+volume: ... rf=2 desired=2 observed=0 ...
+issues:
+- volume ... generated_deployment_missing
+- volume ... observed_replicas=0 desired_replicas=2
+- volume ... replica_slot_missing=unknown
+```
+
+That means the product preserved the requested RF=2 intent and refused to create
+an unsafe partial failover topology. It is not a recovery success; it is an
+honest safe-refusal state.
+
+For development and TestOps only, the alpha installer can opt into two logical
+Seaweed Block server identities on the same Kubernetes node:
+
+```bash
+SW_BLOCK_ALPHA_LOGICAL_SERVERS=2 \
+SW_BLOCK_ALPHA_EXPECTED_SLOTS_PER_VOLUME=2 \
+  bash scripts/install-k8s-alpha.sh "$PWD"
+```
+
+This is a placement/failover-lab shape, not a node-failure HA shape. The
+generated `blockvolume` pods are scheduled to the same Kubernetes node, while
+their `server_id`s, data/control ports, frontend ports, and status ports remain
+distinct. It is useful for proving replica placement and process-level failover
+mechanics before broad multi-node scheduling exists.
+
+In that two-logical-server shape, the currently validated RF=2 primary-failure
+safe-refusal evidence is:
+
+```text
+failover_status: refused
+ack_profile: best-effort
+failure_class=primary-blockvolume-controlled-stop
+before_primary_replica=r1
+failed_replica=r1
+candidate_ready=false
+candidate_evidence=replica: ... replica=r2 ... replication=not_ready ...
+data_check_after_failover=not_claimed
+reason=candidate_not_ready_for_primary
+target_ready_replicas=0
+after_issue_evidence=- volume ... replica_degraded=...
+```
+
+Read this as: the writer path worked before the failure; the primary stop was
+scoped and observable; the peer was not ready to become primary; recovery was
+not claimed.
+
+The RF=2 controlled recovery demo shape, when the peer is promotion-ready, is:
+
+```text
+ack_profile: best-effort
+claim_profile=controlled-best-effort-demo
+failover_status: promotion_pending -> promoted
+data_check_after_failover: pending_reader -> reader_checksum_passed
+reader_verified: true
+```
+
+Read this as: the exact gated demo bytes were recovered after promotion and
+pod recreate. Do not read it as a sync-quorum or sync-all durability guarantee.
+
+#### RF=3 Sync-Quorum Mounted Recovery Status
+
+RF=3 `sync-quorum` is the Stage 1 beta-facing durable recovery profile. The
+validated path is:
+
+```text
+writer writes and verifies data
+inventory identifies primary=r1 and promotion-ready candidate=r2
+candidate frontier covers the required sync ACK frontier
+r1 blockvolume is stopped in a scoped way
+master publishes r2 as the only primary
+CSI/node re-stages the recreated pod to r2's frontend
+reader verifies /data/demo.bin after failure
+```
+
+The expected recovery marker is:
+
+```text
+ack_profile: sync-quorum
+claim_profile=beta-recovery
+failover_status: promotion_pending -> promoted
+before_primary_replica=r1
+failed_replica=r1
+promoted_replica=r2
+frontier_covered=true
+post_failure_primary_count=1
+data_check_after_failover: pending_reader -> reader_checksum_passed
+reader_verified=true
+```
+
+This is a Stage 1 Kubernetes mounted recovery claim, not a transparent
+multipath claim. The reader succeeds after pod recreate / CSI re-stage, not by
+continuing in-place I/O through the original mounted path.
 
 If no volume identity was reached, record that explicitly:
 

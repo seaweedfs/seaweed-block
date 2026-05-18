@@ -186,6 +186,21 @@ func newTestMaster(t *testing.T, lifecycleDir string) *Host {
 	return h
 }
 
+func newTestMasterWithControllerConfig(t *testing.T, lifecycleDir string, controller authority.TopologyControllerConfig) *Host {
+	t.Helper()
+	h, err := New(Config{
+		AuthorityStoreDir: t.TempDir(),
+		LifecycleStoreDir: lifecycleDir,
+		Listen:            "127.0.0.1:0",
+		ControllerConfig:  controller,
+	})
+	if err != nil {
+		t.Fatalf("master.New: %v", err)
+	}
+	h.Start()
+	return h
+}
+
 type parsedStruct struct {
 	Fields map[string]struct{}
 }

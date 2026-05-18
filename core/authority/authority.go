@@ -27,6 +27,19 @@ type assignmentState struct {
 	present bool
 }
 
+// PublishEvent is emitted only after Publisher successfully mints and commits
+// an AssignmentInfo. It is an observation hook; consumers must not feed it back
+// into authority decisions.
+type PublishEvent struct {
+	Info adapter.AssignmentInfo
+	Ask  AssignmentAsk
+}
+
+// PublishObserver receives successful publication events. Implementations must
+// be non-blocking or very fast: Publisher calls this after releasing its state
+// lock but before returning from apply.
+type PublishObserver func(PublishEvent)
+
 // subscription is a live, per-caller subscription to the authority
 // stream. Each Subscribe returns exactly one subscription; cancel
 // is isolated — one subscription ending does NOT affect others on
@@ -137,6 +150,8 @@ type Publisher struct {
 	// records are simply absent from state and the volume
 	// behaves as "never bound" until a new mint.
 	loadErrs []error
+
+	observer PublishObserver
 }
 
 // PublisherOption configures a Publisher at construction.
@@ -155,6 +170,15 @@ type PublisherOption func(*Publisher)
 func WithStore(store AuthorityStore) PublisherOption {
 	return func(p *Publisher) {
 		p.store = store
+	}
+}
+
+// WithPublishObserver registers a read-only callback for successful mints.
+// The callback is not replayed during durable reload; reload is existing state,
+// not a new authority publication event.
+func WithPublishObserver(observer PublishObserver) PublisherOption {
+	return func(p *Publisher) {
+		p.observer = observer
 	}
 }
 
@@ -488,6 +512,9 @@ func (p *Publisher) apply(ask AssignmentAsk) error {
 
 	for _, s := range subs {
 		s.deliver(next)
+	}
+	if p.observer != nil {
+		p.observer(PublishEvent{Info: next, Ask: ask})
 	}
 	return nil
 }
