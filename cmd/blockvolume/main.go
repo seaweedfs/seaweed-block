@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -55,18 +56,22 @@ type flags struct {
 	// Default off; production binaries do NOT enable. Used by hardware
 	// orchestration scripts for catch-up verification (R/H polling).
 	statusRecovery bool
+	// External status bind is off by default. Node-loss gates opt in so
+	// blockmaster can probe surviving replicas across Kubernetes nodes.
+	allowExternalStatusBind bool
 
 	// iSCSI frontend flags. iscsiListen is the TCP address the iSCSI
-	// target binds on; empty disables the frontend. The bind is
-	// rejected at startup if it is not a loopback address —
-	// unauthenticated frontend on an external port would be unsafe.
-	iscsiListen     string
-	iscsiIQN        string
-	iscsiPortalAddr string
-	iscsiDataOutTTL time.Duration
-	iscsiLUN        uint
-	iscsiCHAPUser   string
-	iscsiCHAPSecret string
+	// target binds on; empty disables the frontend. The safe default
+	// rejects non-loopback binds. Node-loss gates must opt into
+	// external bind and provide CHAP.
+	iscsiListen            string
+	iscsiIQN               string
+	iscsiPortalAddr        string
+	iscsiDataOutTTL        time.Duration
+	iscsiLUN               uint
+	iscsiCHAPUser          string
+	iscsiCHAPSecret        string
+	allowExternalISCSIBind bool
 
 	// NVMe/TCP frontend flags. Symmetric with iSCSI flags: same
 	// loopback-only safe-default rule, same auto-enable of
@@ -132,6 +137,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.BoolVar(&f.enableT1Readiness, "t1-readiness", false, "enable readiness bridge (HealthyPathExecutor) so adapter projection reaches Healthy")
 	fs.StringVar(&f.statusAddr, "status-addr", "", "address for the status HTTP endpoint (e.g. 127.0.0.1:0); empty disables")
 	fs.BoolVar(&f.statusRecovery, "status-recovery", false, "expose /status/recovery?volume=<id> with engine.ReplicaProjection (Mode/R/S/H/RecoveryDecision); off by default; loopback-only; intended for hardware test orchestration")
+	fs.BoolVar(&f.allowExternalStatusBind, "allow-external-status-bind", false, "allow the unauthenticated status endpoint to bind and serve non-loopback addresses; intended only for explicit Kubernetes node-loss gates")
 	fs.StringVar(&f.iscsiListen, "iscsi-listen", "", "iSCSI target bind address (e.g. 127.0.0.1:0); empty disables. Loopback-only unless paired with an operator-managed proxy")
 	fs.StringVar(&f.iscsiIQN, "iscsi-iqn", "", "iSCSI target IQN (required if --iscsi-listen is set)")
 	fs.StringVar(&f.iscsiPortalAddr, "iscsi-portal-addr", "", "iSCSI TargetAddress advertised in SendTargets responses (e.g. 203.0.113.10:3260,1). Defaults to the bound listen address. Does not change the loopback-only bind policy")
@@ -139,6 +145,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.UintVar(&f.iscsiLUN, "iscsi-lun", 0, "iSCSI LUN id (default 0)")
 	fs.StringVar(&f.iscsiCHAPUser, "iscsi-chap-username", "", "iSCSI target-side CHAP username. Requires --iscsi-chap-secret and --iscsi-listen")
 	fs.StringVar(&f.iscsiCHAPSecret, "iscsi-chap-secret", "", "iSCSI target-side CHAP secret. Requires --iscsi-chap-username and --iscsi-listen")
+	fs.BoolVar(&f.allowExternalISCSIBind, "allow-external-iscsi-bind", false, "allow iSCSI to bind a non-loopback address; requires CHAP and is intended for explicit Kubernetes node-loss gates")
 	fs.StringVar(&f.nvmeListen, "nvme-listen", "", "NVMe/TCP target bind address (e.g. 127.0.0.1:0); empty disables. Loopback-only (no auth)")
 	fs.StringVar(&f.nvmeSubsysNQN, "nvme-subsysnqn", "", "NVMe subsystem NQN (required if --nvme-listen is set)")
 	fs.UintVar(&f.nvmeNS, "nvme-ns", 1, "NVMe namespace id (default 1)")
@@ -213,7 +220,7 @@ func parseFlags(args []string) (flags, error) {
 		if f.iscsiIQN == "" {
 			return flags{}, fmt.Errorf("--iscsi-iqn is required when --iscsi-listen is set")
 		}
-		if err := enforceFrontendLoopbackBind("iscsi", f.iscsiListen); err != nil {
+		if err := enforceISCSIBindPolicy(f); err != nil {
 			return flags{}, err
 		}
 		// iSCSI needs a Healthy adapter projection to open a
@@ -317,6 +324,34 @@ func enforceFrontendLoopbackBind(kind, addr string) error {
 	return nil
 }
 
+func enforceISCSIBindPolicy(f flags) error {
+	if !f.allowExternalISCSIBind {
+		return enforceFrontendLoopbackBind("iscsi", f.iscsiListen)
+	}
+	if f.iscsiCHAPUser == "" || f.iscsiCHAPSecret == "" {
+		return fmt.Errorf("--allow-external-iscsi-bind requires CHAP")
+	}
+	host, _, err := net.SplitHostPort(f.iscsiListen)
+	if err != nil {
+		return fmt.Errorf("--iscsi-listen %q not host:port: %w", f.iscsiListen, err)
+	}
+	if host == "" {
+		return fmt.Errorf("--iscsi-listen %q has empty host; external iSCSI bind requires an explicit node address", f.iscsiListen)
+	}
+	if isLocalhostOrLoopbackHost(host) {
+		return fmt.Errorf("--iscsi-listen %q is loopback; external iSCSI bind requires a non-loopback node address", f.iscsiListen)
+	}
+	return nil
+}
+
+func isLocalhostOrLoopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
 func main() {
 	f, err := parseFlags(os.Args[1:])
 	if err != nil {
@@ -384,6 +419,9 @@ func run(f flags) int {
 		status = volume.NewStatusServer(h.ProjectionView())
 		if f.statusRecovery {
 			status.EnableRecoveryEndpoint()
+		}
+		if f.allowExternalStatusBind {
+			status.AllowExternalAccess()
 		}
 		bound, err := status.Start(f.statusAddr)
 		if err != nil {

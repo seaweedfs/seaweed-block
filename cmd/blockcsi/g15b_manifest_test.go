@@ -214,7 +214,7 @@ func TestG15b_ImageBuildInputs_ContainExpectedBinariesAndNodeTools(t *testing.T)
 	}
 
 	csi := g15bReadDeployFile(t, "Dockerfile.blockcsi")
-	for _, want := range []string{"./cmd/blockcsi", "open-iscsi", "nvme-cli", "e2fsprogs", "kmod", "util-linux", "/usr/local/bin/blockcsi"} {
+	for _, want := range []string{"./cmd/blockcsi", "open-iscsi", "multipath-tools", "sg3-utils", "nvme-cli", "e2fsprogs", "kmod", "util-linux", "/usr/local/bin/blockcsi"} {
 		if !strings.Contains(csi, want) {
 			t.Fatalf("Dockerfile.blockcsi missing %q", want)
 		}
@@ -228,7 +228,7 @@ func TestG15b_ImageBuildInputs_ContainExpectedBinariesAndNodeTools(t *testing.T)
 	}
 	for _, want := range []string{
 		"SW_BLOCK_IMPORT_K3S",
-		"sudo -n k3s ctr images import -",
+		"sudo -n k3s ctr -n k8s.io images import -",
 		"docker image inspect",
 		"alpha-images.env",
 		"blockmaster.version.txt",

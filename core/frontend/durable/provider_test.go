@@ -316,6 +316,200 @@ func TestDurableProvider_DurableStatuses_ReportLineageAndOperationalState(t *tes
 			if after[0].Evidence == "" {
 				t.Fatalf("status should include recovery evidence: %+v", after[0])
 			}
+			if !after[0].FrontierKnown {
+				t.Fatalf("status should expose storage frontier evidence: %+v", after[0])
+			}
+		})
+	}
+}
+
+func TestDurableProvider_LatchVolumeIdentity_AfterEnsureStorageWithoutFrontendHealthy(t *testing.T) {
+	for _, impl := range implMatrix() {
+		impl := impl
+		t.Run(string(impl), func(t *testing.T) {
+			root := t.TempDir()
+			view := newStubView(frontend.Projection{
+				VolumeID:  "v1",
+				ReplicaID: "r2",
+				Healthy:   false,
+			})
+			p, err := durable.NewDurableProvider(durable.ProviderConfig{
+				Impl:        impl,
+				StorageRoot: root,
+				BlockSize:   4096,
+				NumBlocks:   16,
+			}, view)
+			if err != nil {
+				t.Fatalf("NewDurableProvider: %v", err)
+			}
+			t.Cleanup(func() { _ = p.Close() })
+
+			if _, err := p.EnsureStorage("v1"); err != nil {
+				t.Fatalf("EnsureStorage: %v", err)
+			}
+			if _, err := p.RecoverVolume(context.Background(), "v1"); err != nil {
+				t.Fatalf("RecoverVolume: %v", err)
+			}
+			before := p.DurableStatuses()
+			if len(before) != 1 || before[0].Latched || !before[0].Operational {
+				t.Fatalf("pre-latch status should be operational but unlatched: %+v", before)
+			}
+
+			view.set(frontend.Projection{
+				VolumeID:        "v1",
+				ReplicaID:       "r2",
+				Epoch:           3,
+				EndpointVersion: 2,
+				Healthy:         false, // supporting replica remains frontend-gated
+			})
+			latched, err := p.LatchVolumeIdentity("v1")
+			if err != nil {
+				t.Fatalf("LatchVolumeIdentity: %v", err)
+			}
+			if !latched {
+				t.Fatal("LatchVolumeIdentity should report a changed identity")
+			}
+
+			after := p.DurableStatuses()
+			if len(after) != 1 {
+				t.Fatalf("status count=%d want 1: %+v", len(after), after)
+			}
+			if !after[0].Latched || !after[0].Operational {
+				t.Fatalf("post-latch status should be latched and operational: %+v", after[0])
+			}
+			if after[0].ReplicaID != "r2" || after[0].Epoch != 3 || after[0].EndpointVersion != 2 {
+				t.Fatalf("post-latch lineage mismatch: %+v", after[0])
+			}
+		})
+	}
+}
+
+func TestDurableProvider_LatchVolumeIdentity_AllowsSameReplicaAuthorityAdvance(t *testing.T) {
+	for _, impl := range implMatrix() {
+		impl := impl
+		t.Run(string(impl), func(t *testing.T) {
+			root := t.TempDir()
+			view := newStubView(frontend.Projection{
+				VolumeID:  "v1",
+				ReplicaID: "r2",
+				Healthy:   false,
+			})
+			p, err := durable.NewDurableProvider(durable.ProviderConfig{
+				Impl:        impl,
+				StorageRoot: root,
+				BlockSize:   4096,
+				NumBlocks:   16,
+			}, view)
+			if err != nil {
+				t.Fatalf("NewDurableProvider: %v", err)
+			}
+			t.Cleanup(func() { _ = p.Close() })
+
+			if _, err := p.EnsureStorage("v1"); err != nil {
+				t.Fatalf("EnsureStorage: %v", err)
+			}
+			view.set(frontend.Projection{
+				VolumeID:        "v1",
+				ReplicaID:       "r2",
+				Epoch:           3,
+				EndpointVersion: 2,
+				Healthy:         false,
+			})
+			latched, err := p.LatchVolumeIdentity("v1")
+			if err != nil {
+				t.Fatalf("LatchVolumeIdentity initial: %v", err)
+			}
+			if !latched {
+				t.Fatal("initial latch should change identity")
+			}
+
+			view.set(frontend.Projection{
+				VolumeID:        "v1",
+				ReplicaID:       "r2",
+				Epoch:           4,
+				EndpointVersion: 3,
+				Healthy:         false,
+			})
+			latched, err = p.LatchVolumeIdentity("v1")
+			if err != nil {
+				t.Fatalf("LatchVolumeIdentity advance: %v", err)
+			}
+			if !latched {
+				t.Fatal("authority advance should report changed identity")
+			}
+
+			statuses := p.DurableStatuses()
+			if len(statuses) != 1 {
+				t.Fatalf("status count=%d want 1: %+v", len(statuses), statuses)
+			}
+			if statuses[0].Epoch != 4 || statuses[0].EndpointVersion != 3 {
+				t.Fatalf("authority advance should update lineage: %+v", statuses[0])
+			}
+		})
+	}
+}
+
+func TestDurableProvider_LatchVolumeIdentity_RejectsDifferentReplicaLineage(t *testing.T) {
+	for _, impl := range implMatrix() {
+		impl := impl
+		t.Run(string(impl), func(t *testing.T) {
+			root := t.TempDir()
+			view := newStubView(frontend.Projection{
+				VolumeID:  "v1",
+				ReplicaID: "r2",
+				Healthy:   false,
+			})
+			p, err := durable.NewDurableProvider(durable.ProviderConfig{
+				Impl:        impl,
+				StorageRoot: root,
+				BlockSize:   4096,
+				NumBlocks:   16,
+			}, view)
+			if err != nil {
+				t.Fatalf("NewDurableProvider: %v", err)
+			}
+			t.Cleanup(func() { _ = p.Close() })
+
+			if _, err := p.EnsureStorage("v1"); err != nil {
+				t.Fatalf("EnsureStorage: %v", err)
+			}
+			view.set(frontend.Projection{
+				VolumeID:        "v1",
+				ReplicaID:       "r2",
+				Epoch:           3,
+				EndpointVersion: 2,
+				Healthy:         false,
+			})
+			latched, err := p.LatchVolumeIdentity("v1")
+			if err != nil {
+				t.Fatalf("LatchVolumeIdentity initial: %v", err)
+			}
+			if !latched {
+				t.Fatal("initial latch should change identity")
+			}
+
+			view.set(frontend.Projection{
+				VolumeID:        "v1",
+				ReplicaID:       "r3",
+				Epoch:           4,
+				EndpointVersion: 1,
+				Healthy:         false,
+			})
+			latched, err = p.LatchVolumeIdentity("v1")
+			if err == nil {
+				t.Fatal("LatchVolumeIdentity should reject different replica lineage")
+			}
+			if latched {
+				t.Fatal("failed latch must not report changed identity")
+			}
+
+			statuses := p.DurableStatuses()
+			if len(statuses) != 1 {
+				t.Fatalf("status count=%d want 1: %+v", len(statuses), statuses)
+			}
+			if statuses[0].ReplicaID != "r2" || statuses[0].Epoch != 3 || statuses[0].EndpointVersion != 2 {
+				t.Fatalf("rejected latch must preserve original lineage: %+v", statuses[0])
+			}
 		})
 	}
 }

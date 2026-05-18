@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -49,6 +50,7 @@ type StatusServer struct {
 	srv             *http.Server
 	addr            string
 	recoveryEnabled bool // G5-5: gates /status/recovery; off by default
+	allowExternal   bool
 	peerSource      peerStatusSource
 	durableSource   durableStatusSource
 }
@@ -109,6 +111,19 @@ func (s *StatusServer) EnableRecoveryEndpoint() {
 	s.recoveryEnabled = true
 }
 
+// AllowExternalAccess opts into binding and serving on non-loopback addresses.
+// This is for controlled Kubernetes node-loss gates where blockmaster must
+// probe surviving replicas across nodes. The default remains loopback-only.
+// Must be called BEFORE Start.
+func (s *StatusServer) AllowExternalAccess() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.ln != nil {
+		return
+	}
+	s.allowExternal = true
+}
+
 // SetPeerStatusSource enables /status/peers by wiring a primary-side
 // replication status source. It may be called before or after Start:
 // the route is registered at Start, and returns 404 until a source is
@@ -139,8 +154,14 @@ func (s *StatusServer) Start(addr string) (string, error) {
 	if s.ln != nil {
 		return "", fmt.Errorf("status: already started")
 	}
-	if err := enforceLoopbackBind(addr); err != nil {
-		return "", err
+	if s.allowExternal {
+		if err := enforceExplicitExternalBind(addr); err != nil {
+			return "", err
+		}
+	} else {
+		if err := enforceLoopbackBind(addr); err != nil {
+			return "", err
+		}
 	}
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
@@ -170,6 +191,12 @@ func (s *StatusServer) Addr() string {
 	return s.addr
 }
 
+func (s *StatusServer) externalAccessAllowed() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.allowExternal
+}
+
 // Close gracefully shuts the server down. Idempotent.
 func (s *StatusServer) Close(ctx context.Context) error {
 	s.mu.Lock()
@@ -183,7 +210,7 @@ func (s *StatusServer) Close(ctx context.Context) error {
 }
 
 func (s *StatusServer) handleStatus(w http.ResponseWriter, r *http.Request) {
-	if !isLoopbackRemote(r.RemoteAddr) {
+	if !s.externalAccessAllowed() && !isLoopbackRemote(r.RemoteAddr) {
 		http.Error(w, "status endpoint restricted to loopback", http.StatusForbidden)
 		return
 	}
@@ -248,7 +275,7 @@ func (s *StatusServer) supportingReplicaReady(selfEpoch, selfEV uint64) bool {
 // G5-5 close (per `v3-batch-process.md` no engine/adapter behavior
 // change rule); future field additions are append-only.
 func (s *StatusServer) handleStatusRecovery(w http.ResponseWriter, r *http.Request) {
-	if !isLoopbackRemote(r.RemoteAddr) {
+	if !s.externalAccessAllowed() && !isLoopbackRemote(r.RemoteAddr) {
 		http.Error(w, "status endpoint restricted to loopback", http.StatusForbidden)
 		return
 	}
@@ -270,7 +297,7 @@ func (s *StatusServer) handleStatusRecovery(w http.ResponseWriter, r *http.Reque
 }
 
 func (s *StatusServer) handleStatusPeers(w http.ResponseWriter, r *http.Request) {
-	if !isLoopbackRemote(r.RemoteAddr) {
+	if !s.externalAccessAllowed() && !isLoopbackRemote(r.RemoteAddr) {
 		http.Error(w, "status endpoint restricted to loopback", http.StatusForbidden)
 		return
 	}
@@ -308,7 +335,7 @@ func (s *StatusServer) handleStatusPeers(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *StatusServer) handleStatusDurable(w http.ResponseWriter, r *http.Request) {
-	if !isLoopbackRemote(r.RemoteAddr) {
+	if !s.externalAccessAllowed() && !isLoopbackRemote(r.RemoteAddr) {
 		http.Error(w, "status endpoint restricted to loopback", http.StatusForbidden)
 		return
 	}
@@ -372,6 +399,32 @@ func enforceLoopbackBind(addr string) error {
 		return fmt.Errorf("status: bind addr %q is not loopback; refusing to expose unauthenticated diagnostic endpoint", addr)
 	}
 	return nil
+}
+
+func enforceExplicitExternalBind(addr string) error {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return fmt.Errorf("status: bind addr %q not host:port: %w", addr, err)
+	}
+	if host == "" {
+		return fmt.Errorf("status: bind addr %q has empty host; external status bind requires an explicit node address", addr)
+	}
+	ip := net.ParseIP(host)
+	if ip != nil && ip.IsUnspecified() {
+		return fmt.Errorf("status: bind addr %q is unspecified; external status bind requires a concrete node address", addr)
+	}
+	if isLocalhostOrLoopbackHost(host) {
+		return fmt.Errorf("status: bind addr %q is loopback; external status bind requires a non-loopback node address", addr)
+	}
+	return nil
+}
+
+func isLocalhostOrLoopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // isLoopbackRemote returns true if RemoteAddr parses to a

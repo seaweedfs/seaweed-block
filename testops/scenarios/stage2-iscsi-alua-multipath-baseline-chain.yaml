@@ -1,0 +1,285 @@
+# Runner-native Stage 2 iSCSI ALUA + dm-multipath wiring gate.
+#
+# This is the first Kubernetes Stage 2 runner boundary, not the close gate.
+# It proves the alpha K8s path can opt into CSI multipath, expose an RF=3
+# iSCSI topology with one shared IQN, and produce host multipath evidence.
+# Transparent mounted failover without pod recreate remains a later gate.
+
+name: stage2-iscsi-alua-multipath-baseline-chain
+timeout: 28m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: pre_clean
+    actions:
+      - action: pre_run_cleanup
+        node: m02
+        kill_patterns: "blockmaster,blockvolume,blockcsi,iscsi-target"
+        nvme_disconnect: "true"
+        iscsi_logout_prefix: "iqn.2026-05.io.seaweedfs"
+      - action: exec
+        node: m02
+        cmd: "rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-stage2-iscsi-alua-multipath && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-stage2-iscsi-alua-multipath/pin_build /mnt/smb/work/share/g15d-k8s/{{ run_id }}-stage2-iscsi-alua-multipath/demo"
+      - action: exec
+        node: m02
+        cmd: "kubectl -n default delete pod sw-block-demo-reader sw-block-demo-writer --ignore-not-found=true --wait=true --timeout=120s >/dev/null 2>&1 || true; kubectl -n default delete pvc sw-block-demo-pvc --ignore-not-found=true --wait=true --timeout=120s >/dev/null 2>&1 || true; kubectl delete sc sw-block-dynamic --ignore-not-found=true >/dev/null 2>&1 || true; pkill -f 'kubectl.*port-forward.*svc/blockmaste[r]' >/dev/null 2>&1 || true"
+      - action: assert_no_active_iscsi_sessions
+        node: m02
+        iqn_substr: "io.seaweedfs"
+      - action: assert_no_processes
+        node: m02
+        pattern: "[/]blockmaster --|[/]blockvolume --|[/]blockcsi |[/]iscsi-target |^blockmaster |^blockvolume |^blockcsi |^iscsi-target "
+
+  - name: preflight
+    actions:
+      - action: exec
+        node: m02
+        cmd: "cd {{ product_root }} && bash scripts/preflight-k8s-alpha.sh --local-k3s > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-stage2-iscsi-alua-multipath/preflight.txt 2>&1"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-stage2-iscsi-alua-multipath/preflight.txt"
+        pattern: "summary status=PASS"
+        save_as: preflight_count
+      - action: assert_greater
+        actual: "{{ preflight_count }}"
+        threshold: "0"
+
+  - name: host_multipath_prereq
+    actions:
+      - action: exec
+        node: m02
+        cmd: "set -e; B=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-stage2-iscsi-alua-multipath; { echo stage2_protocol=iscsi-alua; command -v iscsiadm >/dev/null && echo command_iscsiadm=present; command -v multipath >/dev/null && echo command_multipath=present; command -v sg_rtpg >/dev/null && echo command_sg_rtpg=present; command -v sg_inq >/dev/null && echo command_sg_inq=present; sudo modprobe iscsi_tcp; sudo modprobe dm_multipath; sudo modprobe scsi_dh_alua; test -d /sys/module/iscsi_tcp && echo module_iscsi_tcp=loaded; test -d /sys/module/dm_multipath && echo module_dm_multipath=loaded; test -d /sys/module/scsi_dh_alua && echo module_scsi_dh_alua=loaded; test -d /run/udev && echo udev_run=present; sudo multipath -t > \"$B/multipath-prereq.config.txt\" 2>&1; sudo multipath -ll > \"$B/multipath-prereq.multipath-ll.txt\" 2>&1 || true; echo multipath_prereq=pass; } > \"$B/multipath-prereq.txt\" 2>&1"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-stage2-iscsi-alua-multipath/multipath-prereq.txt"
+        pattern: "multipath_prereq=pass"
+        save_as: multipath_prereq_count
+      - action: assert_greater
+        actual: "{{ multipath_prereq_count }}"
+        threshold: "0"
+
+  - name: pin_build_alpha_images
+    actions:
+      - action: exec
+        node: m02
+        timeout: 8m
+        cmd: "cd {{ product_root }} && bash scripts/build-alpha-images.sh {{ product_root }}"
+        env.SW_BLOCK_IMPORT_K3S: "1"
+        env.SW_BLOCK_ARTIFACT_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-stage2-iscsi-alua-multipath/pin_build"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-stage2-iscsi-alua-multipath/pin_build/alpha-images.env"
+        pattern: "SW_BLOCK_IMAGE_ID="
+        save_as: sw_block_image_id_count
+      - action: assert_greater
+        actual: "{{ sw_block_image_id_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-stage2-iscsi-alua-multipath/pin_build/alpha-images.env"
+        pattern: "SW_BLOCK_CSI_IMAGE_ID="
+        save_as: sw_block_csi_image_id_count
+      - action: assert_greater
+        actual: "{{ sw_block_csi_image_id_count }}"
+        threshold: "0"
+
+  - name: render_rf3_demo_manifest
+    actions:
+      - action: exec
+        node: m02
+        cmd: "cd {{ product_root }} && sed 's/replicationFactor: \"1\"/replicationFactor: \"3\"/' deploy/k8s/alpha/demo-app-pvc-writer-hold.yaml > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-stage2-iscsi-alua-multipath/demo/demo-app-rf3.yaml"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-stage2-iscsi-alua-multipath/demo/demo-app-rf3.yaml"
+        pattern: "replicationFactor: \"3\""
+        save_as: rf3_manifest_count
+      - action: assert_greater
+        actual: "{{ rf3_manifest_count }}"
+        threshold: "0"
+
+  - name: stage2_multipath_baseline
+    actions:
+      - action: exec
+        node: m02
+        timeout: 16m
+        cmd: "cd {{ product_root }} && bash -c 'set -a; source /mnt/smb/work/share/g15d-k8s/{{ run_id }}-stage2-iscsi-alua-multipath/pin_build/alpha-images.env; set +a; set +e; SW_BLOCK_ARTIFACT_DIR=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-stage2-iscsi-alua-multipath/demo SW_BLOCK_DEMO_APP_MANIFEST=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-stage2-iscsi-alua-multipath/demo/demo-app-rf3.yaml SW_BLOCK_STAGE2_MULTIPATH=1 SW_BLOCK_ALPHA_LOGICAL_SERVERS=3 SW_BLOCK_ALPHA_EXPECTED_SLOTS_PER_VOLUME=3 SW_BLOCK_ALPHA_REPLICATION_ACK=sync-quorum SW_BLOCK_LAUNCHER_STATE_HOSTPATH=/var/lib/sw-block/testops-{{ run_id }}-stage2-iscsi-alua-multipath SW_BLOCK_DEMO_STOP_AFTER=writer-verified bash scripts/run-k8s-demo.sh {{ product_root }}; rc=$?; echo $rc > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-stage2-iscsi-alua-multipath/demo/exit_code.txt; test \"$rc\" -eq 44'"
+      - action: exec
+        node: m02
+        cmd: "B=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-stage2-iscsi-alua-multipath/demo; { echo transparent_failover_claimed=false; echo pod_recreate_path_used_for_baseline=true; echo next_required_gate=mounted_writer_primary_failure_without_pod_recreate; } > \"$B/stage2-claim-boundary.txt\""
+      - action: exec
+        node: m02
+        cmd: "B=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-stage2-iscsi-alua-multipath/demo; echo bounded_waits=writer_mounted_baseline > \"$B/bounded-waits.txt\"; echo close_gate_requires=post_failure_mounted_io_without_pod_recreate >> \"$B/bounded-waits.txt\""
+
+  - name: stage2_wiring_asserts
+    actions:
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-stage2-iscsi-alua-multipath/demo/run.log"
+        pattern: "stage2_multipath=1"
+        save_as: stage2_log_count
+      - action: assert_greater
+        actual: "{{ stage2_log_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-stage2-iscsi-alua-multipath/demo/csi-controller.rendered.yaml"
+        pattern: "--stage2-multipath"
+        save_as: csi_controller_stage2_count
+      - action: assert_greater
+        actual: "{{ csi_controller_stage2_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-stage2-iscsi-alua-multipath/demo/csi-node.rendered.yaml"
+        pattern: "--stage2-multipath"
+        save_as: csi_node_stage2_count
+      - action: assert_greater
+        actual: "{{ csi_node_stage2_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-stage2-iscsi-alua-multipath/demo/generated-blockvolume.yaml"
+        pattern: "--replica-id=r1"
+        save_as: r1_count
+      - action: assert_greater
+        actual: "{{ r1_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-stage2-iscsi-alua-multipath/demo/generated-blockvolume.yaml"
+        pattern: "--replica-id=r2"
+        save_as: r2_count
+      - action: assert_greater
+        actual: "{{ r2_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-stage2-iscsi-alua-multipath/demo/generated-blockvolume.yaml"
+        pattern: "--replica-id=r3"
+        save_as: r3_count
+      - action: assert_greater
+        actual: "{{ r3_count }}"
+        threshold: "0"
+      - action: exec
+        node: m02
+        cmd: "B=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-stage2-iscsi-alua-multipath/demo; grep -o -- '--iscsi-iqn=[^\" ]*' \"$B/generated-blockvolume.yaml\" | sort -u > \"$B/unique-iscsi-iqns.txt\"; test \"$(wc -l < \"$B/unique-iscsi-iqns.txt\")\" -eq 1"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-stage2-iscsi-alua-multipath/demo/blockcsi-node.log"
+        pattern: "multipath=true"
+        save_as: node_multipath_count
+      - action: assert_greater
+        actual: "{{ node_multipath_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-stage2-iscsi-alua-multipath/demo/blockcsi-node.log"
+        pattern: "staged transport=iscsi .* portals=.*127.0.0.1:3260"
+        save_as: node_multipath_portal_3260_count
+      - action: assert_greater
+        actual: "{{ node_multipath_portal_3260_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-stage2-iscsi-alua-multipath/demo/blockcsi-node.log"
+        pattern: "staged transport=iscsi .* portals=.*127.0.0.1:3261"
+        save_as: node_multipath_portal_3261_count
+      - action: assert_greater
+        actual: "{{ node_multipath_portal_3261_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-stage2-iscsi-alua-multipath/demo/blockcsi-node.log"
+        pattern: "staged transport=iscsi .* portals=.*127.0.0.1:3262"
+        save_as: node_multipath_portal_3262_count
+      - action: assert_greater
+        actual: "{{ node_multipath_portal_3262_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-stage2-iscsi-alua-multipath/demo/writer.log"
+        pattern: "/data/demo.bin: OK"
+        save_as: writer_checksum_count
+      - action: assert_greater
+        actual: "{{ writer_checksum_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-stage2-iscsi-alua-multipath/demo/controlled-stop-writer-verified.txt"
+        pattern: "phase=writer-verified"
+        save_as: writer_verified_stop_count
+      - action: assert_greater
+        actual: "{{ writer_verified_stop_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-stage2-iscsi-alua-multipath/demo/sg-rtpg.writer-mounted.txt"
+        pattern: "asymmetric access state"
+        save_as: rtpg_state_count
+      - action: assert_greater
+        actual: "{{ rtpg_state_count }}"
+        threshold: "0"
+      - action: exec
+        node: m02
+        cmd: "test -s /mnt/smb/work/share/g15d-k8s/{{ run_id }}-stage2-iscsi-alua-multipath/demo/multipath.writer-mounted.txt"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-stage2-iscsi-alua-multipath/demo/iscsi-sessions.writer-mounted.txt"
+        pattern: "iqn.2026-05.io.seaweedfs"
+        save_as: writer_mounted_session_count
+      - action: assert_greater
+        actual: "{{ writer_mounted_session_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-stage2-iscsi-alua-multipath/demo/stage2-claim-boundary.txt"
+        pattern: "transparent_failover_claimed=false"
+        save_as: no_false_stage2_claim_count
+      - action: assert_greater
+        actual: "{{ no_false_stage2_claim_count }}"
+        threshold: "0"
+
+  - name: collect_and_cleanup
+    always: true
+    actions:
+      - action: exec
+        node: m02
+        timeout: 3m
+        cmd: "cd {{ product_root }} && bash scripts/uninstall-k8s-alpha.sh {{ product_root }}"
+        env.SW_BLOCK_ARTIFACT_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-stage2-iscsi-alua-multipath/uninstall"
+        env.SW_BLOCK_UNINSTALL_DELETE_ALL_BLOCKVOLUMES: "1"
+      - action: pre_run_cleanup
+        node: m02
+        kill_patterns: "blockmaster,blockvolume,blockcsi,iscsi-target"
+        nvme_disconnect: "true"
+        iscsi_logout_prefix: "iqn.2026-05.io.seaweedfs"
+      - action: exec
+        node: m02
+        cmd: "for map in $(sudo multipath -ll 2>/dev/null | awk '/^[^[:space:]][^ ]*[[:space:]]+\\(.*\\)/{print $1}'); do if sudo multipath -ll \"$map\" 2>/dev/null | grep -q 'io.seaweedfs'; then sudo multipath -f \"$map\" || true; fi; done; sudo rm -rf -- /var/lib/sw-block/testops-{{ run_id }}-stage2-iscsi-alua-multipath; find /var/lib/sw-block -maxdepth 1 -type d -name 'testops-{{ run_id }}-*' -exec sudo rm -rf -- {} + 2>/dev/null || true; pkill -f 'kubectl.*port-forward.*svc/blockmaste[r]' >/dev/null 2>&1 || true"
+      - action: assert_no_active_iscsi_sessions
+        node: m02
+        iqn_substr: "io.seaweedfs"
+      - action: assert_no_processes
+        node: m02
+        pattern: "[/]blockmaster --|[/]blockvolume --|[/]blockcsi |[/]iscsi-target |[/]kubectl .*port-forward .*svc/blockmaste[r]|^blockmaster |^blockvolume |^blockcsi |^iscsi-target "
+      - action: exec
+        node: m02
+        cmd: "test ! -e /var/lib/sw-block/testops-{{ run_id }}-stage2-iscsi-alua-multipath"
+      - action: exec
+        node: m02
+        cmd: "! sudo multipath -ll 2>/dev/null | grep -q 'io.seaweedfs'"
+      - action: collect_path
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-stage2-iscsi-alua-multipath"
+        name: "remote-phases"
+        ignore_error: true

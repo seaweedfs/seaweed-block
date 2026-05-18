@@ -544,6 +544,121 @@ func TestReplicationVolume_OnLocalWrite_Closed_Errors(t *testing.T) {
 	}
 }
 
+func TestReplicationVolume_UpdateReplicaSet_SeedsLiveCursorFromBarrierFrontier(t *testing.T) {
+	const blockSize = 4096
+	primary := storage.NewBlockStore(64, blockSize)
+	replica := storage.NewBlockStore(64, blockSize)
+
+	for i := uint32(0); i < 3; i++ {
+		data := make([]byte, blockSize)
+		data[0] = byte(i + 1)
+		data[1] = 0xA0
+		lsn, err := primary.Write(i, data)
+		if err != nil {
+			t.Fatalf("primary seed write %d: %v", i, err)
+		}
+		if err := replica.ApplyEntry(i, data, lsn); err != nil {
+			t.Fatalf("replica seed apply %d: %v", i, err)
+		}
+	}
+	frontier, err := primary.Sync()
+	if err != nil {
+		t.Fatalf("primary seed sync: %v", err)
+	}
+	if got, err := replica.Sync(); err != nil || got != frontier {
+		t.Fatalf("replica seed sync=(%d,%v), want frontier %d", got, err, frontier)
+	}
+
+	listener, err := transport.NewReplicaListener("127.0.0.1:0", replica)
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener.Serve()
+	t.Cleanup(func() { listener.Stop() })
+
+	v := NewReplicationVolume("vol-promoted", primary)
+	v.SetDurabilityMode(DurabilitySyncQuorum)
+	t.Cleanup(func() { _ = v.Close() })
+	if err := v.UpdateReplicaSet(1, []ReplicaTarget{targetFor("r3", listener.Addr(), 2, 1)}); err != nil {
+		t.Fatalf("UpdateReplicaSet: %v", err)
+	}
+
+	next := make([]byte, blockSize)
+	next[0] = 0x44
+	next[1] = 0x55
+	lsn, err := primary.Write(9, next)
+	if err != nil {
+		t.Fatalf("primary post-promotion write: %v", err)
+	}
+	if lsn != frontier+1 {
+		t.Fatalf("post-promotion lsn=%d want frontier+1=%d", lsn, frontier+1)
+	}
+	if err := v.OnLocalWrite(context.Background(), LocalWrite{LBA: 9, Data: next, LSN: lsn}); err != nil {
+		t.Fatalf("OnLocalWrite after promoted peer install: %v", err)
+	}
+	waitForReplicaLBA(t, replica, 9, 0x44, 0x55, 2*time.Second)
+}
+
+func TestReplicationVolume_UpdateReplicaSet_DegradesPeerBelowLocalFrontier(t *testing.T) {
+	const blockSize = 4096
+	primary := storage.NewBlockStore(64, blockSize)
+	replica := storage.NewBlockStore(64, blockSize)
+
+	for i := uint32(0); i < 3; i++ {
+		data := make([]byte, blockSize)
+		data[0] = byte(i + 1)
+		data[1] = 0xB0
+		lsn, err := primary.Write(i, data)
+		if err != nil {
+			t.Fatalf("primary seed write %d: %v", i, err)
+		}
+		if i < 2 {
+			if err := replica.ApplyEntry(i, data, lsn); err != nil {
+				t.Fatalf("replica partial apply %d: %v", i, err)
+			}
+		}
+	}
+	frontier, err := primary.Sync()
+	if err != nil {
+		t.Fatalf("primary seed sync: %v", err)
+	}
+	if got, err := replica.Sync(); err != nil || got >= frontier {
+		t.Fatalf("replica partial sync=(%d,%v), want below frontier %d", got, err, frontier)
+	}
+
+	listener, err := transport.NewReplicaListener("127.0.0.1:0", replica)
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener.Serve()
+	t.Cleanup(func() { listener.Stop() })
+
+	v := NewReplicationVolume("vol-promoted", primary)
+	v.SetDurabilityMode(DurabilitySyncQuorum)
+	t.Cleanup(func() { _ = v.Close() })
+	if err := v.UpdateReplicaSet(1, []ReplicaTarget{targetFor("r3", listener.Addr(), 2, 1)}); err != nil {
+		t.Fatalf("UpdateReplicaSet: %v", err)
+	}
+	v.mu.Lock()
+	state := v.peers["r3"].State()
+	v.mu.Unlock()
+	if state != ReplicaDegraded {
+		t.Fatalf("peer state=%s want degraded for below-frontier survivor", state)
+	}
+
+	next := make([]byte, blockSize)
+	next[0] = 0x66
+	next[1] = 0x77
+	lsn, err := primary.Write(9, next)
+	if err != nil {
+		t.Fatalf("primary post-promotion write: %v", err)
+	}
+	err = v.OnLocalWrite(context.Background(), LocalWrite{LBA: 9, Data: next, LSN: lsn})
+	if err == nil || !strings.Contains(err.Error(), ErrDurabilityQuorumLost.Error()) {
+		t.Fatalf("OnLocalWrite err=%v, want quorum loss for below-frontier survivor", err)
+	}
+}
+
 // --- Small helpers ---
 
 func waitForReplicaLBA(t *testing.T, replica *storage.BlockStore, lba uint32, want0, want1 byte, timeout time.Duration) {

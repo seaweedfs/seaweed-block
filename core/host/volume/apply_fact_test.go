@@ -17,8 +17,10 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/adapter"
+	"github.com/seaweedfs/seaweed-block/core/engine"
 	"github.com/seaweedfs/seaweed-block/core/replication"
 	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
 )
@@ -66,11 +68,11 @@ func (s *stubAdapter) OnAssignment(info adapter.AssignmentInfo) adapter.ApplyLog
 }
 
 type stubReplication struct {
-	rec              *orderingRecorder
-	callCount        atomic.Int64
-	lastGeneration   uint64
-	lastTargetIDs    []string
-	returnErr        error
+	rec            *orderingRecorder
+	callCount      atomic.Int64
+	lastGeneration uint64
+	lastTargetIDs  []string
+	returnErr      error
 }
 
 func (s *stubReplication) UpdateReplicaSet(generation uint64, targets []replication.ReplicaTarget) error {
@@ -233,6 +235,207 @@ func TestHost_ApplyFact_Supersede_NeverCallsAdapterOrReplication(t *testing.T) {
 	}
 	if h.LastOtherLine().ReplicaId != "r2" {
 		t.Fatalf("recorded wrong replica: got %s want r2", h.LastOtherLine().ReplicaId)
+	}
+}
+
+func TestHost_ApplyFact_SupportingReplica_UsesSelfPeerDescriptorWithoutReplication(t *testing.T) {
+	rec := &orderingRecorder{}
+	h, a, r := newStubbedHost(t, "vol1", "r2", rec)
+	readyCh := make(chan adapter.AssignmentInfo, 1)
+	h.cfg.ReadyMarker = readyCh
+
+	fact := &control.AssignmentFact{
+		VolumeId:        "vol1",
+		ReplicaId:       "r1", // active primary, not self
+		Epoch:           5,
+		EndpointVersion: 2,
+		DataAddr:        "127.0.0.1:1000",
+		CtrlAddr:        "127.0.0.1:1001",
+		Peers: []*control.ReplicaDescriptor{{
+			ReplicaId:       "r2",
+			Epoch:           5,
+			EndpointVersion: 2,
+			DataAddr:        "127.0.0.1:2000",
+			CtrlAddr:        "127.0.0.1:2001",
+		}},
+		PeerSetGeneration: 100,
+	}
+
+	h.applyFact(fact)
+
+	if got := a.callCount.Load(); got != 1 {
+		t.Fatalf("supporting replica should apply self peer lineage once: got %d calls", got)
+	}
+	if got := r.callCount.Load(); got != 0 {
+		t.Fatalf("supporting replica must not install primary fan-out peer set: got %d calls", got)
+	}
+	if h.LastOtherLine() == nil || h.LastOtherLine().ReplicaId != "r1" {
+		t.Fatalf("supporting replica did not record active primary line: %+v", h.LastOtherLine())
+	}
+	if a.lastInfo.VolumeID != "vol1" || a.lastInfo.ReplicaID != "r2" {
+		t.Fatalf("adapter identity: got volume=%q replica=%q want vol1/r2", a.lastInfo.VolumeID, a.lastInfo.ReplicaID)
+	}
+	if a.lastInfo.Epoch != 5 || a.lastInfo.EndpointVersion != 2 {
+		t.Fatalf("adapter lineage: got epoch=%d ev=%d want 5/2", a.lastInfo.Epoch, a.lastInfo.EndpointVersion)
+	}
+	if a.lastInfo.DataAddr != "127.0.0.1:2000" || a.lastInfo.CtrlAddr != "127.0.0.1:2001" {
+		t.Fatalf("adapter addrs: got data=%q ctrl=%q", a.lastInfo.DataAddr, a.lastInfo.CtrlAddr)
+	}
+	seq := rec.snapshot()
+	if len(seq) != 1 || seq[0] != "OnAssignment" {
+		t.Fatalf("supporting replica sequence: got %v want [OnAssignment]", seq)
+	}
+	select {
+	case got := <-readyCh:
+		if got.ReplicaID != "r2" || got.Epoch != 5 || got.EndpointVersion != 2 {
+			t.Fatalf("ready marker identity: %+v", got)
+		}
+	default:
+		t.Fatal("supporting replica did not emit ready marker for durable lineage latch")
+	}
+
+	primaryFact := &control.AssignmentFact{
+		VolumeId:          "vol1",
+		ReplicaId:         "r2",
+		Epoch:             6,
+		EndpointVersion:   3,
+		DataAddr:          "127.0.0.1:3000",
+		CtrlAddr:          "127.0.0.1:3001",
+		PeerSetGeneration: 101,
+	}
+
+	h.applyFact(primaryFact)
+
+	if got := a.callCount.Load(); got != 2 {
+		t.Fatalf("promotion after supporting assignment should apply adapter again: got %d calls", got)
+	}
+	if got := r.callCount.Load(); got != 1 {
+		t.Fatalf("promotion after supporting assignment should install primary peer set: got %d calls", got)
+	}
+	select {
+	case got := <-readyCh:
+		if got.ReplicaID != "r2" || got.Epoch != 6 || got.EndpointVersion != 3 {
+			t.Fatalf("promoted ready marker identity: %+v", got)
+		}
+	default:
+		t.Fatal("supporting marker must not consume primary ready marker")
+	}
+}
+
+func TestHost_ApplyFact_SupportingReplica_InvalidSelfPeerDescriptorStaysSuperseded(t *testing.T) {
+	rec := &orderingRecorder{}
+	h, a, r := newStubbedHost(t, "vol1", "r2", rec)
+
+	fact := &control.AssignmentFact{
+		VolumeId:        "vol1",
+		ReplicaId:       "r1",
+		Epoch:           5,
+		EndpointVersion: 2,
+		Peers: []*control.ReplicaDescriptor{{
+			ReplicaId:       "r2",
+			Epoch:           5,
+			EndpointVersion: 2,
+			DataAddr:        "", // invalid: do not invent local identity
+			CtrlAddr:        "127.0.0.1:2001",
+		}},
+	}
+
+	h.applyFact(fact)
+
+	if got := a.callCount.Load(); got != 0 {
+		t.Fatalf("invalid supporting peer descriptor must not call adapter: got %d calls", got)
+	}
+	if got := r.callCount.Load(); got != 0 {
+		t.Fatalf("invalid supporting peer descriptor must not call replication: got %d calls", got)
+	}
+	if h.LastOtherLine() == nil || h.LastOtherLine().ReplicaId != "r1" {
+		t.Fatalf("invalid supporting peer descriptor should still record active primary line: %+v", h.LastOtherLine())
+	}
+}
+
+func TestHost_ApplyFact_SupportingReplica_MismatchedSelfPeerLineageStaysSuperseded(t *testing.T) {
+	rec := &orderingRecorder{}
+	h, a, r := newStubbedHost(t, "vol1", "r2", rec)
+
+	fact := &control.AssignmentFact{
+		VolumeId:        "vol1",
+		ReplicaId:       "r1",
+		Epoch:           5,
+		EndpointVersion: 2,
+		Peers: []*control.ReplicaDescriptor{{
+			ReplicaId:       "r2",
+			Epoch:           5,
+			EndpointVersion: 3, // newer than the active primary line: reject
+			DataAddr:        "127.0.0.1:2000",
+			CtrlAddr:        "127.0.0.1:2001",
+		}},
+	}
+
+	h.applyFact(fact)
+
+	if got := a.callCount.Load(); got != 0 {
+		t.Fatalf("mismatched supporting peer lineage must not call adapter: got %d calls", got)
+	}
+	if got := r.callCount.Load(); got != 0 {
+		t.Fatalf("mismatched supporting peer lineage must not call replication: got %d calls", got)
+	}
+	if h.LastOtherLine() == nil || h.LastOtherLine().ReplicaId != "r1" {
+		t.Fatalf("mismatched supporting peer lineage should still record active primary line: %+v", h.LastOtherLine())
+	}
+}
+
+func TestHost_ApplyFact_SupportingReplica_ReportsReplicaReadyButNotFrontendPrimary(t *testing.T) {
+	exec := NewHealthyPathExecutor()
+	a := adapter.NewVolumeReplicaAdapter(exec)
+	h := &Host{
+		cfg: Config{
+			VolumeID:  "vol1",
+			ReplicaID: "r2",
+		},
+		log:  newDiscardLogger(),
+		adpt: a,
+	}
+	h.view = NewAdapterProjectionView(a, "vol1", "r2", h)
+	s := NewStatusServer(h.view)
+
+	h.applyFact(&control.AssignmentFact{
+		VolumeId:        "vol1",
+		ReplicaId:       "r1",
+		Epoch:           7,
+		EndpointVersion: 3,
+		Peers: []*control.ReplicaDescriptor{{
+			ReplicaId:       "r2",
+			Epoch:           7,
+			EndpointVersion: 3,
+			DataAddr:        "127.0.0.1:2000",
+			CtrlAddr:        "127.0.0.1:2001",
+		}},
+	})
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if a.Projection().Mode == engine.ModeHealthy {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := a.Projection().Mode; got != engine.ModeHealthy {
+		t.Fatalf("supporting adapter mode=%s want %s; commands=%v", got, engine.ModeHealthy, exec.Commands())
+	}
+
+	body := s.statusProjection()
+	if body.AuthorityRole != AuthorityRoleUnknown {
+		t.Fatalf("supporting authority role=%q want %q", body.AuthorityRole, AuthorityRoleUnknown)
+	}
+	if body.ReplicationRole != ReplicationRoleReady {
+		t.Fatalf("supporting replication role=%q want %q", body.ReplicationRole, ReplicationRoleReady)
+	}
+	if body.FrontendPrimaryReady {
+		t.Fatalf("supporting replica_ready must not become frontend primary: %+v", body)
+	}
+	report := h.buildReport()
+	if len(report.GetSlots()) != 1 || !report.GetSlots()[0].GetReadyForPrimary() {
+		t.Fatalf("supporting replica did not advertise ReadyForPrimary after engine readiness: %+v", report.GetSlots())
 	}
 }
 

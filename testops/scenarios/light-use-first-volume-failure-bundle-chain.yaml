@@ -162,12 +162,12 @@ phases:
 
   - name: final_asserts
     actions:
+      # The controlled stop intentionally leaves blockmaster/blockvolume live so
+      # ops-status can inspect a real target. Process hygiene is asserted after
+      # collect_and_cleanup uninstalls the alpha stack.
       - action: assert_no_active_iscsi_sessions
         node: m02
         iqn_substr: "io.seaweedfs"
-      - action: assert_no_processes
-        node: m02
-        pattern: "[/]blockmaster --|[/]blockvolume --|[/]blockcsi |[/]iscsi-target |^blockmaster |^blockvolume |^blockcsi |^iscsi-target "
 
   - name: collect_and_cleanup
     always: true

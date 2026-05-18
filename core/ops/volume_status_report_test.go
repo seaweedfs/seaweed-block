@@ -71,6 +71,10 @@ func TestBuildVolumeStatusReport_ComposesExistingStatusSurfaces(t *testing.T) {
 				EndpointVersion: 3,
 				Latched:         true,
 				Operational:     true,
+				FrontierKnown:   true,
+				DurableLSN:      53,
+				RetainedLSN:     1,
+				HeadLSN:         53,
 				Evidence:        "recover ok",
 			},
 		},
@@ -126,6 +130,9 @@ func TestBuildVolumeStatusReport_ComposesExistingStatusSurfaces(t *testing.T) {
 	}
 	if len(report.Durable) != 1 || !report.Durable[0].Latched || !report.Durable[0].Operational {
 		t.Fatalf("durable status mismatch: %+v", report.Durable)
+	}
+	if !report.Durable[0].FrontierKnown || report.Durable[0].DurableLSN != 53 || report.Durable[0].HeadLSN != 53 {
+		t.Fatalf("durable frontier mismatch: %+v", report.Durable[0])
 	}
 	if len(report.Residue.HostInitiator.ISCSISessions) != 1 || len(report.Residue.HostInitiator.NVMESubsystems) != 1 {
 		t.Fatalf("residue mismatch: %+v", report.Residue)
@@ -204,7 +211,7 @@ func TestBuildVolumeStatusReport_JSONSchemaShapeIsStable(t *testing.T) {
 			{ReplicaID: "r2", State: "healthy", DataAddr: "127.0.0.1:10001", CtrlAddr: "127.0.0.1:10002", SessionID: 10},
 		},
 		Durable: []durable.VolumeStatus{
-			{VolumeID: "v1", Impl: "smartwal", Path: "/var/lib/sw-block/v1.blk", ReplicaID: "r1", Epoch: 3, EndpointVersion: 4, Latched: true, Operational: true},
+			{VolumeID: "v1", Impl: "smartwal", Path: "/var/lib/sw-block/v1.blk", ReplicaID: "r1", Epoch: 3, EndpointVersion: 4, Latched: true, Operational: true, FrontierKnown: true, DurableLSN: 9, RetainedLSN: 1, HeadLSN: 10},
 		},
 		Residue: ResidueReport{
 			HostInitiator: HostInitiatorResidue{ISCSISessions: []string{}, NVMESubsystems: []string{}},
@@ -269,6 +276,10 @@ func TestBuildVolumeStatusReport_JSONSchemaShapeIsStable(t *testing.T) {
 		"endpoint_version",
 		"latched",
 		"operational",
+		"frontier_known",
+		"durable_lsn",
+		"retained_lsn",
+		"head_lsn",
 		"closed",
 	})
 	assertJSONKeys(t, "residue", asMap(t, doc["residue"]), []string{"host_initiator", "processes", "kubernetes", "storage_paths"})

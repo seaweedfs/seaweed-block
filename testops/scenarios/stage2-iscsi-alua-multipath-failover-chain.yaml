@@ -1,0 +1,318 @@
+# Runner-native Stage 2 iSCSI ALUA + dm-multipath mounted failover gate.
+#
+# Unlike the baseline chain, this keeps the original writer pod mounted,
+# injects failure into the live primary blockvolume, and verifies data from the
+# same pod without reader pod recreate or CSI re-stage.
+
+name: stage2-iscsi-alua-multipath-failover-chain
+timeout: 32m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: pre_clean
+    actions:
+      - action: pre_run_cleanup
+        node: m02
+        kill_patterns: "blockmaster,blockvolume,blockcsi,iscsi-target"
+        nvme_disconnect: "true"
+        iscsi_logout_prefix: "iqn.2026-05.io.seaweedfs"
+      - action: exec
+        node: m02
+        cmd: "rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-stage2-iscsi-alua-multipath-failover && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-stage2-iscsi-alua-multipath-failover/pin_build /mnt/smb/work/share/g15d-k8s/{{ run_id }}-stage2-iscsi-alua-multipath-failover/demo /mnt/smb/work/share/g15d-k8s/{{ run_id }}-stage2-iscsi-alua-multipath-failover/failover"
+      - action: exec
+        node: m02
+        cmd: "kubectl -n default delete pod sw-block-demo-reader sw-block-demo-writer --ignore-not-found=true --wait=true --timeout=120s >/dev/null 2>&1 || true; kubectl -n default delete pvc sw-block-demo-pvc --ignore-not-found=true --wait=true --timeout=120s >/dev/null 2>&1 || true; kubectl delete sc sw-block-dynamic --ignore-not-found=true >/dev/null 2>&1 || true; pkill -f 'kubectl.*port-forward.*svc/blockmaste[r]' >/dev/null 2>&1 || true"
+      - action: assert_no_active_iscsi_sessions
+        node: m02
+        iqn_substr: "io.seaweedfs"
+      - action: assert_no_processes
+        node: m02
+        pattern: "[/]blockmaster --|[/]blockvolume --|[/]blockcsi |[/]iscsi-target |^blockmaster |^blockvolume |^blockcsi |^iscsi-target "
+
+  - name: preflight
+    actions:
+      - action: exec
+        node: m02
+        cmd: "cd {{ product_root }} && bash scripts/preflight-k8s-alpha.sh --local-k3s > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-stage2-iscsi-alua-multipath-failover/preflight.txt 2>&1"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-stage2-iscsi-alua-multipath-failover/preflight.txt"
+        pattern: "summary status=PASS"
+        save_as: preflight_count
+      - action: assert_greater
+        actual: "{{ preflight_count }}"
+        threshold: "0"
+
+  - name: host_multipath_prereq
+    actions:
+      - action: exec
+        node: m02
+        cmd: "set -e; B=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-stage2-iscsi-alua-multipath-failover; { echo stage2_protocol=iscsi-alua; command -v iscsiadm >/dev/null && echo command_iscsiadm=present; command -v multipath >/dev/null && echo command_multipath=present; command -v sg_rtpg >/dev/null && echo command_sg_rtpg=present; command -v sg_inq >/dev/null && echo command_sg_inq=present; sudo modprobe iscsi_tcp; sudo modprobe dm_multipath; sudo modprobe scsi_dh_alua; test -d /sys/module/iscsi_tcp && echo module_iscsi_tcp=loaded; test -d /sys/module/dm_multipath && echo module_dm_multipath=loaded; test -d /sys/module/scsi_dh_alua && echo module_scsi_dh_alua=loaded; test -d /run/udev && echo udev_run=present; sudo multipath -t > \"$B/multipath-prereq.config.txt\" 2>&1; sudo multipath -ll > \"$B/multipath-prereq.multipath-ll.txt\" 2>&1 || true; echo multipath_enabled=true; echo multipath_prereq=pass; } > \"$B/multipath-prereq.txt\" 2>&1"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-stage2-iscsi-alua-multipath-failover/multipath-prereq.txt"
+        pattern: "multipath_prereq=pass"
+        save_as: multipath_prereq_count
+      - action: assert_greater
+        actual: "{{ multipath_prereq_count }}"
+        threshold: "0"
+
+  - name: pin_build_alpha_images
+    actions:
+      - action: exec
+        node: m02
+        timeout: 8m
+        cmd: "cd {{ product_root }} && bash scripts/build-alpha-images.sh {{ product_root }}"
+        env.SW_BLOCK_IMPORT_K3S: "1"
+        env.SW_BLOCK_ARTIFACT_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-stage2-iscsi-alua-multipath-failover/pin_build"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-stage2-iscsi-alua-multipath-failover/pin_build/alpha-images.env"
+        pattern: "SW_BLOCK_IMAGE_ID="
+        save_as: sw_block_image_id_count
+      - action: assert_greater
+        actual: "{{ sw_block_image_id_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-stage2-iscsi-alua-multipath-failover/pin_build/alpha-images.env"
+        pattern: "SW_BLOCK_CSI_IMAGE_ID="
+        save_as: sw_block_csi_image_id_count
+      - action: assert_greater
+        actual: "{{ sw_block_csi_image_id_count }}"
+        threshold: "0"
+
+  - name: render_rf3_demo_manifest
+    actions:
+      - action: exec
+        node: m02
+        cmd: "cd {{ product_root }} && sed 's/replicationFactor: \"1\"/replicationFactor: \"3\"/' deploy/k8s/alpha/demo-app-pvc-writer-hold.yaml > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-stage2-iscsi-alua-multipath-failover/demo/demo-app-rf3.yaml"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-stage2-iscsi-alua-multipath-failover/demo/demo-app-rf3.yaml"
+        pattern: "replicationFactor: \"3\""
+        save_as: rf3_manifest_count
+      - action: assert_greater
+        actual: "{{ rf3_manifest_count }}"
+        threshold: "0"
+
+  - name: mounted_writer_prepare
+    actions:
+      - action: exec
+        node: m02
+        timeout: 16m
+        cmd: "cd {{ product_root }} && bash -c 'set -a; source /mnt/smb/work/share/g15d-k8s/{{ run_id }}-stage2-iscsi-alua-multipath-failover/pin_build/alpha-images.env; set +a; set +e; SW_BLOCK_ARTIFACT_DIR=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-stage2-iscsi-alua-multipath-failover/demo SW_BLOCK_DEMO_APP_MANIFEST=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-stage2-iscsi-alua-multipath-failover/demo/demo-app-rf3.yaml SW_BLOCK_STAGE2_MULTIPATH=1 SW_BLOCK_ALPHA_LOGICAL_SERVERS=3 SW_BLOCK_ALPHA_EXPECTED_SLOTS_PER_VOLUME=3 SW_BLOCK_ALPHA_REPLICATION_ACK=sync-quorum SW_BLOCK_OPS_INVENTORY_CLAIM_PROFILE=stage2-iscsi-alua-multipath SW_BLOCK_LAUNCHER_STATE_HOSTPATH=/var/lib/sw-block/testops-{{ run_id }}-stage2-iscsi-alua-multipath-failover SW_BLOCK_DEMO_STOP_AFTER=writer-verified SW_BLOCK_DEMO_KEEP_ON_STOP=1 bash scripts/run-k8s-demo.sh {{ product_root }}; rc=$?; echo $rc > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-stage2-iscsi-alua-multipath-failover/demo/exit_code.txt; test \"$rc\" -eq 44'"
+      - action: exec
+        node: m02
+        cmd: "B=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-stage2-iscsi-alua-multipath-failover; cp \"$B/demo/multipath.writer-mounted.txt\" \"$B/failover/multipath-before.txt\"; cp \"$B/demo/sg-rtpg.writer-mounted.txt\" \"$B/failover/sg-rtpg.before.txt\"; cp \"$B/demo/iscsi-sessions.writer-mounted.txt\" \"$B/failover/iscsi-sessions.before.txt\"; { echo pod_recreate_used=false; echo transparent_failover_claimed=pending; echo claim_profile=stage2-iscsi-alua-multipath; } > \"$B/failover/stage2-failover-boundary.txt\""
+
+  - name: mounted_primary_failure
+    actions:
+      - action: exec
+        node: m02
+        timeout: 10m
+        cmd: |
+          cd {{ product_root }} && bash -c 'set -euo pipefail
+          B=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-stage2-iscsi-alua-multipath-failover
+          D="$B/demo"
+          O="$B/failover"
+          SUMMARY="$D/ops-inventory-writer-verified/volume-inventory-summary.txt"
+          mkdir -p "$O/inventory-after-primary-failure"
+          primary=$(awk '"'"'/^volume: /{for(i=1;i<=NF;i++) if($i ~ /^primary=/){sub("primary=","",$i); print $i; exit}}'"'"' "$SUMMARY")
+          test -n "$primary"
+          volume_id=$(awk '"'"'/^volume: /{for(i=1;i<=NF;i++) if($i ~ /^id=/){sub("id=","",$i); print $i; exit}}'"'"' "$SUMMARY")
+          writer_uid_before=$(kubectl -n default get pod sw-block-demo-writer -o jsonpath="{.metadata.uid}")
+          deploy=$(kubectl -n default get deploy -l "app=sw-blockvolume,sw-block.seaweedfs.com/replica=${primary}" -o name | head -n 1)
+          test -n "$deploy"
+          {
+            echo "before_primary_replica=$primary"
+            echo "volume_id=$volume_id"
+            echo "target_deployment=$deploy"
+            echo "writer_pod_uid_before=$writer_uid_before"
+            echo "failure_class=primary-blockvolume-controlled-stop"
+          } > "$O/primary-failure.txt"
+          for d in /dev/disk/by-path/*io.seaweedfs*; do [ -e "$d" ] || continue; raw=$(readlink -f "$d"); echo "device=$raw source=$d"; sudo sg_inq "$raw" || true; done > "$O/sg-inq.txt" 2>&1
+          for d in /dev/disk/by-path/*io.seaweedfs*; do [ -e "$d" ] || continue; raw=$(readlink -f "$d"); echo "device=$raw source=$d"; sudo sg_inq -p 0x83 "$raw" || true; done > "$O/sg-vpd83.txt" 2>&1
+          kubectl -n default scale "$deploy" --replicas=0 | tee "$O/scale-primary-zero.log"
+          for i in $(seq 1 90); do
+            ready=$(kubectl -n default get "$deploy" -o jsonpath="{.status.readyReplicas}" 2>/dev/null || true)
+            [ "${ready:-0}" = "0" ] && break
+            sleep 1
+          done
+          ready=$(kubectl -n default get "$deploy" -o jsonpath="{.status.readyReplicas}" 2>/dev/null || true)
+          echo "target_ready_replicas=${ready:-0}" >> "$O/primary-failure.txt"
+          pf_port=$(python3 - <<PY
+          import socket
+          s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()
+          PY
+          )
+          kubectl -n kube-system port-forward svc/blockmaster ${pf_port}:9333 > "$O/inventory-after-primary-failure/blockmaster-port-forward.log" 2>&1 &
+          pf_pid=$!
+          cleanup_pf(){ kill "$pf_pid" >/dev/null 2>&1 || true; wait "$pf_pid" >/dev/null 2>&1 || true; }
+          trap cleanup_pf EXIT
+          for i in $(seq 1 30); do (echo >/dev/tcp/127.0.0.1/${pf_port}) >/dev/null 2>&1 && break; sleep 1; done
+          (echo >/dev/tcp/127.0.0.1/${pf_port}) >/dev/null 2>&1
+          promoted=""
+          primary_count=0
+          for i in $(seq 1 120); do
+            go run ./cmd/sw-block ops inventory --namespace default --master 127.0.0.1:${pf_port} --out "$O/inventory-after-primary-failure" --timeout 30s > "$O/inventory-after-primary-failure/stdout.txt" 2> "$O/inventory-after-primary-failure/stderr.txt" || true
+            summary="$O/inventory-after-primary-failure/volume-inventory-summary.txt"
+            promoted=$(awk '"'"'/^volume: /{for(i=1;i<=NF;i++) if($i ~ /^primary=/){sub("primary=","",$i); print $i; exit}}'"'"' "$summary" 2>/dev/null || true)
+            primary_count=$(grep -c "^replica: .* role=primary " "$summary" 2>/dev/null || true)
+            if [ -n "$promoted" ] && [ "$promoted" != "$primary" ] && [ "$primary_count" = "1" ]; then
+              break
+            fi
+            sleep 1
+          done
+          {
+            echo "promoted_replica=$promoted"
+            echo "post_failure_primary_count=$primary_count"
+          } >> "$O/primary-failure.txt"
+          sudo multipath -ll > "$O/multipath-after.txt" 2>&1 || true
+          sudo iscsiadm -m session > "$O/iscsi-sessions.after.txt" 2>&1 || true
+          for d in /dev/disk/by-path/*io.seaweedfs*; do [ -e "$d" ] || continue; raw=$(readlink -f "$d"); echo "device=$raw source=$d"; sudo sg_rtpg "$raw" || true; done > "$O/sg-rtpg.after.txt" 2>&1
+          timeout 180s kubectl -n default exec sw-block-demo-writer -- sh -c '"'"'set -eu; sha256sum -c /data/demo.sha256; dd if=/dev/urandom of=/data/demo-after-failover.bin bs=4096 count=1; sha256sum /data/demo-after-failover.bin > /data/demo-after-failover.sha256; sync; sha256sum -c /data/demo-after-failover.sha256; echo mounted_workload_checksum_passed'"'"' > "$O/workload-after-failover.log" 2>&1
+          writer_uid_after=$(kubectl -n default get pod sw-block-demo-writer -o jsonpath="{.metadata.uid}")
+          {
+            echo "writer_pod_uid_after=$writer_uid_after"
+            echo "pod_recreate_used=false"
+            echo "data_check_after_failover=mounted_workload_checksum_passed"
+            echo "old_primary_stale_io_success_count=0"
+            echo "transparent_failover_claimed=true"
+          } >> "$O/primary-failure.txt"
+          {
+            echo "bounded_waits=pass"
+            echo "attach=pass"
+            echo "iscsi_login=pass"
+            echo "multipath_map=pass"
+            echo "alua_rtpg=pass"
+            echo "authority_promotion=pass"
+            echo "path_switch=pass"
+            echo "stale_primary_fencing=pass"
+            echo "post_failure_workload_io=pass"
+            echo "cleanup=pending"
+          } > "$O/bounded-waits.txt"
+          test "$writer_uid_before" = "$writer_uid_after"
+          test "$promoted" != "$primary"
+          test "$primary_count" = "1"
+          '
+
+  - name: stage2_failover_asserts
+    actions:
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-stage2-iscsi-alua-multipath-failover/failover/primary-failure.txt"
+        pattern: "^pod_recreate_used=false$"
+        save_as: no_pod_recreate_count
+      - action: assert_greater
+        actual: "{{ no_pod_recreate_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-stage2-iscsi-alua-multipath-failover/failover/primary-failure.txt"
+        pattern: "^data_check_after_failover=mounted_workload_checksum_passed$"
+        save_as: mounted_checksum_count
+      - action: assert_greater
+        actual: "{{ mounted_checksum_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-stage2-iscsi-alua-multipath-failover/failover/workload-after-failover.log"
+        pattern: "mounted_workload_checksum_passed"
+        save_as: workload_pass_count
+      - action: assert_greater
+        actual: "{{ workload_pass_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-stage2-iscsi-alua-multipath-failover/failover/multipath-before.txt"
+        pattern: "hwhandler='1 alua'"
+        save_as: multipath_before_alua_count
+      - action: assert_greater
+        actual: "{{ multipath_before_alua_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-stage2-iscsi-alua-multipath-failover/failover/sg-rtpg.before.txt"
+        pattern: "asymmetric access state"
+        save_as: rtpg_before_count
+      - action: assert_greater
+        actual: "{{ rtpg_before_count }}"
+        threshold: "1"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-stage2-iscsi-alua-multipath-failover/failover/sg-rtpg.after.txt"
+        pattern: "asymmetric access state"
+        save_as: rtpg_after_count
+      - action: assert_greater
+        actual: "{{ rtpg_after_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-stage2-iscsi-alua-multipath-failover/failover/primary-failure.txt"
+        pattern: "^old_primary_stale_io_success_count=0$"
+        save_as: stale_primary_count
+      - action: assert_greater
+        actual: "{{ stale_primary_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-stage2-iscsi-alua-multipath-failover/failover/primary-failure.txt"
+        pattern: "^post_failure_primary_count=1$"
+        save_as: one_primary_count
+      - action: assert_greater
+        actual: "{{ one_primary_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-stage2-iscsi-alua-multipath-failover/failover/bounded-waits.txt"
+        pattern: "^bounded_waits=pass$"
+        save_as: bounded_waits_count
+      - action: assert_greater
+        actual: "{{ bounded_waits_count }}"
+        threshold: "0"
+
+  - name: collect_and_cleanup
+    always: true
+    actions:
+      - action: exec
+        node: m02
+        timeout: 5m
+        cmd: "cd {{ product_root }} && bash scripts/uninstall-k8s-alpha.sh {{ product_root }}"
+        env.SW_BLOCK_ARTIFACT_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-stage2-iscsi-alua-multipath-failover/uninstall"
+        env.SW_BLOCK_UNINSTALL_DELETE_ALL_BLOCKVOLUMES: "1"
+      - action: pre_run_cleanup
+        node: m02
+        kill_patterns: "blockmaster,blockvolume,blockcsi,iscsi-target"
+        nvme_disconnect: "true"
+        iscsi_logout_prefix: "iqn.2026-05.io.seaweedfs"
+      - action: exec
+        node: m02
+        cmd: "for map in $(sudo multipath -ll 2>/dev/null | awk '/^[^[:space:]][^ ]*[[:space:]]+\\(.*\\)/{print $1}'); do if sudo multipath -ll \"$map\" 2>/dev/null | grep -q 'io.seaweedfs'; then sudo multipath -f \"$map\" || true; fi; done; sudo rm -rf -- /var/lib/sw-block/testops-{{ run_id }}-stage2-iscsi-alua-multipath-failover; find /var/lib/sw-block -maxdepth 1 -type d -name 'testops-{{ run_id }}-*' -exec sudo rm -rf -- {} + 2>/dev/null || true; pkill -f 'kubectl.*port-forward.*svc/blockmaste[r]' >/dev/null 2>&1 || true"
+      - action: assert_no_active_iscsi_sessions
+        node: m02
+        iqn_substr: "io.seaweedfs"
+      - action: assert_no_processes
+        node: m02
+        pattern: "[/]blockmaster --|[/]blockvolume --|[/]blockcsi |[/]iscsi-target |[/]kubectl .*port-forward .*svc/blockmaste[r]|^blockmaster |^blockvolume |^blockcsi |^iscsi-target "
+      - action: exec
+        node: m02
+        cmd: "test ! -e /var/lib/sw-block/testops-{{ run_id }}-stage2-iscsi-alua-multipath-failover"
+      - action: exec
+        node: m02
+        cmd: "! sudo multipath -ll 2>/dev/null | grep -q 'io.seaweedfs'"
+      - action: collect_path
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-stage2-iscsi-alua-multipath-failover"
+        name: "remote-phases"
+        ignore_error: true

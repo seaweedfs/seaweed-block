@@ -65,6 +65,41 @@ func TestParseFlags_ClusterSpecOptional(t *testing.T) {
 	}
 }
 
+func TestParseFlags_LauncherExternalStatusOptional(t *testing.T) {
+	f, err := parseFlags([]string{
+		"--authority-store", "authority-dir",
+		"--lifecycle-store", "lifecycle-dir",
+		"--launcher-status",
+		"--launcher-external-status",
+	})
+	if err != nil {
+		t.Fatalf("parseFlags: %v", err)
+	}
+	if !f.launcherStatus || !f.launcherExternalStatus {
+		t.Fatalf("launcher status flags = %v/%v want true/true", f.launcherStatus, f.launcherExternalStatus)
+	}
+}
+
+func TestParseFlags_LauncherExternalISCSIRequiresCHAP(t *testing.T) {
+	if _, err := parseFlags([]string{
+		"--authority-store", "authority-dir",
+		"--launcher-external-iscsi",
+	}); err == nil {
+		t.Fatal("expected --launcher-external-iscsi without CHAP secret to fail")
+	}
+	f, err := parseFlags([]string{
+		"--authority-store", "authority-dir",
+		"--launcher-external-iscsi",
+		"--launcher-iscsi-chap-secret-name", "sw-block-iscsi-chap",
+	})
+	if err != nil {
+		t.Fatalf("parseFlags with CHAP: %v", err)
+	}
+	if !f.launcherExternalISCSI || f.launcherCHAPSecretName != "sw-block-iscsi-chap" {
+		t.Fatalf("external iscsi flags = %v/%q", f.launcherExternalISCSI, f.launcherCHAPSecretName)
+	}
+}
+
 func TestBlockmasterBareTopologyRegistersVolumeControlServices(t *testing.T) {
 	h, err := master.New(master.Config{
 		AuthorityStoreDir: t.TempDir(),

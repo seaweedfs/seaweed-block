@@ -6,7 +6,9 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
+	"time"
 
 	csipb "github.com/container-storage-interface/spec/lib/go/csi"
 	"google.golang.org/grpc/codes"
@@ -21,13 +23,19 @@ const (
 	targetFile     = ".target"
 )
 
+var (
+	stage2MultipathPublishWait = 90 * time.Second
+	stage2MultipathPublishPoll = time.Second
+)
+
 type ISCSIUtil interface {
 	Discovery(ctx context.Context, portal string) error
 	ConfigureCHAP(ctx context.Context, iqn, portal string, auth ISCSIAuth) error
 	Login(ctx context.Context, iqn, portal string) error
 	Logout(ctx context.Context, iqn string) error
-	GetDeviceByIQN(ctx context.Context, iqn string) (string, error)
-	IsLoggedIn(ctx context.Context, iqn string) (bool, error)
+	GetDeviceByIQN(ctx context.Context, iqn, portal string) (string, error)
+	GetMultipathDeviceByIQN(ctx context.Context, iqn string, minPaths int) (string, error)
+	IsLoggedIn(ctx context.Context, iqn, portal string) (bool, error)
 	RescanDevice(ctx context.Context, iqn string) error
 }
 
@@ -53,6 +61,8 @@ type MountUtil interface {
 type stagedVolumeInfo struct {
 	iqn         string
 	iscsiAddr   string
+	iscsiAddrs  []string
+	multipath   bool
 	nqn         string
 	nvmeAddr    string
 	transport   string
@@ -67,6 +77,8 @@ type NodeServer struct {
 	iscsiUtil ISCSIUtil
 	nvmeUtil  NVMeUtil
 	mountUtil MountUtil
+	lookup    PublishTargetLookup
+	events    EventReporter
 	logger    *log.Logger
 
 	stagedMu sync.Mutex
@@ -74,12 +86,14 @@ type NodeServer struct {
 }
 
 type NodeConfig struct {
-	NodeID    string
-	IQNPrefix string
-	ISCSIUtil ISCSIUtil
-	NVMeUtil  NVMeUtil
-	MountUtil MountUtil
-	Logger    *log.Logger
+	NodeID        string
+	IQNPrefix     string
+	ISCSIUtil     ISCSIUtil
+	NVMeUtil      NVMeUtil
+	MountUtil     MountUtil
+	Lookup        PublishTargetLookup
+	EventReporter EventReporter
+	Logger        *log.Logger
 }
 
 func NewNodeServer(cfg NodeConfig) *NodeServer {
@@ -93,6 +107,8 @@ func NewNodeServer(cfg NodeConfig) *NodeServer {
 		iscsiUtil: cfg.ISCSIUtil,
 		nvmeUtil:  cfg.NVMeUtil,
 		mountUtil: cfg.MountUtil,
+		lookup:    cfg.Lookup,
+		events:    cfg.EventReporter,
 		logger:    lg,
 		staged:    make(map[string]*stagedVolumeInfo),
 	}
@@ -136,13 +152,27 @@ func (s *NodeServer) stageISCSI(ctx context.Context, req *csipb.NodeStageVolumeR
 	if s.iscsiUtil == nil {
 		return nil, status.Error(codes.FailedPrecondition, "iSCSI attach utility is not configured")
 	}
-	portal, iqn := iscsiFromContext(req.GetPublishContext())
+	publish := s.refreshPublishContext(ctx, volumeID, req.GetPublishContext())
+	publishContext := publish.Context
+	multipathRequested := iscsiMultipathFromContext(req.GetPublishContext()) || iscsiMultipathFromContext(req.GetVolumeContext())
+	if multipathRequested || iscsiMultipathFromContext(publishContext) {
+		publish = s.waitForISCSIMultipathPublishContext(ctx, volumeID, publish, 2)
+		publishContext = publish.Context
+	}
+	if multipathRequested && !iscsiMultipathFromContext(publishContext) {
+		publishContext = cloneStringMap(publishContext)
+		publishContext["stage2_multipath"] = "true"
+		publish.Context = publishContext
+	}
+	portal, iqn := iscsiFromContext(publishContext)
+	portals := iscsiPortalsFromContext(publishContext)
 	auth := iscsiAuthFromContext(req.GetSecrets())
 	if auth == (ISCSIAuth{}) {
-		auth = iscsiAuthFromContext(req.GetPublishContext())
+		auth = iscsiAuthFromContext(publishContext)
 	}
 	if portal == "" || iqn == "" {
 		portal, iqn = iscsiFromContext(req.GetVolumeContext())
+		portals = iscsiPortalsFromContext(req.GetVolumeContext())
 		if auth == (ISCSIAuth{}) {
 			auth = iscsiAuthFromContext(req.GetVolumeContext())
 		}
@@ -150,28 +180,41 @@ func (s *NodeServer) stageISCSI(ctx context.Context, req *csipb.NodeStageVolumeR
 	if portal == "" || iqn == "" {
 		return nil, status.Error(codes.FailedPrecondition, "no iSCSI publish target")
 	}
+	if len(portals) == 0 {
+		portals = []string{portal}
+	}
+	multipath := iscsiMultipathFromContext(publishContext)
+	if !multipath {
+		multipath = iscsiMultipathFromContext(req.GetVolumeContext())
+	}
+	if multipath && len(portals) < 2 {
+		return nil, status.Errorf(codes.FailedPrecondition, "iSCSI multipath requires at least two portals, got %d", len(portals))
+	}
 	if err := validateISCSIAuth(auth); err != nil {
 		return nil, err
 	}
 
-	loggedIn, err := s.iscsiUtil.IsLoggedIn(ctx, iqn)
-	if err != nil {
-		return nil, status.Errorf(codes.Internal, "check iscsi login: %v", err)
-	}
-	if loggedIn && !s.hasStagedIdentity(volumeID, stagingPath) {
-		return nil, status.Errorf(codes.FailedPrecondition, "iSCSI session for %q is already logged in without staged volume identity", iqn)
-	}
 	loginStarted := false
-	if !loggedIn {
-		if err := s.iscsiUtil.Discovery(ctx, portal); err != nil {
+	for _, p := range portals {
+		loggedIn, err := s.iscsiUtil.IsLoggedIn(ctx, iqn, p)
+		if err != nil {
+			return nil, status.Errorf(codes.Internal, "check iscsi login: %v", err)
+		}
+		if loggedIn && !s.hasStagedIdentity(volumeID, stagingPath) {
+			return nil, status.Errorf(codes.FailedPrecondition, "iSCSI session for %q at %s is already logged in without staged volume identity", iqn, p)
+		}
+		if loggedIn {
+			continue
+		}
+		if err := s.iscsiUtil.Discovery(ctx, p); err != nil {
 			return nil, status.Errorf(codes.Internal, "iscsi discovery: %v", err)
 		}
 		if auth.Secret != "" {
-			if err := s.iscsiUtil.ConfigureCHAP(ctx, iqn, portal, auth); err != nil {
+			if err := s.iscsiUtil.ConfigureCHAP(ctx, iqn, p, auth); err != nil {
 				return nil, status.Errorf(codes.Internal, "iscsi chap config: %v", err)
 			}
 		}
-		if err := s.iscsiUtil.Login(ctx, iqn, portal); err != nil {
+		if err := s.iscsiUtil.Login(ctx, iqn, p); err != nil {
 			return nil, status.Errorf(codes.Internal, "iscsi login: %v", err)
 		}
 		loginStarted = true
@@ -184,7 +227,13 @@ func (s *NodeServer) stageISCSI(ctx context.Context, req *csipb.NodeStageVolumeR
 		}
 	}()
 
-	device, err := s.iscsiUtil.GetDeviceByIQN(ctx, iqn)
+	device := ""
+	var err error
+	if multipath {
+		device, err = s.iscsiUtil.GetMultipathDeviceByIQN(ctx, iqn, len(portals))
+	} else {
+		device, err = s.iscsiUtil.GetDeviceByIQN(ctx, iqn, portal)
+	}
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "get device: %v", err)
 	}
@@ -215,13 +264,17 @@ func (s *NodeServer) stageISCSI(ctx context.Context, req *csipb.NodeStageVolumeR
 	s.staged[volumeID] = &stagedVolumeInfo{
 		iqn:         iqn,
 		iscsiAddr:   portal,
+		iscsiAddrs:  append([]string(nil), portals...),
+		multipath:   multipath,
 		transport:   transportISCSI,
 		fsType:      fsType,
 		stagingPath: stagingPath,
 	}
 	s.stagedMu.Unlock()
 
+	s.logger.Printf("NodeStageVolume: %s staged transport=iscsi portal=%s portals=%s target=%s multipath=%v staging=%s", volumeID, portal, strings.Join(portals, ","), iqn, multipath, stagingPath)
 	success = true
+	s.reportCSIReattachObserved(ctx, volumeID, transportISCSI, portal, publish)
 	return &csipb.NodeStageVolumeResponse{}, nil
 }
 
@@ -229,7 +282,9 @@ func (s *NodeServer) stageNVMe(ctx context.Context, req *csipb.NodeStageVolumeRe
 	if s.nvmeUtil == nil {
 		return nil, status.Error(codes.FailedPrecondition, "NVMe attach utility is not configured")
 	}
-	addr, nqn := nvmeFromContext(req.GetPublishContext())
+	publish := s.refreshPublishContext(ctx, volumeID, req.GetPublishContext())
+	publishContext := publish.Context
+	addr, nqn := nvmeFromContext(publishContext)
 	if addr == "" || nqn == "" {
 		addr, nqn = nvmeFromContext(req.GetVolumeContext())
 	}
@@ -294,8 +349,47 @@ func (s *NodeServer) stageNVMe(ctx context.Context, req *csipb.NodeStageVolumeRe
 	}
 	s.stagedMu.Unlock()
 
+	s.logger.Printf("NodeStageVolume: %s staged transport=nvme portal=%s target=%s staging=%s", volumeID, addr, nqn, stagingPath)
 	success = true
+	s.reportCSIReattachObserved(ctx, volumeID, transportNVMe, addr, publish)
 	return &csipb.NodeStageVolumeResponse{}, nil
+}
+
+func (s *NodeServer) reportCSIReattachObserved(ctx context.Context, volumeID, transport, targetAddr string, publish publishContextResult) {
+	if s.events == nil {
+		return
+	}
+	event := ClusterEvent{
+		VolumeID:    volumeID,
+		NodeName:    s.nodeID,
+		Type:        EventTypeCSIReattachObserved,
+		Severity:    EventSeverityInfo,
+		Reason:      EventTypeCSIReattachObserved,
+		NewValue:    targetAddr,
+		Message:     fmt.Sprintf("CSI staged %s volume on node %s", transport, s.nodeID),
+		EvidenceRef: "csi-node",
+	}
+	if publish.HasTarget {
+		target := publish.Target
+		event.ReplicaID = target.ReplicaID
+		event.Epoch = target.Epoch
+		event.EndpointVersion = target.EndpointVersion
+		switch target.Protocol {
+		case ProtocolISCSI:
+			if target.ISCSIAddr != "" {
+				event.NewValue = target.ISCSIAddr
+			}
+		case ProtocolNVMe:
+			if target.NVMeAddr != "" {
+				event.NewValue = target.NVMeAddr
+			}
+		}
+	}
+	reportCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := s.events.ReportEvent(reportCtx, event); err != nil {
+		s.logger.Printf("NodeStageVolume: %s report %s failed: %v (non-fatal)", volumeID, EventTypeCSIReattachObserved, err)
+	}
 }
 
 func (s *NodeServer) NodeUnstageVolume(ctx context.Context, req *csipb.NodeUnstageVolumeRequest) (*csipb.NodeUnstageVolumeResponse, error) {
@@ -449,7 +543,44 @@ func iscsiFromContext(ctx map[string]string) (portal, iqn string) {
 	if ctx == nil {
 		return "", ""
 	}
+	portals := iscsiPortalsFromContext(ctx)
+	if len(portals) > 0 {
+		return portals[0], ctx["iqn"]
+	}
 	return ctx["iscsiAddr"], ctx["iqn"]
+}
+
+func iscsiPortalsFromContext(ctx map[string]string) []string {
+	if ctx == nil {
+		return nil
+	}
+	raw := ctx["iscsiAddrs"]
+	if raw == "" {
+		raw = ctx["iscsiAddr"]
+	}
+	var out []string
+	seen := map[string]bool{}
+	for _, part := range strings.Split(raw, ",") {
+		portal := strings.TrimSpace(part)
+		if portal == "" || seen[portal] {
+			continue
+		}
+		seen[portal] = true
+		out = append(out, portal)
+	}
+	return out
+}
+
+func iscsiMultipathFromContext(ctx map[string]string) bool {
+	if ctx == nil {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(ctx["stage2_multipath"])) {
+	case "1", "true", "yes", "required":
+		return true
+	default:
+		return false
+	}
 }
 
 func nvmeFromContext(ctx map[string]string) (addr, nqn string) {
@@ -487,6 +618,79 @@ func iscsiAuthFromContext(ctx map[string]string) ISCSIAuth {
 		Username: ctx["chapUsername"],
 		Secret:   ctx["chapSecret"],
 	}
+}
+
+type publishContextResult struct {
+	Context   map[string]string
+	Target    PublishTarget
+	HasTarget bool
+}
+
+func (s *NodeServer) refreshPublishContext(ctx context.Context, volumeID string, fallback map[string]string) publishContextResult {
+	result := publishContextResult{Context: fallback}
+	if s.lookup == nil || volumeID == "" {
+		return result
+	}
+	target, err := s.lookup.LookupPublishTarget(ctx, volumeID, s.nodeID)
+	if err != nil {
+		s.logger.Printf("NodeStageVolume: %s publish target refresh failed: %v", volumeID, err)
+		return result
+	}
+	refreshed := publishContext(target)
+	if len(refreshed) == 0 {
+		s.logger.Printf("NodeStageVolume: %s publish target refresh returned no attachable frontend", volumeID)
+		return result
+	}
+	return publishContextResult{Context: refreshed, Target: target, HasTarget: true}
+}
+
+func (s *NodeServer) waitForISCSIMultipathPublishContext(ctx context.Context, volumeID string, current publishContextResult, minPortals int) publishContextResult {
+	if hasISCSIMultipathPortals(current.Context, minPortals) {
+		return current
+	}
+	if s.lookup == nil || volumeID == "" {
+		return current
+	}
+	deadline := time.NewTimer(stage2MultipathPublishWait)
+	defer deadline.Stop()
+	ticker := time.NewTicker(stage2MultipathPublishPoll)
+	defer ticker.Stop()
+
+	for {
+		target, err := s.lookup.LookupPublishTarget(ctx, volumeID, s.nodeID)
+		if err != nil {
+			s.logger.Printf("NodeStageVolume: %s multipath publish target wait failed: %v", volumeID, err)
+		} else if refreshed := publishContext(target); len(refreshed) > 0 {
+			current = publishContextResult{Context: refreshed, Target: target, HasTarget: true}
+			if hasISCSIMultipathPortals(current.Context, minPortals) {
+				s.logger.Printf("NodeStageVolume: %s multipath publish target ready portals=%s", volumeID, strings.Join(iscsiPortalsFromContext(current.Context), ","))
+				return current
+			}
+			if iscsiMultipathFromContext(current.Context) {
+				s.logger.Printf("NodeStageVolume: %s waiting for multipath publish target portals=%d want>=%d", volumeID, len(iscsiPortalsFromContext(current.Context)), minPortals)
+			}
+		}
+
+		select {
+		case <-ctx.Done():
+			return current
+		case <-deadline.C:
+			return current
+		case <-ticker.C:
+		}
+	}
+}
+
+func hasISCSIMultipathPortals(ctx map[string]string, minPortals int) bool {
+	return iscsiMultipathFromContext(ctx) && len(iscsiPortalsFromContext(ctx)) >= minPortals
+}
+
+func cloneStringMap(in map[string]string) map[string]string {
+	out := make(map[string]string, len(in)+1)
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
 }
 
 func (s *NodeServer) validateMountedStagingVolume(volumeID, stagingPath string) error {

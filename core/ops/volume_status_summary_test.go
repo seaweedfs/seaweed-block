@@ -23,6 +23,7 @@ func TestVolumeStatusSummary_OKReport(t *testing.T) {
 		"frontend: protocol=iscsi addr=127.0.0.1:3260 iqn=iqn.2026-05.io.seaweedfs:v1 nqn=- lun=0 nsid=0",
 		"frontend: protocol=nvme addr=127.0.0.1:4420 iqn=- nqn=nqn.2026-05.io.seaweedfs:v1 lun=0 nsid=1",
 		"authority: role=primary healthy=true primary_ready=true assigned=true epoch=7 endpoint_version=2",
+		"durable_entry: impl=walstore path=/var/lib/sw-block/v1/r1 replica=r1 latched=true operational=true closed=false epoch=7 endpoint_version=2 frontier_known=true durable_lsn=90 retained_lsn=10 head_lsn=90",
 		"residue: iscsi_sessions=0 nvme_subsystems=0 processes=0 kubernetes=0 storage_paths=0",
 		"issues: none",
 	} {
@@ -162,7 +163,7 @@ func healthySummaryReport() VolumeStatusReport {
 			},
 		},
 		Durable: []DurableReport{
-			{VolumeID: "v1", Impl: "walstore", Path: "/var/lib/sw-block/v1/r1", ReplicaID: "r1", Epoch: 7, EndpointVersion: 2, Latched: true, Operational: true},
+			{VolumeID: "v1", Impl: "walstore", Path: "/var/lib/sw-block/v1/r1", ReplicaID: "r1", Epoch: 7, EndpointVersion: 2, Latched: true, Operational: true, FrontierKnown: true, DurableLSN: 90, RetainedLSN: 10, HeadLSN: 90},
 		},
 		Residue: ResidueReport{
 			HostInitiator: HostInitiatorResidue{

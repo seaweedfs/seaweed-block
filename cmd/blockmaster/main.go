@@ -37,11 +37,14 @@ type flags struct {
 	launcherMasterAddr      string
 	launcherDurableRoot     string
 	launcherStateHostPath   string
+	launcherReplicationAck  string
 	launcherISCSIPortBase   int
 	launcherNVMePortBase    int
 	launcherPVCOwnerRef     bool
 	launcherStatus          bool
 	launcherKubernetesApply bool
+	launcherExternalISCSI   bool
+	launcherExternalStatus  bool
 	launcherCHAPSecretName  string
 	launcherCHAPUserKey     string
 	launcherCHAPSecretKey   string
@@ -73,11 +76,14 @@ func parseFlags(args []string) (flags, error) {
 	fs.StringVar(&f.launcherMasterAddr, "launcher-master-addr", "", "G15d master address used in rendered blockvolume args; defaults to listener address after bind")
 	fs.StringVar(&f.launcherDurableRoot, "launcher-durable-root", "/var/lib/sw-block", "G15d rendered blockvolume durable root base")
 	fs.StringVar(&f.launcherStateHostPath, "launcher-state-hostpath", "", "optional hostPath base mounted at the blockvolume durable root; empty keeps generated blockvolume state on throwaway emptyDir")
+	fs.StringVar(&f.launcherReplicationAck, "launcher-replication-ack", "best-effort", "G15d rendered blockvolume replication ACK profile: best-effort, sync-quorum, or sync-all")
 	fs.IntVar(&f.launcherISCSIPortBase, "launcher-iscsi-port-base", 3260, "G15d iSCSI port base for generated blockvolume workloads")
 	fs.IntVar(&f.launcherNVMePortBase, "launcher-nvme-port-base", 4420, "G15d NVMe/TCP port base for generated blockvolume workloads")
 	fs.BoolVar(&f.launcherPVCOwnerRef, "launcher-pvc-owner-ref", false, "render generated blockvolume Deployments in the source PVC namespace with a PVC ownerReference; disabled by default for alpha harness compatibility")
 	fs.BoolVar(&f.launcherStatus, "launcher-status", false, "render loopback-only blockvolume status endpoints in generated workload manifests; intended for TestOps/diagnostics")
 	fs.BoolVar(&f.launcherKubernetesApply, "launcher-kubernetes-apply", false, "apply/delete generated blockvolume Deployments through the in-cluster Kubernetes API; scoped to app=sw-blockvolume and generated volume/replica labels")
+	fs.BoolVar(&f.launcherExternalISCSI, "launcher-external-iscsi", false, "render generated iSCSI frontends on node addresses instead of loopback; requires --launcher-iscsi-chap-secret-name")
+	fs.BoolVar(&f.launcherExternalStatus, "launcher-external-status", false, "render blockvolume status endpoints on node addresses instead of loopback; intended for explicit Kubernetes node-loss gates")
 	fs.StringVar(&f.launcherCHAPSecretName, "launcher-iscsi-chap-secret-name", "", "optional Kubernetes Secret name used by generated blockvolume Deployments for target-side iSCSI CHAP")
 	fs.StringVar(&f.launcherCHAPUserKey, "launcher-iscsi-chap-username-key", "chapUsername", "Kubernetes Secret key for generated blockvolume iSCSI CHAP username")
 	fs.StringVar(&f.launcherCHAPSecretKey, "launcher-iscsi-chap-secret-key", "chapSecret", "Kubernetes Secret key for generated blockvolume iSCSI CHAP secret")
@@ -92,6 +98,9 @@ func parseFlags(args []string) (flags, error) {
 	}
 	if f.authorityStore == "" {
 		return flags{}, fmt.Errorf("--authority-store is required")
+	}
+	if f.launcherExternalISCSI && f.launcherCHAPSecretName == "" {
+		return flags{}, fmt.Errorf("cannot enable --launcher-external-iscsi without --launcher-iscsi-chap-secret-name")
 	}
 	return f, nil
 }
@@ -121,12 +130,14 @@ func run(f flags) int {
 		fmt.Fprintln(os.Stderr, "blockmaster:", err)
 		return 2
 	}
-	if len(topo.Volumes) == 0 {
+	if len(topo.Volumes) == 0 && len(clusterImport.Nodes) == 0 {
 		// Without a topology the observation host classifies every
 		// volume UnknownReplicaClaim; controller can never mint.
 		// That is a valid "empty cluster" startup state and not an
 		// error, but operators should know — log a prominent line.
 		fmt.Fprintln(os.Stderr, "blockmaster: WARNING: --topology not supplied or empty; controller will not mint assignments until topology is provided")
+	} else if len(topo.Volumes) == 0 {
+		fmt.Fprintln(os.Stderr, "blockmaster: dynamic lifecycle topology enabled by cluster-spec node inventory; assignments will be derived from verified placement intents")
 	}
 	cfg := master.Config{
 		AuthorityStoreDir: f.authorityStore,
@@ -297,6 +308,12 @@ func runLifecycleLauncherTick(h *master.Host, f flags) error {
 	if err != nil {
 		return err
 	}
+	if f.launcherStatus {
+		h.SetPromotionEvidenceProvider(master.NewWorkloadPlanPromotionEvidenceProvider(result.Plans, master.WorkloadPlanPromotionProbeConfig{
+			AckProfile:     f.launcherReplicationAck,
+			ExternalStatus: f.launcherExternalStatus,
+		}))
+	}
 	if f.launcherManifestDir == "" && !f.launcherKubernetesApply {
 		return nil
 	}
@@ -312,8 +329,11 @@ func runLifecycleLauncherTick(h *master.Host, f flags) error {
 			MasterAddr:          masterAddr,
 			DurableRootBase:     f.launcherDurableRoot,
 			StateHostPathBase:   f.launcherStateHostPath,
+			ReplicationAck:      f.launcherReplicationAck,
 			OwnerReferenceToPVC: f.launcherPVCOwnerRef,
 			EnableStatus:        f.launcherStatus,
+			ExternalISCSI:       f.launcherExternalISCSI,
+			ExternalStatus:      f.launcherExternalStatus,
 			ISCSICHAP: launcher.CHAPSecretRef{
 				Name:        f.launcherCHAPSecretName,
 				UsernameKey: f.launcherCHAPUserKey,

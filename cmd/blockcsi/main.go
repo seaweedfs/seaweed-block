@@ -25,13 +25,15 @@ import (
 )
 
 type flags struct {
-	endpoint       string
-	masterAddr     string
-	nodeID         string
-	iqnPrefix      string
-	pvcUIDLookup   bool
-	version        bool
-	printReadyLine bool
+	endpoint                     string
+	masterAddr                   string
+	nodeID                       string
+	iqnPrefix                    string
+	pvcUIDLookup                 bool
+	stage2Multipath              bool
+	rejectLoopbackPublishTargets bool
+	version                      bool
+	printReadyLine               bool
 }
 
 func parseFlags(args []string) (flags, error) {
@@ -42,6 +44,8 @@ func parseFlags(args []string) (flags, error) {
 	fs.StringVar(&f.nodeID, "node-id", "", "CSI node ID; defaults to hostname")
 	fs.StringVar(&f.iqnPrefix, "iqn-prefix", "iqn.2026-05.io.seaweedfs", "fallback IQN prefix for unstage after plugin restart")
 	fs.BoolVar(&f.pvcUIDLookup, "kubernetes-pvc-uid-lookup", false, "opt-in: resolve PVC UID through the in-cluster Kubernetes API before CreateVolume is sent to blockmaster")
+	fs.BoolVar(&f.stage2Multipath, "stage2-multipath", false, "opt-in: consume multiple iSCSI frontend targets as one host multipath device")
+	fs.BoolVar(&f.rejectLoopbackPublishTargets, "reject-loopback-publish-targets", false, "opt-in: reject loopback publish targets for node-loss recovery gates")
 	fs.BoolVar(&f.version, "version", false, "print build provenance and exit")
 	fs.BoolVar(&f.printReadyLine, "t0-print-ready", false, "internal test-only: emit one structured JSON ready line after listener bind")
 	fs.SetOutput(os.Stderr)
@@ -53,6 +57,9 @@ func parseFlags(args []string) (flags, error) {
 	}
 	if f.endpoint == "" {
 		return flags{}, fmt.Errorf("--endpoint is required")
+	}
+	if f.masterAddr == "" && (f.stage2Multipath || f.rejectLoopbackPublishTargets || f.pvcUIDLookup) {
+		return flags{}, fmt.Errorf("--stage2-multipath, --reject-loopback-publish-targets, and --kubernetes-pvc-uid-lookup require --master")
 	}
 	if f.nodeID == "" {
 		host, err := os.Hostname()
@@ -108,6 +115,7 @@ func run(f flags) int {
 	var (
 		masterConn  *grpc.ClientConn
 		lookup      blockcsi.PublishTargetLookup
+		reporter    blockcsi.EventReporter
 		provisioner blockcsi.VolumeProvisioner
 		resolver    blockcsi.KubernetesMetadataResolver
 	)
@@ -118,7 +126,16 @@ func run(f flags) int {
 			return 1
 		}
 		defer masterConn.Close()
-		lookup = blockcsi.NewControlStatusLookup(control.NewEvidenceServiceClient(masterConn))
+		evidence := control.NewEvidenceServiceClient(masterConn)
+		var opts []blockcsi.ControlStatusLookupOption
+		if f.stage2Multipath {
+			opts = append(opts, blockcsi.WithMultipathPublishTargets())
+		}
+		if f.rejectLoopbackPublishTargets {
+			opts = append(opts, blockcsi.WithLoopbackPublishTargetsRejected())
+		}
+		lookup = blockcsi.NewControlStatusLookupWithOptions(evidence, opts...)
+		reporter = blockcsi.NewControlEventReporter(control.NewObservationServiceClient(masterConn))
 		provisioner = blockcsi.NewControlLifecycleProvisioner(control.NewLifecycleServiceClient(masterConn))
 	}
 	if f.pvcUIDLookup && provisioner != nil {
@@ -132,7 +149,7 @@ func run(f flags) int {
 	srv := grpc.NewServer()
 	csipb.RegisterIdentityServer(srv, blockcsi.NewIdentityServer())
 	csipb.RegisterControllerServer(srv, blockcsi.NewControllerServerWithProvisionerAndMetadataResolver(lookup, provisioner, resolver))
-	csipb.RegisterNodeServer(srv, blockcsi.NewDefaultNodeServer(f.nodeID, f.iqnPrefix))
+	csipb.RegisterNodeServer(srv, blockcsi.NewDefaultNodeServerWithLookupAndEventReporter(f.nodeID, f.iqnPrefix, lookup, reporter))
 
 	if f.printReadyLine {
 		_ = json.NewEncoder(os.Stdout).Encode(readyLine{

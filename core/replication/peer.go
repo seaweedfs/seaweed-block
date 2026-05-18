@@ -266,6 +266,26 @@ func (p *ReplicaPeer) RefreshLiveShipSessionAfter(completedSessionID, achievedLS
 	return nil
 }
 
+// SeedLiveShipCursor records that an already-authoritative peer has
+// proven durability through achievedLSN before this primary emits its
+// first post-assignment live write. Promotion uses this after a barrier
+// proof so the first write after failover starts at frontier+1 instead
+// of tripping the WalShipper tail-gap guard.
+func (p *ReplicaPeer) SeedLiveShipCursor(achievedLSN uint64, reason string) {
+	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+		return
+	}
+	replicaID := p.target.ReplicaID
+	executor := p.executor
+	p.mu.Unlock()
+
+	executor.AdvanceLiveShipCursor(replicaID, achievedLSN)
+	log.Printf("replication: peer %s seeded live cursor lsn=%d reason=%s",
+		replicaID, achievedLSN, reason)
+}
+
 // SetProbeCooldownConfig overrides the default probe cooldown config
 // for this peer. Safe to call from any goroutine; takes effect from
 // the next ProbeIfDegraded / OnProbeAttempt call. Cap < Base

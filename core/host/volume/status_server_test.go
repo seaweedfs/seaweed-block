@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -56,6 +57,39 @@ func TestStatusServer_AcceptsLoopbackBindAndServesJSON(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
 		t.Fatalf("loopback client status: %d want 200", resp.StatusCode)
+	}
+}
+
+func TestNodeLoss_StatusServer_ExternalBindPolicyRequiresConcreteHost(t *testing.T) {
+	if err := enforceExplicitExternalBind("10.0.0.12:23260"); err != nil {
+		t.Fatalf("concrete node address rejected: %v", err)
+	}
+	for _, addr := range []string{":23260", "0.0.0.0:23260", "[::]:23260", "127.0.0.1:23260", "localhost:23260"} {
+		t.Run(addr, func(t *testing.T) {
+			if err := enforceExplicitExternalBind(addr); err == nil {
+				t.Fatalf("external status bind %q must be rejected", addr)
+			}
+		})
+	}
+}
+
+func TestNodeLoss_StatusServer_AllowExternalAccessServesNonLoopbackClient(t *testing.T) {
+	p := stubProjector{p: engine.ReplicaProjection{Mode: engine.ModeHealthy, Epoch: 5, EndpointVersion: 3}}
+	s := NewStatusServer(NewAdapterProjectionView(p, "v1", "r1", nil))
+
+	req := httptest.NewRequest(http.MethodGet, "/status?volume=v1", nil)
+	req.RemoteAddr = "10.0.0.9:44100"
+	w := httptest.NewRecorder()
+	s.handleStatus(w, req)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("default non-loopback client status=%d want 403", w.Code)
+	}
+
+	s.AllowExternalAccess()
+	w = httptest.NewRecorder()
+	s.handleStatus(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("external non-loopback client status=%d want 200 body=%s", w.Code, w.Body.String())
 	}
 }
 

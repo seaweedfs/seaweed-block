@@ -1,0 +1,218 @@
+# Runner-native mounted failover MVP safe-refusal gate.
+#
+# Goal:
+#   Prove the current alpha Kubernetes topology refuses an RF=2 mounted
+#   failover setup safely when only one placement candidate exists. This is
+#   intentionally not the happy failover claim; it is the D4 safe-refusal path
+#   that must stay visible until live RF=2 Kubernetes placement is proven.
+#
+# Expected invocation:
+#   swblock run \
+#     -env product_root=/path/to/seaweed_block/on/m02 \
+#     -env ssh_key=/path/to/testdev_key/on/controller \
+#     testops/scenarios/mounted-failover-rf2-safe-refusal-chain.yaml
+
+name: mounted-failover-rf2-safe-refusal-chain
+timeout: 16m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: pre_clean
+    actions:
+      - action: pre_run_cleanup
+        node: m02
+        kill_patterns: "blockmaster,blockvolume,blockcsi,iscsi-target"
+        nvme_disconnect: "true"
+        iscsi_logout_prefix: "iqn.2026-05.io.seaweedfs"
+      - action: exec
+        node: m02
+        cmd: "rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-safe-refusal && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-safe-refusal/pin_build /mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-safe-refusal/install /mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-safe-refusal/rf2 /mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-safe-refusal/inventory"
+      - action: exec
+        node: m02
+        cmd: "kubectl -n default delete pvc sw-block-rf2-safe-refusal-pvc --ignore-not-found=true --wait=true --timeout=120s >/dev/null 2>&1 || true; kubectl delete sc sw-block-rf2-safe-refusal --ignore-not-found=true >/dev/null 2>&1 || true; pkill -f 'kubectl.*port-forward.*svc/blockmaste[r]' >/dev/null 2>&1 || true"
+      - action: assert_no_active_iscsi_sessions
+        node: m02
+        iqn_substr: "io.seaweedfs"
+      - action: assert_no_processes
+        node: m02
+        pattern: "[/]blockmaster --|[/]blockvolume --|[/]blockcsi |[/]iscsi-target |^blockmaster |^blockvolume |^blockcsi |^iscsi-target "
+
+  - name: preflight
+    actions:
+      - action: exec
+        node: m02
+        cmd: "cd {{ product_root }} && bash scripts/preflight-k8s-alpha.sh --local-k3s > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-safe-refusal/preflight.txt 2>&1"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-safe-refusal/preflight.txt"
+        pattern: "summary status=PASS"
+        save_as: preflight_count
+      - action: assert_greater
+        actual: "{{ preflight_count }}"
+        threshold: "0"
+
+  - name: pin_build_alpha_images
+    actions:
+      - action: exec
+        node: m02
+        timeout: 8m
+        cmd: "cd {{ product_root }} && bash scripts/build-alpha-images.sh {{ product_root }}"
+        env.SW_BLOCK_IMPORT_K3S: "1"
+        env.SW_BLOCK_ARTIFACT_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-safe-refusal/pin_build"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-safe-refusal/pin_build/alpha-images.env"
+        pattern: "SW_BLOCK_IMAGE_ID="
+        save_as: sw_block_image_id_count
+      - action: assert_greater
+        actual: "{{ sw_block_image_id_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-safe-refusal/pin_build/alpha-images.env"
+        pattern: "SW_BLOCK_CSI_IMAGE_ID="
+        save_as: sw_block_csi_image_id_count
+      - action: assert_greater
+        actual: "{{ sw_block_csi_image_id_count }}"
+        threshold: "0"
+
+  - name: install_alpha_stack
+    actions:
+      - action: exec
+        node: m02
+        timeout: 6m
+        cmd: "cd {{ product_root }} && bash -c 'set -a; source /mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-safe-refusal/pin_build/alpha-images.env; set +a; SW_BLOCK_ARTIFACT_DIR=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-safe-refusal/install bash scripts/install-k8s-alpha.sh {{ product_root }}'"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-safe-refusal/install/install.log"
+        pattern: "PASS: seaweed-block alpha stack installed"
+        save_as: install_pass_count
+      - action: assert_greater
+        actual: "{{ install_pass_count }}"
+        threshold: "0"
+
+  - name: rf2_safe_refusal_boundary
+    actions:
+      - action: exec
+        node: m02
+        timeout: 5m
+        cmd: "cat > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-safe-refusal/rf2/rf2-safe-refusal.yaml <<'YAML'\napiVersion: storage.k8s.io/v1\nkind: StorageClass\nmetadata:\n  name: sw-block-rf2-safe-refusal\nprovisioner: block.csi.seaweedfs.com\nvolumeBindingMode: Immediate\nallowVolumeExpansion: false\nparameters:\n  replicationFactor: \"2\"\n  sw-block.seaweedfs.com/protocol: iscsi\n---\napiVersion: v1\nkind: PersistentVolumeClaim\nmetadata:\n  name: sw-block-rf2-safe-refusal-pvc\n  namespace: default\nspec:\n  accessModes:\n    - ReadWriteOnce\n  storageClassName: sw-block-rf2-safe-refusal\n  resources:\n    requests:\n      storage: 1Mi\nYAML\nkubectl apply -f /mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-safe-refusal/rf2/rf2-safe-refusal.yaml > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-safe-refusal/rf2/apply-rf2.log 2>&1\nkubectl -n default wait --for=jsonpath='{.status.phase}'=Bound pvc/sw-block-rf2-safe-refusal-pvc --timeout=120s >> /mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-safe-refusal/rf2/apply-rf2.log 2>&1\nsleep 5\nkubectl -n default get pvc sw-block-rf2-safe-refusal-pvc -o yaml > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-safe-refusal/rf2/rf2-pvc.yaml\nkubectl get pv -o yaml > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-safe-refusal/rf2/pv.after-rf2.yaml\nkubectl -n default get deploy -l app=sw-blockvolume -o wide > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-safe-refusal/rf2/blockvolumes.after-rf2.txt\nkubectl -n kube-system logs deploy/sw-blockmaster -c blockmaster > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-safe-refusal/rf2/blockmaster.after-rf2.log 2>&1 || true\n! kubectl -n default get deploy -l app=sw-blockvolume --no-headers 2>/dev/null | grep -q ."
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-safe-refusal/rf2/apply-rf2.log"
+        pattern: "persistentvolumeclaim/sw-block-rf2-safe-refusal-pvc created"
+        save_as: rf2_pvc_created_count
+      - action: assert_greater
+        actual: "{{ rf2_pvc_created_count }}"
+        threshold: "0"
+      - action: exec
+        node: m02
+        cmd: "! grep -q '^sw-blockvolume-' /mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-safe-refusal/rf2/blockvolumes.after-rf2.txt"
+
+  - name: inventory_safe_refusal
+    actions:
+      - action: exec
+        node: m02
+        timeout: 4m
+        cmd: "cd {{ product_root }} && bash -c 'set -euo pipefail; OUT=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-safe-refusal/inventory; mkdir -p \"$OUT\"; pf_port=$(python3 - <<\"PY\"\nimport socket\ns=socket.socket(); s.bind((\"127.0.0.1\",0)); print(s.getsockname()[1]); s.close()\nPY\n); kubectl -n kube-system port-forward svc/blockmaster ${pf_port}:9333 > \"$OUT/blockmaster-port-forward.log\" 2>&1 & pf_pid=$!; echo \"$pf_pid\" > \"$OUT/blockmaster-port-forward.pid\"; cleanup(){ kill \"$pf_pid\" >/dev/null 2>&1 || true; wait \"$pf_pid\" >/dev/null 2>&1 || true; }; trap cleanup EXIT; for i in $(seq 1 30); do (echo >/dev/tcp/127.0.0.1/${pf_port}) >/dev/null 2>&1 && break; sleep 1; done; (echo >/dev/tcp/127.0.0.1/${pf_port}) >/dev/null 2>&1; go run ./cmd/sw-block ops inventory --namespace default --master 127.0.0.1:${pf_port} --out \"$OUT\" --timeout 30s > \"$OUT/stdout.txt\" 2> \"$OUT/stderr.txt\"; rc=$?; echo \"$rc\" > \"$OUT/exit_code.txt\"; exit \"$rc\"'"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-safe-refusal/inventory/exit_code.txt"
+        pattern: "^0$"
+        save_as: inventory_exit_zero_count
+      - action: assert_greater
+        actual: "{{ inventory_exit_zero_count }}"
+        threshold: "0"
+
+  - name: inventory_asserts
+    actions:
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-safe-refusal/inventory/volume-inventory-summary.txt"
+        pattern: "^inventory_status: unhealthy$"
+        save_as: inventory_unhealthy_count
+      - action: assert_greater
+        actual: "{{ inventory_unhealthy_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-safe-refusal/inventory/volume-inventory-summary.txt"
+        pattern: "pvc=sw-block-rf2-safe-refusal-pvc"
+        save_as: rf2_pvc_identity_count
+      - action: assert_greater
+        actual: "{{ rf2_pvc_identity_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-safe-refusal/inventory/volume-inventory-summary.txt"
+        pattern: "rf=2 desired=2 observed=0"
+        save_as: rf2_desired_observed_count
+      - action: assert_greater
+        actual: "{{ rf2_desired_observed_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-safe-refusal/inventory/volume-inventory-summary.txt"
+        pattern: "generated_deployment_missing"
+        save_as: generated_missing_count
+      - action: assert_greater
+        actual: "{{ generated_missing_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-safe-refusal/inventory/volume-inventory-summary.txt"
+        pattern: "observed_replicas=0 desired_replicas=2"
+        save_as: observed_deficit_count
+      - action: assert_greater
+        actual: "{{ observed_deficit_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-safe-refusal/inventory/volume-inventory-summary.txt"
+        pattern: "replica_slot_missing=unknown"
+        save_as: missing_slot_count
+      - action: assert_greater
+        actual: "{{ missing_slot_count }}"
+        threshold: "0"
+
+  - name: collect_and_cleanup
+    always: true
+    actions:
+      - action: exec
+        node: m02
+        cmd: "kubectl -n default delete pvc sw-block-rf2-safe-refusal-pvc --ignore-not-found=true --wait=true --timeout=120s > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-safe-refusal/delete-rf2-pvc.log 2>&1 || true; kubectl delete sc sw-block-rf2-safe-refusal --ignore-not-found=true > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-safe-refusal/delete-rf2-sc.log 2>&1 || true"
+      - action: exec
+        node: m02
+        timeout: 3m
+        cmd: "cd {{ product_root }} && bash scripts/uninstall-k8s-alpha.sh {{ product_root }}"
+        env.SW_BLOCK_ARTIFACT_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-safe-refusal/uninstall"
+        env.SW_BLOCK_UNINSTALL_DELETE_ALL_BLOCKVOLUMES: "1"
+      - action: pre_run_cleanup
+        node: m02
+        kill_patterns: "blockmaster,blockvolume,blockcsi,iscsi-target"
+        nvme_disconnect: "true"
+        iscsi_logout_prefix: "iqn.2026-05.io.seaweedfs"
+      - action: exec
+        node: m02
+        cmd: "pkill -f 'kubectl.*port-forward.*svc/blockmaste[r]' >/dev/null 2>&1 || true"
+      - action: assert_no_active_iscsi_sessions
+        node: m02
+        iqn_substr: "io.seaweedfs"
+      - action: assert_no_processes
+        node: m02
+        pattern: "[/]blockmaster --|[/]blockvolume --|[/]blockcsi |[/]iscsi-target |[/]kubectl .*port-forward .*svc/blockmaste[r]|^blockmaster |^blockvolume |^blockcsi |^iscsi-target "
+      - action: collect_path
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-safe-refusal"
+        name: "remote-phases"
+        ignore_error: true

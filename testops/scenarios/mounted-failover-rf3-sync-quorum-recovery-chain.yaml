@@ -1,0 +1,338 @@
+# Runner-native RF=3 sync-quorum recovery gate.
+#
+# Goal:
+#   Write data through the RF=3 Kubernetes app/PVC path with sync-quorum,
+#   prove a non-primary replica is promotion-ready under the beta-recovery
+#   claim profile, stop the current primary, wait for master/authority to
+#   publish a candidate as the new primary, then recreate/reattach the reader
+#   pod through CSI and verify the same data. This is the durable writable HA
+#   Stage 1 product line.
+
+name: mounted-failover-rf3-sync-quorum-recovery-chain
+timeout: 28m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: pre_clean
+    actions:
+      - action: pre_run_cleanup
+        node: m02
+        kill_patterns: "blockmaster,blockvolume,blockcsi,iscsi-target"
+        nvme_disconnect: "true"
+        iscsi_logout_prefix: "iqn.2026-05.io.seaweedfs"
+      - action: exec
+        node: m02
+        cmd: "rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf3-sync-quorum-recovery && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf3-sync-quorum-recovery/pin_build /mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf3-sync-quorum-recovery/demo"
+      - action: exec
+        node: m02
+        cmd: "kubectl -n default delete pod sw-block-demo-reader sw-block-demo-writer --ignore-not-found=true --wait=true --timeout=120s >/dev/null 2>&1 || true; kubectl -n default delete pvc sw-block-demo-pvc --ignore-not-found=true --wait=true --timeout=120s >/dev/null 2>&1 || true; kubectl delete sc sw-block-dynamic --ignore-not-found=true >/dev/null 2>&1 || true; pkill -f 'kubectl.*port-forward.*svc/blockmaste[r]' >/dev/null 2>&1 || true"
+      - action: assert_no_active_iscsi_sessions
+        node: m02
+        iqn_substr: "io.seaweedfs"
+      - action: assert_no_processes
+        node: m02
+        pattern: "[/]blockmaster --|[/]blockvolume --|[/]blockcsi |[/]iscsi-target |^blockmaster |^blockvolume |^blockcsi |^iscsi-target "
+
+  - name: preflight
+    actions:
+      - action: exec
+        node: m02
+        cmd: "cd {{ product_root }} && bash scripts/preflight-k8s-alpha.sh --local-k3s > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf3-sync-quorum-recovery/preflight.txt 2>&1"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf3-sync-quorum-recovery/preflight.txt"
+        pattern: "summary status=PASS"
+        save_as: preflight_count
+      - action: assert_greater
+        actual: "{{ preflight_count }}"
+        threshold: "0"
+
+  - name: pin_build_alpha_images
+    actions:
+      - action: exec
+        node: m02
+        timeout: 8m
+        cmd: "cd {{ product_root }} && bash scripts/build-alpha-images.sh {{ product_root }}"
+        env.SW_BLOCK_IMPORT_K3S: "1"
+        env.SW_BLOCK_ARTIFACT_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf3-sync-quorum-recovery/pin_build"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf3-sync-quorum-recovery/pin_build/alpha-images.env"
+        pattern: "SW_BLOCK_IMAGE_ID="
+        save_as: sw_block_image_id_count
+      - action: assert_greater
+        actual: "{{ sw_block_image_id_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf3-sync-quorum-recovery/pin_build/alpha-images.env"
+        pattern: "SW_BLOCK_CSI_IMAGE_ID="
+        save_as: sw_block_csi_image_id_count
+      - action: assert_greater
+        actual: "{{ sw_block_csi_image_id_count }}"
+        threshold: "0"
+
+  - name: render_rf3_demo_manifest
+    actions:
+      - action: exec
+        node: m02
+        cmd: "cd {{ product_root }} && sed 's/replicationFactor: \"1\"/replicationFactor: \"3\"/' deploy/k8s/alpha/demo-app-pvc.yaml > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf3-sync-quorum-recovery/demo/demo-app-rf3.yaml"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf3-sync-quorum-recovery/demo/demo-app-rf3.yaml"
+        pattern: "replicationFactor: \"3\""
+        save_as: rf3_manifest_count
+      - action: assert_greater
+        actual: "{{ rf3_manifest_count }}"
+        threshold: "0"
+
+  - name: rf3_sync_quorum_recovery
+    actions:
+      - action: exec
+        node: m02
+        timeout: 16m
+        cmd: "cd {{ product_root }} && bash -c 'set -a; source /mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf3-sync-quorum-recovery/pin_build/alpha-images.env; set +a; set +e; SW_BLOCK_ARTIFACT_DIR=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf3-sync-quorum-recovery/demo SW_BLOCK_DEMO_APP_MANIFEST=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf3-sync-quorum-recovery/demo/demo-app-rf3.yaml SW_BLOCK_ALPHA_LOGICAL_SERVERS=3 SW_BLOCK_ALPHA_EXPECTED_SLOTS_PER_VOLUME=3 SW_BLOCK_ALPHA_REPLICATION_ACK=sync-quorum SW_BLOCK_LAUNCHER_STATE_HOSTPATH=/var/lib/sw-block/testops-{{ run_id }}-rf3-sync-quorum-recovery SW_BLOCK_DEMO_REQUIRE_PROMOTION_READY_BEFORE_FAILURE=1 SW_BLOCK_DEMO_FAIL_PRIMARY_BEFORE_READER=scale-primary-to-zero SW_BLOCK_DEMO_STOP_AFTER=reader-verified bash scripts/run-k8s-demo.sh {{ product_root }}; rc=$?; echo $rc > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf3-sync-quorum-recovery/demo/exit_code.txt; test \"$rc\" -eq 44'"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf3-sync-quorum-recovery/demo/run.log"
+        pattern: "fail_primary_before_reader=scale-primary-to-zero"
+        save_as: fail_primary_mode_count
+      - action: assert_greater
+        actual: "{{ fail_primary_mode_count }}"
+        threshold: "0"
+
+  - name: recovery_asserts
+    actions:
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf3-sync-quorum-recovery/demo/writer.log"
+        pattern: "\\[app-writer\\] wrote and verified /data/demo.bin"
+        save_as: writer_checksum_count
+      - action: assert_greater
+        actual: "{{ writer_checksum_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf3-sync-quorum-recovery/demo/reader.log"
+        pattern: "/data/demo.bin: OK"
+        save_as: reader_checksum_count
+      - action: assert_greater
+        actual: "{{ reader_checksum_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf3-sync-quorum-recovery/demo/primary-failure-recovery.txt"
+        pattern: "ack_profile: sync-quorum"
+        save_as: sync_quorum_ack_count
+      - action: assert_greater
+        actual: "{{ sync_quorum_ack_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf3-sync-quorum-recovery/demo/ops-inventory-before-primary-failure/volume-inventory-summary.txt"
+        pattern: "claim_profile=beta-recovery"
+        save_as: beta_recovery_claim_count
+      - action: assert_greater
+        actual: "{{ beta_recovery_claim_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf3-sync-quorum-recovery/demo/primary-failure-recovery.txt"
+        pattern: "candidate_ready=true"
+        save_as: candidate_ready_count
+      - action: assert_greater
+        actual: "{{ candidate_ready_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf3-sync-quorum-recovery/demo/primary-failure-recovery.txt"
+        pattern: "failover_status: promoted"
+        save_as: failover_promoted_count
+      - action: assert_greater
+        actual: "{{ failover_promoted_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf3-sync-quorum-recovery/demo/iscsi-sessions.before-primary-failure.txt"
+        pattern: "No active sessions"
+        save_as: pre_failure_no_session_count
+      - action: assert_greater
+        actual: "{{ pre_failure_no_session_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf3-sync-quorum-recovery/demo/primary-failure-recovery.txt"
+        pattern: "target_ready_replicas=0"
+        save_as: old_primary_stopped_count
+      - action: assert_greater
+        actual: "{{ old_primary_stopped_count }}"
+        threshold: "0"
+      - action: exec
+        node: m02
+        cmd: "MARKER=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf3-sync-quorum-recovery/demo/primary-failure-recovery.txt; promoted=$(sed -n 's/^promoted_replica=//p' \"$MARKER\"); after=$(sed -n 's/^after_primary_replica=//p' \"$MARKER\"); failed=$(sed -n 's/^failed_replica=//p' \"$MARKER\"); test -n \"$promoted\" && test \"$promoted\" = \"$after\" && test \"$promoted\" != \"$failed\""
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf3-sync-quorum-recovery/demo/primary-failure-recovery.txt"
+        pattern: "post_failure_primary_count=1"
+        save_as: single_primary_count
+      - action: assert_greater
+        actual: "{{ single_primary_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf3-sync-quorum-recovery/demo/primary-failure-recovery.txt"
+        pattern: "frontend_primary_ready_issue_count=0"
+        save_as: no_frontend_ready_issue_count
+      - action: assert_greater
+        actual: "{{ no_frontend_ready_issue_count }}"
+        threshold: "0"
+      - action: exec
+        node: m02
+        cmd: "! grep -q 'frontend_primary_ready=true' /mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf3-sync-quorum-recovery/demo/ops-inventory-after-primary-failure/volume-inventory-summary.txt"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf3-sync-quorum-recovery/demo/primary-failure-recovery.txt"
+        pattern: "failed_replica_after_evidence=replica:"
+        save_as: failed_replica_evidence_count
+      - action: assert_greater
+        actual: "{{ failed_replica_evidence_count }}"
+        threshold: "0"
+      - action: exec
+        node: m02
+        cmd: "MARKER=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf3-sync-quorum-recovery/demo/primary-failure-recovery.txt; failed_line=$(sed -n 's/^failed_replica_after_evidence=//p' \"$MARKER\"); test -n \"$failed_line\" && ! printf '%s\n' \"$failed_line\" | grep -q ' role=primary '"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf3-sync-quorum-recovery/demo/primary-failure-recovery.txt"
+        pattern: "before_publish_target_evidence=replica:"
+        save_as: before_publish_evidence_count
+      - action: assert_greater
+        actual: "{{ before_publish_evidence_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf3-sync-quorum-recovery/demo/primary-failure-recovery.txt"
+        pattern: "after_publish_target_evidence=replica:"
+        save_as: after_publish_evidence_count
+      - action: assert_greater
+        actual: "{{ after_publish_evidence_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf3-sync-quorum-recovery/demo/apply-reader.log"
+        pattern: "sw-block-demo-reader"
+        save_as: reader_apply_count
+      - action: assert_greater
+        actual: "{{ reader_apply_count }}"
+        threshold: "0"
+      - action: exec
+        node: m02
+        cmd: "MARKER=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf3-sync-quorum-recovery/demo/primary-failure-recovery.txt; portal=$(sed -n 's/^after_publish_target_evidence=.* frontend=\\([^ ]*\\).*/\\1/p' \"$MARKER\"); test -n \"$portal\" && grep -q \"NodeStageVolume: .* staged transport=iscsi portal=${portal}\" /mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf3-sync-quorum-recovery/demo/blockcsi-node.log"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf3-sync-quorum-recovery/demo/primary-failure-recovery.txt"
+        pattern: "data_check_after_failover=reader_checksum_passed"
+        save_as: reader_after_failover_count
+      - action: assert_greater
+        actual: "{{ reader_after_failover_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf3-sync-quorum-recovery/demo/control-plane-timeline.txt"
+        pattern: "event=primary_observed"
+        save_as: timeline_primary_observed_count
+      - action: assert_greater
+        actual: "{{ timeline_primary_observed_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf3-sync-quorum-recovery/demo/control-plane-timeline.txt"
+        pattern: "event=candidate_evaluated .*candidate_ready=true"
+        save_as: timeline_candidate_ready_count
+      - action: assert_greater
+        actual: "{{ timeline_candidate_ready_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf3-sync-quorum-recovery/demo/control-plane-timeline.txt"
+        pattern: "event=primary_failure_injected"
+        save_as: timeline_failure_injected_count
+      - action: assert_greater
+        actual: "{{ timeline_failure_injected_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf3-sync-quorum-recovery/demo/control-plane-timeline.txt"
+        pattern: "event=authority_published .*to="
+        save_as: timeline_authority_published_count
+      - action: assert_greater
+        actual: "{{ timeline_authority_published_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf3-sync-quorum-recovery/demo/control-plane-timeline.txt"
+        pattern: "event=csi_reattach_observed"
+        save_as: timeline_csi_reattach_count
+      - action: assert_greater
+        actual: "{{ timeline_csi_reattach_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf3-sync-quorum-recovery/demo/control-plane-timeline.txt"
+        pattern: "event=data_check .*result=reader_checksum_passed"
+        save_as: timeline_data_check_count
+      - action: assert_greater
+        actual: "{{ timeline_data_check_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf3-sync-quorum-recovery/demo/ops-inventory-after-primary-failure/volume-inventory-summary.txt"
+        pattern: "rf=3 desired=3 observed=3"
+        save_as: rf3_observed_count
+      - action: assert_greater
+        actual: "{{ rf3_observed_count }}"
+        threshold: "0"
+      - action: exec
+        node: m02
+        cmd: "! test -f /mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf3-sync-quorum-recovery/demo/primary-failure-safe-refusal.txt"
+
+  - name: collect_and_cleanup
+    always: true
+    actions:
+      - action: exec
+        node: m02
+        timeout: 3m
+        cmd: "cd {{ product_root }} && bash scripts/uninstall-k8s-alpha.sh {{ product_root }}"
+        env.SW_BLOCK_ARTIFACT_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf3-sync-quorum-recovery/uninstall"
+        env.SW_BLOCK_UNINSTALL_DELETE_ALL_BLOCKVOLUMES: "1"
+      - action: pre_run_cleanup
+        node: m02
+        kill_patterns: "blockmaster,blockvolume,blockcsi,iscsi-target"
+        nvme_disconnect: "true"
+        iscsi_logout_prefix: "iqn.2026-05.io.seaweedfs"
+      - action: exec
+        node: m02
+        cmd: "sudo rm -rf -- /var/lib/sw-block/testops-{{ run_id }}-rf3-sync-quorum-recovery; find /var/lib/sw-block -maxdepth 1 -type d -name 'testops-{{ run_id }}-*' -exec sudo rm -rf -- {} + 2>/dev/null || true; pkill -f 'kubectl.*port-forward.*svc/blockmaste[r]' >/dev/null 2>&1 || true"
+      - action: assert_no_active_iscsi_sessions
+        node: m02
+        iqn_substr: "io.seaweedfs"
+      - action: assert_no_processes
+        node: m02
+        pattern: "[/]blockmaster --|[/]blockvolume --|[/]blockcsi |[/]iscsi-target |[/]kubectl .*port-forward .*svc/blockmaste[r]|^blockmaster |^blockvolume |^blockcsi |^iscsi-target "
+      - action: exec
+        node: m02
+        cmd: "test ! -e /var/lib/sw-block/testops-{{ run_id }}-rf3-sync-quorum-recovery"
+      - action: collect_path
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf3-sync-quorum-recovery"
+        name: "remote-phases"
+        ignore_error: true

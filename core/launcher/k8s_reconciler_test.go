@@ -22,7 +22,7 @@ func (c *recordingDeploymentClient) DeleteDeployment(_ context.Context, ref Depl
 	return nil
 }
 
-func TestK8sReconciler_AppliesDesiredAndDeletesOnlyOwnedStaleDeployments(t *testing.T) {
+func TestK8sReconciler_AppliesMissingDesiredAndDeletesOnlyOwnedStaleDeployments(t *testing.T) {
 	desired := RenderedManifest{
 		Name: "sw-blockvolume-pvc-a-r1",
 		YAML: []byte(`---
@@ -42,15 +42,6 @@ metadata:
 		Namespace: "default",
 		Desired:   []RenderedManifest{desired},
 		Existing: []DeploymentIdentity{
-			{
-				Namespace: "default",
-				Name:      "sw-blockvolume-pvc-a-r1",
-				Labels: map[string]string{
-					LabelApp:     AppBlockVolume,
-					LabelVolume:  "pvc-a",
-					LabelReplica: "r1",
-				},
-			},
 			{
 				Namespace: "default",
 				Name:      "sw-blockvolume-pvc-old-r1",
@@ -74,6 +65,98 @@ metadata:
 	}
 	if result.Applied != 1 || result.Deleted != 1 || result.Skipped != 0 {
 		t.Fatalf("result=%+v", result)
+	}
+}
+
+func TestK8sReconciler_SkipsExistingDesiredDeployment(t *testing.T) {
+	desired := RenderedManifest{
+		Name: "sw-blockvolume-pvc-a-r1",
+		YAML: []byte(`---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sw-blockvolume-pvc-a-r1
+  namespace: default
+  labels:
+    app: sw-blockvolume
+    sw-block.seaweedfs.com/volume: pvc-a
+    sw-block.seaweedfs.com/replica: r1
+`),
+	}
+	one := 1
+	client := &recordingDeploymentClient{}
+	result, err := ReconcileBlockVolumeDeployments(context.Background(), ReconcileDeploymentsInput{
+		Namespace: "default",
+		Desired:   []RenderedManifest{desired},
+		Existing: []DeploymentIdentity{{
+			Namespace: "default",
+			Name:      "sw-blockvolume-pvc-a-r1",
+			Labels: map[string]string{
+				LabelApp:     AppBlockVolume,
+				LabelVolume:  "pvc-a",
+				LabelReplica: "r1",
+			},
+			SpecReplicas: &one,
+		}},
+		Client: client,
+	})
+	if err != nil {
+		t.Fatalf("ReconcileBlockVolumeDeployments: %v", err)
+	}
+	if len(client.applied) != 0 {
+		t.Fatalf("existing deployment should not be reapplied: %v", client.applied)
+	}
+	if result.Applied != 0 || result.Deleted != 0 || result.Skipped != 1 {
+		t.Fatalf("result=%+v", result)
+	}
+	if got := result.Actions[0].Reason; got != "already-exists" {
+		t.Fatalf("reason=%q", got)
+	}
+}
+
+func TestK8sReconciler_PreservesOperatorScaledZeroReplicaDeployment(t *testing.T) {
+	desired := RenderedManifest{
+		Name: "sw-blockvolume-pvc-a-r1",
+		YAML: []byte(`---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sw-blockvolume-pvc-a-r1
+  namespace: default
+  labels:
+    app: sw-blockvolume
+    sw-block.seaweedfs.com/volume: pvc-a
+    sw-block.seaweedfs.com/replica: r1
+`),
+	}
+	zero := 0
+	client := &recordingDeploymentClient{}
+	result, err := ReconcileBlockVolumeDeployments(context.Background(), ReconcileDeploymentsInput{
+		Namespace: "default",
+		Desired:   []RenderedManifest{desired},
+		Existing: []DeploymentIdentity{{
+			Namespace: "default",
+			Name:      "sw-blockvolume-pvc-a-r1",
+			Labels: map[string]string{
+				LabelApp:     AppBlockVolume,
+				LabelVolume:  "pvc-a",
+				LabelReplica: "r1",
+			},
+			SpecReplicas: &zero,
+		}},
+		Client: client,
+	})
+	if err != nil {
+		t.Fatalf("ReconcileBlockVolumeDeployments: %v", err)
+	}
+	if len(client.applied) != 0 {
+		t.Fatalf("scaled-zero deployment should not be reapplied: %v", client.applied)
+	}
+	if result.Applied != 0 || result.Deleted != 0 || result.Skipped != 1 {
+		t.Fatalf("result=%+v", result)
+	}
+	if got := result.Actions[0].Reason; got != "preserve-replicas-zero" {
+		t.Fatalf("reason=%q", got)
 	}
 }
 

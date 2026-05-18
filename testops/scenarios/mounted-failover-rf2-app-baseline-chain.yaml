@@ -1,0 +1,208 @@
+# Runner-native mounted failover MVP RF=2 app-path baseline gate.
+#
+# Goal:
+#   Prove the documented app/PVC writer -> reader path works with an RF=2
+#   product-owned blockvolume placement before injecting primary failure. This
+#   is a baseline for the mounted failover gate, not a recovery claim.
+
+name: mounted-failover-rf2-app-baseline-chain
+timeout: 20m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: pre_clean
+    actions:
+      - action: pre_run_cleanup
+        node: m02
+        kill_patterns: "blockmaster,blockvolume,blockcsi,iscsi-target"
+        nvme_disconnect: "true"
+        iscsi_logout_prefix: "iqn.2026-05.io.seaweedfs"
+      - action: exec
+        node: m02
+        cmd: "rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf2-app-baseline && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf2-app-baseline/pin_build /mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf2-app-baseline/demo"
+      - action: exec
+        node: m02
+        cmd: "kubectl -n default delete pod sw-block-demo-reader sw-block-demo-writer --ignore-not-found=true --wait=true --timeout=120s >/dev/null 2>&1 || true; kubectl -n default delete pvc sw-block-demo-pvc --ignore-not-found=true --wait=true --timeout=120s >/dev/null 2>&1 || true; kubectl delete sc sw-block-dynamic --ignore-not-found=true >/dev/null 2>&1 || true; pkill -f 'kubectl.*port-forward.*svc/blockmaste[r]' >/dev/null 2>&1 || true"
+      - action: assert_no_active_iscsi_sessions
+        node: m02
+        iqn_substr: "io.seaweedfs"
+      - action: assert_no_processes
+        node: m02
+        pattern: "[/]blockmaster --|[/]blockvolume --|[/]blockcsi |[/]iscsi-target |^blockmaster |^blockvolume |^blockcsi |^iscsi-target "
+
+  - name: preflight
+    actions:
+      - action: exec
+        node: m02
+        cmd: "cd {{ product_root }} && bash scripts/preflight-k8s-alpha.sh --local-k3s > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf2-app-baseline/preflight.txt 2>&1"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf2-app-baseline/preflight.txt"
+        pattern: "summary status=PASS"
+        save_as: preflight_count
+      - action: assert_greater
+        actual: "{{ preflight_count }}"
+        threshold: "0"
+
+  - name: pin_build_alpha_images
+    actions:
+      - action: exec
+        node: m02
+        timeout: 8m
+        cmd: "cd {{ product_root }} && bash scripts/build-alpha-images.sh {{ product_root }}"
+        env.SW_BLOCK_IMPORT_K3S: "1"
+        env.SW_BLOCK_ARTIFACT_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf2-app-baseline/pin_build"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf2-app-baseline/pin_build/alpha-images.env"
+        pattern: "SW_BLOCK_IMAGE_ID="
+        save_as: sw_block_image_id_count
+      - action: assert_greater
+        actual: "{{ sw_block_image_id_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf2-app-baseline/pin_build/alpha-images.env"
+        pattern: "SW_BLOCK_CSI_IMAGE_ID="
+        save_as: sw_block_csi_image_id_count
+      - action: assert_greater
+        actual: "{{ sw_block_csi_image_id_count }}"
+        threshold: "0"
+
+  - name: render_rf2_demo_manifest
+    actions:
+      - action: exec
+        node: m02
+        cmd: "cd {{ product_root }} && sed 's/replicationFactor: \"1\"/replicationFactor: \"2\"/' deploy/k8s/alpha/demo-app-pvc.yaml > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf2-app-baseline/demo/demo-app-rf2.yaml"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf2-app-baseline/demo/demo-app-rf2.yaml"
+        pattern: "replicationFactor: \"2\""
+        save_as: rf2_manifest_count
+      - action: assert_greater
+        actual: "{{ rf2_manifest_count }}"
+        threshold: "0"
+
+  - name: rf2_app_writer_reader
+    actions:
+      - action: exec
+        node: m02
+        timeout: 12m
+        cmd: "cd {{ product_root }} && bash -c 'set -a; source /mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf2-app-baseline/pin_build/alpha-images.env; set +a; set +e; SW_BLOCK_ARTIFACT_DIR=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf2-app-baseline/demo SW_BLOCK_DEMO_APP_MANIFEST=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf2-app-baseline/demo/demo-app-rf2.yaml SW_BLOCK_ALPHA_LOGICAL_SERVERS=2 SW_BLOCK_ALPHA_EXPECTED_SLOTS_PER_VOLUME=2 SW_BLOCK_LAUNCHER_STATE_HOSTPATH=/var/lib/sw-block/testops-{{ run_id }}-rf2-app SW_BLOCK_DEMO_STOP_AFTER=reader-verified bash scripts/run-k8s-demo.sh {{ product_root }}; rc=$?; echo $rc > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf2-app-baseline/demo/exit_code.txt; test \"$rc\" -eq 44'"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf2-app-baseline/demo/run.log"
+        pattern: "logical_servers=2"
+        save_as: logical_servers_count
+      - action: assert_greater
+        actual: "{{ logical_servers_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf2-app-baseline/demo/run.log"
+        pattern: "expected_slots_per_volume=2"
+        save_as: expected_slots_count
+      - action: assert_greater
+        actual: "{{ expected_slots_count }}"
+        threshold: "0"
+
+  - name: app_path_asserts
+    actions:
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf2-app-baseline/demo/writer.log"
+        pattern: "\\[app-writer\\] wrote and verified /data/demo.bin"
+        save_as: writer_checksum_count
+      - action: assert_greater
+        actual: "{{ writer_checksum_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf2-app-baseline/demo/reader.log"
+        pattern: "/data/demo.bin: OK"
+        save_as: reader_checksum_count
+      - action: assert_greater
+        actual: "{{ reader_checksum_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf2-app-baseline/demo/generated-blockvolume.yaml"
+        pattern: "--replica-id=r1"
+        save_as: r1_manifest_count
+      - action: assert_greater
+        actual: "{{ r1_manifest_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf2-app-baseline/demo/generated-blockvolume.yaml"
+        pattern: "--replica-id=r2"
+        save_as: r2_manifest_count
+      - action: assert_greater
+        actual: "{{ r2_manifest_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf2-app-baseline/demo/ops-inventory-reader-verified/volume-inventory-summary.txt"
+        pattern: "pvc=sw-block-demo-pvc"
+        save_as: inventory_pvc_count
+      - action: assert_greater
+        actual: "{{ inventory_pvc_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf2-app-baseline/demo/ops-inventory-reader-verified/volume-inventory-summary.txt"
+        pattern: "rf=2 desired=2 observed=2"
+        save_as: inventory_rf2_count
+      - action: assert_greater
+        actual: "{{ inventory_rf2_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf2-app-baseline/demo/ops-inventory-reader-verified/nested-ops-status-bundles.json"
+        pattern: "\"command\": \"sw-block ops status\""
+        save_as: nested_status_bundle_count
+      - action: assert_greater
+        actual: "{{ nested_status_bundle_count }}"
+        threshold: "1"
+
+  - name: collect_and_cleanup
+    always: true
+    actions:
+      - action: exec
+        node: m02
+        timeout: 3m
+        cmd: "cd {{ product_root }} && bash scripts/uninstall-k8s-alpha.sh {{ product_root }}"
+        env.SW_BLOCK_ARTIFACT_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf2-app-baseline/uninstall"
+        env.SW_BLOCK_UNINSTALL_DELETE_ALL_BLOCKVOLUMES: "1"
+      - action: pre_run_cleanup
+        node: m02
+        kill_patterns: "blockmaster,blockvolume,blockcsi,iscsi-target"
+        nvme_disconnect: "true"
+        iscsi_logout_prefix: "iqn.2026-05.io.seaweedfs"
+      - action: exec
+        node: m02
+        cmd: "sudo rm -rf -- /var/lib/sw-block/testops-{{ run_id }}-rf2-app; find /var/lib/sw-block -maxdepth 1 -type d -name 'testops-{{ run_id }}-*' -exec sudo rm -rf -- {} + 2>/dev/null || true; pkill -f 'kubectl.*port-forward.*svc/blockmaste[r]' >/dev/null 2>&1 || true"
+      - action: assert_no_active_iscsi_sessions
+        node: m02
+        iqn_substr: "io.seaweedfs"
+      - action: assert_no_processes
+        node: m02
+        pattern: "[/]blockmaster --|[/]blockvolume --|[/]blockcsi |[/]iscsi-target |[/]kubectl .*port-forward .*svc/blockmaste[r]|^blockmaster |^blockvolume |^blockcsi |^iscsi-target "
+      - action: exec
+        node: m02
+        cmd: "test ! -e /var/lib/sw-block/testops-{{ run_id }}-rf2-app"
+      - action: collect_path
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-mounted-failover-rf2-app-baseline"
+        name: "remote-phases"
+        ignore_error: true

@@ -450,7 +450,7 @@ func (c *TopologyController) decideVolume(
 	projectedLoad map[string]int,
 ) (AssignmentAsk, string, bool) {
 	if !hasLine {
-		cands := acceptableCandidates(vol, serverIndex)
+		cands := placeableCandidates(vol, serverIndex)
 		if len(cands) == 0 {
 			return AssignmentAsk{}, "", false
 		}
@@ -492,17 +492,30 @@ func (c *TopologyController) decideVolume(
 	}
 
 	other := acceptableCandidatesExcept(vol, serverIndex, current.ReplicaID)
-	if len(other) == 0 {
-		return AssignmentAsk{}, "", false
+	if len(other) > 0 {
+		best := chooseFailoverCandidate(other, projectedLoad)
+		return AssignmentAsk{
+			VolumeID:  vol.VolumeID,
+			ReplicaID: best.ReplicaID,
+			DataAddr:  best.DataAddr,
+			CtrlAddr:  best.CtrlAddr,
+			Intent:    IntentReassign,
+		}, "failover", true
 	}
-	best := chooseFailoverCandidate(other, projectedLoad)
-	return AssignmentAsk{
-		VolumeID:  vol.VolumeID,
-		ReplicaID: best.ReplicaID,
-		DataAddr:  best.DataAddr,
-		CtrlAddr:  best.CtrlAddr,
-		Intent:    IntentReassign,
-	}, "failover", true
+	// No promotion-ready peer exists. Keep the current authority endpoint fresh
+	// when the current replica is still reachable/eligible; this preserves
+	// authority continuity without treating that replica as a failover candidate.
+	if candidatePlaceable(current, serverIndex) &&
+		(current.DataAddr != currentLine.DataAddr || current.CtrlAddr != currentLine.CtrlAddr) {
+		return AssignmentAsk{
+			VolumeID:  vol.VolumeID,
+			ReplicaID: current.ReplicaID,
+			DataAddr:  current.DataAddr,
+			CtrlAddr:  current.CtrlAddr,
+			Intent:    IntentRefreshEndpoint,
+		}, "endpoint refresh", true
+	}
+	return AssignmentAsk{}, "", false
 }
 
 func volumeIncludesReplica(vol VolumeTopologySnapshot, replicaID string) bool {
@@ -534,6 +547,28 @@ func candidateAcceptable(slot ReplicaCandidate, servers map[string]ServerObserva
 		!slot.Withdrawn &&
 		server.Reachable &&
 		server.Eligible
+}
+
+func candidatePlaceable(slot ReplicaCandidate, servers map[string]ServerObservation) bool {
+	server, ok := servers[slot.ServerID]
+	if !ok {
+		return false
+	}
+	return slot.Reachable &&
+		slot.Eligible &&
+		!slot.Withdrawn &&
+		server.Reachable &&
+		server.Eligible
+}
+
+func placeableCandidates(vol VolumeTopologySnapshot, servers map[string]ServerObservation) []ReplicaCandidate {
+	var out []ReplicaCandidate
+	for _, slot := range vol.Slots {
+		if candidatePlaceable(slot, servers) {
+			out = append(out, slot)
+		}
+	}
+	return out
 }
 
 func acceptableCandidates(vol VolumeTopologySnapshot, servers map[string]ServerObservation) []ReplicaCandidate {

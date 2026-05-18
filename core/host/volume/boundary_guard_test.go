@@ -13,10 +13,9 @@ import (
 // TestNoOtherAssignmentInfoConstruction is the PCDD-STUFFING-001
 // AST guard required by T0 sketch §9 / §6.4 rule 5 / §10.7.
 //
-// Rule: at most ONE adapter.AssignmentInfo composite literal in
-// core/host/volume/*.go, and that one literal MUST live inside
-// the single named decoder decodeAssignmentFact in subscribe.go.
-// Scattered literals anywhere else in this package fail the test.
+// Rule: adapter.AssignmentInfo construction in core/host/volume/*.go must be
+// limited to named boundary functions. Scattered literals anywhere else in this
+// package fail the test.
 //
 // This is the durable enforcement of the volume-side decode
 // boundary (sketch §3.1). Without it, a future patch could
@@ -77,7 +76,12 @@ func TestNoOtherAssignmentInfoConstruction(t *testing.T) {
 	// Allowed construction sites (PCDD-STUFFING-001 scope):
 	//   1. decodeAssignmentFact in subscribe.go — the master-to-host
 	//      fact decoder (T0 sketch §3.1).
-	//   2. OnPeerAdded in peer_adapter_registry.go — G5-5C Batch #7
+	//   2. decodeSelfPeerAssignment in subscribe.go — supporting-replica
+	//      lineage copied from the master's peer descriptor inside an
+	//      AssignmentFact for the active primary. This is still a master-minted
+	//      decode site and is deliberately bounded so a supporting replica can
+	//      become promotion-ready without becoming frontend-primary.
+	//   3. OnPeerAdded in peer_adapter_registry.go — G5-5C Batch #7
 	//      per-peer engine identity priming. The registry constructs
 	//      one AssignmentInfo per admitted peer to seed the per-peer
 	//      adapter's engine state (so engine.checkReplicaID accepts
@@ -86,20 +90,23 @@ func TestNoOtherAssignmentInfoConstruction(t *testing.T) {
 	//      data already decoded upstream and routed through
 	//      ReplicaTarget.
 	//
-	// Any literal outside these two named functions fails the test —
+	// Any literal outside these named functions fails the test —
 	// the rule predates Batch #7 but the per-peer-adapter shape
-	// requires a 2nd site that is bounded, named, and AST-pinned
+	// requires extra sites that are bounded, named, and AST-pinned
 	// here.
 	allowed := map[string]string{
-		"decodeAssignmentFact": "subscribe.go",
-		"OnPeerAdded":          "peer_adapter_registry.go",
+		"decodeAssignmentFact":     "subscribe.go",
+		"decodeSelfPeerAssignment": "subscribe.go",
+		"OnPeerAdded":              "peer_adapter_registry.go",
 	}
 
 	if len(hits) != len(allowed) {
 		t.Fatalf("expected exactly %d adapter.AssignmentInfo composite literals in core/host/volume (outside tests); got %d: %+v",
 			len(allowed), len(hits), hits)
 	}
+	countByFn := make(map[string]int, len(hits))
 	for _, h := range hits {
+		countByFn[h.fn]++
 		wantFile, ok := allowed[h.fn]
 		if !ok {
 			t.Errorf("adapter.AssignmentInfo literal in disallowed function %s (file %s, line %d). Allowed: %v",
@@ -109,6 +116,11 @@ func TestNoOtherAssignmentInfoConstruction(t *testing.T) {
 		if filepath.Base(h.file) != wantFile {
 			t.Errorf("adapter.AssignmentInfo literal in %s must live in %s; found in %s at line %d",
 				h.fn, wantFile, h.file, h.line)
+		}
+	}
+	for fn := range allowed {
+		if countByFn[fn] != 1 {
+			t.Errorf("adapter.AssignmentInfo literal count for %s = %d; want exactly 1", fn, countByFn[fn])
 		}
 	}
 }

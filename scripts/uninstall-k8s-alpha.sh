@@ -5,6 +5,8 @@ ROOT="${1:-$(pwd)}"
 ARTIFACT_DIR="${SW_BLOCK_ARTIFACT_DIR:-/tmp/sw-block-uninstall-$(date -u +%Y%m%dT%H%M%SZ)}"
 NAMESPACE="${SW_BLOCK_APP_NAMESPACE:-default}"
 DELETE_ALL_BLOCKVOLUMES="${SW_BLOCK_UNINSTALL_DELETE_ALL_BLOCKVOLUMES:-0}"
+CHAP_SECRET_NAME="${SW_BLOCK_ISCSI_CHAP_SECRET_NAME:-sw-block-iscsi-chap}"
+STORAGECLASS_NAME="${SW_BLOCK_STORAGECLASS_NAME:-sw-block-dynamic}"
 
 mkdir -p "$ARTIFACT_DIR"
 
@@ -28,6 +30,8 @@ require_cmd kubectl
 log "artifact_dir=$ARTIFACT_DIR"
 log "namespace=$NAMESPACE"
 log "delete_all_blockvolumes=$DELETE_ALL_BLOCKVOLUMES"
+log "chap_secret_name=$CHAP_SECRET_NAME"
+log "storageclass_name=$STORAGECLASS_NAME"
 
 DEMO_PVC_UID="$(kubectl -n "$NAMESPACE" get pvc sw-block-demo-pvc -o jsonpath='{.metadata.uid}' 2>/dev/null || true)"
 
@@ -58,13 +62,29 @@ else
 fi
 
 log "delete CSI components"
-kubectl delete -f "$ROOT/deploy/k8s/alpha/csi-node.yaml" --ignore-not-found=true | tee "$ARTIFACT_DIR/delete-csi-node.log"
-kubectl delete -f "$ROOT/deploy/k8s/alpha/csi-controller.yaml" --ignore-not-found=true | tee "$ARTIFACT_DIR/delete-csi-controller.log"
-kubectl delete -f "$ROOT/deploy/k8s/alpha/csi-driver.yaml" --ignore-not-found=true | tee "$ARTIFACT_DIR/delete-csidriver.log"
-kubectl delete -f "$ROOT/deploy/k8s/alpha/rbac.yaml" --ignore-not-found=true | tee "$ARTIFACT_DIR/delete-rbac.log"
+kubectl delete -f "$ROOT/deploy/k8s/alpha/csi-node.yaml" --ignore-not-found=true --wait=true --timeout=120s | tee "$ARTIFACT_DIR/delete-csi-node.log"
+kubectl delete -f "$ROOT/deploy/k8s/alpha/csi-controller.yaml" --ignore-not-found=true --wait=true --timeout=120s | tee "$ARTIFACT_DIR/delete-csi-controller.log"
+kubectl delete -f "$ROOT/deploy/k8s/alpha/csi-driver.yaml" --ignore-not-found=true --wait=true --timeout=120s | tee "$ARTIFACT_DIR/delete-csidriver.log"
+kubectl delete -f "$ROOT/deploy/k8s/alpha/rbac.yaml" --ignore-not-found=true --wait=true --timeout=120s | tee "$ARTIFACT_DIR/delete-rbac.log"
+
+log "delete alpha StorageClass"
+if kubectl get storageclass "$STORAGECLASS_NAME" >/dev/null 2>&1; then
+  kubectl delete storageclass "$STORAGECLASS_NAME" --wait=true --timeout=120s | tee "$ARTIFACT_DIR/delete-storageclass.log"
+else
+  echo "storageclasses.storage.k8s.io \"$STORAGECLASS_NAME\" not found" | tee "$ARTIFACT_DIR/delete-storageclass.log"
+fi
+
+log "delete iSCSI CHAP Secret"
+for secret_ns in "$NAMESPACE" kube-system; do
+  kubectl -n "$secret_ns" delete secret "$CHAP_SECRET_NAME" --ignore-not-found=true --wait=true --timeout=120s | tee -a "$ARTIFACT_DIR/delete-chap-secret.log"
+done
 
 log "delete blockmaster stack"
-kubectl delete -f "$ROOT/deploy/k8s/alpha/block-stack.yaml" --ignore-not-found=true | tee "$ARTIFACT_DIR/delete-block-stack.log"
+{
+  kubectl -n kube-system delete deploy/sw-blockmaster --ignore-not-found=true --wait=true --timeout=120s
+  kubectl -n kube-system delete svc/blockmaster --ignore-not-found=true --wait=true --timeout=120s
+  kubectl -n kube-system delete configmap/sw-block-cluster-spec --ignore-not-found=true --wait=true --timeout=120s
+} | tee "$ARTIFACT_DIR/delete-block-stack.log"
 
 kubectl -n kube-system get pods,deploy -o wide >"$ARTIFACT_DIR/kube-system.after-delete.txt" 2>&1 || true
 kubectl -n "$NAMESPACE" get pods,deploy,pvc,pv -o wide >"$ARTIFACT_DIR/app-namespace.after-delete.txt" 2>&1 || true

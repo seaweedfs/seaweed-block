@@ -23,11 +23,53 @@ func (f *fakeEvidenceClient) QueryVolumeStatus(_ context.Context, req *control.S
 	return f.resp, nil
 }
 
+type fakeObservationClient struct {
+	event *control.ClusterEvent
+	err   error
+}
+
+func (f *fakeObservationClient) ReportHeartbeat(context.Context, *control.HeartbeatReport, ...grpc.CallOption) (*control.HeartbeatAck, error) {
+	return &control.HeartbeatAck{}, nil
+}
+
+func (f *fakeObservationClient) ReportClusterEvent(_ context.Context, event *control.ClusterEvent, _ ...grpc.CallOption) (*control.ClusterEventAck, error) {
+	f.event = event
+	if f.err != nil {
+		return nil, f.err
+	}
+	return &control.ClusterEventAck{EventId: "master-1"}, nil
+}
+
+func TestControlEventReporter_ReportsClusterEvent(t *testing.T) {
+	client := &fakeObservationClient{}
+	reporter := NewControlEventReporter(client)
+
+	err := reporter.ReportEvent(context.Background(), ClusterEvent{
+		VolumeID:        "v1",
+		ReplicaID:       "r2",
+		NodeName:        "node-a",
+		Type:            EventTypeCSIReattachObserved,
+		Severity:        EventSeverityInfo,
+		Reason:          EventTypeCSIReattachObserved,
+		NewValue:        "127.0.0.1:3261",
+		Epoch:           2,
+		EndpointVersion: 1,
+	})
+	if err != nil {
+		t.Fatalf("ReportEvent: %v", err)
+	}
+	if client.event.GetEventType() != EventTypeCSIReattachObserved || client.event.GetReplicaId() != "r2" || client.event.GetEpoch() != 2 {
+		t.Fatalf("event=%+v", client.event)
+	}
+}
+
 func TestControlStatusLookup_MapsISCSIStatusFrontend(t *testing.T) {
 	client := &fakeEvidenceClient{resp: &control.StatusResponse{
-		VolumeId:  "v1",
-		ReplicaId: "r1",
-		Assigned:  true,
+		VolumeId:        "v1",
+		ReplicaId:       "r1",
+		Epoch:           7,
+		EndpointVersion: 3,
+		Assigned:        true,
 		Frontends: []*control.FrontendTarget{{
 			Protocol: "iscsi",
 			Addr:     "127.0.0.1:3260",
@@ -35,7 +77,7 @@ func TestControlStatusLookup_MapsISCSIStatusFrontend(t *testing.T) {
 			Lun:      3,
 		}},
 	}}
-	lookup := NewControlStatusLookup(client)
+	lookup := NewControlStatusLookupWithMultipath(client)
 
 	got, err := lookup.LookupPublishTarget(context.Background(), "v1", "node-a")
 	if err != nil {
@@ -44,8 +86,197 @@ func TestControlStatusLookup_MapsISCSIStatusFrontend(t *testing.T) {
 	if got.Protocol != ProtocolISCSI || got.ISCSIAddr != "127.0.0.1:3260" || got.IQN != "iqn.2026-05.example:v1" || got.LUN != 3 {
 		t.Fatalf("target=%+v", got)
 	}
+	if got.Epoch != 7 || got.EndpointVersion != 3 {
+		t.Fatalf("target generation=(%d,%d), want (7,3)", got.Epoch, got.EndpointVersion)
+	}
 	if len(client.reqs) != 1 || client.reqs[0] != "v1" {
 		t.Fatalf("status reqs=%v", client.reqs)
+	}
+}
+
+func TestControlStatusLookup_MapsMultipleISCSIFrontendsToMultipathTarget(t *testing.T) {
+	client := &fakeEvidenceClient{resp: &control.StatusResponse{
+		VolumeId:        "v1",
+		ReplicaId:       "r2",
+		Epoch:           2,
+		EndpointVersion: 1,
+		Assigned:        true,
+		Frontends: []*control.FrontendTarget{
+			{Protocol: "iscsi", Addr: "127.0.0.1:3260", Iqn: "iqn.2026-05.example:v1", Lun: 1},
+			{Protocol: "iscsi", Addr: "127.0.0.1:3261", Iqn: "iqn.2026-05.example:v1", Lun: 1},
+		},
+	}}
+	lookup := NewControlStatusLookupWithMultipath(client)
+
+	got, err := lookup.LookupPublishTarget(context.Background(), "v1", "node-a")
+	if err != nil {
+		t.Fatalf("LookupPublishTarget: %v", err)
+	}
+	if !got.Multipath {
+		t.Fatalf("multipath=false target=%+v", got)
+	}
+	if got.IQN != "iqn.2026-05.example:v1" || got.ISCSIAddr != "127.0.0.1:3260" {
+		t.Fatalf("target=%+v", got)
+	}
+	if len(got.ISCSIAddrs) != 2 || got.ISCSIAddrs[0] != "127.0.0.1:3260" || got.ISCSIAddrs[1] != "127.0.0.1:3261" {
+		t.Fatalf("ISCSIAddrs=%v", got.ISCSIAddrs)
+	}
+	ctx := publishContext(got)
+	if ctx["stage2_multipath"] != "true" {
+		t.Fatalf("publish_context missing multipath marker: %+v", ctx)
+	}
+	if ctx["iscsiAddrs"] != "127.0.0.1:3260,127.0.0.1:3261" {
+		t.Fatalf("iscsiAddrs=%q", ctx["iscsiAddrs"])
+	}
+}
+
+func TestControlStatusLookup_DoesNotMergeISCSIFrontendsWithDifferentIQN(t *testing.T) {
+	client := &fakeEvidenceClient{resp: &control.StatusResponse{
+		VolumeId:  "v1",
+		ReplicaId: "r2",
+		Assigned:  true,
+		Frontends: []*control.FrontendTarget{
+			{Protocol: "iscsi", Addr: "127.0.0.1:3260", Iqn: "iqn.2026-05.example:v1-r1"},
+			{Protocol: "iscsi", Addr: "127.0.0.1:3261", Iqn: "iqn.2026-05.example:v1-r2"},
+		},
+	}}
+	lookup := NewControlStatusLookupWithMultipath(client)
+
+	got, err := lookup.LookupPublishTarget(context.Background(), "v1", "node-a")
+	if err != nil {
+		t.Fatalf("LookupPublishTarget: %v", err)
+	}
+	if got.Multipath || len(got.ISCSIAddrs) != 0 {
+		t.Fatalf("must not merge different IQNs into one multipath target: %+v", got)
+	}
+	if got.IQN != "iqn.2026-05.example:v1-r1" || got.ISCSIAddr != "127.0.0.1:3260" {
+		t.Fatalf("target=%+v", got)
+	}
+}
+
+func TestControlStatusLookup_DefaultDoesNotEnableMultipath(t *testing.T) {
+	client := &fakeEvidenceClient{resp: &control.StatusResponse{
+		VolumeId:  "v1",
+		ReplicaId: "r2",
+		Assigned:  true,
+		Frontends: []*control.FrontendTarget{
+			{Protocol: "iscsi", Addr: "127.0.0.1:3260", Iqn: "iqn.2026-05.example:v1", Lun: 1},
+			{Protocol: "iscsi", Addr: "127.0.0.1:3261", Iqn: "iqn.2026-05.example:v1", Lun: 1},
+		},
+	}}
+	lookup := NewControlStatusLookup(client)
+
+	got, err := lookup.LookupPublishTarget(context.Background(), "v1", "node-a")
+	if err != nil {
+		t.Fatalf("LookupPublishTarget: %v", err)
+	}
+	if got.Multipath || len(got.ISCSIAddrs) != 0 {
+		t.Fatalf("default lookup must preserve single-path behavior: %+v", got)
+	}
+	if got.ISCSIAddr != "127.0.0.1:3260" || got.IQN != "iqn.2026-05.example:v1" {
+		t.Fatalf("target=%+v", got)
+	}
+}
+
+func TestNodeLoss_ControlStatusLookup_UsesFirstRoutableFrontendAsCurrentPrimary(t *testing.T) {
+	client := &fakeEvidenceClient{resp: &control.StatusResponse{
+		VolumeId:  "v1",
+		ReplicaId: "r2",
+		Assigned:  true,
+		Frontends: []*control.FrontendTarget{
+			{Protocol: "iscsi", Addr: "10.0.0.2:3260", Iqn: "iqn.2026-05.example:v1", Lun: 1},
+			{Protocol: "iscsi", Addr: "10.0.0.1:3260", Iqn: "iqn.2026-05.example:v1", Lun: 1},
+			{Protocol: "iscsi", Addr: "10.0.0.3:3260", Iqn: "iqn.2026-05.example:v1", Lun: 1},
+		},
+	}}
+	lookup := NewControlStatusLookupWithOptions(client, WithLoopbackPublishTargetsRejected())
+
+	got, err := lookup.LookupPublishTarget(context.Background(), "v1", "node-a")
+	if err != nil {
+		t.Fatalf("LookupPublishTarget: %v", err)
+	}
+	if got.Multipath || got.ISCSIAddr != "10.0.0.2:3260" || got.ReplicaID != "r2" {
+		t.Fatalf("target=%+v want promoted primary r2 first frontend", got)
+	}
+}
+
+func TestNodeLoss_ControlStatusLookup_RejectsLoopbackPublishTargetsWhenEnabled(t *testing.T) {
+	client := &fakeEvidenceClient{resp: &control.StatusResponse{
+		VolumeId:  "v1",
+		ReplicaId: "r1",
+		Assigned:  true,
+		Frontends: []*control.FrontendTarget{
+			{Protocol: "iscsi", Addr: "127.0.0.1:3260", Iqn: "iqn.2026-05.example:v1"},
+			{Protocol: "iscsi", Addr: "10.0.0.12:3260", Iqn: "iqn.2026-05.example:v1"},
+		},
+	}}
+	lookup := NewControlStatusLookupWithOptions(client, WithLoopbackPublishTargetsRejected())
+
+	got, err := lookup.LookupPublishTarget(context.Background(), "v1", "node-a")
+	if err != nil {
+		t.Fatalf("LookupPublishTarget: %v", err)
+	}
+	if got.ISCSIAddr != "10.0.0.12:3260" {
+		t.Fatalf("iscsi addr=%q want non-loopback target", got.ISCSIAddr)
+	}
+}
+
+func TestNodeLoss_ControlStatusLookup_AllowsHostnamePublishTargetsWhenLoopbackRejected(t *testing.T) {
+	client := &fakeEvidenceClient{resp: &control.StatusResponse{
+		VolumeId:  "v1",
+		ReplicaId: "r1",
+		Assigned:  true,
+		Frontends: []*control.FrontendTarget{
+			{Protocol: "iscsi", Addr: "sw-blockvolume-r1.default.svc.cluster.local:3260", Iqn: "iqn.2026-05.example:v1"},
+		},
+	}}
+	lookup := NewControlStatusLookupWithOptions(client, WithLoopbackPublishTargetsRejected())
+
+	got, err := lookup.LookupPublishTarget(context.Background(), "v1", "node-a")
+	if err != nil {
+		t.Fatalf("LookupPublishTarget: %v", err)
+	}
+	if got.ISCSIAddr != "sw-blockvolume-r1.default.svc.cluster.local:3260" {
+		t.Fatalf("iscsi addr=%q want hostname target", got.ISCSIAddr)
+	}
+}
+
+func TestNodeLoss_ControlStatusLookup_FailClosedWhenOnlyLoopbackTargets(t *testing.T) {
+	client := &fakeEvidenceClient{resp: &control.StatusResponse{
+		VolumeId:  "v1",
+		ReplicaId: "r1",
+		Assigned:  true,
+		Frontends: []*control.FrontendTarget{
+			{Protocol: "iscsi", Addr: "127.0.0.1:3260", Iqn: "iqn.2026-05.example:v1"},
+		},
+	}}
+	lookup := NewControlStatusLookupWithOptions(client, WithLoopbackPublishTargetsRejected())
+
+	if _, err := lookup.LookupPublishTarget(context.Background(), "v1", "node-a"); !errors.Is(err, ErrPublishTargetNotFound) {
+		t.Fatalf("err=%v want ErrPublishTargetNotFound", err)
+	}
+}
+
+func TestControlStatusLookup_CarriesGenerationEvidenceForGateOnly(t *testing.T) {
+	lookup := NewControlStatusLookup(&fakeEvidenceClient{resp: &control.StatusResponse{
+		VolumeId:        "v1",
+		ReplicaId:       "r2",
+		Epoch:           2,
+		EndpointVersion: 4,
+		Assigned:        true,
+		Frontends: []*control.FrontendTarget{{
+			Protocol: "iscsi",
+			Addr:     "127.0.0.2:3260",
+			Iqn:      "iqn.2026-05.example:v1-r2",
+		}},
+	}})
+
+	got, err := lookup.LookupPublishTarget(context.Background(), "v1", "node-a")
+	if err != nil {
+		t.Fatalf("LookupPublishTarget: %v", err)
+	}
+	if got.ReplicaID != "r2" || got.Epoch != 2 || got.EndpointVersion != 4 {
+		t.Fatalf("target=%+v want r2@2/4", got)
 	}
 }
 

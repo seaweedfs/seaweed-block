@@ -76,17 +76,20 @@ type LifecycleStores struct {
 // Host is the composed master-side block product daemon. Lifecycle
 // is: New -> Start -> (serve requests) -> Close.
 type Host struct {
-	cfg       Config
-	log       *log.Logger
-	boot      *bootstrap.DurableAuthorityBootstrap
-	ctrl      *authority.TopologyController
-	obs       *authority.ObservationHost
-	ln        net.Listener
-	grpc      *grpc.Server
-	topo      authority.AcceptedTopology
-	lifecycle *LifecycleStores
-	cancel    context.CancelFunc
-	wg        sync.WaitGroup
+	cfg             Config
+	log             *log.Logger
+	boot            *bootstrap.DurableAuthorityBootstrap
+	ctrl            *authority.TopologyController
+	obs             *authority.ObservationHost
+	ln              net.Listener
+	grpc            *grpc.Server
+	topo            authority.AcceptedTopology
+	lifecycle       *LifecycleStores
+	events          *eventRing
+	promotionMu     sync.RWMutex
+	promotionProber PromotionEvidenceProvider
+	cancel          context.CancelFunc
+	wg              sync.WaitGroup
 
 	started atomic.Bool
 }
@@ -155,16 +158,35 @@ func New(cfg Config) (*Host, error) {
 	holder := &publisherHolder{}
 	ctrl := authority.NewTopologyController(cfg.ControllerConfig, holder)
 
-	boot, err := bootstrap.Bootstrap(cfg.AuthorityStoreDir, ctrl)
+	h := &Host{
+		cfg:    cfg,
+		log:    lg,
+		ctrl:   ctrl,
+		topo:   cfg.Topology,
+		events: newEventRing(1024),
+	}
+
+	boot, err := bootstrap.BootstrapWithOptions(cfg.AuthorityStoreDir, ctrl, bootstrap.Options{
+		PublishObserver: h.recordAuthorityPublishedEvent,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("master.New: Bootstrap: %w", err)
 	}
 	holder.set(boot.Publisher)
 
+	var sink authority.ControllerSink = ctrl
+	if len(cfg.Topology.Volumes) == 0 {
+		// Dynamic lifecycle volumes derive their accepted topology from
+		// placement intents in RunLifecycleProductTick. With no static
+		// topology configured, the observation host should collect facts
+		// but must not submit "unknown volume" reports that would clear
+		// lifecycle-driven desired authority.
+		sink = nil
+	}
 	obs := authority.NewObservationHost(authority.ObservationHostConfig{
 		Freshness: cfg.Freshness,
 		Topology:  cfg.Topology,
-		Sink:      ctrl,
+		Sink:      sink,
 		Reader:    boot.Publisher,
 	})
 
@@ -180,22 +202,17 @@ func New(cfg Config) (*Host, error) {
 		return nil, fmt.Errorf("master.New: listen %q: %w", cfg.Listen, err)
 	}
 
-	h := &Host{
-		cfg:       cfg,
-		log:       lg,
-		boot:      boot,
-		ctrl:      ctrl,
-		obs:       obs,
-		ln:        ln,
-		topo:      cfg.Topology,
-		lifecycle: lifecycleStores,
-	}
+	h.boot = boot
+	h.obs = obs
+	h.ln = ln
+	h.lifecycle = lifecycleStores
 
 	grpcSrv := grpc.NewServer()
 	svc := newServices(h)
 	control.RegisterObservationServiceServer(grpcSrv, svc)
 	control.RegisterAssignmentServiceServer(grpcSrv, svc)
 	control.RegisterEvidenceServiceServer(grpcSrv, svc)
+	control.RegisterClusterEvidenceServiceServer(grpcSrv, svc)
 	control.RegisterLifecycleServiceServer(grpcSrv, svc)
 	h.grpc = grpcSrv
 

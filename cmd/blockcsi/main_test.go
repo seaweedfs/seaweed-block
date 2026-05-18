@@ -93,6 +93,32 @@ func TestParseFlags_VersionDoesNotRequireEndpoint(t *testing.T) {
 	}
 }
 
+func TestParseFlags_Stage2MultipathIsExplicitOptIn(t *testing.T) {
+	f, err := parseFlags([]string{"--endpoint", "unix:///tmp/csi.sock", "--node-id", "node-a", "--master", "blockmaster:9333", "--stage2-multipath"})
+	if err != nil {
+		t.Fatalf("parseFlags: %v", err)
+	}
+	if !f.stage2Multipath {
+		t.Fatal("stage2 multipath flag not set")
+	}
+}
+
+func TestParseFlags_RejectLoopbackPublishTargetsIsExplicitOptIn(t *testing.T) {
+	f, err := parseFlags([]string{"--endpoint", "unix:///tmp/csi.sock", "--node-id", "node-a", "--master", "blockmaster:9333", "--reject-loopback-publish-targets"})
+	if err != nil {
+		t.Fatalf("parseFlags: %v", err)
+	}
+	if !f.rejectLoopbackPublishTargets {
+		t.Fatal("reject loopback publish targets flag not set")
+	}
+}
+
+func TestParseFlags_MasterDependentFlagsRequireMaster(t *testing.T) {
+	if _, err := parseFlags([]string{"--endpoint", "unix:///tmp/csi.sock", "--node-id", "node-a", "--stage2-multipath"}); err == nil {
+		t.Fatal("expected --stage2-multipath without --master to fail")
+	}
+}
+
 func TestG15a_BlockCSIControllerPublishUsesMasterFrontendFact(t *testing.T) {
 	if testing.Short() {
 		t.Skip("L2 subprocess test; -short skip")

@@ -167,3 +167,16 @@ func waitAuthorityLine(t *testing.T, pub *authority.Publisher, volumeID string) 
 	t.Fatalf("timeout waiting for authority line %s", volumeID)
 	return authority.AuthorityBasis{}
 }
+
+func waitAuthorityReplica(t *testing.T, pub *authority.Publisher, volumeID, replicaID string) authority.AuthorityBasis {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if line, ok := pub.VolumeAuthorityLine(volumeID); ok && line.ReplicaID == replicaID {
+			return line
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("timeout waiting for authority line %s on replica %s", volumeID, replicaID)
+	return authority.AuthorityBasis{}
+}
