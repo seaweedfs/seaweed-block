@@ -68,7 +68,9 @@ Expected final line:
 
 This default example proves PVC write/read through pod replacement, captures
 `sw-block ops cluster` plus `sw-block ops inventory` evidence, and cleans the
-example resources. To also prove
+example resources. On multi-node clusters, activation automatically uses a
+node InternalIP plus CHAP-backed iSCSI so an app pod can mount the PVC from a
+different Kubernetes node. To also prove
 that the generated `blockvolume` can restart and reattach with data intact, use
 the durable restart workflow in
 [`operations-v1.md`](operations-v1.md#5-prove-durable-blockvolume-restart).

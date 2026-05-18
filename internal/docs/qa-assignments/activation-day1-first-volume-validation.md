@@ -14,8 +14,8 @@ Use the runner-native chain with immutable published images:
 swblock run \
   -env product_root=/tmp/seaweed_block \
   -env ssh_key=C:\work\dev_server\testdev_key \
-  -env sw_block_image=ghcr.io/seaweedfs/seaweed-block:sha-3a916a120d10 \
-  -env sw_block_csi_image=ghcr.io/seaweedfs/seaweed-block-csi:sha-3a916a120d10 \
+  -env sw_block_image=ghcr.io/seaweedfs/seaweed-block:sha-28a99ce4f644 \
+  -env sw_block_csi_image=ghcr.io/seaweedfs/seaweed-block-csi:sha-28a99ce4f644 \
   testops/scenarios/activation-day1-first-volume-chain.yaml
 ```
 
@@ -52,6 +52,9 @@ cleanup_status=ok
 ## Pass Criteria
 
 - Activation succeeds using immutable published images.
+- On multi-node clusters, activation uses a non-loopback publish target and
+  CHAP-backed node-stage secret references; loopback `127.0.0.1` must not be
+  the publish target for a writer on a different node.
 - The example PVC reaches `Bound`.
 - The writer pod logs `/data/demo.bin: OK`.
 - The reader pod logs `/data/demo.bin: OK` after the writer pod is deleted.

@@ -44,6 +44,10 @@ This D2/D3 slice should ship:
    - `inventory_bundle=status/inventory`
    - `cleanup_status=ok|failed`
 5. QA run on immutable GHCR tags.
+6. Multi-node activation must avoid loopback publish targets by default:
+   activation auto-selects a Ready node InternalIP, enables external
+   iSCSI/status with CHAP, and renders node-stage secret references into the
+   StorageClass used by the first-volume example.
 
 ## Out Of Scope
 

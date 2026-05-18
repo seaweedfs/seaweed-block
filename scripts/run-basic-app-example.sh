@@ -10,6 +10,7 @@ PVC_NAME="sw-block-example-pvc"
 WRITER_POD="sw-block-example-writer"
 READER_POD="sw-block-example-reader"
 EXAMPLE_DIR="$ROOT/examples/kubernetes/basic-app"
+CHAP_SECRET_NAME="${SW_BLOCK_ISCSI_CHAP_SECRET_NAME:-sw-block-iscsi-chap}"
 FIRST_VOLUME_STATUS="ok"
 FAILED_PHASE=""
 CLEANUP_STATUS="external_to_script"
@@ -41,6 +42,35 @@ safe_capture() {
   local out="$1"
   shift
   "$@" >"$out" 2>&1 || true
+}
+
+inject_node_stage_secret_into_storageclass() {
+  local input="$1"
+  local output="$2"
+  local secret="$3"
+  local namespace="$4"
+  awk -v secret="$secret" -v namespace="$namespace" '
+    /^parameters:[[:space:]]*$/ {
+      print
+      print "  csi.storage.k8s.io/node-stage-secret-name: \"" secret "\""
+      print "  csi.storage.k8s.io/node-stage-secret-namespace: \"" namespace "\""
+      next
+    }
+    { print }
+  ' "$input" >"$output"
+}
+
+render_example_manifest() {
+  local input="$EXAMPLE_DIR/storageclass-pvc.yaml"
+  local output="$ARTIFACT_DIR/storageclass-pvc.rendered.yaml"
+  if kubectl -n "$NAMESPACE" get secret "$CHAP_SECRET_NAME" >/dev/null 2>&1; then
+    inject_node_stage_secret_into_storageclass "$input" "$output" "$CHAP_SECRET_NAME" "$NAMESPACE"
+    log "node_stage_secret=$CHAP_SECRET_NAME namespace=$NAMESPACE"
+  else
+    cp "$input" "$output"
+    log "node_stage_secret=none"
+  fi
+  EXAMPLE_MANIFEST="$output"
 }
 
 capture_failure_diagnostics() {
@@ -193,8 +223,9 @@ fi
 log "artifact_dir=$ARTIFACT_DIR"
 log "namespace=$NAMESPACE"
 log "master_port=$MASTER_PORT"
+render_example_manifest
 log "apply StorageClass and PVC"
-kubectl apply -f "$EXAMPLE_DIR/storageclass-pvc.yaml" | tee "$ARTIFACT_DIR/apply-storageclass-pvc.log"
+kubectl apply -f "$EXAMPLE_MANIFEST" | tee "$ARTIFACT_DIR/apply-storageclass-pvc.log"
 kubectl -n "$NAMESPACE" wait --for=jsonpath='{.status.phase}'=Bound "pvc/${PVC_NAME}" --timeout=180s | tee "$ARTIFACT_DIR/wait-pvc-bound.log"
 
 safe_capture "$ARTIFACT_DIR/pvc.after-bound.txt" kubectl -n "$NAMESPACE" get pvc "$PVC_NAME" -o wide
