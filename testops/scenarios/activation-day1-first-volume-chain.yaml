@@ -11,8 +11,8 @@ timeout: 24m
 env:
   product_root: "/tmp/seaweed_block"
   ssh_key: "C:\\work\\dev_server\\testdev_key"
-  sw_block_image: "ghcr.io/seaweedfs/seaweed-block:sha-3a916a120d10"
-  sw_block_csi_image: "ghcr.io/seaweedfs/seaweed-block-csi:sha-3a916a120d10"
+  sw_block_image: "ghcr.io/seaweedfs/seaweed-block:sha-28a99ce4f644"
+  sw_block_csi_image: "ghcr.io/seaweedfs/seaweed-block-csi:sha-28a99ce4f644"
 
 topology:
   nodes:

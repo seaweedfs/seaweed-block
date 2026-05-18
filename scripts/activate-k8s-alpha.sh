@@ -24,6 +24,16 @@ fi
 STORAGECLASS_NAME="${SW_BLOCK_STORAGECLASS_NAME:-sw-block-dynamic}"
 REPLICATION_ACK="${SW_BLOCK_ALPHA_REPLICATION_ACK:-best-effort}"
 FRONTEND_PROTOCOL="${SW_BLOCK_FRONTEND_PROTOCOL:-iscsi}"
+APP_NAMESPACE="${SW_BLOCK_APP_NAMESPACE:-default}"
+CHAP_SECRET_NAME="${SW_BLOCK_ISCSI_CHAP_SECRET_NAME:-sw-block-iscsi-chap}"
+CHAP_USERNAME="${SW_BLOCK_ISCSI_CHAP_USERNAME:-}"
+CHAP_SECRET="${SW_BLOCK_ISCSI_CHAP_SECRET:-}"
+LAUNCHER_EXTERNAL_ISCSI="${SW_BLOCK_LAUNCHER_EXTERNAL_ISCSI:-}"
+LAUNCHER_EXTERNAL_STATUS="${SW_BLOCK_LAUNCHER_EXTERNAL_STATUS:-}"
+ALPHA_NODE_SPECS="${SW_BLOCK_ALPHA_NODE_SPECS:-}"
+DAY1_NETWORK_MODE="loopback"
+DAY1_TARGET_NODE=""
+DAY1_TARGET_IP=""
 
 mkdir -p "$ARTIFACT_DIR"
 
@@ -47,6 +57,16 @@ safe_kubectl() {
   kubectl "$@" 2>/dev/null || true
 }
 
+ready_schedulable_node_count() {
+  safe_kubectl get nodes -o wide --no-headers \
+    | awk '$2 ~ /Ready/ && $2 !~ /SchedulingDisabled/ {ready++} END {print ready+0}'
+}
+
+first_ready_node_with_internal_ip() {
+  safe_kubectl get nodes -o wide --no-headers \
+    | awk '$2 ~ /Ready/ && $2 !~ /SchedulingDisabled/ && $6 !~ /^(127\.|0\.0\.0\.0|::1$)/ {print $1 "|" $6; exit}'
+}
+
 image_digest() {
   local image="$1"
   if command -v docker >/dev/null 2>&1; then
@@ -54,6 +74,22 @@ image_digest() {
       | sed -n 's/.*"digest": "\(sha256:[^"]*\)".*/\1/p' \
       | head -1
   fi
+}
+
+inject_node_stage_secret_into_storageclass() {
+  local input="$1"
+  local output="$2"
+  local secret="$3"
+  local namespace="$4"
+  awk -v secret="$secret" -v namespace="$namespace" '
+    /^parameters:[[:space:]]*$/ {
+      print
+      print "  csi.storage.k8s.io/node-stage-secret-name: \"" secret "\""
+      print "  csi.storage.k8s.io/node-stage-secret-namespace: \"" namespace "\""
+      next
+    }
+    { print }
+  ' "$input" >"$output"
 }
 
 collect_failure_diagnostics() {
@@ -115,6 +151,12 @@ write_summary() {
     echo "csi_image_digest=$(summary_value "$(image_digest "$CSI_IMAGE")")"
     echo "protocol=$FRONTEND_PROTOCOL"
     echo "ack_profile=$REPLICATION_ACK"
+    echo "day1_network_mode=$DAY1_NETWORK_MODE"
+    echo "day1_target_node=$(summary_value "$DAY1_TARGET_NODE")"
+    echo "day1_target_ip=$(summary_value "$DAY1_TARGET_IP")"
+    echo "external_iscsi=$([[ "$LAUNCHER_EXTERNAL_ISCSI" == "1" || "$LAUNCHER_EXTERNAL_ISCSI" == "true" ]] && echo true || echo false)"
+    echo "external_status=$([[ "$LAUNCHER_EXTERNAL_STATUS" == "1" || "$LAUNCHER_EXTERNAL_STATUS" == "true" ]] && echo true || echo false)"
+    echo "chap_enabled=$([[ -n "$CHAP_SECRET" ]] && echo true || echo false)"
     echo "ready_kubernetes_nodes=$(summary_value "$nodes_ready")"
     echo "master_ready_replicas=$(summary_value "$master_ready")"
     echo "csi_controller_ready_replicas=$(summary_value "$csi_controller_ready")"
@@ -151,6 +193,28 @@ require_cmd bash
 require_cmd kubectl
 require_cmd docker
 
+READY_NODE_COUNT="$(ready_schedulable_node_count)"
+if [[ -z "$ALPHA_NODE_SPECS" && -z "$LAUNCHER_EXTERNAL_ISCSI" && -z "$LAUNCHER_EXTERNAL_STATUS" && "${READY_NODE_COUNT:-0}" -gt 1 ]]; then
+  first_node="$(first_ready_node_with_internal_ip)"
+  if [[ -z "$first_node" ]]; then
+    write_summary "failed" "multi-node-internal-ip-discovery"
+    echo "multi-node activation requires at least one Ready schedulable node with non-loopback InternalIP" >&2
+    exit 2
+  fi
+  IFS='|' read -r DAY1_TARGET_NODE DAY1_TARGET_IP <<< "$first_node"
+  ALPHA_NODE_SPECS="${DAY1_TARGET_NODE}|${DAY1_TARGET_NODE}|${DAY1_TARGET_IP}|default"
+  LAUNCHER_EXTERNAL_ISCSI="1"
+  LAUNCHER_EXTERNAL_STATUS="1"
+  CHAP_USERNAME="${CHAP_USERNAME:-sw-block}"
+  CHAP_SECRET="${CHAP_SECRET:-sw-block-alpha-${RANDOM}-${RANDOM}-${RANDOM}}"
+  DAY1_NETWORK_MODE="external-iscsi"
+fi
+if [[ "$LAUNCHER_EXTERNAL_ISCSI" == "1" || "$LAUNCHER_EXTERNAL_ISCSI" == "true" ]]; then
+  DAY1_NETWORK_MODE="external-iscsi"
+  CHAP_USERNAME="${CHAP_USERNAME:-sw-block}"
+  CHAP_SECRET="${CHAP_SECRET:-sw-block-alpha-${RANDOM}-${RANDOM}-${RANDOM}}"
+fi
+
 log "artifact_dir=$ARTIFACT_DIR"
 log "root=$ROOT"
 log "image_mode=$IMAGE_MODE"
@@ -159,6 +223,9 @@ log "csi_image=$CSI_IMAGE"
 log "import_k3s=$IMPORT_K3S"
 log "storageclass=$STORAGECLASS_NAME"
 log "replication_ack=$REPLICATION_ACK"
+log "day1_network_mode=$DAY1_NETWORK_MODE"
+log "day1_target_node=${DAY1_TARGET_NODE:-unknown}"
+log "day1_target_ip=${DAY1_TARGET_IP:-unknown}"
 
 if [[ "$IMAGE_MODE" == "published" ]]; then
   run_phase preflight bash "$ROOT/scripts/preflight-k8s-alpha.sh" --ghcr
@@ -204,11 +271,22 @@ run_phase install env \
   SW_BLOCK_IMAGE="$IMAGE" \
   SW_BLOCK_CSI_IMAGE="$CSI_IMAGE" \
   SW_BLOCK_ALPHA_REPLICATION_ACK="$REPLICATION_ACK" \
+  SW_BLOCK_ALPHA_NODE_SPECS="$ALPHA_NODE_SPECS" \
+  SW_BLOCK_LAUNCHER_EXTERNAL_ISCSI="$LAUNCHER_EXTERNAL_ISCSI" \
+  SW_BLOCK_LAUNCHER_EXTERNAL_STATUS="$LAUNCHER_EXTERNAL_STATUS" \
+  SW_BLOCK_ISCSI_CHAP_SECRET_NAME="$CHAP_SECRET_NAME" \
+  SW_BLOCK_ISCSI_CHAP_USERNAME="$CHAP_USERNAME" \
+  SW_BLOCK_ISCSI_CHAP_SECRET="$CHAP_SECRET" \
+  SW_BLOCK_APP_NAMESPACE="$APP_NAMESPACE" \
   bash "$ROOT/scripts/install-k8s-alpha.sh" "$ROOT"
 
 STORAGECLASS_RENDERED="$ARTIFACT_DIR/storageclass.rendered.yaml"
 sed "s/name: sw-block-dynamic/name: ${STORAGECLASS_NAME}/" \
   "$ROOT/deploy/k8s/alpha/storageclass.yaml" >"$STORAGECLASS_RENDERED"
+if [[ -n "$CHAP_SECRET" ]]; then
+  inject_node_stage_secret_into_storageclass "$STORAGECLASS_RENDERED" "$STORAGECLASS_RENDERED.tmp" "$CHAP_SECRET_NAME" "$APP_NAMESPACE"
+  mv "$STORAGECLASS_RENDERED.tmp" "$STORAGECLASS_RENDERED"
+fi
 run_phase storageclass kubectl apply -f "$STORAGECLASS_RENDERED"
 
 {
