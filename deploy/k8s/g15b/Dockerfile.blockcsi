@@ -12,8 +12,10 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends \
       e2fsprogs \
       kmod \
+      multipath-tools \
       nvme-cli \
       open-iscsi \
+      sg3-utils \
       util-linux && \
     rm -rf /var/lib/apt/lists/*
 

@@ -214,8 +214,8 @@ func (v *ReplicationVolume) Sync(ctx context.Context, targetLSN uint64) error {
 //   - generation == 0: unversioned apply. Peer map IS mutated, but
 //     lastAppliedGeneration is NOT advanced. Intended for test /
 //     fake-master use only; production master MUST emit >= 1.
-//   - generation > 0 && generation > lastAppliedGeneration: apply
-//     + advance lastAppliedGeneration.
+//   - generation > 0 && generation > lastAppliedGeneration: apply and
+//     advance lastAppliedGeneration.
 //   - generation > 0 && generation <= lastAppliedGeneration: stale
 //     replay. Peer map NOT mutated; replayedGens counter increments;
 //     debug log emits a peer-ID-set delta diff for forensics. Returns
@@ -283,6 +283,7 @@ func (v *ReplicationVolume) UpdateReplicaSet(generation uint64, targets []Replic
 	}
 
 	// Add new peers + recreate on lineage bump.
+	addedPeers := make([]*ReplicaPeer, 0, len(want))
 	for id, t := range want {
 		if existing, ok := v.peers[id]; ok {
 			cur := existing.Target()
@@ -328,13 +329,56 @@ func (v *ReplicationVolume) UpdateReplicaSet(generation uint64, targets []Replic
 		if v.onPeerAdded != nil {
 			v.onPeerAdded(peer)
 		}
+		addedPeers = append(addedPeers, peer)
 	}
+
+	v.seedNewPeerLiveCursorsLocked(addedPeers)
 
 	// Advance the monotonic guard only for real (non-zero) generations.
 	if generation > 0 {
 		v.lastAppliedGeneration = generation
 	}
 	return nil
+}
+
+// seedNewPeerLiveCursorsLocked verifies that newly installed peers have
+// durably reached this node's local frontier, then seeds their live
+// ship cursor so the first post-promotion write starts at frontier+1.
+// This is the promoted-primary handoff proof: peers that cannot answer
+// the barrier, or answer below the frontier, are degraded and therefore
+// cannot satisfy sync-quorum/sync-all write acknowledgement.
+func (v *ReplicationVolume) seedNewPeerLiveCursorsLocked(peers []*ReplicaPeer) {
+	if len(peers) == 0 {
+		return
+	}
+	frontier, err := v.store.Sync()
+	if err != nil {
+		log.Printf("replication: volume %s live cursor seed skipped: local sync failed: %v",
+			v.volumeID, err)
+		return
+	}
+	if frontier == 0 {
+		return
+	}
+	for _, peer := range peers {
+		if peer == nil {
+			continue
+		}
+		ack, err := peer.Barrier(context.Background(), frontier)
+		if err != nil {
+			log.Printf("replication: volume %s live cursor seed failed peer=%s frontier=%d: %v",
+				v.volumeID, peer.Target().ReplicaID, frontier, err)
+			continue
+		}
+		if ack.AchievedLSN < frontier {
+			peer.Invalidate(fmt.Sprintf("promotion seed barrier below frontier: achieved=%d required=%d",
+				ack.AchievedLSN, frontier))
+			log.Printf("replication: volume %s live cursor seed rejected peer=%s achieved=%d required=%d",
+				v.volumeID, peer.Target().ReplicaID, ack.AchievedLSN, frontier)
+			continue
+		}
+		peer.SeedLiveShipCursor(frontier, "assignment frontier barrier")
+	}
 }
 
 // peerIDSet extracts the set of peer IDs from the current peers map.

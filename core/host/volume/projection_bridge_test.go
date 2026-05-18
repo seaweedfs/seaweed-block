@@ -12,9 +12,18 @@ import (
 	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
 )
 
-type stubProjector struct{ p engine.ReplicaProjection }
+type stubProjector struct {
+	p     engine.ReplicaProjection
+	ready *engine.PromotionReadyFact
+}
 
 func (s stubProjector) Projection() engine.ReplicaProjection { return s.p }
+func (s stubProjector) PromotionReadyFact() engine.PromotionReadyFact {
+	if s.ready == nil {
+		return engine.PromotionReadyFact{Reason: engine.PromotionReadyReasonNotCaughtUp}
+	}
+	return *s.ready
+}
 
 type stubProbe struct {
 	yes   bool

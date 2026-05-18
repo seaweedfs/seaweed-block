@@ -109,6 +109,10 @@ type DurableReport struct {
 	EndpointVersion uint64 `json:"endpoint_version"`
 	Latched         bool   `json:"latched"`
 	Operational     bool   `json:"operational"`
+	FrontierKnown   bool   `json:"frontier_known"`
+	DurableLSN      uint64 `json:"durable_lsn"`
+	RetainedLSN     uint64 `json:"retained_lsn"`
+	HeadLSN         uint64 `json:"head_lsn"`
 	Closed          bool   `json:"closed"`
 	Evidence        string `json:"evidence,omitempty"`
 }
@@ -275,6 +279,10 @@ func durableSnapshots(statuses []durable.VolumeStatus) []DurableReport {
 			EndpointVersion: st.EndpointVersion,
 			Latched:         st.Latched,
 			Operational:     st.Operational,
+			FrontierKnown:   st.FrontierKnown,
+			DurableLSN:      st.DurableLSN,
+			RetainedLSN:     st.RetainedLSN,
+			HeadLSN:         st.HeadLSN,
 			Closed:          st.Closed,
 			Evidence:        st.Evidence,
 		})

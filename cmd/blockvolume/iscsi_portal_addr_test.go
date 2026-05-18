@@ -62,6 +62,85 @@ func TestParseFlags_IscsiPortalAddrStillRejectsExternalBind(t *testing.T) {
 	}
 }
 
+func TestParseFlags_IscsiExternalBindRequiresExplicitOptIn(t *testing.T) {
+	args := append(requiredBlockvolumeArgs(),
+		"--iscsi-listen", "203.0.113.10:3260",
+		"--iscsi-iqn", "iqn.2026-05.io.seaweedfs:test-v1",
+		"--iscsi-chap-username", "user1",
+		"--iscsi-chap-secret", "secret1",
+	)
+	_, err := parseFlags(args)
+	if err == nil {
+		t.Fatal("parseFlags succeeded; want explicit external bind opt-in")
+	}
+	if !strings.Contains(err.Error(), "not loopback") {
+		t.Fatalf("error = %q, want loopback bind rejection", err)
+	}
+}
+
+func TestParseFlags_IscsiExternalBindOptInRequiresCHAP(t *testing.T) {
+	args := append(requiredBlockvolumeArgs(),
+		"--allow-external-iscsi-bind",
+		"--iscsi-listen", "203.0.113.10:3260",
+		"--iscsi-iqn", "iqn.2026-05.io.seaweedfs:test-v1",
+	)
+	_, err := parseFlags(args)
+	if err == nil {
+		t.Fatal("parseFlags succeeded; want CHAP requirement")
+	}
+	if !strings.Contains(err.Error(), "requires CHAP") {
+		t.Fatalf("error = %q, want CHAP requirement", err)
+	}
+}
+
+func TestParseFlags_IscsiExternalBindOptInWithCHAP(t *testing.T) {
+	args := append(requiredBlockvolumeArgs(),
+		"--allow-external-iscsi-bind",
+		"--iscsi-listen", "203.0.113.10:3260",
+		"--iscsi-iqn", "iqn.2026-05.io.seaweedfs:test-v1",
+		"--iscsi-chap-username", "user1",
+		"--iscsi-chap-secret", "secret1",
+	)
+	got, err := parseFlags(args)
+	if err != nil {
+		t.Fatalf("parseFlags: %v", err)
+	}
+	if !got.allowExternalISCSIBind {
+		t.Fatal("allowExternalISCSIBind=false")
+	}
+}
+
+func TestParseFlags_IscsiExternalBindOptInRejectsLoopback(t *testing.T) {
+	args := append(requiredBlockvolumeArgs(),
+		"--allow-external-iscsi-bind",
+		"--iscsi-listen", "127.0.0.1:3260",
+		"--iscsi-iqn", "iqn.2026-05.io.seaweedfs:test-v1",
+		"--iscsi-chap-username", "user1",
+		"--iscsi-chap-secret", "secret1",
+	)
+	_, err := parseFlags(args)
+	if err == nil {
+		t.Fatal("parseFlags succeeded; want loopback external bind rejected")
+	}
+	if !strings.Contains(err.Error(), "non-loopback") {
+		t.Fatalf("error = %q, want non-loopback requirement", err)
+	}
+}
+
+func TestParseFlags_ExternalStatusBindIsExplicitFlag(t *testing.T) {
+	args := append(requiredBlockvolumeArgs(),
+		"--status-addr", "10.0.0.12:23260",
+		"--allow-external-status-bind",
+	)
+	got, err := parseFlags(args)
+	if err != nil {
+		t.Fatalf("parseFlags: %v", err)
+	}
+	if !got.allowExternalStatusBind {
+		t.Fatal("allowExternalStatusBind=false")
+	}
+}
+
 func TestParseFlags_IscsiDataOutTimeoutRequiresListen(t *testing.T) {
 	args := append(requiredBlockvolumeArgs(),
 		"--iscsi-dataout-timeout", "5s",

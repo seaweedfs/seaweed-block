@@ -3,6 +3,7 @@ package volume
 import (
 	"testing"
 
+	"github.com/seaweedfs/seaweed-block/core/engine"
 	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
 )
 
@@ -57,6 +58,83 @@ func TestHost_SetFrontendTargets_ReplacesPreviousSet(t *testing.T) {
 	}
 	if got[0].GetProtocol() != "nvme" || got[0].GetNqn() == "" {
 		t.Fatalf("replacement frontend not reflected: %+v", got[0])
+	}
+}
+
+func TestHost_BuildReport_NotReadyForPrimaryFromHeartbeatAlone(t *testing.T) {
+	h := newTestVolumeHost(t)
+	defer func() { _ = h.Close() }()
+
+	slot := h.buildReport().GetSlots()[0]
+	if slot.GetReadyForPrimary() {
+		t.Fatalf("fresh observed process must not be promotion-ready from heartbeat alone: %+v", slot)
+	}
+}
+
+func TestHost_BuildReport_SupportingReplicaReadyCanBePromotionCandidate(t *testing.T) {
+	h := &Host{
+		cfg: Config{
+			ServerID:  "node-a",
+			VolumeID:  "v1",
+			ReplicaID: "r2",
+			DataAddr:  "127.0.0.1:9202",
+			CtrlAddr:  "127.0.0.1:9102",
+		},
+	}
+	h.view = NewAdapterProjectionView(
+		stubProjector{
+			p: engine.ReplicaProjection{Mode: engine.ModeHealthy, Epoch: 1, EndpointVersion: 1},
+			ready: &engine.PromotionReadyFact{
+				Ready:           true,
+				Reason:          engine.PromotionReadyReasonReady,
+				ReplicaID:       "r2",
+				Epoch:           1,
+				EndpointVersion: 1,
+			},
+		},
+		"v1",
+		"r2",
+		stubProbe{other: &control.AssignmentFact{VolumeId: "v1", ReplicaId: "r1", Epoch: 1, EndpointVersion: 1}},
+	)
+
+	if h.view.Projection().Healthy {
+		t.Fatal("supporting replica must remain frontend-unhealthy before authority moves")
+	}
+	slot := h.buildReport().GetSlots()[0]
+	if !slot.GetReadyForPrimary() {
+		t.Fatalf("caught-up supporting replica should be a promotion candidate: %+v", slot)
+	}
+}
+
+func TestHost_BuildReport_SupersededReplicaNotReadyForPrimary(t *testing.T) {
+	h := &Host{
+		cfg: Config{
+			ServerID:  "node-a",
+			VolumeID:  "v1",
+			ReplicaID: "r1",
+			DataAddr:  "127.0.0.1:9201",
+			CtrlAddr:  "127.0.0.1:9101",
+		},
+	}
+	h.view = NewAdapterProjectionView(
+		stubProjector{
+			p: engine.ReplicaProjection{Mode: engine.ModeHealthy, Epoch: 1, EndpointVersion: 1},
+			ready: &engine.PromotionReadyFact{
+				Ready:           true,
+				Reason:          engine.PromotionReadyReasonReady,
+				ReplicaID:       "r1",
+				Epoch:           1,
+				EndpointVersion: 1,
+			},
+		},
+		"v1",
+		"r1",
+		stubProbe{yes: true},
+	)
+
+	slot := h.buildReport().GetSlots()[0]
+	if slot.GetReadyForPrimary() {
+		t.Fatalf("superseded replica must not be re-promoted from stale healthy projection: %+v", slot)
 	}
 }
 

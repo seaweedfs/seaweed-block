@@ -62,6 +62,33 @@ func TestPublisher_Bind_RejectsDoubleBind(t *testing.T) {
 	}
 }
 
+func TestPublisher_PublishObserverFiresAfterSuccessfulMintOnly(t *testing.T) {
+	var events []PublishEvent
+	pub := NewPublisher(NewStaticDirective(nil), WithPublishObserver(func(event PublishEvent) {
+		events = append(events, event)
+	}))
+	ask := AssignmentAsk{
+		VolumeID: "v1", ReplicaID: "r1",
+		DataAddr: "d", CtrlAddr: "c",
+		Intent: IntentBind,
+	}
+	if err := pub.apply(ask); err != nil {
+		t.Fatalf("Bind: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("events=%d want 1", len(events))
+	}
+	if events[0].Info.VolumeID != "v1" || events[0].Info.ReplicaID != "r1" || events[0].Info.Epoch != 1 {
+		t.Fatalf("event=%+v", events[0])
+	}
+	if err := pub.apply(ask); !errors.Is(err, ErrBindAlreadyBound) {
+		t.Fatalf("second Bind: want ErrBindAlreadyBound, got %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("observer fired for rejected ask: events=%+v", events)
+	}
+}
+
 func TestPublisher_RefreshEndpoint_BumpsOnlyEndpointVersion(t *testing.T) {
 	pub := NewPublisher(NewStaticDirective(nil))
 	if err := pub.apply(AssignmentAsk{
@@ -577,7 +604,7 @@ func TestPublisher_Run_LogsAndContinuesOnRejectedAsk(t *testing.T) {
 	// Run semantic.
 	dir := NewStaticDirective([]AssignmentAsk{
 		{VolumeID: "v1", ReplicaID: "r1", DataAddr: "d", CtrlAddr: "c", Intent: IntentReassign}, // rejected
-		{VolumeID: "v1", ReplicaID: "r1", DataAddr: "d", CtrlAddr: "c", Intent: IntentBind},    // accepted
+		{VolumeID: "v1", ReplicaID: "r1", DataAddr: "d", CtrlAddr: "c", Intent: IntentBind},     // accepted
 	})
 	pub := NewPublisher(dir)
 	ch, cancelSub := pub.Subscribe("v1", "r1")
@@ -672,9 +699,9 @@ func newClosureExecutor() *closureExecutor {
 	return ce
 }
 
-func (e *closureExecutor) SetOnSessionStart(fn adapter.OnSessionStart)     { e.onStart = fn }
-func (e *closureExecutor) SetOnSessionClose(fn adapter.OnSessionClose)     { e.onClose = fn }
-func (e *closureExecutor) SetOnFenceComplete(fn adapter.OnFenceComplete)   { e.onFenceComplete = fn }
+func (e *closureExecutor) SetOnSessionStart(fn adapter.OnSessionStart)   { e.onStart = fn }
+func (e *closureExecutor) SetOnSessionClose(fn adapter.OnSessionClose)   { e.onClose = fn }
+func (e *closureExecutor) SetOnFenceComplete(fn adapter.OnFenceComplete) { e.onFenceComplete = fn }
 
 func (e *closureExecutor) Probe(replicaID, dataAddr, ctrlAddr string, sessionID, epoch, endpointVersion uint64) adapter.ProbeResult {
 	return adapter.ProbeResult{
@@ -1242,4 +1269,3 @@ func receiveOrFail(t *testing.T, ch <-chan adapter.AssignmentInfo, who string) a
 		return adapter.AssignmentInfo{}
 	}
 }
-

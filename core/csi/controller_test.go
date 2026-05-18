@@ -116,6 +116,32 @@ func TestControllerPublish_DoesNotExposeCHAPSecretsInPublishContext(t *testing.T
 	}
 }
 
+func TestControllerPublish_DoesNotExposeAuthorityGenerationInPublishContext(t *testing.T) {
+	lookup := &stubLookup{target: PublishTarget{
+		VolumeID:        "v1",
+		ReplicaID:       "r2",
+		Epoch:           2,
+		EndpointVersion: 4,
+		Protocol:        ProtocolISCSI,
+		ISCSIAddr:       "127.0.0.2:3260",
+		IQN:             "iqn.2026-05.example.v3:v1-r2",
+	}}
+	s := NewControllerServer(lookup)
+
+	resp, err := s.ControllerPublishVolume(context.Background(), &csipb.ControllerPublishVolumeRequest{
+		VolumeId: "v1",
+		NodeId:   "node-a",
+	})
+	if err != nil {
+		t.Fatalf("ControllerPublishVolume: %v", err)
+	}
+	for _, key := range []string{"epoch", "endpointVersion", "replicaID", "primary", "ready", "healthy"} {
+		if _, ok := resp.GetPublishContext()[key]; ok {
+			t.Fatalf("authority field %q leaked in publish_context: %+v", key, resp.GetPublishContext())
+		}
+	}
+}
+
 func TestControllerPublish_FailsClosedWithoutVerifiedTarget(t *testing.T) {
 	s := NewControllerServer(&stubLookup{err: ErrPublishTargetNotFound})
 	_, err := s.ControllerPublishVolume(context.Background(), &csipb.ControllerPublishVolumeRequest{

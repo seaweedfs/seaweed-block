@@ -4,6 +4,7 @@
 //   volume -> master:   ObservationService.ReportHeartbeat (unary)
 //   volume -> master:   AssignmentService.SubscribeAssignments (server-streaming)
 //   operator -> master: EvidenceService.QueryVolumeStatus (unary, read-only)
+//   operator/dashboard -> master: ClusterEvidenceService read-only observation
 //   CSI/operator -> master: LifecycleService.CreateVolume/DeleteVolume (desired intent only)
 //
 // Boundary (T0 sketch §3 load-bearing):
@@ -35,7 +36,8 @@ import (
 const _ = grpc.SupportPackageIsVersion7
 
 const (
-	ObservationService_ReportHeartbeat_FullMethodName = "/seaweedfs.block.control.ObservationService/ReportHeartbeat"
+	ObservationService_ReportHeartbeat_FullMethodName    = "/seaweedfs.block.control.ObservationService/ReportHeartbeat"
+	ObservationService_ReportClusterEvent_FullMethodName = "/seaweedfs.block.control.ObservationService/ReportClusterEvent"
 )
 
 // ObservationServiceClient is the client API for ObservationService service.
@@ -46,6 +48,10 @@ type ObservationServiceClient interface {
 	// authority.HeartbeatMessage, calls ObservationHost.Ingest.
 	// Ack is diagnostic only.
 	ReportHeartbeat(ctx context.Context, in *HeartbeatReport, opts ...grpc.CallOption) (*HeartbeatAck, error)
+	// Node/CSI observation event. This appends an operator timeline event only;
+	// it MUST NOT mutate lifecycle, authority, placement, Kubernetes, or
+	// replica state.
+	ReportClusterEvent(ctx context.Context, in *ClusterEvent, opts ...grpc.CallOption) (*ClusterEventAck, error)
 }
 
 type observationServiceClient struct {
@@ -65,6 +71,15 @@ func (c *observationServiceClient) ReportHeartbeat(ctx context.Context, in *Hear
 	return out, nil
 }
 
+func (c *observationServiceClient) ReportClusterEvent(ctx context.Context, in *ClusterEvent, opts ...grpc.CallOption) (*ClusterEventAck, error) {
+	out := new(ClusterEventAck)
+	err := c.cc.Invoke(ctx, ObservationService_ReportClusterEvent_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ObservationServiceServer is the server API for ObservationService service.
 // All implementations must embed UnimplementedObservationServiceServer
 // for forward compatibility
@@ -73,6 +88,10 @@ type ObservationServiceServer interface {
 	// authority.HeartbeatMessage, calls ObservationHost.Ingest.
 	// Ack is diagnostic only.
 	ReportHeartbeat(context.Context, *HeartbeatReport) (*HeartbeatAck, error)
+	// Node/CSI observation event. This appends an operator timeline event only;
+	// it MUST NOT mutate lifecycle, authority, placement, Kubernetes, or
+	// replica state.
+	ReportClusterEvent(context.Context, *ClusterEvent) (*ClusterEventAck, error)
 	mustEmbedUnimplementedObservationServiceServer()
 }
 
@@ -82,6 +101,9 @@ type UnimplementedObservationServiceServer struct {
 
 func (UnimplementedObservationServiceServer) ReportHeartbeat(context.Context, *HeartbeatReport) (*HeartbeatAck, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ReportHeartbeat not implemented")
+}
+func (UnimplementedObservationServiceServer) ReportClusterEvent(context.Context, *ClusterEvent) (*ClusterEventAck, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ReportClusterEvent not implemented")
 }
 func (UnimplementedObservationServiceServer) mustEmbedUnimplementedObservationServiceServer() {}
 
@@ -114,6 +136,24 @@ func _ObservationService_ReportHeartbeat_Handler(srv interface{}, ctx context.Co
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ObservationService_ReportClusterEvent_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ClusterEvent)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ObservationServiceServer).ReportClusterEvent(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ObservationService_ReportClusterEvent_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ObservationServiceServer).ReportClusterEvent(ctx, req.(*ClusterEvent))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // ObservationService_ServiceDesc is the grpc.ServiceDesc for ObservationService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -124,6 +164,10 @@ var ObservationService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ReportHeartbeat",
 			Handler:    _ObservationService_ReportHeartbeat_Handler,
+		},
+		{
+			MethodName: "ReportClusterEvent",
+			Handler:    _ObservationService_ReportClusterEvent_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
@@ -350,6 +394,273 @@ var EvidenceService_ServiceDesc = grpc.ServiceDesc{
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
+	Metadata: "control.proto",
+}
+
+const (
+	ClusterEvidenceService_GetClusterStatus_FullMethodName   = "/seaweedfs.block.control.ClusterEvidenceService/GetClusterStatus"
+	ClusterEvidenceService_ListVolumes_FullMethodName        = "/seaweedfs.block.control.ClusterEvidenceService/ListVolumes"
+	ClusterEvidenceService_GetVolumeStatus_FullMethodName    = "/seaweedfs.block.control.ClusterEvidenceService/GetVolumeStatus"
+	ClusterEvidenceService_GetVolumeTimeline_FullMethodName  = "/seaweedfs.block.control.ClusterEvidenceService/GetVolumeTimeline"
+	ClusterEvidenceService_WatchClusterEvents_FullMethodName = "/seaweedfs.block.control.ClusterEvidenceService/WatchClusterEvents"
+)
+
+// ClusterEvidenceServiceClient is the client API for ClusterEvidenceService service.
+//
+// For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+type ClusterEvidenceServiceClient interface {
+	GetClusterStatus(ctx context.Context, in *GetClusterStatusRequest, opts ...grpc.CallOption) (*ClusterStatusResponse, error)
+	ListVolumes(ctx context.Context, in *ListVolumesRequest, opts ...grpc.CallOption) (*ListVolumesResponse, error)
+	GetVolumeStatus(ctx context.Context, in *GetVolumeStatusRequest, opts ...grpc.CallOption) (*VolumeEvidence, error)
+	GetVolumeTimeline(ctx context.Context, in *GetVolumeTimelineRequest, opts ...grpc.CallOption) (*VolumeTimelineResponse, error)
+	WatchClusterEvents(ctx context.Context, in *WatchClusterEventsRequest, opts ...grpc.CallOption) (ClusterEvidenceService_WatchClusterEventsClient, error)
+}
+
+type clusterEvidenceServiceClient struct {
+	cc grpc.ClientConnInterface
+}
+
+func NewClusterEvidenceServiceClient(cc grpc.ClientConnInterface) ClusterEvidenceServiceClient {
+	return &clusterEvidenceServiceClient{cc}
+}
+
+func (c *clusterEvidenceServiceClient) GetClusterStatus(ctx context.Context, in *GetClusterStatusRequest, opts ...grpc.CallOption) (*ClusterStatusResponse, error) {
+	out := new(ClusterStatusResponse)
+	err := c.cc.Invoke(ctx, ClusterEvidenceService_GetClusterStatus_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *clusterEvidenceServiceClient) ListVolumes(ctx context.Context, in *ListVolumesRequest, opts ...grpc.CallOption) (*ListVolumesResponse, error) {
+	out := new(ListVolumesResponse)
+	err := c.cc.Invoke(ctx, ClusterEvidenceService_ListVolumes_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *clusterEvidenceServiceClient) GetVolumeStatus(ctx context.Context, in *GetVolumeStatusRequest, opts ...grpc.CallOption) (*VolumeEvidence, error) {
+	out := new(VolumeEvidence)
+	err := c.cc.Invoke(ctx, ClusterEvidenceService_GetVolumeStatus_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *clusterEvidenceServiceClient) GetVolumeTimeline(ctx context.Context, in *GetVolumeTimelineRequest, opts ...grpc.CallOption) (*VolumeTimelineResponse, error) {
+	out := new(VolumeTimelineResponse)
+	err := c.cc.Invoke(ctx, ClusterEvidenceService_GetVolumeTimeline_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *clusterEvidenceServiceClient) WatchClusterEvents(ctx context.Context, in *WatchClusterEventsRequest, opts ...grpc.CallOption) (ClusterEvidenceService_WatchClusterEventsClient, error) {
+	stream, err := c.cc.NewStream(ctx, &ClusterEvidenceService_ServiceDesc.Streams[0], ClusterEvidenceService_WatchClusterEvents_FullMethodName, opts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &clusterEvidenceServiceWatchClusterEventsClient{stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+type ClusterEvidenceService_WatchClusterEventsClient interface {
+	Recv() (*ClusterEvent, error)
+	grpc.ClientStream
+}
+
+type clusterEvidenceServiceWatchClusterEventsClient struct {
+	grpc.ClientStream
+}
+
+func (x *clusterEvidenceServiceWatchClusterEventsClient) Recv() (*ClusterEvent, error) {
+	m := new(ClusterEvent)
+	if err := x.ClientStream.RecvMsg(m); err != nil {
+		return nil, err
+	}
+	return m, nil
+}
+
+// ClusterEvidenceServiceServer is the server API for ClusterEvidenceService service.
+// All implementations must embed UnimplementedClusterEvidenceServiceServer
+// for forward compatibility
+type ClusterEvidenceServiceServer interface {
+	GetClusterStatus(context.Context, *GetClusterStatusRequest) (*ClusterStatusResponse, error)
+	ListVolumes(context.Context, *ListVolumesRequest) (*ListVolumesResponse, error)
+	GetVolumeStatus(context.Context, *GetVolumeStatusRequest) (*VolumeEvidence, error)
+	GetVolumeTimeline(context.Context, *GetVolumeTimelineRequest) (*VolumeTimelineResponse, error)
+	WatchClusterEvents(*WatchClusterEventsRequest, ClusterEvidenceService_WatchClusterEventsServer) error
+	mustEmbedUnimplementedClusterEvidenceServiceServer()
+}
+
+// UnimplementedClusterEvidenceServiceServer must be embedded to have forward compatible implementations.
+type UnimplementedClusterEvidenceServiceServer struct {
+}
+
+func (UnimplementedClusterEvidenceServiceServer) GetClusterStatus(context.Context, *GetClusterStatusRequest) (*ClusterStatusResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetClusterStatus not implemented")
+}
+func (UnimplementedClusterEvidenceServiceServer) ListVolumes(context.Context, *ListVolumesRequest) (*ListVolumesResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ListVolumes not implemented")
+}
+func (UnimplementedClusterEvidenceServiceServer) GetVolumeStatus(context.Context, *GetVolumeStatusRequest) (*VolumeEvidence, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetVolumeStatus not implemented")
+}
+func (UnimplementedClusterEvidenceServiceServer) GetVolumeTimeline(context.Context, *GetVolumeTimelineRequest) (*VolumeTimelineResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetVolumeTimeline not implemented")
+}
+func (UnimplementedClusterEvidenceServiceServer) WatchClusterEvents(*WatchClusterEventsRequest, ClusterEvidenceService_WatchClusterEventsServer) error {
+	return status.Errorf(codes.Unimplemented, "method WatchClusterEvents not implemented")
+}
+func (UnimplementedClusterEvidenceServiceServer) mustEmbedUnimplementedClusterEvidenceServiceServer() {
+}
+
+// UnsafeClusterEvidenceServiceServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to ClusterEvidenceServiceServer will
+// result in compilation errors.
+type UnsafeClusterEvidenceServiceServer interface {
+	mustEmbedUnimplementedClusterEvidenceServiceServer()
+}
+
+func RegisterClusterEvidenceServiceServer(s grpc.ServiceRegistrar, srv ClusterEvidenceServiceServer) {
+	s.RegisterService(&ClusterEvidenceService_ServiceDesc, srv)
+}
+
+func _ClusterEvidenceService_GetClusterStatus_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetClusterStatusRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ClusterEvidenceServiceServer).GetClusterStatus(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ClusterEvidenceService_GetClusterStatus_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ClusterEvidenceServiceServer).GetClusterStatus(ctx, req.(*GetClusterStatusRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ClusterEvidenceService_ListVolumes_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListVolumesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ClusterEvidenceServiceServer).ListVolumes(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ClusterEvidenceService_ListVolumes_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ClusterEvidenceServiceServer).ListVolumes(ctx, req.(*ListVolumesRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ClusterEvidenceService_GetVolumeStatus_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetVolumeStatusRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ClusterEvidenceServiceServer).GetVolumeStatus(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ClusterEvidenceService_GetVolumeStatus_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ClusterEvidenceServiceServer).GetVolumeStatus(ctx, req.(*GetVolumeStatusRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ClusterEvidenceService_GetVolumeTimeline_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetVolumeTimelineRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ClusterEvidenceServiceServer).GetVolumeTimeline(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ClusterEvidenceService_GetVolumeTimeline_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ClusterEvidenceServiceServer).GetVolumeTimeline(ctx, req.(*GetVolumeTimelineRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ClusterEvidenceService_WatchClusterEvents_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(WatchClusterEventsRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(ClusterEvidenceServiceServer).WatchClusterEvents(m, &clusterEvidenceServiceWatchClusterEventsServer{stream})
+}
+
+type ClusterEvidenceService_WatchClusterEventsServer interface {
+	Send(*ClusterEvent) error
+	grpc.ServerStream
+}
+
+type clusterEvidenceServiceWatchClusterEventsServer struct {
+	grpc.ServerStream
+}
+
+func (x *clusterEvidenceServiceWatchClusterEventsServer) Send(m *ClusterEvent) error {
+	return x.ServerStream.SendMsg(m)
+}
+
+// ClusterEvidenceService_ServiceDesc is the grpc.ServiceDesc for ClusterEvidenceService service.
+// It's only intended for direct use with grpc.RegisterService,
+// and not to be introspected or modified (even as a copy)
+var ClusterEvidenceService_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "seaweedfs.block.control.ClusterEvidenceService",
+	HandlerType: (*ClusterEvidenceServiceServer)(nil),
+	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "GetClusterStatus",
+			Handler:    _ClusterEvidenceService_GetClusterStatus_Handler,
+		},
+		{
+			MethodName: "ListVolumes",
+			Handler:    _ClusterEvidenceService_ListVolumes_Handler,
+		},
+		{
+			MethodName: "GetVolumeStatus",
+			Handler:    _ClusterEvidenceService_GetVolumeStatus_Handler,
+		},
+		{
+			MethodName: "GetVolumeTimeline",
+			Handler:    _ClusterEvidenceService_GetVolumeTimeline_Handler,
+		},
+	},
+	Streams: []grpc.StreamDesc{
+		{
+			StreamName:    "WatchClusterEvents",
+			Handler:       _ClusterEvidenceService_WatchClusterEvents_Handler,
+			ServerStreams: true,
+		},
+	},
 	Metadata: "control.proto",
 }
 

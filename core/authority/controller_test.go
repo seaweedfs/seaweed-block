@@ -114,6 +114,29 @@ func TestTopologyController_InitialPlacementUsesEvidenceTieBreakOnEqualLoad(t *t
 	}
 }
 
+func TestTopologyController_InitialPlacementDoesNotRequirePromotionReady(t *testing.T) {
+	reader := newFakeBasisReader()
+	ctrl := NewTopologyController(TopologyControllerConfig{ExpectedSlotsPerVolume: 1}, reader)
+	notReady := candidate("r1", "s1", "d1", "c1", 10)
+	notReady.ReadyForPrimary = false
+	snap := ClusterSnapshot{
+		CollectedRevision: 1,
+		Servers: []ServerObservation{
+			{ServerID: "s1", Reachable: true, Eligible: true},
+		},
+		Volumes: []VolumeTopologySnapshot{
+			clusterVolume("v1", AuthorityBasis{}, notReady),
+		},
+	}
+	if err := ctrl.SubmitClusterSnapshot(snap); err != nil {
+		t.Fatalf("SubmitClusterSnapshot: %v", err)
+	}
+	ask := nextAskOrFail(t, ctrl)
+	if ask.Intent != IntentBind || ask.ReplicaID != "r1" {
+		t.Fatalf("initial bind should use placeable candidate even before promotion-ready, got %+v", ask)
+	}
+}
+
 func TestTopologyController_FailoverUsesHighestEvidenceCandidate(t *testing.T) {
 	reader := newFakeBasisReader()
 	reader.Set("v1", "r1", AuthorityBasis{
@@ -143,6 +166,77 @@ func TestTopologyController_FailoverUsesHighestEvidenceCandidate(t *testing.T) {
 	ask := nextAskOrFail(t, ctrl)
 	if ask.Intent != IntentReassign || ask.ReplicaID != "r2" {
 		t.Fatalf("want Reassign to r2, got %+v", ask)
+	}
+}
+
+func TestTopologyController_NotReadyCurrentRefreshesEndpointWhenNoReadyPeer(t *testing.T) {
+	reader := newFakeBasisReader()
+	reader.Set("v1", "r1", AuthorityBasis{
+		Assigned: true, ReplicaID: "r1", Epoch: 1, EndpointVersion: 1,
+		DataAddr: "d1-old", CtrlAddr: "c1-old",
+	})
+	ctrl := NewTopologyController(TopologyControllerConfig{}, reader)
+	r1 := candidate("r1", "s1", "d1-new", "c1-new", 10)
+	r1.ReadyForPrimary = false
+	r2 := candidate("r2", "s2", "d2", "c2", 20)
+	r2.ReadyForPrimary = false
+	r3 := candidate("r3", "s3", "d3", "c3", 30)
+	r3.ReadyForPrimary = false
+	snap := ClusterSnapshot{
+		CollectedRevision: 2,
+		Servers: []ServerObservation{
+			{ServerID: "s1", Reachable: true, Eligible: true},
+			{ServerID: "s2", Reachable: true, Eligible: true},
+			{ServerID: "s3", Reachable: true, Eligible: true},
+		},
+		Volumes: []VolumeTopologySnapshot{
+			clusterVolume("v1",
+				AuthorityBasis{Assigned: true, ReplicaID: "r1", Epoch: 1, EndpointVersion: 1, DataAddr: "d1-old", CtrlAddr: "c1-old"},
+				r1, r2, r3,
+			),
+		},
+	}
+	if err := ctrl.SubmitClusterSnapshot(snap); err != nil {
+		t.Fatalf("SubmitClusterSnapshot: %v", err)
+	}
+	ask := nextAskOrFail(t, ctrl)
+	if ask.Intent != IntentRefreshEndpoint || ask.ReplicaID != "r1" || ask.DataAddr != "d1-new" || ask.CtrlAddr != "c1-new" {
+		t.Fatalf("not-ready current with no ready peer should only refresh its own endpoint, got %+v", ask)
+	}
+}
+
+func TestTopologyController_ReadyPeerFailoverBeatsNotReadyCurrentEndpointRefresh(t *testing.T) {
+	reader := newFakeBasisReader()
+	reader.Set("v1", "r1", AuthorityBasis{
+		Assigned: true, ReplicaID: "r1", Epoch: 1, EndpointVersion: 1,
+		DataAddr: "d1-old", CtrlAddr: "c1-old",
+	})
+	ctrl := NewTopologyController(TopologyControllerConfig{}, reader)
+	r1 := candidate("r1", "s1", "d1-new", "c1-new", 10)
+	r1.ReadyForPrimary = false
+	r2 := candidate("r2", "s2", "d2", "c2", 20)
+	r3 := candidate("r3", "s3", "d3", "c3", 30)
+	r3.ReadyForPrimary = false
+	snap := ClusterSnapshot{
+		CollectedRevision: 2,
+		Servers: []ServerObservation{
+			{ServerID: "s1", Reachable: true, Eligible: true},
+			{ServerID: "s2", Reachable: true, Eligible: true},
+			{ServerID: "s3", Reachable: true, Eligible: true},
+		},
+		Volumes: []VolumeTopologySnapshot{
+			clusterVolume("v1",
+				AuthorityBasis{Assigned: true, ReplicaID: "r1", Epoch: 1, EndpointVersion: 1, DataAddr: "d1-old", CtrlAddr: "c1-old"},
+				r1, r2, r3,
+			),
+		},
+	}
+	if err := ctrl.SubmitClusterSnapshot(snap); err != nil {
+		t.Fatalf("SubmitClusterSnapshot: %v", err)
+	}
+	ask := nextAskOrFail(t, ctrl)
+	if ask.Intent != IntentReassign || ask.ReplicaID != "r2" {
+		t.Fatalf("ready peer must win over refreshing not-ready current, got %+v", ask)
 	}
 }
 
@@ -186,6 +280,26 @@ func TestTopologyController_RebalanceMovesToLighterServer(t *testing.T) {
 	ask := nextAskOrFail(t, ctrl)
 	if ask.VolumeID != "v1" || ask.Intent != IntentReassign || ask.ReplicaID != "v1r3" {
 		t.Fatalf("want v1 rebalance to v1r3 on s3, got %+v", ask)
+	}
+}
+
+func TestTopologyController_RebalanceSkipsNotReadyCandidate(t *testing.T) {
+	notReadyTarget := candidate("v1r3", "s3", "d13", "c13", 30)
+	notReadyTarget.ReadyForPrimary = false
+	vol := clusterVolume("v1",
+		AuthorityBasis{Assigned: true, ReplicaID: "v1r1", Epoch: 1, EndpointVersion: 1, DataAddr: "d11", CtrlAddr: "c11"},
+		candidate("v1r1", "s1", "d11", "c11", 10),
+		notReadyTarget,
+	)
+	servers := map[string]ServerObservation{
+		"s1": {ServerID: "s1", Reachable: true, Eligible: true},
+		"s3": {ServerID: "s3", Reachable: true, Eligible: true},
+	}
+	current := vol.Slots[0]
+	currentLoad := map[string]int{"s1": 2, "s3": 0}
+	projectedLoad := map[string]int{"s1": 2, "s3": 0}
+	if got, ok := chooseRebalanceCandidate(vol, current, servers, currentLoad, projectedLoad, 1); ok {
+		t.Fatalf("not-ready lighter target must not be chosen for rebalance, got %+v", got)
 	}
 }
 

@@ -19,6 +19,9 @@ Public-facing docs belong in `docs/`.
   the day-to-day driver.
 - QA assignments live under `qa-assignments/` and should be linked from
   `current-plan.md` with `#QA`.
+- Product spec gates live under `ref/` and should be created or referenced
+  before non-trivial P0/P1 implementation. Tests validate the spec; tests are
+  not the spec.
 - When a plan closes, keep the finished markdown plan in `finished-plans/`.
   Link supporting audits, QA requests, and larger references from that plan
   under `ref/` or `qa-assignments/`.
@@ -32,6 +35,11 @@ Public-facing docs belong in `docs/`.
 | `product-management-plan.md` | Older product goals, priorities, evidence links, and decision rules. |
 | `qa-assignments/` | Concrete QA tasks with commands, pass criteria, and report templates. |
 | `finished-plans/` | Closed phase/topic plans retained for PM history. |
+| `ref/product-spec-gate-template.md` | Cold spec-gate template for product semantics, non-negotiables, allowed simplifications, and drift checks. |
+| `ref/stage2-transparent-multipath-host-failover-spec.md` | Stage 2 product spec for iSCSI ALUA/dm-multipath Kubernetes host-path failover without pod recreate. |
+| `ref/node-loss-survival-mvp-spec.md` | Node-loss survival product spec: RF3 sync-quorum recovery across distinct Kubernetes nodes with non-loopback frontends. |
+| `ref/node-loss-lab-setup.md` | Lab setup note for the Node-Loss D3/D4 gates, including 3 Kubernetes nodes on 2 physical machines and physical-host disclosure. |
+| `ref/control-plane-observation-api-mvp.md` | Dashboard-grade read-only observation API spec: cluster status, volume timeline, event stream, and support-bundle UX. |
 | `finished-plans/phase1_finishedplan_frontend_protocol_readiness.md` | Historical iSCSI/NVMe protocol-readiness plan closed by the protocol release gate. |
 | `finished-plans/phase2_finishedplan_beta_hardening_seed.md` | Historical beta hardening seed plan. |
 | `finished-plans/phase3_finishedplan_beta_seed_stabilization.md` | Historical beta seed stabilization plan. |
@@ -43,6 +51,20 @@ Public-facing docs belong in `docs/`.
 | `finished-plans/phase9_finishedplan_light_use_operations_mvp.md` | Historical light-use operations MVP plan closed by local CLI, bundle, and TestOps control-data validation. |
 | `finished-plans/phase10_finishedplan_light_use_install_lifecycle_operations_mvp.md` | Historical light-use install/lifecycle operations MVP plan closed by strict first-volume runbook and scenario validation. |
 | `finished-plans/phase11_finishedplan_cluster_ops_inventory_lifecycle_visibility_mvp.md` | Historical cluster operations inventory and lifecycle visibility MVP plan closed by strict multi-volume inventory validation. |
+| `finished-plans/phase12_finishedplan_product_owned_blockvolume_lifecycle_mvp.md` | Historical product-owned blockvolume lifecycle MVP plan closed by lifecycle ownership and scoped delete validation. |
+| `finished-plans/phase13_finishedplan_durable_volume_restart_reattach_mvp.md` | Historical durable volume restart/reattach MVP plan closed by RF=1 durable hostPath restart gates. |
+| `finished-plans/phase14_finishedplan_multi_node_attach_and_placement_mvp.md` | Historical same-node multi-node-capable attach and placement MVP plan. |
+| `finished-plans/phase15_finishedplan_basic_mounted_failover_and_reattach_mvp.md` | Historical RF=2 mounted app baseline plus controlled primary-failure safe-refusal plan. |
+| `finished-plans/phase16_finishedplan_stage1_mounted_recovery_ack_profile_mvp.md` | Historical Stage 1 mounted recovery ACK profile plan: RF=2 best-effort demo recovery and RF=3 sync-quorum beta recovery through CSI/pod recreate. |
+| `finished-plans/phase17_finishedplan_stage2_transparent_multipath_host_failover_mvp.md` | Historical Stage 2 transparent mounted failover plan: RF=3 sync-quorum iSCSI ALUA/dm-multipath recovery without pod recreate. |
+| `finished-plans/phase18_finishedplan_node_loss_survival_mvp.md` | Historical Node-Loss Survival plan: RF=3 sync-quorum Kubernetes-node-loss recovery through CSI/pod recreate on a surviving node. |
+| `finished-plans/phase19_finishedplan_control_plane_observation_ai_readable_ops_mvp.md` | Historical Control-Plane Observation plan: read-only master evidence API, AI-readable CLI export, product-owned event stream, and support-bundle evidence. |
+| `qa-assignments/stage2-transparent-multipath-host-failover-close-hard-gate.md` | Strict Stage 2 close gate: multipath recovery without pod recreate, stale-primary fencing, and support-bundle evidence. |
+| `qa-assignments/stage2-transparent-multipath-host-failover-close-report.md` | Strict Stage 2 close report: all HG-0 through HG-13 clauses passed. |
+| `qa-assignments/node-loss-survival-mvp-close-hard-gate.md` | Strict node-loss survival close gate: distinct-node placement, non-loopback frontends, CSI reattach recovery, stale-primary fencing, and cleanup. |
+| `qa-assignments/node-loss-survival-mvp-close-report.md` | Strict Node-Loss Survival close report: all HG-0 through HG-12 clauses passed. |
+| `qa-assignments/control-plane-observation-ai-readable-ops-mvp-close-hard-gate.md` | Strict Control-Plane Observation close gate: product-owned event export, master-minted events, CSI reattach evidence, read-only boundary, bundle explanation, and cleanup. |
+| `qa-assignments/control-plane-observation-ai-readable-ops-mvp-close-report.md` | Strict Control-Plane Observation close report: all HG-0 through HG-12 clauses passed. |
 | `ref/production-readiness-plan.md` | Longer readiness reference and iSCSI P1-P6 detail. |
 | `ref/light-use-block-storage-ux-research.md` | Comparison of Longhorn, OpenEBS, Rook/Ceph, Piraeus/LINSTOR, and EBS CSI light-user install/operations UX. |
 | `ref/blockvolume-lifecycle-ownership-contract.md` | Product-owned generated blockvolume workload lifecycle ownership contract for the current plan. |

@@ -16,6 +16,12 @@ var (
 	ErrNodeNotFound            = errors.New("lifecycle: node not found")
 )
 
+const (
+	// KubernetesNodeNameLabel lets a logical Seaweed Block server identity map
+	// to the Kubernetes node that should host its generated workload.
+	KubernetesNodeNameLabel = "kubernetes.io/hostname"
+)
+
 // StoragePool reports allocatable local capacity. It is placement input,
 // not a create decision.
 type StoragePool struct {

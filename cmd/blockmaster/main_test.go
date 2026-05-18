@@ -65,6 +65,21 @@ func TestParseFlags_ClusterSpecOptional(t *testing.T) {
 	}
 }
 
+func TestParseFlags_LauncherExternalStatusOptional(t *testing.T) {
+	f, err := parseFlags([]string{
+		"--authority-store", "authority-dir",
+		"--lifecycle-store", "lifecycle-dir",
+		"--launcher-status",
+		"--launcher-external-status",
+	})
+	if err != nil {
+		t.Fatalf("parseFlags: %v", err)
+	}
+	if !f.launcherStatus || !f.launcherExternalStatus {
+		t.Fatalf("launcher status flags = %v/%v want true/true", f.launcherStatus, f.launcherExternalStatus)
+	}
+}
+
 func TestBlockmasterBareTopologyRegistersVolumeControlServices(t *testing.T) {
 	h, err := master.New(master.Config{
 		AuthorityStoreDir: t.TempDir(),

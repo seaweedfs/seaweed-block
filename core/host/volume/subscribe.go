@@ -17,8 +17,8 @@
 //   - volume host imports core/rpc (wire types) + core/adapter
 //     (consumer API). It MUST NOT import core/authority mint
 //     symbols (Publisher.apply, SubmitObservedState, AssignmentAsk).
-//   - The ONLY adapter.AssignmentInfo composite literal allowed
-//     in this package sits in decodeAssignmentFact below.
+//   - adapter.AssignmentInfo composite literals are allowed only
+//     in named decode/identity boundary functions.
 //     TestNoOtherAssignmentInfoConstruction (L0) enforces this
 //     as a static guard.
 package volume
@@ -29,16 +29,15 @@ import (
 	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
 )
 
-// decodeAssignmentFact is the SOLE permitted translator from a
+// decodeAssignmentFact is the primary translator from a
 // master-minted wire fact into the adapter's ingress type. It is
 // a strict field-copy: every field in the output comes directly
 // from the input's corresponding field. No mutation, no local
 // defaults, no fields from any other source.
 //
 // This is the round-3 architect-pinned boundary (T0 sketch §3.1).
-// If a second AssignmentInfo composite literal appears anywhere
-// in core/host/volume/ the AST guard in
-// TestNoOtherAssignmentInfoConstruction fails.
+// Additional supporting-replica decode sites must be named and AST-pinned by
+// TestNoOtherAssignmentInfoConstruction.
 func decodeAssignmentFact(f *control.AssignmentFact) adapter.AssignmentInfo {
 	return adapter.AssignmentInfo{
 		VolumeID:        f.VolumeId,
@@ -48,6 +47,36 @@ func decodeAssignmentFact(f *control.AssignmentFact) adapter.AssignmentInfo {
 		DataAddr:        f.DataAddr,
 		CtrlAddr:        f.CtrlAddr,
 	}
+}
+
+// decodeSelfPeerAssignment extracts this host's supporting-replica lineage from
+// a master-minted primary AssignmentFact. It is deliberately parallel to
+// decodeAssignmentFact and still field-copy only: the peer descriptor is the
+// master's statement that this replica belongs to the current volume lineage.
+func decodeSelfPeerAssignment(f *control.AssignmentFact, selfReplicaID string) (adapter.AssignmentInfo, bool) {
+	var zero adapter.AssignmentInfo
+	for _, p := range f.Peers {
+		if p.GetReplicaId() != selfReplicaID {
+			continue
+		}
+		if p.GetEpoch() == 0 ||
+			p.GetEndpointVersion() == 0 ||
+			p.GetEpoch() != f.GetEpoch() ||
+			p.GetEndpointVersion() != f.GetEndpointVersion() ||
+			p.GetDataAddr() == "" ||
+			p.GetCtrlAddr() == "" {
+			return zero, false
+		}
+		return adapter.AssignmentInfo{
+			VolumeID:        f.VolumeId,
+			ReplicaID:       p.ReplicaId,
+			Epoch:           p.Epoch,
+			EndpointVersion: p.EndpointVersion,
+			DataAddr:        p.DataAddr,
+			CtrlAddr:        p.CtrlAddr,
+		}, true
+	}
+	return zero, false
 }
 
 // decodeReplicaTargets is the T4a-5 peer-set decode path. Parallel

@@ -13,12 +13,22 @@ import (
 )
 
 func NewDefaultNodeServer(nodeID, iqnPrefix string) *NodeServer {
+	return NewDefaultNodeServerWithLookup(nodeID, iqnPrefix, nil)
+}
+
+func NewDefaultNodeServerWithLookup(nodeID, iqnPrefix string, lookup PublishTargetLookup) *NodeServer {
+	return NewDefaultNodeServerWithLookupAndEventReporter(nodeID, iqnPrefix, lookup, nil)
+}
+
+func NewDefaultNodeServerWithLookupAndEventReporter(nodeID, iqnPrefix string, lookup PublishTargetLookup, reporter EventReporter) *NodeServer {
 	return NewNodeServer(NodeConfig{
-		NodeID:    nodeID,
-		IQNPrefix: iqnPrefix,
-		ISCSIUtil: &realISCSIUtil{},
-		NVMeUtil:  &realNVMeUtil{},
-		MountUtil: &realMountUtil{},
+		NodeID:        nodeID,
+		IQNPrefix:     iqnPrefix,
+		ISCSIUtil:     &realISCSIUtil{},
+		NVMeUtil:      &realNVMeUtil{},
+		MountUtil:     &realMountUtil{},
+		Lookup:        lookup,
+		EventReporter: reporter,
 	})
 }
 
@@ -73,7 +83,7 @@ func (r *realISCSIUtil) Logout(ctx context.Context, iqn string) error {
 	return nil
 }
 
-func (r *realISCSIUtil) GetDeviceByIQN(ctx context.Context, iqn string) (string, error) {
+func (r *realISCSIUtil) GetDeviceByIQN(ctx context.Context, iqn, portal string) (string, error) {
 	deadline := time.After(10 * time.Second)
 	ticker := time.NewTicker(200 * time.Millisecond)
 	defer ticker.Stop()
@@ -82,7 +92,7 @@ func (r *realISCSIUtil) GetDeviceByIQN(ctx context.Context, iqn string) (string,
 		case <-ctx.Done():
 			return "", ctx.Err()
 		case <-deadline:
-			return "", fmt.Errorf("timeout waiting for device for IQN %s", iqn)
+			return "", fmt.Errorf("timeout waiting for device for IQN %s portal %s", iqn, portal)
 		case <-ticker.C:
 			matches, err := filepath.Glob(fmt.Sprintf("/dev/disk/by-path/*%s*", iqn))
 			if err != nil {
@@ -90,6 +100,9 @@ func (r *realISCSIUtil) GetDeviceByIQN(ctx context.Context, iqn string) (string,
 			}
 			for _, match := range matches {
 				if strings.Contains(match, "-part") {
+					continue
+				}
+				if portal != "" && !iscsiByPathMatchesPortal(match, portal) {
 					continue
 				}
 				dev, err := filepath.EvalSymlinks(match)
@@ -102,7 +115,148 @@ func (r *realISCSIUtil) GetDeviceByIQN(ctx context.Context, iqn string) (string,
 	}
 }
 
-func (r *realISCSIUtil) IsLoggedIn(ctx context.Context, iqn string) (bool, error) {
+func (r *realISCSIUtil) GetMultipathDeviceByIQN(ctx context.Context, iqn string, minPaths int) (string, error) {
+	if minPaths < 2 {
+		return "", fmt.Errorf("multipath requires at least two paths, got %d", minPaths)
+	}
+	deadline := time.After(20 * time.Second)
+	ticker := time.NewTicker(250 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-deadline:
+			return "", fmt.Errorf("timeout waiting for multipath device for IQN %s paths >= %d", iqn, minPaths)
+		case <-ticker.C:
+			_ = refreshMultipathMaps(ctx)
+			dev, paths, err := iscsiMultipathDeviceForIQN(ctx, iqn)
+			if err != nil || dev == "" || paths < minPaths {
+				continue
+			}
+			return dev, nil
+		}
+	}
+}
+
+func refreshMultipathMaps(ctx context.Context) error {
+	cmdCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(cmdCtx, "multipath", "-r")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("multipath -r: %s: %w", string(out), err)
+	}
+	return nil
+}
+
+func iscsiMultipathDeviceForIQN(ctx context.Context, iqn string) (string, int, error) {
+	cmdCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(cmdCtx, "multipath", "-ll")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", 0, fmt.Errorf("multipath -ll: %s: %w", string(out), err)
+	}
+	return parseISCSIMultipathDeviceForIQN(string(out), iqn, iscsiRawDevicesForIQN(iqn))
+}
+
+func iscsiRawDevicesForIQN(iqn string) map[string]struct{} {
+	out := map[string]struct{}{}
+	matches, err := filepath.Glob(fmt.Sprintf("/dev/disk/by-path/*%s*", iqn))
+	if err != nil {
+		return out
+	}
+	for _, match := range matches {
+		if strings.Contains(match, "-part") {
+			continue
+		}
+		dev, err := filepath.EvalSymlinks(match)
+		if err != nil {
+			continue
+		}
+		base := filepath.Base(dev)
+		if base != "" {
+			out[base] = struct{}{}
+		}
+	}
+	return out
+}
+
+func parseISCSIMultipathDeviceForIQN(out, iqn string, rawDevices map[string]struct{}) (string, int, error) {
+	lines := strings.Split(out, "\n")
+	for i, line := range lines {
+		if !multipathLooksLikeMapHeader(line) {
+			continue
+		}
+		if !strings.Contains(line, iqn) && !multipathBlockContainsRawDevice(lines, i+1, rawDevices) {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		device := "/dev/mapper/" + fields[0]
+		paths := 0
+		for j := i + 1; j < len(lines); j++ {
+			next := lines[j]
+			if strings.TrimSpace(next) == "" {
+				break
+			}
+			if multipathLooksLikeMapHeader(next) {
+				break
+			}
+			if strings.Contains(next, " active") || strings.Contains(next, " ready") || strings.Contains(next, " running") {
+				paths++
+			}
+		}
+		if paths == 0 {
+			paths = 1
+		}
+		return device, paths, nil
+	}
+	return "", 0, nil
+}
+
+func multipathLooksLikeMapHeader(line string) bool {
+	trimmed := strings.TrimSpace(line)
+	if trimmed == "" || strings.HasPrefix(trimmed, "|") || strings.HasPrefix(trimmed, "`") {
+		return false
+	}
+	return strings.Contains(trimmed, "(") && strings.Contains(trimmed, ")")
+}
+
+func multipathBlockContainsRawDevice(lines []string, start int, rawDevices map[string]struct{}) bool {
+	if len(rawDevices) == 0 {
+		return false
+	}
+	for j := start; j < len(lines); j++ {
+		next := lines[j]
+		if strings.TrimSpace(next) == "" {
+			break
+		}
+		if multipathLooksLikeMapHeader(next) {
+			break
+		}
+		for dev := range rawDevices {
+			if multipathLineContainsDevice(next, dev) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func multipathLineContainsDevice(line, dev string) bool {
+	for _, field := range strings.Fields(line) {
+		if field == dev {
+			return true
+		}
+	}
+	return false
+}
+
+func (r *realISCSIUtil) IsLoggedIn(ctx context.Context, iqn, portal string) (bool, error) {
 	cmd := exec.CommandContext(ctx, "iscsiadm", "-m", "session")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -115,7 +269,30 @@ func (r *realISCSIUtil) IsLoggedIn(ctx context.Context, iqn string) (bool, error
 		}
 		return false, fmt.Errorf("iscsiadm session: %s: %w", outStr, err)
 	}
-	return strings.Contains(string(out), iqn), nil
+	return iscsiSessionContainsTarget(string(out), iqn, portal), nil
+}
+
+func iscsiSessionContainsTarget(out, iqn, portal string) bool {
+	for _, line := range strings.Split(out, "\n") {
+		if !strings.Contains(line, iqn) {
+			continue
+		}
+		if portal == "" || strings.Contains(line, portal) || strings.Contains(line, iscsiPortalHostPortForByPath(portal)) {
+			return true
+		}
+	}
+	return false
+}
+
+func iscsiByPathMatchesPortal(path, portal string) bool {
+	if portal == "" {
+		return true
+	}
+	return strings.Contains(path, portal) || strings.Contains(path, iscsiPortalHostPortForByPath(portal))
+}
+
+func iscsiPortalHostPortForByPath(portal string) string {
+	return strings.ReplaceAll(portal, ":", "-")
 }
 
 func (r *realISCSIUtil) RescanDevice(ctx context.Context, iqn string) error {

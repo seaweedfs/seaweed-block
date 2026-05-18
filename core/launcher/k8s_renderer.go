@@ -3,6 +3,7 @@ package launcher
 import (
 	"bytes"
 	"fmt"
+	"net"
 	"path"
 	"strings"
 
@@ -19,8 +20,11 @@ type K8sRenderConfig struct {
 	DurableRootBase     string
 	StateHostPathBase   string
 	RecoveryMode        string
+	ReplicationAck      string
 	OwnerReferenceToPVC bool
 	EnableStatus        bool
+	ExternalISCSI       bool
+	ExternalStatus      bool
 	ISCSICHAP           CHAPSecretRef
 }
 
@@ -50,6 +54,20 @@ func RenderBlockVolumeDeployments(plan lifecycle.BlockVolumeWorkloadPlan, cfg K8
 	}
 	if cfg.RecoveryMode == "" {
 		cfg.RecoveryMode = "dual-lane"
+	}
+	if cfg.ReplicationAck == "" {
+		cfg.ReplicationAck = "best-effort"
+	}
+	switch cfg.ReplicationAck {
+	case "best-effort", "sync-quorum", "sync-all":
+	default:
+		return nil, fmt.Errorf("launcher: replication ack %q invalid; want best-effort, sync-quorum, or sync-all", cfg.ReplicationAck)
+	}
+	if cfg.ExternalISCSI && cfg.ISCSICHAP.Name == "" {
+		return nil, fmt.Errorf("launcher: external iSCSI requires CHAP secret")
+	}
+	if cfg.ExternalStatus && !cfg.ExternalISCSI {
+		return nil, fmt.Errorf("launcher: external status requires external iSCSI mode")
 	}
 	if cfg.MasterAddr == "" {
 		return nil, fmt.Errorf("launcher: master addr is required")
@@ -95,7 +113,7 @@ func RenderBlockVolumeDeployments(plan lifecycle.BlockVolumeWorkloadPlan, cfg K8
 					Spec: podSpec{
 						HostNetwork:    true,
 						DNSPolicy:      "ClusterFirstWithHostNet",
-						NodeSelector:   map[string]string{"kubernetes.io/hostname": replica.ServerID},
+						NodeSelector:   map[string]string{"kubernetes.io/hostname": replicaKubernetesNodeName(replica)},
 						InitContainers: blockVolumeInitContainers(plan, replica, cfg),
 						Containers: []container{{
 							Name:         "blockvolume",
@@ -159,13 +177,25 @@ func blockVolumeArgs(plan lifecycle.BlockVolumeWorkloadPlan, replica lifecycle.B
 		fmt.Sprintf("--durable-blocks=%d", plan.SizeBytes/4096),
 		"--durable-blocksize=4096",
 		"--recovery-mode=" + cfg.RecoveryMode,
+		"--replication-ack=" + cfg.ReplicationAck,
 	}
 	if cfg.EnableStatus {
 		port, err := blockVolumeStatusPort(plan, replica)
 		if err != nil {
 			return nil, err
 		}
-		args = append(args, fmt.Sprintf("--status-addr=127.0.0.1:%d", port))
+		statusHost := "127.0.0.1"
+		if cfg.ExternalStatus {
+			host, err := hostFromAddr(replica.DataAddr)
+			if err != nil {
+				return nil, fmt.Errorf("launcher: external status volume=%s replica=%s: %w", plan.VolumeID, replica.ReplicaID, err)
+			}
+			statusHost = host
+		}
+		args = append(args, fmt.Sprintf("--status-addr=%s:%d", statusHost, port))
+		if cfg.ExternalStatus {
+			args = append(args, "--allow-external-status-bind")
+		}
 	}
 	switch plan.Protocol {
 	case "nvme":
@@ -175,12 +205,50 @@ func blockVolumeArgs(plan lifecycle.BlockVolumeWorkloadPlan, replica lifecycle.B
 			fmt.Sprintf("--nvme-ns=%d", replica.NVMeNSID),
 		)
 	default:
+		iscsiListen := fmt.Sprintf("127.0.0.1:%d", replica.ISCSIListenPort)
+		if cfg.ExternalISCSI {
+			host, err := hostFromAddr(replica.DataAddr)
+			if err != nil {
+				return nil, fmt.Errorf("launcher: external iSCSI volume=%s replica=%s: %w", plan.VolumeID, replica.ReplicaID, err)
+			}
+			iscsiListen = fmt.Sprintf("%s:%d", host, replica.ISCSIListenPort)
+			args = append(args, "--allow-external-iscsi-bind")
+		}
 		args = append(args,
-			fmt.Sprintf("--iscsi-listen=127.0.0.1:%d", replica.ISCSIListenPort),
+			"--iscsi-listen="+iscsiListen,
 			"--iscsi-iqn="+replica.ISCSIQualifiedName,
 		)
 	}
 	return args, nil
+}
+
+func hostFromAddr(addr string) (string, error) {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return "", fmt.Errorf("node address %q is not host:port: %w", addr, err)
+	}
+	if host == "" {
+		return "", fmt.Errorf("node address %q has empty host", addr)
+	}
+	if isLocalhostOrLoopbackHost(host) {
+		return "", fmt.Errorf("node address %q is loopback; external node-loss endpoints require non-loopback node addresses", addr)
+	}
+	return host, nil
+}
+
+func isLocalhostOrLoopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+func replicaKubernetesNodeName(replica lifecycle.BlockVolumeReplicaWorkload) string {
+	if replica.KubernetesNodeName != "" {
+		return replica.KubernetesNodeName
+	}
+	return replica.ServerID
 }
 
 func blockVolumeStatusPort(plan lifecycle.BlockVolumeWorkloadPlan, replica lifecycle.BlockVolumeReplicaWorkload) (int, error) {

@@ -13,6 +13,10 @@ type adapterProjector interface {
 	Projection() engine.ReplicaProjection
 }
 
+type promotionReadyProjector interface {
+	PromotionReadyFact() engine.PromotionReadyFact
+}
+
 // SupersedeProbe reports whether this replica's locally-reported
 // Healthy should be overridden to fail-closed because the master
 // has published an authoritative line naming a DIFFERENT replica
@@ -97,7 +101,7 @@ func (v *AdapterProjectionView) Projection() frontend.Projection {
 func (v *AdapterProjectionView) projectionWithSupersede() (frontend.Projection, bool) {
 	p := v.projector.Projection()
 	healthy := p.Mode == engine.ModeHealthy
-	superseded := healthy && v.probe != nil && v.probe.IsSuperseded(v.replicaID, p.Epoch, p.EndpointVersion)
+	superseded := healthy && v.isSupersededLine(p.Epoch, p.EndpointVersion)
 	if superseded || (healthy && v.supportingReplicaReady(p.Epoch, p.EndpointVersion)) {
 		healthy = false
 	}
@@ -127,6 +131,31 @@ func (v *AdapterProjectionView) supportingReplicaReady(selfEpoch, selfEV uint64)
 	return other.GetReplicaId() != v.replicaID &&
 		other.GetEpoch() == selfEpoch &&
 		other.GetEndpointVersion() == selfEV
+}
+
+func (v *AdapterProjectionView) isSupersededLine(epoch, endpointVersion uint64) bool {
+	return v != nil &&
+		v.probe != nil &&
+		v.probe.IsSuperseded(v.replicaID, epoch, endpointVersion)
+}
+
+// PromotionReadyFact returns a control-facing readiness fact when the wrapped
+// adapter exposes one. Test-only projectors that only implement Projection()
+// fail closed by returning Ready=false.
+func (v *AdapterProjectionView) PromotionReadyFact() engine.PromotionReadyFact {
+	if v == nil || v.projector == nil {
+		return engine.PromotionReadyFact{Reason: engine.PromotionReadyReasonNotMember}
+	}
+	projector, ok := v.projector.(promotionReadyProjector)
+	if !ok {
+		return engine.PromotionReadyFact{
+			Reason:          engine.PromotionReadyReasonNotCaughtUp,
+			ReplicaID:       v.replicaID,
+			Epoch:           0,
+			EndpointVersion: 0,
+		}
+	}
+	return projector.PromotionReadyFact()
 }
 
 // EngineProjection returns the underlying engine.ReplicaProjection

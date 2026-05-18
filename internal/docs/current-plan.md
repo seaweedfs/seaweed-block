@@ -1,276 +1,254 @@
-# Current Plan: Basic Mounted Failover And Reattach MVP
+# Current Plan: Phase 20 - Activation / Day-1 Ops MVP
 
-Status: active, opened after closing
-`finished-plans/phase14_finishedplan_multi_node_attach_and_placement_mvp.md`,
-0% implementation.
+Status: implementation started. D1 dev slice in progress; QA needed after the
+activation chain is wired into TestOps.
 
-QA needed now: no. First dev slice is D1/D2 audit and contract. Ask QA after a
-runner-native gate exists, or earlier only if the audit finds ambiguous product
-behavior that needs independent scenario design.
+Previous closed capability:
+
+- `finished-plans/phase19_finishedplan_control_plane_observation_ai_readable_ops_mvp.md`
+- `qa-assignments/control-plane-observation-ai-readable-ops-mvp-close-report.md`
 
 ## Product Question
 
-Can an early Kubernetes user recover from a primary `blockvolume` failure while
-an app is using a PVC, and understand the recovery through inventory/support
-bundles without reading internal logs?
-
-The last plans proved the light-use path:
+Can a new Kubernetes user complete one understandable block-storage activation
+loop without reading internal docs or SSHing into every node?
 
 ```text
-first volume -> cluster inventory -> product-owned lifecycle -> durable
-restart/reattach -> same-node placement/attach
+preflight
+-> install
+-> node readiness
+-> create PVC
+-> volume ready
+-> write/read app
+-> status/timeline/evidence
+-> cleanup
 ```
 
-This plan moves the next visible beta gap:
+Expanded product loop:
 
 ```text
-PVC writes data -> primary blockvolume fails -> authority moves or recovery is
-refused safely -> app reattaches/restarts -> data is still readable -> inventory
-explains the timeline
+install Seaweed Block from one documented path
+-> verify node readiness and blockers
+-> create one PVC-backed volume through Kubernetes
+-> run an app write/read check
+-> inspect read-only CLI/status evidence
+-> collect product evidence, inventory, logs, and support bundle
+-> uninstall cleanly
 ```
 
-The narrow target claim is:
+This plan is about activation and day-1 operations. It should not add new HA,
+backup, restore, repair, or mutating admin claims.
 
-```text
-On a supported alpha Kubernetes lab, Seaweed Block can run an RF=2 failover
-exercise for an iSCSI PVC, preserve previously acknowledged data across a
-controlled primary failure, reattach the workload through the documented path,
-and publish enough status/inventory evidence to explain the authority epoch,
-old primary fencing, new primary, and any non-claim.
-```
+## Core Thesis
 
-This is not a production HA claim. It does not claim transparent zero-disruption
-I/O, arbitrary node loss, automatic cross-node scheduling, RF=3 live Kubernetes
-operation, full quorum durability, rebuild completion, upgrade safety,
-performance SLOs, or UI.
+The product is now strong enough in recovery and observation that the next
+highest-friction gap is the user journey around it. A good block product needs
+more than a working CSI path: users need to install it, understand whether each
+node is usable, create volumes, see what happened, and capture evidence when it
+is not healthy.
 
-## Why This Is Next
-
-The product is now usable enough that the next user question is availability:
-
-```text
-What happens when the backing blockvolume dies while my pod is mounted?
-```
-
-We should not jump directly to broad HA. Existing protocol gates already proved
-important pieces:
-
-- iSCSI ALUA failover and mounted failover are release-gated in runner-native
-  chains.
-- NVMe multipath failover is release-gated separately.
-- Durable restart/reattach is closed for the RF=1 Kubernetes path.
-- Same-node placement and inventory now make endpoint ownership visible.
-- Returned-replica component and iSCSI returned-replica chains exist, but the
-  user-facing Kubernetes recovery loop is not yet a product claim.
-
-The next plan should connect these pieces through the app/PVC path, while being
-strict about what is actually guaranteed.
-
-## Current Honest State
-
-What already works:
-
-- A generated RF=1 iSCSI PVC can be used by an app pod under documented
-  same-node loopback placement.
-- Two live PVCs can coexist on the same alpha node with distinct ports.
-- Product-owned lifecycle creates generated blockvolume Deployments.
-- Durable hostPath restart preserves data for the RF=1 path.
-- `sw-block ops inventory` exposes PVC/PV/workload/node/frontend/status/support
-  bundle evidence.
-- Protocol-level iSCSI and NVMe failover chains exist and are green in prior
-  gates.
-
-What is still weak or unknown:
-
-- Live RF=2/RF=3 Kubernetes lifecycle is still a non-claim.
-- The alpha frontend remains loopback-oriented for the supported attach path.
-- It is not yet proven that Kubernetes app write/read survives a controlled
-  primary failure through the normal PVC path.
-- We need to define exactly which write acknowledgements are protected in the
-  MVP: best-effort, quorum, or full-ack.
-- We need to prove stale-primary fencing and returned-replica behavior in the
-  same evidence model users see, not only in component logs.
-- A failing recovery must be safe and explainable; silent promotion is worse
-  than an honest refusal.
+The implementation should reuse the Phase 19 observation surface. Dashboard,
+CLI, logs, and bundles should all describe the same facts with stable reason
+codes.
 
 ## Scope
 
-In scope:
+### D1: Install Loop
 
-- Audit current RF=2/RF=3 failover behavior across existing protocol gates,
-  master assignment, launcher rendering, CSI attach, durable status, and
-  inventory fields.
-- Define the MVP recovery contract: what failure is injected, what ACK profile
-  is claimed, what reattach means, and what must be fenced.
-- Add fast tests for authority movement, stale-primary visibility, inventory
-  failover fields, and support-bundle issue wording.
-- Add a runner-native failover gate that exercises a PVC write/read path through
-  a controlled primary failure or, if the current product cannot safely do that,
-  proves the safe refusal with an actionable bundle.
-- Add negative fixtures for unsafe promotion conditions, stale primary, missing
-  durable evidence, or insufficient replica coverage.
-- Update `docs/operations-v1.md` with failover usage, limitations, and support
-  bundle interpretation.
+- Keep `scripts/install-k8s-alpha.sh` as the implementation substrate for this
+  phase.
+- Add a simpler documented wrapper path if needed. This should wrap preflight,
+  local image build/import, install, rollout wait, and summary. It may be a
+  script first; a `sw-block install k8s-alpha` CLI is optional and should not
+  block the first gate.
+  - Dev slice: `scripts/activate-k8s-alpha.sh` is the first wrapper path. It
+    calls `preflight-k8s-alpha.sh`, `build-alpha-images.sh`,
+    `install-k8s-alpha.sh`, applies the alpha StorageClass, captures rollout
+    readiness, and writes `activation-summary.txt`.
+  - Image path split:
+    - `SW_BLOCK_ACTIVATION_IMAGE_MODE=local` (default) builds/imports
+      `sw-block:local` and `sw-block-csi:local` for dev and QA work-tree
+      validation.
+    - `SW_BLOCK_ACTIVATION_IMAGE_MODE=published` skips local build/import,
+      runs GHCR preflight, and installs `ghcr.io/seaweedfs/seaweed-block:alpha`
+      plus `ghcr.io/seaweedfs/seaweed-block-csi:alpha` unless overridden.
+      This is the PM/user-path test surface. Prefer `sha-<commit>` or release
+      tags over mutable `:alpha` for close validation.
 
-Out of scope:
+- Add a user-facing install path in README/docs that makes prerequisites,
+  expected components, and verification commands explicit.
+- Emit a concise install summary:
+  - master ready,
+  - CSI controller ready,
+  - CSI node ready count,
+  - StorageClass present,
+  - selected protocol,
+  - selected ACK profile,
+  - known non-claims.
+  - Dev slice: summary fields are stable key/value lines:
+    `activation_status`, `master_ready_replicas`,
+    `csi_controller_ready_replicas`, `csi_node_ready`,
+    `storageclass_provider`, `protocol`, `ack_profile`, and next status /
+    inventory commands.
+- Failed install should explain the blocker: missing tool, missing k3s access,
+  image import failure, pod not ready, or node prerequisite mismatch.
+- QA slice: `testops/scenarios/activation-day1-install-chain.yaml` and
+  `qa-assignments/activation-day1-install-validation.md` validate the D1
+  install-to-ready path.
 
-- Transparent I/O continuation without pod restart.
-- Arbitrary Kubernetes node loss.
-- Production HA.
-- RF=3 live Kubernetes close unless the audit shows it is already safe enough
-  to gate.
-- Automatic rebuild completion and returned-replica reintegration as a broad
-  claim.
-- Performance, stress, upgrade, backup/restore, UI, or enterprise operations.
+### D2: Node Readiness
 
-## Top Blocking Issues
+- Provide a read-only node readiness view before claiming add-node automation.
+- A node row should make clear:
+  - Kubernetes node name,
+  - CSI node pod status,
+  - iSCSI / multipath prerequisite status where applicable,
+  - whether the node is eligible for blockvolume placement,
+  - frontend address mode: loopback or non-loopback,
+  - blocker reason if not eligible.
+- If this phase adds an `add-node` command, it must be conservative: preflight
+  and explain eligibility first; mutating scheduling or rebalance behavior is
+  out of scope unless separately gated.
 
-### P0: ACK Profile Must Be Explicit
+### D3: Add-Volume Loop
 
-A user cannot trust a failover claim unless the product says what kind of writes
-are protected.
+- Document the canonical dynamic PVC path as the normal volume creation path.
+- Provide a minimal user-facing "add volume" path. This can be a documented
+  PVC YAML template first. A CLI helper is optional and, if added, must be a
+  thin generator around Kubernetes PVC creation. It must not bypass PVC/CSI.
 
-Close requirement: the plan documents and gates the exact ACK profile used by
-the scenario. If the current path is best-effort, the failover claim must be
-limited to writes proven durable by evidence.
-
-### P0: Stale Primary Must Not Be Ambiguous
-
-After authority moves, the old primary must be fenced, degraded, or otherwise
-reported as unsafe. It must not look like a valid writer.
-
-Close requirement: inventory/support bundles expose old primary state, new
-primary state, epoch/endpoint version, and an issue line when stale-primary
-fencing is incomplete.
-
-### P0: App-Path Recovery Must Be Real Or Honestly Refused
-
-The product should either complete the controlled recovery through PVC
-write/read, or fail closed with an explainable bundle.
-
-Close requirement: the runner-native gate proves one of those outcomes with
-real app data, not only internal PASS lines.
-
-### P1: Returned Replica Must Have A Safe State Machine
-
-Returned replicas should not become ready from heartbeat alone.
-
-Close requirement: at minimum, the negative fixtures demonstrate that returned
-or unplaced replicas are not promoted to healthy without the required durable
-frontier/rebuild evidence.
-
-## Deliverables
-
-### D1: Failover Reality Audit
-
-Read existing code, docs, and gates to answer:
-
-- what RF=2/RF=3 paths already exist,
-- how master promotion is triggered,
-- how CSI attach/reattach behaves after a primary move,
-- where authority epoch and endpoint version are recorded,
-- how old-primary/stale-primary state is exposed,
-- how returned-replica state is represented,
-- what the current ACK profile really is.
-
-Output: `internal/docs/ref/mounted-failover-reattach-audit.md`.
-
-### D2: Recovery Contract
-
-Add a reference contract describing:
-
-- supported MVP topology,
-- failure injection,
-- ACK profile,
-- expected authority transition,
-- app reattach behavior,
-- inventory/support-bundle fields,
-- explicit non-claims.
-
-Output: `internal/docs/ref/mounted-failover-reattach-contract.md`.
-
-### D3: Fast Tests
-
-Add or tighten tests for:
-
-- authority epoch movement and stale-primary issue wording,
-- inventory before/after failover fields,
-- returned-replica not-ready wording,
-- support-bundle timeline fields,
-- safe refusal when required durable evidence is missing.
-
-### D4: Runner-Native Happy Or Safe-Refusal Gate
-
-Add a scenario that:
-
-```text
-pre_clean
-install/build alpha path
-create RF=2 PVC or the nearest supported failover fixture
-write/check data before failure
-inject controlled primary failure
-observe authority move or safe refusal
-restart/reattach app as required by the contract
-read/check data after recovery
-collect inventory/support bundle before cleanup
-collect_and_cleanup(always)
+```bash
+kubectl apply -f examples/kubernetes/basic-app/storageclass-pvc.yaml
 ```
 
-If the current product cannot safely recover through the app path, the gate must
-fail closed intentionally and assert the exact issue class.
-
-### D5: Negative Fixtures
-
-Add at least two focused fixtures:
-
-- stale primary still visible after authority move,
-- missing durable frontier / returned replica not eligible,
-- insufficient replica coverage for the claimed ACK profile,
-- endpoint unreachable after promotion.
-
-The output should be an actionable inventory/support bundle.
-
-### D6: Operations Manual Update
-
-Update `docs/operations-v1.md` and related quickstart docs with:
-
-- how to run the failover exercise,
-- how to read before/after authority evidence,
-- what app restart/reattach behavior is expected,
-- what remains a non-claim.
-
-### D7: QA Close Gate
-
-Create a strict QA assignment that validates:
-
-- runbook clarity,
-- app-path write/read before and after failure or honest safe refusal,
-- stale-primary/new-primary evidence,
-- support-bundle self-explanation,
-- cleanup hygiene,
-- docs do not over-claim HA.
-
-## Gates To Close
-
-This plan closes only when:
-
-1. ACK profile and topology are documented.
-2. Fast tests cover authority/fencing/inventory wording.
-3. A runner-native gate proves app-path recovery or intentional safe refusal.
-4. Negative fixtures show unsafe states are visible and not promoted.
-5. Inventory/support bundles explain the recovery timeline.
-6. Cleanup leaves no active sessions, processes, port-forwards, or generated
-   workloads.
-7. QA validates independently and reports no blocking usability issue.
-
-## Success Statement
-
-After this plan, Seaweed Block can make a narrow beta-facing availability
-statement:
+- The close gate must prove at least two volumes can be created and listed
+  without attribution or port/status collisions.
+- Add or improve a small command/view that maps:
 
 ```text
-For the documented MVP topology and ACK profile, a controlled primary failure
-is either recovered through the PVC app path with data verified after reattach,
-or refused safely with a support bundle that explains exactly why recovery is
-not yet claimed.
+PVC -> PV -> volume_id -> replicas -> primary -> frontend -> events -> bundle
 ```
+
+- The user should be able to create one PVC, watch it become ready, and see the
+  same volume appear in CLI/dashboard evidence.
+
+### D4: Read-Only Status / Dashboard View
+
+- Dashboard/status view is read-only for this plan.
+- It may be a local web view, static report, or CLI-driven status page. Do not
+  make the close depend on a full hosted UI unless that implementation is
+  deliberately chosen.
+- Product positioning:
+
+```text
+V2 UI shape:
+cluster / servers / volumes / ops
+
+V3 sw-block data model:
+PVC / PV / volume_id / replica / primary / frontend / epoch /
+event timeline / bundle / reason codes
+```
+
+- Build a read-only block dashboard/status view modeled after the SeaweedFS
+  `/block/` information architecture, backed by the Phase 19 observation API,
+  with no mutating admin actions.
+- Reuse lessons from the V2 SeaweedFS block UI where useful:
+  - reference files:
+    `C:\work\seaweedfs\weed\server\master_server_handlers_block_ui.go`,
+    `C:\work\seaweedfs\weed\server\master_server.go`,
+    `C:\work\seaweedfs\weed\storage\blockvol\blockapi\types.go`,
+  - useful read-only shape: cluster cards, server table, volume table,
+    replica details, health counters, barrier/failover/rebuild counters,
+  - do not copy mutating V2 operations into this phase: create, delete,
+    promote, expand, assign, or force actions.
+- Minimum pages or panels:
+  - cluster summary,
+  - node readiness,
+  - volumes table,
+  - volume detail,
+  - event timeline,
+  - support bundle / log links.
+- The dashboard must consume product-owned observation data, not scrape random
+  pod logs as its primary source.
+- Logs are supporting evidence, not authority.
+- Mutating actions such as promote, repair, delete, rebuild, failback, and
+  cleanup buttons are explicitly out of scope.
+- Enterprise UI boundary: first ship observation. Add admin workflows only
+  after each workflow has a separate product spec, RBAC/audit model, and strict
+  QA gate.
+
+### D5: Status / Logs / Bundle Loop
+
+- The default CLI path should stay useful without the dashboard:
+
+```text
+sw-block ops cluster --master-api <addr>
+sw-block ops volumes
+sw-block ops describe volume <id>
+sw-block ops timeline volume <id>
+sw-block ops inventory --namespace <ns> --master <addr> --out <dir>
+```
+
+- Text output should be human-readable and AI-readable.
+- JSON/JSONL output should remain stable enough for dashboard, CI, and support
+  assistant use.
+- Every unhealthy state should include a reason code and next inspection step.
+
+### D6: README And User Path
+
+- README must present Seaweed Block as an alpha/early-beta product loop, not a
+  collection of internal gates.
+- README must keep claims narrow:
+  - not production-ready,
+  - no full HA claim,
+  - no backup/restore,
+  - no upgrade safety,
+  - no mutating admin operations,
+  - no hosted dashboard unless implemented and gated.
+- The documented quick path must match the commands the close gate runs.
+
+## Non-Claims
+
+This plan does not claim:
+
+- production installer/operator lifecycle,
+- full Helm/operator packaging unless explicitly chosen as the implementation,
+- online upgrade or rollback safety,
+- mutating dashboard actions,
+- automatic repair/rebuild/failback,
+- backup/snapshot/restore,
+- new HA semantics beyond closed RF=3 gates,
+- transparent node-loss failover beyond existing closed claims,
+- broad distro/kernel compatibility.
+
+## Hard Gate
+
+The close gate should run from a fresh supported Kubernetes lab and prove:
+
+1. One documented command path runs preflight, install, rollout wait, and
+   install summary.
+2. Node readiness view identifies at least one eligible node and explains any
+   blockers.
+3. A PVC is created through the documented Kubernetes path.
+4. The generated product-owned volume becomes ready.
+5. An app writes and reads data through the mounted PVC.
+6. `sw-block` status/evidence explains PVC -> volume -> replica -> primary ->
+   frontend -> timeline.
+7. Product evidence and inventory/support bundle are collected.
+8. Cleanup/uninstall leaves no active iSCSI sessions, stale blockvolume
+   Deployments, stale port-forwards, or unexpected product pods.
+9. README quick path matches the commands used by the gate.
+
+## Suggested Close Claim
+
+Seaweed Block provides an alpha install-to-operate loop for Kubernetes users:
+from a fresh supported lab, run one documented install path, create a
+PVC-backed block volume, verify app write/read, inspect read-only status and
+timeline evidence, collect support artifacts, and uninstall cleanly.
+
+## Next Product Choices After This
+
+- Backup / Snapshot / Restore MVP for data protection.
+- Rebuild / Reintegration / Failback MVP for returned replicas.
+- Production installer/operator lifecycle.
+- Mutating admin controls with RBAC/audit hard gates.

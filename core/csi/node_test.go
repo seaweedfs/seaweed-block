@@ -14,18 +14,20 @@ import (
 )
 
 type mockISCSIUtil struct {
-	discoveryErr    error
-	configureErr    error
-	loginErr        error
-	logoutErr       error
-	getDeviceResult string
-	getDeviceErr    error
-	loggedIn        map[string]bool
-	calls           []string
+	discoveryErr          error
+	configureErr          error
+	loginErr              error
+	logoutErr             error
+	getDeviceResult       string
+	getDeviceErr          error
+	multipathDeviceResult string
+	multipathDeviceErr    error
+	loggedIn              map[string]bool
+	calls                 []string
 }
 
 func newMockISCSIUtil() *mockISCSIUtil {
-	return &mockISCSIUtil{loggedIn: map[string]bool{}, getDeviceResult: "/dev/sda"}
+	return &mockISCSIUtil{loggedIn: map[string]bool{}, getDeviceResult: "/dev/sda", multipathDeviceResult: "/dev/mapper/mpatha"}
 }
 
 func (m *mockISCSIUtil) Discovery(_ context.Context, portal string) error {
@@ -43,7 +45,7 @@ func (m *mockISCSIUtil) Login(_ context.Context, iqn, portal string) error {
 	if m.loginErr != nil {
 		return m.loginErr
 	}
-	m.loggedIn[iqn] = true
+	m.loggedIn[iqn+"@"+portal] = true
 	return nil
 }
 
@@ -53,17 +55,27 @@ func (m *mockISCSIUtil) Logout(_ context.Context, iqn string) error {
 		return m.logoutErr
 	}
 	delete(m.loggedIn, iqn)
+	for key := range m.loggedIn {
+		if strings.HasPrefix(key, iqn+"@") {
+			delete(m.loggedIn, key)
+		}
+	}
 	return nil
 }
 
-func (m *mockISCSIUtil) GetDeviceByIQN(_ context.Context, iqn string) (string, error) {
-	m.calls = append(m.calls, "getdevice:"+iqn)
+func (m *mockISCSIUtil) GetDeviceByIQN(_ context.Context, iqn, portal string) (string, error) {
+	m.calls = append(m.calls, "getdevice:"+iqn+":"+portal)
 	return m.getDeviceResult, m.getDeviceErr
 }
 
-func (m *mockISCSIUtil) IsLoggedIn(_ context.Context, iqn string) (bool, error) {
-	m.calls = append(m.calls, "isloggedin:"+iqn)
-	return m.loggedIn[iqn], nil
+func (m *mockISCSIUtil) GetMultipathDeviceByIQN(_ context.Context, iqn string, minPaths int) (string, error) {
+	m.calls = append(m.calls, "getmpath:"+iqn+":"+string(rune('0'+minPaths)))
+	return m.multipathDeviceResult, m.multipathDeviceErr
+}
+
+func (m *mockISCSIUtil) IsLoggedIn(_ context.Context, iqn, portal string) (bool, error) {
+	m.calls = append(m.calls, "isloggedin:"+iqn+":"+portal)
+	return m.loggedIn[iqn+"@"+portal], nil
 }
 
 func (m *mockISCSIUtil) RescanDevice(context.Context, string) error { return nil }
@@ -175,6 +187,43 @@ func newTestNodeWithNVMe(mi *mockISCSIUtil, mn *mockNVMeUtil, mm *mockMountUtil)
 	})
 }
 
+func newTestNodeWithLookup(mi *mockISCSIUtil, mm *mockMountUtil, lookup PublishTargetLookup) *NodeServer {
+	return NewNodeServer(NodeConfig{
+		NodeID:    "node-a",
+		IQNPrefix: "iqn.2026-05.example.v3",
+		ISCSIUtil: mi,
+		MountUtil: mm,
+		Lookup:    lookup,
+	})
+}
+
+type recordingEventReporter struct {
+	events []ClusterEvent
+	err    error
+}
+
+func (r *recordingEventReporter) ReportEvent(_ context.Context, event ClusterEvent) error {
+	r.events = append(r.events, event)
+	return r.err
+}
+
+type sequenceLookup struct {
+	targets []PublishTarget
+	calls   []string
+}
+
+func (s *sequenceLookup) LookupPublishTarget(_ context.Context, volumeID, nodeID string) (PublishTarget, error) {
+	s.calls = append(s.calls, volumeID+":"+nodeID)
+	if len(s.targets) == 0 {
+		return PublishTarget{}, ErrPublishTargetNotFound
+	}
+	target := s.targets[0]
+	if len(s.targets) > 1 {
+		s.targets = s.targets[1:]
+	}
+	return target, nil
+}
+
 func testVolumeCapability() *csipb.VolumeCapability {
 	return &csipb.VolumeCapability{
 		AccessType: &csipb.VolumeCapability_Mount{
@@ -183,6 +232,312 @@ func testVolumeCapability() *csipb.VolumeCapability {
 		AccessMode: &csipb.VolumeCapability_AccessMode{
 			Mode: csipb.VolumeCapability_AccessMode_SINGLE_NODE_WRITER,
 		},
+	}
+}
+
+func TestNodeStage_RefreshesPublishTargetFromMasterLookup(t *testing.T) {
+	mi, mm := newMockISCSIUtil(), newMockMountUtil()
+	lookup := &stubLookup{target: PublishTarget{
+		VolumeID:  "v1",
+		ReplicaID: "r2",
+		Protocol:  ProtocolISCSI,
+		ISCSIAddr: "127.0.0.1:3261",
+		IQN:       "iqn.2026-05.example.v3:v1-r2",
+	}}
+	ns := newTestNodeWithLookup(mi, mm, lookup)
+	staging := t.TempDir()
+
+	_, err := ns.NodeStageVolume(context.Background(), &csipb.NodeStageVolumeRequest{
+		VolumeId:          "v1",
+		StagingTargetPath: staging,
+		VolumeCapability:  testVolumeCapability(),
+		PublishContext: map[string]string{
+			"protocol":  "iscsi",
+			"iscsiAddr": "127.0.0.1:3260",
+			"iqn":       "iqn.2026-05.example.v3:v1-r1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("NodeStageVolume: %v", err)
+	}
+	if got := readTargetFile(staging); got != "iqn.2026-05.example.v3:v1-r2" {
+		t.Fatalf("target file=%q want refreshed promoted target", got)
+	}
+	if got := ns.staged["v1"].iscsiAddr; got != "127.0.0.1:3261" {
+		t.Fatalf("staged portal=%q want refreshed promoted portal", got)
+	}
+	for _, want := range []string{
+		"discovery:127.0.0.1:3261",
+		"login:iqn.2026-05.example.v3:v1-r2:127.0.0.1:3261",
+	} {
+		found := false
+		for _, call := range mi.calls {
+			if call == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("missing call %q in %v", want, mi.calls)
+		}
+	}
+	if len(lookup.calls) != 1 || lookup.calls[0] != "v1:node-a" {
+		t.Fatalf("lookup calls=%v want v1:node-a", lookup.calls)
+	}
+}
+
+func TestNodeStage_ReportsCSIReattachObservedAfterSuccessfulStage(t *testing.T) {
+	mi, mm := newMockISCSIUtil(), newMockMountUtil()
+	lookup := &sequenceLookup{targets: []PublishTarget{{
+		VolumeID:        "v1",
+		ReplicaID:       "r2",
+		Epoch:           2,
+		EndpointVersion: 1,
+		Protocol:        ProtocolISCSI,
+		ISCSIAddr:       "127.0.0.1:3261",
+		IQN:             "iqn.lookup:v1",
+	}}}
+	reporter := &recordingEventReporter{}
+	ns := NewNodeServer(NodeConfig{
+		NodeID:        "node-a",
+		IQNPrefix:     "iqn.2026-05.example.v3",
+		ISCSIUtil:     mi,
+		MountUtil:     mm,
+		Lookup:        lookup,
+		EventReporter: reporter,
+	})
+
+	_, err := ns.NodeStageVolume(context.Background(), &csipb.NodeStageVolumeRequest{
+		VolumeId:          "v1",
+		StagingTargetPath: t.TempDir(),
+		VolumeCapability:  testVolumeCapability(),
+		PublishContext: map[string]string{
+			"iscsiAddr": "127.0.0.1:3260",
+			"iqn":       "iqn.stale:v1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("NodeStageVolume: %v", err)
+	}
+	if len(reporter.events) != 1 {
+		t.Fatalf("events=%d want 1", len(reporter.events))
+	}
+	event := reporter.events[0]
+	if event.Type != "csi_reattach_observed" || event.VolumeID != "v1" || event.ReplicaID != "r2" || event.NodeName != "node-a" {
+		t.Fatalf("event=%+v", event)
+	}
+	if event.Epoch != 2 || event.EndpointVersion != 1 {
+		t.Fatalf("event lineage epoch=%d ev=%d", event.Epoch, event.EndpointVersion)
+	}
+}
+
+func TestNodeStage_UsesPortalSpecificISCSISessionAfterFailover(t *testing.T) {
+	mi, mm := newMockISCSIUtil(), newMockMountUtil()
+	mi.loggedIn["iqn.2026-05.example.v3:v1@127.0.0.1:3260"] = true
+	lookup := &stubLookup{target: PublishTarget{
+		VolumeID:  "v1",
+		ReplicaID: "r2",
+		Protocol:  ProtocolISCSI,
+		ISCSIAddr: "127.0.0.1:3261",
+		IQN:       "iqn.2026-05.example.v3:v1",
+	}}
+	ns := newTestNodeWithLookup(mi, mm, lookup)
+
+	_, err := ns.NodeStageVolume(context.Background(), &csipb.NodeStageVolumeRequest{
+		VolumeId:          "v1",
+		StagingTargetPath: t.TempDir(),
+		VolumeCapability:  testVolumeCapability(),
+		PublishContext: map[string]string{
+			"protocol":  "iscsi",
+			"iscsiAddr": "127.0.0.1:3260",
+			"iqn":       "iqn.2026-05.example.v3:v1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("NodeStageVolume: %v", err)
+	}
+	wantPrefix := []string{
+		"isloggedin:iqn.2026-05.example.v3:v1:127.0.0.1:3261",
+		"discovery:127.0.0.1:3261",
+		"login:iqn.2026-05.example.v3:v1:127.0.0.1:3261",
+		"getdevice:iqn.2026-05.example.v3:v1:127.0.0.1:3261",
+	}
+	for i, want := range wantPrefix {
+		if i >= len(mi.calls) || mi.calls[i] != want {
+			t.Fatalf("calls=%v want prefix=%v", mi.calls, wantPrefix)
+		}
+	}
+	if !mi.loggedIn["iqn.2026-05.example.v3:v1@127.0.0.1:3261"] {
+		t.Fatalf("promoted portal was not logged in; loggedIn=%v", mi.loggedIn)
+	}
+}
+
+func TestNodeStage_MultipathISCSIRequiresAtLeastTwoPortals(t *testing.T) {
+	mi, mm := newMockISCSIUtil(), newMockMountUtil()
+	ns := newTestNode(mi, mm)
+
+	_, err := ns.NodeStageVolume(context.Background(), &csipb.NodeStageVolumeRequest{
+		VolumeId:          "v1",
+		StagingTargetPath: t.TempDir(),
+		VolumeCapability:  testVolumeCapability(),
+		PublishContext: map[string]string{
+			"protocol":         "iscsi",
+			"stage2_multipath": "true",
+			"iscsiAddr":        "127.0.0.1:3260",
+			"iqn":              "iqn.2026-05.example.v3:v1",
+		},
+	})
+	if err == nil {
+		t.Fatal("expected multipath stage to fail closed with one portal")
+	}
+	st, _ := status.FromError(err)
+	if st.Code() != codes.FailedPrecondition {
+		t.Fatalf("code=%v want FailedPrecondition err=%v", st.Code(), err)
+	}
+	if len(mi.calls) != 0 {
+		t.Fatalf("multipath single-portal refusal should happen before iscsi calls, got %v", mi.calls)
+	}
+}
+
+func TestNodeStage_MultipathISCSILoginsAllPathsAndMountsMultipathDevice(t *testing.T) {
+	mi, mm := newMockISCSIUtil(), newMockMountUtil()
+	ns := newTestNode(mi, mm)
+	staging := t.TempDir()
+
+	_, err := ns.NodeStageVolume(context.Background(), &csipb.NodeStageVolumeRequest{
+		VolumeId:          "v1",
+		StagingTargetPath: staging,
+		VolumeCapability:  testVolumeCapability(),
+		PublishContext: map[string]string{
+			"protocol":         "iscsi",
+			"stage2_multipath": "true",
+			"iscsiAddrs":       "127.0.0.1:3260,127.0.0.1:3261",
+			"iqn":              "iqn.2026-05.example.v3:v1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("NodeStageVolume: %v", err)
+	}
+	for _, want := range []string{
+		"discovery:127.0.0.1:3260",
+		"login:iqn.2026-05.example.v3:v1:127.0.0.1:3260",
+		"discovery:127.0.0.1:3261",
+		"login:iqn.2026-05.example.v3:v1:127.0.0.1:3261",
+		"getmpath:iqn.2026-05.example.v3:v1:2",
+	} {
+		if !containsString(mi.calls, want) {
+			t.Fatalf("missing call %q in %v", want, mi.calls)
+		}
+	}
+	if !containsString(mm.calls, "formatandmount:/dev/mapper/mpatha:"+staging+":ext4") {
+		t.Fatalf("multipath stage must mount mapper device, calls=%v", mm.calls)
+	}
+	info := ns.staged["v1"]
+	if info == nil || !info.multipath {
+		t.Fatalf("staged info did not record multipath: %+v", info)
+	}
+	if got := strings.Join(info.iscsiAddrs, ","); got != "127.0.0.1:3260,127.0.0.1:3261" {
+		t.Fatalf("staged portals=%q", got)
+	}
+	if got := readTargetFile(staging); got != "iqn.2026-05.example.v3:v1" {
+		t.Fatalf("target file=%q", got)
+	}
+}
+
+func TestNodeStage_MultipathISCSIWaitsForRefreshedMultiPortalTarget(t *testing.T) {
+	mi, mm := newMockISCSIUtil(), newMockMountUtil()
+	lookup := &sequenceLookup{targets: []PublishTarget{
+		{
+			VolumeID:   "v1",
+			ReplicaID:  "r1",
+			Protocol:   ProtocolISCSI,
+			ISCSIAddr:  "127.0.0.1:3260",
+			IQN:        "iqn.2026-05.example.v3:v1",
+			Multipath:  true,
+			ISCSIAddrs: []string{"127.0.0.1:3260"},
+		},
+		{
+			VolumeID:   "v1",
+			ReplicaID:  "r1",
+			Protocol:   ProtocolISCSI,
+			ISCSIAddr:  "127.0.0.1:3260",
+			IQN:        "iqn.2026-05.example.v3:v1",
+			Multipath:  true,
+			ISCSIAddrs: []string{"127.0.0.1:3260", "127.0.0.1:3261", "127.0.0.1:3262"},
+		},
+	}}
+	ns := newTestNodeWithLookup(mi, mm, lookup)
+	staging := t.TempDir()
+
+	_, err := ns.NodeStageVolume(context.Background(), &csipb.NodeStageVolumeRequest{
+		VolumeId:          "v1",
+		StagingTargetPath: staging,
+		VolumeCapability:  testVolumeCapability(),
+		PublishContext: map[string]string{
+			"protocol":         "iscsi",
+			"stage2_multipath": "true",
+			"iscsiAddr":        "127.0.0.1:3260",
+			"iqn":              "iqn.2026-05.example.v3:v1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("NodeStageVolume: %v", err)
+	}
+	for _, want := range []string{
+		"login:iqn.2026-05.example.v3:v1:127.0.0.1:3260",
+		"login:iqn.2026-05.example.v3:v1:127.0.0.1:3261",
+		"login:iqn.2026-05.example.v3:v1:127.0.0.1:3262",
+		"getmpath:iqn.2026-05.example.v3:v1:3",
+	} {
+		if !containsString(mi.calls, want) {
+			t.Fatalf("missing call %q in %v", want, mi.calls)
+		}
+	}
+	if len(lookup.calls) < 2 {
+		t.Fatalf("lookup calls=%v, want initial refresh plus multipath wait refresh", lookup.calls)
+	}
+	info := ns.staged["v1"]
+	if info == nil || !info.multipath {
+		t.Fatalf("staged info did not record multipath: %+v", info)
+	}
+	if got := strings.Join(info.iscsiAddrs, ","); got != "127.0.0.1:3260,127.0.0.1:3261,127.0.0.1:3262" {
+		t.Fatalf("staged portals=%q", got)
+	}
+}
+
+func containsString(items []string, want string) bool {
+	for _, item := range items {
+		if item == want {
+			return true
+		}
+	}
+	return false
+}
+
+func TestISCSISessionContainsTargetMatchesIQNAndPortal(t *testing.T) {
+	out := strings.Join([]string{
+		"tcp: [1] 127.0.0.1:3260,1 iqn.2026-05.example.v3:v1 (non-flash)",
+		"tcp: [2] 127.0.0.1:3261,1 iqn.2026-05.example.v3:v1 (non-flash)",
+	}, "\n")
+	if !iscsiSessionContainsTarget(out, "iqn.2026-05.example.v3:v1", "127.0.0.1:3261") {
+		t.Fatal("expected session match on promoted portal")
+	}
+	if iscsiSessionContainsTarget(out, "iqn.2026-05.example.v3:v1", "127.0.0.1:3262") {
+		t.Fatal("must not match a different portal for the same IQN")
+	}
+}
+
+func TestISCSIByPathMatchesPortal(t *testing.T) {
+	for _, path := range []string{
+		"/dev/disk/by-path/ip-127.0.0.1:3261-iscsi-iqn.2026-05.example.v3:v1-lun-1",
+		"/dev/disk/by-path/ip-127.0.0.1-3261-iscsi-iqn.2026-05.example.v3:v1-lun-1",
+	} {
+		if !iscsiByPathMatchesPortal(path, "127.0.0.1:3261") {
+			t.Fatalf("expected by-path match on promoted portal for %q", path)
+		}
+	}
+	if iscsiByPathMatchesPortal("/dev/disk/by-path/ip-127.0.0.1:3261-iscsi-iqn.2026-05.example.v3:v1-lun-1", "127.0.0.1:3260") {
+		t.Fatal("must not match by-path entry from a different portal")
 	}
 }
 
@@ -310,11 +665,11 @@ func TestNodeStage_ConfiguresCHAPBeforeLogin(t *testing.T) {
 		t.Fatalf("NodeStageVolume: %v", err)
 	}
 	want := []string{
-		"isloggedin:iqn.v1",
+		"isloggedin:iqn.v1:127.0.0.1:3260",
 		"discovery:127.0.0.1:3260",
 		"chap:iqn.v1:127.0.0.1:3260:user1:secret1",
 		"login:iqn.v1:127.0.0.1:3260",
-		"getdevice:iqn.v1",
+		"getdevice:iqn.v1:127.0.0.1:3260",
 	}
 	for i, w := range want {
 		if i >= len(mi.calls) || mi.calls[i] != w {
@@ -405,7 +760,7 @@ func TestNodeStage_FailsClosedWhenStagingPathMountedForAnotherVolume(t *testing.
 
 func TestNodeStage_FailsClosedOnStaleLoggedInSessionWithoutStagedIdentity(t *testing.T) {
 	mi, mm := newMockISCSIUtil(), newMockMountUtil()
-	mi.loggedIn["iqn.v1"] = true
+	mi.loggedIn["iqn.v1@127.0.0.1:3260"] = true
 	ns := newTestNode(mi, mm)
 
 	_, err := ns.NodeStageVolume(context.Background(), &csipb.NodeStageVolumeRequest{
@@ -433,7 +788,7 @@ func TestNodeStage_FailsClosedOnStaleLoggedInSessionWithoutStagedIdentity(t *tes
 
 func TestNodeStage_AllowsLoggedInSessionWithRestartIdentityFile(t *testing.T) {
 	mi, mm := newMockISCSIUtil(), newMockMountUtil()
-	mi.loggedIn["iqn.v1"] = true
+	mi.loggedIn["iqn.v1@127.0.0.1:3260"] = true
 	ns := newTestNode(mi, mm)
 	staging := t.TempDir()
 	if err := writeVolumeFile(staging, "v1"); err != nil {
@@ -456,8 +811,8 @@ func TestNodeStage_AllowsLoggedInSessionWithRestartIdentityFile(t *testing.T) {
 		t.Fatalf("NodeStageVolume: %v", err)
 	}
 	wantPrefix := []string{
-		"isloggedin:iqn.v1",
-		"getdevice:iqn.v1",
+		"isloggedin:iqn.v1:127.0.0.1:3260",
+		"getdevice:iqn.v1:127.0.0.1:3260",
 	}
 	for i, w := range wantPrefix {
 		if i >= len(mi.calls) || mi.calls[i] != w {
@@ -831,7 +1186,7 @@ func TestG15e_CSIReattachUsesFreshPublishTargetAfterUnstage(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("NodeUnstageVolume: %v", err)
 	}
-	if mi.loggedIn["iqn.2026-05.example.v3:v1-old"] {
+	if mi.loggedIn["iqn.2026-05.example.v3:v1-old@127.0.0.1:3260"] {
 		t.Fatalf("old IQN still logged in after unstage")
 	}
 	if ns.staged["v1"] != nil {
@@ -870,7 +1225,7 @@ func TestG15e_CSIReattachUsesFreshPublishTargetAfterUnstage(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("second NodePublishVolume: %v", err)
 	}
-	if !mi.loggedIn["iqn.2026-05.example.v3:v1-new"] {
+	if !mi.loggedIn["iqn.2026-05.example.v3:v1-new@127.0.0.2:3260"] {
 		t.Fatalf("fresh IQN was not logged in after reattach; loggedIn=%v", mi.loggedIn)
 	}
 	if got := readTargetFile(staging); got != "iqn.2026-05.example.v3:v1-new" {

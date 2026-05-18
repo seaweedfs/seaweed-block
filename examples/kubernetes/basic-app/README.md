@@ -16,14 +16,13 @@ bash scripts/run-k8s-demo.sh "$PWD"
 To install the alpha stack and keep it running for this example:
 
 ```bash
-bash scripts/install-k8s-alpha.sh "$PWD"
+bash scripts/activate-k8s-alpha.sh "$PWD"
 ```
 
 ## Apply
 
 ```bash
 kubectl apply -f storageclass-pvc.yaml
-bash ../../../scripts/apply-k8s-alpha-blockvolumes.sh
 kubectl apply -f writer-pod.yaml
 ```
 
@@ -72,12 +71,12 @@ kubectl delete pvc sw-block-example-pvc --ignore-not-found=true
 kubectl delete storageclass sw-block-example --ignore-not-found=true
 ```
 
-The current alpha still needs the blockvolume launcher cleanup path from the
-demo runner or operator work. If you are using this example manually, inspect
-and clean generated `sw-blockvolume-*` Deployments as needed:
+The product-owned launcher should remove PVC-owned generated blockvolume
+Deployments after the PVC is deleted. If you are using this example manually,
+inspect generated workloads before uninstall:
 
 ```bash
-kubectl -n kube-system get deploy -l app=sw-blockvolume
+kubectl get deploy -A -l app=sw-blockvolume
 ```
 
 ## Alpha Notes

@@ -41,6 +41,11 @@ type DurableAuthorityBootstrap struct {
 	ReloadSkips []error
 }
 
+// Options customizes durable-authority bootstrap wiring.
+type Options struct {
+	PublishObserver authority.PublishObserver
+}
+
 // Bootstrap performs the durable-authority startup sequence and
 // returns a *DurableAuthorityBootstrap that owns the live store,
 // lock, and Publisher. Fails closed if the lock cannot be
@@ -54,6 +59,11 @@ type DurableAuthorityBootstrap struct {
 // The logs are the promised operator/startup visibility of
 // LoadErrors() — architect round-5 finding #3.
 func Bootstrap(storeDir string, directive authority.Directive) (*DurableAuthorityBootstrap, error) {
+	return BootstrapWithOptions(storeDir, directive, Options{})
+}
+
+// BootstrapWithOptions performs Bootstrap with optional observer hooks.
+func BootstrapWithOptions(storeDir string, directive authority.Directive, opts Options) (*DurableAuthorityBootstrap, error) {
 	if storeDir == "" {
 		return nil, fmt.Errorf("sparrow: --authority-store is required for durable bootstrap")
 	}
@@ -70,7 +80,7 @@ func Bootstrap(storeDir string, directive authority.Directive) (*DurableAuthorit
 		return nil, fmt.Errorf("durable authority store: %w", err)
 	}
 
-	return bootstrapFromStoreLocked(storeDir, lock, store, directive)
+	return bootstrapFromStoreLocked(storeDir, lock, store, directive, opts)
 }
 
 // bootstrapFromStoreLocked performs the durable-authority bring-
@@ -83,7 +93,7 @@ func Bootstrap(storeDir string, directive authority.Directive) (*DurableAuthorit
 // mocked store that produces an index-level failure on any
 // platform — a filesystem-permission-based approach is not
 // portable enough to reliably exercise the branch.
-func bootstrapFromStoreLocked(storeDir string, lock *authority.StoreLock, store authority.AuthorityStore, directive authority.Directive) (*DurableAuthorityBootstrap, error) {
+func bootstrapFromStoreLocked(storeDir string, lock *authority.StoreLock, store authority.AuthorityStore, directive authority.Directive, opts Options) (*DurableAuthorityBootstrap, error) {
 	// Index-level pre-check BEFORE constructing the Publisher.
 	// NewPublisher with a store panics on index-level reload
 	// failure; without this pre-check Bootstrap would leave the
@@ -102,7 +112,11 @@ func bootstrapFromStoreLocked(storeDir string, lock *authority.StoreLock, store 
 	// same healthy index we just verified. Per-record corrupt
 	// skips are still returned via Publisher.LoadErrors() and
 	// logged below.
-	pub := authority.NewPublisher(directive, authority.WithStore(store))
+	pubOpts := []authority.PublisherOption{authority.WithStore(store)}
+	if opts.PublishObserver != nil {
+		pubOpts = append(pubOpts, authority.WithPublishObserver(opts.PublishObserver))
+	}
+	pub := authority.NewPublisher(directive, pubOpts...)
 
 	// Publisher's LoadErrors is the canonical source; prefer it
 	// when both available so we surface exactly what the
@@ -135,7 +149,7 @@ func bootstrapFromStoreLocked(storeDir string, lock *authority.StoreLock, store 
 // lock is released and the store is closed before the error
 // returns.
 func BootstrapFromStore(lock *authority.StoreLock, store authority.AuthorityStore, directive authority.Directive) (*DurableAuthorityBootstrap, error) {
-	return bootstrapFromStoreLocked("", lock, store, directive)
+	return bootstrapFromStoreLocked("", lock, store, directive, Options{})
 }
 
 // Close releases the lock and closes the store. Idempotent.

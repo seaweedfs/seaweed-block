@@ -20,6 +20,7 @@ type BlockVolumeWorkloadPlan struct {
 
 type BlockVolumeReplicaWorkload struct {
 	ServerID           string
+	KubernetesNodeName string
 	PoolID             string
 	ReplicaID          string
 	Source             string
@@ -87,6 +88,7 @@ func PlanBlockVolumeWorkloads(volume VolumeRecord, placement PlacementIntent, no
 		dataAddr, ctrlAddr := nodePlacementAddrs(node)
 		out.Replicas = append(out.Replicas, BlockVolumeReplicaWorkload{
 			ServerID:           slot.ServerID,
+			KubernetesNodeName: kubernetesNodeName(node),
 			PoolID:             slot.PoolID,
 			ReplicaID:          replicaID,
 			Source:             slot.Source,
@@ -113,4 +115,13 @@ func SortWorkloadPlans(plans []BlockVolumeWorkloadPlan) {
 	sort.Slice(plans, func(i, j int) bool {
 		return plans[i].VolumeID < plans[j].VolumeID
 	})
+}
+
+func kubernetesNodeName(node NodeRegistration) string {
+	if node.Labels != nil {
+		if name := node.Labels[KubernetesNodeNameLabel]; name != "" {
+			return name
+		}
+	}
+	return node.ServerID
 }

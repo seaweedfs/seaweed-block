@@ -4,6 +4,7 @@
 //   volume -> master:   ObservationService.ReportHeartbeat (unary)
 //   volume -> master:   AssignmentService.SubscribeAssignments (server-streaming)
 //   operator -> master: EvidenceService.QueryVolumeStatus (unary, read-only)
+//   operator/dashboard -> master: ClusterEvidenceService read-only observation
 //   CSI/operator -> master: LifecycleService.CreateVolume/DeleteVolume (desired intent only)
 //
 // Boundary (T0 sketch §3 load-bearing):
@@ -27,6 +28,11 @@ service ObservationService {
     // authority.HeartbeatMessage, calls ObservationHost.Ingest.
     // Ack is diagnostic only.
     rpc ReportHeartbeat(HeartbeatReport) returns (HeartbeatAck);
+
+    // Node/CSI observation event. This appends an operator timeline event only;
+    // it MUST NOT mutate lifecycle, authority, placement, Kubernetes, or
+    // replica state.
+    rpc ReportClusterEvent(ClusterEvent) returns (ClusterEventAck);
 }
 
 // AssignmentService — master publishes minted AssignmentInfo to
@@ -58,6 +64,18 @@ service AssignmentService {
 // EvidenceService — operator read-only projection + evidence.
 service EvidenceService {
     rpc QueryVolumeStatus(StatusRequest) returns (StatusResponse);
+}
+
+// ClusterEvidenceService — dashboard-grade read-only observation surface.
+// This service exposes the same evidence model as `sw-block ops ...` and
+// MUST NOT mutate lifecycle, authority, placement, Kubernetes, or replica
+// state.
+service ClusterEvidenceService {
+    rpc GetClusterStatus(GetClusterStatusRequest) returns (ClusterStatusResponse);
+    rpc ListVolumes(ListVolumesRequest) returns (ListVolumesResponse);
+    rpc GetVolumeStatus(GetVolumeStatusRequest) returns (VolumeEvidence);
+    rpc GetVolumeTimeline(GetVolumeTimelineRequest) returns (VolumeTimelineResponse);
+    rpc WatchClusterEvents(WatchClusterEventsRequest) returns (stream ClusterEvent);
 }
 
 // LifecycleService — product lifecycle intent. This surface is for CSI /
@@ -114,6 +132,11 @@ message FrontendTarget {
 message HeartbeatAck {
     google.protobuf.Timestamp accepted_at = 1;
     uint64 sequence = 2;
+}
+
+message ClusterEventAck {
+    google.protobuf.Timestamp accepted_at = 1;
+    string event_id = 2;
 }
 
 message SubscribeRequest {
@@ -188,6 +211,133 @@ message StatusResponse {
     string last_unsupported_reason = 6;
     string last_convergence_stuck_at = 7;
     repeated FrontendTarget frontends = 8;
+}
+
+message GetClusterStatusRequest {
+}
+
+message ListVolumesRequest {
+}
+
+message GetVolumeStatusRequest {
+    string volume_id = 1;
+}
+
+message GetVolumeTimelineRequest {
+    string volume_id = 1;
+}
+
+message WatchClusterEventsRequest {
+    string since_event_id = 1;
+}
+
+message ObservationCondition {
+    string type = 1;
+    string status = 2;
+    string reason = 3;
+    string severity = 4;
+    string message = 5;
+}
+
+message ClusterStatusResponse {
+    string schema_version = 1;
+    google.protobuf.Timestamp captured_at = 2;
+    string product_revision = 3;
+    string status = 4;
+    repeated NodeEvidence nodes = 5;
+    repeated VolumeEvidence volumes = 6;
+    repeated ObservationCondition conditions = 7;
+    repeated ClusterEvent events = 8;
+    repeated string non_claims = 9;
+}
+
+message NodeEvidence {
+    string node_name = 1;
+    string kubernetes_node = 2;
+    string physical_host = 3;
+    string internal_ip = 4;
+    bool schedulable = 5;
+    bool ready = 6;
+    google.protobuf.Timestamp last_heartbeat_at = 7;
+    int32 replica_count = 8;
+    repeated string required_images = 9;
+    repeated string missing_images = 10;
+    repeated ObservationCondition conditions = 11;
+}
+
+message VolumeEvidence {
+    string volume_id = 1;
+    string namespace = 2;
+    string pvc_name = 3;
+    string pv_name = 4;
+    int32 replication_factor = 5;
+    string ack_profile = 6;
+    string claim_profile = 7;
+    int32 desired_replicas = 8;
+    int32 observed_replicas = 9;
+    string status = 10;
+    string reason = 11;
+    string primary_replica = 12;
+    string primary_node = 13;
+    string publish_target = 14;
+    uint64 epoch = 15;
+    uint64 endpoint_version = 16;
+    repeated ReplicaEvidence replicas = 17;
+    repeated ObservationCondition conditions = 18;
+    repeated string next_actions = 19;
+    string support_bundle_hint = 20;
+}
+
+message ReplicaEvidence {
+    string replica_id = 1;
+    string server_id = 2;
+    string kubernetes_node = 3;
+    string physical_host = 4;
+    bool observed = 5;
+    string role = 6;
+    string replication_role = 7;
+    bool durable_latched = 8;
+    bool durable_frontier_known = 9;
+    uint64 durable_frontier_lsn = 10;
+    bool candidate_ready = 11;
+    string candidate_ready_reason = 12;
+    string frontend_protocol = 13;
+    string frontend_addr = 14;
+    string status_addr = 15;
+    bool stale_primary_fenced = 16;
+    repeated ObservationCondition conditions = 17;
+    string support_bundle_path = 18;
+}
+
+message ClusterEvent {
+    string event_id = 1;
+    google.protobuf.Timestamp event_time = 2;
+    string volume_id = 3;
+    string replica_id = 4;
+    string node_name = 5;
+    string event_type = 6;
+    string severity = 7;
+    string message = 8;
+    string reason_code = 9;
+    string old_value = 10;
+    string new_value = 11;
+    uint64 epoch = 12;
+    uint64 endpoint_version = 13;
+    string correlation_id = 14;
+    string evidence_ref = 15;
+}
+
+message ListVolumesResponse {
+    string schema_version = 1;
+    google.protobuf.Timestamp captured_at = 2;
+    repeated VolumeEvidence volumes = 3;
+}
+
+message VolumeTimelineResponse {
+    string schema_version = 1;
+    google.protobuf.Timestamp captured_at = 2;
+    string volume_id = 3;
+    repeated ClusterEvent events = 4;
 }
 
 message CreateVolumeRequest {

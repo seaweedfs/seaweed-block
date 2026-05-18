@@ -188,22 +188,18 @@ func (b *StorageBackend) Identity() frontend.Identity {
 // VolumeID/ReplicaID match is asserted but unchanged.
 //
 // Semantic: latch when Epoch is currently zero (transitions from
-// pre-assignment to first authoritative lineage). Subsequent calls
-// with a different lineage are REJECTED — drift past the latched
-// value still fails closed via lineageCheck → ErrStalePrimary
-// (failover safety net preserved).
+// pre-assignment to first authoritative lineage). After that, only
+// master-minted advances for the SAME volume/replica are accepted
+// (epoch increase, or endpoint-version increase within the same
+// epoch). Cross-volume, cross-replica, or backward lineage changes
+// are rejected so old primaries still fail closed via lineageCheck →
+// ErrStalePrimary.
 //
-// Returns true if the latch took effect (Epoch was 0, now set).
-// Returns false on no-op (already at this Epoch+EV) and on rejected
-// drift (already latched to a different non-zero Epoch+EV).
+// Returns true if the identity changed. Returns false on no-op and
+// on rejected drift.
 func (b *StorageBackend) SetIdentity(id frontend.Identity) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	// Reject drift past a non-zero latched Identity (preserves the
-	// failover safety net — lineage drift = ErrStalePrimary).
-	if b.id.Epoch != 0 || b.id.EndpointVersion != 0 {
-		return false
-	}
 	// VolumeID/ReplicaID came from CLI config at backend construction
 	// time and don't change; refuse silently if caller tries to install
 	// a different volume/replica (paranoia — should never happen in
@@ -212,7 +208,17 @@ func (b *StorageBackend) SetIdentity(id frontend.Identity) bool {
 		(b.id.ReplicaID != "" && b.id.ReplicaID != id.ReplicaID) {
 		return false
 	}
-	// Latch.
+	if b.id == id {
+		return false
+	}
+	if b.id.Epoch != 0 || b.id.EndpointVersion != 0 {
+		if id.VolumeID != b.id.VolumeID || id.ReplicaID != b.id.ReplicaID {
+			return false
+		}
+		if id.Epoch < b.id.Epoch || (id.Epoch == b.id.Epoch && id.EndpointVersion <= b.id.EndpointVersion) {
+			return false
+		}
+	}
 	b.id = id
 	log.Printf("durable: StorageBackend.SetIdentity latched volume=%s replica=%s epoch=%d ev=%d",
 		id.VolumeID, id.ReplicaID, id.Epoch, id.EndpointVersion)
@@ -224,6 +230,7 @@ func (b *StorageBackend) durableStatus(volumeID, path, impl string) VolumeStatus
 	id := b.id
 	closed := b.closed
 	b.mu.Unlock()
+	durableLSN, retainedLSN, headLSN := b.storage.Boundaries()
 	evidence, _ := b.opEvidence.Load().(string)
 	return VolumeStatus{
 		VolumeID:        volumeID,
@@ -234,6 +241,10 @@ func (b *StorageBackend) durableStatus(volumeID, path, impl string) VolumeStatus
 		EndpointVersion: id.EndpointVersion,
 		Latched:         id.Epoch > 0 && id.EndpointVersion > 0,
 		Operational:     b.operational.Load(),
+		FrontierKnown:   true,
+		DurableLSN:      durableLSN,
+		RetainedLSN:     retainedLSN,
+		HeadLSN:         headLSN,
 		Evidence:        evidence,
 		Closed:          closed,
 	}

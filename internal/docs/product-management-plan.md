@@ -60,9 +60,9 @@ Non-promise for the current alpha:
 | Durable default state | Volume data survives blockvolume pod restart. |
 | Operator/controller cleanup | Harness no longer acts as the operator for generated blockvolume workloads. |
 | Multi-node attach | App pod and blockvolume can run on different K8s nodes. |
-| Basic failover and reattach | Primary failure can be recovered by authority move and CSI reattach/pod restart. |
+| Safe K8s recovery via CSI/pod recreate | RF=2 primary failure can recover through authority move plus CSI/node reattach on pod recreate, or fail closed with a precise blocker. |
 | Replica lifecycle | Returned replicas go through candidate/syncing/rebuilding/ready, not heartbeat-to-ready. |
-| Explicit ACK profile | Users know whether writes are best-effort, quorum, or full-ack. |
+| Explicit ACK profile | Users know whether writes are best-effort, sync-quorum, or sync-all. |
 | TestOps smoke suite | QA can run named scenarios and return result bundles. |
 
 ## Prioritized Backlog
@@ -87,13 +87,30 @@ Priority definitions:
 
 | Task | Why It Matters | Status | Evidence / Notes |
 |---|---|---|---|
-| Controller-owned generated workload cleanup | Current harness cleanup is not a product controller. | Planned | Roadmap item. |
-| Durable node-local volume state | `emptyDir` is not a production storage story. | Planned | Required before real data-retention claim. |
+| Controller-owned generated workload cleanup | Current harness cleanup is not a product controller. | Closed for alpha path | Product-owned generated workload lifecycle is closed in phase 12. |
+| Durable node-local volume state | `emptyDir` is not a production storage story. | Closed for RF=1 alpha path | Durable restart/reattach is closed in phase 13; RF=2 recovery still needs frontier evidence. |
 | Multi-node K8s attach | Single-node loopback hides networking and placement problems. | Closed for same-node loopback alpha path | Phase 14 proves app/blockvolume co-location, normal CSI attach, inventory placement evidence, and unsupported remote-loopback attach as a non-claim. |
-| Failover under mounted workload | Availability claim must be proven at app path. | Active | Current plan: basic mounted failover and reattach MVP. |
+| Failover under mounted workload | Availability claim must be proven at app path. | Active | Current plan: RF=2 promotion-ready recovery via CSI/pod recreate. |
 | Replica reintegration policy | Returned replicas must not become ready from heartbeat alone. | Partially designed | G9 lifecycle work informs this. |
-| ACK profile rules | Avoid “best-effort” being mistaken for full durability. | Designed, not enforced | See production readiness plan. |
-| Observability/status surface | Users need diagnosis without reading debug logs. | Active | Current plan: cluster operations inventory and lifecycle visibility. |
+| ACK profile rules | Avoid “best-effort” being mistaken for full durability. | Partially enforced | Fast guards reject beta RF=2 recovery on best-effort; sync-quorum/sync-all still need live D4 recovery evidence. |
+| Observability/status surface | Users need diagnosis without reading debug logs. | Closed for read-only alpha inventory; expanding | Cluster inventory is closed; Stage 1.5 tracks product usability hardening. |
+
+### P1.5: Product Usability Hardening
+
+These items do not replace the Stage 1 recovery gate. They make the product
+usable enough that a small-cluster operator can diagnose and trust the system
+without internal context.
+
+| Task | Why It Matters | Status | Evidence / Notes |
+|---|---|---|---|
+| Kubernetes-readable volume conditions | Users should see Ready/Degraded/Recovering/Blocked plus reason without parsing bundles. | Planned | Roadmap Track H. |
+| One-command support bundle | First failure should produce attach/failover/cleanup evidence without component knowledge. | Planned | Builds on `sw-block ops status` and `ops inventory`. |
+| Conservative timeout/retry defaults | iSCSI/NVMe/CSI behavior should be product defaults, not script folklore. | Planned | Must stay protocol-specific and documented. |
+| Upgrade/rollback smoke | Version changes must not silently break existing PVC attach/read. | Planned | Start with a narrow smoke, not broad upgrade safety. |
+| Capacity/replication preflight guards | Obvious impossible requests should fail before unsafe partial placement. | Planned | Especially RF and space constraints. |
+| Delete/residue audit consistency | PVC delete must have stable target/session/artifact cleanup evidence. | Planned | Builds on prior cleanup attribution. |
+| Multi-volume concurrency baseline | Two PVCs are proven; product confidence needs create/attach/delete at N volumes. | Planned | Start with N=10 if lab resources allow. |
+| Productized fail-closed reasons | Blocker strings should map to documented operator next steps. | Planned | Keeps safe refusal actionable, not just correct. |
 
 ### P2: Expansion
 
@@ -132,6 +149,13 @@ Before starting code for a new problem, answer these:
 
 Default answer to #7 is yes for all product fixes after the MVP merge.
 
+For P0/P1 product work, also fill or reference a product spec gate using
+`internal/docs/ref/product-spec-gate-template.md` before broad implementation.
+The spec must define the user-visible contract, non-negotiable semantics,
+allowed simplifications, non-claims, and evidence contract. A green test does
+not override the spec. If implementation weakens the spec, update the plan and
+non-claims first or stop.
+
 ## Test And Evidence Index
 
 | Evidence Type | Where |
@@ -148,28 +172,31 @@ Default answer to #7 is yes for all product fixes after the MVP merge.
 
 ## Current Immediate Recommendation
 
-The light-use operations ladder is now closed through same-node placement and
-attach:
+The light-use operations ladder is now closed through same-node placement,
+attach, durable restart, and safe RF=2 refusal:
 
 - first-volume runbook and failure bundle are closed,
 - cluster inventory is closed,
 - product-owned generated workload lifecycle is closed,
 - durable RF=1 restart/reattach is closed,
-- same-node alpha attach and placement visibility are closed.
+- same-node alpha attach and placement visibility are closed,
+- RF=2 mounted baseline and primary-failure safe refusal are closed.
 
 The next concrete product step is:
 
 ```text
-Build a basic mounted failover and reattach MVP: prove through the app/PVC path
-that a controlled primary failure either recovers with data verified after
-reattach, or fails closed with inventory/support-bundle evidence that explains
-why recovery is not claimed.
+Build Stage 1 safe Kubernetes recovery: prove through the app/PVC path that an
+RF=2 peer becomes promotion-ready, a controlled primary failure triggers safe
+authority movement, CSI/node reattaches on pod recreate, and the reader verifies
+the same data; otherwise fail closed with a precise blocker.
 ```
 
 Current state:
 
-- Protocol-level iSCSI/NVMe failover gates exist, but the Kubernetes app/PVC
-  recovery claim is not yet closed.
-- The ACK profile and stale-primary/returned-replica evidence must be explicit
-  before any availability claim.
-- The active plan is `Basic Mounted Failover And Reattach MVP`.
+- Protocol-level iSCSI/NVMe failover gates exist, but transparent host
+  multipath is Stage 2, not the current claim.
+- Current Stage 1 has candidate durable frontier evidence, but still lacks the
+  mounted writer required frontier and positive CSI/pod-recreate recovery gate.
+- The active plan is `RF=2 Promotion-Ready Recovery MVP`.
+- Stage 1.5 usability hardening should be planned in parallel, but it must not
+  dilute Stage 1's minimum HA product line.

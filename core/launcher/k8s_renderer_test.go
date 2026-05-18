@@ -37,6 +37,7 @@ func TestG15d_K8sRenderer_RendersBlockVolumeDeploymentArgs(t *testing.T) {
 		"--replica-id=r1",
 		"--durable-root=/var/lib/sw-block/pvc-a/r1",
 		"--recovery-mode=dual-lane",
+		"--replication-ack=best-effort",
 		"sw-block.seaweedfs.com/volume: pvc-a",
 		"--iscsi-listen=127.0.0.1:3260",
 		"--iscsi-iqn=iqn.test:pvc-a",
@@ -72,6 +73,35 @@ func TestG15d_K8sRenderer_RF2UsesDistinctNamesAndPorts(t *testing.T) {
 	}
 }
 
+func TestMountedFailover_K8sRendererCanRenderSyncQuorumAckProfile(t *testing.T) {
+	manifests, err := RenderBlockVolumeDeployments(sampleWorkloadPlan(), K8sRenderConfig{
+		MasterAddr:     "m:9333",
+		ReplicationAck: "sync-quorum",
+	})
+	if err != nil {
+		t.Fatalf("RenderBlockVolumeDeployments: %v", err)
+	}
+	for _, manifest := range manifests {
+		raw := string(manifest.YAML)
+		if !strings.Contains(raw, "--replication-ack=sync-quorum") {
+			t.Fatalf("manifest %s missing sync-quorum ack profile:\n%s", manifest.Name, raw)
+		}
+	}
+}
+
+func TestMountedFailover_K8sRendererRejectsInvalidAckProfile(t *testing.T) {
+	_, err := RenderBlockVolumeDeployments(sampleWorkloadPlan(), K8sRenderConfig{
+		MasterAddr:     "m:9333",
+		ReplicationAck: "maybe",
+	})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "replication ack") {
+		t.Fatalf("error=%v", err)
+	}
+}
+
 func TestG15d_K8sRenderer_SameNodeLoopbackPlacementContract(t *testing.T) {
 	manifests, err := RenderBlockVolumeDeployments(sampleWorkloadPlan(), K8sRenderConfig{
 		MasterAddr:   "m:9333",
@@ -92,6 +122,28 @@ func TestG15d_K8sRenderer_SameNodeLoopbackPlacementContract(t *testing.T) {
 		if !strings.Contains(raw, want) {
 			t.Fatalf("same-node placement contract missing %q:\n%s", want, raw)
 		}
+	}
+}
+
+func TestMountedFailover_K8sRendererUsesKubernetesNodeNameForScheduling(t *testing.T) {
+	plan := sampleWorkloadPlan()
+	plan.Replicas[0].ServerID = "m02-r1"
+	plan.Replicas[0].KubernetesNodeName = "m02"
+	manifests, err := RenderBlockVolumeDeployments(plan, K8sRenderConfig{MasterAddr: "m:9333"})
+	if err != nil {
+		t.Fatalf("RenderBlockVolumeDeployments: %v", err)
+	}
+	raw := string(manifests[0].YAML)
+	for _, want := range []string{
+		"--server-id=m02-r1",
+		"kubernetes.io/hostname: m02",
+	} {
+		if !strings.Contains(raw, want) {
+			t.Fatalf("manifest missing %q:\n%s", want, raw)
+		}
+	}
+	if strings.Contains(raw, "kubernetes.io/hostname: m02-r1") {
+		t.Fatalf("scheduler node selector must use Kubernetes node name, not logical server id:\n%s", raw)
 	}
 }
 
@@ -321,6 +373,104 @@ func TestG15d_K8sRenderer_CanWireCHAPSecret(t *testing.T) {
 	} {
 		if strings.Contains(raw, forbidden) {
 			t.Fatalf("manifest must not put CHAP secret material in process args %q:\n%s", forbidden, raw)
+		}
+	}
+}
+
+func TestNodeLoss_K8sRenderer_ExternalISCSIRequiresCHAP(t *testing.T) {
+	_, err := RenderBlockVolumeDeployments(sampleWorkloadPlan(), K8sRenderConfig{
+		MasterAddr:    "m:9333",
+		ExternalISCSI: true,
+	})
+	if err == nil {
+		t.Fatal("RenderBlockVolumeDeployments succeeded; want CHAP requirement")
+	}
+	if !strings.Contains(err.Error(), "external iSCSI requires CHAP") {
+		t.Fatalf("error = %q, want CHAP requirement", err)
+	}
+}
+
+func TestNodeLoss_K8sRenderer_ExternalISCSIUsesNodeAddress(t *testing.T) {
+	manifests, err := RenderBlockVolumeDeployments(sampleWorkloadPlan(), K8sRenderConfig{
+		MasterAddr:    "m:9333",
+		ExternalISCSI: true,
+		ISCSICHAP: CHAPSecretRef{
+			Name: "sw-block-iscsi-chap",
+		},
+	})
+	if err != nil {
+		t.Fatalf("RenderBlockVolumeDeployments: %v", err)
+	}
+	raw := string(manifests[0].YAML)
+	for _, want := range []string{
+		"--allow-external-iscsi-bind",
+		"--iscsi-listen=10.0.0.1:3260",
+		"name: SW_BLOCK_ISCSI_CHAP_USERNAME",
+		"name: SW_BLOCK_ISCSI_CHAP_SECRET",
+	} {
+		if !strings.Contains(raw, want) {
+			t.Fatalf("manifest missing %q:\n%s", want, raw)
+		}
+	}
+	if strings.Contains(raw, "--iscsi-listen=127.0.0.1:3260") {
+		t.Fatalf("external iSCSI must not render loopback listen:\n%s", raw)
+	}
+}
+
+func TestNodeLoss_K8sRenderer_ExternalISCSIRejectsLoopbackNodeAddress(t *testing.T) {
+	plan := sampleWorkloadPlan()
+	plan.Replicas[0].DataAddr = "127.0.0.1:19101"
+	_, err := RenderBlockVolumeDeployments(plan, K8sRenderConfig{
+		MasterAddr:    "m:9333",
+		ExternalISCSI: true,
+		ISCSICHAP: CHAPSecretRef{
+			Name: "sw-block-iscsi-chap",
+		},
+	})
+	if err == nil {
+		t.Fatal("RenderBlockVolumeDeployments succeeded; want loopback external endpoint rejected")
+	}
+	if !strings.Contains(err.Error(), "non-loopback") {
+		t.Fatalf("error = %q, want non-loopback requirement", err)
+	}
+}
+
+func TestNodeLoss_K8sRenderer_ExternalStatusRequiresExternalISCSI(t *testing.T) {
+	_, err := RenderBlockVolumeDeployments(sampleWorkloadPlan(), K8sRenderConfig{
+		MasterAddr:     "m:9333",
+		EnableStatus:   true,
+		ExternalStatus: true,
+	})
+	if err == nil {
+		t.Fatal("RenderBlockVolumeDeployments succeeded; want external status guard")
+	}
+	if !strings.Contains(err.Error(), "external status requires external iSCSI") {
+		t.Fatalf("error = %q, want external status guard", err)
+	}
+}
+
+func TestNodeLoss_K8sRenderer_ExternalStatusUsesNodeAddress(t *testing.T) {
+	manifests, err := RenderBlockVolumeDeployments(sampleWorkloadPlan(), K8sRenderConfig{
+		MasterAddr:     "m:9333",
+		EnableStatus:   true,
+		ExternalISCSI:  true,
+		ExternalStatus: true,
+		ISCSICHAP: CHAPSecretRef{
+			Name: "sw-block-iscsi-chap",
+		},
+	})
+	if err != nil {
+		t.Fatalf("RenderBlockVolumeDeployments: %v", err)
+	}
+	raw := string(manifests[0].YAML)
+	for _, want := range []string{
+		"--status-addr=10.0.0.1:23260",
+		"--allow-external-status-bind",
+		"--allow-external-iscsi-bind",
+		"--iscsi-listen=10.0.0.1:3260",
+	} {
+		if !strings.Contains(raw, want) {
+			t.Fatalf("manifest missing %q:\n%s", want, raw)
 		}
 	}
 }

@@ -1,0 +1,289 @@
+# Runner-native Node-Loss D3 topology eligibility gate.
+#
+# This is not the recovery gate. It proves the alpha Kubernetes path can render
+# RF=3 across real Kubernetes nodes with non-loopback iSCSI/status endpoints,
+# CHAP-protected external iSCSI, loopback publish-target rejection, and stable
+# inventory eligibility markers. Three Kubernetes nodes may share two physical
+# machines for this MVP gate, but the physical/fault-domain shape is recorded
+# and the close report must not over-claim full physical-host loss unless the
+# artifacts prove distinct physical hosts. D4 consumes this topology to inject
+# primary node loss and prove CSI/pod-recreate recovery.
+
+name: node-loss-topology-eligibility-chain
+timeout: 28m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: pre_clean
+    actions:
+      - action: pre_run_cleanup
+        node: m02
+        kill_patterns: "blockmaster,blockvolume,blockcsi,iscsi-target"
+        nvme_disconnect: "true"
+        iscsi_logout_prefix: "iqn.2026-05.io.seaweedfs"
+      - action: exec
+        node: m02
+        cmd: "rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-topology && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-topology/pin_build /mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-topology/demo"
+      - action: exec
+        node: m02
+        cmd: "kubectl -n default delete pod sw-block-demo-reader sw-block-demo-writer --ignore-not-found=true --wait=true --timeout=120s >/dev/null 2>&1 || true; kubectl -n default delete pvc sw-block-demo-pvc --ignore-not-found=true --wait=true --timeout=120s >/dev/null 2>&1 || true; kubectl delete sc sw-block-dynamic --ignore-not-found=true >/dev/null 2>&1 || true; pkill -f 'kubectl.*port-forward.*svc/blockmaste[r]' >/dev/null 2>&1 || true; sudo rm -rf -- /var/lib/sw-block/testops-{{ run_id }}-node-loss-topology >/dev/null 2>&1 || true"
+      - action: assert_no_active_iscsi_sessions
+        node: m02
+        iqn_substr: "io.seaweedfs"
+      - action: assert_no_processes
+        node: m02
+        pattern: "[/]blockmaster --|[/]blockvolume --|[/]blockcsi |[/]iscsi-target |^blockmaster |^blockvolume |^blockcsi |^iscsi-target "
+
+  - name: preflight
+    actions:
+      - action: exec
+        node: m02
+        cmd: "cd {{ product_root }} && bash scripts/preflight-k8s-alpha.sh --local-k3s > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-topology/preflight.txt 2>&1"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-topology/preflight.txt"
+        pattern: "summary status=PASS"
+        save_as: preflight_count
+      - action: assert_greater
+        actual: "{{ preflight_count }}"
+        threshold: "0"
+
+  - name: discover_multinode_topology
+    actions:
+      - action: exec
+        node: m02
+        cmd: |
+          set -euo pipefail
+          B=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-topology
+          cd {{ product_root }}
+          bash scripts/preflight-node-loss-lab.sh \
+            --min-k8s-nodes 3 \
+            --topology-out "$B/cluster-topology.txt" \
+            --topology-json-out "$B/cluster-topology.json" \
+            --env-out "$B/node-specs.env" \
+            --placement-out "$B/node-placement.before.txt" \
+            > "$B/node-loss-lab-preflight.txt" 2>&1
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-topology/node-placement.before.txt"
+        pattern: "node_loss_topology_eligible=true"
+        save_as: topology_eligible_count
+      - action: assert_greater
+        actual: "{{ topology_eligible_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-topology/node-placement.before.txt"
+        pattern: "selected_node_count=3"
+        save_as: selected_node_count
+      - action: assert_greater
+        actual: "{{ selected_node_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-topology/node-placement.before.txt"
+        pattern: "physical_host_loss_claimed=false"
+        save_as: no_physical_host_loss_claim_count
+      - action: assert_greater
+        actual: "{{ no_physical_host_loss_claim_count }}"
+        threshold: "0"
+
+  - name: pin_build_alpha_images
+    actions:
+      - action: exec
+        node: m02
+        timeout: 8m
+        cmd: |
+          set -euo pipefail
+          B=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-topology
+          cd {{ product_root }}
+          set -a
+          source "$B/node-specs.env"
+          set +a
+          SW_BLOCK_IMPORT_K3S=1 \
+          SW_BLOCK_IMPORT_K3S_NODES="$K3S_IMPORT_NODES" \
+          SW_BLOCK_IMPORT_K3S_SSH_USER=testdev \
+          SW_BLOCK_IMPORT_K3S_SSH_KEY=/opt/work/testdev_key \
+          SW_BLOCK_ARTIFACT_DIR="$B/pin_build" \
+            bash scripts/build-alpha-images.sh {{ product_root }}
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-topology/pin_build/alpha-images.env"
+        pattern: "SW_BLOCK_IMAGE_ID="
+        save_as: sw_block_image_id_count
+      - action: assert_greater
+        actual: "{{ sw_block_image_id_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-topology/pin_build/alpha-images.env"
+        pattern: "SW_BLOCK_CSI_IMAGE_ID="
+        save_as: sw_block_csi_image_id_count
+      - action: assert_greater
+        actual: "{{ sw_block_csi_image_id_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-topology/pin_build/alpha-images.env"
+        pattern: "SW_BLOCK_IMPORT_K3S_NODES="
+        save_as: k3s_import_nodes_count
+      - action: assert_greater
+        actual: "{{ k3s_import_nodes_count }}"
+        threshold: "0"
+
+  - name: render_rf3_demo_manifest
+    actions:
+      - action: exec
+        node: m02
+        cmd: "cd {{ product_root }} && sed 's/replicationFactor: \"1\"/replicationFactor: \"3\"/' deploy/k8s/alpha/demo-app-pvc.yaml > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-topology/demo/demo-app-rf3.yaml"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-topology/demo/demo-app-rf3.yaml"
+        pattern: "replicationFactor: \"3\""
+        save_as: rf3_manifest_count
+      - action: assert_greater
+        actual: "{{ rf3_manifest_count }}"
+        threshold: "0"
+
+  - name: rf3_external_topology
+    actions:
+      - action: exec
+        node: m02
+        timeout: 16m
+        cmd: "cd {{ product_root }} && bash -c 'set -a; source /mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-topology/pin_build/alpha-images.env; source /mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-topology/node-specs.env; set +a; set +e; SW_BLOCK_ARTIFACT_DIR=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-topology/demo SW_BLOCK_DEMO_APP_MANIFEST=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-topology/demo/demo-app-rf3.yaml SW_BLOCK_DEMO_APP_NODE_NAME=\"$APP_NODE\" SW_BLOCK_ALPHA_NODE_SPECS=\"$NODE_SPECS\" SW_BLOCK_ALPHA_LOGICAL_SERVERS=3 SW_BLOCK_ALPHA_EXPECTED_SLOTS_PER_VOLUME=3 SW_BLOCK_ALPHA_REPLICATION_ACK=sync-quorum SW_BLOCK_LAUNCHER_EXTERNAL_ISCSI=1 SW_BLOCK_LAUNCHER_EXTERNAL_STATUS=1 SW_BLOCK_REJECT_LOOPBACK_PUBLISH_TARGETS=1 SW_BLOCK_ISCSI_CHAP_SECRET_NAME=sw-block-node-loss-chap SW_BLOCK_ISCSI_CHAP_USERNAME=testops-node-loss SW_BLOCK_ISCSI_CHAP_SECRET=testops-node-loss-{{ run_id }} SW_BLOCK_LAUNCHER_STATE_HOSTPATH=/var/lib/sw-block/testops-{{ run_id }}-node-loss-topology SW_BLOCK_DEMO_STOP_AFTER=writer-verified bash scripts/run-k8s-demo.sh {{ product_root }}; rc=$?; echo $rc > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-topology/demo/exit_code.txt; test \"$rc\" -eq 44'"
+      - action: exec
+        node: m02
+        cmd: "B=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-topology; { cat \"$B/node-placement.before.txt\"; echo kubernetes_node_loss_claimed=true; echo physical_host_loss_claimed=false; echo transparent_node_loss_claimed=false; echo recovery_gate=D4-not-this-scenario; } > \"$B/demo/node-loss-claim-boundary.txt\""
+
+  - name: topology_asserts
+    actions:
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-topology/demo/run.log"
+        pattern: "launcher_external_iscsi=1"
+        save_as: external_iscsi_count
+      - action: assert_greater
+        actual: "{{ external_iscsi_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-topology/demo/run.log"
+        pattern: "launcher_external_status=1"
+        save_as: external_status_count
+      - action: assert_greater
+        actual: "{{ external_status_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-topology/demo/run.log"
+        pattern: "reject_loopback_publish_targets=1"
+        save_as: reject_loopback_count
+      - action: assert_greater
+        actual: "{{ reject_loopback_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-topology/demo/run.log"
+        pattern: "chap_enabled=1"
+        save_as: chap_enabled_count
+      - action: assert_greater
+        actual: "{{ chap_enabled_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-topology/demo/writer.log"
+        pattern: "/data/demo.bin: OK"
+        save_as: writer_checksum_count
+      - action: assert_greater
+        actual: "{{ writer_checksum_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-topology/demo/controlled-stop-writer-verified.txt"
+        pattern: "phase=writer-verified"
+        save_as: writer_verified_stop_count
+      - action: assert_greater
+        actual: "{{ writer_verified_stop_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-topology/demo/node-loss-claim-boundary.txt"
+        pattern: "physical_host_loss_claimed=false"
+        save_as: physical_host_nonclaim_count
+      - action: assert_greater
+        actual: "{{ physical_host_nonclaim_count }}"
+        threshold: "0"
+      - action: exec
+        node: m02
+        cmd: "B=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-topology/demo; test \"$(grep -c -- '--replica-id=r' \"$B/generated-blockvolume.yaml\")\" -ge 3; test \"$(grep -c -- '--allow-external-iscsi-bind' \"$B/generated-blockvolume.yaml\")\" -ge 3; test \"$(grep -c -- '--allow-external-status-bind' \"$B/generated-blockvolume.yaml\")\" -ge 3"
+      - action: exec
+        node: m02
+        cmd: "B=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-topology/demo; ! grep -Eq -- '--(iscsi-listen|status-addr)=127\\.0\\.0\\.1|--(iscsi-listen|status-addr)=localhost' \"$B/generated-blockvolume.yaml\""
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-topology/demo/csi-controller.rendered.yaml"
+        pattern: "--reject-loopback-publish-targets"
+        save_as: csi_controller_reject_loopback_count
+      - action: assert_greater
+        actual: "{{ csi_controller_reject_loopback_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-topology/demo/csi-node.rendered.yaml"
+        pattern: "--reject-loopback-publish-targets"
+        save_as: csi_node_reject_loopback_count
+      - action: assert_greater
+        actual: "{{ csi_node_reject_loopback_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-topology/demo/ops-inventory-writer-verified/volume-inventory-summary.txt"
+        pattern: "rf=3 desired=3 observed=3"
+        save_as: rf3_observed_count
+      - action: assert_greater
+        actual: "{{ rf3_observed_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-topology/demo/ops-inventory-writer-verified/volume-inventory-summary.txt"
+        pattern: "replicas_on_distinct_nodes=true frontends_non_loopback=true"
+        save_as: topology_marker_count
+      - action: assert_greater
+        actual: "{{ topology_marker_count }}"
+        threshold: "0"
+      - action: exec
+        node: m02
+        cmd: "B=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-topology/demo/ops-inventory-writer-verified; test \"$(grep -c '^replica: volume=.* node=' \"$B/volume-inventory-summary.txt\")\" -ge 3; ! grep -Eq 'frontend=127\\.0\\.0\\.1|status_addr=127\\.0\\.0\\.1|frontend=localhost|status_addr=localhost' \"$B/volume-inventory-summary.txt\""
+      - action: exec
+        node: m02
+        cmd: "B=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-topology/demo; grep -q 'NodeStageVolume: .* staged transport=iscsi' \"$B/blockcsi-node.log\"; ! grep -q 'NodeStageVolume: .* portal=127.0.0.1' \"$B/blockcsi-node.log\""
+
+  - name: collect_and_cleanup
+    always: true
+    actions:
+      - action: exec
+        node: m02
+        timeout: 3m
+        cmd: "cd {{ product_root }} && bash scripts/uninstall-k8s-alpha.sh {{ product_root }}"
+        env.SW_BLOCK_ARTIFACT_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-node-loss-topology/uninstall"
+        env.SW_BLOCK_UNINSTALL_DELETE_ALL_BLOCKVOLUMES: "1"
+        env.SW_BLOCK_ISCSI_CHAP_SECRET_NAME: "sw-block-node-loss-chap"
+      - action: exec
+        node: m02
+        cmd: "sudo rm -rf -- /var/lib/sw-block/testops-{{ run_id }}-node-loss-topology; test ! -e /var/lib/sw-block/testops-{{ run_id }}-node-loss-topology"
+      - action: assert_no_active_iscsi_sessions
+        node: m02
+        iqn_substr: "io.seaweedfs"
+      - action: assert_no_processes
+        node: m02
+        pattern: "[/]blockmaster --|[/]blockvolume --|[/]blockcsi |[/]iscsi-target |^blockmaster |^blockvolume |^blockcsi |^iscsi-target "

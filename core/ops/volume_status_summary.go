@@ -64,7 +64,7 @@ func RenderVolumeStatusSummary(r VolumeStatusReport) string {
 	}
 	fmt.Fprintf(&b, "durable: entries=%d\n", len(r.Durable))
 	for _, d := range r.Durable {
-		fmt.Fprintf(&b, "durable_entry: impl=%s path=%s replica=%s latched=%t operational=%t closed=%t epoch=%d endpoint_version=%d\n", d.Impl, emptyAsDash(d.Path), d.ReplicaID, d.Latched, d.Operational, d.Closed, d.Epoch, d.EndpointVersion)
+		fmt.Fprintf(&b, "durable_entry: impl=%s path=%s replica=%s latched=%t operational=%t closed=%t epoch=%d endpoint_version=%d frontier_known=%t durable_lsn=%d retained_lsn=%d head_lsn=%d\n", d.Impl, emptyAsDash(d.Path), d.ReplicaID, d.Latched, d.Operational, d.Closed, d.Epoch, d.EndpointVersion, d.FrontierKnown, d.DurableLSN, d.RetainedLSN, d.HeadLSN)
 	}
 	fmt.Fprintf(&b, "residue: iscsi_sessions=%d nvme_subsystems=%d processes=%d kubernetes=%d storage_paths=%d\n",
 		len(r.Residue.HostInitiator.ISCSISessions),
