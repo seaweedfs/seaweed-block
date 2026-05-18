@@ -58,6 +58,9 @@ func parseFlags(args []string) (flags, error) {
 	if f.endpoint == "" {
 		return flags{}, fmt.Errorf("--endpoint is required")
 	}
+	if f.masterAddr == "" && (f.stage2Multipath || f.rejectLoopbackPublishTargets || f.pvcUIDLookup) {
+		return flags{}, fmt.Errorf("--stage2-multipath, --reject-loopback-publish-targets, and --kubernetes-pvc-uid-lookup require --master")
+	}
 	if f.nodeID == "" {
 		host, err := os.Hostname()
 		if err != nil || host == "" {

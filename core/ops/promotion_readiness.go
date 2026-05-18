@@ -19,6 +19,7 @@ const (
 	PromotionReasonCandidateFrontierMissing = "candidate_frontier_missing"
 	PromotionReasonCandidateFrontierBehind  = "candidate_frontier_behind"
 	PromotionReasonReplicationAckProfileBad = "replication_ack_profile_unmet"
+	PromotionReasonClaimProfileBad          = "claim_profile_unaccepted"
 )
 
 // PromotionReadinessInput is the ops-level, evidence-only contract for deciding
@@ -77,6 +78,10 @@ func EvaluatePromotionReadiness(in PromotionReadinessInput) PromotionReadinessRe
 
 	if !in.Observed || !in.Reachable || in.CandidateReplicaID == "" {
 		out.Reason = PromotionReasonCandidateNotReady
+		return out
+	}
+	if !PromotionClaimProfileAccepted(claimProfile) {
+		out.Reason = PromotionReasonClaimProfileBad
 		return out
 	}
 	if in.AuthorityRole == hostvolume.AuthorityRolePrimary {

@@ -79,6 +79,9 @@ func TestMasterObservationSnapshot_MissingReplicaIsDegraded(t *testing.T) {
 	if snapshot.Status != ops.ObservationStatusDegraded {
 		t.Fatalf("cluster status=%q want degraded", snapshot.Status)
 	}
+	if len(snapshot.Volumes) != 1 {
+		t.Fatalf("volumes=%d want 1", len(snapshot.Volumes))
+	}
 	volume := snapshot.Volumes[0]
 	if volume.Status != ops.ObservationStatusDegraded {
 		t.Fatalf("volume status=%q want degraded: %+v", volume.Status, volume)

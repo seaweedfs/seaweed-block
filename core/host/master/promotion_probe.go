@@ -75,14 +75,14 @@ func (p *workloadPlanPromotionEvidenceProvider) ProbePromotionCandidates(volumeI
 		Candidates: make([]PromotionCandidateEvidence, 0, len(candidates)),
 	}
 	if current.ReplicaID != "" {
-		result.CurrentKnown = true
 		statusAddr := p.status[volumeID][current.ReplicaID]
 		if statusAddr == "" {
 			result.Current = PromotionCandidateEvidence{ReplicaID: current.ReplicaID, ProbeAddr: "missing"}
 		} else if evidence, err := p.probeCurrent(volumeID, current.ReplicaID, statusAddr); err == nil {
+			result.CurrentKnown = true
 			result.Current = evidence
 		} else {
-			result.Current = PromotionCandidateEvidence{ReplicaID: current.ReplicaID}
+			result.Current = PromotionCandidateEvidence{ReplicaID: current.ReplicaID, ProbeAddr: statusAddr}
 		}
 	}
 	for _, candidate := range candidates {

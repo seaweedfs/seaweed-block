@@ -89,7 +89,7 @@ spec:
         - name: udev-run
           hostPath:
             path: /run/udev
-            type: DirectoryOrCreate
+            type: Directory
         - name: modules-dir
           hostPath:
             path: /lib/modules

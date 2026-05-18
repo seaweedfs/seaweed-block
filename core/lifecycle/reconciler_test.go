@@ -198,6 +198,8 @@ func TestReconcilePlacement_PreservesMaterializedReplicaPlacement(t *testing.T) 
 		nodeWithPool("node-a", "pool-a", 1<<30),
 		nodeWithPool("node-b", "pool-b", 1<<30),
 	}
+	nodes[0].Replicas = []ReplicaInventory{{VolumeID: "vol-a", ReplicaID: "r1", StoreUUID: "store-a", SizeBytes: 1 << 20, State: "ready"}}
+	nodes[1].Replicas = []ReplicaInventory{{VolumeID: "vol-a", ReplicaID: "r2", StoreUUID: "store-b", SizeBytes: 1 << 20, State: "ready"}}
 	results := ReconcilePlacement([]VolumeRecord{{Spec: VolumeSpec{
 		VolumeID:          "vol-a",
 		SizeBytes:         1 << 20,
@@ -209,6 +211,9 @@ func TestReconcilePlacement_PreservesMaterializedReplicaPlacement(t *testing.T) 
 	got, ok := store.GetPlacement("vol-a")
 	if !ok {
 		t.Fatal("missing placement")
+	}
+	if len(got.Slots) != 2 {
+		t.Fatalf("slot count=%d want 2: %+v", len(got.Slots), got)
 	}
 	for _, slot := range got.Slots {
 		if slot.Source != PlacementSourceExistingReplica || slot.ReplicaID == "" {

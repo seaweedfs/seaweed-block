@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -69,7 +70,7 @@ func (m *mockISCSIUtil) GetDeviceByIQN(_ context.Context, iqn, portal string) (s
 }
 
 func (m *mockISCSIUtil) GetMultipathDeviceByIQN(_ context.Context, iqn string, minPaths int) (string, error) {
-	m.calls = append(m.calls, "getmpath:"+iqn+":"+string(rune('0'+minPaths)))
+	m.calls = append(m.calls, "getmpath:"+iqn+":"+strconv.Itoa(minPaths))
 	return m.multipathDeviceResult, m.multipathDeviceErr
 }
 

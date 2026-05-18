@@ -120,7 +120,7 @@ func externalClusterEventFromWire(req *control.ClusterEvent) ops.ClusterEvent {
 			ReplicaID:       req.GetReplicaId(),
 			NodeName:        req.GetNodeName(),
 			Type:            ops.EventTypeCSIReattachObserved,
-			Severity:        "info",
+			Severity:        req.GetSeverity(),
 			Message:         "CSI staged volume on node",
 			Reason:          ops.EventTypeCSIReattachObserved,
 			NewValue:        req.GetNewValue(),

@@ -220,17 +220,20 @@ func MarshalObservationJSON(v any) ([]byte, error) {
 
 func RenderClusterEventsJSONL(events []ClusterEvent) (string, error) {
 	ordered := append([]ClusterEvent(nil), events...)
+	fallbackNow := time.Now().UTC()
+	for i := range ordered {
+		if ordered[i].EventTime.IsZero() {
+			ordered[i].EventTime = fallbackNow
+		} else {
+			ordered[i].EventTime = ordered[i].EventTime.UTC()
+		}
+	}
 	sort.SliceStable(ordered, func(i, j int) bool {
 		return ordered[i].EventTime.Before(ordered[j].EventTime)
 	})
 	var b strings.Builder
 	enc := json.NewEncoder(&b)
 	for _, event := range ordered {
-		if event.EventTime.IsZero() {
-			event.EventTime = time.Now().UTC()
-		} else {
-			event.EventTime = event.EventTime.UTC()
-		}
 		if err := enc.Encode(event); err != nil {
 			return "", err
 		}

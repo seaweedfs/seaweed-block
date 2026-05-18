@@ -138,6 +138,33 @@ func TestKubernetesInventoryCollector_RF2PVCWithoutPlacementKeepsDesiredReplicaC
 	}
 }
 
+func TestKubernetesInventoryCollector_UsesPVHandleBeforeReplicaFallback(t *testing.T) {
+	collector := NewKubernetesVolumeInventoryCollector(KubernetesInventoryConfig{
+		Namespace:       "default",
+		ProductRevision: "product-rev",
+		RunCommand: fixtureKubectl(map[string]string{
+			"kubectl -n default get pvc -o json": `{"items":[{"metadata":{"name":"app-a","namespace":"default","uid":"uid-a"},"spec":{"volumeName":"pv-claim-name","storageClassName":"sw-block-dynamic"},"status":{"phase":"Bound"}}]}`,
+			"kubectl get pv -o json":             `{"items":[{"metadata":{"name":"pv-claim-name"},"spec":{"claimRef":{"namespace":"default","name":"app-a","uid":"uid-a"},"csi":{"driver":"block.csi.seaweedfs.com","volumeHandle":"pvc-remapped"}}}]}`,
+			"kubectl -n default get deploy -l app=sw-blockvolume -o json": `{"items":[
+				{"metadata":{"name":"sw-blockvolume-pvc-remapped-r1","namespace":"default","labels":{"app":"sw-blockvolume","sw-block.seaweedfs.com/volume":"pvc-remapped","sw-block.seaweedfs.com/replica":"r1"}},"spec":{"template":{"spec":{"containers":[{"name":"blockvolume","args":["--server-id=m01","--volume-id=pvc-remapped","--replica-id=r1","--iscsi-listen=10.0.0.1:3260"]}]}}},"status":{"replicas":1,"readyReplicas":1}},
+				{"metadata":{"name":"sw-blockvolume-pvc-remapped-r2","namespace":"default","labels":{"app":"sw-blockvolume","sw-block.seaweedfs.com/volume":"pvc-remapped","sw-block.seaweedfs.com/replica":"r2"}},"spec":{"template":{"spec":{"containers":[{"name":"blockvolume","args":["--server-id=m02","--volume-id=pvc-remapped","--replica-id=r2","--iscsi-listen=10.0.0.2:3260"]}]}}},"status":{"replicas":1,"readyReplicas":1}}
+			]}`,
+		}),
+	})
+
+	inventory, err := collector.Collect(context.Background())
+	if err != nil {
+		t.Fatalf("collect: %v", err)
+	}
+	if len(inventory.Volumes) != 1 {
+		t.Fatalf("volumes=%d want 1: %+v", len(inventory.Volumes), inventory.Volumes)
+	}
+	volume := inventory.Volumes[0]
+	if volume.VolumeID != "pvc-remapped" || volume.ReplicationFactor != 2 || volume.ObservedReplicas != 2 {
+		t.Fatalf("volume=%+v", volume)
+	}
+}
+
 func TestKubernetesInventoryCollector_OrphanDeploymentIsActionable(t *testing.T) {
 	collector := NewKubernetesVolumeInventoryCollector(KubernetesInventoryConfig{
 		Namespace:       "default",

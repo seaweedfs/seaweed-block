@@ -30,6 +30,9 @@ func TestObservation_RenderHealthyVolumeTextAndJSON(t *testing.T) {
 	if err := json.Unmarshal(raw, &decoded); err != nil {
 		t.Fatalf("decode json: %v\n%s", err, raw)
 	}
+	if len(decoded.Replicas) < 2 {
+		t.Fatalf("expected at least 2 replicas, got %d: %+v", len(decoded.Replicas), decoded.Replicas)
+	}
 	if decoded.Status != ObservationStatusOK || decoded.Replicas[1].CandidateReadyReason != PromotionReasonReady {
 		t.Fatalf("decoded evidence lost stable fields: %+v", decoded)
 	}

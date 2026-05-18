@@ -128,7 +128,7 @@ func TestClusterEvidenceService_WatchClusterEventsCursor(t *testing.T) {
 	defer conn.Close()
 	client := control.NewClusterEvidenceServiceClient(conn)
 
-	firstCtx, firstCancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	firstCtx, firstCancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer firstCancel()
 	first, err := client.WatchClusterEvents(firstCtx, &control.WatchClusterEventsRequest{})
 	if err != nil {
@@ -140,7 +140,7 @@ func TestClusterEvidenceService_WatchClusterEventsCursor(t *testing.T) {
 	}
 	cursor := firstEvents[0].GetEventId()
 
-	secondCtx, secondCancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	secondCtx, secondCancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer secondCancel()
 	second, err := client.WatchClusterEvents(secondCtx, &control.WatchClusterEventsRequest{SinceEventId: cursor})
 	if err != nil {

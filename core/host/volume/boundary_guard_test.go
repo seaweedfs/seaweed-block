@@ -104,7 +104,9 @@ func TestNoOtherAssignmentInfoConstruction(t *testing.T) {
 		t.Fatalf("expected exactly %d adapter.AssignmentInfo composite literals in core/host/volume (outside tests); got %d: %+v",
 			len(allowed), len(hits), hits)
 	}
+	countByFn := make(map[string]int, len(hits))
 	for _, h := range hits {
+		countByFn[h.fn]++
 		wantFile, ok := allowed[h.fn]
 		if !ok {
 			t.Errorf("adapter.AssignmentInfo literal in disallowed function %s (file %s, line %d). Allowed: %v",
@@ -114,6 +116,11 @@ func TestNoOtherAssignmentInfoConstruction(t *testing.T) {
 		if filepath.Base(h.file) != wantFile {
 			t.Errorf("adapter.AssignmentInfo literal in %s must live in %s; found in %s at line %d",
 				h.fn, wantFile, h.file, h.line)
+		}
+	}
+	for fn := range allowed {
+		if countByFn[fn] != 1 {
+			t.Errorf("adapter.AssignmentInfo literal count for %s = %d; want exactly 1", fn, countByFn[fn])
 		}
 	}
 }

@@ -89,6 +89,23 @@ func TestPublisher_PublishObserverFiresAfterSuccessfulMintOnly(t *testing.T) {
 	}
 }
 
+func TestPublisher_PublishObserverPanicDoesNotAbortMint(t *testing.T) {
+	pub := NewPublisher(NewStaticDirective(nil), WithPublishObserver(func(PublishEvent) {
+		panic("observer bug")
+	}))
+	if err := pub.apply(AssignmentAsk{
+		VolumeID: "v1", ReplicaID: "r1",
+		DataAddr: "d", CtrlAddr: "c",
+		Intent: IntentBind,
+	}); err != nil {
+		t.Fatalf("Bind with panicking observer: %v", err)
+	}
+	line, ok := pub.VolumeAuthorityLine("v1")
+	if !ok || line.ReplicaID != "r1" {
+		t.Fatalf("authority was not minted after observer panic: %+v", line)
+	}
+}
+
 func TestPublisher_RefreshEndpoint_BumpsOnlyEndpointVersion(t *testing.T) {
 	pub := NewPublisher(NewStaticDirective(nil))
 	if err := pub.apply(AssignmentAsk{
@@ -820,12 +837,12 @@ var nonForgeabilityAllowedPackageSuffixes = []string{
 // EVERY production .go file in the repo (not just core/) and fails
 // if any file outside the allowlist:
 //
-//   1. constructs adapter.AssignmentInfo via composite literal with
-//      a non-zero Epoch or non-zero EndpointVersion, OR
-//   2. declares a local variable of type adapter.AssignmentInfo,
-//      (*adapter.AssignmentInfo), or []adapter.AssignmentInfo. A
-//      local variable of this type is the classic bypass shape for
-//      deferred mutation: `var x AssignmentInfo; x.Epoch = input`.
+//  1. constructs adapter.AssignmentInfo via composite literal with
+//     a non-zero Epoch or non-zero EndpointVersion, OR
+//  2. declares a local variable of type adapter.AssignmentInfo,
+//     (*adapter.AssignmentInfo), or []adapter.AssignmentInfo. A
+//     local variable of this type is the classic bypass shape for
+//     deferred mutation: `var x AssignmentInfo; x.Epoch = input`.
 //
 // Using go/ast/parser rather than regex closes two prior weaknesses:
 //   - the regex-based check only matched struct literals, so a
@@ -1042,10 +1059,10 @@ func Forge(userInput uint64) {
 // of human-readable findings describing any disallowed use of
 // adapter.AssignmentInfo. It catches:
 //
-//   (a) composite literals of type AssignmentInfo / adapter.AssignmentInfo
-//       with Epoch or EndpointVersion fields set to non-zero values;
-//   (b) local variable declarations (var / :=) whose declared or
-//       inferred type is AssignmentInfo (value, pointer, or slice).
+//	(a) composite literals of type AssignmentInfo / adapter.AssignmentInfo
+//	    with Epoch or EndpointVersion fields set to non-zero values;
+//	(b) local variable declarations (var / :=) whose declared or
+//	    inferred type is AssignmentInfo (value, pointer, or slice).
 //
 // Function parameters, method receivers, return type declarations,
 // and struct field types are NOT flagged — consuming values flows

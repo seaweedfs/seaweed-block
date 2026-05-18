@@ -94,15 +94,17 @@ func collectKubernetesVolumeInventory(ctx context.Context, cfg KubernetesInvento
 		if !isSeaweedBlockPVC(pvc, pv, hasPV) {
 			continue
 		}
-		volumeID := pvc.Spec.VolumeName
 		pvName := pvc.Spec.VolumeName
-		replicationFactor := max(1, len(replicasByVolume[volumeID]))
+		volumeID := pvc.Spec.VolumeName
 		var replicationFactorIssue string
 		if hasPV {
 			pvName = pv.Metadata.Name
 			if pv.Spec.CSI.VolumeHandle != "" {
 				volumeID = pv.Spec.CSI.VolumeHandle
 			}
+		}
+		replicationFactor := max(1, len(replicasByVolume[volumeID]))
+		if hasPV {
 			replicationFactor, replicationFactorIssue = replicationFactorFromVolumeAttributes(pv.Spec.CSI.VolumeAttributes, replicationFactor)
 		}
 		volume := VolumeInventoryVolumeInput{

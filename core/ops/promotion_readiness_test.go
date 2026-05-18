@@ -38,6 +38,19 @@ func TestEvaluatePromotionReadiness_BetaRecoveryRejectsBestEffortAck(t *testing.
 	}
 }
 
+func TestEvaluatePromotionReadiness_RejectsUnknownClaimProfile(t *testing.T) {
+	report := EvaluatePromotionReadiness(promotionReadyInput(func(in *PromotionReadinessInput) {
+		in.ClaimProfile = "stage2-typo"
+		in.AckProfile = PromotionAckProfileSyncQuorum
+	}))
+	if report.CandidateReady {
+		t.Fatalf("unknown claim profile must not be promotion-ready: %+v", report)
+	}
+	if report.Reason != PromotionReasonClaimProfileBad {
+		t.Fatalf("reason=%q want %q", report.Reason, PromotionReasonClaimProfileBad)
+	}
+}
+
 func TestEvaluatePromotionReadiness_MissingDurableFrontierIsNotReady(t *testing.T) {
 	report := EvaluatePromotionReadiness(promotionReadyInput(func(in *PromotionReadinessInput) {
 		in.DurableLatched = false

@@ -99,6 +99,9 @@ func parseFlags(args []string) (flags, error) {
 	if f.authorityStore == "" {
 		return flags{}, fmt.Errorf("--authority-store is required")
 	}
+	if f.launcherExternalISCSI && f.launcherCHAPSecretName == "" {
+		return flags{}, fmt.Errorf("cannot enable --launcher-external-iscsi without --launcher-iscsi-chap-secret-name")
+	}
 	return f, nil
 }
 

@@ -112,6 +112,62 @@ func TestWorkloadPlanPromotionEvidenceProvider_NotReadyWithoutReplicaReadyRole(t
 	}
 }
 
+func TestWorkloadPlanPromotionEvidenceProvider_CurrentUnknownWithoutProbeAddress(t *testing.T) {
+	provider := NewWorkloadPlanPromotionEvidenceProvider(nil, WorkloadPlanPromotionProbeConfig{
+		AckProfile: "sync-quorum",
+	})
+	result, err := provider.ProbePromotionCandidates("vol-rf3", authority.AuthorityBasis{ReplicaID: "r1"}, nil)
+	if err != nil {
+		t.Fatalf("probe: %v", err)
+	}
+	if result.CurrentKnown {
+		t.Fatalf("current without probe address must not be marked known: %+v", result)
+	}
+	if result.Current.ReplicaID != "r1" || result.Current.ProbeAddr != "missing" {
+		t.Fatalf("current evidence=%+v", result.Current)
+	}
+}
+
+func TestWorkloadPlanPromotionEvidenceProvider_CurrentKnownAfterSuccessfulProbe(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/status":
+			_ = json.NewEncoder(w).Encode(volume.StatusProjection{
+				Projection:           frontend.Projection{VolumeID: "vol-rf3", ReplicaID: "r1", Healthy: true},
+				AuthorityRole:        volume.AuthorityRolePrimary,
+				FrontendPrimaryReady: true,
+			})
+		case "/status/durable":
+			_ = json.NewEncoder(w).Encode(struct {
+				Volumes []durable.VolumeStatus
+			}{Volumes: []durable.VolumeStatus{{
+				VolumeID: "vol-rf3", ReplicaID: "r1", FrontierKnown: true, DurableLSN: 52,
+			}}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	provider := NewWorkloadPlanPromotionEvidenceProvider([]lifecycle.BlockVolumeWorkloadPlan{{
+		VolumeID: "vol-rf3",
+		Protocol: "iscsi",
+		Replicas: []lifecycle.BlockVolumeReplicaWorkload{{
+			ReplicaID: "r1", ISCSIListenPort: 3260,
+		}},
+	}}, WorkloadPlanPromotionProbeConfig{
+		AckProfile: "sync-quorum",
+		HTTPClient: rewriteHTTPClient(server.URL, "127.0.0.1:23260"),
+	})
+	result, err := provider.ProbePromotionCandidates("vol-rf3", authority.AuthorityBasis{ReplicaID: "r1"}, nil)
+	if err != nil {
+		t.Fatalf("probe: %v", err)
+	}
+	if !result.CurrentKnown || result.Current.ReplicaID != "r1" || !result.Current.Ready {
+		t.Fatalf("current evidence=%+v known=%t", result.Current, result.CurrentKnown)
+	}
+}
+
 func TestNodeLoss_WorkloadPlanPromotionEvidenceProvider_ExternalStatusUsesNodeAddress(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {

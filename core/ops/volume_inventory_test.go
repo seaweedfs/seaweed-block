@@ -742,9 +742,12 @@ func TestBuildVolumeInventory_ConflictingPrimariesAreUnsafe(t *testing.T) {
 	if !containsString(volume.Issues, "conflicting_primary_replicas=r1,r2") {
 		t.Fatalf("conflict issue missing: %v", volume.Issues)
 	}
+	if volume.PrimaryReplicaID != Unavailable {
+		t.Fatalf("split-brain primary=%q want unavailable", volume.PrimaryReplicaID)
+	}
 	summary := RenderVolumeInventorySummary(inventory)
 	for _, want := range []string{
-		"volume: id=pvc-split-brain namespace=default pvc=app-split-brain pv=pvc-split-brain rf=2 desired=2 observed=2 primary=r2 status=unhealthy",
+		"volume: id=pvc-split-brain namespace=default pvc=app-split-brain pv=pvc-split-brain rf=2 desired=2 observed=2 primary=unavailable status=unhealthy",
 		"replica: volume=pvc-split-brain replica=r1 server=s1 node=node-a observed=true status=ok",
 		"replica: volume=pvc-split-brain replica=r2 server=s2 node=node-b observed=true status=ok",
 		"- volume pvc-split-brain conflicting_primary_replicas=r1,r2",
@@ -752,6 +755,32 @@ func TestBuildVolumeInventory_ConflictingPrimariesAreUnsafe(t *testing.T) {
 		if !strings.Contains(summary, want) {
 			t.Fatalf("summary missing %q:\n%s", want, summary)
 		}
+	}
+}
+
+func TestNodeLoss_BuildVolumeInventory_NonLoopbackMarkerRejectsMalformedFrontend(t *testing.T) {
+	r1 := healthyInventoryReplica("r1", "s1", "node-a", hostvolume.AuthorityRolePrimary)
+	r1.FrontendAddress = "10.0.0.11:3260"
+	r2 := healthyInventoryReplica("r2", "s2", "node-b", hostvolume.AuthorityRoleUnknown)
+	r2.FrontendAddress = "bad host:3260"
+
+	inventory := BuildVolumeInventory(VolumeInventoryInput{
+		CapturedAt:      time.Date(2026, 5, 15, 12, 0, 0, 0, time.UTC),
+		Source:          ReportSource{Component: "component-test", Scenario: "node-loss-malformed-frontend"},
+		ProductRevision: "product-rev",
+		Volumes: []VolumeInventoryVolumeInput{{
+			VolumeID:          "pvc-node-loss",
+			Namespace:         "default",
+			PVCName:           "app-node-loss",
+			PVName:            "pvc-node-loss",
+			ReplicationFactor: 2,
+			Replicas:          []VolumeInventoryReplicaInput{r1, r2},
+		}},
+	})
+
+	volume := inventory.Volumes[0]
+	if volume.FrontendsNonLoopback {
+		t.Fatalf("malformed frontend must fail closed for non-loopback eligibility: %+v", volume)
 	}
 }
 

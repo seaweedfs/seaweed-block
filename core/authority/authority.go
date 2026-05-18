@@ -514,9 +514,16 @@ func (p *Publisher) apply(ask AssignmentAsk) error {
 		s.deliver(next)
 	}
 	if p.observer != nil {
-		p.observer(PublishEvent{Info: next, Ask: ask})
+		safeInvokePublishObserver(p.observer, PublishEvent{Info: next, Ask: ask})
 	}
 	return nil
+}
+
+func safeInvokePublishObserver(observer func(PublishEvent), event PublishEvent) {
+	defer func() {
+		_ = recover()
+	}()
+	observer(event)
 }
 
 // maxPublishedEpochForVolume scans the publisher's authoring state

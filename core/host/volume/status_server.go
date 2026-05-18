@@ -118,6 +118,9 @@ func (s *StatusServer) EnableRecoveryEndpoint() {
 func (s *StatusServer) AllowExternalAccess() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.ln != nil {
+		return
+	}
 	s.allowExternal = true
 }
 
@@ -188,6 +191,12 @@ func (s *StatusServer) Addr() string {
 	return s.addr
 }
 
+func (s *StatusServer) externalAccessAllowed() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.allowExternal
+}
+
 // Close gracefully shuts the server down. Idempotent.
 func (s *StatusServer) Close(ctx context.Context) error {
 	s.mu.Lock()
@@ -201,7 +210,7 @@ func (s *StatusServer) Close(ctx context.Context) error {
 }
 
 func (s *StatusServer) handleStatus(w http.ResponseWriter, r *http.Request) {
-	if !s.allowExternal && !isLoopbackRemote(r.RemoteAddr) {
+	if !s.externalAccessAllowed() && !isLoopbackRemote(r.RemoteAddr) {
 		http.Error(w, "status endpoint restricted to loopback", http.StatusForbidden)
 		return
 	}
@@ -266,7 +275,7 @@ func (s *StatusServer) supportingReplicaReady(selfEpoch, selfEV uint64) bool {
 // G5-5 close (per `v3-batch-process.md` no engine/adapter behavior
 // change rule); future field additions are append-only.
 func (s *StatusServer) handleStatusRecovery(w http.ResponseWriter, r *http.Request) {
-	if !s.allowExternal && !isLoopbackRemote(r.RemoteAddr) {
+	if !s.externalAccessAllowed() && !isLoopbackRemote(r.RemoteAddr) {
 		http.Error(w, "status endpoint restricted to loopback", http.StatusForbidden)
 		return
 	}
@@ -288,7 +297,7 @@ func (s *StatusServer) handleStatusRecovery(w http.ResponseWriter, r *http.Reque
 }
 
 func (s *StatusServer) handleStatusPeers(w http.ResponseWriter, r *http.Request) {
-	if !s.allowExternal && !isLoopbackRemote(r.RemoteAddr) {
+	if !s.externalAccessAllowed() && !isLoopbackRemote(r.RemoteAddr) {
 		http.Error(w, "status endpoint restricted to loopback", http.StatusForbidden)
 		return
 	}
@@ -326,7 +335,7 @@ func (s *StatusServer) handleStatusPeers(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *StatusServer) handleStatusDurable(w http.ResponseWriter, r *http.Request) {
-	if !s.allowExternal && !isLoopbackRemote(r.RemoteAddr) {
+	if !s.externalAccessAllowed() && !isLoopbackRemote(r.RemoteAddr) {
 		http.Error(w, "status endpoint restricted to loopback", http.StatusForbidden)
 		return
 	}

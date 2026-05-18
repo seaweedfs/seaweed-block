@@ -183,7 +183,7 @@ func TestObservationService_ReportClusterEventAppearsInVolumeTimeline(t *testing
 	if event.GetEventId() == "client-supplied" || event.GetEventTime().AsTime().Year() == 2000 {
 		t.Fatalf("master did not mint event identity/time: %+v", event)
 	}
-	if event.GetSeverity() != "info" || event.GetReasonCode() != "csi_reattach_observed" || event.GetMessage() != "CSI staged volume on node" {
+	if event.GetSeverity() != "warning" || event.GetReasonCode() != "csi_reattach_observed" || event.GetMessage() != "CSI staged volume on node" {
 		t.Fatalf("external event fields were not sanitized: %+v", event)
 	}
 	if event.GetOldValue() != "" || event.GetCorrelationId() != "" || event.GetEvidenceRef() != "csi-node" {

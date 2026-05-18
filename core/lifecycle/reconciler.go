@@ -23,7 +23,7 @@ func ReconcilePlacement(volumes []VolumeRecord, nodes []NodeRegistration, placem
 			Plan:     plan,
 		}
 		if existing, ok := placements.GetPlacement(volume.Spec.VolumeID); ok &&
-			shouldPreserveMaterializedPlacement(volume, existing) {
+			shouldPreserveMaterializedPlacement(volume, existing, nodes) {
 			result.Intent = existing
 			result.Applied = true
 			results = append(results, result)
@@ -42,15 +42,22 @@ func ReconcilePlacement(volumes []VolumeRecord, nodes []NodeRegistration, placem
 	return results
 }
 
-func shouldPreserveMaterializedPlacement(volume VolumeRecord, intent PlacementIntent) bool {
+func shouldPreserveMaterializedPlacement(volume VolumeRecord, intent PlacementIntent, nodes []NodeRegistration) bool {
 	if intent.VolumeID != volume.Spec.VolumeID || intent.DesiredRF != volume.Spec.ReplicationFactor {
 		return false
 	}
 	if len(intent.Slots) != intent.DesiredRF || len(intent.Slots) == 0 {
 		return false
 	}
+	currentNodes := make(map[string]bool, len(nodes))
+	for _, node := range nodes {
+		currentNodes[node.ServerID] = true
+	}
 	for _, slot := range intent.Slots {
 		if slot.Source != PlacementSourceExistingReplica || slot.ServerID == "" || slot.ReplicaID == "" {
+			return false
+		}
+		if !currentNodes[slot.ServerID] {
 			return false
 		}
 	}

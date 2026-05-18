@@ -198,6 +198,7 @@ func buildInventoryVolume(productRevision string, in VolumeInventoryVolumeInput)
 	}
 	observed := 0
 	primary := Unavailable
+	primaryCount := 0
 	protocolsSeen := map[string]bool{}
 	for _, replica := range replicas {
 		if replica.Observed {
@@ -205,6 +206,7 @@ func buildInventoryVolume(productRevision string, in VolumeInventoryVolumeInput)
 		}
 		if replica.AuthorityRole == hostvolume.AuthorityRolePrimary {
 			primary = replica.ReplicaID
+			primaryCount++
 		}
 		if replica.Protocol != "" && replica.Protocol != Unavailable {
 			protocolsSeen[replica.Protocol] = true
@@ -224,7 +226,7 @@ func buildInventoryVolume(productRevision string, in VolumeInventoryVolumeInput)
 		ReplicationFactor:       desired,
 		DesiredReplicas:         desired,
 		ObservedReplicas:        observed,
-		PrimaryReplicaID:        primary,
+		PrimaryReplicaID:        primaryReplicaID(primary, primaryCount),
 		Protocols:               protocols,
 		ProductRevision:         productRevision,
 		ReplicasOnDistinctNodes: replicasOnDistinctNodes(replicas, desired),
@@ -239,6 +241,13 @@ func buildInventoryVolume(productRevision string, in VolumeInventoryVolumeInput)
 	volume.Issues = append(copyStringSlice(in.Issues), volumeInventoryVolumeIssues(volume)...)
 	volume.Status = inventoryIssueStatus(volume.Issues)
 	return volume
+}
+
+func primaryReplicaID(primary string, count int) string {
+	if count == 1 {
+		return explicitUnavailable(primary)
+	}
+	return Unavailable
 }
 
 func buildInventoryReplica(in VolumeInventoryReplicaInput) VolumeInventoryReplica {
@@ -535,6 +544,31 @@ func endpointHostNonLoopback(addr string) bool {
 	}
 	if ip, err := netip.ParseAddr(host); err == nil {
 		return !ip.IsLoopback() && !ip.IsUnspecified()
+	}
+	return isValidDNSHost(host)
+}
+
+func isValidDNSHost(host string) bool {
+	if len(host) == 0 || len(host) > 253 {
+		return false
+	}
+	host = strings.TrimSuffix(host, ".")
+	if host == "" {
+		return false
+	}
+	for _, label := range strings.Split(host, ".") {
+		if len(label) == 0 || len(label) > 63 {
+			return false
+		}
+		if label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for _, ch := range label {
+			if (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '-' {
+				continue
+			}
+			return false
+		}
 	}
 	return true
 }

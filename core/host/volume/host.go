@@ -119,7 +119,9 @@ type Host struct {
 	wg      sync.WaitGroup
 	started atomic.Bool
 
-	readyOnce atomic.Bool
+	readyOnce            atomic.Bool
+	readyMarkerMu        sync.Mutex
+	supportingReadyMarks map[string]struct{}
 
 	// lastOtherLine captures the most recent AssignmentFact that
 	// named a REPLICA OTHER than self for this host's VolumeID.
@@ -543,12 +545,7 @@ func (h *Host) applyFact(fact *control.AssignmentFact) {
 			// Supporting replicas need durable lineage latching for promotion-readiness,
 			// but this must not consume the primary readyOnce. A later promotion to
 			// PRIMARY has to emit its own marker for the promoted lineage.
-			if h.cfg.ReadyMarker != nil && info.Epoch > 0 {
-				select {
-				case h.cfg.ReadyMarker <- info:
-				default:
-				}
-			}
+			h.emitSupportingReadyMarker(info)
 			return
 		}
 		h.log.Printf("blockvolume: volume %s authority is now %s@%d (not this replica %s); recording supersede, not applying to adapter",
@@ -592,5 +589,26 @@ func (h *Host) applyFact(fact *control.AssignmentFact) {
 		case h.cfg.ReadyMarker <- info:
 		default:
 		}
+	}
+}
+
+func (h *Host) emitSupportingReadyMarker(info adapter.AssignmentInfo) {
+	if h.cfg.ReadyMarker == nil || info.Epoch == 0 {
+		return
+	}
+	key := fmt.Sprintf("%s/%d/%d", info.ReplicaID, info.Epoch, info.EndpointVersion)
+	h.readyMarkerMu.Lock()
+	if h.supportingReadyMarks == nil {
+		h.supportingReadyMarks = make(map[string]struct{})
+	}
+	if _, ok := h.supportingReadyMarks[key]; ok {
+		h.readyMarkerMu.Unlock()
+		return
+	}
+	h.supportingReadyMarks[key] = struct{}{}
+	h.readyMarkerMu.Unlock()
+	select {
+	case h.cfg.ReadyMarker <- info:
+	default:
 	}
 }
