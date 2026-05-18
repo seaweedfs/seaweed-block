@@ -30,8 +30,9 @@ Current alpha constraints:
 
 1. Package a clean Kubernetes install surface.
 
-   - keep `deploy/k8s/alpha/` coherent
-   - document image names and prerequisites
+   - v0.2 alpha: script-based Day-1 activation path
+   - v0.3 alpha: Helm chart for the same supported path
+   - document image names, immutable release tags, prerequisites, and cleanup
    - remove gate-specific naming from user paths where possible
 
 2. Replace `emptyDir` for blockvolume state.
@@ -40,11 +41,12 @@ Current alpha constraints:
    - support hostPath/local-path style lab persistence
    - keep `emptyDir` only for explicit throwaway smoke tests
 
-3. Add a minimal operator/controller loop.
+3. Add a minimal operator/controller loop after Helm.
 
-   - watch generated workload intent or lifecycle state
-   - apply/delete blockvolume Deployments
-   - stop requiring the harness to apply generated workloads
+   - do not jump directly from scripts to an operator
+   - first stabilize install values, chart ownership, and uninstall behavior
+   - then add CRDs/Conditions/Events for cluster, node, volume, and lifecycle
+     state
 
 4. Improve TestOps usability.
 
@@ -128,11 +130,14 @@ Requires deeper storage context:
 
 A reasonable beta bar:
 
-- K8s install path is one command or one Helm chart.
+- K8s install path is a Helm chart with documented values and immutable images.
 - Dynamic PVC create/delete works repeatedly.
 - Volume data survives blockvolume pod restart.
 - Multi-node attach works.
 - Basic failover is tested under an attached workload.
+- Read-only status and support evidence are available without SSH log spelunking.
+- Operator lifecycle is either present behind a clear beta gate or explicitly
+  listed as the next release boundary.
 - TestOps can run the protocol release gate and produce stable artifacts.
 - Non-claims are documented and visible to users.
 

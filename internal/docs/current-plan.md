@@ -1,12 +1,31 @@
 # Current Plan: Phase 20 - Activation / Day-1 Ops MVP
 
-Status: implementation started. D1 dev slice in progress; QA needed after the
-activation chain is wired into TestOps.
+Status: implementation and QA slices passed for the script-based v0.2 alpha
+path. Release notes and user docs are in place. Formal close report / move to
+finished-plans is the remaining bookkeeping step.
 
 Previous closed capability:
 
 - `finished-plans/phase19_finishedplan_control_plane_observation_ai_readable_ops_mvp.md`
 - `qa-assignments/control-plane-observation-ai-readable-ops-mvp-close-report.md`
+
+## Release Ladder From Here
+
+- `v0.2-alpha` (this plan): script-based Day-1 activation and first-volume
+  loop. Users can activate the stack, create one PVC, verify writer/reader
+  data, generate a local read-only report, and clean up.
+- `v0.3-alpha` (next): Helm activation. Convert the supported install path into
+  a Kubernetes-native chart while preserving preflight, first-volume smoke,
+  report generation, and cleanup evidence.
+- `v0.4-beta-candidate` (after Helm): Operator lifecycle. Add CRDs,
+  Conditions, Events, and day-2 reconciliation for install status, node
+  eligibility, volume lifecycle, recovery observation, and safe cleanup.
+
+Product guidance: do not jump directly from scripts to operator. Helm is the
+right next release because it makes installation regular and reviewable without
+locking us into a CRD/operator lifecycle contract too early. The operator
+release is more meaningful as a product milestone because it can close the
+Kubernetes lifecycle loop, but it should build on a charted install contract.
 
 ## Product Question
 
@@ -313,7 +332,98 @@ timeline evidence, collect support artifacts, and uninstall cleanly.
 
 ## Next Product Choices After This
 
+- Phase 21: Helm Activation MVP.
+- Phase 22: Operator Lifecycle MVP.
 - Backup / Snapshot / Restore MVP for data protection.
 - Rebuild / Reintegration / Failback MVP for returned replicas.
-- Production installer/operator lifecycle.
 - Mutating admin controls with RBAC/audit hard gates.
+
+## Phase 21 Candidate: Helm Activation MVP
+
+Product question:
+
+```text
+Can a Kubernetes user install Seaweed Block as a normal chart, create a first
+PVC, inspect status/report evidence, and uninstall without relying on internal
+script-only manifest mutation?
+```
+
+Scope:
+
+- Add `charts/seaweed-block/` for blockmaster, CSI controller/node, CSI driver,
+  RBAC, StorageClass, CHAP Secret, and cluster-spec ConfigMap.
+- Add `values.yaml` and `values.schema.json` for:
+  - images and immutable tags/digests,
+  - namespace and StorageClass name,
+  - ACK profile,
+  - frontend protocol,
+  - external iSCSI/status,
+  - CHAP configuration,
+  - cluster/node specs,
+  - Stage 2 multipath,
+  - resource requests and tolerations/node selectors where needed.
+- Keep `scripts/activate-k8s-alpha.sh` as a wrapper that can generate
+  `values.day1.yaml`, run preflight, call `helm install`, run the first-volume
+  smoke, generate `sw-block ops report`, and verify cleanup.
+- Do not claim upgrade safety until a separate Helm upgrade/rollback smoke
+  passes.
+
+Hard gate:
+
+1. Fresh supported cluster passes preflight.
+2. `helm install` with generated Day-1 values reaches blockmaster and CSI
+   readiness.
+3. First PVC writer/reader loop passes.
+4. `sw-block ops report` is generated from live product evidence.
+5. `helm uninstall` plus host cleanup leaves no iSCSI sessions, product pods,
+   generated blockvolume Deployments, or unexpected StorageClass residue.
+6. README/quickstart describe Helm as the preferred user install path and keep
+   scripts as dev/TestOps helpers.
+
+Non-claims:
+
+- no operator/CRD lifecycle yet,
+- no online upgrade/rollback safety until gated,
+- no mutating admin actions,
+- no backup/restore or rebuild/failback claim.
+
+## Phase 22 Candidate: Operator Lifecycle MVP
+
+Product question:
+
+```text
+Can Seaweed Block become a Kubernetes-native product loop where users see
+cluster, node, volume, and recovery lifecycle through CRDs, Conditions, Events,
+and read-only dashboard/API evidence?
+```
+
+Scope:
+
+- Add CRDs such as `SeaweedBlockCluster`, `SeaweedBlockNode`, and/or
+  `SeaweedBlockVolume` only after the exact lifecycle ownership is specified.
+- Operator owns install/upgrade status, node eligibility, desired StorageClass,
+  CHAP Secret references, blockmaster/CSI rollout state, and cleanup
+  reconciliation.
+- Conditions must be first-class and user-readable:
+  `Ready`, `Degraded`, `Recovering`, `Blocked`, `CleanupPending`, with stable
+  reason codes.
+- Events must mirror Phase 19 product observation semantics where possible.
+- Mutating actions such as repair, rebuild, promote, failback, or delete remain
+  out of scope unless each has a separate fencing/RBAC/audit gate.
+
+Hard gate:
+
+1. Apply one CR creates the supported stack.
+2. Status Conditions show install progress and node eligibility without SSH.
+3. First PVC writer/reader loop passes.
+4. A controlled failure updates CR status/events and support evidence.
+5. Delete CR cleans Kubernetes resources and verifies host/session cleanup via
+   documented guardrails.
+6. Helm-to-operator migration or coexistence boundary is documented.
+
+Why this release matters:
+
+Operator is the first release that can make Seaweed Block feel like a complete
+Kubernetes storage product: installation, status, lifecycle ownership, cleanup,
+and user-visible diagnosis are managed by a product control plane instead of a
+collection of scripts.
