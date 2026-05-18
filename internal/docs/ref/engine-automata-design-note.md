@@ -266,4 +266,3 @@ mounted app verifies data
 
 If any link is missing, the product should fail closed and name the missing
 automaton boundary.
-
