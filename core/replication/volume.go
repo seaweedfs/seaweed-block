@@ -71,6 +71,8 @@ type ReplicationVolume struct {
 	onPeerRemoved func(string) // by ReplicaID
 }
 
+const promotionSeedBarrierTimeout = 5 * time.Second
+
 // executorFactory lets tests inject a BlockExecutor constructor that
 // binds to a specific replica address. Production uses the real
 // transport.NewBlockExecutor.
@@ -364,8 +366,12 @@ func (v *ReplicationVolume) seedNewPeerLiveCursorsLocked(peers []*ReplicaPeer) {
 		if peer == nil {
 			continue
 		}
-		ack, err := peer.Barrier(context.Background(), frontier)
+		ctx, cancel := context.WithTimeout(context.Background(), promotionSeedBarrierTimeout)
+		ack, err := peer.Barrier(ctx, frontier)
+		cancel()
 		if err != nil {
+			peer.Invalidate(fmt.Sprintf("promotion seed barrier failed: required=%d err=%v",
+				frontier, err))
 			log.Printf("replication: volume %s live cursor seed failed peer=%s frontier=%d: %v",
 				v.volumeID, peer.Target().ReplicaID, frontier, err)
 			continue

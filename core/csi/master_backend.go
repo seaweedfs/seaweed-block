@@ -216,6 +216,12 @@ func rejectFrontendAddr(addr string, rejectLoopback bool) bool {
 	if err != nil {
 		return true
 	}
+	if host == "" {
+		return true
+	}
 	ip := net.ParseIP(host)
-	return ip == nil || ip.IsLoopback()
+	if ip == nil {
+		return false
+	}
+	return ip.IsLoopback()
 }

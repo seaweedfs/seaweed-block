@@ -221,6 +221,26 @@ func TestNodeLoss_ControlStatusLookup_RejectsLoopbackPublishTargetsWhenEnabled(t
 	}
 }
 
+func TestNodeLoss_ControlStatusLookup_AllowsHostnamePublishTargetsWhenLoopbackRejected(t *testing.T) {
+	client := &fakeEvidenceClient{resp: &control.StatusResponse{
+		VolumeId:  "v1",
+		ReplicaId: "r1",
+		Assigned:  true,
+		Frontends: []*control.FrontendTarget{
+			{Protocol: "iscsi", Addr: "sw-blockvolume-r1.default.svc.cluster.local:3260", Iqn: "iqn.2026-05.example:v1"},
+		},
+	}}
+	lookup := NewControlStatusLookupWithOptions(client, WithLoopbackPublishTargetsRejected())
+
+	got, err := lookup.LookupPublishTarget(context.Background(), "v1", "node-a")
+	if err != nil {
+		t.Fatalf("LookupPublishTarget: %v", err)
+	}
+	if got.ISCSIAddr != "sw-blockvolume-r1.default.svc.cluster.local:3260" {
+		t.Fatalf("iscsi addr=%q want hostname target", got.ISCSIAddr)
+	}
+}
+
 func TestNodeLoss_ControlStatusLookup_FailClosedWhenOnlyLoopbackTargets(t *testing.T) {
 	client := &fakeEvidenceClient{resp: &control.StatusResponse{
 		VolumeId:  "v1",

@@ -61,12 +61,19 @@ func (s *services) GetVolumeTimeline(ctx context.Context, req *control.GetVolume
 }
 
 func (s *services) WatchClusterEvents(req *control.WatchClusterEventsRequest, stream control.ClusterEvidenceService_WatchClusterEventsServer) error {
-	for _, event := range s.host.events.listAfter("", req.GetSinceEventId()) {
-		if err := stream.Send(clusterEventToWire(event)); err != nil {
+	cursor := req.GetSinceEventId()
+	for {
+		events, err := s.host.events.waitAfter(stream.Context(), "", cursor)
+		if err != nil {
 			return err
 		}
+		for _, event := range events {
+			if err := stream.Send(clusterEventToWire(event)); err != nil {
+				return err
+			}
+			cursor = event.EventID
+		}
 	}
-	return nil
 }
 
 func (s *services) ReportClusterEvent(ctx context.Context, req *control.ClusterEvent) (*control.ClusterEventAck, error) {

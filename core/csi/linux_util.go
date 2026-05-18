@@ -122,6 +122,7 @@ func (r *realISCSIUtil) GetMultipathDeviceByIQN(ctx context.Context, iqn string,
 	deadline := time.After(20 * time.Second)
 	ticker := time.NewTicker(250 * time.Millisecond)
 	defer ticker.Stop()
+	_ = refreshMultipathMaps(ctx)
 	for {
 		select {
 		case <-ctx.Done():
@@ -129,7 +130,6 @@ func (r *realISCSIUtil) GetMultipathDeviceByIQN(ctx context.Context, iqn string,
 		case <-deadline:
 			return "", fmt.Errorf("timeout waiting for multipath device for IQN %s paths >= %d", iqn, minPaths)
 		case <-ticker.C:
-			_ = refreshMultipathMaps(ctx)
 			dev, paths, err := iscsiMultipathDeviceForIQN(ctx, iqn)
 			if err != nil || dev == "" || paths < minPaths {
 				continue

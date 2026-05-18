@@ -10,7 +10,9 @@ import (
 	"github.com/seaweedfs/seaweed-block/core/authority"
 	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 )
 
 func TestMasterTimeline_RecordsPlacementVerified(t *testing.T) {
@@ -124,11 +126,11 @@ func TestClusterEvidenceService_WatchClusterEventsCursor(t *testing.T) {
 		t.Fatalf("grpc client: %v", err)
 	}
 	defer conn.Close()
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
 	client := control.NewClusterEvidenceServiceClient(conn)
 
-	first, err := client.WatchClusterEvents(ctx, &control.WatchClusterEventsRequest{})
+	firstCtx, firstCancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer firstCancel()
+	first, err := client.WatchClusterEvents(firstCtx, &control.WatchClusterEventsRequest{})
 	if err != nil {
 		t.Fatalf("first watch: %v", err)
 	}
@@ -138,7 +140,9 @@ func TestClusterEvidenceService_WatchClusterEventsCursor(t *testing.T) {
 	}
 	cursor := firstEvents[0].GetEventId()
 
-	second, err := client.WatchClusterEvents(ctx, &control.WatchClusterEventsRequest{SinceEventId: cursor})
+	secondCtx, secondCancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer secondCancel()
+	second, err := client.WatchClusterEvents(secondCtx, &control.WatchClusterEventsRequest{SinceEventId: cursor})
 	if err != nil {
 		t.Fatalf("second watch: %v", err)
 	}
@@ -150,6 +154,60 @@ func TestClusterEvidenceService_WatchClusterEventsCursor(t *testing.T) {
 	}
 	if !containsEventType(secondEvents, "authority_published") {
 		t.Fatalf("events after cursor=%+v missing authority_published", secondEvents)
+	}
+}
+
+func TestClusterEvidenceService_WatchClusterEventsStreamsNewEvents(t *testing.T) {
+	h := newTestMasterWithControllerConfig(t, t.TempDir(), authority.TopologyControllerConfig{
+		ExpectedSlotsPerVolume: 3,
+	})
+	defer closeTestMaster(t, h)
+	seedObservationSnapshotVolume(t, h)
+	seedRF3PlacementForServers(t, h, "pvc-a", "m01", "m02", "tp01")
+	ingestObservationSnapshotRF3(t, h, true, true, true)
+
+	if _, err := h.RunLifecycleProductTick(); err != nil {
+		t.Fatalf("product tick: %v", err)
+	}
+	waitAuthorityLine(t, h.Publisher(), "pvc-a")
+
+	conn, err := grpc.NewClient(h.Addr(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatalf("grpc client: %v", err)
+	}
+	defer conn.Close()
+	client := control.NewClusterEvidenceServiceClient(conn)
+
+	snapshot, err := client.GetClusterStatus(context.Background(), &control.GetClusterStatusRequest{})
+	if err != nil {
+		t.Fatalf("cluster status: %v", err)
+	}
+	if len(snapshot.GetEvents()) == 0 {
+		t.Fatal("expected seeded events")
+	}
+	cursor := snapshot.GetEvents()[len(snapshot.GetEvents())-1].GetEventId()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	stream, err := client.WatchClusterEvents(ctx, &control.WatchClusterEventsRequest{SinceEventId: cursor})
+	if err != nil {
+		t.Fatalf("watch: %v", err)
+	}
+
+	if _, err := control.NewObservationServiceClient(conn).ReportClusterEvent(context.Background(), &control.ClusterEvent{
+		EventType: "csi_reattach_observed",
+		Severity:  "info",
+		VolumeId:  "pvc-a",
+		NodeName:  "m02",
+		NewValue:  "10.0.0.2:3260",
+	}); err != nil {
+		t.Fatalf("report event: %v", err)
+	}
+	event, err := stream.Recv()
+	if err != nil {
+		t.Fatalf("recv new event: %v", err)
+	}
+	if event.GetEventType() != "csi_reattach_observed" || event.GetEventId() == "" {
+		t.Fatalf("event=%+v want streamed csi_reattach_observed with event_id", event)
 	}
 }
 
@@ -168,6 +226,9 @@ func drainWatchEvents(t *testing.T, stream control.ClusterEvidenceService_WatchC
 	for {
 		event, err := stream.Recv()
 		if err == io.EOF {
+			return out
+		}
+		if status.Code(err) == codes.DeadlineExceeded || status.Code(err) == codes.Canceled {
 			return out
 		}
 		if err != nil {
