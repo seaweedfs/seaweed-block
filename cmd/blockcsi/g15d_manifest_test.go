@@ -502,6 +502,61 @@ func TestPhase20ActivationScenarioPinsDay1InstallGate(t *testing.T) {
 	}
 }
 
+func TestPhase20FirstVolumeScriptPinsUserLoop(t *testing.T) {
+	body := g15dReadFile(t, "scripts", "run-basic-app-example.sh")
+	for _, want := range []string{
+		"examples/kubernetes/basic-app",
+		"sw-block-example-pvc",
+		"sw-block-example-writer",
+		"sw-block-example-reader",
+		"first-volume-summary.txt",
+		"writer_verified=$writer_ok",
+		"reader_verified=$reader_ok",
+		"status_evidence=status/cluster-evidence.json,status/inventory",
+		"cluster_evidence=status/cluster-evidence.json",
+		"inventory_bundle=status/inventory",
+		"cleanup_status=$CLEANUP_STATUS",
+		"failed_phase=$FAILED_PHASE",
+		"SW_BLOCK_BASIC_APP_CLEANUP",
+		"SW_BLOCK_CLI",
+		"command -v sw-block",
+		"sw_block_cmd ops cluster --master-api",
+		"sw_block_cmd ops inventory --namespace",
+		"PASS: basic app PVC writer/reader loop complete",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("basic app wrapper missing %q", want)
+		}
+	}
+}
+
+func TestPhase20FirstVolumeScenarioPinsPublishedUserGate(t *testing.T) {
+	body := g15dReadFile(t, "testops", "scenarios", "activation-day1-first-volume-chain.yaml")
+	for _, want := range []string{
+		"name: activation-day1-first-volume-chain",
+		"SW_BLOCK_ACTIVATION_IMAGE_MODE",
+		"published",
+		"ghcr.io/seaweedfs/seaweed-block:sha-",
+		"scripts/activate-k8s-alpha.sh",
+		"scripts/run-basic-app-example.sh",
+		"env.SW_BLOCK_BASIC_APP_CLEANUP",
+		"first-volume-summary.txt",
+		"^first_volume_status=ok$",
+		"^pvc=sw-block-example-pvc$",
+		"^writer_verified=true$",
+		"^reader_verified=true$",
+		"^cleanup_status=ok$",
+		"status/cluster-evidence.json",
+		"status/inventory/volume-inventory-summary.txt",
+		"kubectl -n default delete pvc sw-block-example-pvc",
+		"SW_BLOCK_UNINSTALL_DELETE_ALL_BLOCKVOLUMES",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("first-volume scenario missing %q", want)
+		}
+	}
+}
+
 func TestPhase20AlphaStorageClassManifestIsDynamicPVCDefault(t *testing.T) {
 	body := g15dReadFile(t, "deploy", "k8s", "alpha", "storageclass.yaml")
 	for _, want := range []string{

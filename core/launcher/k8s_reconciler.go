@@ -75,13 +75,17 @@ func ReconcileBlockVolumeDeployments(ctx context.Context, in ReconcileDeployment
 			)
 		}
 		desiredKeys[deploymentKey(identity)] = true
-		if existing, ok := existingByKey[deploymentKey(identity)]; ok && existing.SpecReplicas != nil && *existing.SpecReplicas == 0 {
+		if existing, ok := existingByKey[deploymentKey(identity)]; ok {
+			reason := "already-exists"
+			if existing.SpecReplicas != nil && *existing.SpecReplicas == 0 {
+				reason = "preserve-replicas-zero"
+			}
 			result.Skipped++
 			result.Actions = append(result.Actions, ReconcileDeploymentAction{
 				Action:    "skip",
 				Namespace: identity.Namespace,
 				Name:      identity.Name,
-				Reason:    "preserve-replicas-zero",
+				Reason:    reason,
 			})
 			continue
 		}

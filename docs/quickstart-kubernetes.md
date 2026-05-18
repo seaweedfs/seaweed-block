@@ -56,16 +56,19 @@ export SW_BLOCK_DEMO_APP_NODE_NAME="${SW_BLOCK_DEMO_APP_NODE_NAME:-$SW_BLOCK_ALP
 bash scripts/activate-k8s-alpha.sh "$PWD"
 cat "$(ls -td /tmp/sw-block-activation-* | head -1)/activation-summary.txt"
 
-bash scripts/run-alpha-app-demo.sh "$PWD"
+bash scripts/run-basic-app-example.sh "$PWD"
+cat "$(ls -td /tmp/sw-block-basic-app-* | head -1)/first-volume-summary.txt"
 ```
 
 Expected final line:
 
 ```text
-[app-demo] PASS: app pod wrote data, replacement app pod read it back through the same PVC, cleanup complete
+[basic-app] PASS: basic app PVC writer/reader loop complete
 ```
 
-This default demo proves PVC write/read through pod replacement. To also prove
+This default example proves PVC write/read through pod replacement, captures
+`sw-block ops cluster` plus `sw-block ops inventory` evidence, and cleans the
+example resources. To also prove
 that the generated `blockvolume` can restart and reattach with data intact, use
 the durable restart workflow in
 [`operations-v1.md`](operations-v1.md#5-prove-durable-blockvolume-restart).

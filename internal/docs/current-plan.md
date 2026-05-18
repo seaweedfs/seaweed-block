@@ -131,6 +131,13 @@ PVC -> PV -> volume_id -> replicas -> primary -> frontend -> events -> bundle
 
 - The user should be able to create one PVC, watch it become ready, and see the
   same volume appear in CLI/dashboard evidence.
+- Dev slice: `scripts/run-basic-app-example.sh` runs the canonical
+  `examples/kubernetes/basic-app` PVC/writer/reader loop, collects
+  `sw-block ops cluster` and `sw-block ops inventory` evidence, and writes
+  `first-volume-summary.txt`.
+- QA slice: `testops/scenarios/activation-day1-first-volume-chain.yaml` and
+  `qa-assignments/activation-day1-first-volume-validation.md` validate the
+  published-image Day-1 first-volume path.
 
 ### D4: Read-Only Status / Dashboard View
 

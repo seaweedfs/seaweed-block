@@ -1,0 +1,151 @@
+# Runner-native Phase 20 D2/D3 first-volume chain.
+#
+# Goal:
+#   Prove the user-facing post-activation loop:
+#     activate -> create PVC -> writer checksum -> reader checksum ->
+#     status/inventory evidence -> cleanup.
+
+name: activation-day1-first-volume-chain
+timeout: 24m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+  sw_block_image: "ghcr.io/seaweedfs/seaweed-block:sha-3a916a120d10"
+  sw_block_csi_image: "ghcr.io/seaweedfs/seaweed-block-csi:sha-3a916a120d10"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: pre_clean
+    actions:
+      - action: pre_run_cleanup
+        node: m02
+        kill_patterns: "blockmaster,blockvolume,blockcsi,iscsi-target"
+        nvme_disconnect: "true"
+        iscsi_logout_prefix: "iqn.2026-05.io.seaweedfs"
+      - action: exec
+        node: m02
+        cmd: "rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-activation-first-volume && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-activation-first-volume/activation /mnt/smb/work/share/g15d-k8s/{{ run_id }}-activation-first-volume/basic-app /mnt/smb/work/share/g15d-k8s/{{ run_id }}-activation-first-volume/cleanup"
+      - action: assert_no_active_iscsi_sessions
+        node: m02
+        iqn_substr: "io.seaweedfs"
+      - action: assert_no_processes
+        node: m02
+        pattern: "[/]blockmaster --|[/]blockvolume --|[/]blockcsi |[/]iscsi-target |^blockmaster |^blockvolume |^blockcsi |^iscsi-target "
+
+  - name: activate_alpha_stack
+    actions:
+      - action: exec
+        node: m02
+        timeout: 12m
+        cmd: "cd {{ product_root }} && bash scripts/activate-k8s-alpha.sh {{ product_root }}"
+        env.SW_BLOCK_ARTIFACT_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-activation-first-volume/activation"
+        env.SW_BLOCK_ACTIVATION_IMAGE_MODE: "published"
+        env.SW_BLOCK_IMAGE: "{{ sw_block_image }}"
+        env.SW_BLOCK_CSI_IMAGE: "{{ sw_block_csi_image }}"
+
+  - name: first_volume_user_loop
+    actions:
+      - action: exec
+        node: m02
+        timeout: 10m
+        cmd: "cd {{ product_root }} && bash scripts/run-basic-app-example.sh {{ product_root }}"
+        env.SW_BLOCK_ARTIFACT_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-activation-first-volume/basic-app"
+        env.SW_BLOCK_BASIC_APP_CLEANUP: "1"
+
+  - name: first_volume_asserts
+    actions:
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-activation-first-volume/basic-app/first-volume-summary.txt"
+        pattern: "^first_volume_status=ok$"
+        save_as: first_volume_ok_count
+      - action: assert_greater
+        actual: "{{ first_volume_ok_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-activation-first-volume/basic-app/first-volume-summary.txt"
+        pattern: "^pvc=sw-block-example-pvc$"
+        save_as: pvc_count
+      - action: assert_greater
+        actual: "{{ pvc_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-activation-first-volume/basic-app/first-volume-summary.txt"
+        pattern: "^writer_verified=true$"
+        save_as: writer_verified_count
+      - action: assert_greater
+        actual: "{{ writer_verified_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-activation-first-volume/basic-app/first-volume-summary.txt"
+        pattern: "^reader_verified=true$"
+        save_as: reader_verified_count
+      - action: assert_greater
+        actual: "{{ reader_verified_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-activation-first-volume/basic-app/writer.log"
+        pattern: "/data/demo.bin: OK"
+        save_as: writer_checksum_count
+      - action: assert_greater
+        actual: "{{ writer_checksum_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-activation-first-volume/basic-app/reader.log"
+        pattern: "/data/demo.bin: OK"
+        save_as: reader_checksum_count
+      - action: assert_greater
+        actual: "{{ reader_checksum_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-activation-first-volume/basic-app/first-volume-summary.txt"
+        pattern: "^cleanup_status=ok$"
+        save_as: basic_cleanup_count
+      - action: assert_greater
+        actual: "{{ basic_cleanup_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-activation-first-volume/basic-app/status/cluster-evidence.json"
+        pattern: "\"volumes\""
+        save_as: cluster_volumes_count
+      - action: assert_greater
+        actual: "{{ cluster_volumes_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-activation-first-volume/basic-app/status/inventory/volume-inventory-summary.txt"
+        pattern: "pvc=sw-block-example-pvc"
+        save_as: inventory_pvc_count
+      - action: assert_greater
+        actual: "{{ inventory_pvc_count }}"
+        threshold: "0"
+
+  - name: collect_and_cleanup
+    always: true
+    actions:
+      - action: exec
+        node: m02
+        timeout: 5m
+        cmd: "kubectl -n default delete pod sw-block-example-reader sw-block-example-writer --ignore-not-found=true --wait=true --timeout=120s; kubectl -n default delete pvc sw-block-example-pvc --ignore-not-found=true --wait=true --timeout=120s; kubectl delete storageclass sw-block-example --ignore-not-found=true --wait=true --timeout=120s; cd {{ product_root }} && bash scripts/uninstall-k8s-alpha.sh {{ product_root }}"
+        env.SW_BLOCK_ARTIFACT_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-activation-first-volume/cleanup"
+        env.SW_BLOCK_UNINSTALL_DELETE_ALL_BLOCKVOLUMES: "1"
+      - action: assert_no_active_iscsi_sessions
+        node: m02
+        iqn_substr: "io.seaweedfs"
+      - action: assert_no_processes
+        node: m02
+        pattern: "[/]blockmaster --|[/]blockvolume --|[/]blockcsi |[/]iscsi-target |^blockmaster |^blockvolume |^blockcsi |^iscsi-target "
