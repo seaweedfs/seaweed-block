@@ -1,38 +1,41 @@
-# seaweed-block
+# Seaweed Block
 
-`seaweed-block` is an experimental Kubernetes block storage service.
+Seaweed Block is an experimental Kubernetes block storage service built around
+normal Kubernetes PVCs, a CSI driver, and SeaweedFS block components.
 
-It provides a CSI-based PVC path backed by SeaweedFS block components. The
-current implementation focuses on a small, understandable storage stack for
-testing block volume creation, attach, mount, write/read, recovery, observation,
-and cleanup flows.
+The current alpha is focused on one user-visible loop:
+
+```text
+install on Kubernetes
+-> create a PVC-backed block volume
+-> mount it in an app pod
+-> write/read data
+-> inspect status and support evidence
+-> clean up
+```
+
+Start with the Kubernetes tutorial:
+
+- [First volume on Kubernetes](docs/quickstart-kubernetes.md)
 
 ## Status
 
 Alpha / early beta shape. Not production-ready.
 
-The simplest supported user path is still intentionally small:
+What has been validated in the current alpha:
 
-```text
-install Seaweed Block on Kubernetes
-→ create a PVC-backed block volume
-→ attach it to an app pod
-→ write/read data through the mounted filesystem
-→ inspect status and support evidence
-→ clean up
-```
-
-Internal gates have expanded the product beyond the original smoke test:
-
-- dynamic PVC provisioning through CSI,
-- product-owned generated `blockvolume` lifecycle,
-- multiple PVCs / volumes visible in inventory,
-- durable local volume restart/reattach coverage,
-- RF=3 `sync-quorum` recovery through CSI/pod recreate,
+- Day-1 install-to-first-volume path: activate stack, create PVC, writer pod
+  verifies data, reader pod verifies persisted data, status report generated,
+  cleanup clean.
+- dynamic PVC provisioning through CSI.
+- product-owned generated `blockvolume` lifecycle.
+- multiple PVCs / volumes visible in inventory.
+- durable local volume restart/reattach coverage.
+- RF=3 `sync-quorum` recovery through CSI/pod recreate.
 - RF=3 Kubernetes node-loss recovery through CSI/pod recreate on a surviving
-  node,
+  node.
 - RF=3 iSCSI ALUA + Linux dm-multipath transparent mounted failover on the
-  proven alpha path,
+  proven alpha path.
 - read-only operations evidence through `sw-block ops inventory`,
   `sw-block ops cluster --master-api ... -o json`, support bundles, and
   product-owned event timelines.
@@ -42,8 +45,8 @@ Do not treat them as broad production HA or compatibility claims.
 
 Known missing pieces:
 
-- production-grade installer/operator lifecycle,
-- hosted dashboard/UI,
+- production-grade installer/operator lifecycle or Helm chart,
+- hosted dashboard/UI (only a local static read-only report exists),
 - backup, snapshot, and restore workflow,
 - returned-replica rebuild, reintegration, and failback,
 - transparent node-loss failover without pod recreate,
@@ -89,50 +92,31 @@ Recovery is split into base transfer and live WAL feeding so normal writes
 keep flowing while a peer catches up. Only one peer is the source of truth
 for a recovery stream at any given time.
 
-## Quick start
+## Quick Start
 
-Start here:
-
-- [First volume on Kubernetes](docs/quickstart-kubernetes.md)
-
-That guide is the supported alpha entry point for a new user. It runs
+Use [First volume on Kubernetes](docs/quickstart-kubernetes.md). It runs
 preflight, builds/imports local images, installs the stack, creates one PVC,
 writes and reads data through an app pod replacement, and shows cleanup and
 support-bundle evidence to inspect if anything fails.
 
-The active product direction is an install-to-operate loop:
-
-```text
-install Seaweed Block
-→ verify node readiness
-→ create a PVC-backed volume
-→ add another volume through Kubernetes PVCs
-→ inspect cluster / volume / timeline evidence
-→ collect support bundle and logs
-→ uninstall cleanly
-```
-
-Today, volume creation is the standard Kubernetes PVC path. The product-owned
-master reconciles the backing `blockvolume` workloads.
+Minimal lab path:
 
 ```bash
-# Dev/lab path: builds local images and imports them into k3s.
 bash scripts/activate-k8s-alpha.sh "$PWD"
-
-kubectl apply -f examples/kubernetes/basic-app/storageclass-pvc.yaml
-kubectl get pvc
-```
-
-To run the full first-volume user loop after activation:
-
-```bash
 bash scripts/run-basic-app-example.sh "$PWD"
 cat "$(ls -td /tmp/sw-block-basic-app-* | head -1)/first-volume-summary.txt"
 ```
 
-The helper creates the example PVC, runs writer/reader checksum pods, captures
-cluster and inventory evidence, writes a static read-only status report under
-`status/report/index.html`, and cleans the example resources by default.
+Expected summary fields:
+
+```text
+first_volume_status=ok
+writer_verified=true
+reader_verified=true
+inventory_status=ok
+status_report=status/report/index.html
+cleanup_status=ok
+```
 
 The activation script writes `/tmp/sw-block-activation-*/activation-summary.txt`
 with the blockmaster, CSI controller, CSI node, StorageClass, protocol, ACK
@@ -150,8 +134,7 @@ That path uses `ghcr.io/seaweedfs/seaweed-block:alpha` and
 `ghcr.io/seaweedfs/seaweed-block-csi:alpha` by default. Prefer immutable
 release tags or `sha-<commit>` tags once a release candidate is cut.
 
-The read-only observation path is the foundation for a future dashboard. Use
-the CLI evidence first:
+## Operations
 
 ```bash
 kubectl -n kube-system port-forward deploy/sw-blockmaster 9333:9333
@@ -159,6 +142,13 @@ sw-block ops cluster --master-api 127.0.0.1:9333 -o json \
   > /tmp/sw-block-cluster-evidence.json
 sw-block ops report --master-api 127.0.0.1:9333 --out /tmp/sw-block-report
 ```
+
+If `sw-block` is not in `PATH`, run the same commands from this repository as
+`go run ./cmd/sw-block ops ...`.
+
+`sw-block ops report` writes a local static read-only status page plus
+machine-readable artifacts. It is not a hosted dashboard and it has no mutating
+admin actions.
 
 For replica-level support evidence:
 
@@ -223,14 +213,6 @@ More detail:
 - [docs/developer-architecture.md](docs/developer-architecture.md)
 - [docs/runtime-state-machines.md](docs/runtime-state-machines.md)
 - [docs/roadmap.md](docs/roadmap.md)
-
-## Current Product Gap
-
-The next milestone is Phase 20: Activation / Day-1 Ops. It packages the proven
-pieces into a smoother install-to-operate loop: simpler install, clearer node
-readiness, PVC-based add-volume workflow, read-only status view, logs, and
-support bundle. The goal is to make the existing block product usable as a
-small alpha product instead of a collection of successful internal gates.
 
 ## License
 

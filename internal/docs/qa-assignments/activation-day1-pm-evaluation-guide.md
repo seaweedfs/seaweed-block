@@ -201,7 +201,7 @@ sleep 5
 **What you should see**:
 
 - a cluster-level status line (`status=ok` or `status=blocked reason=...`),
-- a list of three nodes with their IPs and Ready=true,
+- a list of nodes, one per Ready k3s node, with their IPs and Ready=true,
 - zero or one volumes,
 - a "next action" line.
 - `/tmp/sw-block-report/index.html`,
