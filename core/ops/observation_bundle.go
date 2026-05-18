@@ -13,6 +13,12 @@ import (
 )
 
 const (
+	ClusterEvidenceArtifact        = "cluster-evidence.json"
+	ObservationReportHTMLArtifact  = "index.html"
+	ObservationReportJSONArtifact  = ClusterEvidenceArtifact
+	ObservationReportTextArtifact  = "summary.txt"
+	ObservationReportJSONLArtifact = "timeline.jsonl"
+
 	NodeLossRecoverySummaryArtifact = "node-loss-recovery-summary.txt"
 	PrimaryFailureRecoveryArtifact  = "primary-failure-recovery.txt"
 	ControlPlaneTimelineArtifact    = "control-plane-timeline.txt"
@@ -30,14 +36,24 @@ func BuildObservationFromBundle(opts ObservationBundleOptions) (ClusterEvidence,
 	}
 	cluster := NewClusterEvidence(time.Time{})
 	cluster.ProductRevision = "from-bundle"
+	sourceLoaded := false
 
-	inventory, inventoryPath, inventoryErr := loadBestVolumeInventory(opts.Dir)
-	if inventoryErr == nil {
-		fromInventory, err := BuildObservationFromInventory(inventory, opts.VolumeID, inventoryPath)
-		if err != nil {
-			return cluster, err
+	productCluster, _, productErr := loadBestClusterEvidence(opts.Dir)
+	if productErr == nil {
+		cluster = filterObservationCluster(productCluster, opts.VolumeID)
+		sourceLoaded = true
+	} else {
+		inventory, inventoryPath, inventoryErr := loadBestVolumeInventory(opts.Dir)
+		if inventoryErr == nil {
+			fromInventory, err := BuildObservationFromInventory(inventory, opts.VolumeID, inventoryPath)
+			if err != nil {
+				return cluster, err
+			}
+			cluster = fromInventory
+			sourceLoaded = true
+		} else if opts.VolumeID != "" {
+			cluster = filterObservationCluster(cluster, opts.VolumeID)
 		}
-		cluster = fromInventory
 	}
 
 	summary, summaryPath, _ := loadKeyValueArtifact(opts.Dir, NodeLossRecoverySummaryArtifact)
@@ -45,7 +61,7 @@ func BuildObservationFromBundle(opts ObservationBundleOptions) (ClusterEvidence,
 		applyNodeLossSummary(&cluster, summary, summaryPath)
 	}
 	timeline, timelinePath, _ := loadTimelineArtifact(opts.Dir)
-	if len(timeline) > 0 {
+	if len(timeline) > 0 && len(cluster.Events) == 0 {
 		cluster.Events = append(cluster.Events, timeline...)
 		for i := range cluster.Events {
 			if cluster.Events[i].EvidenceRef == "" {
@@ -55,6 +71,7 @@ func BuildObservationFromBundle(opts ObservationBundleOptions) (ClusterEvidence,
 	}
 	if blocked, blockedVolume := buildImagePullBlockedEvidence(opts.Dir); blocked {
 		cluster.Status = ObservationStatusBlocked
+		sourceLoaded = true
 		if len(cluster.Volumes) == 0 {
 			if opts.VolumeID != "" {
 				blockedVolume.VolumeID = opts.VolumeID
@@ -63,8 +80,11 @@ func BuildObservationFromBundle(opts ObservationBundleOptions) (ClusterEvidence,
 		}
 	}
 	if len(cluster.Volumes) == 0 {
-		if inventoryErr != nil {
-			return cluster, inventoryErr
+		if opts.VolumeID == "" && sourceLoaded {
+			return cluster, nil
+		}
+		if !sourceLoaded && productErr != nil {
+			return cluster, productErr
 		}
 		return cluster, fmt.Errorf("volume %q not found in bundle", opts.VolumeID)
 	}
@@ -133,6 +153,79 @@ func loadBestVolumeInventory(root string) (VolumeInventory, string, error) {
 		return VolumeInventory{}, paths[0], fmt.Errorf("decode %s: %w", paths[0], err)
 	}
 	return inventory, paths[0], nil
+}
+
+func loadBestClusterEvidence(root string) (ClusterEvidence, string, error) {
+	paths, err := findArtifactPaths(root, ClusterEvidenceArtifact)
+	if err != nil {
+		return ClusterEvidence{}, "", err
+	}
+	if len(paths) == 0 {
+		return ClusterEvidence{}, "", fmt.Errorf("%s not found under %s", ClusterEvidenceArtifact, root)
+	}
+	sort.SliceStable(paths, func(i, j int) bool {
+		return clusterEvidencePathRank(paths[i]) < clusterEvidencePathRank(paths[j])
+	})
+	raw, err := os.ReadFile(paths[0])
+	if err != nil {
+		return ClusterEvidence{}, paths[0], fmt.Errorf("read %s: %w", paths[0], err)
+	}
+	var cluster ClusterEvidence
+	if err := json.Unmarshal(raw, &cluster); err != nil {
+		return ClusterEvidence{}, paths[0], fmt.Errorf("decode %s: %w", paths[0], err)
+	}
+	return normalizeObservationCluster(cluster), paths[0], nil
+}
+
+func clusterEvidencePathRank(path string) int {
+	path = filepath.ToSlash(path)
+	switch {
+	case strings.Contains(path, "product-observation"):
+		return 0
+	case strings.Contains(path, "/status/"):
+		return 1
+	default:
+		return 10
+	}
+}
+
+func normalizeObservationCluster(cluster ClusterEvidence) ClusterEvidence {
+	if cluster.SchemaVersion == "" {
+		cluster.SchemaVersion = ObservationSchemaVersion
+	}
+	if cluster.CapturedAt.IsZero() {
+		cluster.CapturedAt = time.Now().UTC()
+	} else {
+		cluster.CapturedAt = cluster.CapturedAt.UTC()
+	}
+	if cluster.Status == "" {
+		cluster.Status = ObservationStatusUnavailable
+	}
+	if len(cluster.NonClaims) == 0 {
+		cluster.NonClaims = NewClusterEvidence(cluster.CapturedAt).NonClaims
+	}
+	return cluster
+}
+
+func filterObservationCluster(cluster ClusterEvidence, volumeID string) ClusterEvidence {
+	cluster = normalizeObservationCluster(cluster)
+	if strings.TrimSpace(volumeID) == "" {
+		return cluster
+	}
+	filtered := cluster
+	filtered.Volumes = nil
+	for _, volume := range cluster.Volumes {
+		if volume.VolumeID == volumeID {
+			filtered.Volumes = append(filtered.Volumes, volume)
+		}
+	}
+	filtered.Events = nil
+	for _, event := range cluster.Events {
+		if event.VolumeID == "" || event.VolumeID == volumeID {
+			filtered.Events = append(filtered.Events, event)
+		}
+	}
+	return filtered
 }
 
 func inventoryPathRank(path string) int {

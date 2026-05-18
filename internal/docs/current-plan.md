@@ -159,6 +159,14 @@ event timeline / bundle / reason codes
 - Build a read-only block dashboard/status view modeled after the SeaweedFS
   `/block/` information architecture, backed by the Phase 19 observation API,
   with no mutating admin actions.
+- Dev slice: `sw-block ops report` renders a static read-only status page from
+  either live `--master-api` evidence or a saved support bundle. It writes
+  `index.html`, `cluster-evidence.json`, `timeline.jsonl`, and `summary.txt`
+  from the shared observation core.
+- Day-1 helper slice: `scripts/run-basic-app-example.sh` now generates
+  `status/report/index.html` after writer/reader verification, so the first
+  volume bundle contains a user-readable status page and machine-readable
+  evidence together.
 - Reuse lessons from the V2 SeaweedFS block UI where useful:
   - reference files:
     `C:\work\seaweedfs\weed\server\master_server_handlers_block_ui.go`,

@@ -131,7 +131,8 @@ cat "$(ls -td /tmp/sw-block-basic-app-* | head -1)/first-volume-summary.txt"
 ```
 
 The helper creates the example PVC, runs writer/reader checksum pods, captures
-cluster and inventory evidence, and cleans the example resources by default.
+cluster and inventory evidence, writes a static read-only status report under
+`status/report/index.html`, and cleans the example resources by default.
 
 The activation script writes `/tmp/sw-block-activation-*/activation-summary.txt`
 with the blockmaster, CSI controller, CSI node, StorageClass, protocol, ACK
@@ -156,6 +157,7 @@ the CLI evidence first:
 kubectl -n kube-system port-forward deploy/sw-blockmaster 9333:9333
 sw-block ops cluster --master-api 127.0.0.1:9333 -o json \
   > /tmp/sw-block-cluster-evidence.json
+sw-block ops report --master-api 127.0.0.1:9333 --out /tmp/sw-block-report
 ```
 
 For replica-level support evidence:
@@ -173,6 +175,8 @@ sw-block ops inventory \
 - Create PVC-backed block volumes through Kubernetes.
 - Run app pods that mount the PVC and verify file data.
 - Inspect cluster, volume, replica, primary, frontend, and event evidence.
+- Generate a local read-only HTML status report from live master evidence or a
+  saved support bundle.
 - Collect inventory and product evidence bundles for support.
 - Exercise documented recovery gates in TestOps/lab environments.
 

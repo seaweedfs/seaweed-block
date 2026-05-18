@@ -366,12 +366,17 @@ sw-block ops describe volume <volume-id>
 sw-block ops timeline volume <volume-id>
 sw-block ops timeline volume <volume-id> -o jsonl
 sw-block ops explain volume <volume-id>
+sw-block ops report --master-api 127.0.0.1:9333 --out /tmp/sw-block-report
+sw-block ops report --from-bundle <bundle-dir> --out /tmp/sw-block-report
 sw-block ops inventory --namespace default --master 127.0.0.1:9333 --out /tmp/sw-block-inventory
 ```
 
 `sw-block ops cluster --master-api` reads the product-owned master API.
 `sw-block ops inventory` and bundle-backed `describe`/`timeline`/`explain`
 commands remain useful when diagnosing from saved artifacts.
+`sw-block ops report` writes a local read-only status page plus JSON/JSONL
+artifacts from the same observation core; it is a dashboard-shaped artifact, not
+a mutating admin UI.
 
 The long-term design is one shared observation core with three consumers:
 
