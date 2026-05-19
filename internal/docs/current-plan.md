@@ -164,6 +164,10 @@ Current D3 checkpoint:
   image identity in `first-volume-summary.txt`.
 - Static validation passes: scenario YAML parses, shell scripts parse, and
   chart lint passes. Live QA run is still required.
+- First QA attempt failed before chart deployment because `helm` did not inherit
+  k3s kubeconfig. Scenario now sets `KUBECONFIG=/etc/rancher/k3s/k3s.yaml` for
+  Helm/kubectl exec actions and records `helm version` as a prerequisite
+  artifact.
 
 ### D4: Helm Uninstall and Host Cleanup Gate
 
@@ -235,6 +239,9 @@ Candidate scenarios:
 - RBAC scope may need one more tightening pass before public release. The chart
   should make namespace, ServiceAccounts, and ClusterRole use visible rather
   than implicit.
+- Helm is now an explicit Day-1 prerequisite. k3s labs require explicit
+  `KUBECONFIG=/etc/rancher/k3s/k3s.yaml`; do not rely on k3s kubectl wrapper
+  behavior for Helm.
 - Helm cannot verify host iSCSI/multipath cleanup by itself. The close gate must
   include a cleanup verifier.
 - Multi-node defaults can regress into loopback mistakes. The values generator

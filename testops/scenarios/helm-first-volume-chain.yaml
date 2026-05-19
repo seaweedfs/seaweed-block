@@ -4,6 +4,11 @@
 #   Prove the PM/user Helm path:
 #     generate values.day1.yaml -> helm install -> first PVC ->
 #     writer checksum -> reader checksum -> read-only report -> helm uninstall.
+#
+# Lab prerequisite:
+#   helm must be installed on the runner node. k3s labs also need explicit
+#   KUBECONFIG because helm does not auto-load /etc/rancher/k3s/k3s.yaml the
+#   way the k3s-wrapped kubectl command does.
 
 name: helm-first-volume-chain
 timeout: 26m
@@ -35,6 +40,7 @@ phases:
         node: m02
         timeout: 5m
         cmd: "helm status {{ helm_release }} --namespace {{ helm_namespace }} >/dev/null 2>&1 && helm uninstall {{ helm_release }} --namespace {{ helm_namespace }} --wait --timeout 180s || true; kubectl -n default delete pod sw-block-example-reader sw-block-example-writer --ignore-not-found=true --wait=true --timeout=120s; kubectl -n default delete pvc sw-block-example-pvc --ignore-not-found=true --wait=true --timeout=120s; kubectl delete storageclass sw-block-example --ignore-not-found=true --wait=true --timeout=120s; rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-first-volume && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-first-volume/values /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-first-volume/install /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-first-volume/basic-app /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-first-volume/cleanup"
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
       - action: assert_no_active_iscsi_sessions
         node: m02
         iqn_substr: "io.seaweedfs"
@@ -47,7 +53,8 @@ phases:
       - action: exec
         node: m02
         timeout: 3m
-        cmd: "cd {{ product_root }} && bash scripts/generate-helm-values-day1.sh {{ product_root }}"
+        cmd: "helm version --short > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-first-volume/values/helm-version.txt && cd {{ product_root }} && bash scripts/generate-helm-values-day1.sh {{ product_root }}"
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
         env.SW_BLOCK_HELM_VALUES_OUT: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-first-volume/values/values.day1.yaml"
         env.SW_BLOCK_ACTIVATION_IMAGE_MODE: "published"
         env.SW_BLOCK_IMAGE: "{{ sw_block_image }}"
@@ -83,6 +90,7 @@ phases:
         node: m02
         timeout: 10m
         cmd: "cd {{ product_root }} && helm lint charts/seaweed-block -f /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-first-volume/values/values.day1.yaml > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-first-volume/install/helm-lint.txt && helm install {{ helm_release }} charts/seaweed-block --namespace {{ helm_namespace }} -f /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-first-volume/values/values.day1.yaml --wait --timeout 5m > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-first-volume/install/helm-install.txt && kubectl -n {{ helm_namespace }} rollout status deploy/sw-blockmaster --timeout=180s > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-first-volume/install/wait-blockmaster.txt && kubectl -n {{ helm_namespace }} rollout status deploy/sw-block-csi-controller --timeout=180s > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-first-volume/install/wait-csi-controller.txt && kubectl -n {{ helm_namespace }} rollout status ds/sw-block-csi-node --timeout=180s > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-first-volume/install/wait-csi-node.txt && helm status {{ helm_release }} --namespace {{ helm_namespace }} > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-first-volume/install/helm-status.txt && kubectl -n {{ helm_namespace }} get pods,deploy,ds,svc -o wide > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-first-volume/install/kube-system-ready.txt && kubectl get sc sw-block-dynamic -o wide > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-first-volume/install/storageclass.txt"
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
       - action: grep_log
         node: m02
         path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-first-volume/install/helm-status.txt"
@@ -106,6 +114,7 @@ phases:
         node: m02
         timeout: 10m
         cmd: "cd {{ product_root }} && bash scripts/run-basic-app-example.sh {{ product_root }}"
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
         env.SW_BLOCK_ARTIFACT_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-first-volume/basic-app"
         env.SW_BLOCK_BASIC_APP_CLEANUP: "1"
         env.SW_BLOCK_INSTALL_MODE: "helm"
@@ -232,6 +241,7 @@ phases:
       - action: exec
         node: m02
         cmd: "! grep -Eiq '<button[^>]*>(promote|repair|delete|rebuild|cleanup)|data-action=\"(promote|repair|delete|rebuild|cleanup)\"|href=\"[^\"]*/(promote|repair|delete|rebuild|cleanup)' /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-first-volume/basic-app/status/report/index.html"
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
 
   - name: helm_uninstall_cleanup
     always: true
@@ -240,6 +250,7 @@ phases:
         node: m02
         timeout: 6m
         cmd: "helm status {{ helm_release }} --namespace {{ helm_namespace }} >/dev/null 2>&1 && helm uninstall {{ helm_release }} --namespace {{ helm_namespace }} --wait --timeout 240s > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-first-volume/cleanup/helm-uninstall.txt || true; kubectl -n default delete pod sw-block-example-reader sw-block-example-writer --ignore-not-found=true --wait=true --timeout=120s; kubectl -n default delete pvc sw-block-example-pvc --ignore-not-found=true --wait=true --timeout=120s; kubectl delete storageclass sw-block-example --ignore-not-found=true --wait=true --timeout=120s; kubectl -n {{ helm_namespace }} get pods,deploy,ds,svc -o wide > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-first-volume/cleanup/kube-system-after-uninstall.txt 2>&1 || true"
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
       - action: assert_no_active_iscsi_sessions
         node: m02
         iqn_substr: "io.seaweedfs"
