@@ -1,0 +1,11 @@
+Seaweed Block has been rendered by Helm.
+
+Next checks:
+  kubectl -n {{ .Release.Namespace }} wait --for=condition=available deploy/sw-blockmaster --timeout=120s
+  kubectl -n {{ .Release.Namespace }} wait --for=condition=available deploy/sw-block-csi-controller --timeout=120s
+  kubectl -n {{ .Release.Namespace }} rollout status ds/sw-block-csi-node --timeout=120s
+
+Create volumes through Kubernetes PVCs using StorageClass {{ .Values.storageClass.name }}.
+
+This chart is read-only/operator-free alpha packaging. It does not install a
+mutating dashboard, operator CRDs, backup/restore, or upgrade safety.

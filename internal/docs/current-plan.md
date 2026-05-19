@@ -1,6 +1,7 @@
 # Current Plan: Phase 21 - Helm Activation MVP
 
-Status: planning starts from `main` after the v0.2 Day-1 activation merge.
+Status: D1 dev pass. Helm chart skeleton renders and dry-runs for both
+single-node loopback defaults and three-node external iSCSI/CHAP values.
 
 Previous closed capability:
 
@@ -86,6 +87,16 @@ surface:
 
 The chart should template existing semantics. It must not fork product behavior
 from `scripts/install-k8s-alpha.sh`.
+
+Current D1 checkpoint:
+
+- `helm lint charts/seaweed-block` passes.
+- `helm template sw-block charts/seaweed-block --namespace kube-system` passes
+  Kubernetes client dry-run.
+- Three-node external values render external iSCSI/status, CHAP,
+  sync-quorum, expected slots, Stage 2 multipath, non-loopback IPs, and
+  loopback publish-target rejection.
+- Chart render fails closed if external iSCSI is enabled without CHAP.
 
 ### D2: Day-1 Values Generator and Preflight
 

@@ -1,0 +1,69 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sw-block-csi-controller
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "seaweed-block.labels" . | nindent 4 }}
+    app: sw-block-csi-controller
+spec:
+  replicas: {{ .Values.csiController.replicas }}
+  selector:
+    matchLabels:
+      app: sw-block-csi-controller
+  template:
+    metadata:
+      labels:
+        app: sw-block-csi-controller
+        {{- include "seaweed-block.labels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "seaweed-block.fullname" . }}-csi
+      containers:
+        - name: block-csi
+          image: {{ include "seaweed-block.csiImage" . | quote }}
+          imagePullPolicy: {{ .Values.csiImage.pullPolicy }}
+          args:
+            - "--endpoint=unix:///csi/csi.sock"
+            - "--master=$(BLOCKMASTER_ADDR)"
+            - "--node-id=$(NODE_NAME)"
+            {{- if .Values.blockmaster.launcherPVCOwnerRef }}
+            - "--kubernetes-pvc-uid-lookup"
+            {{- end }}
+            {{- if .Values.stage2Multipath.enabled }}
+            - "--stage2-multipath"
+            {{- end }}
+            {{- if .Values.network.rejectLoopbackPublishTargets }}
+            - "--reject-loopback-publish-targets"
+            {{- end }}
+          env:
+            - name: BLOCKMASTER_ADDR
+              value: {{ include "seaweed-block.blockmasterAddress" . | quote }}
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+        - name: csi-provisioner
+          image: {{ .Values.sidecars.provisionerImage | quote }}
+          args:
+            - "--csi-address=/csi/csi.sock"
+            - "--timeout=30s"
+            - "--leader-election=true"
+            - "--extra-create-metadata=true"
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+        - name: csi-attacher
+          image: {{ .Values.sidecars.attacherImage | quote }}
+          args:
+            - "--csi-address=/csi/csi.sock"
+            - "--timeout=30s"
+            - "--leader-election=true"
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+      volumes:
+        - name: socket-dir
+          emptyDir: {}

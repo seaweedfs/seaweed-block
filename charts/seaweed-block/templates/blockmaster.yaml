@@ -1,0 +1,111 @@
+{{- if and .Values.network.externalISCSI (not .Values.chap.enabled) -}}
+{{- fail "network.externalISCSI=true requires chap.enabled=true so cross-node iSCSI is not published without CHAP credentials" -}}
+{{- end -}}
+{{- if and .Values.network.externalStatus (not .Values.network.externalISCSI) -}}
+{{- fail "network.externalStatus=true requires network.externalISCSI=true because external status is only supported with external block frontend publishing" -}}
+{{- end -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sw-blockmaster
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "seaweed-block.labels" . | nindent 4 }}
+    app: sw-blockmaster
+spec:
+  replicas: {{ .Values.blockmaster.replicas }}
+  selector:
+    matchLabels:
+      app: sw-blockmaster
+  template:
+    metadata:
+      labels:
+        app: sw-blockmaster
+        {{- include "seaweed-block.labels" . | nindent 8 }}
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      serviceAccountName: {{ include "seaweed-block.fullname" . }}-master
+      containers:
+        - name: blockmaster
+          image: {{ include "seaweed-block.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/usr/local/bin/blockmaster"]
+          args:
+            - "--authority-store={{ .Values.blockmaster.authorityStore }}"
+            - "--lifecycle-store={{ .Values.blockmaster.lifecycleStore }}"
+            - "--cluster-spec=/config/cluster-spec.yaml"
+            - "--lifecycle-product-loop-interval={{ .Values.blockmaster.lifecycleProductLoopInterval }}"
+            - "--launcher-loop-interval={{ .Values.blockmaster.launcherLoopInterval }}"
+            - "--launcher-manifest-dir={{ .Values.blockmaster.launcherManifestDir }}"
+            - "--launcher-master-addr={{ include "seaweed-block.blockmasterAddress" . }}"
+            - "--launcher-image={{ include "seaweed-block.image" . }}"
+            - "--launcher-namespace={{ .Release.Namespace }}"
+            - "--launcher-durable-root={{ .Values.blockmaster.durableRoot }}"
+            {{- if .Values.blockmaster.launcherStatus }}
+            - "--launcher-status"
+            {{- end }}
+            - "--launcher-replication-ack={{ .Values.replication.ackProfile }}"
+            - "--launcher-iscsi-port-base={{ .Values.ports.iscsiBase }}"
+            {{- if .Values.blockmaster.launcherPVCOwnerRef }}
+            - "--launcher-pvc-owner-ref"
+            {{- end }}
+            {{- if .Values.blockmaster.stateHostPath }}
+            - "--launcher-state-hostpath={{ .Values.blockmaster.stateHostPath }}"
+            {{- end }}
+            {{- if .Values.network.externalISCSI }}
+            - "--launcher-external-iscsi"
+            - "--launcher-iscsi-chap-secret-name={{ .Values.chap.secretName }}"
+            - "--launcher-iscsi-chap-username-key={{ .Values.chap.usernameKey }}"
+            - "--launcher-iscsi-chap-secret-key={{ .Values.chap.secretKey }}"
+            {{- end }}
+            {{- if .Values.network.externalStatus }}
+            - "--launcher-external-status"
+            {{- end }}
+            {{- if .Values.network.rejectLoopbackPublishTargets }}
+            - "--launcher-reject-loopback-publish-targets"
+            {{- end }}
+            - "--launcher-kubernetes-apply"
+            - "--listen=0.0.0.0:{{ .Values.blockmaster.listenPort }}"
+            - "--expected-slots-per-volume={{ include "seaweed-block.expectedSlotsPerVolume" . }}"
+          ports:
+            - name: grpc
+              containerPort: {{ .Values.blockmaster.listenPort }}
+          volumeMounts:
+            - name: cluster-spec
+              mountPath: /config
+              readOnly: true
+            - name: state
+              mountPath: /var/lib/sw-block
+            - name: manifests
+              mountPath: /manifests
+      volumes:
+        - name: cluster-spec
+          configMap:
+            name: {{ include "seaweed-block.fullname" . }}-cluster-spec
+        - name: state
+          {{- if .Values.blockmaster.stateHostPath }}
+          hostPath:
+            path: {{ .Values.blockmaster.stateHostPath | quote }}
+            type: {{ .Values.blockmaster.stateHostPathType | quote }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        - name: manifests
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Values.blockmaster.serviceName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "seaweed-block.labels" . | nindent 4 }}
+    app: sw-blockmaster
+spec:
+  selector:
+    app: sw-blockmaster
+  ports:
+    - name: grpc
+      port: {{ .Values.blockmaster.listenPort }}
+      targetPort: grpc

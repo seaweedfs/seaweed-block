@@ -1,0 +1,104 @@
+# Seaweed Block Helm values.
+#
+# This chart packages the existing alpha Kubernetes install path. It does not
+# claim operator lifecycle, backup/restore, upgrade safety, or mutating admin
+# actions.
+
+image:
+  repository: ghcr.io/seaweedfs/seaweed-block
+  tag: alpha
+  digest: ""
+  pullPolicy: IfNotPresent
+
+csiImage:
+  repository: ghcr.io/seaweedfs/seaweed-block-csi
+  tag: alpha
+  digest: ""
+  pullPolicy: IfNotPresent
+
+sidecars:
+  provisionerImage: registry.k8s.io/sig-storage/csi-provisioner:v5.2.0
+  attacherImage: registry.k8s.io/sig-storage/csi-attacher:v4.8.1
+  nodeDriverRegistrarImage: registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.13.0
+
+driver:
+  name: block.csi.seaweedfs.com
+
+appNamespace: default
+
+blockmaster:
+  replicas: 1
+  serviceName: blockmaster
+  listenPort: 9333
+  authorityStore: /var/lib/sw-block/authority
+  lifecycleStore: /var/lib/sw-block/lifecycle
+  durableRoot: /var/lib/sw-block
+  lifecycleProductLoopInterval: 100ms
+  launcherLoopInterval: 100ms
+  launcherManifestDir: /manifests
+  launcherNamespace: kube-system
+  launcherStatus: true
+  launcherPVCOwnerRef: true
+  stateHostPath: ""
+  stateHostPathType: DirectoryOrCreate
+
+storageClass:
+  create: true
+  name: sw-block-dynamic
+  reclaimPolicy: Delete
+  volumeBindingMode: Immediate
+  allowVolumeExpansion: false
+  replicationFactor: 1
+  protocol: iscsi
+  nodeStageSecret:
+    enabled: true
+
+replication:
+  ackProfile: best-effort
+  expectedSlotsPerVolume: 0
+
+network:
+  externalISCSI: false
+  externalStatus: false
+  rejectLoopbackPublishTargets: false
+
+stage2Multipath:
+  enabled: false
+
+chap:
+  enabled: false
+  secretName: sw-block-iscsi-chap
+  usernameKey: chapUsername
+  secretKey: chapSecret
+  username: ""
+  secret: ""
+  create: true
+
+ports:
+  iscsiBase: 3260
+  statusBase: 23260
+
+# Initial block-capable nodes. D2 will add a generator that derives this from
+# `kubectl get nodes` so node names and InternalIPs are verified against the
+# live cluster.
+blockNodes:
+  - name: m02
+    serverID: m02
+    internalIP: 127.0.0.1
+    dataPort: 19101
+    ctrlPort: 19102
+    poolID: pool-a
+    totalBytes: 1073741824
+    freeBytes: 1073741824
+
+rbac:
+  create: true
+
+csiController:
+  replicas: 1
+
+csiNode:
+  kubeletPath: /var/lib/kubelet
+  pluginPath: /var/lib/kubelet/plugins/block.csi.seaweedfs.com
+  registrationPath: /var/lib/kubelet/plugins_registry
+  loadKernelModules: true
