@@ -44,6 +44,6 @@ helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version | replace "+" "_" }}
 {{- if gt (int .Values.replication.expectedSlotsPerVolume) 0 -}}
 {{- .Values.replication.expectedSlotsPerVolume -}}
 {{- else -}}
-{{- len .Values.blockNodes -}}
+{{- .Values.storageClass.replicationFactor -}}
 {{- end -}}
 {{- end -}}

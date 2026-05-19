@@ -23,6 +23,9 @@ helm install sw-block charts/seaweed-block \
 Multi-node Day-1 mode should use non-loopback node IPs and CHAP:
 
 ```bash
+SW_BLOCK_HELM_VALUES_OUT=values.day1.yaml \
+  bash scripts/generate-helm-values-day1.sh "$PWD"
+
 helm install sw-block charts/seaweed-block \
   --namespace kube-system \
   -f values.day1.yaml

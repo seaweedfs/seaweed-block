@@ -119,6 +119,17 @@ Required behavior:
 - preserve the v0.2 distinction between local/internal images and immutable
   GHCR release images.
 
+Current D2 checkpoint:
+
+- `scripts/generate-helm-values-day1.sh` writes `values.day1.yaml` from
+  `kubectl get nodes`.
+- One Ready node generates loopback mode with the real Kubernetes node name.
+- Multiple Ready nodes generate external iSCSI/status, CHAP, loopback publish
+  rejection, and one `blockNodes` entry per Ready schedulable node.
+- RF greater than discovered Ready node count fails closed.
+- Generated three-node RF=3 sync-quorum values pass `helm lint`,
+  `helm template`, and Kubernetes client dry-run.
+
 ### D3: Helm Install First-Volume Gate
 
 Create a TestOps scenario that exercises the PM/user path:
