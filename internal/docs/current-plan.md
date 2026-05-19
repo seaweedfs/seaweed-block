@@ -130,7 +130,43 @@ Current D2 checkpoint:
 - Generated three-node RF=3 sync-quorum values pass `helm lint`,
   `helm template`, and Kubernetes client dry-run.
 
-### D3: Helm Install First-Volume Gate
+### D3a: Helm Single-Node First-Volume Gate
+
+Create a TestOps scenario for the README-friendly single-node path:
+
+```text
+generate values.day1.yaml with one selected node
+-> helm install
+-> pin writer/reader pods to that same node
+-> PVC writer/reader checksum
+-> sw-block ops report
+-> helm uninstall
+```
+
+Acceptance:
+
+- values render loopback mode (`externalISCSI=false`),
+- exactly one `blockNodes` entry maps to the selected Kubernetes node,
+- writer and reader pods are pinned to that node,
+- PVC is Bound,
+- writer and reader checksum pass,
+- report directory contains `index.html`, `cluster-evidence.json`,
+  `timeline.jsonl`, and `summary.txt`,
+- cleanup leaves no iSCSI sessions or product processes.
+
+This gate is developer/laptop usability evidence. It is not HA evidence.
+
+Current D3a checkpoint:
+
+- `scripts/generate-helm-values-day1.sh` supports
+  `SW_BLOCK_HELM_TARGET_NODE` and `SW_BLOCK_HELM_NODE_LIMIT=1`.
+- `scripts/run-basic-app-example.sh` supports
+  `SW_BLOCK_BASIC_APP_NODE_SELECTOR` and records it in
+  `first-volume-summary.txt`.
+- `testops/scenarios/helm-single-node-first-volume-chain.yaml` added.
+- Static validation passes. Live QA run is still required.
+
+### D3b: Helm Multi-Node First-Volume Gate
 
 Create a TestOps scenario that exercises the PM/user path:
 
@@ -154,7 +190,7 @@ Acceptance:
 - first-volume summary names the chart release, namespace, image tags/digests,
   StorageClass, PVC, volume ID, writer/reader results, and report path.
 
-Current D3 checkpoint:
+Current D3b checkpoint:
 
 - `testops/scenarios/helm-first-volume-chain.yaml` added.
 - The scenario follows the user path: generate values, `helm lint`,
@@ -174,6 +210,9 @@ Current D3 checkpoint:
   behind `compat.launcherRejectLoopbackFlag=false` by default while still
   recording `network.rejectLoopbackPublishTargets` as the intended safety
   boundary.
+- QA run `20260519-000135-1bbc` passed strict: 49/49 actions, Helm values
+  generation, Helm install, first-volume writer/reader, report artifacts, and
+  Helm uninstall cleanup all green.
 
 ### D4: Helm Uninstall and Host Cleanup Gate
 

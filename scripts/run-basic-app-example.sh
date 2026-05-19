@@ -17,6 +17,7 @@ HELM_NAMESPACE="${SW_BLOCK_HELM_NAMESPACE:-}"
 HELM_VALUES_FILE="${SW_BLOCK_HELM_VALUES_FILE:-}"
 INSTALL_IMAGE="${SW_BLOCK_IMAGE:-}"
 INSTALL_CSI_IMAGE="${SW_BLOCK_CSI_IMAGE:-}"
+BASIC_APP_NODE_SELECTOR="${SW_BLOCK_BASIC_APP_NODE_SELECTOR:-}"
 FIRST_VOLUME_STATUS="ok"
 FAILED_PHASE=""
 CLEANUP_STATUS="external_to_script"
@@ -98,6 +99,24 @@ render_example_manifest() {
     log "node_stage_secret=none"
   fi
   EXAMPLE_MANIFEST="$output"
+}
+
+render_pod_manifest() {
+  local input="$1"
+  local output="$2"
+  if [[ -z "$BASIC_APP_NODE_SELECTOR" ]]; then
+    cp "$input" "$output"
+    return
+  fi
+  awk -v node="$BASIC_APP_NODE_SELECTOR" '
+    /^spec:[[:space:]]*$/ {
+      print
+      print "  nodeSelector:"
+      print "    kubernetes.io/hostname: \"" node "\""
+      next
+    }
+    { print }
+  ' "$input" >"$output"
 }
 
 capture_failure_diagnostics() {
@@ -245,6 +264,7 @@ write_summary() {
       echo "csi_image=$INSTALL_CSI_IMAGE"
       echo "csi_image_digest=$(summary_value "$(image_digest "$INSTALL_CSI_IMAGE")")"
     fi
+    echo "app_node_selector=${BASIC_APP_NODE_SELECTOR:-none}"
     echo "pvc=$PVC_NAME"
     echo "pvc_phase=${pvc_phase:-unknown}"
     echo "pv=${pv_name:-unknown}"
@@ -276,6 +296,11 @@ log "artifact_dir=$ARTIFACT_DIR"
 log "namespace=$NAMESPACE"
 log "master_port=$MASTER_PORT"
 render_example_manifest
+WRITER_MANIFEST="$ARTIFACT_DIR/writer-pod.rendered.yaml"
+READER_MANIFEST="$ARTIFACT_DIR/reader-pod.rendered.yaml"
+render_pod_manifest "$EXAMPLE_DIR/writer-pod.yaml" "$WRITER_MANIFEST"
+render_pod_manifest "$EXAMPLE_DIR/reader-pod.yaml" "$READER_MANIFEST"
+log "app_node_selector=${BASIC_APP_NODE_SELECTOR:-none}"
 log "apply StorageClass and PVC"
 kubectl apply -f "$EXAMPLE_MANIFEST" | tee "$ARTIFACT_DIR/apply-storageclass-pvc.log"
 kubectl -n "$NAMESPACE" wait --for=jsonpath='{.status.phase}'=Bound "pvc/${PVC_NAME}" --timeout=180s | tee "$ARTIFACT_DIR/wait-pvc-bound.log"
@@ -284,7 +309,7 @@ safe_capture "$ARTIFACT_DIR/pvc.after-bound.txt" kubectl -n "$NAMESPACE" get pvc
 safe_capture "$ARTIFACT_DIR/blockvolume-deployments.after-bound.txt" kubectl get deploy -A -l app=sw-blockvolume -o wide
 
 log "run writer pod"
-kubectl apply -f "$EXAMPLE_DIR/writer-pod.yaml" | tee "$ARTIFACT_DIR/apply-writer.log"
+kubectl apply -f "$WRITER_MANIFEST" | tee "$ARTIFACT_DIR/apply-writer.log"
 if ! kubectl -n "$NAMESPACE" wait --for=jsonpath='{.status.phase}'=Succeeded "pod/${WRITER_POD}" --timeout=240s | tee "$ARTIFACT_DIR/wait-writer.log"; then
   capture_failure_diagnostics "writer"
   exit 1
@@ -294,7 +319,7 @@ grep -q '/data/demo.bin: OK' "$ARTIFACT_DIR/writer.log"
 
 log "replace writer with reader pod"
 kubectl -n "$NAMESPACE" delete pod "$WRITER_POD" --wait=true --timeout=120s | tee "$ARTIFACT_DIR/delete-writer.log"
-kubectl apply -f "$EXAMPLE_DIR/reader-pod.yaml" | tee "$ARTIFACT_DIR/apply-reader.log"
+kubectl apply -f "$READER_MANIFEST" | tee "$ARTIFACT_DIR/apply-reader.log"
 if ! kubectl -n "$NAMESPACE" wait --for=jsonpath='{.status.phase}'=Succeeded "pod/${READER_POD}" --timeout=240s | tee "$ARTIFACT_DIR/wait-reader.log"; then
   capture_failure_diagnostics "reader"
   exit 1

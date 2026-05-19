@@ -15,6 +15,8 @@ CHAP_USERNAME="${SW_BLOCK_ISCSI_CHAP_USERNAME:-sw-block}"
 CHAP_SECRET="${SW_BLOCK_ISCSI_CHAP_SECRET:-}"
 STAGE2_MULTIPATH="${SW_BLOCK_STAGE2_MULTIPATH:-0}"
 RUN_PREFLIGHT="${SW_BLOCK_HELM_VALUES_PREFLIGHT:-1}"
+TARGET_NODE="${SW_BLOCK_HELM_TARGET_NODE:-}"
+NODE_LIMIT="${SW_BLOCK_HELM_NODE_LIMIT:-0}"
 
 case "$IMAGE_MODE" in
   local)
@@ -102,6 +104,12 @@ case "$ACK_PROFILE" in
     exit 2
     ;;
 esac
+case "$NODE_LIMIT" in
+  ''|*[!0-9]*)
+    echo "SW_BLOCK_HELM_NODE_LIMIT must be a non-negative integer; got: $NODE_LIMIT" >&2
+    exit 2
+    ;;
+esac
 
 if [[ "$RUN_PREFLIGHT" == "1" ]]; then
   if [[ "$IMAGE_MODE" == "published" ]]; then
@@ -111,7 +119,27 @@ if [[ "$RUN_PREFLIGHT" == "1" ]]; then
   fi
 fi
 
-mapfile -t NODES < <(ready_schedulable_nodes)
+mapfile -t DISCOVERED_NODES < <(ready_schedulable_nodes)
+DISCOVERED_NODE_COUNT="${#DISCOVERED_NODES[@]}"
+NODES=()
+if [[ -n "$TARGET_NODE" ]]; then
+  for node in "${DISCOVERED_NODES[@]}"; do
+    IFS='|' read -r name _ <<< "$node"
+    if [[ "$name" == "$TARGET_NODE" ]]; then
+      NODES+=("$node")
+      break
+    fi
+  done
+  if [[ "${#NODES[@]}" -eq 0 ]]; then
+    echo "SW_BLOCK_HELM_TARGET_NODE=$TARGET_NODE was not found among Ready schedulable nodes" >&2
+    exit 3
+  fi
+else
+  NODES=("${DISCOVERED_NODES[@]}")
+fi
+if [[ "$NODE_LIMIT" -gt 0 && "${#NODES[@]}" -gt "$NODE_LIMIT" ]]; then
+  NODES=("${NODES[@]:0:$NODE_LIMIT}")
+fi
 NODE_COUNT="${#NODES[@]}"
 if [[ "$NODE_COUNT" -lt 1 ]]; then
   echo "no Ready schedulable Kubernetes nodes with non-loopback InternalIP found" >&2
@@ -212,6 +240,9 @@ values_file=$OUT
 image_mode=$IMAGE_MODE
 network_mode=$NETWORK_MODE
 ready_kubernetes_nodes=$NODE_COUNT
+discovered_kubernetes_nodes=$DISCOVERED_NODE_COUNT
+target_node=${TARGET_NODE:-auto}
+node_limit=$NODE_LIMIT
 storageclass=$STORAGECLASS_NAME
 replication_factor=$REPLICATION_FACTOR
 ack_profile=$ACK_PROFILE
