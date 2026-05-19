@@ -168,6 +168,12 @@ Current D3 checkpoint:
   k3s kubeconfig. Scenario now sets `KUBECONFIG=/etc/rancher/k3s/k3s.yaml` for
   Helm/kubectl exec actions and records `helm version` as a prerequisite
   artifact.
+- Second QA diagnostic found chart/image skew: the pinned image
+  `sha-28a99ce4f644` does not support
+  `--launcher-reject-loopback-publish-targets`. The chart now gates that flag
+  behind `compat.launcherRejectLoopbackFlag=false` by default while still
+  recording `network.rejectLoopbackPublishTargets` as the intended safety
+  boundary.
 
 ### D4: Helm Uninstall and Host Cleanup Gate
 

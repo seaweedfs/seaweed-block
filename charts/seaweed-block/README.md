@@ -44,6 +44,9 @@ network:
   externalStatus: true
   rejectLoopbackPublishTargets: true
 
+compat:
+  launcherRejectLoopbackFlag: false
+
 chap:
   enabled: true
   username: swblock
@@ -66,6 +69,12 @@ blockNodes:
 
 `blockNodes[*].kubernetesNode` must match a real Kubernetes node name. The
 `internalIP` must be reachable by workloads that may mount the PVC.
+
+`network.rejectLoopbackPublishTargets` records the intended safety boundary.
+The matching blockmaster flag is gated by
+`compat.launcherRejectLoopbackFlag` because older alpha images do not accept
+`--launcher-reject-loopback-publish-targets`. Keep the compat flag false unless
+the selected image is known to support it.
 
 ## RF=3 Sync-Quorum Profile
 

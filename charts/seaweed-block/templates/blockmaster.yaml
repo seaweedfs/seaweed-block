@@ -62,7 +62,7 @@ spec:
             {{- if .Values.network.externalStatus }}
             - "--launcher-external-status"
             {{- end }}
-            {{- if .Values.network.rejectLoopbackPublishTargets }}
+            {{- if and .Values.network.rejectLoopbackPublishTargets .Values.compat.launcherRejectLoopbackFlag }}
             - "--launcher-reject-loopback-publish-targets"
             {{- end }}
             - "--launcher-kubernetes-apply"

@@ -27,6 +27,20 @@
         "protocol": { "type": "string", "enum": ["iscsi", "nvme"] }
       }
     },
+    "network": {
+      "type": "object",
+      "properties": {
+        "externalISCSI": { "type": "boolean" },
+        "externalStatus": { "type": "boolean" },
+        "rejectLoopbackPublishTargets": { "type": "boolean" }
+      }
+    },
+    "compat": {
+      "type": "object",
+      "properties": {
+        "launcherRejectLoopbackFlag": { "type": "boolean" }
+      }
+    },
     "blockNodes": {
       "type": "array",
       "minItems": 1,

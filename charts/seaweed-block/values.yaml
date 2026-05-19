@@ -62,6 +62,12 @@ network:
   externalStatus: false
   rejectLoopbackPublishTargets: false
 
+compat:
+  # Some published alpha images predate the blockmaster flag for loopback
+  # publish-target rejection. Keep this false unless the selected image is known
+  # to support --launcher-reject-loopback-publish-targets.
+  launcherRejectLoopbackFlag: false
+
 stage2Multipath:
   enabled: false
 
