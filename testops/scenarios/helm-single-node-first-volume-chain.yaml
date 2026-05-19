@@ -184,11 +184,22 @@ phases:
       - action: exec
         node: m02
         timeout: 6m
-        cmd: "helm status {{ helm_release }} --namespace {{ helm_namespace }} >/dev/null 2>&1 && helm uninstall {{ helm_release }} --namespace {{ helm_namespace }} --wait --timeout 240s > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-single-node/cleanup/helm-uninstall.txt || true; kubectl -n default delete pod sw-block-example-reader sw-block-example-writer --ignore-not-found=true --wait=true --timeout=120s; kubectl -n default delete pvc sw-block-example-pvc --ignore-not-found=true --wait=true --timeout=120s; kubectl delete storageclass sw-block-example --ignore-not-found=true --wait=true --timeout=120s; kubectl -n {{ helm_namespace }} get pods,deploy,ds,svc -o wide > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-single-node/cleanup/kube-system-after-uninstall.txt 2>&1 || true"
+        cmd: "helm status {{ helm_release }} --namespace {{ helm_namespace }} >/dev/null 2>&1 && helm uninstall {{ helm_release }} --namespace {{ helm_namespace }} --wait --timeout 240s > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-single-node/cleanup/helm-uninstall.txt || true; kubectl -n default delete pod sw-block-example-reader sw-block-example-writer --ignore-not-found=true --wait=true --timeout=120s; kubectl -n default delete pvc sw-block-example-pvc --ignore-not-found=true --wait=true --timeout=120s; kubectl delete storageclass sw-block-example --ignore-not-found=true --wait=true --timeout=120s; cd {{ product_root }} && bash scripts/verify-helm-cleanup.sh; kubectl -n {{ helm_namespace }} get pods,deploy,ds,svc -o wide > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-single-node/cleanup/kube-system-after-uninstall.txt 2>&1 || true"
         env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+        env.SW_BLOCK_ARTIFACT_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-single-node/cleanup/verify"
+        env.SW_BLOCK_HELM_RELEASE: "{{ helm_release }}"
+        env.SW_BLOCK_HELM_NAMESPACE: "{{ helm_namespace }}"
       - action: assert_no_active_iscsi_sessions
         node: m02
         iqn_substr: "io.seaweedfs"
       - action: assert_no_processes
         node: m02
         pattern: "[/]blockmaster --|[/]blockvolume --|[/]blockcsi |[/]iscsi-target |^blockmaster |^blockvolume |^blockcsi |^iscsi-target "
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-single-node/cleanup/verify/cleanup-summary.txt"
+        pattern: "^cleanup_status=ok$"
+        save_as: helm_cleanup_ok_count
+      - action: assert_greater
+        actual: "{{ helm_cleanup_ok_count }}"
+        threshold: "0"

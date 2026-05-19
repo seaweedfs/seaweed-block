@@ -230,6 +230,17 @@ Acceptance:
 - no test-scoped hostPath residue remains,
 - cleanup failures produce support evidence instead of silent success.
 
+Current D4 checkpoint:
+
+- `scripts/verify-helm-cleanup.sh` added as the shared cleanup verifier.
+- The verifier captures and checks Helm release state, Kubernetes residue,
+  iSCSI sessions, iSCSI node DB records, multipath maps, sw-block processes,
+  and optional run-scoped hostPath residue.
+- Both Helm first-volume scenarios call the verifier after `helm uninstall` and
+  assert `cleanup_status=ok`.
+- Static validation passes. Live QA reruns are required because this tightens
+  the cleanup phase.
+
 ### D5: Published Image Release Validation
 
 Keep two image paths:
