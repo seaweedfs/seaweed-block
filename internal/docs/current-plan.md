@@ -154,6 +154,17 @@ Acceptance:
 - first-volume summary names the chart release, namespace, image tags/digests,
   StorageClass, PVC, volume ID, writer/reader results, and report path.
 
+Current D3 checkpoint:
+
+- `testops/scenarios/helm-first-volume-chain.yaml` added.
+- The scenario follows the user path: generate values, `helm lint`,
+  `helm install --wait`, first PVC writer/reader checksum, read-only report,
+  and `helm uninstall`.
+- `scripts/run-basic-app-example.sh` now records Helm install metadata and
+  image identity in `first-volume-summary.txt`.
+- Static validation passes: scenario YAML parses, shell scripts parse, and
+  chart lint passes. Live QA run is still required.
+
 ### D4: Helm Uninstall and Host Cleanup Gate
 
 Helm uninstall only removes Kubernetes objects. The product still needs a

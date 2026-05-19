@@ -11,6 +11,12 @@ WRITER_POD="sw-block-example-writer"
 READER_POD="sw-block-example-reader"
 EXAMPLE_DIR="$ROOT/examples/kubernetes/basic-app"
 CHAP_SECRET_NAME="${SW_BLOCK_ISCSI_CHAP_SECRET_NAME:-sw-block-iscsi-chap}"
+INSTALL_MODE="${SW_BLOCK_INSTALL_MODE:-unknown}"
+HELM_RELEASE="${SW_BLOCK_HELM_RELEASE:-}"
+HELM_NAMESPACE="${SW_BLOCK_HELM_NAMESPACE:-}"
+HELM_VALUES_FILE="${SW_BLOCK_HELM_VALUES_FILE:-}"
+INSTALL_IMAGE="${SW_BLOCK_IMAGE:-}"
+INSTALL_CSI_IMAGE="${SW_BLOCK_CSI_IMAGE:-}"
 FIRST_VOLUME_STATUS="ok"
 FAILED_PHASE=""
 CLEANUP_STATUS="external_to_script"
@@ -42,6 +48,27 @@ safe_capture() {
   local out="$1"
   shift
   "$@" >"$out" 2>&1 || true
+}
+
+summary_value() {
+  local value="$1"
+  if [[ -n "$value" ]]; then
+    printf '%s' "$value"
+  else
+    printf 'unknown'
+  fi
+}
+
+image_digest() {
+  local image="$1"
+  if [[ -z "$image" ]]; then
+    return 0
+  fi
+  if command -v docker >/dev/null 2>&1; then
+    docker manifest inspect "$image" 2>/dev/null \
+      | sed -n 's/.*"digest": "\(sha256:[^"]*\)".*/\1/p' \
+      | head -1
+  fi
 }
 
 inject_node_stage_secret_into_storageclass() {
@@ -200,6 +227,24 @@ write_summary() {
       echo "failed_phase=$FAILED_PHASE"
     fi
     echo "namespace=$NAMESPACE"
+    echo "install_mode=$INSTALL_MODE"
+    if [[ -n "$HELM_RELEASE" ]]; then
+      echo "helm_release=$HELM_RELEASE"
+    fi
+    if [[ -n "$HELM_NAMESPACE" ]]; then
+      echo "helm_namespace=$HELM_NAMESPACE"
+    fi
+    if [[ -n "$HELM_VALUES_FILE" ]]; then
+      echo "helm_values=$HELM_VALUES_FILE"
+    fi
+    if [[ -n "$INSTALL_IMAGE" ]]; then
+      echo "image=$INSTALL_IMAGE"
+      echo "image_digest=$(summary_value "$(image_digest "$INSTALL_IMAGE")")"
+    fi
+    if [[ -n "$INSTALL_CSI_IMAGE" ]]; then
+      echo "csi_image=$INSTALL_CSI_IMAGE"
+      echo "csi_image_digest=$(summary_value "$(image_digest "$INSTALL_CSI_IMAGE")")"
+    fi
     echo "pvc=$PVC_NAME"
     echo "pvc_phase=${pvc_phase:-unknown}"
     echo "pv=${pv_name:-unknown}"

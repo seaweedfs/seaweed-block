@@ -1,0 +1,248 @@
+# Runner-native Phase 21 D3 Helm first-volume chain.
+#
+# Goal:
+#   Prove the PM/user Helm path:
+#     generate values.day1.yaml -> helm install -> first PVC ->
+#     writer checksum -> reader checksum -> read-only report -> helm uninstall.
+
+name: helm-first-volume-chain
+timeout: 26m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+  helm_release: "sw-block"
+  helm_namespace: "kube-system"
+  sw_block_image: "ghcr.io/seaweedfs/seaweed-block:sha-28a99ce4f644"
+  sw_block_csi_image: "ghcr.io/seaweedfs/seaweed-block-csi:sha-28a99ce4f644"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: pre_clean
+    actions:
+      - action: pre_run_cleanup
+        node: m02
+        kill_patterns: "blockmaster,blockvolume,blockcsi,iscsi-target"
+        nvme_disconnect: "true"
+        iscsi_logout_prefix: "iqn.2026-05.io.seaweedfs"
+      - action: exec
+        node: m02
+        timeout: 5m
+        cmd: "helm status {{ helm_release }} --namespace {{ helm_namespace }} >/dev/null 2>&1 && helm uninstall {{ helm_release }} --namespace {{ helm_namespace }} --wait --timeout 180s || true; kubectl -n default delete pod sw-block-example-reader sw-block-example-writer --ignore-not-found=true --wait=true --timeout=120s; kubectl -n default delete pvc sw-block-example-pvc --ignore-not-found=true --wait=true --timeout=120s; kubectl delete storageclass sw-block-example --ignore-not-found=true --wait=true --timeout=120s; rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-first-volume && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-first-volume/values /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-first-volume/install /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-first-volume/basic-app /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-first-volume/cleanup"
+      - action: assert_no_active_iscsi_sessions
+        node: m02
+        iqn_substr: "io.seaweedfs"
+      - action: assert_no_processes
+        node: m02
+        pattern: "[/]blockmaster --|[/]blockvolume --|[/]blockcsi |[/]iscsi-target |^blockmaster |^blockvolume |^blockcsi |^iscsi-target "
+
+  - name: generate_day1_values
+    actions:
+      - action: exec
+        node: m02
+        timeout: 3m
+        cmd: "cd {{ product_root }} && bash scripts/generate-helm-values-day1.sh {{ product_root }}"
+        env.SW_BLOCK_HELM_VALUES_OUT: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-first-volume/values/values.day1.yaml"
+        env.SW_BLOCK_ACTIVATION_IMAGE_MODE: "published"
+        env.SW_BLOCK_IMAGE: "{{ sw_block_image }}"
+        env.SW_BLOCK_CSI_IMAGE: "{{ sw_block_csi_image }}"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-first-volume/values/values.day1.yaml"
+        pattern: "^blockNodes:$"
+        save_as: block_nodes_count
+      - action: assert_greater
+        actual: "{{ block_nodes_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-first-volume/values/values.day1.yaml"
+        pattern: "externalISCSI: true"
+        save_as: external_iscsi_count
+      - action: assert_greater
+        actual: "{{ external_iscsi_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-first-volume/values/values.day1.yaml"
+        pattern: "enabled: true"
+        save_as: chap_enabled_count
+      - action: assert_greater
+        actual: "{{ chap_enabled_count }}"
+        threshold: "0"
+
+  - name: helm_install_stack
+    actions:
+      - action: exec
+        node: m02
+        timeout: 10m
+        cmd: "cd {{ product_root }} && helm lint charts/seaweed-block -f /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-first-volume/values/values.day1.yaml > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-first-volume/install/helm-lint.txt && helm install {{ helm_release }} charts/seaweed-block --namespace {{ helm_namespace }} -f /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-first-volume/values/values.day1.yaml --wait --timeout 5m > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-first-volume/install/helm-install.txt && kubectl -n {{ helm_namespace }} rollout status deploy/sw-blockmaster --timeout=180s > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-first-volume/install/wait-blockmaster.txt && kubectl -n {{ helm_namespace }} rollout status deploy/sw-block-csi-controller --timeout=180s > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-first-volume/install/wait-csi-controller.txt && kubectl -n {{ helm_namespace }} rollout status ds/sw-block-csi-node --timeout=180s > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-first-volume/install/wait-csi-node.txt && helm status {{ helm_release }} --namespace {{ helm_namespace }} > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-first-volume/install/helm-status.txt && kubectl -n {{ helm_namespace }} get pods,deploy,ds,svc -o wide > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-first-volume/install/kube-system-ready.txt && kubectl get sc sw-block-dynamic -o wide > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-first-volume/install/storageclass.txt"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-first-volume/install/helm-status.txt"
+        pattern: "STATUS: deployed"
+        save_as: helm_deployed_count
+      - action: assert_greater
+        actual: "{{ helm_deployed_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-first-volume/install/storageclass.txt"
+        pattern: "block.csi.seaweedfs.com"
+        save_as: storageclass_provider_count
+      - action: assert_greater
+        actual: "{{ storageclass_provider_count }}"
+        threshold: "0"
+
+  - name: first_volume_user_loop
+    actions:
+      - action: exec
+        node: m02
+        timeout: 10m
+        cmd: "cd {{ product_root }} && bash scripts/run-basic-app-example.sh {{ product_root }}"
+        env.SW_BLOCK_ARTIFACT_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-first-volume/basic-app"
+        env.SW_BLOCK_BASIC_APP_CLEANUP: "1"
+        env.SW_BLOCK_INSTALL_MODE: "helm"
+        env.SW_BLOCK_HELM_RELEASE: "{{ helm_release }}"
+        env.SW_BLOCK_HELM_NAMESPACE: "{{ helm_namespace }}"
+        env.SW_BLOCK_HELM_VALUES_FILE: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-first-volume/values/values.day1.yaml"
+        env.SW_BLOCK_IMAGE: "{{ sw_block_image }}"
+        env.SW_BLOCK_CSI_IMAGE: "{{ sw_block_csi_image }}"
+
+  - name: first_volume_asserts
+    actions:
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-first-volume/basic-app/first-volume-summary.txt"
+        pattern: "^first_volume_status=ok$"
+        save_as: first_volume_ok_count
+      - action: assert_greater
+        actual: "{{ first_volume_ok_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-first-volume/basic-app/first-volume-summary.txt"
+        pattern: "^install_mode=helm$"
+        save_as: install_mode_count
+      - action: assert_greater
+        actual: "{{ install_mode_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-first-volume/basic-app/first-volume-summary.txt"
+        pattern: "^helm_release={{ helm_release }}$"
+        save_as: helm_release_count
+      - action: assert_greater
+        actual: "{{ helm_release_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-first-volume/basic-app/first-volume-summary.txt"
+        pattern: "^image={{ sw_block_image }}$"
+        save_as: image_count
+      - action: assert_greater
+        actual: "{{ image_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-first-volume/basic-app/first-volume-summary.txt"
+        pattern: "^image_digest="
+        save_as: image_digest_count
+      - action: assert_greater
+        actual: "{{ image_digest_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-first-volume/basic-app/first-volume-summary.txt"
+        pattern: "^writer_verified=true$"
+        save_as: writer_verified_count
+      - action: assert_greater
+        actual: "{{ writer_verified_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-first-volume/basic-app/first-volume-summary.txt"
+        pattern: "^reader_verified=true$"
+        save_as: reader_verified_count
+      - action: assert_greater
+        actual: "{{ reader_verified_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-first-volume/basic-app/writer.log"
+        pattern: "/data/demo.bin: OK"
+        save_as: writer_checksum_count
+      - action: assert_greater
+        actual: "{{ writer_checksum_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-first-volume/basic-app/reader.log"
+        pattern: "/data/demo.bin: OK"
+        save_as: reader_checksum_count
+      - action: assert_greater
+        actual: "{{ reader_checksum_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-first-volume/basic-app/first-volume-summary.txt"
+        pattern: "^cleanup_status=ok$"
+        save_as: basic_cleanup_count
+      - action: assert_greater
+        actual: "{{ basic_cleanup_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-first-volume/basic-app/status/report/index.html"
+        pattern: "<html"
+        save_as: report_html_count
+      - action: assert_greater
+        actual: "{{ report_html_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-first-volume/basic-app/status/report/cluster-evidence.json"
+        pattern: "\"volumes\""
+        save_as: report_cluster_count
+      - action: assert_greater
+        actual: "{{ report_cluster_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-first-volume/basic-app/status/report/timeline.jsonl"
+        pattern: "\"event_id\":\"master-"
+        save_as: report_timeline_count
+      - action: assert_greater
+        actual: "{{ report_timeline_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-first-volume/basic-app/status/report/summary.txt"
+        pattern: "^status=ok"
+        save_as: report_summary_count
+      - action: assert_greater
+        actual: "{{ report_summary_count }}"
+        threshold: "0"
+      - action: exec
+        node: m02
+        cmd: "! grep -Eiq '<button[^>]*>(promote|repair|delete|rebuild|cleanup)|data-action=\"(promote|repair|delete|rebuild|cleanup)\"|href=\"[^\"]*/(promote|repair|delete|rebuild|cleanup)' /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-first-volume/basic-app/status/report/index.html"
+
+  - name: helm_uninstall_cleanup
+    always: true
+    actions:
+      - action: exec
+        node: m02
+        timeout: 6m
+        cmd: "helm status {{ helm_release }} --namespace {{ helm_namespace }} >/dev/null 2>&1 && helm uninstall {{ helm_release }} --namespace {{ helm_namespace }} --wait --timeout 240s > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-first-volume/cleanup/helm-uninstall.txt || true; kubectl -n default delete pod sw-block-example-reader sw-block-example-writer --ignore-not-found=true --wait=true --timeout=120s; kubectl -n default delete pvc sw-block-example-pvc --ignore-not-found=true --wait=true --timeout=120s; kubectl delete storageclass sw-block-example --ignore-not-found=true --wait=true --timeout=120s; kubectl -n {{ helm_namespace }} get pods,deploy,ds,svc -o wide > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-first-volume/cleanup/kube-system-after-uninstall.txt 2>&1 || true"
+      - action: assert_no_active_iscsi_sessions
+        node: m02
+        iqn_substr: "io.seaweedfs"
+      - action: assert_no_processes
+        node: m02
+        pattern: "[/]blockmaster --|[/]blockvolume --|[/]blockcsi |[/]iscsi-target |^blockmaster |^blockvolume |^blockcsi |^iscsi-target "
