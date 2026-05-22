@@ -47,6 +47,26 @@ models unless a release gate proves the current behavior is wrong.
 Goal: make chart metadata and image identity release-grade enough for alpha
 users and QA.
 
+Status: PASS on 2026-05-22.
+
+Evidence:
+
+- Scenario: `testops/scenarios/helm-release-hygiene-chain.yaml`
+- Run: `20260522-131641-7a61`
+- Result: PASS, 5/5 phases, 15/15 actions
+- Artifacts:
+  - `helm-release-hygiene-summary.txt`
+  - `helm-lint.txt`
+  - `helm-template.yaml`
+  - `seaweed-block-0.3.0-alpha.0.tgz`
+- Summary fields:
+  - `helm_hygiene_status=ok`
+  - `chart_version=0.3.0-alpha.0`
+  - `chart_app_version=0.3-alpha`
+  - `rendered_storageclass_count=1`
+  - `rendered_csidriver_count=1`
+  - `rendered_master_count=1`
+
 Required work:
 
 - Align `Chart.yaml` version, `appVersion`, README, quickstart, and release
@@ -190,7 +210,7 @@ finished plan written
 
 ## Progress
 
-- D1: pending
+- D1: PASS - chart release hygiene gate `20260522-131641-7a61`
 - D2: pending
 - D3: pending
 - D4: pending
