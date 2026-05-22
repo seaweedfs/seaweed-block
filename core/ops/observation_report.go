@@ -13,7 +13,7 @@ func WriteObservationReportArtifacts(outDir string, cluster ClusterEvidence) err
 	if strings.TrimSpace(outDir) == "" {
 		return fmt.Errorf("report out dir is required")
 	}
-	cluster = normalizeObservationCluster(cluster)
+	cluster = NormalizeObservationCluster(cluster)
 	if err := os.MkdirAll(outDir, 0o755); err != nil {
 		return err
 	}
@@ -38,7 +38,7 @@ func WriteObservationReportArtifacts(outDir string, cluster ClusterEvidence) err
 }
 
 func RenderObservationReportSummary(cluster ClusterEvidence) string {
-	cluster = normalizeObservationCluster(cluster)
+	cluster = NormalizeObservationCluster(cluster)
 	var b strings.Builder
 	fmt.Fprintf(&b, "sw-block report\n")
 	fmt.Fprintf(&b, "status=%s\n", emptyAsDash(cluster.Status))
@@ -57,13 +57,32 @@ func RenderObservationReportSummary(cluster ClusterEvidence) string {
 			emptyAsDash(volume.PublishTarget),
 			volume.ReplicationFactor,
 			emptyAsDash(volume.AckProfile))
+		managed := managedProjectionForVolume(cluster.ManagedVolumes, volume.VolumeID)
+		fmt.Fprintf(&b, "managed_volume=%s status=%s reason=%s\n",
+			emptyAsDash(managed.VolumeID),
+			emptyAsDash(managed.Status),
+			emptyAsDash(managed.ReasonCode))
+		for _, condition := range managed.Conditions {
+			fmt.Fprintf(&b, "managed_volume_condition=%s status=%s reason=%s severity=%s\n",
+				emptyAsDash(condition.Type),
+				emptyAsDash(condition.Status),
+				emptyAsDash(condition.Reason),
+				emptyAsDash(condition.Severity))
+		}
+		for _, action := range managed.Actions {
+			fmt.Fprintf(&b, "managed_volume_action=%s mode=%s side_effect=%s executor=%s\n",
+				emptyAsDash(action.Type),
+				emptyAsDash(action.Mode),
+				emptyAsDash(action.SideEffectClass),
+				emptyAsDash(action.OwnerExecutor))
+		}
 	}
 	fmt.Fprintf(&b, "read_only=true\n")
 	return b.String()
 }
 
 func RenderObservationReportHTML(cluster ClusterEvidence) string {
-	cluster = normalizeObservationCluster(cluster)
+	cluster = NormalizeObservationCluster(cluster)
 	events := append([]ClusterEvent(nil), cluster.Events...)
 	sort.SliceStable(events, func(i, j int) bool {
 		return events[i].EventTime.Before(events[j].EventTime)
@@ -96,6 +115,22 @@ func RenderObservationReportHTML(cluster ClusterEvidence) string {
 	reportCard(&b, "Read Only", "true", "ok")
 	b.WriteString("</div>")
 
+	b.WriteString("<section><h2>Managed Volumes</h2><table><thead><tr><th>Volume</th><th>Status</th><th>Reason</th><th>Conditions</th><th>Safe Actions</th></tr></thead><tbody>")
+	for _, managed := range cluster.ManagedVolumes {
+		class := "ok"
+		if managed.Status != ManagedVolumeStatusReady && managed.Status != ManagedVolumeStatusRecovered {
+			class = "bad"
+		}
+		fmt.Fprintf(&b, "<tr><td><code>%s</code></td><td class=\"%s\">%s</td><td>%s</td><td>%s</td><td>%s</td></tr>",
+			esc(emptyAsDash(managed.VolumeID)),
+			class,
+			esc(emptyAsDash(managed.Status)),
+			esc(emptyAsDash(managed.ReasonCode)),
+			esc(managedConditionSummary(managed.Conditions)),
+			esc(managedActionSummary(managed.Actions)))
+	}
+	b.WriteString("</tbody></table></section>")
+
 	b.WriteString("<section><h2>Volumes</h2><table><thead><tr><th>Volume</th><th>PVC</th><th>Status</th><th>RF</th><th>Primary</th><th>Frontend</th><th>Reason</th></tr></thead><tbody>")
 	for _, volume := range cluster.Volumes {
 		class := "ok"
@@ -107,6 +142,26 @@ func RenderObservationReportHTML(cluster ClusterEvidence) string {
 			class, esc(emptyAsDash(volume.Status)), volume.ReplicationFactor,
 			esc(emptyAsDash(volume.PrimaryReplica)), esc(emptyAsDash(volume.PrimaryNode)),
 			esc(emptyAsDash(volume.PublishTarget)), esc(emptyAsDash(volume.Reason)))
+	}
+	b.WriteString("</tbody></table></section>")
+
+	b.WriteString("<section><h2>Managed Volume Conditions</h2><table><thead><tr><th>Volume</th><th>Type</th><th>Status</th><th>Severity</th><th>Reason</th><th>Evidence</th><th>Message</th></tr></thead><tbody>")
+	for _, managed := range cluster.ManagedVolumes {
+		for _, condition := range managed.Conditions {
+			class := "ok"
+			if condition.Status != "True" || condition.Severity == "warning" || condition.Severity == "error" {
+				class = "bad"
+			}
+			fmt.Fprintf(&b, "<tr><td><code>%s</code></td><td>%s</td><td class=\"%s\">%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>",
+				esc(emptyAsDash(managed.VolumeID)),
+				esc(emptyAsDash(condition.Type)),
+				class,
+				esc(emptyAsDash(condition.Status)),
+				esc(emptyAsDash(condition.Severity)),
+				esc(emptyAsDash(condition.Reason)),
+				esc(strings.Join(condition.EvidenceRefs, ", ")),
+				esc(emptyAsDash(condition.Message)))
+		}
 	}
 	b.WriteString("</tbody></table></section>")
 
@@ -135,6 +190,40 @@ func reportCard(b *strings.Builder, label, value, class string) {
 		return
 	}
 	fmt.Fprintf(b, "<div class=\"card\"><div class=\"label\">%s</div><div class=\"value\">%s</div></div>", esc(label), esc(value))
+}
+
+func managedConditionSummary(conditions []ObservationCondition) string {
+	if len(conditions) == 0 {
+		return "-"
+	}
+	parts := make([]string, 0, len(conditions))
+	for _, condition := range conditions {
+		parts = append(parts, fmt.Sprintf("%s=%s/%s", emptyAsDash(condition.Type), emptyAsDash(condition.Status), emptyAsDash(condition.Reason)))
+	}
+	return strings.Join(parts, "; ")
+}
+
+func managedActionSummary(actions []ManagedVolumeAction) string {
+	if len(actions) == 0 {
+		return "-"
+	}
+	parts := make([]string, 0, len(actions))
+	for _, action := range actions {
+		parts = append(parts, fmt.Sprintf("%s(%s)", emptyAsDash(action.Type), emptyAsDash(action.Mode)))
+	}
+	return strings.Join(parts, "; ")
+}
+
+func managedProjectionForVolume(managed []ManagedVolumeProjection, volumeID string) ManagedVolumeProjection {
+	for _, projection := range managed {
+		if projection.VolumeID == volumeID {
+			return projection
+		}
+	}
+	if len(managed) == 1 && volumeID == "" {
+		return managed[0]
+	}
+	return ManagedVolumeProjection{VolumeID: volumeID, Status: ManagedVolumeStatusUnknown}
 }
 
 func esc(value string) string {

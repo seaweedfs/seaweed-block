@@ -60,6 +60,10 @@ func BuildObservationFromBundle(opts ObservationBundleOptions) (ClusterEvidence,
 	if len(summary) > 0 {
 		applyNodeLossSummary(&cluster, summary, summaryPath)
 	}
+	primaryFailure, primaryFailurePath, _ := loadKeyValueArtifact(opts.Dir, PrimaryFailureRecoveryArtifact)
+	if len(primaryFailure) > 0 {
+		applyPrimaryFailureSummary(&cluster, primaryFailure, primaryFailurePath)
+	}
 	timeline, timelinePath, _ := loadTimelineArtifact(opts.Dir)
 	if len(timeline) > 0 && len(cluster.Events) == 0 {
 		cluster.Events = append(cluster.Events, timeline...)
@@ -88,6 +92,10 @@ func BuildObservationFromBundle(opts ObservationBundleOptions) (ClusterEvidence,
 		}
 		return cluster, fmt.Errorf("volume %q not found in bundle", opts.VolumeID)
 	}
+	cluster = applyManagedVolumeArtifactHints(cluster, ManagedVolumeArtifactHints{
+		NodeLoss:       summary,
+		PrimaryFailure: primaryFailure,
+	})
 	return cluster, nil
 }
 
@@ -112,8 +120,12 @@ func BuildObservationFromInventory(inventory VolumeInventory, volumeID string, e
 }
 
 func RenderObservationExplainText(cluster ClusterEvidence) string {
+	cluster = NormalizeObservationCluster(cluster)
 	var b strings.Builder
 	b.WriteString(RenderClusterEvidenceText(cluster))
+	for _, volume := range cluster.Volumes {
+		b.WriteString(RenderManagedVolumeProjectionText(managedProjectionForVolume(cluster.ManagedVolumes, volume.VolumeID)))
+	}
 	if len(cluster.Events) > 0 {
 		b.WriteString("timeline:\n")
 		events := append([]ClusterEvent(nil), cluster.Events...)
@@ -174,7 +186,7 @@ func loadBestClusterEvidence(root string) (ClusterEvidence, string, error) {
 	if err := json.Unmarshal(raw, &cluster); err != nil {
 		return ClusterEvidence{}, paths[0], fmt.Errorf("decode %s: %w", paths[0], err)
 	}
-	return normalizeObservationCluster(cluster), paths[0], nil
+	return NormalizeObservationCluster(cluster), paths[0], nil
 }
 
 func clusterEvidencePathRank(path string) int {
@@ -189,7 +201,7 @@ func clusterEvidencePathRank(path string) int {
 	}
 }
 
-func normalizeObservationCluster(cluster ClusterEvidence) ClusterEvidence {
+func NormalizeObservationCluster(cluster ClusterEvidence) ClusterEvidence {
 	if cluster.SchemaVersion == "" {
 		cluster.SchemaVersion = ObservationSchemaVersion
 	}
@@ -204,11 +216,17 @@ func normalizeObservationCluster(cluster ClusterEvidence) ClusterEvidence {
 	if len(cluster.NonClaims) == 0 {
 		cluster.NonClaims = NewClusterEvidence(cluster.CapturedAt).NonClaims
 	}
+	if len(cluster.ManagedVolumes) == 0 && len(cluster.Volumes) > 0 {
+		cluster.ManagedVolumes = make([]ManagedVolumeProjection, 0, len(cluster.Volumes))
+		for _, volume := range cluster.Volumes {
+			cluster.ManagedVolumes = append(cluster.ManagedVolumes, ProjectManagedVolumeFromEvidence(volume))
+		}
+	}
 	return cluster
 }
 
 func filterObservationCluster(cluster ClusterEvidence, volumeID string) ClusterEvidence {
-	cluster = normalizeObservationCluster(cluster)
+	cluster = NormalizeObservationCluster(cluster)
 	if strings.TrimSpace(volumeID) == "" {
 		return cluster
 	}
@@ -336,6 +354,38 @@ func applyNodeLossSummary(cluster *ClusterEvidence, summary map[string]string, e
 	}
 	volume.NextActions = []string{"none"}
 	cluster.Volumes[0] = volume
+}
+
+func applyPrimaryFailureSummary(cluster *ClusterEvidence, summary map[string]string, evidencePath string) {
+	volume := ensureObservationVolume(cluster, "")
+	if summary["transparent_failover_claimed"] == "true" && summary["data_check_after_failover"] == "mounted_workload_checksum_passed" {
+		volume.Status = ObservationStatusOK
+		volume.Reason = ReasonTransparentHostPathRecovered
+	}
+	if promoted := summary["promoted_replica"]; promoted != "" {
+		volume.PrimaryReplica = defaultString(promoted, volume.PrimaryReplica)
+	}
+	volume.SupportBundleHint = defaultString(evidencePath, volume.SupportBundleHint)
+	volume.Conditions = append(volume.Conditions, ObservationCondition{
+		Type:     "TransparentHostPathFailover",
+		Status:   summary["transparent_failover_claimed"],
+		Reason:   ReasonTransparentHostPathRecovered,
+		Severity: "info",
+		Message: fmt.Sprintf("data_check_after_failover=%s pod_recreate_used=%s stale_io_success_count=%s",
+			emptyAsDash(summary["data_check_after_failover"]),
+			emptyAsDash(summary["pod_recreate_used"]),
+			emptyAsDash(summary["old_primary_stale_io_success_count"])),
+	})
+	volume.NextActions = []string{"none"}
+	cluster.Volumes[0] = volume
+}
+
+func applyManagedVolumeArtifactHints(cluster ClusterEvidence, hints ManagedVolumeArtifactHints) ClusterEvidence {
+	cluster.ManagedVolumes = nil
+	for _, volume := range cluster.Volumes {
+		cluster.ManagedVolumes = append(cluster.ManagedVolumes, ProjectManagedVolume(ManagedVolumeFactsFromEvidence(volume, hints)))
+	}
+	return cluster
 }
 
 func buildImagePullBlockedEvidence(root string) (bool, VolumeEvidence) {

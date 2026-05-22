@@ -1,0 +1,85 @@
+package ops
+
+type ManagedVolumeOperatorContract struct {
+	APIVersion     string                        `json:"api_version"`
+	Kind           string                        `json:"kind"`
+	Status         ManagedVolumeOperatorStatus   `json:"status"`
+	Events         []ManagedVolumeOperatorEvent  `json:"events,omitempty"`
+	AllowedActions []ManagedVolumeOperatorAction `json:"allowed_actions,omitempty"`
+}
+
+type ManagedVolumeOperatorStatus struct {
+	VolumeID     string                 `json:"volume_id,omitempty"`
+	PVCName      string                 `json:"pvc_name,omitempty"`
+	Status       string                 `json:"status"`
+	ReasonCode   string                 `json:"reason_code,omitempty"`
+	Conditions   []ObservationCondition `json:"conditions,omitempty"`
+	NonClaims    []string               `json:"non_claims,omitempty"`
+	EvidenceRefs []string               `json:"evidence_refs,omitempty"`
+}
+
+type ManagedVolumeOperatorEvent struct {
+	Type         string   `json:"type"`
+	Reason       string   `json:"reason"`
+	Message      string   `json:"message"`
+	EvidenceRefs []string `json:"evidence_refs,omitempty"`
+}
+
+type ManagedVolumeOperatorAction struct {
+	Type            string   `json:"type"`
+	Mode            string   `json:"mode"`
+	SideEffectClass string   `json:"side_effect_class"`
+	OwnerExecutor   string   `json:"owner_executor,omitempty"`
+	MutationAllowed bool     `json:"mutation_allowed"`
+	Preconditions   []string `json:"preconditions,omitempty"`
+	InvariantRefs   []string `json:"invariant_refs,omitempty"`
+	EvidenceRefs    []string `json:"evidence_refs,omitempty"`
+}
+
+func ManagedVolumeOperatorContractFromProjection(projection ManagedVolumeProjection) ManagedVolumeOperatorContract {
+	contract := ManagedVolumeOperatorContract{
+		APIVersion: "block.seaweedfs.com/v1alpha1",
+		Kind:       "ManagedVolumeStatusContract",
+		Status: ManagedVolumeOperatorStatus{
+			VolumeID:     projection.VolumeID,
+			PVCName:      projection.PVCName,
+			Status:       projection.Status,
+			ReasonCode:   projection.ReasonCode,
+			Conditions:   append([]ObservationCondition(nil), projection.Conditions...),
+			NonClaims:    append([]string(nil), projection.NonClaims...),
+			EvidenceRefs: append([]string(nil), projection.EvidenceRefs...),
+		},
+	}
+	for _, condition := range projection.Conditions {
+		contract.Events = append(contract.Events, managedVolumeOperatorEventFromCondition(condition))
+	}
+	for _, action := range projection.Actions {
+		contract.AllowedActions = append(contract.AllowedActions, ManagedVolumeOperatorAction{
+			Type:            action.Type,
+			Mode:            action.Mode,
+			SideEffectClass: action.SideEffectClass,
+			OwnerExecutor:   action.OwnerExecutor,
+			MutationAllowed: false,
+			Preconditions:   append([]string(nil), action.Preconditions...),
+			InvariantRefs:   append([]string(nil), action.InvariantRefs...),
+			EvidenceRefs:    append([]string(nil), action.EvidenceRefs...),
+		})
+	}
+	return contract
+}
+
+func managedVolumeOperatorEventFromCondition(condition ObservationCondition) ManagedVolumeOperatorEvent {
+	eventType := "Normal"
+	if condition.Severity == "warning" {
+		eventType = "Warning"
+	}
+	if condition.Severity == "error" {
+		eventType = "Warning"
+	}
+	return ManagedVolumeOperatorEvent{
+		Type:         eventType,
+		Reason:       condition.Reason,
+		Message:      condition.Message,
+		EvidenceRefs: append([]string(nil), condition.EvidenceRefs...),
+	}
+}

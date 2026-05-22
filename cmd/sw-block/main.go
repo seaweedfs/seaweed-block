@@ -2,10 +2,15 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"flag"
 	"fmt"
 	"io"
+	"net"
+	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -15,6 +20,7 @@ import (
 	"github.com/seaweedfs/seaweed-block/internal/buildinfo"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+	"gopkg.in/yaml.v3"
 )
 
 func main() {
@@ -22,8 +28,9 @@ func main() {
 }
 
 var (
-	opsStatusRunCommand    = ops.DefaultRunCommand
-	opsInventoryRunCommand = ops.DefaultRunCommand
+	opsStatusRunCommand             = ops.DefaultRunCommand
+	opsInventoryRunCommand          = ops.DefaultRunCommand
+	opsGenerateHelmValuesRunCommand = ops.DefaultRunCommand
 )
 
 func run(args []string, stdout, stderr io.Writer) int {
@@ -41,7 +48,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return ops.VolumeStatusExitInvalid
 	}
 	if len(args) < 2 {
-		fmt.Fprintln(stderr, "sw-block: expected subcommand ops status|inventory|list|cluster|volumes|describe|timeline|explain|report")
+		fmt.Fprintln(stderr, "sw-block: expected subcommand ops status|inventory|list|cluster|volumes|describe|timeline|explain|report|dashboard|generate-helm-values")
 		usage(stderr)
 		return ops.VolumeStatusExitInvalid
 	}
@@ -62,6 +69,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runOpsExplain(args[2:], stdout, stderr)
 	case "report":
 		return runOpsReport(args[2:], stdout, stderr)
+	case "dashboard":
+		return runOpsDashboard(args[2:], stdout, stderr)
+	case "generate-helm-values":
+		return runOpsGenerateHelmValues(args[2:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "sw-block: unknown ops subcommand %q\n", args[1])
 		usage(stderr)
@@ -320,7 +331,7 @@ func loadObservationCluster(command string, args []string, stderr io.Writer) (op
 		fmt.Fprintf(stderr, "%s: %v\n", command, err)
 		return ops.ClusterEvidence{}, "", ops.VolumeStatusExitInvalid
 	}
-	return cluster, out, ops.VolumeStatusExitOK
+	return ops.NormalizeObservationCluster(cluster), out, ops.VolumeStatusExitOK
 }
 
 func readMasterClusterEvidence(ctx context.Context, masterAddr string) (ops.ClusterEvidence, error) {
@@ -618,6 +629,482 @@ func runOpsReport(args []string, stdout, stderr io.Writer) int {
 	return ops.VolumeStatusExitOK
 }
 
+func runOpsDashboard(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("sw-block ops dashboard", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	var (
+		fromBundle       string
+		namespace        string
+		masterAddr       string
+		masterAPIAddr    string
+		evidenceOutDir   string
+		productRevision  string
+		claimProfile     string
+		listenAddr       string
+		requiredFrontier requiredFrontierFlags
+		timeout          time.Duration
+		serveDuration    time.Duration
+	)
+	fs.StringVar(&fromBundle, "from-bundle", "", "existing inventory/support bundle directory to serve")
+	fs.StringVar(&namespace, "namespace", "default", "Kubernetes namespace for live read-only inventory")
+	fs.StringVar(&masterAddr, "master", "", "optional blockmaster gRPC address for live per-replica status evidence")
+	fs.StringVar(&masterAPIAddr, "master-api", "", "optional blockmaster gRPC address for ClusterEvidenceService read-only snapshot")
+	fs.StringVar(&evidenceOutDir, "evidence-out", "", "optional directory for nested live status evidence")
+	fs.StringVar(&productRevision, "product-revision", "", "product revision label for live evidence")
+	fs.StringVar(&claimProfile, "claim-profile", "", "promotion-readiness claim profile for live evidence")
+	fs.StringVar(&listenAddr, "listen", "127.0.0.1:9334", "dashboard listen address; keep loopback for alpha")
+	fs.Var(&requiredFrontier, "required-frontier", "required frontier as volume_id=lsn; repeat for multiple volumes")
+	fs.DurationVar(&timeout, "timeout", 5*time.Second, "live collection timeout")
+	fs.DurationVar(&serveDuration, "serve-duration", 0, "optional test duration; 0 serves until interrupted")
+	if err := fs.Parse(args); err != nil {
+		return ops.VolumeStatusExitInvalid
+	}
+	if fs.NArg() != 0 {
+		fmt.Fprintf(stderr, "sw-block ops dashboard: unexpected args %s\n", strings.Join(fs.Args(), " "))
+		return ops.VolumeStatusExitInvalid
+	}
+
+	cluster, err := loadDashboardCluster(dashboardClusterOptions{
+		FromBundle:        fromBundle,
+		Namespace:         namespace,
+		MasterAddr:        masterAddr,
+		MasterAPIAddr:     masterAPIAddr,
+		EvidenceOutDir:    evidenceOutDir,
+		ProductRevision:   productRevision,
+		ClaimProfile:      claimProfile,
+		RequiredFrontiers: requiredFrontier.values,
+		Timeout:           timeout,
+	})
+	if err != nil {
+		fmt.Fprintf(stderr, "sw-block ops dashboard: %v\n", err)
+		return ops.VolumeStatusExitInvalid
+	}
+
+	ln, err := net.Listen("tcp", listenAddr)
+	if err != nil {
+		fmt.Fprintf(stderr, "sw-block ops dashboard: listen %s: %v\n", listenAddr, err)
+		return ops.VolumeStatusExitInvalid
+	}
+	defer ln.Close()
+
+	server := &http.Server{
+		Handler:           ops.NewObservationDashboardHandler(cluster),
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- server.Serve(ln)
+	}()
+	fmt.Fprintf(stdout, "dashboard_status=ok\n")
+	fmt.Fprintf(stdout, "url=http://%s/\n", ln.Addr().String())
+	fmt.Fprintf(stdout, "cluster_evidence=%s\n", ops.ObservationReportJSONArtifact)
+	fmt.Fprintf(stdout, "timeline=%s\n", ops.ObservationReportJSONLArtifact)
+	fmt.Fprintf(stdout, "summary=%s\n", ops.ObservationReportTextArtifact)
+	fmt.Fprintf(stdout, "read_only=true\n")
+
+	if serveDuration > 0 {
+		timer := time.NewTimer(serveDuration)
+		defer timer.Stop()
+		select {
+		case err := <-errCh:
+			if err != nil && err != http.ErrServerClosed {
+				fmt.Fprintf(stderr, "sw-block ops dashboard: %v\n", err)
+				return ops.VolumeStatusExitInvalid
+			}
+			return ops.VolumeStatusExitOK
+		case <-timer.C:
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			if err := server.Shutdown(ctx); err != nil {
+				fmt.Fprintf(stderr, "sw-block ops dashboard: shutdown: %v\n", err)
+				return ops.VolumeStatusExitInvalid
+			}
+			if err := <-errCh; err != nil && err != http.ErrServerClosed {
+				fmt.Fprintf(stderr, "sw-block ops dashboard: %v\n", err)
+				return ops.VolumeStatusExitInvalid
+			}
+			return ops.VolumeStatusExitOK
+		}
+	}
+
+	if err := <-errCh; err != nil && err != http.ErrServerClosed {
+		fmt.Fprintf(stderr, "sw-block ops dashboard: %v\n", err)
+		return ops.VolumeStatusExitInvalid
+	}
+	return ops.VolumeStatusExitOK
+}
+
+type dashboardClusterOptions struct {
+	FromBundle        string
+	Namespace         string
+	MasterAddr        string
+	MasterAPIAddr     string
+	EvidenceOutDir    string
+	ProductRevision   string
+	ClaimProfile      string
+	RequiredFrontiers map[string]uint64
+	Timeout           time.Duration
+}
+
+func loadDashboardCluster(options dashboardClusterOptions) (ops.ClusterEvidence, error) {
+	switch {
+	case options.FromBundle != "":
+		return ops.BuildObservationFromBundle(ops.ObservationBundleOptions{Dir: options.FromBundle})
+	case options.MasterAPIAddr != "":
+		ctx, cancel := context.WithTimeout(context.Background(), options.Timeout)
+		defer cancel()
+		return readMasterClusterEvidence(ctx, options.MasterAPIAddr)
+	default:
+		productRevision := options.ProductRevision
+		if productRevision == "" {
+			productRevision = buildinfo.Version("sw-block")
+		}
+		if !ops.PromotionClaimProfileAccepted(options.ClaimProfile) {
+			return ops.ClusterEvidence{}, fmt.Errorf("--claim-profile=%q invalid; want %q, %q, or %q", options.ClaimProfile, ops.PromotionClaimBetaRecovery, ops.PromotionClaimControlledBestEffortDemo, ops.PromotionClaimStage2ISCSIALUAMultipath)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), options.Timeout)
+		defer cancel()
+		collector := ops.NewKubernetesVolumeInventoryCollector(ops.KubernetesInventoryConfig{
+			Namespace:         options.Namespace,
+			MasterAddr:        options.MasterAddr,
+			StatusBundleRoot:  options.EvidenceOutDir,
+			ProductRevision:   productRevision,
+			ClaimProfile:      options.ClaimProfile,
+			RequiredFrontiers: options.RequiredFrontiers,
+			RunCommand:        opsInventoryRunCommand,
+		})
+		inventory, collectErr := collector.Collect(ctx)
+		if collectErr != nil {
+			inventory.CollectionErrors = append(inventory.CollectionErrors, strings.Split(collectErr.Error(), "\n")...)
+		}
+		return ops.BuildObservationFromInventory(inventory, "", options.EvidenceOutDir)
+	}
+}
+
+type helmValuesFile struct {
+	Image           helmValuesImage        `yaml:"image"`
+	CSIImage        helmValuesImage        `yaml:"csiImage"`
+	AppNamespace    string                 `yaml:"appNamespace"`
+	StorageClass    helmValuesStorageClass `yaml:"storageClass"`
+	Replication     helmValuesReplication  `yaml:"replication"`
+	Network         helmValuesNetwork      `yaml:"network"`
+	Compat          helmValuesCompat       `yaml:"compat"`
+	CHAP            helmValuesCHAP         `yaml:"chap"`
+	Stage2Multipath helmValuesEnabled      `yaml:"stage2Multipath"`
+	BlockNodes      []helmValuesBlockNode  `yaml:"blockNodes"`
+}
+
+type helmValuesImage struct {
+	Repository string `yaml:"repository"`
+	Tag        string `yaml:"tag"`
+	Digest     string `yaml:"digest"`
+}
+
+type helmValuesStorageClass struct {
+	Create            bool   `yaml:"create"`
+	Name              string `yaml:"name"`
+	ReplicationFactor int    `yaml:"replicationFactor"`
+	Protocol          string `yaml:"protocol"`
+}
+
+type helmValuesReplication struct {
+	AckProfile             string `yaml:"ackProfile"`
+	ExpectedSlotsPerVolume int    `yaml:"expectedSlotsPerVolume"`
+}
+
+type helmValuesNetwork struct {
+	ExternalISCSI                bool `yaml:"externalISCSI"`
+	ExternalStatus               bool `yaml:"externalStatus"`
+	RejectLoopbackPublishTargets bool `yaml:"rejectLoopbackPublishTargets"`
+}
+
+type helmValuesCompat struct {
+	LauncherRejectLoopbackFlag bool `yaml:"launcherRejectLoopbackFlag"`
+}
+
+type helmValuesCHAP struct {
+	Enabled    bool   `yaml:"enabled"`
+	Create     bool   `yaml:"create"`
+	SecretName string `yaml:"secretName"`
+	Username   string `yaml:"username"`
+	Secret     string `yaml:"secret"`
+}
+
+type helmValuesEnabled struct {
+	Enabled bool `yaml:"enabled"`
+}
+
+type helmValuesBlockNode struct {
+	Name           string `yaml:"name"`
+	KubernetesNode string `yaml:"kubernetesNode"`
+	InternalIP     string `yaml:"internalIP"`
+	DataPort       int    `yaml:"dataPort"`
+	ControlPort    int    `yaml:"controlPort"`
+	Pool           string `yaml:"pool"`
+}
+
+type kubernetesReadyNode struct {
+	Name       string
+	InternalIP string
+}
+
+func runOpsGenerateHelmValues(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("sw-block ops generate-helm-values", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	var (
+		outPath           string
+		kubeconfig        string
+		image             string
+		csiImage          string
+		replicationFactor int
+		ackProfile        string
+		storageClass      string
+		appNamespace      string
+		targetNode        string
+		nodeLimit         int
+		chapSecretName    string
+		chapUsername      string
+		chapSecret        string
+		stage2Multipath   bool
+		timeout           time.Duration
+	)
+	fs.StringVar(&outPath, "out", "", "output Helm values.yaml path")
+	fs.StringVar(&outPath, "o", "", "output Helm values.yaml path")
+	fs.StringVar(&kubeconfig, "kubeconfig", "", "optional kubeconfig path passed to kubectl")
+	fs.StringVar(&image, "image", "ghcr.io/seaweedfs/seaweed-block:alpha", "sw-block image reference")
+	fs.StringVar(&csiImage, "csi-image", "ghcr.io/seaweedfs/seaweed-block-csi:alpha", "sw-block CSI image reference")
+	fs.IntVar(&replicationFactor, "replication-factor", 1, "storage class replication factor")
+	fs.StringVar(&ackProfile, "ack-profile", "best-effort", "replication ACK profile: best-effort, sync-quorum, or sync-all")
+	fs.StringVar(&storageClass, "storageclass", "sw-block-dynamic", "StorageClass name")
+	fs.StringVar(&appNamespace, "app-namespace", "default", "default application namespace")
+	fs.StringVar(&targetNode, "target-node", "", "optional Kubernetes node name to select for single-node values")
+	fs.IntVar(&nodeLimit, "node-limit", 0, "optional maximum selected Ready node count")
+	fs.StringVar(&chapSecretName, "chap-secret-name", "sw-block-iscsi-chap", "iSCSI CHAP Secret name")
+	fs.StringVar(&chapUsername, "chap-username", "sw-block", "iSCSI CHAP username")
+	fs.StringVar(&chapSecret, "chap-secret", "", "iSCSI CHAP shared secret; generated when needed and omitted")
+	fs.BoolVar(&stage2Multipath, "stage2-multipath", false, "enable Stage 2 multipath chart values")
+	fs.DurationVar(&timeout, "timeout", 10*time.Second, "kubectl discovery timeout")
+	if err := fs.Parse(args); err != nil {
+		return ops.VolumeStatusExitInvalid
+	}
+	if fs.NArg() != 0 {
+		fmt.Fprintf(stderr, "sw-block ops generate-helm-values: unexpected args %s\n", strings.Join(fs.Args(), " "))
+		return ops.VolumeStatusExitInvalid
+	}
+	if outPath == "" {
+		fmt.Fprintln(stderr, "sw-block ops generate-helm-values: --out is required")
+		return ops.VolumeStatusExitInvalid
+	}
+	if replicationFactor < 1 {
+		fmt.Fprintln(stderr, "sw-block ops generate-helm-values: --replication-factor must be >= 1")
+		return ops.VolumeStatusExitInvalid
+	}
+	if !helmValuesAckProfileAccepted(ackProfile) {
+		fmt.Fprintf(stderr, "sw-block ops generate-helm-values: --ack-profile=%q invalid; want best-effort, sync-quorum, or sync-all\n", ackProfile)
+		return ops.VolumeStatusExitInvalid
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	kubectlArgs := []string{}
+	if kubeconfig != "" {
+		kubectlArgs = append(kubectlArgs, "--kubeconfig", kubeconfig)
+	}
+	kubectlArgs = append(kubectlArgs, "get", "nodes", "-o", "wide", "--no-headers")
+	rawNodes, err := opsGenerateHelmValuesRunCommand(ctx, "kubectl", kubectlArgs...)
+	if err != nil {
+		fmt.Fprintf(stderr, "sw-block ops generate-helm-values: kubectl node discovery failed: %v\n%s", err, rawNodes)
+		return ops.VolumeStatusExitInvalid
+	}
+	discovered, selected, err := selectHelmValuesNodes(string(rawNodes), targetNode, nodeLimit)
+	if err != nil {
+		fmt.Fprintf(stderr, "sw-block ops generate-helm-values: %v\n", err)
+		return ops.VolumeStatusExitInvalid
+	}
+	if replicationFactor > len(selected) {
+		fmt.Fprintf(stderr, "sw-block ops generate-helm-values: --replication-factor=%d requires at least %d selected Ready nodes; selected=%d\n", replicationFactor, replicationFactor, len(selected))
+		return ops.VolumeStatusExitInvalid
+	}
+
+	multiNode := len(selected) > 1
+	if multiNode && chapSecret == "" {
+		chapSecret = generateHelmValuesSecret()
+	}
+	values := helmValuesFile{
+		Image:        parseHelmValuesImage(image),
+		CSIImage:     parseHelmValuesImage(csiImage),
+		AppNamespace: appNamespace,
+		StorageClass: helmValuesStorageClass{
+			Create:            true,
+			Name:              storageClass,
+			ReplicationFactor: replicationFactor,
+			Protocol:          "iscsi",
+		},
+		Replication: helmValuesReplication{
+			AckProfile:             ackProfile,
+			ExpectedSlotsPerVolume: replicationFactor,
+		},
+		Network: helmValuesNetwork{
+			ExternalISCSI:                multiNode,
+			ExternalStatus:               multiNode,
+			RejectLoopbackPublishTargets: multiNode,
+		},
+		Compat: helmValuesCompat{
+			LauncherRejectLoopbackFlag: false,
+		},
+		CHAP: helmValuesCHAP{
+			Enabled:    multiNode,
+			Create:     multiNode,
+			SecretName: chapSecretName,
+			Username:   chapUsername,
+			Secret:     chapSecret,
+		},
+		Stage2Multipath: helmValuesEnabled{Enabled: stage2Multipath},
+		BlockNodes:      make([]helmValuesBlockNode, 0, len(selected)),
+	}
+	for i, node := range selected {
+		ip := node.InternalIP
+		if !multiNode {
+			ip = "127.0.0.1"
+		}
+		values.BlockNodes = append(values.BlockNodes, helmValuesBlockNode{
+			Name:           node.Name,
+			KubernetesNode: node.Name,
+			InternalIP:     ip,
+			DataPort:       3260 + i,
+			ControlPort:    9333 + i,
+			Pool:           "default",
+		})
+	}
+	rawValues, err := yaml.Marshal(values)
+	if err != nil {
+		fmt.Fprintf(stderr, "sw-block ops generate-helm-values: marshal values: %v\n", err)
+		return ops.VolumeStatusExitInvalid
+	}
+	if dir := filepath.Dir(outPath); dir != "." && dir != "" {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			fmt.Fprintf(stderr, "sw-block ops generate-helm-values: create output dir: %v\n", err)
+			return ops.VolumeStatusExitInvalid
+		}
+	}
+	if err := os.WriteFile(outPath, rawValues, 0o600); err != nil {
+		fmt.Fprintf(stderr, "sw-block ops generate-helm-values: write %s: %v\n", outPath, err)
+		return ops.VolumeStatusExitInvalid
+	}
+
+	networkMode := "loopback"
+	if multiNode {
+		networkMode = "external-iscsi"
+	}
+	fmt.Fprintln(stdout, "helm_values_status=ok")
+	fmt.Fprintf(stdout, "values_file=%s\n", outPath)
+	fmt.Fprintf(stdout, "network_mode=%s\n", networkMode)
+	fmt.Fprintf(stdout, "ready_kubernetes_nodes=%d\n", len(selected))
+	fmt.Fprintf(stdout, "discovered_kubernetes_nodes=%d\n", len(discovered))
+	fmt.Fprintf(stdout, "target_node=%s\n", emptyCLI(targetNode))
+	fmt.Fprintf(stdout, "node_limit=%s\n", emptyCLI(strconv.Itoa(nodeLimit)))
+	fmt.Fprintf(stdout, "external_iscsi=%t\n", multiNode)
+	fmt.Fprintf(stdout, "chap_enabled=%t\n", multiNode)
+	fmt.Fprintf(stdout, "replication_factor=%d\n", replicationFactor)
+	fmt.Fprintf(stdout, "ack_profile=%s\n", ackProfile)
+	return ops.VolumeStatusExitOK
+}
+
+func helmValuesAckProfileAccepted(value string) bool {
+	switch value {
+	case "best-effort", "sync-quorum", "sync-all":
+		return true
+	default:
+		return false
+	}
+}
+
+func selectHelmValuesNodes(raw, targetNode string, nodeLimit int) ([]kubernetesReadyNode, []kubernetesReadyNode, error) {
+	discovered := parseKubectlWideReadyNodes(raw)
+	if len(discovered) == 0 {
+		return nil, nil, fmt.Errorf("no Ready schedulable Kubernetes nodes with non-loopback InternalIP found")
+	}
+	selected := make([]kubernetesReadyNode, 0, len(discovered))
+	for _, node := range discovered {
+		if targetNode != "" && node.Name != targetNode {
+			continue
+		}
+		selected = append(selected, node)
+	}
+	if targetNode != "" && len(selected) == 0 {
+		return discovered, nil, fmt.Errorf("--target-node=%q is not a Ready schedulable node with non-loopback InternalIP", targetNode)
+	}
+	if nodeLimit > 0 && len(selected) > nodeLimit {
+		selected = selected[:nodeLimit]
+	}
+	if len(selected) == 0 {
+		return discovered, nil, fmt.Errorf("no Kubernetes nodes selected")
+	}
+	return discovered, selected, nil
+}
+
+func parseKubectlWideReadyNodes(raw string) []kubernetesReadyNode {
+	var nodes []kubernetesReadyNode
+	for _, line := range strings.Split(raw, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 6 {
+			continue
+		}
+		status := fields[1]
+		internalIP := fields[5]
+		if !kubectlNodeStatusReadySchedulable(status) || helmValuesIPUnsafe(internalIP) {
+			continue
+		}
+		nodes = append(nodes, kubernetesReadyNode{
+			Name:       fields[0],
+			InternalIP: internalIP,
+		})
+	}
+	return nodes
+}
+
+func kubectlNodeStatusReadySchedulable(status string) bool {
+	ready := false
+	for _, part := range strings.Split(status, ",") {
+		switch strings.TrimSpace(part) {
+		case "Ready":
+			ready = true
+		case "SchedulingDisabled":
+			return false
+		}
+	}
+	return ready
+}
+
+func helmValuesIPUnsafe(ip string) bool {
+	return ip == "" || ip == "<none>" || ip == "0.0.0.0" || ip == "::1" || strings.HasPrefix(ip, "127.")
+}
+
+func parseHelmValuesImage(ref string) helmValuesImage {
+	repository := ref
+	tag := "latest"
+	digest := ""
+	if before, after, ok := strings.Cut(ref, "@"); ok {
+		repository = before
+		digest = after
+	}
+	lastSlash := strings.LastIndex(repository, "/")
+	lastColon := strings.LastIndex(repository, ":")
+	if lastColon > lastSlash {
+		tag = repository[lastColon+1:]
+		repository = repository[:lastColon]
+	}
+	return helmValuesImage{Repository: repository, Tag: tag, Digest: digest}
+}
+
+func generateHelmValuesSecret() string {
+	var b [18]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return fmt.Sprintf("sw-block-%d", time.Now().UnixNano())
+	}
+	return "sw-block-" + hex.EncodeToString(b[:])
+}
+
 func loadObservationVolume(command string, args []string, stderr io.Writer) (ops.ClusterEvidence, string, int) {
 	if len(args) == 0 || args[0] != "volume" {
 		fmt.Fprintf(stderr, "%s: expected volume [--from-bundle <dir>|--namespace <ns>] <volume-id>\n", command)
@@ -749,6 +1236,7 @@ func usage(w io.Writer) {
 	fmt.Fprintln(w, "  sw-block ops explain volume <volume-id> --namespace <ns> [--master <addr>] [--out <dir>]")
 	fmt.Fprintln(w, "  sw-block ops report --from-bundle <dir> --out <dir>")
 	fmt.Fprintln(w, "  sw-block ops report --master-api <addr> --out <dir>")
+	fmt.Fprintln(w, "  sw-block ops generate-helm-values --out values.yaml [--target-node <node>] [--replication-factor <n>]")
 }
 
 func emptyCLI(value string) string {

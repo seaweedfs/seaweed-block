@@ -1,6 +1,9 @@
 package ops
 
 import (
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -147,6 +150,304 @@ deployment.apps/sw-block-csi-controller 1/1 1 1 2m3s block-csi sw-block-csi:loca
 		if !strings.Contains(text, want) {
 			t.Fatalf("text missing %q:\n%s", want, text)
 		}
+	}
+}
+
+func TestObservationBundle_ManagedVolumeUsesPrimaryFailureArtifactHints(t *testing.T) {
+	dir := t.TempDir()
+	productDir := filepath.Join(dir, "demo", "product-observation")
+	if err := os.MkdirAll(productDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cluster := NewClusterEvidence(time.Date(2026, 5, 20, 12, 0, 0, 0, time.UTC))
+	cluster.Volumes = []VolumeEvidence{{
+		VolumeID:          "pvc-stage2",
+		Namespace:         "default",
+		PVCName:           "demo-pvc",
+		ReplicationFactor: 3,
+		PrimaryReplica:    "r2",
+		PublishTarget:     "192.168.1.184:3261",
+		Replicas: []ReplicaEvidence{{
+			ReplicaID:      "r2",
+			KubernetesNode: "m02",
+			Role:           "primary",
+			Observed:       true,
+			FrontendAddr:   "192.168.1.184:3261",
+		}},
+	}}
+	raw, err := MarshalObservationJSON(cluster)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(productDir, ClusterEvidenceArtifact), raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, filepath.Join(dir, "demo", PrimaryFailureRecoveryArtifact), strings.Join([]string{
+		"promoted_replica=r2",
+		"data_check_after_failover=mounted_workload_checksum_passed",
+		"pod_recreate_used=false",
+		"old_primary_stale_io_success_count=0",
+		"transparent_failover_claimed=true",
+	}, "\n"))
+
+	out, err := BuildObservationFromBundle(ObservationBundleOptions{Dir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out.ManagedVolumes) != 1 {
+		t.Fatalf("managed_volumes=%+v", out.ManagedVolumes)
+	}
+	managed := out.ManagedVolumes[0]
+	if managed.Status != ManagedVolumeStatusRecovered || managed.ReasonCode != ReasonTransparentHostPathRecovered {
+		t.Fatalf("managed=%+v", managed)
+	}
+}
+
+func TestObservationBundle_D6ReplayGate_FirstVolumeBlockedAndRecovery(t *testing.T) {
+	cases := []struct {
+		name       string
+		build      func(t *testing.T, dir string)
+		wantStatus string
+		wantReason string
+		wantEvent  string
+	}{
+		{
+			name: "first-volume",
+			build: func(t *testing.T, dir string) {
+				writeProductClusterEvidence(t, dir, []VolumeEvidence{healthyObservationVolume()})
+			},
+			wantStatus: ManagedVolumeStatusReady,
+			wantReason: ReasonFirstVolumeVerified,
+			wantEvent:  "Normal",
+		},
+		{
+			name: "blocked-image-pull",
+			build: func(t *testing.T, dir string) {
+				mustWrite(t, filepath.Join(dir, "demo", KubeSystemPodsDeploysArtifact), `NAME READY STATUS RESTARTS AGE IP NODE
+pod/sw-block-csi-node-n948t 0/2 Init:ErrImagePull 0 2m3s 192.168.1.184 m02
+deployment.apps/sw-block-csi-controller 1/1 1 1 2m3s block-csi sw-block-csi:local`)
+			},
+			wantStatus: ManagedVolumeStatusBlocked,
+			wantReason: ReasonCSINodeImagePullFailed,
+			wantEvent:  "Warning",
+		},
+		{
+			name: "stage2-recovery",
+			build: func(t *testing.T, dir string) {
+				writeProductClusterEvidence(t, dir, []VolumeEvidence{{
+					VolumeID:          "pvc-stage2",
+					Namespace:         "default",
+					PVCName:           "demo-pvc",
+					ReplicationFactor: 3,
+					PrimaryReplica:    "r2",
+					PublishTarget:     "192.168.1.184:3261",
+					Replicas: []ReplicaEvidence{{
+						ReplicaID:      "r2",
+						KubernetesNode: "m02",
+						Role:           "primary",
+						Observed:       true,
+						FrontendAddr:   "192.168.1.184:3261",
+					}},
+				}})
+				mustWrite(t, filepath.Join(dir, "demo", PrimaryFailureRecoveryArtifact), strings.Join([]string{
+					"promoted_replica=r2",
+					"data_check_after_failover=mounted_workload_checksum_passed",
+					"pod_recreate_used=false",
+					"old_primary_stale_io_success_count=0",
+					"transparent_failover_claimed=true",
+				}, "\n"))
+			},
+			wantStatus: ManagedVolumeStatusRecovered,
+			wantReason: ReasonTransparentHostPathRecovered,
+			wantEvent:  "Normal",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			tc.build(t, dir)
+			opts := ObservationBundleOptions{Dir: dir}
+			if tc.name == "blocked-image-pull" {
+				opts.VolumeID = "pvc-blocked"
+			}
+			cluster, err := BuildObservationFromBundle(opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(cluster.ManagedVolumes) != 1 {
+				t.Fatalf("managed_volumes=%+v", cluster.ManagedVolumes)
+			}
+			managed := cluster.ManagedVolumes[0]
+			if managed.Status != tc.wantStatus || managed.ReasonCode != tc.wantReason {
+				t.Fatalf("managed=%+v", managed)
+			}
+			reportDir := filepath.Join(dir, "report")
+			if err := WriteObservationReportArtifacts(reportDir, cluster); err != nil {
+				t.Fatal(err)
+			}
+			for _, artifact := range []string{
+				ObservationReportHTMLArtifact,
+				ObservationReportJSONArtifact,
+				ObservationReportJSONLArtifact,
+				ObservationReportTextArtifact,
+			} {
+				if _, err := os.Stat(filepath.Join(reportDir, artifact)); err != nil {
+					t.Fatalf("missing report artifact %s: %v", artifact, err)
+				}
+			}
+			explain := RenderObservationExplainText(cluster)
+			if !strings.Contains(explain, "managed_volume_condition") {
+				t.Fatalf("explain missing condition:\n%s", explain)
+			}
+			contract := ManagedVolumeOperatorContractFromProjection(managed)
+			if len(contract.Events) == 0 || contract.Events[0].Type != tc.wantEvent {
+				t.Fatalf("contract events=%+v", contract.Events)
+			}
+			for _, action := range contract.AllowedActions {
+				if action.MutationAllowed {
+					t.Fatalf("mutation allowed in replay contract: %+v", action)
+				}
+			}
+		})
+	}
+}
+
+func TestObservationBundle_DashboardReplayGate_FirstVolumeBlockedAndRecovery(t *testing.T) {
+	cases := []struct {
+		name       string
+		build      func(t *testing.T, dir string)
+		wantHTML   string
+		wantJSON   string
+		wantText   string
+		wantStatus string
+	}{
+		{
+			name: "first-volume",
+			build: func(t *testing.T, dir string) {
+				writeProductClusterEvidence(t, dir, []VolumeEvidence{healthyObservationVolume()})
+			},
+			wantHTML:   "Managed Volumes",
+			wantJSON:   `"reason_code": "first_volume_verified"`,
+			wantText:   "managed_volume=pvc-healthy status=ready reason=first_volume_verified",
+			wantStatus: ManagedVolumeStatusReady,
+		},
+		{
+			name: "blocked-image-pull",
+			build: func(t *testing.T, dir string) {
+				mustWrite(t, filepath.Join(dir, "demo", KubeSystemPodsDeploysArtifact), `NAME READY STATUS RESTARTS AGE IP NODE
+pod/sw-block-csi-node-n948t 0/2 Init:ErrImagePull 0 2m3s 192.168.1.184 m02
+deployment.apps/sw-block-csi-controller 1/1 1 1 2m3s block-csi sw-block-csi:local`)
+			},
+			wantHTML:   ReasonCSINodeImagePullFailed,
+			wantJSON:   `"reason_code": "csi_node_image_pull_failed"`,
+			wantText:   "managed_volume=pvc-blocked status=blocked reason=csi_node_image_pull_failed",
+			wantStatus: ManagedVolumeStatusBlocked,
+		},
+		{
+			name: "stage2-recovery",
+			build: func(t *testing.T, dir string) {
+				writeProductClusterEvidence(t, dir, []VolumeEvidence{{
+					VolumeID:          "pvc-stage2",
+					Namespace:         "default",
+					PVCName:           "demo-pvc",
+					ReplicationFactor: 3,
+					PrimaryReplica:    "r2",
+					PublishTarget:     "192.168.1.184:3261",
+					Replicas: []ReplicaEvidence{{
+						ReplicaID:      "r2",
+						KubernetesNode: "m02",
+						Role:           "primary",
+						Observed:       true,
+						FrontendAddr:   "192.168.1.184:3261",
+					}},
+				}})
+				mustWrite(t, filepath.Join(dir, "demo", PrimaryFailureRecoveryArtifact), strings.Join([]string{
+					"promoted_replica=r2",
+					"data_check_after_failover=mounted_workload_checksum_passed",
+					"pod_recreate_used=false",
+					"old_primary_stale_io_success_count=0",
+					"transparent_failover_claimed=true",
+				}, "\n"))
+			},
+			wantHTML:   ReasonTransparentHostPathRecovered,
+			wantJSON:   `"reason_code": "transparent_host_path_recovered"`,
+			wantText:   "managed_volume=pvc-stage2 status=recovered reason=transparent_host_path_recovered",
+			wantStatus: ManagedVolumeStatusRecovered,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			tc.build(t, dir)
+			opts := ObservationBundleOptions{Dir: dir}
+			if tc.name == "blocked-image-pull" {
+				opts.VolumeID = "pvc-blocked"
+			}
+			cluster, err := BuildObservationFromBundle(opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(cluster.ManagedVolumes) != 1 || cluster.ManagedVolumes[0].Status != tc.wantStatus {
+				t.Fatalf("managed_volumes=%+v", cluster.ManagedVolumes)
+			}
+
+			server := httptest.NewServer(NewObservationDashboardHandler(cluster))
+			defer server.Close()
+			assertDashboardEndpointContains(t, server.URL+"/", tc.wantHTML)
+			assertDashboardEndpointContains(t, server.URL+"/"+ObservationReportJSONArtifact, tc.wantJSON)
+			assertDashboardEndpointContains(t, server.URL+"/"+ObservationReportTextArtifact, tc.wantText)
+
+			resp, err := http.Post(server.URL+"/", "application/json", strings.NewReader(`{"action":"repair"}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			body, err := io.ReadAll(resp.Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if resp.StatusCode != http.StatusMethodNotAllowed || !strings.Contains(string(body), "read-only dashboard") {
+				t.Fatalf("mutation response status=%d body=%s", resp.StatusCode, body)
+			}
+		})
+	}
+}
+
+func assertDashboardEndpointContains(t *testing.T, url, want string) {
+	t.Helper()
+	resp, err := http.Get(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("%s status=%d body=%s", url, resp.StatusCode, body)
+	}
+	if !strings.Contains(string(body), want) {
+		t.Fatalf("%s missing %q:\n%s", url, want, body)
+	}
+}
+
+func writeProductClusterEvidence(t *testing.T, dir string, volumes []VolumeEvidence) {
+	t.Helper()
+	productDir := filepath.Join(dir, "demo", "product-observation")
+	if err := os.MkdirAll(productDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cluster := NewClusterEvidence(time.Date(2026, 5, 21, 12, 0, 0, 0, time.UTC))
+	cluster.Volumes = volumes
+	raw, err := MarshalObservationJSON(cluster)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(productDir, ClusterEvidenceArtifact), raw, 0o644); err != nil {
+		t.Fatal(err)
 	}
 }
 

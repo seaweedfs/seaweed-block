@@ -48,6 +48,26 @@ log "hostpath_prefix=${HOSTPATH_PREFIX:-none}"
 require_cmd kubectl || true
 require_cmd iscsiadm || true
 
+wait_for_k8s_cleanup() {
+  command -v kubectl >/dev/null 2>&1 || return 0
+  local deadline=$((SECONDS + ${SW_BLOCK_CLEANUP_WAIT_SECONDS:-60}))
+  while (( SECONDS < deadline )); do
+    local residue
+    residue="$(
+      {
+        kubectl get deploy,daemonset,statefulset,pod,svc,pvc,pv,configmap,secret,serviceaccount -A -o name
+        kubectl get storageclass,csidriver,clusterrole,clusterrolebinding -o name
+      } 2>/dev/null | grep -E '(sw-block|seaweed-block|block\.csi\.seaweedfs\.com)' || true
+    )"
+    if [[ -z "$residue" ]]; then
+      return 0
+    fi
+    sleep 2
+  done
+}
+
+wait_for_k8s_cleanup
+
 if command -v helm >/dev/null 2>&1; then
   capture "helm-status.after-cleanup.txt" helm status "$HELM_RELEASE" --namespace "$HELM_NAMESPACE"
   if helm status "$HELM_RELEASE" --namespace "$HELM_NAMESPACE" >/dev/null 2>&1; then

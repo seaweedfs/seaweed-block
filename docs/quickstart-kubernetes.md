@@ -1,45 +1,47 @@
 # Kubernetes Quick Start
 
-This guide is the alpha Day-1 path for Seaweed Block on Kubernetes.
+This guide is the v0.3 alpha path for Seaweed Block on Kubernetes.
 
-It shows a normal user loop:
+It shows the user loop:
 
 ```text
-preflight
--> install the alpha stack
+generate Helm values
+-> helm install
 -> create a PVC-backed volume
 -> write data from one app pod
 -> read the same data from a replacement app pod
--> collect status/report evidence
+-> inspect read-only report/dashboard evidence
 -> clean up
 ```
 
-The current quickstart is for a supported test cluster, not production.
-For deeper operational detail, see [`operations-v1.md`](operations-v1.md).
+The current quickstart is for supported test clusters, not production. For
+deeper operational detail, see [`operations-v1.md`](operations-v1.md).
 
 ## What This Proves
 
 The quickstart proves:
 
-- Kubernetes can install the alpha blockmaster and CSI components.
+- Helm can install the alpha blockmaster and CSI components.
 - A PVC can dynamically provision a Seaweed Block-backed PV.
 - A writer pod can mount the PVC and write `/data/demo.bin`.
 - A replacement reader pod can mount the same PVC and verify the same data.
-- Product-owned status evidence and a local read-only report are collected.
-- The example resources are cleaned up.
+- Product-owned status evidence, a local read-only report, and a local
+  read-only dashboard are available.
+- The example resources and host-side residue are cleaned up.
 
 It does not prove production HA, backup/restore, upgrade safety, broad platform
-compatibility, or a hosted dashboard.
+compatibility, operator lifecycle, mutating admin workflows, or production UI.
 
 ## Prerequisites
 
 Run from a Linux host with access to your Kubernetes cluster:
 
 - `kubectl` configured for the target cluster.
+- `helm` installed.
 - `sudo` access for iSCSI checks and cleanup.
 - `iscsiadm` available on nodes that will stage volumes.
-- `go` and Docker/container tools for the local dev path, unless you use
-  published images.
+- `sw-block` binary in `PATH`, or run `go run ./cmd/sw-block ...` from this
+  repository.
 
 Check the cluster:
 
@@ -55,60 +57,104 @@ at least one Ready node
 iscsiadm: No active sessions.
 ```
 
-On a multi-node cluster, the activation script uses a non-loopback node
-InternalIP plus CHAP-backed iSCSI for the Day-1 path. On a single-node cluster,
-it may use the simpler local path.
-
-## Step 1 — Activate Seaweed Block
+## Step 1 — Generate Helm Values
 
 From the repository root:
 
 ```bash
 export KUBECONFIG="${KUBECONFIG:-/etc/rancher/k3s/k3s.yaml}"
-bash scripts/activate-k8s-alpha.sh "$PWD"
+sw-block ops generate-helm-values --out values.day1.yaml
 ```
 
-The script runs preflight, builds/imports local images into k3s, applies the
-alpha manifests, waits for blockmaster and CSI readiness, creates the default
-StorageClass, and writes an activation summary.
-
-Read the summary:
+If `sw-block` is not installed:
 
 ```bash
-cat "$(ls -td /tmp/sw-block-activation-* | head -1)/activation-summary.txt"
+go run ./cmd/sw-block ops generate-helm-values --out values.day1.yaml
 ```
 
-Expected fields include:
+What this command does:
+
+- reads Kubernetes nodes through `kubectl get nodes -o wide`,
+- selects Ready schedulable nodes with non-loopback InternalIP,
+- writes `values.day1.yaml` for the Helm chart.
+
+Single-node behavior:
+
+- one selected node,
+- loopback iSCSI/status mode,
+- CHAP disabled.
+
+Multi-node behavior:
+
+- multiple selected nodes,
+- non-loopback iSCSI/status addresses,
+- CHAP enabled,
+- loopback publish-target rejection recorded in values.
+
+Inspect the generated values:
+
+```bash
+grep -E "externalISCSI|externalStatus|replicationFactor|ackProfile|enabled:|internalIP" values.day1.yaml
+```
+
+For release validation, use immutable images:
+
+```bash
+sw-block ops generate-helm-values \
+  --out values.day1.yaml \
+  --image ghcr.io/seaweedfs/seaweed-block:sha-<commit> \
+  --csi-image ghcr.io/seaweedfs/seaweed-block-csi:sha-<commit>
+```
+
+Mutable `:alpha` is a smoke/demo tag only. Do not use it as release evidence
+unless the publish commit is known.
+
+## Step 2 — Install Seaweed Block With Helm
+
+```bash
+helm install sw-block charts/seaweed-block \
+  --namespace kube-system \
+  --create-namespace \
+  -f values.day1.yaml \
+  --wait
+```
+
+Check readiness:
+
+```bash
+kubectl -n kube-system get deploy,ds,pods -l app.kubernetes.io/instance=sw-block -o wide
+kubectl get storageclass
+```
+
+Expected:
 
 ```text
-activation_status=ok
-image_mode=local
-protocol=iscsi
-ack_profile=best-effort
-ready_kubernetes_nodes=<N>
-master_ready_replicas=1
-csi_controller_ready_replicas=1
-csi_node_ready=<N>/<N>
-storageclass=sw-block-dynamic
-next_create_volume=...
-next_status=...
-non_claims=...
+sw-blockmaster ready
+sw-block-csi-controller ready
+sw-block-csi-node ready on selected nodes
+StorageClass present
 ```
 
-If preflight fails, fix the environment first. Do not debug storage behavior
-until `activation_status=ok`.
+## Step 3 — Create And Verify The First Volume
 
-## Step 2 — Create And Verify The First Volume
-
-Run the first-volume helper:
+Run the first-volume helper in Helm mode:
 
 ```bash
-bash scripts/run-basic-app-example.sh "$PWD"
+SW_BLOCK_INSTALL_MODE=helm \
+SW_BLOCK_HELM_RELEASE=sw-block \
+SW_BLOCK_HELM_NAMESPACE=kube-system \
+SW_BLOCK_HELM_VALUES_FILE=values.day1.yaml \
+  bash scripts/run-basic-app-example.sh "$PWD"
 ```
 
 The helper applies the example StorageClass/PVC, waits for the PVC to bind,
 runs a writer pod, deletes it, runs a reader pod, collects status evidence,
 generates a local report, and cleans the example resources by default.
+
+Current helper scope: the example app resources use the `default` namespace.
+Use the documented example as-is for the v0.3 alpha gate. Cross-namespace
+helpers are a later usability enhancement; Kubernetes can still consume the
+installed CSI driver from other namespaces through normal PVC manifests.
 
 Expected final line:
 
@@ -119,7 +165,8 @@ Expected final line:
 Read the first-volume summary:
 
 ```bash
-cat "$(ls -td /tmp/sw-block-basic-app-* | head -1)/first-volume-summary.txt"
+APP_DIR="$(ls -td /tmp/sw-block-basic-app-* | head -1)"
+cat "$APP_DIR/first-volume-summary.txt"
 ```
 
 Expected fields:
@@ -142,13 +189,11 @@ The writer and reader are ordinary app pods. The reader is a replacement pod,
 so this proves the data is on the PVC-backed volume, not only in the writer
 container.
 
-## Step 3 — Inspect The Read-Only Report
+## Step 4 — Inspect Report Or Dashboard
 
-The first-volume helper writes a status directory under the latest basic-app
-artifact directory:
+The first-volume helper writes a status report:
 
 ```bash
-APP_DIR="$(ls -td /tmp/sw-block-basic-app-* | head -1)"
 ls "$APP_DIR/status/report"
 cat "$APP_DIR/status/report/summary.txt"
 ```
@@ -162,10 +207,25 @@ timeline.jsonl
 summary.txt
 ```
 
-`index.html` is a local static report. It is read-only. It has no promote,
-repair, rebuild, delete, failback, or cleanup controls.
+`sw-block ops report` writes static artifacts. `sw-block ops dashboard` serves
+the same evidence locally over HTTP.
 
-If you want to generate the same report from the live master:
+Serve the collected bundle:
+
+```bash
+sw-block ops dashboard --from-bundle "$APP_DIR" --listen 127.0.0.1:9334
+```
+
+Open:
+
+```text
+http://127.0.0.1:9334/
+```
+
+The dashboard is read-only. It has no promote, repair, rebuild, delete,
+failback, backup, restore, or cleanup controls.
+
+To generate live evidence from blockmaster:
 
 ```bash
 kubectl -n kube-system port-forward deploy/sw-blockmaster 9333:9333
@@ -176,44 +236,13 @@ In another terminal:
 ```bash
 sw-block ops cluster --master-api 127.0.0.1:9333
 sw-block ops report --master-api 127.0.0.1:9333 --out /tmp/sw-block-report
+sw-block ops dashboard --master-api 127.0.0.1:9333 --listen 127.0.0.1:9334
 ```
-
-If `sw-block` is not installed in `PATH`, run the same commands from the
-repository as `go run ./cmd/sw-block ops ...`.
-
-For replica-level support evidence:
-
-```bash
-sw-block ops inventory \
-  --namespace default \
-  --master 127.0.0.1:9333 \
-  --out /tmp/sw-block-inventory
-```
-
-## Published Images
-
-For development, local build/import is the fastest path and guarantees the
-running image matches the source tree.
-
-For QA/PM or release-candidate validation, use immutable published images:
-
-```bash
-export SW_BLOCK_ACTIVATION_IMAGE_MODE=published
-export SW_BLOCK_IMAGE=ghcr.io/seaweedfs/seaweed-block:sha-<commit>
-export SW_BLOCK_CSI_IMAGE=ghcr.io/seaweedfs/seaweed-block-csi:sha-<commit>
-
-bash scripts/activate-k8s-alpha.sh "$PWD"
-bash scripts/run-basic-app-example.sh "$PWD"
-```
-
-Mutable `:alpha` images are acceptable for casual smoke tests, but they can
-drift from the checked-out source tree. Do not use `:alpha` as release
-evidence unless the publish commit is known.
 
 ## Use Your Own PVC
 
 The standard volume creation path is Kubernetes PVC creation. Start from the
-example:
+example, which is written for the `default` namespace:
 
 ```bash
 kubectl apply -f examples/kubernetes/basic-app/storageclass-pvc.yaml
@@ -234,8 +263,20 @@ kubectl logs sw-block-example-reader
 ```
 
 The generated `blockvolume` workload is reconciled by blockmaster. You should
-not need to manually apply generated blockvolume YAML on the supported alpha
-path.
+not manually apply generated blockvolume YAML on the supported alpha path.
+
+## Script Fallback Path
+
+The script path remains available for development, local images, and fallback
+diagnostics:
+
+```bash
+bash scripts/activate-k8s-alpha.sh "$PWD"
+bash scripts/run-basic-app-example.sh "$PWD"
+```
+
+Use Helm for the v0.3 alpha release path unless you are specifically testing
+local script activation.
 
 ## Troubleshooting
 
@@ -256,36 +297,21 @@ cat "$APP_DIR/diagnostics/writer/writer-describe.txt" 2>/dev/null || true
 cat "$APP_DIR/diagnostics/reader/reader-describe.txt" 2>/dev/null || true
 ```
 
-If a pod cannot mount the PVC, `writer-describe.txt` or `reader-describe.txt`
-should include the Kubernetes event explaining why, such as image pull failure,
-iSCSI connection failure, missing CHAP secret, or scheduling mismatch.
+If a pod cannot mount the PVC, `writer-describe.txt` or
+`reader-describe.txt` should include the Kubernetes event explaining why, such
+as image pull failure, iSCSI connection failure, missing CHAP secret, or
+scheduling mismatch.
 
-If the cluster is still reachable, collect fresh live evidence:
-
-```bash
-kubectl -n kube-system port-forward deploy/sw-blockmaster 9333:9333
-```
-
-In another terminal:
-
-```bash
-sw-block ops cluster --master-api 127.0.0.1:9333 -o json \
-  > /tmp/sw-block-cluster-evidence.json
-sw-block ops report --master-api 127.0.0.1:9333 --out /tmp/sw-block-report
-sw-block ops inventory --namespace default --master 127.0.0.1:9333 --out /tmp/sw-block-inventory
-```
-
-If `sw-block` is not installed in `PATH`, prefix those commands with
-`go run ./cmd/sw-block` from the repository root.
-
-Attach the artifact directory and `/tmp/sw-block-report` when filing an issue.
+Attach the artifact directory and any `/tmp/sw-block-report` output when filing
+an issue.
 
 ## Cleanup
 
 The first-volume helper cleans the example resources by default. To uninstall
-the whole alpha stack:
+the alpha stack:
 
 ```bash
+helm uninstall sw-block --namespace kube-system
 bash scripts/uninstall-k8s-alpha.sh "$PWD"
 ```
 
@@ -310,11 +336,10 @@ other run owns the resources.
 
 ## Current Alpha Limitations
 
-- This is an alpha installer/script path, not a production Helm chart or
-  operator.
-- The local `sw-block ops report` is not a hosted dashboard.
+- This is an alpha Helm path, not a production installer or operator.
+- The dashboard is local and read-only, not a production hosted UI.
 - Mutating admin workflows are not exposed: no promote, repair, rebuild,
-  failback, delete, backup, or restore button.
+  failback, delete, backup, restore, or cleanup button.
 - Upgrade and rollback safety are not claimed.
 - Backup, snapshot, and restore are not claimed.
 - Broad distro/kernel/initiator compatibility is not claimed.

@@ -1,322 +1,184 @@
-# Current Plan: Phase 21 - Helm Activation MVP
+# Current Plan: Phase 25 - v0.3 Helm + Observable First-Volume Release
 
-Status: D1 dev pass. Helm chart skeleton renders and dry-runs for both
-single-node loopback defaults and three-node external iSCSI/CHAP values.
+Status: closed, 100% complete. Plan simplified and closed on 2026-05-22.
 
-Previous closed capability:
+Reference:
 
-- `finished-plans/phase20_finishedplan_activation_day1_ops_mvp.md`
-- v0.2 alpha Day-1 activation: script install, first PVC, writer/reader
-  checksum, read-only report, and strict cleanup.
+- `internal/docs/ref/product-delivery-review-simple-stable-observable-block.md`
 
-## Product Question
+## Product Goal
 
-Can a Kubernetes user install Seaweed Block through a normal Helm path and
-complete the same first-volume product loop without treating repo-local scripts
-as the primary install surface?
+Deliver a simple, stable, observable Kubernetes block alpha:
 
 ```text
-preflight
--> generate values.day1.yaml
--> helm install
--> rollout readiness
--> create PVC
--> writer/reader checksum
--> sw-block ops report
--> helm uninstall
--> host cleanup verification
+Helm install
+-> first PVC
+-> writer/reader data check
+-> read-only report/dashboard
+-> clean uninstall
+-> docs and release note match the exact claim
 ```
 
-## Release Target
-
-`v0.3-alpha`: Helm activation for supported Kubernetes labs.
-
-The release should make the install contract regular, reviewable, and closer to
-what users expect from a Kubernetes storage product. It should not introduce an
-operator lifecycle contract yet.
-
-## Core Thesis
-
-v0.2 proved the product loop with scripts. v0.3 should package that loop as a
-Kubernetes-native chart while preserving the same evidence discipline:
-readiness, PVC creation, data check, product-owned report, and cleanup.
-
-Helm is the right next step before an operator because:
-
-- it gives users a standard install/uninstall surface,
-- it makes values, RBAC, images, StorageClass, and CHAP settings explicit,
-- it keeps lifecycle logic simple while the product contract is still moving,
-- it creates a stable base for a later operator with CRDs and Conditions.
-
-## Non-Claims
-
-Do not claim:
-
-- production readiness,
-- operator / CRD lifecycle management,
-- automatic upgrades or rollback safety,
-- backup, snapshot, or restore,
-- mutating dashboard/admin actions,
-- broad Kubernetes distro support,
-- broad performance SLOs,
-- physical-host-loss survival beyond the gated node-loss claim,
-- transparent node-loss failover beyond already gated Stage 2/Node-Loss scopes,
-- NVMe ANA parity.
-
-## Scope
-
-### D1: Helm Chart Skeleton
-
-Create `charts/seaweed-block/` with templates for the existing install
-surface:
-
-- blockmaster Deployment and Service,
-- CSI controller Deployment,
-- CSI node DaemonSet,
-- RBAC / ServiceAccounts / ClusterRoleBindings,
-- CSIDriver,
-- StorageClass,
-- cluster-spec ConfigMap,
-- optional CHAP Secret,
-- image, pull policy, tag, and digest values,
-- namespace and naming overrides,
-- ACK profile and expected slots per volume,
-- external iSCSI/status settings,
-- Stage 2 multipath opt-in settings,
-- launcher state hostPath settings.
-
-The chart should template existing semantics. It must not fork product behavior
-from `scripts/install-k8s-alpha.sh`.
-
-Current D1 checkpoint:
-
-- `helm lint charts/seaweed-block` passes.
-- `helm template sw-block charts/seaweed-block --namespace kube-system` passes
-  Kubernetes client dry-run.
-- Three-node external values render external iSCSI/status, CHAP,
-  sync-quorum, expected slots, Stage 2 multipath, non-loopback IPs, and
-  loopback publish-target rejection.
-- Chart render fails closed if external iSCSI is enabled without CHAP.
-
-### D2: Day-1 Values Generator and Preflight
-
-Add a small user-facing helper that turns a live cluster into a Helm values
-file:
+This phase was release reconciliation and hardening. It had two steps only:
 
 ```text
-scripts/generate-helm-values-day1.sh
+D1: docs + release claim alignment - PASS
+D2: gate replay + close evidence - PASS
 ```
 
-Required behavior:
+## Scope Contract
 
-- detect Ready schedulable nodes and InternalIP values,
-- choose loopback mode for single-node labs,
-- choose external iSCSI/status + CHAP for multi-node labs,
-- write a `values.day1.yaml`,
-- print a concise activation summary,
-- fail closed on missing Kubernetes access, missing iSCSI prerequisites, or
-  unsafe topology,
-- preserve the v0.2 distinction between local/internal images and immutable
-  GHCR release images.
+| In | Out |
+|---|---|
+| Helm release hardening | CRD/operator implementation |
+| README / quickstart / release note alignment | new mutating admin action |
+| single-node and multi-node Helm gate replay | new protocol capability |
+| dashboard/report evidence consistency | model or protocol refactor |
+| immutable image / digest documentation | backup/snapshot/restore |
+| cleanup and host residue verification | rebuild/reintegration/failback |
 
-Current D2 checkpoint:
+Principle: Phase 25 may take small bug fixes only when they block the v0.3 user
+path. No model rewrite, no operator controller, no broad architecture refactor.
 
-- `scripts/generate-helm-values-day1.sh` writes `values.day1.yaml` from
-  `kubectl get nodes`.
-- One Ready node generates loopback mode with the real Kubernetes node name.
-- Multiple Ready nodes generate external iSCSI/status, CHAP, loopback publish
-  rejection, and one `blockNodes` entry per Ready schedulable node.
-- RF greater than discovered Ready node count fails closed.
-- Generated three-node RF=3 sync-quorum values pass `helm lint`,
-  `helm template`, and Kubernetes client dry-run.
+## Current Closed Inputs
 
-### D3a: Helm Single-Node First-Volume Gate
+As of 2026-05-22:
 
-Create a TestOps scenario for the README-friendly single-node path:
+- Phase 20 Day-1 activation: closed.
+- Phase 22 ManagedVolume model: closed for scope.
+- Phase 23 operations surface/operator-readiness contract: closed for scope.
+- Phase 24 hosted read-only dashboard: closed for scope.
 
-```text
-generate values.day1.yaml with one selected node
--> helm install
--> pin writer/reader pods to that same node
--> PVC writer/reader checksum
--> sw-block ops report
--> helm uninstall
-```
+## D1: Docs + Release Claim Alignment
+
+Goal: make the user-facing product story match the current code and gates.
+
+Status: PASS on 2026-05-22.
+
+Artifacts:
+
+- `internal/docs/product-roadmap.md`
+- `README.md`
+- `docs/quickstart-kubernetes.md`
+- `docs/releases/v0.3-alpha.md`
+- `docs/releases/README.md`
+
+Required content:
+
+- v0.3 is Helm alpha install + first PVC + read-only report/dashboard +
+  cleanup.
+- Script activation remains alpha/dev fallback, not the preferred v0.3 story.
+- `sw-block ops generate-helm-values` input/output is explained.
+- Single-node behavior is clear: one selected node, loopback mode.
+- Multi-node behavior is clear: Ready schedulable nodes, non-loopback
+  InternalIP, external iSCSI/status, CHAP.
+- `sw-block ops report` vs `sw-block ops dashboard` is clear:
+  - report writes static artifacts,
+  - dashboard serves the same read-only evidence locally.
+- Immutable `sha-<commit>` images are recommended for QA/PM/release proof.
+- Mutable `:alpha` is documented as smoke/demo only.
+- Non-claims are explicit:
+  - not production-ready,
+  - no operator lifecycle,
+  - no mutating admin UI/actions,
+  - no backup/snapshot/restore,
+  - no upgrade/rollback safety,
+  - no broad performance/RTO/SLO claim,
+  - no new recovery scope beyond already gated evidence.
 
 Acceptance:
 
-- values render loopback mode (`externalISCSI=false`),
-- exactly one `blockNodes` entry maps to the selected Kubernetes node,
-- writer and reader pods are pinned to that node,
-- PVC is Bound,
-- writer and reader checksum pass,
-- report directory contains `index.html`, `cluster-evidence.json`,
-  `timeline.jsonl`, and `summary.txt`,
-- cleanup leaves no iSCSI sessions or product processes.
-
-This gate is developer/laptop usability evidence. It is not HA evidence.
-
-Current D3a checkpoint:
-
-- `scripts/generate-helm-values-day1.sh` supports
-  `SW_BLOCK_HELM_TARGET_NODE` and `SW_BLOCK_HELM_NODE_LIMIT=1`.
-- `scripts/run-basic-app-example.sh` supports
-  `SW_BLOCK_BASIC_APP_NODE_SELECTOR` and records it in
-  `first-volume-summary.txt`.
-- `testops/scenarios/helm-single-node-first-volume-chain.yaml` added.
-- Static validation passes. Live QA run is still required.
-
-### D3b: Helm Multi-Node First-Volume Gate
-
-Create a TestOps scenario that exercises the PM/user path:
-
 ```text
-helm install sw-block charts/seaweed-block -f values.day1.yaml
--> wait for blockmaster, CSI controller, CSI node, StorageClass
--> create PVC through Kubernetes
--> writer pod writes /data/demo.bin
--> reader pod verifies /data/demo.bin
--> sw-block ops report emits HTML + JSON + JSONL timeline
+README + quickstart + release note describe the same v0.3 claim.
+No doc claims a capability without a gate.
+Roadmap marks Phase 22/23/24 closed and Phase 25/v0.3 closed.
 ```
 
-Acceptance:
+## D2: Gate Replay + Close Evidence
 
-- PVC is Bound,
-- blockvolume Deployment is stable,
-- writer and reader checksum pass,
-- report directory contains `index.html`, `cluster-evidence.json`,
-  `timeline.jsonl`, and `summary.txt`,
-- report is read-only and has no mutating actions,
-- first-volume summary names the chart release, namespace, image tags/digests,
-  StorageClass, PVC, volume ID, writer/reader results, and report path.
+Goal: prove the documented v0.3 path is runnable and self-explaining.
 
-Current D3b checkpoint:
+Status: PASS on 2026-05-22.
 
-- `testops/scenarios/helm-first-volume-chain.yaml` added.
-- The scenario follows the user path: generate values, `helm lint`,
-  `helm install --wait`, first PVC writer/reader checksum, read-only report,
-  and `helm uninstall`.
-- `scripts/run-basic-app-example.sh` now records Helm install metadata and
-  image identity in `first-volume-summary.txt`.
-- Static validation passes: scenario YAML parses, shell scripts parse, and
-  chart lint passes. Live QA run is still required.
-- First QA attempt failed before chart deployment because `helm` did not inherit
-  k3s kubeconfig. Scenario now sets `KUBECONFIG=/etc/rancher/k3s/k3s.yaml` for
-  Helm/kubectl exec actions and records `helm version` as a prerequisite
-  artifact.
-- Second QA diagnostic found chart/image skew: the pinned image
-  `sha-28a99ce4f644` does not support
-  `--launcher-reject-loopback-publish-targets`. The chart now gates that flag
-  behind `compat.launcherRejectLoopbackFlag=false` by default while still
-  recording `network.rejectLoopbackPublishTargets` as the intended safety
-  boundary.
-- QA run `20260519-000135-1bbc` passed strict: 49/49 actions, Helm values
-  generation, Helm install, first-volume writer/reader, report artifacts, and
-  Helm uninstall cleanup all green.
+Evidence:
 
-### D4: Helm Uninstall and Host Cleanup Gate
+- Single-node Helm gate: `20260522-031019-ef25`, PASS, 34/34 actions.
+- Multi-node Helm gate: `20260522-031124-0a44`, PASS, 51/51 actions.
+- Both runs record immutable image tags and digests.
+- Both runs produce `status/report/index.html`, `cluster-evidence.json`,
+  `timeline.jsonl`, and `summary.txt`.
+- Both runs finish with `cleanup_status=ok`, zero k8s residue, zero process
+  residue, and zero hostPath residue.
 
-Helm uninstall only removes Kubernetes objects. The product still needs a
-documented host cleanup/check step for iSCSI and multipath residue.
+Required gates:
 
-Acceptance:
-
-- `helm uninstall sw-block` completes,
-- StorageClass and product workloads are gone,
-- demo PVC/pods are removed by the scenario,
-- no active iSCSI sessions remain,
-- no stale iSCSI node records remain for the test IQNs,
-- no matching blockmaster/blockvolume/blockcsi processes remain,
-- no test-scoped hostPath residue remains,
-- cleanup failures produce support evidence instead of silent success.
-
-Current D4 checkpoint:
-
-- `scripts/verify-helm-cleanup.sh` added as the shared cleanup verifier.
-- The verifier captures and checks Helm release state, Kubernetes residue,
-  iSCSI sessions, iSCSI node DB records, multipath maps, sw-block processes,
-  and optional run-scoped hostPath residue.
-- Both Helm first-volume scenarios call the verifier after `helm uninstall` and
-  assert `cleanup_status=ok`.
-- Static validation passes. Live QA reruns are required because this tightens
-  the cleanup phase.
-
-### D5: Published Image Release Validation
-
-Keep two image paths:
-
-- local/internal images for fast engineering QA,
-- immutable GHCR `sha-<commit>` images for PM/release validation.
+- Helm single-node first-volume gate:
+  - `testops/scenarios/helm-single-node-first-volume-chain.yaml`
+  - expected: PASS
+- Helm multi-node first-volume gate:
+  - `testops/scenarios/helm-first-volume-chain.yaml`
+  - expected: PASS
+- Report/dashboard consistency:
+  - `summary.txt`
+  - `index.html`
+  - `cluster-evidence.json`
+  - `timeline.jsonl`
+  - dashboard endpoint serving same evidence when applicable
+- Image identity:
+  - image tag recorded,
+  - digest recorded,
+  - release validation uses immutable tag.
+- Cleanup:
+  - Helm release removed,
+  - StorageClass/demo PVC/pods removed,
+  - no active iSCSI sessions,
+  - no sw-block processes,
+  - no test-scoped residue.
 
 Acceptance:
-
-- Helm values support image tags and digests,
-- activation/report output records both configured image and observed digest,
-- mutable `:alpha` is documented as smoke/demo only,
-- release validation uses immutable `sha-<commit>` tags.
-
-### D6: User Docs and README
-
-After D1-D5 are green:
-
-- README default install path should become Helm,
-- script activation should move to dev/lab fallback language,
-- tutorial should show one-node and three-node expectations clearly,
-- release note should identify `v0.3-alpha` as Helm activation, not new HA,
-- non-claims must remain explicit.
-
-## Test Strategy
-
-Use TDD at the packaging boundary:
-
-- chart render tests or golden `helm template` checks,
-- preflight/values-generator unit checks for one-node and multi-node examples,
-- TestOps red/green scenarios for install, first volume, report, and uninstall,
-- local/internal image run before any GHCR validation,
-- immutable GHCR run before release note.
-
-Candidate scenarios:
-
-- `testops/scenarios/helm-activation-install-chain.yaml`
-- `testops/scenarios/helm-first-volume-chain.yaml`
-- `testops/scenarios/helm-uninstall-cleanup-chain.yaml`
-
-## Guardrails
-
-- Do not add operator/CRD work in this phase.
-- Do not add mutating dashboard actions.
-- Do not hide host cleanup behind Helm if Helm cannot actually enforce it.
-- Do not weaken existing safe-refusal, sync-quorum, or observation contracts.
-- Do not make Helm values drift from the script path; if behavior differs,
-  document and gate it explicitly.
-
-## Known Risks
-
-- RBAC scope may need one more tightening pass before public release. The chart
-  should make namespace, ServiceAccounts, and ClusterRole use visible rather
-  than implicit.
-- Helm is now an explicit Day-1 prerequisite. k3s labs require explicit
-  `KUBECONFIG=/etc/rancher/k3s/k3s.yaml`; do not rely on k3s kubectl wrapper
-  behavior for Helm.
-- Helm cannot verify host iSCSI/multipath cleanup by itself. The close gate must
-  include a cleanup verifier.
-- Multi-node defaults can regress into loopback mistakes. The values generator
-  must make network mode and target IPs visible in the summary.
-- Published image drift can reappear if release validation uses mutable tags.
-
-## Definition of Done
-
-Phase 21 closes only when a cold user/PM path can run:
 
 ```text
-preflight
-generate values.day1.yaml
-helm install
-first PVC writer/reader checksum
-sw-block ops report
-helm uninstall
-cleanup verification
+single-node Helm gate PASS
+multi-node Helm gate PASS
+report/dashboard reason codes agree
+image tag/digest evidence present
+cleanup clean
+close report written
+finished plan written
 ```
 
-and the resulting bundle self-explains install status, volume status, report
-artifacts, image identity, and cleanup result without SSH log spelunking.
+Close artifacts:
+
+- `internal/docs/qa-assignments/v0.3-helm-observable-first-volume-close-report.md`
+- `internal/docs/finished-plans/phase25_finishedplan_v0.3_helm_observable_first_volume.md`
+
+## Claim Matrix
+
+| Area | Can Claim For v0.3 | Cannot Claim |
+|---|---|---|
+| Install | Helm alpha install on supported k3s/Kubernetes labs | production installer, broad distro support |
+| First Volume | PVC create, writer/reader data check, clean report | performance/SLO, upgrade safety |
+| Recovery | Existing gated RF3 recovery evidence remains valid | new recovery scope beyond prior gates |
+| Dashboard | local read-only dashboard/report over product evidence | production hosted UI, mutating admin UI |
+| Cleanup | documented uninstall + host cleanup verification | fully automated operator lifecycle |
+| Images | immutable tag/digest release validation | mutable `:alpha` as release proof |
+
+## Risks
+
+| Risk | Mitigation | Fallback |
+|---|---|---|
+| `:alpha` image drift | release docs require immutable `sha-<commit>` tags for QA/PM | use local/internal images for dev gates |
+| single-node vs three-node behavior confusion | quickstart explains loopback vs external iSCSI/CHAP values | provide separate single-node and multi-node commands |
+| docs drift from implementation | close gate checks README, quickstart, release note against gate artifacts | block release note until docs are corrected |
+| dashboard/report reason mismatch | compare summary, HTML, JSON, explain/dashboard reason codes | fix projection consistency only; no model rewrite |
+| cleanup residue after Helm uninstall | host cleanup verification is required | document manual cleanup command and keep release blocked until clean |
+
+## Dependency Order
+
+```text
+D1 docs alignment
+-> D2 gate replay
+-> close report
+```
+
+Do not start operator/CRD implementation until this phase closes.
