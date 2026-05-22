@@ -31,6 +31,10 @@ This is the short internal roadmap. Keep it current and readable.
   iSCSI configuration, StorageClass, readiness output, first-volume smoke,
   local read-only report/dashboard, and uninstall hygiene. Phase 25 closed this
   release target on 2026-05-22.
+- `v0.3.x-alpha`: Helm release lifecycle hardening. Before operator work,
+  prove the chart can be treated as a repeatable release artifact: chart/image
+  version alignment, install/upgrade/rollback smoke, multi-PVC Day-1 smoke,
+  support bundle completeness, and strict cleanup. This is Phase 26.
 - `v0.4-beta-candidate`: Operator lifecycle. Add a Kubernetes-native control
   plane with CRDs/Conditions/Events for install, node eligibility, volume
   lifecycle, recovery observation, safe cleanup, and eventually gated repair or
@@ -121,8 +125,15 @@ lifecycle.
   - `helm install` + first PVC smoke + `sw-block ops report`,
   - local read-only `sw-block ops dashboard` over the same evidence,
   - `helm uninstall` plus explicit host cleanup verification.
+- Current: Phase 26 Helm release lifecycle hardening. Keep the scope narrow:
+  - `helm lint` and template validation,
+  - chart version / `appVersion` / image tag and digest alignment,
+  - install -> first PVC -> report/dashboard -> upgrade/rollback smoke,
+  - multi-PVC Day-1 smoke,
+  - support bundle completeness for PASS and blocked cases,
+  - `helm uninstall` plus strict host cleanup verification.
 - Later: v0.4 operator lifecycle. Introduce CRDs/Conditions/Events and scoped
-  reconciliation only after the Helm contract is stable.
+  reconciliation only after the Helm lifecycle contract is stable.
 
 ### Track B: iSCSI Frontend Stability
 

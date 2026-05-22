@@ -1,186 +1,197 @@
-# Current Plan: Phase 25 - v0.3 Helm + Observable First-Volume Release
+# Current Plan: Phase 26 - Helm Release Lifecycle Hardening
 
-Status: closed, 100% complete. Plan simplified and closed on 2026-05-22.
-
-Reference:
-
-- `internal/docs/ref/product-delivery-review-simple-stable-observable-block.md`
+Status: active, 0% complete. Started on 2026-05-22 after PR #49 merged
+v0.3 Helm observable first-volume alpha.
 
 ## Product Goal
 
-Deliver a simple, stable, observable Kubernetes block alpha:
+Turn the v0.3 Helm-first alpha path into a more release-shaped Kubernetes
+product loop:
 
 ```text
-Helm install
+generate values
+-> helm install
 -> first PVC
--> writer/reader data check
--> read-only report/dashboard
--> clean uninstall
--> docs and release note match the exact claim
+-> multiple PVC smoke
+-> read-only report/dashboard/support bundle
+-> helm upgrade / rollback smoke
+-> helm uninstall and host cleanup
 ```
 
-This phase was release reconciliation and hardening. It had two steps only:
-
-```text
-D1: docs + release claim alignment - PASS
-D2: gate replay + close evidence - PASS
-```
+This phase is about lifecycle confidence, not new HA semantics.
 
 ## Scope Contract
 
 | In | Out |
 |---|---|
-| Helm release hardening | CRD/operator implementation |
-| README / quickstart / release note alignment | new mutating admin action |
-| single-node and multi-node Helm gate replay | new protocol capability |
-| dashboard/report evidence consistency | model or protocol refactor |
-| immutable image / digest documentation | backup/snapshot/restore |
-| cleanup and host residue verification | rebuild/reintegration/failback |
+| Helm install / upgrade / rollback / uninstall gates | CRD/operator implementation |
+| chart version, appVersion, image tag/digest alignment | mutating dashboard/admin actions |
+| single-volume and multi-volume smoke gates | new protocol or recovery capability |
+| support bundle completeness for Helm installs | rebuild/failback implementation |
+| chart packaging and release-note consistency | backup/snapshot/restore |
+| cleanup and host residue verification | broad distro/performance/SLO claims |
 
-Principle: Phase 25 may take small bug fixes only when they block the v0.3 user
-path. No model rewrite, no operator controller, no broad architecture refactor.
+Principle: Phase 26 may take small product fixes only when they block the Helm
+release lifecycle. Do not refactor ManagedVolume, authority, CSI, or protocol
+models unless a release gate proves the current behavior is wrong.
 
-## Current Closed Inputs
+## Dependencies
 
-As of 2026-05-22:
+- Phase 25 is closed: v0.3 Helm first-volume path works.
+- Published immutable images are available for release validation.
+- Read-only ops report/dashboard artifacts are available.
+- ManagedVolume projection exists for first-volume and recovery explanations.
 
-- Phase 20 Day-1 activation: closed.
-- Phase 22 ManagedVolume model: closed for scope.
-- Phase 23 operations surface/operator-readiness contract: closed for scope.
-- Phase 24 hosted read-only dashboard: closed for scope.
+## D1: Chart Release Hygiene
 
-## D1: Docs + Release Claim Alignment
+Goal: make chart metadata and image identity release-grade enough for alpha
+users and QA.
 
-Goal: make the user-facing product story match the current code and gates.
+Required work:
 
-Status: PASS on 2026-05-22.
-
-Artifacts:
-
-- `internal/docs/product-roadmap.md`
-- `README.md`
-- `docs/quickstart-kubernetes.md`
-- `docs/releases/v0.3-alpha.md`
-- `docs/releases/README.md`
-
-Required content:
-
-- v0.3 is Helm alpha install + first PVC + read-only report/dashboard +
-  cleanup.
-- Script activation remains alpha/dev fallback, not the preferred v0.3 story.
-- `sw-block ops generate-helm-values` input/output is explained.
-- Single-node behavior is clear: one selected node, loopback mode.
-- Multi-node behavior is clear: Ready schedulable nodes, non-loopback
-  InternalIP, external iSCSI/status, CHAP.
-- `sw-block ops report` vs `sw-block ops dashboard` is clear:
-  - report writes static artifacts,
-  - dashboard serves the same read-only evidence locally.
-- Immutable `sha-<commit>` images are recommended for QA/PM/release proof.
-- Mutable `:alpha` is documented as smoke/demo only.
-- Non-claims are explicit:
-  - not production-ready,
-  - no operator lifecycle,
-  - no mutating admin UI/actions,
-  - no backup/snapshot/restore,
-  - no upgrade/rollback safety,
-  - no broad performance/RTO/SLO claim,
-  - no new recovery scope beyond already gated evidence.
+- Align `Chart.yaml` version, `appVersion`, README, quickstart, and release
+  note.
+- Ensure generated values include image tags and digest evidence where
+  available.
+- Document immutable `sha-<commit>` as the release-validation path.
+- Keep mutable `:alpha` as smoke/demo only.
+- Add a chart/package validation command to the gate.
 
 Acceptance:
 
 ```text
-README + quickstart + release note describe the same v0.3 claim.
-No doc claims a capability without a gate.
-Roadmap marks Phase 22/23/24 closed and Phase 25/v0.3 closed.
+helm lint charts/seaweed-block PASS
+helm template with generated values PASS
+chart version/appVersion/image docs agree
+release note names exact validated image path
 ```
 
-## D2: Gate Replay + Close Evidence
+## D2: Helm Lifecycle Gate
 
-Goal: prove the documented v0.3 path is runnable and self-explaining.
+Goal: prove the chart handles the basic release lifecycle, not just first
+install.
 
-Status: PASS on 2026-05-22.
+Required flow:
 
-Evidence:
-
-- Single-node Helm gate: `20260522-031019-ef25`, PASS, 34/34 actions.
-- Multi-node Helm gate: `20260522-031124-0a44`, PASS, 51/51 actions.
-- Documented Go CLI generator gate: `20260522-091642-b9a7`, PASS, 31/31
-  actions.
-- Both runs record immutable image tags and digests.
-- Both runs produce `status/report/index.html`, `cluster-evidence.json`,
-  `timeline.jsonl`, and `summary.txt`.
-- Both runs finish with `cleanup_status=ok`, zero k8s residue, zero process
-  residue, and zero hostPath residue.
-
-Required gates:
-
-- Helm single-node first-volume gate:
-  - `testops/scenarios/helm-single-node-first-volume-chain.yaml`
-  - expected: PASS
-- Helm multi-node first-volume gate:
-  - `testops/scenarios/helm-first-volume-chain.yaml`
-  - expected: PASS
-- Report/dashboard consistency:
-  - `summary.txt`
-  - `index.html`
-  - `cluster-evidence.json`
-  - `timeline.jsonl`
-  - dashboard endpoint serving same evidence when applicable
-- Image identity:
-  - image tag recorded,
-  - digest recorded,
-  - release validation uses immutable tag.
-- Cleanup:
-  - Helm release removed,
-  - StorageClass/demo PVC/pods removed,
-  - no active iSCSI sessions,
-  - no sw-block processes,
-  - no test-scoped residue.
+```text
+helm install
+-> first PVC writer/reader
+-> sw-block ops report
+-> helm upgrade with no data loss
+-> writer/reader again
+-> helm rollback or reinstall-safe fallback
+-> helm uninstall
+-> cleanup verification
+```
 
 Acceptance:
 
 ```text
-single-node Helm gate PASS
-multi-node Helm gate PASS
-report/dashboard reason codes agree
-image tag/digest evidence present
-cleanup clean
+install PASS
+upgrade PASS or explicit safe-refusal with reason
+rollback/reinstall-safe path PASS
+PVC data check survives supported lifecycle step
+cleanup_status=ok
+no active iSCSI sessions
+no sw-block processes
+no test-scoped hostPath residue
+```
+
+## D3: Multi-Volume Day-1 Gate
+
+Goal: move from "first PVC works" to "small user workload with multiple PVCs is
+stable enough to evaluate".
+
+Required flow:
+
+- Create at least three PVCs through the Helm-installed StorageClass.
+- Run writer/reader checksum on each PVC.
+- Verify `sw-block ops report` and dashboard distinguish all volumes.
+- Delete the PVCs and prove generated blockvolume workloads are cleaned up.
+
+Acceptance:
+
+```text
+N>=3 PVCs Bound
+N writer checksums PASS
+N reader checksums PASS
+ops report lists N ManagedVolumes with stable volume IDs
+delete cleanup removes all generated blockvolume Deployments
+cleanup residue clean
+```
+
+## D4: Support Bundle And Diagnostics Gate
+
+Goal: make "user reports Kubernetes block is stuck" actionable without SSH log
+spelunking.
+
+Required artifact set:
+
+- cluster evidence JSON
+- timeline JSONL
+- summary text
+- Helm release metadata
+- Kubernetes nodes / pods / PVC / PV / events
+- CSI controller/node logs
+- blockmaster logs
+- blockvolume logs when volumes exist
+- cleanup and iSCSI residue snapshots
+
+Acceptance:
+
+```text
+one command or scenario step writes the bundle
+bundle explains PASS and blocked first-volume cases
+reason codes match report/dashboard
+bundle is read-only evidence only
+```
+
+## D5: Phase Close And v0.3.x Release Note
+
+Goal: close the phase only when the user-facing claim is exact.
+
+Required:
+
+- Update README / quickstart only for proven lifecycle behavior.
+- Add a v0.3.x release note if lifecycle gates pass.
+- Write close report with run IDs and evidence paths.
+- Carry v0.4 operator items forward without starting implementation.
+
+Acceptance:
+
+```text
+D1-D4 gates PASS
+docs match gates
+release note has non-claims
 close report written
 finished plan written
 ```
 
-Close artifacts:
-
-- `internal/docs/qa-assignments/v0.3-helm-observable-first-volume-close-report.md`
-- `internal/docs/finished-plans/phase25_finishedplan_v0.3_helm_observable_first_volume.md`
-
 ## Claim Matrix
 
-| Area | Can Claim For v0.3 | Cannot Claim |
+| Area | Phase 26 Target Claim | Still Not Claimed |
 |---|---|---|
-| Install | Helm alpha install on supported k3s/Kubernetes labs | production installer, broad distro support |
-| First Volume | PVC create, writer/reader data check, clean report | performance/SLO, upgrade safety |
-| Recovery | Existing gated RF3 recovery evidence remains valid | new recovery scope beyond prior gates |
-| Dashboard | local read-only dashboard/report over product evidence | production hosted UI, mutating admin UI |
-| Cleanup | documented uninstall + host cleanup verification | fully automated operator lifecycle |
-| Images | immutable tag/digest release validation | mutable `:alpha` as release proof |
+| Install | Helm alpha install is repeatable and versioned | production installer |
+| Upgrade | one narrow upgrade/rollback smoke is gated | general upgrade safety |
+| Volumes | multiple small PVCs work in Day-1 smoke | scale/performance SLO |
+| Ops | support bundle/report/dashboard are enough for first diagnosis | full observability platform |
+| Cleanup | Helm uninstall plus host cleanup verification is gated | operator-owned lifecycle |
+| HA | prior recovery claims remain documented | new recovery semantics |
 
 ## Risks
 
 | Risk | Mitigation | Fallback |
 |---|---|---|
-| `:alpha` image drift | release docs require immutable `sha-<commit>` tags for QA/PM | use local/internal images for dev gates |
-| single-node vs three-node behavior confusion | quickstart explains loopback vs external iSCSI/CHAP values | provide separate single-node and multi-node commands |
-| docs drift from implementation | close gate checks README, quickstart, release note against gate artifacts | block release note until docs are corrected |
-| dashboard/report reason mismatch | compare summary, HTML, JSON, explain/dashboard reason codes | fix projection consistency only; no model rewrite |
-| cleanup residue after Helm uninstall | host cleanup verification is required | document manual cleanup command and keep release blocked until clean |
+| Upgrade mutates data path unexpectedly | run checksum before and after lifecycle step | document upgrade unsupported and block claim |
+| Multi-volume exposes launcher/provisioner churn | D3 gate requires stable volume IDs and cleanup | keep v0.3 first-volume-only claim |
+| Bundle grows without explaining root cause | require summary + reason codes + timeline | trim to required artifacts |
+| Chart/image version drift | immutable tags and digest evidence | local/internal image for dev gates only |
+| Operator scope creep | keep CRD/operator out of Phase 26 | start Phase 27 only after close |
 
-## Dependency Order
+## Progress
 
-```text
-D1 docs alignment
--> D2 gate replay
--> close report
-```
-
-Do not start operator/CRD implementation until this phase closes.
+- D1: pending
+- D2: pending
+- D3: pending
+- D4: pending
+- D5: pending
