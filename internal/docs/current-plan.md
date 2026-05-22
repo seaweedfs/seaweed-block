@@ -1,6 +1,7 @@
 # Current Plan: Phase 26 - Helm Release Lifecycle Hardening
 
-Status: active, 80% complete. Started on 2026-05-22 after PR #49 merged
+Status: closed, 100% complete. Started and closed on 2026-05-22 after PR #49
+merged v0.3 Helm observable first-volume alpha.
 v0.3 Helm observable first-volume alpha.
 
 ## Product Goal
@@ -258,6 +259,17 @@ bundle is read-only evidence only
 
 Goal: close the phase only when the user-facing claim is exact.
 
+Status: PASS on 2026-05-22.
+
+Evidence:
+
+- Close report:
+  `internal/docs/qa-assignments/phase26-helm-lifecycle-hardening-close-report.md`
+- Release note:
+  `docs/releases/v0.3.1-alpha.md`
+- README / quickstart updated to distinguish the gated upgrade/rollback smoke
+  from broad production upgrade safety.
+
 Required:
 
 - Update README / quickstart only for proven lifecycle behavior.
@@ -302,4 +314,4 @@ finished plan written
 - D2: PASS - Helm lifecycle gate `20260522-131951-a6d4`
 - D3: PASS - multi-volume Day-1 gate `20260522-152903-1116`
 - D4: PASS - support bundle diagnostics gate `20260522-153929-93a3`
-- D5: pending
+- D5: PASS - close report and v0.3.1 release note written

@@ -29,8 +29,9 @@ The quickstart proves:
   read-only dashboard are available.
 - The example resources and host-side residue are cleaned up.
 
-It does not prove production HA, backup/restore, upgrade safety, broad platform
-compatibility, operator lifecycle, mutating admin workflows, or production UI.
+It does not prove production HA, backup/restore, broad upgrade safety, broad
+platform compatibility, operator lifecycle, mutating admin workflows, or
+production UI.
 
 ## Prerequisites
 
@@ -375,7 +376,8 @@ other run owns the resources.
 - The dashboard is local and read-only, not a production hosted UI.
 - Mutating admin workflows are not exposed: no promote, repair, rebuild,
   failback, delete, backup, restore, or cleanup button.
-- Upgrade and rollback safety are not claimed.
+- Broad upgrade and rollback safety are not claimed beyond the gated alpha
+  smoke path.
 - Backup, snapshot, and restore are not claimed.
 - Broad distro/kernel/initiator compatibility is not claimed.
 - Performance, RTO, and SLO numbers are not claimed.

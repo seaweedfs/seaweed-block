@@ -32,6 +32,9 @@ What has been validated in the current alpha:
 - Day-1 install-to-first-volume path: activate stack, create PVC, writer pod
   verifies data, reader pod verifies persisted data, status report generated,
   cleanup clean.
+- Helm alpha lifecycle smoke: chart hygiene, one upgrade/rollback path that
+  preserves an existing PVC, three-PVC Day-1 smoke, support-bundle replay, and
+  clean uninstall.
 - dynamic PVC provisioning through CSI.
 - product-owned generated `blockvolume` lifecycle.
 - multiple PVCs / volumes visible in inventory.
@@ -51,15 +54,16 @@ Do not treat them as broad production HA or compatibility claims.
 Known missing pieces:
 
 - production-grade operator lifecycle,
-- Helm is the supported v0.3 alpha install path for supported labs; a
-  production-grade Helm lifecycle is not yet claimed,
+- Helm is the supported alpha install path for supported labs; a narrow
+  upgrade/rollback smoke is gated, but production-grade Helm lifecycle is not
+  claimed,
 - production hosted dashboard/UI; a local read-only dashboard/report exists,
 - backup, snapshot, and restore workflow,
 - returned-replica rebuild, reintegration, and failback,
 - transparent node-loss failover without pod recreate,
 - NVMe ANA parity for the transparent failover path,
 - broad distro/kernel/initiator compatibility matrix,
-- upgrade/rollback safety,
+- broad upgrade/rollback safety beyond the gated smoke path,
 - performance, RTO, or SLO claims,
 - security/RBAC/audit hardening for mutating admin actions.
 
@@ -210,12 +214,13 @@ sw-block ops inventory \
 ## What Users Should Not Expect Yet
 
 - A production-grade operator.
-- Production-grade Helm lifecycle management; Helm is the supported v0.3 alpha
-  install path, but upgrade/rollback/lifecycle hardening is not claimed.
+- Production-grade Helm lifecycle management; Helm is the supported alpha
+  install path and one upgrade/rollback smoke is gated, but broad upgrade
+  safety is not claimed.
 - A production hosted dashboard; the current dashboard is local and read-only.
 - Backup, snapshot, or restore workflows.
 - Mutating admin actions such as promote, repair, rebuild, failback, or cleanup.
-- Upgrade/rollback safety.
+- Broad upgrade/rollback safety beyond the gated smoke path.
 - Performance, RTO, or SLO guarantees.
 - Broad distro/kernel/initiator compatibility.
 - Transparent Kubernetes node-loss failover without pod recreate.
