@@ -1,6 +1,6 @@
 # Current Plan: Phase 26 - Helm Release Lifecycle Hardening
 
-Status: active, 60% complete. Started on 2026-05-22 after PR #49 merged
+Status: active, 80% complete. Started on 2026-05-22 after PR #49 merged
 v0.3 Helm observable first-volume alpha.
 
 ## Product Goal
@@ -205,6 +205,34 @@ cleanup residue clean
 Goal: make "user reports Kubernetes block is stuck" actionable without SSH log
 spelunking.
 
+Status: PASS on 2026-05-22.
+
+Evidence:
+
+- Scenario: `testops/scenarios/helm-support-bundle-diagnostics-chain.yaml`
+- Run: `20260522-153929-93a3`
+- Result: PASS, 7/7 phases, 38/38 actions
+- Flow:
+  - Helm install completed with generated Day-1 values and local branch images
+  - first-volume writer/reader verified while resources stayed live for
+    diagnostics
+  - `scripts/collect-helm-support-bundle.sh` collected Helm metadata, K8s
+    snapshots, logs, iSCSI state, and replayed read-only ops artifacts
+  - `sw-block ops report --from-bundle` rendered a cold static report
+  - `sw-block ops explain volume --from-bundle` explained the volume without a
+    live cluster
+  - `sw-block ops timeline volume --from-bundle -o jsonl` replayed the
+    timeline
+  - a synthetic ImagePullBackOff bundle explained
+    `reason=csi_node_image_pull_failed`
+  - Helm uninstall and host cleanup passed
+- Summary fields:
+  - `support_bundle_status=ok`
+  - `report_status=ok`
+  - `explain_status=ok`
+  - `timeline_status=ok`
+  - `read_only=true`
+
 Required artifact set:
 
 - cluster evidence JSON
@@ -272,6 +300,6 @@ finished plan written
 
 - D1: PASS - chart release hygiene gate `20260522-131641-7a61`
 - D2: PASS - Helm lifecycle gate `20260522-131951-a6d4`
-- D3: pending
-- D4: pending
+- D3: PASS - multi-volume Day-1 gate `20260522-152903-1116`
+- D4: PASS - support bundle diagnostics gate `20260522-153929-93a3`
 - D5: pending
