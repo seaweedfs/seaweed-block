@@ -1,0 +1,23 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "seaweed-block.fullname" . }}-cluster-spec
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "seaweed-block.labels" . | nindent 4 }}
+data:
+  cluster-spec.yaml: |
+    nodes:
+{{- range $i, $node := .Values.blockNodes }}
+      - server_id: {{ default $node.name $node.serverID | quote }}
+        addr: {{ printf "%s:%v" (required "blockNodes[].internalIP is required" $node.internalIP) (default 19101 $node.dataPort) | quote }}
+        data_addr: {{ printf "%s:%v" $node.internalIP (default 19101 $node.dataPort) | quote }}
+        ctrl_addr: {{ printf "%s:%v" $node.internalIP (default 19102 $node.controlPort) | quote }}
+        labels:
+          kubernetes.io/hostname: {{ default $node.name $node.kubernetesNode | quote }}
+        pools:
+          - pool_id: {{ default (printf "pool-%d" (add $i 1)) $node.poolID | quote }}
+            total_bytes: {{ default 1073741824 $node.totalBytes }}
+            free_bytes: {{ default 1073741824 $node.freeBytes }}
+            block_size: 4096
+{{- end }}

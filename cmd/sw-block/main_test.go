@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -280,6 +281,151 @@ func TestOpsInventoryAcceptsStage2ClaimProfile(t *testing.T) {
 	}
 }
 
+func TestOpsGenerateHelmValuesSingleNodeFromKubernetes(t *testing.T) {
+	oldRunCommand := opsGenerateHelmValuesRunCommand
+	opsGenerateHelmValuesRunCommand = fixtureCmdKubectl(map[string]string{
+		"kubectl get nodes -o wide --no-headers": cmdHelmNodeWide,
+	})
+	defer func() { opsGenerateHelmValuesRunCommand = oldRunCommand }()
+
+	outPath := filepath.Join(t.TempDir(), "values.yaml")
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"ops", "generate-helm-values",
+		"--out", outPath,
+		"--target-node", "m02",
+		"--node-limit", "1",
+		"--image", "ghcr.io/seaweedfs/seaweed-block:sha-test",
+		"--csi-image", "ghcr.io/seaweedfs/seaweed-block-csi:sha-test",
+	}, &stdout, &stderr)
+	if code != ops.VolumeStatusExitOK {
+		t.Fatalf("exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	for _, want := range []string{
+		"helm_values_status=ok",
+		"network_mode=loopback",
+		"ready_kubernetes_nodes=1",
+		"discovered_kubernetes_nodes=3",
+		"target_node=m02",
+	} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("stdout missing %q:\n%s", want, stdout.String())
+		}
+	}
+	values, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"repository: ghcr.io/seaweedfs/seaweed-block",
+		"tag: sha-test",
+		"externalISCSI: false",
+		"externalStatus: false",
+		"rejectLoopbackPublishTargets: false",
+		"expectedSlotsPerVolume: 1",
+		"enabled: false",
+		"name: m02",
+		"kubernetesNode: m02",
+		"internalIP: 127.0.0.1",
+		"dataPort: 19101",
+		"controlPort: 19102",
+		"launcherReplicationAckFlag: false",
+	} {
+		if !strings.Contains(string(values), want) {
+			t.Fatalf("values missing %q:\n%s", want, values)
+		}
+	}
+}
+
+func TestOpsGenerateHelmValuesMultiNodeExternalISCSI(t *testing.T) {
+	oldRunCommand := opsGenerateHelmValuesRunCommand
+	opsGenerateHelmValuesRunCommand = fixtureCmdKubectl(map[string]string{
+		"kubectl get nodes -o wide --no-headers": cmdHelmNodeWide,
+	})
+	defer func() { opsGenerateHelmValuesRunCommand = oldRunCommand }()
+
+	outPath := filepath.Join(t.TempDir(), "values.yaml")
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"ops", "generate-helm-values",
+		"--out", outPath,
+		"--replication-factor", "3",
+		"--ack-profile", "sync-quorum",
+		"--chap-secret", "fixed-chap-secret",
+		"--stage2-multipath",
+	}, &stdout, &stderr)
+	if code != ops.VolumeStatusExitOK {
+		t.Fatalf("exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	for _, want := range []string{
+		"network_mode=external-iscsi",
+		"ready_kubernetes_nodes=3",
+		"external_iscsi=true",
+		"chap_enabled=true",
+		"ack_profile=sync-quorum",
+	} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("stdout missing %q:\n%s", want, stdout.String())
+		}
+	}
+	values, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"replicationFactor: 3",
+		"ackProfile: sync-quorum",
+		"expectedSlotsPerVolume: 3",
+		"externalISCSI: true",
+		"externalStatus: true",
+		"rejectLoopbackPublishTargets: true",
+		"enabled: true",
+		"secret: fixed-chap-secret",
+		"name: m01",
+		"internalIP: 192.168.1.181",
+		"dataPort: 19101",
+		"controlPort: 19102",
+		"name: m02",
+		"internalIP: 192.168.1.184",
+		"dataPort: 19103",
+		"controlPort: 19104",
+		"name: tp01",
+		"internalIP: 192.168.1.188",
+		"dataPort: 19105",
+		"controlPort: 19106",
+		"launcherReplicationAckFlag: false",
+	} {
+		if !strings.Contains(string(values), want) {
+			t.Fatalf("values missing %q:\n%s", want, values)
+		}
+	}
+	if strings.Contains(string(values), "dataPort: 3260") {
+		t.Fatalf("values must not assign dataPort 3260 because it collides with iSCSI listener port:\n%s", values)
+	}
+}
+
+func TestOpsGenerateHelmValuesRejectsRFAboveSelectedNodes(t *testing.T) {
+	oldRunCommand := opsGenerateHelmValuesRunCommand
+	opsGenerateHelmValuesRunCommand = fixtureCmdKubectl(map[string]string{
+		"kubectl get nodes -o wide --no-headers": cmdHelmNodeWide,
+	})
+	defer func() { opsGenerateHelmValuesRunCommand = oldRunCommand }()
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"ops", "generate-helm-values",
+		"--out", filepath.Join(t.TempDir(), "values.yaml"),
+		"--target-node", "m02",
+		"--replication-factor", "3",
+	}, &stdout, &stderr)
+	if code != ops.VolumeStatusExitInvalid {
+		t.Fatalf("exit=%d want invalid stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "requires at least 3 selected Ready nodes; selected=1") {
+		t.Fatalf("stderr=%s", stderr.String())
+	}
+}
+
 func TestOpsDescribeVolumeFromBundle(t *testing.T) {
 	dir := writeCmdObservationBundle(t)
 	var stdout, stderr bytes.Buffer
@@ -392,6 +538,77 @@ func TestOpsReportFromBundleAllowsEmptyClusterEvidence(t *testing.T) {
 	}
 }
 
+func TestOpsDashboardFromBundleServesReadOnlyHTTP(t *testing.T) {
+	dir := writeCmdProductClusterBundle(t)
+	addr := freeTCPAddr(t)
+	var stdout, stderr bytes.Buffer
+	done := make(chan int, 1)
+	go func() {
+		done <- run([]string{
+			"ops", "dashboard",
+			"--from-bundle", dir,
+			"--listen", addr,
+			"--serve-duration", "500ms",
+		}, &stdout, &stderr)
+	}()
+
+	body := waitForHTTPContains(t, "http://"+addr+"/summary.txt", "managed_volume=pvc-product")
+	if !strings.Contains(body, "read_only=true") {
+		t.Fatalf("summary missing read_only=true:\n%s", body)
+	}
+	postResp, err := http.Post("http://"+addr+"/", "application/json", strings.NewReader(`{"action":"promote"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer postResp.Body.Close()
+	if postResp.StatusCode != http.StatusMethodNotAllowed {
+		t.Fatalf("post status=%d", postResp.StatusCode)
+	}
+
+	select {
+	case code := <-done:
+		if code != ops.VolumeStatusExitOK {
+			t.Fatalf("exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("dashboard command did not stop; stdout=%s stderr=%s", stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "dashboard_status=ok") ||
+		!strings.Contains(stdout.String(), "read_only=true") {
+		t.Fatalf("stdout missing dashboard summary:\n%s", stdout.String())
+	}
+}
+
+func TestOpsDashboardMasterAPIServesLiveClusterEvidence(t *testing.T) {
+	masterAddr, closeMaster := startCmdFakeMaster(t)
+	defer closeMaster()
+	addr := freeTCPAddr(t)
+	var stdout, stderr bytes.Buffer
+	done := make(chan int, 1)
+	go func() {
+		done <- run([]string{
+			"ops", "dashboard",
+			"--master-api", masterAddr,
+			"--listen", addr,
+			"--serve-duration", "1500ms",
+		}, &stdout, &stderr)
+	}()
+
+	body := waitForHTTPContains(t, "http://"+addr+"/cluster-evidence.json", `"event_type": "csi_reattach_observed"`)
+	if !strings.Contains(body, `"managed_volumes"`) {
+		t.Fatalf("cluster evidence missing managed_volumes:\n%s", body)
+	}
+
+	select {
+	case code := <-done:
+		if code != ops.VolumeStatusExitOK {
+			t.Fatalf("exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("dashboard command did not stop; stdout=%s stderr=%s", stdout.String(), stderr.String())
+	}
+}
+
 func TestOpsTimelineVolumeFromBundleJSONL(t *testing.T) {
 	dir := writeCmdObservationBundle(t)
 	var stdout, stderr bytes.Buffer
@@ -403,6 +620,47 @@ func TestOpsTimelineVolumeFromBundleJSONL(t *testing.T) {
 		!strings.Contains(stdout.String(), `"reason_code":"candidate_covers_required_frontier"`) {
 		t.Fatalf("stdout missing timeline jsonl:\n%s", stdout.String())
 	}
+}
+
+func freeTCPAddr(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+	if err := ln.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return addr
+}
+
+func waitForHTTPContains(t *testing.T, url, want string) string {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	var lastErr error
+	for time.Now().Before(deadline) {
+		resp, err := http.Get(url)
+		if err != nil {
+			lastErr = err
+			time.Sleep(20 * time.Millisecond)
+			continue
+		}
+		body, readErr := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if readErr != nil {
+			lastErr = readErr
+			time.Sleep(20 * time.Millisecond)
+			continue
+		}
+		if resp.StatusCode == http.StatusOK && strings.Contains(string(body), want) {
+			return string(body)
+		}
+		lastErr = fmt.Errorf("status=%d body=%s", resp.StatusCode, body)
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %s containing %q: %v", url, want, lastErr)
+	return ""
 }
 
 func TestOpsExplainVolumeFromBundleBlockedImagePull(t *testing.T) {
@@ -498,6 +756,14 @@ func cleanCmdResidueCommand(_ context.Context, name string, args ...string) ([]b
 		return nil, fmt.Errorf("unexpected command %s", name)
 	}
 }
+
+const cmdHelmNodeWide = `m01    Ready                      worker          10d   v1.34.4+k3s1   192.168.1.181   <none>        Ubuntu 24.04   6.8.0   containerd://2.0.0
+m02    Ready                      control-plane   10d   v1.34.4+k3s1   192.168.1.184   <none>        Ubuntu 24.04   6.8.0   containerd://2.0.0
+tp01   Ready                      worker          10d   v1.34.4+k3s1   192.168.1.188   <none>        Ubuntu 24.04   6.8.0   containerd://2.0.0
+bad1   Ready,SchedulingDisabled   worker          10d   v1.34.4+k3s1   192.168.1.199   <none>        Ubuntu 24.04   6.8.0   containerd://2.0.0
+bad2   NotReady                   worker          10d   v1.34.4+k3s1   192.168.1.200   <none>        Ubuntu 24.04   6.8.0   containerd://2.0.0
+bad3   Ready                      worker          10d   v1.34.4+k3s1   127.0.0.1       <none>        Ubuntu 24.04   6.8.0   containerd://2.0.0
+`
 
 const cmdSinglePVCListJSON = `{
   "items": [
@@ -720,6 +986,12 @@ func TestOpsClusterReadsMasterAPIProductEvents(t *testing.T) {
 	}
 	if len(cluster.Volumes) != 1 || cluster.Volumes[0].VolumeID != "v1" || cluster.Volumes[0].PrimaryReplica != "r2" {
 		t.Fatalf("volumes=%+v", cluster.Volumes)
+	}
+	if len(cluster.ManagedVolumes) != 1 || cluster.ManagedVolumes[0].VolumeID != "v1" {
+		t.Fatalf("managed_volumes=%+v", cluster.ManagedVolumes)
+	}
+	if cluster.ManagedVolumes[0].States.Authority != ops.ManagedVolumeAuthorityPrimaryAvailable {
+		t.Fatalf("managed volume=%+v", cluster.ManagedVolumes[0])
 	}
 }
 

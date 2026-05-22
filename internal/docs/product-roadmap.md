@@ -24,17 +24,23 @@ This is the short internal roadmap. Keep it current and readable.
   lab gates. This is an engineering alpha, not a polished install product.
 - `v0.2-alpha`: Day-1 activation. A supported user can run the script-based
   activation path, create a first PVC, verify writer/reader data, generate a
-  local read-only report, and clean up. This is the current user-facing alpha
-  packaging boundary.
+  local read-only report, and clean up. This remains the script fallback
+  boundary.
 - `v0.3-alpha`: Helm activation. Package the same supported Day-1 path as a
   normal Kubernetes add-on: chart values, immutable images, CHAP/external
-  iSCSI configuration, StorageClass, readiness output, first-volume smoke, and
-  uninstall hygiene. Helm is the next installer milestone.
+  iSCSI configuration, StorageClass, readiness output, first-volume smoke,
+  local read-only report/dashboard, and uninstall hygiene. Phase 25 closed this
+  release target on 2026-05-22.
 - `v0.4-beta-candidate`: Operator lifecycle. Add a Kubernetes-native control
   plane with CRDs/Conditions/Events for install, node eligibility, volume
   lifecycle, recovery observation, safe cleanup, and eventually gated repair or
   rebuild workflows. This is the first release boundary that can credibly feel
   like a complete Kubernetes product loop rather than an install script.
+- Model hardening gate before the next large release: complete the
+  ManagedVolume Operations Model under `internal/docs/protocol/` before
+  expanding operator or broader HA claims. The goal is to prevent Kubernetes,
+  CSI, authority, host-path, recovery, and future NVMe logic from becoming
+  scattered scripts or unrelated small automata.
 
 Do not skip from scripts directly to an operator. Helm should stabilize the
 installation contract before an in-cluster controller owns upgrades and day-2
@@ -100,12 +106,12 @@ lifecycle.
 
 ### Track A: Kubernetes Install And Cleanup
 
-- Current: v0.2 alpha closes the script-based Day-1 loop for the supported
+- Closed: v0.2 alpha closes the script-based Day-1 loop for the supported
   Kubernetes path: activate, verify node readiness, create a first PVC, run
   writer/reader verification, inspect status/report evidence, and clean up.
   Product-owned generated `blockvolume` workload lifecycle is also closed for
   the supported alpha path.
-- Next: v0.3 Helm activation. Package the same Day-1 path as a chart while
+- Closed on 2026-05-22: v0.3 Helm activation. Package the same Day-1 path as a chart while
   keeping preflight and host cleanup explicit:
   - charted blockmaster, CSI controller/node, RBAC, CSI driver, StorageClass,
     CHAP Secret, and cluster spec,
@@ -113,6 +119,7 @@ lifecycle.
     Stage 2 multipath, namespace, and StorageClass,
   - generated Day-1 values file for multi-node labs,
   - `helm install` + first PVC smoke + `sw-block ops report`,
+  - local read-only `sw-block ops dashboard` over the same evidence,
   - `helm uninstall` plus explicit host cleanup verification.
 - Later: v0.4 operator lifecycle. Introduce CRDs/Conditions/Events and scoped
   reconciliation only after the Helm contract is stable.
@@ -160,6 +167,10 @@ lifecycle.
   the MVP backend.
 - Next: storage-engine boundary tests, backend pressure behavior, and
   smartwal/delta experiments behind explicit gates.
+- Protocol hardening now has a dedicated working area under
+  `internal/docs/protocol/`. New protocol semantics should update the control
+  model, invariant ledger, and anti-pattern checklist there before release
+  claims are made.
 - Later: RDMA/KV-backed data-plane experiments and semantic storage protocols
   only after the block core is mature.
 - Guardrail: do not let backend/library extraction weaken the user-visible
@@ -179,12 +190,65 @@ lifecycle.
   the proof surface for product-owned lifecycle, durable restart evidence, and
   same-node placement/attach evidence. Phase 19 closed the shared observation
   core for users/support/AI, JSON automation, and future dashboard use.
-- Next: make observation part of the first-user loop: cluster status, node
-  readiness, volume list, volume detail, timeline, logs, and bundle pointers
-  should be visible without SSHing into every node.
+- Current: observation is now part of the first-user loop. Users can inspect
+  cluster status, volume detail, timeline, static report artifacts, and a local
+  read-only dashboard without SSHing into every node.
+- Closed model-hardening slice: Phase 22 ManagedVolume Operations Model
+  (`internal/docs/protocol/phase22-control-context-plan.md`) made PVC-backed
+  volumes a first-class internal read model that composes K8s, CSI, authority,
+  recovery, host path, workload, and evidence facts while keeping local
+  controllers small and testable.
 - Later: metrics, read-only dashboard hardening, conservative admin controls,
   enterprise operations, hosted validation, fleet automation, and cloud-scale
   test lifecycle.
+
+### Track F2: ManagedVolume Model And Protocol Hardening
+
+- Closed for current scope: V3 protocol principles have been pulled into
+  `internal/docs/protocol/`: truth-domain ownership, anti-patterns, invariant
+  ledger, engine design guidelines, and the Phase 22 ManagedVolume plan. The scope review in
+  `internal/docs/protocol/operations-state-dependency-review.md` defines Phase
+  22 as a PVC-backed ManagedVolume read model plus read-only operations
+  alignment.
+- Seed landed: `core/ops` now has an initial ManagedVolume projection model,
+  typed facts, status priority, read-only/dry-run action contracts,
+  `VolumeEvidence` and bundle-artifact bridges, and table tests for healthy
+  first-volume, blocked loopback cross-node attach, CSI image-pull and mount
+  blockers, node-loss reattach recovery, Stage 2 transparent multipath
+  recovery, non-claims, and dual-primary invalid priority.
+- Execution discipline: every Phase 22 D-step must carry TDD, internal review
+  against the engine guidelines, and a regression command before it can close.
+- Later: use ManagedVolume as the semantic core for operator
+  Conditions/Events, read-only dashboard, and any future safe mutating admin
+  workflows.
+
+### Track F3: Operations Surface / Dashboard / Operator-Readiness
+
+- Current: Phase 23 is closed for scope. Seaweed Block now exposes
+  ManagedVolume Conditions, evidence refs, report/explain alignment, and a
+  future-operator status contract from the shared read model.
+- Current: Phase 24 is closed for scope. Seaweed Block can serve a local
+  read-only dashboard/API surface over the same `ClusterEvidence` and
+  ManagedVolume model used by `sw-block ops report`.
+- Closed on 2026-05-22: Phase 25 packages that operations surface into the
+  v0.3 Helm first-volume release story and validates docs/gates against it.
+- Seed landed:
+  - `NewObservationDashboardHandler` serves `index.html`,
+    `cluster-evidence.json`, `timeline.jsonl`, `summary.txt`, and `healthz`,
+  - `sw-block ops dashboard` serves bundle-backed and master-api-backed
+    evidence on a loopback address by default,
+  - unsafe HTTP methods return `405` with a read-only boundary message,
+  - `ops explain` now emits ManagedVolume Conditions, dry-run action
+    preconditions, invariant refs, evidence refs, and non-claims,
+  - Conditions carry additive `evidence_refs`,
+  - `ManagedVolumeOperatorContractFromProjection` defines how Conditions map to
+    future operator status and Kubernetes Events while keeping
+    `mutation_allowed=false`,
+  - `internal/docs/protocol/operator-readiness-contract.md` documents the
+    future operator boundary,
+  - replay tests cover first-volume, blocked, and recovery bundles.
+- Later: production dashboard hardening and operator reconciliation can depend
+  on this surface, but should not bypass ManagedVolume or mint their own truth.
 
 ### Product Semantics Rule
 
@@ -205,11 +269,12 @@ credible light-use product:
 
 - Product-owned generated workload lifecycle: scripts/TestOps still own too
   much apply/cleanup and run-scoped state management.
-- Install/upgrade/uninstall: v0.2 script activation works, but users need a
-  normal Kubernetes add-on flow. Helm is the next packaging blocker; operator
-  lifecycle comes after the Helm contract is stable.
-- Observation beyond one volume: the read-only CLI now covers cluster inventory;
-  users will still need lifecycle status, metrics, and eventually UI.
+- Install/upgrade/uninstall: v0.2 script activation works and v0.3 Helm is the
+  current packaging boundary. Operator lifecycle comes after the Helm contract
+  is stable.
+- Observation beyond one volume: the read-only CLI/dashboard now covers cluster
+  inventory and first-volume evidence; users will still need richer lifecycle
+  status, metrics, and production UI hardening.
 - Safe admin controls: repair/promote/cleanup actions must wait until the
   read-only observation model is stable and release-gated.
 

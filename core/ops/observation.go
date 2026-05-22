@@ -35,23 +35,25 @@ const (
 )
 
 type ObservationCondition struct {
-	Type     string `json:"type"`
-	Status   string `json:"status"`
-	Reason   string `json:"reason"`
-	Severity string `json:"severity"`
-	Message  string `json:"message,omitempty"`
+	Type         string   `json:"type"`
+	Status       string   `json:"status"`
+	Reason       string   `json:"reason"`
+	Severity     string   `json:"severity"`
+	Message      string   `json:"message,omitempty"`
+	EvidenceRefs []string `json:"evidence_refs,omitempty"`
 }
 
 type ClusterEvidence struct {
-	SchemaVersion   string                 `json:"schema_version"`
-	CapturedAt      time.Time              `json:"captured_at"`
-	ProductRevision string                 `json:"product_revision,omitempty"`
-	Status          string                 `json:"status"`
-	Nodes           []NodeEvidence         `json:"nodes"`
-	Volumes         []VolumeEvidence       `json:"volumes"`
-	Conditions      []ObservationCondition `json:"conditions,omitempty"`
-	Events          []ClusterEvent         `json:"events,omitempty"`
-	NonClaims       []string               `json:"non_claims,omitempty"`
+	SchemaVersion   string                    `json:"schema_version"`
+	CapturedAt      time.Time                 `json:"captured_at"`
+	ProductRevision string                    `json:"product_revision,omitempty"`
+	Status          string                    `json:"status"`
+	Nodes           []NodeEvidence            `json:"nodes"`
+	Volumes         []VolumeEvidence          `json:"volumes"`
+	ManagedVolumes  []ManagedVolumeProjection `json:"managed_volumes,omitempty"`
+	Conditions      []ObservationCondition    `json:"conditions,omitempty"`
+	Events          []ClusterEvent            `json:"events,omitempty"`
+	NonClaims       []string                  `json:"non_claims,omitempty"`
 }
 
 type NodeEvidence struct {

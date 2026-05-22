@@ -6,6 +6,7 @@ is still outside the supported boundary.
 
 - [v0.1 Alpha — Kubernetes Block Foundation](v0.1-alpha.md)
 - [v0.2 Alpha — Day-1 Activation And First Volume](v0.2-alpha.md)
+- [v0.3 Alpha — Helm Install And Observable First Volume](v0.3-alpha.md)
 
 ## Version Boundary
 
@@ -16,6 +17,10 @@ is still outside the supported boundary.
 - `v0.2-alpha` is the first user-facing activation loop: one documented
   Kubernetes path from install to first PVC, writer/reader verification, local
   status report, and cleanup.
+- `v0.3-alpha` is the Helm-first alpha loop: generated chart values, Helm
+  install, first PVC, writer/reader verification, local read-only
+  report/dashboard, and cleanup verification.
 
-Helm/operator packaging is not included in either alpha. The current install
-path is script-based.
+Operator packaging is not included in these alphas. v0.3 introduces Helm as
+the preferred Kubernetes alpha install path; the script path remains available
+for development and fallback validation.

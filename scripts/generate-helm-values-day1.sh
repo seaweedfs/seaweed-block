@@ -1,0 +1,256 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${1:-$(pwd)}"
+OUT="${SW_BLOCK_HELM_VALUES_OUT:-values.day1.yaml}"
+IMAGE_MODE="${SW_BLOCK_ACTIVATION_IMAGE_MODE:-published}"
+IMAGE="${SW_BLOCK_IMAGE:-ghcr.io/seaweedfs/seaweed-block:alpha}"
+CSI_IMAGE="${SW_BLOCK_CSI_IMAGE:-ghcr.io/seaweedfs/seaweed-block-csi:alpha}"
+REPLICATION_FACTOR="${SW_BLOCK_HELM_REPLICATION_FACTOR:-1}"
+ACK_PROFILE="${SW_BLOCK_ALPHA_REPLICATION_ACK:-best-effort}"
+STORAGECLASS_NAME="${SW_BLOCK_STORAGECLASS_NAME:-sw-block-dynamic}"
+APP_NAMESPACE="${SW_BLOCK_APP_NAMESPACE:-default}"
+CHAP_SECRET_NAME="${SW_BLOCK_ISCSI_CHAP_SECRET_NAME:-sw-block-iscsi-chap}"
+CHAP_USERNAME="${SW_BLOCK_ISCSI_CHAP_USERNAME:-sw-block}"
+CHAP_SECRET="${SW_BLOCK_ISCSI_CHAP_SECRET:-}"
+STAGE2_MULTIPATH="${SW_BLOCK_STAGE2_MULTIPATH:-0}"
+RUN_PREFLIGHT="${SW_BLOCK_HELM_VALUES_PREFLIGHT:-1}"
+TARGET_NODE="${SW_BLOCK_HELM_TARGET_NODE:-}"
+NODE_LIMIT="${SW_BLOCK_HELM_NODE_LIMIT:-0}"
+
+case "$IMAGE_MODE" in
+  local)
+    IMAGE="${SW_BLOCK_IMAGE:-sw-block:local}"
+    CSI_IMAGE="${SW_BLOCK_CSI_IMAGE:-sw-block-csi:local}"
+    ;;
+  published)
+    ;;
+  *)
+    echo "SW_BLOCK_ACTIVATION_IMAGE_MODE must be local or published; got: $IMAGE_MODE" >&2
+    exit 2
+    ;;
+esac
+
+if [[ -z "${KUBECONFIG:-}" && -f /etc/rancher/k3s/k3s.yaml ]]; then
+  export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+fi
+
+require_cmd() {
+  if ! command -v "$1" >/dev/null 2>&1; then
+    echo "missing required command: $1" >&2
+    exit 2
+  fi
+}
+
+is_true() {
+  case "${1:-}" in
+    1|true|TRUE|yes|YES|on|ON) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+yaml_quote() {
+  local value="${1:-}"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  printf '"%s"' "$value"
+}
+
+image_repo() {
+  local image="$1"
+  image="${image%@*}"
+  if [[ "$image" == *:* && "${image##*:}" != */* ]]; then
+    printf '%s' "${image%:*}"
+  else
+    printf '%s' "$image"
+  fi
+}
+
+image_tag() {
+  local image="$1"
+  image="${image%@*}"
+  if [[ "$image" == *:* && "${image##*:}" != */* ]]; then
+    printf '%s' "${image##*:}"
+  else
+    printf 'latest'
+  fi
+}
+
+image_digest_value() {
+  local image="$1"
+  if [[ "$image" == *@* ]]; then
+    printf '%s' "${image#*@}"
+  fi
+}
+
+ready_schedulable_nodes() {
+  kubectl get nodes -o wide --no-headers \
+    | awk '$2 ~ /^Ready(,|$)/ && $2 !~ /SchedulingDisabled/ && $6 !~ /^(127\.|0\.0\.0\.0|::1$)/ {print $1 "|" $6}'
+}
+
+require_cmd kubectl
+
+case "$REPLICATION_FACTOR" in
+  ''|*[!0-9]*|0)
+    echo "SW_BLOCK_HELM_REPLICATION_FACTOR must be a positive integer; got: $REPLICATION_FACTOR" >&2
+    exit 2
+    ;;
+esac
+case "$ACK_PROFILE" in
+  best-effort|sync-quorum|sync-all)
+    ;;
+  *)
+    echo "SW_BLOCK_ALPHA_REPLICATION_ACK must be best-effort, sync-quorum, or sync-all; got: $ACK_PROFILE" >&2
+    exit 2
+    ;;
+esac
+case "$NODE_LIMIT" in
+  ''|*[!0-9]*)
+    echo "SW_BLOCK_HELM_NODE_LIMIT must be a non-negative integer; got: $NODE_LIMIT" >&2
+    exit 2
+    ;;
+esac
+
+if [[ "$RUN_PREFLIGHT" == "1" ]]; then
+  if [[ "$IMAGE_MODE" == "published" ]]; then
+    bash "$ROOT/scripts/preflight-k8s-alpha.sh" --ghcr >/tmp/sw-block-helm-values-preflight.log
+  else
+    bash "$ROOT/scripts/preflight-k8s-alpha.sh" --local-k3s >/tmp/sw-block-helm-values-preflight.log
+  fi
+fi
+
+mapfile -t DISCOVERED_NODES < <(ready_schedulable_nodes)
+DISCOVERED_NODE_COUNT="${#DISCOVERED_NODES[@]}"
+NODES=()
+if [[ -n "$TARGET_NODE" ]]; then
+  for node in "${DISCOVERED_NODES[@]}"; do
+    IFS='|' read -r name _ <<< "$node"
+    if [[ "$name" == "$TARGET_NODE" ]]; then
+      NODES+=("$node")
+      break
+    fi
+  done
+  if [[ "${#NODES[@]}" -eq 0 ]]; then
+    echo "SW_BLOCK_HELM_TARGET_NODE=$TARGET_NODE was not found among Ready schedulable nodes" >&2
+    exit 3
+  fi
+else
+  NODES=("${DISCOVERED_NODES[@]}")
+fi
+if [[ "$NODE_LIMIT" -gt 0 && "${#NODES[@]}" -gt "$NODE_LIMIT" ]]; then
+  NODES=("${NODES[@]:0:$NODE_LIMIT}")
+fi
+NODE_COUNT="${#NODES[@]}"
+if [[ "$NODE_COUNT" -lt 1 ]]; then
+  echo "no Ready schedulable Kubernetes nodes with non-loopback InternalIP found" >&2
+  exit 3
+fi
+if [[ "$REPLICATION_FACTOR" -gt "$NODE_COUNT" ]]; then
+  echo "requested RF=$REPLICATION_FACTOR but only $NODE_COUNT Ready schedulable nodes were found" >&2
+  exit 3
+fi
+
+NETWORK_MODE="loopback"
+EXTERNAL_ISCSI="false"
+EXTERNAL_STATUS="false"
+REJECT_LOOPBACK="false"
+CHAP_ENABLED="false"
+
+if [[ "$NODE_COUNT" -gt 1 ]]; then
+  NETWORK_MODE="external-iscsi"
+  EXTERNAL_ISCSI="true"
+  EXTERNAL_STATUS="true"
+  REJECT_LOOPBACK="true"
+  CHAP_ENABLED="true"
+  if [[ -z "$CHAP_SECRET" ]]; then
+    CHAP_SECRET="sw-block-alpha-$(date -u +%Y%m%d%H%M%S)-$RANDOM"
+  fi
+fi
+
+IMAGE_REPO="$(image_repo "$IMAGE")"
+IMAGE_TAG="$(image_tag "$IMAGE")"
+IMAGE_DIGEST="$(image_digest_value "$IMAGE")"
+CSI_IMAGE_REPO="$(image_repo "$CSI_IMAGE")"
+CSI_IMAGE_TAG="$(image_tag "$CSI_IMAGE")"
+CSI_IMAGE_DIGEST="$(image_digest_value "$CSI_IMAGE")"
+
+TMP_OUT="${OUT}.tmp"
+mkdir -p "$(dirname "$OUT")"
+{
+  echo "# Generated by scripts/generate-helm-values-day1.sh"
+  echo "# Review before use; blockNodes must match real Kubernetes node names/IPs."
+  echo "image:"
+  echo "  repository: $(yaml_quote "$IMAGE_REPO")"
+  echo "  tag: $(yaml_quote "$IMAGE_TAG")"
+  echo "  digest: $(yaml_quote "$IMAGE_DIGEST")"
+  echo "csiImage:"
+  echo "  repository: $(yaml_quote "$CSI_IMAGE_REPO")"
+  echo "  tag: $(yaml_quote "$CSI_IMAGE_TAG")"
+  echo "  digest: $(yaml_quote "$CSI_IMAGE_DIGEST")"
+  echo "appNamespace: $(yaml_quote "$APP_NAMESPACE")"
+  echo "storageClass:"
+  echo "  create: true"
+  echo "  name: $(yaml_quote "$STORAGECLASS_NAME")"
+  echo "  replicationFactor: $REPLICATION_FACTOR"
+  echo "  protocol: iscsi"
+  echo "replication:"
+  echo "  ackProfile: $(yaml_quote "$ACK_PROFILE")"
+  echo "  expectedSlotsPerVolume: $REPLICATION_FACTOR"
+  echo "network:"
+  echo "  externalISCSI: $EXTERNAL_ISCSI"
+  echo "  externalStatus: $EXTERNAL_STATUS"
+  echo "  rejectLoopbackPublishTargets: $REJECT_LOOPBACK"
+  echo "compat:"
+  echo "  launcherReplicationAckFlag: false"
+  echo "  launcherRejectLoopbackFlag: false"
+  echo "chap:"
+  echo "  enabled: $CHAP_ENABLED"
+  echo "  create: $CHAP_ENABLED"
+  echo "  secretName: $(yaml_quote "$CHAP_SECRET_NAME")"
+  echo "  username: $(yaml_quote "$CHAP_USERNAME")"
+  echo "  secret: $(yaml_quote "$CHAP_SECRET")"
+  echo "stage2Multipath:"
+  if is_true "$STAGE2_MULTIPATH"; then
+    echo "  enabled: true"
+  else
+    echo "  enabled: false"
+  fi
+  echo "blockNodes:"
+  idx=0
+  for node in "${NODES[@]}"; do
+    IFS='|' read -r name ip <<< "$node"
+    data_port=$((19101 + (idx * 2)))
+    ctrl_port=$((data_port + 1))
+    if [[ "$NETWORK_MODE" == "loopback" ]]; then
+      ip="127.0.0.1"
+    fi
+    echo "  - name: $(yaml_quote "$name")"
+    echo "    kubernetesNode: $(yaml_quote "$name")"
+    echo "    internalIP: $(yaml_quote "$ip")"
+    echo "    dataPort: $data_port"
+    echo "    controlPort: $ctrl_port"
+    echo "    pool: $(yaml_quote "pool-a")"
+    idx=$((idx + 1))
+  done
+} >"$TMP_OUT"
+mv "$TMP_OUT" "$OUT"
+
+cat <<EOF
+helm_values_status=ok
+values_file=$OUT
+image_mode=$IMAGE_MODE
+network_mode=$NETWORK_MODE
+ready_kubernetes_nodes=$NODE_COUNT
+discovered_kubernetes_nodes=$DISCOVERED_NODE_COUNT
+target_node=${TARGET_NODE:-auto}
+node_limit=$NODE_LIMIT
+storageclass=$STORAGECLASS_NAME
+replication_factor=$REPLICATION_FACTOR
+ack_profile=$ACK_PROFILE
+external_iscsi=$EXTERNAL_ISCSI
+external_status=$EXTERNAL_STATUS
+chap_enabled=$CHAP_ENABLED
+stage2_multipath=$(is_true "$STAGE2_MULTIPATH" && echo true || echo false)
+next_lint=helm lint "$ROOT/charts/seaweed-block" -f "$OUT"
+next_install=helm install sw-block "$ROOT/charts/seaweed-block" --namespace kube-system -f "$OUT"
+EOF

@@ -50,8 +50,10 @@ Do not treat them as broad production HA or compatibility claims.
 
 Known missing pieces:
 
-- production-grade installer/operator lifecycle or Helm chart,
-- hosted dashboard/UI (only a local static read-only report exists),
+- production-grade operator lifecycle,
+- Helm is the supported v0.3 alpha install path for supported labs; a
+  production-grade Helm lifecycle is not yet claimed,
+- production hosted dashboard/UI; a local read-only dashboard/report exists,
 - backup, snapshot, and restore workflow,
 - returned-replica rebuild, reintegration, and failback,
 - transparent node-loss failover without pod recreate,
@@ -99,18 +101,35 @@ for a recovery stream at any given time.
 
 ## Quick Start
 
-Use [First volume on Kubernetes](docs/quickstart-kubernetes.md). It runs
-preflight, builds/imports local images, installs the stack, creates one PVC,
-writes and reads data through an app pod replacement, and shows cleanup and
-support-bundle evidence to inspect if anything fails.
+Use [First volume on Kubernetes](docs/quickstart-kubernetes.md). For v0.3
+alpha, start with Helm on a supported Kubernetes/k3s lab.
 
-Minimal lab path:
+Fast path:
 
 ```bash
-bash scripts/activate-k8s-alpha.sh "$PWD"
-bash scripts/run-basic-app-example.sh "$PWD"
-cat "$(ls -td /tmp/sw-block-basic-app-* | head -1)/first-volume-summary.txt"
+go build -o sw-block ./cmd/sw-block
+export PATH="$PWD:$PATH"
+sw-block ops generate-helm-values \
+  --out values.day1.yaml \
+  --image ghcr.io/seaweedfs/seaweed-block:sha-28a99ce4f644 \
+  --csi-image ghcr.io/seaweedfs/seaweed-block-csi:sha-28a99ce4f644
+helm install sw-block charts/seaweed-block \
+  --namespace kube-system \
+  --create-namespace \
+  -f values.day1.yaml \
+  --wait \
+  --timeout 10m
+SW_BLOCK_INSTALL_MODE=helm \
+SW_BLOCK_HELM_RELEASE=sw-block \
+SW_BLOCK_HELM_NAMESPACE=kube-system \
+SW_BLOCK_HELM_VALUES_FILE=values.day1.yaml \
+  bash scripts/run-basic-app-example.sh "$PWD"
 ```
+
+`generate-helm-values` reads the current Kubernetes API through `kubectl`,
+selects Ready schedulable nodes, and writes chart values. One selected node
+uses loopback mode. Multiple selected nodes use external iSCSI/status addresses
+and CHAP by default.
 
 Expected summary fields:
 
@@ -123,21 +142,33 @@ status_report=status/report/index.html
 cleanup_status=ok
 ```
 
+Use the script path for development, local image testing, or fallback
+diagnostics when Helm is not the target.
+
+```bash
+bash scripts/activate-k8s-alpha.sh "$PWD"
+bash scripts/run-basic-app-example.sh "$PWD"
+cat "$(ls -td /tmp/sw-block-basic-app-* | head -1)/first-volume-summary.txt"
+```
+
+The `"$PWD"` argument is the repository root. The helper scripts use it to
+locate chart, manifest, and example files.
+
 The activation script writes `/tmp/sw-block-activation-*/activation-summary.txt`
 with the blockmaster, CSI controller, CSI node, StorageClass, protocol, ACK
 profile, and next inspection commands.
 
-For QA/PM user-path testing against published images, use the same activation
-entry point with image mode set to `published`:
+For QA/PM user-path testing against published images, prefer immutable image
+tags in Helm values or activation env:
 
 ```bash
-SW_BLOCK_ACTIVATION_IMAGE_MODE=published \
-  bash scripts/activate-k8s-alpha.sh "$PWD"
+ghcr.io/seaweedfs/seaweed-block:sha-<commit>
+ghcr.io/seaweedfs/seaweed-block-csi:sha-<commit>
 ```
 
-That path uses `ghcr.io/seaweedfs/seaweed-block:alpha` and
-`ghcr.io/seaweedfs/seaweed-block-csi:alpha` by default. Prefer immutable
-release tags or `sha-<commit>` tags once a release candidate is cut.
+Current validated v0.3 walkthrough image tag: `sha-28a99ce4f644`.
+
+Mutable `:alpha` is a smoke/demo tag only; it can drift from the source tree.
 
 ## Operations
 
@@ -146,14 +177,15 @@ kubectl -n kube-system port-forward deploy/sw-blockmaster 9333:9333
 sw-block ops cluster --master-api 127.0.0.1:9333 -o json \
   > /tmp/sw-block-cluster-evidence.json
 sw-block ops report --master-api 127.0.0.1:9333 --out /tmp/sw-block-report
+sw-block ops dashboard --master-api 127.0.0.1:9333 --listen 127.0.0.1:9334
 ```
 
 If `sw-block` is not in `PATH`, run the same commands from this repository as
 `go run ./cmd/sw-block ops ...`.
 
-`sw-block ops report` writes a local static read-only status page plus
-machine-readable artifacts. It is not a hosted dashboard and it has no mutating
-admin actions.
+`sw-block ops report` writes static read-only artifacts. `sw-block ops
+dashboard` serves the same evidence as a local read-only dashboard. Neither has
+mutating admin actions.
 
 For replica-level support evidence:
 
@@ -170,15 +202,17 @@ sw-block ops inventory \
 - Create PVC-backed block volumes through Kubernetes.
 - Run app pods that mount the PVC and verify file data.
 - Inspect cluster, volume, replica, primary, frontend, and event evidence.
-- Generate a local read-only HTML status report from live master evidence or a
-  saved support bundle.
+- Generate a local read-only HTML status report or dashboard from live master
+  evidence or a saved support bundle.
 - Collect inventory and product evidence bundles for support.
 - Exercise documented recovery gates in TestOps/lab environments.
 
 ## What Users Should Not Expect Yet
 
-- A production-grade installer/operator or Helm chart.
-- A hosted dashboard.
+- A production-grade operator.
+- Production-grade Helm lifecycle management; Helm is the supported v0.3 alpha
+  install path, but upgrade/rollback/lifecycle hardening is not claimed.
+- A production hosted dashboard; the current dashboard is local and read-only.
 - Backup, snapshot, or restore workflows.
 - Mutating admin actions such as promote, repair, rebuild, failback, or cleanup.
 - Upgrade/rollback safety.
@@ -200,11 +234,14 @@ scripts/    build, install, and smoke-test helpers
 
 ## Development
 
-Run tests:
+Run the release-relevant scoped tests:
 
 ```bash
-go test ./...
+go test ./cmd/sw-block ./core/ops ./core/csi ./core/launcher ./core/host/master -count=1
 ```
+
+`go test ./...` is the full repository sweep and may include unrelated
+in-progress packages outside the current release gate.
 
 Run the Kubernetes alpha smoke:
 

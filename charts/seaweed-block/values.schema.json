@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "image": {
+      "type": "object",
+      "properties": {
+        "repository": { "type": "string", "minLength": 1 },
+        "tag": { "type": "string" },
+        "digest": { "type": "string" },
+        "pullPolicy": { "type": "string" }
+      }
+    },
+    "csiImage": {
+      "type": "object",
+      "properties": {
+        "repository": { "type": "string", "minLength": 1 },
+        "tag": { "type": "string" },
+        "digest": { "type": "string" },
+        "pullPolicy": { "type": "string" }
+      }
+    },
+    "storageClass": {
+      "type": "object",
+      "properties": {
+        "replicationFactor": { "type": "integer", "minimum": 1 },
+        "protocol": { "type": "string", "enum": ["iscsi", "nvme"] }
+      }
+    },
+    "network": {
+      "type": "object",
+      "properties": {
+        "externalISCSI": { "type": "boolean" },
+        "externalStatus": { "type": "boolean" },
+        "rejectLoopbackPublishTargets": { "type": "boolean" }
+      }
+    },
+    "compat": {
+      "type": "object",
+      "properties": {
+        "launcherReplicationAckFlag": { "type": "boolean" },
+        "launcherRejectLoopbackFlag": { "type": "boolean" }
+      }
+    },
+    "blockNodes": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["name", "internalIP"],
+        "properties": {
+          "name": { "type": "string", "minLength": 1 },
+          "serverID": { "type": "string" },
+          "internalIP": { "type": "string", "minLength": 1 },
+          "dataPort": { "type": "integer", "minimum": 1 },
+          "ctrlPort": { "type": "integer", "minimum": 1 },
+          "poolID": { "type": "string" }
+        }
+      }
+    }
+  }
+}

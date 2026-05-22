@@ -1,0 +1,19 @@
+{{- if .Values.storageClass.create }}
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: {{ .Values.storageClass.name }}
+  labels:
+    {{- include "seaweed-block.labels" . | nindent 4 }}
+provisioner: {{ .Values.driver.name }}
+reclaimPolicy: {{ .Values.storageClass.reclaimPolicy }}
+volumeBindingMode: {{ .Values.storageClass.volumeBindingMode }}
+allowVolumeExpansion: {{ .Values.storageClass.allowVolumeExpansion }}
+parameters:
+  replicationFactor: {{ .Values.storageClass.replicationFactor | quote }}
+  sw-block.seaweedfs.com/protocol: {{ .Values.storageClass.protocol | quote }}
+  {{- if and .Values.chap.enabled .Values.storageClass.nodeStageSecret.enabled }}
+  csi.storage.k8s.io/node-stage-secret-name: {{ .Values.chap.secretName | quote }}
+  csi.storage.k8s.io/node-stage-secret-namespace: {{ .Values.appNamespace | quote }}
+  {{- end }}
+{{- end }}
