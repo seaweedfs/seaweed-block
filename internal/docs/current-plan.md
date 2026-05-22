@@ -104,6 +104,8 @@ Evidence:
 
 - Single-node Helm gate: `20260522-031019-ef25`, PASS, 34/34 actions.
 - Multi-node Helm gate: `20260522-031124-0a44`, PASS, 51/51 actions.
+- Documented Go CLI generator gate: `20260522-091642-b9a7`, PASS, 31/31
+  actions.
 - Both runs record immutable image tags and digests.
 - Both runs produce `status/report/index.html`, `cluster-evidence.json`,
   `timeline.jsonl`, and `summary.txt`.

@@ -63,9 +63,9 @@ network:
   rejectLoopbackPublishTargets: false
 
 compat:
-  # Some published alpha images predate the blockmaster flag for loopback
-  # publish-target rejection. Keep this false unless the selected image is known
-  # to support --launcher-reject-loopback-publish-targets.
+  # Some published alpha images predate these blockmaster launcher flags. Keep
+  # these false unless the selected image is known to support the flag.
+  launcherReplicationAckFlag: false
   launcherRejectLoopbackFlag: false
 
 stage2Multipath:

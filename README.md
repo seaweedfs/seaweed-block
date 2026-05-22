@@ -107,12 +107,18 @@ alpha, start with Helm on a supported Kubernetes/k3s lab.
 Fast path:
 
 ```bash
-sw-block ops generate-helm-values --out values.day1.yaml
+go build -o sw-block ./cmd/sw-block
+export PATH="$PWD:$PATH"
+sw-block ops generate-helm-values \
+  --out values.day1.yaml \
+  --image ghcr.io/seaweedfs/seaweed-block:sha-28a99ce4f644 \
+  --csi-image ghcr.io/seaweedfs/seaweed-block-csi:sha-28a99ce4f644
 helm install sw-block charts/seaweed-block \
   --namespace kube-system \
   --create-namespace \
   -f values.day1.yaml \
-  --wait
+  --wait \
+  --timeout 10m
 SW_BLOCK_INSTALL_MODE=helm \
 SW_BLOCK_HELM_RELEASE=sw-block \
 SW_BLOCK_HELM_NAMESPACE=kube-system \
@@ -145,6 +151,9 @@ bash scripts/run-basic-app-example.sh "$PWD"
 cat "$(ls -td /tmp/sw-block-basic-app-* | head -1)/first-volume-summary.txt"
 ```
 
+The `"$PWD"` argument is the repository root. The helper scripts use it to
+locate chart, manifest, and example files.
+
 The activation script writes `/tmp/sw-block-activation-*/activation-summary.txt`
 with the blockmaster, CSI controller, CSI node, StorageClass, protocol, ACK
 profile, and next inspection commands.
@@ -156,6 +165,8 @@ tags in Helm values or activation env:
 ghcr.io/seaweedfs/seaweed-block:sha-<commit>
 ghcr.io/seaweedfs/seaweed-block-csi:sha-<commit>
 ```
+
+Current validated v0.3 walkthrough image tag: `sha-28a99ce4f644`.
 
 Mutable `:alpha` is a smoke/demo tag only; it can drift from the source tree.
 

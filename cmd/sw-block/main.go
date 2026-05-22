@@ -819,6 +819,7 @@ type helmValuesNetwork struct {
 }
 
 type helmValuesCompat struct {
+	LauncherReplicationAckFlag bool `yaml:"launcherReplicationAckFlag"`
 	LauncherRejectLoopbackFlag bool `yaml:"launcherRejectLoopbackFlag"`
 }
 
@@ -971,8 +972,8 @@ func runOpsGenerateHelmValues(args []string, stdout, stderr io.Writer) int {
 			Name:           node.Name,
 			KubernetesNode: node.Name,
 			InternalIP:     ip,
-			DataPort:       3260 + i,
-			ControlPort:    9333 + i,
+			DataPort:       19101 + (i * 2),
+			ControlPort:    19102 + (i * 2),
 			Pool:           "default",
 		})
 	}
@@ -1236,6 +1237,8 @@ func usage(w io.Writer) {
 	fmt.Fprintln(w, "  sw-block ops explain volume <volume-id> --namespace <ns> [--master <addr>] [--out <dir>]")
 	fmt.Fprintln(w, "  sw-block ops report --from-bundle <dir> --out <dir>")
 	fmt.Fprintln(w, "  sw-block ops report --master-api <addr> --out <dir>")
+	fmt.Fprintln(w, "  sw-block ops dashboard --from-bundle <dir> [--listen 127.0.0.1:9334]")
+	fmt.Fprintln(w, "  sw-block ops dashboard --master-api <addr> [--listen 127.0.0.1:9334]")
 	fmt.Fprintln(w, "  sw-block ops generate-helm-values --out values.yaml [--target-node <node>] [--replication-factor <n>]")
 }
 

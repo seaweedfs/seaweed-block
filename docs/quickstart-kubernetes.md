@@ -57,14 +57,37 @@ at least one Ready node
 iscsiadm: No active sessions.
 ```
 
+## Step 0 - Build The CLI
+
+If `sw-block` is not already installed in `PATH`, build it from this
+repository:
+
+```bash
+go build -o sw-block ./cmd/sw-block
+export PATH="$PWD:$PATH"
+sw-block --version
+```
+
+The release walkthrough uses `sw-block ops generate-helm-values`. `go run
+./cmd/sw-block ...` is available as a fallback, but building the CLI first
+matches what a user normally runs.
+
 ## Step 1 — Generate Helm Values
 
 From the repository root:
 
 ```bash
 export KUBECONFIG="${KUBECONFIG:-/etc/rancher/k3s/k3s.yaml}"
-sw-block ops generate-helm-values --out values.day1.yaml
+sw-block ops generate-helm-values \
+  --out values.day1.yaml \
+  --image ghcr.io/seaweedfs/seaweed-block:sha-28a99ce4f644 \
+  --csi-image ghcr.io/seaweedfs/seaweed-block-csi:sha-28a99ce4f644
 ```
+
+The `KUBECONFIG` fallback above is the common k3s path. Non-k3s users should
+keep their existing `KUBECONFIG`. Fresh k3s installs may keep
+`/etc/rancher/k3s/k3s.yaml` readable only by root unless k3s was started with a
+readable kubeconfig mode.
 
 If `sw-block` is not installed:
 
@@ -106,6 +129,8 @@ sw-block ops generate-helm-values \
   --csi-image ghcr.io/seaweedfs/seaweed-block-csi:sha-<commit>
 ```
 
+Current validated v0.3 walkthrough image tag: `sha-28a99ce4f644`.
+
 Mutable `:alpha` is a smoke/demo tag only. Do not use it as release evidence
 unless the publish commit is known.
 
@@ -116,7 +141,8 @@ helm install sw-block charts/seaweed-block \
   --namespace kube-system \
   --create-namespace \
   -f values.day1.yaml \
-  --wait
+  --wait \
+  --timeout 10m
 ```
 
 Check readiness:
@@ -146,6 +172,9 @@ SW_BLOCK_HELM_NAMESPACE=kube-system \
 SW_BLOCK_HELM_VALUES_FILE=values.day1.yaml \
   bash scripts/run-basic-app-example.sh "$PWD"
 ```
+
+The `"$PWD"` argument is the repository root. The helper uses it to locate the
+example manifests and chart metadata.
 
 The helper applies the example StorageClass/PVC, waits for the PVC to bind,
 runs a writer pod, deletes it, runs a reader pod, collects status evidence,
@@ -216,6 +245,10 @@ Serve the collected bundle:
 sw-block ops dashboard --from-bundle "$APP_DIR" --listen 127.0.0.1:9334
 ```
 
+`$APP_DIR` is the basic-app artifact root. The dashboard/report loader finds
+the nested `status/report/`, `status/cluster-evidence.json`, and inventory
+artifacts under that root.
+
 Open:
 
 ```text
@@ -274,6 +307,8 @@ diagnostics:
 bash scripts/activate-k8s-alpha.sh "$PWD"
 bash scripts/run-basic-app-example.sh "$PWD"
 ```
+
+The `"$PWD"` argument is the repository root for both helper scripts.
 
 Use Helm for the v0.3 alpha release path unless you are specifically testing
 local script activation.

@@ -45,7 +45,9 @@ spec:
             {{- if .Values.blockmaster.launcherStatus }}
             - "--launcher-status"
             {{- end }}
+            {{- if .Values.compat.launcherReplicationAckFlag }}
             - "--launcher-replication-ack={{ .Values.replication.ackProfile }}"
+            {{- end }}
             - "--launcher-iscsi-port-base={{ .Values.ports.iscsiBase }}"
             {{- if .Values.blockmaster.launcherPVCOwnerRef }}
             - "--launcher-pvc-owner-ref"

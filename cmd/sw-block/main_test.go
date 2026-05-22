@@ -327,6 +327,9 @@ func TestOpsGenerateHelmValuesSingleNodeFromKubernetes(t *testing.T) {
 		"name: m02",
 		"kubernetesNode: m02",
 		"internalIP: 127.0.0.1",
+		"dataPort: 19101",
+		"controlPort: 19102",
+		"launcherReplicationAckFlag: false",
 	} {
 		if !strings.Contains(string(values), want) {
 			t.Fatalf("values missing %q:\n%s", want, values)
@@ -380,14 +383,24 @@ func TestOpsGenerateHelmValuesMultiNodeExternalISCSI(t *testing.T) {
 		"secret: fixed-chap-secret",
 		"name: m01",
 		"internalIP: 192.168.1.181",
+		"dataPort: 19101",
+		"controlPort: 19102",
 		"name: m02",
 		"internalIP: 192.168.1.184",
+		"dataPort: 19103",
+		"controlPort: 19104",
 		"name: tp01",
 		"internalIP: 192.168.1.188",
+		"dataPort: 19105",
+		"controlPort: 19106",
+		"launcherReplicationAckFlag: false",
 	} {
 		if !strings.Contains(string(values), want) {
 			t.Fatalf("values missing %q:\n%s", want, values)
 		}
+	}
+	if strings.Contains(string(values), "dataPort: 3260") {
+		t.Fatalf("values must not assign dataPort 3260 because it collides with iSCSI listener port:\n%s", values)
 	}
 }
 

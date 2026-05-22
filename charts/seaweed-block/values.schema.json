@@ -38,6 +38,7 @@
     "compat": {
       "type": "object",
       "properties": {
+        "launcherReplicationAckFlag": { "type": "boolean" },
         "launcherRejectLoopbackFlag": { "type": "boolean" }
       }
     },

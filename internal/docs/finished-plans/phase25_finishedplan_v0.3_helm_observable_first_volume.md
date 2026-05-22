@@ -29,6 +29,12 @@ generate values.day1.yaml
   - run `20260522-031124-0a44`
   - PASS, 51/51 actions
   - external iSCSI/status, CHAP, writer/reader verified
+- Documented Go CLI Helm values path:
+  - run `20260522-091642-b9a7`
+  - PASS, 31/31 actions
+  - builds `sw-block`, runs `sw-block ops generate-helm-values`, verifies
+    non-conflicting `19101+` data/control ports, then completes the Helm
+    first-volume loop
 - Close report:
   - `internal/docs/qa-assignments/v0.3-helm-observable-first-volume-close-report.md`
 

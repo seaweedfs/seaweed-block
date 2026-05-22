@@ -45,6 +45,7 @@ network:
   rejectLoopbackPublishTargets: true
 
 compat:
+  launcherReplicationAckFlag: false
   launcherRejectLoopbackFlag: false
 
 chap:
@@ -71,10 +72,10 @@ blockNodes:
 `internalIP` must be reachable by workloads that may mount the PVC.
 
 `network.rejectLoopbackPublishTargets` records the intended safety boundary.
-The matching blockmaster flag is gated by
-`compat.launcherRejectLoopbackFlag` because older alpha images do not accept
-`--launcher-reject-loopback-publish-targets`. Keep the compat flag false unless
-the selected image is known to support it.
+Some blockmaster launcher flags are gated by `compat.*` settings because older
+published alpha images do not accept every v0.3 flag. Keep
+`compat.launcherReplicationAckFlag` and `compat.launcherRejectLoopbackFlag`
+false unless the selected image is known to support the corresponding flag.
 
 ## RF=3 Sync-Quorum Profile
 
