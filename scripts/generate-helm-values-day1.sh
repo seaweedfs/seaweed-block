@@ -85,7 +85,7 @@ image_digest_value() {
 
 ready_schedulable_nodes() {
   kubectl get nodes -o wide --no-headers \
-    | awk '$2 ~ /Ready/ && $2 !~ /SchedulingDisabled/ && $6 !~ /^(127\.|0\.0\.0\.0|::1$)/ {print $1 "|" $6}'
+    | awk '$2 ~ /^Ready(,|$)/ && $2 !~ /SchedulingDisabled/ && $6 !~ /^(127\.|0\.0\.0\.0|::1$)/ {print $1 "|" $6}'
 }
 
 require_cmd kubectl
