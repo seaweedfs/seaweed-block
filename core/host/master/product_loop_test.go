@@ -240,7 +240,7 @@ func TestMountedFailover_ProductLoopRF3BlocksHealthyCurrentRebalanceWithoutProbe
 	if err != nil {
 		t.Fatalf("rebalance product tick: %v", err)
 	}
-	if result.PromotionProbes != 1 || result.PromotionBlocked != 1 {
+	if result.PromotionProbes != 2 || result.PromotionBlocked != 2 {
 		t.Fatalf("result=%+v want RF3 rebalance candidates blocked without probe", result)
 	}
 	time.Sleep(100 * time.Millisecond)

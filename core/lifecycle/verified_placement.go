@@ -72,6 +72,12 @@ func VerifyPlacementIntent(intent PlacementIntent, nodes []NodeRegistration, cfg
 			return out
 		}
 		dataAddr, ctrlAddr := nodePlacementAddrs(node)
+		if slot.DataAddr != "" {
+			dataAddr = slot.DataAddr
+		}
+		if slot.CtrlAddr != "" {
+			ctrlAddr = slot.CtrlAddr
+		}
 		if dataAddr == "" || ctrlAddr == "" {
 			out.Reason = VerifyReasonMissingAddress
 			return out

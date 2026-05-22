@@ -33,8 +33,13 @@ func (h *Host) RunLifecycleWorkloadPlanTick(cfg lifecycle.WorkloadPlanConfig) (L
 		volumeByID[volume.Spec.VolumeID] = volume
 	}
 	nodes := stores.Nodes.ListNodes()
+	type pendingPlan struct {
+		placement   lifecycle.PlacementIntent
+		plan        lifecycle.BlockVolumeWorkloadPlan
+		materialize bool
+	}
 	var result LifecycleWorkloadPlanTickResult
-	portAllocator := newWorkloadPortAllocator()
+	var pending []pendingPlan
 	for _, placement := range stores.Placements.ListPlacements() {
 		volume, ok := volumeByID[placement.VolumeID]
 		if !ok {
@@ -46,11 +51,22 @@ func (h *Host) RunLifecycleWorkloadPlanTick(cfg lifecycle.WorkloadPlanConfig) (L
 			result.SkippedMissingInventory++
 			continue
 		}
-		portAllocator.assign(&plan)
-		result.Plans = append(result.Plans, plan)
+		pending = append(pending, pendingPlan{
+			placement:   placement,
+			plan:        plan,
+			materialize: placementHasBlankPool(placement),
+		})
 		result.PlannedVolumes++
-		if placementHasBlankPool(placement) {
-			materialized, err := lifecycle.MaterializePlacementFromWorkloadPlan(placement, plan)
+	}
+	plans := make([]*lifecycle.BlockVolumeWorkloadPlan, 0, len(pending))
+	for i := range pending {
+		plans = append(plans, &pending[i].plan)
+	}
+	newWorkloadPortAllocator().assignAll(plans)
+	for _, item := range pending {
+		result.Plans = append(result.Plans, item.plan)
+		if item.materialize {
+			materialized, err := lifecycle.MaterializePlacementFromWorkloadPlan(item.placement, item.plan)
 			if err != nil {
 				return result, err
 			}
@@ -66,6 +82,10 @@ func (h *Host) RunLifecycleWorkloadPlanTick(cfg lifecycle.WorkloadPlanConfig) (L
 type workloadPortAllocator struct {
 	nextOrdinalByNode map[string]int
 	baseByNode        map[string]nodePortBase
+	usedISCSIByNode   map[string]map[int]bool
+	usedNVMeByNode    map[string]map[int]bool
+	usedDataByNode    map[string]map[string]bool
+	usedCtrlByNode    map[string]map[string]bool
 }
 
 type nodePortBase struct {
@@ -79,35 +99,117 @@ func newWorkloadPortAllocator() *workloadPortAllocator {
 	return &workloadPortAllocator{
 		nextOrdinalByNode: make(map[string]int),
 		baseByNode:        make(map[string]nodePortBase),
+		usedISCSIByNode:   make(map[string]map[int]bool),
+		usedNVMeByNode:    make(map[string]map[int]bool),
+		usedDataByNode:    make(map[string]map[string]bool),
+		usedCtrlByNode:    make(map[string]map[string]bool),
 	}
 }
 
 func (a *workloadPortAllocator) assign(plan *lifecycle.BlockVolumeWorkloadPlan) {
-	if a == nil || plan == nil {
+	a.assignAll([]*lifecycle.BlockVolumeWorkloadPlan{plan})
+}
+
+func (a *workloadPortAllocator) assignAll(plans []*lifecycle.BlockVolumeWorkloadPlan) {
+	if a == nil {
 		return
 	}
-	for i := range plan.Replicas {
-		replica := &plan.Replicas[i]
-		key := replica.KubernetesNodeName
-		if key == "" {
-			key = replica.ServerID
+	for _, plan := range plans {
+		if plan == nil {
+			continue
 		}
-		base, ok := a.baseByNode[key]
-		if !ok {
-			base = nodePortBase{
-				iscsi: replica.ISCSIListenPort - i,
-				nvme:  replica.NVMeListenPort - i,
-				data:  replica.DataAddr,
-				ctrl:  replica.CtrlAddr,
+		for i := range plan.Replicas {
+			replica := &plan.Replicas[i]
+			key := workloadNodeKey(*replica)
+			a.ensureNode(key)
+			if _, ok := a.baseByNode[key]; !ok {
+				a.baseByNode[key] = nodePortBase{
+					iscsi: replica.ISCSIListenPort - i,
+					nvme:  replica.NVMeListenPort - i,
+					data:  addPortOffset(replica.DataAddr, -i*2),
+					ctrl:  addPortOffset(replica.CtrlAddr, -i*2),
+				}
 			}
-			a.baseByNode[key] = base
+			if replica.PortAssignmentPinned {
+				a.markUsed(key, *replica)
+			}
 		}
-		ordinal := a.nextOrdinalByNode[key]
-		a.nextOrdinalByNode[key] = ordinal + 1
-		replica.ISCSIListenPort = base.iscsi + ordinal
-		replica.NVMeListenPort = base.nvme + ordinal
-		replica.DataAddr = addPortOffset(base.data, ordinal*2)
-		replica.CtrlAddr = addPortOffset(base.ctrl, ordinal*2)
+	}
+	for _, plan := range plans {
+		if plan == nil {
+			continue
+		}
+		for i := range plan.Replicas {
+			replica := &plan.Replicas[i]
+			if replica.PortAssignmentPinned {
+				continue
+			}
+			key := workloadNodeKey(*replica)
+			a.ensureNode(key)
+			base, ok := a.baseByNode[key]
+			if !ok {
+				base = nodePortBase{
+					iscsi: replica.ISCSIListenPort - i,
+					nvme:  replica.NVMeListenPort - i,
+					data:  addPortOffset(replica.DataAddr, -i*2),
+					ctrl:  addPortOffset(replica.CtrlAddr, -i*2),
+				}
+				a.baseByNode[key] = base
+			}
+			ordinal := a.nextFreeOrdinal(key, base)
+			a.nextOrdinalByNode[key] = ordinal + 1
+			replica.ISCSIListenPort = base.iscsi + ordinal
+			replica.NVMeListenPort = base.nvme + ordinal
+			replica.DataAddr = addPortOffset(base.data, ordinal*2)
+			replica.CtrlAddr = addPortOffset(base.ctrl, ordinal*2)
+			a.markUsed(key, *replica)
+		}
+	}
+}
+
+func workloadNodeKey(replica lifecycle.BlockVolumeReplicaWorkload) string {
+	if replica.KubernetesNodeName != "" {
+		return replica.KubernetesNodeName
+	}
+	return replica.ServerID
+}
+
+func (a *workloadPortAllocator) ensureNode(key string) {
+	if a.usedISCSIByNode[key] == nil {
+		a.usedISCSIByNode[key] = make(map[int]bool)
+		a.usedNVMeByNode[key] = make(map[int]bool)
+		a.usedDataByNode[key] = make(map[string]bool)
+		a.usedCtrlByNode[key] = make(map[string]bool)
+	}
+}
+
+func (a *workloadPortAllocator) markUsed(key string, replica lifecycle.BlockVolumeReplicaWorkload) {
+	a.ensureNode(key)
+	if replica.ISCSIListenPort != 0 {
+		a.usedISCSIByNode[key][replica.ISCSIListenPort] = true
+	}
+	if replica.NVMeListenPort != 0 {
+		a.usedNVMeByNode[key][replica.NVMeListenPort] = true
+	}
+	if replica.DataAddr != "" {
+		a.usedDataByNode[key][replica.DataAddr] = true
+	}
+	if replica.CtrlAddr != "" {
+		a.usedCtrlByNode[key][replica.CtrlAddr] = true
+	}
+}
+
+func (a *workloadPortAllocator) nextFreeOrdinal(key string, base nodePortBase) int {
+	for ordinal := a.nextOrdinalByNode[key]; ; ordinal++ {
+		data := addPortOffset(base.data, ordinal*2)
+		ctrl := addPortOffset(base.ctrl, ordinal*2)
+		if a.usedISCSIByNode[key][base.iscsi+ordinal] ||
+			a.usedNVMeByNode[key][base.nvme+ordinal] ||
+			a.usedDataByNode[key][data] ||
+			a.usedCtrlByNode[key][ctrl] {
+			continue
+		}
+		return ordinal
 	}
 }
 
@@ -143,11 +245,15 @@ func placementPlanFromIntent(intent lifecycle.PlacementIntent) lifecycle.Placeme
 	}
 	for _, slot := range intent.Slots {
 		plan.Candidates = append(plan.Candidates, lifecycle.PlacementCandidate{
-			VolumeID:  intent.VolumeID,
-			ServerID:  slot.ServerID,
-			PoolID:    slot.PoolID,
-			ReplicaID: slot.ReplicaID,
-			Source:    slot.Source,
+			VolumeID:        intent.VolumeID,
+			ServerID:        slot.ServerID,
+			PoolID:          slot.PoolID,
+			ReplicaID:       slot.ReplicaID,
+			Source:          slot.Source,
+			DataAddr:        slot.DataAddr,
+			CtrlAddr:        slot.CtrlAddr,
+			ISCSIListenPort: slot.ISCSIListenPort,
+			NVMeListenPort:  slot.NVMeListenPort,
 		})
 	}
 	return plan

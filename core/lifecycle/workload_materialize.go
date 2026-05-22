@@ -29,6 +29,10 @@ func MaterializePlacementFromWorkloadPlan(placement PlacementIntent, plan BlockV
 		}
 		slot.ReplicaID = replica.ReplicaID
 		slot.Source = PlacementSourceExistingReplica
+		slot.DataAddr = replica.DataAddr
+		slot.CtrlAddr = replica.CtrlAddr
+		slot.ISCSIListenPort = replica.ISCSIListenPort
+		slot.NVMeListenPort = replica.NVMeListenPort
 	}
 	return out, nil
 }

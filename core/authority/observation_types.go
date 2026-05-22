@@ -20,6 +20,7 @@ import "time"
 //   - an instruction to the authority layer
 //   - an epoch or EndpointVersion proposal
 //   - a "promote me" flag
+//
 // The observation institution records observations; it does not
 // interpret them as authority. (Load-bearing: sketch §3.)
 type Observation struct {
@@ -53,6 +54,13 @@ type SlotFact struct {
 	Eligible        bool
 	Withdrawn       bool
 	EvidenceScore   uint64
+	// ObservedAt/ExpiresAt are store-owned per-slot freshness
+	// markers. They let one Kubernetes node run multiple
+	// blockvolume processes that each report a different slot
+	// without their heartbeats overwriting or refreshing each
+	// other's safety window.
+	ObservedAt time.Time
+	ExpiresAt  time.Time
 	// LocalRoleClaim is what the reporting server thinks its own
 	// role is right now. Recorded as raw fact only; never
 	// interpreted as authority. Two servers both claiming

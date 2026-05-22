@@ -1,6 +1,6 @@
 # Current Plan: Phase 26 - Helm Release Lifecycle Hardening
 
-Status: active, 0% complete. Started on 2026-05-22 after PR #49 merged
+Status: active, 60% complete. Started on 2026-05-22 after PR #49 merged
 v0.3 Helm observable first-volume alpha.
 
 ## Product Goal
@@ -146,6 +146,41 @@ no test-scoped hostPath residue
 
 Goal: move from "first PVC works" to "small user workload with multiple PVCs is
 stable enough to evaluate".
+
+Status: PASS on 2026-05-22.
+
+Evidence:
+
+- Scenario: `testops/scenarios/helm-multi-volume-day1-chain.yaml`
+- Run: `20260522-152903-1116`
+- Result: PASS, 6/6 phases, 29/29 actions
+- Flow:
+  - local branch images built and imported to all k3s nodes
+  - Helm install completed with generated Day-1 values
+  - three PVCs bound through the Helm-installed StorageClass
+  - three writer pods verified `/data/demo.bin`
+  - three reader pods verified the persisted bytes
+  - `sw-block ops report` listed three volumes and three ManagedVolume rows
+  - PVC deletion removed generated blockvolume Deployments
+  - Helm uninstall and host cleanup passed
+- Summary fields:
+  - `multi_volume_status=ok`
+  - `requested_volume_count=3`
+  - `writer_verified_count=3`
+  - `reader_verified_count=3`
+  - `managed_volume_count=3`
+  - `inventory_status=ok`
+  - `cleanup_status=ok`
+
+Product fixes found by this gate:
+
+- Persist materialized workload endpoint ports in placement intent so later
+  volume IDs cannot reshuffle an already-created blockvolume Deployment's
+  node-local ports.
+- Preserve materialized DataAddr/CtrlAddr when verifying placement.
+- Merge observation slots from the same Kubernetes node by `(volume, replica)`
+  with independent per-slot freshness. Multiple blockvolume processes on one
+  node must not overwrite each other's publish-target heartbeats.
 
 Required flow:
 

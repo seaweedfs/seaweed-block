@@ -16,10 +16,14 @@ var ErrInsufficientPlacementCandidates = errors.New("lifecycle: insufficient pla
 // placement plan. It is still not authority: no epoch, no endpoint version,
 // no readiness.
 type PlacementSlotIntent struct {
-	ServerID  string `json:"server_id"`
-	PoolID    string `json:"pool_id,omitempty"`
-	ReplicaID string `json:"replica_id,omitempty"`
-	Source    string `json:"source"`
+	ServerID        string `json:"server_id"`
+	PoolID          string `json:"pool_id,omitempty"`
+	ReplicaID       string `json:"replica_id,omitempty"`
+	Source          string `json:"source"`
+	DataAddr        string `json:"data_addr,omitempty"`
+	CtrlAddr        string `json:"ctrl_addr,omitempty"`
+	ISCSIListenPort int    `json:"iscsi_listen_port,omitempty"`
+	NVMeListenPort  int    `json:"nvme_listen_port,omitempty"`
 }
 
 // PlacementIntent is durable controller input for one volume.
@@ -67,10 +71,14 @@ func (s *PlacementIntentStore) ApplyPlan(plan PlacementPlan) (PlacementIntent, e
 	}
 	for _, candidate := range plan.Candidates[:plan.DesiredRF] {
 		intent.Slots = append(intent.Slots, PlacementSlotIntent{
-			ServerID:  candidate.ServerID,
-			PoolID:    candidate.PoolID,
-			ReplicaID: candidate.ReplicaID,
-			Source:    candidate.Source,
+			ServerID:        candidate.ServerID,
+			PoolID:          candidate.PoolID,
+			ReplicaID:       candidate.ReplicaID,
+			Source:          candidate.Source,
+			DataAddr:        candidate.DataAddr,
+			CtrlAddr:        candidate.CtrlAddr,
+			ISCSIListenPort: candidate.ISCSIListenPort,
+			NVMeListenPort:  candidate.NVMeListenPort,
 		})
 	}
 	if err := validatePlacementIntent(intent); err != nil {

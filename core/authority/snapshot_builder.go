@@ -74,8 +74,11 @@ func BuildSnapshot(store storeSnapshot, topology AcceptedTopology, reader Author
 			continue
 		}
 		for _, s := range obs.Slots {
+			if slotExpired(s, obs, store.evaluatedAt) {
+				continue
+			}
 			freshSlotsByVolume[s.VolumeID] = append(freshSlotsByVolume[s.VolumeID],
-				slotWithServer{slot: s, serverID: obs.ServerID, observedAt: obs.ObservedAt})
+				slotWithServer{slot: s, serverID: obs.ServerID, observedAt: slotObservedAt(s, obs)})
 		}
 	}
 
