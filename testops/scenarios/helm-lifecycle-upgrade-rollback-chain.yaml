@@ -1,0 +1,181 @@
+# Runner-native Phase 26 D2 gate: Helm install / upgrade / rollback lifecycle.
+#
+# Goal:
+#   Prove the chart handles a narrow release lifecycle smoke:
+#     generate values
+#     -> helm install
+#     -> first PVC writer/reader, keep PVC
+#     -> helm upgrade with the same chart/values
+#     -> verify existing PVC data
+#     -> helm rollback to revision 1
+#     -> verify existing PVC data again
+#     -> helm uninstall and strict cleanup
+
+name: helm-lifecycle-upgrade-rollback-chain
+timeout: 32m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+  helm_release: "sw-block"
+  helm_namespace: "kube-system"
+  sw_block_image: "ghcr.io/seaweedfs/seaweed-block:sha-28a99ce4f644"
+  sw_block_csi_image: "ghcr.io/seaweedfs/seaweed-block-csi:sha-28a99ce4f644"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: pre_clean
+    actions:
+      - action: pre_run_cleanup
+        node: m02
+        kill_patterns: "blockmaster,blockvolume,blockcsi,iscsi-target"
+        nvme_disconnect: "true"
+        iscsi_logout_prefix: "iqn.2026-05.io.seaweedfs"
+      - action: exec
+        node: m02
+        timeout: 5m
+        cmd: "helm status {{ helm_release }} --namespace {{ helm_namespace }} >/dev/null 2>&1 && helm uninstall {{ helm_release }} --namespace {{ helm_namespace }} --wait --timeout 180s || true; kubectl -n default delete pod sw-block-example-reader sw-block-example-writer --ignore-not-found=true --wait=true --timeout=120s; kubectl -n default delete pvc sw-block-example-pvc --ignore-not-found=true --wait=true --timeout=120s; kubectl delete storageclass sw-block-example --ignore-not-found=true --wait=true --timeout=120s; kubectl delete storageclass sw-block-dynamic --ignore-not-found=true --wait=true --timeout=120s; kubectl delete clusterrole/sw-block-csi clusterrolebinding/sw-block-csi --ignore-not-found=true; sudo -n iscsiadm -m node 2>/dev/null | awk '/io.seaweedfs/ {print $1, $2}' | while read portal target; do sudo -n iscsiadm -m node -T \"$target\" -p \"$portal\" -o delete || true; done; rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-lifecycle && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-lifecycle/bin /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-lifecycle/values /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-lifecycle/install /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-lifecycle/first-volume /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-lifecycle/upgrade /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-lifecycle/after-upgrade /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-lifecycle/rollback /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-lifecycle/after-rollback /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-lifecycle/cleanup"
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+      - action: assert_no_active_iscsi_sessions
+        node: m02
+        iqn_substr: "io.seaweedfs"
+
+  - name: build_and_generate_values
+    actions:
+      - action: exec
+        node: m02
+        timeout: 6m
+        cmd: "cd {{ product_root }} && go build -o /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-lifecycle/bin/sw-block ./cmd/sw-block && /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-lifecycle/bin/sw-block ops generate-helm-values --kubeconfig /etc/rancher/k3s/k3s.yaml --out /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-lifecycle/values/values.day1.yaml --image {{ sw_block_image }} --csi-image {{ sw_block_csi_image }} > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-lifecycle/values/generate.stdout.txt && cd {{ product_root }} && bash scripts/verify-helm-release-hygiene.sh {{ product_root }}"
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+        env.SW_BLOCK_ARTIFACT_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-lifecycle/values/hygiene"
+        env.SW_BLOCK_HELM_VALUES_FILE: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-lifecycle/values/values.day1.yaml"
+        env.SW_BLOCK_HELM_RELEASE: "{{ helm_release }}"
+        env.SW_BLOCK_HELM_NAMESPACE: "{{ helm_namespace }}"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-lifecycle/values/generate.stdout.txt"
+        pattern: "helm_values_status=ok"
+        save_as: generator_ok_count
+      - action: assert_greater
+        actual: "{{ generator_ok_count }}"
+        threshold: "0"
+
+  - name: helm_install_stack
+    actions:
+      - action: exec
+        node: m02
+        timeout: 10m
+        cmd: "cd {{ product_root }} && helm install {{ helm_release }} charts/seaweed-block --namespace {{ helm_namespace }} --create-namespace -f /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-lifecycle/values/values.day1.yaml --wait --timeout 10m > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-lifecycle/install/helm-install.txt && helm history {{ helm_release }} --namespace {{ helm_namespace }} > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-lifecycle/install/helm-history.after-install.txt && kubectl -n {{ helm_namespace }} get deploy,ds,pods,svc -o wide > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-lifecycle/install/kube-system.after-install.txt"
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-lifecycle/install/helm-install.txt"
+        pattern: "STATUS: deployed"
+        save_as: helm_deployed_count
+      - action: assert_greater
+        actual: "{{ helm_deployed_count }}"
+        threshold: "0"
+
+  - name: first_volume_keep_pvc
+    actions:
+      - action: exec
+        node: m02
+        timeout: 8m
+        cmd: "cd {{ product_root }} && bash scripts/run-basic-app-example.sh {{ product_root }}"
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+        env.SW_BLOCK_ARTIFACT_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-lifecycle/first-volume"
+        env.SW_BLOCK_BASIC_APP_CLEANUP: "0"
+        env.SW_BLOCK_INSTALL_MODE: "helm-lifecycle"
+        env.SW_BLOCK_HELM_RELEASE: "{{ helm_release }}"
+        env.SW_BLOCK_HELM_NAMESPACE: "{{ helm_namespace }}"
+        env.SW_BLOCK_HELM_VALUES_FILE: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-lifecycle/values/values.day1.yaml"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-lifecycle/first-volume/first-volume-summary.txt"
+        pattern: "^first_volume_status=ok$"
+        save_as: first_volume_ok_count
+      - action: assert_greater
+        actual: "{{ first_volume_ok_count }}"
+        threshold: "0"
+
+  - name: helm_upgrade_and_verify
+    actions:
+      - action: exec
+        node: m02
+        timeout: 10m
+        cmd: "cd {{ product_root }} && helm upgrade {{ helm_release }} charts/seaweed-block --namespace {{ helm_namespace }} -f /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-lifecycle/values/values.day1.yaml --wait --timeout 10m > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-lifecycle/upgrade/helm-upgrade.txt && helm history {{ helm_release }} --namespace {{ helm_namespace }} > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-lifecycle/upgrade/helm-history.after-upgrade.txt && bash scripts/verify-basic-app-existing-pvc.sh {{ product_root }}"
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+        env.SW_BLOCK_ARTIFACT_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-lifecycle/after-upgrade"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-lifecycle/after-upgrade/existing-pvc-summary.txt"
+        pattern: "^existing_pvc_status=ok$"
+        save_as: after_upgrade_reader_ok_count
+      - action: assert_greater
+        actual: "{{ after_upgrade_reader_ok_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-lifecycle/upgrade/helm-history.after-upgrade.txt"
+        pattern: "superseded"
+        save_as: helm_superseded_count
+      - action: assert_greater
+        actual: "{{ helm_superseded_count }}"
+        threshold: "0"
+
+  - name: helm_rollback_and_verify
+    actions:
+      - action: exec
+        node: m02
+        timeout: 10m
+        cmd: "helm rollback {{ helm_release }} 1 --namespace {{ helm_namespace }} --wait --timeout 10m > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-lifecycle/rollback/helm-rollback.txt && helm history {{ helm_release }} --namespace {{ helm_namespace }} > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-lifecycle/rollback/helm-history.after-rollback.txt && cd {{ product_root }} && bash scripts/verify-basic-app-existing-pvc.sh {{ product_root }}"
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+        env.SW_BLOCK_ARTIFACT_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-lifecycle/after-rollback"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-lifecycle/after-rollback/existing-pvc-summary.txt"
+        pattern: "^existing_pvc_status=ok$"
+        save_as: after_rollback_reader_ok_count
+      - action: assert_greater
+        actual: "{{ after_rollback_reader_ok_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-lifecycle/rollback/helm-history.after-rollback.txt"
+        pattern: "deployed"
+        save_as: helm_deployed_after_rollback_count
+      - action: assert_greater
+        actual: "{{ helm_deployed_after_rollback_count }}"
+        threshold: "0"
+
+  - name: helm_uninstall_cleanup
+    always: true
+    actions:
+      - action: exec
+        node: m02
+        timeout: 8m
+        cmd: "helm status {{ helm_release }} --namespace {{ helm_namespace }} >/dev/null 2>&1 && helm uninstall {{ helm_release }} --namespace {{ helm_namespace }} --wait --timeout 240s > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-lifecycle/cleanup/helm-uninstall.txt || true; kubectl -n default delete pod sw-block-example-reader sw-block-example-writer --ignore-not-found=true --wait=true --timeout=120s; kubectl -n default delete pvc sw-block-example-pvc --ignore-not-found=true --wait=true --timeout=120s; kubectl delete storageclass sw-block-example --ignore-not-found=true --wait=true --timeout=120s; kubectl delete storageclass sw-block-dynamic --ignore-not-found=true --wait=true --timeout=120s; sudo -n iscsiadm -m node 2>/dev/null | awk '/io.seaweedfs/ {print $1, $2}' | while read portal target; do sudo -n iscsiadm -m node -T \"$target\" -p \"$portal\" -o delete || true; done; cd {{ product_root }} && bash scripts/verify-helm-cleanup.sh"
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+        env.SW_BLOCK_ARTIFACT_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-lifecycle/cleanup/verify"
+        env.SW_BLOCK_HELM_RELEASE: "{{ helm_release }}"
+        env.SW_BLOCK_HELM_NAMESPACE: "{{ helm_namespace }}"
+      - action: assert_no_active_iscsi_sessions
+        node: m02
+        iqn_substr: "io.seaweedfs"
+      - action: assert_no_processes
+        node: m02
+        pattern: "[/]blockmaster --|[/]blockvolume --|[/]blockcsi |[/]iscsi-target |^blockmaster |^blockvolume |^blockcsi |^iscsi-target "
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-lifecycle/cleanup/verify/cleanup-summary.txt"
+        pattern: "^cleanup_status=ok$"
+        save_as: helm_cleanup_ok_count
+      - action: assert_greater
+        actual: "{{ helm_cleanup_ok_count }}"
+        threshold: "0"

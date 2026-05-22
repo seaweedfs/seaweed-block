@@ -91,6 +91,31 @@ release note names exact validated image path
 Goal: prove the chart handles the basic release lifecycle, not just first
 install.
 
+Status: PASS on 2026-05-22.
+
+Evidence:
+
+- Scenario: `testops/scenarios/helm-lifecycle-upgrade-rollback-chain.yaml`
+- Run: `20260522-131951-a6d4`
+- Result: PASS, 7/7 phases, 27/27 actions
+- Flow:
+  - `helm install` completed with `STATUS: deployed`
+  - first PVC writer/reader verified and PVC kept for lifecycle testing
+  - `helm upgrade` created a superseded revision
+  - existing PVC reader verified persisted `/data/demo.bin`
+  - `helm rollback sw-block 1` completed
+  - existing PVC reader verified the same PV again
+  - `helm uninstall` plus cleanup verification passed
+- Stable data identity:
+  - PV before upgrade: `pvc-00c8dc4d-db6b-481e-bf4e-447b2b53bfc3`
+  - PV after upgrade: `pvc-00c8dc4d-db6b-481e-bf4e-447b2b53bfc3`
+  - PV after rollback: `pvc-00c8dc4d-db6b-481e-bf4e-447b2b53bfc3`
+- Cleanup:
+  - `cleanup_status=ok`
+  - `k8s_residue_count=0`
+  - `process_residue_count=0`
+  - `hostpath_residue_count=0`
+
 Required flow:
 
 ```text
@@ -211,7 +236,7 @@ finished plan written
 ## Progress
 
 - D1: PASS - chart release hygiene gate `20260522-131641-7a61`
-- D2: pending
+- D2: PASS - Helm lifecycle gate `20260522-131951-a6d4`
 - D3: pending
 - D4: pending
 - D5: pending
