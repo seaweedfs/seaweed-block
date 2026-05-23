@@ -11,7 +11,7 @@ to runnable gates.
 - Keep alpha/beta claims narrow: dynamic PVC, mounted app write/read, clean
   teardown, read-only evidence, and explicit non-claims.
 - Do not claim production HA, broad distro compatibility, performance, upgrade
-  safety, or multi-volume HA independence until separately gated.
+  safety, or scale beyond the separately gated multi-volume HA lab boundary.
 
 ## Roadmap Taxonomy
 
@@ -31,9 +31,9 @@ ready.
 
 | Priority | Work | Type | Status | Why It Matters |
 |---|---|---|---|---|
-| P0 | Publish v0.3.1 images and update doc pins | Operational | ready after Phase 26 QA | Users need a consumable immutable GHCR SHA, not local TestOps tags |
-| P0 | Phase 27 Multi-Volume HA Independence D2 | Functional + Core Stability | next | Multi-volume RF3 readiness passed; failover isolation is the real HA bar |
-| P0 | Keep Phase 27 D1 RF3 readiness green | Core Stability | PASS | Proves 3 RF3 PVCs can coexist before fault injection |
+| P0 | Publish v0.3.2 images and update doc pins | Operational | next | Phase 27 uses local TestOps images; users need a consumable immutable GHCR SHA |
+| P0 | Multipath stale-map cleanup verifier | Operational + Core Stability | follow-up from Phase 27 QA | QA found orphan dm-multipath maps after sessions were gone; cleanup evidence should cover this |
+| P0 | Phase 27 Multi-Volume HA Independence | Functional + Core Stability | PASS | Proves RF3 multi-volume readiness, CSI reattach, mounted transparent failover, and interleaved failover isolation |
 | P1 | Operator lifecycle design and first CRD/Condition shape | Operational | after Helm hardening | Kubernetes-native day-2 loop starts here |
 | P1 | Product-owned cleanup/lifecycle ownership | Operational + Core Stability | partial | Scripts still own too much lifecycle and cleanup |
 | P1 | Control Model Stabilization Gate | Core Stability | required before operator-grade operations | Operation layer and future operator need stable state, action, and evidence contracts |
@@ -63,9 +63,13 @@ ready.
   install/upgrade/rollback smoke, multi-PVC Day-1 smoke, support bundle replay,
   and strict cleanup. QA replay passed on 2026-05-22. Before external release,
   publish a new immutable GHCR SHA and update docs.
-- `v0.3.x-alpha` follow-up: Multi-volume HA independence. Phase 27 starts here.
-  D1 readiness passed; D2-D4 must prove per-volume failover isolation before
-  any multi-volume HA claim.
+- `v0.3.2-alpha`: Multi-volume HA independence. Phase 27 closed on
+  2026-05-23 with independent QA reruns across D1-D4. It proves three RF3
+  PVC-backed volumes can coexist, recover independently through CSI reattach,
+  recover independently through iSCSI ALUA/dm-multipath without pod recreate,
+  and tolerate two interleaved volume-primary failures while the third volume
+  stays stable and writable. Before external release, publish a new immutable
+  GHCR SHA and update docs.
 - `v0.4-beta-candidate`: Operator lifecycle. Add Kubernetes-native CRDs,
   Conditions, Events, safe cleanup, and eventually gated repair/rebuild
   workflows. This is the first release boundary that can feel like a complete
@@ -81,28 +85,21 @@ own day-2 lifecycle without hiding unstable behavior.
 
 Type: Functional + Core Stability
 
-Current status: D1 PASS, 20%.
+Current status: PASS, 100%. Phase 27 closed on 2026-05-23.
 
-D1 closed:
+Closed gates:
 
-- `N=3` PVCs.
-- `RF=3` each.
-- 9 generated blockvolume Deployments.
-- 3 writer checksums PASS.
-- 3 reader checksums PASS.
-- `sw-block ops report` shows 3 ManagedVolumes and `rf=3`.
-- Cleanup waits for all generated blockvolume Deployments and exits clean.
+- D1 RF3 readiness: `20260523-094437-c24c`, 35/35 PASS.
+- D2 per-volume CSI reattach recovery: `20260523-094707-bbf5`, 29/29 PASS.
+- D3 mounted transparent failover: `20260523-095122-a5c4`, 47/47 PASS.
+- D4 interleaved multi-volume failover: `20260523-095509-4d02`, 55/55 PASS.
 
-Next gates:
+Non-claims:
 
-- D2: per-volume CSI reattach recovery, pod recreate allowed.
-- D3: per-volume mounted transparent failover, no pod recreate, multipath
-  enabled.
-- D4: concurrent/interleaved primary failures across multiple volumes.
-
-Non-claim:
-
-- D1 is readiness only. It does not prove failover isolation.
+- Only N=3 PVCs are gated.
+- This does not claim arbitrary node failure for multi-volume.
+- This does not claim performance/RTO/SLO.
+- This does not claim NVMe ANA parity.
 
 ## Functional Capability Backlog
 
@@ -115,9 +112,9 @@ Closed:
 - RF3 iSCSI ALUA + Linux dm-multipath transparent mounted failover for one
   volume.
 
-Current:
+Closed:
 
-- Multi-volume HA independence, Phase 27.
+- Multi-volume HA independence, Phase 27, for N=3 RF3 PVCs in the gated lab.
 
 Later:
 
@@ -167,7 +164,7 @@ Closed:
 
 Current:
 
-- Publish v0.3.1 immutable GHCR images and update README / quickstart /
+- Publish v0.3.2 immutable GHCR images and update README / quickstart /
   release note pins.
 
 Next:
@@ -229,6 +226,8 @@ Closed / current:
 - Observation slots merge by `(volume, replica)` with independent freshness.
 - Materialized workload ports persist so new volumes cannot reshuffle existing
   ports.
+- Phase 27 proved per-volume independence under sequential and interleaved
+  faults for N=3 RF3 PVCs.
 
 Next:
 
@@ -259,6 +258,8 @@ Closed / current:
 
 Next:
 
+- Extend cleanup verification to catch orphan dm-multipath maps after mounted
+  failover tests.
 - Make more cleanup product-owned instead of script-owned.
 - Preserve test/debug artifacts while guaranteeing no live sessions/processes.
 
