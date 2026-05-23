@@ -1,6 +1,6 @@
 # Current Plan: Phase 27 - Multi-Volume HA Independence
 
-Status: active, 50% complete. Started on 2026-05-22 after Phase 26 Helm
+Status: active, 75% complete. Started on 2026-05-22 after Phase 26 Helm
 lifecycle hardening closed.
 
 ## Product Goal
@@ -160,7 +160,49 @@ non-target workloads continue without interruption
 cleanup clean
 ```
 
-Status: pending.
+Status: PASS on 2026-05-23.
+
+Evidence:
+
+- Scenario: `testops/scenarios/helm-multi-volume-rf3-mounted-failover-chain.yaml`
+- Run: `20260523-090534-24e4`
+- Result: PASS, 8/8 phases, 47/47 actions
+- Flow:
+  - Helm installed RF=3 sync-quorum stack with Stage 2 multipath enabled
+  - three RF=3 PVCs bound
+  - three long-running writer pods mounted the PVCs on `m02`
+  - each volume's current primary Deployment was stopped in turn
+  - each target volume promoted to a surviving replica
+  - the same writer pod UID verified old data and wrote new data after
+    failover
+  - non-target mounted workloads remained healthy during each target failover
+  - cleanup removed Helm resources, iSCSI sessions, and product processes
+- Summary fields:
+  - `multi_volume_mounted_failover_status=ok`
+  - `requested_volume_count=3`
+  - `replication_factor=3`
+  - `recovered_volume_count=3`
+  - `mounted_workload_checksum_passed_count=3`
+  - `pod_recreate_used=false`
+  - `cross_interference_observed=false`
+  - `transparent_failover_claimed=true`
+- Per-volume evidence:
+  - volume 1: `before_primary=r1`, `promoted_replica=r2`,
+    `post_failure_primary_count=1`, `pod_recreate_used=false`
+  - volume 2: `before_primary=r2`, `promoted_replica=r1`,
+    `post_failure_primary_count=1`, `pod_recreate_used=false`
+  - volume 3: `before_primary=r3`, `promoted_replica=r1`,
+    `post_failure_primary_count=1`, `pod_recreate_used=false`
+
+Fix included:
+
+- New helper:
+  `scripts/run-multi-volume-mounted-failover.sh`.
+- New TestOps gate:
+  `testops/scenarios/helm-multi-volume-rf3-mounted-failover-chain.yaml`.
+- The gate uses bounded mounted-I/O checks and split cleanup actions so a host
+  path stall or cleanup race becomes diagnosable evidence instead of a hung
+  scenario.
 
 ## D4: Concurrent / Interleaved Multi-Volume Faults
 
@@ -193,5 +235,5 @@ Status: pending.
 
 - D1: PASS - RF=3 multi-volume readiness `20260522-170901-70c5`
 - D2: PASS - RF=3 per-volume CSI reattach recovery `20260522-223126-21fd`
-- D3: pending
+- D3: PASS - RF=3 multi-volume mounted transparent failover `20260523-090534-24e4`
 - D4: pending
