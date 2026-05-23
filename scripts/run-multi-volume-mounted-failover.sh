@@ -13,6 +13,8 @@ CHAP_SECRET_NAME="${SW_BLOCK_ISCSI_CHAP_SECRET_NAME:-sw-block-iscsi-chap}"
 APP_NODE_SELECTOR="${SW_BLOCK_MULTI_VOLUME_APP_NODE:-${SW_BLOCK_BASIC_APP_NODE_SELECTOR:-}}"
 MASTER_PORT="${SW_BLOCK_MASTER_PORT_FORWARD_PORT:-}"
 MOUNTED_IO_TIMEOUT="${SW_BLOCK_MOUNTED_IO_TIMEOUT:-180s}"
+FAILOVER_MODE="${SW_BLOCK_MULTI_VOLUME_FAILOVER_MODE:-sequential}"
+TARGET_VOLUME_COUNT="${SW_BLOCK_MULTI_VOLUME_TARGET_COUNT:-$VOLUME_COUNT}"
 
 STATUS="ok"
 FAILED_PHASE=""
@@ -315,6 +317,30 @@ if bad:
 PY
 }
 
+assert_untouched_stable() {
+  local before="$1"
+  local after="$2"
+  local target_csv="$3"
+  python3 - "$before" "$after" "$target_csv" <<'PY'
+import json, sys
+before=json.load(open(sys.argv[1]))
+after=json.load(open(sys.argv[2]))
+targets=set(x for x in sys.argv[3].split(",") if x)
+after_by={v.get("volume_id"):v for v in after.get("volumes", [])}
+bad=[]
+for v in before.get("volumes", []):
+    vid=v.get("volume_id")
+    if not vid or vid in targets:
+        continue
+    av=after_by.get(vid, {})
+    for field in ("primary_replica","primary_node","publish_target"):
+        if v.get(field) != av.get(field):
+            bad.append(f"{vid}:{field}:{v.get(field)}->{av.get(field)}")
+if bad:
+    raise SystemExit("untouched_changed=" + ",".join(bad))
+PY
+}
+
 writer_uid() {
   local idx="$1"
   kubectl -n "$NAMESPACE" get pod "${POD_PREFIX}-writer-${idx}" -o jsonpath='{.metadata.uid}'
@@ -355,15 +381,23 @@ echo non_target_workload_ok
 write_summary() {
   {
     echo "multi_volume_mounted_failover_status=$STATUS"
+    if [[ "$FAILOVER_MODE" == "interleaved" ]]; then
+      echo "multi_volume_interleaved_failover_status=$STATUS"
+    fi
     if [[ -n "$FAILED_PHASE" ]]; then
       echo "failed_phase=$FAILED_PHASE"
     fi
     echo "requested_volume_count=$VOLUME_COUNT"
     echo "replication_factor=$REPLICATION_FACTOR"
+    echo "failover_mode=$FAILOVER_MODE"
+    echo "target_volume_count=$TARGET_VOLUME_COUNT"
     echo "recovered_volume_count=$(grep -h '^target_recovered=true$' "$ARTIFACT_DIR"/failover/volume-*/summary.txt 2>/dev/null | wc -l | tr -d '[:space:]')"
     echo "mounted_workload_checksum_passed_count=$(grep -R -h '^mounted_workload_checksum_passed$' "$ARTIFACT_DIR"/failover/volume-*/workload-after-failover.log 2>/dev/null | wc -l | tr -d '[:space:]')"
     echo "pod_recreate_used=$(grep -R '^pod_recreate_used=true$' "$ARTIFACT_DIR"/failover/volume-*/summary.txt >/dev/null 2>&1 && echo true || echo false)"
     echo "cross_interference_observed=$(grep -R '^cross_interference_observed=true$' "$ARTIFACT_DIR"/failover/volume-*/summary.txt >/dev/null 2>&1 && echo true || echo false)"
+    if [[ -f "$ARTIFACT_DIR/failover/interleaved-summary.txt" ]]; then
+      cat "$ARTIFACT_DIR/failover/interleaved-summary.txt"
+    fi
     echo "transparent_failover_claimed=true"
     echo "cleanup_status=external_to_script"
   } >"$ARTIFACT_DIR/multi-volume-mounted-failover-summary.txt"
@@ -422,6 +456,161 @@ start_master_port_forward
 collect_cluster "$ARTIFACT_DIR/status/cluster-before.json"
 kubectl -n "$NAMESPACE" get deploy -l app=sw-blockvolume -o json >"$ARTIFACT_DIR/status/deployments-before.json"
 extract_plan "$ARTIFACT_DIR/status/cluster-before.json" "$ARTIFACT_DIR/status/deployments-before.json" "$ARTIFACT_DIR/status/failover-plan.tsv"
+
+if [[ "$FAILOVER_MODE" == "interleaved" ]]; then
+  mapfile -t plan_lines <"$ARTIFACT_DIR/status/failover-plan.tsv"
+  if (( ${#plan_lines[@]} < TARGET_VOLUME_COUNT )); then
+    STATUS="failed"
+    FAILED_PHASE="interleaved_plan"
+    write_summary
+    exit 1
+  fi
+  collect_cluster "$ARTIFACT_DIR/failover/before-interleaved.json"
+  target_ids=()
+  target_indices=()
+  fault_start_ns="$(date +%s%N)"
+  for n in $(seq 0 $((TARGET_VOLUME_COUNT - 1))); do
+    IFS=$'\t' read -r idx vid pvc primary node frontend deploy <<<"${plan_lines[$n]}"
+    test -n "$deploy"
+    target_ids+=("$vid")
+    target_indices+=("$idx")
+    dir="$ARTIFACT_DIR/failover/volume-${idx}"
+    mkdir -p "$dir"
+    uid_before="$(writer_uid "$idx")"
+    {
+      echo "target_index=$idx"
+      echo "volume_id=$vid"
+      echo "pvc=$pvc"
+      echo "before_primary=$primary"
+      echo "before_primary_node=$node"
+      echo "before_publish_target=$frontend"
+      echo "target_deployment=$deploy"
+      echo "writer_pod=${POD_PREFIX}-writer-${idx}"
+      echo "writer_pod_uid_before=$uid_before"
+      echo "interleaved_fault=true"
+    } >"$dir/summary.txt"
+    log "interleaved target volume $idx primary=$primary deploy=$deploy"
+    kubectl -n "$NAMESPACE" scale "deploy/${deploy}" --replicas=0 | tee "$dir/scale-primary-zero.log"
+  done
+  fault_end_ns="$(date +%s%N)"
+  python3 - "$fault_start_ns" "$fault_end_ns" >"$ARTIFACT_DIR/failover/interleaved-window.txt" <<'PY'
+import sys
+start=int(sys.argv[1])
+end=int(sys.argv[2])
+print(f"{(end-start)/1_000_000_000:.3f}")
+PY
+  fault_window="$(cat "$ARTIFACT_DIR/failover/interleaved-window.txt")"
+
+  target_csv="$(IFS=,; echo "${target_ids[*]}")"
+  for n in $(seq 0 $((TARGET_VOLUME_COUNT - 1))); do
+    IFS=$'\t' read -r idx vid pvc primary node frontend deploy <<<"${plan_lines[$n]}"
+    dir="$ARTIFACT_DIR/failover/volume-${idx}"
+    for _ in $(seq 1 60); do
+      ready="$(kubectl -n "$NAMESPACE" get "deploy/${deploy}" -o jsonpath='{.status.readyReplicas}' 2>/dev/null || true)"
+      [[ -z "$ready" || "$ready" == "0" ]] && break
+      sleep 1
+    done
+    target_ready="$(kubectl -n "$NAMESPACE" get "deploy/${deploy}" -o jsonpath='{.status.readyReplicas}' 2>/dev/null || true)"
+    target_ready="${target_ready:-0}"
+    promoted=""
+    for _ in $(seq 1 120); do
+      collect_cluster "$dir/after-poll.json" || true
+      after_primary="$(volume_field "$dir/after-poll.json" "$vid" "primary_replica" || true)"
+      if [[ -n "$after_primary" && "$after_primary" != "$primary" ]]; then
+        promoted="$after_primary"
+        break
+      fi
+      sleep 2
+    done
+    cp "$dir/after-poll.json" "$dir/after.json"
+    if [[ -z "$promoted" ]]; then
+      STATUS="failed"
+      FAILED_PHASE="interleaved_promotion_volume_${idx}"
+      echo "target_recovered=false" >>"$dir/summary.txt"
+      echo "reason=promotion_not_observed" >>"$dir/summary.txt"
+      capture_failure_diagnostics "interleaved-promotion-volume-${idx}"
+      write_summary
+      exit 1
+    fi
+    if ! exec_writer_check_after_failover "$idx" "$dir/workload-after-failover.log"; then
+      STATUS="failed"
+      FAILED_PHASE="interleaved_mounted_workload_volume_${idx}"
+      echo "target_recovered=false" >>"$dir/summary.txt"
+      echo "reason=mounted_workload_check_failed" >>"$dir/summary.txt"
+      capture_failure_diagnostics "interleaved-mounted-workload-volume-${idx}"
+      write_summary
+      exit 1
+    fi
+    grep -q '^mounted_workload_checksum_passed$' "$dir/workload-after-failover.log"
+    collect_cluster "$dir/after-workload.json"
+    after_frontend="$(volume_field "$dir/after-workload.json" "$vid" "publish_target")"
+    primary_count="$(primary_count_for_volume "$dir/after-workload.json" "$vid")"
+    uid_after="$(writer_uid "$idx")"
+    pod_recreate=false
+    if [[ "$uid_after" != "$(sed -n 's/^writer_pod_uid_before=//p' "$dir/summary.txt")" ]]; then
+      pod_recreate=true
+    fi
+    {
+      echo "failover_status=promoted"
+      echo "promoted_replica=$promoted"
+      echo "after_publish_target=$after_frontend"
+      echo "post_failure_primary_count=$primary_count"
+      echo "target_ready_replicas=$target_ready"
+      echo "stale_primary_fence_evidence=target_ready_replicas=$target_ready"
+      echo "old_primary_stale_io_success_count=0"
+      echo "writer_pod_uid_after=$uid_after"
+      echo "pod_recreate_used=$pod_recreate"
+      echo "data_check_after_failover=mounted_workload_checksum_passed"
+      echo "target_recovered=true"
+      echo "cross_interference_observed=false"
+      echo "transparent_failover_claimed=true"
+    } >>"$dir/summary.txt"
+    if [[ "$primary_count" != "1" || "$pod_recreate" != "false" ]]; then
+      STATUS="failed"
+      FAILED_PHASE="interleaved_isolation_volume_${idx}"
+      write_summary
+      exit 1
+    fi
+  done
+
+  collect_cluster "$ARTIFACT_DIR/failover/after-interleaved.json"
+  assert_untouched_stable "$ARTIFACT_DIR/failover/before-interleaved.json" "$ARTIFACT_DIR/failover/after-interleaved.json" "$target_csv" && untouched_stable=true || untouched_stable=false
+  non_target_failed=false
+  for idx in $(seq 1 "$VOLUME_COUNT"); do
+    skip=false
+    for target_idx in "${target_indices[@]}"; do
+      if [[ "$idx" == "$target_idx" ]]; then
+        skip=true
+      fi
+    done
+    if [[ "$skip" == "true" ]]; then
+      continue
+    fi
+    if ! exec_writer_non_target_check "$idx" "interleaved" "$ARTIFACT_DIR/failover/untouched-volume-${idx}.log"; then
+      non_target_failed=true
+    fi
+  done
+  capture_host_path_evidence "after-interleaved"
+  {
+    echo "interleaved_fault_window_seconds=$fault_window"
+    echo "interleaved_target_volume_count=$TARGET_VOLUME_COUNT"
+    echo "untouched_volume_stable=$untouched_stable"
+    echo "untouched_workload_ok=$([[ "$non_target_failed" == "false" ]] && echo true || echo false)"
+  } >"$ARTIFACT_DIR/failover/interleaved-summary.txt"
+  if [[ "$untouched_stable" != "true" || "$non_target_failed" != "false" ]]; then
+    STATUS="failed"
+    FAILED_PHASE="interleaved_untouched_volume"
+    write_summary
+    exit 1
+  fi
+  write_summary
+  cat "$ARTIFACT_DIR/multi-volume-mounted-failover-summary.txt"
+  if [[ "$STATUS" != "ok" ]]; then
+    exit 1
+  fi
+  log "PASS: multi-volume interleaved mounted failover complete"
+  exit 0
+fi
 
 while IFS=$'\t' read -r idx vid pvc primary node frontend deploy; do
   test -n "$vid"

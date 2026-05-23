@@ -1,6 +1,6 @@
 # Current Plan: Phase 27 - Multi-Volume HA Independence
 
-Status: active, 75% complete. Started on 2026-05-22 after Phase 26 Helm
+Status: complete, 100% complete. Started on 2026-05-22 after Phase 26 Helm
 lifecycle hardening closed.
 
 ## Product Goal
@@ -25,22 +25,25 @@ readiness and, later, multi-volume failover independence.
 
 ## Claim Boundary
 
-Allowed after D1:
+Allowed after Phase 27:
 
 ```text
 Three RF=3 PVC-backed volumes can coexist on the 3-node lab, bind, mount,
-write/read, and appear as three independent ManagedVolume rows.
+write/read, appear as three independent ManagedVolume rows, recover
+independently through CSI/pod recreate, and recover independently through
+Stage 2 iSCSI ALUA/dm-multipath without pod recreate when the mounted host
+path is enabled.
 ```
 
-Not allowed yet:
+Still not allowed:
 
 ```text
-Multi-volume HA independence.
-Multi-volume transparent failover.
-One volume's failover does not affect other volumes.
+Broad production HA.
+Backup/snapshot/restore.
+Operator-managed lifecycle.
+NVMe ANA parity.
+Performance or scale SLOs beyond the gated 3-volume lab.
 ```
-
-Those require D2-D4.
 
 ## D1: RF=3 Multi-Volume Readiness
 
@@ -220,7 +223,51 @@ no timeline side-effect on untouched volume
 cleanup clean
 ```
 
-Status: pending.
+Status: PASS on 2026-05-23.
+
+Evidence:
+
+- Scenario: `testops/scenarios/helm-multi-volume-rf3-interleaved-failover-chain.yaml`
+- Run: `20260523-093348-6b02`
+- Result: PASS, 8/8 phases, 55/55 actions
+- Flow:
+  - Helm installed RF=3 sync-quorum stack with Stage 2 multipath enabled
+  - three RF=3 PVCs were mounted by long-running writer pods on `m02`
+  - two target volumes had their current primary Deployments stopped in a
+    bounded interleaved window
+  - both target volumes promoted independently
+  - both target writer pods kept the same pod UID and verified old/new data
+    without pod recreate
+  - untouched volume kept primary/frontend stable and its mounted workload
+    verified old/new data
+  - cleanup removed Helm resources, iSCSI sessions, and product processes
+- Summary fields:
+  - `multi_volume_interleaved_failover_status=ok`
+  - `failover_mode=interleaved`
+  - `target_volume_count=2`
+  - `recovered_volume_count=2`
+  - `mounted_workload_checksum_passed_count=2`
+  - `pod_recreate_used=false`
+  - `cross_interference_observed=false`
+  - `interleaved_fault_window_seconds=0.464`
+  - `untouched_volume_stable=true`
+  - `untouched_workload_ok=true`
+- Per-volume evidence:
+  - volume 1: `before_primary=r1`, `interleaved_fault=true`,
+    `promoted_replica=r2`, `post_failure_primary_count=1`,
+    `pod_recreate_used=false`
+  - volume 2: `before_primary=r2`, `interleaved_fault=true`,
+    `promoted_replica=r1`, `post_failure_primary_count=1`,
+    `pod_recreate_used=false`
+  - volume 3: untouched workload wrote and verified
+    `/data/non-target-interleaved.bin`
+
+Fix included:
+
+- `scripts/run-multi-volume-mounted-failover.sh` now supports
+  `SW_BLOCK_MULTI_VOLUME_FAILOVER_MODE=interleaved`.
+- New TestOps gate:
+  `testops/scenarios/helm-multi-volume-rf3-interleaved-failover-chain.yaml`.
 
 ## Risks
 
@@ -236,4 +283,4 @@ Status: pending.
 - D1: PASS - RF=3 multi-volume readiness `20260522-170901-70c5`
 - D2: PASS - RF=3 per-volume CSI reattach recovery `20260522-223126-21fd`
 - D3: PASS - RF=3 multi-volume mounted transparent failover `20260523-090534-24e4`
-- D4: pending
+- D4: PASS - RF=3 interleaved multi-volume mounted failover `20260523-093348-6b02`

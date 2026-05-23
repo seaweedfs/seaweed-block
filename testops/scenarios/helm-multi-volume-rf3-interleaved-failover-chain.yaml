@@ -1,0 +1,293 @@
+# Phase 27 D4: multi-volume RF=3 interleaved mounted failover.
+#
+# Pass = three RF=3 PVCs are mounted by long-running writer pods on the same
+# kubelet, two target volumes have their current primaries stopped in one bounded window, the same
+# writer pod UID verifies old data and writes new data through dm-multipath,
+# non-target mounted workloads keep working, and cleanup is clean.
+
+name: helm-multi-volume-rf3-interleaved-failover-chain
+timeout: 52m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+  helm_release: "sw-block"
+  helm_namespace: "kube-system"
+  sw_block_image: "sw-block:phase27-d4"
+  sw_block_csi_image: "sw-block-csi:phase27-d4"
+  volume_count: "3"
+  target_volume_count: "2"
+  replication_factor: "3"
+  app_node: "m02"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: pre_clean
+    actions:
+      - action: pre_run_cleanup
+        node: m02
+        kill_patterns: "blockmaster,blockvolume,blockcsi,iscsi-target"
+        nvme_disconnect: "true"
+        iscsi_logout_prefix: "iqn.2026-05.io.seaweedfs"
+      - action: exec
+        node: m02
+        timeout: 6m
+        cmd: "helm status {{ helm_release }} --namespace {{ helm_namespace }} >/dev/null 2>&1 && helm uninstall {{ helm_release }} --namespace {{ helm_namespace }} --wait --timeout 240s || true; kubectl -n default delete pod -l sw-block-test=multi-volume-mounted-failover --ignore-not-found=true --wait=true --timeout=180s; for i in 1 2 3; do kubectl -n default delete pod sw-block-multi-mounted-writer-$i --ignore-not-found=true --wait=true --timeout=180s; kubectl -n default delete pvc sw-block-multi-mounted-pvc-$i --ignore-not-found=true --wait=true --timeout=180s; done; kubectl delete storageclass sw-block-multi-mounted sw-block-dynamic --ignore-not-found=true --wait=true --timeout=180s; kubectl delete clusterrole/sw-block-csi clusterrolebinding/sw-block-csi --ignore-not-found=true; sudo -n iscsiadm -m node 2>/dev/null | awk '/io.seaweedfs/ {print $1, $2}' | while read portal target; do sudo -n iscsiadm -m node -T \"$target\" -p \"$portal\" -o delete || true; done; sudo -n multipath -F >/dev/null 2>&1 || true; rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-multi-volume-rf3-interleaved-failover && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-multi-volume-rf3-interleaved-failover/bin /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-multi-volume-rf3-interleaved-failover/values /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-multi-volume-rf3-interleaved-failover/install /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-multi-volume-rf3-interleaved-failover/recovery /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-multi-volume-rf3-interleaved-failover/cleanup"
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+      - action: assert_no_active_iscsi_sessions
+        node: m02
+        iqn_substr: "io.seaweedfs"
+
+  - name: preflight
+    actions:
+      - action: exec
+        node: m02
+        cmd: "cd {{ product_root }} && bash scripts/preflight-k8s-alpha.sh --local-k3s > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-multi-volume-rf3-interleaved-failover/preflight.txt 2>&1"
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-multi-volume-rf3-interleaved-failover/preflight.txt"
+        pattern: "summary status=PASS"
+        save_as: preflight_count
+      - action: assert_greater
+        actual: "{{ preflight_count }}"
+        threshold: "0"
+
+  - name: host_multipath_prereq
+    actions:
+      - action: exec
+        node: m02
+        cmd: "set -e; B=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-multi-volume-rf3-interleaved-failover; { echo stage2_protocol=iscsi-alua; command -v iscsiadm >/dev/null && echo command_iscsiadm=present; command -v multipath >/dev/null && echo command_multipath=present; command -v sg_rtpg >/dev/null && echo command_sg_rtpg=present; sudo modprobe iscsi_tcp; sudo modprobe dm_multipath; sudo modprobe scsi_dh_alua; test -d /sys/module/iscsi_tcp && echo module_iscsi_tcp=loaded; test -d /sys/module/dm_multipath && echo module_dm_multipath=loaded; test -d /sys/module/scsi_dh_alua && echo module_scsi_dh_alua=loaded; sudo multipath -t > \"$B/multipath-prereq.config.txt\" 2>&1; echo multipath_prereq=pass; } > \"$B/multipath-prereq.txt\" 2>&1"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-multi-volume-rf3-interleaved-failover/multipath-prereq.txt"
+        pattern: "multipath_prereq=pass"
+        save_as: multipath_prereq_count
+      - action: assert_greater
+        actual: "{{ multipath_prereq_count }}"
+        threshold: "0"
+
+  - name: build_and_generate_values
+    actions:
+      - action: exec
+        node: m02
+        timeout: 8m
+        cmd: "cd {{ product_root }} && SW_BLOCK_IMAGE={{ sw_block_image }} SW_BLOCK_CSI_IMAGE={{ sw_block_csi_image }} SW_BLOCK_IMPORT_K3S=1 SW_BLOCK_IMPORT_K3S_NODES='192.168.1.181,192.168.1.188' SW_BLOCK_IMPORT_K3S_SSH_USER=testdev SW_BLOCK_IMPORT_K3S_SSH_KEY=/opt/work/testdev_key SW_BLOCK_ARTIFACT_DIR=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-multi-volume-rf3-interleaved-failover/build bash scripts/build-alpha-images.sh {{ product_root }}"
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+      - action: exec
+        node: m02
+        timeout: 6m
+        cmd: "cd {{ product_root }} && go build -o /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-multi-volume-rf3-interleaved-failover/bin/sw-block ./cmd/sw-block && /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-multi-volume-rf3-interleaved-failover/bin/sw-block ops generate-helm-values --kubeconfig /etc/rancher/k3s/k3s.yaml --out /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-multi-volume-rf3-interleaved-failover/values/values.day1.yaml --image {{ sw_block_image }} --csi-image {{ sw_block_csi_image }} --replication-factor {{ replication_factor }} --ack-profile sync-quorum --stage2-multipath > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-multi-volume-rf3-interleaved-failover/values/generate.stdout.txt && python3 - <<'PY'\nfrom pathlib import Path\np=Path('/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-multi-volume-rf3-interleaved-failover/values/values.day1.yaml')\ns=p.read_text()\ns=s.replace('launcherReplicationAckFlag: false','launcherReplicationAckFlag: true')\np.write_text(s)\nPY"
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-multi-volume-rf3-interleaved-failover/values/generate.stdout.txt"
+        pattern: "helm_values_status=ok"
+        save_as: generator_ok_count
+      - action: assert_greater
+        actual: "{{ generator_ok_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-multi-volume-rf3-interleaved-failover/values/values.day1.yaml"
+        pattern: "replicationFactor: 3"
+        save_as: rf3_in_values
+      - action: assert_greater
+        actual: "{{ rf3_in_values }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-multi-volume-rf3-interleaved-failover/values/values.day1.yaml"
+        pattern: "ackProfile: sync-quorum"
+        save_as: sync_quorum_in_values
+      - action: assert_greater
+        actual: "{{ sync_quorum_in_values }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-multi-volume-rf3-interleaved-failover/values/values.day1.yaml"
+        pattern: "enabled: true"
+        save_as: stage2_enabled_count
+      - action: assert_greater
+        actual: "{{ stage2_enabled_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-multi-volume-rf3-interleaved-failover/values/values.day1.yaml"
+        pattern: "launcherReplicationAckFlag: true"
+        save_as: ack_flag_in_values
+      - action: assert_greater
+        actual: "{{ ack_flag_in_values }}"
+        threshold: "0"
+
+  - name: helm_install_stack
+    actions:
+      - action: exec
+        node: m02
+        timeout: 10m
+        cmd: "cd {{ product_root }} && helm lint charts/seaweed-block -f /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-multi-volume-rf3-interleaved-failover/values/values.day1.yaml > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-multi-volume-rf3-interleaved-failover/install/helm-lint.txt && helm install {{ helm_release }} charts/seaweed-block --namespace {{ helm_namespace }} --create-namespace -f /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-multi-volume-rf3-interleaved-failover/values/values.day1.yaml --wait --timeout 10m > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-multi-volume-rf3-interleaved-failover/install/helm-install.txt"
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-multi-volume-rf3-interleaved-failover/install/helm-install.txt"
+        pattern: "STATUS: deployed"
+        save_as: helm_deployed_count
+      - action: assert_greater
+        actual: "{{ helm_deployed_count }}"
+        threshold: "0"
+
+  - name: multi_volume_interleaved_failover
+    actions:
+      - action: exec
+        node: m02
+        timeout: 34m
+        cmd: "cd {{ product_root }} && bash scripts/run-multi-volume-mounted-failover.sh {{ product_root }}"
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+        env.SW_BLOCK_ARTIFACT_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-multi-volume-rf3-interleaved-failover/recovery"
+        env.SW_BLOCK_MULTI_VOLUME_COUNT: "{{ volume_count }}"
+        env.SW_BLOCK_MULTI_VOLUME_RF: "{{ replication_factor }}"
+        env.SW_BLOCK_MULTI_VOLUME_FAILOVER_MODE: "interleaved"
+        env.SW_BLOCK_MULTI_VOLUME_TARGET_COUNT: "{{ target_volume_count }}"
+        env.SW_BLOCK_MULTI_VOLUME_APP_NODE: "{{ app_node }}"
+        env.SW_BLOCK_CLI: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-multi-volume-rf3-interleaved-failover/bin/sw-block"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-multi-volume-rf3-interleaved-failover/recovery/multi-volume-mounted-failover-summary.txt"
+        pattern: "^multi_volume_interleaved_failover_status=ok$"
+        save_as: interleaved_failover_ok_count
+      - action: assert_greater
+        actual: "{{ interleaved_failover_ok_count }}"
+        threshold: "0"
+
+  - name: interleaved_failover_asserts
+    actions:
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-multi-volume-rf3-interleaved-failover/recovery/multi-volume-mounted-failover-summary.txt"
+        pattern: "^recovered_volume_count=2$"
+        save_as: recovered_count_ok
+      - action: assert_greater
+        actual: "{{ recovered_count_ok }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-multi-volume-rf3-interleaved-failover/recovery/multi-volume-mounted-failover-summary.txt"
+        pattern: "^mounted_workload_checksum_passed_count=2$"
+        save_as: mounted_workload_ok
+      - action: assert_greater
+        actual: "{{ mounted_workload_ok }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-multi-volume-rf3-interleaved-failover/recovery/multi-volume-mounted-failover-summary.txt"
+        pattern: "^failover_mode=interleaved$"
+        save_as: interleaved_mode_ok
+      - action: assert_greater
+        actual: "{{ interleaved_mode_ok }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-multi-volume-rf3-interleaved-failover/recovery/multi-volume-mounted-failover-summary.txt"
+        pattern: "^target_volume_count=2$"
+        save_as: target_count_ok
+      - action: assert_greater
+        actual: "{{ target_count_ok }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-multi-volume-rf3-interleaved-failover/recovery/multi-volume-mounted-failover-summary.txt"
+        pattern: "^untouched_volume_stable=true$"
+        save_as: untouched_stable_ok
+      - action: assert_greater
+        actual: "{{ untouched_stable_ok }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-multi-volume-rf3-interleaved-failover/recovery/multi-volume-mounted-failover-summary.txt"
+        pattern: "^untouched_workload_ok=true$"
+        save_as: untouched_workload_ok
+      - action: assert_greater
+        actual: "{{ untouched_workload_ok }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-multi-volume-rf3-interleaved-failover/recovery/multi-volume-mounted-failover-summary.txt"
+        pattern: "^pod_recreate_used=false$"
+        save_as: no_pod_recreate
+      - action: assert_greater
+        actual: "{{ no_pod_recreate }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-multi-volume-rf3-interleaved-failover/recovery/multi-volume-mounted-failover-summary.txt"
+        pattern: "^cross_interference_observed=false$"
+        save_as: no_cross_interference
+      - action: assert_greater
+        actual: "{{ no_cross_interference }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-multi-volume-rf3-interleaved-failover/recovery/host/multipath.before.txt"
+        pattern: "hwhandler='1 alua'"
+        save_as: multipath_alua_count
+      - action: assert_greater
+        actual: "{{ multipath_alua_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-multi-volume-rf3-interleaved-failover/recovery/host/sg-rtpg.before.txt"
+        pattern: "asymmetric access state"
+        save_as: rtpg_before_count
+      - action: assert_greater
+        actual: "{{ rtpg_before_count }}"
+        threshold: "2"
+      - action: exec
+        node: m02
+        timeout: 2m
+        cmd: "for i in 1 2; do S=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-multi-volume-rf3-interleaved-failover/recovery/failover/volume-$i/summary.txt; grep -q '^interleaved_fault=true$' \"$S\"; grep -q '^failover_status=promoted$' \"$S\"; grep -q '^target_recovered=true$' \"$S\"; grep -q '^pod_recreate_used=false$' \"$S\"; grep -q '^data_check_after_failover=mounted_workload_checksum_passed$' \"$S\"; grep -q '^post_failure_primary_count=1$' \"$S\"; grep -q '^old_primary_stale_io_success_count=0$' \"$S\"; grep -q '^cross_interference_observed=false$' \"$S\"; done; grep -q '^non_target_workload_ok$' /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-multi-volume-rf3-interleaved-failover/recovery/failover/untouched-volume-3.log"
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+
+  - name: helm_uninstall_cleanup
+    always: true
+    actions:
+      - action: exec
+        node: m02
+        timeout: 3m
+        cmd: "helm status {{ helm_release }} --namespace {{ helm_namespace }} >/dev/null 2>&1 && helm uninstall {{ helm_release }} --namespace {{ helm_namespace }} --wait --timeout 180s > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-multi-volume-rf3-interleaved-failover/cleanup/helm-uninstall.txt || true; kubectl -n default delete pod -l sw-block-test=multi-volume-mounted-failover --ignore-not-found=true --force --grace-period=0 --wait=false; for i in 1 2 3; do kubectl -n default delete pvc sw-block-multi-mounted-pvc-$i --ignore-not-found=true --wait=false; done; kubectl delete storageclass sw-block-multi-mounted sw-block-dynamic --ignore-not-found=true --wait=false; kubectl -n default delete deploy -l app=sw-blockvolume --ignore-not-found=true --wait=false"
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+        env.SW_BLOCK_ARTIFACT_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-multi-volume-rf3-interleaved-failover/cleanup/verify"
+        env.SW_BLOCK_HELM_RELEASE: "{{ helm_release }}"
+        env.SW_BLOCK_HELM_NAMESPACE: "{{ helm_namespace }}"
+      - action: exec
+        node: m02
+        timeout: 3m
+        cmd: "for _ in $(seq 1 60); do if ! sudo -n iscsiadm -m session 2>/dev/null | grep -q io.seaweedfs; then break; fi; sudo -n iscsiadm -m session 2>/dev/null | awk '/io.seaweedfs/ {print $3, $4}' | while read portal target; do sudo -n iscsiadm -m node -T \"$target\" -p \"$portal\" --logout || true; done; sleep 2; done; sudo -n iscsiadm -m node 2>/dev/null | awk '/io.seaweedfs/ {print $1, $2}' | while read portal target; do sudo -n iscsiadm -m node -T \"$target\" -p \"$portal\" -o delete || true; done; sudo -n multipath -F >/dev/null 2>&1 || true"
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+      - action: exec
+        node: m02
+        timeout: 5m
+        cmd: "cd {{ product_root }} && bash scripts/verify-helm-cleanup.sh"
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+        env.SW_BLOCK_ARTIFACT_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-multi-volume-rf3-interleaved-failover/cleanup/verify"
+        env.SW_BLOCK_HELM_RELEASE: "{{ helm_release }}"
+        env.SW_BLOCK_HELM_NAMESPACE: "{{ helm_namespace }}"
+      - action: assert_no_active_iscsi_sessions
+        node: m02
+        iqn_substr: "io.seaweedfs"
+      - action: assert_no_processes
+        node: m02
+        pattern: "[/]blockmaster --|[/]blockvolume --|[/]blockcsi |[/]iscsi-target |^blockmaster |^blockvolume |^blockcsi |^iscsi-target "
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-multi-volume-rf3-interleaved-failover/cleanup/verify/cleanup-summary.txt"
+        pattern: "^cleanup_status=ok$"
+        save_as: helm_cleanup_ok_count
+      - action: assert_greater
+        actual: "{{ helm_cleanup_ok_count }}"
+        threshold: "0"
