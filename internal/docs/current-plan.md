@@ -379,6 +379,7 @@ Evidence:
   `testops/scenarios/helm-multi-volume-rf3-app-spread-failover-chain.yaml`
 - Run: `20260523-151100-e241`
 - Result: PASS, 8/8 phases, 32/32 actions
+- Independent QA rerun: `20260523-160348-6cc2`, PASS, 32/32 actions
 - Flow:
   - Helm installed RF=3 sync-quorum stack with Stage 2 multipath enabled
   - three RF=3 PVCs bound and launched long-running writer pods distributed
@@ -440,4 +441,4 @@ Fix included:
 - D5: PASS - measured stale primary direct-read probe `20260523-114708-46bc`
 - D6: PASS - measured RTPG AAS transition evidence `20260523-123229-9dd4`, `20260523-123647-2fc4`
 - D7: DEV PASS - flake matrix wrapper, D4 N=3 pass, N>=5 QA/nightly pending
-- D8: PASS - app pods spread across m01/m02/tp01 with mounted transparent failover `20260523-151100-e241`
+- D8: PASS - app pods spread across m01/m02/tp01 with mounted transparent failover `20260523-151100-e241`; QA rerun `20260523-160348-6cc2`

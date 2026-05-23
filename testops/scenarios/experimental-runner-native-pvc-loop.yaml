@@ -1,0 +1,232 @@
+# Proof-of-concept: PVC user-loop driven by runner-native actions.
+#
+# Demonstrates that the testrunner can drive K8s PVC install + test using
+# named actions instead of bash exec wrappers.
+#
+# Limitations discovered during this spike:
+# - kubectl_wait_condition only supports Type=Status condition style; it
+#   polls .status.conditions[?(@.type==X)].status. PVC has no Conditions
+#   array (only .status.phase=Bound), so we wait via the workload Pod's
+#   Ready=True condition - if the pod reaches Ready then the PVC bound,
+#   the volume attached, and the mount succeeded.
+# - Helm install + uninstall stay as exec; no helm_* action exists.
+# - Writer/reader pods are long-running (sleep loop) instead of one-shot
+#   completion pods, because Succeeded pods drop Ready=False and the
+#   kubectl_wait_condition action would never fire.
+
+name: experimental-runner-native-pvc-loop
+timeout: 15m
+
+env:
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+  product_root: "/tmp/seaweed_block"
+  helm_release: "sw-block"
+  helm_namespace: "kube-system"
+  sw_block_image: "ghcr.io/seaweedfs/seaweed-block:sha-28a99ce4f644"
+  sw_block_csi_image: "ghcr.io/seaweedfs/seaweed-block-csi:sha-28a99ce4f644"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: pre_clean
+    actions:
+      - action: pre_run_cleanup
+        node: m02
+        kill_patterns: "blockmaster,blockvolume,blockcsi,iscsi-target"
+        iscsi_logout_prefix: "iqn.2026-05.io.seaweedfs"
+      - action: exec
+        node: m02
+        timeout: 3m
+        cmd: "helm status {{ helm_release }} --namespace {{ helm_namespace }} >/dev/null 2>&1 && helm uninstall {{ helm_release }} --namespace {{ helm_namespace }} --wait --timeout 120s || true; kubectl -n default delete pod sw-runner-writer sw-runner-reader --ignore-not-found=true --wait=true --timeout=60s; kubectl -n default delete pvc sw-runner-pvc --ignore-not-found=true --wait=true --timeout=60s; kubectl delete storageclass sw-block-dynamic --ignore-not-found=true"
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+
+  - name: helm_install
+    actions:
+      - action: exec
+        node: m02
+        timeout: 10m
+        cmd: "cd {{ product_root }} && go build -o /tmp/sw-block-runner-native ./cmd/sw-block && /tmp/sw-block-runner-native ops generate-helm-values --kubeconfig /etc/rancher/k3s/k3s.yaml --out /tmp/runner-native-values.yaml --image {{ sw_block_image }} --csi-image {{ sw_block_csi_image }} && helm install {{ helm_release }} charts/seaweed-block --namespace {{ helm_namespace }} --create-namespace -f /tmp/runner-native-values.yaml --wait --timeout 10m"
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+
+  - name: pvc
+    actions:
+      - action: kubectl_apply
+        node: m02
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+        manifest: |
+          apiVersion: v1
+          kind: PersistentVolumeClaim
+          metadata:
+            name: sw-runner-pvc
+            namespace: default
+          spec:
+            accessModes:
+              - ReadWriteOnce
+            storageClassName: sw-block-dynamic
+            resources:
+              requests:
+                storage: 1Mi
+
+  - name: writer_loop
+    actions:
+      - action: kubectl_apply
+        node: m02
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+        manifest: |
+          apiVersion: v1
+          kind: Pod
+          metadata:
+            name: sw-runner-writer
+            namespace: default
+            labels:
+              app: sw-runner
+              role: writer
+          spec:
+            restartPolicy: Always
+            containers:
+              - name: writer
+                image: busybox:1.36
+                command:
+                  - /bin/sh
+                  - -c
+                  - |
+                    set -eu
+                    if [ ! -s /data/demo.bin ]; then
+                      dd if=/dev/urandom of=/data/demo.bin bs=4096 count=1
+                      sha256sum /data/demo.bin > /data/demo.sha256
+                      sync
+                    fi
+                    sha256sum -c /data/demo.sha256
+                    echo "writer-ok"
+                    exec sleep 3600
+                volumeMounts:
+                  - name: data
+                    mountPath: /data
+            volumes:
+              - name: data
+                persistentVolumeClaim:
+                  claimName: sw-runner-pvc
+      - action: kubectl_wait_condition
+        node: m02
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+        resource: "pod/sw-runner-writer"
+        namespace: "default"
+        condition: "Ready=True"
+        timeout: "5m"
+      - action: kubectl_pod_ready_count
+        node: m02
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+        namespace: "default"
+        selector: "app=sw-runner,role=writer"
+        save_as: writer_ready_count
+      - action: assert_equal
+        actual: "{{ writer_ready_count }}"
+        expected: "1"
+      - action: kubectl_logs
+        node: m02
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+        namespace: "default"
+        resource: "pod/sw-runner-writer"
+        save_as: writer_logs
+      - action: assert_contains
+        actual: "{{ writer_logs }}"
+        expected: "writer-ok"
+
+  - name: reader_loop
+    actions:
+      - action: kubectl_delete
+        node: m02
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+        resource: "pod/sw-runner-writer"
+        namespace: "default"
+      - action: kubectl_apply
+        node: m02
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+        manifest: |
+          apiVersion: v1
+          kind: Pod
+          metadata:
+            name: sw-runner-reader
+            namespace: default
+            labels:
+              app: sw-runner
+              role: reader
+          spec:
+            restartPolicy: Always
+            containers:
+              - name: reader
+                image: busybox:1.36
+                command:
+                  - /bin/sh
+                  - -c
+                  - |
+                    set -eu
+                    test -s /data/demo.bin
+                    test -s /data/demo.sha256
+                    sha256sum -c /data/demo.sha256
+                    echo "reader-ok"
+                    exec sleep 3600
+                volumeMounts:
+                  - name: data
+                    mountPath: /data
+            volumes:
+              - name: data
+                persistentVolumeClaim:
+                  claimName: sw-runner-pvc
+      - action: kubectl_wait_condition
+        node: m02
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+        resource: "pod/sw-runner-reader"
+        namespace: "default"
+        condition: "Ready=True"
+        timeout: "5m"
+      - action: kubectl_pod_ready_count
+        node: m02
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+        namespace: "default"
+        selector: "app=sw-runner,role=reader"
+        save_as: reader_ready_count
+      - action: assert_equal
+        actual: "{{ reader_ready_count }}"
+        expected: "1"
+      - action: kubectl_logs
+        node: m02
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+        namespace: "default"
+        resource: "pod/sw-runner-reader"
+        save_as: reader_logs
+      - action: assert_contains
+        actual: "{{ reader_logs }}"
+        expected: "reader-ok"
+
+  - name: cleanup
+    always: true
+    actions:
+      - action: kubectl_delete
+        node: m02
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+        resource: "pod/sw-runner-writer"
+        namespace: "default"
+      - action: kubectl_delete
+        node: m02
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+        resource: "pod/sw-runner-reader"
+        namespace: "default"
+      - action: kubectl_delete
+        node: m02
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+        resource: "pvc/sw-runner-pvc"
+        namespace: "default"
+      - action: exec
+        node: m02
+        timeout: 4m
+        cmd: "helm uninstall {{ helm_release }} --namespace {{ helm_namespace }} --wait --timeout 120s 2>&1 || true"
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+      - action: assert_no_active_iscsi_sessions
+        node: m02
+        iqn_substr: "io.seaweedfs"
