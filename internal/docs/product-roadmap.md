@@ -1,22 +1,49 @@
 # Product Roadmap
 
-This is the short internal roadmap. Keep it current and readable.
+This is the short internal roadmap. Keep it current, priority-driven, and tied
+to runnable gates.
 
 ## Product Goal
 
 - Build a small Kubernetes block storage service that is easier to try and
   reason about than a large distributed-storage stack.
 - Target early users running lab or small Kubernetes clusters.
-- Keep alpha/beta claims narrow: dynamic PVC, iSCSI/NVMe protocol-gated paths,
-  app write/read, clean teardown, and explicit non-claims.
-- CHAP, iSCSI ALUA, NVMe ANA, CSI protocol selection, and mounted failover are
-  release-gated in the lab. Do not claim production HA, broad distro
-  compatibility, performance, upgrade safety, or multi-node readiness until
-  separately tested.
+- Keep alpha/beta claims narrow: dynamic PVC, mounted app write/read, clean
+  teardown, read-only evidence, and explicit non-claims.
+- Do not claim production HA, broad distro compatibility, performance, upgrade
+  safety, or multi-volume HA independence until separately gated.
 
-## Product Phases
+## Roadmap Taxonomy
 
-### Release Ladder
+Use these labels in plans and release notes:
+
+| Type | Meaning | Examples |
+|---|---|---|
+| Functional | User-visible storage capability | PVC create/mount, RF3 recovery, multipath failover, multi-volume HA |
+| Operational | Install, observe, diagnose, package, operate | Helm, dashboard/report, support bundle, cleanup, future operator |
+| Core Stability | Semantics and invariants that make functional claims safe | placement identity, port allocation, authority epoch, ACK frontier, fencing |
+
+Rule: functional claims require core stability evidence and operational evidence.
+If a feature works but cannot be diagnosed or cleaned up, it is not release
+ready.
+
+## Current Priority Map
+
+| Priority | Work | Type | Status | Why It Matters |
+|---|---|---|---|---|
+| P0 | Publish v0.3.1 images and update doc pins | Operational | ready after Phase 26 QA | Users need a consumable immutable GHCR SHA, not local TestOps tags |
+| P0 | Phase 27 Multi-Volume HA Independence D2 | Functional + Core Stability | next | Multi-volume RF3 readiness passed; failover isolation is the real HA bar |
+| P0 | Keep Phase 27 D1 RF3 readiness green | Core Stability | PASS | Proves 3 RF3 PVCs can coexist before fault injection |
+| P1 | Operator lifecycle design and first CRD/Condition shape | Operational | after Helm hardening | Kubernetes-native day-2 loop starts here |
+| P1 | Product-owned cleanup/lifecycle ownership | Operational + Core Stability | partial | Scripts still own too much lifecycle and cleanup |
+| P1 | ManagedVolume model hardening for operator dependency | Core Stability | seed closed, needs extension | Operator/dashboard must consume one semantic model, not invent truth |
+| P1 | Returned-replica rebuild/reintegration/failback | Functional + Core Stability | pending | Required for credible sustained HA after recovery |
+| P2 | NVMe ANA Kubernetes parity | Functional | pending | Protocol parity after iSCSI multipath path is stable |
+| P2 | Backup/snapshot/restore workflow | Functional + Operational | pending | Enterprise expectation, not part of current alpha |
+| P2 | Metrics/alerts/production dashboard | Operational | pending | Needed for beta operations, but depends on stable model |
+| P3 | Broad compatibility/performance/SLO matrix | Core Stability | pending | Production hardening, too early for current claim |
+
+## Release Ladder
 
 - `v0.1-alpha`: Kubernetes block foundation. CSI/PVC path, product-owned
   blockvolume lifecycle, inventory, recovery gates, iSCSI ALUA/dm-multipath,
@@ -31,338 +58,221 @@ This is the short internal roadmap. Keep it current and readable.
   iSCSI configuration, StorageClass, readiness output, first-volume smoke,
   local read-only report/dashboard, and uninstall hygiene. Phase 25 closed this
   release target on 2026-05-22.
-- `v0.3.x-alpha`: Helm release lifecycle hardening. Before operator work,
-  prove the chart can be treated as a repeatable release artifact: chart/image
-  version alignment, install/upgrade/rollback smoke, multi-PVC Day-1 smoke,
-  support bundle completeness, and strict cleanup. This is Phase 26.
-- `v0.3.x-alpha` follow-up: Multi-volume HA independence. Before broad HA or
-  operator lifecycle claims, prove multiple RF=3 PVC-backed volumes can recover
-  independently: first readiness, then CSI reattach failover, then transparent
-  multipath failover, then interleaved faults. This is Phase 27.
-- `v0.4-beta-candidate`: Operator lifecycle. Add a Kubernetes-native control
-  plane with CRDs/Conditions/Events for install, node eligibility, volume
-  lifecycle, recovery observation, safe cleanup, and eventually gated repair or
-  rebuild workflows. This is the first release boundary that can credibly feel
-  like a complete Kubernetes product loop rather than an install script.
-- Model hardening gate before the next large release: complete the
-  ManagedVolume Operations Model under `internal/docs/protocol/` before
-  expanding operator or broader HA claims. The goal is to prevent Kubernetes,
-  CSI, authority, host-path, recovery, and future NVMe logic from becoming
-  scattered scripts or unrelated small automata.
+- `v0.3.1-alpha`: Helm lifecycle hardening. Phase 26 proved chart hygiene,
+  install/upgrade/rollback smoke, multi-PVC Day-1 smoke, support bundle replay,
+  and strict cleanup. QA replay passed on 2026-05-22. Before external release,
+  publish a new immutable GHCR SHA and update docs.
+- `v0.3.x-alpha` follow-up: Multi-volume HA independence. Phase 27 starts here.
+  D1 readiness passed; D2-D4 must prove per-volume failover isolation before
+  any multi-volume HA claim.
+- `v0.4-beta-candidate`: Operator lifecycle. Add Kubernetes-native CRDs,
+  Conditions, Events, safe cleanup, and eventually gated repair/rebuild
+  workflows. This is the first release boundary that can feel like a complete
+  Kubernetes product loop rather than scripts plus Helm.
 
-Do not skip from scripts directly to an operator. Helm should stabilize the
-installation contract before an in-cluster controller owns upgrades and day-2
-lifecycle.
+Do not skip from scripts directly to an operator. Helm stabilizes the install
+contract; Phase 27 stabilizes multi-volume HA semantics; then an operator can
+own day-2 lifecycle without hiding unstable behavior.
 
-### Alpha Preview
+## Active Work
 
-- Status: protocol-gated; moving toward beta hardening.
-- Single-node k3s quick start works.
-- Dynamic PVC create/delete works.
-- App pod writes and reads through a PVC.
-- Cleanup leaves no active iSCSI sessions and no visible Kubernetes residue.
-- Default frontend: iSCSI.
-- Optional frontend: NVMe-oF, behind explicit protocol selection and release
+### Phase 27 - Multi-Volume HA Independence
+
+Type: Functional + Core Stability
+
+Current status: D1 PASS, 20%.
+
+D1 closed:
+
+- `N=3` PVCs.
+- `RF=3` each.
+- 9 generated blockvolume Deployments.
+- 3 writer checksums PASS.
+- 3 reader checksums PASS.
+- `sw-block ops report` shows 3 ManagedVolumes and `rf=3`.
+- Cleanup waits for all generated blockvolume Deployments and exits clean.
+
+Next gates:
+
+- D2: per-volume CSI reattach recovery, pod recreate allowed.
+- D3: per-volume mounted transparent failover, no pod recreate, multipath
+  enabled.
+- D4: concurrent/interleaved primary failures across multiple volumes.
+
+Non-claim:
+
+- D1 is readiness only. It does not prove failover isolation.
+
+## Functional Capability Backlog
+
+### Availability And Recovery
+
+Closed:
+
+- RF3 `sync-quorum` recovery through CSI/pod recreate.
+- RF3 Kubernetes node-loss recovery through CSI reattach.
+- RF3 iSCSI ALUA + Linux dm-multipath transparent mounted failover for one
+  volume.
+
+Current:
+
+- Multi-volume HA independence, Phase 27.
+
+Later:
+
+- Returned-replica rebuild/reintegration/failback.
+- Stronger committed-frontier publication and audit.
+- Longer soak under failure.
+- NVMe ANA Kubernetes multipath parity.
+
+### Protocols And Backends
+
+Closed / current:
+
+- iSCSI is the default frontend.
+- NVMe-oF exists behind explicit protocol selection and gates.
+- `walstore` remains the MVP durable backend.
+- Protocol hardening docs live under `internal/docs/protocol/`.
+
+Later:
+
+- NVMe ANA parity after iSCSI multipath semantics are stable.
+- Storage-engine boundary tests and backend pressure gates.
+- RDMA/KV-backed experiments only if they preserve block semantics:
+  ACK profile, durable frontier, fencing, retry behavior, and supportable
+  failure evidence.
+
+### Data Services
+
+Later:
+
+- Backup/snapshot/restore.
+- Cross-cluster DR contract.
+- Capacity/quota enforcement with operator-readable errors.
+
+These are important product features, but they should not interrupt the current
+multi-volume HA and operator readiness tracks.
+
+## Operational Product Backlog
+
+### Packaging And Install
+
+Closed:
+
+- Script activation Day-1 loop.
+- Helm first-volume loop.
+- Helm lifecycle hardening: chart hygiene, upgrade/rollback smoke,
+  multi-PVC Day-1, support bundle replay, cleanup.
+
+Current:
+
+- Publish v0.3.1 immutable GHCR images and update README / quickstart /
+  release note pins.
+
+Next:
+
+- Operator lifecycle design after Helm and Phase 27 semantics are stable.
+
+### Observation And Support
+
+Closed:
+
+- `sw-block ops inventory`.
+- `sw-block ops cluster`.
+- `sw-block ops report`.
+- `sw-block ops dashboard` local read-only surface.
+- `sw-block ops explain`.
+- Product-owned timeline / event evidence.
+- Support bundle replay from saved artifacts.
+
+Next:
+
+- Keep report/dashboard/reason-code output aligned as Phase 27 adds
+  multi-volume failover evidence.
+- Add concise runbook mappings from stable reason codes to operator actions.
+
+Later:
+
+- Metrics and alerts.
+- Production hosted dashboard.
+- Audit/compliance reports.
+
+### Operator
+
+Preconditions:
+
+- Helm lifecycle stable.
+- ManagedVolume model is the single read model.
+- Phase 27 does not reveal unresolved multi-volume semantics.
+
+Initial operator scope:
+
+- CRD status only.
+- Conditions and Events from ManagedVolume projection.
+- Install/readiness/cleanup visibility.
+- No mutating promote/repair/rebuild buttons in the first operator release.
+
+Later:
+
+- Safe repair/rebuild/failback workflows with RBAC, audit, dry-run, and hard
   gates.
-- Default backend: `walstore`.
 
-### Alpha Stabilization
+## Core Stability Backlog
 
-- Make cleanup product-owned instead of script-owned.
-- Make PVC owner-reference cleanup the default path.
-- Stabilize iSCSI with real OS initiators and larger filesystem writes.
-- Make repeated create/write/read/delete stable.
-- Keep artifact bundles useful for QA and issue reports.
-- Keep docs modest and accurate.
+### State Model And Truth Ownership
 
-### Beta Candidate
+Closed / current:
 
-- Multi-node Kubernetes attach.
-- Durable volume state across `blockvolume` restart. (Closed for supported
-  single-node RF=1 alpha path in phase 13.)
-- Same-node multi-node-capable attach and placement visibility. (Closed for
-  the supported RF=1 loopback alpha path in phase 14.)
-- Basic failover with an attached workload.
-- Returned replica lifecycle: observed -> candidate -> syncing/rebuilding ->
-  ready.
-- Explicit ACK profile: best-effort, sync-quorum, or sync-all
-  (quorum/full-ack aliases may appear in older docs or discussions).
-- TestOps can run named smoke scenarios and return result bundles.
+- ManagedVolume Operations Model seed.
+- Truth-domain and invariant docs under `internal/docs/protocol/`.
+- Observation slots merge by `(volume, replica)` with independent freshness.
+- Materialized workload ports persist so new volumes cannot reshuffle existing
+  ports.
 
-### Production Candidate
+Next:
 
-- Soak and fault testing.
-- Upgrade and uninstall story.
-- Security and resource hardening.
-- Operator-visible status and diagnostics.
-- Reproducible release images.
-- Documented operational limits.
+- Extend ManagedVolume to express multi-volume failover isolation facts:
+  target volume, non-target volume stability, primary_count, stale I/O result,
+  and host-path recovery method.
+- Keep local controllers small: truth owners publish facts, orchestration
+  entities make global decisions, executors perform allowed actions, evidence
+  records why.
 
-### Iterative Release Rule
+### Cleanup And Idempotence
 
-- Do not wait for the full enterprise block vision before publishing useful
-  slices.
-- Every hardening phase should have a user-visible preview with clear
-  non-claims.
-- TestOps evidence is release evidence, but user installs and issues are the
-  feedback loop.
-- Keep the basic block product and basic runner open enough to build trust;
-  reserve advanced fleet automation, private scenario corpus, hosted
-  validation, and enterprise operations as possible enterprise layers.
+Closed / current:
 
-## Priority Tracks
+- Helm cleanup verification.
+- Multi-volume helper waits for generated blockvolume Deployments before
+  claiming cleanup success.
 
-### Track A: Kubernetes Install And Cleanup
+Next:
 
-- Closed: v0.2 alpha closes the script-based Day-1 loop for the supported
-  Kubernetes path: activate, verify node readiness, create a first PVC, run
-  writer/reader verification, inspect status/report evidence, and clean up.
-  Product-owned generated `blockvolume` workload lifecycle is also closed for
-  the supported alpha path.
-- Closed on 2026-05-22: v0.3 Helm activation. Package the same Day-1 path as a chart while
-  keeping preflight and host cleanup explicit:
-  - charted blockmaster, CSI controller/node, RBAC, CSI driver, StorageClass,
-    CHAP Secret, and cluster spec,
-  - values for image tags/digests, ACK profile, external iSCSI/status,
-    Stage 2 multipath, namespace, and StorageClass,
-  - generated Day-1 values file for multi-node labs,
-  - `helm install` + first PVC smoke + `sw-block ops report`,
-  - local read-only `sw-block ops dashboard` over the same evidence,
-  - `helm uninstall` plus explicit host cleanup verification.
-- Current: Phase 26 Helm release lifecycle hardening. Keep the scope narrow:
-  - `helm lint` and template validation,
-  - chart version / `appVersion` / image tag and digest alignment,
-  - install -> first PVC -> report/dashboard -> upgrade/rollback smoke,
-  - multi-PVC Day-1 smoke,
-  - support bundle completeness for PASS and blocked cases,
-  - `helm uninstall` plus strict host cleanup verification.
-- Later: v0.4 operator lifecycle. Introduce CRDs/Conditions/Events and scoped
-  reconciliation only after the Helm lifecycle contract is stable.
+- Make more cleanup product-owned instead of script-owned.
+- Preserve test/debug artifacts while guaranteeing no live sessions/processes.
 
-### Track B: iSCSI Frontend Stability
+### TestOps And Lab Control
 
-- Current: Linux/open-iscsi and Windows 11 built-in Initiator correctness are
-  validated for the current alpha claim. Evidence includes mkfs/NTFS format,
-  checksum write/read, cleanup, and Linux dmesg-delta checks.
-- Next: move remaining iSCSI work to component-first session/backend pressure
-  tests instead of broad V2 porting.
-- Later: larger compatibility coverage across host distros and initiator
-  versions.
+Current:
 
-### Track C: Durable State
+- TestOps scenarios are release evidence.
+- Runner still relies heavily on SSH and shared lab convention.
 
-- Current: durable hostPath restart/reattach is closed for the supported
-  single-node RF=1 alpha path. Users can configure a run-scoped durable path,
-  restart the generated `blockvolume`, reattach through the PVC, and verify
-  durable status/inventory evidence.
-- Next: keep durable evidence wired into multi-node attach and later
-  availability gates.
-- Later: integrate returned-replica rebuild and storage-engine compaction.
+Next:
 
-### Track D: Availability And Recovery
+- TestOps controller/agent design for node snapshots, logs, locks, and
+  artifact collection.
 
-- Current: Stage 1 mounted recovery and Stage 2 transparent host-path failover
-  are closed for the documented Kubernetes alpha path. Stage 1 proved RF=3
-  `sync-quorum` recovery through CSI/node reattach on pod recreate. Stage 2
-  proved RF=3 `sync-quorum` iSCSI ALUA plus Linux dm-multipath failover with
-  the same mounted writer pod, no pod recreate, no CSI re-stage, stale-primary
-  fencing, and post-failure checksum verification.
-- Closed: node-loss survival is validated for RF=3 `sync-quorum` across
-  distinct Kubernetes nodes with CSI reattach recovery.
-- Current: Phase 27 starts the multi-volume HA independence track. D1 readiness
-  proves `N=3` RF=3 volumes can coexist and serve writer/reader workloads; D2-D4
-  must prove per-volume failover isolation before any multi-volume HA claim.
-- Later: returned-replica rebuild/reintegration/failback, NVMe ANA Kubernetes
-  multipath parity, stronger committed-frontier reporting, broad distro/host
-  compatibility, and longer soak under failure.
+Later:
 
-### Track E: Protocol / Backend Expansion
+- Scenario library, matrix scheduling, hosted validation, and enterprise test
+  automation.
 
-- Current: iSCSI and NVMe-oF are protocol-gated frontends. `walstore` remains
-  the MVP backend.
-- Next: storage-engine boundary tests, backend pressure behavior, and
-  smartwal/delta experiments behind explicit gates.
-- Protocol hardening now has a dedicated working area under
-  `internal/docs/protocol/`. New protocol semantics should update the control
-  model, invariant ledger, and anti-pattern checklist there before release
-  claims are made.
-- Later: RDMA/KV-backed data-plane experiments and semantic storage protocols
-  only after the block core is mature.
-- Guardrail: do not let backend/library extraction weaken the user-visible
-  block contract. A simpler data-plane seam is useful only if it preserves the
-  product semantics the block layer needs: bounded buffers/streaming for large
-  objects, explicit acknowledgement profile, durable frontier, fencing, retry
-  behavior, and supportable failure evidence. If an abstraction becomes easier
-  to test but cannot carry real volume I/O semantics, keep it experimental and
-  do not build a product claim on it.
+## Release Rules
 
-### Track F: Operations Layer
-
-- Current: cluster operations inventory is closed for the supported alpha path:
-  it discovers live Seaweed Block volumes from Kubernetes, maps them to
-  PVC/PV/generated workloads, attaches per-replica status bundles, and names
-  stale/orphan residue without relying on TestOps artifacts. It also serves as
-  the proof surface for product-owned lifecycle, durable restart evidence, and
-  same-node placement/attach evidence. Phase 19 closed the shared observation
-  core for users/support/AI, JSON automation, and future dashboard use.
-- Current: observation is now part of the first-user loop. Users can inspect
-  cluster status, volume detail, timeline, static report artifacts, and a local
-  read-only dashboard without SSHing into every node.
-- Closed model-hardening slice: Phase 22 ManagedVolume Operations Model
-  (`internal/docs/protocol/phase22-control-context-plan.md`) made PVC-backed
-  volumes a first-class internal read model that composes K8s, CSI, authority,
-  recovery, host path, workload, and evidence facts while keeping local
-  controllers small and testable.
-- Later: metrics, read-only dashboard hardening, conservative admin controls,
-  enterprise operations, hosted validation, fleet automation, and cloud-scale
-  test lifecycle.
-
-### Track F2: ManagedVolume Model And Protocol Hardening
-
-- Closed for current scope: V3 protocol principles have been pulled into
-  `internal/docs/protocol/`: truth-domain ownership, anti-patterns, invariant
-  ledger, engine design guidelines, and the Phase 22 ManagedVolume plan. The scope review in
-  `internal/docs/protocol/operations-state-dependency-review.md` defines Phase
-  22 as a PVC-backed ManagedVolume read model plus read-only operations
-  alignment.
-- Seed landed: `core/ops` now has an initial ManagedVolume projection model,
-  typed facts, status priority, read-only/dry-run action contracts,
-  `VolumeEvidence` and bundle-artifact bridges, and table tests for healthy
-  first-volume, blocked loopback cross-node attach, CSI image-pull and mount
-  blockers, node-loss reattach recovery, Stage 2 transparent multipath
-  recovery, non-claims, and dual-primary invalid priority.
-- Execution discipline: every Phase 22 D-step must carry TDD, internal review
-  against the engine guidelines, and a regression command before it can close.
-- Later: use ManagedVolume as the semantic core for operator
-  Conditions/Events, read-only dashboard, and any future safe mutating admin
-  workflows.
-
-### Track F3: Operations Surface / Dashboard / Operator-Readiness
-
-- Current: Phase 23 is closed for scope. Seaweed Block now exposes
-  ManagedVolume Conditions, evidence refs, report/explain alignment, and a
-  future-operator status contract from the shared read model.
-- Current: Phase 24 is closed for scope. Seaweed Block can serve a local
-  read-only dashboard/API surface over the same `ClusterEvidence` and
-  ManagedVolume model used by `sw-block ops report`.
-- Closed on 2026-05-22: Phase 25 packages that operations surface into the
-  v0.3 Helm first-volume release story and validates docs/gates against it.
-- Seed landed:
-  - `NewObservationDashboardHandler` serves `index.html`,
-    `cluster-evidence.json`, `timeline.jsonl`, `summary.txt`, and `healthz`,
-  - `sw-block ops dashboard` serves bundle-backed and master-api-backed
-    evidence on a loopback address by default,
-  - unsafe HTTP methods return `405` with a read-only boundary message,
-  - `ops explain` now emits ManagedVolume Conditions, dry-run action
-    preconditions, invariant refs, evidence refs, and non-claims,
-  - Conditions carry additive `evidence_refs`,
-  - `ManagedVolumeOperatorContractFromProjection` defines how Conditions map to
-    future operator status and Kubernetes Events while keeping
-    `mutation_allowed=false`,
-  - `internal/docs/protocol/operator-readiness-contract.md` documents the
-    future operator boundary,
-  - replay tests cover first-volume, blocked, and recovery bundles.
-- Later: production dashboard hardening and operator reconciliation can depend
-  on this surface, but should not bypass ManagedVolume or mint their own truth.
-
-### Product Semantics Rule
-
-- Roadmap slices must preserve a sharp product question. For block storage, the
-  question is not "can we model this state?" but "can an operator and workload
-  safely use this volume under the documented topology and failure mode?"
-- Passing tests are not enough when the tested abstraction has weaker semantics
-  than the user-facing product. Such cases must be documented as non-claims,
-  safe refusals, or experiments.
-- Mature-product direction means each operations and availability slice should
-  improve one of: provision, attach, mounted I/O, durability, fencing, reattach,
-  cleanup, status, or support-bundle actionability.
-
-### Top Light-Use Product Blockers
-
-These are the main gaps between the current functional block substrate and a
-credible light-use product:
-
-- Product-owned generated workload lifecycle: scripts/TestOps still own too
-  much apply/cleanup and run-scoped state management.
-- Install/upgrade/uninstall: v0.2 script activation works and v0.3 Helm is the
-  current packaging boundary. Operator lifecycle comes after the Helm contract
-  is stable.
-- Observation beyond one volume: the read-only CLI/dashboard now covers cluster
-  inventory and first-volume evidence; users will still need richer lifecycle
-  status, metrics, and production UI hardening.
-- Safe admin controls: repair/promote/cleanup actions must wait until the
-  read-only observation model is stable and release-gated.
-
-### Track H: Stage 1.5 Product Usability Hardening
-
-- Current: core product loops are proven for light-use alpha, but day-2
-  usability still depends too much on internal context.
-- Next:
-  - add `kubectl get`-readable readiness/degraded/recovering/blocked conditions
-    with stable reason codes,
-  - provide one-command support-bundle capture with minimum evidence for attach,
-    failover, and cleanup diagnosis,
-  - set conservative default timeout/retry profiles for iSCSI/NVMe/CSI paths,
-  - add upgrade/rollback smoke gates for PVC attach/read continuity,
-  - enforce capacity/replication preflight guards with operator-readable errors,
-  - harden delete/residue cleanup auditing for sessions/targets/artifacts,
-  - run multi-volume concurrency baselines (create/attach/delete) as product
-    gates, not ad-hoc checks,
-  - keep fail-closed blocker reasons directly mapped to operator runbook steps.
-- Later: fold proven Stage 1.5 hardening into beta entry criteria.
-
-### Track I: Enterprise Feature Gap Closure (Backup, UI, DR, Security)
-
-- Current: Seaweed Block is intentionally narrow and honest for alpha/beta.
-  Compared with mature Kubernetes block platforms, major product gaps still
-  include:
-  - backup/snapshot lifecycle as a first-class product workflow,
-  - disaster-recovery orchestration across clusters/regions,
-  - operator-facing control UI and guided diagnostics,
-  - policy/RBAC/audit guardrails for admin actions,
-  - richer day-2 automation (scheduled policies, safe runbooks, rollback UX).
-- Reference signals from mature products:
-  - Longhorn exposes recurring snapshot/backup jobs and UI-first operations.
-  - Ceph/Rook exposes RBD snapshots and mirroring for DR workflows.
-  - OpenEBS Replicated PV Mayastor exposes replicated PV operations and CSI
-    snapshot integration.
-  - Portworx positions backup + DR + enterprise security as core platform
-    pillars.
-- Next (priority order):
-  - P1: backup/snapshot policy + restore workflow with support-bundle evidence,
-  - P1: control-plane read UI over the observation API described in
-    `ref/control-plane-observation-api-mvp.md`,
-  - P2: admin action protocol (promote/repair/cleanup) with strict fencing and
-    audit trail,
-  - P2: cross-cluster DR contract (RPO/RTO class + failover/failback runbook),
-  - P3: security hardening track (RBAC, secret handling, action audit,
-    tenancy boundaries).
-- Later: turn these tracks into explicit beta/production entry gates and avoid
-  feature-claim drift between docs and runnable gates.
-
-### Track G: Test Management Control Plane
-
-- Current: runner scenarios write result/status bundles, but M01/M02 shared lab
-  ownership is still mostly implicit.
-- Next: add simple shared-drive control data for active runs, history, locks,
-  artifact pointers, commits, target nodes, and stale-run detection.
-- Later: scenario library indexing, queueing, remote agents on lab nodes,
-  matrix scheduling, hosted validation, and discovery-agent ingestion.
-
-## PR Cadence
-
+- Every user-facing claim needs a gate, run ID, and support artifact.
+- Do not promote TestOps-only behavior into docs unless a user path exists.
 - Prefer one coherent milestone PR, not one PR per tiny fix.
-- Target one or two PRs per day at most.
-- Keep minor doc/test cleanups batched unless they block current work.
-- QA can push evidence-only PRs when assigned, but product code should stay
-  milestone-based.
-
-## Current Execution Pointer
-
-- Active work should be tracked in `internal/docs/current-plan.md`.
-- When the current plan closes, move it to `internal/docs/finished-plans/`
-  with a phase/topic filename such as
-  `phase1_finishedplan_frontend_protocol_readiness.md`.
-- Keep deeper technical design in separate files only when it is needed for
-  review or future maintenance.
+- Keep `internal/docs/current-plan.md` as the active execution pointer.
+- When a plan closes, add a finished plan under `internal/docs/finished-plans/`.
 - Keep long audits and historical references under `internal/docs/ref/`.
