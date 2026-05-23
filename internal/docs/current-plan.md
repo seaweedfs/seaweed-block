@@ -323,6 +323,47 @@ Evidence:
   `rtpg_transition_verified=true` for each target volume. This covers all
   three sequential D3 targets and both interleaved D4 targets.
 
+## D7: Flake Matrix Wrapper
+
+Goal: make the Phase 27 reliability gates repeatable and measurable instead of
+single-run-only.
+
+Status: dev implementation complete on 2026-05-23; QA/nightly N>=5 pending.
+
+Implementation:
+
+- Added `scripts/run-phase27-flake-matrix.ps1`.
+- The wrapper runs a selected TestOps scenario `N` times, stores each run under
+  `iterations/iteration-NN/`, and emits:
+  - `flake-summary.txt`
+  - `flake-summary.json`
+- Summary fields:
+  - `target_runs=<N>`
+  - `pass_runs=<P>`
+  - `fail_runs=<F>`
+  - `flake_rate_percent=<percent>`
+  - one line per iteration with result, exit code, run id, and duration
+
+Evidence:
+
+- Smoke run: `results/phase27-d7-flake-smoke`
+- Scenario: `testops/scenarios/helm-multi-volume-rf3-interleaved-failover-chain.yaml`
+- Iterations: 1
+- Result: PASS, `pass_runs=1`, `fail_runs=0`, `flake_rate_percent=0`
+- Dev stability run: `results/phase27-d7-flake-interleaved-n3`
+- Scenario: `testops/scenarios/helm-multi-volume-rf3-interleaved-failover-chain.yaml`
+- Iterations: 3
+- Result: PASS, `pass_runs=3`, `fail_runs=0`, `flake_rate_percent=0`
+- Iteration run IDs:
+  - `20260523-124555-691c`
+  - `20260523-124832-7d5c`
+  - `20260523-125104-532c`
+
+Release-grade target:
+
+- Run D3 and D4 at least `N=5` each in nightly or QA-owned validation.
+- Required result for release-grade wording: `flake_rate_percent=0`.
+
 ## Risks
 
 | Risk | Mitigation |
@@ -340,3 +381,4 @@ Evidence:
 - D4: PASS - RF=3 interleaved multi-volume mounted failover `20260523-093348-6b02`
 - D5: PASS - measured stale primary direct-read probe `20260523-114708-46bc`
 - D6: PASS - measured RTPG AAS transition evidence `20260523-123229-9dd4`, `20260523-123647-2fc4`
+- D7: DEV PASS - flake matrix wrapper, D4 N=3 pass, N>=5 QA/nightly pending

@@ -110,7 +110,7 @@ All target volumes recorded the expected `0x00 -> missing` old-primary path and
 
 ## D7 - Stability / Flake-Rate Matrix
 
-**The gap**: D3 and D4 are single-run PASS. No information on how often they
+**The gap**: D3 and D4 were single-run PASS. No information on how often they
 pass under repeated runs. Promotion races, port-allocation races, observation
 slot merge under load, and multipath path-stay-on-active timing are all
 candidates for intermittent failures that won't show up in a single run.
@@ -119,32 +119,42 @@ candidates for intermittent failures that won't show up in a single run.
 not a one-shot smoke claim. A 95% pass rate would not be acceptable for a
 release-grade gate.
 
-**Fix shape**:
+**Status**: DEV PASS, QA/nightly N>=5 pending.
 
-1. New runner mode or wrapper script that runs each of D1-D4 N times in a
-   row (default `N=5`, configurable via env).
-2. Per-iteration: capture full artifact tree under
-   `iteration-<i>/` subdirectory.
-3. Emit `flake-summary.txt` with:
+Implemented shape:
+
+1. New wrapper script `scripts/run-phase27-flake-matrix.ps1` runs a selected
+   scenario N times.
+2. Per-iteration result bundles are captured under
+   `iterations/iteration-<NN>/`.
+3. Emits `flake-summary.txt` and `flake-summary.json` with:
    - `target_runs=<N>`
    - `pass_runs=<P>`
    - `fail_runs=<N-P>`
    - per-iteration result line: `iteration=<i> result=PASS|FAIL
      run_id=<id>`
    - `flake_rate_percent=<((N-P)/N)*100>`
-4. Schedule as nightly cron rather than per-PR gate (cost-aware).
-5. Hard gate: `flake_rate_percent=0` over the documented window.
+4. Intended scheduling: nightly or QA-owned validation rather than every PR
+   (cost-aware).
+5. Hard gate target: `flake_rate_percent=0` over the documented window.
 
 **Helper changes**:
 
-- New `scripts/run-phase27-flake-matrix.sh` that drives swblock.exe
+- New `scripts/run-phase27-flake-matrix.ps1` that drives `swblock.exe run`
   N times.
-- New scenario `helm-multi-volume-rf3-flake-matrix-chain.yaml` that wraps the
-  N-iteration loop.
 
-**Hard gate**: 0 flake over 5 sequential runs on a clean lab.
+**Evidence**:
 
-**Scope**: dev for helper; TestOps infra for nightly scheduling.
+- Smoke: `results/phase27-d7-flake-smoke`, one interleaved D4 iteration, PASS,
+  `flake_rate_percent=0`.
+- Dev stability: `results/phase27-d7-flake-interleaved-n3`, three interleaved
+  D4 iterations, PASS, `pass_runs=3`, `fail_runs=0`,
+  `flake_rate_percent=0`.
+
+**Hard gate still pending**: 0 flake over 5 sequential D3 runs and 5 sequential
+D4 runs on a clean lab.
+
+**Scope**: dev for helper; QA/TestOps infra for nightly scheduling.
 
 ## D8 - App Pod Distribution Across Nodes
 
@@ -195,7 +205,7 @@ lands.
 |---|---|---|---|
 | 1 | D5 (real stale-I/O probe) | DONE | Closed by run `20260523-114708-46bc` |
 | 2 | D6 (RTPG AAS pre/post) | DONE | Closed by run `20260523-123229-9dd4` |
-| 3 | D7 (flake matrix) | MEDIUM | Required for any release-grade claim |
+| 3 | D7 (flake matrix) | DEV PASS | D4 N=3 pass; N>=5 QA/nightly pending |
 | 4 | D8 (app pod spread) | MEDIUM | Removes single-node-initiator hidden-bug risk |
 
 ## Release Note Implications
@@ -213,6 +223,6 @@ and D6 now strengthened:
 Phase 27 is shippable as alpha at the single-app-node, single-run, gated
 "transparent failover claimed" wording, with D5 stale-primary fencing and D6
 RTPG AAS transitions now measured. The release note should explicitly defer
-D7-D8 broadening work. None of these block the multi-volume-mounted-failover
+D7 full N>=5 stability and D8 app-spread broadening work. None of these block the multi-volume-mounted-failover
 product capability itself; they bound how broadly we can market the strongest
 claims.
