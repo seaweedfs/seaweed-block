@@ -13,6 +13,7 @@ CHAP_SECRET_NAME="${SW_BLOCK_ISCSI_CHAP_SECRET_NAME:-sw-block-iscsi-chap}"
 APP_NODE_SELECTOR="${SW_BLOCK_MULTI_VOLUME_APP_NODE:-${SW_BLOCK_BASIC_APP_NODE_SELECTOR:-}}"
 MASTER_PORT="${SW_BLOCK_MASTER_PORT_FORWARD_PORT:-}"
 MOUNTED_IO_TIMEOUT="${SW_BLOCK_MOUNTED_IO_TIMEOUT:-180s}"
+STALE_IO_PROBE_TIMEOUT="${SW_BLOCK_STALE_IO_PROBE_TIMEOUT:-8s}"
 FAILOVER_MODE="${SW_BLOCK_MULTI_VOLUME_FAILOVER_MODE:-sequential}"
 TARGET_VOLUME_COUNT="${SW_BLOCK_MULTI_VOLUME_TARGET_COUNT:-$VOLUME_COUNT}"
 
@@ -378,6 +379,41 @@ echo non_target_workload_ok
 " >"$out" 2>&1
 }
 
+probe_stale_primary_path() {
+  local volume_id="$1"
+  local old_frontend="$2"
+  local out="$3"
+  local host="${old_frontend%:*}"
+  local port="${old_frontend##*:}"
+  local success=0
+  local found=0
+  {
+    echo "stale_primary_probe=direct_read"
+    echo "volume_id=$volume_id"
+    echo "old_frontend=$old_frontend"
+    echo "timeout=$STALE_IO_PROBE_TIMEOUT"
+    shopt -s nullglob
+    for d in /dev/disk/by-path/*ip-"${host}:${port}"*io.seaweedfs:"${volume_id}"*; do
+      found=1
+      raw="$(readlink -f "$d")"
+      echo "candidate_path=$d"
+      echo "candidate_raw=$raw"
+      if timeout "$STALE_IO_PROBE_TIMEOUT" sudo -n dd if="$raw" of=/dev/null bs=4096 count=1 iflag=direct status=none; then
+        echo "candidate_result=unexpected_success"
+        success=$((success + 1))
+      else
+        echo "candidate_result=expected_failure"
+      fi
+    done
+    shopt -u nullglob
+    if [[ "$found" -eq 0 ]]; then
+      echo "candidate_result=no_stale_path"
+    fi
+    echo "old_primary_stale_io_success_count=$success"
+  } >"$out" 2>&1
+  echo "$success"
+}
+
 write_summary() {
   {
     echo "multi_volume_mounted_failover_status=$STATUS"
@@ -550,14 +586,16 @@ PY
     if [[ "$uid_after" != "$(sed -n 's/^writer_pod_uid_before=//p' "$dir/summary.txt")" ]]; then
       pod_recreate=true
     fi
+    stale_success="$(probe_stale_primary_path "$vid" "$frontend" "$dir/stale-primary-probe.log")"
     {
       echo "failover_status=promoted"
       echo "promoted_replica=$promoted"
       echo "after_publish_target=$after_frontend"
       echo "post_failure_primary_count=$primary_count"
       echo "target_ready_replicas=$target_ready"
-      echo "stale_primary_fence_evidence=target_ready_replicas=$target_ready"
-      echo "old_primary_stale_io_success_count=0"
+      echo "stale_primary_fence_evidence=target_ready_replicas=$target_ready,stale_path_direct_read_success_count=$stale_success"
+      echo "stale_primary_probe=direct_read"
+      echo "old_primary_stale_io_success_count=$stale_success"
       echo "writer_pod_uid_after=$uid_after"
       echo "pod_recreate_used=$pod_recreate"
       echo "data_check_after_failover=mounted_workload_checksum_passed"
@@ -565,7 +603,7 @@ PY
       echo "cross_interference_observed=false"
       echo "transparent_failover_claimed=true"
     } >>"$dir/summary.txt"
-    if [[ "$primary_count" != "1" || "$pod_recreate" != "false" ]]; then
+    if [[ "$primary_count" != "1" || "$pod_recreate" != "false" || "$stale_success" != "0" ]]; then
       STATUS="failed"
       FAILED_PHASE="interleaved_isolation_volume_${idx}"
       write_summary
@@ -696,6 +734,7 @@ while IFS=$'\t' read -r idx vid pvc primary node frontend deploy; do
   if [[ "$uid_after" != "$uid_before" ]]; then
     pod_recreate=true
   fi
+  stale_success="$(probe_stale_primary_path "$vid" "$frontend" "$dir/stale-primary-probe.log")"
   capture_host_path_evidence "after-volume-${idx}"
 
   {
@@ -704,8 +743,9 @@ while IFS=$'\t' read -r idx vid pvc primary node frontend deploy; do
     echo "after_publish_target=$after_frontend"
     echo "post_failure_primary_count=$primary_count"
     echo "target_ready_replicas=$target_ready"
-    echo "stale_primary_fence_evidence=target_ready_replicas=$target_ready"
-    echo "old_primary_stale_io_success_count=0"
+    echo "stale_primary_fence_evidence=target_ready_replicas=$target_ready,stale_path_direct_read_success_count=$stale_success"
+    echo "stale_primary_probe=direct_read"
+    echo "old_primary_stale_io_success_count=$stale_success"
     echo "writer_pod_uid_after=$uid_after"
     echo "pod_recreate_used=$pod_recreate"
     echo "data_check_after_failover=mounted_workload_checksum_passed"
@@ -714,7 +754,7 @@ while IFS=$'\t' read -r idx vid pvc primary node frontend deploy; do
     echo "transparent_failover_claimed=true"
   } >>"$dir/summary.txt"
 
-  if [[ "$primary_count" != "1" || "$pod_recreate" != "false" || "$cross" != "false" ]]; then
+  if [[ "$primary_count" != "1" || "$pod_recreate" != "false" || "$cross" != "false" || "$stale_success" != "0" ]]; then
     STATUS="failed"
     FAILED_PHASE="isolation_volume_${idx}"
     write_summary

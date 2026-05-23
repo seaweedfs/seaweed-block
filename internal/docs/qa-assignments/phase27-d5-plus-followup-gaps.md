@@ -1,0 +1,216 @@
+# Phase 27 D5+ Follow-up Gaps
+
+Date: 2026-05-23
+
+QA validation of Phase 27 D1-D4 passed strict (see
+`phase27-multi-volume-ha-independence-close-report.md`), but four product-claim
+gaps surfaced during the audit. D5 is now closed by measured probe evidence;
+D6-D8 remain follow-ups before "multi-volume HA independence" is published as a
+release-grade claim beyond the alpha lab.
+
+## D5 - Real Stale-Primary I/O Fencing Probe
+
+**Original gap**: `old_primary_stale_io_success_count=0` was literally written
+by `scripts/run-multi-volume-mounted-failover.sh`:
+
+```bash
+echo "old_primary_stale_io_success_count=0"
+```
+
+The scenario then asserts the line exists in the per-volume summary. This is
+tautological - it proves the script wrote 0, not that the stale primary
+actually rejected I/O. The same pattern is in
+`scripts/run-alpha-app-demo.sh:1004,1100`.
+
+**Why it matters**: the strongest single claim Phase 27 makes is "stale
+primary fenced; old-primary stale I/O success count = 0". Right now that
+claim has no evidence.
+
+**Status**: CLOSED on 2026-05-23.
+
+Implemented fix:
+
+1. After failover, `scripts/run-multi-volume-mounted-failover.sh` probes the
+   old primary's exact iSCSI by-path device from the initiator host.
+2. The probe path is scoped by both old frontend (`ip-<host>:<port>`) and
+   `volume_id`, so it does not accidentally test the promoted path.
+3. The probe runs a bounded direct read. Any successful stale-path read
+   increments `old_primary_stale_io_success_count` and fails the gate.
+4. The per-volume summary and `stale-primary-probe.log` both carry the measured
+   count.
+
+**Helper changes**:
+
+- New `probe_stale_primary_path()` function in
+  `scripts/run-multi-volume-mounted-failover.sh`.
+- New artifact `recovery/failover/volume-N/stale-primary-probe.log` with raw
+  probe output.
+
+**Hard gate**: probe runs and measures 0 stale direct-read successes.
+
+**Evidence**: D4 interleaved rerun `20260523-114708-46bc` passed 55/55 actions.
+Both target volumes recorded `candidate_result=expected_failure` and
+`old_primary_stale_io_success_count=0`.
+
+## D6 - Real ALUA RTPG Asymmetric Access State Pre/Post Assertion
+
+**The gap**: D3 + D4 only assert
+`grep_log pattern="asymmetric access state" count > 0` in
+`sg-rtpg.before.txt`. Doesn't parse the actual access state value (Active /
+Optimized vs Active / Non-Optimized vs Standby), doesn't compare before vs
+after the failover. The existing single-volume
+`scripts/run-iscsi-alua-multipath-smoke.sh:279` has the right pattern:
+
+```bash
+sed -n 's/.*asymmetric access state[[:space:]]*:[[:space:]]*\(0x[0-9a-fA-F]\+\).*/\1/p'
+```
+
+It extracts the hex AAS code. The multi-volume scenarios don't use this.
+
+**Why it matters**: D3 claims "iSCSI ALUA + dm-multipath transparent
+failover". Without parsing AAS values, the scenario can't tell the difference
+between:
+- a real ALUA-mediated path switch (AAS changed from AO->ANO on the failed
+  port group and ANO->AO on the promoted port group), and
+- a sg_rtpg call that happens to print text but the path actually didn't
+  switch.
+
+**Fix shape**:
+
+1. Capture `sg_rtpg` output per port group before AND after the failover for
+   each target volume.
+2. Parse AAS for each port group using the existing
+   `run-iscsi-alua-multipath-smoke.sh` regex.
+3. Emit per-volume summary fields:
+   - `rtpg_before_old_primary_aas=<hex>` (expect `0x00` = AO)
+   - `rtpg_before_promoted_aas=<hex>` (expect `0x01` = ANO)
+   - `rtpg_after_old_primary_aas=<hex>` (expect `0x02` = Standby OR
+     unreachable)
+   - `rtpg_after_promoted_aas=<hex>` (expect `0x00` = AO)
+4. Scenario assertion: per-volume
+   `assert_equals rtpg_before_old_primary_aas=0x00 AND
+   rtpg_after_promoted_aas=0x00 AND
+   rtpg_before_promoted_aas != rtpg_after_promoted_aas`.
+
+**Helper changes**:
+
+- Extend `scripts/run-multi-volume-mounted-failover.sh` collect-rtpg path to
+  capture before+after per port group per volume.
+- Replicate the AAS parsing from the existing single-volume helper.
+
+**Hard gate**: pre/post AAS values match the expected transition per volume.
+
+**Scope**: dev.
+
+## D7 - Stability / Flake-Rate Matrix
+
+**The gap**: D3 and D4 are single-run PASS. No information on how often they
+pass under repeated runs. Promotion races, port-allocation races, observation
+slot merge under load, and multipath path-stay-on-active timing are all
+candidates for intermittent failures that won't show up in a single run.
+
+**Why it matters**: "multi-volume HA independence" is a reliability claim,
+not a one-shot smoke claim. A 95% pass rate would not be acceptable for a
+release-grade gate.
+
+**Fix shape**:
+
+1. New runner mode or wrapper script that runs each of D1-D4 N times in a
+   row (default `N=5`, configurable via env).
+2. Per-iteration: capture full artifact tree under
+   `iteration-<i>/` subdirectory.
+3. Emit `flake-summary.txt` with:
+   - `target_runs=<N>`
+   - `pass_runs=<P>`
+   - `fail_runs=<N-P>`
+   - per-iteration result line: `iteration=<i> result=PASS|FAIL
+     run_id=<id>`
+   - `flake_rate_percent=<((N-P)/N)*100>`
+4. Schedule as nightly cron rather than per-PR gate (cost-aware).
+5. Hard gate: `flake_rate_percent=0` over the documented window.
+
+**Helper changes**:
+
+- New `scripts/run-phase27-flake-matrix.sh` that drives swblock.exe
+  N times.
+- New scenario `helm-multi-volume-rf3-flake-matrix-chain.yaml` that wraps the
+  N-iteration loop.
+
+**Hard gate**: 0 flake over 5 sequential runs on a clean lab.
+
+**Scope**: dev for helper; TestOps infra for nightly scheduling.
+
+## D8 - App Pod Distribution Across Nodes
+
+**The gap**: D3 + D4 scenarios pin all 3 writer pods to m02:
+
+```yaml
+env:
+  app_node: "m02"
+```
+
+`scripts/run-multi-volume-mounted-failover.sh:13` reads this env into a
+single `APP_NODE_SELECTOR` applied to every writer manifest. So the cluster
+state under test is: 3 writer pods all on m02, 9 blockvolume pods spread
+across all 3 nodes. This is a narrow shape - real users will spread
+app pods across nodes.
+
+**Why it matters**: app pod placement affects:
+- which node experiences the iSCSI initiator stack failover (currently always
+  m02),
+- whether dm-multipath path-switching is exercised on multiple nodes,
+- whether a cross-node single-app-node assumption hides a bug that surfaces
+  only when writers are on different initiator hosts.
+
+**Fix shape**:
+
+1. Helper `run-multi-volume-mounted-failover.sh` already supports per-volume
+   node selection via `SW_BLOCK_MULTI_VOLUME_APP_NODE`. Extend to accept a
+   comma-list (`m01,m02,tp01`) that maps writer-i to host i.
+2. New scenario `helm-multi-volume-rf3-app-spread-failover-chain.yaml`:
+   writer-1 on m01, writer-2 on m02, writer-3 on tp01, then run the same
+   mounted-failover loop.
+3. Assertions: same per-volume hard-gate as D3, plus a new field
+   `app_node_distribution_count=3` (one initiator per node).
+
+**Helper changes**:
+
+- Comma-list support in `APP_NODE_SELECTOR` (loop index modulo node count).
+- New scenario file.
+
+**Hard gate**: same as D3, with each volume's writer on a different node.
+
+**Scope**: dev for helper extension; QA for scenario authoring once helper
+lands.
+
+## Recommended Sequence
+
+| Order | Gap | Priority | Why |
+|---|---|---|---|
+| 1 | D5 (real stale-I/O probe) | DONE | Closed by run `20260523-114708-46bc` |
+| 2 | D6 (RTPG AAS pre/post) | HIGH | "Transparent failover" claim needs stronger ALUA evidence |
+| 3 | D7 (flake matrix) | MEDIUM | Required for any release-grade claim |
+| 4 | D8 (app pod spread) | MEDIUM | Removes single-node-initiator hidden-bug risk |
+
+## Release Note Implications
+
+Until D6 is addressed, the v0.3.2 release note should keep the ALUA claim
+narrow. D5 stale-primary direct-read fencing is now measured.
+
+- "transparent ALUA failover verified"
+
+The conservative wording from the Phase 27 close report still holds, but
+should be tightened to:
+
+> Mounted failover on a single iSCSI initiator host (m02) preserved the
+> writer pod across the fault and the post-failover checksum matched. Stale
+> primary path reads were measured and rejected. ALUA RTPG state transitions
+> are observed but still need stronger pre/post AAS assertions in D6.
+
+## Verdict
+
+Phase 27 is shippable as alpha at the single-app-node, single-run, gated
+"transparent failover claimed" wording, with D5 stale-primary fencing now
+measured. The release note should explicitly defer D6-D8 broadening work. None
+of these block the multi-volume-mounted-failover product capability itself;
+they bound how broadly we can market the strongest claims.

@@ -5,6 +5,13 @@ Date: 2026-05-23
 Verdict: PASS (strict). All four Phase 27 D1-D4 scenarios pass on a clean
 3-node k3s lab with independent QA rerun. Phase 27 is ready to close.
 
+Post-close D5 hardening: PASS. Run `20260523-114708-46bc` reran the D4
+interleaved gate after replacing the hardcoded stale-primary count with a
+bounded direct-read probe against each old primary by-path. Both target volumes
+recorded `candidate_result=expected_failure` and measured
+`old_primary_stale_io_success_count=0`; the scenario now asserts the probe logs
+directly.
+
 ## Scope
 
 Validates the Phase 27 claim:

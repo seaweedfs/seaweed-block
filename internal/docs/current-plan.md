@@ -269,6 +269,32 @@ Fix included:
 - New TestOps gate:
   `testops/scenarios/helm-multi-volume-rf3-interleaved-failover-chain.yaml`.
 
+## D5: Stale Primary Fencing Evidence Hardening
+
+Goal: make stale-primary fencing evidence measured, not a scripted constant.
+
+Status: PASS on 2026-05-23.
+
+Evidence:
+
+- Scenario: `testops/scenarios/helm-multi-volume-rf3-interleaved-failover-chain.yaml`
+- Run: `20260523-114708-46bc`
+- Result: PASS, 8/8 phases, 55/55 actions
+- The mounted failover helper now probes the old primary's exact iSCSI by-path
+  device with a bounded direct read. The path is scoped by both old frontend
+  (`ip-<host>:<port>`) and `volume_id`, so it does not accidentally probe the
+  promoted path.
+- Per-target artifacts:
+  - `failover/volume-1/stale-primary-probe.log`
+  - `failover/volume-2/stale-primary-probe.log`
+- Both target volumes produced:
+  - `stale_primary_probe=direct_read`
+  - `candidate_result=expected_failure`
+  - `old_primary_stale_io_success_count=0`
+- The scenario now asserts the probe log exists and carries the measured
+  `old_primary_stale_io_success_count=0`; the summary alone is no longer
+  accepted as fencing evidence.
+
 ## Risks
 
 | Risk | Mitigation |
@@ -284,3 +310,4 @@ Fix included:
 - D2: PASS - RF=3 per-volume CSI reattach recovery `20260522-223126-21fd`
 - D3: PASS - RF=3 multi-volume mounted transparent failover `20260523-090534-24e4`
 - D4: PASS - RF=3 interleaved multi-volume mounted failover `20260523-093348-6b02`
+- D5: PASS - measured stale primary direct-read probe `20260523-114708-46bc`
