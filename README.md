@@ -170,7 +170,10 @@ ghcr.io/seaweedfs/seaweed-block:sha-<commit>
 ghcr.io/seaweedfs/seaweed-block-csi:sha-<commit>
 ```
 
-Current validated v0.3 walkthrough image tag: `sha-28a99ce4f644`.
+Current validated v0.3 Day-1 walkthrough image tag:
+`sha-28a99ce4f644`. v0.3.1 lifecycle hardening gates used the Phase 26 branch
+build; publish a new immutable GHCR SHA before advertising v0.3.1 as an
+external image-backed release.
 
 Mutable `:alpha` is a smoke/demo tag only; it can drift from the source tree.
 

@@ -1,6 +1,6 @@
 # Kubernetes Quick Start
 
-This guide is the v0.3 alpha path for Seaweed Block on Kubernetes.
+This guide is the v0.3 / v0.3.1 alpha path for Seaweed Block on Kubernetes.
 
 It shows the user loop:
 
@@ -130,7 +130,9 @@ sw-block ops generate-helm-values \
   --csi-image ghcr.io/seaweedfs/seaweed-block-csi:sha-<commit>
 ```
 
-Current validated v0.3 walkthrough image tag: `sha-28a99ce4f644`.
+Current validated v0.3 Day-1 walkthrough image tag:
+`sha-28a99ce4f644`. The v0.3.1 lifecycle-hardening gates used the Phase 26
+branch build; use the v0.3.1 immutable GHCR SHA once it is published.
 
 Mutable `:alpha` is a smoke/demo tag only. Do not use it as release evidence
 unless the publish commit is known.

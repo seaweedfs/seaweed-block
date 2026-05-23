@@ -32,6 +32,19 @@ SLOs, or new recovery semantics.
 | D3 multi-volume Day-1 | `20260522-152903-1116` | PASS, 29/29 | 3 PVCs, 3 writers, 3 readers, 3 ManagedVolume rows |
 | D4 support bundle diagnostics | `20260522-153929-93a3` | PASS, 38/38 | cold `report/explain/timeline --from-bundle`, blocked bundle explains ImagePullBackOff |
 
+Independent QA replay:
+
+| Gate | QA Run | Result |
+|---|---:|---|
+| D1 chart release hygiene | `20260522-155827-ce94` | PASS, 15/15 |
+| D2 Helm lifecycle smoke | `20260522-155835-2057` | PASS, 27/27 |
+| D3 multi-volume Day-1 | `20260522-155944-27b3` | PASS, 29/29 |
+| D4 support bundle diagnostics | `20260522-160203-227d` | PASS, 38/38 |
+
+QA validation report:
+
+- `internal/docs/qa-assignments/phase26-helm-lifecycle-hardening-qa-validation.md`
+
 ## Acceptance
 
 | Requirement | Result |
@@ -90,6 +103,12 @@ Phase 26 does not deliver:
 - production hosted dashboard,
 - performance/RTO/SLO claims.
 
+## Release Image Note
+
+D3 and D4 validated Phase 26 code through local TestOps images. Publish a new
+immutable GHCR SHA and update README / quickstart pins before presenting
+v0.3.1 as an externally consumable image release.
+
 ## Verdict
 
 PASS for Phase 26 scope.
@@ -97,4 +116,3 @@ PASS for Phase 26 scope.
 Recommended close: prepare the v0.3.1 alpha release note / PR using this report
 as evidence, and carry operator packaging plus broader lifecycle management into
 the next phase.
-
