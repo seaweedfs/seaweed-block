@@ -118,6 +118,11 @@ func (h *Host) submitPlacementSnapshots(placements []lifecycle.PlacementIntent) 
 	}
 	build := authority.BuildSnapshot(h.obs.Store().Snapshot(), topology, h.Publisher())
 	probeCount, blockedCount, directAsks := h.applyPromotionEvidenceGate(&build.Snapshot)
+	supported := supportedSnapshotVolumes(build.Snapshot)
+	unsupportedProbeCount, unsupportedBlockedCount, unsupportedDirectAsks := h.applyUnsupportedPromotionEvidenceGate(placements, build.Report, supported)
+	probeCount += unsupportedProbeCount
+	blockedCount += unsupportedBlockedCount
+	directAsks = append(directAsks, unsupportedDirectAsks...)
 	return true, probeCount, blockedCount, directAsks, h.ctrl.SubmitObservedState(build.Snapshot, build.Report)
 }
 
@@ -199,6 +204,132 @@ func (h *Host) applyPromotionEvidenceGate(snap *authority.ClusterSnapshot) (int,
 		}
 	}
 	return probeCount, blockedCount, directAsks
+}
+
+func (h *Host) applyUnsupportedPromotionEvidenceGate(placements []lifecycle.PlacementIntent, report authority.SupportabilityReport, supported map[string]bool) (int, int, []authority.AssignmentAsk) {
+	if len(report.Unsupported) == 0 {
+		return 0, 0, nil
+	}
+	probeCount, blockedCount := 0, 0
+	var directAsks []authority.AssignmentAsk
+	for _, placement := range placements {
+		if supported[placement.VolumeID] || len(placement.Slots) < 3 || !placementIsConcreteExistingReplica(placement) {
+			continue
+		}
+		evidence, ok := report.Unsupported[placement.VolumeID]
+		if !ok || !unsupportedReasonsAllowPromotionProbe(evidence.Reasons) {
+			continue
+		}
+		current, ok := h.Publisher().VolumeAuthorityLine(placement.VolumeID)
+		if !ok || !current.Assigned {
+			continue
+		}
+		vol, ok := topologyFromUnsupportedPlacement(placement, current)
+		if !ok {
+			continue
+		}
+		currentIdx := replicaIndex(vol.Slots, current.ReplicaID)
+		if currentIdx < 0 {
+			continue
+		}
+		candidates := make([]authority.ReplicaCandidate, 0, len(vol.Slots)-1)
+		for _, slot := range vol.Slots {
+			if slot.ReplicaID != current.ReplicaID {
+				candidates = append(candidates, slot)
+			}
+		}
+		probeCount++
+		result, probeOK := h.probePromotionCandidates(vol.VolumeID, current, candidates)
+		allowed := promotionAllowedReplicas(result, probeOK)
+		if probeOK {
+			h.log.Printf("blockmaster: promotion gate unsupported volume=%s current=%s reasons=%v current_known=%t current_ready=%t ack_profile=%s required_lsn=%d candidates=%v allowed=%v",
+				vol.VolumeID, current.ReplicaID, evidence.Reasons, result.CurrentKnown, result.Current.Ready, result.AckProfile, result.SyncAckLSN, result.Candidates, allowed)
+			h.recordPromotionEvaluationEvents(vol.VolumeID, result, allowed)
+		} else {
+			h.log.Printf("blockmaster: promotion gate unsupported volume=%s current=%s probe_unavailable reasons=%v", vol.VolumeID, current.ReplicaID, evidence.Reasons)
+			h.recordPromotionProbeUnavailableEvent(vol.VolumeID, current.ReplicaID)
+		}
+		enabledCandidate := false
+		for _, slot := range vol.Slots {
+			if slot.ReplicaID != current.ReplicaID && allowed[slot.ReplicaID] {
+				enabledCandidate = true
+				break
+			}
+		}
+		if enabledCandidate && (!result.CurrentKnown || !result.Current.Ready) {
+			if target, ok := chooseAllowedPromotionTarget(vol, result, allowed); ok {
+				h.log.Printf("blockmaster: promotion gate unsupported volume=%s direct_reassign=%s current=%s", vol.VolumeID, target.ReplicaID, current.ReplicaID)
+				directAsks = append(directAsks, authority.AssignmentAsk{
+					VolumeID:  vol.VolumeID,
+					ReplicaID: target.ReplicaID,
+					DataAddr:  target.DataAddr,
+					CtrlAddr:  target.CtrlAddr,
+					Intent:    authority.IntentReassign,
+				})
+			}
+			continue
+		}
+		if !enabledCandidate {
+			blockedCount++
+			h.recordVolumeBlockedEvent(vol.VolumeID, ops.ReasonNoPromotionReadyCandidate)
+		}
+	}
+	return probeCount, blockedCount, directAsks
+}
+
+func supportedSnapshotVolumes(snap authority.ClusterSnapshot) map[string]bool {
+	out := make(map[string]bool, len(snap.Volumes))
+	for _, volume := range snap.Volumes {
+		out[volume.VolumeID] = true
+	}
+	return out
+}
+
+func unsupportedReasonsAllowPromotionProbe(reasons []string) bool {
+	if len(reasons) == 0 {
+		return false
+	}
+	for _, reason := range reasons {
+		switch reason {
+		case authority.ReasonPartialInventory, authority.ReasonMissingServerObservation, authority.ReasonStaleObservation:
+			continue
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func topologyFromUnsupportedPlacement(placement lifecycle.PlacementIntent, current authority.AuthorityBasis) (authority.VolumeTopologySnapshot, bool) {
+	vol := authority.VolumeTopologySnapshot{
+		VolumeID:  placement.VolumeID,
+		Authority: current,
+		Slots:     make([]authority.ReplicaCandidate, 0, len(placement.Slots)),
+	}
+	for _, slot := range placement.Slots {
+		dataAddr := slot.DataAddr
+		ctrlAddr := slot.CtrlAddr
+		if slot.ReplicaID == current.ReplicaID {
+			if dataAddr == "" {
+				dataAddr = current.DataAddr
+			}
+			if ctrlAddr == "" {
+				ctrlAddr = current.CtrlAddr
+			}
+		}
+		if dataAddr == "" || ctrlAddr == "" {
+			return authority.VolumeTopologySnapshot{}, false
+		}
+		vol.Slots = append(vol.Slots, authority.ReplicaCandidate{
+			ReplicaID: slot.ReplicaID,
+			ServerID:  slot.ServerID,
+			DataAddr:  dataAddr,
+			CtrlAddr:  ctrlAddr,
+			Reachable: true,
+			Eligible:  true,
+		})
+	}
+	return vol, true
 }
 
 func (h *Host) recordPlacementVerifiedEvents(placements []lifecycle.VerifiedPlacement) {

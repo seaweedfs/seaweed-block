@@ -1,6 +1,6 @@
 # Current Plan: Phase 27 - Multi-Volume HA Independence
 
-Status: active, 20% complete. Started on 2026-05-22 after Phase 26 Helm
+Status: active, 50% complete. Started on 2026-05-22 after Phase 26 Helm
 lifecycle hardening closed.
 
 ## Product Goal
@@ -99,7 +99,47 @@ for each target volume:
 cleanup clean
 ```
 
-Status: pending.
+Status: PASS on 2026-05-22.
+
+Evidence:
+
+- Scenario: `testops/scenarios/helm-multi-volume-rf3-reattach-recovery-chain.yaml`
+- Run: `20260522-223126-21fd`
+- Result: PASS, 6/6 phases, 29/29 actions
+- Flow:
+  - Helm installed RF=3 sync-quorum stack
+  - three PVCs bound and passed writer/reader setup
+  - each volume's current primary Deployment was stopped in turn
+  - each target volume promoted to a surviving replica
+  - replacement reader verified `/data/demo.bin` after each promotion
+  - non-target volumes kept primary/frontend stable during each target
+    recovery
+  - cleanup removed Helm resources, iSCSI sessions, and product processes
+- Summary fields:
+  - `multi_volume_reattach_status=ok`
+  - `requested_volume_count=3`
+  - `replication_factor=3`
+  - `recovered_volume_count=3`
+  - `cross_interference_observed=false`
+  - `cleanup_status=external_to_script`
+- Per-volume evidence:
+  - volume 1: `before_primary=r1`, `promoted_replica=r2`,
+    `post_failure_primary_count=1`, `reader_verified=true`
+  - volume 2: `before_primary=r2`, `promoted_replica=r1`,
+    `post_failure_primary_count=1`, `reader_verified=true`
+  - volume 3: `before_primary=r3`, `promoted_replica=r1`,
+    `post_failure_primary_count=1`, `reader_verified=true`
+
+Fix included:
+
+- Product loop now probes promotion candidates for known placement volumes that
+  are excluded from the supported authority snapshot only because of
+  recoverable inventory gaps such as `PartialInventory`.
+- If the current primary cannot be proven healthy and a survivor passes the
+  promotion probe, master emits a direct `IntentReassign` for that volume
+  without relaxing unsafe evidence classes such as conflicting primary claims.
+- New TDD coverage:
+  `TestMountedFailover_ProductLoopRF3PromotesWhenCurrentSlotMissingButSurvivorProbeReady`.
 
 ## D3: Multi-Volume Mounted Transparent Failover
 
@@ -152,6 +192,6 @@ Status: pending.
 ## Progress
 
 - D1: PASS - RF=3 multi-volume readiness `20260522-170901-70c5`
-- D2: pending
+- D2: PASS - RF=3 per-volume CSI reattach recovery `20260522-223126-21fd`
 - D3: pending
 - D4: pending
