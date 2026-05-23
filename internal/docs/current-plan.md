@@ -1,317 +1,157 @@
-# Current Plan: Phase 26 - Helm Release Lifecycle Hardening
+# Current Plan: Phase 27 - Multi-Volume HA Independence
 
-Status: closed, 100% complete. Started and closed on 2026-05-22 after PR #49
-merged v0.3 Helm observable first-volume alpha.
-v0.3 Helm observable first-volume alpha.
+Status: active, 20% complete. Started on 2026-05-22 after Phase 26 Helm
+lifecycle hardening closed.
 
 ## Product Goal
 
-Turn the v0.3 Helm-first alpha path into a more release-shaped Kubernetes
-product loop:
+Prove that Seaweed Block can host multiple Kubernetes PVC-backed RF=3 volumes
+and eventually recover each volume independently under faults.
 
-```text
-generate values
--> helm install
--> first PVC
--> multiple PVC smoke
--> read-only report/dashboard/support bundle
--> helm upgrade / rollback smoke
--> helm uninstall and host cleanup
-```
-
-This phase is about lifecycle confidence, not new HA semantics.
+This phase is intentionally separate from v0.3.1. Phase 26 proved Helm lifecycle
+and multi-PVC Day-1 behavior. Phase 27 raises the bar to RF=3 multi-volume
+readiness and, later, multi-volume failover independence.
 
 ## Scope Contract
 
 | In | Out |
 |---|---|
-| Helm install / upgrade / rollback / uninstall gates | CRD/operator implementation |
-| chart version, appVersion, image tag/digest alignment | mutating dashboard/admin actions |
-| single-volume and multi-volume smoke gates | new protocol or recovery capability |
-| support bundle completeness for Helm installs | rebuild/failback implementation |
-| chart packaging and release-note consistency | backup/snapshot/restore |
-| cleanup and host residue verification | broad distro/performance/SLO claims |
+| RF=3 multi-volume readiness and fault gates | v0.3.1 release claim |
+| per-volume primary/replica/frontend independence | operator/CRD implementation |
+| CSI reattach recovery per volume | backup/snapshot/restore |
+| transparent mounted failover per volume if multipath is enabled | broad production HA |
+| cross-volume non-interference evidence | performance/SLO claims |
+| support-bundle/timeline evidence per volume | NVMe ANA parity |
 
-Principle: Phase 26 may take small product fixes only when they block the Helm
-release lifecycle. Do not refactor ManagedVolume, authority, CSI, or protocol
-models unless a release gate proves the current behavior is wrong.
+## Claim Boundary
 
-## Dependencies
-
-- Phase 25 is closed: v0.3 Helm first-volume path works.
-- Published immutable images are available for release validation.
-- Read-only ops report/dashboard artifacts are available.
-- ManagedVolume projection exists for first-volume and recovery explanations.
-
-## D1: Chart Release Hygiene
-
-Goal: make chart metadata and image identity release-grade enough for alpha
-users and QA.
-
-Status: PASS on 2026-05-22.
-
-Evidence:
-
-- Scenario: `testops/scenarios/helm-release-hygiene-chain.yaml`
-- Run: `20260522-131641-7a61`
-- Result: PASS, 5/5 phases, 15/15 actions
-- Artifacts:
-  - `helm-release-hygiene-summary.txt`
-  - `helm-lint.txt`
-  - `helm-template.yaml`
-  - `seaweed-block-0.3.0-alpha.0.tgz`
-- Summary fields:
-  - `helm_hygiene_status=ok`
-  - `chart_version=0.3.0-alpha.0`
-  - `chart_app_version=0.3-alpha`
-  - `rendered_storageclass_count=1`
-  - `rendered_csidriver_count=1`
-  - `rendered_master_count=1`
-
-Required work:
-
-- Align `Chart.yaml` version, `appVersion`, README, quickstart, and release
-  note.
-- Ensure generated values include image tags and digest evidence where
-  available.
-- Document immutable `sha-<commit>` as the release-validation path.
-- Keep mutable `:alpha` as smoke/demo only.
-- Add a chart/package validation command to the gate.
-
-Acceptance:
+Allowed after D1:
 
 ```text
-helm lint charts/seaweed-block PASS
-helm template with generated values PASS
-chart version/appVersion/image docs agree
-release note names exact validated image path
+Three RF=3 PVC-backed volumes can coexist on the 3-node lab, bind, mount,
+write/read, and appear as three independent ManagedVolume rows.
 ```
 
-## D2: Helm Lifecycle Gate
+Not allowed yet:
 
-Goal: prove the chart handles the basic release lifecycle, not just first
-install.
+```text
+Multi-volume HA independence.
+Multi-volume transparent failover.
+One volume's failover does not affect other volumes.
+```
+
+Those require D2-D4.
+
+## D1: RF=3 Multi-Volume Readiness
+
+Goal: prove the placement / port-assignment / observation scheme can host
+`N=3` concurrent RF=3 volumes before fault injection is attempted.
 
 Status: PASS on 2026-05-22.
 
 Evidence:
 
-- Scenario: `testops/scenarios/helm-lifecycle-upgrade-rollback-chain.yaml`
-- Run: `20260522-131951-a6d4`
-- Result: PASS, 7/7 phases, 27/27 actions
+- Scenario: `testops/scenarios/helm-multi-volume-rf3-readiness-chain.yaml`
+- Run: `20260522-170901-70c5`
+- Result: PASS, 6/6 phases, 35/35 actions
 - Flow:
-  - `helm install` completed with `STATUS: deployed`
-  - first PVC writer/reader verified and PVC kept for lifecycle testing
-  - `helm upgrade` created a superseded revision
-  - existing PVC reader verified persisted `/data/demo.bin`
-  - `helm rollback sw-block 1` completed
-  - existing PVC reader verified the same PV again
-  - `helm uninstall` plus cleanup verification passed
-- Stable data identity:
-  - PV before upgrade: `pvc-00c8dc4d-db6b-481e-bf4e-447b2b53bfc3`
-  - PV after upgrade: `pvc-00c8dc4d-db6b-481e-bf4e-447b2b53bfc3`
-  - PV after rollback: `pvc-00c8dc4d-db6b-481e-bf4e-447b2b53bfc3`
-- Cleanup:
-  - `cleanup_status=ok`
-  - `k8s_residue_count=0`
-  - `process_residue_count=0`
-  - `hostpath_residue_count=0`
-
-Required flow:
-
-```text
-helm install
--> first PVC writer/reader
--> sw-block ops report
--> helm upgrade with no data loss
--> writer/reader again
--> helm rollback or reinstall-safe fallback
--> helm uninstall
--> cleanup verification
-```
-
-Acceptance:
-
-```text
-install PASS
-upgrade PASS or explicit safe-refusal with reason
-rollback/reinstall-safe path PASS
-PVC data check survives supported lifecycle step
-cleanup_status=ok
-no active iSCSI sessions
-no sw-block processes
-no test-scoped hostPath residue
-```
-
-## D3: Multi-Volume Day-1 Gate
-
-Goal: move from "first PVC works" to "small user workload with multiple PVCs is
-stable enough to evaluate".
-
-Status: PASS on 2026-05-22.
-
-Evidence:
-
-- Scenario: `testops/scenarios/helm-multi-volume-day1-chain.yaml`
-- Run: `20260522-152903-1116`
-- Result: PASS, 6/6 phases, 29/29 actions
-- Flow:
-  - local branch images built and imported to all k3s nodes
-  - Helm install completed with generated Day-1 values
-  - three PVCs bound through the Helm-installed StorageClass
-  - three writer pods verified `/data/demo.bin`
-  - three reader pods verified the persisted bytes
-  - `sw-block ops report` listed three volumes and three ManagedVolume rows
-  - PVC deletion removed generated blockvolume Deployments
-  - Helm uninstall and host cleanup passed
+  - Helm install completed with generated RF=3 values
+  - three PVCs bound
+  - three writers verified `/data/demo.bin`
+  - three readers verified persisted bytes
+  - report showed `volumes=3`
+  - report included `rf=3` for all three volumes
+  - cleanup removed all generated blockvolume Deployments, iSCSI sessions, and
+    product processes
 - Summary fields:
   - `multi_volume_status=ok`
   - `requested_volume_count=3`
+  - `replication_factor=3`
   - `writer_verified_count=3`
   - `reader_verified_count=3`
   - `managed_volume_count=3`
-  - `inventory_status=ok`
   - `cleanup_status=ok`
 
-Product fixes found by this gate:
+Fix included:
 
-- Persist materialized workload endpoint ports in placement intent so later
-  volume IDs cannot reshuffle an already-created blockvolume Deployment's
-  node-local ports.
-- Preserve materialized DataAddr/CtrlAddr when verifying placement.
-- Merge observation slots from the same Kubernetes node by `(volume, replica)`
-  with independent per-slot freshness. Multiple blockvolume processes on one
-  node must not overwrite each other's publish-target heartbeats.
+- `scripts/run-multi-volume-example.sh` now supports
+  `SW_BLOCK_MULTI_VOLUME_RF`.
+- Multi-volume helper waits for generated blockvolume Deployments to disappear
+  before declaring cleanup success, avoiding RF=3 async launcher cleanup races.
 
-Required flow:
+## D2: Multi-Volume CSI Reattach Recovery
 
-- Create at least three PVCs through the Helm-installed StorageClass.
-- Run writer/reader checksum on each PVC.
-- Verify `sw-block ops report` and dashboard distinguish all volumes.
-- Delete the PVCs and prove generated blockvolume workloads are cleaned up.
+Goal: for each volume in the set, kill that volume's current primary and prove
+only that volume recovers through the CSI/pod-recreate path while the other
+volumes remain stable.
 
 Acceptance:
 
 ```text
-N>=3 PVCs Bound
-N writer checksums PASS
-N reader checksums PASS
-ops report lists N ManagedVolumes with stable volume IDs
-delete cleanup removes all generated blockvolume Deployments
-cleanup residue clean
+N=3 RF=3 PVCs ready
+for each target volume:
+  primary deployment stopped
+  promoted primary changes only for target volume
+  post_failure_primary_count=1 for target volume
+  reader checksum passes after reattach
+  non-target volumes keep primary/frontend stable
+  cross_interference_observed=false
+cleanup clean
 ```
 
-## D4: Support Bundle And Diagnostics Gate
+Status: pending.
 
-Goal: make "user reports Kubernetes block is stuck" actionable without SSH log
-spelunking.
+## D3: Multi-Volume Mounted Transparent Failover
 
-Status: PASS on 2026-05-22.
-
-Evidence:
-
-- Scenario: `testops/scenarios/helm-support-bundle-diagnostics-chain.yaml`
-- Run: `20260522-153929-93a3`
-- Result: PASS, 7/7 phases, 38/38 actions
-- Flow:
-  - Helm install completed with generated Day-1 values and local branch images
-  - first-volume writer/reader verified while resources stayed live for
-    diagnostics
-  - `scripts/collect-helm-support-bundle.sh` collected Helm metadata, K8s
-    snapshots, logs, iSCSI state, and replayed read-only ops artifacts
-  - `sw-block ops report --from-bundle` rendered a cold static report
-  - `sw-block ops explain volume --from-bundle` explained the volume without a
-    live cluster
-  - `sw-block ops timeline volume --from-bundle -o jsonl` replayed the
-    timeline
-  - a synthetic ImagePullBackOff bundle explained
-    `reason=csi_node_image_pull_failed`
-  - Helm uninstall and host cleanup passed
-- Summary fields:
-  - `support_bundle_status=ok`
-  - `report_status=ok`
-  - `explain_status=ok`
-  - `timeline_status=ok`
-  - `read_only=true`
-
-Required artifact set:
-
-- cluster evidence JSON
-- timeline JSONL
-- summary text
-- Helm release metadata
-- Kubernetes nodes / pods / PVC / PV / events
-- CSI controller/node logs
-- blockmaster logs
-- blockvolume logs when volumes exist
-- cleanup and iSCSI residue snapshots
+Goal: with Stage 2 iSCSI ALUA/dm-multipath enabled, keep workloads mounted and
+prove each target volume can fail over without pod recreate while other volumes
+continue serving.
 
 Acceptance:
 
 ```text
-one command or scenario step writes the bundle
-bundle explains PASS and blocked first-volume cases
-reason codes match report/dashboard
-bundle is read-only evidence only
+N=3 RF=3 mounted workloads
+pod UID unchanged for target workload
+old data readable after primary stop
+new data writable after failover
+primary_count=1 per target volume
+old_primary_stale_io_success_count=0
+non-target workloads continue without interruption
+cleanup clean
 ```
 
-## D5: Phase Close And v0.3.x Release Note
+Status: pending.
 
-Goal: close the phase only when the user-facing claim is exact.
+## D4: Concurrent / Interleaved Multi-Volume Faults
 
-Status: PASS on 2026-05-22.
-
-Evidence:
-
-- Close report:
-  `internal/docs/qa-assignments/phase26-helm-lifecycle-hardening-close-report.md`
-- Release note:
-  `docs/releases/v0.3.1-alpha.md`
-- README / quickstart updated to distinguish the gated upgrade/rollback smoke
-  from broad production upgrade safety.
-
-Required:
-
-- Update README / quickstart only for proven lifecycle behavior.
-- Add a v0.3.x release note if lifecycle gates pass.
-- Write close report with run IDs and evidence paths.
-- Carry v0.4 operator items forward without starting implementation.
+Goal: inject overlapping primary failures on multiple volumes and prove
+promotion and recovery remain per-volume isolated.
 
 Acceptance:
 
 ```text
-D1-D4 gates PASS
-docs match gates
-release note has non-claims
-close report written
-finished plan written
+two target volumes fail within a bounded window
+both promote independently
+untouched volume primary/frontend unchanged
+no dual-primary per volume
+no timeline side-effect on untouched volume
+cleanup clean
 ```
 
-## Claim Matrix
-
-| Area | Phase 26 Target Claim | Still Not Claimed |
-|---|---|---|
-| Install | Helm alpha install is repeatable and versioned | production installer |
-| Upgrade | one narrow upgrade/rollback smoke is gated | general upgrade safety |
-| Volumes | multiple small PVCs work in Day-1 smoke | scale/performance SLO |
-| Ops | support bundle/report/dashboard are enough for first diagnosis | full observability platform |
-| Cleanup | Helm uninstall plus host cleanup verification is gated | operator-owned lifecycle |
-| HA | prior recovery claims remain documented | new recovery semantics |
+Status: pending.
 
 ## Risks
 
-| Risk | Mitigation | Fallback |
-|---|---|---|
-| Upgrade mutates data path unexpectedly | run checksum before and after lifecycle step | document upgrade unsupported and block claim |
-| Multi-volume exposes launcher/provisioner churn | D3 gate requires stable volume IDs and cleanup | keep v0.3 first-volume-only claim |
-| Bundle grows without explaining root cause | require summary + reason codes + timeline | trim to required artifacts |
-| Chart/image version drift | immutable tags and digest evidence | local/internal image for dev gates only |
-| Operator scope creep | keep CRD/operator out of Phase 26 | start Phase 27 only after close |
+| Risk | Mitigation |
+|---|---|
+| Cleanup race hides real residue | helper waits for generated Deployments before `cleanup_status=ok` |
+| Per-node port reuse collides across volumes | D1 requires RF=3 report and writer/reader success for all volumes |
+| One volume's event stream contaminates another | D2-D4 require per-volume timeline and non-target stability checks |
+| Multipath evidence becomes too noisy | D3 must reuse Stage 2 host evidence shape and keep assertions narrow |
 
 ## Progress
 
-- D1: PASS - chart release hygiene gate `20260522-131641-7a61`
-- D2: PASS - Helm lifecycle gate `20260522-131951-a6d4`
-- D3: PASS - multi-volume Day-1 gate `20260522-152903-1116`
-- D4: PASS - support bundle diagnostics gate `20260522-153929-93a3`
-- D5: PASS - close report and v0.3.1 release note written
+- D1: PASS - RF=3 multi-volume readiness `20260522-170901-70c5`
+- D2: pending
+- D3: pending
+- D4: pending

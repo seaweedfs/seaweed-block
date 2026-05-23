@@ -35,6 +35,10 @@ This is the short internal roadmap. Keep it current and readable.
   prove the chart can be treated as a repeatable release artifact: chart/image
   version alignment, install/upgrade/rollback smoke, multi-PVC Day-1 smoke,
   support bundle completeness, and strict cleanup. This is Phase 26.
+- `v0.3.x-alpha` follow-up: Multi-volume HA independence. Before broad HA or
+  operator lifecycle claims, prove multiple RF=3 PVC-backed volumes can recover
+  independently: first readiness, then CSI reattach failover, then transparent
+  multipath failover, then interleaved faults. This is Phase 27.
 - `v0.4-beta-candidate`: Operator lifecycle. Add a Kubernetes-native control
   plane with CRDs/Conditions/Events for install, node eligibility, volume
   lifecycle, recovery observation, safe cleanup, and eventually gated repair or
@@ -163,11 +167,11 @@ lifecycle.
   proved RF=3 `sync-quorum` iSCSI ALUA plus Linux dm-multipath failover with
   the same mounted writer pod, no pod recreate, no CSI re-stage, stale-primary
   fencing, and post-failure checksum verification.
-- Next: Node-loss survival is the highest-impact availability gap. Move from
-  same-node logical replica failure to real Kubernetes node failure semantics:
-  distinct nodes, non-loopback frontends, node-aware publish target selection,
-  authority promotion to a surviving replica, host-path recovery through the
-  documented mechanism, and support-bundle proof of fencing and data integrity.
+- Closed: node-loss survival is validated for RF=3 `sync-quorum` across
+  distinct Kubernetes nodes with CSI reattach recovery.
+- Current: Phase 27 starts the multi-volume HA independence track. D1 readiness
+  proves `N=3` RF=3 volumes can coexist and serve writer/reader workloads; D2-D4
+  must prove per-volume failover isolation before any multi-volume HA claim.
 - Later: returned-replica rebuild/reintegration/failback, NVMe ANA Kubernetes
   multipath parity, stronger committed-frontier reporting, broad distro/host
   compatibility, and longer soak under failure.

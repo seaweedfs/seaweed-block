@@ -1,0 +1,205 @@
+# Phase 27 D1 spike: multi-volume Day-1 at RF=3, no fault injection.
+#
+# Goal:
+#   First signal on whether the v0.3.1 placement / port-assignment scheme can
+#   actually host N concurrent RF=3 volumes (N=3 PVCs => 9 blockvolume pods
+#   total, 3 per node on a 3-node lab). This is the lowest-bar readiness gate
+#   for the multi-volume HA independence track; it does NOT inject faults.
+#
+# Pass = 3 PVCs bind, 3 writers verify, 3 readers verify, report shows
+#        replication_factor=3 and three ManagedVolumes, cleanup is clean.
+# Fail = first signal that the port / placement scheme needs more work before
+#        multi-volume HA gates can even be authored.
+
+name: helm-multi-volume-rf3-readiness-chain
+timeout: 34m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+  helm_release: "sw-block"
+  helm_namespace: "kube-system"
+  sw_block_image: "sw-block:phase27-rf3"
+  sw_block_csi_image: "sw-block-csi:phase27-rf3"
+  volume_count: "3"
+  replication_factor: "3"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: pre_clean
+    actions:
+      - action: pre_run_cleanup
+        node: m02
+        kill_patterns: "blockmaster,blockvolume,blockcsi,iscsi-target"
+        nvme_disconnect: "true"
+        iscsi_logout_prefix: "iqn.2026-05.io.seaweedfs"
+      - action: exec
+        node: m02
+        timeout: 5m
+        cmd: "helm status {{ helm_release }} --namespace {{ helm_namespace }} >/dev/null 2>&1 && helm uninstall {{ helm_release }} --namespace {{ helm_namespace }} --wait --timeout 180s || true; kubectl -n default delete pod -l sw-block-test=multi-volume --ignore-not-found=true --wait=true --timeout=120s; for i in 1 2 3; do kubectl -n default delete pod sw-block-multi-writer-$i sw-block-multi-reader-$i --ignore-not-found=true --wait=true --timeout=120s; kubectl -n default delete pvc sw-block-multi-pvc-$i --ignore-not-found=true --wait=true --timeout=120s; done; kubectl delete storageclass sw-block-multi sw-block-dynamic --ignore-not-found=true --wait=true --timeout=120s; kubectl delete clusterrole/sw-block-csi clusterrolebinding/sw-block-csi --ignore-not-found=true; sudo -n iscsiadm -m node 2>/dev/null | awk '/io.seaweedfs/ {print $1, $2}' | while read portal target; do sudo -n iscsiadm -m node -T \"$target\" -p \"$portal\" -o delete || true; done; rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-multi-volume-rf3 && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-multi-volume-rf3/bin /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-multi-volume-rf3/values /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-multi-volume-rf3/install /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-multi-volume-rf3/multi-volume /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-multi-volume-rf3/cleanup"
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+      - action: assert_no_active_iscsi_sessions
+        node: m02
+        iqn_substr: "io.seaweedfs"
+
+  - name: build_and_generate_values
+    actions:
+      - action: exec
+        node: m02
+        timeout: 8m
+        cmd: "cd {{ product_root }} && SW_BLOCK_IMAGE={{ sw_block_image }} SW_BLOCK_CSI_IMAGE={{ sw_block_csi_image }} SW_BLOCK_IMPORT_K3S=1 SW_BLOCK_IMPORT_K3S_NODES='192.168.1.181,192.168.1.188' SW_BLOCK_IMPORT_K3S_SSH_USER=testdev SW_BLOCK_IMPORT_K3S_SSH_KEY=/opt/work/testdev_key SW_BLOCK_ARTIFACT_DIR=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-multi-volume-rf3/build bash scripts/build-alpha-images.sh {{ product_root }}"
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-multi-volume-rf3/build/alpha-images.env"
+        pattern: "SW_BLOCK_IMAGE={{ sw_block_image }}"
+        save_as: local_image_built_count
+      - action: assert_greater
+        actual: "{{ local_image_built_count }}"
+        threshold: "0"
+      - action: exec
+        node: m02
+        timeout: 6m
+        cmd: "cd {{ product_root }} && go build -o /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-multi-volume-rf3/bin/sw-block ./cmd/sw-block && /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-multi-volume-rf3/bin/sw-block ops generate-helm-values --kubeconfig /etc/rancher/k3s/k3s.yaml --out /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-multi-volume-rf3/values/values.day1.yaml --image {{ sw_block_image }} --csi-image {{ sw_block_csi_image }} --replication-factor {{ replication_factor }} > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-multi-volume-rf3/values/generate.stdout.txt"
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-multi-volume-rf3/values/generate.stdout.txt"
+        pattern: "helm_values_status=ok"
+        save_as: generator_ok_count
+      - action: assert_greater
+        actual: "{{ generator_ok_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-multi-volume-rf3/values/values.day1.yaml"
+        pattern: "replicationFactor: 3"
+        save_as: rf3_in_values
+      - action: assert_greater
+        actual: "{{ rf3_in_values }}"
+        threshold: "0"
+
+  - name: helm_install_stack
+    actions:
+      - action: exec
+        node: m02
+        timeout: 10m
+        cmd: "cd {{ product_root }} && helm lint charts/seaweed-block -f /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-multi-volume-rf3/values/values.day1.yaml > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-multi-volume-rf3/install/helm-lint.txt && helm install {{ helm_release }} charts/seaweed-block --namespace {{ helm_namespace }} --create-namespace -f /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-multi-volume-rf3/values/values.day1.yaml --wait --timeout 10m > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-multi-volume-rf3/install/helm-install.txt && kubectl -n {{ helm_namespace }} get deploy,ds,pods,svc -o wide > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-multi-volume-rf3/install/kube-system.after-install.txt"
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-multi-volume-rf3/install/helm-install.txt"
+        pattern: "STATUS: deployed"
+        save_as: helm_deployed_count
+      - action: assert_greater
+        actual: "{{ helm_deployed_count }}"
+        threshold: "0"
+
+  - name: multi_volume_user_loop
+    actions:
+      - action: exec
+        node: m02
+        timeout: 18m
+        cmd: "cd {{ product_root }} && bash scripts/run-multi-volume-example.sh {{ product_root }}"
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+        env.SW_BLOCK_ARTIFACT_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-multi-volume-rf3/multi-volume"
+        env.SW_BLOCK_MULTI_VOLUME_COUNT: "{{ volume_count }}"
+        env.SW_BLOCK_MULTI_VOLUME_RF: "{{ replication_factor }}"
+        env.SW_BLOCK_MULTI_VOLUME_CLEANUP: "1"
+        env.SW_BLOCK_CLI: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-multi-volume-rf3/bin/sw-block"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-multi-volume-rf3/multi-volume/multi-volume-summary.txt"
+        pattern: "^multi_volume_status=ok$"
+        save_as: multi_volume_ok_count
+      - action: assert_greater
+        actual: "{{ multi_volume_ok_count }}"
+        threshold: "0"
+
+  - name: multi_volume_rf3_asserts
+    actions:
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-multi-volume-rf3/multi-volume/multi-volume-summary.txt"
+        pattern: "^replication_factor=3$"
+        save_as: rf3_in_summary
+      - action: assert_greater
+        actual: "{{ rf3_in_summary }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-multi-volume-rf3/multi-volume/multi-volume-summary.txt"
+        pattern: "^writer_verified_count=3$"
+        save_as: writer_count_ok
+      - action: assert_greater
+        actual: "{{ writer_count_ok }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-multi-volume-rf3/multi-volume/multi-volume-summary.txt"
+        pattern: "^reader_verified_count=3$"
+        save_as: reader_count_ok
+      - action: assert_greater
+        actual: "{{ reader_count_ok }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-multi-volume-rf3/multi-volume/multi-volume-summary.txt"
+        pattern: "^managed_volume_count=3$"
+        save_as: managed_volume_count_ok
+      - action: assert_greater
+        actual: "{{ managed_volume_count_ok }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-multi-volume-rf3/multi-volume/status/report/summary.txt"
+        pattern: "^volumes=3$"
+        save_as: report_volume_count_ok
+      - action: assert_greater
+        actual: "{{ report_volume_count_ok }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-multi-volume-rf3/multi-volume/status/report/summary.txt"
+        pattern: "rf=3"
+        save_as: rf3_in_report
+      - action: assert_greater
+        actual: "{{ rf3_in_report }}"
+        threshold: "0"
+      - action: exec
+        node: m02
+        timeout: 3m
+        cmd: "for i in $(seq 1 60); do out=$(kubectl -n default get deploy -l app=sw-blockvolume -o name 2>/dev/null); if [ -z \"$out\" ]; then exit 0; fi; sleep 2; done; echo \"timeout: launcher-rendered deployments still present\" >&2; kubectl -n default get deploy -l app=sw-blockvolume -o wide >&2; exit 1"
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+
+  - name: helm_uninstall_cleanup
+    always: true
+    actions:
+      - action: exec
+        node: m02
+        timeout: 8m
+        cmd: "helm status {{ helm_release }} --namespace {{ helm_namespace }} >/dev/null 2>&1 && helm uninstall {{ helm_release }} --namespace {{ helm_namespace }} --wait --timeout 240s > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-multi-volume-rf3/cleanup/helm-uninstall.txt || true; for i in 1 2 3; do kubectl -n default delete pod sw-block-multi-writer-$i sw-block-multi-reader-$i --ignore-not-found=true --wait=true --timeout=120s; kubectl -n default delete pvc sw-block-multi-pvc-$i --ignore-not-found=true --wait=true --timeout=120s; done; kubectl delete storageclass sw-block-multi sw-block-dynamic --ignore-not-found=true --wait=true --timeout=120s; sudo -n iscsiadm -m node 2>/dev/null | awk '/io.seaweedfs/ {print $1, $2}' | while read portal target; do sudo -n iscsiadm -m node -T \"$target\" -p \"$portal\" -o delete || true; done; cd {{ product_root }} && bash scripts/verify-helm-cleanup.sh"
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+        env.SW_BLOCK_ARTIFACT_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-multi-volume-rf3/cleanup/verify"
+        env.SW_BLOCK_HELM_RELEASE: "{{ helm_release }}"
+        env.SW_BLOCK_HELM_NAMESPACE: "{{ helm_namespace }}"
+      - action: assert_no_active_iscsi_sessions
+        node: m02
+        iqn_substr: "io.seaweedfs"
+      - action: assert_no_processes
+        node: m02
+        pattern: "[/]blockmaster --|[/]blockvolume --|[/]blockcsi |[/]iscsi-target |^blockmaster |^blockvolume |^blockcsi |^iscsi-target "
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-multi-volume-rf3/cleanup/verify/cleanup-summary.txt"
+        pattern: "^cleanup_status=ok$"
+        save_as: helm_cleanup_ok_count
+      - action: assert_greater
+        actual: "{{ helm_cleanup_ok_count }}"
+        threshold: "0"

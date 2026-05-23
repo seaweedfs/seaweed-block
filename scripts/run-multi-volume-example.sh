@@ -5,6 +5,7 @@ ROOT="${1:-$(pwd)}"
 ARTIFACT_DIR="${SW_BLOCK_ARTIFACT_DIR:-/tmp/sw-block-multi-volume-$(date -u +%Y%m%dT%H%M%SZ)}"
 NAMESPACE="${SW_BLOCK_APP_NAMESPACE:-default}"
 VOLUME_COUNT="${SW_BLOCK_MULTI_VOLUME_COUNT:-3}"
+REPLICATION_FACTOR="${SW_BLOCK_MULTI_VOLUME_RF:-1}"
 STORAGECLASS_NAME="${SW_BLOCK_MULTI_VOLUME_STORAGECLASS:-sw-block-multi}"
 PVC_PREFIX="${SW_BLOCK_MULTI_VOLUME_PVC_PREFIX:-sw-block-multi-pvc}"
 POD_PREFIX="${SW_BLOCK_MULTI_VOLUME_POD_PREFIX:-sw-block-multi}"
@@ -101,7 +102,7 @@ render_storageclass() {
     echo "volumeBindingMode: Immediate"
     echo "allowVolumeExpansion: false"
     echo "parameters:"
-    echo "  replicationFactor: \"1\""
+    echo "  replicationFactor: \"$REPLICATION_FACTOR\""
     if kubectl -n "$NAMESPACE" get secret "$CHAP_SECRET_NAME" >/dev/null 2>&1; then
       echo "  csi.storage.k8s.io/node-stage-secret-name: \"$CHAP_SECRET_NAME\""
       echo "  csi.storage.k8s.io/node-stage-secret-namespace: \"$NAMESPACE\""
@@ -235,6 +236,21 @@ cleanup_multi_volume() {
   for idx in $(seq 1 "$VOLUME_COUNT"); do
     kubectl -n "$NAMESPACE" delete pvc "${PVC_PREFIX}-${idx}" --ignore-not-found=true --wait=true --timeout=120s || rc=1
   done
+  # RF>1 creates several generated blockvolume Deployments per PVC. The
+  # launcher removes them asynchronously after PVC deletion; wait before
+  # declaring helper-level cleanup success.
+  for _ in $(seq 1 90); do
+    local remaining
+    remaining="$(kubectl -n "$NAMESPACE" get deploy -l app=sw-blockvolume -o name 2>/dev/null || true)"
+    if [[ -z "$remaining" ]]; then
+      break
+    fi
+    sleep 2
+  done
+  if kubectl -n "$NAMESPACE" get deploy -l app=sw-blockvolume -o name 2>/dev/null | grep -q .; then
+    safe_capture "$ARTIFACT_DIR/logs/blockvolume-deployments.cleanup-timeout.txt" kubectl -n "$NAMESPACE" get deploy -l app=sw-blockvolume -o wide
+    rc=1
+  fi
   kubectl delete storageclass "$STORAGECLASS_NAME" --ignore-not-found=true --wait=true --timeout=120s || rc=1
   return "$rc"
 }
@@ -283,6 +299,7 @@ write_summary() {
     echo "namespace=$NAMESPACE"
     echo "storageclass=$STORAGECLASS_NAME"
     echo "requested_volume_count=$VOLUME_COUNT"
+    echo "replication_factor=$REPLICATION_FACTOR"
     echo "writer_verified_count=$writer_count"
     echo "reader_verified_count=$reader_count"
     echo "managed_volume_count=$managed_count"
