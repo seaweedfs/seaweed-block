@@ -295,6 +295,34 @@ Evidence:
   `old_primary_stale_io_success_count=0`; the summary alone is no longer
   accepted as fencing evidence.
 
+## D6: RTPG AAS Transition Evidence Hardening
+
+Goal: make the iSCSI ALUA evidence assert concrete RTPG asymmetric access state
+values before and after failover, not just the presence of RTPG text.
+
+Status: PASS on 2026-05-23.
+
+Evidence:
+
+- Scenarios:
+  - `testops/scenarios/helm-multi-volume-rf3-interleaved-failover-chain.yaml`
+  - `testops/scenarios/helm-multi-volume-rf3-mounted-failover-chain.yaml`
+- Runs:
+  - D4 interleaved: `20260523-123229-9dd4`, PASS, 8/8 phases, 55/55 actions
+  - D3 sequential: `20260523-123647-2fc4`, PASS, 8/8 phases, 47/47 actions
+- The mounted failover helper now records per-volume RTPG state files:
+  - `failover/volume-N/rtpg-before-states.txt`
+  - `failover/volume-N/rtpg-after-states.txt`
+- Both interleaved target volumes produced:
+  - `rtpg_before_old_primary_aas=0x00`
+  - `rtpg_before_promoted_aas=0x02`
+  - `rtpg_after_old_primary_aas=missing`
+  - `rtpg_after_promoted_aas=0x00`
+  - `rtpg_transition_verified=true`
+- The scenario now asserts the per-volume state files exist and requires
+  `rtpg_transition_verified=true` for each target volume. This covers all
+  three sequential D3 targets and both interleaved D4 targets.
+
 ## Risks
 
 | Risk | Mitigation |
@@ -311,3 +339,4 @@ Evidence:
 - D3: PASS - RF=3 multi-volume mounted transparent failover `20260523-090534-24e4`
 - D4: PASS - RF=3 interleaved multi-volume mounted failover `20260523-093348-6b02`
 - D5: PASS - measured stale primary direct-read probe `20260523-114708-46bc`
+- D6: PASS - measured RTPG AAS transition evidence `20260523-123229-9dd4`, `20260523-123647-2fc4`

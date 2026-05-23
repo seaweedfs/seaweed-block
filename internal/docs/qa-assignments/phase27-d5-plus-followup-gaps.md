@@ -4,8 +4,8 @@ Date: 2026-05-23
 
 QA validation of Phase 27 D1-D4 passed strict (see
 `phase27-multi-volume-ha-independence-close-report.md`), but four product-claim
-gaps surfaced during the audit. D5 is now closed by measured probe evidence;
-D6-D8 remain follow-ups before "multi-volume HA independence" is published as a
+gaps surfaced during the audit. D5 and D6 are now closed by measured evidence;
+D7-D8 remain follow-ups before "multi-volume HA independence" is published as a
 release-grade claim beyond the alpha lab.
 
 ## D5 - Real Stale-Primary I/O Fencing Probe
@@ -54,7 +54,7 @@ Both target volumes recorded `candidate_result=expected_failure` and
 
 ## D6 - Real ALUA RTPG Asymmetric Access State Pre/Post Assertion
 
-**The gap**: D3 + D4 only assert
+**Original gap**: D3 + D4 only asserted
 `grep_log pattern="asymmetric access state" count > 0` in
 `sg-rtpg.before.txt`. Doesn't parse the actual access state value (Active /
 Optimized vs Active / Non-Optimized vs Standby), doesn't compare before vs
@@ -75,32 +75,38 @@ between:
 - a sg_rtpg call that happens to print text but the path actually didn't
   switch.
 
-**Fix shape**:
+**Status**: CLOSED on 2026-05-23.
 
-1. Capture `sg_rtpg` output per port group before AND after the failover for
-   each target volume.
-2. Parse AAS for each port group using the existing
-   `run-iscsi-alua-multipath-smoke.sh` regex.
+Implemented fix:
+
+1. Capture `sg_rtpg` output for each by-path device before and after failover
+   for each target volume.
+2. Parse AAS for each path using the same regex family as
+   `run-iscsi-alua-multipath-smoke.sh`.
 3. Emit per-volume summary fields:
-   - `rtpg_before_old_primary_aas=<hex>` (expect `0x00` = AO)
-   - `rtpg_before_promoted_aas=<hex>` (expect `0x01` = ANO)
-   - `rtpg_after_old_primary_aas=<hex>` (expect `0x02` = Standby OR
-     unreachable)
-   - `rtpg_after_promoted_aas=<hex>` (expect `0x00` = AO)
-4. Scenario assertion: per-volume
-   `assert_equals rtpg_before_old_primary_aas=0x00 AND
-   rtpg_after_promoted_aas=0x00 AND
-   rtpg_before_promoted_aas != rtpg_after_promoted_aas`.
+   - `rtpg_before_old_primary_aas=0x00`
+   - `rtpg_before_promoted_aas=0x02`
+   - `rtpg_after_old_primary_aas=missing`
+   - `rtpg_after_promoted_aas=0x00`
+   - `rtpg_transition_verified=true`
+4. Scenario assertion now requires the before/after state files to exist and
+   `rtpg_transition_verified=true` per target volume.
 
 **Helper changes**:
 
-- Extend `scripts/run-multi-volume-mounted-failover.sh` collect-rtpg path to
-  capture before+after per port group per volume.
-- Replicate the AAS parsing from the existing single-volume helper.
+- Extended `scripts/run-multi-volume-mounted-failover.sh` to capture before
+  and after RTPG state per port group per volume.
+- Added per-volume AAS transition verification.
 
 **Hard gate**: pre/post AAS values match the expected transition per volume.
 
-**Scope**: dev.
+**Evidence**:
+
+- D4 interleaved rerun `20260523-123229-9dd4` passed 55/55 actions.
+- D3 sequential rerun `20260523-123647-2fc4` passed 47/47 actions.
+
+All target volumes recorded the expected `0x00 -> missing` old-primary path and
+`0x02 -> 0x00` promoted path transition.
 
 ## D7 - Stability / Flake-Rate Matrix
 
@@ -188,29 +194,25 @@ lands.
 | Order | Gap | Priority | Why |
 |---|---|---|---|
 | 1 | D5 (real stale-I/O probe) | DONE | Closed by run `20260523-114708-46bc` |
-| 2 | D6 (RTPG AAS pre/post) | HIGH | "Transparent failover" claim needs stronger ALUA evidence |
+| 2 | D6 (RTPG AAS pre/post) | DONE | Closed by run `20260523-123229-9dd4` |
 | 3 | D7 (flake matrix) | MEDIUM | Required for any release-grade claim |
 | 4 | D8 (app pod spread) | MEDIUM | Removes single-node-initiator hidden-bug risk |
 
 ## Release Note Implications
 
-Until D6 is addressed, the v0.3.2 release note should keep the ALUA claim
-narrow. D5 stale-primary direct-read fencing is now measured.
-
-- "transparent ALUA failover verified"
-
-The conservative wording from the Phase 27 close report still holds, but
-should be tightened to:
+The conservative wording from the Phase 27 close report still holds, with D5
+and D6 now strengthened:
 
 > Mounted failover on a single iSCSI initiator host (m02) preserved the
 > writer pod across the fault and the post-failover checksum matched. Stale
 > primary path reads were measured and rejected. ALUA RTPG state transitions
-> are observed but still need stronger pre/post AAS assertions in D6.
+> were measured per target volume.
 
 ## Verdict
 
 Phase 27 is shippable as alpha at the single-app-node, single-run, gated
-"transparent failover claimed" wording, with D5 stale-primary fencing now
-measured. The release note should explicitly defer D6-D8 broadening work. None
-of these block the multi-volume-mounted-failover product capability itself;
-they bound how broadly we can market the strongest claims.
+"transparent failover claimed" wording, with D5 stale-primary fencing and D6
+RTPG AAS transitions now measured. The release note should explicitly defer
+D7-D8 broadening work. None of these block the multi-volume-mounted-failover
+product capability itself; they bound how broadly we can market the strongest
+claims.

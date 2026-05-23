@@ -387,6 +387,7 @@ probe_stale_primary_path() {
   local port="${old_frontend##*:}"
   local success=0
   local found=0
+  local raw
   {
     echo "stale_primary_probe=direct_read"
     echo "volume_id=$volume_id"
@@ -412,6 +413,73 @@ probe_stale_primary_path() {
     echo "old_primary_stale_io_success_count=$success"
   } >"$out" 2>&1
   echo "$success"
+}
+
+capture_volume_rtpg_states() {
+  local volume_id="$1"
+  local label="$2"
+  local out="$3"
+  local found=0
+  local d raw frontend tmp result aas
+  {
+    echo "rtpg_state_capture=$label"
+    echo "volume_id=$volume_id"
+    shopt -s nullglob
+    for d in /dev/disk/by-path/*io.seaweedfs:"${volume_id}"*; do
+      found=1
+      raw="$(readlink -f "$d")"
+      frontend="$(printf '%s\n' "$d" | sed -n 's#.*ip-\([^/]*\)-iscsi.*#\1#p')"
+      tmp="$(mktemp)"
+      if sudo -n sg_rtpg "$raw" >"$tmp" 2>&1; then
+        result=ok
+      else
+        result=failed
+      fi
+      aas="$(sed -n 's/.*asymmetric access state[[:space:]]*:[[:space:]]*\(0x[0-9a-fA-F]\+\).*/\1/p' "$tmp" | head -n1)"
+      echo "rtpg_${label}_frontend=${frontend:-unknown} aas=${aas:-missing} result=$result raw=$raw source=$d"
+      sed 's/^/  /' "$tmp"
+      rm -f "$tmp"
+    done
+    shopt -u nullglob
+    if [[ "$found" -eq 0 ]]; then
+      echo "rtpg_${label}_result=no_paths"
+    fi
+  } >"$out" 2>&1
+}
+
+rtpg_aas_from_states() {
+  local states="$1"
+  local label="$2"
+  local frontend="$3"
+  awk -v key="rtpg_${label}_frontend=${frontend}" '
+    $1 == key {
+      for (i = 1; i <= NF; i++) {
+        if ($i ~ /^aas=/) {
+          sub(/^aas=/, "", $i)
+          print $i
+          exit
+        }
+      }
+    }
+  ' "$states"
+}
+
+verify_rtpg_transition() {
+  local old_before="$1"
+  local promoted_before="$2"
+  local old_after="$3"
+  local promoted_after="$4"
+  if [[ "$old_before" != "0x00" ]]; then
+    echo false
+  elif [[ -z "$promoted_before" || "$promoted_before" == "missing" || "$promoted_before" == "0x00" ]]; then
+    echo false
+  elif [[ "$promoted_after" != "0x00" ]]; then
+    echo false
+  elif [[ "$old_after" == "0x00" ]]; then
+    echo false
+  else
+    echo true
+  fi
 }
 
 write_summary() {
@@ -525,6 +593,7 @@ if [[ "$FAILOVER_MODE" == "interleaved" ]]; then
       echo "writer_pod_uid_before=$uid_before"
       echo "interleaved_fault=true"
     } >"$dir/summary.txt"
+    capture_volume_rtpg_states "$vid" "before" "$dir/rtpg-before-states.txt"
     log "interleaved target volume $idx primary=$primary deploy=$deploy"
     kubectl -n "$NAMESPACE" scale "deploy/${deploy}" --replicas=0 | tee "$dir/scale-primary-zero.log"
   done
@@ -581,6 +650,12 @@ PY
     collect_cluster "$dir/after-workload.json"
     after_frontend="$(volume_field "$dir/after-workload.json" "$vid" "publish_target")"
     primary_count="$(primary_count_for_volume "$dir/after-workload.json" "$vid")"
+    capture_volume_rtpg_states "$vid" "after" "$dir/rtpg-after-states.txt"
+    rtpg_before_old="$(rtpg_aas_from_states "$dir/rtpg-before-states.txt" "before" "$frontend")"
+    rtpg_before_promoted="$(rtpg_aas_from_states "$dir/rtpg-before-states.txt" "before" "$after_frontend")"
+    rtpg_after_old="$(rtpg_aas_from_states "$dir/rtpg-after-states.txt" "after" "$frontend")"
+    rtpg_after_promoted="$(rtpg_aas_from_states "$dir/rtpg-after-states.txt" "after" "$after_frontend")"
+    rtpg_ok="$(verify_rtpg_transition "$rtpg_before_old" "$rtpg_before_promoted" "$rtpg_after_old" "$rtpg_after_promoted")"
     uid_after="$(writer_uid "$idx")"
     pod_recreate=false
     if [[ "$uid_after" != "$(sed -n 's/^writer_pod_uid_before=//p' "$dir/summary.txt")" ]]; then
@@ -596,6 +671,11 @@ PY
       echo "stale_primary_fence_evidence=target_ready_replicas=$target_ready,stale_path_direct_read_success_count=$stale_success"
       echo "stale_primary_probe=direct_read"
       echo "old_primary_stale_io_success_count=$stale_success"
+      echo "rtpg_before_old_primary_aas=${rtpg_before_old:-missing}"
+      echo "rtpg_before_promoted_aas=${rtpg_before_promoted:-missing}"
+      echo "rtpg_after_old_primary_aas=${rtpg_after_old:-missing}"
+      echo "rtpg_after_promoted_aas=${rtpg_after_promoted:-missing}"
+      echo "rtpg_transition_verified=$rtpg_ok"
       echo "writer_pod_uid_after=$uid_after"
       echo "pod_recreate_used=$pod_recreate"
       echo "data_check_after_failover=mounted_workload_checksum_passed"
@@ -603,7 +683,7 @@ PY
       echo "cross_interference_observed=false"
       echo "transparent_failover_claimed=true"
     } >>"$dir/summary.txt"
-    if [[ "$primary_count" != "1" || "$pod_recreate" != "false" || "$stale_success" != "0" ]]; then
+    if [[ "$primary_count" != "1" || "$pod_recreate" != "false" || "$stale_success" != "0" || "$rtpg_ok" != "true" ]]; then
       STATUS="failed"
       FAILED_PHASE="interleaved_isolation_volume_${idx}"
       write_summary
@@ -669,6 +749,7 @@ while IFS=$'\t' read -r idx vid pvc primary node frontend deploy; do
     echo "writer_pod=${POD_PREFIX}-writer-${idx}"
     echo "writer_pod_uid_before=$uid_before"
   } >"$dir/summary.txt"
+  capture_volume_rtpg_states "$vid" "before" "$dir/rtpg-before-states.txt"
 
   log "target volume $idx primary=$primary deploy=$deploy"
   kubectl -n "$NAMESPACE" scale "deploy/${deploy}" --replicas=0 | tee "$dir/scale-primary-zero.log"
@@ -725,6 +806,12 @@ while IFS=$'\t' read -r idx vid pvc primary node frontend deploy; do
   collect_cluster "$dir/after-workload.json"
   after_frontend="$(volume_field "$dir/after-workload.json" "$vid" "publish_target")"
   primary_count="$(primary_count_for_volume "$dir/after-workload.json" "$vid")"
+  capture_volume_rtpg_states "$vid" "after" "$dir/rtpg-after-states.txt"
+  rtpg_before_old="$(rtpg_aas_from_states "$dir/rtpg-before-states.txt" "before" "$frontend")"
+  rtpg_before_promoted="$(rtpg_aas_from_states "$dir/rtpg-before-states.txt" "before" "$after_frontend")"
+  rtpg_after_old="$(rtpg_aas_from_states "$dir/rtpg-after-states.txt" "after" "$frontend")"
+  rtpg_after_promoted="$(rtpg_aas_from_states "$dir/rtpg-after-states.txt" "after" "$after_frontend")"
+  rtpg_ok="$(verify_rtpg_transition "$rtpg_before_old" "$rtpg_before_promoted" "$rtpg_after_old" "$rtpg_after_promoted")"
   assert_non_target_stable "$dir/before.json" "$dir/after-workload.json" "$vid" && cross=false || cross=true
   if [[ "$non_target_failed" == "true" ]]; then
     cross=true
@@ -746,6 +833,11 @@ while IFS=$'\t' read -r idx vid pvc primary node frontend deploy; do
     echo "stale_primary_fence_evidence=target_ready_replicas=$target_ready,stale_path_direct_read_success_count=$stale_success"
     echo "stale_primary_probe=direct_read"
     echo "old_primary_stale_io_success_count=$stale_success"
+    echo "rtpg_before_old_primary_aas=${rtpg_before_old:-missing}"
+    echo "rtpg_before_promoted_aas=${rtpg_before_promoted:-missing}"
+    echo "rtpg_after_old_primary_aas=${rtpg_after_old:-missing}"
+    echo "rtpg_after_promoted_aas=${rtpg_after_promoted:-missing}"
+    echo "rtpg_transition_verified=$rtpg_ok"
     echo "writer_pod_uid_after=$uid_after"
     echo "pod_recreate_used=$pod_recreate"
     echo "data_check_after_failover=mounted_workload_checksum_passed"
@@ -754,7 +846,7 @@ while IFS=$'\t' read -r idx vid pvc primary node frontend deploy; do
     echo "transparent_failover_claimed=true"
   } >>"$dir/summary.txt"
 
-  if [[ "$primary_count" != "1" || "$pod_recreate" != "false" || "$cross" != "false" || "$stale_success" != "0" ]]; then
+  if [[ "$primary_count" != "1" || "$pod_recreate" != "false" || "$cross" != "false" || "$stale_success" != "0" || "$rtpg_ok" != "true" ]]; then
     STATUS="failed"
     FAILED_PHASE="isolation_volume_${idx}"
     write_summary

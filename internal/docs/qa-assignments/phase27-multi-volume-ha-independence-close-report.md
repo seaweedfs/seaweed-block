@@ -12,6 +12,14 @@ recorded `candidate_result=expected_failure` and measured
 `old_primary_stale_io_success_count=0`; the scenario now asserts the probe logs
 directly.
 
+Post-close D6 hardening: PASS. Run `20260523-123229-9dd4` reran the D4
+interleaved gate after adding per-volume RTPG AAS transition evidence. Both
+target volumes measured old-primary before `0x00`, promoted-replica before
+`0x02`, promoted-replica after `0x00`, old-primary after `missing`, and
+`rtpg_transition_verified=true`. Run `20260523-123647-2fc4` also reran the D3
+sequential gate and passed 47/47 actions with the same per-target AAS
+assertions across all three target volumes.
+
 ## Scope
 
 Validates the Phase 27 claim:
