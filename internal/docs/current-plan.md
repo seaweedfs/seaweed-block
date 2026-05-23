@@ -364,6 +364,63 @@ Release-grade target:
 - Run D3 and D4 at least `N=5` each in nightly or QA-owned validation.
 - Required result for release-grade wording: `flake_rate_percent=0`.
 
+## D8: App Pods Spread Across Nodes
+
+Goal: prove the multi-volume mounted failover path is not limited to the old
+single app-node shape. Three mounted writer pods must run on three distinct
+Kubernetes nodes, and each PVC must still recover transparently through its own
+host path.
+
+Status: PASS on 2026-05-23.
+
+Evidence:
+
+- Scenario:
+  `testops/scenarios/helm-multi-volume-rf3-app-spread-failover-chain.yaml`
+- Run: `20260523-151100-e241`
+- Result: PASS, 8/8 phases, 32/32 actions
+- Flow:
+  - Helm installed RF=3 sync-quorum stack with Stage 2 multipath enabled
+  - three RF=3 PVCs bound and launched long-running writer pods distributed
+    across `m01`, `m02`, and `tp01`
+  - helper waited for all 9 generated BlockVolume Deployments to become
+    available before mounting writers
+  - each volume's current primary Deployment was stopped in turn
+  - each writer pod kept the same UID and verified old/new data after failover
+  - RTPG and stale-primary probes ran on the writer pod's actual Kubernetes
+    node, not a fixed controller node
+  - cleanup removed Helm resources, iSCSI sessions, and product processes
+- Summary fields:
+  - `multi_volume_mounted_failover_status=ok`
+  - `requested_volume_count=3`
+  - `replication_factor=3`
+  - `app_node_selector=m01,m02,tp01`
+  - `app_node_distribution_count=3`
+  - `recovered_volume_count=3`
+  - `mounted_workload_checksum_passed_count=3`
+  - `pod_recreate_used=false`
+  - `cross_interference_observed=false`
+  - `transparent_failover_claimed=true`
+- Per-volume evidence:
+  - volume 1: writer on `m01`, `before_primary=r1`, `promoted_replica=r2`,
+    `post_failure_primary_count=1`, `rtpg_transition_verified=true`
+  - volume 2: writer on `m02`, `before_primary=r2`, `promoted_replica=r1`,
+    `post_failure_primary_count=1`, `rtpg_transition_verified=true`
+  - volume 3: writer on `tp01`, `before_primary=r3`, `promoted_replica=r1`,
+    `post_failure_primary_count=1`, `rtpg_transition_verified=true`
+  - all three volumes measured `old_primary_stale_io_success_count=0`
+
+Fix included:
+
+- `scripts/run-multi-volume-mounted-failover.sh` accepts comma-separated app
+  node selectors and distributes writer pods round-robin.
+- RTPG and stale-primary direct-read probes now execute on each PVC's mounted
+  writer node, which is required once app pods are spread across nodes.
+- The helper waits for the expected `volume_count * replication_factor`
+  BlockVolume Deployments to be available before writer pods are created.
+- The D8 Helm scenario captures applied Helm values, rendered manifest, and
+  kube-system rollout state after install so image/flag drift is self-evident.
+
 ## Risks
 
 | Risk | Mitigation |
@@ -372,6 +429,7 @@ Release-grade target:
 | Per-node port reuse collides across volumes | D1 requires RF=3 report and writer/reader success for all volumes |
 | One volume's event stream contaminates another | D2-D4 require per-volume timeline and non-target stability checks |
 | Multipath evidence becomes too noisy | D3 must reuse Stage 2 host evidence shape and keep assertions narrow |
+| Host-path evidence sampled on the wrong node | D8 runs RTPG/stale probes on each writer pod's mounted node |
 
 ## Progress
 
@@ -382,3 +440,4 @@ Release-grade target:
 - D5: PASS - measured stale primary direct-read probe `20260523-114708-46bc`
 - D6: PASS - measured RTPG AAS transition evidence `20260523-123229-9dd4`, `20260523-123647-2fc4`
 - D7: DEV PASS - flake matrix wrapper, D4 N=3 pass, N>=5 QA/nightly pending
+- D8: PASS - app pods spread across m01/m02/tp01 with mounted transparent failover `20260523-151100-e241`

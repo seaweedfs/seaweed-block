@@ -20,6 +20,21 @@ target volumes measured old-primary before `0x00`, promoted-replica before
 sequential gate and passed 47/47 actions with the same per-target AAS
 assertions across all three target volumes.
 
+Post-close D7 hardening: DEV PASS. `scripts/run-phase27-flake-matrix.ps1`
+now runs selected Phase 27 TestOps scenarios repeatedly and emits
+`flake-summary.txt` / `flake-summary.json`. Dev run
+`results/phase27-d7-flake-interleaved-n3` completed three D4 interleaved
+iterations with `pass_runs=3`, `fail_runs=0`, `flake_rate_percent=0`.
+Release-grade soak wording still requires QA/nightly `N>=5`.
+
+Post-close D8 hardening: PASS. Run `20260523-151100-e241` added the app-spread
+variant: three RF=3 PVC writers were pinned to `m01`, `m02`, and `tp01`, each
+volume failed over transparently with the same writer pod UID, and RTPG /
+stale-primary probes were collected on the actual mounted writer node. The run
+passed 32/32 actions with `app_node_distribution_count=3`,
+`recovered_volume_count=3`, `pod_recreate_used=false`, and
+`rtpg_transition_verified=true` for all three volumes.
+
 ## Scope
 
 Validates the Phase 27 claim:
