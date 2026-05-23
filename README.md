@@ -115,8 +115,8 @@ go build -o sw-block ./cmd/sw-block
 export PATH="$PWD:$PATH"
 sw-block ops generate-helm-values \
   --out values.day1.yaml \
-  --image ghcr.io/seaweedfs/seaweed-block:sha-28a99ce4f644 \
-  --csi-image ghcr.io/seaweedfs/seaweed-block-csi:sha-28a99ce4f644
+  --image ghcr.io/seaweedfs/seaweed-block:sha-d4822bf02617 \
+  --csi-image ghcr.io/seaweedfs/seaweed-block-csi:sha-d4822bf02617
 helm install sw-block charts/seaweed-block \
   --namespace kube-system \
   --create-namespace \
@@ -170,10 +170,8 @@ ghcr.io/seaweedfs/seaweed-block:sha-<commit>
 ghcr.io/seaweedfs/seaweed-block-csi:sha-<commit>
 ```
 
-Current validated v0.3 Day-1 walkthrough image tag:
-`sha-28a99ce4f644`. v0.3.1 lifecycle hardening gates used the Phase 26 branch
-build; publish a new immutable GHCR SHA before advertising v0.3.1 as an
-external image-backed release.
+Current validated v0.3.1 Day-1 walkthrough image tag:
+`sha-d4822bf02617`.
 
 Mutable `:alpha` is a smoke/demo tag only; it can drift from the source tree.
 

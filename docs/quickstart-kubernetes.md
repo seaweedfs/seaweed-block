@@ -81,8 +81,8 @@ From the repository root:
 export KUBECONFIG="${KUBECONFIG:-/etc/rancher/k3s/k3s.yaml}"
 sw-block ops generate-helm-values \
   --out values.day1.yaml \
-  --image ghcr.io/seaweedfs/seaweed-block:sha-28a99ce4f644 \
-  --csi-image ghcr.io/seaweedfs/seaweed-block-csi:sha-28a99ce4f644
+  --image ghcr.io/seaweedfs/seaweed-block:sha-d4822bf02617 \
+  --csi-image ghcr.io/seaweedfs/seaweed-block-csi:sha-d4822bf02617
 ```
 
 The `KUBECONFIG` fallback above is the common k3s path. Non-k3s users should
@@ -130,9 +130,8 @@ sw-block ops generate-helm-values \
   --csi-image ghcr.io/seaweedfs/seaweed-block-csi:sha-<commit>
 ```
 
-Current validated v0.3 Day-1 walkthrough image tag:
-`sha-28a99ce4f644`. The v0.3.1 lifecycle-hardening gates used the Phase 26
-branch build; use the v0.3.1 immutable GHCR SHA once it is published.
+Current validated v0.3.1 Day-1 walkthrough image tag:
+`sha-d4822bf02617`.
 
 Mutable `:alpha` is a smoke/demo tag only. Do not use it as release evidence
 unless the publish commit is known.
