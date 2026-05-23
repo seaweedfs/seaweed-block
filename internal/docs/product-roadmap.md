@@ -36,7 +36,8 @@ ready.
 | P0 | Keep Phase 27 D1 RF3 readiness green | Core Stability | PASS | Proves 3 RF3 PVCs can coexist before fault injection |
 | P1 | Operator lifecycle design and first CRD/Condition shape | Operational | after Helm hardening | Kubernetes-native day-2 loop starts here |
 | P1 | Product-owned cleanup/lifecycle ownership | Operational + Core Stability | partial | Scripts still own too much lifecycle and cleanup |
-| P1 | ManagedVolume model hardening for operator dependency | Core Stability | seed closed, needs extension | Operator/dashboard must consume one semantic model, not invent truth |
+| P1 | Control Model Stabilization Gate | Core Stability | required before operator-grade operations | Operation layer and future operator need stable state, action, and evidence contracts |
+| P1 | ManagedVolume model hardening for operator dependency | Core Stability | seed closed, folds into model gate | Operator/dashboard must consume one semantic model, not invent truth |
 | P1 | Returned-replica rebuild/reintegration/failback | Functional + Core Stability | pending | Required for credible sustained HA after recovery |
 | P2 | NVMe ANA Kubernetes parity | Functional | pending | Protocol parity after iSCSI multipath path is stable |
 | P2 | Backup/snapshot/restore workflow | Functional + Operational | pending | Enterprise expectation, not part of current alpha |
@@ -231,6 +232,16 @@ Closed / current:
 
 Next:
 
+- Run a `Control Model Stabilization Gate` before operator-grade operations:
+  - freeze the ManagedVolume fact model used by report/dashboard/explain,
+  - define truth owners for Kubernetes placement, CSI publish/stage, authority,
+    recovery, host path, workload, cleanup, and evidence,
+  - separate fact publication, orchestration decisions, executor actions, and
+    timeline evidence,
+  - define state priority when multiple automata overlap, such as node loss
+    affecting authority, CSI, host path, and cleanup at the same time,
+  - keep mutating actions as dry-run/read-only contracts until the model has
+    gates and audit evidence.
 - Extend ManagedVolume to express multi-volume failover isolation facts:
   target volume, non-target volume stability, primary_count, stale I/O result,
   and host-path recovery method.
