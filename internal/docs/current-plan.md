@@ -1,6 +1,6 @@
 # Current Plan: Phase 28 - Productized Operations And Operator Foundation
 
-Status: active, 62% complete. Started on 2026-05-23 after Phase 27 D5/D6/D8
+Status: active, 70% complete. Started on 2026-05-23 after Phase 27 D5/D6/D8
 independent QA reruns passed. Expanded on 2026-05-23 from a narrow
 operational-hardening slice into the productized operations / operator
 foundation plan.
@@ -452,12 +452,20 @@ Acceptance:
 - Keep the CRD scope read-only: no promote, repair, rebuild, delete, or cleanup
   actions in this phase.
 
-Status: pending.
+Status: dev complete, tests pending.
 
 Required output:
 
 - `internal/docs/ref/operator-crd-condition-event-contract.md`
 - Example YAML snippets for one ready volume and one blocked volume.
+
+Implemented:
+
+- `core/ops/managed_volume_crd_contract.go`
+- `core/ops/managed_volume_crd_contract_test.go`
+- CRD resource contract for `SwBlockCluster` and `SwBlockVolume`.
+- Condition vocabulary and Kubernetes Event severity mapping.
+- Read-only/non-mutating action boundary.
 
 ## D11: Read-Only Operator Foundation Gate
 
@@ -542,7 +550,8 @@ Status: pending.
 - Operational foundation QA: PASS - `phase28-operational-reliability-qa-validation.md`
 - D9: dev complete - layered model, ManagedVolume field contract, and contract
   tests added; validation pending
-- D10: pending - Kubernetes CRD / Condition / Event contract
+- D10: dev complete - CRD/Condition/Event contract and tests added;
+  validation pending
 - D11: pending - read-only operator foundation gate
 - D12: pending - productized operations close gate
 - D13: pending - release packaging and claim alignment
