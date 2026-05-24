@@ -31,11 +31,12 @@ ready.
 
 | Priority | Work | Type | Status | Why It Matters |
 |---|---|---|---|---|
-| P0 | Phase 28 Operational Reliability And TestOps Hardening | Operational + Core Stability | active | Cleanup, repeatability, runner primitives, and support evidence must stabilize before the next feature expansion |
+| P0 | Phase 28 Productized Operations And Operator Foundation | Operational + Core Stability | active | Turn Helm/scripts/evidence/model into one Kubernetes product operations loop before the next feature expansion |
 | P0 | Publish v0.3.2 images and update doc pins | Operational | next | Phase 27 uses local TestOps images; users need a consumable immutable GHCR SHA |
 | P0 | Multipath stale-map cleanup verifier | Operational + Core Stability | PASS in Phase 28 D1 | QA found orphan dm-multipath maps after sessions were gone; cleanup evidence now covers this |
 | P0 | Phase 27 Multi-Volume HA Independence | Functional + Core Stability | PASS | Proves RF3 multi-volume readiness, CSI reattach, mounted transparent failover, and interleaved failover isolation |
-| P1 | Operator lifecycle design and first CRD/Condition shape | Operational | after Phase 28 model review | Kubernetes-native day-2 loop starts here |
+| P0 | ManagedVolume / CRD / Condition contract | Core Stability + Operational | Phase 28 D9-D10 pending | Operator, dashboard, report, and support bundle must consume one state model |
+| P1 | Read-only operator foundation | Operational | Phase 28 D11 pending | Kubernetes-native day-2 loop starts with status, Conditions, Events, and no mutating storage actions |
 | P1 | Product-owned cleanup/lifecycle ownership | Operational + Core Stability | partial | Scripts still own too much lifecycle and cleanup |
 | P1 | Control Model Stabilization Gate | Core Stability | required before operator-grade operations | Operation layer and future operator need stable state, action, and evidence contracts |
 | P1 | ManagedVolume model hardening for operator dependency | Core Stability | seed closed, folds into model gate | Operator/dashboard must consume one semantic model, not invent truth |
@@ -71,10 +72,11 @@ ready.
   and tolerate two interleaved volume-primary failures while the third volume
   stays stable and writable. Before external release, publish a new immutable
   GHCR SHA and update docs.
-- `v0.4-beta-candidate`: Operator lifecycle. Add Kubernetes-native CRDs,
-  Conditions, Events, safe cleanup, and eventually gated repair/rebuild
-  workflows. This is the first release boundary that can feel like a complete
-  Kubernetes product loop rather than scripts plus Helm.
+- `v0.4-beta-candidate`: Productized operations and operator foundation. Add a
+  stable ManagedVolume model, Kubernetes-native CRD/Condition/Event contract,
+  read-only operator foundation, and aligned CLI/report/dashboard/support
+  evidence. Mutating repair/rebuild/failback workflows remain later unless they
+  are separately gated.
 
 Do not skip from scripts directly to an operator. Helm stabilizes the install
 contract; Phase 27 stabilizes multi-volume HA semantics; then an operator can
@@ -82,12 +84,13 @@ own day-2 lifecycle without hiding unstable behavior.
 
 ## Active Work
 
-### Phase 28 - Operational Reliability And TestOps Hardening
+### Phase 28 - Productized Operations And Operator Foundation
 
 Type: Operational + Core Stability
 
-Current status: active, 95%. Started on 2026-05-23 after Phase 27 D5/D6/D8
-independent QA reruns passed.
+Current status: active, 45%. Started on 2026-05-23 after Phase 27 D5/D6/D8
+independent QA reruns passed. Expanded on 2026-05-23 to include the
+productized operations / operator foundation loop.
 
 Goals:
 
@@ -96,9 +99,11 @@ Goals:
 - convert TestOps runner pain into concrete action backlog and reference
   scenarios,
 - align support/report/dashboard evidence for multi-volume HA failures,
-- review structure/model dependencies before operator-grade operations.
+- stabilize the ManagedVolume model as the operations read model,
+- define the CRD/Condition/Event contract for Kubernetes-native status,
+- establish a read-only operator foundation with no mutating storage actions.
 
-Closed gates:
+Closed foundation gates:
 
 - D1 multipath cleanup verifier: `20260523-182000-41ee`, 13/13 PASS.
 - D2 Phase 27 flake matrix:
@@ -110,11 +115,19 @@ Closed gates:
 - D5-D8 structure/model/readiness review:
   `internal/docs/ref/phase28-structure-model-readiness-review.md`.
 
+Open operator-foundation gates:
+
+- D9 ManagedVolume operational model contract.
+- D10 Kubernetes CRD / Condition / Event contract.
+- D11 read-only operator foundation gate.
+- D12 productized operations close gate.
+- D13 release packaging and claim alignment.
+
 Non-goals:
 
 - no new NVMe ANA claim,
 - no backup/snapshot/restore implementation,
-- no operator/CRD implementation,
+- no mutating operator lifecycle implementation,
 - no large model refactor without gates.
 
 ### Phase 27 - Multi-Volume HA Independence

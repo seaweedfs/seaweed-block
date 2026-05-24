@@ -1,23 +1,35 @@
-# Current Plan: Phase 28 - Operational Reliability And TestOps Hardening
+# Current Plan: Phase 28 - Productized Operations And Operator Foundation
 
-Status: active, 95% complete. Started on 2026-05-23 after Phase 27 D5/D6/D8
-independent QA reruns passed.
+Status: active, 45% complete. Started on 2026-05-23 after Phase 27 D5/D6/D8
+independent QA reruns passed. Expanded on 2026-05-23 from a narrow
+operational-hardening slice into the productized operations / operator
+foundation plan.
 
 ## Product Goal
 
-Make the v0.3.x block product easier to validate, diagnose, clean up, and
-extend before the next functional expansion. Phase 28 deliberately prioritizes
-operational reliability and structure review over new user-facing storage
-features.
+Turn the v0.3.x block product from "Helm plus scripts plus strong lab gates"
+into a clearer Kubernetes product loop:
+
+```text
+install -> first PVCs -> multi-volume HA -> observe/explain -> support bundle
+-> cleanup -> stable model -> operator foundation
+```
+
+Phase 28 deliberately treats operational reliability, state-model tightening,
+and operator foundation as one plan. The reason is practical: an operator or
+dashboard cannot be credible if cleanup, evidence, ManagedVolume state, and
+reason codes are still scattered across scripts, launcher loops, CSI logs, and
+TestOps helpers.
 
 The working thesis:
 
 ```text
 simple stable observable block
 -> reliable gates and cleanup
--> clearer TestOps/product interface
--> structure/model review
--> then operator, NVMe ANA, rebuild/failback, backup
+-> one product evidence vocabulary
+-> stable ManagedVolume / Condition model
+-> read-only operator foundation
+-> then mutating lifecycle, NVMe ANA, rebuild/failback, backup
 ```
 
 ## Scope Contract
@@ -26,10 +38,13 @@ simple stable observable block
 |---|---|
 | cleanup residue detection and verifier hardening | new NVMe ANA product claim |
 | TestOps runner action backlog and reference scenarios | backup/snapshot/restore implementation |
-| flake matrix / repeatability gates | operator/CRD implementation |
+| flake matrix / repeatability gates | full operator implementation beyond read-only foundation |
 | support-bundle/report consistency for multi-volume failures | broad production HA claim |
 | structure review for control-plane/model tightening | large refactor without gates |
 | small fixes that unblock reliability gates | mutating repair/promote/rebuild workflows |
+| ManagedVolume / Condition field contract for operations | automatic rebuild/failback implementation |
+| read-only operator foundation design and gated skeleton | physical-host-loss product claim expansion |
+| ops/report/dashboard/CRD evidence vocabulary alignment | production SLO or broad scale claim |
 
 ## Priority
 
@@ -39,6 +54,10 @@ P0:
 - D2 Phase 27 flake matrix repeatability gate.
 - D3 TestOps runner action backlog from real scenario pain.
 - D4 support-bundle/report consistency for multi-volume HA failures.
+- D9 ManagedVolume operational model contract.
+- D10 Kubernetes CRD / Condition / Event contract.
+- D11 read-only operator foundation gate.
+- D12 productized operations close gate.
 
 P1:
 
@@ -46,6 +65,7 @@ P1:
   launcher, CSI, ops, scripts, and helper scenarios.
 - D6 model dependency map: what the operator/dashboard/report must consume
   from a stable ManagedVolume / control model.
+- D13 release packaging and docs alignment for the operator-foundation boundary.
 
 P2:
 
@@ -57,9 +77,11 @@ P2:
 Allowed after Phase 28:
 
 ```text
-The v0.3.x lab gates have stronger cleanup, repeatability, and diagnostic
-coverage. TestOps gaps are documented with concrete action candidates. The
-next operator/model work has an explicit dependency map.
+The v0.3.x product has a clearer operations foundation: repeatable cleanup and
+HA gates, product-owned support evidence, a stable ManagedVolume/Condition
+contract, and a read-only operator foundation that can report install,
+readiness, volume health, recovery evidence, and cleanup status without
+inventing new truth.
 ```
 
 Still not allowed:
@@ -67,7 +89,7 @@ Still not allowed:
 ```text
 Production HA.
 Arbitrary scale/SLO.
-Operator-managed lifecycle.
+Mutating operator-managed lifecycle.
 NVMe ANA parity.
 Backup/snapshot/restore.
 Automatic rebuild/failback.
@@ -332,6 +354,141 @@ Output:
 
 - `internal/docs/ref/phase28-structure-model-readiness-review.md`
 
+## D9: ManagedVolume Operational Model Contract
+
+Goal: make ManagedVolume the stable read model for productized operations.
+
+Why this belongs in Phase 28: the product already has strong PVC, failover,
+report, and dashboard evidence, but some truth is still assembled from
+launcher state, CSI observations, inventory snapshots, and helper summaries.
+Operator-grade operations need one semantic projection that every surface can
+consume.
+
+Acceptance:
+
+- Define the stable fields for a ManagedVolume:
+  - identity: PVC/PV/volume ID, namespace, StorageClass,
+  - placement: replicas, nodes, frontends, ports, protocol,
+  - authority: primary, epoch, endpoint_version, primary_count,
+  - data safety: RF, ack_profile, required frontier, candidate frontier,
+  - host path: CSI reattach vs mounted multipath, RTPG/AAS evidence,
+  - health: Ready/Degraded/Recovering/Blocked conditions,
+  - support: reason_code, evidence_ref, timeline cursor.
+- Mark fields as `stable`, `provisional`, or `test_only`.
+- Map current `sw-block ops cluster`, `ops inventory`, `ops report`,
+  dashboard, support bundle, and future CRD status to the same field names.
+- Add a small regression test or golden fixture that catches renamed or missing
+  core fields before docs/UI drift.
+
+Status: pending.
+
+Required output:
+
+- `internal/docs/ref/managed-volume-operational-model-contract.md`
+- TDD/golden coverage for at least one healthy RF3 multi-volume case and one
+  blocked/recovery case.
+
+## D10: Kubernetes CRD / Condition / Event Contract
+
+Goal: define the Kubernetes-native surface before writing a real operator.
+
+This does not claim a production operator. It defines the API shape and the
+status semantics that a read-only operator must expose.
+
+Acceptance:
+
+- Draft CRD status shape for the first operator-owned resources, likely:
+  - `SwBlockCluster`
+  - `SwBlockVolume` or `SwBlockManagedVolume`
+- Define Conditions with stable reasons:
+  - `Ready`
+  - `Degraded`
+  - `Recovering`
+  - `Blocked`
+  - `CleanupRequired`
+- Define Kubernetes Events emitted from product-owned evidence, not from log
+  scraping.
+- Prove the CRD/Condition vocabulary round-trips from ManagedVolume fields.
+- Keep the CRD scope read-only: no promote, repair, rebuild, delete, or cleanup
+  actions in this phase.
+
+Status: pending.
+
+Required output:
+
+- `internal/docs/ref/operator-crd-condition-event-contract.md`
+- Example YAML snippets for one ready volume and one blocked volume.
+
+## D11: Read-Only Operator Foundation Gate
+
+Goal: create the first operator foundation without adding dangerous actions.
+
+The operator foundation may start as a skeleton or prototype, but it must prove
+the correct boundary: observe Kubernetes and sw-block, project status, emit
+conditions/events, and never mutate storage authority.
+
+Acceptance:
+
+- Operator can be installed by Helm behind an explicit alpha flag, or a clear
+  prototype path if code is not ready for chart inclusion.
+- It reports cluster and volume status from the ManagedVolume model.
+- It exposes Conditions/Events consistent with D10.
+- It does not call mutating sw-block APIs.
+- It is covered by a TestOps gate that validates:
+  - install,
+  - status projection,
+  - blocked-bundle projection,
+  - uninstall/cleanup.
+
+Status: pending.
+
+Required output:
+
+- Read-only operator design or skeleton.
+- TestOps scenario for status-only operator foundation.
+- Internal review proving no mutating action path exists.
+
+## D12: Productized Operations Close Gate
+
+Goal: prove a user-facing operational loop, not just individual mechanisms.
+
+Acceptance:
+
+- Fresh cluster, documented install path.
+- First volume and multi-volume smoke pass.
+- `sw-block ops report` and dashboard show the same status vocabulary.
+- ManagedVolume model and CRD/Condition contract describe the same volume
+  state.
+- Support bundle explains one healthy case and one blocked case.
+- Cleanup verifier proves no Kubernetes, iSCSI, dm-multipath, or product-process
+  residue.
+- QA reruns the gate from clean state.
+- PM review confirms the user-facing claim matrix is understandable and narrow.
+
+Status: pending.
+
+Required output:
+
+- Phase 28 close report.
+- Updated README / quickstart / release note language for the operator
+  foundation boundary.
+
+## D13: Release Packaging And Claim Alignment
+
+Goal: avoid shipping a strong internal plan with weak external packaging.
+
+Acceptance:
+
+- Publish immutable GHCR images for the Phase 28 consumable SHA.
+- Update README, quickstart, and release note pins.
+- State the boundary clearly:
+  - Helm is the supported alpha install path.
+  - Operator foundation is read-only/status-first unless D11 proves otherwise.
+  - Mutating repair/rebuild/failback remains future work.
+- Do not let `:alpha` mutable-tag evidence stand in for release evidence.
+
+Status: pending.
+
 ## Progress
 
 - D1: PASS - multipath cleanup verifier catches orphan maps `20260523-182000-41ee`
@@ -342,3 +499,8 @@ Output:
 - D6: PASS - model dependency map written
 - D7: PASS - model tightening proposal written
 - D8: PASS - next feature readiness review written
+- D9: pending - ManagedVolume operational model contract
+- D10: pending - Kubernetes CRD / Condition / Event contract
+- D11: pending - read-only operator foundation gate
+- D12: pending - productized operations close gate
+- D13: pending - release packaging and claim alignment
