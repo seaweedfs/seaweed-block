@@ -290,6 +290,8 @@ Next:
     authority, recovery, host path, workload, cleanup, and evidence,
   - separate fact publication, orchestration decisions, executor actions, and
     timeline evidence,
+  - define dual-mode aggregation: passive fact streams for steady state,
+    bounded active probes for high-impact decisions,
   - define state priority when multiple automata overlap, such as node loss
     affecting authority, CSI, host path, and cleanup at the same time,
   - keep mutating actions as dry-run/read-only contracts until the model has

@@ -48,8 +48,9 @@ engines that project from it.
   defines the reusable Participant / Fact Authority / Master / Executor
   hierarchy: participants emit observations, fact authorities publish
   authoritative facts, masters compute collective state and allowed actions,
-  executors perform side effects, and a domain master may become a fact
-  authority for the next higher layer.
+  masters normally consume passive fact streams but may request bounded probes
+  at high-impact decision boundaries, executors perform side effects, and a
+  domain master may become a fact authority for the next higher layer.
 - [`engine-design-guidelines.md`](./engine-design-guidelines.md)
   defines the reusable engine/control-plane method: facts, context,
   multi-state projections, invariant checks, action contracts, executor

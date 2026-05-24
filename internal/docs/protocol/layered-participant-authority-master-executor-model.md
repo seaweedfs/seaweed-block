@@ -41,7 +41,8 @@ The correct middle shape is:
 ```text
 participants publish observations
 fact authorities publish authoritative facts
-domain masters compute bounded domain state
+domain masters consume mostly-passive fact streams
+domain masters request bounded probes only at decision boundaries
 higher masters consume domain-master output as authority facts
 executors perform side effects only after the relevant master allows them
 ```
@@ -100,6 +101,8 @@ A Master is an information gatherer and decision maker for one control domain.
 A Master:
 
 - consumes Fact Authority facts,
+- can request bounded probes when required facts are missing, stale, or
+  contradictory,
 - checks whether required facts are present and fresh,
 - computes a collective state,
 - decides whether an action is allowed, refused, or still pending,
@@ -108,6 +111,103 @@ A Master:
 
 A Master must not forge lower-domain facts. It can only derive state from facts
 that are authoritative elsewhere or authoritative inside its own domain.
+
+### Dual-Mode Fact Aggregation
+
+Masters should use two fact-aggregation modes.
+
+Default mode:
+
+```text
+passive fact stream
+```
+
+Participants report facts through heartbeats, event streams, watch caches,
+status APIs, and ordinary observations. This should cover almost all steady
+state operation. It keeps the system simple and avoids polling storms.
+
+Exception mode:
+
+```text
+bounded active probe at a decision boundary
+```
+
+If a high-impact decision needs facts that are missing, stale, or
+contradictory, the Master may request a bounded probe through an appropriate
+Participant or Executor.
+
+Use the rule:
+
+```text
+Passive facts are enough for observation.
+Active probes are required only for high-impact decisions when current facts
+are not sufficient.
+If probe cannot prove safety, the Master must fail closed.
+```
+
+The probe rule:
+
+```text
+Master requests probe
+  -> Participant/Executor performs observation
+      -> Fact Authority validates or publishes the fact
+          -> Master recomputes state
+```
+
+A probe is an information-gathering action, not a product mutation. It must not
+silently promote, repair, rebuild, delete, or change authority.
+
+Typical probe triggers:
+
+- primary lost or suspected stale primary,
+- promotion decision,
+- CSI reattach timeout,
+- mounted multipath failover confirmation,
+- cleanup close gate,
+- Kubernetes node loss, network partition, or multi-volume interleaved failure,
+- support bundle capture for a blocked state,
+- future repair/rebuild/failback before any mutation.
+
+Examples:
+
+| Master | Probe request | Fact Authority after probe |
+|---|---|---|
+| `EngineMaster` | probe surviving replica durable frontier before promotion | `ReplicaDurabilityAuthority` |
+| `ManagedVolumeMaster` | probe CSI staged target on a node | `CSIAttachAuthority` |
+| `ManagedVolumeMaster` | probe dm-multipath / RTPG state | `HostPathAuthority` |
+| `ManagedVolumeMaster` | probe cleanup residue after uninstall | `CleanupAuthority` |
+
+Every probe must be bounded:
+
+- timeout,
+- target scope,
+- reason code,
+- evidence output,
+- freshness/generation rule,
+- fail-closed behavior if the probe cannot complete.
+
+Bad pattern:
+
+```text
+fact missing -> assume healthy
+```
+
+Correct pattern:
+
+```text
+fact missing -> request bounded probe -> still missing => Blocked/Unknown
+```
+
+This is the same shape the identity engine has been moving toward:
+
+```text
+steady-state passive reports
++ decision-time active probe
+```
+
+The probe path should stay rare. If a Master needs continuous active probing to
+function normally, either the passive fact stream is missing a required fact or
+the domain boundary is wrong.
 
 Examples:
 

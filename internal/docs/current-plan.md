@@ -377,6 +377,9 @@ Acceptance:
 - Mark fields as `stable`, `provisional`, or `test_only`.
 - Map current `sw-block ops cluster`, `ops inventory`, `ops report`,
   dashboard, support bundle, and future CRD status to the same field names.
+- Define dual-mode fact aggregation:
+  - passive fact streams for steady-state observation,
+  - bounded active probes at high-impact decision boundaries.
 - Add a small regression test or golden fixture that catches renamed or missing
   core fields before docs/UI drift.
 
