@@ -88,7 +88,7 @@ own day-2 lifecycle without hiding unstable behavior.
 
 Type: Operational + Core Stability
 
-Current status: active, 88%. Started on 2026-05-23 after Phase 27 D5/D6/D8
+Current status: active, 90%. Started on 2026-05-23 after Phase 27 D5/D6/D8
 independent QA reruns passed. Expanded on 2026-05-23 to include the
 productized operations / operator foundation loop.
 
@@ -127,8 +127,8 @@ Open operator-foundation gates:
 - D11 read-only operator foundation gate: dev complete. `sw-block ops report`
   writes `operator-snapshot.json`; dashboard serves `/operator-snapshot.json`;
   scoped tests PASS; QA validation pending.
-- D12 productized operations close gate: QA assignment, close-report template,
-  and controller-side close runner written; QA/PM validation pending.
+- D12 productized operations close gate: first QA attempt found B1/B2/B3/N1;
+  fixes landed locally, rerun pending.
 - D13 release packaging: draft v0.3.3 release note and doc alignment prepared;
   immutable GHCR images and final pins pending.
 - D13 release packaging and claim alignment.

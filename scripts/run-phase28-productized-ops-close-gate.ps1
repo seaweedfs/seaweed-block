@@ -1,6 +1,7 @@
 param(
     [string]$Runner = "C:\work\swblock.exe",
     [string]$ResultsDir = "results\phase28-productized-ops-close",
+    [string]$ArtifactShareRoot = "V:\share\g15d-k8s",
     [string[]]$EnvOverride = @()
 )
 
@@ -108,19 +109,36 @@ foreach ($gate in $gates) {
 $operatorSnapshotStatus = "not_checked"
 $operatorSnapshotPath = ""
 $operatorSnapshotReason = ""
+$operatorDashboardRouteStatus = "not_checked"
+$operatorDashboardRoutePath = ""
+$operatorDashboardRouteReason = ""
 
-$snapshotFile = Get-ChildItem -Path (Join-Path $resolvedResults "G1") -Recurse -Filter "operator-snapshot.json" -ErrorAction SilentlyContinue |
+$g1Record = $records | Where-Object { $_.gate -eq "G1" } | Select-Object -First 1
+$snapshotCandidates = @()
+$localSnapshot = Get-ChildItem -Path (Join-Path $resolvedResults "G1") -Recurse -Filter "operator-snapshot.json" -ErrorAction SilentlyContinue |
     Sort-Object LastWriteTime -Descending |
+    Select-Object -First 1
+if ($localSnapshot) {
+    $snapshotCandidates += $localSnapshot.FullName
+}
+if ($g1Record -and $g1Record.run_id -and (Test-Path -LiteralPath $ArtifactShareRoot)) {
+    $shareBase = Join-Path $ArtifactShareRoot "$($g1Record.run_id)-helm-cli-first-volume"
+    $snapshotCandidates += (Join-Path $shareBase "basic-app\status\report\operator-snapshot.json")
+    $operatorDashboardRoutePath = Join-Path $shareBase "basic-app\status\report\dashboard-route\operator-snapshot.json"
+}
+
+$snapshotFile = $snapshotCandidates |
+    Where-Object { $_ -and (Test-Path -LiteralPath $_) } |
     Select-Object -First 1
 
 if (-not $snapshotFile) {
     $operatorSnapshotStatus = "failed"
-    $operatorSnapshotReason = "operator-snapshot.json not found in G1 artifacts"
+    $operatorSnapshotReason = "operator-snapshot.json not found in G1 artifacts or ArtifactShareRoot=$ArtifactShareRoot"
     $failRuns++
 } else {
-    $operatorSnapshotPath = $snapshotFile.FullName
+    $operatorSnapshotPath = [string]$snapshotFile
     try {
-        $snapshot = Get-Content -LiteralPath $snapshotFile.FullName -Raw | ConvertFrom-Json
+        $snapshot = Get-Content -LiteralPath $operatorSnapshotPath -Raw | ConvertFrom-Json
         if ($snapshot.api_version -ne "block.seaweedfs.com/v1alpha1") {
             throw "api_version=$($snapshot.api_version)"
         }
@@ -158,8 +176,29 @@ if (-not $snapshotFile) {
     }
 }
 
+if ($operatorDashboardRoutePath -and (Test-Path -LiteralPath $operatorDashboardRoutePath)) {
+    try {
+        $routeSnapshot = Get-Content -LiteralPath $operatorDashboardRoutePath -Raw | ConvertFrom-Json
+        if ($routeSnapshot.read_only -ne $true) {
+            throw "read_only=$($routeSnapshot.read_only)"
+        }
+        if ($routeSnapshot.mutation.mutation_allowed -ne $false) {
+            throw "mutation_allowed=$($routeSnapshot.mutation.mutation_allowed)"
+        }
+        $operatorDashboardRouteStatus = "PASS"
+    } catch {
+        $operatorDashboardRouteStatus = "failed"
+        $operatorDashboardRouteReason = [string]$_.Exception.Message
+        $failRuns++
+    }
+} else {
+    $operatorDashboardRouteStatus = "failed"
+    $operatorDashboardRouteReason = "dashboard route artifact not found; G1 should save basic-app/status/report/dashboard-route/operator-snapshot.json"
+    $failRuns++
+}
+
 $finishedAt = (Get-Date).ToUniversalTime().ToString("o")
-$closeStatus = if ($failRuns -eq 0 -and $operatorSnapshotStatus -eq "PASS") { "ok" } else { "failed" }
+$closeStatus = if ($failRuns -eq 0 -and $operatorSnapshotStatus -eq "PASS" -and $operatorDashboardRouteStatus -eq "PASS") { "ok" } else { "failed" }
 
 @(
     "phase28_productized_ops_close_status=$closeStatus"
@@ -171,6 +210,9 @@ $closeStatus = if ($failRuns -eq 0 -and $operatorSnapshotStatus -eq "PASS") { "o
     "operator_snapshot_status=$operatorSnapshotStatus"
     "operator_snapshot_path=$operatorSnapshotPath"
     "operator_snapshot_reason=$operatorSnapshotReason"
+    "operator_dashboard_route_status=$operatorDashboardRouteStatus"
+    "operator_dashboard_route_path=$operatorDashboardRoutePath"
+    "operator_dashboard_route_reason=$operatorDashboardRouteReason"
 ) + ($records | ForEach-Object {
     "gate=$($_.gate) result=$($_.result) exit_code=$($_.exit_code) run_id=$($_.run_id) duration_seconds=$($_.duration_seconds) scenario=$($_.scenario)"
 }) | Set-Content -LiteralPath $summaryTxt -Encoding UTF8
@@ -184,6 +226,9 @@ $closeStatus = if ($failRuns -eq 0 -and $operatorSnapshotStatus -eq "PASS") { "o
     operator_snapshot_status = $operatorSnapshotStatus
     operator_snapshot_path = $operatorSnapshotPath
     operator_snapshot_reason = $operatorSnapshotReason
+    operator_dashboard_route_status = $operatorDashboardRouteStatus
+    operator_dashboard_route_path = $operatorDashboardRoutePath
+    operator_dashboard_route_reason = $operatorDashboardRouteReason
     gates = $records
 } | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $summaryJson -Encoding UTF8
 

@@ -52,12 +52,16 @@ Controller-side helper:
 ```powershell
 .\scripts\run-phase28-productized-ops-close-gate.ps1 `
   -Runner C:\work\swblock.exe `
-  -ResultsDir results\phase28-productized-ops-close
+  -ResultsDir results\phase28-productized-ops-close `
+  -ArtifactShareRoot V:\share\g15d-k8s
 ```
 
 The helper runs G1/G2/G3/G5 and validates the D11
-`operator-snapshot.json` contract from G1 artifacts. QA may still inspect
-artifacts manually, but the helper provides a consistent summary:
+`operator-snapshot.json` contract from G1 artifacts. G1 also serves the
+dashboard with its freshly built `sw-block` binary and saves the routed
+`/operator-snapshot.json` response under
+`basic-app/status/report/dashboard-route/`. QA may still inspect artifacts
+manually, but the helper provides a consistent summary:
 
 ```text
 phase28-productized-ops-close-summary.txt

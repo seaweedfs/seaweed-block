@@ -161,6 +161,18 @@ phases:
       - action: assert_greater
         actual: "{{ report_html_count }}"
         threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-cli-first-volume/basic-app/first-volume-summary.txt"
+        pattern: "^operator_snapshot=status/report/operator-snapshot.json$"
+        save_as: operator_snapshot_summary_count
+      - action: assert_greater
+        actual: "{{ operator_snapshot_summary_count }}"
+        threshold: "0"
+      - action: exec
+        node: m02
+        timeout: 1m
+        cmd: "set -e; out=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-cli-first-volume/basic-app/status/report/dashboard-route; mkdir -p \"$out\"; /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-cli-first-volume/bin/sw-block ops dashboard --from-bundle /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-cli-first-volume/basic-app --listen 127.0.0.1:19334 > \"$out/dashboard.stdout.txt\" 2> \"$out/dashboard.stderr.txt\" & pid=$!; trap 'kill $pid >/dev/null 2>&1 || true; wait $pid >/dev/null 2>&1 || true' EXIT; for i in $(seq 1 100); do code=$(curl -s -o \"$out/operator-snapshot.json\" -w '%{http_code}' http://127.0.0.1:19334/operator-snapshot.json || true); if [ \"$code\" = \"200\" ] && grep -q '\"read_only\": true' \"$out/operator-snapshot.json\" && grep -q '\"mutation_allowed\": false' \"$out/operator-snapshot.json\"; then exit 0; fi; sleep 0.2; done; echo \"operator-snapshot route failed\" >&2; cat \"$out/dashboard.stderr.txt\" >&2 || true; exit 1"
 
   - name: helm_uninstall_cleanup
     always: true
