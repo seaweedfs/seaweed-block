@@ -1,6 +1,6 @@
 # Current Plan: Phase 28 - Productized Operations And Operator Foundation
 
-Status: active, 50% complete. Started on 2026-05-23 after Phase 27 D5/D6/D8
+Status: active, 55% complete. Started on 2026-05-23 after Phase 27 D5/D6/D8
 independent QA reruns passed. Expanded on 2026-05-23 from a narrow
 operational-hardening slice into the productized operations / operator
 foundation plan.
@@ -178,6 +178,10 @@ Evidence:
     `20260523-191350-ae51`, `20260523-191644-fcb3`,
     `20260523-191915-0f86`, `20260523-192150-4a49`,
     `20260523-192433-362e`
+- Independent QA validation:
+  `internal/docs/qa-assignments/phase28-operational-reliability-qa-validation.md`
+  confirms D3 mounted N=5 and D4 interleaved N=5, both `flake_rate_percent=0`,
+  with 510 failover-scenario actions and no failures.
 
 Notes:
 
@@ -354,6 +358,30 @@ Output:
 
 - `internal/docs/ref/phase28-structure-model-readiness-review.md`
 
+## Operational Foundation QA Addendum
+
+Status: PASS on 2026-05-24 UTC.
+
+Evidence:
+
+- `internal/docs/qa-assignments/phase28-operational-reliability-qa-validation.md`
+
+Scope:
+
+- D1 cleanup-residue chain: `20260523-210004-bed1`, 13/13 PASS.
+- D2 D3 mounted flake matrix: N=5, 5/5 PASS, `flake_rate_percent=0`.
+- D2 D4 interleaved flake matrix: N=5, 5/5 PASS,
+  `flake_rate_percent=0`.
+- Direct host audit after QA: no multipath maps, no dmsetup devices, no iSCSI
+  sessions, no sw-block pods/processes.
+- PM-shape review of D3-D6 reference docs accepted with no blocking findings.
+
+Boundary:
+
+- This closes the operational reliability foundation of Phase 28.
+- It does not close D9-D13, which are the expanded ManagedVolume / CRD /
+  operator-foundation gates.
+
 ## D9: ManagedVolume Operational Model Contract
 
 Goal: make ManagedVolume the stable read model for productized operations.
@@ -503,6 +531,7 @@ Status: pending.
 - D6: PASS - model dependency map written
 - D7: PASS - model tightening proposal written
 - D8: PASS - next feature readiness review written
+- Operational foundation QA: PASS - `phase28-operational-reliability-qa-validation.md`
 - D9: in progress - layered Participant/Fact Authority/Master/Executor model
   written; ManagedVolume field contract and golden tests pending
 - D10: pending - Kubernetes CRD / Condition / Event contract

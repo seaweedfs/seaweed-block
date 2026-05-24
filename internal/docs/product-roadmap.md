@@ -88,7 +88,7 @@ own day-2 lifecycle without hiding unstable behavior.
 
 Type: Operational + Core Stability
 
-Current status: active, 50%. Started on 2026-05-23 after Phase 27 D5/D6/D8
+Current status: active, 55%. Started on 2026-05-23 after Phase 27 D5/D6/D8
 independent QA reruns passed. Expanded on 2026-05-23 to include the
 productized operations / operator foundation loop.
 
@@ -114,6 +114,9 @@ Closed foundation gates:
   `internal/docs/ref/multi-volume-ha-support-evidence-contract.md`.
 - D5-D8 structure/model/readiness review:
   `internal/docs/ref/phase28-structure-model-readiness-review.md`.
+- Operational reliability QA validation:
+  `internal/docs/qa-assignments/phase28-operational-reliability-qa-validation.md`
+  confirms D1 plus D2 N=5/N=5 flake matrices with 0 failures and 0 flakes.
 
 Open operator-foundation gates:
 
