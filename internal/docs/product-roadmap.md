@@ -88,7 +88,7 @@ own day-2 lifecycle without hiding unstable behavior.
 
 Type: Operational + Core Stability
 
-Current status: active, 55%. Started on 2026-05-23 after Phase 27 D5/D6/D8
+Current status: active, 62%. Started on 2026-05-23 after Phase 27 D5/D6/D8
 independent QA reruns passed. Expanded on 2026-05-23 to include the
 productized operations / operator foundation loop.
 
@@ -120,7 +120,8 @@ Closed foundation gates:
 
 Open operator-foundation gates:
 
-- D9 ManagedVolume operational model contract.
+- D9 ManagedVolume operational model contract: dev complete, validation
+  pending.
 - D10 Kubernetes CRD / Condition / Event contract.
 - D11 read-only operator foundation gate.
 - D12 productized operations close gate.

@@ -1,6 +1,6 @@
 # Current Plan: Phase 28 - Productized Operations And Operator Foundation
 
-Status: active, 55% complete. Started on 2026-05-23 after Phase 27 D5/D6/D8
+Status: active, 62% complete. Started on 2026-05-23 after Phase 27 D5/D6/D8
 independent QA reruns passed. Expanded on 2026-05-23 from a narrow
 operational-hardening slice into the productized operations / operator
 foundation plan.
@@ -411,7 +411,7 @@ Acceptance:
 - Add a small regression test or golden fixture that catches renamed or missing
   core fields before docs/UI drift.
 
-Status: pending.
+Status: dev complete, tests pending.
 
 Required output:
 
@@ -419,6 +419,14 @@ Required output:
 - `internal/docs/ref/managed-volume-operational-model-contract.md`
 - TDD/golden coverage for at least one healthy RF3 multi-volume case and one
   blocked/recovery case.
+
+Implemented:
+
+- `core/ops/managed_volume_contract.go`
+- `core/ops/managed_volume_contract_test.go`
+- stable field contract with Participant, Fact Authority, Master,
+  aggregation mode, probe boundary, condition surface, and evidence
+  requirement.
 
 ## D10: Kubernetes CRD / Condition / Event Contract
 
@@ -532,8 +540,8 @@ Status: pending.
 - D7: PASS - model tightening proposal written
 - D8: PASS - next feature readiness review written
 - Operational foundation QA: PASS - `phase28-operational-reliability-qa-validation.md`
-- D9: in progress - layered Participant/Fact Authority/Master/Executor model
-  written; ManagedVolume field contract and golden tests pending
+- D9: dev complete - layered model, ManagedVolume field contract, and contract
+  tests added; validation pending
 - D10: pending - Kubernetes CRD / Condition / Event contract
 - D11: pending - read-only operator foundation gate
 - D12: pending - productized operations close gate
