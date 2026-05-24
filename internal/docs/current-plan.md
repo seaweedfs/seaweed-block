@@ -1,444 +1,258 @@
-# Current Plan: Phase 27 - Multi-Volume HA Independence
+# Current Plan: Phase 28 - Operational Reliability And TestOps Hardening
 
-Status: complete, 100% complete. Started on 2026-05-22 after Phase 26 Helm
-lifecycle hardening closed.
+Status: active, 30% complete. Started on 2026-05-23 after Phase 27 D5/D6/D8
+independent QA reruns passed.
 
 ## Product Goal
 
-Prove that Seaweed Block can host multiple Kubernetes PVC-backed RF=3 volumes
-and eventually recover each volume independently under faults.
+Make the v0.3.x block product easier to validate, diagnose, clean up, and
+extend before the next functional expansion. Phase 28 deliberately prioritizes
+operational reliability and structure review over new user-facing storage
+features.
 
-This phase is intentionally separate from v0.3.1. Phase 26 proved Helm lifecycle
-and multi-PVC Day-1 behavior. Phase 27 raises the bar to RF=3 multi-volume
-readiness and, later, multi-volume failover independence.
+The working thesis:
+
+```text
+simple stable observable block
+-> reliable gates and cleanup
+-> clearer TestOps/product interface
+-> structure/model review
+-> then operator, NVMe ANA, rebuild/failback, backup
+```
 
 ## Scope Contract
 
 | In | Out |
 |---|---|
-| RF=3 multi-volume readiness and fault gates | v0.3.1 release claim |
-| per-volume primary/replica/frontend independence | operator/CRD implementation |
-| CSI reattach recovery per volume | backup/snapshot/restore |
-| transparent mounted failover per volume if multipath is enabled | broad production HA |
-| cross-volume non-interference evidence | performance/SLO claims |
-| support-bundle/timeline evidence per volume | NVMe ANA parity |
+| cleanup residue detection and verifier hardening | new NVMe ANA product claim |
+| TestOps runner action backlog and reference scenarios | backup/snapshot/restore implementation |
+| flake matrix / repeatability gates | operator/CRD implementation |
+| support-bundle/report consistency for multi-volume failures | broad production HA claim |
+| structure review for control-plane/model tightening | large refactor without gates |
+| small fixes that unblock reliability gates | mutating repair/promote/rebuild workflows |
+
+## Priority
+
+P0:
+
+- D1 multipath stale-map cleanup verifier.
+- D2 Phase 27 flake matrix repeatability gate.
+- D3 TestOps runner action backlog from real scenario pain.
+- D4 support-bundle/report consistency for multi-volume HA failures.
+
+P1:
+
+- D5 structure review: where control-plane logic is currently spread across
+  launcher, CSI, ops, scripts, and helper scenarios.
+- D6 model dependency map: what the operator/dashboard/report must consume
+  from a stable ManagedVolume / control model.
+
+P2:
+
+- D7 model-tightening design proposal for the next major release.
+- D8 next-feature readiness review for NVMe ANA, rebuild/failback, and backup.
 
 ## Claim Boundary
 
-Allowed after Phase 27:
+Allowed after Phase 28:
 
 ```text
-Three RF=3 PVC-backed volumes can coexist on the 3-node lab, bind, mount,
-write/read, appear as three independent ManagedVolume rows, recover
-independently through CSI/pod recreate, and recover independently through
-Stage 2 iSCSI ALUA/dm-multipath without pod recreate when the mounted host
-path is enabled.
+The v0.3.x lab gates have stronger cleanup, repeatability, and diagnostic
+coverage. TestOps gaps are documented with concrete action candidates. The
+next operator/model work has an explicit dependency map.
 ```
 
 Still not allowed:
 
 ```text
-Broad production HA.
-Backup/snapshot/restore.
+Production HA.
+Arbitrary scale/SLO.
 Operator-managed lifecycle.
 NVMe ANA parity.
-Performance or scale SLOs beyond the gated 3-volume lab.
+Backup/snapshot/restore.
+Automatic rebuild/failback.
 ```
 
-## D1: RF=3 Multi-Volume Readiness
+## D1: Multipath Cleanup Verifier
 
-Goal: prove the placement / port-assignment / observation scheme can host
-`N=3` concurrent RF=3 volumes before fault injection is attempted.
+Goal: fail cleanup when orphan dm-multipath maps remain after iSCSI sessions
+and Kubernetes resources are gone.
 
-Status: PASS on 2026-05-22.
+Reason: Phase 27 QA repeatedly found stale maps such as:
 
-Evidence:
+```text
+mpathbp (363141082d2f7caa1) dm-2 ##,##
+size=1.0M features='0' hwhandler='0' wp=rw
+```
 
-- Scenario: `testops/scenarios/helm-multi-volume-rf3-readiness-chain.yaml`
-- Run: `20260522-170901-70c5`
-- Result: PASS, 6/6 phases, 35/35 actions
-- Flow:
-  - Helm install completed with generated RF=3 values
-  - three PVCs bound
-  - three writers verified `/data/demo.bin`
-  - three readers verified persisted bytes
-  - report showed `volumes=3`
-  - report included `rf=3` for all three volumes
-  - cleanup removed all generated blockvolume Deployments, iSCSI sessions, and
-    product processes
-- Summary fields:
-  - `multi_volume_status=ok`
-  - `requested_volume_count=3`
-  - `replication_factor=3`
-  - `writer_verified_count=3`
-  - `reader_verified_count=3`
-  - `managed_volume_count=3`
-  - `cleanup_status=ok`
-
-Fix included:
-
-- `scripts/run-multi-volume-example.sh` now supports
-  `SW_BLOCK_MULTI_VOLUME_RF`.
-- Multi-volume helper waits for generated blockvolume Deployments to disappear
-  before declaring cleanup success, avoiding RF=3 async launcher cleanup races.
-
-## D2: Multi-Volume CSI Reattach Recovery
-
-Goal: for each volume in the set, kill that volume's current primary and prove
-only that volume recovers through the CSI/pod-recreate path while the other
-volumes remain stable.
+The old verifier caught normal Seaweed maps (`SeaweedF`, `BlockVol`,
+`io.seaweedfs`) but missed orphan maps that lost vendor/IQN identity.
 
 Acceptance:
 
-```text
-N=3 RF=3 PVCs ready
-for each target volume:
-  primary deployment stopped
-  promoted primary changes only for target volume
-  post_failure_primary_count=1 for target volume
-  reader checksum passes after reattach
-  non-target volumes keep primary/frontend stable
-  cross_interference_observed=false
-cleanup clean
-```
+- `scripts/verify-helm-cleanup.sh` captures `multipath.after-cleanup.txt`.
+- It writes `multipath-residue.after-cleanup.txt`.
+- It fails on normal Seaweed maps or orphan `mpath... ##,##` maps.
+- `cleanup-summary.txt` includes `multipath_residue_count`.
+- `cleanup-residue-chain.yaml` runs the verifier directly.
 
-Status: PASS on 2026-05-22.
+Status: PASS on 2026-05-23.
 
 Evidence:
 
-- Scenario: `testops/scenarios/helm-multi-volume-rf3-reattach-recovery-chain.yaml`
-- Run: `20260522-223126-21fd`
-- Result: PASS, 6/6 phases, 29/29 actions
-- Flow:
-  - Helm installed RF=3 sync-quorum stack
-  - three PVCs bound and passed writer/reader setup
-  - each volume's current primary Deployment was stopped in turn
-  - each target volume promoted to a surviving replica
-  - replacement reader verified `/data/demo.bin` after each promotion
-  - non-target volumes kept primary/frontend stable during each target
-    recovery
-  - cleanup removed Helm resources, iSCSI sessions, and product processes
-- Summary fields:
-  - `multi_volume_reattach_status=ok`
-  - `requested_volume_count=3`
-  - `replication_factor=3`
-  - `recovered_volume_count=3`
-  - `cross_interference_observed=false`
-  - `cleanup_status=external_to_script`
-- Per-volume evidence:
-  - volume 1: `before_primary=r1`, `promoted_replica=r2`,
-    `post_failure_primary_count=1`, `reader_verified=true`
-  - volume 2: `before_primary=r2`, `promoted_replica=r1`,
-    `post_failure_primary_count=1`, `reader_verified=true`
-  - volume 3: `before_primary=r3`, `promoted_replica=r1`,
-    `post_failure_primary_count=1`, `reader_verified=true`
+- Red check: direct verifier run against the orphan `mpathbp ... ##,##` map
+  failed with `cleanup_status=failed`, `multipath_residue_count=1`, and
+  `failure_count=1`.
+- Green check: after removing the stale map, verifier passed with
+  `cleanup_status=ok`, `multipath_residue_count=0`, and `failure_count=0`.
+- Scenario: `testops/scenarios/cleanup-residue-chain.yaml`
+- Run: `20260523-182000-41ee`
+- Result: PASS, 4/4 phases, 13/13 actions
 
 Fix included:
 
-- Product loop now probes promotion candidates for known placement volumes that
-  are excluded from the supported authority snapshot only because of
-  recoverable inventory gaps such as `PartialInventory`.
-- If the current primary cannot be proven healthy and a survivor passes the
-  promotion probe, master emits a direct `IntentReassign` for that volume
-  without relaxing unsafe evidence classes such as conflicting primary claims.
-- New TDD coverage:
-  `TestMountedFailover_ProductLoopRF3PromotesWhenCurrentSlotMissingButSurvivorProbeReady`.
+- `scripts/verify-helm-cleanup.sh` now writes
+  `multipath-residue.after-cleanup.txt`.
+- It fails on normal Seaweed maps and orphan `mpath... ##,##` maps.
+- `cleanup-summary.txt` now includes `multipath_residue_count`.
+- `cleanup-residue-chain.yaml` invokes the cleanup verifier directly and no
+  longer requires a `.git` checkout when run from a tar-synced tree.
 
-## D3: Multi-Volume Mounted Transparent Failover
+## D2: Phase 27 Flake Matrix
 
-Goal: with Stage 2 iSCSI ALUA/dm-multipath enabled, keep workloads mounted and
-prove each target volume can fail over without pod recreate while other volumes
-continue serving.
+Goal: convert D7 from dev-pass to QA/nightly evidence.
 
 Acceptance:
 
-```text
-N=3 RF=3 mounted workloads
-pod UID unchanged for target workload
-old data readable after primary stop
-new data writable after failover
-primary_count=1 per target volume
-old_primary_stale_io_success_count=0
-non-target workloads continue without interruption
-cleanup clean
-```
+- Run D3 and D4 at least `N=5` each using
+  `scripts/run-phase27-flake-matrix.ps1`.
+- Artifact includes `flake-summary.txt` and `flake-summary.json`.
+- Required release-grade result: `flake_rate_percent=0`.
+- Failures preserve run IDs and bundle paths.
 
-Status: PASS on 2026-05-23.
+Status: pending.
 
-Evidence:
+## D3: TestOps Runner Product Interface
 
-- Scenario: `testops/scenarios/helm-multi-volume-rf3-mounted-failover-chain.yaml`
-- Run: `20260523-090534-24e4`
-- Result: PASS, 8/8 phases, 47/47 actions
-- Flow:
-  - Helm installed RF=3 sync-quorum stack with Stage 2 multipath enabled
-  - three RF=3 PVCs bound
-  - three long-running writer pods mounted the PVCs on `m02`
-  - each volume's current primary Deployment was stopped in turn
-  - each target volume promoted to a surviving replica
-  - the same writer pod UID verified old data and wrote new data after
-    failover
-  - non-target mounted workloads remained healthy during each target failover
-  - cleanup removed Helm resources, iSCSI sessions, and product processes
-- Summary fields:
-  - `multi_volume_mounted_failover_status=ok`
-  - `requested_volume_count=3`
-  - `replication_factor=3`
-  - `recovered_volume_count=3`
-  - `mounted_workload_checksum_passed_count=3`
-  - `pod_recreate_used=false`
-  - `cross_interference_observed=false`
-  - `transparent_failover_claimed=true`
-- Per-volume evidence:
-  - volume 1: `before_primary=r1`, `promoted_replica=r2`,
-    `post_failure_primary_count=1`, `pod_recreate_used=false`
-  - volume 2: `before_primary=r2`, `promoted_replica=r1`,
-    `post_failure_primary_count=1`, `pod_recreate_used=false`
-  - volume 3: `before_primary=r3`, `promoted_replica=r1`,
-    `post_failure_primary_count=1`, `pod_recreate_used=false`
+Goal: turn the runner-native PVC spike into a concrete TestOps backlog instead
+of rewriting mature scenarios prematurely.
 
-Fix included:
+Inputs:
 
-- New helper:
-  `scripts/run-multi-volume-mounted-failover.sh`.
-- New TestOps gate:
-  `testops/scenarios/helm-multi-volume-rf3-mounted-failover-chain.yaml`.
-- The gate uses bounded mounted-I/O checks and split cleanup actions so a host
-  path stall or cleanup race becomes diagnosable evidence instead of a hung
-  scenario.
-
-## D4: Concurrent / Interleaved Multi-Volume Faults
-
-Goal: inject overlapping primary failures on multiple volumes and prove
-promotion and recovery remain per-volume isolated.
+- `internal/docs/qa-assignments/testrunner-product-interface-audit.md`
+- `testops/scenarios/experimental-runner-native-pvc-loop.yaml`
 
 Acceptance:
 
-```text
-two target volumes fail within a bounded window
-both promote independently
-untouched volume primary/frontend unchanged
-no dual-primary per volume
-no timeline side-effect on untouched volume
-cleanup clean
-```
+- Decide which runner actions should be first-class:
+  - `helm_install` / `helm_uninstall`
+  - `kubectl_wait_jsonpath`
+  - `kubectl_wait_completed`
+  - `assert_no_multipath_maps`
+  - ALUA AAS transition assertion
+  - stale-path read/write rejection assertion
+- Keep current helper-script gates where they carry complex orchestration.
+- Add one runner-native smoke gate only where it improves clarity.
 
-Status: PASS on 2026-05-23.
+Status: pending.
 
-Evidence:
+## D4: Multi-Volume Support Bundle Consistency
 
-- Scenario: `testops/scenarios/helm-multi-volume-rf3-interleaved-failover-chain.yaml`
-- Run: `20260523-093348-6b02`
-- Result: PASS, 8/8 phases, 55/55 actions
-- Flow:
-  - Helm installed RF=3 sync-quorum stack with Stage 2 multipath enabled
-  - three RF=3 PVCs were mounted by long-running writer pods on `m02`
-  - two target volumes had their current primary Deployments stopped in a
-    bounded interleaved window
-  - both target volumes promoted independently
-  - both target writer pods kept the same pod UID and verified old/new data
-    without pod recreate
-  - untouched volume kept primary/frontend stable and its mounted workload
-    verified old/new data
-  - cleanup removed Helm resources, iSCSI sessions, and product processes
-- Summary fields:
-  - `multi_volume_interleaved_failover_status=ok`
-  - `failover_mode=interleaved`
-  - `target_volume_count=2`
-  - `recovered_volume_count=2`
-  - `mounted_workload_checksum_passed_count=2`
-  - `pod_recreate_used=false`
-  - `cross_interference_observed=false`
-  - `interleaved_fault_window_seconds=0.464`
-  - `untouched_volume_stable=true`
-  - `untouched_workload_ok=true`
-- Per-volume evidence:
-  - volume 1: `before_primary=r1`, `interleaved_fault=true`,
-    `promoted_replica=r2`, `post_failure_primary_count=1`,
-    `pod_recreate_used=false`
-  - volume 2: `before_primary=r2`, `interleaved_fault=true`,
-    `promoted_replica=r1`, `post_failure_primary_count=1`,
-    `pod_recreate_used=false`
-  - volume 3: untouched workload wrote and verified
-    `/data/non-target-interleaved.bin`
+Goal: make support/report artifacts explain multi-volume HA failures as clearly
+as the Phase 27 summaries do.
 
-Fix included:
+Acceptance:
 
-- `scripts/run-multi-volume-mounted-failover.sh` now supports
-  `SW_BLOCK_MULTI_VOLUME_FAILOVER_MODE=interleaved`.
-- New TestOps gate:
-  `testops/scenarios/helm-multi-volume-rf3-interleaved-failover-chain.yaml`.
+- `sw-block ops report` / dashboard / explain output carries consistent names
+  for:
+  - target volume
+  - non-target volume stability
+  - primary count
+  - stale I/O probe result
+  - RTPG/host-path transition
+  - recovery method: CSI reattach vs mounted multipath
+- Failed bundles preserve the same fields where possible.
+- No mutating action is introduced.
 
-## D5: Stale Primary Fencing Evidence Hardening
+Status: pending.
 
-Goal: make stale-primary fencing evidence measured, not a scripted constant.
+## D5: Structure Review
 
-Status: PASS on 2026-05-23.
+Goal: identify where product control-plane logic is spread too widely and what
+should become explicit entities or state machines.
 
-Evidence:
+Review targets:
 
-- Scenario: `testops/scenarios/helm-multi-volume-rf3-interleaved-failover-chain.yaml`
-- Run: `20260523-114708-46bc`
-- Result: PASS, 8/8 phases, 55/55 actions
-- The mounted failover helper now probes the old primary's exact iSCSI by-path
-  device with a bounded direct read. The path is scoped by both old frontend
-  (`ip-<host>:<port>`) and `volume_id`, so it does not accidentally probe the
-  promoted path.
-- Per-target artifacts:
-  - `failover/volume-1/stale-primary-probe.log`
-  - `failover/volume-2/stale-primary-probe.log`
-- Both target volumes produced:
-  - `stale_primary_probe=direct_read`
-  - `candidate_result=expected_failure`
-  - `old_primary_stale_io_success_count=0`
-- The scenario now asserts the probe log exists and carries the measured
-  `old_primary_stale_io_success_count=0`; the summary alone is no longer
-  accepted as fencing evidence.
+- Helm / install lifecycle.
+- Launcher / BlockVolume lifecycle.
+- CSI publish/stage observation.
+- Recovery and promotion orchestration.
+- Host-path/multipath evidence.
+- ManagedVolume model projection.
+- TestOps helper scripts.
 
-## D6: RTPG AAS Transition Evidence Hardening
+Output:
 
-Goal: make the iSCSI ALUA evidence assert concrete RTPG asymmetric access state
-values before and after failover, not just the presence of RTPG text.
+- A short structure review with:
+  - current owner,
+  - desired truth owner,
+  - executor,
+  - evidence source,
+  - risk if left mixed.
 
-Status: PASS on 2026-05-23.
+Status: pending.
 
-Evidence:
+## D6: Model Dependency Map
 
-- Scenarios:
-  - `testops/scenarios/helm-multi-volume-rf3-interleaved-failover-chain.yaml`
-  - `testops/scenarios/helm-multi-volume-rf3-mounted-failover-chain.yaml`
-- Runs:
-  - D4 interleaved: `20260523-123229-9dd4`, PASS, 8/8 phases, 55/55 actions
-  - D3 sequential: `20260523-123647-2fc4`, PASS, 8/8 phases, 47/47 actions
-- The mounted failover helper now records per-volume RTPG state files:
-  - `failover/volume-N/rtpg-before-states.txt`
-  - `failover/volume-N/rtpg-after-states.txt`
-- Both interleaved target volumes produced:
-  - `rtpg_before_old_primary_aas=0x00`
-  - `rtpg_before_promoted_aas=0x02`
-  - `rtpg_after_old_primary_aas=missing`
-  - `rtpg_after_promoted_aas=0x00`
-  - `rtpg_transition_verified=true`
-- The scenario now asserts the per-volume state files exist and requires
-  `rtpg_transition_verified=true` for each target volume. This covers all
-  three sequential D3 targets and both interleaved D4 targets.
+Goal: define which operations depend on a stable model before operator-grade
+work starts.
 
-## D7: Flake Matrix Wrapper
+Acceptance:
 
-Goal: make the Phase 27 reliability gates repeatable and measurable instead of
-single-run-only.
+- Map report/dashboard/explain/operator dependencies onto the ManagedVolume
+  model.
+- Mark fields as stable, provisional, or test-only.
+- Define how overlapping automata should be represented when node loss affects
+  authority, CSI, host path, cleanup, and support evidence simultaneously.
 
-Status: dev implementation complete on 2026-05-23; QA/nightly N>=5 pending.
+Status: pending.
 
-Implementation:
+## D7: Model Tightening Proposal
 
-- Added `scripts/run-phase27-flake-matrix.ps1`.
-- The wrapper runs a selected TestOps scenario `N` times, stores each run under
-  `iterations/iteration-NN/`, and emits:
-  - `flake-summary.txt`
-  - `flake-summary.json`
-- Summary fields:
-  - `target_runs=<N>`
-  - `pass_runs=<P>`
-  - `fail_runs=<F>`
-  - `flake_rate_percent=<percent>`
-  - one line per iteration with result, exit code, run id, and duration
+Goal: produce the next-release design proposal for tighter state ownership.
 
-Evidence:
+Principles:
 
-- Smoke run: `results/phase27-d7-flake-smoke`
-- Scenario: `testops/scenarios/helm-multi-volume-rf3-interleaved-failover-chain.yaml`
-- Iterations: 1
-- Result: PASS, `pass_runs=1`, `fail_runs=0`, `flake_rate_percent=0`
-- Dev stability run: `results/phase27-d7-flake-interleaved-n3`
-- Scenario: `testops/scenarios/helm-multi-volume-rf3-interleaved-failover-chain.yaml`
-- Iterations: 3
-- Result: PASS, `pass_runs=3`, `fail_runs=0`, `flake_rate_percent=0`
-- Iteration run IDs:
-  - `20260523-124555-691c`
-  - `20260523-124832-7d5c`
-  - `20260523-125104-532c`
+- Truth owners publish facts.
+- Orchestration entities make global decisions.
+- Executors perform allowed actions.
+- Evidence records why an action was allowed or refused.
+- Small automata are useful only if their interaction with global context is
+  explicit.
 
-Release-grade target:
+Status: pending.
 
-- Run D3 and D4 at least `N=5` each in nightly or QA-owned validation.
-- Required result for release-grade wording: `flake_rate_percent=0`.
+## D8: Next Feature Readiness Review
 
-## D8: App Pods Spread Across Nodes
+Goal: decide when to start NVMe ANA, rebuild/failback, and backup without
+destabilizing v0.3.x.
 
-Goal: prove the multi-volume mounted failover path is not limited to the old
-single app-node shape. Three mounted writer pods must run on three distinct
-Kubernetes nodes, and each PVC must still recover transparently through its own
-host path.
+Acceptance:
 
-Status: PASS on 2026-05-23.
+- NVMe ANA starts only after iSCSI cleanup/repeatability is stable.
+- Rebuild/failback starts only after stale-path and multi-volume isolation
+  evidence is repeatable.
+- Backup starts only after volume identity/model boundaries are stable.
 
-Evidence:
-
-- Scenario:
-  `testops/scenarios/helm-multi-volume-rf3-app-spread-failover-chain.yaml`
-- Run: `20260523-151100-e241`
-- Result: PASS, 8/8 phases, 32/32 actions
-- Independent QA rerun: `20260523-160348-6cc2`, PASS, 32/32 actions
-- Flow:
-  - Helm installed RF=3 sync-quorum stack with Stage 2 multipath enabled
-  - three RF=3 PVCs bound and launched long-running writer pods distributed
-    across `m01`, `m02`, and `tp01`
-  - helper waited for all 9 generated BlockVolume Deployments to become
-    available before mounting writers
-  - each volume's current primary Deployment was stopped in turn
-  - each writer pod kept the same UID and verified old/new data after failover
-  - RTPG and stale-primary probes ran on the writer pod's actual Kubernetes
-    node, not a fixed controller node
-  - cleanup removed Helm resources, iSCSI sessions, and product processes
-- Summary fields:
-  - `multi_volume_mounted_failover_status=ok`
-  - `requested_volume_count=3`
-  - `replication_factor=3`
-  - `app_node_selector=m01,m02,tp01`
-  - `app_node_distribution_count=3`
-  - `recovered_volume_count=3`
-  - `mounted_workload_checksum_passed_count=3`
-  - `pod_recreate_used=false`
-  - `cross_interference_observed=false`
-  - `transparent_failover_claimed=true`
-- Per-volume evidence:
-  - volume 1: writer on `m01`, `before_primary=r1`, `promoted_replica=r2`,
-    `post_failure_primary_count=1`, `rtpg_transition_verified=true`
-  - volume 2: writer on `m02`, `before_primary=r2`, `promoted_replica=r1`,
-    `post_failure_primary_count=1`, `rtpg_transition_verified=true`
-  - volume 3: writer on `tp01`, `before_primary=r3`, `promoted_replica=r1`,
-    `post_failure_primary_count=1`, `rtpg_transition_verified=true`
-  - all three volumes measured `old_primary_stale_io_success_count=0`
-
-Fix included:
-
-- `scripts/run-multi-volume-mounted-failover.sh` accepts comma-separated app
-  node selectors and distributes writer pods round-robin.
-- RTPG and stale-primary direct-read probes now execute on each PVC's mounted
-  writer node, which is required once app pods are spread across nodes.
-- The helper waits for the expected `volume_count * replication_factor`
-  BlockVolume Deployments to be available before writer pods are created.
-- The D8 Helm scenario captures applied Helm values, rendered manifest, and
-  kube-system rollout state after install so image/flag drift is self-evident.
-
-## Risks
-
-| Risk | Mitigation |
-|---|---|
-| Cleanup race hides real residue | helper waits for generated Deployments before `cleanup_status=ok` |
-| Per-node port reuse collides across volumes | D1 requires RF=3 report and writer/reader success for all volumes |
-| One volume's event stream contaminates another | D2-D4 require per-volume timeline and non-target stability checks |
-| Multipath evidence becomes too noisy | D3 must reuse Stage 2 host evidence shape and keep assertions narrow |
-| Host-path evidence sampled on the wrong node | D8 runs RTPG/stale probes on each writer pod's mounted node |
+Status: pending.
 
 ## Progress
 
-- D1: PASS - RF=3 multi-volume readiness `20260522-170901-70c5`
-- D2: PASS - RF=3 per-volume CSI reattach recovery `20260522-223126-21fd`
-- D3: PASS - RF=3 multi-volume mounted transparent failover `20260523-090534-24e4`
-- D4: PASS - RF=3 interleaved multi-volume mounted failover `20260523-093348-6b02`
-- D5: PASS - measured stale primary direct-read probe `20260523-114708-46bc`
-- D6: PASS - measured RTPG AAS transition evidence `20260523-123229-9dd4`, `20260523-123647-2fc4`
-- D7: DEV PASS - flake matrix wrapper, D4 N=3 pass, N>=5 QA/nightly pending
-- D8: PASS - app pods spread across m01/m02/tp01 with mounted transparent failover `20260523-151100-e241`; QA rerun `20260523-160348-6cc2`
+- D1: PASS - multipath cleanup verifier catches orphan maps `20260523-182000-41ee`
+- D2: pending - Phase 27 N>=5 flake matrix
+- D3: pending - TestOps action backlog
+- D4: pending - support/report consistency
+- D5: pending - structure review
+- D6: pending - model dependency map
+- D7: pending - model tightening proposal
+- D8: pending - next feature readiness review

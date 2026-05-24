@@ -6,6 +6,7 @@ HELM_RELEASE="${SW_BLOCK_HELM_RELEASE:-sw-block}"
 HELM_NAMESPACE="${SW_BLOCK_HELM_NAMESPACE:-kube-system}"
 IQN_SUBSTR="${SW_BLOCK_CLEANUP_IQN_SUBSTR:-io.seaweedfs}"
 HOSTPATH_PREFIX="${SW_BLOCK_CLEANUP_HOSTPATH_PREFIX:-}"
+MULTIPATH_ORPHAN_PATTERN="${SW_BLOCK_CLEANUP_MULTIPATH_ORPHAN_PATTERN:-^mpath[^[:space:]]*[[:space:]].*##,##}"
 
 mkdir -p "$ARTIFACT_DIR"
 
@@ -44,6 +45,7 @@ log "helm_release=$HELM_RELEASE"
 log "helm_namespace=$HELM_NAMESPACE"
 log "iqn_substr=$IQN_SUBSTR"
 log "hostpath_prefix=${HOSTPATH_PREFIX:-none}"
+log "multipath_orphan_pattern=$MULTIPATH_ORPHAN_PATTERN"
 
 require_cmd kubectl || true
 require_cmd iscsiadm || true
@@ -108,11 +110,14 @@ if command -v multipath >/dev/null 2>&1; then
   else
     capture "multipath.after-cleanup.txt" multipath -ll
   fi
-  if grep -Eiq '(io\.seaweedfs|SeaweedF|BlockVol)' "$ARTIFACT_DIR/multipath.after-cleanup.txt"; then
+  if grep -Ei "(io\.seaweedfs|SeaweedF|BlockVol|$MULTIPATH_ORPHAN_PATTERN)" "$ARTIFACT_DIR/multipath.after-cleanup.txt" >"$ARTIFACT_DIR/multipath-residue.after-cleanup.txt"; then
     mark_fail "multipath_maps_present"
+  else
+    : >"$ARTIFACT_DIR/multipath-residue.after-cleanup.txt"
   fi
 else
   echo "multipath unavailable" >"$ARTIFACT_DIR/multipath.after-cleanup.txt"
+  : >"$ARTIFACT_DIR/multipath-residue.after-cleanup.txt"
 fi
 
 capture "processes.after-cleanup.txt" ps -eo pid,args
@@ -146,6 +151,7 @@ fi
   echo "iqn_substr=$IQN_SUBSTR"
   echo "k8s_residue_count=$(wc -l <"$ARTIFACT_DIR/k8s-residue.after-cleanup.txt")"
   echo "process_residue_count=$(wc -l <"$ARTIFACT_DIR/process-residue.after-cleanup.txt")"
+  echo "multipath_residue_count=$(wc -l <"$ARTIFACT_DIR/multipath-residue.after-cleanup.txt")"
   echo "hostpath_residue_count=$(wc -l <"$ARTIFACT_DIR/hostpath-residue.after-cleanup.txt")"
   echo "failure_count=$failures"
 } >"$ARTIFACT_DIR/cleanup-summary.txt"

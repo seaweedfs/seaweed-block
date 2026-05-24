@@ -34,13 +34,16 @@ phases:
         cmd: "rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-cleanup-residue && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-cleanup-residue/uninstall /mnt/smb/work/share/g15d-k8s/{{ run_id }}-cleanup-residue/pin_build"
       - action: exec
         node: m02
-        cmd: "cd {{ product_root }} && git rev-parse HEAD > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-cleanup-residue/pin_build/git.sha && git status --porcelain > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-cleanup-residue/pin_build/git.status && test ! -s /mnt/smb/work/share/g15d-k8s/{{ run_id }}-cleanup-residue/pin_build/git.status"
+        cmd: "cd {{ product_root }} && if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then git rev-parse HEAD > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-cleanup-residue/pin_build/git.sha && git status --porcelain > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-cleanup-residue/pin_build/git.status && test ! -s /mnt/smb/work/share/g15d-k8s/{{ run_id }}-cleanup-residue/pin_build/git.status; else echo no-git-worktree > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-cleanup-residue/pin_build/git.sha; : > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-cleanup-residue/pin_build/git.status; fi"
       - action: exec
         node: m02
         cmd: "command -v iscsiadm >/dev/null && (sudo -n iscsiadm -m session > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-cleanup-residue/iscsi-sessions.after-cleanup.txt 2>&1 || grep -q 'No active sessions' /mnt/smb/work/share/g15d-k8s/{{ run_id }}-cleanup-residue/iscsi-sessions.after-cleanup.txt)"
       - action: assert_no_active_iscsi_sessions
         node: m02
         iqn_substr: "io.seaweedfs"
+      - action: exec
+        node: m02
+        cmd: "cd {{ product_root }} && SW_BLOCK_ARTIFACT_DIR=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-cleanup-residue/verify-cleanup bash scripts/verify-helm-cleanup.sh {{ product_root }}"
       - action: exec
         node: m02
         cmd: "sudo nvme list-subsys -o json > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-cleanup-residue/nvme-list-subsys.after-cleanup.json 2> /mnt/smb/work/share/g15d-k8s/{{ run_id }}-cleanup-residue/nvme-list-subsys.after-cleanup.err && ! grep -Ei 'nqn\\.[^[:space:]\"}]*seaweedfs|nqn\\.[^[:space:]\"}]*sw-block|nqn\\.[^[:space:]\"}]*weedblock' /mnt/smb/work/share/g15d-k8s/{{ run_id }}-cleanup-residue/nvme-list-subsys.after-cleanup.json"

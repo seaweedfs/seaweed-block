@@ -31,10 +31,11 @@ ready.
 
 | Priority | Work | Type | Status | Why It Matters |
 |---|---|---|---|---|
+| P0 | Phase 28 Operational Reliability And TestOps Hardening | Operational + Core Stability | active | Cleanup, repeatability, runner primitives, and support evidence must stabilize before the next feature expansion |
 | P0 | Publish v0.3.2 images and update doc pins | Operational | next | Phase 27 uses local TestOps images; users need a consumable immutable GHCR SHA |
-| P0 | Multipath stale-map cleanup verifier | Operational + Core Stability | follow-up from Phase 27 QA | QA found orphan dm-multipath maps after sessions were gone; cleanup evidence should cover this |
+| P0 | Multipath stale-map cleanup verifier | Operational + Core Stability | PASS in Phase 28 D1 | QA found orphan dm-multipath maps after sessions were gone; cleanup evidence now covers this |
 | P0 | Phase 27 Multi-Volume HA Independence | Functional + Core Stability | PASS | Proves RF3 multi-volume readiness, CSI reattach, mounted transparent failover, and interleaved failover isolation |
-| P1 | Operator lifecycle design and first CRD/Condition shape | Operational | after Helm hardening | Kubernetes-native day-2 loop starts here |
+| P1 | Operator lifecycle design and first CRD/Condition shape | Operational | after Phase 28 model review | Kubernetes-native day-2 loop starts here |
 | P1 | Product-owned cleanup/lifecycle ownership | Operational + Core Stability | partial | Scripts still own too much lifecycle and cleanup |
 | P1 | Control Model Stabilization Gate | Core Stability | required before operator-grade operations | Operation layer and future operator need stable state, action, and evidence contracts |
 | P1 | ManagedVolume model hardening for operator dependency | Core Stability | seed closed, folds into model gate | Operator/dashboard must consume one semantic model, not invent truth |
@@ -81,25 +82,54 @@ own day-2 lifecycle without hiding unstable behavior.
 
 ## Active Work
 
+### Phase 28 - Operational Reliability And TestOps Hardening
+
+Type: Operational + Core Stability
+
+Current status: active, 30%. Started on 2026-05-23 after Phase 27 D5/D6/D8
+independent QA reruns passed.
+
+Goals:
+
+- close cleanup residue gaps, starting with orphan dm-multipath maps,
+- make Phase 27 repeatability measurable through flake matrices,
+- convert TestOps runner pain into concrete action backlog and reference
+  scenarios,
+- align support/report/dashboard evidence for multi-volume HA failures,
+- review structure/model dependencies before operator-grade operations.
+
+Closed gates:
+
+- D1 multipath cleanup verifier: `20260523-182000-41ee`, 13/13 PASS.
+
+Non-goals:
+
+- no new NVMe ANA claim,
+- no backup/snapshot/restore implementation,
+- no operator/CRD implementation,
+- no large model refactor without gates.
+
 ### Phase 27 - Multi-Volume HA Independence
 
 Type: Functional + Core Stability
 
-Current status: PASS, 100%. Phase 27 closed on 2026-05-23.
+Current status: PASS, 100%. Phase 27 closed on 2026-05-23. D5/D6/D8
+independent QA reruns also passed on 2026-05-23.
 
 Closed gates:
 
 - D1 RF3 readiness: `20260523-094437-c24c`, 35/35 PASS.
 - D2 per-volume CSI reattach recovery: `20260523-094707-bbf5`, 29/29 PASS.
-- D3 mounted transparent failover: `20260523-095122-a5c4`, 47/47 PASS.
-- D4 interleaved multi-volume failover: `20260523-095509-4d02`, 55/55 PASS.
+- D3 mounted transparent failover: `20260523-155700-9a63`, 47/47 PASS with
+  D5/D6 instrumentation.
+- D4 interleaved multi-volume failover: `20260523-160109-cd3d`, 55/55 PASS
+  with D5/D6 instrumentation.
+- D8 app-spread mounted failover: `20260523-160348-6cc2`, 32/32 PASS.
 
-Non-claims:
+Open follow-ups moved into Phase 28:
 
-- Only N=3 PVCs are gated.
-- This does not claim arbitrary node failure for multi-volume.
-- This does not claim performance/RTO/SLO.
-- This does not claim NVMe ANA parity.
+- D7 N>=5 flake matrix.
+- Multipath stale-map cleanup verifier is closed in Phase 28 D1.
 
 ## Functional Capability Backlog
 
