@@ -44,6 +44,11 @@ engines that project from it.
   defines the Phase 22 center of gravity: a PVC-backed `ManagedVolume` read
   model that composes K8s, CSI, authority, replica, host-path, workload, and
   evidence facts.
+- [`layered-owner-master-executor-model.md`](./layered-owner-master-executor-model.md)
+  defines the reusable Owner / Master / Executor hierarchy: owners publish
+  authoritative facts, masters compute collective state and allowed actions,
+  executors perform side effects, and a domain master may become an owner for
+  the next higher layer.
 - [`engine-design-guidelines.md`](./engine-design-guidelines.md)
   defines the reusable engine/control-plane method: facts, context,
   multi-state projections, invariant checks, action contracts, executor

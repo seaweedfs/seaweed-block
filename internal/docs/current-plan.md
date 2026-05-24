@@ -1,6 +1,6 @@
 # Current Plan: Phase 28 - Productized Operations And Operator Foundation
 
-Status: active, 45% complete. Started on 2026-05-23 after Phase 27 D5/D6/D8
+Status: active, 50% complete. Started on 2026-05-23 after Phase 27 D5/D6/D8
 independent QA reruns passed. Expanded on 2026-05-23 from a narrow
 operational-hardening slice into the productized operations / operator
 foundation plan.
@@ -384,6 +384,7 @@ Status: pending.
 
 Required output:
 
+- `internal/docs/protocol/layered-owner-master-executor-model.md`
 - `internal/docs/ref/managed-volume-operational-model-contract.md`
 - TDD/golden coverage for at least one healthy RF3 multi-volume case and one
   blocked/recovery case.
@@ -499,7 +500,8 @@ Status: pending.
 - D6: PASS - model dependency map written
 - D7: PASS - model tightening proposal written
 - D8: PASS - next feature readiness review written
-- D9: pending - ManagedVolume operational model contract
+- D9: in progress - layered Owner/Master/Executor model written; ManagedVolume
+  field contract and golden tests pending
 - D10: pending - Kubernetes CRD / Condition / Event contract
 - D11: pending - read-only operator foundation gate
 - D12: pending - productized operations close gate

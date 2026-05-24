@@ -88,7 +88,7 @@ own day-2 lifecycle without hiding unstable behavior.
 
 Type: Operational + Core Stability
 
-Current status: active, 45%. Started on 2026-05-23 after Phase 27 D5/D6/D8
+Current status: active, 50%. Started on 2026-05-23 after Phase 27 D5/D6/D8
 independent QA reruns passed. Expanded on 2026-05-23 to include the
 productized operations / operator foundation loop.
 
@@ -274,6 +274,8 @@ Closed / current:
 
 - ManagedVolume Operations Model seed.
 - Truth-domain and invariant docs under `internal/docs/protocol/`.
+- Layered Owner / Master / Executor model for reusable control-plane
+  decomposition.
 - Observation slots merge by `(volume, replica)` with independent freshness.
 - Materialized workload ports persist so new volumes cannot reshuffle existing
   ports.
