@@ -47,6 +47,23 @@ Acceptance:
 
 Run from clean lab state.
 
+Controller-side helper:
+
+```powershell
+.\scripts\run-phase28-productized-ops-close-gate.ps1 `
+  -Runner C:\work\swblock.exe `
+  -ResultsDir results\phase28-productized-ops-close
+```
+
+The helper runs G1/G2/G3/G5 and validates the D11
+`operator-snapshot.json` contract from G1 artifacts. QA may still inspect
+artifacts manually, but the helper provides a consistent summary:
+
+```text
+phase28-productized-ops-close-summary.txt
+phase28-productized-ops-close-summary.json
+```
+
 ### G1 Helm First Volume Via CLI
 
 Scenario:
