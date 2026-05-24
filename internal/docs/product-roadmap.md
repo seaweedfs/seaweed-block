@@ -31,12 +31,12 @@ ready.
 
 | Priority | Work | Type | Status | Why It Matters |
 |---|---|---|---|---|
-| P0 | Phase 28 Productized Operations And Operator Foundation | Operational + Core Stability | active | Turn Helm/scripts/evidence/model into one Kubernetes product operations loop before the next feature expansion |
-| P0 | Publish v0.3.2 images and update doc pins | Operational | next | Phase 27 uses local TestOps images; users need a consumable immutable GHCR SHA |
+| P0 | Phase 28 Productized Operations And Operator Foundation | Operational + Core Stability | active, D12 PASS | Turn Helm/scripts/evidence/model into one Kubernetes product operations loop before the next feature expansion |
+| P0 | Publish v0.3.3 images and update doc pins | Operational | next | Phase 28 D12 is gated; users need a consumable immutable GHCR SHA for the operator-foundation surface |
 | P0 | Multipath stale-map cleanup verifier | Operational + Core Stability | PASS in Phase 28 D1 | QA found orphan dm-multipath maps after sessions were gone; cleanup evidence now covers this |
 | P0 | Phase 27 Multi-Volume HA Independence | Functional + Core Stability | PASS | Proves RF3 multi-volume readiness, CSI reattach, mounted transparent failover, and interleaved failover isolation |
-| P0 | ManagedVolume / CRD / Condition contract | Core Stability + Operational | Phase 28 D9-D10 dev complete, QA pending | Operator, dashboard, report, and support bundle must consume one state model |
-| P1 | Read-only operator foundation | Operational | Phase 28 D11 dev complete, QA pending | Kubernetes-native day-2 loop starts with status, Conditions, Events, and no mutating storage actions |
+| P0 | ManagedVolume / CRD / Condition contract | Core Stability + Operational | PASS in Phase 28 D12 | Operator, dashboard, report, and support bundle must consume one state model |
+| P1 | Read-only operator foundation | Operational | PASS in Phase 28 D12 | Kubernetes-native day-2 loop starts with status, Conditions, Events, and no mutating storage actions |
 | P1 | Product-owned cleanup/lifecycle ownership | Operational + Core Stability | partial | Scripts still own too much lifecycle and cleanup |
 | P1 | Control Model Stabilization Gate | Core Stability | required before operator-grade operations | Operation layer and future operator need stable state, action, and evidence contracts |
 | P1 | ManagedVolume model hardening for operator dependency | Core Stability | seed closed, folds into model gate | Operator/dashboard must consume one semantic model, not invent truth |
@@ -88,7 +88,7 @@ own day-2 lifecycle without hiding unstable behavior.
 
 Type: Operational + Core Stability
 
-Current status: active, 90%. Started on 2026-05-23 after Phase 27 D5/D6/D8
+Current status: active, 95%. Started on 2026-05-23 after Phase 27 D5/D6/D8
 independent QA reruns passed. Expanded on 2026-05-23 to include the
 productized operations / operator foundation loop.
 
@@ -118,20 +118,30 @@ Closed foundation gates:
   `internal/docs/qa-assignments/phase28-operational-reliability-qa-validation.md`
   confirms D1 plus D2 N=5/N=5 flake matrices with 0 failures and 0 flakes.
 
-Open operator-foundation gates:
+Closed operator-foundation gates:
 
-- D9 ManagedVolume operational model contract: dev complete, scoped tests PASS,
-  QA validation pending.
-- D10 Kubernetes CRD / Condition / Event contract: dev complete, scoped tests
-  PASS, QA validation pending.
-- D11 read-only operator foundation gate: dev complete. `sw-block ops report`
-  writes `operator-snapshot.json`; dashboard serves `/operator-snapshot.json`;
-  scoped tests PASS; QA validation pending.
-- D12 productized operations close gate: first QA attempt found B1/B2/B3/N1;
-  fixes landed locally, rerun pending.
+- D9 ManagedVolume operational model contract: PASS in D12 close on
+  2026-05-24.
+- D10 Kubernetes CRD / Condition / Event contract: PASS in D12 close on
+  2026-05-24.
+- D11 read-only operator foundation gate: PASS in D12 close on 2026-05-24.
+  `sw-block ops report` writes `operator-snapshot.json`; dashboard serves
+  `/operator-snapshot.json`; operator snapshot is read-only and explicitly
+  declares mutation non-claims.
+- D12 productized operations close gate: PASS on `bf7281b` after final rerun.
+  Final run IDs: G1 `20260524-103052-beb2`, G2 `20260524-103143-7c41`,
+  G3 `20260524-103350-901d`, G5 `20260524-103511-d329`.
+
+Open release gate:
+
 - D13 release packaging: draft v0.3.3 release note and doc alignment prepared;
   immutable GHCR images and final pins pending.
-- D13 release packaging and claim alignment.
+
+Follow-up:
+
+- Fix the non-blocking `scripts/run-multi-volume-example.sh` cleanup TOCTOU
+  race found during D12 rerun cycle. D12 is closed, but the helper should stop
+  rechecking deployment emptiness after the wait loop already observed success.
 
 Non-goals:
 

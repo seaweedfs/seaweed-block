@@ -1,6 +1,6 @@
 # Current Plan: Phase 28 - Productized Operations And Operator Foundation
 
-Status: active, 90% complete. Started on 2026-05-23 after Phase 27 D5/D6/D8
+Status: active, 95% complete. Started on 2026-05-23 after Phase 27 D5/D6/D8
 independent QA reruns passed. Expanded on 2026-05-23 from a narrow
 operational-hardening slice into the productized operations / operator
 foundation plan.
@@ -411,7 +411,7 @@ Acceptance:
 - Add a small regression test or golden fixture that catches renamed or missing
   core fields before docs/UI drift.
 
-Status: dev complete, scoped tests PASS on 2026-05-23; QA validation pending.
+Status: PASS in Phase 28 D12 close on 2026-05-24.
 
 Required output:
 
@@ -452,7 +452,7 @@ Acceptance:
 - Keep the CRD scope read-only: no promote, repair, rebuild, delete, or cleanup
   actions in this phase.
 
-Status: dev complete, scoped tests PASS on 2026-05-23; QA validation pending.
+Status: PASS in Phase 28 D12 close on 2026-05-24.
 
 Required output:
 
@@ -488,8 +488,7 @@ Acceptance:
   - blocked-bundle projection,
   - uninstall/cleanup.
 
-Status: dev complete as a read-only operator snapshot gate on 2026-05-23;
-QA validation pending.
+Status: PASS in Phase 28 D12 close on 2026-05-24.
 
 Required output:
 
@@ -517,8 +516,7 @@ Acceptance:
 - QA reruns the gate from clean state.
 - PM review confirms the user-facing claim matrix is understandable and narrow.
 
-Status: QA assignment written on 2026-05-23; first QA close attempt failed on
-2026-05-24; B1/B2/B3/N1 fixes landed locally and rerun pending.
+Status: PASS on 2026-05-24. D12 is closed; D13 release packaging remains open.
 
 Required output:
 
@@ -538,6 +536,27 @@ Fixes after first QA close attempt:
   only searching runner metadata.
 - Updated README / quickstart / release note language for the operator
   foundation boundary.
+
+Close evidence:
+
+- Final rerun source: `bf7281b testops: harden phase28 close gate`.
+- G1 first volume: `20260524-103052-beb2`, PASS.
+- G2 multi-volume day-1: `20260524-103143-7c41`, PASS.
+- G3 support-bundle diagnostics: `20260524-103350-901d`, PASS.
+- G5 cleanup residue: `20260524-103511-d329`, PASS.
+- Helper summary: `phase28_productized_ops_close_status=ok`,
+  `operator_snapshot_status=PASS`,
+  `operator_dashboard_route_status=PASS`.
+- Close report:
+  `internal/docs/qa-assignments/phase28-productized-operations-close-report.md`.
+
+Follow-up carried forward:
+
+- `scripts/run-multi-volume-example.sh` still has a helper-internal cleanup
+  TOCTOU race in one rerun path. Product evidence and final rerun were green,
+  so D12 is closed, but the helper should replace the redundant post-loop
+  deployment check with a `deployments_gone=true` flag in the next cleanup
+  hardening cycle.
 
 ## D13: Release Packaging And Claim Alignment
 
@@ -564,7 +583,6 @@ Prepared output:
 
 Still required:
 
-- D12 QA/PM close.
 - Publish immutable GHCR images for the final Phase 28 close commit.
 - Replace `<phase28-close-commit>` / prior pins with final SHA tags and
   digests.
@@ -580,11 +598,10 @@ Still required:
 - D7: PASS - model tightening proposal written
 - D8: PASS - next feature readiness review written
 - Operational foundation QA: PASS - `phase28-operational-reliability-qa-validation.md`
-- D9: dev complete - layered model, ManagedVolume field contract, and contract
-  tests added; `go test ./core/ops` PASS; QA validation pending
-- D10: dev complete - CRD/Condition/Event contract and tests added;
-  `go test ./core/ops` PASS; QA validation pending
-- D11: dev complete - read-only operator snapshot artifact/API added;
-  `go test ./core/ops ./cmd/sw-block` PASS; QA validation pending
-- D12: rerun pending - B1/B2/B3/N1 fixes landed after first QA close attempt
-- D13: docs prepared - image publication and final pin alignment pending
+- D9: PASS in D12 close - layered model, ManagedVolume field contract, and
+  contract tests validated
+- D10: PASS in D12 close - CRD/Condition/Event contract validated
+- D11: PASS in D12 close - read-only operator snapshot artifact/API and
+  dashboard route validated
+- D12: PASS - productized operations close gate validated on 2026-05-24
+- D13: open - image publication and final pin alignment pending
