@@ -20,8 +20,8 @@ env:
   ssh_key: "C:\\work\\dev_server\\testdev_key"
   helm_release: "sw-block"
   helm_namespace: "kube-system"
-  sw_block_image: "ghcr.io/seaweedfs/seaweed-block:sha-28a99ce4f644"
-  sw_block_csi_image: "ghcr.io/seaweedfs/seaweed-block-csi:sha-28a99ce4f644"
+  sw_block_image: "ghcr.io/seaweedfs/seaweed-block:sha-6260e46fd3be"
+  sw_block_csi_image: "ghcr.io/seaweedfs/seaweed-block-csi:sha-6260e46fd3be"
 
 topology:
   nodes:

@@ -83,8 +83,8 @@ From the repository root:
 export KUBECONFIG="${KUBECONFIG:-/etc/rancher/k3s/k3s.yaml}"
 sw-block ops generate-helm-values \
   --out values.day1.yaml \
-  --image ghcr.io/seaweedfs/seaweed-block:sha-d4822bf02617 \
-  --csi-image ghcr.io/seaweedfs/seaweed-block-csi:sha-d4822bf02617
+  --image ghcr.io/seaweedfs/seaweed-block:sha-6260e46fd3be \
+  --csi-image ghcr.io/seaweedfs/seaweed-block-csi:sha-6260e46fd3be
 ```
 
 The `KUBECONFIG` fallback above is the common k3s path. Non-k3s users should
@@ -132,8 +132,19 @@ sw-block ops generate-helm-values \
   --csi-image ghcr.io/seaweedfs/seaweed-block-csi:sha-<commit>
 ```
 
-Current validated v0.3.1 Day-1 walkthrough image tag:
-`sha-d4822bf02617`.
+Current validated v0.3.3 Day-1 / productized-operations image tag:
+`sha-6260e46fd3be`.
+
+Published image digests:
+
+```text
+seaweed-block
+  index:       sha256:ef9c60f82c36f22360b10faafd32caf807f98ac0ea86c0365c0d0836e5f67110
+  linux/amd64: sha256:36481cbc1fc98fafdfa386823e0e5906785cb6f35748ef698ff1cec39bb40464
+seaweed-block-csi
+  index:       sha256:b160ceee874dc6743074ef6b6735ccf05914c1de5951972922f6d3779bc73592
+  linux/amd64: sha256:82e41b7ef92ad8db38b6927e334cc1d564b1012ad916e9bde2e882cece680be8
+```
 
 Mutable `:alpha` is a smoke/demo tag only. Do not use it as release evidence
 unless the publish commit is known.

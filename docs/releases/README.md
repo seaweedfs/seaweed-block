@@ -32,7 +32,8 @@ is still outside the supported boundary.
 - `v0.3.3-alpha` is the current Phase 28 packaging target for productized
   operations: stable ManagedVolume vocabulary, CRD/Condition/Event contract,
   read-only operator snapshot, report/dashboard alignment, and close-gate QA.
-  It is not final until QA/PM close and immutable GHCR image pins are recorded.
+  D12 close passed on 2026-05-24; immutable GHCR image pins are recorded in
+  the v0.3.3 release note.
 
 Mutating operator packaging is not included in these alphas. v0.3 introduces
 Helm as the preferred Kubernetes alpha install path; the script path remains

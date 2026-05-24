@@ -31,8 +31,8 @@ ready.
 
 | Priority | Work | Type | Status | Why It Matters |
 |---|---|---|---|---|
-| P0 | Phase 28 Productized Operations And Operator Foundation | Operational + Core Stability | active, D12 PASS | Turn Helm/scripts/evidence/model into one Kubernetes product operations loop before the next feature expansion |
-| P0 | Publish v0.3.3 images and update doc pins | Operational | next | Phase 28 D12 is gated; users need a consumable immutable GHCR SHA for the operator-foundation surface |
+| P0 | Phase 28 Productized Operations And Operator Foundation | Operational + Core Stability | PASS | Turn Helm/scripts/evidence/model into one Kubernetes product operations loop before the next feature expansion |
+| P0 | Publish v0.3.3 images and update doc pins | Operational | PASS | Phase 28 D12 is gated; users have a consumable immutable GHCR SHA for the operator-foundation surface |
 | P0 | Multipath stale-map cleanup verifier | Operational + Core Stability | PASS in Phase 28 D1 | QA found orphan dm-multipath maps after sessions were gone; cleanup evidence now covers this |
 | P0 | Phase 27 Multi-Volume HA Independence | Functional + Core Stability | PASS | Proves RF3 multi-volume readiness, CSI reattach, mounted transparent failover, and interleaved failover isolation |
 | P0 | ManagedVolume / CRD / Condition contract | Core Stability + Operational | PASS in Phase 28 D12 | Operator, dashboard, report, and support bundle must consume one state model |
@@ -88,7 +88,7 @@ own day-2 lifecycle without hiding unstable behavior.
 
 Type: Operational + Core Stability
 
-Current status: active, 95%. Started on 2026-05-23 after Phase 27 D5/D6/D8
+Current status: PASS, 100%. Started on 2026-05-23 after Phase 27 D5/D6/D8
 independent QA reruns passed. Expanded on 2026-05-23 to include the
 productized operations / operator foundation loop.
 
@@ -132,10 +132,11 @@ Closed operator-foundation gates:
   Final run IDs: G1 `20260524-103052-beb2`, G2 `20260524-103143-7c41`,
   G3 `20260524-103350-901d`, G5 `20260524-103511-d329`.
 
-Open release gate:
+Closed release gate:
 
 - D13 release packaging: draft v0.3.3 release note and doc alignment prepared;
-  immutable GHCR images and final pins pending.
+  immutable GHCR images published and final pins recorded. Published-image
+  release-path QA `20260524-124413-829a`, PASS, 34/34 actions.
 
 Follow-up:
 

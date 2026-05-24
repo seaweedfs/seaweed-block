@@ -1,6 +1,6 @@
 # Current Plan: Phase 28 - Productized Operations And Operator Foundation
 
-Status: active, 95% complete. Started on 2026-05-23 after Phase 27 D5/D6/D8
+Status: complete, 100%. Started on 2026-05-23 after Phase 27 D5/D6/D8
 independent QA reruns passed. Expanded on 2026-05-23 from a narrow
 operational-hardening slice into the productized operations / operator
 foundation plan.
@@ -572,7 +572,7 @@ Acceptance:
   - Mutating repair/rebuild/failback remains future work.
 - Do not let `:alpha` mutable-tag evidence stand in for release evidence.
 
-Status: docs prepared, image publication and final pin update pending.
+Status: PASS on 2026-05-24. D13 is closed.
 
 Prepared output:
 
@@ -583,9 +583,20 @@ Prepared output:
 
 Still required:
 
-- Publish immutable GHCR images for the final Phase 28 close commit.
-- Replace `<phase28-close-commit>` / prior pins with final SHA tags and
-  digests.
+- Move this plan to `internal/docs/finished-plans/` when preparing the final
+  plan archive.
+
+Close evidence:
+
+- Published images:
+  - `ghcr.io/seaweedfs/seaweed-block:sha-6260e46fd3be`
+  - `ghcr.io/seaweedfs/seaweed-block-csi:sha-6260e46fd3be`
+- Publish workflow:
+  `https://github.com/seaweedfs/seaweed-block/actions/runs/26370891528`
+- Published-image release-path QA:
+  `20260524-124413-829a`, PASS, 34/34 actions.
+- D13 report:
+  `internal/docs/qa-assignments/phase28-d13-release-packaging-report.md`.
 
 ## Progress
 
@@ -604,4 +615,4 @@ Still required:
 - D11: PASS in D12 close - read-only operator snapshot artifact/API and
   dashboard route validated
 - D12: PASS - productized operations close gate validated on 2026-05-24
-- D13: open - image publication and final pin alignment pending
+- D13: PASS - immutable images published, docs pinned, release-path QA passed
