@@ -179,3 +179,9 @@ Phase 28 D12 can close only when:
 - QA report names run IDs and bundle paths,
 - PM review accepts the claim boundary,
 - D13 remains explicitly open if immutable images are not yet published.
+
+Use this close-report template to keep the result comparable across reruns:
+
+```text
+internal/docs/qa-assignments/phase28-productized-operations-close-report-template.md
+```
