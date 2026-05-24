@@ -89,7 +89,7 @@ own day-2 lifecycle without hiding unstable behavior.
 
 Type: Operational + Core Stability
 
-Current status: active, 65%. Started on 2026-05-24 after Phase 28 D13
+Current status: active, 80%. Started on 2026-05-24 after Phase 28 D13
 published-image release packaging passed.
 
 Goal:
@@ -120,7 +120,10 @@ Gate status:
   snapshot): PASS on 2026-05-24. Artifact:
   `internal/docs/ref/phase29-lifecycle-evidence-contract.md`; `core/ops`
   and `cmd/sw-block` tests validate bundle cleanup evidence propagation.
-- D4 deterministic cleanup reruns across RF3 multi-volume gates.
+- D4 deterministic cleanup reruns across RF3 multi-volume gates: DEV PASS on
+  2026-05-24, 181/181 actions across five scenarios. Independent QA replay
+  assigned in
+  `internal/docs/qa-assignments/phase29-deterministic-cleanup-qa-assignment.md`.
 - D5 phase close with independent QA replay.
 
 Non-goals:

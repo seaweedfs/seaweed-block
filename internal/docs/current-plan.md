@@ -1,6 +1,6 @@
 # Current Plan: Phase 29 - Lifecycle/Cleanup Reliability Hardening
 
-Status: active, 65% complete. Started on 2026-05-24 after Phase 28 D13
+Status: active, 80% complete. Started on 2026-05-24 after Phase 28 D13
 release packaging closed with immutable image publication.
 
 ## Product Goal
@@ -203,6 +203,27 @@ Acceptance:
 - No sw-block pods/process residue after uninstall path.
 - Any failure case produces explicit reason/evidence (not timeout ambiguity).
 
+Status: DEV PASS on 2026-05-24; independent QA replay pending.
+
+Dev evidence:
+
+- `helm-multi-volume-rf3-readiness-chain.yaml`:
+  `20260524-144856-f4b3`, PASS, 35/35 actions.
+- `helm-multi-volume-rf3-reattach-recovery-chain.yaml`:
+  `20260524-145058-6289`, PASS, 29/29 actions.
+- `helm-multi-volume-rf3-mounted-failover-chain.yaml`:
+  `20260524-145513-41d0`, PASS, 48/48 actions.
+- `helm-multi-volume-rf3-interleaved-failover-chain.yaml`:
+  `20260524-145901-6d11`, PASS, 56/56 actions.
+- `cleanup-residue-chain.yaml`:
+  `20260524-150146-f4e5`, PASS, 13/13 actions.
+
+Total dev baseline: 181/181 actions.
+
+QA assignment:
+
+- `internal/docs/qa-assignments/phase29-deterministic-cleanup-qa-assignment.md`
+
 ## D5: Close Gate
 
 Goal: close only when reliability is verified by independent QA replay.
@@ -228,5 +249,5 @@ only when:
 - D1: PASS - cleanup ownership matrix written
 - D2: PASS - primary multi-volume cleanup TOCTOU fixed, N=3 regression green
 - D3: PASS - lifecycle cleanup evidence parity added to report/dashboard/operator snapshot
-- D4: pending
+- D4: DEV PASS - QA replay assigned for deterministic cleanup gates
 - D5: pending
