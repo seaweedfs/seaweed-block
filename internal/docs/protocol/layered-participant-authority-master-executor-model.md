@@ -1,4 +1,4 @@
-# Layered Owner / Master / Executor Model
+# Layered Participant / Fact Authority / Master / Executor Model
 
 Status: working protocol methodology for Phase 28 D9-D11.
 
@@ -6,27 +6,28 @@ Purpose: define a reusable control-plane shape for Seaweed Block domains that
 need more discipline than local `if/else` listeners, but should not become one
 giant global state machine.
 
-This document deepens the current `truth owner` and `ManagedVolume` model. It
-is intended to be reused outside PVC/Kubernetes, including recovery, repair,
-NVMe ANA, backup, and future operator workflows.
+This document deepens the current truth-domain and `ManagedVolume` model. It is
+intended to be reused outside PVC/Kubernetes, including recovery, repair, NVMe
+ANA, backup, and future operator workflows.
 
 ## Core Thesis
 
 Seaweed Block should be modeled as a layered network of small control systems:
 
 ```text
-Owner facts
-  -> Domain Master computes domain state
-      -> Domain Master publishes domain facts upward
-          -> Higher Master computes cross-domain product state
-              -> Executor performs only allowed actions
-                  -> Evidence records why the action was allowed or refused
+Participants emit observations
+  -> Fact Authorities publish authoritative facts
+      -> Domain Master computes domain state
+          -> Domain Master publishes domain facts upward
+              -> Higher Master computes cross-domain product state
+                  -> Executor performs only allowed actions
+                      -> Evidence records why the action was allowed or refused
 ```
 
 Do not build:
 
 ```text
-one super master that owns all facts
+one super master that is authoritative for all facts
 ```
 
 Do not drift into:
@@ -38,39 +39,59 @@ many local listeners each making product decisions independently
 The correct middle shape is:
 
 ```text
-domain owners publish authoritative facts
+participants publish observations
+fact authorities publish authoritative facts
 domain masters compute bounded domain state
-higher masters consume domain-master output as owner facts
+higher masters consume domain-master output as authority facts
 executors perform side effects only after the relevant master allows them
 ```
 
 ## Terms
 
-### Owner
+### Participant
 
-An Owner is the authority for one fact domain.
+A Participant is any process, controller, probe, or adapter that contributes observations or local state.
 
-An Owner:
+A Participant:
 
-- publishes facts,
-- preserves domain semantics,
+- publishes observations or local facts,
+- must not claim global semantics,
 - attaches generation, epoch, timestamp, or evidence where needed,
-- does not publish facts owned by another domain,
+- does not publish authoritative facts unless it is also the Fact Authority for that domain,
 - does not take cross-domain product actions directly.
 
 Examples:
 
-| Owner | Publishes |
+| Participant | Emits |
 |---|---|
-| `AuthorityOwner` | primary, epoch, endpoint_version |
-| `ReplicaDurabilityOwner` | durable_frontier, latched, operational |
-| `PlacementOwner` | replica node, frontend address, Deployment readiness |
-| `CSIAttachOwner` | staged node, staged target, attach generation |
-| `HostPathOwner` | iSCSI sessions, dm-multipath paths, RTPG/AAS, stale-path probe |
-| `CleanupOwner` | resources gone, sessions gone, multipath maps gone |
+| replica process | local health, durable-store observation, replication observation |
+| CSI node plugin | local stage/publish observation |
+| host-path probe | iSCSI session, multipath, RTPG/AAS observation |
+| Kubernetes watcher | PVC/PV/pod/node observation |
+| cleanup verifier | residue observation |
+
+### Fact Authority
+
+A Fact Authority is the component or domain output that is accepted as
+authoritative for one fact domain.
+
+A Participant can be a Fact Authority, but not every Participant is one. This
+distinction keeps the model useful: "I observed X" is not the same as "X is
+the authoritative product fact".
+
+Examples:
+
+| Fact Authority | Publishes |
+|---|---|
+| `AuthorityLineAuthority` | primary, epoch, endpoint_version |
+| `ReplicaDurabilityAuthority` | durable_frontier, latched, operational |
+| `PlacementAuthority` | replica node, frontend address, Deployment readiness |
+| `CSIAttachAuthority` | staged node, staged target, attach generation |
+| `HostPathAuthority` | iSCSI sessions, dm-multipath paths, RTPG/AAS, stale-path probe |
+| `CleanupAuthority` | resources gone, sessions gone, multipath maps gone |
 
 Rule: if two components can publish the same fact with different answers, the
-fact ownership is broken.
+fact authority is broken.
 
 ### Master
 
@@ -78,7 +99,7 @@ A Master is an information gatherer and decision maker for one control domain.
 
 A Master:
 
-- consumes owner facts,
+- consumes Fact Authority facts,
 - checks whether required facts are present and fresh,
 - computes a collective state,
 - decides whether an action is allowed, refused, or still pending,
@@ -86,7 +107,7 @@ A Master:
 - fails closed when required facts are missing or contradictory.
 
 A Master must not forge lower-domain facts. It can only derive state from facts
-that are owned elsewhere or owned inside its own domain.
+that are authoritative elsewhere or authoritative inside its own domain.
 
 Examples:
 
@@ -105,7 +126,7 @@ An Executor:
 
 - accepts an allowed action from the relevant Master,
 - performs the side effect,
-- reports result facts or errors back to an Owner/Master,
+- reports result facts or errors back to a Fact Authority or Master,
 - produces audit evidence.
 
 Examples:
@@ -123,12 +144,12 @@ Rule: an Executor that starts deciding safety is becoming an accidental Master.
 
 ## Recursive Role Rule
 
-Owner and Master are relative roles.
+Fact Authority and Master are relative roles.
 
-A small Master can become an Owner for the next higher layer:
+A domain Master can become a Fact Authority for the next higher layer:
 
 ```text
-ReplicaDurabilityOwner
+ReplicaDurabilityAuthority
   -> EngineMaster
       publishes authority.primary=r2, epoch=2, promotion=committed
           -> ManagedVolumeMaster consumes that as an authority fact
@@ -136,7 +157,7 @@ ReplicaDurabilityOwner
 
 From inside the engine domain, `EngineMaster` is the master.
 
-From the product-control domain, `EngineMaster` is an owner of authority facts.
+From the product-control domain, `EngineMaster` is a Fact Authority for authority-domain facts.
 
 This recursive rule is what lets the system scale without one huge controller.
 
@@ -153,9 +174,9 @@ Example: engine identity / authority.
 participants:
   primary, replicas, durable backend, replication transport
 
-owners:
-  AuthorityOwner
-  ReplicaDurabilityOwner
+fact authorities:
+  AuthorityLineAuthority
+  ReplicaDurabilityAuthority
 
 master:
   EngineMaster
@@ -181,11 +202,11 @@ Example: PVC-backed Kubernetes volume recovery.
 ```text
 domain facts:
   EngineMaster publishes authority and promotion facts
-  PlacementOwner publishes replica/node/frontend facts
-  CSIAttachOwner publishes stage/publish facts
-  HostPathOwner publishes iSCSI/multipath/RTPG facts
-  KubernetesObjectOwner publishes PVC/PV/pod/node facts
-  CleanupOwner publishes residue facts
+  PlacementAuthority publishes replica/node/frontend facts
+  CSIAttachAuthority publishes stage/publish facts
+  HostPathAuthority publishes iSCSI/multipath/RTPG facts
+  KubernetesObjectAuthority publishes PVC/PV/pod/node facts
+  CleanupAuthority publishes residue facts
 
 higher master:
   ManagedVolumeMaster
@@ -300,7 +321,7 @@ ManagedVolume condition evidence_ref:
 Its shape:
 
 ```text
-lower owners and masters publish facts
+participants, fact authorities, and masters publish facts
 ManagedVolumeMaster computes product state and allowed actions
 ops/report/dashboard/operator consume ManagedVolume state
 executors remain behind policy gates
@@ -309,8 +330,8 @@ executors remain behind policy gates
 Therefore D9 is not only a field-list exercise. It must define:
 
 - which facts exist,
-- which owner publishes each fact,
-- which domain-master outputs are accepted as upward owner facts,
+- which Fact Authority publishes each fact,
+- which domain-master outputs are accepted as upward Fact Authority facts,
 - how ManagedVolumeMaster computes Conditions,
 - which actions require ManagedVolumeMaster authorization,
 - which evidence refs prove each state.
@@ -323,10 +344,11 @@ The engine directory remains a protocol/domain implementation:
 engine = identity / authority / recovery protocol automata
 ```
 
-It owns primary, epoch, endpoint version, promotion eligibility, and frontier
-semantics. It should not own PVC, CSI, host-path, dashboard, or cleanup truth.
+It is authoritative for primary, epoch, endpoint version, promotion
+eligibility, and frontier semantics. It should not be authoritative for PVC,
+CSI, host-path, dashboard, or cleanup truth.
 
-The engine output becomes an owner fact for ManagedVolume:
+The engine output becomes an authority fact for ManagedVolume:
 
 ```text
 EngineMaster publishes:
@@ -354,7 +376,7 @@ spreading across CSI, launcher, scripts, and reports.
 For any new behavior, ask:
 
 1. What fact changed?
-2. Who owns that fact?
+2. Which Fact Authority publishes that fact?
 3. Is there a domain Master that computes the local state?
 4. Does that domain Master publish an upward fact?
 5. Does a higher Master need this fact before allowing an action?
@@ -374,7 +396,7 @@ invariant ledger for every domain.
 
 Phase 28 D9-D11 should add:
 
-- ManagedVolume field ownership table,
+- ManagedVolume fact-authority table,
 - Condition derivation rules,
 - action contracts,
 - cross-domain invariant rows,

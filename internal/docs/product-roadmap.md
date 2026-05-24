@@ -268,14 +268,14 @@ Later:
 
 ## Core Stability Backlog
 
-### State Model And Truth Ownership
+### State Model And Fact Authority
 
 Closed / current:
 
 - ManagedVolume Operations Model seed.
 - Truth-domain and invariant docs under `internal/docs/protocol/`.
-- Layered Owner / Master / Executor model for reusable control-plane
-  decomposition.
+- Layered Participant / Fact Authority / Master / Executor model for reusable
+  control-plane decomposition.
 - Observation slots merge by `(volume, replica)` with independent freshness.
 - Materialized workload ports persist so new volumes cannot reshuffle existing
   ports.
@@ -286,8 +286,8 @@ Next:
 
 - Run a `Control Model Stabilization Gate` before operator-grade operations:
   - freeze the ManagedVolume fact model used by report/dashboard/explain,
-  - define truth owners for Kubernetes placement, CSI publish/stage, authority,
-    recovery, host path, workload, cleanup, and evidence,
+  - define Fact Authorities for Kubernetes placement, CSI publish/stage,
+    authority, recovery, host path, workload, cleanup, and evidence,
   - separate fact publication, orchestration decisions, executor actions, and
     timeline evidence,
   - define state priority when multiple automata overlap, such as node loss
@@ -297,9 +297,9 @@ Next:
 - Extend ManagedVolume to express multi-volume failover isolation facts:
   target volume, non-target volume stability, primary_count, stale I/O result,
   and host-path recovery method.
-- Keep local controllers small: truth owners publish facts, orchestration
-  entities make global decisions, executors perform allowed actions, evidence
-  records why.
+- Keep local controllers small: participants emit observations, Fact
+  Authorities publish authoritative facts, masters make global decisions,
+  executors perform allowed actions, evidence records why.
 
 ### Cleanup And Idempotence
 
