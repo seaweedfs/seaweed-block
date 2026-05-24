@@ -1,6 +1,6 @@
 # Current Plan: Phase 28 - Productized Operations And Operator Foundation
 
-Status: active, 78% complete. Started on 2026-05-23 after Phase 27 D5/D6/D8
+Status: active, 82% complete. Started on 2026-05-23 after Phase 27 D5/D6/D8
 independent QA reruns passed. Expanded on 2026-05-23 from a narrow
 operational-hardening slice into the productized operations / operator
 foundation plan.
@@ -517,11 +517,12 @@ Acceptance:
 - QA reruns the gate from clean state.
 - PM review confirms the user-facing claim matrix is understandable and narrow.
 
-Status: pending.
+Status: QA assignment written on 2026-05-23; QA/PM validation pending.
 
 Required output:
 
-- Phase 28 close report.
+- `internal/docs/qa-assignments/phase28-productized-operations-close-gate-assignment.md`
+- Phase 28 close report after QA/PM validation.
 - Updated README / quickstart / release note language for the operator
   foundation boundary.
 
@@ -558,5 +559,5 @@ Status: pending.
   `go test ./core/ops` PASS; QA validation pending
 - D11: dev complete - read-only operator snapshot artifact/API added;
   `go test ./core/ops ./cmd/sw-block` PASS; QA validation pending
-- D12: pending - productized operations close gate
+- D12: QA assigned - productized operations close gate
 - D13: pending - release packaging and claim alignment
