@@ -23,6 +23,7 @@ type OperatorClusterStatus struct {
 	VolumeCount        int                    `json:"volume_count"`
 	ReadyVolumeCount   int                    `json:"ready_volume_count"`
 	BlockedVolumeCount int                    `json:"blocked_volume_count"`
+	Cleanup            *CleanupEvidence       `json:"cleanup,omitempty"`
 	Conditions         []ObservationCondition `json:"conditions,omitempty"`
 	NonClaims          []string               `json:"non_claims,omitempty"`
 }
@@ -51,6 +52,7 @@ func BuildOperatorFoundationSnapshot(cluster ClusterEvidence) OperatorFoundation
 		CRDContract: ManagedVolumeCRDContractDefinition(),
 		Cluster: OperatorClusterStatus{
 			Status:     cluster.Status,
+			Cleanup:    cluster.Cleanup,
 			Conditions: append([]ObservationCondition(nil), cluster.Conditions...),
 			NonClaims:  append([]string(nil), cluster.NonClaims...),
 		},

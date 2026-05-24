@@ -54,6 +54,21 @@ func RenderObservationReportSummary(cluster ClusterEvidence) string {
 	fmt.Fprintf(&b, "nodes=%d\n", len(cluster.Nodes))
 	fmt.Fprintf(&b, "events=%d\n", len(cluster.Events))
 	fmt.Fprintf(&b, "operator_snapshot=%s\n", ObservationOperatorSnapshotArtifact)
+	if cluster.Cleanup != nil {
+		fmt.Fprintf(&b, "cleanup_status=%s\n", emptyAsDash(cluster.Cleanup.Status))
+		fmt.Fprintf(&b, "k8s_residue_count=%d\n", cluster.Cleanup.KubernetesResidueCount)
+		fmt.Fprintf(&b, "iscsi_residue_count=%d\n", cluster.Cleanup.ISCSIResidueCount)
+		fmt.Fprintf(&b, "multipath_residue_count=%d\n", cluster.Cleanup.MultipathResidueCount)
+		fmt.Fprintf(&b, "process_residue_count=%d\n", cluster.Cleanup.ProcessResidueCount)
+		fmt.Fprintf(&b, "hostpath_residue_count=%d\n", cluster.Cleanup.HostPathResidueCount)
+		fmt.Fprintf(&b, "failure_count=%d\n", cluster.Cleanup.FailureCount)
+		if cluster.Cleanup.FailedPhase != "" {
+			fmt.Fprintf(&b, "failed_phase=%s\n", cluster.Cleanup.FailedPhase)
+		}
+		if cluster.Cleanup.EvidenceRef != "" {
+			fmt.Fprintf(&b, "cleanup_evidence=%s\n", cluster.Cleanup.EvidenceRef)
+		}
+	}
 	for _, volume := range cluster.Volumes {
 		fmt.Fprintf(&b, "volume=%s status=%s pvc=%s/%s primary=%s@%s frontend=%s rf=%d ack=%s\n",
 			emptyAsDash(volume.VolumeID),
@@ -122,6 +137,25 @@ func RenderObservationReportHTML(cluster ClusterEvidence) string {
 	reportCard(&b, "Events", fmt.Sprintf("%d", len(cluster.Events)), "")
 	reportCard(&b, "Read Only", "true", "ok")
 	b.WriteString("</div>")
+
+	if cluster.Cleanup != nil {
+		class := "ok"
+		if cluster.Cleanup.Status != "ok" || cluster.Cleanup.FailureCount > 0 {
+			class = "bad"
+		}
+		b.WriteString("<section><h2>Lifecycle Cleanup</h2><table><thead><tr><th>Status</th><th>K8s</th><th>iSCSI</th><th>Multipath</th><th>Processes</th><th>HostPath</th><th>Failures</th><th>Evidence</th></tr></thead><tbody>")
+		fmt.Fprintf(&b, "<tr><td class=\"%s\">%s</td><td>%d</td><td>%d</td><td>%d</td><td>%d</td><td>%d</td><td>%d</td><td>%s</td></tr>",
+			class,
+			esc(emptyAsDash(cluster.Cleanup.Status)),
+			cluster.Cleanup.KubernetesResidueCount,
+			cluster.Cleanup.ISCSIResidueCount,
+			cluster.Cleanup.MultipathResidueCount,
+			cluster.Cleanup.ProcessResidueCount,
+			cluster.Cleanup.HostPathResidueCount,
+			cluster.Cleanup.FailureCount,
+			esc(emptyAsDash(cluster.Cleanup.EvidenceRef)))
+		b.WriteString("</tbody></table></section>")
+	}
 
 	b.WriteString("<section><h2>Managed Volumes</h2><table><thead><tr><th>Volume</th><th>Status</th><th>Reason</th><th>Conditions</th><th>Safe Actions</th></tr></thead><tbody>")
 	for _, managed := range cluster.ManagedVolumes {

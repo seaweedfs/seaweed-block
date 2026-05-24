@@ -13,11 +13,12 @@ import (
 )
 
 const (
-	ClusterEvidenceArtifact        = "cluster-evidence.json"
-	ObservationReportHTMLArtifact  = "index.html"
-	ObservationReportJSONArtifact  = ClusterEvidenceArtifact
-	ObservationReportTextArtifact  = "summary.txt"
-	ObservationReportJSONLArtifact = "timeline.jsonl"
+	ClusterEvidenceArtifact           = "cluster-evidence.json"
+	ObservationReportHTMLArtifact     = "index.html"
+	ObservationReportJSONArtifact     = ClusterEvidenceArtifact
+	ObservationReportTextArtifact     = "summary.txt"
+	ObservationReportJSONLArtifact    = "timeline.jsonl"
+	ObservationCleanupSummaryArtifact = "cleanup-summary.txt"
 
 	NodeLossRecoverySummaryArtifact = "node-loss-recovery-summary.txt"
 	PrimaryFailureRecoveryArtifact  = "primary-failure-recovery.txt"
@@ -73,6 +74,10 @@ func BuildObservationFromBundle(opts ObservationBundleOptions) (ClusterEvidence,
 			}
 		}
 	}
+	cleanup, cleanupPath, _ := loadKeyValueArtifact(opts.Dir, ObservationCleanupSummaryArtifact)
+	if len(cleanup) > 0 {
+		cluster.Cleanup = cleanupEvidenceFromSummary(cleanup, cleanupPath)
+	}
 	if blocked, blockedVolume := buildImagePullBlockedEvidence(opts.Dir); blocked {
 		cluster.Status = ObservationStatusBlocked
 		sourceLoaded = true
@@ -97,6 +102,44 @@ func BuildObservationFromBundle(opts ObservationBundleOptions) (ClusterEvidence,
 		PrimaryFailure: primaryFailure,
 	})
 	return cluster, nil
+}
+
+func cleanupEvidenceFromSummary(summary map[string]string, evidencePath string) *CleanupEvidence {
+	if len(summary) == 0 {
+		return nil
+	}
+	cleanup := &CleanupEvidence{
+		Status:      defaultString(summary["cleanup_status"], ObservationStatusUnavailable),
+		EvidenceRef: evidencePath,
+	}
+	cleanup.KubernetesResidueCount = intFromSummary(summary, "k8s_residue_count")
+	cleanup.ISCSIResidueCount = intFromSummary(summary, "iscsi_residue_count")
+	cleanup.MultipathResidueCount = intFromSummary(summary, "multipath_residue_count")
+	cleanup.ProcessResidueCount = intFromSummary(summary, "process_residue_count")
+	cleanup.HostPathResidueCount = intFromSummary(summary, "hostpath_residue_count")
+	cleanup.FailureCount = intFromSummary(summary, "failure_count")
+	cleanup.FailedPhase = summary["failed_phase"]
+	if reasons := strings.TrimSpace(summary["reason_codes"]); reasons != "" {
+		for _, reason := range strings.Split(reasons, ",") {
+			reason = strings.TrimSpace(reason)
+			if reason != "" {
+				cleanup.ReasonCodes = append(cleanup.ReasonCodes, reason)
+			}
+		}
+	}
+	return cleanup
+}
+
+func intFromSummary(summary map[string]string, key string) int {
+	value := strings.TrimSpace(summary[key])
+	if value == "" {
+		return 0
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return 0
+	}
+	return parsed
 }
 
 func BuildObservationFromInventory(inventory VolumeInventory, volumeID string, evidencePath string) (ClusterEvidence, error) {

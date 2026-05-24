@@ -1,6 +1,6 @@
 # Current Plan: Phase 29 - Lifecycle/Cleanup Reliability Hardening
 
-Status: active, 40% complete. Started on 2026-05-24 after Phase 28 D13
+Status: active, 65% complete. Started on 2026-05-24 after Phase 28 D13
 release packaging closed with immutable image publication.
 
 ## Product Goal
@@ -165,6 +165,23 @@ Expected output:
 
 - `internal/docs/ref/phase29-lifecycle-evidence-contract.md`
 
+Status: PASS on 2026-05-24.
+
+Implementation:
+
+- Added read-only `CleanupEvidence` to the observation model.
+- Bundle replay now imports `cleanup-summary.txt` when present.
+- `sw-block ops report` text summary emits cleanup fields.
+- Dashboard HTML renders a Lifecycle Cleanup section.
+- `operator-snapshot.json` carries cleanup evidence under read-only cluster
+  status.
+
+Evidence:
+
+- `go test ./core/ops ./cmd/sw-block`, PASS.
+- Contract artifact:
+  `internal/docs/ref/phase29-lifecycle-evidence-contract.md`.
+
 ## D4: Deterministic Cleanup Gates (QA-facing)
 
 Goal: prove cleanup determinism for both normal and stressed multi-volume HA
@@ -210,6 +227,6 @@ only when:
 
 - D1: PASS - cleanup ownership matrix written
 - D2: PASS - primary multi-volume cleanup TOCTOU fixed, N=3 regression green
-- D3: pending
+- D3: PASS - lifecycle cleanup evidence parity added to report/dashboard/operator snapshot
 - D4: pending
 - D5: pending

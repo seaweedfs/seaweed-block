@@ -8,6 +8,13 @@ import (
 func TestOperatorFoundationSnapshot_ReadOnlyBoundary(t *testing.T) {
 	cluster := NewClusterEvidence(time.Date(2026, 5, 23, 20, 0, 0, 0, time.UTC))
 	cluster.Volumes = []VolumeEvidence{healthyObservationVolume()}
+	cluster.Cleanup = &CleanupEvidence{
+		Status:                 "ok",
+		KubernetesResidueCount: 0,
+		MultipathResidueCount:  0,
+		FailureCount:           0,
+		EvidenceRef:            "cleanup-summary.txt",
+	}
 
 	snapshot := BuildOperatorFoundationSnapshot(cluster)
 	if !snapshot.ReadOnly || snapshot.Mutation.MutationAllowed {
@@ -21,6 +28,9 @@ func TestOperatorFoundationSnapshot_ReadOnlyBoundary(t *testing.T) {
 	}
 	if snapshot.Cluster.VolumeCount != 1 || snapshot.Cluster.ReadyVolumeCount != 1 || snapshot.Cluster.BlockedVolumeCount != 0 {
 		t.Fatalf("cluster status=%+v", snapshot.Cluster)
+	}
+	if snapshot.Cluster.Cleanup == nil || snapshot.Cluster.Cleanup.Status != "ok" || snapshot.Cluster.Cleanup.EvidenceRef != "cleanup-summary.txt" {
+		t.Fatalf("missing cleanup evidence: %+v", snapshot.Cluster.Cleanup)
 	}
 	if len(snapshot.Volumes) != 1 {
 		t.Fatalf("volumes=%+v", snapshot.Volumes)

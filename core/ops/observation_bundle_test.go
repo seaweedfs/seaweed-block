@@ -203,6 +203,58 @@ func TestObservationBundle_ManagedVolumeUsesPrimaryFailureArtifactHints(t *testi
 	}
 }
 
+func TestObservationBundle_CarriesCleanupEvidenceIntoReportSurfaces(t *testing.T) {
+	dir := t.TempDir()
+	writeProductClusterEvidence(t, dir, []VolumeEvidence{healthyObservationVolume()})
+	mustWrite(t, filepath.Join(dir, "demo", ObservationCleanupSummaryArtifact), strings.Join([]string{
+		"cleanup_status=failed",
+		"k8s_residue_count=1",
+		"iscsi_residue_count=2",
+		"multipath_residue_count=3",
+		"process_residue_count=4",
+		"hostpath_residue_count=5",
+		"failure_count=2",
+		"failed_phase=collect_and_cleanup",
+		"reason_codes=kubernetes_sw_block_resources_present,multipath_maps_present",
+	}, "\n"))
+
+	cluster, err := BuildObservationFromBundle(ObservationBundleOptions{Dir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cluster.Cleanup == nil {
+		t.Fatalf("missing cleanup evidence")
+	}
+	if cluster.Cleanup.Status != "failed" || cluster.Cleanup.KubernetesResidueCount != 1 || cluster.Cleanup.MultipathResidueCount != 3 {
+		t.Fatalf("cleanup evidence=%+v", cluster.Cleanup)
+	}
+	if len(cluster.Cleanup.ReasonCodes) != 2 || cluster.Cleanup.ReasonCodes[1] != "multipath_maps_present" {
+		t.Fatalf("cleanup reason codes=%+v", cluster.Cleanup.ReasonCodes)
+	}
+
+	summary := RenderObservationReportSummary(cluster)
+	for _, want := range []string{
+		"cleanup_status=failed",
+		"k8s_residue_count=1",
+		"iscsi_residue_count=2",
+		"multipath_residue_count=3",
+		"process_residue_count=4",
+		"hostpath_residue_count=5",
+		"failure_count=2",
+		"failed_phase=collect_and_cleanup",
+		"cleanup_evidence=",
+	} {
+		if !strings.Contains(summary, want) {
+			t.Fatalf("summary missing %q:\n%s", want, summary)
+		}
+	}
+
+	snapshot := BuildOperatorFoundationSnapshot(cluster)
+	if snapshot.Cluster.Cleanup == nil || snapshot.Cluster.Cleanup.Status != "failed" || snapshot.Cluster.Cleanup.FailedPhase != "collect_and_cleanup" {
+		t.Fatalf("operator cleanup evidence=%+v", snapshot.Cluster.Cleanup)
+	}
+}
+
 func TestObservationBundle_D6ReplayGate_FirstVolumeBlockedAndRecovery(t *testing.T) {
 	cases := []struct {
 		name       string
