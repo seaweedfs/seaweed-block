@@ -1,6 +1,6 @@
 # Current Plan: Phase 29 - Lifecycle/Cleanup Reliability Hardening
 
-Status: active, 0% complete. Started on 2026-05-24 after Phase 28 D13
+Status: active, 25% complete. Started on 2026-05-24 after Phase 28 D13
 release packaging closed with immutable image publication.
 
 ## Product Goal
@@ -98,6 +98,30 @@ Acceptance:
 - `cleanup_status` and `deployments_gone` (or equivalent) are consistent.
 - Failures keep diagnostics instead of timing out silently.
 
+Status: PASS on 2026-05-24 for the primary target.
+
+Implementation:
+
+- `scripts/run-multi-volume-example.sh` now normalizes generated
+  blockvolume Deployment listing through `list_blockvolume_deployments`.
+- Cleanup success is recorded by a `deployments_gone=true` terminal flag
+  observed inside the wait loop.
+- The helper no longer performs the race-prone second `kubectl | grep`
+  observation after success.
+- The poll uses a deadline plus one final normalized observation before
+  timeout diagnostics.
+
+Evidence:
+
+- Initial green run: `20260524-140609-c204`, PASS, 29/29 actions.
+- N=3 regression:
+  - `20260524-141408-35e3`, PASS, 29/29 actions.
+  - `20260524-141615-7be6`, PASS, 29/29 actions.
+  - `20260524-141814-83f6`, PASS, 29/29 actions.
+
+Secondary targets remain gated by D4 only if those scenarios surface the same
+pattern.
+
 ## D3: Lifecycle Evidence Contract Tightening
 
 Goal: ensure lifecycle outcomes are represented by one stable vocabulary across
@@ -167,7 +191,7 @@ only when:
 ## Progress
 
 - D1: pending
-- D2: pending
+- D2: PASS - primary multi-volume cleanup TOCTOU fixed, N=3 regression green
 - D3: pending
 - D4: pending
 - D5: pending

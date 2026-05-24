@@ -89,39 +89,40 @@ own day-2 lifecycle without hiding unstable behavior.
 
 Type: Operational + Core Stability
 
-Current status: active, 5%. Started on 2026-05-24 after Phase 28 D13
+Current status: active, 25%. Started on 2026-05-24 after Phase 28 D13
 published-image release packaging passed.
 
 Goal:
 
 ```text
-install -> PVCs -> app write/read -> observe -> uninstall/delete -> cleanup
--> explain residue or clean state
+install -> run multi-volume HA loops -> cleanup
+-> residue check is deterministic
+-> evidence vocabulary is stable
+-> no helper TOCTOU race masks real state
 ```
 
-Phase 29 makes lifecycle and cleanup less dependent on brittle helper timing
-and more product-owned. The immediate seed is the Phase 28 D12 non-blocking
-multi-volume cleanup TOCTOU race, but the plan is broader: stable cleanup
-evidence, report/dashboard/operator-snapshot lifecycle fields, TestOps cleanup
-actions, flake matrices, and a handoff into control-model stabilization or
-returned-replica rebuild/failback.
+Phase 29 makes lifecycle and cleanup less dependent on helper timing and more
+product-owned. The seed issue is the Phase 28 D12 non-blocking multi-volume
+cleanup TOCTOU race. The exit target is deterministic cleanup evidence across
+the documented RF3 multi-volume loops.
 
-Planned gates:
+Gate status:
 
-- D1 multi-volume cleanup TOCTOU fix with N>=3 regression.
-- D2 product-owned cleanup evidence vocabulary.
-- D3 report/dashboard/operator snapshot cleanup surface.
-- D4 TestOps lifecycle/cleanup action hardening.
-- D5 lifecycle cleanup flake matrix.
-- D6 productized lifecycle close gate.
-- D7 lifecycle ownership review and control-model handoff.
-- D8 next-phase decision.
+- D1 cleanup ownership matrix (product-owned vs helper-owned steps).
+- D2 helper TOCTOU cleanup fixes (`run-multi-volume-*`): PASS for the primary
+  `scripts/run-multi-volume-example.sh` target on 2026-05-24. Evidence:
+  `20260524-140609-c204` plus N=3 regression
+  `20260524-141408-35e3`, `20260524-141615-7be6`,
+  `20260524-141814-83f6`.
+- D3 lifecycle evidence contract parity (summary/report/dashboard).
+- D4 deterministic cleanup reruns across RF3 multi-volume gates.
+- D5 phase close with independent QA replay.
 
 Non-goals:
 
-- no mutating operator cleanup,
-- no automatic rebuild/failback,
-- no backup/snapshot/restore,
+- no mutating operator cleanup or lifecycle actions,
+- no rebuild/failback implementation,
+- no backup/snapshot/restore implementation,
 - no new NVMe ANA claim,
 - no production lifecycle SLO.
 
@@ -179,11 +180,10 @@ Closed release gate:
   immutable GHCR images published and final pins recorded. Published-image
   release-path QA `20260524-124413-829a`, PASS, 34/34 actions.
 
-Follow-up:
+Closed carryover:
 
-- Fix the non-blocking `scripts/run-multi-volume-example.sh` cleanup TOCTOU
-  race found during D12 rerun cycle. D12 is closed, but the helper should stop
-  rechecking deployment emptiness after the wait loop already observed success.
+- The non-blocking `scripts/run-multi-volume-example.sh` cleanup TOCTOU race
+  found during D12 rerun cycle is closed in Phase 29 D2.
 
 Non-goals:
 

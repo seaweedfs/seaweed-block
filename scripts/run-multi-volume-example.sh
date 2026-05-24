@@ -43,6 +43,11 @@ safe_capture() {
   "$@" >"$out" 2>&1 || true
 }
 
+list_blockvolume_deployments() {
+  kubectl -n "$NAMESPACE" get deploy -l app=sw-blockvolume -o name 2>/dev/null \
+    | awk '/^deployment/ { print }'
+}
+
 sw_block_cmd() {
   if [[ -n "${SW_BLOCK_CLI:-}" ]]; then
     "$SW_BLOCK_CLI" "$@"
@@ -230,6 +235,7 @@ collect_status_evidence() {
 
 cleanup_multi_volume() {
   local rc=0
+  local deployments_gone=false
   for idx in $(seq 1 "$VOLUME_COUNT"); do
     kubectl -n "$NAMESPACE" delete pod "${POD_PREFIX}-reader-${idx}" "${POD_PREFIX}-writer-${idx}" --ignore-not-found=true --wait=true --timeout=120s || rc=1
   done
@@ -239,15 +245,20 @@ cleanup_multi_volume() {
   # RF>1 creates several generated blockvolume Deployments per PVC. The
   # launcher removes them asynchronously after PVC deletion; wait before
   # declaring helper-level cleanup success.
-  for _ in $(seq 1 90); do
+  local deadline=$((SECONDS + 180))
+  while (( SECONDS <= deadline )); do
     local remaining
-    remaining="$(kubectl -n "$NAMESPACE" get deploy -l app=sw-blockvolume -o name 2>/dev/null || true)"
+    remaining="$(list_blockvolume_deployments || true)"
     if [[ -z "$remaining" ]]; then
+      deployments_gone=true
       break
     fi
     sleep 2
   done
-  if kubectl -n "$NAMESPACE" get deploy -l app=sw-blockvolume -o name 2>/dev/null | grep -q .; then
+  if [[ "$deployments_gone" != "true" ]] && [[ -z "$(list_blockvolume_deployments || true)" ]]; then
+    deployments_gone=true
+  fi
+  if [[ "$deployments_gone" != "true" ]]; then
     safe_capture "$ARTIFACT_DIR/logs/blockvolume-deployments.cleanup-timeout.txt" kubectl -n "$NAMESPACE" get deploy -l app=sw-blockvolume -o wide
     rc=1
   fi
