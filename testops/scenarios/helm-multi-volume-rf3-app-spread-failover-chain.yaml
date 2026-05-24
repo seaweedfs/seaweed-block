@@ -54,6 +54,15 @@ phases:
           rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-multi-volume-rf3-app-spread-failover
           mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-multi-volume-rf3-app-spread-failover/bin /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-multi-volume-rf3-app-spread-failover/values /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-multi-volume-rf3-app-spread-failover/install /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-multi-volume-rf3-app-spread-failover/recovery /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-multi-volume-rf3-app-spread-failover/cleanup
         env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+      - action: exec
+        node: m02
+        timeout: 5m
+        cmd: "cd {{ product_root }} && bash scripts/verify-helm-cleanup.sh"
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+        env.SW_BLOCK_ARTIFACT_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-multi-volume-rf3-app-spread-failover/preclean/verify"
+        env.SW_BLOCK_HELM_RELEASE: "{{ helm_release }}"
+        env.SW_BLOCK_HELM_NAMESPACE: "{{ helm_namespace }}"
+        env.SW_BLOCK_CLEANUP_MULTIPATH_FLUSH: "1"
       - action: assert_no_active_iscsi_sessions
         node: m02
 
@@ -221,7 +230,7 @@ phases:
       - action: exec
         node: m02
         timeout: 3m
-        cmd: "cd {{ product_root }} && SW_BLOCK_ARTIFACT_DIR=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-multi-volume-rf3-app-spread-failover/cleanup/verify SW_BLOCK_HELM_RELEASE={{ helm_release }} SW_BLOCK_NAMESPACE={{ helm_namespace }} bash scripts/verify-helm-cleanup.sh {{ product_root }}"
+        cmd: "cd {{ product_root }} && SW_BLOCK_ARTIFACT_DIR=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-multi-volume-rf3-app-spread-failover/cleanup/verify SW_BLOCK_HELM_RELEASE={{ helm_release }} SW_BLOCK_HELM_NAMESPACE={{ helm_namespace }} SW_BLOCK_CLEANUP_MULTIPATH_FLUSH=1 bash scripts/verify-helm-cleanup.sh {{ product_root }}"
         env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
       - action: assert_no_active_iscsi_sessions
         node: m02

@@ -1,6 +1,6 @@
 # Current Plan: Phase 28 - Operational Reliability And TestOps Hardening
 
-Status: active, 30% complete. Started on 2026-05-23 after Phase 27 D5/D6/D8
+Status: active, 95% complete. Started on 2026-05-23 after Phase 27 D5/D6/D8
 independent QA reruns passed.
 
 ## Product Goal
@@ -108,6 +108,8 @@ Evidence:
 - Scenario: `testops/scenarios/cleanup-residue-chain.yaml`
 - Run: `20260523-182000-41ee`
 - Result: PASS, 4/4 phases, 13/13 actions
+- Regression rerun after dmsetup residue coverage:
+  `20260523-195058-3d4d`, PASS, 4/4 phases, 13/13 actions
 
 Fix included:
 
@@ -130,7 +132,39 @@ Acceptance:
 - Required release-grade result: `flake_rate_percent=0`.
 - Failures preserve run IDs and bundle paths.
 
-Status: pending.
+Status: PASS on 2026-05-23.
+
+Evidence:
+
+- D3 mounted failover matrix:
+  `results/phase28-d2-flake-d3-mounted-n5/flake-summary.txt`
+  - `target_runs=5`
+  - `pass_runs=5`
+  - `fail_runs=0`
+  - `flake_rate_percent=0`
+  - Run IDs:
+    `20260523-192731-dc0f`, `20260523-193114-03d0`,
+    `20260523-193501-d275`, `20260523-193845-90bc`,
+    `20260523-194232-8ea4`
+- D4 interleaved failover matrix:
+  `results/phase28-d2-flake-d4-interleaved-n5-r3/flake-summary.txt`
+  - `target_runs=5`
+  - `pass_runs=5`
+  - `fail_runs=0`
+  - `flake_rate_percent=0`
+  - Run IDs:
+    `20260523-191350-ae51`, `20260523-191644-fcb3`,
+    `20260523-191915-0f86`, `20260523-192150-4a49`,
+    `20260523-192433-362e`
+
+Notes:
+
+- The first D2 attempt surfaced a real cleanup gap: orphan multipath maps could
+  remain mounted under stale kubelet CSI paths.
+- Fix: cleanup verification can now opt into stale kubelet unmount +
+  multipath/dmsetup flush via `SW_BLOCK_CLEANUP_MULTIPATH_FLUSH=1`.
+- The mounted writer setup now waits for per-writer checksum evidence instead
+  of treating Pod `Ready=True` as proof that the write completed.
 
 ## D3: TestOps Runner Product Interface
 
@@ -154,7 +188,23 @@ Acceptance:
 - Keep current helper-script gates where they carry complex orchestration.
 - Add one runner-native smoke gate only where it improves clarity.
 
-Status: pending.
+Status: PASS on 2026-05-23.
+
+Output:
+
+- Backlog doc: `internal/docs/ref/testops-runner-action-backlog.md`
+- Reference spike: `testops/scenarios/experimental-runner-native-pvc-loop.yaml`
+- Spike run: `20260523-145417-4f50`, PASS, 22/22 actions
+
+Decisions:
+
+- Do not rewrite the scenario DSL now.
+- Keep helper-script gates for complex orchestration where they produce better
+  summaries and diagnostics.
+- Promote repeated shell assertions into runner actions first:
+  `assert_no_multipath_maps`, `kubectl_wait_jsonpath`,
+  `kubectl_wait_completed`, `helm_install`, `helm_uninstall`,
+  `assert_alua_aas_transition`, and `iscsi_assert_io_rejected`.
 
 ## D4: Multi-Volume Support Bundle Consistency
 
@@ -174,7 +224,27 @@ Acceptance:
 - Failed bundles preserve the same fields where possible.
 - No mutating action is introduced.
 
-Status: pending.
+Status: PASS as a support-evidence contract on 2026-05-23.
+
+Output:
+
+- Contract doc:
+  `internal/docs/ref/multi-volume-ha-support-evidence-contract.md`
+
+Evidence audited:
+
+- Mounted representative run:
+  `20260523-194232-8ea4-helm-multi-volume-rf3-mounted-failover`
+- Interleaved representative run:
+  `20260523-192433-362e-helm-multi-volume-rf3-interleaved-failover`
+
+Boundary:
+
+- Current bundles already preserve stable field names for target volume,
+  non-target stability, primary count, measured stale I/O probe, RTPG
+  transition, and recovery method.
+- Product dashboard/report integration should consume the same vocabulary, but
+  this D4 slice does not claim a new dashboard feature.
 
 ## D5: Structure Review
 
@@ -200,7 +270,11 @@ Output:
   - evidence source,
   - risk if left mixed.
 
-Status: pending.
+Status: PASS as a structure review on 2026-05-23.
+
+Output:
+
+- `internal/docs/ref/phase28-structure-model-readiness-review.md`
 
 ## D6: Model Dependency Map
 
@@ -215,7 +289,11 @@ Acceptance:
 - Define how overlapping automata should be represented when node loss affects
   authority, CSI, host path, cleanup, and support evidence simultaneously.
 
-Status: pending.
+Status: PASS as a model dependency map on 2026-05-23.
+
+Output:
+
+- `internal/docs/ref/phase28-structure-model-readiness-review.md`
 
 ## D7: Model Tightening Proposal
 
@@ -230,7 +308,11 @@ Principles:
 - Small automata are useful only if their interaction with global context is
   explicit.
 
-Status: pending.
+Status: PASS as a tightening proposal on 2026-05-23.
+
+Output:
+
+- `internal/docs/ref/phase28-structure-model-readiness-review.md`
 
 ## D8: Next Feature Readiness Review
 
@@ -244,15 +326,19 @@ Acceptance:
   evidence is repeatable.
 - Backup starts only after volume identity/model boundaries are stable.
 
-Status: pending.
+Status: PASS as a readiness review on 2026-05-23.
+
+Output:
+
+- `internal/docs/ref/phase28-structure-model-readiness-review.md`
 
 ## Progress
 
 - D1: PASS - multipath cleanup verifier catches orphan maps `20260523-182000-41ee`
-- D2: pending - Phase 27 N>=5 flake matrix
-- D3: pending - TestOps action backlog
-- D4: pending - support/report consistency
-- D5: pending - structure review
-- D6: pending - model dependency map
-- D7: pending - model tightening proposal
-- D8: pending - next feature readiness review
+- D2: PASS - D3/D4 Phase 27 N=5 matrices both `flake_rate_percent=0`
+- D3: PASS - TestOps action backlog written
+- D4: PASS - multi-volume support evidence field contract written
+- D5: PASS - structure review written
+- D6: PASS - model dependency map written
+- D7: PASS - model tightening proposal written
+- D8: PASS - next feature readiness review written

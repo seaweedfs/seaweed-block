@@ -86,7 +86,7 @@ own day-2 lifecycle without hiding unstable behavior.
 
 Type: Operational + Core Stability
 
-Current status: active, 30%. Started on 2026-05-23 after Phase 27 D5/D6/D8
+Current status: active, 95%. Started on 2026-05-23 after Phase 27 D5/D6/D8
 independent QA reruns passed.
 
 Goals:
@@ -101,6 +101,14 @@ Goals:
 Closed gates:
 
 - D1 multipath cleanup verifier: `20260523-182000-41ee`, 13/13 PASS.
+- D2 Phase 27 flake matrix:
+  - D3 mounted failover N=5, 5/5 PASS, `flake_rate_percent=0`.
+  - D4 interleaved failover N=5, 5/5 PASS, `flake_rate_percent=0`.
+- D3 TestOps action backlog: `internal/docs/ref/testops-runner-action-backlog.md`.
+- D4 multi-volume support evidence contract:
+  `internal/docs/ref/multi-volume-ha-support-evidence-contract.md`.
+- D5-D8 structure/model/readiness review:
+  `internal/docs/ref/phase28-structure-model-readiness-review.md`.
 
 Non-goals:
 

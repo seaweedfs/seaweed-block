@@ -630,6 +630,24 @@ wait_for_blockvolume_deployments_ready() {
     | tee "$ARTIFACT_DIR/setup/wait-blockvolume-deployments.log"
 }
 
+wait_for_writer_verified() {
+  local idx="$1"
+  local log_path="$ARTIFACT_DIR/logs/writer-$idx.log"
+  local deadline=$((SECONDS + ${SW_BLOCK_MULTI_VOLUME_WRITER_VERIFY_WAIT_SECONDS:-120}))
+
+  while (( SECONDS < deadline )); do
+    kubectl -n "$NAMESPACE" logs "${POD_PREFIX}-writer-${idx}" >"$log_path" 2>&1 || true
+    if grep -q '/data/demo.bin: OK' "$log_path"; then
+      return 0
+    fi
+    sleep 2
+  done
+
+  kubectl -n "$NAMESPACE" logs "${POD_PREFIX}-writer-${idx}" >"$log_path" 2>&1 || true
+  safe_capture "$ARTIFACT_DIR/setup/writer-$idx.describe.txt" kubectl -n "$NAMESPACE" describe pod "${POD_PREFIX}-writer-${idx}"
+  return 1
+}
+
 if [[ "$NAMESPACE" != "default" ]]; then
   echo "only default namespace is supported by this helper" >&2
   exit 2
@@ -665,8 +683,13 @@ for idx in $(seq 1 "$VOLUME_COUNT"); do
     write_summary
     exit 1
   fi
-  kubectl -n "$NAMESPACE" logs "${POD_PREFIX}-writer-${idx}" >"$ARTIFACT_DIR/logs/writer-$idx.log"
-  grep -q '/data/demo.bin: OK' "$ARTIFACT_DIR/logs/writer-$idx.log"
+  if ! wait_for_writer_verified "$idx"; then
+    capture_failure_diagnostics "writer-$idx-verified"
+    STATUS="failed"
+    FAILED_PHASE="writer_${idx}_verified"
+    write_summary
+    exit 1
+  fi
   writer_uid "$idx" >"$ARTIFACT_DIR/setup/writer-$idx.uid.before"
   writer_node "$idx" >"$ARTIFACT_DIR/setup/writer-$idx.node"
 done

@@ -40,6 +40,15 @@ phases:
         timeout: 6m
         cmd: "helm status {{ helm_release }} --namespace {{ helm_namespace }} >/dev/null 2>&1 && helm uninstall {{ helm_release }} --namespace {{ helm_namespace }} --wait --timeout 240s || true; kubectl -n default delete pod -l sw-block-test=multi-volume-mounted-failover --ignore-not-found=true --wait=true --timeout=180s; for i in 1 2 3; do kubectl -n default delete pod sw-block-multi-mounted-writer-$i --ignore-not-found=true --wait=true --timeout=180s; kubectl -n default delete pvc sw-block-multi-mounted-pvc-$i --ignore-not-found=true --wait=true --timeout=180s; done; kubectl delete storageclass sw-block-multi-mounted sw-block-dynamic --ignore-not-found=true --wait=true --timeout=180s; kubectl delete clusterrole/sw-block-csi clusterrolebinding/sw-block-csi --ignore-not-found=true; sudo -n iscsiadm -m node 2>/dev/null | awk '/io.seaweedfs/ {print $1, $2}' | while read portal target; do sudo -n iscsiadm -m node -T \"$target\" -p \"$portal\" -o delete || true; done; sudo -n multipath -F >/dev/null 2>&1 || true; rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-multi-volume-rf3-interleaved-failover && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-multi-volume-rf3-interleaved-failover/bin /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-multi-volume-rf3-interleaved-failover/values /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-multi-volume-rf3-interleaved-failover/install /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-multi-volume-rf3-interleaved-failover/recovery /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-multi-volume-rf3-interleaved-failover/cleanup"
         env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+      - action: exec
+        node: m02
+        timeout: 5m
+        cmd: "cd {{ product_root }} && bash scripts/verify-helm-cleanup.sh"
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+        env.SW_BLOCK_ARTIFACT_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-multi-volume-rf3-interleaved-failover/preclean/verify"
+        env.SW_BLOCK_HELM_RELEASE: "{{ helm_release }}"
+        env.SW_BLOCK_HELM_NAMESPACE: "{{ helm_namespace }}"
+        env.SW_BLOCK_CLEANUP_MULTIPATH_FLUSH: "1"
       - action: assert_no_active_iscsi_sessions
         node: m02
         iqn_substr: "io.seaweedfs"
@@ -277,6 +286,7 @@ phases:
         env.SW_BLOCK_ARTIFACT_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-multi-volume-rf3-interleaved-failover/cleanup/verify"
         env.SW_BLOCK_HELM_RELEASE: "{{ helm_release }}"
         env.SW_BLOCK_HELM_NAMESPACE: "{{ helm_namespace }}"
+        env.SW_BLOCK_CLEANUP_MULTIPATH_FLUSH: "1"
       - action: assert_no_active_iscsi_sessions
         node: m02
         iqn_substr: "io.seaweedfs"
