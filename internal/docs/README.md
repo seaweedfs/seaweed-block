@@ -63,6 +63,7 @@ Public-facing docs belong in `docs/`.
 | `ref/production-readiness-plan.md` | Longer readiness reference and iSCSI P1-P6 detail. |
 | `ref/light-use-block-storage-ux-research.md` | Comparison of Longhorn, OpenEBS, Rook/Ceph, Piraeus/LINSTOR, and EBS CSI light-user install/operations UX. |
 | `ref/blockvolume-lifecycle-ownership-contract.md` | Product-owned generated blockvolume workload lifecycle ownership contract for the current plan. |
+| `ref/phase29-cleanup-ownership-matrix.md` | Cleanup ownership matrix for Phase 29: truth owner, executor, evidence, reason codes, and migration target per residue class. |
 | `ref/iscsi-os-initiator-compat-plan.md` | Detailed iSCSI P1 OS-initiator compatibility plan and evidence. |
 | `ref/iscsi-v2-coverage-gap-audit.md` | V2-to-V3 iSCSI coverage gap audit and prioritized test backlog. |
 | `ref/v2-frontend-protocol-gap-audit.md` | Broader V2 frontend protocol feature gap audit. |

@@ -89,7 +89,7 @@ own day-2 lifecycle without hiding unstable behavior.
 
 Type: Operational + Core Stability
 
-Current status: active, 25%. Started on 2026-05-24 after Phase 28 D13
+Current status: active, 40%. Started on 2026-05-24 after Phase 28 D13
 published-image release packaging passed.
 
 Goal:
@@ -108,7 +108,9 @@ the documented RF3 multi-volume loops.
 
 Gate status:
 
-- D1 cleanup ownership matrix (product-owned vs helper-owned steps).
+- D1 cleanup ownership matrix (product-owned vs helper-owned steps): PASS on
+  2026-05-24. Artifact:
+  `internal/docs/ref/phase29-cleanup-ownership-matrix.md`.
 - D2 helper TOCTOU cleanup fixes (`run-multi-volume-*`): PASS for the primary
   `scripts/run-multi-volume-example.sh` target on 2026-05-24. Evidence:
   `20260524-140609-c204` plus N=3 regression

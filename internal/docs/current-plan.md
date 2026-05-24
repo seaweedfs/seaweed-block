@@ -1,6 +1,6 @@
 # Current Plan: Phase 29 - Lifecycle/Cleanup Reliability Hardening
 
-Status: active, 25% complete. Started on 2026-05-24 after Phase 28 D13
+Status: active, 40% complete. Started on 2026-05-24 after Phase 28 D13
 release packaging closed with immutable image publication.
 
 ## Product Goal
@@ -75,6 +75,24 @@ Acceptance:
 Expected output:
 
 - `internal/docs/ref/phase29-cleanup-ownership-matrix.md`
+
+Status: PASS on 2026-05-24.
+
+Output:
+
+- `internal/docs/ref/phase29-cleanup-ownership-matrix.md`
+
+Coverage:
+
+- Helm release and chart-scoped Kubernetes resources.
+- Demo pods, PVC/PV objects, generated blockvolume Deployments.
+- iSCSI sessions and node records.
+- dm-multipath / dmsetup residue.
+- run-scoped hostPath residue, product processes, and support artifacts.
+
+The matrix assigns truth owner, current executor, evidence artifact, failure
+reason code, retry/idempotence rule, and migration target for each resource
+class.
 
 ## D2: Helper TOCTOU Cleanup Fixes
 
@@ -190,7 +208,7 @@ only when:
 
 ## Progress
 
-- D1: pending
+- D1: PASS - cleanup ownership matrix written
 - D2: PASS - primary multi-volume cleanup TOCTOU fixed, N=3 regression green
 - D3: pending
 - D4: pending
