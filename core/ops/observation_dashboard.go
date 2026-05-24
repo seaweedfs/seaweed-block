@@ -43,6 +43,13 @@ func (h observationDashboardHandler) ServeHTTP(w http.ResponseWriter, r *http.Re
 		writeDashboardResponse(w, r, "application/x-ndjson; charset=utf-8", []byte(raw))
 	case "/" + ObservationReportTextArtifact:
 		writeDashboardResponse(w, r, "text/plain; charset=utf-8", []byte(RenderObservationReportSummary(h.cluster)))
+	case "/" + ObservationOperatorSnapshotArtifact:
+		raw, err := MarshalObservationJSON(BuildOperatorFoundationSnapshot(h.cluster))
+		if err != nil {
+			http.Error(w, fmt.Sprintf("render operator snapshot: %v", err), http.StatusInternalServerError)
+			return
+		}
+		writeDashboardResponse(w, r, "application/json; charset=utf-8", raw)
 	case "/healthz":
 		writeDashboardResponse(w, r, "text/plain; charset=utf-8", []byte("ok\n"))
 	default:

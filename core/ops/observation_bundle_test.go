@@ -290,6 +290,7 @@ deployment.apps/sw-block-csi-controller 1/1 1 1 2m3s block-csi sw-block-csi:loca
 				ObservationReportHTMLArtifact,
 				ObservationReportJSONArtifact,
 				ObservationReportJSONLArtifact,
+				ObservationOperatorSnapshotArtifact,
 				ObservationReportTextArtifact,
 			} {
 				if _, err := os.Stat(filepath.Join(reportDir, artifact)); err != nil {
@@ -397,6 +398,7 @@ deployment.apps/sw-block-csi-controller 1/1 1 1 2m3s block-csi sw-block-csi:loca
 			defer server.Close()
 			assertDashboardEndpointContains(t, server.URL+"/", tc.wantHTML)
 			assertDashboardEndpointContains(t, server.URL+"/"+ObservationReportJSONArtifact, tc.wantJSON)
+			assertDashboardEndpointContains(t, server.URL+"/"+ObservationOperatorSnapshotArtifact, `"read_only": true`)
 			assertDashboardEndpointContains(t, server.URL+"/"+ObservationReportTextArtifact, tc.wantText)
 
 			resp, err := http.Post(server.URL+"/", "application/json", strings.NewReader(`{"action":"repair"}`))

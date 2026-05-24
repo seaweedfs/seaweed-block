@@ -58,6 +58,8 @@ func TestObservationDashboardHandlerServesMachineArtifacts(t *testing.T) {
 	assertEndpointContains(t, server.URL+"/cluster-evidence.json", `"managed_volumes"`)
 	assertEndpointContains(t, server.URL+"/timeline.jsonl", `"event_id":"master-1"`)
 	assertEndpointContains(t, server.URL+"/summary.txt", "managed_volume_condition=Ready")
+	assertEndpointContains(t, server.URL+"/operator-snapshot.json", `"read_only": true`)
+	assertEndpointContains(t, server.URL+"/operator-snapshot.json", `"mutation_allowed": false`)
 }
 
 func TestObservationDashboardHandlerRejectsMutationMethods(t *testing.T) {

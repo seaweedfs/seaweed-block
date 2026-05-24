@@ -27,6 +27,13 @@ func WriteObservationReportArtifacts(outDir string, cluster ClusterEvidence) err
 	if err := os.WriteFile(filepath.Join(outDir, ObservationReportTextArtifact), []byte(RenderObservationReportSummary(cluster)), 0o644); err != nil {
 		return err
 	}
+	operatorRaw, err := MarshalObservationJSON(BuildOperatorFoundationSnapshot(cluster))
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(outDir, ObservationOperatorSnapshotArtifact), operatorRaw, 0o644); err != nil {
+		return err
+	}
 	jsonl, err := RenderClusterEventsJSONL(cluster.Events)
 	if err != nil {
 		return err
@@ -46,6 +53,7 @@ func RenderObservationReportSummary(cluster ClusterEvidence) string {
 	fmt.Fprintf(&b, "volumes=%d\n", len(cluster.Volumes))
 	fmt.Fprintf(&b, "nodes=%d\n", len(cluster.Nodes))
 	fmt.Fprintf(&b, "events=%d\n", len(cluster.Events))
+	fmt.Fprintf(&b, "operator_snapshot=%s\n", ObservationOperatorSnapshotArtifact)
 	for _, volume := range cluster.Volumes {
 		fmt.Fprintf(&b, "volume=%s status=%s pvc=%s/%s primary=%s@%s frontend=%s rf=%d ack=%s\n",
 			emptyAsDash(volume.VolumeID),

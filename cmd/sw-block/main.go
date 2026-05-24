@@ -624,6 +624,7 @@ func runOpsReport(args []string, stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "html=%s\n", ops.ObservationReportHTMLArtifact)
 	fmt.Fprintf(stdout, "cluster_evidence=%s\n", ops.ObservationReportJSONArtifact)
 	fmt.Fprintf(stdout, "timeline=%s\n", ops.ObservationReportJSONLArtifact)
+	fmt.Fprintf(stdout, "operator_snapshot=%s\n", ops.ObservationOperatorSnapshotArtifact)
 	fmt.Fprintf(stdout, "summary=%s\n", ops.ObservationReportTextArtifact)
 	fmt.Fprintf(stdout, "read_only=true\n")
 	return ops.VolumeStatusExitOK
@@ -699,6 +700,7 @@ func runOpsDashboard(args []string, stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "url=http://%s/\n", ln.Addr().String())
 	fmt.Fprintf(stdout, "cluster_evidence=%s\n", ops.ObservationReportJSONArtifact)
 	fmt.Fprintf(stdout, "timeline=%s\n", ops.ObservationReportJSONLArtifact)
+	fmt.Fprintf(stdout, "operator_snapshot=%s\n", ops.ObservationOperatorSnapshotArtifact)
 	fmt.Fprintf(stdout, "summary=%s\n", ops.ObservationReportTextArtifact)
 	fmt.Fprintf(stdout, "read_only=true\n")
 

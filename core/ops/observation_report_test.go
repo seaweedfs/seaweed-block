@@ -59,6 +59,7 @@ func TestObservationReportSummary_IncludesManagedVolumeStatus(t *testing.T) {
 
 	summary := RenderObservationReportSummary(cluster)
 	for _, want := range []string{
+		"operator_snapshot=operator-snapshot.json",
 		"volume=pvc-healthy status=ok pvc=default/mysql-data",
 		"managed_volume=pvc-healthy status=ready reason=first_volume_verified",
 		"managed_volume_condition=Ready status=True reason=first_volume_verified severity=info",
@@ -130,5 +131,20 @@ func TestObservationReportArtifacts_JSONIncludesManagedVolumeProjection(t *testi
 	}
 	if len(managed.Actions) == 0 || managed.Actions[0].Mode != ManagedVolumeActionModeReadOnly {
 		t.Fatalf("managed actions=%+v", managed.Actions)
+	}
+
+	raw, err = os.ReadFile(filepath.Join(dir, ObservationOperatorSnapshotArtifact))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var snapshot OperatorFoundationSnapshot
+	if err := json.Unmarshal(raw, &snapshot); err != nil {
+		t.Fatalf("decode operator snapshot json: %v\n%s", err, raw)
+	}
+	if !snapshot.ReadOnly || snapshot.Mutation.MutationAllowed {
+		t.Fatalf("operator snapshot must be read-only: %+v", snapshot)
+	}
+	if snapshot.Cluster.VolumeCount != 1 || len(snapshot.Volumes) != 1 {
+		t.Fatalf("operator snapshot missing volume evidence: %+v", snapshot)
 	}
 }
