@@ -1,6 +1,6 @@
 # Kubernetes Quick Start
 
-This guide is the v0.3 / v0.3.1 alpha path for Seaweed Block on Kubernetes.
+This guide is the v0.3.x alpha path for Seaweed Block on Kubernetes.
 
 It shows the user loop:
 
@@ -27,11 +27,13 @@ The quickstart proves:
 - A replacement reader pod can mount the same PVC and verify the same data.
 - Product-owned status evidence, a local read-only report, and a local
   read-only dashboard are available.
+- The report/dashboard include `operator-snapshot.json`, a read-only
+  operator-facing status projection. It is not a mutating operator.
 - The example resources and host-side residue are cleaned up.
 
 It does not prove production HA, backup/restore, broad upgrade safety, broad
-platform compatibility, operator lifecycle, mutating admin workflows, or
-production UI.
+platform compatibility, mutating operator lifecycle, mutating admin workflows,
+or production UI.
 
 ## Prerequisites
 
@@ -213,6 +215,7 @@ status_evidence=status/cluster-evidence.json,status/inventory
 cluster_evidence=status/cluster-evidence.json
 inventory_bundle=status/inventory
 status_report=status/report/index.html
+operator_snapshot=status/report/operator-snapshot.json
 cleanup_status=ok
 ```
 
@@ -235,11 +238,14 @@ Expected files:
 index.html
 cluster-evidence.json
 timeline.jsonl
+operator-snapshot.json
 summary.txt
 ```
 
 `sw-block ops report` writes static artifacts. `sw-block ops dashboard` serves
-the same evidence locally over HTTP.
+the same evidence locally over HTTP. `operator-snapshot.json` uses the same
+ManagedVolume status vocabulary as the report/dashboard and is the status-only
+foundation for future Kubernetes operator work.
 
 Serve the collected bundle:
 

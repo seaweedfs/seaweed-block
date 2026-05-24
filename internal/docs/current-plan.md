@@ -1,6 +1,6 @@
 # Current Plan: Phase 28 - Productized Operations And Operator Foundation
 
-Status: active, 82% complete. Started on 2026-05-23 after Phase 27 D5/D6/D8
+Status: active, 85% complete. Started on 2026-05-23 after Phase 27 D5/D6/D8
 independent QA reruns passed. Expanded on 2026-05-23 from a narrow
 operational-hardening slice into the productized operations / operator
 foundation plan.
@@ -540,7 +540,21 @@ Acceptance:
   - Mutating repair/rebuild/failback remains future work.
 - Do not let `:alpha` mutable-tag evidence stand in for release evidence.
 
-Status: pending.
+Status: docs prepared, image publication and final pin update pending.
+
+Prepared output:
+
+- `docs/releases/v0.3.3-alpha.md` draft release note.
+- `docs/releases/README.md` updated with v0.3.2 and v0.3.3 boundaries.
+- `README.md` and `docs/quickstart-kubernetes.md` mention the read-only
+  operator snapshot without claiming a mutating operator.
+
+Still required:
+
+- D12 QA/PM close.
+- Publish immutable GHCR images for the final Phase 28 close commit.
+- Replace `<phase28-close-commit>` / prior pins with final SHA tags and
+  digests.
 
 ## Progress
 
@@ -560,4 +574,4 @@ Status: pending.
 - D11: dev complete - read-only operator snapshot artifact/API added;
   `go test ./core/ops ./cmd/sw-block` PASS; QA validation pending
 - D12: QA assigned - productized operations close gate
-- D13: pending - release packaging and claim alignment
+- D13: docs prepared - image publication and final pin alignment pending

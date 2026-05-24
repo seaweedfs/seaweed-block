@@ -8,6 +8,8 @@ is still outside the supported boundary.
 - [v0.2 Alpha — Day-1 Activation And First Volume](v0.2-alpha.md)
 - [v0.3 Alpha — Helm Install And Observable First Volume](v0.3-alpha.md)
 - [v0.3.1 Alpha — Helm Lifecycle Hardening](v0.3.1-alpha.md)
+- [v0.3.2 Alpha — Multi-Volume HA Independence](v0.3.2-alpha.md)
+- [v0.3.3 Alpha — Productized Operations And Read-Only Operator Foundation](v0.3.3-alpha.md)
 
 ## Version Boundary
 
@@ -24,7 +26,15 @@ is still outside the supported boundary.
 - `v0.3.1-alpha` hardens the Helm alpha loop with chart hygiene, a narrow
   upgrade/rollback smoke, three-PVC Day-1 smoke, and cold support-bundle
   replay.
+- `v0.3.2-alpha` adds scenario-gated RF=3 multi-volume HA independence:
+  three PVC-backed volumes, per-volume CSI reattach recovery, mounted
+  transparent failover, interleaved failover isolation, and cleanup hardening.
+- `v0.3.3-alpha` is the current Phase 28 packaging target for productized
+  operations: stable ManagedVolume vocabulary, CRD/Condition/Event contract,
+  read-only operator snapshot, report/dashboard alignment, and close-gate QA.
+  It is not final until QA/PM close and immutable GHCR image pins are recorded.
 
-Operator packaging is not included in these alphas. v0.3 introduces Helm as
-the preferred Kubernetes alpha install path; the script path remains available
-for development and fallback validation.
+Mutating operator packaging is not included in these alphas. v0.3 introduces
+Helm as the preferred Kubernetes alpha install path; the script path remains
+available for development and fallback validation. The first operator-facing
+surface is read-only/status-first.

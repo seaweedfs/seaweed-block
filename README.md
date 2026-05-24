@@ -35,6 +35,9 @@ What has been validated in the current alpha:
 - Helm alpha lifecycle smoke: chart hygiene, one upgrade/rollback path that
   preserves an existing PVC, three-PVC Day-1 smoke, support-bundle replay, and
   clean uninstall.
+- Scenario-gated RF=3 multi-volume HA independence: three PVC-backed volumes,
+  per-volume CSI reattach recovery, mounted transparent failover, interleaved
+  failover isolation, and measured stale-path / ALUA evidence in the gated lab.
 - dynamic PVC provisioning through CSI.
 - product-owned generated `blockvolume` lifecycle.
 - multiple PVCs / volumes visible in inventory.
@@ -47,6 +50,9 @@ What has been validated in the current alpha:
 - read-only operations evidence through `sw-block ops inventory`,
   `sw-block ops cluster --master-api ... -o json`, support bundles, and
   product-owned event timelines.
+- read-only operator-foundation evidence through the ManagedVolume model,
+  CRD/Condition/Event contract, and `operator-snapshot.json` report/dashboard
+  artifact. This is not a mutating operator.
 
 These are narrow alpha claims tied to documented gates and support artifacts.
 Do not treat them as broad production HA or compatibility claims.
@@ -189,8 +195,9 @@ If `sw-block` is not in `PATH`, run the same commands from this repository as
 `go run ./cmd/sw-block ops ...`.
 
 `sw-block ops report` writes static read-only artifacts. `sw-block ops
-dashboard` serves the same evidence as a local read-only dashboard. Neither has
-mutating admin actions.
+dashboard` serves the same evidence as a local read-only dashboard. Reports and
+dashboard also expose `operator-snapshot.json`, a read-only status projection
+for future operator work. Neither has mutating admin actions.
 
 For replica-level support evidence:
 
@@ -209,6 +216,8 @@ sw-block ops inventory \
 - Inspect cluster, volume, replica, primary, frontend, and event evidence.
 - Generate a local read-only HTML status report or dashboard from live master
   evidence or a saved support bundle.
+- Inspect `operator-snapshot.json` as the read-only operator-facing status
+  projection.
 - Collect inventory and product evidence bundles for support.
 - Exercise documented recovery gates in TestOps/lab environments.
 

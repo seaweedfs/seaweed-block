@@ -88,7 +88,7 @@ own day-2 lifecycle without hiding unstable behavior.
 
 Type: Operational + Core Stability
 
-Current status: active, 82%. Started on 2026-05-23 after Phase 27 D5/D6/D8
+Current status: active, 85%. Started on 2026-05-23 after Phase 27 D5/D6/D8
 independent QA reruns passed. Expanded on 2026-05-23 to include the
 productized operations / operator foundation loop.
 
@@ -129,6 +129,8 @@ Open operator-foundation gates:
   scoped tests PASS; QA validation pending.
 - D12 productized operations close gate: QA assignment written; QA/PM
   validation pending.
+- D13 release packaging: draft v0.3.3 release note and doc alignment prepared;
+  immutable GHCR images and final pins pending.
 - D13 release packaging and claim alignment.
 
 Non-goals:
