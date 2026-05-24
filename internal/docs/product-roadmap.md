@@ -31,6 +31,7 @@ ready.
 
 | Priority | Work | Type | Status | Why It Matters |
 |---|---|---|---|---|
+| P0 | Phase 29 Product-Owned Lifecycle And Cleanup Reliability | Operational + Core Stability | active | Cleanup/lifecycle must be product-owned and repeatable before mutating operator work or rebuild/failback |
 | P0 | Phase 28 Productized Operations And Operator Foundation | Operational + Core Stability | PASS | Turn Helm/scripts/evidence/model into one Kubernetes product operations loop before the next feature expansion |
 | P0 | Publish v0.3.3 images and update doc pins | Operational | PASS | Phase 28 D12 is gated; users have a consumable immutable GHCR SHA for the operator-foundation surface |
 | P0 | Multipath stale-map cleanup verifier | Operational + Core Stability | PASS in Phase 28 D1 | QA found orphan dm-multipath maps after sessions were gone; cleanup evidence now covers this |
@@ -83,6 +84,46 @@ contract; Phase 27 stabilizes multi-volume HA semantics; then an operator can
 own day-2 lifecycle without hiding unstable behavior.
 
 ## Active Work
+
+### Phase 29 - Product-Owned Lifecycle And Cleanup Reliability
+
+Type: Operational + Core Stability
+
+Current status: active, 5%. Started on 2026-05-24 after Phase 28 D13
+published-image release packaging passed.
+
+Goal:
+
+```text
+install -> PVCs -> app write/read -> observe -> uninstall/delete -> cleanup
+-> explain residue or clean state
+```
+
+Phase 29 makes lifecycle and cleanup less dependent on brittle helper timing
+and more product-owned. The immediate seed is the Phase 28 D12 non-blocking
+multi-volume cleanup TOCTOU race, but the plan is broader: stable cleanup
+evidence, report/dashboard/operator-snapshot lifecycle fields, TestOps cleanup
+actions, flake matrices, and a handoff into control-model stabilization or
+returned-replica rebuild/failback.
+
+Planned gates:
+
+- D1 multi-volume cleanup TOCTOU fix with N>=3 regression.
+- D2 product-owned cleanup evidence vocabulary.
+- D3 report/dashboard/operator snapshot cleanup surface.
+- D4 TestOps lifecycle/cleanup action hardening.
+- D5 lifecycle cleanup flake matrix.
+- D6 productized lifecycle close gate.
+- D7 lifecycle ownership review and control-model handoff.
+- D8 next-phase decision.
+
+Non-goals:
+
+- no mutating operator cleanup,
+- no automatic rebuild/failback,
+- no backup/snapshot/restore,
+- no new NVMe ANA claim,
+- no production lifecycle SLO.
 
 ### Phase 28 - Productized Operations And Operator Foundation
 
