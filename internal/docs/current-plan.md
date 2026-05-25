@@ -1,6 +1,6 @@
 # Current Plan: Phase 30 - Control Model / ManagedVolume Hardening
 
-Status: active, 80% complete. Started on 2026-05-24 after Phase 29 lifecycle
+Status: closed, 100% complete. Started on 2026-05-24 after Phase 29 lifecycle
 cleanup reliability closed.
 
 ## Product Goal
@@ -156,10 +156,17 @@ Acceptance:
 - QA or independent rerun validates the selected gates.
 - Close report and finished plan are written.
 
+Status: PASS on 2026-05-25.
+
+Artifacts:
+
+- `internal/docs/qa-assignments/phase30-control-model-managed-volume-hardening-close-report.md`
+- `internal/docs/finished-plans/phase30_finishedplan_control_model_managed_volume_hardening.md`
+
 ## Progress
 
 - D1: PASS - control-state dependency review written
 - D2: PASS - field/action contract tightened; stable facts and read-only/dry-run actions tested
 - D3: PASS - cleanup projection ownership moved into CleanupEvidence helper
 - D4: PASS - regression gates passed
-- D5: pending
+- D5: PASS - close report and finished plan written
