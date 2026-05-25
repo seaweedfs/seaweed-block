@@ -32,6 +32,7 @@ ready.
 | Priority | Work | Type | Status | Why It Matters |
 |---|---|---|---|---|
 | P0 | Phase 29 Product-Owned Lifecycle And Cleanup Reliability | Operational + Core Stability | PASS | Cleanup/lifecycle is deterministic and auditable across active alpha loops |
+| P0 | Phase 30 Control Model / ManagedVolume Hardening | Core Stability + Operational | active | Stabilize state ownership before mutating operator, rebuild/failback, NVMe ANA, or backup work |
 | P0 | Phase 28 Productized Operations And Operator Foundation | Operational + Core Stability | PASS | Turn Helm/scripts/evidence/model into one Kubernetes product operations loop before the next feature expansion |
 | P0 | Publish v0.3.3 images and update doc pins | Operational | PASS | Phase 28 D12 is gated; users have a consumable immutable GHCR SHA for the operator-foundation surface |
 | P0 | Multipath stale-map cleanup verifier | Operational + Core Stability | PASS in Phase 28 D1 | QA found orphan dm-multipath maps after sessions were gone; cleanup evidence now covers this |
@@ -84,6 +85,40 @@ contract; Phase 27 stabilizes multi-volume HA semantics; then an operator can
 own day-2 lifecycle without hiding unstable behavior.
 
 ## Active Work
+
+### Phase 30 - Control Model / ManagedVolume Hardening
+
+Type: Core Stability + Operational
+
+Current status: active, 20%. Started on 2026-05-24 after Phase 29 lifecycle
+cleanup reliability closed.
+
+Goal:
+
+```text
+PVC/PV + ManagedVolume + Launcher + CSI + Authority + HostPath + Cleanup
+-> one explicit state dependency model
+-> each fact has an authority
+-> each action has an executor
+-> each status/condition has evidence
+```
+
+Gate status:
+
+- D1 control-state dependency review: PASS on 2026-05-24. Artifact:
+  `internal/docs/ref/phase30-control-state-dependency-review.md`.
+- D2 ManagedVolume field contract tightening: pending.
+- D3 projection ownership cleanup: pending.
+- D4 regression gates: pending.
+- D5 close gate: pending.
+
+Non-goals:
+
+- no rebuild/failback implementation,
+- no mutating operator action,
+- no NVMe ANA implementation,
+- no backup/snapshot/restore implementation,
+- no broad production SLO.
 
 ### Phase 29 - Product-Owned Lifecycle And Cleanup Reliability
 

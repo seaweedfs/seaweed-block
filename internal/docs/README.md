@@ -66,6 +66,7 @@ Public-facing docs belong in `docs/`.
 | `ref/blockvolume-lifecycle-ownership-contract.md` | Product-owned generated blockvolume workload lifecycle ownership contract for the current plan. |
 | `ref/phase29-cleanup-ownership-matrix.md` | Cleanup ownership matrix for Phase 29: truth owner, executor, evidence, reason codes, and migration target per residue class. |
 | `ref/phase29-lifecycle-evidence-contract.md` | Phase 29 lifecycle evidence contract: cleanup fields shared by helper summaries, report, dashboard, and operator snapshot. |
+| `ref/phase30-control-state-dependency-review.md` | Phase 30 control-state dependency review: fact authority, passive source, bounded probe, master/projection, executor, and risk map. |
 | `ref/iscsi-os-initiator-compat-plan.md` | Detailed iSCSI P1 OS-initiator compatibility plan and evidence. |
 | `ref/iscsi-v2-coverage-gap-audit.md` | V2-to-V3 iSCSI coverage gap audit and prioritized test backlog. |
 | `ref/v2-frontend-protocol-gap-audit.md` | Broader V2 frontend protocol feature gap audit. |
