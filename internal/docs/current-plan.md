@@ -1,6 +1,6 @@
 # Current Plan: Phase 32 - Negative-First Read-Only Operator Status Surface
 
-Status: active, 35% complete. Started on 2026-05-25 after Phase 31 restart
+Status: active, 55% complete. Started on 2026-05-25 after Phase 31 restart
 persistence closed.
 
 ## Product Goal
@@ -125,7 +125,7 @@ Acceptance:
 - Status fields classify stable vs provisional vs test-only.
 - RBAC is read-only except status/event publication.
 
-Status: dev PASS on 2026-05-25; QA pending.
+Status: PASS on 2026-05-25.
 
 Implementation:
 
@@ -152,6 +152,10 @@ QA assignment:
 
 - `internal/docs/qa-assignments/phase32-d2-crd-condition-event-qa-assignment.md`
 
+QA evidence:
+
+- `internal/docs/qa-assignments/phase32-d2-crd-condition-event-qa-signoff.md`
+
 ## D3: Happy-Path Status Projection Gate
 
 Goal: prove the normal user path produces Kubernetes-native status that matches
@@ -174,7 +178,19 @@ Acceptance:
   across status, report, dashboard, and bundle.
 - No mutating action appears in status, dashboard, or operator snapshot.
 
-Status: pending.
+Status: dev PASS on 2026-05-25; QA pending.
+
+Implementation:
+
+- Added scoped surface-agreement tests for the Ready path:
+  - report `summary.txt`,
+  - report HTML,
+  - `operator-snapshot.json`,
+  - dashboard `/operator-snapshot.json`.
+
+Validation:
+
+- `go test ./core/ops ./cmd/sw-block`
 
 Existing scenario seed:
 
@@ -202,7 +218,24 @@ Acceptance:
 - Evidence path points to logs/events/bundle facts.
 - `sw-block ops explain` and dashboard use the same reason.
 
-Status: pending.
+Status: dev PASS on 2026-05-25; QA pending.
+
+Implementation:
+
+- Added scoped surface-agreement tests for the blocked CSI image-pull path:
+  - `Ready=False`,
+  - `Blocked=True`,
+  - `reason=csi_node_image_pull_failed`,
+  - dry-run `safe_k8s.import_csi_image`,
+  - no mutating action in operator snapshot.
+
+Validation:
+
+- `go test ./core/ops ./cmd/sw-block`
+
+QA assignment:
+
+- `internal/docs/qa-assignments/phase32-d3-d4-status-surface-qa-assignment.md`
 
 Existing scenario seeds:
 
@@ -305,12 +338,12 @@ Status: pending.
 
 - D1: PASS
 - D1a: PASS
-- D2: dev PASS, QA pending
-- D3: pending
-- D4: pending
+- D2: PASS
+- D3: dev PASS, QA pending
+- D4: dev PASS, QA pending
 - D5: pending
 - D6: pending
 - D7: pending
 - D8: pending
 
-Overall: 35%.
+Overall: 55%.

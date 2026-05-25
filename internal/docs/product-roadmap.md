@@ -146,7 +146,7 @@ own day-2 lifecycle without hiding unstable behavior.
 
 Type: Operational + Core Stability
 
-Current status: active, 35%. Started on 2026-05-25 after Phase 31 restart
+Current status: active, 55%. Started on 2026-05-25 after Phase 31 restart
 persistence closed.
 
 Goal:
@@ -169,9 +169,9 @@ Gate plan:
   `internal/docs/ref/phase32-negative-first-operator-status-plan.md`.
 - D1a TestOps product-grade validation layer: PASS on 2026-05-25. Assignment:
   `internal/docs/qa-assignments/phase32-testops-product-grade-validation-assignment.md`.
-- D2 CRD / Condition / Event alpha contract: dev PASS, QA pending.
-- D3 happy-path status projection gate: pending.
-- D4 blocked / negative status projection gate: pending.
+- D2 CRD / Condition / Event alpha contract: PASS on 2026-05-25.
+- D3 happy-path status projection gate: dev PASS, QA pending.
+- D4 blocked / negative status projection gate: dev PASS, QA pending.
 - D5 restart / promotion status consistency gate: pending.
 - D6 multi-volume independence status gate: pending.
 - D7 stale evidence and bounded probe gate: pending.
