@@ -1,6 +1,6 @@
 # Current Plan: Phase 30 - Control Model / ManagedVolume Hardening
 
-Status: active, 20% complete. Started on 2026-05-24 after Phase 29 lifecycle
+Status: active, 40% complete. Started on 2026-05-24 after Phase 29 lifecycle
 cleanup reliability closed.
 
 ## Product Goal
@@ -80,6 +80,14 @@ Acceptance:
   - allowed actions.
 - No mutating action is exposed.
 
+Status: PASS on 2026-05-25.
+
+Artifacts:
+
+- `core/ops/managed_volume_contract.go`
+- `core/ops/managed_volume_contract_test.go`
+- `internal/docs/ref/managed-volume-operational-model-contract.md`
+
 ## D3: Projection Ownership Cleanup
 
 Goal: remove at least one duplicated or ambiguous projection path from code.
@@ -123,7 +131,7 @@ Acceptance:
 ## Progress
 
 - D1: PASS - control-state dependency review written
-- D2: pending
+- D2: PASS - field/action contract tightened; stable facts and read-only/dry-run actions tested
 - D3: pending
 - D4: pending
 - D5: pending

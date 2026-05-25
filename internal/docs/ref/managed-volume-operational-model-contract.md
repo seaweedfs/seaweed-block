@@ -1,6 +1,6 @@
 # ManagedVolume Operational Model Contract
 
-Status: Phase 28 D9 working contract.
+Status: Phase 30 D2 tightened contract.
 
 Purpose: make `ManagedVolume` the stable operations read model for CLI,
 report, dashboard, support bundle, and future read-only operator status.
@@ -11,6 +11,10 @@ This contract applies the layered model from
 ```text
 Participant -> Fact Authority -> Master -> Executor -> Evidence
 ```
+
+For fields, the executor slot is intentionally absent. `ManagedVolume` fields
+are read-only facts and derived state. Executors only appear on
+`ManagedVolumeAction` entries.
 
 ## Boundary
 
@@ -52,6 +56,19 @@ Every stable field must name:
 - condition surface,
 - required evidence.
 
+Every allowed action must name:
+
+- action type,
+- deciding Master,
+- mode,
+- side-effect class,
+- owner executor,
+- policy gate,
+- required facts,
+- invariant refs when applicable,
+- required evidence,
+- whether mutation is allowed.
+
 The current contract uses these aggregation modes:
 
 | Mode | Meaning |
@@ -64,18 +81,31 @@ The current contract uses these aggregation modes:
 
 | Path | Fact Authority | Master | Aggregation | Evidence |
 |---|---|---|---|---|
+| `identity.volume_id` | KubernetesObjectAuthority | ManagedVolumeMaster | passive | PV handle or inventory volume id |
 | `identity.namespace` | KubernetesObjectAuthority | ManagedVolumeMaster | passive | PVC/PV object |
 | `identity.pvc_name` | KubernetesObjectAuthority | ManagedVolumeMaster | passive | PVC object |
+| `desired.replication_factor` | KubernetesObjectAuthority | ManagedVolumeMaster | passive | StorageClass parameter or Helm values |
+| `desired.ack_profile` | KubernetesObjectAuthority | ManagedVolumeMaster | passive | StorageClass parameter or Helm values |
+| `desired.claim_profile` | ObservationAuthority | ManagedVolumeMaster | passive | claim artifact or release contract |
+| `desired.protocol` | KubernetesObjectAuthority | ManagedVolumeMaster | passive | StorageClass parameter or Helm values |
 | `kubernetes.pvc_phase` | KubernetesObjectAuthority | ManagedVolumeMaster | passive + bounded probe | PVC status or describe |
 | `placement.replica_node` | PlacementAuthority | ManagedVolumeMaster | passive | launcher plan or generated Deployment |
 | `authority.primary_replica` | AuthorityLineAuthority | EngineMaster | passive + bounded probe | authority event or inventory primary |
 | `authority.epoch` | AuthorityLineAuthority | EngineMaster | passive | authority event |
+| `authority.endpoint_version` | AuthorityLineAuthority | EngineMaster | passive | authority event |
+| `authority.publish_target` | AuthorityLineAuthority | EngineMaster | passive + bounded probe | authority event or inventory publish target |
 | `replica.durable_frontier_lsn` | ReplicaDurabilityAuthority | EngineMaster | passive + bounded probe | status endpoint or promotion evidence |
 | `csi.staged_target` | CSIAttachAuthority | ManagedVolumeMaster | passive + bounded probe | CSI event or node-stage log |
 | `host_path.rtpg_aas` | HostPathAuthority | ManagedVolumeMaster | passive + bounded probe | `sg_rtpg` artifact |
 | `host_path.stale_path_probe` | HostPathAuthority | ManagedVolumeMaster | bounded probe | direct stale-path I/O probe |
 | `workload.reader_verified` | WorkloadEvidenceAuthority | ManagedVolumeMaster | bounded probe | reader checksum log |
+| `cleanup.status` | CleanupAuthority | ManagedVolumeMaster | bounded probe | cleanup summary |
+| `cleanup.k8s_residue_count` | CleanupAuthority | ManagedVolumeMaster | bounded probe | cleanup summary and kubectl artifact |
+| `cleanup.iscsi_residue_count` | CleanupAuthority | ManagedVolumeMaster | bounded probe | cleanup summary and iscsiadm artifact |
 | `cleanup.multipath_residue_count` | CleanupAuthority | ManagedVolumeMaster | bounded probe | cleanup summary and multipath artifact |
+| `cleanup.process_residue_count` | CleanupAuthority | ManagedVolumeMaster | bounded probe | cleanup summary and process artifact |
+| `cleanup.hostpath_residue_count` | CleanupAuthority | ManagedVolumeMaster | bounded probe | cleanup summary and hostpath artifact |
+| `cleanup.failure_count` | CleanupAuthority | ManagedVolumeMaster | bounded probe | cleanup summary |
 | `evidence.reason_code` | ObservationAuthority | ManagedVolumeMaster | passive | projection inputs |
 
 Test-only field:
@@ -83,6 +113,35 @@ Test-only field:
 | Path | Why test-only |
 |---|---|
 | `workload.same_pod_uid` | Needed to prove transparent mounted failover gates; not a general user-facing Kubernetes status field yet. |
+
+## Action Contract
+
+Fields describe facts. Actions describe allowed next steps.
+
+Phase 30 keeps all actions read-only or dry-run. No action in the current
+contract may mutate storage, promote a replica, rebuild data, delete user data,
+or perform cleanup without a future policy gate.
+
+| Action | Master | Executor | Mode | Side effect | Policy gate |
+|---|---|---|---|---|---|
+| `observe.collect_bundle` | ManagedVolumeMaster | `ops` | `read_only` | `observe` | `read_only` |
+| `observe.wait_for_pvc_bound` | ManagedVolumeMaster | `ops` | `dry_run` | `observe` | `dry_run` |
+| `observe.inspect_mount_failure` | ManagedVolumeMaster | `ops` | `dry_run` | `observe` | `dry_run` |
+| `observe.inspect_host_path` | ManagedVolumeMaster | `ops` | `dry_run` | `observe` | `dry_run` |
+| `safe_k8s.reinstall_external_iscsi` | ManagedVolumeMaster | `installer_or_operator` | `dry_run` | `safe_k8s` | `dry_run` |
+| `safe_k8s.import_csi_image` | ManagedVolumeMaster | `installer_or_operator` | `dry_run` | `safe_k8s` | `dry_run` |
+| `authority.request_promotion` | EngineMaster | `authority_recovery_executor` | `dry_run` | `authority_mutating` | `disabled_until_operator_policy` |
+
+`authority.request_promotion` is present only to reserve the contract shape.
+It is not emitted as an executable operation in Phase 30.
+
+Required rule:
+
+```text
+ManagedVolumeProjection may recommend observation or dry-run remediation.
+Only a future operator policy can convert safe_k8s, authority, repair, cleanup,
+or destructive actions into executable mutations.
+```
 
 ## Dual-Mode Aggregation
 
@@ -153,11 +212,24 @@ update `ManagedVolumeFactContract()` and answer:
 If the answers are not clear, the field is probably a UI convenience or timing
 workaround, not a stable product fact.
 
+Before adding an action to `ManagedVolumeAction`, update
+`ManagedVolumeActionContract()` and answer:
+
+1. Which Master allows or refuses it?
+2. Which executor is allowed to perform it?
+3. Is the current mode `read_only`, `dry_run`, or disabled?
+4. Which required facts must be present and fresh?
+5. Which invariant prevents unsafe execution?
+6. Which evidence proves the action is justified?
+7. Which future policy gate can make it executable?
+
+If the action needs mutation today, it is out of Phase 30 scope.
+
 ## Open Work
 
-D9 is not fully closed until:
+D2 is not fully closed until:
 
-- the contract is used by `sw-block ops report` / dashboard field rendering,
-- the future CRD/Condition examples in D10 are generated from this vocabulary,
+- `ManagedVolumeFactContract()` and `ManagedVolumeActionContract()` are tested,
+- report/dashboard/operator surfaces keep using these field names,
 - QA verifies one healthy bundle and one blocked bundle against the stable
-  field names.
+  field/action vocabulary.
