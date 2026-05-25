@@ -1,6 +1,6 @@
 # Current Plan: Phase 32 - Negative-First Read-Only Operator Status Surface
 
-Status: active, 55% complete. Started on 2026-05-25 after Phase 31 restart
+Status: active, 75% complete. Started on 2026-05-25 after Phase 31 restart
 persistence closed.
 
 ## Product Goal
@@ -178,7 +178,7 @@ Acceptance:
   across status, report, dashboard, and bundle.
 - No mutating action appears in status, dashboard, or operator snapshot.
 
-Status: dev PASS on 2026-05-25; QA pending.
+Status: PASS on 2026-05-25.
 
 Implementation:
 
@@ -196,6 +196,10 @@ Existing scenario seed:
 
 - `helm-first-volume-via-sw-block-cli-chain.yaml`
 - `helm-first-volume-chain.yaml`
+
+QA sign-off:
+
+- `internal/docs/qa-assignments/phase32-d3-d4-status-surface-qa-signoff.md`
 
 ## D4: Blocked / Negative Status Projection Gate
 
@@ -218,7 +222,7 @@ Acceptance:
 - Evidence path points to logs/events/bundle facts.
 - `sw-block ops explain` and dashboard use the same reason.
 
-Status: dev PASS on 2026-05-25; QA pending.
+Status: PASS on 2026-05-25.
 
 Implementation:
 
@@ -236,6 +240,10 @@ Validation:
 QA assignment:
 
 - `internal/docs/qa-assignments/phase32-d3-d4-status-surface-qa-assignment.md`
+
+QA sign-off:
+
+- `internal/docs/qa-assignments/phase32-d3-d4-status-surface-qa-signoff.md`
 
 Existing scenario seeds:
 
@@ -267,7 +275,24 @@ Acceptance:
 - Old primary is not resurrected as Ready.
 - Event timeline explains restart reload and authority persistence.
 
-Status: pending.
+Status: dev PASS on 2026-05-25; QA pending.
+
+Implementation:
+
+- Added scoped surface-agreement tests for promoted-authority restart status:
+  - primary remains `r2`,
+  - publish target remains the promoted replica frontend,
+  - epoch does not roll back,
+  - `Recovered=True` and reason `csi_reattach_recovered` agree across report
+    summary and operator snapshot.
+
+Validation:
+
+- `go test ./core/ops ./cmd/sw-block`
+
+QA assignment:
+
+- `internal/docs/qa-assignments/phase32-d5-d6-status-surface-qa-assignment.md`
 
 Existing scenario seeds:
 
@@ -294,7 +319,24 @@ Acceptance:
 - no duplicate publish target for distinct volumes unless explicitly expected.
 - failed target volume status does not poison untouched volume status.
 
-Status: pending.
+Status: dev PASS on 2026-05-25; QA pending.
+
+Implementation:
+
+- Added scoped surface-agreement tests for three independent ManagedVolume
+  projections:
+  - `managed_volume_count=3`,
+  - each volume has a distinct PVC and volume ID,
+  - each Ready condition uses reason `first_volume_verified`,
+  - publish targets remain distinct across the three volumes.
+
+Validation:
+
+- `go test ./core/ops ./cmd/sw-block`
+
+QA assignment:
+
+- `internal/docs/qa-assignments/phase32-d5-d6-status-surface-qa-assignment.md`
 
 Existing scenario seeds:
 
@@ -339,11 +381,11 @@ Status: pending.
 - D1: PASS
 - D1a: PASS
 - D2: PASS
-- D3: dev PASS, QA pending
-- D4: dev PASS, QA pending
-- D5: pending
-- D6: pending
+- D3: PASS
+- D4: PASS
+- D5: dev PASS, QA pending
+- D6: dev PASS, QA pending
 - D7: pending
 - D8: pending
 
-Overall: 55%.
+Overall: 75%.
