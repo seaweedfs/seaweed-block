@@ -1,0 +1,204 @@
+# Phase 31 D4: RF3 promotion state survives Kubernetes restart.
+#
+# Goal:
+#   Prove that after an RF=3 sync-quorum volume promotes a surviving replica,
+#   a k3s/product restart does not resurrect the old primary or roll authority
+#   back to the pre-promotion target.
+#
+# Product boundary:
+#   One PVC, RF=3, sync-quorum, CSI/pod recreate recovery after failover, then
+#   CSI/pod recreate after k3s restart. This is not backup/restore, returned
+#   replica rebuild/failback, or physical host loss.
+
+name: helm-rf3-promotion-restart-persistence-chain
+timeout: 44m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+  helm_release: "sw-block"
+  helm_namespace: "kube-system"
+  sw_block_image: "sw-block:phase31-d4"
+  sw_block_csi_image: "sw-block-csi:phase31-d4"
+  volume_count: "1"
+  replication_factor: "3"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: pre_clean
+    actions:
+      - action: pre_run_cleanup
+        node: m02
+        kill_patterns: "blockmaster,blockvolume,blockcsi,iscsi-target"
+        nvme_disconnect: "true"
+        iscsi_logout_prefix: "iqn.2026-05.io.seaweedfs"
+      - action: exec
+        node: m02
+        timeout: 6m
+        cmd: "sudo -n chmod 644 /etc/rancher/k3s/k3s.yaml || true; helm status {{ helm_release }} --namespace {{ helm_namespace }} >/dev/null 2>&1 && helm uninstall {{ helm_release }} --namespace {{ helm_namespace }} --wait --timeout 240s || true; kubectl -n default delete pod -l sw-block-test=multi-volume --ignore-not-found=true --wait=true --timeout=120s; kubectl -n default delete pod -l sw-block-test=multi-volume-reattach --ignore-not-found=true --wait=true --timeout=120s; kubectl -n default delete pod sw-block-multi-writer-1 sw-block-multi-reader-1 sw-block-multi-reattach-reader-1 --ignore-not-found=true --wait=true --timeout=120s; kubectl -n default delete pvc sw-block-multi-pvc-1 --ignore-not-found=true --wait=true --timeout=120s; kubectl delete storageclass sw-block-multi sw-block-dynamic --ignore-not-found=true --wait=true --timeout=120s; kubectl delete clusterrole/sw-block-csi clusterrolebinding/sw-block-csi --ignore-not-found=true; sudo -n iscsiadm -m node 2>/dev/null | awk '/io.seaweedfs/ {print $1, $2}' | while read portal target; do sudo -n iscsiadm -m node -T \"$target\" -p \"$portal\" -o delete || true; done; sudo -n rm -rf /var/lib/sw-block/testops-{{ run_id }}-rf3-promotion-restart; rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-rf3-promotion-restart && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-rf3-promotion-restart/bin /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-rf3-promotion-restart/values /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-rf3-promotion-restart/install /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-rf3-promotion-restart/recovery /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-rf3-promotion-restart/restart /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-rf3-promotion-restart/after-restart /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-rf3-promotion-restart/cleanup"
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+      - action: assert_no_active_iscsi_sessions
+        node: m02
+        iqn_substr: "io.seaweedfs"
+      - action: assert_no_processes
+        node: m02
+        pattern: "[/]blockmaster --|[/]blockvolume --|[/]blockcsi |[/]iscsi-target |^blockmaster |^blockvolume |^blockcsi |^iscsi-target "
+
+  - name: build_and_generate_values
+    actions:
+      - action: exec
+        node: m02
+        timeout: 10m
+        cmd: "cd {{ product_root }} && SW_BLOCK_IMAGE={{ sw_block_image }} SW_BLOCK_CSI_IMAGE={{ sw_block_csi_image }} SW_BLOCK_IMPORT_K3S=1 SW_BLOCK_IMPORT_K3S_NODES='192.168.1.181,192.168.1.188' SW_BLOCK_IMPORT_K3S_SSH_USER=testdev SW_BLOCK_IMPORT_K3S_SSH_KEY=/opt/work/testdev_key SW_BLOCK_ARTIFACT_DIR=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-rf3-promotion-restart/build bash scripts/build-alpha-images.sh {{ product_root }}"
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+      - action: exec
+        node: m02
+        timeout: 6m
+        cmd: "cd {{ product_root }} && go build -o /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-rf3-promotion-restart/bin/sw-block ./cmd/sw-block && /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-rf3-promotion-restart/bin/sw-block ops generate-helm-values --kubeconfig /etc/rancher/k3s/k3s.yaml --out /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-rf3-promotion-restart/values/values.restart.yaml --image {{ sw_block_image }} --csi-image {{ sw_block_csi_image }} --replication-factor {{ replication_factor }} --ack-profile sync-quorum --restart-persistence hostpath --state-hostpath /var/lib/sw-block/testops-{{ run_id }}-rf3-promotion-restart > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-rf3-promotion-restart/values/generate.stdout.txt && python3 - <<'PY'\nfrom pathlib import Path\np=Path('/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-rf3-promotion-restart/values/values.restart.yaml')\ns=p.read_text()\ns=s.replace('launcherReplicationAckFlag: false','launcherReplicationAckFlag: true')\np.write_text(s)\nPY"
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-rf3-promotion-restart/values/generate.stdout.txt"
+        pattern: "^restart_persistence_mode=hostpath$"
+        save_as: restart_mode_count
+      - action: assert_greater
+        actual: "{{ restart_mode_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-rf3-promotion-restart/values/values.restart.yaml"
+        pattern: "ackProfile: sync-quorum"
+        save_as: sync_quorum_values_count
+      - action: assert_greater
+        actual: "{{ sync_quorum_values_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-rf3-promotion-restart/values/values.restart.yaml"
+        pattern: "launcherReplicationAckFlag: true"
+        save_as: ack_flag_values_count
+      - action: assert_greater
+        actual: "{{ ack_flag_values_count }}"
+        threshold: "0"
+
+  - name: helm_install_stack
+    actions:
+      - action: exec
+        node: m02
+        timeout: 10m
+        cmd: "cd {{ product_root }} && helm lint charts/seaweed-block -f /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-rf3-promotion-restart/values/values.restart.yaml > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-rf3-promotion-restart/install/helm-lint.txt && helm template {{ helm_release }} charts/seaweed-block -f /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-rf3-promotion-restart/values/values.restart.yaml > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-rf3-promotion-restart/install/helm-template.yaml && grep -q -- '--launcher-state-hostpath=/var/lib/sw-block/testops-{{ run_id }}-rf3-promotion-restart' /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-rf3-promotion-restart/install/helm-template.yaml && grep -q -- '--launcher-replication-ack=sync-quorum' /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-rf3-promotion-restart/install/helm-template.yaml && helm install {{ helm_release }} charts/seaweed-block --namespace {{ helm_namespace }} --create-namespace -f /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-rf3-promotion-restart/values/values.restart.yaml --wait --timeout 10m > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-rf3-promotion-restart/install/helm-install.txt"
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-rf3-promotion-restart/install/helm-install.txt"
+        pattern: "STATUS: deployed"
+        save_as: helm_deployed_count
+      - action: assert_greater
+        actual: "{{ helm_deployed_count }}"
+        threshold: "0"
+
+  - name: promote_and_reattach
+    actions:
+      - action: exec
+        node: m02
+        timeout: 22m
+        cmd: "cd {{ product_root }} && bash scripts/run-multi-volume-reattach-recovery.sh {{ product_root }}"
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+        env.SW_BLOCK_ARTIFACT_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-rf3-promotion-restart/recovery"
+        env.SW_BLOCK_MULTI_VOLUME_COUNT: "{{ volume_count }}"
+        env.SW_BLOCK_MULTI_VOLUME_RF: "{{ replication_factor }}"
+        env.SW_BLOCK_CLI: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-rf3-promotion-restart/bin/sw-block"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-rf3-promotion-restart/recovery/multi-volume-reattach-summary.txt"
+        pattern: "^multi_volume_reattach_status=ok$"
+        save_as: recovery_ok_count
+      - action: assert_greater
+        actual: "{{ recovery_ok_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-rf3-promotion-restart/recovery/failover/volume-1/summary.txt"
+        pattern: "^failover_status=promoted$"
+        save_as: promoted_count
+      - action: assert_greater
+        actual: "{{ promoted_count }}"
+        threshold: "0"
+
+  - name: restart_k3s_and_verify_authority
+    actions:
+      - action: exec
+        node: m02
+        timeout: 9m
+        cmd: "set -e; date -u > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-rf3-promotion-restart/restart/restart-start.txt; sudo -n systemctl restart k3s; for i in $(seq 1 180); do if sudo -n k3s kubectl get nodes >/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-rf3-promotion-restart/restart/nodes.wait.txt 2>&1; then break; fi; sleep 2; done; sudo -n chmod 644 /etc/rancher/k3s/k3s.yaml; kubectl wait --for=condition=Ready node/m02 --timeout=300s > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-rf3-promotion-restart/restart/wait-node-ready.txt; kubectl -n {{ helm_namespace }} rollout status deploy/sw-blockmaster --timeout=300s > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-rf3-promotion-restart/restart/wait-blockmaster.txt; kubectl -n {{ helm_namespace }} rollout status deploy/sw-block-csi-controller --timeout=300s > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-rf3-promotion-restart/restart/wait-csi-controller.txt; kubectl -n {{ helm_namespace }} rollout status ds/sw-block-csi-node --timeout=300s > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-rf3-promotion-restart/restart/wait-csi-node.txt; for d in $(kubectl -n default get deploy -l app=sw-blockvolume -o name); do kubectl -n default rollout status \"$d\" --timeout=300s; done > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-rf3-promotion-restart/restart/wait-blockvolumes.txt; port=$(/usr/bin/python3 - <<'PY'\nimport socket\ns=socket.socket(); s.bind(('127.0.0.1',0)); print(s.getsockname()[1]); s.close()\nPY\n); kubectl -n {{ helm_namespace }} port-forward deploy/sw-blockmaster ${port}:9333 > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-rf3-promotion-restart/restart/blockmaster-port-forward.log 2>&1 & pf=$!; trap 'kill $pf >/dev/null 2>&1 || true; wait $pf >/dev/null 2>&1 || true' EXIT; for i in $(seq 1 60); do if (echo >/dev/tcp/127.0.0.1/$port) >/dev/null 2>&1; then break; fi; sleep 1; done; /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-rf3-promotion-restart/bin/sw-block ops cluster --master-api 127.0.0.1:${port} --timeout 30s -o json > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-rf3-promotion-restart/restart/cluster-after-restart.json; python3 - /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-rf3-promotion-restart/recovery/failover/volume-1/summary.txt /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-rf3-promotion-restart/recovery/failover/volume-1/after.json /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-rf3-promotion-restart/restart/cluster-after-restart.json /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-rf3-promotion-restart/restart/restart-promotion-summary.txt <<'PY'\nimport json, sys\nsummary_path, before_json, after_json, out_path = sys.argv[1:]\nsummary = {}\nfor line in open(summary_path, encoding='utf-8'):\n    if '=' in line:\n        k, v = line.strip().split('=', 1)\n        summary[k] = v\nvolume_id = summary['volume_id']\npromoted = summary['promoted_replica']\ntarget = summary['after_publish_target']\nbefore = json.load(open(before_json))\nafter = json.load(open(after_json))\ndef find(doc):\n    for v in doc.get('volumes', []):\n        if v.get('volume_id') == volume_id:\n            return v\n    raise SystemExit('volume_not_found')\nb = find(before)\na = find(after)\nbefore_epoch = int(b.get('epoch') or b.get('authority_epoch') or 0)\nafter_epoch = int(a.get('epoch') or a.get('authority_epoch') or 0)\nprimary_count = sum(1 for r in a.get('replicas', []) if r.get('role') == 'primary')\nstatus = 'ok'\nreasons = []\nif a.get('primary_replica') != promoted:\n    status = 'failed'; reasons.append('primary_rolled_back')\nif a.get('publish_target') != target:\n    status = 'failed'; reasons.append('publish_target_changed')\nif after_epoch < before_epoch:\n    status = 'failed'; reasons.append('epoch_rolled_back')\nif primary_count != 1:\n    status = 'failed'; reasons.append('primary_count_not_one')\nwith open(out_path, 'w', encoding='utf-8') as f:\n    f.write(f'restart_promotion_status={status}\\n')\n    f.write(f'volume_id={volume_id}\\n')\n    f.write(f'before_restart_primary={promoted}\\n')\n    f.write(f'after_restart_primary={a.get(\"primary_replica\", \"\")}\\n')\n    f.write(f'before_restart_publish_target={target}\\n')\n    f.write(f'after_restart_publish_target={a.get(\"publish_target\", \"\")}\\n')\n    f.write(f'before_restart_epoch={before_epoch}\\n')\n    f.write(f'after_restart_epoch={after_epoch}\\n')\n    f.write(f'post_restart_primary_count={primary_count}\\n')\n    f.write(f'reason={\",\".join(reasons) if reasons else \"authority_persisted\"}\\n')\nif status != 'ok':\n    raise SystemExit(','.join(reasons))\nPY"
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-rf3-promotion-restart/restart/restart-promotion-summary.txt"
+        pattern: "^restart_promotion_status=ok$"
+        save_as: restart_promotion_ok_count
+      - action: assert_greater
+        actual: "{{ restart_promotion_ok_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-rf3-promotion-restart/restart/restart-promotion-summary.txt"
+        pattern: "^reason=authority_persisted$"
+        save_as: authority_persisted_count
+      - action: assert_greater
+        actual: "{{ authority_persisted_count }}"
+        threshold: "0"
+
+  - name: reader_after_restart
+    actions:
+      - action: exec
+        node: m02
+        timeout: 8m
+        cmd: "set -e; kubectl -n default delete pod sw-block-multi-reattach-reader-1 --ignore-not-found=true --wait=true --timeout=120s; kubectl apply -f /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-rf3-promotion-restart/recovery/manifests/sw-block-multi-reattach-reader-1.yaml > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-rf3-promotion-restart/after-restart/apply-reader-after-restart.log; kubectl -n default wait --for=jsonpath='{.status.phase}'=Succeeded pod/sw-block-multi-reattach-reader-1 --timeout=240s > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-rf3-promotion-restart/after-restart/wait-reader-after-restart.log; kubectl -n default logs sw-block-multi-reattach-reader-1 > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-rf3-promotion-restart/after-restart/reader-after-restart.log; grep -q '/data/demo.bin: OK' /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-rf3-promotion-restart/after-restart/reader-after-restart.log"
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-rf3-promotion-restart/after-restart/reader-after-restart.log"
+        pattern: "/data/demo.bin: OK"
+        save_as: reader_after_restart_count
+      - action: assert_greater
+        actual: "{{ reader_after_restart_count }}"
+        threshold: "0"
+
+  - name: helm_uninstall_cleanup
+    always: true
+    actions:
+      - action: exec
+        node: m02
+        timeout: 9m
+        cmd: "mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-rf3-promotion-restart/cleanup/diagnostics; kubectl -n {{ helm_namespace }} get pods,deploy,ds,svc -o wide > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-rf3-promotion-restart/cleanup/diagnostics/kube-system.before-cleanup.txt 2>&1 || true; helm status {{ helm_release }} --namespace {{ helm_namespace }} >/dev/null 2>&1 && helm uninstall {{ helm_release }} --namespace {{ helm_namespace }} --wait --timeout 300s > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-rf3-promotion-restart/cleanup/helm-uninstall.txt || true; kubectl -n default delete pod -l sw-block-test=multi-volume --ignore-not-found=true --wait=true --timeout=120s; kubectl -n default delete pod -l sw-block-test=multi-volume-reattach --ignore-not-found=true --wait=true --timeout=120s; kubectl -n default delete pod sw-block-multi-writer-1 sw-block-multi-reader-1 sw-block-multi-reattach-reader-1 --ignore-not-found=true --wait=true --timeout=120s; kubectl -n default delete pvc sw-block-multi-pvc-1 --ignore-not-found=true --wait=true --timeout=120s; kubectl delete storageclass sw-block-multi sw-block-dynamic --ignore-not-found=true --wait=true --timeout=120s; sudo -n iscsiadm -m node 2>/dev/null | awk '/io.seaweedfs/ {print $1, $2}' | while read portal target; do sudo -n iscsiadm -m node -T \"$target\" -p \"$portal\" -o delete || true; done; sudo -n rm -rf /var/lib/sw-block/testops-{{ run_id }}-rf3-promotion-restart; cd {{ product_root }} && bash scripts/verify-helm-cleanup.sh"
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+        env.SW_BLOCK_ARTIFACT_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-rf3-promotion-restart/cleanup/verify"
+        env.SW_BLOCK_HELM_RELEASE: "{{ helm_release }}"
+        env.SW_BLOCK_HELM_NAMESPACE: "{{ helm_namespace }}"
+        env.SW_BLOCK_CLEANUP_HOSTPATH_PREFIX: "testops-{{ run_id }}-rf3-promotion-restart"
+      - action: assert_no_active_iscsi_sessions
+        node: m02
+        iqn_substr: "io.seaweedfs"
+      - action: assert_no_processes
+        node: m02
+        pattern: "[/]blockmaster --|[/]blockvolume --|[/]blockcsi |[/]iscsi-target |^blockmaster |^blockvolume |^blockcsi |^iscsi-target "
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-rf3-promotion-restart/cleanup/verify/cleanup-summary.txt"
+        pattern: "^cleanup_status=ok$"
+        save_as: helm_cleanup_ok_count
+      - action: assert_greater
+        actual: "{{ helm_cleanup_ok_count }}"
+        threshold: "0"
+      - action: collect_path
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-rf3-promotion-restart"
+        name: "remote-phases"
+        ignore_error: true

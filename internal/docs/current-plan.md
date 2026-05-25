@@ -1,6 +1,6 @@
 # Current Plan: Phase 31 - Kubernetes Restart Persistence
 
-Status: active, 50% complete. Started on 2026-05-25 after Phase 30 control model
+Status: active, 67% complete. Started on 2026-05-25 after Phase 30 control model
 hardening closed.
 
 ## Product Goal
@@ -141,7 +141,7 @@ Acceptance:
 - Authority epoch/publish target are consistent after restart.
 - `sw-block ops report` contains restart evidence and no unsupported claim.
 
-Status: PASS (dev) on 2026-05-25; independent QA rerun pending.
+Status: PASS on 2026-05-25; independent QA rerun passed.
 
 Scenario:
 
@@ -159,6 +159,12 @@ Dev evidence:
 - Report summary contained `managed_volume=... status=ready`.
 - Cleanup removed Helm release, app resources, iSCSI residue, processes, and
   test-scoped hostPath.
+
+QA evidence:
+
+- Run `20260525-104016-f3d4`: 40/40 actions PASS.
+- Sign-off:
+  `internal/docs/qa-assignments/phase31-restart-persistence-d3-qa-signoff.md`.
 
 ## D4: RF3 Restart After Promotion Gate
 
@@ -187,6 +193,42 @@ Acceptance:
 - stale old-primary I/O success remains 0 and is measured by a direct stale
   path probe.
 - reader checksum passes after restart.
+
+Status: PASS (dev) on 2026-05-25; independent QA rerun pending.
+
+Scenario:
+
+- `testops/scenarios/helm-rf3-promotion-restart-persistence-chain.yaml`
+
+Dev evidence:
+
+- Run `20260525-104247-d6da`: 34/34 actions PASS in 3m33s.
+- Helm values generated `restart_persistence_mode=hostpath`.
+- Helm template rendered both:
+  - `--launcher-state-hostpath=/var/lib/sw-block/testops-...`,
+  - `--launcher-replication-ack=sync-quorum`.
+- RF3 recovery promoted `r1 -> r2` and verified the PVC by CSI/pod recreate.
+- After `sudo systemctl restart k3s`, authority comparison reported:
+  - `restart_promotion_status=ok`,
+  - `before_restart_primary=r2`,
+  - `after_restart_primary=r2`,
+  - `before_restart_publish_target=192.168.1.184:3260`,
+  - `after_restart_publish_target=192.168.1.184:3260`,
+  - `before_restart_epoch=2`,
+  - `after_restart_epoch=2`,
+  - `post_restart_primary_count=1`,
+  - `reason=authority_persisted`.
+- Reader verified `/data/demo.bin: OK` after restart.
+- Cleanup removed Helm release, app resources, iSCSI residue, processes, and
+  test-scoped hostPath.
+
+Known limitation:
+
+- The D4 dev gate validates authority persistence, data continuity, and
+  single-primary after restart. The direct stale old-primary I/O probe remains
+  required for QA/close hardening before D6; D4 currently preserves the
+  Phase 27 measured stale-fencing requirement as a close criterion rather than
+  reimplementing it inside the first dev gate.
 
 ## D5: Multi-Volume Restart Smoke
 
@@ -228,7 +270,7 @@ Acceptance:
 
 - D1: PASS
 - D2: PASS
-- D3: PASS (dev), QA pending
-- D4: pending
+- D3: PASS
+- D4: PASS (dev), QA pending
 - D5: pending
 - D6: pending
