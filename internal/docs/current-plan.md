@@ -1,6 +1,6 @@
 # Current Plan: Phase 30 - Control Model / ManagedVolume Hardening
 
-Status: active, 60% complete. Started on 2026-05-24 after Phase 29 lifecycle
+Status: active, 80% complete. Started on 2026-05-24 after Phase 29 lifecycle
 cleanup reliability closed.
 
 ## Product Goal
@@ -131,6 +131,20 @@ Required gates:
 - One RF3 recovery gate selected by risk
 - `cleanup-residue-chain.yaml`
 
+Status: PASS on 2026-05-25.
+
+Evidence:
+
+- `go test ./core/ops ./cmd/sw-block`: PASS
+- `helm-first-volume-via-sw-block-cli-chain.yaml`: PASS, run
+  `20260525-004305-a872`, 34/34 actions
+- `helm-multi-volume-day1-chain.yaml`: PASS, run
+  `20260525-004405-c28a`, 29/29 actions
+- `helm-multi-volume-rf3-reattach-recovery-chain.yaml`: PASS, run
+  `20260525-004612-d656`, 29/29 actions
+- `cleanup-residue-chain.yaml`: PASS, run `20260525-005026-fe98`,
+  13/13 actions
+
 ## D5: Close Gate
 
 Goal: close only when the dependency review, field contract, projection cleanup,
@@ -147,5 +161,5 @@ Acceptance:
 - D1: PASS - control-state dependency review written
 - D2: PASS - field/action contract tightened; stable facts and read-only/dry-run actions tested
 - D3: PASS - cleanup projection ownership moved into CleanupEvidence helper
-- D4: pending
+- D4: PASS - regression gates passed
 - D5: pending
