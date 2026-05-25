@@ -55,18 +55,8 @@ func RenderObservationReportSummary(cluster ClusterEvidence) string {
 	fmt.Fprintf(&b, "events=%d\n", len(cluster.Events))
 	fmt.Fprintf(&b, "operator_snapshot=%s\n", ObservationOperatorSnapshotArtifact)
 	if cluster.Cleanup != nil {
-		fmt.Fprintf(&b, "cleanup_status=%s\n", emptyAsDash(cluster.Cleanup.Status))
-		fmt.Fprintf(&b, "k8s_residue_count=%d\n", cluster.Cleanup.KubernetesResidueCount)
-		fmt.Fprintf(&b, "iscsi_residue_count=%d\n", cluster.Cleanup.ISCSIResidueCount)
-		fmt.Fprintf(&b, "multipath_residue_count=%d\n", cluster.Cleanup.MultipathResidueCount)
-		fmt.Fprintf(&b, "process_residue_count=%d\n", cluster.Cleanup.ProcessResidueCount)
-		fmt.Fprintf(&b, "hostpath_residue_count=%d\n", cluster.Cleanup.HostPathResidueCount)
-		fmt.Fprintf(&b, "failure_count=%d\n", cluster.Cleanup.FailureCount)
-		if cluster.Cleanup.FailedPhase != "" {
-			fmt.Fprintf(&b, "failed_phase=%s\n", cluster.Cleanup.FailedPhase)
-		}
-		if cluster.Cleanup.EvidenceRef != "" {
-			fmt.Fprintf(&b, "cleanup_evidence=%s\n", cluster.Cleanup.EvidenceRef)
+		for _, line := range cluster.Cleanup.ReportSummaryLines() {
+			fmt.Fprintf(&b, "%s\n", line)
 		}
 	}
 	for _, volume := range cluster.Volumes {
@@ -139,21 +129,18 @@ func RenderObservationReportHTML(cluster ClusterEvidence) string {
 	b.WriteString("</div>")
 
 	if cluster.Cleanup != nil {
-		class := "ok"
-		if cluster.Cleanup.Status != "ok" || cluster.Cleanup.FailureCount > 0 {
-			class = "bad"
-		}
+		row := cluster.Cleanup.ReportRow()
 		b.WriteString("<section><h2>Lifecycle Cleanup</h2><table><thead><tr><th>Status</th><th>K8s</th><th>iSCSI</th><th>Multipath</th><th>Processes</th><th>HostPath</th><th>Failures</th><th>Evidence</th></tr></thead><tbody>")
 		fmt.Fprintf(&b, "<tr><td class=\"%s\">%s</td><td>%d</td><td>%d</td><td>%d</td><td>%d</td><td>%d</td><td>%d</td><td>%s</td></tr>",
-			class,
-			esc(emptyAsDash(cluster.Cleanup.Status)),
-			cluster.Cleanup.KubernetesResidueCount,
-			cluster.Cleanup.ISCSIResidueCount,
-			cluster.Cleanup.MultipathResidueCount,
-			cluster.Cleanup.ProcessResidueCount,
-			cluster.Cleanup.HostPathResidueCount,
-			cluster.Cleanup.FailureCount,
-			esc(emptyAsDash(cluster.Cleanup.EvidenceRef)))
+			row.StatusClass,
+			esc(row.Status),
+			row.KubernetesResidueCount,
+			row.ISCSIResidueCount,
+			row.MultipathResidueCount,
+			row.ProcessResidueCount,
+			row.HostPathResidueCount,
+			row.FailureCount,
+			esc(row.EvidenceRef))
 		b.WriteString("</tbody></table></section>")
 	}
 

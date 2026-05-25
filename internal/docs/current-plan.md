@@ -1,6 +1,6 @@
 # Current Plan: Phase 30 - Control Model / ManagedVolume Hardening
 
-Status: active, 40% complete. Started on 2026-05-24 after Phase 29 lifecycle
+Status: active, 60% complete. Started on 2026-05-24 after Phase 29 lifecycle
 cleanup reliability closed.
 
 ## Product Goal
@@ -105,6 +105,20 @@ Acceptance:
 - Tests prove summary/report/dashboard/operator snapshot agree.
 - No scenario helper becomes the source of truth for a product status.
 
+Status: PASS on 2026-05-25.
+
+Selected chain:
+
+```text
+cleanup-summary.txt -> CleanupEvidence -> report summary/dashboard/operator snapshot
+```
+
+Artifacts:
+
+- `core/ops/cleanup_evidence.go`
+- `core/ops/cleanup_evidence_test.go`
+- `internal/docs/ref/phase30-cleanup-projection-ownership.md`
+
 ## D4: Regression Gates
 
 Goal: prove model tightening did not break the product loops.
@@ -132,6 +146,6 @@ Acceptance:
 
 - D1: PASS - control-state dependency review written
 - D2: PASS - field/action contract tightened; stable facts and read-only/dry-run actions tested
-- D3: pending
+- D3: PASS - cleanup projection ownership moved into CleanupEvidence helper
 - D4: pending
 - D5: pending
