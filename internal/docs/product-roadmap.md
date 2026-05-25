@@ -31,6 +31,7 @@ ready.
 
 | Priority | Work | Type | Status | Why It Matters |
 |---|---|---|---|---|
+| P0 | Phase 31 Kubernetes Restart Persistence | Core Stability + Operational + Functional | active | Storage must not forget data, authority, or promoted primary after Kubernetes/product restart |
 | P0 | Phase 29 Product-Owned Lifecycle And Cleanup Reliability | Operational + Core Stability | PASS | Cleanup/lifecycle is deterministic and auditable across active alpha loops |
 | P0 | Phase 30 Control Model / ManagedVolume Hardening | Core Stability + Operational | PASS | Stabilizes state ownership before mutating operator, rebuild/failback, NVMe ANA, or backup work |
 | P0 | Phase 28 Productized Operations And Operator Foundation | Operational + Core Stability | PASS | Turn Helm/scripts/evidence/model into one Kubernetes product operations loop before the next feature expansion |
@@ -85,6 +86,41 @@ contract; Phase 27 stabilizes multi-volume HA semantics; then an operator can
 own day-2 lifecycle without hiding unstable behavior.
 
 ## Active Work
+
+### Phase 31 - Kubernetes Restart Persistence
+
+Type: Core Stability + Operational + Functional
+
+Current status: active, 0%. Started on 2026-05-25 after Phase 30 control model
+hardening closed.
+
+Goal:
+
+```text
+PVC writes data
+-> product / k3s restarts
+-> persisted authority/lifecycle/durable state is reloaded
+-> CSI reattaches to the current publish target
+-> reader verifies the same PVC data
+-> promotion state is not forgotten
+```
+
+Gate status:
+
+- D1 restart persistence contract review: pending.
+- D2 durable Helm values / install contract: pending.
+- D3 single-node restart gate: pending.
+- D4 RF3 restart after promotion gate: pending.
+- D5 multi-volume restart smoke: pending.
+- D6 close gate: pending.
+
+Non-goals:
+
+- no fresh-cluster restore,
+- no backup/snapshot/restore,
+- no returned-replica rebuild/failback,
+- no host disk loss survival,
+- no broad production SLO.
 
 ### Phase 30 - Control Model / ManagedVolume Hardening
 
