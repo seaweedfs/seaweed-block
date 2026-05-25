@@ -1,349 +1,291 @@
-# Current Plan: Phase 31 - Kubernetes Restart Persistence
+# Current Plan: Phase 32 - Negative-First Read-Only Operator Status Surface
 
-Status: PASS, 100% complete. Started and closed on 2026-05-25 after Phase 30
-control model hardening closed.
+Status: active, 25% complete. Started on 2026-05-25 after Phase 31 restart
+persistence closed.
 
 ## Product Goal
 
-Make the Kubernetes block product survive normal cluster restart without
-forgetting storage data or control-plane state.
+Make the Kubernetes-facing operations surface truthful under both normal and
+bad states.
 
-The required product behavior is:
+The target user experience is:
 
 ```text
-PVC writes data
--> blockvolume / master / CSI / k3s restart
--> persisted authority/lifecycle/durable state is reloaded
--> launcher reconciles the existing desired state
--> CSI reattaches to the current publish target
--> reader verifies the same PVC data
--> report proves epoch, primary, promotion history, target, and cleanup state
+Helm install Seaweed Block
+-> create one or more PVCs
+-> status is visible through Kubernetes-native objects, Conditions, Events,
+   report, dashboard, and support bundle
+-> failures are reported as Blocked/Unknown/CleanupRequired with stable reasons
+-> no read-only surface invents Ready when evidence is stale, missing, or
+   contradictory
 ```
 
-If a volume was promoted before the restart, restart must preserve the promoted
-primary/epoch/publish target. The product must not fall back to an old primary
-or remint authority from stale topology.
+This phase is intentionally negative-first. Happy-path status is not enough.
+The gate must prove that known failure classes are visible, bounded, and
+non-mutating.
+
+## Source Inputs
+
+- External failure lessons:
+  `C:/work/seaweedfs/sw-block/design/external-failure-taxonomy.md`
+- Semantic constraints:
+  `C:/work/seaweedfs/sw-block/design/v3-semantic-constraint-checklist.md`
+- Control model:
+  `internal/docs/ref/phase30-control-state-dependency-review.md`
+- Restart persistence:
+  `internal/docs/ref/phase31-restart-persistence-claim-and-qa-checklist.md`
+- Evidence vocabulary:
+  `internal/docs/ref/multi-volume-ha-support-evidence-contract.md`
+- Phase 32 mapping:
+  `internal/docs/ref/phase32-negative-first-operator-status-plan.md`
 
 ## Scope Contract
 
 | In | Out |
 |---|---|
-| durable Helm configuration for master authority/lifecycle and blockvolume walstore state | deleting/recreating a Kubernetes cluster from scratch |
-| single-node k3s restart persistence gate | cloud disaster recovery |
-| RF3 sync-quorum multi-node restart persistence gate | backup/snapshot/restore |
-| promotion-before-restart persistence gate | returned-replica rebuild/failback |
-| report/dashboard/operator evidence for restart recovery | new mutating operator action |
-| cleanup/residue verification after restart gates | broad production SLO |
+| read-only Kubernetes status surface for `SwBlockCluster` / `SwBlockVolume` or equivalent alpha CRD shape | mutating promote / repair / rebuild / failback / delete actions |
+| ManagedVolume projection to Conditions and Events | backup / snapshot / restore |
+| stable reason codes for Ready, Blocked, Recovered, CleanupRequired, Unknown, EvidenceStale | NVMe ANA feature work |
+| negative-first QA using existing failure scenarios | production SLO or broad compatibility matrix |
+| status/dashboard/report/operator-snapshot vocabulary alignment | operator-owned lifecycle mutation |
+| bounded active probe policy for stale or high-impact state | replacing TestOps with a full controller/agent implementation |
 
-This phase is required before claiming a usable beta storage product. It is not
-optional polish.
+## D1: Negative-First Contract And Failure Matrix
 
-## D1: Restart Persistence Contract Review
-
-Goal: define exactly which state must persist across restart and who owns it.
+Goal: turn the external failure taxonomy into executable operator-status
+requirements.
 
 Acceptance:
 
-- Define required persisted state:
-  - blockvolume durable data,
-  - master authority store,
-  - lifecycle/PVC registration store,
-  - launcher desired placement inputs,
-  - current primary/epoch/endpoint_version/publish target,
-  - CSI attach/stage recovery evidence.
-- Identify current default gaps:
-  - Helm default `blockmaster.stateHostPath=""` means master state uses
-    `emptyDir`,
-  - generated blockvolume state is not durable unless launcher state hostPath is
-    configured,
-  - complete k3s shutdown/start is not yet gated.
-- Define non-claims and exact restart claim boundary.
+- Each major external failure class maps to at least one status rule:
+  - liveness misjudgment,
+  - stale epoch/state,
+  - address-derived identity,
+  - stale health/durability,
+  - partial cleanup,
+  - recovery starvation / thundering herd.
+- Each status rule maps to:
+  - Condition type,
+  - reason code,
+  - evidence path,
+  - existing or new TestOps scenario.
+- The matrix explicitly says which failures are covered now and which remain
+  future work.
 
-PM/QA claim checklist:
+Status: PASS on 2026-05-25.
 
-- Use wording from
-  `internal/docs/ref/phase31-restart-persistence-claim-and-qa-checklist.md`.
-- Validate authority monotonicity: primary/epoch/publish target must not roll
-  back.
-- Validate stale-primary fencing with a direct stale path I/O probe, not only
-  role text.
-- Validate data continuity with writer/reader checksum before/after restart.
-- Validate cross-volume isolation in the multi-volume restart smoke.
+Artifact:
+
+- `internal/docs/ref/phase32-negative-first-operator-status-plan.md`
+- QA/TestOps assignment:
+  `internal/docs/qa-assignments/phase32-testops-product-grade-validation-assignment.md`
+
+## D1a: TestOps Product-Grade Validation Layer
+
+Goal: make TestOps the external auditor for Phase 32 status truthfulness.
+
+Acceptance:
+
+- QA classifies existing scenarios into happy, negative, restart,
+  multi-volume, cleanup, and runner-native buckets.
+- QA produces a negative-status evidence review for at least one blocked path.
+- Runner primitive gaps are stated with acceptance cases, not only complaints.
+- Failure snapshot standard is defined.
+- The runner action backlog reflects Phase 32 needs.
 
 Status: PASS on 2026-05-25.
 
 Artifacts:
 
-- `internal/docs/ref/phase31-kubernetes-restart-persistence-contract.md`
-- `internal/docs/ref/phase31-restart-persistence-claim-and-qa-checklist.md`
+- `internal/docs/qa-assignments/phase32-testops-product-grade-validation-assignment.md`
+- `internal/docs/qa-assignments/phase32-testops-scenario-inventory.md`
+- `internal/docs/qa-assignments/phase32-negative-status-evidence-review.md`
+- `internal/docs/qa-assignments/phase32-runner-action-backlog-addendum.md`
+- `internal/docs/qa-assignments/phase32-failure-snapshot-standard.md`
+- `internal/docs/ref/testops-runner-action-backlog.md`
 
-## D2: Durable Helm Values / Install Contract
+## D2: CRD / Condition / Event Alpha Contract
 
-Goal: make durable state an explicit Helm install mode.
+Goal: define the Kubernetes-native read model without adding mutating operator
+behavior.
 
 Acceptance:
 
-- Add or document values required for durable restart mode.
-- `sw-block ops generate-helm-values` can generate a durable restart values file
-  or clearly opt into one.
-- Generated values set durable hostPath state for:
-  - blockmaster authority/lifecycle store,
-  - launcher-created blockvolume durable roots.
-- Values/report surface `restart_persistence_mode=hostpath` or equivalent.
-- Fast tests cover rendered Helm args and generated blockvolume hostPath layout.
+- Define alpha `SwBlockCluster` and `SwBlockVolume` status fields, or document
+  the exact equivalent if the implementation first ships as
+  `operator-snapshot.json`.
+- Conditions include at minimum:
+  - `Ready`,
+  - `Blocked`,
+  - `Recovering`,
+  - `Recovered`,
+  - `CleanupRequired`,
+  - `EvidenceStale`.
+- Kubernetes Events use stable reason codes already present in report/timeline.
+- Status fields classify stable vs provisional vs test-only.
+- RBAC is read-only except status/event publication.
 
-Status: PASS on 2026-05-25.
+Status: pending.
 
-Implementation:
+## D3: Happy-Path Status Projection Gate
 
-- `sw-block ops generate-helm-values` now accepts
-  `--restart-persistence ephemeral|hostpath`.
-- `--restart-persistence hostpath --state-hostpath /var/lib/sw-block`
-  generates:
-  - `blockmaster.stateHostPath=/var/lib/sw-block`,
-  - `restartPersistence.mode=hostpath`,
-  - `restartPersistence.stateHostPath=/var/lib/sw-block`.
-- The chart schema accepts the restart-persistence contract.
-
-Validation:
-
-- `go test ./cmd/sw-block`
-- `go test ./core/launcher`
-- `helm lint charts/seaweed-block`
-- `helm template ... -f hostpath-values.yaml` renders
-  `--launcher-state-hostpath=/var/lib/sw-block` and a master state hostPath
-  mount.
-- D3 dev run exposed and fixed the blockmaster hostPath permission gap:
-  the chart now adds a root `state-permissions` initContainer for hostPath
-  state, matching the generated blockvolume permission model.
-
-## D3: Single-Node Restart Gate
-
-Goal: prove the smallest user path survives a k3s restart.
+Goal: prove the normal user path produces Kubernetes-native status that matches
+report/dashboard/support evidence.
 
 Gate:
 
 ```text
-Helm install with durable restart values
-create one PVC
-writer writes /data/demo.bin
-restart k3s on the node
-wait for master/CSI/blockvolume to return
-reader mounts same PVC and verifies checksum
-report captures authority/lifecycle/durable evidence
-cleanup leaves no residue
+Helm install
+-> first PVC writer/reader
+-> operator/status export
+-> kubectl-style status says Ready=True
+-> report/dashboard/operator-snapshot agree
 ```
 
 Acceptance:
 
-- Same PVC/PV survives.
-- Data checksum survives.
-- Authority epoch/publish target are consistent after restart.
-- `sw-block ops report` contains restart evidence and no unsupported claim.
+- `Ready=True` with reason `first_volume_verified` or equivalent.
+- PVC, PV, volume_id, primary, epoch, publish target, RF, ACK profile agree
+  across status, report, dashboard, and bundle.
+- No mutating action appears in status, dashboard, or operator snapshot.
 
-Status: PASS on 2026-05-25; independent QA rerun passed.
+Status: pending.
 
-Scenario:
+Existing scenario seed:
 
-- `testops/scenarios/helm-single-node-restart-persistence-chain.yaml`
+- `helm-first-volume-via-sw-block-cli-chain.yaml`
+- `helm-first-volume-chain.yaml`
 
-Dev evidence:
+## D4: Blocked / Negative Status Projection Gate
 
-- Run `20260525-103441-2e9c`: 39/39 actions PASS in 2m39s.
-- Helm values generated `restart_persistence_mode=hostpath`.
-- Helm template rendered `--launcher-state-hostpath=/var/lib/sw-block/testops-...`.
-- Writer/reader verified before restart.
-- `sudo systemctl restart k3s` completed and blockmaster/CSI/blockvolume
-  rolled out again.
-- Reader verified `/data/demo.bin: OK` after restart.
-- Report summary contained `managed_volume=... status=ready`.
-- Cleanup removed Helm release, app resources, iSCSI residue, processes, and
-  test-scoped hostPath.
+Goal: prove common user-visible failures become explicit Blocked/Unknown status
+instead of silent timeout or false Ready.
 
-QA evidence:
+Candidate negative cases:
 
-- Run `20260525-104016-f3d4`: 40/40 actions PASS.
-- Sign-off:
-  `internal/docs/qa-assignments/phase31-restart-persistence-d3-qa-signoff.md`.
+- CSI node image pull failure.
+- missing publish target.
+- loopback publish target rejected in multi-node mode.
+- writer pod mount failure.
+- cleanup residue present.
+- blockmaster unreachable or stale evidence.
 
-## D4: RF3 Restart After Promotion Gate
+Acceptance:
 
-Goal: prove promotion state is not forgotten.
+- Failure status is not `Ready=True`.
+- Condition and reason code identify the blocker.
+- Evidence path points to logs/events/bundle facts.
+- `sw-block ops explain` and dashboard use the same reason.
+
+Status: pending.
+
+Existing scenario seeds:
+
+- `helm-support-bundle-diagnostics-chain.yaml`
+- `same-node-alpha-attach-negative-chain.yaml`
+- `csi-rf1-durable-restart-failure-chain.yaml`
+- `light-use-first-volume-breaks-chain.yaml`
+
+## D5: Restart / Promotion Status Consistency Gate
+
+Goal: carry Phase 31 restart guarantees into the operator/status surface.
 
 Gate:
 
 ```text
-RF3 sync-quorum PVC
-writer verifies data
-controlled primary failure promotes r2
-reader verifies through promoted target
-restart k3s / product stack
-reader verifies same PVC again
-report proves primary remains r2 with epoch >= promoted epoch
-old primary is not resurrected as primary
+RF3 promotion to r2
+-> k3s/product restart
+-> status still shows r2 primary, epoch non-rollback, one primary
+-> reader verifies data
 ```
 
 Acceptance:
 
-- `before_restart_primary` equals promoted replica.
-- `after_restart_primary` equals promoted replica unless a new valid failover
-  happened and is evidenced.
-- `after_restart_epoch >= before_restart_epoch`.
-- publish target matches the post-promotion authority line.
-- stale old-primary I/O success remains 0 and is measured by a direct stale
-  path probe.
-- reader checksum passes after restart.
+- CRD/status or operator snapshot preserves:
+  - primary,
+  - epoch,
+  - publish target,
+  - `post_restart_primary_count=1`.
+- Old primary is not resurrected as Ready.
+- Event timeline explains restart reload and authority persistence.
 
-Status: PASS (strict) on 2026-05-25; independent QA rerun passed.
+Status: pending.
 
-Scenario:
+Existing scenario seeds:
 
-- `testops/scenarios/helm-rf3-promotion-restart-persistence-chain.yaml`
+- `helm-rf3-promotion-restart-persistence-chain.yaml`
+- `helm-multi-volume-rf3-restart-smoke-chain.yaml`
 
-Dev evidence:
+## D6: Multi-Volume Independence Status Gate
 
-- Run `20260525-104247-d6da`: 34/34 actions PASS in 3m33s.
-- Strict rerun after scenario hardening `20260525-122104-60c3`: 34/34
-  actions PASS in 2m35s.
-- Helm values generated `restart_persistence_mode=hostpath`.
-- Helm template rendered both:
-  - `--launcher-state-hostpath=/var/lib/sw-block/testops-...`,
-  - `--launcher-replication-ack=sync-quorum`.
-- RF3 recovery promoted `r1 -> r2` and verified the PVC by CSI/pod recreate.
-- After `sudo systemctl restart k3s`, authority comparison reported:
-  - `restart_promotion_status=ok`,
-  - `before_restart_primary=r2`,
-  - `after_restart_primary=r2`,
-  - `before_restart_publish_target=192.168.1.184:3260`,
-  - `after_restart_publish_target=192.168.1.184:3260`,
-  - `before_restart_epoch=2`,
-  - `after_restart_epoch=2`,
-  - `post_restart_primary_count=1`,
-  - `reason=authority_persisted`.
-- Reader verified `/data/demo.bin: OK` after restart.
-- Cleanup removed Helm release, app resources, iSCSI residue, processes, and
-  test-scoped hostPath.
-- Scenario hardening now:
-  - pre-cleans generated `app=sw-blockvolume` Deployments and refuses to start
-    if they remain,
-  - port-forwards to a selected Running/Ready blockmaster pod,
-  - retries the product `ops cluster` call instead of relying on a raw TCP
-    port readiness probe.
-
-Known limitation:
-
-- The D4 dev gate validates authority persistence, data continuity, and
-  single-primary after restart. The direct stale old-primary I/O probe remains
-  required for QA/close hardening before D6; D4 currently preserves the
-  Phase 27 measured stale-fencing requirement as a close criterion rather than
-  reimplementing it inside the first dev gate.
-- QA product-claim sign-off is captured at
-  `internal/docs/qa-assignments/phase31-restart-persistence-d4-qa-signoff.md`.
-  It verified `before_restart_primary=r2`, `after_restart_primary=r2`,
-  `post_restart_primary_count=1`, and post-restart reader checksum. The final
-  strict QA run `20260525-122723-f7ed` passed 34/34 actions and confirmed the
-  port-forward/lab-serialization hardening.
-
-## D5: Multi-Volume Restart Smoke
-
-Goal: prove restart does not mix per-volume authority or placement.
+Goal: prove status isolation for multiple PVCs.
 
 Gate:
 
 ```text
-3 PVCs, RF3 sync-quorum
-each writer verifies
-restart k3s/product stack
-each reader verifies
-report shows 3 ManagedVolumes Ready with independent primary/epoch/target
+3 RF3 PVCs
+-> independent writers/readers
+-> per-volume failover or restart smoke
+-> each SwBlockVolume / ManagedVolume remains distinct
 ```
 
 Acceptance:
 
-- requested_volume_count=3
-- reader_verified_count=3
-- managed_volume_count=3
-- duplicate_publish_target_for_distinct_volume=false unless expected by design
-- cross_volume_authority_mixup=false
+- `managed_volume_count=3`.
+- no cross-volume authority mixup.
+- no duplicate publish target for distinct volumes unless explicitly expected.
+- failed target volume status does not poison untouched volume status.
 
-Status: PASS (strict) on 2026-05-25; independent QA rerun passed.
+Status: pending.
 
-Scenario:
+Existing scenario seeds:
 
-- `testops/scenarios/helm-multi-volume-rf3-restart-smoke-chain.yaml`
+- `helm-multi-volume-rf3-readiness-chain.yaml`
+- `helm-multi-volume-rf3-interleaved-failover-chain.yaml`
+- `helm-multi-volume-rf3-restart-smoke-chain.yaml`
 
-Dev evidence:
+## D7: Stale Evidence And Bounded Probe Gate
 
-- Run `20260525-110800-4f19`: 36/36 actions PASS in 4m11s.
-- Helm values generated `restart_persistence_mode=hostpath`, RF=3, and
-  `ackProfile: sync-quorum`.
-- Three PVCs were created and verified before restart:
-  - `writer_verified_count=3`,
-  - `reader_verified_count=3`,
-  - product-owned `cluster-evidence.json` exported before restart.
-- After `sudo systemctl restart k3s`, authority comparison reported:
-  - `multi_volume_restart_status=ok`,
-  - `before_volume_count=3`,
-  - `after_volume_count=3`,
-  - `managed_volume_count=3`,
-  - `duplicate_publish_target_for_distinct_volume=false`,
-  - `cross_volume_authority_mixup=false`,
-  - `reason=all_volumes_persisted`.
-- Three reader pods verified `/data/demo.bin: OK` after restart.
-- Cleanup removed Helm release, app resources, generated blockvolume
-  Deployments, iSCSI residue, processes, multipath residue, and test-scoped
-  hostPath.
-
-QA evidence:
-
-- Run `20260525-123233-541b`: 36/36 actions PASS.
-- Sign-off:
-  `internal/docs/qa-assignments/phase31-restart-persistence-d5-qa-signoff.md`.
-- Hard evidence:
-  - `multi_volume_restart_status=ok`,
-  - `before_volume_count=3`,
-  - `after_volume_count=3`,
-  - `managed_volume_count=3`,
-  - `reader_verified_count=3`,
-  - `duplicate_publish_target_for_distinct_volume=false`,
-  - `cross_volume_authority_mixup=false`,
-  - `cleanup_status=ok`.
-
-Note:
-
-- The scenario intentionally treats `scripts/run-multi-volume-example.sh` as a
-  setup helper for PVC/write/read/evidence only. D5's restart assertion uses
-  product-owned `ops cluster` / `ops report` after restart so helper-level
-  inventory/report status does not mask restart-persistence behavior.
-
-## D6: Close Gate
-
-Goal: close only when restart persistence is proven and documented.
+Goal: prove observation is honest when passive state is stale or missing.
 
 Acceptance:
 
-- D1-D5 complete.
-- QA independently reruns D3 and D4.
-- README/quickstart/release note clearly distinguish:
-  - default alpha quick path,
-  - durable restart mode,
-  - unsupported disaster recovery.
+- Status can enter `EvidenceStale=True` or `Unknown` with reason.
+- Bounded active probes are allowed only for:
+  - high-impact promotion/failover status,
+  - stale or missing status evidence,
+  - cleanup residue close,
+  - support/report replay.
+- Every probe has timeout, evidence, and no mutation.
+- Failure to probe does not become `Ready=True`.
+
+Status: pending.
+
+## D8: Close Gate
+
+Goal: close Phase 32 only when happy path, negative path, restart path, and
+multi-volume path agree across all read-only operations surfaces.
+
+Acceptance:
+
+- D1-D7 complete.
+- QA independently reruns D3-D6, including at least one negative case.
+- PM reviews claim wording and non-claims.
+- README/quickstart/release note only claim read-only status/operator surface.
 - Close report and finished plan are written.
 
-Status: PASS on 2026-05-25.
-
-Artifacts:
-
-- Close report:
-  `internal/docs/qa-assignments/phase31-kubernetes-restart-persistence-close-report.md`
-- Finished plan:
-  `internal/docs/finished-plans/phase31_finishedplan_kubernetes_restart_persistence.md`
+Status: pending.
 
 ## Progress
 
 - D1: PASS
-- D2: PASS
-- D3: PASS
-- D4: PASS (strict)
-- D5: PASS (strict)
-- D6: PASS
+- D1a: PASS
+- D2: pending
+- D3: pending
+- D4: pending
+- D5: pending
+- D6: pending
+- D7: pending
+- D8: pending
+
+Overall: 25%.

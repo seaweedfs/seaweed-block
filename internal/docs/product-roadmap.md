@@ -86,7 +86,7 @@ ready.
 | Priority | Work | Type | Status | Why It Matters |
 |---|---|---|---|---|
 | P0 | Phase 31 Kubernetes Restart Persistence | Core Stability + Operational + Functional | PASS | Storage must not forget data, authority, or promoted primary after Kubernetes/product restart |
-| P0 | Phase 32 Read-Only Operator / Kubernetes Status Surface | Operational + Core Stability | next | Resume the deferred operator/status surface now that restart persistence is proven |
+| P0 | Phase 32 Negative-First Read-Only Operator Status Surface | Operational + Core Stability | active | Make Kubernetes-native status truthful under happy, blocked, restart, and multi-volume paths |
 | P0 | Phase 29 Product-Owned Lifecycle And Cleanup Reliability | Operational + Core Stability | PASS | Cleanup/lifecycle is deterministic and auditable across active alpha loops |
 | P0 | Phase 30 Control Model / ManagedVolume Hardening | Core Stability + Operational | PASS | Stabilizes state ownership before mutating operator, rebuild/failback, NVMe ANA, or backup work |
 | P0 | Phase 28 Productized Operations And Operator Foundation | Operational + Core Stability | PASS | Turn Helm/scripts/evidence/model into one Kubernetes product operations loop before the next feature expansion |
@@ -142,7 +142,49 @@ own day-2 lifecycle without hiding unstable behavior.
 
 ## Active Work
 
-### Phase 31 - Kubernetes Restart Persistence
+### Phase 32 - Negative-First Read-Only Operator Status Surface
+
+Type: Operational + Core Stability
+
+Current status: active, 25%. Started on 2026-05-25 after Phase 31 restart
+persistence closed.
+
+Goal:
+
+```text
+Helm install / PVC lifecycle / recovery / restart
+-> ManagedVolume projection
+-> Kubernetes-native status, Conditions, Events, report, dashboard, support bundle
+-> Ready only when current evidence supports Ready
+-> blocked or stale states are explicit and explainable
+```
+
+This phase is negative-first. The main product risk is not "missing a status
+page"; it is publishing a stable-looking state when evidence is stale, missing,
+or contradictory.
+
+Gate plan:
+
+- D1 negative-first contract and failure matrix: PASS on 2026-05-25. Artifact:
+  `internal/docs/ref/phase32-negative-first-operator-status-plan.md`.
+- D1a TestOps product-grade validation layer: PASS on 2026-05-25. Assignment:
+  `internal/docs/qa-assignments/phase32-testops-product-grade-validation-assignment.md`.
+- D2 CRD / Condition / Event alpha contract: pending.
+- D3 happy-path status projection gate: pending.
+- D4 blocked / negative status projection gate: pending.
+- D5 restart / promotion status consistency gate: pending.
+- D6 multi-volume independence status gate: pending.
+- D7 stale evidence and bounded probe gate: pending.
+- D8 close gate: pending.
+
+Non-goals:
+
+- no mutating operator promote, repair, rebuild, failback, delete, or cleanup,
+- no backup/snapshot/restore,
+- no NVMe ANA feature work,
+- no broad production SLO.
+
+### Phase 31 - Kubernetes Restart Persistence (Closed)
 
 Type: Core Stability + Operational + Functional
 
@@ -180,26 +222,6 @@ Non-goals:
 - no returned-replica rebuild/failback,
 - no host disk loss survival,
 - no broad production SLO.
-
-### Next: Phase 32 - Read-Only Operator / Kubernetes Status Surface
-
-Type: Operational + Core Stability
-
-Status: next.
-
-This should resume now that restart persistence is proven. Operator status must
-not publish a stable-looking state that forgets authority or data across
-product/Kubernetes restart.
-
-Candidate scope:
-
-- CRD/status schema for `SwBlockVolume` and `SwBlockCluster`,
-- read-only status projection from ManagedVolume,
-- Conditions: `Ready`, `Blocked`, `Recovering`, `Recovered`,
-  `CleanupRequired`,
-- Kubernetes Events from existing reason codes,
-- Helm install option gated as alpha/read-only,
-- no mutating reconcile, promote, repair, rebuild, failback, delete, or backup.
 
 ### Phase 30 - Control Model / ManagedVolume Hardening
 

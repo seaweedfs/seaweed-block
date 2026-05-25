@@ -59,5 +59,38 @@ shell fragments hide the intent or weaken diagnostics.
 - Do not require agent mode before v0.3.x cleanup/repeatability gates close.
 - Do not expose product mutating fault-injection APIs to end users.
 - Do not move complex product orchestration out of helper scripts until the
-  runner has equivalent primitives and diagnostics.
+runner has equivalent primitives and diagnostics.
 
+## Phase 32 Product-Grade Role
+
+Phase 32 raises the runner bar. TestOps is not only a YAML executor; it is the
+external auditor that proves the product's read-only status surface is truthful.
+
+For operator/status work, every release gate should answer:
+
+```text
+what happened
+what the product reported
+why the product was allowed to report that state
+which artifact proves it
+whether cleanup left residue
+```
+
+The runner should therefore prioritize actions that reduce false positives:
+
+- wait for Kubernetes resources by actual field values, not only shell sleeps,
+- collect standardized failure snapshots,
+- export product-owned `ops cluster` / `ops report` evidence,
+- assert host-path facts such as stale I/O rejection and ALUA AAS transitions,
+- assert cleanup residue across Kubernetes, iSCSI, multipath, dmsetup, process,
+  and hostPath domains,
+- preserve enough evidence for a cold reviewer to diagnose the run without SSH.
+
+## Phase 32 QA Assignment
+
+The executable QA assignment for this backlog is:
+
+- `internal/docs/qa-assignments/phase32-testops-product-grade-validation-assignment.md`
+
+QA can start Workstreams A-D before the Phase 32 product implementation lands.
+Workstream E depends on D2 status/CRD/operator-snapshot changes.
