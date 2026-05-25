@@ -42,6 +42,12 @@ blockmaster:
   stateHostPath: ""
   stateHostPathType: DirectoryOrCreate
 
+restartPersistence:
+  # ephemeral keeps the alpha/dev default. hostpath persists blockmaster and
+  # generated blockvolume state across Kubernetes pod restarts.
+  mode: ephemeral
+  stateHostPath: ""
+
 storageClass:
   create: true
   name: sw-block-dynamic

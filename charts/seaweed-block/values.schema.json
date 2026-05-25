@@ -27,6 +27,20 @@
         "protocol": { "type": "string", "enum": ["iscsi", "nvme"] }
       }
     },
+    "blockmaster": {
+      "type": "object",
+      "properties": {
+        "stateHostPath": { "type": "string" },
+        "stateHostPathType": { "type": "string" }
+      }
+    },
+    "restartPersistence": {
+      "type": "object",
+      "properties": {
+        "mode": { "type": "string", "enum": ["ephemeral", "hostpath"] },
+        "stateHostPath": { "type": "string" }
+      }
+    },
     "network": {
       "type": "object",
       "properties": {

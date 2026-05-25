@@ -1,6 +1,6 @@
 # Current Plan: Phase 31 - Kubernetes Restart Persistence
 
-Status: active, 0% complete. Started on 2026-05-25 after Phase 30 control model
+Status: active, 33% complete. Started on 2026-05-25 after Phase 30 control model
 hardening closed.
 
 ## Product Goal
@@ -70,6 +70,13 @@ PM/QA claim checklist:
 - Validate data continuity with writer/reader checksum before/after restart.
 - Validate cross-volume isolation in the multi-volume restart smoke.
 
+Status: PASS on 2026-05-25.
+
+Artifacts:
+
+- `internal/docs/ref/phase31-kubernetes-restart-persistence-contract.md`
+- `internal/docs/ref/phase31-restart-persistence-claim-and-qa-checklist.md`
+
 ## D2: Durable Helm Values / Install Contract
 
 Goal: make durable state an explicit Helm install mode.
@@ -84,6 +91,28 @@ Acceptance:
   - launcher-created blockvolume durable roots.
 - Values/report surface `restart_persistence_mode=hostpath` or equivalent.
 - Fast tests cover rendered Helm args and generated blockvolume hostPath layout.
+
+Status: PASS on 2026-05-25.
+
+Implementation:
+
+- `sw-block ops generate-helm-values` now accepts
+  `--restart-persistence ephemeral|hostpath`.
+- `--restart-persistence hostpath --state-hostpath /var/lib/sw-block`
+  generates:
+  - `blockmaster.stateHostPath=/var/lib/sw-block`,
+  - `restartPersistence.mode=hostpath`,
+  - `restartPersistence.stateHostPath=/var/lib/sw-block`.
+- The chart schema accepts the restart-persistence contract.
+
+Validation:
+
+- `go test ./cmd/sw-block`
+- `go test ./core/launcher`
+- `helm lint charts/seaweed-block`
+- `helm template ... -f hostpath-values.yaml` renders
+  `--launcher-state-hostpath=/var/lib/sw-block` and a master state hostPath
+  mount.
 
 ## D3: Single-Node Restart Gate
 
@@ -175,8 +204,8 @@ Acceptance:
 
 ## Progress
 
-- D1: pending
-- D2: pending
+- D1: PASS
+- D2: PASS
 - D3: pending
 - D4: pending
 - D5: pending
