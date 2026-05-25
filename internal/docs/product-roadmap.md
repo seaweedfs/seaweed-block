@@ -92,7 +92,7 @@ own day-2 lifecycle without hiding unstable behavior.
 
 Type: Core Stability + Operational + Functional
 
-Current status: active, 67%. Started on 2026-05-25 after Phase 30 control model
+Current status: active, 83%. Started on 2026-05-25 after Phase 30 control model
 hardening closed.
 
 Goal:
@@ -111,8 +111,9 @@ Gate status:
 - D1 restart persistence contract review: PASS on 2026-05-25.
 - D2 durable Helm values / install contract: PASS on 2026-05-25.
 - D3 single-node restart gate: PASS on 2026-05-25.
-- D4 RF3 restart after promotion gate: PASS (dev) on 2026-05-25; QA pending.
-- D5 multi-volume restart smoke: pending.
+- D4 RF3 restart after promotion gate: PASS (dev) on 2026-05-25; QA
+  product-claim replay PASS, strict rerun pending.
+- D5 multi-volume restart smoke: PASS (dev) on 2026-05-25; QA pending.
 - D6 close gate: pending.
 
 Claim wording and QA checklist:

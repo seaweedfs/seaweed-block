@@ -1,6 +1,6 @@
 # Current Plan: Phase 31 - Kubernetes Restart Persistence
 
-Status: active, 67% complete. Started on 2026-05-25 after Phase 30 control model
+Status: active, 83% complete. Started on 2026-05-25 after Phase 30 control model
 hardening closed.
 
 ## Product Goal
@@ -194,7 +194,8 @@ Acceptance:
   path probe.
 - reader checksum passes after restart.
 
-Status: PASS (dev) on 2026-05-25; independent QA rerun pending.
+Status: PASS (dev) on 2026-05-25; QA product-claim replay passed, strict
+scenario rerun pending after port-forward/lab-serialization hardening.
 
 Scenario:
 
@@ -229,6 +230,12 @@ Known limitation:
   required for QA/close hardening before D6; D4 currently preserves the
   Phase 27 measured stale-fencing requirement as a close criterion rather than
   reimplementing it inside the first dev gate.
+- QA product-claim sign-off is captured at
+  `internal/docs/qa-assignments/phase31-restart-persistence-d4-qa-signoff.md`.
+  It verified `before_restart_primary=r2`, `after_restart_primary=r2`,
+  `post_restart_primary_count=1`, and post-restart reader checksum. It also
+  found two strict-scenario hardening items: a port-forward race after k3s
+  restart and shared-lab overlap during cleanup.
 
 ## D5: Multi-Volume Restart Smoke
 
@@ -252,6 +259,41 @@ Acceptance:
 - duplicate_publish_target_for_distinct_volume=false unless expected by design
 - cross_volume_authority_mixup=false
 
+Status: PASS (dev) on 2026-05-25; independent QA rerun pending.
+
+Scenario:
+
+- `testops/scenarios/helm-multi-volume-rf3-restart-smoke-chain.yaml`
+
+Dev evidence:
+
+- Run `20260525-110800-4f19`: 36/36 actions PASS in 4m11s.
+- Helm values generated `restart_persistence_mode=hostpath`, RF=3, and
+  `ackProfile: sync-quorum`.
+- Three PVCs were created and verified before restart:
+  - `writer_verified_count=3`,
+  - `reader_verified_count=3`,
+  - product-owned `cluster-evidence.json` exported before restart.
+- After `sudo systemctl restart k3s`, authority comparison reported:
+  - `multi_volume_restart_status=ok`,
+  - `before_volume_count=3`,
+  - `after_volume_count=3`,
+  - `managed_volume_count=3`,
+  - `duplicate_publish_target_for_distinct_volume=false`,
+  - `cross_volume_authority_mixup=false`,
+  - `reason=all_volumes_persisted`.
+- Three reader pods verified `/data/demo.bin: OK` after restart.
+- Cleanup removed Helm release, app resources, generated blockvolume
+  Deployments, iSCSI residue, processes, multipath residue, and test-scoped
+  hostPath.
+
+Note:
+
+- The scenario intentionally treats `scripts/run-multi-volume-example.sh` as a
+  setup helper for PVC/write/read/evidence only. D5's restart assertion uses
+  product-owned `ops cluster` / `ops report` after restart so helper-level
+  inventory/report status does not mask restart-persistence behavior.
+
 ## D6: Close Gate
 
 Goal: close only when restart persistence is proven and documented.
@@ -271,6 +313,6 @@ Acceptance:
 - D1: PASS
 - D2: PASS
 - D3: PASS
-- D4: PASS (dev), QA pending
-- D5: pending
+- D4: PASS (dev), QA product replay PASS, strict rerun pending
+- D5: PASS (dev), QA pending
 - D6: pending
