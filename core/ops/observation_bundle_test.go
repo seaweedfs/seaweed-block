@@ -203,6 +203,54 @@ func TestObservationBundle_ManagedVolumeUsesPrimaryFailureArtifactHints(t *testi
 	}
 }
 
+func TestObservationBundle_D7PrefersNewestRestartClusterEvidence(t *testing.T) {
+	dir := t.TempDir()
+	oldCluster := NewClusterEvidence(time.Date(2026, 5, 25, 21, 32, 48, 0, time.UTC))
+	oldCluster.Volumes = []VolumeEvidence{{
+		VolumeID:          "pvc-restart",
+		Namespace:         "default",
+		PVCName:           "demo-pvc",
+		ReplicationFactor: 3,
+		AckProfile:        "sync-quorum",
+		Status:            ObservationStatusOK,
+		PrimaryReplica:    "r1",
+		PrimaryNode:       "m01",
+		PublishTarget:     "192.168.1.181:3260",
+		Epoch:             1,
+	}}
+	newCluster := NewClusterEvidence(time.Date(2026, 5, 25, 21, 33, 37, 0, time.UTC))
+	newCluster.Volumes = []VolumeEvidence{{
+		VolumeID:          "pvc-restart",
+		Namespace:         "default",
+		PVCName:           "demo-pvc",
+		ReplicationFactor: 3,
+		AckProfile:        "sync-quorum",
+		Status:            ObservationStatusOK,
+		PrimaryReplica:    "r2",
+		PrimaryNode:       "m02",
+		PublishTarget:     "192.168.1.184:3260",
+		Epoch:             2,
+	}}
+	writeClusterEvidenceArtifact(t, filepath.Join(dir, "recovery", "setup", "status", ClusterEvidenceArtifact), oldCluster)
+	writeClusterEvidenceArtifact(t, filepath.Join(dir, "restart", RestartClusterEvidenceArtifact), newCluster)
+
+	out, err := BuildObservationFromBundle(ObservationBundleOptions{Dir: dir, VolumeID: "pvc-restart"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Volumes) != 1 {
+		t.Fatalf("volumes=%+v", out.Volumes)
+	}
+	volume := out.Volumes[0]
+	if volume.PrimaryReplica != "r2" || volume.PrimaryNode != "m02" || volume.PublishTarget != "192.168.1.184:3260" || volume.Epoch != 2 {
+		t.Fatalf("expected post-restart evidence, got %+v", volume)
+	}
+	summary := RenderObservationReportSummary(out)
+	if !strings.Contains(summary, "primary=r2@m02 frontend=192.168.1.184:3260") {
+		t.Fatalf("summary used stale primary:\n%s", summary)
+	}
+}
+
 func TestObservationBundle_CarriesCleanupEvidenceIntoReportSurfaces(t *testing.T) {
 	dir := t.TempDir()
 	writeProductClusterEvidence(t, dir, []VolumeEvidence{healthyObservationVolume()})
@@ -501,6 +549,20 @@ func writeProductClusterEvidence(t *testing.T, dir string, volumes []VolumeEvide
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(productDir, ClusterEvidenceArtifact), raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeClusterEvidenceArtifact(t *testing.T, path string, cluster ClusterEvidence) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := MarshalObservationJSON(cluster)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, raw, 0o644); err != nil {
 		t.Fatal(err)
 	}
 }

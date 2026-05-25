@@ -1,6 +1,6 @@
 # Current Plan: Phase 32 - Negative-First Read-Only Operator Status Surface
 
-Status: active, 85% complete. Started on 2026-05-25 after Phase 31 restart
+Status: active, 90% complete. Started on 2026-05-25 after Phase 31 restart
 persistence closed.
 
 ## Product Goal
@@ -376,7 +376,26 @@ Acceptance:
   `EvidenceStale=True`; it must not silently publish an older primary when a
   newer restart snapshot exists in the same bundle.
 
-Status: pending.
+Implementation:
+
+- `ops report --from-bundle` now considers both canonical
+  `cluster-evidence.json` and restart-phase `cluster-after-restart.json`
+  evidence files.
+- When multiple cluster evidence files exist, replay chooses the newest
+  `captured_at` value deterministically; path rank is only a tie-break.
+- Added a regression test for the D5 failure shape where old pre-promotion
+  `status/cluster-evidence.json` reported r1 while newer
+  `restart/cluster-after-restart.json` reported r2.
+
+Validation:
+
+- `go test ./core/ops ./cmd/sw-block`
+
+QA assignment:
+
+- `internal/docs/qa-assignments/phase32-d7-stale-evidence-qa-assignment.md`
+
+Status: dev PASS on 2026-05-25; QA pending.
 
 ## D8: Close Gate
 
@@ -402,7 +421,7 @@ Status: pending.
 - D4: PASS
 - D5: PASS
 - D6: PASS
-- D7: pending
+- D7: dev PASS, QA pending
 - D8: pending
 
-Overall: 85%.
+Overall: 90%.
