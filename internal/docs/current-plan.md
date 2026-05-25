@@ -194,8 +194,8 @@ Acceptance:
   path probe.
 - reader checksum passes after restart.
 
-Status: PASS (dev) on 2026-05-25; QA product-claim replay passed, strict
-scenario rerun pending after port-forward/lab-serialization hardening.
+Status: PASS (dev strict) on 2026-05-25; QA product-claim replay passed.
+Independent strict QA rerun pending after the scenario hardening lands.
 
 Scenario:
 
@@ -204,6 +204,8 @@ Scenario:
 Dev evidence:
 
 - Run `20260525-104247-d6da`: 34/34 actions PASS in 3m33s.
+- Strict rerun after scenario hardening `20260525-122104-60c3`: 34/34
+  actions PASS in 2m35s.
 - Helm values generated `restart_persistence_mode=hostpath`.
 - Helm template rendered both:
   - `--launcher-state-hostpath=/var/lib/sw-block/testops-...`,
@@ -222,6 +224,12 @@ Dev evidence:
 - Reader verified `/data/demo.bin: OK` after restart.
 - Cleanup removed Helm release, app resources, iSCSI residue, processes, and
   test-scoped hostPath.
+- Scenario hardening now:
+  - pre-cleans generated `app=sw-blockvolume` Deployments and refuses to start
+    if they remain,
+  - port-forwards to a selected Running/Ready blockmaster pod,
+  - retries the product `ops cluster` call instead of relying on a raw TCP
+    port readiness probe.
 
 Known limitation:
 
@@ -234,8 +242,8 @@ Known limitation:
   `internal/docs/qa-assignments/phase31-restart-persistence-d4-qa-signoff.md`.
   It verified `before_restart_primary=r2`, `after_restart_primary=r2`,
   `post_restart_primary_count=1`, and post-restart reader checksum. It also
-  found two strict-scenario hardening items: a port-forward race after k3s
-  restart and shared-lab overlap during cleanup.
+  found two strict-scenario hardening items; the dev strict rerun above
+  validates the corresponding scenario fixes.
 
 ## D5: Multi-Volume Restart Smoke
 
@@ -313,6 +321,6 @@ Acceptance:
 - D1: PASS
 - D2: PASS
 - D3: PASS
-- D4: PASS (dev), QA product replay PASS, strict rerun pending
+- D4: PASS (dev strict), QA product replay PASS, QA strict rerun pending
 - D5: PASS (dev), QA pending
 - D6: pending

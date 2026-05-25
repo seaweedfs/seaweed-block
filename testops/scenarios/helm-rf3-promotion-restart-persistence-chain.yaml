@@ -41,7 +41,7 @@ phases:
       - action: exec
         node: m02
         timeout: 6m
-        cmd: "sudo -n chmod 644 /etc/rancher/k3s/k3s.yaml || true; helm status {{ helm_release }} --namespace {{ helm_namespace }} >/dev/null 2>&1 && helm uninstall {{ helm_release }} --namespace {{ helm_namespace }} --wait --timeout 240s || true; kubectl -n default delete pod -l sw-block-test=multi-volume --ignore-not-found=true --wait=true --timeout=120s; kubectl -n default delete pod -l sw-block-test=multi-volume-reattach --ignore-not-found=true --wait=true --timeout=120s; kubectl -n default delete pod sw-block-multi-writer-1 sw-block-multi-reader-1 sw-block-multi-reattach-reader-1 --ignore-not-found=true --wait=true --timeout=120s; kubectl -n default delete pvc sw-block-multi-pvc-1 --ignore-not-found=true --wait=true --timeout=120s; kubectl delete storageclass sw-block-multi sw-block-dynamic --ignore-not-found=true --wait=true --timeout=120s; kubectl delete clusterrole/sw-block-csi clusterrolebinding/sw-block-csi --ignore-not-found=true; sudo -n iscsiadm -m node 2>/dev/null | awk '/io.seaweedfs/ {print $1, $2}' | while read portal target; do sudo -n iscsiadm -m node -T \"$target\" -p \"$portal\" -o delete || true; done; sudo -n rm -rf /var/lib/sw-block/testops-{{ run_id }}-rf3-promotion-restart; rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-rf3-promotion-restart && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-rf3-promotion-restart/bin /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-rf3-promotion-restart/values /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-rf3-promotion-restart/install /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-rf3-promotion-restart/recovery /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-rf3-promotion-restart/restart /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-rf3-promotion-restart/after-restart /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-rf3-promotion-restart/cleanup"
+        cmd: "sudo -n chmod 644 /etc/rancher/k3s/k3s.yaml || true; helm status {{ helm_release }} --namespace {{ helm_namespace }} >/dev/null 2>&1 && helm uninstall {{ helm_release }} --namespace {{ helm_namespace }} --wait --timeout 240s || true; kubectl -n default delete pod -l sw-block-test=multi-volume --ignore-not-found=true --wait=true --timeout=120s; kubectl -n default delete pod -l sw-block-test=multi-volume-reattach --ignore-not-found=true --wait=true --timeout=120s; kubectl -n default delete pod sw-block-multi-writer-1 sw-block-multi-reader-1 sw-block-multi-reattach-reader-1 --ignore-not-found=true --wait=true --timeout=120s; kubectl -n default delete pvc sw-block-multi-pvc-1 --ignore-not-found=true --wait=true --timeout=120s; kubectl -n default delete deploy -l app=sw-blockvolume --ignore-not-found=true --wait=true --timeout=180s; kubectl delete storageclass sw-block-multi sw-block-dynamic --ignore-not-found=true --wait=true --timeout=120s; kubectl delete clusterrole/sw-block-csi clusterrolebinding/sw-block-csi --ignore-not-found=true; sudo -n iscsiadm -m node 2>/dev/null | awk '/io.seaweedfs/ {print $1, $2}' | while read portal target; do sudo -n iscsiadm -m node -T \"$target\" -p \"$portal\" -o delete || true; done; sudo -n rm -rf /var/lib/sw-block/testops-{{ run_id }}-rf3-promotion-restart; rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-rf3-promotion-restart && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-rf3-promotion-restart/bin /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-rf3-promotion-restart/values /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-rf3-promotion-restart/install /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-rf3-promotion-restart/recovery /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-rf3-promotion-restart/restart /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-rf3-promotion-restart/after-restart /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-rf3-promotion-restart/cleanup; leftover=$(kubectl -n default get deploy -l app=sw-blockvolume -o name 2>/dev/null || true); if [ -n \"$leftover\" ]; then echo \"$leftover\" > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-rf3-promotion-restart/pre-clean-blockvolume-leftover.txt; exit 3; fi"
         env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
       - action: assert_no_active_iscsi_sessions
         node: m02
@@ -136,7 +136,99 @@ phases:
       - action: exec
         node: m02
         timeout: 9m
-        cmd: "set -e; date -u > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-rf3-promotion-restart/restart/restart-start.txt; sudo -n systemctl restart k3s; for i in $(seq 1 180); do if sudo -n k3s kubectl get nodes >/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-rf3-promotion-restart/restart/nodes.wait.txt 2>&1; then break; fi; sleep 2; done; sudo -n chmod 644 /etc/rancher/k3s/k3s.yaml; kubectl wait --for=condition=Ready node/m02 --timeout=300s > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-rf3-promotion-restart/restart/wait-node-ready.txt; kubectl -n {{ helm_namespace }} rollout status deploy/sw-blockmaster --timeout=300s > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-rf3-promotion-restart/restart/wait-blockmaster.txt; kubectl -n {{ helm_namespace }} rollout status deploy/sw-block-csi-controller --timeout=300s > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-rf3-promotion-restart/restart/wait-csi-controller.txt; kubectl -n {{ helm_namespace }} rollout status ds/sw-block-csi-node --timeout=300s > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-rf3-promotion-restart/restart/wait-csi-node.txt; for d in $(kubectl -n default get deploy -l app=sw-blockvolume -o name); do kubectl -n default rollout status \"$d\" --timeout=300s; done > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-rf3-promotion-restart/restart/wait-blockvolumes.txt; port=$(/usr/bin/python3 - <<'PY'\nimport socket\ns=socket.socket(); s.bind(('127.0.0.1',0)); print(s.getsockname()[1]); s.close()\nPY\n); kubectl -n {{ helm_namespace }} port-forward deploy/sw-blockmaster ${port}:9333 > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-rf3-promotion-restart/restart/blockmaster-port-forward.log 2>&1 & pf=$!; trap 'kill $pf >/dev/null 2>&1 || true; wait $pf >/dev/null 2>&1 || true' EXIT; for i in $(seq 1 60); do if (echo >/dev/tcp/127.0.0.1/$port) >/dev/null 2>&1; then break; fi; sleep 1; done; /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-rf3-promotion-restart/bin/sw-block ops cluster --master-api 127.0.0.1:${port} --timeout 30s -o json > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-rf3-promotion-restart/restart/cluster-after-restart.json; python3 - /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-rf3-promotion-restart/recovery/failover/volume-1/summary.txt /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-rf3-promotion-restart/recovery/failover/volume-1/after.json /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-rf3-promotion-restart/restart/cluster-after-restart.json /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-rf3-promotion-restart/restart/restart-promotion-summary.txt <<'PY'\nimport json, sys\nsummary_path, before_json, after_json, out_path = sys.argv[1:]\nsummary = {}\nfor line in open(summary_path, encoding='utf-8'):\n    if '=' in line:\n        k, v = line.strip().split('=', 1)\n        summary[k] = v\nvolume_id = summary['volume_id']\npromoted = summary['promoted_replica']\ntarget = summary['after_publish_target']\nbefore = json.load(open(before_json))\nafter = json.load(open(after_json))\ndef find(doc):\n    for v in doc.get('volumes', []):\n        if v.get('volume_id') == volume_id:\n            return v\n    raise SystemExit('volume_not_found')\nb = find(before)\na = find(after)\nbefore_epoch = int(b.get('epoch') or b.get('authority_epoch') or 0)\nafter_epoch = int(a.get('epoch') or a.get('authority_epoch') or 0)\nprimary_count = sum(1 for r in a.get('replicas', []) if r.get('role') == 'primary')\nstatus = 'ok'\nreasons = []\nif a.get('primary_replica') != promoted:\n    status = 'failed'; reasons.append('primary_rolled_back')\nif a.get('publish_target') != target:\n    status = 'failed'; reasons.append('publish_target_changed')\nif after_epoch < before_epoch:\n    status = 'failed'; reasons.append('epoch_rolled_back')\nif primary_count != 1:\n    status = 'failed'; reasons.append('primary_count_not_one')\nwith open(out_path, 'w', encoding='utf-8') as f:\n    f.write(f'restart_promotion_status={status}\\n')\n    f.write(f'volume_id={volume_id}\\n')\n    f.write(f'before_restart_primary={promoted}\\n')\n    f.write(f'after_restart_primary={a.get(\"primary_replica\", \"\")}\\n')\n    f.write(f'before_restart_publish_target={target}\\n')\n    f.write(f'after_restart_publish_target={a.get(\"publish_target\", \"\")}\\n')\n    f.write(f'before_restart_epoch={before_epoch}\\n')\n    f.write(f'after_restart_epoch={after_epoch}\\n')\n    f.write(f'post_restart_primary_count={primary_count}\\n')\n    f.write(f'reason={\",\".join(reasons) if reasons else \"authority_persisted\"}\\n')\nif status != 'ok':\n    raise SystemExit(','.join(reasons))\nPY"
+        cmd: |
+          set -e
+          out=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-rf3-promotion-restart/restart
+          date -u > "$out/restart-start.txt"
+          sudo -n systemctl restart k3s
+          for i in $(seq 1 180); do
+            if sudo -n k3s kubectl get nodes > "$out/nodes.wait.txt" 2>&1; then break; fi
+            sleep 2
+          done
+          sudo -n chmod 644 /etc/rancher/k3s/k3s.yaml
+          kubectl wait --for=condition=Ready node/m02 --timeout=300s > "$out/wait-node-ready.txt"
+          kubectl -n {{ helm_namespace }} rollout status deploy/sw-blockmaster --timeout=300s > "$out/wait-blockmaster.txt"
+          kubectl -n {{ helm_namespace }} rollout status deploy/sw-block-csi-controller --timeout=300s > "$out/wait-csi-controller.txt"
+          kubectl -n {{ helm_namespace }} rollout status ds/sw-block-csi-node --timeout=300s > "$out/wait-csi-node.txt"
+          for d in $(kubectl -n default get deploy -l app=sw-blockvolume -o name); do
+            kubectl -n default rollout status "$d" --timeout=300s
+          done > "$out/wait-blockvolumes.txt"
+          port=$(/usr/bin/python3 - <<'PY'
+          import socket
+          s=socket.socket(); s.bind(('127.0.0.1',0)); print(s.getsockname()[1]); s.close()
+          PY
+          )
+          pf=''
+          cluster_ready=false
+          for attempt in $(seq 1 10); do
+            pod=$(kubectl -n {{ helm_namespace }} get pods -l app.kubernetes.io/component=blockmaster --field-selector=status.phase=Running -o name 2>/dev/null | head -1 || true)
+            if [ -z "$pod" ]; then
+              pod=$(kubectl -n {{ helm_namespace }} get pods -o name 2>/dev/null | grep '/sw-blockmaster-' | head -1 || true)
+            fi
+            if [ -z "$pod" ]; then sleep 2; continue; fi
+            echo "$pod" > "$out/blockmaster-port-forward-pod.txt"
+            kubectl -n {{ helm_namespace }} wait --for=condition=Ready "$pod" --timeout=30s >> "$out/wait-blockmaster-pod.txt" 2>&1 || { sleep 2; continue; }
+            kubectl -n {{ helm_namespace }} port-forward "$pod" "${port}:9333" > "$out/blockmaster-port-forward.log" 2>&1 &
+            pf=$!
+            sleep 2
+            if /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-rf3-promotion-restart/bin/sw-block ops cluster --master-api "127.0.0.1:${port}" --timeout 30s -o json > "$out/cluster-after-restart.json.tmp" 2> "$out/cluster-after-restart.stderr.txt"; then
+              mv "$out/cluster-after-restart.json.tmp" "$out/cluster-after-restart.json"
+              cluster_ready=true
+              break
+            fi
+            kill "$pf" >/dev/null 2>&1 || true
+            wait "$pf" >/dev/null 2>&1 || true
+            sleep 2
+          done
+          test "$cluster_ready" = true
+          trap 'kill "$pf" >/dev/null 2>&1 || true; wait "$pf" >/dev/null 2>&1 || true' EXIT
+          python3 - /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-rf3-promotion-restart/recovery/failover/volume-1/summary.txt /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-rf3-promotion-restart/recovery/failover/volume-1/after.json "$out/cluster-after-restart.json" "$out/restart-promotion-summary.txt" <<'PY'
+          import json, sys
+          summary_path, before_json, after_json, out_path = sys.argv[1:]
+          summary = {}
+          for line in open(summary_path, encoding='utf-8'):
+              if '=' in line:
+                  k, v = line.strip().split('=', 1)
+                  summary[k] = v
+          volume_id = summary['volume_id']
+          promoted = summary['promoted_replica']
+          target = summary['after_publish_target']
+          before = json.load(open(before_json))
+          after = json.load(open(after_json))
+          def find(doc):
+              for v in doc.get('volumes', []):
+                  if v.get('volume_id') == volume_id:
+                      return v
+              raise SystemExit('volume_not_found')
+          b = find(before)
+          a = find(after)
+          before_epoch = int(b.get('epoch') or b.get('authority_epoch') or 0)
+          after_epoch = int(a.get('epoch') or a.get('authority_epoch') or 0)
+          primary_count = sum(1 for r in a.get('replicas', []) if r.get('role') == 'primary')
+          status = 'ok'
+          reasons = []
+          if a.get('primary_replica') != promoted:
+              status = 'failed'; reasons.append('primary_rolled_back')
+          if a.get('publish_target') != target:
+              status = 'failed'; reasons.append('publish_target_changed')
+          if after_epoch < before_epoch:
+              status = 'failed'; reasons.append('epoch_rolled_back')
+          if primary_count != 1:
+              status = 'failed'; reasons.append('primary_count_not_one')
+          with open(out_path, 'w', encoding='utf-8') as f:
+              f.write(f'restart_promotion_status={status}\n')
+              f.write(f'volume_id={volume_id}\n')
+              f.write(f'before_restart_primary={promoted}\n')
+              f.write(f'after_restart_primary={a.get("primary_replica", "")}\n')
+              f.write(f'before_restart_publish_target={target}\n')
+              f.write(f'after_restart_publish_target={a.get("publish_target", "")}\n')
+              f.write(f'before_restart_epoch={before_epoch}\n')
+              f.write(f'after_restart_epoch={after_epoch}\n')
+              f.write(f'post_restart_primary_count={primary_count}\n')
+              f.write(f'reason={",".join(reasons) if reasons else "authority_persisted"}\n')
+          if status != 'ok':
+              raise SystemExit(','.join(reasons))
+          PY
         env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
       - action: grep_log
         node: m02
