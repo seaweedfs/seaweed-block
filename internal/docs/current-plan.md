@@ -1,7 +1,7 @@
 # Current Plan: Phase 31 - Kubernetes Restart Persistence
 
-Status: active, 83% complete. Started on 2026-05-25 after Phase 30 control model
-hardening closed.
+Status: PASS, 100% complete. Started and closed on 2026-05-25 after Phase 30
+control model hardening closed.
 
 ## Product Goal
 
@@ -194,8 +194,7 @@ Acceptance:
   path probe.
 - reader checksum passes after restart.
 
-Status: PASS (dev strict) on 2026-05-25; QA product-claim replay passed.
-Independent strict QA rerun pending after the scenario hardening lands.
+Status: PASS (strict) on 2026-05-25; independent QA rerun passed.
 
 Scenario:
 
@@ -241,9 +240,9 @@ Known limitation:
 - QA product-claim sign-off is captured at
   `internal/docs/qa-assignments/phase31-restart-persistence-d4-qa-signoff.md`.
   It verified `before_restart_primary=r2`, `after_restart_primary=r2`,
-  `post_restart_primary_count=1`, and post-restart reader checksum. It also
-  found two strict-scenario hardening items; the dev strict rerun above
-  validates the corresponding scenario fixes.
+  `post_restart_primary_count=1`, and post-restart reader checksum. The final
+  strict QA run `20260525-122723-f7ed` passed 34/34 actions and confirmed the
+  port-forward/lab-serialization hardening.
 
 ## D5: Multi-Volume Restart Smoke
 
@@ -267,7 +266,7 @@ Acceptance:
 - duplicate_publish_target_for_distinct_volume=false unless expected by design
 - cross_volume_authority_mixup=false
 
-Status: PASS (dev) on 2026-05-25; independent QA rerun pending.
+Status: PASS (strict) on 2026-05-25; independent QA rerun passed.
 
 Scenario:
 
@@ -295,6 +294,21 @@ Dev evidence:
   Deployments, iSCSI residue, processes, multipath residue, and test-scoped
   hostPath.
 
+QA evidence:
+
+- Run `20260525-123233-541b`: 36/36 actions PASS.
+- Sign-off:
+  `internal/docs/qa-assignments/phase31-restart-persistence-d5-qa-signoff.md`.
+- Hard evidence:
+  - `multi_volume_restart_status=ok`,
+  - `before_volume_count=3`,
+  - `after_volume_count=3`,
+  - `managed_volume_count=3`,
+  - `reader_verified_count=3`,
+  - `duplicate_publish_target_for_distinct_volume=false`,
+  - `cross_volume_authority_mixup=false`,
+  - `cleanup_status=ok`.
+
 Note:
 
 - The scenario intentionally treats `scripts/run-multi-volume-example.sh` as a
@@ -316,11 +330,20 @@ Acceptance:
   - unsupported disaster recovery.
 - Close report and finished plan are written.
 
+Status: PASS on 2026-05-25.
+
+Artifacts:
+
+- Close report:
+  `internal/docs/qa-assignments/phase31-kubernetes-restart-persistence-close-report.md`
+- Finished plan:
+  `internal/docs/finished-plans/phase31_finishedplan_kubernetes_restart_persistence.md`
+
 ## Progress
 
 - D1: PASS
 - D2: PASS
 - D3: PASS
-- D4: PASS (dev strict), QA product replay PASS, QA strict rerun pending
-- D5: PASS (dev), QA pending
-- D6: pending
+- D4: PASS (strict)
+- D5: PASS (strict)
+- D6: PASS

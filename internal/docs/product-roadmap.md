@@ -13,6 +13,60 @@ to runnable gates.
 - Do not claim production HA, broad distro compatibility, performance, upgrade
   safety, or scale beyond the separately gated multi-volume HA lab boundary.
 
+## Product Vision (North Star)
+
+Seaweed Block should become a **simple, stable, observable Kubernetes block
+platform** for teams that need real stateful workload reliability without
+operating a full Ceph-scale control plane from day one.
+
+Target product shape:
+
+```text
+install in one path (Helm/operator)
+-> provision many PVC volumes safely
+-> survive common failures automatically
+-> explain every recovery decision with evidence
+-> upgrade/rollback without state ambiguity
+```
+
+Competitive intent versus Ceph/OpenEBS:
+
+- We are not trying to out-feature them immediately.
+- We are trying to reach a trustworthy beta faster with a narrower, explicit
+  contract.
+- Every release must reduce "unknown behavior under failure", not just add
+  protocol/features.
+
+Maturity principle:
+
+- New capabilities are only "real" when they are
+  **functional + operational + core-stability** complete.
+- If a behavior cannot be diagnosed or cleaned up, it is not a product claim.
+
+## Maturity Gap To Ceph/OpenEBS
+
+Already proven in our gated path:
+
+- RF3 failover and interleaved multi-volume fault isolation.
+- iSCSI ALUA/dm-multipath transparent failover.
+- Helm lifecycle and cleanup evidence.
+- support bundle and read-only ops/dashboard surface.
+- ManagedVolume/Condition/event semantics as read-only foundation.
+
+Still behind mature platforms:
+
+- Mutating operator lifecycle (day-2 control plane).
+- returned-replica rebuild/reintegration/failback full loop.
+- backup/snapshot/restore and DR workflow.
+- broad compatibility matrix and long-horizon upgrade guarantees.
+- production SLO/performance characterization at scale.
+
+Vision-driven sequencing rule:
+
+1. First close reliability/control gaps that protect user data semantics.
+2. Then add lifecycle automation (operator mutating workflows).
+3. Then add enterprise data services (backup/restore/DR) and broad matrix/SLO.
+
 ## Roadmap Taxonomy
 
 Use these labels in plans and release notes:
@@ -31,8 +85,8 @@ ready.
 
 | Priority | Work | Type | Status | Why It Matters |
 |---|---|---|---|---|
-| P0 | Phase 31 Kubernetes Restart Persistence | Core Stability + Operational + Functional | active | Storage must not forget data, authority, or promoted primary after Kubernetes/product restart |
-| P0 | Phase 32 Read-Only Operator / Kubernetes Status Surface | Operational + Core Stability | next after Phase 31 | Resume the deferred operator/status surface after restart persistence is proven |
+| P0 | Phase 31 Kubernetes Restart Persistence | Core Stability + Operational + Functional | PASS | Storage must not forget data, authority, or promoted primary after Kubernetes/product restart |
+| P0 | Phase 32 Read-Only Operator / Kubernetes Status Surface | Operational + Core Stability | next | Resume the deferred operator/status surface now that restart persistence is proven |
 | P0 | Phase 29 Product-Owned Lifecycle And Cleanup Reliability | Operational + Core Stability | PASS | Cleanup/lifecycle is deterministic and auditable across active alpha loops |
 | P0 | Phase 30 Control Model / ManagedVolume Hardening | Core Stability + Operational | PASS | Stabilizes state ownership before mutating operator, rebuild/failback, NVMe ANA, or backup work |
 | P0 | Phase 28 Productized Operations And Operator Foundation | Operational + Core Stability | PASS | Turn Helm/scripts/evidence/model into one Kubernetes product operations loop before the next feature expansion |
@@ -92,8 +146,8 @@ own day-2 lifecycle without hiding unstable behavior.
 
 Type: Core Stability + Operational + Functional
 
-Current status: active, 83%. Started on 2026-05-25 after Phase 30 control model
-hardening closed.
+Current status: PASS, 100%. Started and closed on 2026-05-25 after Phase 30
+control model hardening closed.
 
 Goal:
 
@@ -111,10 +165,9 @@ Gate status:
 - D1 restart persistence contract review: PASS on 2026-05-25.
 - D2 durable Helm values / install contract: PASS on 2026-05-25.
 - D3 single-node restart gate: PASS on 2026-05-25.
-- D4 RF3 restart after promotion gate: PASS (dev strict) on 2026-05-25; QA
-  product-claim replay PASS, QA strict rerun pending.
-- D5 multi-volume restart smoke: PASS (dev) on 2026-05-25; QA pending.
-- D6 close gate: pending.
+- D4 RF3 restart after promotion gate: PASS (strict) on 2026-05-25.
+- D5 multi-volume restart smoke: PASS (strict) on 2026-05-25.
+- D6 close gate: PASS on 2026-05-25.
 
 Claim wording and QA checklist:
 
@@ -128,15 +181,15 @@ Non-goals:
 - no host disk loss survival,
 - no broad production SLO.
 
-### Deferred Next: Phase 32 - Read-Only Operator / Kubernetes Status Surface
+### Next: Phase 32 - Read-Only Operator / Kubernetes Status Surface
 
 Type: Operational + Core Stability
 
-Status: deferred until Phase 31 closes.
+Status: next.
 
-This is the previous next-step candidate. It should resume after restart
-persistence is proven, because operator status must not publish a stable-looking
-state that forgets authority or data across product/Kubernetes restart.
+This should resume now that restart persistence is proven. Operator status must
+not publish a stable-looking state that forgets authority or data across
+product/Kubernetes restart.
 
 Candidate scope:
 
