@@ -23,6 +23,7 @@ type OperatorClusterStatus struct {
 	VolumeCount        int                    `json:"volume_count"`
 	ReadyVolumeCount   int                    `json:"ready_volume_count"`
 	BlockedVolumeCount int                    `json:"blocked_volume_count"`
+	StaleVolumeCount   int                    `json:"stale_volume_count"`
 	Cleanup            *CleanupEvidence       `json:"cleanup,omitempty"`
 	Conditions         []ObservationCondition `json:"conditions,omitempty"`
 	NonClaims          []string               `json:"non_claims,omitempty"`
@@ -68,6 +69,27 @@ func BuildOperatorFoundationSnapshot(cluster ClusterEvidence) OperatorFoundation
 		case ManagedVolumeStatusBlocked, ManagedVolumeStatusInvalid, ManagedVolumeStatusUnsafe:
 			snapshot.Cluster.BlockedVolumeCount++
 		}
+		if managed.ReasonCode == ReasonEvidenceStale || hasCondition(managed.Conditions, ConditionEvidenceStale, "True") {
+			snapshot.Cluster.StaleVolumeCount++
+		}
+	}
+	if snapshot.Cluster.StaleVolumeCount > 0 && !hasCondition(snapshot.Cluster.Conditions, ConditionEvidenceStale, "True") {
+		snapshot.Cluster.Conditions = append(snapshot.Cluster.Conditions, ObservationCondition{
+			Type:     ConditionEvidenceStale,
+			Status:   "True",
+			Reason:   ReasonEvidenceStale,
+			Severity: "warning",
+			Message:  "one or more managed volumes have stale or unreachable evidence",
+		})
 	}
 	return snapshot
+}
+
+func hasCondition(conditions []ObservationCondition, conditionType, status string) bool {
+	for _, condition := range conditions {
+		if condition.Type == conditionType && (status == "" || condition.Status == status) {
+			return true
+		}
+	}
+	return false
 }

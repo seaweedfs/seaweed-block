@@ -97,6 +97,30 @@ func TestManagedVolumeProjection_RecoveredConditionForTransparentFailover(t *tes
 	}
 }
 
+func TestManagedVolumeProjection_EvidenceStaleIsNotReady(t *testing.T) {
+	projection := ProjectManagedVolume(ManagedVolumeFacts{
+		VolumeID:            "pvc-stale",
+		EvidenceStale:       true,
+		EvidenceStaleReason: ReasonEvidenceStale,
+		EvidenceRefs:        []string{"product/unreachable.txt"},
+	})
+
+	ready := findObservationCondition(projection.Conditions, "Ready")
+	stale := findObservationCondition(projection.Conditions, "EvidenceStale")
+	if ready == nil || stale == nil {
+		t.Fatalf("conditions=%+v", projection.Conditions)
+	}
+	if ready.Status != "Unknown" || ready.Reason != ReasonEvidenceStale {
+		t.Fatalf("ready=%+v", ready)
+	}
+	if stale.Status != "True" || stale.Severity != "warning" || stale.Reason != ReasonEvidenceStale {
+		t.Fatalf("stale=%+v", stale)
+	}
+	if projection.Status != ManagedVolumeStatusUnknown || projection.ReasonCode != ReasonEvidenceStale {
+		t.Fatalf("projection=%+v", projection)
+	}
+}
+
 func findObservationCondition(conditions []ObservationCondition, conditionType string) *ObservationCondition {
 	for i := range conditions {
 		if conditions[i].Type == conditionType {

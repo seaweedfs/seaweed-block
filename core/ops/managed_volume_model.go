@@ -71,6 +71,7 @@ const (
 	ReasonWriterMountFailed              = "writer_mount_failed"
 	ReasonHostPathNotMultipathed         = "host_path_not_multipathed"
 	ReasonTransparentHostPathRecovered   = "transparent_host_path_recovered"
+	ReasonEvidenceStale                  = "evidence_stale"
 
 	HostPathStateActiveOptimized = "active_optimized"
 	HostPathStateSinglePath      = "single_path"
@@ -87,26 +88,28 @@ type FactMeta struct {
 }
 
 type ManagedVolumeFacts struct {
-	VolumeID          string               `json:"volume_id,omitempty"`
-	Namespace         string               `json:"namespace,omitempty"`
-	PVCName           string               `json:"pvc_name,omitempty"`
-	PVName            string               `json:"pv_name,omitempty"`
-	StorageClass      string               `json:"storage_class,omitempty"`
-	ReplicationFactor int                  `json:"replication_factor,omitempty"`
-	AckProfile        string               `json:"ack_profile,omitempty"`
-	ClaimProfile      string               `json:"claim_profile,omitempty"`
-	Protocol          string               `json:"protocol,omitempty"`
-	ProductStatus     string               `json:"product_status,omitempty"`
-	ProductReason     string               `json:"product_reason,omitempty"`
-	KubernetesNodes   []KubernetesNodeFact `json:"kubernetes_nodes,omitempty"`
-	PVC               *PVCFact             `json:"pvc,omitempty"`
-	PodMounts         []PodMountFact       `json:"pod_mounts,omitempty"`
-	Authority         *AuthorityFact       `json:"authority,omitempty"`
-	Replicas          []ReplicaFact        `json:"replicas,omitempty"`
-	CSIStages         []CSIStageFact       `json:"csi_stages,omitempty"`
-	HostPaths         []HostPathFact       `json:"host_paths,omitempty"`
-	Workload          *WorkloadCheckFact   `json:"workload,omitempty"`
-	EvidenceRefs      []string             `json:"evidence_refs,omitempty"`
+	VolumeID            string               `json:"volume_id,omitempty"`
+	Namespace           string               `json:"namespace,omitempty"`
+	PVCName             string               `json:"pvc_name,omitempty"`
+	PVName              string               `json:"pv_name,omitempty"`
+	StorageClass        string               `json:"storage_class,omitempty"`
+	ReplicationFactor   int                  `json:"replication_factor,omitempty"`
+	AckProfile          string               `json:"ack_profile,omitempty"`
+	ClaimProfile        string               `json:"claim_profile,omitempty"`
+	Protocol            string               `json:"protocol,omitempty"`
+	ProductStatus       string               `json:"product_status,omitempty"`
+	ProductReason       string               `json:"product_reason,omitempty"`
+	EvidenceStale       bool                 `json:"evidence_stale,omitempty"`
+	EvidenceStaleReason string               `json:"evidence_stale_reason,omitempty"`
+	KubernetesNodes     []KubernetesNodeFact `json:"kubernetes_nodes,omitempty"`
+	PVC                 *PVCFact             `json:"pvc,omitempty"`
+	PodMounts           []PodMountFact       `json:"pod_mounts,omitempty"`
+	Authority           *AuthorityFact       `json:"authority,omitempty"`
+	Replicas            []ReplicaFact        `json:"replicas,omitempty"`
+	CSIStages           []CSIStageFact       `json:"csi_stages,omitempty"`
+	HostPaths           []HostPathFact       `json:"host_paths,omitempty"`
+	Workload            *WorkloadCheckFact   `json:"workload,omitempty"`
+	EvidenceRefs        []string             `json:"evidence_refs,omitempty"`
 }
 
 type PVCFact struct {
@@ -535,6 +538,9 @@ func classifyManagedVolume(p ManagedVolumeProjection, facts ManagedVolumeFacts) 
 	if p.States.Kubernetes == ManagedVolumeKubernetesPending {
 		return ManagedVolumeStatusBlocked, ReasonPVCUnbound
 	}
+	if facts.EvidenceStale || facts.ProductReason == ReasonEvidenceStale {
+		return ManagedVolumeStatusUnknown, defaultString(facts.EvidenceStaleReason, ReasonEvidenceStale)
+	}
 	if p.States.HostPath == ManagedVolumeHostPathTransparentReady &&
 		facts.Workload != nil &&
 		facts.Workload.WriterVerified &&
@@ -730,7 +736,7 @@ func managedVolumeConditionsForProjection(p ManagedVolumeProjection) []Observati
 			EvidenceRefs: append([]string(nil), p.EvidenceRefs...),
 		}}
 	default:
-		return []ObservationCondition{{
+		conditions := []ObservationCondition{{
 			Type:         "Ready",
 			Status:       "Unknown",
 			Reason:       reason,
@@ -738,6 +744,19 @@ func managedVolumeConditionsForProjection(p ManagedVolumeProjection) []Observati
 			Message:      "insufficient managed volume facts",
 			EvidenceRefs: append([]string(nil), p.EvidenceRefs...),
 		}}
+		if reason == ReasonEvidenceStale {
+			conditions[0].Severity = "warning"
+			conditions[0].Message = "managed volume evidence is stale or unreachable; readiness is not claimed"
+			conditions = append(conditions, ObservationCondition{
+				Type:         ConditionEvidenceStale,
+				Status:       "True",
+				Reason:       reason,
+				Severity:     "warning",
+				Message:      "bounded probe or fresh evidence is required before claiming readiness",
+				EvidenceRefs: append([]string(nil), p.EvidenceRefs...),
+			})
+		}
+		return conditions
 	}
 }
 

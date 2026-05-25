@@ -11,14 +11,23 @@ const (
 	ConditionBlocked         = "Blocked"
 	ConditionInvalid         = "Invalid"
 	ConditionCleanupRequired = "CleanupRequired"
+	ConditionEvidenceStale   = "EvidenceStale"
 )
 
 type ManagedVolumeCRDContract struct {
-	Group      string                 `json:"group"`
-	Version    string                 `json:"version"`
-	Resources  []ManagedVolumeCRDKind `json:"resources"`
-	Conditions []string               `json:"conditions"`
+	Group      string                   `json:"group"`
+	Version    string                   `json:"version"`
+	ReadOnly   bool                     `json:"read_only"`
+	RBAC       ManagedVolumeCRDRBAC     `json:"rbac"`
+	Resources  []ManagedVolumeCRDKind   `json:"resources"`
+	Conditions []string                 `json:"conditions"`
 	EventRules []ManagedVolumeEventRule `json:"event_rules"`
+}
+
+type ManagedVolumeCRDRBAC struct {
+	AllowedVerbs                []string `json:"allowed_verbs"`
+	ForbiddenActions            []string `json:"forbidden_actions"`
+	MutatingStorageVerbsAllowed bool     `json:"mutating_storage_verbs_allowed"`
 }
 
 type ManagedVolumeCRDKind struct {
@@ -37,8 +46,28 @@ type ManagedVolumeEventRule struct {
 
 func ManagedVolumeCRDContractDefinition() ManagedVolumeCRDContract {
 	return ManagedVolumeCRDContract{
-		Group:   "block.seaweedfs.com",
-		Version: "v1alpha1",
+		Group:    "block.seaweedfs.com",
+		Version:  "v1alpha1",
+		ReadOnly: true,
+		RBAC: ManagedVolumeCRDRBAC{
+			AllowedVerbs: []string{
+				"get",
+				"list",
+				"watch",
+				"update_status",
+				"patch_status",
+				"create_event",
+			},
+			ForbiddenActions: []string{
+				"promote",
+				"repair",
+				"rebuild",
+				"failback",
+				"delete_storage",
+				"cleanup_live_state",
+			},
+			MutatingStorageVerbsAllowed: false,
+		},
 		Resources: []ManagedVolumeCRDKind{{
 			Kind:       SwBlockClusterKind,
 			Scope:      "Namespaced",
@@ -53,11 +82,14 @@ func ManagedVolumeCRDContractDefinition() ManagedVolumeCRDContract {
 			},
 			StatusPaths: []string{
 				"status.conditions",
+				"status.observedAt",
 				"status.nodeCount",
 				"status.volumeCount",
 				"status.readyVolumeCount",
 				"status.blockedVolumeCount",
+				"status.staleVolumeCount",
 				"status.observedGeneration",
+				"status.evidenceRefs",
 			},
 			NonClaims: []string{
 				"no_mutating_storage_actions",
@@ -78,6 +110,7 @@ func ManagedVolumeCRDContractDefinition() ManagedVolumeCRDContract {
 				"status.status",
 				"status.reasonCode",
 				"status.conditions",
+				"status.observedAt",
 				"status.nonClaims",
 				"status.evidenceRefs",
 				"status.allowedActions",
@@ -95,6 +128,7 @@ func ManagedVolumeCRDContractDefinition() ManagedVolumeCRDContract {
 			ConditionBlocked,
 			ConditionInvalid,
 			ConditionCleanupRequired,
+			ConditionEvidenceStale,
 		},
 		EventRules: []ManagedVolumeEventRule{{
 			ConditionSeverity: "info",

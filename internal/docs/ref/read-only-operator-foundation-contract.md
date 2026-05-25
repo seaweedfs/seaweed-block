@@ -1,6 +1,6 @@
 # Read-Only Operator Foundation Contract
 
-Status: Phase 28 D11 working contract.
+Status: Phase 32 D2 alpha contract.
 
 Purpose: define the first operator-consumable status artifact without claiming
 a production Kubernetes operator or any mutating storage action.
@@ -64,6 +64,14 @@ Top-level fields:
 - `cluster`: aggregate status counts and cluster Conditions
 - `volumes`: `ManagedVolumeOperatorContract` entries
 
+Phase 32 adds:
+
+- `crd_contract.read_only=true`
+- `crd_contract.rbac.mutating_storage_verbs_allowed=false`
+- `crd_contract.rbac.allowed_verbs=get,list,watch,update_status,patch_status,create_event`
+- `cluster.stale_volume_count`
+- cluster `EvidenceStale=True` when any ManagedVolume has stale evidence
+
 The snapshot is deliberately close to a Kubernetes operator status model, but it
 is not a CRD instance yet. It is the bridge between current CLI/report/dashboard
 evidence and a future status-only operator.
@@ -91,6 +99,7 @@ Examples:
 - `Ready=True reason=first_volume_verified`
 - `Blocked=True reason=publish_target_loopback_cross_node`
 - `Recovered=True reason=transparent_host_path_recovered`
+- `EvidenceStale=True reason=evidence_stale`
 - `Warning reason=csi_node_image_pull_failed`
 
 The same reason codes must appear in:
@@ -112,6 +121,9 @@ Specific checks:
 
 - operator snapshot is always read-only,
 - blocked volumes carry warning events and stable reason codes,
+- stale evidence volumes carry `Ready=Unknown`, `EvidenceStale=True`, and
+  warning events,
+- cluster status counts `stale_volume_count`,
 - report writes `operator-snapshot.json`,
 - dashboard serves `/operator-snapshot.json`,
 - CLI output names the operator snapshot artifact.

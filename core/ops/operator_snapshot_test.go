@@ -87,3 +87,27 @@ func TestOperatorFoundationSnapshot_BlockedVolumeCarriesWarningEvent(t *testing.
 		t.Fatalf("missing warning event: %+v", volume.Events)
 	}
 }
+
+func TestOperatorFoundationSnapshot_CountsStaleEvidenceVolumes(t *testing.T) {
+	cluster := NewClusterEvidence(time.Date(2026, 5, 25, 20, 0, 0, 0, time.UTC))
+	cluster.ManagedVolumes = []ManagedVolumeProjection{ProjectManagedVolume(ManagedVolumeFacts{
+		VolumeID:            "pvc-stale",
+		EvidenceStale:       true,
+		EvidenceStaleReason: ReasonEvidenceStale,
+		EvidenceRefs:        []string{"product/unreachable.txt"},
+	})}
+
+	snapshot := BuildOperatorFoundationSnapshot(cluster)
+	if snapshot.Cluster.VolumeCount != 1 || snapshot.Cluster.StaleVolumeCount != 1 {
+		t.Fatalf("cluster status=%+v", snapshot.Cluster)
+	}
+	found := false
+	for _, condition := range snapshot.Cluster.Conditions {
+		if condition.Type == ConditionEvidenceStale && condition.Status == "True" && condition.Reason == ReasonEvidenceStale {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("missing cluster EvidenceStale condition: %+v", snapshot.Cluster.Conditions)
+	}
+}

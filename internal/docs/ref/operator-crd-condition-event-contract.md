@@ -1,6 +1,6 @@
 # Operator CRD / Condition / Event Contract
 
-Status: Phase 28 D10 working contract.
+Status: Phase 32 D2 alpha contract.
 
 Purpose: define the Kubernetes-native status surface before implementing a
 full operator.
@@ -51,11 +51,14 @@ Spec fields are deployment intent, not authority:
 Status comes from ManagedVolume aggregate and install/readiness evidence:
 
 - `status.conditions`
+- `status.observedAt`
 - `status.nodeCount`
 - `status.volumeCount`
 - `status.readyVolumeCount`
 - `status.blockedVolumeCount`
+- `status.staleVolumeCount`
 - `status.observedGeneration`
+- `status.evidenceRefs`
 
 Non-claims:
 
@@ -81,6 +84,7 @@ Status comes from `ManagedVolumeProjection`:
 - `status.status`
 - `status.reasonCode`
 - `status.conditions`
+- `status.observedAt`
 - `status.nonClaims`
 - `status.evidenceRefs`
 - `status.allowedActions`
@@ -103,6 +107,7 @@ Allowed condition types:
 | `Blocked` | A documented blocker prevents the user path. |
 | `Invalid` | Safety invariant violation or contradictory state. |
 | `CleanupRequired` | Functional path may be done, but residue remains. |
+| `EvidenceStale` | Passive evidence is stale, missing, unreachable, or contradictory. |
 
 Mapping from ManagedVolume projection:
 
@@ -114,6 +119,7 @@ Mapping from ManagedVolume projection:
 | `blocked` | `Ready=False`, `Blocked=True` |
 | `invalid` / `unsafe` | `Ready=False`, `Invalid=True` |
 | `unknown` | `Ready=Unknown` |
+| `unknown` with `reason=evidence_stale` | `Ready=Unknown`, `EvidenceStale=True` |
 
 Every condition must carry:
 
@@ -121,6 +127,31 @@ Every condition must carry:
 - message,
 - severity,
 - evidence refs when available.
+
+## RBAC Boundary
+
+The alpha contract is status-first and read-only.
+
+Allowed verbs:
+
+- `get`
+- `list`
+- `watch`
+- `update_status`
+- `patch_status`
+- `create_event`
+
+Forbidden actions:
+
+- `promote`
+- `repair`
+- `rebuild`
+- `failback`
+- `delete_storage`
+- `cleanup_live_state`
+
+`mutating_storage_verbs_allowed=false` is part of the machine-readable
+contract returned in `operator-snapshot.json`.
 
 ## Event Mapping
 
@@ -224,13 +255,16 @@ status:
 
 ## Gate Requirement
 
-D10 is dev-complete when:
+D2 is dev-complete when:
 
 - CRD contract code exists,
 - condition vocabulary is tested against ManagedVolume projection,
+- `EvidenceStale` is represented as a first-class condition,
+- cluster status counts stale volumes,
+- read-only RBAC boundary is encoded in the machine-readable contract,
 - event severity mapping is tested,
 - docs include ready and blocked examples,
 - no mutating action is exposed.
 
-D10 is close-ready only after QA/PM review confirms the CRD wording is
+D2 is close-ready only after QA/PM review confirms the CRD wording is
 understandable and does not over-claim operator functionality.

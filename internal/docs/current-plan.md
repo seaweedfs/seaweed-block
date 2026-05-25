@@ -1,6 +1,6 @@
 # Current Plan: Phase 32 - Negative-First Read-Only Operator Status Surface
 
-Status: active, 25% complete. Started on 2026-05-25 after Phase 31 restart
+Status: active, 35% complete. Started on 2026-05-25 after Phase 31 restart
 persistence closed.
 
 ## Product Goal
@@ -125,7 +125,32 @@ Acceptance:
 - Status fields classify stable vs provisional vs test-only.
 - RBAC is read-only except status/event publication.
 
-Status: pending.
+Status: dev PASS on 2026-05-25; QA pending.
+
+Implementation:
+
+- `ConditionEvidenceStale` and `ReasonEvidenceStale` are first-class.
+- `ManagedVolumeFacts{EvidenceStale:true}` projects to:
+  - `status=unknown`,
+  - `reason_code=evidence_stale`,
+  - `Ready status=Unknown`,
+  - `EvidenceStale status=True severity=warning`.
+- Operator events map stale evidence to a Kubernetes `Warning`.
+- `operator-snapshot.json` cluster status includes `stale_volume_count`.
+- CRD contract includes:
+  - `read_only=true`,
+  - `mutating_storage_verbs_allowed=false`,
+  - read/status/event verbs only,
+  - forbidden mutating storage actions.
+
+Validation:
+
+- `go test ./core/ops`
+- `go test ./cmd/sw-block`
+
+QA assignment:
+
+- `internal/docs/qa-assignments/phase32-d2-crd-condition-event-qa-assignment.md`
 
 ## D3: Happy-Path Status Projection Gate
 
@@ -280,7 +305,7 @@ Status: pending.
 
 - D1: PASS
 - D1a: PASS
-- D2: pending
+- D2: dev PASS, QA pending
 - D3: pending
 - D4: pending
 - D5: pending
@@ -288,4 +313,4 @@ Status: pending.
 - D7: pending
 - D8: pending
 
-Overall: 25%.
+Overall: 35%.
