@@ -146,7 +146,7 @@ own day-2 lifecycle without hiding unstable behavior.
 
 Type: Operational + Core Stability
 
-Current status: active, 75%. Started on 2026-05-25 after Phase 31 restart
+Current status: active, 85%. Started on 2026-05-25 after Phase 31 restart
 persistence closed.
 
 Goal:
@@ -172,10 +172,18 @@ Gate plan:
 - D2 CRD / Condition / Event alpha contract: PASS on 2026-05-25.
 - D3 happy-path status projection gate: PASS on 2026-05-25.
 - D4 blocked / negative status projection gate: PASS on 2026-05-25.
-- D5 restart / promotion status consistency gate: dev PASS, QA pending.
-- D6 multi-volume independence status gate: dev PASS, QA pending.
+- D5 restart / promotion status consistency gate: PASS on 2026-05-25.
+- D6 multi-volume independence status gate: PASS on 2026-05-25.
 - D7 stale evidence and bounded probe gate: pending.
 - D8 close gate: pending.
+
+Open D7 input:
+
+- D5 QA found a non-blocking report-replay precedence gap: regenerated report
+  can read an older pre-promotion `cluster-evidence.json` while newer
+  post-restart evidence exists under a different filename. D7 must make replay
+  choose current evidence deterministically or mark the surface
+  `EvidenceStale=True`.
 
 Non-goals:
 

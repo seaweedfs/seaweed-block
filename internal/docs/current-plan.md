@@ -1,6 +1,6 @@
 # Current Plan: Phase 32 - Negative-First Read-Only Operator Status Surface
 
-Status: active, 75% complete. Started on 2026-05-25 after Phase 31 restart
+Status: active, 85% complete. Started on 2026-05-25 after Phase 31 restart
 persistence closed.
 
 ## Product Goal
@@ -275,7 +275,7 @@ Acceptance:
 - Old primary is not resurrected as Ready.
 - Event timeline explains restart reload and authority persistence.
 
-Status: dev PASS on 2026-05-25; QA pending.
+Status: PASS on 2026-05-25.
 
 Implementation:
 
@@ -293,6 +293,16 @@ Validation:
 QA assignment:
 
 - `internal/docs/qa-assignments/phase32-d5-d6-status-surface-qa-assignment.md`
+
+QA sign-off:
+
+- `internal/docs/qa-assignments/phase32-d5-d6-status-surface-qa-signoff.md`
+
+Follow-up carried into D7:
+
+- D5 report regeneration can pick an older pre-promotion `cluster-evidence.json`
+  while the post-restart evidence is present under a different filename. This
+  is a stale-evidence precedence issue, not a D5 product-claim failure.
 
 Existing scenario seeds:
 
@@ -319,7 +329,7 @@ Acceptance:
 - no duplicate publish target for distinct volumes unless explicitly expected.
 - failed target volume status does not poison untouched volume status.
 
-Status: dev PASS on 2026-05-25; QA pending.
+Status: PASS on 2026-05-25.
 
 Implementation:
 
@@ -337,6 +347,10 @@ Validation:
 QA assignment:
 
 - `internal/docs/qa-assignments/phase32-d5-d6-status-surface-qa-assignment.md`
+
+QA sign-off:
+
+- `internal/docs/qa-assignments/phase32-d5-d6-status-surface-qa-signoff.md`
 
 Existing scenario seeds:
 
@@ -358,6 +372,9 @@ Acceptance:
   - support/report replay.
 - Every probe has timeout, evidence, and no mutation.
 - Failure to probe does not become `Ready=True`.
+- Report replay chooses current evidence deterministically or marks the replay
+  `EvidenceStale=True`; it must not silently publish an older primary when a
+  newer restart snapshot exists in the same bundle.
 
 Status: pending.
 
@@ -383,9 +400,9 @@ Status: pending.
 - D2: PASS
 - D3: PASS
 - D4: PASS
-- D5: dev PASS, QA pending
-- D6: dev PASS, QA pending
+- D5: PASS
+- D6: PASS
 - D7: pending
 - D8: pending
 
-Overall: 75%.
+Overall: 85%.
