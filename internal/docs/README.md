@@ -60,6 +60,7 @@ Public-facing docs belong in `docs/`.
 | `finished-plans/phase18_finishedplan_node_loss_survival_mvp.md` | Historical Node-Loss Survival plan: RF=3 sync-quorum Kubernetes-node-loss recovery through CSI/pod recreate on a surviving node. |
 | `finished-plans/phase19_finishedplan_control_plane_observation_ai_readable_ops_mvp.md` | Historical Control-Plane Observation plan: read-only master evidence API, AI-readable CLI export, product-owned event stream, and support-bundle evidence. |
 | `finished-plans/phase20_finishedplan_activation_day1_ops_mvp.md` | Historical Activation / Day-1 Ops plan: script-based v0.2 alpha install, first PVC, writer/reader checksum, read-only report, release note, and cleanup evidence. |
+| `finished-plans/phase29_finishedplan_lifecycle_cleanup_reliability.md` | Historical Phase 29 lifecycle/cleanup reliability plan closed by deterministic RF3 cleanup QA replay and cleanup evidence parity. |
 | `ref/production-readiness-plan.md` | Longer readiness reference and iSCSI P1-P6 detail. |
 | `ref/light-use-block-storage-ux-research.md` | Comparison of Longhorn, OpenEBS, Rook/Ceph, Piraeus/LINSTOR, and EBS CSI light-user install/operations UX. |
 | `ref/blockvolume-lifecycle-ownership-contract.md` | Product-owned generated blockvolume workload lifecycle ownership contract for the current plan. |

@@ -31,14 +31,14 @@ ready.
 
 | Priority | Work | Type | Status | Why It Matters |
 |---|---|---|---|---|
-| P0 | Phase 29 Product-Owned Lifecycle And Cleanup Reliability | Operational + Core Stability | active | Cleanup/lifecycle must be product-owned and repeatable before mutating operator work or rebuild/failback |
+| P0 | Phase 29 Product-Owned Lifecycle And Cleanup Reliability | Operational + Core Stability | PASS | Cleanup/lifecycle is deterministic and auditable across active alpha loops |
 | P0 | Phase 28 Productized Operations And Operator Foundation | Operational + Core Stability | PASS | Turn Helm/scripts/evidence/model into one Kubernetes product operations loop before the next feature expansion |
 | P0 | Publish v0.3.3 images and update doc pins | Operational | PASS | Phase 28 D12 is gated; users have a consumable immutable GHCR SHA for the operator-foundation surface |
 | P0 | Multipath stale-map cleanup verifier | Operational + Core Stability | PASS in Phase 28 D1 | QA found orphan dm-multipath maps after sessions were gone; cleanup evidence now covers this |
 | P0 | Phase 27 Multi-Volume HA Independence | Functional + Core Stability | PASS | Proves RF3 multi-volume readiness, CSI reattach, mounted transparent failover, and interleaved failover isolation |
 | P0 | ManagedVolume / CRD / Condition contract | Core Stability + Operational | PASS in Phase 28 D12 | Operator, dashboard, report, and support bundle must consume one state model |
 | P1 | Read-only operator foundation | Operational | PASS in Phase 28 D12 | Kubernetes-native day-2 loop starts with status, Conditions, Events, and no mutating storage actions |
-| P1 | Product-owned cleanup/lifecycle ownership | Operational + Core Stability | partial | Scripts still own too much lifecycle and cleanup |
+| P1 | Product-owned cleanup/lifecycle ownership | Operational + Core Stability | seed closed in Phase 29 | Scripts still own execution, but ownership/evidence contracts are now explicit |
 | P1 | Control Model Stabilization Gate | Core Stability | required before operator-grade operations | Operation layer and future operator need stable state, action, and evidence contracts |
 | P1 | ManagedVolume model hardening for operator dependency | Core Stability | seed closed, folds into model gate | Operator/dashboard must consume one semantic model, not invent truth |
 | P1 | Returned-replica rebuild/reintegration/failback | Functional + Core Stability | pending | Required for credible sustained HA after recovery |
@@ -89,7 +89,7 @@ own day-2 lifecycle without hiding unstable behavior.
 
 Type: Operational + Core Stability
 
-Current status: active, 80%. Started on 2026-05-24 after Phase 28 D13
+Current status: PASS, 100%. Started on 2026-05-24 after Phase 28 D13
 published-image release packaging passed.
 
 Goal:
@@ -120,11 +120,19 @@ Gate status:
   snapshot): PASS on 2026-05-24. Artifact:
   `internal/docs/ref/phase29-lifecycle-evidence-contract.md`; `core/ops`
   and `cmd/sw-block` tests validate bundle cleanup evidence propagation.
-- D4 deterministic cleanup reruns across RF3 multi-volume gates: DEV PASS on
-  2026-05-24, 181/181 actions across five scenarios. Independent QA replay
-  assigned in
-  `internal/docs/qa-assignments/phase29-deterministic-cleanup-qa-assignment.md`.
-- D5 phase close with independent QA replay.
+- D4 deterministic cleanup reruns across RF3 multi-volume gates: PASS on
+  2026-05-24. QA replay: 181/181 actions across five scenarios.
+  Validation report:
+  `internal/docs/qa-assignments/phase29-deterministic-cleanup-qa-validation.md`.
+- D5 phase close with independent QA replay: PASS. Close report:
+  `internal/docs/qa-assignments/phase29-lifecycle-cleanup-reliability-close-report.md`.
+
+D5 hardening:
+
+- `scripts/verify-helm-cleanup.sh` now emits `iscsi_residue_count` directly in
+  `cleanup-summary.txt`.
+- Quick validation: `cleanup-residue-chain.yaml` run `20260524-215539-4285`,
+  PASS, 13/13 actions.
 
 Non-goals:
 

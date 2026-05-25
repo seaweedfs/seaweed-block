@@ -41,6 +41,16 @@ require_cmd() {
   fi
 }
 
+count_file_matches() {
+  local path="$1"
+  local pattern="$2"
+  if [[ ! -f "$path" ]]; then
+    echo 0
+    return
+  fi
+  grep -c "$pattern" "$path" 2>/dev/null || true
+}
+
 log "artifact_dir=$ARTIFACT_DIR"
 log "helm_release=$HELM_RELEASE"
 log "helm_namespace=$HELM_NAMESPACE"
@@ -105,6 +115,10 @@ fi
 if grep -q "$IQN_SUBSTR" "$ARTIFACT_DIR/iscsi-nodes.after-cleanup.txt"; then
   mark_fail "iscsi_node_records_present"
 fi
+ISCSI_RESIDUE_COUNT=$(( \
+  $(count_file_matches "$ARTIFACT_DIR/iscsi-sessions.after-cleanup.txt" "$IQN_SUBSTR") + \
+  $(count_file_matches "$ARTIFACT_DIR/iscsi-nodes.after-cleanup.txt" "$IQN_SUBSTR") \
+))
 
 capture_multipath_state() {
   if command -v multipath >/dev/null 2>&1; then
@@ -214,6 +228,7 @@ fi
   echo "helm_namespace=$HELM_NAMESPACE"
   echo "iqn_substr=$IQN_SUBSTR"
   echo "k8s_residue_count=$(wc -l <"$ARTIFACT_DIR/k8s-residue.after-cleanup.txt")"
+  echo "iscsi_residue_count=$ISCSI_RESIDUE_COUNT"
   echo "process_residue_count=$(wc -l <"$ARTIFACT_DIR/process-residue.after-cleanup.txt")"
   echo "multipath_residue_count=$(wc -l <"$ARTIFACT_DIR/multipath-residue.after-cleanup.txt")"
   echo "hostpath_residue_count=$(wc -l <"$ARTIFACT_DIR/hostpath-residue.after-cleanup.txt")"
