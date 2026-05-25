@@ -59,6 +59,17 @@ Acceptance:
   - complete k3s shutdown/start is not yet gated.
 - Define non-claims and exact restart claim boundary.
 
+PM/QA claim checklist:
+
+- Use wording from
+  `internal/docs/ref/phase31-restart-persistence-claim-and-qa-checklist.md`.
+- Validate authority monotonicity: primary/epoch/publish target must not roll
+  back.
+- Validate stale-primary fencing with a direct stale path I/O probe, not only
+  role text.
+- Validate data continuity with writer/reader checksum before/after restart.
+- Validate cross-volume isolation in the multi-volume restart smoke.
+
 ## D2: Durable Helm Values / Install Contract
 
 Goal: make durable state an explicit Helm install mode.
@@ -122,7 +133,8 @@ Acceptance:
   happened and is evidenced.
 - `after_restart_epoch >= before_restart_epoch`.
 - publish target matches the post-promotion authority line.
-- stale old-primary I/O success remains 0.
+- stale old-primary I/O success remains 0 and is measured by a direct stale
+  path probe.
 - reader checksum passes after restart.
 
 ## D5: Multi-Volume Restart Smoke

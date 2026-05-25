@@ -32,6 +32,7 @@ ready.
 | Priority | Work | Type | Status | Why It Matters |
 |---|---|---|---|---|
 | P0 | Phase 31 Kubernetes Restart Persistence | Core Stability + Operational + Functional | active | Storage must not forget data, authority, or promoted primary after Kubernetes/product restart |
+| P0 | Phase 32 Read-Only Operator / Kubernetes Status Surface | Operational + Core Stability | next after Phase 31 | Resume the deferred operator/status surface after restart persistence is proven |
 | P0 | Phase 29 Product-Owned Lifecycle And Cleanup Reliability | Operational + Core Stability | PASS | Cleanup/lifecycle is deterministic and auditable across active alpha loops |
 | P0 | Phase 30 Control Model / ManagedVolume Hardening | Core Stability + Operational | PASS | Stabilizes state ownership before mutating operator, rebuild/failback, NVMe ANA, or backup work |
 | P0 | Phase 28 Productized Operations And Operator Foundation | Operational + Core Stability | PASS | Turn Helm/scripts/evidence/model into one Kubernetes product operations loop before the next feature expansion |
@@ -114,6 +115,10 @@ Gate status:
 - D5 multi-volume restart smoke: pending.
 - D6 close gate: pending.
 
+Claim wording and QA checklist:
+
+- `internal/docs/ref/phase31-restart-persistence-claim-and-qa-checklist.md`
+
 Non-goals:
 
 - no fresh-cluster restore,
@@ -121,6 +126,26 @@ Non-goals:
 - no returned-replica rebuild/failback,
 - no host disk loss survival,
 - no broad production SLO.
+
+### Deferred Next: Phase 32 - Read-Only Operator / Kubernetes Status Surface
+
+Type: Operational + Core Stability
+
+Status: deferred until Phase 31 closes.
+
+This is the previous next-step candidate. It should resume after restart
+persistence is proven, because operator status must not publish a stable-looking
+state that forgets authority or data across product/Kubernetes restart.
+
+Candidate scope:
+
+- CRD/status schema for `SwBlockVolume` and `SwBlockCluster`,
+- read-only status projection from ManagedVolume,
+- Conditions: `Ready`, `Blocked`, `Recovering`, `Recovered`,
+  `CleanupRequired`,
+- Kubernetes Events from existing reason codes,
+- Helm install option gated as alpha/read-only,
+- no mutating reconcile, promote, repair, rebuild, failback, delete, or backup.
 
 ### Phase 30 - Control Model / ManagedVolume Hardening
 
