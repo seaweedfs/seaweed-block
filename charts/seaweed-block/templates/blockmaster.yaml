@@ -26,6 +26,20 @@ spec:
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet
       serviceAccountName: {{ include "seaweed-block.fullname" . }}-master
+      {{- if .Values.blockmaster.stateHostPath }}
+      initContainers:
+        - name: state-permissions
+          image: {{ include "seaweed-block.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/bin/sh", "-c"]
+          args:
+            - "mkdir -p /var/lib/sw-block/authority /var/lib/sw-block/lifecycle && chown -R 65532:65532 /var/lib/sw-block"
+          securityContext:
+            runAsUser: 0
+          volumeMounts:
+            - name: state
+              mountPath: /var/lib/sw-block
+      {{- end }}
       containers:
         - name: blockmaster
           image: {{ include "seaweed-block.image" . | quote }}

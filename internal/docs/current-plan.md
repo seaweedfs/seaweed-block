@@ -1,6 +1,6 @@
 # Current Plan: Phase 31 - Kubernetes Restart Persistence
 
-Status: active, 33% complete. Started on 2026-05-25 after Phase 30 control model
+Status: active, 50% complete. Started on 2026-05-25 after Phase 30 control model
 hardening closed.
 
 ## Product Goal
@@ -113,6 +113,9 @@ Validation:
 - `helm template ... -f hostpath-values.yaml` renders
   `--launcher-state-hostpath=/var/lib/sw-block` and a master state hostPath
   mount.
+- D3 dev run exposed and fixed the blockmaster hostPath permission gap:
+  the chart now adds a root `state-permissions` initContainer for hostPath
+  state, matching the generated blockvolume permission model.
 
 ## D3: Single-Node Restart Gate
 
@@ -137,6 +140,25 @@ Acceptance:
 - Data checksum survives.
 - Authority epoch/publish target are consistent after restart.
 - `sw-block ops report` contains restart evidence and no unsupported claim.
+
+Status: PASS (dev) on 2026-05-25; independent QA rerun pending.
+
+Scenario:
+
+- `testops/scenarios/helm-single-node-restart-persistence-chain.yaml`
+
+Dev evidence:
+
+- Run `20260525-103441-2e9c`: 39/39 actions PASS in 2m39s.
+- Helm values generated `restart_persistence_mode=hostpath`.
+- Helm template rendered `--launcher-state-hostpath=/var/lib/sw-block/testops-...`.
+- Writer/reader verified before restart.
+- `sudo systemctl restart k3s` completed and blockmaster/CSI/blockvolume
+  rolled out again.
+- Reader verified `/data/demo.bin: OK` after restart.
+- Report summary contained `managed_volume=... status=ready`.
+- Cleanup removed Helm release, app resources, iSCSI residue, processes, and
+  test-scoped hostPath.
 
 ## D4: RF3 Restart After Promotion Gate
 
@@ -206,7 +228,7 @@ Acceptance:
 
 - D1: PASS
 - D2: PASS
-- D3: pending
+- D3: PASS (dev), QA pending
 - D4: pending
 - D5: pending
 - D6: pending
