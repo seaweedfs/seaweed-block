@@ -111,8 +111,8 @@ for a recovery stream at any given time.
 
 ## Quick Start
 
-Use [First volume on Kubernetes](docs/quickstart-kubernetes.md). For v0.3
-alpha, start with Helm on a supported Kubernetes/k3s lab.
+Use [First volume on Kubernetes](docs/quickstart-kubernetes.md). For the
+current alpha, start with Helm on a supported Kubernetes/k3s lab.
 
 Fast path:
 
@@ -176,7 +176,7 @@ ghcr.io/seaweedfs/seaweed-block:sha-<commit>
 ghcr.io/seaweedfs/seaweed-block-csi:sha-<commit>
 ```
 
-Current validated v0.3.3 Day-1 / productized-operations image tag:
+Current validated alpha image tag:
 `sha-6260e46fd3be`.
 
 Published image digests:
@@ -219,18 +219,55 @@ sw-block ops inventory \
   --out /tmp/sw-block-inventory
 ```
 
+For support-bundle replay on another machine:
+
+```bash
+bash scripts/collect-helm-support-bundle.sh "$PWD"
+sw-block ops report --from-bundle <bundle-or-artifact-dir> --out /tmp/sw-block-report
+sw-block ops explain volume <volume-id> --from-bundle <bundle-or-artifact-dir>
+sw-block ops dashboard --from-bundle <bundle-or-artifact-dir> --listen 127.0.0.1:9334
+```
+
+The status surface is negative-first. If evidence is missing or stale, the
+system reports `Ready=Unknown` / `EvidenceStale=True` rather than claiming a
+false ready state. A blocked example such as `csi_node_image_pull_failed`
+appears consistently in `summary.txt`, `operator-snapshot.json`, dashboard
+JSON, explain output, and support bundles.
+
+Strict cleanup:
+
+```bash
+helm uninstall sw-block --namespace kube-system
+bash scripts/uninstall-k8s-alpha.sh "$PWD"
+bash scripts/verify-helm-cleanup.sh
+```
+
+The cleanup verifier checks Kubernetes resources, iSCSI sessions, iSCSI node
+DB records, dm-multipath maps, `dmsetup` devices, product processes, and
+hostPath residue.
+
 ## What Users Can Do Today
 
-- Install the alpha stack on a supported Kubernetes/k3s lab.
-- Create PVC-backed block volumes through Kubernetes.
-- Run app pods that mount the PVC and verify file data.
-- Inspect cluster, volume, replica, primary, frontend, and event evidence.
-- Generate a local read-only HTML status report or dashboard from live master
-  evidence or a saved support bundle.
+- Install Seaweed Block through Helm on a supported Kubernetes/k3s lab, create
+  the first PVC, run a writer pod, run a replacement reader pod, inspect a
+  read-only report/dashboard, and uninstall cleanly.
+- Use normal Kubernetes PVC semantics: `kubectl apply` a PVC, let CSI
+  dynamically provision the backing block volume, and mount it from app pods.
+- Run multiple PVC-backed volumes in the gated lab path. The current QA gates
+  validate three RF=3 volumes with independent primaries and publish targets.
+- Validate restart persistence in the hostPath-backed alpha path. The gated
+  restart tests verify data remains readable and promoted authority does not
+  roll back after k3s restart.
+- Exercise gated recovery paths: CSI reattach with pod recreate, transparent
+  mounted failover through iSCSI ALUA/dm-multipath on the proven Stage-2 path,
+  and interleaved multi-volume failover isolation.
+- Collect support evidence and replay it offline through `sw-block ops report`,
+  `sw-block ops explain`, and the local read-only dashboard.
 - Inspect `operator-snapshot.json` as the read-only operator-facing status
   projection.
-- Collect inventory and product evidence bundles for support.
-- Exercise documented recovery gates in TestOps/lab environments.
+
+These are alpha, gate-backed capabilities for supported labs. They are not
+broad production HA, broad platform compatibility, or SLO commitments.
 
 ## What Users Should Not Expect Yet
 

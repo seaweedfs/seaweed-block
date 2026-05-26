@@ -1,6 +1,6 @@
 # Kubernetes Quick Start
 
-This guide is the v0.3.x alpha path for Seaweed Block on Kubernetes.
+This guide is the current alpha path for Seaweed Block on Kubernetes.
 
 It shows the user loop:
 
@@ -132,7 +132,7 @@ sw-block ops generate-helm-values \
   --csi-image ghcr.io/seaweedfs/seaweed-block-csi:sha-<commit>
 ```
 
-Current validated v0.3.3 Day-1 / productized-operations image tag:
+Current validated alpha image tag:
 `sha-6260e46fd3be`.
 
 Published image digests:
@@ -258,6 +258,16 @@ the same evidence locally over HTTP. `operator-snapshot.json` uses the same
 ManagedVolume status vocabulary as the report/dashboard and is the status-only
 foundation for future Kubernetes operator work.
 
+Important status vocabulary:
+
+- `Ready=True reason=first_volume_verified` means the report has positive
+  writer/reader evidence for the volume.
+- `Blocked=True reason=<stable_reason_code>` means the product found a known
+  blocker, such as `csi_node_image_pull_failed`.
+- `EvidenceStale=True` or `Ready=Unknown` means the evidence is missing,
+  stale, or still reconverging. The alpha status surface should not claim
+  `Ready=True` without current evidence.
+
 Serve the collected bundle:
 
 ```bash
@@ -367,22 +377,35 @@ the alpha stack:
 ```bash
 helm uninstall sw-block --namespace kube-system
 bash scripts/uninstall-k8s-alpha.sh "$PWD"
+bash scripts/verify-helm-cleanup.sh
 ```
 
-Verify:
+The uninstall script removes Kubernetes resources and scrubs Seaweed Block
+iSCSI sessions and iSCSI node DB records. The verifier checks the same residue
+classes used by release QA.
+
+Manual spot checks:
 
 ```bash
 kubectl get sc | grep sw-block || echo "no sw-block StorageClass"
 kubectl get deploy -A | grep sw-block || echo "no sw-block deployments"
 sudo iscsiadm -m session || true
+sudo iscsiadm -m node | grep io.seaweedfs || echo "no Seaweed Block iSCSI node records"
 ```
 
 Expected clean state:
 
 ```text
+cleanup_status=ok
+k8s_residue_count=0
+iscsi_residue_count=0
+multipath_residue_count=0
+process_residue_count=0
+hostpath_residue_count=0
 no sw-block StorageClass
 no sw-block deployments
 iscsiadm: No active sessions.
+no Seaweed Block iSCSI node records
 ```
 
 Do not run broad cluster cleanup commands in a shared cluster unless you know no
