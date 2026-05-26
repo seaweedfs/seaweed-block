@@ -1,5 +1,11 @@
 # Seaweed Block Architecture
 
+> Document status: engineering architecture reference. Some operational
+> examples in this file may lag the latest alpha release gates. Use
+> [`quickstart-kubernetes.md`](quickstart-kubernetes.md) and
+> [`releases/README.md`](releases/README.md) as the source of truth for current
+> user-facing install, cleanup, and capability claims.
+
 `seaweed-block` is a lightweight Kubernetes block-storage project. The current
 alpha MVP is intentionally narrow: it proves the main control/data path before
 expanding into a full storage operator.

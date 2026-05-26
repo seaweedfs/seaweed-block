@@ -1,5 +1,11 @@
 # Seaweed Block Developer Architecture
 
+> Document status: contributor architecture reference. It explains module
+> boundaries and design rules, but it is not the release-claim source. Use
+> [`quickstart-kubernetes.md`](quickstart-kubernetes.md) and
+> [`releases/README.md`](releases/README.md) for the current validated user
+> path and non-claims.
+
 This document is for developers who want to understand or contribute to
 `seaweed-block`. It describes the current alpha architecture without relying on
 internal planning labels.

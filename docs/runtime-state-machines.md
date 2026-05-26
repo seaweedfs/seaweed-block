@@ -1,5 +1,10 @@
 # Runtime State Machines
 
+> Document status: protocol/model reference. It is useful for reading runtime
+> code and protocol boundaries, but it is not the source of truth for current
+> release claims. Use [`quickstart-kubernetes.md`](quickstart-kubernetes.md)
+> and [`releases/README.md`](releases/README.md) for validated user behavior.
+
 This is a lightweight map for engineers reading the runtime code for the first
 time. It is descriptive, not a normative protocol specification.
 

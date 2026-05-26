@@ -318,11 +318,14 @@ bash scripts/run-k8s-alpha.sh "$PWD"
 
 More detail:
 
-- [docs/releases/README.md](docs/releases/README.md)
-- [docs/architecture.md](docs/architecture.md)
-- [docs/developer-architecture.md](docs/developer-architecture.md)
-- [docs/runtime-state-machines.md](docs/runtime-state-machines.md)
-- [docs/roadmap.md](docs/roadmap.md)
+- User path and claims: [docs/quickstart-kubernetes.md](docs/quickstart-kubernetes.md)
+  and [docs/releases/README.md](docs/releases/README.md).
+- Current public planning: [docs/roadmap.md](docs/roadmap.md).
+- Design references: [docs/architecture.md](docs/architecture.md),
+  [docs/developer-architecture.md](docs/developer-architecture.md), and
+  [docs/runtime-state-machines.md](docs/runtime-state-machines.md). These are
+  engineering references; use the quickstart and release notes as the source of
+  truth for current user-facing claims.
 
 ## License
 
