@@ -96,5 +96,29 @@ else
   echo "iscsiadm unavailable" >"$ARTIFACT_DIR/iscsi-sessions.after-delete.txt"
 fi
 
+log "delete stale Seaweed Block iSCSI node records"
+if command -v iscsiadm >/dev/null 2>&1; then
+  if command -v sudo >/dev/null 2>&1; then
+    ISCSIADM=(sudo -n iscsiadm)
+  else
+    ISCSIADM=(iscsiadm)
+  fi
+  "${ISCSIADM[@]}" -m node >"$ARTIFACT_DIR/iscsi-nodes.before-scrub.txt" 2>&1 || true
+  awk '/io\.seaweedfs/ {print $1, $2}' "$ARTIFACT_DIR/iscsi-nodes.before-scrub.txt" | while read -r portal target; do
+    if [[ -z "$portal" || -z "$target" ]]; then
+      continue
+    fi
+    {
+      echo "portal=$portal target=$target"
+      "${ISCSIADM[@]}" -m node -T "$target" -p "$portal" --logout || true
+      "${ISCSIADM[@]}" -m node -T "$target" -p "$portal" -o delete || true
+    } >>"$ARTIFACT_DIR/delete-iscsi-node-records.log" 2>&1
+  done
+  "${ISCSIADM[@]}" -m node >"$ARTIFACT_DIR/iscsi-nodes.after-scrub.txt" 2>&1 || true
+else
+  echo "iscsiadm unavailable" >"$ARTIFACT_DIR/iscsi-nodes.before-scrub.txt"
+  echo "iscsiadm unavailable" >"$ARTIFACT_DIR/iscsi-nodes.after-scrub.txt"
+fi
+
 log "PASS: seaweed-block alpha stack uninstall requested"
 log "artifacts=$ARTIFACT_DIR"
