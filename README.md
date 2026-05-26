@@ -24,6 +24,19 @@ install on Kubernetes
 
 This is an **alpha** product path for supported lab clusters, not production.
 
+## Feature & Status
+
+| Feature | Status | Feature | Status |
+|---|---|---|---|
+| Kubernetes PVC provisioning | Available | Helm install path | Available |
+| First PVC writer/reader verification | Available | Read-only report/dashboard | Available |
+| Support-bundle replay | Available | Negative-first status reasons | Available |
+| Multi-volume RF=3 lab path | Gated | CSI reattach recovery | Gated |
+| iSCSI ALUA/dm-multipath mounted failover | Gated | Restart persistence with hostPath | Gated |
+| Read-only operator snapshot | Partial | Production operator lifecycle | Planned |
+| Backup/snapshot/restore | Planned | Returned-replica rebuild/failback | Planned |
+| NVMe ANA parity | Planned | Production SLO/performance claims | Not claimed |
+
 ## What You Can Do Today
 
 - Install Seaweed Block through Helm on a supported Kubernetes/k3s lab.
