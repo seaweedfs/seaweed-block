@@ -44,13 +44,6 @@ engines that project from it.
   defines the Phase 22 center of gravity: a PVC-backed `ManagedVolume` read
   model that composes K8s, CSI, authority, replica, host-path, workload, and
   evidence facts.
-- [`layered-participant-authority-master-executor-model.md`](./layered-participant-authority-master-executor-model.md)
-  defines the reusable Participant / Fact Authority / Master / Executor
-  hierarchy: participants emit observations, fact authorities publish
-  authoritative facts, masters compute collective state and allowed actions,
-  masters normally consume passive fact streams but may request bounded probes
-  at high-impact decision boundaries, executors perform side effects, and a
-  domain master may become a fact authority for the next higher layer.
 - [`engine-design-guidelines.md`](./engine-design-guidelines.md)
   defines the reusable engine/control-plane method: facts, context,
   multi-state projections, invariant checks, action contracts, executor
@@ -71,7 +64,7 @@ engines that project from it.
 Any behavior change that affects authority, recovery, CSI attach, host path,
 Kubernetes node behavior, or support evidence should answer:
 
-1. Which Fact Authority publishes the new fact?
+1. Which truth domain owns the new fact?
 2. Which invariant proves the behavior?
 3. Which anti-pattern did we check against?
 4. Is this a projection, or does it create authority?

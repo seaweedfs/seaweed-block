@@ -1,443 +1,186 @@
-# Current Plan: Phase 32 - Negative-First Read-Only Operator Status Surface
+# Current Plan: Phase 25 - v0.3 Helm + Observable First-Volume Release
 
-Status: PASS, 100% complete. Started and closed on 2026-05-25 after Phase 31
-restart persistence closed.
+Status: closed, 100% complete. Plan simplified and closed on 2026-05-22.
+
+Reference:
+
+- `internal/docs/ref/product-delivery-review-simple-stable-observable-block.md`
 
 ## Product Goal
 
-Make the Kubernetes-facing operations surface truthful under both normal and
-bad states.
-
-The target user experience is:
+Deliver a simple, stable, observable Kubernetes block alpha:
 
 ```text
-Helm install Seaweed Block
--> create one or more PVCs
--> status is visible through Kubernetes-native objects, Conditions, Events,
-   report, dashboard, and support bundle
--> failures are reported as Blocked/Unknown/CleanupRequired with stable reasons
--> no read-only surface invents Ready when evidence is stale, missing, or
-   contradictory
+Helm install
+-> first PVC
+-> writer/reader data check
+-> read-only report/dashboard
+-> clean uninstall
+-> docs and release note match the exact claim
 ```
 
-This phase is intentionally negative-first. Happy-path status is not enough.
-The gate must prove that known failure classes are visible, bounded, and
-non-mutating.
+This phase was release reconciliation and hardening. It had two steps only:
 
-## Source Inputs
-
-- External failure lessons:
-  `C:/work/seaweedfs/sw-block/design/external-failure-taxonomy.md`
-- Semantic constraints:
-  `C:/work/seaweedfs/sw-block/design/v3-semantic-constraint-checklist.md`
-- Control model:
-  `internal/docs/ref/phase30-control-state-dependency-review.md`
-- Restart persistence:
-  `internal/docs/ref/phase31-restart-persistence-claim-and-qa-checklist.md`
-- Evidence vocabulary:
-  `internal/docs/ref/multi-volume-ha-support-evidence-contract.md`
-- Phase 32 mapping:
-  `internal/docs/ref/phase32-negative-first-operator-status-plan.md`
+```text
+D1: docs + release claim alignment - PASS
+D2: gate replay + close evidence - PASS
+```
 
 ## Scope Contract
 
 | In | Out |
 |---|---|
-| read-only Kubernetes status surface for `SwBlockCluster` / `SwBlockVolume` or equivalent alpha CRD shape | mutating promote / repair / rebuild / failback / delete actions |
-| ManagedVolume projection to Conditions and Events | backup / snapshot / restore |
-| stable reason codes for Ready, Blocked, Recovered, CleanupRequired, Unknown, EvidenceStale | NVMe ANA feature work |
-| negative-first QA using existing failure scenarios | production SLO or broad compatibility matrix |
-| status/dashboard/report/operator-snapshot vocabulary alignment | operator-owned lifecycle mutation |
-| bounded active probe policy for stale or high-impact state | replacing TestOps with a full controller/agent implementation |
+| Helm release hardening | CRD/operator implementation |
+| README / quickstart / release note alignment | new mutating admin action |
+| single-node and multi-node Helm gate replay | new protocol capability |
+| dashboard/report evidence consistency | model or protocol refactor |
+| immutable image / digest documentation | backup/snapshot/restore |
+| cleanup and host residue verification | rebuild/reintegration/failback |
 
-## D1: Negative-First Contract And Failure Matrix
+Principle: Phase 25 may take small bug fixes only when they block the v0.3 user
+path. No model rewrite, no operator controller, no broad architecture refactor.
 
-Goal: turn the external failure taxonomy into executable operator-status
-requirements.
+## Current Closed Inputs
 
-Acceptance:
+As of 2026-05-22:
 
-- Each major external failure class maps to at least one status rule:
-  - liveness misjudgment,
-  - stale epoch/state,
-  - address-derived identity,
-  - stale health/durability,
-  - partial cleanup,
-  - recovery starvation / thundering herd.
-- Each status rule maps to:
-  - Condition type,
-  - reason code,
-  - evidence path,
-  - existing or new TestOps scenario.
-- The matrix explicitly says which failures are covered now and which remain
-  future work.
+- Phase 20 Day-1 activation: closed.
+- Phase 22 ManagedVolume model: closed for scope.
+- Phase 23 operations surface/operator-readiness contract: closed for scope.
+- Phase 24 hosted read-only dashboard: closed for scope.
 
-Status: PASS on 2026-05-25.
+## D1: Docs + Release Claim Alignment
 
-Artifact:
+Goal: make the user-facing product story match the current code and gates.
 
-- `internal/docs/ref/phase32-negative-first-operator-status-plan.md`
-- QA/TestOps assignment:
-  `internal/docs/qa-assignments/phase32-testops-product-grade-validation-assignment.md`
-
-## D1a: TestOps Product-Grade Validation Layer
-
-Goal: make TestOps the external auditor for Phase 32 status truthfulness.
-
-Acceptance:
-
-- QA classifies existing scenarios into happy, negative, restart,
-  multi-volume, cleanup, and runner-native buckets.
-- QA produces a negative-status evidence review for at least one blocked path.
-- Runner primitive gaps are stated with acceptance cases, not only complaints.
-- Failure snapshot standard is defined.
-- The runner action backlog reflects Phase 32 needs.
-
-Status: PASS on 2026-05-25.
+Status: PASS on 2026-05-22.
 
 Artifacts:
 
-- `internal/docs/qa-assignments/phase32-testops-product-grade-validation-assignment.md`
-- `internal/docs/qa-assignments/phase32-testops-scenario-inventory.md`
-- `internal/docs/qa-assignments/phase32-negative-status-evidence-review.md`
-- `internal/docs/qa-assignments/phase32-runner-action-backlog-addendum.md`
-- `internal/docs/qa-assignments/phase32-failure-snapshot-standard.md`
-- `internal/docs/ref/testops-runner-action-backlog.md`
+- `internal/docs/product-roadmap.md`
+- `README.md`
+- `docs/quickstart-kubernetes.md`
+- `docs/releases/v0.3-alpha.md`
+- `docs/releases/README.md`
 
-## D2: CRD / Condition / Event Alpha Contract
+Required content:
 
-Goal: define the Kubernetes-native read model without adding mutating operator
-behavior.
+- v0.3 is Helm alpha install + first PVC + read-only report/dashboard +
+  cleanup.
+- Script activation remains alpha/dev fallback, not the preferred v0.3 story.
+- `sw-block ops generate-helm-values` input/output is explained.
+- Single-node behavior is clear: one selected node, loopback mode.
+- Multi-node behavior is clear: Ready schedulable nodes, non-loopback
+  InternalIP, external iSCSI/status, CHAP.
+- `sw-block ops report` vs `sw-block ops dashboard` is clear:
+  - report writes static artifacts,
+  - dashboard serves the same read-only evidence locally.
+- Immutable `sha-<commit>` images are recommended for QA/PM/release proof.
+- Mutable `:alpha` is documented as smoke/demo only.
+- Non-claims are explicit:
+  - not production-ready,
+  - no operator lifecycle,
+  - no mutating admin UI/actions,
+  - no backup/snapshot/restore,
+  - no upgrade/rollback safety,
+  - no broad performance/RTO/SLO claim,
+  - no new recovery scope beyond already gated evidence.
 
 Acceptance:
-
-- Define alpha `SwBlockCluster` and `SwBlockVolume` status fields, or document
-  the exact equivalent if the implementation first ships as
-  `operator-snapshot.json`.
-- Conditions include at minimum:
-  - `Ready`,
-  - `Blocked`,
-  - `Recovering`,
-  - `Recovered`,
-  - `CleanupRequired`,
-  - `EvidenceStale`.
-- Kubernetes Events use stable reason codes already present in report/timeline.
-- Status fields classify stable vs provisional vs test-only.
-- RBAC is read-only except status/event publication.
-
-Status: PASS on 2026-05-25.
-
-Implementation:
-
-- `ConditionEvidenceStale` and `ReasonEvidenceStale` are first-class.
-- `ManagedVolumeFacts{EvidenceStale:true}` projects to:
-  - `status=unknown`,
-  - `reason_code=evidence_stale`,
-  - `Ready status=Unknown`,
-  - `EvidenceStale status=True severity=warning`.
-- Operator events map stale evidence to a Kubernetes `Warning`.
-- `operator-snapshot.json` cluster status includes `stale_volume_count`.
-- CRD contract includes:
-  - `read_only=true`,
-  - `mutating_storage_verbs_allowed=false`,
-  - read/status/event verbs only,
-  - forbidden mutating storage actions.
-
-Validation:
-
-- `go test ./core/ops`
-- `go test ./cmd/sw-block`
-
-QA assignment:
-
-- `internal/docs/qa-assignments/phase32-d2-crd-condition-event-qa-assignment.md`
-
-QA evidence:
-
-- `internal/docs/qa-assignments/phase32-d2-crd-condition-event-qa-signoff.md`
-
-## D3: Happy-Path Status Projection Gate
-
-Goal: prove the normal user path produces Kubernetes-native status that matches
-report/dashboard/support evidence.
-
-Gate:
 
 ```text
-Helm install
--> first PVC writer/reader
--> operator/status export
--> kubectl-style status says Ready=True
--> report/dashboard/operator-snapshot agree
+README + quickstart + release note describe the same v0.3 claim.
+No doc claims a capability without a gate.
+Roadmap marks Phase 22/23/24 closed and Phase 25/v0.3 closed.
 ```
 
+## D2: Gate Replay + Close Evidence
+
+Goal: prove the documented v0.3 path is runnable and self-explaining.
+
+Status: PASS on 2026-05-22.
+
+Evidence:
+
+- Single-node Helm gate: `20260522-031019-ef25`, PASS, 34/34 actions.
+- Multi-node Helm gate: `20260522-031124-0a44`, PASS, 51/51 actions.
+- Documented Go CLI generator gate: `20260522-091642-b9a7`, PASS, 31/31
+  actions.
+- Both runs record immutable image tags and digests.
+- Both runs produce `status/report/index.html`, `cluster-evidence.json`,
+  `timeline.jsonl`, and `summary.txt`.
+- Both runs finish with `cleanup_status=ok`, zero k8s residue, zero process
+  residue, and zero hostPath residue.
+
+Required gates:
+
+- Helm single-node first-volume gate:
+  - `testops/scenarios/helm-single-node-first-volume-chain.yaml`
+  - expected: PASS
+- Helm multi-node first-volume gate:
+  - `testops/scenarios/helm-first-volume-chain.yaml`
+  - expected: PASS
+- Report/dashboard consistency:
+  - `summary.txt`
+  - `index.html`
+  - `cluster-evidence.json`
+  - `timeline.jsonl`
+  - dashboard endpoint serving same evidence when applicable
+- Image identity:
+  - image tag recorded,
+  - digest recorded,
+  - release validation uses immutable tag.
+- Cleanup:
+  - Helm release removed,
+  - StorageClass/demo PVC/pods removed,
+  - no active iSCSI sessions,
+  - no sw-block processes,
+  - no test-scoped residue.
+
 Acceptance:
-
-- `Ready=True` with reason `first_volume_verified` or equivalent.
-- PVC, PV, volume_id, primary, epoch, publish target, RF, ACK profile agree
-  across status, report, dashboard, and bundle.
-- No mutating action appears in status, dashboard, or operator snapshot.
-
-Status: PASS on 2026-05-25.
-
-Implementation:
-
-- Added scoped surface-agreement tests for the Ready path:
-  - report `summary.txt`,
-  - report HTML,
-  - `operator-snapshot.json`,
-  - dashboard `/operator-snapshot.json`.
-
-Validation:
-
-- `go test ./core/ops ./cmd/sw-block`
-
-Existing scenario seed:
-
-- `helm-first-volume-via-sw-block-cli-chain.yaml`
-- `helm-first-volume-chain.yaml`
-
-QA sign-off:
-
-- `internal/docs/qa-assignments/phase32-d3-d4-status-surface-qa-signoff.md`
-
-## D4: Blocked / Negative Status Projection Gate
-
-Goal: prove common user-visible failures become explicit Blocked/Unknown status
-instead of silent timeout or false Ready.
-
-Candidate negative cases:
-
-- CSI node image pull failure.
-- missing publish target.
-- loopback publish target rejected in multi-node mode.
-- writer pod mount failure.
-- cleanup residue present.
-- blockmaster unreachable or stale evidence.
-
-Acceptance:
-
-- Failure status is not `Ready=True`.
-- Condition and reason code identify the blocker.
-- Evidence path points to logs/events/bundle facts.
-- `sw-block ops explain` and dashboard use the same reason.
-
-Status: PASS on 2026-05-25.
-
-Implementation:
-
-- Added scoped surface-agreement tests for the blocked CSI image-pull path:
-  - `Ready=False`,
-  - `Blocked=True`,
-  - `reason=csi_node_image_pull_failed`,
-  - dry-run `safe_k8s.import_csi_image`,
-  - no mutating action in operator snapshot.
-
-Validation:
-
-- `go test ./core/ops ./cmd/sw-block`
-
-QA assignment:
-
-- `internal/docs/qa-assignments/phase32-d3-d4-status-surface-qa-assignment.md`
-
-QA sign-off:
-
-- `internal/docs/qa-assignments/phase32-d3-d4-status-surface-qa-signoff.md`
-
-Existing scenario seeds:
-
-- `helm-support-bundle-diagnostics-chain.yaml`
-- `same-node-alpha-attach-negative-chain.yaml`
-- `csi-rf1-durable-restart-failure-chain.yaml`
-- `light-use-first-volume-breaks-chain.yaml`
-
-## D5: Restart / Promotion Status Consistency Gate
-
-Goal: carry Phase 31 restart guarantees into the operator/status surface.
-
-Gate:
 
 ```text
-RF3 promotion to r2
--> k3s/product restart
--> status still shows r2 primary, epoch non-rollback, one primary
--> reader verifies data
+single-node Helm gate PASS
+multi-node Helm gate PASS
+report/dashboard reason codes agree
+image tag/digest evidence present
+cleanup clean
+close report written
+finished plan written
 ```
-
-Acceptance:
-
-- CRD/status or operator snapshot preserves:
-  - primary,
-  - epoch,
-  - publish target,
-  - `post_restart_primary_count=1`.
-- Old primary is not resurrected as Ready.
-- Event timeline explains restart reload and authority persistence.
-
-Status: PASS on 2026-05-25.
-
-Implementation:
-
-- Added scoped surface-agreement tests for promoted-authority restart status:
-  - primary remains `r2`,
-  - publish target remains the promoted replica frontend,
-  - epoch does not roll back,
-  - `Recovered=True` and reason `csi_reattach_recovered` agree across report
-    summary and operator snapshot.
-
-Validation:
-
-- `go test ./core/ops ./cmd/sw-block`
-
-QA assignment:
-
-- `internal/docs/qa-assignments/phase32-d5-d6-status-surface-qa-assignment.md`
-
-QA sign-off:
-
-- `internal/docs/qa-assignments/phase32-d5-d6-status-surface-qa-signoff.md`
-
-Follow-up carried into D7:
-
-- D5 report regeneration can pick an older pre-promotion `cluster-evidence.json`
-  while the post-restart evidence is present under a different filename. This
-  is a stale-evidence precedence issue, not a D5 product-claim failure.
-
-Existing scenario seeds:
-
-- `helm-rf3-promotion-restart-persistence-chain.yaml`
-- `helm-multi-volume-rf3-restart-smoke-chain.yaml`
-
-## D6: Multi-Volume Independence Status Gate
-
-Goal: prove status isolation for multiple PVCs.
-
-Gate:
-
-```text
-3 RF3 PVCs
--> independent writers/readers
--> per-volume failover or restart smoke
--> each SwBlockVolume / ManagedVolume remains distinct
-```
-
-Acceptance:
-
-- `managed_volume_count=3`.
-- no cross-volume authority mixup.
-- no duplicate publish target for distinct volumes unless explicitly expected.
-- failed target volume status does not poison untouched volume status.
-
-Status: PASS on 2026-05-25.
-
-Implementation:
-
-- Added scoped surface-agreement tests for three independent ManagedVolume
-  projections:
-  - `managed_volume_count=3`,
-  - each volume has a distinct PVC and volume ID,
-  - each Ready condition uses reason `first_volume_verified`,
-  - publish targets remain distinct across the three volumes.
-
-Validation:
-
-- `go test ./core/ops ./cmd/sw-block`
-
-QA assignment:
-
-- `internal/docs/qa-assignments/phase32-d5-d6-status-surface-qa-assignment.md`
-
-QA sign-off:
-
-- `internal/docs/qa-assignments/phase32-d5-d6-status-surface-qa-signoff.md`
-
-Existing scenario seeds:
-
-- `helm-multi-volume-rf3-readiness-chain.yaml`
-- `helm-multi-volume-rf3-interleaved-failover-chain.yaml`
-- `helm-multi-volume-rf3-restart-smoke-chain.yaml`
-
-## D7: Stale Evidence And Bounded Probe Gate
-
-Goal: prove observation is honest when passive state is stale or missing.
-
-Acceptance:
-
-- Status can enter `EvidenceStale=True` or `Unknown` with reason.
-- Bounded active probes are allowed only for:
-  - high-impact promotion/failover status,
-  - stale or missing status evidence,
-  - cleanup residue close,
-  - support/report replay.
-- Every probe has timeout, evidence, and no mutation.
-- Failure to probe does not become `Ready=True`.
-- Report replay chooses current evidence deterministically or marks the replay
-  `EvidenceStale=True`; it must not silently publish an older primary when a
-  newer restart snapshot exists in the same bundle.
-
-Implementation:
-
-- `ops report --from-bundle` now considers both canonical
-  `cluster-evidence.json` and restart-phase `cluster-after-restart.json`
-  evidence files.
-- When multiple cluster evidence files exist, replay chooses the newest
-  `captured_at` value deterministically; path rank is only a tie-break.
-- Added a regression test for the D5 failure shape where old pre-promotion
-  `status/cluster-evidence.json` reported r1 while newer
-  `restart/cluster-after-restart.json` reported r2.
-
-Validation:
-
-- `go test ./core/ops ./cmd/sw-block`
-
-QA assignment:
-
-- `internal/docs/qa-assignments/phase32-d7-stale-evidence-qa-assignment.md`
-
-Status: PASS on 2026-05-25.
-
-QA sign-off:
-
-- `internal/docs/qa-assignments/phase32-d7-stale-evidence-qa-signoff.md`
-
-Non-blocking follow-up:
-
-- The freshest post-restart snapshot can legitimately produce
-  `Ready=Unknown` during reconvergence. Future work can add a scenario settle
-  wait or a bounded refresh probe, but the Phase 32 negative-first rule is
-  satisfied because replay no longer publishes the older primary as Ready.
-
-## D8: Close Gate
-
-Goal: close Phase 32 only when happy path, negative path, restart path, and
-multi-volume path agree across all read-only operations surfaces.
-
-Acceptance:
-
-- D1-D7 complete.
-- QA independently reruns D3-D6, including at least one negative case.
-- PM reviews claim wording and non-claims.
-- README/quickstart/release note only claim read-only status/operator surface.
-- Close report and finished plan are written.
-
-Status: PASS on 2026-05-25.
 
 Close artifacts:
 
-- `internal/docs/qa-assignments/phase32-negative-first-read-only-operator-status-close-report.md`
-- `internal/docs/finished-plans/phase32_finishedplan_negative_first_read_only_operator_status.md`
+- `internal/docs/qa-assignments/v0.3-helm-observable-first-volume-close-report.md`
+- `internal/docs/finished-plans/phase25_finishedplan_v0.3_helm_observable_first_volume.md`
 
-## Progress
+## Claim Matrix
 
-- D1: PASS
-- D1a: PASS
-- D2: PASS
-- D3: PASS
-- D4: PASS
-- D5: PASS
-- D6: PASS
-- D7: PASS
-- D8: PASS
+| Area | Can Claim For v0.3 | Cannot Claim |
+|---|---|---|
+| Install | Helm alpha install on supported k3s/Kubernetes labs | production installer, broad distro support |
+| First Volume | PVC create, writer/reader data check, clean report | performance/SLO, upgrade safety |
+| Recovery | Existing gated RF3 recovery evidence remains valid | new recovery scope beyond prior gates |
+| Dashboard | local read-only dashboard/report over product evidence | production hosted UI, mutating admin UI |
+| Cleanup | documented uninstall + host cleanup verification | fully automated operator lifecycle |
+| Images | immutable tag/digest release validation | mutable `:alpha` as release proof |
 
-Overall: 100%.
+## Risks
+
+| Risk | Mitigation | Fallback |
+|---|---|---|
+| `:alpha` image drift | release docs require immutable `sha-<commit>` tags for QA/PM | use local/internal images for dev gates |
+| single-node vs three-node behavior confusion | quickstart explains loopback vs external iSCSI/CHAP values | provide separate single-node and multi-node commands |
+| docs drift from implementation | close gate checks README, quickstart, release note against gate artifacts | block release note until docs are corrected |
+| dashboard/report reason mismatch | compare summary, HTML, JSON, explain/dashboard reason codes | fix projection consistency only; no model rewrite |
+| cleanup residue after Helm uninstall | host cleanup verification is required | document manual cleanup command and keep release blocked until clean |
+
+## Dependency Order
+
+```text
+D1 docs alignment
+-> D2 gate replay
+-> close report
+```
+
+Do not start operator/CRD implementation until this phase closes.
