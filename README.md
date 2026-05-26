@@ -1,11 +1,15 @@
-# Seaweed Block
+# Seaweed Block (Alpha)
 
 <p align="center">
   <img src="docs/assets/seaweed-block-hero.svg" alt="Seaweed Block alpha architecture: Kubernetes PVC to CSI, blockmaster, blockvolume, iSCSI, and WAL-backed recovery" width="100%">
 </p>
 
-Seaweed Block is an experimental Kubernetes block storage service built around
-normal Kubernetes PVCs, a CSI driver, and SeaweedFS block components.
+Seaweed Block is an experimental Kubernetes block storage service built around:
+
+- normal Kubernetes PVC workflow,
+- a CSI driver,
+- Seaweed block components,
+- read-only operations evidence.
 
 The current alpha is focused on one user-visible loop:
 
@@ -18,33 +22,40 @@ install on Kubernetes
 -> clean up
 ```
 
-Start here:
+This is an **alpha** product path for supported lab clusters, not production.
 
-- [Kubernetes quickstart](docs/quickstart-kubernetes.md)
-- [What users can do today](docs/user-capabilities.md)
-- [Release notes and validated claims](docs/releases/README.md)
+## What You Can Do Today
 
-## Status
-
-Alpha / early beta shape. Not production-ready.
-
-Current QA-gated capabilities:
-
-- Helm install to first PVC with writer/reader verification and clean uninstall.
-- Standard Kubernetes PVC provisioning through CSI.
-- Multiple PVC-backed volumes in the gated lab path.
-- RF=3 recovery gates: CSI reattach, mounted ALUA/dm-multipath failover, and
-  interleaved multi-volume isolation.
-- Restart persistence on the hostPath-backed alpha path.
-- Read-only operations evidence: report, dashboard, inventory, timeline,
-  explain output, support-bundle replay, and `operator-snapshot.json`.
+- Install Seaweed Block through Helm on a supported Kubernetes/k3s lab.
+- Create and mount PVC-backed block volumes through normal Kubernetes PVCs.
+- Verify writer/reader persistence with ordinary app pods.
+- Run multiple RF=3 volumes in the gated lab path.
+- Validate gated recovery paths:
+  - CSI reattach with pod recreate,
+  - iSCSI ALUA + dm-multipath transparent mounted failover on the proven
+    Stage-2 path,
+  - interleaved multi-volume failover isolation.
+- Inspect cluster, volume, replica, primary, frontend, timeline, and reason
+  evidence through read-only CLI/report/dashboard surfaces.
+- Replay support bundles offline.
 
 These are narrow alpha claims tied to documented gates. See
 [release notes](docs/releases/README.md) for exact run evidence.
 
+## What You Should Not Expect Yet
+
+- Production readiness or production SLOs.
+- A production-grade operator or mutating admin workflow.
+- Backup, snapshot, or restore.
+- Returned-replica rebuild, reintegration, or failback.
+- Transparent Kubernetes node-loss failover without pod recreate.
+- NVMe ANA parity for the transparent failover path.
+- Broad distro/kernel/initiator compatibility.
+- Broad upgrade/rollback safety beyond gated smoke paths.
+
 ## Five-Minute Quick Start
 
-Use Helm on a supported Kubernetes/k3s lab:
+From the repository root:
 
 ```bash
 go build -o sw-block ./cmd/sw-block
@@ -69,7 +80,7 @@ SW_BLOCK_HELM_VALUES_FILE=values.day1.yaml \
   bash scripts/run-basic-app-example.sh "$PWD"
 ```
 
-Expected summary shape:
+Expected summary in the latest `/tmp/sw-block-basic-app-*/first-volume-summary.txt`:
 
 ```text
 first_volume_status=ok
@@ -132,30 +143,6 @@ bash scripts/verify-helm-cleanup.sh
 The cleanup verifier checks Kubernetes resources, iSCSI sessions, iSCSI node
 DB records, dm-multipath maps, `dmsetup` devices, product processes, and
 hostPath residue.
-
-## What You Can Do
-
-- Install Seaweed Block through Helm on a supported Kubernetes/k3s lab.
-- Create and mount PVC-backed block volumes through normal Kubernetes PVCs.
-- Verify writer/reader persistence with ordinary app pods.
-- Inspect cluster, volume, replica, primary, frontend, timeline, and reason
-  evidence through read-only CLI/report/dashboard surfaces.
-- Replay support bundles offline.
-- Exercise gated multi-volume, restart, and recovery scenarios in lab/TestOps
-  environments.
-
-More detail: [docs/user-capabilities.md](docs/user-capabilities.md).
-
-## What You Should Not Expect Yet
-
-- Production readiness or production SLOs.
-- A production-grade operator or mutating admin workflow.
-- Backup, snapshot, or restore.
-- Returned-replica rebuild, reintegration, or failback.
-- Transparent Kubernetes node-loss failover without pod recreate.
-- NVMe ANA parity for the transparent failover path.
-- Broad distro/kernel/initiator compatibility.
-- Broad upgrade/rollback safety beyond gated smoke paths.
 
 ## Documentation
 
