@@ -27,35 +27,20 @@ Start with the Kubernetes tutorial:
 
 Alpha / early beta shape. Not production-ready.
 
-What has been validated in the current alpha:
+The current alpha has QA-gated evidence for:
 
-- Day-1 install-to-first-volume path: activate stack, create PVC, writer pod
-  verifies data, reader pod verifies persisted data, status report generated,
-  cleanup clean.
-- Helm alpha lifecycle smoke: chart hygiene, one upgrade/rollback path that
-  preserves an existing PVC, three-PVC Day-1 smoke, support-bundle replay, and
-  clean uninstall.
-- Scenario-gated RF=3 multi-volume HA independence: three PVC-backed volumes,
-  per-volume CSI reattach recovery, mounted transparent failover, interleaved
-  failover isolation, and measured stale-path / ALUA evidence in the gated lab.
-- dynamic PVC provisioning through CSI.
-- product-owned generated `blockvolume` lifecycle.
-- multiple PVCs / volumes visible in inventory.
-- durable local volume restart/reattach coverage.
-- RF=3 `sync-quorum` recovery through CSI/pod recreate.
-- RF=3 Kubernetes node-loss recovery through CSI/pod recreate on a surviving
-  node.
-- RF=3 iSCSI ALUA + Linux dm-multipath transparent mounted failover on the
-  proven alpha path.
-- read-only operations evidence through `sw-block ops inventory`,
-  `sw-block ops cluster --master-api ... -o json`, support bundles, and
-  product-owned event timelines.
-- read-only operator-foundation evidence through the ManagedVolume model,
-  CRD/Condition/Event contract, and `operator-snapshot.json` report/dashboard
-  artifact. This is not a mutating operator.
+- Helm install to first PVC with writer/reader verification and clean uninstall.
+- Standard Kubernetes PVC provisioning through CSI.
+- Multiple PVC-backed volumes in the gated lab path.
+- RF=3 recovery gates: CSI reattach, mounted ALUA/dm-multipath failover, and
+  interleaved multi-volume isolation.
+- Restart persistence on the hostPath-backed alpha path.
+- Read-only operations evidence: report, dashboard, inventory, timeline,
+  explain output, support-bundle replay, and `operator-snapshot.json`.
 
 These are narrow alpha claims tied to documented gates and support artifacts.
-Do not treat them as broad production HA or compatibility claims.
+See [release notes](docs/releases/README.md) for the exact run evidence. Do
+not treat these as broad production HA or compatibility claims.
 
 Known missing pieces:
 
@@ -152,22 +137,6 @@ status_report=status/report/index.html
 cleanup_status=ok
 ```
 
-Use the script path for development, local image testing, or fallback
-diagnostics when Helm is not the target.
-
-```bash
-bash scripts/activate-k8s-alpha.sh "$PWD"
-bash scripts/run-basic-app-example.sh "$PWD"
-cat "$(ls -td /tmp/sw-block-basic-app-* | head -1)/first-volume-summary.txt"
-```
-
-The `"$PWD"` argument is the repository root. The helper scripts use it to
-locate chart, manifest, and example files.
-
-The activation script writes `/tmp/sw-block-activation-*/activation-summary.txt`
-with the blockmaster, CSI controller, CSI node, StorageClass, protocol, ACK
-profile, and next inspection commands.
-
 For QA/PM user-path testing against published images, prefer immutable image
 tags in Helm values or activation env:
 
@@ -192,10 +161,43 @@ seaweed-block-csi
 
 Mutable `:alpha` is a smoke/demo tag only; it can drift from the source tree.
 
+Script activation is a development/local-image fallback, not the primary user
+path:
+
+```bash
+bash scripts/activate-k8s-alpha.sh "$PWD"
+bash scripts/run-basic-app-example.sh "$PWD"
+cat "$(ls -td /tmp/sw-block-basic-app-* | head -1)/first-volume-summary.txt"
+```
+
+The `"$PWD"` argument is the repository root. The helper scripts use it to
+locate chart, manifest, and example files.
+
 ## Operations
+
+Port-forward blockmaster when reading live cluster state:
 
 ```bash
 kubectl -n kube-system port-forward deploy/sw-blockmaster 9333:9333
+```
+
+Common read-only commands:
+
+| Command | Use |
+|---|---|
+| `sw-block ops cluster --master-api 127.0.0.1:9333 -o json` | Cluster snapshot for automation or support. |
+| `sw-block ops volumes --master-api 127.0.0.1:9333` | List volumes, status, RF, primary, node, and frontend. |
+| `sw-block ops status --volume <id> --master <addr> --status-addr <addr> --out <dir>` | Collect a focused live status bundle for one volume. |
+| `sw-block ops describe volume <id> --namespace default --master 127.0.0.1:9333` | Describe one volume through live Kubernetes/master evidence. |
+| `sw-block ops timeline volume --from-bundle <dir> <id> -o jsonl` | Read the event timeline for one volume from a saved bundle. |
+| `sw-block ops explain volume --from-bundle <dir> <id>` | Cold-read why a volume is ready, blocked, stale, or recovering. |
+| `sw-block ops report --master-api 127.0.0.1:9333 --out <dir>` | Generate static HTML/JSON/text evidence. |
+| `sw-block ops dashboard --master-api 127.0.0.1:9333 --listen 127.0.0.1:9334` | Serve the same evidence as a local read-only dashboard. |
+| `sw-block ops inventory --namespace default --master 127.0.0.1:9333 --out <dir>` | Collect replica-level support inventory. |
+
+Minimal live report example:
+
+```bash
 sw-block ops cluster --master-api 127.0.0.1:9333 -o json \
   > /tmp/sw-block-cluster-evidence.json
 sw-block ops report --master-api 127.0.0.1:9333 --out /tmp/sw-block-report
@@ -209,15 +211,6 @@ If `sw-block` is not in `PATH`, run the same commands from this repository as
 dashboard` serves the same evidence as a local read-only dashboard. Reports and
 dashboard also expose `operator-snapshot.json`, a read-only status projection
 for future operator work. Neither has mutating admin actions.
-
-For replica-level support evidence:
-
-```bash
-sw-block ops inventory \
-  --namespace default \
-  --master 127.0.0.1:9333 \
-  --out /tmp/sw-block-inventory
-```
 
 For support-bundle replay on another machine:
 
@@ -233,6 +226,17 @@ system reports `Ready=Unknown` / `EvidenceStale=True` rather than claiming a
 false ready state. A blocked example such as `csi_node_image_pull_failed`
 appears consistently in `summary.txt`, `operator-snapshot.json`, dashboard
 JSON, explain output, and support bundles.
+
+Minimal blocked-state drill:
+
+```bash
+# Example: install with an intentionally bad CSI image tag, then collect bundle.
+bash scripts/collect-helm-support-bundle.sh "$PWD"
+sw-block ops explain volume <volume-id> --from-bundle <bundle-or-artifact-dir>
+```
+
+Expected shape: no `Ready=True`; instead `Blocked=True
+reason=csi_node_image_pull_failed` and read-only/dry-run suggested actions.
 
 Strict cleanup:
 
