@@ -1,6 +1,6 @@
 # Current Plan: Phase 32 - Negative-First Read-Only Operator Status Surface
 
-Status: active, 90% complete. Started on 2026-05-25 after Phase 31 restart
+Status: active, 95% complete. Started on 2026-05-25 after Phase 31 restart
 persistence closed.
 
 ## Product Goal
@@ -395,7 +395,18 @@ QA assignment:
 
 - `internal/docs/qa-assignments/phase32-d7-stale-evidence-qa-assignment.md`
 
-Status: dev PASS on 2026-05-25; QA pending.
+Status: PASS on 2026-05-25.
+
+QA sign-off:
+
+- `internal/docs/qa-assignments/phase32-d7-stale-evidence-qa-signoff.md`
+
+Non-blocking follow-up:
+
+- The freshest post-restart snapshot can legitimately produce
+  `Ready=Unknown` during reconvergence. Future work can add a scenario settle
+  wait or a bounded refresh probe, but the Phase 32 negative-first rule is
+  satisfied because replay no longer publishes the older primary as Ready.
 
 ## D8: Close Gate
 
@@ -421,7 +432,7 @@ Status: pending.
 - D4: PASS
 - D5: PASS
 - D6: PASS
-- D7: dev PASS, QA pending
+- D7: PASS
 - D8: pending
 
-Overall: 90%.
+Overall: 95%.

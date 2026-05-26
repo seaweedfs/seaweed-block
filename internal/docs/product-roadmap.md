@@ -146,7 +146,7 @@ own day-2 lifecycle without hiding unstable behavior.
 
 Type: Operational + Core Stability
 
-Current status: active, 90%. Started on 2026-05-25 after Phase 31 restart
+Current status: active, 95%. Started on 2026-05-25 after Phase 31 restart
 persistence closed.
 
 Goal:
@@ -174,7 +174,7 @@ Gate plan:
 - D4 blocked / negative status projection gate: PASS on 2026-05-25.
 - D5 restart / promotion status consistency gate: PASS on 2026-05-25.
 - D6 multi-volume independence status gate: PASS on 2026-05-25.
-- D7 stale evidence and bounded probe gate: dev PASS, QA pending.
+- D7 stale evidence and bounded probe gate: PASS on 2026-05-25.
 - D8 close gate: pending.
 
 Open D7 input:
@@ -187,6 +187,9 @@ Open D7 input:
 - Dev fix: `ops report --from-bundle` now includes
   `cluster-after-restart.json` as a cluster evidence candidate and chooses by
   newest `captured_at` before path rank. QA replay is pending.
+- QA confirmed D7 on run `20260525-172250-bf28`: regenerated summary,
+  operator-snapshot, and dashboard use post-restart `r2@m02` evidence and avoid
+  false `Ready=True` while the freshest snapshot is still reconverging.
 
 Non-goals:
 
