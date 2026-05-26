@@ -86,7 +86,7 @@ ready.
 | Priority | Work | Type | Status | Why It Matters |
 |---|---|---|---|---|
 | P0 | Phase 31 Kubernetes Restart Persistence | Core Stability + Operational + Functional | PASS | Storage must not forget data, authority, or promoted primary after Kubernetes/product restart |
-| P0 | Phase 32 Negative-First Read-Only Operator Status Surface | Operational + Core Stability | active | Make Kubernetes-native status truthful under happy, blocked, restart, and multi-volume paths |
+| P0 | Phase 32 Negative-First Read-Only Operator Status Surface | Operational + Core Stability | PASS | Make Kubernetes-native status truthful under happy, blocked, restart, and multi-volume paths |
 | P0 | Phase 29 Product-Owned Lifecycle And Cleanup Reliability | Operational + Core Stability | PASS | Cleanup/lifecycle is deterministic and auditable across active alpha loops |
 | P0 | Phase 30 Control Model / ManagedVolume Hardening | Core Stability + Operational | PASS | Stabilizes state ownership before mutating operator, rebuild/failback, NVMe ANA, or backup work |
 | P0 | Phase 28 Productized Operations And Operator Foundation | Operational + Core Stability | PASS | Turn Helm/scripts/evidence/model into one Kubernetes product operations loop before the next feature expansion |
@@ -146,8 +146,8 @@ own day-2 lifecycle without hiding unstable behavior.
 
 Type: Operational + Core Stability
 
-Current status: active, 95%. Started on 2026-05-25 after Phase 31 restart
-persistence closed.
+Current status: PASS, 100%. Started and closed on 2026-05-25 after Phase 31
+restart persistence closed.
 
 Goal:
 
@@ -175,7 +175,7 @@ Gate plan:
 - D5 restart / promotion status consistency gate: PASS on 2026-05-25.
 - D6 multi-volume independence status gate: PASS on 2026-05-25.
 - D7 stale evidence and bounded probe gate: PASS on 2026-05-25.
-- D8 close gate: pending.
+- D8 close gate: PASS on 2026-05-25.
 
 Open D7 input:
 
@@ -190,6 +190,11 @@ Open D7 input:
 - QA confirmed D7 on run `20260525-172250-bf28`: regenerated summary,
   operator-snapshot, and dashboard use post-restart `r2@m02` evidence and avoid
   false `Ready=True` while the freshest snapshot is still reconverging.
+
+Close artifacts:
+
+- `internal/docs/qa-assignments/phase32-negative-first-read-only-operator-status-close-report.md`
+- `internal/docs/finished-plans/phase32_finishedplan_negative_first_read_only_operator_status.md`
 
 Non-goals:
 

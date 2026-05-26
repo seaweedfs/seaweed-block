@@ -1,7 +1,7 @@
 # Current Plan: Phase 32 - Negative-First Read-Only Operator Status Surface
 
-Status: active, 95% complete. Started on 2026-05-25 after Phase 31 restart
-persistence closed.
+Status: PASS, 100% complete. Started and closed on 2026-05-25 after Phase 31
+restart persistence closed.
 
 ## Product Goal
 
@@ -421,7 +421,12 @@ Acceptance:
 - README/quickstart/release note only claim read-only status/operator surface.
 - Close report and finished plan are written.
 
-Status: pending.
+Status: PASS on 2026-05-25.
+
+Close artifacts:
+
+- `internal/docs/qa-assignments/phase32-negative-first-read-only-operator-status-close-report.md`
+- `internal/docs/finished-plans/phase32_finishedplan_negative_first_read_only_operator_status.md`
 
 ## Progress
 
@@ -433,6 +438,6 @@ Status: pending.
 - D5: PASS
 - D6: PASS
 - D7: PASS
-- D8: pending
+- D8: PASS
 
-Overall: 95%.
+Overall: 100%.
