@@ -164,7 +164,8 @@ if [[ "$MULTIPATH_FLUSH" == "1" && -s "$ARTIFACT_DIR/multipath-residue.before-fl
       if [[ "$dm" == dm-* ]]; then
         findmnt -rn -S "/dev/$dm" -o TARGET 2>/dev/null || true
       fi
-      lsblk -nr -o MOUNTPOINTS "/dev/mapper/$map" 2>/dev/null | sed 's/\\x0a/\n/g' || true
+      lsblk -nr -o MOUNTPOINT "/dev/mapper/$map" 2>/dev/null || \
+        lsblk -nr -o MOUNTPOINTS "/dev/mapper/$map" 2>/dev/null | sed 's/\\x0a/\n/g' || true
     } | awk 'NF {print}' | sort -u | while read -r mountpoint; do
       [[ "$mountpoint" == /var/lib/kubelet/* ]] || continue
       log "unmount_stale_kubelet_path=$mountpoint"

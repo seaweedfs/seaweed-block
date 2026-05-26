@@ -36,6 +36,14 @@ helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version | replace "+" "_" }}
 {{- end -}}
 {{- end -}}
 
+{{- define "seaweed-block.statePermissionsImage" -}}
+{{- if .Values.blockmaster.statePermissionsImage.digest -}}
+{{- printf "%s@%s" .Values.blockmaster.statePermissionsImage.repository .Values.blockmaster.statePermissionsImage.digest -}}
+{{- else -}}
+{{- printf "%s:%s" .Values.blockmaster.statePermissionsImage.repository .Values.blockmaster.statePermissionsImage.tag -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "seaweed-block.blockmasterAddress" -}}
 {{- printf "%s.%s.svc.cluster.local:%v" .Values.blockmaster.serviceName .Release.Namespace .Values.blockmaster.listenPort -}}
 {{- end -}}

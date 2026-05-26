@@ -31,7 +31,16 @@
       "type": "object",
       "properties": {
         "stateHostPath": { "type": "string" },
-        "stateHostPathType": { "type": "string" }
+        "stateHostPathType": { "type": "string" },
+        "statePermissionsImage": {
+          "type": "object",
+          "properties": {
+            "repository": { "type": "string", "minLength": 1 },
+            "tag": { "type": "string" },
+            "digest": { "type": "string" },
+            "pullPolicy": { "type": "string" }
+          }
+        }
       }
     },
     "restartPersistence": {

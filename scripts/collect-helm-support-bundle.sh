@@ -20,6 +20,10 @@ sw_block_cmd() {
     "$SW_BLOCK_CLI" "$@"
   elif command -v sw-block >/dev/null 2>&1; then
     sw-block "$@"
+  elif [[ -x ./sw-block ]]; then
+    ./sw-block "$@"
+  elif [[ -x "$ROOT/sw-block" ]]; then
+    "$ROOT/sw-block" "$@"
   else
     go run ./cmd/sw-block "$@"
   fi

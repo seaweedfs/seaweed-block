@@ -29,8 +29,8 @@ spec:
       {{- if .Values.blockmaster.stateHostPath }}
       initContainers:
         - name: state-permissions
-          image: {{ include "seaweed-block.image" . | quote }}
-          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          image: {{ include "seaweed-block.statePermissionsImage" . | quote }}
+          imagePullPolicy: {{ .Values.blockmaster.statePermissionsImage.pullPolicy }}
           command: ["/bin/sh", "-c"]
           args:
             - "mkdir -p /var/lib/sw-block/authority /var/lib/sw-block/lifecycle && chown -R 65532:65532 /var/lib/sw-block"

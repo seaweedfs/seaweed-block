@@ -41,6 +41,11 @@ blockmaster:
   launcherPVCOwnerRef: true
   stateHostPath: ""
   stateHostPathType: DirectoryOrCreate
+  statePermissionsImage:
+    repository: busybox
+    tag: "1.36"
+    digest: ""
+    pullPolicy: IfNotPresent
 
 restartPersistence:
   # ephemeral keeps the alpha/dev default. hostpath persists blockmaster and
