@@ -19,18 +19,19 @@ type BlockVolumeWorkloadPlan struct {
 }
 
 type BlockVolumeReplicaWorkload struct {
-	ServerID           string
-	KubernetesNodeName string
-	PoolID             string
-	ReplicaID          string
-	Source             string
-	DataAddr           string
-	CtrlAddr           string
-	ISCSIListenPort    int
-	ISCSIQualifiedName string
-	NVMeListenPort     int
-	NVMeSubsystemNQN   string
-	NVMeNSID           int
+	ServerID             string
+	KubernetesNodeName   string
+	PoolID               string
+	ReplicaID            string
+	Source               string
+	PortAssignmentPinned bool
+	DataAddr             string
+	CtrlAddr             string
+	ISCSIListenPort      int
+	ISCSIQualifiedName   string
+	NVMeListenPort       int
+	NVMeSubsystemNQN     string
+	NVMeNSID             int
 }
 
 // PlanBlockVolumeWorkloads converts desired lifecycle state plus placement
@@ -86,19 +87,39 @@ func PlanBlockVolumeWorkloads(volume VolumeRecord, placement PlacementIntent, no
 			replicaID = fmt.Sprintf("r%d", i+1)
 		}
 		dataAddr, ctrlAddr := nodePlacementAddrs(node)
+		portAssignmentPinned := false
+		iscsiListenPort := cfg.ISCSIPortBase + i
+		nvmeListenPort := cfg.NVMePortBase + i
+		if slot.DataAddr != "" {
+			dataAddr = slot.DataAddr
+			portAssignmentPinned = true
+		}
+		if slot.CtrlAddr != "" {
+			ctrlAddr = slot.CtrlAddr
+			portAssignmentPinned = true
+		}
+		if slot.ISCSIListenPort != 0 {
+			iscsiListenPort = slot.ISCSIListenPort
+			portAssignmentPinned = true
+		}
+		if slot.NVMeListenPort != 0 {
+			nvmeListenPort = slot.NVMeListenPort
+			portAssignmentPinned = true
+		}
 		out.Replicas = append(out.Replicas, BlockVolumeReplicaWorkload{
-			ServerID:           slot.ServerID,
-			KubernetesNodeName: kubernetesNodeName(node),
-			PoolID:             slot.PoolID,
-			ReplicaID:          replicaID,
-			Source:             slot.Source,
-			DataAddr:           dataAddr,
-			CtrlAddr:           ctrlAddr,
-			ISCSIListenPort:    cfg.ISCSIPortBase + i,
-			ISCSIQualifiedName: fmt.Sprintf("%s:%s", cfg.IQNPrefix, volume.Spec.VolumeID),
-			NVMeListenPort:     cfg.NVMePortBase + i,
-			NVMeSubsystemNQN:   fmt.Sprintf("%s:%s", cfg.NQNPrefix, volume.Spec.VolumeID),
-			NVMeNSID:           1,
+			ServerID:             slot.ServerID,
+			KubernetesNodeName:   kubernetesNodeName(node),
+			PoolID:               slot.PoolID,
+			ReplicaID:            replicaID,
+			Source:               slot.Source,
+			PortAssignmentPinned: portAssignmentPinned,
+			DataAddr:             dataAddr,
+			CtrlAddr:             ctrlAddr,
+			ISCSIListenPort:      iscsiListenPort,
+			ISCSIQualifiedName:   fmt.Sprintf("%s:%s", cfg.IQNPrefix, volume.Spec.VolumeID),
+			NVMeListenPort:       nvmeListenPort,
+			NVMeSubsystemNQN:     fmt.Sprintf("%s:%s", cfg.NQNPrefix, volume.Spec.VolumeID),
+			NVMeNSID:             1,
 		})
 	}
 	return out, nil

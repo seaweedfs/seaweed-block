@@ -41,6 +41,17 @@ blockmaster:
   launcherPVCOwnerRef: true
   stateHostPath: ""
   stateHostPathType: DirectoryOrCreate
+  statePermissionsImage:
+    repository: busybox
+    tag: "1.36"
+    digest: ""
+    pullPolicy: IfNotPresent
+
+restartPersistence:
+  # ephemeral keeps the alpha/dev default. hostpath persists blockmaster and
+  # generated blockvolume state across Kubernetes pod restarts.
+  mode: ephemeral
+  stateHostPath: ""
 
 storageClass:
   create: true

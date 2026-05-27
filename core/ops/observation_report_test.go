@@ -56,9 +56,28 @@ func TestObservationExplain_IncludesManagedVolumeProjectionAndDryRunActions(t *t
 func TestObservationReportSummary_IncludesManagedVolumeStatus(t *testing.T) {
 	cluster := NewClusterEvidence(time.Date(2026, 5, 20, 12, 0, 0, 0, time.UTC))
 	cluster.Volumes = []VolumeEvidence{healthyObservationVolume()}
+	cluster.Cleanup = &CleanupEvidence{
+		Status:                 "ok",
+		KubernetesResidueCount: 0,
+		ISCSIResidueCount:      0,
+		MultipathResidueCount:  0,
+		ProcessResidueCount:    0,
+		HostPathResidueCount:   0,
+		FailureCount:           0,
+		EvidenceRef:            "cleanup-summary.txt",
+	}
 
 	summary := RenderObservationReportSummary(cluster)
 	for _, want := range []string{
+		"operator_snapshot=operator-snapshot.json",
+		"cleanup_status=ok",
+		"k8s_residue_count=0",
+		"iscsi_residue_count=0",
+		"multipath_residue_count=0",
+		"process_residue_count=0",
+		"hostpath_residue_count=0",
+		"failure_count=0",
+		"cleanup_evidence=cleanup-summary.txt",
 		"volume=pvc-healthy status=ok pvc=default/mysql-data",
 		"managed_volume=pvc-healthy status=ready reason=first_volume_verified",
 		"managed_volume_condition=Ready status=True reason=first_volume_verified severity=info",
@@ -73,6 +92,13 @@ func TestObservationReportSummary_IncludesManagedVolumeStatus(t *testing.T) {
 func TestObservationReportHTML_IncludesManagedVolumeConditions(t *testing.T) {
 	cluster := NewClusterEvidence(time.Date(2026, 5, 20, 12, 0, 0, 0, time.UTC))
 	cluster.Status = ObservationStatusBlocked
+	cluster.Cleanup = &CleanupEvidence{
+		Status:                 "failed",
+		KubernetesResidueCount: 1,
+		MultipathResidueCount:  2,
+		FailureCount:           2,
+		EvidenceRef:            "cleanup-summary.txt",
+	}
 	cluster.Volumes = []VolumeEvidence{{
 		VolumeID:       "pvc-loopback",
 		Namespace:      "default",
@@ -93,8 +119,10 @@ func TestObservationReportHTML_IncludesManagedVolumeConditions(t *testing.T) {
 
 	html := RenderObservationReportHTML(cluster)
 	for _, want := range []string{
+		"Lifecycle Cleanup",
 		"Managed Volumes",
 		"Managed Volume Conditions",
+		"cleanup-summary.txt",
 		"pvc-loopback",
 		"publish_target_loopback_cross_node",
 		"safe_k8s.reinstall_external_iscsi",
@@ -130,5 +158,20 @@ func TestObservationReportArtifacts_JSONIncludesManagedVolumeProjection(t *testi
 	}
 	if len(managed.Actions) == 0 || managed.Actions[0].Mode != ManagedVolumeActionModeReadOnly {
 		t.Fatalf("managed actions=%+v", managed.Actions)
+	}
+
+	raw, err = os.ReadFile(filepath.Join(dir, ObservationOperatorSnapshotArtifact))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var snapshot OperatorFoundationSnapshot
+	if err := json.Unmarshal(raw, &snapshot); err != nil {
+		t.Fatalf("decode operator snapshot json: %v\n%s", err, raw)
+	}
+	if !snapshot.ReadOnly || snapshot.Mutation.MutationAllowed {
+		t.Fatalf("operator snapshot must be read-only: %+v", snapshot)
+	}
+	if snapshot.Cluster.VolumeCount != 1 || len(snapshot.Volumes) != 1 {
+		t.Fatalf("operator snapshot missing volume evidence: %+v", snapshot)
 	}
 }

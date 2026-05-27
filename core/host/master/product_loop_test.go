@@ -240,7 +240,7 @@ func TestMountedFailover_ProductLoopRF3BlocksHealthyCurrentRebalanceWithoutProbe
 	if err != nil {
 		t.Fatalf("rebalance product tick: %v", err)
 	}
-	if result.PromotionProbes != 1 || result.PromotionBlocked != 1 {
+	if result.PromotionProbes != 2 || result.PromotionBlocked != 2 {
 		t.Fatalf("result=%+v want RF3 rebalance candidates blocked without probe", result)
 	}
 	time.Sleep(100 * time.Millisecond)
@@ -544,6 +544,57 @@ func TestMountedFailover_ProductLoopRF3ProbeCanAuthorizeStaleHeartbeatReadiness(
 	}
 }
 
+func TestMountedFailover_ProductLoopRF3PromotesWhenCurrentSlotMissingButSurvivorProbeReady(t *testing.T) {
+	h := newTestMasterWithControllerConfig(t, t.TempDir(), authority.TopologyControllerConfig{
+		ExpectedSlotsPerVolume: 3,
+	})
+	defer closeTestMaster(t, h)
+	h.SetPromotionEvidenceProvider(staticPromotionProbe{
+		result: PromotionProbeResult{
+			AckProfile: "sync-quorum",
+			Candidates: []PromotionCandidateEvidence{
+				{ReplicaID: "r2", Ready: true, DurableLSN: 70},
+				{ReplicaID: "r3", Ready: true, DurableLSN: 90},
+			},
+		},
+	})
+	seedRF3PlacementForServersWithAddrs(t, h, "vol-rf3", "node-a", "node-b", "node-c")
+	ingestRF3Observation(t, h, true, true, true)
+
+	if _, err := h.RunLifecycleProductTick(); err != nil {
+		t.Fatalf("initial product tick: %v", err)
+	}
+	initial := waitAuthorityLine(t, h.Publisher(), "vol-rf3")
+	if initial.ReplicaID != "r1" {
+		t.Fatalf("initial line=%+v want r1", initial)
+	}
+
+	// K8s can keep the server/node fresh while the generated primary
+	// blockvolume pod is gone. That produces PartialInventory and excludes
+	// the volume from the normal supported snapshot; the product loop must
+	// still use placement + probe evidence to promote an eligible survivor.
+	ingestRF3PartialInventoryMissingCurrent(t, h, "vol-rf3", "node-a", "node-b", "node-c")
+	placements := h.Lifecycle().Placements.ListPlacements()
+	report := authority.SupportabilityReport{Unsupported: map[string]authority.VolumeUnsupportedEvidence{
+		"vol-rf3": {VolumeID: "vol-rf3", Reasons: []string{authority.ReasonPartialInventory}},
+	}}
+	probes, blocked, asks := h.applyUnsupportedPromotionEvidenceGate(placements, report, nil)
+	if probes != 1 || blocked != 0 || len(asks) != 1 {
+		line, _ := h.Publisher().VolumeAuthorityLine("vol-rf3")
+		t.Fatalf("probes=%d blocked=%d asks=%+v placements=%+v line=%+v want one direct unsupported promotion ask", probes, blocked, asks, placements, line)
+	}
+	if asks[0].ReplicaID != "r3" || asks[0].Intent != authority.IntentReassign {
+		t.Fatalf("ask=%+v want highest durable survivor r3 reassign", asks[0])
+	}
+	if err := h.ctrl.SubmitAssignmentAsk(asks[0]); err != nil {
+		t.Fatalf("submit unsupported promotion ask: %v", err)
+	}
+	failover := waitAuthorityReplica(t, h.Publisher(), "vol-rf3", "r3")
+	if failover.Epoch != 2 || failover.EndpointVersion != 1 {
+		t.Fatalf("failover line=%+v want highest durable survivor r3@2/1", failover)
+	}
+}
+
 func TestMountedFailover_ProductLoopRF3RejectsBestEffortProbeForHA(t *testing.T) {
 	h := newTestMasterWithControllerConfig(t, t.TempDir(), authority.TopologyControllerConfig{
 		ExpectedSlotsPerVolume: 3,
@@ -819,6 +870,22 @@ func seedRF3PlacementForServers(t *testing.T, h *Host, volumeID, r1ServerID, r2S
 	}
 }
 
+func seedRF3PlacementForServersWithAddrs(t *testing.T, h *Host, volumeID, r1ServerID, r2ServerID, r3ServerID string) {
+	t.Helper()
+	stores := h.Lifecycle()
+	if _, err := stores.Placements.ApplyPlan(lifecycle.PlacementPlan{
+		VolumeID:  volumeID,
+		DesiredRF: 3,
+		Candidates: []lifecycle.PlacementCandidate{
+			{VolumeID: volumeID, ServerID: r1ServerID, ReplicaID: "r1", Source: lifecycle.PlacementSourceExistingReplica, DataAddr: "127.0.0.1:19101", CtrlAddr: "127.0.0.1:19102"},
+			{VolumeID: volumeID, ServerID: r2ServerID, ReplicaID: "r2", Source: lifecycle.PlacementSourceExistingReplica, DataAddr: "127.0.0.1:19201", CtrlAddr: "127.0.0.1:19202"},
+			{VolumeID: volumeID, ServerID: r3ServerID, ReplicaID: "r3", Source: lifecycle.PlacementSourceExistingReplica, DataAddr: "127.0.0.1:19301", CtrlAddr: "127.0.0.1:19302"},
+		},
+	}); err != nil {
+		t.Fatalf("apply RF3 placement with addrs: %v", err)
+	}
+}
+
 func ingestRF3ObservationForServers(t *testing.T, h *Host, volumeID, r1ServerID, r2ServerID, r3ServerID string, r1Ready, r2Ready, r3Ready bool) {
 	t.Helper()
 	ingestRF3ObservationForServersWithReady(t, h, volumeID, r1ServerID, r2ServerID, r3ServerID,
@@ -856,6 +923,54 @@ func ingestRF3ObservationForServersWithReady(t *testing.T, h *Host, volumeID, r1
 			}},
 		}); err != nil {
 			t.Fatalf("ingest RF3 observation: %v", err)
+		}
+	}
+}
+
+func ingestRF3PartialInventoryMissingCurrent(t *testing.T, h *Host, volumeID, r1ServerID, r2ServerID, r3ServerID string) {
+	t.Helper()
+	now := time.Now().UTC()
+	observations := []authority.Observation{
+		{
+			ServerID:   r1ServerID,
+			ObservedAt: now,
+			Server:     authority.ServerFact{Reachable: true, Eligible: true},
+			Slots:      nil,
+		},
+		{
+			ServerID:   r2ServerID,
+			ObservedAt: now,
+			Server:     authority.ServerFact{Reachable: true, Eligible: true},
+			Slots: []authority.SlotFact{{
+				VolumeID:        volumeID,
+				ReplicaID:       "r2",
+				DataAddr:        "127.0.0.1:19201",
+				CtrlAddr:        "127.0.0.1:19202",
+				Reachable:       true,
+				ReadyForPrimary: true,
+				Eligible:        true,
+				EvidenceScore:   20,
+			}},
+		},
+		{
+			ServerID:   r3ServerID,
+			ObservedAt: now,
+			Server:     authority.ServerFact{Reachable: true, Eligible: true},
+			Slots: []authority.SlotFact{{
+				VolumeID:        volumeID,
+				ReplicaID:       "r3",
+				DataAddr:        "127.0.0.1:19301",
+				CtrlAddr:        "127.0.0.1:19302",
+				Reachable:       true,
+				ReadyForPrimary: true,
+				Eligible:        true,
+				EvidenceScore:   10,
+			}},
+		},
+	}
+	for _, obs := range observations {
+		if err := h.ObservationHost().Ingest(obs); err != nil {
+			t.Fatalf("ingest RF3 partial inventory observation: %v", err)
 		}
 	}
 }

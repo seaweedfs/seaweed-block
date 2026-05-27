@@ -624,6 +624,7 @@ func runOpsReport(args []string, stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "html=%s\n", ops.ObservationReportHTMLArtifact)
 	fmt.Fprintf(stdout, "cluster_evidence=%s\n", ops.ObservationReportJSONArtifact)
 	fmt.Fprintf(stdout, "timeline=%s\n", ops.ObservationReportJSONLArtifact)
+	fmt.Fprintf(stdout, "operator_snapshot=%s\n", ops.ObservationOperatorSnapshotArtifact)
 	fmt.Fprintf(stdout, "summary=%s\n", ops.ObservationReportTextArtifact)
 	fmt.Fprintf(stdout, "read_only=true\n")
 	return ops.VolumeStatusExitOK
@@ -699,6 +700,7 @@ func runOpsDashboard(args []string, stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "url=http://%s/\n", ln.Addr().String())
 	fmt.Fprintf(stdout, "cluster_evidence=%s\n", ops.ObservationReportJSONArtifact)
 	fmt.Fprintf(stdout, "timeline=%s\n", ops.ObservationReportJSONLArtifact)
+	fmt.Fprintf(stdout, "operator_snapshot=%s\n", ops.ObservationOperatorSnapshotArtifact)
 	fmt.Fprintf(stdout, "summary=%s\n", ops.ObservationReportTextArtifact)
 	fmt.Fprintf(stdout, "read_only=true\n")
 
@@ -785,9 +787,11 @@ type helmValuesFile struct {
 	Image           helmValuesImage        `yaml:"image"`
 	CSIImage        helmValuesImage        `yaml:"csiImage"`
 	AppNamespace    string                 `yaml:"appNamespace"`
+	Blockmaster     *helmValuesBlockmaster `yaml:"blockmaster,omitempty"`
 	StorageClass    helmValuesStorageClass `yaml:"storageClass"`
 	Replication     helmValuesReplication  `yaml:"replication"`
 	Network         helmValuesNetwork      `yaml:"network"`
+	Restart         *helmValuesRestart     `yaml:"restartPersistence,omitempty"`
 	Compat          helmValuesCompat       `yaml:"compat"`
 	CHAP            helmValuesCHAP         `yaml:"chap"`
 	Stage2Multipath helmValuesEnabled      `yaml:"stage2Multipath"`
@@ -798,6 +802,15 @@ type helmValuesImage struct {
 	Repository string `yaml:"repository"`
 	Tag        string `yaml:"tag"`
 	Digest     string `yaml:"digest"`
+}
+
+type helmValuesBlockmaster struct {
+	StateHostPath string `yaml:"stateHostPath,omitempty"`
+}
+
+type helmValuesRestart struct {
+	Mode          string `yaml:"mode,omitempty"`
+	StateHostPath string `yaml:"stateHostPath,omitempty"`
 }
 
 type helmValuesStorageClass struct {
@@ -853,21 +866,23 @@ func runOpsGenerateHelmValues(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("sw-block ops generate-helm-values", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	var (
-		outPath           string
-		kubeconfig        string
-		image             string
-		csiImage          string
-		replicationFactor int
-		ackProfile        string
-		storageClass      string
-		appNamespace      string
-		targetNode        string
-		nodeLimit         int
-		chapSecretName    string
-		chapUsername      string
-		chapSecret        string
-		stage2Multipath   bool
-		timeout           time.Duration
+		outPath            string
+		kubeconfig         string
+		image              string
+		csiImage           string
+		replicationFactor  int
+		ackProfile         string
+		storageClass       string
+		appNamespace       string
+		targetNode         string
+		nodeLimit          int
+		chapSecretName     string
+		chapUsername       string
+		chapSecret         string
+		stage2Multipath    bool
+		restartPersistence string
+		stateHostPath      string
+		timeout            time.Duration
 	)
 	fs.StringVar(&outPath, "out", "", "output Helm values.yaml path")
 	fs.StringVar(&outPath, "o", "", "output Helm values.yaml path")
@@ -884,6 +899,8 @@ func runOpsGenerateHelmValues(args []string, stdout, stderr io.Writer) int {
 	fs.StringVar(&chapUsername, "chap-username", "sw-block", "iSCSI CHAP username")
 	fs.StringVar(&chapSecret, "chap-secret", "", "iSCSI CHAP shared secret; generated when needed and omitted")
 	fs.BoolVar(&stage2Multipath, "stage2-multipath", false, "enable Stage 2 multipath chart values")
+	fs.StringVar(&restartPersistence, "restart-persistence", "ephemeral", "restart persistence mode: ephemeral or hostpath")
+	fs.StringVar(&stateHostPath, "state-hostpath", "/var/lib/sw-block", "hostPath base used when --restart-persistence=hostpath")
 	fs.DurationVar(&timeout, "timeout", 10*time.Second, "kubectl discovery timeout")
 	if err := fs.Parse(args); err != nil {
 		return ops.VolumeStatusExitInvalid
@@ -902,6 +919,14 @@ func runOpsGenerateHelmValues(args []string, stdout, stderr io.Writer) int {
 	}
 	if !helmValuesAckProfileAccepted(ackProfile) {
 		fmt.Fprintf(stderr, "sw-block ops generate-helm-values: --ack-profile=%q invalid; want best-effort, sync-quorum, or sync-all\n", ackProfile)
+		return ops.VolumeStatusExitInvalid
+	}
+	if !helmValuesRestartPersistenceAccepted(restartPersistence) {
+		fmt.Fprintf(stderr, "sw-block ops generate-helm-values: --restart-persistence=%q invalid; want ephemeral or hostpath\n", restartPersistence)
+		return ops.VolumeStatusExitInvalid
+	}
+	if restartPersistence == "hostpath" && strings.TrimSpace(stateHostPath) == "" {
+		fmt.Fprintln(stderr, "sw-block ops generate-helm-values: --state-hostpath is required when --restart-persistence=hostpath")
 		return ops.VolumeStatusExitInvalid
 	}
 
@@ -963,6 +988,11 @@ func runOpsGenerateHelmValues(args []string, stdout, stderr io.Writer) int {
 		Stage2Multipath: helmValuesEnabled{Enabled: stage2Multipath},
 		BlockNodes:      make([]helmValuesBlockNode, 0, len(selected)),
 	}
+	values.Restart = &helmValuesRestart{Mode: restartPersistence}
+	if restartPersistence == "hostpath" {
+		values.Blockmaster = &helmValuesBlockmaster{StateHostPath: stateHostPath}
+		values.Restart.StateHostPath = stateHostPath
+	}
 	for i, node := range selected {
 		ip := node.InternalIP
 		if !multiNode {
@@ -1008,12 +1038,25 @@ func runOpsGenerateHelmValues(args []string, stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "chap_enabled=%t\n", multiNode)
 	fmt.Fprintf(stdout, "replication_factor=%d\n", replicationFactor)
 	fmt.Fprintf(stdout, "ack_profile=%s\n", ackProfile)
+	fmt.Fprintf(stdout, "restart_persistence_mode=%s\n", restartPersistence)
+	if restartPersistence == "hostpath" {
+		fmt.Fprintf(stdout, "state_hostpath=%s\n", stateHostPath)
+	}
 	return ops.VolumeStatusExitOK
 }
 
 func helmValuesAckProfileAccepted(value string) bool {
 	switch value {
 	case "best-effort", "sync-quorum", "sync-all":
+		return true
+	default:
+		return false
+	}
+}
+
+func helmValuesRestartPersistenceAccepted(value string) bool {
+	switch value {
+	case "ephemeral", "hostpath":
 		return true
 	default:
 		return false
@@ -1240,6 +1283,7 @@ func usage(w io.Writer) {
 	fmt.Fprintln(w, "  sw-block ops dashboard --from-bundle <dir> [--listen 127.0.0.1:9334]")
 	fmt.Fprintln(w, "  sw-block ops dashboard --master-api <addr> [--listen 127.0.0.1:9334]")
 	fmt.Fprintln(w, "  sw-block ops generate-helm-values --out values.yaml [--target-node <node>] [--replication-factor <n>]")
+	fmt.Fprintln(w, "      [--restart-persistence ephemeral|hostpath] [--state-hostpath /var/lib/sw-block] [--timeout 10s]")
 }
 
 func emptyCLI(value string) string {

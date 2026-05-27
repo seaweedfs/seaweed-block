@@ -1,0 +1,112 @@
+# Runner-native Phase 26 D1 gate: Helm release hygiene.
+#
+# Goal:
+#   Prove the chart is a repeatable release artifact before running heavier
+#   lifecycle gates:
+#     build sw-block CLI
+#     -> generate Day-1 values from the live cluster
+#     -> helm lint
+#     -> helm template
+#     -> helm package
+#     -> assert rendered release-critical resources exist
+
+name: helm-release-hygiene-chain
+timeout: 12m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+  helm_release: "sw-block"
+  helm_namespace: "kube-system"
+  sw_block_image: "ghcr.io/seaweedfs/seaweed-block:sha-28a99ce4f644"
+  sw_block_csi_image: "ghcr.io/seaweedfs/seaweed-block-csi:sha-28a99ce4f644"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: pre_clean
+    actions:
+      - action: exec
+        node: m02
+        timeout: 3m
+        cmd: "rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-release-hygiene && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-release-hygiene/bin /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-release-hygiene/values /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-release-hygiene/hygiene"
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+
+  - name: build_sw_block_cli
+    actions:
+      - action: exec
+        node: m02
+        timeout: 5m
+        cmd: "cd {{ product_root }} && go build -o /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-release-hygiene/bin/sw-block ./cmd/sw-block && /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-release-hygiene/bin/sw-block --version > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-release-hygiene/bin/sw-block.version.txt"
+
+  - name: generate_day1_values
+    actions:
+      - action: exec
+        node: m02
+        timeout: 3m
+        cmd: "helm version --short > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-release-hygiene/values/helm-version.txt && /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-release-hygiene/bin/sw-block ops generate-helm-values --kubeconfig /etc/rancher/k3s/k3s.yaml --out /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-release-hygiene/values/values.day1.yaml --image {{ sw_block_image }} --csi-image {{ sw_block_csi_image }} > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-release-hygiene/values/generate.stdout.txt"
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-release-hygiene/values/generate.stdout.txt"
+        pattern: "helm_values_status=ok"
+        save_as: generator_ok_count
+      - action: assert_greater
+        actual: "{{ generator_ok_count }}"
+        threshold: "0"
+
+  - name: helm_release_hygiene
+    actions:
+      - action: exec
+        node: m02
+        timeout: 5m
+        cmd: "cd {{ product_root }} && bash scripts/verify-helm-release-hygiene.sh {{ product_root }}"
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+        env.SW_BLOCK_ARTIFACT_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-release-hygiene/hygiene"
+        env.SW_BLOCK_HELM_VALUES_FILE: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-release-hygiene/values/values.day1.yaml"
+        env.SW_BLOCK_HELM_RELEASE: "{{ helm_release }}"
+        env.SW_BLOCK_HELM_NAMESPACE: "{{ helm_namespace }}"
+
+  - name: helm_release_hygiene_asserts
+    actions:
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-release-hygiene/hygiene/helm-release-hygiene-summary.txt"
+        pattern: "^helm_hygiene_status=ok$"
+        save_as: hygiene_ok_count
+      - action: assert_greater
+        actual: "{{ hygiene_ok_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-release-hygiene/hygiene/helm-release-hygiene-summary.txt"
+        pattern: "^rendered_storageclass_count=1$"
+        save_as: rendered_sc_count
+      - action: assert_greater
+        actual: "{{ rendered_sc_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-release-hygiene/hygiene/helm-release-hygiene-summary.txt"
+        pattern: "^rendered_csidriver_count=1$"
+        save_as: rendered_csidriver_count
+      - action: assert_greater
+        actual: "{{ rendered_csidriver_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-release-hygiene/hygiene/helm-release-hygiene-summary.txt"
+        pattern: "^rendered_master_count=1$"
+        save_as: rendered_master_count
+      - action: assert_greater
+        actual: "{{ rendered_master_count }}"
+        threshold: "0"
+      - action: exec
+        node: m02
+        timeout: 1m
+        cmd: "ls /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-release-hygiene/hygiene/*.tgz >/dev/null && test -s /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-release-hygiene/hygiene/helm-template.yaml && test -s /mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-release-hygiene/hygiene/helm-lint.txt"

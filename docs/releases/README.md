@@ -7,6 +7,10 @@ is still outside the supported boundary.
 - [v0.1 Alpha — Kubernetes Block Foundation](v0.1-alpha.md)
 - [v0.2 Alpha — Day-1 Activation And First Volume](v0.2-alpha.md)
 - [v0.3 Alpha — Helm Install And Observable First Volume](v0.3-alpha.md)
+- [v0.3.1 Alpha — Helm Lifecycle Hardening](v0.3.1-alpha.md)
+- [v0.3.2 Alpha — Multi-Volume HA Independence](v0.3.2-alpha.md)
+- [v0.3.3 Alpha — Productized Operations And Read-Only Operator Foundation](v0.3.3-alpha.md)
+- [v0.3.4 Alpha — Status Surface Hardening And Strict New-User Path](v0.3.4-alpha.md)
 
 ## Version Boundary
 
@@ -20,7 +24,23 @@ is still outside the supported boundary.
 - `v0.3-alpha` is the Helm-first alpha loop: generated chart values, Helm
   install, first PVC, writer/reader verification, local read-only
   report/dashboard, and cleanup verification.
+- `v0.3.1-alpha` hardens the Helm alpha loop with chart hygiene, a narrow
+  upgrade/rollback smoke, three-PVC Day-1 smoke, and cold support-bundle
+  replay.
+- `v0.3.2-alpha` adds scenario-gated RF=3 multi-volume HA independence:
+  three PVC-backed volumes, per-volume CSI reattach recovery, mounted
+  transparent failover, interleaved failover isolation, and cleanup hardening.
+- `v0.3.3-alpha` is the Phase 28 packaging target for productized
+  operations: stable ManagedVolume vocabulary, CRD/Condition/Event contract,
+  read-only operator snapshot, report/dashboard alignment, and close-gate QA.
+  D12 close passed on 2026-05-24; immutable GHCR image pins are recorded in
+  the v0.3.3 release note.
+- `v0.3.4-alpha` hardens the status surface and release walkthrough:
+  happy/blocked/restart/multi-volume/stale-evidence surfaces agree, support
+  bundle replay prefers the freshest evidence, and the documented cleanup path
+  scrubs iSCSI node DB residue.
 
-Operator packaging is not included in these alphas. v0.3 introduces Helm as
-the preferred Kubernetes alpha install path; the script path remains available
-for development and fallback validation.
+Mutating operator packaging is not included in these alphas. v0.3 introduces
+Helm as the preferred Kubernetes alpha install path; the script path remains
+available for development and fallback validation. The first operator-facing
+surface is read-only/status-first.

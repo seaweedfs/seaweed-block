@@ -51,9 +51,23 @@ type ClusterEvidence struct {
 	Nodes           []NodeEvidence            `json:"nodes"`
 	Volumes         []VolumeEvidence          `json:"volumes"`
 	ManagedVolumes  []ManagedVolumeProjection `json:"managed_volumes,omitempty"`
+	Cleanup         *CleanupEvidence          `json:"cleanup,omitempty"`
 	Conditions      []ObservationCondition    `json:"conditions,omitempty"`
 	Events          []ClusterEvent            `json:"events,omitempty"`
 	NonClaims       []string                  `json:"non_claims,omitempty"`
+}
+
+type CleanupEvidence struct {
+	Status                 string   `json:"status"`
+	KubernetesResidueCount int      `json:"k8s_residue_count,omitempty"`
+	ISCSIResidueCount      int      `json:"iscsi_residue_count,omitempty"`
+	MultipathResidueCount  int      `json:"multipath_residue_count,omitempty"`
+	ProcessResidueCount    int      `json:"process_residue_count,omitempty"`
+	HostPathResidueCount   int      `json:"hostpath_residue_count,omitempty"`
+	FailureCount           int      `json:"failure_count,omitempty"`
+	FailedPhase            string   `json:"failed_phase,omitempty"`
+	ReasonCodes            []string `json:"reason_codes,omitempty"`
+	EvidenceRef            string   `json:"evidence_ref,omitempty"`
 }
 
 type NodeEvidence struct {

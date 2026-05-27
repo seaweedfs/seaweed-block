@@ -78,6 +78,27 @@ func TestStatusFrontendsForAssignedVolume_DedupesRepeatedFacts(t *testing.T) {
 	}
 }
 
+func TestStatusFrontendsForAssignedVolume_PreservesMultipleVolumesOnSameServer(t *testing.T) {
+	obs := authority.NewObservationHost(authority.ObservationHostConfig{})
+	for _, hb := range []authority.HeartbeatMessage{
+		frontendHeartbeat("node-a", "v1", "r1", "127.0.0.1:3260"),
+		frontendHeartbeat("node-a", "v2", "r1", "127.0.0.1:3261"),
+	} {
+		if err := obs.IngestHeartbeat(hb); err != nil {
+			t.Fatalf("ingest heartbeat: %v", err)
+		}
+	}
+
+	gotV1 := statusFrontendsForAssignedVolume(obs, "v1", []string{"r1"}, true)
+	if len(gotV1) != 1 || gotV1[0].GetAddr() != "127.0.0.1:3260" {
+		t.Fatalf("v1 frontends=%+v, want first heartbeat preserved", gotV1)
+	}
+	gotV2 := statusFrontendsForAssignedVolume(obs, "v2", []string{"r1"}, true)
+	if len(gotV2) != 1 || gotV2[0].GetAddr() != "127.0.0.1:3261" {
+		t.Fatalf("v2 frontends=%+v, want second heartbeat", gotV2)
+	}
+}
+
 func TestNodeLoss_PrimaryFirstReplicaIDsMovesPromotedReplicaFirst(t *testing.T) {
 	got := primaryFirstReplicaIDs([]string{"r1", "r2", "r3"}, "r2")
 	want := []string{"r2", "r1", "r3"}

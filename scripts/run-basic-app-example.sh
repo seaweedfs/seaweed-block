@@ -276,6 +276,7 @@ write_summary() {
     echo "cluster_evidence=status/cluster-evidence.json"
     echo "inventory_bundle=status/inventory"
     echo "status_report=status/report/index.html"
+    echo "operator_snapshot=status/report/operator-snapshot.json"
     echo "cleanup_status=$CLEANUP_STATUS"
   } >"$ARTIFACT_DIR/first-volume-summary.txt"
 }

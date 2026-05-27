@@ -126,6 +126,88 @@ func TestG15d_WorkloadPlanTickAllocatesDistinctNodeLocalPortsAcrossVolumes(t *te
 	}
 }
 
+func TestG15d_WorkloadPlanTickPreservesMaterializedPortsWhenVolumeIDsSortEarlier(t *testing.T) {
+	h := newTestMaster(t, t.TempDir())
+	defer closeTestMaster(t, h)
+	stores := h.Lifecycle()
+	if _, err := stores.Volumes.CreateVolume(lifecycle.VolumeSpec{
+		VolumeID:          "pvc-c",
+		SizeBytes:         1 << 20,
+		ReplicationFactor: 1,
+	}); err != nil {
+		t.Fatalf("create first volume: %v", err)
+	}
+	if _, err := stores.Nodes.RegisterNode(lifecycle.NodeRegistration{
+		ServerID: "m02",
+		DataAddr: "127.0.0.1:19101",
+		CtrlAddr: "127.0.0.1:19102",
+		Pools: []lifecycle.StoragePool{{
+			PoolID:     "default",
+			TotalBytes: 1 << 30,
+			FreeBytes:  1 << 30,
+			BlockSize:  4096,
+		}},
+	}); err != nil {
+		t.Fatalf("register node: %v", err)
+	}
+	if _, err := h.RunLifecycleProductTick(); err != nil {
+		t.Fatalf("product tick: %v", err)
+	}
+	firstResult, err := h.RunLifecycleWorkloadPlanTick(lifecycle.WorkloadPlanConfig{
+		ISCSIPortBase: 3260,
+		NVMePortBase:  4420,
+	})
+	if err != nil {
+		t.Fatalf("first workload tick: %v", err)
+	}
+	if got := firstResult.Plans[0].Replicas[0].ISCSIListenPort; got != 3260 {
+		t.Fatalf("first volume port=%d want 3260", got)
+	}
+
+	for _, volumeID := range []string{"pvc-a", "pvc-b"} {
+		if _, err := stores.Volumes.CreateVolume(lifecycle.VolumeSpec{
+			VolumeID:          volumeID,
+			SizeBytes:         1 << 20,
+			ReplicationFactor: 1,
+		}); err != nil {
+			t.Fatalf("create later volume %s: %v", volumeID, err)
+		}
+	}
+	if _, err := h.RunLifecycleProductTick(); err != nil {
+		t.Fatalf("second product tick: %v", err)
+	}
+	secondResult, err := h.RunLifecycleWorkloadPlanTick(lifecycle.WorkloadPlanConfig{
+		ISCSIPortBase: 3260,
+		NVMePortBase:  4420,
+	})
+	if err != nil {
+		t.Fatalf("second workload tick: %v", err)
+	}
+	portsByVolume := map[string]int{}
+	dataByVolume := map[string]string{}
+	for _, plan := range secondResult.Plans {
+		portsByVolume[plan.VolumeID] = plan.Replicas[0].ISCSIListenPort
+		dataByVolume[plan.VolumeID] = plan.Replicas[0].DataAddr
+	}
+	if portsByVolume["pvc-c"] != 3260 {
+		t.Fatalf("materialized pvc-c port moved to %d; want preserved 3260", portsByVolume["pvc-c"])
+	}
+	seenPorts := map[int]string{}
+	seenData := map[string]string{}
+	for volumeID, port := range portsByVolume {
+		if prior := seenPorts[port]; prior != "" {
+			t.Fatalf("duplicate port %d for %s and %s: %+v", port, prior, volumeID, portsByVolume)
+		}
+		seenPorts[port] = volumeID
+	}
+	for volumeID, data := range dataByVolume {
+		if prior := seenData[data]; prior != "" {
+			t.Fatalf("duplicate data addr %s for %s and %s: %+v", data, prior, volumeID, dataByVolume)
+		}
+		seenData[data] = volumeID
+	}
+}
+
 func TestMountedFailover_WorkloadPlanSupportsLogicalServersOnOneKubernetesNode(t *testing.T) {
 	h := newTestMaster(t, t.TempDir())
 	defer closeTestMaster(t, h)

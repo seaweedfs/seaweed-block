@@ -1,6 +1,6 @@
 # Kubernetes Quick Start
 
-This guide is the v0.3 alpha path for Seaweed Block on Kubernetes.
+This guide is the current alpha path for Seaweed Block on Kubernetes.
 
 It shows the user loop:
 
@@ -15,7 +15,9 @@ generate Helm values
 ```
 
 The current quickstart is for supported test clusters, not production. For
-deeper operational detail, see [`operations-v1.md`](operations-v1.md).
+the release boundary and exact QA evidence, see
+[`docs/releases/README.md`](releases/README.md). The top-level README contains
+the current operations command matrix.
 
 ## What This Proves
 
@@ -27,10 +29,13 @@ The quickstart proves:
 - A replacement reader pod can mount the same PVC and verify the same data.
 - Product-owned status evidence, a local read-only report, and a local
   read-only dashboard are available.
+- The report/dashboard include `operator-snapshot.json`, a read-only
+  operator-facing status projection. It is not a mutating operator.
 - The example resources and host-side residue are cleaned up.
 
-It does not prove production HA, backup/restore, upgrade safety, broad platform
-compatibility, operator lifecycle, mutating admin workflows, or production UI.
+It does not prove production HA, backup/restore, broad upgrade safety, broad
+platform compatibility, mutating operator lifecycle, mutating admin workflows,
+or production UI.
 
 ## Prerequisites
 
@@ -80,8 +85,8 @@ From the repository root:
 export KUBECONFIG="${KUBECONFIG:-/etc/rancher/k3s/k3s.yaml}"
 sw-block ops generate-helm-values \
   --out values.day1.yaml \
-  --image ghcr.io/seaweedfs/seaweed-block:sha-28a99ce4f644 \
-  --csi-image ghcr.io/seaweedfs/seaweed-block-csi:sha-28a99ce4f644
+  --image ghcr.io/seaweedfs/seaweed-block:sha-6260e46fd3be \
+  --csi-image ghcr.io/seaweedfs/seaweed-block-csi:sha-6260e46fd3be
 ```
 
 The `KUBECONFIG` fallback above is the common k3s path. Non-k3s users should
@@ -129,7 +134,19 @@ sw-block ops generate-helm-values \
   --csi-image ghcr.io/seaweedfs/seaweed-block-csi:sha-<commit>
 ```
 
-Current validated v0.3 walkthrough image tag: `sha-28a99ce4f644`.
+Current validated alpha image tag:
+`sha-6260e46fd3be`.
+
+Published image digests:
+
+```text
+seaweed-block
+  index:       sha256:ef9c60f82c36f22360b10faafd32caf807f98ac0ea86c0365c0d0836e5f67110
+  linux/amd64: sha256:36481cbc1fc98fafdfa386823e0e5906785cb6f35748ef698ff1cec39bb40464
+seaweed-block-csi
+  index:       sha256:b160ceee874dc6743074ef6b6735ccf05914c1de5951972922f6d3779bc73592
+  linux/amd64: sha256:82e41b7ef92ad8db38b6927e334cc1d564b1012ad916e9bde2e882cece680be8
+```
 
 Mutable `:alpha` is a smoke/demo tag only. Do not use it as release evidence
 unless the publish commit is known.
@@ -211,6 +228,7 @@ status_evidence=status/cluster-evidence.json,status/inventory
 cluster_evidence=status/cluster-evidence.json
 inventory_bundle=status/inventory
 status_report=status/report/index.html
+operator_snapshot=status/report/operator-snapshot.json
 cleanup_status=ok
 ```
 
@@ -233,11 +251,24 @@ Expected files:
 index.html
 cluster-evidence.json
 timeline.jsonl
+operator-snapshot.json
 summary.txt
 ```
 
 `sw-block ops report` writes static artifacts. `sw-block ops dashboard` serves
-the same evidence locally over HTTP.
+the same evidence locally over HTTP. `operator-snapshot.json` uses the same
+ManagedVolume status vocabulary as the report/dashboard and is the status-only
+foundation for future Kubernetes operator work.
+
+Important status vocabulary:
+
+- `Ready=True reason=first_volume_verified` means the report has positive
+  writer/reader evidence for the volume.
+- `Blocked=True reason=<stable_reason_code>` means the product found a known
+  blocker, such as `csi_node_image_pull_failed`.
+- `EvidenceStale=True` or `Ready=Unknown` means the evidence is missing,
+  stale, or still reconverging. The alpha status surface should not claim
+  `Ready=True` without current evidence.
 
 Serve the collected bundle:
 
@@ -348,22 +379,35 @@ the alpha stack:
 ```bash
 helm uninstall sw-block --namespace kube-system
 bash scripts/uninstall-k8s-alpha.sh "$PWD"
+bash scripts/verify-helm-cleanup.sh
 ```
 
-Verify:
+The uninstall script removes Kubernetes resources and scrubs Seaweed Block
+iSCSI sessions and iSCSI node DB records. The verifier checks the same residue
+classes used by release QA.
+
+Manual spot checks:
 
 ```bash
 kubectl get sc | grep sw-block || echo "no sw-block StorageClass"
 kubectl get deploy -A | grep sw-block || echo "no sw-block deployments"
 sudo iscsiadm -m session || true
+sudo iscsiadm -m node | grep io.seaweedfs || echo "no Seaweed Block iSCSI node records"
 ```
 
 Expected clean state:
 
 ```text
+cleanup_status=ok
+k8s_residue_count=0
+iscsi_residue_count=0
+multipath_residue_count=0
+process_residue_count=0
+hostpath_residue_count=0
 no sw-block StorageClass
 no sw-block deployments
 iscsiadm: No active sessions.
+no Seaweed Block iSCSI node records
 ```
 
 Do not run broad cluster cleanup commands in a shared cluster unless you know no
@@ -375,7 +419,8 @@ other run owns the resources.
 - The dashboard is local and read-only, not a production hosted UI.
 - Mutating admin workflows are not exposed: no promote, repair, rebuild,
   failback, delete, backup, restore, or cleanup button.
-- Upgrade and rollback safety are not claimed.
+- Broad upgrade and rollback safety are not claimed beyond the gated alpha
+  smoke path.
 - Backup, snapshot, and restore are not claimed.
 - Broad distro/kernel/initiator compatibility is not claimed.
 - Performance, RTO, and SLO numbers are not claimed.

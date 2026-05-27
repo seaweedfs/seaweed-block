@@ -27,6 +27,13 @@ func WriteObservationReportArtifacts(outDir string, cluster ClusterEvidence) err
 	if err := os.WriteFile(filepath.Join(outDir, ObservationReportTextArtifact), []byte(RenderObservationReportSummary(cluster)), 0o644); err != nil {
 		return err
 	}
+	operatorRaw, err := MarshalObservationJSON(BuildOperatorFoundationSnapshot(cluster))
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(outDir, ObservationOperatorSnapshotArtifact), operatorRaw, 0o644); err != nil {
+		return err
+	}
 	jsonl, err := RenderClusterEventsJSONL(cluster.Events)
 	if err != nil {
 		return err
@@ -46,6 +53,12 @@ func RenderObservationReportSummary(cluster ClusterEvidence) string {
 	fmt.Fprintf(&b, "volumes=%d\n", len(cluster.Volumes))
 	fmt.Fprintf(&b, "nodes=%d\n", len(cluster.Nodes))
 	fmt.Fprintf(&b, "events=%d\n", len(cluster.Events))
+	fmt.Fprintf(&b, "operator_snapshot=%s\n", ObservationOperatorSnapshotArtifact)
+	if cluster.Cleanup != nil {
+		for _, line := range cluster.Cleanup.ReportSummaryLines() {
+			fmt.Fprintf(&b, "%s\n", line)
+		}
+	}
 	for _, volume := range cluster.Volumes {
 		fmt.Fprintf(&b, "volume=%s status=%s pvc=%s/%s primary=%s@%s frontend=%s rf=%d ack=%s\n",
 			emptyAsDash(volume.VolumeID),
@@ -114,6 +127,22 @@ func RenderObservationReportHTML(cluster ClusterEvidence) string {
 	reportCard(&b, "Events", fmt.Sprintf("%d", len(cluster.Events)), "")
 	reportCard(&b, "Read Only", "true", "ok")
 	b.WriteString("</div>")
+
+	if cluster.Cleanup != nil {
+		row := cluster.Cleanup.ReportRow()
+		b.WriteString("<section><h2>Lifecycle Cleanup</h2><table><thead><tr><th>Status</th><th>K8s</th><th>iSCSI</th><th>Multipath</th><th>Processes</th><th>HostPath</th><th>Failures</th><th>Evidence</th></tr></thead><tbody>")
+		fmt.Fprintf(&b, "<tr><td class=\"%s\">%s</td><td>%d</td><td>%d</td><td>%d</td><td>%d</td><td>%d</td><td>%d</td><td>%s</td></tr>",
+			row.StatusClass,
+			esc(row.Status),
+			row.KubernetesResidueCount,
+			row.ISCSIResidueCount,
+			row.MultipathResidueCount,
+			row.ProcessResidueCount,
+			row.HostPathResidueCount,
+			row.FailureCount,
+			esc(row.EvidenceRef))
+		b.WriteString("</tbody></table></section>")
+	}
 
 	b.WriteString("<section><h2>Managed Volumes</h2><table><thead><tr><th>Volume</th><th>Status</th><th>Reason</th><th>Conditions</th><th>Safe Actions</th></tr></thead><tbody>")
 	for _, managed := range cluster.ManagedVolumes {

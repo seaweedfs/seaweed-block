@@ -1,5 +1,10 @@
 # Seaweed Block Roadmap
 
+> Document status: public roadmap summary. It is intentionally high level and
+> may trail the internal execution plan between releases. For current
+> user-facing claims, use [`quickstart-kubernetes.md`](quickstart-kubernetes.md)
+> and [`releases/README.md`](releases/README.md).
+
 This roadmap is intentionally practical. The goal is to make a Kubernetes block
 service that is easy to try, review, and improve without hiding unfinished
 storage semantics.

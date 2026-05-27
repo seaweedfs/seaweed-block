@@ -307,6 +307,7 @@ func TestOpsGenerateHelmValuesSingleNodeFromKubernetes(t *testing.T) {
 		"ready_kubernetes_nodes=1",
 		"discovered_kubernetes_nodes=3",
 		"target_node=m02",
+		"restart_persistence_mode=ephemeral",
 	} {
 		if !strings.Contains(stdout.String(), want) {
 			t.Fatalf("stdout missing %q:\n%s", want, stdout.String())
@@ -322,6 +323,8 @@ func TestOpsGenerateHelmValuesSingleNodeFromKubernetes(t *testing.T) {
 		"externalISCSI: false",
 		"externalStatus: false",
 		"rejectLoopbackPublishTargets: false",
+		"restartPersistence:",
+		"mode: ephemeral",
 		"expectedSlotsPerVolume: 1",
 		"enabled: false",
 		"name: m02",
@@ -363,6 +366,7 @@ func TestOpsGenerateHelmValuesMultiNodeExternalISCSI(t *testing.T) {
 		"external_iscsi=true",
 		"chap_enabled=true",
 		"ack_profile=sync-quorum",
+		"restart_persistence_mode=ephemeral",
 	} {
 		if !strings.Contains(stdout.String(), want) {
 			t.Fatalf("stdout missing %q:\n%s", want, stdout.String())
@@ -379,6 +383,8 @@ func TestOpsGenerateHelmValuesMultiNodeExternalISCSI(t *testing.T) {
 		"externalISCSI: true",
 		"externalStatus: true",
 		"rejectLoopbackPublishTargets: true",
+		"restartPersistence:",
+		"mode: ephemeral",
 		"enabled: true",
 		"secret: fixed-chap-secret",
 		"name: m01",
@@ -401,6 +407,65 @@ func TestOpsGenerateHelmValuesMultiNodeExternalISCSI(t *testing.T) {
 	}
 	if strings.Contains(string(values), "dataPort: 3260") {
 		t.Fatalf("values must not assign dataPort 3260 because it collides with iSCSI listener port:\n%s", values)
+	}
+}
+
+func TestOpsGenerateHelmValuesRestartPersistenceHostPath(t *testing.T) {
+	oldRunCommand := opsGenerateHelmValuesRunCommand
+	opsGenerateHelmValuesRunCommand = fixtureCmdKubectl(map[string]string{
+		"kubectl get nodes -o wide --no-headers": cmdHelmNodeWide,
+	})
+	defer func() { opsGenerateHelmValuesRunCommand = oldRunCommand }()
+
+	outPath := filepath.Join(t.TempDir(), "values.yaml")
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"ops", "generate-helm-values",
+		"--out", outPath,
+		"--target-node", "m02",
+		"--node-limit", "1",
+		"--restart-persistence", "hostpath",
+		"--state-hostpath", "/var/lib/sw-block",
+	}, &stdout, &stderr)
+	if code != ops.VolumeStatusExitOK {
+		t.Fatalf("exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	for _, want := range []string{
+		"restart_persistence_mode=hostpath",
+		"state_hostpath=/var/lib/sw-block",
+	} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("stdout missing %q:\n%s", want, stdout.String())
+		}
+	}
+	values, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"blockmaster:",
+		"stateHostPath: /var/lib/sw-block",
+		"restartPersistence:",
+		"mode: hostpath",
+	} {
+		if !strings.Contains(string(values), want) {
+			t.Fatalf("values missing %q:\n%s", want, values)
+		}
+	}
+}
+
+func TestOpsGenerateHelmValuesRejectsUnknownRestartPersistence(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"ops", "generate-helm-values",
+		"--out", filepath.Join(t.TempDir(), "values.yaml"),
+		"--restart-persistence", "durable-magic",
+	}, &stdout, &stderr)
+	if code != ops.VolumeStatusExitInvalid {
+		t.Fatalf("exit=%d want invalid stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "--restart-persistence=\"durable-magic\" invalid") {
+		t.Fatalf("stderr=%s", stderr.String())
 	}
 }
 
@@ -477,6 +542,7 @@ func TestOpsReportFromBundleWritesStaticReadOnlyArtifacts(t *testing.T) {
 		ops.ObservationReportHTMLArtifact,
 		ops.ObservationReportJSONArtifact,
 		ops.ObservationReportJSONLArtifact,
+		ops.ObservationOperatorSnapshotArtifact,
 		ops.ObservationReportTextArtifact,
 	} {
 		if _, err := os.Stat(filepath.Join(outDir, name)); err != nil {
@@ -504,7 +570,9 @@ func TestOpsReportFromBundleWritesStaticReadOnlyArtifacts(t *testing.T) {
 	if !strings.Contains(string(summary), "read_only=true") || !strings.Contains(string(summary), "volume=pvc-product") {
 		t.Fatalf("summary missing report evidence:\n%s", summary)
 	}
-	if !strings.Contains(stdout.String(), "report_status=ok") || !strings.Contains(stdout.String(), "html=index.html") {
+	if !strings.Contains(stdout.String(), "report_status=ok") ||
+		!strings.Contains(stdout.String(), "html=index.html") ||
+		!strings.Contains(stdout.String(), "operator_snapshot=operator-snapshot.json") {
 		t.Fatalf("stdout missing report paths:\n%s", stdout.String())
 	}
 }
@@ -556,6 +624,10 @@ func TestOpsDashboardFromBundleServesReadOnlyHTTP(t *testing.T) {
 	if !strings.Contains(body, "read_only=true") {
 		t.Fatalf("summary missing read_only=true:\n%s", body)
 	}
+	snapshot := waitForHTTPContains(t, "http://"+addr+"/operator-snapshot.json", `"read_only": true`)
+	if !strings.Contains(snapshot, `"mutation_allowed": false`) {
+		t.Fatalf("operator snapshot missing read-only boundary:\n%s", snapshot)
+	}
 	postResp, err := http.Post("http://"+addr+"/", "application/json", strings.NewReader(`{"action":"promote"}`))
 	if err != nil {
 		t.Fatal(err)
@@ -597,6 +669,10 @@ func TestOpsDashboardMasterAPIServesLiveClusterEvidence(t *testing.T) {
 	body := waitForHTTPContains(t, "http://"+addr+"/cluster-evidence.json", `"event_type": "csi_reattach_observed"`)
 	if !strings.Contains(body, `"managed_volumes"`) {
 		t.Fatalf("cluster evidence missing managed_volumes:\n%s", body)
+	}
+	snapshot := waitForHTTPContains(t, "http://"+addr+"/operator-snapshot.json", `"read_only": true`)
+	if !strings.Contains(snapshot, `"api_version": "block.seaweedfs.com/v1alpha1"`) {
+		t.Fatalf("operator snapshot missing api version:\n%s", snapshot)
 	}
 
 	select {

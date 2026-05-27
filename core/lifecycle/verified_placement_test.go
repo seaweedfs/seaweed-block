@@ -60,6 +60,40 @@ func TestG9F_VerifiedPlacement_IsNotAuthorityShaped(t *testing.T) {
 	}
 }
 
+func TestG15d_VerifiedPlacementUsesMaterializedWorkloadAddresses(t *testing.T) {
+	now := time.Date(2026, 5, 2, 12, 0, 0, 0, time.UTC)
+	intent := PlacementIntent{
+		VolumeID:  "vol-a",
+		DesiredRF: 1,
+		Slots: []PlacementSlotIntent{{
+			ServerID:  "node-a",
+			ReplicaID: "r1",
+			Source:    PlacementSourceExistingReplica,
+			DataAddr:  "10.0.0.1:19103",
+			CtrlAddr:  "10.0.0.1:19104",
+		}},
+	}
+	got := VerifyPlacementIntent(intent, []NodeRegistration{{
+		ServerID: "node-a",
+		DataAddr: "10.0.0.1:19101",
+		CtrlAddr: "10.0.0.1:19102",
+		SeenAt:   now,
+		Replicas: []ReplicaInventory{{
+			VolumeID:  "vol-a",
+			ReplicaID: "r1",
+			StoreUUID: "store-1",
+			SizeBytes: 1 << 20,
+			State:     "ready",
+		}},
+	}}, VerificationConfig{Now: now, FreshnessWindow: time.Minute})
+	if !got.Verified {
+		t.Fatalf("materialized placement did not verify: %+v", got)
+	}
+	if got.Slots[0].DataAddr != "10.0.0.1:19103" || got.Slots[0].CtrlAddr != "10.0.0.1:19104" {
+		t.Fatalf("verified addrs=%s/%s want materialized slot addrs", got.Slots[0].DataAddr, got.Slots[0].CtrlAddr)
+	}
+}
+
 func TestG9F_BlankPoolIntentWithFreshObservation_VerifiesCreateNeededSlot(t *testing.T) {
 	now := time.Date(2026, 5, 2, 12, 0, 0, 0, time.UTC)
 	intent := PlacementIntent{
@@ -116,6 +150,37 @@ func TestG9F_FreshObservationMissingControlAddress_DoesNotVerify(t *testing.T) {
 	}
 	if got.Reason != VerifyReasonMissingAddress {
 		t.Fatalf("reason=%q want %q", got.Reason, VerifyReasonMissingAddress)
+	}
+}
+
+func TestPlacementIntentRejectsInvalidPersistedPorts(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		slot PlacementSlotIntent
+	}{
+		{
+			name: "iscsi negative",
+			slot: PlacementSlotIntent{ServerID: "node-a", PoolID: "pool-a", Source: PlacementSourceBlankPool, ISCSIListenPort: -1},
+		},
+		{
+			name: "iscsi too high",
+			slot: PlacementSlotIntent{ServerID: "node-a", PoolID: "pool-a", Source: PlacementSourceBlankPool, ISCSIListenPort: 70000},
+		},
+		{
+			name: "nvme negative",
+			slot: PlacementSlotIntent{ServerID: "node-a", PoolID: "pool-a", Source: PlacementSourceBlankPool, NVMeListenPort: -1},
+		},
+		{
+			name: "nvme too high",
+			slot: PlacementSlotIntent{ServerID: "node-a", PoolID: "pool-a", Source: PlacementSourceBlankPool, NVMeListenPort: 70000},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validatePlacementIntent(PlacementIntent{VolumeID: "vol-a", DesiredRF: 1, Slots: []PlacementSlotIntent{tc.slot}})
+			if err == nil {
+				t.Fatal("expected invalid port to be rejected")
+			}
+		})
 	}
 }
 

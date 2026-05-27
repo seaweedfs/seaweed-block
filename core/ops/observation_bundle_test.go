@@ -203,6 +203,125 @@ func TestObservationBundle_ManagedVolumeUsesPrimaryFailureArtifactHints(t *testi
 	}
 }
 
+func TestObservationBundle_D7PrefersNewestRestartClusterEvidence(t *testing.T) {
+	dir := t.TempDir()
+	oldCluster := NewClusterEvidence(time.Date(2026, 5, 25, 21, 32, 48, 0, time.UTC))
+	oldCluster.Volumes = []VolumeEvidence{{
+		VolumeID:          "pvc-restart",
+		Namespace:         "default",
+		PVCName:           "demo-pvc",
+		ReplicationFactor: 3,
+		AckProfile:        "sync-quorum",
+		Status:            ObservationStatusOK,
+		PrimaryReplica:    "r1",
+		PrimaryNode:       "m01",
+		PublishTarget:     "192.168.1.181:3260",
+		Epoch:             1,
+	}}
+	newCluster := NewClusterEvidence(time.Date(2026, 5, 25, 21, 33, 37, 0, time.UTC))
+	newCluster.Volumes = []VolumeEvidence{{
+		VolumeID:          "pvc-restart",
+		Namespace:         "default",
+		PVCName:           "demo-pvc",
+		ReplicationFactor: 3,
+		AckProfile:        "sync-quorum",
+		Status:            ObservationStatusOK,
+		PrimaryReplica:    "r2",
+		PrimaryNode:       "m02",
+		PublishTarget:     "192.168.1.184:3260",
+		Epoch:             2,
+	}}
+	writeClusterEvidenceArtifact(t, filepath.Join(dir, "recovery", "setup", "status", ClusterEvidenceArtifact), oldCluster)
+	writeClusterEvidenceArtifact(t, filepath.Join(dir, "restart", RestartClusterEvidenceArtifact), newCluster)
+
+	out, err := BuildObservationFromBundle(ObservationBundleOptions{Dir: dir, VolumeID: "pvc-restart"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Volumes) != 1 {
+		t.Fatalf("volumes=%+v", out.Volumes)
+	}
+	volume := out.Volumes[0]
+	if volume.PrimaryReplica != "r2" || volume.PrimaryNode != "m02" || volume.PublishTarget != "192.168.1.184:3260" || volume.Epoch != 2 {
+		t.Fatalf("expected post-restart evidence, got %+v", volume)
+	}
+	summary := RenderObservationReportSummary(out)
+	if !strings.Contains(summary, "primary=r2@m02 frontend=192.168.1.184:3260") {
+		t.Fatalf("summary used stale primary:\n%s", summary)
+	}
+}
+
+func TestObservationBundle_SkipsCorruptClusterEvidenceCandidate(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "stale", "status"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, filepath.Join(dir, "stale", "status", ClusterEvidenceArtifact), "{not-json")
+	good := NewClusterEvidence(time.Date(2026, 5, 25, 21, 33, 37, 0, time.UTC))
+	good.Volumes = []VolumeEvidence{healthyObservationVolume()}
+	writeClusterEvidenceArtifact(t, filepath.Join(dir, "restart", RestartClusterEvidenceArtifact), good)
+
+	out, err := BuildObservationFromBundle(ObservationBundleOptions{Dir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Volumes) != 1 || out.Volumes[0].VolumeID != healthyObservationVolume().VolumeID {
+		t.Fatalf("unexpected bundle replay output: %+v", out.Volumes)
+	}
+}
+
+func TestObservationBundle_CarriesCleanupEvidenceIntoReportSurfaces(t *testing.T) {
+	dir := t.TempDir()
+	writeProductClusterEvidence(t, dir, []VolumeEvidence{healthyObservationVolume()})
+	mustWrite(t, filepath.Join(dir, "demo", ObservationCleanupSummaryArtifact), strings.Join([]string{
+		"cleanup_status=failed",
+		"k8s_residue_count=1",
+		"iscsi_residue_count=2",
+		"multipath_residue_count=3",
+		"process_residue_count=4",
+		"hostpath_residue_count=5",
+		"failure_count=2",
+		"failed_phase=collect_and_cleanup",
+		"reason_codes=kubernetes_sw_block_resources_present,multipath_maps_present",
+	}, "\n"))
+
+	cluster, err := BuildObservationFromBundle(ObservationBundleOptions{Dir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cluster.Cleanup == nil {
+		t.Fatalf("missing cleanup evidence")
+	}
+	if cluster.Cleanup.Status != "failed" || cluster.Cleanup.KubernetesResidueCount != 1 || cluster.Cleanup.MultipathResidueCount != 3 {
+		t.Fatalf("cleanup evidence=%+v", cluster.Cleanup)
+	}
+	if len(cluster.Cleanup.ReasonCodes) != 2 || cluster.Cleanup.ReasonCodes[1] != "multipath_maps_present" {
+		t.Fatalf("cleanup reason codes=%+v", cluster.Cleanup.ReasonCodes)
+	}
+
+	summary := RenderObservationReportSummary(cluster)
+	for _, want := range []string{
+		"cleanup_status=failed",
+		"k8s_residue_count=1",
+		"iscsi_residue_count=2",
+		"multipath_residue_count=3",
+		"process_residue_count=4",
+		"hostpath_residue_count=5",
+		"failure_count=2",
+		"failed_phase=collect_and_cleanup",
+		"cleanup_evidence=",
+	} {
+		if !strings.Contains(summary, want) {
+			t.Fatalf("summary missing %q:\n%s", want, summary)
+		}
+	}
+
+	snapshot := BuildOperatorFoundationSnapshot(cluster)
+	if snapshot.Cluster.Cleanup == nil || snapshot.Cluster.Cleanup.Status != "failed" || snapshot.Cluster.Cleanup.FailedPhase != "collect_and_cleanup" {
+		t.Fatalf("operator cleanup evidence=%+v", snapshot.Cluster.Cleanup)
+	}
+}
+
 func TestObservationBundle_D6ReplayGate_FirstVolumeBlockedAndRecovery(t *testing.T) {
 	cases := []struct {
 		name       string
@@ -290,6 +409,7 @@ deployment.apps/sw-block-csi-controller 1/1 1 1 2m3s block-csi sw-block-csi:loca
 				ObservationReportHTMLArtifact,
 				ObservationReportJSONArtifact,
 				ObservationReportJSONLArtifact,
+				ObservationOperatorSnapshotArtifact,
 				ObservationReportTextArtifact,
 			} {
 				if _, err := os.Stat(filepath.Join(reportDir, artifact)); err != nil {
@@ -397,6 +517,7 @@ deployment.apps/sw-block-csi-controller 1/1 1 1 2m3s block-csi sw-block-csi:loca
 			defer server.Close()
 			assertDashboardEndpointContains(t, server.URL+"/", tc.wantHTML)
 			assertDashboardEndpointContains(t, server.URL+"/"+ObservationReportJSONArtifact, tc.wantJSON)
+			assertDashboardEndpointContains(t, server.URL+"/"+ObservationOperatorSnapshotArtifact, `"read_only": true`)
 			assertDashboardEndpointContains(t, server.URL+"/"+ObservationReportTextArtifact, tc.wantText)
 
 			resp, err := http.Post(server.URL+"/", "application/json", strings.NewReader(`{"action":"repair"}`))
@@ -447,6 +568,20 @@ func writeProductClusterEvidence(t *testing.T, dir string, volumes []VolumeEvide
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(productDir, ClusterEvidenceArtifact), raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeClusterEvidenceArtifact(t *testing.T, path string, cluster ClusterEvidence) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := MarshalObservationJSON(cluster)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, raw, 0o644); err != nil {
 		t.Fatal(err)
 	}
 }

@@ -11,7 +11,8 @@ This directory contains public and technical documentation.
 | `runtime-state-machines.md` | Mermaid state-machine and loop overview. |
 | `roadmap.md` | Alpha roadmap and non-claims. |
 | `quickstart-kubernetes.md` | First-volume Kubernetes quickstart. |
-| `operations-v1.md` | V1 alpha operations manual for install, first PVC, inventory, cleanup, and support bundles. |
+| `user-capabilities.md` | User-facing current capabilities, operations commands, status vocabulary, and non-claims. |
+| `operations-v1.md` | Legacy V1 alpha operations manual; use quickstart and release notes for current claims. |
 | `kubernetes-app-demo.md` | Presentation-friendly Kubernetes app + PVC demo. |
 
 ## Calibration Evidence

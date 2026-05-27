@@ -13,11 +13,13 @@ import (
 )
 
 const (
-	ClusterEvidenceArtifact        = "cluster-evidence.json"
-	ObservationReportHTMLArtifact  = "index.html"
-	ObservationReportJSONArtifact  = ClusterEvidenceArtifact
-	ObservationReportTextArtifact  = "summary.txt"
-	ObservationReportJSONLArtifact = "timeline.jsonl"
+	ClusterEvidenceArtifact           = "cluster-evidence.json"
+	RestartClusterEvidenceArtifact    = "cluster-after-restart.json"
+	ObservationReportHTMLArtifact     = "index.html"
+	ObservationReportJSONArtifact     = ClusterEvidenceArtifact
+	ObservationReportTextArtifact     = "summary.txt"
+	ObservationReportJSONLArtifact    = "timeline.jsonl"
+	ObservationCleanupSummaryArtifact = "cleanup-summary.txt"
 
 	NodeLossRecoverySummaryArtifact = "node-loss-recovery-summary.txt"
 	PrimaryFailureRecoveryArtifact  = "primary-failure-recovery.txt"
@@ -72,6 +74,10 @@ func BuildObservationFromBundle(opts ObservationBundleOptions) (ClusterEvidence,
 				cluster.Events[i].EvidenceRef = timelinePath
 			}
 		}
+	}
+	cleanup, cleanupPath, _ := loadKeyValueArtifact(opts.Dir, ObservationCleanupSummaryArtifact)
+	if len(cleanup) > 0 {
+		cluster.Cleanup = CleanupEvidenceFromSummary(cleanup, cleanupPath)
 	}
 	if blocked, blockedVolume := buildImagePullBlockedEvidence(opts.Dir); blocked {
 		cluster.Status = ObservationStatusBlocked
@@ -168,34 +174,85 @@ func loadBestVolumeInventory(root string) (VolumeInventory, string, error) {
 }
 
 func loadBestClusterEvidence(root string) (ClusterEvidence, string, error) {
-	paths, err := findArtifactPaths(root, ClusterEvidenceArtifact)
+	paths, err := findClusterEvidenceCandidatePaths(root)
 	if err != nil {
 		return ClusterEvidence{}, "", err
 	}
 	if len(paths) == 0 {
 		return ClusterEvidence{}, "", fmt.Errorf("%s not found under %s", ClusterEvidenceArtifact, root)
 	}
-	sort.SliceStable(paths, func(i, j int) bool {
-		return clusterEvidencePathRank(paths[i]) < clusterEvidencePathRank(paths[j])
+
+	type candidate struct {
+		path    string
+		cluster ClusterEvidence
+	}
+	candidates := make([]candidate, 0, len(paths))
+	var loadErrs []string
+	for _, path := range paths {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			loadErrs = append(loadErrs, fmt.Sprintf("read %s: %v", path, err))
+			continue
+		}
+		var cluster ClusterEvidence
+		if err := json.Unmarshal(raw, &cluster); err != nil {
+			loadErrs = append(loadErrs, fmt.Sprintf("decode %s: %v", path, err))
+			continue
+		}
+		candidates = append(candidates, candidate{path: path, cluster: cluster})
+	}
+	if len(candidates) == 0 {
+		if len(loadErrs) > 0 {
+			return ClusterEvidence{}, "", fmt.Errorf("no valid %s candidates under %s: %s", ClusterEvidenceArtifact, root, strings.Join(loadErrs, "; "))
+		}
+		return ClusterEvidence{}, "", fmt.Errorf("%s not found under %s", ClusterEvidenceArtifact, root)
+	}
+	sort.SliceStable(candidates, func(i, j int) bool {
+		left := candidates[i].cluster.CapturedAt
+		right := candidates[j].cluster.CapturedAt
+		if !left.IsZero() || !right.IsZero() {
+			if left.IsZero() {
+				return false
+			}
+			if right.IsZero() {
+				return true
+			}
+			if !left.Equal(right) {
+				return left.After(right)
+			}
+		}
+		leftRank := clusterEvidencePathRank(candidates[i].path)
+		rightRank := clusterEvidencePathRank(candidates[j].path)
+		if leftRank != rightRank {
+			return leftRank < rightRank
+		}
+		return filepath.ToSlash(candidates[i].path) < filepath.ToSlash(candidates[j].path)
 	})
-	raw, err := os.ReadFile(paths[0])
-	if err != nil {
-		return ClusterEvidence{}, paths[0], fmt.Errorf("read %s: %w", paths[0], err)
+	return NormalizeObservationCluster(candidates[0].cluster), candidates[0].path, nil
+}
+
+func findClusterEvidenceCandidatePaths(root string) ([]string, error) {
+	var out []string
+	for _, name := range []string{ClusterEvidenceArtifact, RestartClusterEvidenceArtifact} {
+		paths, err := findArtifactPaths(root, name)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, paths...)
 	}
-	var cluster ClusterEvidence
-	if err := json.Unmarshal(raw, &cluster); err != nil {
-		return ClusterEvidence{}, paths[0], fmt.Errorf("decode %s: %w", paths[0], err)
-	}
-	return NormalizeObservationCluster(cluster), paths[0], nil
+	sort.Strings(out)
+	return out, nil
 }
 
 func clusterEvidencePathRank(path string) int {
 	path = filepath.ToSlash(path)
 	switch {
-	case strings.Contains(path, "product-observation"):
+	case strings.Contains(path, "/restart/"):
 		return 0
-	case strings.Contains(path, "/status/"):
+	case strings.Contains(path, "product-observation"):
 		return 1
+	case strings.Contains(path, "/status/"):
+		return 2
 	default:
 		return 10
 	}

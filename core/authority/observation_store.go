@@ -109,16 +109,20 @@ func (s *ObservationStore) SlotFact(volumeID, replicaID string) (SlotFact, bool)
 			if slot.VolumeID != volumeID || slot.ReplicaID != replicaID {
 				continue
 			}
+			if slotExpired(slot, obs, now) {
+				continue
+			}
 			if slot.DataAddr == "" {
 				// Fail-closed: an observation that names the slot but
 				// without a usable DataAddr is unusable for primary
 				// fan-out.
 				continue
 			}
-			if !found || obs.ObservedAt.After(bestObsAt) {
+			candidateObsAt := slotObservedAt(slot, obs)
+			if !found || candidateObsAt.After(bestObsAt) {
 				best = slot
 				best.Frontends = append([]FrontendTargetFact(nil), slot.Frontends...)
-				bestObsAt = obs.ObservedAt
+				bestObsAt = candidateObsAt
 				found = true
 			}
 		}
@@ -193,6 +197,10 @@ func (s *ObservationStore) Ingest(obs Observation) error {
 	// caller-supplied ExpiresAt to prevent out-of-band freshness
 	// fabrication.
 	obs.ExpiresAt = obs.ObservedAt.Add(s.config.FreshnessWindow)
+	for i := range obs.Slots {
+		obs.Slots[i].ObservedAt = obs.ObservedAt
+		obs.Slots[i].ExpiresAt = obs.ExpiresAt
+	}
 
 	var fn func()
 	s.mu.Lock()
@@ -211,6 +219,7 @@ func (s *ObservationStore) Ingest(obs Observation) error {
 			s.mu.Unlock()
 			return nil
 		}
+		obs.Slots = mergeServerSlots(prev.Slots, obs.Slots)
 	}
 	s.observations[obs.ServerID] = obs
 	s.revision++
@@ -221,6 +230,60 @@ func (s *ObservationStore) Ingest(obs Observation) error {
 		fn()
 	}
 	return nil
+}
+
+func mergeServerSlots(prev []SlotFact, next []SlotFact) []SlotFact {
+	if len(prev) == 0 {
+		return cloneSlots(next)
+	}
+	out := make([]SlotFact, 0, len(prev)+len(next))
+	replaced := make(map[string]struct{}, len(next))
+	for _, slot := range next {
+		replaced[slotKey(slot)] = struct{}{}
+	}
+	for _, slot := range prev {
+		if _, ok := replaced[slotKey(slot)]; ok {
+			continue
+		}
+		out = append(out, cloneSlot(slot))
+	}
+	for _, slot := range next {
+		out = append(out, cloneSlot(slot))
+	}
+	return out
+}
+
+func slotKey(slot SlotFact) string {
+	return slot.VolumeID + "\x00" + slot.ReplicaID
+}
+
+func cloneSlots(in []SlotFact) []SlotFact {
+	out := make([]SlotFact, 0, len(in))
+	for _, slot := range in {
+		out = append(out, cloneSlot(slot))
+	}
+	return out
+}
+
+func cloneSlot(in SlotFact) SlotFact {
+	out := in
+	out.Frontends = append([]FrontendTargetFact(nil), in.Frontends...)
+	return out
+}
+
+func slotExpired(slot SlotFact, obs Observation, now time.Time) bool {
+	expiresAt := slot.ExpiresAt
+	if expiresAt.IsZero() {
+		expiresAt = obs.ExpiresAt
+	}
+	return !expiresAt.IsZero() && now.After(expiresAt)
+}
+
+func slotObservedAt(slot SlotFact, obs Observation) time.Time {
+	if !slot.ObservedAt.IsZero() {
+		return slot.ObservedAt
+	}
+	return obs.ObservedAt
 }
 
 // storeSnapshot is the immutable per-call value consumed by the

@@ -13,11 +13,15 @@ const (
 // PlacementCandidate is planner output. It is a candidate for future
 // controller action, not an assignment and not readiness.
 type PlacementCandidate struct {
-	VolumeID  string
-	ServerID  string
-	PoolID    string
-	ReplicaID string
-	Source    string
+	VolumeID        string
+	ServerID        string
+	PoolID          string
+	ReplicaID       string
+	Source          string
+	DataAddr        string
+	CtrlAddr        string
+	ISCSIListenPort int
+	NVMeListenPort  int
 }
 
 // PlacementConflict records inventory that blocks automatic placement.

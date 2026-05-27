@@ -16,10 +16,14 @@ var ErrInsufficientPlacementCandidates = errors.New("lifecycle: insufficient pla
 // placement plan. It is still not authority: no epoch, no endpoint version,
 // no readiness.
 type PlacementSlotIntent struct {
-	ServerID  string `json:"server_id"`
-	PoolID    string `json:"pool_id,omitempty"`
-	ReplicaID string `json:"replica_id,omitempty"`
-	Source    string `json:"source"`
+	ServerID        string `json:"server_id"`
+	PoolID          string `json:"pool_id,omitempty"`
+	ReplicaID       string `json:"replica_id,omitempty"`
+	Source          string `json:"source"`
+	DataAddr        string `json:"data_addr,omitempty"`
+	CtrlAddr        string `json:"ctrl_addr,omitempty"`
+	ISCSIListenPort int    `json:"iscsi_listen_port,omitempty"`
+	NVMeListenPort  int    `json:"nvme_listen_port,omitempty"`
 }
 
 // PlacementIntent is durable controller input for one volume.
@@ -67,10 +71,14 @@ func (s *PlacementIntentStore) ApplyPlan(plan PlacementPlan) (PlacementIntent, e
 	}
 	for _, candidate := range plan.Candidates[:plan.DesiredRF] {
 		intent.Slots = append(intent.Slots, PlacementSlotIntent{
-			ServerID:  candidate.ServerID,
-			PoolID:    candidate.PoolID,
-			ReplicaID: candidate.ReplicaID,
-			Source:    candidate.Source,
+			ServerID:        candidate.ServerID,
+			PoolID:          candidate.PoolID,
+			ReplicaID:       candidate.ReplicaID,
+			Source:          candidate.Source,
+			DataAddr:        candidate.DataAddr,
+			CtrlAddr:        candidate.CtrlAddr,
+			ISCSIListenPort: candidate.ISCSIListenPort,
+			NVMeListenPort:  candidate.NVMeListenPort,
 		})
 	}
 	if err := validatePlacementIntent(intent); err != nil {
@@ -203,6 +211,12 @@ func validatePlacementIntent(intent PlacementIntent) error {
 		if seenServers[slot.ServerID] {
 			return fmt.Errorf("%w: duplicate server %s", ErrInvalidVolumeSpec, slot.ServerID)
 		}
+		if err := validateOptionalPort("iscsi_listen_port", slot.ISCSIListenPort); err != nil {
+			return err
+		}
+		if err := validateOptionalPort("nvme_listen_port", slot.NVMeListenPort); err != nil {
+			return err
+		}
 		seenServers[slot.ServerID] = true
 		switch slot.Source {
 		case PlacementSourceBlankPool:
@@ -219,6 +233,13 @@ func validatePlacementIntent(intent PlacementIntent) error {
 		default:
 			return fmt.Errorf("%w: unknown placement source %q", ErrInvalidVolumeSpec, slot.Source)
 		}
+	}
+	return nil
+}
+
+func validateOptionalPort(name string, port int) error {
+	if port < 0 || port > 65535 {
+		return fmt.Errorf("%w: %s %d outside 0..65535", ErrInvalidVolumeSpec, name, port)
 	}
 	return nil
 }
