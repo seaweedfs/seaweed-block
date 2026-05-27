@@ -32,7 +32,7 @@ type OperatorClusterStatus struct {
 func BuildOperatorFoundationSnapshot(cluster ClusterEvidence) OperatorFoundationSnapshot {
 	cluster = NormalizeObservationCluster(cluster)
 	snapshot := OperatorFoundationSnapshot{
-		APIVersion: "block.seaweedfs.com/v1alpha1",
+		APIVersion: SwBlockVolumeAPIVersion,
 		Kind:       "ReadOnlyOperatorFoundationSnapshot",
 		ReadOnly:   true,
 		Mutation: OperatorMutationBoundary{

@@ -88,8 +88,8 @@ log "delete blockmaster stack"
 
 kubectl -n kube-system get pods,deploy -o wide >"$ARTIFACT_DIR/kube-system.after-delete.txt" 2>&1 || true
 kubectl -n "$NAMESPACE" get pods,deploy,pvc,pv -o wide >"$ARTIFACT_DIR/app-namespace.after-delete.txt" 2>&1 || true
-if command -v sudo >/dev/null 2>&1; then
-  sudo iscsiadm -m session >"$ARTIFACT_DIR/iscsi-sessions.after-delete.txt" 2>&1 || true
+if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
+  sudo -n iscsiadm -m session >"$ARTIFACT_DIR/iscsi-sessions.after-delete.txt" 2>&1 || true
 elif command -v iscsiadm >/dev/null 2>&1; then
   iscsiadm -m session >"$ARTIFACT_DIR/iscsi-sessions.after-delete.txt" 2>&1 || true
 else
@@ -98,23 +98,33 @@ fi
 
 log "delete stale Seaweed Block iSCSI node records"
 if command -v iscsiadm >/dev/null 2>&1; then
-  if command -v sudo >/dev/null 2>&1; then
+  if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
     ISCSIADM=(sudo -n iscsiadm)
   else
     ISCSIADM=(iscsiadm)
   fi
   "${ISCSIADM[@]}" -m node >"$ARTIFACT_DIR/iscsi-nodes.before-scrub.txt" 2>&1 || true
-  awk '/io\.seaweedfs/ {print $1, $2}' "$ARTIFACT_DIR/iscsi-nodes.before-scrub.txt" | while read -r portal target; do
+  scrub_failed=0
+  while read -r portal target; do
     if [[ -z "$portal" || -z "$target" ]]; then
       continue
     fi
     {
       echo "portal=$portal target=$target"
-      "${ISCSIADM[@]}" -m node -T "$target" -p "$portal" --logout || true
-      "${ISCSIADM[@]}" -m node -T "$target" -p "$portal" -o delete || true
+      if ! "${ISCSIADM[@]}" -m node -T "$target" -p "$portal" --logout; then
+        echo "logout_failed=true"
+      fi
+      if ! "${ISCSIADM[@]}" -m node -T "$target" -p "$portal" -o delete; then
+        echo "delete_failed=true"
+        scrub_failed=1
+      fi
     } >>"$ARTIFACT_DIR/delete-iscsi-node-records.log" 2>&1
-  done
+  done < <(awk '/io\.seaweedfs/ {print $1, $2}' "$ARTIFACT_DIR/iscsi-nodes.before-scrub.txt")
   "${ISCSIADM[@]}" -m node >"$ARTIFACT_DIR/iscsi-nodes.after-scrub.txt" 2>&1 || true
+  if [[ "$scrub_failed" != "0" ]]; then
+    echo "one or more iSCSI node records could not be deleted; see $ARTIFACT_DIR/delete-iscsi-node-records.log" >&2
+    exit 1
+  fi
 else
   echo "iscsiadm unavailable" >"$ARTIFACT_DIR/iscsi-nodes.before-scrub.txt"
   echo "iscsiadm unavailable" >"$ARTIFACT_DIR/iscsi-nodes.after-scrub.txt"

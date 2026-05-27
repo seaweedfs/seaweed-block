@@ -118,10 +118,11 @@ func (s *ObservationStore) SlotFact(volumeID, replicaID string) (SlotFact, bool)
 				// fan-out.
 				continue
 			}
-			if !found || obs.ObservedAt.After(bestObsAt) {
+			candidateObsAt := slotObservedAt(slot, obs)
+			if !found || candidateObsAt.After(bestObsAt) {
 				best = slot
 				best.Frontends = append([]FrontendTargetFact(nil), slot.Frontends...)
-				bestObsAt = obs.ObservedAt
+				bestObsAt = candidateObsAt
 				found = true
 			}
 		}

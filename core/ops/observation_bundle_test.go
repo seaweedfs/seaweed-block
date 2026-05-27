@@ -251,6 +251,25 @@ func TestObservationBundle_D7PrefersNewestRestartClusterEvidence(t *testing.T) {
 	}
 }
 
+func TestObservationBundle_SkipsCorruptClusterEvidenceCandidate(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "stale", "status"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, filepath.Join(dir, "stale", "status", ClusterEvidenceArtifact), "{not-json")
+	good := NewClusterEvidence(time.Date(2026, 5, 25, 21, 33, 37, 0, time.UTC))
+	good.Volumes = []VolumeEvidence{healthyObservationVolume()}
+	writeClusterEvidenceArtifact(t, filepath.Join(dir, "restart", RestartClusterEvidenceArtifact), good)
+
+	out, err := BuildObservationFromBundle(ObservationBundleOptions{Dir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Volumes) != 1 || out.Volumes[0].VolumeID != healthyObservationVolume().VolumeID {
+		t.Fatalf("unexpected bundle replay output: %+v", out.Volumes)
+	}
+}
+
 func TestObservationBundle_CarriesCleanupEvidenceIntoReportSurfaces(t *testing.T) {
 	dir := t.TempDir()
 	writeProductClusterEvidence(t, dir, []VolumeEvidence{healthyObservationVolume()})

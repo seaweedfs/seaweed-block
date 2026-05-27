@@ -153,6 +153,37 @@ func TestG9F_FreshObservationMissingControlAddress_DoesNotVerify(t *testing.T) {
 	}
 }
 
+func TestPlacementIntentRejectsInvalidPersistedPorts(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		slot PlacementSlotIntent
+	}{
+		{
+			name: "iscsi negative",
+			slot: PlacementSlotIntent{ServerID: "node-a", PoolID: "pool-a", Source: PlacementSourceBlankPool, ISCSIListenPort: -1},
+		},
+		{
+			name: "iscsi too high",
+			slot: PlacementSlotIntent{ServerID: "node-a", PoolID: "pool-a", Source: PlacementSourceBlankPool, ISCSIListenPort: 70000},
+		},
+		{
+			name: "nvme negative",
+			slot: PlacementSlotIntent{ServerID: "node-a", PoolID: "pool-a", Source: PlacementSourceBlankPool, NVMeListenPort: -1},
+		},
+		{
+			name: "nvme too high",
+			slot: PlacementSlotIntent{ServerID: "node-a", PoolID: "pool-a", Source: PlacementSourceBlankPool, NVMeListenPort: 70000},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validatePlacementIntent(PlacementIntent{VolumeID: "vol-a", DesiredRF: 1, Slots: []PlacementSlotIntent{tc.slot}})
+			if err == nil {
+				t.Fatal("expected invalid port to be rejected")
+			}
+		})
+	}
+}
+
 func TestG9F_ExistingReplicaIntentWithWrongInventory_DoesNotVerify(t *testing.T) {
 	now := time.Date(2026, 5, 2, 12, 0, 0, 0, time.UTC)
 	intent := PlacementIntent{

@@ -236,7 +236,7 @@ phases:
         node: m02
       - action: assert_no_processes
         node: m02
-        pattern: "blockmaster,blockvolume,blockcsi,iscsi-target"
+        pattern: "(blockmaster|blockvolume|blockcsi|iscsi-target)"
       - action: grep_log
         node: m02
         path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-multi-volume-rf3-app-spread-failover/cleanup/verify/cleanup-summary.txt"

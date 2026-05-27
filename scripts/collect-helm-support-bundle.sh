@@ -10,6 +10,7 @@ HELM_NAMESPACE="${SW_BLOCK_HELM_NAMESPACE:-kube-system}"
 VOLUME_ID="${SW_BLOCK_VOLUME_ID:-}"
 
 mkdir -p "$ARTIFACT_DIR"/{helm,k8s,logs,iscsi,replayed-report}
+SUPPORT_BUNDLE_CAPTURE_FAILED=0
 
 if [[ -z "${KUBECONFIG:-}" && -f /etc/rancher/k3s/k3s.yaml ]]; then
   export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
@@ -32,7 +33,14 @@ sw_block_cmd() {
 capture() {
   local out="$1"
   shift
-  "$@" >"$out" 2>&1 || true
+  if ! "$@" >"$out" 2>&1; then
+    SUPPORT_BUNDLE_CAPTURE_FAILED=1
+    {
+      echo
+      echo "[support-bundle] command failed: $*"
+    } >>"$out"
+    return 1
+  fi
 }
 
 summary_value() {
@@ -56,24 +64,24 @@ if [[ -z "$VOLUME_ID" ]]; then
     | head -1 || true)"
 fi
 
-capture "$ARTIFACT_DIR/helm/status.txt" helm status "$HELM_RELEASE" --namespace "$HELM_NAMESPACE"
-capture "$ARTIFACT_DIR/helm/values.txt" helm get values "$HELM_RELEASE" --namespace "$HELM_NAMESPACE" --all
-capture "$ARTIFACT_DIR/helm/manifest.yaml" helm get manifest "$HELM_RELEASE" --namespace "$HELM_NAMESPACE"
+capture "$ARTIFACT_DIR/helm/status.txt" helm status "$HELM_RELEASE" --namespace "$HELM_NAMESPACE" || true
+capture "$ARTIFACT_DIR/helm/values.txt" helm get values "$HELM_RELEASE" --namespace "$HELM_NAMESPACE" --all || true
+capture "$ARTIFACT_DIR/helm/manifest.yaml" helm get manifest "$HELM_RELEASE" --namespace "$HELM_NAMESPACE" || true
 
-capture "$ARTIFACT_DIR/k8s/nodes.txt" kubectl get nodes -o wide
-capture "$ARTIFACT_DIR/k8s/pods.txt" kubectl get pods -A -o wide
-capture "$ARTIFACT_DIR/k8s/pv.txt" kubectl get pv -o wide
-capture "$ARTIFACT_DIR/k8s/pvc.txt" kubectl get pvc -A -o wide
-capture "$ARTIFACT_DIR/k8s/events.txt" kubectl get events -A --sort-by=.lastTimestamp
-capture "$ARTIFACT_DIR/k8s/volumeattachments.txt" kubectl get volumeattachments -o wide
+capture "$ARTIFACT_DIR/k8s/nodes.txt" kubectl get nodes -o wide || true
+capture "$ARTIFACT_DIR/k8s/pods.txt" kubectl get pods -A -o wide || true
+capture "$ARTIFACT_DIR/k8s/pv.txt" kubectl get pv -o wide || true
+capture "$ARTIFACT_DIR/k8s/pvc.txt" kubectl get pvc -A -o wide || true
+capture "$ARTIFACT_DIR/k8s/events.txt" kubectl get events -A --sort-by=.lastTimestamp || true
+capture "$ARTIFACT_DIR/k8s/volumeattachments.txt" kubectl get volumeattachments -o wide || true
 
-capture "$ARTIFACT_DIR/logs/blockmaster.log" kubectl -n "$HELM_NAMESPACE" logs deploy/sw-blockmaster --all-containers --tail=300
-capture "$ARTIFACT_DIR/logs/csi-controller.log" kubectl -n "$HELM_NAMESPACE" logs deploy/sw-block-csi-controller --all-containers --tail=300
-capture "$ARTIFACT_DIR/logs/csi-node.log" kubectl -n "$HELM_NAMESPACE" logs ds/sw-block-csi-node --all-containers --tail=300
-capture "$ARTIFACT_DIR/logs/blockvolume.log" kubectl -n "$NAMESPACE" logs -l app=sw-blockvolume --all-containers --tail=300
+capture "$ARTIFACT_DIR/logs/blockmaster.log" kubectl -n "$HELM_NAMESPACE" logs deploy/sw-blockmaster --all-containers --tail=300 || true
+capture "$ARTIFACT_DIR/logs/csi-controller.log" kubectl -n "$HELM_NAMESPACE" logs deploy/sw-block-csi-controller --all-containers --tail=300 || true
+capture "$ARTIFACT_DIR/logs/csi-node.log" kubectl -n "$HELM_NAMESPACE" logs ds/sw-block-csi-node --all-containers --tail=300 || true
+capture "$ARTIFACT_DIR/logs/blockvolume.log" kubectl -n "$NAMESPACE" logs -l app=sw-blockvolume --all-containers --tail=300 || true
 
-capture "$ARTIFACT_DIR/iscsi/sessions.txt" sudo -n iscsiadm -m session
-capture "$ARTIFACT_DIR/iscsi/nodes.txt" sudo -n iscsiadm -m node
+capture "$ARTIFACT_DIR/iscsi/sessions.txt" sudo -n iscsiadm -m session || true
+capture "$ARTIFACT_DIR/iscsi/nodes.txt" sudo -n iscsiadm -m node || true
 
 report_status=ok
 explain_status=ok
@@ -113,7 +121,7 @@ for required in \
     support_bundle_status=failed
   fi
 done
-if [[ "$report_status" != "ok" || "$explain_status" != "ok" || "$timeline_status" != "ok" ]]; then
+if [[ "$SUPPORT_BUNDLE_CAPTURE_FAILED" != "0" || "$report_status" != "ok" || "$explain_status" != "ok" || "$timeline_status" != "ok" ]]; then
   support_bundle_status=failed
 fi
 
@@ -126,6 +134,7 @@ fi
   echo "report_status=$report_status"
   echo "explain_status=$explain_status"
   echo "timeline_status=$timeline_status"
+  echo "capture_status=$([[ "$SUPPORT_BUNDLE_CAPTURE_FAILED" == "0" ]] && echo ok || echo failed)"
   echo "read_only=true"
   echo "report=replayed-report/index.html"
   echo "cluster_evidence=replayed-report/cluster-evidence.json"

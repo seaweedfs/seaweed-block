@@ -107,7 +107,7 @@ phases:
       - action: exec
         node: m02
         timeout: 16m
-        cmd: "cd {{ product_root }} && bash scripts/run-multi-volume-example.sh {{ product_root }} || true"
+        cmd: "cd {{ product_root }} && bash scripts/run-multi-volume-example.sh {{ product_root }}"
         env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
         env.SW_BLOCK_ARTIFACT_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-multi-volume-rf3-restart/multi-volume"
         env.SW_BLOCK_MULTI_VOLUME_COUNT: "{{ volume_count }}"

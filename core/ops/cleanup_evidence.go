@@ -100,7 +100,7 @@ func cleanupIntFromSummary(summary map[string]string, key string) int {
 		return 0
 	}
 	parsed, err := strconv.Atoi(value)
-	if err != nil {
+	if err != nil || parsed < 0 {
 		return 0
 	}
 	return parsed

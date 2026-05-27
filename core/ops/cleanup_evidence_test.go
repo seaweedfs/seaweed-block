@@ -68,3 +68,14 @@ func TestCleanupEvidenceProjectionMarksCleanStatusOK(t *testing.T) {
 		t.Fatalf("row=%+v", row)
 	}
 }
+
+func TestCleanupEvidenceRejectsNegativeCounters(t *testing.T) {
+	cleanup := CleanupEvidenceFromSummary(map[string]string{
+		CleanupSummaryStatusKey:            "failed",
+		CleanupSummaryKubernetesResidueKey: "-1",
+		CleanupSummaryFailureKey:           "-2",
+	}, "cleanup-summary.txt")
+	if cleanup.KubernetesResidueCount != 0 || cleanup.FailureCount != 0 {
+		t.Fatalf("negative counters should parse as zero, got %+v", cleanup)
+	}
+}

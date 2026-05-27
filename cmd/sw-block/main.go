@@ -1283,6 +1283,7 @@ func usage(w io.Writer) {
 	fmt.Fprintln(w, "  sw-block ops dashboard --from-bundle <dir> [--listen 127.0.0.1:9334]")
 	fmt.Fprintln(w, "  sw-block ops dashboard --master-api <addr> [--listen 127.0.0.1:9334]")
 	fmt.Fprintln(w, "  sw-block ops generate-helm-values --out values.yaml [--target-node <node>] [--replication-factor <n>]")
+	fmt.Fprintln(w, "      [--restart-persistence ephemeral|hostpath] [--state-hostpath /var/lib/sw-block] [--timeout 10s]")
 }
 
 func emptyCLI(value string) string {

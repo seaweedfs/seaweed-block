@@ -135,6 +135,36 @@ func TestObservationStore_SlotFact_MergedSlotExpiresIndependently(t *testing.T) 
 	}
 }
 
+func TestObservationStore_SlotFact_UsesMergedSlotObservationTime(t *testing.T) {
+	t0 := time.Date(2026, 5, 22, 12, 0, 0, 0, time.UTC)
+	now := t0.Add(10 * time.Second)
+	s := NewObservationStore(FreshnessConfig{FreshnessWindow: time.Hour}, func() time.Time { return now })
+
+	_ = s.Ingest(Observation{
+		ServerID:   "m01",
+		ObservedAt: t0,
+		Slots:      []SlotFact{{VolumeID: "v1", ReplicaID: "r1", DataAddr: "OLD:1"}},
+	})
+	_ = s.Ingest(Observation{
+		ServerID:   "m01",
+		ObservedAt: t0.Add(10 * time.Second),
+		Slots:      []SlotFact{{VolumeID: "v2", ReplicaID: "r1", DataAddr: "OTHER:1"}},
+	})
+	_ = s.Ingest(Observation{
+		ServerID:   "m02",
+		ObservedAt: t0.Add(5 * time.Second),
+		Slots:      []SlotFact{{VolumeID: "v1", ReplicaID: "r1", DataAddr: "NEW:1"}},
+	})
+
+	got, ok := s.SlotFact("v1", "r1")
+	if !ok {
+		t.Fatal("SlotFact: ok=false")
+	}
+	if got.DataAddr != "NEW:1" {
+		t.Fatalf("DataAddr=%q want NEW:1; carried-forward old slot must not inherit m01's newer heartbeat time", got.DataAddr)
+	}
+}
+
 // TestObservationStore_SlotFact_ExpiredObservation_FailsClosed pins
 // architect round 54 finding-1: expired heartbeat addrs MUST NOT be
 // used for live replication peer construction. Observation stays

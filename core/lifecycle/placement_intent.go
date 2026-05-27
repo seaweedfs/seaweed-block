@@ -211,6 +211,12 @@ func validatePlacementIntent(intent PlacementIntent) error {
 		if seenServers[slot.ServerID] {
 			return fmt.Errorf("%w: duplicate server %s", ErrInvalidVolumeSpec, slot.ServerID)
 		}
+		if err := validateOptionalPort("iscsi_listen_port", slot.ISCSIListenPort); err != nil {
+			return err
+		}
+		if err := validateOptionalPort("nvme_listen_port", slot.NVMeListenPort); err != nil {
+			return err
+		}
 		seenServers[slot.ServerID] = true
 		switch slot.Source {
 		case PlacementSourceBlankPool:
@@ -227,6 +233,13 @@ func validatePlacementIntent(intent PlacementIntent) error {
 		default:
 			return fmt.Errorf("%w: unknown placement source %q", ErrInvalidVolumeSpec, slot.Source)
 		}
+	}
+	return nil
+}
+
+func validateOptionalPort(name string, port int) error {
+	if port < 0 || port > 65535 {
+		return fmt.Errorf("%w: %s %d outside 0..65535", ErrInvalidVolumeSpec, name, port)
 	}
 	return nil
 }

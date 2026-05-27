@@ -80,6 +80,7 @@ collect_cluster() {
 render_reader() {
   local idx="$1"
   local name="$2"
+  local pvc="$3"
   local out="$ARTIFACT_DIR/manifests/${name}.yaml"
   cat >"$out" <<YAML
 apiVersion: v1
@@ -110,7 +111,7 @@ spec:
   volumes:
     - name: data
       persistentVolumeClaim:
-        claimName: ${PVC_PREFIX}-${idx}
+        claimName: ${pvc}
 YAML
   echo "$out"
 }
@@ -268,7 +269,16 @@ while IFS=$'\t' read -r idx vid pvc primary node frontend deploy; do
     fi
     sleep 2
   done
-  cp "$dir/after-poll.json" "$dir/after.json"
+  if [[ -f "$dir/after-poll.json" ]]; then
+    cp "$dir/after-poll.json" "$dir/after.json"
+  else
+    STATUS="failed"
+    FAILED_PHASE="promotion_volume_${idx}"
+    echo "target_recovered=false" >>"$dir/summary.txt"
+    echo "reason=promotion_poll_missing" >>"$dir/summary.txt"
+    write_summary
+    exit 1
+  fi
   if [[ -z "$promoted" ]]; then
     STATUS="failed"
     FAILED_PHASE="promotion_volume_${idx}"
@@ -291,7 +301,7 @@ PY
 
   reader="${POD_PREFIX}-reattach-reader-${idx}"
   kubectl -n "$NAMESPACE" delete pod "$reader" --ignore-not-found=true --wait=true --timeout=120s
-  kubectl apply -f "$(render_reader "$idx" "$reader")" | tee "$dir/apply-reader.log"
+  kubectl apply -f "$(render_reader "$idx" "$reader" "$pvc")" | tee "$dir/apply-reader.log"
   kubectl -n "$NAMESPACE" wait --for=jsonpath='{.status.phase}'=Succeeded "pod/${reader}" --timeout=240s | tee "$dir/wait-reader.log"
   kubectl -n "$NAMESPACE" logs "$reader" >"$dir/reader.log"
   grep -q '/data/demo.bin: OK' "$dir/reader.log"

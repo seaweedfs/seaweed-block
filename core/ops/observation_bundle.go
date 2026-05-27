@@ -187,16 +187,25 @@ func loadBestClusterEvidence(root string) (ClusterEvidence, string, error) {
 		cluster ClusterEvidence
 	}
 	candidates := make([]candidate, 0, len(paths))
+	var loadErrs []string
 	for _, path := range paths {
 		raw, err := os.ReadFile(path)
 		if err != nil {
-			return ClusterEvidence{}, path, fmt.Errorf("read %s: %w", path, err)
+			loadErrs = append(loadErrs, fmt.Sprintf("read %s: %v", path, err))
+			continue
 		}
 		var cluster ClusterEvidence
 		if err := json.Unmarshal(raw, &cluster); err != nil {
-			return ClusterEvidence{}, path, fmt.Errorf("decode %s: %w", path, err)
+			loadErrs = append(loadErrs, fmt.Sprintf("decode %s: %v", path, err))
+			continue
 		}
 		candidates = append(candidates, candidate{path: path, cluster: cluster})
+	}
+	if len(candidates) == 0 {
+		if len(loadErrs) > 0 {
+			return ClusterEvidence{}, "", fmt.Errorf("no valid %s candidates under %s: %s", ClusterEvidenceArtifact, root, strings.Join(loadErrs, "; "))
+		}
+		return ClusterEvidence{}, "", fmt.Errorf("%s not found under %s", ClusterEvidenceArtifact, root)
 	}
 	sort.SliceStable(candidates, func(i, j int) bool {
 		left := candidates[i].cluster.CapturedAt
