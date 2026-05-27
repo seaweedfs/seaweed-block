@@ -1,186 +1,172 @@
-# Current Plan: Phase 25 - v0.3 Helm + Observable First-Volume Release
+# Current Plan: Phase 33 - TestOps Failure Hardening
 
-Status: closed, 100% complete. Plan simplified and closed on 2026-05-22.
+Status: active, 10% complete. Started on 2026-05-27.
 
-Reference:
+Branch: `phase33-testops-failure-hardening`
 
-- `internal/docs/ref/product-delivery-review-simple-stable-observable-block.md`
+Base release: PR #50 / merge `8102cf3` (`v0.3.4-alpha` release baseline).
 
 ## Product Goal
 
-Deliver a simple, stable, observable Kubernetes block alpha:
+Increase release confidence by proving Seaweed Block behaves correctly when
+things fail, not only when the happy path works.
+
+The user-facing rule for this phase:
 
 ```text
-Helm install
--> first PVC
--> writer/reader data check
--> read-only report/dashboard
--> clean uninstall
--> docs and release note match the exact claim
-```
-
-This phase was release reconciliation and hardening. It had two steps only:
-
-```text
-D1: docs + release claim alignment - PASS
-D2: gate replay + close evidence - PASS
+If the product cannot prove a volume is ready, it must not claim Ready=True.
+It must surface a stable reason, collect useful evidence, and clean up
+deterministically.
 ```
 
 ## Scope Contract
 
 | In | Out |
 |---|---|
-| Helm release hardening | CRD/operator implementation |
-| README / quickstart / release note alignment | new mutating admin action |
-| single-node and multi-node Helm gate replay | new protocol capability |
-| dashboard/report evidence consistency | model or protocol refactor |
-| immutable image / digest documentation | backup/snapshot/restore |
-| cleanup and host residue verification | rebuild/reintegration/failback |
+| negative/failure TestOps scenarios | new HA feature claims |
+| failure snapshot and support-bundle quality | rebuild/failback implementation |
+| runner/helper primitives that reduce shell flake | NVMe ANA expansion |
+| cleanup and residue assertions after failed runs | mutating operator/admin actions |
+| stale/blocked/unreachable status-surface agreement | protocol/model rewrite |
+| release note / roadmap claim alignment | production SLO/performance claims |
 
-Principle: Phase 25 may take small bug fixes only when they block the v0.3 user
-path. No model rewrite, no operator controller, no broad architecture refactor.
+Small product fixes are allowed only when a failure gate exposes a release-risk
+bug. Avoid broad refactors.
 
-## Current Closed Inputs
+## D1: Failure Matrix And Plan
 
-As of 2026-05-22:
+Goal: convert existing failure ideas into a small executable matrix.
 
-- Phase 20 Day-1 activation: closed.
-- Phase 22 ManagedVolume model: closed for scope.
-- Phase 23 operations surface/operator-readiness contract: closed for scope.
-- Phase 24 hosted read-only dashboard: closed for scope.
+Deliverables:
 
-## D1: Docs + Release Claim Alignment
+- Inventory 5-8 high-value failure classes from existing design docs,
+  TestOps scenarios, and recent QA blockers.
+- For each class, define:
+  - trigger,
+  - expected status,
+  - stable reason code,
+  - evidence files,
+  - cleanup assertions,
+  - whether it is release-blocking or exploratory.
 
-Goal: make the user-facing product story match the current code and gates.
+Initial candidates:
 
-Status: PASS on 2026-05-22.
+- CSI image pull failure.
+- blockmaster/API unreachable.
+- stale evidence / stale bundle replay.
+- corrupt or partial support-bundle evidence.
+- cleanup residue after failed run.
+- multi-volume cross-interference.
+- restart during recovery or shortly after promotion.
+- loopback publish target in a cross-node mount path.
 
-Artifacts:
-
-- `internal/docs/product-roadmap.md`
-- `README.md`
-- `docs/quickstart-kubernetes.md`
-- `docs/releases/v0.3-alpha.md`
-- `docs/releases/README.md`
-
-Required content:
-
-- v0.3 is Helm alpha install + first PVC + read-only report/dashboard +
-  cleanup.
-- Script activation remains alpha/dev fallback, not the preferred v0.3 story.
-- `sw-block ops generate-helm-values` input/output is explained.
-- Single-node behavior is clear: one selected node, loopback mode.
-- Multi-node behavior is clear: Ready schedulable nodes, non-loopback
-  InternalIP, external iSCSI/status, CHAP.
-- `sw-block ops report` vs `sw-block ops dashboard` is clear:
-  - report writes static artifacts,
-  - dashboard serves the same read-only evidence locally.
-- Immutable `sha-<commit>` images are recommended for QA/PM/release proof.
-- Mutable `:alpha` is documented as smoke/demo only.
-- Non-claims are explicit:
-  - not production-ready,
-  - no operator lifecycle,
-  - no mutating admin UI/actions,
-  - no backup/snapshot/restore,
-  - no upgrade/rollback safety,
-  - no broad performance/RTO/SLO claim,
-  - no new recovery scope beyond already gated evidence.
-
-Acceptance:
+Verify:
 
 ```text
-README + quickstart + release note describe the same v0.3 claim.
-No doc claims a capability without a gate.
-Roadmap marks Phase 22/23/24 closed and Phase 25/v0.3 closed.
+matrix doc exists
+each scenario has explicit pass/fail assertions
+no broad HA claim added
 ```
 
-## D2: Gate Replay + Close Evidence
+## D2: Runner And Helper Hardening
 
-Goal: prove the documented v0.3 path is runnable and self-explaining.
+Goal: reduce shell gymnastics and make failed runs self-explaining.
 
-Status: PASS on 2026-05-22.
+P0 items:
 
-Evidence:
+- Add or standardize failure snapshot capture.
+- Add runner/helper wait for JSONPath-style conditions where existing actions
+  cannot express PVC/Job/phase checks.
+- Add deterministic Helm install/uninstall wrappers or scenario helpers.
+- Add no-residue checks for iSCSI sessions, iSCSI node DB, multipath, dmsetup,
+  Kubernetes resources, and product processes.
 
-- Single-node Helm gate: `20260522-031019-ef25`, PASS, 34/34 actions.
-- Multi-node Helm gate: `20260522-031124-0a44`, PASS, 51/51 actions.
-- Documented Go CLI generator gate: `20260522-091642-b9a7`, PASS, 31/31
-  actions.
-- Both runs record immutable image tags and digests.
-- Both runs produce `status/report/index.html`, `cluster-evidence.json`,
-  `timeline.jsonl`, and `summary.txt`.
-- Both runs finish with `cleanup_status=ok`, zero k8s residue, zero process
-  residue, and zero hostPath residue.
-
-Required gates:
-
-- Helm single-node first-volume gate:
-  - `testops/scenarios/helm-single-node-first-volume-chain.yaml`
-  - expected: PASS
-- Helm multi-node first-volume gate:
-  - `testops/scenarios/helm-first-volume-chain.yaml`
-  - expected: PASS
-- Report/dashboard consistency:
-  - `summary.txt`
-  - `index.html`
-  - `cluster-evidence.json`
-  - `timeline.jsonl`
-  - dashboard endpoint serving same evidence when applicable
-- Image identity:
-  - image tag recorded,
-  - digest recorded,
-  - release validation uses immutable tag.
-- Cleanup:
-  - Helm release removed,
-  - StorageClass/demo PVC/pods removed,
-  - no active iSCSI sessions,
-  - no sw-block processes,
-  - no test-scoped residue.
-
-Acceptance:
+Verify:
 
 ```text
-single-node Helm gate PASS
-multi-node Helm gate PASS
-report/dashboard reason codes agree
-image tag/digest evidence present
-cleanup clean
-close report written
-finished plan written
+new/updated helper tests pass
+existing happy-path gates still parse and run
+failure artifacts are produced even when the trigger blocks progress
 ```
+
+## D3: Negative Status Gates
+
+Goal: prove blocked states do not become false Ready states.
+
+Required surfaces for each negative gate:
+
+- `summary.txt`
+- `cluster-evidence.json`
+- `operator-snapshot.json`
+- dashboard `/operator-snapshot.json`
+- `sw-block ops explain`
+
+Required assertions:
+
+- `Ready=True` is absent unless evidence proves readiness.
+- blocked/stale/unavailable condition is present.
+- reason code is stable and identical across surfaces.
+- suggested actions are `read_only` or `dry_run`; no mutation is implied.
+
+Verify:
+
+```text
+negative scenarios PASS
+surface agreement table is produced
+no false Ready=True in blocked/stale paths
+```
+
+## D4: Cleanup And Replay Gates
+
+Goal: failed runs must still clean up and replay correctly.
+
+Required assertions:
+
+- Cleanup verifier returns `cleanup_status=ok` after scenario cleanup.
+- Residue counters are zero across k8s, iSCSI session, iSCSI node DB,
+  multipath, dmsetup, process, and test hostPath dimensions.
+- Bundle replay prefers newest valid evidence and skips corrupt candidates.
+- If evidence is stale or insufficient, replay returns `Ready=Unknown`, not
+  `Ready=True`.
+
+Verify:
+
+```text
+cleanup-residue gate PASS after negative scenarios
+bundle replay gate PASS for corrupt/partial evidence
+dashboard/report/explain agree after replay
+```
+
+## D5: Release Close
+
+Goal: produce a compact release-hardening addendum.
+
+Required inputs:
+
+- Minimal new-user validation from `main` release baseline or this phase branch.
+- Negative failure matrix PASS.
+- Cleanup/replay gates PASS.
+- No docs claim new product features beyond tested scope.
 
 Close artifacts:
 
-- `internal/docs/qa-assignments/v0.3-helm-observable-first-volume-close-report.md`
-- `internal/docs/finished-plans/phase25_finishedplan_v0.3_helm_observable_first_volume.md`
+- QA sign-off under `internal/docs/qa-assignments/`.
+- Finished plan under `internal/docs/finished-plans/`.
+- Release note addendum if this becomes `v0.3.5-alpha`.
 
-## Claim Matrix
-
-| Area | Can Claim For v0.3 | Cannot Claim |
-|---|---|---|
-| Install | Helm alpha install on supported k3s/Kubernetes labs | production installer, broad distro support |
-| First Volume | PVC create, writer/reader data check, clean report | performance/SLO, upgrade safety |
-| Recovery | Existing gated RF3 recovery evidence remains valid | new recovery scope beyond prior gates |
-| Dashboard | local read-only dashboard/report over product evidence | production hosted UI, mutating admin UI |
-| Cleanup | documented uninstall + host cleanup verification | fully automated operator lifecycle |
-| Images | immutable tag/digest release validation | mutable `:alpha` as release proof |
-
-## Risks
-
-| Risk | Mitigation | Fallback |
-|---|---|---|
-| `:alpha` image drift | release docs require immutable `sha-<commit>` tags for QA/PM | use local/internal images for dev gates |
-| single-node vs three-node behavior confusion | quickstart explains loopback vs external iSCSI/CHAP values | provide separate single-node and multi-node commands |
-| docs drift from implementation | close gate checks README, quickstart, release note against gate artifacts | block release note until docs are corrected |
-| dashboard/report reason mismatch | compare summary, HTML, JSON, explain/dashboard reason codes | fix projection consistency only; no model rewrite |
-| cleanup residue after Helm uninstall | host cleanup verification is required | document manual cleanup command and keep release blocked until clean |
-
-## Dependency Order
+Acceptance:
 
 ```text
-D1 docs alignment
--> D2 gate replay
--> close report
+Phase 33 negative matrix PASS
+minimal new-user validation PASS
+cleanup/replay gates PASS
+release claims updated or explicitly unchanged
 ```
 
-Do not start operator/CRD implementation until this phase closes.
+## Current Progress
+
+- 5%: branch created from merged `main`.
+- 5%: `AGENTS.md` added to guide future agent behavior.
+- 10%: Phase 33 scope, D1-D5 gates, and roadmap pointers drafted.
+
+Next step: D1 failure matrix.

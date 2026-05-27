@@ -31,6 +31,13 @@ This is the short internal roadmap. Keep it current and readable.
   iSCSI configuration, StorageClass, readiness output, first-volume smoke,
   local read-only report/dashboard, and uninstall hygiene. Phase 25 closed this
   release target on 2026-05-22.
+- `v0.3.4-alpha`: Helm lifecycle, restart persistence, read-only operations
+  surface, deterministic cleanup, and negative-first status vocabulary merged
+  through PR #50 (`8102cf3`) on 2026-05-27.
+- `v0.3.5-alpha` candidate: TestOps failure hardening. Expand release proof
+  from happy-path gates to negative paths: blocked/stale/unreachable status
+  surfaces, support-bundle replay under corrupt/partial evidence, failed-run
+  cleanup, and multi-volume interference checks.
 - `v0.4-beta-candidate`: Operator lifecycle. Add a Kubernetes-native control
   plane with CRDs/Conditions/Events for install, node eligibility, volume
   lifecycle, recovery observation, safe cleanup, and eventually gated repair or
@@ -329,8 +336,12 @@ credible light-use product:
 
 - Current: runner scenarios write result/status bundles, but M01/M02 shared lab
   ownership is still mostly implicit.
-- Next: add simple shared-drive control data for active runs, history, locks,
-  artifact pointers, commits, target nodes, and stale-run detection.
+- Current next-release focus: Phase 33 TestOps failure hardening. The runner and
+  helpers must exercise negative paths, collect useful failure snapshots, assert
+  no false Ready states, and prove cleanup/replay behavior after failed runs.
+- Next after Phase 33: add simple shared-drive control data for active runs,
+  history, locks, artifact pointers, commits, target nodes, and stale-run
+  detection.
 - Later: scenario library indexing, queueing, remote agents on lab nodes,
   matrix scheduling, hosted validation, and discovery-agent ingestion.
 

@@ -58,6 +58,8 @@ Current alpha constraints:
    - remote shell execution for K8s scenarios
    - stable result bundles
    - scenario registry index
+   - stronger negative-path gates for blocked, stale, unreachable, corrupt
+     evidence, and cleanup-residue cases
 
 ## Availability And Recovery Follow-Ups
 
@@ -141,6 +143,7 @@ A reasonable beta bar:
 - Multi-node attach works.
 - Basic failover is tested under an attached workload.
 - Read-only status and support evidence are available without SSH log spelunking.
+- Negative and stale states are surfaced without false Ready claims.
 - Operator lifecycle is either present behind a clear beta gate or explicitly
   listed as the next release boundary.
 - TestOps can run the protocol release gate and produce stable artifacts.
