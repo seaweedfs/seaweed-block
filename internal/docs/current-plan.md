@@ -1,6 +1,6 @@
 # Current Plan: Phase 33 - TestOps Failure Hardening
 
-Status: active, 20% complete. Started on 2026-05-27.
+Status: active, 30% complete. Started on 2026-05-27.
 
 Branch: `phase33-testops-failure-hardening`
 
@@ -77,6 +77,12 @@ no broad HA claim added
 ## D2: Runner And Helper Hardening
 
 Goal: reduce shell gymnastics and make failed runs self-explaining.
+
+Status: in progress, first helper landed.
+
+Artifact:
+
+- `scripts/collect-k8s-failure-snapshot.sh`
 
 P0 items:
 
@@ -174,5 +180,7 @@ release claims updated or explicitly unchanged
 - 5%: branch created from merged `main`.
 - 5%: `AGENTS.md` added to guide future agent behavior.
 - 10%: Phase 33 scope, D1-D5 gates, and roadmap pointers drafted.
+- 20%: D1 failure matrix drafted.
+- 30%: D2 failure snapshot helper and contract test added.
 
 Next step: D2 runner/helper hardening for the P0 gates.
