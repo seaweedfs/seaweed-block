@@ -1,6 +1,6 @@
 # Current Plan: Phase 33 - TestOps Failure Hardening
 
-Status: active, 50% complete. Started on 2026-05-27.
+Status: active, 55% complete. Started on 2026-05-27.
 
 Branch: `phase33-testops-failure-hardening`
 
@@ -192,5 +192,8 @@ release claims updated or explicitly unchanged
 - 50%: F2 bundle replay/dashboard gate extended so report text,
   operator-snapshot JSON, dashboard JSON, and explain text agree on
   `status_endpoint_unreachable`.
+- 55%: F4 CLI replay gate added for `sw-block ops report --from-bundle`
+  skipping corrupt cluster evidence and using the newest valid snapshot.
 
-Next step: D3 negative status gates for live/scenario surface agreement.
+Next step: D3/F1 live negative scenario QA, then D4 cleanup/replay gate
+consolidation.

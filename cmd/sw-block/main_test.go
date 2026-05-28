@@ -606,6 +606,59 @@ func TestOpsReportFromBundleAllowsEmptyClusterEvidence(t *testing.T) {
 	}
 }
 
+func TestOpsReportFromBundleSkipsCorruptClusterEvidenceCandidate(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "a-stale", "status"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "a-stale", "status", ops.ClusterEvidenceArtifact), []byte("{not-json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	validDir := filepath.Join(dir, "z-restart")
+	if err := os.MkdirAll(validDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cluster := ops.NewClusterEvidence(time.Date(2026, 5, 27, 12, 0, 0, 0, time.UTC))
+	cluster.Volumes = []ops.VolumeEvidence{{
+		VolumeID:          "pvc-valid",
+		Namespace:         "default",
+		PVCName:           "demo-pvc",
+		ReplicationFactor: 1,
+		Status:            ops.ObservationStatusOK,
+		PrimaryReplica:    "r1",
+		PrimaryNode:       "m02",
+		PublishTarget:     "192.168.1.184:3260",
+	}}
+	raw, err := ops.MarshalObservationJSON(cluster)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(validDir, ops.RestartClusterEvidenceArtifact), raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	outDir := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ops", "report", "--from-bundle", dir, "--out", outDir}, &stdout, &stderr)
+	if code != ops.VolumeStatusExitOK {
+		t.Fatalf("exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	summary, err := os.ReadFile(filepath.Join(outDir, ops.ObservationReportTextArtifact))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(summary), "volume=pvc-valid") || strings.Contains(string(summary), "not-json") {
+		t.Fatalf("summary did not use valid evidence:\n%s", summary)
+	}
+	snapshot, err := os.ReadFile(filepath.Join(outDir, ops.ObservationOperatorSnapshotArtifact))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(snapshot), `"volume_id": "pvc-valid"`) || !strings.Contains(string(snapshot), `"read_only": true`) {
+		t.Fatalf("operator snapshot missing valid read-only evidence:\n%s", snapshot)
+	}
+}
+
 func TestOpsDashboardFromBundleServesReadOnlyHTTP(t *testing.T) {
 	dir := writeCmdProductClusterBundle(t)
 	addr := freeTCPAddr(t)
