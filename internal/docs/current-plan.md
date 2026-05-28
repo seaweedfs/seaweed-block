@@ -1,6 +1,6 @@
 # Current Plan: Phase 33 - TestOps Failure Hardening
 
-Status: active, 30% complete. Started on 2026-05-27.
+Status: active, 35% complete. Started on 2026-05-27.
 
 Branch: `phase33-testops-failure-hardening`
 
@@ -182,5 +182,7 @@ release claims updated or explicitly unchanged
 - 10%: Phase 33 scope, D1-D5 gates, and roadmap pointers drafted.
 - 20%: D1 failure matrix drafted.
 - 30%: D2 failure snapshot helper and contract test added.
+- 35%: F1 support-bundle diagnostics gate wired to collect the failure
+  snapshot contract.
 
 Next step: D2 runner/helper hardening for the P0 gates.

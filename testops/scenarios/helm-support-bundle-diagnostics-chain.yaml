@@ -194,6 +194,57 @@ phases:
         actual: "{{ blocked_image_pull_count }}"
         threshold: "0"
 
+  - name: failure_snapshot
+    actions:
+      - action: exec
+        node: m02
+        timeout: 3m
+        cmd: "cd {{ product_root }} && bash scripts/collect-k8s-failure-snapshot.sh {{ product_root }}"
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+        env.SW_BLOCK_FAILURE_SNAPSHOT_OUT: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-support-bundle/failure-snapshot"
+        env.SW_BLOCK_HELM_RELEASE: "{{ helm_release }}"
+        env.SW_BLOCK_HELM_NAMESPACE: "{{ helm_namespace }}"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-support-bundle/failure-snapshot/failure-snapshot-summary.txt"
+        pattern: "^read_only=true$"
+        save_as: failure_snapshot_readonly_count
+      - action: assert_greater
+        actual: "{{ failure_snapshot_readonly_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-support-bundle/failure-snapshot/k8s/events-all.txt"
+        pattern: "."
+        save_as: failure_snapshot_events_count
+      - action: assert_greater
+        actual: "{{ failure_snapshot_events_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-support-bundle/failure-snapshot/logs/csi-node.current.log"
+        pattern: "."
+        save_as: failure_snapshot_csi_log_count
+      - action: assert_greater
+        actual: "{{ failure_snapshot_csi_log_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-support-bundle/failure-snapshot/host/iscsi-nodes.txt"
+        pattern: "."
+        save_as: failure_snapshot_iscsi_nodes_count
+      - action: assert_greater
+        actual: "{{ failure_snapshot_iscsi_nodes_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-support-bundle/failure-snapshot/host/processes.txt"
+        pattern: "."
+        save_as: failure_snapshot_process_count
+      - action: assert_greater
+        actual: "{{ failure_snapshot_process_count }}"
+        threshold: "0"
+
   - name: helm_uninstall_cleanup
     always: true
     actions:
