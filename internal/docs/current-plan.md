@@ -1,6 +1,6 @@
 # Current Plan: Phase 33 - TestOps Failure Hardening
 
-Status: active, 45% complete. Started on 2026-05-27.
+Status: active, 50% complete. Started on 2026-05-27.
 
 Branch: `phase33-testops-failure-hardening`
 
@@ -189,5 +189,8 @@ release claims updated or explicitly unchanged
 - 45%: F2 status endpoint unreachable projection tightened to
   `status=unknown reason=status_endpoint_unreachable`; replay tests prove no
   false `Ready=True`.
+- 50%: F2 bundle replay/dashboard gate extended so report text,
+  operator-snapshot JSON, dashboard JSON, and explain text agree on
+  `status_endpoint_unreachable`.
 
 Next step: D3 negative status gates for live/scenario surface agreement.

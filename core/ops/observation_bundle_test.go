@@ -353,34 +353,7 @@ deployment.apps/sw-block-csi-controller 1/1 1 1 2m3s block-csi sw-block-csi:loca
 		{
 			name: "status-endpoint-unreachable",
 			build: func(t *testing.T, dir string) {
-				inventoryDir := filepath.Join(dir, "demo", "ops-inventory-status-unreachable")
-				inventory := BuildVolumeInventory(VolumeInventoryInput{
-					CapturedAt:      time.Date(2026, 5, 27, 12, 0, 0, 0, time.UTC),
-					Source:          ReportSource{Component: "component-test"},
-					ProductRevision: "product-rev",
-					Volumes: []VolumeInventoryVolumeInput{{
-						VolumeID:          "pvc-unreachable",
-						Namespace:         "default",
-						PVCName:           "demo-pvc",
-						PVName:            "pvc-unreachable",
-						ReplicationFactor: 1,
-						Replicas: []VolumeInventoryReplicaInput{{
-							ReplicaID:            "r1",
-							ServerID:             "node-r1",
-							NodeName:             "m01",
-							Protocol:             "iscsi",
-							FrontendAddress:      "192.168.1.181:3260",
-							StatusAddress:        "192.168.1.181:23260",
-							Observed:             true,
-							AuthorityRole:        "primary",
-							Healthy:              true,
-							FrontendPrimaryReady: true,
-							ReplicationRole:      "none",
-							Issues:               []string{"status_endpoint_unreachable=192.168.1.181:23260"},
-						}},
-					}},
-				})
-				mustWriteInventory(t, inventoryDir, inventory)
+				writeStatusEndpointUnreachableInventory(t, dir)
 			},
 			wantStatus: ManagedVolumeStatusUnknown,
 			wantReason: ReasonStatusEndpointUnreachable,
@@ -499,6 +472,16 @@ deployment.apps/sw-block-csi-controller 1/1 1 1 2m3s block-csi sw-block-csi:loca
 			wantJSON:   `"reason_code": "csi_node_image_pull_failed"`,
 			wantText:   "managed_volume=pvc-blocked status=blocked reason=csi_node_image_pull_failed",
 			wantStatus: ManagedVolumeStatusBlocked,
+		},
+		{
+			name: "status-endpoint-unreachable",
+			build: func(t *testing.T, dir string) {
+				writeStatusEndpointUnreachableInventory(t, dir)
+			},
+			wantHTML:   ReasonStatusEndpointUnreachable,
+			wantJSON:   `"reason_code": "status_endpoint_unreachable"`,
+			wantText:   "managed_volume=pvc-unreachable status=unknown reason=status_endpoint_unreachable",
+			wantStatus: ManagedVolumeStatusUnknown,
 		},
 		{
 			name: "stage2-recovery",
@@ -629,6 +612,38 @@ func mustWriteInventory(t *testing.T, dir string, inventory VolumeInventory) {
 		t.Fatal(err)
 	}
 	mustWrite(t, filepath.Join(dir, VolumeInventoryArtifact), string(raw))
+}
+
+func writeStatusEndpointUnreachableInventory(t *testing.T, dir string) {
+	t.Helper()
+	inventoryDir := filepath.Join(dir, "demo", "ops-inventory-status-unreachable")
+	inventory := BuildVolumeInventory(VolumeInventoryInput{
+		CapturedAt:      time.Date(2026, 5, 27, 12, 0, 0, 0, time.UTC),
+		Source:          ReportSource{Component: "component-test"},
+		ProductRevision: "product-rev",
+		Volumes: []VolumeInventoryVolumeInput{{
+			VolumeID:          "pvc-unreachable",
+			Namespace:         "default",
+			PVCName:           "demo-pvc",
+			PVName:            "pvc-unreachable",
+			ReplicationFactor: 1,
+			Replicas: []VolumeInventoryReplicaInput{{
+				ReplicaID:            "r1",
+				ServerID:             "node-r1",
+				NodeName:             "m01",
+				Protocol:             "iscsi",
+				FrontendAddress:      "192.168.1.181:3260",
+				StatusAddress:        "192.168.1.181:23260",
+				Observed:             true,
+				AuthorityRole:        "primary",
+				Healthy:              true,
+				FrontendPrimaryReady: true,
+				ReplicationRole:      "none",
+				Issues:               []string{"status_endpoint_unreachable=192.168.1.181:23260"},
+			}},
+		}},
+	})
+	mustWriteInventory(t, inventoryDir, inventory)
 }
 
 func mustWrite(t *testing.T, path, content string) {
