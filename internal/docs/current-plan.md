@@ -1,6 +1,6 @@
 # Current Plan: Phase 33 - TestOps Failure Hardening
 
-Status: active, 10% complete. Started on 2026-05-27.
+Status: active, 20% complete. Started on 2026-05-27.
 
 Branch: `phase33-testops-failure-hardening`
 
@@ -36,6 +36,12 @@ bug. Avoid broad refactors.
 ## D1: Failure Matrix And Plan
 
 Goal: convert existing failure ideas into a small executable matrix.
+
+Status: PASS on 2026-05-27.
+
+Artifact:
+
+- `internal/docs/qa-assignments/phase33-failure-matrix.md`
 
 Deliverables:
 
@@ -169,4 +175,4 @@ release claims updated or explicitly unchanged
 - 5%: `AGENTS.md` added to guide future agent behavior.
 - 10%: Phase 33 scope, D1-D5 gates, and roadmap pointers drafted.
 
-Next step: D1 failure matrix.
+Next step: D2 runner/helper hardening for the P0 gates.
