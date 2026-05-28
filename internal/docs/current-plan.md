@@ -1,6 +1,6 @@
 # Current Plan: Phase 33 - TestOps Failure Hardening
 
-Status: active, 35% complete. Started on 2026-05-27.
+Status: active, 45% complete. Started on 2026-05-27.
 
 Branch: `phase33-testops-failure-hardening`
 
@@ -78,11 +78,13 @@ no broad HA claim added
 
 Goal: reduce shell gymnastics and make failed runs self-explaining.
 
-Status: in progress, first helper landed.
+Status: in progress, failure snapshot helper and unreachable status projection
+landed.
 
 Artifact:
 
 - `scripts/collect-k8s-failure-snapshot.sh`
+- `core/ops/managed_volume_model.go`
 
 P0 items:
 
@@ -184,5 +186,8 @@ release claims updated or explicitly unchanged
 - 30%: D2 failure snapshot helper and contract test added.
 - 35%: F1 support-bundle diagnostics gate wired to collect the failure
   snapshot contract.
+- 45%: F2 status endpoint unreachable projection tightened to
+  `status=unknown reason=status_endpoint_unreachable`; replay tests prove no
+  false `Ready=True`.
 
-Next step: D2 runner/helper hardening for the P0 gates.
+Next step: D3 negative status gates for live/scenario surface agreement.

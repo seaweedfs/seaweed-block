@@ -541,6 +541,9 @@ func classifyManagedVolume(p ManagedVolumeProjection, facts ManagedVolumeFacts) 
 	if facts.EvidenceStale || facts.ProductReason == ReasonEvidenceStale {
 		return ManagedVolumeStatusUnknown, defaultString(facts.EvidenceStaleReason, ReasonEvidenceStale)
 	}
+	if facts.ProductReason == ReasonStatusEndpointUnreachable {
+		return ManagedVolumeStatusUnknown, ReasonStatusEndpointUnreachable
+	}
 	if p.States.HostPath == ManagedVolumeHostPathTransparentReady &&
 		facts.Workload != nil &&
 		facts.Workload.WriterVerified &&
@@ -744,7 +747,7 @@ func managedVolumeConditionsForProjection(p ManagedVolumeProjection) []Observati
 			Message:      "insufficient managed volume facts",
 			EvidenceRefs: append([]string(nil), p.EvidenceRefs...),
 		}}
-		if reason == ReasonEvidenceStale {
+		if reason == ReasonEvidenceStale || reason == ReasonStatusEndpointUnreachable {
 			conditions[0].Severity = "warning"
 			conditions[0].Message = "managed volume evidence is stale or unreachable; readiness is not claimed"
 			conditions = append(conditions, ObservationCondition{

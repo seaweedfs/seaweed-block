@@ -121,6 +121,30 @@ func TestManagedVolumeProjection_EvidenceStaleIsNotReady(t *testing.T) {
 	}
 }
 
+func TestManagedVolumeProjection_StatusEndpointUnreachableIsNotReady(t *testing.T) {
+	projection := ProjectManagedVolume(ManagedVolumeFacts{
+		VolumeID:      "pvc-unreachable",
+		ProductStatus: ObservationStatusUnavailable,
+		ProductReason: ReasonStatusEndpointUnreachable,
+		EvidenceRefs:  []string{"ops-inventory/volume-inventory.json"},
+	})
+
+	ready := findObservationCondition(projection.Conditions, "Ready")
+	stale := findObservationCondition(projection.Conditions, "EvidenceStale")
+	if ready == nil || stale == nil {
+		t.Fatalf("conditions=%+v", projection.Conditions)
+	}
+	if ready.Status != "Unknown" || ready.Reason != ReasonStatusEndpointUnreachable || ready.Severity != "warning" {
+		t.Fatalf("ready=%+v", ready)
+	}
+	if stale.Status != "True" || stale.Reason != ReasonStatusEndpointUnreachable || stale.Severity != "warning" {
+		t.Fatalf("stale=%+v", stale)
+	}
+	if projection.Status != ManagedVolumeStatusUnknown || projection.ReasonCode != ReasonStatusEndpointUnreachable {
+		t.Fatalf("projection=%+v", projection)
+	}
+}
+
 func findObservationCondition(conditions []ObservationCondition, conditionType string) *ObservationCondition {
 	for i := range conditions {
 		if conditions[i].Type == conditionType {

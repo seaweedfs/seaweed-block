@@ -351,6 +351,42 @@ deployment.apps/sw-block-csi-controller 1/1 1 1 2m3s block-csi sw-block-csi:loca
 			wantEvent:  "Warning",
 		},
 		{
+			name: "status-endpoint-unreachable",
+			build: func(t *testing.T, dir string) {
+				inventoryDir := filepath.Join(dir, "demo", "ops-inventory-status-unreachable")
+				inventory := BuildVolumeInventory(VolumeInventoryInput{
+					CapturedAt:      time.Date(2026, 5, 27, 12, 0, 0, 0, time.UTC),
+					Source:          ReportSource{Component: "component-test"},
+					ProductRevision: "product-rev",
+					Volumes: []VolumeInventoryVolumeInput{{
+						VolumeID:          "pvc-unreachable",
+						Namespace:         "default",
+						PVCName:           "demo-pvc",
+						PVName:            "pvc-unreachable",
+						ReplicationFactor: 1,
+						Replicas: []VolumeInventoryReplicaInput{{
+							ReplicaID:            "r1",
+							ServerID:             "node-r1",
+							NodeName:             "m01",
+							Protocol:             "iscsi",
+							FrontendAddress:      "192.168.1.181:3260",
+							StatusAddress:        "192.168.1.181:23260",
+							Observed:             true,
+							AuthorityRole:        "primary",
+							Healthy:              true,
+							FrontendPrimaryReady: true,
+							ReplicationRole:      "none",
+							Issues:               []string{"status_endpoint_unreachable=192.168.1.181:23260"},
+						}},
+					}},
+				})
+				mustWriteInventory(t, inventoryDir, inventory)
+			},
+			wantStatus: ManagedVolumeStatusUnknown,
+			wantReason: ReasonStatusEndpointUnreachable,
+			wantEvent:  "Warning",
+		},
+		{
 			name: "stage2-recovery",
 			build: func(t *testing.T, dir string) {
 				writeProductClusterEvidence(t, dir, []VolumeEvidence{{
