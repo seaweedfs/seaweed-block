@@ -1,6 +1,6 @@
 # Current Plan: Phase 33 - TestOps Failure Hardening
 
-Status: active, 85% complete. Started on 2026-05-27.
+Status: complete, 100% complete. Started on 2026-05-27. Closed on 2026-05-29.
 
 Branch: `phase33-testops-failure-hardening`
 
@@ -206,5 +206,10 @@ release claims updated or explicitly unchanged
   PASS 17/17, `cleanup-residue-chain.yaml` run `20260529-155040-4519`
   PASS 13/13, and F4 corrupt evidence replay remains covered by
   `go test ./cmd/sw-block`.
+- 95%: Minimal new-user regression passed:
+  `helm-first-volume-via-sw-block-cli-chain.yaml` run `20260529-155216-0d9d`,
+  PASS 34/34.
+- 100%: Close report, finished plan, and `v0.3.5-alpha` release note drafted.
 
-Next step: Phase 33 close report and release-hardening addendum decision.
+Next step: review/merge Phase 33 branch, publish immutable images if cutting
+`v0.3.5-alpha`, then start the next feature/reliability phase.

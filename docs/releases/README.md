@@ -11,6 +11,7 @@ is still outside the supported boundary.
 - [v0.3.2 Alpha — Multi-Volume HA Independence](v0.3.2-alpha.md)
 - [v0.3.3 Alpha — Productized Operations And Read-Only Operator Foundation](v0.3.3-alpha.md)
 - [v0.3.4 Alpha — Status Surface Hardening And Strict New-User Path](v0.3.4-alpha.md)
+- [v0.3.5 Alpha — Failure-Path Evidence And Cleanup Hardening](v0.3.5-alpha.md)
 
 ## Version Boundary
 
@@ -39,6 +40,10 @@ is still outside the supported boundary.
   happy/blocked/restart/multi-volume/stale-evidence surfaces agree, support
   bundle replay prefers the freshest evidence, and the documented cleanup path
   scrubs iSCSI node DB residue.
+- `v0.3.5-alpha` hardens failure-path evidence and cleanup confidence:
+  blocked CSI image-pull evidence, status endpoint unreachable replay, corrupt
+  evidence replay, support-bundle/failure-snapshot diagnostics, and cleanup
+  residue gates all follow the negative-first rule.
 
 Mutating operator packaging is not included in these alphas. v0.3 introduces
 Helm as the preferred Kubernetes alpha install path; the script path remains
