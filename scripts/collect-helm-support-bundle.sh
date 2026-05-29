@@ -43,6 +43,17 @@ capture() {
   fi
 }
 
+capture_optional() {
+  local out="$1"
+  shift
+  if ! "$@" >"$out" 2>&1; then
+    {
+      echo
+      echo "[support-bundle] optional command failed: $*"
+    } >>"$out"
+  fi
+}
+
 summary_value() {
   local value="$1"
   if [[ -n "$value" ]]; then
@@ -78,10 +89,10 @@ capture "$ARTIFACT_DIR/k8s/volumeattachments.txt" kubectl get volumeattachments 
 capture "$ARTIFACT_DIR/logs/blockmaster.log" kubectl -n "$HELM_NAMESPACE" logs deploy/sw-blockmaster --all-containers --tail=300 || true
 capture "$ARTIFACT_DIR/logs/csi-controller.log" kubectl -n "$HELM_NAMESPACE" logs deploy/sw-block-csi-controller --all-containers --tail=300 || true
 capture "$ARTIFACT_DIR/logs/csi-node.log" kubectl -n "$HELM_NAMESPACE" logs ds/sw-block-csi-node --all-containers --tail=300 || true
-capture "$ARTIFACT_DIR/logs/blockvolume.log" kubectl -n "$NAMESPACE" logs -l app=sw-blockvolume --all-containers --tail=300 || true
+capture_optional "$ARTIFACT_DIR/logs/blockvolume.log" kubectl -n "$NAMESPACE" logs -l app=sw-blockvolume --all-containers --tail=300
 
-capture "$ARTIFACT_DIR/iscsi/sessions.txt" sudo -n iscsiadm -m session || true
-capture "$ARTIFACT_DIR/iscsi/nodes.txt" sudo -n iscsiadm -m node || true
+capture_optional "$ARTIFACT_DIR/iscsi/sessions.txt" sudo -n iscsiadm -m session
+capture_optional "$ARTIFACT_DIR/iscsi/nodes.txt" sudo -n iscsiadm -m node
 
 report_status=ok
 explain_status=ok

@@ -1,6 +1,7 @@
 # Phase 33 Failure Matrix
 
-Status: D1 draft complete on 2026-05-27.
+Status: D1 complete; F1/F2/F4/F5 implementation evidence landed as of
+2026-05-28.
 
 Purpose: turn Phase 33 from "test failures more" into executable release gates.
 Every failure below must prove the same product rule:
@@ -45,7 +46,7 @@ before the surface can exist:
 
 | ID | Failure Class | Trigger | Expected Status / Reason | Required Evidence | Cleanup Gate | Source / Scenario Shape | Priority |
 |---|---|---|---|---|---|---|---|
-| F1 | CSI node image pull failure | Install with invalid CSI image or missing local image import | `Blocked`, `Ready=False`, `reason=csi_node_image_pull_failed` | K8s pods/events, support bundle, report, operator snapshot, explain dry-run action | zero k8s/iSCSI/multipath/process residue after cleanup | Existing: `helm-support-bundle-diagnostics-chain.yaml`; harden as release gate | P0 |
+| F1 | CSI node image pull failure | Install with invalid CSI image or missing local image import | `Blocked`, `Ready=False`, `reason=csi_node_image_pull_failed` | K8s pods/events, support bundle, report, operator snapshot, explain dry-run action | zero k8s/iSCSI/multipath/process residue after cleanup | PASS: `helm-support-bundle-diagnostics-chain.yaml` run `20260528-190738-51a2`, 49/49 actions | P0 |
 | F2 | Blockmaster/API unreachable / status endpoint unreachable | Stop or block access to status evidence before status/report capture | `Unknown`, no `Ready=True`, reason `status_endpoint_unreachable` | report, explain, dashboard, operator snapshot showing inability to prove readiness; live port-forward/log artifact for future master-specific gate | cleanup still succeeds without master API | Replay scenario landed: `status-endpoint-unreachable-replay-chain.yaml`; live master-specific scenario still optional | P0 |
 | F3 | Evidence stale / reconverging snapshot | Replay bundle where newest evidence is post-restart but not fully reconverged | `Ready=Unknown`, reason `evidence_stale` or `unknown`; never false `Ready=True` | multiple cluster snapshots with timestamps, replay output, dashboard snapshot | replay-only; no live residue expected | Existing D7 replay behavior; convert to explicit scenario or component gate | P0 |
 | F4 | Corrupt or partial bundle evidence | Put corrupt `cluster-evidence.json` beside a newer valid snapshot, or remove optional artifacts | replay skips corrupt candidate; status comes from newest valid evidence; if none valid, fail with clear error | corrupt file, valid file, replay stderr/stdout, report artifacts | replay-only; no live residue expected | Component gate around `BuildObservationFromBundle` plus CLI replay test | P0 |

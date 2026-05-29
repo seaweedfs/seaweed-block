@@ -38,6 +38,8 @@ func TestFailureSnapshotScriptCapturesRequiredEvidenceLayers(t *testing.T) {
 	for _, want := range []string{
 		"failure_snapshot_status=",
 		"capture_failure_count=",
+		"capture_optional()",
+		"[failure-snapshot] optional command failed:",
 		"k8s/pods-all.yaml",
 		"k8s/events-all.txt",
 		"k8s/blockvolume-deployments.yaml",
@@ -46,15 +48,40 @@ func TestFailureSnapshotScriptCapturesRequiredEvidenceLayers(t *testing.T) {
 		"logs/blockmaster.previous.log",
 		"logs/csi-node.current.log",
 		"logs/csi-node.previous.log",
+		`capture_optional "$ARTIFACT_DIR/logs/blockmaster.previous.log"`,
+		`capture_optional "$ARTIFACT_DIR/logs/csi-controller.previous.log"`,
+		`capture_optional "$ARTIFACT_DIR/logs/csi-node.previous.log"`,
+		`capture_optional "$ARTIFACT_DIR/logs/blockvolume.previous.log"`,
 		"host/iscsi-sessions.txt",
 		"host/iscsi-nodes.txt",
 		"host/multipath.txt",
 		"host/dmsetup.txt",
+		`capture_optional "$ARTIFACT_DIR/host/kubelet-mounts.txt"`,
 		"host/processes.txt",
 		"read_only=true",
 	} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("failure snapshot script missing %q", want)
+		}
+	}
+}
+
+func TestCollectHelmSupportBundleKeepsOptionalDiagnosticsNonFatal(t *testing.T) {
+	root := repoRoot(t)
+	raw, err := os.ReadFile(filepath.Join(root, "scripts", "collect-helm-support-bundle.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(raw)
+	for _, want := range []string{
+		"capture_optional()",
+		"[support-bundle] optional command failed:",
+		`capture_optional "$ARTIFACT_DIR/logs/blockvolume.log"`,
+		`capture_optional "$ARTIFACT_DIR/iscsi/sessions.txt"`,
+		`capture_optional "$ARTIFACT_DIR/iscsi/nodes.txt"`,
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("support bundle script missing %q", want)
 		}
 	}
 }

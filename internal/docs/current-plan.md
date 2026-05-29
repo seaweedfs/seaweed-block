@@ -1,6 +1,6 @@
 # Current Plan: Phase 33 - TestOps Failure Hardening
 
-Status: active, 65% complete. Started on 2026-05-27.
+Status: active, 75% complete. Started on 2026-05-27.
 
 Branch: `phase33-testops-failure-hardening`
 
@@ -198,6 +198,8 @@ release claims updated or explicitly unchanged
   agreement across report, explain, dashboard, and operator snapshot.
 - 65%: F5 cleanup verifier contract test added so all residue counters and
   failure reason codes remain present across future cleanup edits.
+- 75%: F1 live negative support-bundle gate passed after helper fixes:
+  `20260528-190738-51a2`, 49/49 actions, support bundle and failure snapshot
+  both `ok`, cleanup residue zero.
 
-Next step: D3/F1 live negative scenario QA, then D4 cleanup/replay gate
-consolidation.
+Next step: D4 cleanup/replay gate consolidation, then Phase 33 close report.

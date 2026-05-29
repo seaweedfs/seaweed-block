@@ -28,13 +28,24 @@ capture() {
   fi
 }
 
+capture_optional() {
+  local out="$1"
+  shift
+  if ! "$@" >"$out" 2>&1; then
+    {
+      echo
+      echo "[failure-snapshot] optional command failed: $*"
+    } >>"$out"
+  fi
+}
+
 capture_optional_sudo() {
   local out="$1"
   shift
   if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
-    capture "$out" sudo -n "$@"
+    capture_optional "$out" sudo -n "$@"
   else
-    capture "$out" "$@"
+    capture_optional "$out" "$@"
   fi
 }
 
@@ -57,19 +68,19 @@ capture "$ARTIFACT_DIR/k8s/app-pods-describe.txt" kubectl -n "$NAMESPACE" descri
 capture "$ARTIFACT_DIR/k8s/kube-system-pods-describe.txt" kubectl -n "$HELM_NAMESPACE" describe pods
 
 capture "$ARTIFACT_DIR/logs/blockmaster.current.log" kubectl -n "$HELM_NAMESPACE" logs deploy/sw-blockmaster --all-containers --tail=500
-capture "$ARTIFACT_DIR/logs/blockmaster.previous.log" kubectl -n "$HELM_NAMESPACE" logs deploy/sw-blockmaster --all-containers --previous --tail=500
+capture_optional "$ARTIFACT_DIR/logs/blockmaster.previous.log" kubectl -n "$HELM_NAMESPACE" logs deploy/sw-blockmaster --all-containers --previous --tail=500
 capture "$ARTIFACT_DIR/logs/csi-controller.current.log" kubectl -n "$HELM_NAMESPACE" logs deploy/sw-block-csi-controller --all-containers --tail=500
-capture "$ARTIFACT_DIR/logs/csi-controller.previous.log" kubectl -n "$HELM_NAMESPACE" logs deploy/sw-block-csi-controller --all-containers --previous --tail=500
+capture_optional "$ARTIFACT_DIR/logs/csi-controller.previous.log" kubectl -n "$HELM_NAMESPACE" logs deploy/sw-block-csi-controller --all-containers --previous --tail=500
 capture "$ARTIFACT_DIR/logs/csi-node.current.log" kubectl -n "$HELM_NAMESPACE" logs ds/sw-block-csi-node --all-containers --tail=500
-capture "$ARTIFACT_DIR/logs/csi-node.previous.log" kubectl -n "$HELM_NAMESPACE" logs ds/sw-block-csi-node --all-containers --previous --tail=500
+capture_optional "$ARTIFACT_DIR/logs/csi-node.previous.log" kubectl -n "$HELM_NAMESPACE" logs ds/sw-block-csi-node --all-containers --previous --tail=500
 capture "$ARTIFACT_DIR/logs/blockvolume.current.log" kubectl -n "$NAMESPACE" logs -l app=sw-blockvolume --all-containers --tail=500
-capture "$ARTIFACT_DIR/logs/blockvolume.previous.log" kubectl -n "$NAMESPACE" logs -l app=sw-blockvolume --all-containers --previous --tail=500
+capture_optional "$ARTIFACT_DIR/logs/blockvolume.previous.log" kubectl -n "$NAMESPACE" logs -l app=sw-blockvolume --all-containers --previous --tail=500
 
 capture_optional_sudo "$ARTIFACT_DIR/host/iscsi-sessions.txt" iscsiadm -m session
 capture_optional_sudo "$ARTIFACT_DIR/host/iscsi-nodes.txt" iscsiadm -m node
 capture_optional_sudo "$ARTIFACT_DIR/host/multipath.txt" multipath -ll
 capture_optional_sudo "$ARTIFACT_DIR/host/dmsetup.txt" dmsetup ls --tree
-capture "$ARTIFACT_DIR/host/kubelet-mounts.txt" findmnt -R /var/lib/kubelet -o TARGET,SOURCE,FSTYPE,OPTIONS
+capture_optional "$ARTIFACT_DIR/host/kubelet-mounts.txt" findmnt -R /var/lib/kubelet -o TARGET,SOURCE,FSTYPE,OPTIONS
 capture "$ARTIFACT_DIR/host/processes.txt" ps -eo pid,args
 
 {
