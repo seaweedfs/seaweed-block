@@ -59,6 +59,39 @@ func TestFailureSnapshotScriptCapturesRequiredEvidenceLayers(t *testing.T) {
 	}
 }
 
+func TestVerifyHelmCleanupReportsAllResidueDimensions(t *testing.T) {
+	root := repoRoot(t)
+	raw, err := os.ReadFile(filepath.Join(root, "scripts", "verify-helm-cleanup.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(raw)
+	for _, want := range []string{
+		"cleanup_status=ok",
+		"cleanup_status=failed",
+		"k8s_residue_count=",
+		"iscsi_residue_count=",
+		"process_residue_count=",
+		"multipath_residue_count=",
+		"hostpath_residue_count=",
+		"failure_count=",
+		"helm_release_still_present",
+		"kubernetes_sw_block_resources_present",
+		"iscsi_sessions_present",
+		"iscsi_node_records_present",
+		"multipath_maps_present",
+		"sw_block_processes_present",
+		"hostpath_residue_present",
+		"multipath-residue.after-cleanup.txt",
+		"dmsetup.after-cleanup.txt",
+		"cleanup-failures.txt",
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("cleanup verifier missing %q", want)
+		}
+	}
+}
+
 func repoRoot(t *testing.T) string {
 	t.Helper()
 	dir, err := os.Getwd()
