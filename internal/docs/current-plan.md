@@ -1,6 +1,6 @@
 # Current Plan: Phase 33 - TestOps Failure Hardening
 
-Status: active, 75% complete. Started on 2026-05-27.
+Status: active, 85% complete. Started on 2026-05-27.
 
 Branch: `phase33-testops-failure-hardening`
 
@@ -201,5 +201,10 @@ release claims updated or explicitly unchanged
 - 75%: F1 live negative support-bundle gate passed after helper fixes:
   `20260528-190738-51a2`, 49/49 actions, support bundle and failure snapshot
   both `ok`, cleanup residue zero.
+- 85%: D4 cleanup/replay gate consolidated:
+  `status-endpoint-unreachable-replay-chain.yaml` run `20260529-155016-e9a5`
+  PASS 17/17, `cleanup-residue-chain.yaml` run `20260529-155040-4519`
+  PASS 13/13, and F4 corrupt evidence replay remains covered by
+  `go test ./cmd/sw-block`.
 
-Next step: D4 cleanup/replay gate consolidation, then Phase 33 close report.
+Next step: Phase 33 close report and release-hardening addendum decision.
