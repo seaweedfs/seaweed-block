@@ -263,6 +263,191 @@ phases:
         actual: "{{ reader_after_restart_count }}"
         threshold: "0"
 
+  - name: post_restart_degraded_status_boundary
+    actions:
+      - action: exec
+        node: m02
+        timeout: 4m
+        cmd: |
+          set -e
+          out=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-rf3-promotion-restart/after-restart/convergence
+          mkdir -p "$out"
+          python3 - "$out" <<'PY'
+          import json
+          import socket
+          import subprocess
+          import sys
+          import time
+          from pathlib import Path
+
+          out = Path(sys.argv[1])
+          root = Path("/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-rf3-promotion-restart")
+          sw_block = root / "bin/sw-block"
+          restart_summary = root / "restart/restart-promotion-summary.txt"
+          volume_id = ""
+          for line in restart_summary.read_text(encoding="utf-8").splitlines():
+              if line.startswith("volume_id="):
+                  volume_id = line.split("=", 1)[1]
+                  break
+          if not volume_id:
+              raise SystemExit("volume_id unavailable")
+
+          def run(*args, **kwargs):
+              return subprocess.run(args, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, **kwargs)
+
+          pods = run(
+              "kubectl", "-n", "{{ helm_namespace }}", "get", "pods",
+              "-l", "app.kubernetes.io/component=blockmaster",
+              "--field-selector=status.phase=Running",
+              "-o", "json",
+              check=True,
+          )
+          pod_items = json.loads(pods.stdout).get("items") or []
+          if not pod_items:
+              pods = run(
+                  "kubectl", "-n", "{{ helm_namespace }}", "get", "pods",
+                  "--field-selector=status.phase=Running",
+                  "-o", "json",
+                  check=True,
+              )
+              pod_items = [
+                  item for item in json.loads(pods.stdout).get("items") or []
+                  if item.get("metadata", {}).get("name", "").startswith("sw-blockmaster-")
+              ]
+          ready_pod = ""
+          for item in pod_items:
+              conditions = {c.get("type"): c.get("status") for c in (item.get("status") or {}).get("conditions") or []}
+              if conditions.get("Ready") == "True":
+                  ready_pod = item["metadata"]["name"]
+                  break
+          if not ready_pod:
+              raise SystemExit("no Ready blockmaster pod")
+          (out / "blockmaster-pod.txt").write_text(ready_pod + "\n", encoding="utf-8")
+
+          sock = socket.socket()
+          sock.bind(("127.0.0.1", 0))
+          port = sock.getsockname()[1]
+          sock.close()
+          (out / "port.txt").write_text(str(port) + "\n", encoding="utf-8")
+
+          pf_log = open(out / "blockmaster-port-forward.log", "w", encoding="utf-8")
+          pf = subprocess.Popen(
+              ["kubectl", "-n", "{{ helm_namespace }}", "port-forward", f"pod/{ready_pod}", f"{port}:9333"],
+              stdout=pf_log,
+              stderr=subprocess.STDOUT,
+              text=True,
+          )
+
+          def port_ready():
+              try:
+                  with socket.create_connection(("127.0.0.1", port), timeout=1):
+                      return True
+              except OSError:
+                  return False
+
+          try:
+              deadline = time.time() + 30
+              while time.time() < deadline:
+                  if pf.poll() is not None:
+                      raise SystemExit("port-forward exited early")
+                  if port_ready():
+                      break
+                  time.sleep(0.5)
+              else:
+                  raise SystemExit("port-forward did not become ready")
+
+              consecutive = 0
+              max_consecutive = 0
+              observations = []
+              final_reason = ""
+              for attempt in range(1, 31):
+                  report_dir = out / f"report-{attempt:02d}"
+                  evidence_dir = out / f"evidence-{attempt:02d}"
+                  cmd = [
+                      str(sw_block), "ops", "report",
+                      "--namespace", "default",
+                      "--master", f"127.0.0.1:{port}",
+                      "--out", str(report_dir),
+                      "--evidence-out", str(evidence_dir),
+                      "--timeout", "30s",
+                  ]
+                  proc = run(*cmd)
+                  (out / f"report-{attempt:02d}.stdout.txt").write_text(proc.stdout, encoding="utf-8")
+                  (out / f"report-{attempt:02d}.stderr.txt").write_text(proc.stderr, encoding="utf-8")
+                  if proc.returncode != 0:
+                      observations.append(f"{attempt}: report_failed rc={proc.returncode}")
+                      consecutive = 0
+                      time.sleep(3)
+                      continue
+                  snap_path = report_dir / "operator-snapshot.json"
+                  snap = json.loads(snap_path.read_text(encoding="utf-8"))
+                  vols = snap.get("volumes") or []
+                  target = next((v for v in vols if (v.get("status") or {}).get("volume_id") == volume_id), None)
+                  if target is None:
+                      observations.append(f"{attempt}: volume_missing")
+                      consecutive = 0
+                      time.sleep(3)
+                      continue
+                  status = target.get("status") or {}
+                  conditions = status.get("conditions") or []
+                  ready_true = any(c.get("type") == "Ready" and c.get("status") == "True" for c in conditions)
+                  blocked_true = any(c.get("type") == "Blocked" and c.get("status") == "True" for c in conditions)
+                  status_value = status.get("status", "")
+                  reason = status.get("reason_code", "")
+                  final_reason = reason
+                  stable_degraded_unknown = status_value == "unknown" and reason == "status_endpoint_unreachable"
+                  stable_ready = status_value == "ready" and ready_true
+                  if (stable_ready or stable_degraded_unknown) and not blocked_true:
+                      consecutive += 1
+                  else:
+                      consecutive = 0
+                  max_consecutive = max(max_consecutive, consecutive)
+                  observations.append(
+                      f"{attempt}: status={status_value} reason={reason} ready_true={str(ready_true).lower()} "
+                      f"blocked_true={str(blocked_true).lower()} consecutive_stable={consecutive}"
+                  )
+                  if consecutive >= 3:
+                      break
+                  time.sleep(3)
+
+              (out / "observations.txt").write_text("\n".join(observations) + "\n", encoding="utf-8")
+              status = "ok" if consecutive >= 3 else "failed"
+              with open(out / "convergence-summary.txt", "w", encoding="utf-8") as f:
+                  f.write(f"restart_status_boundary={status}\n")
+                  f.write(f"volume_id={volume_id}\n")
+                  f.write(f"required_consecutive_stable=3\n")
+                  f.write(f"max_consecutive_stable={max_consecutive}\n")
+                  f.write(f"final_reason={final_reason or 'unknown'}\n")
+                  f.write("evidence=observations.txt\n")
+              if status != "ok":
+                  raise SystemExit("post-restart status did not reach a stable safe surface")
+          finally:
+              pf.terminate()
+              try:
+                  pf.wait(timeout=5)
+              except subprocess.TimeoutExpired:
+                  pf.kill()
+                  pf.wait(timeout=5)
+              pf_log.close()
+          PY
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-rf3-promotion-restart/after-restart/convergence/convergence-summary.txt"
+        pattern: "^restart_status_boundary=ok$"
+        save_as: restart_status_boundary_ok_count
+      - action: assert_greater
+        actual: "{{ restart_status_boundary_ok_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-helm-rf3-promotion-restart/after-restart/convergence/convergence-summary.txt"
+        pattern: "^max_consecutive_stable=3$"
+        save_as: restart_consecutive_stable_count
+      - action: assert_greater
+        actual: "{{ restart_consecutive_stable_count }}"
+        threshold: "0"
+
   - name: helm_uninstall_cleanup
     always: true
     actions:
