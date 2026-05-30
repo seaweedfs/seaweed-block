@@ -144,6 +144,7 @@ after k3s/product restart
 -> capture immediate status; Unknown is allowed
 -> poll report/operator-snapshot for up to 90s
 -> require final Ready=True reason=first_volume_verified or equivalent
+   for 3 consecutive polls
 -> verify primary/epoch/publish target did not roll back
 ```
 
@@ -151,11 +152,36 @@ Acceptance:
 
 - Immediate Unknown is not failure if evidence is still stale.
 - Final non-convergence is failure.
+- A single transient Ready=True is not enough; the status must remain Ready for
+  3 consecutive polls to avoid passing on Ready/Unknown flicker.
 - No old primary is surfaced as Ready during the window.
 
 ## D4: Corrupt WAL Dirty-Failure Gate
 
 Goal: cover a storage-native dirty failure, not just clean Kubernetes failures.
+
+Hard prerequisite - D4-0:
+
+The existing `corrupt_wal` TestRunner primitive must not be used blindly for
+V3. It was originally shaped around a V2 durable-file layout with a fixed
+superblock plus large WAL region. V3 `smartwal` uses a different layout:
+
+```text
+[header][walSlots * recordSize][block data extents]
+```
+
+Before any D4 assertion is allowed:
+
+- Locate the real V3 smartwal store file under the Helm hostPath durable root.
+- Read or derive the V3 smartwal header/record layout.
+- Prove the injected bytes land inside the WAL ring, not inside data extents.
+- Capture an artifact that records file path, WAL offset, WAL length, injected
+  offset, and before/after byte sample.
+- Run with `restartPersistence: hostpath`; `emptyDir` mode is invalid for this
+  gate because the durable file disappears across pod restart.
+
+If D4-0 cannot prove V3-aware WAL corruption, D4 must be marked blocked rather
+than producing a false green test.
 
 Scenario shape:
 
@@ -204,6 +230,8 @@ Priority:
 
 - P1 for Phase 34 unless D2-D4 finish quickly.
 - Use one scenario only. Do not create a RF/node-count matrix.
+- Do not start D5 until D4-0 has closed. The same realism rule applies: the
+  fault must affect the intended path, not merely run a chaos primitive.
 
 ## D6: Event Noise Sanity
 
@@ -229,8 +257,10 @@ Minimum close requirements:
 - D1 audit complete.
 - D2 F2b live status-unreachable PASS.
 - D3 restart convergence PASS.
-- D4 corrupt WAL dirty-failure PASS or explicitly blocked by missing product
-  reason code with a concrete implementation issue filed.
+- D4 corrupt WAL dirty-failure PASS, or explicitly blocked with a concrete
+  implementation issue because:
+  - the product lacks a stable dirty-recovery reason code, or
+  - the injection primitive is not yet proven against the V3 smartwal layout.
 - Existing v0.3.5 user path still PASS.
 
 Close report must classify each hard claim by realism level:
