@@ -36,6 +36,7 @@ type flags struct {
 	launcherImage           string
 	launcherMasterAddr      string
 	launcherDurableRoot     string
+	launcherDurableImpl     string
 	launcherStateHostPath   string
 	launcherReplicationAck  string
 	launcherISCSIPortBase   int
@@ -75,6 +76,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.StringVar(&f.launcherImage, "launcher-image", "sw-block:local", "G15d rendered blockvolume container image")
 	fs.StringVar(&f.launcherMasterAddr, "launcher-master-addr", "", "G15d master address used in rendered blockvolume args; defaults to listener address after bind")
 	fs.StringVar(&f.launcherDurableRoot, "launcher-durable-root", "/var/lib/sw-block", "G15d rendered blockvolume durable root base")
+	fs.StringVar(&f.launcherDurableImpl, "launcher-durable-impl", "walstore", "G15d rendered blockvolume durable implementation: walstore (default) or smartwal")
 	fs.StringVar(&f.launcherStateHostPath, "launcher-state-hostpath", "", "optional hostPath base mounted at the blockvolume durable root; empty keeps generated blockvolume state on throwaway emptyDir")
 	fs.StringVar(&f.launcherReplicationAck, "launcher-replication-ack", "best-effort", "G15d rendered blockvolume replication ACK profile: best-effort, sync-quorum, or sync-all")
 	fs.IntVar(&f.launcherISCSIPortBase, "launcher-iscsi-port-base", 3260, "G15d iSCSI port base for generated blockvolume workloads")
@@ -328,6 +330,7 @@ func runLifecycleLauncherTick(h *master.Host, f flags) error {
 			Image:               f.launcherImage,
 			MasterAddr:          masterAddr,
 			DurableRootBase:     f.launcherDurableRoot,
+			DurableImpl:         f.launcherDurableImpl,
 			StateHostPathBase:   f.launcherStateHostPath,
 			ReplicationAck:      f.launcherReplicationAck,
 			OwnerReferenceToPVC: f.launcherPVCOwnerRef,

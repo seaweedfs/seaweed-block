@@ -53,6 +53,17 @@ surface stays read-only. The utility:
 - fsyncs the file,
 - writes `smartwal-corruption-evidence.txt`.
 
+Added a launcher/Helm selection seam:
+
+```text
+blockmaster --launcher-durable-impl=walstore|smartwal
+Helm value: blockmaster.durableImpl
+```
+
+The default remains `walstore` to preserve existing Helm gates. A SmartWAL D4
+scenario must explicitly set `blockmaster.durableImpl=smartwal`; otherwise it
+is not testing SmartWAL at all.
+
 The inspector returns:
 
 ```text
@@ -79,7 +90,8 @@ whether an offset is inside the WAL ring or extent region.
 Command:
 
 ```text
-go test ./core/storage/smartwal ./cmd/sw-block-testutil
+go test ./core/storage/smartwal ./cmd/sw-block-testutil ./core/launcher ./cmd/blockmaster
+helm template sw-block charts/seaweed-block --set blockmaster.durableImpl=smartwal
 ```
 
 Result:
@@ -87,6 +99,8 @@ Result:
 ```text
 ok github.com/seaweedfs/seaweed-block/core/storage/smartwal
 ok github.com/seaweedfs/seaweed-block/cmd/sw-block-testutil
+ok github.com/seaweedfs/seaweed-block/core/launcher
+ok github.com/seaweedfs/seaweed-block/cmd/blockmaster
 ```
 
 Tests prove:
@@ -98,6 +112,8 @@ Tests prove:
 - Truncated SmartWAL files are rejected.
 - The mutation utility writes evidence, flips a real record CRC byte, and the
   corrupted record no longer decodes as valid.
+- Helm can render `--launcher-durable-impl=smartwal` for D4 without changing
+  the default release path.
 
 ## D4 gate rule
 
@@ -117,6 +133,7 @@ before_bytes=<sample>
 after_bytes=<sample>
 mutation=flip_last_record_crc_byte
 restart_persistence=hostpath
+durable_impl=smartwal
 ```
 
 If those fields are not present, the D4 scenario must fail closed or be marked

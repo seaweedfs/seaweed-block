@@ -36,6 +36,7 @@ func TestG15d_K8sRenderer_RendersBlockVolumeDeploymentArgs(t *testing.T) {
 		"--volume-id=pvc-a",
 		"--replica-id=r1",
 		"--durable-root=/var/lib/sw-block/pvc-a/r1",
+		"--durable-impl=walstore",
 		"--recovery-mode=dual-lane",
 		"--replication-ack=best-effort",
 		"sw-block.seaweedfs.com/volume: pvc-a",
@@ -57,6 +58,33 @@ func TestG15d_K8sRenderer_RendersBlockVolumeDeploymentArgs(t *testing.T) {
 	}
 	if strings.Contains(raw, "--status-addr=") {
 		t.Fatalf("status endpoint must be opt-in for generated manifests:\n%s", raw)
+	}
+}
+
+func TestPhase34_K8sRendererCanRenderSmartWALDurableImpl(t *testing.T) {
+	manifests, err := RenderBlockVolumeDeployments(sampleWorkloadPlan(), K8sRenderConfig{
+		MasterAddr:  "m:9333",
+		DurableImpl: "smartwal",
+	})
+	if err != nil {
+		t.Fatalf("RenderBlockVolumeDeployments: %v", err)
+	}
+	raw := string(manifests[0].YAML)
+	if !strings.Contains(raw, "--durable-impl=smartwal") {
+		t.Fatalf("manifest missing smartwal durable impl:\n%s", raw)
+	}
+}
+
+func TestPhase34_K8sRendererRejectsUnknownDurableImpl(t *testing.T) {
+	_, err := RenderBlockVolumeDeployments(sampleWorkloadPlan(), K8sRenderConfig{
+		MasterAddr:  "m:9333",
+		DurableImpl: "maybe",
+	})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "durable impl") {
+		t.Fatalf("error=%v", err)
 	}
 }
 

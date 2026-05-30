@@ -56,6 +56,7 @@ spec:
             - "--launcher-image={{ include "seaweed-block.image" . }}"
             - "--launcher-namespace={{ .Release.Namespace }}"
             - "--launcher-durable-root={{ .Values.blockmaster.durableRoot }}"
+            - "--launcher-durable-impl={{ .Values.blockmaster.durableImpl }}"
             {{- if .Values.blockmaster.launcherStatus }}
             - "--launcher-status"
             {{- end }}

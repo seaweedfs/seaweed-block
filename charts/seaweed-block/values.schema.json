@@ -30,7 +30,8 @@
     "blockmaster": {
       "type": "object",
       "properties": {
-        "stateHostPath": { "type": "string" },
+      "durableImpl": { "type": "string", "enum": ["walstore", "smartwal"] },
+      "stateHostPath": { "type": "string" },
         "stateHostPathType": { "type": "string" },
         "statePermissionsImage": {
           "type": "object",

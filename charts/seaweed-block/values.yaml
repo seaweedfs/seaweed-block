@@ -39,6 +39,7 @@ blockmaster:
   launcherNamespace: kube-system
   launcherStatus: true
   launcherPVCOwnerRef: true
+  durableImpl: walstore
   stateHostPath: ""
   stateHostPathType: DirectoryOrCreate
   statePermissionsImage:

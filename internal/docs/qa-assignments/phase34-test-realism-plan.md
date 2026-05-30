@@ -190,6 +190,9 @@ Precheck artifact:
   contract for future D4 injection code.
 - `cmd/sw-block-testutil smartwal-corrupt-latest-record` is the TestOps-only
   mutation utility; do not put mutating corruption under `sw-block ops`.
+- Helm/launcher must explicitly set `blockmaster.durableImpl=smartwal` /
+  `--launcher-durable-impl=smartwal`; the default Helm path remains `walstore`
+  and is not valid evidence for a SmartWAL corruption claim.
 
 Scenario shape:
 

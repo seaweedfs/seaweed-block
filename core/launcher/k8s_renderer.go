@@ -18,6 +18,7 @@ type K8sRenderConfig struct {
 	Image               string
 	MasterAddr          string
 	DurableRootBase     string
+	DurableImpl         string
 	StateHostPathBase   string
 	RecoveryMode        string
 	ReplicationAck      string
@@ -48,6 +49,14 @@ func RenderBlockVolumeDeployments(plan lifecycle.BlockVolumeWorkloadPlan, cfg K8
 	}
 	if cfg.DurableRootBase == "" {
 		cfg.DurableRootBase = stateMountPath
+	}
+	if cfg.DurableImpl == "" {
+		cfg.DurableImpl = "walstore"
+	}
+	switch cfg.DurableImpl {
+	case "walstore", "smartwal":
+	default:
+		return nil, fmt.Errorf("launcher: durable impl %q invalid; want walstore or smartwal", cfg.DurableImpl)
 	}
 	if cfg.StateHostPathBase != "" && path.Clean(cfg.DurableRootBase) != stateMountPath {
 		return nil, fmt.Errorf("launcher: state hostPath requires durable root base %q, got %q", stateMountPath, cfg.DurableRootBase)
@@ -173,7 +182,7 @@ func blockVolumeArgs(plan lifecycle.BlockVolumeWorkloadPlan, replica lifecycle.B
 		"--data-addr=" + replica.DataAddr,
 		"--ctrl-addr=" + replica.CtrlAddr,
 		"--durable-root=" + durableRoot(plan, replica, cfg),
-		"--durable-impl=walstore",
+		"--durable-impl=" + cfg.DurableImpl,
 		fmt.Sprintf("--durable-blocks=%d", plan.SizeBytes/4096),
 		"--durable-blocksize=4096",
 		"--recovery-mode=" + cfg.RecoveryMode,
