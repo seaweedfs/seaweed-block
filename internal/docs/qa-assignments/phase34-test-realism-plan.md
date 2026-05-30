@@ -183,6 +183,12 @@ Before any D4 assertion is allowed:
 If D4-0 cannot prove V3-aware WAL corruption, D4 must be marked blocked rather
 than producing a false green test.
 
+Precheck artifact:
+
+- `internal/docs/qa-assignments/phase34-d4-smartwal-injection-precheck.md`
+- `core/storage/smartwal.InspectLayout` is the required read-only layout
+  contract for future D4 injection code.
+
 Scenario shape:
 
 ```text
