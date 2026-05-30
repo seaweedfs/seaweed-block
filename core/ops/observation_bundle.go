@@ -614,6 +614,8 @@ func observationStatusFromInventoryCode(code int) string {
 func reasonFromIssueList(issues []string) string {
 	joined := strings.Join(issues, "\n")
 	switch {
+	case strings.Contains(joined, "WALIntegrity") || strings.Contains(joined, "walintegrity") || strings.Contains(joined, "wal_integrity") || strings.Contains(joined, "WAL integrity"):
+		return ReasonWALIntegrityFault
 	case strings.Contains(joined, "status_endpoint_unreachable"):
 		return ReasonStatusEndpointUnreachable
 	case strings.Contains(joined, "generated_deployment_missing"):

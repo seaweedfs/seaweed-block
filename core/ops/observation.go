@@ -30,6 +30,7 @@ const (
 	ReasonObservedReplicasBelowDesired    = "observed_replicas_below_desired"
 	ReasonLoopbackFrontendRejected        = "loopback_frontend_rejected"
 	ReasonStalePrimaryFenced              = "stale_primary_fenced"
+	ReasonWALIntegrityFault               = "wal_integrity_fault"
 
 	EventTypeCSIReattachObserved = "csi_reattach_observed"
 )

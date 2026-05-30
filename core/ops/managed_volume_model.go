@@ -523,6 +523,9 @@ func classifyManagedVolume(p ManagedVolumeProjection, facts ManagedVolumeFacts) 
 	if facts.ProductReason == ReasonCSINodeImagePullFailed {
 		return ManagedVolumeStatusBlocked, ReasonCSINodeImagePullFailed
 	}
+	if facts.ProductReason == ReasonWALIntegrityFault {
+		return ManagedVolumeStatusBlocked, ReasonWALIntegrityFault
+	}
 	if hasBlockedCSINode(facts.KubernetesNodes) {
 		return ManagedVolumeStatusBlocked, ReasonCSINodeImagePullFailed
 	}

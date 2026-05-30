@@ -1,6 +1,9 @@
 package ops
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestManagedVolumeProjection_ReadyConditionForFirstVolume(t *testing.T) {
 	projection := ProjectManagedVolume(ManagedVolumeFacts{
@@ -142,6 +145,67 @@ func TestManagedVolumeProjection_StatusEndpointUnreachableIsNotReady(t *testing.
 	}
 	if projection.Status != ManagedVolumeStatusUnknown || projection.ReasonCode != ReasonStatusEndpointUnreachable {
 		t.Fatalf("projection=%+v", projection)
+	}
+}
+
+func TestManagedVolumeProjection_WALIntegrityFaultIsBlockedNotReady(t *testing.T) {
+	projection := ProjectManagedVolume(ManagedVolumeFacts{
+		VolumeID:      "pvc-corrupt",
+		ProductStatus: ObservationStatusBlocked,
+		ProductReason: ReasonWALIntegrityFault,
+		EvidenceRefs:  []string{"status/report/cluster-evidence.json"},
+	})
+
+	ready := findObservationCondition(projection.Conditions, "Ready")
+	blocked := findObservationCondition(projection.Conditions, "Blocked")
+	if ready == nil || blocked == nil {
+		t.Fatalf("conditions=%+v", projection.Conditions)
+	}
+	if ready.Status != "False" || ready.Reason != ReasonWALIntegrityFault || ready.Severity != "warning" {
+		t.Fatalf("ready=%+v", ready)
+	}
+	if blocked.Status != "True" || blocked.Reason != ReasonWALIntegrityFault {
+		t.Fatalf("blocked=%+v", blocked)
+	}
+	if projection.Status != ManagedVolumeStatusBlocked || projection.ReasonCode != ReasonWALIntegrityFault {
+		t.Fatalf("projection=%+v", projection)
+	}
+}
+
+func TestReasonFromIssueList_WALIntegrityFault(t *testing.T) {
+	got := reasonFromIssueList([]string{
+		"ops_status=unhealthy reason=durable_pvc_r1_operational_false_evidence_recover_failed_storage_walintegrity_crc_mismatch",
+	})
+	if got != ReasonWALIntegrityFault {
+		t.Fatalf("reason=%s want %s", got, ReasonWALIntegrityFault)
+	}
+}
+
+func TestVolumeStatusReportIssues_CarriesDurableEvidence(t *testing.T) {
+	issues := VolumeStatusReportIssues(VolumeStatusReport{
+		SchemaVersion:   VolumeStatusReportSchemaVersion,
+		ProductRevision: "test",
+		Volume: VolumeReport{
+			VolumeID:  "pvc-corrupt",
+			ReplicaID: "r1",
+		},
+		Authority: AuthorityReport{
+			AuthorityRole:        "primary",
+			Healthy:              true,
+			FrontendPrimaryReady: true,
+		},
+		Replication: ReplicationReport{ReplicationRole: "none"},
+		Durable: []DurableReport{{
+			VolumeID:    "pvc-corrupt",
+			ReplicaID:   "r1",
+			Latched:     true,
+			Operational: false,
+			Evidence:    "recover failed: storage: WALIntegrity: CRC mismatch",
+		}},
+	})
+	joined := strings.Join(issues, "\n")
+	if !strings.Contains(joined, "WALIntegrity") {
+		t.Fatalf("issues missing WALIntegrity evidence: %v", issues)
 	}
 }
 
