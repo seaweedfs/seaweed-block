@@ -22,7 +22,6 @@ env:
   single_node: "m02"
   sw_block_image: "sw-block:local"
   sw_block_csi_image: "sw-block-csi:local"
-  state_hostpath: "/var/lib/sw-block/testops-{{ run_id }}-smartwal-corrupt"
 
 topology:
   nodes:
@@ -42,7 +41,7 @@ phases:
       - action: exec
         node: m02
         timeout: 5m
-        cmd: "helm status {{ helm_release }} --namespace {{ helm_namespace }} >/dev/null 2>&1 && helm uninstall {{ helm_release }} --namespace {{ helm_namespace }} --wait --timeout 180s || true; kubectl -n default delete pod sw-block-example-reader sw-block-example-writer --ignore-not-found=true --wait=true --timeout=120s; kubectl -n default delete pvc sw-block-example-pvc --ignore-not-found=true --wait=true --timeout=120s; kubectl delete storageclass sw-block-example --ignore-not-found=true --wait=true --timeout=120s; kubectl delete clusterrole/sw-block-csi clusterrolebinding/sw-block-csi --ignore-not-found=true; sudo -n iscsiadm -m node 2>/dev/null | awk '/io.seaweedfs/ {print $1, $2}' | while read portal target; do sudo -n iscsiadm -m node -T \"$target\" -p \"$portal\" -o delete || true; done; sudo -n rm -rf {{ state_hostpath }}; rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-smartwal-corrupt && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-smartwal-corrupt/bin /mnt/smb/work/share/g15d-k8s/{{ run_id }}-smartwal-corrupt/values /mnt/smb/work/share/g15d-k8s/{{ run_id }}-smartwal-corrupt/install /mnt/smb/work/share/g15d-k8s/{{ run_id }}-smartwal-corrupt/basic-app /mnt/smb/work/share/g15d-k8s/{{ run_id }}-smartwal-corrupt/corrupt /mnt/smb/work/share/g15d-k8s/{{ run_id }}-smartwal-corrupt/after-corrupt /mnt/smb/work/share/g15d-k8s/{{ run_id }}-smartwal-corrupt/cleanup"
+        cmd: "helm status {{ helm_release }} --namespace {{ helm_namespace }} >/dev/null 2>&1 && helm uninstall {{ helm_release }} --namespace {{ helm_namespace }} --wait --timeout 180s || true; kubectl -n default delete pod sw-block-example-reader sw-block-example-writer --ignore-not-found=true --wait=true --timeout=120s; kubectl -n default delete pvc sw-block-example-pvc --ignore-not-found=true --wait=true --timeout=120s; kubectl delete storageclass sw-block-example --ignore-not-found=true --wait=true --timeout=120s; kubectl delete clusterrole/sw-block-csi clusterrolebinding/sw-block-csi --ignore-not-found=true; sudo -n iscsiadm -m node 2>/dev/null | awk '/io.seaweedfs/ {print $1, $2}' | while read portal target; do sudo -n iscsiadm -m node -T \"$target\" -p \"$portal\" -o delete || true; done; sudo -n rm -rf /var/lib/sw-block/testops-{{ run_id }}-smartwal-corrupt; rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-smartwal-corrupt && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-smartwal-corrupt/bin /mnt/smb/work/share/g15d-k8s/{{ run_id }}-smartwal-corrupt/values /mnt/smb/work/share/g15d-k8s/{{ run_id }}-smartwal-corrupt/install /mnt/smb/work/share/g15d-k8s/{{ run_id }}-smartwal-corrupt/basic-app /mnt/smb/work/share/g15d-k8s/{{ run_id }}-smartwal-corrupt/corrupt /mnt/smb/work/share/g15d-k8s/{{ run_id }}-smartwal-corrupt/after-corrupt /mnt/smb/work/share/g15d-k8s/{{ run_id }}-smartwal-corrupt/cleanup"
         env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
       - action: assert_no_active_iscsi_sessions
         node: m02
@@ -84,18 +83,28 @@ phases:
             --target-node {{ single_node }} \
             --node-limit 1 \
             --restart-persistence hostpath \
-            --state-hostpath {{ state_hostpath }} > "$out/generate.stdout.txt"
+            --state-hostpath /var/lib/sw-block/testops-{{ run_id }}-smartwal-corrupt > "$out/generate.stdout.txt"
           python3 - "$out/values.smartwal.yaml" <<'PY'
           import sys
           from pathlib import Path
           path = Path(sys.argv[1])
-          text = path.read_text(encoding="utf-8")
-          marker = "  stateHostPath:"
-          if "  durableImpl:" not in text:
-              text = text.replace(marker, "  durableImpl: smartwal\n" + marker, 1)
-          else:
-              text = text.replace("  durableImpl: walstore", "  durableImpl: smartwal")
-          path.write_text(text, encoding="utf-8")
+          lines = path.read_text(encoding="utf-8").splitlines()
+          out = []
+          inserted = False
+          for line in lines:
+              stripped = line.strip()
+              if stripped.startswith("durableImpl:"):
+                  indent = line[: len(line) - len(line.lstrip())]
+                  out.append(f"{indent}durableImpl: smartwal")
+                  inserted = True
+                  continue
+              out.append(line)
+              if not inserted and line.rstrip() == "blockmaster:":
+                  out.append("    durableImpl: smartwal")
+                  inserted = True
+          if not inserted:
+              raise SystemExit("blockmaster block not found; cannot set durableImpl")
+          path.write_text("\n".join(out) + "\n", encoding="utf-8")
           PY
         env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
       - action: grep_log
@@ -160,26 +169,44 @@ phases:
           test -n "$vol"
           deploy=$(kubectl -n default get deploy -l app=sw-blockvolume,sw-block.seaweedfs.com/volume="$vol" -o jsonpath='{.items[0].metadata.name}')
           test -n "$deploy"
-          store="{{ state_hostpath }}/${vol}/r1/${vol}.bin"
+          store="/var/lib/sw-block/testops-{{ run_id }}-smartwal-corrupt/${vol}/r1/${vol}.bin"
           echo "volume_id=$vol" > "$out/corrupt-context.txt"
           echo "deployment=$deploy" >> "$out/corrupt-context.txt"
           echo "store=$store" >> "$out/corrupt-context.txt"
           test -f "$store"
           kubectl -n default delete pod sw-block-example-reader sw-block-example-writer --ignore-not-found=true --wait=true --timeout=120s
-          kubectl -n {{ helm_namespace }} scale deploy/sw-blockmaster --replicas=0
-          kubectl -n {{ helm_namespace }} wait --for=delete pod -l app=sw-blockmaster --timeout=180s
-          kubectl -n default delete "deploy/$deploy" --wait=true --timeout=180s
-          /mnt/smb/work/share/g15d-k8s/{{ run_id }}-smartwal-corrupt/bin/sw-block-testutil smartwal-corrupt-latest-record --path "$store" --out "$out" > "$out/smartwal-corruption.stdout.txt" 2> "$out/smartwal-corruption.stderr.txt"
-          kubectl -n {{ helm_namespace }} scale deploy/sw-blockmaster --replicas=1
-          kubectl -n {{ helm_namespace }} rollout status deploy/sw-blockmaster --timeout=300s > "$out/wait-blockmaster-after-corrupt.txt"
+          kubectl -n default scale "deploy/$deploy" --replicas=0
+          for i in $(seq 1 120); do
+            pods=$(kubectl -n default get pod -l sw-block.seaweedfs.com/volume="$vol" -o name 2>/dev/null | wc -l | tr -d ' ')
+            test "$pods" = "0" && break
+            sleep 1
+          done
+          pods=$(kubectl -n default get pod -l sw-block.seaweedfs.com/volume="$vol" -o name 2>/dev/null | wc -l | tr -d ' ')
+          echo "pods_after_scale_zero=$pods" >> "$out/corrupt-context.txt"
+          test "$pods" = "0"
+          sudo -n /mnt/smb/work/share/g15d-k8s/{{ run_id }}-smartwal-corrupt/bin/sw-block-testutil smartwal-corrupt-latest-record --path "$store" --out "$out" > "$out/smartwal-corruption.stdout.txt" 2> "$out/smartwal-corruption.stderr.txt"
+          kubectl -n default scale "deploy/$deploy" --replicas=1
+          deployment_restarted=false
+          deployment_rollout_ready=false
           for i in $(seq 1 180); do
-            if kubectl -n default get deploy "$deploy" >/dev/null 2>&1; then
-              kubectl -n default rollout status "deploy/$deploy" --timeout=10s >/dev/null 2>&1 && break
+            if kubectl -n default get pod -l sw-block.seaweedfs.com/volume="$vol" -o name 2>/dev/null | grep -q .; then
+              deployment_restarted=true
+            fi
+            ready=$(kubectl -n default get "deploy/$deploy" -o jsonpath='{.status.readyReplicas}' 2>/dev/null || true)
+            if test "$ready" = "1"; then
+              deployment_rollout_ready=true
+              break
             fi
             sleep 1
           done
+          echo "deployment_restarted=$deployment_restarted" >> "$out/corrupt-context.txt"
+          echo "deployment_rollout_ready=$deployment_rollout_ready" >> "$out/corrupt-context.txt"
+          test "$deployment_restarted" = "true"
+          kubectl -n default rollout status "deploy/$deploy" --timeout=5s > "$out/wait-blockvolume-after-corrupt.txt" 2>&1 || true
           kubectl -n default get pods,deploy,pvc,pv -o wide > "$out/default.after-corrupt.txt"
           kubectl -n {{ helm_namespace }} get pods,deploy,svc -o wide > "$out/kube-system.after-corrupt.txt"
+          kubectl -n default describe "deploy/$deploy" > "$out/blockvolume-deploy.describe.txt" 2>&1 || true
+          kubectl -n default logs -l sw-block.seaweedfs.com/volume="$vol" --all-containers --tail=200 > "$out/blockvolume-pods.log" 2>&1 || true
         env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
       - action: grep_log
         node: m02
@@ -269,7 +296,7 @@ phases:
       - action: exec
         node: m02
         timeout: 8m
-        cmd: "mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-smartwal-corrupt/cleanup/diagnostics; kubectl -n {{ helm_namespace }} get pods,deploy,ds,svc -o wide > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-smartwal-corrupt/cleanup/diagnostics/kube-system.before-cleanup.txt 2>&1 || true; kubectl -n default get pods,deploy,pvc,pv -o wide > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-smartwal-corrupt/cleanup/diagnostics/default.before-cleanup.txt 2>&1 || true; helm status {{ helm_release }} --namespace {{ helm_namespace }} >/dev/null 2>&1 && helm uninstall {{ helm_release }} --namespace {{ helm_namespace }} --wait --timeout 300s > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-smartwal-corrupt/cleanup/helm-uninstall.txt || true; kubectl -n default delete pod sw-block-example-reader sw-block-example-writer --ignore-not-found=true --wait=true --timeout=120s; kubectl -n default delete pvc sw-block-example-pvc --ignore-not-found=true --wait=true --timeout=120s; kubectl delete storageclass sw-block-example --ignore-not-found=true --wait=true --timeout=120s; sudo -n iscsiadm -m node 2>/dev/null | awk '/io.seaweedfs/ {print $1, $2}' | while read portal target; do sudo -n iscsiadm -m node -T \"$target\" -p \"$portal\" -o delete || true; done; sudo -n rm -rf {{ state_hostpath }}; cd {{ product_root }} && bash scripts/verify-helm-cleanup.sh"
+        cmd: "mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-smartwal-corrupt/cleanup/diagnostics; kubectl -n {{ helm_namespace }} get pods,deploy,ds,svc -o wide > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-smartwal-corrupt/cleanup/diagnostics/kube-system.before-cleanup.txt 2>&1 || true; kubectl -n default get pods,deploy,pvc,pv -o wide > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-smartwal-corrupt/cleanup/diagnostics/default.before-cleanup.txt 2>&1 || true; helm status {{ helm_release }} --namespace {{ helm_namespace }} >/dev/null 2>&1 && helm uninstall {{ helm_release }} --namespace {{ helm_namespace }} --wait --timeout 300s > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-smartwal-corrupt/cleanup/helm-uninstall.txt || true; kubectl -n default delete pod sw-block-example-reader sw-block-example-writer --ignore-not-found=true --wait=true --timeout=120s; kubectl -n default delete pvc sw-block-example-pvc --ignore-not-found=true --wait=true --timeout=120s; kubectl delete storageclass sw-block-example --ignore-not-found=true --wait=true --timeout=120s; sudo -n iscsiadm -m node 2>/dev/null | awk '/io.seaweedfs/ {print $1, $2}' | while read portal target; do sudo -n iscsiadm -m node -T \"$target\" -p \"$portal\" -o delete || true; done; sudo -n rm -rf /var/lib/sw-block/testops-{{ run_id }}-smartwal-corrupt; cd {{ product_root }} && bash scripts/verify-helm-cleanup.sh"
         env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
         env.SW_BLOCK_ARTIFACT_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-smartwal-corrupt/cleanup/verify"
         env.SW_BLOCK_HELM_RELEASE: "{{ helm_release }}"
