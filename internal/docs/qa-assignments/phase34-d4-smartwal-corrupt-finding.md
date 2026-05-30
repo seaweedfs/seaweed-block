@@ -11,6 +11,7 @@ Date: 2026-05-29
 Source commit under test: `03fe9ae testops: keep smartwal corruption gate scoped to volume`
 QA run: `20260529-232752-b23c`
 Scenario: `testops/scenarios/helm-smartwal-corrupt-restart-chain.yaml`
+Tracking issue: https://github.com/seaweedfs/seaweed-block/issues/51
 
 This supersedes the orchestration blocker (issue 4) in
 `phase34-d4-smartwal-corrupt-qa-status.md`. Dev's rewrite (scale only the
