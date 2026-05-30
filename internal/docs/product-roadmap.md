@@ -38,6 +38,11 @@ This is the short internal roadmap. Keep it current and readable.
   from happy-path gates to negative paths: blocked/stale/unreachable status
   surfaces, support-bundle replay under corrupt/partial evidence, failed-run
   cleanup, and multi-volume interference checks.
+- Next hardening candidate: Test realism and anti self-proving gates. Upgrade
+  selected replay or summary-grep checks into independent live/dirty-failure
+  evidence: live status endpoint unreachable, restart convergence, corrupt WAL
+  refusal, and targeted cross-validation between helper summaries and product
+  or Kubernetes facts.
 - `v0.4-beta-candidate`: Operator lifecycle. Add a Kubernetes-native control
   plane with CRDs/Conditions/Events for install, node eligibility, volume
   lifecycle, recovery observation, safe cleanup, and eventually gated repair or
@@ -339,9 +344,11 @@ credible light-use product:
 - Current next-release focus: Phase 33 TestOps failure hardening. The runner and
   helpers must exercise negative paths, collect useful failure snapshots, assert
   no false Ready states, and prove cleanup/replay behavior after failed runs.
-- Next after Phase 33: add simple shared-drive control data for active runs,
-  history, locks, artifact pointers, commits, target nodes, and stale-run
-  detection.
+- Next after Phase 33: Phase 34 test realism. Reduce self-proving gates by
+  adding independent cross-checks, live status-endpoint-unreachable injection,
+  restart convergence assertions, and one dirty storage failure such as corrupt
+  WAL. Shared-drive control data for active runs remains the next TestOps
+  control-plane step after the realism pass.
 - Later: scenario library indexing, queueing, remote agents on lab nodes,
   matrix scheduling, hosted validation, and discovery-agent ingestion.
 
