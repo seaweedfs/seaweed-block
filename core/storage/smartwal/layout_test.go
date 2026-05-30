@@ -88,3 +88,53 @@ func TestInspectLayoutRejectsTruncatedFile(t *testing.T) {
 		t.Fatal("InspectLayout should reject truncated SmartWAL files")
 	}
 }
+
+func TestInspectRecordsFindsLatestValidRecord(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "store.sw")
+	s, err := CreateStoreWithSlots(path, 8, 4096, 8)
+	if err != nil {
+		t.Fatalf("CreateStoreWithSlots: %v", err)
+	}
+	for i := uint32(0); i < 3; i++ {
+		data := make([]byte, 4096)
+		data[0] = byte(i + 1)
+		if _, err := s.Write(i, data); err != nil {
+			t.Fatalf("Write: %v", err)
+		}
+	}
+	if _, err := s.Sync(); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	layout, records, err := InspectRecords(path)
+	if err != nil {
+		t.Fatalf("InspectRecords: %v", err)
+	}
+	if len(records) != 3 {
+		t.Fatalf("records=%d want 3", len(records))
+	}
+	for i, rec := range records {
+		wantLSN := uint64(i + 1)
+		if rec.LSN != wantLSN {
+			t.Fatalf("record[%d].LSN=%d want %d", i, rec.LSN, wantLSN)
+		}
+		if !layout.ContainsWALOffset(rec.Offset) {
+			t.Fatalf("record[%d] offset %d should be inside WAL", i, rec.Offset)
+		}
+		if rec.BytesHex == "" {
+			t.Fatalf("record[%d] missing byte sample", i)
+		}
+	}
+
+	_, latest, err := LatestRecord(path)
+	if err != nil {
+		t.Fatalf("LatestRecord: %v", err)
+	}
+	if latest.LSN != 3 || latest.LBA != 2 {
+		t.Fatalf("latest=%+v want LSN=3 LBA=2", latest)
+	}
+}

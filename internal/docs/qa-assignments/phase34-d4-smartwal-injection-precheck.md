@@ -2,7 +2,8 @@
 
 Date: 2026-05-29
 
-Status: PASS for layout contract; D4 dirty-failure scenario remains pending.
+Status: PASS for layout + mutation-tool contract; D4 dirty-failure scenario
+remains pending.
 
 ## Why this precheck exists
 
@@ -37,6 +38,21 @@ core/storage/smartwal/layout.go
 core/storage/smartwal/layout_test.go
 ```
 
+Added an explicit TestOps-only mutation utility:
+
+```text
+cmd/sw-block-testutil smartwal-corrupt-latest-record --path <store.bin> --out <dir>
+```
+
+This utility is deliberately not part of `sw-block ops`; the user-facing ops
+surface stays read-only. The utility:
+
+- parses the SmartWAL layout from the header,
+- selects the highest-LSN valid WAL record,
+- flips the last byte of that record's CRC,
+- fsyncs the file,
+- writes `smartwal-corruption-evidence.txt`.
+
 The inspector returns:
 
 ```text
@@ -63,13 +79,14 @@ whether an offset is inside the WAL ring or extent region.
 Command:
 
 ```text
-go test ./core/storage/smartwal
+go test ./core/storage/smartwal ./cmd/sw-block-testutil
 ```
 
 Result:
 
 ```text
 ok github.com/seaweedfs/seaweed-block/core/storage/smartwal
+ok github.com/seaweedfs/seaweed-block/cmd/sw-block-testutil
 ```
 
 Tests prove:
@@ -79,6 +96,8 @@ Tests prove:
 - Record offset uses `slot = lsn % walSlots`.
 - Non-SmartWAL files are rejected.
 - Truncated SmartWAL files are rejected.
+- The mutation utility writes evidence, flips a real record CRC byte, and the
+  corrupted record no longer decodes as valid.
 
 ## D4 gate rule
 
@@ -96,6 +115,7 @@ target_offset_inside_wal=true
 target_offset_inside_extent=false
 before_bytes=<sample>
 after_bytes=<sample>
+mutation=flip_last_record_crc_byte
 restart_persistence=hostpath
 ```
 

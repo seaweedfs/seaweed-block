@@ -188,6 +188,8 @@ Precheck artifact:
 - `internal/docs/qa-assignments/phase34-d4-smartwal-injection-precheck.md`
 - `core/storage/smartwal.InspectLayout` is the required read-only layout
   contract for future D4 injection code.
+- `cmd/sw-block-testutil smartwal-corrupt-latest-record` is the TestOps-only
+  mutation utility; do not put mutating corruption under `sw-block ops`.
 
 Scenario shape:
 
