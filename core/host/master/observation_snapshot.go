@@ -120,6 +120,39 @@ func (h *Host) observationVolume(volumeID string, rec lifecycle.VolumeRecord, pl
 		volume.PublishTarget = publishTargetForReplica(replicas, volume.PrimaryReplica)
 	}
 
+	if volume.PrimaryReplica != "" {
+		primary, ok := replicaEvidenceByID(replicas, volume.PrimaryReplica)
+		if !ok || !primary.Observed {
+			if volume.Status == ops.ObservationStatusOK {
+				volume.Status = ops.ObservationStatusDegraded
+				volume.Reason = ops.ReasonStatusEndpointUnreachable
+			}
+			volume.Conditions = append(volume.Conditions, ops.ObservationCondition{
+				Type:     "PrimaryReady",
+				Status:   "false",
+				Reason:   ops.ReasonStatusEndpointUnreachable,
+				Severity: "warning",
+				Message:  "published primary has no fresh readiness observation",
+			})
+		} else if !primary.CandidateReady {
+			reason := primary.CandidateReadyReason
+			if reason == "" {
+				reason = ops.ReasonNoPromotionReadyCandidate
+			}
+			if volume.Status == ops.ObservationStatusOK {
+				volume.Status = ops.ObservationStatusDegraded
+				volume.Reason = reason
+			}
+			volume.Conditions = append(volume.Conditions, ops.ObservationCondition{
+				Type:     "PrimaryReady",
+				Status:   "false",
+				Reason:   reason,
+				Severity: "warning",
+				Message:  "published primary has not confirmed local readiness",
+			})
+		}
+	}
+
 	if volume.DesiredReplicas > 0 && volume.ObservedReplicas < volume.DesiredReplicas {
 		volume.Status = ops.ObservationStatusDegraded
 		volume.Reason = ops.ReasonObservedReplicasBelowDesired
@@ -284,6 +317,15 @@ func publishTargetForReplica(replicas []ops.ReplicaEvidence, replicaID string) s
 		}
 	}
 	return ""
+}
+
+func replicaEvidenceByID(replicas []ops.ReplicaEvidence, replicaID string) (ops.ReplicaEvidence, bool) {
+	for _, replica := range replicas {
+		if replica.ReplicaID == replicaID {
+			return replica, true
+		}
+	}
+	return ops.ReplicaEvidence{}, false
 }
 
 func candidateReason(ready bool) string {
