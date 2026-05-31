@@ -412,6 +412,9 @@ func run(f flags) int {
 		fmt.Fprintln(os.Stderr, "blockvolume:", err)
 		return 1
 	}
+	if f.durableRoot != "" {
+		h.BlockLocalReadiness("awaiting durable recovery")
+	}
 	h.Start()
 
 	var status *volume.StatusServer
@@ -495,8 +498,11 @@ func run(f flags) int {
 		recCancel()
 		if recErr != nil {
 			fmt.Fprintln(os.Stderr, "blockvolume: durable recovery failed:", report.Evidence)
+			h.BlockLocalReadiness(report.Evidence)
+			return waitFaultedDurableRecovery(h, status, durableProv, report.Evidence)
 		} else {
 			fmt.Fprintln(os.Stderr, "blockvolume: durable recovered:", report.Evidence)
+			h.ClearLocalReadinessBlock()
 		}
 	} else {
 		// memback fallback — wraps the volume's AdapterProjectionView
@@ -910,6 +916,28 @@ func run(f flags) int {
 	// T3b: close DurableProvider in correct order — Provider.Close
 	// closes backends first (flags them closed) then storage files
 	// (releases fd + final fsync).
+	if durableProv != nil {
+		_ = durableProv.Close()
+	}
+	if status != nil {
+		shutCtx, shutCancel := context.WithTimeout(context.Background(), 2*time.Second)
+		_ = status.Close(shutCtx)
+		shutCancel()
+	}
+	if err := h.Close(); err != nil {
+		fmt.Fprintln(os.Stderr, "blockvolume: close:", err)
+		return 1
+	}
+	return 0
+}
+
+func waitFaultedDurableRecovery(h *volume.Host, status *volume.StatusServer, durableProv *durable.DurableProvider, evidence string) int {
+	fmt.Fprintln(os.Stderr, "blockvolume: durable recovery faulted; status endpoint remains available and local readiness remains blocked:", evidence)
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+	<-sig
+	signal.Stop(sig)
+
 	if durableProv != nil {
 		_ = durableProv.Close()
 	}
