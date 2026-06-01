@@ -83,3 +83,39 @@ func TestProjectManagedVolumeFromEvidence_ImagePullBlocked(t *testing.T) {
 		t.Fatalf("missing import action: %+v", projection.Actions)
 	}
 }
+
+func TestProjectManagedVolumeFromEvidence_PrimaryReadinessBlockIsNotReady(t *testing.T) {
+	projection := ProjectManagedVolumeFromEvidence(VolumeEvidence{
+		VolumeID:       "pvc-corrupt",
+		Namespace:      "default",
+		PVCName:        "demo-pvc",
+		PVName:         "pvc-corrupt",
+		Status:         ObservationStatusDegraded,
+		Reason:         ReasonNoPromotionReadyCandidate,
+		PrimaryReplica: "r1",
+		PublishTarget:  "192.168.1.184:3260",
+		Replicas: []ReplicaEvidence{{
+			ReplicaID:            "r1",
+			KubernetesNode:       "m02",
+			Observed:             true,
+			Role:                 "primary",
+			CandidateReady:       false,
+			CandidateReadyReason: ReasonNoPromotionReadyCandidate,
+			FrontendAddr:         "192.168.1.184:3260",
+		}},
+		Conditions: []ObservationCondition{{
+			Type:     "PrimaryReady",
+			Status:   "false",
+			Reason:   ReasonNoPromotionReadyCandidate,
+			Severity: "warning",
+		}},
+	})
+
+	if projection.Status == ManagedVolumeStatusReady {
+		t.Fatalf("primary readiness block projected Ready: %+v", projection)
+	}
+	ready := findObservationCondition(projection.Conditions, "Ready")
+	if ready != nil && ready.Status == "True" {
+		t.Fatalf("primary readiness block emitted Ready=True: %+v", projection.Conditions)
+	}
+}
