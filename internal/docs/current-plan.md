@@ -1,6 +1,6 @@
 # Current Plan: Phase 34 - Test Realism And Dirty-Failure Hardening
 
-Status: active, 85% complete. Started on 2026-05-29.
+Status: active, 95% complete. Started on 2026-05-29.
 
 Branch: `phase33-testops-failure-hardening`
 
@@ -103,7 +103,7 @@ cleanup_status=ok
 Goal: prove a real SmartWAL corruption is detected through the product surface
 and never becomes false Ready=True.
 
-Status: active; product fix chain landed, strict QA rerun pending.
+Status: PASS on 2026-06-01.
 
 Current code chain:
 
@@ -121,12 +121,13 @@ Artifacts:
 - `internal/docs/qa-assignments/phase34-d4-smartwal-corrupt-finding.md`
 - `internal/docs/qa-assignments/phase34-d4-smartwal-corrupt-verify.md`
 - `internal/docs/qa-assignments/phase34-d4-smartwal-corrupt-verify2.md`
+- `internal/docs/qa-assignments/phase34-d4-smartwal-corrupt-verify3-PASS.md`
 
-Required QA rerun:
+Passing QA rerun:
 
 ```text
 testops/scenarios/helm-smartwal-corrupt-restart-chain.yaml
-source commit: 7fa34a7 or newer on phase33-testops-failure-hardening
+run 20260601-020747-5a1f, 30/30 PASS
 ```
 
 Acceptance:
@@ -150,6 +151,12 @@ Status: planned after D4.
 
 Candidates:
 
+- Surface the specific `wal_integrity_fault` reason through status evidence so
+  cold operators do not need blockvolume logs to understand why a corrupted
+  volume is Unknown.
+- Preserve deterministic scheduling in future single-node dirty-failure gates:
+  the D4 SmartWAL scenario now pins blockmaster to the scenario's `single_node`
+  so stale local images on other lab nodes cannot affect the run.
 - Cross-check selected helper summary counts against independent Kubernetes or
   product evidence.
 - Add timeline noise sanity for repeated identical `placement_verified` events.
@@ -202,15 +209,16 @@ finished plan moved under internal/docs/finished-plans/
 - 83%: master projection now requires positive primary readiness evidence.
 - 85%: ManagedVolume projection regression test added; strict D4 QA rerun is
   pending.
+- 92%: D4 strict rerun `20260601-020747-5a1f` passed 30/30. SmartWAL
+  corruption now projects `Ready=Unknown` instead of false `Ready=True`.
+- 95%: D4 scenario non-determinism fixed by pinning blockmaster to the
+  scenario's `single_node`; D6 close report remains.
 
 ## Next Step
 
-Ask QA to rerun:
+Write the Phase 34 D6 close report and release wording. The D4 product gate is
+closed, with one product follow-up:
 
 ```text
-testops/scenarios/helm-smartwal-corrupt-restart-chain.yaml
+surface reason=wal_integrity_fault instead of generic unknown
 ```
-
-against commit `7fa34a7` or newer. If it passes, write the Phase 34 D4 sign-off
-and close D6. If it still reports Ready=True, treat the new evidence as the next
-control-plane/status-surface blocker, not as a test flake.

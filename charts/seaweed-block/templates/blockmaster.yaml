@@ -26,6 +26,10 @@ spec:
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet
       serviceAccountName: {{ include "seaweed-block.fullname" . }}-master
+      {{- with .Values.blockmaster.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       {{- if .Values.blockmaster.stateHostPath }}
       initContainers:
         - name: state-permissions

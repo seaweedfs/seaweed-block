@@ -43,8 +43,8 @@ This is the short internal roadmap. Keep it current and readable.
   Upgrade selected replay or summary-grep checks into independent live/dirty
   evidence: live status endpoint unreachable, restart convergence, SmartWAL
   corruption refusal, and targeted cross-validation between helper summaries
-  and product or Kubernetes facts. The current blocking gate is D4 SmartWAL
-  corruption: after corruption, no status surface may claim `Ready=True`.
+  and product or Kubernetes facts. D4 SmartWAL corruption now passes the core
+  no-false-Ready contract; D6 close and release wording are next.
 - `v0.4-beta-candidate`: Operator lifecycle. Add a Kubernetes-native control
   plane with CRDs/Conditions/Events for install, node eligibility, volume
   lifecycle, recovery observation, safe cleanup, and eventually gated repair or
@@ -349,8 +349,9 @@ credible light-use product:
 - Current next-release focus: Phase 34 test realism. Reduce self-proving gates
   by adding independent cross-checks, live status-endpoint-unreachable
   injection, restart convergence assertions, and one dirty storage failure:
-  SmartWAL corruption. The active D4 gate is release-relevant because it checks
-  whether dirty storage evidence can still leak through as false `Ready=True`.
+  SmartWAL corruption. The D4 gate is release-relevant because it checks
+  whether dirty storage evidence can still leak through as false `Ready=True`;
+  it now passes on the core contract and is ready for Phase 34 closeout.
 - Later: shared-drive control data for active runs, scenario library indexing,
   queueing, remote agents on lab nodes, matrix scheduling, hosted validation,
   and discovery-agent ingestion.
@@ -367,9 +368,8 @@ credible light-use product:
 
 - Active work should be tracked in `internal/docs/current-plan.md`.
 - Current active work is Phase 34: test realism and dirty-failure hardening.
-  The immediate execution gate is
-  `testops/scenarios/helm-smartwal-corrupt-restart-chain.yaml` against
-  `7fa34a7` or newer.
+  The immediate execution step is the D6 close report and release wording after
+  D4 SmartWAL corruption passed in run `20260601-020747-5a1f`.
 - When the current plan closes, move it to `internal/docs/finished-plans/`
   with a phase/topic filename such as
   `phase1_finishedplan_frontend_protocol_readiness.md`.

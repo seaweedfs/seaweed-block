@@ -28,6 +28,7 @@ appNamespace: default
 
 blockmaster:
   replicas: 1
+  nodeSelector: {}
   serviceName: blockmaster
   listenPort: 9333
   authorityStore: /var/lib/sw-block/authority

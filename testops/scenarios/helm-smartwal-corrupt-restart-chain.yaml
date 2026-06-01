@@ -101,6 +101,8 @@ phases:
               out.append(line)
               if not inserted and line.rstrip() == "blockmaster:":
                   out.append("    durableImpl: smartwal")
+                  out.append("    nodeSelector:")
+                  out.append("      kubernetes.io/hostname: {{ single_node }}")
                   inserted = True
           if not inserted:
               raise SystemExit("blockmaster block not found; cannot set durableImpl")

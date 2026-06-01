@@ -196,12 +196,13 @@ Current state:
 - Phase 33 failure hardening is closed.
 - Phase 34 is active under `internal/docs/current-plan.md`.
 - D2 live status-endpoint-unreachable and D3 restart convergence are validated.
-- D4 SmartWAL corruption is the current release-relevant gate. It found a real
-  false Ready risk and has driven fixes through storage, blockvolume readiness,
-  master projection, and ManagedVolume projection tests.
-- QA still needs to rerun
-  `testops/scenarios/helm-smartwal-corrupt-restart-chain.yaml` against
-  `7fa34a7` or newer.
+- D4 SmartWAL corruption is validated for the core release-relevant contract:
+  after real WAL corruption, the product no longer reports false `Ready=True`.
+  The run `20260601-020747-5a1f` passed 30/30 after fixes through storage,
+  blockvolume readiness, master projection, and ManagedVolume projection tests.
+- The remaining Phase 34 work is closeout and release wording. A product
+  follow-up remains to surface the specific `wal_integrity_fault` reason rather
+  than generic `unknown`.
 
 After Phase 34 closes, the next product decision is whether to cut the next
 alpha hardening release or start the next larger loop: productized operator
