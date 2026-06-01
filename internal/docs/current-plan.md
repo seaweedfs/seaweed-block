@@ -1,215 +1,216 @@
-# Current Plan: Phase 33 - TestOps Failure Hardening
+# Current Plan: Phase 34 - Test Realism And Dirty-Failure Hardening
 
-Status: complete, 100% complete. Started on 2026-05-27. Closed on 2026-05-29.
+Status: active, 85% complete. Started on 2026-05-29.
 
 Branch: `phase33-testops-failure-hardening`
 
 Base release: PR #50 / merge `8102cf3` (`v0.3.4-alpha` release baseline).
+Phase 33 is closed in
+`internal/docs/finished-plans/phase33_finishedplan_testops_failure_hardening.md`;
+this file tracks the next realism pass on the same hardening branch.
 
 ## Product Goal
 
-Increase release confidence by proving Seaweed Block behaves correctly when
-things fail, not only when the happy path works.
+Raise release confidence by replacing self-proving or replay-only checks with
+independent live evidence for the failure modes that most affect user trust.
 
-The user-facing rule for this phase:
+User-facing rule:
 
 ```text
-If the product cannot prove a volume is ready, it must not claim Ready=True.
-It must surface a stable reason, collect useful evidence, and clean up
-deterministically.
+If Seaweed Block cannot positively prove a volume is safe and ready, it must not
+claim Ready=True. Dirty storage faults, stale evidence, and unreachable status
+paths must become explicit non-ready states with useful evidence.
 ```
 
 ## Scope Contract
 
 | In | Out |
 |---|---|
-| negative/failure TestOps scenarios | new HA feature claims |
-| failure snapshot and support-bundle quality | rebuild/failback implementation |
-| runner/helper primitives that reduce shell flake | NVMe ANA expansion |
-| cleanup and residue assertions after failed runs | mutating operator/admin actions |
-| stale/blocked/unreachable status-surface agreement | protocol/model rewrite |
-| release note / roadmap claim alignment | production SLO/performance claims |
+| live negative-status injection | new HA claims |
+| restart convergence checks | rebuild/failback implementation |
+| dirty SmartWAL corruption gate | NVMe ANA expansion |
+| cross-checks between helper summaries and product/K8s facts | mutating operator/admin actions |
+| cleanup after dirty-failure runs | production SLO/performance claims |
+| narrow product fixes exposed by realism gates | broad control-plane rewrite |
 
-Small product fixes are allowed only when a failure gate exposes a release-risk
+Small product fixes are allowed only when a realism gate exposes a release-risk
 bug. Avoid broad refactors.
 
-## D1: Failure Matrix And Plan
+## D1: Self-Proof Audit
 
-Goal: convert existing failure ideas into a small executable matrix.
+Goal: identify checks that only grep helper-written summary fields and do not
+independently prove product behavior.
 
-Status: PASS on 2026-05-27.
+Status: PASS.
 
-Artifact:
+Artifacts:
 
-- `internal/docs/qa-assignments/phase33-failure-matrix.md`
-
-Deliverables:
-
-- Inventory 5-8 high-value failure classes from existing design docs,
-  TestOps scenarios, and recent QA blockers.
-- For each class, define:
-  - trigger,
-  - expected status,
-  - stable reason code,
-  - evidence files,
-  - cleanup assertions,
-  - whether it is release-blocking or exploratory.
-
-Initial candidates:
-
-- CSI image pull failure.
-- blockmaster/API unreachable.
-- stale evidence / stale bundle replay.
-- corrupt or partial support-bundle evidence.
-- cleanup residue after failed run.
-- multi-volume cross-interference.
-- restart during recovery or shortly after promotion.
-- loopback publish target in a cross-node mount path.
-
-Verify:
-
-```text
-matrix doc exists
-each scenario has explicit pass/fail assertions
-no broad HA claim added
-```
-
-## D2: Runner And Helper Hardening
-
-Goal: reduce shell gymnastics and make failed runs self-explaining.
-
-Status: in progress, failure snapshot helper and unreachable status projection
-landed.
-
-Artifact:
-
-- `scripts/collect-k8s-failure-snapshot.sh`
-- `core/ops/managed_volume_model.go`
-
-P0 items:
-
-- Add or standardize failure snapshot capture.
-- Add runner/helper wait for JSONPath-style conditions where existing actions
-  cannot express PVC/Job/phase checks.
-- Add deterministic Helm install/uninstall wrappers or scenario helpers.
-- Add no-residue checks for iSCSI sessions, iSCSI node DB, multipath, dmsetup,
-  Kubernetes resources, and product processes.
-
-Verify:
-
-```text
-new/updated helper tests pass
-existing happy-path gates still parse and run
-failure artifacts are produced even when the trigger blocks progress
-```
-
-## D3: Negative Status Gates
-
-Goal: prove blocked states do not become false Ready states.
-
-Required surfaces for each negative gate:
-
-- `summary.txt`
-- `cluster-evidence.json`
-- `operator-snapshot.json`
-- dashboard `/operator-snapshot.json`
-- `sw-block ops explain`
-
-Required assertions:
-
-- `Ready=True` is absent unless evidence proves readiness.
-- blocked/stale/unavailable condition is present.
-- reason code is stable and identical across surfaces.
-- suggested actions are `read_only` or `dry_run`; no mutation is implied.
-
-Verify:
-
-```text
-negative scenarios PASS
-surface agreement table is produced
-no false Ready=True in blocked/stale paths
-```
-
-## D4: Cleanup And Replay Gates
-
-Goal: failed runs must still clean up and replay correctly.
-
-Required assertions:
-
-- Cleanup verifier returns `cleanup_status=ok` after scenario cleanup.
-- Residue counters are zero across k8s, iSCSI session, iSCSI node DB,
-  multipath, dmsetup, process, and test hostPath dimensions.
-- Bundle replay prefers newest valid evidence and skips corrupt candidates.
-- If evidence is stale or insufficient, replay returns `Ready=Unknown`, not
-  `Ready=True`.
-
-Verify:
-
-```text
-cleanup-residue gate PASS after negative scenarios
-bundle replay gate PASS for corrupt/partial evidence
-dashboard/report/explain agree after replay
-```
-
-## D5: Release Close
-
-Goal: produce a compact release-hardening addendum.
-
-Required inputs:
-
-- Minimal new-user validation from `main` release baseline or this phase branch.
-- Negative failure matrix PASS.
-- Cleanup/replay gates PASS.
-- No docs claim new product features beyond tested scope.
-
-Close artifacts:
-
-- QA sign-off under `internal/docs/qa-assignments/`.
-- Finished plan under `internal/docs/finished-plans/`.
-- Release note addendum if this becomes `v0.3.5-alpha`.
+- `internal/docs/qa-assignments/phase34-self-proof-audit.md`
+- `internal/docs/qa-assignments/phase34-test-realism-plan.md`
 
 Acceptance:
 
 ```text
-Phase 33 negative matrix PASS
-minimal new-user validation PASS
-cleanup/replay gates PASS
-release claims updated or explicitly unchanged
+high-risk self-proof patterns are listed
+each selected upgrade names the live signal that replaces or cross-checks it
+scope avoids broad chaos matrix work
+```
+
+## D2: Live Status-Endpoint-Unreachable Gate
+
+Goal: prove a live status collection failure becomes Unknown/EvidenceStale, not
+Ready and not Blocked.
+
+Status: PASS.
+
+Artifact:
+
+- `internal/docs/qa-assignments/phase34-d2-live-status-endpoint-unreachable-signoff.md`
+
+Acceptance:
+
+```text
+status endpoint is blocked without killing the data path
+Ready=True is absent
+Blocked=True is absent for pure unreachable evidence
+reason=status_endpoint_unreachable is consistent across surfaces
+cleanup_status=ok
+```
+
+## D3: Restart Convergence Gate
+
+Goal: prove restart observations do not stop at a transient Unknown state; the
+status surface must eventually return to stable Ready when the volume is healthy.
+
+Status: PASS.
+
+Artifact:
+
+- `internal/docs/qa-assignments/phase34-d3-restart-convergence-signoff.md`
+
+Acceptance:
+
+```text
+restart may show transient Unknown
+final status reaches Ready=True reason=first_volume_verified
+Ready must be stable for consecutive polls, not a single flicker
+no false Blocked=True
+cleanup_status=ok
+```
+
+## D4: SmartWAL Dirty-Failure Gate
+
+Goal: prove a real SmartWAL corruption is detected through the product surface
+and never becomes false Ready=True.
+
+Status: active; product fix chain landed, strict QA rerun pending.
+
+Current code chain:
+
+- `85d9375` storage fails closed on SmartWAL CRC mismatch.
+- `954083a` blockvolume blocks local readiness after recovery fault while
+  keeping status service diagnosable.
+- `09aa6fe` master requires positive primary readiness evidence before
+  projecting the published primary as healthy.
+- `7fa34a7` ops projection test prevents ManagedVolume Ready projection without
+  primary readiness evidence.
+
+Artifacts:
+
+- `internal/docs/qa-assignments/phase34-d4-smartwal-injection-precheck.md`
+- `internal/docs/qa-assignments/phase34-d4-smartwal-corrupt-finding.md`
+- `internal/docs/qa-assignments/phase34-d4-smartwal-corrupt-verify.md`
+- `internal/docs/qa-assignments/phase34-d4-smartwal-corrupt-verify2.md`
+
+Required QA rerun:
+
+```text
+testops/scenarios/helm-smartwal-corrupt-restart-chain.yaml
+source commit: 7fa34a7 or newer on phase33-testops-failure-hardening
+```
+
+Acceptance:
+
+```text
+corruption evidence proves target_offset_inside_wal=true
+corruption evidence proves target_offset_inside_extent=false
+blockvolume logs a WAL integrity or durable recovery fault
+operator-snapshot/report/dashboard do not show Ready=True after corruption
+preferred: status is Blocked or Unknown with reason=wal_integrity_fault
+acceptable for this slice: non-ready generic reason, if no surface lies Ready
+cleanup_status=ok and all residue counters are zero
+```
+
+## D5: Cross-Validation And Noise Follow-Ups
+
+Goal: reduce remaining weak evidence patterns without expanding into broad
+chaos testing.
+
+Status: planned after D4.
+
+Candidates:
+
+- Cross-check selected helper summary counts against independent Kubernetes or
+  product evidence.
+- Add timeline noise sanity for repeated identical `placement_verified` events.
+- Decide whether one netem slow-replica gate is worth doing after D4 closes.
+
+Acceptance:
+
+```text
+only high-value weak checks are upgraded
+no RF/node-count permutation matrix
+no broad chaos primitive sweep
+```
+
+## D6: Close And Release Claim Alignment
+
+Goal: close Phase 34 and decide whether the result is part of `v0.3.5-alpha` or
+the next hardening release.
+
+Required inputs:
+
+- D1-D4 sign-offs.
+- D4 strict QA result after `7fa34a7`.
+- Cleanup residue proof for dirty-failure run.
+- Release wording that distinguishes:
+  - live negative-status proof,
+  - restart convergence proof,
+  - SmartWAL dirty-failure proof,
+  - remaining non-claims.
+
+Acceptance:
+
+```text
+no false Ready=True in D2/D3/D4 surfaces
+dirty-failure gate either passes or has an explicit product blocker
+roadmap and release notes do not overclaim
+finished plan moved under internal/docs/finished-plans/
 ```
 
 ## Current Progress
 
-- 5%: branch created from merged `main`.
-- 5%: `AGENTS.md` added to guide future agent behavior.
-- 10%: Phase 33 scope, D1-D5 gates, and roadmap pointers drafted.
-- 20%: D1 failure matrix drafted.
-- 30%: D2 failure snapshot helper and contract test added.
-- 35%: F1 support-bundle diagnostics gate wired to collect the failure
-  snapshot contract.
-- 45%: F2 status endpoint unreachable projection tightened to
-  `status=unknown reason=status_endpoint_unreachable`; replay tests prove no
-  false `Ready=True`.
-- 50%: F2 bundle replay/dashboard gate extended so report text,
-  operator-snapshot JSON, dashboard JSON, and explain text agree on
-  `status_endpoint_unreachable`.
-- 55%: F4 CLI replay gate added for `sw-block ops report --from-bundle`
-  skipping corrupt cluster evidence and using the newest valid snapshot.
-- 60%: F2 runner replay scenario added for status endpoint unreachable surface
-  agreement across report, explain, dashboard, and operator snapshot.
-- 65%: F5 cleanup verifier contract test added so all residue counters and
-  failure reason codes remain present across future cleanup edits.
-- 75%: F1 live negative support-bundle gate passed after helper fixes:
-  `20260528-190738-51a2`, 49/49 actions, support bundle and failure snapshot
-  both `ok`, cleanup residue zero.
-- 85%: D4 cleanup/replay gate consolidated:
-  `status-endpoint-unreachable-replay-chain.yaml` run `20260529-155016-e9a5`
-  PASS 17/17, `cleanup-residue-chain.yaml` run `20260529-155040-4519`
-  PASS 13/13, and F4 corrupt evidence replay remains covered by
-  `go test ./cmd/sw-block`.
-- 95%: Minimal new-user regression passed:
-  `helm-first-volume-via-sw-block-cli-chain.yaml` run `20260529-155216-0d9d`,
-  PASS 34/34.
-- 100%: Close report, finished plan, and `v0.3.5-alpha` release note drafted.
+- 10%: self-proof audit and realism plan drafted.
+- 25%: live status-endpoint-unreachable gate implemented and validated.
+- 40%: restart convergence gate implemented and validated.
+- 55%: V3-aware SmartWAL corruption injection precheck completed; old V2-style
+  corruption primitive rejected as unsafe/self-proving.
+- 65%: D4 live gate reached the real product assertion and found false
+  Ready=True after SmartWAL corruption.
+- 72%: storage layer changed from skip-on-CRC-mismatch to fail-closed.
+- 78%: blockvolume now blocks local readiness after durable recovery fault.
+- 83%: master projection now requires positive primary readiness evidence.
+- 85%: ManagedVolume projection regression test added; strict D4 QA rerun is
+  pending.
 
-Next step: review/merge Phase 33 branch, publish immutable images if cutting
-`v0.3.5-alpha`, then start the next feature/reliability phase.
+## Next Step
+
+Ask QA to rerun:
+
+```text
+testops/scenarios/helm-smartwal-corrupt-restart-chain.yaml
+```
+
+against commit `7fa34a7` or newer. If it passes, write the Phase 34 D4 sign-off
+and close D6. If it still reports Ready=True, treat the new evidence as the next
+control-plane/status-surface blocker, not as a test flake.

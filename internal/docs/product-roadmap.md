@@ -37,12 +37,14 @@ This is the short internal roadmap. Keep it current and readable.
 - `v0.3.5-alpha` candidate: TestOps failure hardening. Expand release proof
   from happy-path gates to negative paths: blocked/stale/unreachable status
   surfaces, support-bundle replay under corrupt/partial evidence, failed-run
-  cleanup, and multi-volume interference checks.
-- Next hardening candidate: Test realism and anti self-proving gates. Upgrade
-  selected replay or summary-grep checks into independent live/dirty-failure
-  evidence: live status endpoint unreachable, restart convergence, corrupt WAL
-  refusal, and targeted cross-validation between helper summaries and product
-  or Kubernetes facts.
+  cleanup, and multi-volume interference checks. Phase 33 closed this scope;
+  release packaging remains a separate decision.
+- Active hardening phase: Phase 34 test realism and anti self-proving gates.
+  Upgrade selected replay or summary-grep checks into independent live/dirty
+  evidence: live status endpoint unreachable, restart convergence, SmartWAL
+  corruption refusal, and targeted cross-validation between helper summaries
+  and product or Kubernetes facts. The current blocking gate is D4 SmartWAL
+  corruption: after corruption, no status surface may claim `Ready=True`.
 - `v0.4-beta-candidate`: Operator lifecycle. Add a Kubernetes-native control
   plane with CRDs/Conditions/Events for install, node eligibility, volume
   lifecycle, recovery observation, safe cleanup, and eventually gated repair or
@@ -341,16 +343,17 @@ credible light-use product:
 
 - Current: runner scenarios write result/status bundles, but M01/M02 shared lab
   ownership is still mostly implicit.
-- Current next-release focus: Phase 33 TestOps failure hardening. The runner and
-  helpers must exercise negative paths, collect useful failure snapshots, assert
-  no false Ready states, and prove cleanup/replay behavior after failed runs.
-- Next after Phase 33: Phase 34 test realism. Reduce self-proving gates by
-  adding independent cross-checks, live status-endpoint-unreachable injection,
-  restart convergence assertions, and one dirty storage failure such as corrupt
-  WAL. Shared-drive control data for active runs remains the next TestOps
-  control-plane step after the realism pass.
-- Later: scenario library indexing, queueing, remote agents on lab nodes,
-  matrix scheduling, hosted validation, and discovery-agent ingestion.
+- Closed: Phase 33 TestOps failure hardening. The runner and helpers now
+  exercise negative paths, collect useful failure snapshots, assert no false
+  Ready states, and prove cleanup/replay behavior after failed runs.
+- Current next-release focus: Phase 34 test realism. Reduce self-proving gates
+  by adding independent cross-checks, live status-endpoint-unreachable
+  injection, restart convergence assertions, and one dirty storage failure:
+  SmartWAL corruption. The active D4 gate is release-relevant because it checks
+  whether dirty storage evidence can still leak through as false `Ready=True`.
+- Later: shared-drive control data for active runs, scenario library indexing,
+  queueing, remote agents on lab nodes, matrix scheduling, hosted validation,
+  and discovery-agent ingestion.
 
 ## PR Cadence
 
@@ -363,6 +366,10 @@ credible light-use product:
 ## Current Execution Pointer
 
 - Active work should be tracked in `internal/docs/current-plan.md`.
+- Current active work is Phase 34: test realism and dirty-failure hardening.
+  The immediate execution gate is
+  `testops/scenarios/helm-smartwal-corrupt-restart-chain.yaml` against
+  `7fa34a7` or newer.
 - When the current plan closes, move it to `internal/docs/finished-plans/`
   with a phase/topic filename such as
   `phase1_finishedplan_frontend_protocol_readiness.md`.
