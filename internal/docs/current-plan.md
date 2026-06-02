@@ -222,3 +222,54 @@ closed, with one product follow-up:
 ```text
 surface reason=wal_integrity_fault instead of generic unknown
 ```
+
+## Next Major Plan: Phase 35 - Kubernetes-Native Read-Only Operator Foundation
+
+Phase 35 should start after Phase 34 D6 closes. It is the next productized
+operations milestone, not an NVMe feature phase.
+
+Goal:
+
+```text
+Make Seaweed Block look and behave like a normal Kubernetes storage product for
+status and diagnostics: CRDs, Conditions, Events, and read-only reconciliation,
+without adding mutating admin actions.
+```
+
+P0 scope:
+
+- `SwBlockCluster` and `SwBlockVolume` CRDs.
+- A status-only controller that writes `.status` and does not mutate storage.
+- Projection of existing ManagedVolume statuses into Kubernetes Conditions:
+  `Ready`, `Blocked`, `Recovering`, `Recovered`, `EvidenceStale`, and
+  `CleanupRequired` where applicable.
+- Kubernetes Events for the most important operator-visible transitions:
+  `VolumeReady`, `CsiNodeImagePullFailed`, `AuthorityPromoted`,
+  `EvidenceStale`, and cleanup-required warnings.
+- Read-only boundary tests proving no promote, repair, rebuild, failback,
+  delete-storage, or live cleanup action is executed by the controller.
+
+P1 follow-up inside or immediately after Phase 35:
+
+- Node readiness/preflight status in `SwBlockCluster.status.nodes[]`:
+  iSCSI, multipath, image readiness, hostPath readiness, and observed version.
+- Support-bundle pointers from status so `Blocked=True` gives a concrete next
+  diagnostic command/evidence reference.
+- Product-owned cleanup visibility: `CleanupRequired=True`, residue type, and
+  safe next step. Automatic cleanup remains out of scope.
+
+Out of Phase 35:
+
+- NVMe ANA parity.
+- Rebuild, reintegration, failback, and backup/restore.
+- Finalizers and delete mutation.
+- Upgrade execution.
+- Production operator lifecycle claims.
+
+Reasoning:
+
+```text
+NVMe should wait until the Kubernetes-native status/control foundation exists.
+New protocol facts should plug into the same CRD/Condition/Event model instead
+of creating another script-only or dashboard-only status path.
+```

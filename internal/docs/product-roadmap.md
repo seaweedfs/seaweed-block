@@ -45,20 +45,23 @@ This is the short internal roadmap. Keep it current and readable.
   corruption refusal, and targeted cross-validation between helper summaries
   and product or Kubernetes facts. D4 SmartWAL corruption now passes the core
   no-false-Ready contract; D6 close and release wording are next.
-- `v0.4-beta-candidate`: Operator lifecycle. Add a Kubernetes-native control
-  plane with CRDs/Conditions/Events for install, node eligibility, volume
-  lifecycle, recovery observation, safe cleanup, and eventually gated repair or
-  rebuild workflows. This is the first release boundary that can credibly feel
-  like a complete Kubernetes product loop rather than an install script.
+- `v0.4-beta-candidate`: Kubernetes-native read-only operator foundation. Add
+  CRDs, Conditions, Events, and a status-only controller for cluster, node,
+  volume, recovery, stale-evidence, and cleanup-required visibility. This is
+  the first release boundary that can credibly feel like a normal Kubernetes
+  product loop rather than an install script. Mutating workflows such as
+  repair, rebuild, failback, delete safety, and automatic cleanup come after the
+  read-only status contract is stable.
 - Model hardening gate before the next large release: complete the
   ManagedVolume Operations Model under `internal/docs/protocol/` before
   expanding operator or broader HA claims. The goal is to prevent Kubernetes,
   CSI, authority, host-path, recovery, and future NVMe logic from becoming
   scattered scripts or unrelated small automata.
 
-Do not skip from scripts directly to an operator. Helm should stabilize the
-installation contract before an in-cluster controller owns upgrades and day-2
-lifecycle.
+Do not skip from scripts directly to mutating operator lifecycle. Helm should
+stabilize the installation contract, then Phase 35 should add read-only CRD
+status, Conditions, and Events before an in-cluster controller owns upgrades,
+repair, rebuild, delete safety, or cleanup.
 
 ### Alpha Preview
 
@@ -135,8 +138,10 @@ lifecycle.
   - `helm install` + first PVC smoke + `sw-block ops report`,
   - local read-only `sw-block ops dashboard` over the same evidence,
   - `helm uninstall` plus explicit host cleanup verification.
-- Later: v0.4 operator lifecycle. Introduce CRDs/Conditions/Events and scoped
-  reconciliation only after the Helm contract is stable.
+- Next major milestone: Phase 35 read-only operator foundation. Introduce
+  CRDs/Conditions/Events and status-only reconciliation after the Helm contract
+  is stable. Keep mutating cleanup, delete finalizers, upgrade execution, and
+  repair/rebuild outside this first operator slice.
 
 ### Track B: iSCSI Frontend Stability
 
@@ -173,7 +178,9 @@ lifecycle.
   documented mechanism, and support-bundle proof of fencing and data integrity.
 - Later: returned-replica rebuild/reintegration/failback, NVMe ANA Kubernetes
   multipath parity, stronger committed-frontier reporting, broad distro/host
-  compatibility, and longer soak under failure.
+  compatibility, and longer soak under failure. NVMe ANA parity should follow
+  the Kubernetes-native status foundation so ANA facts, path states, and
+  protocol-specific reasons project through the same CRD/Condition/Event model.
 
 ### Track E: Protocol / Backend Expansion
 
@@ -212,6 +219,14 @@ lifecycle.
   volumes a first-class internal read model that composes K8s, CSI, authority,
   recovery, host path, workload, and evidence facts while keeping local
   controllers small and testable.
+- Next: Phase 35 should turn the existing read-only operations model into
+  Kubernetes-native status:
+  - `SwBlockCluster` and `SwBlockVolume` CRDs,
+  - a status-only controller that writes `.status`,
+  - ManagedVolume Conditions projected into Kubernetes Conditions,
+  - Kubernetes Events for ready, blocked, promoted, stale-evidence, and cleanup
+    required transitions,
+  - tests proving the controller has no mutating storage authority.
 - Later: metrics, read-only dashboard hardening, conservative admin controls,
   enterprise operations, hosted validation, fleet automation, and cloud-scale
   test lifecycle.
@@ -246,6 +261,9 @@ lifecycle.
   ManagedVolume model used by `sw-block ops report`.
 - Closed on 2026-05-22: Phase 25 packages that operations surface into the
   v0.3 Helm first-volume release story and validates docs/gates against it.
+- Next: Phase 35 should implement the first Kubernetes-native operator
+  foundation slice over this surface: CRDs, read-only `.status`, Conditions,
+  Events, and read-only RBAC. It should not add mutating admin workflows.
 - Seed landed:
   - `NewObservationDashboardHandler` serves `index.html`,
     `cluster-evidence.json`, `timeline.jsonl`, `summary.txt`, and `healthz`,
@@ -298,7 +316,7 @@ credible light-use product:
   usability still depends too much on internal context.
 - Next:
   - add `kubectl get`-readable readiness/degraded/recovering/blocked conditions
-    with stable reason codes,
+    with stable reason codes through Phase 35 CRD status,
   - provide one-command support-bundle capture with minimum evidence for attach,
     failover, and cleanup diagnosis,
   - set conservative default timeout/retry profiles for iSCSI/NVMe/CSI paths,
@@ -356,6 +374,48 @@ credible light-use product:
   queueing, remote agents on lab nodes, matrix scheduling, hosted validation,
   and discovery-agent ingestion.
 
+## Productized Operations Gap Priority
+
+These are the current operation gaps in priority order. Phase 35 should address
+the P0 group first.
+
+### P0: Become Kubernetes-Native For Read-Only Status
+
+1. CRD + status-only operator:
+   `SwBlockCluster`, `SwBlockVolume`, and `.status` writes only.
+2. Conditions writer:
+   project `Ready`, `Blocked`, `Recovering`, `Recovered`, `EvidenceStale`, and
+   `CleanupRequired` from ManagedVolume facts.
+3. Kubernetes Events:
+   emit normal/warning Events such as `VolumeReady`,
+   `CsiNodeImagePullFailed`, `AuthorityPromoted`, and `EvidenceStale`.
+
+### P1: Make Operations Actionable
+
+4. Node readiness/preflight status:
+   iSCSI, multipath, image readiness, hostPath readiness, and observed version
+   under `SwBlockCluster.status.nodes[]`.
+5. Support-bundle pointers:
+   keep the CLI collection path, but expose evidence refs and suggested
+   commands from status.
+6. Cleanup visibility:
+   `CleanupRequired=True`, residue type, and safe next step. Do not automate
+   cleanup yet.
+
+### P2: Enter Mutating Lifecycle Carefully
+
+7. Finalizers and delete safety for PVC/CRD lifecycle.
+8. Upgrade/rollback status and drift reporting before upgrade execution.
+
+### P3: Advanced Day-2 Features
+
+9. Rebuild, reintegration, and failback.
+10. Backup, snapshot, and restore.
+
+NVMe ANA parity is important, but it should not be the next plan. It should
+reuse the Phase 35 status foundation so protocol-specific path state does not
+become another isolated status model.
+
 ## PR Cadence
 
 - Prefer one coherent milestone PR, not one PR per tiny fix.
@@ -370,6 +430,10 @@ credible light-use product:
 - Current active work is Phase 34: test realism and dirty-failure hardening.
   The immediate execution step is the D6 close report and release wording after
   D4 SmartWAL corruption passed in run `20260601-020747-5a1f`.
+- The next major plan is Phase 35: Kubernetes-native read-only operator
+  foundation. Start with CRDs, status-only reconciliation, Conditions, Events,
+  and read-only boundary tests. Do not start NVMe ANA parity, rebuild/failback,
+  backup/restore, or mutating operator workflows before this foundation lands.
 - When the current plan closes, move it to `internal/docs/finished-plans/`
   with a phase/topic filename such as
   `phase1_finishedplan_frontend_protocol_readiness.md`.
