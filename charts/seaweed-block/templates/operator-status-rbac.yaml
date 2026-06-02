@@ -1,0 +1,41 @@
+{{- if and .Values.operatorStatus.create .Values.operatorStatus.rbac.create }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "seaweed-block.fullname" . }}-operator-status
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "seaweed-block.labels" . | nindent 4 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "seaweed-block.fullname" . }}-operator-status
+  labels:
+    {{- include "seaweed-block.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["block.seaweedfs.com"]
+    resources: ["swblockclusters", "swblockvolumes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["block.seaweedfs.com"]
+    resources: ["swblockclusters/status", "swblockvolumes/status"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "seaweed-block.fullname" . }}-operator-status
+  labels:
+    {{- include "seaweed-block.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "seaweed-block.fullname" . }}-operator-status
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "seaweed-block.fullname" . }}-operator-status
+{{- end }}

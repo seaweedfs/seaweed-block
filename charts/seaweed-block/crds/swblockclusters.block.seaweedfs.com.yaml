@@ -1,0 +1,130 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: swblockclusters.block.seaweedfs.com
+spec:
+  group: block.seaweedfs.com
+  scope: Namespaced
+  names:
+    plural: swblockclusters
+    singular: swblockcluster
+    kind: SwBlockCluster
+    shortNames:
+      - swbc
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Ready
+          type: integer
+          jsonPath: .status.readyVolumeCount
+        - name: Blocked
+          type: integer
+          jsonPath: .status.blockedVolumeCount
+        - name: Stale
+          type: integer
+          jsonPath: .status.staleVolumeCount
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      schema:
+        openAPIV3Schema:
+          type: object
+          description: Read-only Seaweed Block cluster status projection.
+          properties:
+            spec:
+              type: object
+              description: Declarative install metadata. Phase 35 does not reconcile spec into storage mutation.
+              properties:
+                image:
+                  type: string
+                csiImage:
+                  type: string
+                storageClass:
+                  type: string
+                ackProfile:
+                  type: string
+                protocol:
+                  type: string
+                blockNodes:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      name:
+                        type: string
+                      internalIP:
+                        type: string
+            status:
+              type: object
+              properties:
+                observedAt:
+                  type: string
+                  format: date-time
+                observedGeneration:
+                  type: integer
+                  format: int64
+                nodeCount:
+                  type: integer
+                  minimum: 0
+                volumeCount:
+                  type: integer
+                  minimum: 0
+                readyVolumeCount:
+                  type: integer
+                  minimum: 0
+                blockedVolumeCount:
+                  type: integer
+                  minimum: 0
+                staleVolumeCount:
+                  type: integer
+                  minimum: 0
+                conditions:
+                  type: array
+                  items:
+                    x-kubernetes-preserve-unknown-fields: true
+                    type: object
+                    required:
+                      - type
+                      - status
+                    properties:
+                      type:
+                        type: string
+                        enum:
+                          - Ready
+                          - Recovered
+                          - Recovering
+                          - Blocked
+                          - Invalid
+                          - CleanupRequired
+                          - EvidenceStale
+                      status:
+                        type: string
+                        enum:
+                          - "True"
+                          - "False"
+                          - Unknown
+                      reason:
+                        type: string
+                      severity:
+                        type: string
+                        enum:
+                          - info
+                          - warning
+                          - error
+                      message:
+                        type: string
+                      lastTransitionTime:
+                        type: string
+                        format: date-time
+                      evidenceRefs:
+                        type: array
+                        items:
+                          type: string
+                evidenceRefs:
+                  type: array
+                  items:
+                    type: string

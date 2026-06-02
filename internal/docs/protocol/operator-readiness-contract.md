@@ -1,6 +1,7 @@
 # Operator Readiness Contract
 
-Status: Phase 23 seed. Read-only contract only; no operator implementation.
+Status: Phase 35 D1 seed. Read-only CRD/status contract only; no controller
+implementation yet.
 
 ## Purpose
 
@@ -20,10 +21,18 @@ ManagedVolumeProjection
 
 It is not:
 
-- a CRD schema,
 - a controller loop,
 - a mutating admin workflow,
 - a repair/rebuild/failback implementation.
+
+The Phase 35 D1 CRD schema lives in:
+
+- `charts/seaweed-block/crds/swblockclusters.block.seaweedfs.com.yaml`
+- `charts/seaweed-block/crds/swblockvolumes.block.seaweedfs.com.yaml`
+
+The status-only RBAC seed lives in:
+
+- `charts/seaweed-block/templates/operator-status-rbac.yaml`
 
 ## Source Of Truth
 
@@ -64,6 +73,29 @@ The contract contains:
 - `status.evidence_refs[]`
 - `events[]`
 - `allowed_actions[]`
+
+The Kubernetes CRD projection keeps the same vocabulary:
+
+| ManagedVolume Contract | CRD Status Path |
+|---|---|
+| `status.volume_id` | `SwBlockVolume.status.volumeID` |
+| `status.pvc_name` | `SwBlockVolume.status.pvcName` |
+| `status.status` | `SwBlockVolume.status.status` |
+| `status.reason_code` | `SwBlockVolume.status.reasonCode` |
+| `status.conditions[]` | `SwBlockVolume.status.conditions[]` |
+| `status.non_claims[]` | `SwBlockVolume.status.nonClaims[]` |
+| `status.evidence_refs[]` | `SwBlockVolume.status.evidenceRefs[]` |
+| `allowed_actions[]` | `SwBlockVolume.status.allowedActions[]` |
+
+Cluster-level aggregate fields map to `SwBlockCluster.status.*`:
+
+- `nodeCount`
+- `volumeCount`
+- `readyVolumeCount`
+- `blockedVolumeCount`
+- `staleVolumeCount`
+- `conditions[]`
+- `evidenceRefs[]`
 
 All Phase 23 actions are non-executing:
 
@@ -127,7 +159,6 @@ Examples:
 
 This contract does not deliver:
 
-- CRDs,
 - controller reconciliation,
 - mutating actions,
 - automatic repair/rebuild,
@@ -141,9 +172,11 @@ It exists so those future pieces use the same facts and safety boundaries.
 Pinned by:
 
 - `core/ops/managed_volume_operator_contract_test.go`
+- `core/ops/managed_volume_crd_contract_test.go`
+- `core/ops/kubernetes_crd_manifests_test.go`
 
 Regression:
 
 ```text
-go test ./core/ops -run "ManagedVolumeOperatorContract" -count=1
+go test ./core/ops -run "ManagedVolumeOperatorContract|ManagedVolumeCRDContract|Phase35D1" -count=1
 ```

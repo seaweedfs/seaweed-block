@@ -113,6 +113,13 @@ blockNodes:
 rbac:
   create: true
 
+operatorStatus:
+  # Phase 35 read-only operator foundation. This only creates the status
+  # service account and RBAC; it does not install a controller by itself.
+  create: false
+  rbac:
+    create: true
+
 csiController:
   replicas: 1
 

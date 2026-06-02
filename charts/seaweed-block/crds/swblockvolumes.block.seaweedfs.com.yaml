@@ -1,0 +1,152 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: swblockvolumes.block.seaweedfs.com
+spec:
+  group: block.seaweedfs.com
+  scope: Namespaced
+  names:
+    plural: swblockvolumes
+    singular: swblockvolume
+    kind: SwBlockVolume
+    shortNames:
+      - swbv
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Status
+          type: string
+          jsonPath: .status.status
+        - name: Reason
+          type: string
+          jsonPath: .status.reasonCode
+        - name: PVC
+          type: string
+          jsonPath: .status.pvcName
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      schema:
+        openAPIV3Schema:
+          type: object
+          description: Read-only Seaweed Block volume status projection.
+          properties:
+            spec:
+              type: object
+              description: PVC binding metadata. Phase 35 does not reconcile spec into storage mutation.
+              properties:
+                pvcName:
+                  type: string
+                storageClass:
+                  type: string
+            status:
+              type: object
+              properties:
+                volumeID:
+                  type: string
+                pvcName:
+                  type: string
+                status:
+                  type: string
+                  enum:
+                    - ready
+                    - recovered
+                    - recovering
+                    - degraded
+                    - blocked
+                    - invalid
+                    - unsafe
+                    - unknown
+                reasonCode:
+                  type: string
+                observedAt:
+                  type: string
+                  format: date-time
+                conditions:
+                  type: array
+                  items:
+                    x-kubernetes-preserve-unknown-fields: true
+                    type: object
+                    required:
+                      - type
+                      - status
+                    properties:
+                      type:
+                        type: string
+                        enum:
+                          - Ready
+                          - Recovered
+                          - Recovering
+                          - Blocked
+                          - Invalid
+                          - CleanupRequired
+                          - EvidenceStale
+                      status:
+                        type: string
+                        enum:
+                          - "True"
+                          - "False"
+                          - Unknown
+                      reason:
+                        type: string
+                      severity:
+                        type: string
+                        enum:
+                          - info
+                          - warning
+                          - error
+                      message:
+                        type: string
+                      lastTransitionTime:
+                        type: string
+                        format: date-time
+                      evidenceRefs:
+                        type: array
+                        items:
+                          type: string
+                nonClaims:
+                  type: array
+                  items:
+                    type: string
+                evidenceRefs:
+                  type: array
+                  items:
+                    type: string
+                allowedActions:
+                  type: array
+                  items:
+                    type: object
+                    required:
+                      - type
+                      - mode
+                      - mutationAllowed
+                    properties:
+                      type:
+                        type: string
+                      mode:
+                        type: string
+                        enum:
+                          - read_only
+                          - dry_run
+                      sideEffectClass:
+                        type: string
+                      ownerExecutor:
+                        type: string
+                      mutationAllowed:
+                        type: boolean
+                      preconditions:
+                        type: array
+                        items:
+                          type: string
+                      invariantRefs:
+                        type: array
+                        items:
+                          type: string
+                      evidenceRefs:
+                        type: array
+                        items:
+                          type: string

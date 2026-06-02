@@ -50,21 +50,27 @@ StorageClasses, Helm releases, iSCSI sessions, multipath maps, or hostPath data.
 
 Goal: define the Kubernetes API shape without starting mutating lifecycle.
 
+Status: local PASS; live k3s apply/dry-run pending QA.
+
 Deliverables:
 
-- `SwBlockCluster` CRD manifest.
-- `SwBlockVolume` CRD manifest.
-- read-only/status-only RBAC manifest.
-- schema docs that map existing ManagedVolume fields to CRD status fields.
+- `SwBlockCluster` CRD manifest:
+  `charts/seaweed-block/crds/swblockclusters.block.seaweedfs.com.yaml`
+- `SwBlockVolume` CRD manifest:
+  `charts/seaweed-block/crds/swblockvolumes.block.seaweedfs.com.yaml`
+- read-only/status-only RBAC manifest:
+  `charts/seaweed-block/templates/operator-status-rbac.yaml`
+- schema docs that map existing ManagedVolume fields to CRD status fields:
+  `internal/docs/protocol/operator-readiness-contract.md`
 
 Acceptance:
 
 ```text
-CRDs apply cleanly on k3s
-status subresource is enabled
-RBAC permits get/list/watch and status/event writes only
-RBAC does not permit storage mutation verbs
-unit/schema tests cover required condition vocabulary
+[pending QA] CRDs apply cleanly on k3s
+[done] status subresource is enabled
+[done] RBAC permits get/list/watch and status/event writes only
+[done] RBAC does not permit storage mutation verbs
+[done] unit/schema tests cover required condition vocabulary
 ```
 
 ## D2: Status-Only Controller Skeleton
@@ -211,14 +217,20 @@ finished plan moved under internal/docs/finished-plans/
 ## Current Progress
 
 - 0%: Phase 35 plan opened.
+- 12%: D1 CRD/RBAC contract manifests landed locally. `go test ./core/ops
+  ./cmd/sw-block`, `helm lint charts/seaweed-block`, and `helm template
+  --include-crds --set operatorStatus.create=true` pass. Live k3s
+  apply/dry-run remains the QA validation item.
 
 ## Next Step
 
-Start D1 with TDD:
+Ask QA to validate D1 on the k3s lab, then start D2 controller skeleton.
 
 ```text
-define CRD/status/RBAC contract
-write schema/RBAC tests
-add manifests
-verify apply/dry-run on k3s
+helm template sw-block charts/seaweed-block \
+  --namespace kube-system \
+  --set operatorStatus.create=true \
+  --include-crds > /tmp/sw-block-phase35-d1.yaml
+
+kubectl apply --dry-run=server -f /tmp/sw-block-phase35-d1.yaml
 ```
