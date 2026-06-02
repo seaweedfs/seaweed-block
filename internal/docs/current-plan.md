@@ -50,7 +50,7 @@ StorageClasses, Helm releases, iSCSI sessions, multipath maps, or hostPath data.
 
 Goal: define the Kubernetes API shape without starting mutating lifecycle.
 
-Status: local PASS; live k3s apply/dry-run pending QA.
+Status: PASS.
 
 Deliverables:
 
@@ -62,11 +62,13 @@ Deliverables:
   `charts/seaweed-block/templates/operator-status-rbac.yaml`
 - schema docs that map existing ManagedVolume fields to CRD status fields:
   `internal/docs/protocol/operator-readiness-contract.md`
+- QA signoff:
+  `internal/docs/qa-assignments/phase35-d1-operator-crd-qa-signoff.md`
 
 Acceptance:
 
 ```text
-[pending QA] CRDs apply cleanly on k3s
+[done] CRDs apply cleanly on k3s server-side dry-run
 [done] status subresource is enabled
 [done] RBAC permits get/list/watch and status/event writes only
 [done] RBAC does not permit storage mutation verbs
@@ -78,20 +80,24 @@ Acceptance:
 Goal: create the smallest controller that can reconcile observation evidence
 into CRD `.status`.
 
+Status: local skeleton PASS; in-cluster command/Deployment wiring pending.
+
 Deliverables:
 
-- controller command or mode that runs in-cluster.
-- watches/reconciles `SwBlockCluster` and/or PVC-backed volumes.
+- status-only reconciler interfaces:
+  `core/ops/operator_status_controller.go`
+- tests proving reconcile writes only cluster/volume status and Events:
+  `core/ops/operator_status_controller_test.go`
 - uses existing `core/ops` ManagedVolume projection as the status source.
-- writes `.status` only.
+- writes `.status`-shaped payloads only.
 
 Acceptance:
 
 ```text
-controller starts under Helm or a test manifest
-controller writes cluster observed generation/status timestamp
-controller writes no spec, PVC, PV, workload, Secret, StorageClass, or host data
-scoped tests prove mutation clients are not called
+[pending] controller starts under Helm or a test manifest
+[done] controller writes cluster/volume status-shaped payloads
+[done] controller writes no spec, PVC, PV, workload, Secret, StorageClass, or host data
+[done] scoped tests prove mutation clients are not called
 ```
 
 ## D3: Happy-Path Conditions Gate
@@ -219,18 +225,17 @@ finished plan moved under internal/docs/finished-plans/
 - 0%: Phase 35 plan opened.
 - 12%: D1 CRD/RBAC contract manifests landed locally. `go test ./core/ops
   ./cmd/sw-block`, `helm lint charts/seaweed-block`, and `helm template
-  --include-crds --set operatorStatus.create=true` pass. Live k3s
-  apply/dry-run remains the QA validation item.
+  --include-crds --set operatorStatus.create=true` pass.
+- 18%: D1 live k3s QA signoff passed. Server-side dry-run accepted all rendered
+  CRDs/RBAC; status subresources, condition vocabulary, evidence refs, and
+  read-only RBAC boundary were verified.
+- 22%: D2 local status-only reconciler skeleton landed. It consumes
+  `ClusterEvidence`, builds the existing operator snapshot, writes
+  `SwBlockCluster`/`SwBlockVolume` status-shaped payloads, emits Events, and
+  has no storage mutation interface.
 
 ## Next Step
 
-Ask QA to validate D1 on the k3s lab, then start D2 controller skeleton.
-
-```text
-helm template sw-block charts/seaweed-block \
-  --namespace kube-system \
-  --set operatorStatus.create=true \
-  --include-crds > /tmp/sw-block-phase35-d1.yaml
-
-kubectl apply --dry-run=server -f /tmp/sw-block-phase35-d1.yaml
-```
+Decide and implement the D2 packaging shape for the first in-cluster
+status-controller command or deployment. Keep it status-only and disabled by
+default until the D2 live gate passes.
