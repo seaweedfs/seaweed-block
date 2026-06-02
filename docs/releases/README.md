@@ -12,6 +12,7 @@ is still outside the supported boundary.
 - [v0.3.3 Alpha — Productized Operations And Read-Only Operator Foundation](v0.3.3-alpha.md)
 - [v0.3.4 Alpha — Status Surface Hardening And Strict New-User Path](v0.3.4-alpha.md)
 - [v0.3.5 Alpha — Failure-Path Evidence And Cleanup Hardening](v0.3.5-alpha.md)
+- [v0.3.6 Alpha — Test Realism And Dirty-Failure Hardening](v0.3.6-alpha.md)
 
 ## Version Boundary
 
@@ -44,6 +45,10 @@ is still outside the supported boundary.
   blocked CSI image-pull evidence, status endpoint unreachable replay, corrupt
   evidence replay, support-bundle/failure-snapshot diagnostics, and cleanup
   residue gates all follow the negative-first rule.
+- `v0.3.6-alpha` hardens test realism and dirty-failure behavior:
+  live status endpoint unreachable, restart convergence, and real V3 SmartWAL
+  corruption gates prove no false `Ready=True` is projected from weak or dirty
+  evidence.
 
 Mutating operator packaging is not included in these alphas. v0.3 introduces
 Helm as the preferred Kubernetes alpha install path; the script path remains

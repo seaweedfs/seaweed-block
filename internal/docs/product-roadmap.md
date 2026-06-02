@@ -39,12 +39,14 @@ This is the short internal roadmap. Keep it current and readable.
   surfaces, support-bundle replay under corrupt/partial evidence, failed-run
   cleanup, and multi-volume interference checks. Phase 33 closed this scope;
   release packaging remains a separate decision.
-- Active hardening phase: Phase 34 test realism and anti self-proving gates.
-  Upgrade selected replay or summary-grep checks into independent live/dirty
+- `v0.3.6-alpha`: Phase 34 test realism and anti self-proving gates. Selected
+  replay or summary-grep checks were upgraded into independent live/dirty
   evidence: live status endpoint unreachable, restart convergence, SmartWAL
   corruption refusal, and targeted cross-validation between helper summaries
-  and product or Kubernetes facts. D4 SmartWAL corruption now passes the core
-  no-false-Ready contract; D6 close and release wording are next.
+  and product or Kubernetes facts. Phase 34 closed on 2026-06-02.
+- Active phase: Phase 35 Kubernetes-native read-only operator foundation.
+  Implement CRDs, status-only reconciliation, Conditions, Events, and read-only
+  boundary tests before any mutating operator lifecycle or NVMe ANA expansion.
 - `v0.4-beta-candidate`: Kubernetes-native read-only operator foundation. Add
   CRDs, Conditions, Events, and a status-only controller for cluster, node,
   volume, recovery, stale-evidence, and cleanup-required visibility. This is
@@ -364,12 +366,12 @@ credible light-use product:
 - Closed: Phase 33 TestOps failure hardening. The runner and helpers now
   exercise negative paths, collect useful failure snapshots, assert no false
   Ready states, and prove cleanup/replay behavior after failed runs.
-- Current next-release focus: Phase 34 test realism. Reduce self-proving gates
-  by adding independent cross-checks, live status-endpoint-unreachable
-  injection, restart convergence assertions, and one dirty storage failure:
-  SmartWAL corruption. The D4 gate is release-relevant because it checks
-  whether dirty storage evidence can still leak through as false `Ready=True`;
-  it now passes on the core contract and is ready for Phase 34 closeout.
+- Closed: Phase 34 test realism. Reduced self-proving gates by adding
+  independent cross-checks, live status-endpoint-unreachable injection,
+  restart convergence assertions, and one dirty storage failure: SmartWAL
+  corruption. The D4 gate is release-relevant because it checks whether dirty
+  storage evidence can still leak through as false `Ready=True`; it now passes
+  on the core contract.
 - Later: shared-drive control data for active runs, scenario library indexing,
   queueing, remote agents on lab nodes, matrix scheduling, hosted validation,
   and discovery-agent ingestion.
@@ -427,13 +429,11 @@ become another isolated status model.
 ## Current Execution Pointer
 
 - Active work should be tracked in `internal/docs/current-plan.md`.
-- Current active work is Phase 34: test realism and dirty-failure hardening.
-  The immediate execution step is the D6 close report and release wording after
-  D4 SmartWAL corruption passed in run `20260601-020747-5a1f`.
-- The next major plan is Phase 35: Kubernetes-native read-only operator
+- Current active work is Phase 35: Kubernetes-native read-only operator
   foundation. Start with CRDs, status-only reconciliation, Conditions, Events,
-  and read-only boundary tests. Do not start NVMe ANA parity, rebuild/failback,
-  backup/restore, or mutating operator workflows before this foundation lands.
+  and read-only boundary tests.
+- Do not start NVMe ANA parity, rebuild/failback, backup/restore, or mutating
+  operator workflows before the Phase 35 status foundation lands.
 - When the current plan closes, move it to `internal/docs/finished-plans/`
   with a phase/topic filename such as
   `phase1_finishedplan_frontend_protocol_readiness.md`.
