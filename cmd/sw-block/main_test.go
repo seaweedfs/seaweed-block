@@ -283,15 +283,88 @@ func TestOpsOperatorStatusDryRunFromBundle(t *testing.T) {
 	}
 }
 
-func TestOpsOperatorStatusRequiresDryRunUntilWriterIsWired(t *testing.T) {
+func TestOpsOperatorStatusWritesCRDStatusWhenDryRunDisabled(t *testing.T) {
+	dir := t.TempDir()
+	cluster := ops.NewClusterEvidence(time.Date(2026, 6, 3, 10, 30, 0, 0, time.UTC))
+	cluster.ManagedVolumes = []ops.ManagedVolumeProjection{ops.ProjectManagedVolume(ops.ManagedVolumeFacts{
+		VolumeID: "pvc-write",
+		PVCName:  "write-pvc",
+		PVC:      &ops.PVCFact{Phase: "Bound"},
+		Authority: &ops.AuthorityFact{
+			PrimaryReplica: "r1",
+			PublishTarget:  "192.168.1.184:3260",
+		},
+		Replicas: []ops.ReplicaFact{{
+			ReplicaID:      "r1",
+			KubernetesNode: "m02",
+			Role:           "primary",
+			Observed:       true,
+		}},
+		CSIStages: []ops.CSIStageFact{{NodeName: "m02", Target: "192.168.1.184:3260"}},
+		Workload:  &ops.WorkloadCheckFact{WriterVerified: true, ReaderVerified: true},
+	})}
+	raw, err := ops.MarshalObservationJSON(cluster)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ops.ClusterEvidenceArtifact), raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	writer := &operatorStatusTestWriter{}
+	oldFactory := opsOperatorStatusWriterFactory
+	opsOperatorStatusWriterFactory = func() (ops.OperatorStatusWriter, error) {
+		return writer, nil
+	}
+	t.Cleanup(func() { opsOperatorStatusWriterFactory = oldFactory })
+
 	var stdout, stderr bytes.Buffer
 	code := run([]string{"ops", "operator-status", "--from-bundle", t.TempDir()}, &stdout, &stderr)
-	if code != ops.VolumeStatusExitInvalid {
-		t.Fatalf("exit=%d want invalid stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	if code == ops.VolumeStatusExitOK {
+		t.Fatalf("empty bundle unexpectedly succeeded stdout=%s stderr=%s", stdout.String(), stderr.String())
 	}
-	if !strings.Contains(stderr.String(), "rerun with --dry-run") {
-		t.Fatalf("stderr=%s", stderr.String())
+
+	stdout.Reset()
+	stderr.Reset()
+	code = run([]string{"ops", "operator-status", "--from-bundle", dir, "--namespace", "kube-system"}, &stdout, &stderr)
+	if code != ops.VolumeStatusExitOK {
+		t.Fatalf("exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
 	}
+	if writer.cluster.VolumeCount != 1 || len(writer.volumes) != 1 {
+		t.Fatalf("writer cluster=%+v volumes=%+v", writer.cluster, writer.volumes)
+	}
+	if writer.volumes[0].ref.Name != "write-pvc" || writer.volumes[0].status.Status != ops.ManagedVolumeStatusReady {
+		t.Fatalf("volume write=%+v", writer.volumes[0])
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"operator_status=write_status cluster=kube-system/sw-block volumes=1",
+		"mutation_allowed=false",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("stdout missing %q:\n%s", want, out)
+		}
+	}
+}
+
+type operatorStatusTestWriter struct {
+	cluster ops.SwBlockClusterCRDStatus
+	volumes []operatorStatusTestVolumeWrite
+}
+
+type operatorStatusTestVolumeWrite struct {
+	ref    ops.OperatorObjectRef
+	status ops.SwBlockVolumeCRDStatus
+}
+
+func (w *operatorStatusTestWriter) WriteClusterStatus(_ context.Context, _ ops.OperatorObjectRef, status ops.SwBlockClusterCRDStatus) error {
+	w.cluster = status
+	return nil
+}
+
+func (w *operatorStatusTestWriter) WriteVolumeStatus(_ context.Context, ref ops.OperatorObjectRef, status ops.SwBlockVolumeCRDStatus) error {
+	w.volumes = append(w.volumes, operatorStatusTestVolumeWrite{ref: ref, status: status})
+	return nil
 }
 
 func TestOpsInventoryRejectsBadRequiredFrontierFlag(t *testing.T) {

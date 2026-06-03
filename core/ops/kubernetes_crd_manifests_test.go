@@ -154,15 +154,15 @@ func TestPhase35D1OperatorStatusRBACDefaultDisabled(t *testing.T) {
 	assertYAMLBool(t, rbac, "create", true)
 }
 
-func TestPhase35D2OperatorStatusDeploymentIsDryRunGuarded(t *testing.T) {
+func TestPhase35D3OperatorStatusDeploymentCanRunDryRunOrStatusWriteMode(t *testing.T) {
 	raw := readRepoFile(t, "charts/seaweed-block/templates/operator-status.yaml")
 	for _, want := range []string{
-		`operatorStatus.create=true currently requires operatorStatus.dryRun=true`,
 		`kind: Deployment`,
 		`name: sw-block-operator-status`,
 		`serviceAccountName: {{ include "seaweed-block.fullname" . }}-operator-status`,
 		`command: ["/usr/local/bin/sw-block"]`,
 		`- "operator-status"`,
+		`{{- if .Values.operatorStatus.dryRun }}`,
 		`- "--dry-run"`,
 		`- "--master-api={{ include "seaweed-block.blockmasterAddress" . }}"`,
 		`- "--interval={{ .Values.operatorStatus.interval }}"`,

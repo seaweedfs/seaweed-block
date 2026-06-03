@@ -1,6 +1,6 @@
 # Current Plan: Phase 35 - Kubernetes-Native Read-Only Operator Foundation
 
-Status: active, 34% complete. Started on 2026-06-02.
+Status: active, 42% complete. Started on 2026-06-02.
 
 Branch: `phase33-testops-failure-hardening`
 
@@ -119,12 +119,24 @@ Non-blocking follow-up:
 
 Goal: prove a normal first PVC becomes Kubernetes-native Ready status.
 
+Status: local status writer PASS; live k3s CR status publication pending QA.
+
+Boundary:
+
+```text
+D3 patches existing SwBlockCluster / SwBlockVolume .status subresources.
+It does not create CR objects. Automatic SwBlockVolume object ownership is a
+separate product contract and must not be added silently.
+```
+
 Scenario:
 
 ```text
 helm install
 run first-volume writer/reader
-create/read SwBlockVolume status
+create SwBlockCluster/SwBlockVolume stubs
+operatorStatus.dryRun=false patches CRD .status
+read SwBlockVolume status
 ```
 
 Acceptance:
@@ -255,17 +267,24 @@ finished plan moved under internal/docs/finished-plans/
 - 34%: D2 live k3s QA signoff passed. The dry-run controller starts under
   Helm, reads blockmaster evidence, reports `mutation_allowed=false`, writes
   zero CRD objects, is disabled by default, and rejects `dryRun=false`.
+- 42%: D3 local status writer landed. `sw-block ops operator-status` can run
+  without `--dry-run`, using an in-cluster REST client that PATCHes only
+  `swblockclusters/status` and `swblockvolumes/status`. Component tests verify
+  method/path/body/auth and reject any `spec` patch. Helm can now render
+  `operatorStatus.dryRun=false`, but live k3s publication is still pending.
 
 ## Next Step
 
-Implement D3 real Kubernetes status publication in the smallest safe slice:
-first add a component-tested status writer against fake/discovery-shaped
-Kubernetes clients, then allow `operatorStatus.dryRun=false` only when the
-writer is wired and still scoped to CRD `.status` plus Events.
+Ask QA to run the D3 live gate: install with CRD stubs present, enable
+`operatorStatus.create=true` and `operatorStatus.dryRun=false`, then verify CRD
+status agrees with the first-volume report while no storage mutation is added by
+the operator-status service account.
 
 ```text
-go test ./core/ops ./cmd/sw-block
 helm template sw-block charts/seaweed-block \
   --set operatorStatus.create=true \
   --set operatorStatus.dryRun=false
+
+kubectl -n kube-system get swblockcluster sw-block -o jsonpath='{.status.readyVolumeCount}'
+kubectl -n kube-system get swblockvolume <pvc-name> -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}'
 ```

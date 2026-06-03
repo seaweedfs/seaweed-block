@@ -31,6 +31,9 @@ var (
 	opsStatusRunCommand             = ops.DefaultRunCommand
 	opsInventoryRunCommand          = ops.DefaultRunCommand
 	opsGenerateHelmValuesRunCommand = ops.DefaultRunCommand
+	opsOperatorStatusWriterFactory  = func() (ops.OperatorStatusWriter, error) {
+		return ops.NewInClusterKubernetesStatusClient()
+	}
 )
 
 func run(args []string, stdout, stderr io.Writer) int {
@@ -116,11 +119,6 @@ func runOpsOperatorStatus(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "sw-block ops operator-status: unexpected args %s\n", strings.Join(fs.Args(), " "))
 		return ops.VolumeStatusExitInvalid
 	}
-	if !dryRun {
-		fmt.Fprintln(stderr, "sw-block ops operator-status: real Kubernetes status writes are not wired yet; rerun with --dry-run")
-		return ops.VolumeStatusExitInvalid
-	}
-
 	runOnce := func() int {
 		clusterArgs := []string{"--namespace", namespace, "--timeout", timeout.String()}
 		if fromBundle != "" {
@@ -145,8 +143,21 @@ func runOpsOperatorStatus(args []string, stdout, stderr io.Writer) int {
 		if code != ops.VolumeStatusExitOK {
 			return code
 		}
-		writer := &operatorStatusDryRunWriter{}
-		events := &operatorStatusDryRunEventSink{}
+		mode := "write_status"
+		var writer ops.OperatorStatusWriter
+		var events ops.OperatorEventSink
+		if dryRun {
+			mode = "dry_run"
+			writer = &operatorStatusDryRunWriter{}
+			events = &operatorStatusDryRunEventSink{}
+		} else {
+			var err error
+			writer, err = opsOperatorStatusWriterFactory()
+			if err != nil {
+				fmt.Fprintf(stderr, "sw-block ops operator-status: %v\n", err)
+				return ops.VolumeStatusExitInvalid
+			}
+		}
 		result, err := (ops.OperatorStatusReconciler{
 			Namespace:   namespace,
 			ClusterName: clusterName,
@@ -158,23 +169,26 @@ func runOpsOperatorStatus(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintf(stderr, "sw-block ops operator-status: %v\n", err)
 			return ops.VolumeStatusExitInvalid
 		}
-		fmt.Fprintf(stdout, "operator_status=dry_run cluster=%s/%s volumes=%d events=%d mutation_allowed=false\n",
+		fmt.Fprintf(stdout, "operator_status=%s cluster=%s/%s volumes=%d events=%d mutation_allowed=false\n",
+			mode,
 			result.ClusterRef.Namespace,
 			result.ClusterRef.Name,
 			len(result.VolumeRefs),
 			result.EventCount)
-		fmt.Fprintf(stdout, "cluster_status volumes=%d ready=%d blocked=%d stale=%d\n",
-			writer.cluster.VolumeCount,
-			writer.cluster.ReadyVolumeCount,
-			writer.cluster.BlockedVolumeCount,
-			writer.cluster.StaleVolumeCount)
-		for _, volume := range writer.volumes {
-			fmt.Fprintf(stdout, "volume_status name=%s volume_id=%s pvc=%s status=%s reason=%s\n",
-				volume.ref.Name,
-				emptyCLI(volume.status.VolumeID),
-				emptyCLI(volume.status.PVCName),
-				emptyCLI(volume.status.Status),
-				emptyCLI(volume.status.ReasonCode))
+		if dryWriter, ok := writer.(*operatorStatusDryRunWriter); ok {
+			fmt.Fprintf(stdout, "cluster_status volumes=%d ready=%d blocked=%d stale=%d\n",
+				dryWriter.cluster.VolumeCount,
+				dryWriter.cluster.ReadyVolumeCount,
+				dryWriter.cluster.BlockedVolumeCount,
+				dryWriter.cluster.StaleVolumeCount)
+			for _, volume := range dryWriter.volumes {
+				fmt.Fprintf(stdout, "volume_status name=%s volume_id=%s pvc=%s status=%s reason=%s\n",
+					volume.ref.Name,
+					emptyCLI(volume.status.VolumeID),
+					emptyCLI(volume.status.PVCName),
+					emptyCLI(volume.status.Status),
+					emptyCLI(volume.status.ReasonCode))
+			}
 		}
 		return ops.VolumeStatusExitOK
 	}

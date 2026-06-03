@@ -115,8 +115,9 @@ rbac:
 
 operatorStatus:
   # Phase 35 read-only operator foundation. When enabled, this installs the
-  # status service account/RBAC plus a dry-run status projection Deployment.
-  # Real CRD status writes are intentionally not wired yet.
+  # status service account/RBAC plus a status projection Deployment. dryRun
+  # logs the projection only. dryRun=false patches existing SwBlockCluster /
+  # SwBlockVolume .status subresources and does not create CR objects.
   create: false
   dryRun: true
   interval: 30s

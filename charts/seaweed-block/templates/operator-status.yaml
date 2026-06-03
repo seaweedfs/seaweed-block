@@ -1,6 +1,3 @@
-{{- if and .Values.operatorStatus.create (not .Values.operatorStatus.dryRun) -}}
-{{- fail "operatorStatus.create=true currently requires operatorStatus.dryRun=true; real CRD status writes are not wired yet" -}}
-{{- end -}}
 {{- if .Values.operatorStatus.create }}
 apiVersion: apps/v1
 kind: Deployment
@@ -34,7 +31,9 @@ spec:
           args:
             - "ops"
             - "operator-status"
+            {{- if .Values.operatorStatus.dryRun }}
             - "--dry-run"
+            {{- end }}
             - "--master-api={{ include "seaweed-block.blockmasterAddress" . }}"
             - "--namespace={{ .Release.Namespace }}"
             - "--cluster-name={{ .Values.operatorStatus.clusterName }}"
