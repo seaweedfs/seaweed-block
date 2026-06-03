@@ -1,6 +1,6 @@
 # Current Plan: Phase 35 - Kubernetes-Native Read-Only Operator Foundation
 
-Status: active, 0% complete. Started on 2026-06-02.
+Status: active, 34% complete. Started on 2026-06-02.
 
 Branch: `phase33-testops-failure-hardening`
 
@@ -80,7 +80,7 @@ Acceptance:
 Goal: create the smallest controller that can reconcile observation evidence
 into CRD `.status`.
 
-Status: local packaged dry-run PASS; live k3s deployment validation pending QA.
+Status: PASS.
 
 Deliverables:
 
@@ -92,17 +92,27 @@ Deliverables:
   `sw-block ops operator-status --dry-run`
 - disabled-by-default dry-run Helm Deployment:
   `charts/seaweed-block/templates/operator-status.yaml`
+- QA signoff:
+  `internal/docs/qa-assignments/phase35-d2-operator-status-qa-signoff.md`
 - uses existing `core/ops` ManagedVolume projection as the status source.
 - writes `.status`-shaped payloads only.
 
 Acceptance:
 
 ```text
-[pending QA] controller starts under Helm as a dry-run Deployment
+[done] controller starts under Helm as a dry-run Deployment
 [done] controller writes cluster/volume status-shaped payloads
 [done] controller writes no spec, PVC, PV, workload, Secret, StorageClass, or host data
 [done] scoped tests prove mutation clients are not called
 [done] chart refuses operatorStatus.dryRun=false until real status writes are wired
+```
+
+Non-blocking follow-up:
+
+```text
+[open] first dry-run iterations may log blockmaster connection refused before
+       blockmaster gRPC is ready; polish logs to "waiting for blockmaster"
+       before D3/D8 release close.
 ```
 
 ## D3: Happy-Path Conditions Gate
@@ -242,21 +252,20 @@ finished plan moved under internal/docs/finished-plans/
   projects status from bundle/master-api evidence, Helm can render a disabled
   by default dry-run Deployment, and the chart fails if real CRD writes are
   requested before the writer exists.
+- 34%: D2 live k3s QA signoff passed. The dry-run controller starts under
+  Helm, reads blockmaster evidence, reports `mutation_allowed=false`, writes
+  zero CRD objects, is disabled by default, and rejects `dryRun=false`.
 
 ## Next Step
 
-Ask QA to validate D2 dry-run Deployment on k3s, then decide whether D3 wires a
-real Kubernetes status writer directly or first adds a fake-apiserver/component
-test for status writes.
+Implement D3 real Kubernetes status publication in the smallest safe slice:
+first add a component-tested status writer against fake/discovery-shaped
+Kubernetes clients, then allow `operatorStatus.dryRun=false` only when the
+writer is wired and still scoped to CRD `.status` plus Events.
 
 ```text
+go test ./core/ops ./cmd/sw-block
 helm template sw-block charts/seaweed-block \
-  --namespace kube-system \
   --set operatorStatus.create=true \
-  --include-crds > /tmp/sw-block-phase35-d2.yaml
-
-kubectl apply --dry-run=server -f /tmp/sw-block-phase35-d2.yaml
-
-# Optional live smoke after normal Helm install:
-kubectl -n kube-system logs deploy/sw-block-operator-status
+  --set operatorStatus.dryRun=false
 ```
