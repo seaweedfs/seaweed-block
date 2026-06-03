@@ -237,6 +237,63 @@ func TestOpsInventoryMissingOutReturnsInvalid(t *testing.T) {
 	}
 }
 
+func TestOpsOperatorStatusDryRunFromBundle(t *testing.T) {
+	dir := t.TempDir()
+	cluster := ops.NewClusterEvidence(time.Date(2026, 6, 2, 23, 30, 0, 0, time.UTC))
+	cluster.ManagedVolumes = []ops.ManagedVolumeProjection{ops.ProjectManagedVolume(ops.ManagedVolumeFacts{
+		VolumeID: "pvc-operator",
+		PVCName:  "demo-pvc",
+		PVC:      &ops.PVCFact{Phase: "Bound"},
+		Authority: &ops.AuthorityFact{
+			PrimaryReplica: "r1",
+			PublishTarget:  "192.168.1.184:3260",
+		},
+		Replicas: []ops.ReplicaFact{{
+			ReplicaID:      "r1",
+			KubernetesNode: "m02",
+			Role:           "primary",
+			Observed:       true,
+		}},
+		CSIStages: []ops.CSIStageFact{{NodeName: "m02", Target: "192.168.1.184:3260"}},
+		Workload:  &ops.WorkloadCheckFact{WriterVerified: true, ReaderVerified: true},
+	})}
+	raw, err := ops.MarshalObservationJSON(cluster)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ops.ClusterEvidenceArtifact), raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ops", "operator-status", "--dry-run", "--from-bundle", dir, "--namespace", "kube-system"}, &stdout, &stderr)
+	if code != ops.VolumeStatusExitOK {
+		t.Fatalf("exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"operator_status=dry_run cluster=kube-system/sw-block volumes=1",
+		"mutation_allowed=false",
+		"cluster_status volumes=1 ready=1 blocked=0 stale=0",
+		"volume_status name=demo-pvc volume_id=pvc-operator pvc=demo-pvc status=ready reason=first_volume_verified",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("stdout missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestOpsOperatorStatusRequiresDryRunUntilWriterIsWired(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ops", "operator-status", "--from-bundle", t.TempDir()}, &stdout, &stderr)
+	if code != ops.VolumeStatusExitInvalid {
+		t.Fatalf("exit=%d want invalid stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "rerun with --dry-run") {
+		t.Fatalf("stderr=%s", stderr.String())
+	}
+}
+
 func TestOpsInventoryRejectsBadRequiredFrontierFlag(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := run([]string{"ops", "inventory", "--out", t.TempDir(), "--required-frontier", "pvc-a=not-a-number"}, &stdout, &stderr)

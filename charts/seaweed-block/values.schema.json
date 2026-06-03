@@ -90,11 +90,18 @@
       "type": "object",
       "properties": {
         "create": { "type": "boolean" },
+        "dryRun": { "type": "boolean" },
+        "interval": { "type": "string" },
+        "clusterName": { "type": "string" },
         "rbac": {
           "type": "object",
           "properties": {
             "create": { "type": "boolean" }
           }
+        },
+        "nodeSelector": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
         }
       }
     }

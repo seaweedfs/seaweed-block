@@ -207,7 +207,14 @@ func TestG15b_Manifest_NoAuthorityShapedFields(t *testing.T) {
 
 func TestG15b_ImageBuildInputs_ContainExpectedBinariesAndNodeTools(t *testing.T) {
 	swBlock := g15bReadDeployFile(t, "Dockerfile.sw-block")
-	for _, want := range []string{"./cmd/blockmaster", "./cmd/blockvolume", "/usr/local/bin/blockmaster", "/usr/local/bin/blockvolume"} {
+	for _, want := range []string{
+		"./cmd/blockmaster",
+		"./cmd/blockvolume",
+		"./cmd/sw-block",
+		"/usr/local/bin/blockmaster",
+		"/usr/local/bin/blockvolume",
+		"/usr/local/bin/sw-block",
+	} {
 		if !strings.Contains(swBlock, want) {
 			t.Fatalf("Dockerfile.sw-block missing %q", want)
 		}

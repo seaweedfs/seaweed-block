@@ -114,11 +114,16 @@ rbac:
   create: true
 
 operatorStatus:
-  # Phase 35 read-only operator foundation. This only creates the status
-  # service account and RBAC; it does not install a controller by itself.
+  # Phase 35 read-only operator foundation. When enabled, this installs the
+  # status service account/RBAC plus a dry-run status projection Deployment.
+  # Real CRD status writes are intentionally not wired yet.
   create: false
+  dryRun: true
+  interval: 30s
+  clusterName: sw-block
   rbac:
     create: true
+  nodeSelector: {}
 
 csiController:
   replicas: 1

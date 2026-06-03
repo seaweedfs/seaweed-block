@@ -154,6 +154,25 @@ func TestPhase35D1OperatorStatusRBACDefaultDisabled(t *testing.T) {
 	assertYAMLBool(t, rbac, "create", true)
 }
 
+func TestPhase35D2OperatorStatusDeploymentIsDryRunGuarded(t *testing.T) {
+	raw := readRepoFile(t, "charts/seaweed-block/templates/operator-status.yaml")
+	for _, want := range []string{
+		`operatorStatus.create=true currently requires operatorStatus.dryRun=true`,
+		`kind: Deployment`,
+		`name: sw-block-operator-status`,
+		`serviceAccountName: {{ include "seaweed-block.fullname" . }}-operator-status`,
+		`command: ["/usr/local/bin/sw-block"]`,
+		`- "operator-status"`,
+		`- "--dry-run"`,
+		`- "--master-api={{ include "seaweed-block.blockmasterAddress" . }}"`,
+		`- "--interval={{ .Values.operatorStatus.interval }}"`,
+	} {
+		if !strings.Contains(raw, want) {
+			t.Fatalf("operator-status deployment missing %q\n%s", want, raw)
+		}
+	}
+}
+
 func readRepoFile(t *testing.T, repoPath string) string {
 	t.Helper()
 	raw, err := os.ReadFile(filepath.Join("..", "..", filepath.FromSlash(repoPath)))

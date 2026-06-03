@@ -1,0 +1,42 @@
+{{- if and .Values.operatorStatus.create (not .Values.operatorStatus.dryRun) -}}
+{{- fail "operatorStatus.create=true currently requires operatorStatus.dryRun=true; real CRD status writes are not wired yet" -}}
+{{- end -}}
+{{- if .Values.operatorStatus.create }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sw-block-operator-status
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "seaweed-block.labels" . | nindent 4 }}
+    app: sw-block-operator-status
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sw-block-operator-status
+  template:
+    metadata:
+      labels:
+        app: sw-block-operator-status
+        {{- include "seaweed-block.labels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "seaweed-block.fullname" . }}-operator-status
+      {{- with .Values.operatorStatus.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: operator-status
+          image: {{ include "seaweed-block.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/usr/local/bin/sw-block"]
+          args:
+            - "ops"
+            - "operator-status"
+            - "--dry-run"
+            - "--master-api={{ include "seaweed-block.blockmasterAddress" . }}"
+            - "--namespace={{ .Release.Namespace }}"
+            - "--cluster-name={{ .Values.operatorStatus.clusterName }}"
+            - "--interval={{ .Values.operatorStatus.interval }}"
+{{- end }}

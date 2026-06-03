@@ -80,7 +80,7 @@ Acceptance:
 Goal: create the smallest controller that can reconcile observation evidence
 into CRD `.status`.
 
-Status: local skeleton PASS; in-cluster command/Deployment wiring pending.
+Status: local packaged dry-run PASS; live k3s deployment validation pending QA.
 
 Deliverables:
 
@@ -88,16 +88,21 @@ Deliverables:
   `core/ops/operator_status_controller.go`
 - tests proving reconcile writes only cluster/volume status and Events:
   `core/ops/operator_status_controller_test.go`
+- dry-run CLI entrypoint:
+  `sw-block ops operator-status --dry-run`
+- disabled-by-default dry-run Helm Deployment:
+  `charts/seaweed-block/templates/operator-status.yaml`
 - uses existing `core/ops` ManagedVolume projection as the status source.
 - writes `.status`-shaped payloads only.
 
 Acceptance:
 
 ```text
-[pending] controller starts under Helm or a test manifest
+[pending QA] controller starts under Helm as a dry-run Deployment
 [done] controller writes cluster/volume status-shaped payloads
 [done] controller writes no spec, PVC, PV, workload, Secret, StorageClass, or host data
 [done] scoped tests prove mutation clients are not called
+[done] chart refuses operatorStatus.dryRun=false until real status writes are wired
 ```
 
 ## D3: Happy-Path Conditions Gate
@@ -233,9 +238,25 @@ finished plan moved under internal/docs/finished-plans/
   `ClusterEvidence`, builds the existing operator snapshot, writes
   `SwBlockCluster`/`SwBlockVolume` status-shaped payloads, emits Events, and
   has no storage mutation interface.
+- 28%: D2 dry-run packaging landed. `sw-block ops operator-status --dry-run`
+  projects status from bundle/master-api evidence, Helm can render a disabled
+  by default dry-run Deployment, and the chart fails if real CRD writes are
+  requested before the writer exists.
 
 ## Next Step
 
-Decide and implement the D2 packaging shape for the first in-cluster
-status-controller command or deployment. Keep it status-only and disabled by
-default until the D2 live gate passes.
+Ask QA to validate D2 dry-run Deployment on k3s, then decide whether D3 wires a
+real Kubernetes status writer directly or first adds a fake-apiserver/component
+test for status writes.
+
+```text
+helm template sw-block charts/seaweed-block \
+  --namespace kube-system \
+  --set operatorStatus.create=true \
+  --include-crds > /tmp/sw-block-phase35-d2.yaml
+
+kubectl apply --dry-run=server -f /tmp/sw-block-phase35-d2.yaml
+
+# Optional live smoke after normal Helm install:
+kubectl -n kube-system logs deploy/sw-block-operator-status
+```
