@@ -1,6 +1,6 @@
 # Current Plan: Phase 35 - Kubernetes-Native Read-Only Operator Foundation
 
-Status: active, 92% complete. Started on 2026-06-02.
+Status: active, 96% complete. Started on 2026-06-02.
 
 Branch: `phase33-testops-failure-hardening`
 
@@ -315,7 +315,7 @@ Non-blocking follow-ups:
 
 Goal: prove the new operator foundation cannot mutate storage.
 
-Status: local review PASS; live QA pending.
+Status: PASS.
 
 Acceptance:
 
@@ -343,6 +343,31 @@ QA assignment:
 
 ```text
 internal/docs/qa-assignments/phase35-d7-read-only-boundary-qa-assignment.md
+```
+
+QA signoff:
+
+```text
+internal/docs/qa-assignments/phase35-d7-read-only-boundary-qa-signoff.md
+```
+
+Result:
+
+```text
+[done] live ClusterRole has exactly three rules:
+       CRD get/list/watch, CRD status get/update/patch, Events create.
+[done] 7 allowed status/event/read checks returned yes.
+[done] 21 forbidden spec/storage/workload/config mutation checks returned no.
+[done] write-mode reconcile changed only .status and Events.
+[done] SwBlockCluster.spec and SwBlockVolume.spec remained unchanged.
+[done] no PVC/PV/workload was created by operator-status.
+```
+
+Non-blocking doc fix:
+
+```text
+[done] assignment status-subresource can-i commands now use
+       --subresource=status to avoid false negatives on kubectl v1.34.
 ```
 
 ## D8: Close And Release Claim Alignment
@@ -437,13 +462,17 @@ finished plan moved under internal/docs/finished-plans/
   ServiceAccount, writer interface, Kubernetes client, and chart render are
   limited to CRD reads, CRD status writes, and core Event creation. Live
   `kubectl auth can-i` QA remains pending.
+- 96%: D7 live QA passed on `a9f43e1`. The operator-status ClusterRole has
+  exactly three rules, 7 allowed checks returned yes, 21 forbidden
+  spec/storage/workload mutation checks returned no, and write-mode reconcile
+  changed only CRD status and Events with `mutation_allowed=false`.
 
 ## Next Step
 
-Ask QA to run D7 from
-`internal/docs/qa-assignments/phase35-d7-read-only-boundary-qa-assignment.md`.
-D7 closes only when live `kubectl auth can-i` checks prove status/events are
-allowed and storage/workload/spec mutations are denied.
+Run D8 close and release-claim alignment. Produce the Phase 35 finished plan,
+update release/README wording if needed, and ensure the final claim is narrow:
+Kubernetes-native read-only status/Events foundation, not a mutating operator
+lifecycle.
 
 ```text
 VolumeReady -> Normal

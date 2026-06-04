@@ -55,11 +55,16 @@ These must be `yes`:
 kubectl auth can-i get swblockvolumes.block.seaweedfs.com --as <SA> -n kube-system
 kubectl auth can-i list swblockvolumes.block.seaweedfs.com --as <SA> -n kube-system
 kubectl auth can-i watch swblockvolumes.block.seaweedfs.com --as <SA> -n kube-system
-kubectl auth can-i patch swblockvolumes.block.seaweedfs.com/status --as <SA> -n kube-system
-kubectl auth can-i update swblockvolumes.block.seaweedfs.com/status --as <SA> -n kube-system
-kubectl auth can-i patch swblockclusters.block.seaweedfs.com/status --as <SA> -n kube-system
+kubectl auth can-i patch swblockvolumes --subresource=status --as <SA> -n kube-system
+kubectl auth can-i update swblockvolumes --subresource=status --as <SA> -n kube-system
+kubectl auth can-i patch swblockclusters --subresource=status --as <SA> -n kube-system
+kubectl auth can-i update swblockclusters --subresource=status --as <SA> -n kube-system
 kubectl auth can-i create events --as <SA> -n kube-system
 ```
+
+Use `--subresource=status` for the status checks. On newer kubectl versions,
+the spelling `swblockvolumes.block.seaweedfs.com/status` can return a false
+`no` even when the ClusterRole and live status PATCH are correct.
 
 ### Forbidden Verbs
 
@@ -117,4 +122,3 @@ D7 passes when:
 - Runtime reconcile writes CRD `.status` and Events only.
 - Output and operator snapshot still report `mutation_allowed=false`.
 - Cleanup leaves no product residue.
-
