@@ -1,6 +1,6 @@
 # Current Plan: Phase 35 - Kubernetes-Native Read-Only Operator Foundation
 
-Status: active, 42% complete. Started on 2026-06-02.
+Status: active, 50% complete. Started on 2026-06-02.
 
 Branch: `phase33-testops-failure-hardening`
 
@@ -119,8 +119,7 @@ Non-blocking follow-up:
 
 Goal: prove a normal first PVC becomes Kubernetes-native Ready status.
 
-Status: live QA blocked on volume status schema mismatch; fix landed locally,
-live rerun pending QA.
+Status: PASS.
 
 Boundary:
 
@@ -149,6 +148,15 @@ ready_volume_count increments on SwBlockCluster
 sw-block ops report/operator-snapshot agrees with CRD status
 kubectl describe shows useful status without reading bundle files
 cleanup_status=ok
+```
+
+Non-blocking follow-ups:
+
+```text
+[open] add server-side-dry-run/schema validation for CRD status payloads, so
+       future required-field or enum drift is caught before live QA.
+[open] write-mode retry log still says "dry-run iteration failed"; relabel
+       to "operator-status iteration failed" before D8 close.
 ```
 
 ## D4: Blocked Conditions Gate
@@ -277,19 +285,21 @@ finished plan moved under internal/docs/finished-plans/
   operator-snapshot action contract where the CRD requires camelCase
   `allowedActions[].mutationAllowed`. The fix maps actions into a dedicated
   CRD-status DTO and preserves the snapshot JSON contract. Live rerun pending.
+- 50%: D3 re-validation passed on `e3cf010`. `SwBlockVolume.status` is
+  populated with camelCase `allowedActions[].mutationAllowed=false`, status is
+  `ready`, reason is `first_volume_verified`, cluster ready count is 1, spec
+  remains untouched, and the service account still has no storage/workload
+  mutation power.
 
 ## Next Step
 
-Ask QA to run the D3 live gate: install with CRD stubs present, enable
-`operatorStatus.create=true` and `operatorStatus.dryRun=false`, then verify CRD
-status agrees with the first-volume report while no storage mutation is added by
-the operator-status service account.
+Implement D4 blocked-condition publication: project the known
+`csi_node_image_pull_failed` blocked evidence into `SwBlockVolume.status` and a
+Kubernetes Warning Event, without producing Ready=True anywhere.
 
 ```text
-helm template sw-block charts/seaweed-block \
-  --set operatorStatus.create=true \
-  --set operatorStatus.dryRun=false
-
-kubectl -n kube-system get swblockcluster sw-block -o jsonpath='{.status.readyVolumeCount}'
-kubectl -n kube-system get swblockvolume <pvc-name> -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}'
+Condition Ready=False
+Condition Blocked=True
+reason=csi_node_image_pull_failed
+event Warning CsiNodeImagePullFailed
 ```
