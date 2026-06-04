@@ -1,6 +1,6 @@
 # Current Plan: Phase 35 - Kubernetes-Native Read-Only Operator Foundation
 
-Status: active, 88% complete. Started on 2026-06-02.
+Status: active, 92% complete. Started on 2026-06-02.
 
 Branch: `phase33-testops-failure-hardening`
 
@@ -315,6 +315,8 @@ Non-blocking follow-ups:
 
 Goal: prove the new operator foundation cannot mutate storage.
 
+Status: local review PASS; live QA pending.
+
 Acceptance:
 
 ```text
@@ -322,6 +324,25 @@ RBAC audit shows no create/update/patch/delete on PVC/PV/workloads/storage data
 controller tests fail if mutating clients are called
 HTTP/dashboard/ops surfaces remain read-only
 negative scenarios produce dry-run advice only
+```
+
+Local verification:
+
+```text
+[done] operator-status Helm RBAC grants only get/list/watch on CRDs,
+       get/update/patch on CRD status subresources, and create Events.
+[done] operator-status Deployment uses its dedicated ServiceAccount.
+[done] KubernetesStatusClient only PATCHes CRD /status and POSTs Events.
+[done] no operator-status code path exposes PVC/PV/workload/Secret/
+       StorageClass/host mutation methods.
+[done] go test ./core/ops ./cmd/sw-block ./cmd/blockcsi
+[done] helm lint charts/seaweed-block
+```
+
+QA assignment:
+
+```text
+internal/docs/qa-assignments/phase35-d7-read-only-boundary-qa-assignment.md
 ```
 
 ## D8: Close And Release Claim Alignment
@@ -412,14 +433,17 @@ finished plan moved under internal/docs/finished-plans/
   left exactly one distinct Kubernetes Event named
   `pvc-walfault-warning-wal-integrity-fault`. Status remained
   blocked/Ready=False and RBAC remained status/events only.
+- 92%: D7 local read-only boundary review passed. The operator-status
+  ServiceAccount, writer interface, Kubernetes client, and chart render are
+  limited to CRD reads, CRD status writes, and core Event creation. Live
+  `kubectl auth can-i` QA remains pending.
 
 ## Next Step
 
-Run D7 read-only boundary close. Re-audit the operator-status service account
-and code path now that real status writes and Events are enabled: it may patch
-only CRD status and create Events, and it must not mutate PVC/PV/workloads,
-storage classes, Secrets, Helm releases, iSCSI sessions, multipath maps, or
-hostPath data.
+Ask QA to run D7 from
+`internal/docs/qa-assignments/phase35-d7-read-only-boundary-qa-assignment.md`.
+D7 closes only when live `kubectl auth can-i` checks prove status/events are
+allowed and storage/workload/spec mutations are denied.
 
 ```text
 VolumeReady -> Normal
