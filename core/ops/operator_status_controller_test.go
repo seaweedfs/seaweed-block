@@ -167,6 +167,99 @@ func TestOperatorStatusReconcilerStaleEvidenceProjectsUnknownAndWarningEvent(t *
 	}
 }
 
+func TestOperatorStatusReconcilerStatusEndpointUnreachableIsUnknownNotBlocked(t *testing.T) {
+	source := fakeOperatorStatusSource{cluster: ClusterEvidence{
+		SchemaVersion: ObservationSchemaVersion,
+		CapturedAt:    time.Date(2026, 6, 4, 2, 0, 0, 0, time.UTC),
+		Status:        ObservationStatusUnavailable,
+		ManagedVolumes: []ManagedVolumeProjection{ProjectManagedVolume(ManagedVolumeFacts{
+			VolumeID:      "pvc-unreachable",
+			PVCName:       "status-unreachable-pvc",
+			ProductStatus: ObservationStatusUnavailable,
+			ProductReason: ReasonStatusEndpointUnreachable,
+			EvidenceRefs:  []string{"diagnostics/status-endpoint-unreachable.txt"},
+		})},
+	}}
+	writer := &fakeOperatorStatusWriter{}
+	events := &fakeOperatorEventSink{}
+
+	_, err := (OperatorStatusReconciler{
+		Source:    source,
+		Writer:    writer,
+		EventSink: events,
+	}).Reconcile(context.Background())
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if writer.cluster.StaleVolumeCount != 1 || writer.cluster.BlockedVolumeCount != 0 {
+		t.Fatalf("cluster status=%+v", writer.cluster)
+	}
+	if len(writer.volumes) != 1 {
+		t.Fatalf("volume writes=%+v", writer.volumes)
+	}
+	volume := writer.volumes[0]
+	if volume.status.Status != ManagedVolumeStatusUnknown || volume.status.ReasonCode != ReasonStatusEndpointUnreachable {
+		t.Fatalf("volume status=%+v", volume.status)
+	}
+	assertCondition(t, volume.status.Conditions, ConditionReady, "Unknown", ReasonStatusEndpointUnreachable)
+	assertCondition(t, volume.status.Conditions, ConditionEvidenceStale, "True", ReasonStatusEndpointUnreachable)
+	if condition := findObservationCondition(volume.status.Conditions, ConditionBlocked); condition != nil && condition.Status == "True" {
+		t.Fatalf("pure unreachable status must not become Blocked=True: %+v", volume.status.Conditions)
+	}
+	if events.countByReason(ReasonStatusEndpointUnreachable) == 0 {
+		t.Fatalf("missing status_endpoint_unreachable event: %+v", events.events)
+	}
+	for _, event := range events.events {
+		if event.Reason == ReasonStatusEndpointUnreachable && event.Type != "Warning" {
+			t.Fatalf("status endpoint event type=%s want Warning", event.Type)
+		}
+	}
+}
+
+func TestOperatorStatusReconcilerWALIntegrityFaultIsNeverReady(t *testing.T) {
+	source := fakeOperatorStatusSource{cluster: ClusterEvidence{
+		SchemaVersion: ObservationSchemaVersion,
+		CapturedAt:    time.Date(2026, 6, 4, 2, 15, 0, 0, time.UTC),
+		Status:        ObservationStatusBlocked,
+		ManagedVolumes: []ManagedVolumeProjection{ProjectManagedVolume(ManagedVolumeFacts{
+			VolumeID:      "pvc-corrupt",
+			PVCName:       "wal-corrupt-pvc",
+			ProductStatus: ObservationStatusBlocked,
+			ProductReason: ReasonWALIntegrityFault,
+			EvidenceRefs:  []string{"status/report/cluster-evidence.json", "blockvolume.log"},
+		})},
+	}}
+	writer := &fakeOperatorStatusWriter{}
+	events := &fakeOperatorEventSink{}
+
+	_, err := (OperatorStatusReconciler{
+		Source:    source,
+		Writer:    writer,
+		EventSink: events,
+	}).Reconcile(context.Background())
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if writer.cluster.ReadyVolumeCount != 0 || writer.cluster.BlockedVolumeCount != 1 {
+		t.Fatalf("cluster status=%+v", writer.cluster)
+	}
+	if len(writer.volumes) != 1 {
+		t.Fatalf("volume writes=%+v", writer.volumes)
+	}
+	volume := writer.volumes[0]
+	if volume.status.Status == ManagedVolumeStatusReady {
+		t.Fatalf("wal integrity fault must never be Ready: %+v", volume.status)
+	}
+	if volume.status.ReasonCode != ReasonWALIntegrityFault {
+		t.Fatalf("volume status=%+v", volume.status)
+	}
+	assertCondition(t, volume.status.Conditions, ConditionReady, "False", ReasonWALIntegrityFault)
+	assertCondition(t, volume.status.Conditions, ConditionBlocked, "True", ReasonWALIntegrityFault)
+	if events.countByReason(ReasonWALIntegrityFault) == 0 {
+		t.Fatalf("missing wal_integrity_fault event: %+v", events.events)
+	}
+}
+
 func TestOperatorStatusReconcilerEventFailureDoesNotBlockLaterStatusWrites(t *testing.T) {
 	source := fakeOperatorStatusSource{cluster: ClusterEvidence{
 		SchemaVersion: ObservationSchemaVersion,
@@ -301,4 +394,15 @@ func (f *fakeOperatorEventSink) countByReason(reason string) int {
 		}
 	}
 	return count
+}
+
+func assertCondition(t *testing.T, conditions []ObservationCondition, typ, status, reason string) {
+	t.Helper()
+	condition := findObservationCondition(conditions, typ)
+	if condition == nil {
+		t.Fatalf("missing %s condition: %+v", typ, conditions)
+	}
+	if condition.Status != status || condition.Reason != reason {
+		t.Fatalf("%s condition=%+v want status=%s reason=%s", typ, *condition, status, reason)
+	}
 }

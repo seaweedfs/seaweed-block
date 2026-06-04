@@ -1,6 +1,6 @@
 # Current Plan: Phase 35 - Kubernetes-Native Read-Only Operator Foundation
 
-Status: active, 66% complete. Started on 2026-06-02.
+Status: active, 72% complete. Started on 2026-06-02.
 
 Branch: `phase33-testops-failure-hardening`
 
@@ -198,6 +198,8 @@ Non-blocking follow-ups:
 
 Goal: preserve the negative-first rule for unreachable or incomplete evidence.
 
+Status: local contract PASS; live QA pending.
+
 Scenarios:
 
 - live status endpoint unreachable.
@@ -211,6 +213,53 @@ insufficient or stale evidence becomes Ready=Unknown
 EvidenceStale=True when freshness is the reason
 SmartWAL corruption never becomes Ready=True
 preferred follow-up: reason=wal_integrity_fault when that reason is surfaced
+```
+
+Local verification:
+
+```text
+[done] operator-status projects evidence_stale as Ready=Unknown +
+       EvidenceStale=True and emits a Warning Event.
+[done] operator-status projects status_endpoint_unreachable as Ready=Unknown +
+       EvidenceStale=True, not Blocked=True, and emits a Warning Event.
+[done] operator-status projects wal_integrity_fault as non-Ready
+       (Blocked/Ready=False) with reason=wal_integrity_fault.
+[done] go test ./core/ops ./cmd/sw-block ./cmd/blockcsi
+[done] helm lint charts/seaweed-block
+[done] helm template with operatorStatus.create=true,dryRun=false renders
+       status/events-only RBAC and no --dry-run arg.
+```
+
+QA assignment:
+
+```text
+Run a live D5 status-surface gate in write mode.
+
+Required checks:
+1. Pure status endpoint unreachable:
+   - SwBlockVolume.status.status=unknown
+   - Ready=Unknown
+   - EvidenceStale=True
+   - reasonCode=status_endpoint_unreachable
+   - Kubernetes Warning Event reason=status_endpoint_unreachable
+   - no Blocked=True and no Ready=True on CRD/report/dashboard/operator-snapshot
+
+2. Evidence stale replay/bundle:
+   - SwBlockVolume.status.status=unknown
+   - Ready=Unknown
+   - EvidenceStale=True
+   - reasonCode=evidence_stale
+   - Kubernetes Warning Event reason=evidence_stale
+
+3. Phase 34 SmartWAL corruption projection:
+   - no Ready=True anywhere
+   - preferred: reasonCode=wal_integrity_fault when the fact is surfaced
+   - accepted for D5 only: any non-ready projection if the live evidence still
+     lacks the specific reason
+
+4. Read-only boundary:
+   - operator SA can patch only CRD status and create Events
+   - no storage/workload mutation verbs are granted
 ```
 
 ## D6: Kubernetes Events Gate
@@ -315,13 +364,16 @@ finished plan moved under internal/docs/finished-plans/
   0 even with duplicate/already-existing Events, Warning Event exists,
   `SwBlockVolume.status` is blocked with Ready=False and Blocked=True, no
   Ready=True appears on blocked surfaces, and RBAC remains status/events only.
+- 72%: D5 local contract coverage landed. Operator-status tests now lock
+  `evidence_stale`, `status_endpoint_unreachable`, and `wal_integrity_fault`
+  projections through the CRD-status/Event layer. Scoped Go tests, Helm lint,
+  and write-mode Helm render pass. Live QA is pending.
 
 ## Next Step
 
-Implement and validate D5 Unknown/EvidenceStale publication: unreachable or
-incomplete evidence must become Ready=Unknown/EvidenceStale=True, not Blocked
-and never Ready=True. Reuse the Phase 34 SmartWAL corruption projection to prove
-the status surface remains negative-first.
+Ask QA to run the D5 live status-surface gate in write mode. D5 closes only
+when unreachable/stale evidence is visible through Kubernetes CRD status and
+Events without any false Ready=True or inappropriate Blocked=True projection.
 
 ```text
 Condition Ready=Unknown
