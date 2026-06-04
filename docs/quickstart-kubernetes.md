@@ -31,6 +31,9 @@ The quickstart proves:
   read-only dashboard are available.
 - The report/dashboard include `operator-snapshot.json`, a read-only
   operator-facing status projection. It is not a mutating operator.
+- The gated operator-status path can publish the same read-only vocabulary into
+  `SwBlockCluster` / `SwBlockVolume` `.status` and Kubernetes Events. It is
+  status/events only and does not create CR objects or mutate storage.
 - The example resources and host-side residue are cleaned up.
 
 It does not prove production HA, backup/restore, broad upgrade safety, broad

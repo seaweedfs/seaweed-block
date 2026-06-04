@@ -44,26 +44,24 @@ This is the short internal roadmap. Keep it current and readable.
   evidence: live status endpoint unreachable, restart convergence, SmartWAL
   corruption refusal, and targeted cross-validation between helper summaries
   and product or Kubernetes facts. Phase 34 closed on 2026-06-02.
-- Active phase: Phase 35 Kubernetes-native read-only operator foundation.
-  Implement CRDs, status-only reconciliation, Conditions, Events, and read-only
-  boundary tests before any mutating operator lifecycle or NVMe ANA expansion.
-- `v0.4-beta-candidate`: Kubernetes-native read-only operator foundation. Add
-  CRDs, Conditions, Events, and a status-only controller for cluster, node,
-  volume, recovery, stale-evidence, and cleanup-required visibility. This is
-  the first release boundary that can credibly feel like a normal Kubernetes
-  product loop rather than an install script. Mutating workflows such as
-  repair, rebuild, failback, delete safety, and automatic cleanup come after the
-  read-only status contract is stable.
+- `v0.4-beta-candidate`: Kubernetes-native read-only operator foundation. Phase
+  35 closed this scope on 2026-06-04 with CRDs, Conditions, Events, a
+  status-only controller, stable Event identity, stale/blocked status gates,
+  and read-only RBAC proof. This is the first release boundary that can
+  credibly feel like a normal Kubernetes product loop rather than an install
+  script. Mutating workflows such as repair, rebuild, failback, delete safety,
+  automatic cleanup, and CR object ownership come after the read-only status
+  contract is stable.
 - Model hardening gate before the next large release: complete the
   ManagedVolume Operations Model under `internal/docs/protocol/` before
   expanding operator or broader HA claims. The goal is to prevent Kubernetes,
   CSI, authority, host-path, recovery, and future NVMe logic from becoming
   scattered scripts or unrelated small automata.
 
-Do not skip from scripts directly to mutating operator lifecycle. Helm should
-stabilize the installation contract, then Phase 35 should add read-only CRD
-status, Conditions, and Events before an in-cluster controller owns upgrades,
-repair, rebuild, delete safety, or cleanup.
+Do not skip from scripts directly to mutating operator lifecycle. Helm has
+stabilized the installation contract, and Phase 35 added read-only CRD status,
+Conditions, and Events. Any in-cluster controller ownership of upgrades, repair,
+rebuild, delete safety, or cleanup must start as a separate gated phase.
 
 ### Alpha Preview
 
@@ -221,13 +219,13 @@ repair, rebuild, delete safety, or cleanup.
   volumes a first-class internal read model that composes K8s, CSI, authority,
   recovery, host path, workload, and evidence facts while keeping local
   controllers small and testable.
-- Next: Phase 35 should turn the existing read-only operations model into
-  Kubernetes-native status:
+- Closed on 2026-06-04: Phase 35 turned the existing read-only operations model
+  into Kubernetes-native status:
   - `SwBlockCluster` and `SwBlockVolume` CRDs,
   - a status-only controller that writes `.status`,
   - ManagedVolume Conditions projected into Kubernetes Conditions,
-  - Kubernetes Events for ready, blocked, promoted, stale-evidence, and cleanup
-    required transitions,
+  - Kubernetes Events for ready, blocked, stale-evidence, and WAL-integrity
+    transitions,
   - tests proving the controller has no mutating storage authority.
 - Later: metrics, read-only dashboard hardening, conservative admin controls,
   enterprise operations, hosted validation, fleet automation, and cloud-scale
@@ -263,9 +261,10 @@ repair, rebuild, delete safety, or cleanup.
   ManagedVolume model used by `sw-block ops report`.
 - Closed on 2026-05-22: Phase 25 packages that operations surface into the
   v0.3 Helm first-volume release story and validates docs/gates against it.
-- Next: Phase 35 should implement the first Kubernetes-native operator
-  foundation slice over this surface: CRDs, read-only `.status`, Conditions,
-  Events, and read-only RBAC. It should not add mutating admin workflows.
+- Closed on 2026-06-04: Phase 35 implemented the first Kubernetes-native
+  operator foundation slice over this surface: CRDs, read-only `.status`,
+  Conditions, Events, stable Event identity, and read-only RBAC. It did not add
+  mutating admin workflows.
 - Seed landed:
   - `NewObservationDashboardHandler` serves `index.html`,
     `cluster-evidence.json`, `timeline.jsonl`, `summary.txt`, and `healthz`,
@@ -378,19 +377,23 @@ credible light-use product:
 
 ## Productized Operations Gap Priority
 
-These are the current operation gaps in priority order. Phase 35 should address
-the P0 group first.
+These are the current operation gaps in priority order. Phase 35 closed the P0
+read-only status foundation; the remaining groups should become separate gated
+phases rather than being mixed into the closed foundation.
 
 ### P0: Become Kubernetes-Native For Read-Only Status
 
 1. CRD + status-only operator:
-   `SwBlockCluster`, `SwBlockVolume`, and `.status` writes only.
+   `SwBlockCluster`, `SwBlockVolume`, and `.status` writes only. Status:
+   closed in Phase 35.
 2. Conditions writer:
    project `Ready`, `Blocked`, `Recovering`, `Recovered`, `EvidenceStale`, and
-   `CleanupRequired` from ManagedVolume facts.
+   `CleanupRequired` from ManagedVolume facts. Status: core vocabulary closed;
+   cleanup projection remains follow-up.
 3. Kubernetes Events:
    emit normal/warning Events such as `VolumeReady`,
-   `CsiNodeImagePullFailed`, `AuthorityPromoted`, and `EvidenceStale`.
+   `CsiNodeImagePullFailed`, `WalIntegrityFault`, and `EvidenceStale`. Status:
+   closed for read-only status Events.
 
 ### P1: Make Operations Actionable
 
@@ -429,11 +432,12 @@ become another isolated status model.
 ## Current Execution Pointer
 
 - Active work should be tracked in `internal/docs/current-plan.md`.
-- Current active work is Phase 35: Kubernetes-native read-only operator
-  foundation. Start with CRDs, status-only reconciliation, Conditions, Events,
+- Phase 35 closed the Kubernetes-native read-only operator foundation:
+  CRDs, status-only reconciliation, Conditions, Events, stable Event identity,
   and read-only boundary tests.
 - Do not start NVMe ANA parity, rebuild/failback, backup/restore, or mutating
-  operator workflows before the Phase 35 status foundation lands.
+  operator workflows by extending Phase 35. Pick the next product loop as a new
+  gated phase.
 - When the current plan closes, move it to `internal/docs/finished-plans/`
   with a phase/topic filename such as
   `phase1_finishedplan_frontend_protocol_readiness.md`.

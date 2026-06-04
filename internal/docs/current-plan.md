@@ -1,6 +1,6 @@
 # Current Plan: Phase 35 - Kubernetes-Native Read-Only Operator Foundation
 
-Status: active, 96% complete. Started on 2026-06-02.
+Status: complete, 100%. Started on 2026-06-02. Closed on 2026-06-04.
 
 Branch: `phase33-testops-failure-hardening`
 
@@ -375,6 +375,8 @@ Non-blocking doc fix:
 Goal: close Phase 35 as a Kubernetes-native status foundation, not a full
 operator lifecycle.
 
+Status: PASS.
+
 Required inputs:
 
 - D1-D7 sign-offs.
@@ -385,11 +387,18 @@ Required inputs:
 Acceptance:
 
 ```text
-kubectl-visible CRD status agrees with sw-block ops surfaces
-Kubernetes Events agree with reason codes
-read-only boundary is proven
-no mutating operator/admin claim is made
-finished plan moved under internal/docs/finished-plans/
+[done] kubectl-visible CRD status agrees with sw-block ops surfaces
+[done] Kubernetes Events agree with reason codes
+[done] read-only boundary is proven
+[done] no mutating operator/admin claim is made
+[done] finished plan moved under internal/docs/finished-plans/
+```
+
+Close artifacts:
+
+```text
+internal/docs/finished-plans/phase35_finishedplan_kubernetes_native_read_only_operator_foundation.md
+docs/releases/v0.4-beta-candidate.md
 ```
 
 ## Current Progress
@@ -466,18 +475,13 @@ finished plan moved under internal/docs/finished-plans/
   exactly three rules, 7 allowed checks returned yes, 21 forbidden
   spec/storage/workload mutation checks returned no, and write-mode reconcile
   changed only CRD status and Events with `mutation_allowed=false`.
+- 100%: D8 close completed. README, quickstart, release index, release note,
+  roadmap, and finished plan now describe the narrow claim: Kubernetes-native
+  read-only CRD status and Events foundation, not a mutating operator lifecycle.
 
 ## Next Step
 
-Run D8 close and release-claim alignment. Produce the Phase 35 finished plan,
-update release/README wording if needed, and ensure the final claim is narrow:
-Kubernetes-native read-only status/Events foundation, not a mutating operator
-lifecycle.
-
-```text
-VolumeReady -> Normal
-CsiNodeImagePullFailed -> Warning
-AuthorityPromoted -> Normal
-EvidenceStale -> Warning
-CleanupRequired -> Warning
-```
+Phase 35 is closed. Next phase should choose a new product loop explicitly:
+mutating operator lifecycle, cleanup/finalizer safety, model hardening, NVMe ANA
+parity, rebuild/failback, or backup/snapshot/restore. Do not mix them into this
+closed read-only operator foundation.

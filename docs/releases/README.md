@@ -13,6 +13,7 @@ is still outside the supported boundary.
 - [v0.3.4 Alpha — Status Surface Hardening And Strict New-User Path](v0.3.4-alpha.md)
 - [v0.3.5 Alpha — Failure-Path Evidence And Cleanup Hardening](v0.3.5-alpha.md)
 - [v0.3.6 Alpha — Test Realism And Dirty-Failure Hardening](v0.3.6-alpha.md)
+- [v0.4 Beta Candidate — Kubernetes-Native Read-Only Operator Foundation](v0.4-beta-candidate.md)
 
 ## Version Boundary
 
@@ -49,6 +50,10 @@ is still outside the supported boundary.
   live status endpoint unreachable, restart convergence, and real V3 SmartWAL
   corruption gates prove no false `Ready=True` is projected from weak or dirty
   evidence.
+- `v0.4-beta-candidate` adds a Kubernetes-native read-only status foundation:
+  `SwBlockCluster` and `SwBlockVolume` CRDs, status-only reconciliation,
+  Conditions, Events, stable event identity, and read-only RBAC proof. It is
+  not a mutating operator lifecycle.
 
 Mutating operator packaging is not included in these alphas. v0.3 introduces
 Helm as the preferred Kubernetes alpha install path; the script path remains

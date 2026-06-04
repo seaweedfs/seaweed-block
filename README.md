@@ -33,7 +33,7 @@ This is an **alpha** product path for supported lab clusters, not production.
 | Support-bundle replay | Available | Negative-first status reasons | Available |
 | Multi-volume RF=3 lab path | Gated | CSI reattach recovery | Gated |
 | iSCSI ALUA/dm-multipath mounted failover | Gated | Restart persistence with hostPath | Gated |
-| Read-only operator snapshot | Partial | Production operator lifecycle | Planned |
+| Read-only CRD status + Events | Gated | Production operator lifecycle | Planned |
 | Backup/snapshot/restore | Planned | Returned-replica rebuild/failback | Planned |
 | NVMe ANA parity | Planned | Production SLO/performance claims | Not claimed |
 
@@ -50,6 +50,8 @@ This is an **alpha** product path for supported lab clusters, not production.
   - interleaved multi-volume failover isolation.
 - Inspect cluster, volume, replica, primary, frontend, timeline, and reason
   evidence through read-only CLI/report/dashboard surfaces.
+- Publish the same read-only status into Kubernetes-native `SwBlockCluster` /
+  `SwBlockVolume` `.status` and Events on the gated operator-status path.
 - Replay support bundles offline.
 
 These are narrow alpha claims tied to documented gates. See
@@ -58,7 +60,9 @@ These are narrow alpha claims tied to documented gates. See
 ## What You Should Not Expect Yet
 
 - Production readiness or production SLOs.
-- A production-grade operator or mutating admin workflow.
+- A production-grade operator or mutating admin workflow. The current
+  operator-status controller is status/events only and does not create
+  `SwBlockVolume` objects for you.
 - Backup, snapshot, or restore.
 - Returned-replica rebuild, reintegration, or failback.
 - Transparent Kubernetes node-loss failover without pod recreate.
@@ -130,7 +134,8 @@ Common read-only commands:
 | `sw-block ops inventory --namespace default --master 127.0.0.1:9333 --out <dir>` | Collect replica-level inventory. |
 
 Reports and dashboard expose `operator-snapshot.json`, a read-only status
-projection for future operator work. There are no mutating admin actions.
+projection. The gated operator-status controller can publish that model into
+Kubernetes CRD `.status` and Events, but it has no mutating admin actions.
 
 Support-bundle replay:
 
