@@ -1,6 +1,6 @@
 # Current Plan: Phase 35 - Kubernetes-Native Read-Only Operator Foundation
 
-Status: active, 82% complete. Started on 2026-06-02.
+Status: active, 88% complete. Started on 2026-06-02.
 
 Branch: `phase33-testops-failure-hardening`
 
@@ -251,7 +251,7 @@ Result:
 
 Goal: make important transitions visible through standard Kubernetes Events.
 
-Status: event identity hygiene local PASS; live QA pending.
+Status: PASS.
 
 Required Events:
 
@@ -282,18 +282,33 @@ Local verification:
 [done] helm lint charts/seaweed-block
 ```
 
-Open D6 validation:
+QA signoff:
 
 ```text
-[pending] live QA should run repeated write-mode reconciles for a persistent
-          blocked volume and verify Event object count stays bounded.
-[pending] live QA should verify Event reason/type alignment for:
-          first_volume_verified -> Normal
-          csi_node_image_pull_failed -> Warning
-          transparent_host_path_recovered -> Normal
-          evidence_stale/status_endpoint_unreachable -> Warning
-[pending] CleanupRequired Event remains pending until cleanup residue evidence
-          is projected as a ManagedVolume condition.
+internal/docs/qa-assignments/phase35-d6-stable-event-identity-qa-signoff.md
+```
+
+Result:
+
+```text
+[done] three repeated write-mode reconciles against a persistent
+       wal_integrity_fault volume all exited 0.
+[done] distinct Event object count stayed at 1 across all three reconciles.
+[done] Event name is stable per object/type/reason:
+       pvc-walfault-warning-wal-integrity-fault.
+[done] status stayed blocked/Ready=False with no Ready=True.
+[done] SA boundary stayed status/events only.
+```
+
+Non-blocking follow-ups:
+
+```text
+[open] 409 dedupe does not patch count++/lastTimestamp; CRD status carries
+       freshness, so this is optional telemetry polish.
+[open] same type+reason conditions still collapse to one Event; CRD conditions
+       carry the detailed Ready/Blocked split, so this is acceptable for D6.
+[open] CleanupRequired Event remains pending until cleanup residue evidence is
+       projected as a ManagedVolume condition.
 ```
 
 ## D7: Read-Only Boundary Gate
@@ -392,13 +407,19 @@ finished plan moved under internal/docs/finished-plans/
   idempotent 409 handling instead of producing timestamp-suffixed Event spam.
   Scoped Go tests and Helm lint pass. Live QA and full reason/type coverage are
   pending.
+- 88%: D6 live QA passed on `1b22ccc`. Three repeated write-mode reconciles
+  against a persistent `wal_integrity_fault` blocked volume all exited 0 and
+  left exactly one distinct Kubernetes Event named
+  `pvc-walfault-warning-wal-integrity-fault`. Status remained
+  blocked/Ready=False and RBAC remained status/events only.
 
 ## Next Step
 
-Ask QA to run the D6 live Event hygiene gate on the current branch tip. The
-main proof is repeated write-mode reconcile against a persistent blocked volume:
-the second reconcile should exit 0 and not grow a new Event object for the same
-object/type/reason.
+Run D7 read-only boundary close. Re-audit the operator-status service account
+and code path now that real status writes and Events are enabled: it may patch
+only CRD status and create Events, and it must not mutate PVC/PV/workloads,
+storage classes, Secrets, Helm releases, iSCSI sessions, multipath maps, or
+hostPath data.
 
 ```text
 VolumeReady -> Normal
