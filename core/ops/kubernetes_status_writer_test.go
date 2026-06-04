@@ -151,9 +151,13 @@ func TestKubernetesStatusClientCreatesCoreEvents(t *testing.T) {
 	if involved["kind"] != SwBlockVolumeKind || involved["name"] != "blocked-pvc" {
 		t.Fatalf("involvedObject=%+v", involved)
 	}
+	metadata := eventBody["metadata"].(map[string]any)
+	if metadata["name"] != "blocked-pvc-warning-csi-node-image-pull-failed" {
+		t.Fatalf("event name=%s", metadata["name"])
+	}
 }
 
-func TestKubernetesStatusClientTreatsDuplicateEventAsSuccess(t *testing.T) {
+func TestKubernetesStatusClientTreatsPersistentEventAsIdempotentSuccess(t *testing.T) {
 	seen := map[string]bool{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var body map[string]any
@@ -190,11 +194,29 @@ func TestKubernetesStatusClientTreatsDuplicateEventAsSuccess(t *testing.T) {
 	if err := client.EmitEvent(context.Background(), event); err != nil {
 		t.Fatalf("first event: %v", err)
 	}
+	event.ObservedAt = event.ObservedAt.Add(time.Minute)
 	if err := client.EmitEvent(context.Background(), event); err != nil {
-		t.Fatalf("duplicate event must be idempotent success: %v", err)
+		t.Fatalf("persistent event must be idempotent success: %v", err)
 	}
 	if len(seen) != 1 {
 		t.Fatalf("seen events=%+v", seen)
+	}
+}
+
+func TestKubernetesEventNameSeparatesTypeAndReason(t *testing.T) {
+	base := OperatorKubernetesEvent{
+		InvolvedObject: OperatorObjectRef{Name: "demo-pvc"},
+		Reason:         ReasonFirstVolumeVerified,
+	}
+	normal := base
+	normal.Type = "Normal"
+	warning := base
+	warning.Type = "Warning"
+	if kubernetesEventName(normal) == kubernetesEventName(warning) {
+		t.Fatalf("event names must separate type: normal=%s warning=%s", kubernetesEventName(normal), kubernetesEventName(warning))
+	}
+	if got := kubernetesEventName(normal); strings.Contains(got, ".") {
+		t.Fatalf("event name must be stable and not timestamp-suffixed: %s", got)
 	}
 }
 

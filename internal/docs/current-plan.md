@@ -1,6 +1,6 @@
 # Current Plan: Phase 35 - Kubernetes-Native Read-Only Operator Foundation
 
-Status: active, 78% complete. Started on 2026-06-02.
+Status: active, 82% complete. Started on 2026-06-02.
 
 Branch: `phase33-testops-failure-hardening`
 
@@ -251,6 +251,8 @@ Result:
 
 Goal: make important transitions visible through standard Kubernetes Events.
 
+Status: event identity hygiene local PASS; live QA pending.
+
 Required Events:
 
 - `VolumeReady` as Normal.
@@ -265,6 +267,33 @@ Acceptance:
 events include involved object, reason, type, message, volume id, and evidence ref
 events are deduplicated enough to avoid timeline spam
 events match ManagedVolume/operator-snapshot reason codes
+```
+
+Local verification:
+
+```text
+[done] Kubernetes Event names are stable per SwBlockVolume object, Event type,
+       and reason code. The name no longer embeds observedAt.UnixNano().
+[done] Persistent same-reason Events become idempotent 409 success across
+       reconcile iterations instead of creating a new Event each time.
+[done] Normal and Warning Events for the same object/reason get different
+       names.
+[done] go test ./core/ops ./cmd/sw-block ./cmd/blockcsi
+[done] helm lint charts/seaweed-block
+```
+
+Open D6 validation:
+
+```text
+[pending] live QA should run repeated write-mode reconciles for a persistent
+          blocked volume and verify Event object count stays bounded.
+[pending] live QA should verify Event reason/type alignment for:
+          first_volume_verified -> Normal
+          csi_node_image_pull_failed -> Warning
+          transparent_host_path_recovered -> Normal
+          evidence_stale/status_endpoint_unreachable -> Warning
+[pending] CleanupRequired Event remains pending until cleanup residue evidence
+          is projected as a ManagedVolume condition.
 ```
 
 ## D7: Read-Only Boundary Gate
@@ -358,13 +387,18 @@ finished plan moved under internal/docs/finished-plans/
   Blocked or Ready=True, while `wal_integrity_fault` projected to
   Blocked/Ready=False. Warning Events landed and the status/events-only RBAC
   boundary held.
+- 82%: D6 event identity hygiene landed locally. Kubernetes Event names are
+  stable per object/type/reason, so repeated persistent conditions dedupe via
+  idempotent 409 handling instead of producing timestamp-suffixed Event spam.
+  Scoped Go tests and Helm lint pass. Live QA and full reason/type coverage are
+  pending.
 
 ## Next Step
 
-Implement and validate D6 Kubernetes Events semantics. Start with stable Event
-identity: persistent same-reason conditions must dedupe across reconcile
-iterations, and same-reason different-condition Events must either be
-disambiguated or intentionally collapsed without aborting status publication.
+Ask QA to run the D6 live Event hygiene gate on the current branch tip. The
+main proof is repeated write-mode reconcile against a persistent blocked volume:
+the second reconcile should exit 0 and not grow a new Event object for the same
+object/type/reason.
 
 ```text
 VolumeReady -> Normal

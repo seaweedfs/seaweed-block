@@ -111,7 +111,7 @@ func (c *KubernetesStatusClient) EmitEvent(ctx context.Context, event OperatorKu
 	body := kubernetesCoreEvent{
 		APIVersion:     "v1",
 		Kind:           "Event",
-		Metadata:       kubernetesMetadata{Name: kubernetesEventName(event, now), Namespace: namespace},
+		Metadata:       kubernetesMetadata{Name: kubernetesEventName(event), Namespace: namespace},
 		InvolvedObject: kubernetesObjectReferenceFromOperator(event.InvolvedObject),
 		Type:           event.Type,
 		Reason:         event.Reason,
@@ -173,12 +173,12 @@ func kubernetesObjectReferenceFromOperator(ref OperatorObjectRef) kubernetesObje
 	}
 }
 
-func kubernetesEventName(event OperatorKubernetesEvent, at time.Time) string {
-	base := kubernetesName(event.InvolvedObject.Name + "-" + event.Reason)
+func kubernetesEventName(event OperatorKubernetesEvent) string {
+	base := kubernetesName(event.InvolvedObject.Name + "-" + event.Type + "-" + event.Reason)
 	if base == "unknown-volume" {
 		base = "sw-block-event"
 	}
-	return fmt.Sprintf("%s.%d", base, at.UnixNano())
+	return base
 }
 
 func pathEscape(value string) string {
