@@ -167,6 +167,63 @@ func TestOperatorStatusReconcilerStaleEvidenceProjectsUnknownAndWarningEvent(t *
 	}
 }
 
+func TestOperatorStatusReconcilerEventFailureDoesNotBlockLaterStatusWrites(t *testing.T) {
+	source := fakeOperatorStatusSource{cluster: ClusterEvidence{
+		SchemaVersion: ObservationSchemaVersion,
+		CapturedAt:    time.Date(2026, 6, 4, 1, 30, 0, 0, time.UTC),
+		ManagedVolumes: []ManagedVolumeProjection{
+			ProjectManagedVolume(ManagedVolumeFacts{
+				VolumeID:      "pvc-blocked",
+				PVCName:       "blocked-pvc",
+				ProductStatus: ObservationStatusBlocked,
+				ProductReason: ReasonCSINodeImagePullFailed,
+				EvidenceRefs:  []string{"blocked/events.txt"},
+			}),
+			ProjectManagedVolume(ManagedVolumeFacts{
+				VolumeID: "pvc-ready",
+				PVCName:  "ready-pvc",
+				PVC:      &PVCFact{Phase: "Bound"},
+				Authority: &AuthorityFact{
+					PrimaryReplica: "r1",
+					PublishTarget:  "192.168.1.184:3260",
+				},
+				Replicas: []ReplicaFact{{
+					ReplicaID:      "r1",
+					KubernetesNode: "m02",
+					Role:           "primary",
+					Observed:       true,
+				}},
+				CSIStages: []CSIStageFact{{NodeName: "m02", Target: "192.168.1.184:3260"}},
+				Workload:  &WorkloadCheckFact{WriterVerified: true, ReaderVerified: true},
+			}),
+		},
+	}}
+	writer := &fakeOperatorStatusWriter{}
+	events := &failingOperatorEventSink{}
+
+	result, err := (OperatorStatusReconciler{
+		Namespace: "kube-system",
+		Source:    source,
+		Writer:    writer,
+		EventSink: events,
+	}).Reconcile(context.Background())
+	if err != nil {
+		t.Fatalf("event failure must not abort reconcile: %v", err)
+	}
+	if len(writer.volumes) != 2 {
+		t.Fatalf("status writes=%+v", writer.volumes)
+	}
+	if writer.volumes[0].status.Status != ManagedVolumeStatusBlocked || writer.volumes[1].status.Status != ManagedVolumeStatusReady {
+		t.Fatalf("volume statuses=%+v", writer.volumes)
+	}
+	if events.count == 0 {
+		t.Fatalf("expected event attempts")
+	}
+	if result.EventCount != 0 {
+		t.Fatalf("successful event count=%d want 0", result.EventCount)
+	}
+}
+
 func TestSwBlockVolumeObjectNameIsDNSLabelLike(t *testing.T) {
 	cases := map[string]string{
 		"Demo_PVC":      "demo-pvc",
@@ -219,6 +276,21 @@ type fakeOperatorEventSink struct {
 func (f *fakeOperatorEventSink) EmitEvent(_ context.Context, event OperatorKubernetesEvent) error {
 	f.events = append(f.events, event)
 	return nil
+}
+
+type failingOperatorEventSink struct {
+	count int
+}
+
+func (f *failingOperatorEventSink) EmitEvent(context.Context, OperatorKubernetesEvent) error {
+	f.count++
+	return errOperatorEventSinkFailed{}
+}
+
+type errOperatorEventSinkFailed struct{}
+
+func (errOperatorEventSinkFailed) Error() string {
+	return "event sink failed"
 }
 
 func (f *fakeOperatorEventSink) countByReason(reason string) int {

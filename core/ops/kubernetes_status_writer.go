@@ -146,6 +146,9 @@ func (c *KubernetesStatusClient) EmitEvent(ctx context.Context, event OperatorKu
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		return nil
 	}
+	if resp.StatusCode == http.StatusConflict {
+		return nil
+	}
 	rawResp, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 	return fmt.Errorf("create event %s failed: http %d %s", event.Reason, resp.StatusCode, strings.TrimSpace(string(rawResp)))
 }

@@ -171,10 +171,9 @@ func (r OperatorStatusReconciler) Reconcile(ctx context.Context) (OperatorStatus
 				Message:        event.Message,
 				EvidenceRefs:   append([]string(nil), event.EvidenceRefs...),
 				ObservedAt:     observedAt,
-			}); err != nil {
-				return OperatorStatusReconcileResult{}, err
+			}); err == nil {
+				result.EventCount++
 			}
-			result.EventCount++
 		}
 	}
 	return result, nil

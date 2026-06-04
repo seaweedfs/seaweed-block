@@ -164,8 +164,8 @@ Non-blocking follow-ups:
 Goal: prove known blocked states become Kubernetes-native blocked status, not
 false Ready.
 
-Status: local event publication PASS; live blocked-condition validation pending
-QA.
+Status: live QA blocked on duplicate Event 409 abort; idempotency fix landed
+locally, live rerun pending QA.
 
 Scenario:
 
@@ -298,6 +298,10 @@ finished plan moved under internal/docs/finished-plans/
   already-scoped `events/create` RBAC. Tests verify `csi_node_image_pull_failed`
   produces a Warning Event involved with the `SwBlockVolume`, while the status
   writer still patches only `/status`.
+- 60%: D4 live QA found blocked volumes emit two same-reason Warning Events
+  (`Ready=False` + `Blocked=True`), causing duplicate event names and HTTP 409.
+  The local fix treats 409 AlreadyExists as idempotent success and makes event
+  emission best-effort so telemetry cannot abort later status writes.
 
 ## Next Step
 

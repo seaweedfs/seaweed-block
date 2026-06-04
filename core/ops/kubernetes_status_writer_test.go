@@ -153,6 +153,51 @@ func TestKubernetesStatusClientCreatesCoreEvents(t *testing.T) {
 	}
 }
 
+func TestKubernetesStatusClientTreatsDuplicateEventAsSuccess(t *testing.T) {
+	seen := map[string]bool{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode event body: %v", err)
+		}
+		name := body["metadata"].(map[string]any)["name"].(string)
+		if seen[name] {
+			w.WriteHeader(http.StatusConflict)
+			_, _ = w.Write([]byte(`{"reason":"AlreadyExists"}`))
+			return
+		}
+		seen[name] = true
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer server.Close()
+
+	client := &KubernetesStatusClient{
+		BaseURL:    server.URL,
+		HTTPClient: server.Client(),
+	}
+	event := OperatorKubernetesEvent{
+		InvolvedObject: OperatorObjectRef{
+			APIVersion: SwBlockVolumeAPIVersion,
+			Kind:       SwBlockVolumeKind,
+			Namespace:  "kube-system",
+			Name:       "unknown",
+		},
+		Type:       "Warning",
+		Reason:     ReasonCSINodeImagePullFailed,
+		Message:    "managed volume is blocked",
+		ObservedAt: time.Date(2026, 6, 4, 1, 0, 0, 0, time.UTC),
+	}
+	if err := client.EmitEvent(context.Background(), event); err != nil {
+		t.Fatalf("first event: %v", err)
+	}
+	if err := client.EmitEvent(context.Background(), event); err != nil {
+		t.Fatalf("duplicate event must be idempotent success: %v", err)
+	}
+	if len(seen) != 1 {
+		t.Fatalf("seen events=%+v", seen)
+	}
+}
+
 func TestKubernetesStatusClientReturnsHTTPFailure(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
