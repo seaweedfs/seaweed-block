@@ -164,6 +164,9 @@ Non-blocking follow-ups:
 Goal: prove known blocked states become Kubernetes-native blocked status, not
 false Ready.
 
+Status: local event publication PASS; live blocked-condition validation pending
+QA.
+
 Scenario:
 
 ```text
@@ -290,12 +293,18 @@ finished plan moved under internal/docs/finished-plans/
   `ready`, reason is `first_volume_verified`, cluster ready count is 1, spec
   remains untouched, and the service account still has no storage/workload
   mutation power.
+- 58%: D4 local event publication landed. In write mode the same
+  status-only Kubernetes client now also creates core/v1 Events through the
+  already-scoped `events/create` RBAC. Tests verify `csi_node_image_pull_failed`
+  produces a Warning Event involved with the `SwBlockVolume`, while the status
+  writer still patches only `/status`.
 
 ## Next Step
 
-Implement D4 blocked-condition publication: project the known
-`csi_node_image_pull_failed` blocked evidence into `SwBlockVolume.status` and a
-Kubernetes Warning Event, without producing Ready=True anywhere.
+Ask QA to rerun the D4 blocked-condition gate with
+`operatorStatus.dryRun=false`: create blocked evidence/stubs, verify
+`SwBlockVolume.status` is blocked, verify a Kubernetes Warning Event appears,
+and verify no Ready=True appears in CRD/report/dashboard/operator-snapshot.
 
 ```text
 Condition Ready=False

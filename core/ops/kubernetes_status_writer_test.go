@@ -106,6 +106,53 @@ func TestKubernetesStatusClientPatchesOnlyStatusSubresources(t *testing.T) {
 	}
 }
 
+func TestKubernetesStatusClientCreatesCoreEvents(t *testing.T) {
+	var eventBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Fatalf("method=%s want POST", r.Method)
+		}
+		if r.URL.Path != "/api/v1/namespaces/kube-system/events" {
+			t.Fatalf("path=%s", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer event-token" {
+			t.Fatalf("authorization=%s", got)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&eventBody); err != nil {
+			t.Fatalf("decode event body: %v", err)
+		}
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer server.Close()
+
+	err := (&KubernetesStatusClient{
+		BaseURL:     server.URL,
+		BearerToken: "event-token",
+		HTTPClient:  server.Client(),
+	}).EmitEvent(context.Background(), OperatorKubernetesEvent{
+		InvolvedObject: OperatorObjectRef{
+			APIVersion: SwBlockVolumeAPIVersion,
+			Kind:       SwBlockVolumeKind,
+			Namespace:  "kube-system",
+			Name:       "blocked-pvc",
+		},
+		Type:       "Warning",
+		Reason:     ReasonCSINodeImagePullFailed,
+		Message:    "CSI node image pull failed",
+		ObservedAt: time.Date(2026, 6, 3, 12, 0, 0, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatalf("emit event: %v", err)
+	}
+	if eventBody["kind"] != "Event" || eventBody["type"] != "Warning" || eventBody["reason"] != ReasonCSINodeImagePullFailed {
+		t.Fatalf("event body=%+v", eventBody)
+	}
+	involved := eventBody["involvedObject"].(map[string]any)
+	if involved["kind"] != SwBlockVolumeKind || involved["name"] != "blocked-pvc" {
+		t.Fatalf("involvedObject=%+v", involved)
+	}
+}
+
 func TestKubernetesStatusClientReturnsHTTPFailure(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNotFound)

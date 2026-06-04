@@ -99,6 +99,13 @@ func TestOperatorStatusReconcilerWritesStatusOnlyProjection(t *testing.T) {
 	if events.countByReason(ReasonCSINodeImagePullFailed) == 0 {
 		t.Fatalf("missing blocked event: %+v", events.events)
 	}
+	for _, event := range events.events {
+		if event.Reason == ReasonCSINodeImagePullFailed {
+			if event.Type != "Warning" || event.InvolvedObject.Kind != SwBlockVolumeKind || event.InvolvedObject.Name != "blocked-pvc" {
+				t.Fatalf("blocked event shape=%+v", event)
+			}
+		}
+	}
 	if result.EventCount != len(events.events) {
 		t.Fatalf("event count=%d events=%d", result.EventCount, len(events.events))
 	}

@@ -157,6 +157,7 @@ func runOpsOperatorStatus(args []string, stdout, stderr io.Writer) int {
 				fmt.Fprintf(stderr, "sw-block ops operator-status: %v\n", err)
 				return ops.VolumeStatusExitInvalid
 			}
+			events, _ = writer.(ops.OperatorEventSink)
 		}
 		result, err := (ops.OperatorStatusReconciler{
 			Namespace:   namespace,
@@ -198,7 +199,7 @@ func runOpsOperatorStatus(args []string, stdout, stderr io.Writer) int {
 	for {
 		code := runOnce()
 		if code != ops.VolumeStatusExitOK {
-			fmt.Fprintf(stderr, "sw-block ops operator-status: dry-run iteration failed exit=%d; retrying in %s\n", code, interval)
+			fmt.Fprintf(stderr, "sw-block ops operator-status: iteration failed exit=%d; retrying in %s\n", code, interval)
 		}
 		time.Sleep(interval)
 	}
