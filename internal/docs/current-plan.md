@@ -1,6 +1,6 @@
 # Current Plan: Phase 35 - Kubernetes-Native Read-Only Operator Foundation
 
-Status: active, 72% complete. Started on 2026-06-02.
+Status: active, 78% complete. Started on 2026-06-02.
 
 Branch: `phase33-testops-failure-hardening`
 
@@ -198,7 +198,7 @@ Non-blocking follow-ups:
 
 Goal: preserve the negative-first rule for unreachable or incomplete evidence.
 
-Status: local contract PASS; live QA pending.
+Status: PASS.
 
 Scenarios:
 
@@ -230,36 +230,21 @@ Local verification:
        status/events-only RBAC and no --dry-run arg.
 ```
 
-QA assignment:
+QA signoff:
 
 ```text
-Run a live D5 status-surface gate in write mode.
+internal/docs/qa-assignments/phase35-d5-stale-status-projections-qa-signoff.md
+```
 
-Required checks:
-1. Pure status endpoint unreachable:
-   - SwBlockVolume.status.status=unknown
-   - Ready=Unknown
-   - EvidenceStale=True
-   - reasonCode=status_endpoint_unreachable
-   - Kubernetes Warning Event reason=status_endpoint_unreachable
-   - no Blocked=True and no Ready=True on CRD/report/dashboard/operator-snapshot
+Result:
 
-2. Evidence stale replay/bundle:
-   - SwBlockVolume.status.status=unknown
-   - Ready=Unknown
-   - EvidenceStale=True
-   - reasonCode=evidence_stale
-   - Kubernetes Warning Event reason=evidence_stale
-
-3. Phase 34 SmartWAL corruption projection:
-   - no Ready=True anywhere
-   - preferred: reasonCode=wal_integrity_fault when the fact is surfaced
-   - accepted for D5 only: any non-ready projection if the live evidence still
-     lacks the specific reason
-
-4. Read-only boundary:
-   - operator SA can patch only CRD status and create Events
-   - no storage/workload mutation verbs are granted
+```text
+[done] status_endpoint_unreachable -> status=unknown, Ready=Unknown,
+       EvidenceStale=True, no Blocked condition, Warning Event.
+[done] wal_integrity_fault -> status=blocked, Ready=False, Blocked=True,
+       Warning Event, no Ready=True.
+[done] one reconcile wrote both volumes and emitted Events with exit=0.
+[done] SA boundary unchanged: Events + status yes; spec/pods/PVC mutation no.
 ```
 
 ## D6: Kubernetes Events Gate
@@ -368,16 +353,23 @@ finished plan moved under internal/docs/finished-plans/
   `evidence_stale`, `status_endpoint_unreachable`, and `wal_integrity_fault`
   projections through the CRD-status/Event layer. Scoped Go tests, Helm lint,
   and write-mode Helm render pass. Live QA is pending.
+- 78%: D5 live QA passed on `6859be1`. In one write-mode reconcile,
+  `status_endpoint_unreachable` projected to Unknown/EvidenceStale without
+  Blocked or Ready=True, while `wal_integrity_fault` projected to
+  Blocked/Ready=False. Warning Events landed and the status/events-only RBAC
+  boundary held.
 
 ## Next Step
 
-Ask QA to run the D5 live status-surface gate in write mode. D5 closes only
-when unreachable/stale evidence is visible through Kubernetes CRD status and
-Events without any false Ready=True or inappropriate Blocked=True projection.
+Implement and validate D6 Kubernetes Events semantics. Start with stable Event
+identity: persistent same-reason conditions must dedupe across reconcile
+iterations, and same-reason different-condition Events must either be
+disambiguated or intentionally collapsed without aborting status publication.
 
 ```text
-Condition Ready=Unknown
-Condition EvidenceStale=True
-reason=evidence_stale
-event Warning EvidenceStale
+VolumeReady -> Normal
+CsiNodeImagePullFailed -> Warning
+AuthorityPromoted -> Normal
+EvidenceStale -> Warning
+CleanupRequired -> Warning
 ```
