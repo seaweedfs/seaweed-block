@@ -1,6 +1,6 @@
 # Current Plan: Phase 35 - Kubernetes-Native Read-Only Operator Foundation
 
-Status: active, 50% complete. Started on 2026-06-02.
+Status: active, 66% complete. Started on 2026-06-02.
 
 Branch: `phase33-testops-failure-hardening`
 
@@ -164,8 +164,7 @@ Non-blocking follow-ups:
 Goal: prove known blocked states become Kubernetes-native blocked status, not
 false Ready.
 
-Status: live QA blocked on duplicate Event 409 abort; idempotency fix landed
-locally, live rerun pending QA.
+Status: PASS.
 
 Scenario:
 
@@ -183,6 +182,16 @@ reason=csi_node_image_pull_failed
 safe next action is dry_run/read_only only
 no Ready=True appears in CRD, report, dashboard, or operator-snapshot
 Kubernetes Warning Event is emitted
+```
+
+Non-blocking follow-ups:
+
+```text
+[open] make Event names stable per object+reason so persistent blocked
+       conditions dedupe across reconcile iterations instead of growing one
+       Event every interval.
+[open] include condition type or equivalent disambiguator if Ready=False and
+       Blocked=True same-reason events should coexist as separate Events.
 ```
 
 ## D5: Unknown / EvidenceStale Conditions Gate
@@ -302,17 +311,21 @@ finished plan moved under internal/docs/finished-plans/
   (`Ready=False` + `Blocked=True`), causing duplicate event names and HTTP 409.
   The local fix treats 409 AlreadyExists as idempotent success and makes event
   emission best-effort so telemetry cannot abort later status writes.
+- 66%: D4 re-validation passed on `a2714c8`. Blocked one-shot reconciles exit
+  0 even with duplicate/already-existing Events, Warning Event exists,
+  `SwBlockVolume.status` is blocked with Ready=False and Blocked=True, no
+  Ready=True appears on blocked surfaces, and RBAC remains status/events only.
 
 ## Next Step
 
-Ask QA to rerun the D4 blocked-condition gate with
-`operatorStatus.dryRun=false`: create blocked evidence/stubs, verify
-`SwBlockVolume.status` is blocked, verify a Kubernetes Warning Event appears,
-and verify no Ready=True appears in CRD/report/dashboard/operator-snapshot.
+Implement and validate D5 Unknown/EvidenceStale publication: unreachable or
+incomplete evidence must become Ready=Unknown/EvidenceStale=True, not Blocked
+and never Ready=True. Reuse the Phase 34 SmartWAL corruption projection to prove
+the status surface remains negative-first.
 
 ```text
-Condition Ready=False
-Condition Blocked=True
-reason=csi_node_image_pull_failed
-event Warning CsiNodeImagePullFailed
+Condition Ready=Unknown
+Condition EvidenceStale=True
+reason=evidence_stale
+event Warning EvidenceStale
 ```

@@ -1,24 +1,29 @@
 # QA Sign-off - Phase 35 D4 Operator Status Events (Blocked-Condition Gate)
 
-Verdict: **BLOCKED — status surface is correct, but the new event-emission
-path aborts the reconcile on any blocked volume.** All six literal checklist
-items pass in isolation (the SwBlockVolume status writes `blocked` with the
-right conditions/reason, a `Warning` event lands, no `Ready=True` on any
-surface, SA boundary intact). But driving the canonical blocked condition
-(`csi_node_image_pull_failed`) surfaced a real defect: the volume's two
-same-reason conditions (`Ready=False` + `Blocked=True`) generate **two events
-with an identical name**, the second create returns `409 AlreadyExists`, and the
-reconciler treats that as fatal — **aborting the whole iteration (`exit=2`)** and
-preventing status publication for any volume ordered after the blocked one.
+Verdict: **PASS (re-validated on `a2714c8`).** The original `e0330b7` was
+**BLOCKED** — a blocked volume's two same-reason conditions (`Ready=False` +
+`Blocked=True`) generated two events with an identical name, the second
+`409 AlreadyExists` was treated as fatal, and the reconcile aborted (`exit=2`),
+halting status publication for any later volume. The fix `a2714c8` makes
+`EmitEvent` treat `409` as idempotent success and makes event emission
+best-effort (errors no longer abort the reconcile). Re-validated live: the
+blocked one-shot reconcile now **exits 0** (both within-run-duplicate and
+re-run), the Warning event lands, status is correct, no `Ready=True` on any
+surface, and the SA boundary is unchanged. Two non-blocking event-hygiene
+follow-ups noted (the abort masked them before).
 
-This is a gate red for a real reason: the headline feature of `e0330b7` (publish
-operator-status events) fails on the most common shape it will ever encounter —
-a blocked volume.
+The original blocked write-up is preserved below; the **Re-Validation** section
+at the end is the current PASS.
 
-Date: 2026-06-03
+Date: 2026-06-03 (blocked) → 2026-06-04 (re-validated PASS)
 
-Source commit: `e0330b7 phase35: publish operator status events`
+Source commit (blocked): `e0330b7 phase35: publish operator status events`
+Fix commit (PASS): `a2714c8 phase35: make operator events idempotent`
 (branch `phase33-testops-failure-hardening`)
+
+---
+
+## ORIGINAL FINDING (blocked, `e0330b7`) — preserved for the record
 
 ## How the gate was driven
 
@@ -192,3 +197,87 @@ sessions.
   in write mode and confirm the reconcile **succeeds** (`exit=0`), the Warning
   event(s) land, and subsequent volumes still get their status written.
 - Do not close D4 until the reconcile no longer aborts on a blocked volume.
+
+---
+
+## RE-VALIDATION (`a2714c8`) — PASS
+
+Re-ran the exact blocked-condition gate against `a2714c8 phase35: make operator
+events idempotent` (fresh images built + imported; `helm install … --set
+operatorStatus.create=true --set operatorStatus.dryRun=false`, exit=0).
+
+### The fix (verified in code)
+
+- `KubernetesStatusClient.EmitEvent` now returns `nil` on `http.StatusConflict`
+  (`kubernetes_status_writer.go:149-151`) — 409 AlreadyExists is idempotent success.
+- The reconciler's event loop no longer returns on an EmitEvent error; it only
+  counts successes (`operator_status_controller.go:166-178`,
+  `if err == nil { result.EventCount++ }`). Event emission is best-effort and
+  cannot abort status publication for later volumes.
+- Dev added regressions: duplicate same-name event create returns nil on the
+  second call; an event-sink failure does not stop status writes for a following
+  volume.
+
+### Live results
+
+| # | Check | Result | Evidence |
+|---|---|---|---|
+| 1 | Blocked one-shot reconcile exits 0 | **PASS** | RUN #1 (within-run duplicate): `volumes=1 events=2`, `RUN1_EXIT=0`. RUN #2 (event already exists → 409): `RUN2_EXIT=0`. Was `exit=2` on `e0330b7`. |
+| 2 | Warning Event, reason `csi_node_image_pull_failed` | **PASS** | `kubectl get events`: `Warning  csi_node_image_pull_failed  swblockvolume/unknown` |
+| 3 | Status correct on the blocked volume | **PASS** | CRD `status=blocked reason=csi_node_image_pull_failed Ready=False Blocked=True` |
+| 4 | No `Ready=True` on blocked surfaces | **PASS** | CRD Ready=False; report dir `grep -ic ready.*true` = 0; operator-snapshot `status:blocked` |
+| 5 | Subsequent volume status still written if present | **PASS (structural + unit)** | reconcile no longer returns on event error (code verified); dev unit regression covers the explicit two-volume case. Live from-bundle yields a single blocked volume, so not exercised as a live 2-volume case — see note. |
+| 6 | SA mutation boundary unchanged | **PASS** | `create events: yes`, `patch swblockvolumes --subresource=status: yes`; `patch swblockvolumes (spec): no`, `create pods: no`, `delete pvc: no`, `create secrets: no` |
+
+The original blocker (`exit=2` abort on a blocked volume) is gone. All of the
+dev's re-validation asks are satisfied.
+
+### Non-blocking event-hygiene follow-ups (the abort masked these before)
+
+Now that 409 no longer aborts, two residual nuances are visible. Neither blocks
+D4 — the status surface is the source of truth and is correct; events are
+best-effort telemetry.
+
+1. **Within a run, the two same-reason condition events collapse to one.** The
+   event name is still `object + reason + observedAt.UnixNano()`, which is
+   identical for the `Ready=False` and `Blocked=True` conditions (same object,
+   reason, timestamp). So only the **first** event (the Ready condition's
+   message, "managed volume is blocked; inspect dry-run actions…") persists; the
+   Blocked condition's distinct message ("a documented blocker prevents the
+   expected user path") is silently swallowed by the idempotent 409. The CRD
+   status conditions carry both, so no information is lost on the authoritative
+   surface — but the event stream shows one message, not two.
+
+2. **Across reconciles, a new event is minted every iteration.** Because the
+   name embeds `observedAt.UnixNano()`, each reconcile produces a *new* event
+   name for the same persistent condition (confirmed: two one-shot runs left two
+   distinct events). A long-running controller would create a fresh Warning
+   event every `--interval` (30s) for a stuck blocked volume → unbounded event
+   growth, no core/v1 aggregation (`count++`). This is reachable on the live
+   `--master-api` path for blocked reasons it can surface (`wal_integrity_fault`,
+   `writer_mount_failed`, loopback).
+
+   The natural fix for both: make the event name **stable** per
+   `(object, reason[, type])` *without* the timestamp. Then the existing
+   409-idempotency dedupes across iterations (one durable event per
+   object+reason, optionally aggregated with `count++`), and per-condition
+   disambiguation (adding `type`) lets the Ready and Blocked events coexist.
+
+3. Minor: the CLI prints `events=2` while only one distinct Event object lands
+   per run (the count includes the idempotent 409). Cosmetic.
+
+### Lab state
+
+Clean — stubs + Warning events deleted, helm uninstalled, both CRDs deleted;
+0 sw-block pods, 0 CRDs, 0 iSCSI sessions.
+
+### Bottom line
+
+- **D4 PASS on `a2714c8`.** The blocked-volume reconcile exits 0, the Warning
+  event lands, the status surface is correct (`blocked`, Ready=False,
+  Blocked=True, no `Ready=True` anywhere), event emission can no longer abort
+  status publication, and the SA still has zero storage/workload mutation power.
+- **D4 can close.** Recommend filing the event-hygiene follow-ups (stable event
+  name per object+reason so cross-iteration emits dedupe/aggregate instead of
+  accumulate; per-condition `type` so Ready and Blocked events coexist) as
+  tracked, non-blocking work.
