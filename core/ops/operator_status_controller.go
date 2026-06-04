@@ -46,15 +46,26 @@ type SwBlockClusterCRDStatus struct {
 }
 
 type SwBlockVolumeCRDStatus struct {
-	VolumeID       string                        `json:"volumeID,omitempty"`
-	PVCName        string                        `json:"pvcName,omitempty"`
-	Status         string                        `json:"status"`
-	ReasonCode     string                        `json:"reasonCode,omitempty"`
-	ObservedAt     time.Time                     `json:"observedAt,omitempty"`
-	Conditions     []ObservationCondition        `json:"conditions,omitempty"`
-	NonClaims      []string                      `json:"nonClaims,omitempty"`
-	EvidenceRefs   []string                      `json:"evidenceRefs,omitempty"`
-	AllowedActions []ManagedVolumeOperatorAction `json:"allowedActions,omitempty"`
+	VolumeID       string                   `json:"volumeID,omitempty"`
+	PVCName        string                   `json:"pvcName,omitempty"`
+	Status         string                   `json:"status"`
+	ReasonCode     string                   `json:"reasonCode,omitempty"`
+	ObservedAt     time.Time                `json:"observedAt,omitempty"`
+	Conditions     []ObservationCondition   `json:"conditions,omitempty"`
+	NonClaims      []string                 `json:"nonClaims,omitempty"`
+	EvidenceRefs   []string                 `json:"evidenceRefs,omitempty"`
+	AllowedActions []SwBlockVolumeCRDAction `json:"allowedActions,omitempty"`
+}
+
+type SwBlockVolumeCRDAction struct {
+	Type            string   `json:"type"`
+	Mode            string   `json:"mode"`
+	SideEffectClass string   `json:"sideEffectClass,omitempty"`
+	OwnerExecutor   string   `json:"ownerExecutor,omitempty"`
+	MutationAllowed bool     `json:"mutationAllowed"`
+	Preconditions   []string `json:"preconditions,omitempty"`
+	InvariantRefs   []string `json:"invariantRefs,omitempty"`
+	EvidenceRefs    []string `json:"evidenceRefs,omitempty"`
 }
 
 type OperatorKubernetesEvent struct {
@@ -143,7 +154,7 @@ func (r OperatorStatusReconciler) Reconcile(ctx context.Context) (OperatorStatus
 			Conditions:     append([]ObservationCondition(nil), volume.Status.Conditions...),
 			NonClaims:      append([]string(nil), volume.Status.NonClaims...),
 			EvidenceRefs:   append([]string(nil), volume.Status.EvidenceRefs...),
-			AllowedActions: append([]ManagedVolumeOperatorAction(nil), volume.AllowedActions...),
+			AllowedActions: swBlockVolumeCRDActions(volume.AllowedActions),
 		}
 		if err := r.Writer.WriteVolumeStatus(ctx, volumeRef, volumeStatus); err != nil {
 			return OperatorStatusReconcileResult{}, err
@@ -167,6 +178,26 @@ func (r OperatorStatusReconciler) Reconcile(ctx context.Context) (OperatorStatus
 		}
 	}
 	return result, nil
+}
+
+func swBlockVolumeCRDActions(actions []ManagedVolumeOperatorAction) []SwBlockVolumeCRDAction {
+	if len(actions) == 0 {
+		return nil
+	}
+	out := make([]SwBlockVolumeCRDAction, 0, len(actions))
+	for _, action := range actions {
+		out = append(out, SwBlockVolumeCRDAction{
+			Type:            action.Type,
+			Mode:            action.Mode,
+			SideEffectClass: action.SideEffectClass,
+			OwnerExecutor:   action.OwnerExecutor,
+			MutationAllowed: action.MutationAllowed,
+			Preconditions:   append([]string(nil), action.Preconditions...),
+			InvariantRefs:   append([]string(nil), action.InvariantRefs...),
+			EvidenceRefs:    append([]string(nil), action.EvidenceRefs...),
+		})
+	}
+	return out
 }
 
 func (r OperatorStatusReconciler) now() func() time.Time {

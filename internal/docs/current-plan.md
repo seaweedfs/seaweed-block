@@ -119,7 +119,8 @@ Non-blocking follow-up:
 
 Goal: prove a normal first PVC becomes Kubernetes-native Ready status.
 
-Status: local status writer PASS; live k3s CR status publication pending QA.
+Status: live QA blocked on volume status schema mismatch; fix landed locally,
+live rerun pending QA.
 
 Boundary:
 
@@ -272,6 +273,10 @@ finished plan moved under internal/docs/finished-plans/
   `swblockclusters/status` and `swblockvolumes/status`. Component tests verify
   method/path/body/auth and reject any `spec` patch. Helm can now render
   `operatorStatus.dryRun=false`, but live k3s publication is still pending.
+- 45%: D3 live QA found the volume status payload used the snake_case
+  operator-snapshot action contract where the CRD requires camelCase
+  `allowedActions[].mutationAllowed`. The fix maps actions into a dedicated
+  CRD-status DTO and preserves the snapshot JSON contract. Live rerun pending.
 
 ## Next Step
 

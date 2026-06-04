@@ -2,6 +2,8 @@ package ops
 
 import (
 	"context"
+	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 )
@@ -80,6 +82,16 @@ func TestOperatorStatusReconcilerWritesStatusOnlyProjection(t *testing.T) {
 				t.Fatalf("mutating action leaked into status: %+v", action)
 			}
 		}
+	}
+	rawStatus, err := json.Marshal(writer.volumes[0].status)
+	if err != nil {
+		t.Fatalf("marshal volume status: %v", err)
+	}
+	if !strings.Contains(string(rawStatus), `"mutationAllowed":false`) {
+		t.Fatalf("CRD volume status must use camelCase mutationAllowed: %s", string(rawStatus))
+	}
+	if strings.Contains(string(rawStatus), "mutation_allowed") {
+		t.Fatalf("CRD volume status must not use operator-snapshot snake_case fields: %s", string(rawStatus))
 	}
 	if events.countByReason(ReasonFirstVolumeVerified) == 0 {
 		t.Fatalf("missing ready event: %+v", events.events)

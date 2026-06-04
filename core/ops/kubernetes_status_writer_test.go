@@ -57,6 +57,13 @@ func TestKubernetesStatusClientPatchesOnlyStatusSubresources(t *testing.T) {
 		Status:     ManagedVolumeStatusReady,
 		ReasonCode: ReasonFirstVolumeVerified,
 		ObservedAt: observedAt,
+		AllowedActions: []SwBlockVolumeCRDAction{{
+			Type:            "observe.collect_bundle",
+			Mode:            "read_only",
+			SideEffectClass: "none",
+			OwnerExecutor:   "ops",
+			MutationAllowed: false,
+		}},
 	}); err != nil {
 		t.Fatalf("write volume status: %v", err)
 	}
@@ -87,6 +94,15 @@ func TestKubernetesStatusClientPatchesOnlyStatusSubresources(t *testing.T) {
 		if _, ok := req.Body["spec"]; ok {
 			t.Fatalf("request %d must not patch spec: %+v", i, req.Body)
 		}
+	}
+	volumeStatus := requests[1].Body["status"].(map[string]any)
+	actions := volumeStatus["allowedActions"].([]any)
+	action := actions[0].(map[string]any)
+	if _, ok := action["mutationAllowed"]; !ok {
+		t.Fatalf("volume action missing camelCase mutationAllowed: %+v", action)
+	}
+	if _, ok := action["mutation_allowed"]; ok {
+		t.Fatalf("volume action leaked snake_case mutation_allowed: %+v", action)
 	}
 }
 
