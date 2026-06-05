@@ -52,6 +52,10 @@ This is the short internal roadmap. Keep it current and readable.
   script. Mutating workflows such as repair, rebuild, failback, delete safety,
   automatic cleanup, and CR object ownership come after the read-only status
   contract is stable.
+- Active phase: Phase 36 Productized Operations Actionability. Use the Phase 35
+  CRD/status/Event foundation to publish node readiness, support evidence refs,
+  cleanup visibility, and safe next-step hints. This remains read-only and must
+  not add mutating operator lifecycle.
 - Model hardening gate before the next large release: complete the
   ManagedVolume Operations Model under `internal/docs/protocol/` before
   expanding operator or broader HA claims. The goal is to prevent Kubernetes,
@@ -399,13 +403,13 @@ phases rather than being mixed into the closed foundation.
 
 4. Node readiness/preflight status:
    iSCSI, multipath, image readiness, hostPath readiness, and observed version
-   under `SwBlockCluster.status.nodes[]`.
+   under `SwBlockCluster.status.nodes[]`. Status: active in Phase 36.
 5. Support-bundle pointers:
    keep the CLI collection path, but expose evidence refs and suggested
-   commands from status.
+   commands from status. Status: active in Phase 36.
 6. Cleanup visibility:
    `CleanupRequired=True`, residue type, and safe next step. Do not automate
-   cleanup yet.
+   cleanup yet. Status: active in Phase 36.
 
 ### P2: Enter Mutating Lifecycle Carefully
 
@@ -435,9 +439,12 @@ become another isolated status model.
 - Phase 35 closed the Kubernetes-native read-only operator foundation:
   CRDs, status-only reconciliation, Conditions, Events, stable Event identity,
   and read-only boundary tests.
+- Active work is Phase 36: Productized Operations Actionability over the
+  read-only control-plane model. Focus on node readiness, support evidence
+  pointers, cleanup visibility, and surface agreement.
 - Do not start NVMe ANA parity, rebuild/failback, backup/restore, or mutating
-  operator workflows by extending Phase 35. Pick the next product loop as a new
-  gated phase.
+  operator workflows by extending Phase 36. Pick those as separate gated
+  phases.
 - When the current plan closes, move it to `internal/docs/finished-plans/`
   with a phase/topic filename such as
   `phase1_finishedplan_frontend_protocol_readiness.md`.
