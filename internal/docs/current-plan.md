@@ -1,6 +1,6 @@
 # Current Plan: Phase 36 - Productized Operations Actionability
 
-Status: active, 48% complete. Started on 2026-06-05.
+Status: active, 58% complete. Started on 2026-06-05.
 
 Branch: `phase33-testops-failure-hardening`
 
@@ -132,7 +132,7 @@ QA rerun on 1-node and 3-node lab if code reaches live status
 
 Goal: make blocked/unknown status self-explaining through evidence references.
 
-Status: LOCAL PASS; QA pending.
+Status: PASS.
 
 Deliverables:
 
@@ -144,12 +144,12 @@ Deliverables:
 Acceptance:
 
 ```text
-[done-local] blocked status includes evidence_ref
-[done-local] unknown/stale status includes evidence_ref or missing-evidence reason
-[done-local] support-bundle command is suggested as read-only/scripted next step
-[done-local] report summary, HTML, operator-snapshot, and CRD status expose support refs
-[pending-qa] from-bundle report/dashboard/operator-snapshot agree with live report
-[pending-qa] cold-reader bundle can explain a blocker without SSH/log spelunking
+[done] blocked status includes evidence_ref
+[done] unknown/stale status includes evidence_ref or missing-evidence reason
+[done] support-bundle command is suggested as read-only/scripted next step
+[done] report summary, HTML, operator-snapshot, and CRD status expose support refs
+[done] from-bundle report/dashboard/operator-snapshot agree with live report
+[done] cold-reader bundle can explain a blocker without SSH/log spelunking
 ```
 
 Verification:
@@ -291,9 +291,13 @@ PM wording review if README/release note changes
   `SwBlockCluster.status.supportBundleRefs[]`,
   `SwBlockCluster.status.safeNextSteps[]`, `operator-snapshot.json`,
   `summary.txt`, and the report HTML. Live/from-bundle QA remains pending.
+- 58%: D3 QA passed. Blocked CSI image-pull evidence projects support refs and
+  read-only collect-bundle safe next steps across CRD status,
+  `operator-snapshot.json`, `summary.txt`, report HTML, dashboard replay, and
+  `ops explain`. The operator suggests `collect-helm-support-bundle.sh` but
+  does not execute it and gains no mutation power.
 
 ## Next Step
 
-Ask QA to run the D3 support-bundle/from-bundle agreement gate, then continue
-D4 cleanup visibility. Track the live negative node-evidence follow-up; do not
-add mutating controller behavior.
+Continue D4 cleanup visibility. Track the live negative node-evidence
+follow-up; do not add mutating controller behavior.
