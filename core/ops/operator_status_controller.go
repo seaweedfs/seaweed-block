@@ -105,6 +105,89 @@ func swBlockCleanupStatus(cleanup *CleanupEvidence) *SwBlockCleanupStatus {
 	}
 }
 
+func supportBundleRefsFromCluster(cluster ClusterEvidence) []string {
+	seen := map[string]struct{}{}
+	var refs []string
+	add := func(ref string) {
+		ref = strings.TrimSpace(ref)
+		if ref == "" {
+			return
+		}
+		if _, ok := seen[ref]; ok {
+			return
+		}
+		seen[ref] = struct{}{}
+		refs = append(refs, ref)
+	}
+	if cluster.Cleanup != nil {
+		add(cluster.Cleanup.EvidenceRef)
+	}
+	for _, volume := range cluster.Volumes {
+		add(volume.SupportBundleHint)
+		for _, condition := range volume.Conditions {
+			for _, ref := range condition.EvidenceRefs {
+				add(ref)
+			}
+		}
+		for _, replica := range volume.Replicas {
+			add(replica.SupportBundlePath)
+			for _, condition := range replica.Conditions {
+				for _, ref := range condition.EvidenceRefs {
+					add(ref)
+				}
+			}
+		}
+	}
+	for _, managed := range cluster.ManagedVolumes {
+		for _, ref := range managed.EvidenceRefs {
+			add(ref)
+		}
+		for _, condition := range managed.Conditions {
+			for _, ref := range condition.EvidenceRefs {
+				add(ref)
+			}
+		}
+		for _, action := range managed.Actions {
+			for _, ref := range action.EvidenceRefs {
+				add(ref)
+			}
+		}
+	}
+	for _, node := range cluster.Nodes {
+		for _, ref := range nodeEvidenceRefs(node) {
+			add(ref)
+		}
+	}
+	return refs
+}
+
+func safeNextStepsFromCluster(cluster ClusterEvidence, evidenceRefs []string) []SwBlockSafeNextStep {
+	if len(evidenceRefs) == 0 && cluster.Status == ObservationStatusOK && cluster.Cleanup == nil {
+		return nil
+	}
+	return []SwBlockSafeNextStep{{
+		Type:            ManagedVolumeActionCollectBundle,
+		Mode:            ManagedVolumeActionModeReadOnly,
+		Command:         `bash scripts/collect-helm-support-bundle.sh "$PWD"`,
+		ReasonCode:      supportBundleReason(cluster),
+		MutationAllowed: false,
+		EvidenceRefs:    append([]string(nil), evidenceRefs...),
+	}}
+}
+
+func supportBundleReason(cluster ClusterEvidence) string {
+	if cluster.Cleanup != nil && cluster.Cleanup.Status != "" && cluster.Cleanup.Status != "ok" {
+		if len(cluster.Cleanup.ReasonCodes) > 0 {
+			return cluster.Cleanup.ReasonCodes[0]
+		}
+		return ConditionCleanupRequired
+	}
+	if cluster.Status != "" && cluster.Status != ObservationStatusOK {
+		return cluster.Status
+	}
+	return "support_evidence_available"
+}
+
 type SwBlockVolumeCRDStatus struct {
 	VolumeID       string                   `json:"volumeID,omitempty"`
 	PVCName        string                   `json:"pvcName,omitempty"`
@@ -191,6 +274,8 @@ func (r OperatorStatusReconciler) Reconcile(ctx context.Context) (OperatorStatus
 		AllowedActionModes: append([]string(nil), snapshot.Mutation.AllowedModes...),
 		NonClaims:          append([]string(nil), snapshot.Mutation.NonClaims...),
 	}
+	clusterStatus.SupportBundleRefs = supportBundleRefsFromCluster(cluster)
+	clusterStatus.SafeNextSteps = safeNextStepsFromCluster(cluster, clusterStatus.SupportBundleRefs)
 	if snapshot.Cluster.Cleanup != nil && snapshot.Cluster.Cleanup.EvidenceRef != "" {
 		clusterStatus.EvidenceRefs = append(clusterStatus.EvidenceRefs, snapshot.Cluster.Cleanup.EvidenceRef)
 	}

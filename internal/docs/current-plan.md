@@ -1,6 +1,6 @@
 # Current Plan: Phase 36 - Productized Operations Actionability
 
-Status: active, 34% complete. Started on 2026-06-05.
+Status: active, 48% complete. Started on 2026-06-05.
 
 Branch: `phase33-testops-failure-hardening`
 
@@ -132,7 +132,7 @@ QA rerun on 1-node and 3-node lab if code reaches live status
 
 Goal: make blocked/unknown status self-explaining through evidence references.
 
-Status: pending.
+Status: LOCAL PASS; QA pending.
 
 Deliverables:
 
@@ -144,11 +144,12 @@ Deliverables:
 Acceptance:
 
 ```text
-[ ] blocked status includes evidence_ref
-[ ] unknown/stale status includes evidence_ref or missing-evidence reason
-[ ] support-bundle command is suggested as read-only/scripted next step
-[ ] from-bundle report/dashboard/operator-snapshot agree with live report
-[ ] cold-reader bundle can explain a blocker without SSH/log spelunking
+[done-local] blocked status includes evidence_ref
+[done-local] unknown/stale status includes evidence_ref or missing-evidence reason
+[done-local] support-bundle command is suggested as read-only/scripted next step
+[done-local] report summary, HTML, operator-snapshot, and CRD status expose support refs
+[pending-qa] from-bundle report/dashboard/operator-snapshot agree with live report
+[pending-qa] cold-reader bundle can explain a blocker without SSH/log spelunking
 ```
 
 Verification:
@@ -285,8 +286,14 @@ PM wording review if README/release note changes
   hardcodes `Ready=true`, `Schedulable=true`, and omits `MissingImages`.
   Follow-up: populate live `NodeEvidence` from real Kubernetes node readiness
   and image-presence facts so negative node reasons are reachable live.
+- 48%: D3 local support evidence projection landed. Cluster-level support refs
+  and a read-only `observe.collect_bundle` safe next step now project into
+  `SwBlockCluster.status.supportBundleRefs[]`,
+  `SwBlockCluster.status.safeNextSteps[]`, `operator-snapshot.json`,
+  `summary.txt`, and the report HTML. Live/from-bundle QA remains pending.
 
 ## Next Step
 
-Continue D3 support-bundle pointers and evidence refs. Track the live negative
-node-evidence follow-up; do not add mutating controller behavior.
+Ask QA to run the D3 support-bundle/from-bundle agreement gate, then continue
+D4 cleanup visibility. Track the live negative node-evidence follow-up; do not
+add mutating controller behavior.

@@ -147,3 +147,41 @@ func TestOperatorFoundationSnapshot_IncludesNodeReadiness(t *testing.T) {
 		t.Fatalf("blocked missing images=%+v", blocked)
 	}
 }
+
+func TestOperatorFoundationSnapshot_IncludesSupportBundlePointers(t *testing.T) {
+	cluster := NewClusterEvidence(time.Date(2026, 6, 5, 18, 30, 0, 0, time.UTC))
+	cluster.Status = ObservationStatusBlocked
+	cluster.Volumes = []VolumeEvidence{{
+		VolumeID:          "pvc-blocked",
+		Namespace:         "default",
+		PVCName:           "blocked-pvc",
+		Status:            ObservationStatusBlocked,
+		Reason:            ReasonCSINodeImagePullFailed,
+		SupportBundleHint: "support/bundle",
+		Replicas: []ReplicaEvidence{{
+			ReplicaID:         "r1",
+			SupportBundlePath: "support/bundle/volumes/pvc-blocked/r1",
+		}},
+	}}
+	cluster.ManagedVolumes = []ManagedVolumeProjection{ProjectManagedVolume(ManagedVolumeFacts{
+		VolumeID:      "pvc-blocked",
+		PVCName:       "blocked-pvc",
+		ProductStatus: ObservationStatusBlocked,
+		ProductReason: ReasonCSINodeImagePullFailed,
+		EvidenceRefs:  []string{"support/bundle/replayed-report/summary.txt"},
+	})}
+
+	snapshot := BuildOperatorFoundationSnapshot(cluster)
+	for _, want := range []string{"support/bundle", "support/bundle/volumes/pvc-blocked/r1"} {
+		if !stringSliceContains(snapshot.Cluster.SupportBundleRefs, want) {
+			t.Fatalf("support refs missing %q: %+v", want, snapshot.Cluster.SupportBundleRefs)
+		}
+	}
+	if len(snapshot.Cluster.SafeNextSteps) == 0 {
+		t.Fatalf("missing safe next steps: %+v", snapshot.Cluster)
+	}
+	step := snapshot.Cluster.SafeNextSteps[0]
+	if step.Type != ManagedVolumeActionCollectBundle || step.Mode != ManagedVolumeActionModeReadOnly || step.MutationAllowed {
+		t.Fatalf("safe next step=%+v", step)
+	}
+}

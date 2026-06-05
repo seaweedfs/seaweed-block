@@ -59,6 +59,18 @@ func RenderObservationReportSummary(cluster ClusterEvidence) string {
 			fmt.Fprintf(&b, "%s\n", line)
 		}
 	}
+	supportRefs := supportBundleRefsFromCluster(cluster)
+	for _, ref := range supportRefs {
+		fmt.Fprintf(&b, "support_bundle_ref=%s\n", ref)
+	}
+	for _, step := range safeNextStepsFromCluster(cluster, supportRefs) {
+		fmt.Fprintf(&b, "safe_next_step=%s mode=%s mutation_allowed=%t command=%q reason=%s\n",
+			emptyAsDash(step.Type),
+			emptyAsDash(step.Mode),
+			step.MutationAllowed,
+			step.Command,
+			emptyAsDash(step.ReasonCode))
+	}
 	for _, volume := range cluster.Volumes {
 		fmt.Fprintf(&b, "volume=%s status=%s pvc=%s/%s primary=%s@%s frontend=%s rf=%d ack=%s\n",
 			emptyAsDash(volume.VolumeID),
@@ -141,6 +153,23 @@ func RenderObservationReportHTML(cluster ClusterEvidence) string {
 			row.HostPathResidueCount,
 			row.FailureCount,
 			esc(row.EvidenceRef))
+		b.WriteString("</tbody></table></section>")
+	}
+
+	supportRefs := supportBundleRefsFromCluster(cluster)
+	if len(supportRefs) > 0 {
+		b.WriteString("<section><h2>Support Evidence</h2><table><thead><tr><th>Evidence Ref</th></tr></thead><tbody>")
+		for _, ref := range supportRefs {
+			fmt.Fprintf(&b, "<tr><td><code>%s</code></td></tr>", esc(ref))
+		}
+		b.WriteString("</tbody></table></section>")
+	}
+	if steps := safeNextStepsFromCluster(cluster, supportRefs); len(steps) > 0 {
+		b.WriteString("<section><h2>Safe Next Steps</h2><table><thead><tr><th>Type</th><th>Mode</th><th>Mutation</th><th>Reason</th><th>Command</th></tr></thead><tbody>")
+		for _, step := range steps {
+			fmt.Fprintf(&b, "<tr><td>%s</td><td>%s</td><td>%t</td><td>%s</td><td><code>%s</code></td></tr>",
+				esc(step.Type), esc(step.Mode), step.MutationAllowed, esc(emptyAsDash(step.ReasonCode)), esc(step.Command))
+		}
 		b.WriteString("</tbody></table></section>")
 	}
 

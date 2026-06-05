@@ -422,6 +422,60 @@ func TestOperatorStatusReconcilerCleanupStatusUsesCRDFieldNames(t *testing.T) {
 	}
 }
 
+func TestOperatorStatusReconcilerProjectsSupportBundlePointers(t *testing.T) {
+	source := fakeOperatorStatusSource{cluster: ClusterEvidence{
+		SchemaVersion: ObservationSchemaVersion,
+		CapturedAt:    time.Date(2026, 6, 5, 18, 0, 0, 0, time.UTC),
+		Status:        ObservationStatusBlocked,
+		Volumes: []VolumeEvidence{{
+			VolumeID:          "pvc-blocked",
+			Namespace:         "default",
+			PVCName:           "blocked-pvc",
+			Status:            ObservationStatusBlocked,
+			Reason:            ReasonCSINodeImagePullFailed,
+			SupportBundleHint: "support/bundle",
+			Replicas: []ReplicaEvidence{{
+				ReplicaID:         "r1",
+				SupportBundlePath: "support/bundle/volumes/pvc-blocked/r1",
+			}},
+		}},
+		ManagedVolumes: []ManagedVolumeProjection{ProjectManagedVolume(ManagedVolumeFacts{
+			VolumeID:      "pvc-blocked",
+			PVCName:       "blocked-pvc",
+			ProductStatus: ObservationStatusBlocked,
+			ProductReason: ReasonCSINodeImagePullFailed,
+			EvidenceRefs:  []string{"support/bundle/replayed-report/summary.txt"},
+		})},
+	}}
+	writer := &fakeOperatorStatusWriter{}
+
+	_, err := (OperatorStatusReconciler{
+		Source: source,
+		Writer: writer,
+	}).Reconcile(context.Background())
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	for _, want := range []string{
+		"support/bundle",
+		"support/bundle/volumes/pvc-blocked/r1",
+	} {
+		if !stringSliceContains(writer.cluster.SupportBundleRefs, want) {
+			t.Fatalf("cluster support refs missing %q: %+v", want, writer.cluster.SupportBundleRefs)
+		}
+	}
+	if len(writer.cluster.SafeNextSteps) == 0 {
+		t.Fatalf("missing safe next steps: %+v", writer.cluster)
+	}
+	step := writer.cluster.SafeNextSteps[0]
+	if step.Type != ManagedVolumeActionCollectBundle || step.Mode != ManagedVolumeActionModeReadOnly || step.MutationAllowed {
+		t.Fatalf("support next step=%+v", step)
+	}
+	if step.Command == "" || !strings.Contains(step.Command, "collect-helm-support-bundle.sh") {
+		t.Fatalf("support next step command=%+v", step)
+	}
+}
+
 func TestOperatorStatusReconcilerEventFailureDoesNotBlockLaterStatusWrites(t *testing.T) {
 	source := fakeOperatorStatusSource{cluster: ClusterEvidence{
 		SchemaVersion: ObservationSchemaVersion,

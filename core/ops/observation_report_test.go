@@ -97,6 +97,7 @@ func TestObservationReportHTML_IncludesManagedVolumeConditions(t *testing.T) {
 		KubernetesResidueCount: 1,
 		MultipathResidueCount:  2,
 		FailureCount:           2,
+		ReasonCodes:            []string{"multipath_residue_present"},
 		EvidenceRef:            "cleanup-summary.txt",
 	}
 	cluster.Volumes = []VolumeEvidence{{
@@ -120,15 +121,50 @@ func TestObservationReportHTML_IncludesManagedVolumeConditions(t *testing.T) {
 	html := RenderObservationReportHTML(cluster)
 	for _, want := range []string{
 		"Lifecycle Cleanup",
+		"Support Evidence",
+		"Safe Next Steps",
 		"Managed Volumes",
 		"Managed Volume Conditions",
 		"cleanup-summary.txt",
+		"collect-helm-support-bundle.sh",
 		"pvc-loopback",
 		"publish_target_loopback_cross_node",
 		"safe_k8s.reinstall_external_iscsi",
 	} {
 		if !strings.Contains(html, want) {
 			t.Fatalf("html missing %q:\n%s", want, html)
+		}
+	}
+}
+
+func TestObservationReportSummary_IncludesSupportBundlePointers(t *testing.T) {
+	cluster := NewClusterEvidence(time.Date(2026, 6, 5, 18, 45, 0, 0, time.UTC))
+	cluster.Status = ObservationStatusBlocked
+	cluster.Volumes = []VolumeEvidence{{
+		VolumeID:          "pvc-blocked",
+		Namespace:         "default",
+		PVCName:           "blocked-pvc",
+		Status:            ObservationStatusBlocked,
+		Reason:            ReasonCSINodeImagePullFailed,
+		SupportBundleHint: "support/bundle",
+	}}
+	cluster.ManagedVolumes = []ManagedVolumeProjection{ProjectManagedVolume(ManagedVolumeFacts{
+		VolumeID:      "pvc-blocked",
+		PVCName:       "blocked-pvc",
+		ProductStatus: ObservationStatusBlocked,
+		ProductReason: ReasonCSINodeImagePullFailed,
+		EvidenceRefs:  []string{"support/bundle/replayed-report/summary.txt"},
+	})}
+
+	summary := RenderObservationReportSummary(cluster)
+	for _, want := range []string{
+		"support_bundle_ref=support/bundle",
+		"support_bundle_ref=support/bundle/replayed-report/summary.txt",
+		"safe_next_step=observe.collect_bundle mode=read_only mutation_allowed=false",
+		"collect-helm-support-bundle.sh",
+	} {
+		if !strings.Contains(summary, want) {
+			t.Fatalf("summary missing %q:\n%s", want, summary)
 		}
 	}
 }

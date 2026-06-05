@@ -29,6 +29,8 @@ type OperatorClusterStatus struct {
 	BlockedVolumeCount int                    `json:"blocked_volume_count"`
 	StaleVolumeCount   int                    `json:"stale_volume_count"`
 	Cleanup            *CleanupEvidence       `json:"cleanup,omitempty"`
+	SupportBundleRefs  []string               `json:"support_bundle_refs,omitempty"`
+	SafeNextSteps      []OperatorSafeNextStep `json:"safe_next_steps,omitempty"`
 	Conditions         []ObservationCondition `json:"conditions,omitempty"`
 	NonClaims          []string               `json:"non_claims,omitempty"`
 }
@@ -49,8 +51,18 @@ type OperatorNodeStatus struct {
 	EvidenceRefs    []string               `json:"evidence_refs,omitempty"`
 }
 
+type OperatorSafeNextStep struct {
+	Type            string   `json:"type"`
+	Mode            string   `json:"mode"`
+	Command         string   `json:"command,omitempty"`
+	ReasonCode      string   `json:"reason_code,omitempty"`
+	MutationAllowed bool     `json:"mutation_allowed"`
+	EvidenceRefs    []string `json:"evidence_refs,omitempty"`
+}
+
 func BuildOperatorFoundationSnapshot(cluster ClusterEvidence) OperatorFoundationSnapshot {
 	cluster = NormalizeObservationCluster(cluster)
+	supportRefs := supportBundleRefsFromCluster(cluster)
 	snapshot := OperatorFoundationSnapshot{
 		APIVersion: SwBlockVolumeAPIVersion,
 		Kind:       "ReadOnlyOperatorFoundationSnapshot",
@@ -72,12 +84,14 @@ func BuildOperatorFoundationSnapshot(cluster ClusterEvidence) OperatorFoundation
 		},
 		CRDContract: ManagedVolumeCRDContractDefinition(),
 		Cluster: OperatorClusterStatus{
-			Status:     cluster.Status,
-			NodeCount:  len(cluster.Nodes),
-			Nodes:      operatorNodeStatuses(cluster.Nodes),
-			Cleanup:    cluster.Cleanup,
-			Conditions: append([]ObservationCondition(nil), cluster.Conditions...),
-			NonClaims:  append([]string(nil), cluster.NonClaims...),
+			Status:            cluster.Status,
+			NodeCount:         len(cluster.Nodes),
+			Nodes:             operatorNodeStatuses(cluster.Nodes),
+			Cleanup:           cluster.Cleanup,
+			SupportBundleRefs: supportRefs,
+			SafeNextSteps:     operatorSafeNextSteps(safeNextStepsFromCluster(cluster, supportRefs)),
+			Conditions:        append([]ObservationCondition(nil), cluster.Conditions...),
+			NonClaims:         append([]string(nil), cluster.NonClaims...),
 		},
 	}
 
@@ -105,6 +119,24 @@ func BuildOperatorFoundationSnapshot(cluster ClusterEvidence) OperatorFoundation
 		})
 	}
 	return snapshot
+}
+
+func operatorSafeNextSteps(steps []SwBlockSafeNextStep) []OperatorSafeNextStep {
+	if len(steps) == 0 {
+		return nil
+	}
+	out := make([]OperatorSafeNextStep, 0, len(steps))
+	for _, step := range steps {
+		out = append(out, OperatorSafeNextStep{
+			Type:            step.Type,
+			Mode:            step.Mode,
+			Command:         step.Command,
+			ReasonCode:      step.ReasonCode,
+			MutationAllowed: step.MutationAllowed,
+			EvidenceRefs:    append([]string(nil), step.EvidenceRefs...),
+		})
+	}
+	return out
 }
 
 func operatorNodeStatuses(nodes []NodeEvidence) []OperatorNodeStatus {
