@@ -181,6 +181,7 @@ func (r OperatorStatusReconciler) Reconcile(ctx context.Context) (OperatorStatus
 	clusterStatus := SwBlockClusterCRDStatus{
 		ObservedAt:         observedAt,
 		NodeCount:          len(cluster.Nodes),
+		Nodes:              swBlockNodeStatuses(cluster.Nodes),
 		VolumeCount:        snapshot.Cluster.VolumeCount,
 		ReadyVolumeCount:   snapshot.Cluster.ReadyVolumeCount,
 		BlockedVolumeCount: snapshot.Cluster.BlockedVolumeCount,
@@ -258,6 +259,104 @@ func swBlockVolumeCRDActions(actions []ManagedVolumeOperatorAction) []SwBlockVol
 		})
 	}
 	return out
+}
+
+func swBlockNodeStatuses(nodes []NodeEvidence) []SwBlockNodeCRDStatus {
+	if len(nodes) == 0 {
+		return nil
+	}
+	out := make([]SwBlockNodeCRDStatus, 0, len(nodes))
+	for _, node := range nodes {
+		status, reason := classifyNodeReadiness(node)
+		out = append(out, SwBlockNodeCRDStatus{
+			Name:            defaultString(node.NodeName, node.KubernetesNode),
+			KubernetesNode:  node.KubernetesNode,
+			InternalIP:      node.InternalIP,
+			Schedulable:     node.Schedulable,
+			Ready:           node.Ready,
+			Status:          status,
+			ReasonCode:      reason,
+			LastHeartbeatAt: node.LastHeartbeatAt,
+			ReplicaCount:    node.ReplicaCount,
+			RequiredImages:  append([]string(nil), node.RequiredImages...),
+			MissingImages:   append([]string(nil), node.MissingImages...),
+			Conditions:      nodeReadinessConditions(node, status, reason),
+			EvidenceRefs:    nodeEvidenceRefs(node),
+		})
+	}
+	return out
+}
+
+func classifyNodeReadiness(node NodeEvidence) (string, string) {
+	switch {
+	case len(node.MissingImages) > 0:
+		return ManagedVolumeStatusBlocked, ReasonImageMissingOnNode
+	case !node.Ready:
+		return ManagedVolumeStatusUnknown, ReasonNodeNotReady
+	case !node.Schedulable:
+		return ManagedVolumeStatusBlocked, ReasonNodeSchedulingDisabled
+	default:
+		return ManagedVolumeStatusReady, ReasonNodeReady
+	}
+}
+
+func nodeReadinessConditions(node NodeEvidence, status, reason string) []ObservationCondition {
+	conditions := append([]ObservationCondition(nil), node.Conditions...)
+	switch status {
+	case ManagedVolumeStatusReady:
+		return ensureCondition(conditions, ObservationCondition{
+			Type:     ConditionReady,
+			Status:   "True",
+			Reason:   reason,
+			Severity: "info",
+			Message:  "node is ready for Seaweed Block",
+		})
+	case ManagedVolumeStatusBlocked:
+		conditions = ensureCondition(conditions, ObservationCondition{
+			Type:     ConditionReady,
+			Status:   "False",
+			Reason:   reason,
+			Severity: "warning",
+			Message:  "node is blocked for Seaweed Block",
+		})
+		return ensureCondition(conditions, ObservationCondition{
+			Type:     ConditionBlocked,
+			Status:   "True",
+			Reason:   reason,
+			Severity: "warning",
+			Message:  "node requires operator attention before scheduling Seaweed Block workloads",
+		})
+	default:
+		conditions = ensureCondition(conditions, ObservationCondition{
+			Type:     ConditionReady,
+			Status:   "Unknown",
+			Reason:   reason,
+			Severity: "warning",
+			Message:  "node readiness evidence is unavailable or not ready",
+		})
+		return ensureCondition(conditions, ObservationCondition{
+			Type:     ConditionEvidenceStale,
+			Status:   "True",
+			Reason:   reason,
+			Severity: "warning",
+			Message:  "node readiness evidence is insufficient",
+		})
+	}
+}
+
+func ensureCondition(conditions []ObservationCondition, condition ObservationCondition) []ObservationCondition {
+	if hasCondition(conditions, condition.Type, condition.Status) {
+		return conditions
+	}
+	return append(conditions, condition)
+}
+
+func nodeEvidenceRefs(node NodeEvidence) []string {
+	var refs []string
+	for _, condition := range node.Conditions {
+		refs = append(refs, condition.EvidenceRefs...)
+	}
+	return refs
 }
 
 func (r OperatorStatusReconciler) now() func() time.Time {

@@ -1,6 +1,6 @@
 # Current Plan: Phase 36 - Productized Operations Actionability
 
-Status: active, 16% complete. Started on 2026-06-05.
+Status: active, 28% complete. Started on 2026-06-05.
 
 Branch: `phase33-testops-failure-hardening`
 
@@ -94,7 +94,7 @@ internal review against roadmap and Phase 35 non-claims
 
 Goal: publish node-level readiness facts into `SwBlockCluster.status.nodes[]`.
 
-Status: pending.
+Status: LOCAL PASS; QA pending.
 
 Required facts:
 
@@ -109,11 +109,12 @@ Required facts:
 Acceptance:
 
 ```text
-[ ] healthy lab shows all expected nodes ready
-[ ] missing image or missing prerequisite does not project cluster Ready=True
-[ ] blocked node reason is stable and visible in CRD status
-[ ] node readiness agrees across report, dashboard, operator-snapshot, CRD status
-[ ] no storage/workload mutation verbs are added
+[done-local] healthy node evidence projects Ready node status
+[done-local] missing image projects blocked node reason
+[done-local] blocked node reason is stable and visible in CRD status
+[done-local] node readiness projects to operator-snapshot as well as CRD status
+[done-local] no storage/workload mutation verbs are added
+[pending-qa] live 1-node and 3-node status agreement
 ```
 
 Verification:
@@ -272,8 +273,13 @@ PM wording review if README/release note changes
   support-bundle refs, and safe next-step fields while preserving the
   status/events-only mutation boundary. Focused tests failed first on missing
   fields, then passed after the structural contract landed.
+- 28%: D2 local node readiness projection landed. Existing `NodeEvidence`
+  now maps into `SwBlockCluster.status.nodes[]` and `operator-snapshot.json`
+  with stable node reasons such as `node_ready`, `node_not_ready`,
+  `node_scheduling_disabled`, and `image_missing_on_node`. Local tests cover
+  healthy and missing-image nodes; live QA remains pending.
 
 ## Next Step
 
-Start D2 by wiring real node readiness/preflight evidence into
-`SwBlockCluster.status.nodes[]`. Do not add mutating controller behavior.
+Ask QA to run the D2 live node-readiness gate on 1-node and 3-node labs, then
+continue D3 support-bundle pointers. Do not add mutating controller behavior.

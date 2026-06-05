@@ -111,3 +111,39 @@ func TestOperatorFoundationSnapshot_CountsStaleEvidenceVolumes(t *testing.T) {
 		t.Fatalf("missing cluster EvidenceStale condition: %+v", snapshot.Cluster.Conditions)
 	}
 }
+
+func TestOperatorFoundationSnapshot_IncludesNodeReadiness(t *testing.T) {
+	cluster := NewClusterEvidence(time.Date(2026, 6, 5, 16, 30, 0, 0, time.UTC))
+	cluster.Nodes = []NodeEvidence{{
+		NodeName:       "m02",
+		KubernetesNode: "m02",
+		InternalIP:     "192.168.1.184",
+		Schedulable:    true,
+		Ready:          true,
+		ReplicaCount:   1,
+		RequiredImages: []string{"sw-block:local"},
+	}, {
+		NodeName:       "tp01",
+		KubernetesNode: "tp01",
+		InternalIP:     "192.168.1.188",
+		Schedulable:    true,
+		Ready:          true,
+		MissingImages:  []string{"sw-block-csi:local"},
+	}}
+
+	snapshot := BuildOperatorFoundationSnapshot(cluster)
+	if snapshot.Cluster.NodeCount != 2 || len(snapshot.Cluster.Nodes) != 2 {
+		t.Fatalf("node status=%+v", snapshot.Cluster)
+	}
+	ready := snapshot.Cluster.Nodes[0]
+	if ready.Status != ManagedVolumeStatusReady || ready.ReasonCode != ReasonNodeReady {
+		t.Fatalf("ready node=%+v", ready)
+	}
+	blocked := snapshot.Cluster.Nodes[1]
+	if blocked.Status != ManagedVolumeStatusBlocked || blocked.ReasonCode != ReasonImageMissingOnNode {
+		t.Fatalf("blocked node=%+v", blocked)
+	}
+	if len(blocked.MissingImages) != 1 {
+		t.Fatalf("blocked missing images=%+v", blocked)
+	}
+}

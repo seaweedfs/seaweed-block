@@ -134,6 +134,9 @@ Phase 36 cluster node status fields are:
 | `status.nodes[].conditions[]` | operator-status aggregate | Kubernetes-style node readiness conditions | provisional |
 | `status.nodes[].evidenceRefs[]` | evidence producer | supporting artifact paths | stable |
 
+Initial Phase 36 node reason codes are `node_ready`, `node_not_ready`,
+`node_scheduling_disabled`, and `image_missing_on_node`.
+
 Phase 36 cleanup status fields are:
 
 | Field | Owner Input | Meaning | Stability |

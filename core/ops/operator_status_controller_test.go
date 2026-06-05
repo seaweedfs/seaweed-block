@@ -70,6 +70,9 @@ func TestOperatorStatusReconcilerWritesStatusOnlyProjection(t *testing.T) {
 	if writer.cluster.MutationAllowed {
 		t.Fatalf("cluster status must not allow mutation: %+v", writer.cluster)
 	}
+	if len(writer.cluster.Nodes) != 1 || writer.cluster.Nodes[0].Name != "m02" {
+		t.Fatalf("cluster nodes=%+v", writer.cluster.Nodes)
+	}
 	if got := writer.volumes[0].status.Status; got != ManagedVolumeStatusReady {
 		t.Fatalf("ready volume status=%s", got)
 	}
@@ -108,6 +111,118 @@ func TestOperatorStatusReconcilerWritesStatusOnlyProjection(t *testing.T) {
 	}
 	if result.EventCount != len(events.events) {
 		t.Fatalf("event count=%d events=%d", result.EventCount, len(events.events))
+	}
+}
+
+func TestOperatorStatusReconcilerProjectsNodeReadiness(t *testing.T) {
+	heartbeat := time.Date(2026, 6, 5, 16, 0, 0, 0, time.UTC)
+	source := fakeOperatorStatusSource{cluster: ClusterEvidence{
+		SchemaVersion: ObservationSchemaVersion,
+		CapturedAt:    time.Date(2026, 6, 5, 16, 1, 0, 0, time.UTC),
+		Status:        ObservationStatusOK,
+		Nodes: []NodeEvidence{{
+			NodeName:        "node-loss-r1",
+			KubernetesNode:  "m01",
+			InternalIP:      "192.168.1.181",
+			Schedulable:     true,
+			Ready:           true,
+			LastHeartbeatAt: heartbeat,
+			ReplicaCount:    2,
+			RequiredImages:  []string{"sw-block:local", "sw-block-csi:local"},
+			Conditions: []ObservationCondition{{
+				Type:     ConditionReady,
+				Status:   "True",
+				Reason:   ReasonNodeReady,
+				Severity: "info",
+				Message:  "node is ready for Seaweed Block",
+			}},
+		}},
+	}}
+	writer := &fakeOperatorStatusWriter{}
+
+	_, err := (OperatorStatusReconciler{
+		Source: source,
+		Writer: writer,
+	}).Reconcile(context.Background())
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if writer.cluster.NodeCount != 1 || len(writer.cluster.Nodes) != 1 {
+		t.Fatalf("cluster node status=%+v", writer.cluster)
+	}
+	node := writer.cluster.Nodes[0]
+	if node.Name != "node-loss-r1" || node.KubernetesNode != "m01" || node.InternalIP != "192.168.1.181" {
+		t.Fatalf("node identity=%+v", node)
+	}
+	if !node.Schedulable || !node.Ready || node.Status != ManagedVolumeStatusReady || node.ReasonCode != ReasonNodeReady {
+		t.Fatalf("node readiness=%+v", node)
+	}
+	if !node.LastHeartbeatAt.Equal(heartbeat) || node.ReplicaCount != 2 || len(node.RequiredImages) != 2 {
+		t.Fatalf("node details=%+v", node)
+	}
+	assertCondition(t, node.Conditions, ConditionReady, "True", ReasonNodeReady)
+	rawStatus, err := json.Marshal(writer.cluster)
+	if err != nil {
+		t.Fatalf("marshal cluster status: %v", err)
+	}
+	raw := string(rawStatus)
+	for _, want := range []string{`"kubernetesNode":"m01"`, `"internalIP":"192.168.1.181"`, `"lastHeartbeatAt":"2026-06-05T16:00:00Z"`, `"requiredImages":["sw-block:local","sw-block-csi:local"]`} {
+		if !strings.Contains(raw, want) {
+			t.Fatalf("cluster node status missing %s: %s", want, raw)
+		}
+	}
+	for _, forbidden := range []string{"kubernetes_node", "internal_ip", "last_heartbeat_at", "required_images"} {
+		if strings.Contains(raw, forbidden) {
+			t.Fatalf("CRD node status must not use observation snake_case field %q: %s", forbidden, raw)
+		}
+	}
+}
+
+func TestOperatorStatusReconcilerProjectsImageMissingNodeAsBlocked(t *testing.T) {
+	source := fakeOperatorStatusSource{cluster: ClusterEvidence{
+		SchemaVersion: ObservationSchemaVersion,
+		CapturedAt:    time.Date(2026, 6, 5, 16, 5, 0, 0, time.UTC),
+		Status:        ObservationStatusOK,
+		Nodes: []NodeEvidence{{
+			NodeName:       "m02",
+			KubernetesNode: "m02",
+			InternalIP:     "192.168.1.184",
+			Schedulable:    true,
+			Ready:          true,
+			RequiredImages: []string{"ghcr.io/seaweedfs/seaweed-block:sha-test"},
+			MissingImages:  []string{"ghcr.io/seaweedfs/seaweed-block:sha-test"},
+			Conditions: []ObservationCondition{{
+				Type:     ConditionBlocked,
+				Status:   "True",
+				Reason:   ReasonImageMissingOnNode,
+				Severity: "warning",
+				Message:  "required image is missing on node",
+			}},
+		}},
+	}}
+	writer := &fakeOperatorStatusWriter{}
+
+	_, err := (OperatorStatusReconciler{
+		Source: source,
+		Writer: writer,
+	}).Reconcile(context.Background())
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if len(writer.cluster.Nodes) != 1 {
+		t.Fatalf("cluster nodes=%+v", writer.cluster.Nodes)
+	}
+	node := writer.cluster.Nodes[0]
+	if node.Status != ManagedVolumeStatusBlocked || node.ReasonCode != ReasonImageMissingOnNode {
+		t.Fatalf("node status=%+v", node)
+	}
+	if len(node.MissingImages) != 1 || node.MissingImages[0] != "ghcr.io/seaweedfs/seaweed-block:sha-test" {
+		t.Fatalf("missing images=%+v", node.MissingImages)
+	}
+	assertCondition(t, node.Conditions, ConditionReady, "False", ReasonImageMissingOnNode)
+	assertCondition(t, node.Conditions, ConditionBlocked, "True", ReasonImageMissingOnNode)
+	if writer.cluster.ReadyVolumeCount != 0 {
+		t.Fatalf("node blocker must not synthesize ready volumes: %+v", writer.cluster)
 	}
 }
 
