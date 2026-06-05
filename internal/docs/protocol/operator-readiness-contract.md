@@ -159,12 +159,17 @@ Safe next-step fields are advisory only:
 | `status.safeNextSteps[].mutationAllowed` | must remain `false` in Phase 36 |
 | `status.safeNextSteps[].evidenceRefs[]` | evidence backing the suggestion |
 
-All Phase 23 actions are non-executing:
+ManagedVolume actions remain non-executing:
 
 ```text
 mutation_allowed=false
 mode=read_only | dry_run
 ```
+
+Phase 36 cluster-level `safeNextSteps[]` may also use `mode=scripted` for
+user/TestOps-invoked commands such as cleanup verification. `scripted` does not
+grant operator execution rights; it is still a printed next-step hint with
+`mutationAllowed=false`.
 
 ## Condition Mapping
 

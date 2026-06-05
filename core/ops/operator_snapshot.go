@@ -72,6 +72,7 @@ func BuildOperatorFoundationSnapshot(cluster ClusterEvidence) OperatorFoundation
 			AllowedModes: []string{
 				ManagedVolumeActionModeReadOnly,
 				ManagedVolumeActionModeDryRun,
+				ManagedVolumeActionModeScripted,
 			},
 			NonClaims: []string{
 				"no_promote",
@@ -117,6 +118,9 @@ func BuildOperatorFoundationSnapshot(cluster ClusterEvidence) OperatorFoundation
 			Severity: "warning",
 			Message:  "one or more managed volumes have stale or unreachable evidence",
 		})
+	}
+	if condition := cleanupCondition(cluster.Cleanup); condition != nil {
+		snapshot.Cluster.Conditions = ensureCondition(snapshot.Cluster.Conditions, *condition)
 	}
 	return snapshot
 }

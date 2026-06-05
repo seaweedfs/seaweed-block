@@ -1,6 +1,6 @@
 # Current Plan: Phase 36 - Productized Operations Actionability
 
-Status: active, 58% complete. Started on 2026-06-05.
+Status: active, 70% complete. Started on 2026-06-05.
 
 Branch: `phase33-testops-failure-hardening`
 
@@ -165,7 +165,7 @@ QA cold-reader review of generated bundle
 
 Goal: project cleanup residue into status without performing cleanup.
 
-Status: pending.
+Status: local PASS; QA pending.
 
 Required status behavior:
 
@@ -179,11 +179,14 @@ Required status behavior:
 Acceptance:
 
 ```text
-[ ] verifier summary maps to CRD cleanup fields
-[ ] residue scenario projects CleanupRequired=True
-[ ] clean scenario projects CleanupRequired=False
-[ ] cleanup action hint is mode=read_only or mode=scripted, never mutation_allowed=true
-[ ] support surfaces agree on residue counts
+[done] verifier summary maps to CRD cleanup fields
+[done] residue scenario projects CleanupRequired=True
+[done] clean scenario projects CleanupRequired=False
+[done] cleanup action hint is mode=read_only or mode=scripted, never mutation_allowed=true
+[done] support surfaces agree on residue counts locally
+[ ] live/TestOps cleanup-residue visibility gate passes
+[ ] live/TestOps clean cleanup visibility gate passes
+[ ] QA verifies no operator cleanup mutation occurred
 ```
 
 Verification:
@@ -296,8 +299,14 @@ PM wording review if README/release note changes
   `operator-snapshot.json`, `summary.txt`, report HTML, dashboard replay, and
   `ops explain`. The operator suggests `collect-helm-support-bundle.sh` but
   does not execute it and gains no mutation power.
+- 70%: D4 local cleanup visibility landed. Cleanup verifier evidence now
+  projects into `SwBlockCluster.status.cleanup`, cluster
+  `CleanupRequired=True|False` Conditions, `operator-snapshot.json`,
+  `summary.txt`, report HTML, and `safeNextSteps[]`. Residue suggests
+  `observe.verify_cleanup` with `mode=scripted` and
+  `mutationAllowed=false`; the operator still performs no cleanup.
 
 ## Next Step
 
-Continue D4 cleanup visibility. Track the live negative node-evidence
-follow-up; do not add mutating controller behavior.
+Run D4 QA cleanup-residue and clean-state gates. Track the live negative
+node-evidence follow-up; do not add mutating controller behavior.

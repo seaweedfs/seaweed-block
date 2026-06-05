@@ -46,6 +46,7 @@ const (
 
 	ManagedVolumeActionModeReadOnly = "read_only"
 	ManagedVolumeActionModeDryRun   = "dry_run"
+	ManagedVolumeActionModeScripted = "scripted"
 
 	ManagedVolumeSideEffectObserve           = "observe"
 	ManagedVolumeSideEffectSafeK8S           = "safe_k8s"
@@ -55,6 +56,7 @@ const (
 	ManagedVolumeSideEffectDestructive       = "destructive"
 
 	ManagedVolumeActionCollectBundle          = "observe.collect_bundle"
+	ManagedVolumeActionVerifyCleanup          = "observe.verify_cleanup"
 	ManagedVolumeActionReinstallExternalISCSI = "safe_k8s.reinstall_external_iscsi"
 	ManagedVolumeActionWaitForPVCBound        = "observe.wait_for_pvc_bound"
 	ManagedVolumeActionInspectMountFailure    = "observe.inspect_mount_failure"

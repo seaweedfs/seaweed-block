@@ -32,6 +32,9 @@ func TestOperatorFoundationSnapshot_ReadOnlyBoundary(t *testing.T) {
 	if snapshot.Cluster.Cleanup == nil || snapshot.Cluster.Cleanup.Status != "ok" || snapshot.Cluster.Cleanup.EvidenceRef != "cleanup-summary.txt" {
 		t.Fatalf("missing cleanup evidence: %+v", snapshot.Cluster.Cleanup)
 	}
+	if condition := findObservationCondition(snapshot.Cluster.Conditions, ConditionCleanupRequired); condition == nil || condition.Status != "False" || condition.Reason != ReasonCleanupVerified {
+		t.Fatalf("missing clean cleanup condition: %+v", snapshot.Cluster.Conditions)
+	}
 	if len(snapshot.Volumes) != 1 {
 		t.Fatalf("volumes=%+v", snapshot.Volumes)
 	}
@@ -42,6 +45,42 @@ func TestOperatorFoundationSnapshot_ReadOnlyBoundary(t *testing.T) {
 		if action.Mode != ManagedVolumeActionModeReadOnly && action.Mode != ManagedVolumeActionModeDryRun {
 			t.Fatalf("operator snapshot exposed unsupported action mode: %+v", action)
 		}
+	}
+}
+
+func TestOperatorFoundationSnapshot_ProjectsCleanupResidue(t *testing.T) {
+	cluster := NewClusterEvidence(time.Date(2026, 6, 5, 19, 0, 0, 0, time.UTC))
+	cluster.Cleanup = &CleanupEvidence{
+		Status:                 "failed",
+		KubernetesResidueCount: 1,
+		ISCSIResidueCount:      2,
+		MultipathResidueCount:  3,
+		ProcessResidueCount:    4,
+		HostPathResidueCount:   5,
+		FailureCount:           6,
+		ReasonCodes:            []string{"iscsi_node_records_present"},
+		EvidenceRef:            "cleanup-summary.txt",
+	}
+
+	snapshot := BuildOperatorFoundationSnapshot(cluster)
+	if snapshot.Cluster.Cleanup == nil || snapshot.Cluster.Cleanup.ISCSIResidueCount != 2 {
+		t.Fatalf("cleanup=%+v", snapshot.Cluster.Cleanup)
+	}
+	if condition := findObservationCondition(snapshot.Cluster.Conditions, ConditionCleanupRequired); condition == nil || condition.Status != "True" || condition.Reason != "iscsi_node_records_present" {
+		t.Fatalf("missing cleanup required condition: %+v", snapshot.Cluster.Conditions)
+	}
+	foundCleanupStep := false
+	for _, step := range snapshot.Cluster.SafeNextSteps {
+		if step.Type != ManagedVolumeActionVerifyCleanup {
+			continue
+		}
+		foundCleanupStep = true
+		if step.Mode != ManagedVolumeActionModeScripted || step.MutationAllowed {
+			t.Fatalf("cleanup step=%+v", step)
+		}
+	}
+	if !foundCleanupStep {
+		t.Fatalf("missing cleanup safe next step: %+v", snapshot.Cluster.SafeNextSteps)
 	}
 }
 

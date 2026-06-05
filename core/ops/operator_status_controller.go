@@ -162,17 +162,21 @@ func supportBundleRefsFromCluster(cluster ClusterEvidence) []string {
 }
 
 func safeNextStepsFromCluster(cluster ClusterEvidence, evidenceRefs []string) []SwBlockSafeNextStep {
-	if len(evidenceRefs) == 0 && cluster.Status == ObservationStatusOK && cluster.Cleanup == nil {
-		return nil
+	var steps []SwBlockSafeNextStep
+	if len(evidenceRefs) > 0 || cluster.Status != ObservationStatusOK || cluster.Cleanup != nil {
+		steps = append(steps, SwBlockSafeNextStep{
+			Type:            ManagedVolumeActionCollectBundle,
+			Mode:            ManagedVolumeActionModeReadOnly,
+			Command:         `bash scripts/collect-helm-support-bundle.sh "$PWD"`,
+			ReasonCode:      supportBundleReason(cluster),
+			MutationAllowed: false,
+			EvidenceRefs:    append([]string(nil), evidenceRefs...),
+		})
 	}
-	return []SwBlockSafeNextStep{{
-		Type:            ManagedVolumeActionCollectBundle,
-		Mode:            ManagedVolumeActionModeReadOnly,
-		Command:         `bash scripts/collect-helm-support-bundle.sh "$PWD"`,
-		ReasonCode:      supportBundleReason(cluster),
-		MutationAllowed: false,
-		EvidenceRefs:    append([]string(nil), evidenceRefs...),
-	}}
+	if step := cleanupSafeNextStep(cluster.Cleanup); step != nil {
+		steps = append(steps, *step)
+	}
+	return steps
 }
 
 func supportBundleReason(cluster ClusterEvidence) string {

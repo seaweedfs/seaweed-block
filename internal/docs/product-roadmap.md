@@ -403,13 +403,15 @@ phases rather than being mixed into the closed foundation.
 
 4. Node readiness/preflight status:
    iSCSI, multipath, image readiness, hostPath readiness, and observed version
-   under `SwBlockCluster.status.nodes[]`. Status: active in Phase 36.
+   under `SwBlockCluster.status.nodes[]`. Status: local/live positive paths
+   active in Phase 36; live negative node evidence remains a follow-up.
 5. Support-bundle pointers:
    keep the CLI collection path, but expose evidence refs and suggested
-   commands from status. Status: active in Phase 36.
+   commands from status. Status: active in Phase 36; D3 QA passed.
 6. Cleanup visibility:
    `CleanupRequired=True`, residue type, and safe next step. Do not automate
-   cleanup yet. Status: active in Phase 36.
+   cleanup yet. Status: active in Phase 36; D4 local projection landed, QA
+   pending.
 
 ### P2: Enter Mutating Lifecycle Carefully
 
