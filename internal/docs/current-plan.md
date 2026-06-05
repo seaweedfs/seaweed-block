@@ -1,6 +1,6 @@
 # Current Plan: Phase 36 - Productized Operations Actionability
 
-Status: active, 28% complete. Started on 2026-06-05.
+Status: active, 34% complete. Started on 2026-06-05.
 
 Branch: `phase33-testops-failure-hardening`
 
@@ -94,7 +94,7 @@ internal review against roadmap and Phase 35 non-claims
 
 Goal: publish node-level readiness facts into `SwBlockCluster.status.nodes[]`.
 
-Status: LOCAL PASS; QA pending.
+Status: PASS.
 
 Required facts:
 
@@ -109,12 +109,13 @@ Required facts:
 Acceptance:
 
 ```text
-[done-local] healthy node evidence projects Ready node status
-[done-local] missing image projects blocked node reason
-[done-local] blocked node reason is stable and visible in CRD status
-[done-local] node readiness projects to operator-snapshot as well as CRD status
-[done-local] no storage/workload mutation verbs are added
-[pending-qa] live 1-node and 3-node status agreement
+[done] healthy node evidence projects Ready node status
+[done] missing image projects blocked node reason
+[done] blocked node reason is stable and visible in CRD status
+[done] node readiness projects to operator-snapshot as well as CRD status
+[done] no storage/workload mutation verbs are added
+[done] live 1-node and 3-node status agreement
+[done] replay-only missing-image blocker projects blocked/image_missing_on_node
 ```
 
 Verification:
@@ -278,8 +279,14 @@ PM wording review if README/release note changes
   with stable node reasons such as `node_ready`, `node_not_ready`,
   `node_scheduling_disabled`, and `image_missing_on_node`. Local tests cover
   healthy and missing-image nodes; live QA remains pending.
+- 34%: D2 QA passed. Live 1-node and 3-node labs project healthy nodes into
+  `SwBlockCluster.status.nodes[]` and `operator-snapshot.json`; G3 missing
+  image is replay-only PASS because live blockmaster node evidence currently
+  hardcodes `Ready=true`, `Schedulable=true`, and omits `MissingImages`.
+  Follow-up: populate live `NodeEvidence` from real Kubernetes node readiness
+  and image-presence facts so negative node reasons are reachable live.
 
 ## Next Step
 
-Ask QA to run the D2 live node-readiness gate on 1-node and 3-node labs, then
-continue D3 support-bundle pointers. Do not add mutating controller behavior.
+Continue D3 support-bundle pointers and evidence refs. Track the live negative
+node-evidence follow-up; do not add mutating controller behavior.
