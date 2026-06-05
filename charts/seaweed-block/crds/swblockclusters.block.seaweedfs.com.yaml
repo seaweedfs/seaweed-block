@@ -70,6 +70,89 @@ spec:
                 nodeCount:
                   type: integer
                   minimum: 0
+                nodes:
+                  type: array
+                  items:
+                    type: object
+                    required:
+                      - name
+                      - schedulable
+                      - ready
+                    properties:
+                      name:
+                        type: string
+                      kubernetesNode:
+                        type: string
+                      internalIP:
+                        type: string
+                      schedulable:
+                        type: boolean
+                      ready:
+                        type: boolean
+                      status:
+                        type: string
+                      reasonCode:
+                        type: string
+                      lastHeartbeatAt:
+                        type: string
+                        format: date-time
+                      replicaCount:
+                        type: integer
+                        minimum: 0
+                      requiredImages:
+                        type: array
+                        items:
+                          type: string
+                      missingImages:
+                        type: array
+                        items:
+                          type: string
+                      conditions:
+                        type: array
+                        items:
+                          x-kubernetes-preserve-unknown-fields: true
+                          type: object
+                          required:
+                            - type
+                            - status
+                          properties:
+                            type:
+                              type: string
+                              enum:
+                                - Ready
+                                - Recovered
+                                - Recovering
+                                - Blocked
+                                - Invalid
+                                - CleanupRequired
+                                - EvidenceStale
+                            status:
+                              type: string
+                              enum:
+                                - "True"
+                                - "False"
+                                - Unknown
+                            reason:
+                              type: string
+                            severity:
+                              type: string
+                              enum:
+                                - info
+                                - warning
+                                - error
+                            message:
+                              type: string
+                            lastTransitionTime:
+                              type: string
+                              format: date-time
+                            evidenceRefs:
+                              type: array
+                              items:
+                                type: string
+                      evidenceRefs:
+                        type: array
+                        items:
+                          type: string
                 volumeCount:
                   type: integer
                   minimum: 0
@@ -128,3 +211,65 @@ spec:
                   type: array
                   items:
                     type: string
+                supportBundleRefs:
+                  type: array
+                  items:
+                    type: string
+                cleanup:
+                  type: object
+                  properties:
+                    status:
+                      type: string
+                    k8sResidueCount:
+                      type: integer
+                      minimum: 0
+                    iscsiResidueCount:
+                      type: integer
+                      minimum: 0
+                    multipathResidueCount:
+                      type: integer
+                      minimum: 0
+                    processResidueCount:
+                      type: integer
+                      minimum: 0
+                    hostPathResidueCount:
+                      type: integer
+                      minimum: 0
+                    failureCount:
+                      type: integer
+                      minimum: 0
+                    failedPhase:
+                      type: string
+                    reasonCodes:
+                      type: array
+                      items:
+                        type: string
+                    evidenceRef:
+                      type: string
+                safeNextSteps:
+                  type: array
+                  items:
+                    type: object
+                    required:
+                      - type
+                      - mode
+                      - mutationAllowed
+                    properties:
+                      type:
+                        type: string
+                      mode:
+                        type: string
+                        enum:
+                          - read_only
+                          - dry_run
+                          - scripted
+                      command:
+                        type: string
+                      reasonCode:
+                        type: string
+                      mutationAllowed:
+                        type: boolean
+                      evidenceRefs:
+                        type: array
+                        items:
+                          type: string

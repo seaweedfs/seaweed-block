@@ -117,6 +117,38 @@ func TestPhase35D1SwBlockVolumeConditionEnumCoversContract(t *testing.T) {
 	}
 }
 
+func TestPhase36D1SwBlockClusterActionabilitySchema(t *testing.T) {
+	doc := readYAMLMap(t, "charts/seaweed-block/crds/swblockclusters.block.seaweedfs.com.yaml")
+	statusProperties := crdStatusProperties(t, doc)
+	for _, want := range []string{"nodes", "cleanup", "supportBundleRefs", "safeNextSteps"} {
+		if _, ok := statusProperties[want]; !ok {
+			t.Fatalf("SwBlockCluster status schema missing %s", want)
+		}
+	}
+
+	nodeProperties := yamlMap(t, yamlMap(t, statusProperties, "nodes"), "items")
+	nodeProperties = yamlMap(t, nodeProperties, "properties")
+	for _, want := range []string{"name", "kubernetesNode", "internalIP", "schedulable", "ready", "status", "reasonCode", "conditions", "evidenceRefs"} {
+		if _, ok := nodeProperties[want]; !ok {
+			t.Fatalf("SwBlockCluster.status.nodes[] schema missing %s", want)
+		}
+	}
+
+	cleanupProperties := yamlMap(t, yamlMap(t, statusProperties, "cleanup"), "properties")
+	for _, want := range []string{"status", "k8sResidueCount", "iscsiResidueCount", "multipathResidueCount", "processResidueCount", "hostPathResidueCount", "failureCount", "evidenceRef"} {
+		if _, ok := cleanupProperties[want]; !ok {
+			t.Fatalf("SwBlockCluster.status.cleanup schema missing %s", want)
+		}
+	}
+
+	stepProperties := yamlMap(t, yamlMap(t, yamlMap(t, statusProperties, "safeNextSteps"), "items"), "properties")
+	for _, want := range []string{"type", "mode", "command", "reasonCode", "mutationAllowed", "evidenceRefs"} {
+		if _, ok := stepProperties[want]; !ok {
+			t.Fatalf("SwBlockCluster.status.safeNextSteps[] schema missing %s", want)
+		}
+	}
+}
+
 func TestPhase35D1OperatorStatusRBACIsStatusOnly(t *testing.T) {
 	raw := readRepoFile(t, "charts/seaweed-block/templates/operator-status-rbac.yaml")
 	required := []string{
@@ -152,6 +184,21 @@ func TestPhase35D1OperatorStatusRBACDefaultDisabled(t *testing.T) {
 	assertYAMLBool(t, operatorStatus, "create", false)
 	rbac := yamlMap(t, operatorStatus, "rbac")
 	assertYAMLBool(t, rbac, "create", true)
+}
+
+func crdStatusProperties(t *testing.T, doc map[string]any) map[string]any {
+	t.Helper()
+	return yamlMap(t,
+		yamlMap(t,
+			yamlMap(t,
+				yamlMap(t,
+					yamlMap(t,
+						yamlSlice(t, yamlMap(t, doc, "spec"), "versions")[0].(map[string]any),
+						"schema"),
+					"openAPIV3Schema"),
+				"properties"),
+			"status"),
+		"properties")
 }
 
 func TestPhase35D3OperatorStatusDeploymentCanRunDryRunOrStatusWriteMode(t *testing.T) {

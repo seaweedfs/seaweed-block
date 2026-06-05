@@ -1,6 +1,6 @@
 # Current Plan: Phase 36 - Productized Operations Actionability
 
-Status: active, 0% complete. Started on 2026-06-05.
+Status: active, 16% complete. Started on 2026-06-05.
 
 Branch: `phase33-testops-failure-hardening`
 
@@ -61,7 +61,7 @@ or CRD spec.
 
 Goal: define the exact Phase 36 status vocabulary before code changes.
 
-Status: pending.
+Status: PASS.
 
 Deliverables:
 
@@ -75,12 +75,12 @@ Deliverables:
 Acceptance:
 
 ```text
-[ ] field contract names `SwBlockCluster.status.nodes[]`
-[ ] field contract names cleanup visibility and residue counters
-[ ] field contract names evidence refs and support-bundle pointers
-[ ] field contract names safe next-step / dry-run action hints
-[ ] internal review confirms no field implies mutating operator ownership
-[ ] scoped unit tests fail first for any new status projection contract
+[done] field contract names `SwBlockCluster.status.nodes[]`
+[done] field contract names cleanup visibility and residue counters
+[done] field contract names evidence refs and support-bundle pointers
+[done] field contract names safe next-step / dry-run action hints
+[done] internal review confirms no field implies mutating operator ownership
+[done] scoped unit tests fail first for any new status projection contract
 ```
 
 Verification:
@@ -267,8 +267,13 @@ PM wording review if README/release note changes
 - 0%: Phase 36 plan opened. Scope is read-only control-plane operations
   actionability: node readiness, support evidence refs, cleanup visibility,
   surface agreement, and release-claim alignment.
+- 16%: D1 contract closed. The Go CRD contract, `SwBlockCluster` CRD schema,
+  and operator readiness document now define node readiness, cleanup visibility,
+  support-bundle refs, and safe next-step fields while preserving the
+  status/events-only mutation boundary. Focused tests failed first on missing
+  fields, then passed after the structural contract landed.
 
 ## Next Step
 
-Start D1 with a contract review and tests before implementation. Do not add
-mutating controller behavior in this phase.
+Start D2 by wiring real node readiness/preflight evidence into
+`SwBlockCluster.status.nodes[]`. Do not add mutating controller behavior.

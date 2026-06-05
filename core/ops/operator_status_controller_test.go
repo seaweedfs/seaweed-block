@@ -260,6 +260,53 @@ func TestOperatorStatusReconcilerWALIntegrityFaultIsNeverReady(t *testing.T) {
 	}
 }
 
+func TestOperatorStatusReconcilerCleanupStatusUsesCRDFieldNames(t *testing.T) {
+	source := fakeOperatorStatusSource{cluster: ClusterEvidence{
+		SchemaVersion: ObservationSchemaVersion,
+		CapturedAt:    time.Date(2026, 6, 5, 12, 0, 0, 0, time.UTC),
+		Status:        ObservationStatusOK,
+		Cleanup: &CleanupEvidence{
+			Status:                 "failed",
+			KubernetesResidueCount: 1,
+			ISCSIResidueCount:      2,
+			MultipathResidueCount:  3,
+			ProcessResidueCount:    4,
+			HostPathResidueCount:   5,
+			FailureCount:           6,
+			FailedPhase:            "verify",
+			ReasonCodes:            []string{"iscsi_node_records_present"},
+			EvidenceRef:            "cleanup-summary.txt",
+		},
+	}}
+	writer := &fakeOperatorStatusWriter{}
+
+	_, err := (OperatorStatusReconciler{
+		Source: source,
+		Writer: writer,
+	}).Reconcile(context.Background())
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if writer.cluster.Cleanup == nil || writer.cluster.Cleanup.ISCSIResidueCount != 2 {
+		t.Fatalf("cleanup status=%+v", writer.cluster.Cleanup)
+	}
+	rawStatus, err := json.Marshal(writer.cluster)
+	if err != nil {
+		t.Fatalf("marshal cluster status: %v", err)
+	}
+	raw := string(rawStatus)
+	for _, want := range []string{`"k8sResidueCount":1`, `"iscsiResidueCount":2`, `"hostPathResidueCount":5`, `"evidenceRef":"cleanup-summary.txt"`} {
+		if !strings.Contains(raw, want) {
+			t.Fatalf("cluster cleanup status missing %s: %s", want, raw)
+		}
+	}
+	for _, forbidden := range []string{"k8s_residue_count", "iscsi_residue_count", "hostpath_residue_count", "evidence_ref"} {
+		if strings.Contains(raw, forbidden) {
+			t.Fatalf("CRD cleanup status must not use report snake_case field %q: %s", forbidden, raw)
+		}
+	}
+}
+
 func TestOperatorStatusReconcilerEventFailureDoesNotBlockLaterStatusWrites(t *testing.T) {
 	source := fakeOperatorStatusSource{cluster: ClusterEvidence{
 		SchemaVersion: ObservationSchemaVersion,

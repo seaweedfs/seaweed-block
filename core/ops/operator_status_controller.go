@@ -34,15 +34,75 @@ type SwBlockClusterCRDStatus struct {
 	ObservedAt         time.Time              `json:"observedAt,omitempty"`
 	ObservedGeneration int64                  `json:"observedGeneration,omitempty"`
 	NodeCount          int                    `json:"nodeCount"`
+	Nodes              []SwBlockNodeCRDStatus `json:"nodes,omitempty"`
 	VolumeCount        int                    `json:"volumeCount"`
 	ReadyVolumeCount   int                    `json:"readyVolumeCount"`
 	BlockedVolumeCount int                    `json:"blockedVolumeCount"`
 	StaleVolumeCount   int                    `json:"staleVolumeCount"`
 	Conditions         []ObservationCondition `json:"conditions,omitempty"`
 	EvidenceRefs       []string               `json:"evidenceRefs,omitempty"`
+	SupportBundleRefs  []string               `json:"supportBundleRefs,omitempty"`
+	Cleanup            *SwBlockCleanupStatus  `json:"cleanup,omitempty"`
+	SafeNextSteps      []SwBlockSafeNextStep  `json:"safeNextSteps,omitempty"`
 	MutationAllowed    bool                   `json:"mutationAllowed"`
 	AllowedActionModes []string               `json:"allowedActionModes,omitempty"`
 	NonClaims          []string               `json:"nonClaims,omitempty"`
+}
+
+type SwBlockNodeCRDStatus struct {
+	Name            string                 `json:"name"`
+	KubernetesNode  string                 `json:"kubernetesNode,omitempty"`
+	InternalIP      string                 `json:"internalIP,omitempty"`
+	Schedulable     bool                   `json:"schedulable"`
+	Ready           bool                   `json:"ready"`
+	Status          string                 `json:"status,omitempty"`
+	ReasonCode      string                 `json:"reasonCode,omitempty"`
+	LastHeartbeatAt time.Time              `json:"lastHeartbeatAt,omitempty"`
+	ReplicaCount    int                    `json:"replicaCount,omitempty"`
+	RequiredImages  []string               `json:"requiredImages,omitempty"`
+	MissingImages   []string               `json:"missingImages,omitempty"`
+	Conditions      []ObservationCondition `json:"conditions,omitempty"`
+	EvidenceRefs    []string               `json:"evidenceRefs,omitempty"`
+}
+
+type SwBlockSafeNextStep struct {
+	Type            string   `json:"type"`
+	Mode            string   `json:"mode"`
+	Command         string   `json:"command,omitempty"`
+	ReasonCode      string   `json:"reasonCode,omitempty"`
+	MutationAllowed bool     `json:"mutationAllowed"`
+	EvidenceRefs    []string `json:"evidenceRefs,omitempty"`
+}
+
+type SwBlockCleanupStatus struct {
+	Status                 string   `json:"status"`
+	KubernetesResidueCount int      `json:"k8sResidueCount,omitempty"`
+	ISCSIResidueCount      int      `json:"iscsiResidueCount,omitempty"`
+	MultipathResidueCount  int      `json:"multipathResidueCount,omitempty"`
+	ProcessResidueCount    int      `json:"processResidueCount,omitempty"`
+	HostPathResidueCount   int      `json:"hostPathResidueCount,omitempty"`
+	FailureCount           int      `json:"failureCount,omitempty"`
+	FailedPhase            string   `json:"failedPhase,omitempty"`
+	ReasonCodes            []string `json:"reasonCodes,omitempty"`
+	EvidenceRef            string   `json:"evidenceRef,omitempty"`
+}
+
+func swBlockCleanupStatus(cleanup *CleanupEvidence) *SwBlockCleanupStatus {
+	if cleanup == nil {
+		return nil
+	}
+	return &SwBlockCleanupStatus{
+		Status:                 cleanup.Status,
+		KubernetesResidueCount: cleanup.KubernetesResidueCount,
+		ISCSIResidueCount:      cleanup.ISCSIResidueCount,
+		MultipathResidueCount:  cleanup.MultipathResidueCount,
+		ProcessResidueCount:    cleanup.ProcessResidueCount,
+		HostPathResidueCount:   cleanup.HostPathResidueCount,
+		FailureCount:           cleanup.FailureCount,
+		FailedPhase:            cleanup.FailedPhase,
+		ReasonCodes:            append([]string(nil), cleanup.ReasonCodes...),
+		EvidenceRef:            cleanup.EvidenceRef,
+	}
 }
 
 type SwBlockVolumeCRDStatus struct {
@@ -133,6 +193,7 @@ func (r OperatorStatusReconciler) Reconcile(ctx context.Context) (OperatorStatus
 	if snapshot.Cluster.Cleanup != nil && snapshot.Cluster.Cleanup.EvidenceRef != "" {
 		clusterStatus.EvidenceRefs = append(clusterStatus.EvidenceRefs, snapshot.Cluster.Cleanup.EvidenceRef)
 	}
+	clusterStatus.Cleanup = swBlockCleanupStatus(snapshot.Cluster.Cleanup)
 	if err := r.Writer.WriteClusterStatus(ctx, clusterRef, clusterStatus); err != nil {
 		return OperatorStatusReconcileResult{}, err
 	}

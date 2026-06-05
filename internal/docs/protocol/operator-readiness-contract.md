@@ -1,7 +1,7 @@
 # Operator Readiness Contract
 
-Status: Phase 35 D1 seed. Read-only CRD/status contract only; no controller
-implementation yet.
+Status: Phase 36 D1. Read-only CRD/status contract plus actionable operations
+fields. The controller may publish status and Events only.
 
 ## Purpose
 
@@ -9,7 +9,7 @@ This document defines how the Phase 22 `ManagedVolume` read model can feed a
 future Kubernetes operator without letting the operator rediscover volume state
 or bypass authority.
 
-The contract is:
+The base contract is:
 
 ```text
 ManagedVolumeProjection
@@ -24,6 +24,22 @@ It is not:
 - a controller loop,
 - a mutating admin workflow,
 - a repair/rebuild/failback implementation.
+
+Phase 36 extends the same contract with actionable read-only operations fields:
+
+```text
+node readiness facts
+-> SwBlockCluster.status.nodes[]
+support/evidence pointers
+-> SwBlockCluster.status.supportBundleRefs[] / evidenceRefs[]
+cleanup verifier facts
+-> SwBlockCluster.status.cleanup + CleanupRequired condition
+safe next-step hints
+-> SwBlockCluster.status.safeNextSteps[]
+```
+
+These fields are still observation and advice. They do not transfer lifecycle
+ownership to the operator.
 
 The Phase 35 D1 CRD schema lives in:
 
@@ -50,6 +66,9 @@ Truth ownership remains:
 | Replica durability | blockvolume / master evidence | expose readiness and blockers |
 | Host path | host initiator/kernel tools | expose transparent path state |
 | Workload check | user/TestOps/app evidence | expose data-check proof |
+| Node readiness | Kubernetes + preflight/verifier evidence | expose schedulability, image, iSCSI, multipath, and hostPath readiness |
+| Cleanup residue | cleanup verifier / host evidence | expose residue type and safe next step |
+| Support bundle | CLI/TestOps bundle collector | expose evidence refs and collection/replay commands |
 
 The operator may publish Conditions/Events. It may not mint authority or decide
 promotion.
@@ -90,12 +109,52 @@ The Kubernetes CRD projection keeps the same vocabulary:
 Cluster-level aggregate fields map to `SwBlockCluster.status.*`:
 
 - `nodeCount`
+- `nodes[]`
 - `volumeCount`
 - `readyVolumeCount`
 - `blockedVolumeCount`
 - `staleVolumeCount`
 - `conditions[]`
 - `evidenceRefs[]`
+- `supportBundleRefs[]`
+- `cleanup`
+- `safeNextSteps[]`
+
+Phase 36 cluster node status fields are:
+
+| Field | Owner Input | Meaning | Stability |
+|---|---|---|---|
+| `status.nodes[].name` | Kubernetes / inventory | product node identity | stable |
+| `status.nodes[].kubernetesNode` | Kubernetes API | Kubernetes node name when known | stable |
+| `status.nodes[].internalIP` | Kubernetes API / inventory | observed node IP | stable |
+| `status.nodes[].schedulable` | Kubernetes API | scheduling availability fact | stable |
+| `status.nodes[].ready` | Kubernetes API / heartbeat | node Ready fact | stable |
+| `status.nodes[].status` | operator-status aggregate | ready/blocked/unknown-style node status | provisional |
+| `status.nodes[].reasonCode` | operator-status aggregate | stable reason for non-ready node | provisional |
+| `status.nodes[].conditions[]` | operator-status aggregate | Kubernetes-style node readiness conditions | provisional |
+| `status.nodes[].evidenceRefs[]` | evidence producer | supporting artifact paths | stable |
+
+Phase 36 cleanup status fields are:
+
+| Field | Owner Input | Meaning | Stability |
+|---|---|---|---|
+| `status.cleanup.status` | cleanup verifier | `ok` or `failed` cleanup verdict | stable |
+| `status.cleanup.*ResidueCount` | cleanup verifier | residue counters by category | stable |
+| `status.cleanup.failureCount` | cleanup verifier | total cleanup verifier failures | stable |
+| `status.cleanup.failedPhase` | cleanup verifier | failed cleanup/verifier phase | provisional |
+| `status.cleanup.reasonCodes[]` | cleanup verifier | stable residue reason codes | provisional |
+| `status.cleanup.evidenceRef` | cleanup verifier | cleanup summary artifact | stable |
+
+Safe next-step fields are advisory only:
+
+| Field | Meaning |
+|---|---|
+| `status.safeNextSteps[].type` | action identifier such as `observe.collect_bundle` |
+| `status.safeNextSteps[].mode` | `read_only`, `dry_run`, or `scripted` |
+| `status.safeNextSteps[].command` | suggested command text when safe to print |
+| `status.safeNextSteps[].reasonCode` | reason that made the step relevant |
+| `status.safeNextSteps[].mutationAllowed` | must remain `false` in Phase 36 |
+| `status.safeNextSteps[].evidenceRefs[]` | evidence backing the suggestion |
 
 All Phase 23 actions are non-executing:
 
@@ -153,7 +212,11 @@ Examples:
 | `safe_k8s.reinstall_external_iscsi` | `dry_run` | installer or operator |
 | `safe_k8s.import_csi_image` | `dry_run` | installer or operator |
 | `observe.inspect_host_path` | `dry_run` | ops / host diagnostics |
+| `observe.verify_cleanup` | `scripted` | user/TestOps cleanup verifier |
 | `authority.request_promotion` | not emitted by Phase 23 for execution | blockmaster recovery only |
+
+In Phase 36, `scripted` still means user-initiated and outside the operator
+reconcile loop. It must not be executed automatically by operator-status.
 
 ## Non-Claims
 
@@ -162,6 +225,9 @@ This contract does not deliver:
 - controller reconciliation,
 - mutating actions,
 - automatic repair/rebuild,
+- automatic cleanup,
+- CR object ownership or finalizers,
+- support-bundle upload,
 - dashboard buttons,
 - production RBAC/audit.
 
@@ -174,9 +240,10 @@ Pinned by:
 - `core/ops/managed_volume_operator_contract_test.go`
 - `core/ops/managed_volume_crd_contract_test.go`
 - `core/ops/kubernetes_crd_manifests_test.go`
+- `core/ops/operator_status_controller_test.go`
 
 Regression:
 
 ```text
-go test ./core/ops -run "ManagedVolumeOperatorContract|ManagedVolumeCRDContract|Phase35D1" -count=1
+go test ./core/ops -run "ManagedVolumeOperatorContract|ManagedVolumeCRDContract|Phase35D1|Phase36D1|OperatorStatusReconciler" -count=1
 ```

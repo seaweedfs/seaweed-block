@@ -48,6 +48,43 @@ func TestManagedVolumeCRDContract_StatusOnlyResources(t *testing.T) {
 	}
 }
 
+func TestManagedVolumeCRDContract_Phase36ActionabilityFields(t *testing.T) {
+	contract := ManagedVolumeCRDContractDefinition()
+	var cluster ManagedVolumeCRDKind
+	for _, resource := range contract.Resources {
+		if resource.Kind == SwBlockClusterKind {
+			cluster = resource
+			break
+		}
+	}
+	if cluster.Kind == "" {
+		t.Fatalf("missing %s resource", SwBlockClusterKind)
+	}
+	for _, want := range []string{
+		"status.nodes",
+		"status.cleanup",
+		"status.supportBundleRefs",
+		"status.safeNextSteps",
+	} {
+		if !stringSliceContains(cluster.StatusPaths, want) {
+			t.Fatalf("cluster status contract missing %s in %+v", want, cluster.StatusPaths)
+		}
+	}
+	for _, forbidden := range []string{
+		"create_pvc",
+		"delete_pvc",
+		"delete_iscsi_session",
+		"cleanup_live_state",
+		"repair",
+		"rebuild",
+		"failback",
+	} {
+		if !stringSliceContains(contract.RBAC.ForbiddenActions, forbidden) {
+			t.Fatalf("phase36 forbidden action %s missing from %+v", forbidden, contract.RBAC.ForbiddenActions)
+		}
+	}
+}
+
 func TestManagedVolumeCRDContract_ConditionVocabularyCoversProjection(t *testing.T) {
 	contract := ManagedVolumeCRDContractDefinition()
 	for _, condition := range []string{
