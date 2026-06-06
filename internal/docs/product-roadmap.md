@@ -411,16 +411,20 @@ phases rather than being mixed into the closed foundation.
 6. Cleanup visibility:
    `CleanupRequired=True`, residue type, and safe next step. Do not automate
    cleanup yet. Status: active in Phase 36; D4 QA passed.
+7. Surface agreement:
+   CRD status, Events, report, dashboard, operator-snapshot, and explain must
+   agree on healthy, blocked, stale, cleanup-required, and multi-volume paths.
+   Status: active in Phase 36; local D5 contract landed, QA pending.
 
 ### P2: Enter Mutating Lifecycle Carefully
 
-7. Finalizers and delete safety for PVC/CRD lifecycle.
-8. Upgrade/rollback status and drift reporting before upgrade execution.
+8. Finalizers and delete safety for PVC/CRD lifecycle.
+9. Upgrade/rollback status and drift reporting before upgrade execution.
 
 ### P3: Advanced Day-2 Features
 
-9. Rebuild, reintegration, and failback.
-10. Backup, snapshot, and restore.
+10. Rebuild, reintegration, and failback.
+11. Backup, snapshot, and restore.
 
 NVMe ANA parity is important, but it should not be the next plan. It should
 reuse the Phase 35 status foundation so protocol-specific path state does not

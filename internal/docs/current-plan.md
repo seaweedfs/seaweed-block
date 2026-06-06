@@ -1,6 +1,6 @@
 # Current Plan: Phase 36 - Productized Operations Actionability
 
-Status: active, 78% complete. Started on 2026-06-05.
+Status: active, 86% complete. Started on 2026-06-05.
 
 Branch: `phase33-testops-failure-hardening`
 
@@ -204,7 +204,7 @@ QA verifies no operator cleanup mutation occurred
 Goal: prove CRD status, report, dashboard, operator-snapshot, explain, and
 Events agree on the same operational truth.
 
-Status: pending.
+Status: local PASS; QA pending.
 
 Scenarios:
 
@@ -217,12 +217,14 @@ Scenarios:
 Acceptance:
 
 ```text
-[ ] no blocked/unknown/cleanup-required path shows false Ready=True
-[ ] CRD status agrees with report summary
-[ ] CRD status agrees with operator-snapshot.json
-[ ] dashboard /operator-snapshot.json agrees with CRD status
-[ ] explain names the same reason code and evidence refs
-[ ] Kubernetes Events use stable bounded identity
+[done] no blocked/unknown/cleanup-required path shows false Ready=True locally
+[done] CRD status agrees with report summary locally
+[done] CRD status agrees with operator-snapshot.json locally
+[done] dashboard /operator-snapshot.json agrees with CRD status locally
+[done] explain names the same reason code and evidence refs locally
+[done] managed-only stale evidence is rendered in report summary and explain
+[ ] Kubernetes Events use stable bounded identity in QA gate
+[ ] QA strict rerun covers healthy, blocked, stale, cleanup-required, and multi-volume paths
 ```
 
 Verification:
@@ -311,8 +313,13 @@ PM wording review if README/release note changes
   evidence projects `CleanupRequired=True`, residue counters, and scripted
   `observe.verify_cleanup`. CRD status, operator-snapshot, summary, and HTML
   agree. QA verified the controller never runs cleanup or gains mutation power.
+- 86%: D5 local surface-agreement tests landed. `summary.txt`, `ops explain`,
+  `operator-snapshot.json`, and dashboard now agree for node blockers,
+  cleanup-required evidence, and stale/unreachable evidence. Managed-only
+  stale evidence now appears in `summary.txt` and `ops explain` even when the
+  bundle has no raw `volumes[]` row. QA strict surface gate remains pending.
 
 ## Next Step
 
-Continue D5 surface agreement and negative-first gates. Track the live
-negative node-evidence follow-up; do not add mutating controller behavior.
+Run D5 QA surface-agreement gates. Track the live negative node-evidence
+follow-up; do not add mutating controller behavior.

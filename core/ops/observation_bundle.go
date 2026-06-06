@@ -129,8 +129,17 @@ func RenderObservationExplainText(cluster ClusterEvidence) string {
 	cluster = NormalizeObservationCluster(cluster)
 	var b strings.Builder
 	b.WriteString(RenderClusterEvidenceText(cluster))
+	renderedManaged := map[string]bool{}
 	for _, volume := range cluster.Volumes {
-		b.WriteString(RenderManagedVolumeProjectionText(managedProjectionForVolume(cluster.ManagedVolumes, volume.VolumeID)))
+		managed := managedProjectionForVolume(cluster.ManagedVolumes, volume.VolumeID)
+		b.WriteString(RenderManagedVolumeProjectionText(managed))
+		renderedManaged[managedProjectionKey(managed)] = true
+	}
+	for _, managed := range cluster.ManagedVolumes {
+		if renderedManaged[managedProjectionKey(managed)] {
+			continue
+		}
+		b.WriteString(RenderManagedVolumeProjectionText(managed))
 	}
 	if len(cluster.Events) > 0 {
 		b.WriteString("timeline:\n")

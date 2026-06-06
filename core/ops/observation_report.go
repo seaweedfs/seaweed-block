@@ -71,6 +71,25 @@ func RenderObservationReportSummary(cluster ClusterEvidence) string {
 			step.Command,
 			emptyAsDash(step.ReasonCode))
 	}
+	operatorSnapshot := BuildOperatorFoundationSnapshot(cluster)
+	for _, condition := range operatorSnapshot.Cluster.Conditions {
+		fmt.Fprintf(&b, "cluster_condition=%s status=%s reason=%s severity=%s\n",
+			emptyAsDash(condition.Type),
+			emptyAsDash(condition.Status),
+			emptyAsDash(condition.Reason),
+			emptyAsDash(condition.Severity))
+	}
+	for _, node := range operatorSnapshot.Cluster.Nodes {
+		fmt.Fprintf(&b, "node=%s k8s=%s status=%s reason=%s ready=%t schedulable=%t missing_images=%s\n",
+			emptyAsDash(node.Name),
+			emptyAsDash(node.KubernetesNode),
+			emptyAsDash(node.Status),
+			emptyAsDash(node.ReasonCode),
+			node.Ready,
+			node.Schedulable,
+			emptyAsDash(strings.Join(node.MissingImages, ",")))
+	}
+	renderedManaged := map[string]bool{}
 	for _, volume := range cluster.Volumes {
 		fmt.Fprintf(&b, "volume=%s status=%s pvc=%s/%s primary=%s@%s frontend=%s rf=%d ack=%s\n",
 			emptyAsDash(volume.VolumeID),
@@ -83,27 +102,42 @@ func RenderObservationReportSummary(cluster ClusterEvidence) string {
 			volume.ReplicationFactor,
 			emptyAsDash(volume.AckProfile))
 		managed := managedProjectionForVolume(cluster.ManagedVolumes, volume.VolumeID)
-		fmt.Fprintf(&b, "managed_volume=%s status=%s reason=%s\n",
-			emptyAsDash(managed.VolumeID),
-			emptyAsDash(managed.Status),
-			emptyAsDash(managed.ReasonCode))
-		for _, condition := range managed.Conditions {
-			fmt.Fprintf(&b, "managed_volume_condition=%s status=%s reason=%s severity=%s\n",
-				emptyAsDash(condition.Type),
-				emptyAsDash(condition.Status),
-				emptyAsDash(condition.Reason),
-				emptyAsDash(condition.Severity))
+		renderManagedProjectionSummary(&b, managed)
+		renderedManaged[managedProjectionKey(managed)] = true
+	}
+	for _, managed := range cluster.ManagedVolumes {
+		if renderedManaged[managedProjectionKey(managed)] {
+			continue
 		}
-		for _, action := range managed.Actions {
-			fmt.Fprintf(&b, "managed_volume_action=%s mode=%s side_effect=%s executor=%s\n",
-				emptyAsDash(action.Type),
-				emptyAsDash(action.Mode),
-				emptyAsDash(action.SideEffectClass),
-				emptyAsDash(action.OwnerExecutor))
-		}
+		renderManagedProjectionSummary(&b, managed)
 	}
 	fmt.Fprintf(&b, "read_only=true\n")
 	return b.String()
+}
+
+func renderManagedProjectionSummary(b *strings.Builder, managed ManagedVolumeProjection) {
+	fmt.Fprintf(b, "managed_volume=%s status=%s reason=%s\n",
+		emptyAsDash(managed.VolumeID),
+		emptyAsDash(managed.Status),
+		emptyAsDash(managed.ReasonCode))
+	for _, condition := range managed.Conditions {
+		fmt.Fprintf(b, "managed_volume_condition=%s status=%s reason=%s severity=%s\n",
+			emptyAsDash(condition.Type),
+			emptyAsDash(condition.Status),
+			emptyAsDash(condition.Reason),
+			emptyAsDash(condition.Severity))
+	}
+	for _, action := range managed.Actions {
+		fmt.Fprintf(b, "managed_volume_action=%s mode=%s side_effect=%s executor=%s\n",
+			emptyAsDash(action.Type),
+			emptyAsDash(action.Mode),
+			emptyAsDash(action.SideEffectClass),
+			emptyAsDash(action.OwnerExecutor))
+	}
+}
+
+func managedProjectionKey(managed ManagedVolumeProjection) string {
+	return defaultString(managed.VolumeID, managed.PVCName)
 }
 
 func RenderObservationReportHTML(cluster ClusterEvidence) string {
