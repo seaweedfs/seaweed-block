@@ -54,8 +54,9 @@ This is the short internal roadmap. Keep it current and readable.
   contract is stable.
 - Active phase: Phase 36 Productized Operations Actionability. Use the Phase 35
   CRD/status/Event foundation to publish node readiness, support evidence refs,
-  cleanup visibility, and safe next-step hints. This remains read-only and must
-  not add mutating operator lifecycle.
+  cleanup visibility, safe next-step hints, and cross-surface agreement. D2-D5
+  are QA-validated; D6 release-claim alignment remains. This remains read-only
+  and must not add mutating operator lifecycle.
 - Model hardening gate before the next large release: complete the
   ManagedVolume Operations Model under `internal/docs/protocol/` before
   expanding operator or broader HA claims. The goal is to prevent Kubernetes,
@@ -414,7 +415,9 @@ phases rather than being mixed into the closed foundation.
 7. Surface agreement:
    CRD status, Events, report, dashboard, operator-snapshot, and explain must
    agree on healthy, blocked, stale, cleanup-required, and multi-volume paths.
-   Status: active in Phase 36; local D5 contract landed, QA pending.
+   Status: active in Phase 36; D5 QA passed. Live operational follow-ups remain
+   for build-host CSI image-import evidence, loopback publish-target
+   documentation, and force-delete iSCSI node DB residue visibility.
 
 ### P2: Enter Mutating Lifecycle Carefully
 
@@ -445,8 +448,9 @@ become another isolated status model.
   CRDs, status-only reconciliation, Conditions, Events, stable Event identity,
   and read-only boundary tests.
 - Active work is Phase 36: Productized Operations Actionability over the
-  read-only control-plane model. Focus on node readiness, support evidence
-  pointers, cleanup visibility, and surface agreement.
+  read-only control-plane model. Node readiness, support evidence pointers,
+  cleanup visibility, and surface agreement are QA-validated; release-claim
+  alignment and close remain.
 - Do not start NVMe ANA parity, rebuild/failback, backup/restore, or mutating
   operator workflows by extending Phase 36. Pick those as separate gated
   phases.

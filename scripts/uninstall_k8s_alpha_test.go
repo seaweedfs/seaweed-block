@@ -86,6 +86,33 @@ func TestCollectHelmSupportBundleKeepsOptionalDiagnosticsNonFatal(t *testing.T) 
 	}
 }
 
+func TestBuildAlphaImagesImportsLocalCSIImageWhenImportingRemoteK3SNodes(t *testing.T) {
+	root := repoRoot(t)
+	raw, err := os.ReadFile(filepath.Join(root, "scripts", "build-alpha-images.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(raw)
+	remoteBranch := `if [[ -n "$IMPORT_K3S_NODES" ]]; then`
+	idx := strings.Index(script, remoteBranch)
+	if idx < 0 {
+		t.Fatalf("build script missing remote k3s import branch %q", remoteBranch)
+	}
+	branch := script[idx:]
+	for _, want := range []string{
+		`import_k3s_image "$IMAGE" "k3s-import-local-sw-block.log"`,
+		`verify_local_k3s_image "$IMAGE" "k3s-images-local-sw-block.txt"`,
+		`import_k3s_image "$CSI_IMAGE" "k3s-import-local-sw-block-csi.log"`,
+		`verify_local_k3s_image "$CSI_IMAGE" "k3s-images-local-sw-block-csi.txt"`,
+		`[alpha-build] k3s_import node=local skipped reason=local_k3s_unavailable`,
+		`import_k3s_images_to_nodes "$IMPORT_K3S_NODES"`,
+	} {
+		if !strings.Contains(branch, want) {
+			t.Fatalf("remote k3s import branch missing %q", want)
+		}
+	}
+}
+
 func TestVerifyHelmCleanupReportsAllResidueDimensions(t *testing.T) {
 	root := repoRoot(t)
 	raw, err := os.ReadFile(filepath.Join(root, "scripts", "verify-helm-cleanup.sh"))

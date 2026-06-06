@@ -1,6 +1,6 @@
 # Current Plan: Phase 36 - Productized Operations Actionability
 
-Status: active, 86% complete. Started on 2026-06-05.
+Status: active, 93% complete. Started on 2026-06-05.
 
 Branch: `phase33-testops-failure-hardening`
 
@@ -204,7 +204,7 @@ QA verifies no operator cleanup mutation occurred
 Goal: prove CRD status, report, dashboard, operator-snapshot, explain, and
 Events agree on the same operational truth.
 
-Status: local PASS; QA pending.
+Status: PASS.
 
 Scenarios:
 
@@ -223,8 +223,8 @@ Acceptance:
 [done] dashboard /operator-snapshot.json agrees with CRD status locally
 [done] explain names the same reason code and evidence refs locally
 [done] managed-only stale evidence is rendered in report summary and explain
-[ ] Kubernetes Events use stable bounded identity in QA gate
-[ ] QA strict rerun covers healthy, blocked, stale, cleanup-required, and multi-volume paths
+[done] Kubernetes Events use stable bounded identity in QA gate
+[done] QA strict rerun covers healthy, blocked, stale, cleanup-required, and multi-volume paths
 ```
 
 Verification:
@@ -318,8 +318,16 @@ PM wording review if README/release note changes
   cleanup-required evidence, and stale/unreachable evidence. Managed-only
   stale evidence now appears in `summary.txt` and `ops explain` even when the
   bundle has no raw `volumes[]` row. QA strict surface gate remains pending.
+- 93%: D5 QA passed all six gates. Healthy first-volume, blocked,
+  unknown/stale, cleanup-required, multi-volume, Event-identity, and RBAC
+  boundary paths agree across CRD status, Events, report, dashboard,
+  operator-snapshot, and `ops explain`; no negative path shows false
+  `Ready=True`. Follow-ups recorded from the live path: local CSI image import
+  evidence gap, loopback publish-target single-node boundary, and force-delete
+  iSCSI node DB residue.
 
 ## Next Step
 
-Run D5 QA surface-agreement gates. Track the live negative node-evidence
-follow-up; do not add mutating controller behavior.
+Run D6 release-claim alignment and close. Keep the claim to actionable
+read-only operations. Track the live negative node-evidence follow-up and D5
+operational findings; do not add mutating controller behavior.
