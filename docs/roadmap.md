@@ -64,6 +64,39 @@ Current alpha constraints:
    - stronger negative-path gates for blocked, stale, unreachable, corrupt
      evidence, and cleanup-residue cases
 
+## Current Capability Snapshot
+
+Seaweed Block can already demonstrate a narrow Kubernetes block-storage loop:
+
+- Helm install on supported lab clusters.
+- Dynamic PVC provisioning through CSI.
+- App pod mount, write, read, and replacement-reader verification.
+- iSCSI frontend with gated ALUA/dm-multipath failover evidence.
+- RF=3 multi-volume lab path with independent volume identity and publish
+  target.
+- Restart persistence for supported hostPath gates.
+- Read-only CLI/report/dashboard/support-bundle flows.
+- Read-only CRD status and Events for `SwBlockCluster` and `SwBlockVolume`.
+- Negative-first status: blocked, stale, unreachable, or corrupt evidence must
+  not become false `Ready=True`.
+- Cleanup verification for Kubernetes, iSCSI, multipath, process, and hostPath
+  residue.
+
+The product model is converging around one read-only control-plane pattern:
+truth owners publish facts, the status layer aggregates judgment, executors stay
+bounded, and evidence explains why the status is allowed. The next work should
+preserve that model rather than add isolated scripts or separate status systems.
+
+Recommended order from here:
+
+1. Harden live node evidence so CRD status reflects real Kubernetes node,
+   image, and CSI-driver state.
+2. Define the lifecycle action model before adding mutating operator behavior.
+3. Add finalizer/delete safety as the first mutating operator slice.
+4. Add upgrade/rollback drift status before upgrade execution.
+5. Add returned-replica rebuild/failback, backup/restore, and NVMe ANA parity
+   only after the status/action model stays stable.
+
 ## Availability And Recovery Follow-Ups
 
 1. Multi-node Kubernetes test.

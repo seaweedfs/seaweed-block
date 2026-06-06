@@ -436,6 +436,116 @@ NVMe ANA parity is important, but it should not be the next plan. It should
 reuse the Phase 35 status foundation so protocol-specific path state does not
 become another isolated status model.
 
+## Capability And Model Maturity Snapshot
+
+This section is the product-state checkpoint after the Phase 35/36 operations
+push. It exists to stop the roadmap from becoming an unbounded sequence of
+small operations fixes.
+
+### Current Block Capabilities
+
+The product can already demonstrate a narrow but real Kubernetes block-storage
+loop:
+
+- Helm install on supported lab clusters.
+- CSI dynamic PVC provisioning.
+- App pod mount, write, read, and replacement-reader verification.
+- iSCSI frontend with Linux initiator and dm-multipath/ALUA gates.
+- RF=3 multi-volume lab path with independent volume identity, primary, and
+  publish target.
+- CSI reattach recovery with pod recreate.
+- Mounted transparent failover on the gated Stage-2 iSCSI ALUA path.
+- HostPath restart persistence for supported gates, including authority
+  preservation after promotion.
+- Dirty-evidence protection: stale/unreachable/corrupt evidence does not become
+  false `Ready=True`.
+- Strict cleanup verification across Kubernetes resources, iSCSI sessions,
+  iSCSI node DB records, multipath, dmsetup, product processes, and hostPath
+  residue.
+
+### Current Kubernetes And Operations Capabilities
+
+- Helm is the primary install path; scripts remain development/fallback tools.
+- `sw-block ops generate-helm-values` can derive Day-1 Helm values from the
+  target Kubernetes cluster.
+- Read-only CLI/report/dashboard/support-bundle flows are established.
+- `SwBlockCluster` and `SwBlockVolume` CRDs exist with status subresources.
+- The optional operator-status controller writes `.status` and Kubernetes
+  Events only.
+- Node readiness, support evidence refs, cleanup visibility, safe next-step
+  hints, and surface agreement are QA-validated under the read-only model.
+
+### Model Convergence State
+
+The control-plane model is materially better than the earlier script-centered
+shape, but it is not finished.
+
+Converged:
+
+- `ManagedVolume` is the shared semantic object for volume status.
+- CRD status, Events, report, dashboard, `operator-snapshot.json`, and
+  `ops explain` share the same Condition/reason vocabulary.
+- The design pattern is now explicit:
+  truth owner publishes facts; orchestration/status entity aggregates judgment;
+  executor remains bounded; evidence/timeline explains why the judgment is
+  allowed.
+- Negative-first is enforced across status surfaces.
+
+Still incomplete:
+
+- Live node evidence does not yet derive all negative facts from real Kubernetes
+  node/image/CSI-driver state.
+- Some volume-side fault reasons still need stronger end-to-end propagation to
+  user-visible surfaces.
+- Mutating lifecycle actions are not yet modeled as
+  action + precondition + invariant + executor + evidence.
+- PVC lifecycle, blockvolume lifecycle, and Kubernetes attach lifecycle still
+  need sharper ownership boundaries before the operator mutates anything.
+
+### Product Priority From Here
+
+The operations work can continue forever unless the next phases are bounded by
+product risk. The recommended order is:
+
+1. **Live node evidence hardening.**
+   Highest ROI and lowest mutation risk. It makes the read-only status model
+   trustworthy before any lifecycle action depends on it. It should cover
+   Kubernetes Ready/Schedulable, image presence, CSI driver registration, and
+   loopback/cross-node publish-target blockers.
+2. **Lifecycle action model review.**
+   Define the contract for future mutating actions before implementing them:
+   facts required, preconditions, invariants, allowed executor, rollback/failure
+   behavior, and evidence emitted.
+3. **Finalizer/delete safety.**
+   First mutating lifecycle slice. It should remove or block deletion with clear
+   status when PVC/CRD teardown would leave iSCSI, multipath, hostPath, or
+   generated workload residue.
+4. **Upgrade/rollback drift status.**
+   Report desired/current image/chart/controller drift before executing
+   upgrades.
+5. **Returned-replica rebuild/failback.**
+   High product value, but it depends on the action model and status trust.
+6. **Backup/snapshot/restore and NVMe ANA parity.**
+   Important, but they should reuse the status/action model rather than create
+   another isolated control plane.
+
+### Effort Shape
+
+Approximate engineering effort if scope remains tight:
+
+- Live node evidence hardening: small/medium. Mostly observation ingestion,
+  projection tests, and live TestOps gates. Low mutation risk.
+- Lifecycle action model review: medium. Mostly design and tests, but it should
+  block later mutating work from scattering logic across listeners/scripts.
+- Finalizer/delete safety: medium/high. First real mutation path; needs careful
+  idempotency, residue gates, rollback behavior, and shared-cluster safety.
+- Rebuild/failback: high. Requires storage semantics, authority/fencing,
+  returned-replica state, and long-running failure gates.
+- Backup/snapshot/restore: high. Requires durable data semantics and user-facing
+  restore guarantees.
+- NVMe ANA parity: medium/high. Protocol-specific work, but cheaper if it uses
+  the existing CRD/Condition/Event model.
+
 ## PR Cadence
 
 - Prefer one coherent milestone PR, not one PR per tiny fix.
