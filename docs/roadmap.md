@@ -29,7 +29,7 @@ Current alpha constraints:
 - launcher-generated blockvolume state uses `emptyDir`
 - harness applies generated blockvolume manifests
 - generated blockvolume Deployments can use PVC owner references for cleanup
-- no production operator yet
+- no production or mutating operator yet
 
 ## Near-Term MVP Hardening
 
@@ -50,8 +50,11 @@ Current alpha constraints:
 
    - do not jump directly from scripts to an operator
    - first stabilize install values, chart ownership, and uninstall behavior
-   - then add CRDs/Conditions/Events for cluster, node, volume, and lifecycle
-     state
+   - read-only CRDs, Conditions, Events, node readiness, support evidence refs,
+     cleanup visibility, and safe next-step status are now gated as the first
+     operator foundation
+   - mutating lifecycle ownership, finalizers, upgrade execution, repair,
+     rebuild, failback, and automatic cleanup remain separate future phases
 
 4. Improve TestOps usability.
 

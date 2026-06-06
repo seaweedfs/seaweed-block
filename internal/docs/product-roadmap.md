@@ -52,11 +52,13 @@ This is the short internal roadmap. Keep it current and readable.
   script. Mutating workflows such as repair, rebuild, failback, delete safety,
   automatic cleanup, and CR object ownership come after the read-only status
   contract is stable.
-- Active phase: Phase 36 Productized Operations Actionability. Use the Phase 35
-  CRD/status/Event foundation to publish node readiness, support evidence refs,
-  cleanup visibility, safe next-step hints, and cross-surface agreement. D2-D5
-  are QA-validated; D6 release-claim alignment remains. This remains read-only
-  and must not add mutating operator lifecycle.
+- Closed on 2026-06-06: Phase 36 Productized Operations Actionability. It uses
+  the Phase 35 CRD/status/Event foundation to publish node readiness, support
+  evidence refs, cleanup visibility, safe next-step hints, and cross-surface
+  agreement. This remains read-only and does not add mutating operator
+  lifecycle.
+- Active phase: none. The next phase should be opened explicitly rather than
+  extending Phase 36.
 - Model hardening gate before the next large release: complete the
   ManagedVolume Operations Model under `internal/docs/protocol/` before
   expanding operator or broader HA claims. The goal is to prevent Kubernetes,
@@ -404,20 +406,21 @@ phases rather than being mixed into the closed foundation.
 
 4. Node readiness/preflight status:
    iSCSI, multipath, image readiness, hostPath readiness, and observed version
-   under `SwBlockCluster.status.nodes[]`. Status: local/live positive paths
-   active in Phase 36; live negative node evidence remains a follow-up.
+   under `SwBlockCluster.status.nodes[]`. Status: QA-validated in Phase 36 for
+   positive live paths and replay-only missing-image blockers; live negative
+   node evidence remains a follow-up.
 5. Support-bundle pointers:
    keep the CLI collection path, but expose evidence refs and suggested
-   commands from status. Status: active in Phase 36; D3 QA passed.
+   commands from status. Status: closed in Phase 36.
 6. Cleanup visibility:
    `CleanupRequired=True`, residue type, and safe next step. Do not automate
-   cleanup yet. Status: active in Phase 36; D4 QA passed.
+   cleanup yet. Status: closed in Phase 36.
 7. Surface agreement:
    CRD status, Events, report, dashboard, operator-snapshot, and explain must
    agree on healthy, blocked, stale, cleanup-required, and multi-volume paths.
-   Status: active in Phase 36; D5 QA passed. Live operational follow-ups remain
-   for build-host CSI image-import evidence, loopback publish-target
-   documentation, and force-delete iSCSI node DB residue visibility.
+   Status: closed in Phase 36. Live operational follow-ups remain for
+   build-host CSI image-import evidence, loopback publish-target documentation,
+   and force-delete iSCSI node DB residue visibility.
 
 ### P2: Enter Mutating Lifecycle Carefully
 
@@ -447,10 +450,10 @@ become another isolated status model.
 - Phase 35 closed the Kubernetes-native read-only operator foundation:
   CRDs, status-only reconciliation, Conditions, Events, stable Event identity,
   and read-only boundary tests.
-- Active work is Phase 36: Productized Operations Actionability over the
-  read-only control-plane model. Node readiness, support evidence pointers,
-  cleanup visibility, and surface agreement are QA-validated; release-claim
-  alignment and close remain.
+- Phase 36 Productized Operations Actionability is closed. Node readiness,
+  support evidence pointers, cleanup visibility, and surface agreement are
+  QA-validated under the read-only control-plane model.
+- Active work is currently not opened. Choose the next gated phase explicitly.
 - Do not start NVMe ANA parity, rebuild/failback, backup/restore, or mutating
   operator workflows by extending Phase 36. Pick those as separate gated
   phases.

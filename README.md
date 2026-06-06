@@ -33,7 +33,7 @@ This is an **alpha** product path for supported lab clusters, not production.
 | Support-bundle replay | Available | Negative-first status reasons | Available |
 | Multi-volume RF=3 lab path | Gated | CSI reattach recovery | Gated |
 | iSCSI ALUA/dm-multipath mounted failover | Gated | Restart persistence with hostPath | Gated |
-| Read-only CRD status + Events | Gated | Production operator lifecycle | Planned |
+| Actionable read-only CRD status + Events | Gated | Production operator lifecycle | Planned |
 | Backup/snapshot/restore | Planned | Returned-replica rebuild/failback | Planned |
 | NVMe ANA parity | Planned | Production SLO/performance claims | Not claimed |
 
@@ -52,6 +52,8 @@ This is an **alpha** product path for supported lab clusters, not production.
   evidence through read-only CLI/report/dashboard surfaces.
 - Publish the same read-only status into Kubernetes-native `SwBlockCluster` /
   `SwBlockVolume` `.status` and Events on the gated operator-status path.
+- Inspect node readiness, support evidence refs, cleanup-required status, and
+  safe read-only/scripted next-step hints through that same status model.
 - Replay support bundles offline.
 
 These are narrow alpha claims tied to documented gates. See
