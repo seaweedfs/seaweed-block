@@ -163,7 +163,7 @@ func supportBundleRefsFromCluster(cluster ClusterEvidence) []string {
 
 func safeNextStepsFromCluster(cluster ClusterEvidence, evidenceRefs []string) []SwBlockSafeNextStep {
 	var steps []SwBlockSafeNextStep
-	if len(evidenceRefs) > 0 || cluster.Status != ObservationStatusOK || cluster.Cleanup != nil {
+	if shouldSuggestCollectBundle(cluster, evidenceRefs) {
 		steps = append(steps, SwBlockSafeNextStep{
 			Type:            ManagedVolumeActionCollectBundle,
 			Mode:            ManagedVolumeActionModeReadOnly,
@@ -177,6 +177,19 @@ func safeNextStepsFromCluster(cluster ClusterEvidence, evidenceRefs []string) []
 		steps = append(steps, *step)
 	}
 	return steps
+}
+
+func shouldSuggestCollectBundle(cluster ClusterEvidence, evidenceRefs []string) bool {
+	if cluster.Status != ObservationStatusOK || cleanupRequired(cluster.Cleanup) {
+		return true
+	}
+	if len(evidenceRefs) == 0 {
+		return false
+	}
+	if cluster.Cleanup != nil && !cleanupRequired(cluster.Cleanup) && len(evidenceRefs) == 1 && evidenceRefs[0] == cluster.Cleanup.EvidenceRef {
+		return false
+	}
+	return true
 }
 
 func supportBundleReason(cluster ClusterEvidence) string {

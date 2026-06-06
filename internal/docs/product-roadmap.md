@@ -410,8 +410,7 @@ phases rather than being mixed into the closed foundation.
    commands from status. Status: active in Phase 36; D3 QA passed.
 6. Cleanup visibility:
    `CleanupRequired=True`, residue type, and safe next step. Do not automate
-   cleanup yet. Status: active in Phase 36; D4 local projection landed, QA
-   pending.
+   cleanup yet. Status: active in Phase 36; D4 QA passed.
 
 ### P2: Enter Mutating Lifecycle Carefully
 

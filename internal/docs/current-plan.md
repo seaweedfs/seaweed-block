@@ -1,6 +1,6 @@
 # Current Plan: Phase 36 - Productized Operations Actionability
 
-Status: active, 70% complete. Started on 2026-06-05.
+Status: active, 78% complete. Started on 2026-06-05.
 
 Branch: `phase33-testops-failure-hardening`
 
@@ -165,7 +165,7 @@ QA cold-reader review of generated bundle
 
 Goal: project cleanup residue into status without performing cleanup.
 
-Status: local PASS; QA pending.
+Status: PASS.
 
 Required status behavior:
 
@@ -184,9 +184,10 @@ Acceptance:
 [done] clean scenario projects CleanupRequired=False
 [done] cleanup action hint is mode=read_only or mode=scripted, never mutation_allowed=true
 [done] support surfaces agree on residue counts locally
-[ ] live/TestOps cleanup-residue visibility gate passes
-[ ] live/TestOps clean cleanup visibility gate passes
-[ ] QA verifies no operator cleanup mutation occurred
+[done] live/TestOps cleanup-residue visibility gate passes
+[done] live/TestOps clean cleanup visibility gate passes
+[done] QA verifies no operator cleanup mutation occurred
+[done] clean cleanup evidence does not emit noisy cleanup or collect-bundle next steps
 ```
 
 Verification:
@@ -305,8 +306,13 @@ PM wording review if README/release note changes
   `summary.txt`, report HTML, and `safeNextSteps[]`. Residue suggests
   `observe.verify_cleanup` with `mode=scripted` and
   `mutationAllowed=false`; the operator still performs no cleanup.
+- 78%: D4 QA passed. Clean verifier evidence projects
+  `CleanupRequired=False/cleanup_verified` with no cleanup next step; residue
+  evidence projects `CleanupRequired=True`, residue counters, and scripted
+  `observe.verify_cleanup`. CRD status, operator-snapshot, summary, and HTML
+  agree. QA verified the controller never runs cleanup or gains mutation power.
 
 ## Next Step
 
-Run D4 QA cleanup-residue and clean-state gates. Track the live negative
-node-evidence follow-up; do not add mutating controller behavior.
+Continue D5 surface agreement and negative-first gates. Track the live
+negative node-evidence follow-up; do not add mutating controller behavior.

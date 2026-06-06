@@ -459,13 +459,8 @@ func TestOperatorStatusReconcilerProjectsCleanCleanupCondition(t *testing.T) {
 		t.Fatalf("reconcile: %v", err)
 	}
 	assertCondition(t, writer.cluster.Conditions, ConditionCleanupRequired, "False", ReasonCleanupVerified)
-	for _, step := range writer.cluster.SafeNextSteps {
-		if step.Type == ManagedVolumeActionVerifyCleanup {
-			t.Fatalf("clean state must not ask for cleanup verifier: %+v", writer.cluster.SafeNextSteps)
-		}
-		if step.MutationAllowed {
-			t.Fatalf("safe next step must remain non-mutating: %+v", step)
-		}
+	if len(writer.cluster.SafeNextSteps) != 0 {
+		t.Fatalf("clean cleanup evidence must not suggest next steps: %+v", writer.cluster.SafeNextSteps)
 	}
 }
 
