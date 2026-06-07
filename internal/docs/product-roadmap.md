@@ -406,9 +406,9 @@ phases rather than being mixed into the closed foundation.
 
 4. Node readiness/preflight status:
    iSCSI, multipath, image readiness, hostPath readiness, and observed version
-   under `SwBlockCluster.status.nodes[]`. Status: QA-validated in Phase 36 for
-   positive live paths and replay-only missing-image blockers; live negative
-   node evidence remains a follow-up.
+   under `SwBlockCluster.status.nodes[]`. Status: Phase 36 validated positive
+   read-only node readiness and replay-only missing-image blockers. Live
+   negative node evidence remains Phase 37.
 5. Support-bundle pointers:
    keep the CLI collection path, but expose evidence refs and suggested
    commands from status. Status: closed in Phase 36.
@@ -472,8 +472,9 @@ loop:
 - `SwBlockCluster` and `SwBlockVolume` CRDs exist with status subresources.
 - The optional operator-status controller writes `.status` and Kubernetes
   Events only.
-- Node readiness, support evidence refs, cleanup visibility, safe next-step
-  hints, and surface agreement are QA-validated under the read-only model.
+- Positive/read-only node readiness, support evidence refs, cleanup visibility,
+  safe next-step hints, and surface agreement are QA-validated under the
+  read-only model. Live negative node blockers remain Phase 37.
 
 ### Model Convergence State
 
@@ -510,15 +511,19 @@ Still incomplete:
 The operations work can continue forever unless the next phases are bounded by
 product risk. The recommended order is:
 
-1. **Live node evidence hardening.**
+1. **Phase 37: Live node evidence hardening.**
    Highest ROI and lowest mutation risk. It makes the read-only status model
    trustworthy before any lifecycle action depends on it. It should cover
-   Kubernetes Ready/Schedulable, image presence, CSI driver registration, and
-   loopback/cross-node publish-target blockers.
-2. **Lifecycle action model review.**
-   Define the contract for future mutating actions before implementing them:
-   facts required, preconditions, invariants, allowed executor, rollback/failure
-   behavior, and evidence emitted.
+   only Kubernetes Ready/SchedulingDisabled, CSI node pod readiness,
+   CSIDriver/node-plugin registration, required image presence or image-pull
+   status, iSCSI/multipath prerequisite evidence, and loopback target
+   cross-node blockers.
+2. **Phase 38: Lifecycle action model executable contract.**
+   Define and test the contract for future mutating actions before implementing
+   them: facts required, preconditions, invariants, allowed executor,
+   rollback/failure behavior, and evidence emitted. This phase must include at
+   least one dry-run action test and one rejected-action test; documentation
+   alone is not enough.
 3. **Finalizer/delete safety.**
    First mutating lifecycle slice. It should remove or block deletion with clear
    status when PVC/CRD teardown would leave iSCSI, multipath, hostPath, or
@@ -563,9 +568,10 @@ Approximate engineering effort if scope remains tight:
 - Phase 35 closed the Kubernetes-native read-only operator foundation:
   CRDs, status-only reconciliation, Conditions, Events, stable Event identity,
   and read-only boundary tests.
-- Phase 36 Productized Operations Actionability is closed. Node readiness,
-  support evidence pointers, cleanup visibility, and surface agreement are
-  QA-validated under the read-only control-plane model.
+- Phase 36 Productized Operations Actionability is closed. Positive/read-only
+  node readiness, support evidence pointers, cleanup visibility, and surface
+  agreement are QA-validated under the read-only control-plane model. Live
+  negative node evidence remains Phase 37.
 - Active work is currently not opened. Choose the next gated phase explicitly.
 - Do not start NVMe ANA parity, rebuild/failback, backup/restore, or mutating
   operator workflows by extending Phase 36. Pick those as separate gated

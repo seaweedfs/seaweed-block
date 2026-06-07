@@ -90,8 +90,10 @@ preserve that model rather than add isolated scripts or separate status systems.
 Recommended order from here:
 
 1. Harden live node evidence so CRD status reflects real Kubernetes node,
-   image, and CSI-driver state.
-2. Define the lifecycle action model before adding mutating operator behavior.
+   image, CSI-driver, iSCSI/multipath, and loopback/cross-node blocker state.
+2. Define and test the lifecycle action model before adding mutating operator
+   behavior. This must include executable dry-run and rejected-action gates, not
+   only a document.
 3. Add finalizer/delete safety as the first mutating operator slice.
 4. Add upgrade/rollback drift status before upgrade execution.
 5. Add returned-replica rebuild/failback, backup/restore, and NVMe ANA parity

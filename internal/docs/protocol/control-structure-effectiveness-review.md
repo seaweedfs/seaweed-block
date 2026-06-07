@@ -174,15 +174,16 @@ control loop can reliably say what is true and what action is safe.
 
 Goal:
 
-Make node readiness facts real, not replay-only.
+Make node readiness blockers real, not replay-only, without expanding into a
+general node-operations phase.
 
 Required live facts:
 
-- Kubernetes Ready / SchedulingDisabled.
-- image presence for required sw-block images.
-- CSI driver registration per node.
+- Kubernetes Node Ready / SchedulingDisabled.
+- CSI node pod readiness.
+- CSIDriver and node-plugin registration.
+- Required image presence or image-pull status.
 - iSCSI and multipath readiness.
-- hostPath readiness where enabled.
 - loopback publish-target cross-node blocker.
 
 Why first:
@@ -197,7 +198,8 @@ Estimated effort: small/medium.
 
 Goal:
 
-Turn the semantic action model into a concrete contract before mutation.
+Turn the semantic action model into a concrete, executable contract before
+mutation.
 
 Required output:
 
@@ -209,12 +211,14 @@ Required output:
 - idempotency/retry behavior,
 - failure status,
 - evidence emitted,
-- TestOps gate for at least one no-op/dry-run and one rejected action.
+- TestOps or unit/component gate for at least one no-op/dry-run action and one
+  rejected action.
 
 Why second:
 
 - It prevents finalizer/delete safety from becoming another local script with
   nicer names.
+- It prevents the review from becoming another semantic-only document.
 
 Estimated effort: medium.
 
@@ -261,4 +265,3 @@ operations capability and caught real bugs. But the model is only half closed.
 The next value is not more vocabulary. The next value is making the fact/action
 loop concrete enough that the first mutating lifecycle behavior can be safely
 implemented.
-
