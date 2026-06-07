@@ -58,6 +58,10 @@ engines that project from it.
 - [`operations-state-dependency-review.md`](./operations-state-dependency-review.md)
   defines the Phase 22 scope decision: operations v1 over a real product read
   model, not a pure dashboard pass or narrow protocol refactor.
+- [`control-structure-effectiveness-review.md`](./control-structure-effectiveness-review.md)
+  reviews which parts of the control/model work have become real product
+  capability, which remain too semantic, and what proof is required before
+  approving more model work.
 
 ## Review Rule
 

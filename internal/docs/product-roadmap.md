@@ -478,7 +478,10 @@ loop:
 ### Model Convergence State
 
 The control-plane model is materially better than the earlier script-centered
-shape, but it is not finished.
+shape, but it is not finished. See
+`internal/docs/protocol/control-structure-effectiveness-review.md` for the
+review standard that separates real capability closure from semantic-only model
+work.
 
 Converged:
 
