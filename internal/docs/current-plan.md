@@ -1,6 +1,6 @@
 # Current Plan: Phase 37 - Live Node Evidence Hardening
 
-Status: active, 0% complete. Started on 2026-06-06.
+Status: active, 16% complete. Started on 2026-06-06.
 
 Branch: `phase33-testops-failure-hardening`
 
@@ -55,7 +55,7 @@ multipath maps, hostPath data, Helm releases, image state, or CRD spec.
 Goal: define the exact live node facts and stable reason codes before code
 changes.
 
-Status: pending.
+Status: complete.
 
 Required facts:
 
@@ -71,14 +71,14 @@ Required facts:
 Acceptance:
 
 ```text
-[ ] each fact has one truth source and one projection path
-[ ] reason codes are named for node_not_ready, node_scheduling_disabled,
+[x] each fact has one truth source and one projection path
+[x] reason codes are named for node_not_ready, node_scheduling_disabled,
       csi_node_pod_not_ready, csi_driver_not_registered,
       image_missing_on_node, iscsi_prereq_missing,
       multipath_prereq_missing, publish_target_loopback_cross_node
-[ ] contract states which fields are stable/provisional/test-only
-[ ] contract preserves read-only boundary
-[ ] focused tests fail first for any missing projection field
+[x] contract states which fields are stable/provisional/test-only
+[x] contract preserves read-only boundary
+[x] focused tests fail first for any missing projection field
 ```
 
 Verification:
@@ -233,9 +233,13 @@ QA strict rerun from clean lab
 - 0%: Phase 37 opened. Scope is live node evidence hardening only:
   Kubernetes node readiness, CSI registration, image readiness, iSCSI/multipath
   prerequisites, loopback cross-node blocker, and cross-surface agreement.
+- 16%: D1 live node evidence contract complete. `core/ops` now pins the
+  passive read-only node fact contract and reason vocabulary for Kubernetes
+  Ready/SchedulingDisabled, CSI pod/driver registration, image readiness,
+  iSCSI/multipath prerequisites, and loopback cross-node blockers.
 
 ## Next Step
 
-Start D1 contract review and focused failing tests. Do not implement
+Start D2 Kubernetes Node and CSI registration evidence. Do not implement
 finalizers, cleanup automation, rebuild/failback, backup/restore, or NVMe ANA
 parity in this phase.

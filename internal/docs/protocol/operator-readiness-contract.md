@@ -1,6 +1,6 @@
 # Operator Readiness Contract
 
-Status: Phase 36 D1. Read-only CRD/status contract plus actionable operations
+Status: Phase 37 D1. Read-only CRD/status contract plus actionable operations
 fields. The controller may publish status and Events only.
 
 ## Purpose
@@ -40,6 +40,10 @@ safe next-step hints
 
 These fields are still observation and advice. They do not transfer lifecycle
 ownership to the operator.
+
+Phase 37 tightens the node-readiness side of the contract. Node status must be
+derived from live Kubernetes, CSI, image, host-prerequisite, and publish-target
+facts, not replay-only bundles or helper summaries.
 
 The Phase 35 D1 CRD schema lives in:
 
@@ -120,7 +124,7 @@ Cluster-level aggregate fields map to `SwBlockCluster.status.*`:
 - `cleanup`
 - `safeNextSteps[]`
 
-Phase 36 cluster node status fields are:
+Phase 36/37 cluster node status fields are:
 
 | Field | Owner Input | Meaning | Stability |
 |---|---|---|---|
@@ -134,8 +138,24 @@ Phase 36 cluster node status fields are:
 | `status.nodes[].conditions[]` | operator-status aggregate | Kubernetes-style node readiness conditions | provisional |
 | `status.nodes[].evidenceRefs[]` | evidence producer | supporting artifact paths | stable |
 
-Initial Phase 36 node reason codes are `node_ready`, `node_not_ready`,
-`node_scheduling_disabled`, and `image_missing_on_node`.
+Phase 36 introduced the initial node reason codes `node_ready`,
+`node_not_ready`, `node_scheduling_disabled`, and `image_missing_on_node`.
+
+Phase 37 adds the live node blocker vocabulary:
+
+| Reason Code | Meaning |
+|---|---|
+| `csi_node_pod_not_ready` | CSI node pod is absent, not Ready, or blocked by image/runtime state |
+| `csi_driver_not_registered` | CSIDriver or per-node CSINode driver registration is missing |
+| `iscsi_prereq_missing` | node iSCSI prerequisite evidence is missing or unhealthy |
+| `multipath_prereq_missing` | node multipath prerequisite evidence is missing or unhealthy |
+| `publish_target_loopback_cross_node` | loopback publish target would be consumed from another node |
+
+The Phase 37 live node evidence contract is pinned in
+`core/ops.LiveNodeEvidenceFactContract()`. Each fact names one authority,
+one participant, a stability level, and the user-visible projection surface.
+The contract is passive and read-only; it does not authorize probes or
+operator-executed host changes.
 
 Phase 36 cleanup status fields are:
 
@@ -249,9 +269,10 @@ Pinned by:
 - `core/ops/managed_volume_crd_contract_test.go`
 - `core/ops/kubernetes_crd_manifests_test.go`
 - `core/ops/operator_status_controller_test.go`
+- `core/ops/phase37_node_evidence_contract_test.go`
 
 Regression:
 
 ```text
-go test ./core/ops -run "ManagedVolumeOperatorContract|ManagedVolumeCRDContract|Phase35D1|Phase36D1|OperatorStatusReconciler" -count=1
+go test ./core/ops -run "ManagedVolumeOperatorContract|ManagedVolumeCRDContract|Phase35D1|Phase36D1|Phase37D1|OperatorStatusReconciler" -count=1
 ```

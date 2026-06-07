@@ -360,6 +360,125 @@ func ManagedVolumeFactContract() []ManagedVolumeFactContractEntry {
 	}
 }
 
+func LiveNodeEvidenceFactContract() []ManagedVolumeFactContractEntry {
+	return []ManagedVolumeFactContractEntry{
+		{
+			Path:             "node.kubernetes_ready",
+			Stability:        ManagedVolumeFieldStable,
+			Participant:      "kubernetes_node_watcher",
+			FactAuthority:    FactAuthorityKubernetesObject,
+			Master:           MasterManagedVolume,
+			AggregationMode:  FactAggregationPassive,
+			ConditionSurface: "SwBlockCluster.status.nodes[].Ready",
+			EvidenceRequired: "kubernetes_node_ready_condition",
+		},
+		{
+			Path:             "node.scheduling_disabled",
+			Stability:        ManagedVolumeFieldStable,
+			Participant:      "kubernetes_node_watcher",
+			FactAuthority:    FactAuthorityKubernetesObject,
+			Master:           MasterManagedVolume,
+			AggregationMode:  FactAggregationPassive,
+			ConditionSurface: "SwBlockCluster.status.nodes[].Blocked",
+			EvidenceRequired: "kubernetes_node_unschedulable_field",
+		},
+		{
+			Path:             "node.csi_node_pod_ready",
+			Stability:        ManagedVolumeFieldStable,
+			Participant:      "kubernetes_pod_watcher",
+			FactAuthority:    FactAuthorityKubernetesObject,
+			Master:           MasterManagedVolume,
+			AggregationMode:  FactAggregationPassive,
+			ConditionSurface: "SwBlockCluster.status.nodes[].Blocked",
+			EvidenceRequired: "csi_node_daemonset_pod_status",
+		},
+		{
+			Path:             "node.csi_driver_exists",
+			Stability:        ManagedVolumeFieldStable,
+			Participant:      "kubernetes_csi_watcher",
+			FactAuthority:    FactAuthorityKubernetesObject,
+			Master:           MasterManagedVolume,
+			AggregationMode:  FactAggregationPassive,
+			ConditionSurface: "SwBlockCluster.status.nodes[].Blocked",
+			EvidenceRequired: "csidriver_object",
+		},
+		{
+			Path:             "node.csi_node_driver_registered",
+			Stability:        ManagedVolumeFieldStable,
+			Participant:      "kubernetes_csi_watcher",
+			FactAuthority:    FactAuthorityKubernetesObject,
+			Master:           MasterManagedVolume,
+			AggregationMode:  FactAggregationPassive,
+			ConditionSurface: "SwBlockCluster.status.nodes[].Blocked",
+			EvidenceRequired: "csinode_driver_entry",
+		},
+		{
+			Path:             "node.required_image_presence",
+			Stability:        ManagedVolumeFieldProvisional,
+			Participant:      "image_inventory_observer",
+			FactAuthority:    FactAuthorityObservation,
+			Master:           MasterManagedVolume,
+			AggregationMode:  FactAggregationPassive,
+			ConditionSurface: "SwBlockCluster.status.nodes[].Blocked",
+			EvidenceRequired: "node_image_inventory_or_pod_image_pull_status",
+		},
+		{
+			Path:             "node.image_pull_status",
+			Stability:        ManagedVolumeFieldStable,
+			Participant:      "kubernetes_pod_watcher",
+			FactAuthority:    FactAuthorityKubernetesObject,
+			Master:           MasterManagedVolume,
+			AggregationMode:  FactAggregationPassive,
+			ConditionSurface: "SwBlockCluster.status.nodes[].Blocked",
+			EvidenceRequired: "pod_container_waiting_reason",
+		},
+		{
+			Path:             "node.iscsi_prereq",
+			Stability:        ManagedVolumeFieldProvisional,
+			Participant:      "host_prereq_observer",
+			FactAuthority:    FactAuthorityHostPath,
+			Master:           MasterManagedVolume,
+			AggregationMode:  FactAggregationPassive,
+			ConditionSurface: "SwBlockCluster.status.nodes[].Blocked",
+			EvidenceRequired: "iscsiadm_or_preflight_artifact",
+		},
+		{
+			Path:             "node.multipath_prereq",
+			Stability:        ManagedVolumeFieldProvisional,
+			Participant:      "host_prereq_observer",
+			FactAuthority:    FactAuthorityHostPath,
+			Master:           MasterManagedVolume,
+			AggregationMode:  FactAggregationPassive,
+			ConditionSurface: "SwBlockCluster.status.nodes[].Blocked",
+			EvidenceRequired: "multipath_or_preflight_artifact",
+		},
+		{
+			Path:             "node.loopback_publish_target_cross_node",
+			Stability:        ManagedVolumeFieldStable,
+			Participant:      "managed_volume_projector",
+			FactAuthority:    FactAuthorityObservation,
+			Master:           MasterManagedVolume,
+			AggregationMode:  FactAggregationPassive,
+			ConditionSurface: "SwBlockCluster.status.nodes[].Blocked",
+			EvidenceRequired: "publish_target_and_consumer_node_evidence",
+		},
+	}
+}
+
+func LiveNodeEvidenceReasonCodes() []string {
+	return []string{
+		ReasonNodeReady,
+		ReasonNodeNotReady,
+		ReasonNodeSchedulingDisabled,
+		ReasonCSINodePodNotReady,
+		ReasonCSIDriverNotRegistered,
+		ReasonImageMissingOnNode,
+		ReasonISCSIPrereqMissing,
+		ReasonMultipathPrereqMissing,
+		ReasonPublishTargetLoopbackCrossNode,
+	}
+}
+
 func ManagedVolumeActionContract() []ManagedVolumeActionContractEntry {
 	return []ManagedVolumeActionContractEntry{
 		{
