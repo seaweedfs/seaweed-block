@@ -28,10 +28,10 @@ func main() {
 }
 
 var (
-	opsStatusRunCommand                  = ops.DefaultRunCommand
-	opsInventoryRunCommand               = ops.DefaultRunCommand
-	opsGenerateHelmValuesRunCommand      = ops.DefaultRunCommand
-	opsOperatorStatusNodeEvidenceFactory = func() (ops.OperatorNodeEvidenceEnricher, error) {
+	opsStatusRunCommand             = ops.DefaultRunCommand
+	opsInventoryRunCommand          = ops.DefaultRunCommand
+	opsGenerateHelmValuesRunCommand = ops.DefaultRunCommand
+	opsNodeEvidenceEnricherFactory  = func() (ops.OperatorNodeEvidenceEnricher, error) {
 		return ops.NewInClusterKubernetesStatusClient()
 	}
 	opsOperatorStatusWriterFactory = func() (ops.OperatorStatusWriter, error) {
@@ -145,20 +145,6 @@ func runOpsOperatorStatus(args []string, stdout, stderr io.Writer) int {
 		cluster, _, code := loadObservationCluster("sw-block ops operator-status", clusterArgs, stderr)
 		if code != ops.VolumeStatusExitOK {
 			return code
-		}
-		if fromBundle == "" && os.Getenv("KUBERNETES_SERVICE_HOST") != "" {
-			enricher, err := opsOperatorStatusNodeEvidenceFactory()
-			if err != nil {
-				fmt.Fprintf(stderr, "sw-block ops operator-status: %v\n", err)
-				return ops.VolumeStatusExitInvalid
-			}
-			ctx, cancel := context.WithTimeout(context.Background(), timeout)
-			defer cancel()
-			cluster, err = enricher.EnrichNodeEvidence(ctx, namespace, cluster)
-			if err != nil {
-				fmt.Fprintf(stderr, "sw-block ops operator-status: enrich node evidence: %v\n", err)
-				return ops.VolumeStatusExitInvalid
-			}
 		}
 		mode := "write_status"
 		var writer ops.OperatorStatusWriter
@@ -472,6 +458,20 @@ func loadObservationCluster(command string, args []string, stderr io.Writer) (op
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", command, err)
 		return ops.ClusterEvidence{}, "", ops.VolumeStatusExitInvalid
+	}
+	if fromBundle == "" && os.Getenv("KUBERNETES_SERVICE_HOST") != "" {
+		enricher, enrichErr := opsNodeEvidenceEnricherFactory()
+		if enrichErr != nil {
+			fmt.Fprintf(stderr, "%s: %v\n", command, enrichErr)
+			return ops.ClusterEvidence{}, "", ops.VolumeStatusExitInvalid
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+		cluster, enrichErr = enricher.EnrichNodeEvidence(ctx, namespace, cluster)
+		if enrichErr != nil {
+			fmt.Fprintf(stderr, "%s: enrich node evidence: %v\n", command, enrichErr)
+			return ops.ClusterEvidence{}, "", ops.VolumeStatusExitInvalid
+		}
 	}
 	return ops.NormalizeObservationCluster(cluster), out, ops.VolumeStatusExitOK
 }

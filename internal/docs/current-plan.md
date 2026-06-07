@@ -1,6 +1,6 @@
 # Current Plan: Phase 37 - Live Node Evidence Hardening
 
-Status: active, 28% complete. Started on 2026-06-06.
+Status: active, 30% complete. Started on 2026-06-06.
 
 Branch: `phase33-testops-failure-hardening`
 
@@ -93,7 +93,7 @@ internal review against control-structure-effectiveness-review.md
 Goal: populate live node readiness from Kubernetes API facts, not replay-only
 fixtures.
 
-Status: dev-complete; QA pending.
+Status: reworked after QA blocker; QA revalidation pending.
 
 Acceptance:
 
@@ -242,9 +242,13 @@ QA strict rerun from clean lab
   evidence from in-cluster read-only Kubernetes facts for Nodes, CSI node pods,
   CSIDriver, and CSINode driver registration. Chart RBAC adds only
   get/list/watch for those resources. Live QA remains pending.
+- 30%: D2 QA blocker reworked. Live node enrichment now emits only CRD-enum-safe
+  `Ready`/`Blocked` condition types with node reason codes, and enrichment moved
+  into the shared live observation loader so report/dashboard/explain can see
+  the same in-cluster Kubernetes node facts as operator-status.
 
 ## Next Step
 
-Assign QA to run D2 live node-readiness and CSI-registration gates from a clean
-lab. Do not implement finalizers, cleanup automation, rebuild/failback,
+Ask QA to re-run D2 G2/G3/G4 plus the shared surface agreement checks from a
+clean lab. Do not implement finalizers, cleanup automation, rebuild/failback,
 backup/restore, or NVMe ANA parity in this phase.

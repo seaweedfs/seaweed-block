@@ -168,8 +168,8 @@ func mergeLiveNodeEvidence(namespace string, cluster ClusterEvidence, nodes []ku
 func mergeNodeKubernetesConditions(conditions []ObservationCondition, fact kubernetesNodeFact) []ObservationCondition {
 	if !fact.Ready {
 		conditions = append(conditions, ObservationCondition{
-			Type:         "KubernetesNodeReady",
-			Status:       "False",
+			Type:         ConditionReady,
+			Status:       "Unknown",
 			Reason:       ReasonNodeNotReady,
 			Severity:     "warning",
 			Message:      "Kubernetes node Ready condition is not True",
@@ -178,8 +178,8 @@ func mergeNodeKubernetesConditions(conditions []ObservationCondition, fact kuber
 	}
 	if !fact.Schedulable {
 		conditions = append(conditions, ObservationCondition{
-			Type:         "KubernetesNodeSchedulable",
-			Status:       "False",
+			Type:         ConditionBlocked,
+			Status:       "True",
 			Reason:       ReasonNodeSchedulingDisabled,
 			Severity:     "warning",
 			Message:      "Kubernetes node is marked unschedulable",
@@ -192,7 +192,7 @@ func mergeNodeKubernetesConditions(conditions []ObservationCondition, fact kuber
 func mergeNodeCSIEvidence(conditions []ObservationCondition, namespace, nodeName string, pod kubernetesPodFact, driverExists, registered bool) []ObservationCondition {
 	if !driverExists || !registered {
 		conditions = append(conditions, ObservationCondition{
-			Type:         "CSIDriverRegistered",
+			Type:         ConditionReady,
 			Status:       "False",
 			Reason:       ReasonCSIDriverNotRegistered,
 			Severity:     "warning",
@@ -202,7 +202,7 @@ func mergeNodeCSIEvidence(conditions []ObservationCondition, namespace, nodeName
 	}
 	if !pod.Ready {
 		conditions = append(conditions, ObservationCondition{
-			Type:         "CSINodePodReady",
+			Type:         ConditionReady,
 			Status:       "False",
 			Reason:       ReasonCSINodePodNotReady,
 			Severity:     "warning",

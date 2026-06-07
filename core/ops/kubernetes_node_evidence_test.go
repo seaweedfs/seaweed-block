@@ -75,6 +75,7 @@ func TestPhase37D2KubernetesNodeEvidenceEnrichesReadyAndBlockedNodes(t *testing.
 	if !conditionReason(m02.Conditions, ReasonNodeNotReady) || !conditionReason(m02.Conditions, ReasonNodeSchedulingDisabled) {
 		t.Fatalf("m02 conditions=%+v", m02.Conditions)
 	}
+	assertCRDSafeNodeConditions(t, m02.Conditions)
 }
 
 func TestPhase37D2KubernetesNodeEvidenceProjectsCSIRegistrationBlockers(t *testing.T) {
@@ -125,6 +126,7 @@ func TestPhase37D2KubernetesNodeEvidenceProjectsCSIRegistrationBlockers(t *testi
 	if len(crd.EvidenceRefs) == 0 || !strings.Contains(strings.Join(crd.EvidenceRefs, ","), "kubernetes/csinode/m02") {
 		t.Fatalf("missing CRD evidence refs: %+v", crd.EvidenceRefs)
 	}
+	assertCRDSafeNodeConditions(t, crd.Conditions)
 }
 
 func TestPhase37D2KubernetesNodeEvidenceProjectsMissingCSIDriver(t *testing.T) {
@@ -152,6 +154,25 @@ func TestPhase37D2KubernetesNodeEvidenceProjectsMissingCSIDriver(t *testing.T) {
 	m01 := nodeByKubernetesName(t, enriched.Nodes, "m01")
 	if status, reason := classifyNodeReadiness(m01); status != ManagedVolumeStatusBlocked || reason != ReasonCSIDriverNotRegistered {
 		t.Fatalf("m01 status=%s reason=%s conditions=%+v", status, reason, m01.Conditions)
+	}
+	assertCRDSafeNodeConditions(t, m01.Conditions)
+}
+
+func assertCRDSafeNodeConditions(t *testing.T, conditions []ObservationCondition) {
+	t.Helper()
+	allowed := map[string]bool{
+		ConditionReady:           true,
+		ConditionRecovered:       true,
+		ConditionRecovering:      true,
+		ConditionBlocked:         true,
+		ConditionInvalid:         true,
+		ConditionCleanupRequired: true,
+		ConditionEvidenceStale:   true,
+	}
+	for _, condition := range conditions {
+		if !allowed[condition.Type] {
+			t.Fatalf("condition type %q is not CRD-safe: %+v", condition.Type, conditions)
+		}
 	}
 }
 

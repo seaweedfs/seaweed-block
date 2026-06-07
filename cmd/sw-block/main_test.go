@@ -347,6 +347,52 @@ func TestOpsOperatorStatusWritesCRDStatusWhenDryRunDisabled(t *testing.T) {
 	}
 }
 
+func TestOpsClusterMasterAPIUsesSharedInClusterNodeEvidenceEnrichment(t *testing.T) {
+	masterAddr, closeMaster := startCmdFakeMaster(t)
+	defer closeMaster()
+	oldFactory := opsNodeEvidenceEnricherFactory
+	opsNodeEvidenceEnricherFactory = func() (ops.OperatorNodeEvidenceEnricher, error) {
+		return fakeNodeEvidenceEnricher{}, nil
+	}
+	t.Cleanup(func() { opsNodeEvidenceEnricherFactory = oldFactory })
+	t.Setenv("KUBERNETES_SERVICE_HOST", "10.0.0.1")
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ops", "cluster", "--master-api", masterAddr, "-o", "json"}, &stdout, &stderr)
+	if code != ops.VolumeStatusExitOK {
+		t.Fatalf("exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		`"kubernetes_node": "m02"`,
+		`"ready": false`,
+		`"reason": "node_not_ready"`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("stdout missing %q:\n%s", want, out)
+		}
+	}
+}
+
+type fakeNodeEvidenceEnricher struct{}
+
+func (fakeNodeEvidenceEnricher) EnrichNodeEvidence(_ context.Context, _ string, cluster ops.ClusterEvidence) (ops.ClusterEvidence, error) {
+	cluster.Nodes = []ops.NodeEvidence{{
+		NodeName:       "m02",
+		KubernetesNode: "m02",
+		Ready:          false,
+		Schedulable:    true,
+		Conditions: []ops.ObservationCondition{{
+			Type:     ops.ConditionReady,
+			Status:   "Unknown",
+			Reason:   ops.ReasonNodeNotReady,
+			Severity: "warning",
+			Message:  "Kubernetes node Ready condition is not True",
+		}},
+	}}
+	return cluster, nil
+}
+
 type operatorStatusTestWriter struct {
 	cluster ops.SwBlockClusterCRDStatus
 	volumes []operatorStatusTestVolumeWrite
