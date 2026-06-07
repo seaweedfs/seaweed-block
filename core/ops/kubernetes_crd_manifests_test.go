@@ -152,6 +152,8 @@ func TestPhase36D1SwBlockClusterActionabilitySchema(t *testing.T) {
 func TestPhase35D1OperatorStatusRBACIsStatusOnly(t *testing.T) {
 	raw := readRepoFile(t, "charts/seaweed-block/templates/operator-status-rbac.yaml")
 	required := []string{
+		`resources: ["nodes", "pods"]`,
+		`resources: ["csidrivers", "csinodes"]`,
 		`resources: ["swblockclusters", "swblockvolumes"]`,
 		`verbs: ["get", "list", "watch"]`,
 		`resources: ["swblockclusters/status", "swblockvolumes/status"]`,
@@ -170,6 +172,7 @@ func TestPhase35D1OperatorStatusRBACIsStatusOnly(t *testing.T) {
 		`resources: ["deployments"`,
 		`resources: ["secrets"`,
 		`resources: ["storageclasses"`,
+		`"create", "update", "patch"`,
 		`"delete"`,
 	} {
 		if strings.Contains(raw, forbidden) {

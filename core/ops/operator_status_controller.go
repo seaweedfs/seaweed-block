@@ -14,6 +14,10 @@ type OperatorStatusSource interface {
 	ClusterEvidence(ctx context.Context) (ClusterEvidence, error)
 }
 
+type OperatorNodeEvidenceEnricher interface {
+	EnrichNodeEvidence(ctx context.Context, namespace string, cluster ClusterEvidence) (ClusterEvidence, error)
+}
+
 type OperatorStatusWriter interface {
 	WriteClusterStatus(ctx context.Context, ref OperatorObjectRef, status SwBlockClusterCRDStatus) error
 	WriteVolumeStatus(ctx context.Context, ref OperatorObjectRef, status SwBlockVolumeCRDStatus) error
@@ -391,6 +395,10 @@ func swBlockNodeStatuses(nodes []NodeEvidence) []SwBlockNodeCRDStatus {
 
 func classifyNodeReadiness(node NodeEvidence) (string, string) {
 	switch {
+	case nodeHasConditionReason(node, ReasonCSIDriverNotRegistered):
+		return ManagedVolumeStatusBlocked, ReasonCSIDriverNotRegistered
+	case nodeHasConditionReason(node, ReasonCSINodePodNotReady):
+		return ManagedVolumeStatusBlocked, ReasonCSINodePodNotReady
 	case len(node.MissingImages) > 0:
 		return ManagedVolumeStatusBlocked, ReasonImageMissingOnNode
 	case !node.Ready:
@@ -400,6 +408,15 @@ func classifyNodeReadiness(node NodeEvidence) (string, string) {
 	default:
 		return ManagedVolumeStatusReady, ReasonNodeReady
 	}
+}
+
+func nodeHasConditionReason(node NodeEvidence, reason string) bool {
+	for _, condition := range node.Conditions {
+		if condition.Reason == reason {
+			return true
+		}
+	}
+	return false
 }
 
 func nodeReadinessConditions(node NodeEvidence, status, reason string) []ObservationCondition {

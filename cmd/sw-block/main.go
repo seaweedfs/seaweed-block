@@ -28,10 +28,13 @@ func main() {
 }
 
 var (
-	opsStatusRunCommand             = ops.DefaultRunCommand
-	opsInventoryRunCommand          = ops.DefaultRunCommand
-	opsGenerateHelmValuesRunCommand = ops.DefaultRunCommand
-	opsOperatorStatusWriterFactory  = func() (ops.OperatorStatusWriter, error) {
+	opsStatusRunCommand                  = ops.DefaultRunCommand
+	opsInventoryRunCommand               = ops.DefaultRunCommand
+	opsGenerateHelmValuesRunCommand      = ops.DefaultRunCommand
+	opsOperatorStatusNodeEvidenceFactory = func() (ops.OperatorNodeEvidenceEnricher, error) {
+		return ops.NewInClusterKubernetesStatusClient()
+	}
+	opsOperatorStatusWriterFactory = func() (ops.OperatorStatusWriter, error) {
 		return ops.NewInClusterKubernetesStatusClient()
 	}
 )
@@ -142,6 +145,20 @@ func runOpsOperatorStatus(args []string, stdout, stderr io.Writer) int {
 		cluster, _, code := loadObservationCluster("sw-block ops operator-status", clusterArgs, stderr)
 		if code != ops.VolumeStatusExitOK {
 			return code
+		}
+		if fromBundle == "" && os.Getenv("KUBERNETES_SERVICE_HOST") != "" {
+			enricher, err := opsOperatorStatusNodeEvidenceFactory()
+			if err != nil {
+				fmt.Fprintf(stderr, "sw-block ops operator-status: %v\n", err)
+				return ops.VolumeStatusExitInvalid
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), timeout)
+			defer cancel()
+			cluster, err = enricher.EnrichNodeEvidence(ctx, namespace, cluster)
+			if err != nil {
+				fmt.Fprintf(stderr, "sw-block ops operator-status: enrich node evidence: %v\n", err)
+				return ops.VolumeStatusExitInvalid
+			}
 		}
 		mode := "write_status"
 		var writer ops.OperatorStatusWriter

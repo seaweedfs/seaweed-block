@@ -1,6 +1,6 @@
 # Current Plan: Phase 37 - Live Node Evidence Hardening
 
-Status: active, 16% complete. Started on 2026-06-06.
+Status: active, 28% complete. Started on 2026-06-06.
 
 Branch: `phase33-testops-failure-hardening`
 
@@ -93,25 +93,26 @@ internal review against control-structure-effectiveness-review.md
 Goal: populate live node readiness from Kubernetes API facts, not replay-only
 fixtures.
 
-Status: pending.
+Status: dev-complete; QA pending.
 
 Acceptance:
 
 ```text
-[ ] Ready node projects node_ready
-[ ] SchedulingDisabled node projects node_scheduling_disabled
-[ ] NotReady node projects node_not_ready
-[ ] missing CSIDriver projects csi_driver_not_registered
-[ ] missing per-node CSINode driver registration projects csi_driver_not_registered
-[ ] CSI node pod image-pull or not-ready state projects csi_node_pod_not_ready
-[ ] CRD status and operator-snapshot agree
-[ ] no workload/storage mutation verbs are added
+[x] Ready node projects node_ready
+[x] SchedulingDisabled node projects node_scheduling_disabled
+[x] NotReady node projects node_not_ready
+[x] missing CSIDriver projects csi_driver_not_registered
+[x] missing per-node CSINode driver registration projects csi_driver_not_registered
+[x] CSI node pod image-pull or not-ready state projects csi_node_pod_not_ready
+[ ] CRD status and operator-snapshot agree in live TestOps gate
+[x] no workload/storage mutation verbs are added
 ```
 
 Verification:
 
 ```text
 go test ./core/ops ./cmd/sw-block ./cmd/blockcsi
+helm lint charts/seaweed-block
 TestOps live node-readiness gate
 TestOps live CSI-registration blocker gate
 ```
@@ -237,9 +238,13 @@ QA strict rerun from clean lab
   passive read-only node fact contract and reason vocabulary for Kubernetes
   Ready/SchedulingDisabled, CSI pod/driver registration, image readiness,
   iSCSI/multipath prerequisites, and loopback cross-node blockers.
+- 28%: D2 dev-complete. `sw-block ops operator-status` enriches live master
+  evidence from in-cluster read-only Kubernetes facts for Nodes, CSI node pods,
+  CSIDriver, and CSINode driver registration. Chart RBAC adds only
+  get/list/watch for those resources. Live QA remains pending.
 
 ## Next Step
 
-Start D2 Kubernetes Node and CSI registration evidence. Do not implement
-finalizers, cleanup automation, rebuild/failback, backup/restore, or NVMe ANA
-parity in this phase.
+Assign QA to run D2 live node-readiness and CSI-registration gates from a clean
+lab. Do not implement finalizers, cleanup automation, rebuild/failback,
+backup/restore, or NVMe ANA parity in this phase.
