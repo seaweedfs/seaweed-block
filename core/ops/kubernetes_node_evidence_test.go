@@ -78,6 +78,27 @@ func TestPhase37D2KubernetesNodeEvidenceEnrichesReadyAndBlockedNodes(t *testing.
 	assertCRDSafeNodeConditions(t, m02.Conditions)
 }
 
+func TestPhase37D2NodeNotReadyTakesPrecedenceOverCSIPodSymptoms(t *testing.T) {
+	node := NodeEvidence{
+		NodeName:       "tp01",
+		KubernetesNode: "tp01",
+		Ready:          false,
+		Schedulable:    true,
+		Conditions: []ObservationCondition{
+			{Type: ConditionReady, Status: "Unknown", Reason: ReasonNodeNotReady, Severity: "warning"},
+			{Type: ConditionReady, Status: "False", Reason: ReasonCSINodePodNotReady, Severity: "warning"},
+		},
+	}
+	status, reason := classifyNodeReadiness(node)
+	if status != ManagedVolumeStatusUnknown || reason != ReasonNodeNotReady {
+		t.Fatalf("status=%s reason=%s want unknown/%s", status, reason, ReasonNodeNotReady)
+	}
+	crd := swBlockNodeStatuses([]NodeEvidence{node})[0]
+	if crd.Status != ManagedVolumeStatusUnknown || crd.ReasonCode != ReasonNodeNotReady {
+		t.Fatalf("CRD status=%+v", crd)
+	}
+}
+
 func TestPhase37D2KubernetesNodeEvidenceProjectsCSIRegistrationBlockers(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {

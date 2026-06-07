@@ -459,21 +459,29 @@ func loadObservationCluster(command string, args []string, stderr io.Writer) (op
 		fmt.Fprintf(stderr, "%s: %v\n", command, err)
 		return ops.ClusterEvidence{}, "", ops.VolumeStatusExitInvalid
 	}
-	if fromBundle == "" && os.Getenv("KUBERNETES_SERVICE_HOST") != "" {
-		enricher, enrichErr := opsNodeEvidenceEnricherFactory()
-		if enrichErr != nil {
-			fmt.Fprintf(stderr, "%s: %v\n", command, enrichErr)
-			return ops.ClusterEvidence{}, "", ops.VolumeStatusExitInvalid
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), timeout)
-		defer cancel()
-		cluster, enrichErr = enricher.EnrichNodeEvidence(ctx, namespace, cluster)
-		if enrichErr != nil {
-			fmt.Fprintf(stderr, "%s: enrich node evidence: %v\n", command, enrichErr)
-			return ops.ClusterEvidence{}, "", ops.VolumeStatusExitInvalid
-		}
+	cluster, err = enrichLiveObservationCluster(namespace, timeout, fromBundle == "", cluster)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: %v\n", command, err)
+		return ops.ClusterEvidence{}, "", ops.VolumeStatusExitInvalid
 	}
 	return ops.NormalizeObservationCluster(cluster), out, ops.VolumeStatusExitOK
+}
+
+func enrichLiveObservationCluster(namespace string, timeout time.Duration, live bool, cluster ops.ClusterEvidence) (ops.ClusterEvidence, error) {
+	if !live || os.Getenv("KUBERNETES_SERVICE_HOST") == "" {
+		return cluster, nil
+	}
+	enricher, err := opsNodeEvidenceEnricherFactory()
+	if err != nil {
+		return cluster, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	cluster, err = enricher.EnrichNodeEvidence(ctx, namespace, cluster)
+	if err != nil {
+		return cluster, fmt.Errorf("enrich node evidence: %w", err)
+	}
+	return cluster, nil
 }
 
 func readMasterClusterEvidence(ctx context.Context, masterAddr string) (ops.ClusterEvidence, error) {
@@ -757,6 +765,11 @@ func runOpsReport(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "sw-block ops report: %v\n", err)
 		return ops.VolumeStatusExitInvalid
 	}
+	cluster, err = enrichLiveObservationCluster(namespace, timeout, fromBundle == "", cluster)
+	if err != nil {
+		fmt.Fprintf(stderr, "sw-block ops report: %v\n", err)
+		return ops.VolumeStatusExitInvalid
+	}
 	if err := ops.WriteObservationReportArtifacts(outDir, cluster); err != nil {
 		fmt.Fprintf(stderr, "sw-block ops report: %v\n", err)
 		return ops.VolumeStatusExitInvalid
@@ -891,13 +904,19 @@ type dashboardClusterOptions struct {
 }
 
 func loadDashboardCluster(options dashboardClusterOptions) (ops.ClusterEvidence, error) {
+	var (
+		cluster ops.ClusterEvidence
+		err     error
+		live    bool
+	)
 	switch {
 	case options.FromBundle != "":
-		return ops.BuildObservationFromBundle(ops.ObservationBundleOptions{Dir: options.FromBundle})
+		cluster, err = ops.BuildObservationFromBundle(ops.ObservationBundleOptions{Dir: options.FromBundle})
 	case options.MasterAPIAddr != "":
 		ctx, cancel := context.WithTimeout(context.Background(), options.Timeout)
 		defer cancel()
-		return readMasterClusterEvidence(ctx, options.MasterAPIAddr)
+		cluster, err = readMasterClusterEvidence(ctx, options.MasterAPIAddr)
+		live = true
 	default:
 		productRevision := options.ProductRevision
 		if productRevision == "" {
@@ -921,8 +940,13 @@ func loadDashboardCluster(options dashboardClusterOptions) (ops.ClusterEvidence,
 		if collectErr != nil {
 			inventory.CollectionErrors = append(inventory.CollectionErrors, strings.Split(collectErr.Error(), "\n")...)
 		}
-		return ops.BuildObservationFromInventory(inventory, "", options.EvidenceOutDir)
+		cluster, err = ops.BuildObservationFromInventory(inventory, "", options.EvidenceOutDir)
+		live = true
 	}
+	if err != nil {
+		return ops.ClusterEvidence{}, err
+	}
+	return enrichLiveObservationCluster(options.Namespace, options.Timeout, live, cluster)
 }
 
 type helmValuesFile struct {
@@ -1361,6 +1385,11 @@ func loadObservationVolume(command string, args []string, stderr io.Writer) (ops
 		}
 		cluster, err = ops.BuildObservationFromInventory(inventory, volumeID, outDir)
 	}
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: %v\n", command, err)
+		return ops.ClusterEvidence{}, "", ops.VolumeStatusExitInvalid
+	}
+	cluster, err = enrichLiveObservationCluster(namespace, timeout, fromBundle == "", cluster)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", command, err)
 		return ops.ClusterEvidence{}, "", ops.VolumeStatusExitInvalid

@@ -395,16 +395,16 @@ func swBlockNodeStatuses(nodes []NodeEvidence) []SwBlockNodeCRDStatus {
 
 func classifyNodeReadiness(node NodeEvidence) (string, string) {
 	switch {
-	case nodeHasConditionReason(node, ReasonCSIDriverNotRegistered):
-		return ManagedVolumeStatusBlocked, ReasonCSIDriverNotRegistered
-	case nodeHasConditionReason(node, ReasonCSINodePodNotReady):
-		return ManagedVolumeStatusBlocked, ReasonCSINodePodNotReady
-	case len(node.MissingImages) > 0:
-		return ManagedVolumeStatusBlocked, ReasonImageMissingOnNode
 	case !node.Ready:
 		return ManagedVolumeStatusUnknown, ReasonNodeNotReady
 	case !node.Schedulable:
 		return ManagedVolumeStatusBlocked, ReasonNodeSchedulingDisabled
+	case len(node.MissingImages) > 0:
+		return ManagedVolumeStatusBlocked, ReasonImageMissingOnNode
+	case nodeHasConditionReason(node, ReasonCSIDriverNotRegistered):
+		return ManagedVolumeStatusBlocked, ReasonCSIDriverNotRegistered
+	case nodeHasConditionReason(node, ReasonCSINodePodNotReady):
+		return ManagedVolumeStatusBlocked, ReasonCSINodePodNotReady
 	default:
 		return ManagedVolumeStatusReady, ReasonNodeReady
 	}

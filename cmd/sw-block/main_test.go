@@ -374,6 +374,102 @@ func TestOpsClusterMasterAPIUsesSharedInClusterNodeEvidenceEnrichment(t *testing
 	}
 }
 
+func TestOpsReportMasterAPIUsesSharedInClusterNodeEvidenceEnrichment(t *testing.T) {
+	masterAddr, closeMaster := startCmdFakeMaster(t)
+	defer closeMaster()
+	oldFactory := opsNodeEvidenceEnricherFactory
+	opsNodeEvidenceEnricherFactory = func() (ops.OperatorNodeEvidenceEnricher, error) {
+		return fakeNodeEvidenceEnricher{}, nil
+	}
+	t.Cleanup(func() { opsNodeEvidenceEnricherFactory = oldFactory })
+	t.Setenv("KUBERNETES_SERVICE_HOST", "10.0.0.1")
+
+	outDir := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ops", "report", "--master-api", masterAddr, "--out", outDir}, &stdout, &stderr)
+	if code != ops.VolumeStatusExitOK {
+		t.Fatalf("exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	raw, err := os.ReadFile(filepath.Join(outDir, ops.ObservationReportJSONArtifact))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := string(raw)
+	for _, want := range []string{
+		`"kubernetes_node": "m02"`,
+		`"ready": false`,
+		`"reason": "node_not_ready"`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("report missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestLoadObservationVolumeUsesSharedInClusterNodeEvidenceEnrichment(t *testing.T) {
+	oldFactory := opsNodeEvidenceEnricherFactory
+	opsNodeEvidenceEnricherFactory = func() (ops.OperatorNodeEvidenceEnricher, error) {
+		return fakeNodeEvidenceEnricher{}, nil
+	}
+	t.Cleanup(func() { opsNodeEvidenceEnricherFactory = oldFactory })
+	t.Setenv("KUBERNETES_SERVICE_HOST", "10.0.0.1")
+	oldRunCommand := opsInventoryRunCommand
+	opsInventoryRunCommand = fixtureCmdKubectl(map[string]string{
+		"kubectl -n default get pvc -o json":                          cmdSinglePVCListJSON,
+		"kubectl get pv -o json":                                      cmdSinglePVListJSON,
+		"kubectl -n default get deploy -l app=sw-blockvolume -o json": cmdSingleDeploymentListJSON,
+	})
+	t.Cleanup(func() { opsInventoryRunCommand = oldRunCommand })
+
+	var stderr bytes.Buffer
+	cluster, _, code := loadObservationVolume("sw-block ops explain", []string{"volume", "--namespace", "default", "--product-revision", "product-rev", "pvc-live"}, &stderr)
+	if code != ops.VolumeStatusExitOK {
+		t.Fatalf("exit=%d stderr=%s cluster=%+v", code, stderr.String(), cluster)
+	}
+	if len(cluster.Nodes) != 1 || cluster.Nodes[0].KubernetesNode != "m02" {
+		t.Fatalf("cluster nodes=%+v", cluster.Nodes)
+	}
+	if !cmdConditionReason(cluster.Nodes[0].Conditions, ops.ReasonNodeNotReady) {
+		t.Fatalf("volume loader did not enrich node evidence: %+v", cluster.Nodes[0])
+	}
+}
+
+func TestOpsDashboardMasterAPIUsesSharedInClusterNodeEvidenceEnrichment(t *testing.T) {
+	masterAddr, closeMaster := startCmdFakeMaster(t)
+	defer closeMaster()
+	oldFactory := opsNodeEvidenceEnricherFactory
+	opsNodeEvidenceEnricherFactory = func() (ops.OperatorNodeEvidenceEnricher, error) {
+		return fakeNodeEvidenceEnricher{}, nil
+	}
+	t.Cleanup(func() { opsNodeEvidenceEnricherFactory = oldFactory })
+	t.Setenv("KUBERNETES_SERVICE_HOST", "10.0.0.1")
+
+	addr := freeTCPAddr(t)
+	var stdout, stderr bytes.Buffer
+	done := make(chan int, 1)
+	go func() {
+		done <- run([]string{
+			"ops", "dashboard",
+			"--master-api", masterAddr,
+			"--listen", addr,
+			"--serve-duration", "1500ms",
+		}, &stdout, &stderr)
+	}()
+
+	body := waitForHTTPContains(t, "http://"+addr+"/cluster-evidence.json", `"reason": "node_not_ready"`)
+	if !strings.Contains(body, `"kubernetes_node": "m02"`) || !strings.Contains(body, `"ready": false`) {
+		t.Fatalf("dashboard cluster evidence missing enriched node:\n%s", body)
+	}
+	select {
+	case code := <-done:
+		if code != ops.VolumeStatusExitOK {
+			t.Fatalf("exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("dashboard command did not stop; stdout=%s stderr=%s", stdout.String(), stderr.String())
+	}
+}
+
 type fakeNodeEvidenceEnricher struct{}
 
 func (fakeNodeEvidenceEnricher) EnrichNodeEvidence(_ context.Context, _ string, cluster ops.ClusterEvidence) (ops.ClusterEvidence, error) {
@@ -391,6 +487,15 @@ func (fakeNodeEvidenceEnricher) EnrichNodeEvidence(_ context.Context, _ string, 
 		}},
 	}}
 	return cluster, nil
+}
+
+func cmdConditionReason(conditions []ops.ObservationCondition, reason string) bool {
+	for _, condition := range conditions {
+		if condition.Reason == reason {
+			return true
+		}
+	}
+	return false
 }
 
 type operatorStatusTestWriter struct {
