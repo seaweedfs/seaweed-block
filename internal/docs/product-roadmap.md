@@ -57,8 +57,8 @@ This is the short internal roadmap. Keep it current and readable.
   evidence refs, cleanup visibility, safe next-step hints, and cross-surface
   agreement. This remains read-only and does not add mutating operator
   lifecycle.
-- Active phase: none. The next phase should be opened explicitly rather than
-  extending Phase 36.
+- Active phase: Phase 37 Live Node Evidence Hardening. Keep it read-only and
+  bounded to live node blockers; do not extend it into mutating lifecycle.
 - Model hardening gate before the next large release: complete the
   ManagedVolume Operations Model under `internal/docs/protocol/` before
   expanding operator or broader HA claims. The goal is to prevent Kubernetes,
@@ -572,7 +572,7 @@ Approximate engineering effort if scope remains tight:
   node readiness, support evidence pointers, cleanup visibility, and surface
   agreement are QA-validated under the read-only control-plane model. Live
   negative node evidence remains Phase 37.
-- Active work is currently not opened. Choose the next gated phase explicitly.
+- Active work is Phase 37 Live Node Evidence Hardening.
 - Do not start NVMe ANA parity, rebuild/failback, backup/restore, or mutating
   operator workflows by extending Phase 36. Pick those as separate gated
   phases.

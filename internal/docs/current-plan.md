@@ -1,45 +1,241 @@
-# Current Plan
+# Current Plan: Phase 37 - Live Node Evidence Hardening
 
-Status: no active phase. Phase 36 closed on 2026-06-06.
+Status: active, 0% complete. Started on 2026-06-06.
 
 Branch: `phase33-testops-failure-hardening`
 
-Most recent finished plan:
+Previous phase: Phase 36 is closed in
+`internal/docs/finished-plans/phase36_finishedplan_productized_operations_actionability.md`.
 
-- `internal/docs/finished-plans/phase36_finishedplan_productized_operations_actionability.md`
+## Product Goal
 
-## Closed Phase 36 Summary
+Make node readiness blockers real, not replay-only, without expanding into a
+general node-operations phase.
 
-Phase 36 delivered actionable read-only operations over the Phase 35
-Kubernetes-native status foundation:
+Phase 36 proved that read-only status surfaces can agree. Phase 37 makes the
+node facts behind that status trustworthy enough to support future lifecycle
+actions.
 
-- node readiness under `SwBlockCluster.status.nodes[]`,
-- support-bundle and evidence refs,
-- cleanup visibility and `CleanupRequired` projection,
-- safe read-only/scripted next-step hints,
-- cross-surface agreement across CRD status, Events, report, dashboard,
-  operator-snapshot, and `ops explain`.
+The hard exit statement:
 
-This phase did not add mutating operator lifecycle.
+```text
+kubectl, CRD status, report, dashboard, and ops explain must agree on node
+readiness and node blockers from live evidence, not replay-only bundles or
+helper summaries.
+```
 
-## Open Follow-ups
+## Scope Contract
 
-- Populate live node evidence from real Kubernetes node readiness,
-  schedulability, image presence, and CSI driver registration.
-- Tighten local-image build/import evidence for the build host's k3s.
-- Document loopback publish targets as single-node/local-consumer only.
-- Keep cleanup verifier strict for force-delete residue such as stale iSCSI node
-  DB records.
+| In | Out |
+|---|---|
+| Kubernetes Node Ready / SchedulingDisabled evidence | mutating operator lifecycle |
+| CSI node pod readiness evidence | finalizers/delete safety |
+| CSIDriver and per-node CSI plugin registration evidence | automatic cleanup |
+| required image presence or image-pull status | repair/rebuild/failback |
+| iSCSI and multipath prerequisite evidence | backup/snapshot/restore |
+| loopback publish-target cross-node blocker | NVMe ANA parity |
+| CRD/report/dashboard/explain/Event agreement | broad node-health monitoring |
+| TestOps live negative-node gates | performance/SLO claims |
 
-## Next Plan Candidates
+Allowed implementation rule:
 
-Pick one as a separate gated phase:
+```text
+Phase 37 may read Kubernetes, blockmaster observation, node/pod/image facts,
+and host prerequisite evidence.
 
-- mutating lifecycle foundation: finalizers and delete safety,
-- live node-evidence hardening,
-- upgrade/rollback drift status before upgrade execution,
-- returned-replica rebuild/failback,
-- backup/snapshot/restore,
-- NVMe ANA parity over the same CRD/Condition/Event model.
+Phase 37 may write CRD .status and Kubernetes Events through the existing
+status-only controller.
 
-Do not extend Phase 36 for mutating workflows.
+Phase 37 must not mutate workloads, PVCs, PVs, storage, iSCSI sessions,
+multipath maps, hostPath data, Helm releases, image state, or CRD spec.
+```
+
+## D1: Live Node Evidence Contract
+
+Goal: define the exact live node facts and stable reason codes before code
+changes.
+
+Status: pending.
+
+Required facts:
+
+- Kubernetes node Ready / SchedulingDisabled.
+- CSI node pod Ready and image-pull state.
+- CSIDriver exists.
+- per-node CSI plugin registration exists in `CSINode`.
+- required `sw-block` and `sw-block-csi` image readiness or image-pull blocker.
+- iSCSI prerequisite evidence.
+- multipath prerequisite evidence.
+- loopback publish-target cross-node risk.
+
+Acceptance:
+
+```text
+[ ] each fact has one truth source and one projection path
+[ ] reason codes are named for node_not_ready, node_scheduling_disabled,
+      csi_node_pod_not_ready, csi_driver_not_registered,
+      image_missing_on_node, iscsi_prereq_missing,
+      multipath_prereq_missing, publish_target_loopback_cross_node
+[ ] contract states which fields are stable/provisional/test-only
+[ ] contract preserves read-only boundary
+[ ] focused tests fail first for any missing projection field
+```
+
+Verification:
+
+```text
+go test ./core/ops ./cmd/sw-block ./cmd/blockcsi
+internal review against control-structure-effectiveness-review.md
+```
+
+## D2: Kubernetes Node And CSI Registration Evidence
+
+Goal: populate live node readiness from Kubernetes API facts, not replay-only
+fixtures.
+
+Status: pending.
+
+Acceptance:
+
+```text
+[ ] Ready node projects node_ready
+[ ] SchedulingDisabled node projects node_scheduling_disabled
+[ ] NotReady node projects node_not_ready
+[ ] missing CSIDriver projects csi_driver_not_registered
+[ ] missing per-node CSINode driver registration projects csi_driver_not_registered
+[ ] CSI node pod image-pull or not-ready state projects csi_node_pod_not_ready
+[ ] CRD status and operator-snapshot agree
+[ ] no workload/storage mutation verbs are added
+```
+
+Verification:
+
+```text
+go test ./core/ops ./cmd/sw-block ./cmd/blockcsi
+TestOps live node-readiness gate
+TestOps live CSI-registration blocker gate
+```
+
+## D3: Image Presence / Image Pull Evidence
+
+Goal: make local-image and published-image node blockers visible from live
+evidence.
+
+Status: pending.
+
+Acceptance:
+
+```text
+[ ] missing required image on a selected node projects image_missing_on_node
+[ ] CSI image-pull failure on csi-node pod projects image_missing_on_node or
+      csi_node_pod_not_ready with stable evidence
+[ ] build-host local k3s import evidence is checked before local-image gates
+      claim node image readiness
+[ ] report/dashboard/explain name the same node blocker
+[ ] no image import or cleanup is executed by the operator
+```
+
+Verification:
+
+```text
+go test ./scripts ./core/ops ./cmd/sw-block
+TestOps live missing-image node gate
+QA rerun against local-image path that previously masked missing CSI image
+```
+
+## D4: Host Prerequisite Evidence
+
+Goal: project iSCSI and multipath prerequisites into node readiness without
+performing host changes.
+
+Status: pending.
+
+Acceptance:
+
+```text
+[ ] healthy iSCSI prerequisite projects ready evidence
+[ ] missing iSCSI prerequisite projects iscsi_prereq_missing
+[ ] healthy multipath prerequisite projects ready evidence
+[ ] missing multipath prerequisite projects multipath_prereq_missing
+[ ] status points to safe scripted verification, not automatic repair
+[ ] CRD/report/dashboard/explain agree
+```
+
+Verification:
+
+```text
+go test ./core/ops ./cmd/sw-block
+TestOps host-prereq replay gate
+TestOps live host-prereq smoke if lab-safe
+```
+
+## D5: Loopback Publish Target Cross-Node Blocker
+
+Goal: make the default loopback target boundary visible when a consumer pod
+would run on a different node.
+
+Status: pending.
+
+Acceptance:
+
+```text
+[ ] single-node / same-node loopback target remains allowed
+[ ] multi-node consumer placement with loopback publish target projects
+      publish_target_loopback_cross_node
+[ ] status is blocked or unknown as appropriate, never false Ready=True
+[ ] docs name loopback as single-node/local-consumer only
+[ ] CRD/report/dashboard/explain agree
+```
+
+Verification:
+
+```text
+go test ./core/ops ./cmd/sw-block
+TestOps loopback-cross-node blocker gate
+```
+
+## D6: Surface Agreement And Close
+
+Goal: prove live node evidence is consistent across user surfaces and close
+Phase 37 without widening the scope.
+
+Status: pending.
+
+Acceptance:
+
+```text
+[ ] live healthy node path agrees across kubectl, CRD status, report,
+      dashboard, operator-snapshot, and explain
+[ ] live NotReady/SchedulingDisabled path agrees
+[ ] live CSI registration blocker agrees
+[ ] live image blocker agrees
+[ ] host prereq blocker agrees or is explicitly replay-only with reason
+[ ] loopback cross-node blocker agrees
+[ ] no negative node path shows false Ready=True
+[ ] no mutating operator verbs are added
+[ ] finished plan records follow-ups and non-claims
+```
+
+Verification:
+
+```text
+go test ./scripts
+go test ./core/ops ./cmd/sw-block ./cmd/blockcsi
+helm lint charts/seaweed-block
+helm template sw-block charts/seaweed-block --namespace kube-system --include-crds \
+  --set operatorStatus.create=true --set operatorStatus.dryRun=false
+git diff --check
+QA strict rerun from clean lab
+```
+
+## Current Progress
+
+- 0%: Phase 37 opened. Scope is live node evidence hardening only:
+  Kubernetes node readiness, CSI registration, image readiness, iSCSI/multipath
+  prerequisites, loopback cross-node blocker, and cross-surface agreement.
+
+## Next Step
+
+Start D1 contract review and focused failing tests. Do not implement
+finalizers, cleanup automation, rebuild/failback, backup/restore, or NVMe ANA
+parity in this phase.
