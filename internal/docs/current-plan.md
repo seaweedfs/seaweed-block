@@ -122,18 +122,18 @@ TestOps live CSI-registration blocker gate
 Goal: make local-image and published-image node blockers visible from live
 evidence.
 
-Status: pending.
+Status: dev-complete; QA pending.
 
 Acceptance:
 
 ```text
-[ ] missing required image on a selected node projects image_missing_on_node
-[ ] CSI image-pull failure on csi-node pod projects image_missing_on_node or
+[x] missing required image on a selected node projects image_missing_on_node
+[x] CSI image-pull failure on csi-node pod projects image_missing_on_node or
       csi_node_pod_not_ready with stable evidence
 [ ] build-host local k3s import evidence is checked before local-image gates
       claim node image readiness
-[ ] report/dashboard/explain name the same node blocker
-[ ] no image import or cleanup is executed by the operator
+[x] report/dashboard/explain name the same node blocker
+[x] no image import or cleanup is executed by the operator
 ```
 
 Verification:
@@ -253,9 +253,16 @@ QA strict rerun from clean lab
   dashboard, and operator-snapshot agree. Follow-ups: collapse duplicate Ready
   conditions per node and add a server-side-dry-run/envtest status payload
   regression.
+- 48%: D3 dev-complete. Live Kubernetes CSI node pod specs/status now feed
+  required image and image-pull evidence into node readiness. CSI pod
+  `ImagePullBackOff`/`ErrImagePull` projects `image_missing_on_node` as the
+  root cause instead of masking it behind CSI registration or pod-not-ready
+  symptoms. Unit coverage proves the CRD-safe projection and read-only
+  operator boundary. Live QA remains pending.
 
 ## Next Step
 
-Start D3 image presence / image-pull evidence. Do not implement finalizers,
-cleanup automation, rebuild/failback, backup/restore, or NVMe ANA parity in this
-phase.
+Run D3 live QA against the local-image path that previously masked missing CSI
+images, then decide whether build-host local k3s import evidence needs a code
+change or only a gate assertion. Do not implement finalizers, cleanup
+automation, rebuild/failback, backup/restore, or NVMe ANA parity in this phase.

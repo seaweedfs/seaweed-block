@@ -63,10 +63,12 @@ func (c *KubernetesStatusClient) readCSINodePods(ctx context.Context, namespace 
 			continue
 		}
 		out[nodeName] = kubernetesPodFact{
-			Name:      item.Metadata.Name,
-			NodeName:  nodeName,
-			Ready:     item.ready(),
-			Namespace: namespace,
+			Name:          item.Metadata.Name,
+			NodeName:      nodeName,
+			Ready:         item.ready(),
+			Namespace:     namespace,
+			Images:        item.images(),
+			MissingImages: item.imagePullMissingImages(),
 		}
 	}
 	return out, nil
@@ -154,6 +156,8 @@ func mergeLiveNodeEvidence(namespace string, cluster ClusterEvidence, nodes []ku
 		node.InternalIP = firstNonEmptyString(node.InternalIP, fact.InternalIP)
 		node.Ready = fact.Ready
 		node.Schedulable = fact.Schedulable
+		node.RequiredImages = appendUniqueStrings(node.RequiredImages, csiPods[fact.Name].Images...)
+		node.MissingImages = appendUniqueStrings(node.MissingImages, csiPods[fact.Name].MissingImages...)
 		node.Conditions = mergeNodeKubernetesConditions(node.Conditions, fact)
 		node.Conditions = mergeNodeCSIEvidence(node.Conditions, namespace, fact.Name, csiPods[fact.Name], driverExists, registered[fact.Name])
 		cluster.Nodes[idx] = node
@@ -190,6 +194,17 @@ func mergeNodeKubernetesConditions(conditions []ObservationCondition, fact kuber
 }
 
 func mergeNodeCSIEvidence(conditions []ObservationCondition, namespace, nodeName string, pod kubernetesPodFact, driverExists, registered bool) []ObservationCondition {
+	if len(pod.MissingImages) > 0 {
+		conditions = append(conditions, ObservationCondition{
+			Type:         ConditionReady,
+			Status:       "False",
+			Reason:       ReasonImageMissingOnNode,
+			Severity:     "warning",
+			Message:      "Seaweed Block CSI node pod has image-pull failure",
+			EvidenceRefs: []string{"kubernetes/pod/" + firstNonEmptyString(pod.Namespace, namespace) + "/" + firstNonEmptyString(pod.Name, "missing")},
+		})
+		return conditions
+	}
 	if !driverExists || !registered {
 		conditions = append(conditions, ObservationCondition{
 			Type:         ConditionReady,
@@ -200,7 +215,7 @@ func mergeNodeCSIEvidence(conditions []ObservationCondition, namespace, nodeName
 			EvidenceRefs: []string{"kubernetes/csidriver/" + seaweedBlockCSIDriver, "kubernetes/csinode/" + nodeName},
 		})
 	}
-	if !pod.Ready {
+	if !pod.Ready && len(pod.MissingImages) == 0 {
 		conditions = append(conditions, ObservationCondition{
 			Type:         ConditionReady,
 			Status:       "False",
@@ -235,10 +250,12 @@ type kubernetesNodeFact struct {
 }
 
 type kubernetesPodFact struct {
-	Name      string
-	Namespace string
-	NodeName  string
-	Ready     bool
+	Name          string
+	Namespace     string
+	NodeName      string
+	Ready         bool
+	Images        []string
+	MissingImages []string
 }
 
 type kubernetesMetadataObject struct {
@@ -299,11 +316,28 @@ type kubernetesPodList struct {
 type kubernetesPodObject struct {
 	Metadata kubernetesObjectMeta `json:"metadata"`
 	Spec     struct {
-		NodeName string `json:"nodeName"`
+		NodeName       string                `json:"nodeName"`
+		Containers     []kubernetesContainer `json:"containers"`
+		InitContainers []kubernetesContainer `json:"initContainers"`
 	} `json:"spec"`
 	Status struct {
-		Conditions []kubernetesPodCondition `json:"conditions"`
+		Conditions            []kubernetesPodCondition    `json:"conditions"`
+		ContainerStatuses     []kubernetesContainerStatus `json:"containerStatuses"`
+		InitContainerStatuses []kubernetesContainerStatus `json:"initContainerStatuses"`
 	} `json:"status"`
+}
+
+type kubernetesContainer struct {
+	Image string `json:"image"`
+}
+
+type kubernetesContainerStatus struct {
+	Image string `json:"image"`
+	State struct {
+		Waiting *struct {
+			Reason string `json:"reason"`
+		} `json:"waiting"`
+	} `json:"state"`
 }
 
 type kubernetesPodCondition struct {
@@ -318,6 +352,41 @@ func (p kubernetesPodObject) ready() bool {
 		}
 	}
 	return false
+}
+
+func (p kubernetesPodObject) images() []string {
+	var images []string
+	for _, container := range p.Spec.InitContainers {
+		images = appendUniqueStrings(images, container.Image)
+	}
+	for _, container := range p.Spec.Containers {
+		images = appendUniqueStrings(images, container.Image)
+	}
+	return images
+}
+
+func (p kubernetesPodObject) imagePullMissingImages() []string {
+	var images []string
+	for _, status := range p.Status.InitContainerStatuses {
+		if imagePullWaitingReason(status.State.Waiting) {
+			images = appendUniqueStrings(images, status.Image)
+		}
+	}
+	for _, status := range p.Status.ContainerStatuses {
+		if imagePullWaitingReason(status.State.Waiting) {
+			images = appendUniqueStrings(images, status.Image)
+		}
+	}
+	return images
+}
+
+func imagePullWaitingReason(waiting *struct {
+	Reason string `json:"reason"`
+}) bool {
+	if waiting == nil {
+		return false
+	}
+	return waiting.Reason == "ImagePullBackOff" || waiting.Reason == "ErrImagePull"
 }
 
 type kubernetesCSINodeList struct {
@@ -340,6 +409,26 @@ func firstNonEmptyString(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func appendUniqueStrings(values []string, add ...string) []string {
+	seen := map[string]struct{}{}
+	for _, value := range values {
+		if value != "" {
+			seen[value] = struct{}{}
+		}
+	}
+	for _, value := range add {
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		values = append(values, value)
+	}
+	return values
 }
 
 func stringsTrimRightSlash(value string) string {

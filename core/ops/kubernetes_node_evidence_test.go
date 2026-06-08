@@ -179,6 +179,66 @@ func TestPhase37D2KubernetesNodeEvidenceProjectsMissingCSIDriver(t *testing.T) {
 	assertCRDSafeNodeConditions(t, m01.Conditions)
 }
 
+func TestPhase37D3KubernetesNodeEvidenceProjectsCSIImagePullBlocker(t *testing.T) {
+	const missingImage = "ghcr.io/seaweedfs/seaweed-block-csi:sha-missing"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/nodes":
+			_, _ = w.Write([]byte(`{"items":[{"metadata":{"name":"m02"},"spec":{},"status":{"conditions":[{"type":"Ready","status":"True"}]}}]}`))
+		case "/api/v1/namespaces/kube-system/pods":
+			_, _ = w.Write([]byte(`{"items":[{
+				"metadata":{"name":"sw-block-csi-node-m02"},
+				"spec":{
+					"nodeName":"m02",
+					"initContainers":[{"image":"ghcr.io/seaweedfs/seaweed-block-csi:registrar"}],
+					"containers":[{"image":"` + missingImage + `"}]
+				},
+				"status":{
+					"conditions":[{"type":"Ready","status":"False"}],
+					"containerStatuses":[{"image":"` + missingImage + `","state":{"waiting":{"reason":"ImagePullBackOff"}}}]
+				}
+			}]}`))
+		case "/apis/storage.k8s.io/v1/csidrivers/block.csi.seaweedfs.com":
+			_, _ = w.Write([]byte(`{"metadata":{"name":"block.csi.seaweedfs.com"}}`))
+		case "/apis/storage.k8s.io/v1/csinodes":
+			_, _ = w.Write([]byte(`{"items":[{"metadata":{"name":"m02"},"spec":{"drivers":[]}}]}`))
+		default:
+			t.Fatalf("unexpected Kubernetes API path %s", r.URL.String())
+		}
+	}))
+	defer server.Close()
+
+	client := &KubernetesStatusClient{BaseURL: server.URL, HTTPClient: server.Client()}
+	enriched, err := client.EnrichNodeEvidence(context.Background(), "kube-system", ClusterEvidence{})
+	if err != nil {
+		t.Fatalf("enrich: %v", err)
+	}
+	node := nodeByKubernetesName(t, enriched.Nodes, "m02")
+	if len(node.MissingImages) != 1 || node.MissingImages[0] != missingImage {
+		t.Fatalf("missing images=%+v", node.MissingImages)
+	}
+	if len(node.RequiredImages) != 2 || !containsString(node.RequiredImages, missingImage) {
+		t.Fatalf("required images=%+v", node.RequiredImages)
+	}
+	status, reason := classifyNodeReadiness(node)
+	if status != ManagedVolumeStatusBlocked || reason != ReasonImageMissingOnNode {
+		t.Fatalf("node status=%s reason=%s conditions=%+v", status, reason, node.Conditions)
+	}
+	if conditionReason(node.Conditions, ReasonCSIDriverNotRegistered) || conditionReason(node.Conditions, ReasonCSINodePodNotReady) {
+		t.Fatalf("image-pull root cause should not be masked by CSI symptoms: %+v", node.Conditions)
+	}
+	crd := swBlockNodeStatuses([]NodeEvidence{node})[0]
+	if crd.Status != ManagedVolumeStatusBlocked || crd.ReasonCode != ReasonImageMissingOnNode {
+		t.Fatalf("CRD node status=%+v", crd)
+	}
+	assertCondition(t, crd.Conditions, ConditionReady, "False", ReasonImageMissingOnNode)
+	assertCondition(t, crd.Conditions, ConditionBlocked, "True", ReasonImageMissingOnNode)
+	if !strings.Contains(strings.Join(crd.EvidenceRefs, ","), "kubernetes/pod/kube-system/sw-block-csi-node-m02") {
+		t.Fatalf("missing pod evidence refs: %+v", crd.EvidenceRefs)
+	}
+	assertCRDSafeNodeConditions(t, crd.Conditions)
+}
+
 func assertCRDSafeNodeConditions(t *testing.T, conditions []ObservationCondition) {
 	t.Helper()
 	allowed := map[string]bool{
