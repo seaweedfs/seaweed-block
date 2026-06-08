@@ -1,6 +1,6 @@
 # Current Plan: Phase 37 - Live Node Evidence Hardening
 
-Status: active, 30% complete. Started on 2026-06-06.
+Status: active, 36% complete. Started on 2026-06-06.
 
 Branch: `phase33-testops-failure-hardening`
 
@@ -93,7 +93,7 @@ internal review against control-structure-effectiveness-review.md
 Goal: populate live node readiness from Kubernetes API facts, not replay-only
 fixtures.
 
-Status: reworked after QA blocker; QA revalidation pending.
+Status: complete.
 
 Acceptance:
 
@@ -104,7 +104,7 @@ Acceptance:
 [x] missing CSIDriver projects csi_driver_not_registered
 [x] missing per-node CSINode driver registration projects csi_driver_not_registered
 [x] CSI node pod image-pull or not-ready state projects csi_node_pod_not_ready
-[ ] CRD status and operator-snapshot agree in live TestOps gate
+[x] CRD status, report, dashboard, and operator-snapshot agree in live TestOps gate
 [x] no workload/storage mutation verbs are added
 ```
 
@@ -246,9 +246,16 @@ QA strict rerun from clean lab
   `Ready`/`Blocked` condition types with node reason codes, and enrichment moved
   into the shared live observation loader so report/dashboard/explain can see
   the same in-cluster Kubernetes node facts as operator-status.
+- 36%: D2 QA PASS on `052b321`. Healthy, cordoned, NotReady, and missing CSI
+  registration states now surface from live evidence as `node_ready`,
+  `node_scheduling_disabled`, `node_not_ready`, and
+  `csi_driver_not_registered` without false `node_ready`. CRD, report,
+  dashboard, and operator-snapshot agree. Follow-ups: collapse duplicate Ready
+  conditions per node and add a server-side-dry-run/envtest status payload
+  regression.
 
 ## Next Step
 
-Ask QA to re-run D2 G2/G3/G4 plus the shared surface agreement checks from a
-clean lab. Do not implement finalizers, cleanup automation, rebuild/failback,
-backup/restore, or NVMe ANA parity in this phase.
+Start D3 image presence / image-pull evidence. Do not implement finalizers,
+cleanup automation, rebuild/failback, backup/restore, or NVMe ANA parity in this
+phase.
