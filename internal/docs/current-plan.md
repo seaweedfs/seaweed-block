@@ -149,17 +149,17 @@ QA rerun against local-image path that previously masked missing CSI image
 Goal: project iSCSI and multipath prerequisites into node readiness without
 performing host changes.
 
-Status: pending.
+Status: projection dev-complete; host fact source pending.
 
 Acceptance:
 
 ```text
 [ ] healthy iSCSI prerequisite projects ready evidence
-[ ] missing iSCSI prerequisite projects iscsi_prereq_missing
+[x] missing iSCSI prerequisite projects iscsi_prereq_missing
 [ ] healthy multipath prerequisite projects ready evidence
-[ ] missing multipath prerequisite projects multipath_prereq_missing
+[x] missing multipath prerequisite projects multipath_prereq_missing
 [ ] status points to safe scripted verification, not automatic repair
-[ ] CRD/report/dashboard/explain agree
+[x] CRD/report/dashboard/explain agree
 ```
 
 Verification:
@@ -272,10 +272,16 @@ QA strict rerun from clean lab
   `ImagePullBackOff`/`ErrImagePull` and `ErrImageNeverPull`. This closes the
   local-image masking gap that previously appeared as CSI registration or pod
   readiness symptoms.
+- 68%: D4 projection dev-complete. Node conditions carrying
+  `iscsi_prereq_missing` or `multipath_prereq_missing` now block node readiness
+  consistently across CRD status, report summary, dashboard JSON, and
+  operator-snapshot. This slice deliberately does not add privileged host
+  probing; live host fact collection still needs a safe source such as a
+  preflight artifact, CSI-node-reported fact, or future node agent.
 
 ## Next Step
 
-Start D4 host prerequisite evidence. Project iSCSI and multipath prerequisite
-facts into node readiness without performing host changes. Do not implement
-finalizers, cleanup automation, rebuild/failback, backup/restore, or NVMe ANA
-parity in this phase.
+Finish the D4 fact-source decision: use a safe preflight/support artifact or a
+CSI-node-reported read-only fact for iSCSI/multipath prerequisites. Do not add
+privileged operator host probes, finalizers, cleanup automation,
+rebuild/failback, backup/restore, or NVMe ANA parity in this phase.

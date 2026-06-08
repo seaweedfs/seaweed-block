@@ -46,6 +46,60 @@ func TestPhase36D5NodeStatusSurfacesAgree(t *testing.T) {
 	}
 }
 
+func TestPhase37D4HostPrereqNodeStatusSurfacesAgree(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		reason string
+	}{
+		{name: "iscsi", reason: ReasonISCSIPrereqMissing},
+		{name: "multipath", reason: ReasonMultipathPrereqMissing},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cluster := NewClusterEvidence(time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC))
+			cluster.Nodes = []NodeEvidence{{
+				NodeName:       "m02",
+				KubernetesNode: "m02",
+				InternalIP:     "192.168.1.184",
+				Schedulable:    true,
+				Ready:          true,
+				Conditions: []ObservationCondition{{
+					Type:         ConditionReady,
+					Status:       "False",
+					Reason:       tc.reason,
+					Severity:     "warning",
+					Message:      "host prerequisite evidence is missing",
+					EvidenceRefs: []string{"host/m02/prereq.txt"},
+				}},
+			}}
+
+			summary := RenderObservationReportSummary(cluster)
+			want := "node=m02 k8s=m02 status=blocked reason=" + tc.reason + " ready=true schedulable=true"
+			if !strings.Contains(summary, want) {
+				t.Fatalf("summary missing %q:\n%s", want, summary)
+			}
+
+			snapshot := BuildOperatorFoundationSnapshot(cluster)
+			if snapshot.Cluster.NodeCount != 1 || len(snapshot.Cluster.Nodes) != 1 {
+				t.Fatalf("snapshot nodes=%+v", snapshot.Cluster)
+			}
+			node := snapshot.Cluster.Nodes[0]
+			if node.Status != ManagedVolumeStatusBlocked || node.ReasonCode != tc.reason {
+				t.Fatalf("snapshot node=%+v", node)
+			}
+			if !phase37HasNodeCondition(node.Conditions, ConditionReady, "False", tc.reason) ||
+				!phase37HasNodeCondition(node.Conditions, ConditionBlocked, "True", tc.reason) {
+				t.Fatalf("snapshot conditions=%+v", node.Conditions)
+			}
+
+			dashboard := phase36DashboardSnapshot(t, cluster)
+			if dashboard.Cluster.Nodes[0].Status != ManagedVolumeStatusBlocked ||
+				dashboard.Cluster.Nodes[0].ReasonCode != tc.reason {
+				t.Fatalf("dashboard node=%+v", dashboard.Cluster.Nodes[0])
+			}
+		})
+	}
+}
+
 func TestPhase36D5CleanupRequiredSurfacesAgree(t *testing.T) {
 	cluster := NewClusterEvidence(time.Date(2026, 6, 5, 20, 5, 0, 0, time.UTC))
 	cluster.Cleanup = &CleanupEvidence{
@@ -169,6 +223,15 @@ func phase36DashboardSnapshot(t *testing.T, cluster ClusterEvidence) OperatorFou
 
 func phase36HasClusterCondition(snapshot OperatorFoundationSnapshot, typ, status, reason string) bool {
 	for _, condition := range snapshot.Cluster.Conditions {
+		if condition.Type == typ && condition.Status == status && condition.Reason == reason {
+			return true
+		}
+	}
+	return false
+}
+
+func phase37HasNodeCondition(conditions []ObservationCondition, typ, status, reason string) bool {
+	for _, condition := range conditions {
 		if condition.Type == typ && condition.Status == status && condition.Reason == reason {
 			return true
 		}

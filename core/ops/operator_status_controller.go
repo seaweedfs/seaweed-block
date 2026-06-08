@@ -405,6 +405,10 @@ func classifyNodeReadiness(node NodeEvidence) (string, string) {
 		return ManagedVolumeStatusBlocked, ReasonCSIDriverNotRegistered
 	case nodeHasConditionReason(node, ReasonCSINodePodNotReady):
 		return ManagedVolumeStatusBlocked, ReasonCSINodePodNotReady
+	case nodeHasConditionReason(node, ReasonISCSIPrereqMissing):
+		return ManagedVolumeStatusBlocked, ReasonISCSIPrereqMissing
+	case nodeHasConditionReason(node, ReasonMultipathPrereqMissing):
+		return ManagedVolumeStatusBlocked, ReasonMultipathPrereqMissing
 	default:
 		return ManagedVolumeStatusReady, ReasonNodeReady
 	}
