@@ -77,6 +77,10 @@ func TestPhase37D4HostPrereqNodeStatusSurfacesAgree(t *testing.T) {
 			if !strings.Contains(summary, want) {
 				t.Fatalf("summary missing %q:\n%s", want, summary)
 			}
+			step := "safe_next_step=observe.collect_bundle mode=read_only mutation_allowed=false"
+			if !strings.Contains(summary, step) || !strings.Contains(summary, "reason="+tc.reason) {
+				t.Fatalf("summary missing safe host-prereq next step:\n%s", summary)
+			}
 
 			snapshot := BuildOperatorFoundationSnapshot(cluster)
 			if snapshot.Cluster.NodeCount != 1 || len(snapshot.Cluster.Nodes) != 1 {

@@ -206,6 +206,12 @@ func supportBundleReason(cluster ClusterEvidence) string {
 	if cluster.Status != "" && cluster.Status != ObservationStatusOK {
 		return cluster.Status
 	}
+	for _, node := range cluster.Nodes {
+		status, reason := classifyNodeReadiness(node)
+		if status != ManagedVolumeStatusReady && reason != "" {
+			return reason
+		}
+	}
 	return "support_evidence_available"
 }
 

@@ -49,6 +49,38 @@ capture_optional_sudo() {
   fi
 }
 
+command_state() {
+  if command -v "$1" >/dev/null 2>&1; then
+    printf 'present'
+  else
+    printf 'missing'
+  fi
+}
+
+module_state() {
+  if [[ -d "/sys/module/$1" ]]; then
+    printf 'loaded'
+  else
+    printf 'unknown'
+  fi
+}
+
+write_host_prereq_summary() {
+  local node command_iscsiadm command_multipath command_dmsetup module_iscsi_tcp module_dm_multipath iscsi_prereq multipath_prereq
+  node="$(hostname -s 2>/dev/null || hostname)"
+  command_iscsiadm="$(command_state iscsiadm)"
+  command_multipath="$(command_state multipath)"
+  command_dmsetup="$(command_state dmsetup)"
+  module_iscsi_tcp="$(module_state iscsi_tcp)"
+  module_dm_multipath="$(module_state dm_multipath)"
+  iscsi_prereq=missing
+  multipath_prereq=missing
+  [[ "$command_iscsiadm" == "present" ]] && iscsi_prereq=ok
+  [[ "$command_multipath" == "present" && "$command_dmsetup" == "present" ]] && multipath_prereq=ok
+  echo "node=$node iscsi_prereq=$iscsi_prereq multipath_prereq=$multipath_prereq command_iscsiadm=$command_iscsiadm command_multipath=$command_multipath command_dmsetup=$command_dmsetup module_iscsi_tcp=$module_iscsi_tcp module_dm_multipath=$module_dm_multipath read_only=true" \
+    >"$ARTIFACT_DIR/host/host-prereq-summary.txt"
+}
+
 capture "$ARTIFACT_DIR/helm/status.txt" helm status "$HELM_RELEASE" --namespace "$HELM_NAMESPACE"
 capture "$ARTIFACT_DIR/helm/list.txt" helm list --all-namespaces
 capture "$ARTIFACT_DIR/helm/values.txt" helm get values "$HELM_RELEASE" --namespace "$HELM_NAMESPACE" --all
@@ -82,6 +114,7 @@ capture_optional_sudo "$ARTIFACT_DIR/host/multipath.txt" multipath -ll
 capture_optional_sudo "$ARTIFACT_DIR/host/dmsetup.txt" dmsetup ls --tree
 capture_optional "$ARTIFACT_DIR/host/kubelet-mounts.txt" findmnt -R /var/lib/kubelet -o TARGET,SOURCE,FSTYPE,OPTIONS
 capture "$ARTIFACT_DIR/host/processes.txt" ps -eo pid,args
+write_host_prereq_summary
 
 {
   if [[ "$capture_failures" -eq 0 ]]; then
@@ -98,6 +131,7 @@ capture "$ARTIFACT_DIR/host/processes.txt" ps -eo pid,args
   echo "k8s_snapshot=k8s"
   echo "logs=logs"
   echo "host_snapshot=host"
+  echo "host_prereq=host/host-prereq-summary.txt"
 } >"$ARTIFACT_DIR/failure-snapshot-summary.txt"
 
 cat "$ARTIFACT_DIR/failure-snapshot-summary.txt"

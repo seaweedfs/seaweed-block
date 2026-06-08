@@ -56,6 +56,11 @@ func TestFailureSnapshotScriptCapturesRequiredEvidenceLayers(t *testing.T) {
 		"host/iscsi-nodes.txt",
 		"host/multipath.txt",
 		"host/dmsetup.txt",
+		"host/host-prereq-summary.txt",
+		"write_host_prereq_summary",
+		"iscsi_prereq=",
+		"multipath_prereq=",
+		"host_prereq=host/host-prereq-summary.txt",
 		`capture_optional "$ARTIFACT_DIR/host/kubelet-mounts.txt"`,
 		"host/processes.txt",
 		"read_only=true",
@@ -79,6 +84,11 @@ func TestCollectHelmSupportBundleKeepsOptionalDiagnosticsNonFatal(t *testing.T) 
 		`capture_optional "$ARTIFACT_DIR/logs/blockvolume.log"`,
 		`capture_optional "$ARTIFACT_DIR/iscsi/sessions.txt"`,
 		`capture_optional "$ARTIFACT_DIR/iscsi/nodes.txt"`,
+		"host/host-prereq-summary.txt",
+		"write_host_prereq_summary",
+		"iscsi_prereq=",
+		"multipath_prereq=",
+		"host_prereq=host/host-prereq-summary.txt",
 	} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("support bundle script missing %q", want)

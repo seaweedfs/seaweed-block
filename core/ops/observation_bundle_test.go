@@ -322,6 +322,53 @@ func TestObservationBundle_CarriesCleanupEvidenceIntoReportSurfaces(t *testing.T
 	}
 }
 
+func TestObservationBundle_CarriesHostPrereqEvidenceIntoNodeStatus(t *testing.T) {
+	dir := t.TempDir()
+	cluster := NewClusterEvidence(time.Date(2026, 6, 8, 13, 0, 0, 0, time.UTC))
+	cluster.Nodes = []NodeEvidence{{
+		NodeName:       "m02",
+		KubernetesNode: "m02",
+		Ready:          true,
+		Schedulable:    true,
+	}, {
+		NodeName:       "tp01",
+		KubernetesNode: "tp01",
+		Ready:          true,
+		Schedulable:    true,
+	}}
+	writeClusterEvidenceArtifact(t, filepath.Join(dir, "status", ClusterEvidenceArtifact), cluster)
+	mustWrite(t, filepath.Join(dir, "host", ObservationHostPrereqArtifact), strings.Join([]string{
+		"node=m02 iscsi_prereq=missing multipath_prereq=ok command_iscsiadm=missing",
+		"node=tp01 iscsi_prereq=ok multipath_prereq=missing command_multipath=missing",
+	}, "\n"))
+
+	out, err := BuildObservationFromBundle(ObservationBundleOptions{Dir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := BuildOperatorFoundationSnapshot(out)
+	if len(snapshot.Cluster.Nodes) != 2 {
+		t.Fatalf("nodes=%+v", snapshot.Cluster.Nodes)
+	}
+	if snapshot.Cluster.Nodes[0].Status != ManagedVolumeStatusBlocked ||
+		snapshot.Cluster.Nodes[0].ReasonCode != ReasonISCSIPrereqMissing {
+		t.Fatalf("m02 node=%+v", snapshot.Cluster.Nodes[0])
+	}
+	if snapshot.Cluster.Nodes[1].Status != ManagedVolumeStatusBlocked ||
+		snapshot.Cluster.Nodes[1].ReasonCode != ReasonMultipathPrereqMissing {
+		t.Fatalf("tp01 node=%+v", snapshot.Cluster.Nodes[1])
+	}
+	summary := RenderObservationReportSummary(out)
+	for _, want := range []string{
+		"node=m02 k8s=m02 status=blocked reason=iscsi_prereq_missing",
+		"node=tp01 k8s=tp01 status=blocked reason=multipath_prereq_missing",
+	} {
+		if !strings.Contains(summary, want) {
+			t.Fatalf("summary missing %q:\n%s", want, summary)
+		}
+	}
+}
+
 func TestObservationBundle_D6ReplayGate_FirstVolumeBlockedAndRecovery(t *testing.T) {
 	cases := []struct {
 		name       string

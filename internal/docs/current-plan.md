@@ -149,7 +149,7 @@ QA rerun against local-image path that previously masked missing CSI image
 Goal: project iSCSI and multipath prerequisites into node readiness without
 performing host changes.
 
-Status: projection dev-complete; host fact source pending.
+Status: dev-complete; QA pending.
 
 Acceptance:
 
@@ -158,7 +158,7 @@ Acceptance:
 [x] missing iSCSI prerequisite projects iscsi_prereq_missing
 [ ] healthy multipath prerequisite projects ready evidence
 [x] missing multipath prerequisite projects multipath_prereq_missing
-[ ] status points to safe scripted verification, not automatic repair
+[x] status points to safe scripted verification, not automatic repair
 [x] CRD/report/dashboard/explain agree
 ```
 
@@ -278,10 +278,17 @@ QA strict rerun from clean lab
   operator-snapshot. This slice deliberately does not add privileged host
   probing; live host fact collection still needs a safe source such as a
   preflight artifact, CSI-node-reported fact, or future node agent.
+- 76%: D4 dev-complete. Support bundles and failure snapshots now emit a
+  read-only `host/host-prereq-summary.txt` artifact with iSCSI/multipath
+  prerequisite command evidence. Bundle replay projects missing prerequisites
+  into node blockers and safe next steps point to scripted bundle collection,
+  never automatic repair. This is an artifact/preflight source, not privileged
+  operator probing. QA validation remains pending.
 
 ## Next Step
 
-Finish the D4 fact-source decision: use a safe preflight/support artifact or a
-CSI-node-reported read-only fact for iSCSI/multipath prerequisites. Do not add
-privileged operator host probes, finalizers, cleanup automation,
-rebuild/failback, backup/restore, or NVMe ANA parity in this phase.
+Run D4 QA against the support/failure snapshot artifact path. Validate
+`host-prereq-summary.txt` replay, CRD/report/dashboard/explain agreement, and
+that the operator still has no privileged host probe or repair behavior. Do not
+add finalizers, cleanup automation, rebuild/failback, backup/restore, or NVMe
+ANA parity in this phase.

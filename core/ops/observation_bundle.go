@@ -20,6 +20,7 @@ const (
 	ObservationReportTextArtifact     = "summary.txt"
 	ObservationReportJSONLArtifact    = "timeline.jsonl"
 	ObservationCleanupSummaryArtifact = "cleanup-summary.txt"
+	ObservationHostPrereqArtifact     = "host-prereq-summary.txt"
 
 	NodeLossRecoverySummaryArtifact = "node-loss-recovery-summary.txt"
 	PrimaryFailureRecoveryArtifact  = "primary-failure-recovery.txt"
@@ -78,6 +79,11 @@ func BuildObservationFromBundle(opts ObservationBundleOptions) (ClusterEvidence,
 	cleanup, cleanupPath, _ := loadKeyValueArtifact(opts.Dir, ObservationCleanupSummaryArtifact)
 	if len(cleanup) > 0 {
 		cluster.Cleanup = CleanupEvidenceFromSummary(cleanup, cleanupPath)
+	}
+	hostPrereq, hostPrereqPath, _ := loadTextArtifact(opts.Dir, ObservationHostPrereqArtifact)
+	if hostPrereq != "" {
+		applyHostPrereqSummary(&cluster, hostPrereq, hostPrereqPath)
+		sourceLoaded = true
 	}
 	if blocked, blockedVolume := buildImagePullBlockedEvidence(opts.Dir); blocked {
 		cluster.Status = ObservationStatusBlocked
@@ -446,6 +452,63 @@ func applyPrimaryFailureSummary(cluster *ClusterEvidence, summary map[string]str
 	cluster.Volumes[0] = volume
 }
 
+func applyHostPrereqSummary(cluster *ClusterEvidence, text, evidencePath string) {
+	scanner := bufio.NewScanner(strings.NewReader(text))
+	for scanner.Scan() {
+		fields := parseSpaceKeyValues(scanner.Text())
+		nodeName := firstNonEmpty(fields["node"], fields["kubernetes_node"], fields["host"])
+		if nodeName == "" {
+			continue
+		}
+		idx := ensureObservationNode(cluster, nodeName)
+		node := cluster.Nodes[idx]
+		node.NodeName = defaultString(node.NodeName, nodeName)
+		node.KubernetesNode = defaultString(node.KubernetesNode, nodeName)
+		if hostPrereqMissing(fields["iscsi_prereq"]) {
+			node.Conditions = append(node.Conditions, hostPrereqCondition(ReasonISCSIPrereqMissing, "iSCSI host prerequisite evidence is missing", evidencePath))
+		}
+		if hostPrereqMissing(fields["multipath_prereq"]) {
+			node.Conditions = append(node.Conditions, hostPrereqCondition(ReasonMultipathPrereqMissing, "multipath host prerequisite evidence is missing", evidencePath))
+		}
+		cluster.Nodes[idx] = node
+	}
+}
+
+func ensureObservationNode(cluster *ClusterEvidence, nodeName string) int {
+	for i, node := range cluster.Nodes {
+		if node.NodeName == nodeName || node.KubernetesNode == nodeName || node.PhysicalHost == nodeName {
+			return i
+		}
+	}
+	cluster.Nodes = append(cluster.Nodes, NodeEvidence{
+		NodeName:       nodeName,
+		KubernetesNode: nodeName,
+		Ready:          true,
+		Schedulable:    true,
+	})
+	return len(cluster.Nodes) - 1
+}
+
+func hostPrereqMissing(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "missing", "failed", "false", "no":
+		return true
+	default:
+		return false
+	}
+}
+
+func hostPrereqCondition(reason, message, evidencePath string) ObservationCondition {
+	return ObservationCondition{
+		Type:         ConditionReady,
+		Status:       "False",
+		Reason:       reason,
+		Severity:     "warning",
+		Message:      message,
+		EvidenceRefs: []string{evidencePath},
+	}
+}
+
 func applyManagedVolumeArtifactHints(cluster ClusterEvidence, hints ManagedVolumeArtifactHints) ClusterEvidence {
 	cluster.ManagedVolumes = nil
 	for _, volume := range cluster.Volumes {
@@ -566,6 +629,18 @@ func loadKeyValueArtifact(root, name string) (map[string]string, string, error) 
 		}
 	}
 	return out, paths[0], scanner.Err()
+}
+
+func loadTextArtifact(root, name string) (string, string, error) {
+	paths, err := findArtifactPaths(root, name)
+	if err != nil || len(paths) == 0 {
+		return "", "", err
+	}
+	raw, err := os.ReadFile(paths[0])
+	if err != nil {
+		return "", paths[0], err
+	}
+	return string(raw), paths[0], nil
 }
 
 func findArtifactPaths(root, name string) ([]string, error) {
