@@ -369,6 +369,146 @@ func TestObservationBundle_CarriesHostPrereqEvidenceIntoNodeStatus(t *testing.T)
 	}
 }
 
+func TestObservationBundle_CarriesUnsupportedLoopbackAttachIntoManagedStatus(t *testing.T) {
+	dir := t.TempDir()
+	writeProductClusterEvidence(t, dir, []VolumeEvidence{{
+		VolumeID:          "pvc-loopback",
+		Namespace:         "default",
+		PVCName:           "demo-pvc",
+		ReplicationFactor: 1,
+		Status:            ObservationStatusOK,
+		PrimaryReplica:    "r1",
+		PrimaryNode:       "m01",
+		PublishTarget:     "127.0.0.1:3260",
+		Replicas: []ReplicaEvidence{{
+			ReplicaID:      "r1",
+			KubernetesNode: "m01",
+			Observed:       true,
+			Role:           "primary",
+			FrontendAddr:   "127.0.0.1:3260",
+		}},
+	}})
+	mustWrite(t, filepath.Join(dir, "demo", ObservationLoopbackAttachArtifact), strings.Join([]string{
+		"issue=unsupported_cross_node_loopback_attach",
+		"app_node=m02",
+		"blockvolume_node=m01",
+		"frontend=127.0.0.1:3260",
+		"volume_id=pvc-loopback",
+		"replica_id=r1",
+		"reason=loopback frontend requires app pod and blockvolume on the same node",
+	}, "\n"))
+
+	cluster, err := BuildObservationFromBundle(ObservationBundleOptions{Dir: dir, VolumeID: "pvc-loopback"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cluster.Status != ObservationStatusBlocked {
+		t.Fatalf("cluster status=%s", cluster.Status)
+	}
+	if len(cluster.ManagedVolumes) != 1 {
+		t.Fatalf("managed_volumes=%+v", cluster.ManagedVolumes)
+	}
+	managed := cluster.ManagedVolumes[0]
+	if managed.Status != ManagedVolumeStatusBlocked || managed.ReasonCode != ReasonPublishTargetLoopbackCrossNode {
+		t.Fatalf("managed=%+v", managed)
+	}
+	if !hasManagedVolumeAction(managed.Actions, ManagedVolumeActionReinstallExternalISCSI) {
+		t.Fatalf("missing external iSCSI dry-run action: %+v", managed.Actions)
+	}
+
+	summary := RenderObservationReportSummary(cluster)
+	for _, want := range []string{
+		"volume=pvc-loopback status=blocked pvc=default/demo-pvc primary=r1@m01 frontend=127.0.0.1:3260",
+		"managed_volume=pvc-loopback status=blocked reason=publish_target_loopback_cross_node",
+		"managed_volume_condition=Ready status=False reason=publish_target_loopback_cross_node severity=warning",
+		"managed_volume_action=safe_k8s.reinstall_external_iscsi mode=dry_run side_effect=safe_k8s executor=installer_or_operator",
+	} {
+		if !strings.Contains(summary, want) {
+			t.Fatalf("summary missing %q:\n%s", want, summary)
+		}
+	}
+
+	server := httptest.NewServer(NewObservationDashboardHandler(cluster))
+	defer server.Close()
+	assertDashboardEndpointContains(t, server.URL+"/"+ObservationOperatorSnapshotArtifact, `"reason_code": "publish_target_loopback_cross_node"`)
+	assertDashboardEndpointContains(t, server.URL+"/"+ObservationReportTextArtifact, "managed_volume=pvc-loopback status=blocked reason=publish_target_loopback_cross_node")
+}
+
+func TestObservationBundle_LoopbackAttachTargetsNamedVolume(t *testing.T) {
+	dir := t.TempDir()
+	writeProductClusterEvidence(t, dir, []VolumeEvidence{
+		{
+			VolumeID:       "pvc-a",
+			Namespace:      "default",
+			PVCName:        "pvc-a",
+			Status:         ObservationStatusOK,
+			PrimaryReplica: "r1",
+			PrimaryNode:    "m01",
+			PublishTarget:  "192.168.1.181:3260",
+		},
+		{
+			VolumeID:       "pvc-b",
+			Namespace:      "default",
+			PVCName:        "pvc-b",
+			Status:         ObservationStatusOK,
+			PrimaryReplica: "r1",
+			PrimaryNode:    "m01",
+			PublishTarget:  "127.0.0.1:3260",
+		},
+	})
+	mustWrite(t, filepath.Join(dir, "demo", ObservationLoopbackAttachArtifact), strings.Join([]string{
+		"issue=unsupported_cross_node_loopback_attach",
+		"app_node=m02",
+		"blockvolume_node=m01",
+		"frontend=127.0.0.1:3260",
+		"volume_id=pvc-b",
+		"replica_id=r1",
+	}, "\n"))
+
+	cluster, err := BuildObservationFromBundle(ObservationBundleOptions{Dir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cluster.ManagedVolumes) != 2 {
+		t.Fatalf("managed_volumes=%+v", cluster.ManagedVolumes)
+	}
+	statusByVolume := map[string]string{}
+	reasonByVolume := map[string]string{}
+	for _, managed := range cluster.ManagedVolumes {
+		statusByVolume[managed.VolumeID] = managed.Status
+		reasonByVolume[managed.VolumeID] = managed.ReasonCode
+	}
+	if statusByVolume["pvc-a"] != ManagedVolumeStatusReady || reasonByVolume["pvc-a"] != ReasonFirstVolumeVerified {
+		t.Fatalf("pvc-a status=%s reason=%s", statusByVolume["pvc-a"], reasonByVolume["pvc-a"])
+	}
+	if statusByVolume["pvc-b"] != ManagedVolumeStatusBlocked || reasonByVolume["pvc-b"] != ReasonPublishTargetLoopbackCrossNode {
+		t.Fatalf("pvc-b status=%s reason=%s", statusByVolume["pvc-b"], reasonByVolume["pvc-b"])
+	}
+}
+
+func TestManagedVolumeFactsFromEvidence_AllowsSameNodeLoopback(t *testing.T) {
+	projection := ProjectManagedVolume(ManagedVolumeFactsFromEvidence(VolumeEvidence{
+		VolumeID:       "pvc-loopback-ok",
+		Namespace:      "default",
+		PVCName:        "demo-pvc",
+		Status:         ObservationStatusOK,
+		PrimaryReplica: "r1",
+		PrimaryNode:    "m02",
+		PublishTarget:  "127.0.0.1:3260",
+		Replicas: []ReplicaEvidence{{
+			ReplicaID:      "r1",
+			KubernetesNode: "m02",
+			Observed:       true,
+			Role:           "primary",
+			FrontendAddr:   "127.0.0.1:3260",
+		}},
+	}, ManagedVolumeArtifactHints{}))
+
+	if projection.Status != ManagedVolumeStatusReady || projection.ReasonCode != ReasonFirstVolumeVerified {
+		t.Fatalf("same-node loopback projection=%+v", projection)
+	}
+}
+
 func TestObservationBundle_D6ReplayGate_FirstVolumeBlockedAndRecovery(t *testing.T) {
 	cases := []struct {
 		name       string

@@ -21,6 +21,7 @@ const (
 	ObservationReportJSONLArtifact    = "timeline.jsonl"
 	ObservationCleanupSummaryArtifact = "cleanup-summary.txt"
 	ObservationHostPrereqArtifact     = "host-prereq-summary.txt"
+	ObservationLoopbackAttachArtifact = "unsupported-cross-node-loopback-attach.txt"
 
 	NodeLossRecoverySummaryArtifact = "node-loss-recovery-summary.txt"
 	PrimaryFailureRecoveryArtifact  = "primary-failure-recovery.txt"
@@ -83,6 +84,11 @@ func BuildObservationFromBundle(opts ObservationBundleOptions) (ClusterEvidence,
 	hostPrereq, hostPrereqPath, _ := loadTextArtifact(opts.Dir, ObservationHostPrereqArtifact)
 	if hostPrereq != "" {
 		applyHostPrereqSummary(&cluster, hostPrereq, hostPrereqPath)
+		sourceLoaded = true
+	}
+	loopbackAttach, loopbackAttachPath, _ := loadKeyValueArtifact(opts.Dir, ObservationLoopbackAttachArtifact)
+	if len(loopbackAttach) > 0 {
+		applyUnsupportedLoopbackAttachSummary(&cluster, loopbackAttach, loopbackAttachPath)
 		sourceLoaded = true
 	}
 	if blocked, blockedVolume := buildImagePullBlockedEvidence(opts.Dir); blocked {
@@ -474,6 +480,47 @@ func applyHostPrereqSummary(cluster *ClusterEvidence, text, evidencePath string)
 	}
 }
 
+func applyUnsupportedLoopbackAttachSummary(cluster *ClusterEvidence, summary map[string]string, evidencePath string) {
+	if summary["issue"] != "unsupported_cross_node_loopback_attach" {
+		return
+	}
+	idx := ensureObservationVolumeIndex(cluster, summary["volume_id"])
+	volume := cluster.Volumes[idx]
+	volume.VolumeID = defaultString(volume.VolumeID, summary["volume_id"])
+	volume.Status = ObservationStatusBlocked
+	volume.Reason = ReasonPublishTargetLoopbackCrossNode
+	volume.PrimaryNode = defaultString(volume.PrimaryNode, summary["blockvolume_node"])
+	volume.PublishTarget = defaultString(volume.PublishTarget, summary["frontend"])
+	volume.SupportBundleHint = evidencePath
+	if replicaID := summary["replica_id"]; replicaID != "" && len(volume.Replicas) == 0 {
+		volume.PrimaryReplica = defaultString(volume.PrimaryReplica, replicaID)
+		volume.Replicas = append(volume.Replicas, ReplicaEvidence{
+			ReplicaID:      replicaID,
+			KubernetesNode: summary["blockvolume_node"],
+			Observed:       true,
+			Role:           "primary",
+			FrontendAddr:   summary["frontend"],
+		})
+	}
+	message := "loopback frontend requires app pod and blockvolume on the same node"
+	if summary["app_node"] != "" || summary["blockvolume_node"] != "" {
+		message = fmt.Sprintf("app node %s differs from blockvolume node %s; loopback frontend is not cross-node reachable",
+			emptyAsDash(summary["app_node"]),
+			emptyAsDash(summary["blockvolume_node"]))
+	}
+	volume.Conditions = append(volume.Conditions, ObservationCondition{
+		Type:         ConditionBlocked,
+		Status:       "True",
+		Reason:       ReasonPublishTargetLoopbackCrossNode,
+		Severity:     "warning",
+		Message:      message,
+		EvidenceRefs: []string{evidencePath},
+	})
+	volume.NextActions = []string{"reinstall with external iSCSI target or schedule the app pod on the blockvolume node"}
+	cluster.Volumes[idx] = volume
+	cluster.Status = ObservationStatusBlocked
+}
+
 func ensureObservationNode(cluster *ClusterEvidence, nodeName string) int {
 	for i, node := range cluster.Nodes {
 		if node.NodeName == nodeName || node.KubernetesNode == nodeName || node.PhysicalHost == nodeName {
@@ -662,13 +709,24 @@ func findArtifactPaths(root, name string) ([]string, error) {
 }
 
 func ensureObservationVolume(cluster *ClusterEvidence, volumeID string) VolumeEvidence {
+	return cluster.Volumes[ensureObservationVolumeIndex(cluster, volumeID)]
+}
+
+func ensureObservationVolumeIndex(cluster *ClusterEvidence, volumeID string) int {
+	if volumeID != "" {
+		for i, volume := range cluster.Volumes {
+			if volume.VolumeID == volumeID {
+				return i
+			}
+		}
+	}
 	if len(cluster.Volumes) == 0 {
 		if volumeID == "" {
 			volumeID = "unknown"
 		}
 		cluster.Volumes = append(cluster.Volumes, VolumeEvidence{VolumeID: volumeID, Status: ObservationStatusUnavailable})
 	}
-	return cluster.Volumes[0]
+	return 0
 }
 
 func observationStatusFromInventoryStatus(status string) string {
@@ -698,6 +756,8 @@ func observationStatusFromInventoryCode(code int) string {
 func reasonFromIssueList(issues []string) string {
 	joined := strings.Join(issues, "\n")
 	switch {
+	case strings.Contains(joined, "unsupported_cross_node_loopback_attach") || strings.Contains(joined, "cross-node loopback") || strings.Contains(joined, "loopback frontend requires"):
+		return ReasonPublishTargetLoopbackCrossNode
 	case strings.Contains(joined, "WALIntegrity") || strings.Contains(joined, "walintegrity") || strings.Contains(joined, "wal_integrity") || strings.Contains(joined, "WAL integrity"):
 		return ReasonWALIntegrityFault
 	case strings.Contains(joined, "status_endpoint_unreachable"):

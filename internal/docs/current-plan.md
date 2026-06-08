@@ -1,6 +1,6 @@
 # Current Plan: Phase 37 - Live Node Evidence Hardening
 
-Status: active, 60% complete. Started on 2026-06-06.
+Status: active, 84% complete. Started on 2026-06-06.
 
 Branch: `phase33-testops-failure-hardening`
 
@@ -175,17 +175,17 @@ TestOps live host-prereq smoke if lab-safe
 Goal: make the default loopback target boundary visible when a consumer pod
 would run on a different node.
 
-Status: pending.
+Status: dev-complete; QA pending.
 
 Acceptance:
 
 ```text
-[ ] single-node / same-node loopback target remains allowed
-[ ] multi-node consumer placement with loopback publish target projects
+[x] single-node / same-node loopback target remains allowed
+[x] multi-node consumer placement with loopback publish target projects
       publish_target_loopback_cross_node
-[ ] status is blocked or unknown as appropriate, never false Ready=True
-[ ] docs name loopback as single-node/local-consumer only
-[ ] CRD/report/dashboard/explain agree
+[x] status is blocked or unknown as appropriate, never false Ready=True
+[x] docs name loopback as single-node/local-consumer only
+[x] CRD/report/dashboard/explain agree
 ```
 
 Verification:
@@ -284,11 +284,19 @@ QA strict rerun from clean lab
   into node blockers and safe next steps point to scripted bundle collection,
   never automatic repair. This is an artifact/preflight source, not privileged
   operator probing. QA validation remains pending.
+- 84%: D5 dev-complete. Existing same-node negative evidence
+  `unsupported-cross-node-loopback-attach.txt` now replays into
+  `publish_target_loopback_cross_node` across managed-volume status, summary,
+  operator-snapshot, and dashboard. Same-node loopback remains allowed. The
+  projected next step is a dry-run external-iSCSI reinstall suggestion, not an
+  operator mutation. QA validation remains pending.
 
 ## Next Step
 
-Run D4 QA against the support/failure snapshot artifact path. Validate
+Run D4 and D5 QA from a clean lab. For D4, validate
 `host-prereq-summary.txt` replay, CRD/report/dashboard/explain agreement, and
-that the operator still has no privileged host probe or repair behavior. Do not
-add finalizers, cleanup automation, rebuild/failback, backup/restore, or NVMe
-ANA parity in this phase.
+that the operator still has no privileged host probe or repair behavior. For
+D5, validate same-node loopback remains allowed and cross-node loopback
+placement surfaces `publish_target_loopback_cross_node` without false
+`Ready=True`. Do not add finalizers, cleanup automation, rebuild/failback,
+backup/restore, or NVMe ANA parity in this phase.
