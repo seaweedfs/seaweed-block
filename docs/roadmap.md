@@ -99,6 +99,32 @@ Recommended order from here:
 5. Add returned-replica rebuild/failback, backup/restore, and NVMe ANA parity
    only after the status/action model stays stable.
 
+## Future Non-Kubernetes Adapters
+
+Kubernetes CSI remains the primary product surface. A Docker integration is
+possible later, but it should be scoped as a Docker Volume Plugin, not a Docker
+graph/storage driver.
+
+Potential Docker Volume Plugin path:
+
+- `docker volume create -d seaweed-block ...`
+- local attach/mount/unmount through a small node agent or local daemon
+- reuse ManagedVolume status, cleanup verification, support bundles, and
+  negative-first evidence
+- target single-node Docker, lab, edge, or developer workflows first
+
+Explicit non-goals for the Docker path:
+
+- no Docker graph/storage driver to replace `overlay2`
+- no broad Docker Swarm HA claim before the K8s lifecycle model is stable
+- no production failover claim without fencing, cleanup, and residue gates
+
+Windows Docker Desktop support is an investigation item, not a current claim.
+The likely path is a Linux Docker Desktop VM or WSL2 backend running the
+Seaweed Block node component, with Windows accessing the mounted volume through
+Docker. Native Windows block-device attachment is out of scope until the Linux
+control-plane path is mature.
+
 ## Availability And Recovery Follow-Ups
 
 1. Multi-node Kubernetes test.

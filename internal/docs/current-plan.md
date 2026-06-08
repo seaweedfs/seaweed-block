@@ -1,6 +1,6 @@
 # Current Plan: Phase 37 - Live Node Evidence Hardening
 
-Status: active, 36% complete. Started on 2026-06-06.
+Status: active, 60% complete. Started on 2026-06-06.
 
 Branch: `phase33-testops-failure-hardening`
 
@@ -122,7 +122,7 @@ TestOps live CSI-registration blocker gate
 Goal: make local-image and published-image node blockers visible from live
 evidence.
 
-Status: dev-complete; QA pending.
+Status: complete.
 
 Acceptance:
 
@@ -130,7 +130,7 @@ Acceptance:
 [x] missing required image on a selected node projects image_missing_on_node
 [x] CSI image-pull failure on csi-node pod projects image_missing_on_node or
       csi_node_pod_not_ready with stable evidence
-[ ] build-host local k3s import evidence is checked before local-image gates
+[x] build-host local k3s import evidence is checked before local-image gates
       claim node image readiness
 [x] report/dashboard/explain name the same node blocker
 [x] no image import or cleanup is executed by the operator
@@ -266,11 +266,16 @@ QA strict rerun from clean lab
   (default `kube-system`) while PVC/app inventory still uses `--namespace`.
   `ErrImageNeverPull` is also treated as image-pull evidence for local-image
   paths. QA rerun remains pending.
+- 60%: D3 QA PASS on `43d7786`. Missing CSI image now surfaces live as
+  `image_missing_on_node` across CRD, report, dashboard, and explain using the
+  default app namespace. Both pull modes are covered:
+  `ImagePullBackOff`/`ErrImagePull` and `ErrImageNeverPull`. This closes the
+  local-image masking gap that previously appeared as CSI registration or pod
+  readiness symptoms.
 
 ## Next Step
 
-Rerun D3 live QA: `ops report` / dashboard / explain with default app namespace
-must agree with the CRD on `image_missing_on_node` for the induced missing CSI
-image. Then decide whether build-host local k3s import evidence needs a code
-change or only a gate assertion. Do not implement finalizers, cleanup
-automation, rebuild/failback, backup/restore, or NVMe ANA parity in this phase.
+Start D4 host prerequisite evidence. Project iSCSI and multipath prerequisite
+facts into node readiness without performing host changes. Do not implement
+finalizers, cleanup automation, rebuild/failback, backup/restore, or NVMe ANA
+parity in this phase.
