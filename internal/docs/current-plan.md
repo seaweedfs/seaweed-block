@@ -259,10 +259,18 @@ QA strict rerun from clean lab
   root cause instead of masking it behind CSI registration or pod-not-ready
   symptoms. Unit coverage proves the CRD-safe projection and read-only
   operator boundary. Live QA remains pending.
+- 52%: D3 QA partial reworked. QA proved the authoritative CRD path reports
+  `image_missing_on_node`, but found report/dashboard/explain defaulting node
+  enrichment to the app namespace instead of the Helm/control-plane namespace.
+  Live node enrichment now reads CSI pods from `SW_BLOCK_HELM_NAMESPACE`
+  (default `kube-system`) while PVC/app inventory still uses `--namespace`.
+  `ErrImageNeverPull` is also treated as image-pull evidence for local-image
+  paths. QA rerun remains pending.
 
 ## Next Step
 
-Run D3 live QA against the local-image path that previously masked missing CSI
-images, then decide whether build-host local k3s import evidence needs a code
+Rerun D3 live QA: `ops report` / dashboard / explain with default app namespace
+must agree with the CRD on `image_missing_on_node` for the induced missing CSI
+image. Then decide whether build-host local k3s import evidence needs a code
 change or only a gate assertion. Do not implement finalizers, cleanup
 automation, rebuild/failback, backup/restore, or NVMe ANA parity in this phase.

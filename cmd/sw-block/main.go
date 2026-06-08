@@ -477,11 +477,21 @@ func enrichLiveObservationCluster(namespace string, timeout time.Duration, live 
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	cluster, err = enricher.EnrichNodeEvidence(ctx, namespace, cluster)
+	cluster, err = enricher.EnrichNodeEvidence(ctx, liveNodeEvidenceNamespace(namespace), cluster)
 	if err != nil {
 		return cluster, fmt.Errorf("enrich node evidence: %w", err)
 	}
 	return cluster, nil
+}
+
+func liveNodeEvidenceNamespace(namespace string) string {
+	if namespace := strings.TrimSpace(os.Getenv("SW_BLOCK_HELM_NAMESPACE")); namespace != "" {
+		return namespace
+	}
+	if namespace = strings.TrimSpace(namespace); namespace != "" && namespace != "default" {
+		return namespace
+	}
+	return "kube-system"
 }
 
 func readMasterClusterEvidence(ctx context.Context, masterAddr string) (ops.ClusterEvidence, error) {

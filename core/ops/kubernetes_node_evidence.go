@@ -386,7 +386,7 @@ func imagePullWaitingReason(waiting *struct {
 	if waiting == nil {
 		return false
 	}
-	return waiting.Reason == "ImagePullBackOff" || waiting.Reason == "ErrImagePull"
+	return waiting.Reason == "ImagePullBackOff" || waiting.Reason == "ErrImagePull" || waiting.Reason == "ErrImageNeverPull"
 }
 
 type kubernetesCSINodeList struct {

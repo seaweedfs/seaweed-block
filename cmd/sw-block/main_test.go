@@ -470,6 +470,61 @@ func TestOpsDashboardMasterAPIUsesSharedInClusterNodeEvidenceEnrichment(t *testi
 	}
 }
 
+func TestLiveNodeEvidenceUsesHelmNamespaceWhenAppNamespaceDefaults(t *testing.T) {
+	recorder := &recordingNodeEvidenceEnricher{}
+	oldFactory := opsNodeEvidenceEnricherFactory
+	opsNodeEvidenceEnricherFactory = func() (ops.OperatorNodeEvidenceEnricher, error) {
+		return recorder, nil
+	}
+	t.Cleanup(func() { opsNodeEvidenceEnricherFactory = oldFactory })
+	t.Setenv("KUBERNETES_SERVICE_HOST", "10.0.0.1")
+
+	_, err := enrichLiveObservationCluster("default", time.Second, true, ops.ClusterEvidence{})
+	if err != nil {
+		t.Fatalf("enrich: %v", err)
+	}
+	if recorder.namespace != "kube-system" {
+		t.Fatalf("node evidence namespace=%q want kube-system", recorder.namespace)
+	}
+}
+
+func TestLiveNodeEvidenceNamespaceHonorsHelmNamespaceOverride(t *testing.T) {
+	recorder := &recordingNodeEvidenceEnricher{}
+	oldFactory := opsNodeEvidenceEnricherFactory
+	opsNodeEvidenceEnricherFactory = func() (ops.OperatorNodeEvidenceEnricher, error) {
+		return recorder, nil
+	}
+	t.Cleanup(func() { opsNodeEvidenceEnricherFactory = oldFactory })
+	t.Setenv("KUBERNETES_SERVICE_HOST", "10.0.0.1")
+	t.Setenv("SW_BLOCK_HELM_NAMESPACE", "sw-system")
+
+	_, err := enrichLiveObservationCluster("default", time.Second, true, ops.ClusterEvidence{})
+	if err != nil {
+		t.Fatalf("enrich: %v", err)
+	}
+	if recorder.namespace != "sw-system" {
+		t.Fatalf("node evidence namespace=%q want sw-system", recorder.namespace)
+	}
+}
+
+func TestLiveNodeEvidenceUsesExplicitNonDefaultNamespace(t *testing.T) {
+	recorder := &recordingNodeEvidenceEnricher{}
+	oldFactory := opsNodeEvidenceEnricherFactory
+	opsNodeEvidenceEnricherFactory = func() (ops.OperatorNodeEvidenceEnricher, error) {
+		return recorder, nil
+	}
+	t.Cleanup(func() { opsNodeEvidenceEnricherFactory = oldFactory })
+	t.Setenv("KUBERNETES_SERVICE_HOST", "10.0.0.1")
+
+	_, err := enrichLiveObservationCluster("sw-system", time.Second, true, ops.ClusterEvidence{})
+	if err != nil {
+		t.Fatalf("enrich: %v", err)
+	}
+	if recorder.namespace != "sw-system" {
+		t.Fatalf("node evidence namespace=%q want sw-system", recorder.namespace)
+	}
+}
+
 type fakeNodeEvidenceEnricher struct{}
 
 func (fakeNodeEvidenceEnricher) EnrichNodeEvidence(_ context.Context, _ string, cluster ops.ClusterEvidence) (ops.ClusterEvidence, error) {
@@ -486,6 +541,15 @@ func (fakeNodeEvidenceEnricher) EnrichNodeEvidence(_ context.Context, _ string, 
 			Message:  "Kubernetes node Ready condition is not True",
 		}},
 	}}
+	return cluster, nil
+}
+
+type recordingNodeEvidenceEnricher struct {
+	namespace string
+}
+
+func (r *recordingNodeEvidenceEnricher) EnrichNodeEvidence(_ context.Context, namespace string, cluster ops.ClusterEvidence) (ops.ClusterEvidence, error) {
+	r.namespace = namespace
 	return cluster, nil
 }
 

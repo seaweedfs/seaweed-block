@@ -239,6 +239,21 @@ func TestPhase37D3KubernetesNodeEvidenceProjectsCSIImagePullBlocker(t *testing.T
 	assertCRDSafeNodeConditions(t, crd.Conditions)
 }
 
+func TestPhase37D3ImagePullEvidenceIncludesNeverPull(t *testing.T) {
+	pod := kubernetesPodObject{}
+	pod.Status.ContainerStatuses = []kubernetesContainerStatus{{
+		Image: "sw-block-csi:local",
+	}}
+	pod.Status.ContainerStatuses[0].State.Waiting = &struct {
+		Reason string `json:"reason"`
+	}{Reason: "ErrImageNeverPull"}
+
+	got := pod.imagePullMissingImages()
+	if len(got) != 1 || got[0] != "sw-block-csi:local" {
+		t.Fatalf("missing images=%+v", got)
+	}
+}
+
 func assertCRDSafeNodeConditions(t *testing.T, conditions []ObservationCondition) {
 	t.Helper()
 	allowed := map[string]bool{
