@@ -149,7 +149,7 @@ QA rerun against local-image path that previously masked missing CSI image
 Goal: project iSCSI and multipath prerequisites into node readiness without
 performing host changes.
 
-Status: dev-complete; QA pending.
+Status: projection PASS; live host smoke optional/pending.
 
 Acceptance:
 
@@ -175,7 +175,8 @@ TestOps live host-prereq smoke if lab-safe
 Goal: make the default loopback target boundary visible when a consumer pod
 would run on a different node.
 
-Status: dev-complete; QA pending.
+Status: cross-node projection PASS; same-node E2E pending runner/default-path
+clarification.
 
 Acceptance:
 
@@ -192,7 +193,9 @@ Verification:
 
 ```text
 go test ./core/ops ./cmd/sw-block
-TestOps loopback-cross-node blocker gate
+TestOps same-node-alpha-attach-chain.yaml
+TestOps same-node-alpha-attach-negative-chain.yaml
+from-bundle replay for unsupported-cross-node-loopback-attach.txt
 ```
 
 ## D6: Surface Agreement And Close
@@ -210,8 +213,10 @@ Acceptance:
 [ ] live NotReady/SchedulingDisabled path agrees
 [ ] live CSI registration blocker agrees
 [ ] live image blocker agrees
-[ ] host prereq blocker agrees or is explicitly replay-only with reason
-[ ] loopback cross-node blocker agrees
+[x] host prereq blocker agrees from read-only artifact replay; live host probe
+      remains out of scope without a privileged node agent/source
+[ ] loopback cross-node blocker agrees; projection replay is green, runner E2E
+      still must produce the artifact from a live placement attempt
 [ ] no negative node path shows false Ready=True
 [ ] no mutating operator verbs are added
 [ ] finished plan records follow-ups and non-claims
@@ -290,13 +295,21 @@ QA strict rerun from clean lab
   operator-snapshot, and dashboard. Same-node loopback remains allowed. The
   projected next step is a dry-run external-iSCSI reinstall suggestion, not an
   operator mutation. QA validation remains pending.
+- 90%: D4/D5 QA replay PASS on `f6a8378`. Host prereq artifacts project
+  `iscsi_prereq_missing`/`multipath_prereq_missing`, and cross-node loopback
+  artifacts project `publish_target_loopback_cross_node` across report,
+  operator-snapshot, dashboard, and explain with read-only/dry-run next steps.
+  Remaining close gap is live same-node/negative E2E through the YAML `swblock`
+  runner. QA's manual raw-Helm default install hit `primary_unavailable`
+  (launcher skipped); raw chart defaults are not the release-gated path and the
+  chart README now points users to generated `values.day1.yaml`.
 
 ## Next Step
 
-Run D4 and D5 QA from a clean lab. For D4, validate
-`host-prereq-summary.txt` replay, CRD/report/dashboard/explain agreement, and
-that the operator still has no privileged host probe or repair behavior. For
-D5, validate same-node loopback remains allowed and cross-node loopback
-placement surfaces `publish_target_loopback_cross_node` without false
-`Ready=True`. Do not add finalizers, cleanup automation, rebuild/failback,
-backup/restore, or NVMe ANA parity in this phase.
+Run the two D5 YAML scenarios from a clean lab with the `swblock` runner:
+`same-node-alpha-attach-chain.yaml` and
+`same-node-alpha-attach-negative-chain.yaml`. D6 can close only after the
+same-node path proves writer/reader success and the negative path produces
+`unsupported-cross-node-loopback-attach.txt` from a live placement attempt. Do
+not add finalizers, cleanup automation, rebuild/failback, backup/restore, or
+NVMe ANA parity in this phase.
