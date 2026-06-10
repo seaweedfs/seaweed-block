@@ -1,6 +1,6 @@
 # Current Plan: Phase 38 - Lifecycle Action Model Executable Contract
 
-Status: active, 88% complete. Started on 2026-06-09.
+Status: closed, 100% complete. Started on 2026-06-09; closed on 2026-06-10.
 
 Branch: `phase33-testops-failure-hardening`
 
@@ -74,7 +74,7 @@ go test ./core/ops
 Goal: add a code-level evaluator that turns action contracts plus current facts
 into an allow/reject decision without performing side effects.
 
-Status: dev-complete; QA/internal review pending.
+Status: complete.
 
 Acceptance:
 
@@ -98,7 +98,7 @@ go test ./core/ops
 Goal: ensure report, operator-snapshot, CRD status, and dashboard do not diverge
 on the action contract.
 
-Status: dev-complete; QA/internal review pending.
+Status: complete.
 
 Acceptance:
 
@@ -122,7 +122,7 @@ server-side dry-run or live CRD status patch check
 Goal: prove unsafe or underspecified actions fail closed before any executor can
 run.
 
-Status: dev-complete; QA/internal review pending.
+Status: complete.
 
 Acceptance:
 
@@ -145,7 +145,7 @@ TestOps/QA replay gate for rejected action evidence
 Goal: prove one non-mutating dry-run action is executable as a dry-run decision
 and still does not mutate the cluster.
 
-Status: dev-complete; QA/internal review pending.
+Status: complete.
 
 Acceptance:
 
@@ -169,15 +169,15 @@ TestOps loopback-cross-node dry-run action replay
 Goal: close the action model as a real product foundation for Phase 39
 finalizer/delete safety.
 
-Status: ready for QA.
+Status: complete.
 
 Acceptance:
 
 ```text
-[ ] D1-D5 pass
-[ ] no new mutating RBAC is introduced
+[x] D1-D5 pass
+[x] no new mutating RBAC is introduced
 [x] QA assignment records non-claims and follow-ups
-[ ] QA validates dry-run and rejected-action evidence
+[x] QA validates dry-run and rejected-action evidence
 ```
 
 Verification:
@@ -195,34 +195,38 @@ QA strict rerun or replay from clean bundle
 ## Current Progress
 
 - 0%: Phase 38 opened. Scope is action eligibility only; no operator mutation.
-- 18%: D1/D2 dev-complete. `core/ops` now has an executable
+- 18%: D1/D2 completed. `core/ops` now has an executable
   `EvaluateManagedVolumeAction` contract that allows dry-run actions only when
   required facts exist, rejects missing facts with `missing_required_facts`,
   rejects disabled authority mutation with `policy_disabled`, and rejects
   unknown actions. Unit tests cover allowed dry-run, missing facts, disabled
   authority mutation, and unknown action rejection.
-- 42%: D3 dev-complete. ManagedVolume actions now carry evaluator decisions
+- 42%: D3 completed. ManagedVolume actions now carry evaluator decisions
   (`allowed`/`rejected`), rejection reasons, missing facts, invariant refs, and
   evidence requirements through projection text, operator-snapshot, and
   SwBlockVolume CRD status. The CRD schema and status DTO use camelCase fields
   (`decisionReason`, `missingFacts`, `evidenceRequired`) to avoid live schema
   rejection.
-- 60%: D4 dev-complete. The action evaluator now has a rejected-action evidence
+- 60%: D4 completed. The action evaluator now has a rejected-action evidence
   renderer. Unit gates prove every action contract is covered by the evaluator,
   `authority.request_promotion` stays rejected with `policy_disabled`, and the
   rendered evidence names side-effect class, executor, evidence requirement,
   and `mutation_allowed=false`.
-- 78%: D5 dev-complete. A cross-node loopback bundle now proves
+- 78%: D5 completed. A cross-node loopback bundle now proves
   `safe_k8s.reinstall_external_iscsi` evaluates `allowed` in `dry_run` mode
   while the operator contract and snapshot keep `mutation_allowed=false`.
   `summary.txt`, explain text, dashboard `/operator-snapshot.json`, and the
   operator snapshot agree on the decision and required evidence.
-- 88%: D6 ready for QA. The Phase 38 QA assignment defines strict local,
+- 88%: D6 moved to QA. The Phase 38 QA assignment defined strict local,
   replay, optional live RBAC, and non-mutation gates for rejected and dry-run
-  action evidence. Finished-plan closure waits for QA sign-off.
+  action evidence.
+- 100%: Phase 38 closed. QA passed G1-G5 on `ea1618d`: local contract tests,
+  rejected-action evidence, dry-run loopback action evidence, CRD/RBAC boundary,
+  non-mutation, and cleanup. Finished plan:
+  `internal/docs/finished-plans/phase38_finishedplan_lifecycle_action_model_executable_contract.md`.
 
 ## Next Step
 
-Send `internal/docs/qa-assignments/phase38-action-model-executable-contract-qa.md`
-to QA. Close Phase 38 after the sign-off confirms rejected-action evidence,
-dry-run loopback action evidence, CRD/RBAC boundary, and zero mutation.
+Open Phase 39 for finalizer/delete safety as the first narrow mutating operator
+path. Restore lab node `tp01` before any Phase 39 multi-node delete-safety
+scenario.
