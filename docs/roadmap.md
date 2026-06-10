@@ -84,6 +84,9 @@ Seaweed Block can already demonstrate a narrow Kubernetes block-storage loop:
   not become false `Ready=True`.
 - Cleanup verification for Kubernetes, iSCSI, multipath, process, and hostPath
   residue.
+- Executable lifecycle action contracts: dry-run actions can be allowed with
+  evidence, unsafe/future-mutating actions are rejected with stable reasons, and
+  CRD/report/dashboard/operator-snapshot surfaces agree on the decision.
 
 The product model is converging around one read-only control-plane pattern:
 truth owners publish facts, the status layer aggregates judgment, executors stay
@@ -92,12 +95,9 @@ preserve that model rather than add isolated scripts or separate status systems.
 
 Recommended order from here:
 
-1. Define and test the lifecycle action model before adding mutating operator
-   behavior. This must include executable dry-run and rejected-action gates, not
-   only a document.
-2. Add finalizer/delete safety as the first mutating operator slice.
-3. Add upgrade/rollback drift status before upgrade execution.
-4. Add returned-replica rebuild/failback, backup/restore, and NVMe ANA parity
+1. Add finalizer/delete safety as the first mutating operator slice.
+2. Add upgrade/rollback drift status before upgrade execution.
+3. Add returned-replica rebuild/failback, backup/restore, and NVMe ANA parity
    only after the status/action model stays stable.
 
 ## Future Non-Kubernetes Adapters

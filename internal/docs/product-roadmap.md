@@ -511,20 +511,16 @@ Still incomplete:
 The operations work can continue forever unless the next phases are bounded by
 product risk. The recommended order is:
 
-1. **Phase 37: Live node evidence hardening.**
-   Highest ROI and lowest mutation risk. It makes the read-only status model
-   trustworthy before any lifecycle action depends on it. It should cover
-   only Kubernetes Ready/SchedulingDisabled, CSI node pod readiness,
-   CSIDriver/node-plugin registration, required image presence or image-pull
-   status, iSCSI/multipath prerequisite evidence, and loopback target
-   cross-node blockers.
-2. **Phase 38: Lifecycle action model executable contract.**
-   Define and test the contract for future mutating actions before implementing
-   them: facts required, preconditions, invariants, allowed executor,
-   rollback/failure behavior, and evidence emitted. This phase must include at
-   least one dry-run action test and one rejected-action test; documentation
-   alone is not enough.
-3. **Finalizer/delete safety.**
+1. **Phase 37: Live node evidence hardening.** Closed.
+   Kubernetes Ready/SchedulingDisabled, CSI node pod readiness,
+   CSIDriver/node-plugin registration, image-pull status, host-prereq replay,
+   and loopback target cross-node blockers are now projected through the shared
+   status surfaces.
+2. **Phase 38: Lifecycle action model executable contract.** Closed.
+   Future actions now have facts, preconditions, invariants, allowed executor,
+   policy gate, evidence, and allow/reject decisions. It includes both a dry-run
+   action gate and a rejected-action gate.
+3. **Phase 39: Finalizer/delete safety.** Active.
    First mutating lifecycle slice. It should remove or block deletion with clear
    status when PVC/CRD teardown would leave iSCSI, multipath, hostPath, or
    generated workload residue.
@@ -572,10 +568,12 @@ Approximate engineering effort if scope remains tight:
   node readiness, support evidence pointers, cleanup visibility, and surface
   agreement are QA-validated under the read-only control-plane model. Live
   negative node evidence remains Phase 37.
-- Active work is Phase 37 Live Node Evidence Hardening.
+- Phase 37 Live Node Evidence Hardening is closed.
+- Phase 38 Lifecycle Action Model Executable Contract is closed.
+- Active work is Phase 39 Finalizer/Delete Safety.
 - Do not start NVMe ANA parity, rebuild/failback, backup/restore, or mutating
-  operator workflows by extending Phase 36. Pick those as separate gated
-  phases.
+  operator workflows by extending Phase 39. Pick those as separate gated
+  phases after finalizer/delete safety closes.
 - When the current plan closes, move it to `internal/docs/finished-plans/`
   with a phase/topic filename such as
   `phase1_finishedplan_frontend_protocol_readiness.md`.
