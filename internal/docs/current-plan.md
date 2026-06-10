@@ -1,6 +1,6 @@
 # Current Plan: Phase 38 - Lifecycle Action Model Executable Contract
 
-Status: active, 78% complete. Started on 2026-06-09.
+Status: active, 88% complete. Started on 2026-06-09.
 
 Branch: `phase33-testops-failure-hardening`
 
@@ -169,14 +169,14 @@ TestOps loopback-cross-node dry-run action replay
 Goal: close the action model as a real product foundation for Phase 39
 finalizer/delete safety.
 
-Status: pending.
+Status: ready for QA.
 
 Acceptance:
 
 ```text
 [ ] D1-D5 pass
 [ ] no new mutating RBAC is introduced
-[ ] finished plan records non-claims and follow-ups
+[x] QA assignment records non-claims and follow-ups
 [ ] QA validates dry-run and rejected-action evidence
 ```
 
@@ -217,8 +217,12 @@ QA strict rerun or replay from clean bundle
   while the operator contract and snapshot keep `mutation_allowed=false`.
   `summary.txt`, explain text, dashboard `/operator-snapshot.json`, and the
   operator snapshot agree on the decision and required evidence.
+- 88%: D6 ready for QA. The Phase 38 QA assignment defines strict local,
+  replay, optional live RBAC, and non-mutation gates for rejected and dry-run
+  action evidence. Finished-plan closure waits for QA sign-off.
 
 ## Next Step
 
-Run the D6 close gate: scoped tests, Helm render/lint, diff hygiene, and QA
-replay/strict validation for rejected and dry-run action evidence.
+Send `internal/docs/qa-assignments/phase38-action-model-executable-contract-qa.md`
+to QA. Close Phase 38 after the sign-off confirms rejected-action evidence,
+dry-run loopback action evidence, CRD/RBAC boundary, and zero mutation.
