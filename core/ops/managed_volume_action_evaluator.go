@@ -157,3 +157,31 @@ func (e ManagedVolumeActionEvaluation) String() string {
 	}
 	return fmt.Sprintf("%s %s reason=%s missing=%s", e.ActionType, e.Decision, e.Reason, strings.Join(e.MissingFacts, ","))
 }
+
+func RenderManagedVolumeActionEvaluationText(e ManagedVolumeActionEvaluation) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "managed_volume_action_evaluation %s decision=%s", emptyAsDash(e.ActionType), emptyAsDash(e.Decision))
+	if e.Mode != "" {
+		fmt.Fprintf(&b, " mode=%s", e.Mode)
+	}
+	if e.SideEffectClass != "" {
+		fmt.Fprintf(&b, " side_effect=%s", e.SideEffectClass)
+	}
+	if e.OwnerExecutor != "" {
+		fmt.Fprintf(&b, " executor=%s", e.OwnerExecutor)
+	}
+	if e.Reason != "" {
+		fmt.Fprintf(&b, " reason=%s", e.Reason)
+	}
+	fmt.Fprintf(&b, " mutation_allowed=%t\n", e.MutationAllowed)
+	if len(e.MissingFacts) > 0 {
+		fmt.Fprintf(&b, "managed_volume_action_evaluation_missing_facts %s %s\n", emptyAsDash(e.ActionType), strings.Join(e.MissingFacts, ","))
+	}
+	if len(e.InvariantRefs) > 0 {
+		fmt.Fprintf(&b, "managed_volume_action_evaluation_invariants %s %s\n", emptyAsDash(e.ActionType), strings.Join(e.InvariantRefs, ","))
+	}
+	if e.EvidenceRequired != "" {
+		fmt.Fprintf(&b, "managed_volume_action_evaluation_evidence_required %s %s\n", emptyAsDash(e.ActionType), e.EvidenceRequired)
+	}
+	return b.String()
+}

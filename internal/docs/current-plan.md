@@ -122,15 +122,15 @@ server-side dry-run or live CRD status patch check
 Goal: prove unsafe or underspecified actions fail closed before any executor can
 run.
 
-Status: pending.
+Status: dev-complete; QA/internal review pending.
 
 Acceptance:
 
 ```text
-[ ] authority.request_promotion is rejected under current policy
-[ ] action with missing required facts is rejected with a stable reason
-[ ] rejected action is visible as not executable, not silently omitted
-[ ] Kubernetes RBAC remains status/events/read-only only
+[x] authority.request_promotion is rejected under current policy
+[x] action with missing required facts is rejected with a stable reason
+[x] rejected action is visible as not executable, not silently omitted
+[x] Kubernetes RBAC remains status/events/read-only only
 ```
 
 Verification:
@@ -207,9 +207,14 @@ QA strict rerun or replay from clean bundle
   SwBlockVolume CRD status. The CRD schema and status DTO use camelCase fields
   (`decisionReason`, `missingFacts`, `evidenceRequired`) to avoid live schema
   rejection.
+- 60%: D4 dev-complete. The action evaluator now has a rejected-action evidence
+  renderer. Unit gates prove every action contract is covered by the evaluator,
+  `authority.request_promotion` stays rejected with `policy_disabled`, and the
+  rendered evidence names side-effect class, executor, evidence requirement,
+  and `mutation_allowed=false`.
 
 ## Next Step
 
-Add D4 rejected-action evidence: surface a deliberately rejected
-`authority.request_promotion` decision in a replay/unit gate, prove it remains
-non-executable, and confirm the operator RBAC boundary stays status/events only.
+Add D5 dry-run action evidence for `safe_k8s.reinstall_external_iscsi`: replay a
+cross-node loopback bundle, prove the action evaluates `allowed` in dry-run
+mode, and confirm no Kubernetes/storage mutation is performed or allowed.
