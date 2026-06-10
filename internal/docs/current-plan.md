@@ -98,16 +98,16 @@ go test ./core/ops
 Goal: ensure report, operator-snapshot, CRD status, and dashboard do not diverge
 on the action contract.
 
-Status: pending.
+Status: dev-complete; QA/internal review pending.
 
 Acceptance:
 
 ```text
-[ ] operator-snapshot exposes the same action fields as the evaluator contract
-[ ] SwBlockVolume.status.allowedActions remains camelCase and schema-valid
-[ ] blocked path still has dry-run/read-only actions only
-[ ] no surface shows mutationAllowed=true
-[ ] action reasons/evidence refs survive from-bundle replay
+[x] operator-snapshot exposes the same action fields as the evaluator contract
+[x] SwBlockVolume.status.allowedActions remains camelCase and schema-valid
+[x] blocked path still has dry-run/read-only actions only
+[x] no surface shows mutationAllowed=true
+[x] action reasons/evidence refs survive from-bundle replay
 ```
 
 Verification:
@@ -201,10 +201,15 @@ QA strict rerun or replay from clean bundle
   rejects disabled authority mutation with `policy_disabled`, and rejects
   unknown actions. Unit tests cover allowed dry-run, missing facts, disabled
   authority mutation, and unknown action rejection.
+- 42%: D3 dev-complete. ManagedVolume actions now carry evaluator decisions
+  (`allowed`/`rejected`), rejection reasons, missing facts, invariant refs, and
+  evidence requirements through projection text, operator-snapshot, and
+  SwBlockVolume CRD status. The CRD schema and status DTO use camelCase fields
+  (`decisionReason`, `missingFacts`, `evidenceRequired`) to avoid live schema
+  rejection.
 
 ## Next Step
 
-Wire the evaluator into one user-visible surface without making actions
-mutating. Recommended next slice: expose action evaluation decisions in
-operator-snapshot/report for the existing cross-node loopback dry-run action,
-then add a rejected-action replay gate for `authority.request_promotion`.
+Add D4 rejected-action evidence: surface a deliberately rejected
+`authority.request_promotion` decision in a replay/unit gate, prove it remains
+non-executable, and confirm the operator RBAC boundary stays status/events only.

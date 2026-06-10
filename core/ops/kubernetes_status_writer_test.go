@@ -58,11 +58,14 @@ func TestKubernetesStatusClientPatchesOnlyStatusSubresources(t *testing.T) {
 		ReasonCode: ReasonFirstVolumeVerified,
 		ObservedAt: observedAt,
 		AllowedActions: []SwBlockVolumeCRDAction{{
-			Type:            "observe.collect_bundle",
-			Mode:            "read_only",
-			SideEffectClass: "none",
-			OwnerExecutor:   "ops",
-			MutationAllowed: false,
+			Type:             "observe.collect_bundle",
+			Mode:             "read_only",
+			SideEffectClass:  "none",
+			OwnerExecutor:    "ops",
+			Decision:         ManagedVolumeActionDecisionAllowed,
+			DecisionReason:   "",
+			MutationAllowed:  false,
+			EvidenceRequired: "projection_inputs_or_bundle",
 		}},
 	}); err != nil {
 		t.Fatalf("write volume status: %v", err)
@@ -101,8 +104,17 @@ func TestKubernetesStatusClientPatchesOnlyStatusSubresources(t *testing.T) {
 	if _, ok := action["mutationAllowed"]; !ok {
 		t.Fatalf("volume action missing camelCase mutationAllowed: %+v", action)
 	}
+	if _, ok := action["decision"]; !ok {
+		t.Fatalf("volume action missing decision: %+v", action)
+	}
+	if _, ok := action["evidenceRequired"]; !ok {
+		t.Fatalf("volume action missing camelCase evidenceRequired: %+v", action)
+	}
 	if _, ok := action["mutation_allowed"]; ok {
 		t.Fatalf("volume action leaked snake_case mutation_allowed: %+v", action)
+	}
+	if _, ok := action["evidence_required"]; ok {
+		t.Fatalf("volume action leaked snake_case evidence_required: %+v", action)
 	}
 }
 

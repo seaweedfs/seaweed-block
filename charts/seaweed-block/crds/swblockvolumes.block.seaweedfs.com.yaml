@@ -136,6 +136,17 @@ spec:
                         type: string
                       ownerExecutor:
                         type: string
+                      decision:
+                        type: string
+                        enum:
+                          - allowed
+                          - rejected
+                      decisionReason:
+                        type: string
+                      missingFacts:
+                        type: array
+                        items:
+                          type: string
                       mutationAllowed:
                         type: boolean
                       preconditions:
@@ -146,6 +157,8 @@ spec:
                         type: array
                         items:
                           type: string
+                      evidenceRequired:
+                        type: string
                       evidenceRefs:
                         type: array
                         items:

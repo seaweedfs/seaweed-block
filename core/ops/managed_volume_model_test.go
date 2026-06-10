@@ -373,6 +373,12 @@ func TestManagedVolumeProjection_ActionInvariantRefs(t *testing.T) {
 	if action.OwnerExecutor != "installer_or_operator" || action.SideEffectClass != ManagedVolumeSideEffectSafeK8S || action.Mode != ManagedVolumeActionModeDryRun {
 		t.Fatalf("action boundary=%+v", action)
 	}
+	if action.Decision != ManagedVolumeActionDecisionAllowed {
+		t.Fatalf("action decision=%s reason=%s missing=%v", action.Decision, action.DecisionReason, action.MissingFacts)
+	}
+	if action.EvidenceRequired != "loopback_cross_node_evidence" {
+		t.Fatalf("evidence_required=%q", action.EvidenceRequired)
+	}
 }
 
 func TestManagedVolumeProjection_NonClaimsDerivedFromFacts(t *testing.T) {

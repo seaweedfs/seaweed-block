@@ -224,14 +224,18 @@ type ManagedVolumeStates struct {
 }
 
 type ManagedVolumeAction struct {
-	Type            string   `json:"type"`
-	Target          string   `json:"target,omitempty"`
-	Mode            string   `json:"mode"`
-	SideEffectClass string   `json:"side_effect_class"`
-	OwnerExecutor   string   `json:"owner_executor,omitempty"`
-	Preconditions   []string `json:"preconditions,omitempty"`
-	InvariantRefs   []string `json:"invariant_refs,omitempty"`
-	EvidenceRefs    []string `json:"evidence_refs,omitempty"`
+	Type             string   `json:"type"`
+	Target           string   `json:"target,omitempty"`
+	Mode             string   `json:"mode"`
+	SideEffectClass  string   `json:"side_effect_class"`
+	OwnerExecutor    string   `json:"owner_executor,omitempty"`
+	Decision         string   `json:"decision,omitempty"`
+	DecisionReason   string   `json:"decision_reason,omitempty"`
+	MissingFacts     []string `json:"missing_facts,omitempty"`
+	Preconditions    []string `json:"preconditions,omitempty"`
+	InvariantRefs    []string `json:"invariant_refs,omitempty"`
+	EvidenceRequired string   `json:"evidence_required,omitempty"`
+	EvidenceRefs     []string `json:"evidence_refs,omitempty"`
 }
 
 type ManagedVolumeArtifactHints struct {
@@ -277,11 +281,21 @@ func RenderManagedVolumeProjectionText(projection ManagedVolumeProjection) strin
 		}
 	}
 	for _, action := range projection.Actions {
-		fmt.Fprintf(&b, "managed_volume_action %s mode=%s side_effect=%s executor=%s\n",
+		fmt.Fprintf(&b, "managed_volume_action %s mode=%s side_effect=%s executor=%s decision=%s",
 			emptyAsDash(action.Type),
 			emptyAsDash(action.Mode),
 			emptyAsDash(action.SideEffectClass),
-			emptyAsDash(action.OwnerExecutor))
+			emptyAsDash(action.OwnerExecutor),
+			emptyAsDash(action.Decision))
+		if action.DecisionReason != "" {
+			fmt.Fprintf(&b, " reason=%s", action.DecisionReason)
+		}
+		b.WriteByte('\n')
+		if len(action.MissingFacts) > 0 {
+			fmt.Fprintf(&b, "managed_volume_action_missing_facts %s %s\n",
+				emptyAsDash(action.Type),
+				strings.Join(action.MissingFacts, ","))
+		}
 		if len(action.Preconditions) > 0 {
 			fmt.Fprintf(&b, "managed_volume_action_preconditions %s %s\n",
 				emptyAsDash(action.Type),
@@ -296,6 +310,11 @@ func RenderManagedVolumeProjectionText(projection ManagedVolumeProjection) strin
 			fmt.Fprintf(&b, "managed_volume_action_evidence %s %s\n",
 				emptyAsDash(action.Type),
 				strings.Join(action.EvidenceRefs, ","))
+		}
+		if action.EvidenceRequired != "" {
+			fmt.Fprintf(&b, "managed_volume_action_evidence_required %s %s\n",
+				emptyAsDash(action.Type),
+				action.EvidenceRequired)
 		}
 	}
 	for _, nonClaim := range projection.NonClaims {
@@ -644,6 +663,16 @@ func managedVolumeActionsForProjection(p ManagedVolumeProjection, facts ManagedV
 			InvariantRefs:   []string{"INV-HOSTPATH-FACTS-001", "INV-HOSTPATH-TRANSPARENT-001"},
 			EvidenceRefs:    append([]string(nil), p.EvidenceRefs...),
 		})
+	}
+	for i := range actions {
+		evaluation := EvaluateManagedVolumeAction(actions[i].Type, facts)
+		actions[i].Decision = evaluation.Decision
+		actions[i].DecisionReason = evaluation.Reason
+		actions[i].MissingFacts = append([]string(nil), evaluation.MissingFacts...)
+		actions[i].EvidenceRequired = evaluation.EvidenceRequired
+		if len(actions[i].InvariantRefs) == 0 {
+			actions[i].InvariantRefs = append([]string(nil), evaluation.InvariantRefs...)
+		}
 	}
 	return actions
 }

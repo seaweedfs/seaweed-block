@@ -149,6 +149,20 @@ func TestPhase36D1SwBlockClusterActionabilitySchema(t *testing.T) {
 	}
 }
 
+func TestPhase38D3SwBlockVolumeAllowedActionEvaluationSchema(t *testing.T) {
+	doc := readYAMLMap(t, "charts/seaweed-block/crds/swblockvolumes.block.seaweedfs.com.yaml")
+	statusProperties := crdStatusProperties(t, doc)
+	actionProperties := yamlMap(t, yamlMap(t, yamlMap(t, statusProperties, "allowedActions"), "items"), "properties")
+	for _, want := range []string{"type", "mode", "sideEffectClass", "ownerExecutor", "decision", "decisionReason", "missingFacts", "mutationAllowed", "preconditions", "invariantRefs", "evidenceRequired", "evidenceRefs"} {
+		if _, ok := actionProperties[want]; !ok {
+			t.Fatalf("SwBlockVolume.status.allowedActions[] schema missing %s", want)
+		}
+	}
+	if _, ok := actionProperties["evidence_required"]; ok {
+		t.Fatalf("SwBlockVolume.status.allowedActions[] schema leaked snake_case evidence_required")
+	}
+}
+
 func TestPhase35D1OperatorStatusRBACIsStatusOnly(t *testing.T) {
 	raw := readRepoFile(t, "charts/seaweed-block/templates/operator-status-rbac.yaml")
 	required := []string{

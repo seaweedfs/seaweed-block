@@ -26,14 +26,18 @@ type ManagedVolumeOperatorEvent struct {
 }
 
 type ManagedVolumeOperatorAction struct {
-	Type            string   `json:"type"`
-	Mode            string   `json:"mode"`
-	SideEffectClass string   `json:"side_effect_class"`
-	OwnerExecutor   string   `json:"owner_executor,omitempty"`
-	MutationAllowed bool     `json:"mutation_allowed"`
-	Preconditions   []string `json:"preconditions,omitempty"`
-	InvariantRefs   []string `json:"invariant_refs,omitempty"`
-	EvidenceRefs    []string `json:"evidence_refs,omitempty"`
+	Type             string   `json:"type"`
+	Mode             string   `json:"mode"`
+	SideEffectClass  string   `json:"side_effect_class"`
+	OwnerExecutor    string   `json:"owner_executor,omitempty"`
+	Decision         string   `json:"decision,omitempty"`
+	DecisionReason   string   `json:"decision_reason,omitempty"`
+	MissingFacts     []string `json:"missing_facts,omitempty"`
+	MutationAllowed  bool     `json:"mutation_allowed"`
+	Preconditions    []string `json:"preconditions,omitempty"`
+	InvariantRefs    []string `json:"invariant_refs,omitempty"`
+	EvidenceRequired string   `json:"evidence_required,omitempty"`
+	EvidenceRefs     []string `json:"evidence_refs,omitempty"`
 }
 
 func ManagedVolumeOperatorContractFromProjection(projection ManagedVolumeProjection) ManagedVolumeOperatorContract {
@@ -55,14 +59,18 @@ func ManagedVolumeOperatorContractFromProjection(projection ManagedVolumeProject
 	}
 	for _, action := range projection.Actions {
 		contract.AllowedActions = append(contract.AllowedActions, ManagedVolumeOperatorAction{
-			Type:            action.Type,
-			Mode:            action.Mode,
-			SideEffectClass: action.SideEffectClass,
-			OwnerExecutor:   action.OwnerExecutor,
-			MutationAllowed: false,
-			Preconditions:   append([]string(nil), action.Preconditions...),
-			InvariantRefs:   append([]string(nil), action.InvariantRefs...),
-			EvidenceRefs:    append([]string(nil), action.EvidenceRefs...),
+			Type:             action.Type,
+			Mode:             action.Mode,
+			SideEffectClass:  action.SideEffectClass,
+			OwnerExecutor:    action.OwnerExecutor,
+			Decision:         action.Decision,
+			DecisionReason:   action.DecisionReason,
+			MissingFacts:     append([]string(nil), action.MissingFacts...),
+			MutationAllowed:  false,
+			Preconditions:    append([]string(nil), action.Preconditions...),
+			InvariantRefs:    append([]string(nil), action.InvariantRefs...),
+			EvidenceRequired: action.EvidenceRequired,
+			EvidenceRefs:     append([]string(nil), action.EvidenceRefs...),
 		})
 	}
 	return contract

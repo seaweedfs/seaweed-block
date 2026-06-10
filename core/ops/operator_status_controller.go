@@ -228,14 +228,18 @@ type SwBlockVolumeCRDStatus struct {
 }
 
 type SwBlockVolumeCRDAction struct {
-	Type            string   `json:"type"`
-	Mode            string   `json:"mode"`
-	SideEffectClass string   `json:"sideEffectClass,omitempty"`
-	OwnerExecutor   string   `json:"ownerExecutor,omitempty"`
-	MutationAllowed bool     `json:"mutationAllowed"`
-	Preconditions   []string `json:"preconditions,omitempty"`
-	InvariantRefs   []string `json:"invariantRefs,omitempty"`
-	EvidenceRefs    []string `json:"evidenceRefs,omitempty"`
+	Type             string   `json:"type"`
+	Mode             string   `json:"mode"`
+	SideEffectClass  string   `json:"sideEffectClass,omitempty"`
+	OwnerExecutor    string   `json:"ownerExecutor,omitempty"`
+	Decision         string   `json:"decision,omitempty"`
+	DecisionReason   string   `json:"decisionReason,omitempty"`
+	MissingFacts     []string `json:"missingFacts,omitempty"`
+	MutationAllowed  bool     `json:"mutationAllowed"`
+	Preconditions    []string `json:"preconditions,omitempty"`
+	InvariantRefs    []string `json:"invariantRefs,omitempty"`
+	EvidenceRequired string   `json:"evidenceRequired,omitempty"`
+	EvidenceRefs     []string `json:"evidenceRefs,omitempty"`
 }
 
 type OperatorKubernetesEvent struct {
@@ -360,14 +364,18 @@ func swBlockVolumeCRDActions(actions []ManagedVolumeOperatorAction) []SwBlockVol
 	out := make([]SwBlockVolumeCRDAction, 0, len(actions))
 	for _, action := range actions {
 		out = append(out, SwBlockVolumeCRDAction{
-			Type:            action.Type,
-			Mode:            action.Mode,
-			SideEffectClass: action.SideEffectClass,
-			OwnerExecutor:   action.OwnerExecutor,
-			MutationAllowed: action.MutationAllowed,
-			Preconditions:   append([]string(nil), action.Preconditions...),
-			InvariantRefs:   append([]string(nil), action.InvariantRefs...),
-			EvidenceRefs:    append([]string(nil), action.EvidenceRefs...),
+			Type:             action.Type,
+			Mode:             action.Mode,
+			SideEffectClass:  action.SideEffectClass,
+			OwnerExecutor:    action.OwnerExecutor,
+			Decision:         action.Decision,
+			DecisionReason:   action.DecisionReason,
+			MissingFacts:     append([]string(nil), action.MissingFacts...),
+			MutationAllowed:  action.MutationAllowed,
+			Preconditions:    append([]string(nil), action.Preconditions...),
+			InvariantRefs:    append([]string(nil), action.InvariantRefs...),
+			EvidenceRequired: action.EvidenceRequired,
+			EvidenceRefs:     append([]string(nil), action.EvidenceRefs...),
 		})
 	}
 	return out
