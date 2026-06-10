@@ -128,11 +128,21 @@ func renderManagedProjectionSummary(b *strings.Builder, managed ManagedVolumePro
 			emptyAsDash(condition.Severity))
 	}
 	for _, action := range managed.Actions {
-		fmt.Fprintf(b, "managed_volume_action=%s mode=%s side_effect=%s executor=%s\n",
+		fmt.Fprintf(b, "managed_volume_action=%s mode=%s side_effect=%s executor=%s decision=%s",
 			emptyAsDash(action.Type),
 			emptyAsDash(action.Mode),
 			emptyAsDash(action.SideEffectClass),
-			emptyAsDash(action.OwnerExecutor))
+			emptyAsDash(action.OwnerExecutor),
+			emptyAsDash(action.Decision))
+		if action.DecisionReason != "" {
+			fmt.Fprintf(b, " reason=%s", action.DecisionReason)
+		}
+		b.WriteByte('\n')
+		if action.EvidenceRequired != "" {
+			fmt.Fprintf(b, "managed_volume_action_evidence_required=%s %s\n",
+				emptyAsDash(action.Type),
+				action.EvidenceRequired)
+		}
 	}
 }
 

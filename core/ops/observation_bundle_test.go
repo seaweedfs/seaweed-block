@@ -412,8 +412,38 @@ func TestObservationBundle_CarriesUnsupportedLoopbackAttachIntoManagedStatus(t *
 	if managed.Status != ManagedVolumeStatusBlocked || managed.ReasonCode != ReasonPublishTargetLoopbackCrossNode {
 		t.Fatalf("managed=%+v", managed)
 	}
-	if !hasManagedVolumeAction(managed.Actions, ManagedVolumeActionReinstallExternalISCSI) {
+	action := findManagedVolumeAction(managed.Actions, ManagedVolumeActionReinstallExternalISCSI)
+	if action == nil {
 		t.Fatalf("missing external iSCSI dry-run action: %+v", managed.Actions)
+	}
+	if action.Decision != ManagedVolumeActionDecisionAllowed ||
+		action.Mode != ManagedVolumeActionModeDryRun ||
+		action.SideEffectClass != ManagedVolumeSideEffectSafeK8S ||
+		action.OwnerExecutor != "installer_or_operator" ||
+		action.EvidenceRequired != "loopback_cross_node_evidence" {
+		t.Fatalf("unexpected external iSCSI action evaluation: %+v", *action)
+	}
+
+	contract := ManagedVolumeOperatorContractFromProjection(managed)
+	operatorAction := findManagedVolumeOperatorAction(contract.AllowedActions, ManagedVolumeActionReinstallExternalISCSI)
+	if operatorAction == nil {
+		t.Fatalf("missing operator action: %+v", contract.AllowedActions)
+	}
+	if operatorAction.Decision != ManagedVolumeActionDecisionAllowed ||
+		operatorAction.MutationAllowed ||
+		operatorAction.EvidenceRequired != "loopback_cross_node_evidence" {
+		t.Fatalf("unexpected operator action contract: %+v", *operatorAction)
+	}
+
+	snapshot := BuildOperatorFoundationSnapshot(cluster)
+	snapshotAction := findManagedVolumeOperatorAction(snapshot.Volumes[0].AllowedActions, ManagedVolumeActionReinstallExternalISCSI)
+	if snapshotAction == nil {
+		t.Fatalf("missing snapshot action: %+v", snapshot.Volumes[0].AllowedActions)
+	}
+	if snapshotAction.Decision != ManagedVolumeActionDecisionAllowed ||
+		snapshotAction.MutationAllowed ||
+		snapshot.Mutation.MutationAllowed {
+		t.Fatalf("unexpected snapshot action/boundary: action=%+v mutation=%+v", *snapshotAction, snapshot.Mutation)
 	}
 
 	summary := RenderObservationReportSummary(cluster)
@@ -421,16 +451,30 @@ func TestObservationBundle_CarriesUnsupportedLoopbackAttachIntoManagedStatus(t *
 		"volume=pvc-loopback status=blocked pvc=default/demo-pvc primary=r1@m01 frontend=127.0.0.1:3260",
 		"managed_volume=pvc-loopback status=blocked reason=publish_target_loopback_cross_node",
 		"managed_volume_condition=Ready status=False reason=publish_target_loopback_cross_node severity=warning",
-		"managed_volume_action=safe_k8s.reinstall_external_iscsi mode=dry_run side_effect=safe_k8s executor=installer_or_operator",
+		"managed_volume_action=safe_k8s.reinstall_external_iscsi mode=dry_run side_effect=safe_k8s executor=installer_or_operator decision=allowed",
+		"managed_volume_action_evidence_required=safe_k8s.reinstall_external_iscsi loopback_cross_node_evidence",
 	} {
 		if !strings.Contains(summary, want) {
 			t.Fatalf("summary missing %q:\n%s", want, summary)
 		}
 	}
 
+	explain := RenderObservationExplainText(cluster)
+	for _, want := range []string{
+		"managed_volume_action safe_k8s.reinstall_external_iscsi mode=dry_run side_effect=safe_k8s executor=installer_or_operator decision=allowed",
+		"managed_volume_action_evidence_required safe_k8s.reinstall_external_iscsi loopback_cross_node_evidence",
+	} {
+		if !strings.Contains(explain, want) {
+			t.Fatalf("explain missing %q:\n%s", want, explain)
+		}
+	}
+
 	server := httptest.NewServer(NewObservationDashboardHandler(cluster))
 	defer server.Close()
 	assertDashboardEndpointContains(t, server.URL+"/"+ObservationOperatorSnapshotArtifact, `"reason_code": "publish_target_loopback_cross_node"`)
+	assertDashboardEndpointContains(t, server.URL+"/"+ObservationOperatorSnapshotArtifact, `"decision": "allowed"`)
+	assertDashboardEndpointContains(t, server.URL+"/"+ObservationOperatorSnapshotArtifact, `"mutation_allowed": false`)
+	assertDashboardEndpointContains(t, server.URL+"/"+ObservationOperatorSnapshotArtifact, `"evidence_required": "loopback_cross_node_evidence"`)
 	assertDashboardEndpointContains(t, server.URL+"/"+ObservationReportTextArtifact, "managed_volume=pvc-loopback status=blocked reason=publish_target_loopback_cross_node")
 }
 
@@ -831,6 +875,15 @@ func writeStatusEndpointUnreachableInventory(t *testing.T, dir string) {
 		}},
 	})
 	mustWriteInventory(t, inventoryDir, inventory)
+}
+
+func findManagedVolumeOperatorAction(actions []ManagedVolumeOperatorAction, actionType string) *ManagedVolumeOperatorAction {
+	for i := range actions {
+		if actions[i].Type == actionType {
+			return &actions[i]
+		}
+	}
+	return nil
 }
 
 func mustWrite(t *testing.T, path, content string) {

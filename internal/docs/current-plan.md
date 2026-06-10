@@ -1,6 +1,6 @@
 # Current Plan: Phase 38 - Lifecycle Action Model Executable Contract
 
-Status: active, 18% complete. Started on 2026-06-09.
+Status: active, 78% complete. Started on 2026-06-09.
 
 Branch: `phase33-testops-failure-hardening`
 
@@ -145,16 +145,16 @@ TestOps/QA replay gate for rejected action evidence
 Goal: prove one non-mutating dry-run action is executable as a dry-run decision
 and still does not mutate the cluster.
 
-Status: pending.
+Status: dev-complete; QA/internal review pending.
 
 Acceptance:
 
 ```text
-[ ] safe_k8s.reinstall_external_iscsi can evaluate allowed in dry-run mode
-[ ] evaluation names preconditions, executor, invariant refs, evidence refs
-[ ] no Helm release, Deployment, PVC/PV, image, iSCSI, multipath, or hostPath
+[x] safe_k8s.reinstall_external_iscsi can evaluate allowed in dry-run mode
+[x] evaluation names preconditions, executor, invariant refs, evidence refs
+[x] no Helm release, Deployment, PVC/PV, image, iSCSI, multipath, or hostPath
       mutation occurs
-[ ] report/dashboard/operator-snapshot agree on the dry-run boundary
+[x] report/dashboard/operator-snapshot agree on the dry-run boundary
 ```
 
 Verification:
@@ -212,9 +212,13 @@ QA strict rerun or replay from clean bundle
   `authority.request_promotion` stays rejected with `policy_disabled`, and the
   rendered evidence names side-effect class, executor, evidence requirement,
   and `mutation_allowed=false`.
+- 78%: D5 dev-complete. A cross-node loopback bundle now proves
+  `safe_k8s.reinstall_external_iscsi` evaluates `allowed` in `dry_run` mode
+  while the operator contract and snapshot keep `mutation_allowed=false`.
+  `summary.txt`, explain text, dashboard `/operator-snapshot.json`, and the
+  operator snapshot agree on the decision and required evidence.
 
 ## Next Step
 
-Add D5 dry-run action evidence for `safe_k8s.reinstall_external_iscsi`: replay a
-cross-node loopback bundle, prove the action evaluates `allowed` in dry-run
-mode, and confirm no Kubernetes/storage mutation is performed or allowed.
+Run the D6 close gate: scoped tests, Helm render/lint, diff hygiene, and QA
+replay/strict validation for rejected and dry-run action evidence.
