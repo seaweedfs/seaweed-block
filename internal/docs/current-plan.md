@@ -1,6 +1,6 @@
 # Current Plan: Phase 39 - Finalizer / Delete Safety
 
-Status: active, 0% complete. Started on 2026-06-10.
+Status: active, 14% complete. Started on 2026-06-10.
 
 Branch: `phase33-testops-failure-hardening`
 
@@ -55,19 +55,19 @@ remove hostPath data, promote/fence/rebuild/failback, or mutate storage.
 Goal: define exactly what the finalizer owns and which facts are required before
 it can release deletion.
 
-Status: pending.
+Status: dev-complete; QA/internal review pending.
 
 Acceptance:
 
 ```text
-[ ] SwBlockVolume finalizer name is defined
-[ ] delete states are defined: not_requested, requested, blocked, releasable,
+[x] SwBlockVolume finalizer name is defined
+[x] delete states are defined: not_requested, requested, blocked, releasable,
       released
-[ ] required facts are defined: volume identity, PVC/PV linkage, cleanup
+[x] required facts are defined: volume identity, PVC/PV linkage, cleanup
       summary, active sessions, multipath/dmsetup state, generated workload
       residue, hostPath residue
-[ ] action contract maps delete release/block to Phase 38 evaluator language
-[ ] non-claims explicitly exclude automatic cleanup and PVC finalizer ownership
+[x] action contract maps delete release/block to Phase 38 evaluator language
+[x] non-claims explicitly exclude automatic cleanup and PVC finalizer ownership
 ```
 
 Verification:
@@ -229,6 +229,10 @@ QA strict rerun from clean lab
 - 0%: Phase 39 opened. Scope is limited to `SwBlockVolume` finalizer/delete
   safety as the first mutating operator path. PVC finalizers, automatic cleanup,
   repair/rebuild/failback, backup/restore, and NVMe remain out of scope.
+- 14%: D1 dev-complete. The delete-safety contract defines the finalizer name,
+  owned mutation scope, required cleanup/identity facts, delete states,
+  non-claims, and a pure decision function that blocks missing/residue evidence
+  and marks clean evidence as releasable without performing mutation.
 
 ## Prerequisites / Risks
 
@@ -241,5 +245,6 @@ QA strict rerun from clean lab
 
 ## Next Step
 
-Start D1: write the delete-safety contract and map finalizer decisions onto the
-Phase 38 action model before implementing finalizer mutation.
+Run D1 review/QA, then start D2: project delete-requested, delete-blocked, and
+delete-releasable states through status surfaces before enabling finalizer
+mutation.
