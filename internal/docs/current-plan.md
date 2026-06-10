@@ -175,8 +175,7 @@ TestOps live host-prereq smoke if lab-safe
 Goal: make the default loopback target boundary visible when a consumer pod
 would run on a different node.
 
-Status: cross-node projection PASS; same-node E2E pending runner/default-path
-clarification.
+Status: PASS. Projection replay and runner-driven E2E both passed.
 
 Acceptance:
 
@@ -203,23 +202,23 @@ from-bundle replay for unsupported-cross-node-loopback-attach.txt
 Goal: prove live node evidence is consistent across user surfaces and close
 Phase 37 without widening the scope.
 
-Status: pending.
+Status: closed.
 
 Acceptance:
 
 ```text
-[ ] live healthy node path agrees across kubectl, CRD status, report,
+[x] live healthy node path agrees across kubectl, CRD status, report,
       dashboard, operator-snapshot, and explain
-[ ] live NotReady/SchedulingDisabled path agrees
-[ ] live CSI registration blocker agrees
-[ ] live image blocker agrees
+[x] live NotReady/SchedulingDisabled path agrees
+[x] live CSI registration blocker agrees
+[x] live image blocker agrees
 [x] host prereq blocker agrees from read-only artifact replay; live host probe
       remains out of scope without a privileged node agent/source
-[ ] loopback cross-node blocker agrees; projection replay is green, runner E2E
-      still must produce the artifact from a live placement attempt
-[ ] no negative node path shows false Ready=True
-[ ] no mutating operator verbs are added
-[ ] finished plan records follow-ups and non-claims
+[x] loopback cross-node blocker agrees; projection replay is green and runner
+      E2E produces the artifact from a live placement attempt
+[x] no negative node path shows false Ready=True
+[x] no mutating operator verbs are added
+[x] finished plan records follow-ups and non-claims
 ```
 
 Verification:
@@ -303,13 +302,20 @@ QA strict rerun from clean lab
   runner. QA's manual raw-Helm default install hit `primary_unavailable`
   (launcher skipped); raw chart defaults are not the release-gated path and the
   chart README now points users to generated `values.day1.yaml`.
+- 100%: D5 runner E2E PASS. QA built `C:\work\swblock.exe` from the shared
+  `sw-test-runner-standalone` tree and ran both scenarios from a clean lab:
+  `same-node-alpha-attach-chain.yaml` passed 47/47 with writer/reader verified
+  and loopback accepted on the same node; `same-node-alpha-attach-negative-chain.yaml`
+  passed 34/34 and produced `unsupported-cross-node-loopback-attach.txt` live.
+  Replaying the live bundle projected `publish_target_loopback_cross_node`
+  across report, explain, operator-snapshot, and dashboard with no false
+  `Ready=True`. Phase 37 is closed on 2026-06-09.
 
 ## Next Step
 
-Run the two D5 YAML scenarios from a clean lab with the `swblock` runner:
-`same-node-alpha-attach-chain.yaml` and
-`same-node-alpha-attach-negative-chain.yaml`. D6 can close only after the
-same-node path proves writer/reader success and the negative path produces
-`unsupported-cross-node-loopback-attach.txt` from a live placement attempt. Do
-not add finalizers, cleanup automation, rebuild/failback, backup/restore, or
-NVMe ANA parity in this phase.
+Start the next phase from the Phase 37 foundation: define the lifecycle action
+contract before adding mutating operator behavior. The next slice should produce
+an executable dry-run action contract and rejected-action gates, then use that
+contract to add finalizer/delete safety as the first narrow mutating path. Do
+not jump directly to rebuild/failback, backup/restore, or broader NVMe ANA
+parity until action preconditions, execution authority, and evidence are gated.

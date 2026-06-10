@@ -77,6 +77,9 @@ Seaweed Block can already demonstrate a narrow Kubernetes block-storage loop:
 - Restart persistence for supported hostPath gates.
 - Read-only CLI/report/dashboard/support-bundle flows.
 - Read-only CRD status and Events for `SwBlockCluster` and `SwBlockVolume`.
+- Live node evidence for Kubernetes Ready/SchedulingDisabled, CSI registration,
+  CSI image-pull blockers, host-prereq evidence replay, and loopback
+  cross-node attach blockers.
 - Negative-first status: blocked, stale, unreachable, or corrupt evidence must
   not become false `Ready=True`.
 - Cleanup verification for Kubernetes, iSCSI, multipath, process, and hostPath
@@ -89,14 +92,12 @@ preserve that model rather than add isolated scripts or separate status systems.
 
 Recommended order from here:
 
-1. Harden live node evidence so CRD status reflects real Kubernetes node,
-   image, CSI-driver, iSCSI/multipath, and loopback/cross-node blocker state.
-2. Define and test the lifecycle action model before adding mutating operator
+1. Define and test the lifecycle action model before adding mutating operator
    behavior. This must include executable dry-run and rejected-action gates, not
    only a document.
-3. Add finalizer/delete safety as the first mutating operator slice.
-4. Add upgrade/rollback drift status before upgrade execution.
-5. Add returned-replica rebuild/failback, backup/restore, and NVMe ANA parity
+2. Add finalizer/delete safety as the first mutating operator slice.
+3. Add upgrade/rollback drift status before upgrade execution.
+4. Add returned-replica rebuild/failback, backup/restore, and NVMe ANA parity
    only after the status/action model stays stable.
 
 ## Future Non-Kubernetes Adapters
