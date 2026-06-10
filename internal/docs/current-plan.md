@@ -1,224 +1,183 @@
-# Current Plan: Phase 37 - Live Node Evidence Hardening
+# Current Plan: Phase 38 - Lifecycle Action Model Executable Contract
 
-Status: active, 84% complete. Started on 2026-06-06.
+Status: active, 18% complete. Started on 2026-06-09.
 
 Branch: `phase33-testops-failure-hardening`
 
-Previous phase: Phase 36 is closed in
-`internal/docs/finished-plans/phase36_finishedplan_productized_operations_actionability.md`.
+Previous phase: Phase 37 is closed in
+`internal/docs/finished-plans/phase37_finishedplan_live_node_evidence_hardening.md`.
 
 ## Product Goal
 
-Make node readiness blockers real, not replay-only, without expanding into a
-general node-operations phase.
+Turn safe next-step/action hints into an executable contract before adding
+mutating operator behavior.
 
-Phase 36 proved that read-only status surfaces can agree. Phase 37 makes the
-node facts behind that status trustworthy enough to support future lifecycle
-actions.
+Phase 35-37 made status trustworthy and visible. Phase 38 makes action
+eligibility explicit: a future executor must be able to explain why an action is
+allowed as read-only/dry-run, rejected for missing facts, or blocked because it
+would mutate storage/authority without a product gate.
 
 The hard exit statement:
 
 ```text
-kubectl, CRD status, report, dashboard, and ops explain must agree on node
-readiness and node blockers from live evidence, not replay-only bundles or
-helper summaries.
+Every surfaced action has a typed contract, required facts, policy gate,
+executor, invariant/evidence refs, and a testable allow/reject decision. No
+operator mutation is added in this phase.
 ```
 
 ## Scope Contract
 
 | In | Out |
 |---|---|
-| Kubernetes Node Ready / SchedulingDisabled evidence | mutating operator lifecycle |
-| CSI node pod readiness evidence | finalizers/delete safety |
-| CSIDriver and per-node CSI plugin registration evidence | automatic cleanup |
-| required image presence or image-pull status | repair/rebuild/failback |
-| iSCSI and multipath prerequisite evidence | backup/snapshot/restore |
-| loopback publish-target cross-node blocker | NVMe ANA parity |
-| CRD/report/dashboard/explain/Event agreement | broad node-health monitoring |
-| TestOps live negative-node gates | performance/SLO claims |
+| action registry / typed contracts | finalizers/delete safety |
+| executable allow/reject evaluator | automatic cleanup |
+| dry-run action proof | repair/rebuild/failback |
+| rejected-action proof | backup/snapshot/restore |
+| CRD/report/dashboard/operator-snapshot agreement | NVMe ANA parity |
+| TestOps or unit/component action gates | new mutating RBAC |
+| QA assignment for strict action validation | dashboard mutation buttons |
 
 Allowed implementation rule:
 
 ```text
-Phase 37 may read Kubernetes, blockmaster observation, node/pod/image facts,
-and host prerequisite evidence.
+Phase 38 may evaluate actions and emit read-only/dry-run/scripted status.
 
-Phase 37 may write CRD .status and Kubernetes Events through the existing
-status-only controller.
-
-Phase 37 must not mutate workloads, PVCs, PVs, storage, iSCSI sessions,
-multipath maps, hostPath data, Helm releases, image state, or CRD spec.
+Phase 38 must not patch spec, delete objects, run cleanup, import images,
+change Helm releases, promote/fence/rebuild/failback, or mutate storage.
 ```
 
-## D1: Live Node Evidence Contract
+## D1: Action Contract Inventory
 
-Goal: define the exact live node facts and stable reason codes before code
-changes.
-
-Status: complete.
-
-Required facts:
-
-- Kubernetes node Ready / SchedulingDisabled.
-- CSI node pod Ready and image-pull state.
-- CSIDriver exists.
-- per-node CSI plugin registration exists in `CSINode`.
-- required `sw-block` and `sw-block-csi` image readiness or image-pull blocker.
-- iSCSI prerequisite evidence.
-- multipath prerequisite evidence.
-- loopback publish-target cross-node risk.
-
-Acceptance:
-
-```text
-[x] each fact has one truth source and one projection path
-[x] reason codes are named for node_not_ready, node_scheduling_disabled,
-      csi_node_pod_not_ready, csi_driver_not_registered,
-      image_missing_on_node, iscsi_prereq_missing,
-      multipath_prereq_missing, publish_target_loopback_cross_node
-[x] contract states which fields are stable/provisional/test-only
-[x] contract preserves read-only boundary
-[x] focused tests fail first for any missing projection field
-```
-
-Verification:
-
-```text
-go test ./core/ops ./cmd/sw-block ./cmd/blockcsi
-internal review against control-structure-effectiveness-review.md
-```
-
-## D2: Kubernetes Node And CSI Registration Evidence
-
-Goal: populate live node readiness from Kubernetes API facts, not replay-only
-fixtures.
+Goal: pin the current action vocabulary and identify which actions are
+read-only, dry-run, scripted, disabled, or future-mutating.
 
 Status: complete.
 
 Acceptance:
 
 ```text
-[x] Ready node projects node_ready
-[x] SchedulingDisabled node projects node_scheduling_disabled
-[x] NotReady node projects node_not_ready
-[x] missing CSIDriver projects csi_driver_not_registered
-[x] missing per-node CSINode driver registration projects csi_driver_not_registered
-[x] CSI node pod image-pull or not-ready state projects csi_node_pod_not_ready
-[x] CRD status, report, dashboard, and operator-snapshot agree in live TestOps gate
-[x] no workload/storage mutation verbs are added
+[x] every action type has owner executor
+[x] every action type has side-effect class
+[x] every action type has required facts
+[x] every non-observe action has policy gate
+[x] no action has mutation_allowed=true
 ```
 
 Verification:
 
 ```text
-go test ./core/ops ./cmd/sw-block ./cmd/blockcsi
-helm lint charts/seaweed-block
-TestOps live node-readiness gate
-TestOps live CSI-registration blocker gate
+go test ./core/ops
 ```
 
-## D3: Image Presence / Image Pull Evidence
+## D2: Executable Allow/Reject Evaluator
 
-Goal: make local-image and published-image node blockers visible from live
-evidence.
+Goal: add a code-level evaluator that turns action contracts plus current facts
+into an allow/reject decision without performing side effects.
 
-Status: complete.
+Status: dev-complete; QA/internal review pending.
 
 Acceptance:
 
 ```text
-[x] missing required image on a selected node projects image_missing_on_node
-[x] CSI image-pull failure on csi-node pod projects image_missing_on_node or
-      csi_node_pod_not_ready with stable evidence
-[x] build-host local k3s import evidence is checked before local-image gates
-      claim node image readiness
-[x] report/dashboard/explain name the same node blocker
-[x] no image import or cleanup is executed by the operator
+[x] dry-run action with required facts returns allowed
+[x] missing required facts returns rejected with missing_facts
+[x] disabled authority mutation returns rejected
+[x] unknown action returns rejected
+[x] evaluator output includes mode, side-effect class, executor,
+      invariant refs, and evidence requirement
 ```
 
 Verification:
 
 ```text
-go test ./scripts ./core/ops ./cmd/sw-block
-TestOps live missing-image node gate
-QA rerun against local-image path that previously masked missing CSI image
+go test ./core/ops
 ```
 
-## D4: Host Prerequisite Evidence
+## D3: Surface Agreement For Action Decisions
 
-Goal: project iSCSI and multipath prerequisites into node readiness without
-performing host changes.
+Goal: ensure report, operator-snapshot, CRD status, and dashboard do not diverge
+on the action contract.
 
-Status: projection PASS; live host smoke optional/pending.
+Status: pending.
 
 Acceptance:
 
 ```text
-[ ] healthy iSCSI prerequisite projects ready evidence
-[x] missing iSCSI prerequisite projects iscsi_prereq_missing
-[ ] healthy multipath prerequisite projects ready evidence
-[x] missing multipath prerequisite projects multipath_prereq_missing
-[x] status points to safe scripted verification, not automatic repair
-[x] CRD/report/dashboard/explain agree
+[ ] operator-snapshot exposes the same action fields as the evaluator contract
+[ ] SwBlockVolume.status.allowedActions remains camelCase and schema-valid
+[ ] blocked path still has dry-run/read-only actions only
+[ ] no surface shows mutationAllowed=true
+[ ] action reasons/evidence refs survive from-bundle replay
 ```
 
 Verification:
 
 ```text
 go test ./core/ops ./cmd/sw-block
-TestOps host-prereq replay gate
-TestOps live host-prereq smoke if lab-safe
+server-side dry-run or live CRD status patch check
 ```
 
-## D5: Loopback Publish Target Cross-Node Blocker
+## D4: Rejected-Action Gate
 
-Goal: make the default loopback target boundary visible when a consumer pod
-would run on a different node.
+Goal: prove unsafe or underspecified actions fail closed before any executor can
+run.
 
-Status: PASS. Projection replay and runner-driven E2E both passed.
+Status: pending.
 
 Acceptance:
 
 ```text
-[x] single-node / same-node loopback target remains allowed
-[x] multi-node consumer placement with loopback publish target projects
-      publish_target_loopback_cross_node
-[x] status is blocked or unknown as appropriate, never false Ready=True
-[x] docs name loopback as single-node/local-consumer only
-[x] CRD/report/dashboard/explain agree
+[ ] authority.request_promotion is rejected under current policy
+[ ] action with missing required facts is rejected with a stable reason
+[ ] rejected action is visible as not executable, not silently omitted
+[ ] Kubernetes RBAC remains status/events/read-only only
+```
+
+Verification:
+
+```text
+go test ./core/ops
+TestOps/QA replay gate for rejected action evidence
+```
+
+## D5: Dry-Run Action Gate
+
+Goal: prove one non-mutating dry-run action is executable as a dry-run decision
+and still does not mutate the cluster.
+
+Status: pending.
+
+Acceptance:
+
+```text
+[ ] safe_k8s.reinstall_external_iscsi can evaluate allowed in dry-run mode
+[ ] evaluation names preconditions, executor, invariant refs, evidence refs
+[ ] no Helm release, Deployment, PVC/PV, image, iSCSI, multipath, or hostPath
+      mutation occurs
+[ ] report/dashboard/operator-snapshot agree on the dry-run boundary
 ```
 
 Verification:
 
 ```text
 go test ./core/ops ./cmd/sw-block
-TestOps same-node-alpha-attach-chain.yaml
-TestOps same-node-alpha-attach-negative-chain.yaml
-from-bundle replay for unsupported-cross-node-loopback-attach.txt
+TestOps loopback-cross-node dry-run action replay
 ```
 
-## D6: Surface Agreement And Close
+## D6: Close Gate
 
-Goal: prove live node evidence is consistent across user surfaces and close
-Phase 37 without widening the scope.
+Goal: close the action model as a real product foundation for Phase 39
+finalizer/delete safety.
 
-Status: closed.
+Status: pending.
 
 Acceptance:
 
 ```text
-[x] live healthy node path agrees across kubectl, CRD status, report,
-      dashboard, operator-snapshot, and explain
-[x] live NotReady/SchedulingDisabled path agrees
-[x] live CSI registration blocker agrees
-[x] live image blocker agrees
-[x] host prereq blocker agrees from read-only artifact replay; live host probe
-      remains out of scope without a privileged node agent/source
-[x] loopback cross-node blocker agrees; projection replay is green and runner
-      E2E produces the artifact from a live placement attempt
-[x] no negative node path shows false Ready=True
-[x] no mutating operator verbs are added
-[x] finished plan records follow-ups and non-claims
+[ ] D1-D5 pass
+[ ] no new mutating RBAC is introduced
+[ ] finished plan records non-claims and follow-ups
+[ ] QA validates dry-run and rejected-action evidence
 ```
 
 Verification:
@@ -230,92 +189,22 @@ helm lint charts/seaweed-block
 helm template sw-block charts/seaweed-block --namespace kube-system --include-crds \
   --set operatorStatus.create=true --set operatorStatus.dryRun=false
 git diff --check
-QA strict rerun from clean lab
+QA strict rerun or replay from clean bundle
 ```
 
 ## Current Progress
 
-- 0%: Phase 37 opened. Scope is live node evidence hardening only:
-  Kubernetes node readiness, CSI registration, image readiness, iSCSI/multipath
-  prerequisites, loopback cross-node blocker, and cross-surface agreement.
-- 16%: D1 live node evidence contract complete. `core/ops` now pins the
-  passive read-only node fact contract and reason vocabulary for Kubernetes
-  Ready/SchedulingDisabled, CSI pod/driver registration, image readiness,
-  iSCSI/multipath prerequisites, and loopback cross-node blockers.
-- 28%: D2 dev-complete. `sw-block ops operator-status` enriches live master
-  evidence from in-cluster read-only Kubernetes facts for Nodes, CSI node pods,
-  CSIDriver, and CSINode driver registration. Chart RBAC adds only
-  get/list/watch for those resources. Live QA remains pending.
-- 30%: D2 QA blocker reworked. Live node enrichment now emits only CRD-enum-safe
-  `Ready`/`Blocked` condition types with node reason codes, and enrichment moved
-  into the shared live observation loader so report/dashboard/explain can see
-  the same in-cluster Kubernetes node facts as operator-status.
-- 36%: D2 QA PASS on `052b321`. Healthy, cordoned, NotReady, and missing CSI
-  registration states now surface from live evidence as `node_ready`,
-  `node_scheduling_disabled`, `node_not_ready`, and
-  `csi_driver_not_registered` without false `node_ready`. CRD, report,
-  dashboard, and operator-snapshot agree. Follow-ups: collapse duplicate Ready
-  conditions per node and add a server-side-dry-run/envtest status payload
-  regression.
-- 48%: D3 dev-complete. Live Kubernetes CSI node pod specs/status now feed
-  required image and image-pull evidence into node readiness. CSI pod
-  `ImagePullBackOff`/`ErrImagePull` projects `image_missing_on_node` as the
-  root cause instead of masking it behind CSI registration or pod-not-ready
-  symptoms. Unit coverage proves the CRD-safe projection and read-only
-  operator boundary. Live QA remains pending.
-- 52%: D3 QA partial reworked. QA proved the authoritative CRD path reports
-  `image_missing_on_node`, but found report/dashboard/explain defaulting node
-  enrichment to the app namespace instead of the Helm/control-plane namespace.
-  Live node enrichment now reads CSI pods from `SW_BLOCK_HELM_NAMESPACE`
-  (default `kube-system`) while PVC/app inventory still uses `--namespace`.
-  `ErrImageNeverPull` is also treated as image-pull evidence for local-image
-  paths. QA rerun remains pending.
-- 60%: D3 QA PASS on `43d7786`. Missing CSI image now surfaces live as
-  `image_missing_on_node` across CRD, report, dashboard, and explain using the
-  default app namespace. Both pull modes are covered:
-  `ImagePullBackOff`/`ErrImagePull` and `ErrImageNeverPull`. This closes the
-  local-image masking gap that previously appeared as CSI registration or pod
-  readiness symptoms.
-- 68%: D4 projection dev-complete. Node conditions carrying
-  `iscsi_prereq_missing` or `multipath_prereq_missing` now block node readiness
-  consistently across CRD status, report summary, dashboard JSON, and
-  operator-snapshot. This slice deliberately does not add privileged host
-  probing; live host fact collection still needs a safe source such as a
-  preflight artifact, CSI-node-reported fact, or future node agent.
-- 76%: D4 dev-complete. Support bundles and failure snapshots now emit a
-  read-only `host/host-prereq-summary.txt` artifact with iSCSI/multipath
-  prerequisite command evidence. Bundle replay projects missing prerequisites
-  into node blockers and safe next steps point to scripted bundle collection,
-  never automatic repair. This is an artifact/preflight source, not privileged
-  operator probing. QA validation remains pending.
-- 84%: D5 dev-complete. Existing same-node negative evidence
-  `unsupported-cross-node-loopback-attach.txt` now replays into
-  `publish_target_loopback_cross_node` across managed-volume status, summary,
-  operator-snapshot, and dashboard. Same-node loopback remains allowed. The
-  projected next step is a dry-run external-iSCSI reinstall suggestion, not an
-  operator mutation. QA validation remains pending.
-- 90%: D4/D5 QA replay PASS on `f6a8378`. Host prereq artifacts project
-  `iscsi_prereq_missing`/`multipath_prereq_missing`, and cross-node loopback
-  artifacts project `publish_target_loopback_cross_node` across report,
-  operator-snapshot, dashboard, and explain with read-only/dry-run next steps.
-  Remaining close gap is live same-node/negative E2E through the YAML `swblock`
-  runner. QA's manual raw-Helm default install hit `primary_unavailable`
-  (launcher skipped); raw chart defaults are not the release-gated path and the
-  chart README now points users to generated `values.day1.yaml`.
-- 100%: D5 runner E2E PASS. QA built `C:\work\swblock.exe` from the shared
-  `sw-test-runner-standalone` tree and ran both scenarios from a clean lab:
-  `same-node-alpha-attach-chain.yaml` passed 47/47 with writer/reader verified
-  and loopback accepted on the same node; `same-node-alpha-attach-negative-chain.yaml`
-  passed 34/34 and produced `unsupported-cross-node-loopback-attach.txt` live.
-  Replaying the live bundle projected `publish_target_loopback_cross_node`
-  across report, explain, operator-snapshot, and dashboard with no false
-  `Ready=True`. Phase 37 is closed on 2026-06-09.
+- 0%: Phase 38 opened. Scope is action eligibility only; no operator mutation.
+- 18%: D1/D2 dev-complete. `core/ops` now has an executable
+  `EvaluateManagedVolumeAction` contract that allows dry-run actions only when
+  required facts exist, rejects missing facts with `missing_required_facts`,
+  rejects disabled authority mutation with `policy_disabled`, and rejects
+  unknown actions. Unit tests cover allowed dry-run, missing facts, disabled
+  authority mutation, and unknown action rejection.
 
 ## Next Step
 
-Start the next phase from the Phase 37 foundation: define the lifecycle action
-contract before adding mutating operator behavior. The next slice should produce
-an executable dry-run action contract and rejected-action gates, then use that
-contract to add finalizer/delete safety as the first narrow mutating path. Do
-not jump directly to rebuild/failback, backup/restore, or broader NVMe ANA
-parity until action preconditions, execution authority, and evidence are gated.
+Wire the evaluator into one user-visible surface without making actions
+mutating. Recommended next slice: expose action evaluation decisions in
+operator-snapshot/report for the existing cross-node loopback dry-run action,
+then add a rejected-action replay gate for `authority.request_promotion`.
