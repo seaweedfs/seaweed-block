@@ -1,6 +1,6 @@
 # Current Plan: Phase 39 - Finalizer / Delete Safety
 
-Status: active, 56% complete. Started on 2026-06-10.
+Status: active, 70% complete. Started on 2026-06-10.
 
 Branch: `phase33-testops-failure-hardening`
 
@@ -154,15 +154,15 @@ live CRD delete attempt if lab is available
 
 Goal: prove deletion completes only when cleanup evidence is clean.
 
-Status: pending.
+Status: component-complete; QA/live validation pending.
 
 Acceptance:
 
 ```text
-[ ] deleting SwBlockVolume with clean evidence removes finalizer
+[x] deleting SwBlockVolume with clean evidence removes finalizer
 [ ] object deletion completes
-[ ] final status/event records release decision before deletion when possible
-[ ] repeated reconcile is idempotent
+[x] final status/event records release decision before deletion when possible
+[x] repeated reconcile is idempotent
 [ ] final cleanup verifier returns cleanup_status=ok
 ```
 
@@ -252,6 +252,11 @@ QA strict rerun from clean lab
   the SwBlockVolume finalizer, writes blocked delete-safety status, emits no
   release event, and never calls the finalizer release path. Live delete-attempt
   validation remains for QA.
+- 70%: D5 component gate complete. A releasable delete-safety decision
+  (`decision=allowed`, `state=releasable`, `finalizerReleaseAllowed=true`)
+  removes the SwBlockVolume finalizer, emits one release event, and is
+  idempotent on repeated reconcile. Live object deletion completion and final
+  cleanup verifier remain for QA.
 
 ## Prerequisites / Risks
 
@@ -264,5 +269,5 @@ QA strict rerun from clean lab
 
 ## Next Step
 
-Start D5: prove clean delete-safety evidence releases the finalizer and keeps
-cleanup residue at zero, then hand D4/D5 to QA for live validation.
+Prepare the D4/D5 QA assignment for live blocked-delete and clean-delete
+validation, including final cleanup verification and `tp01` lab-health caveat.

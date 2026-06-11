@@ -661,6 +661,23 @@ func TestOperatorStatusReconcilerReleasesFinalizerOnlyWhenReleasable(t *testing.
 	if events.countByReason(ReasonDeleteFinalizerReleased) != 1 {
 		t.Fatalf("missing finalizer released event: %+v", events.events)
 	}
+	result, err = (OperatorStatusReconciler{
+		Namespace:   "kube-system",
+		ClusterName: "sw-block",
+		Source:      source,
+		Writer:      writer,
+		EventSink:   events,
+		Finalizers:  finalizers,
+	}).Reconcile(context.Background())
+	if err != nil {
+		t.Fatalf("second reconcile: %v", err)
+	}
+	if result.FinalizerPatchCount != 0 {
+		t.Fatalf("second reconcile finalizer patches=%d", result.FinalizerPatchCount)
+	}
+	if events.countByReason(ReasonDeleteFinalizerReleased) != 1 {
+		t.Fatalf("duplicate finalizer release event: %+v", events.events)
+	}
 }
 
 func TestOperatorStatusReconcilerHoldsFinalizerWhenDeleteSafetyBlocked(t *testing.T) {
