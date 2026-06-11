@@ -589,7 +589,7 @@ func TestOperatorStatusReconcilerEnsuresVolumeFinalizer(t *testing.T) {
 	}}
 	writer := &fakeOperatorStatusWriter{}
 	events := &fakeOperatorEventSink{}
-	finalizers := &fakeOperatorFinalizerClient{}
+	finalizers := newFakeOperatorFinalizerClient()
 	result, err := (OperatorStatusReconciler{
 		Namespace:   "kube-system",
 		ClusterName: "sw-block",
@@ -636,7 +636,8 @@ func TestOperatorStatusReconcilerReleasesFinalizerOnlyWhenReleasable(t *testing.
 	}}
 	writer := &fakeOperatorStatusWriter{}
 	events := &fakeOperatorEventSink{}
-	finalizers := &fakeOperatorFinalizerClient{}
+	finalizers := newFakeOperatorFinalizerClient()
+	finalizers.finalizers["kube-system/release-pvc"] = []string{SwBlockVolumeFinalizerName}
 	result, err := (OperatorStatusReconciler{
 		Namespace:   "kube-system",
 		ClusterName: "sw-block",
@@ -659,6 +660,88 @@ func TestOperatorStatusReconcilerReleasesFinalizerOnlyWhenReleasable(t *testing.
 	}
 	if events.countByReason(ReasonDeleteFinalizerReleased) != 1 {
 		t.Fatalf("missing finalizer released event: %+v", events.events)
+	}
+}
+
+func TestOperatorStatusReconcilerHoldsFinalizerWhenDeleteSafetyBlocked(t *testing.T) {
+	source := fakeOperatorStatusSource{cluster: ClusterEvidence{
+		SchemaVersion: ObservationSchemaVersion,
+		CapturedAt:    time.Date(2026, 6, 10, 12, 10, 0, 0, time.UTC),
+		Status:        ObservationStatusBlocked,
+		ManagedVolumes: []ManagedVolumeProjection{{
+			VolumeID:   "pvc-held",
+			PVCName:    "held-pvc",
+			Status:     ManagedVolumeStatusBlocked,
+			ReasonCode: "iscsi_node_records_present",
+			Conditions: []ObservationCondition{{
+				Type:     ConditionCleanupRequired,
+				Status:   "True",
+				Reason:   "iscsi_node_records_present",
+				Severity: "warning",
+			}},
+			DeleteSafety: &SwBlockVolumeDeleteSafetyDecision{
+				ActionType:              SwBlockVolumeDeleteActionReleaseFinalizer,
+				Decision:                ManagedVolumeActionDecisionRejected,
+				State:                   DeleteSafetyStateBlocked,
+				Reason:                  "iscsi_node_records_present",
+				FinalizerReleaseAllowed: false,
+				SafeNextAction:          ManagedVolumeActionVerifyCleanup,
+				EvidenceRefs:            []string{"cleanup-summary.txt"},
+			},
+		}},
+	}}
+	writer := &fakeOperatorStatusWriter{}
+	events := &fakeOperatorEventSink{}
+	finalizers := newFakeOperatorFinalizerClient()
+	result, err := (OperatorStatusReconciler{
+		Namespace:   "kube-system",
+		ClusterName: "sw-block",
+		Source:      source,
+		Writer:      writer,
+		EventSink:   events,
+		Finalizers:  finalizers,
+	}).Reconcile(context.Background())
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if result.FinalizerPatchCount != 1 {
+		t.Fatalf("finalizer patches=%d", result.FinalizerPatchCount)
+	}
+	if len(finalizers.ensureCalls) != 1 || finalizers.ensureCalls[0].ref.Name != "held-pvc" {
+		t.Fatalf("ensure calls=%+v", finalizers.ensureCalls)
+	}
+	if len(finalizers.releaseCalls) != 0 {
+		t.Fatalf("blocked delete must not release finalizer: %+v", finalizers.releaseCalls)
+	}
+	if len(writer.volumes) != 1 || writer.volumes[0].status.DeleteSafety == nil {
+		t.Fatalf("volume status writes=%+v", writer.volumes)
+	}
+	if writer.volumes[0].status.DeleteSafety.State != DeleteSafetyStateBlocked ||
+		writer.volumes[0].status.DeleteSafety.Decision != ManagedVolumeActionDecisionRejected {
+		t.Fatalf("delete safety status=%+v", writer.volumes[0].status.DeleteSafety)
+	}
+	if events.countByReason(ReasonDeleteFinalizerAdded) != 1 {
+		t.Fatalf("missing finalizer held/added event: %+v", events.events)
+	}
+	if events.countByReason(ReasonDeleteFinalizerReleased) != 0 {
+		t.Fatalf("blocked delete emitted release event: %+v", events.events)
+	}
+	result, err = (OperatorStatusReconciler{
+		Namespace:   "kube-system",
+		ClusterName: "sw-block",
+		Source:      source,
+		Writer:      writer,
+		EventSink:   events,
+		Finalizers:  finalizers,
+	}).Reconcile(context.Background())
+	if err != nil {
+		t.Fatalf("second reconcile: %v", err)
+	}
+	if result.FinalizerPatchCount != 0 {
+		t.Fatalf("second reconcile finalizer patches=%d", result.FinalizerPatchCount)
+	}
+	if events.countByReason(ReasonDeleteFinalizerAdded) != 1 {
+		t.Fatalf("duplicate finalizer added event: %+v", events.events)
 	}
 }
 
@@ -713,18 +796,40 @@ type fakeFinalizerCall struct {
 }
 
 type fakeOperatorFinalizerClient struct {
+	finalizers   map[string][]string
 	ensureCalls  []fakeFinalizerCall
 	releaseCalls []fakeFinalizerCall
 }
 
+func newFakeOperatorFinalizerClient() *fakeOperatorFinalizerClient {
+	return &fakeOperatorFinalizerClient{finalizers: map[string][]string{}}
+}
+
 func (f *fakeOperatorFinalizerClient) EnsureVolumeFinalizer(_ context.Context, ref OperatorObjectRef, finalizer string) (bool, error) {
 	f.ensureCalls = append(f.ensureCalls, fakeFinalizerCall{ref: ref, finalizer: finalizer})
+	key := ref.Namespace + "/" + ref.Name
+	if stringSliceContains(f.finalizers[key], finalizer) {
+		return false, nil
+	}
+	f.finalizers[key] = append(f.finalizers[key], finalizer)
 	return true, nil
 }
 
 func (f *fakeOperatorFinalizerClient) ReleaseVolumeFinalizer(_ context.Context, ref OperatorObjectRef, finalizer string) (bool, error) {
 	f.releaseCalls = append(f.releaseCalls, fakeFinalizerCall{ref: ref, finalizer: finalizer})
-	return true, nil
+	key := ref.Namespace + "/" + ref.Name
+	existing := f.finalizers[key]
+	next := existing[:0]
+	removed := false
+	for _, value := range existing {
+		if value == finalizer {
+			removed = true
+			continue
+		}
+		next = append(next, value)
+	}
+	f.finalizers[key] = next
+	return removed, nil
 }
 
 type fakeOperatorEventSink struct {

@@ -1,6 +1,6 @@
 # Current Plan: Phase 39 - Finalizer / Delete Safety
 
-Status: active, 42% complete. Started on 2026-06-10.
+Status: active, 56% complete. Started on 2026-06-10.
 
 Branch: `phase33-testops-failure-hardening`
 
@@ -131,16 +131,16 @@ kubectl auth can-i boundary sweep
 
 Goal: prove deletion is held when residue or insufficient evidence exists.
 
-Status: pending.
+Status: dev-complete; QA/live validation pending.
 
 Acceptance:
 
 ```text
-[ ] deleting SwBlockVolume with active/residue evidence keeps finalizer
-[ ] status shows blocked or cleanup_required with stable reason
-[ ] safe next step is observe.verify_cleanup or collect bundle, mutation=false
-[ ] no Ready=True or released event appears while blocked
-[ ] repeated reconcile does not add duplicate finalizers or unbounded Events
+[x] deleting SwBlockVolume with active/residue evidence keeps finalizer
+[x] status shows blocked or cleanup_required with stable reason
+[x] safe next step is observe.verify_cleanup or collect bundle, mutation=false
+[x] no Ready=True or released event appears while blocked
+[x] repeated reconcile does not add duplicate finalizers or unbounded Events
 ```
 
 Verification:
@@ -247,6 +247,11 @@ QA strict rerun from clean lab
   `deleteSafety.finalizerReleaseAllowed=true`. RBAC is widened only to
   `swblockvolumes/finalizers`; no PVC/PV/workload/storage/host mutation is
   added.
+- 56%: D4 component gate dev-complete. A blocked delete-safety decision
+  (`decision=rejected`, `state=blocked`, cleanup residue reason) keeps/ensures
+  the SwBlockVolume finalizer, writes blocked delete-safety status, emits no
+  release event, and never calls the finalizer release path. Live delete-attempt
+  validation remains for QA.
 
 ## Prerequisites / Risks
 
@@ -259,5 +264,5 @@ QA strict rerun from clean lab
 
 ## Next Step
 
-Run D1-D3 review, then start D4: prove deletion is held when cleanup evidence
-is missing or residue remains.
+Start D5: prove clean delete-safety evidence releases the finalizer and keeps
+cleanup residue at zero, then hand D4/D5 to QA for live validation.
