@@ -1,6 +1,6 @@
 # Current Plan: Phase 39 - Finalizer / Delete Safety
 
-Status: active, 28% complete. Started on 2026-06-10.
+Status: active, 42% complete. Started on 2026-06-10.
 
 Branch: `phase33-testops-failure-hardening`
 
@@ -106,17 +106,17 @@ from-bundle replay for clean and residue delete evidence
 Goal: add the minimum RBAC and code path for finalizer metadata mutation, with
 no storage/workload mutation.
 
-Status: pending.
+Status: dev-complete; QA/internal review pending.
 
 Acceptance:
 
 ```text
-[ ] operator can patch SwBlockVolume metadata.finalizers only
-[ ] operator cannot patch spec, PVC/PV, pods, deployments, storageclasses,
+[x] operator can patch SwBlockVolume metadata.finalizers only
+[x] operator cannot patch spec, PVC/PV, pods, deployments, storageclasses,
       secrets, nodes, iSCSI, multipath, hostPath, or Helm resources
-[ ] finalizer is added idempotently to managed SwBlockVolume objects
-[ ] finalizer removal requires a releasable delete decision
-[ ] all finalizer decisions emit status and Events
+[x] finalizer is added idempotently to managed SwBlockVolume objects
+[x] finalizer removal requires a releasable delete decision
+[x] all finalizer decisions emit status and Events
 ```
 
 Verification:
@@ -240,6 +240,13 @@ QA strict rerun from clean lab
   releasable/allowed without falsely blocking the volume. Summary, explain,
   operator-snapshot, dashboard JSON, and `SwBlockVolume.status.deleteSafety`
   use the same vocabulary.
+- 42%: D3 dev-complete. Write-mode operator-status now has an optional
+  finalizer client. It reads existing `SwBlockVolume` finalizers, patches only
+  the `/finalizers` subresource, preserves unrelated finalizers, adds the
+  Seaweed Block finalizer idempotently, and releases it only when
+  `deleteSafety.finalizerReleaseAllowed=true`. RBAC is widened only to
+  `swblockvolumes/finalizers`; no PVC/PV/workload/storage/host mutation is
+  added.
 
 ## Prerequisites / Risks
 
@@ -252,5 +259,5 @@ QA strict rerun from clean lab
 
 ## Next Step
 
-Run D1/D2 review, then start D3: add the minimum finalizer metadata mutation
-boundary and RBAC without storage/workload mutation.
+Run D1-D3 review, then start D4: prove deletion is held when cleanup evidence
+is missing or residue remains.

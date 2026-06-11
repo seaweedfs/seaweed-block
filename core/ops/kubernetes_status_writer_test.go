@@ -189,6 +189,71 @@ func TestKubernetesStatusClientCreatesCoreEvents(t *testing.T) {
 	}
 }
 
+func TestKubernetesStatusClientEnsuresAndReleasesVolumeFinalizer(t *testing.T) {
+	var patchBodies []map[string]any
+	currentFinalizers := []string{"example.com/keep"}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/apis/block.seaweedfs.com/v1alpha1/namespaces/kube-system/swblockvolumes/demo-pvc":
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"metadata": map[string]any{"finalizers": currentFinalizers},
+			})
+		case r.Method == http.MethodPatch && r.URL.Path == "/apis/block.seaweedfs.com/v1alpha1/namespaces/kube-system/swblockvolumes/demo-pvc/finalizers":
+			var body map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatalf("decode patch: %v", err)
+			}
+			patchBodies = append(patchBodies, body)
+			metadata := body["metadata"].(map[string]any)
+			rawFinalizers := metadata["finalizers"].([]any)
+			currentFinalizers = nil
+			for _, value := range rawFinalizers {
+				currentFinalizers = append(currentFinalizers, value.(string))
+			}
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"ok":true}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client := &KubernetesStatusClient{BaseURL: server.URL, HTTPClient: server.Client()}
+	ref := OperatorObjectRef{Namespace: "kube-system", Name: "demo-pvc"}
+	patched, err := client.EnsureVolumeFinalizer(context.Background(), ref, SwBlockVolumeFinalizerName)
+	if err != nil || !patched {
+		t.Fatalf("ensure patched=%t err=%v", patched, err)
+	}
+	if len(currentFinalizers) != 2 ||
+		currentFinalizers[0] != "example.com/keep" ||
+		currentFinalizers[1] != SwBlockVolumeFinalizerName {
+		t.Fatalf("finalizers after ensure=%+v", currentFinalizers)
+	}
+	patched, err = client.EnsureVolumeFinalizer(context.Background(), ref, SwBlockVolumeFinalizerName)
+	if err != nil || patched {
+		t.Fatalf("second ensure patched=%t err=%v", patched, err)
+	}
+	patched, err = client.ReleaseVolumeFinalizer(context.Background(), ref, SwBlockVolumeFinalizerName)
+	if err != nil || !patched {
+		t.Fatalf("release patched=%t err=%v", patched, err)
+	}
+	if len(currentFinalizers) != 1 || currentFinalizers[0] != "example.com/keep" {
+		t.Fatalf("finalizers after release=%+v", currentFinalizers)
+	}
+	if len(patchBodies) != 2 {
+		t.Fatalf("patch count=%d bodies=%+v", len(patchBodies), patchBodies)
+	}
+	for _, body := range patchBodies {
+		if _, ok := body["status"]; ok {
+			t.Fatalf("finalizer patch must not patch status: %+v", body)
+		}
+		if _, ok := body["spec"]; ok {
+			t.Fatalf("finalizer patch must not patch spec: %+v", body)
+		}
+	}
+}
+
 func TestKubernetesStatusClientTreatsPersistentEventAsIdempotentSuccess(t *testing.T) {
 	seen := map[string]bool{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

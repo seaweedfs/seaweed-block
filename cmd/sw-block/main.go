@@ -149,6 +149,7 @@ func runOpsOperatorStatus(args []string, stdout, stderr io.Writer) int {
 		mode := "write_status"
 		var writer ops.OperatorStatusWriter
 		var events ops.OperatorEventSink
+		var finalizers ops.OperatorFinalizerClient
 		if dryRun {
 			mode = "dry_run"
 			writer = &operatorStatusDryRunWriter{}
@@ -161,6 +162,7 @@ func runOpsOperatorStatus(args []string, stdout, stderr io.Writer) int {
 				return ops.VolumeStatusExitInvalid
 			}
 			events, _ = writer.(ops.OperatorEventSink)
+			finalizers, _ = writer.(ops.OperatorFinalizerClient)
 		}
 		result, err := (ops.OperatorStatusReconciler{
 			Namespace:   namespace,
@@ -168,17 +170,19 @@ func runOpsOperatorStatus(args []string, stdout, stderr io.Writer) int {
 			Source:      operatorStatusClusterSource{cluster: cluster},
 			Writer:      writer,
 			EventSink:   events,
+			Finalizers:  finalizers,
 		}).Reconcile(context.Background())
 		if err != nil {
 			fmt.Fprintf(stderr, "sw-block ops operator-status: %v\n", err)
 			return ops.VolumeStatusExitInvalid
 		}
-		fmt.Fprintf(stdout, "operator_status=%s cluster=%s/%s volumes=%d events=%d mutation_allowed=false\n",
+		fmt.Fprintf(stdout, "operator_status=%s cluster=%s/%s volumes=%d events=%d finalizer_patches=%d mutation_allowed=false\n",
 			mode,
 			result.ClusterRef.Namespace,
 			result.ClusterRef.Name,
 			len(result.VolumeRefs),
-			result.EventCount)
+			result.EventCount,
+			result.FinalizerPatchCount)
 		if dryWriter, ok := writer.(*operatorStatusDryRunWriter); ok {
 			fmt.Fprintf(stdout, "cluster_status volumes=%d ready=%d blocked=%d stale=%d\n",
 				dryWriter.cluster.VolumeCount,

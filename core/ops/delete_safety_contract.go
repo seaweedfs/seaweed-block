@@ -14,6 +14,8 @@ const (
 	ReasonDeleteNotRequested        = "delete_not_requested"
 	ReasonCleanupEvidenceMissing    = "cleanup_evidence_missing"
 	ReasonDeleteFinalizerReleasable = "finalizer_releasable"
+	ReasonDeleteFinalizerAdded      = "finalizer_added"
+	ReasonDeleteFinalizerReleased   = "finalizer_released"
 )
 
 type SwBlockVolumeDeleteSafetyContract struct {
