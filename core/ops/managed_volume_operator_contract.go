@@ -9,13 +9,14 @@ type ManagedVolumeOperatorContract struct {
 }
 
 type ManagedVolumeOperatorStatus struct {
-	VolumeID     string                 `json:"volume_id,omitempty"`
-	PVCName      string                 `json:"pvc_name,omitempty"`
-	Status       string                 `json:"status"`
-	ReasonCode   string                 `json:"reason_code,omitempty"`
-	Conditions   []ObservationCondition `json:"conditions,omitempty"`
-	NonClaims    []string               `json:"non_claims,omitempty"`
-	EvidenceRefs []string               `json:"evidence_refs,omitempty"`
+	VolumeID     string                             `json:"volume_id,omitempty"`
+	PVCName      string                             `json:"pvc_name,omitempty"`
+	Status       string                             `json:"status"`
+	ReasonCode   string                             `json:"reason_code,omitempty"`
+	Conditions   []ObservationCondition             `json:"conditions,omitempty"`
+	DeleteSafety *SwBlockVolumeDeleteSafetyDecision `json:"delete_safety,omitempty"`
+	NonClaims    []string                           `json:"non_claims,omitempty"`
+	EvidenceRefs []string                           `json:"evidence_refs,omitempty"`
 }
 
 type ManagedVolumeOperatorEvent struct {
@@ -50,6 +51,7 @@ func ManagedVolumeOperatorContractFromProjection(projection ManagedVolumeProject
 			Status:       projection.Status,
 			ReasonCode:   projection.ReasonCode,
 			Conditions:   append([]ObservationCondition(nil), projection.Conditions...),
+			DeleteSafety: cloneSwBlockVolumeDeleteSafetyDecision(projection.DeleteSafety),
 			NonClaims:    append([]string(nil), projection.NonClaims...),
 			EvidenceRefs: append([]string(nil), projection.EvidenceRefs...),
 		},
@@ -74,6 +76,16 @@ func ManagedVolumeOperatorContractFromProjection(projection ManagedVolumeProject
 		})
 	}
 	return contract
+}
+
+func cloneSwBlockVolumeDeleteSafetyDecision(in *SwBlockVolumeDeleteSafetyDecision) *SwBlockVolumeDeleteSafetyDecision {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	out.MissingFacts = append([]string(nil), in.MissingFacts...)
+	out.EvidenceRefs = append([]string(nil), in.EvidenceRefs...)
+	return &out
 }
 
 func managedVolumeOperatorEventFromCondition(condition ObservationCondition) ManagedVolumeOperatorEvent {

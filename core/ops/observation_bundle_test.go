@@ -478,6 +478,147 @@ func TestObservationBundle_CarriesUnsupportedLoopbackAttachIntoManagedStatus(t *
 	assertDashboardEndpointContains(t, server.URL+"/"+ObservationReportTextArtifact, "managed_volume=pvc-loopback status=blocked reason=publish_target_loopback_cross_node")
 }
 
+func TestObservationBundle_DeleteSafetyBlocksWithResidue(t *testing.T) {
+	dir := t.TempDir()
+	writeProductClusterEvidence(t, dir, []VolumeEvidence{{
+		VolumeID:          "pvc-delete",
+		Namespace:         "default",
+		PVCName:           "delete-pvc",
+		PVName:            "pv-delete",
+		ReplicationFactor: 1,
+		Status:            ObservationStatusOK,
+		PrimaryReplica:    "r1",
+		PrimaryNode:       "m01",
+		PublishTarget:     "192.168.1.181:3260",
+		Replicas: []ReplicaEvidence{{
+			ReplicaID:      "r1",
+			KubernetesNode: "m01",
+			Observed:       true,
+			Role:           "primary",
+			FrontendAddr:   "192.168.1.181:3260",
+		}},
+	}})
+	mustWrite(t, filepath.Join(dir, ObservationCleanupSummaryArtifact), strings.Join([]string{
+		"cleanup_status=failed",
+		"iscsi_residue_count=1",
+		"reason_codes=iscsi_node_records_present",
+	}, "\n"))
+	mustWrite(t, filepath.Join(dir, ObservationDeleteSafetyArtifact), strings.Join([]string{
+		"delete_requested=true",
+		"finalizer_present=true",
+		"volume_id=pvc-delete",
+		"pvc_name=delete-pvc",
+		"pv_name=pv-delete",
+	}, "\n"))
+
+	cluster, err := BuildObservationFromBundle(ObservationBundleOptions{Dir: dir, VolumeID: "pvc-delete"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	managed := managedProjectionForVolume(cluster.ManagedVolumes, "pvc-delete")
+	if managed.DeleteSafety == nil {
+		t.Fatalf("missing delete safety: %+v", managed)
+	}
+	if managed.Status != ManagedVolumeStatusBlocked ||
+		managed.ReasonCode != "iscsi_node_records_present" ||
+		managed.DeleteSafety.State != DeleteSafetyStateBlocked ||
+		managed.DeleteSafety.Decision != ManagedVolumeActionDecisionRejected ||
+		managed.DeleteSafety.FinalizerReleaseAllowed {
+		t.Fatalf("managed=%+v delete=%+v", managed, managed.DeleteSafety)
+	}
+	if !hasManagedVolumeAction(managed.Actions, ManagedVolumeActionVerifyCleanup) {
+		t.Fatalf("missing verify cleanup action: %+v", managed.Actions)
+	}
+	if condition := findObservationCondition(managed.Conditions, ConditionCleanupRequired); condition == nil ||
+		condition.Status != "True" ||
+		condition.Reason != "iscsi_node_records_present" {
+		t.Fatalf("cleanup condition=%+v", condition)
+	}
+
+	summary := RenderObservationReportSummary(cluster)
+	for _, want := range []string{
+		"managed_volume_delete_safety=pvc-delete state=blocked decision=rejected reason=iscsi_node_records_present release_allowed=false action=safe_k8s.release_swblockvolume_finalizer",
+		"managed_volume_delete_safety_safe_next_action=pvc-delete observe.verify_cleanup",
+	} {
+		if !strings.Contains(summary, want) {
+			t.Fatalf("summary missing %q:\n%s", want, summary)
+		}
+	}
+	explain := RenderObservationExplainText(cluster)
+	if !strings.Contains(explain, "managed_volume_delete_safety state=blocked decision=rejected reason=iscsi_node_records_present release_allowed=false action=safe_k8s.release_swblockvolume_finalizer") {
+		t.Fatalf("explain missing delete safety:\n%s", explain)
+	}
+	snapshot := BuildOperatorFoundationSnapshot(cluster)
+	if snapshot.Volumes[0].Status.DeleteSafety == nil ||
+		snapshot.Volumes[0].Status.DeleteSafety.State != DeleteSafetyStateBlocked {
+		t.Fatalf("snapshot delete safety=%+v", snapshot.Volumes[0].Status.DeleteSafety)
+	}
+	server := httptest.NewServer(NewObservationDashboardHandler(cluster))
+	defer server.Close()
+	assertDashboardEndpointContains(t, server.URL+"/"+ObservationOperatorSnapshotArtifact, `"delete_safety": {`)
+	assertDashboardEndpointContains(t, server.URL+"/"+ObservationOperatorSnapshotArtifact, `"state": "blocked"`)
+	assertDashboardEndpointContains(t, server.URL+"/"+ObservationOperatorSnapshotArtifact, `"reason": "iscsi_node_records_present"`)
+}
+
+func TestObservationBundle_DeleteSafetyReleasableWithCleanCleanupEvidence(t *testing.T) {
+	dir := t.TempDir()
+	writeProductClusterEvidence(t, dir, []VolumeEvidence{{
+		VolumeID:          "pvc-clean-delete",
+		Namespace:         "default",
+		PVCName:           "clean-pvc",
+		PVName:            "pv-clean",
+		ReplicationFactor: 1,
+		Status:            ObservationStatusOK,
+		PrimaryReplica:    "r1",
+		PrimaryNode:       "m01",
+		PublishTarget:     "192.168.1.181:3260",
+		Replicas: []ReplicaEvidence{{
+			ReplicaID:      "r1",
+			KubernetesNode: "m01",
+			Observed:       true,
+			Role:           "primary",
+			FrontendAddr:   "192.168.1.181:3260",
+		}},
+	}})
+	mustWrite(t, filepath.Join(dir, ObservationCleanupSummaryArtifact), "cleanup_status=ok")
+	mustWrite(t, filepath.Join(dir, ObservationDeleteSafetyArtifact), strings.Join([]string{
+		"delete_requested=true",
+		"finalizer_present=true",
+		"volume_id=pvc-clean-delete",
+		"pvc_name=clean-pvc",
+		"pv_name=pv-clean",
+	}, "\n"))
+
+	cluster, err := BuildObservationFromBundle(ObservationBundleOptions{Dir: dir, VolumeID: "pvc-clean-delete"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	managed := managedProjectionForVolume(cluster.ManagedVolumes, "pvc-clean-delete")
+	if managed.DeleteSafety == nil ||
+		managed.DeleteSafety.State != DeleteSafetyStateReleasable ||
+		managed.DeleteSafety.Decision != ManagedVolumeActionDecisionAllowed ||
+		!managed.DeleteSafety.FinalizerReleaseAllowed {
+		t.Fatalf("managed=%+v delete=%+v", managed, managed.DeleteSafety)
+	}
+	if managed.Status == ManagedVolumeStatusBlocked {
+		t.Fatalf("clean delete evidence must not block managed volume: %+v", managed)
+	}
+	if condition := findObservationCondition(managed.Conditions, ConditionCleanupRequired); condition == nil ||
+		condition.Status != "False" ||
+		condition.Reason != ReasonCleanupVerified {
+		t.Fatalf("cleanup condition=%+v", condition)
+	}
+	summary := RenderObservationReportSummary(cluster)
+	if !strings.Contains(summary, "managed_volume_delete_safety=pvc-clean-delete state=releasable decision=allowed reason=finalizer_releasable release_allowed=true action=safe_k8s.release_swblockvolume_finalizer") {
+		t.Fatalf("summary missing releasable delete safety:\n%s", summary)
+	}
+	snapshot := BuildOperatorFoundationSnapshot(cluster)
+	if snapshot.Volumes[0].Status.DeleteSafety == nil ||
+		!snapshot.Volumes[0].Status.DeleteSafety.FinalizerReleaseAllowed {
+		t.Fatalf("snapshot delete safety=%+v", snapshot.Volumes[0].Status.DeleteSafety)
+	}
+}
+
 func TestObservationBundle_LoopbackAttachTargetsNamedVolume(t *testing.T) {
 	dir := t.TempDir()
 	writeProductClusterEvidence(t, dir, []VolumeEvidence{

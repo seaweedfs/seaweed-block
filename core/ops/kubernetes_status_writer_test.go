@@ -57,6 +57,14 @@ func TestKubernetesStatusClientPatchesOnlyStatusSubresources(t *testing.T) {
 		Status:     ManagedVolumeStatusReady,
 		ReasonCode: ReasonFirstVolumeVerified,
 		ObservedAt: observedAt,
+		DeleteSafety: &SwBlockVolumeCRDDeleteSafety{
+			ActionType:              SwBlockVolumeDeleteActionReleaseFinalizer,
+			Decision:                ManagedVolumeActionDecisionAllowed,
+			State:                   DeleteSafetyStateReleasable,
+			Reason:                  ReasonDeleteFinalizerReleasable,
+			FinalizerReleaseAllowed: true,
+			EvidenceRefs:            []string{"cleanup-summary.txt"},
+		},
 		AllowedActions: []SwBlockVolumeCRDAction{{
 			Type:             "observe.collect_bundle",
 			Mode:             "read_only",
@@ -115,6 +123,18 @@ func TestKubernetesStatusClientPatchesOnlyStatusSubresources(t *testing.T) {
 	}
 	if _, ok := action["evidence_required"]; ok {
 		t.Fatalf("volume action leaked snake_case evidence_required: %+v", action)
+	}
+	deleteSafety := volumeStatus["deleteSafety"].(map[string]any)
+	if _, ok := deleteSafety["finalizerReleaseAllowed"]; !ok {
+		t.Fatalf("deleteSafety missing camelCase finalizerReleaseAllowed: %+v", deleteSafety)
+	}
+	if _, ok := deleteSafety["actionType"]; !ok {
+		t.Fatalf("deleteSafety missing camelCase actionType: %+v", deleteSafety)
+	}
+	for _, forbidden := range []string{"finalizer_release_allowed", "action_type", "safe_next_action"} {
+		if _, ok := deleteSafety[forbidden]; ok {
+			t.Fatalf("deleteSafety leaked snake_case %s: %+v", forbidden, deleteSafety)
+		}
 	}
 }
 

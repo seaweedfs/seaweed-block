@@ -1,6 +1,6 @@
 # Current Plan: Phase 39 - Finalizer / Delete Safety
 
-Status: active, 14% complete. Started on 2026-06-10.
+Status: active, 28% complete. Started on 2026-06-10.
 
 Branch: `phase33-testops-failure-hardening`
 
@@ -82,16 +82,16 @@ internal review of finalizer/delete contract doc
 Goal: before adding finalizer mutation, prove delete-requested and
 delete-blocked states project correctly from evidence.
 
-Status: pending.
+Status: dev-complete; QA/internal review pending.
 
 Acceptance:
 
 ```text
-[ ] deletionTimestamp-like evidence projects DeletionRequested/Blocked status
-[ ] residue evidence projects CleanupRequired=True and reason=cleanup_required
-[ ] clean evidence projects delete releasable, not false blocked
-[ ] report, explain, dashboard, operator-snapshot, and CRD status agree
-[ ] no finalizer mutation is enabled yet
+[x] deletionTimestamp-like evidence projects DeletionRequested/Blocked status
+[x] residue evidence projects CleanupRequired=True and reason=cleanup_required
+[x] clean evidence projects delete releasable, not false blocked
+[x] report, explain, dashboard, operator-snapshot, and CRD status agree
+[x] no finalizer mutation is enabled yet
 ```
 
 Verification:
@@ -233,6 +233,13 @@ QA strict rerun from clean lab
   owned mutation scope, required cleanup/identity facts, delete states,
   non-claims, and a pure decision function that blocks missing/residue evidence
   and marks clean evidence as releasable without performing mutation.
+- 28%: D2 dev-complete. Bundle replay can carry
+  `swblockvolume-delete-summary.txt` plus cleanup evidence into
+  ManagedVolume delete-safety status. Residue/missing cleanup evidence projects
+  blocked/rejected with `CleanupRequired=True`; clean evidence projects
+  releasable/allowed without falsely blocking the volume. Summary, explain,
+  operator-snapshot, dashboard JSON, and `SwBlockVolume.status.deleteSafety`
+  use the same vocabulary.
 
 ## Prerequisites / Risks
 
@@ -245,6 +252,5 @@ QA strict rerun from clean lab
 
 ## Next Step
 
-Run D1 review/QA, then start D2: project delete-requested, delete-blocked, and
-delete-releasable states through status surfaces before enabling finalizer
-mutation.
+Run D1/D2 review, then start D3: add the minimum finalizer metadata mutation
+boundary and RBAC without storage/workload mutation.

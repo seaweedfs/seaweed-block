@@ -22,6 +22,7 @@ const (
 	ObservationCleanupSummaryArtifact = "cleanup-summary.txt"
 	ObservationHostPrereqArtifact     = "host-prereq-summary.txt"
 	ObservationLoopbackAttachArtifact = "unsupported-cross-node-loopback-attach.txt"
+	ObservationDeleteSafetyArtifact   = "swblockvolume-delete-summary.txt"
 
 	NodeLossRecoverySummaryArtifact = "node-loss-recovery-summary.txt"
 	PrimaryFailureRecoveryArtifact  = "primary-failure-recovery.txt"
@@ -91,6 +92,10 @@ func BuildObservationFromBundle(opts ObservationBundleOptions) (ClusterEvidence,
 		applyUnsupportedLoopbackAttachSummary(&cluster, loopbackAttach, loopbackAttachPath)
 		sourceLoaded = true
 	}
+	deleteSafety, deleteSafetyPath, _ := loadKeyValueArtifact(opts.Dir, ObservationDeleteSafetyArtifact)
+	if len(deleteSafety) > 0 {
+		sourceLoaded = true
+	}
 	if blocked, blockedVolume := buildImagePullBlockedEvidence(opts.Dir); blocked {
 		cluster.Status = ObservationStatusBlocked
 		sourceLoaded = true
@@ -114,6 +119,9 @@ func BuildObservationFromBundle(opts ObservationBundleOptions) (ClusterEvidence,
 		NodeLoss:       summary,
 		PrimaryFailure: primaryFailure,
 	})
+	if len(deleteSafety) > 0 {
+		applyDeleteSafetySummary(&cluster, deleteSafety, deleteSafetyPath)
+	}
 	return cluster, nil
 }
 
@@ -519,6 +527,121 @@ func applyUnsupportedLoopbackAttachSummary(cluster *ClusterEvidence, summary map
 	volume.NextActions = []string{"reinstall with external iSCSI target or schedule the app pod on the blockvolume node"}
 	cluster.Volumes[idx] = volume
 	cluster.Status = ObservationStatusBlocked
+}
+
+func applyDeleteSafetySummary(cluster *ClusterEvidence, summary map[string]string, evidencePath string) {
+	volumeID := strings.TrimSpace(summary["volume_id"])
+	pvcName := strings.TrimSpace(summary["pvc_name"])
+	pvName := strings.TrimSpace(summary["pv_name"])
+	deleteRequested := boolFromSummaryDefault(summary, "delete_requested", true)
+	finalizerPresent := boolFromSummaryDefault(summary, "finalizer_present", true)
+	if len(cluster.ManagedVolumes) == 0 && len(cluster.Volumes) > 0 {
+		*cluster = NormalizeObservationCluster(*cluster)
+	}
+	idx := findManagedVolumeIndex(cluster.ManagedVolumes, volumeID, pvcName)
+	if idx < 0 {
+		cluster.ManagedVolumes = append(cluster.ManagedVolumes, ManagedVolumeProjection{
+			VolumeID:   volumeID,
+			PVCName:    pvcName,
+			PVName:     pvName,
+			Status:     ManagedVolumeStatusUnknown,
+			ReasonCode: ReasonCleanupEvidenceMissing,
+			States: ManagedVolumeStates{
+				Kubernetes: ManagedVolumeKubernetesUnknown,
+				Authority:  ManagedVolumeAuthorityUnknown,
+				CSI:        ManagedVolumeCSIUnknown,
+				HostPath:   ManagedVolumeHostPathUnknown,
+				Recovery:   ManagedVolumeRecoveryNone,
+				Workload:   ManagedVolumeWorkloadUnknown,
+			},
+		})
+		idx = len(cluster.ManagedVolumes) - 1
+	}
+	managed := &cluster.ManagedVolumes[idx]
+	if managed.VolumeID == "" {
+		managed.VolumeID = volumeID
+	}
+	if managed.PVCName == "" {
+		managed.PVCName = pvcName
+	}
+	if managed.PVName == "" {
+		managed.PVName = pvName
+	}
+	decision := EvaluateSwBlockVolumeDeleteSafety(SwBlockVolumeDeleteSafetyFacts{
+		DeleteRequested:  deleteRequested,
+		FinalizerPresent: finalizerPresent,
+		Cleanup:          cluster.Cleanup,
+	})
+	if evidencePath != "" {
+		decision.EvidenceRefs = appendUniqueStrings(decision.EvidenceRefs, evidencePath)
+	}
+	managed.DeleteSafety = &decision
+	managed.EvidenceRefs = appendUniqueStrings(managed.EvidenceRefs, decision.EvidenceRefs...)
+	switch decision.State {
+	case DeleteSafetyStateBlocked:
+		managed.Status = ManagedVolumeStatusBlocked
+		managed.ReasonCode = decision.Reason
+		managed.Conditions = ensureCondition(managed.Conditions, ObservationCondition{
+			Type:         ConditionCleanupRequired,
+			Status:       "True",
+			Reason:       decision.Reason,
+			Severity:     "warning",
+			Message:      "delete is blocked until cleanup evidence is clean",
+			EvidenceRefs: append([]string(nil), decision.EvidenceRefs...),
+		})
+		managed.Actions = ensureManagedVolumeAction(managed.Actions, ManagedVolumeAction{
+			Type:             ManagedVolumeActionVerifyCleanup,
+			Mode:             ManagedVolumeActionModeScripted,
+			SideEffectClass:  ManagedVolumeSideEffectObserve,
+			OwnerExecutor:    "ops",
+			Decision:         ManagedVolumeActionDecisionAllowed,
+			EvidenceRequired: "cleanup-summary.txt",
+			EvidenceRefs:     append([]string(nil), decision.EvidenceRefs...),
+		})
+	case DeleteSafetyStateReleasable:
+		managed.Conditions = ensureCondition(managed.Conditions, ObservationCondition{
+			Type:         ConditionCleanupRequired,
+			Status:       "False",
+			Reason:       ReasonCleanupVerified,
+			Severity:     "info",
+			Message:      "delete finalizer is releasable; cleanup evidence is clean",
+			EvidenceRefs: append([]string(nil), decision.EvidenceRefs...),
+		})
+	}
+}
+
+func findManagedVolumeIndex(volumes []ManagedVolumeProjection, volumeID, pvcName string) int {
+	for i := range volumes {
+		if volumeID != "" && volumes[i].VolumeID == volumeID {
+			return i
+		}
+		if pvcName != "" && volumes[i].PVCName == pvcName {
+			return i
+		}
+	}
+	return -1
+}
+
+func boolFromSummaryDefault(summary map[string]string, key string, defaultValue bool) bool {
+	value := strings.TrimSpace(summary[key])
+	if value == "" {
+		return defaultValue
+	}
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		return defaultValue
+	}
+	return parsed
+}
+
+func ensureManagedVolumeAction(actions []ManagedVolumeAction, action ManagedVolumeAction) []ManagedVolumeAction {
+	for i := range actions {
+		if actions[i].Type == action.Type {
+			actions[i] = action
+			return actions
+		}
+	}
+	return append(actions, action)
 }
 
 func ensureObservationNode(cluster *ClusterEvidence, nodeName string) int {

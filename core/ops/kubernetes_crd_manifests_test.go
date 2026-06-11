@@ -163,6 +163,22 @@ func TestPhase38D3SwBlockVolumeAllowedActionEvaluationSchema(t *testing.T) {
 	}
 }
 
+func TestPhase39D2SwBlockVolumeDeleteSafetySchema(t *testing.T) {
+	doc := readYAMLMap(t, "charts/seaweed-block/crds/swblockvolumes.block.seaweedfs.com.yaml")
+	statusProperties := crdStatusProperties(t, doc)
+	deleteSafetyProperties := yamlMap(t, yamlMap(t, statusProperties, "deleteSafety"), "properties")
+	for _, want := range []string{"actionType", "decision", "state", "reason", "finalizerReleaseAllowed", "missingFacts", "evidenceRefs", "safeNextAction"} {
+		if _, ok := deleteSafetyProperties[want]; !ok {
+			t.Fatalf("SwBlockVolume.status.deleteSafety schema missing %s", want)
+		}
+	}
+	for _, forbidden := range []string{"action_type", "finalizer_release_allowed", "safe_next_action"} {
+		if _, ok := deleteSafetyProperties[forbidden]; ok {
+			t.Fatalf("SwBlockVolume.status.deleteSafety schema leaked snake_case %s", forbidden)
+		}
+	}
+}
+
 func TestPhase35D1OperatorStatusRBACIsStatusOnly(t *testing.T) {
 	raw := readRepoFile(t, "charts/seaweed-block/templates/operator-status-rbac.yaml")
 	required := []string{

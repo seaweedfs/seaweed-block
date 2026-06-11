@@ -108,6 +108,38 @@ spec:
                         type: array
                         items:
                           type: string
+                deleteSafety:
+                  type: object
+                  properties:
+                    actionType:
+                      type: string
+                    decision:
+                      type: string
+                      enum:
+                        - allowed
+                        - rejected
+                    state:
+                      type: string
+                      enum:
+                        - not_requested
+                        - requested
+                        - blocked
+                        - releasable
+                        - released
+                    reason:
+                      type: string
+                    finalizerReleaseAllowed:
+                      type: boolean
+                    missingFacts:
+                      type: array
+                      items:
+                        type: string
+                    evidenceRefs:
+                      type: array
+                      items:
+                        type: string
+                    safeNextAction:
+                      type: string
                 nonClaims:
                   type: array
                   items:

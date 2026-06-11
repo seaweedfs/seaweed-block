@@ -197,21 +197,22 @@ type WorkloadCheckFact struct {
 }
 
 type ManagedVolumeProjection struct {
-	VolumeID          string                 `json:"volume_id,omitempty"`
-	Namespace         string                 `json:"namespace,omitempty"`
-	PVCName           string                 `json:"pvc_name,omitempty"`
-	PVName            string                 `json:"pv_name,omitempty"`
-	StorageClass      string                 `json:"storage_class,omitempty"`
-	ReplicationFactor int                    `json:"replication_factor,omitempty"`
-	AckProfile        string                 `json:"ack_profile,omitempty"`
-	ClaimProfile      string                 `json:"claim_profile,omitempty"`
-	Status            string                 `json:"status"`
-	ReasonCode        string                 `json:"reason_code,omitempty"`
-	States            ManagedVolumeStates    `json:"states"`
-	Actions           []ManagedVolumeAction  `json:"actions,omitempty"`
-	Conditions        []ObservationCondition `json:"conditions,omitempty"`
-	NonClaims         []string               `json:"non_claims,omitempty"`
-	EvidenceRefs      []string               `json:"evidence_refs,omitempty"`
+	VolumeID          string                             `json:"volume_id,omitempty"`
+	Namespace         string                             `json:"namespace,omitempty"`
+	PVCName           string                             `json:"pvc_name,omitempty"`
+	PVName            string                             `json:"pv_name,omitempty"`
+	StorageClass      string                             `json:"storage_class,omitempty"`
+	ReplicationFactor int                                `json:"replication_factor,omitempty"`
+	AckProfile        string                             `json:"ack_profile,omitempty"`
+	ClaimProfile      string                             `json:"claim_profile,omitempty"`
+	Status            string                             `json:"status"`
+	ReasonCode        string                             `json:"reason_code,omitempty"`
+	States            ManagedVolumeStates                `json:"states"`
+	Actions           []ManagedVolumeAction              `json:"actions,omitempty"`
+	Conditions        []ObservationCondition             `json:"conditions,omitempty"`
+	DeleteSafety      *SwBlockVolumeDeleteSafetyDecision `json:"delete_safety,omitempty"`
+	NonClaims         []string                           `json:"non_claims,omitempty"`
+	EvidenceRefs      []string                           `json:"evidence_refs,omitempty"`
 }
 
 type ManagedVolumeStates struct {
@@ -264,6 +265,20 @@ func RenderManagedVolumeProjectionText(projection ManagedVolumeProjection) strin
 		emptyAsDash(projection.States.HostPath),
 		emptyAsDash(projection.States.Recovery),
 		emptyAsDash(projection.States.Workload))
+	if projection.DeleteSafety != nil {
+		fmt.Fprintf(&b, "managed_volume_delete_safety state=%s decision=%s reason=%s release_allowed=%t action=%s\n",
+			emptyAsDash(projection.DeleteSafety.State),
+			emptyAsDash(projection.DeleteSafety.Decision),
+			emptyAsDash(projection.DeleteSafety.Reason),
+			projection.DeleteSafety.FinalizerReleaseAllowed,
+			emptyAsDash(projection.DeleteSafety.ActionType))
+		if projection.DeleteSafety.SafeNextAction != "" {
+			fmt.Fprintf(&b, "managed_volume_delete_safety_safe_next_action %s\n", projection.DeleteSafety.SafeNextAction)
+		}
+		if len(projection.DeleteSafety.EvidenceRefs) > 0 {
+			fmt.Fprintf(&b, "managed_volume_delete_safety_evidence %s\n", strings.Join(projection.DeleteSafety.EvidenceRefs, ","))
+		}
+	}
 	for _, condition := range projection.Conditions {
 		fmt.Fprintf(&b, "managed_volume_condition %s status=%s reason=%s severity=%s",
 			emptyAsDash(condition.Type),

@@ -216,15 +216,27 @@ func supportBundleReason(cluster ClusterEvidence) string {
 }
 
 type SwBlockVolumeCRDStatus struct {
-	VolumeID       string                   `json:"volumeID,omitempty"`
-	PVCName        string                   `json:"pvcName,omitempty"`
-	Status         string                   `json:"status"`
-	ReasonCode     string                   `json:"reasonCode,omitempty"`
-	ObservedAt     time.Time                `json:"observedAt,omitempty"`
-	Conditions     []ObservationCondition   `json:"conditions,omitempty"`
-	NonClaims      []string                 `json:"nonClaims,omitempty"`
-	EvidenceRefs   []string                 `json:"evidenceRefs,omitempty"`
-	AllowedActions []SwBlockVolumeCRDAction `json:"allowedActions,omitempty"`
+	VolumeID       string                        `json:"volumeID,omitempty"`
+	PVCName        string                        `json:"pvcName,omitempty"`
+	Status         string                        `json:"status"`
+	ReasonCode     string                        `json:"reasonCode,omitempty"`
+	ObservedAt     time.Time                     `json:"observedAt,omitempty"`
+	Conditions     []ObservationCondition        `json:"conditions,omitempty"`
+	DeleteSafety   *SwBlockVolumeCRDDeleteSafety `json:"deleteSafety,omitempty"`
+	NonClaims      []string                      `json:"nonClaims,omitempty"`
+	EvidenceRefs   []string                      `json:"evidenceRefs,omitempty"`
+	AllowedActions []SwBlockVolumeCRDAction      `json:"allowedActions,omitempty"`
+}
+
+type SwBlockVolumeCRDDeleteSafety struct {
+	ActionType              string   `json:"actionType,omitempty"`
+	Decision                string   `json:"decision,omitempty"`
+	State                   string   `json:"state,omitempty"`
+	Reason                  string   `json:"reason,omitempty"`
+	FinalizerReleaseAllowed bool     `json:"finalizerReleaseAllowed"`
+	MissingFacts            []string `json:"missingFacts,omitempty"`
+	EvidenceRefs            []string `json:"evidenceRefs,omitempty"`
+	SafeNextAction          string   `json:"safeNextAction,omitempty"`
 }
 
 type SwBlockVolumeCRDAction struct {
@@ -330,6 +342,7 @@ func (r OperatorStatusReconciler) Reconcile(ctx context.Context) (OperatorStatus
 			ReasonCode:     volume.Status.ReasonCode,
 			ObservedAt:     observedAt,
 			Conditions:     append([]ObservationCondition(nil), volume.Status.Conditions...),
+			DeleteSafety:   swBlockVolumeCRDDeleteSafety(volume.Status.DeleteSafety),
 			NonClaims:      append([]string(nil), volume.Status.NonClaims...),
 			EvidenceRefs:   append([]string(nil), volume.Status.EvidenceRefs...),
 			AllowedActions: swBlockVolumeCRDActions(volume.AllowedActions),
@@ -355,6 +368,22 @@ func (r OperatorStatusReconciler) Reconcile(ctx context.Context) (OperatorStatus
 		}
 	}
 	return result, nil
+}
+
+func swBlockVolumeCRDDeleteSafety(decision *SwBlockVolumeDeleteSafetyDecision) *SwBlockVolumeCRDDeleteSafety {
+	if decision == nil {
+		return nil
+	}
+	return &SwBlockVolumeCRDDeleteSafety{
+		ActionType:              decision.ActionType,
+		Decision:                decision.Decision,
+		State:                   decision.State,
+		Reason:                  decision.Reason,
+		FinalizerReleaseAllowed: decision.FinalizerReleaseAllowed,
+		MissingFacts:            append([]string(nil), decision.MissingFacts...),
+		EvidenceRefs:            append([]string(nil), decision.EvidenceRefs...),
+		SafeNextAction:          decision.SafeNextAction,
+	}
 }
 
 func swBlockVolumeCRDActions(actions []ManagedVolumeOperatorAction) []SwBlockVolumeCRDAction {

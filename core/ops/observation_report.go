@@ -127,6 +127,20 @@ func renderManagedProjectionSummary(b *strings.Builder, managed ManagedVolumePro
 			emptyAsDash(condition.Reason),
 			emptyAsDash(condition.Severity))
 	}
+	if managed.DeleteSafety != nil {
+		fmt.Fprintf(b, "managed_volume_delete_safety=%s state=%s decision=%s reason=%s release_allowed=%t action=%s\n",
+			emptyAsDash(managed.VolumeID),
+			emptyAsDash(managed.DeleteSafety.State),
+			emptyAsDash(managed.DeleteSafety.Decision),
+			emptyAsDash(managed.DeleteSafety.Reason),
+			managed.DeleteSafety.FinalizerReleaseAllowed,
+			emptyAsDash(managed.DeleteSafety.ActionType))
+		if managed.DeleteSafety.SafeNextAction != "" {
+			fmt.Fprintf(b, "managed_volume_delete_safety_safe_next_action=%s %s\n",
+				emptyAsDash(managed.VolumeID),
+				managed.DeleteSafety.SafeNextAction)
+		}
+	}
 	for _, action := range managed.Actions {
 		fmt.Fprintf(b, "managed_volume_action=%s mode=%s side_effect=%s executor=%s decision=%s",
 			emptyAsDash(action.Type),
