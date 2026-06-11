@@ -1,6 +1,6 @@
 # Current Plan: Phase 39 - Finalizer / Delete Safety
 
-Status: active, 78% complete. Started on 2026-06-10.
+Status: active, 80% complete. Started on 2026-06-10.
 
 Branch: `phase33-testops-failure-hardening`
 
@@ -242,8 +242,8 @@ QA strict rerun from clean lab
   use the same vocabulary.
 - 42%: D3 dev-complete. Write-mode operator-status now has an optional
   finalizer client. It reads existing `SwBlockVolume` finalizers, patches only
-  the `/finalizers` subresource, preserves unrelated finalizers, adds the
-  Seaweed Block finalizer idempotently, and releases it only when
+  `metadata.finalizers`, preserves unrelated finalizers, adds the Seaweed Block
+  finalizer idempotently, and releases it only when
   `deleteSafety.finalizerReleaseAllowed=true`. RBAC is widened only to
   `swblockvolumes/finalizers`; no PVC/PV/workload/storage/host mutation is
   added.
@@ -260,6 +260,11 @@ QA strict rerun from clean lab
 - 78%: D4/D5 live QA handoff ready. The QA assignment covers RBAC,
   blocked-delete finalizer hold, clean-delete finalizer release, object deletion
   completion, final cleanup verification, and the `tp01` lab-health caveat.
+- 80%: D4/D5 live QA found the first bug: the client patched a nonexistent
+  `/finalizers` URL for CRDs. The fix keeps RBAC scoped to
+  `swblockvolumes/finalizers` but sends the merge patch to the main
+  SwBlockVolume resource URL with a body containing only
+  `metadata.finalizers`. Awaiting QA re-validation.
 
 ## Prerequisites / Risks
 
@@ -269,9 +274,12 @@ QA strict rerun from clean lab
   behavior is to block deletion with evidence and a safe next step.
 - Finalizer behavior must be idempotent; retries and repeated reconciles are
   expected.
+- Kubernetes CRDs do not expose a `/finalizers` subresource. The operator must
+  use the main object URL for `metadata.finalizers`, while authorization remains
+  scoped to the `swblockvolumes/finalizers` resource. Tests and QA must keep
+  verifying that the patch body never contains `spec` or unrelated metadata.
 
 ## Next Step
 
-Send `internal/docs/qa-assignments/phase39-d4-d5-finalizer-delete-safety-qa.md`
-to QA. After D4/D5 pass, add D6 multi-volume isolation and close-gate
-assignment.
+Send the D4/D5 endpoint fix to QA for re-validation. After D4/D5 pass, add D6
+multi-volume isolation and close-gate assignment.

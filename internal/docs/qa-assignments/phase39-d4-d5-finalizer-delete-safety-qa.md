@@ -65,6 +65,12 @@ Expected:
 - finalizers/status/events: `yes`,
 - pods/PVC/storageclasses: `no`.
 
+Note: Kubernetes CRDs do not expose a `/finalizers` subresource. Finalizer-only
+changes are main-object merge patches containing only
+`{"metadata":{"finalizers":[...]}}`, while RBAC remains scoped to the
+`swblockvolumes/finalizers` subresource. QA must still confirm the operator
+never patches `spec`.
+
 ## D4: Blocked Delete Holds Finalizer
 
 Create a `SwBlockVolume` stub for a known managed volume and let the operator add

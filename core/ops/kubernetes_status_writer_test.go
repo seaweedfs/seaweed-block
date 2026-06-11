@@ -199,7 +199,7 @@ func TestKubernetesStatusClientEnsuresAndReleasesVolumeFinalizer(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"metadata": map[string]any{"finalizers": currentFinalizers},
 			})
-		case r.Method == http.MethodPatch && r.URL.Path == "/apis/block.seaweedfs.com/v1alpha1/namespaces/kube-system/swblockvolumes/demo-pvc/finalizers":
+		case r.Method == http.MethodPatch && r.URL.Path == "/apis/block.seaweedfs.com/v1alpha1/namespaces/kube-system/swblockvolumes/demo-pvc":
 			var body map[string]any
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 				t.Fatalf("decode patch: %v", err)

@@ -23,9 +23,9 @@ const (
 	serviceAccountCAPath    = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
 )
 
-// KubernetesStatusClient patches CRD status and the SwBlockVolume finalizers
-// subresource. It deliberately has no methods for spec, workload, PVC/PV,
-// Secret, StorageClass, or host mutation.
+// KubernetesStatusClient patches CRD status and SwBlockVolume metadata.finalizers.
+// It deliberately has no methods for spec, workload, PVC/PV, Secret,
+// StorageClass, or host mutation.
 type KubernetesStatusClient struct {
 	BaseURL     string
 	BearerToken string
@@ -134,7 +134,7 @@ func (c *KubernetesStatusClient) patchVolumeFinalizers(ctx context.Context, ref 
 	if err != nil {
 		return fmt.Errorf("marshal finalizer patch: %w", err)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, c.finalizersURL(ref.Namespace, SwBlockVolumePlural, ref.Name), bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, c.resourceURL(ref.Namespace, SwBlockVolumePlural, ref.Name), bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
@@ -248,10 +248,6 @@ func (c *KubernetesStatusClient) EmitEvent(ctx context.Context, event OperatorKu
 
 func (c *KubernetesStatusClient) statusURL(namespace, resource, name string) string {
 	return c.resourceURL(namespace, resource, name) + "/status"
-}
-
-func (c *KubernetesStatusClient) finalizersURL(namespace, resource, name string) string {
-	return c.resourceURL(namespace, resource, name) + "/finalizers"
 }
 
 func (c *KubernetesStatusClient) resourcePath(namespace, resource, name string) string {
