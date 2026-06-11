@@ -1,6 +1,6 @@
 # Current Plan: Phase 39 - Finalizer / Delete Safety
 
-Status: active, 70% complete. Started on 2026-06-10.
+Status: active, 78% complete. Started on 2026-06-10.
 
 Branch: `phase33-testops-failure-hardening`
 
@@ -257,6 +257,9 @@ QA strict rerun from clean lab
   removes the SwBlockVolume finalizer, emits one release event, and is
   idempotent on repeated reconcile. Live object deletion completion and final
   cleanup verifier remain for QA.
+- 78%: D4/D5 live QA handoff ready. The QA assignment covers RBAC,
+  blocked-delete finalizer hold, clean-delete finalizer release, object deletion
+  completion, final cleanup verification, and the `tp01` lab-health caveat.
 
 ## Prerequisites / Risks
 
@@ -269,5 +272,6 @@ QA strict rerun from clean lab
 
 ## Next Step
 
-Prepare the D4/D5 QA assignment for live blocked-delete and clean-delete
-validation, including final cleanup verification and `tp01` lab-health caveat.
+Send `internal/docs/qa-assignments/phase39-d4-d5-finalizer-delete-safety-qa.md`
+to QA. After D4/D5 pass, add D6 multi-volume isolation and close-gate
+assignment.
