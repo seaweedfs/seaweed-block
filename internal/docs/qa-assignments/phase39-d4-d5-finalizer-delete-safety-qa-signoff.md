@@ -1,20 +1,28 @@
 # QA Sign-off - Phase 39 D4/D5 Finalizer Delete Safety
 
-Verdict: **BLOCKED.** The first bounded mutating path — adding/removing
-`block.seaweedfs.com/swblockvolume-protection` on `SwBlockVolume.metadata.finalizers`
-— does not work against the live Kubernetes API. The operator PATCHes a
-`<resource>/<name>/finalizers` URL, but CRDs have no `/finalizers` subresource
-(only `/status` and `/scale`), so every finalizer patch returns **HTTP 404**. The
-finalizer is never added, so neither D4 (blocked-delete hold) nor D5
-(clean-delete release) can be exercised. The status-only projection
-(`status.deleteSafety`) works; only the finalizer mutation is broken. Same class
-as the Phase 35 D3 and Phase 37 live-vs-mock defects: it passes `go test` (mock
-HTTP server) and `helm template` but fails against the real k3s API.
+Verdict: **STILL BLOCKED (after `b371e2e`).** The URL bug is fixed — the operator
+now PATCHes the main `SwBlockVolume` object (no `/finalizers` 404) — but that
+exposed the deeper, definitive problem I flagged as the RBAC follow-on: the patch
+now returns **HTTP 403**. Modifying a CRD's `.metadata.finalizers` requires the
+**main** `patch swblockvolumes` permission, and the `swblockvolumes/finalizers`
+subresource grant does **not** substitute for it (for CRDs there is no
+`/finalizers` endpoint to target, so the authorizer always checks the main verb
+first). Confirmed for **both** add-on-fresh and remove-on-terminating. The
+finalizers-subresource-only RBAC can never modify a CRD finalizer — so the
+bounded-mutation design as built cannot work, and D4/D5 still cannot be
+exercised. The status-only `status.deleteSafety` projection continues to work.
 
-Date: 2026-06-09
+Date: 2026-06-09 (404 blocked) → 2026-06-11 (re-validated `b371e2e`: 404 fixed, 403 exposed)
 
-Source commit: `f59784a` (floor met: `7143c8f`, `fd3977b`, `3340038`, `07c50d3`,
-`a90dda3`; branch `phase33-testops-failure-hardening`)
+Source commits: `f59784a` (404 blocked) → `b371e2e phase39: fix finalizer patch
+endpoint` (URL fixed, now 403; branch `phase33-testops-failure-hardening`)
+
+> See the **Re-Validation (`b371e2e`)** section at the end for the 403 evidence
+> and the design options. The original 404 write-up is preserved below.
+
+---
+
+## ORIGINAL FINDING (404, `f59784a`) — preserved
 
 ## Lab Node Health
 
@@ -141,3 +149,92 @@ volumes; it cannot pass while the single-volume finalizer patch 404s. Fix the
 added → blocked-hold under a real `kubectl delete` → clean-release with one
 `finalizer_released` Event and object deletion completing), and restore tp01 —
 then D6.
+
+---
+
+## RE-VALIDATION (`b371e2e`) — STILL BLOCKED (403)
+
+`b371e2e` correctly fixes the URL: `patchVolumeFinalizers` now PATCHes
+`c.resourceURL(ns, swblockvolumes, name)` (the main object) with
+`{"metadata":{"finalizers":[...]}}`. The 404 is gone. But the operator now hits
+**403 Forbidden** — the deeper issue noted in the original RBAC follow-on.
+
+### Add to a fresh object — 403
+
+```text
+SwBlockVolume/del-vol created (no deletionTimestamp); reconcile ->
+status.deleteSafety written (status path OK), then:
+patch swblockvolumes/del-vol finalizers failed: http 403
+  User "system:serviceaccount:kube-system:sw-block-seaweed-block-operator-status"
+  cannot patch resource "swblockvolumes" in API group "block.seaweedfs.com" in namespace "kube-system"
+del-vol finalizers: (empty)  -> finalizer never added
+```
+
+### Remove from a terminating object — also 403
+
+```text
+admin adds the finalizer; kubectl delete del-vol --wait=false (deletionTimestamp set);
+reconcile with delete_requested=true + clean cleanup ->
+patch swblockvolumes/del-vol finalizers failed: http 403 (same "cannot patch swblockvolumes")
+del-vol still exists, finalizers=["block.seaweedfs.com/swblockvolume-protection"]  -> stuck terminating
+```
+
+So **neither add nor remove works** with the current RBAC.
+
+### Why finalizers-subresource-only RBAC cannot work for a CRD
+
+A CRD exposes no `/finalizers` endpoint (that is why the old URL 404'd), so
+`.metadata.finalizers` can only be changed by PATCHing the **main object**. The
+authorizer evaluates that request as `patch swblockvolumes` (the main verb +
+resource) and denies it — the operator was granted only
+`swblockvolumes/finalizers`. The `<resource>/finalizers` RBAC subresource is an
+*additional* gate applied by the OwnerReferencesPermissionEnforcement admission
+plugin *after* authorization; it is **not a substitute** for the main `patch`
+permission, and (unlike built-ins such as namespaces) there is no finalizers URL
+to make the authorizer evaluate the subresource instead. Net: the
+finalizers-subresource-only grant can never modify a CRD finalizer.
+
+### Design options (this needs a decision, not just a code tweak)
+
+1. **Grant the operator `patch`/`update` on `swblockvolumes` (main) and enforce
+   finalizer-only changes with a ValidatingAdmissionPolicy/webhook** that rejects
+   any operator-status write touching `.spec` or fields other than
+   `.metadata.finalizers`. Keeps the "no spec mutation" boundary via admission
+   rather than RBAC. This is the standard way to bound a finalizer controller.
+2. **Move finalizer add/remove to the component that already owns the
+   `SwBlockVolume` lifecycle** (the CSI provisioner/controller that creates the
+   CR), gated by the `status.deleteSafety` the operator publishes. The
+   operator-status SA then stays status-only (no main patch), which preserves the
+   read-only posture established in Phases 35-38.
+3. **Accept main `patch` on the SA with a code-enforced boundary** (the
+   controller only ever writes finalizers). Weakest — the RBAC no longer proves
+   the boundary; not recommended given the whole phase chain's emphasis on
+   RBAC-provable read-only.
+
+Option 1 or 2 is the real fix. Whichever is chosen, add a **live/envtest**
+regression that performs the add+remove against a real API server with the
+operator's actual RBAC (the current tests pass because the mock neither enforces
+the CRD subresource surface nor the authorizer — the same gap that hid the 404
+and now the 403).
+
+### Status of the gates
+
+- RBAC boundary intent: still correctly scoped (no pod/PVC/storageclass/spec
+  mutation), but **insufficient** for the finalizer feature to function.
+- D4 blocked-delete hold: **still BLOCKED** (finalizer never added → nothing to
+  hold).
+- D5 clean-delete release: **still BLOCKED** (operator cannot remove the
+  finalizer → object stuck terminating).
+- Final cleanup: clean (`cleanup_status=ok`, residue 0); the stuck `del-vol` was
+  cleared by an admin finalizer patch.
+- Lab: tp01 still `NotReady`/unreachable.
+
+### Bottom line (updated)
+
+`b371e2e` fixes the URL but the bounded-finalizer-mutation design is **not viable
+as built** — the operator cannot modify a CRD finalizer with only the
+`swblockvolumes/finalizers` subresource grant (403 on both add and remove). This
+is a design decision (admission-bounded main patch, or move finalizer ownership),
+not a one-line fix. Do not close D4/D5 or advance to D6 until the operator can
+actually add the finalizer to a fresh `SwBlockVolume` and remove it from a
+terminating one, proven live with its real RBAC.

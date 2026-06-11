@@ -1,6 +1,6 @@
 # Current Plan: Phase 39 - Finalizer / Delete Safety
 
-Status: active, 80% complete. Started on 2026-06-10.
+Status: design-blocked, 80% complete. Started on 2026-06-10.
 
 Branch: `phase33-testops-failure-hardening`
 
@@ -36,14 +36,19 @@ The operator mutates only finalizer metadata and status/events in this phase.
 | idempotent reconcile and retry behavior | promotion/fencing/rebuild/failback |
 | cleanup verifier evidence consumption | backup/snapshot/restore |
 | Kubernetes Events for blocked/released delete | NVMe ANA parity |
-| RBAC narrowed to finalizers + status + events | dashboard mutation buttons |
+| finalizer mutation design decision | dashboard mutation buttons |
 | TestOps delete-safety gates | broad production delete lifecycle |
 
 Allowed implementation rule:
 
 ```text
-Phase 39 may patch SwBlockVolume metadata.finalizers, SwBlockVolume/status,
-and Kubernetes Events.
+Phase 39 may patch SwBlockVolume/status and Kubernetes Events.
+
+Finalizer mutation is currently design-blocked. Kubernetes CRDs do not expose a
+usable HTTP `/finalizers` endpoint, and patching `metadata.finalizers` on the
+main CRD object requires main `patch swblockvolumes` RBAC. The original target
+of "RBAC narrowed to finalizers + status + events" is therefore not viable for
+CRD finalizers.
 
 Phase 39 must not delete PVC/PV/Pods/Deployments/StorageClasses, run cleanup
 scripts, change Helm releases, import images, touch iSCSI/multipath/dmsetup,
@@ -55,7 +60,7 @@ remove hostPath data, promote/fence/rebuild/failback, or mutate storage.
 Goal: define exactly what the finalizer owns and which facts are required before
 it can release deletion.
 
-Status: dev-complete; QA/internal review pending.
+Status: design-blocked by live QA.
 
 Acceptance:
 
@@ -111,7 +116,8 @@ Status: dev-complete; QA/internal review pending.
 Acceptance:
 
 ```text
-[x] operator can patch SwBlockVolume metadata.finalizers only
+[ ] operator can patch SwBlockVolume metadata.finalizers under an approved
+      boundary model
 [x] operator cannot patch spec, PVC/PV, pods, deployments, storageclasses,
       secrets, nodes, iSCSI, multipath, hostPath, or Helm resources
 [x] finalizer is added idempotently to managed SwBlockVolume objects
@@ -131,7 +137,7 @@ kubectl auth can-i boundary sweep
 
 Goal: prove deletion is held when residue or insufficient evidence exists.
 
-Status: dev-complete; QA/live validation pending.
+Status: blocked by finalizer mutation design.
 
 Acceptance:
 
@@ -154,7 +160,7 @@ live CRD delete attempt if lab is available
 
 Goal: prove deletion completes only when cleanup evidence is clean.
 
-Status: component-complete; QA/live validation pending.
+Status: blocked by finalizer mutation design.
 
 Acceptance:
 
@@ -206,7 +212,7 @@ Acceptance:
 
 ```text
 [ ] D1-D6 pass
-[ ] RBAC grants only finalizer/status/event writes
+[ ] approved finalizer mutation boundary is implemented and proven live
 [ ] no storage/workload/host mutation is introduced
 [ ] QA validates blocked-delete, clean-delete, and multi-volume isolation gates
 [ ] finished plan records non-claims and follow-ups
@@ -265,6 +271,11 @@ QA strict rerun from clean lab
   `swblockvolumes/finalizers` but sends the merge patch to the main
   SwBlockVolume resource URL with a body containing only
   `metadata.finalizers`. Awaiting QA re-validation.
+- 80% blocked: QA re-validation of `b371e2e` proved the deeper issue. The
+  corrected main-object patch is rejected with HTTP 403 because Kubernetes
+  authorizes it as main `patch swblockvolumes`; the
+  `swblockvolumes/finalizers` grant cannot authorize CRD finalizer mutation.
+  D4/D5 stay blocked until we choose a new boundary model.
 
 ## Prerequisites / Risks
 
@@ -274,12 +285,35 @@ QA strict rerun from clean lab
   behavior is to block deletion with evidence and a safe next step.
 - Finalizer behavior must be idempotent; retries and repeated reconciles are
   expected.
-- Kubernetes CRDs do not expose a `/finalizers` subresource. The operator must
-  use the main object URL for `metadata.finalizers`, while authorization remains
-  scoped to the `swblockvolumes/finalizers` resource. Tests and QA must keep
-  verifying that the patch body never contains `spec` or unrelated metadata.
+- Kubernetes CRDs do not expose a usable HTTP `/finalizers` subresource. A
+  finalizer patch must use the main object URL and therefore requires main
+  `patch swblockvolumes` authorization. This invalidates the original
+  RBAC-only boundary assumption.
+- Do not broaden operator-status RBAC to main `patch swblockvolumes` as a
+  local fix. That would make the safety boundary code-enforced only. If Phase
+  39 continues with operator-owned CRD finalizers, pair main patch RBAC with an
+  admission boundary and a live/envtest regression. Otherwise defer finalizer
+  mutation to the component that owns the `SwBlockVolume` lifecycle.
+
+## Design Decision Required
+
+Choose one before resuming D4/D5:
+
+1. **Admission-bounded operator finalizer.** Grant operator-status main
+   `patch/update swblockvolumes`, then add a ValidatingAdmissionPolicy or
+   webhook that rejects any operator-status write touching `.spec` or metadata
+   outside `metadata.finalizers`. This is the quickest way to finish Phase 39,
+   but the boundary moves from RBAC-only to admission + tests.
+2. **Lifecycle-owner finalizer.** Keep operator-status status/events-only and
+   move finalizer add/remove to the component that owns `SwBlockVolume` object
+   creation and lifecycle. This preserves the read-only operator-status model,
+   but it is a larger ownership change because `SwBlockVolume` objects are not
+   yet automatically created by CSI.
+3. **Code-only main patch.** Grant main patch and rely only on the controller
+   implementation to avoid spec writes. This is not recommended.
 
 ## Next Step
 
-Send the D4/D5 endpoint fix to QA for re-validation. After D4/D5 pass, add D6
-multi-volume isolation and close-gate assignment.
+Stop D6. Decide between admission-bounded operator finalizers and
+lifecycle-owner finalizers. After that, update RBAC/tests/QA gates and re-run
+D4/D5 live against the real API and real ServiceAccount.

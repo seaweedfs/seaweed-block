@@ -520,10 +520,13 @@ product risk. The recommended order is:
    Future actions now have facts, preconditions, invariants, allowed executor,
    policy gate, evidence, and allow/reject decisions. It includes both a dry-run
    action gate and a rejected-action gate.
-3. **Phase 39: Finalizer/delete safety.** Active.
-   First mutating lifecycle slice. It should remove or block deletion with clear
-   status when PVC/CRD teardown would leave iSCSI, multipath, hostPath, or
-   generated workload residue.
+3. **Phase 39: Finalizer/delete safety.** Design-blocked.
+   First mutating lifecycle slice. Live QA proved the original RBAC-only
+   boundary is not viable for CRD finalizers: CRDs have no usable HTTP
+   `/finalizers` endpoint, so `metadata.finalizers` changes require main
+   `patch swblockvolumes` authorization. Phase 39 must choose either an
+   admission-bounded main-object patch or moving finalizer ownership to the
+   component that owns `SwBlockVolume` lifecycle before D4/D5 can close.
 4. **Upgrade/rollback drift status.**
    Report desired/current image/chart/controller drift before executing
    upgrades.
@@ -541,8 +544,10 @@ Approximate engineering effort if scope remains tight:
   projection tests, and live TestOps gates. Low mutation risk.
 - Lifecycle action model review: medium. Mostly design and tests, but it should
   block later mutating work from scattering logic across listeners/scripts.
-- Finalizer/delete safety: medium/high. First real mutation path; needs careful
-  idempotency, residue gates, rollback behavior, and shared-cluster safety.
+- Finalizer/delete safety: medium/high. First real mutation path; now includes
+  a Kubernetes authorization-boundary decision. Admission-bounded operator
+  finalizers are the shorter path; lifecycle-owner finalizers are cleaner but
+  require stronger `SwBlockVolume` object ownership first.
 - Rebuild/failback: high. Requires storage semantics, authority/fencing,
   returned-replica state, and long-running failure gates.
 - Backup/snapshot/restore: high. Requires durable data semantics and user-facing
@@ -570,7 +575,8 @@ Approximate engineering effort if scope remains tight:
   negative node evidence remains Phase 37.
 - Phase 37 Live Node Evidence Hardening is closed.
 - Phase 38 Lifecycle Action Model Executable Contract is closed.
-- Active work is Phase 39 Finalizer/Delete Safety.
+- Active work is Phase 39 Finalizer/Delete Safety, currently design-blocked by
+  CRD finalizer authorization semantics.
 - Do not start NVMe ANA parity, rebuild/failback, backup/restore, or mutating
   operator workflows by extending Phase 39. Pick those as separate gated
   phases after finalizer/delete safety closes.

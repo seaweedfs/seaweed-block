@@ -1,6 +1,12 @@
 # Phase 39 D4/D5 QA Assignment: Finalizer Delete Safety
 
-Status: ready for QA.
+Status: paused/design-blocked.
+
+Live QA on `b371e2e` proved this gate cannot pass with the current boundary:
+CRD finalizer mutation requires main `patch swblockvolumes` authorization, and
+`swblockvolumes/finalizers` RBAC alone cannot authorize the patch. Do not rerun
+D4/D5 until the implementation chooses either an admission-bounded main-object
+patch or a lifecycle-owner finalizer design.
 
 Source branch: `phase33-testops-failure-hardening`.
 
