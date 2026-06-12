@@ -135,7 +135,7 @@ kubectl auth can-i boundary sweep: status/events yes, finalizers/spec/workloads 
 Goal: prove residue or insufficient evidence becomes blocked delete-safety
 status with non-mutating next steps.
 
-Status: ready for QA after status-only pivot.
+Status: enum fix dev-complete; QA rerun pending.
 
 Acceptance:
 
@@ -275,6 +275,11 @@ QA strict rerun from clean lab
   finalizer executor and `swblockvolumes/finalizers` RBAC are removed. Phase 39
   will close, if QA agrees, as delete-safety status/events only; actual
   finalizer ownership moves to a future lifecycle-owner phase.
+- 88%: D4/D5 status-only QA on `4a51bae` passed RBAC and D5, but D4 exposed a
+  CRD schema enum gap: `SwBlockVolume.status.allowedActions[].mode` rejected
+  `scripted` even though blocked delete-safety emits `observe.verify_cleanup
+  mode=scripted`. Added `scripted` to the volume allowedActions mode enum and a
+  schema regression test. D4 live rerun is pending.
 
 ## Prerequisites / Risks
 
@@ -309,7 +314,7 @@ Rejected paths:
 
 ## Next Step
 
-Ask QA to validate D4/D5 with
+Ask QA to re-run D4 from
 `internal/docs/qa-assignments/phase39-d4-d5-finalizer-delete-safety-qa.md`.
-After D4/D5 pass, run D6 with
+D5 already passed on the status-only path. After D4 passes, run D6 with
 `internal/docs/qa-assignments/phase39-d6-multi-volume-delete-safety-status-isolation-qa.md`.

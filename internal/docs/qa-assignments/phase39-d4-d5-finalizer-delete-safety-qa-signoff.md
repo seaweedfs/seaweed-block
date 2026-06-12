@@ -244,3 +244,90 @@ is a design decision (admission-bounded main patch, or move finalizer ownership)
 not a one-line fix. Do not close D4/D5 or advance to D6 until the operator can
 actually add the finalizer to a fresh `SwBlockVolume` and remove it from a
 terminating one, proven live with its real RBAC.
+
+---
+
+## STATUS-ONLY RE-VALIDATION (`4a51bae`, floor `1630de2`) — D5 PASS, D4 BLOCKED (new 422)
+
+Product pivoted to **status/events-only** (my Option 2): the operator no longer
+patches finalizers; finalizer add/remove is deferred to a future lifecycle-owner.
+Verified in code: no `EnsureVolumeFinalizer`/`ReleaseVolumeFinalizer` calls in the
+controller, and the RBAC `swblockvolumes/finalizers` grant is **removed**.
+
+### RBAC boundary — PASS (status-only)
+
+```text
+patch swblockvolumes --subresource=status: yes   create events: yes
+patch swblockvolumes (main): no                  patch swblockvolumes --subresource=finalizers: no
+patch pods: no   patch pvc (default): no   update storageclasses: no
+```
+
+Status + events only; finalizers grant gone; no spec/pod/PVC/storageclass power.
+The 403 problem is correctly avoided by **not attempting** the mutation.
+
+### D5 — Clean Delete-Safety Status — PASS
+
+Bundle (`delete_requested=true` + `cleanup_status=ok`, all residue 0):
+
+```text
+operator_status=write_status ... volumes=1 events=3 finalizer_patches=0 mutation_allowed=false
+SwBlockVolume.status.deleteSafety: state=releasable decision=allowed finalizerReleaseAllowed=true
+metadata.finalizers: (empty)   no finalizer patch, no finalizer-released Event
+idempotent: re-run keeps state=releasable
+```
+
+All D5 criteria met: `releasable`/`allowed`, `finalizerReleaseAllowed=true` as a
+**decision fact only**, `finalizer_patches=0`, idempotent, final verifier
+`cleanup_status=ok`. PASS.
+
+### D4 — Blocked Delete-Safety Status — BLOCKED (new live-vs-mock 422)
+
+Bundle (`delete_requested=true` + `cleanup_status=failed iscsi_residue_count=1`).
+The blocked state's safe action is `observe.verify_cleanup` (`mode=scripted`), and
+writing it into `SwBlockVolume.status.allowedActions[]` is rejected:
+
+```text
+patch swblockvolumes/del-vol status failed: http 422
+  status.allowedActions[1].mode: Unsupported value: "scripted":
+  supported values: "read_only", "dry_run"
+```
+
+So the entire blocked status patch fails — `deleteSafety`, the `CleanupRequired`
+condition, and the verify_cleanup action never land. Root cause: the
+`SwBlockVolume` CRD `status.allowedActions[].mode` enum is `{read_only, dry_run}`
+(`crds/swblockvolumes...yaml:165-166`) and is **missing `scripted`**, even though
+the `SwBlockCluster` CRD `safeNextSteps[].mode` enum **does** include `scripted`
+(`crds/swblockclusters...yaml:265`). The blocked delete-safety projection puts the
+`scripted` verify_cleanup action onto the volume's `allowedActions`, which the
+volume enum rejects.
+
+This is the same class as the D3 casing 422 and the Phase 37 node-condition 422:
+a payload the unit-test mock accepts but the live CRD schema rejects.
+
+**Fix:** add `scripted` to the `SwBlockVolume.status.allowedActions[].mode` enum
+(one line, mirroring the cluster `safeNextSteps` enum). Then re-run D4 live; the
+blocked status should land with `deleteSafety.state=blocked decision=rejected`,
+`CleanupRequired=True`, and the `observe.verify_cleanup mutationAllowed=false`
+action.
+
+### Status-only gate status
+
+| Gate | Result |
+|---|---|
+| RBAC boundary (status-only, no finalizers) | PASS |
+| D4 blocked delete-safety status | **BLOCKED** — `allowedActions[].mode=scripted` 422 |
+| D5 clean delete-safety status | PASS |
+| Final cleanup verifier | PASS (`cleanup_status=ok`, residue 0) |
+| Lab: tp01 | still `NotReady`/unreachable |
+
+### Bottom line (status-only)
+
+The status-only pivot is the right call and is mostly working: the RBAC is
+provably read-only (no finalizers), D5 projects `releasable/allowed` cleanly with
+zero finalizer patches, and idempotency holds. **D4 is blocked by a one-line CRD
+enum gap** — `scripted` is missing from the SwBlockVolume `allowedActions[].mode`
+enum, so the blocked-delete status (which surfaces the scripted verify_cleanup
+action) 422s and never lands. Add `scripted` to that enum, re-run D4, **then** D6
+multi-volume status isolation. Recommend the live/envtest regression for the
+status writer once more — it would have caught this 422 (and the prior 404/403)
+before handoff.

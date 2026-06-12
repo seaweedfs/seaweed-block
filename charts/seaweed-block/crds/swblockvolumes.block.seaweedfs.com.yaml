@@ -164,6 +164,7 @@ spec:
                         enum:
                           - read_only
                           - dry_run
+                          - scripted
                       sideEffectClass:
                         type: string
                       ownerExecutor:

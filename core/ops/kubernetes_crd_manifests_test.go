@@ -161,6 +161,12 @@ func TestPhase38D3SwBlockVolumeAllowedActionEvaluationSchema(t *testing.T) {
 	if _, ok := actionProperties["evidence_required"]; ok {
 		t.Fatalf("SwBlockVolume.status.allowedActions[] schema leaked snake_case evidence_required")
 	}
+	modeEnum := yamlStringSet(t, yamlMap(t, actionProperties, "mode"), "enum")
+	for _, want := range []string{"read_only", "dry_run", "scripted"} {
+		if !modeEnum[want] {
+			t.Fatalf("SwBlockVolume.status.allowedActions[].mode enum missing %s: %+v", want, modeEnum)
+		}
+	}
 }
 
 func TestPhase39D2SwBlockVolumeDeleteSafetySchema(t *testing.T) {
