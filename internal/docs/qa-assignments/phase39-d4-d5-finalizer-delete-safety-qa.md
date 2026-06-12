@@ -1,47 +1,42 @@
-# Phase 39 D4/D5 QA Assignment: Finalizer Delete Safety
+# Phase 39 D4/D5 QA Assignment: Delete-Safety Status Boundary
 
-Status: paused/design-blocked.
+Status: ready for QA after the lifecycle-owner pivot.
 
-Live QA on `b371e2e` proved this gate cannot pass with the current boundary:
-CRD finalizer mutation requires main `patch swblockvolumes` authorization, and
-`swblockvolumes/finalizers` RBAC alone cannot authorize the patch. Do not rerun
-D4/D5 until the implementation chooses either an admission-bounded main-object
-patch or a lifecycle-owner finalizer design.
-
-Source branch: `phase33-testops-failure-hardening`.
-
-Required source floor:
-
-- `7143c8f phase39: define delete safety contract`
-- `fd3977b phase39: project delete safety status`
-- `3340038 phase39: add finalizer mutation boundary`
-- `07c50d3 phase39: gate blocked delete finalizer hold`
-- `a90dda3 phase39: gate clean delete finalizer release`
+Live QA on `b371e2e` proved CRD finalizer mutation cannot be bounded by
+`swblockvolumes/finalizers` RBAC alone. The chosen product direction is:
+operator-status remains status/events-only, while actual finalizer add/remove is
+deferred to a future component that owns the `SwBlockVolume` lifecycle.
 
 ## Goal
 
-Validate the first bounded mutating operator path:
+Validate that delete-safety remains observable and actionable without granting
+operator-status any finalizer, spec, workload, storage, or host mutation power.
+
+The controller may write:
+
+```text
+SwBlockCluster/status
+SwBlockVolume/status
+Kubernetes Events
+```
+
+It must not write:
 
 ```text
 SwBlockVolume.metadata.finalizers
+SwBlockVolume.spec
+PVC/PV/Pod/Deployment/StorageClass/Secret/Node resources
+iSCSI/multipath/dmsetup/hostPath/Helm/storage state
 ```
-
-The operator may add or remove only
-`block.seaweedfs.com/swblockvolume-protection`. It must not delete or mutate
-PVCs, PVs, Pods, Deployments, StorageClasses, Helm releases, images, iSCSI,
-multipath, dmsetup, hostPath, replica authority, rebuild/failback, backup, or
-restore state.
 
 ## Preflight
 
-Use a clean lab. If multi-node gates are run, restore `tp01` first; Phase 38 QA
-reported it as `NotReady`/unreachable.
+Use a clean lab. If multi-node gates are run, restore `tp01` first; Phase 38/39
+QA previously reported it as `NotReady`/unreachable.
 
-Render and install with operator-status write mode:
+Install with operator-status write mode:
 
 ```bash
-helm template sw-block charts/seaweed-block --namespace kube-system --include-crds \
-  --set operatorStatus.create=true --set operatorStatus.dryRun=false >/tmp/sw-block-phase39.yaml
 helm install sw-block charts/seaweed-block --namespace kube-system \
   --create-namespace -f values.day1.yaml \
   --set operatorStatus.create=true \
@@ -52,11 +47,13 @@ helm install sw-block charts/seaweed-block --namespace kube-system \
 Confirm RBAC:
 
 ```bash
-kubectl auth can-i patch swblockvolumes --subresource=finalizers \
-  --as system:serviceaccount:kube-system:sw-block-operator-status -n kube-system
 kubectl auth can-i patch swblockvolumes --subresource=status \
   --as system:serviceaccount:kube-system:sw-block-operator-status -n kube-system
 kubectl auth can-i create events \
+  --as system:serviceaccount:kube-system:sw-block-operator-status -n kube-system
+kubectl auth can-i patch swblockvolumes \
+  --as system:serviceaccount:kube-system:sw-block-operator-status -n kube-system
+kubectl auth can-i patch swblockvolumes --subresource=finalizers \
   --as system:serviceaccount:kube-system:sw-block-operator-status -n kube-system
 kubectl auth can-i patch pods \
   --as system:serviceaccount:kube-system:sw-block-operator-status -n kube-system
@@ -68,71 +65,45 @@ kubectl auth can-i update storageclasses \
 
 Expected:
 
-- finalizers/status/events: `yes`,
-- pods/PVC/storageclasses: `no`.
+- status/events: `yes`,
+- main `swblockvolumes`, finalizers, pods/PVC/storageclasses: `no`.
 
-Note: Kubernetes CRDs do not expose a `/finalizers` subresource. Finalizer-only
-changes are main-object merge patches containing only
-`{"metadata":{"finalizers":[...]}}`, while RBAC remains scoped to the
-`swblockvolumes/finalizers` subresource. QA must still confirm the operator
-never patches `spec`.
+## D4: Blocked Delete-Safety Status
 
-## D4: Blocked Delete Holds Finalizer
-
-Create a `SwBlockVolume` stub for a known managed volume and let the operator add
-the finalizer.
-
-Then inject delete-safety evidence with residue, for example a bundle or status
-source containing:
+Feed delete-safety evidence with residue, for example:
 
 ```text
-swblockvolume-delete-summary.txt
-cleanup-summary.txt
-```
-
-Minimum delete artifact:
-
-```text
+swblockvolume-delete-summary.txt:
 delete_requested=true
 finalizer_present=true
 volume_id=<volume-id>
 pvc_name=<pvc-name>
 pv_name=<pv-name>
-```
 
-Minimum cleanup residue artifact:
-
-```text
+cleanup-summary.txt:
 cleanup_status=failed
 iscsi_residue_count=1
 reason_codes=iscsi_node_records_present
 ```
 
-Delete the `SwBlockVolume` object:
-
-```bash
-kubectl -n kube-system delete swblockvolume <name> --wait=false
-```
-
 Pass criteria:
 
-- object remains with `metadata.deletionTimestamp` and the Seaweed Block
-  finalizer still present,
-- `status.deleteSafety.state=blocked`,
-- `status.deleteSafety.decision=rejected`,
-- `status.deleteSafety.reason` is the verifier reason or `cleanup_required`,
+- `SwBlockVolume.status.deleteSafety.state=blocked`,
+- `SwBlockVolume.status.deleteSafety.decision=rejected`,
+- reason is the verifier reason or `cleanup_required`,
 - `status.conditions[]` includes `CleanupRequired=True`,
 - safe next action is `observe.verify_cleanup` or collect bundle with
   `mutationAllowed=false`,
-- no `finalizer_released` Event appears,
-- repeated reconcile does not duplicate the finalizer or mint unbounded
-  finalizer-added Events,
+- no `Ready=True` or executed/released mutation claim appears,
+- `operator_status=... finalizer_patches=0`,
+- no finalizer-added or finalizer-released Events appear,
+- repeated reconcile does not mint unbounded Events,
 - no PVC/PV/Pod/Deployment/StorageClass/iSCSI/multipath/dmsetup/hostPath
-  mutation is performed by the operator.
+  mutation is performed by operator-status.
 
-## D5: Clean Delete Releases Finalizer
+## D5: Clean Delete-Safety Status
 
-Use the same object shape, but provide clean cleanup evidence:
+Feed clean cleanup evidence:
 
 ```text
 delete_requested=true
@@ -149,26 +120,25 @@ hostpath_residue_count=0
 failure_count=0
 ```
 
-Delete the `SwBlockVolume` object:
-
-```bash
-kubectl -n kube-system delete swblockvolume <name> --wait=true --timeout=2m
-```
-
 Pass criteria:
 
-- `status.deleteSafety.state=releasable` and `decision=allowed` are observed
-  before deletion when possible,
-- `finalizer_released` Event is emitted once,
-- the Seaweed Block finalizer is removed,
-- the `SwBlockVolume` object deletion completes,
-- repeated reconcile is idempotent if the object still exists during the window,
+- `SwBlockVolume.status.deleteSafety.state=releasable`,
+- `SwBlockVolume.status.deleteSafety.decision=allowed`,
+- `finalizerReleaseAllowed=true` is visible as a decision fact only,
+- no finalizer patch is attempted and no finalizer-released Event is emitted,
+- `operator_status=... finalizer_patches=0`,
+- repeated reconcile is idempotent,
 - final cleanup verifier returns `cleanup_status=ok`,
 - all residue counters are zero.
 
+## D6 Preview: Multi-Volume Status Isolation
+
+Do not test finalizer add/remove. Test that delete-safety evidence for volume A
+does not change volume B/C status, identity, publish target, or Events.
+
 ## Report
 
-Write the sign-off to:
+Write or update the sign-off at:
 
 ```text
 internal/docs/qa-assignments/phase39-d4-d5-finalizer-delete-safety-qa-signoff.md
@@ -179,9 +149,9 @@ Required verdict fields:
 - source commit,
 - lab node health, especially `tp01`,
 - RBAC boundary result,
-- D4 blocked delete result,
-- D5 clean delete result,
+- D4 blocked delete-safety status result,
+- D5 clean delete-safety status result,
 - final cleanup audit,
 - blocking findings,
 - non-blocking findings,
-- recommendation for D6 multi-volume isolation.
+- recommendation for D6 multi-volume status isolation.

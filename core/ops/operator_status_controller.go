@@ -23,11 +23,6 @@ type OperatorStatusWriter interface {
 	WriteVolumeStatus(ctx context.Context, ref OperatorObjectRef, status SwBlockVolumeCRDStatus) error
 }
 
-type OperatorFinalizerClient interface {
-	EnsureVolumeFinalizer(ctx context.Context, ref OperatorObjectRef, finalizer string) (bool, error)
-	ReleaseVolumeFinalizer(ctx context.Context, ref OperatorObjectRef, finalizer string) (bool, error)
-}
-
 type OperatorEventSink interface {
 	EmitEvent(ctx context.Context, event OperatorKubernetesEvent) error
 }
@@ -274,7 +269,6 @@ type OperatorStatusReconciler struct {
 	Source      OperatorStatusSource
 	Writer      OperatorStatusWriter
 	EventSink   OperatorEventSink
-	Finalizers  OperatorFinalizerClient
 	Now         func() time.Time
 }
 
@@ -358,24 +352,6 @@ func (r OperatorStatusReconciler) Reconcile(ctx context.Context) (OperatorStatus
 			return OperatorStatusReconcileResult{}, err
 		}
 		result.VolumeRefs = append(result.VolumeRefs, volumeRef)
-		patched, finalizerReason, err := r.reconcileVolumeFinalizer(ctx, volumeRef, volume.Status.DeleteSafety)
-		if err != nil {
-			return OperatorStatusReconcileResult{}, err
-		}
-		if patched {
-			result.FinalizerPatchCount++
-			if r.EventSink != nil {
-				if err := r.EventSink.EmitEvent(ctx, OperatorKubernetesEvent{
-					InvolvedObject: volumeRef,
-					Type:           "Normal",
-					Reason:         finalizerReason,
-					Message:        "SwBlockVolume finalizer metadata updated",
-					ObservedAt:     observedAt,
-				}); err == nil {
-					result.EventCount++
-				}
-			}
-		}
 		if r.EventSink == nil {
 			continue
 		}
@@ -393,18 +369,6 @@ func (r OperatorStatusReconciler) Reconcile(ctx context.Context) (OperatorStatus
 		}
 	}
 	return result, nil
-}
-
-func (r OperatorStatusReconciler) reconcileVolumeFinalizer(ctx context.Context, ref OperatorObjectRef, decision *SwBlockVolumeDeleteSafetyDecision) (bool, string, error) {
-	if r.Finalizers == nil {
-		return false, "", nil
-	}
-	if decision != nil && decision.FinalizerReleaseAllowed {
-		patched, err := r.Finalizers.ReleaseVolumeFinalizer(ctx, ref, SwBlockVolumeFinalizerName)
-		return patched, ReasonDeleteFinalizerReleased, err
-	}
-	patched, err := r.Finalizers.EnsureVolumeFinalizer(ctx, ref, SwBlockVolumeFinalizerName)
-	return patched, ReasonDeleteFinalizerAdded, err
 }
 
 func swBlockVolumeCRDDeleteSafety(decision *SwBlockVolumeDeleteSafetyDecision) *SwBlockVolumeCRDDeleteSafety {

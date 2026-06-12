@@ -95,11 +95,10 @@ preserve that model rather than add isolated scripts or separate status systems.
 
 Recommended order from here:
 
-1. Resolve finalizer/delete safety as the first mutating operator slice.
-   Current finding: CRD finalizers cannot be protected by
-   `swblockvolumes/finalizers` RBAC alone; the project must choose either an
-   admission-bounded main-object patch or move finalizer ownership to the
-   component that owns `SwBlockVolume` lifecycle.
+1. Close delete-safety status first, then add finalizer ownership in a later
+   lifecycle-owner slice. Current finding: CRD finalizers cannot be protected by
+   `swblockvolumes/finalizers` RBAC alone, so operator-status remains
+   status/events-only instead of taking main `patch swblockvolumes`.
 2. Add upgrade/rollback drift status before upgrade execution.
 3. Add returned-replica rebuild/failback, backup/restore, and NVMe ANA parity
    only after the status/action model stays stable.

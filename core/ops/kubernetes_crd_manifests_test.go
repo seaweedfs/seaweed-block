@@ -179,7 +179,7 @@ func TestPhase39D2SwBlockVolumeDeleteSafetySchema(t *testing.T) {
 	}
 }
 
-func TestPhase39D3OperatorStatusRBACIsStatusEventsAndFinalizersOnly(t *testing.T) {
+func TestOperatorStatusRBACIsStatusEventsOnly(t *testing.T) {
 	raw := readRepoFile(t, "charts/seaweed-block/templates/operator-status-rbac.yaml")
 	required := []string{
 		`resources: ["nodes", "pods"]`,
@@ -188,7 +188,6 @@ func TestPhase39D3OperatorStatusRBACIsStatusEventsAndFinalizersOnly(t *testing.T
 		`verbs: ["get", "list", "watch"]`,
 		`resources: ["swblockclusters/status", "swblockvolumes/status"]`,
 		`verbs: ["get", "update", "patch"]`,
-		`resources: ["swblockvolumes/finalizers"]`,
 		`resources: ["events"]`,
 		`verbs: ["create"]`,
 	}
@@ -203,6 +202,7 @@ func TestPhase39D3OperatorStatusRBACIsStatusEventsAndFinalizersOnly(t *testing.T
 		`resources: ["deployments"`,
 		`resources: ["secrets"`,
 		`resources: ["storageclasses"`,
+		`resources: ["swblockvolumes/finalizers"]`,
 		`"delete"`,
 	} {
 		if strings.Contains(raw, forbidden) {

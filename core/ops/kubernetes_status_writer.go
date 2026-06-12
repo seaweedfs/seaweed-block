@@ -23,8 +23,8 @@ const (
 	serviceAccountCAPath    = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
 )
 
-// KubernetesStatusClient patches CRD status and SwBlockVolume metadata.finalizers.
-// It deliberately has no methods for spec, workload, PVC/PV, Secret,
+// KubernetesStatusClient patches CRD status and emits Kubernetes Events. It
+// deliberately has no methods for spec, finalizers, workload, PVC/PV, Secret,
 // StorageClass, or host mutation.
 type KubernetesStatusClient struct {
 	BaseURL     string
@@ -65,98 +65,6 @@ func (c *KubernetesStatusClient) WriteClusterStatus(ctx context.Context, ref Ope
 
 func (c *KubernetesStatusClient) WriteVolumeStatus(ctx context.Context, ref OperatorObjectRef, status SwBlockVolumeCRDStatus) error {
 	return c.patchStatus(ctx, ref.Namespace, SwBlockVolumePlural, ref.Name, status)
-}
-
-func (c *KubernetesStatusClient) EnsureVolumeFinalizer(ctx context.Context, ref OperatorObjectRef, finalizer string) (bool, error) {
-	finalizers, err := c.readVolumeFinalizers(ctx, ref)
-	if err != nil {
-		return false, err
-	}
-	if stringContains(finalizers, finalizer) {
-		return false, nil
-	}
-	finalizers = append(finalizers, finalizer)
-	if err := c.patchVolumeFinalizers(ctx, ref, finalizers); err != nil {
-		return false, err
-	}
-	return true, nil
-}
-
-func (c *KubernetesStatusClient) ReleaseVolumeFinalizer(ctx context.Context, ref OperatorObjectRef, finalizer string) (bool, error) {
-	finalizers, err := c.readVolumeFinalizers(ctx, ref)
-	if err != nil {
-		return false, err
-	}
-	next := finalizers[:0]
-	removed := false
-	for _, existing := range finalizers {
-		if existing == finalizer {
-			removed = true
-			continue
-		}
-		next = append(next, existing)
-	}
-	if !removed {
-		return false, nil
-	}
-	if err := c.patchVolumeFinalizers(ctx, ref, next); err != nil {
-		return false, err
-	}
-	return true, nil
-}
-
-func stringContains(values []string, want string) bool {
-	for _, value := range values {
-		if value == want {
-			return true
-		}
-	}
-	return false
-}
-
-func (c *KubernetesStatusClient) readVolumeFinalizers(ctx context.Context, ref OperatorObjectRef) ([]string, error) {
-	var object struct {
-		Metadata struct {
-			Finalizers []string `json:"finalizers"`
-		} `json:"metadata"`
-	}
-	if err := c.getJSON(ctx, c.resourcePath(ref.Namespace, SwBlockVolumePlural, ref.Name), &object); err != nil {
-		return nil, err
-	}
-	return append([]string(nil), object.Metadata.Finalizers...), nil
-}
-
-func (c *KubernetesStatusClient) patchVolumeFinalizers(ctx context.Context, ref OperatorObjectRef, finalizers []string) error {
-	if ref.Namespace == "" || ref.Name == "" {
-		return fmt.Errorf("namespace and name are required for finalizer patch")
-	}
-	body, err := json.Marshal(map[string]any{"metadata": map[string]any{"finalizers": finalizers}})
-	if err != nil {
-		return fmt.Errorf("marshal finalizer patch: %w", err)
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, c.resourceURL(ref.Namespace, SwBlockVolumePlural, ref.Name), bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("Content-Type", "application/merge-patch+json")
-	if c.BearerToken != "" {
-		req.Header.Set("Authorization", "Bearer "+c.BearerToken)
-	}
-	client := c.HTTPClient
-	if client == nil {
-		client = http.DefaultClient
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		return nil
-	}
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-	return fmt.Errorf("patch %s/%s finalizers failed: http %d %s", SwBlockVolumePlural, ref.Name, resp.StatusCode, strings.TrimSpace(string(raw)))
 }
 
 func (c *KubernetesStatusClient) patchStatus(ctx context.Context, namespace, resource, name string, status any) error {

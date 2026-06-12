@@ -1,5 +1,11 @@
 # QA Sign-off - Phase 39 D4/D5 Finalizer Delete Safety
 
+> Superseded by the lifecycle-owner pivot after `d695c0a`. The findings below
+> remain valid evidence that operator-status must not own CRD finalizer mutation
+> under the old RBAC model. The revised Phase 39 gate is now delete-safety
+> status/events only; finalizer add/remove is deferred to a future lifecycle
+> owner.
+
 Verdict: **STILL BLOCKED (after `b371e2e`).** The URL bug is fixed — the operator
 now PATCHes the main `SwBlockVolume` object (no `/finalizers` 404) — but that
 exposed the deeper, definitive problem I flagged as the RBAC follow-on: the patch
