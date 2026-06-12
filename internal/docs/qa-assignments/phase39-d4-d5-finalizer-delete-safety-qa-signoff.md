@@ -331,3 +331,48 @@ action) 422s and never lands. Add `scripted` to that enum, re-run D4, **then** D
 multi-volume status isolation. Recommend the live/envtest regression for the
 status writer once more — it would have caught this 422 (and the prior 404/403)
 before handoff.
+
+---
+
+## D4 RE-RUN (`f167f9a`) — PASS
+
+`f167f9a phase39: allow scripted volume actions` adds `scripted` to the
+`SwBlockVolume.status.allowedActions[].mode` enum (now `read_only, dry_run,
+scripted`, mirroring the cluster `safeNextSteps` enum). Re-ran D4 live (re-imported
+the existing image — binary unchanged — and re-installed with the updated CRD):
+
+```text
+operator_status=write_status ... volumes=1 events=3 finalizer_patches=0 mutation_allowed=false  EXIT=0
+SwBlockVolume.status.deleteSafety: state=blocked decision=rejected reason=iscsi_node_records_present
+condition CleanupRequired: True / iscsi_node_records_present
+allowedActions[observe.verify_cleanup]: mode=scripted mutationAllowed=false
+metadata.finalizers: (empty)        Ready=True conditions: 0
+idempotent: 3 reconciles -> state stays blocked, 2 distinct Events (bounded, not per-reconcile growth)
+no finalizer-added/released Events
+final cleanup verifier: cleanup_status=ok, residue 0
+```
+
+All D4 status-only criteria are met: `blocked`/`rejected` with the verifier
+reason, `CleanupRequired=True`, the `observe.verify_cleanup` action surfaces with
+`mode=scripted mutationAllowed=false` (no longer 422), no `Ready=True`,
+`finalizer_patches=0`, no finalizer Events, bounded Events on repeat, and no
+storage/workload/host mutation. PASS.
+
+### Final Phase 39 D4/D5 status (status-only path)
+
+| Gate | Result |
+|---|---|
+| RBAC boundary (status-only, no finalizers) | PASS |
+| D4 blocked delete-safety status | **PASS** (`f167f9a`) |
+| D5 clean delete-safety status | PASS |
+| Final cleanup verifier | PASS |
+| Lab: tp01 | still `NotReady`/unreachable |
+
+**D4 and D5 both pass on the status-only path.** The operator surfaces
+delete-safety (`blocked`/`releasable`, decision, `CleanupRequired`, the scripted
+verify_cleanup action, `finalizerReleaseAllowed` as a fact) and emits Events,
+with **zero finalizer/spec/storage/workload mutation** and an RBAC boundary that
+proves it. **Phase 39 D4/D5 can close; proceed to D6 multi-volume status
+isolation** (restore tp01 first if D6 exercises multiple nodes). Still recommend
+adding the live/envtest status-writer regression — it would have caught the
+404/403/422 chain before each handoff.

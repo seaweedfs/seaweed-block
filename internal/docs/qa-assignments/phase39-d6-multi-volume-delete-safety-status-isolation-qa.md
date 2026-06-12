@@ -1,7 +1,10 @@
 # Phase 39 D6 QA Assignment: Multi-Volume Delete-Safety Status Isolation
 
-Status: pending; run only after D4/D5 status-boundary validation passes on
-`1630de2` or newer.
+Status: ready for QA. D4/D5 status-boundary validation passed on `f167f9a`.
+
+Required source floor:
+
+- `f167f9a phase39: allow scripted volume actions`
 
 ## Goal
 

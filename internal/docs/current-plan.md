@@ -135,7 +135,7 @@ kubectl auth can-i boundary sweep: status/events yes, finalizers/spec/workloads 
 Goal: prove residue or insufficient evidence becomes blocked delete-safety
 status with non-mutating next steps.
 
-Status: enum fix dev-complete; QA rerun pending.
+Status: QA PASS on `f167f9a`.
 
 Acceptance:
 
@@ -159,7 +159,7 @@ live CRD status/event check if lab is available
 Goal: prove clean evidence becomes releasable delete-safety status without
 claiming that operator-status removes finalizers or completes deletion.
 
-Status: ready for QA after status-only pivot.
+Status: QA PASS on status-only path.
 
 Acceptance:
 
@@ -182,7 +182,7 @@ cleanup verifier on m01/m02/tp01 if lab is healthy
 
 Goal: prove delete-safety for one volume does not affect unrelated volumes.
 
-Status: pending.
+Status: ready for QA; restore `tp01` first for 3-node validation.
 
 Acceptance:
 
@@ -280,6 +280,12 @@ QA strict rerun from clean lab
   `scripted` even though blocked delete-safety emits `observe.verify_cleanup
   mode=scripted`. Added `scripted` to the volume allowedActions mode enum and a
   schema regression test. D4 live rerun is pending.
+- 92%: D4 re-run on `f167f9a` passed. The blocked path now writes
+  `deleteSafety.state=blocked`, `decision=rejected`,
+  `CleanupRequired=True`, and `observe.verify_cleanup mode=scripted
+  mutationAllowed=false` with `finalizer_patches=0`. D4 and D5 both pass on the
+  status-only path. Proceed to D6 multi-volume status isolation after `tp01` is
+  restored if the gate exercises three nodes.
 
 ## Prerequisites / Risks
 
@@ -314,7 +320,6 @@ Rejected paths:
 
 ## Next Step
 
-Ask QA to re-run D4 from
-`internal/docs/qa-assignments/phase39-d4-d5-finalizer-delete-safety-qa.md`.
-D5 already passed on the status-only path. After D4 passes, run D6 with
+Run D6 with
 `internal/docs/qa-assignments/phase39-d6-multi-volume-delete-safety-status-isolation-qa.md`.
+Restore `tp01` first if D6 uses the 3-node RF=3 lab.
