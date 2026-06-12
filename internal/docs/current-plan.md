@@ -130,11 +130,12 @@ helm template/lint with updated RBAC
 kubectl auth can-i boundary sweep: status/events yes, finalizers/spec/workloads no
 ```
 
-## D4: Delete Block Gate
+## D4: Delete-Safety Blocked Status Gate
 
-Goal: prove deletion is held when residue or insufficient evidence exists.
+Goal: prove residue or insufficient evidence becomes blocked delete-safety
+status with non-mutating next steps.
 
-Status: needs QA update after status-only pivot.
+Status: ready for QA after status-only pivot.
 
 Acceptance:
 
@@ -153,11 +154,12 @@ TestOps/from-bundle delete-residue scenario
 live CRD status/event check if lab is available
 ```
 
-## D5: Delete Release Gate
+## D5: Delete-Safety Releasable Status Gate
 
-Goal: prove deletion completes only when cleanup evidence is clean.
+Goal: prove clean evidence becomes releasable delete-safety status without
+claiming that operator-status removes finalizers or completes deletion.
 
-Status: needs QA update after status-only pivot.
+Status: ready for QA after status-only pivot.
 
 Acceptance:
 
@@ -196,13 +198,14 @@ Acceptance:
 Verification:
 
 ```text
-TestOps multi-volume delete-safety scenario
+internal/docs/qa-assignments/phase39-d6-multi-volume-delete-safety-status-isolation-qa.md
 ```
 
 ## D7: Close Gate
 
-Goal: close Phase 39 only after the first mutating operator path is proven
-bounded, idempotent, observable, and residue-safe.
+Goal: close Phase 39 only after the delete-safety status path is proven
+bounded, idempotent, observable, and residue-safe without widening
+operator-status mutation power.
 
 Status: pending.
 
@@ -253,14 +256,15 @@ QA strict rerun from clean lab
 - 70%: D5 component gate projected releasable delete-safety status from clean
   evidence. The finalizer-release part of the gate is now deferred to a future
   lifecycle owner.
-- 78%: D4/D5 live QA handoff ready. The QA assignment covers RBAC,
-  blocked-delete finalizer hold, clean-delete finalizer release, object deletion
-  completion, final cleanup verification, and the `tp01` lab-health caveat.
+- 78%: D4/D5 live QA handoff ready under the original finalizer design. That
+  assignment is superseded by the status-only assignment after the
+  lifecycle-owner pivot.
 - 80%: D4/D5 live QA found the first bug: the client patched a nonexistent
   `/finalizers` URL for CRDs. The fix keeps RBAC scoped to
   `swblockvolumes/finalizers` but sends the merge patch to the main
   SwBlockVolume resource URL with a body containing only
-  `metadata.finalizers`. Awaiting QA re-validation.
+  `metadata.finalizers`. Follow-up QA then exposed the deeper 403 boundary
+  issue below.
 - 80% blocked: QA re-validation of `b371e2e` proved the deeper issue. The
   corrected main-object patch is rejected with HTTP 403 because Kubernetes
   authorizes it as main `patch swblockvolumes`; the
@@ -305,8 +309,7 @@ Rejected paths:
 
 ## Next Step
 
-Ask QA to validate the revised Phase 39 boundary: operator-status writes
-delete-safety status/events, has no finalizer/spec/workload mutation RBAC, and
-does not attempt finalizer patches during blocked or releasable delete-safety
-states. Then update D6 as a multi-volume status-isolation gate, not a finalizer
-mutation gate.
+Ask QA to validate D4/D5 with
+`internal/docs/qa-assignments/phase39-d4-d5-finalizer-delete-safety-qa.md`.
+After D4/D5 pass, run D6 with
+`internal/docs/qa-assignments/phase39-d6-multi-volume-delete-safety-status-isolation-qa.md`.

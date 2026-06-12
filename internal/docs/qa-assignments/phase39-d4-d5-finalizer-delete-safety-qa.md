@@ -2,6 +2,10 @@
 
 Status: ready for QA after the lifecycle-owner pivot.
 
+Required source floor:
+
+- `1630de2 phase39: keep delete safety status-only`
+
 Live QA on `b371e2e` proved CRD finalizer mutation cannot be bounded by
 `swblockvolumes/finalizers` RBAC alone. The chosen product direction is:
 operator-status remains status/events-only, while actual finalizer add/remove is
