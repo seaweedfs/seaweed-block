@@ -350,6 +350,9 @@ func validateOpenAPISubset(schema map[string]any, value any, path string) error 
 		}
 		properties, _ := schema["properties"].(map[string]any)
 		for key, child := range valueMap {
+			if child == nil {
+				continue
+			}
 			childSchema, ok := properties[key].(map[string]any)
 			if !ok {
 				continue

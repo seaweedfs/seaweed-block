@@ -1,6 +1,6 @@
 # Current Plan: Phase 40 - Operator Production Hardening
 
-Status: active, 14% complete. Started on 2026-06-13.
+Status: active, 28% complete. Started on 2026-06-13.
 
 Branch: `phase33-testops-failure-hardening`
 
@@ -95,15 +95,17 @@ helm template with operatorStatus.create=true dryRun=false
 
 Goal: remove known confusing status leftovers without changing product scope.
 
+Status: dev-complete; QA/internal review pending.
+
 Acceptance:
 
 ```text
-[ ] stale deleteSafety is cleared or marked not_requested when current delete
+[x] stale deleteSafety is cleared or marked not_requested when current delete
       evidence disappears
-[ ] non-healthy node status has one effective Ready condition per node surface
-[ ] Events stay bounded and remain stable per object/reason/type
-[ ] report, dashboard, operator-snapshot, and CRD agree after each polish
-[ ] no new mutating action or RBAC grant is introduced
+[x] non-healthy node status has one effective Ready condition per node surface
+[x] Events stay bounded and remain stable per object/reason/type
+[x] report, dashboard, operator-snapshot, and CRD agree after each polish
+[x] no new mutating action or RBAC grant is introduced
 ```
 
 Verification:
@@ -250,6 +252,12 @@ release PR or explicit hold note
   status patches, scripted actions, deleteSafety, Events, duplicate-event
   idempotency, and negative cases for snake_case payload drift, unsupported
   condition enums, main-resource patches, and finalizer endpoint usage.
+- 28%: D2 dev-complete. Volume status now emits `deleteSafety:null` when no
+  current delete evidence exists so Kubernetes merge-patch clears stale
+  delete-safety state. Node readiness projection now replaces old `Ready`
+  conditions with one computed authoritative `Ready` condition, while keeping
+  non-Ready conditions. Existing stable event identity remains covered by D1
+  and writer tests.
 
 ## Prerequisites / Risks
 

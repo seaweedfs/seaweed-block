@@ -222,7 +222,7 @@ type SwBlockVolumeCRDStatus struct {
 	ReasonCode     string                        `json:"reasonCode,omitempty"`
 	ObservedAt     time.Time                     `json:"observedAt,omitempty"`
 	Conditions     []ObservationCondition        `json:"conditions,omitempty"`
-	DeleteSafety   *SwBlockVolumeCRDDeleteSafety `json:"deleteSafety,omitempty"`
+	DeleteSafety   *SwBlockVolumeCRDDeleteSafety `json:"deleteSafety"`
 	NonClaims      []string                      `json:"nonClaims,omitempty"`
 	EvidenceRefs   []string                      `json:"evidenceRefs,omitempty"`
 	AllowedActions []SwBlockVolumeCRDAction      `json:"allowedActions,omitempty"`
@@ -468,7 +468,7 @@ func nodeHasConditionReason(node NodeEvidence, reason string) bool {
 }
 
 func nodeReadinessConditions(node NodeEvidence, status, reason string) []ObservationCondition {
-	conditions := append([]ObservationCondition(nil), node.Conditions...)
+	conditions := removeConditionType(node.Conditions, ConditionReady)
 	switch status {
 	case ManagedVolumeStatusReady:
 		return ensureCondition(conditions, ObservationCondition{
@@ -509,6 +509,20 @@ func nodeReadinessConditions(node NodeEvidence, status, reason string) []Observa
 			Message:  "node readiness evidence is insufficient",
 		})
 	}
+}
+
+func removeConditionType(conditions []ObservationCondition, typ string) []ObservationCondition {
+	if len(conditions) == 0 {
+		return nil
+	}
+	out := make([]ObservationCondition, 0, len(conditions))
+	for _, condition := range conditions {
+		if condition.Type == typ {
+			continue
+		}
+		out = append(out, condition)
+	}
+	return out
 }
 
 func ensureCondition(conditions []ObservationCondition, condition ObservationCondition) []ObservationCondition {

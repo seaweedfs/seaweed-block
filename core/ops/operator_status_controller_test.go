@@ -226,6 +226,43 @@ func TestOperatorStatusReconcilerProjectsImageMissingNodeAsBlocked(t *testing.T)
 	}
 }
 
+func TestPhase40D2NodeReadinessReplacesStaleReadyCondition(t *testing.T) {
+	source := fakeOperatorStatusSource{cluster: ClusterEvidence{
+		SchemaVersion: ObservationSchemaVersion,
+		CapturedAt:    time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC),
+		Status:        ObservationStatusOK,
+		Nodes: []NodeEvidence{{
+			NodeName:    "m02",
+			Schedulable: true,
+			Ready:       true,
+			MissingImages: []string{
+				"sw-block-csi:local",
+			},
+			Conditions: []ObservationCondition{
+				{Type: ConditionReady, Status: "True", Reason: ReasonNodeReady, Severity: "info"},
+				{Type: ConditionReady, Status: "Unknown", Reason: ReasonNodeNotReady, Severity: "warning"},
+			},
+		}},
+	}}
+	writer := &fakeOperatorStatusWriter{}
+
+	_, err := (OperatorStatusReconciler{
+		Source: source,
+		Writer: writer,
+	}).Reconcile(context.Background())
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if len(writer.cluster.Nodes) != 1 {
+		t.Fatalf("cluster nodes=%+v", writer.cluster.Nodes)
+	}
+	node := writer.cluster.Nodes[0]
+	assertCondition(t, node.Conditions, ConditionReady, "False", ReasonImageMissingOnNode)
+	if got := countConditionsByType(node.Conditions, ConditionReady); got != 1 {
+		t.Fatalf("Ready conditions=%d want 1: %+v", got, node.Conditions)
+	}
+}
+
 func TestOperatorStatusReconcilerStaleEvidenceProjectsUnknownAndWarningEvent(t *testing.T) {
 	source := fakeOperatorStatusSource{cluster: ClusterEvidence{
 		SchemaVersion: ObservationSchemaVersion,
@@ -732,6 +769,23 @@ func TestOperatorStatusReconcilerDeleteSafetyDoesNotContaminateOtherVolumes(t *t
 	}
 }
 
+func TestPhase40D2VolumeStatusClearsStaleDeleteSafety(t *testing.T) {
+	status := SwBlockVolumeCRDStatus{
+		VolumeID:     "pvc-ready",
+		PVCName:      "ready-pvc",
+		Status:       ManagedVolumeStatusReady,
+		ReasonCode:   ReasonFirstVolumeVerified,
+		DeleteSafety: nil,
+	}
+	raw, err := json.Marshal(status)
+	if err != nil {
+		t.Fatalf("marshal status: %v", err)
+	}
+	if !strings.Contains(string(raw), `"deleteSafety":null`) {
+		t.Fatalf("status patch must clear stale deleteSafety with null: %s", string(raw))
+	}
+}
+
 func TestSwBlockVolumeObjectNameIsDNSLabelLike(t *testing.T) {
 	cases := map[string]string{
 		"Demo_PVC":      "demo-pvc",
@@ -820,4 +874,14 @@ func assertCondition(t *testing.T, conditions []ObservationCondition, typ, statu
 	if condition.Status != status || condition.Reason != reason {
 		t.Fatalf("%s condition=%+v want status=%s reason=%s", typ, *condition, status, reason)
 	}
+}
+
+func countConditionsByType(conditions []ObservationCondition, typ string) int {
+	count := 0
+	for _, condition := range conditions {
+		if condition.Type == typ {
+			count++
+		}
+	}
+	return count
 }
