@@ -38,6 +38,9 @@ const (
 	ReasonLoopbackFrontendRejected        = "loopback_frontend_rejected"
 	ReasonStalePrimaryFenced              = "stale_primary_fenced"
 	ReasonWALIntegrityFault               = "wal_integrity_fault"
+	ReasonInstallDriftAligned             = "install_drift_aligned"
+	ReasonInstallDriftMismatch            = "install_drift_mismatch"
+	ReasonInstallDriftEvidenceMissing     = "install_drift_evidence_missing"
 
 	EventTypeCSIReattachObserved = "csi_reattach_observed"
 )
@@ -60,9 +63,27 @@ type ClusterEvidence struct {
 	Volumes         []VolumeEvidence          `json:"volumes"`
 	ManagedVolumes  []ManagedVolumeProjection `json:"managed_volumes,omitempty"`
 	Cleanup         *CleanupEvidence          `json:"cleanup,omitempty"`
+	InstallDrift    *InstallDriftEvidence     `json:"install_drift,omitempty"`
 	Conditions      []ObservationCondition    `json:"conditions,omitempty"`
 	Events          []ClusterEvent            `json:"events,omitempty"`
 	NonClaims       []string                  `json:"non_claims,omitempty"`
+}
+
+type InstallDriftEvidence struct {
+	Status               string `json:"status"`
+	ReasonCode           string `json:"reason_code,omitempty"`
+	ChartName            string `json:"chart_name,omitempty"`
+	CurrentChartVersion  string `json:"current_chart_version,omitempty"`
+	DesiredChartVersion  string `json:"desired_chart_version,omitempty"`
+	CurrentAppVersion    string `json:"current_app_version,omitempty"`
+	DesiredAppVersion    string `json:"desired_app_version,omitempty"`
+	CurrentImage         string `json:"current_image,omitempty"`
+	DesiredImage         string `json:"desired_image,omitempty"`
+	CurrentCSIImage      string `json:"current_csi_image,omitempty"`
+	DesiredCSIImage      string `json:"desired_csi_image,omitempty"`
+	CurrentOperatorImage string `json:"current_operator_image,omitempty"`
+	DesiredOperatorImage string `json:"desired_operator_image,omitempty"`
+	EvidenceRef          string `json:"evidence_ref,omitempty"`
 }
 
 type CleanupEvidence struct {

@@ -47,6 +47,7 @@ type SwBlockClusterCRDStatus struct {
 	EvidenceRefs       []string               `json:"evidenceRefs,omitempty"`
 	SupportBundleRefs  []string               `json:"supportBundleRefs,omitempty"`
 	Cleanup            *SwBlockCleanupStatus  `json:"cleanup,omitempty"`
+	InstallDrift       *SwBlockInstallDrift   `json:"installDrift,omitempty"`
 	SafeNextSteps      []SwBlockSafeNextStep  `json:"safeNextSteps,omitempty"`
 	MutationAllowed    bool                   `json:"mutationAllowed"`
 	AllowedActionModes []string               `json:"allowedActionModes,omitempty"`
@@ -91,6 +92,23 @@ type SwBlockCleanupStatus struct {
 	EvidenceRef            string   `json:"evidenceRef,omitempty"`
 }
 
+type SwBlockInstallDrift struct {
+	Status               string `json:"status"`
+	ReasonCode           string `json:"reasonCode,omitempty"`
+	ChartName            string `json:"chartName,omitempty"`
+	CurrentChartVersion  string `json:"currentChartVersion,omitempty"`
+	DesiredChartVersion  string `json:"desiredChartVersion,omitempty"`
+	CurrentAppVersion    string `json:"currentAppVersion,omitempty"`
+	DesiredAppVersion    string `json:"desiredAppVersion,omitempty"`
+	CurrentImage         string `json:"currentImage,omitempty"`
+	DesiredImage         string `json:"desiredImage,omitempty"`
+	CurrentCSIImage      string `json:"currentCsiImage,omitempty"`
+	DesiredCSIImage      string `json:"desiredCsiImage,omitempty"`
+	CurrentOperatorImage string `json:"currentOperatorImage,omitempty"`
+	DesiredOperatorImage string `json:"desiredOperatorImage,omitempty"`
+	EvidenceRef          string `json:"evidenceRef,omitempty"`
+}
+
 func swBlockCleanupStatus(cleanup *CleanupEvidence) *SwBlockCleanupStatus {
 	if cleanup == nil {
 		return nil
@@ -106,6 +124,28 @@ func swBlockCleanupStatus(cleanup *CleanupEvidence) *SwBlockCleanupStatus {
 		FailedPhase:            cleanup.FailedPhase,
 		ReasonCodes:            append([]string(nil), cleanup.ReasonCodes...),
 		EvidenceRef:            cleanup.EvidenceRef,
+	}
+}
+
+func swBlockInstallDriftStatus(drift *InstallDriftEvidence) *SwBlockInstallDrift {
+	if drift == nil {
+		return nil
+	}
+	return &SwBlockInstallDrift{
+		Status:               drift.Status,
+		ReasonCode:           drift.ReasonCode,
+		ChartName:            drift.ChartName,
+		CurrentChartVersion:  drift.CurrentChartVersion,
+		DesiredChartVersion:  drift.DesiredChartVersion,
+		CurrentAppVersion:    drift.CurrentAppVersion,
+		DesiredAppVersion:    drift.DesiredAppVersion,
+		CurrentImage:         drift.CurrentImage,
+		DesiredImage:         drift.DesiredImage,
+		CurrentCSIImage:      drift.CurrentCSIImage,
+		DesiredCSIImage:      drift.DesiredCSIImage,
+		CurrentOperatorImage: drift.CurrentOperatorImage,
+		DesiredOperatorImage: drift.DesiredOperatorImage,
+		EvidenceRef:          drift.EvidenceRef,
 	}
 }
 
@@ -125,6 +165,9 @@ func supportBundleRefsFromCluster(cluster ClusterEvidence) []string {
 	}
 	if cluster.Cleanup != nil {
 		add(cluster.Cleanup.EvidenceRef)
+	}
+	if cluster.InstallDrift != nil {
+		add(cluster.InstallDrift.EvidenceRef)
 	}
 	for _, volume := range cluster.Volumes {
 		add(volume.SupportBundleHint)
@@ -324,6 +367,7 @@ func (r OperatorStatusReconciler) Reconcile(ctx context.Context) (OperatorStatus
 		clusterStatus.EvidenceRefs = append(clusterStatus.EvidenceRefs, snapshot.Cluster.Cleanup.EvidenceRef)
 	}
 	clusterStatus.Cleanup = swBlockCleanupStatus(snapshot.Cluster.Cleanup)
+	clusterStatus.InstallDrift = swBlockInstallDriftStatus(snapshot.Cluster.InstallDrift)
 	if err := r.Writer.WriteClusterStatus(ctx, clusterRef, clusterStatus); err != nil {
 		return OperatorStatusReconcileResult{}, err
 	}

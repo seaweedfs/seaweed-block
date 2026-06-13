@@ -141,6 +141,13 @@ func TestPhase36D1SwBlockClusterActionabilitySchema(t *testing.T) {
 		}
 	}
 
+	installDriftProperties := yamlMap(t, yamlMap(t, statusProperties, "installDrift"), "properties")
+	for _, want := range []string{"status", "reasonCode", "currentImage", "desiredImage", "currentCsiImage", "desiredCsiImage", "evidenceRef"} {
+		if _, ok := installDriftProperties[want]; !ok {
+			t.Fatalf("SwBlockCluster.status.installDrift schema missing %s", want)
+		}
+	}
+
 	stepProperties := yamlMap(t, yamlMap(t, yamlMap(t, statusProperties, "safeNextSteps"), "items"), "properties")
 	for _, want := range []string{"type", "mode", "command", "reasonCode", "mutationAllowed", "evidenceRefs"} {
 		if _, ok := stepProperties[want]; !ok {

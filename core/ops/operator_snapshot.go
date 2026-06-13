@@ -29,6 +29,7 @@ type OperatorClusterStatus struct {
 	BlockedVolumeCount int                    `json:"blocked_volume_count"`
 	StaleVolumeCount   int                    `json:"stale_volume_count"`
 	Cleanup            *CleanupEvidence       `json:"cleanup,omitempty"`
+	InstallDrift       *InstallDriftEvidence  `json:"install_drift,omitempty"`
 	SupportBundleRefs  []string               `json:"support_bundle_refs,omitempty"`
 	SafeNextSteps      []OperatorSafeNextStep `json:"safe_next_steps,omitempty"`
 	Conditions         []ObservationCondition `json:"conditions,omitempty"`
@@ -81,6 +82,7 @@ func BuildOperatorFoundationSnapshot(cluster ClusterEvidence) OperatorFoundation
 				"no_failback",
 				"no_delete",
 				"no_cleanup_mutation",
+				"no_upgrade_execution",
 			},
 		},
 		CRDContract: ManagedVolumeCRDContractDefinition(),
@@ -89,6 +91,7 @@ func BuildOperatorFoundationSnapshot(cluster ClusterEvidence) OperatorFoundation
 			NodeCount:         len(cluster.Nodes),
 			Nodes:             operatorNodeStatuses(cluster.Nodes),
 			Cleanup:           cluster.Cleanup,
+			InstallDrift:      cluster.InstallDrift,
 			SupportBundleRefs: supportRefs,
 			SafeNextSteps:     operatorSafeNextSteps(safeNextStepsFromCluster(cluster, supportRefs)),
 			Conditions:        append([]ObservationCondition(nil), cluster.Conditions...),
@@ -120,6 +123,9 @@ func BuildOperatorFoundationSnapshot(cluster ClusterEvidence) OperatorFoundation
 		})
 	}
 	if condition := cleanupCondition(cluster.Cleanup); condition != nil {
+		snapshot.Cluster.Conditions = ensureCondition(snapshot.Cluster.Conditions, *condition)
+	}
+	if condition := installDriftCondition(cluster.InstallDrift); condition != nil {
 		snapshot.Cluster.Conditions = ensureCondition(snapshot.Cluster.Conditions, *condition)
 	}
 	return snapshot

@@ -153,6 +153,43 @@ deployment.apps/sw-block-csi-controller 1/1 1 1 2m3s block-csi sw-block-csi:loca
 	}
 }
 
+func TestObservationBundle_ReplaysInstallDriftSummary(t *testing.T) {
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "demo", ObservationInstallDriftArtifact), strings.Join([]string{
+		"chart_name=seaweed-block",
+		"current_chart_version=0.3.5",
+		"desired_chart_version=0.4.0",
+		"current_image=sw-block:old",
+		"desired_image=sw-block:new",
+		"current_csi_image=sw-block-csi:old",
+		"desired_csi_image=sw-block-csi:new",
+	}, "\n"))
+
+	cluster, err := BuildObservationFromBundle(ObservationBundleOptions{Dir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cluster.InstallDrift == nil || cluster.InstallDrift.Status != InstallDriftStatusMismatch {
+		t.Fatalf("install drift=%+v", cluster.InstallDrift)
+	}
+	snapshot := BuildOperatorFoundationSnapshot(cluster)
+	if snapshot.Cluster.InstallDrift == nil || snapshot.Cluster.InstallDrift.ReasonCode != ReasonInstallDriftMismatch {
+		t.Fatalf("snapshot install drift=%+v", snapshot.Cluster.InstallDrift)
+	}
+	assertCondition(t, snapshot.Cluster.Conditions, ConditionBlocked, "True", ReasonInstallDriftMismatch)
+	summary := RenderObservationReportSummary(cluster)
+	for _, want := range []string{
+		"install_drift_status=mismatch reason=install_drift_mismatch evidence=",
+		"install-drift-summary.txt",
+		"install_drift_chart current=0.3.5 desired=0.4.0",
+		"install_drift_image current=sw-block:old desired=sw-block:new csi_current=sw-block-csi:old csi_desired=sw-block-csi:new",
+	} {
+		if !strings.Contains(summary, want) {
+			t.Fatalf("summary missing %q:\n%s", want, summary)
+		}
+	}
+}
+
 func TestObservationBundle_ManagedVolumeUsesPrimaryFailureArtifactHints(t *testing.T) {
 	dir := t.TempDir()
 	productDir := filepath.Join(dir, "demo", "product-observation")

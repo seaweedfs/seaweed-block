@@ -59,6 +59,15 @@ func TestPhase40D1KubernetesStatusClientConformsToCRDSchemaAndRBAC(t *testing.T)
 			ReasonCodes:       []string{"iscsi_node_records_present"},
 			EvidenceRef:       "cleanup-summary.txt",
 		},
+		InstallDrift: &SwBlockInstallDrift{
+			Status:          InstallDriftStatusMismatch,
+			ReasonCode:      ReasonInstallDriftMismatch,
+			CurrentImage:    "sw-block:old",
+			DesiredImage:    "sw-block:new",
+			CurrentCSIImage: "sw-block-csi:old",
+			DesiredCSIImage: "sw-block-csi:new",
+			EvidenceRef:     "install-drift-summary.txt",
+		},
 		SafeNextSteps: []SwBlockSafeNextStep{{
 			Type:            ManagedVolumeActionVerifyCleanup,
 			Mode:            ManagedVolumeActionModeScripted,

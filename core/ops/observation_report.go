@@ -59,6 +59,24 @@ func RenderObservationReportSummary(cluster ClusterEvidence) string {
 			fmt.Fprintf(&b, "%s\n", line)
 		}
 	}
+	if cluster.InstallDrift != nil {
+		fmt.Fprintf(&b, "install_drift_status=%s reason=%s evidence=%s\n",
+			emptyAsDash(cluster.InstallDrift.Status),
+			emptyAsDash(cluster.InstallDrift.ReasonCode),
+			emptyAsDash(cluster.InstallDrift.EvidenceRef))
+		fmt.Fprintf(&b, "install_drift_chart current=%s desired=%s app_current=%s app_desired=%s\n",
+			emptyAsDash(cluster.InstallDrift.CurrentChartVersion),
+			emptyAsDash(cluster.InstallDrift.DesiredChartVersion),
+			emptyAsDash(cluster.InstallDrift.CurrentAppVersion),
+			emptyAsDash(cluster.InstallDrift.DesiredAppVersion))
+		fmt.Fprintf(&b, "install_drift_image current=%s desired=%s csi_current=%s csi_desired=%s operator_current=%s operator_desired=%s\n",
+			emptyAsDash(cluster.InstallDrift.CurrentImage),
+			emptyAsDash(cluster.InstallDrift.DesiredImage),
+			emptyAsDash(cluster.InstallDrift.CurrentCSIImage),
+			emptyAsDash(cluster.InstallDrift.DesiredCSIImage),
+			emptyAsDash(cluster.InstallDrift.CurrentOperatorImage),
+			emptyAsDash(cluster.InstallDrift.DesiredOperatorImage))
+	}
 	supportRefs := supportBundleRefsFromCluster(cluster)
 	for _, ref := range supportRefs {
 		fmt.Fprintf(&b, "support_bundle_ref=%s\n", ref)
@@ -211,6 +229,25 @@ func RenderObservationReportHTML(cluster ClusterEvidence) string {
 			row.HostPathResidueCount,
 			row.FailureCount,
 			esc(row.EvidenceRef))
+		b.WriteString("</tbody></table></section>")
+	}
+
+	if cluster.InstallDrift != nil {
+		b.WriteString("<section><h2>Install Drift</h2><table><thead><tr><th>Status</th><th>Reason</th><th>Chart</th><th>App</th><th>Image</th><th>CSI Image</th><th>Operator Image</th><th>Evidence</th></tr></thead><tbody>")
+		fmt.Fprintf(&b, "<tr><td>%s</td><td>%s</td><td>%s -> %s</td><td>%s -> %s</td><td>%s -> %s</td><td>%s -> %s</td><td>%s -> %s</td><td>%s</td></tr>",
+			esc(emptyAsDash(cluster.InstallDrift.Status)),
+			esc(emptyAsDash(cluster.InstallDrift.ReasonCode)),
+			esc(emptyAsDash(cluster.InstallDrift.CurrentChartVersion)),
+			esc(emptyAsDash(cluster.InstallDrift.DesiredChartVersion)),
+			esc(emptyAsDash(cluster.InstallDrift.CurrentAppVersion)),
+			esc(emptyAsDash(cluster.InstallDrift.DesiredAppVersion)),
+			esc(emptyAsDash(cluster.InstallDrift.CurrentImage)),
+			esc(emptyAsDash(cluster.InstallDrift.DesiredImage)),
+			esc(emptyAsDash(cluster.InstallDrift.CurrentCSIImage)),
+			esc(emptyAsDash(cluster.InstallDrift.DesiredCSIImage)),
+			esc(emptyAsDash(cluster.InstallDrift.CurrentOperatorImage)),
+			esc(emptyAsDash(cluster.InstallDrift.DesiredOperatorImage)),
+			esc(emptyAsDash(cluster.InstallDrift.EvidenceRef)))
 		b.WriteString("</tbody></table></section>")
 	}
 

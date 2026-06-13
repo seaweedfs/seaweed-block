@@ -224,3 +224,27 @@ func TestOperatorFoundationSnapshot_IncludesSupportBundlePointers(t *testing.T) 
 		t.Fatalf("safe next step=%+v", step)
 	}
 }
+
+func TestOperatorFoundationSnapshot_IncludesInstallDrift(t *testing.T) {
+	cluster := NewClusterEvidence(time.Date(2026, 6, 13, 13, 0, 0, 0, time.UTC))
+	cluster.InstallDrift = &InstallDriftEvidence{
+		Status:          InstallDriftStatusMismatch,
+		ReasonCode:      ReasonInstallDriftMismatch,
+		CurrentImage:    "sw-block:old",
+		DesiredImage:    "sw-block:new",
+		CurrentCSIImage: "sw-block-csi:old",
+		DesiredCSIImage: "sw-block-csi:new",
+		EvidenceRef:     "install-drift-summary.txt",
+	}
+
+	snapshot := BuildOperatorFoundationSnapshot(cluster)
+	if snapshot.Cluster.InstallDrift == nil ||
+		snapshot.Cluster.InstallDrift.Status != InstallDriftStatusMismatch ||
+		snapshot.Cluster.InstallDrift.ReasonCode != ReasonInstallDriftMismatch {
+		t.Fatalf("install drift=%+v", snapshot.Cluster.InstallDrift)
+	}
+	if condition := findObservationCondition(snapshot.Cluster.Conditions, ConditionBlocked); condition == nil ||
+		condition.Reason != ReasonInstallDriftMismatch {
+		t.Fatalf("missing install drift condition: %+v", snapshot.Cluster.Conditions)
+	}
+}

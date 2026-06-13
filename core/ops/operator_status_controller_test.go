@@ -18,6 +18,15 @@ func TestOperatorStatusReconcilerWritesStatusOnlyProjection(t *testing.T) {
 			NodeName: "m02",
 			Ready:    true,
 		}},
+		InstallDrift: &InstallDriftEvidence{
+			Status:          InstallDriftStatusMismatch,
+			ReasonCode:      ReasonInstallDriftMismatch,
+			CurrentImage:    "sw-block:old",
+			DesiredImage:    "sw-block:new",
+			CurrentCSIImage: "sw-block-csi:old",
+			DesiredCSIImage: "sw-block-csi:new",
+			EvidenceRef:     "install-drift-summary.txt",
+		},
 		ManagedVolumes: []ManagedVolumeProjection{
 			ProjectManagedVolume(ManagedVolumeFacts{
 				VolumeID: "pvc-ready",
@@ -69,6 +78,15 @@ func TestOperatorStatusReconcilerWritesStatusOnlyProjection(t *testing.T) {
 	}
 	if writer.cluster.MutationAllowed {
 		t.Fatalf("cluster status must not allow mutation: %+v", writer.cluster)
+	}
+	if writer.cluster.InstallDrift == nil ||
+		writer.cluster.InstallDrift.Status != InstallDriftStatusMismatch ||
+		writer.cluster.InstallDrift.ReasonCode != ReasonInstallDriftMismatch ||
+		writer.cluster.InstallDrift.CurrentImage != "sw-block:old" ||
+		writer.cluster.InstallDrift.DesiredImage != "sw-block:new" ||
+		writer.cluster.InstallDrift.CurrentCSIImage != "sw-block-csi:old" ||
+		writer.cluster.InstallDrift.DesiredCSIImage != "sw-block-csi:new" {
+		t.Fatalf("install drift status=%+v", writer.cluster.InstallDrift)
 	}
 	if len(writer.cluster.Nodes) != 1 || writer.cluster.Nodes[0].Name != "m02" {
 		t.Fatalf("cluster nodes=%+v", writer.cluster.Nodes)

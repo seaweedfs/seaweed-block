@@ -1,6 +1,6 @@
 # Current Plan: Phase 40 - Operator Production Hardening
 
-Status: active, 28% complete. Started on 2026-06-13.
+Status: active, 42% complete. Started on 2026-06-13.
 
 Branch: `phase33-testops-failure-hardening`
 
@@ -121,15 +121,17 @@ event identity regression
 
 Goal: make install drift visible before implementing upgrade execution.
 
+Status: dev-complete; QA/internal review pending.
+
 Acceptance:
 
 ```text
-[ ] SwBlockCluster.status reports chart/app/operator image identity where
+[x] SwBlockCluster.status reports chart/app/operator image identity where
       evidence is available
-[ ] drift status distinguishes current, desired, missing, and mismatched images
-[ ] upgrade/rollback status is read-only and never runs helm/kubectl mutation
-[ ] report/dashboard/operator-snapshot show the same drift status
-[ ] non-claims explicitly state that upgrade execution is not implemented
+[x] drift status distinguishes current, desired, missing, and mismatched images
+[x] upgrade/rollback status is read-only and never runs helm/kubectl mutation
+[x] report/dashboard/operator-snapshot show the same drift status
+[x] non-claims explicitly state that upgrade execution is not implemented
 ```
 
 Verification:
@@ -258,6 +260,13 @@ release PR or explicit hold note
   conditions with one computed authoritative `Ready` condition, while keeping
   non-Ready conditions. Existing stable event identity remains covered by D1
   and writer tests.
+- 42%: D3 dev-complete. Added read-only install drift evidence from
+  `install-drift-summary.txt`, projecting current/desired chart, app,
+  blockvolume, CSI, and operator image identity into `SwBlockCluster.status`,
+  operator-snapshot, report summary, dashboard HTML, and from-bundle replay.
+  Drift can be `ok`, `mismatch`, or `unknown`; mismatch is negative-first
+  `Blocked=True`, missing evidence is `EvidenceStale=True`, and the operator
+  snapshot now explicitly carries `no_upgrade_execution`.
 
 ## Prerequisites / Risks
 

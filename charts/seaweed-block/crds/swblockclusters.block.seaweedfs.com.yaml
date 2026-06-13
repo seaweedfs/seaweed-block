@@ -246,6 +246,41 @@ spec:
                         type: string
                     evidenceRef:
                       type: string
+                installDrift:
+                  type: object
+                  properties:
+                    status:
+                      type: string
+                      enum:
+                        - ok
+                        - mismatch
+                        - unknown
+                    reasonCode:
+                      type: string
+                    chartName:
+                      type: string
+                    currentChartVersion:
+                      type: string
+                    desiredChartVersion:
+                      type: string
+                    currentAppVersion:
+                      type: string
+                    desiredAppVersion:
+                      type: string
+                    currentImage:
+                      type: string
+                    desiredImage:
+                      type: string
+                    currentCsiImage:
+                      type: string
+                    desiredCsiImage:
+                      type: string
+                    currentOperatorImage:
+                      type: string
+                    desiredOperatorImage:
+                      type: string
+                    evidenceRef:
+                      type: string
                 safeNextSteps:
                   type: array
                   items:

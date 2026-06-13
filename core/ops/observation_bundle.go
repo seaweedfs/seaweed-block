@@ -23,6 +23,7 @@ const (
 	ObservationHostPrereqArtifact     = "host-prereq-summary.txt"
 	ObservationLoopbackAttachArtifact = "unsupported-cross-node-loopback-attach.txt"
 	ObservationDeleteSafetyArtifact   = "swblockvolume-delete-summary.txt"
+	ObservationInstallDriftArtifact   = "install-drift-summary.txt"
 
 	NodeLossRecoverySummaryArtifact = "node-loss-recovery-summary.txt"
 	PrimaryFailureRecoveryArtifact  = "primary-failure-recovery.txt"
@@ -81,6 +82,11 @@ func BuildObservationFromBundle(opts ObservationBundleOptions) (ClusterEvidence,
 	cleanup, cleanupPath, _ := loadKeyValueArtifact(opts.Dir, ObservationCleanupSummaryArtifact)
 	if len(cleanup) > 0 {
 		cluster.Cleanup = CleanupEvidenceFromSummary(cleanup, cleanupPath)
+	}
+	installDrift, installDriftPath, _ := loadKeyValueArtifact(opts.Dir, ObservationInstallDriftArtifact)
+	if len(installDrift) > 0 {
+		cluster.InstallDrift = InstallDriftEvidenceFromSummary(installDrift, installDriftPath)
+		sourceLoaded = true
 	}
 	hostPrereq, hostPrereqPath, _ := loadTextArtifact(opts.Dir, ObservationHostPrereqArtifact)
 	if hostPrereq != "" {
