@@ -87,6 +87,12 @@ Seaweed Block can already demonstrate a narrow Kubernetes block-storage loop:
 - Executable lifecycle action contracts: dry-run actions can be allowed with
   evidence, unsafe/future-mutating actions are rejected with stable reasons, and
   CRD/report/dashboard/operator-snapshot surfaces agree on the decision.
+- Delete-safety status and cleanup-required visibility without finalizer or
+  cleanup mutation.
+- Install drift status for current versus desired chart/app/image identity
+  without upgrade execution.
+- CRD/RBAC status-writer conformance coverage for the failures that previously
+  escaped mock tests and only failed in live QA.
 
 The product model is converging around one read-only control-plane pattern:
 truth owners publish facts, the status layer aggregates judgment, executors stay
@@ -95,9 +101,10 @@ preserve that model rather than add isolated scripts or separate status systems.
 
 Recommended order from here:
 
-1. Harden the operator-status foundation as one release-sized slice. This
-   includes real CRD/RBAC status-writer conformance tests, stale-status polish,
-   bounded Events, upgrade/rollback drift status, and release-claim alignment.
+1. Finish and release the operator-status foundation as one release-sized
+   slice. This includes real CRD/RBAC status-writer conformance tests,
+   stale-status polish, bounded Events, install drift status, and release-claim
+   alignment.
 2. Cut a release after the operator-status foundation passes QA. This release
    should claim status/events-only visibility, not lifecycle mutation.
 3. Add finalizer ownership in a later lifecycle-owner slice. Current finding:

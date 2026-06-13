@@ -33,7 +33,7 @@ This is an **alpha** product path for supported lab clusters, not production.
 | Support-bundle replay | Available | Negative-first status reasons | Available |
 | Multi-volume RF=3 lab path | Gated | CSI reattach recovery | Gated |
 | iSCSI ALUA/dm-multipath mounted failover | Gated | Restart persistence with hostPath | Gated |
-| Actionable read-only CRD status + Events | Gated | Production operator lifecycle | Planned |
+| Actionable read-only CRD status + Events | Available | Production operator lifecycle | Planned |
 | Backup/snapshot/restore | Planned | Returned-replica rebuild/failback | Planned |
 | NVMe ANA parity | Planned | Production SLO/performance claims | Not claimed |
 
@@ -54,6 +54,8 @@ This is an **alpha** product path for supported lab clusters, not production.
   `SwBlockVolume` `.status` and Events on the gated operator-status path.
 - Inspect node readiness, support evidence refs, cleanup-required status, and
   safe read-only/scripted next-step hints through that same status model.
+- Inspect install drift status for current versus desired chart/app/image
+  identity. This is visibility only, not upgrade execution.
 - Replay support bundles offline.
 
 These are narrow alpha claims tied to documented gates. See
@@ -65,12 +67,15 @@ These are narrow alpha claims tied to documented gates. See
 - A production-grade operator or mutating admin workflow. The current
   operator-status controller is status/events only and does not create
   `SwBlockVolume` objects for you.
+- Finalizer ownership or automatic cleanup execution. Delete-safety and cleanup
+  are visible as status only.
 - Backup, snapshot, or restore.
 - Returned-replica rebuild, reintegration, or failback.
 - Transparent Kubernetes node-loss failover without pod recreate.
 - NVMe ANA parity for the transparent failover path.
 - Broad distro/kernel/initiator compatibility.
-- Broad upgrade/rollback safety beyond gated smoke paths.
+- Upgrade or rollback execution. The status layer can report install drift, but
+  it does not run Helm or kubectl mutations.
 
 ## Five-Minute Quick Start
 
@@ -137,7 +142,8 @@ Common read-only commands:
 
 Reports and dashboard expose `operator-snapshot.json`, a read-only status
 projection. The gated operator-status controller can publish that model into
-Kubernetes CRD `.status` and Events, but it has no mutating admin actions.
+Kubernetes CRD `.status` and Events, including node readiness, cleanup/delete
+safety, and install-drift visibility. It has no mutating admin actions.
 
 Support-bundle replay:
 

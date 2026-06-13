@@ -1,6 +1,6 @@
 # Current Plan: Phase 40 - Operator Production Hardening
 
-Status: active, 56% complete. Started on 2026-06-13.
+Status: active, 70% complete. Started on 2026-06-13.
 
 Branch: `phase33-testops-failure-hardening`
 
@@ -172,18 +172,20 @@ QA assignment with explicit pass/fail evidence paths
 Goal: prepare a coherent release boundary for the status-only operator
 foundation.
 
+Status: dev-complete; QA/PM review pending.
+
 Acceptance:
 
 ```text
-[ ] README/quickstart/release notes describe supported status-only operator
+[x] README/quickstart/release notes describe supported status-only operator
       behavior
-[ ] non-claims are visible: no finalizer owner, no automatic cleanup, no
+[x] non-claims are visible: no finalizer owner, no automatic cleanup, no
       upgrade execution, no repair/rebuild/failback, no backup/restore
-[ ] feature/status table reflects Helm, PVC, ops, CRD status, Events, node
+[x] feature/status table reflects Helm, PVC, ops, CRD status, Events, node
       evidence, delete-safety status, and known limitations
-[ ] release note names immutable image digest or clearly states local build
+[x] release note names immutable image digest or clearly states local build
       evidence if digest is pending
-[ ] PM/user wording distinguishes status visibility from lifecycle mutation
+[x] PM/user wording distinguishes status visibility from lifecycle mutation
 ```
 
 Verification:
@@ -274,6 +276,12 @@ release PR or explicit hold note
   scenario. The gate runs the CRD/RBAC conformance tests that catch casing
   drift, enum drift, wrong endpoint usage, RBAC broadening, and delete-safety
   status regressions, then emits a summary file for QA assertions.
+- 70%: D5 dev-complete. README, user capabilities, roadmap, release index, and
+  v0.4 beta-candidate notes now describe the status/events-only operator
+  foundation, delete-safety visibility, install drift visibility, CRD/RBAC
+  conformance gates, and explicit non-claims for finalizer ownership,
+  automatic cleanup, upgrade execution, repair/rebuild/failback, backup/restore,
+  and NVMe ANA parity.
 
 ## Prerequisites / Risks
 
@@ -287,7 +295,7 @@ release PR or explicit hold note
 
 ## Next Step
 
-Start D5 by aligning README, quickstart, release notes, and roadmap language to
-the status/events-only operator foundation. Keep the non-claims explicit: no
-finalizer owner, no automatic cleanup, no upgrade execution, no repair/rebuild,
-no failback, and no backup/restore.
+Start D6 by running the release-candidate gate: focused Go tests, Helm lint and
+template, the Phase 40 status API conformance gate, then QA minimal new-user and
+negative-status validation against the release image or a clearly identified
+local build if the immutable digest is still pending.

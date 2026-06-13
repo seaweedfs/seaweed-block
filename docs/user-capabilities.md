@@ -117,8 +117,34 @@ timeline.jsonl
 operator-snapshot.json
 ```
 
-`operator-snapshot.json` is a read-only status projection for future operator
-work. It is not a running controller manager and it does not permit mutations.
+`operator-snapshot.json` is a read-only status projection. By itself it is not
+a controller and it does not permit mutations.
+
+## Kubernetes-Native Status And Events
+
+The optional operator-status path can publish the same read-only model into
+Kubernetes:
+
+- `SwBlockCluster.status`
+- `SwBlockVolume.status`
+- Kubernetes Conditions
+- Kubernetes Events
+
+The controller is status/events-only. Its ServiceAccount is constrained to CRD
+read, CRD `/status` write, and Event create. It does not patch CRD spec, create
+PVCs, mutate workloads, own finalizers, run cleanup, or execute upgrades.
+
+Current status surfaces include:
+
+- volume readiness and stable reason codes,
+- node readiness and node blockers,
+- support evidence references,
+- cleanup-required and delete-safety visibility,
+- safe read-only/dry-run/scripted next-step hints,
+- install drift for current versus desired chart/app/image identity.
+
+Install drift is visibility only. It can report `ok`, `mismatch`, or `unknown`;
+it does not run Helm, kubectl, upgrade, or rollback commands.
 
 ## Support Bundle Replay
 
@@ -145,6 +171,11 @@ The current status model is negative-first:
   identify known blockers.
 - `EvidenceStale=True` or `Ready=Unknown` means evidence is stale, missing, or
   still reconverging; the product should not claim ready.
+- `CleanupRequired=True` means residue evidence exists; the operator suggests
+  scripted verification but does not clean automatically.
+- `install_drift_mismatch` means current install identity differs from desired
+  evidence; the operator reports the mismatch but does not execute upgrade or
+  rollback.
 - Cluster counters include `ready_volume_count`, `blocked_volume_count`, and
   `stale_volume_count`.
 
@@ -195,6 +226,9 @@ hostpath_residue_count=0
 - Not production-ready.
 - No production-grade operator or controller-manager lifecycle.
 - No mutating admin/operator/dashboard actions.
+- No finalizer ownership by operator-status.
+- No automatic cleanup execution.
+- No upgrade or rollback execution.
 - No promote, repair, rebuild, failback, delete, backup, restore, or cleanup
   mutation through UI/API/operator.
 - No backup/snapshot/restore workflow.
@@ -202,5 +236,5 @@ hostpath_residue_count=0
 - No transparent Kubernetes node-loss failover without pod recreate.
 - No NVMe ANA parity for the transparent failover path.
 - No broad distro/kernel/initiator compatibility matrix.
-- No broad upgrade/rollback safety beyond existing gated smoke paths.
+- No upgrade or rollback execution.
 - No performance, RTO, RPO, or SLO claim.

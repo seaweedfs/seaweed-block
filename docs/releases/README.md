@@ -53,8 +53,9 @@ is still outside the supported boundary.
 - `v0.4-beta-candidate` adds a Kubernetes-native read-only status foundation and
   actionability layer: `SwBlockCluster` and `SwBlockVolume` CRDs, status-only
   reconciliation, Conditions, Events, node readiness, support evidence refs,
-  cleanup visibility, safe next-step hints, cross-surface agreement, and
-  read-only RBAC proof. It is not a mutating operator lifecycle.
+  cleanup/delete-safety visibility, install drift visibility, safe next-step
+  hints, cross-surface agreement, CRD/RBAC conformance gates, and read-only RBAC
+  proof. It is not a mutating operator lifecycle.
 
 Mutating operator packaging is not included in these alphas. v0.3 introduces
 Helm as the preferred Kubernetes alpha install path; the script path remains
