@@ -1,6 +1,6 @@
 # Current Plan: Phase 40 - Operator Production Hardening
 
-Status: active, 70% complete. Started on 2026-06-13.
+Status: active, 78% complete. Started on 2026-06-13.
 
 Branch: `phase33-testops-failure-hardening`
 
@@ -199,6 +199,8 @@ QA minimal new-user walkthrough if release digest is available
 
 Goal: prove the release candidate from a user and QA perspective.
 
+Status: local gate passed; lab QA pending.
+
 Acceptance:
 
 ```text
@@ -207,7 +209,7 @@ Acceptance:
 [ ] operator-status CRDs show healthy volume status and Events
 [ ] negative status scenario shows no false Ready=True
 [ ] cleanup leaves zero residue
-[ ] conformance harness passes
+[x] conformance harness passes
 [ ] docs and claims match the tested image
 ```
 
@@ -282,6 +284,13 @@ release PR or explicit hold note
   conformance gates, and explicit non-claims for finalizer ownership,
   automatic cleanup, upgrade execution, repair/rebuild/failback, backup/restore,
   and NVMe ANA parity.
+- 78%: D6 local gate passed. Added `run-phase40-release-candidate-local.ps1`
+  and the D6 QA assignment. Local checks pass for Go release-scope tests, Helm
+  lint/template with operator-status write mode, Phase 40 status API
+  conformance, and `git diff --check`. Release remains held until QA completes
+  the lab gates for fresh Helm install, first PVC writer/reader, live
+  operator-status CRD/Event publication, negative status, and zero-residue
+  cleanup.
 
 ## Prerequisites / Risks
 
@@ -295,7 +304,6 @@ release PR or explicit hold note
 
 ## Next Step
 
-Start D6 by running the release-candidate gate: focused Go tests, Helm lint and
-template, the Phase 40 status API conformance gate, then QA minimal new-user and
-negative-status validation against the release image or a clearly identified
-local build if the immutable digest is still pending.
+Send `internal/docs/qa-assignments/phase40-d6-release-candidate-qa.md` to QA.
+Do not cut the release until the required lab gates pass against either the
+published release image digest or a clearly identified local build.
