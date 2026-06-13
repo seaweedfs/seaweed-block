@@ -1,330 +1,260 @@
-# Current Plan: Phase 39 - Finalizer / Delete Safety
+# Current Plan: Phase 40 - Operator Production Hardening
 
-Status: complete, 100%. Started on 2026-06-10; closed on 2026-06-13.
+Status: active, 0% complete. Started on 2026-06-13.
 
 Branch: `phase33-testops-failure-hardening`
 
-Previous phase: Phase 38 is closed in
-`internal/docs/finished-plans/phase38_finishedplan_lifecycle_action_model_executable_contract.md`.
+Previous phase: Phase 39 is closed in
+`internal/docs/finished-plans/phase39_finishedplan_delete_safety_status_boundary.md`.
 
 ## Product Goal
 
-Close the delete-safety status boundary while preserving the operator-status
-read-only posture.
+Make the operator-status foundation trustworthy enough to release and to build
+future lifecycle mutation on.
 
-Phases 35-38 established read-only CRD status, Events, live node evidence,
-support/cleanup visibility, and executable action decisions. Phase 39 validates
-that model against deletion evidence, but live QA proved `SwBlockVolume`
-finalizer mutation cannot be made RBAC-bounded for CRDs without granting main
-`patch swblockvolumes`. Phase 39 therefore keeps operator-status limited to
-status/events and moves finalizer mutation to a future lifecycle-owner phase.
+Phases 35-39 produced a useful read-only/status-only operator surface:
+`SwBlockCluster.status`, `SwBlockVolume.status`, Kubernetes Events, live node
+evidence, support/cleanup evidence, safe next steps, action decisions, and
+delete-safety status. The recurring weakness was not the model; it was that
+several CRD schema/RBAC bugs were only caught by live QA after mock unit tests
+and Helm rendering passed.
+
+Phase 40 closes that gap as one larger hardening phase. It adds real
+Kubernetes API conformance coverage, cleans up known status-polish issues, adds
+upgrade/rollback drift status, and prepares a release candidate for the
+operator-status foundation.
 
 The hard exit statement:
 
 ```text
-Deleting a managed SwBlockVolume is not yet automatically protected by this
-controller. The product reports whether deletion is safe or blocked with
-explicit status, reason, evidence, and a non-mutating next step. The
-operator-status controller mutates only CRD status and Kubernetes Events in this
-phase.
+The operator-status foundation is release-ready as a status/events-only
+control-plane surface. It is schema/RBAC-validated against a real Kubernetes API,
+does not mutate storage or lifecycle objects, and reports install/status/drift
+conditions with consistent CRD/report/dashboard/operator-snapshot evidence.
 ```
+
+## Release Decision
+
+Cut the next release after Phase 40 if QA passes.
+
+Do not wait for Phase 41. Phase 41 is the next mutating lifecycle-owner slice
+and should start after the status-only operator foundation has a clean release
+boundary. Shipping after Phase 40 gives users a coherent product increment:
+Helm + PVC + read-only operator status + Events + diagnostics + delete-safety
+visibility, with explicit non-claims for finalizer ownership and automatic
+cleanup.
 
 ## Scope Contract
 
 | In | Out |
 |---|---|
-| SwBlockVolume delete-safety contract | PVC finalizer ownership |
-| delete-requested status projection | automatic cleanup execution |
-| status/events-only operator boundary | iSCSI/multipath/hostPath deletion by operator |
-| idempotent reconcile and retry behavior | promotion/fencing/rebuild/failback |
-| cleanup verifier evidence consumption | backup/snapshot/restore |
-| Kubernetes Events for delete-safety decisions | NVMe ANA parity |
-| lifecycle-owner finalizer follow-up | dashboard mutation buttons |
-| TestOps delete-safety gates | broad production delete lifecycle |
+| real CRD/RBAC status-writer conformance tests | finalizer add/remove |
+| stale status cleanup and condition/event polish | automatic cleanup execution |
+| upgrade/rollback drift status | upgrade execution |
+| operator-status release docs and claim alignment | repair/rebuild/failback |
+| QA release close gate | backup/snapshot/restore |
+| TestOps coverage for API/schema failures | NVMe ANA parity |
 
 Allowed implementation rule:
 
 ```text
-Phase 39 may patch SwBlockVolume/status and Kubernetes Events.
+Phase 40 may change status projection, CRD status schema, Events, TestOps
+coverage, docs, and release packaging.
 
-Phase 39 must not delete PVC/PV/Pods/Deployments/StorageClasses, run cleanup
-scripts, change Helm releases, import images, touch iSCSI/multipath/dmsetup,
-remove hostPath data, promote/fence/rebuild/failback, mutate storage, or patch
-SwBlockVolume metadata/finalizers.
+Phase 40 must not add storage/workload/host mutation, automatic cleanup,
+finalizer mutation, promotion/fencing/rebuild/failback, or upgrade execution.
 ```
 
-## D1: Delete-Safety Contract Review
+## D1: Kubernetes API Conformance Harness
 
-Goal: define exactly what the finalizer owns and which facts are required before
-it can release deletion.
-
-Status: complete.
+Goal: catch CRD schema and RBAC defects before live QA.
 
 Acceptance:
 
 ```text
-[x] SwBlockVolume finalizer name is defined
-[x] delete states are defined: not_requested, requested, blocked, releasable,
-      released
-[x] required facts are defined: volume identity, PVC/PV linkage, cleanup
-      summary, active sessions, multipath/dmsetup state, generated workload
-      residue, hostPath residue
-[x] action contract maps delete release/block to Phase 38 evaluator language
-[x] non-claims explicitly exclude automatic cleanup and PVC finalizer ownership
-```
-
-Verification:
-
-```text
-go test ./core/ops
-internal review of finalizer/delete contract doc
-```
-
-## D2: Status-Only Delete Projection
-
-Goal: before adding finalizer mutation, prove delete-requested and
-delete-blocked states project correctly from evidence.
-
-Status: complete.
-
-Acceptance:
-
-```text
-[x] deletionTimestamp-like evidence projects DeletionRequested/Blocked status
-[x] residue evidence projects CleanupRequired=True and reason=cleanup_required
-[x] clean evidence projects delete releasable, not false blocked
-[x] report, explain, dashboard, operator-snapshot, and CRD status agree
-[x] no finalizer mutation is enabled yet
+[ ] harness installs real SwBlockCluster/SwBlockVolume CRDs
+[ ] harness uses operator-status ServiceAccount permissions or equivalent RBAC
+[ ] cluster status patch succeeds with current status DTOs
+[ ] volume status patch succeeds with conditions, allowedActions, cleanup,
+      deleteSafety, node-derived evidence, and scripted actions
+[ ] schema-negative cases fail in the harness, not only in live QA
+[ ] event create and duplicate-event behavior are covered
 ```
 
 Verification:
 
 ```text
 go test ./core/ops ./cmd/sw-block
-from-bundle replay for clean and residue delete evidence
+new envtest/live-apiserver status-writer test target
+helm template with operatorStatus.create=true dryRun=false
 ```
 
-## D3: Status-Only Delete-Safety Boundary
+## D2: Status Correctness Polish
 
-Goal: keep delete-safety observable while proving operator-status has no
-finalizer, storage, or workload mutation power.
-
-Status: complete.
+Goal: remove known confusing status leftovers without changing product scope.
 
 Acceptance:
 
 ```text
-[x] operator cannot patch SwBlockVolume metadata.finalizers
-[x] operator cannot patch spec, PVC/PV, pods, deployments, storageclasses,
-      secrets, nodes, iSCSI, multipath, hostPath, or Helm resources
-[x] delete-safety status is still written for blocked/releasable decisions
-[x] finalizer add/remove is deferred to a future lifecycle owner
-[x] delete-safety decisions emit status and Events only
+[ ] stale deleteSafety is cleared or marked not_requested when current delete
+      evidence disappears
+[ ] non-healthy node status has one effective Ready condition per node surface
+[ ] Events stay bounded and remain stable per object/reason/type
+[ ] report, dashboard, operator-snapshot, and CRD agree after each polish
+[ ] no new mutating action or RBAC grant is introduced
 ```
 
 Verification:
 
 ```text
 go test ./core/ops ./cmd/sw-block
-helm template/lint with updated RBAC
-kubectl auth can-i boundary sweep: status/events yes, finalizers/spec/workloads no
+from-bundle regression for stale deleteSafety clearing
+status-surface regression for node condition shape
+event identity regression
 ```
 
-## D4: Delete-Safety Blocked Status Gate
+## D3: Upgrade / Rollback Drift Status
 
-Goal: prove residue or insufficient evidence becomes blocked delete-safety
-status with non-mutating next steps.
-
-Status: QA PASS on `f167f9a`.
+Goal: make install drift visible before implementing upgrade execution.
 
 Acceptance:
 
 ```text
-[x] delete evidence with active/residue facts projects blocked status
-[x] status shows blocked or cleanup_required with stable reason
-[x] safe next step is observe.verify_cleanup or collect bundle, mutation=false
-[x] no Ready=True or release/executed claim appears while blocked
-[x] repeated reconcile does not emit unbounded Events
+[ ] SwBlockCluster.status reports chart/app/operator image identity where
+      evidence is available
+[ ] drift status distinguishes current, desired, missing, and mismatched images
+[ ] upgrade/rollback status is read-only and never runs helm/kubectl mutation
+[ ] report/dashboard/operator-snapshot show the same drift status
+[ ] non-claims explicitly state that upgrade execution is not implemented
 ```
 
 Verification:
 
 ```text
-TestOps/from-bundle delete-residue scenario
-live CRD status/event check if lab is available
+go test ./core/ops ./cmd/sw-block
+from-bundle drift scenarios: aligned, image mismatch, missing evidence
+helm template/lint
 ```
 
-## D5: Delete-Safety Releasable Status Gate
+## D4: TestOps API-Failure Regression Gate
 
-Goal: prove clean evidence becomes releasable delete-safety status without
-claiming that operator-status removes finalizers or completes deletion.
-
-Status: QA PASS on status-only path.
+Goal: turn the live-only failures from Phases 35-39 into repeatable gates.
 
 Acceptance:
 
 ```text
-[x] clean evidence projects releasable status
-[x] object deletion is not claimed by operator-status
-[x] final status/event records releasable decision when evidence allows it
-[x] repeated reconcile is idempotent
-[x] final cleanup verifier returns cleanup_status=ok
+[ ] casing drift in status payload fails before QA
+[ ] enum drift in status conditions/actions fails before QA
+[ ] wrong CRD endpoint usage fails before QA
+[ ] RBAC boundary drift fails before QA
+[ ] blocked/releasable/delete-safety status gates still pass
+[ ] QA can run the gate from a clean lab or local envtest path
 ```
 
 Verification:
 
 ```text
-TestOps live delete-safety clean scenario
-cleanup verifier on m01/m02/tp01 if lab is healthy
+testops scenario or scripted gate for CRD/RBAC conformance
+go test target for conformance harness
+QA assignment with explicit pass/fail evidence paths
 ```
 
-## D6: Multi-Volume Isolation Gate
+## D5: Release Claim And Docs Alignment
 
-Goal: prove delete-safety for one volume does not affect unrelated volumes.
-
-Status: QA PASS on `afd98f5`.
+Goal: prepare a coherent release boundary for the status-only operator
+foundation.
 
 Acceptance:
 
 ```text
-[x] delete-safety evidence for volume A does not change volume B/C status,
-      targets, or ManagedVolume identity
-[x] blocked delete on volume A does not block status publication for volume B/C
-[x] clean delete evidence on volume A does not trigger cleanup or action on
-      volume B/C
-[x] no cross-volume Events or reason-code mix-up
+[ ] README/quickstart/release notes describe supported status-only operator
+      behavior
+[ ] non-claims are visible: no finalizer owner, no automatic cleanup, no
+      upgrade execution, no repair/rebuild/failback, no backup/restore
+[ ] feature/status table reflects Helm, PVC, ops, CRD status, Events, node
+      evidence, delete-safety status, and known limitations
+[ ] release note names immutable image digest or clearly states local build
+      evidence if digest is pending
+[ ] PM/user wording distinguishes status visibility from lifecycle mutation
 ```
 
 Verification:
 
 ```text
-internal/docs/qa-assignments/phase39-d6-multi-volume-delete-safety-status-isolation-qa.md
+docs review: README, quickstart, release note, roadmap
+QA minimal new-user walkthrough if release digest is available
+```
+
+## D6: Release Candidate Gate
+
+Goal: prove the release candidate from a user and QA perspective.
+
+Acceptance:
+
+```text
+[ ] fresh Helm install from documented values
+[ ] first PVC writer/reader passes
+[ ] operator-status CRDs show healthy volume status and Events
+[ ] negative status scenario shows no false Ready=True
+[ ] cleanup leaves zero residue
+[ ] conformance harness passes
+[ ] docs and claims match the tested image
+```
+
+Verification:
+
+```text
+go test ./core/ops ./cmd/sw-block ./cmd/blockcsi ./scripts
+helm lint charts/seaweed-block
+helm template sw-block charts/seaweed-block --namespace kube-system --include-crds \
+  --set operatorStatus.create=true --set operatorStatus.dryRun=false
+QA minimal new-user validation
+QA negative-status validation
+git diff --check
 ```
 
 ## D7: Close Gate
 
-Goal: close Phase 39 only after the delete-safety status path is proven
-bounded, idempotent, observable, and residue-safe without widening
-operator-status mutation power.
-
-Status: complete.
+Goal: close Phase 40 only when the operator-status foundation is release-ready
+and Phase 41 can safely start as a separate mutating lifecycle-owner track.
 
 Acceptance:
 
 ```text
-[x] D1-D6 pass
-[x] operator-status remains status/events-only
-[x] no storage/workload/host mutation is introduced
-[x] QA validates blocked delete-safety, clean delete-safety, and multi-volume
-      isolation gates
-[x] finished plan records non-claims and follow-ups
+[ ] D1-D6 pass
+[ ] operator-status remains status/events-only
+[ ] known Phase 39 follow-ups are either fixed or explicitly carried forward
+[ ] release/no-release decision is recorded
+[ ] Phase 41 entry criteria are listed
 ```
 
 Verification:
 
 ```text
-go test ./scripts
-go test ./core/ops ./cmd/sw-block ./cmd/blockcsi
-helm lint charts/seaweed-block
-helm template sw-block charts/seaweed-block --namespace kube-system --include-crds \
-  --set operatorStatus.create=true --set operatorStatus.dryRun=false
-git diff --check
-QA strict rerun from clean lab
+finished plan
+QA close report
+roadmap update
+release PR or explicit hold note
 ```
 
 ## Current Progress
 
-- 0%: Phase 39 opened. Scope is limited to `SwBlockVolume` finalizer/delete
-  safety as the first mutating operator path. PVC finalizers, automatic cleanup,
-  repair/rebuild/failback, backup/restore, and NVMe remain out of scope.
-- 14%: D1 dev-complete. The delete-safety contract defines the finalizer name,
-  owned mutation scope, required cleanup/identity facts, delete states,
-  non-claims, and a pure decision function that blocks missing/residue evidence
-  and marks clean evidence as releasable without performing mutation.
-- 28%: D2 dev-complete. Bundle replay can carry
-  `swblockvolume-delete-summary.txt` plus cleanup evidence into
-  ManagedVolume delete-safety status. Residue/missing cleanup evidence projects
-  blocked/rejected with `CleanupRequired=True`; clean evidence projects
-  releasable/allowed without falsely blocking the volume. Summary, explain,
-  operator-snapshot, dashboard JSON, and `SwBlockVolume.status.deleteSafety`
-  use the same vocabulary.
-- 42%: D3 first implementation attempted an optional finalizer client in
-  operator-status. Live QA later proved that boundary was not viable for CRDs.
-- 56%: D4 component gate projected blocked delete-safety status and safe next
-  steps from residue evidence. The finalizer-hold part of the gate is now
-  deferred to a future lifecycle owner.
-- 70%: D5 component gate projected releasable delete-safety status from clean
-  evidence. The finalizer-release part of the gate is now deferred to a future
-  lifecycle owner.
-- 78%: D4/D5 live QA handoff ready under the original finalizer design. That
-  assignment is superseded by the status-only assignment after the
-  lifecycle-owner pivot.
-- 80%: D4/D5 live QA found the first bug: the client patched a nonexistent
-  `/finalizers` URL for CRDs. The fix keeps RBAC scoped to
-  `swblockvolumes/finalizers` but sends the merge patch to the main
-  SwBlockVolume resource URL with a body containing only
-  `metadata.finalizers`. Follow-up QA then exposed the deeper 403 boundary
-  issue below.
-- 80% blocked: QA re-validation of `b371e2e` proved the deeper issue. The
-  corrected main-object patch is rejected with HTTP 403 because Kubernetes
-  authorizes it as main `patch swblockvolumes`; the
-  `swblockvolumes/finalizers` grant cannot authorize CRD finalizer mutation.
-  D4/D5 stay blocked until we choose a new boundary model.
-- 86%: Design decision made. Preserve the operator-status read-only/status-only
-  model and do not grant main `patch swblockvolumes`. The operator-status
-  finalizer executor and `swblockvolumes/finalizers` RBAC are removed. Phase 39
-  will close, if QA agrees, as delete-safety status/events only; actual
-  finalizer ownership moves to a future lifecycle-owner phase.
-- 88%: D4/D5 status-only QA on `4a51bae` passed RBAC and D5, but D4 exposed a
-  CRD schema enum gap: `SwBlockVolume.status.allowedActions[].mode` rejected
-  `scripted` even though blocked delete-safety emits `observe.verify_cleanup
-  mode=scripted`. Added `scripted` to the volume allowedActions mode enum and a
-  schema regression test. D4 live rerun is pending.
-- 92%: D4 re-run on `f167f9a` passed. The blocked path now writes
-  `deleteSafety.state=blocked`, `decision=rejected`,
-  `CleanupRequired=True`, and `observe.verify_cleanup mode=scripted
-  mutationAllowed=false` with `finalizer_patches=0`. D4 and D5 both pass on the
-  status-only path. Proceed to D6 multi-volume status isolation after `tp01` is
-  restored if the gate exercises three nodes.
-- 100%: D6 QA on `afd98f5` passed. Delete-safety evidence for volume A does not
-  contaminate B/C, C can independently become releasable, cluster counts and
-  report/CRD surfaces agree, and every reconcile reports `finalizer_patches=0`.
-  Phase 39 is closed as status/events-only delete-safety, with finalizer
-  mutation deferred to a future lifecycle-owner phase.
+- 0%: Phase 40 opened. Scope is consolidated into one larger
+  operator-production-hardening phase instead of splitting envtest, status
+  polish, drift status, and release alignment into separate tiny phases.
 
 ## Prerequisites / Risks
 
-- QA reported `tp01` as `NotReady`/unreachable during Phase 38 sign-off. Restore
-  `tp01` before D6 multi-volume or any 3-node delete-safety gate.
-- This phase must not become a cleanup executor. If residue exists, the correct
-  behavior is to block deletion with evidence and a safe next step.
-- Delete-safety status behavior must be idempotent; retries and repeated
-  reconciles are expected.
-- Kubernetes CRDs do not expose a usable HTTP `/finalizers` subresource. A
-  finalizer patch must use the main object URL and therefore requires main
-  `patch swblockvolumes` authorization. This invalidates the original
-  RBAC-only boundary assumption.
-- Do not broaden operator-status RBAC to main `patch swblockvolumes` as a local
-  fix. That would make the safety boundary code-enforced only. Finalizer
-  mutation is deferred to the component that owns the `SwBlockVolume` lifecycle.
-
-## Design Decision
-
-Chosen path:
-
-Keep operator-status status/events-only. Move finalizer add/remove to a future
-lifecycle owner that also owns `SwBlockVolume` object creation and deletion.
-This preserves the Phase 35-38 safety boundary and avoids granting
-operator-status main `patch swblockvolumes`.
-
-Rejected paths:
-
-1. Admission-bounded operator finalizer: viable later, but adds admission
-   policy/webhook complexity to the alpha path.
-2. Code-only main patch: not acceptable for this control-plane boundary.
+- `tp01` was reported `NotReady`/unreachable during recent QA. Restore before
+  any live RF=3 or 3-node release gate.
+- Do not fix conformance failures by broadening operator-status RBAC to main
+  object mutation. The status-only safety boundary remains the product promise.
+- Conformance coverage should use a real CRD schema and real or equivalent RBAC;
+  mock-only tests are not sufficient for this phase.
+- Drift status must not become upgrade execution.
 
 ## Next Step
 
-Move this plan to `internal/docs/finished-plans/` and start the next phase only
-after choosing whether to prioritize stale deleteSafety clearing, envtest
-status-writer regression, or the future lifecycle-owner finalizer work.
+Start D1 by adding the real Kubernetes API conformance harness for
+`KubernetesStatusClient`, then use it to lock the status payloads that previously
+failed only in live QA.

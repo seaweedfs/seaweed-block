@@ -95,12 +95,16 @@ preserve that model rather than add isolated scripts or separate status systems.
 
 Recommended order from here:
 
-1. Close delete-safety status first, then add finalizer ownership in a later
-   lifecycle-owner slice. Current finding: CRD finalizers cannot be protected by
-   `swblockvolumes/finalizers` RBAC alone, so operator-status remains
-   status/events-only instead of taking main `patch swblockvolumes`.
-2. Add upgrade/rollback drift status before upgrade execution.
-3. Add returned-replica rebuild/failback, backup/restore, and NVMe ANA parity
+1. Harden the operator-status foundation as one release-sized slice. This
+   includes real CRD/RBAC status-writer conformance tests, stale-status polish,
+   bounded Events, upgrade/rollback drift status, and release-claim alignment.
+2. Cut a release after the operator-status foundation passes QA. This release
+   should claim status/events-only visibility, not lifecycle mutation.
+3. Add finalizer ownership in a later lifecycle-owner slice. Current finding:
+   CRD finalizers cannot be protected by `swblockvolumes/finalizers` RBAC alone,
+   so operator-status remains status/events-only instead of taking main
+   `patch swblockvolumes`.
+4. Add returned-replica rebuild/failback, backup/restore, and NVMe ANA parity
    only after the status/action model stays stable.
 
 ## Future Non-Kubernetes Adapters
