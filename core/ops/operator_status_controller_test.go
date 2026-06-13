@@ -630,6 +630,108 @@ func TestOperatorStatusReconcilerProjectsDeleteSafetyWithoutFinalizerMutation(t 
 	}
 }
 
+func TestOperatorStatusReconcilerDeleteSafetyDoesNotContaminateOtherVolumes(t *testing.T) {
+	source := fakeOperatorStatusSource{cluster: ClusterEvidence{
+		SchemaVersion: ObservationSchemaVersion,
+		CapturedAt:    time.Date(2026, 6, 12, 10, 0, 0, 0, time.UTC),
+		Status:        ObservationStatusBlocked,
+		ManagedVolumes: []ManagedVolumeProjection{
+			{
+				VolumeID:   "pvc-a",
+				PVCName:    "delete-a",
+				Status:     ManagedVolumeStatusBlocked,
+				ReasonCode: "iscsi_node_records_present",
+				Conditions: []ObservationCondition{{
+					Type:     ConditionCleanupRequired,
+					Status:   "True",
+					Reason:   "iscsi_node_records_present",
+					Severity: "warning",
+				}},
+				DeleteSafety: &SwBlockVolumeDeleteSafetyDecision{
+					ActionType:              SwBlockVolumeDeleteActionReleaseFinalizer,
+					Decision:                ManagedVolumeActionDecisionRejected,
+					State:                   DeleteSafetyStateBlocked,
+					Reason:                  "iscsi_node_records_present",
+					FinalizerReleaseAllowed: false,
+					SafeNextAction:          ManagedVolumeActionVerifyCleanup,
+					EvidenceRefs:            []string{"cleanup-a.txt"},
+				},
+			},
+			{
+				VolumeID:   "pvc-b",
+				PVCName:    "healthy-b",
+				Status:     ManagedVolumeStatusReady,
+				ReasonCode: ReasonFirstVolumeVerified,
+				Conditions: []ObservationCondition{{
+					Type:     ConditionReady,
+					Status:   "True",
+					Reason:   ReasonFirstVolumeVerified,
+					Severity: "info",
+				}},
+			},
+			{
+				VolumeID:   "pvc-c",
+				PVCName:    "clean-c",
+				Status:     ManagedVolumeStatusReady,
+				ReasonCode: ReasonFirstVolumeVerified,
+				DeleteSafety: &SwBlockVolumeDeleteSafetyDecision{
+					ActionType:              SwBlockVolumeDeleteActionReleaseFinalizer,
+					Decision:                ManagedVolumeActionDecisionAllowed,
+					State:                   DeleteSafetyStateReleasable,
+					Reason:                  ReasonDeleteFinalizerReleasable,
+					FinalizerReleaseAllowed: true,
+					EvidenceRefs:            []string{"cleanup-c.txt"},
+				},
+			},
+		},
+	}}
+	writer := &fakeOperatorStatusWriter{}
+	events := &fakeOperatorEventSink{}
+	result, err := (OperatorStatusReconciler{
+		Namespace:   "kube-system",
+		ClusterName: "sw-block",
+		Source:      source,
+		Writer:      writer,
+		EventSink:   events,
+	}).Reconcile(context.Background())
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if result.FinalizerPatchCount != 0 {
+		t.Fatalf("finalizer patches=%d", result.FinalizerPatchCount)
+	}
+	if len(writer.volumes) != 3 {
+		t.Fatalf("volume writes=%+v", writer.volumes)
+	}
+	byName := map[string]SwBlockVolumeCRDStatus{}
+	for _, record := range writer.volumes {
+		byName[record.ref.Name] = record.status
+	}
+	if got := byName["delete-a"]; got.Status != ManagedVolumeStatusBlocked ||
+		got.ReasonCode != "iscsi_node_records_present" ||
+		got.DeleteSafety == nil ||
+		got.DeleteSafety.State != DeleteSafetyStateBlocked {
+		t.Fatalf("volume A status=%+v", got)
+	}
+	if got := byName["healthy-b"]; got.Status != ManagedVolumeStatusReady ||
+		got.ReasonCode != ReasonFirstVolumeVerified ||
+		got.DeleteSafety != nil {
+		t.Fatalf("volume B contaminated status=%+v", got)
+	}
+	if got := byName["clean-c"]; got.Status != ManagedVolumeStatusReady ||
+		got.ReasonCode != ReasonFirstVolumeVerified ||
+		got.DeleteSafety == nil ||
+		got.DeleteSafety.State != DeleteSafetyStateReleasable ||
+		got.DeleteSafety.Decision != ManagedVolumeActionDecisionAllowed {
+		t.Fatalf("volume C status=%+v", got)
+	}
+	for _, event := range events.events {
+		if event.Reason == ReasonDeleteFinalizerAdded || event.Reason == ReasonDeleteFinalizerReleased {
+			t.Fatalf("finalizer mutation event emitted: %+v", event)
+		}
+	}
+}
+
 func TestSwBlockVolumeObjectNameIsDNSLabelLike(t *testing.T) {
 	cases := map[string]string{
 		"Demo_PVC":      "demo-pvc",
