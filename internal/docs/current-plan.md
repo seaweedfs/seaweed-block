@@ -1,6 +1,6 @@
 # Current Plan: Phase 39 - Finalizer / Delete Safety
 
-Status: active, 86% complete. Started on 2026-06-10.
+Status: complete, 100%. Started on 2026-06-10; closed on 2026-06-13.
 
 Branch: `phase33-testops-failure-hardening`
 
@@ -58,7 +58,7 @@ SwBlockVolume metadata/finalizers.
 Goal: define exactly what the finalizer owns and which facts are required before
 it can release deletion.
 
-Status: dev-complete; QA/internal review pending.
+Status: complete.
 
 Acceptance:
 
@@ -85,7 +85,7 @@ internal review of finalizer/delete contract doc
 Goal: before adding finalizer mutation, prove delete-requested and
 delete-blocked states project correctly from evidence.
 
-Status: dev-complete; QA/internal review pending.
+Status: complete.
 
 Acceptance:
 
@@ -109,7 +109,7 @@ from-bundle replay for clean and residue delete evidence
 Goal: keep delete-safety observable while proving operator-status has no
 finalizer, storage, or workload mutation power.
 
-Status: dev-complete; QA/internal review pending.
+Status: complete.
 
 Acceptance:
 
@@ -165,10 +165,10 @@ Acceptance:
 
 ```text
 [x] clean evidence projects releasable status
-[ ] object deletion is not claimed by operator-status
+[x] object deletion is not claimed by operator-status
 [x] final status/event records releasable decision when evidence allows it
 [x] repeated reconcile is idempotent
-[ ] final cleanup verifier returns cleanup_status=ok
+[x] final cleanup verifier returns cleanup_status=ok
 ```
 
 Verification:
@@ -182,17 +182,17 @@ cleanup verifier on m01/m02/tp01 if lab is healthy
 
 Goal: prove delete-safety for one volume does not affect unrelated volumes.
 
-Status: ready for QA; restore `tp01` first for 3-node validation.
+Status: QA PASS on `afd98f5`.
 
 Acceptance:
 
 ```text
-[ ] delete-safety evidence for volume A does not change volume B/C status,
+[x] delete-safety evidence for volume A does not change volume B/C status,
       targets, or ManagedVolume identity
-[ ] blocked delete on volume A does not block status publication for volume B/C
-[ ] clean delete evidence on volume A does not trigger cleanup or action on
+[x] blocked delete on volume A does not block status publication for volume B/C
+[x] clean delete evidence on volume A does not trigger cleanup or action on
       volume B/C
-[ ] no cross-volume Events or reason-code mix-up
+[x] no cross-volume Events or reason-code mix-up
 ```
 
 Verification:
@@ -207,17 +207,17 @@ Goal: close Phase 39 only after the delete-safety status path is proven
 bounded, idempotent, observable, and residue-safe without widening
 operator-status mutation power.
 
-Status: pending.
+Status: complete.
 
 Acceptance:
 
 ```text
-[ ] D1-D6 pass
-[ ] operator-status remains status/events-only
-[ ] no storage/workload/host mutation is introduced
-[ ] QA validates blocked delete-safety, clean delete-safety, and multi-volume
+[x] D1-D6 pass
+[x] operator-status remains status/events-only
+[x] no storage/workload/host mutation is introduced
+[x] QA validates blocked delete-safety, clean delete-safety, and multi-volume
       isolation gates
-[ ] finished plan records non-claims and follow-ups
+[x] finished plan records non-claims and follow-ups
 ```
 
 Verification:
@@ -286,6 +286,11 @@ QA strict rerun from clean lab
   mutationAllowed=false` with `finalizer_patches=0`. D4 and D5 both pass on the
   status-only path. Proceed to D6 multi-volume status isolation after `tp01` is
   restored if the gate exercises three nodes.
+- 100%: D6 QA on `afd98f5` passed. Delete-safety evidence for volume A does not
+  contaminate B/C, C can independently become releasable, cluster counts and
+  report/CRD surfaces agree, and every reconcile reports `finalizer_patches=0`.
+  Phase 39 is closed as status/events-only delete-safety, with finalizer
+  mutation deferred to a future lifecycle-owner phase.
 
 ## Prerequisites / Risks
 
@@ -320,6 +325,6 @@ Rejected paths:
 
 ## Next Step
 
-Run D6 with
-`internal/docs/qa-assignments/phase39-d6-multi-volume-delete-safety-status-isolation-qa.md`.
-Restore `tp01` first if D6 uses the 3-node RF=3 lab.
+Move this plan to `internal/docs/finished-plans/` and start the next phase only
+after choosing whether to prioritize stale deleteSafety clearing, envtest
+status-writer regression, or the future lifecycle-owner finalizer work.
