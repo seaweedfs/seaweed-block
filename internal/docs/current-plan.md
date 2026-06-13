@@ -69,16 +69,18 @@ finalizer mutation, promotion/fencing/rebuild/failback, or upgrade execution.
 
 Goal: catch CRD schema and RBAC defects before live QA.
 
+Status: dev-complete; QA/internal review pending.
+
 Acceptance:
 
 ```text
-[ ] harness installs real SwBlockCluster/SwBlockVolume CRDs
-[ ] harness uses operator-status ServiceAccount permissions or equivalent RBAC
-[ ] cluster status patch succeeds with current status DTOs
-[ ] volume status patch succeeds with conditions, allowedActions, cleanup,
+[x] harness loads real SwBlockCluster/SwBlockVolume CRD schemas
+[x] harness uses an operator-status-equivalent RBAC boundary
+[x] cluster status patch succeeds with current status DTOs
+[x] volume status patch succeeds with conditions, allowedActions, cleanup,
       deleteSafety, node-derived evidence, and scripted actions
-[ ] schema-negative cases fail in the harness, not only in live QA
-[ ] event create and duplicate-event behavior are covered
+[x] schema-negative cases fail in the harness, not only in live QA
+[x] event create and duplicate-event behavior are covered
 ```
 
 Verification:
@@ -242,6 +244,12 @@ release PR or explicit hold note
 - 0%: Phase 40 opened. Scope is consolidated into one larger
   operator-production-hardening phase instead of splitting envtest, status
   polish, drift status, and release alignment into separate tiny phases.
+- 14%: D1 dev-complete. Added a Phase 40 conformance harness that loads the
+  real `SwBlockCluster`/`SwBlockVolume` CRD status schemas and enforces an
+  operator-status-equivalent API boundary. It validates full cluster and volume
+  status patches, scripted actions, deleteSafety, Events, duplicate-event
+  idempotency, and negative cases for snake_case payload drift, unsupported
+  condition enums, main-resource patches, and finalizer endpoint usage.
 
 ## Prerequisites / Risks
 
