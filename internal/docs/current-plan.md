@@ -1,6 +1,6 @@
 # Current Plan: Phase 40 - Operator Production Hardening
 
-Status: active, 42% complete. Started on 2026-06-13.
+Status: active, 56% complete. Started on 2026-06-13.
 
 Branch: `phase33-testops-failure-hardening`
 
@@ -146,15 +146,17 @@ helm template/lint
 
 Goal: turn the live-only failures from Phases 35-39 into repeatable gates.
 
+Status: dev-complete; QA/internal review pending.
+
 Acceptance:
 
 ```text
-[ ] casing drift in status payload fails before QA
-[ ] enum drift in status conditions/actions fails before QA
-[ ] wrong CRD endpoint usage fails before QA
-[ ] RBAC boundary drift fails before QA
-[ ] blocked/releasable/delete-safety status gates still pass
-[ ] QA can run the gate from a clean lab or local envtest path
+[x] casing drift in status payload fails before QA
+[x] enum drift in status conditions/actions fails before QA
+[x] wrong CRD endpoint usage fails before QA
+[x] RBAC boundary drift fails before QA
+[x] blocked/releasable/delete-safety status gates still pass
+[x] QA can run the gate from a clean lab or local envtest path
 ```
 
 Verification:
@@ -267,6 +269,11 @@ release PR or explicit hold note
   Drift can be `ok`, `mismatch`, or `unknown`; mismatch is negative-first
   `Blocked=True`, missing evidence is `EvidenceStale=True`, and the operator
   snapshot now explicitly carries `no_upgrade_execution`.
+- 56%: D4 dev-complete. Added `run-phase40-status-api-conformance` scripts for
+  PowerShell and bash plus the `operator-status-api-conformance-chain` TestOps
+  scenario. The gate runs the CRD/RBAC conformance tests that catch casing
+  drift, enum drift, wrong endpoint usage, RBAC broadening, and delete-safety
+  status regressions, then emits a summary file for QA assertions.
 
 ## Prerequisites / Risks
 
@@ -280,6 +287,7 @@ release PR or explicit hold note
 
 ## Next Step
 
-Start D1 by adding the real Kubernetes API conformance harness for
-`KubernetesStatusClient`, then use it to lock the status payloads that previously
-failed only in live QA.
+Start D5 by aligning README, quickstart, release notes, and roadmap language to
+the status/events-only operator foundation. Keep the non-claims explicit: no
+finalizer owner, no automatic cleanup, no upgrade execution, no repair/rebuild,
+no failback, and no backup/restore.
