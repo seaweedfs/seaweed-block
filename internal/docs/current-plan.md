@@ -1,6 +1,6 @@
 # Current Plan: Phase 40 - Operator Production Hardening
 
-Status: active, 84% complete. Started on 2026-06-13.
+Status: active, 90% complete. Started on 2026-06-13.
 
 Branch: `phase33-testops-failure-hardening`
 
@@ -199,14 +199,14 @@ QA minimal new-user walkthrough if release digest is available
 
 Goal: prove the release candidate from a user and QA perspective.
 
-Status: local gate passed; QA HOLD on published-image rerun after image-compat
-fix.
+Status: local gate passed; published-image G1 rerun passed; fresh release-image
+G2 pending.
 
 Acceptance:
 
 ```text
-[ ] fresh Helm install from documented values
-[ ] first PVC writer/reader passes
+[x] fresh Helm install from documented values
+[x] first PVC writer/reader passes
 [ ] operator-status CRDs show healthy volume status and Events
 [ ] negative status scenario shows no false Ready=True
 [ ] cleanup leaves zero residue
@@ -302,6 +302,13 @@ release PR or explicit hold note
   flags. The local release-candidate gate now asserts the default render omits
   the incompatible flag. Release remains held until QA reruns the published-image
   first-volume path.
+- 90%: QA reran D6 G1 against the published
+  `ghcr.io/seaweedfs/seaweed-block:sha-6260e46fd3be` image on commit `5f0566e`.
+  Helm install, first PVC, writer/reader verification, report artifacts, and
+  cleanup all passed. The original chart-ahead-of-image blocker is resolved.
+  Release remains held only for G2 against the actual fresh release image,
+  because the old published images predate the Phase 35-39 operator-status
+  binary fixes.
 
 ## Prerequisites / Risks
 
@@ -315,7 +322,7 @@ release PR or explicit hold note
 
 ## Next Step
 
-Ask QA to rerun D6 G1 against the published image path after the
-`compat.launcherDurableImplFlag` chart fix. Do not cut the release until the
-published-image first-volume gate passes and the D6 sign-off flips from HOLD to
-PASS.
+Publish or identify the fresh release image for this branch, then ask QA to run
+D6 G2 against that image. Do not cut the release until live operator-status CRD
+status, Events, and the status/events-only RBAC boundary pass on the shipped
+binary.

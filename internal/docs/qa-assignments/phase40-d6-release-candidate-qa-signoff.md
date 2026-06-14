@@ -1,6 +1,56 @@
 # QA Sign-off — Phase 40 D6 Release Candidate Gate
 
-Verdict: **HOLD (do not release the published images as-is).**
+Verdict: **Blocker RESOLVED — chart-flag gate verified.** First filed HOLD on
+`9a8df78`; re-validated on `5f0566e` (see Re-validation below). The published-image
+first-volume gate (G1) now passes. One residual confirmation remains before a full
+release PASS (G2 operator-status claim on the actual release image).
+
+## Re-validation — 2026-06-13, commit `5f0566e phase40: gate durable impl chart flag`
+
+The dev gated `--launcher-durable-impl` behind `compat.launcherDurableImplFlag`
+(default `false`):
+
+- Default `helm template` now renders blockmaster with **only**
+  `--launcher-durable-root` (the flag every published image already has);
+  `--launcher-durable-impl` is omitted. `--set compat.launcherDurableImplFlag=true`
+  re-adds it. A `fail` guards `blockmaster.durableImpl != walstore` while the
+  compat flag is off (no silent drop). Omitting the flag is behavior-neutral for
+  the default — the blockmaster binary's own `--launcher-durable-impl` default is
+  already `walstore`.
+
+**G1 re-run against the PUBLISHED image** (lab tree synced to `5f0566e`; scenario
+default image, no local override):
+
+```text
+swblock run testops/scenarios/helm-first-volume-via-sw-block-cli-chain.yaml
+day1.yaml image = ghcr.io/seaweedfs/seaweed-block:sha-6260e46fd3be   (published)
+=== helm-first-volume-via-sw-block-cli-chain === PASS (52.9s) — 34/34 actions
+  helm_install_stack PASS   (blockmaster starts; no CrashLoopBackOff)
+  first_volume_user_loop PASS   writer_verified=1  reader_verified=1
+  first_volume_asserts PASS   first_volume_ok=1
+  helm_uninstall_cleanup PASS   cleanup_ok=1
+bundle results/20260613-203738-8794
+```
+
+The blocking finding (chart-ahead-of-image flag skew) is **resolved**: the
+documented Helm + first-PVC + writer/reader path now works end-to-end with the
+currently-published images. Lab left clean (helm 0, pods 0).
+
+**Residual confirmation (not a regression, a scope note).** `sha-6260e46fd3be`
+(and `:alpha`) are old published images used here only to prove the chart is
+backward-compatible. Their **operator-status binary predates the Phases 35–39
+fixes**, so the G2 operator-status live-CRD/Event claim was validated on the
+*from-source* build, not on these digests. Before a full release PASS, re-run G2
+against the **actual release image** (a fresh publish from the release commit) to
+confirm live status/events publication and the RBAC boundary hold on the shipped
+binary. The chart-flag gate does not change any binary; it only makes the chart
+installable on older images.
+
+---
+
+## Original finding (commit `9a8df78`, superseded by the Re-validation above)
+
+Verdict at filing: **HOLD (do not release the published images as-is).**
 
 The product **code** at `9a8df78` is good: with an image built from that source,
 the full documented path passes — fresh Helm install, first PVC bind,
