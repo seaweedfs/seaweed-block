@@ -1009,6 +1009,7 @@ type helmValuesNetwork struct {
 }
 
 type helmValuesCompat struct {
+	LauncherDurableImplFlag    bool `yaml:"launcherDurableImplFlag"`
 	LauncherReplicationAckFlag bool `yaml:"launcherReplicationAckFlag"`
 	LauncherRejectLoopbackFlag bool `yaml:"launcherRejectLoopbackFlag"`
 }

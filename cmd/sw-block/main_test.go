@@ -677,6 +677,7 @@ func TestOpsGenerateHelmValuesSingleNodeFromKubernetes(t *testing.T) {
 		"internalIP: 127.0.0.1",
 		"dataPort: 19101",
 		"controlPort: 19102",
+		"launcherDurableImplFlag: false",
 		"launcherReplicationAckFlag: false",
 	} {
 		if !strings.Contains(string(values), want) {
@@ -744,6 +745,7 @@ func TestOpsGenerateHelmValuesMultiNodeExternalISCSI(t *testing.T) {
 		"internalIP: 192.168.1.188",
 		"dataPort: 19105",
 		"controlPort: 19106",
+		"launcherDurableImplFlag: false",
 		"launcherReplicationAckFlag: false",
 	} {
 		if !strings.Contains(string(values), want) {

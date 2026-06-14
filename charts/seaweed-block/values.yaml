@@ -78,6 +78,7 @@ network:
 compat:
   # Some published alpha images predate these blockmaster launcher flags. Keep
   # these false unless the selected image is known to support the flag.
+  launcherDurableImplFlag: false
   launcherReplicationAckFlag: false
   launcherRejectLoopbackFlag: false
 

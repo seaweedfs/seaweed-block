@@ -1,6 +1,6 @@
 # Current Plan: Phase 40 - Operator Production Hardening
 
-Status: active, 78% complete. Started on 2026-06-13.
+Status: active, 84% complete. Started on 2026-06-13.
 
 Branch: `phase33-testops-failure-hardening`
 
@@ -199,7 +199,8 @@ QA minimal new-user walkthrough if release digest is available
 
 Goal: prove the release candidate from a user and QA perspective.
 
-Status: local gate passed; lab QA pending.
+Status: local gate passed; QA HOLD on published-image rerun after image-compat
+fix.
 
 Acceptance:
 
@@ -210,6 +211,8 @@ Acceptance:
 [ ] negative status scenario shows no false Ready=True
 [ ] cleanup leaves zero residue
 [x] conformance harness passes
+[x] local chart render omits published-image-incompatible launcher flags by
+      default
 [ ] docs and claims match the tested image
 ```
 
@@ -291,6 +294,14 @@ release PR or explicit hold note
   the lab gates for fresh Helm install, first PVC writer/reader, live
   operator-status CRD/Event publication, negative status, and zero-residue
   cleanup.
+- 84%: QA D6 lab validation found a release-packaging blocker: the chart passed
+  `--launcher-durable-impl`, but the published `:alpha` and pinned
+  `sha-6260e46fd3be` images do not support that newer blockmaster flag. The
+  chart now gates the flag behind `compat.launcherDurableImplFlag=false` by
+  default, matching the existing compatibility pattern for newer launcher
+  flags. The local release-candidate gate now asserts the default render omits
+  the incompatible flag. Release remains held until QA reruns the published-image
+  first-volume path.
 
 ## Prerequisites / Risks
 
@@ -304,6 +315,7 @@ release PR or explicit hold note
 
 ## Next Step
 
-Send `internal/docs/qa-assignments/phase40-d6-release-candidate-qa.md` to QA.
-Do not cut the release until the required lab gates pass against either the
-published release image digest or a clearly identified local build.
+Ask QA to rerun D6 G1 against the published image path after the
+`compat.launcherDurableImplFlag` chart fix. Do not cut the release until the
+published-image first-volume gate passes and the D6 sign-off flips from HOLD to
+PASS.

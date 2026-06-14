@@ -64,6 +64,20 @@ Invoke-GateStep `
         "operatorStatus.dryRun=false"
     )
 
+Add-Content -Path $log -Value ("[{0}] helm_published_image_compat_template" -f (Get-Date).ToUniversalTime().ToString("HH:mm:ss"))
+$compatStdout = Join-Path $ArtifactDir "helm_published_image_compat_template.stdout.txt"
+$compatStderr = Join-Path $ArtifactDir "helm_published_image_compat_template.stderr.txt"
+$compatRender = & helm template sw-block charts/seaweed-block --namespace kube-system 2>$compatStderr
+$compatExit = $LASTEXITCODE
+$compatRender | Set-Content -Path $compatStdout
+$compatText = $compatRender -join "`n"
+if ($compatExit -eq 0 -and ($compatText -notmatch "--launcher-durable-impl")) {
+    Add-Content -Path $summary -Value "helm_published_image_compat_template=ok"
+} else {
+    Add-Content -Path $summary -Value "helm_published_image_compat_template=failed"
+    $status = "failed"
+}
+
 $conformanceDir = Join-Path $ArtifactDir "status-api-conformance"
 Invoke-GateStep `
     -Name "status_api_conformance_gate" `

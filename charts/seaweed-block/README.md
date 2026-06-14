@@ -46,6 +46,7 @@ network:
   rejectLoopbackPublishTargets: true
 
 compat:
+  launcherDurableImplFlag: false
   launcherReplicationAckFlag: false
   launcherRejectLoopbackFlag: false
 
@@ -75,8 +76,11 @@ blockNodes:
 `network.rejectLoopbackPublishTargets` records the intended safety boundary.
 Some blockmaster launcher flags are gated by `compat.*` settings because older
 published alpha images do not accept every v0.3 flag. Keep
-`compat.launcherReplicationAckFlag` and `compat.launcherRejectLoopbackFlag`
-false unless the selected image is known to support the corresponding flag.
+`compat.launcherDurableImplFlag`, `compat.launcherReplicationAckFlag`, and
+`compat.launcherRejectLoopbackFlag` false unless the selected image is known to
+support the corresponding flag. The default durable implementation is still
+`walstore` because that is the blockmaster binary default when the
+`--launcher-durable-impl` flag is omitted.
 
 ## RF=3 Sync-Quorum Profile
 

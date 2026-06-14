@@ -66,6 +66,7 @@
     "compat": {
       "type": "object",
       "properties": {
+        "launcherDurableImplFlag": { "type": "boolean" },
         "launcherReplicationAckFlag": { "type": "boolean" },
         "launcherRejectLoopbackFlag": { "type": "boolean" }
       }

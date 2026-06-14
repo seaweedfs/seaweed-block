@@ -27,6 +27,7 @@ phase40_release_candidate_local_status=ok
 go_test_release_scope=ok
 helm_lint=ok
 helm_operator_status_template=ok
+helm_published_image_compat_template=ok
 status_api_conformance_gate=ok
 git_diff_check=ok
 ```
