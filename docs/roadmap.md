@@ -106,7 +106,8 @@ Recommended order from here:
 2. Add a lifecycle-owner foundation before adding more storage features. This
    is the next control-plane boundary: decide who owns CR metadata/finalizers,
    prove the RBAC/API contract against a real Kubernetes API, and keep
-   operator-status status/events-only.
+   operator-status status/events-only. The working contract is
+   `internal/docs/ref/lifecycle-owner-control-contract.md`.
 3. Add the first bounded lifecycle mutation only after the lifecycle-owner
    boundary is proven. The likely first candidate is finalizer add/remove for
    `SwBlockVolume`, but CRD finalizers require main-object

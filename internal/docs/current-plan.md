@@ -65,22 +65,24 @@ mutation and must be release-gated.
 
 Goal: make ownership explicit before code changes.
 
+Status: dev-complete, awaiting review.
+
 Acceptance:
 
 ```text
-[ ] document the three roles: observer/status writer, lifecycle owner, executor
-[ ] define which component may patch CR metadata/finalizers
-[ ] define which component may patch CR status
-[ ] define which component may create Events
-[ ] define which component may execute storage/workload/host mutation
-[ ] define evidence, preconditions, and audit fields for each allowed action
-[ ] explain why operator-status remains status/events-only
+[x] document the three roles: observer/status writer, lifecycle owner, executor
+[x] define which component may patch CR metadata/finalizers
+[x] define which component may patch CR status
+[x] define which component may create Events
+[x] define which component may execute storage/workload/host mutation
+[x] define evidence, preconditions, and audit fields for each allowed action
+[x] explain why operator-status remains status/events-only
 ```
 
 Verification:
 
 ```text
-docs review: current-plan, roadmap, architecture/control-plane note
+docs review: current-plan, roadmap, lifecycle-owner control contract
 no code changes that broaden RBAC before this contract is accepted
 ```
 
@@ -235,6 +237,12 @@ git diff --check
   phase is intentionally larger than a single finalizer fix: it must establish
   a lifecycle-owner boundary, a real Kubernetes API/RBAC test harness, and the
   first bounded mutation decision before adding storage lifecycle features.
+- 14%: D1 dev-complete. Added
+  `internal/docs/ref/lifecycle-owner-control-contract.md`, defining the
+  observer/status writer, lifecycle owner, and executor roles; preserving the
+  released operator-status status/events-only boundary; and making finalizer
+  mutation an explicit lifecycle-owner strategy decision rather than an RBAC
+  patch to the observer.
 
 ## Prerequisites / Risks
 
