@@ -1,6 +1,6 @@
 # Current Plan: Phase 40 - Operator Production Hardening
 
-Status: active, 90% complete. Started on 2026-06-13.
+Status: active, 94% complete. Started on 2026-06-13.
 
 Branch: `phase33-testops-failure-hardening`
 
@@ -199,8 +199,8 @@ QA minimal new-user walkthrough if release digest is available
 
 Goal: prove the release candidate from a user and QA perspective.
 
-Status: local gate passed; published-image G1 rerun passed; fresh release-image
-G2 pending.
+Status: local gate passed; published-image G1 rerun passed; fresh release image
+published; G2 pending.
 
 Acceptance:
 
@@ -309,6 +309,14 @@ release PR or explicit hold note
   Release remains held only for G2 against the actual fresh release image,
   because the old published images predate the Phase 35-39 operator-status
   binary fixes.
+- 94%: Published fresh GHCR images from commit `dc2972d0059b` through GitHub
+  Actions run `27490827782`. QA should use
+  `ghcr.io/seaweedfs/seaweed-block:sha-dc2972d0059b` and
+  `ghcr.io/seaweedfs/seaweed-block-csi:sha-dc2972d0059b` for the remaining D6 G2
+  operator-status live CRD/Event/RBAC check. Digests:
+  `seaweed-block@sha256:b8da5ca4e2bbe2f0f630fee0468790c444362615d68807a1be31fd237c84928f`
+  and
+  `seaweed-block-csi@sha256:b5942cd68d28aecdfebec1f1e5ec55a9cafe746169fee3b6c35916c93fffcaa6`.
 
 ## Prerequisites / Risks
 
@@ -322,7 +330,6 @@ release PR or explicit hold note
 
 ## Next Step
 
-Publish or identify the fresh release image for this branch, then ask QA to run
-D6 G2 against that image. Do not cut the release until live operator-status CRD
-status, Events, and the status/events-only RBAC boundary pass on the shipped
-binary.
+Ask QA to run D6 G2 against `sha-dc2972d0059b`. Do not cut the release until
+live operator-status CRD status, Events, and the status/events-only RBAC
+boundary pass on the shipped binary.

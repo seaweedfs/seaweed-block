@@ -46,6 +46,27 @@ confirm live status/events publication and the RBAC boundary hold on the shipped
 binary. The chart-flag gate does not change any binary; it only makes the chart
 installable on older images.
 
+## Fresh Release Image For G2
+
+GitHub Actions run `27490827782` published commit `dc2972d0059b` from branch
+`phase33-testops-failure-hardening`.
+
+Use these images for the remaining G2 operator-status live CRD/Event/RBAC check:
+
+```text
+ghcr.io/seaweedfs/seaweed-block:sha-dc2972d0059b
+ghcr.io/seaweedfs/seaweed-block-csi:sha-dc2972d0059b
+```
+
+Published digests:
+
+```text
+seaweed-block:
+  sha256:b8da5ca4e2bbe2f0f630fee0468790c444362615d68807a1be31fd237c84928f
+seaweed-block-csi:
+  sha256:b5942cd68d28aecdfebec1f1e5ec55a9cafe746169fee3b6c35916c93fffcaa6
+```
+
 ---
 
 ## Original finding (commit `9a8df78`, superseded by the Re-validation above)
