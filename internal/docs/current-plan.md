@@ -90,22 +90,31 @@ no code changes that broaden RBAC before this contract is accepted
 
 Goal: stop live-only schema/RBAC bugs before QA.
 
+Status: in progress. The schema-aware boundary gate is dev-complete; a real
+live-apiserver/envtest path remains open.
+
 Acceptance:
 
 ```text
-[ ] harness installs real SwBlockCluster/SwBlockVolume CRDs
-[ ] harness uses real or equivalent ServiceAccounts and ClusterRoles
-[ ] status-only observer can patch status and create Events only
-[ ] lifecycle owner can perform only the explicitly approved lifecycle mutation
-[ ] wrong status casing, enum drift, endpoint drift, and RBAC broadening fail
-[ ] finalizer/main-object patch behavior is tested against the real API
+[x] harness loads real SwBlockCluster/SwBlockVolume CRD status schemas
+[x] harness uses equivalent ServiceAccount/RBAC tokens for observer and
+      lifecycle owner
+[x] status-only observer can patch status and create Events only
+[x] lifecycle owner can perform only the explicitly approved finalizer-shaped
+      main-object patch
+[x] wrong status casing, enum drift, endpoint drift, RBAC broadening, spec
+      patch, unrelated metadata patch, and fake `/finalizers` endpoint fail
+[ ] run the same boundary against a real Kubernetes API or envtest apiserver
 ```
 
 Verification:
 
 ```text
 go test ./core/ops ./cmd/sw-block
-new envtest/live-apiserver target with real CRD schemas and RBAC
+scripts/run-phase41-lifecycle-owner-api-boundary.ps1
+scripts/run-phase41-lifecycle-owner-api-boundary.sh
+testops/scenarios/lifecycle-owner-api-boundary-chain.yaml
+future envtest/live-apiserver target with real CRD schemas and RBAC
 negative tests for forbidden spec/storage/workload mutation
 ```
 
@@ -243,6 +252,13 @@ git diff --check
   released operator-status status/events-only boundary; and making finalizer
   mutation an explicit lifecycle-owner strategy decision rather than an RBAC
   patch to the observer.
+- 24%: D2 schema-aware boundary gate dev-complete. Added
+  `TestPhase41D2LifecycleOwnerFinalizerBoundary`, Phase 41 D2 wrapper scripts,
+  and a TestOps scenario. The gate proves the observer cannot patch the main
+  `SwBlockVolume`, the future lifecycle-owner identity can only make a
+  finalizer-shaped main-object patch, and spec/unrelated metadata/fake
+  `/finalizers` endpoint mutation is rejected. A true live-apiserver/envtest
+  execution path remains open before D2 can be called fully closed.
 
 ## Prerequisites / Risks
 

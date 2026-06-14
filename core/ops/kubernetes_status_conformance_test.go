@@ -226,6 +226,82 @@ func TestPhase40D1StatusConformanceRejectsSchemaAndRBACDrift(t *testing.T) {
 	}
 }
 
+func TestPhase41D2LifecycleOwnerFinalizerBoundary(t *testing.T) {
+	api := newStatusConformanceAPIServer(t)
+	defer api.Close()
+
+	finalizerPatch := map[string]any{"metadata": map[string]any{
+		"finalizers": []any{"block.seaweedfs.com/swblockvolume-protection"},
+	}}
+	cases := []struct {
+		name  string
+		token string
+		path  string
+		body  map[string]any
+		want  int
+	}{
+		{
+			name:  "operator-status cannot patch finalizers through main object",
+			token: "operator-status-token",
+			path:  "/apis/block.seaweedfs.com/v1alpha1/namespaces/kube-system/swblockvolumes/pvc-a",
+			body:  finalizerPatch,
+			want:  http.StatusForbidden,
+		},
+		{
+			name:  "lifecycle-owner can patch only finalizers through main object",
+			token: "lifecycle-owner-token",
+			path:  "/apis/block.seaweedfs.com/v1alpha1/namespaces/kube-system/swblockvolumes/pvc-a",
+			body:  finalizerPatch,
+			want:  http.StatusOK,
+		},
+		{
+			name:  "lifecycle-owner still cannot use non-existent finalizers endpoint",
+			token: "lifecycle-owner-token",
+			path:  "/apis/block.seaweedfs.com/v1alpha1/namespaces/kube-system/swblockvolumes/pvc-a/finalizers",
+			body:  finalizerPatch,
+			want:  http.StatusForbidden,
+		},
+		{
+			name:  "lifecycle-owner cannot patch spec",
+			token: "lifecycle-owner-token",
+			path:  "/apis/block.seaweedfs.com/v1alpha1/namespaces/kube-system/swblockvolumes/pvc-a",
+			body:  map[string]any{"spec": map[string]any{"volumeID": "pvc-a"}},
+			want:  http.StatusForbidden,
+		},
+		{
+			name:  "lifecycle-owner cannot patch unrelated metadata",
+			token: "lifecycle-owner-token",
+			path:  "/apis/block.seaweedfs.com/v1alpha1/namespaces/kube-system/swblockvolumes/pvc-a",
+			body:  map[string]any{"metadata": map[string]any{"labels": map[string]any{"changed": "true"}}},
+			want:  http.StatusForbidden,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			raw, err := json.Marshal(tc.body)
+			if err != nil {
+				t.Fatalf("marshal body: %v", err)
+			}
+			req, err := http.NewRequest(http.MethodPatch, api.URL+tc.path, bytes.NewReader(raw))
+			if err != nil {
+				t.Fatalf("new request: %v", err)
+			}
+			req.Header.Set("Content-Type", "application/merge-patch+json")
+			if tc.token != "" {
+				req.Header.Set("Authorization", "Bearer "+tc.token)
+			}
+			resp, err := api.Client().Do(req)
+			if err != nil {
+				t.Fatalf("do request: %v", err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != tc.want {
+				t.Fatalf("status=%d want %d", resp.StatusCode, tc.want)
+			}
+		})
+	}
+}
+
 type statusConformanceAPIServer struct {
 	*httptest.Server
 	clusterStatusSchema map[string]any
@@ -249,11 +325,55 @@ func (api *statusConformanceAPIServer) handle(w http.ResponseWriter, r *http.Req
 	switch {
 	case r.Method == http.MethodPatch && strings.HasSuffix(r.URL.Path, "/status"):
 		api.handleStatusPatch(w, r)
+	case r.Method == http.MethodPatch && strings.Contains(r.URL.Path, "/swblockvolumes/") && !strings.HasSuffix(r.URL.Path, "/finalizers"):
+		api.handleLifecycleOwnerPatch(w, r)
 	case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/api/v1/namespaces/") && strings.HasSuffix(r.URL.Path, "/events"):
 		api.handleEventCreate(w, r)
 	default:
 		http.Error(w, "operator-status RBAC forbids this request", http.StatusForbidden)
 	}
+}
+
+func (api *statusConformanceAPIServer) handleLifecycleOwnerPatch(w http.ResponseWriter, r *http.Request) {
+	if r.Header.Get("Authorization") != "Bearer lifecycle-owner-token" {
+		http.Error(w, "main resource patch forbidden for observer", http.StatusForbidden)
+		return
+	}
+	if got := r.Header.Get("Content-Type"); got != "application/merge-patch+json" {
+		http.Error(w, "resource patches must use merge-patch", http.StatusUnsupportedMediaType)
+		return
+	}
+	var body map[string]any
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if !isFinalizerOnlyPatch(body) {
+		http.Error(w, "lifecycle-owner may patch only metadata.finalizers", http.StatusForbidden)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write([]byte(`{"kind":"SwBlockVolume","metadata":{"name":"pvc-a"}}`))
+}
+
+func isFinalizerOnlyPatch(body map[string]any) bool {
+	if len(body) != 1 {
+		return false
+	}
+	metadata, ok := body["metadata"].(map[string]any)
+	if !ok || len(metadata) != 1 {
+		return false
+	}
+	finalizers, ok := metadata["finalizers"].([]any)
+	if !ok {
+		return false
+	}
+	for _, item := range finalizers {
+		if _, ok := item.(string); !ok {
+			return false
+		}
+	}
+	return true
 }
 
 func (api *statusConformanceAPIServer) handleStatusPatch(w http.ResponseWriter, r *http.Request) {
