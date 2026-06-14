@@ -1,6 +1,6 @@
 # Current Plan: Phase 42 - Lifecycle Owner API / Admission Gate
 
-Status: open, 0% complete. Started on 2026-06-14.
+Status: open, 14% complete. Started on 2026-06-14.
 
 Branch: `phase41-lifecycle-owner-foundation`
 
@@ -65,18 +65,19 @@ Goal: choose and wire the real API proof.
 Acceptance:
 
 ```text
-[ ] choose one primary harness: envtest, live throwaway cluster, or equivalent
-[ ] load real SwBlockVolume CRD schema
-[ ] install lifecycle-owner RBAC separate from operator-status
-[ ] install admission policy/webhook or equivalent finalizer-only enforcement
-[ ] prove operator-status RBAC remains status/events-only
+[x] choose one primary harness: live Kubernetes ValidatingAdmissionPolicy gate
+[x] load real SwBlockVolume CRD schema
+[x] install lifecycle-owner RBAC separate from operator-status
+[x] install admission policy/webhook or equivalent finalizer-only enforcement
+[x] prove operator-status RBAC remains status/events-only
 ```
 
 Verification:
 
 ```text
-documented harness command
-negative test proving mock-only is not the source of truth
+scripts/run-phase42-lifecycle-owner-admission-gate.sh
+scripts/run-phase42-lifecycle-owner-admission-gate.ps1
+testops/scenarios/lifecycle-owner-admission-gate-chain.yaml
 ```
 
 ## D2: Allowed Finalizer Patch
@@ -206,6 +207,14 @@ Phase 42 can close only if:
 - 0%: Phase 42 opened from the Phase 41 lifecycle-owner foundation. The
   planning contract is drafted in
   `internal/docs/ref/phase42-lifecycle-owner-api-admission-gate.md`.
+- 14%: D1 dev-complete. Chose a live Kubernetes
+  `ValidatingAdmissionPolicy` harness instead of mock-only tests. Added
+  PowerShell/Bash runners and a TestOps scenario that apply the real
+  `SwBlockVolume` CRD, create separate operator-status and lifecycle-owner
+  identities, install finalizer-only admission, and assert operator-status
+  remains status/events-only. Local Rancher Desktop smoke fails closed with
+  `blocked_reason=validating_admission_policy_unavailable`; QA must run this on
+  a cluster with `ValidatingAdmissionPolicy` support.
 
 ## Prerequisites / Risks
 
@@ -220,4 +229,6 @@ Phase 42 can close only if:
 ## Next Step
 
 Implement D1: choose the harness shape, wire the real CRD/RBAC/admission test
-surface, and prove the existing status-only observer remains unchanged.
+surface, and prove the existing status-only observer remains unchanged. QA
+assignment:
+`internal/docs/qa-assignments/phase42-d1-lifecycle-owner-admission-gate-qa.md`.
