@@ -234,6 +234,7 @@ fi
   echo "multipath_residue_count=$(wc -l <"$ARTIFACT_DIR/multipath-residue.after-cleanup.txt")"
   echo "hostpath_residue_count=$(wc -l <"$ARTIFACT_DIR/hostpath-residue.after-cleanup.txt")"
   echo "failure_count=$failures"
+  echo "cleanup_observed_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 } >"$ARTIFACT_DIR/cleanup-summary.txt"
 
 cat "$ARTIFACT_DIR/cleanup-summary.txt"

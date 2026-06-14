@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 )
 
 const (
@@ -17,6 +18,7 @@ const (
 	CleanupSummaryFailedPhaseKey       = "failed_phase"
 	CleanupSummaryReasonCodesKey       = "reason_codes"
 	CleanupSummaryEvidenceKey          = "cleanup_evidence"
+	CleanupSummaryObservedAtKey        = "cleanup_observed_at"
 )
 
 type CleanupEvidenceReportRow struct {
@@ -39,6 +41,7 @@ func CleanupEvidenceFromSummary(summary map[string]string, evidencePath string) 
 		Status:      defaultString(summary[CleanupSummaryStatusKey], ObservationStatusUnavailable),
 		EvidenceRef: evidencePath,
 	}
+	cleanup.ObservedAt = cleanupTimeFromSummary(summary, CleanupSummaryObservedAtKey)
 	cleanup.KubernetesResidueCount = cleanupIntFromSummary(summary, CleanupSummaryKubernetesResidueKey)
 	cleanup.ISCSIResidueCount = cleanupIntFromSummary(summary, CleanupSummaryISCSIResidueKey)
 	cleanup.MultipathResidueCount = cleanupIntFromSummary(summary, CleanupSummaryMultipathResidueKey)
@@ -73,6 +76,9 @@ func (cleanup CleanupEvidence) ReportSummaryLines() []string {
 	if cleanup.EvidenceRef != "" {
 		lines = append(lines, fmt.Sprintf("%s=%s", CleanupSummaryEvidenceKey, cleanup.EvidenceRef))
 	}
+	if !cleanup.ObservedAt.IsZero() {
+		lines = append(lines, fmt.Sprintf("%s=%s", CleanupSummaryObservedAtKey, cleanup.ObservedAt.UTC().Format(time.RFC3339)))
+	}
 	return lines
 }
 
@@ -104,4 +110,16 @@ func cleanupIntFromSummary(summary map[string]string, key string) int {
 		return 0
 	}
 	return parsed
+}
+
+func cleanupTimeFromSummary(summary map[string]string, key string) time.Time {
+	value := strings.TrimSpace(summary[key])
+	if value == "" {
+		return time.Time{}
+	}
+	parsed, err := time.Parse(time.RFC3339, value)
+	if err != nil {
+		return time.Time{}
+	}
+	return parsed.UTC()
 }

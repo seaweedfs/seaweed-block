@@ -577,6 +577,8 @@ func applyDeleteSafetySummary(cluster *ClusterEvidence, summary map[string]strin
 		DeleteRequested:  deleteRequested,
 		FinalizerPresent: finalizerPresent,
 		Cleanup:          cluster.Cleanup,
+		ObservedAt:       cluster.CapturedAt,
+		MaxEvidenceAge:   15 * time.Minute,
 	})
 	if evidencePath != "" {
 		decision.EvidenceRefs = appendUniqueStrings(decision.EvidenceRefs, evidencePath)

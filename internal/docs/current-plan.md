@@ -123,9 +123,7 @@ negative tests for forbidden spec/storage/workload mutation
 Goal: convert Phase 39 delete-safety status into executable preconditions
 without executing cleanup.
 
-Status: in progress. Clean, blocked, missing-evidence, and multi-volume
-isolation are covered; stale cleanup evidence needs an explicit freshness fact
-source before it can be gated honestly.
+Status: dev-complete, awaiting QA/review.
 
 Acceptance:
 
@@ -133,7 +131,7 @@ Acceptance:
 [x] blocked delete evidence rejects lifecycle release with stable reason
 [x] clean delete evidence permits release intent
 [x] missing evidence produces decision=unknown and release_allowed=false
-[ ] stale evidence produces decision=unknown from an explicit freshness fact
+[x] stale evidence produces decision=unknown from an explicit freshness fact
 [x] cleanup-required evidence suggests scripted verification only
 [x] CRD/report/dashboard/operator-snapshot agree on decision and evidence
 [x] multi-volume evidence stays isolated per volume
@@ -264,13 +262,15 @@ git diff --check
   finalizer-shaped main-object patch, and spec/unrelated metadata/fake
   `/finalizers` endpoint mutation is rejected. A true live-apiserver/envtest
   execution path remains open before D2 can be called fully closed.
-- 36%: D3 precondition semantics partially complete. Delete-safety now uses
+- 42%: D3 dev-complete. Delete-safety now uses
   `decision=unknown` for missing cleanup evidence instead of treating missing
   evidence as confirmed blocked residue. From-bundle tests prove blocked
   residue rejects release, clean evidence allows release, missing evidence keeps
   data-plane readiness separate from lifecycle release, and the surfaces carry
-  the same delete-safety decision. Stale cleanup evidence still needs an
-  explicit freshness field before it can be gated without self-certifying.
+  the same delete-safety decision. Cleanup summaries now carry
+  `cleanup_observed_at`, and stale cleanup evidence produces
+  `decision=unknown reason=cleanup_evidence_stale` instead of allowing
+  finalizer release.
 
 ## Prerequisites / Risks
 

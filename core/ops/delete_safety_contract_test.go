@@ -1,6 +1,9 @@
 package ops
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestSwBlockVolumeDeleteSafetyContract_BoundsFinalizerOwnership(t *testing.T) {
 	contract := SwBlockVolumeDeleteSafetyContractDefinition()
@@ -120,6 +123,31 @@ func TestEvaluateSwBlockVolumeDeleteSafety_BlocksWithResidue(t *testing.T) {
 	}
 	if !stringSliceContains(decision.EvidenceRefs, "cleanup-summary.txt") {
 		t.Fatalf("evidence refs=%+v", decision.EvidenceRefs)
+	}
+}
+
+func TestEvaluateSwBlockVolumeDeleteSafety_UnknownWithStaleCleanupEvidence(t *testing.T) {
+	now := time.Date(2026, 6, 14, 12, 0, 0, 0, time.UTC)
+	decision := EvaluateSwBlockVolumeDeleteSafety(SwBlockVolumeDeleteSafetyFacts{
+		DeleteRequested:  true,
+		FinalizerPresent: true,
+		ObservedAt:       now,
+		MaxEvidenceAge:   15 * time.Minute,
+		Cleanup: &CleanupEvidence{
+			Status:      ObservationStatusOK,
+			ObservedAt:  now.Add(-16 * time.Minute),
+			EvidenceRef: "cleanup-summary.txt",
+		},
+	})
+	if decision.State != DeleteSafetyStateRequested ||
+		decision.Decision != ManagedVolumeActionDecisionUnknown ||
+		decision.Reason != ReasonCleanupEvidenceStale ||
+		decision.FinalizerReleaseAllowed ||
+		decision.SafeNextAction != ManagedVolumeActionVerifyCleanup {
+		t.Fatalf("decision=%+v", decision)
+	}
+	if !stringSliceContains(decision.MissingFacts, "cleanup.freshness") {
+		t.Fatalf("missing facts=%+v", decision.MissingFacts)
 	}
 }
 

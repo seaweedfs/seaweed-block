@@ -1,5 +1,7 @@
 package ops
 
+import "time"
+
 const (
 	SwBlockVolumeFinalizerName = "block.seaweedfs.com/swblockvolume-protection"
 
@@ -13,6 +15,7 @@ const (
 
 	ReasonDeleteNotRequested        = "delete_not_requested"
 	ReasonCleanupEvidenceMissing    = "cleanup_evidence_missing"
+	ReasonCleanupEvidenceStale      = "cleanup_evidence_stale"
 	ReasonDeleteFinalizerReleasable = "finalizer_releasable"
 	ReasonDeleteFinalizerAdded      = "finalizer_added"
 	ReasonDeleteFinalizerReleased   = "finalizer_released"
@@ -36,6 +39,8 @@ type SwBlockVolumeDeleteSafetyFacts struct {
 	DeleteRequested  bool             `json:"delete_requested"`
 	FinalizerPresent bool             `json:"finalizer_present"`
 	Cleanup          *CleanupEvidence `json:"cleanup,omitempty"`
+	ObservedAt       time.Time        `json:"observed_at,omitempty"`
+	MaxEvidenceAge   time.Duration    `json:"max_evidence_age,omitempty"`
 }
 
 type SwBlockVolumeDeleteSafetyDecision struct {
@@ -121,6 +126,17 @@ func EvaluateSwBlockVolumeDeleteSafety(facts SwBlockVolumeDeleteSafetyFacts) SwB
 			SafeNextAction: ManagedVolumeActionVerifyCleanup,
 		}
 	}
+	if cleanupEvidenceStale(facts) {
+		return SwBlockVolumeDeleteSafetyDecision{
+			ActionType:     SwBlockVolumeDeleteActionReleaseFinalizer,
+			Decision:       ManagedVolumeActionDecisionUnknown,
+			State:          DeleteSafetyStateRequested,
+			Reason:         ReasonCleanupEvidenceStale,
+			MissingFacts:   []string{"cleanup.freshness"},
+			EvidenceRefs:   cleanupEvidenceRefs(facts.Cleanup),
+			SafeNextAction: ManagedVolumeActionVerifyCleanup,
+		}
+	}
 	if cleanupRequired(facts.Cleanup) {
 		return SwBlockVolumeDeleteSafetyDecision{
 			ActionType:     SwBlockVolumeDeleteActionReleaseFinalizer,
@@ -139,4 +155,12 @@ func EvaluateSwBlockVolumeDeleteSafety(facts SwBlockVolumeDeleteSafetyFacts) SwB
 		FinalizerReleaseAllowed: true,
 		EvidenceRefs:            cleanupEvidenceRefs(facts.Cleanup),
 	}
+}
+
+func cleanupEvidenceStale(facts SwBlockVolumeDeleteSafetyFacts) bool {
+	if facts.Cleanup == nil || facts.Cleanup.ObservedAt.IsZero() ||
+		facts.ObservedAt.IsZero() || facts.MaxEvidenceAge <= 0 {
+		return false
+	}
+	return facts.Cleanup.ObservedAt.Add(facts.MaxEvidenceAge).Before(facts.ObservedAt)
 }

@@ -87,16 +87,17 @@ type InstallDriftEvidence struct {
 }
 
 type CleanupEvidence struct {
-	Status                 string   `json:"status"`
-	KubernetesResidueCount int      `json:"k8s_residue_count,omitempty"`
-	ISCSIResidueCount      int      `json:"iscsi_residue_count,omitempty"`
-	MultipathResidueCount  int      `json:"multipath_residue_count,omitempty"`
-	ProcessResidueCount    int      `json:"process_residue_count,omitempty"`
-	HostPathResidueCount   int      `json:"hostpath_residue_count,omitempty"`
-	FailureCount           int      `json:"failure_count,omitempty"`
-	FailedPhase            string   `json:"failed_phase,omitempty"`
-	ReasonCodes            []string `json:"reason_codes,omitempty"`
-	EvidenceRef            string   `json:"evidence_ref,omitempty"`
+	Status                 string    `json:"status"`
+	ObservedAt             time.Time `json:"observed_at,omitempty"`
+	KubernetesResidueCount int       `json:"k8s_residue_count,omitempty"`
+	ISCSIResidueCount      int       `json:"iscsi_residue_count,omitempty"`
+	MultipathResidueCount  int       `json:"multipath_residue_count,omitempty"`
+	ProcessResidueCount    int       `json:"process_residue_count,omitempty"`
+	HostPathResidueCount   int       `json:"hostpath_residue_count,omitempty"`
+	FailureCount           int       `json:"failure_count,omitempty"`
+	FailedPhase            string    `json:"failed_phase,omitempty"`
+	ReasonCodes            []string  `json:"reason_codes,omitempty"`
+	EvidenceRef            string    `json:"evidence_ref,omitempty"`
 }
 
 type NodeEvidence struct {
