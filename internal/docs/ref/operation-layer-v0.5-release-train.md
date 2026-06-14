@@ -116,4 +116,3 @@ That later train must still use the same five-layer standard:
 ```text
 live facts -> judgment -> action owner -> user-visible status/action -> QA gate
 ```
-

@@ -175,4 +175,3 @@ Phase 42 can close only if:
 [ ] QA sign-off records that Phase 43 is now eligible to implement the first
     real finalizer mutation
 ```
-
