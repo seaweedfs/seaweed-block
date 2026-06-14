@@ -540,9 +540,23 @@ product risk. The recommended order is:
    Before any finalizer add/remove, prove main-object patch confinement against
    a real Kubernetes API with admission/RBAC. Only then consider a first
    bounded mutation.
-7. **Returned-replica rebuild/failback.**
-   High product value, but it depends on the action model and status trust.
-8. **Backup/snapshot/restore and NVMe ANA parity.**
+7. **Phase 43 candidate: first real lifecycle mutation.**
+   If Phase 42 proves the API/admission boundary, ship only the first bounded
+   mutation: likely `SwBlockVolume` finalizer add/remove with delete-safety
+   preconditions. Do not include cleanup, rebuild, failback, backup, or NVMe in
+   the same phase.
+8. **Phase 44 candidate: delete lifecycle close gate and Operation Layer v0.5
+   release.**
+   Validate the full user path: install -> PVC -> status -> delete requested ->
+   blocked/releasable -> finalizer behavior -> cleanup evidence -> support
+   bundle -> uninstall zero residue. This is the release boundary for the
+   operation layer.
+9. **Productized returned-replica rebuild/reintegration/failback.**
+   High product value. The engine/transport has rebuild and returned-replica
+   safety pieces; the remaining work is productization through the lifecycle
+   action model: live facts, judgment, action owner, fencing, status, Events,
+   and multi-volume QA gates.
+10. **Backup/snapshot/restore and NVMe ANA parity.**
    Important, but they should reuse the status/action model rather than create
    another isolated control plane.
 
@@ -559,8 +573,10 @@ Approximate engineering effort if scope remains tight:
 - Lifecycle-owner finalizers: medium/high. Cleaner than operator-status main
   patch, but requires a separate lifecycle-owner component plus real
   API/admission proof that only finalizers can be patched.
-- Rebuild/failback: high. Requires storage semantics, authority/fencing,
-  returned-replica state, and long-running failure gates.
+- Productized returned-replica rebuild/reintegration/failback: high. The
+  low-level rebuild/recovery pieces exist, but shipping it as a product feature
+  requires lifecycle ownership, authority/fencing status, returned-replica state
+  projection, and long-running multi-volume failure gates.
 - Backup/snapshot/restore: high. Requires durable data semantics and user-facing
   restore guarantees.
 - NVMe ANA parity: medium/high. Protocol-specific work, but cheaper if it uses
@@ -592,9 +608,12 @@ Approximate engineering effort if scope remains tight:
 - Active work is Phase 41 Lifecycle Owner Foundation. It is non-mutating:
   finalizer add/remove is deferred, while lifecycle-owner dry-run decisions and
   delete-safety preconditions are made visible.
+- Phase 41-44 are the Operation Layer v0.5 release train: lifecycle-owner
+  foundation, real API/admission proof, first bounded finalizer mutation, and
+  delete lifecycle close gate/release.
 - Do not start NVMe ANA parity, rebuild/failback, backup/restore, or mutating
-  operator workflows by extending Phase 41. Pick those as separate gated phases
-  after the lifecycle-owner API/admission boundary is proven.
+  recovery workflows by extending Phase 41. Pick those as separate gated phases
+  after the Operation Layer v0.5 train closes.
 - When the current plan closes, move it to `internal/docs/finished-plans/`
   with a phase/topic filename such as
   `phase1_finishedplan_frontend_protocol_readiness.md`.

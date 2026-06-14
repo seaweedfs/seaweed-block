@@ -103,21 +103,28 @@ Recommended order from here:
 
 1. Operator-status foundation release: complete in v0.4 beta. It claims
    status/events-only visibility, not lifecycle mutation.
-2. Add a lifecycle-owner foundation before adding more storage features. This
-   is the next control-plane boundary: decide who owns CR metadata/finalizers,
-   prove the RBAC/API contract against a real Kubernetes API, and keep
-   operator-status status/events-only. The working contract is
-   `internal/docs/ref/lifecycle-owner-control-contract.md`.
-3. Add the first bounded lifecycle mutation only after the lifecycle-owner
-   boundary is proven. The likely first candidate is finalizer add/remove for
-   `SwBlockVolume`, but CRD finalizers require main-object
-   `patch swblockvolumes`, so this must be owned by a lifecycle controller with
-   explicit tests and user-visible preconditions, not by the released
-   status-only observer.
-4. Add returned-replica rebuild/failback, backup/restore, and NVMe ANA parity
-   only after the lifecycle owner can safely authorize, block, and audit a
-   small mutation. These features all add state transitions; doing them before
-   the lifecycle boundary would create more status debt.
+2. Complete the Operation Layer v0.5 release train before adding more storage
+   features:
+   - Phase 41: lifecycle-owner foundation. Define observer, lifecycle-owner,
+     and executor roles. Keep operator-status status/events-only.
+   - Phase 42: real API/admission proof. Show that a lifecycle owner can be
+     granted main-object patch only for finalizer-shaped writes, with spec and
+     unrelated metadata rejected by a real Kubernetes API/admission gate.
+   - Phase 43: first bounded lifecycle mutation. The likely candidate is
+     `SwBlockVolume` finalizer add/remove, with delete-safety preconditions and
+     user-visible Events/status.
+   - Phase 44: delete lifecycle close gate and release. Validate install,
+     PVC, status, delete-request, blocked/releasable finalizer behavior,
+     cleanup evidence, support bundle, and uninstall zero-residue as one user
+     path.
+3. Productize returned-replica rebuild/reintegration/failback after the
+   operation layer can safely authorize, block, and audit lifecycle actions.
+   The engine/transport already has rebuild and returned-replica safety pieces;
+   the missing work is the Kubernetes/product control loop: facts, judgment,
+   action ownership, status, Events, fencing, and multi-volume QA gates.
+4. Add backup/restore and NVMe ANA parity after they can reuse the same action
+   owner, evidence, and status model rather than creating another isolated
+   control plane.
 
 The practical rule is:
 
@@ -168,11 +175,13 @@ control-plane path is mature.
    - authority moves
    - frontend reconnect path is validated
 
-3. Returned replica lifecycle.
+3. Productized returned replica lifecycle.
 
-   - observed replica returns
-   - candidate -> syncing/rebuilding -> ready
+   - observed replica returns after promotion
+   - returned replica stays frontend-fenced until recovery evidence is current
+   - candidate -> syncing/rebuilding -> ready is visible in CRD/report/dashboard
    - ready status gates placement/ACK eligibility
+   - rebuild/reintegration/failback action owner is explicit and audited
 
 4. Flow-control and pressure behavior.
 
