@@ -597,6 +597,66 @@ func TestObservationBundle_DeleteSafetyBlocksWithResidue(t *testing.T) {
 	assertDashboardEndpointContains(t, server.URL+"/"+ObservationOperatorSnapshotArtifact, `"reason": "iscsi_node_records_present"`)
 }
 
+func TestObservationBundle_DeleteSafetyUnknownWithoutCleanupEvidence(t *testing.T) {
+	dir := t.TempDir()
+	writeProductClusterEvidence(t, dir, []VolumeEvidence{{
+		VolumeID:          "pvc-missing-cleanup",
+		Namespace:         "default",
+		PVCName:           "missing-cleanup-pvc",
+		PVName:            "pv-missing-cleanup",
+		ReplicationFactor: 1,
+		Status:            ObservationStatusOK,
+		PrimaryReplica:    "r1",
+		PrimaryNode:       "m01",
+		PublishTarget:     "192.168.1.181:3260",
+		Replicas: []ReplicaEvidence{{
+			ReplicaID:      "r1",
+			KubernetesNode: "m01",
+			Observed:       true,
+			Role:           "primary",
+			FrontendAddr:   "192.168.1.181:3260",
+		}},
+	}})
+	mustWrite(t, filepath.Join(dir, ObservationDeleteSafetyArtifact), strings.Join([]string{
+		"delete_requested=true",
+		"finalizer_present=true",
+		"volume_id=pvc-missing-cleanup",
+		"pvc_name=missing-cleanup-pvc",
+		"pv_name=pv-missing-cleanup",
+	}, "\n"))
+
+	cluster, err := BuildObservationFromBundle(ObservationBundleOptions{Dir: dir, VolumeID: "pvc-missing-cleanup"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	managed := managedProjectionForVolume(cluster.ManagedVolumes, "pvc-missing-cleanup")
+	if managed.DeleteSafety == nil ||
+		managed.DeleteSafety.State != DeleteSafetyStateRequested ||
+		managed.DeleteSafety.Decision != ManagedVolumeActionDecisionUnknown ||
+		managed.DeleteSafety.Reason != ReasonCleanupEvidenceMissing ||
+		managed.DeleteSafety.FinalizerReleaseAllowed {
+		t.Fatalf("managed=%+v delete=%+v", managed, managed.DeleteSafety)
+	}
+	if managed.Status != ManagedVolumeStatusReady {
+		t.Fatalf("missing cleanup evidence must not falsify data-plane readiness: %+v", managed)
+	}
+
+	summary := RenderObservationReportSummary(cluster)
+	if !strings.Contains(summary, "managed_volume_delete_safety=pvc-missing-cleanup state=requested decision=unknown reason=cleanup_evidence_missing release_allowed=false action=safe_k8s.release_swblockvolume_finalizer") {
+		t.Fatalf("summary missing unknown delete safety:\n%s", summary)
+	}
+	snapshot := BuildOperatorFoundationSnapshot(cluster)
+	if snapshot.Volumes[0].Status.DeleteSafety == nil ||
+		snapshot.Volumes[0].Status.DeleteSafety.Decision != ManagedVolumeActionDecisionUnknown ||
+		snapshot.Volumes[0].Status.DeleteSafety.State != DeleteSafetyStateRequested {
+		t.Fatalf("snapshot delete safety=%+v", snapshot.Volumes[0].Status.DeleteSafety)
+	}
+	server := httptest.NewServer(NewObservationDashboardHandler(cluster))
+	defer server.Close()
+	assertDashboardEndpointContains(t, server.URL+"/"+ObservationOperatorSnapshotArtifact, `"decision": "unknown"`)
+	assertDashboardEndpointContains(t, server.URL+"/"+ObservationOperatorSnapshotArtifact, `"reason": "cleanup_evidence_missing"`)
+}
+
 func TestObservationBundle_DeleteSafetyReleasableWithCleanCleanupEvidence(t *testing.T) {
 	dir := t.TempDir()
 	writeProductClusterEvidence(t, dir, []VolumeEvidence{{

@@ -8,6 +8,7 @@ import (
 const (
 	ManagedVolumeActionDecisionAllowed  = "allowed"
 	ManagedVolumeActionDecisionRejected = "rejected"
+	ManagedVolumeActionDecisionUnknown  = "unknown"
 
 	ManagedVolumeActionRejectUnknownAction = "unknown_action"
 	ManagedVolumeActionRejectDisabled      = "policy_disabled"

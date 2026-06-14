@@ -114,8 +114,8 @@ func EvaluateSwBlockVolumeDeleteSafety(facts SwBlockVolumeDeleteSafetyFacts) SwB
 	if facts.Cleanup == nil {
 		return SwBlockVolumeDeleteSafetyDecision{
 			ActionType:     SwBlockVolumeDeleteActionReleaseFinalizer,
-			Decision:       ManagedVolumeActionDecisionRejected,
-			State:          DeleteSafetyStateBlocked,
+			Decision:       ManagedVolumeActionDecisionUnknown,
+			State:          DeleteSafetyStateRequested,
 			Reason:         ReasonCleanupEvidenceMissing,
 			MissingFacts:   []string{"cleanup.status"},
 			SafeNextAction: ManagedVolumeActionVerifyCleanup,

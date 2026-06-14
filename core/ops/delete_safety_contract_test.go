@@ -83,13 +83,13 @@ func TestEvaluateSwBlockVolumeDeleteSafety_NotRequested(t *testing.T) {
 	}
 }
 
-func TestEvaluateSwBlockVolumeDeleteSafety_BlocksWithoutCleanupEvidence(t *testing.T) {
+func TestEvaluateSwBlockVolumeDeleteSafety_UnknownWithoutCleanupEvidence(t *testing.T) {
 	decision := EvaluateSwBlockVolumeDeleteSafety(SwBlockVolumeDeleteSafetyFacts{
 		DeleteRequested:  true,
 		FinalizerPresent: true,
 	})
-	if decision.State != DeleteSafetyStateBlocked ||
-		decision.Decision != ManagedVolumeActionDecisionRejected ||
+	if decision.State != DeleteSafetyStateRequested ||
+		decision.Decision != ManagedVolumeActionDecisionUnknown ||
 		decision.Reason != ReasonCleanupEvidenceMissing ||
 		decision.FinalizerReleaseAllowed ||
 		decision.SafeNextAction != ManagedVolumeActionVerifyCleanup {

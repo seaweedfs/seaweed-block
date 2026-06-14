@@ -118,6 +118,7 @@ spec:
                       enum:
                         - allowed
                         - rejected
+                        - unknown
                     state:
                       type: string
                       enum:
@@ -174,6 +175,7 @@ spec:
                         enum:
                           - allowed
                           - rejected
+                          - unknown
                       decisionReason:
                         type: string
                       missingFacts:
