@@ -105,11 +105,18 @@ Recommended order from here:
    status/events-only visibility, not lifecycle mutation.
 2. Complete the Operation Layer v0.5 release train before adding more storage
    features:
-   - Phase 41: lifecycle-owner foundation. Define observer, lifecycle-owner,
-     and executor roles. Keep operator-status status/events-only.
-   - Phase 42: real API/admission proof. Show that a lifecycle owner can be
-     granted main-object patch only for finalizer-shaped writes, with spec and
-     unrelated metadata rejected by a real Kubernetes API/admission gate.
+   - Phase 41: lifecycle-owner foundation. **Closed 2026-06-14, QA PASS**
+     (`internal/docs/finished-plans/phase41_finishedplan_lifecycle_owner_foundation.md`).
+     Observer/lifecycle-owner/executor roles defined; delete-safety preconditions
+     and a dry-run finalizer-release action shipped; operator-status stays
+     status/events-only; finalizer mutation deferred. Recorded carry-forward: a
+     real live-apiserver/envtest RBAC/admission gate is still required before any
+     finalizer mutation can ship.
+   - Phase 42 (**active**): real API/admission proof. Show that a lifecycle owner
+     can be granted main-object patch only for finalizer-shaped writes, with spec
+     and unrelated metadata rejected by a real Kubernetes API/admission gate. This
+     is the recorded Phase 41 carry-forward and the gate before any actual
+     finalizer add/remove.
    - Phase 43: first bounded lifecycle mutation. The likely candidate is
      `SwBlockVolume` finalizer add/remove, with delete-safety preconditions and
      user-visible Events/status.
@@ -125,6 +132,11 @@ Recommended order from here:
 4. Add backup/restore and NVMe ANA parity after they can reuse the same action
    owner, evidence, and status model rather than creating another isolated
    control plane.
+
+The internal release-train contract is
+`internal/docs/ref/operation-layer-v0.5-release-train.md`; the Phase 42 entry
+gate is drafted in
+`internal/docs/ref/phase42-lifecycle-owner-api-admission-gate.md`.
 
 The practical rule is:
 
