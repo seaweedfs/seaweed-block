@@ -679,10 +679,27 @@ func TestOperatorStatusReconcilerProjectsDeleteSafetyWithoutFinalizerMutation(t 
 		writer.volumes[0].status.DeleteSafety.Decision != ManagedVolumeActionDecisionRejected {
 		t.Fatalf("delete safety status=%+v", writer.volumes[0].status.DeleteSafety)
 	}
+	action := findCRDAction(writer.volumes[0].status.AllowedActions, SwBlockVolumeDeleteActionReleaseFinalizer)
+	if action == nil ||
+		action.Mode != ManagedVolumeActionModeDryRun ||
+		action.OwnerExecutor != "lifecycle_owner" ||
+		action.MutationAllowed ||
+		action.Decision != ManagedVolumeActionDecisionRejected {
+		t.Fatalf("lifecycle-owner dry-run action=%+v", action)
+	}
 	if events.countByReason(ReasonDeleteFinalizerAdded) != 0 ||
 		events.countByReason(ReasonDeleteFinalizerReleased) != 0 {
 		t.Fatalf("operator-status must not emit finalizer mutation events: %+v", events.events)
 	}
+}
+
+func findCRDAction(actions []SwBlockVolumeCRDAction, typ string) *SwBlockVolumeCRDAction {
+	for i := range actions {
+		if actions[i].Type == typ {
+			return &actions[i]
+		}
+	}
+	return nil
 }
 
 func TestOperatorStatusReconcilerDeleteSafetyDoesNotContaminateOtherVolumes(t *testing.T) {

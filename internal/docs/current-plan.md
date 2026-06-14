@@ -149,16 +149,19 @@ operator-status remains status/events-only
 Goal: decide whether Phase 41 lands a finalizer mutation or stops at a
 documented design block.
 
+Status: dev-complete, awaiting review. Phase 41 defers finalizer mutation and
+continues with a dry-run/status lifecycle-owner path.
+
 Acceptance:
 
 ```text
-[ ] explicitly choose one strategy:
+[x] explicitly choose one strategy:
     - lifecycle-owner owns finalizer mutation with main-object patch RBAC, or
     - finalizer mutation is deferred to a future CSI/lifecycle controller
-[ ] if lifecycle-owner owns it, add admission/code/RBAC proof that spec and
+[x] if lifecycle-owner owns it, add admission/code/RBAC proof that spec and
       storage mutation stay forbidden
-[ ] if deferred, document the exact future owner and release non-claim
-[ ] user-facing impact is documented for PVC/CR deletion
+[x] if deferred, document the exact future owner and release non-claim
+[x] user-facing impact is documented for PVC/CR deletion
 ```
 
 Verification:
@@ -174,16 +177,19 @@ envtest/live-apiserver proof for the chosen strategy
 Goal: if D4 approves mutation, implement only finalizer add/remove. If D4
 defers mutation, implement the dry-run lifecycle-owner status path instead.
 
+Status: dev-complete, awaiting QA/review. D4 deferred mutation, so D5 shipped
+the dry-run lifecycle-owner status path.
+
 Acceptance:
 
 ```text
-[ ] disabled by default or explicitly beta-gated
-[ ] no storage/workload/host cleanup is executed
-[ ] clean volume: finalizer release is allowed and audited
-[ ] blocked volume: finalizer release is rejected and audited
-[ ] repeated reconciles are idempotent
-[ ] Events are bounded and stable
-[ ] operator-status RBAC remains unchanged
+[x] disabled by default or explicitly beta-gated
+[x] no storage/workload/host cleanup is executed
+[x] clean volume: finalizer release is allowed and audited
+[x] blocked volume: finalizer release is rejected and audited
+[x] repeated reconciles are idempotent
+[x] Events are bounded and stable
+[x] operator-status RBAC remains unchanged
 ```
 
 Verification:
@@ -271,6 +277,17 @@ git diff --check
   `cleanup_observed_at`, and stale cleanup evidence produces
   `decision=unknown reason=cleanup_evidence_stale` instead of allowing
   finalizer release.
+- 56%: D4 strategy dev-complete. Added
+  `internal/docs/ref/lifecycle-owner-finalizer-strategy.md`. Phase 41 will not
+  ship finalizer add/remove because the future lifecycle owner still lacks a
+  real API/admission proof for main-object patch confinement. The release
+  non-claim remains: delete-safety is status-only guidance, not Kubernetes
+  deletion protection.
+- 70%: D5 dev-complete. Delete-safety decisions now project a dry-run
+  `safe_k8s.release_swblockvolume_finalizer` lifecycle-owner action across
+  report, operator-snapshot, and CRD allowedActions. Clean evidence produces
+  `decision=allowed`, residue produces `decision=rejected`, and missing/stale
+  evidence produces `decision=unknown`; all carry `mutationAllowed=false`.
 
 ## Prerequisites / Risks
 

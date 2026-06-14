@@ -576,6 +576,8 @@ func TestObservationBundle_DeleteSafetyBlocksWithResidue(t *testing.T) {
 	for _, want := range []string{
 		"managed_volume_delete_safety=pvc-delete state=blocked decision=rejected reason=iscsi_node_records_present release_allowed=false action=safe_k8s.release_swblockvolume_finalizer",
 		"managed_volume_delete_safety_safe_next_action=pvc-delete observe.verify_cleanup",
+		"managed_volume_action=safe_k8s.release_swblockvolume_finalizer mode=dry_run side_effect=safe_k8s executor=lifecycle_owner decision=rejected reason=iscsi_node_records_present",
+		"managed_volume_action_evidence_required=safe_k8s.release_swblockvolume_finalizer cleanup-summary.txt",
 	} {
 		if !strings.Contains(summary, want) {
 			t.Fatalf("summary missing %q:\n%s", want, summary)
@@ -644,6 +646,9 @@ func TestObservationBundle_DeleteSafetyUnknownWithoutCleanupEvidence(t *testing.
 	summary := RenderObservationReportSummary(cluster)
 	if !strings.Contains(summary, "managed_volume_delete_safety=pvc-missing-cleanup state=requested decision=unknown reason=cleanup_evidence_missing release_allowed=false action=safe_k8s.release_swblockvolume_finalizer") {
 		t.Fatalf("summary missing unknown delete safety:\n%s", summary)
+	}
+	if !strings.Contains(summary, "managed_volume_action=safe_k8s.release_swblockvolume_finalizer mode=dry_run side_effect=safe_k8s executor=lifecycle_owner decision=unknown reason=cleanup_evidence_missing") {
+		t.Fatalf("summary missing unknown lifecycle-owner action:\n%s", summary)
 	}
 	snapshot := BuildOperatorFoundationSnapshot(cluster)
 	if snapshot.Volumes[0].Status.DeleteSafety == nil ||
@@ -777,6 +782,9 @@ func TestObservationBundle_DeleteSafetyReleasableWithCleanCleanupEvidence(t *tes
 	summary := RenderObservationReportSummary(cluster)
 	if !strings.Contains(summary, "managed_volume_delete_safety=pvc-clean-delete state=releasable decision=allowed reason=finalizer_releasable release_allowed=true action=safe_k8s.release_swblockvolume_finalizer") {
 		t.Fatalf("summary missing releasable delete safety:\n%s", summary)
+	}
+	if !strings.Contains(summary, "managed_volume_action=safe_k8s.release_swblockvolume_finalizer mode=dry_run side_effect=safe_k8s executor=lifecycle_owner decision=allowed reason=finalizer_releasable") {
+		t.Fatalf("summary missing releasable lifecycle-owner action:\n%s", summary)
 	}
 	snapshot := BuildOperatorFoundationSnapshot(cluster)
 	if snapshot.Volumes[0].Status.DeleteSafety == nil ||

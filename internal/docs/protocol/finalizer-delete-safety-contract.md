@@ -38,11 +38,12 @@ vocabulary:
 
 ```text
 action_type=safe_k8s.release_swblockvolume_finalizer
-decision=allowed|rejected
+decision=allowed|rejected|unknown
 ```
 
-The action is allowed only when the delete state is `releasable`. Missing
-cleanup evidence, residue, or no active delete request rejects the action.
+The action is allowed only when the delete state is `releasable`. Residue or no
+active delete request rejects the action. Missing or stale cleanup evidence is
+`unknown`, not allowed.
 
 ## Delete States
 
@@ -50,7 +51,7 @@ cleanup evidence, residue, or no active delete request rejects the action.
 |---|---|
 | `not_requested` | No delete request is active. |
 | `requested` | Delete request exists; evidence has not yet been classified. |
-| `blocked` | Delete was requested, but cleanup/evidence is missing or unsafe. |
+| `blocked` | Delete was requested, and cleanup evidence proves residue or unsafe state. |
 | `releasable` | Delete was requested and cleanup evidence is clean. The operator may remove the finalizer. |
 | `released` | Finalizer removal has been observed or emitted as an event. |
 
@@ -74,9 +75,18 @@ cleanup.hostpath_residue_count
 If cleanup evidence is missing, the safe decision is:
 
 ```text
-state=blocked
-decision=rejected
+state=requested
+decision=unknown
 reason=cleanup_evidence_missing
+safe_next_action=observe.verify_cleanup
+```
+
+If cleanup evidence is stale, the safe decision is:
+
+```text
+state=requested
+decision=unknown
+reason=cleanup_evidence_stale
 safe_next_action=observe.verify_cleanup
 ```
 

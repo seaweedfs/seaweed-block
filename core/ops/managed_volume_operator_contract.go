@@ -75,7 +75,36 @@ func ManagedVolumeOperatorContractFromProjection(projection ManagedVolumeProject
 			EvidenceRefs:     append([]string(nil), action.EvidenceRefs...),
 		})
 	}
+	if projection.DeleteSafety != nil && !hasManagedVolumeOperatorAction(contract.AllowedActions, projection.DeleteSafety.ActionType) {
+		contract.AllowedActions = append(contract.AllowedActions, managedVolumeOperatorActionFromDeleteSafety(*projection.DeleteSafety))
+	}
 	return contract
+}
+
+func managedVolumeOperatorActionFromDeleteSafety(decision SwBlockVolumeDeleteSafetyDecision) ManagedVolumeOperatorAction {
+	return ManagedVolumeOperatorAction{
+		Type:             decision.ActionType,
+		Mode:             ManagedVolumeActionModeDryRun,
+		SideEffectClass:  ManagedVolumeSideEffectSafeK8S,
+		OwnerExecutor:    "lifecycle_owner",
+		Decision:         decision.Decision,
+		DecisionReason:   decision.Reason,
+		MissingFacts:     append([]string(nil), decision.MissingFacts...),
+		MutationAllowed:  false,
+		Preconditions:    []string{"delete_safety_evidence_current", "cleanup_residue_absent"},
+		InvariantRefs:    []string{"INV-LIFECYCLE-FINALIZER-001"},
+		EvidenceRequired: "cleanup-summary.txt",
+		EvidenceRefs:     append([]string(nil), decision.EvidenceRefs...),
+	}
+}
+
+func hasManagedVolumeOperatorAction(actions []ManagedVolumeOperatorAction, actionType string) bool {
+	for _, action := range actions {
+		if action.Type == actionType {
+			return true
+		}
+	}
+	return false
 }
 
 func cloneSwBlockVolumeDeleteSafetyDecision(in *SwBlockVolumeDeleteSafetyDecision) *SwBlockVolumeDeleteSafetyDecision {

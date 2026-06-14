@@ -585,6 +585,7 @@ func applyDeleteSafetySummary(cluster *ClusterEvidence, summary map[string]strin
 	}
 	managed.DeleteSafety = &decision
 	managed.EvidenceRefs = appendUniqueStrings(managed.EvidenceRefs, decision.EvidenceRefs...)
+	managed.Actions = ensureManagedVolumeAction(managed.Actions, managedVolumeActionFromDeleteSafety(decision))
 	switch decision.State {
 	case DeleteSafetyStateBlocked:
 		managed.Status = ManagedVolumeStatusBlocked
@@ -615,6 +616,22 @@ func applyDeleteSafetySummary(cluster *ClusterEvidence, summary map[string]strin
 			Message:      "delete finalizer is releasable; cleanup evidence is clean",
 			EvidenceRefs: append([]string(nil), decision.EvidenceRefs...),
 		})
+	}
+}
+
+func managedVolumeActionFromDeleteSafety(decision SwBlockVolumeDeleteSafetyDecision) ManagedVolumeAction {
+	return ManagedVolumeAction{
+		Type:             decision.ActionType,
+		Mode:             ManagedVolumeActionModeDryRun,
+		SideEffectClass:  ManagedVolumeSideEffectSafeK8S,
+		OwnerExecutor:    "lifecycle_owner",
+		Decision:         decision.Decision,
+		DecisionReason:   decision.Reason,
+		MissingFacts:     append([]string(nil), decision.MissingFacts...),
+		Preconditions:    []string{"delete_safety_evidence_current", "cleanup_residue_absent"},
+		InvariantRefs:    []string{"INV-LIFECYCLE-FINALIZER-001"},
+		EvidenceRequired: "cleanup-summary.txt",
+		EvidenceRefs:     append([]string(nil), decision.EvidenceRefs...),
 	}
 }
 
