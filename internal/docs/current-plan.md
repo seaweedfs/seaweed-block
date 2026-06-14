@@ -206,14 +206,17 @@ cleanup verifier remains zero-residue after test
 Goal: prove the lifecycle-owner path does not mix volume identities or poison
 other volumes.
 
+Status: dev-complete for the status/dry-run path. A live finalizer mutation gate
+is not applicable because D4 deferred mutation.
+
 Acceptance:
 
 ```text
-[ ] one blocked volume does not block status or lifecycle decisions for others
-[ ] one releasable volume does not release another volume
-[ ] stale evidence on one volume stays Unknown only for that volume
-[ ] Events, allowedActions, deleteSafety, and finalizer state are per-volume
-[ ] cleanup verification remains clean
+[x] one blocked volume does not block status or lifecycle decisions for others
+[x] one releasable volume does not release another volume
+[x] stale evidence on one volume stays Unknown only for that volume
+[x] Events, allowedActions, deleteSafety, and finalizer state are per-volume
+[x] cleanup verification remains clean
 ```
 
 Verification:
@@ -288,6 +291,11 @@ git diff --check
   report, operator-snapshot, and CRD allowedActions. Clean evidence produces
   `decision=allowed`, residue produces `decision=rejected`, and missing/stale
   evidence produces `decision=unknown`; all carry `mutationAllowed=false`.
+- 84%: D6 dev-complete for the non-mutating Phase 41 path. The multi-volume
+  operator-status regression now covers blocked, ready, releasable, and stale
+  delete-safety decisions in one reconcile. Each volume keeps its own
+  `deleteSafety` and dry-run lifecycle-owner action decision, with no finalizer
+  mutation Events and no cross-volume contamination.
 
 ## Prerequisites / Risks
 

@@ -755,6 +755,21 @@ func TestOperatorStatusReconcilerDeleteSafetyDoesNotContaminateOtherVolumes(t *t
 					EvidenceRefs:            []string{"cleanup-c.txt"},
 				},
 			},
+			{
+				VolumeID:   "pvc-d",
+				PVCName:    "stale-d",
+				Status:     ManagedVolumeStatusReady,
+				ReasonCode: ReasonFirstVolumeVerified,
+				DeleteSafety: &SwBlockVolumeDeleteSafetyDecision{
+					ActionType:              SwBlockVolumeDeleteActionReleaseFinalizer,
+					Decision:                ManagedVolumeActionDecisionUnknown,
+					State:                   DeleteSafetyStateRequested,
+					Reason:                  ReasonCleanupEvidenceStale,
+					FinalizerReleaseAllowed: false,
+					MissingFacts:            []string{"cleanup.freshness"},
+					EvidenceRefs:            []string{"cleanup-d.txt"},
+				},
+			},
 		},
 	}}
 	writer := &fakeOperatorStatusWriter{}
@@ -772,7 +787,7 @@ func TestOperatorStatusReconcilerDeleteSafetyDoesNotContaminateOtherVolumes(t *t
 	if result.FinalizerPatchCount != 0 {
 		t.Fatalf("finalizer patches=%d", result.FinalizerPatchCount)
 	}
-	if len(writer.volumes) != 3 {
+	if len(writer.volumes) != 4 {
 		t.Fatalf("volume writes=%+v", writer.volumes)
 	}
 	byName := map[string]SwBlockVolumeCRDStatus{}
@@ -796,6 +811,28 @@ func TestOperatorStatusReconcilerDeleteSafetyDoesNotContaminateOtherVolumes(t *t
 		got.DeleteSafety.State != DeleteSafetyStateReleasable ||
 		got.DeleteSafety.Decision != ManagedVolumeActionDecisionAllowed {
 		t.Fatalf("volume C status=%+v", got)
+	}
+	if got := byName["stale-d"]; got.Status != ManagedVolumeStatusReady ||
+		got.ReasonCode != ReasonFirstVolumeVerified ||
+		got.DeleteSafety == nil ||
+		got.DeleteSafety.State != DeleteSafetyStateRequested ||
+		got.DeleteSafety.Decision != ManagedVolumeActionDecisionUnknown ||
+		got.DeleteSafety.Reason != ReasonCleanupEvidenceStale {
+		t.Fatalf("volume D status=%+v", got)
+	}
+	for name, wantDecision := range map[string]string{
+		"delete-a": ManagedVolumeActionDecisionRejected,
+		"clean-c":  ManagedVolumeActionDecisionAllowed,
+		"stale-d":  ManagedVolumeActionDecisionUnknown,
+	} {
+		action := findCRDAction(byName[name].AllowedActions, SwBlockVolumeDeleteActionReleaseFinalizer)
+		if action == nil ||
+			action.OwnerExecutor != "lifecycle_owner" ||
+			action.Mode != ManagedVolumeActionModeDryRun ||
+			action.MutationAllowed ||
+			action.Decision != wantDecision {
+			t.Fatalf("volume %s lifecycle-owner action=%+v want decision=%s", name, action, wantDecision)
+		}
 	}
 	for _, event := range events.events {
 		if event.Reason == ReasonDeleteFinalizerAdded || event.Reason == ReasonDeleteFinalizerReleased {
