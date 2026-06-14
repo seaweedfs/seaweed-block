@@ -87,8 +87,8 @@ export PATH="$PWD:$PATH"
 
 sw-block ops generate-helm-values \
   --out values.day1.yaml \
-  --image ghcr.io/seaweedfs/seaweed-block:sha-6260e46fd3be \
-  --csi-image ghcr.io/seaweedfs/seaweed-block-csi:sha-6260e46fd3be
+  --image ghcr.io/seaweedfs/seaweed-block:sha-dc2972d0059b \
+  --csi-image ghcr.io/seaweedfs/seaweed-block-csi:sha-dc2972d0059b
 
 helm install sw-block charts/seaweed-block \
   --namespace kube-system \
@@ -115,7 +115,7 @@ status_report=status/report/index.html
 cleanup_status=ok
 ```
 
-Current validated alpha image tag: `sha-6260e46fd3be`.
+Current validated alpha image tag: `sha-dc2972d0059b`.
 
 Mutable `:alpha` is a smoke/demo tag only; it can drift from the source tree.
 

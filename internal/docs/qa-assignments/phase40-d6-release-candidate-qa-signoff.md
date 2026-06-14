@@ -1,9 +1,11 @@
 # QA Sign-off — Phase 40 D6 Release Candidate Gate
 
-Verdict: **Blocker RESOLVED — chart-flag gate verified.** First filed HOLD on
-`9a8df78`; re-validated on `5f0566e` (see Re-validation below). The published-image
-first-volume gate (G1) now passes. One residual confirmation remains before a full
-release PASS (G2 operator-status claim on the actual release image).
+Verdict: **PASS — release-clear from the QA gate.** First filed HOLD on `9a8df78`
+(chart-ahead-of-image flag skew); chart-flag gate verified on `5f0566e` with G1
+against published images; and the final blocker — G2 operator-status live
+CRD/Event/RBAC on the **shipped release image `sha-dc2972d0059b`** — now passes
+(see "G2 on the fresh release image" below). All D6 gates (Local, G1–G5) pass on
+the shipped release artifacts; no QA release blocker remains.
 
 ## Re-validation — 2026-06-13, commit `5f0566e phase40: gate durable impl chart flag`
 
@@ -66,6 +68,51 @@ seaweed-block:
 seaweed-block-csi:
   sha256:b5942cd68d28aecdfebec1f1e5ec55a9cafe746169fee3b6c35916c93fffcaa6
 ```
+
+### G2 on the fresh release image — PASS (2026-06-14)
+
+Ran the operator-status live write-mode path against the shipped release images
+(`sha-dc2972d0059b`, pulled into m01+m02 k3s) on the gated chart (`5f0566e`, lab
+tree; chart unchanged through `340e05f`). Image preflight: the shipped blockmaster
+binary defines **both** `--launcher-durable-root` and `--launcher-durable-impl`
+(fully current), and `sw-block ops` exposes `operator-status`.
+
+```text
+install: helm install ... -f day1.yaml(image=sha-dc2972d0059b)
+         --set operatorStatus.create=true --set operatorStatus.dryRun=false
+         --set operatorStatus.interval=15s --wait
+blockmaster: 1/1 Running (no CrashLoopBackOff on the gated chart)
+first volume: first_volume_status=ok  writer_verified=true  reader_verified=true
+              (pvc sw-block-example-pvc / volume pvc-3344346b-...)
+
+live CRD status (patched by the shipped operator-status loop):
+  SwBlockCluster sw-block:           readyVolumeCount=1  volumeCount=1  blocked=0
+  SwBlockVolume sw-block-example-pvc: status=ready  Ready=True  reason=first_volume_verified
+Event: Normal first_volume_verified swblockvolume/sw-block-example-pvc
+       "managed volume is ready for the documented path"
+
+RBAC (can-i as system:serviceaccount:kube-system:sw-block-seaweed-block-operator-status):
+  patch swblockvolumes  --subresource=status      => yes
+  patch swblockclusters --subresource=status      => yes
+  create events                                   => yes
+  patch swblockvolumes (main object)              => no
+  patch swblockvolumes --subresource=finalizers   => no
+  patch pods                                       => no
+  patch persistentvolumeclaims                     => no
+  update storageclasses                            => no
+  delete swblockvolumes                            => no
+```
+
+The shipped release binary publishes live CRD status + the ready Event with the
+exact status/events-only RBAC boundary — no schema/casing/enum/endpoint defects,
+no spec/finalizer/storage/workload/delete mutation power. The Phases 35–39
+operator-status fixes are present in the published image. Cleanup verified:
+`cleanup_status=ok`, helm 0 / pods 0.
+
+**Final verdict: all D6 gates pass on the shipped release artifacts.** The chart
+(`5f0566e`) installs and runs the documented first-volume path on the published
+images (G1), and the operator-status read-only/status-only CRD + Event claim holds
+on the shipped binary (G2). No release blocker remains from the QA gate.
 
 ---
 

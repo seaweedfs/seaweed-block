@@ -101,17 +101,13 @@ preserve that model rather than add isolated scripts or separate status systems.
 
 Recommended order from here:
 
-1. Finish and release the operator-status foundation as one release-sized
-   slice. This includes real CRD/RBAC status-writer conformance tests,
-   stale-status polish, bounded Events, install drift status, and release-claim
-   alignment.
-2. Cut a release after the operator-status foundation passes QA. This release
-   should claim status/events-only visibility, not lifecycle mutation.
-3. Add finalizer ownership in a later lifecycle-owner slice. Current finding:
+1. Operator-status foundation release: complete in v0.4 beta. It claims
+   status/events-only visibility, not lifecycle mutation.
+2. Add finalizer ownership in a later lifecycle-owner slice. Current finding:
    CRD finalizers cannot be protected by `swblockvolumes/finalizers` RBAC alone,
    so operator-status remains status/events-only instead of taking main
    `patch swblockvolumes`.
-4. Add returned-replica rebuild/failback, backup/restore, and NVMe ANA parity
+3. Add returned-replica rebuild/failback, backup/restore, and NVMe ANA parity
    only after the status/action model stays stable.
 
 ## Future Non-Kubernetes Adapters

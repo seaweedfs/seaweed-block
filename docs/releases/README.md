@@ -13,7 +13,7 @@ is still outside the supported boundary.
 - [v0.3.4 Alpha — Status Surface Hardening And Strict New-User Path](v0.3.4-alpha.md)
 - [v0.3.5 Alpha — Failure-Path Evidence And Cleanup Hardening](v0.3.5-alpha.md)
 - [v0.3.6 Alpha — Test Realism And Dirty-Failure Hardening](v0.3.6-alpha.md)
-- [v0.4 Beta Candidate — Kubernetes-Native Read-Only Operator Foundation](v0.4-beta-candidate.md)
+- [v0.4 Beta — Kubernetes-Native Read-Only Operator Foundation](v0.4-beta-candidate.md)
 
 ## Version Boundary
 
@@ -50,7 +50,7 @@ is still outside the supported boundary.
   live status endpoint unreachable, restart convergence, and real V3 SmartWAL
   corruption gates prove no false `Ready=True` is projected from weak or dirty
   evidence.
-- `v0.4-beta-candidate` adds a Kubernetes-native read-only status foundation and
+- `v0.4-beta` adds a Kubernetes-native read-only status foundation and
   actionability layer: `SwBlockCluster` and `SwBlockVolume` CRDs, status-only
   reconciliation, Conditions, Events, node readiness, support evidence refs,
   cleanup/delete-safety visibility, install drift visibility, safe next-step

@@ -1,6 +1,6 @@
 # Current Plan: Phase 40 - Operator Production Hardening
 
-Status: active, 94% complete. Started on 2026-06-13.
+Status: closed, 100% complete. Started on 2026-06-13; closed on 2026-06-14.
 
 Branch: `phase33-testops-failure-hardening`
 
@@ -69,7 +69,7 @@ finalizer mutation, promotion/fencing/rebuild/failback, or upgrade execution.
 
 Goal: catch CRD schema and RBAC defects before live QA.
 
-Status: dev-complete; QA/internal review pending.
+Status: PASS.
 
 Acceptance:
 
@@ -95,7 +95,7 @@ helm template with operatorStatus.create=true dryRun=false
 
 Goal: remove known confusing status leftovers without changing product scope.
 
-Status: dev-complete; QA/internal review pending.
+Status: PASS.
 
 Acceptance:
 
@@ -121,7 +121,7 @@ event identity regression
 
 Goal: make install drift visible before implementing upgrade execution.
 
-Status: dev-complete; QA/internal review pending.
+Status: PASS.
 
 Acceptance:
 
@@ -146,7 +146,7 @@ helm template/lint
 
 Goal: turn the live-only failures from Phases 35-39 into repeatable gates.
 
-Status: dev-complete; QA/internal review pending.
+Status: PASS.
 
 Acceptance:
 
@@ -172,7 +172,7 @@ QA assignment with explicit pass/fail evidence paths
 Goal: prepare a coherent release boundary for the status-only operator
 foundation.
 
-Status: dev-complete; QA/PM review pending.
+Status: PASS.
 
 Acceptance:
 
@@ -199,21 +199,20 @@ QA minimal new-user walkthrough if release digest is available
 
 Goal: prove the release candidate from a user and QA perspective.
 
-Status: local gate passed; published-image G1 rerun passed; fresh release image
-published; G2 pending.
+Status: PASS.
 
 Acceptance:
 
 ```text
 [x] fresh Helm install from documented values
 [x] first PVC writer/reader passes
-[ ] operator-status CRDs show healthy volume status and Events
-[ ] negative status scenario shows no false Ready=True
-[ ] cleanup leaves zero residue
+[x] operator-status CRDs show healthy volume status and Events
+[x] negative status scenario shows no false Ready=True
+[x] cleanup leaves zero residue
 [x] conformance harness passes
 [x] local chart render omits published-image-incompatible launcher flags by
       default
-[ ] docs and claims match the tested image
+[x] docs and claims match the tested image
 ```
 
 Verification:
@@ -236,11 +235,11 @@ and Phase 41 can safely start as a separate mutating lifecycle-owner track.
 Acceptance:
 
 ```text
-[ ] D1-D6 pass
-[ ] operator-status remains status/events-only
-[ ] known Phase 39 follow-ups are either fixed or explicitly carried forward
-[ ] release/no-release decision is recorded
-[ ] Phase 41 entry criteria are listed
+[x] D1-D6 pass
+[x] operator-status remains status/events-only
+[x] known Phase 39 follow-ups are either fixed or explicitly carried forward
+[x] release/no-release decision is recorded
+[x] Phase 41 entry criteria are listed
 ```
 
 Verification:
@@ -317,6 +316,12 @@ release PR or explicit hold note
   `seaweed-block@sha256:b8da5ca4e2bbe2f0f630fee0468790c444362615d68807a1be31fd237c84928f`
   and
   `seaweed-block-csi@sha256:b5942cd68d28aecdfebec1f1e5ec55a9cafe746169fee3b6c35916c93fffcaa6`.
+- 100%: QA reran D6 G2 against the fresh release image
+  `sha-dc2972d0059b`. The shipped binary published live
+  `SwBlockCluster.status`, `SwBlockVolume.status`, and a Kubernetes Event, while
+  the operator-status ServiceAccount remained status/events-only with no main
+  CRD, finalizer, pod, PVC, StorageClass, or delete mutation power. D6 is PASS
+  and no QA release blocker remains.
 
 ## Prerequisites / Risks
 
@@ -330,6 +335,6 @@ release PR or explicit hold note
 
 ## Next Step
 
-Ask QA to run D6 G2 against `sha-dc2972d0059b`. Do not cut the release until
-live operator-status CRD status, Events, and the status/events-only RBAC
-boundary pass on the shipped binary.
+Phase 40 is closed. Next phase should start as Phase 41 for lifecycle-owner
+design and the first bounded mutating path, using the status/events-only release
+as the stable baseline.
