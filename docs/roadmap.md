@@ -103,12 +103,28 @@ Recommended order from here:
 
 1. Operator-status foundation release: complete in v0.4 beta. It claims
    status/events-only visibility, not lifecycle mutation.
-2. Add finalizer ownership in a later lifecycle-owner slice. Current finding:
-   CRD finalizers cannot be protected by `swblockvolumes/finalizers` RBAC alone,
-   so operator-status remains status/events-only instead of taking main
-   `patch swblockvolumes`.
-3. Add returned-replica rebuild/failback, backup/restore, and NVMe ANA parity
-   only after the status/action model stays stable.
+2. Add a lifecycle-owner foundation before adding more storage features. This
+   is the next control-plane boundary: decide who owns CR metadata/finalizers,
+   prove the RBAC/API contract against a real Kubernetes API, and keep
+   operator-status status/events-only.
+3. Add the first bounded lifecycle mutation only after the lifecycle-owner
+   boundary is proven. The likely first candidate is finalizer add/remove for
+   `SwBlockVolume`, but CRD finalizers require main-object
+   `patch swblockvolumes`, so this must be owned by a lifecycle controller with
+   explicit tests and user-visible preconditions, not by the released
+   status-only observer.
+4. Add returned-replica rebuild/failback, backup/restore, and NVMe ANA parity
+   only after the lifecycle owner can safely authorize, block, and audit a
+   small mutation. These features all add state transitions; doing them before
+   the lifecycle boundary would create more status debt.
+
+The practical rule is:
+
+```text
+Do not add a new data-plane feature if the product cannot yet explain who owns
+the lifecycle action, what evidence authorizes it, how it is blocked, and where
+the user sees the result.
+```
 
 ## Future Non-Kubernetes Adapters
 

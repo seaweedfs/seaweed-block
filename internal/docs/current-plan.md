@@ -1,340 +1,257 @@
-# Current Plan: Phase 40 - Operator Production Hardening
+# Current Plan: Phase 41 - Lifecycle Owner Foundation
 
-Status: closed, 100% complete. Started on 2026-06-13; closed on 2026-06-14.
+Status: open, 0% complete. Started on 2026-06-14.
 
-Branch: `phase33-testops-failure-hardening`
+Branch: `phase41-lifecycle-owner-foundation`
 
-Previous phase: Phase 39 is closed in
-`internal/docs/finished-plans/phase39_finishedplan_delete_safety_status_boundary.md`.
+Previous phase: Phase 40 is closed in
+`internal/docs/finished-plans/phase40_finishedplan_operator_production_hardening.md`.
 
 ## Product Goal
 
-Make the operator-status foundation trustworthy enough to release and to build
-future lifecycle mutation on.
+Turn the v0.4 status/events-only operator foundation into a safe lifecycle
+owner foundation without breaking the read-only operator-status boundary.
 
-Phases 35-39 produced a useful read-only/status-only operator surface:
-`SwBlockCluster.status`, `SwBlockVolume.status`, Kubernetes Events, live node
-evidence, support/cleanup evidence, safe next steps, action decisions, and
-delete-safety status. The recurring weakness was not the model; it was that
-several CRD schema/RBAC bugs were only caught by live QA after mock unit tests
-and Helm rendering passed.
-
-Phase 40 closes that gap as one larger hardening phase. It adds real
-Kubernetes API conformance coverage, cleans up known status-polish issues, adds
-upgrade/rollback drift status, and prepares a release candidate for the
-operator-status foundation.
+Phase 40 made the control plane useful as an observation surface: CRD status,
+Events, node evidence, cleanup visibility, delete-safety status, action
+decisions, install drift, and API conformance. Phase 39 proved why the next
+step cannot be a local patch: CRD finalizer mutation requires main-object
+`patch swblockvolumes`, so it must belong to a clearly scoped lifecycle owner,
+not the status-only observer.
 
 The hard exit statement:
 
 ```text
-The operator-status foundation is release-ready as a status/events-only
-control-plane surface. It is schema/RBAC-validated against a real Kubernetes API,
-does not mutate storage or lifecycle objects, and reports install/status/drift
-conditions with consistent CRD/report/dashboard/operator-snapshot evidence.
+Seaweed Block has an explicit lifecycle-owner contract and a gated first
+mutation path. Status-only observation remains status/events-only. Any lifecycle
+mutation is owned by a separate component, guarded by real Kubernetes API/RBAC
+tests, and explained through CRD status, Events, reports, and QA evidence.
 ```
 
-## Release Decision
+## Why This Comes Before NVMe / Rebuild / Backup
 
-Cut the next release after Phase 40 if QA passes.
+NVMe ANA parity, returned-replica rebuild/failback, and backup/restore all add
+state transitions. If the product cannot clearly answer who owns a lifecycle
+mutation, what facts authorize it, how it is audited, and how it is blocked,
+those features will add more status debt.
 
-Do not wait for Phase 41. Phase 41 is the next mutating lifecycle-owner slice
-and should start after the status-only operator foundation has a clean release
-boundary. Shipping after Phase 40 gives users a coherent product increment:
-Helm + PVC + read-only operator status + Events + diagnostics + delete-safety
-visibility, with explicit non-claims for finalizer ownership and automatic
-cleanup.
+Phase 41 is not another unbounded ops-fix loop. It has one purpose: define and
+prove the mutation boundary that later features can reuse.
 
 ## Scope Contract
 
 | In | Out |
 |---|---|
-| real CRD/RBAC status-writer conformance tests | finalizer add/remove |
-| stale status cleanup and condition/event polish | automatic cleanup execution |
-| upgrade/rollback drift status | upgrade execution |
-| operator-status release docs and claim alignment | repair/rebuild/failback |
-| QA release close gate | backup/snapshot/restore |
-| TestOps coverage for API/schema failures | NVMe ANA parity |
+| lifecycle-owner responsibility contract | NVMe ANA parity |
+| real CRD/RBAC/envtest gate before mutation | rebuild/failback implementation |
+| finalizer strategy and ownership decision | backup/snapshot/restore |
+| first bounded lifecycle mutation behind an explicit gate | automatic cleanup of host/storage residue |
+| delete-safety preconditions and user-visible block reasons | promotion/fencing executor |
+| multi-volume isolation for lifecycle status/mutation | broad production lifecycle claims |
 
 Allowed implementation rule:
 
 ```text
-Phase 40 may change status projection, CRD status schema, Events, TestOps
-coverage, docs, and release packaging.
+Phase 41 may introduce a separate lifecycle-owner component or mode only after
+the contract and API/RBAC gates prove the boundary.
 
-Phase 40 must not add storage/workload/host mutation, automatic cleanup,
-finalizer mutation, promotion/fencing/rebuild/failback, or upgrade execution.
+Phase 41 must not broaden operator-status into a mutating controller.
+Phase 41 must not execute cleanup, rebuild, failback, backup, restore, or
+promotion. If finalizer mutation lands, it is the only allowed lifecycle
+mutation and must be release-gated.
 ```
 
-## D1: Kubernetes API Conformance Harness
+## D1: Lifecycle Owner Contract
 
-Goal: catch CRD schema and RBAC defects before live QA.
-
-Status: PASS.
+Goal: make ownership explicit before code changes.
 
 Acceptance:
 
 ```text
-[x] harness loads real SwBlockCluster/SwBlockVolume CRD schemas
-[x] harness uses an operator-status-equivalent RBAC boundary
-[x] cluster status patch succeeds with current status DTOs
-[x] volume status patch succeeds with conditions, allowedActions, cleanup,
-      deleteSafety, node-derived evidence, and scripted actions
-[x] schema-negative cases fail in the harness, not only in live QA
-[x] event create and duplicate-event behavior are covered
+[ ] document the three roles: observer/status writer, lifecycle owner, executor
+[ ] define which component may patch CR metadata/finalizers
+[ ] define which component may patch CR status
+[ ] define which component may create Events
+[ ] define which component may execute storage/workload/host mutation
+[ ] define evidence, preconditions, and audit fields for each allowed action
+[ ] explain why operator-status remains status/events-only
+```
+
+Verification:
+
+```text
+docs review: current-plan, roadmap, architecture/control-plane note
+no code changes that broaden RBAC before this contract is accepted
+```
+
+## D2: Real Kubernetes API / RBAC Harness
+
+Goal: stop live-only schema/RBAC bugs before QA.
+
+Acceptance:
+
+```text
+[ ] harness installs real SwBlockCluster/SwBlockVolume CRDs
+[ ] harness uses real or equivalent ServiceAccounts and ClusterRoles
+[ ] status-only observer can patch status and create Events only
+[ ] lifecycle owner can perform only the explicitly approved lifecycle mutation
+[ ] wrong status casing, enum drift, endpoint drift, and RBAC broadening fail
+[ ] finalizer/main-object patch behavior is tested against the real API
 ```
 
 Verification:
 
 ```text
 go test ./core/ops ./cmd/sw-block
-new envtest/live-apiserver status-writer test target
-helm template with operatorStatus.create=true dryRun=false
+new envtest/live-apiserver target with real CRD schemas and RBAC
+negative tests for forbidden spec/storage/workload mutation
 ```
 
-## D2: Status Correctness Polish
+## D3: Delete-Safety To Lifecycle Preconditions
 
-Goal: remove known confusing status leftovers without changing product scope.
-
-Status: PASS.
+Goal: convert Phase 39 delete-safety status into executable preconditions
+without executing cleanup.
 
 Acceptance:
 
 ```text
-[x] stale deleteSafety is cleared or marked not_requested when current delete
-      evidence disappears
-[x] non-healthy node status has one effective Ready condition per node surface
-[x] Events stay bounded and remain stable per object/reason/type
-[x] report, dashboard, operator-snapshot, and CRD agree after each polish
-[x] no new mutating action or RBAC grant is introduced
+[ ] blocked delete evidence rejects lifecycle release with stable reason
+[ ] clean delete evidence permits release intent
+[ ] missing or stale evidence produces Unknown/EvidenceStale, not allowed
+[ ] cleanup-required evidence suggests scripted verification only
+[ ] CRD/report/dashboard/operator-snapshot agree on decision and evidence
+[ ] multi-volume evidence stays isolated per volume
 ```
 
 Verification:
 
 ```text
-go test ./core/ops ./cmd/sw-block
-from-bundle regression for stale deleteSafety clearing
-status-surface regression for node condition shape
-event identity regression
+from-bundle scenarios: clean, blocked, stale, missing, multi-volume
+operator-status remains status/events-only
 ```
 
-## D3: Upgrade / Rollback Drift Status
+## D4: Finalizer Strategy Gate
 
-Goal: make install drift visible before implementing upgrade execution.
-
-Status: PASS.
+Goal: decide whether Phase 41 lands a finalizer mutation or stops at a
+documented design block.
 
 Acceptance:
 
 ```text
-[x] SwBlockCluster.status reports chart/app/operator image identity where
-      evidence is available
-[x] drift status distinguishes current, desired, missing, and mismatched images
-[x] upgrade/rollback status is read-only and never runs helm/kubectl mutation
-[x] report/dashboard/operator-snapshot show the same drift status
-[x] non-claims explicitly state that upgrade execution is not implemented
+[ ] explicitly choose one strategy:
+    - lifecycle-owner owns finalizer mutation with main-object patch RBAC, or
+    - finalizer mutation is deferred to a future CSI/lifecycle controller
+[ ] if lifecycle-owner owns it, add admission/code/RBAC proof that spec and
+      storage mutation stay forbidden
+[ ] if deferred, document the exact future owner and release non-claim
+[ ] user-facing impact is documented for PVC/CR deletion
 ```
 
 Verification:
 
 ```text
-go test ./core/ops ./cmd/sw-block
-from-bundle drift scenarios: aligned, image mismatch, missing evidence
-helm template/lint
+design review
+RBAC can-i matrix
+envtest/live-apiserver proof for the chosen strategy
 ```
 
-## D4: TestOps API-Failure Regression Gate
+## D5: First Bounded Mutation Prototype
 
-Goal: turn the live-only failures from Phases 35-39 into repeatable gates.
-
-Status: PASS.
+Goal: if D4 approves mutation, implement only finalizer add/remove. If D4
+defers mutation, implement the dry-run lifecycle-owner status path instead.
 
 Acceptance:
 
 ```text
-[x] casing drift in status payload fails before QA
-[x] enum drift in status conditions/actions fails before QA
-[x] wrong CRD endpoint usage fails before QA
-[x] RBAC boundary drift fails before QA
-[x] blocked/releasable/delete-safety status gates still pass
-[x] QA can run the gate from a clean lab or local envtest path
+[ ] disabled by default or explicitly beta-gated
+[ ] no storage/workload/host cleanup is executed
+[ ] clean volume: finalizer release is allowed and audited
+[ ] blocked volume: finalizer release is rejected and audited
+[ ] repeated reconciles are idempotent
+[ ] Events are bounded and stable
+[ ] operator-status RBAC remains unchanged
 ```
 
 Verification:
 
 ```text
-testops scenario or scripted gate for CRD/RBAC conformance
-go test target for conformance harness
-QA assignment with explicit pass/fail evidence paths
+live lab or envtest finalizer lifecycle gate
+can-i matrix
+no pods/PVC/PV/StorageClass/host mutation
+cleanup verifier remains zero-residue after test
 ```
 
-## D5: Release Claim And Docs Alignment
+## D6: Multi-Volume And Failure Isolation Gate
 
-Goal: prepare a coherent release boundary for the status-only operator
-foundation.
-
-Status: PASS.
+Goal: prove the lifecycle-owner path does not mix volume identities or poison
+other volumes.
 
 Acceptance:
 
 ```text
-[x] README/quickstart/release notes describe supported status-only operator
-      behavior
-[x] non-claims are visible: no finalizer owner, no automatic cleanup, no
-      upgrade execution, no repair/rebuild/failback, no backup/restore
-[x] feature/status table reflects Helm, PVC, ops, CRD status, Events, node
-      evidence, delete-safety status, and known limitations
-[x] release note names immutable image digest or clearly states local build
-      evidence if digest is pending
-[x] PM/user wording distinguishes status visibility from lifecycle mutation
+[ ] one blocked volume does not block status or lifecycle decisions for others
+[ ] one releasable volume does not release another volume
+[ ] stale evidence on one volume stays Unknown only for that volume
+[ ] Events, allowedActions, deleteSafety, and finalizer state are per-volume
+[ ] cleanup verification remains clean
 ```
 
 Verification:
 
 ```text
-docs review: README, quickstart, release note, roadmap
-QA minimal new-user walkthrough if release digest is available
-```
-
-## D6: Release Candidate Gate
-
-Goal: prove the release candidate from a user and QA perspective.
-
-Status: PASS.
-
-Acceptance:
-
-```text
-[x] fresh Helm install from documented values
-[x] first PVC writer/reader passes
-[x] operator-status CRDs show healthy volume status and Events
-[x] negative status scenario shows no false Ready=True
-[x] cleanup leaves zero residue
-[x] conformance harness passes
-[x] local chart render omits published-image-incompatible launcher flags by
-      default
-[x] docs and claims match the tested image
-```
-
-Verification:
-
-```text
-go test ./core/ops ./cmd/sw-block ./cmd/blockcsi ./scripts
-helm lint charts/seaweed-block
-helm template sw-block charts/seaweed-block --namespace kube-system --include-crds \
-  --set operatorStatus.create=true --set operatorStatus.dryRun=false
-QA minimal new-user validation
-QA negative-status validation
-git diff --check
+multi-volume from-bundle gate
+live lab gate if finalizer mutation is enabled
+CRD/report/dashboard/operator-snapshot agreement
 ```
 
 ## D7: Close Gate
 
-Goal: close Phase 40 only when the operator-status foundation is release-ready
-and Phase 41 can safely start as a separate mutating lifecycle-owner track.
+Goal: close Phase 41 only if the lifecycle-owner boundary is real enough to
+build future features on.
 
 Acceptance:
 
 ```text
-[x] D1-D6 pass
-[x] operator-status remains status/events-only
-[x] known Phase 39 follow-ups are either fixed or explicitly carried forward
-[x] release/no-release decision is recorded
-[x] Phase 41 entry criteria are listed
+[ ] D1-D6 pass or a documented D4 design block is accepted
+[ ] operator-status remains status/events-only
+[ ] lifecycle-owner permissions are minimal and tested against real API/RBAC
+[ ] first mutation path is either gated and QA-proven or explicitly deferred
+[ ] user-facing docs state what deletion/finalizer behavior is and is not
+[ ] roadmap is updated for Phase 42
 ```
 
 Verification:
 
 ```text
 finished plan
-QA close report
+QA sign-off
 roadmap update
-release PR or explicit hold note
+git diff --check
 ```
 
 ## Current Progress
 
-- 0%: Phase 40 opened. Scope is consolidated into one larger
-  operator-production-hardening phase instead of splitting envtest, status
-  polish, drift status, and release alignment into separate tiny phases.
-- 14%: D1 dev-complete. Added a Phase 40 conformance harness that loads the
-  real `SwBlockCluster`/`SwBlockVolume` CRD status schemas and enforces an
-  operator-status-equivalent API boundary. It validates full cluster and volume
-  status patches, scripted actions, deleteSafety, Events, duplicate-event
-  idempotency, and negative cases for snake_case payload drift, unsupported
-  condition enums, main-resource patches, and finalizer endpoint usage.
-- 28%: D2 dev-complete. Volume status now emits `deleteSafety:null` when no
-  current delete evidence exists so Kubernetes merge-patch clears stale
-  delete-safety state. Node readiness projection now replaces old `Ready`
-  conditions with one computed authoritative `Ready` condition, while keeping
-  non-Ready conditions. Existing stable event identity remains covered by D1
-  and writer tests.
-- 42%: D3 dev-complete. Added read-only install drift evidence from
-  `install-drift-summary.txt`, projecting current/desired chart, app,
-  blockvolume, CSI, and operator image identity into `SwBlockCluster.status`,
-  operator-snapshot, report summary, dashboard HTML, and from-bundle replay.
-  Drift can be `ok`, `mismatch`, or `unknown`; mismatch is negative-first
-  `Blocked=True`, missing evidence is `EvidenceStale=True`, and the operator
-  snapshot now explicitly carries `no_upgrade_execution`.
-- 56%: D4 dev-complete. Added `run-phase40-status-api-conformance` scripts for
-  PowerShell and bash plus the `operator-status-api-conformance-chain` TestOps
-  scenario. The gate runs the CRD/RBAC conformance tests that catch casing
-  drift, enum drift, wrong endpoint usage, RBAC broadening, and delete-safety
-  status regressions, then emits a summary file for QA assertions.
-- 70%: D5 dev-complete. README, user capabilities, roadmap, release index, and
-  v0.4 beta-candidate notes now describe the status/events-only operator
-  foundation, delete-safety visibility, install drift visibility, CRD/RBAC
-  conformance gates, and explicit non-claims for finalizer ownership,
-  automatic cleanup, upgrade execution, repair/rebuild/failback, backup/restore,
-  and NVMe ANA parity.
-- 78%: D6 local gate passed. Added `run-phase40-release-candidate-local.ps1`
-  and the D6 QA assignment. Local checks pass for Go release-scope tests, Helm
-  lint/template with operator-status write mode, Phase 40 status API
-  conformance, and `git diff --check`. Release remains held until QA completes
-  the lab gates for fresh Helm install, first PVC writer/reader, live
-  operator-status CRD/Event publication, negative status, and zero-residue
-  cleanup.
-- 84%: QA D6 lab validation found a release-packaging blocker: the chart passed
-  `--launcher-durable-impl`, but the published `:alpha` and pinned
-  `sha-6260e46fd3be` images do not support that newer blockmaster flag. The
-  chart now gates the flag behind `compat.launcherDurableImplFlag=false` by
-  default, matching the existing compatibility pattern for newer launcher
-  flags. The local release-candidate gate now asserts the default render omits
-  the incompatible flag. Release remains held until QA reruns the published-image
-  first-volume path.
-- 90%: QA reran D6 G1 against the published
-  `ghcr.io/seaweedfs/seaweed-block:sha-6260e46fd3be` image on commit `5f0566e`.
-  Helm install, first PVC, writer/reader verification, report artifacts, and
-  cleanup all passed. The original chart-ahead-of-image blocker is resolved.
-  Release remains held only for G2 against the actual fresh release image,
-  because the old published images predate the Phase 35-39 operator-status
-  binary fixes.
-- 94%: Published fresh GHCR images from commit `dc2972d0059b` through GitHub
-  Actions run `27490827782`. QA should use
-  `ghcr.io/seaweedfs/seaweed-block:sha-dc2972d0059b` and
-  `ghcr.io/seaweedfs/seaweed-block-csi:sha-dc2972d0059b` for the remaining D6 G2
-  operator-status live CRD/Event/RBAC check. Digests:
-  `seaweed-block@sha256:b8da5ca4e2bbe2f0f630fee0468790c444362615d68807a1be31fd237c84928f`
-  and
-  `seaweed-block-csi@sha256:b5942cd68d28aecdfebec1f1e5ec55a9cafe746169fee3b6c35916c93fffcaa6`.
-- 100%: QA reran D6 G2 against the fresh release image
-  `sha-dc2972d0059b`. The shipped binary published live
-  `SwBlockCluster.status`, `SwBlockVolume.status`, and a Kubernetes Event, while
-  the operator-status ServiceAccount remained status/events-only with no main
-  CRD, finalizer, pod, PVC, StorageClass, or delete mutation power. D6 is PASS
-  and no QA release blocker remains.
+- 0%: Phase 41 opened from the v0.4 beta operator-status release baseline. The
+  phase is intentionally larger than a single finalizer fix: it must establish
+  a lifecycle-owner boundary, a real Kubernetes API/RBAC test harness, and the
+  first bounded mutation decision before adding storage lifecycle features.
 
 ## Prerequisites / Risks
 
 - `tp01` was reported `NotReady`/unreachable during recent QA. Restore before
-  any live RF=3 or 3-node release gate.
-- Do not fix conformance failures by broadening operator-status RBAC to main
-  object mutation. The status-only safety boundary remains the product promise.
-- Conformance coverage should use a real CRD schema and real or equivalent RBAC;
-  mock-only tests are not sufficient for this phase.
-- Drift status must not become upgrade execution.
+  any multi-node live gate.
+- Do not broaden operator-status RBAC. It is the released status/events-only
+  observer and must stay that way.
+- A finalizer controller for CRDs needs main-object patch permission. Treat this
+  as a lifecycle-owner design decision, not a small RBAC tweak.
+- Mock-only tests are insufficient for CRD/RBAC writers. D2 must use real CRD
+  schemas and real or equivalent RBAC.
+- If D4 cannot prove a safe mutation boundary, Phase 41 should close with a
+  documented defer decision rather than shipping a weak mutating controller.
 
 ## Next Step
 
-Phase 40 is closed. Next phase should start as Phase 41 for lifecycle-owner
-design and the first bounded mutating path, using the status/events-only release
-as the stable baseline.
+Start D1 by writing the lifecycle-owner contract and aligning it with the
+existing standard model: fact owners publish evidence, the observer writes
+status, the lifecycle owner owns CR lifecycle mutation, and executors remain
+separate until explicitly introduced.
