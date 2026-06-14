@@ -605,12 +605,18 @@ Approximate engineering effort if scope remains tight:
 - Phase 39 Delete-Safety Status Boundary is closed.
 - Phase 40 Operator Production Hardening is closed and is the v0.4 beta release
   boundary.
-- Active work is Phase 41 Lifecycle Owner Foundation. It is non-mutating:
+- Phase 41 Lifecycle Owner Foundation is closed. It is non-mutating:
   finalizer add/remove is deferred, while lifecycle-owner dry-run decisions and
   delete-safety preconditions are made visible.
+- Active work is Phase 42 Lifecycle Owner API / Admission Gate. It must prove
+  the future lifecycle-owner main-object patch boundary against a real
+  Kubernetes API/admission surface before Phase 43 can ship finalizer mutation.
 - Phase 41-44 are the Operation Layer v0.5 release train: lifecycle-owner
   foundation, real API/admission proof, first bounded finalizer mutation, and
   delete lifecycle close gate/release.
+- The release-train contract is
+  `internal/docs/ref/operation-layer-v0.5-release-train.md`; the Phase 42 gate
+  draft is `internal/docs/ref/phase42-lifecycle-owner-api-admission-gate.md`.
 - Do not start NVMe ANA parity, rebuild/failback, backup/restore, or mutating
   recovery workflows by extending Phase 41. Pick those as separate gated phases
   after the Operation Layer v0.5 train closes.
