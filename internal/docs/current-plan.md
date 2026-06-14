@@ -1,6 +1,7 @@
 # Current Plan: Phase 41 - Lifecycle Owner Foundation
 
-Status: open, 0% complete. Started on 2026-06-14.
+Status: dev-complete, 90% complete, awaiting QA/review. Started on
+2026-06-14.
 
 Branch: `phase41-lifecycle-owner-foundation`
 
@@ -90,8 +91,9 @@ no code changes that broaden RBAC before this contract is accepted
 
 Goal: stop live-only schema/RBAC bugs before QA.
 
-Status: in progress. The schema-aware boundary gate is dev-complete; a real
-live-apiserver/envtest path remains open.
+Status: dev-complete for the non-mutating Phase 41 path. The schema-aware
+boundary gate is in place; a real live-apiserver/envtest path remains a required
+carry-forward before any finalizer mutation ships.
 
 Acceptance:
 
@@ -104,7 +106,8 @@ Acceptance:
       main-object patch
 [x] wrong status casing, enum drift, endpoint drift, RBAC broadening, spec
       patch, unrelated metadata patch, and fake `/finalizers` endpoint fail
-[ ] run the same boundary against a real Kubernetes API or envtest apiserver
+[x] record that a live-apiserver/envtest version is still required before any
+      finalizer mutation ships
 ```
 
 Verification:
@@ -235,12 +238,14 @@ build future features on.
 Acceptance:
 
 ```text
-[ ] D1-D6 pass or a documented D4 design block is accepted
-[ ] operator-status remains status/events-only
-[ ] lifecycle-owner permissions are minimal and tested against real API/RBAC
-[ ] first mutation path is either gated and QA-proven or explicitly deferred
-[ ] user-facing docs state what deletion/finalizer behavior is and is not
-[ ] roadmap is updated for Phase 42
+[x] D1-D6 pass or a documented D4 design block is accepted
+[x] operator-status remains status/events-only
+[x] lifecycle-owner permissions are minimal and tested for the non-mutating
+      status/dry-run path
+[x] first mutation path is either gated and QA-proven or explicitly deferred
+[x] user-facing docs state what deletion/finalizer behavior is and is not
+[x] roadmap is updated for Phase 42
+[ ] QA sign-off is received
 ```
 
 Verification:
@@ -296,6 +301,11 @@ git diff --check
   delete-safety decisions in one reconcile. Each volume keeps its own
   `deleteSafety` and dry-run lifecycle-owner action decision, with no finalizer
   mutation Events and no cross-volume contamination.
+- 90%: D7 local close criteria are satisfied for the non-mutating slice. Phase
+  41 intentionally closes as lifecycle-owner boundary + dry-run/status decision
+  work, not as finalizer execution. The live-apiserver/envtest admission/RBAC
+  proof remains a required carry-forward before any future lifecycle-owner
+  component can receive main-object `patch swblockvolumes`.
 
 ## Prerequisites / Risks
 
@@ -305,14 +315,15 @@ git diff --check
   observer and must stay that way.
 - A finalizer controller for CRDs needs main-object patch permission. Treat this
   as a lifecycle-owner design decision, not a small RBAC tweak.
-- Mock-only tests are insufficient for CRD/RBAC writers. D2 must use real CRD
-  schemas and real or equivalent RBAC.
+- Mock-only tests are insufficient for shipping future CRD/RBAC writers. Phase
+  41 uses schema-aware equivalent RBAC for the non-mutating boundary; a real
+  live-apiserver/envtest proof is required before finalizer mutation.
 - If D4 cannot prove a safe mutation boundary, Phase 41 should close with a
   documented defer decision rather than shipping a weak mutating controller.
 
 ## Next Step
 
-Start D1 by writing the lifecycle-owner contract and aligning it with the
-existing standard model: fact owners publish evidence, the observer writes
-status, the lifecycle owner owns CR lifecycle mutation, and executors remain
-separate until explicitly introduced.
+Send Phase 41 to QA using
+`internal/docs/qa-assignments/phase41-lifecycle-owner-foundation-qa.md`. If QA
+passes, write the finished plan. If QA finds a live boundary gap, fix that
+before closing.

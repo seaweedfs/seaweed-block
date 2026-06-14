@@ -31,6 +31,8 @@ cabe790 phase41: tighten delete safety preconditions
 ab004fc phase41: gate stale cleanup evidence
 1f4f769 phase41: choose finalizer strategy and dry-run action
 c80fdfc phase41: prove lifecycle action isolation
+b414a9f phase41: add lifecycle owner qa gate
+plus the latest Phase 41 branch HEAD docs close handoff
 ```
 
 ## G1 - Contract Review

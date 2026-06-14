@@ -501,10 +501,11 @@ Still incomplete:
   node/image/CSI-driver state.
 - Some volume-side fault reasons still need stronger end-to-end propagation to
   user-visible surfaces.
-- Mutating lifecycle actions are not yet modeled as
-  action + precondition + invariant + executor + evidence.
+- Mutating lifecycle actions now have a non-mutating lifecycle-owner contract
+  shape: action + precondition + invariant + executor + evidence.
 - PVC lifecycle, blockvolume lifecycle, and Kubernetes attach lifecycle still
-  need sharper ownership boundaries before the operator mutates anything.
+  need a real lifecycle-owner component and API/admission proof before anything
+  mutates Kubernetes lifecycle objects.
 
 ### Product Priority From Here
 
@@ -520,18 +521,28 @@ product risk. The recommended order is:
    Future actions now have facts, preconditions, invariants, allowed executor,
    policy gate, evidence, and allow/reject decisions. It includes both a dry-run
    action gate and a rejected-action gate.
-3. **Phase 39: Delete-safety status boundary.** Active.
+3. **Phase 39: Delete-safety status boundary.** Closed.
    Live QA proved the original RBAC-only finalizer boundary is not viable for
    CRD finalizers: CRDs have no usable HTTP `/finalizers` endpoint, so
    `metadata.finalizers` changes require main `patch swblockvolumes`
    authorization. The chosen path is to keep operator-status status/events-only
    and defer finalizer add/remove to a future lifecycle owner.
-4. **Upgrade/rollback drift status.**
-   Report desired/current image/chart/controller drift before executing
-   upgrades.
-5. **Returned-replica rebuild/failback.**
+4. **Phase 40: Operator production hardening.** Closed.
+   The v0.4 beta foundation released Helm + PVC + status/events-only
+   operator-status, install drift visibility, delete-safety visibility, and
+   schema/RBAC conformance gates.
+5. **Phase 41: Lifecycle owner foundation.** Active.
+   Defines observer/lifecycle-owner/executor boundaries, keeps operator-status
+   status/events-only, defers finalizer mutation, and exposes dry-run
+   lifecycle-owner decisions for delete-safety. It does not ship deletion
+   protection.
+6. **Phase 42 candidate: real lifecycle-owner API/admission gate.**
+   Before any finalizer add/remove, prove main-object patch confinement against
+   a real Kubernetes API with admission/RBAC. Only then consider a first
+   bounded mutation.
+7. **Returned-replica rebuild/failback.**
    High product value, but it depends on the action model and status trust.
-6. **Backup/snapshot/restore and NVMe ANA parity.**
+8. **Backup/snapshot/restore and NVMe ANA parity.**
    Important, but they should reuse the status/action model rather than create
    another isolated control plane.
 
@@ -543,10 +554,11 @@ Approximate engineering effort if scope remains tight:
   projection tests, and live TestOps gates. Low mutation risk.
 - Lifecycle action model review: medium. Mostly design and tests, but it should
   block later mutating work from scattering logic across listeners/scripts.
-- Delete-safety status: medium. Keeps delete safety visible without widening
+- Delete-safety status: closed. Keeps delete safety visible without widening
   operator-status mutation rights.
 - Lifecycle-owner finalizers: medium/high. Cleaner than operator-status main
-  patch, but requires stronger `SwBlockVolume` object ownership first.
+  patch, but requires a separate lifecycle-owner component plus real
+  API/admission proof that only finalizers can be patched.
 - Rebuild/failback: high. Requires storage semantics, authority/fencing,
   returned-replica state, and long-running failure gates.
 - Backup/snapshot/restore: high. Requires durable data semantics and user-facing
@@ -574,12 +586,15 @@ Approximate engineering effort if scope remains tight:
   negative node evidence remains Phase 37.
 - Phase 37 Live Node Evidence Hardening is closed.
 - Phase 38 Lifecycle Action Model Executable Contract is closed.
-- Active work is Phase 39 Delete-Safety Status Boundary. Finalizer mutation is
-  deferred to a later lifecycle-owner phase because of CRD finalizer
-  authorization semantics.
+- Phase 39 Delete-Safety Status Boundary is closed.
+- Phase 40 Operator Production Hardening is closed and is the v0.4 beta release
+  boundary.
+- Active work is Phase 41 Lifecycle Owner Foundation. It is non-mutating:
+  finalizer add/remove is deferred, while lifecycle-owner dry-run decisions and
+  delete-safety preconditions are made visible.
 - Do not start NVMe ANA parity, rebuild/failback, backup/restore, or mutating
-  operator workflows by extending Phase 39. Pick those as separate gated
-  phases after finalizer/delete safety closes.
+  operator workflows by extending Phase 41. Pick those as separate gated phases
+  after the lifecycle-owner API/admission boundary is proven.
 - When the current plan closes, move it to `internal/docs/finished-plans/`
   with a phase/topic filename such as
   `phase1_finishedplan_frontend_protocol_readiness.md`.
