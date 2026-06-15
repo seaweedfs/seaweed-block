@@ -166,13 +166,17 @@ spec:
         request.userInfo.username != 'system:serviceaccount:${NAMESPACE}:sw-block-lifecycle-owner' ||
         (
           object.spec == oldObject.spec &&
-          object.status == oldObject.status &&
-          object.metadata.labels == oldObject.metadata.labels &&
-          object.metadata.annotations == oldObject.metadata.annotations &&
-          object.metadata.ownerReferences == oldObject.metadata.ownerReferences &&
-          has(object.metadata.finalizers) &&
-          size(object.metadata.finalizers) <= 1 &&
-          object.metadata.finalizers.all(f, f == '${FINALIZER}') &&
+          (has(object.status) == has(oldObject.status)) &&
+          (!has(object.status) || object.status == oldObject.status) &&
+          (has(object.metadata.labels) == has(oldObject.metadata.labels)) &&
+          (!has(object.metadata.labels) || object.metadata.labels == oldObject.metadata.labels) &&
+          (has(object.metadata.annotations) == has(oldObject.metadata.annotations)) &&
+          (!has(object.metadata.annotations) || object.metadata.annotations == oldObject.metadata.annotations) &&
+          (has(object.metadata.ownerReferences) == has(oldObject.metadata.ownerReferences)) &&
+          (!has(object.metadata.ownerReferences) || object.metadata.ownerReferences == oldObject.metadata.ownerReferences) &&
+          (!has(object.metadata.finalizers) ||
+            (size(object.metadata.finalizers) <= 1 &&
+             object.metadata.finalizers.all(f, f == '${FINALIZER}'))) &&
           (!has(oldObject.metadata.finalizers) ||
             (size(oldObject.metadata.finalizers) <= 1 &&
              oldObject.metadata.finalizers.all(f, f == '${FINALIZER}')))
@@ -193,6 +197,8 @@ spec:
 YAML
 run_expect_success apply-admission "${KUBECTL}" apply -f "${ARTIFACT_DIR}/admission.yaml"
 
+OWNER_AS="system:serviceaccount:${NAMESPACE}:sw-block-lifecycle-owner"
+
 cat >"${ARTIFACT_DIR}/volume.yaml" <<YAML
 apiVersion: block.seaweedfs.com/v1alpha1
 kind: SwBlockVolume
@@ -209,8 +215,41 @@ spec:
 YAML
 run_expect_success apply-volume "${KUBECTL}" apply -f "${ARTIFACT_DIR}/volume.yaml"
 
+cat >"${ARTIFACT_DIR}/admission-probe.yaml" <<YAML
+apiVersion: block.seaweedfs.com/v1alpha1
+kind: SwBlockVolume
+metadata:
+  name: phase42-admission-probe
+  namespace: ${NAMESPACE}
+  labels:
+    probe: "initial"
+spec:
+  pvcName: phase42-admission-probe
+  storageClass: sw-block
+YAML
+run_expect_success apply-admission-probe "${KUBECTL}" apply -f "${ARTIFACT_DIR}/admission-probe.yaml"
+
+wait_for_admission_policy() {
+  local attempt
+  for attempt in $(seq 1 30); do
+    if run_capture "admission-policy-propagation-${attempt}" "${KUBECTL}" patch swblockvolume phase42-admission-probe -n "${NAMESPACE}" --as "${OWNER_AS}" --type=merge -p "{\"metadata\":{\"labels\":{\"probe\":\"denied-${attempt}\"}}}"; then
+      sleep 1
+      continue
+    fi
+    if grep -q "lifecycle-owner may patch only" "${ARTIFACT_DIR}/admission-policy-propagation-${attempt}.stderr.txt"; then
+      write_summary "admission_policy_propagated=true"
+      return 0
+    fi
+    sleep 1
+  done
+  write_summary "admission_policy_propagated=false"
+  echo "validating admission policy did not deny a known-bad lifecycle-owner patch in time" >&2
+  return 1
+}
+
+wait_for_admission_policy
+
 OPERATOR_AS="system:serviceaccount:${NAMESPACE}:sw-block-operator-status"
-OWNER_AS="system:serviceaccount:${NAMESPACE}:sw-block-lifecycle-owner"
 
 run_expect_failure operator-status-main-patch "${KUBECTL}" patch swblockvolume phase42-a -n "${NAMESPACE}" --as "${OPERATOR_AS}" --type=merge -p "{\"metadata\":{\"finalizers\":[\"${FINALIZER}\"]}}"
 write_summary "operator_status_main_patch_allowed=false"

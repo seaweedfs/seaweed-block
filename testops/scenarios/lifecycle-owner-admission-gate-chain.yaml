@@ -28,6 +28,10 @@ phases:
         path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase42-lifecycle-owner-admission-gate/phase42-lifecycle-owner-admission-gate-summary.txt"
         pattern: "^operator_status_main_patch_allowed=false$"
       - type: grep_log
+        name: admission_policy_propagated
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase42-lifecycle-owner-admission-gate/phase42-lifecycle-owner-admission-gate-summary.txt"
+        pattern: "^admission_policy_propagated=true$"
+      - type: grep_log
         name: lifecycle_owner_finalizer_add_allowed
         path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase42-lifecycle-owner-admission-gate/phase42-lifecycle-owner-admission-gate-summary.txt"
         pattern: "^lifecycle_owner_finalizer_add_allowed=true$"

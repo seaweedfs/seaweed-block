@@ -1,6 +1,6 @@
 # Current Plan: Phase 42 - Lifecycle Owner API / Admission Gate
 
-Status: open, 14% complete. Started on 2026-06-14.
+Status: open, 21% complete. Started on 2026-06-14.
 
 Branch: `phase41-lifecycle-owner-foundation`
 
@@ -70,6 +70,7 @@ Acceptance:
 [x] install lifecycle-owner RBAC separate from operator-status
 [x] install admission policy/webhook or equivalent finalizer-only enforcement
 [x] prove operator-status RBAC remains status/events-only
+[x] fail on real admission mistakes instead of mock-only proof
 ```
 
 Verification:
@@ -93,8 +94,9 @@ Allowed patch shape:
 Acceptance:
 
 ```text
-[ ] lifecycle-owner can add the Seaweed Block finalizer
-[ ] lifecycle-owner can remove the Seaweed Block finalizer
+[ ] lifecycle-owner can add the Seaweed Block finalizer on a real apiserver
+[ ] lifecycle-owner can remove the Seaweed Block finalizer on a real apiserver
+[ ] admission policy propagation is proven before positive/negative assertions
 [ ] repeated add/remove is idempotent
 [ ] spec, labels, annotations, ownerReferences, and status are preserved
 [ ] audit evidence records request, decision, reason, and object diff
@@ -215,6 +217,11 @@ Phase 42 can close only if:
   remains status/events-only. Local Rancher Desktop smoke fails closed with
   `blocked_reason=validating_admission_policy_unavailable`; QA must run this on
   a cluster with `ValidatingAdmissionPolicy` support.
+- 21%: D1 QA found a real live-admission defect: optional-field CEL comparisons
+  denied a legitimate finalizer add when `.status` or `ownerReferences` were
+  absent, and the gate had no VAP propagation wait. The harness now guards
+  optional fields with `has()` and waits until a known-bad lifecycle-owner patch
+  is denied before running assertions. This is pending QA rerun on m02.
 
 ## Prerequisites / Risks
 
@@ -228,7 +235,16 @@ Phase 42 can close only if:
 
 ## Next Step
 
-Implement D1: choose the harness shape, wire the real CRD/RBAC/admission test
-surface, and prove the existing status-only observer remains unchanged. QA
-assignment:
+Re-run D1 on m02 or another `ValidatingAdmissionPolicy`-capable cluster. The
+rerun must show:
+
+```text
+phase42_lifecycle_owner_admission_status=ok
+admission_policy_propagated=true
+lifecycle_owner_finalizer_add_allowed=true
+lifecycle_owner_finalizer_remove_allowed=true
+all forbidden patch checks=false
+```
+
+QA assignment:
 `internal/docs/qa-assignments/phase42-d1-lifecycle-owner-admission-gate-qa.md`.

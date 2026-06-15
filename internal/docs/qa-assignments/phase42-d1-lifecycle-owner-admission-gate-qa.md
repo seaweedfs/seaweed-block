@@ -77,6 +77,7 @@ Pass criteria in
 ```text
 phase42_lifecycle_owner_admission_status=ok
 harness=live_kubernetes_validating_admission_policy
+admission_policy_propagated=true
 operator_status_main_patch_allowed=false
 lifecycle_owner_finalizer_add_allowed=true
 lifecycle_owner_finalizer_remove_allowed=true
@@ -142,3 +143,7 @@ PASS only if G1-G4 pass on a real Kubernetes API/admission surface.
 Do not mark Phase 42 D1 passed using the old Phase 41 schema-aware fake server.
 That fake server was sufficient for Phase 41's non-mutating slice, but Phase 42
 is specifically about the real admission boundary.
+
+The gate must wait until a known-bad lifecycle-owner patch is denied before it
+runs the positive and negative assertions. A success before admission policy
+propagation is not a product PASS.

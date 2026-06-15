@@ -171,13 +171,17 @@ spec:
         request.userInfo.username != 'system:serviceaccount:${Namespace}:sw-block-lifecycle-owner' ||
         (
           object.spec == oldObject.spec &&
-          object.status == oldObject.status &&
-          object.metadata.labels == oldObject.metadata.labels &&
-          object.metadata.annotations == oldObject.metadata.annotations &&
-          object.metadata.ownerReferences == oldObject.metadata.ownerReferences &&
-          has(object.metadata.finalizers) &&
-          size(object.metadata.finalizers) <= 1 &&
-          object.metadata.finalizers.all(f, f == '${Finalizer}') &&
+          (has(object.status) == has(oldObject.status)) &&
+          (!has(object.status) || object.status == oldObject.status) &&
+          (has(object.metadata.labels) == has(oldObject.metadata.labels)) &&
+          (!has(object.metadata.labels) || object.metadata.labels == oldObject.metadata.labels) &&
+          (has(object.metadata.annotations) == has(oldObject.metadata.annotations)) &&
+          (!has(object.metadata.annotations) || object.metadata.annotations == oldObject.metadata.annotations) &&
+          (has(object.metadata.ownerReferences) == has(oldObject.metadata.ownerReferences)) &&
+          (!has(object.metadata.ownerReferences) || object.metadata.ownerReferences == oldObject.metadata.ownerReferences) &&
+          (!has(object.metadata.finalizers) ||
+            (size(object.metadata.finalizers) <= 1 &&
+             object.metadata.finalizers.all(f, f == '${Finalizer}'))) &&
           (!has(oldObject.metadata.finalizers) ||
             (size(oldObject.metadata.finalizers) <= 1 &&
              oldObject.metadata.finalizers.all(f, f == '${Finalizer}')))
@@ -198,6 +202,8 @@ spec:
 "@ | Set-Content -Path (Join-Path $ArtifactDir "admission.yaml")
     Expect-Success "apply-admission" @("apply", "-f", (Join-Path $ArtifactDir "admission.yaml"))
 
+    $ownerAs = "system:serviceaccount:${Namespace}:sw-block-lifecycle-owner"
+
     @"
 apiVersion: block.seaweedfs.com/v1alpha1
 kind: SwBlockVolume
@@ -214,8 +220,42 @@ spec:
 "@ | Set-Content -Path (Join-Path $ArtifactDir "volume.yaml")
     Expect-Success "apply-volume" @("apply", "-f", (Join-Path $ArtifactDir "volume.yaml"))
 
+    @"
+apiVersion: block.seaweedfs.com/v1alpha1
+kind: SwBlockVolume
+metadata:
+  name: phase42-admission-probe
+  namespace: $Namespace
+  labels:
+    probe: "initial"
+spec:
+  pvcName: phase42-admission-probe
+  storageClass: sw-block
+"@ | Set-Content -Path (Join-Path $ArtifactDir "admission-probe.yaml")
+    Expect-Success "apply-admission-probe" @("apply", "-f", (Join-Path $ArtifactDir "admission-probe.yaml"))
+
+    $propagated = $false
+    foreach ($attempt in 1..30) {
+        $patch = "{`"metadata`":{`"labels`":{`"probe`":`"denied-$attempt`"}}}"
+        $code = Invoke-Capture -Name "admission-policy-propagation-$attempt" -Args @("patch", "swblockvolume", "phase42-admission-probe", "-n", $Namespace, "--as", $ownerAs, "--type=merge", "-p", $patch)
+        if ($code -eq 0) {
+            Start-Sleep -Seconds 1
+            continue
+        }
+        $stderr = Get-Content (Join-Path $ArtifactDir "admission-policy-propagation-$attempt.stderr.txt") -ErrorAction SilentlyContinue
+        if ($stderr -match "lifecycle-owner may patch only") {
+            $propagated = $true
+            Add-Summary "admission_policy_propagated=true"
+            break
+        }
+        Start-Sleep -Seconds 1
+    }
+    if (-not $propagated) {
+        Add-Summary "admission_policy_propagated=false"
+        throw "validating admission policy did not deny a known-bad lifecycle-owner patch in time"
+    }
+
     $operatorAs = "system:serviceaccount:${Namespace}:sw-block-operator-status"
-    $ownerAs = "system:serviceaccount:${Namespace}:sw-block-lifecycle-owner"
 
     Expect-Failure "operator-status-main-patch" @("patch", "swblockvolume", "phase42-a", "-n", $Namespace, "--as", $operatorAs, "--type=merge", "-p", "{`"metadata`":{`"finalizers`":[`"$Finalizer`"]}}")
     Add-Summary "operator_status_main_patch_allowed=false"
