@@ -44,6 +44,28 @@ function Expect-Failure {
     }
 }
 
+function Assert-JsonPathEquals {
+    param([string]$Name, [string]$Path, [string]$Expected)
+    Expect-Success $Name @("get", "swblockvolume", "phase42-a", "-n", $Namespace, "-o", "jsonpath=$Path")
+    $actual = Get-Content (Join-Path $ArtifactDir "$Name.stdout.txt") -Raw -ErrorAction SilentlyContinue
+    if ($null -eq $actual) { $actual = "" }
+    $actual = $actual.TrimEnd("`r", "`n")
+    if ($actual -ne $Expected) {
+        throw "unexpected ${Name}: got '$actual', expected '$Expected'"
+    }
+}
+
+function Assert-JsonPathEmpty {
+    param([string]$Name, [string]$Path)
+    Expect-Success $Name @("get", "swblockvolume", "phase42-a", "-n", $Namespace, "-o", "jsonpath=$Path")
+    $actual = Get-Content (Join-Path $ArtifactDir "$Name.stdout.txt") -Raw -ErrorAction SilentlyContinue
+    if ($null -eq $actual) { $actual = "" }
+    $actual = $actual.TrimEnd("`r", "`n")
+    if (-not [string]::IsNullOrEmpty($actual)) {
+        throw "unexpected ${Name}: got '$actual', expected empty"
+    }
+}
+
 function Cleanup {
     try { & $Kubectl delete validatingadmissionpolicybinding sw-block-phase42-finalizer-only --ignore-not-found >$null 2>$null } catch {}
     try { & $Kubectl delete validatingadmissionpolicy sw-block-phase42-finalizer-only --ignore-not-found >$null 2>$null } catch {}
@@ -261,27 +283,60 @@ spec:
     Add-Summary "operator_status_main_patch_allowed=false"
     Expect-Success "lifecycle-owner-add-finalizer" @("patch", "swblockvolume", "phase42-a", "-n", $Namespace, "--as", $ownerAs, "--type=merge", "-p", "{`"metadata`":{`"finalizers`":[`"$Finalizer`"]}}")
     Add-Summary "lifecycle_owner_finalizer_add_allowed=true"
+    Expect-Success "lifecycle-owner-add-finalizer-idempotent" @("patch", "swblockvolume", "phase42-a", "-n", $Namespace, "--as", $ownerAs, "--type=merge", "-p", "{`"metadata`":{`"finalizers`":[`"$Finalizer`"]}}")
+    Add-Summary "lifecycle_owner_finalizer_add_idempotent=true"
     Expect-Success "lifecycle-owner-remove-finalizer" @("patch", "swblockvolume", "phase42-a", "-n", $Namespace, "--as", $ownerAs, "--type=merge", "-p", '{"metadata":{"finalizers":[]}}')
     Add-Summary "lifecycle_owner_finalizer_remove_allowed=true"
+    Expect-Success "lifecycle-owner-remove-finalizer-idempotent" @("patch", "swblockvolume", "phase42-a", "-n", $Namespace, "--as", $ownerAs, "--type=merge", "-p", '{"metadata":{"finalizers":[]}}')
+    Add-Summary "lifecycle_owner_finalizer_remove_idempotent=true"
 
     Expect-Failure "lifecycle-owner-spec-patch" @("patch", "swblockvolume", "phase42-a", "-n", $Namespace, "--as", $ownerAs, "--type=merge", "-p", '{"spec":{"pvcName":"changed"}}')
     Add-Summary "lifecycle_owner_spec_patch_allowed=false"
     Expect-Failure "lifecycle-owner-label-patch" @("patch", "swblockvolume", "phase42-a", "-n", $Namespace, "--as", $ownerAs, "--type=merge", "-p", '{"metadata":{"labels":{"changed":"true"}}}')
     Add-Summary "lifecycle_owner_label_patch_allowed=false"
+    Expect-Failure "lifecycle-owner-annotation-patch" @("patch", "swblockvolume", "phase42-a", "-n", $Namespace, "--as", $ownerAs, "--type=merge", "-p", '{"metadata":{"annotations":{"changed":"true"}}}')
+    Add-Summary "lifecycle_owner_annotation_patch_allowed=false"
+    Expect-Failure "lifecycle-owner-ownerreferences-patch" @("patch", "swblockvolume", "phase42-a", "-n", $Namespace, "--as", $ownerAs, "--type=merge", "-p", '{"metadata":{"ownerReferences":[{"apiVersion":"v1","kind":"ConfigMap","name":"foreign-owner","uid":"00000000-0000-0000-0000-000000000000"}]}}')
+    Add-Summary "lifecycle_owner_ownerreferences_patch_allowed=false"
+    Expect-Failure "lifecycle-owner-deletiontimestamp-patch" @("patch", "swblockvolume", "phase42-a", "-n", $Namespace, "--as", $ownerAs, "--type=merge", "-p", '{"metadata":{"deletionTimestamp":"2026-01-01T00:00:00Z"}}')
+    Add-Summary "lifecycle_owner_deletiontimestamp_patch_allowed=false"
     Expect-Failure "lifecycle-owner-foreign-finalizer" @("patch", "swblockvolume", "phase42-a", "-n", $Namespace, "--as", $ownerAs, "--type=merge", "-p", '{"metadata":{"finalizers":["example.com/foreign"]}}')
     Add-Summary "lifecycle_owner_foreign_finalizer_allowed=false"
     Expect-Failure "lifecycle-owner-mixed-patch" @("patch", "swblockvolume", "phase42-a", "-n", $Namespace, "--as", $ownerAs, "--type=merge", "-p", "{`"metadata`":{`"finalizers`":[`"$Finalizer`"]},`"spec`":{`"pvcName`":`"changed`"}}")
     Add-Summary "lifecycle_owner_mixed_patch_allowed=false"
+    Expect-Failure "lifecycle-owner-mixed-metadata-patch" @("patch", "swblockvolume", "phase42-a", "-n", $Namespace, "--as", $ownerAs, "--type=merge", "-p", "{`"metadata`":{`"finalizers`":[`"$Finalizer`"],`"annotations`":{`"changed`":`"true`"}}}")
+    Add-Summary "lifecycle_owner_mixed_metadata_patch_allowed=false"
+
+    $code = Invoke-Capture -Name "lifecycle-owner-main-status-patch" -Args @("patch", "swblockvolume", "phase42-a", "-n", $Namespace, "--as", $ownerAs, "--type=merge", "-p", '{"status":{"status":"ready","reasonCode":"forbidden"}}')
+    if ($code -eq 0) {
+        Add-Summary "lifecycle_owner_main_status_patch_request_denied=false"
+    } else {
+        Add-Summary "lifecycle_owner_main_status_patch_request_denied=true"
+    }
+    Assert-JsonPathEmpty "final-status-empty" "{.status.status}"
+    Add-Summary "lifecycle_owner_main_status_mutated=false"
+
+    Expect-Failure "lifecycle-owner-status-subresource-patch" @("patch", "swblockvolume", "phase42-a", "-n", $Namespace, "--as", $ownerAs, "--subresource=status", "--type=merge", "-p", '{"status":{"status":"ready","reasonCode":"forbidden"}}')
+    Add-Summary "lifecycle_owner_status_subresource_patch_allowed=false"
 
     $code = Invoke-Capture -Name "finalizers-endpoint" -Args @("patch", "swblockvolume", "phase42-a", "-n", $Namespace, "--as", $ownerAs, "--subresource=finalizers", "--type=merge", "-p", "{`"metadata`":{`"finalizers`":[`"$Finalizer`"]}}")
     if ($code -eq 0) { throw "unexpected /finalizers subresource success" }
     Add-Summary "finalizers_endpoint_allowed=false"
 
     foreach ($resource in @("pods", "deployments", "persistentvolumeclaims", "persistentvolumes", "storageclasses", "secrets", "nodes", "csidrivers", "csinodes")) {
-        $code = Invoke-Capture -Name "can-i-patch-$resource" -Args @("auth", "can-i", "patch", $resource, "--as", $ownerAs, "-n", $Namespace)
-        if ($code -eq 0) { throw "unexpected patch permission for $resource" }
-        Add-Summary "lifecycle_owner_${resource}_patch_allowed=false"
+        foreach ($verb in @("create", "update", "patch", "delete")) {
+            $code = Invoke-Capture -Name "can-i-$verb-$resource" -Args @("auth", "can-i", $verb, $resource, "--as", $ownerAs, "-n", $Namespace)
+            if ($code -eq 0) { throw "unexpected $verb permission for $resource" }
+            Add-Summary "lifecycle_owner_${resource}_${verb}_allowed=false"
+        }
     }
+
+    Assert-JsonPathEquals "final-spec-pvc" "{.spec.pvcName}" "phase42-a"
+    Assert-JsonPathEquals "final-label-keep" "{.metadata.labels.keep}" "true"
+    Assert-JsonPathEquals "final-annotation-keep" "{.metadata.annotations.keep}" "true"
+    Assert-JsonPathEmpty "final-finalizers-empty" "{range .metadata.finalizers[*]}{.}{'\n'}{end}"
+    Assert-JsonPathEmpty "final-ownerreferences-empty" "{range .metadata.ownerReferences[*]}{.name}{'\n'}{end}"
+    Add-Summary "object_integrity_preserved=true"
 
     Expect-Success "final-object" @("get", "swblockvolume", "phase42-a", "-n", $Namespace, "-o", "yaml")
     Add-Summary "phase42_lifecycle_owner_admission_status=ok"

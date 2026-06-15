@@ -1,6 +1,6 @@
 # Current Plan: Phase 42 - Lifecycle Owner API / Admission Gate
 
-Status: open, 21% complete. Started on 2026-06-14.
+Status: open, 36% complete. Started on 2026-06-14.
 
 Branch: `phase41-lifecycle-owner-foundation`
 
@@ -99,7 +99,7 @@ Acceptance:
 [ ] admission policy propagation is proven before positive/negative assertions
 [ ] repeated add/remove is idempotent
 [ ] spec, labels, annotations, ownerReferences, and status are preserved
-[ ] audit evidence records request, decision, reason, and object diff
+[ ] audit evidence records request, decision, reason, and observed object diff
 ```
 
 ## D3: Forbidden Main-Object Patches
@@ -125,6 +125,8 @@ Acceptance:
 [ ] every forbidden patch is rejected by real API/admission
 [ ] rejection reason is stable enough for QA evidence
 [ ] object is unchanged after every rejected patch
+[ ] status cannot be mutated by lifecycle-owner through main-object no-op or
+    `/status` subresource paths
 ```
 
 ## D4: Forbidden Resource Mutations
@@ -222,6 +224,16 @@ Phase 42 can close only if:
   absent, and the gate had no VAP propagation wait. The harness now guards
   optional fields with `has()` and waits until a known-bad lifecycle-owner patch
   is denied before running assertions. This is pending QA rerun on m02.
+- 28%: D1 QA re-run passed on m02 (`k3s v1.34.4`) at `116d381`. The
+  lifecycle-owner finalizer add/remove is allowed, forbidden main-object patches
+  are denied, forbidden resource patch checks are denied, object integrity is
+  preserved, and cleanup leaves no admission/RBAC residue.
+- 36%: D2/D3/D4 breadth dev-complete. The same live gate now also checks
+  idempotent add/remove, annotation/ownerReferences/deletionTimestamp and mixed
+  metadata rejection, `/status` denial plus no main-object status mutation,
+  object-integrity preservation after rejected patches, and
+  create/update/patch/delete denial for forbidden Kubernetes resources. Pending
+  QA rerun.
 
 ## Prerequisites / Risks
 
@@ -235,15 +247,18 @@ Phase 42 can close only if:
 
 ## Next Step
 
-Re-run D1 on m02 or another `ValidatingAdmissionPolicy`-capable cluster. The
-rerun must show:
+Re-run the expanded Phase 42 admission gate on m02 or another
+`ValidatingAdmissionPolicy`-capable cluster. The rerun must show:
 
 ```text
 phase42_lifecycle_owner_admission_status=ok
 admission_policy_propagated=true
 lifecycle_owner_finalizer_add_allowed=true
 lifecycle_owner_finalizer_remove_allowed=true
-all forbidden patch checks=false
+lifecycle_owner_finalizer_add_idempotent=true
+lifecycle_owner_finalizer_remove_idempotent=true
+object_integrity_preserved=true
+all forbidden main-object and resource mutation checks=false
 ```
 
 QA assignment:

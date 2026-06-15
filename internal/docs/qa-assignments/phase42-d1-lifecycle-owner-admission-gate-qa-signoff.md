@@ -1,6 +1,59 @@
 # QA Sign-off — Phase 42 D1 Lifecycle Owner Admission Gate
 
-Verdict: **FAIL (blocking product defect in the VAP policy).** On a real
+Verdict: **PASS (re-validated on `116d381`).** First filed FAIL on `bc5ffc0`
+(VAP CEL errored on absent optional fields). The dev's fix `116d381` resolves it;
+the gate now passes G1–G4 on a real VAP-capable cluster. See the Re-validation
+section immediately below; the original FAIL analysis is kept beneath it for the
+record.
+
+## Re-validation — 2026-06-15, commit `116d381 phase42: fix lifecycle owner admission gate`
+
+The fix: (a) the VAP CEL now `has()`-guards the optional fields (status, labels,
+annotations, ownerReferences, finalizers) so absent-key eval errors no longer
+deny legitimate patches; (b) a probe object drives an admission-propagation wait
+before the real assertions, with `admission_policy_propagated=true` added to the
+pass criteria.
+
+Re-ran `bash scripts/run-phase42-lifecycle-owner-admission-gate.sh` on m02
+(k3s v1.34.4, VAP-capable), artifacts `/tmp/p42d1c`. `GATE_EXIT=0`, full summary:
+
+```text
+phase42_lifecycle_owner_admission_status=ok
+harness=live_kubernetes_validating_admission_policy
+admission_policy_propagated=true
+operator_status_main_patch_allowed=false
+lifecycle_owner_finalizer_add_allowed=true
+lifecycle_owner_finalizer_remove_allowed=true
+lifecycle_owner_spec_patch_allowed=false
+lifecycle_owner_label_patch_allowed=false
+lifecycle_owner_foreign_finalizer_allowed=false
+lifecycle_owner_mixed_patch_allowed=false
+finalizers_endpoint_allowed=false
+lifecycle_owner_{pods,deployments,persistentvolumeclaims,persistentvolumes,
+  storageclasses,secrets,nodes,csidrivers,csinodes}_patch_allowed=false
+```
+
+- **G1** PASS — `status=ok`, `admission_policy_propagated=true`, legitimate
+  finalizer add/remove allowed, all forbidden main-object patches (spec, label,
+  foreign finalizer, mixed, `/finalizers` subresource) denied; operator-status
+  main patch denied (RBAC).
+- **G2** PASS — all nine forbidden resource mutations (pods, deployments, pvc,
+  pv, storageclasses, secrets, nodes, csidrivers, csinodes) `=false`.
+- **G3** PASS — final object integrity: `spec.pvcName=phase42-a`,
+  `metadata.labels.keep=true`, `metadata.annotations.keep=true`, no foreign
+  finalizer remains (the allowed finalizer add/remove changed nothing else).
+- **G4** PASS — `sw-block-phase42-gate` namespace NotFound; no leftover
+  `sw-block-phase42-*` VAP / VAPBinding / ClusterRole / ClusterRoleBinding.
+
+The lifecycle-owner main-object patch is now provably confined to the
+`block.seaweedfs.com/swblockvolume-protection` finalizer against a real
+Kubernetes admission server. **Phase 42 D1 passes**; lab left clean.
+
+---
+
+## Original finding (commit `bc5ffc0`, superseded by the Re-validation above)
+
+Verdict at filing: **FAIL (blocking product defect in the VAP policy).** On a real
 VAP-capable cluster the admission gate denies the **legitimate** lifecycle-owner
 finalizer add — the policy CEL errors on absent optional fields. This is a
 live-only defect: it is invisible to the Phase 41 schema-aware mock and to the

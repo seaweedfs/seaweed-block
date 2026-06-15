@@ -80,28 +80,47 @@ harness=live_kubernetes_validating_admission_policy
 admission_policy_propagated=true
 operator_status_main_patch_allowed=false
 lifecycle_owner_finalizer_add_allowed=true
+lifecycle_owner_finalizer_add_idempotent=true
 lifecycle_owner_finalizer_remove_allowed=true
+lifecycle_owner_finalizer_remove_idempotent=true
 lifecycle_owner_spec_patch_allowed=false
 lifecycle_owner_label_patch_allowed=false
+lifecycle_owner_annotation_patch_allowed=false
+lifecycle_owner_ownerreferences_patch_allowed=false
+lifecycle_owner_deletiontimestamp_patch_allowed=false
 lifecycle_owner_foreign_finalizer_allowed=false
 lifecycle_owner_mixed_patch_allowed=false
+lifecycle_owner_mixed_metadata_patch_allowed=false
+lifecycle_owner_main_status_mutated=false
+lifecycle_owner_status_subresource_patch_allowed=false
 finalizers_endpoint_allowed=false
+object_integrity_preserved=true
 ```
 
 ## G2 - Forbidden Resource Mutations
 
-The summary must include `false` for all lifecycle-owner patch checks:
+The summary must include `false` for all lifecycle-owner `create`, `update`,
+`patch`, and `delete` checks for these resources:
 
 ```text
+pods
+deployments
+persistentvolumeclaims
+persistentvolumes
+storageclasses
+secrets
+nodes
+csidrivers
+csinodes
+```
+
+For example:
+
+```text
+lifecycle_owner_pods_create_allowed=false
+lifecycle_owner_pods_update_allowed=false
 lifecycle_owner_pods_patch_allowed=false
-lifecycle_owner_deployments_patch_allowed=false
-lifecycle_owner_persistentvolumeclaims_patch_allowed=false
-lifecycle_owner_persistentvolumes_patch_allowed=false
-lifecycle_owner_storageclasses_patch_allowed=false
-lifecycle_owner_secrets_patch_allowed=false
-lifecycle_owner_nodes_patch_allowed=false
-lifecycle_owner_csidrivers_patch_allowed=false
-lifecycle_owner_csinodes_patch_allowed=false
+lifecycle_owner_pods_delete_allowed=false
 ```
 
 Fail if any forbidden resource mutation is allowed.
@@ -117,10 +136,11 @@ spec.pvcName remains phase42-a
 metadata.labels.keep remains true
 metadata.annotations.keep remains true
 no foreign finalizer remains
+object_integrity_preserved=true
 ```
 
-Fail if an allowed finalizer patch changes spec, labels, annotations, or any
-unrelated metadata.
+Fail if an allowed finalizer patch or any rejected patch changes spec, labels,
+annotations, ownerReferences, status, or any unrelated metadata.
 
 ## G4 - Cleanup
 

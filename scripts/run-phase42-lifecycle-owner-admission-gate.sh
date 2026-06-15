@@ -43,6 +43,31 @@ run_expect_failure() {
   return 0
 }
 
+assert_jsonpath_equals() {
+  local name="$1"
+  local path="$2"
+  local expected="$3"
+  run_expect_success "${name}" "${KUBECTL}" get swblockvolume phase42-a -n "${NAMESPACE}" -o "jsonpath=${path}"
+  local actual
+  actual="$(cat "${ARTIFACT_DIR}/${name}.stdout.txt")"
+  if [ "${actual}" != "${expected}" ]; then
+    echo "unexpected ${name}: got '${actual}', expected '${expected}'" >&2
+    return 1
+  fi
+}
+
+assert_jsonpath_empty() {
+  local name="$1"
+  local path="$2"
+  run_expect_success "${name}" "${KUBECTL}" get swblockvolume phase42-a -n "${NAMESPACE}" -o "jsonpath=${path}"
+  local actual
+  actual="$(cat "${ARTIFACT_DIR}/${name}.stdout.txt")"
+  if [ -n "${actual}" ]; then
+    echo "unexpected ${name}: got '${actual}', expected empty" >&2
+    return 1
+  fi
+}
+
 cleanup() {
   set +e
   "${KUBECTL}" delete validatingadmissionpolicybinding sw-block-phase42-finalizer-only --ignore-not-found >/dev/null 2>&1
@@ -257,8 +282,14 @@ write_summary "operator_status_main_patch_allowed=false"
 run_expect_success lifecycle-owner-add-finalizer "${KUBECTL}" patch swblockvolume phase42-a -n "${NAMESPACE}" --as "${OWNER_AS}" --type=merge -p "{\"metadata\":{\"finalizers\":[\"${FINALIZER}\"]}}"
 write_summary "lifecycle_owner_finalizer_add_allowed=true"
 
+run_expect_success lifecycle-owner-add-finalizer-idempotent "${KUBECTL}" patch swblockvolume phase42-a -n "${NAMESPACE}" --as "${OWNER_AS}" --type=merge -p "{\"metadata\":{\"finalizers\":[\"${FINALIZER}\"]}}"
+write_summary "lifecycle_owner_finalizer_add_idempotent=true"
+
 run_expect_success lifecycle-owner-remove-finalizer "${KUBECTL}" patch swblockvolume phase42-a -n "${NAMESPACE}" --as "${OWNER_AS}" --type=merge -p '{"metadata":{"finalizers":[]}}'
 write_summary "lifecycle_owner_finalizer_remove_allowed=true"
+
+run_expect_success lifecycle-owner-remove-finalizer-idempotent "${KUBECTL}" patch swblockvolume phase42-a -n "${NAMESPACE}" --as "${OWNER_AS}" --type=merge -p '{"metadata":{"finalizers":[]}}'
+write_summary "lifecycle_owner_finalizer_remove_idempotent=true"
 
 run_expect_failure lifecycle-owner-spec-patch "${KUBECTL}" patch swblockvolume phase42-a -n "${NAMESPACE}" --as "${OWNER_AS}" --type=merge -p '{"spec":{"pvcName":"changed"}}'
 write_summary "lifecycle_owner_spec_patch_allowed=false"
@@ -266,11 +297,34 @@ write_summary "lifecycle_owner_spec_patch_allowed=false"
 run_expect_failure lifecycle-owner-label-patch "${KUBECTL}" patch swblockvolume phase42-a -n "${NAMESPACE}" --as "${OWNER_AS}" --type=merge -p '{"metadata":{"labels":{"changed":"true"}}}'
 write_summary "lifecycle_owner_label_patch_allowed=false"
 
+run_expect_failure lifecycle-owner-annotation-patch "${KUBECTL}" patch swblockvolume phase42-a -n "${NAMESPACE}" --as "${OWNER_AS}" --type=merge -p '{"metadata":{"annotations":{"changed":"true"}}}'
+write_summary "lifecycle_owner_annotation_patch_allowed=false"
+
+run_expect_failure lifecycle-owner-ownerreferences-patch "${KUBECTL}" patch swblockvolume phase42-a -n "${NAMESPACE}" --as "${OWNER_AS}" --type=merge -p '{"metadata":{"ownerReferences":[{"apiVersion":"v1","kind":"ConfigMap","name":"foreign-owner","uid":"00000000-0000-0000-0000-000000000000"}]}}'
+write_summary "lifecycle_owner_ownerreferences_patch_allowed=false"
+
+run_expect_failure lifecycle-owner-deletiontimestamp-patch "${KUBECTL}" patch swblockvolume phase42-a -n "${NAMESPACE}" --as "${OWNER_AS}" --type=merge -p '{"metadata":{"deletionTimestamp":"2026-01-01T00:00:00Z"}}'
+write_summary "lifecycle_owner_deletiontimestamp_patch_allowed=false"
+
 run_expect_failure lifecycle-owner-foreign-finalizer "${KUBECTL}" patch swblockvolume phase42-a -n "${NAMESPACE}" --as "${OWNER_AS}" --type=merge -p '{"metadata":{"finalizers":["example.com/foreign"]}}'
 write_summary "lifecycle_owner_foreign_finalizer_allowed=false"
 
 run_expect_failure lifecycle-owner-mixed-patch "${KUBECTL}" patch swblockvolume phase42-a -n "${NAMESPACE}" --as "${OWNER_AS}" --type=merge -p "{\"metadata\":{\"finalizers\":[\"${FINALIZER}\"]},\"spec\":{\"pvcName\":\"changed\"}}"
 write_summary "lifecycle_owner_mixed_patch_allowed=false"
+
+run_expect_failure lifecycle-owner-mixed-metadata-patch "${KUBECTL}" patch swblockvolume phase42-a -n "${NAMESPACE}" --as "${OWNER_AS}" --type=merge -p "{\"metadata\":{\"finalizers\":[\"${FINALIZER}\"],\"annotations\":{\"changed\":\"true\"}}}"
+write_summary "lifecycle_owner_mixed_metadata_patch_allowed=false"
+
+if run_capture lifecycle-owner-main-status-patch "${KUBECTL}" patch swblockvolume phase42-a -n "${NAMESPACE}" --as "${OWNER_AS}" --type=merge -p '{"status":{"status":"ready","reasonCode":"forbidden"}}'; then
+  write_summary "lifecycle_owner_main_status_patch_request_denied=false"
+else
+  write_summary "lifecycle_owner_main_status_patch_request_denied=true"
+fi
+assert_jsonpath_empty final-status-empty "{.status.status}"
+write_summary "lifecycle_owner_main_status_mutated=false"
+
+run_expect_failure lifecycle-owner-status-subresource-patch "${KUBECTL}" patch swblockvolume phase42-a -n "${NAMESPACE}" --as "${OWNER_AS}" --subresource=status --type=merge -p '{"status":{"status":"ready","reasonCode":"forbidden"}}'
+write_summary "lifecycle_owner_status_subresource_patch_allowed=false"
 
 if "${KUBECTL}" patch swblockvolume phase42-a -n "${NAMESPACE}" --as "${OWNER_AS}" --subresource=finalizers --type=merge -p "{\"metadata\":{\"finalizers\":[\"${FINALIZER}\"]}}" >"${ARTIFACT_DIR}/finalizers-endpoint.stdout.txt" 2>"${ARTIFACT_DIR}/finalizers-endpoint.stderr.txt"; then
   write_summary "finalizers_endpoint_allowed=true"
@@ -280,13 +334,22 @@ fi
 write_summary "finalizers_endpoint_allowed=false"
 
 for resource in pods deployments persistentvolumeclaims persistentvolumes storageclasses secrets nodes csidrivers csinodes; do
-  if "${KUBECTL}" auth can-i patch "${resource}" --as "${OWNER_AS}" -n "${NAMESPACE}" >/dev/null 2>&1; then
-    write_summary "lifecycle_owner_${resource}_patch_allowed=true"
-    echo "unexpected patch permission for ${resource}" >&2
-    exit 1
-  fi
-  write_summary "lifecycle_owner_${resource}_patch_allowed=false"
+  for verb in create update patch delete; do
+    if "${KUBECTL}" auth can-i "${verb}" "${resource}" --as "${OWNER_AS}" -n "${NAMESPACE}" >/dev/null 2>&1; then
+      write_summary "lifecycle_owner_${resource}_${verb}_allowed=true"
+      echo "unexpected ${verb} permission for ${resource}" >&2
+      exit 1
+    fi
+    write_summary "lifecycle_owner_${resource}_${verb}_allowed=false"
+  done
 done
+
+assert_jsonpath_equals final-spec-pvc "{.spec.pvcName}" "phase42-a"
+assert_jsonpath_equals final-label-keep "{.metadata.labels.keep}" "true"
+assert_jsonpath_equals final-annotation-keep "{.metadata.annotations.keep}" "true"
+assert_jsonpath_empty final-finalizers-empty "{range .metadata.finalizers[*]}{.}{'\n'}{end}"
+assert_jsonpath_empty final-ownerreferences-empty "{range .metadata.ownerReferences[*]}{.name}{'\n'}{end}"
+write_summary "object_integrity_preserved=true"
 
 run_expect_success final-object "${KUBECTL}" get swblockvolume phase42-a -n "${NAMESPACE}" -o yaml
 
