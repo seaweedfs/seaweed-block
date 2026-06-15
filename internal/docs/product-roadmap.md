@@ -531,20 +531,19 @@ product risk. The recommended order is:
    The v0.4 beta foundation released Helm + PVC + status/events-only
    operator-status, install drift visibility, delete-safety visibility, and
    schema/RBAC conformance gates.
-5. **Phase 41: Lifecycle owner foundation.** Active.
+5. **Phase 41: Lifecycle owner foundation.** Closed.
    Defines observer/lifecycle-owner/executor boundaries, keeps operator-status
    status/events-only, defers finalizer mutation, and exposes dry-run
    lifecycle-owner decisions for delete-safety. It does not ship deletion
    protection.
-6. **Phase 42 candidate: real lifecycle-owner API/admission gate.**
+6. **Phase 42: real lifecycle-owner API/admission gate.** Closed.
    Before any finalizer add/remove, prove main-object patch confinement against
    a real Kubernetes API with admission/RBAC. Only then consider a first
    bounded mutation.
-7. **Phase 43 candidate: first real lifecycle mutation.**
-   If Phase 42 proves the API/admission boundary, ship only the first bounded
-   mutation: likely `SwBlockVolume` finalizer add/remove with delete-safety
-   preconditions. Do not include cleanup, rebuild, failback, backup, or NVMe in
-   the same phase.
+7. **Phase 43: first real lifecycle mutation.** Active.
+   Ship only the first bounded mutation: `SwBlockVolume` protection finalizer
+   add/remove with delete-safety preconditions. Do not include cleanup, rebuild,
+   failback, backup, or NVMe in the same phase.
 8. **Phase 44 candidate: delete lifecycle close gate and Operation Layer v0.5
    release.**
    Validate the full user path: install -> PVC -> status -> delete requested ->
@@ -608,9 +607,12 @@ Approximate engineering effort if scope remains tight:
 - Phase 41 Lifecycle Owner Foundation is closed. It is non-mutating:
   finalizer add/remove is deferred, while lifecycle-owner dry-run decisions and
   delete-safety preconditions are made visible.
-- Active work is Phase 42 Lifecycle Owner API / Admission Gate. It must prove
-  the future lifecycle-owner main-object patch boundary against a real
-  Kubernetes API/admission surface before Phase 43 can ship finalizer mutation.
+- Phase 42 Lifecycle Owner API / Admission Gate is closed. It proved the
+  lifecycle-owner main-object patch boundary against a real Kubernetes
+  API/admission surface and preserved the delete-safety decision model.
+- Active work is Phase 43 First Bounded Finalizer Mutation. It may add/remove
+  only the Seaweed Block `SwBlockVolume` protection finalizer, gated by
+  delete-safety. It must not execute cleanup or mutate PVC/PV/workloads/storage.
 - Phase 41-44 are the Operation Layer v0.5 release train: lifecycle-owner
   foundation, real API/admission proof, first bounded finalizer mutation, and
   delete lifecycle close gate/release.

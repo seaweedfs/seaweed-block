@@ -1,6 +1,6 @@
 # Operation Layer v0.5 Release Train
 
-Status: planning contract.
+Status: active release train. Phase 42 is closed; Phase 43 is active.
 
 ## Purpose
 
@@ -21,8 +21,8 @@ evidence, and cleanup verification.
 | Phase | Goal | Mutation allowed |
 |---|---|---|
 | 41 | Lifecycle owner foundation | none |
-| 42 | Real API/admission proof for lifecycle-owner patches | test-only |
-| 43 | First bounded finalizer mutation | SwBlockVolume finalizer only |
+| 42 | Real API/admission proof for lifecycle-owner patches | test-only, closed |
+| 43 | First bounded finalizer mutation | SwBlockVolume finalizer only, active |
 | 44 | Delete lifecycle close gate and release | finalizer only |
 
 ## Phase 41: Lifecycle Owner Foundation
@@ -61,9 +61,12 @@ apiserver/admission harness. Mock-only tests are not sufficient.
 
 Phase 42 does not ship finalizer mutation in the product controller.
 
+Phase 42 is closed. QA validated both the real VAP boundary and the
+delete-safety decision model on m02.
+
 ## Phase 43: First Bounded Lifecycle Mutation
 
-Phase 43 can enable the first real mutation if Phase 42 passes:
+Phase 43 can enable the first real mutation now that Phase 42 has passed:
 
 ```text
 add/remove block.seaweedfs.com/swblockvolume-protection finalizer

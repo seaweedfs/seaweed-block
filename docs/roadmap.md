@@ -134,9 +134,10 @@ Recommended order from here:
    control plane.
 
 The internal release-train contract is
-`internal/docs/ref/operation-layer-v0.5-release-train.md`; the Phase 42 entry
-gate is drafted in
-`internal/docs/ref/phase42-lifecycle-owner-api-admission-gate.md`.
+`internal/docs/ref/operation-layer-v0.5-release-train.md`. Phase 42 is closed:
+the lifecycle-owner API/admission boundary and delete-safety decision model are
+validated. Phase 43 is active and may implement only the first bounded
+`SwBlockVolume` protection-finalizer mutation.
 
 The practical rule is:
 
@@ -264,4 +265,3 @@ A reasonable beta bar:
 
 Detailed post-alpha execution planning is kept in `internal/docs/` so the
 public roadmap stays focused on user-visible behavior and non-claims.
-
