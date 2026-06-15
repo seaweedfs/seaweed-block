@@ -1,10 +1,42 @@
 # QA Sign-off — Phase 42 D1 Lifecycle Owner Admission Gate
 
-Verdict: **PASS (re-validated on `116d381`).** First filed FAIL on `bc5ffc0`
-(VAP CEL errored on absent optional fields). The dev's fix `116d381` resolves it;
-the gate now passes G1–G4 on a real VAP-capable cluster. See the Re-validation
-section immediately below; the original FAIL analysis is kept beneath it for the
-record.
+Verdict: **PASS.** First filed FAIL on `bc5ffc0` (VAP CEL errored on absent
+optional fields); fixed in `116d381` (G1–G4 green); breadth-expanded to D1–D4 in
+`d3a1e0e` and re-validated green on a real VAP-capable cluster. See the
+Re-validation sections below; the original FAIL analysis is kept at the bottom.
+
+## Re-validation — 2026-06-15, commit `d3a1e0e phase42: expand lifecycle owner admission checks` (D1–D4 breadth)
+
+The dev widened the same live VAP gate to cover D2–D4: finalizer add/remove
+idempotency; annotation / ownerReferences / deletionTimestamp / mixed-metadata
+rejects; `/status` subresource denied and main-object status proven unmutated;
+object integrity preserved after rejected patches; and create/update/patch/delete
+denied for all forbidden resources.
+
+Re-ran on m02 (k3s v1.34.4): `GATE_EXIT=0`. Every criterion in the expanded
+assignment holds:
+
+```text
+status=ok   harness=live VAP   admission_policy_propagated=true   object_integrity_preserved=true
+operator_status_main_patch_allowed=false
+finalizer_add_allowed=true   finalizer_add_idempotent=true
+finalizer_remove_allowed=true   finalizer_remove_idempotent=true
+spec/label/annotation/ownerreferences/deletiontimestamp/foreign_finalizer/
+  mixed/mixed_metadata patch_allowed = false
+main_status_mutated=false   status_subresource_patch_allowed=false   finalizers_endpoint_allowed=false
+forbidden resources {pods,deployments,pvc,pv,storageclasses,secrets,nodes,
+  csidrivers,csinodes} × {create,update,patch,delete} = false  (36/36)
+G3 final object: spec.pvcName=phase42-a, labels.keep=true, annotations.keep=true, no foreign finalizer
+G4 cleanup: ns NotFound, VAP/VAPBinding/ClusterRole/Binding all 0
+```
+
+Note: `lifecycle_owner_main_status_patch_request_denied=false` is expected and
+safe — a CRD with a status subresource silently strips `.status` from a
+main-object patch rather than rejecting the request, and the gate independently
+proves `main_status_mutated=false` (the status is not changed). The lifecycle-owner
+main-object patch is now comprehensively confined to the
+`block.seaweedfs.com/swblockvolume-protection` finalizer against a real Kubernetes
+admission server. **Phase 42 D1–D4 pass**; lab left clean.
 
 ## Re-validation — 2026-06-15, commit `116d381 phase42: fix lifecycle owner admission gate`
 

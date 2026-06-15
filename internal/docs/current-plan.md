@@ -1,6 +1,6 @@
 # Current Plan: Phase 42 - Lifecycle Owner API / Admission Gate
 
-Status: open, 36% complete. Started on 2026-06-14.
+Status: open, 57% complete. Started on 2026-06-14.
 
 Branch: `phase41-lifecycle-owner-foundation`
 
@@ -167,6 +167,8 @@ Acceptance:
 [ ] missing or stale cleanup evidence returns unknown
 [ ] decisions are visible through CRD status/actions
 [ ] Phase 42 does not execute cleanup to make the decision pass
+[ ] lifecycle-owner action remains dry-run with mutation_allowed=false until
+    Phase 43
 ```
 
 ## D6: Multi-Volume Isolation
@@ -189,6 +191,7 @@ Acceptance:
 [ ] B's rejected patch leaves B unchanged
 [ ] C/D status decisions do not block A's API proof
 [ ] all Events/audit evidence use the correct volume identity
+[ ] stale deleteSafety clears when current evidence is absent
 ```
 
 ## D7: Close Gate
@@ -234,6 +237,15 @@ Phase 42 can close only if:
   object-integrity preservation after rejected patches, and
   create/update/patch/delete denial for forbidden Kubernetes resources. Pending
   QA rerun.
+- 43%: D1-D4 QA passed on m02 at `d3a1e0e`. The lifecycle-owner main-object
+  patch is confined by real Kubernetes admission to exactly the Seaweed Block
+  finalizer, while operator-status remains status/events-only.
+- 57%: D5/D6 dev-complete. Added a focused delete-safety decision gate that
+  runs the core delete-safety and operator-status regressions, summarizes
+  clean/blocked/missing/stale decisions, proves the lifecycle-owner action is
+  still `dry_run` with `mutation_allowed=false`, asserts no finalizer patches or
+  finalizer Events, and proves multi-volume delete-safety isolation. Pending QA
+  rerun.
 
 ## Prerequisites / Risks
 
@@ -247,19 +259,19 @@ Phase 42 can close only if:
 
 ## Next Step
 
-Re-run the expanded Phase 42 admission gate on m02 or another
-`ValidatingAdmissionPolicy`-capable cluster. The rerun must show:
+Run the D5/D6 delete-safety decision gate:
 
 ```text
-phase42_lifecycle_owner_admission_status=ok
-admission_policy_propagated=true
-lifecycle_owner_finalizer_add_allowed=true
-lifecycle_owner_finalizer_remove_allowed=true
-lifecycle_owner_finalizer_add_idempotent=true
-lifecycle_owner_finalizer_remove_idempotent=true
-object_integrity_preserved=true
-all forbidden main-object and resource mutation checks=false
+phase42_delete_safety_decision_status=ok
+clean_delete_safety_decision=allowed
+blocked_delete_safety_decision=rejected
+missing_delete_safety_decision=unknown
+stale_delete_safety_decision=unknown
+lifecycle_owner_action_mode=dry_run
+lifecycle_owner_action_mutation_allowed=false
+finalizer_patch_count=0
+multi_volume_delete_safety_isolation=true
 ```
 
 QA assignment:
-`internal/docs/qa-assignments/phase42-d1-lifecycle-owner-admission-gate-qa.md`.
+`internal/docs/qa-assignments/phase42-d5-d6-delete-safety-decision-qa.md`.

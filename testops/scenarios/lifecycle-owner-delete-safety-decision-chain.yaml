@@ -1,0 +1,62 @@
+# Runner-native Phase 42 D5/D6 gate: delete-safety decisions stay external and
+# isolated per volume.
+
+name: lifecycle-owner-delete-safety-decision-chain
+description: >
+  Runs the Phase 42 delete-safety decision gate. This complements the live
+  admission gate: admission proves the lifecycle-owner can only patch the
+  approved finalizer shape; this gate proves finalizer-release decisions still
+  come from cleanup evidence and remain dry-run/status-only until Phase 43.
+
+vars:
+  product_root: "{{ env.PRODUCT_ROOT | default('/mnt/c/work/seaweed_block') }}"
+
+phases:
+  - name: delete_safety_decision
+    actions:
+      - type: exec
+        name: run_phase42_delete_safety_decision
+        cmd: "rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase42-delete-safety-decision && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase42-delete-safety-decision && cd {{ product_root }} && SW_BLOCK_ARTIFACT_DIR=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase42-delete-safety-decision bash scripts/run-phase42-delete-safety-decision-gate.sh {{ product_root }}"
+
+  - name: asserts
+    actions:
+      - type: grep_log
+        name: gate_ok
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase42-delete-safety-decision/phase42-delete-safety-decision-gate-summary.txt"
+        pattern: "^phase42_delete_safety_decision_status=ok$"
+      - type: grep_log
+        name: clean_allowed
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase42-delete-safety-decision/phase42-delete-safety-decision-gate-summary.txt"
+        pattern: "^clean_delete_safety_decision=allowed$"
+      - type: grep_log
+        name: blocked_rejected
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase42-delete-safety-decision/phase42-delete-safety-decision-gate-summary.txt"
+        pattern: "^blocked_delete_safety_decision=rejected$"
+      - type: grep_log
+        name: missing_unknown
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase42-delete-safety-decision/phase42-delete-safety-decision-gate-summary.txt"
+        pattern: "^missing_delete_safety_decision=unknown$"
+      - type: grep_log
+        name: stale_unknown
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase42-delete-safety-decision/phase42-delete-safety-decision-gate-summary.txt"
+        pattern: "^stale_delete_safety_decision=unknown$"
+      - type: grep_log
+        name: dry_run_action
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase42-delete-safety-decision/phase42-delete-safety-decision-gate-summary.txt"
+        pattern: "^lifecycle_owner_action_mode=dry_run$"
+      - type: grep_log
+        name: no_action_mutation
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase42-delete-safety-decision/phase42-delete-safety-decision-gate-summary.txt"
+        pattern: "^lifecycle_owner_action_mutation_allowed=false$"
+      - type: grep_log
+        name: no_finalizer_patch
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase42-delete-safety-decision/phase42-delete-safety-decision-gate-summary.txt"
+        pattern: "^finalizer_patch_count=0$"
+      - type: grep_log
+        name: no_finalizer_events
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase42-delete-safety-decision/phase42-delete-safety-decision-gate-summary.txt"
+        pattern: "^no_finalizer_mutation_events=true$"
+      - type: grep_log
+        name: multi_volume_isolated
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase42-delete-safety-decision/phase42-delete-safety-decision-gate-summary.txt"
+        pattern: "^multi_volume_delete_safety_isolation=true$"
