@@ -1,215 +1,193 @@
-# Current Plan: Phase 43 - First Bounded Finalizer Mutation
+# Current Plan: Phase 44 - Delete Lifecycle Close Gate
 
-Status: open, D1/D2 live QA PASS; D3/D4 implemented locally and awaiting live
-QA. Started on 2026-06-15.
+Status: open, 0% complete. Started on 2026-06-15.
 
 Branch: `phase41-lifecycle-owner-foundation`
 
-Previous phase: Phase 42 is closed in
-`internal/docs/finished-plans/phase42_finishedplan_lifecycle_owner_admission_gate.md`.
+Previous phase: Phase 43 is closed in
+`internal/docs/finished-plans/phase43_finishedplan_bounded_finalizer_lifecycle.md`.
 
 ## Product Goal
 
-Ship the first real Kubernetes lifecycle mutation in Seaweed Block:
+Validate the complete user-visible delete lifecycle as one product path:
 
 ```text
-add/remove only block.seaweedfs.com/swblockvolume-protection on owned
-SwBlockVolume objects, gated by delete-safety evidence.
+install -> first PVC -> SwBlockVolume protected -> delete requested ->
+blocked/unknown evidence holds finalizer -> clean evidence releases finalizer ->
+object deletion completes -> uninstall leaves zero residue
 ```
 
-Phase 42 proved the lifecycle-owner identity can hold main-object
-`patch swblockvolumes` without becoming a broad mutator. Phase 43 turns that
-proof into the product path, but keeps the scope narrow: finalizer only, no
-cleanup execution, no PVC/PV/workload/storage mutation, no rebuild/failback,
-no backup, no NVMe work.
+Phase 43 proved add and release independently. Phase 44 proves the integrated
+operation behaves as a coherent product capability across Kubernetes objects,
+CRD status, Events, report/dashboard/explain surfaces, and cleanup.
 
-Hard exit statement:
+## Why This Is Next
+
+The operation layer is only useful if separate pieces compose:
 
 ```text
-The lifecycle-owner can add the protection finalizer, hold deletion while
-delete-safety is blocked or unknown, and remove the finalizer only when
-delete-safety is clean and fresh. Every decision is visible through CRD status,
-Events, report/dashboard surfaces, and QA evidence.
+live object state + status evidence + action boundary + admitted mutation +
+user-facing explanation + cleanup
 ```
 
-## Why This Is The Right Next Step
-
-This is the first ability closure after the operation-layer foundation:
-
-```text
-facts -> judgment -> admitted action owner -> real bounded mutation -> status/Event evidence
-```
-
-Starting returned-replica rebuild, NVMe ANA parity, or backup/restore before this
-would add more lifecycle transitions without proving the product can safely own
-a small Kubernetes mutation. Phase 43 keeps the blast radius intentionally small.
+Phase 44 is the close gate before moving to a broader release or larger
+features. It should not add rebuild, failback, backup, or NVMe scope.
 
 ## Scope Contract
 
 | In | Out |
 |---|---|
-| lifecycle-owner component or mode | operator-status main-object patch |
-| SwBlockVolume protection finalizer add/remove | PVC/PV finalizer ownership |
-| delete-safety hold/release decisions | cleanup execution |
-| Events for hold/release | iSCSI/multipath/hostPath mutation |
-| CRD status/report/dashboard agreement | workload/storageclass mutation |
-| idempotency and multi-volume isolation | rebuild/failback/promotion |
-| uninstall/cleanup zero-residue gate | backup/restore/NVMe ANA parity |
+| one first-volume user path | returned-replica rebuild |
+| SwBlockVolume finalizer add and release | failback / repair |
+| delete-safety hold/release status | automatic cleanup execution |
+| CRD status/Event/report/dashboard agreement | PVC/PV/workload mutation |
+| zero-residue uninstall verification | backup/snapshot/restore |
+| multi-volume isolation smoke if cheap | NVMe ANA parity |
 
-Allowed implementation rule:
+Allowed mutation:
 
 ```text
-operator-status must remain status/events-only.
-lifecycle-owner may patch SwBlockVolume main objects only through the
-Phase 42-admitted finalizer shape.
+lifecycle-owner may patch only SwBlockVolume.metadata.finalizers.
+operator-status remains status/events-only.
 ```
 
-## D1: Product Wiring And RBAC Separation
+## D1: Release Artifact / Image Alignment
 
-Goal: introduce the product lifecycle-owner path without widening
-operator-status.
+Goal: ensure the shipped image and chart can actually run the lifecycle-owner.
 
 Acceptance:
 
 ```text
-[ ] lifecycle-owner has a separate identity from operator-status
-[ ] lifecycle-owner RBAC matches the Phase 42 boundary
-[ ] operator-status still cannot patch SwBlockVolume main objects
-[ ] admission policy or equivalent finalizer-only enforcement is installed
-[ ] lifecycle-owner can run disabled/dry-run by default if needed for rollout
+[ ] candidate image includes sw-block ops lifecycle-owner
+[ ] chart renders lifecycleOwner.create=false by default
+[ ] lifecycleOwner.create=true installs Deployment/RBAC/VAP
+[ ] no chart flag/image skew
 ```
 
-Verification:
+Fail if the chart references a subcommand or flag absent from the image.
 
-```text
-kubectl auth can-i patch swblockvolumes --as <operator-status-sa> == no
-kubectl auth can-i patch swblockvolumes --as <lifecycle-owner-sa> == yes
-Phase 42 forbidden patch matrix still passes
-```
+## D2: First PVC Creates Protected SwBlockVolume
 
-## D2: Finalizer Add On Owned SwBlockVolume
-
-Goal: add the protection finalizer idempotently to owned `SwBlockVolume`
-objects.
+Goal: a normal Day-1 PVC path creates an observable, protected
+`SwBlockVolume`.
 
 Acceptance:
 
 ```text
-[ ] lifecycle-owner adds block.seaweedfs.com/swblockvolume-protection
-[ ] repeated reconcile does not duplicate or churn finalizers
-[ ] spec, status, labels, annotations, ownerReferences are unchanged
-[ ] foreign finalizers are not added or removed
-[ ] Event and status/action evidence names the volume identity
+[ ] Helm install succeeds with operatorStatus + lifecycleOwner enabled
+[ ] first PVC writer/reader passes
+[ ] SwBlockVolume exists for the PVC
+[ ] lifecycle-owner adds exactly one protection finalizer
+[ ] operator-status writes Ready=True / first_volume_verified
+[ ] finalizer_added Event is bounded
+```
+
+## D3: Delete Request Holds On Unsafe Evidence
+
+Goal: a delete request cannot complete while evidence is unsafe.
+
+Acceptance:
+
+```text
+[ ] deleting SwBlockVolume with missing cleanup evidence remains Terminating
+[ ] blocked residue evidence remains Terminating
+[ ] stale cleanup evidence remains Terminating
+[ ] status.deleteSafety decision is unknown/rejected as appropriate
+[ ] Events explain the hold reason
+[ ] lifecycle-owner does not run cleanup
+```
+
+Fail if unsafe evidence releases the finalizer.
+
+## D4: Clean Evidence Releases And Deletion Completes
+
+Goal: clean, fresh evidence releases only the Seaweed Block finalizer.
+
+Acceptance:
+
+```text
+[ ] clean cleanup evidence sets decision=allowed state=releasable
+[ ] lifecycle-owner removes only block.seaweedfs.com/swblockvolume-protection
+[ ] foreign finalizers are preserved if present
+[ ] SwBlockVolume deletion completes after release
+[ ] finalizer_released Event is bounded
 ```
 
 Fail if any non-finalizer field changes.
 
-## D3: Blocked / Unknown Delete Holds Finalizer
+## D5: Surface Agreement
 
-Goal: deletion is held when release evidence is unsafe.
-
-Acceptance:
-
-```text
-[ ] blocked residue -> deleteSafety.state=blocked decision=rejected
-[ ] missing cleanup evidence -> state=requested decision=unknown
-[ ] stale cleanup evidence -> state=requested decision=unknown
-[ ] finalizer remains present in all three cases
-[ ] no cleanup is executed to make the decision pass
-[ ] Events explain hold reason without claiming release
-```
-
-Fail if blocked, missing, or stale evidence removes the finalizer.
-
-## D4: Clean Delete Releases Finalizer
-
-Goal: release finalizer only when cleanup evidence is clean and fresh.
+Goal: users see the same answer everywhere.
 
 Acceptance:
 
 ```text
-[ ] clean cleanup evidence -> state=releasable decision=allowed
-[ ] lifecycle-owner removes only the Seaweed Block protection finalizer
-[ ] finalizer removal is idempotent
-[ ] finalizer_released Event is emitted once or bounded/stable
-[ ] object deletion can complete after release
+[ ] kubectl get/describe SwBlockVolume status agrees with ops report
+[ ] operator-snapshot agrees with CRD status
+[ ] dashboard /operator-snapshot.json agrees
+[ ] ops explain names the same hold/release reason
+[ ] no false Ready=True appears in blocked/unknown delete states
 ```
 
-Fail if clean evidence causes any PVC/PV/workload/host mutation.
+## D6: Multi-Volume Isolation Smoke
 
-## D5: Multi-Volume Isolation
-
-Goal: one volume's delete lifecycle does not contaminate another.
+Goal: one deleting volume does not contaminate another volume.
 
 Scenario:
 
 ```text
-A: delete requested + residue -> held
-B: delete requested + clean evidence -> released
-C: ready volume with no delete request -> finalizer remains, no deleteSafety
-D: stale evidence -> unknown, held
+A deleting + blocked residue -> held
+B deleting + clean evidence -> released
+C normal ready volume -> remains ready, protected, no deleteSafety contamination
 ```
 
 Acceptance:
 
 ```text
-[ ] A remains held and does not block B release
-[ ] B release does not affect A/C/D
-[ ] C has no deleteSafety contamination
-[ ] D remains unknown/held
-[ ] Events and status use the correct volume identity
+[ ] A held does not block B release
+[ ] B release does not remove A/C finalizer
+[ ] C remains Ready=True and protected
+[ ] Events/status use the correct volume identity
 ```
 
-## D6: Close Gate
+## D7: Close / Release Decision
 
-Phase 43 can close only if:
+Phase 44 can close only if:
 
 ```text
-[ ] Phase 42 D1-D4 admission gate still passes
-[ ] finalizer add works on owned SwBlockVolume
-[ ] blocked/missing/stale delete-safety holds finalizer
-[ ] clean/fresh delete-safety releases finalizer
-[ ] operator-status remains status/events-only
+[ ] D1-D6 PASS on a clean VAP-capable lab
 [ ] lifecycle-owner has no cleanup/PVC/PV/workload/storage mutation power
-[ ] uninstall/cleanup verifier reports zero residue
-[ ] QA sign-off records Phase 44 is eligible for delete lifecycle release close
+[ ] operator-status remains status/events-only
+[ ] final cleanup verifier reports zero residue
+[ ] release notes and README claim only bounded SwBlockVolume finalizer
+    lifecycle, not automatic cleanup or broad lifecycle automation
 ```
 
 ## Current Progress
 
-- D1/D2 live QA PASS:
-  - `sw-block ops lifecycle-owner` command added.
-  - separate Helm lifecycle-owner Deployment/RBAC added, disabled by default.
-  - lifecycle-owner admission policy added for finalizer-only patch shape.
-  - Kubernetes client can list `SwBlockVolume` objects and patch only
-    `metadata.finalizers`.
-  - live VAP/RBAC boundary and idempotent finalizer add validated in
-    `internal/docs/qa-assignments/phase43-d1-d2-lifecycle-owner-finalizer-add-qa-signoff.md`.
-- D3/D4 local implementation complete:
-  - lifecycle-owner holds deleting volumes when `status.deleteSafety` is absent,
-    blocked, or unknown/stale.
-  - lifecycle-owner removes only the Seaweed Block protection finalizer when
-    `status.deleteSafety` is releasable and allowed.
-  - local tests pass; live QA pending.
+- 0%: Phase 44 opened from Phase 43.
+- Phase 43 already proved add and release as separate live gates.
+- Phase 44 must prove the integrated path and release wording.
 
 ## Prerequisites / Risks
 
-- Keep the Phase 42 admission policy in the loop; RBAC alone is not enough for
-  CRD finalizers.
-- Do not put main-object patch permission on operator-status.
-- Deleting a CR with finalizers can easily leave stuck test objects. Every gate
-  must include cleanup and force-clean instructions.
-- Do not add automatic cleanup to make finalizer release pass.
-- Keep Events bounded; repeated reconcile should not create unbounded duplicate
-  lifecycle Events.
+- Use a candidate image that includes `sw-block ops lifecycle-owner`.
+- Use a VAP-capable lab; Rancher Desktop without VAP is not sufficient.
+- Be careful with deleting CRs that have finalizers; every failed gate must
+  include admin cleanup instructions.
+- Do not paper over unsafe evidence by running cleanup inside lifecycle-owner.
 
 ## Next Step
 
-Run D3/D4 live QA:
+Build or publish a candidate image from the current branch, then author/run the
+D1-D4 integrated live scenario:
 
 ```text
-blocked/missing/stale delete-safety holds finalizer
-clean/fresh delete-safety releases only Seaweed Block finalizer
-operator-status remains status/events-only
-lifecycle-owner keeps no cleanup/PVC/PV/workload/storage mutation power
+install with operatorStatus + lifecycleOwner
+create first PVC
+observe protection finalizer
+request delete
+prove hold under unsafe evidence
+patch/provide clean delete-safety evidence
+prove finalizer release and object deletion
 ```
