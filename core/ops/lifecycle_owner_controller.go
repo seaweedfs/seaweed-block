@@ -15,7 +15,13 @@ type SwBlockVolumeObject struct {
 	Ref               OperatorObjectRef `json:"ref"`
 	Finalizers        []string          `json:"finalizers,omitempty"`
 	DeletionTimestamp *time.Time        `json:"deletionTimestamp,omitempty"`
+	Spec              SwBlockVolumeSpec `json:"spec,omitempty"`
 	Status            SwBlockVolumeCRDStatus
+}
+
+type SwBlockVolumeSpec struct {
+	PVCName      string `json:"pvcName,omitempty"`
+	StorageClass string `json:"storageClass,omitempty"`
 }
 
 type LifecycleOwnerReconciler struct {

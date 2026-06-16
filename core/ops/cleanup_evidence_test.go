@@ -1,6 +1,8 @@
 package ops
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -70,6 +72,20 @@ func TestCleanupEvidenceProjectionMarksCleanStatusOK(t *testing.T) {
 	row := cleanup.ReportRow()
 	if row.StatusClass != "ok" {
 		t.Fatalf("row=%+v", row)
+	}
+}
+
+func TestLoadCleanupEvidenceSummary(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cleanup-summary.txt")
+	if err := os.WriteFile(path, []byte("cleanup_status=ok\ncleanup_observed_at=2026-06-16T10:05:00Z\ncleanup_evidence=cleanup-summary.txt\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cleanup, err := LoadCleanupEvidenceSummary(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cleanup == nil || cleanup.Status != ObservationStatusOK || cleanup.EvidenceRef != path || cleanup.ObservedAt.IsZero() {
+		t.Fatalf("cleanup=%+v", cleanup)
 	}
 }
 

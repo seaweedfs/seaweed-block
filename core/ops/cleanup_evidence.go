@@ -1,7 +1,9 @@
 package ops
 
 import (
+	"bufio"
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -58,6 +60,27 @@ func CleanupEvidenceFromSummary(summary map[string]string, evidencePath string) 
 		}
 	}
 	return cleanup
+}
+
+func LoadCleanupEvidenceSummary(path string) (*CleanupEvidence, error) {
+	raw, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("read cleanup summary: %w", err)
+	}
+	defer raw.Close()
+	summary := map[string]string{}
+	scanner := bufio.NewScanner(raw)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		key, value, ok := strings.Cut(line, "=")
+		if ok {
+			summary[strings.TrimSpace(key)] = strings.TrimSpace(value)
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("read cleanup summary: %w", err)
+	}
+	return CleanupEvidenceFromSummary(summary, path), nil
 }
 
 func (cleanup CleanupEvidence) ReportSummaryLines() []string {

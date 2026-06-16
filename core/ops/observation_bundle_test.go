@@ -639,8 +639,8 @@ func TestObservationBundle_DeleteSafetyUnknownWithoutCleanupEvidence(t *testing.
 		managed.DeleteSafety.FinalizerReleaseAllowed {
 		t.Fatalf("managed=%+v delete=%+v", managed, managed.DeleteSafety)
 	}
-	if managed.Status != ManagedVolumeStatusReady {
-		t.Fatalf("missing cleanup evidence must not falsify data-plane readiness: %+v", managed)
+	if managed.Status != ManagedVolumeStatusUnknown || managed.ReasonCode != ReasonCleanupEvidenceMissing {
+		t.Fatalf("missing cleanup evidence must not claim Ready: %+v", managed)
 	}
 
 	summary := RenderObservationReportSummary(cluster)

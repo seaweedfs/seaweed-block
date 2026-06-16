@@ -167,6 +167,7 @@ func runOpsOperatorStatus(args []string, stdout, stderr io.Writer) int {
 	var (
 		dryRun          bool
 		fromBundle      string
+		cleanupSummary  string
 		namespace       string
 		masterAddr      string
 		masterAPIAddr   string
@@ -179,6 +180,7 @@ func runOpsOperatorStatus(args []string, stdout, stderr io.Writer) int {
 	)
 	fs.BoolVar(&dryRun, "dry-run", false, "render the status projection without writing Kubernetes CRD status")
 	fs.StringVar(&fromBundle, "from-bundle", "", "existing inventory/support bundle directory to project")
+	fs.StringVar(&cleanupSummary, "cleanup-summary", "", "cleanup-summary.txt evidence to project into delete-safety status")
 	fs.StringVar(&namespace, "namespace", "default", "Kubernetes namespace for live read-only inventory")
 	fs.StringVar(&masterAddr, "master", "", "optional blockmaster gRPC address for live per-replica status evidence")
 	fs.StringVar(&masterAPIAddr, "master-api", "", "optional blockmaster gRPC address for ClusterEvidenceService read-only snapshot")
@@ -219,9 +221,18 @@ func runOpsOperatorStatus(args []string, stdout, stderr io.Writer) int {
 		if code != ops.VolumeStatusExitOK {
 			return code
 		}
+		if cleanupSummary != "" {
+			cleanup, err := ops.LoadCleanupEvidenceSummary(cleanupSummary)
+			if err != nil {
+				fmt.Fprintf(stderr, "sw-block ops operator-status: %v\n", err)
+				return ops.VolumeStatusExitInvalid
+			}
+			cluster.Cleanup = cleanup
+		}
 		mode := "write_status"
 		var writer ops.OperatorStatusWriter
 		var events ops.OperatorEventSink
+		var volumes ops.OperatorSwBlockVolumeSource
 		if dryRun {
 			mode = "dry_run"
 			writer = &operatorStatusDryRunWriter{}
@@ -234,12 +245,14 @@ func runOpsOperatorStatus(args []string, stdout, stderr io.Writer) int {
 				return ops.VolumeStatusExitInvalid
 			}
 			events, _ = writer.(ops.OperatorEventSink)
+			volumes, _ = writer.(ops.OperatorSwBlockVolumeSource)
 		}
 		result, err := (ops.OperatorStatusReconciler{
 			Namespace:   namespace,
 			ClusterName: clusterName,
 			Source:      operatorStatusClusterSource{cluster: cluster},
 			Writer:      writer,
+			Volumes:     volumes,
 			EventSink:   events,
 		}).Reconcile(context.Background())
 		if err != nil {
@@ -1540,7 +1553,7 @@ func usage(w io.Writer) {
 	fmt.Fprintln(w, "  sw-block ops dashboard --master-api <addr> [--listen 127.0.0.1:9334]")
 	fmt.Fprintln(w, "  sw-block ops generate-helm-values --out values.yaml [--target-node <node>] [--replication-factor <n>]")
 	fmt.Fprintln(w, "      [--restart-persistence ephemeral|hostpath] [--state-hostpath /var/lib/sw-block] [--timeout 10s]")
-	fmt.Fprintln(w, "  sw-block ops operator-status --dry-run [--master-api <addr>|--from-bundle <dir>] [--interval 30s]")
+	fmt.Fprintln(w, "  sw-block ops operator-status --dry-run [--master-api <addr>|--from-bundle <dir>] [--cleanup-summary <file>] [--interval 30s]")
 	fmt.Fprintln(w, "  sw-block ops lifecycle-owner [--dry-run] [--namespace <ns>] [--interval 30s]")
 }
 

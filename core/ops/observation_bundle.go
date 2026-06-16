@@ -536,20 +536,35 @@ func applyUnsupportedLoopbackAttachSummary(cluster *ClusterEvidence, summary map
 }
 
 func applyDeleteSafetySummary(cluster *ClusterEvidence, summary map[string]string, evidencePath string) {
-	volumeID := strings.TrimSpace(summary["volume_id"])
-	pvcName := strings.TrimSpace(summary["pvc_name"])
-	pvName := strings.TrimSpace(summary["pv_name"])
-	deleteRequested := boolFromSummaryDefault(summary, "delete_requested", true)
-	finalizerPresent := boolFromSummaryDefault(summary, "finalizer_present", true)
+	applyDeleteSafetyFacts(cluster, deleteSafetyProjectionFacts{
+		VolumeID:         strings.TrimSpace(summary["volume_id"]),
+		PVCName:          strings.TrimSpace(summary["pvc_name"]),
+		PVName:           strings.TrimSpace(summary["pv_name"]),
+		DeleteRequested:  boolFromSummaryDefault(summary, "delete_requested", true),
+		FinalizerPresent: boolFromSummaryDefault(summary, "finalizer_present", true),
+		EvidencePath:     evidencePath,
+	})
+}
+
+type deleteSafetyProjectionFacts struct {
+	VolumeID         string
+	PVCName          string
+	PVName           string
+	DeleteRequested  bool
+	FinalizerPresent bool
+	EvidencePath     string
+}
+
+func applyDeleteSafetyFacts(cluster *ClusterEvidence, facts deleteSafetyProjectionFacts) {
 	if len(cluster.ManagedVolumes) == 0 && len(cluster.Volumes) > 0 {
 		*cluster = NormalizeObservationCluster(*cluster)
 	}
-	idx := findManagedVolumeIndex(cluster.ManagedVolumes, volumeID, pvcName)
+	idx := findManagedVolumeIndex(cluster.ManagedVolumes, facts.VolumeID, facts.PVCName)
 	if idx < 0 {
 		cluster.ManagedVolumes = append(cluster.ManagedVolumes, ManagedVolumeProjection{
-			VolumeID:   volumeID,
-			PVCName:    pvcName,
-			PVName:     pvName,
+			VolumeID:   facts.VolumeID,
+			PVCName:    facts.PVCName,
+			PVName:     facts.PVName,
 			Status:     ManagedVolumeStatusUnknown,
 			ReasonCode: ReasonCleanupEvidenceMissing,
 			States: ManagedVolumeStates{
@@ -565,31 +580,68 @@ func applyDeleteSafetySummary(cluster *ClusterEvidence, summary map[string]strin
 	}
 	managed := &cluster.ManagedVolumes[idx]
 	if managed.VolumeID == "" {
-		managed.VolumeID = volumeID
+		managed.VolumeID = facts.VolumeID
 	}
 	if managed.PVCName == "" {
-		managed.PVCName = pvcName
+		managed.PVCName = facts.PVCName
 	}
 	if managed.PVName == "" {
-		managed.PVName = pvName
+		managed.PVName = facts.PVName
 	}
 	decision := EvaluateSwBlockVolumeDeleteSafety(SwBlockVolumeDeleteSafetyFacts{
-		DeleteRequested:  deleteRequested,
-		FinalizerPresent: finalizerPresent,
+		DeleteRequested:  facts.DeleteRequested,
+		FinalizerPresent: facts.FinalizerPresent,
 		Cleanup:          cluster.Cleanup,
 		ObservedAt:       cluster.CapturedAt,
 		MaxEvidenceAge:   15 * time.Minute,
 	})
-	if evidencePath != "" {
-		decision.EvidenceRefs = appendUniqueStrings(decision.EvidenceRefs, evidencePath)
+	if facts.EvidencePath != "" {
+		decision.EvidenceRefs = appendUniqueStrings(decision.EvidenceRefs, facts.EvidencePath)
 	}
 	managed.DeleteSafety = &decision
 	managed.EvidenceRefs = appendUniqueStrings(managed.EvidenceRefs, decision.EvidenceRefs...)
 	managed.Actions = ensureManagedVolumeAction(managed.Actions, managedVolumeActionFromDeleteSafety(decision))
 	switch decision.State {
+	case DeleteSafetyStateRequested:
+		if decision.Decision == ManagedVolumeActionDecisionUnknown {
+			managed.Status = ManagedVolumeStatusUnknown
+			managed.ReasonCode = decision.Reason
+			managed.Conditions = ensureCondition(removeConditionType(managed.Conditions, ConditionReady), ObservationCondition{
+				Type:         ConditionReady,
+				Status:       "Unknown",
+				Reason:       decision.Reason,
+				Severity:     "warning",
+				Message:      "delete is held until cleanup evidence is available and fresh",
+				EvidenceRefs: append([]string(nil), decision.EvidenceRefs...),
+			})
+			managed.Conditions = ensureCondition(managed.Conditions, ObservationCondition{
+				Type:         ConditionEvidenceStale,
+				Status:       "True",
+				Reason:       decision.Reason,
+				Severity:     "warning",
+				Message:      "delete-safety evidence is missing or stale",
+				EvidenceRefs: append([]string(nil), decision.EvidenceRefs...),
+			})
+		}
 	case DeleteSafetyStateBlocked:
 		managed.Status = ManagedVolumeStatusBlocked
 		managed.ReasonCode = decision.Reason
+		managed.Conditions = ensureCondition(removeConditionType(managed.Conditions, ConditionReady), ObservationCondition{
+			Type:         ConditionReady,
+			Status:       "False",
+			Reason:       decision.Reason,
+			Severity:     "warning",
+			Message:      "delete is blocked until cleanup evidence is clean",
+			EvidenceRefs: append([]string(nil), decision.EvidenceRefs...),
+		})
+		managed.Conditions = ensureCondition(managed.Conditions, ObservationCondition{
+			Type:         ConditionBlocked,
+			Status:       "True",
+			Reason:       decision.Reason,
+			Severity:     "warning",
+			Message:      "delete-safety evidence blocks finalizer release",
+			EvidenceRefs: append([]string(nil), decision.EvidenceRefs...),
+		})
 		managed.Conditions = ensureCondition(managed.Conditions, ObservationCondition{
 			Type:         ConditionCleanupRequired,
 			Status:       "True",

@@ -113,6 +113,7 @@ func (c *KubernetesStatusClient) ListSwBlockVolumes(ctx context.Context, namespa
 			},
 			Finalizers:        append([]string(nil), item.Metadata.Finalizers...),
 			DeletionTimestamp: item.Metadata.DeletionTimestamp,
+			Spec:              item.Spec,
 			Status:            item.Status,
 		})
 	}
@@ -329,5 +330,6 @@ type kubernetesSwBlockVolumeList struct {
 
 type kubernetesSwBlockVolume struct {
 	Metadata kubernetesMetadata     `json:"metadata"`
+	Spec     SwBlockVolumeSpec      `json:"spec"`
 	Status   SwBlockVolumeCRDStatus `json:"status"`
 }

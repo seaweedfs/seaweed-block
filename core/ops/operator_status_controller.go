@@ -23,6 +23,10 @@ type OperatorStatusWriter interface {
 	WriteVolumeStatus(ctx context.Context, ref OperatorObjectRef, status SwBlockVolumeCRDStatus) error
 }
 
+type OperatorSwBlockVolumeSource interface {
+	ListSwBlockVolumes(ctx context.Context, namespace string) ([]SwBlockVolumeObject, error)
+}
+
 type OperatorEventSink interface {
 	EmitEvent(ctx context.Context, event OperatorKubernetesEvent) error
 }
@@ -311,6 +315,7 @@ type OperatorStatusReconciler struct {
 	ClusterName string
 	Source      OperatorStatusSource
 	Writer      OperatorStatusWriter
+	Volumes     OperatorSwBlockVolumeSource
 	EventSink   OperatorEventSink
 	Now         func() time.Time
 }
@@ -334,13 +339,19 @@ func (r OperatorStatusReconciler) Reconcile(ctx context.Context) (OperatorStatus
 		return OperatorStatusReconcileResult{}, err
 	}
 	cluster = NormalizeObservationCluster(cluster)
+	namespace := defaultString(r.Namespace, "default")
+	if r.Volumes != nil {
+		if err := r.applyLiveDeleteSafety(ctx, namespace, &cluster); err != nil {
+			return OperatorStatusReconcileResult{}, err
+		}
+		cluster = NormalizeObservationCluster(cluster)
+	}
 	snapshot := BuildOperatorFoundationSnapshot(cluster)
 	observedAt := cluster.CapturedAt
 	if observedAt.IsZero() {
 		observedAt = r.now()()
 	}
 
-	namespace := defaultString(r.Namespace, "default")
 	clusterName := defaultString(r.ClusterName, DefaultSwBlockClusterName)
 	clusterRef := OperatorObjectRef{
 		APIVersion: SwBlockVolumeAPIVersion,
@@ -413,6 +424,28 @@ func (r OperatorStatusReconciler) Reconcile(ctx context.Context) (OperatorStatus
 		}
 	}
 	return result, nil
+}
+
+func (r OperatorStatusReconciler) applyLiveDeleteSafety(ctx context.Context, namespace string, cluster *ClusterEvidence) error {
+	volumes, err := r.Volumes.ListSwBlockVolumes(ctx, namespace)
+	if err != nil {
+		return err
+	}
+	for _, volume := range volumes {
+		if volume.DeletionTimestamp == nil {
+			continue
+		}
+		volumeID := volume.Status.VolumeID
+		pvcName := firstNonEmpty(volume.Status.PVCName, volume.Spec.PVCName, volume.Ref.Name)
+		applyDeleteSafetyFacts(cluster, deleteSafetyProjectionFacts{
+			VolumeID:         volumeID,
+			PVCName:          pvcName,
+			DeleteRequested:  true,
+			FinalizerPresent: lifecycleOwnerStringSliceContains(volume.Finalizers, SwBlockVolumeFinalizerName),
+			EvidencePath:     "swblockvolume/" + volume.Ref.Namespace + "/" + volume.Ref.Name,
+		})
+	}
+	return nil
 }
 
 func swBlockVolumeCRDDeleteSafety(decision *SwBlockVolumeDeleteSafetyDecision) *SwBlockVolumeCRDDeleteSafety {

@@ -841,6 +841,125 @@ func TestOperatorStatusReconcilerDeleteSafetyDoesNotContaminateOtherVolumes(t *t
 	}
 }
 
+func TestPhase44OperatorStatusReconcilerProjectsLiveDeletingVolumeHold(t *testing.T) {
+	deletingAt := time.Date(2026, 6, 16, 10, 0, 0, 0, time.UTC)
+	source := fakeOperatorStatusSource{cluster: ClusterEvidence{
+		SchemaVersion: ObservationSchemaVersion,
+		CapturedAt:    deletingAt,
+		Status:        ObservationStatusOK,
+		ManagedVolumes: []ManagedVolumeProjection{{
+			VolumeID:   "pvc-live",
+			PVCName:    "live-pvc",
+			Status:     ManagedVolumeStatusReady,
+			ReasonCode: ReasonFirstVolumeVerified,
+			Conditions: []ObservationCondition{{
+				Type:     ConditionReady,
+				Status:   "True",
+				Reason:   ReasonFirstVolumeVerified,
+				Severity: "info",
+			}},
+		}},
+	}}
+	writer := &fakeOperatorStatusWriter{}
+	result, err := (OperatorStatusReconciler{
+		Namespace: "kube-system",
+		Source:    source,
+		Writer:    writer,
+		Volumes: fakeOperatorSwBlockVolumeSource{volumes: []SwBlockVolumeObject{{
+			Ref: OperatorObjectRef{
+				Namespace: "kube-system",
+				Name:      "live-pvc",
+			},
+			Finalizers:        []string{SwBlockVolumeFinalizerName},
+			DeletionTimestamp: &deletingAt,
+			Spec:              SwBlockVolumeSpec{PVCName: "live-pvc"},
+			Status: SwBlockVolumeCRDStatus{
+				VolumeID: "pvc-live",
+				PVCName:  "live-pvc",
+			},
+		}}},
+	}).Reconcile(context.Background())
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if result.FinalizerPatchCount != 0 {
+		t.Fatalf("operator-status must not patch finalizers: %d", result.FinalizerPatchCount)
+	}
+	if len(writer.volumes) != 1 {
+		t.Fatalf("volume writes=%+v", writer.volumes)
+	}
+	got := writer.volumes[0].status
+	if got.Status != ManagedVolumeStatusUnknown || got.ReasonCode != ReasonCleanupEvidenceMissing {
+		t.Fatalf("deleting volume with missing evidence must not stay ready: %+v", got)
+	}
+	if got.DeleteSafety == nil ||
+		got.DeleteSafety.Decision != ManagedVolumeActionDecisionUnknown ||
+		got.DeleteSafety.State != DeleteSafetyStateRequested ||
+		got.DeleteSafety.Reason != ReasonCleanupEvidenceMissing {
+		t.Fatalf("delete safety=%+v", got.DeleteSafety)
+	}
+	action := findCRDAction(got.AllowedActions, SwBlockVolumeDeleteActionReleaseFinalizer)
+	if action == nil ||
+		action.Decision != ManagedVolumeActionDecisionUnknown ||
+		action.MutationAllowed ||
+		action.Mode != ManagedVolumeActionModeDryRun {
+		t.Fatalf("release action=%+v", action)
+	}
+}
+
+func TestPhase44OperatorStatusReconcilerProjectsLiveDeletingVolumeRelease(t *testing.T) {
+	observedAt := time.Date(2026, 6, 16, 10, 5, 0, 0, time.UTC)
+	source := fakeOperatorStatusSource{cluster: ClusterEvidence{
+		SchemaVersion: ObservationSchemaVersion,
+		CapturedAt:    observedAt,
+		Status:        ObservationStatusOK,
+		Cleanup: &CleanupEvidence{
+			Status:      ObservationStatusOK,
+			EvidenceRef: "cleanup-summary.txt",
+			ObservedAt:  observedAt,
+		},
+		ManagedVolumes: []ManagedVolumeProjection{{
+			VolumeID:   "pvc-clean",
+			PVCName:    "clean-pvc",
+			Status:     ManagedVolumeStatusReady,
+			ReasonCode: ReasonFirstVolumeVerified,
+		}},
+	}}
+	writer := &fakeOperatorStatusWriter{}
+	_, err := (OperatorStatusReconciler{
+		Namespace: "kube-system",
+		Source:    source,
+		Writer:    writer,
+		Volumes: fakeOperatorSwBlockVolumeSource{volumes: []SwBlockVolumeObject{{
+			Ref: OperatorObjectRef{
+				Namespace: "kube-system",
+				Name:      "clean-pvc",
+			},
+			Finalizers:        []string{"example.com/foreign", SwBlockVolumeFinalizerName},
+			DeletionTimestamp: &observedAt,
+			Spec:              SwBlockVolumeSpec{PVCName: "clean-pvc"},
+			Status: SwBlockVolumeCRDStatus{
+				VolumeID: "pvc-clean",
+				PVCName:  "clean-pvc",
+			},
+		}}},
+	}).Reconcile(context.Background())
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	got := writer.volumes[0].status
+	if got.DeleteSafety == nil ||
+		!got.DeleteSafety.FinalizerReleaseAllowed ||
+		got.DeleteSafety.Decision != ManagedVolumeActionDecisionAllowed ||
+		got.DeleteSafety.State != DeleteSafetyStateReleasable {
+		t.Fatalf("delete safety=%+v", got.DeleteSafety)
+	}
+	action := findCRDAction(got.AllowedActions, SwBlockVolumeDeleteActionReleaseFinalizer)
+	if action == nil || action.Decision != ManagedVolumeActionDecisionAllowed || action.MutationAllowed {
+		t.Fatalf("release action=%+v", action)
+	}
+}
+
 func TestPhase40D2VolumeStatusClearsStaleDeleteSafety(t *testing.T) {
 	status := SwBlockVolumeCRDStatus{
 		VolumeID:     "pvc-ready",
@@ -879,6 +998,14 @@ type fakeOperatorStatusSource struct {
 
 func (f fakeOperatorStatusSource) ClusterEvidence(context.Context) (ClusterEvidence, error) {
 	return f.cluster, nil
+}
+
+type fakeOperatorSwBlockVolumeSource struct {
+	volumes []SwBlockVolumeObject
+}
+
+func (f fakeOperatorSwBlockVolumeSource) ListSwBlockVolumes(context.Context, string) ([]SwBlockVolumeObject, error) {
+	return append([]SwBlockVolumeObject(nil), f.volumes...), nil
 }
 
 type fakeOperatorStatusWriter struct {

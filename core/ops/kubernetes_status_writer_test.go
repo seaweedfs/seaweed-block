@@ -249,6 +249,7 @@ func TestKubernetesStatusClientListsSwBlockVolumesForLifecycleOwner(t *testing.T
 		  "items": [
 		    {
 		      "metadata":{"name":"a","namespace":"kube-system","finalizers":["example.com/foreign"]},
+		      "spec":{"pvcName":"pvc-a","storageClass":"seaweed-block"},
 		      "status":{"status":"ready","deleteSafety":{"state":"releasable","decision":"allowed","finalizerReleaseAllowed":true}}
 		    },
 		    {"metadata":{"name":"b","deletionTimestamp":"` + deletingAt + `"}}
@@ -270,6 +271,9 @@ func TestKubernetesStatusClientListsSwBlockVolumesForLifecycleOwner(t *testing.T
 	if volumes[0].Ref.Name != "a" || volumes[0].Ref.Namespace != "kube-system" ||
 		!stringSliceContains(volumes[0].Finalizers, "example.com/foreign") {
 		t.Fatalf("volume a=%+v", volumes[0])
+	}
+	if volumes[0].Spec.PVCName != "pvc-a" || volumes[0].Spec.StorageClass != "seaweed-block" {
+		t.Fatalf("volume a spec=%+v", volumes[0].Spec)
 	}
 	if volumes[0].Status.DeleteSafety == nil || !volumes[0].Status.DeleteSafety.FinalizerReleaseAllowed {
 		t.Fatalf("volume a status=%+v", volumes[0].Status)

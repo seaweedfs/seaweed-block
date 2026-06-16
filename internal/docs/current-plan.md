@@ -1,6 +1,6 @@
 # Current Plan: Phase 44 - Delete Lifecycle Close Gate
 
-Status: open, 0% complete. Started on 2026-06-15.
+Status: open, D2 PASS; D3/D4 implementation ready for QA. Started on 2026-06-15.
 
 Branch: `phase41-lifecycle-owner-foundation`
 
@@ -107,6 +107,14 @@ Acceptance:
 
 Fail if unsafe evidence releases the finalizer.
 
+Implementation note:
+
+```text
+operator-status now lists live SwBlockVolume objects and projects deleteSafety
+for objects with deletionTimestamp. Cleanup remains external evidence: pass the
+verifier output with --cleanup-summary; operator-status reads it, never runs it.
+```
+
 ## D4: Clean Evidence Releases And Deletion Completes
 
 Goal: clean, fresh evidence releases only the Seaweed Block finalizer.
@@ -173,14 +181,22 @@ Phase 44 can close only if:
 
 ## Current Progress
 
-- D2 implementation started: normal CSI CreateVolume now registers the
+- D2 implementation landed in `e56b844`: normal CSI CreateVolume registers the
   SwBlockVolume identity CR when operator-status or lifecycle-owner surfaces
   are enabled.
-- Local checks pass for the D2 implementation:
+- D2 QA PASS:
+  `internal/docs/qa-assignments/phase44-d2-integrated-swblockvolume-cr-qa-signoff.md`.
+- D3/D4 implementation added: operator-status consumes live deleting
+  SwBlockVolume objects plus externally generated `cleanup-summary.txt`
+  evidence to publish deleteSafety hold/release status. It still does not patch
+  finalizers, run cleanup, or mutate PVC/PV/workloads/storage.
+- Local checks pass:
   `go test ./core/csi ./cmd/blockcsi`, `go test ./core/ops ./cmd/sw-block`,
   and `helm lint charts/seaweed-block`.
 - D2 QA assignment prepared:
   `internal/docs/qa-assignments/phase44-d2-integrated-swblockvolume-cr-qa.md`.
+- D3/D4 QA assignment prepared:
+  `internal/docs/qa-assignments/phase44-d3-d4-delete-lifecycle-close-gate-qa.md`.
 - Phase 43 already proved add and release as separate live gates.
 - Phase 44 must prove the integrated path and release wording.
 
@@ -196,8 +212,8 @@ Phase 44 can close only if:
 
 ## Next Step
 
-Build or publish a candidate image from the current branch, then author/run the
-D1-D4 integrated live scenario:
+Build fresh `sw-block` and `sw-block-csi` candidate images from this branch, then
+run the D3/D4 integrated live scenario:
 
 ```text
 install with operatorStatus + lifecycleOwner
@@ -205,6 +221,6 @@ create first PVC
 observe protection finalizer
 request delete
 prove hold under unsafe evidence
-patch/provide clean delete-safety evidence
+provide clean delete-safety evidence via --cleanup-summary
 prove finalizer release and object deletion
 ```
