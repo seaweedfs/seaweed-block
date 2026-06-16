@@ -79,6 +79,14 @@ type VolumeProvisioner interface {
 	DeleteVolume(ctx context.Context, volumeID string) error
 }
 
+// VolumeObjectRegistrar creates the Kubernetes-facing SwBlockVolume identity
+// object after CSI provisioning succeeds. It owns metadata/spec identity only;
+// status remains operator-status owned and finalizers remain lifecycle-owner
+// owned.
+type VolumeObjectRegistrar interface {
+	EnsureVolumeObject(ctx context.Context, spec VolumeSpec) error
+}
+
 type KubernetesMetadataResolver interface {
 	ResolvePVCUID(ctx context.Context, name, namespace string) (string, error)
 }
@@ -92,6 +100,7 @@ type VolumeSpec struct {
 	PVCNamespace      string
 	PVCUID            string
 	PVName            string
+	StorageClass      string
 }
 
 func publishContext(t PublishTarget) map[string]string {

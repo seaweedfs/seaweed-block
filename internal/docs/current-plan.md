@@ -71,6 +71,14 @@ Fail if the chart references a subcommand or flag absent from the image.
 Goal: a normal Day-1 PVC path creates an observable, protected
 `SwBlockVolume`.
 
+Ownership boundary:
+
+```text
+CSI controller creates/updates SwBlockVolume metadata/spec identity after
+CreateVolume succeeds. operator-status writes only .status. lifecycle-owner
+patches only metadata.finalizers.
+```
+
 Acceptance:
 
 ```text
@@ -165,13 +173,22 @@ Phase 44 can close only if:
 
 ## Current Progress
 
-- 0%: Phase 44 opened from Phase 43.
+- D2 implementation started: normal CSI CreateVolume now registers the
+  SwBlockVolume identity CR when operator-status or lifecycle-owner surfaces
+  are enabled.
+- Local checks pass for the D2 implementation:
+  `go test ./core/csi ./cmd/blockcsi`, `go test ./core/ops ./cmd/sw-block`,
+  and `helm lint charts/seaweed-block`.
+- D2 QA assignment prepared:
+  `internal/docs/qa-assignments/phase44-d2-integrated-swblockvolume-cr-qa.md`.
 - Phase 43 already proved add and release as separate live gates.
 - Phase 44 must prove the integrated path and release wording.
 
 ## Prerequisites / Risks
 
 - Use a candidate image that includes `sw-block ops lifecycle-owner`.
+- Use a candidate CSI image that includes `blockcsi --swblockvolume-cr-namespace`;
+  older CSI images will not support D2 integrated CR creation.
 - Use a VAP-capable lab; Rancher Desktop without VAP is not sufficient.
 - Be careful with deleting CRs that have finalizers; every failed gate must
   include admin cleanup instructions.

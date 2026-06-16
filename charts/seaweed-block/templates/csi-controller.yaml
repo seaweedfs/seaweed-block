@@ -29,6 +29,9 @@ spec:
             {{- if .Values.blockmaster.launcherPVCOwnerRef }}
             - "--kubernetes-pvc-uid-lookup"
             {{- end }}
+            {{- if or .Values.operatorStatus.create .Values.lifecycleOwner.create }}
+            - "--swblockvolume-cr-namespace={{ .Release.Namespace }}"
+            {{- end }}
             {{- if .Values.stage2Multipath.enabled }}
             - "--stage2-multipath"
             {{- end }}

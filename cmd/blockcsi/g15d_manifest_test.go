@@ -46,6 +46,31 @@ func TestAlphaK8sCSIController_IncludesCreateMetadata(t *testing.T) {
 	}
 }
 
+func TestPhase44HelmCSIController_RegistersSwBlockVolumeWhenOperatorSurfacesEnabled(t *testing.T) {
+	controller := g15dReadFile(t, "charts", "seaweed-block", "templates", "csi-controller.yaml")
+	for _, want := range []string{
+		"or .Values.operatorStatus.create .Values.lifecycleOwner.create",
+		`"--swblockvolume-cr-namespace={{ .Release.Namespace }}"`,
+	} {
+		if !strings.Contains(controller, want) {
+			t.Fatalf("csi-controller template missing %q:\n%s", want, controller)
+		}
+	}
+	rbac := g15dReadFile(t, "charts", "seaweed-block", "templates", "rbac.yaml")
+	for _, want := range []string{
+		`apiGroups: ["block.seaweedfs.com"]`,
+		`resources: ["swblockvolumes"]`,
+		`verbs: ["get", "list", "watch", "create", "update", "patch"]`,
+	} {
+		if !strings.Contains(rbac, want) {
+			t.Fatalf("csi RBAC template missing %q:\n%s", want, rbac)
+		}
+	}
+	if strings.Contains(rbac, `resources: ["swblockvolumes/status"]`) || strings.Contains(rbac, `resources: ["swblockvolumes/finalizers"]`) {
+		t.Fatalf("CSI controller must not receive SwBlockVolume status/finalizer ownership:\n%s", rbac)
+	}
+}
+
 func TestG15d_K8sDynamicPVC_UsesStorageClassNoPrecreatedPV(t *testing.T) {
 	body := g15dReadFile(t, "deploy", "k8s", "g15d", "dynamic-pvc-pod.yaml")
 	for _, want := range []string{
