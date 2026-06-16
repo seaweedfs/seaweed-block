@@ -3,6 +3,7 @@ package ops
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -960,6 +961,43 @@ func TestPhase44OperatorStatusReconcilerProjectsLiveDeletingVolumeRelease(t *tes
 	}
 }
 
+func TestPhase44OperatorStatusReconcilerSkipsDeletedCRDuringStatusPatch(t *testing.T) {
+	source := fakeOperatorStatusSource{cluster: ClusterEvidence{
+		SchemaVersion: ObservationSchemaVersion,
+		CapturedAt:    time.Date(2026, 6, 16, 10, 15, 0, 0, time.UTC),
+		Status:        ObservationStatusOK,
+		ManagedVolumes: []ManagedVolumeProjection{
+			{
+				VolumeID:   "pvc-gone",
+				PVCName:    "gone-pvc",
+				Status:     ManagedVolumeStatusReady,
+				ReasonCode: ReasonFirstVolumeVerified,
+			},
+			{
+				VolumeID:   "pvc-live",
+				PVCName:    "live-pvc",
+				Status:     ManagedVolumeStatusReady,
+				ReasonCode: ReasonFirstVolumeVerified,
+			},
+		},
+	}}
+	writer := &notFoundOnceOperatorStatusWriter{missingName: "gone-pvc"}
+	result, err := (OperatorStatusReconciler{
+		Namespace: "kube-system",
+		Source:    source,
+		Writer:    writer,
+	}).Reconcile(context.Background())
+	if err != nil {
+		t.Fatalf("404 on deleted volume CR must not abort reconcile: %v", err)
+	}
+	if len(result.VolumeRefs) != 1 || result.VolumeRefs[0].Name != "live-pvc" {
+		t.Fatalf("volume refs=%+v", result.VolumeRefs)
+	}
+	if len(writer.volumes) != 1 || writer.volumes[0].ref.Name != "live-pvc" {
+		t.Fatalf("written volumes=%+v", writer.volumes)
+	}
+}
+
 func TestPhase40D2VolumeStatusClearsStaleDeleteSafety(t *testing.T) {
 	status := SwBlockVolumeCRDStatus{
 		VolumeID:     "pvc-ready",
@@ -1028,6 +1066,18 @@ func (f *fakeOperatorStatusWriter) WriteClusterStatus(_ context.Context, _ Opera
 func (f *fakeOperatorStatusWriter) WriteVolumeStatus(_ context.Context, ref OperatorObjectRef, status SwBlockVolumeCRDStatus) error {
 	f.volumes = append(f.volumes, OperatorStatusWriterVolumeRecord{ref: ref, status: status})
 	return nil
+}
+
+type notFoundOnceOperatorStatusWriter struct {
+	fakeOperatorStatusWriter
+	missingName string
+}
+
+func (f *notFoundOnceOperatorStatusWriter) WriteVolumeStatus(ctx context.Context, ref OperatorObjectRef, status SwBlockVolumeCRDStatus) error {
+	if ref.Name == f.missingName {
+		return fmt.Errorf("patch swblockvolumes/%s status failed: http 404 not found", ref.Name)
+	}
+	return f.fakeOperatorStatusWriter.WriteVolumeStatus(ctx, ref, status)
 }
 
 type fakeOperatorEventSink struct {

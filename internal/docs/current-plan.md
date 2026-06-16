@@ -1,6 +1,6 @@
 # Current Plan: Phase 44 - Delete Lifecycle Close Gate
 
-Status: open, D2 PASS; D3/D4 implementation ready for QA. Started on 2026-06-15.
+Status: open, D2-D4 PASS; D5/D6 release-close checks remain. Started on 2026-06-15.
 
 Branch: `phase41-lifecycle-owner-foundation`
 
@@ -186,10 +186,15 @@ Phase 44 can close only if:
   are enabled.
 - D2 QA PASS:
   `internal/docs/qa-assignments/phase44-d2-integrated-swblockvolume-cr-qa-signoff.md`.
-- D3/D4 implementation added: operator-status consumes live deleting
+- D3/D4 implementation added in `8669d4a`: operator-status consumes live deleting
   SwBlockVolume objects plus externally generated `cleanup-summary.txt`
   evidence to publish deleteSafety hold/release status. It still does not patch
   finalizers, run cleanup, or mutate PVC/PV/workloads/storage.
+- D3/D4 QA PASS:
+  `internal/docs/qa-assignments/phase44-d3-d4-delete-lifecycle-close-gate-qa-signoff.md`.
+- D3/D4 polish added after QA: report/explain/dashboard can consume
+  `--cleanup-summary` in live in-cluster mode, and operator-status skips a
+  disappeared SwBlockVolume CR instead of aborting the whole reconcile.
 - Local checks pass:
   `go test ./core/csi ./cmd/blockcsi`, `go test ./core/ops ./cmd/sw-block`,
   and `helm lint charts/seaweed-block`.
@@ -212,15 +217,11 @@ Phase 44 can close only if:
 
 ## Next Step
 
-Build fresh `sw-block` and `sw-block-csi` candidate images from this branch, then
-run the D3/D4 integrated live scenario:
+Run the remaining D5/D6 release-close checks with fresh images from this branch:
 
 ```text
 install with operatorStatus + lifecycleOwner
-create first PVC
-observe protection finalizer
-request delete
-prove hold under unsafe evidence
-provide clean delete-safety evidence via --cleanup-summary
-prove finalizer release and object deletion
+prove report/explain/dashboard consume cleanup-summary consistently
+run multi-volume isolation smoke for held/releasable/ready volumes
+verify final cleanup remains zero-residue
 ```

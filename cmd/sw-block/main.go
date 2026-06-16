@@ -480,6 +480,7 @@ func loadObservationCluster(command string, args []string, stderr io.Writer) (op
 	fs.SetOutput(stderr)
 	var (
 		fromBundle       string
+		cleanupSummary   string
 		namespace        string
 		masterAddr       string
 		masterAPIAddr    string
@@ -491,6 +492,7 @@ func loadObservationCluster(command string, args []string, stderr io.Writer) (op
 		timeout          time.Duration
 	)
 	fs.StringVar(&fromBundle, "from-bundle", "", "existing inventory/support bundle directory to explain")
+	fs.StringVar(&cleanupSummary, "cleanup-summary", "", "cleanup-summary.txt evidence to project into delete-safety status")
 	fs.StringVar(&namespace, "namespace", "default", "Kubernetes namespace for live read-only inventory")
 	fs.StringVar(&masterAddr, "master", "", "optional blockmaster gRPC address for live per-replica status evidence")
 	fs.StringVar(&masterAPIAddr, "master-api", "", "optional blockmaster gRPC address for ClusterEvidenceService read-only snapshot")
@@ -546,6 +548,11 @@ func loadObservationCluster(command string, args []string, stderr io.Writer) (op
 		fmt.Fprintf(stderr, "%s: %v\n", command, err)
 		return ops.ClusterEvidence{}, "", ops.VolumeStatusExitInvalid
 	}
+	cluster, err = applyCleanupSummaryProjection(namespace, cleanupSummary, cluster)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: %v\n", command, err)
+		return ops.ClusterEvidence{}, "", ops.VolumeStatusExitInvalid
+	}
 	cluster, err = enrichLiveObservationCluster(namespace, timeout, fromBundle == "", cluster)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", command, err)
@@ -569,6 +576,35 @@ func enrichLiveObservationCluster(namespace string, timeout time.Duration, live 
 		return cluster, fmt.Errorf("enrich node evidence: %w", err)
 	}
 	return cluster, nil
+}
+
+func applyCleanupSummaryProjection(namespace, cleanupSummary string, cluster ops.ClusterEvidence) (ops.ClusterEvidence, error) {
+	if cleanupSummary == "" {
+		return cluster, nil
+	}
+	cleanup, err := ops.LoadCleanupEvidenceSummary(cleanupSummary)
+	if err != nil {
+		return ops.ClusterEvidence{}, err
+	}
+	cluster.Cleanup = cleanup
+	if os.Getenv("KUBERNETES_SERVICE_HOST") == "" {
+		return cluster, nil
+	}
+	client, err := ops.NewInClusterKubernetesStatusClient()
+	if err != nil {
+		return ops.ClusterEvidence{}, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	listNamespace := strings.TrimSpace(namespace)
+	if listNamespace == "" {
+		listNamespace = "default"
+	}
+	volumes, err := client.ListSwBlockVolumes(ctx, listNamespace)
+	if err != nil {
+		return ops.ClusterEvidence{}, err
+	}
+	return ops.ProjectSwBlockVolumeDeleteSafety(cluster, volumes), nil
 }
 
 func liveNodeEvidenceNamespace(namespace string) string {
@@ -790,6 +826,7 @@ func runOpsReport(args []string, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	var (
 		fromBundle       string
+		cleanupSummary   string
 		namespace        string
 		masterAddr       string
 		masterAPIAddr    string
@@ -801,6 +838,7 @@ func runOpsReport(args []string, stdout, stderr io.Writer) int {
 		timeout          time.Duration
 	)
 	fs.StringVar(&fromBundle, "from-bundle", "", "existing inventory/support bundle directory to render")
+	fs.StringVar(&cleanupSummary, "cleanup-summary", "", "cleanup-summary.txt evidence to project into delete-safety status")
 	fs.StringVar(&namespace, "namespace", "default", "Kubernetes namespace for live read-only inventory")
 	fs.StringVar(&masterAddr, "master", "", "optional blockmaster gRPC address for live per-replica status evidence")
 	fs.StringVar(&masterAPIAddr, "master-api", "", "optional blockmaster gRPC address for ClusterEvidenceService read-only snapshot")
@@ -862,6 +900,11 @@ func runOpsReport(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "sw-block ops report: %v\n", err)
 		return ops.VolumeStatusExitInvalid
 	}
+	cluster, err = applyCleanupSummaryProjection(namespace, cleanupSummary, cluster)
+	if err != nil {
+		fmt.Fprintf(stderr, "sw-block ops report: %v\n", err)
+		return ops.VolumeStatusExitInvalid
+	}
 	cluster, err = enrichLiveObservationCluster(namespace, timeout, fromBundle == "", cluster)
 	if err != nil {
 		fmt.Fprintf(stderr, "sw-block ops report: %v\n", err)
@@ -887,6 +930,7 @@ func runOpsDashboard(args []string, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	var (
 		fromBundle       string
+		cleanupSummary   string
 		namespace        string
 		masterAddr       string
 		masterAPIAddr    string
@@ -899,6 +943,7 @@ func runOpsDashboard(args []string, stdout, stderr io.Writer) int {
 		serveDuration    time.Duration
 	)
 	fs.StringVar(&fromBundle, "from-bundle", "", "existing inventory/support bundle directory to serve")
+	fs.StringVar(&cleanupSummary, "cleanup-summary", "", "cleanup-summary.txt evidence to project into delete-safety status")
 	fs.StringVar(&namespace, "namespace", "default", "Kubernetes namespace for live read-only inventory")
 	fs.StringVar(&masterAddr, "master", "", "optional blockmaster gRPC address for live per-replica status evidence")
 	fs.StringVar(&masterAPIAddr, "master-api", "", "optional blockmaster gRPC address for ClusterEvidenceService read-only snapshot")
@@ -919,6 +964,7 @@ func runOpsDashboard(args []string, stdout, stderr io.Writer) int {
 
 	cluster, err := loadDashboardCluster(dashboardClusterOptions{
 		FromBundle:        fromBundle,
+		CleanupSummary:    cleanupSummary,
 		Namespace:         namespace,
 		MasterAddr:        masterAddr,
 		MasterAPIAddr:     masterAPIAddr,
@@ -990,6 +1036,7 @@ func runOpsDashboard(args []string, stdout, stderr io.Writer) int {
 
 type dashboardClusterOptions struct {
 	FromBundle        string
+	CleanupSummary    string
 	Namespace         string
 	MasterAddr        string
 	MasterAPIAddr     string
@@ -1040,6 +1087,10 @@ func loadDashboardCluster(options dashboardClusterOptions) (ops.ClusterEvidence,
 		cluster, err = ops.BuildObservationFromInventory(inventory, "", options.EvidenceOutDir)
 		live = true
 	}
+	if err != nil {
+		return ops.ClusterEvidence{}, err
+	}
+	cluster, err = applyCleanupSummaryProjection(options.Namespace, options.CleanupSummary, cluster)
 	if err != nil {
 		return ops.ClusterEvidence{}, err
 	}
@@ -1422,6 +1473,7 @@ func loadObservationVolume(command string, args []string, stderr io.Writer) (ops
 	fs.SetOutput(stderr)
 	var (
 		fromBundle       string
+		cleanupSummary   string
 		namespace        string
 		masterAddr       string
 		out              string
@@ -1432,6 +1484,7 @@ func loadObservationVolume(command string, args []string, stderr io.Writer) (ops
 		timeout          time.Duration
 	)
 	fs.StringVar(&fromBundle, "from-bundle", "", "existing inventory/support bundle directory to explain")
+	fs.StringVar(&cleanupSummary, "cleanup-summary", "", "cleanup-summary.txt evidence to project into delete-safety status")
 	fs.StringVar(&namespace, "namespace", "default", "Kubernetes namespace for live read-only inventory")
 	fs.StringVar(&masterAddr, "master", "", "optional blockmaster gRPC address for live per-replica status evidence")
 	fs.StringVar(&out, "o", "text", "output format: text, json, or jsonl where supported")
@@ -1487,6 +1540,11 @@ func loadObservationVolume(command string, args []string, stderr io.Writer) (ops
 		fmt.Fprintf(stderr, "%s: %v\n", command, err)
 		return ops.ClusterEvidence{}, "", ops.VolumeStatusExitInvalid
 	}
+	cluster, err = applyCleanupSummaryProjection(namespace, cleanupSummary, cluster)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: %v\n", command, err)
+		return ops.ClusterEvidence{}, "", ops.VolumeStatusExitInvalid
+	}
 	cluster, err = enrichLiveObservationCluster(namespace, timeout, fromBundle == "", cluster)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", command, err)
@@ -1498,6 +1556,7 @@ func loadObservationVolume(command string, args []string, stderr io.Writer) (ops
 func normalizeObservationVolumeArgs(args []string) []string {
 	valueFlags := map[string]bool{
 		"--from-bundle":       true,
+		"--cleanup-summary":   true,
 		"--namespace":         true,
 		"--master":            true,
 		"--out":               true,

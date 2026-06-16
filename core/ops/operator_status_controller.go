@@ -341,10 +341,11 @@ func (r OperatorStatusReconciler) Reconcile(ctx context.Context) (OperatorStatus
 	cluster = NormalizeObservationCluster(cluster)
 	namespace := defaultString(r.Namespace, "default")
 	if r.Volumes != nil {
-		if err := r.applyLiveDeleteSafety(ctx, namespace, &cluster); err != nil {
+		volumes, err := r.Volumes.ListSwBlockVolumes(ctx, namespace)
+		if err != nil {
 			return OperatorStatusReconcileResult{}, err
 		}
-		cluster = NormalizeObservationCluster(cluster)
+		cluster = ProjectSwBlockVolumeDeleteSafety(cluster, volumes)
 	}
 	snapshot := BuildOperatorFoundationSnapshot(cluster)
 	observedAt := cluster.CapturedAt
@@ -404,6 +405,9 @@ func (r OperatorStatusReconciler) Reconcile(ctx context.Context) (OperatorStatus
 			AllowedActions: swBlockVolumeCRDActions(volume.AllowedActions),
 		}
 		if err := r.Writer.WriteVolumeStatus(ctx, volumeRef, volumeStatus); err != nil {
+			if IsKubernetesStatusNotFound(err) {
+				continue
+			}
 			return OperatorStatusReconcileResult{}, err
 		}
 		result.VolumeRefs = append(result.VolumeRefs, volumeRef)
@@ -426,18 +430,15 @@ func (r OperatorStatusReconciler) Reconcile(ctx context.Context) (OperatorStatus
 	return result, nil
 }
 
-func (r OperatorStatusReconciler) applyLiveDeleteSafety(ctx context.Context, namespace string, cluster *ClusterEvidence) error {
-	volumes, err := r.Volumes.ListSwBlockVolumes(ctx, namespace)
-	if err != nil {
-		return err
-	}
+func ProjectSwBlockVolumeDeleteSafety(cluster ClusterEvidence, volumes []SwBlockVolumeObject) ClusterEvidence {
+	cluster = NormalizeObservationCluster(cluster)
 	for _, volume := range volumes {
 		if volume.DeletionTimestamp == nil {
 			continue
 		}
 		volumeID := volume.Status.VolumeID
 		pvcName := firstNonEmpty(volume.Status.PVCName, volume.Spec.PVCName, volume.Ref.Name)
-		applyDeleteSafetyFacts(cluster, deleteSafetyProjectionFacts{
+		applyDeleteSafetyFacts(&cluster, deleteSafetyProjectionFacts{
 			VolumeID:         volumeID,
 			PVCName:          pvcName,
 			DeleteRequested:  true,
@@ -445,7 +446,7 @@ func (r OperatorStatusReconciler) applyLiveDeleteSafety(ctx context.Context, nam
 			EvidencePath:     "swblockvolume/" + volume.Ref.Namespace + "/" + volume.Ref.Name,
 		})
 	}
-	return nil
+	return NormalizeObservationCluster(cluster)
 }
 
 func swBlockVolumeCRDDeleteSafety(decision *SwBlockVolumeDeleteSafetyDecision) *SwBlockVolumeCRDDeleteSafety {

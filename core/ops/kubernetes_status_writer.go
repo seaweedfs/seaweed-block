@@ -69,6 +69,10 @@ func (c *KubernetesStatusClient) WriteVolumeStatus(ctx context.Context, ref Oper
 	return c.patchStatus(ctx, ref.Namespace, SwBlockVolumePlural, ref.Name, status)
 }
 
+func IsKubernetesStatusNotFound(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "http 404")
+}
+
 func (c *KubernetesStatusClient) ListSwBlockVolumes(ctx context.Context, namespace string) ([]SwBlockVolumeObject, error) {
 	if namespace == "" {
 		return nil, fmt.Errorf("namespace is required for SwBlockVolume list")
