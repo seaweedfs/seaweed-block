@@ -15,6 +15,7 @@ type SwBlockVolumeObject struct {
 	Ref               OperatorObjectRef `json:"ref"`
 	Finalizers        []string          `json:"finalizers,omitempty"`
 	DeletionTimestamp *time.Time        `json:"deletionTimestamp,omitempty"`
+	Status            SwBlockVolumeCRDStatus
 }
 
 type LifecycleOwnerReconciler struct {
@@ -26,10 +27,12 @@ type LifecycleOwnerReconciler struct {
 }
 
 type LifecycleOwnerReconcileResult struct {
-	VolumeCount         int `json:"volumeCount"`
-	FinalizerPatchCount int `json:"finalizerPatchCount"`
-	FinalizerAddedCount int `json:"finalizerAddedCount"`
-	EventCount          int `json:"eventCount"`
+	VolumeCount            int `json:"volumeCount"`
+	FinalizerPatchCount    int `json:"finalizerPatchCount"`
+	FinalizerAddedCount    int `json:"finalizerAddedCount"`
+	FinalizerHeldCount     int `json:"finalizerHeldCount"`
+	FinalizerReleasedCount int `json:"finalizerReleasedCount"`
+	EventCount             int `json:"eventCount"`
 }
 
 func (r LifecycleOwnerReconciler) Reconcile(ctx context.Context) (LifecycleOwnerReconcileResult, error) {
@@ -43,7 +46,52 @@ func (r LifecycleOwnerReconciler) Reconcile(ctx context.Context) (LifecycleOwner
 	}
 	result := LifecycleOwnerReconcileResult{VolumeCount: len(volumes)}
 	for _, volume := range volumes {
-		if volume.DeletionTimestamp != nil || lifecycleOwnerStringSliceContains(volume.Finalizers, SwBlockVolumeFinalizerName) {
+		hasFinalizer := lifecycleOwnerStringSliceContains(volume.Finalizers, SwBlockVolumeFinalizerName)
+		if volume.DeletionTimestamp != nil {
+			if !hasFinalizer {
+				continue
+			}
+			decision := volume.Status.DeleteSafety
+			if lifecycleOwnerReleaseAllowed(decision) {
+				next := lifecycleOwnerRemoveString(volume.Finalizers, SwBlockVolumeFinalizerName)
+				if !r.DryRun {
+					if err := r.Client.PatchSwBlockVolumeFinalizers(ctx, volume.Ref, next); err != nil {
+						return LifecycleOwnerReconcileResult{}, err
+					}
+					result.FinalizerPatchCount++
+				}
+				result.FinalizerReleasedCount++
+				if r.EventSink != nil && !r.DryRun {
+					if err := r.EventSink.EmitEvent(ctx, OperatorKubernetesEvent{
+						InvolvedObject: volume.Ref,
+						Type:           "Normal",
+						Reason:         ReasonDeleteFinalizerReleased,
+						Message:        "Seaweed Block protection finalizer released after clean delete-safety evidence",
+						EvidenceRefs:   append([]string(nil), decision.EvidenceRefs...),
+						ObservedAt:     r.now()(),
+					}); err == nil {
+						result.EventCount++
+					}
+				}
+				continue
+			}
+			result.FinalizerHeldCount++
+			if r.EventSink != nil && !r.DryRun {
+				holdReason, evidenceRefs := lifecycleOwnerHoldReason(decision)
+				if err := r.EventSink.EmitEvent(ctx, OperatorKubernetesEvent{
+					InvolvedObject: volume.Ref,
+					Type:           "Warning",
+					Reason:         holdReason,
+					Message:        "Seaweed Block protection finalizer held until delete-safety evidence allows release",
+					EvidenceRefs:   evidenceRefs,
+					ObservedAt:     r.now()(),
+				}); err == nil {
+					result.EventCount++
+				}
+			}
+			continue
+		}
+		if hasFinalizer {
 			continue
 		}
 		next := append([]string(nil), volume.Finalizers...)
@@ -71,6 +119,20 @@ func (r LifecycleOwnerReconciler) Reconcile(ctx context.Context) (LifecycleOwner
 	return result, nil
 }
 
+func lifecycleOwnerReleaseAllowed(decision *SwBlockVolumeCRDDeleteSafety) bool {
+	return decision != nil &&
+		decision.FinalizerReleaseAllowed &&
+		decision.Decision == ManagedVolumeActionDecisionAllowed &&
+		decision.State == DeleteSafetyStateReleasable
+}
+
+func lifecycleOwnerHoldReason(decision *SwBlockVolumeCRDDeleteSafety) (string, []string) {
+	if decision == nil || decision.Reason == "" {
+		return ReasonCleanupEvidenceMissing, nil
+	}
+	return decision.Reason, append([]string(nil), decision.EvidenceRefs...)
+}
+
 func (r LifecycleOwnerReconciler) now() func() time.Time {
 	if r.Now != nil {
 		return r.Now
@@ -85,4 +147,14 @@ func lifecycleOwnerStringSliceContains(values []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func lifecycleOwnerRemoveString(values []string, remove string) []string {
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		if value != remove {
+			out = append(out, value)
+		}
+	}
+	return out
 }

@@ -1,7 +1,7 @@
 # Current Plan: Phase 43 - First Bounded Finalizer Mutation
 
-Status: open, D1/D2 implemented locally; live QA pending. Started on
-2026-06-15.
+Status: open, D1/D2 live QA PASS; D3/D4 implemented locally and awaiting live
+QA. Started on 2026-06-15.
 
 Branch: `phase41-lifecycle-owner-foundation`
 
@@ -177,15 +177,20 @@ Phase 43 can close only if:
 
 ## Current Progress
 
-- D1/D2 local implementation complete:
+- D1/D2 live QA PASS:
   - `sw-block ops lifecycle-owner` command added.
   - separate Helm lifecycle-owner Deployment/RBAC added, disabled by default.
   - lifecycle-owner admission policy added for finalizer-only patch shape.
   - Kubernetes client can list `SwBlockVolume` objects and patch only
     `metadata.finalizers`.
-  - local tests and Helm lint/render pass.
-- Live QA still must validate the real VAP/RBAC boundary and idempotent
-  finalizer add before D1/D2 can close.
+  - live VAP/RBAC boundary and idempotent finalizer add validated in
+    `internal/docs/qa-assignments/phase43-d1-d2-lifecycle-owner-finalizer-add-qa-signoff.md`.
+- D3/D4 local implementation complete:
+  - lifecycle-owner holds deleting volumes when `status.deleteSafety` is absent,
+    blocked, or unknown/stale.
+  - lifecycle-owner removes only the Seaweed Block protection finalizer when
+    `status.deleteSafety` is releasable and allowed.
+  - local tests pass; live QA pending.
 
 ## Prerequisites / Risks
 
@@ -200,14 +205,11 @@ Phase 43 can close only if:
 
 ## Next Step
 
-Implement D1/D2 as the smallest product slice:
+Run D3/D4 live QA:
 
 ```text
-lifecycle-owner identity exists
+blocked/missing/stale delete-safety holds finalizer
+clean/fresh delete-safety releases only Seaweed Block finalizer
 operator-status remains status/events-only
-owned SwBlockVolume gets the protection finalizer
-reconcile is idempotent
-Phase 42 forbidden-patch matrix still passes
+lifecycle-owner keeps no cleanup/PVC/PV/workload/storage mutation power
 ```
-
-QA assignment should be written before or with the D1/D2 implementation.

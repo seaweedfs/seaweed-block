@@ -433,6 +433,56 @@ func TestOpsLifecycleOwnerWritesProtectionFinalizer(t *testing.T) {
 	}
 }
 
+func TestOpsLifecycleOwnerReleasesProtectionFinalizerWhenDeleteSafetyAllows(t *testing.T) {
+	deletingAt := time.Date(2026, 6, 15, 2, 0, 0, 0, time.UTC)
+	client := &lifecycleOwnerTestClient{
+		volumes: []ops.SwBlockVolumeObject{{
+			Ref: ops.OperatorObjectRef{
+				APIVersion: ops.SwBlockVolumeAPIVersion,
+				Kind:       ops.SwBlockVolumeKind,
+				Namespace:  "kube-system",
+				Name:       "demo-volume",
+			},
+			Finalizers:        []string{"example.com/foreign", ops.SwBlockVolumeFinalizerName},
+			DeletionTimestamp: &deletingAt,
+			Status: ops.SwBlockVolumeCRDStatus{DeleteSafety: &ops.SwBlockVolumeCRDDeleteSafety{
+				Decision:                ops.ManagedVolumeActionDecisionAllowed,
+				State:                   ops.DeleteSafetyStateReleasable,
+				Reason:                  ops.ReasonDeleteFinalizerReleasable,
+				FinalizerReleaseAllowed: true,
+			}},
+		}},
+	}
+	oldFactory := opsLifecycleOwnerClientFactory
+	opsLifecycleOwnerClientFactory = func() (ops.LifecycleOwnerClient, ops.OperatorEventSink, error) {
+		return client, client, nil
+	}
+	t.Cleanup(func() { opsLifecycleOwnerClientFactory = oldFactory })
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ops", "lifecycle-owner", "--namespace", "kube-system"}, &stdout, &stderr)
+	if code != ops.VolumeStatusExitOK {
+		t.Fatalf("exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	if len(client.patches) != 1 {
+		t.Fatalf("patches=%+v", client.patches)
+	}
+	if got, want := fmt.Sprint(client.patches[0].finalizers), fmt.Sprint([]string{"example.com/foreign"}); got != want {
+		t.Fatalf("finalizers=%s want %s", got, want)
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"finalizer_patches=1",
+		"finalizer_released=1",
+		"events=1",
+		"mutation_allowed=true",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("stdout missing %q:\n%s", want, out)
+		}
+	}
+}
+
 func TestOpsClusterMasterAPIUsesSharedInClusterNodeEvidenceEnrichment(t *testing.T) {
 	masterAddr, closeMaster := startCmdFakeMaster(t)
 	defer closeMaster()

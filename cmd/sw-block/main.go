@@ -137,12 +137,14 @@ func runOpsLifecycleOwner(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintf(stderr, "sw-block ops lifecycle-owner: %v\n", err)
 			return ops.VolumeStatusExitInvalid
 		}
-		fmt.Fprintf(stdout, "lifecycle_owner=%s namespace=%s volumes=%d finalizer_patches=%d finalizer_added=%d events=%d mutation_allowed=%t\n",
+		fmt.Fprintf(stdout, "lifecycle_owner=%s namespace=%s volumes=%d finalizer_patches=%d finalizer_added=%d finalizer_held=%d finalizer_released=%d events=%d mutation_allowed=%t\n",
 			mode,
 			namespace,
 			result.VolumeCount,
 			result.FinalizerPatchCount,
 			result.FinalizerAddedCount,
+			result.FinalizerHeldCount,
+			result.FinalizerReleasedCount,
 			result.EventCount,
 			!dryRun)
 		return ops.VolumeStatusExitOK

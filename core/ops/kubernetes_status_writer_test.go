@@ -247,7 +247,10 @@ func TestKubernetesStatusClientListsSwBlockVolumesForLifecycleOwner(t *testing.T
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{
 		  "items": [
-		    {"metadata":{"name":"a","namespace":"kube-system","finalizers":["example.com/foreign"]}},
+		    {
+		      "metadata":{"name":"a","namespace":"kube-system","finalizers":["example.com/foreign"]},
+		      "status":{"status":"ready","deleteSafety":{"state":"releasable","decision":"allowed","finalizerReleaseAllowed":true}}
+		    },
 		    {"metadata":{"name":"b","deletionTimestamp":"` + deletingAt + `"}}
 		  ]
 		}`))
@@ -267,6 +270,9 @@ func TestKubernetesStatusClientListsSwBlockVolumesForLifecycleOwner(t *testing.T
 	if volumes[0].Ref.Name != "a" || volumes[0].Ref.Namespace != "kube-system" ||
 		!stringSliceContains(volumes[0].Finalizers, "example.com/foreign") {
 		t.Fatalf("volume a=%+v", volumes[0])
+	}
+	if volumes[0].Status.DeleteSafety == nil || !volumes[0].Status.DeleteSafety.FinalizerReleaseAllowed {
+		t.Fatalf("volume a status=%+v", volumes[0].Status)
 	}
 	if volumes[1].Ref.Name != "b" || volumes[1].Ref.Namespace != "kube-system" || volumes[1].DeletionTimestamp == nil {
 		t.Fatalf("volume b=%+v", volumes[1])
