@@ -23,13 +23,15 @@ const (
 	serviceAccountCAPath    = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
 )
 
-// KubernetesStatusClient patches CRD status and emits Kubernetes Events. It
-// deliberately has no methods for spec, finalizers, workload, PVC/PV, Secret,
+// KubernetesStatusClient patches CRD status, emits Kubernetes Events, and
+// supports the lifecycle owner's narrowly admitted SwBlockVolume finalizer
+// patch. It deliberately has no methods for spec, workload, PVC/PV, Secret,
 // StorageClass, or host mutation.
 type KubernetesStatusClient struct {
-	BaseURL     string
-	BearerToken string
-	HTTPClient  *http.Client
+	BaseURL        string
+	BearerToken    string
+	HTTPClient     *http.Client
+	EventComponent string
 }
 
 func NewInClusterKubernetesStatusClient() (*KubernetesStatusClient, error) {
@@ -65,6 +67,88 @@ func (c *KubernetesStatusClient) WriteClusterStatus(ctx context.Context, ref Ope
 
 func (c *KubernetesStatusClient) WriteVolumeStatus(ctx context.Context, ref OperatorObjectRef, status SwBlockVolumeCRDStatus) error {
 	return c.patchStatus(ctx, ref.Namespace, SwBlockVolumePlural, ref.Name, status)
+}
+
+func (c *KubernetesStatusClient) ListSwBlockVolumes(ctx context.Context, namespace string) ([]SwBlockVolumeObject, error) {
+	if namespace == "" {
+		return nil, fmt.Errorf("namespace is required for SwBlockVolume list")
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.resourceCollectionURL(namespace, SwBlockVolumePlural), nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/json")
+	if c.BearerToken != "" {
+		req.Header.Set("Authorization", "Bearer "+c.BearerToken)
+	}
+	client := c.HTTPClient
+	if client == nil {
+		client = http.DefaultClient
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return nil, fmt.Errorf("list %s failed: http %d %s", SwBlockVolumePlural, resp.StatusCode, strings.TrimSpace(string(raw)))
+	}
+	var list kubernetesSwBlockVolumeList
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&list); err != nil {
+		return nil, fmt.Errorf("decode %s list: %w", SwBlockVolumePlural, err)
+	}
+	out := make([]SwBlockVolumeObject, 0, len(list.Items))
+	for _, item := range list.Items {
+		refNamespace := item.Metadata.Namespace
+		if refNamespace == "" {
+			refNamespace = namespace
+		}
+		out = append(out, SwBlockVolumeObject{
+			Ref: OperatorObjectRef{
+				APIVersion: SwBlockVolumeAPIVersion,
+				Kind:       SwBlockVolumeKind,
+				Namespace:  refNamespace,
+				Name:       item.Metadata.Name,
+			},
+			Finalizers:        append([]string(nil), item.Metadata.Finalizers...),
+			DeletionTimestamp: item.Metadata.DeletionTimestamp,
+		})
+	}
+	return out, nil
+}
+
+func (c *KubernetesStatusClient) PatchSwBlockVolumeFinalizers(ctx context.Context, ref OperatorObjectRef, finalizers []string) error {
+	if ref.Namespace == "" || ref.Name == "" {
+		return fmt.Errorf("namespace and name are required for SwBlockVolume finalizer patch")
+	}
+	body, err := json.Marshal(map[string]any{"metadata": map[string]any{"finalizers": finalizers}})
+	if err != nil {
+		return fmt.Errorf("marshal finalizer patch: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, c.resourceURL(ref.Namespace, SwBlockVolumePlural, ref.Name), bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Content-Type", "application/merge-patch+json")
+	if c.BearerToken != "" {
+		req.Header.Set("Authorization", "Bearer "+c.BearerToken)
+	}
+	client := c.HTTPClient
+	if client == nil {
+		client = http.DefaultClient
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		return nil
+	}
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	return fmt.Errorf("patch %s/%s finalizers failed: http %d %s", SwBlockVolumePlural, ref.Name, resp.StatusCode, strings.TrimSpace(string(raw)))
 }
 
 func (c *KubernetesStatusClient) patchStatus(ctx context.Context, namespace, resource, name string, status any) error {
@@ -117,7 +201,7 @@ func (c *KubernetesStatusClient) EmitEvent(ctx context.Context, event OperatorKu
 		Type:           event.Type,
 		Reason:         event.Reason,
 		Message:        event.Message,
-		Source:         kubernetesEventSource{Component: "sw-block-operator-status"},
+		Source:         kubernetesEventSource{Component: defaultString(c.EventComponent, "sw-block-operator-status")},
 		FirstTimestamp: now.Format(time.RFC3339),
 		LastTimestamp:  now.Format(time.RFC3339),
 		Count:          1,
@@ -161,6 +245,12 @@ func (c *KubernetesStatusClient) statusURL(namespace, resource, name string) str
 func (c *KubernetesStatusClient) resourcePath(namespace, resource, name string) string {
 	return "/apis/block.seaweedfs.com/v1alpha1/namespaces/" +
 		pathEscape(namespace) + "/" + pathEscape(resource) + "/" + pathEscape(name)
+}
+
+func (c *KubernetesStatusClient) resourceCollectionURL(namespace, resource string) string {
+	base := strings.TrimRight(c.BaseURL, "/")
+	return base + "/apis/block.seaweedfs.com/v1alpha1/namespaces/" +
+		pathEscape(namespace) + "/" + pathEscape(resource)
 }
 
 func (c *KubernetesStatusClient) resourceURL(namespace, resource, name string) string {
@@ -215,8 +305,10 @@ type kubernetesCoreEvent struct {
 }
 
 type kubernetesMetadata struct {
-	Name      string `json:"name"`
-	Namespace string `json:"namespace"`
+	Name              string     `json:"name"`
+	Namespace         string     `json:"namespace"`
+	Finalizers        []string   `json:"finalizers,omitempty"`
+	DeletionTimestamp *time.Time `json:"deletionTimestamp,omitempty"`
 }
 
 type kubernetesObjectReference struct {
@@ -228,4 +320,12 @@ type kubernetesObjectReference struct {
 
 type kubernetesEventSource struct {
 	Component string `json:"component"`
+}
+
+type kubernetesSwBlockVolumeList struct {
+	Items []kubernetesSwBlockVolume `json:"items"`
+}
+
+type kubernetesSwBlockVolume struct {
+	Metadata kubernetesMetadata `json:"metadata"`
 }

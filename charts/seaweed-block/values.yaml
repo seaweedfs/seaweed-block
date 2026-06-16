@@ -127,6 +127,21 @@ operatorStatus:
     create: true
   nodeSelector: {}
 
+lifecycleOwner:
+  # Phase 43 bounded lifecycle owner. Disabled by default. When enabled with
+  # dryRun=false it may patch only SwBlockVolume metadata.finalizers, and the
+  # admission policy confines the patch to the Seaweed Block protection
+  # finalizer.
+  create: false
+  dryRun: true
+  interval: 30s
+  finalizerName: block.seaweedfs.com/swblockvolume-protection
+  rbac:
+    create: true
+  admission:
+    create: true
+  nodeSelector: {}
+
 csiController:
   replicas: 1
 

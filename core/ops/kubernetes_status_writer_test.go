@@ -235,6 +235,93 @@ func TestKubernetesStatusClientTreatsPersistentEventAsIdempotentSuccess(t *testi
 	}
 }
 
+func TestKubernetesStatusClientListsSwBlockVolumesForLifecycleOwner(t *testing.T) {
+	deletingAt := "2026-06-15T01:02:03Z"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Fatalf("method=%s want GET", r.Method)
+		}
+		if r.URL.Path != "/apis/block.seaweedfs.com/v1alpha1/namespaces/kube-system/swblockvolumes" {
+			t.Fatalf("path=%s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+		  "items": [
+		    {"metadata":{"name":"a","namespace":"kube-system","finalizers":["example.com/foreign"]}},
+		    {"metadata":{"name":"b","deletionTimestamp":"` + deletingAt + `"}}
+		  ]
+		}`))
+	}))
+	defer server.Close()
+
+	volumes, err := (&KubernetesStatusClient{
+		BaseURL:    server.URL,
+		HTTPClient: server.Client(),
+	}).ListSwBlockVolumes(context.Background(), "kube-system")
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(volumes) != 2 {
+		t.Fatalf("volumes=%+v", volumes)
+	}
+	if volumes[0].Ref.Name != "a" || volumes[0].Ref.Namespace != "kube-system" ||
+		!stringSliceContains(volumes[0].Finalizers, "example.com/foreign") {
+		t.Fatalf("volume a=%+v", volumes[0])
+	}
+	if volumes[1].Ref.Name != "b" || volumes[1].Ref.Namespace != "kube-system" || volumes[1].DeletionTimestamp == nil {
+		t.Fatalf("volume b=%+v", volumes[1])
+	}
+}
+
+func TestKubernetesStatusClientPatchesOnlySwBlockVolumeFinalizers(t *testing.T) {
+	var request recordedStatusPatch
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&request.Body); err != nil {
+			t.Fatalf("decode request body: %v", err)
+		}
+		request.Method = r.Method
+		request.Path = r.URL.Path
+		request.ContentType = r.Header.Get("Content-Type")
+		request.Authorization = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	err := (&KubernetesStatusClient{
+		BaseURL:     server.URL,
+		BearerToken: "owner-token",
+		HTTPClient:  server.Client(),
+	}).PatchSwBlockVolumeFinalizers(context.Background(), OperatorObjectRef{
+		Namespace: "kube-system",
+		Name:      "demo",
+	}, []string{"example.com/foreign", SwBlockVolumeFinalizerName})
+	if err != nil {
+		t.Fatalf("patch finalizers: %v", err)
+	}
+	if request.Method != http.MethodPatch {
+		t.Fatalf("method=%s", request.Method)
+	}
+	if request.Path != "/apis/block.seaweedfs.com/v1alpha1/namespaces/kube-system/swblockvolumes/demo" {
+		t.Fatalf("path=%s", request.Path)
+	}
+	if request.ContentType != "application/merge-patch+json" {
+		t.Fatalf("content-type=%s", request.ContentType)
+	}
+	if request.Authorization != "Bearer owner-token" {
+		t.Fatalf("authorization=%s", request.Authorization)
+	}
+	metadata := request.Body["metadata"].(map[string]any)
+	if _, ok := request.Body["spec"]; ok {
+		t.Fatalf("finalizer patch must not include spec: %+v", request.Body)
+	}
+	if _, ok := request.Body["status"]; ok {
+		t.Fatalf("finalizer patch must not include status: %+v", request.Body)
+	}
+	if len(request.Body) != 1 || len(metadata) != 1 {
+		t.Fatalf("finalizer patch must contain only metadata.finalizers: %+v", request.Body)
+	}
+}
+
 func TestKubernetesEventNameSeparatesTypeAndReason(t *testing.T) {
 	base := OperatorKubernetesEvent{
 		InvolvedObject: OperatorObjectRef{Name: "demo-pvc"},

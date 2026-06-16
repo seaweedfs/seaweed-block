@@ -347,6 +347,92 @@ func TestOpsOperatorStatusWritesCRDStatusWhenDryRunDisabled(t *testing.T) {
 	}
 }
 
+func TestOpsLifecycleOwnerDryRunDoesNotPatch(t *testing.T) {
+	client := &lifecycleOwnerTestClient{
+		volumes: []ops.SwBlockVolumeObject{{
+			Ref: ops.OperatorObjectRef{
+				APIVersion: ops.SwBlockVolumeAPIVersion,
+				Kind:       ops.SwBlockVolumeKind,
+				Namespace:  "kube-system",
+				Name:       "demo-volume",
+			},
+		}},
+	}
+	oldFactory := opsLifecycleOwnerClientFactory
+	opsLifecycleOwnerClientFactory = func() (ops.LifecycleOwnerClient, ops.OperatorEventSink, error) {
+		return client, client, nil
+	}
+	t.Cleanup(func() { opsLifecycleOwnerClientFactory = oldFactory })
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ops", "lifecycle-owner", "--dry-run", "--namespace", "kube-system"}, &stdout, &stderr)
+	if code != ops.VolumeStatusExitOK {
+		t.Fatalf("exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	if len(client.patches) != 0 || len(client.events) != 0 {
+		t.Fatalf("dry-run patched/events: patches=%+v events=%+v", client.patches, client.events)
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"lifecycle_owner=dry_run namespace=kube-system volumes=1",
+		"finalizer_patches=0",
+		"finalizer_added=1",
+		"events=0",
+		"mutation_allowed=false",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("stdout missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestOpsLifecycleOwnerWritesProtectionFinalizer(t *testing.T) {
+	client := &lifecycleOwnerTestClient{
+		volumes: []ops.SwBlockVolumeObject{{
+			Ref: ops.OperatorObjectRef{
+				APIVersion: ops.SwBlockVolumeAPIVersion,
+				Kind:       ops.SwBlockVolumeKind,
+				Namespace:  "kube-system",
+				Name:       "demo-volume",
+			},
+			Finalizers: []string{"example.com/foreign"},
+		}},
+	}
+	oldFactory := opsLifecycleOwnerClientFactory
+	opsLifecycleOwnerClientFactory = func() (ops.LifecycleOwnerClient, ops.OperatorEventSink, error) {
+		return client, client, nil
+	}
+	t.Cleanup(func() { opsLifecycleOwnerClientFactory = oldFactory })
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ops", "lifecycle-owner", "--namespace", "kube-system"}, &stdout, &stderr)
+	if code != ops.VolumeStatusExitOK {
+		t.Fatalf("exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	if len(client.patches) != 1 {
+		t.Fatalf("patches=%+v", client.patches)
+	}
+	wantFinalizers := []string{"example.com/foreign", ops.SwBlockVolumeFinalizerName}
+	if fmt.Sprint(client.patches[0].finalizers) != fmt.Sprint(wantFinalizers) {
+		t.Fatalf("finalizers=%+v want %+v", client.patches[0].finalizers, wantFinalizers)
+	}
+	if len(client.events) != 1 || client.events[0].Reason != ops.ReasonDeleteFinalizerAdded {
+		t.Fatalf("events=%+v", client.events)
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"lifecycle_owner=finalizer_mutation namespace=kube-system volumes=1",
+		"finalizer_patches=1",
+		"finalizer_added=1",
+		"events=1",
+		"mutation_allowed=true",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("stdout missing %q:\n%s", want, out)
+		}
+	}
+}
+
 func TestOpsClusterMasterAPIUsesSharedInClusterNodeEvidenceEnrichment(t *testing.T) {
 	masterAddr, closeMaster := startCmdFakeMaster(t)
 	defer closeMaster()
@@ -579,6 +665,34 @@ func (w *operatorStatusTestWriter) WriteClusterStatus(_ context.Context, _ ops.O
 
 func (w *operatorStatusTestWriter) WriteVolumeStatus(_ context.Context, ref ops.OperatorObjectRef, status ops.SwBlockVolumeCRDStatus) error {
 	w.volumes = append(w.volumes, operatorStatusTestVolumeWrite{ref: ref, status: status})
+	return nil
+}
+
+type lifecycleOwnerTestClient struct {
+	volumes []ops.SwBlockVolumeObject
+	patches []lifecycleOwnerTestPatch
+	events  []ops.OperatorKubernetesEvent
+}
+
+type lifecycleOwnerTestPatch struct {
+	ref        ops.OperatorObjectRef
+	finalizers []string
+}
+
+func (c *lifecycleOwnerTestClient) ListSwBlockVolumes(_ context.Context, _ string) ([]ops.SwBlockVolumeObject, error) {
+	return append([]ops.SwBlockVolumeObject(nil), c.volumes...), nil
+}
+
+func (c *lifecycleOwnerTestClient) PatchSwBlockVolumeFinalizers(_ context.Context, ref ops.OperatorObjectRef, finalizers []string) error {
+	c.patches = append(c.patches, lifecycleOwnerTestPatch{
+		ref:        ref,
+		finalizers: append([]string(nil), finalizers...),
+	})
+	return nil
+}
+
+func (c *lifecycleOwnerTestClient) EmitEvent(_ context.Context, event ops.OperatorKubernetesEvent) error {
+	c.events = append(c.events, event)
 	return nil
 }
 

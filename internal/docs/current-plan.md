@@ -1,6 +1,7 @@
 # Current Plan: Phase 43 - First Bounded Finalizer Mutation
 
-Status: open, 0% complete. Started on 2026-06-15.
+Status: open, D1/D2 implemented locally; live QA pending. Started on
+2026-06-15.
 
 Branch: `phase41-lifecycle-owner-foundation`
 
@@ -176,8 +177,15 @@ Phase 43 can close only if:
 
 ## Current Progress
 
-- 0%: Phase 43 opened from Phase 42. No product mutation has been implemented
-  yet in this phase.
+- D1/D2 local implementation complete:
+  - `sw-block ops lifecycle-owner` command added.
+  - separate Helm lifecycle-owner Deployment/RBAC added, disabled by default.
+  - lifecycle-owner admission policy added for finalizer-only patch shape.
+  - Kubernetes client can list `SwBlockVolume` objects and patch only
+    `metadata.finalizers`.
+  - local tests and Helm lint/render pass.
+- Live QA still must validate the real VAP/RBAC boundary and idempotent
+  finalizer add before D1/D2 can close.
 
 ## Prerequisites / Risks
 

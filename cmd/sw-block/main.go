@@ -37,6 +37,14 @@ var (
 	opsOperatorStatusWriterFactory = func() (ops.OperatorStatusWriter, error) {
 		return ops.NewInClusterKubernetesStatusClient()
 	}
+	opsLifecycleOwnerClientFactory = func() (ops.LifecycleOwnerClient, ops.OperatorEventSink, error) {
+		client, err := ops.NewInClusterKubernetesStatusClient()
+		if err != nil {
+			return nil, nil, err
+		}
+		client.EventComponent = "sw-block-lifecycle-owner"
+		return client, client, nil
+	}
 )
 
 func run(args []string, stdout, stderr io.Writer) int {
@@ -54,7 +62,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return ops.VolumeStatusExitInvalid
 	}
 	if len(args) < 2 {
-		fmt.Fprintln(stderr, "sw-block: expected subcommand ops status|inventory|list|cluster|volumes|describe|timeline|explain|report|dashboard|generate-helm-values|operator-status")
+		fmt.Fprintln(stderr, "sw-block: expected subcommand ops status|inventory|list|cluster|volumes|describe|timeline|explain|report|dashboard|generate-helm-values|operator-status|lifecycle-owner")
 		usage(stderr)
 		return ops.VolumeStatusExitInvalid
 	}
@@ -81,10 +89,73 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runOpsGenerateHelmValues(args[2:], stdout, stderr)
 	case "operator-status":
 		return runOpsOperatorStatus(args[2:], stdout, stderr)
+	case "lifecycle-owner":
+		return runOpsLifecycleOwner(args[2:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "sw-block: unknown ops subcommand %q\n", args[1])
 		usage(stderr)
 		return ops.VolumeStatusExitInvalid
+	}
+}
+
+func runOpsLifecycleOwner(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("sw-block ops lifecycle-owner", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	var (
+		dryRun    bool
+		namespace string
+		interval  time.Duration
+	)
+	fs.BoolVar(&dryRun, "dry-run", false, "evaluate lifecycle-owner reconciliation without patching finalizers or emitting Events")
+	fs.StringVar(&namespace, "namespace", "default", "Kubernetes namespace containing SwBlockVolume objects")
+	fs.DurationVar(&interval, "interval", 0, "repeat lifecycle-owner reconciliation at this interval; 0 runs once")
+	if err := fs.Parse(args); err != nil {
+		return ops.VolumeStatusExitInvalid
+	}
+	if fs.NArg() != 0 {
+		fmt.Fprintf(stderr, "sw-block ops lifecycle-owner: unexpected args %s\n", strings.Join(fs.Args(), " "))
+		return ops.VolumeStatusExitInvalid
+	}
+	runOnce := func() int {
+		client, events, err := opsLifecycleOwnerClientFactory()
+		if err != nil {
+			fmt.Fprintf(stderr, "sw-block ops lifecycle-owner: %v\n", err)
+			return ops.VolumeStatusExitInvalid
+		}
+		mode := "finalizer_mutation"
+		if dryRun {
+			mode = "dry_run"
+			events = nil
+		}
+		result, err := (ops.LifecycleOwnerReconciler{
+			Namespace: namespace,
+			Client:    client,
+			EventSink: events,
+			DryRun:    dryRun,
+		}).Reconcile(context.Background())
+		if err != nil {
+			fmt.Fprintf(stderr, "sw-block ops lifecycle-owner: %v\n", err)
+			return ops.VolumeStatusExitInvalid
+		}
+		fmt.Fprintf(stdout, "lifecycle_owner=%s namespace=%s volumes=%d finalizer_patches=%d finalizer_added=%d events=%d mutation_allowed=%t\n",
+			mode,
+			namespace,
+			result.VolumeCount,
+			result.FinalizerPatchCount,
+			result.FinalizerAddedCount,
+			result.EventCount,
+			!dryRun)
+		return ops.VolumeStatusExitOK
+	}
+	if interval <= 0 {
+		return runOnce()
+	}
+	for {
+		code := runOnce()
+		if code != ops.VolumeStatusExitOK {
+			fmt.Fprintf(stderr, "sw-block ops lifecycle-owner: iteration failed exit=%d; retrying in %s\n", code, interval)
+		}
+		time.Sleep(interval)
 	}
 }
 
@@ -1468,6 +1539,7 @@ func usage(w io.Writer) {
 	fmt.Fprintln(w, "  sw-block ops generate-helm-values --out values.yaml [--target-node <node>] [--replication-factor <n>]")
 	fmt.Fprintln(w, "      [--restart-persistence ephemeral|hostpath] [--state-hostpath /var/lib/sw-block] [--timeout 10s]")
 	fmt.Fprintln(w, "  sw-block ops operator-status --dry-run [--master-api <addr>|--from-bundle <dir>] [--interval 30s]")
+	fmt.Fprintln(w, "  sw-block ops lifecycle-owner [--dry-run] [--namespace <ns>] [--interval 30s]")
 }
 
 func emptyCLI(value string) string {
