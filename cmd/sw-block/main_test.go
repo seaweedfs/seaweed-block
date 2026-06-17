@@ -237,6 +237,578 @@ func TestOpsInventoryMissingOutReturnsInvalid(t *testing.T) {
 	}
 }
 
+func TestOpsOperatorStatusDryRunFromBundle(t *testing.T) {
+	dir := t.TempDir()
+	cluster := ops.NewClusterEvidence(time.Date(2026, 6, 2, 23, 30, 0, 0, time.UTC))
+	cluster.ManagedVolumes = []ops.ManagedVolumeProjection{ops.ProjectManagedVolume(ops.ManagedVolumeFacts{
+		VolumeID: "pvc-operator",
+		PVCName:  "demo-pvc",
+		PVC:      &ops.PVCFact{Phase: "Bound"},
+		Authority: &ops.AuthorityFact{
+			PrimaryReplica: "r1",
+			PublishTarget:  "192.168.1.184:3260",
+		},
+		Replicas: []ops.ReplicaFact{{
+			ReplicaID:      "r1",
+			KubernetesNode: "m02",
+			Role:           "primary",
+			Observed:       true,
+		}},
+		CSIStages: []ops.CSIStageFact{{NodeName: "m02", Target: "192.168.1.184:3260"}},
+		Workload:  &ops.WorkloadCheckFact{WriterVerified: true, ReaderVerified: true},
+	})}
+	raw, err := ops.MarshalObservationJSON(cluster)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ops.ClusterEvidenceArtifact), raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ops", "operator-status", "--dry-run", "--from-bundle", dir, "--namespace", "kube-system"}, &stdout, &stderr)
+	if code != ops.VolumeStatusExitOK {
+		t.Fatalf("exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"operator_status=dry_run cluster=kube-system/sw-block volumes=1",
+		"mutation_allowed=false",
+		"cluster_status volumes=1 ready=1 blocked=0 stale=0",
+		"volume_status name=demo-pvc volume_id=pvc-operator pvc=demo-pvc status=ready reason=first_volume_verified",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("stdout missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestOpsOperatorStatusWritesCRDStatusWhenDryRunDisabled(t *testing.T) {
+	dir := t.TempDir()
+	cluster := ops.NewClusterEvidence(time.Date(2026, 6, 3, 10, 30, 0, 0, time.UTC))
+	cluster.ManagedVolumes = []ops.ManagedVolumeProjection{ops.ProjectManagedVolume(ops.ManagedVolumeFacts{
+		VolumeID: "pvc-write",
+		PVCName:  "write-pvc",
+		PVC:      &ops.PVCFact{Phase: "Bound"},
+		Authority: &ops.AuthorityFact{
+			PrimaryReplica: "r1",
+			PublishTarget:  "192.168.1.184:3260",
+		},
+		Replicas: []ops.ReplicaFact{{
+			ReplicaID:      "r1",
+			KubernetesNode: "m02",
+			Role:           "primary",
+			Observed:       true,
+		}},
+		CSIStages: []ops.CSIStageFact{{NodeName: "m02", Target: "192.168.1.184:3260"}},
+		Workload:  &ops.WorkloadCheckFact{WriterVerified: true, ReaderVerified: true},
+	})}
+	raw, err := ops.MarshalObservationJSON(cluster)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ops.ClusterEvidenceArtifact), raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	writer := &operatorStatusTestWriter{}
+	oldFactory := opsOperatorStatusWriterFactory
+	opsOperatorStatusWriterFactory = func() (ops.OperatorStatusWriter, error) {
+		return writer, nil
+	}
+	t.Cleanup(func() { opsOperatorStatusWriterFactory = oldFactory })
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ops", "operator-status", "--from-bundle", t.TempDir()}, &stdout, &stderr)
+	if code == ops.VolumeStatusExitOK {
+		t.Fatalf("empty bundle unexpectedly succeeded stdout=%s stderr=%s", stdout.String(), stderr.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = run([]string{"ops", "operator-status", "--from-bundle", dir, "--namespace", "kube-system"}, &stdout, &stderr)
+	if code != ops.VolumeStatusExitOK {
+		t.Fatalf("exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	if writer.cluster.VolumeCount != 1 || len(writer.volumes) != 1 {
+		t.Fatalf("writer cluster=%+v volumes=%+v", writer.cluster, writer.volumes)
+	}
+	if writer.volumes[0].ref.Name != "write-pvc" || writer.volumes[0].status.Status != ops.ManagedVolumeStatusReady {
+		t.Fatalf("volume write=%+v", writer.volumes[0])
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"operator_status=write_status cluster=kube-system/sw-block volumes=1",
+		"mutation_allowed=false",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("stdout missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestOpsLifecycleOwnerDryRunDoesNotPatch(t *testing.T) {
+	client := &lifecycleOwnerTestClient{
+		volumes: []ops.SwBlockVolumeObject{{
+			Ref: ops.OperatorObjectRef{
+				APIVersion: ops.SwBlockVolumeAPIVersion,
+				Kind:       ops.SwBlockVolumeKind,
+				Namespace:  "kube-system",
+				Name:       "demo-volume",
+			},
+		}},
+	}
+	oldFactory := opsLifecycleOwnerClientFactory
+	opsLifecycleOwnerClientFactory = func() (ops.LifecycleOwnerClient, ops.OperatorEventSink, error) {
+		return client, client, nil
+	}
+	t.Cleanup(func() { opsLifecycleOwnerClientFactory = oldFactory })
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ops", "lifecycle-owner", "--dry-run", "--namespace", "kube-system"}, &stdout, &stderr)
+	if code != ops.VolumeStatusExitOK {
+		t.Fatalf("exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	if len(client.patches) != 0 || len(client.events) != 0 {
+		t.Fatalf("dry-run patched/events: patches=%+v events=%+v", client.patches, client.events)
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"lifecycle_owner=dry_run namespace=kube-system volumes=1",
+		"finalizer_patches=0",
+		"finalizer_added=1",
+		"events=0",
+		"mutation_allowed=false",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("stdout missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestOpsLifecycleOwnerWritesProtectionFinalizer(t *testing.T) {
+	client := &lifecycleOwnerTestClient{
+		volumes: []ops.SwBlockVolumeObject{{
+			Ref: ops.OperatorObjectRef{
+				APIVersion: ops.SwBlockVolumeAPIVersion,
+				Kind:       ops.SwBlockVolumeKind,
+				Namespace:  "kube-system",
+				Name:       "demo-volume",
+			},
+			Finalizers: []string{"example.com/foreign"},
+		}},
+	}
+	oldFactory := opsLifecycleOwnerClientFactory
+	opsLifecycleOwnerClientFactory = func() (ops.LifecycleOwnerClient, ops.OperatorEventSink, error) {
+		return client, client, nil
+	}
+	t.Cleanup(func() { opsLifecycleOwnerClientFactory = oldFactory })
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ops", "lifecycle-owner", "--namespace", "kube-system"}, &stdout, &stderr)
+	if code != ops.VolumeStatusExitOK {
+		t.Fatalf("exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	if len(client.patches) != 1 {
+		t.Fatalf("patches=%+v", client.patches)
+	}
+	wantFinalizers := []string{"example.com/foreign", ops.SwBlockVolumeFinalizerName}
+	if fmt.Sprint(client.patches[0].finalizers) != fmt.Sprint(wantFinalizers) {
+		t.Fatalf("finalizers=%+v want %+v", client.patches[0].finalizers, wantFinalizers)
+	}
+	if len(client.events) != 1 || client.events[0].Reason != ops.ReasonDeleteFinalizerAdded {
+		t.Fatalf("events=%+v", client.events)
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"lifecycle_owner=finalizer_mutation namespace=kube-system volumes=1",
+		"finalizer_patches=1",
+		"finalizer_added=1",
+		"events=1",
+		"mutation_allowed=true",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("stdout missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestOpsLifecycleOwnerReleasesProtectionFinalizerWhenDeleteSafetyAllows(t *testing.T) {
+	deletingAt := time.Date(2026, 6, 15, 2, 0, 0, 0, time.UTC)
+	client := &lifecycleOwnerTestClient{
+		volumes: []ops.SwBlockVolumeObject{{
+			Ref: ops.OperatorObjectRef{
+				APIVersion: ops.SwBlockVolumeAPIVersion,
+				Kind:       ops.SwBlockVolumeKind,
+				Namespace:  "kube-system",
+				Name:       "demo-volume",
+			},
+			Finalizers:        []string{"example.com/foreign", ops.SwBlockVolumeFinalizerName},
+			DeletionTimestamp: &deletingAt,
+			Status: ops.SwBlockVolumeCRDStatus{DeleteSafety: &ops.SwBlockVolumeCRDDeleteSafety{
+				Decision:                ops.ManagedVolumeActionDecisionAllowed,
+				State:                   ops.DeleteSafetyStateReleasable,
+				Reason:                  ops.ReasonDeleteFinalizerReleasable,
+				FinalizerReleaseAllowed: true,
+			}},
+		}},
+	}
+	oldFactory := opsLifecycleOwnerClientFactory
+	opsLifecycleOwnerClientFactory = func() (ops.LifecycleOwnerClient, ops.OperatorEventSink, error) {
+		return client, client, nil
+	}
+	t.Cleanup(func() { opsLifecycleOwnerClientFactory = oldFactory })
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ops", "lifecycle-owner", "--namespace", "kube-system"}, &stdout, &stderr)
+	if code != ops.VolumeStatusExitOK {
+		t.Fatalf("exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	if len(client.patches) != 1 {
+		t.Fatalf("patches=%+v", client.patches)
+	}
+	if got, want := fmt.Sprint(client.patches[0].finalizers), fmt.Sprint([]string{"example.com/foreign"}); got != want {
+		t.Fatalf("finalizers=%s want %s", got, want)
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"finalizer_patches=1",
+		"finalizer_released=1",
+		"events=1",
+		"mutation_allowed=true",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("stdout missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestOpsClusterMasterAPIUsesSharedInClusterNodeEvidenceEnrichment(t *testing.T) {
+	masterAddr, closeMaster := startCmdFakeMaster(t)
+	defer closeMaster()
+	oldFactory := opsNodeEvidenceEnricherFactory
+	opsNodeEvidenceEnricherFactory = func() (ops.OperatorNodeEvidenceEnricher, error) {
+		return fakeNodeEvidenceEnricher{}, nil
+	}
+	t.Cleanup(func() { opsNodeEvidenceEnricherFactory = oldFactory })
+	t.Setenv("KUBERNETES_SERVICE_HOST", "10.0.0.1")
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ops", "cluster", "--master-api", masterAddr, "-o", "json"}, &stdout, &stderr)
+	if code != ops.VolumeStatusExitOK {
+		t.Fatalf("exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		`"kubernetes_node": "m02"`,
+		`"ready": false`,
+		`"reason": "node_not_ready"`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("stdout missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestOpsReportMasterAPIUsesSharedInClusterNodeEvidenceEnrichment(t *testing.T) {
+	masterAddr, closeMaster := startCmdFakeMaster(t)
+	defer closeMaster()
+	oldFactory := opsNodeEvidenceEnricherFactory
+	opsNodeEvidenceEnricherFactory = func() (ops.OperatorNodeEvidenceEnricher, error) {
+		return fakeNodeEvidenceEnricher{}, nil
+	}
+	t.Cleanup(func() { opsNodeEvidenceEnricherFactory = oldFactory })
+	t.Setenv("KUBERNETES_SERVICE_HOST", "10.0.0.1")
+
+	outDir := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ops", "report", "--master-api", masterAddr, "--out", outDir}, &stdout, &stderr)
+	if code != ops.VolumeStatusExitOK {
+		t.Fatalf("exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	raw, err := os.ReadFile(filepath.Join(outDir, ops.ObservationReportJSONArtifact))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := string(raw)
+	for _, want := range []string{
+		`"kubernetes_node": "m02"`,
+		`"ready": false`,
+		`"reason": "node_not_ready"`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("report missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestLoadObservationVolumeUsesSharedInClusterNodeEvidenceEnrichment(t *testing.T) {
+	oldFactory := opsNodeEvidenceEnricherFactory
+	opsNodeEvidenceEnricherFactory = func() (ops.OperatorNodeEvidenceEnricher, error) {
+		return fakeNodeEvidenceEnricher{}, nil
+	}
+	t.Cleanup(func() { opsNodeEvidenceEnricherFactory = oldFactory })
+	t.Setenv("KUBERNETES_SERVICE_HOST", "10.0.0.1")
+	oldRunCommand := opsInventoryRunCommand
+	opsInventoryRunCommand = fixtureCmdKubectl(map[string]string{
+		"kubectl -n default get pvc -o json":                          cmdSinglePVCListJSON,
+		"kubectl get pv -o json":                                      cmdSinglePVListJSON,
+		"kubectl -n default get deploy -l app=sw-blockvolume -o json": cmdSingleDeploymentListJSON,
+	})
+	t.Cleanup(func() { opsInventoryRunCommand = oldRunCommand })
+
+	var stderr bytes.Buffer
+	cluster, _, code := loadObservationVolume("sw-block ops explain", []string{"volume", "--namespace", "default", "--product-revision", "product-rev", "pvc-live"}, &stderr)
+	if code != ops.VolumeStatusExitOK {
+		t.Fatalf("exit=%d stderr=%s cluster=%+v", code, stderr.String(), cluster)
+	}
+	if len(cluster.Nodes) != 1 || cluster.Nodes[0].KubernetesNode != "m02" {
+		t.Fatalf("cluster nodes=%+v", cluster.Nodes)
+	}
+	if !cmdConditionReason(cluster.Nodes[0].Conditions, ops.ReasonNodeNotReady) {
+		t.Fatalf("volume loader did not enrich node evidence: %+v", cluster.Nodes[0])
+	}
+}
+
+func TestOpsExplainProjectsDeletingCRFromCleanupSummary(t *testing.T) {
+	oldInventoryRun := opsInventoryRunCommand
+	opsInventoryRunCommand = fixtureCmdKubectl(map[string]string{
+		"kubectl -n default get pvc -o json":                          `{"items":[]}`,
+		"kubectl get pv -o json":                                      `{"items":[]}`,
+		"kubectl -n default get deploy -l app=sw-blockvolume -o json": `{"items":[]}`,
+	})
+	t.Cleanup(func() { opsInventoryRunCommand = oldInventoryRun })
+
+	oldNodeFactory := opsNodeEvidenceEnricherFactory
+	opsNodeEvidenceEnricherFactory = func() (ops.OperatorNodeEvidenceEnricher, error) {
+		return fakeNodeEvidenceEnricher{}, nil
+	}
+	t.Cleanup(func() { opsNodeEvidenceEnricherFactory = oldNodeFactory })
+
+	deletingAt := time.Date(2026, 6, 17, 8, 0, 0, 0, time.UTC)
+	oldVolumeSourceFactory := opsSwBlockVolumeSourceFactory
+	opsSwBlockVolumeSourceFactory = func() (ops.OperatorSwBlockVolumeSource, error) {
+		return &lifecycleOwnerTestClient{volumes: []ops.SwBlockVolumeObject{{
+			Ref: ops.OperatorObjectRef{
+				Namespace: "default",
+				Name:      "delete-pvc",
+			},
+			Finalizers:        []string{ops.SwBlockVolumeFinalizerName},
+			DeletionTimestamp: &deletingAt,
+			Spec:              ops.SwBlockVolumeSpec{PVCName: "delete-pvc"},
+			Status: ops.SwBlockVolumeCRDStatus{
+				VolumeID: "pvc-delete",
+				PVCName:  "delete-pvc",
+			},
+		}}}, nil
+	}
+	t.Cleanup(func() { opsSwBlockVolumeSourceFactory = oldVolumeSourceFactory })
+	t.Setenv("KUBERNETES_SERVICE_HOST", "10.0.0.1")
+
+	cleanupSummary := filepath.Join(t.TempDir(), "cleanup-summary.txt")
+	if err := os.WriteFile(cleanupSummary, []byte(strings.Join([]string{
+		"cleanup_status=failed",
+		"iscsi_residue_count=1",
+		"failure_count=1",
+		"reason_codes=iscsi_node_records_present",
+		"cleanup_observed_at=2026-06-17T08:00:00Z",
+	}, "\n")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ops", "explain", "volume", "--namespace", "default", "--cleanup-summary", cleanupSummary, "delete-pvc"}, &stdout, &stderr)
+	if code != ops.VolumeStatusExitOK {
+		t.Fatalf("exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"managed_volume pvc-delete status=blocked reason=iscsi_node_records_present",
+		"managed_volume_delete_safety state=blocked decision=rejected reason=iscsi_node_records_present",
+		"managed_volume_action safe_k8s.release_swblockvolume_finalizer mode=dry_run",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("explain missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestOpsDashboardMasterAPIUsesSharedInClusterNodeEvidenceEnrichment(t *testing.T) {
+	masterAddr, closeMaster := startCmdFakeMaster(t)
+	defer closeMaster()
+	oldFactory := opsNodeEvidenceEnricherFactory
+	opsNodeEvidenceEnricherFactory = func() (ops.OperatorNodeEvidenceEnricher, error) {
+		return fakeNodeEvidenceEnricher{}, nil
+	}
+	t.Cleanup(func() { opsNodeEvidenceEnricherFactory = oldFactory })
+	t.Setenv("KUBERNETES_SERVICE_HOST", "10.0.0.1")
+
+	addr := freeTCPAddr(t)
+	var stdout, stderr bytes.Buffer
+	done := make(chan int, 1)
+	go func() {
+		done <- run([]string{
+			"ops", "dashboard",
+			"--master-api", masterAddr,
+			"--listen", addr,
+			"--serve-duration", "1500ms",
+		}, &stdout, &stderr)
+	}()
+
+	body := waitForHTTPContains(t, "http://"+addr+"/cluster-evidence.json", `"reason": "node_not_ready"`)
+	if !strings.Contains(body, `"kubernetes_node": "m02"`) || !strings.Contains(body, `"ready": false`) {
+		t.Fatalf("dashboard cluster evidence missing enriched node:\n%s", body)
+	}
+	select {
+	case code := <-done:
+		if code != ops.VolumeStatusExitOK {
+			t.Fatalf("exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("dashboard command did not stop; stdout=%s stderr=%s", stdout.String(), stderr.String())
+	}
+}
+
+func TestLiveNodeEvidenceUsesHelmNamespaceWhenAppNamespaceDefaults(t *testing.T) {
+	recorder := &recordingNodeEvidenceEnricher{}
+	oldFactory := opsNodeEvidenceEnricherFactory
+	opsNodeEvidenceEnricherFactory = func() (ops.OperatorNodeEvidenceEnricher, error) {
+		return recorder, nil
+	}
+	t.Cleanup(func() { opsNodeEvidenceEnricherFactory = oldFactory })
+	t.Setenv("KUBERNETES_SERVICE_HOST", "10.0.0.1")
+
+	_, err := enrichLiveObservationCluster("default", time.Second, true, ops.ClusterEvidence{})
+	if err != nil {
+		t.Fatalf("enrich: %v", err)
+	}
+	if recorder.namespace != "kube-system" {
+		t.Fatalf("node evidence namespace=%q want kube-system", recorder.namespace)
+	}
+}
+
+func TestLiveNodeEvidenceNamespaceHonorsHelmNamespaceOverride(t *testing.T) {
+	recorder := &recordingNodeEvidenceEnricher{}
+	oldFactory := opsNodeEvidenceEnricherFactory
+	opsNodeEvidenceEnricherFactory = func() (ops.OperatorNodeEvidenceEnricher, error) {
+		return recorder, nil
+	}
+	t.Cleanup(func() { opsNodeEvidenceEnricherFactory = oldFactory })
+	t.Setenv("KUBERNETES_SERVICE_HOST", "10.0.0.1")
+	t.Setenv("SW_BLOCK_HELM_NAMESPACE", "sw-system")
+
+	_, err := enrichLiveObservationCluster("default", time.Second, true, ops.ClusterEvidence{})
+	if err != nil {
+		t.Fatalf("enrich: %v", err)
+	}
+	if recorder.namespace != "sw-system" {
+		t.Fatalf("node evidence namespace=%q want sw-system", recorder.namespace)
+	}
+}
+
+func TestLiveNodeEvidenceUsesExplicitNonDefaultNamespace(t *testing.T) {
+	recorder := &recordingNodeEvidenceEnricher{}
+	oldFactory := opsNodeEvidenceEnricherFactory
+	opsNodeEvidenceEnricherFactory = func() (ops.OperatorNodeEvidenceEnricher, error) {
+		return recorder, nil
+	}
+	t.Cleanup(func() { opsNodeEvidenceEnricherFactory = oldFactory })
+	t.Setenv("KUBERNETES_SERVICE_HOST", "10.0.0.1")
+
+	_, err := enrichLiveObservationCluster("sw-system", time.Second, true, ops.ClusterEvidence{})
+	if err != nil {
+		t.Fatalf("enrich: %v", err)
+	}
+	if recorder.namespace != "sw-system" {
+		t.Fatalf("node evidence namespace=%q want sw-system", recorder.namespace)
+	}
+}
+
+type fakeNodeEvidenceEnricher struct{}
+
+func (fakeNodeEvidenceEnricher) EnrichNodeEvidence(_ context.Context, _ string, cluster ops.ClusterEvidence) (ops.ClusterEvidence, error) {
+	cluster.Nodes = []ops.NodeEvidence{{
+		NodeName:       "m02",
+		KubernetesNode: "m02",
+		Ready:          false,
+		Schedulable:    true,
+		Conditions: []ops.ObservationCondition{{
+			Type:     ops.ConditionReady,
+			Status:   "Unknown",
+			Reason:   ops.ReasonNodeNotReady,
+			Severity: "warning",
+			Message:  "Kubernetes node Ready condition is not True",
+		}},
+	}}
+	return cluster, nil
+}
+
+type recordingNodeEvidenceEnricher struct {
+	namespace string
+}
+
+func (r *recordingNodeEvidenceEnricher) EnrichNodeEvidence(_ context.Context, namespace string, cluster ops.ClusterEvidence) (ops.ClusterEvidence, error) {
+	r.namespace = namespace
+	return cluster, nil
+}
+
+func cmdConditionReason(conditions []ops.ObservationCondition, reason string) bool {
+	for _, condition := range conditions {
+		if condition.Reason == reason {
+			return true
+		}
+	}
+	return false
+}
+
+type operatorStatusTestWriter struct {
+	cluster ops.SwBlockClusterCRDStatus
+	volumes []operatorStatusTestVolumeWrite
+}
+
+type operatorStatusTestVolumeWrite struct {
+	ref    ops.OperatorObjectRef
+	status ops.SwBlockVolumeCRDStatus
+}
+
+func (w *operatorStatusTestWriter) WriteClusterStatus(_ context.Context, _ ops.OperatorObjectRef, status ops.SwBlockClusterCRDStatus) error {
+	w.cluster = status
+	return nil
+}
+
+func (w *operatorStatusTestWriter) WriteVolumeStatus(_ context.Context, ref ops.OperatorObjectRef, status ops.SwBlockVolumeCRDStatus) error {
+	w.volumes = append(w.volumes, operatorStatusTestVolumeWrite{ref: ref, status: status})
+	return nil
+}
+
+type lifecycleOwnerTestClient struct {
+	volumes []ops.SwBlockVolumeObject
+	patches []lifecycleOwnerTestPatch
+	events  []ops.OperatorKubernetesEvent
+}
+
+type lifecycleOwnerTestPatch struct {
+	ref        ops.OperatorObjectRef
+	finalizers []string
+}
+
+func (c *lifecycleOwnerTestClient) ListSwBlockVolumes(_ context.Context, _ string) ([]ops.SwBlockVolumeObject, error) {
+	return append([]ops.SwBlockVolumeObject(nil), c.volumes...), nil
+}
+
+func (c *lifecycleOwnerTestClient) PatchSwBlockVolumeFinalizers(_ context.Context, ref ops.OperatorObjectRef, finalizers []string) error {
+	c.patches = append(c.patches, lifecycleOwnerTestPatch{
+		ref:        ref,
+		finalizers: append([]string(nil), finalizers...),
+	})
+	return nil
+}
+
+func (c *lifecycleOwnerTestClient) EmitEvent(_ context.Context, event ops.OperatorKubernetesEvent) error {
+	c.events = append(c.events, event)
+	return nil
+}
+
 func TestOpsInventoryRejectsBadRequiredFrontierFlag(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := run([]string{"ops", "inventory", "--out", t.TempDir(), "--required-frontier", "pvc-a=not-a-number"}, &stdout, &stderr)
@@ -332,6 +904,7 @@ func TestOpsGenerateHelmValuesSingleNodeFromKubernetes(t *testing.T) {
 		"internalIP: 127.0.0.1",
 		"dataPort: 19101",
 		"controlPort: 19102",
+		"launcherDurableImplFlag: false",
 		"launcherReplicationAckFlag: false",
 	} {
 		if !strings.Contains(string(values), want) {
@@ -399,6 +972,7 @@ func TestOpsGenerateHelmValuesMultiNodeExternalISCSI(t *testing.T) {
 		"internalIP: 192.168.1.188",
 		"dataPort: 19105",
 		"controlPort: 19106",
+		"launcherDurableImplFlag: false",
 		"launcherReplicationAckFlag: false",
 	} {
 		if !strings.Contains(string(values), want) {
@@ -603,6 +1177,59 @@ func TestOpsReportFromBundleAllowsEmptyClusterEvidence(t *testing.T) {
 	}
 	if !strings.Contains(string(summary), "volumes=0") || !strings.Contains(string(summary), "read_only=true") {
 		t.Fatalf("summary missing empty-cluster evidence:\n%s", summary)
+	}
+}
+
+func TestOpsReportFromBundleSkipsCorruptClusterEvidenceCandidate(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "a-stale", "status"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "a-stale", "status", ops.ClusterEvidenceArtifact), []byte("{not-json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	validDir := filepath.Join(dir, "z-restart")
+	if err := os.MkdirAll(validDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cluster := ops.NewClusterEvidence(time.Date(2026, 5, 27, 12, 0, 0, 0, time.UTC))
+	cluster.Volumes = []ops.VolumeEvidence{{
+		VolumeID:          "pvc-valid",
+		Namespace:         "default",
+		PVCName:           "demo-pvc",
+		ReplicationFactor: 1,
+		Status:            ops.ObservationStatusOK,
+		PrimaryReplica:    "r1",
+		PrimaryNode:       "m02",
+		PublishTarget:     "192.168.1.184:3260",
+	}}
+	raw, err := ops.MarshalObservationJSON(cluster)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(validDir, ops.RestartClusterEvidenceArtifact), raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	outDir := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ops", "report", "--from-bundle", dir, "--out", outDir}, &stdout, &stderr)
+	if code != ops.VolumeStatusExitOK {
+		t.Fatalf("exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	summary, err := os.ReadFile(filepath.Join(outDir, ops.ObservationReportTextArtifact))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(summary), "volume=pvc-valid") || strings.Contains(string(summary), "not-json") {
+		t.Fatalf("summary did not use valid evidence:\n%s", summary)
+	}
+	snapshot, err := os.ReadFile(filepath.Join(outDir, ops.ObservationOperatorSnapshotArtifact))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(snapshot), `"volume_id": "pvc-valid"`) || !strings.Contains(string(snapshot), `"read_only": true`) {
+		t.Fatalf("operator snapshot missing valid read-only evidence:\n%s", snapshot)
 	}
 }
 

@@ -1,8 +1,11 @@
 package ops
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestCleanupEvidenceProjectionOwnsSummaryAndReportShape(t *testing.T) {
@@ -16,6 +19,7 @@ func TestCleanupEvidenceProjectionOwnsSummaryAndReportShape(t *testing.T) {
 		CleanupSummaryFailureKey:           "6",
 		CleanupSummaryFailedPhaseKey:       "collect_and_cleanup",
 		CleanupSummaryReasonCodesKey:       "k8s_residue,multipath_residue",
+		CleanupSummaryObservedAtKey:        "2026-06-14T12:00:00Z",
 	}, "cleanup-summary.txt")
 
 	if cleanup == nil {
@@ -29,6 +33,7 @@ func TestCleanupEvidenceProjectionOwnsSummaryAndReportShape(t *testing.T) {
 		cleanup.HostPathResidueCount != 5 ||
 		cleanup.FailureCount != 6 ||
 		cleanup.FailedPhase != "collect_and_cleanup" ||
+		!cleanup.ObservedAt.Equal(time.Date(2026, 6, 14, 12, 0, 0, 0, time.UTC)) ||
 		cleanup.EvidenceRef != "cleanup-summary.txt" {
 		t.Fatalf("cleanup evidence=%+v", cleanup)
 	}
@@ -47,6 +52,7 @@ func TestCleanupEvidenceProjectionOwnsSummaryAndReportShape(t *testing.T) {
 		"failure_count=6",
 		"failed_phase=collect_and_cleanup",
 		"cleanup_evidence=cleanup-summary.txt",
+		"cleanup_observed_at=2026-06-14T12:00:00Z",
 	} {
 		if !strings.Contains(lines, want) {
 			t.Fatalf("summary lines missing %q:\n%s", want, lines)
@@ -66,6 +72,20 @@ func TestCleanupEvidenceProjectionMarksCleanStatusOK(t *testing.T) {
 	row := cleanup.ReportRow()
 	if row.StatusClass != "ok" {
 		t.Fatalf("row=%+v", row)
+	}
+}
+
+func TestLoadCleanupEvidenceSummary(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cleanup-summary.txt")
+	if err := os.WriteFile(path, []byte("cleanup_status=ok\ncleanup_observed_at=2026-06-16T10:05:00Z\ncleanup_evidence=cleanup-summary.txt\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cleanup, err := LoadCleanupEvidenceSummary(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cleanup == nil || cleanup.Status != ObservationStatusOK || cleanup.EvidenceRef != path || cleanup.ObservedAt.IsZero() {
+		t.Fatalf("cleanup=%+v", cleanup)
 	}
 }
 

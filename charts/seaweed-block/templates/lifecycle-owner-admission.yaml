@@ -1,0 +1,47 @@
+{{- if and .Values.lifecycleOwner.create .Values.lifecycleOwner.admission.create }}
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: {{ include "seaweed-block.fullname" . }}-lifecycle-owner-finalizer-boundary
+  labels:
+    {{- include "seaweed-block.labels" . | nindent 4 }}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["block.seaweedfs.com"]
+        apiVersions: ["v1alpha1"]
+        operations: ["UPDATE"]
+        resources: ["swblockvolumes"]
+  validations:
+    - expression: >-
+        request.userInfo.username != "system:serviceaccount:{{ .Release.Namespace }}:{{ include "seaweed-block.fullname" . }}-lifecycle-owner" ||
+        (
+          (has(object.spec) == has(oldObject.spec)) &&
+          (!has(object.spec) || object.spec == oldObject.spec) &&
+          (has(object.status) == has(oldObject.status)) &&
+          (!has(object.status) || object.status == oldObject.status) &&
+          (has(object.metadata.labels) == has(oldObject.metadata.labels)) &&
+          (!has(object.metadata.labels) || object.metadata.labels == oldObject.metadata.labels) &&
+          (has(object.metadata.annotations) == has(oldObject.metadata.annotations)) &&
+          (!has(object.metadata.annotations) || object.metadata.annotations == oldObject.metadata.annotations) &&
+          (has(object.metadata.ownerReferences) == has(oldObject.metadata.ownerReferences)) &&
+          (!has(object.metadata.ownerReferences) || object.metadata.ownerReferences == oldObject.metadata.ownerReferences) &&
+          (has(object.metadata.deletionTimestamp) == has(oldObject.metadata.deletionTimestamp)) &&
+          (!has(object.metadata.deletionTimestamp) || object.metadata.deletionTimestamp == oldObject.metadata.deletionTimestamp) &&
+          ((has(object.metadata.finalizers) ? object.metadata.finalizers : []).filter(f, f != "{{ .Values.lifecycleOwner.finalizerName | default "block.seaweedfs.com/swblockvolume-protection" }}") ==
+           (has(oldObject.metadata.finalizers) ? oldObject.metadata.finalizers : []).filter(f, f != "{{ .Values.lifecycleOwner.finalizerName | default "block.seaweedfs.com/swblockvolume-protection" }}")) &&
+          ((has(object.metadata.finalizers) ? object.metadata.finalizers : []).filter(f, f == "{{ .Values.lifecycleOwner.finalizerName | default "block.seaweedfs.com/swblockvolume-protection" }}").size() <= 1)
+        )
+      message: lifecycle-owner may only add or remove the Seaweed Block protection finalizer
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: {{ include "seaweed-block.fullname" . }}-lifecycle-owner-finalizer-boundary
+  labels:
+    {{- include "seaweed-block.labels" . | nindent 4 }}
+spec:
+  policyName: {{ include "seaweed-block.fullname" . }}-lifecycle-owner-finalizer-boundary
+  validationActions: ["Deny"]
+{{- end }}

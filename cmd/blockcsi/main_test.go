@@ -113,6 +113,19 @@ func TestParseFlags_RejectLoopbackPublishTargetsIsExplicitOptIn(t *testing.T) {
 	}
 }
 
+func TestParseFlags_SwBlockVolumeCRNamespaceRequiresMaster(t *testing.T) {
+	f, err := parseFlags([]string{"--endpoint", "unix:///tmp/csi.sock", "--node-id", "node-a", "--master", "blockmaster:9333", "--swblockvolume-cr-namespace", "kube-system"})
+	if err != nil {
+		t.Fatalf("parseFlags: %v", err)
+	}
+	if f.swBlockVolumeCRNamespace != "kube-system" {
+		t.Fatalf("swblockvolume namespace=%q", f.swBlockVolumeCRNamespace)
+	}
+	if _, err := parseFlags([]string{"--endpoint", "unix:///tmp/csi.sock", "--node-id", "node-a", "--swblockvolume-cr-namespace", "kube-system"}); err == nil {
+		t.Fatal("expected --swblockvolume-cr-namespace without --master to fail")
+	}
+}
+
 func TestParseFlags_MasterDependentFlagsRequireMaster(t *testing.T) {
 	if _, err := parseFlags([]string{"--endpoint", "unix:///tmp/csi.sock", "--node-id", "node-a", "--stage2-multipath"}); err == nil {
 		t.Fatal("expected --stage2-multipath without --master to fail")

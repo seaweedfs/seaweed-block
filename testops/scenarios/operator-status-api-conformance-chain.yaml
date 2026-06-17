@@ -1,0 +1,91 @@
+# Runner-native Phase 40 D4 gate: operator-status API conformance.
+#
+# Goal:
+#   Catch the CRD/RBAC failures that previously escaped mock tests and failed
+#   only under live Kubernetes API validation:
+#     snake_case status payload drift
+#     unsupported condition/action enums
+#     wrong CRD endpoint usage
+#     RBAC boundary broadening
+#     delete-safety status regression
+
+name: operator-status-api-conformance-chain
+timeout: 8m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: status_api_conformance
+    actions:
+      - action: exec
+        node: m02
+        timeout: 5m
+        cmd: "rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-operator-status-api-conformance && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-operator-status-api-conformance && cd {{ product_root }} && SW_BLOCK_ARTIFACT_DIR=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-operator-status-api-conformance bash scripts/run-phase40-status-api-conformance.sh {{ product_root }}"
+
+  - name: status_api_conformance_asserts
+    actions:
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-operator-status-api-conformance/phase40-status-api-conformance-summary.txt"
+        pattern: "^phase40_status_api_conformance_status=ok$"
+        save_as: gate_ok_count
+      - action: assert_greater
+        actual: "{{ gate_ok_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-operator-status-api-conformance/phase40-status-api-conformance-summary.txt"
+        pattern: "^casing_drift_gate=ok$"
+        save_as: casing_ok_count
+      - action: assert_greater
+        actual: "{{ casing_ok_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-operator-status-api-conformance/phase40-status-api-conformance-summary.txt"
+        pattern: "^enum_drift_gate=ok$"
+        save_as: enum_ok_count
+      - action: assert_greater
+        actual: "{{ enum_ok_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-operator-status-api-conformance/phase40-status-api-conformance-summary.txt"
+        pattern: "^wrong_endpoint_gate=ok$"
+        save_as: endpoint_ok_count
+      - action: assert_greater
+        actual: "{{ endpoint_ok_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-operator-status-api-conformance/phase40-status-api-conformance-summary.txt"
+        pattern: "^rbac_boundary_gate=ok$"
+        save_as: rbac_ok_count
+      - action: assert_greater
+        actual: "{{ rbac_ok_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-operator-status-api-conformance/phase40-status-api-conformance-summary.txt"
+        pattern: "^delete_safety_status_gate=ok$"
+        save_as: delete_safety_ok_count
+      - action: assert_greater
+        actual: "{{ delete_safety_ok_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-operator-status-api-conformance/phase40-status-api-conformance-summary.txt"
+        pattern: "^finalizer_mutation_allowed=false$"
+        save_as: finalizer_mutation_count
+      - action: assert_greater
+        actual: "{{ finalizer_mutation_count }}"
+        threshold: "0"

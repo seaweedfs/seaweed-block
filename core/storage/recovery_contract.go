@@ -56,6 +56,12 @@ const (
 // G-1 §3 row #8 placement decision §4.3).
 var ErrWALRecycled = errors.New("storage: WAL recycled past requested LSN")
 
+// ErrWALIntegrityFault is returned when recovery detects that WAL metadata and
+// durable extent contents disagree. Callers MUST NOT treat this as a clean
+// torn-tail skip because doing so can claim readiness after a committed record
+// was detected as corrupt.
+var ErrWALIntegrityFault = errors.New("storage: WAL integrity fault")
+
 // RecoveryEntry is one entry emitted by `LogicalStorage.ScanLBAs`.
 // Carries enough information for the catch-up sender to write a
 // wire frame to the replica.
@@ -110,6 +116,12 @@ const (
 	// StorageRecoveryFailureSubstrateIO — substrate IO error
 	// (read failure, decode failure mid-scan, etc.). Retryable.
 	StorageRecoveryFailureSubstrateIO
+
+	// StorageRecoveryFailureWALIntegrity — recovery detected that WAL
+	// metadata and durable extent contents disagree. Not a clean
+	// readiness path; surface as an integrity blocker until repaired or
+	// rebuilt.
+	StorageRecoveryFailureWALIntegrity
 )
 
 // String returns the human-readable kind name for diagnostics. NOT
@@ -120,6 +132,8 @@ func (k StorageRecoveryFailureKind) String() string {
 		return "WALRecycled"
 	case StorageRecoveryFailureSubstrateIO:
 		return "SubstrateIO"
+	case StorageRecoveryFailureWALIntegrity:
+		return "WALIntegrity"
 	default:
 		return "Unknown"
 	}
@@ -173,6 +187,20 @@ func NewWALRecycledFailure(cause error, detail string) *RecoveryFailure {
 func NewSubstrateIOFailure(cause error, detail string) *RecoveryFailure {
 	return &RecoveryFailure{
 		Kind:   StorageRecoveryFailureSubstrateIO,
+		Cause:  cause,
+		Detail: detail,
+	}
+}
+
+// NewWALIntegrityFailure wraps a recovery-time WAL/extent integrity mismatch in
+// the typed envelope. Substrates call this when recovery detects corruption and
+// must fail closed instead of claiming a clean frontier.
+func NewWALIntegrityFailure(cause error, detail string) *RecoveryFailure {
+	if cause == nil {
+		cause = ErrWALIntegrityFault
+	}
+	return &RecoveryFailure{
+		Kind:   StorageRecoveryFailureWALIntegrity,
 		Cause:  cause,
 		Detail: detail,
 	}

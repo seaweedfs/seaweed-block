@@ -153,6 +153,43 @@ deployment.apps/sw-block-csi-controller 1/1 1 1 2m3s block-csi sw-block-csi:loca
 	}
 }
 
+func TestObservationBundle_ReplaysInstallDriftSummary(t *testing.T) {
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "demo", ObservationInstallDriftArtifact), strings.Join([]string{
+		"chart_name=seaweed-block",
+		"current_chart_version=0.3.5",
+		"desired_chart_version=0.4.0",
+		"current_image=sw-block:old",
+		"desired_image=sw-block:new",
+		"current_csi_image=sw-block-csi:old",
+		"desired_csi_image=sw-block-csi:new",
+	}, "\n"))
+
+	cluster, err := BuildObservationFromBundle(ObservationBundleOptions{Dir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cluster.InstallDrift == nil || cluster.InstallDrift.Status != InstallDriftStatusMismatch {
+		t.Fatalf("install drift=%+v", cluster.InstallDrift)
+	}
+	snapshot := BuildOperatorFoundationSnapshot(cluster)
+	if snapshot.Cluster.InstallDrift == nil || snapshot.Cluster.InstallDrift.ReasonCode != ReasonInstallDriftMismatch {
+		t.Fatalf("snapshot install drift=%+v", snapshot.Cluster.InstallDrift)
+	}
+	assertCondition(t, snapshot.Cluster.Conditions, ConditionBlocked, "True", ReasonInstallDriftMismatch)
+	summary := RenderObservationReportSummary(cluster)
+	for _, want := range []string{
+		"install_drift_status=mismatch reason=install_drift_mismatch evidence=",
+		"install-drift-summary.txt",
+		"install_drift_chart current=0.3.5 desired=0.4.0",
+		"install_drift_image current=sw-block:old desired=sw-block:new csi_current=sw-block-csi:old csi_desired=sw-block-csi:new",
+	} {
+		if !strings.Contains(summary, want) {
+			t.Fatalf("summary missing %q:\n%s", want, summary)
+		}
+	}
+}
+
 func TestObservationBundle_ManagedVolumeUsesPrimaryFailureArtifactHints(t *testing.T) {
 	dir := t.TempDir()
 	productDir := filepath.Join(dir, "demo", "product-observation")
@@ -322,6 +359,515 @@ func TestObservationBundle_CarriesCleanupEvidenceIntoReportSurfaces(t *testing.T
 	}
 }
 
+func TestObservationBundle_CarriesHostPrereqEvidenceIntoNodeStatus(t *testing.T) {
+	dir := t.TempDir()
+	cluster := NewClusterEvidence(time.Date(2026, 6, 8, 13, 0, 0, 0, time.UTC))
+	cluster.Nodes = []NodeEvidence{{
+		NodeName:       "m02",
+		KubernetesNode: "m02",
+		Ready:          true,
+		Schedulable:    true,
+	}, {
+		NodeName:       "tp01",
+		KubernetesNode: "tp01",
+		Ready:          true,
+		Schedulable:    true,
+	}}
+	writeClusterEvidenceArtifact(t, filepath.Join(dir, "status", ClusterEvidenceArtifact), cluster)
+	mustWrite(t, filepath.Join(dir, "host", ObservationHostPrereqArtifact), strings.Join([]string{
+		"node=m02 iscsi_prereq=missing multipath_prereq=ok command_iscsiadm=missing",
+		"node=tp01 iscsi_prereq=ok multipath_prereq=missing command_multipath=missing",
+	}, "\n"))
+
+	out, err := BuildObservationFromBundle(ObservationBundleOptions{Dir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := BuildOperatorFoundationSnapshot(out)
+	if len(snapshot.Cluster.Nodes) != 2 {
+		t.Fatalf("nodes=%+v", snapshot.Cluster.Nodes)
+	}
+	if snapshot.Cluster.Nodes[0].Status != ManagedVolumeStatusBlocked ||
+		snapshot.Cluster.Nodes[0].ReasonCode != ReasonISCSIPrereqMissing {
+		t.Fatalf("m02 node=%+v", snapshot.Cluster.Nodes[0])
+	}
+	if snapshot.Cluster.Nodes[1].Status != ManagedVolumeStatusBlocked ||
+		snapshot.Cluster.Nodes[1].ReasonCode != ReasonMultipathPrereqMissing {
+		t.Fatalf("tp01 node=%+v", snapshot.Cluster.Nodes[1])
+	}
+	summary := RenderObservationReportSummary(out)
+	for _, want := range []string{
+		"node=m02 k8s=m02 status=blocked reason=iscsi_prereq_missing",
+		"node=tp01 k8s=tp01 status=blocked reason=multipath_prereq_missing",
+	} {
+		if !strings.Contains(summary, want) {
+			t.Fatalf("summary missing %q:\n%s", want, summary)
+		}
+	}
+}
+
+func TestObservationBundle_CarriesUnsupportedLoopbackAttachIntoManagedStatus(t *testing.T) {
+	dir := t.TempDir()
+	writeProductClusterEvidence(t, dir, []VolumeEvidence{{
+		VolumeID:          "pvc-loopback",
+		Namespace:         "default",
+		PVCName:           "demo-pvc",
+		ReplicationFactor: 1,
+		Status:            ObservationStatusOK,
+		PrimaryReplica:    "r1",
+		PrimaryNode:       "m01",
+		PublishTarget:     "127.0.0.1:3260",
+		Replicas: []ReplicaEvidence{{
+			ReplicaID:      "r1",
+			KubernetesNode: "m01",
+			Observed:       true,
+			Role:           "primary",
+			FrontendAddr:   "127.0.0.1:3260",
+		}},
+	}})
+	mustWrite(t, filepath.Join(dir, "demo", ObservationLoopbackAttachArtifact), strings.Join([]string{
+		"issue=unsupported_cross_node_loopback_attach",
+		"app_node=m02",
+		"blockvolume_node=m01",
+		"frontend=127.0.0.1:3260",
+		"volume_id=pvc-loopback",
+		"replica_id=r1",
+		"reason=loopback frontend requires app pod and blockvolume on the same node",
+	}, "\n"))
+
+	cluster, err := BuildObservationFromBundle(ObservationBundleOptions{Dir: dir, VolumeID: "pvc-loopback"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cluster.Status != ObservationStatusBlocked {
+		t.Fatalf("cluster status=%s", cluster.Status)
+	}
+	if len(cluster.ManagedVolumes) != 1 {
+		t.Fatalf("managed_volumes=%+v", cluster.ManagedVolumes)
+	}
+	managed := cluster.ManagedVolumes[0]
+	if managed.Status != ManagedVolumeStatusBlocked || managed.ReasonCode != ReasonPublishTargetLoopbackCrossNode {
+		t.Fatalf("managed=%+v", managed)
+	}
+	action := findManagedVolumeAction(managed.Actions, ManagedVolumeActionReinstallExternalISCSI)
+	if action == nil {
+		t.Fatalf("missing external iSCSI dry-run action: %+v", managed.Actions)
+	}
+	if action.Decision != ManagedVolumeActionDecisionAllowed ||
+		action.Mode != ManagedVolumeActionModeDryRun ||
+		action.SideEffectClass != ManagedVolumeSideEffectSafeK8S ||
+		action.OwnerExecutor != "installer_or_operator" ||
+		action.EvidenceRequired != "loopback_cross_node_evidence" {
+		t.Fatalf("unexpected external iSCSI action evaluation: %+v", *action)
+	}
+
+	contract := ManagedVolumeOperatorContractFromProjection(managed)
+	operatorAction := findManagedVolumeOperatorAction(contract.AllowedActions, ManagedVolumeActionReinstallExternalISCSI)
+	if operatorAction == nil {
+		t.Fatalf("missing operator action: %+v", contract.AllowedActions)
+	}
+	if operatorAction.Decision != ManagedVolumeActionDecisionAllowed ||
+		operatorAction.MutationAllowed ||
+		operatorAction.EvidenceRequired != "loopback_cross_node_evidence" {
+		t.Fatalf("unexpected operator action contract: %+v", *operatorAction)
+	}
+
+	snapshot := BuildOperatorFoundationSnapshot(cluster)
+	snapshotAction := findManagedVolumeOperatorAction(snapshot.Volumes[0].AllowedActions, ManagedVolumeActionReinstallExternalISCSI)
+	if snapshotAction == nil {
+		t.Fatalf("missing snapshot action: %+v", snapshot.Volumes[0].AllowedActions)
+	}
+	if snapshotAction.Decision != ManagedVolumeActionDecisionAllowed ||
+		snapshotAction.MutationAllowed ||
+		snapshot.Mutation.MutationAllowed {
+		t.Fatalf("unexpected snapshot action/boundary: action=%+v mutation=%+v", *snapshotAction, snapshot.Mutation)
+	}
+
+	summary := RenderObservationReportSummary(cluster)
+	for _, want := range []string{
+		"volume=pvc-loopback status=blocked pvc=default/demo-pvc primary=r1@m01 frontend=127.0.0.1:3260",
+		"managed_volume=pvc-loopback status=blocked reason=publish_target_loopback_cross_node",
+		"managed_volume_condition=Ready status=False reason=publish_target_loopback_cross_node severity=warning",
+		"managed_volume_action=safe_k8s.reinstall_external_iscsi mode=dry_run side_effect=safe_k8s executor=installer_or_operator decision=allowed",
+		"managed_volume_action_evidence_required=safe_k8s.reinstall_external_iscsi loopback_cross_node_evidence",
+	} {
+		if !strings.Contains(summary, want) {
+			t.Fatalf("summary missing %q:\n%s", want, summary)
+		}
+	}
+
+	explain := RenderObservationExplainText(cluster)
+	for _, want := range []string{
+		"managed_volume_action safe_k8s.reinstall_external_iscsi mode=dry_run side_effect=safe_k8s executor=installer_or_operator decision=allowed",
+		"managed_volume_action_evidence_required safe_k8s.reinstall_external_iscsi loopback_cross_node_evidence",
+	} {
+		if !strings.Contains(explain, want) {
+			t.Fatalf("explain missing %q:\n%s", want, explain)
+		}
+	}
+
+	server := httptest.NewServer(NewObservationDashboardHandler(cluster))
+	defer server.Close()
+	assertDashboardEndpointContains(t, server.URL+"/"+ObservationOperatorSnapshotArtifact, `"reason_code": "publish_target_loopback_cross_node"`)
+	assertDashboardEndpointContains(t, server.URL+"/"+ObservationOperatorSnapshotArtifact, `"decision": "allowed"`)
+	assertDashboardEndpointContains(t, server.URL+"/"+ObservationOperatorSnapshotArtifact, `"mutation_allowed": false`)
+	assertDashboardEndpointContains(t, server.URL+"/"+ObservationOperatorSnapshotArtifact, `"evidence_required": "loopback_cross_node_evidence"`)
+	assertDashboardEndpointContains(t, server.URL+"/"+ObservationReportTextArtifact, "managed_volume=pvc-loopback status=blocked reason=publish_target_loopback_cross_node")
+}
+
+func TestObservationBundle_DeleteSafetyBlocksWithResidue(t *testing.T) {
+	dir := t.TempDir()
+	writeProductClusterEvidence(t, dir, []VolumeEvidence{{
+		VolumeID:          "pvc-delete",
+		Namespace:         "default",
+		PVCName:           "delete-pvc",
+		PVName:            "pv-delete",
+		ReplicationFactor: 1,
+		Status:            ObservationStatusOK,
+		PrimaryReplica:    "r1",
+		PrimaryNode:       "m01",
+		PublishTarget:     "192.168.1.181:3260",
+		Replicas: []ReplicaEvidence{{
+			ReplicaID:      "r1",
+			KubernetesNode: "m01",
+			Observed:       true,
+			Role:           "primary",
+			FrontendAddr:   "192.168.1.181:3260",
+		}},
+	}})
+	mustWrite(t, filepath.Join(dir, ObservationCleanupSummaryArtifact), strings.Join([]string{
+		"cleanup_status=failed",
+		"iscsi_residue_count=1",
+		"reason_codes=iscsi_node_records_present",
+	}, "\n"))
+	mustWrite(t, filepath.Join(dir, ObservationDeleteSafetyArtifact), strings.Join([]string{
+		"delete_requested=true",
+		"finalizer_present=true",
+		"volume_id=pvc-delete",
+		"pvc_name=delete-pvc",
+		"pv_name=pv-delete",
+	}, "\n"))
+
+	cluster, err := BuildObservationFromBundle(ObservationBundleOptions{Dir: dir, VolumeID: "pvc-delete"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	managed := managedProjectionForVolume(cluster.ManagedVolumes, "pvc-delete")
+	if managed.DeleteSafety == nil {
+		t.Fatalf("missing delete safety: %+v", managed)
+	}
+	if managed.Status != ManagedVolumeStatusBlocked ||
+		managed.ReasonCode != "iscsi_node_records_present" ||
+		managed.DeleteSafety.State != DeleteSafetyStateBlocked ||
+		managed.DeleteSafety.Decision != ManagedVolumeActionDecisionRejected ||
+		managed.DeleteSafety.FinalizerReleaseAllowed {
+		t.Fatalf("managed=%+v delete=%+v", managed, managed.DeleteSafety)
+	}
+	if !hasManagedVolumeAction(managed.Actions, ManagedVolumeActionVerifyCleanup) {
+		t.Fatalf("missing verify cleanup action: %+v", managed.Actions)
+	}
+	if condition := findObservationCondition(managed.Conditions, ConditionCleanupRequired); condition == nil ||
+		condition.Status != "True" ||
+		condition.Reason != "iscsi_node_records_present" {
+		t.Fatalf("cleanup condition=%+v", condition)
+	}
+
+	summary := RenderObservationReportSummary(cluster)
+	for _, want := range []string{
+		"managed_volume_delete_safety=pvc-delete state=blocked decision=rejected reason=iscsi_node_records_present release_allowed=false action=safe_k8s.release_swblockvolume_finalizer",
+		"managed_volume_delete_safety_safe_next_action=pvc-delete observe.verify_cleanup",
+		"managed_volume_action=safe_k8s.release_swblockvolume_finalizer mode=dry_run side_effect=safe_k8s executor=lifecycle_owner decision=rejected reason=iscsi_node_records_present",
+		"managed_volume_action_evidence_required=safe_k8s.release_swblockvolume_finalizer cleanup-summary.txt",
+	} {
+		if !strings.Contains(summary, want) {
+			t.Fatalf("summary missing %q:\n%s", want, summary)
+		}
+	}
+	explain := RenderObservationExplainText(cluster)
+	if !strings.Contains(explain, "managed_volume_delete_safety state=blocked decision=rejected reason=iscsi_node_records_present release_allowed=false action=safe_k8s.release_swblockvolume_finalizer") {
+		t.Fatalf("explain missing delete safety:\n%s", explain)
+	}
+	snapshot := BuildOperatorFoundationSnapshot(cluster)
+	if snapshot.Volumes[0].Status.DeleteSafety == nil ||
+		snapshot.Volumes[0].Status.DeleteSafety.State != DeleteSafetyStateBlocked {
+		t.Fatalf("snapshot delete safety=%+v", snapshot.Volumes[0].Status.DeleteSafety)
+	}
+	server := httptest.NewServer(NewObservationDashboardHandler(cluster))
+	defer server.Close()
+	assertDashboardEndpointContains(t, server.URL+"/"+ObservationOperatorSnapshotArtifact, `"delete_safety": {`)
+	assertDashboardEndpointContains(t, server.URL+"/"+ObservationOperatorSnapshotArtifact, `"state": "blocked"`)
+	assertDashboardEndpointContains(t, server.URL+"/"+ObservationOperatorSnapshotArtifact, `"reason": "iscsi_node_records_present"`)
+}
+
+func TestObservationBundle_DeleteSafetyUnknownWithoutCleanupEvidence(t *testing.T) {
+	dir := t.TempDir()
+	writeProductClusterEvidence(t, dir, []VolumeEvidence{{
+		VolumeID:          "pvc-missing-cleanup",
+		Namespace:         "default",
+		PVCName:           "missing-cleanup-pvc",
+		PVName:            "pv-missing-cleanup",
+		ReplicationFactor: 1,
+		Status:            ObservationStatusOK,
+		PrimaryReplica:    "r1",
+		PrimaryNode:       "m01",
+		PublishTarget:     "192.168.1.181:3260",
+		Replicas: []ReplicaEvidence{{
+			ReplicaID:      "r1",
+			KubernetesNode: "m01",
+			Observed:       true,
+			Role:           "primary",
+			FrontendAddr:   "192.168.1.181:3260",
+		}},
+	}})
+	mustWrite(t, filepath.Join(dir, ObservationDeleteSafetyArtifact), strings.Join([]string{
+		"delete_requested=true",
+		"finalizer_present=true",
+		"volume_id=pvc-missing-cleanup",
+		"pvc_name=missing-cleanup-pvc",
+		"pv_name=pv-missing-cleanup",
+	}, "\n"))
+
+	cluster, err := BuildObservationFromBundle(ObservationBundleOptions{Dir: dir, VolumeID: "pvc-missing-cleanup"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	managed := managedProjectionForVolume(cluster.ManagedVolumes, "pvc-missing-cleanup")
+	if managed.DeleteSafety == nil ||
+		managed.DeleteSafety.State != DeleteSafetyStateRequested ||
+		managed.DeleteSafety.Decision != ManagedVolumeActionDecisionUnknown ||
+		managed.DeleteSafety.Reason != ReasonCleanupEvidenceMissing ||
+		managed.DeleteSafety.FinalizerReleaseAllowed {
+		t.Fatalf("managed=%+v delete=%+v", managed, managed.DeleteSafety)
+	}
+	if managed.Status != ManagedVolumeStatusUnknown || managed.ReasonCode != ReasonCleanupEvidenceMissing {
+		t.Fatalf("missing cleanup evidence must not claim Ready: %+v", managed)
+	}
+
+	summary := RenderObservationReportSummary(cluster)
+	if !strings.Contains(summary, "managed_volume_delete_safety=pvc-missing-cleanup state=requested decision=unknown reason=cleanup_evidence_missing release_allowed=false action=safe_k8s.release_swblockvolume_finalizer") {
+		t.Fatalf("summary missing unknown delete safety:\n%s", summary)
+	}
+	if !strings.Contains(summary, "managed_volume_action=safe_k8s.release_swblockvolume_finalizer mode=dry_run side_effect=safe_k8s executor=lifecycle_owner decision=unknown reason=cleanup_evidence_missing") {
+		t.Fatalf("summary missing unknown lifecycle-owner action:\n%s", summary)
+	}
+	snapshot := BuildOperatorFoundationSnapshot(cluster)
+	if snapshot.Volumes[0].Status.DeleteSafety == nil ||
+		snapshot.Volumes[0].Status.DeleteSafety.Decision != ManagedVolumeActionDecisionUnknown ||
+		snapshot.Volumes[0].Status.DeleteSafety.State != DeleteSafetyStateRequested {
+		t.Fatalf("snapshot delete safety=%+v", snapshot.Volumes[0].Status.DeleteSafety)
+	}
+	server := httptest.NewServer(NewObservationDashboardHandler(cluster))
+	defer server.Close()
+	assertDashboardEndpointContains(t, server.URL+"/"+ObservationOperatorSnapshotArtifact, `"decision": "unknown"`)
+	assertDashboardEndpointContains(t, server.URL+"/"+ObservationOperatorSnapshotArtifact, `"reason": "cleanup_evidence_missing"`)
+}
+
+func TestObservationBundle_DeleteSafetyUnknownWithStaleCleanupEvidence(t *testing.T) {
+	dir := t.TempDir()
+	writeProductClusterEvidence(t, dir, []VolumeEvidence{{
+		VolumeID:          "pvc-stale-cleanup",
+		Namespace:         "default",
+		PVCName:           "stale-cleanup-pvc",
+		PVName:            "pv-stale-cleanup",
+		ReplicationFactor: 1,
+		Status:            ObservationStatusOK,
+		PrimaryReplica:    "r1",
+		PrimaryNode:       "m01",
+		PublishTarget:     "192.168.1.181:3260",
+		Replicas: []ReplicaEvidence{{
+			ReplicaID:      "r1",
+			KubernetesNode: "m01",
+			Observed:       true,
+			Role:           "primary",
+			FrontendAddr:   "192.168.1.181:3260",
+		}},
+	}})
+	mustWrite(t, filepath.Join(dir, ObservationCleanupSummaryArtifact), strings.Join([]string{
+		"cleanup_status=ok",
+		"cleanup_observed_at=2026-06-14T11:44:00Z",
+	}, "\n"))
+	mustWrite(t, filepath.Join(dir, ObservationDeleteSafetyArtifact), strings.Join([]string{
+		"delete_requested=true",
+		"finalizer_present=true",
+		"volume_id=pvc-stale-cleanup",
+		"pvc_name=stale-cleanup-pvc",
+		"pv_name=pv-stale-cleanup",
+	}, "\n"))
+
+	cluster, err := BuildObservationFromBundle(ObservationBundleOptions{Dir: dir, VolumeID: "pvc-stale-cleanup"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cluster.CapturedAt = time.Date(2026, 6, 14, 12, 0, 0, 0, time.UTC)
+	applyDeleteSafetySummary(&cluster, map[string]string{
+		"delete_requested":  "true",
+		"finalizer_present": "true",
+		"volume_id":         "pvc-stale-cleanup",
+		"pvc_name":          "stale-cleanup-pvc",
+		"pv_name":           "pv-stale-cleanup",
+	}, ObservationDeleteSafetyArtifact)
+
+	managed := managedProjectionForVolume(cluster.ManagedVolumes, "pvc-stale-cleanup")
+	if managed.DeleteSafety == nil ||
+		managed.DeleteSafety.State != DeleteSafetyStateRequested ||
+		managed.DeleteSafety.Decision != ManagedVolumeActionDecisionUnknown ||
+		managed.DeleteSafety.Reason != ReasonCleanupEvidenceStale ||
+		managed.DeleteSafety.FinalizerReleaseAllowed {
+		t.Fatalf("managed=%+v delete=%+v", managed, managed.DeleteSafety)
+	}
+
+	summary := RenderObservationReportSummary(cluster)
+	if !strings.Contains(summary, "managed_volume_delete_safety=pvc-stale-cleanup state=requested decision=unknown reason=cleanup_evidence_stale release_allowed=false action=safe_k8s.release_swblockvolume_finalizer") {
+		t.Fatalf("summary missing stale delete safety:\n%s", summary)
+	}
+	snapshot := BuildOperatorFoundationSnapshot(cluster)
+	if snapshot.Volumes[0].Status.DeleteSafety == nil ||
+		snapshot.Volumes[0].Status.DeleteSafety.Reason != ReasonCleanupEvidenceStale {
+		t.Fatalf("snapshot delete safety=%+v", snapshot.Volumes[0].Status.DeleteSafety)
+	}
+	server := httptest.NewServer(NewObservationDashboardHandler(cluster))
+	defer server.Close()
+	assertDashboardEndpointContains(t, server.URL+"/"+ObservationOperatorSnapshotArtifact, `"decision": "unknown"`)
+	assertDashboardEndpointContains(t, server.URL+"/"+ObservationOperatorSnapshotArtifact, `"reason": "cleanup_evidence_stale"`)
+}
+
+func TestObservationBundle_DeleteSafetyReleasableWithCleanCleanupEvidence(t *testing.T) {
+	dir := t.TempDir()
+	writeProductClusterEvidence(t, dir, []VolumeEvidence{{
+		VolumeID:          "pvc-clean-delete",
+		Namespace:         "default",
+		PVCName:           "clean-pvc",
+		PVName:            "pv-clean",
+		ReplicationFactor: 1,
+		Status:            ObservationStatusOK,
+		PrimaryReplica:    "r1",
+		PrimaryNode:       "m01",
+		PublishTarget:     "192.168.1.181:3260",
+		Replicas: []ReplicaEvidence{{
+			ReplicaID:      "r1",
+			KubernetesNode: "m01",
+			Observed:       true,
+			Role:           "primary",
+			FrontendAddr:   "192.168.1.181:3260",
+		}},
+	}})
+	mustWrite(t, filepath.Join(dir, ObservationCleanupSummaryArtifact), "cleanup_status=ok")
+	mustWrite(t, filepath.Join(dir, ObservationDeleteSafetyArtifact), strings.Join([]string{
+		"delete_requested=true",
+		"finalizer_present=true",
+		"volume_id=pvc-clean-delete",
+		"pvc_name=clean-pvc",
+		"pv_name=pv-clean",
+	}, "\n"))
+
+	cluster, err := BuildObservationFromBundle(ObservationBundleOptions{Dir: dir, VolumeID: "pvc-clean-delete"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	managed := managedProjectionForVolume(cluster.ManagedVolumes, "pvc-clean-delete")
+	if managed.DeleteSafety == nil ||
+		managed.DeleteSafety.State != DeleteSafetyStateReleasable ||
+		managed.DeleteSafety.Decision != ManagedVolumeActionDecisionAllowed ||
+		!managed.DeleteSafety.FinalizerReleaseAllowed {
+		t.Fatalf("managed=%+v delete=%+v", managed, managed.DeleteSafety)
+	}
+	if managed.Status == ManagedVolumeStatusBlocked {
+		t.Fatalf("clean delete evidence must not block managed volume: %+v", managed)
+	}
+	if condition := findObservationCondition(managed.Conditions, ConditionCleanupRequired); condition == nil ||
+		condition.Status != "False" ||
+		condition.Reason != ReasonCleanupVerified {
+		t.Fatalf("cleanup condition=%+v", condition)
+	}
+	summary := RenderObservationReportSummary(cluster)
+	if !strings.Contains(summary, "managed_volume_delete_safety=pvc-clean-delete state=releasable decision=allowed reason=finalizer_releasable release_allowed=true action=safe_k8s.release_swblockvolume_finalizer") {
+		t.Fatalf("summary missing releasable delete safety:\n%s", summary)
+	}
+	if !strings.Contains(summary, "managed_volume_action=safe_k8s.release_swblockvolume_finalizer mode=dry_run side_effect=safe_k8s executor=lifecycle_owner decision=allowed reason=finalizer_releasable") {
+		t.Fatalf("summary missing releasable lifecycle-owner action:\n%s", summary)
+	}
+	snapshot := BuildOperatorFoundationSnapshot(cluster)
+	if snapshot.Volumes[0].Status.DeleteSafety == nil ||
+		!snapshot.Volumes[0].Status.DeleteSafety.FinalizerReleaseAllowed {
+		t.Fatalf("snapshot delete safety=%+v", snapshot.Volumes[0].Status.DeleteSafety)
+	}
+}
+
+func TestObservationBundle_LoopbackAttachTargetsNamedVolume(t *testing.T) {
+	dir := t.TempDir()
+	writeProductClusterEvidence(t, dir, []VolumeEvidence{
+		{
+			VolumeID:       "pvc-a",
+			Namespace:      "default",
+			PVCName:        "pvc-a",
+			Status:         ObservationStatusOK,
+			PrimaryReplica: "r1",
+			PrimaryNode:    "m01",
+			PublishTarget:  "192.168.1.181:3260",
+		},
+		{
+			VolumeID:       "pvc-b",
+			Namespace:      "default",
+			PVCName:        "pvc-b",
+			Status:         ObservationStatusOK,
+			PrimaryReplica: "r1",
+			PrimaryNode:    "m01",
+			PublishTarget:  "127.0.0.1:3260",
+		},
+	})
+	mustWrite(t, filepath.Join(dir, "demo", ObservationLoopbackAttachArtifact), strings.Join([]string{
+		"issue=unsupported_cross_node_loopback_attach",
+		"app_node=m02",
+		"blockvolume_node=m01",
+		"frontend=127.0.0.1:3260",
+		"volume_id=pvc-b",
+		"replica_id=r1",
+	}, "\n"))
+
+	cluster, err := BuildObservationFromBundle(ObservationBundleOptions{Dir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cluster.ManagedVolumes) != 2 {
+		t.Fatalf("managed_volumes=%+v", cluster.ManagedVolumes)
+	}
+	statusByVolume := map[string]string{}
+	reasonByVolume := map[string]string{}
+	for _, managed := range cluster.ManagedVolumes {
+		statusByVolume[managed.VolumeID] = managed.Status
+		reasonByVolume[managed.VolumeID] = managed.ReasonCode
+	}
+	if statusByVolume["pvc-a"] != ManagedVolumeStatusReady || reasonByVolume["pvc-a"] != ReasonFirstVolumeVerified {
+		t.Fatalf("pvc-a status=%s reason=%s", statusByVolume["pvc-a"], reasonByVolume["pvc-a"])
+	}
+	if statusByVolume["pvc-b"] != ManagedVolumeStatusBlocked || reasonByVolume["pvc-b"] != ReasonPublishTargetLoopbackCrossNode {
+		t.Fatalf("pvc-b status=%s reason=%s", statusByVolume["pvc-b"], reasonByVolume["pvc-b"])
+	}
+}
+
+func TestManagedVolumeFactsFromEvidence_AllowsSameNodeLoopback(t *testing.T) {
+	projection := ProjectManagedVolume(ManagedVolumeFactsFromEvidence(VolumeEvidence{
+		VolumeID:       "pvc-loopback-ok",
+		Namespace:      "default",
+		PVCName:        "demo-pvc",
+		Status:         ObservationStatusOK,
+		PrimaryReplica: "r1",
+		PrimaryNode:    "m02",
+		PublishTarget:  "127.0.0.1:3260",
+		Replicas: []ReplicaEvidence{{
+			ReplicaID:      "r1",
+			KubernetesNode: "m02",
+			Observed:       true,
+			Role:           "primary",
+			FrontendAddr:   "127.0.0.1:3260",
+		}},
+	}, ManagedVolumeArtifactHints{}))
+
+	if projection.Status != ManagedVolumeStatusReady || projection.ReasonCode != ReasonFirstVolumeVerified {
+		t.Fatalf("same-node loopback projection=%+v", projection)
+	}
+}
+
 func TestObservationBundle_D6ReplayGate_FirstVolumeBlockedAndRecovery(t *testing.T) {
 	cases := []struct {
 		name       string
@@ -348,6 +894,15 @@ deployment.apps/sw-block-csi-controller 1/1 1 1 2m3s block-csi sw-block-csi:loca
 			},
 			wantStatus: ManagedVolumeStatusBlocked,
 			wantReason: ReasonCSINodeImagePullFailed,
+			wantEvent:  "Warning",
+		},
+		{
+			name: "status-endpoint-unreachable",
+			build: func(t *testing.T, dir string) {
+				writeStatusEndpointUnreachableInventory(t, dir)
+			},
+			wantStatus: ManagedVolumeStatusUnknown,
+			wantReason: ReasonStatusEndpointUnreachable,
 			wantEvent:  "Warning",
 		},
 		{
@@ -463,6 +1018,16 @@ deployment.apps/sw-block-csi-controller 1/1 1 1 2m3s block-csi sw-block-csi:loca
 			wantJSON:   `"reason_code": "csi_node_image_pull_failed"`,
 			wantText:   "managed_volume=pvc-blocked status=blocked reason=csi_node_image_pull_failed",
 			wantStatus: ManagedVolumeStatusBlocked,
+		},
+		{
+			name: "status-endpoint-unreachable",
+			build: func(t *testing.T, dir string) {
+				writeStatusEndpointUnreachableInventory(t, dir)
+			},
+			wantHTML:   ReasonStatusEndpointUnreachable,
+			wantJSON:   `"reason_code": "status_endpoint_unreachable"`,
+			wantText:   "managed_volume=pvc-unreachable status=unknown reason=status_endpoint_unreachable",
+			wantStatus: ManagedVolumeStatusUnknown,
 		},
 		{
 			name: "stage2-recovery",
@@ -593,6 +1158,47 @@ func mustWriteInventory(t *testing.T, dir string, inventory VolumeInventory) {
 		t.Fatal(err)
 	}
 	mustWrite(t, filepath.Join(dir, VolumeInventoryArtifact), string(raw))
+}
+
+func writeStatusEndpointUnreachableInventory(t *testing.T, dir string) {
+	t.Helper()
+	inventoryDir := filepath.Join(dir, "demo", "ops-inventory-status-unreachable")
+	inventory := BuildVolumeInventory(VolumeInventoryInput{
+		CapturedAt:      time.Date(2026, 5, 27, 12, 0, 0, 0, time.UTC),
+		Source:          ReportSource{Component: "component-test"},
+		ProductRevision: "product-rev",
+		Volumes: []VolumeInventoryVolumeInput{{
+			VolumeID:          "pvc-unreachable",
+			Namespace:         "default",
+			PVCName:           "demo-pvc",
+			PVName:            "pvc-unreachable",
+			ReplicationFactor: 1,
+			Replicas: []VolumeInventoryReplicaInput{{
+				ReplicaID:            "r1",
+				ServerID:             "node-r1",
+				NodeName:             "m01",
+				Protocol:             "iscsi",
+				FrontendAddress:      "192.168.1.181:3260",
+				StatusAddress:        "192.168.1.181:23260",
+				Observed:             true,
+				AuthorityRole:        "primary",
+				Healthy:              true,
+				FrontendPrimaryReady: true,
+				ReplicationRole:      "none",
+				Issues:               []string{"status_endpoint_unreachable=192.168.1.181:23260"},
+			}},
+		}},
+	})
+	mustWriteInventory(t, inventoryDir, inventory)
+}
+
+func findManagedVolumeOperatorAction(actions []ManagedVolumeOperatorAction, actionType string) *ManagedVolumeOperatorAction {
+	for i := range actions {
+		if actions[i].Type == actionType {
+			return &actions[i]
+		}
+	}
+	return nil
 }
 
 func mustWrite(t *testing.T, path, content string) {

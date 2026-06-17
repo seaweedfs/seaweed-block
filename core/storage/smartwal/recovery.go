@@ -5,6 +5,8 @@ import (
 	"hash/crc32"
 	"log"
 	"os"
+
+	"github.com/seaweedfs/seaweed-block/core/storage"
 )
 
 // runRecovery rebuilds the LSN frontier from a smartwal store's ring
@@ -18,16 +20,13 @@ import (
 //  2. Build a map LBA → highest-LSN record. Older records for the
 //     same LBA are dominated and ignored.
 //  3. For each surviving record:
-//       - Trim record: counts as recovered (its CRC32 covers a zero
-//         block; if the extent matches that, the trim is durable).
-//       - Write record: read the extent block, compute its CRC32,
-//         compare to record.DataCRC32. If they match, the write is
-//         durable and counts toward the recovered frontier. If they
-//         do NOT match, this is a torn pre-Sync write — skip the
-//         record so the LBA reads as whatever the extent currently
-//         holds (which is either the pre-write bytes, if the rollback
-//         path ran, or torn bytes if it didn't; either way the
-//         metadata no longer claims authority over them).
+//     - Trim record: counts as recovered (its CRC32 covers a zero
+//     block; if the extent matches that, the trim is durable).
+//     - Write record: read the extent block, compute its CRC32,
+//     compare to record.DataCRC32. If they match, the write is
+//     durable and counts toward the recovered frontier. If they
+//     do NOT match, fail closed with a WAL integrity error so the
+//     volume cannot report Ready=True after detecting corruption.
 //  4. The recovered frontier is the highest LSN among VALIDATED
 //     records, not just the highest LSN seen in the ring. A record
 //     whose CRC didn't verify cannot advance the frontier.
@@ -56,7 +55,7 @@ func runRecovery(r *ring, fd *os.File, extentBase int64, blockSize int) (uint64,
 		}
 	}
 
-	var recovered, torn int
+	var recovered int
 	var highestVerifiedLSN uint64
 	for _, rec := range lastWrite {
 		if rec.Flags&flagTrim != 0 {
@@ -69,10 +68,9 @@ func runRecovery(r *ring, fd *os.File, extentBase int64, blockSize int) (uint64,
 				return 0, fmt.Errorf("smartwal: recovery read trim LBA %d: %w", rec.LBA, err)
 			}
 			if crc32.ChecksumIEEE(data) != rec.DataCRC32 {
-				log.Printf("smartwal: recovery trim CRC mismatch LSN=%d LBA=%d — skipping",
-					rec.LSN, rec.LBA)
-				torn++
-				continue
+				detail := fmt.Sprintf("trim CRC mismatch LSN=%d LBA=%d", rec.LSN, rec.LBA)
+				log.Printf("smartwal: recovery %s — failing closed", detail)
+				return 0, storage.NewWALIntegrityFailure(nil, detail)
 			}
 			recovered++
 			if rec.LSN > highestVerifiedLSN {
@@ -88,10 +86,10 @@ func runRecovery(r *ring, fd *os.File, extentBase int64, blockSize int) (uint64,
 		}
 		actual := crc32.ChecksumIEEE(data)
 		if actual != rec.DataCRC32 {
-			log.Printf("smartwal: recovery CRC mismatch LSN=%d LBA=%d expected=%08x actual=%08x — skipping",
+			detail := fmt.Sprintf("CRC mismatch LSN=%d LBA=%d expected=%08x actual=%08x",
 				rec.LSN, rec.LBA, rec.DataCRC32, actual)
-			torn++
-			continue
+			log.Printf("smartwal: recovery %s — failing closed", detail)
+			return 0, storage.NewWALIntegrityFailure(nil, detail)
 		}
 		recovered++
 		if rec.LSN > highestVerifiedLSN {
@@ -99,7 +97,7 @@ func runRecovery(r *ring, fd *os.File, extentBase int64, blockSize int) (uint64,
 		}
 	}
 
-	log.Printf("smartwal: recovery: %d LBAs verified, %d torn, frontier=%d",
-		recovered, torn, highestVerifiedLSN)
+	log.Printf("smartwal: recovery: %d LBAs verified, frontier=%d",
+		recovered, highestVerifiedLSN)
 	return highestVerifiedLSN, nil
 }

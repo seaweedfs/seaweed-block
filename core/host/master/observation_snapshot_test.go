@@ -97,6 +97,43 @@ func TestMasterObservationSnapshot_MissingReplicaIsDegraded(t *testing.T) {
 	}
 }
 
+func TestMasterObservationSnapshot_PrimaryMustConfirmReadiness(t *testing.T) {
+	h := newTestMasterWithControllerConfig(t, t.TempDir(), authority.TopologyControllerConfig{
+		ExpectedSlotsPerVolume: 3,
+	})
+	defer closeTestMaster(t, h)
+	seedObservationSnapshotVolume(t, h)
+	seedRF3PlacementForServers(t, h, "pvc-a", "m01", "m02", "tp01")
+	ingestObservationSnapshotRF3(t, h, true, true, true)
+
+	if _, err := h.RunLifecycleProductTick(); err != nil {
+		t.Fatalf("product tick: %v", err)
+	}
+	line := waitAuthorityLine(t, h.Publisher(), "pvc-a")
+	ingestObservationSnapshotReplica(t, h, line.ReplicaID, false)
+
+	snapshot := h.ObservationSnapshot(time.Now().UTC())
+	if snapshot.Status != ops.ObservationStatusDegraded {
+		t.Fatalf("cluster status=%q want degraded", snapshot.Status)
+	}
+	if len(snapshot.Volumes) != 1 {
+		t.Fatalf("volumes=%d want 1", len(snapshot.Volumes))
+	}
+	volume := snapshot.Volumes[0]
+	if volume.Status == ops.ObservationStatusOK {
+		t.Fatalf("volume incorrectly reported ok after primary readiness block: %+v", volume)
+	}
+	if volume.Reason != ops.ReasonNoPromotionReadyCandidate {
+		t.Fatalf("volume reason=%q want %q: %+v", volume.Reason, ops.ReasonNoPromotionReadyCandidate, volume)
+	}
+	if !hasVolumeCondition(volume, "PrimaryReady", ops.ReasonNoPromotionReadyCandidate) {
+		t.Fatalf("volume conditions=%+v missing primary readiness block", volume.Conditions)
+	}
+	if !hasReplicaNotReady(volume.Replicas, line.ReplicaID) {
+		t.Fatalf("replicas=%+v missing not-ready primary %s", volume.Replicas, line.ReplicaID)
+	}
+}
+
 func TestMasterObservationSnapshot_NoLifecycleStoreReturnsEmptyOK(t *testing.T) {
 	h := newTestMaster(t, "")
 	defer closeTestMaster(t, h)
@@ -154,43 +191,57 @@ func seedObservationSnapshotVolume(t *testing.T, h *Host) {
 
 func ingestObservationSnapshotRF3(t *testing.T, h *Host, r1Ready, r2Ready, r3Ready bool) {
 	t.Helper()
-	now := time.Now().UTC()
-	for i, item := range []struct {
-		serverID string
-		replica  string
-		ip       string
-		ready    bool
+	for _, item := range []struct {
+		replica string
+		ready   bool
 	}{
-		{serverID: "m01", replica: "r1", ip: "192.168.1.181", ready: r1Ready},
-		{serverID: "m02", replica: "r2", ip: "192.168.1.184", ready: r2Ready},
-		{serverID: "tp01", replica: "r3", ip: "192.168.1.188", ready: r3Ready},
+		{replica: "r1", ready: r1Ready},
+		{replica: "r2", ready: r2Ready},
+		{replica: "r3", ready: r3Ready},
 	} {
 		if !item.ready {
 			continue
 		}
-		if err := h.ObservationHost().Ingest(authority.Observation{
-			ServerID:   item.serverID,
-			ObservedAt: now,
-			Server:     authority.ServerFact{Reachable: true, Eligible: true},
-			Slots: []authority.SlotFact{{
-				VolumeID:        "pvc-a",
-				ReplicaID:       item.replica,
-				DataAddr:        item.ip + ":19101",
-				CtrlAddr:        item.ip + ":19102",
-				Reachable:       true,
-				ReadyForPrimary: true,
-				Eligible:        true,
-				EvidenceScore:   uint64(30 - i),
-				Frontends: []authority.FrontendTargetFact{{
-					Protocol: "iscsi",
-					Addr:     item.ip + ":3260",
-					IQN:      "iqn.2026-05.io.seaweedfs:pvc-a",
-					LUN:      1,
-				}},
+		ingestObservationSnapshotReplica(t, h, item.replica, true)
+	}
+}
+
+func ingestObservationSnapshotReplica(t *testing.T, h *Host, replica string, ready bool) {
+	t.Helper()
+	item, ok := map[string]struct {
+		serverID string
+		ip       string
+		score    uint64
+	}{
+		"r1": {serverID: "m01", ip: "192.168.1.181", score: 30},
+		"r2": {serverID: "m02", ip: "192.168.1.184", score: 29},
+		"r3": {serverID: "tp01", ip: "192.168.1.188", score: 28},
+	}[replica]
+	if !ok {
+		t.Fatalf("unknown replica %s", replica)
+	}
+	if err := h.ObservationHost().Ingest(authority.Observation{
+		ServerID:   item.serverID,
+		ObservedAt: time.Now().UTC(),
+		Server:     authority.ServerFact{Reachable: true, Eligible: true},
+		Slots: []authority.SlotFact{{
+			VolumeID:        "pvc-a",
+			ReplicaID:       replica,
+			DataAddr:        item.ip + ":19101",
+			CtrlAddr:        item.ip + ":19102",
+			Reachable:       true,
+			ReadyForPrimary: ready,
+			Eligible:        true,
+			EvidenceScore:   item.score,
+			Frontends: []authority.FrontendTargetFact{{
+				Protocol: "iscsi",
+				Addr:     item.ip + ":3260",
+				IQN:      "iqn.2026-05.io.seaweedfs:pvc-a",
+				LUN:      1,
 			}},
-		}); err != nil {
-			t.Fatalf("ingest %s: %v", item.replica, err)
-		}
+		}},
+	}); err != nil {
+		t.Fatalf("ingest %s: %v", replica, err)
 	}
 }
 
@@ -212,6 +263,24 @@ func hasReplicaCondition(replicas []ops.ReplicaEvidence, replicaID, reason strin
 			if condition.Reason == reason {
 				return true
 			}
+		}
+	}
+	return false
+}
+
+func hasVolumeCondition(volume ops.VolumeEvidence, conditionType, reason string) bool {
+	for _, condition := range volume.Conditions {
+		if condition.Type == conditionType && condition.Reason == reason {
+			return true
+		}
+	}
+	return false
+}
+
+func hasReplicaNotReady(replicas []ops.ReplicaEvidence, replicaID string) bool {
+	for _, replica := range replicas {
+		if replica.ReplicaID == replicaID && replica.Observed && replica.Role == "primary" && !replica.CandidateReady {
+			return true
 		}
 	}
 	return false

@@ -31,11 +31,16 @@ The quickstart proves:
   read-only dashboard are available.
 - The report/dashboard include `operator-snapshot.json`, a read-only
   operator-facing status projection. It is not a mutating operator.
+- The gated operator-status path can publish the same read-only vocabulary into
+  `SwBlockCluster` / `SwBlockVolume` `.status` and Kubernetes Events. It is
+  status/events only and does not create CR objects or mutate storage.
 - The example resources and host-side residue are cleaned up.
 
 It does not prove production HA, backup/restore, broad upgrade safety, broad
-platform compatibility, mutating operator lifecycle, mutating admin workflows,
-or production UI.
+platform compatibility, broad mutating operator lifecycle, mutating admin
+workflows, or production UI. The separate v0.5 beta-candidate lifecycle-owner
+path is limited to the Seaweed Block `SwBlockVolume` protection finalizer and
+requires matching release images.
 
 ## Prerequisites
 
@@ -85,8 +90,8 @@ From the repository root:
 export KUBECONFIG="${KUBECONFIG:-/etc/rancher/k3s/k3s.yaml}"
 sw-block ops generate-helm-values \
   --out values.day1.yaml \
-  --image ghcr.io/seaweedfs/seaweed-block:sha-6260e46fd3be \
-  --csi-image ghcr.io/seaweedfs/seaweed-block-csi:sha-6260e46fd3be
+  --image ghcr.io/seaweedfs/seaweed-block:sha-dc2972d0059b \
+  --csi-image ghcr.io/seaweedfs/seaweed-block-csi:sha-dc2972d0059b
 ```
 
 The `KUBECONFIG` fallback above is the common k3s path. Non-k3s users should
@@ -134,18 +139,23 @@ sw-block ops generate-helm-values \
   --csi-image ghcr.io/seaweedfs/seaweed-block-csi:sha-<commit>
 ```
 
-Current validated alpha image tag:
-`sha-6260e46fd3be`.
+Current validated published quickstart image tag:
+`sha-dc2972d0059b`.
+
+This tag covers the v0.4 read-only/status foundation path. The v0.5
+bounded lifecycle-owner path requires matching `sw-block` and `sw-block-csi`
+images published from the Phase 44 release commit; do not use the older
+quickstart tag to validate lifecycle-owner behavior.
 
 Published image digests:
 
 ```text
 seaweed-block
-  index:       sha256:ef9c60f82c36f22360b10faafd32caf807f98ac0ea86c0365c0d0836e5f67110
-  linux/amd64: sha256:36481cbc1fc98fafdfa386823e0e5906785cb6f35748ef698ff1cec39bb40464
+  index:       sha256:b8da5ca4e2bbe2f0f630fee0468790c444362615d68807a1be31fd237c84928f
+  linux/amd64: sha256:677f6321ea5199b14792345b8691358860bb9ca7376f4e4a2f3a7c0113d5db9b
 seaweed-block-csi
-  index:       sha256:b160ceee874dc6743074ef6b6735ccf05914c1de5951972922f6d3779bc73592
-  linux/amd64: sha256:82e41b7ef92ad8db38b6927e334cc1d564b1012ad916e9bde2e882cece680be8
+  index:       sha256:b5942cd68d28aecdfebec1f1e5ec55a9cafe746169fee3b6c35916c93fffcaa6
+  linux/amd64: sha256:1fc636a4e0e63cc8cbee39e6775053c5d1aba7213ca9182a084e1bb6fe71474c
 ```
 
 Mutable `:alpha` is a smoke/demo tag only. Do not use it as release evidence

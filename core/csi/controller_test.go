@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 
 	csipb "github.com/container-storage-interface/spec/lib/go/csi"
@@ -57,6 +58,16 @@ type stubMetadataResolver struct {
 func (s *stubMetadataResolver) ResolvePVCUID(_ context.Context, name, namespace string) (string, error) {
 	s.calls = append(s.calls, namespace+"/"+name)
 	return s.uid, s.err
+}
+
+type stubVolumeRegistrar struct {
+	err   error
+	calls []VolumeSpec
+}
+
+func (s *stubVolumeRegistrar) EnsureVolumeObject(_ context.Context, spec VolumeSpec) error {
+	s.calls = append(s.calls, spec)
+	return s.err
 }
 
 func TestControllerPublish_ReturnsISCSIPublishContextFromTargetFact(t *testing.T) {
@@ -276,6 +287,76 @@ func TestG15c_ControllerCreateVolume_RecordsDesiredIntentOnly(t *testing.T) {
 	}
 	if err := authorityContextGuard(vol.GetVolumeContext()); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestPhase44_ControllerCreateVolume_RegistersSwBlockVolumeObjectAfterProvisioning(t *testing.T) {
+	prov := &stubProvisioner{}
+	registrar := &stubVolumeRegistrar{}
+	s := NewControllerServerWithProvisionerMetadataAndRegistrar(&stubLookup{}, prov, nil, registrar)
+
+	_, err := s.CreateVolume(context.Background(), &csipb.CreateVolumeRequest{
+		Name: "pvc-a",
+		CapacityRange: &csipb.CapacityRange{
+			RequiredBytes: 1 << 30,
+		},
+		Parameters: map[string]string{
+			"replicationFactor":                         "1",
+			"csi.storage.k8s.io/pvc/name":               "demo-pvc",
+			"csi.storage.k8s.io/pvc/namespace":          "default",
+			"csi.storage.k8s.io/pvc/uid":                "uid-123",
+			"csi.storage.k8s.io/pv/name":                "pvc-a",
+			"csi.storage.k8s.io/storageclass/name":      "sw-block-dynamic",
+			"csi.storage.k8s.io/serviceAccount.name":    "ignored",
+			"csi.storage.k8s.io/serviceAccount.secrets": "ignored",
+		},
+		VolumeCapabilities: []*csipb.VolumeCapability{
+			testVolumeCapability(),
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateVolume: %v", err)
+	}
+	if len(prov.calls) != 1 {
+		t.Fatalf("provisioner calls=%d want 1", len(prov.calls))
+	}
+	if len(registrar.calls) != 1 {
+		t.Fatalf("registrar calls=%d want 1", len(registrar.calls))
+	}
+	got := registrar.calls[0]
+	if got.VolumeID != "pvc-a" || got.PVCName != "demo-pvc" || got.PVCNamespace != "default" || got.PVCUID != "uid-123" || got.StorageClass != "sw-block-dynamic" {
+		t.Fatalf("registered spec=%+v", got)
+	}
+}
+
+func TestPhase44_ControllerCreateVolume_FailsWhenSwBlockVolumeRegistrationFails(t *testing.T) {
+	prov := &stubProvisioner{}
+	registrar := &stubVolumeRegistrar{err: errors.New("api rejected object")}
+	s := NewControllerServerWithProvisionerMetadataAndRegistrar(&stubLookup{}, prov, nil, registrar)
+
+	_, err := s.CreateVolume(context.Background(), &csipb.CreateVolumeRequest{
+		Name: "pvc-a",
+		CapacityRange: &csipb.CapacityRange{
+			RequiredBytes: 1 << 30,
+		},
+		Parameters: map[string]string{
+			"replicationFactor":                "1",
+			"csi.storage.k8s.io/pvc/name":      "demo-pvc",
+			"csi.storage.k8s.io/pvc/namespace": "default",
+		},
+		VolumeCapabilities: []*csipb.VolumeCapability{
+			testVolumeCapability(),
+		},
+	})
+	if err == nil {
+		t.Fatal("expected registration failure")
+	}
+	st, _ := status.FromError(err)
+	if st.Code() != codes.Internal || !strings.Contains(st.Message(), "ensure SwBlockVolume object") {
+		t.Fatalf("error=%v", err)
+	}
+	if len(prov.calls) != 1 {
+		t.Fatalf("provisioner should be called before registration: %d", len(prov.calls))
 	}
 }
 

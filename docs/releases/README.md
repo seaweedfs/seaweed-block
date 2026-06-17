@@ -11,6 +11,10 @@ is still outside the supported boundary.
 - [v0.3.2 Alpha — Multi-Volume HA Independence](v0.3.2-alpha.md)
 - [v0.3.3 Alpha — Productized Operations And Read-Only Operator Foundation](v0.3.3-alpha.md)
 - [v0.3.4 Alpha — Status Surface Hardening And Strict New-User Path](v0.3.4-alpha.md)
+- [v0.3.5 Alpha — Failure-Path Evidence And Cleanup Hardening](v0.3.5-alpha.md)
+- [v0.3.6 Alpha — Test Realism And Dirty-Failure Hardening](v0.3.6-alpha.md)
+- [v0.4 Beta — Kubernetes-Native Read-Only Operator Foundation](v0.4-beta-candidate.md)
+- [v0.5 Beta Candidate — Bounded SwBlockVolume Lifecycle Owner](v0.5-beta-candidate.md)
 
 ## Version Boundary
 
@@ -39,8 +43,27 @@ is still outside the supported boundary.
   happy/blocked/restart/multi-volume/stale-evidence surfaces agree, support
   bundle replay prefers the freshest evidence, and the documented cleanup path
   scrubs iSCSI node DB residue.
+- `v0.3.5-alpha` hardens failure-path evidence and cleanup confidence:
+  blocked CSI image-pull evidence, status endpoint unreachable replay, corrupt
+  evidence replay, support-bundle/failure-snapshot diagnostics, and cleanup
+  residue gates all follow the negative-first rule.
+- `v0.3.6-alpha` hardens test realism and dirty-failure behavior:
+  live status endpoint unreachable, restart convergence, and real V3 SmartWAL
+  corruption gates prove no false `Ready=True` is projected from weak or dirty
+  evidence.
+- `v0.4-beta` adds a Kubernetes-native read-only status foundation and
+  actionability layer: `SwBlockCluster` and `SwBlockVolume` CRDs, status-only
+  reconciliation, Conditions, Events, node readiness, support evidence refs,
+  cleanup/delete-safety visibility, install drift visibility, safe next-step
+  hints, cross-surface agreement, CRD/RBAC conformance gates, and read-only RBAC
+  proof. It is not a mutating operator lifecycle.
+- `v0.5-beta-candidate` adds the first bounded mutating lifecycle-owner:
+  CSI-created `SwBlockVolume` identity CRs, a Seaweed Block protection
+  finalizer, admission-confined finalizer add/release, evidence-driven
+  delete-safety hold/release, multi-volume isolation, and zero-residue close
+  gates. It does not execute cleanup or own PVC/PV/workload deletion.
 
-Mutating operator packaging is not included in these alphas. v0.3 introduces
-Helm as the preferred Kubernetes alpha install path; the script path remains
-available for development and fallback validation. The first operator-facing
-surface is read-only/status-first.
+v0.3 introduces Helm as the preferred Kubernetes alpha install path; the script
+path remains available for development and fallback validation. v0.4 is the
+read-only/status-first operator surface. v0.5 beta candidate adds only a bounded
+`SwBlockVolume` protection-finalizer lifecycle, not broad operator automation.

@@ -123,6 +123,9 @@ type Host struct {
 	readyMarkerMu        sync.Mutex
 	supportingReadyMarks map[string]struct{}
 
+	localReadinessBlocked atomic.Bool
+	localReadinessReason  atomic.Value // string
+
 	// lastOtherLine captures the most recent AssignmentFact that
 	// named a REPLICA OTHER than self for this host's VolumeID.
 	// Populated when the master's volume-scoped subscription
@@ -227,6 +230,35 @@ func New(cfg Config) (*Host, error) {
 	// in when master names another replica at a newer lineage.
 	h.view = NewAdapterProjectionView(adpt, cfg.VolumeID, cfg.ReplicaID, h)
 	return h, nil
+}
+
+// BlockLocalReadiness prevents assignment facts from entering the local
+// adapter while preserving heartbeat/status serving. Use this when local
+// storage evidence says this replica must not publish Healthy.
+func (h *Host) BlockLocalReadiness(reason string) {
+	if reason == "" {
+		reason = "local readiness blocked"
+	}
+	h.localReadinessReason.Store(reason)
+	h.localReadinessBlocked.Store(true)
+}
+
+// ClearLocalReadinessBlock allows future assignment stream replays to enter
+// the adapter after local startup/recovery evidence is clean.
+func (h *Host) ClearLocalReadinessBlock() {
+	h.localReadinessReason.Store("")
+	h.localReadinessBlocked.Store(false)
+}
+
+func (h *Host) localReadinessBlock() (bool, string) {
+	if !h.localReadinessBlocked.Load() {
+		return false, ""
+	}
+	reason, _ := h.localReadinessReason.Load().(string)
+	if reason == "" {
+		reason = "local readiness blocked"
+	}
+	return true, reason
 }
 
 // SetReplicationVolume installs (or replaces) the per-volume
@@ -539,6 +571,11 @@ func (h *Host) applyFact(fact *control.AssignmentFact) {
 		// unhealthy even if its local engine is otherwise caught up.
 		h.recordOtherLine(fact)
 		if info, ok := decodeSelfPeerAssignment(fact, h.cfg.ReplicaID); ok {
+			if blocked, reason := h.localReadinessBlock(); blocked {
+				h.log.Printf("blockvolume: volume %s local readiness blocked (%s); NOT admitting supporting replica %s at epoch=%d EV=%d",
+					h.cfg.VolumeID, reason, info.ReplicaID, info.Epoch, info.EndpointVersion)
+				return
+			}
 			h.adpt.OnAssignment(info)
 			h.log.Printf("blockvolume: volume %s admitted as SUPPORTING replica %s at epoch=%d EV=%d behind primary %s; frontend remains gated",
 				h.cfg.VolumeID, info.ReplicaID, info.Epoch, info.EndpointVersion, fact.ReplicaId)
@@ -550,6 +587,12 @@ func (h *Host) applyFact(fact *control.AssignmentFact) {
 		}
 		h.log.Printf("blockvolume: volume %s authority is now %s@%d (not this replica %s); recording supersede, not applying to adapter",
 			h.cfg.VolumeID, fact.ReplicaId, fact.Epoch, h.cfg.ReplicaID)
+		return
+	}
+
+	if blocked, reason := h.localReadinessBlock(); blocked {
+		h.log.Printf("blockvolume: volume %s local readiness blocked (%s); NOT applying primary assignment %s@%d to adapter",
+			h.cfg.VolumeID, reason, fact.ReplicaId, fact.Epoch)
 		return
 	}
 

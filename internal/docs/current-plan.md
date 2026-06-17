@@ -1,186 +1,237 @@
-# Current Plan: Phase 25 - v0.3 Helm + Observable First-Volume Release
+# Current Plan: Phase 44 - Delete Lifecycle Close Gate
 
-Status: closed, 100% complete. Plan simplified and closed on 2026-05-22.
+Status: closed on 2026-06-17.
 
-Reference:
+Branch: `phase41-lifecycle-owner-foundation`
 
-- `internal/docs/ref/product-delivery-review-simple-stable-observable-block.md`
+Previous phase: Phase 43 is closed in
+`internal/docs/finished-plans/phase43_finishedplan_bounded_finalizer_lifecycle.md`.
 
 ## Product Goal
 
-Deliver a simple, stable, observable Kubernetes block alpha:
+Validate the complete user-visible delete lifecycle as one product path:
 
 ```text
-Helm install
--> first PVC
--> writer/reader data check
--> read-only report/dashboard
--> clean uninstall
--> docs and release note match the exact claim
+install -> first PVC -> SwBlockVolume protected -> delete requested ->
+blocked/unknown evidence holds finalizer -> clean evidence releases finalizer ->
+object deletion completes -> uninstall leaves zero residue
 ```
 
-This phase was release reconciliation and hardening. It had two steps only:
+Phase 43 proved add and release independently. Phase 44 proves the integrated
+operation behaves as a coherent product capability across Kubernetes objects,
+CRD status, Events, report/dashboard/explain surfaces, and cleanup.
+
+## Why This Is Next
+
+The operation layer is only useful if separate pieces compose:
 
 ```text
-D1: docs + release claim alignment - PASS
-D2: gate replay + close evidence - PASS
+live object state + status evidence + action boundary + admitted mutation +
+user-facing explanation + cleanup
 ```
+
+Phase 44 is the close gate before moving to a broader release or larger
+features. It should not add rebuild, failback, backup, or NVMe scope.
 
 ## Scope Contract
 
 | In | Out |
 |---|---|
-| Helm release hardening | CRD/operator implementation |
-| README / quickstart / release note alignment | new mutating admin action |
-| single-node and multi-node Helm gate replay | new protocol capability |
-| dashboard/report evidence consistency | model or protocol refactor |
-| immutable image / digest documentation | backup/snapshot/restore |
-| cleanup and host residue verification | rebuild/reintegration/failback |
+| one first-volume user path | returned-replica rebuild |
+| SwBlockVolume finalizer add and release | failback / repair |
+| delete-safety hold/release status | automatic cleanup execution |
+| CRD status/Event/report/dashboard agreement | PVC/PV/workload mutation |
+| zero-residue uninstall verification | backup/snapshot/restore |
+| multi-volume isolation smoke if cheap | NVMe ANA parity |
 
-Principle: Phase 25 may take small bug fixes only when they block the v0.3 user
-path. No model rewrite, no operator controller, no broad architecture refactor.
+Allowed mutation:
 
-## Current Closed Inputs
+```text
+lifecycle-owner may patch only SwBlockVolume.metadata.finalizers.
+operator-status remains status/events-only.
+```
 
-As of 2026-05-22:
+## D1: Release Artifact / Image Alignment
 
-- Phase 20 Day-1 activation: closed.
-- Phase 22 ManagedVolume model: closed for scope.
-- Phase 23 operations surface/operator-readiness contract: closed for scope.
-- Phase 24 hosted read-only dashboard: closed for scope.
-
-## D1: Docs + Release Claim Alignment
-
-Goal: make the user-facing product story match the current code and gates.
-
-Status: PASS on 2026-05-22.
-
-Artifacts:
-
-- `internal/docs/product-roadmap.md`
-- `README.md`
-- `docs/quickstart-kubernetes.md`
-- `docs/releases/v0.3-alpha.md`
-- `docs/releases/README.md`
-
-Required content:
-
-- v0.3 is Helm alpha install + first PVC + read-only report/dashboard +
-  cleanup.
-- Script activation remains alpha/dev fallback, not the preferred v0.3 story.
-- `sw-block ops generate-helm-values` input/output is explained.
-- Single-node behavior is clear: one selected node, loopback mode.
-- Multi-node behavior is clear: Ready schedulable nodes, non-loopback
-  InternalIP, external iSCSI/status, CHAP.
-- `sw-block ops report` vs `sw-block ops dashboard` is clear:
-  - report writes static artifacts,
-  - dashboard serves the same read-only evidence locally.
-- Immutable `sha-<commit>` images are recommended for QA/PM/release proof.
-- Mutable `:alpha` is documented as smoke/demo only.
-- Non-claims are explicit:
-  - not production-ready,
-  - no operator lifecycle,
-  - no mutating admin UI/actions,
-  - no backup/snapshot/restore,
-  - no upgrade/rollback safety,
-  - no broad performance/RTO/SLO claim,
-  - no new recovery scope beyond already gated evidence.
+Goal: ensure the shipped image and chart can actually run the lifecycle-owner.
 
 Acceptance:
 
 ```text
-README + quickstart + release note describe the same v0.3 claim.
-No doc claims a capability without a gate.
-Roadmap marks Phase 22/23/24 closed and Phase 25/v0.3 closed.
+[x] candidate image includes sw-block ops lifecycle-owner
+[x] chart renders lifecycleOwner.create=false by default
+[x] lifecycleOwner.create=true installs Deployment/RBAC/VAP
+[x] no chart flag/image skew
 ```
 
-## D2: Gate Replay + Close Evidence
+Fail if the chart references a subcommand or flag absent from the image.
 
-Goal: prove the documented v0.3 path is runnable and self-explaining.
+## D2: First PVC Creates Protected SwBlockVolume
 
-Status: PASS on 2026-05-22.
+Goal: a normal Day-1 PVC path creates an observable, protected
+`SwBlockVolume`.
 
-Evidence:
+Ownership boundary:
 
-- Single-node Helm gate: `20260522-031019-ef25`, PASS, 34/34 actions.
-- Multi-node Helm gate: `20260522-031124-0a44`, PASS, 51/51 actions.
-- Documented Go CLI generator gate: `20260522-091642-b9a7`, PASS, 31/31
-  actions.
-- Both runs record immutable image tags and digests.
-- Both runs produce `status/report/index.html`, `cluster-evidence.json`,
-  `timeline.jsonl`, and `summary.txt`.
-- Both runs finish with `cleanup_status=ok`, zero k8s residue, zero process
-  residue, and zero hostPath residue.
-
-Required gates:
-
-- Helm single-node first-volume gate:
-  - `testops/scenarios/helm-single-node-first-volume-chain.yaml`
-  - expected: PASS
-- Helm multi-node first-volume gate:
-  - `testops/scenarios/helm-first-volume-chain.yaml`
-  - expected: PASS
-- Report/dashboard consistency:
-  - `summary.txt`
-  - `index.html`
-  - `cluster-evidence.json`
-  - `timeline.jsonl`
-  - dashboard endpoint serving same evidence when applicable
-- Image identity:
-  - image tag recorded,
-  - digest recorded,
-  - release validation uses immutable tag.
-- Cleanup:
-  - Helm release removed,
-  - StorageClass/demo PVC/pods removed,
-  - no active iSCSI sessions,
-  - no sw-block processes,
-  - no test-scoped residue.
+```text
+CSI controller creates/updates SwBlockVolume metadata/spec identity after
+CreateVolume succeeds. operator-status writes only .status. lifecycle-owner
+patches only metadata.finalizers.
+```
 
 Acceptance:
 
 ```text
-single-node Helm gate PASS
-multi-node Helm gate PASS
-report/dashboard reason codes agree
-image tag/digest evidence present
-cleanup clean
-close report written
-finished plan written
+[x] Helm install succeeds with operatorStatus + lifecycleOwner enabled
+[x] first PVC writer/reader passes
+[x] SwBlockVolume exists for the PVC
+[x] lifecycle-owner adds exactly one protection finalizer
+[x] operator-status writes Ready=True / first_volume_verified
+[x] finalizer_added Event is bounded
 ```
 
-Close artifacts:
+## D3: Delete Request Holds On Unsafe Evidence
 
-- `internal/docs/qa-assignments/v0.3-helm-observable-first-volume-close-report.md`
-- `internal/docs/finished-plans/phase25_finishedplan_v0.3_helm_observable_first_volume.md`
+Goal: a delete request cannot complete while evidence is unsafe.
 
-## Claim Matrix
-
-| Area | Can Claim For v0.3 | Cannot Claim |
-|---|---|---|
-| Install | Helm alpha install on supported k3s/Kubernetes labs | production installer, broad distro support |
-| First Volume | PVC create, writer/reader data check, clean report | performance/SLO, upgrade safety |
-| Recovery | Existing gated RF3 recovery evidence remains valid | new recovery scope beyond prior gates |
-| Dashboard | local read-only dashboard/report over product evidence | production hosted UI, mutating admin UI |
-| Cleanup | documented uninstall + host cleanup verification | fully automated operator lifecycle |
-| Images | immutable tag/digest release validation | mutable `:alpha` as release proof |
-
-## Risks
-
-| Risk | Mitigation | Fallback |
-|---|---|---|
-| `:alpha` image drift | release docs require immutable `sha-<commit>` tags for QA/PM | use local/internal images for dev gates |
-| single-node vs three-node behavior confusion | quickstart explains loopback vs external iSCSI/CHAP values | provide separate single-node and multi-node commands |
-| docs drift from implementation | close gate checks README, quickstart, release note against gate artifacts | block release note until docs are corrected |
-| dashboard/report reason mismatch | compare summary, HTML, JSON, explain/dashboard reason codes | fix projection consistency only; no model rewrite |
-| cleanup residue after Helm uninstall | host cleanup verification is required | document manual cleanup command and keep release blocked until clean |
-
-## Dependency Order
+Acceptance:
 
 ```text
-D1 docs alignment
--> D2 gate replay
--> close report
+[x] deleting SwBlockVolume with missing cleanup evidence remains Terminating
+[x] blocked residue evidence remains Terminating
+[x] stale cleanup evidence remains Terminating
+[x] status.deleteSafety decision is unknown/rejected as appropriate
+[x] Events explain the hold reason
+[x] lifecycle-owner does not run cleanup
 ```
 
-Do not start operator/CRD implementation until this phase closes.
+Fail if unsafe evidence releases the finalizer.
+
+Implementation note:
+
+```text
+operator-status now lists live SwBlockVolume objects and projects deleteSafety
+for objects with deletionTimestamp. Cleanup remains external evidence: pass the
+verifier output with --cleanup-summary; operator-status reads it, never runs it.
+```
+
+## D4: Clean Evidence Releases And Deletion Completes
+
+Goal: clean, fresh evidence releases only the Seaweed Block finalizer.
+
+Acceptance:
+
+```text
+[x] clean cleanup evidence sets decision=allowed state=releasable
+[x] lifecycle-owner removes only block.seaweedfs.com/swblockvolume-protection
+[x] foreign finalizers are preserved if present
+[x] SwBlockVolume deletion completes after release
+[x] finalizer_released Event is bounded
+```
+
+Fail if any non-finalizer field changes.
+
+## D5: Surface Agreement
+
+Goal: users see the same answer everywhere.
+
+Acceptance:
+
+```text
+[x] kubectl get/describe SwBlockVolume status agrees with ops report
+[x] operator-snapshot agrees with CRD status
+[x] dashboard /operator-snapshot.json agrees
+[x] ops explain names the same hold/release reason
+[x] no false Ready=True appears in blocked/unknown delete states
+```
+
+## D6: Multi-Volume Isolation Smoke
+
+Goal: one deleting volume does not contaminate another volume.
+
+Scenario:
+
+```text
+A deleting + blocked residue -> held
+B deleting + clean evidence -> released
+C normal ready volume -> remains ready, protected, no deleteSafety contamination
+```
+
+Acceptance:
+
+```text
+[x] A held does not block B release
+[x] B release does not remove A/C finalizer
+[x] C remains Ready=True and protected
+[x] Events/status use the correct volume identity
+```
+
+## D7: Close / Release Decision
+
+Phase 44 can close only if:
+
+```text
+[x] D1-D6 PASS on a clean VAP-capable lab
+[x] lifecycle-owner has no cleanup/PVC/PV/workload/storage mutation power
+[x] operator-status remains status/events-only
+[x] final cleanup verifier reports zero residue
+[x] release notes and README claim only bounded SwBlockVolume finalizer
+    lifecycle, not automatic cleanup or broad lifecycle automation
+```
+
+## Current Progress
+
+- Phase 44 finished plan:
+  `internal/docs/finished-plans/phase44_finishedplan_delete_lifecycle_close_gate.md`.
+- v0.5 beta candidate release note:
+  `docs/releases/v0.5-beta-candidate.md`.
+- D2 implementation landed in `e56b844`: normal CSI CreateVolume registers the
+  SwBlockVolume identity CR when operator-status or lifecycle-owner surfaces
+  are enabled.
+- D2 QA PASS:
+  `internal/docs/qa-assignments/phase44-d2-integrated-swblockvolume-cr-qa-signoff.md`.
+- D3/D4 implementation added in `8669d4a`: operator-status consumes live deleting
+  SwBlockVolume objects plus externally generated `cleanup-summary.txt`
+  evidence to publish deleteSafety hold/release status. It still does not patch
+  finalizers, run cleanup, or mutate PVC/PV/workloads/storage.
+- D3/D4 QA PASS:
+  `internal/docs/qa-assignments/phase44-d3-d4-delete-lifecycle-close-gate-qa-signoff.md`.
+- D3/D4 polish added after QA: report/explain/dashboard can consume
+  `--cleanup-summary` in live in-cluster mode, and operator-status skips a
+  disappeared SwBlockVolume CR instead of aborting the whole reconcile.
+- D5/D6 QA PASS:
+  `internal/docs/qa-assignments/phase44-d5-d6-surface-isolation-close-qa-signoff.md`.
+- D5/D6 polish added after QA: `ops explain volume --cleanup-summary` can now
+  explain a deleting SwBlockVolume even when the live inventory no longer
+  contains the managed volume.
+- Local checks pass:
+  `go test ./core/csi ./cmd/blockcsi`, `go test ./core/ops ./cmd/sw-block`,
+  and `helm lint charts/seaweed-block`.
+- D2 QA assignment prepared:
+  `internal/docs/qa-assignments/phase44-d2-integrated-swblockvolume-cr-qa.md`.
+- D3/D4 QA assignment prepared:
+  `internal/docs/qa-assignments/phase44-d3-d4-delete-lifecycle-close-gate-qa.md`.
+- Phase 43 already proved add and release as separate live gates.
+- Phase 44 must prove the integrated path and release wording.
+
+## Prerequisites / Risks
+
+- Use a candidate image that includes `sw-block ops lifecycle-owner`.
+- Use a candidate CSI image that includes `blockcsi --swblockvolume-cr-namespace`;
+  older CSI images will not support D2 integrated CR creation.
+- Use a VAP-capable lab; Rancher Desktop without VAP is not sufficient.
+- Be careful with deleting CRs that have finalizers; every failed gate must
+  include admin cleanup instructions.
+- Do not paper over unsafe evidence by running cleanup inside lifecycle-owner.
+
+## Next Step
+
+Publish matching images from the final release commit and rerun the
+release-candidate smoke:
+
+```text
+claim bounded SwBlockVolume finalizer lifecycle only
+claim evidence-driven hold/release, not automatic cleanup
+publish both sw-block and sw-block-csi images together
+rerun release-candidate smoke if image digests change
+```

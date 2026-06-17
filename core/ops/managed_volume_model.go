@@ -46,6 +46,7 @@ const (
 
 	ManagedVolumeActionModeReadOnly = "read_only"
 	ManagedVolumeActionModeDryRun   = "dry_run"
+	ManagedVolumeActionModeScripted = "scripted"
 
 	ManagedVolumeSideEffectObserve           = "observe"
 	ManagedVolumeSideEffectSafeK8S           = "safe_k8s"
@@ -55,6 +56,7 @@ const (
 	ManagedVolumeSideEffectDestructive       = "destructive"
 
 	ManagedVolumeActionCollectBundle          = "observe.collect_bundle"
+	ManagedVolumeActionVerifyCleanup          = "observe.verify_cleanup"
 	ManagedVolumeActionReinstallExternalISCSI = "safe_k8s.reinstall_external_iscsi"
 	ManagedVolumeActionWaitForPVCBound        = "observe.wait_for_pvc_bound"
 	ManagedVolumeActionInspectMountFailure    = "observe.inspect_mount_failure"
@@ -195,21 +197,22 @@ type WorkloadCheckFact struct {
 }
 
 type ManagedVolumeProjection struct {
-	VolumeID          string                 `json:"volume_id,omitempty"`
-	Namespace         string                 `json:"namespace,omitempty"`
-	PVCName           string                 `json:"pvc_name,omitempty"`
-	PVName            string                 `json:"pv_name,omitempty"`
-	StorageClass      string                 `json:"storage_class,omitempty"`
-	ReplicationFactor int                    `json:"replication_factor,omitempty"`
-	AckProfile        string                 `json:"ack_profile,omitempty"`
-	ClaimProfile      string                 `json:"claim_profile,omitempty"`
-	Status            string                 `json:"status"`
-	ReasonCode        string                 `json:"reason_code,omitempty"`
-	States            ManagedVolumeStates    `json:"states"`
-	Actions           []ManagedVolumeAction  `json:"actions,omitempty"`
-	Conditions        []ObservationCondition `json:"conditions,omitempty"`
-	NonClaims         []string               `json:"non_claims,omitempty"`
-	EvidenceRefs      []string               `json:"evidence_refs,omitempty"`
+	VolumeID          string                             `json:"volume_id,omitempty"`
+	Namespace         string                             `json:"namespace,omitempty"`
+	PVCName           string                             `json:"pvc_name,omitempty"`
+	PVName            string                             `json:"pv_name,omitempty"`
+	StorageClass      string                             `json:"storage_class,omitempty"`
+	ReplicationFactor int                                `json:"replication_factor,omitempty"`
+	AckProfile        string                             `json:"ack_profile,omitempty"`
+	ClaimProfile      string                             `json:"claim_profile,omitempty"`
+	Status            string                             `json:"status"`
+	ReasonCode        string                             `json:"reason_code,omitempty"`
+	States            ManagedVolumeStates                `json:"states"`
+	Actions           []ManagedVolumeAction              `json:"actions,omitempty"`
+	Conditions        []ObservationCondition             `json:"conditions,omitempty"`
+	DeleteSafety      *SwBlockVolumeDeleteSafetyDecision `json:"delete_safety,omitempty"`
+	NonClaims         []string                           `json:"non_claims,omitempty"`
+	EvidenceRefs      []string                           `json:"evidence_refs,omitempty"`
 }
 
 type ManagedVolumeStates struct {
@@ -222,14 +225,18 @@ type ManagedVolumeStates struct {
 }
 
 type ManagedVolumeAction struct {
-	Type            string   `json:"type"`
-	Target          string   `json:"target,omitempty"`
-	Mode            string   `json:"mode"`
-	SideEffectClass string   `json:"side_effect_class"`
-	OwnerExecutor   string   `json:"owner_executor,omitempty"`
-	Preconditions   []string `json:"preconditions,omitempty"`
-	InvariantRefs   []string `json:"invariant_refs,omitempty"`
-	EvidenceRefs    []string `json:"evidence_refs,omitempty"`
+	Type             string   `json:"type"`
+	Target           string   `json:"target,omitempty"`
+	Mode             string   `json:"mode"`
+	SideEffectClass  string   `json:"side_effect_class"`
+	OwnerExecutor    string   `json:"owner_executor,omitempty"`
+	Decision         string   `json:"decision,omitempty"`
+	DecisionReason   string   `json:"decision_reason,omitempty"`
+	MissingFacts     []string `json:"missing_facts,omitempty"`
+	Preconditions    []string `json:"preconditions,omitempty"`
+	InvariantRefs    []string `json:"invariant_refs,omitempty"`
+	EvidenceRequired string   `json:"evidence_required,omitempty"`
+	EvidenceRefs     []string `json:"evidence_refs,omitempty"`
 }
 
 type ManagedVolumeArtifactHints struct {
@@ -258,6 +265,20 @@ func RenderManagedVolumeProjectionText(projection ManagedVolumeProjection) strin
 		emptyAsDash(projection.States.HostPath),
 		emptyAsDash(projection.States.Recovery),
 		emptyAsDash(projection.States.Workload))
+	if projection.DeleteSafety != nil {
+		fmt.Fprintf(&b, "managed_volume_delete_safety state=%s decision=%s reason=%s release_allowed=%t action=%s\n",
+			emptyAsDash(projection.DeleteSafety.State),
+			emptyAsDash(projection.DeleteSafety.Decision),
+			emptyAsDash(projection.DeleteSafety.Reason),
+			projection.DeleteSafety.FinalizerReleaseAllowed,
+			emptyAsDash(projection.DeleteSafety.ActionType))
+		if projection.DeleteSafety.SafeNextAction != "" {
+			fmt.Fprintf(&b, "managed_volume_delete_safety_safe_next_action %s\n", projection.DeleteSafety.SafeNextAction)
+		}
+		if len(projection.DeleteSafety.EvidenceRefs) > 0 {
+			fmt.Fprintf(&b, "managed_volume_delete_safety_evidence %s\n", strings.Join(projection.DeleteSafety.EvidenceRefs, ","))
+		}
+	}
 	for _, condition := range projection.Conditions {
 		fmt.Fprintf(&b, "managed_volume_condition %s status=%s reason=%s severity=%s",
 			emptyAsDash(condition.Type),
@@ -275,11 +296,21 @@ func RenderManagedVolumeProjectionText(projection ManagedVolumeProjection) strin
 		}
 	}
 	for _, action := range projection.Actions {
-		fmt.Fprintf(&b, "managed_volume_action %s mode=%s side_effect=%s executor=%s\n",
+		fmt.Fprintf(&b, "managed_volume_action %s mode=%s side_effect=%s executor=%s decision=%s",
 			emptyAsDash(action.Type),
 			emptyAsDash(action.Mode),
 			emptyAsDash(action.SideEffectClass),
-			emptyAsDash(action.OwnerExecutor))
+			emptyAsDash(action.OwnerExecutor),
+			emptyAsDash(action.Decision))
+		if action.DecisionReason != "" {
+			fmt.Fprintf(&b, " reason=%s", action.DecisionReason)
+		}
+		b.WriteByte('\n')
+		if len(action.MissingFacts) > 0 {
+			fmt.Fprintf(&b, "managed_volume_action_missing_facts %s %s\n",
+				emptyAsDash(action.Type),
+				strings.Join(action.MissingFacts, ","))
+		}
 		if len(action.Preconditions) > 0 {
 			fmt.Fprintf(&b, "managed_volume_action_preconditions %s %s\n",
 				emptyAsDash(action.Type),
@@ -294,6 +325,11 @@ func RenderManagedVolumeProjectionText(projection ManagedVolumeProjection) strin
 			fmt.Fprintf(&b, "managed_volume_action_evidence %s %s\n",
 				emptyAsDash(action.Type),
 				strings.Join(action.EvidenceRefs, ","))
+		}
+		if action.EvidenceRequired != "" {
+			fmt.Fprintf(&b, "managed_volume_action_evidence_required %s %s\n",
+				emptyAsDash(action.Type),
+				action.EvidenceRequired)
 		}
 	}
 	for _, nonClaim := range projection.NonClaims {
@@ -523,6 +559,9 @@ func classifyManagedVolume(p ManagedVolumeProjection, facts ManagedVolumeFacts) 
 	if facts.ProductReason == ReasonCSINodeImagePullFailed {
 		return ManagedVolumeStatusBlocked, ReasonCSINodeImagePullFailed
 	}
+	if facts.ProductReason == ReasonWALIntegrityFault {
+		return ManagedVolumeStatusBlocked, ReasonWALIntegrityFault
+	}
 	if hasBlockedCSINode(facts.KubernetesNodes) {
 		return ManagedVolumeStatusBlocked, ReasonCSINodeImagePullFailed
 	}
@@ -540,6 +579,9 @@ func classifyManagedVolume(p ManagedVolumeProjection, facts ManagedVolumeFacts) 
 	}
 	if facts.EvidenceStale || facts.ProductReason == ReasonEvidenceStale {
 		return ManagedVolumeStatusUnknown, defaultString(facts.EvidenceStaleReason, ReasonEvidenceStale)
+	}
+	if facts.ProductReason == ReasonStatusEndpointUnreachable {
+		return ManagedVolumeStatusUnknown, ReasonStatusEndpointUnreachable
 	}
 	if p.States.HostPath == ManagedVolumeHostPathTransparentReady &&
 		facts.Workload != nil &&
@@ -636,6 +678,16 @@ func managedVolumeActionsForProjection(p ManagedVolumeProjection, facts ManagedV
 			InvariantRefs:   []string{"INV-HOSTPATH-FACTS-001", "INV-HOSTPATH-TRANSPARENT-001"},
 			EvidenceRefs:    append([]string(nil), p.EvidenceRefs...),
 		})
+	}
+	for i := range actions {
+		evaluation := EvaluateManagedVolumeAction(actions[i].Type, facts)
+		actions[i].Decision = evaluation.Decision
+		actions[i].DecisionReason = evaluation.Reason
+		actions[i].MissingFacts = append([]string(nil), evaluation.MissingFacts...)
+		actions[i].EvidenceRequired = evaluation.EvidenceRequired
+		if len(actions[i].InvariantRefs) == 0 {
+			actions[i].InvariantRefs = append([]string(nil), evaluation.InvariantRefs...)
+		}
 	}
 	return actions
 }
@@ -744,7 +796,7 @@ func managedVolumeConditionsForProjection(p ManagedVolumeProjection) []Observati
 			Message:      "insufficient managed volume facts",
 			EvidenceRefs: append([]string(nil), p.EvidenceRefs...),
 		}}
-		if reason == ReasonEvidenceStale {
+		if reason == ReasonEvidenceStale || reason == ReasonStatusEndpointUnreachable {
 			conditions[0].Severity = "warning"
 			conditions[0].Message = "managed volume evidence is stale or unreachable; readiness is not claimed"
 			conditions = append(conditions, ObservationCondition{

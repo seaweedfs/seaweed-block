@@ -1,0 +1,44 @@
+# Runner-native Phase 41 D2 gate: lifecycle-owner API/RBAC boundary.
+
+name: lifecycle-owner-api-boundary-chain
+description: >
+  Proves that the released operator-status boundary remains status/events-only
+  while the future lifecycle-owner boundary permits only finalizer-shaped main
+  SwBlockVolume patches and rejects spec/unrelated metadata mutation.
+
+vars:
+  product_root: "{{ env.PRODUCT_ROOT | default('/mnt/c/work/seaweed_block') }}"
+
+phases:
+  - name: api_boundary
+    actions:
+      - type: exec
+        name: run_phase41_api_boundary
+        cmd: "rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase41-lifecycle-owner-api-boundary && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase41-lifecycle-owner-api-boundary && cd {{ product_root }} && SW_BLOCK_ARTIFACT_DIR=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase41-lifecycle-owner-api-boundary bash scripts/run-phase41-lifecycle-owner-api-boundary.sh {{ product_root }}"
+
+  - name: asserts
+    actions:
+      - type: grep_log
+        name: api_boundary_ok
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase41-lifecycle-owner-api-boundary/phase41-lifecycle-owner-api-boundary-summary.txt"
+        pattern: "^phase41_lifecycle_owner_api_boundary_status=ok$"
+      - type: grep_log
+        name: operator_status_no_main_patch
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase41-lifecycle-owner-api-boundary/phase41-lifecycle-owner-api-boundary-summary.txt"
+        pattern: "^operator_status_main_patch_allowed=false$"
+      - type: grep_log
+        name: lifecycle_owner_finalizer_only_allowed
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase41-lifecycle-owner-api-boundary/phase41-lifecycle-owner-api-boundary-summary.txt"
+        pattern: "^lifecycle_owner_finalizer_patch_allowed=true$"
+      - type: grep_log
+        name: lifecycle_owner_spec_forbidden
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase41-lifecycle-owner-api-boundary/phase41-lifecycle-owner-api-boundary-summary.txt"
+        pattern: "^lifecycle_owner_spec_patch_allowed=false$"
+      - type: grep_log
+        name: lifecycle_owner_unrelated_metadata_forbidden
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase41-lifecycle-owner-api-boundary/phase41-lifecycle-owner-api-boundary-summary.txt"
+        pattern: "^lifecycle_owner_unrelated_metadata_patch_allowed=false$"
+      - type: grep_log
+        name: finalizers_endpoint_forbidden
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase41-lifecycle-owner-api-boundary/phase41-lifecycle-owner-api-boundary-summary.txt"
+        pattern: "^finalizers_endpoint_allowed=false$"

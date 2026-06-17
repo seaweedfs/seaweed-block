@@ -1,5 +1,7 @@
 package ops
 
+import "time"
+
 const ObservationOperatorSnapshotArtifact = "operator-snapshot.json"
 
 type OperatorFoundationSnapshot struct {
@@ -20,17 +22,48 @@ type OperatorMutationBoundary struct {
 
 type OperatorClusterStatus struct {
 	Status             string                 `json:"status"`
+	NodeCount          int                    `json:"node_count"`
+	Nodes              []OperatorNodeStatus   `json:"nodes,omitempty"`
 	VolumeCount        int                    `json:"volume_count"`
 	ReadyVolumeCount   int                    `json:"ready_volume_count"`
 	BlockedVolumeCount int                    `json:"blocked_volume_count"`
 	StaleVolumeCount   int                    `json:"stale_volume_count"`
 	Cleanup            *CleanupEvidence       `json:"cleanup,omitempty"`
+	InstallDrift       *InstallDriftEvidence  `json:"install_drift,omitempty"`
+	SupportBundleRefs  []string               `json:"support_bundle_refs,omitempty"`
+	SafeNextSteps      []OperatorSafeNextStep `json:"safe_next_steps,omitempty"`
 	Conditions         []ObservationCondition `json:"conditions,omitempty"`
 	NonClaims          []string               `json:"non_claims,omitempty"`
 }
 
+type OperatorNodeStatus struct {
+	Name            string                 `json:"name"`
+	KubernetesNode  string                 `json:"kubernetes_node,omitempty"`
+	InternalIP      string                 `json:"internal_ip,omitempty"`
+	Schedulable     bool                   `json:"schedulable"`
+	Ready           bool                   `json:"ready"`
+	Status          string                 `json:"status,omitempty"`
+	ReasonCode      string                 `json:"reason_code,omitempty"`
+	LastHeartbeatAt time.Time              `json:"last_heartbeat_at,omitempty"`
+	ReplicaCount    int                    `json:"replica_count,omitempty"`
+	RequiredImages  []string               `json:"required_images,omitempty"`
+	MissingImages   []string               `json:"missing_images,omitempty"`
+	Conditions      []ObservationCondition `json:"conditions,omitempty"`
+	EvidenceRefs    []string               `json:"evidence_refs,omitempty"`
+}
+
+type OperatorSafeNextStep struct {
+	Type            string   `json:"type"`
+	Mode            string   `json:"mode"`
+	Command         string   `json:"command,omitempty"`
+	ReasonCode      string   `json:"reason_code,omitempty"`
+	MutationAllowed bool     `json:"mutation_allowed"`
+	EvidenceRefs    []string `json:"evidence_refs,omitempty"`
+}
+
 func BuildOperatorFoundationSnapshot(cluster ClusterEvidence) OperatorFoundationSnapshot {
 	cluster = NormalizeObservationCluster(cluster)
+	supportRefs := supportBundleRefsFromCluster(cluster)
 	snapshot := OperatorFoundationSnapshot{
 		APIVersion: SwBlockVolumeAPIVersion,
 		Kind:       "ReadOnlyOperatorFoundationSnapshot",
@@ -40,6 +73,7 @@ func BuildOperatorFoundationSnapshot(cluster ClusterEvidence) OperatorFoundation
 			AllowedModes: []string{
 				ManagedVolumeActionModeReadOnly,
 				ManagedVolumeActionModeDryRun,
+				ManagedVolumeActionModeScripted,
 			},
 			NonClaims: []string{
 				"no_promote",
@@ -48,14 +82,20 @@ func BuildOperatorFoundationSnapshot(cluster ClusterEvidence) OperatorFoundation
 				"no_failback",
 				"no_delete",
 				"no_cleanup_mutation",
+				"no_upgrade_execution",
 			},
 		},
 		CRDContract: ManagedVolumeCRDContractDefinition(),
 		Cluster: OperatorClusterStatus{
-			Status:     cluster.Status,
-			Cleanup:    cluster.Cleanup,
-			Conditions: append([]ObservationCondition(nil), cluster.Conditions...),
-			NonClaims:  append([]string(nil), cluster.NonClaims...),
+			Status:            cluster.Status,
+			NodeCount:         len(cluster.Nodes),
+			Nodes:             operatorNodeStatuses(cluster.Nodes),
+			Cleanup:           cluster.Cleanup,
+			InstallDrift:      cluster.InstallDrift,
+			SupportBundleRefs: supportRefs,
+			SafeNextSteps:     operatorSafeNextSteps(safeNextStepsFromCluster(cluster, supportRefs)),
+			Conditions:        append([]ObservationCondition(nil), cluster.Conditions...),
+			NonClaims:         append([]string(nil), cluster.NonClaims...),
 		},
 	}
 
@@ -82,7 +122,57 @@ func BuildOperatorFoundationSnapshot(cluster ClusterEvidence) OperatorFoundation
 			Message:  "one or more managed volumes have stale or unreachable evidence",
 		})
 	}
+	if condition := cleanupCondition(cluster.Cleanup); condition != nil {
+		snapshot.Cluster.Conditions = ensureCondition(snapshot.Cluster.Conditions, *condition)
+	}
+	if condition := installDriftCondition(cluster.InstallDrift); condition != nil {
+		snapshot.Cluster.Conditions = ensureCondition(snapshot.Cluster.Conditions, *condition)
+	}
 	return snapshot
+}
+
+func operatorSafeNextSteps(steps []SwBlockSafeNextStep) []OperatorSafeNextStep {
+	if len(steps) == 0 {
+		return nil
+	}
+	out := make([]OperatorSafeNextStep, 0, len(steps))
+	for _, step := range steps {
+		out = append(out, OperatorSafeNextStep{
+			Type:            step.Type,
+			Mode:            step.Mode,
+			Command:         step.Command,
+			ReasonCode:      step.ReasonCode,
+			MutationAllowed: step.MutationAllowed,
+			EvidenceRefs:    append([]string(nil), step.EvidenceRefs...),
+		})
+	}
+	return out
+}
+
+func operatorNodeStatuses(nodes []NodeEvidence) []OperatorNodeStatus {
+	if len(nodes) == 0 {
+		return nil
+	}
+	out := make([]OperatorNodeStatus, 0, len(nodes))
+	for _, node := range nodes {
+		status, reason := classifyNodeReadiness(node)
+		out = append(out, OperatorNodeStatus{
+			Name:            defaultString(node.NodeName, node.KubernetesNode),
+			KubernetesNode:  node.KubernetesNode,
+			InternalIP:      node.InternalIP,
+			Schedulable:     node.Schedulable,
+			Ready:           node.Ready,
+			Status:          status,
+			ReasonCode:      reason,
+			LastHeartbeatAt: node.LastHeartbeatAt,
+			ReplicaCount:    node.ReplicaCount,
+			RequiredImages:  append([]string(nil), node.RequiredImages...),
+			MissingImages:   append([]string(nil), node.MissingImages...),
+			Conditions:      nodeReadinessConditions(node, status, reason),
+			EvidenceRefs:    nodeEvidenceRefs(node),
+		})
+	}
+	return out
 }
 
 func hasCondition(conditions []ObservationCondition, conditionType, status string) bool {

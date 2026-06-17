@@ -29,7 +29,8 @@ Current alpha constraints:
 - launcher-generated blockvolume state uses `emptyDir`
 - harness applies generated blockvolume manifests
 - generated blockvolume Deployments can use PVC owner references for cleanup
-- no production operator yet
+- no production operator yet; only the bounded v0.5 beta-candidate
+  lifecycle-owner mutates `SwBlockVolume.metadata.finalizers`
 
 ## Near-Term MVP Hardening
 
@@ -50,14 +51,129 @@ Current alpha constraints:
 
    - do not jump directly from scripts to an operator
    - first stabilize install values, chart ownership, and uninstall behavior
-   - then add CRDs/Conditions/Events for cluster, node, volume, and lifecycle
-     state
+   - read-only CRDs, Conditions, Events, node readiness, support evidence refs,
+     cleanup visibility, and safe next-step status are now gated as the first
+     operator foundation
+   - mutating lifecycle ownership, finalizers, upgrade execution, repair,
+     rebuild, failback, and automatic cleanup remain separate future phases
 
 4. Improve TestOps usability.
 
    - remote shell execution for K8s scenarios
    - stable result bundles
    - scenario registry index
+   - stronger negative-path gates for blocked, stale, unreachable, corrupt
+     evidence, and cleanup-residue cases
+
+## Current Capability Snapshot
+
+Seaweed Block can already demonstrate a narrow Kubernetes block-storage loop:
+
+- Helm install on supported lab clusters.
+- Dynamic PVC provisioning through CSI.
+- App pod mount, write, read, and replacement-reader verification.
+- iSCSI frontend with gated ALUA/dm-multipath failover evidence.
+- RF=3 multi-volume lab path with independent volume identity and publish
+  target.
+- Restart persistence for supported hostPath gates.
+- Read-only CLI/report/dashboard/support-bundle flows.
+- Read-only CRD status and Events for `SwBlockCluster` and `SwBlockVolume`.
+- Live node evidence for Kubernetes Ready/SchedulingDisabled, CSI registration,
+  CSI image-pull blockers, host-prereq evidence replay, and loopback
+  cross-node attach blockers.
+- Negative-first status: blocked, stale, unreachable, or corrupt evidence must
+  not become false `Ready=True`.
+- Cleanup verification for Kubernetes, iSCSI, multipath, process, and hostPath
+  residue.
+- Executable lifecycle action contracts: dry-run actions can be allowed with
+  evidence, unsafe/future-mutating actions are rejected with stable reasons, and
+  CRD/report/dashboard/operator-snapshot surfaces agree on the decision.
+- Delete-safety status and cleanup-required visibility without finalizer or
+  cleanup mutation.
+- Bounded `SwBlockVolume` finalizer lifecycle in the v0.5 beta-candidate path:
+  CSI-created identity CRs, lifecycle-owner protection finalizer, evidence-driven
+  hold/release, Events, and multi-volume isolation.
+- Install drift status for current versus desired chart/app/image identity
+  without upgrade execution.
+- CRD/RBAC status-writer conformance coverage for the failures that previously
+  escaped mock tests and only failed in live QA.
+
+The product model is converging around one read-only control-plane pattern:
+truth owners publish facts, the status layer aggregates judgment, executors stay
+bounded, and evidence explains why the status is allowed. The next work should
+preserve that model rather than add isolated scripts or separate status systems.
+
+Recommended order from here:
+
+1. Operator-status foundation release: complete in v0.4 beta. It claims
+   status/events-only visibility, not lifecycle mutation.
+2. Operation Layer v0.5 beta candidate: code and QA complete through Phase 44;
+   release images still need publish/pinned-image smoke before marking it
+   shipped. It claims a bounded `SwBlockVolume` protection-finalizer lifecycle,
+   not automatic cleanup or broad operator automation.
+   - Phase 41: lifecycle-owner foundation. **Closed 2026-06-14, QA PASS**
+     (`internal/docs/finished-plans/phase41_finishedplan_lifecycle_owner_foundation.md`).
+     Observer/lifecycle-owner/executor roles defined; delete-safety preconditions
+     and a dry-run finalizer-release action shipped.
+   - Phase 42: real API/admission proof. **Closed 2026-06-15, QA PASS**
+     (`internal/docs/finished-plans/phase42_finishedplan_lifecycle_owner_admission_gate.md`).
+     The lifecycle-owner patch boundary is proven with real Kubernetes
+     ValidatingAdmissionPolicy.
+   - Phase 43: first bounded lifecycle mutation. **Closed 2026-06-15, QA PASS**
+     (`internal/docs/finished-plans/phase43_finishedplan_bounded_finalizer_lifecycle.md`).
+     Finalizer add/release works as isolated gates.
+   - Phase 44: delete lifecycle close gate. **Closed 2026-06-17, QA PASS**
+     (`internal/docs/finished-plans/phase44_finishedplan_delete_lifecycle_close_gate.md`).
+     The integrated PVC -> protected CR -> hold/release -> zero-residue path is
+     validated end-to-end.
+3. Productize returned-replica rebuild/reintegration/failback after the
+   operation layer can safely authorize, block, and audit lifecycle actions.
+   The engine/transport already has rebuild and returned-replica safety pieces;
+   the missing work is the Kubernetes/product control loop: facts, judgment,
+   action ownership, status, Events, fencing, and multi-volume QA gates.
+4. Add backup/restore and NVMe ANA parity after they can reuse the same action
+   owner, evidence, and status model rather than creating another isolated
+   control plane.
+
+The internal release-train contract is
+`internal/docs/ref/operation-layer-v0.5-release-train.md`. Phases 41-44 close
+the operation-layer loop for a bounded `SwBlockVolume` protection finalizer.
+Next storage features should reuse this same fact -> judgment -> action ->
+evidence pattern.
+
+The practical rule is:
+
+```text
+Do not add a new data-plane feature if the product cannot yet explain who owns
+the lifecycle action, what evidence authorizes it, how it is blocked, and where
+the user sees the result.
+```
+
+## Future Non-Kubernetes Adapters
+
+Kubernetes CSI remains the primary product surface. A Docker integration is
+possible later, but it should be scoped as a Docker Volume Plugin, not a Docker
+graph/storage driver.
+
+Potential Docker Volume Plugin path:
+
+- `docker volume create -d seaweed-block ...`
+- local attach/mount/unmount through a small node agent or local daemon
+- reuse ManagedVolume status, cleanup verification, support bundles, and
+  negative-first evidence
+- target single-node Docker, lab, edge, or developer workflows first
+
+Explicit non-goals for the Docker path:
+
+- no Docker graph/storage driver to replace `overlay2`
+- no broad Docker Swarm HA claim before the K8s lifecycle model is stable
+- no production failover claim without fencing, cleanup, and residue gates
+
+Windows Docker Desktop support is an investigation item, not a current claim.
+The likely path is a Linux Docker Desktop VM or WSL2 backend running the
+Seaweed Block node component, with Windows accessing the mounted volume through
+Docker. Native Windows block-device attachment is out of scope until the Linux
+control-plane path is mature.
 
 ## Availability And Recovery Follow-Ups
 
@@ -74,11 +190,13 @@ Current alpha constraints:
    - authority moves
    - frontend reconnect path is validated
 
-3. Returned replica lifecycle.
+3. Productized returned replica lifecycle.
 
-   - observed replica returns
-   - candidate -> syncing/rebuilding -> ready
+   - observed replica returns after promotion
+   - returned replica stays frontend-fenced until recovery evidence is current
+   - candidate -> syncing/rebuilding -> ready is visible in CRD/report/dashboard
    - ready status gates placement/ACK eligibility
+   - rebuild/reintegration/failback action owner is explicit and audited
 
 4. Flow-control and pressure behavior.
 
@@ -141,6 +259,7 @@ A reasonable beta bar:
 - Multi-node attach works.
 - Basic failover is tested under an attached workload.
 - Read-only status and support evidence are available without SSH log spelunking.
+- Negative and stale states are surfaced without false Ready claims.
 - Operator lifecycle is either present behind a clear beta gate or explicitly
   listed as the next release boundary.
 - TestOps can run the protocol release gate and produce stable artifacts.
@@ -148,4 +267,3 @@ A reasonable beta bar:
 
 Detailed post-alpha execution planning is kept in `internal/docs/` so the
 public roadmap stays focused on user-visible behavior and non-claims.
-

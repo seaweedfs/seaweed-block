@@ -33,7 +33,7 @@ This is an **alpha** product path for supported lab clusters, not production.
 | Support-bundle replay | Available | Negative-first status reasons | Available |
 | Multi-volume RF=3 lab path | Gated | CSI reattach recovery | Gated |
 | iSCSI ALUA/dm-multipath mounted failover | Gated | Restart persistence with hostPath | Gated |
-| Read-only operator snapshot | Partial | Production operator lifecycle | Planned |
+| Actionable read-only CRD status + Events | Available | Bounded SwBlockVolume finalizer lifecycle | Beta candidate |
 | Backup/snapshot/restore | Planned | Returned-replica rebuild/failback | Planned |
 | NVMe ANA parity | Planned | Production SLO/performance claims | Not claimed |
 
@@ -50,6 +50,15 @@ This is an **alpha** product path for supported lab clusters, not production.
   - interleaved multi-volume failover isolation.
 - Inspect cluster, volume, replica, primary, frontend, timeline, and reason
   evidence through read-only CLI/report/dashboard surfaces.
+- Publish the same read-only status into Kubernetes-native `SwBlockCluster` /
+  `SwBlockVolume` `.status` and Events on the gated operator-status path.
+- Inspect node readiness, support evidence refs, cleanup-required status, and
+  safe read-only/scripted next-step hints through that same status model.
+- Use the beta-candidate lifecycle-owner path to protect `SwBlockVolume` CRs
+  with a Seaweed Block finalizer and release it only after clean externally
+  supplied cleanup evidence.
+- Inspect install drift status for current versus desired chart/app/image
+  identity. This is visibility only, not upgrade execution.
 - Replay support bundles offline.
 
 These are narrow alpha claims tied to documented gates. See
@@ -58,13 +67,18 @@ These are narrow alpha claims tied to documented gates. See
 ## What You Should Not Expect Yet
 
 - Production readiness or production SLOs.
-- A production-grade operator or mutating admin workflow.
+- A production-grade operator or broad mutating admin workflow. The current
+  lifecycle-owner owns only the Seaweed Block `SwBlockVolume` protection
+  finalizer.
+- Automatic cleanup execution, host repair, or PVC/PV/workload deletion.
+  Delete-safety uses externally supplied cleanup evidence.
 - Backup, snapshot, or restore.
 - Returned-replica rebuild, reintegration, or failback.
 - Transparent Kubernetes node-loss failover without pod recreate.
 - NVMe ANA parity for the transparent failover path.
 - Broad distro/kernel/initiator compatibility.
-- Broad upgrade/rollback safety beyond gated smoke paths.
+- Upgrade or rollback execution. The status layer can report install drift, but
+  it does not run Helm or kubectl mutations.
 
 ## Five-Minute Quick Start
 
@@ -76,8 +90,8 @@ export PATH="$PWD:$PATH"
 
 sw-block ops generate-helm-values \
   --out values.day1.yaml \
-  --image ghcr.io/seaweedfs/seaweed-block:sha-6260e46fd3be \
-  --csi-image ghcr.io/seaweedfs/seaweed-block-csi:sha-6260e46fd3be
+  --image ghcr.io/seaweedfs/seaweed-block:sha-dc2972d0059b \
+  --csi-image ghcr.io/seaweedfs/seaweed-block-csi:sha-dc2972d0059b
 
 helm install sw-block charts/seaweed-block \
   --namespace kube-system \
@@ -104,7 +118,11 @@ status_report=status/report/index.html
 cleanup_status=ok
 ```
 
-Current validated alpha image tag: `sha-6260e46fd3be`.
+Current validated published quickstart image tag: `sha-dc2972d0059b`.
+This tag covers the v0.4 read-only/status foundation path. The v0.5
+bounded lifecycle-owner path requires matching `sw-block` and `sw-block-csi`
+images published from the Phase 44 release commit; do not use the older
+quickstart tag to validate lifecycle-owner behavior.
 
 Mutable `:alpha` is a smoke/demo tag only; it can drift from the source tree.
 
@@ -130,7 +148,9 @@ Common read-only commands:
 | `sw-block ops inventory --namespace default --master 127.0.0.1:9333 --out <dir>` | Collect replica-level inventory. |
 
 Reports and dashboard expose `operator-snapshot.json`, a read-only status
-projection for future operator work. There are no mutating admin actions.
+projection. The gated operator-status controller can publish that model into
+Kubernetes CRD `.status` and Events, including node readiness, cleanup/delete
+safety, and install-drift visibility. It has no mutating admin actions.
 
 Support-bundle replay:
 

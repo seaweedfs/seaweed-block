@@ -13,14 +13,10 @@ mutating dashboard, operator reconciliation, backup/restore, or upgrade safety.
 
 ## Quick Install
 
-Single-node or local-dev loopback mode:
-
-```bash
-helm install sw-block charts/seaweed-block \
-  --namespace kube-system
-```
-
-Multi-node Day-1 mode should use non-loopback node IPs and CHAP:
+Use generated values for the supported alpha install path. The generator reads
+the live Kubernetes nodes and writes the node names/IPs that the launcher uses
+for placement. On a single-node lab it keeps loopback/local-consumer mode; on a
+multi-node lab it switches to non-loopback iSCSI with CHAP.
 
 ```bash
 SW_BLOCK_HELM_VALUES_OUT=values.day1.yaml \
@@ -30,6 +26,11 @@ helm install sw-block charts/seaweed-block \
   --namespace kube-system \
   -f values.day1.yaml
 ```
+
+The raw chart defaults are render/development defaults only. Do not treat a
+plain `helm install sw-block charts/seaweed-block` as a release-gated install:
+it does not run preflight, does not discover the live Kubernetes node set, and
+can leave placement/launcher evidence incomplete on real labs.
 
 Example `values.day1.yaml`:
 
@@ -45,6 +46,7 @@ network:
   rejectLoopbackPublishTargets: true
 
 compat:
+  launcherDurableImplFlag: false
   launcherReplicationAckFlag: false
   launcherRejectLoopbackFlag: false
 
@@ -74,8 +76,11 @@ blockNodes:
 `network.rejectLoopbackPublishTargets` records the intended safety boundary.
 Some blockmaster launcher flags are gated by `compat.*` settings because older
 published alpha images do not accept every v0.3 flag. Keep
-`compat.launcherReplicationAckFlag` and `compat.launcherRejectLoopbackFlag`
-false unless the selected image is known to support the corresponding flag.
+`compat.launcherDurableImplFlag`, `compat.launcherReplicationAckFlag`, and
+`compat.launcherRejectLoopbackFlag` false unless the selected image is known to
+support the corresponding flag. The default durable implementation is still
+`walstore` because that is the blockmaster binary default when the
+`--launcher-durable-impl` flag is omitted.
 
 ## RF=3 Sync-Quorum Profile
 

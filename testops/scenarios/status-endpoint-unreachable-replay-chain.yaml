@@ -1,0 +1,200 @@
+# Phase 33 F2 gate: status endpoint unreachable replay.
+#
+# Goal:
+#   Prove a bundle that cannot reach replica status evidence is rendered as
+#   Unknown with reason=status_endpoint_unreachable across the user-facing
+#   read-only surfaces. This is intentionally replay-only: it validates the
+#   surface contract without introducing a second live failure mechanism.
+
+name: status-endpoint-unreachable-replay-chain
+timeout: 10m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: prepare
+    actions:
+      - action: exec
+        node: m02
+        timeout: 1m
+        cmd: "rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-status-endpoint-unreachable && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-status-endpoint-unreachable/bin /mnt/smb/work/share/g15d-k8s/{{ run_id }}-status-endpoint-unreachable/bundle/demo/product-observation /mnt/smb/work/share/g15d-k8s/{{ run_id }}-status-endpoint-unreachable/report /mnt/smb/work/share/g15d-k8s/{{ run_id }}-status-endpoint-unreachable/dashboard"
+      - action: exec
+        node: m02
+        timeout: 5m
+        cmd: "cd {{ product_root }} && go build -o /mnt/smb/work/share/g15d-k8s/{{ run_id }}-status-endpoint-unreachable/bin/sw-block ./cmd/sw-block"
+
+  - name: render_unreachable_bundle
+    actions:
+      - action: exec
+        node: m02
+        timeout: 1m
+        cmd: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          root = Path("/mnt/smb/work/share/g15d-k8s/{{ run_id }}-status-endpoint-unreachable/bundle/demo/product-observation")
+          root.mkdir(parents=True, exist_ok=True)
+          doc = {
+              "schema_version": "1.0",
+              "captured_at": "2026-05-28T12:00:00Z",
+              "product_revision": "phase33-f2-replay",
+              "status": "unavailable",
+              "nodes": [],
+              "volumes": [{
+                  "volume_id": "pvc-unreachable",
+                  "namespace": "default",
+                  "pvc_name": "demo-pvc",
+                  "pv_name": "pvc-unreachable",
+                  "replication_factor": 1,
+                  "desired_replicas": 1,
+                  "observed_replicas": 1,
+                  "status": "unavailable",
+                  "reason": "status_endpoint_unreachable",
+                  "primary_replica": "r1",
+                  "primary_node": "m01",
+                  "publish_target": "192.168.1.181:3260",
+                  "replicas": [{
+                      "replica_id": "r1",
+                      "server_id": "node-r1",
+                      "kubernetes_node": "m01",
+                      "observed": True,
+                      "role": "primary",
+                      "replication_role": "none",
+                      "frontend_protocol": "iscsi",
+                      "frontend_addr": "192.168.1.181:3260",
+                      "status_addr": "192.168.1.181:23260"
+                  }]
+              }],
+              "events": [{
+                  "event_id": "phase33-f2-1",
+                  "event_time": "2026-05-28T12:00:01Z",
+                  "volume_id": "pvc-unreachable",
+                  "replica_id": "r1",
+                  "event_type": "status_endpoint_unreachable",
+                  "severity": "warning",
+                  "message": "replica status endpoint unreachable; readiness is not claimed",
+                  "reason_code": "status_endpoint_unreachable",
+                  "evidence_ref": "product-observation/cluster-evidence.json"
+              }],
+              "non_claims": [
+                  "read-only-observation: does not mutate product, Kubernetes, iSCSI, or replica state",
+                  "not-an-admin-action: no promote, repair, rebuild, backup, restore, or cleanup is authorized"
+              ]
+          }
+          (root / "cluster-evidence.json").write_text(json.dumps(doc, indent=2) + "\n")
+          PY
+
+  - name: replay_surfaces
+    actions:
+      - action: exec
+        node: m02
+        timeout: 1m
+        cmd: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-status-endpoint-unreachable/bin/sw-block ops report --from-bundle /mnt/smb/work/share/g15d-k8s/{{ run_id }}-status-endpoint-unreachable/bundle --out /mnt/smb/work/share/g15d-k8s/{{ run_id }}-status-endpoint-unreachable/report > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-status-endpoint-unreachable/report/stdout.txt 2> /mnt/smb/work/share/g15d-k8s/{{ run_id }}-status-endpoint-unreachable/report/stderr.txt"
+      - action: exec
+        node: m02
+        timeout: 1m
+        cmd: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-status-endpoint-unreachable/bin/sw-block ops explain volume --from-bundle /mnt/smb/work/share/g15d-k8s/{{ run_id }}-status-endpoint-unreachable/bundle pvc-unreachable > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-status-endpoint-unreachable/report/explain.txt"
+      - action: exec
+        node: m02
+        timeout: 1m
+        cmd: |
+          set -e
+          OUT=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-status-endpoint-unreachable/dashboard
+          port=$(python3 - <<'PY'
+          import socket
+          s = socket.socket()
+          s.bind(("127.0.0.1", 0))
+          print(s.getsockname()[1])
+          s.close()
+          PY
+          )
+          echo "$port" > "$OUT/port.txt"
+          /mnt/smb/work/share/g15d-k8s/{{ run_id }}-status-endpoint-unreachable/bin/sw-block ops dashboard --from-bundle /mnt/smb/work/share/g15d-k8s/{{ run_id }}-status-endpoint-unreachable/bundle --listen 127.0.0.1:${port} > "$OUT/stdout.txt" 2> "$OUT/stderr.txt" &
+          pid=$!
+          trap 'kill $pid >/dev/null 2>&1 || true; wait $pid >/dev/null 2>&1 || true' EXIT
+          for i in $(seq 1 100); do
+            code=$(curl -s -o "$OUT/operator-snapshot.json" -w '%{http_code}' "http://127.0.0.1:${port}/operator-snapshot.json" || true)
+            test "$code" = "200" && break
+            sleep 0.2
+          done
+          test -s "$OUT/operator-snapshot.json"
+
+  - name: surface_asserts
+    actions:
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-status-endpoint-unreachable/report/summary.txt"
+        pattern: "managed_volume=pvc-unreachable status=unknown reason=status_endpoint_unreachable"
+        save_as: summary_unreachable_count
+      - action: assert_greater
+        actual: "{{ summary_unreachable_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-status-endpoint-unreachable/report/operator-snapshot.json"
+        pattern: "\"reason_code\": \"status_endpoint_unreachable\""
+        save_as: report_snapshot_reason_count
+      - action: assert_greater
+        actual: "{{ report_snapshot_reason_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-status-endpoint-unreachable/report/operator-snapshot.json"
+        pattern: "\"mutation_allowed\": false"
+        save_as: report_snapshot_readonly_count
+      - action: assert_greater
+        actual: "{{ report_snapshot_readonly_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-status-endpoint-unreachable/report/explain.txt"
+        pattern: "managed_volume_condition Ready status=Unknown reason=status_endpoint_unreachable"
+        save_as: explain_unknown_count
+      - action: assert_greater
+        actual: "{{ explain_unknown_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-status-endpoint-unreachable/dashboard/operator-snapshot.json"
+        pattern: "\"reason_code\": \"status_endpoint_unreachable\""
+        save_as: dashboard_reason_count
+      - action: assert_greater
+        actual: "{{ dashboard_reason_count }}"
+        threshold: "0"
+      - action: exec
+        node: m02
+        timeout: 1m
+        cmd: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          paths = [
+              Path("/mnt/smb/work/share/g15d-k8s/{{ run_id }}-status-endpoint-unreachable/report/operator-snapshot.json"),
+              Path("/mnt/smb/work/share/g15d-k8s/{{ run_id }}-status-endpoint-unreachable/dashboard/operator-snapshot.json"),
+          ]
+          for path in paths:
+              doc = json.loads(path.read_text())
+              if doc.get("read_only") is not True:
+                  raise SystemExit(f"{path}: read_only not true")
+              if (doc.get("mutation") or {}).get("mutation_allowed") is not False:
+                  raise SystemExit(f"{path}: mutation_allowed not false")
+              vols = doc.get("volumes") or []
+              if len(vols) != 1:
+                  raise SystemExit(f"{path}: expected one volume")
+              status = vols[0].get("status") or {}
+              if status.get("status") != "unknown" or status.get("reason_code") != "status_endpoint_unreachable":
+                  raise SystemExit(f"{path}: bad status {status}")
+              for condition in status.get("conditions") or []:
+                  if condition.get("type") == "Ready" and condition.get("status") == "True":
+                      raise SystemExit(f"{path}: false Ready=True")
+          PY

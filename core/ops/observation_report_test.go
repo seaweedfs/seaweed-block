@@ -97,6 +97,7 @@ func TestObservationReportHTML_IncludesManagedVolumeConditions(t *testing.T) {
 		KubernetesResidueCount: 1,
 		MultipathResidueCount:  2,
 		FailureCount:           2,
+		ReasonCodes:            []string{"multipath_residue_present"},
 		EvidenceRef:            "cleanup-summary.txt",
 	}
 	cluster.Volumes = []VolumeEvidence{{
@@ -120,9 +121,13 @@ func TestObservationReportHTML_IncludesManagedVolumeConditions(t *testing.T) {
 	html := RenderObservationReportHTML(cluster)
 	for _, want := range []string{
 		"Lifecycle Cleanup",
+		"Support Evidence",
+		"Safe Next Steps",
 		"Managed Volumes",
 		"Managed Volume Conditions",
 		"cleanup-summary.txt",
+		"collect-helm-support-bundle.sh",
+		"verify-helm-cleanup.sh",
 		"pvc-loopback",
 		"publish_target_loopback_cross_node",
 		"safe_k8s.reinstall_external_iscsi",
@@ -130,6 +135,90 @@ func TestObservationReportHTML_IncludesManagedVolumeConditions(t *testing.T) {
 		if !strings.Contains(html, want) {
 			t.Fatalf("html missing %q:\n%s", want, html)
 		}
+	}
+}
+
+func TestObservationReportSummary_IncludesCleanupVisibilityNextStep(t *testing.T) {
+	cluster := NewClusterEvidence(time.Date(2026, 6, 5, 19, 15, 0, 0, time.UTC))
+	cluster.Cleanup = &CleanupEvidence{
+		Status:            "failed",
+		ISCSIResidueCount: 1,
+		FailureCount:      1,
+		ReasonCodes:       []string{"iscsi_node_records_present"},
+		EvidenceRef:       "cleanup-summary.txt",
+	}
+
+	summary := RenderObservationReportSummary(cluster)
+	for _, want := range []string{
+		"cleanup_status=failed",
+		"iscsi_residue_count=1",
+		"support_bundle_ref=cleanup-summary.txt",
+		"safe_next_step=observe.collect_bundle mode=read_only mutation_allowed=false",
+		"safe_next_step=observe.verify_cleanup mode=scripted mutation_allowed=false",
+		"verify-helm-cleanup.sh",
+		"reason=iscsi_node_records_present",
+	} {
+		if !strings.Contains(summary, want) {
+			t.Fatalf("summary missing %q:\n%s", want, summary)
+		}
+	}
+}
+
+func TestObservationReportSummary_IncludesSupportBundlePointers(t *testing.T) {
+	cluster := NewClusterEvidence(time.Date(2026, 6, 5, 18, 45, 0, 0, time.UTC))
+	cluster.Status = ObservationStatusBlocked
+	cluster.Volumes = []VolumeEvidence{{
+		VolumeID:          "pvc-blocked",
+		Namespace:         "default",
+		PVCName:           "blocked-pvc",
+		Status:            ObservationStatusBlocked,
+		Reason:            ReasonCSINodeImagePullFailed,
+		SupportBundleHint: "support/bundle",
+	}}
+	cluster.ManagedVolumes = []ManagedVolumeProjection{ProjectManagedVolume(ManagedVolumeFacts{
+		VolumeID:      "pvc-blocked",
+		PVCName:       "blocked-pvc",
+		ProductStatus: ObservationStatusBlocked,
+		ProductReason: ReasonCSINodeImagePullFailed,
+		EvidenceRefs:  []string{"support/bundle/replayed-report/summary.txt"},
+	})}
+
+	summary := RenderObservationReportSummary(cluster)
+	for _, want := range []string{
+		"support_bundle_ref=support/bundle",
+		"support_bundle_ref=support/bundle/replayed-report/summary.txt",
+		"safe_next_step=observe.collect_bundle mode=read_only mutation_allowed=false",
+		"collect-helm-support-bundle.sh",
+	} {
+		if !strings.Contains(summary, want) {
+			t.Fatalf("summary missing %q:\n%s", want, summary)
+		}
+	}
+}
+
+func TestObservationReport_IncludesInstallDrift(t *testing.T) {
+	cluster := NewClusterEvidence(time.Date(2026, 6, 13, 13, 10, 0, 0, time.UTC))
+	cluster.InstallDrift = &InstallDriftEvidence{
+		Status:       InstallDriftStatusMismatch,
+		ReasonCode:   ReasonInstallDriftMismatch,
+		CurrentImage: "sw-block:old",
+		DesiredImage: "sw-block:new",
+		EvidenceRef:  "install-drift-summary.txt",
+	}
+
+	summary := RenderObservationReportSummary(cluster)
+	for _, want := range []string{
+		"install_drift_status=mismatch reason=install_drift_mismatch evidence=install-drift-summary.txt",
+		"install_drift_image current=sw-block:old desired=sw-block:new",
+		"cluster_condition=Blocked status=True reason=install_drift_mismatch severity=warning",
+	} {
+		if !strings.Contains(summary, want) {
+			t.Fatalf("summary missing %q:\n%s", want, summary)
+		}
+	}
+	html := RenderObservationReportHTML(cluster)
+	if !strings.Contains(html, "Install Drift") || !strings.Contains(html, "sw-block:old") || !strings.Contains(html, "sw-block:new") {
+		t.Fatalf("html missing install drift:\n%s", html)
 	}
 }
 

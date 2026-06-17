@@ -1,0 +1,97 @@
+# Runner-native Phase 42 D1 gate: live lifecycle-owner API/admission boundary.
+
+name: lifecycle-owner-admission-gate-chain
+description: >
+  Runs the live Kubernetes ValidatingAdmissionPolicy gate that proves the
+  lifecycle-owner identity can only issue finalizer-shaped SwBlockVolume main
+  object patches. This is the real API/admission successor to the Phase 41
+  schema-aware boundary gate.
+
+vars:
+  product_root: "{{ env.PRODUCT_ROOT | default('/mnt/c/work/seaweed_block') }}"
+
+phases:
+  - name: admission_gate
+    actions:
+      - type: exec
+        name: run_phase42_admission_gate
+        cmd: "rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase42-lifecycle-owner-admission-gate && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase42-lifecycle-owner-admission-gate && cd {{ product_root }} && SW_BLOCK_ARTIFACT_DIR=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase42-lifecycle-owner-admission-gate bash scripts/run-phase42-lifecycle-owner-admission-gate.sh {{ product_root }}"
+
+  - name: asserts
+    actions:
+      - type: grep_log
+        name: admission_gate_ok
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase42-lifecycle-owner-admission-gate/phase42-lifecycle-owner-admission-gate-summary.txt"
+        pattern: "^phase42_lifecycle_owner_admission_status=ok$"
+      - type: grep_log
+        name: operator_status_no_main_patch
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase42-lifecycle-owner-admission-gate/phase42-lifecycle-owner-admission-gate-summary.txt"
+        pattern: "^operator_status_main_patch_allowed=false$"
+      - type: grep_log
+        name: admission_policy_propagated
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase42-lifecycle-owner-admission-gate/phase42-lifecycle-owner-admission-gate-summary.txt"
+        pattern: "^admission_policy_propagated=true$"
+      - type: grep_log
+        name: lifecycle_owner_finalizer_add_allowed
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase42-lifecycle-owner-admission-gate/phase42-lifecycle-owner-admission-gate-summary.txt"
+        pattern: "^lifecycle_owner_finalizer_add_allowed=true$"
+      - type: grep_log
+        name: lifecycle_owner_finalizer_add_idempotent
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase42-lifecycle-owner-admission-gate/phase42-lifecycle-owner-admission-gate-summary.txt"
+        pattern: "^lifecycle_owner_finalizer_add_idempotent=true$"
+      - type: grep_log
+        name: lifecycle_owner_finalizer_remove_allowed
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase42-lifecycle-owner-admission-gate/phase42-lifecycle-owner-admission-gate-summary.txt"
+        pattern: "^lifecycle_owner_finalizer_remove_allowed=true$"
+      - type: grep_log
+        name: lifecycle_owner_finalizer_remove_idempotent
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase42-lifecycle-owner-admission-gate/phase42-lifecycle-owner-admission-gate-summary.txt"
+        pattern: "^lifecycle_owner_finalizer_remove_idempotent=true$"
+      - type: grep_log
+        name: lifecycle_owner_spec_forbidden
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase42-lifecycle-owner-admission-gate/phase42-lifecycle-owner-admission-gate-summary.txt"
+        pattern: "^lifecycle_owner_spec_patch_allowed=false$"
+      - type: grep_log
+        name: lifecycle_owner_label_forbidden
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase42-lifecycle-owner-admission-gate/phase42-lifecycle-owner-admission-gate-summary.txt"
+        pattern: "^lifecycle_owner_label_patch_allowed=false$"
+      - type: grep_log
+        name: lifecycle_owner_annotation_forbidden
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase42-lifecycle-owner-admission-gate/phase42-lifecycle-owner-admission-gate-summary.txt"
+        pattern: "^lifecycle_owner_annotation_patch_allowed=false$"
+      - type: grep_log
+        name: lifecycle_owner_ownerreferences_forbidden
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase42-lifecycle-owner-admission-gate/phase42-lifecycle-owner-admission-gate-summary.txt"
+        pattern: "^lifecycle_owner_ownerreferences_patch_allowed=false$"
+      - type: grep_log
+        name: lifecycle_owner_deletiontimestamp_forbidden
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase42-lifecycle-owner-admission-gate/phase42-lifecycle-owner-admission-gate-summary.txt"
+        pattern: "^lifecycle_owner_deletiontimestamp_patch_allowed=false$"
+      - type: grep_log
+        name: lifecycle_owner_foreign_finalizer_forbidden
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase42-lifecycle-owner-admission-gate/phase42-lifecycle-owner-admission-gate-summary.txt"
+        pattern: "^lifecycle_owner_foreign_finalizer_allowed=false$"
+      - type: grep_log
+        name: lifecycle_owner_mixed_patch_forbidden
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase42-lifecycle-owner-admission-gate/phase42-lifecycle-owner-admission-gate-summary.txt"
+        pattern: "^lifecycle_owner_mixed_patch_allowed=false$"
+      - type: grep_log
+        name: lifecycle_owner_mixed_metadata_forbidden
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase42-lifecycle-owner-admission-gate/phase42-lifecycle-owner-admission-gate-summary.txt"
+        pattern: "^lifecycle_owner_mixed_metadata_patch_allowed=false$"
+      - type: grep_log
+        name: lifecycle_owner_main_status_not_mutated
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase42-lifecycle-owner-admission-gate/phase42-lifecycle-owner-admission-gate-summary.txt"
+        pattern: "^lifecycle_owner_main_status_mutated=false$"
+      - type: grep_log
+        name: lifecycle_owner_status_subresource_forbidden
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase42-lifecycle-owner-admission-gate/phase42-lifecycle-owner-admission-gate-summary.txt"
+        pattern: "^lifecycle_owner_status_subresource_patch_allowed=false$"
+      - type: grep_log
+        name: finalizers_endpoint_forbidden
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase42-lifecycle-owner-admission-gate/phase42-lifecycle-owner-admission-gate-summary.txt"
+        pattern: "^finalizers_endpoint_allowed=false$"
+      - type: grep_log
+        name: object_integrity_preserved
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase42-lifecycle-owner-admission-gate/phase42-lifecycle-owner-admission-gate-summary.txt"
+        pattern: "^object_integrity_preserved=true$"

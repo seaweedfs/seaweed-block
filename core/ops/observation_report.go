@@ -59,6 +59,55 @@ func RenderObservationReportSummary(cluster ClusterEvidence) string {
 			fmt.Fprintf(&b, "%s\n", line)
 		}
 	}
+	if cluster.InstallDrift != nil {
+		fmt.Fprintf(&b, "install_drift_status=%s reason=%s evidence=%s\n",
+			emptyAsDash(cluster.InstallDrift.Status),
+			emptyAsDash(cluster.InstallDrift.ReasonCode),
+			emptyAsDash(cluster.InstallDrift.EvidenceRef))
+		fmt.Fprintf(&b, "install_drift_chart current=%s desired=%s app_current=%s app_desired=%s\n",
+			emptyAsDash(cluster.InstallDrift.CurrentChartVersion),
+			emptyAsDash(cluster.InstallDrift.DesiredChartVersion),
+			emptyAsDash(cluster.InstallDrift.CurrentAppVersion),
+			emptyAsDash(cluster.InstallDrift.DesiredAppVersion))
+		fmt.Fprintf(&b, "install_drift_image current=%s desired=%s csi_current=%s csi_desired=%s operator_current=%s operator_desired=%s\n",
+			emptyAsDash(cluster.InstallDrift.CurrentImage),
+			emptyAsDash(cluster.InstallDrift.DesiredImage),
+			emptyAsDash(cluster.InstallDrift.CurrentCSIImage),
+			emptyAsDash(cluster.InstallDrift.DesiredCSIImage),
+			emptyAsDash(cluster.InstallDrift.CurrentOperatorImage),
+			emptyAsDash(cluster.InstallDrift.DesiredOperatorImage))
+	}
+	supportRefs := supportBundleRefsFromCluster(cluster)
+	for _, ref := range supportRefs {
+		fmt.Fprintf(&b, "support_bundle_ref=%s\n", ref)
+	}
+	for _, step := range safeNextStepsFromCluster(cluster, supportRefs) {
+		fmt.Fprintf(&b, "safe_next_step=%s mode=%s mutation_allowed=%t command=%q reason=%s\n",
+			emptyAsDash(step.Type),
+			emptyAsDash(step.Mode),
+			step.MutationAllowed,
+			step.Command,
+			emptyAsDash(step.ReasonCode))
+	}
+	operatorSnapshot := BuildOperatorFoundationSnapshot(cluster)
+	for _, condition := range operatorSnapshot.Cluster.Conditions {
+		fmt.Fprintf(&b, "cluster_condition=%s status=%s reason=%s severity=%s\n",
+			emptyAsDash(condition.Type),
+			emptyAsDash(condition.Status),
+			emptyAsDash(condition.Reason),
+			emptyAsDash(condition.Severity))
+	}
+	for _, node := range operatorSnapshot.Cluster.Nodes {
+		fmt.Fprintf(&b, "node=%s k8s=%s status=%s reason=%s ready=%t schedulable=%t missing_images=%s\n",
+			emptyAsDash(node.Name),
+			emptyAsDash(node.KubernetesNode),
+			emptyAsDash(node.Status),
+			emptyAsDash(node.ReasonCode),
+			node.Ready,
+			node.Schedulable,
+			emptyAsDash(strings.Join(node.MissingImages, ",")))
+	}
+	renderedManaged := map[string]bool{}
 	for _, volume := range cluster.Volumes {
 		fmt.Fprintf(&b, "volume=%s status=%s pvc=%s/%s primary=%s@%s frontend=%s rf=%d ack=%s\n",
 			emptyAsDash(volume.VolumeID),
@@ -71,27 +120,66 @@ func RenderObservationReportSummary(cluster ClusterEvidence) string {
 			volume.ReplicationFactor,
 			emptyAsDash(volume.AckProfile))
 		managed := managedProjectionForVolume(cluster.ManagedVolumes, volume.VolumeID)
-		fmt.Fprintf(&b, "managed_volume=%s status=%s reason=%s\n",
-			emptyAsDash(managed.VolumeID),
-			emptyAsDash(managed.Status),
-			emptyAsDash(managed.ReasonCode))
-		for _, condition := range managed.Conditions {
-			fmt.Fprintf(&b, "managed_volume_condition=%s status=%s reason=%s severity=%s\n",
-				emptyAsDash(condition.Type),
-				emptyAsDash(condition.Status),
-				emptyAsDash(condition.Reason),
-				emptyAsDash(condition.Severity))
+		renderManagedProjectionSummary(&b, managed)
+		renderedManaged[managedProjectionKey(managed)] = true
+	}
+	for _, managed := range cluster.ManagedVolumes {
+		if renderedManaged[managedProjectionKey(managed)] {
+			continue
 		}
-		for _, action := range managed.Actions {
-			fmt.Fprintf(&b, "managed_volume_action=%s mode=%s side_effect=%s executor=%s\n",
-				emptyAsDash(action.Type),
-				emptyAsDash(action.Mode),
-				emptyAsDash(action.SideEffectClass),
-				emptyAsDash(action.OwnerExecutor))
-		}
+		renderManagedProjectionSummary(&b, managed)
 	}
 	fmt.Fprintf(&b, "read_only=true\n")
 	return b.String()
+}
+
+func renderManagedProjectionSummary(b *strings.Builder, managed ManagedVolumeProjection) {
+	fmt.Fprintf(b, "managed_volume=%s status=%s reason=%s\n",
+		emptyAsDash(managed.VolumeID),
+		emptyAsDash(managed.Status),
+		emptyAsDash(managed.ReasonCode))
+	for _, condition := range managed.Conditions {
+		fmt.Fprintf(b, "managed_volume_condition=%s status=%s reason=%s severity=%s\n",
+			emptyAsDash(condition.Type),
+			emptyAsDash(condition.Status),
+			emptyAsDash(condition.Reason),
+			emptyAsDash(condition.Severity))
+	}
+	if managed.DeleteSafety != nil {
+		fmt.Fprintf(b, "managed_volume_delete_safety=%s state=%s decision=%s reason=%s release_allowed=%t action=%s\n",
+			emptyAsDash(managed.VolumeID),
+			emptyAsDash(managed.DeleteSafety.State),
+			emptyAsDash(managed.DeleteSafety.Decision),
+			emptyAsDash(managed.DeleteSafety.Reason),
+			managed.DeleteSafety.FinalizerReleaseAllowed,
+			emptyAsDash(managed.DeleteSafety.ActionType))
+		if managed.DeleteSafety.SafeNextAction != "" {
+			fmt.Fprintf(b, "managed_volume_delete_safety_safe_next_action=%s %s\n",
+				emptyAsDash(managed.VolumeID),
+				managed.DeleteSafety.SafeNextAction)
+		}
+	}
+	for _, action := range managed.Actions {
+		fmt.Fprintf(b, "managed_volume_action=%s mode=%s side_effect=%s executor=%s decision=%s",
+			emptyAsDash(action.Type),
+			emptyAsDash(action.Mode),
+			emptyAsDash(action.SideEffectClass),
+			emptyAsDash(action.OwnerExecutor),
+			emptyAsDash(action.Decision))
+		if action.DecisionReason != "" {
+			fmt.Fprintf(b, " reason=%s", action.DecisionReason)
+		}
+		b.WriteByte('\n')
+		if action.EvidenceRequired != "" {
+			fmt.Fprintf(b, "managed_volume_action_evidence_required=%s %s\n",
+				emptyAsDash(action.Type),
+				action.EvidenceRequired)
+		}
+	}
+}
+
+func managedProjectionKey(managed ManagedVolumeProjection) string {
+	return defaultString(managed.VolumeID, managed.PVCName)
 }
 
 func RenderObservationReportHTML(cluster ClusterEvidence) string {
@@ -141,6 +229,42 @@ func RenderObservationReportHTML(cluster ClusterEvidence) string {
 			row.HostPathResidueCount,
 			row.FailureCount,
 			esc(row.EvidenceRef))
+		b.WriteString("</tbody></table></section>")
+	}
+
+	if cluster.InstallDrift != nil {
+		b.WriteString("<section><h2>Install Drift</h2><table><thead><tr><th>Status</th><th>Reason</th><th>Chart</th><th>App</th><th>Image</th><th>CSI Image</th><th>Operator Image</th><th>Evidence</th></tr></thead><tbody>")
+		fmt.Fprintf(&b, "<tr><td>%s</td><td>%s</td><td>%s -> %s</td><td>%s -> %s</td><td>%s -> %s</td><td>%s -> %s</td><td>%s -> %s</td><td>%s</td></tr>",
+			esc(emptyAsDash(cluster.InstallDrift.Status)),
+			esc(emptyAsDash(cluster.InstallDrift.ReasonCode)),
+			esc(emptyAsDash(cluster.InstallDrift.CurrentChartVersion)),
+			esc(emptyAsDash(cluster.InstallDrift.DesiredChartVersion)),
+			esc(emptyAsDash(cluster.InstallDrift.CurrentAppVersion)),
+			esc(emptyAsDash(cluster.InstallDrift.DesiredAppVersion)),
+			esc(emptyAsDash(cluster.InstallDrift.CurrentImage)),
+			esc(emptyAsDash(cluster.InstallDrift.DesiredImage)),
+			esc(emptyAsDash(cluster.InstallDrift.CurrentCSIImage)),
+			esc(emptyAsDash(cluster.InstallDrift.DesiredCSIImage)),
+			esc(emptyAsDash(cluster.InstallDrift.CurrentOperatorImage)),
+			esc(emptyAsDash(cluster.InstallDrift.DesiredOperatorImage)),
+			esc(emptyAsDash(cluster.InstallDrift.EvidenceRef)))
+		b.WriteString("</tbody></table></section>")
+	}
+
+	supportRefs := supportBundleRefsFromCluster(cluster)
+	if len(supportRefs) > 0 {
+		b.WriteString("<section><h2>Support Evidence</h2><table><thead><tr><th>Evidence Ref</th></tr></thead><tbody>")
+		for _, ref := range supportRefs {
+			fmt.Fprintf(&b, "<tr><td><code>%s</code></td></tr>", esc(ref))
+		}
+		b.WriteString("</tbody></table></section>")
+	}
+	if steps := safeNextStepsFromCluster(cluster, supportRefs); len(steps) > 0 {
+		b.WriteString("<section><h2>Safe Next Steps</h2><table><thead><tr><th>Type</th><th>Mode</th><th>Mutation</th><th>Reason</th><th>Command</th></tr></thead><tbody>")
+		for _, step := range steps {
+			fmt.Fprintf(&b, "<tr><td>%s</td><td>%s</td><td>%t</td><td>%s</td><td><code>%s</code></td></tr>",
+				esc(step.Type), esc(step.Mode), step.MutationAllowed, esc(emptyAsDash(step.ReasonCode)), esc(step.Command))
+		}
 		b.WriteString("</tbody></table></section>")
 	}
 

@@ -205,6 +205,74 @@ func TestHost_ApplyFact_Self_UpdateReplicaSetFailure_SkipsOnAssignment(t *testin
 	}
 }
 
+func TestHost_ApplyFact_Self_LocalReadinessBlocked_SkipsReplicationAndAdapter(t *testing.T) {
+	rec := &orderingRecorder{}
+	h, a, r := newStubbedHost(t, "vol1", "r1", rec)
+	readyCh := make(chan adapter.AssignmentInfo, 1)
+	h.cfg.ReadyMarker = readyCh
+	h.BlockLocalReadiness("durable recovery failed: wal_integrity_fault")
+
+	fact := &control.AssignmentFact{
+		VolumeId:          "vol1",
+		ReplicaId:         "r1",
+		Epoch:             2,
+		EndpointVersion:   1,
+		PeerSetGeneration: 7,
+		Peers: []*control.ReplicaDescriptor{
+			{ReplicaId: "r1", DataAddr: "d1", CtrlAddr: "c1", Epoch: 2, EndpointVersion: 1},
+		},
+	}
+
+	h.applyFact(fact)
+
+	if got := r.callCount.Load(); got != 0 {
+		t.Fatalf("local readiness block must skip UpdateReplicaSet: got %d calls", got)
+	}
+	if got := a.callCount.Load(); got != 0 {
+		t.Fatalf("local readiness block must skip OnAssignment: got %d calls", got)
+	}
+	if seq := rec.snapshot(); len(seq) != 0 {
+		t.Fatalf("local readiness block sequence=%v want empty", seq)
+	}
+	select {
+	case got := <-readyCh:
+		t.Fatalf("local readiness block must not emit ready marker: %+v", got)
+	default:
+	}
+}
+
+func TestHost_ApplyFact_SupportingReplica_LocalReadinessBlocked_SkipsAdapter(t *testing.T) {
+	rec := &orderingRecorder{}
+	h, a, _ := newStubbedHost(t, "vol1", "r2", rec)
+	readyCh := make(chan adapter.AssignmentInfo, 1)
+	h.cfg.ReadyMarker = readyCh
+	h.BlockLocalReadiness("awaiting durable recovery")
+
+	fact := &control.AssignmentFact{
+		VolumeId:        "vol1",
+		ReplicaId:       "r1",
+		Epoch:           5,
+		EndpointVersion: 2,
+		Peers: []*control.ReplicaDescriptor{
+			{ReplicaId: "r2", DataAddr: "d2", CtrlAddr: "c2", Epoch: 5, EndpointVersion: 2},
+		},
+	}
+
+	h.applyFact(fact)
+
+	if got := a.callCount.Load(); got != 0 {
+		t.Fatalf("local readiness block must skip supporting OnAssignment: got %d calls", got)
+	}
+	if seq := rec.snapshot(); len(seq) != 0 {
+		t.Fatalf("local readiness block sequence=%v want empty", seq)
+	}
+	select {
+	case got := <-readyCh:
+		t.Fatalf("local readiness block must not emit supporting ready marker: %+v", got)
+	default:
+	}
+}
+
 // --- Test 3: supersede branch unaffected ---
 
 // TestHost_ApplyFact_Supersede_NeverCallsAdapterOrReplication —

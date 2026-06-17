@@ -31,20 +31,44 @@ This is the short internal roadmap. Keep it current and readable.
   iSCSI configuration, StorageClass, readiness output, first-volume smoke,
   local read-only report/dashboard, and uninstall hygiene. Phase 25 closed this
   release target on 2026-05-22.
-- `v0.4-beta-candidate`: Operator lifecycle. Add a Kubernetes-native control
-  plane with CRDs/Conditions/Events for install, node eligibility, volume
-  lifecycle, recovery observation, safe cleanup, and eventually gated repair or
-  rebuild workflows. This is the first release boundary that can credibly feel
-  like a complete Kubernetes product loop rather than an install script.
+- `v0.3.4-alpha`: Helm lifecycle, restart persistence, read-only operations
+  surface, deterministic cleanup, and negative-first status vocabulary merged
+  through PR #50 (`8102cf3`) on 2026-05-27.
+- `v0.3.5-alpha` candidate: TestOps failure hardening. Expand release proof
+  from happy-path gates to negative paths: blocked/stale/unreachable status
+  surfaces, support-bundle replay under corrupt/partial evidence, failed-run
+  cleanup, and multi-volume interference checks. Phase 33 closed this scope;
+  release packaging remains a separate decision.
+- `v0.3.6-alpha`: Phase 34 test realism and anti self-proving gates. Selected
+  replay or summary-grep checks were upgraded into independent live/dirty
+  evidence: live status endpoint unreachable, restart convergence, SmartWAL
+  corruption refusal, and targeted cross-validation between helper summaries
+  and product or Kubernetes facts. Phase 34 closed on 2026-06-02.
+- `v0.4-beta-candidate`: Kubernetes-native read-only operator foundation. Phase
+  35 closed this scope on 2026-06-04 with CRDs, Conditions, Events, a
+  status-only controller, stable Event identity, stale/blocked status gates,
+  and read-only RBAC proof. This is the first release boundary that can
+  credibly feel like a normal Kubernetes product loop rather than an install
+  script. Mutating workflows such as repair, rebuild, failback, delete safety,
+  automatic cleanup, and CR object ownership come after the read-only status
+  contract is stable.
+- Closed on 2026-06-06: Phase 36 Productized Operations Actionability. It uses
+  the Phase 35 CRD/status/Event foundation to publish node readiness, support
+  evidence refs, cleanup visibility, safe next-step hints, and cross-surface
+  agreement. This remains read-only and does not add mutating operator
+  lifecycle.
+- Active phase: Phase 37 Live Node Evidence Hardening. Keep it read-only and
+  bounded to live node blockers; do not extend it into mutating lifecycle.
 - Model hardening gate before the next large release: complete the
   ManagedVolume Operations Model under `internal/docs/protocol/` before
   expanding operator or broader HA claims. The goal is to prevent Kubernetes,
   CSI, authority, host-path, recovery, and future NVMe logic from becoming
   scattered scripts or unrelated small automata.
 
-Do not skip from scripts directly to an operator. Helm should stabilize the
-installation contract before an in-cluster controller owns upgrades and day-2
-lifecycle.
+Do not skip from scripts directly to mutating operator lifecycle. Helm has
+stabilized the installation contract, and Phase 35 added read-only CRD status,
+Conditions, and Events. Any in-cluster controller ownership of upgrades, repair,
+rebuild, delete safety, or cleanup must start as a separate gated phase.
 
 ### Alpha Preview
 
@@ -121,8 +145,10 @@ lifecycle.
   - `helm install` + first PVC smoke + `sw-block ops report`,
   - local read-only `sw-block ops dashboard` over the same evidence,
   - `helm uninstall` plus explicit host cleanup verification.
-- Later: v0.4 operator lifecycle. Introduce CRDs/Conditions/Events and scoped
-  reconciliation only after the Helm contract is stable.
+- Next major milestone: Phase 35 read-only operator foundation. Introduce
+  CRDs/Conditions/Events and status-only reconciliation after the Helm contract
+  is stable. Keep mutating cleanup, delete finalizers, upgrade execution, and
+  repair/rebuild outside this first operator slice.
 
 ### Track B: iSCSI Frontend Stability
 
@@ -159,7 +185,9 @@ lifecycle.
   documented mechanism, and support-bundle proof of fencing and data integrity.
 - Later: returned-replica rebuild/reintegration/failback, NVMe ANA Kubernetes
   multipath parity, stronger committed-frontier reporting, broad distro/host
-  compatibility, and longer soak under failure.
+  compatibility, and longer soak under failure. NVMe ANA parity should follow
+  the Kubernetes-native status foundation so ANA facts, path states, and
+  protocol-specific reasons project through the same CRD/Condition/Event model.
 
 ### Track E: Protocol / Backend Expansion
 
@@ -198,6 +226,14 @@ lifecycle.
   volumes a first-class internal read model that composes K8s, CSI, authority,
   recovery, host path, workload, and evidence facts while keeping local
   controllers small and testable.
+- Closed on 2026-06-04: Phase 35 turned the existing read-only operations model
+  into Kubernetes-native status:
+  - `SwBlockCluster` and `SwBlockVolume` CRDs,
+  - a status-only controller that writes `.status`,
+  - ManagedVolume Conditions projected into Kubernetes Conditions,
+  - Kubernetes Events for ready, blocked, stale-evidence, and WAL-integrity
+    transitions,
+  - tests proving the controller has no mutating storage authority.
 - Later: metrics, read-only dashboard hardening, conservative admin controls,
   enterprise operations, hosted validation, fleet automation, and cloud-scale
   test lifecycle.
@@ -232,6 +268,10 @@ lifecycle.
   ManagedVolume model used by `sw-block ops report`.
 - Closed on 2026-05-22: Phase 25 packages that operations surface into the
   v0.3 Helm first-volume release story and validates docs/gates against it.
+- Closed on 2026-06-04: Phase 35 implemented the first Kubernetes-native
+  operator foundation slice over this surface: CRDs, read-only `.status`,
+  Conditions, Events, stable Event identity, and read-only RBAC. It did not add
+  mutating admin workflows.
 - Seed landed:
   - `NewObservationDashboardHandler` serves `index.html`,
     `cluster-evidence.json`, `timeline.jsonl`, `summary.txt`, and `healthz`,
@@ -284,7 +324,7 @@ credible light-use product:
   usability still depends too much on internal context.
 - Next:
   - add `kubectl get`-readable readiness/degraded/recovering/blocked conditions
-    with stable reason codes,
+    with stable reason codes through Phase 35 CRD status,
   - provide one-command support-bundle capture with minimum evidence for attach,
     failover, and cleanup diagnosis,
   - set conservative default timeout/retry profiles for iSCSI/NVMe/CSI paths,
@@ -329,10 +369,217 @@ credible light-use product:
 
 - Current: runner scenarios write result/status bundles, but M01/M02 shared lab
   ownership is still mostly implicit.
-- Next: add simple shared-drive control data for active runs, history, locks,
-  artifact pointers, commits, target nodes, and stale-run detection.
-- Later: scenario library indexing, queueing, remote agents on lab nodes,
-  matrix scheduling, hosted validation, and discovery-agent ingestion.
+- Closed: Phase 33 TestOps failure hardening. The runner and helpers now
+  exercise negative paths, collect useful failure snapshots, assert no false
+  Ready states, and prove cleanup/replay behavior after failed runs.
+- Closed: Phase 34 test realism. Reduced self-proving gates by adding
+  independent cross-checks, live status-endpoint-unreachable injection,
+  restart convergence assertions, and one dirty storage failure: SmartWAL
+  corruption. The D4 gate is release-relevant because it checks whether dirty
+  storage evidence can still leak through as false `Ready=True`; it now passes
+  on the core contract.
+- Later: shared-drive control data for active runs, scenario library indexing,
+  queueing, remote agents on lab nodes, matrix scheduling, hosted validation,
+  and discovery-agent ingestion.
+
+## Productized Operations Gap Priority
+
+These are the current operation gaps in priority order. Phase 35 closed the P0
+read-only status foundation; the remaining groups should become separate gated
+phases rather than being mixed into the closed foundation.
+
+### P0: Become Kubernetes-Native For Read-Only Status
+
+1. CRD + status-only operator:
+   `SwBlockCluster`, `SwBlockVolume`, and `.status` writes only. Status:
+   closed in Phase 35.
+2. Conditions writer:
+   project `Ready`, `Blocked`, `Recovering`, `Recovered`, `EvidenceStale`, and
+   `CleanupRequired` from ManagedVolume facts. Status: core vocabulary closed;
+   cleanup projection remains follow-up.
+3. Kubernetes Events:
+   emit normal/warning Events such as `VolumeReady`,
+   `CsiNodeImagePullFailed`, `WalIntegrityFault`, and `EvidenceStale`. Status:
+   closed for read-only status Events.
+
+### P1: Make Operations Actionable
+
+4. Node readiness/preflight status:
+   iSCSI, multipath, image readiness, hostPath readiness, and observed version
+   under `SwBlockCluster.status.nodes[]`. Status: Phase 36 validated positive
+   read-only node readiness and replay-only missing-image blockers. Live
+   negative node evidence remains Phase 37.
+5. Support-bundle pointers:
+   keep the CLI collection path, but expose evidence refs and suggested
+   commands from status. Status: closed in Phase 36.
+6. Cleanup visibility:
+   `CleanupRequired=True`, residue type, and safe next step. Do not automate
+   cleanup yet. Status: closed in Phase 36.
+7. Surface agreement:
+   CRD status, Events, report, dashboard, operator-snapshot, and explain must
+   agree on healthy, blocked, stale, cleanup-required, and multi-volume paths.
+   Status: closed in Phase 36. Live operational follow-ups remain for
+   build-host CSI image-import evidence, loopback publish-target documentation,
+   and force-delete iSCSI node DB residue visibility.
+
+### P2: Enter Mutating Lifecycle Carefully
+
+8. Finalizers and delete safety for PVC/CRD lifecycle.
+9. Upgrade/rollback status and drift reporting before upgrade execution.
+
+### P3: Advanced Day-2 Features
+
+10. Rebuild, reintegration, and failback.
+11. Backup, snapshot, and restore.
+
+NVMe ANA parity is important, but it should not be the next plan. It should
+reuse the Phase 35 status foundation so protocol-specific path state does not
+become another isolated status model.
+
+## Capability And Model Maturity Snapshot
+
+This section is the product-state checkpoint after the Phase 35/36 operations
+push. It exists to stop the roadmap from becoming an unbounded sequence of
+small operations fixes.
+
+### Current Block Capabilities
+
+The product can already demonstrate a narrow but real Kubernetes block-storage
+loop:
+
+- Helm install on supported lab clusters.
+- CSI dynamic PVC provisioning.
+- App pod mount, write, read, and replacement-reader verification.
+- iSCSI frontend with Linux initiator and dm-multipath/ALUA gates.
+- RF=3 multi-volume lab path with independent volume identity, primary, and
+  publish target.
+- CSI reattach recovery with pod recreate.
+- Mounted transparent failover on the gated Stage-2 iSCSI ALUA path.
+- HostPath restart persistence for supported gates, including authority
+  preservation after promotion.
+- Dirty-evidence protection: stale/unreachable/corrupt evidence does not become
+  false `Ready=True`.
+- Strict cleanup verification across Kubernetes resources, iSCSI sessions,
+  iSCSI node DB records, multipath, dmsetup, product processes, and hostPath
+  residue.
+
+### Current Kubernetes And Operations Capabilities
+
+- Helm is the primary install path; scripts remain development/fallback tools.
+- `sw-block ops generate-helm-values` can derive Day-1 Helm values from the
+  target Kubernetes cluster.
+- Read-only CLI/report/dashboard/support-bundle flows are established.
+- `SwBlockCluster` and `SwBlockVolume` CRDs exist with status subresources.
+- The optional operator-status controller writes `.status` and Kubernetes
+  Events only.
+- Positive/read-only node readiness, support evidence refs, cleanup visibility,
+  safe next-step hints, and surface agreement are QA-validated under the
+  read-only model. Live negative node blockers remain Phase 37.
+
+### Model Convergence State
+
+The control-plane model is materially better than the earlier script-centered
+shape, but it is not finished. See
+`internal/docs/protocol/control-structure-effectiveness-review.md` for the
+review standard that separates real capability closure from semantic-only model
+work.
+
+Converged:
+
+- `ManagedVolume` is the shared semantic object for volume status.
+- CRD status, Events, report, dashboard, `operator-snapshot.json`, and
+  `ops explain` share the same Condition/reason vocabulary.
+- The design pattern is now explicit:
+  truth owner publishes facts; orchestration/status entity aggregates judgment;
+  executor remains bounded; evidence/timeline explains why the judgment is
+  allowed.
+- Negative-first is enforced across status surfaces.
+
+Still incomplete:
+
+- Live node evidence does not yet derive all negative facts from real Kubernetes
+  node/image/CSI-driver state.
+- Some volume-side fault reasons still need stronger end-to-end propagation to
+  user-visible surfaces.
+- Mutating lifecycle actions now have a non-mutating lifecycle-owner contract
+  shape: action + precondition + invariant + executor + evidence.
+- PVC lifecycle, blockvolume lifecycle, and Kubernetes attach lifecycle still
+  need a real lifecycle-owner component and API/admission proof before anything
+  mutates Kubernetes lifecycle objects.
+
+### Product Priority From Here
+
+The operations work can continue forever unless the next phases are bounded by
+product risk. The recommended order is:
+
+1. **Phase 37: Live node evidence hardening.** Closed.
+   Kubernetes Ready/SchedulingDisabled, CSI node pod readiness,
+   CSIDriver/node-plugin registration, image-pull status, host-prereq replay,
+   and loopback target cross-node blockers are now projected through the shared
+   status surfaces.
+2. **Phase 38: Lifecycle action model executable contract.** Closed.
+   Future actions now have facts, preconditions, invariants, allowed executor,
+   policy gate, evidence, and allow/reject decisions. It includes both a dry-run
+   action gate and a rejected-action gate.
+3. **Phase 39: Delete-safety status boundary.** Closed.
+   Live QA proved the original RBAC-only finalizer boundary is not viable for
+   CRD finalizers: CRDs have no usable HTTP `/finalizers` endpoint, so
+   `metadata.finalizers` changes require main `patch swblockvolumes`
+   authorization. The chosen path is to keep operator-status status/events-only
+   and defer finalizer add/remove to a future lifecycle owner.
+4. **Phase 40: Operator production hardening.** Closed.
+   The v0.4 beta foundation released Helm + PVC + status/events-only
+   operator-status, install drift visibility, delete-safety visibility, and
+   schema/RBAC conformance gates.
+5. **Phase 41: Lifecycle owner foundation.** Closed.
+   Defines observer/lifecycle-owner/executor boundaries, keeps operator-status
+   status/events-only, defers finalizer mutation, and exposes dry-run
+   lifecycle-owner decisions for delete-safety. It does not ship deletion
+   protection.
+6. **Phase 42: real lifecycle-owner API/admission gate.** Closed.
+   Before any finalizer add/remove, prove main-object patch confinement against
+   a real Kubernetes API with admission/RBAC. Only then consider a first
+   bounded mutation.
+7. **Phase 43: first real lifecycle mutation.** Active.
+   Ship only the first bounded mutation: `SwBlockVolume` protection finalizer
+   add/remove with delete-safety preconditions. Do not include cleanup, rebuild,
+   failback, backup, or NVMe in the same phase.
+8. **Phase 44 candidate: delete lifecycle close gate and Operation Layer v0.5
+   release.**
+   Validate the full user path: install -> PVC -> status -> delete requested ->
+   blocked/releasable -> finalizer behavior -> cleanup evidence -> support
+   bundle -> uninstall zero residue. This is the release boundary for the
+   operation layer.
+9. **Productized returned-replica rebuild/reintegration/failback.**
+   High product value. The engine/transport has rebuild and returned-replica
+   safety pieces; the remaining work is productization through the lifecycle
+   action model: live facts, judgment, action owner, fencing, status, Events,
+   and multi-volume QA gates.
+10. **Backup/snapshot/restore and NVMe ANA parity.**
+   Important, but they should reuse the status/action model rather than create
+   another isolated control plane.
+
+### Effort Shape
+
+Approximate engineering effort if scope remains tight:
+
+- Live node evidence hardening: small/medium. Mostly observation ingestion,
+  projection tests, and live TestOps gates. Low mutation risk.
+- Lifecycle action model review: medium. Mostly design and tests, but it should
+  block later mutating work from scattering logic across listeners/scripts.
+- Delete-safety status: closed. Keeps delete safety visible without widening
+  operator-status mutation rights.
+- Lifecycle-owner finalizers: medium/high. Cleaner than operator-status main
+  patch, but requires a separate lifecycle-owner component plus real
+  API/admission proof that only finalizers can be patched.
+- Productized returned-replica rebuild/reintegration/failback: high. The
+  low-level rebuild/recovery pieces exist, but shipping it as a product feature
+  requires lifecycle ownership, authority/fencing status, returned-replica state
+  projection, and long-running multi-volume failure gates.
+- Backup/snapshot/restore: high. Requires durable data semantics and user-facing
+  restore guarantees.
+- NVMe ANA parity: medium/high. Protocol-specific work, but cheaper if it uses
+  the existing CRD/Condition/Event model.
 
 ## PR Cadence
 
@@ -345,6 +592,36 @@ credible light-use product:
 ## Current Execution Pointer
 
 - Active work should be tracked in `internal/docs/current-plan.md`.
+- Phase 35 closed the Kubernetes-native read-only operator foundation:
+  CRDs, status-only reconciliation, Conditions, Events, stable Event identity,
+  and read-only boundary tests.
+- Phase 36 Productized Operations Actionability is closed. Positive/read-only
+  node readiness, support evidence pointers, cleanup visibility, and surface
+  agreement are QA-validated under the read-only control-plane model. Live
+  negative node evidence remains Phase 37.
+- Phase 37 Live Node Evidence Hardening is closed.
+- Phase 38 Lifecycle Action Model Executable Contract is closed.
+- Phase 39 Delete-Safety Status Boundary is closed.
+- Phase 40 Operator Production Hardening is closed and is the v0.4 beta release
+  boundary.
+- Phase 41 Lifecycle Owner Foundation is closed. It is non-mutating:
+  finalizer add/remove is deferred, while lifecycle-owner dry-run decisions and
+  delete-safety preconditions are made visible.
+- Phase 42 Lifecycle Owner API / Admission Gate is closed. It proved the
+  lifecycle-owner main-object patch boundary against a real Kubernetes
+  API/admission surface and preserved the delete-safety decision model.
+- Active work is Phase 43 First Bounded Finalizer Mutation. It may add/remove
+  only the Seaweed Block `SwBlockVolume` protection finalizer, gated by
+  delete-safety. It must not execute cleanup or mutate PVC/PV/workloads/storage.
+- Phase 41-44 are the Operation Layer v0.5 release train: lifecycle-owner
+  foundation, real API/admission proof, first bounded finalizer mutation, and
+  delete lifecycle close gate/release.
+- The release-train contract is
+  `internal/docs/ref/operation-layer-v0.5-release-train.md`; the Phase 42 gate
+  draft is `internal/docs/ref/phase42-lifecycle-owner-api-admission-gate.md`.
+- Do not start NVMe ANA parity, rebuild/failback, backup/restore, or mutating
+  recovery workflows by extending Phase 41. Pick those as separate gated phases
+  after the Operation Layer v0.5 train closes.
 - When the current plan closes, move it to `internal/docs/finished-plans/`
   with a phase/topic filename such as
   `phase1_finishedplan_frontend_protocol_readiness.md`.

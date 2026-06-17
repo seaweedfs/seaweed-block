@@ -5,11 +5,13 @@ COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 go build -o /out/blockmaster ./cmd/blockmaster && \
-    CGO_ENABLED=0 go build -o /out/blockvolume ./cmd/blockvolume
+    CGO_ENABLED=0 go build -o /out/blockvolume ./cmd/blockvolume && \
+    CGO_ENABLED=0 go build -o /out/sw-block ./cmd/sw-block
 
 FROM debian:bookworm-slim
 
 COPY --from=build /out/blockmaster /usr/local/bin/blockmaster
 COPY --from=build /out/blockvolume /usr/local/bin/blockvolume
+COPY --from=build /out/sw-block /usr/local/bin/sw-block
 
 USER 65532:65532

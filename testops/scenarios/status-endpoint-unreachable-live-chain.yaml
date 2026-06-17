@@ -1,0 +1,356 @@
+# Phase 34 D2 gate: live status endpoint unreachable.
+#
+# Goal:
+#   Upgrade the Phase 33 replay-only unreachable-status check into a live
+#   injection. The blockvolume process and iSCSI data path stay alive; only the
+#   replica status endpoint is rejected. Correct behavior is Unknown /
+#   status_endpoint_unreachable, not Blocked and not Ready=True.
+
+name: status-endpoint-unreachable-live-chain
+timeout: 32m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+  helm_release: "sw-block"
+  helm_namespace: "kube-system"
+  sw_block_image: "ghcr.io/seaweedfs/seaweed-block:sha-dc2972d0059b"
+  sw_block_csi_image: "ghcr.io/seaweedfs/seaweed-block-csi:sha-dc2972d0059b"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: pre_clean
+    actions:
+      - action: pre_run_cleanup
+        node: m02
+        kill_patterns: "blockmaster,blockvolume,blockcsi,iscsi-target"
+        nvme_disconnect: "true"
+        iscsi_logout_prefix: "iqn.2026-05.io.seaweedfs"
+      - action: exec
+        node: m02
+        timeout: 5m
+        cmd: "helm status {{ helm_release }} --namespace {{ helm_namespace }} >/dev/null 2>&1 && helm uninstall {{ helm_release }} --namespace {{ helm_namespace }} --wait --timeout 180s || true; kubectl -n default delete pod sw-block-example-reader sw-block-example-writer --ignore-not-found=true --wait=true --timeout=120s; kubectl -n default delete pvc sw-block-example-pvc --ignore-not-found=true --wait=true --timeout=120s; kubectl delete storageclass sw-block-example sw-block-dynamic --ignore-not-found=true --wait=true --timeout=120s; kubectl delete clusterrole/sw-block-csi clusterrolebinding/sw-block-csi --ignore-not-found=true; sudo -n iscsiadm -m node 2>/dev/null | awk '/io.seaweedfs/ {print $1, $2}' | while read portal target; do sudo -n iscsiadm -m node -T \"$target\" -p \"$portal\" -o delete || true; done; rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-status-endpoint-unreachable-live && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-status-endpoint-unreachable-live/bin /mnt/smb/work/share/g15d-k8s/{{ run_id }}-status-endpoint-unreachable-live/values /mnt/smb/work/share/g15d-k8s/{{ run_id }}-status-endpoint-unreachable-live/install /mnt/smb/work/share/g15d-k8s/{{ run_id }}-status-endpoint-unreachable-live/basic-app /mnt/smb/work/share/g15d-k8s/{{ run_id }}-status-endpoint-unreachable-live/fault /mnt/smb/work/share/g15d-k8s/{{ run_id }}-status-endpoint-unreachable-live/live-report /mnt/smb/work/share/g15d-k8s/{{ run_id }}-status-endpoint-unreachable-live/dashboard /mnt/smb/work/share/g15d-k8s/{{ run_id }}-status-endpoint-unreachable-live/cleanup"
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+      - action: assert_no_active_iscsi_sessions
+        node: m02
+        iqn_substr: "io.seaweedfs"
+      - action: assert_no_processes
+        node: m02
+        pattern: "[/]blockmaster --|[/]blockvolume --|[/]blockcsi |[/]iscsi-target |^blockmaster |^blockvolume |^blockcsi |^iscsi-target "
+
+  - name: build_and_install
+    actions:
+      - action: exec
+        node: m02
+        timeout: 6m
+        cmd: "cd {{ product_root }} && go build -o /mnt/smb/work/share/g15d-k8s/{{ run_id }}-status-endpoint-unreachable-live/bin/sw-block ./cmd/sw-block && /mnt/smb/work/share/g15d-k8s/{{ run_id }}-status-endpoint-unreachable-live/bin/sw-block ops generate-helm-values --kubeconfig /etc/rancher/k3s/k3s.yaml --out /mnt/smb/work/share/g15d-k8s/{{ run_id }}-status-endpoint-unreachable-live/values/values.day1.yaml --image {{ sw_block_image }} --csi-image {{ sw_block_csi_image }} > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-status-endpoint-unreachable-live/values/generate.stdout.txt"
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-status-endpoint-unreachable-live/values/generate.stdout.txt"
+        pattern: "helm_values_status=ok"
+        save_as: generator_ok_count
+      - action: assert_greater
+        actual: "{{ generator_ok_count }}"
+        threshold: "0"
+      - action: exec
+        node: m02
+        timeout: 10m
+        cmd: "cd {{ product_root }} && helm install {{ helm_release }} charts/seaweed-block --namespace {{ helm_namespace }} --create-namespace -f /mnt/smb/work/share/g15d-k8s/{{ run_id }}-status-endpoint-unreachable-live/values/values.day1.yaml --wait --timeout 10m > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-status-endpoint-unreachable-live/install/helm-install.txt && kubectl -n {{ helm_namespace }} get deploy,ds,pods,svc -o wide > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-status-endpoint-unreachable-live/install/kube-system.after-install.txt"
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-status-endpoint-unreachable-live/install/helm-install.txt"
+        pattern: "STATUS: deployed"
+        save_as: helm_deployed_count
+      - action: assert_greater
+        actual: "{{ helm_deployed_count }}"
+        threshold: "0"
+
+  - name: first_volume_ready_before_fault
+    actions:
+      - action: exec
+        node: m02
+        timeout: 10m
+        cmd: "cd {{ product_root }} && bash scripts/run-basic-app-example.sh {{ product_root }}"
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+        env.SW_BLOCK_ARTIFACT_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-status-endpoint-unreachable-live/basic-app"
+        env.SW_BLOCK_BASIC_APP_CLEANUP: "0"
+        env.SW_BLOCK_INSTALL_MODE: "helm"
+        env.SW_BLOCK_HELM_RELEASE: "{{ helm_release }}"
+        env.SW_BLOCK_HELM_NAMESPACE: "{{ helm_namespace }}"
+        env.SW_BLOCK_HELM_VALUES_FILE: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-status-endpoint-unreachable-live/values/values.day1.yaml"
+        env.SW_BLOCK_CLI: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-status-endpoint-unreachable-live/bin/sw-block"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-status-endpoint-unreachable-live/basic-app/first-volume-summary.txt"
+        pattern: "^first_volume_status=ok$"
+        save_as: first_volume_ok_count
+      - action: assert_greater
+        actual: "{{ first_volume_ok_count }}"
+        threshold: "0"
+      - action: exec
+        node: m02
+        timeout: 1m
+        cmd: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          root = Path("/mnt/smb/work/share/g15d-k8s/{{ run_id }}-status-endpoint-unreachable-live/basic-app")
+          snap = json.loads((root / "status/report/operator-snapshot.json").read_text())
+          vols = snap.get("volumes") or []
+          if len(vols) != 1:
+              raise SystemExit(f"expected one volume before fault, got {len(vols)}")
+          status = vols[0].get("status") or {}
+          if status.get("status") != "ready" or status.get("reason_code") != "first_volume_verified":
+              raise SystemExit(f"volume was not Ready before fault: {status}")
+          cluster = snap.get("cluster") or {}
+          if cluster.get("ready_volume_count") != 1:
+              raise SystemExit(f"expected ready_volume_count=1 before fault: {cluster}")
+          PY
+
+  - name: block_status_endpoint
+    actions:
+      - action: exec
+        node: m02
+        timeout: 2m
+        cmd: |
+          set -eu
+          OUT=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-status-endpoint-unreachable-live/fault
+          mkdir -p "$OUT"
+          python3 - <<'PY' > "$OUT/status-target.env"
+          import json
+          from pathlib import Path
+          root = Path("/mnt/smb/work/share/g15d-k8s/{{ run_id }}-status-endpoint-unreachable-live/basic-app/status")
+          doc = json.loads((root / "inventory/volume-inventory.json").read_text())
+          vols = doc.get("volumes") or []
+          if len(vols) != 1:
+              raise SystemExit(f"expected one volume, got {len(vols)}")
+          replicas = vols[0].get("replicas") or []
+          if len(replicas) != 1:
+              raise SystemExit(f"expected one replica, got {len(replicas)}")
+          status_addr = replicas[0].get("status_address") or replicas[0].get("status_addr") or ""
+          if ":" not in status_addr:
+              raise SystemExit(f"bad status_addr={status_addr!r}")
+          host, port = status_addr.rsplit(":", 1)
+          frontend = replicas[0].get("frontend_address") or replicas[0].get("frontend_addr") or ""
+          if frontend.endswith(":3260") and frontend.rsplit(":", 1)[0] == host and port == "3260":
+              raise SystemExit("refusing to block iSCSI data port 3260")
+          print(f"status_addr={status_addr}")
+          print(f"status_host={host}")
+          print(f"status_port={port}")
+          print(f"volume_id={vols[0].get('volume_id','')}")
+          print(f"replica_id={replicas[0].get('replica_id','')}")
+          print(f"frontend_addr={frontend}")
+          PY
+          . "$OUT/status-target.env"
+          test "$status_port" != "3260"
+          echo "rule=iptables -I INPUT -p tcp --dport ${status_port} -j REJECT --reject-with tcp-reset" > "$OUT/iptables-rule.txt"
+          run_remote() {
+            if [ "$status_host" = "192.168.1.184" ] || [ "$status_host" = "127.0.0.1" ]; then
+              bash -s
+            else
+              ssh -i /opt/work/testdev_key -o StrictHostKeyChecking=no "testdev@${status_host}" bash -s
+            fi
+          }
+          run_remote > "$OUT/block-status-port.log" 2>&1 <<REMOTE
+          set -eu
+          sudo -n iptables -I INPUT 1 -p tcp --dport "$status_port" -j REJECT --reject-with tcp-reset
+          sudo -n iptables -S INPUT | grep -- "--dport $status_port"
+          REMOTE
+          if curl -fsS --max-time 2 "http://${status_addr}/status?volume=${volume_id}" > "$OUT/unexpected-status-response.txt" 2>"$OUT/status-curl-after-block.stderr.txt"; then
+            echo "status endpoint still reachable after iptables block" >&2
+            exit 1
+          fi
+          echo "status_endpoint_blocked=true" > "$OUT/block-summary.txt"
+          cat "$OUT/status-target.env" >> "$OUT/block-summary.txt"
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+
+  - name: collect_live_unreachable_report
+    actions:
+      - action: exec
+        node: m02
+        timeout: 4m
+        cmd: |
+          set -eu
+          ROOT=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-status-endpoint-unreachable-live
+          OUT="$ROOT/live-report"
+          mkdir -p "$OUT"
+          port=$(python3 - <<'PY'
+          import socket
+          s = socket.socket()
+          s.bind(("127.0.0.1", 0))
+          print(s.getsockname()[1])
+          s.close()
+          PY
+          )
+          echo "$port" > "$OUT/blockmaster-port.txt"
+          kubectl -n kube-system port-forward deploy/sw-blockmaster "${port}:9333" > "$OUT/blockmaster-port-forward.log" 2>&1 &
+          pf=$!
+          trap 'kill $pf >/dev/null 2>&1 || true; wait $pf >/dev/null 2>&1 || true' EXIT
+          for i in $(seq 1 60); do
+            if (echo >"/dev/tcp/127.0.0.1/$port") >/dev/null 2>&1; then
+              break
+            fi
+            sleep 1
+          done
+          /mnt/smb/work/share/g15d-k8s/{{ run_id }}-status-endpoint-unreachable-live/bin/sw-block ops report --namespace default --master "127.0.0.1:${port}" --out "$OUT/report" --evidence-out "$OUT/evidence" --timeout 30s > "$OUT/report.stdout.txt" 2> "$OUT/report.stderr.txt"
+          volume_id=$(sed -n 's/^volume_id=//p' "$ROOT/fault/status-target.env" | head -1)
+          /mnt/smb/work/share/g15d-k8s/{{ run_id }}-status-endpoint-unreachable-live/bin/sw-block ops explain volume --from-bundle "$OUT/report" "$volume_id" > "$OUT/explain.txt" 2> "$OUT/explain.stderr.txt"
+          test -s "$OUT/report/operator-snapshot.json"
+          test -s "$OUT/report/summary.txt"
+          test -s "$OUT/explain.txt"
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+
+  - name: unreachable_asserts
+    actions:
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-status-endpoint-unreachable-live/fault/block-summary.txt"
+        pattern: "^status_endpoint_blocked=true$"
+        save_as: status_blocked_count
+      - action: assert_greater
+        actual: "{{ status_blocked_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-status-endpoint-unreachable-live/live-report/report/summary.txt"
+        pattern: "status=unknown reason=status_endpoint_unreachable"
+        save_as: summary_unknown_count
+      - action: assert_greater
+        actual: "{{ summary_unknown_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-status-endpoint-unreachable-live/live-report/explain.txt"
+        pattern: "managed_volume_condition Ready status=Unknown reason=status_endpoint_unreachable"
+        save_as: explain_unknown_count
+      - action: assert_greater
+        actual: "{{ explain_unknown_count }}"
+        threshold: "0"
+      - action: exec
+        node: m02
+        timeout: 2m
+        cmd: |
+          set -eu
+          ROOT=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-status-endpoint-unreachable-live
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          snap = json.loads(Path("/mnt/smb/work/share/g15d-k8s/{{ run_id }}-status-endpoint-unreachable-live/live-report/report/operator-snapshot.json").read_text())
+          if snap.get("read_only") is not True:
+              raise SystemExit("operator snapshot is not read-only")
+          if (snap.get("mutation") or {}).get("mutation_allowed") is not False:
+              raise SystemExit("mutation_allowed is not false")
+          vols = snap.get("volumes") or []
+          if len(vols) != 1:
+              raise SystemExit(f"expected one volume, got {len(vols)}")
+          status = vols[0].get("status") or {}
+          if status.get("status") != "unknown" or status.get("reason_code") != "status_endpoint_unreachable":
+              raise SystemExit(f"expected unknown/status_endpoint_unreachable, got {status}")
+          for condition in status.get("conditions") or []:
+              if condition.get("type") == "Ready" and condition.get("status") == "True":
+                  raise SystemExit("false Ready=True while status endpoint is unreachable")
+              if condition.get("type") == "Blocked" and condition.get("status") == "True":
+                  raise SystemExit("false Blocked=True for pure status endpoint unreachable")
+          cluster = snap.get("cluster") or {}
+          if cluster.get("ready_volume_count", 0) != 0:
+              raise SystemExit(f"ready_volume_count should be 0 during unreachable evidence: {cluster}")
+          PY
+          port=$(python3 - <<'PY'
+          import socket
+          s = socket.socket()
+          s.bind(("127.0.0.1", 0))
+          print(s.getsockname()[1])
+          s.close()
+          PY
+          )
+          echo "$port" > "$ROOT/dashboard/port.txt"
+          /mnt/smb/work/share/g15d-k8s/{{ run_id }}-status-endpoint-unreachable-live/bin/sw-block ops dashboard --from-bundle "$ROOT/live-report/report" --listen "127.0.0.1:${port}" > "$ROOT/dashboard/stdout.txt" 2> "$ROOT/dashboard/stderr.txt" &
+          pid=$!
+          trap 'kill $pid >/dev/null 2>&1 || true; wait $pid >/dev/null 2>&1 || true' EXIT
+          for i in $(seq 1 100); do
+            code=$(curl -s -o "$ROOT/dashboard/operator-snapshot.json" -w '%{http_code}' "http://127.0.0.1:${port}/operator-snapshot.json" || true)
+            test "$code" = "200" && break
+            sleep 0.2
+          done
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          snap = json.loads(Path("/mnt/smb/work/share/g15d-k8s/{{ run_id }}-status-endpoint-unreachable-live/dashboard/operator-snapshot.json").read_text())
+          vols = snap.get("volumes") or []
+          if len(vols) != 1:
+              raise SystemExit("dashboard snapshot did not preserve one volume")
+          status = vols[0].get("status") or {}
+          if status.get("status") != "unknown" or status.get("reason_code") != "status_endpoint_unreachable":
+              raise SystemExit(f"dashboard did not preserve unreachable status: {status}")
+          for condition in status.get("conditions") or []:
+              if condition.get("type") == "Ready" and condition.get("status") == "True":
+                  raise SystemExit("dashboard false Ready=True")
+              if condition.get("type") == "Blocked" and condition.get("status") == "True":
+                  raise SystemExit("dashboard false Blocked=True")
+          PY
+
+  - name: restore_status_endpoint
+    always: true
+    actions:
+      - action: exec
+        node: m02
+        timeout: 2m
+        cmd: |
+          set -eu
+          OUT=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-status-endpoint-unreachable-live/fault
+          if [ ! -f "$OUT/status-target.env" ]; then
+            exit 0
+          fi
+          . "$OUT/status-target.env"
+          if [ -z "${status_host:-}" ] || [ -z "${status_port:-}" ]; then
+            echo "status endpoint was not blocked; no restore needed" > "$OUT/restore-summary.txt"
+            exit 0
+          fi
+          run_remote() {
+            if [ "$status_host" = "192.168.1.184" ] || [ "$status_host" = "127.0.0.1" ]; then
+              bash -s
+            else
+              ssh -i /opt/work/testdev_key -o StrictHostKeyChecking=no "testdev@${status_host}" bash -s
+            fi
+          }
+          run_remote > "$OUT/restore-status-port.log" 2>&1 <<REMOTE
+          set -eu
+          while sudo -n iptables -D INPUT -p tcp --dport "$status_port" -j REJECT --reject-with tcp-reset 2>/dev/null; do :; done
+          ! sudo -n iptables -S INPUT | grep -- "--dport $status_port"
+          REMOTE
+          echo "status_endpoint_restored=true" > "$OUT/restore-summary.txt"
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+
+  - name: helm_uninstall_cleanup
+    always: true
+    actions:
+      - action: exec
+        node: m02
+        timeout: 8m
+        cmd: "kubectl -n default delete pod sw-block-example-reader sw-block-example-writer --ignore-not-found=true --wait=true --timeout=120s; kubectl -n default delete pvc sw-block-example-pvc --ignore-not-found=true --wait=true --timeout=120s; kubectl delete storageclass sw-block-example sw-block-dynamic --ignore-not-found=true --wait=true --timeout=120s; helm status {{ helm_release }} --namespace {{ helm_namespace }} >/dev/null 2>&1 && helm uninstall {{ helm_release }} --namespace {{ helm_namespace }} --wait --timeout 240s > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-status-endpoint-unreachable-live/cleanup/helm-uninstall.txt || true; sudo -n iscsiadm -m node 2>/dev/null | awk '/io.seaweedfs/ {print $1, $2}' | while read portal target; do sudo -n iscsiadm -m node -T \"$target\" -p \"$portal\" -o delete || true; done; cd {{ product_root }} && bash scripts/verify-helm-cleanup.sh"
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+        env.SW_BLOCK_ARTIFACT_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-status-endpoint-unreachable-live/cleanup/verify"
+        env.SW_BLOCK_HELM_RELEASE: "{{ helm_release }}"
+        env.SW_BLOCK_HELM_NAMESPACE: "{{ helm_namespace }}"
+      - action: assert_no_active_iscsi_sessions
+        node: m02
+        iqn_substr: "io.seaweedfs"
+      - action: assert_no_processes
+        node: m02
+        pattern: "[/]blockmaster --|[/]blockvolume --|[/]blockcsi |[/]iscsi-target |^blockmaster |^blockvolume |^blockcsi |^iscsi-target "
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-status-endpoint-unreachable-live/cleanup/verify/cleanup-summary.txt"
+        pattern: "^cleanup_status=ok$"
+        save_as: cleanup_ok_count
+      - action: assert_greater
+        actual: "{{ cleanup_ok_count }}"
+        threshold: "0"

@@ -30,6 +30,7 @@ type flags struct {
 	nodeID                       string
 	iqnPrefix                    string
 	pvcUIDLookup                 bool
+	swBlockVolumeCRNamespace     string
 	stage2Multipath              bool
 	rejectLoopbackPublishTargets bool
 	version                      bool
@@ -44,6 +45,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.StringVar(&f.nodeID, "node-id", "", "CSI node ID; defaults to hostname")
 	fs.StringVar(&f.iqnPrefix, "iqn-prefix", "iqn.2026-05.io.seaweedfs", "fallback IQN prefix for unstage after plugin restart")
 	fs.BoolVar(&f.pvcUIDLookup, "kubernetes-pvc-uid-lookup", false, "opt-in: resolve PVC UID through the in-cluster Kubernetes API before CreateVolume is sent to blockmaster")
+	fs.StringVar(&f.swBlockVolumeCRNamespace, "swblockvolume-cr-namespace", "", "opt-in: create or update SwBlockVolume CR identity objects in this namespace after successful CreateVolume")
 	fs.BoolVar(&f.stage2Multipath, "stage2-multipath", false, "opt-in: consume multiple iSCSI frontend targets as one host multipath device")
 	fs.BoolVar(&f.rejectLoopbackPublishTargets, "reject-loopback-publish-targets", false, "opt-in: reject loopback publish targets for node-loss recovery gates")
 	fs.BoolVar(&f.version, "version", false, "print build provenance and exit")
@@ -58,8 +60,8 @@ func parseFlags(args []string) (flags, error) {
 	if f.endpoint == "" {
 		return flags{}, fmt.Errorf("--endpoint is required")
 	}
-	if f.masterAddr == "" && (f.stage2Multipath || f.rejectLoopbackPublishTargets || f.pvcUIDLookup) {
-		return flags{}, fmt.Errorf("--stage2-multipath, --reject-loopback-publish-targets, and --kubernetes-pvc-uid-lookup require --master")
+	if f.masterAddr == "" && (f.stage2Multipath || f.rejectLoopbackPublishTargets || f.pvcUIDLookup || f.swBlockVolumeCRNamespace != "") {
+		return flags{}, fmt.Errorf("--stage2-multipath, --reject-loopback-publish-targets, --kubernetes-pvc-uid-lookup, and --swblockvolume-cr-namespace require --master")
 	}
 	if f.nodeID == "" {
 		host, err := os.Hostname()
@@ -118,6 +120,7 @@ func run(f flags) int {
 		reporter    blockcsi.EventReporter
 		provisioner blockcsi.VolumeProvisioner
 		resolver    blockcsi.KubernetesMetadataResolver
+		registrar   blockcsi.VolumeObjectRegistrar
 	)
 	if f.masterAddr != "" {
 		masterConn, err = grpc.NewClient(f.masterAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
@@ -145,10 +148,17 @@ func run(f flags) int {
 			return 1
 		}
 	}
+	if f.swBlockVolumeCRNamespace != "" && provisioner != nil {
+		registrar, err = blockcsi.NewInClusterSwBlockVolumeRegistrar(f.swBlockVolumeCRNamespace)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "blockcsi: swblockvolume registrar:", err)
+			return 1
+		}
+	}
 
 	srv := grpc.NewServer()
 	csipb.RegisterIdentityServer(srv, blockcsi.NewIdentityServer())
-	csipb.RegisterControllerServer(srv, blockcsi.NewControllerServerWithProvisionerAndMetadataResolver(lookup, provisioner, resolver))
+	csipb.RegisterControllerServer(srv, blockcsi.NewControllerServerWithProvisionerMetadataAndRegistrar(lookup, provisioner, resolver, registrar))
 	csipb.RegisterNodeServer(srv, blockcsi.NewDefaultNodeServerWithLookupAndEventReporter(f.nodeID, f.iqnPrefix, lookup, reporter))
 
 	if f.printReadyLine {

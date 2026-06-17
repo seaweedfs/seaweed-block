@@ -30,6 +30,11 @@
     "blockmaster": {
       "type": "object",
       "properties": {
+        "nodeSelector": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        },
+        "durableImpl": { "type": "string", "enum": ["walstore", "smartwal"] },
         "stateHostPath": { "type": "string" },
         "stateHostPathType": { "type": "string" },
         "statePermissionsImage": {
@@ -61,6 +66,7 @@
     "compat": {
       "type": "object",
       "properties": {
+        "launcherDurableImplFlag": { "type": "boolean" },
         "launcherReplicationAckFlag": { "type": "boolean" },
         "launcherRejectLoopbackFlag": { "type": "boolean" }
       }
@@ -78,6 +84,25 @@
           "dataPort": { "type": "integer", "minimum": 1 },
           "ctrlPort": { "type": "integer", "minimum": 1 },
           "poolID": { "type": "string" }
+        }
+      }
+    },
+    "operatorStatus": {
+      "type": "object",
+      "properties": {
+        "create": { "type": "boolean" },
+        "dryRun": { "type": "boolean" },
+        "interval": { "type": "string" },
+        "clusterName": { "type": "string" },
+        "rbac": {
+          "type": "object",
+          "properties": {
+            "create": { "type": "boolean" }
+          }
+        },
+        "nodeSelector": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
         }
       }
     }

@@ -32,6 +32,9 @@ func TestOperatorFoundationSnapshot_ReadOnlyBoundary(t *testing.T) {
 	if snapshot.Cluster.Cleanup == nil || snapshot.Cluster.Cleanup.Status != "ok" || snapshot.Cluster.Cleanup.EvidenceRef != "cleanup-summary.txt" {
 		t.Fatalf("missing cleanup evidence: %+v", snapshot.Cluster.Cleanup)
 	}
+	if condition := findObservationCondition(snapshot.Cluster.Conditions, ConditionCleanupRequired); condition == nil || condition.Status != "False" || condition.Reason != ReasonCleanupVerified {
+		t.Fatalf("missing clean cleanup condition: %+v", snapshot.Cluster.Conditions)
+	}
 	if len(snapshot.Volumes) != 1 {
 		t.Fatalf("volumes=%+v", snapshot.Volumes)
 	}
@@ -42,6 +45,42 @@ func TestOperatorFoundationSnapshot_ReadOnlyBoundary(t *testing.T) {
 		if action.Mode != ManagedVolumeActionModeReadOnly && action.Mode != ManagedVolumeActionModeDryRun {
 			t.Fatalf("operator snapshot exposed unsupported action mode: %+v", action)
 		}
+	}
+}
+
+func TestOperatorFoundationSnapshot_ProjectsCleanupResidue(t *testing.T) {
+	cluster := NewClusterEvidence(time.Date(2026, 6, 5, 19, 0, 0, 0, time.UTC))
+	cluster.Cleanup = &CleanupEvidence{
+		Status:                 "failed",
+		KubernetesResidueCount: 1,
+		ISCSIResidueCount:      2,
+		MultipathResidueCount:  3,
+		ProcessResidueCount:    4,
+		HostPathResidueCount:   5,
+		FailureCount:           6,
+		ReasonCodes:            []string{"iscsi_node_records_present"},
+		EvidenceRef:            "cleanup-summary.txt",
+	}
+
+	snapshot := BuildOperatorFoundationSnapshot(cluster)
+	if snapshot.Cluster.Cleanup == nil || snapshot.Cluster.Cleanup.ISCSIResidueCount != 2 {
+		t.Fatalf("cleanup=%+v", snapshot.Cluster.Cleanup)
+	}
+	if condition := findObservationCondition(snapshot.Cluster.Conditions, ConditionCleanupRequired); condition == nil || condition.Status != "True" || condition.Reason != "iscsi_node_records_present" {
+		t.Fatalf("missing cleanup required condition: %+v", snapshot.Cluster.Conditions)
+	}
+	foundCleanupStep := false
+	for _, step := range snapshot.Cluster.SafeNextSteps {
+		if step.Type != ManagedVolumeActionVerifyCleanup {
+			continue
+		}
+		foundCleanupStep = true
+		if step.Mode != ManagedVolumeActionModeScripted || step.MutationAllowed {
+			t.Fatalf("cleanup step=%+v", step)
+		}
+	}
+	if !foundCleanupStep {
+		t.Fatalf("missing cleanup safe next step: %+v", snapshot.Cluster.SafeNextSteps)
 	}
 }
 
@@ -109,5 +148,103 @@ func TestOperatorFoundationSnapshot_CountsStaleEvidenceVolumes(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("missing cluster EvidenceStale condition: %+v", snapshot.Cluster.Conditions)
+	}
+}
+
+func TestOperatorFoundationSnapshot_IncludesNodeReadiness(t *testing.T) {
+	cluster := NewClusterEvidence(time.Date(2026, 6, 5, 16, 30, 0, 0, time.UTC))
+	cluster.Nodes = []NodeEvidence{{
+		NodeName:       "m02",
+		KubernetesNode: "m02",
+		InternalIP:     "192.168.1.184",
+		Schedulable:    true,
+		Ready:          true,
+		ReplicaCount:   1,
+		RequiredImages: []string{"sw-block:local"},
+	}, {
+		NodeName:       "tp01",
+		KubernetesNode: "tp01",
+		InternalIP:     "192.168.1.188",
+		Schedulable:    true,
+		Ready:          true,
+		MissingImages:  []string{"sw-block-csi:local"},
+	}}
+
+	snapshot := BuildOperatorFoundationSnapshot(cluster)
+	if snapshot.Cluster.NodeCount != 2 || len(snapshot.Cluster.Nodes) != 2 {
+		t.Fatalf("node status=%+v", snapshot.Cluster)
+	}
+	ready := snapshot.Cluster.Nodes[0]
+	if ready.Status != ManagedVolumeStatusReady || ready.ReasonCode != ReasonNodeReady {
+		t.Fatalf("ready node=%+v", ready)
+	}
+	blocked := snapshot.Cluster.Nodes[1]
+	if blocked.Status != ManagedVolumeStatusBlocked || blocked.ReasonCode != ReasonImageMissingOnNode {
+		t.Fatalf("blocked node=%+v", blocked)
+	}
+	if len(blocked.MissingImages) != 1 {
+		t.Fatalf("blocked missing images=%+v", blocked)
+	}
+}
+
+func TestOperatorFoundationSnapshot_IncludesSupportBundlePointers(t *testing.T) {
+	cluster := NewClusterEvidence(time.Date(2026, 6, 5, 18, 30, 0, 0, time.UTC))
+	cluster.Status = ObservationStatusBlocked
+	cluster.Volumes = []VolumeEvidence{{
+		VolumeID:          "pvc-blocked",
+		Namespace:         "default",
+		PVCName:           "blocked-pvc",
+		Status:            ObservationStatusBlocked,
+		Reason:            ReasonCSINodeImagePullFailed,
+		SupportBundleHint: "support/bundle",
+		Replicas: []ReplicaEvidence{{
+			ReplicaID:         "r1",
+			SupportBundlePath: "support/bundle/volumes/pvc-blocked/r1",
+		}},
+	}}
+	cluster.ManagedVolumes = []ManagedVolumeProjection{ProjectManagedVolume(ManagedVolumeFacts{
+		VolumeID:      "pvc-blocked",
+		PVCName:       "blocked-pvc",
+		ProductStatus: ObservationStatusBlocked,
+		ProductReason: ReasonCSINodeImagePullFailed,
+		EvidenceRefs:  []string{"support/bundle/replayed-report/summary.txt"},
+	})}
+
+	snapshot := BuildOperatorFoundationSnapshot(cluster)
+	for _, want := range []string{"support/bundle", "support/bundle/volumes/pvc-blocked/r1"} {
+		if !stringSliceContains(snapshot.Cluster.SupportBundleRefs, want) {
+			t.Fatalf("support refs missing %q: %+v", want, snapshot.Cluster.SupportBundleRefs)
+		}
+	}
+	if len(snapshot.Cluster.SafeNextSteps) == 0 {
+		t.Fatalf("missing safe next steps: %+v", snapshot.Cluster)
+	}
+	step := snapshot.Cluster.SafeNextSteps[0]
+	if step.Type != ManagedVolumeActionCollectBundle || step.Mode != ManagedVolumeActionModeReadOnly || step.MutationAllowed {
+		t.Fatalf("safe next step=%+v", step)
+	}
+}
+
+func TestOperatorFoundationSnapshot_IncludesInstallDrift(t *testing.T) {
+	cluster := NewClusterEvidence(time.Date(2026, 6, 13, 13, 0, 0, 0, time.UTC))
+	cluster.InstallDrift = &InstallDriftEvidence{
+		Status:          InstallDriftStatusMismatch,
+		ReasonCode:      ReasonInstallDriftMismatch,
+		CurrentImage:    "sw-block:old",
+		DesiredImage:    "sw-block:new",
+		CurrentCSIImage: "sw-block-csi:old",
+		DesiredCSIImage: "sw-block-csi:new",
+		EvidenceRef:     "install-drift-summary.txt",
+	}
+
+	snapshot := BuildOperatorFoundationSnapshot(cluster)
+	if snapshot.Cluster.InstallDrift == nil ||
+		snapshot.Cluster.InstallDrift.Status != InstallDriftStatusMismatch ||
+		snapshot.Cluster.InstallDrift.ReasonCode != ReasonInstallDriftMismatch {
+		t.Fatalf("install drift=%+v", snapshot.Cluster.InstallDrift)
+	}
+	if condition := findObservationCondition(snapshot.Cluster.Conditions, ConditionBlocked); condition == nil ||
+		condition.Reason != ReasonInstallDriftMismatch {
+		t.Fatalf("missing install drift condition: %+v", snapshot.Cluster.Conditions)
 	}
 }

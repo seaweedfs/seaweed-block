@@ -28,6 +28,7 @@ appNamespace: default
 
 blockmaster:
   replicas: 1
+  nodeSelector: {}
   serviceName: blockmaster
   listenPort: 9333
   authorityStore: /var/lib/sw-block/authority
@@ -39,6 +40,7 @@ blockmaster:
   launcherNamespace: kube-system
   launcherStatus: true
   launcherPVCOwnerRef: true
+  durableImpl: walstore
   stateHostPath: ""
   stateHostPathType: DirectoryOrCreate
   statePermissionsImage:
@@ -76,6 +78,7 @@ network:
 compat:
   # Some published alpha images predate these blockmaster launcher flags. Keep
   # these false unless the selected image is known to support the flag.
+  launcherDurableImplFlag: false
   launcherReplicationAckFlag: false
   launcherRejectLoopbackFlag: false
 
@@ -110,6 +113,34 @@ blockNodes:
 
 rbac:
   create: true
+
+operatorStatus:
+  # Phase 35 read-only operator foundation. When enabled, this installs the
+  # status service account/RBAC plus a status projection Deployment. dryRun
+  # logs the projection only. dryRun=false patches existing SwBlockCluster /
+  # SwBlockVolume .status subresources and does not create CR objects.
+  create: false
+  dryRun: true
+  interval: 30s
+  clusterName: sw-block
+  rbac:
+    create: true
+  nodeSelector: {}
+
+lifecycleOwner:
+  # Phase 43 bounded lifecycle owner. Disabled by default. When enabled with
+  # dryRun=false it may patch only SwBlockVolume metadata.finalizers, and the
+  # admission policy confines the patch to the Seaweed Block protection
+  # finalizer.
+  create: false
+  dryRun: true
+  interval: 30s
+  finalizerName: block.seaweedfs.com/swblockvolume-protection
+  rbac:
+    create: true
+  admission:
+    create: true
+  nodeSelector: {}
 
 csiController:
   replicas: 1

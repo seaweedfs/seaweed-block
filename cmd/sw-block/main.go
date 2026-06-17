@@ -31,6 +31,23 @@ var (
 	opsStatusRunCommand             = ops.DefaultRunCommand
 	opsInventoryRunCommand          = ops.DefaultRunCommand
 	opsGenerateHelmValuesRunCommand = ops.DefaultRunCommand
+	opsNodeEvidenceEnricherFactory  = func() (ops.OperatorNodeEvidenceEnricher, error) {
+		return ops.NewInClusterKubernetesStatusClient()
+	}
+	opsOperatorStatusWriterFactory = func() (ops.OperatorStatusWriter, error) {
+		return ops.NewInClusterKubernetesStatusClient()
+	}
+	opsSwBlockVolumeSourceFactory = func() (ops.OperatorSwBlockVolumeSource, error) {
+		return ops.NewInClusterKubernetesStatusClient()
+	}
+	opsLifecycleOwnerClientFactory = func() (ops.LifecycleOwnerClient, ops.OperatorEventSink, error) {
+		client, err := ops.NewInClusterKubernetesStatusClient()
+		if err != nil {
+			return nil, nil, err
+		}
+		client.EventComponent = "sw-block-lifecycle-owner"
+		return client, client, nil
+	}
 )
 
 func run(args []string, stdout, stderr io.Writer) int {
@@ -48,7 +65,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return ops.VolumeStatusExitInvalid
 	}
 	if len(args) < 2 {
-		fmt.Fprintln(stderr, "sw-block: expected subcommand ops status|inventory|list|cluster|volumes|describe|timeline|explain|report|dashboard|generate-helm-values")
+		fmt.Fprintln(stderr, "sw-block: expected subcommand ops status|inventory|list|cluster|volumes|describe|timeline|explain|report|dashboard|generate-helm-values|operator-status|lifecycle-owner")
 		usage(stderr)
 		return ops.VolumeStatusExitInvalid
 	}
@@ -73,10 +90,211 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runOpsDashboard(args[2:], stdout, stderr)
 	case "generate-helm-values":
 		return runOpsGenerateHelmValues(args[2:], stdout, stderr)
+	case "operator-status":
+		return runOpsOperatorStatus(args[2:], stdout, stderr)
+	case "lifecycle-owner":
+		return runOpsLifecycleOwner(args[2:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "sw-block: unknown ops subcommand %q\n", args[1])
 		usage(stderr)
 		return ops.VolumeStatusExitInvalid
+	}
+}
+
+func runOpsLifecycleOwner(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("sw-block ops lifecycle-owner", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	var (
+		dryRun    bool
+		namespace string
+		interval  time.Duration
+	)
+	fs.BoolVar(&dryRun, "dry-run", false, "evaluate lifecycle-owner reconciliation without patching finalizers or emitting Events")
+	fs.StringVar(&namespace, "namespace", "default", "Kubernetes namespace containing SwBlockVolume objects")
+	fs.DurationVar(&interval, "interval", 0, "repeat lifecycle-owner reconciliation at this interval; 0 runs once")
+	if err := fs.Parse(args); err != nil {
+		return ops.VolumeStatusExitInvalid
+	}
+	if fs.NArg() != 0 {
+		fmt.Fprintf(stderr, "sw-block ops lifecycle-owner: unexpected args %s\n", strings.Join(fs.Args(), " "))
+		return ops.VolumeStatusExitInvalid
+	}
+	runOnce := func() int {
+		client, events, err := opsLifecycleOwnerClientFactory()
+		if err != nil {
+			fmt.Fprintf(stderr, "sw-block ops lifecycle-owner: %v\n", err)
+			return ops.VolumeStatusExitInvalid
+		}
+		mode := "finalizer_mutation"
+		if dryRun {
+			mode = "dry_run"
+			events = nil
+		}
+		result, err := (ops.LifecycleOwnerReconciler{
+			Namespace: namespace,
+			Client:    client,
+			EventSink: events,
+			DryRun:    dryRun,
+		}).Reconcile(context.Background())
+		if err != nil {
+			fmt.Fprintf(stderr, "sw-block ops lifecycle-owner: %v\n", err)
+			return ops.VolumeStatusExitInvalid
+		}
+		fmt.Fprintf(stdout, "lifecycle_owner=%s namespace=%s volumes=%d finalizer_patches=%d finalizer_added=%d finalizer_held=%d finalizer_released=%d events=%d mutation_allowed=%t\n",
+			mode,
+			namespace,
+			result.VolumeCount,
+			result.FinalizerPatchCount,
+			result.FinalizerAddedCount,
+			result.FinalizerHeldCount,
+			result.FinalizerReleasedCount,
+			result.EventCount,
+			!dryRun)
+		return ops.VolumeStatusExitOK
+	}
+	if interval <= 0 {
+		return runOnce()
+	}
+	for {
+		code := runOnce()
+		if code != ops.VolumeStatusExitOK {
+			fmt.Fprintf(stderr, "sw-block ops lifecycle-owner: iteration failed exit=%d; retrying in %s\n", code, interval)
+		}
+		time.Sleep(interval)
+	}
+}
+
+func runOpsOperatorStatus(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("sw-block ops operator-status", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	var (
+		dryRun          bool
+		fromBundle      string
+		cleanupSummary  string
+		namespace       string
+		masterAddr      string
+		masterAPIAddr   string
+		outDir          string
+		productRevision string
+		claimProfile    string
+		clusterName     string
+		timeout         time.Duration
+		interval        time.Duration
+	)
+	fs.BoolVar(&dryRun, "dry-run", false, "render the status projection without writing Kubernetes CRD status")
+	fs.StringVar(&fromBundle, "from-bundle", "", "existing inventory/support bundle directory to project")
+	fs.StringVar(&cleanupSummary, "cleanup-summary", "", "cleanup-summary.txt evidence to project into delete-safety status")
+	fs.StringVar(&namespace, "namespace", "default", "Kubernetes namespace for live read-only inventory")
+	fs.StringVar(&masterAddr, "master", "", "optional blockmaster gRPC address for live per-replica status evidence")
+	fs.StringVar(&masterAPIAddr, "master-api", "", "optional blockmaster gRPC address for ClusterEvidenceService read-only snapshot")
+	fs.StringVar(&outDir, "out", "", "optional directory for nested live status evidence")
+	fs.StringVar(&productRevision, "product-revision", "", "product revision label for live evidence")
+	fs.StringVar(&claimProfile, "claim-profile", "", "promotion-readiness claim profile for live evidence")
+	fs.StringVar(&clusterName, "cluster-name", ops.DefaultSwBlockClusterName, "SwBlockCluster object name")
+	fs.DurationVar(&timeout, "timeout", 5*time.Second, "live collection timeout")
+	fs.DurationVar(&interval, "interval", 0, "repeat dry-run projection at this interval; 0 runs once")
+	if err := fs.Parse(args); err != nil {
+		return ops.VolumeStatusExitInvalid
+	}
+	if fs.NArg() != 0 {
+		fmt.Fprintf(stderr, "sw-block ops operator-status: unexpected args %s\n", strings.Join(fs.Args(), " "))
+		return ops.VolumeStatusExitInvalid
+	}
+	runOnce := func() int {
+		clusterArgs := []string{"--namespace", namespace, "--timeout", timeout.String()}
+		if fromBundle != "" {
+			clusterArgs = append(clusterArgs, "--from-bundle", fromBundle)
+		}
+		if masterAddr != "" {
+			clusterArgs = append(clusterArgs, "--master", masterAddr)
+		}
+		if masterAPIAddr != "" {
+			clusterArgs = append(clusterArgs, "--master-api", masterAPIAddr)
+		}
+		if outDir != "" {
+			clusterArgs = append(clusterArgs, "--out", outDir)
+		}
+		if productRevision != "" {
+			clusterArgs = append(clusterArgs, "--product-revision", productRevision)
+		}
+		if claimProfile != "" {
+			clusterArgs = append(clusterArgs, "--claim-profile", claimProfile)
+		}
+		cluster, _, code := loadObservationCluster("sw-block ops operator-status", clusterArgs, stderr)
+		if code != ops.VolumeStatusExitOK {
+			return code
+		}
+		if cleanupSummary != "" {
+			cleanup, err := ops.LoadCleanupEvidenceSummary(cleanupSummary)
+			if err != nil {
+				fmt.Fprintf(stderr, "sw-block ops operator-status: %v\n", err)
+				return ops.VolumeStatusExitInvalid
+			}
+			cluster.Cleanup = cleanup
+		}
+		mode := "write_status"
+		var writer ops.OperatorStatusWriter
+		var events ops.OperatorEventSink
+		var volumes ops.OperatorSwBlockVolumeSource
+		if dryRun {
+			mode = "dry_run"
+			writer = &operatorStatusDryRunWriter{}
+			events = &operatorStatusDryRunEventSink{}
+		} else {
+			var err error
+			writer, err = opsOperatorStatusWriterFactory()
+			if err != nil {
+				fmt.Fprintf(stderr, "sw-block ops operator-status: %v\n", err)
+				return ops.VolumeStatusExitInvalid
+			}
+			events, _ = writer.(ops.OperatorEventSink)
+			volumes, _ = writer.(ops.OperatorSwBlockVolumeSource)
+		}
+		result, err := (ops.OperatorStatusReconciler{
+			Namespace:   namespace,
+			ClusterName: clusterName,
+			Source:      operatorStatusClusterSource{cluster: cluster},
+			Writer:      writer,
+			Volumes:     volumes,
+			EventSink:   events,
+		}).Reconcile(context.Background())
+		if err != nil {
+			fmt.Fprintf(stderr, "sw-block ops operator-status: %v\n", err)
+			return ops.VolumeStatusExitInvalid
+		}
+		fmt.Fprintf(stdout, "operator_status=%s cluster=%s/%s volumes=%d events=%d finalizer_patches=%d mutation_allowed=false\n",
+			mode,
+			result.ClusterRef.Namespace,
+			result.ClusterRef.Name,
+			len(result.VolumeRefs),
+			result.EventCount,
+			result.FinalizerPatchCount)
+		if dryWriter, ok := writer.(*operatorStatusDryRunWriter); ok {
+			fmt.Fprintf(stdout, "cluster_status volumes=%d ready=%d blocked=%d stale=%d\n",
+				dryWriter.cluster.VolumeCount,
+				dryWriter.cluster.ReadyVolumeCount,
+				dryWriter.cluster.BlockedVolumeCount,
+				dryWriter.cluster.StaleVolumeCount)
+			for _, volume := range dryWriter.volumes {
+				fmt.Fprintf(stdout, "volume_status name=%s volume_id=%s pvc=%s status=%s reason=%s\n",
+					volume.ref.Name,
+					emptyCLI(volume.status.VolumeID),
+					emptyCLI(volume.status.PVCName),
+					emptyCLI(volume.status.Status),
+					emptyCLI(volume.status.ReasonCode))
+			}
+		}
+		return ops.VolumeStatusExitOK
+	}
+	if interval <= 0 {
+		return runOnce()
+	}
+	for {
+		code := runOnce()
+		if code != ops.VolumeStatusExitOK {
+			fmt.Fprintf(stderr, "sw-block ops operator-status: iteration failed exit=%d; retrying in %s\n", code, interval)
+		}
+		time.Sleep(interval)
 	}
 }
 
@@ -265,6 +483,7 @@ func loadObservationCluster(command string, args []string, stderr io.Writer) (op
 	fs.SetOutput(stderr)
 	var (
 		fromBundle       string
+		cleanupSummary   string
 		namespace        string
 		masterAddr       string
 		masterAPIAddr    string
@@ -276,6 +495,7 @@ func loadObservationCluster(command string, args []string, stderr io.Writer) (op
 		timeout          time.Duration
 	)
 	fs.StringVar(&fromBundle, "from-bundle", "", "existing inventory/support bundle directory to explain")
+	fs.StringVar(&cleanupSummary, "cleanup-summary", "", "cleanup-summary.txt evidence to project into delete-safety status")
 	fs.StringVar(&namespace, "namespace", "default", "Kubernetes namespace for live read-only inventory")
 	fs.StringVar(&masterAddr, "master", "", "optional blockmaster gRPC address for live per-replica status evidence")
 	fs.StringVar(&masterAPIAddr, "master-api", "", "optional blockmaster gRPC address for ClusterEvidenceService read-only snapshot")
@@ -331,7 +551,73 @@ func loadObservationCluster(command string, args []string, stderr io.Writer) (op
 		fmt.Fprintf(stderr, "%s: %v\n", command, err)
 		return ops.ClusterEvidence{}, "", ops.VolumeStatusExitInvalid
 	}
+	cluster, err = applyCleanupSummaryProjection(namespace, cleanupSummary, cluster)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: %v\n", command, err)
+		return ops.ClusterEvidence{}, "", ops.VolumeStatusExitInvalid
+	}
+	cluster, err = enrichLiveObservationCluster(namespace, timeout, fromBundle == "", cluster)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: %v\n", command, err)
+		return ops.ClusterEvidence{}, "", ops.VolumeStatusExitInvalid
+	}
 	return ops.NormalizeObservationCluster(cluster), out, ops.VolumeStatusExitOK
+}
+
+func enrichLiveObservationCluster(namespace string, timeout time.Duration, live bool, cluster ops.ClusterEvidence) (ops.ClusterEvidence, error) {
+	if !live || os.Getenv("KUBERNETES_SERVICE_HOST") == "" {
+		return cluster, nil
+	}
+	enricher, err := opsNodeEvidenceEnricherFactory()
+	if err != nil {
+		return cluster, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	cluster, err = enricher.EnrichNodeEvidence(ctx, liveNodeEvidenceNamespace(namespace), cluster)
+	if err != nil {
+		return cluster, fmt.Errorf("enrich node evidence: %w", err)
+	}
+	return cluster, nil
+}
+
+func applyCleanupSummaryProjection(namespace, cleanupSummary string, cluster ops.ClusterEvidence) (ops.ClusterEvidence, error) {
+	if cleanupSummary == "" {
+		return cluster, nil
+	}
+	cleanup, err := ops.LoadCleanupEvidenceSummary(cleanupSummary)
+	if err != nil {
+		return ops.ClusterEvidence{}, err
+	}
+	cluster.Cleanup = cleanup
+	if os.Getenv("KUBERNETES_SERVICE_HOST") == "" {
+		return cluster, nil
+	}
+	client, err := opsSwBlockVolumeSourceFactory()
+	if err != nil {
+		return ops.ClusterEvidence{}, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	listNamespace := strings.TrimSpace(namespace)
+	if listNamespace == "" {
+		listNamespace = "default"
+	}
+	volumes, err := client.ListSwBlockVolumes(ctx, listNamespace)
+	if err != nil {
+		return ops.ClusterEvidence{}, err
+	}
+	return ops.ProjectSwBlockVolumeDeleteSafety(cluster, volumes), nil
+}
+
+func liveNodeEvidenceNamespace(namespace string) string {
+	if namespace := strings.TrimSpace(os.Getenv("SW_BLOCK_HELM_NAMESPACE")); namespace != "" {
+		return namespace
+	}
+	if namespace = strings.TrimSpace(namespace); namespace != "" && namespace != "default" {
+		return namespace
+	}
+	return "kube-system"
 }
 
 func readMasterClusterEvidence(ctx context.Context, masterAddr string) (ops.ClusterEvidence, error) {
@@ -543,6 +829,7 @@ func runOpsReport(args []string, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	var (
 		fromBundle       string
+		cleanupSummary   string
 		namespace        string
 		masterAddr       string
 		masterAPIAddr    string
@@ -554,6 +841,7 @@ func runOpsReport(args []string, stdout, stderr io.Writer) int {
 		timeout          time.Duration
 	)
 	fs.StringVar(&fromBundle, "from-bundle", "", "existing inventory/support bundle directory to render")
+	fs.StringVar(&cleanupSummary, "cleanup-summary", "", "cleanup-summary.txt evidence to project into delete-safety status")
 	fs.StringVar(&namespace, "namespace", "default", "Kubernetes namespace for live read-only inventory")
 	fs.StringVar(&masterAddr, "master", "", "optional blockmaster gRPC address for live per-replica status evidence")
 	fs.StringVar(&masterAPIAddr, "master-api", "", "optional blockmaster gRPC address for ClusterEvidenceService read-only snapshot")
@@ -615,6 +903,16 @@ func runOpsReport(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "sw-block ops report: %v\n", err)
 		return ops.VolumeStatusExitInvalid
 	}
+	cluster, err = applyCleanupSummaryProjection(namespace, cleanupSummary, cluster)
+	if err != nil {
+		fmt.Fprintf(stderr, "sw-block ops report: %v\n", err)
+		return ops.VolumeStatusExitInvalid
+	}
+	cluster, err = enrichLiveObservationCluster(namespace, timeout, fromBundle == "", cluster)
+	if err != nil {
+		fmt.Fprintf(stderr, "sw-block ops report: %v\n", err)
+		return ops.VolumeStatusExitInvalid
+	}
 	if err := ops.WriteObservationReportArtifacts(outDir, cluster); err != nil {
 		fmt.Fprintf(stderr, "sw-block ops report: %v\n", err)
 		return ops.VolumeStatusExitInvalid
@@ -635,6 +933,7 @@ func runOpsDashboard(args []string, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	var (
 		fromBundle       string
+		cleanupSummary   string
 		namespace        string
 		masterAddr       string
 		masterAPIAddr    string
@@ -647,6 +946,7 @@ func runOpsDashboard(args []string, stdout, stderr io.Writer) int {
 		serveDuration    time.Duration
 	)
 	fs.StringVar(&fromBundle, "from-bundle", "", "existing inventory/support bundle directory to serve")
+	fs.StringVar(&cleanupSummary, "cleanup-summary", "", "cleanup-summary.txt evidence to project into delete-safety status")
 	fs.StringVar(&namespace, "namespace", "default", "Kubernetes namespace for live read-only inventory")
 	fs.StringVar(&masterAddr, "master", "", "optional blockmaster gRPC address for live per-replica status evidence")
 	fs.StringVar(&masterAPIAddr, "master-api", "", "optional blockmaster gRPC address for ClusterEvidenceService read-only snapshot")
@@ -667,6 +967,7 @@ func runOpsDashboard(args []string, stdout, stderr io.Writer) int {
 
 	cluster, err := loadDashboardCluster(dashboardClusterOptions{
 		FromBundle:        fromBundle,
+		CleanupSummary:    cleanupSummary,
 		Namespace:         namespace,
 		MasterAddr:        masterAddr,
 		MasterAPIAddr:     masterAPIAddr,
@@ -738,6 +1039,7 @@ func runOpsDashboard(args []string, stdout, stderr io.Writer) int {
 
 type dashboardClusterOptions struct {
 	FromBundle        string
+	CleanupSummary    string
 	Namespace         string
 	MasterAddr        string
 	MasterAPIAddr     string
@@ -749,13 +1051,19 @@ type dashboardClusterOptions struct {
 }
 
 func loadDashboardCluster(options dashboardClusterOptions) (ops.ClusterEvidence, error) {
+	var (
+		cluster ops.ClusterEvidence
+		err     error
+		live    bool
+	)
 	switch {
 	case options.FromBundle != "":
-		return ops.BuildObservationFromBundle(ops.ObservationBundleOptions{Dir: options.FromBundle})
+		cluster, err = ops.BuildObservationFromBundle(ops.ObservationBundleOptions{Dir: options.FromBundle})
 	case options.MasterAPIAddr != "":
 		ctx, cancel := context.WithTimeout(context.Background(), options.Timeout)
 		defer cancel()
-		return readMasterClusterEvidence(ctx, options.MasterAPIAddr)
+		cluster, err = readMasterClusterEvidence(ctx, options.MasterAPIAddr)
+		live = true
 	default:
 		productRevision := options.ProductRevision
 		if productRevision == "" {
@@ -779,8 +1087,17 @@ func loadDashboardCluster(options dashboardClusterOptions) (ops.ClusterEvidence,
 		if collectErr != nil {
 			inventory.CollectionErrors = append(inventory.CollectionErrors, strings.Split(collectErr.Error(), "\n")...)
 		}
-		return ops.BuildObservationFromInventory(inventory, "", options.EvidenceOutDir)
+		cluster, err = ops.BuildObservationFromInventory(inventory, "", options.EvidenceOutDir)
+		live = true
 	}
+	if err != nil {
+		return ops.ClusterEvidence{}, err
+	}
+	cluster, err = applyCleanupSummaryProjection(options.Namespace, options.CleanupSummary, cluster)
+	if err != nil {
+		return ops.ClusterEvidence{}, err
+	}
+	return enrichLiveObservationCluster(options.Namespace, options.Timeout, live, cluster)
 }
 
 type helmValuesFile struct {
@@ -832,6 +1149,7 @@ type helmValuesNetwork struct {
 }
 
 type helmValuesCompat struct {
+	LauncherDurableImplFlag    bool `yaml:"launcherDurableImplFlag"`
 	LauncherReplicationAckFlag bool `yaml:"launcherReplicationAckFlag"`
 	LauncherRejectLoopbackFlag bool `yaml:"launcherRejectLoopbackFlag"`
 }
@@ -1158,6 +1476,7 @@ func loadObservationVolume(command string, args []string, stderr io.Writer) (ops
 	fs.SetOutput(stderr)
 	var (
 		fromBundle       string
+		cleanupSummary   string
 		namespace        string
 		masterAddr       string
 		out              string
@@ -1168,6 +1487,7 @@ func loadObservationVolume(command string, args []string, stderr io.Writer) (ops
 		timeout          time.Duration
 	)
 	fs.StringVar(&fromBundle, "from-bundle", "", "existing inventory/support bundle directory to explain")
+	fs.StringVar(&cleanupSummary, "cleanup-summary", "", "cleanup-summary.txt evidence to project into delete-safety status")
 	fs.StringVar(&namespace, "namespace", "default", "Kubernetes namespace for live read-only inventory")
 	fs.StringVar(&masterAddr, "master", "", "optional blockmaster gRPC address for live per-replica status evidence")
 	fs.StringVar(&out, "o", "text", "output format: text, json, or jsonl where supported")
@@ -1218,7 +1538,20 @@ func loadObservationVolume(command string, args []string, stderr io.Writer) (ops
 			inventory.CollectionErrors = append(inventory.CollectionErrors, strings.Split(collectErr.Error(), "\n")...)
 		}
 		cluster, err = ops.BuildObservationFromInventory(inventory, volumeID, outDir)
+		if err != nil && cleanupSummary != "" && strings.Contains(err.Error(), "not found in inventory") {
+			cluster, err = ops.BuildObservationFromInventory(inventory, "", outDir)
+		}
 	}
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: %v\n", command, err)
+		return ops.ClusterEvidence{}, "", ops.VolumeStatusExitInvalid
+	}
+	cluster, err = applyCleanupSummaryProjection(namespace, cleanupSummary, cluster)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: %v\n", command, err)
+		return ops.ClusterEvidence{}, "", ops.VolumeStatusExitInvalid
+	}
+	cluster, err = enrichLiveObservationCluster(namespace, timeout, fromBundle == "", cluster)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", command, err)
 		return ops.ClusterEvidence{}, "", ops.VolumeStatusExitInvalid
@@ -1229,6 +1562,7 @@ func loadObservationVolume(command string, args []string, stderr io.Writer) (ops
 func normalizeObservationVolumeArgs(args []string) []string {
 	valueFlags := map[string]bool{
 		"--from-bundle":       true,
+		"--cleanup-summary":   true,
 		"--namespace":         true,
 		"--master":            true,
 		"--out":               true,
@@ -1284,6 +1618,8 @@ func usage(w io.Writer) {
 	fmt.Fprintln(w, "  sw-block ops dashboard --master-api <addr> [--listen 127.0.0.1:9334]")
 	fmt.Fprintln(w, "  sw-block ops generate-helm-values --out values.yaml [--target-node <node>] [--replication-factor <n>]")
 	fmt.Fprintln(w, "      [--restart-persistence ephemeral|hostpath] [--state-hostpath /var/lib/sw-block] [--timeout 10s]")
+	fmt.Fprintln(w, "  sw-block ops operator-status --dry-run [--master-api <addr>|--from-bundle <dir>] [--cleanup-summary <file>] [--interval 30s]")
+	fmt.Fprintln(w, "  sw-block ops lifecycle-owner [--dry-run] [--namespace <ns>] [--interval 30s]")
 }
 
 func emptyCLI(value string) string {
@@ -1291,6 +1627,43 @@ func emptyCLI(value string) string {
 		return "-"
 	}
 	return value
+}
+
+type operatorStatusClusterSource struct {
+	cluster ops.ClusterEvidence
+}
+
+func (s operatorStatusClusterSource) ClusterEvidence(context.Context) (ops.ClusterEvidence, error) {
+	return s.cluster, nil
+}
+
+type operatorStatusDryRunWriter struct {
+	cluster ops.SwBlockClusterCRDStatus
+	volumes []operatorStatusDryRunVolumeWrite
+}
+
+type operatorStatusDryRunVolumeWrite struct {
+	ref    ops.OperatorObjectRef
+	status ops.SwBlockVolumeCRDStatus
+}
+
+func (w *operatorStatusDryRunWriter) WriteClusterStatus(_ context.Context, _ ops.OperatorObjectRef, status ops.SwBlockClusterCRDStatus) error {
+	w.cluster = status
+	return nil
+}
+
+func (w *operatorStatusDryRunWriter) WriteVolumeStatus(_ context.Context, ref ops.OperatorObjectRef, status ops.SwBlockVolumeCRDStatus) error {
+	w.volumes = append(w.volumes, operatorStatusDryRunVolumeWrite{ref: ref, status: status})
+	return nil
+}
+
+type operatorStatusDryRunEventSink struct {
+	events []ops.OperatorKubernetesEvent
+}
+
+func (s *operatorStatusDryRunEventSink) EmitEvent(_ context.Context, event ops.OperatorKubernetesEvent) error {
+	s.events = append(s.events, event)
+	return nil
 }
 
 type requiredFrontierFlags struct {

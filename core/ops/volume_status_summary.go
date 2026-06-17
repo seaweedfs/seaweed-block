@@ -156,7 +156,11 @@ func VolumeStatusReportIssues(r VolumeStatusReport) []string {
 			issues = append(issues, fmt.Sprintf("durable %s/%s latched=false", d.VolumeID, d.ReplicaID))
 		}
 		if !d.Operational {
-			issues = append(issues, fmt.Sprintf("durable %s/%s operational=false", d.VolumeID, d.ReplicaID))
+			issue := fmt.Sprintf("durable %s/%s operational=false", d.VolumeID, d.ReplicaID)
+			if d.Evidence != "" {
+				issue += " evidence=" + d.Evidence
+			}
+			issues = append(issues, issue)
 		}
 		if d.Closed {
 			issues = append(issues, fmt.Sprintf("durable %s/%s closed=true", d.VolumeID, d.ReplicaID))

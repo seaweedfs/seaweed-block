@@ -25,11 +25,22 @@ const (
 	ReasonCandidateFrontierBehind         = "candidate_frontier_behind"
 	ReasonStatusEndpointUnreachable       = "status_endpoint_unreachable"
 	ReasonCSINodeImagePullFailed          = "csi_node_image_pull_failed"
+	ReasonCSIDriverNotRegistered          = "csi_driver_not_registered"
+	ReasonCSINodePodNotReady              = "csi_node_pod_not_ready"
 	ReasonImageMissingOnNode              = "image_missing_on_node"
+	ReasonISCSIPrereqMissing              = "iscsi_prereq_missing"
+	ReasonMultipathPrereqMissing          = "multipath_prereq_missing"
+	ReasonNodeReady                       = "node_ready"
+	ReasonNodeNotReady                    = "node_not_ready"
+	ReasonNodeSchedulingDisabled          = "node_scheduling_disabled"
 	ReasonGeneratedDeploymentMissing      = "generated_deployment_missing"
 	ReasonObservedReplicasBelowDesired    = "observed_replicas_below_desired"
 	ReasonLoopbackFrontendRejected        = "loopback_frontend_rejected"
 	ReasonStalePrimaryFenced              = "stale_primary_fenced"
+	ReasonWALIntegrityFault               = "wal_integrity_fault"
+	ReasonInstallDriftAligned             = "install_drift_aligned"
+	ReasonInstallDriftMismatch            = "install_drift_mismatch"
+	ReasonInstallDriftEvidenceMissing     = "install_drift_evidence_missing"
 
 	EventTypeCSIReattachObserved = "csi_reattach_observed"
 )
@@ -52,22 +63,41 @@ type ClusterEvidence struct {
 	Volumes         []VolumeEvidence          `json:"volumes"`
 	ManagedVolumes  []ManagedVolumeProjection `json:"managed_volumes,omitempty"`
 	Cleanup         *CleanupEvidence          `json:"cleanup,omitempty"`
+	InstallDrift    *InstallDriftEvidence     `json:"install_drift,omitempty"`
 	Conditions      []ObservationCondition    `json:"conditions,omitempty"`
 	Events          []ClusterEvent            `json:"events,omitempty"`
 	NonClaims       []string                  `json:"non_claims,omitempty"`
 }
 
+type InstallDriftEvidence struct {
+	Status               string `json:"status"`
+	ReasonCode           string `json:"reason_code,omitempty"`
+	ChartName            string `json:"chart_name,omitempty"`
+	CurrentChartVersion  string `json:"current_chart_version,omitempty"`
+	DesiredChartVersion  string `json:"desired_chart_version,omitempty"`
+	CurrentAppVersion    string `json:"current_app_version,omitempty"`
+	DesiredAppVersion    string `json:"desired_app_version,omitempty"`
+	CurrentImage         string `json:"current_image,omitempty"`
+	DesiredImage         string `json:"desired_image,omitempty"`
+	CurrentCSIImage      string `json:"current_csi_image,omitempty"`
+	DesiredCSIImage      string `json:"desired_csi_image,omitempty"`
+	CurrentOperatorImage string `json:"current_operator_image,omitempty"`
+	DesiredOperatorImage string `json:"desired_operator_image,omitempty"`
+	EvidenceRef          string `json:"evidence_ref,omitempty"`
+}
+
 type CleanupEvidence struct {
-	Status                 string   `json:"status"`
-	KubernetesResidueCount int      `json:"k8s_residue_count,omitempty"`
-	ISCSIResidueCount      int      `json:"iscsi_residue_count,omitempty"`
-	MultipathResidueCount  int      `json:"multipath_residue_count,omitempty"`
-	ProcessResidueCount    int      `json:"process_residue_count,omitempty"`
-	HostPathResidueCount   int      `json:"hostpath_residue_count,omitempty"`
-	FailureCount           int      `json:"failure_count,omitempty"`
-	FailedPhase            string   `json:"failed_phase,omitempty"`
-	ReasonCodes            []string `json:"reason_codes,omitempty"`
-	EvidenceRef            string   `json:"evidence_ref,omitempty"`
+	Status                 string    `json:"status"`
+	ObservedAt             time.Time `json:"observed_at,omitempty"`
+	KubernetesResidueCount int       `json:"k8s_residue_count,omitempty"`
+	ISCSIResidueCount      int       `json:"iscsi_residue_count,omitempty"`
+	MultipathResidueCount  int       `json:"multipath_residue_count,omitempty"`
+	ProcessResidueCount    int       `json:"process_residue_count,omitempty"`
+	HostPathResidueCount   int       `json:"hostpath_residue_count,omitempty"`
+	FailureCount           int       `json:"failure_count,omitempty"`
+	FailedPhase            string    `json:"failed_phase,omitempty"`
+	ReasonCodes            []string  `json:"reason_codes,omitempty"`
+	EvidenceRef            string    `json:"evidence_ref,omitempty"`
 }
 
 type NodeEvidence struct {

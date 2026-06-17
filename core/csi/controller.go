@@ -18,6 +18,7 @@ type ControllerServer struct {
 	lookup           PublishTargetLookup
 	provisioner      VolumeProvisioner
 	metadataResolver KubernetesMetadataResolver
+	registrar        VolumeObjectRegistrar
 }
 
 func NewControllerServer(lookup PublishTargetLookup) *ControllerServer {
@@ -30,6 +31,10 @@ func NewControllerServerWithProvisioner(lookup PublishTargetLookup, provisioner 
 
 func NewControllerServerWithProvisionerAndMetadataResolver(lookup PublishTargetLookup, provisioner VolumeProvisioner, resolver KubernetesMetadataResolver) *ControllerServer {
 	return &ControllerServer{lookup: lookup, provisioner: provisioner, metadataResolver: resolver}
+}
+
+func NewControllerServerWithProvisionerMetadataAndRegistrar(lookup PublishTargetLookup, provisioner VolumeProvisioner, resolver KubernetesMetadataResolver, registrar VolumeObjectRegistrar) *ControllerServer {
+	return &ControllerServer{lookup: lookup, provisioner: provisioner, metadataResolver: resolver, registrar: registrar}
 }
 
 func (s *ControllerServer) CreateVolume(ctx context.Context, req *csipb.CreateVolumeRequest) (*csipb.CreateVolumeResponse, error) {
@@ -50,6 +55,11 @@ func (s *ControllerServer) CreateVolume(ctx context.Context, req *csipb.CreateVo
 			return nil, status.Errorf(codes.AlreadyExists, "volume %q already exists with different spec", spec.VolumeID)
 		}
 		return nil, status.Errorf(codes.Internal, "create volume intent: %v", err)
+	}
+	if s.registrar != nil {
+		if err := s.registrar.EnsureVolumeObject(ctx, created); err != nil {
+			return nil, status.Errorf(codes.Internal, "ensure SwBlockVolume object: %v", err)
+		}
 	}
 	protocol := normalizeProtocol(created.Protocol)
 	return &csipb.CreateVolumeResponse{
@@ -199,6 +209,7 @@ func volumeSpecFromCreateRequest(req *csipb.CreateVolumeRequest) (VolumeSpec, er
 		PVCNamespace:      req.GetParameters()["csi.storage.k8s.io/pvc/namespace"],
 		PVCUID:            req.GetParameters()["csi.storage.k8s.io/pvc/uid"],
 		PVName:            req.GetParameters()["csi.storage.k8s.io/pv/name"],
+		StorageClass:      req.GetParameters()["csi.storage.k8s.io/storageclass/name"],
 	}, nil
 }
 

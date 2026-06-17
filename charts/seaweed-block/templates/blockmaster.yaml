@@ -4,6 +4,9 @@
 {{- if and .Values.network.externalStatus (not .Values.network.externalISCSI) -}}
 {{- fail "network.externalStatus=true requires network.externalISCSI=true because external status is only supported with external block frontend publishing" -}}
 {{- end -}}
+{{- if and (ne .Values.blockmaster.durableImpl "walstore") (not .Values.compat.launcherDurableImplFlag) -}}
+{{- fail "blockmaster.durableImpl requires compat.launcherDurableImplFlag=true because older published images do not accept --launcher-durable-impl" -}}
+{{- end -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -26,6 +29,10 @@ spec:
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet
       serviceAccountName: {{ include "seaweed-block.fullname" . }}-master
+      {{- with .Values.blockmaster.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       {{- if .Values.blockmaster.stateHostPath }}
       initContainers:
         - name: state-permissions
@@ -56,6 +63,9 @@ spec:
             - "--launcher-image={{ include "seaweed-block.image" . }}"
             - "--launcher-namespace={{ .Release.Namespace }}"
             - "--launcher-durable-root={{ .Values.blockmaster.durableRoot }}"
+            {{- if .Values.compat.launcherDurableImplFlag }}
+            - "--launcher-durable-impl={{ .Values.blockmaster.durableImpl }}"
+            {{- end }}
             {{- if .Values.blockmaster.launcherStatus }}
             - "--launcher-status"
             {{- end }}

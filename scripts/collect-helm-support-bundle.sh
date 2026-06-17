@@ -9,7 +9,7 @@ HELM_RELEASE="${SW_BLOCK_HELM_RELEASE:-sw-block}"
 HELM_NAMESPACE="${SW_BLOCK_HELM_NAMESPACE:-kube-system}"
 VOLUME_ID="${SW_BLOCK_VOLUME_ID:-}"
 
-mkdir -p "$ARTIFACT_DIR"/{helm,k8s,logs,iscsi,replayed-report}
+mkdir -p "$ARTIFACT_DIR"/{helm,k8s,logs,iscsi,host,replayed-report}
 SUPPORT_BUNDLE_CAPTURE_FAILED=0
 
 if [[ -z "${KUBECONFIG:-}" && -f /etc/rancher/k3s/k3s.yaml ]]; then
@@ -43,6 +43,17 @@ capture() {
   fi
 }
 
+capture_optional() {
+  local out="$1"
+  shift
+  if ! "$@" >"$out" 2>&1; then
+    {
+      echo
+      echo "[support-bundle] optional command failed: $*"
+    } >>"$out"
+  fi
+}
+
 summary_value() {
   local value="$1"
   if [[ -n "$value" ]]; then
@@ -50,6 +61,38 @@ summary_value() {
   else
     printf 'unknown'
   fi
+}
+
+command_state() {
+  if command -v "$1" >/dev/null 2>&1; then
+    printf 'present'
+  else
+    printf 'missing'
+  fi
+}
+
+module_state() {
+  if [[ -d "/sys/module/$1" ]]; then
+    printf 'loaded'
+  else
+    printf 'unknown'
+  fi
+}
+
+write_host_prereq_summary() {
+  local node command_iscsiadm command_multipath command_dmsetup module_iscsi_tcp module_dm_multipath iscsi_prereq multipath_prereq
+  node="$(hostname -s 2>/dev/null || hostname)"
+  command_iscsiadm="$(command_state iscsiadm)"
+  command_multipath="$(command_state multipath)"
+  command_dmsetup="$(command_state dmsetup)"
+  module_iscsi_tcp="$(module_state iscsi_tcp)"
+  module_dm_multipath="$(module_state dm_multipath)"
+  iscsi_prereq=missing
+  multipath_prereq=missing
+  [[ "$command_iscsiadm" == "present" ]] && iscsi_prereq=ok
+  [[ "$command_multipath" == "present" && "$command_dmsetup" == "present" ]] && multipath_prereq=ok
+  echo "node=$node iscsi_prereq=$iscsi_prereq multipath_prereq=$multipath_prereq command_iscsiadm=$command_iscsiadm command_multipath=$command_multipath command_dmsetup=$command_dmsetup module_iscsi_tcp=$module_iscsi_tcp module_dm_multipath=$module_dm_multipath read_only=true" \
+    >"$ARTIFACT_DIR/host/host-prereq-summary.txt"
 }
 
 if [[ -z "$VOLUME_ID" && -f "$SOURCE_DIR/first-volume-summary.txt" ]]; then
@@ -78,10 +121,11 @@ capture "$ARTIFACT_DIR/k8s/volumeattachments.txt" kubectl get volumeattachments 
 capture "$ARTIFACT_DIR/logs/blockmaster.log" kubectl -n "$HELM_NAMESPACE" logs deploy/sw-blockmaster --all-containers --tail=300 || true
 capture "$ARTIFACT_DIR/logs/csi-controller.log" kubectl -n "$HELM_NAMESPACE" logs deploy/sw-block-csi-controller --all-containers --tail=300 || true
 capture "$ARTIFACT_DIR/logs/csi-node.log" kubectl -n "$HELM_NAMESPACE" logs ds/sw-block-csi-node --all-containers --tail=300 || true
-capture "$ARTIFACT_DIR/logs/blockvolume.log" kubectl -n "$NAMESPACE" logs -l app=sw-blockvolume --all-containers --tail=300 || true
+capture_optional "$ARTIFACT_DIR/logs/blockvolume.log" kubectl -n "$NAMESPACE" logs -l app=sw-blockvolume --all-containers --tail=300
 
-capture "$ARTIFACT_DIR/iscsi/sessions.txt" sudo -n iscsiadm -m session || true
-capture "$ARTIFACT_DIR/iscsi/nodes.txt" sudo -n iscsiadm -m node || true
+capture_optional "$ARTIFACT_DIR/iscsi/sessions.txt" sudo -n iscsiadm -m session
+capture_optional "$ARTIFACT_DIR/iscsi/nodes.txt" sudo -n iscsiadm -m node
+write_host_prereq_summary
 
 report_status=ok
 explain_status=ok
@@ -116,6 +160,7 @@ for required in \
   "$ARTIFACT_DIR/replayed-report/summary.txt" \
   "$ARTIFACT_DIR/explain.txt" \
   "$ARTIFACT_DIR/k8s/pods.txt" \
+  "$ARTIFACT_DIR/host/host-prereq-summary.txt" \
   "$ARTIFACT_DIR/helm/status.txt"; do
   if [[ ! -s "$required" ]]; then
     support_bundle_status=failed
@@ -136,6 +181,7 @@ fi
   echo "timeline_status=$timeline_status"
   echo "capture_status=$([[ "$SUPPORT_BUNDLE_CAPTURE_FAILED" == "0" ]] && echo ok || echo failed)"
   echo "read_only=true"
+  echo "host_prereq=host/host-prereq-summary.txt"
   echo "report=replayed-report/index.html"
   echo "cluster_evidence=replayed-report/cluster-evidence.json"
   echo "timeline=replayed-report/timeline.jsonl"

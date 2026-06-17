@@ -6,6 +6,12 @@ Its job is to keep product goals, prioritized engineering tasks, and evidence
 links in one place so the team does not jump from every new finding directly
 into code.
 
+Status note, 2026-06-01: this file is now a product-background document, not
+the active execution plan. Active execution is tracked in
+`internal/docs/current-plan.md`; release sequencing is tracked in
+`internal/docs/product-roadmap.md`. The immediate recommendation section below
+has been refreshed to avoid the older RF=2 Stage 1 pointer.
+
 ## Product Goal
 
 Build a small, understandable Kubernetes block storage service for teams that
@@ -172,31 +178,33 @@ non-claims first or stop.
 
 ## Current Immediate Recommendation
 
-The light-use operations ladder is now closed through same-node placement,
-attach, durable restart, and safe RF=2 refusal:
+The light-use operations ladder has moved beyond the original RF=2 Stage 1
+plan. The current alpha line now includes Helm installation, first PVC,
+multi-volume RF=3 gates, restart persistence, read-only status/report/dashboard
+surfaces, deterministic cleanup, and negative-first status vocabulary.
 
-- first-volume runbook and failure bundle are closed,
-- cluster inventory is closed,
-- product-owned generated workload lifecycle is closed,
-- durable RF=1 restart/reattach is closed,
-- same-node alpha attach and placement visibility are closed,
-- RF=2 mounted baseline and primary-failure safe refusal are closed.
-
-The next concrete product step is:
+The next concrete product step is not a new user feature. It is release
+hardening:
 
 ```text
-Build Stage 1 safe Kubernetes recovery: prove through the app/PVC path that an
-RF=2 peer becomes promotion-ready, a controlled primary failure triggers safe
-authority movement, CSI/node reattaches on pod recreate, and the reader verifies
-the same data; otherwise fail closed with a precise blocker.
+Finish Phase 34 test realism: prove live negative paths and dirty storage faults
+do not produce false Ready=True, then align release claims with that evidence.
 ```
 
 Current state:
 
-- Protocol-level iSCSI/NVMe failover gates exist, but transparent host
-  multipath is Stage 2, not the current claim.
-- Current Stage 1 has candidate durable frontier evidence, but still lacks the
-  mounted writer required frontier and positive CSI/pod-recreate recovery gate.
-- The active plan is `RF=2 Promotion-Ready Recovery MVP`.
-- Stage 1.5 usability hardening should be planned in parallel, but it must not
-  dilute Stage 1's minimum HA product line.
+- Phase 33 failure hardening is closed.
+- Phase 34 is active under `internal/docs/current-plan.md`.
+- D2 live status-endpoint-unreachable and D3 restart convergence are validated.
+- D4 SmartWAL corruption is validated for the core release-relevant contract:
+  after real WAL corruption, the product no longer reports false `Ready=True`.
+  The run `20260601-020747-5a1f` passed 30/30 after fixes through storage,
+  blockvolume readiness, master projection, and ManagedVolume projection tests.
+- The remaining Phase 34 work is closeout and release wording. A product
+  follow-up remains to surface the specific `wal_integrity_fault` reason rather
+  than generic `unknown`.
+
+After Phase 34 closes, the next product decision is whether to cut the next
+alpha hardening release or start the next larger loop: productized operator
+lifecycle, model/control-plane tightening, rebuild/failback, NVMe ANA parity, or
+backup/snapshot workflow. The roadmap should choose one loop at a time.

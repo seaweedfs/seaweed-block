@@ -20,6 +20,10 @@ const (
 	ObservationReportTextArtifact     = "summary.txt"
 	ObservationReportJSONLArtifact    = "timeline.jsonl"
 	ObservationCleanupSummaryArtifact = "cleanup-summary.txt"
+	ObservationHostPrereqArtifact     = "host-prereq-summary.txt"
+	ObservationLoopbackAttachArtifact = "unsupported-cross-node-loopback-attach.txt"
+	ObservationDeleteSafetyArtifact   = "swblockvolume-delete-summary.txt"
+	ObservationInstallDriftArtifact   = "install-drift-summary.txt"
 
 	NodeLossRecoverySummaryArtifact = "node-loss-recovery-summary.txt"
 	PrimaryFailureRecoveryArtifact  = "primary-failure-recovery.txt"
@@ -79,6 +83,25 @@ func BuildObservationFromBundle(opts ObservationBundleOptions) (ClusterEvidence,
 	if len(cleanup) > 0 {
 		cluster.Cleanup = CleanupEvidenceFromSummary(cleanup, cleanupPath)
 	}
+	installDrift, installDriftPath, _ := loadKeyValueArtifact(opts.Dir, ObservationInstallDriftArtifact)
+	if len(installDrift) > 0 {
+		cluster.InstallDrift = InstallDriftEvidenceFromSummary(installDrift, installDriftPath)
+		sourceLoaded = true
+	}
+	hostPrereq, hostPrereqPath, _ := loadTextArtifact(opts.Dir, ObservationHostPrereqArtifact)
+	if hostPrereq != "" {
+		applyHostPrereqSummary(&cluster, hostPrereq, hostPrereqPath)
+		sourceLoaded = true
+	}
+	loopbackAttach, loopbackAttachPath, _ := loadKeyValueArtifact(opts.Dir, ObservationLoopbackAttachArtifact)
+	if len(loopbackAttach) > 0 {
+		applyUnsupportedLoopbackAttachSummary(&cluster, loopbackAttach, loopbackAttachPath)
+		sourceLoaded = true
+	}
+	deleteSafety, deleteSafetyPath, _ := loadKeyValueArtifact(opts.Dir, ObservationDeleteSafetyArtifact)
+	if len(deleteSafety) > 0 {
+		sourceLoaded = true
+	}
 	if blocked, blockedVolume := buildImagePullBlockedEvidence(opts.Dir); blocked {
 		cluster.Status = ObservationStatusBlocked
 		sourceLoaded = true
@@ -102,6 +125,9 @@ func BuildObservationFromBundle(opts ObservationBundleOptions) (ClusterEvidence,
 		NodeLoss:       summary,
 		PrimaryFailure: primaryFailure,
 	})
+	if len(deleteSafety) > 0 {
+		applyDeleteSafetySummary(&cluster, deleteSafety, deleteSafetyPath)
+	}
 	return cluster, nil
 }
 
@@ -129,8 +155,17 @@ func RenderObservationExplainText(cluster ClusterEvidence) string {
 	cluster = NormalizeObservationCluster(cluster)
 	var b strings.Builder
 	b.WriteString(RenderClusterEvidenceText(cluster))
+	renderedManaged := map[string]bool{}
 	for _, volume := range cluster.Volumes {
-		b.WriteString(RenderManagedVolumeProjectionText(managedProjectionForVolume(cluster.ManagedVolumes, volume.VolumeID)))
+		managed := managedProjectionForVolume(cluster.ManagedVolumes, volume.VolumeID)
+		b.WriteString(RenderManagedVolumeProjectionText(managed))
+		renderedManaged[managedProjectionKey(managed)] = true
+	}
+	for _, managed := range cluster.ManagedVolumes {
+		if renderedManaged[managedProjectionKey(managed)] {
+			continue
+		}
+		b.WriteString(RenderManagedVolumeProjectionText(managed))
 	}
 	if len(cluster.Events) > 0 {
 		b.WriteString("timeline:\n")
@@ -437,6 +472,290 @@ func applyPrimaryFailureSummary(cluster *ClusterEvidence, summary map[string]str
 	cluster.Volumes[0] = volume
 }
 
+func applyHostPrereqSummary(cluster *ClusterEvidence, text, evidencePath string) {
+	scanner := bufio.NewScanner(strings.NewReader(text))
+	for scanner.Scan() {
+		fields := parseSpaceKeyValues(scanner.Text())
+		nodeName := firstNonEmpty(fields["node"], fields["kubernetes_node"], fields["host"])
+		if nodeName == "" {
+			continue
+		}
+		idx := ensureObservationNode(cluster, nodeName)
+		node := cluster.Nodes[idx]
+		node.NodeName = defaultString(node.NodeName, nodeName)
+		node.KubernetesNode = defaultString(node.KubernetesNode, nodeName)
+		if hostPrereqMissing(fields["iscsi_prereq"]) {
+			node.Conditions = append(node.Conditions, hostPrereqCondition(ReasonISCSIPrereqMissing, "iSCSI host prerequisite evidence is missing", evidencePath))
+		}
+		if hostPrereqMissing(fields["multipath_prereq"]) {
+			node.Conditions = append(node.Conditions, hostPrereqCondition(ReasonMultipathPrereqMissing, "multipath host prerequisite evidence is missing", evidencePath))
+		}
+		cluster.Nodes[idx] = node
+	}
+}
+
+func applyUnsupportedLoopbackAttachSummary(cluster *ClusterEvidence, summary map[string]string, evidencePath string) {
+	if summary["issue"] != "unsupported_cross_node_loopback_attach" {
+		return
+	}
+	idx := ensureObservationVolumeIndex(cluster, summary["volume_id"])
+	volume := cluster.Volumes[idx]
+	volume.VolumeID = defaultString(volume.VolumeID, summary["volume_id"])
+	volume.Status = ObservationStatusBlocked
+	volume.Reason = ReasonPublishTargetLoopbackCrossNode
+	volume.PrimaryNode = defaultString(volume.PrimaryNode, summary["blockvolume_node"])
+	volume.PublishTarget = defaultString(volume.PublishTarget, summary["frontend"])
+	volume.SupportBundleHint = evidencePath
+	if replicaID := summary["replica_id"]; replicaID != "" && len(volume.Replicas) == 0 {
+		volume.PrimaryReplica = defaultString(volume.PrimaryReplica, replicaID)
+		volume.Replicas = append(volume.Replicas, ReplicaEvidence{
+			ReplicaID:      replicaID,
+			KubernetesNode: summary["blockvolume_node"],
+			Observed:       true,
+			Role:           "primary",
+			FrontendAddr:   summary["frontend"],
+		})
+	}
+	message := "loopback frontend requires app pod and blockvolume on the same node"
+	if summary["app_node"] != "" || summary["blockvolume_node"] != "" {
+		message = fmt.Sprintf("app node %s differs from blockvolume node %s; loopback frontend is not cross-node reachable",
+			emptyAsDash(summary["app_node"]),
+			emptyAsDash(summary["blockvolume_node"]))
+	}
+	volume.Conditions = append(volume.Conditions, ObservationCondition{
+		Type:         ConditionBlocked,
+		Status:       "True",
+		Reason:       ReasonPublishTargetLoopbackCrossNode,
+		Severity:     "warning",
+		Message:      message,
+		EvidenceRefs: []string{evidencePath},
+	})
+	volume.NextActions = []string{"reinstall with external iSCSI target or schedule the app pod on the blockvolume node"}
+	cluster.Volumes[idx] = volume
+	cluster.Status = ObservationStatusBlocked
+}
+
+func applyDeleteSafetySummary(cluster *ClusterEvidence, summary map[string]string, evidencePath string) {
+	applyDeleteSafetyFacts(cluster, deleteSafetyProjectionFacts{
+		VolumeID:         strings.TrimSpace(summary["volume_id"]),
+		PVCName:          strings.TrimSpace(summary["pvc_name"]),
+		PVName:           strings.TrimSpace(summary["pv_name"]),
+		DeleteRequested:  boolFromSummaryDefault(summary, "delete_requested", true),
+		FinalizerPresent: boolFromSummaryDefault(summary, "finalizer_present", true),
+		EvidencePath:     evidencePath,
+	})
+}
+
+type deleteSafetyProjectionFacts struct {
+	VolumeID         string
+	PVCName          string
+	PVName           string
+	DeleteRequested  bool
+	FinalizerPresent bool
+	EvidencePath     string
+}
+
+func applyDeleteSafetyFacts(cluster *ClusterEvidence, facts deleteSafetyProjectionFacts) {
+	if len(cluster.ManagedVolumes) == 0 && len(cluster.Volumes) > 0 {
+		*cluster = NormalizeObservationCluster(*cluster)
+	}
+	idx := findManagedVolumeIndex(cluster.ManagedVolumes, facts.VolumeID, facts.PVCName)
+	if idx < 0 {
+		cluster.ManagedVolumes = append(cluster.ManagedVolumes, ManagedVolumeProjection{
+			VolumeID:   facts.VolumeID,
+			PVCName:    facts.PVCName,
+			PVName:     facts.PVName,
+			Status:     ManagedVolumeStatusUnknown,
+			ReasonCode: ReasonCleanupEvidenceMissing,
+			States: ManagedVolumeStates{
+				Kubernetes: ManagedVolumeKubernetesUnknown,
+				Authority:  ManagedVolumeAuthorityUnknown,
+				CSI:        ManagedVolumeCSIUnknown,
+				HostPath:   ManagedVolumeHostPathUnknown,
+				Recovery:   ManagedVolumeRecoveryNone,
+				Workload:   ManagedVolumeWorkloadUnknown,
+			},
+		})
+		idx = len(cluster.ManagedVolumes) - 1
+	}
+	managed := &cluster.ManagedVolumes[idx]
+	if managed.VolumeID == "" {
+		managed.VolumeID = facts.VolumeID
+	}
+	if managed.PVCName == "" {
+		managed.PVCName = facts.PVCName
+	}
+	if managed.PVName == "" {
+		managed.PVName = facts.PVName
+	}
+	decision := EvaluateSwBlockVolumeDeleteSafety(SwBlockVolumeDeleteSafetyFacts{
+		DeleteRequested:  facts.DeleteRequested,
+		FinalizerPresent: facts.FinalizerPresent,
+		Cleanup:          cluster.Cleanup,
+		ObservedAt:       cluster.CapturedAt,
+		MaxEvidenceAge:   15 * time.Minute,
+	})
+	if facts.EvidencePath != "" {
+		decision.EvidenceRefs = appendUniqueStrings(decision.EvidenceRefs, facts.EvidencePath)
+	}
+	managed.DeleteSafety = &decision
+	managed.EvidenceRefs = appendUniqueStrings(managed.EvidenceRefs, decision.EvidenceRefs...)
+	managed.Actions = ensureManagedVolumeAction(managed.Actions, managedVolumeActionFromDeleteSafety(decision))
+	switch decision.State {
+	case DeleteSafetyStateRequested:
+		if decision.Decision == ManagedVolumeActionDecisionUnknown {
+			managed.Status = ManagedVolumeStatusUnknown
+			managed.ReasonCode = decision.Reason
+			managed.Conditions = ensureCondition(removeConditionType(managed.Conditions, ConditionReady), ObservationCondition{
+				Type:         ConditionReady,
+				Status:       "Unknown",
+				Reason:       decision.Reason,
+				Severity:     "warning",
+				Message:      "delete is held until cleanup evidence is available and fresh",
+				EvidenceRefs: append([]string(nil), decision.EvidenceRefs...),
+			})
+			managed.Conditions = ensureCondition(managed.Conditions, ObservationCondition{
+				Type:         ConditionEvidenceStale,
+				Status:       "True",
+				Reason:       decision.Reason,
+				Severity:     "warning",
+				Message:      "delete-safety evidence is missing or stale",
+				EvidenceRefs: append([]string(nil), decision.EvidenceRefs...),
+			})
+		}
+	case DeleteSafetyStateBlocked:
+		managed.Status = ManagedVolumeStatusBlocked
+		managed.ReasonCode = decision.Reason
+		managed.Conditions = ensureCondition(removeConditionType(managed.Conditions, ConditionReady), ObservationCondition{
+			Type:         ConditionReady,
+			Status:       "False",
+			Reason:       decision.Reason,
+			Severity:     "warning",
+			Message:      "delete is blocked until cleanup evidence is clean",
+			EvidenceRefs: append([]string(nil), decision.EvidenceRefs...),
+		})
+		managed.Conditions = ensureCondition(managed.Conditions, ObservationCondition{
+			Type:         ConditionBlocked,
+			Status:       "True",
+			Reason:       decision.Reason,
+			Severity:     "warning",
+			Message:      "delete-safety evidence blocks finalizer release",
+			EvidenceRefs: append([]string(nil), decision.EvidenceRefs...),
+		})
+		managed.Conditions = ensureCondition(managed.Conditions, ObservationCondition{
+			Type:         ConditionCleanupRequired,
+			Status:       "True",
+			Reason:       decision.Reason,
+			Severity:     "warning",
+			Message:      "delete is blocked until cleanup evidence is clean",
+			EvidenceRefs: append([]string(nil), decision.EvidenceRefs...),
+		})
+		managed.Actions = ensureManagedVolumeAction(managed.Actions, ManagedVolumeAction{
+			Type:             ManagedVolumeActionVerifyCleanup,
+			Mode:             ManagedVolumeActionModeScripted,
+			SideEffectClass:  ManagedVolumeSideEffectObserve,
+			OwnerExecutor:    "ops",
+			Decision:         ManagedVolumeActionDecisionAllowed,
+			EvidenceRequired: "cleanup-summary.txt",
+			EvidenceRefs:     append([]string(nil), decision.EvidenceRefs...),
+		})
+	case DeleteSafetyStateReleasable:
+		managed.Conditions = ensureCondition(managed.Conditions, ObservationCondition{
+			Type:         ConditionCleanupRequired,
+			Status:       "False",
+			Reason:       ReasonCleanupVerified,
+			Severity:     "info",
+			Message:      "delete finalizer is releasable; cleanup evidence is clean",
+			EvidenceRefs: append([]string(nil), decision.EvidenceRefs...),
+		})
+	}
+}
+
+func managedVolumeActionFromDeleteSafety(decision SwBlockVolumeDeleteSafetyDecision) ManagedVolumeAction {
+	return ManagedVolumeAction{
+		Type:             decision.ActionType,
+		Mode:             ManagedVolumeActionModeDryRun,
+		SideEffectClass:  ManagedVolumeSideEffectSafeK8S,
+		OwnerExecutor:    "lifecycle_owner",
+		Decision:         decision.Decision,
+		DecisionReason:   decision.Reason,
+		MissingFacts:     append([]string(nil), decision.MissingFacts...),
+		Preconditions:    []string{"delete_safety_evidence_current", "cleanup_residue_absent"},
+		InvariantRefs:    []string{"INV-LIFECYCLE-FINALIZER-001"},
+		EvidenceRequired: "cleanup-summary.txt",
+		EvidenceRefs:     append([]string(nil), decision.EvidenceRefs...),
+	}
+}
+
+func findManagedVolumeIndex(volumes []ManagedVolumeProjection, volumeID, pvcName string) int {
+	for i := range volumes {
+		if volumeID != "" && volumes[i].VolumeID == volumeID {
+			return i
+		}
+		if pvcName != "" && volumes[i].PVCName == pvcName {
+			return i
+		}
+	}
+	return -1
+}
+
+func boolFromSummaryDefault(summary map[string]string, key string, defaultValue bool) bool {
+	value := strings.TrimSpace(summary[key])
+	if value == "" {
+		return defaultValue
+	}
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		return defaultValue
+	}
+	return parsed
+}
+
+func ensureManagedVolumeAction(actions []ManagedVolumeAction, action ManagedVolumeAction) []ManagedVolumeAction {
+	for i := range actions {
+		if actions[i].Type == action.Type {
+			actions[i] = action
+			return actions
+		}
+	}
+	return append(actions, action)
+}
+
+func ensureObservationNode(cluster *ClusterEvidence, nodeName string) int {
+	for i, node := range cluster.Nodes {
+		if node.NodeName == nodeName || node.KubernetesNode == nodeName || node.PhysicalHost == nodeName {
+			return i
+		}
+	}
+	cluster.Nodes = append(cluster.Nodes, NodeEvidence{
+		NodeName:       nodeName,
+		KubernetesNode: nodeName,
+		Ready:          true,
+		Schedulable:    true,
+	})
+	return len(cluster.Nodes) - 1
+}
+
+func hostPrereqMissing(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "missing", "failed", "false", "no":
+		return true
+	default:
+		return false
+	}
+}
+
+func hostPrereqCondition(reason, message, evidencePath string) ObservationCondition {
+	return ObservationCondition{
+		Type:         ConditionReady,
+		Status:       "False",
+		Reason:       reason,
+		Severity:     "warning",
+		Message:      message,
+		EvidenceRefs: []string{evidencePath},
+	}
+}
+
 func applyManagedVolumeArtifactHints(cluster ClusterEvidence, hints ManagedVolumeArtifactHints) ClusterEvidence {
 	cluster.ManagedVolumes = nil
 	for _, volume := range cluster.Volumes {
@@ -559,6 +878,18 @@ func loadKeyValueArtifact(root, name string) (map[string]string, string, error) 
 	return out, paths[0], scanner.Err()
 }
 
+func loadTextArtifact(root, name string) (string, string, error) {
+	paths, err := findArtifactPaths(root, name)
+	if err != nil || len(paths) == 0 {
+		return "", "", err
+	}
+	raw, err := os.ReadFile(paths[0])
+	if err != nil {
+		return "", paths[0], err
+	}
+	return string(raw), paths[0], nil
+}
+
 func findArtifactPaths(root, name string) ([]string, error) {
 	var paths []string
 	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
@@ -578,13 +909,24 @@ func findArtifactPaths(root, name string) ([]string, error) {
 }
 
 func ensureObservationVolume(cluster *ClusterEvidence, volumeID string) VolumeEvidence {
+	return cluster.Volumes[ensureObservationVolumeIndex(cluster, volumeID)]
+}
+
+func ensureObservationVolumeIndex(cluster *ClusterEvidence, volumeID string) int {
+	if volumeID != "" {
+		for i, volume := range cluster.Volumes {
+			if volume.VolumeID == volumeID {
+				return i
+			}
+		}
+	}
 	if len(cluster.Volumes) == 0 {
 		if volumeID == "" {
 			volumeID = "unknown"
 		}
 		cluster.Volumes = append(cluster.Volumes, VolumeEvidence{VolumeID: volumeID, Status: ObservationStatusUnavailable})
 	}
-	return cluster.Volumes[0]
+	return 0
 }
 
 func observationStatusFromInventoryStatus(status string) string {
@@ -614,6 +956,10 @@ func observationStatusFromInventoryCode(code int) string {
 func reasonFromIssueList(issues []string) string {
 	joined := strings.Join(issues, "\n")
 	switch {
+	case strings.Contains(joined, "unsupported_cross_node_loopback_attach") || strings.Contains(joined, "cross-node loopback") || strings.Contains(joined, "loopback frontend requires"):
+		return ReasonPublishTargetLoopbackCrossNode
+	case strings.Contains(joined, "WALIntegrity") || strings.Contains(joined, "walintegrity") || strings.Contains(joined, "wal_integrity") || strings.Contains(joined, "WAL integrity"):
+		return ReasonWALIntegrityFault
 	case strings.Contains(joined, "status_endpoint_unreachable"):
 		return ReasonStatusEndpointUnreachable
 	case strings.Contains(joined, "generated_deployment_missing"):

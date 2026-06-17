@@ -177,6 +177,8 @@ if [[ "$IMPORT_K3S" == "1" || "$IMPORT_K3S" == "true" ]]; then
       verify_local_k3s_image "$IMAGE" "k3s-images-local-sw-block.txt"
       import_k3s_image "$CSI_IMAGE" "k3s-import-local-sw-block-csi.log"
       verify_local_k3s_image "$CSI_IMAGE" "k3s-images-local-sw-block-csi.txt"
+    else
+      echo "[alpha-build] k3s_import node=local skipped reason=local_k3s_unavailable"
     fi
     import_k3s_images_to_nodes "$IMPORT_K3S_NODES"
   else
