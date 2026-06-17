@@ -102,11 +102,15 @@ Goal: identify the first detailed wiki deep dives to write next.
 Acceptance:
 
 ```text
-[ ] operation-layer v0.5 deep dive outline
-[ ] block engine / WAL dirty-failure deep dive outline
-[ ] CSI + SwBlockVolume lifecycle deep dive outline
-[ ] TestOps scenario authoring deep dive outline
-[ ] returned-replica rebuild readiness deep dive outline
+[x] domain coverage matrix exists
+[x] major domains from the last several months are listed
+[x] each domain maps to source evidence and current wiki coverage
+[x] priority deep pages are ordered for review
+[ ] operation-layer v0.5 deep dive
+[ ] block engine / WAL dirty-failure deep dive
+[ ] CSI + SwBlockVolume lifecycle deep dive
+[ ] TestOps scenario authoring deep dive
+[ ] returned-replica rebuild readiness deep dive
 ```
 
 ## D4: Publish / Serve Decision

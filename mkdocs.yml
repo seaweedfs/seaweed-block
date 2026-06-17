@@ -33,6 +33,7 @@ nav:
   - Home: wiki/index.md
   - Developer Guide:
       - Wiki Structure: wiki/developer-guide.md
+      - Coverage Matrix: wiki/coverage-matrix.md
       - Code Map: wiki/code-map.md
       - State Machines: wiki/state-machines.md
       - Protocol Catalog: wiki/protocol-catalog.md

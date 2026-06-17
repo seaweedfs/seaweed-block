@@ -23,6 +23,8 @@ Start here:
 
 - [Developer Guide](developer-guide.md) - what belongs in the wiki and what
   remains in source evidence.
+- [Coverage Matrix](coverage-matrix.md) - whether the wiki covers the major
+  months-long engineering domains and where deeper docs are still needed.
 - [Code Map](code-map.md) - main packages, commands, and responsibility
   boundaries.
 - [State Machines](state-machines.md) - the product states developers must not
