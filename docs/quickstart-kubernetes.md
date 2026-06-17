@@ -37,8 +37,10 @@ The quickstart proves:
 - The example resources and host-side residue are cleaned up.
 
 It does not prove production HA, backup/restore, broad upgrade safety, broad
-platform compatibility, mutating operator lifecycle, mutating admin workflows,
-or production UI.
+platform compatibility, broad mutating operator lifecycle, mutating admin
+workflows, or production UI. The separate v0.5 beta-candidate lifecycle-owner
+path is limited to the Seaweed Block `SwBlockVolume` protection finalizer and
+requires matching release images.
 
 ## Prerequisites
 
@@ -137,8 +139,13 @@ sw-block ops generate-helm-values \
   --csi-image ghcr.io/seaweedfs/seaweed-block-csi:sha-<commit>
 ```
 
-Current validated alpha image tag:
+Current validated published quickstart image tag:
 `sha-dc2972d0059b`.
+
+This tag covers the v0.4 read-only/status foundation path. The v0.5
+bounded lifecycle-owner path requires matching `sw-block` and `sw-block-csi`
+images published from the Phase 44 release commit; do not use the older
+quickstart tag to validate lifecycle-owner behavior.
 
 Published image digests:
 

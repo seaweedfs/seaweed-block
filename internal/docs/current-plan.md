@@ -58,10 +58,10 @@ Goal: ensure the shipped image and chart can actually run the lifecycle-owner.
 Acceptance:
 
 ```text
-[ ] candidate image includes sw-block ops lifecycle-owner
-[ ] chart renders lifecycleOwner.create=false by default
-[ ] lifecycleOwner.create=true installs Deployment/RBAC/VAP
-[ ] no chart flag/image skew
+[x] candidate image includes sw-block ops lifecycle-owner
+[x] chart renders lifecycleOwner.create=false by default
+[x] lifecycleOwner.create=true installs Deployment/RBAC/VAP
+[x] no chart flag/image skew
 ```
 
 Fail if the chart references a subcommand or flag absent from the image.
@@ -82,12 +82,12 @@ patches only metadata.finalizers.
 Acceptance:
 
 ```text
-[ ] Helm install succeeds with operatorStatus + lifecycleOwner enabled
-[ ] first PVC writer/reader passes
-[ ] SwBlockVolume exists for the PVC
-[ ] lifecycle-owner adds exactly one protection finalizer
-[ ] operator-status writes Ready=True / first_volume_verified
-[ ] finalizer_added Event is bounded
+[x] Helm install succeeds with operatorStatus + lifecycleOwner enabled
+[x] first PVC writer/reader passes
+[x] SwBlockVolume exists for the PVC
+[x] lifecycle-owner adds exactly one protection finalizer
+[x] operator-status writes Ready=True / first_volume_verified
+[x] finalizer_added Event is bounded
 ```
 
 ## D3: Delete Request Holds On Unsafe Evidence
@@ -97,12 +97,12 @@ Goal: a delete request cannot complete while evidence is unsafe.
 Acceptance:
 
 ```text
-[ ] deleting SwBlockVolume with missing cleanup evidence remains Terminating
-[ ] blocked residue evidence remains Terminating
-[ ] stale cleanup evidence remains Terminating
-[ ] status.deleteSafety decision is unknown/rejected as appropriate
-[ ] Events explain the hold reason
-[ ] lifecycle-owner does not run cleanup
+[x] deleting SwBlockVolume with missing cleanup evidence remains Terminating
+[x] blocked residue evidence remains Terminating
+[x] stale cleanup evidence remains Terminating
+[x] status.deleteSafety decision is unknown/rejected as appropriate
+[x] Events explain the hold reason
+[x] lifecycle-owner does not run cleanup
 ```
 
 Fail if unsafe evidence releases the finalizer.
@@ -122,11 +122,11 @@ Goal: clean, fresh evidence releases only the Seaweed Block finalizer.
 Acceptance:
 
 ```text
-[ ] clean cleanup evidence sets decision=allowed state=releasable
-[ ] lifecycle-owner removes only block.seaweedfs.com/swblockvolume-protection
-[ ] foreign finalizers are preserved if present
-[ ] SwBlockVolume deletion completes after release
-[ ] finalizer_released Event is bounded
+[x] clean cleanup evidence sets decision=allowed state=releasable
+[x] lifecycle-owner removes only block.seaweedfs.com/swblockvolume-protection
+[x] foreign finalizers are preserved if present
+[x] SwBlockVolume deletion completes after release
+[x] finalizer_released Event is bounded
 ```
 
 Fail if any non-finalizer field changes.
@@ -138,11 +138,11 @@ Goal: users see the same answer everywhere.
 Acceptance:
 
 ```text
-[ ] kubectl get/describe SwBlockVolume status agrees with ops report
-[ ] operator-snapshot agrees with CRD status
-[ ] dashboard /operator-snapshot.json agrees
-[ ] ops explain names the same hold/release reason
-[ ] no false Ready=True appears in blocked/unknown delete states
+[x] kubectl get/describe SwBlockVolume status agrees with ops report
+[x] operator-snapshot agrees with CRD status
+[x] dashboard /operator-snapshot.json agrees
+[x] ops explain names the same hold/release reason
+[x] no false Ready=True appears in blocked/unknown delete states
 ```
 
 ## D6: Multi-Volume Isolation Smoke
@@ -160,10 +160,10 @@ C normal ready volume -> remains ready, protected, no deleteSafety contamination
 Acceptance:
 
 ```text
-[ ] A held does not block B release
-[ ] B release does not remove A/C finalizer
-[ ] C remains Ready=True and protected
-[ ] Events/status use the correct volume identity
+[x] A held does not block B release
+[x] B release does not remove A/C finalizer
+[x] C remains Ready=True and protected
+[x] Events/status use the correct volume identity
 ```
 
 ## D7: Close / Release Decision
@@ -171,11 +171,11 @@ Acceptance:
 Phase 44 can close only if:
 
 ```text
-[ ] D1-D6 PASS on a clean VAP-capable lab
-[ ] lifecycle-owner has no cleanup/PVC/PV/workload/storage mutation power
-[ ] operator-status remains status/events-only
-[ ] final cleanup verifier reports zero residue
-[ ] release notes and README claim only bounded SwBlockVolume finalizer
+[x] D1-D6 PASS on a clean VAP-capable lab
+[x] lifecycle-owner has no cleanup/PVC/PV/workload/storage mutation power
+[x] operator-status remains status/events-only
+[x] final cleanup verifier reports zero residue
+[x] release notes and README claim only bounded SwBlockVolume finalizer
     lifecycle, not automatic cleanup or broad lifecycle automation
 ```
 

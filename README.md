@@ -118,7 +118,11 @@ status_report=status/report/index.html
 cleanup_status=ok
 ```
 
-Current validated alpha image tag: `sha-dc2972d0059b`.
+Current validated published quickstart image tag: `sha-dc2972d0059b`.
+This tag covers the v0.4 read-only/status foundation path. The v0.5
+bounded lifecycle-owner path requires matching `sw-block` and `sw-block-csi`
+images published from the Phase 44 release commit; do not use the older
+quickstart tag to validate lifecycle-owner behavior.
 
 Mutable `:alpha` is a smoke/demo tag only; it can drift from the source tree.
 

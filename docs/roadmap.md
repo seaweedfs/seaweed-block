@@ -29,7 +29,8 @@ Current alpha constraints:
 - launcher-generated blockvolume state uses `emptyDir`
 - harness applies generated blockvolume manifests
 - generated blockvolume Deployments can use PVC owner references for cleanup
-- no production or mutating operator yet
+- no production operator yet; only the bounded v0.5 beta-candidate
+  lifecycle-owner mutates `SwBlockVolume.metadata.finalizers`
 
 ## Near-Term MVP Hardening
 
@@ -106,9 +107,10 @@ Recommended order from here:
 
 1. Operator-status foundation release: complete in v0.4 beta. It claims
    status/events-only visibility, not lifecycle mutation.
-2. Operation Layer v0.5 beta candidate: complete through Phase 44. It claims a
-   bounded `SwBlockVolume` protection-finalizer lifecycle, not automatic cleanup
-   or broad operator automation.
+2. Operation Layer v0.5 beta candidate: code and QA complete through Phase 44;
+   release images still need publish/pinned-image smoke before marking it
+   shipped. It claims a bounded `SwBlockVolume` protection-finalizer lifecycle,
+   not automatic cleanup or broad operator automation.
    - Phase 41: lifecycle-owner foundation. **Closed 2026-06-14, QA PASS**
      (`internal/docs/finished-plans/phase41_finishedplan_lifecycle_owner_foundation.md`).
      Observer/lifecycle-owner/executor roles defined; delete-safety preconditions
