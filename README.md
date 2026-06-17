@@ -33,7 +33,7 @@ This is an **alpha** product path for supported lab clusters, not production.
 | Support-bundle replay | Available | Negative-first status reasons | Available |
 | Multi-volume RF=3 lab path | Gated | CSI reattach recovery | Gated |
 | iSCSI ALUA/dm-multipath mounted failover | Gated | Restart persistence with hostPath | Gated |
-| Actionable read-only CRD status + Events | Available | Production operator lifecycle | Planned |
+| Actionable read-only CRD status + Events | Available | Bounded SwBlockVolume finalizer lifecycle | Beta candidate |
 | Backup/snapshot/restore | Planned | Returned-replica rebuild/failback | Planned |
 | NVMe ANA parity | Planned | Production SLO/performance claims | Not claimed |
 
@@ -54,6 +54,9 @@ This is an **alpha** product path for supported lab clusters, not production.
   `SwBlockVolume` `.status` and Events on the gated operator-status path.
 - Inspect node readiness, support evidence refs, cleanup-required status, and
   safe read-only/scripted next-step hints through that same status model.
+- Use the beta-candidate lifecycle-owner path to protect `SwBlockVolume` CRs
+  with a Seaweed Block finalizer and release it only after clean externally
+  supplied cleanup evidence.
 - Inspect install drift status for current versus desired chart/app/image
   identity. This is visibility only, not upgrade execution.
 - Replay support bundles offline.
@@ -64,11 +67,11 @@ These are narrow alpha claims tied to documented gates. See
 ## What You Should Not Expect Yet
 
 - Production readiness or production SLOs.
-- A production-grade operator or mutating admin workflow. The current
-  operator-status controller is status/events only and does not create
-  `SwBlockVolume` objects for you.
-- Finalizer ownership or automatic cleanup execution. Delete-safety and cleanup
-  are visible as status only.
+- A production-grade operator or broad mutating admin workflow. The current
+  lifecycle-owner owns only the Seaweed Block `SwBlockVolume` protection
+  finalizer.
+- Automatic cleanup execution, host repair, or PVC/PV/workload deletion.
+  Delete-safety uses externally supplied cleanup evidence.
 - Backup, snapshot, or restore.
 - Returned-replica rebuild, reintegration, or failback.
 - Transparent Kubernetes node-loss failover without pod recreate.

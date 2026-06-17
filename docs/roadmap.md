@@ -89,6 +89,9 @@ Seaweed Block can already demonstrate a narrow Kubernetes block-storage loop:
   CRD/report/dashboard/operator-snapshot surfaces agree on the decision.
 - Delete-safety status and cleanup-required visibility without finalizer or
   cleanup mutation.
+- Bounded `SwBlockVolume` finalizer lifecycle in the v0.5 beta-candidate path:
+  CSI-created identity CRs, lifecycle-owner protection finalizer, evidence-driven
+  hold/release, Events, and multi-volume isolation.
 - Install drift status for current versus desired chart/app/image identity
   without upgrade execution.
 - CRD/RBAC status-writer conformance coverage for the failures that previously
@@ -103,27 +106,24 @@ Recommended order from here:
 
 1. Operator-status foundation release: complete in v0.4 beta. It claims
    status/events-only visibility, not lifecycle mutation.
-2. Complete the Operation Layer v0.5 release train before adding more storage
-   features:
+2. Operation Layer v0.5 beta candidate: complete through Phase 44. It claims a
+   bounded `SwBlockVolume` protection-finalizer lifecycle, not automatic cleanup
+   or broad operator automation.
    - Phase 41: lifecycle-owner foundation. **Closed 2026-06-14, QA PASS**
      (`internal/docs/finished-plans/phase41_finishedplan_lifecycle_owner_foundation.md`).
      Observer/lifecycle-owner/executor roles defined; delete-safety preconditions
-     and a dry-run finalizer-release action shipped; operator-status stays
-     status/events-only; finalizer mutation deferred. Recorded carry-forward: a
-     real live-apiserver/envtest RBAC/admission gate is still required before any
-     finalizer mutation can ship.
-   - Phase 42 (**active**): real API/admission proof. Show that a lifecycle owner
-     can be granted main-object patch only for finalizer-shaped writes, with spec
-     and unrelated metadata rejected by a real Kubernetes API/admission gate. This
-     is the recorded Phase 41 carry-forward and the gate before any actual
-     finalizer add/remove.
-   - Phase 43: first bounded lifecycle mutation. The likely candidate is
-     `SwBlockVolume` finalizer add/remove, with delete-safety preconditions and
-     user-visible Events/status.
-   - Phase 44: delete lifecycle close gate and release. Validate install,
-     PVC, status, delete-request, blocked/releasable finalizer behavior,
-     cleanup evidence, support bundle, and uninstall zero-residue as one user
-     path.
+     and a dry-run finalizer-release action shipped.
+   - Phase 42: real API/admission proof. **Closed 2026-06-15, QA PASS**
+     (`internal/docs/finished-plans/phase42_finishedplan_lifecycle_owner_admission_gate.md`).
+     The lifecycle-owner patch boundary is proven with real Kubernetes
+     ValidatingAdmissionPolicy.
+   - Phase 43: first bounded lifecycle mutation. **Closed 2026-06-15, QA PASS**
+     (`internal/docs/finished-plans/phase43_finishedplan_bounded_finalizer_lifecycle.md`).
+     Finalizer add/release works as isolated gates.
+   - Phase 44: delete lifecycle close gate. **Closed 2026-06-17, QA PASS**
+     (`internal/docs/finished-plans/phase44_finishedplan_delete_lifecycle_close_gate.md`).
+     The integrated PVC -> protected CR -> hold/release -> zero-residue path is
+     validated end-to-end.
 3. Productize returned-replica rebuild/reintegration/failback after the
    operation layer can safely authorize, block, and audit lifecycle actions.
    The engine/transport already has rebuild and returned-replica safety pieces;
@@ -134,10 +134,10 @@ Recommended order from here:
    control plane.
 
 The internal release-train contract is
-`internal/docs/ref/operation-layer-v0.5-release-train.md`. Phase 42 is closed:
-the lifecycle-owner API/admission boundary and delete-safety decision model are
-validated. Phase 43 is active and may implement only the first bounded
-`SwBlockVolume` protection-finalizer mutation.
+`internal/docs/ref/operation-layer-v0.5-release-train.md`. Phases 41-44 close
+the operation-layer loop for a bounded `SwBlockVolume` protection finalizer.
+Next storage features should reuse this same fact -> judgment -> action ->
+evidence pattern.
 
 The practical rule is:
 

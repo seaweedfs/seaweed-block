@@ -1,6 +1,6 @@
 # Current Plan: Phase 44 - Delete Lifecycle Close Gate
 
-Status: open, D2-D6 PASS; final release docs/close remain. Started on 2026-06-15.
+Status: closed on 2026-06-17.
 
 Branch: `phase41-lifecycle-owner-foundation`
 
@@ -181,6 +181,10 @@ Phase 44 can close only if:
 
 ## Current Progress
 
+- Phase 44 finished plan:
+  `internal/docs/finished-plans/phase44_finishedplan_delete_lifecycle_close_gate.md`.
+- v0.5 beta candidate release note:
+  `docs/releases/v0.5-beta-candidate.md`.
 - D2 implementation landed in `e56b844`: normal CSI CreateVolume registers the
   SwBlockVolume identity CR when operator-status or lifecycle-owner surfaces
   are enabled.
@@ -222,8 +226,8 @@ Phase 44 can close only if:
 
 ## Next Step
 
-Prepare final release/close docs and claim wording with fresh images from this
-branch:
+Publish matching images from the final release commit and rerun the
+release-candidate smoke:
 
 ```text
 claim bounded SwBlockVolume finalizer lifecycle only
