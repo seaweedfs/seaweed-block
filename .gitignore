@@ -27,3 +27,6 @@ coverage.out
 # under internal/docs/qa-assignments or external shared artifacts, not here.
 /results/
 /sw-testops.exe
+
+# MkDocs engineering wiki build output
+/site/

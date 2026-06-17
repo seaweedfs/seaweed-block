@@ -1,0 +1,37 @@
+site_name: Seaweed Block Engineering Wiki
+site_description: Internal engineering knowledge base for Seaweed Block.
+repo_url: https://github.com/seaweedfs/seaweed-block
+docs_dir: docs
+site_dir: site
+
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - navigation.expand
+    - navigation.indexes
+    - search.suggest
+    - search.highlight
+
+plugins:
+  - search
+
+nav:
+  - Home: wiki/index.md
+  - Developer Guide:
+      - Wiki Structure: wiki/developer-guide.md
+      - Code Map: wiki/code-map.md
+      - State Machines: wiki/state-machines.md
+      - Phase Map: wiki/phase-map.md
+      - QA and TestOps Map: wiki/testops-map.md
+  - Product:
+      - Overview: overview.md
+      - User Capabilities: user-capabilities.md
+      - Roadmap: roadmap.md
+      - Releases: releases/README.md
+  - Architecture:
+      - Architecture: architecture.md
+      - Developer Architecture: developer-architecture.md
+      - Runtime State Machines: runtime-state-machines.md
+      - Operations v1: operations-v1.md
+  - Quickstart: quickstart-kubernetes.md
