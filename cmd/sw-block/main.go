@@ -37,6 +37,9 @@ var (
 	opsOperatorStatusWriterFactory = func() (ops.OperatorStatusWriter, error) {
 		return ops.NewInClusterKubernetesStatusClient()
 	}
+	opsSwBlockVolumeSourceFactory = func() (ops.OperatorSwBlockVolumeSource, error) {
+		return ops.NewInClusterKubernetesStatusClient()
+	}
 	opsLifecycleOwnerClientFactory = func() (ops.LifecycleOwnerClient, ops.OperatorEventSink, error) {
 		client, err := ops.NewInClusterKubernetesStatusClient()
 		if err != nil {
@@ -590,7 +593,7 @@ func applyCleanupSummaryProjection(namespace, cleanupSummary string, cluster ops
 	if os.Getenv("KUBERNETES_SERVICE_HOST") == "" {
 		return cluster, nil
 	}
-	client, err := ops.NewInClusterKubernetesStatusClient()
+	client, err := opsSwBlockVolumeSourceFactory()
 	if err != nil {
 		return ops.ClusterEvidence{}, err
 	}
@@ -1535,6 +1538,9 @@ func loadObservationVolume(command string, args []string, stderr io.Writer) (ops
 			inventory.CollectionErrors = append(inventory.CollectionErrors, strings.Split(collectErr.Error(), "\n")...)
 		}
 		cluster, err = ops.BuildObservationFromInventory(inventory, volumeID, outDir)
+		if err != nil && cleanupSummary != "" && strings.Contains(err.Error(), "not found in inventory") {
+			cluster, err = ops.BuildObservationFromInventory(inventory, "", outDir)
+		}
 	}
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", command, err)

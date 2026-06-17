@@ -1,6 +1,6 @@
 # Current Plan: Phase 44 - Delete Lifecycle Close Gate
 
-Status: open, D2-D4 PASS; D5/D6 release-close checks remain. Started on 2026-06-15.
+Status: open, D2-D6 PASS; final release docs/close remain. Started on 2026-06-15.
 
 Branch: `phase41-lifecycle-owner-foundation`
 
@@ -195,6 +195,11 @@ Phase 44 can close only if:
 - D3/D4 polish added after QA: report/explain/dashboard can consume
   `--cleanup-summary` in live in-cluster mode, and operator-status skips a
   disappeared SwBlockVolume CR instead of aborting the whole reconcile.
+- D5/D6 QA PASS:
+  `internal/docs/qa-assignments/phase44-d5-d6-surface-isolation-close-qa-signoff.md`.
+- D5/D6 polish added after QA: `ops explain volume --cleanup-summary` can now
+  explain a deleting SwBlockVolume even when the live inventory no longer
+  contains the managed volume.
 - Local checks pass:
   `go test ./core/csi ./cmd/blockcsi`, `go test ./core/ops ./cmd/sw-block`,
   and `helm lint charts/seaweed-block`.
@@ -217,11 +222,12 @@ Phase 44 can close only if:
 
 ## Next Step
 
-Run the remaining D5/D6 release-close checks with fresh images from this branch:
+Prepare final release/close docs and claim wording with fresh images from this
+branch:
 
 ```text
-install with operatorStatus + lifecycleOwner
-prove report/explain/dashboard consume cleanup-summary consistently
-run multi-volume isolation smoke for held/releasable/ready volumes
-verify final cleanup remains zero-residue
+claim bounded SwBlockVolume finalizer lifecycle only
+claim evidence-driven hold/release, not automatic cleanup
+publish both sw-block and sw-block-csi images together
+rerun release-candidate smoke if image digests change
 ```

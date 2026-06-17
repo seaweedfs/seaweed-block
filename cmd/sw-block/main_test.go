@@ -570,6 +570,69 @@ func TestLoadObservationVolumeUsesSharedInClusterNodeEvidenceEnrichment(t *testi
 	}
 }
 
+func TestOpsExplainProjectsDeletingCRFromCleanupSummary(t *testing.T) {
+	oldInventoryRun := opsInventoryRunCommand
+	opsInventoryRunCommand = fixtureCmdKubectl(map[string]string{
+		"kubectl -n default get pvc -o json":                          `{"items":[]}`,
+		"kubectl get pv -o json":                                      `{"items":[]}`,
+		"kubectl -n default get deploy -l app=sw-blockvolume -o json": `{"items":[]}`,
+	})
+	t.Cleanup(func() { opsInventoryRunCommand = oldInventoryRun })
+
+	oldNodeFactory := opsNodeEvidenceEnricherFactory
+	opsNodeEvidenceEnricherFactory = func() (ops.OperatorNodeEvidenceEnricher, error) {
+		return fakeNodeEvidenceEnricher{}, nil
+	}
+	t.Cleanup(func() { opsNodeEvidenceEnricherFactory = oldNodeFactory })
+
+	deletingAt := time.Date(2026, 6, 17, 8, 0, 0, 0, time.UTC)
+	oldVolumeSourceFactory := opsSwBlockVolumeSourceFactory
+	opsSwBlockVolumeSourceFactory = func() (ops.OperatorSwBlockVolumeSource, error) {
+		return &lifecycleOwnerTestClient{volumes: []ops.SwBlockVolumeObject{{
+			Ref: ops.OperatorObjectRef{
+				Namespace: "default",
+				Name:      "delete-pvc",
+			},
+			Finalizers:        []string{ops.SwBlockVolumeFinalizerName},
+			DeletionTimestamp: &deletingAt,
+			Spec:              ops.SwBlockVolumeSpec{PVCName: "delete-pvc"},
+			Status: ops.SwBlockVolumeCRDStatus{
+				VolumeID: "pvc-delete",
+				PVCName:  "delete-pvc",
+			},
+		}}}, nil
+	}
+	t.Cleanup(func() { opsSwBlockVolumeSourceFactory = oldVolumeSourceFactory })
+	t.Setenv("KUBERNETES_SERVICE_HOST", "10.0.0.1")
+
+	cleanupSummary := filepath.Join(t.TempDir(), "cleanup-summary.txt")
+	if err := os.WriteFile(cleanupSummary, []byte(strings.Join([]string{
+		"cleanup_status=failed",
+		"iscsi_residue_count=1",
+		"failure_count=1",
+		"reason_codes=iscsi_node_records_present",
+		"cleanup_observed_at=2026-06-17T08:00:00Z",
+	}, "\n")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ops", "explain", "volume", "--namespace", "default", "--cleanup-summary", cleanupSummary, "delete-pvc"}, &stdout, &stderr)
+	if code != ops.VolumeStatusExitOK {
+		t.Fatalf("exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"managed_volume pvc-delete status=blocked reason=iscsi_node_records_present",
+		"managed_volume_delete_safety state=blocked decision=rejected reason=iscsi_node_records_present",
+		"managed_volume_action safe_k8s.release_swblockvolume_finalizer mode=dry_run",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("explain missing %q:\n%s", want, out)
+		}
+	}
+}
+
 func TestOpsDashboardMasterAPIUsesSharedInClusterNodeEvidenceEnrichment(t *testing.T) {
 	masterAddr, closeMaster := startCmdFakeMaster(t)
 	defer closeMaster()
