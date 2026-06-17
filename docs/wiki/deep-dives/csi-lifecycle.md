@@ -10,6 +10,25 @@ volume identity, publish target, replica facts, delete-safety state, and
 event/status surfaces. If those are not correlated, every tool can invent its
 own answer about the same volume.
 
+CSI is not just a mount API. It is a lifecycle compiler between Kubernetes
+intent and block-storage safety:
+
+```text
+cluster intent + node state + volume state + readiness + mount state
+-> safe create / publish / stage / mount / unstage / delete behavior
+```
+
+The hard bugs are usually lifecycle bugs, not byte-level bugs:
+
+- a retry creates duplicate ownership,
+- a node sees a volume it should not see,
+- a backend becomes publishable before it is semantically ready,
+- a detached volume still has stale mount/session state,
+- a stale controller keeps acting after authority moved.
+
+That is why CSI must consume current authority and readiness facts. It must not
+mint authority.
+
 The `SwBlockVolume` CR is the bridge:
 
 ```text
@@ -31,6 +50,22 @@ PVC / StorageClass
 
 This split is the product boundary. It is why Phase 44 matters: a normal PVC can
 now create the CR identity object before the status and lifecycle layers act.
+
+## Lifecycle Compiler Questions
+
+For every CSI action, ask:
+
+```text
+which volume exists?
+which node may see it?
+is the target ready?
+who is allowed to mount it?
+is this retry idempotent?
+what stale state must be ignored or cleaned?
+```
+
+Those questions are coupled. Handling them as local special cases creates
+hidden state machines.
 
 ## Sequence
 
@@ -76,6 +111,33 @@ SwBlockVolumeObjectName(ManagedVolumeOperatorStatus{
 
 That keeps Kubernetes object naming aligned with the operation-layer read model.
 
+## Failure Modes This Design Avoids
+
+| Failure shape | Why the CR/status split helps |
+|---|---|
+| CSI creates storage but operation layer cannot find the volume | CSI creates the `SwBlockVolume` identity object at CreateVolume time |
+| operator-status tries to infer identity from bundles or pod names | status writer reads explicit CR identity |
+| lifecycle-owner protects the wrong object | finalizer is attached to the `SwBlockVolume` that CSI created |
+| retry changes the identity object unexpectedly | create-or-patch identity spec is idempotent for the same PVC/volume |
+| one component gets broad permissions | CSI/spec, operator-status/status, lifecycle-owner/finalizer are separated |
+
+## Why This Took Multiple Phases
+
+The early product path could prove a PVC worked. It could not yet prove that
+the Kubernetes object model, status model, and lifecycle owner composed as one
+user path. The missing link was automatic CR identity creation from the normal
+CSI path.
+
+Phase 44 closed that gap:
+
+```text
+PVC succeeds
+-> CR exists without manual stub
+-> finalizer is added
+-> Ready status is written
+-> delete request can be held/released
+```
+
 ## QA Evidence
 
 | Gate | What it proved |
@@ -90,4 +152,3 @@ That keeps Kubernetes object naming aligned with the operation-layer read model.
 - CSI does not add or remove finalizers.
 - CSI does not run cleanup.
 - `SwBlockVolume` is not a replacement for PVC/PV lifecycle ownership.
-
