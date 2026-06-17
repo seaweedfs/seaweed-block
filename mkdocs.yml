@@ -35,6 +35,7 @@ nav:
       - Wiki Structure: wiki/developer-guide.md
       - Code Map: wiki/code-map.md
       - State Machines: wiki/state-machines.md
+      - Protocol Catalog: wiki/protocol-catalog.md
       - Phase Map: wiki/phase-map.md
       - QA and TestOps Map: wiki/testops-map.md
   - Product:

@@ -4,6 +4,10 @@ Seaweed Block development should be driven by state machines and invariants,
 not by isolated helper scripts. This page names the states developers must
 preserve.
 
+For the broader list of mini-protocols and diagrams still to add, see
+[Protocol Catalog](protocol-catalog.md). For existing runtime diagrams, see
+[Runtime State Machines](../runtime-state-machines.md).
+
 ## Managed Volume Readiness
 
 ```text

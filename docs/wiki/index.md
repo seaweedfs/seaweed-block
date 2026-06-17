@@ -27,6 +27,8 @@ Start here:
   boundaries.
 - [State Machines](state-machines.md) - the product states developers must not
   violate.
+- [Protocol Catalog](protocol-catalog.md) - the current catalog of mini
+  protocols and state machines that deserve Mermaid diagrams.
 - [Phase Map](phase-map.md) - how Phase 1 through Phase 44 connect.
 - [QA and TestOps Map](testops-map.md) - which gates prove which claims.
 
@@ -62,4 +64,3 @@ The wiki links to these source areas:
 
 When a wiki page conflicts with a finished plan or QA sign-off, the finished
 plan or QA sign-off wins.
-
