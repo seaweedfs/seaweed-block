@@ -72,3 +72,36 @@ after:
 mkdocs build
 ```
 
+## Diagrams
+
+Use Mermaid for state machines and sequence diagrams:
+
+````markdown
+```mermaid
+stateDiagram-v2
+  Ready --> Blocked: evidence fault
+  Blocked --> Unknown: evidence stale
+  Unknown --> Ready: fresh verified evidence
+```
+````
+
+Avoid screenshots for state machines. Mermaid diagrams stay reviewable in Git
+and can be updated with the code.
+
+## Code Links
+
+For links to Markdown docs inside `docs/`, use normal relative Markdown links.
+MkDocs renders those as site links.
+
+For links to source code under `cmd/`, `core/`, `charts/`, `scripts/`, or
+`testops/`, prefer GitHub source links when the target should be clickable in
+the built site:
+
+```markdown
+[operator_status_controller.go](https://github.com/seaweedfs/seaweed-block/blob/main/core/ops/operator_status_controller.go)
+```
+
+MkDocs' default site only serves files under `docs_dir`. It does not render
+repo-root source files as pages unless we add a source-link plugin or copy
+generated code references into `docs/`. Keep wiki pages as explanations and
+link to source-of-truth code rather than duplicating code.

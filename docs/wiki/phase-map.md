@@ -38,6 +38,21 @@ failback would add more states than the product can safely explain.
 
 Phase 44 closes this path:
 
+```mermaid
+flowchart LR
+  A[Helm install] --> B[First PVC]
+  B --> C[CSI creates SwBlockVolume CR]
+  C --> D[lifecycle-owner adds protection finalizer]
+  D --> E[operator-status writes status and Events]
+  E --> F[Delete requested]
+  F --> G{cleanup evidence}
+  G -->|missing/stale/residue| H[hold finalizer]
+  G -->|fresh clean| I[release protection finalizer]
+  H --> E
+  I --> J[CR deletion completes]
+  J --> K[uninstall zero residue]
+```
+
 ```text
 install
 -> first PVC
@@ -68,4 +83,3 @@ Which gate proves no false Ready=True?
 
 Returned-replica rebuild/failback is the natural next major product capability
 because it can reuse the operation-layer model built in Phases 35-44.
-

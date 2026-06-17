@@ -54,6 +54,17 @@ masked by CSI pod not ready.
 
 Delete-safety is evidence-driven:
 
+```mermaid
+stateDiagram-v2
+  [*] --> Requested: delete timestamp observed
+  Requested --> HoldUnknown: cleanup evidence missing or stale
+  Requested --> HoldBlocked: residue evidence present
+  HoldUnknown --> Releasable: fresh clean cleanup evidence
+  HoldBlocked --> Releasable: residue cleared and fresh clean evidence
+  Releasable --> Released: lifecycle-owner removes protection finalizer
+  Released --> [*]: CR deletion completes
+```
+
 ```text
 missing cleanup evidence -> unknown/requested -> hold finalizer
 stale cleanup evidence -> unknown/requested -> hold finalizer
@@ -65,6 +76,23 @@ The lifecycle-owner never runs cleanup. It only consumes status already written
 by operator-status.
 
 ## Finalizer Lifecycle
+
+```mermaid
+sequenceDiagram
+  participant CSI
+  participant CR as SwBlockVolume CR
+  participant OS as operator-status
+  participant LO as lifecycle-owner
+  participant QA as cleanup evidence
+
+  CSI->>CR: create/update identity spec after CreateVolume
+  LO->>CR: add protection finalizer
+  OS->>CR: publish Ready status and Events
+  CR->>OS: deletionTimestamp observed
+  OS->>QA: read cleanup-summary evidence
+  OS->>CR: publish deleteSafety hold or releasable status
+  LO->>CR: remove only protection finalizer if releasable
+```
 
 ```text
 SwBlockVolume created
@@ -93,4 +121,3 @@ detect corruption
 
 This is the model for future dirty failures such as partial writes, stale
 replicas, and returned-replica rebuild.
-
