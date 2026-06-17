@@ -3,6 +3,41 @@
 This page explains the Kubernetes-facing path from PVC to Seaweed Block
 operation-layer identity.
 
+## Reader Orientation
+
+CSI is the Kubernetes standard interface between an orchestrator and a storage
+system. It is where Kubernetes lifecycle intent becomes storage-side actions.
+
+You need this page before changing:
+
+- `core/csi`,
+- Helm CSI RBAC/flags,
+- `SwBlockVolume` CR creation,
+- PVC/PV delete behavior,
+- node stage/publish behavior,
+- any operation-layer code that assumes a `SwBlockVolume` identity exists.
+
+## Domain Background
+
+Kubernetes users request storage with a PersistentVolumeClaim. CSI receives
+controller and node RPCs that turn that claim into a usable filesystem inside a
+pod.
+
+Practical CSI vocabulary:
+
+| Term | Meaning |
+|---|---|
+| `CreateVolume` | controller-side creation/provisioning for a PVC |
+| `DeleteVolume` | controller-side delete request for the storage volume |
+| `ControllerPublishVolume` | attach/publish intent for a node |
+| `NodeStageVolume` | node-side setup, e.g. login, format, mount to staging path |
+| `NodePublishVolume` | bind or publish staged volume into the pod path |
+| idempotency | repeated RPCs after retry must produce the same logical result |
+| publish target | address/protocol target the node can connect to |
+
+CSI does not know Seaweed Block authority by itself. It must consume the current
+truth from blockmaster and the operation layer.
+
 ## Problem
 
 Kubernetes users think in PVCs and pods. Seaweed Block internally needs a
