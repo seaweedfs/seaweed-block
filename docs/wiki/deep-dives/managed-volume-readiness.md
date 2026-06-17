@@ -8,6 +8,20 @@ It does not own Kubernetes lifecycle or authority.
 
 ## Why It Exists
 
+The problem was not "we need a prettier dashboard". The problem was that every
+surface could see only a slice of truth:
+
+- Kubernetes knows PVC/Pod scheduling and mount symptoms.
+- CSI knows publish/stage attempts and node-side errors.
+- blockmaster knows authority, publish target, and observed replicas.
+- blockvolume knows local readiness and storage/frontier state.
+- host tools know iSCSI sessions, multipath maps, and residue.
+- TestOps knows scenario artifacts and cleanup summaries.
+
+If each surface recomposes status independently, the user gets contradictory
+answers: CLI says ready, dashboard says blocked, support bundle says stale, and
+QA greps a helper line that none of the product code understands.
+
 Without a shared read model, CLI, dashboard, QA scripts, and CRD status can
 derive different answers from the same underlying state. The core invariant is:
 
@@ -15,6 +29,40 @@ derive different answers from the same underlying state. The core invariant is:
 User-facing PVC/volume explanations must be derived from ManagedVolume facts,
 not independently recomposed by CLI, dashboard, TestOps, CSI logs, or shell grep.
 ```
+
+The older methodology called this a problem-shape issue:
+
+```text
+facts -> constraints -> one decision owner -> narrow execution -> terminal evidence
+```
+
+`ManagedVolume` is the "facts and judgment" part of that loop. It is not the
+executor.
+
+## Why This Is Hard
+
+Block storage is unforgiving about partial truth:
+
+- a stale frontend can still be reachable,
+- a heartbeat can be alive while local storage is unsafe,
+- a Kubernetes pod can be Running while the CSI image is wrong on another node,
+- a cleanup script can remove sessions but leave iSCSI node DB records,
+- a support bundle can contain multiple snapshots from different times.
+
+The safe product behavior is therefore negative-first:
+
+```text
+weak evidence -> Unknown or Blocked
+strong current positive evidence -> Ready
+```
+
+The dangerous behavior is default-green:
+
+```text
+no obvious error -> Ready=True
+```
+
+Several phases existed specifically to eliminate default-green behavior.
 
 ## Readiness Priority
 
@@ -83,4 +131,3 @@ The same projection feeds:
 - `ManagedVolume` does not choose a primary.
 - `ManagedVolume` does not execute promotion, rebuild, failback, or cleanup.
 - `ManagedVolume` is a read model and action contract, not a storage authority.
-

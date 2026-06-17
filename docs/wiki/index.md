@@ -25,6 +25,8 @@ Start here:
   remains in source evidence.
 - [Coverage Matrix](coverage-matrix.md) - whether the wiki covers the major
   months-long engineering domains and where deeper docs are still needed.
+- [Historical Sources](historical-sources.md) - older tutorial and methodology
+  material that explains the block-storage method behind the current design.
 - [Code Map](code-map.md) - main packages, commands, and responsibility
   boundaries.
 - [State Machines](state-machines.md) - the product states developers must not
