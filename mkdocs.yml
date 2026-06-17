@@ -39,6 +39,12 @@ nav:
       - Protocol Catalog: wiki/protocol-catalog.md
       - Phase Map: wiki/phase-map.md
       - QA and TestOps Map: wiki/testops-map.md
+      - Deep Dives:
+          - CSI Lifecycle: wiki/deep-dives/csi-lifecycle.md
+          - Operation Layer v0.5: wiki/deep-dives/operation-layer-v05.md
+          - ManagedVolume Readiness: wiki/deep-dives/managed-volume-readiness.md
+          - SmartWAL Dirty Failure: wiki/deep-dives/smartwal-dirty-failure.md
+          - TestOps Authoring: wiki/deep-dives/testops-authoring.md
   - Product:
       - Overview: overview.md
       - User Capabilities: user-capabilities.md

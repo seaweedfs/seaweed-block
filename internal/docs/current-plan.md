@@ -106,10 +106,10 @@ Acceptance:
 [x] major domains from the last several months are listed
 [x] each domain maps to source evidence and current wiki coverage
 [x] priority deep pages are ordered for review
-[ ] operation-layer v0.5 deep dive
-[ ] block engine / WAL dirty-failure deep dive
-[ ] CSI + SwBlockVolume lifecycle deep dive
-[ ] TestOps scenario authoring deep dive
+[x] operation-layer v0.5 deep dive
+[x] block engine / WAL dirty-failure deep dive
+[x] CSI + SwBlockVolume lifecycle deep dive
+[x] TestOps scenario authoring deep dive
 [ ] returned-replica rebuild readiness deep dive
 ```
 

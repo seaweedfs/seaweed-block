@@ -19,21 +19,21 @@ Coverage levels:
 |---|---|---|---|---|
 | Product positioning and claims | Prevents over-claiming and release confusion | `docs/releases/`, `docs/roadmap.md`, `docs/user-capabilities.md` | mapped | claim-boundary page by release |
 | Day-1 Kubernetes install and first PVC | User entry path and release smoke | Phase 20, 25, 40, 44 finished plans; quickstart | mapped | install flow diagram and troubleshooting |
-| CSI lifecycle | PVC/PV path, CreateVolume/DeleteVolume, node stage/publish | `core/csi`, `docs/runtime-state-machines.md`, Phase 44 D2 | linked | deep dive needed |
-| SwBlockVolume CR identity | Bridge from CSI to operation layer | Phase 44 D2 sign-off, `core/csi/kubernetes_metadata.go` | mapped | sequence diagram and field ownership |
-| operator-status | CRD status, Events, node evidence, cleanup/delete-safety | Phases 35-40, `core/ops` | mapped | deep dive needed |
-| lifecycle-owner | bounded finalizer add/release | Phases 41-44, lifecycle-owner refs | mapped | deep dive needed |
+| CSI lifecycle | PVC/PV path, CreateVolume/DeleteVolume, node stage/publish | `core/csi`, `docs/runtime-state-machines.md`, Phase 44 D2 | deep | expand DeleteVolume details later |
+| SwBlockVolume CR identity | Bridge from CSI to operation layer | Phase 44 D2 sign-off, `core/csi/kubernetes_metadata.go` | deep | add field-by-field CRD contract later |
+| operator-status | CRD status, Events, node evidence, cleanup/delete-safety | Phases 35-40, `core/ops` | deep initial | add status writer/schema conformance page |
+| lifecycle-owner | bounded finalizer add/release | Phases 41-44, lifecycle-owner refs | deep initial | add admission policy field matrix |
 | Admission/RBAC boundary | Prevents finalizer owner from becoming broad operator | Phase 42 sign-off, Helm templates | linked | VAP/RBAC decision diagram |
 | Delete-safety | Holds unsafe deletion, releases on clean evidence | Phase 39, 42, 44; finalizer-delete-safety contract | deep initial | field-by-field status contract |
 | Cleanup verifier | Zero-residue authority and safety evidence | cleanup scripts, Phase 29, 36, 44 | mapped | residue taxonomy |
-| ManagedVolume readiness | Shared ready/blocked/unknown model | Phase 22, 32, 35-36 | linked | detailed priority diagram |
+| ManagedVolume readiness | Shared ready/blocked/unknown model | Phase 22, 32, 35-36 | deep initial | add reason-code taxonomy |
 | Node readiness / CSI evidence | Avoids false node-ready status | Phase 37 | linked | detailed live evidence diagram |
-| SmartWAL dirty failure | Proves dirty storage evidence cannot become false Ready | Phase 34 | linked | deep dive needed |
+| SmartWAL dirty failure | Proves dirty storage evidence cannot become false Ready | Phase 34 | deep | add exact test log excerpts later |
 | Authority / epoch / promotion | One-primary, fencing, restart authority persistence | Phases 13-18, 31, invariant ledger | linked | authority protocol deep dive |
 | Returned-replica rebuild/reintegration | Next major storage lifecycle feature | recovery refs, roadmap | linked | readiness/gap analysis |
 | iSCSI frontend / ALUA / multipath | Current default frontend and transparent failover path | iSCSI refs, Phase 17, 27, 37 | linked | ALUA path-state diagram |
 | NVMe ANA parity | Planned protocol parity path | NVMe refs, roadmap | linked | future protocol page |
-| TestOps runner and scenarios | Product evidence, not just tests | `testops/`, Phase 33-34 | mapped | authoring guide needed |
+| TestOps runner and scenarios | Product evidence, not just tests | `testops/`, Phase 33-34 | deep initial | add runner action reference |
 | Support bundle/replay/report/dashboard | Cold-reader diagnosis and support path | Phases 23-24, 28, 32, 36 | mapped | bundle structure diagram |
 | Release engineering | Image/chart skew prevention | Phases 40, 44, release notes | mapped | release checklist page |
 | Docker volume plugin idea | Future non-K8s adapter | roadmap | linked | investigation page later |
@@ -65,4 +65,3 @@ explicit non-claims
 
 These eight pages would cover most of the hard-earned knowledge from the last
 few months. The rest can remain linked until those are reviewed.
-
