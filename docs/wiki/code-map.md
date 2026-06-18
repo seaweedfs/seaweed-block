@@ -50,6 +50,9 @@ mutation and prevents lifecycle ownership from becoming a broad operator.
 | Replay support bundles | `core/ops/observation_bundle.go`, `scripts/collect-helm-support-bundle.sh` |
 | Render report/dashboard/snapshot | `core/ops/observation_report.go`, `core/ops/observation_dashboard.go`, `core/ops/operator_snapshot.go` |
 | SmartWAL and recovery frontier handling | `core/storage/smartwal/`, `core/recovery/`, `core/transport/` |
+| CRD/RBAC status conformance | `core/ops/kubernetes_status_writer.go`, `core/ops/kubernetes_status_conformance_test.go`, `charts/seaweed-block/crds/` |
+| blockvolume process readiness | `cmd/blockvolume/main.go`, `core/host/volume/host.go`, `core/frontend/durable/` |
+| Release image/chart compatibility | `charts/seaweed-block/templates/`, `charts/seaweed-block/values.yaml`, `docs/releases/`, `docs/quickstart-kubernetes.md` |
 
 ## Development Rule
 

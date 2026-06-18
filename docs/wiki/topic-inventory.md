@@ -33,7 +33,7 @@ Status meanings:
 | CSI ControllerPublish/NodeStage/NodePublish details | summary | CSI page |
 | CSI DeleteVolume and CR delete ordering | summary | CSI page + operation layer page |
 | SwBlockVolume CRD field ownership | summary | CSI page + operation layer page |
-| operator-status CRD status writer | summary | operation layer page |
+| operator-status CRD status writer | deep draft | `deep-dives/status-writer-conformance.md` |
 | lifecycle-owner finalizer add/release | deep | operation layer page |
 | Kubernetes VAP/RBAC admission boundary | summary | operation layer page |
 | delete-safety state machine | tutorial | state machines + operation layer |
@@ -41,9 +41,9 @@ Status meanings:
 | node readiness / CSI evidence | deep draft | `deep-dives/live-node-evidence.md` |
 | host prereq projection | mapped | Phase 37 D4/D5 docs |
 | loopback/cross-node blocker | mapped | Phase 37 D5 docs |
-| install drift status | mapped | roadmap/release docs |
+| install drift status | deep draft | `deep-dives/release-engineering-image-skew.md` |
 | Kubernetes Events identity/dedupe | mapped | Phase 35 docs |
-| CRD schema conformance/envtest gap | mapped | Phase 39/40 docs |
+| CRD schema conformance/envtest gap | deep draft | `deep-dives/status-writer-conformance.md` |
 
 ## Storage / Data Plane
 
@@ -53,7 +53,7 @@ Status meanings:
 | SmartWAL dirty-failure path | tutorial | `deep-dives/smartwal-dirty-failure.md` |
 | SmartWAL file layout and corruption injection | summary | SmartWAL page |
 | durable root / hostPath persistence | mapped | roadmap/ref docs |
-| blockvolume process layout and flags | missing | historical tutorial only |
+| blockvolume process layout and flags | deep draft | `deep-dives/blockvolume-process-readiness.md` |
 | frontend projection/readiness | mapped | SmartWAL + ManagedVolume pages |
 | local storage adapter readiness | missing | source/code only |
 | SCSI command handling / sense errors | missing | `core/frontend/iscsi` only |
@@ -116,13 +116,12 @@ Status meanings:
 
 The highest-value missing or summary-only pages are:
 
-1. CRD schema/RBAC/envtest conformance.
-2. release engineering and image/chart skew prevention.
-3. NVMe-oF / ANA background.
-4. blockvolume process layout and frontend readiness.
-5. runner action reference.
-6. WAL SmartWAL file-layout detail diagrams.
-7. support bundle artifact examples from real runs.
+1. NVMe-oF / ANA background.
+2. runner action reference.
+3. WAL SmartWAL file-layout detail diagrams.
+4. support bundle artifact examples from real runs.
+5. returned-replica rebuild concrete future gate plan.
+6. field-by-field SwBlockVolume CRD contract.
 
 ## Review Rule
 

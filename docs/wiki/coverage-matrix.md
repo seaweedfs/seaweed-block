@@ -36,7 +36,9 @@ Coverage levels:
 | NVMe ANA parity | Planned protocol parity path | NVMe refs, roadmap | linked | future protocol page |
 | TestOps runner and scenarios | Product evidence, not just tests | `testops/`, Phase 33-34 | deep initial | add runner action reference |
 | Support bundle/replay/report/dashboard | Cold-reader diagnosis and support path | Phases 23-24, 28, 32, 36, 44 | deep | keep artifact list aligned with collect script |
-| Release engineering | Image/chart skew prevention | Phases 40, 44, release notes | mapped | release checklist page |
+| Release engineering | Image/chart skew prevention | Phases 40, 44, release notes | deep | keep current release checklist aligned |
+| Status writer conformance | Real CRD/RBAC/admission validation | Phases 35-42, Phase 40 | deep | turn remaining schema-aware gates into envtest/live |
+| blockvolume process/readiness | Separates process liveness, diagnostics, durable recovery, and frontend readiness | Phase 34, `cmd/blockvolume` | deep | add flag matrix examples as needed |
 | Docker volume plugin idea | Future non-K8s adapter | roadmap | linked | investigation page later |
 
 ## Coverage Decision
