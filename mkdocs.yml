@@ -40,6 +40,7 @@ nav:
       - State Machines: wiki/state-machines.md
       - Protocol Catalog: wiki/protocol-catalog.md
       - Phase Map: wiki/phase-map.md
+      - Phase Recap: wiki/phase-recap.md
       - QA and TestOps Map: wiki/testops-map.md
       - Deep Dives:
           - Template: wiki/deep-dives/template.md

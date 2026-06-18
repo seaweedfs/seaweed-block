@@ -3,6 +3,9 @@
 The phases form a product-learning sequence. They should not be read as a flat
 changelog.
 
+For a per-phase explanation of the problem, feature logic, and remaining gap,
+see [Phase Recap](phase-recap.md).
+
 ## Phase Groups
 
 | Phases | Theme | Outcome |

@@ -36,6 +36,8 @@ Start here:
 - [Protocol Catalog](protocol-catalog.md) - the current catalog of mini
   protocols and state machines that deserve Mermaid diagrams.
 - [Phase Map](phase-map.md) - how Phase 1 through Phase 44 connect.
+- [Phase Recap](phase-recap.md) - what each phase solved and how the feature
+  logic accumulated.
 - [QA and TestOps Map](testops-map.md) - which gates prove which claims.
 
 Related local docs:
