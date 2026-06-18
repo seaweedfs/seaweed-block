@@ -38,6 +38,11 @@ Start here:
 - [Phase Map](phase-map.md) - how Phase 1 through Phase 44 connect.
 - [QA and TestOps Map](testops-map.md) - which gates prove which claims.
 
+Related local docs:
+
+- [Seaweed RDMA Engineering Wiki](http://127.0.0.1:8011/wiki/) - Rust RDMA
+  data path, native RC/DC, UCX, pull-RDMA, and future GPU-style destinations.
+
 ## Current Product Loop
 
 The current validated loop is:
