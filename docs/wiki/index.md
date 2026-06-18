@@ -42,8 +42,11 @@ Start here:
 
 Related local docs:
 
-- [Seaweed RDMA Engineering Wiki](http://127.0.0.1:8011/wiki/) - Rust RDMA
+- [Seaweed RDMA Engineering Wiki](http://192.168.1.135:8011/wiki/) - Rust RDMA
   data path, native RC/DC, UCX, pull-RDMA, and future GPU-style destinations.
+- [sw-test-runner TestOps Wiki](http://192.168.1.135:8012/wiki/) -
+  cross-product scenario runner, product testing guides, and live run
+  dashboard docs.
 
 ## Current Product Loop
 
