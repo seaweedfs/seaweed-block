@@ -46,6 +46,9 @@ nav:
           - Operation Layer v0.5: wiki/deep-dives/operation-layer-v05.md
           - ManagedVolume Readiness: wiki/deep-dives/managed-volume-readiness.md
           - SmartWAL Dirty Failure: wiki/deep-dives/smartwal-dirty-failure.md
+          - Authority And Promotion: wiki/deep-dives/authority-promotion.md
+          - iSCSI ALUA Multipath: wiki/deep-dives/iscsi-alua-multipath.md
+          - Returned Replica Rebuild: wiki/deep-dives/returned-replica-rebuild.md
           - TestOps Authoring: wiki/deep-dives/testops-authoring.md
   - Product:
       - Overview: overview.md

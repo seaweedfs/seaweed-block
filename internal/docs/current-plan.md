@@ -110,7 +110,9 @@ Acceptance:
 [x] block engine / WAL dirty-failure deep dive
 [x] CSI + SwBlockVolume lifecycle deep dive
 [x] TestOps scenario authoring deep dive
-[ ] returned-replica rebuild readiness deep dive
+[x] authority / epoch / promotion deep dive
+[x] iSCSI ALUA / multipath deep dive
+[x] returned-replica rebuild readiness deep dive
 ```
 
 ## D4: Publish / Serve Decision

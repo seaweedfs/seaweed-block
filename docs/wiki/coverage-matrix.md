@@ -29,9 +29,9 @@ Coverage levels:
 | ManagedVolume readiness | Shared ready/blocked/unknown model | Phase 22, 32, 35-36 | deep initial | add reason-code taxonomy |
 | Node readiness / CSI evidence | Avoids false node-ready status | Phase 37 | linked | detailed live evidence diagram |
 | SmartWAL dirty failure | Proves dirty storage evidence cannot become false Ready | Phase 34 | deep | add exact test log excerpts later |
-| Authority / epoch / promotion | One-primary, fencing, restart authority persistence | Phases 13-18, 31, invariant ledger | linked | authority protocol deep dive |
-| Returned-replica rebuild/reintegration | Next major storage lifecycle feature | recovery refs, roadmap | linked | readiness/gap analysis |
-| iSCSI frontend / ALUA / multipath | Current default frontend and transparent failover path | iSCSI refs, Phase 17, 27, 37 | linked | ALUA path-state diagram |
+| Authority / epoch / promotion | One-primary, fencing, restart authority persistence | Phases 13-18, 31, invariant ledger | deep initial | add code-level product-loop walkthrough |
+| Returned-replica rebuild/reintegration | Next major storage lifecycle feature | recovery refs, roadmap | deep initial | add concrete future gate plan |
+| iSCSI frontend / ALUA / multipath | Current default frontend and transparent failover path | iSCSI refs, Phase 17, 27, 37 | deep initial | add artifact examples |
 | NVMe ANA parity | Planned protocol parity path | NVMe refs, roadmap | linked | future protocol page |
 | TestOps runner and scenarios | Product evidence, not just tests | `testops/`, Phase 33-34 | deep initial | add runner action reference |
 | Support bundle/replay/report/dashboard | Cold-reader diagnosis and support path | Phases 23-24, 28, 32, 36 | mapped | bundle structure diagram |
