@@ -42,6 +42,8 @@ claims.
 | 16 | NVMe ANA parity path | `internal/docs/ref/nvme-ana-technical-note.md`, `nvme-ana-parity-plan.md` | future NVMe frontend path | planned diagram |
 | 17 | Returned-replica rebuild / reintegration | roadmap + recovery refs | recovery + future lifecycle action owner | planned diagram |
 | 18 | TestOps run lifecycle and evidence bundle | `internal/docs/ref/testops-control-data-contract.md`, `testops/` | runner/scenarios | needs run-state diagram |
+| 19 | Future read-write action execution | Phase 38-44 contracts + roadmap | future safe_k8s/host_cleanup/authority/data lifecycle executors | initial diagram in read-write control-plane deep dive |
+| 20 | GPUDirect/cuFile compatibility gate | future design + NVIDIA GDS/cuFile docs | future TestOps helper + ops evidence ingestion | initial diagram in GPUDirect deep dive |
 
 ## Diagram Priority
 
@@ -53,6 +55,10 @@ The first detailed Mermaid expansions should be:
 4. SmartWAL dirty-failure path: storage fault -> local readiness block ->
    projection no false Ready.
 5. TestOps gate lifecycle: live/replay/adversarial gates and evidence bundles.
+6. Future mutating action execution: preconditions -> policy -> executor ->
+   terminal evidence.
+7. GPUDirect/cuFile compatibility: GPU/GDS prereq -> mount probe -> transfer
+   checksum -> supported/blocked/unsupported.
 
 ## Rule For Adding A Diagram
 
@@ -69,4 +75,3 @@ QA gate
 
 If a diagram cannot name the evidence artifact or gate, it is probably still a
 design sketch rather than a product behavior.
-

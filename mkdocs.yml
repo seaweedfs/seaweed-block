@@ -56,6 +56,8 @@ nav:
           - Support Bundle Cold Reader: wiki/deep-dives/support-bundle-cold-reader.md
           - Release Engineering Image Skew: wiki/deep-dives/release-engineering-image-skew.md
           - Returned Replica Rebuild: wiki/deep-dives/returned-replica-rebuild.md
+          - Read-Write Control Plane: wiki/deep-dives/read-write-control-plane-roadmap.md
+          - GPUDirect cuFile cuObject: wiki/deep-dives/gpudirect-cufile-cuobject.md
           - TestOps Authoring: wiki/deep-dives/testops-authoring.md
   - Product:
       - Overview: overview.md

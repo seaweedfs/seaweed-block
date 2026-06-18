@@ -32,8 +32,10 @@ Coverage levels:
 | WAL/frontier/barrier/recovery | Persistence and recovery vocabulary behind dirty-failure and rebuild | methodology docs, recovery tutorial, Phase 34 | deep | add exact SmartWAL layout diagrams later |
 | Authority / epoch / promotion | One-primary, fencing, restart authority persistence | Phases 13-18, 31, invariant ledger | deep initial | add code-level product-loop walkthrough |
 | Returned-replica rebuild/reintegration | Next major storage lifecycle feature | recovery refs, roadmap | deep initial | add concrete future gate plan |
+| Read-write control-plane maturity | Prevents broad operator mutation from outrunning facts/evidence/admission | Phases 38-44, action/finalizer/delete-safety contracts | deep initial | split future safe_k8s, host_cleanup, authority, and data-lifecycle pages when each starts |
 | iSCSI frontend / ALUA / multipath | Current default frontend and transparent failover path | iSCSI refs, Phase 17, 27, 37 | deep | keep artifact examples current as scenarios evolve |
 | NVMe ANA parity | Planned protocol parity path | NVMe refs, roadmap | linked | future protocol page |
+| GPUDirect/cuFile/cuObject | Future GPU data paths need separate block/file/object/transport claims | NVIDIA GDS/cuFile docs, roadmap | deep initial | add hardware-backed compatibility evidence when available |
 | TestOps runner and scenarios | Product evidence, not just tests | `testops/`, Phase 33-34 | deep initial | add runner action reference |
 | Support bundle/replay/report/dashboard | Cold-reader diagnosis and support path | Phases 23-24, 28, 32, 36, 44 | deep | keep artifact list aligned with collect script |
 | Release engineering | Image/chart skew prevention | Phases 40, 44, release notes | deep | keep current release checklist aligned |
@@ -72,6 +74,8 @@ explicit non-claims
 9. Live node/CSI evidence.
 10. Support bundle cold-reader path.
 11. Returned-replica rebuild readiness.
+12. Future read-write control-plane maturity.
+13. GPUDirect/cuFile/cuObject future design.
 
 These pages cover most of the hard-earned knowledge from the last
 few months. The rest can remain linked until those are reviewed.

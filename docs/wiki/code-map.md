@@ -44,6 +44,7 @@ mutation and prevents lifecycle ownership from becoming a broad operator.
 | Evaluate safe actions | `core/ops/action_model.go` |
 | Add/release protection finalizer | `core/ops/lifecycle_owner_controller.go` |
 | Register `SwBlockVolume` from CSI | `core/csi/kubernetes_metadata.go` |
+| Evaluate future read-write action maturity | `core/ops/action_model.go`, future owner executors |
 | Project delete-safety from cleanup evidence | `core/ops/observation_bundle.go` |
 | Parse cleanup verifier output | `core/ops/cleanup_evidence.go` |
 | Enrich live node/CSI evidence | `cmd/sw-block/main.go`, `core/ops/kubernetes_node_evidence.go` |
@@ -53,6 +54,7 @@ mutation and prevents lifecycle ownership from becoming a broad operator.
 | CRD/RBAC status conformance | `core/ops/kubernetes_status_writer.go`, `core/ops/kubernetes_status_conformance_test.go`, `charts/seaweed-block/crds/` |
 | blockvolume process readiness | `cmd/blockvolume/main.go`, `core/host/volume/host.go`, `core/frontend/durable/` |
 | Release image/chart compatibility | `charts/seaweed-block/templates/`, `charts/seaweed-block/values.yaml`, `docs/releases/`, `docs/quickstart-kubernetes.md` |
+| Future GPUDirect/cuFile probes | no current product code; expected first home is a TestOps/helper utility plus later `core/ops` evidence ingestion |
 
 ## Development Rule
 
@@ -69,3 +71,7 @@ failure bundle evidence
 ```
 
 If any item is missing, the feature is not ready for product code.
+
+Future GPU data-path work has an additional rule: identify whether the claim is
+file path (`cuFile` over a mounted PVC), object path (`cuObject`/S3-style), or
+transport path (RDMA/NVMe). Do not mix those claims in one code path or test.

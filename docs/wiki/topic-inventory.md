@@ -44,6 +44,7 @@ Status meanings:
 | install drift status | deep draft | `deep-dives/release-engineering-image-skew.md` |
 | Kubernetes Events identity/dedupe | mapped | Phase 35 docs |
 | CRD schema conformance/envtest gap | deep draft | `deep-dives/status-writer-conformance.md` |
+| read-write control-plane maturity | future design | `deep-dives/read-write-control-plane-roadmap.md` |
 
 ## Storage / Data Plane
 
@@ -84,6 +85,8 @@ Status meanings:
 | NVMe-oF basics | missing | ref docs only |
 | NVMe ANA parity | future | roadmap/ref docs |
 | protocol selection in CSI | mapped | roadmap/ref docs |
+| GPUDirect Storage / cuFile | future design | `deep-dives/gpudirect-cufile-cuobject.md` |
+| cuObject / GPU object path | future design | `deep-dives/gpudirect-cufile-cuobject.md` |
 
 ## Operations / Observability
 
@@ -98,6 +101,7 @@ Status meanings:
 | cold-reader explain path | mapped | Phase 32/36/44 docs |
 | cleanup visibility | mapped | Phase 36/39/44 docs |
 | action precondition/evidence model | mapped | Phase 38 docs |
+| future mutating action execution | future design | `deep-dives/read-write-control-plane-roadmap.md` |
 
 ## TestOps / QA
 
@@ -122,6 +126,7 @@ The highest-value missing or summary-only pages are:
 4. support bundle artifact examples from real runs.
 5. returned-replica rebuild concrete future gate plan.
 6. field-by-field SwBlockVolume CRD contract.
+7. first concrete cuFile/GDS compatibility gate once GPU lab hardware exists.
 
 ## Review Rule
 

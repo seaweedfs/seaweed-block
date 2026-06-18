@@ -149,6 +149,62 @@ the lifecycle action, what evidence authorizes it, how it is blocked, and where
 the user sees the result.
 ```
 
+## Future Read-Write Control Plane
+
+The operation layer should evolve from status-only and bounded finalizer
+mutation into broader read-write behavior in stages, not as one large
+"operator does everything" jump.
+
+Current proven boundary:
+
+- CSI owns `SwBlockVolume` identity/spec creation.
+- operator-status owns `.status` and Events.
+- lifecycle-owner owns only the Seaweed Block protection finalizer.
+- cleanup, repair, rebuild, failback, backup, and upgrade execution are not
+  automatic operator actions.
+
+The next read-write stages should be ordered by blast radius:
+
+1. `safe_k8s`: repair only Seaweed Block-owned Kubernetes objects, with
+   admission/RBAC confinement and terminal evidence.
+2. `host_cleanup`: clean stale iSCSI/multipath/hostPath residue through a
+   node-scoped executor, never through operator-status.
+3. `authority_mutating`: productize returned-replica rebuild/reintegration and
+   failback with fencing, frontier evidence, and multi-volume isolation.
+4. `data_lifecycle`: snapshot, backup, and restore after the consistency and
+   identity model is explicit.
+
+The design reference is
+[`wiki/deep-dives/read-write-control-plane-roadmap.md`](wiki/deep-dives/read-write-control-plane-roadmap.md).
+The product rule remains: a mutating action needs live facts, preconditions,
+an owner executor, an admission/RBAC boundary, user-visible status, and QA
+evidence before it can be enabled.
+
+## Future GPU Data Paths
+
+GPU-oriented storage should be treated as a future design train, not as a
+small flag on the current PVC path. There are three different tracks:
+
+1. `cuFile` over a mounted Seaweed Block PVC: first prove API compatibility
+   and byte-correct reads/writes on a supported Linux GPU node.
+2. `cuObject` / object path: design a SeaweedFS object/S3-style GPU API with
+   its own consistency, auth, and commit semantics.
+3. Protocol-level GPU/RDMA/NVMe path: investigate only after the file/object
+   claims are separated and the fencing/backpressure model is clear.
+
+The first acceptable claim is narrow:
+
+```text
+On one supported Linux GPU node, a pod can use cuFile against a mounted
+Seaweed Block PVC and verify byte-correct data transfer with documented
+environment prerequisites.
+```
+
+It must not claim broad GPUDirect acceleration, zero-copy, multi-node failover,
+or object API support until the evidence proves those separately. The design
+reference is
+[`wiki/deep-dives/gpudirect-cufile-cuobject.md`](wiki/deep-dives/gpudirect-cufile-cuobject.md).
+
 ## Future Non-Kubernetes Adapters
 
 Kubernetes CSI remains the primary product surface. A Docker integration is
