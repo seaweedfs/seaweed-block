@@ -27,14 +27,15 @@ Coverage levels:
 | Delete-safety | Holds unsafe deletion, releases on clean evidence | Phase 39, 42, 44; finalizer-delete-safety contract | deep initial | field-by-field status contract |
 | Cleanup verifier | Zero-residue authority and safety evidence | cleanup scripts, Phase 29, 36, 44 | mapped | residue taxonomy |
 | ManagedVolume readiness | Shared ready/blocked/unknown model | Phase 22, 32, 35-36 | deep initial | add reason-code taxonomy |
-| Node readiness / CSI evidence | Avoids false node-ready status | Phase 37 | linked | detailed live evidence diagram |
+| Node readiness / CSI evidence | Avoids false node-ready status | Phase 37 | deep | keep live K8s evidence current as CRD evolves |
 | SmartWAL dirty failure | Proves dirty storage evidence cannot become false Ready | Phase 34 | deep | add exact test log excerpts later |
+| WAL/frontier/barrier/recovery | Persistence and recovery vocabulary behind dirty-failure and rebuild | methodology docs, recovery tutorial, Phase 34 | deep | add exact SmartWAL layout diagrams later |
 | Authority / epoch / promotion | One-primary, fencing, restart authority persistence | Phases 13-18, 31, invariant ledger | deep initial | add code-level product-loop walkthrough |
 | Returned-replica rebuild/reintegration | Next major storage lifecycle feature | recovery refs, roadmap | deep initial | add concrete future gate plan |
 | iSCSI frontend / ALUA / multipath | Current default frontend and transparent failover path | iSCSI refs, Phase 17, 27, 37 | deep | keep artifact examples current as scenarios evolve |
 | NVMe ANA parity | Planned protocol parity path | NVMe refs, roadmap | linked | future protocol page |
 | TestOps runner and scenarios | Product evidence, not just tests | `testops/`, Phase 33-34 | deep initial | add runner action reference |
-| Support bundle/replay/report/dashboard | Cold-reader diagnosis and support path | Phases 23-24, 28, 32, 36 | mapped | bundle structure diagram |
+| Support bundle/replay/report/dashboard | Cold-reader diagnosis and support path | Phases 23-24, 28, 32, 36, 44 | deep | keep artifact list aligned with collect script |
 | Release engineering | Image/chart skew prevention | Phases 40, 44, release notes | mapped | release checklist page |
 | Docker volume plugin idea | Future non-K8s adapter | roadmap | linked | investigation page later |
 
@@ -65,7 +66,10 @@ explicit non-claims
 5. TestOps authoring and evidence realism.
 6. Authority/promotion/restart persistence.
 7. iSCSI ALUA/multipath frontend.
-8. Returned-replica rebuild readiness.
+8. WAL/frontier/barrier/recovery.
+9. Live node/CSI evidence.
+10. Support bundle cold-reader path.
+11. Returned-replica rebuild readiness.
 
-These eight pages would cover most of the hard-earned knowledge from the last
+These pages cover most of the hard-earned knowledge from the last
 few months. The rest can remain linked until those are reviewed.

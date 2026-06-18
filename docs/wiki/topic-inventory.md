@@ -37,8 +37,8 @@ Status meanings:
 | lifecycle-owner finalizer add/release | deep | operation layer page |
 | Kubernetes VAP/RBAC admission boundary | summary | operation layer page |
 | delete-safety state machine | tutorial | state machines + operation layer |
-| cleanup verifier / residue taxonomy | mapped | state machines + coverage matrix |
-| node readiness / CSI evidence | mapped | coverage matrix |
+| cleanup verifier / residue taxonomy | mapped | state machines + support bundle page |
+| node readiness / CSI evidence | deep draft | `deep-dives/live-node-evidence.md` |
 | host prereq projection | mapped | Phase 37 D4/D5 docs |
 | loopback/cross-node blocker | mapped | Phase 37 D5 docs |
 | install drift status | mapped | roadmap/release docs |
@@ -49,7 +49,7 @@ Status meanings:
 
 | Topic | Status | Current page |
 |---|---|---|
-| WAL / frontier / barrier concepts | mapped | historical sources + SmartWAL page |
+| WAL / frontier / barrier concepts | deep draft | `deep-dives/wal-frontier-recovery.md` |
 | SmartWAL dirty-failure path | tutorial | `deep-dives/smartwal-dirty-failure.md` |
 | SmartWAL file layout and corruption injection | summary | SmartWAL page |
 | durable root / hostPath persistence | mapped | roadmap/ref docs |
@@ -90,7 +90,7 @@ Status meanings:
 | Topic | Status | Current page |
 |---|---|---|
 | ManagedVolume readiness | tutorial | `deep-dives/managed-volume-readiness.md` |
-| support bundle / report / dashboard | mapped | coverage matrix |
+| support bundle / report / dashboard | deep draft | `deep-dives/support-bundle-cold-reader.md` |
 | operator-snapshot.json | mapped | operations docs |
 | Events and reason-code vocabulary | mapped | release docs |
 | action model evaluator | mapped | protocol catalog |
@@ -116,14 +116,13 @@ Status meanings:
 
 The highest-value missing or summary-only pages are:
 
-1. WAL/frontier/barrier/recovery architecture.
-2. support bundle/report/dashboard cold-reader path.
-3. node readiness / CSI evidence.
-4. release engineering and image/chart skew prevention.
-5. CRD schema/RBAC/envtest conformance.
-6. NVMe-oF / ANA background.
-7. blockvolume process layout and frontend readiness.
-8. runner action reference.
+1. CRD schema/RBAC/envtest conformance.
+2. release engineering and image/chart skew prevention.
+3. NVMe-oF / ANA background.
+4. blockvolume process layout and frontend readiness.
+5. runner action reference.
+6. WAL SmartWAL file-layout detail diagrams.
+7. support bundle artifact examples from real runs.
 
 ## Review Rule
 

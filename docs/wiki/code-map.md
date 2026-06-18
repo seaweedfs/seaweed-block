@@ -46,6 +46,10 @@ mutation and prevents lifecycle ownership from becoming a broad operator.
 | Register `SwBlockVolume` from CSI | `core/csi/kubernetes_metadata.go` |
 | Project delete-safety from cleanup evidence | `core/ops/observation_bundle.go` |
 | Parse cleanup verifier output | `core/ops/cleanup_evidence.go` |
+| Enrich live node/CSI evidence | `cmd/sw-block/main.go`, `core/ops/kubernetes_node_evidence.go` |
+| Replay support bundles | `core/ops/observation_bundle.go`, `scripts/collect-helm-support-bundle.sh` |
+| Render report/dashboard/snapshot | `core/ops/observation_report.go`, `core/ops/observation_dashboard.go`, `core/ops/operator_snapshot.go` |
+| SmartWAL and recovery frontier handling | `core/storage/smartwal/`, `core/recovery/`, `core/transport/` |
 
 ## Development Rule
 
@@ -62,4 +66,3 @@ failure bundle evidence
 ```
 
 If any item is missing, the feature is not ready for product code.
-
