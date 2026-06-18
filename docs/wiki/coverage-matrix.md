@@ -11,7 +11,7 @@ Coverage levels:
 |---|---|
 | `linked` | source docs are linked, but wiki explanation is thin |
 | `mapped` | wiki explains the domain, ownership, code area, and source evidence |
-| `deep` | wiki includes Mermaid diagrams, state transitions, code entry points, and QA gates |
+| `deep` | wiki includes background, contract, ownership, state transitions, code entry points, evidence, failure taxonomy, implementation checklist, and QA gates |
 
 ## Domain Coverage
 
@@ -31,7 +31,7 @@ Coverage levels:
 | SmartWAL dirty failure | Proves dirty storage evidence cannot become false Ready | Phase 34 | deep | add exact test log excerpts later |
 | Authority / epoch / promotion | One-primary, fencing, restart authority persistence | Phases 13-18, 31, invariant ledger | deep initial | add code-level product-loop walkthrough |
 | Returned-replica rebuild/reintegration | Next major storage lifecycle feature | recovery refs, roadmap | deep initial | add concrete future gate plan |
-| iSCSI frontend / ALUA / multipath | Current default frontend and transparent failover path | iSCSI refs, Phase 17, 27, 37 | deep initial | add artifact examples |
+| iSCSI frontend / ALUA / multipath | Current default frontend and transparent failover path | iSCSI refs, Phase 17, 27, 37 | deep | keep artifact examples current as scenarios evolve |
 | NVMe ANA parity | Planned protocol parity path | NVMe refs, roadmap | linked | future protocol page |
 | TestOps runner and scenarios | Product evidence, not just tests | `testops/`, Phase 33-34 | deep initial | add runner action reference |
 | Support bundle/replay/report/dashboard | Cold-reader diagnosis and support path | Phases 23-24, 28, 32, 36 | mapped | bundle structure diagram |
@@ -47,7 +47,11 @@ problem statement
 industry/product pattern
 Seaweed Block ownership model
 state machine or protocol diagram
+publish/API shape
 main code entry points
+evidence contract
+failure taxonomy
+implementation checklist
 QA gates and failure evidence
 explicit non-claims
 ```

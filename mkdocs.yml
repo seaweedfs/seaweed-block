@@ -34,6 +34,7 @@ nav:
   - Developer Guide:
       - Wiki Structure: wiki/developer-guide.md
       - Coverage Matrix: wiki/coverage-matrix.md
+      - Topic Inventory: wiki/topic-inventory.md
       - Historical Sources: wiki/historical-sources.md
       - Code Map: wiki/code-map.md
       - State Machines: wiki/state-machines.md

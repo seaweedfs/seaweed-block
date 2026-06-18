@@ -93,6 +93,36 @@ Each deep-dive page should use this shape:
 This standard matters because historical design notes can be stale. Use them as
 source material for explanation and vocabulary, not as current release claims.
 
+## Implementation-Grade Density
+
+A deep-dive page is not `deep` because it is long. It is `deep` only if a
+developer could use it to make a correct code change, write the right gate, and
+diagnose a failed run.
+
+For a feature or subsystem page, require these sections:
+
+| Section | Required content |
+|---|---|
+| Protocol / domain background | Industry terms, standards involved, and the Linux/Kubernetes objects that actually participate |
+| Product contract | The narrow user-visible claim, exact non-claims, and the condition that would make the claim false |
+| Ownership model | Which component decides, which component executes, which component only observes, and which fields each may write |
+| State machine | Mermaid state or sequence diagram with success, blocked, stale/unknown, and cleanup paths |
+| Publish / API shape | CRD fields, CSI publish context, CLI flags, Helm values, Events, status fields, or bundle artifacts |
+| Code map | Concrete packages, key structs/functions, scripts, charts, and scenarios |
+| Evidence contract | Stable lines or JSON fields that prove the behavior; not just log examples |
+| Failure taxonomy | Named blocker reasons, timeouts, and what a cold reader should inspect next |
+| Implementation checklist | Ordered engineering steps and fail-closed checks needed to implement or change the feature |
+| QA history | The gates that proved the behavior and the important failures that shaped the design |
+
+If a page only answers "what is this feature?" it is `summary`. If it also
+answers "how would I safely implement or modify this feature?" it can be
+`deep`.
+
+Use this density especially for storage-path features such as iSCSI ALUA,
+SmartWAL recovery, authority promotion, returned-replica rebuild, CSI lifecycle,
+delete safety, and node evidence. Those areas have enough implicit domain
+knowledge that a short summary hides the real engineering cost.
+
 ## Local Preview
 
 Install MkDocs Material and serve the site:

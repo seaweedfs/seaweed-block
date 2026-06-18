@@ -25,6 +25,8 @@ Start here:
   remains in source evidence.
 - [Coverage Matrix](coverage-matrix.md) - whether the wiki covers the major
   months-long engineering domains and where deeper docs are still needed.
+- [Topic Inventory](topic-inventory.md) - full topic backlog and whether each
+  topic is implementation-grade, summary-level, mapped, missing, or future.
 - [Historical Sources](historical-sources.md) - older tutorial and methodology
   material that explains the block-storage method behind the current design.
 - [Code Map](code-map.md) - main packages, commands, and responsibility
@@ -68,3 +70,13 @@ The wiki links to these source areas:
 
 When a wiki page conflicts with a finished plan or QA sign-off, the finished
 plan or QA sign-off wins.
+
+## Depth Standard
+
+For storage/control-plane topics, a page is only considered deep if it can guide
+a code change and a QA gate. It should include protocol or domain background,
+product contract, ownership model, state machine, publish/API shape, code
+entry points, evidence contract, failure taxonomy, implementation checklist,
+QA history, and non-claims.
+
+A correct summary is still useful, but it is not enough for feature work.
