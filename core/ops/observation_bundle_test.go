@@ -257,6 +257,105 @@ func TestObservationBundle_ReplaysReturnedReplicaProjection(t *testing.T) {
 	}
 }
 
+func TestObservationBundle_ReturnedReplicaProjectionIsVolumeScoped(t *testing.T) {
+	dir := t.TempDir()
+	productDir := filepath.Join(dir, "demo", "product-observation")
+	if err := os.MkdirAll(productDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cluster := NewClusterEvidence(time.Date(2026, 6, 19, 9, 0, 0, 0, time.UTC))
+	cluster.Volumes = []VolumeEvidence{{
+		VolumeID:          "pvc-a",
+		Namespace:         "default",
+		PVCName:           "app-a",
+		ReplicationFactor: 2,
+		Status:            ObservationStatusRecovering,
+		PrimaryReplica:    "a-r2",
+		PublishTarget:     "192.168.1.184:3260",
+		Epoch:             2,
+		EndpointVersion:   1,
+		Replicas: []ReplicaEvidence{{
+			ReplicaID:            "a-r1",
+			KubernetesNode:       "m01",
+			Observed:             true,
+			Role:                 "previous_primary",
+			ReplicationRole:      "replica_ready",
+			DurableFrontierKnown: true,
+			DurableFrontierLSN:   42,
+			FrontendPrimaryReady: false,
+			StalePrimaryFenced:   true,
+		}, {
+			ReplicaID:            "a-r2",
+			KubernetesNode:       "m02",
+			Observed:             true,
+			Role:                 "primary",
+			Healthy:              true,
+			FrontendPrimaryReady: true,
+			ReplicationRole:      "none",
+			FrontendAddr:         "192.168.1.184:3260",
+			DurableFrontierKnown: true,
+			DurableFrontierLSN:   42,
+		}},
+	}, {
+		VolumeID:          "pvc-b",
+		Namespace:         "default",
+		PVCName:           "app-b",
+		ReplicationFactor: 2,
+		Status:            ObservationStatusOK,
+		PrimaryReplica:    "b-r1",
+		PublishTarget:     "192.168.1.188:3260",
+		Epoch:             1,
+		EndpointVersion:   1,
+		Replicas: []ReplicaEvidence{{
+			ReplicaID:            "b-r1",
+			KubernetesNode:       "tp01",
+			Observed:             true,
+			Role:                 "primary",
+			Healthy:              true,
+			FrontendPrimaryReady: true,
+			ReplicationRole:      "none",
+			FrontendAddr:         "192.168.1.188:3260",
+			DurableFrontierKnown: true,
+			DurableFrontierLSN:   7,
+		}}},
+	}
+	raw, err := MarshalObservationJSON(cluster)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, filepath.Join(productDir, ClusterEvidenceArtifact), string(raw))
+
+	replayed, err := BuildObservationFromBundle(ObservationBundleOptions{Dir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	summary := RenderObservationReportSummary(replayed)
+	if !strings.Contains(summary, "managed_volume_returned_replica=pvc-a replica=a-r1 state=fenced reason=returned_replica_frontend_fenced") {
+		t.Fatalf("summary missing pvc-a returned replica:\n%s", summary)
+	}
+	if strings.Contains(summary, "managed_volume_returned_replica=pvc-b") ||
+		strings.Contains(summary, "authority.reintegrate_returned_replica target=b-") {
+		t.Fatalf("pvc-b contaminated by pvc-a returned state:\n%s", summary)
+	}
+	snapshot := BuildOperatorFoundationSnapshot(replayed)
+	if len(snapshot.Volumes) != 2 {
+		t.Fatalf("snapshot volumes=%+v", snapshot.Volumes)
+	}
+	byID := map[string]ManagedVolumeOperatorContract{}
+	for _, volume := range snapshot.Volumes {
+		byID[volume.Status.VolumeID] = volume
+	}
+	if len(byID["pvc-a"].Status.ReplicaReintegrations) != 1 {
+		t.Fatalf("pvc-a returned replicas=%+v", byID["pvc-a"].Status.ReplicaReintegrations)
+	}
+	if len(byID["pvc-b"].Status.ReplicaReintegrations) != 0 {
+		t.Fatalf("pvc-b returned replicas=%+v", byID["pvc-b"].Status.ReplicaReintegrations)
+	}
+	if findManagedVolumeOperatorAction(byID["pvc-b"].AllowedActions, ManagedVolumeActionReintegrateReturned) != nil {
+		t.Fatalf("pvc-b got returned action: %+v", byID["pvc-b"].AllowedActions)
+	}
+}
+
 func TestObservationBundle_ManagedVolumeUsesPrimaryFailureArtifactHints(t *testing.T) {
 	dir := t.TempDir()
 	productDir := filepath.Join(dir, "demo", "product-observation")

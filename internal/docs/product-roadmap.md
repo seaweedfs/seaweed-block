@@ -550,12 +550,12 @@ product risk. The recommended order is:
    -> blocked/releasable -> finalizer behavior -> cleanup evidence -> support
    bundle -> uninstall zero residue. Matching release images and pinned-image
    smoke remain required before marking v0.5 released.
-9. **Phase 46: returned-replica rebuild/reintegration productization.** Active.
-   High product value. The engine/transport has rebuild and returned-replica
-   safety pieces; the remaining work is productization through the lifecycle
-   action model: live facts, judgment, action owner, fencing, status, Events,
-   and multi-volume QA gates. Initial scope is status/decision productization,
-   not automatic failback or broad rebuild execution.
+9. **Phase 46: returned-replica rebuild/reintegration productization.** Closed.
+   High product value. Returned-replica facts now project through the lifecycle
+   action model as visible, fenced, volume-scoped status/decision evidence
+   (`internal/docs/finished-plans/phase46_finishedplan_returned_replica_reintegration_productization.md`).
+   The phase intentionally stops short of automatic failback or broad rebuild
+   execution.
 10. **Backup/snapshot/restore and NVMe ANA parity.**
    Important, but they should reuse the status/action model rather than create
    another isolated control plane.
@@ -573,12 +573,10 @@ Approximate engineering effort if scope remains tight:
 - Lifecycle-owner finalizers: medium/high. Cleaner than operator-status main
   patch, but requires a separate lifecycle-owner component plus real
   API/admission proof that only finalizers can be patched.
-- Productized returned-replica rebuild/reintegration/failback: high. The
-  low-level rebuild/recovery pieces exist, but shipping it as a product feature
-  requires lifecycle ownership, authority/fencing status, returned-replica state
-  projection, and long-running multi-volume failure gates. Phase 46 starts with
-  status/decision productization; executor-enabled rebuild/failback remains a
-  later decision.
+- Productized returned-replica rebuild/reintegration/failback: high. Phase 46
+  closed the status/decision slice: returned replicas are visible, fenced, and
+  volume-scoped across product surfaces. Executor-enabled rebuild/failback
+  remains a later decision and should not be claimed until separately gated.
 - Backup/snapshot/restore: high. Requires durable data semantics and user-facing
   restore guarantees.
 - NVMe ANA parity: medium/high. Protocol-specific work, but cheaper if it uses
@@ -617,10 +615,9 @@ Approximate engineering effort if scope remains tight:
 - Phase 44 Delete Lifecycle Close Gate is closed for code/QA. The team is
   intentionally skipping the v0.5 release smoke for now, so v0.5 is not marked
   released until matching images and pinned-image validation are completed.
-- Active work is Phase 46 Returned-Replica Rebuild / Reintegration
-  Productization. It should reuse the Operation Layer model to make returned
-  replicas visible, fenced, action-gated, and QA-verifiable before any automatic
-  rebuild/failback executor is enabled.
+- Phase 46 Returned-Replica Rebuild / Reintegration Productization is closed.
+  Returned replicas are visible, fenced, action-gated, and QA-verifiable before
+  any automatic rebuild/failback executor is enabled.
 - Phase 41-44 are the Operation Layer v0.5 release train: lifecycle-owner
   foundation, real API/admission proof, first bounded finalizer mutation, and
   delete lifecycle close gate.
@@ -628,9 +625,9 @@ Approximate engineering effort if scope remains tight:
   `internal/docs/ref/operation-layer-v0.5-release-train.md`; the Phase 42 gate
   draft is `internal/docs/ref/phase42-lifecycle-owner-api-admission-gate.md`.
 - Do not start NVMe ANA parity, backup/restore, or broad mutating recovery
-  workflows by extending the Operation Layer. Phase 46 is the separate gated
-  rebuild/reintegration productization phase; keep its first slice focused on
-  returned-replica facts, fencing, decisions, status, and QA evidence.
+  workflows by bypassing the Operation Layer. The next storage feature should
+  either enable a separately gated returned-replica executor or reuse the same
+  fact -> judgment -> action -> evidence model.
 - When the current plan closes, move it to `internal/docs/finished-plans/`
   with a phase/topic filename such as
   `phase1_finishedplan_frontend_protocol_readiness.md`.

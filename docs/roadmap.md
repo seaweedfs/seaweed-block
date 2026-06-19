@@ -129,12 +129,12 @@ Recommended order from here:
      The integrated PVC -> protected CR -> hold/release -> zero-residue path is
      validated end-to-end.
 3. Phase 46: productize returned-replica rebuild/reintegration status and
-   decisioning. **Active.** The engine/transport already has rebuild and
-   returned-replica safety pieces; the missing work is the Kubernetes/product
-   control loop: facts, judgment, action ownership, status, Events, fencing,
-   and multi-volume QA gates. Initial scope is status/decision productization;
-   automatic failback or broad rebuild execution remains a later executor
-   phase.
+   decisioning. **Closed 2026-06-19, QA PASS**
+   (`internal/docs/finished-plans/phase46_finishedplan_returned_replica_reintegration_productization.md`).
+   Returned replicas are now Kubernetes/product-surface visible, fenced from
+   frontend/ACK eligibility until evidence supports reintegration, and
+   volume-scoped across multi-volume reports. Automatic failback or broad
+   rebuild execution remains a later executor phase.
 4. Add backup/restore and NVMe ANA parity after they can reuse the same action
    owner, evidence, and status model rather than creating another isolated
    control plane.
@@ -142,9 +142,8 @@ Recommended order from here:
 The internal release-train contract is
 `internal/docs/ref/operation-layer-v0.5-release-train.md`. Phases 41-44 close
 the operation-layer loop for a bounded `SwBlockVolume` protection finalizer.
-Phase 46 intentionally reuses this same fact -> judgment -> action -> evidence
-pattern for returned-replica reintegration before any larger storage feature is
-enabled.
+Phase 46 reused this same fact -> judgment -> action -> evidence pattern for
+returned-replica reintegration before any larger storage feature is enabled.
 
 The practical rule is:
 

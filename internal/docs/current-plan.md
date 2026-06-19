@@ -177,16 +177,22 @@ Goal: prove the returned-replica lifecycle is per-volume and release-shaped.
 Acceptance:
 
 ```text
-[ ] returned replica on volume A does not affect volume B/C status
-[ ] action decisions and reason codes remain volume-scoped
-[ ] Events are bounded and stable
-[ ] cleanup hygiene remains clean
-[ ] finished plan records what is now claimed and what remains future work
+[x] returned replica on volume A does not affect volume B/C status
+[x] action decisions and reason codes remain volume-scoped
+[x] Events are bounded and stable
+[x] cleanup hygiene remains clean
+[x] finished plan records what is now claimed and what remains future work
 ```
+
+Implementation note: `TestObservationBundle_ReturnedReplicaProjectionIsVolumeScoped`
+guards the multi-volume projection and action isolation. The returned-replica
+projection does not add an event emitter in Phase 46; existing event identity
+rules remain unchanged.
 
 ## Release Position
 
-If Phase 46 passes, the product can claim that returned replicas are
-Kubernetes-visible and safely fenced until reintegration evidence is sufficient.
-It still must not claim automatic failback or production rebuild automation
-unless an executor phase lands and is separately QA-validated.
+Phase 46 passed for status/decision productization. The product can claim that
+returned replicas are Kubernetes-visible and safely fenced until reintegration
+evidence is sufficient. It still must not claim automatic failback or production
+rebuild automation unless an executor phase lands and is separately
+QA-validated.
