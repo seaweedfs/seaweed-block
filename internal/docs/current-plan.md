@@ -78,13 +78,16 @@ Goal: freeze the product contract before code changes.
 Acceptance:
 
 ```text
-[ ] returned-replica lifecycle states are named
-[ ] required facts are listed: authority, frontend readiness, replication role,
+[x] returned-replica lifecycle states are named
+[x] required facts are listed: authority, frontend readiness, replication role,
     durable frontier, retained/head LSN, peer readiness, fencing reason
-[ ] catch-up versus rebuild decision inputs are documented
-[ ] non-claims are explicit: no automatic failback, no broad rebuild execution
-[ ] existing component/live scenarios are mapped to the new product gates
+[x] catch-up versus rebuild decision inputs are documented
+[x] non-claims are explicit: no automatic failback, no broad rebuild execution
+[x] existing component/live scenarios are mapped to the new product gates
 ```
+
+Implementation note: `bd92d65` adds
+`internal/docs/ref/phase46-returned-replica-reintegration-contract.md`.
 
 ## D2: Returned-Replica Status Projection
 
@@ -93,12 +96,18 @@ Goal: expose returned-replica safety state without changing data-plane behavior.
 Acceptance:
 
 ```text
-[ ] non-primary returned replica can be durable-ready but frontend-fenced
-[ ] frontend-fenced returned replica never makes the volume Ready by itself
-[ ] unsafe non-primary frontend readiness is classified as a blocker
-[ ] CRD/operator-snapshot/report/dashboard share the same state/reason
-[ ] unit tests cover returned, fenced, recovering, blocked, and ready shapes
+[x] non-primary returned replica can be durable-ready but frontend-fenced
+[x] frontend-fenced returned replica never makes the volume Ready by itself
+[x] unsafe non-primary frontend readiness is classified as a blocker
+[x] CRD/operator-snapshot/report summary share the same state/reason
+[x] unit tests cover returned, fenced, recovering, and blocked shapes
+[ ] live bundle/dashboard gate confirms the projection from returned-replica
+    scenario evidence
 ```
+
+Implementation note: `bd92d65` adds `replicaReintegrations` to
+`SwBlockVolume.status`, operator-snapshot, and report summary. This is status
+projection only; it does not change data-plane behavior.
 
 ## D3: Action Decision Model
 
@@ -107,12 +116,13 @@ Goal: add product actions without pretending an executor exists.
 Acceptance:
 
 ```text
-[ ] authority.reintegrate_returned_replica has preconditions and evidence refs
-[ ] authority.rebuild_returned_replica has preconditions and evidence refs
-[ ] missing executor or missing frontier evidence rejects/fails closed
-[ ] safe/dry-run suggestions are visible but mutation_allowed=false unless a
+[x] authority.reintegrate_returned_replica has preconditions and evidence refs
+[x] authority.rebuild_returned_replica has preconditions and evidence refs
+[x] missing executor or missing frontier evidence rejects/fails closed
+[x] safe/dry-run suggestions are visible but mutation_allowed=false unless a
     later executor gate explicitly enables them
-[ ] report/explain/dashboard render the decision consistently
+[x] report summary and operator-snapshot render the decision consistently
+[ ] explain/dashboard HTML/live API gate confirms the same rendering
 ```
 
 ## D4: Bundle / Replay Integration
@@ -166,4 +176,3 @@ If Phase 46 passes, the product can claim that returned replicas are
 Kubernetes-visible and safely fenced until reintegration evidence is sufficient.
 It still must not claim automatic failback or production rebuild automation
 unless an executor phase lands and is separately QA-validated.
-
