@@ -273,6 +273,88 @@ func TestHost_ApplyFact_SupportingReplica_LocalReadinessBlocked_SkipsAdapter(t *
 	}
 }
 
+func TestHost_ApplyFact_SupportingReplica_ReplaysAfterLocalReadinessClears(t *testing.T) {
+	rec := &orderingRecorder{}
+	h, a, _ := newStubbedHost(t, "vol1", "r2", rec)
+	readyCh := make(chan adapter.AssignmentInfo, 1)
+	h.cfg.ReadyMarker = readyCh
+	h.BlockLocalReadiness("awaiting durable recovery")
+
+	fact := &control.AssignmentFact{
+		VolumeId:        "vol1",
+		ReplicaId:       "r1",
+		Epoch:           5,
+		EndpointVersion: 2,
+		Peers: []*control.ReplicaDescriptor{{
+			ReplicaId:       "r2",
+			Epoch:           5,
+			EndpointVersion: 2,
+			DataAddr:        "127.0.0.1:2000",
+			CtrlAddr:        "127.0.0.1:2001",
+		}},
+	}
+
+	h.applyFact(fact)
+	h.ClearLocalReadinessBlock()
+	h.replayLocalReadinessFactIfReady()
+
+	if got := a.callCount.Load(); got != 1 {
+		t.Fatalf("supporting replay should apply adapter once: got %d calls", got)
+	}
+	if a.lastInfo.ReplicaID != "r2" || a.lastInfo.Epoch != 5 || a.lastInfo.EndpointVersion != 2 {
+		t.Fatalf("replayed adapter identity: %+v", a.lastInfo)
+	}
+	if seq := rec.snapshot(); len(seq) != 1 || seq[0] != "OnAssignment" {
+		t.Fatalf("supporting replay sequence=%v want [OnAssignment]", seq)
+	}
+	select {
+	case got := <-readyCh:
+		if got.ReplicaID != "r2" || got.Epoch != 5 || got.EndpointVersion != 2 {
+			t.Fatalf("supporting replay marker identity: %+v", got)
+		}
+	default:
+		t.Fatal("supporting replay did not emit ready marker")
+	}
+}
+
+func TestHost_ApplyFact_Self_ReplaysAfterLocalReadinessClearsWithReplicationFirst(t *testing.T) {
+	rec := &orderingRecorder{}
+	h, a, r := newStubbedHost(t, "vol1", "r1", rec)
+	h.BlockLocalReadiness("awaiting durable recovery")
+
+	fact := &control.AssignmentFact{
+		VolumeId:          "vol1",
+		ReplicaId:         "r1",
+		Epoch:             6,
+		EndpointVersion:   2,
+		PeerSetGeneration: 11,
+		Peers: []*control.ReplicaDescriptor{{
+			ReplicaId:       "r2",
+			Epoch:           6,
+			EndpointVersion: 2,
+			DataAddr:        "127.0.0.1:2000",
+			CtrlAddr:        "127.0.0.1:2001",
+		}},
+	}
+
+	h.applyFact(fact)
+	h.ClearLocalReadinessBlock()
+	h.replayLocalReadinessFactIfReady()
+
+	if got := r.callCount.Load(); got != 1 {
+		t.Fatalf("self replay should install replication once: got %d calls", got)
+	}
+	if got := a.callCount.Load(); got != 1 {
+		t.Fatalf("self replay should apply adapter once: got %d calls", got)
+	}
+	if r.lastGeneration != 11 || len(r.lastTargetIDs) != 1 || r.lastTargetIDs[0] != "r2" {
+		t.Fatalf("replayed replication payload: gen=%d targets=%v", r.lastGeneration, r.lastTargetIDs)
+	}
+	if seq := rec.snapshot(); len(seq) != 2 || seq[0] != "UpdateReplicaSet" || seq[1] != "OnAssignment" {
+		t.Fatalf("self replay sequence=%v want [UpdateReplicaSet OnAssignment]", seq)
+	}
+}
+
 // --- Test 3: supersede branch unaffected ---
 
 // TestHost_ApplyFact_Supersede_NeverCallsAdapterOrReplication —

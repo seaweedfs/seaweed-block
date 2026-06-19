@@ -125,6 +125,8 @@ type Host struct {
 
 	localReadinessBlocked atomic.Bool
 	localReadinessReason  atomic.Value // string
+	readinessReplayMu     sync.Mutex
+	readinessReplayFact   *control.AssignmentFact
 
 	// lastOtherLine captures the most recent AssignmentFact that
 	// named a REPLICA OTHER than self for this host's VolumeID.
@@ -278,12 +280,14 @@ func (h *Host) localReadinessBlock() (bool, string) {
 // the caller owns its lifecycle (Provider/composition root).
 func (h *Host) SetReplicationVolume(rv *replication.ReplicationVolume) {
 	h.replicationMu.Lock()
-	defer h.replicationMu.Unlock()
 	if rv == nil {
 		h.replication = nil
+		h.replicationMu.Unlock()
 		return
 	}
 	h.setReplicationLocked(rv)
+	h.replicationMu.Unlock()
+	h.replayLocalReadinessFactIfReady()
 }
 
 // setReplicationLocked installs the replication slot. Caller must
@@ -291,6 +295,31 @@ func (h *Host) SetReplicationVolume(rv *replication.ReplicationVolume) {
 // goroutine has visibility yet).
 func (h *Host) setReplicationLocked(rv replicaSetUpdater) {
 	h.replication = rv
+}
+
+func (h *Host) storeLocalReadinessReplayFact(fact *control.AssignmentFact) {
+	if fact == nil {
+		return
+	}
+	cp := proto.Clone(fact).(*control.AssignmentFact)
+	h.readinessReplayMu.Lock()
+	h.readinessReplayFact = cp
+	h.readinessReplayMu.Unlock()
+}
+
+func (h *Host) replayLocalReadinessFactIfReady() {
+	if blocked, _ := h.localReadinessBlock(); blocked {
+		return
+	}
+	h.readinessReplayMu.Lock()
+	fact := h.readinessReplayFact
+	h.readinessReplayFact = nil
+	h.readinessReplayMu.Unlock()
+	if fact == nil {
+		return
+	}
+	h.log.Printf("blockvolume: volume %s replaying assignment after local readiness cleared", h.cfg.VolumeID)
+	h.applyFact(fact)
 }
 
 // getReplication returns the current replication slot under a
@@ -572,6 +601,7 @@ func (h *Host) applyFact(fact *control.AssignmentFact) {
 		h.recordOtherLine(fact)
 		if info, ok := decodeSelfPeerAssignment(fact, h.cfg.ReplicaID); ok {
 			if blocked, reason := h.localReadinessBlock(); blocked {
+				h.storeLocalReadinessReplayFact(fact)
 				h.log.Printf("blockvolume: volume %s local readiness blocked (%s); NOT admitting supporting replica %s at epoch=%d EV=%d",
 					h.cfg.VolumeID, reason, info.ReplicaID, info.Epoch, info.EndpointVersion)
 				return
@@ -591,6 +621,7 @@ func (h *Host) applyFact(fact *control.AssignmentFact) {
 	}
 
 	if blocked, reason := h.localReadinessBlock(); blocked {
+		h.storeLocalReadinessReplayFact(fact)
 		h.log.Printf("blockvolume: volume %s local readiness blocked (%s); NOT applying primary assignment %s@%d to adapter",
 			h.cfg.VolumeID, reason, fact.ReplicaId, fact.Epoch)
 		return
