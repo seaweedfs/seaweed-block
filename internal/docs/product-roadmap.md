@@ -540,21 +540,22 @@ product risk. The recommended order is:
    Before any finalizer add/remove, prove main-object patch confinement against
    a real Kubernetes API with admission/RBAC. Only then consider a first
    bounded mutation.
-7. **Phase 43: first real lifecycle mutation.** Active.
-   Ship only the first bounded mutation: `SwBlockVolume` protection finalizer
-   add/remove with delete-safety preconditions. Do not include cleanup, rebuild,
-   failback, backup, or NVMe in the same phase.
-8. **Phase 44 candidate: delete lifecycle close gate and Operation Layer v0.5
-   release.**
-   Validate the full user path: install -> PVC -> status -> delete requested ->
-   blocked/releasable -> finalizer behavior -> cleanup evidence -> support
-   bundle -> uninstall zero residue. This is the release boundary for the
-   operation layer.
-9. **Productized returned-replica rebuild/reintegration/failback.**
+7. **Phase 43: first real lifecycle mutation.** Closed.
+   Shipped the first bounded mutation: `SwBlockVolume` protection finalizer
+   add/remove with delete-safety preconditions. It does not include cleanup,
+   rebuild, failback, backup, or NVMe.
+8. **Phase 44: delete lifecycle close gate and Operation Layer v0.5
+   candidate.** Closed for code/QA; release skipped for now.
+   Validated the full user path: install -> PVC -> status -> delete requested
+   -> blocked/releasable -> finalizer behavior -> cleanup evidence -> support
+   bundle -> uninstall zero residue. Matching release images and pinned-image
+   smoke remain required before marking v0.5 released.
+9. **Phase 46: returned-replica rebuild/reintegration productization.** Active.
    High product value. The engine/transport has rebuild and returned-replica
    safety pieces; the remaining work is productization through the lifecycle
    action model: live facts, judgment, action owner, fencing, status, Events,
-   and multi-volume QA gates.
+   and multi-volume QA gates. Initial scope is status/decision productization,
+   not automatic failback or broad rebuild execution.
 10. **Backup/snapshot/restore and NVMe ANA parity.**
    Important, but they should reuse the status/action model rather than create
    another isolated control plane.
@@ -575,7 +576,9 @@ Approximate engineering effort if scope remains tight:
 - Productized returned-replica rebuild/reintegration/failback: high. The
   low-level rebuild/recovery pieces exist, but shipping it as a product feature
   requires lifecycle ownership, authority/fencing status, returned-replica state
-  projection, and long-running multi-volume failure gates.
+  projection, and long-running multi-volume failure gates. Phase 46 starts with
+  status/decision productization; executor-enabled rebuild/failback remains a
+  later decision.
 - Backup/snapshot/restore: high. Requires durable data semantics and user-facing
   restore guarantees.
 - NVMe ANA parity: medium/high. Protocol-specific work, but cheaper if it uses
@@ -610,18 +613,24 @@ Approximate engineering effort if scope remains tight:
 - Phase 42 Lifecycle Owner API / Admission Gate is closed. It proved the
   lifecycle-owner main-object patch boundary against a real Kubernetes
   API/admission surface and preserved the delete-safety decision model.
-- Active work is Phase 43 First Bounded Finalizer Mutation. It may add/remove
-  only the Seaweed Block `SwBlockVolume` protection finalizer, gated by
-  delete-safety. It must not execute cleanup or mutate PVC/PV/workloads/storage.
+- Phase 43 First Bounded Finalizer Mutation is closed.
+- Phase 44 Delete Lifecycle Close Gate is closed for code/QA. The team is
+  intentionally skipping the v0.5 release smoke for now, so v0.5 is not marked
+  released until matching images and pinned-image validation are completed.
+- Active work is Phase 46 Returned-Replica Rebuild / Reintegration
+  Productization. It should reuse the Operation Layer model to make returned
+  replicas visible, fenced, action-gated, and QA-verifiable before any automatic
+  rebuild/failback executor is enabled.
 - Phase 41-44 are the Operation Layer v0.5 release train: lifecycle-owner
   foundation, real API/admission proof, first bounded finalizer mutation, and
-  delete lifecycle close gate/release.
+  delete lifecycle close gate.
 - The release-train contract is
   `internal/docs/ref/operation-layer-v0.5-release-train.md`; the Phase 42 gate
   draft is `internal/docs/ref/phase42-lifecycle-owner-api-admission-gate.md`.
-- Do not start NVMe ANA parity, rebuild/failback, backup/restore, or mutating
-  recovery workflows by extending Phase 41. Pick those as separate gated phases
-  after the Operation Layer v0.5 train closes.
+- Do not start NVMe ANA parity, backup/restore, or broad mutating recovery
+  workflows by extending the Operation Layer. Phase 46 is the separate gated
+  rebuild/reintegration productization phase; keep its first slice focused on
+  returned-replica facts, fencing, decisions, status, and QA evidence.
 - When the current plan closes, move it to `internal/docs/finished-plans/`
   with a phase/topic filename such as
   `phase1_finishedplan_frontend_protocol_readiness.md`.
