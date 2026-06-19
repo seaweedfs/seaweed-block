@@ -85,11 +85,29 @@ This D5 live gate does not claim automatic failback or automatic rebuild
 execution. It proves the returned replica is visible, fenced from frontend use,
 and usable as a healthy peer after recovery evidence.
 
-This D5 live gate also does not by itself close the K8s status-surface
-requirement. CRD/report/dashboard/explain agreement for returned-replica
-projection remains a separate product-surface gate.
+## Product Surface Gate
+
+The K8s product-surface requirement is covered by
+`TestOpsReturnedReplicaFromBundleSurfacesAcrossReportExplainDashboard`.
+
+That gate drives one returned-replica bundle through:
+
+- `sw-block ops report --from-bundle`
+- `sw-block ops operator-status --from-bundle` using the CRD status DTO writer
+- `sw-block ops explain volume --from-bundle`
+- `sw-block ops dashboard --from-bundle` and `/operator-snapshot.json`
+
+All four surfaces carry the same returned-replica projection:
+
+```text
+managed_volume_returned_replica=pvc-returned replica=r1 state=fenced reason=returned_replica_frontend_fenced
+authority.reintegrate_returned_replica mode=dry_run decision=rejected reason=policy_disabled
+```
+
+The explain text was tightened to include the volume id on returned-replica
+lines, matching report summary shape and avoiding multi-volume ambiguity.
 
 ## Verdict
 
-D5 host/live returned-replica safety is PASS. The next Phase 46 work should
-close the K8s product-surface gate and then the multi-volume close gate.
+D5 returned-replica safety and product-surface projection are PASS. The next
+Phase 46 work is the multi-volume close gate.

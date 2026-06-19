@@ -1151,6 +1151,116 @@ func TestOpsReportFromBundleWritesStaticReadOnlyArtifacts(t *testing.T) {
 	}
 }
 
+func TestOpsReturnedReplicaFromBundleSurfacesAcrossReportExplainDashboard(t *testing.T) {
+	dir := writeCmdReturnedReplicaBundle(t)
+	outDir := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ops", "report", "--from-bundle", dir, "--out", outDir}, &stdout, &stderr)
+	if code != ops.VolumeStatusExitOK {
+		t.Fatalf("report exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	summary, err := os.ReadFile(filepath.Join(outDir, ops.ObservationReportTextArtifact))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"managed_volume_returned_replica=pvc-returned replica=r1 state=fenced reason=returned_replica_frontend_fenced",
+		"managed_volume_action=authority.reintegrate_returned_replica mode=dry_run side_effect=authority_mutating executor=authority_recovery_executor decision=rejected reason=policy_disabled",
+	} {
+		if !strings.Contains(string(summary), want) {
+			t.Fatalf("report summary missing %q:\n%s", want, summary)
+		}
+	}
+	snapshot, err := os.ReadFile(filepath.Join(outDir, ops.ObservationOperatorSnapshotArtifact))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		`"replica_reintegrations": [`,
+		`"state": "fenced"`,
+		`"reason_code": "returned_replica_frontend_fenced"`,
+		`"type": "authority.reintegrate_returned_replica"`,
+	} {
+		if !strings.Contains(string(snapshot), want) {
+			t.Fatalf("operator snapshot missing %q:\n%s", want, snapshot)
+		}
+	}
+
+	writer := &operatorStatusTestWriter{}
+	oldFactory := opsOperatorStatusWriterFactory
+	opsOperatorStatusWriterFactory = func() (ops.OperatorStatusWriter, error) {
+		return writer, nil
+	}
+	t.Cleanup(func() { opsOperatorStatusWriterFactory = oldFactory })
+	stdout.Reset()
+	stderr.Reset()
+	code = run([]string{"ops", "operator-status", "--from-bundle", dir, "--namespace", "kube-system"}, &stdout, &stderr)
+	if code != ops.VolumeStatusExitOK {
+		t.Fatalf("operator-status exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	if len(writer.volumes) != 1 {
+		t.Fatalf("operator-status writes=%+v", writer.volumes)
+	}
+	returned := writer.volumes[0].status.ReplicaReintegrations
+	if len(returned) != 1 || returned[0].ReplicaID != "r1" || returned[0].State != ops.ReturnedReplicaStateFenced {
+		t.Fatalf("CRD returned replicas=%+v", returned)
+	}
+	foundReintegrate := false
+	for _, action := range writer.volumes[0].status.AllowedActions {
+		if action.Type == ops.ManagedVolumeActionReintegrateReturned {
+			foundReintegrate = true
+		}
+	}
+	if !foundReintegrate {
+		t.Fatalf("CRD actions=%+v", writer.volumes[0].status.AllowedActions)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = run([]string{"ops", "explain", "volume", "--from-bundle", dir, "pvc-returned"}, &stdout, &stderr)
+	if code != ops.VolumeStatusExitOK {
+		t.Fatalf("explain exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	for _, want := range []string{
+		"managed_volume_returned_replica=pvc-returned replica=r1 state=fenced reason=returned_replica_frontend_fenced",
+		"managed_volume_action authority.reintegrate_returned_replica mode=dry_run",
+	} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("explain missing %q:\n%s", want, stdout.String())
+		}
+	}
+
+	addr := freeTCPAddr(t)
+	stdout.Reset()
+	stderr.Reset()
+	done := make(chan int, 1)
+	go func() {
+		done <- run([]string{
+			"ops", "dashboard",
+			"--from-bundle", dir,
+			"--listen", addr,
+			"--serve-duration", "500ms",
+		}, &stdout, &stderr)
+	}()
+	body := waitForHTTPContains(t, "http://"+addr+"/operator-snapshot.json", `"replica_reintegrations": [`)
+	for _, want := range []string{
+		`"reason_code": "returned_replica_frontend_fenced"`,
+		`"type": "authority.reintegrate_returned_replica"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("dashboard operator snapshot missing %q:\n%s", want, body)
+		}
+	}
+	select {
+	case code := <-done:
+		if code != ops.VolumeStatusExitOK {
+			t.Fatalf("dashboard exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("dashboard command did not stop; stdout=%s stderr=%s", stdout.String(), stderr.String())
+	}
+}
+
 func TestOpsReportFromBundleAllowsEmptyClusterEvidence(t *testing.T) {
 	dir := t.TempDir()
 	productDir := filepath.Join(dir, "demo", "product-observation")
@@ -1627,6 +1737,62 @@ func writeCmdProductClusterBundle(t *testing.T) string {
 		Reason:    ops.EventTypeCSIReattachObserved,
 		Message:   "CSI staged volume on node",
 		NewValue:  "192.168.1.184:3260",
+	}}
+	raw, err := ops.MarshalObservationJSON(cluster)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(productDir, ops.ClusterEvidenceArtifact), raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+func writeCmdReturnedReplicaBundle(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	productDir := filepath.Join(dir, "demo", "product-observation")
+	if err := os.MkdirAll(productDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cluster := ops.NewClusterEvidence(time.Date(2026, 6, 19, 8, 40, 0, 0, time.UTC))
+	cluster.ProductRevision = "phase46-test"
+	cluster.Status = ops.ObservationStatusRecovering
+	cluster.Volumes = []ops.VolumeEvidence{{
+		VolumeID:          "pvc-returned",
+		Namespace:         "default",
+		PVCName:           "returned-pvc",
+		ReplicationFactor: 2,
+		Status:            ops.ObservationStatusRecovering,
+		PrimaryReplica:    "r2",
+		PrimaryNode:       "m02",
+		PublishTarget:     "192.168.1.184:3260",
+		Epoch:             2,
+		EndpointVersion:   1,
+		Replicas: []ops.ReplicaEvidence{{
+			ReplicaID:            "r1",
+			KubernetesNode:       "m01",
+			Observed:             true,
+			Role:                 "previous_primary",
+			ReplicationRole:      "replica_ready",
+			Healthy:              false,
+			FrontendPrimaryReady: false,
+			DurableFrontierKnown: true,
+			DurableFrontierLSN:   4241,
+			StalePrimaryFenced:   true,
+			SupportBundlePath:    "returned-replica-summary.txt",
+		}, {
+			ReplicaID:            "r2",
+			KubernetesNode:       "m02",
+			Observed:             true,
+			Role:                 "primary",
+			Healthy:              true,
+			FrontendPrimaryReady: true,
+			ReplicationRole:      "none",
+			FrontendAddr:         "192.168.1.184:3260",
+			DurableFrontierKnown: true,
+			DurableFrontierLSN:   4241,
+		}},
 	}}
 	raw, err := ops.MarshalObservationJSON(cluster)
 	if err != nil {

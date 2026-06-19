@@ -305,7 +305,8 @@ func RenderManagedVolumeProjectionText(projection ManagedVolumeProjection) strin
 		}
 	}
 	for _, returned := range projection.ReplicaReintegrations {
-		fmt.Fprintf(&b, "managed_volume_returned_replica replica=%s state=%s reason=%s frontend_fenced=%t ack_eligible=%t durable_frontier_known=%t durable_lsn=%d required_frontier_known=%t required_lsn=%d\n",
+		fmt.Fprintf(&b, "managed_volume_returned_replica=%s replica=%s state=%s reason=%s frontend_fenced=%t ack_eligible=%t durable_frontier_known=%t durable_lsn=%d required_frontier_known=%t required_lsn=%d\n",
+			explicitUnavailable(projection.VolumeID),
 			emptyAsDash(returned.ReplicaID),
 			emptyAsDash(returned.State),
 			emptyAsDash(returned.ReasonCode),

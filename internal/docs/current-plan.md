@@ -101,7 +101,7 @@ Acceptance:
 [x] unsafe non-primary frontend readiness is classified as a blocker
 [x] CRD/operator-snapshot/report summary share the same state/reason
 [x] unit tests cover returned, fenced, recovering, and blocked shapes
-[ ] live bundle/dashboard gate confirms the projection from returned-replica
+[x] live bundle/dashboard gate confirms the projection from returned-replica
     scenario evidence
 ```
 
@@ -122,7 +122,7 @@ Acceptance:
 [x] safe/dry-run suggestions are visible but mutation_allowed=false unless a
     later executor gate explicitly enables them
 [x] report summary and operator-snapshot render the decision consistently
-[ ] explain/dashboard HTML/live API gate confirms the same rendering
+[x] explain/dashboard HTML/live API gate confirms the same rendering
 ```
 
 ## D4: Bundle / Replay Integration
@@ -155,7 +155,7 @@ Minimum gate:
 [x] after r1 returns and r2 remains primary, r1 is non-primary and
     frontend_primary_ready=false
 [x] r2 remains the only primary/frontend-ready replica
-[ ] CRD/report/dashboard/explain show returned/fenced/recovering facts
+[x] CRD/report/dashboard/explain show returned/fenced/recovering facts
 [x] no false Ready=True for stale or insufficient returned-replica evidence
 [x] cleanup verifier reports zero residue
 ```
@@ -165,7 +165,10 @@ The live chain exposed and fixed a product gap where assignments blocked during
 durable recovery were not replayed after recovery, leaving returned replicas
 safe but under-projected. See
 `internal/docs/qa-assignments/phase46-d5-returned-replica-live-gate-qa-signoff.md`.
-The remaining D5 item is the K8s product-surface gate.
+The K8s product-surface gate is covered by
+`TestOpsReturnedReplicaFromBundleSurfacesAcrossReportExplainDashboard`, which
+checks report summary, operator-snapshot/dashboard, explain, and CRD status DTO
+rendering from the same returned-replica bundle.
 
 ## D6: Multi-Volume / Close Gate
 
