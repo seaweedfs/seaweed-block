@@ -65,11 +65,11 @@ Goal: ensure public docs and release notes say exactly what v0.5 can do.
 Acceptance:
 
 ```text
-[ ] README feature table matches v0.5 bounded lifecycle claim
-[ ] quickstart does not over-claim lifecycle-owner as production operator
-[ ] docs/releases/v0.5-beta-candidate.md is current
-[ ] docs/roadmap.md says next product work is rebuild/reintegration after v0.5
-[ ] wiki links remain internal/developer documentation, not release claims
+[x] README feature table matches v0.5 bounded lifecycle claim
+[x] quickstart does not over-claim lifecycle-owner as production operator
+[x] docs/releases/v0.5-beta-candidate.md is current
+[x] docs/roadmap.md says next product work is rebuild/reintegration after v0.5
+[x] wiki links remain internal/developer documentation, not release claims
 ```
 
 ## D2: Artifact / Image Check
@@ -84,6 +84,11 @@ Acceptance:
 [ ] README/quickstart use the same public tags if this is a public release
 [ ] chart defaults do not point at an incompatible older image
 ```
+
+Current status: blocked on publish/identification of matching v0.5 images for
+code commit `041b084` or a later release commit. The existing public quickstart
+tag `sha-dc2972d0059b` is a v0.4/status-foundation image and must not be used
+as v0.5 lifecycle-owner evidence.
 
 ## D3: Release Smoke
 
