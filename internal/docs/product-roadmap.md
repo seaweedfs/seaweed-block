@@ -556,10 +556,13 @@ product risk. The recommended order is:
    (`internal/docs/finished-plans/phase46_finishedplan_returned_replica_reintegration_productization.md`).
    The phase intentionally stops short of automatic failback or broad rebuild
    execution.
-10. **Phase 47: returned-replica executor admission.** Active.
+10. **Phase 47: returned-replica executor admission.** Dev-validated; QA
+   pending.
    First slice admits `authority.reintegrate_returned_replica` only as a
    dry-run, non-mutating action after exact fencing and frontier evidence is
-   present. It is the bridge toward a future executor, not automatic failback.
+   present
+   (`internal/docs/finished-plans/phase47_finishedplan_returned_replica_executor_admission.md`).
+   It is the bridge toward a future executor, not automatic failback.
 11. **Backup/snapshot/restore and NVMe ANA parity.**
    Important, but they should reuse the status/action model rather than create
    another isolated control plane.
@@ -624,9 +627,10 @@ Approximate engineering effort if scope remains tight:
 - Phase 46 Returned-Replica Rebuild / Reintegration Productization is closed.
   Returned replicas are visible, fenced, action-gated, and QA-verifiable before
   any automatic rebuild/failback executor is enabled.
-- Active work is Phase 47 Returned-Replica Executor Admission. It should keep
-  `authority.reintegrate_returned_replica` dry-run/non-mutating while proving
-  exact fencing/frontier evidence and schema/RBAC conformance.
+- Phase 47 Returned-Replica Executor Admission is dev-validated and ready for
+  independent QA. It keeps `authority.reintegrate_returned_replica`
+  dry-run/non-mutating while proving exact fencing/frontier evidence and
+  schema/RBAC conformance.
 - Phase 41-44 are the Operation Layer v0.5 release train: lifecycle-owner
   foundation, real API/admission proof, first bounded finalizer mutation, and
   delete lifecycle close gate.

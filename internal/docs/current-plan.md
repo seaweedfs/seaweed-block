@@ -146,10 +146,14 @@ Goal: decide whether the next phase may wire a real executor.
 Acceptance:
 
 ```text
-[ ] QA sign-off states exactly what is allowed and what remains non-claim
-[ ] finished plan records the evidence gate and no-mutation boundary
-[ ] roadmap names the next possible executor slice separately
+[x] QA sign-off states exactly what is allowed and what remains non-claim
+[x] finished plan records the evidence gate and no-mutation boundary
+[x] roadmap names the next possible executor slice separately
 ```
 
 Only after D5 should a later phase consider a real mutating executor for
 catch-up/rebuild/failback.
+
+Implementation note: Phase 47 is dev-validated and ready for independent QA.
+It admits only a dry-run, non-mutating returned-replica reintegration action.
+The next executor slice must separately gate any authority/storage mutation.

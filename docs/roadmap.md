@@ -135,10 +135,11 @@ Recommended order from here:
    frontend/ACK eligibility until evidence supports reintegration, and
    volume-scoped across multi-volume reports. Automatic failback or broad
    rebuild execution remains a later executor phase.
-4. Phase 47: returned-replica executor admission. **Active.** First slice:
-   allow `authority.reintegrate_returned_replica` only as a dry-run, non-mutating
-   action when exact fencing and frontier evidence is present. This is not
-   automatic failback or rebuild execution.
+4. Phase 47: returned-replica executor admission. **Dev-validated; QA pending**
+   (`internal/docs/finished-plans/phase47_finishedplan_returned_replica_executor_admission.md`).
+   `authority.reintegrate_returned_replica` is allowed only as a dry-run,
+   non-mutating action when exact fencing and frontier evidence is present.
+   This is not automatic failback or rebuild execution.
 5. Add backup/restore and NVMe ANA parity after they can reuse the same action
    owner, evidence, and status model rather than creating another isolated
    control plane.
