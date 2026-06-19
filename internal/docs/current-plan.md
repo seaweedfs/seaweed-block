@@ -150,15 +150,22 @@ Goal: run the real returned-replica scenario through the product surfaces.
 Minimum gate:
 
 ```text
-[ ] run returned-replica component gate
-[ ] run iscsi-returned-replica chain
-[ ] after r1 returns and r2 remains primary, r1 is non-primary and
+[x] run returned-replica component gate
+[x] run iscsi-returned-replica chain
+[x] after r1 returns and r2 remains primary, r1 is non-primary and
     frontend_primary_ready=false
-[ ] r2 remains the only primary/frontend-ready replica
+[x] r2 remains the only primary/frontend-ready replica
 [ ] CRD/report/dashboard/explain show returned/fenced/recovering facts
-[ ] no false Ready=True for stale or insufficient returned-replica evidence
-[ ] cleanup verifier reports zero residue
+[x] no false Ready=True for stale or insufficient returned-replica evidence
+[x] cleanup verifier reports zero residue
 ```
+
+Implementation note: `f28ecf3` closes the host/live safety portion of D5.
+The live chain exposed and fixed a product gap where assignments blocked during
+durable recovery were not replayed after recovery, leaving returned replicas
+safe but under-projected. See
+`internal/docs/qa-assignments/phase46-d5-returned-replica-live-gate-qa-signoff.md`.
+The remaining D5 item is the K8s product-surface gate.
 
 ## D6: Multi-Volume / Close Gate
 
