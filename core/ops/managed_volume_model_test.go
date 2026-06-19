@@ -477,6 +477,100 @@ func TestManagedVolumeProjection_NodeLossReattachRecovered(t *testing.T) {
 	}
 }
 
+func TestManagedVolumeProjection_ReturnedPreviousPrimaryStaysFrontendFenced(t *testing.T) {
+	projection := ProjectManagedVolume(ManagedVolumeFacts{
+		VolumeID:          "pvc-returned",
+		Namespace:         "default",
+		PVCName:           "demo-pvc",
+		ReplicationFactor: 3,
+		AckProfile:        "sync-quorum",
+		PVC:               &PVCFact{Phase: "Bound"},
+		Authority: &AuthorityFact{
+			PrimaryReplica:        "r2",
+			PreviousPrimary:       "r1",
+			PublishTarget:         "192.168.1.184:3260",
+			Epoch:                 2,
+			EndpointVersion:       9,
+			RequiredFrontierKnown: true,
+			RequiredFrontierLSN:   52,
+		},
+		Replicas: []ReplicaFact{{
+			ReplicaID:            "r1",
+			KubernetesNode:       "m01",
+			Observed:             true,
+			Role:                 "replica",
+			ReplicationRole:      "ready",
+			DurableFrontierKnown: true,
+			DurableFrontierLSN:   52,
+			Healthy:              false,
+			FrontendPrimaryReady: false,
+			StalePrimaryFenced:   true,
+		}, {
+			ReplicaID:            "r2",
+			KubernetesNode:       "m02",
+			Observed:             true,
+			Role:                 "primary",
+			DurableFrontierKnown: true,
+			DurableFrontierLSN:   52,
+			FrontendAddr:         "192.168.1.184:3260",
+		}},
+		EvidenceRefs: []string{"returned-replica-summary.txt"},
+	})
+
+	if len(projection.ReplicaReintegrations) != 1 {
+		t.Fatalf("returned replicas=%+v", projection.ReplicaReintegrations)
+	}
+	returned := projection.ReplicaReintegrations[0]
+	if returned.ReplicaID != "r1" || returned.State != ReturnedReplicaStateFenced || returned.ReasonCode != ReasonReturnedReplicaFrontendFenced {
+		t.Fatalf("returned projection=%+v", returned)
+	}
+	if !returned.FrontendFenced || returned.FrontendPrimaryReady || returned.AckEligible {
+		t.Fatalf("returned replica must be fenced and not ack eligible: %+v", returned)
+	}
+	action := findManagedVolumeAction(projection.Actions, ManagedVolumeActionReintegrateReturned)
+	if action == nil {
+		t.Fatalf("missing reintegrate action: %+v", projection.Actions)
+	}
+	if action.Decision != ManagedVolumeActionDecisionRejected || action.DecisionReason != ManagedVolumeActionRejectDisabled {
+		t.Fatalf("reintegrate action must fail closed: %+v", action)
+	}
+}
+
+func TestManagedVolumeProjection_ReturnedReplicaFrontendReadyBlocksVolume(t *testing.T) {
+	projection := ProjectManagedVolume(ManagedVolumeFacts{
+		VolumeID: "pvc-unsafe-returned",
+		PVC:      &PVCFact{Phase: "Bound"},
+		Authority: &AuthorityFact{
+			PrimaryReplica:  "r2",
+			PreviousPrimary: "r1",
+			PublishTarget:   "192.168.1.184:3260",
+		},
+		Replicas: []ReplicaFact{{
+			ReplicaID:            "r1",
+			Observed:             true,
+			Role:                 "replica",
+			DurableFrontierKnown: true,
+			DurableFrontierLSN:   52,
+			FrontendPrimaryReady: true,
+		}, {
+			ReplicaID: "r2",
+			Observed:  true,
+			Role:      "primary",
+		}},
+	})
+
+	if projection.Status != ManagedVolumeStatusBlocked {
+		t.Fatalf("status=%s reason=%s returned=%+v", projection.Status, projection.ReasonCode, projection.ReplicaReintegrations)
+	}
+	if projection.ReasonCode != ReasonReturnedReplicaUnsafeFrontend {
+		t.Fatalf("reason=%s", projection.ReasonCode)
+	}
+	ready := findObservationCondition(projection.Conditions, ConditionReady)
+	if ready == nil || ready.Status == "True" {
+		t.Fatalf("unsafe returned replica must not emit Ready=True: %+v", projection.Conditions)
+	}
+}
+
 func TestManagedVolumeProjection_InvalidDualPrimaryBeatsReady(t *testing.T) {
 	projection := ProjectManagedVolume(ManagedVolumeFacts{
 		VolumeID: "pvc-a",

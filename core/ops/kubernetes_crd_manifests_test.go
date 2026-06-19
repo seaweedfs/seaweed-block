@@ -192,6 +192,28 @@ func TestPhase39D2SwBlockVolumeDeleteSafetySchema(t *testing.T) {
 	}
 }
 
+func TestPhase46D2SwBlockVolumeReturnedReplicaSchema(t *testing.T) {
+	doc := readYAMLMap(t, "charts/seaweed-block/crds/swblockvolumes.block.seaweedfs.com.yaml")
+	statusProperties := crdStatusProperties(t, doc)
+	returnedProperties := yamlMap(t, yamlMap(t, yamlMap(t, statusProperties, "replicaReintegrations"), "items"), "properties")
+	for _, want := range []string{"replicaID", "state", "reasonCode", "frontendFenced", "frontendPrimaryReady", "ackEligible", "durableFrontierKnown", "durableFrontierLsn", "requiredFrontierKnown", "requiredFrontierLsn", "evidenceRefs"} {
+		if _, ok := returnedProperties[want]; !ok {
+			t.Fatalf("SwBlockVolume.status.replicaReintegrations[] schema missing %s", want)
+		}
+	}
+	stateEnum := yamlStringSet(t, yamlMap(t, returnedProperties, "state"), "enum")
+	for _, want := range []string{"fenced", "recovering", "ready", "blocked", "unknown"} {
+		if !stateEnum[want] {
+			t.Fatalf("SwBlockVolume.status.replicaReintegrations[].state enum missing %s: %+v", want, stateEnum)
+		}
+	}
+	for _, forbidden := range []string{"replica_id", "frontend_primary_ready", "ack_eligible", "durable_frontier_lsn"} {
+		if _, ok := returnedProperties[forbidden]; ok {
+			t.Fatalf("SwBlockVolume.status.replicaReintegrations[] leaked snake_case %s", forbidden)
+		}
+	}
+}
+
 func TestOperatorStatusRBACIsStatusEventsOnly(t *testing.T) {
 	raw := readRepoFile(t, "charts/seaweed-block/templates/operator-status-rbac.yaml")
 	required := []string{

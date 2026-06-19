@@ -9,14 +9,15 @@ type ManagedVolumeOperatorContract struct {
 }
 
 type ManagedVolumeOperatorStatus struct {
-	VolumeID     string                             `json:"volume_id,omitempty"`
-	PVCName      string                             `json:"pvc_name,omitempty"`
-	Status       string                             `json:"status"`
-	ReasonCode   string                             `json:"reason_code,omitempty"`
-	Conditions   []ObservationCondition             `json:"conditions,omitempty"`
-	DeleteSafety *SwBlockVolumeDeleteSafetyDecision `json:"delete_safety,omitempty"`
-	NonClaims    []string                           `json:"non_claims,omitempty"`
-	EvidenceRefs []string                           `json:"evidence_refs,omitempty"`
+	VolumeID              string                             `json:"volume_id,omitempty"`
+	PVCName               string                             `json:"pvc_name,omitempty"`
+	Status                string                             `json:"status"`
+	ReasonCode            string                             `json:"reason_code,omitempty"`
+	Conditions            []ObservationCondition             `json:"conditions,omitempty"`
+	DeleteSafety          *SwBlockVolumeDeleteSafetyDecision `json:"delete_safety,omitempty"`
+	ReplicaReintegrations []ReturnedReplicaProjection        `json:"replica_reintegrations,omitempty"`
+	NonClaims             []string                           `json:"non_claims,omitempty"`
+	EvidenceRefs          []string                           `json:"evidence_refs,omitempty"`
 }
 
 type ManagedVolumeOperatorEvent struct {
@@ -46,14 +47,15 @@ func ManagedVolumeOperatorContractFromProjection(projection ManagedVolumeProject
 		APIVersion: "block.seaweedfs.com/v1alpha1",
 		Kind:       "ManagedVolumeStatusContract",
 		Status: ManagedVolumeOperatorStatus{
-			VolumeID:     projection.VolumeID,
-			PVCName:      projection.PVCName,
-			Status:       projection.Status,
-			ReasonCode:   projection.ReasonCode,
-			Conditions:   append([]ObservationCondition(nil), projection.Conditions...),
-			DeleteSafety: cloneSwBlockVolumeDeleteSafetyDecision(projection.DeleteSafety),
-			NonClaims:    append([]string(nil), projection.NonClaims...),
-			EvidenceRefs: append([]string(nil), projection.EvidenceRefs...),
+			VolumeID:              projection.VolumeID,
+			PVCName:               projection.PVCName,
+			Status:                projection.Status,
+			ReasonCode:            projection.ReasonCode,
+			Conditions:            append([]ObservationCondition(nil), projection.Conditions...),
+			DeleteSafety:          cloneSwBlockVolumeDeleteSafetyDecision(projection.DeleteSafety),
+			ReplicaReintegrations: cloneReturnedReplicaProjections(projection.ReplicaReintegrations),
+			NonClaims:             append([]string(nil), projection.NonClaims...),
+			EvidenceRefs:          append([]string(nil), projection.EvidenceRefs...),
 		},
 	}
 	for _, condition := range projection.Conditions {
@@ -79,6 +81,17 @@ func ManagedVolumeOperatorContractFromProjection(projection ManagedVolumeProject
 		contract.AllowedActions = append(contract.AllowedActions, managedVolumeOperatorActionFromDeleteSafety(*projection.DeleteSafety))
 	}
 	return contract
+}
+
+func cloneReturnedReplicaProjections(in []ReturnedReplicaProjection) []ReturnedReplicaProjection {
+	if len(in) == 0 {
+		return nil
+	}
+	out := append([]ReturnedReplicaProjection(nil), in...)
+	for i := range out {
+		out[i].EvidenceRefs = append([]string(nil), in[i].EvidenceRefs...)
+	}
+	return out
 }
 
 func managedVolumeOperatorActionFromDeleteSafety(decision SwBlockVolumeDeleteSafetyDecision) ManagedVolumeOperatorAction {

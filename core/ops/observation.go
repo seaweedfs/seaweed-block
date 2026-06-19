@@ -38,6 +38,8 @@ const (
 	ReasonLoopbackFrontendRejected        = "loopback_frontend_rejected"
 	ReasonStalePrimaryFenced              = "stale_primary_fenced"
 	ReasonWALIntegrityFault               = "wal_integrity_fault"
+	ReasonReturnedReplicaFrontendFenced   = "returned_replica_frontend_fenced"
+	ReasonReturnedReplicaUnsafeFrontend   = "returned_replica_unsafe_frontend_ready"
 	ReasonInstallDriftAligned             = "install_drift_aligned"
 	ReasonInstallDriftMismatch            = "install_drift_mismatch"
 	ReasonInstallDriftEvidenceMissing     = "install_drift_evidence_missing"
@@ -150,6 +152,8 @@ type ReplicaEvidence struct {
 	DurableFrontierLSN   uint64                 `json:"durable_frontier_lsn,omitempty"`
 	CandidateReady       bool                   `json:"candidate_ready"`
 	CandidateReadyReason string                 `json:"candidate_ready_reason,omitempty"`
+	Healthy              bool                   `json:"healthy,omitempty"`
+	FrontendPrimaryReady bool                   `json:"frontend_primary_ready,omitempty"`
 	FrontendProtocol     string                 `json:"frontend_protocol,omitempty"`
 	FrontendAddr         string                 `json:"frontend_addr,omitempty"`
 	StatusAddr           string                 `json:"status_addr,omitempty"`

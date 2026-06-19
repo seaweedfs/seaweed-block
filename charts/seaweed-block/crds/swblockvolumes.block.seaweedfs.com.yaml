@@ -141,6 +141,52 @@ spec:
                         type: string
                     safeNextAction:
                       type: string
+                replicaReintegrations:
+                  type: array
+                  items:
+                    type: object
+                    required:
+                      - replicaID
+                      - state
+                      - frontendFenced
+                      - frontendPrimaryReady
+                      - ackEligible
+                      - durableFrontierKnown
+                    properties:
+                      replicaID:
+                        type: string
+                      state:
+                        type: string
+                        enum:
+                          - fenced
+                          - recovering
+                          - ready
+                          - blocked
+                          - unknown
+                      reasonCode:
+                        type: string
+                      frontendFenced:
+                        type: boolean
+                      frontendPrimaryReady:
+                        type: boolean
+                      ackEligible:
+                        type: boolean
+                      durableFrontierKnown:
+                        type: boolean
+                      durableFrontierLsn:
+                        type: integer
+                        format: int64
+                        minimum: 0
+                      requiredFrontierKnown:
+                        type: boolean
+                      requiredFrontierLsn:
+                        type: integer
+                        format: int64
+                        minimum: 0
+                      evidenceRefs:
+                        type: array
+                        items:
+                          type: string
                 nonClaims:
                   type: array
                   items:

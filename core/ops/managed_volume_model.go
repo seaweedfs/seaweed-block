@@ -63,6 +63,8 @@ const (
 	ManagedVolumeActionImportCSIImage         = "safe_k8s.import_csi_image"
 	ManagedVolumeActionInspectHostPath        = "observe.inspect_host_path"
 	ManagedVolumeActionRequestPromotion       = "authority.request_promotion"
+	ManagedVolumeActionReintegrateReturned    = "authority.reintegrate_returned_replica"
+	ManagedVolumeActionRebuildReturned        = "authority.rebuild_returned_replica"
 
 	ReasonMultiplePrimariesObserved      = "multiple_primaries_observed"
 	ReasonPublishTargetLoopbackCrossNode = "publish_target_loopback_cross_node"
@@ -80,6 +82,12 @@ const (
 	HostPathStateANAOptimized    = "ana_optimized"
 
 	NonClaimTransparentFailover = "transparent_failover_not_claimed"
+
+	ReturnedReplicaStateFenced     = "fenced"
+	ReturnedReplicaStateRecovering = "recovering"
+	ReturnedReplicaStateReady      = "ready"
+	ReturnedReplicaStateBlocked    = "blocked"
+	ReturnedReplicaStateUnknown    = "unknown"
 )
 
 type FactMeta struct {
@@ -162,6 +170,8 @@ type ReplicaFact struct {
 	DurableLatched       bool     `json:"durable_latched,omitempty"`
 	DurableFrontierKnown bool     `json:"durable_frontier_known,omitempty"`
 	DurableFrontierLSN   uint64   `json:"durable_frontier_lsn,omitempty"`
+	Healthy              bool     `json:"healthy,omitempty"`
+	FrontendPrimaryReady bool     `json:"frontend_primary_ready,omitempty"`
 	FrontendProtocol     string   `json:"frontend_protocol,omitempty"`
 	FrontendAddr         string   `json:"frontend_addr,omitempty"`
 	StatusAddr           string   `json:"status_addr,omitempty"`
@@ -197,22 +207,37 @@ type WorkloadCheckFact struct {
 }
 
 type ManagedVolumeProjection struct {
-	VolumeID          string                             `json:"volume_id,omitempty"`
-	Namespace         string                             `json:"namespace,omitempty"`
-	PVCName           string                             `json:"pvc_name,omitempty"`
-	PVName            string                             `json:"pv_name,omitempty"`
-	StorageClass      string                             `json:"storage_class,omitempty"`
-	ReplicationFactor int                                `json:"replication_factor,omitempty"`
-	AckProfile        string                             `json:"ack_profile,omitempty"`
-	ClaimProfile      string                             `json:"claim_profile,omitempty"`
-	Status            string                             `json:"status"`
-	ReasonCode        string                             `json:"reason_code,omitempty"`
-	States            ManagedVolumeStates                `json:"states"`
-	Actions           []ManagedVolumeAction              `json:"actions,omitempty"`
-	Conditions        []ObservationCondition             `json:"conditions,omitempty"`
-	DeleteSafety      *SwBlockVolumeDeleteSafetyDecision `json:"delete_safety,omitempty"`
-	NonClaims         []string                           `json:"non_claims,omitempty"`
-	EvidenceRefs      []string                           `json:"evidence_refs,omitempty"`
+	VolumeID              string                             `json:"volume_id,omitempty"`
+	Namespace             string                             `json:"namespace,omitempty"`
+	PVCName               string                             `json:"pvc_name,omitempty"`
+	PVName                string                             `json:"pv_name,omitempty"`
+	StorageClass          string                             `json:"storage_class,omitempty"`
+	ReplicationFactor     int                                `json:"replication_factor,omitempty"`
+	AckProfile            string                             `json:"ack_profile,omitempty"`
+	ClaimProfile          string                             `json:"claim_profile,omitempty"`
+	Status                string                             `json:"status"`
+	ReasonCode            string                             `json:"reason_code,omitempty"`
+	States                ManagedVolumeStates                `json:"states"`
+	Actions               []ManagedVolumeAction              `json:"actions,omitempty"`
+	Conditions            []ObservationCondition             `json:"conditions,omitempty"`
+	DeleteSafety          *SwBlockVolumeDeleteSafetyDecision `json:"delete_safety,omitempty"`
+	ReplicaReintegrations []ReturnedReplicaProjection        `json:"replica_reintegrations,omitempty"`
+	NonClaims             []string                           `json:"non_claims,omitempty"`
+	EvidenceRefs          []string                           `json:"evidence_refs,omitempty"`
+}
+
+type ReturnedReplicaProjection struct {
+	ReplicaID             string   `json:"replica_id"`
+	State                 string   `json:"state"`
+	ReasonCode            string   `json:"reason_code,omitempty"`
+	FrontendFenced        bool     `json:"frontend_fenced"`
+	FrontendPrimaryReady  bool     `json:"frontend_primary_ready"`
+	AckEligible           bool     `json:"ack_eligible"`
+	DurableFrontierKnown  bool     `json:"durable_frontier_known"`
+	DurableFrontierLSN    uint64   `json:"durable_frontier_lsn,omitempty"`
+	RequiredFrontierKnown bool     `json:"required_frontier_known,omitempty"`
+	RequiredFrontierLSN   uint64   `json:"required_frontier_lsn,omitempty"`
+	EvidenceRefs          []string `json:"evidence_refs,omitempty"`
 }
 
 type ManagedVolumeStates struct {
@@ -278,6 +303,18 @@ func RenderManagedVolumeProjectionText(projection ManagedVolumeProjection) strin
 		if len(projection.DeleteSafety.EvidenceRefs) > 0 {
 			fmt.Fprintf(&b, "managed_volume_delete_safety_evidence %s\n", strings.Join(projection.DeleteSafety.EvidenceRefs, ","))
 		}
+	}
+	for _, returned := range projection.ReplicaReintegrations {
+		fmt.Fprintf(&b, "managed_volume_returned_replica replica=%s state=%s reason=%s frontend_fenced=%t ack_eligible=%t durable_frontier_known=%t durable_lsn=%d required_frontier_known=%t required_lsn=%d\n",
+			emptyAsDash(returned.ReplicaID),
+			emptyAsDash(returned.State),
+			emptyAsDash(returned.ReasonCode),
+			returned.FrontendFenced,
+			returned.AckEligible,
+			returned.DurableFrontierKnown,
+			returned.DurableFrontierLSN,
+			returned.RequiredFrontierKnown,
+			returned.RequiredFrontierLSN)
 	}
 	for _, condition := range projection.Conditions {
 		fmt.Fprintf(&b, "managed_volume_condition %s status=%s reason=%s severity=%s",
@@ -376,6 +413,8 @@ func managedVolumeFactsFromVolumeEvidence(volume VolumeEvidence) ManagedVolumeFa
 			DurableLatched:       replica.DurableLatched,
 			DurableFrontierKnown: replica.DurableFrontierKnown,
 			DurableFrontierLSN:   replica.DurableFrontierLSN,
+			Healthy:              replica.Healthy,
+			FrontendPrimaryReady: replica.FrontendPrimaryReady,
 			FrontendProtocol:     replica.FrontendProtocol,
 			FrontendAddr:         replica.FrontendAddr,
 			StatusAddr:           replica.StatusAddr,
@@ -408,6 +447,7 @@ func ProjectManagedVolume(facts ManagedVolumeFacts) ManagedVolumeProjection {
 	}
 
 	deriveManagedVolumeStates(&projection, facts)
+	projection.ReplicaReintegrations = returnedReplicaProjections(facts)
 	status, reason := classifyManagedVolume(projection, facts)
 	projection.Status = status
 	projection.ReasonCode = reason
@@ -553,6 +593,9 @@ func classifyManagedVolume(p ManagedVolumeProjection, facts ManagedVolumeFacts) 
 	if p.States.Authority == ManagedVolumeAuthorityInvalid {
 		return ManagedVolumeStatusInvalid, ReasonMultiplePrimariesObserved
 	}
+	if hasReturnedReplicaReason(p.ReplicaReintegrations, ReasonReturnedReplicaUnsafeFrontend) {
+		return ManagedVolumeStatusBlocked, ReasonReturnedReplicaUnsafeFrontend
+	}
 	if facts.ProductReason == ReasonPublishTargetLoopbackCrossNode {
 		return ManagedVolumeStatusBlocked, ReasonPublishTargetLoopbackCrossNode
 	}
@@ -679,6 +722,32 @@ func managedVolumeActionsForProjection(p ManagedVolumeProjection, facts ManagedV
 			EvidenceRefs:    append([]string(nil), p.EvidenceRefs...),
 		})
 	}
+	for _, returned := range p.ReplicaReintegrations {
+		if returned.State == ReturnedReplicaStateFenced {
+			actions = append(actions, ManagedVolumeAction{
+				Type:            ManagedVolumeActionReintegrateReturned,
+				Target:          returned.ReplicaID,
+				Mode:            ManagedVolumeActionModeDryRun,
+				SideEffectClass: ManagedVolumeSideEffectAuthorityMutating,
+				OwnerExecutor:   "authority_recovery_executor",
+				Preconditions:   []string{"returned_replica_frontend_fenced", "durable_frontier_evidence"},
+				InvariantRefs:   []string{"INV-RETURNED-REPLICA-FENCING-001"},
+				EvidenceRefs:    append([]string(nil), returned.EvidenceRefs...),
+			})
+		}
+		if returned.State == ReturnedReplicaStateRecovering || returned.ReasonCode == ReasonCandidateFrontierBehind || returned.ReasonCode == ReasonDurableFrontierMissing {
+			actions = append(actions, ManagedVolumeAction{
+				Type:            ManagedVolumeActionRebuildReturned,
+				Target:          returned.ReplicaID,
+				Mode:            ManagedVolumeActionModeDryRun,
+				SideEffectClass: ManagedVolumeSideEffectAuthorityMutating,
+				OwnerExecutor:   "authority_recovery_executor",
+				Preconditions:   []string{"returned_replica_frontend_fenced", "required_frontier_known"},
+				InvariantRefs:   []string{"INV-RETURNED-REPLICA-FENCING-001", "INV-RETURNED-REPLICA-FRONTIER-001"},
+				EvidenceRefs:    append([]string(nil), returned.EvidenceRefs...),
+			})
+		}
+	}
 	for i := range actions {
 		evaluation := EvaluateManagedVolumeAction(actions[i].Type, facts)
 		actions[i].Decision = evaluation.Decision
@@ -700,6 +769,68 @@ func managedVolumeNonClaims(p ManagedVolumeProjection, facts ManagedVolumeFacts)
 		}
 	}
 	return out
+}
+
+func returnedReplicaProjections(facts ManagedVolumeFacts) []ReturnedReplicaProjection {
+	if facts.Authority == nil || facts.Authority.PrimaryReplica == "" {
+		return nil
+	}
+	var out []ReturnedReplicaProjection
+	for _, replica := range facts.Replicas {
+		if !isReturnedReplicaCandidate(replica, *facts.Authority) {
+			continue
+		}
+		projection := ReturnedReplicaProjection{
+			ReplicaID:             replica.ReplicaID,
+			FrontendPrimaryReady:  replica.FrontendPrimaryReady,
+			FrontendFenced:        !replica.FrontendPrimaryReady,
+			AckEligible:           false,
+			DurableFrontierKnown:  replica.DurableFrontierKnown,
+			DurableFrontierLSN:    replica.DurableFrontierLSN,
+			RequiredFrontierKnown: facts.Authority.RequiredFrontierKnown,
+			RequiredFrontierLSN:   facts.Authority.RequiredFrontierLSN,
+			EvidenceRefs:          append([]string(nil), facts.EvidenceRefs...),
+		}
+		switch {
+		case replica.FrontendPrimaryReady:
+			projection.State = ReturnedReplicaStateBlocked
+			projection.ReasonCode = ReasonReturnedReplicaUnsafeFrontend
+		case !replica.DurableFrontierKnown:
+			projection.State = ReturnedReplicaStateRecovering
+			projection.ReasonCode = ReasonDurableFrontierMissing
+		case facts.Authority.RequiredFrontierKnown && replica.DurableFrontierLSN < facts.Authority.RequiredFrontierLSN:
+			projection.State = ReturnedReplicaStateRecovering
+			projection.ReasonCode = ReasonCandidateFrontierBehind
+		default:
+			projection.State = ReturnedReplicaStateFenced
+			projection.ReasonCode = ReasonReturnedReplicaFrontendFenced
+		}
+		out = append(out, projection)
+	}
+	return out
+}
+
+func isReturnedReplicaCandidate(replica ReplicaFact, authority AuthorityFact) bool {
+	if !replica.Observed || replica.ReplicaID == "" || replica.ReplicaID == authority.PrimaryReplica {
+		return false
+	}
+	if authority.PreviousPrimary != "" && replica.ReplicaID == authority.PreviousPrimary {
+		return true
+	}
+	role := strings.ToLower(strings.TrimSpace(replica.Role))
+	if role == "returned" || role == "stale" || role == "previous_primary" {
+		return true
+	}
+	return replica.StalePrimaryFenced
+}
+
+func hasReturnedReplicaReason(returned []ReturnedReplicaProjection, reason string) bool {
+	for _, replica := range returned {
+		if replica.ReasonCode == reason {
+			return true
+		}
+	}
+	return false
 }
 
 func managedVolumeConditionsForProjection(p ManagedVolumeProjection) []ObservationCondition {

@@ -142,11 +142,25 @@ func managedVolumeActionFactPresent(requiredFact string, facts ManagedVolumeFact
 			}
 		}
 		return false
+	case "replica.frontend_primary_ready":
+		for _, replica := range facts.Replicas {
+			if isReturnedReplicaCandidate(replica, derefAuthorityFact(facts.Authority)) {
+				return true
+			}
+		}
+		return false
 	default:
 		// Unknown fact names are treated as missing so new contract entries
 		// must be deliberately wired into this executable evaluator.
 		return false
 	}
+}
+
+func derefAuthorityFact(authority *AuthorityFact) AuthorityFact {
+	if authority == nil {
+		return AuthorityFact{}
+	}
+	return *authority
 }
 
 func (e ManagedVolumeActionEvaluation) String() string {

@@ -263,16 +263,31 @@ func supportBundleReason(cluster ClusterEvidence) string {
 }
 
 type SwBlockVolumeCRDStatus struct {
-	VolumeID       string                        `json:"volumeID,omitempty"`
-	PVCName        string                        `json:"pvcName,omitempty"`
-	Status         string                        `json:"status"`
-	ReasonCode     string                        `json:"reasonCode,omitempty"`
-	ObservedAt     time.Time                     `json:"observedAt,omitempty"`
-	Conditions     []ObservationCondition        `json:"conditions,omitempty"`
-	DeleteSafety   *SwBlockVolumeCRDDeleteSafety `json:"deleteSafety"`
-	NonClaims      []string                      `json:"nonClaims,omitempty"`
-	EvidenceRefs   []string                      `json:"evidenceRefs,omitempty"`
-	AllowedActions []SwBlockVolumeCRDAction      `json:"allowedActions,omitempty"`
+	VolumeID              string                            `json:"volumeID,omitempty"`
+	PVCName               string                            `json:"pvcName,omitempty"`
+	Status                string                            `json:"status"`
+	ReasonCode            string                            `json:"reasonCode,omitempty"`
+	ObservedAt            time.Time                         `json:"observedAt,omitempty"`
+	Conditions            []ObservationCondition            `json:"conditions,omitempty"`
+	DeleteSafety          *SwBlockVolumeCRDDeleteSafety     `json:"deleteSafety"`
+	ReplicaReintegrations []SwBlockVolumeCRDReturnedReplica `json:"replicaReintegrations,omitempty"`
+	NonClaims             []string                          `json:"nonClaims,omitempty"`
+	EvidenceRefs          []string                          `json:"evidenceRefs,omitempty"`
+	AllowedActions        []SwBlockVolumeCRDAction          `json:"allowedActions,omitempty"`
+}
+
+type SwBlockVolumeCRDReturnedReplica struct {
+	ReplicaID             string   `json:"replicaID"`
+	State                 string   `json:"state"`
+	ReasonCode            string   `json:"reasonCode,omitempty"`
+	FrontendFenced        bool     `json:"frontendFenced"`
+	FrontendPrimaryReady  bool     `json:"frontendPrimaryReady"`
+	AckEligible           bool     `json:"ackEligible"`
+	DurableFrontierKnown  bool     `json:"durableFrontierKnown"`
+	DurableFrontierLSN    uint64   `json:"durableFrontierLsn,omitempty"`
+	RequiredFrontierKnown bool     `json:"requiredFrontierKnown,omitempty"`
+	RequiredFrontierLSN   uint64   `json:"requiredFrontierLsn,omitempty"`
+	EvidenceRefs          []string `json:"evidenceRefs,omitempty"`
 }
 
 type SwBlockVolumeCRDDeleteSafety struct {
@@ -393,16 +408,17 @@ func (r OperatorStatusReconciler) Reconcile(ctx context.Context) (OperatorStatus
 			Name:       SwBlockVolumeObjectName(volume.Status),
 		}
 		volumeStatus := SwBlockVolumeCRDStatus{
-			VolumeID:       volume.Status.VolumeID,
-			PVCName:        volume.Status.PVCName,
-			Status:         volume.Status.Status,
-			ReasonCode:     volume.Status.ReasonCode,
-			ObservedAt:     observedAt,
-			Conditions:     append([]ObservationCondition(nil), volume.Status.Conditions...),
-			DeleteSafety:   swBlockVolumeCRDDeleteSafety(volume.Status.DeleteSafety),
-			NonClaims:      append([]string(nil), volume.Status.NonClaims...),
-			EvidenceRefs:   append([]string(nil), volume.Status.EvidenceRefs...),
-			AllowedActions: swBlockVolumeCRDActions(volume.AllowedActions),
+			VolumeID:              volume.Status.VolumeID,
+			PVCName:               volume.Status.PVCName,
+			Status:                volume.Status.Status,
+			ReasonCode:            volume.Status.ReasonCode,
+			ObservedAt:            observedAt,
+			Conditions:            append([]ObservationCondition(nil), volume.Status.Conditions...),
+			DeleteSafety:          swBlockVolumeCRDDeleteSafety(volume.Status.DeleteSafety),
+			ReplicaReintegrations: swBlockVolumeCRDReturnedReplicas(volume.Status.ReplicaReintegrations),
+			NonClaims:             append([]string(nil), volume.Status.NonClaims...),
+			EvidenceRefs:          append([]string(nil), volume.Status.EvidenceRefs...),
+			AllowedActions:        swBlockVolumeCRDActions(volume.AllowedActions),
 		}
 		if err := r.Writer.WriteVolumeStatus(ctx, volumeRef, volumeStatus); err != nil {
 			if IsKubernetesStatusNotFound(err) {
@@ -447,6 +463,29 @@ func ProjectSwBlockVolumeDeleteSafety(cluster ClusterEvidence, volumes []SwBlock
 		})
 	}
 	return NormalizeObservationCluster(cluster)
+}
+
+func swBlockVolumeCRDReturnedReplicas(returned []ReturnedReplicaProjection) []SwBlockVolumeCRDReturnedReplica {
+	if len(returned) == 0 {
+		return nil
+	}
+	out := make([]SwBlockVolumeCRDReturnedReplica, 0, len(returned))
+	for _, replica := range returned {
+		out = append(out, SwBlockVolumeCRDReturnedReplica{
+			ReplicaID:             replica.ReplicaID,
+			State:                 replica.State,
+			ReasonCode:            replica.ReasonCode,
+			FrontendFenced:        replica.FrontendFenced,
+			FrontendPrimaryReady:  replica.FrontendPrimaryReady,
+			AckEligible:           replica.AckEligible,
+			DurableFrontierKnown:  replica.DurableFrontierKnown,
+			DurableFrontierLSN:    replica.DurableFrontierLSN,
+			RequiredFrontierKnown: replica.RequiredFrontierKnown,
+			RequiredFrontierLSN:   replica.RequiredFrontierLSN,
+			EvidenceRefs:          append([]string(nil), replica.EvidenceRefs...),
+		})
+	}
+	return out
 }
 
 func swBlockVolumeCRDDeleteSafety(decision *SwBlockVolumeDeleteSafetyDecision) *SwBlockVolumeCRDDeleteSafety {

@@ -65,6 +65,19 @@ func TestKubernetesStatusClientPatchesOnlyStatusSubresources(t *testing.T) {
 			FinalizerReleaseAllowed: true,
 			EvidenceRefs:            []string{"cleanup-summary.txt"},
 		},
+		ReplicaReintegrations: []SwBlockVolumeCRDReturnedReplica{{
+			ReplicaID:             "r1",
+			State:                 ReturnedReplicaStateFenced,
+			ReasonCode:            ReasonReturnedReplicaFrontendFenced,
+			FrontendFenced:        true,
+			FrontendPrimaryReady:  false,
+			AckEligible:           false,
+			DurableFrontierKnown:  true,
+			DurableFrontierLSN:    52,
+			RequiredFrontierKnown: true,
+			RequiredFrontierLSN:   52,
+			EvidenceRefs:          []string{"returned-replica-summary.txt"},
+		}},
 		AllowedActions: []SwBlockVolumeCRDAction{{
 			Type:             "observe.collect_bundle",
 			Mode:             "read_only",
@@ -134,6 +147,17 @@ func TestKubernetesStatusClientPatchesOnlyStatusSubresources(t *testing.T) {
 	for _, forbidden := range []string{"finalizer_release_allowed", "action_type", "safe_next_action"} {
 		if _, ok := deleteSafety[forbidden]; ok {
 			t.Fatalf("deleteSafety leaked snake_case %s: %+v", forbidden, deleteSafety)
+		}
+	}
+	returned := volumeStatus["replicaReintegrations"].([]any)[0].(map[string]any)
+	for _, want := range []string{"replicaID", "frontendFenced", "frontendPrimaryReady", "ackEligible", "durableFrontierKnown", "durableFrontierLsn", "requiredFrontierKnown", "requiredFrontierLsn"} {
+		if _, ok := returned[want]; !ok {
+			t.Fatalf("returned replica missing camelCase %s: %+v", want, returned)
+		}
+	}
+	for _, forbidden := range []string{"replica_id", "frontend_primary_ready", "ack_eligible", "durable_frontier_lsn"} {
+		if _, ok := returned[forbidden]; ok {
+			t.Fatalf("returned replica leaked snake_case %s: %+v", forbidden, returned)
 		}
 	}
 }

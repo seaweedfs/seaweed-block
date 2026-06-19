@@ -159,6 +159,19 @@ func renderManagedProjectionSummary(b *strings.Builder, managed ManagedVolumePro
 				managed.DeleteSafety.SafeNextAction)
 		}
 	}
+	for _, returned := range managed.ReplicaReintegrations {
+		fmt.Fprintf(b, "managed_volume_returned_replica=%s replica=%s state=%s reason=%s frontend_fenced=%t ack_eligible=%t durable_frontier_known=%t durable_lsn=%d required_frontier_known=%t required_lsn=%d\n",
+			emptyAsDash(managed.VolumeID),
+			emptyAsDash(returned.ReplicaID),
+			emptyAsDash(returned.State),
+			emptyAsDash(returned.ReasonCode),
+			returned.FrontendFenced,
+			returned.AckEligible,
+			returned.DurableFrontierKnown,
+			returned.DurableFrontierLSN,
+			returned.RequiredFrontierKnown,
+			returned.RequiredFrontierLSN)
+	}
 	for _, action := range managed.Actions {
 		fmt.Fprintf(b, "managed_volume_action=%s mode=%s side_effect=%s executor=%s decision=%s",
 			emptyAsDash(action.Type),

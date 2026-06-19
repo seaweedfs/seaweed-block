@@ -84,3 +84,35 @@ func TestManagedVolumeOperatorContract_RecoveredConditionEventIsNormal(t *testin
 		t.Fatalf("events=%+v", contract.Events)
 	}
 }
+
+func TestManagedVolumeOperatorContract_ReturnedReplicaProjection(t *testing.T) {
+	contract := ManagedVolumeOperatorContractFromProjection(ProjectManagedVolume(ManagedVolumeFacts{
+		VolumeID: "pvc-returned",
+		Authority: &AuthorityFact{
+			PrimaryReplica:        "r2",
+			PreviousPrimary:       "r1",
+			RequiredFrontierKnown: true,
+			RequiredFrontierLSN:   52,
+		},
+		Replicas: []ReplicaFact{{
+			ReplicaID:            "r1",
+			Observed:             true,
+			Role:                 "replica",
+			DurableFrontierKnown: true,
+			DurableFrontierLSN:   52,
+			FrontendPrimaryReady: false,
+		}, {
+			ReplicaID: "r2",
+			Observed:  true,
+			Role:      "primary",
+		}},
+	}))
+
+	if len(contract.Status.ReplicaReintegrations) != 1 {
+		t.Fatalf("returned replicas=%+v", contract.Status.ReplicaReintegrations)
+	}
+	returned := contract.Status.ReplicaReintegrations[0]
+	if returned.ReplicaID != "r1" || returned.State != ReturnedReplicaStateFenced || returned.ReasonCode != ReasonReturnedReplicaFrontendFenced {
+		t.Fatalf("returned replica=%+v", returned)
+	}
+}
