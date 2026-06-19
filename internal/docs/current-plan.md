@@ -132,12 +132,16 @@ Goal: make existing returned-replica evidence cold-readable.
 Acceptance:
 
 ```text
-[ ] existing returned-replica scenario bundles replay into returned/fenced state
-[ ] stale/behind evidence does not produce false Ready=True
-[ ] durable frontier facts are preserved in summary and operator-snapshot
+[x] synthetic returned-replica bundle replays into returned/fenced state
+[x] stale/behind evidence does not produce false Ready=True in projection tests
+[x] durable frontier facts are preserved in summary and operator-snapshot
 [ ] missing or stale evidence becomes Unknown/EvidenceStale, not Ready
 [ ] support bundle relocation preserves the interpretation
+[ ] existing live returned-replica scenario bundle replay is validated
 ```
+
+Implementation note: `BuildObservationFromBundle` now has a Phase 46 replay
+test for returned-replica projection. Live TestOps bundle replay remains D5.
 
 ## D5: Live Returned-Replica Gate
 

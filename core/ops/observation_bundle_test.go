@@ -190,6 +190,73 @@ func TestObservationBundle_ReplaysInstallDriftSummary(t *testing.T) {
 	}
 }
 
+func TestObservationBundle_ReplaysReturnedReplicaProjection(t *testing.T) {
+	dir := t.TempDir()
+	productDir := filepath.Join(dir, "demo", "product-observation")
+	if err := os.MkdirAll(productDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cluster := NewClusterEvidence(time.Date(2026, 6, 18, 12, 30, 0, 0, time.UTC))
+	cluster.Volumes = []VolumeEvidence{{
+		VolumeID:          "pvc-returned",
+		Namespace:         "default",
+		PVCName:           "demo-pvc",
+		ReplicationFactor: 3,
+		Status:            ObservationStatusRecovering,
+		PrimaryReplica:    "r2",
+		PublishTarget:     "192.168.1.184:3260",
+		Epoch:             2,
+		EndpointVersion:   9,
+		Replicas: []ReplicaEvidence{{
+			ReplicaID:            "r1",
+			KubernetesNode:       "m01",
+			Observed:             true,
+			Role:                 "replica",
+			ReplicationRole:      "ready",
+			DurableFrontierKnown: true,
+			DurableFrontierLSN:   52,
+			FrontendPrimaryReady: false,
+			StalePrimaryFenced:   true,
+			SupportBundlePath:    "returned-replica-summary.txt",
+		}, {
+			ReplicaID:            "r2",
+			KubernetesNode:       "m02",
+			Observed:             true,
+			Role:                 "primary",
+			DurableFrontierKnown: true,
+			DurableFrontierLSN:   52,
+			FrontendAddr:         "192.168.1.184:3260",
+		}},
+	}}
+	raw, err := MarshalObservationJSON(cluster)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, filepath.Join(productDir, ClusterEvidenceArtifact), string(raw))
+
+	replayed, err := BuildObservationFromBundle(ObservationBundleOptions{Dir: dir, VolumeID: "pvc-returned"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	summary := RenderObservationReportSummary(replayed)
+	for _, want := range []string{
+		"managed_volume_returned_replica=pvc-returned replica=r1 state=fenced reason=returned_replica_frontend_fenced",
+		"managed_volume_action=authority.reintegrate_returned_replica mode=dry_run side_effect=authority_mutating executor=authority_recovery_executor decision=rejected reason=policy_disabled",
+		"support_bundle_ref=returned-replica-summary.txt",
+	} {
+		if !strings.Contains(summary, want) {
+			t.Fatalf("summary missing %q:\n%s", want, summary)
+		}
+	}
+	snapshot := BuildOperatorFoundationSnapshot(replayed)
+	if len(snapshot.Volumes) != 1 || len(snapshot.Volumes[0].Status.ReplicaReintegrations) != 1 {
+		t.Fatalf("snapshot returned replicas=%+v", snapshot.Volumes)
+	}
+	if snapshot.Volumes[0].Status.ReplicaReintegrations[0].State != ReturnedReplicaStateFenced {
+		t.Fatalf("snapshot returned replica=%+v", snapshot.Volumes[0].Status.ReplicaReintegrations[0])
+	}
+}
+
 func TestObservationBundle_ManagedVolumeUsesPrimaryFailureArtifactHints(t *testing.T) {
 	dir := t.TempDir()
 	productDir := filepath.Join(dir, "demo", "product-observation")
