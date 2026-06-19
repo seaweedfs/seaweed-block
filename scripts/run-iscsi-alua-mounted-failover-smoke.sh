@@ -386,7 +386,7 @@ wait_log_pattern() {
   local pattern="$2"
   local label="$3"
   for _ in $(seq 1 160); do
-    if grep -q "$pattern" "$path" 2>/dev/null; then
+    if grep -Eq "$pattern" "$path" 2>/dev/null; then
       return 0
     fi
     sleep 0.25
@@ -413,7 +413,7 @@ wait_port "$PORT2"
 log "wait authority projections"
 wait_status_healthy "$R1_STATUS_ADDR" r1 1
 wait_status_projected "$R2_STATUS_ADDR" r2
-wait_log_pattern "$ARTIFACT_DIR/blockvolume-r2.log" "authority is now .*not this replica" "r2 standby authority observation"
+wait_log_pattern "$ARTIFACT_DIR/blockvolume-r2.log" "(authority is now .*not this replica|admitted as SUPPORTING replica .*frontend remains gated)" "r2 standby authority observation"
 
 discover_login() {
   local port="$1"
@@ -552,7 +552,7 @@ if [[ "$RETURN_R1_AFTER_FAILOVER" == "1" || "$RETURN_R1_AFTER_FAILOVER" == "true
     "${RUN_DIR}/r1-store" "$ARTIFACT_DIR/blockvolume-r1-returned.log"
   wait_port "$PORT1"
   wait_status_returned "$R1_STATUS_ADDR" r1
-  wait_log_pattern "$ARTIFACT_DIR/blockvolume-r1-returned.log" "authority is now .*not this replica" "r1 returned authority observation"
+  wait_log_pattern "$ARTIFACT_DIR/blockvolume-r1-returned.log" "(authority is now .*not this replica|admitted as SUPPORTING replica .*frontend remains gated)" "r1 returned authority observation"
   wait_log_pattern "$ARTIFACT_DIR/blockvolume-r1-returned.log" "durable recovered: recovered LSN=" "r1 returned local recovery"
   wait_peer_healthy "$R2_STATUS_ADDR" r1 2
   capture_durable_status "$R1_STATUS_ADDR" r1 "returned"
