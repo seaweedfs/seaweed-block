@@ -106,12 +106,16 @@ Goal: ensure D1's dry-run admission is visible and not overstated.
 Acceptance:
 
 ```text
-[ ] report summary shows `decision=allowed` for the safe fenced returned replica
-[ ] explain shows the same allowed dry-run action
-[ ] dashboard/operator-snapshot shows the same action contract
-[ ] CRD status allowedActions uses camelCase and validates against the CRD
-[ ] unsafe/behind returned replica still has no false Ready=True
+[x] report summary shows `decision=allowed` for the safe fenced returned replica
+[x] explain shows the same allowed dry-run action
+[x] dashboard/operator-snapshot shows the same action contract
+[x] CRD status allowedActions uses camelCase and validates against the CRD
+[x] unsafe/behind returned replica still has no false Ready=True
 ```
+
+Evidence: `TestOpsReturnedReplicaFromBundleSurfacesAcrossReportExplainDashboard`
+drives report, explain, dashboard/operator-snapshot, and CRD DTOs from the same
+returned-replica bundle.
 
 ## D4: Live Returned-Replica Gate
 
@@ -120,13 +124,20 @@ Goal: rerun the real returned-replica scenario against the new action decision.
 Acceptance:
 
 ```text
-[ ] component gate passes
-[ ] iSCSI returned-replica chain passes
-[ ] r2 remains sole primary/frontend-ready replica
-[ ] returned r1 remains frontend/ACK fenced
-[ ] action decision is dry-run allowed only for safe reintegration evidence
-[ ] cleanup verifier reports zero residue
+[x] component gate passes
+[x] iSCSI returned-replica chain passes
+[x] r2 remains sole primary/frontend-ready replica
+[x] returned r1 remains frontend/ACK fenced
+[x] action decision is dry-run allowed only for safe reintegration evidence
+[x] cleanup verifier reports zero residue
 ```
+
+Evidence: component run `20260619-155251-ac1e` passed 16/16. iSCSI returned
+chain run `20260619-155300-ba6d` passed 57/57 and proved r2 remained
+primary/frontend-ready while returned r1 stayed non-primary/frontend-fenced.
+The action decision assertion is covered by D3 because the live iSCSI scenario
+does not yet emit a managed-volume report bundle with required-frontier
+evidence.
 
 ## D5: Close / Future Executor Decision
 
