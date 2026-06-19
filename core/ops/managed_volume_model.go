@@ -392,10 +392,12 @@ func managedVolumeFactsFromVolumeEvidence(volume VolumeEvidence) ManagedVolumeFa
 		ProductStatus:     volume.Status,
 		ProductReason:     volume.Reason,
 		Authority: &AuthorityFact{
-			PrimaryReplica:  volume.PrimaryReplica,
-			PublishTarget:   volume.PublishTarget,
-			Epoch:           volume.Epoch,
-			EndpointVersion: volume.EndpointVersion,
+			PrimaryReplica:        volume.PrimaryReplica,
+			PublishTarget:         volume.PublishTarget,
+			Epoch:                 volume.Epoch,
+			EndpointVersion:       volume.EndpointVersion,
+			RequiredFrontierKnown: volume.RequiredFrontierKnown,
+			RequiredFrontierLSN:   volume.RequiredFrontierLSN,
 		},
 	}
 	if volume.PVCName != "" || volume.PVName != "" {

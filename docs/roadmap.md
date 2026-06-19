@@ -135,7 +135,11 @@ Recommended order from here:
    frontend/ACK eligibility until evidence supports reintegration, and
    volume-scoped across multi-volume reports. Automatic failback or broad
    rebuild execution remains a later executor phase.
-4. Add backup/restore and NVMe ANA parity after they can reuse the same action
+4. Phase 47: returned-replica executor admission. **Active.** First slice:
+   allow `authority.reintegrate_returned_replica` only as a dry-run, non-mutating
+   action when exact fencing and frontier evidence is present. This is not
+   automatic failback or rebuild execution.
+5. Add backup/restore and NVMe ANA parity after they can reuse the same action
    owner, evidence, and status model rather than creating another isolated
    control plane.
 
@@ -144,6 +148,7 @@ The internal release-train contract is
 the operation-layer loop for a bounded `SwBlockVolume` protection finalizer.
 Phase 46 reused this same fact -> judgment -> action -> evidence pattern for
 returned-replica reintegration before any larger storage feature is enabled.
+Phase 47 starts the executor-admission bridge without allowing mutation.
 
 The practical rule is:
 

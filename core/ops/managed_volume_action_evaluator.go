@@ -149,6 +149,26 @@ func managedVolumeActionFactPresent(requiredFact string, facts ManagedVolumeFact
 			}
 		}
 		return false
+	case "returned_replica.frontend_fenced":
+		for _, returned := range returnedReplicaProjections(facts) {
+			if returned.State == ReturnedReplicaStateFenced && returned.FrontendFenced && !returned.FrontendPrimaryReady && !returned.AckEligible {
+				return true
+			}
+		}
+		return false
+	case "returned_replica.required_frontier_covered":
+		for _, returned := range returnedReplicaProjections(facts) {
+			if returned.State != ReturnedReplicaStateFenced || !returned.DurableFrontierKnown {
+				continue
+			}
+			if !returned.RequiredFrontierKnown {
+				return false
+			}
+			if returned.DurableFrontierLSN >= returned.RequiredFrontierLSN {
+				return true
+			}
+		}
+		return false
 	default:
 		// Unknown fact names are treated as missing so new contract entries
 		// must be deliberately wired into this executable evaluator.

@@ -531,8 +531,8 @@ func TestManagedVolumeProjection_ReturnedPreviousPrimaryStaysFrontendFenced(t *t
 	if action == nil {
 		t.Fatalf("missing reintegrate action: %+v", projection.Actions)
 	}
-	if action.Decision != ManagedVolumeActionDecisionRejected || action.DecisionReason != ManagedVolumeActionRejectDisabled {
-		t.Fatalf("reintegrate action must fail closed: %+v", action)
+	if action.Decision != ManagedVolumeActionDecisionAllowed || action.DecisionReason != "" {
+		t.Fatalf("reintegrate action must be dry-run admitted only after fencing/frontier evidence: %+v", action)
 	}
 }
 

@@ -198,15 +198,17 @@ func TestObservationBundle_ReplaysReturnedReplicaProjection(t *testing.T) {
 	}
 	cluster := NewClusterEvidence(time.Date(2026, 6, 18, 12, 30, 0, 0, time.UTC))
 	cluster.Volumes = []VolumeEvidence{{
-		VolumeID:          "pvc-returned",
-		Namespace:         "default",
-		PVCName:           "demo-pvc",
-		ReplicationFactor: 3,
-		Status:            ObservationStatusRecovering,
-		PrimaryReplica:    "r2",
-		PublishTarget:     "192.168.1.184:3260",
-		Epoch:             2,
-		EndpointVersion:   9,
+		VolumeID:              "pvc-returned",
+		Namespace:             "default",
+		PVCName:               "demo-pvc",
+		ReplicationFactor:     3,
+		Status:                ObservationStatusRecovering,
+		PrimaryReplica:        "r2",
+		PublishTarget:         "192.168.1.184:3260",
+		Epoch:                 2,
+		EndpointVersion:       9,
+		RequiredFrontierKnown: true,
+		RequiredFrontierLSN:   52,
 		Replicas: []ReplicaEvidence{{
 			ReplicaID:            "r1",
 			KubernetesNode:       "m01",
@@ -241,7 +243,7 @@ func TestObservationBundle_ReplaysReturnedReplicaProjection(t *testing.T) {
 	summary := RenderObservationReportSummary(replayed)
 	for _, want := range []string{
 		"managed_volume_returned_replica=pvc-returned replica=r1 state=fenced reason=returned_replica_frontend_fenced",
-		"managed_volume_action=authority.reintegrate_returned_replica mode=dry_run side_effect=authority_mutating executor=authority_recovery_executor decision=rejected reason=policy_disabled",
+		"managed_volume_action=authority.reintegrate_returned_replica mode=dry_run side_effect=authority_mutating executor=authority_recovery_executor decision=allowed",
 		"support_bundle_ref=returned-replica-summary.txt",
 	} {
 		if !strings.Contains(summary, want) {
@@ -265,15 +267,17 @@ func TestObservationBundle_ReturnedReplicaProjectionIsVolumeScoped(t *testing.T)
 	}
 	cluster := NewClusterEvidence(time.Date(2026, 6, 19, 9, 0, 0, 0, time.UTC))
 	cluster.Volumes = []VolumeEvidence{{
-		VolumeID:          "pvc-a",
-		Namespace:         "default",
-		PVCName:           "app-a",
-		ReplicationFactor: 2,
-		Status:            ObservationStatusRecovering,
-		PrimaryReplica:    "a-r2",
-		PublishTarget:     "192.168.1.184:3260",
-		Epoch:             2,
-		EndpointVersion:   1,
+		VolumeID:              "pvc-a",
+		Namespace:             "default",
+		PVCName:               "app-a",
+		ReplicationFactor:     2,
+		Status:                ObservationStatusRecovering,
+		PrimaryReplica:        "a-r2",
+		PublishTarget:         "192.168.1.184:3260",
+		Epoch:                 2,
+		EndpointVersion:       1,
+		RequiredFrontierKnown: true,
+		RequiredFrontierLSN:   42,
 		Replicas: []ReplicaEvidence{{
 			ReplicaID:            "a-r1",
 			KubernetesNode:       "m01",

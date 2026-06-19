@@ -1165,7 +1165,7 @@ func TestOpsReturnedReplicaFromBundleSurfacesAcrossReportExplainDashboard(t *tes
 	}
 	for _, want := range []string{
 		"managed_volume_returned_replica=pvc-returned replica=r1 state=fenced reason=returned_replica_frontend_fenced",
-		"managed_volume_action=authority.reintegrate_returned_replica mode=dry_run side_effect=authority_mutating executor=authority_recovery_executor decision=rejected reason=policy_disabled",
+		"managed_volume_action=authority.reintegrate_returned_replica mode=dry_run side_effect=authority_mutating executor=authority_recovery_executor decision=allowed",
 	} {
 		if !strings.Contains(string(summary), want) {
 			t.Fatalf("report summary missing %q:\n%s", want, summary)
@@ -1759,16 +1759,18 @@ func writeCmdReturnedReplicaBundle(t *testing.T) string {
 	cluster.ProductRevision = "phase46-test"
 	cluster.Status = ops.ObservationStatusRecovering
 	cluster.Volumes = []ops.VolumeEvidence{{
-		VolumeID:          "pvc-returned",
-		Namespace:         "default",
-		PVCName:           "returned-pvc",
-		ReplicationFactor: 2,
-		Status:            ops.ObservationStatusRecovering,
-		PrimaryReplica:    "r2",
-		PrimaryNode:       "m02",
-		PublishTarget:     "192.168.1.184:3260",
-		Epoch:             2,
-		EndpointVersion:   1,
+		VolumeID:              "pvc-returned",
+		Namespace:             "default",
+		PVCName:               "returned-pvc",
+		ReplicationFactor:     2,
+		Status:                ops.ObservationStatusRecovering,
+		PrimaryReplica:        "r2",
+		PrimaryNode:           "m02",
+		PublishTarget:         "192.168.1.184:3260",
+		Epoch:                 2,
+		EndpointVersion:       1,
+		RequiredFrontierKnown: true,
+		RequiredFrontierLSN:   4241,
 		Replicas: []ops.ReplicaEvidence{{
 			ReplicaID:            "r1",
 			KubernetesNode:       "m01",

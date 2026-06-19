@@ -556,7 +556,11 @@ product risk. The recommended order is:
    (`internal/docs/finished-plans/phase46_finishedplan_returned_replica_reintegration_productization.md`).
    The phase intentionally stops short of automatic failback or broad rebuild
    execution.
-10. **Backup/snapshot/restore and NVMe ANA parity.**
+10. **Phase 47: returned-replica executor admission.** Active.
+   First slice admits `authority.reintegrate_returned_replica` only as a
+   dry-run, non-mutating action after exact fencing and frontier evidence is
+   present. It is the bridge toward a future executor, not automatic failback.
+11. **Backup/snapshot/restore and NVMe ANA parity.**
    Important, but they should reuse the status/action model rather than create
    another isolated control plane.
 
@@ -575,8 +579,10 @@ Approximate engineering effort if scope remains tight:
   API/admission proof that only finalizers can be patched.
 - Productized returned-replica rebuild/reintegration/failback: high. Phase 46
   closed the status/decision slice: returned replicas are visible, fenced, and
-  volume-scoped across product surfaces. Executor-enabled rebuild/failback
-  remains a later decision and should not be claimed until separately gated.
+  volume-scoped across product surfaces. Phase 47 starts dry-run executor
+  admission for safe reintegration evidence only. Executor-enabled
+  rebuild/failback remains a later decision and should not be claimed until
+  separately gated.
 - Backup/snapshot/restore: high. Requires durable data semantics and user-facing
   restore guarantees.
 - NVMe ANA parity: medium/high. Protocol-specific work, but cheaper if it uses
@@ -618,6 +624,9 @@ Approximate engineering effort if scope remains tight:
 - Phase 46 Returned-Replica Rebuild / Reintegration Productization is closed.
   Returned replicas are visible, fenced, action-gated, and QA-verifiable before
   any automatic rebuild/failback executor is enabled.
+- Active work is Phase 47 Returned-Replica Executor Admission. It should keep
+  `authority.reintegrate_returned_replica` dry-run/non-mutating while proving
+  exact fencing/frontier evidence and schema/RBAC conformance.
 - Phase 41-44 are the Operation Layer v0.5 release train: lifecycle-owner
   foundation, real API/admission proof, first bounded finalizer mutation, and
   delete lifecycle close gate.
@@ -626,8 +635,8 @@ Approximate engineering effort if scope remains tight:
   draft is `internal/docs/ref/phase42-lifecycle-owner-api-admission-gate.md`.
 - Do not start NVMe ANA parity, backup/restore, or broad mutating recovery
   workflows by bypassing the Operation Layer. The next storage feature should
-  either enable a separately gated returned-replica executor or reuse the same
-  fact -> judgment -> action -> evidence model.
+  either continue the separately gated returned-replica executor path or reuse
+  the same fact -> judgment -> action -> evidence model.
 - When the current plan closes, move it to `internal/docs/finished-plans/`
   with a phase/topic filename such as
   `phase1_finishedplan_frontend_protocol_readiness.md`.
