@@ -1,156 +1,138 @@
-# Current Plan: Phase 45 - Engineering Wiki And Knowledge Base
+# Current Plan: v0.5 Operation Layer Release Close
 
 Status: active.
 
-Branch: `phase45-engineering-wiki`
+Working branch: `phase45-engineering-wiki`
 
-Previous phase: Phase 44 is closed in
+Scope note: the recent engineering wiki work is a documentation maintenance
+slice, not a product phase. Do not count it as "Phase 45" in the product
+roadmap. The next formal product phase should start after the v0.5 operation
+layer release is closed.
+
+Previous product phase: Phase 44 is closed in
 `internal/docs/finished-plans/phase44_finishedplan_delete_lifecycle_close_gate.md`.
 
-## Product / Engineering Goal
+## Product Goal
 
-Create an internal engineering wiki that explains Seaweed Block development at
-developer depth:
-
-```text
-background
--> industry pattern
--> internal implementation structure
--> state machines and invariants
--> major code/function entry points
--> QA gates and failure evidence
--> current limits and next work
-```
-
-This is not a marketing site and not a replacement for finished plans. It is a
-navigation and explanation layer over the existing docs, plans, protocol notes,
-and TestOps scenarios.
-
-## Why This Is Next
-
-Seaweed Block has crossed more than forty phases. The hard problems are now
-spread across:
+Close the v0.5 beta-candidate release for the Operation Layer:
 
 ```text
-docs/
-internal/docs/finished-plans/
-internal/docs/ref/
-internal/docs/protocol/
-internal/docs/qa-assignments/
-testops/
-cmd/
-core/
+install
+-> PVC create
+-> CSI-created SwBlockVolume CR
+-> lifecycle-owner protection finalizer
+-> operator-status status/Events
+-> delete request
+-> hold on unsafe cleanup evidence
+-> release on clean cleanup evidence
+-> uninstall zero residue
 ```
 
-New developers need a structured way to answer:
+The release claim is narrow: bounded `SwBlockVolume` lifecycle ownership and
+evidence-driven delete hold/release. It is not automatic cleanup, rebuild,
+failback, backup/restore, upgrade execution, or a broad production operator.
 
-```text
-Why does this state exist?
-Which code owns it?
-Which invariant does it protect?
-Which QA gate proves it?
-What is explicitly out of scope?
-```
+## Why This Is The Current Plan
 
-Without this, future work like returned-replica rebuild, NVMe ANA parity, Docker
-volume integration, and backup/restore will rediscover old decisions or repeat
-old control-plane mistakes.
+Phases 41-44 already delivered the product capability:
+
+- lifecycle-owner role separation,
+- real Kubernetes admission/RBAC boundary,
+- finalizer add/release,
+- delete-safety status,
+- CSI-created CR identity,
+- integrated hold/release close gate,
+- multi-volume delete isolation,
+- report/dashboard/explain surface agreement.
+
+The remaining work is release closure, not a new feature phase.
 
 ## Scope Contract
 
 | In | Out |
 |---|---|
-| MkDocs Material static wiki scaffold | custom wiki server |
-| developer-facing docs under `docs/wiki/` | moving source evidence |
-| code map and state-machine map | exhaustive API reference |
-| Phase 1-44 phase map | rewriting every finished plan |
-| QA/TestOps map | replacing QA sign-offs |
-| local and internal-server preview instructions | public product website |
+| release docs / README / quickstart boundary review | new storage features |
+| publish or identify matching immutable images | automatic cleanup |
+| pinned-image release smoke | returned-replica rebuild |
+| verify status/events/finalizer/delete path on shipped artifacts | failback |
+| admin merge / PR summary | NVMe ANA parity |
+| keep wiki/docs as maintenance commits | GPUDirect/cuFile implementation |
 
-## D1: Wiki Site Scaffold
+## D1: Documentation Boundary Check
 
-Goal: make the wiki runnable as a static Markdown site.
-
-Acceptance:
-
-```text
-[x] `mkdocs.yml` exists
-[x] wiki pages live under `docs/wiki/`
-[x] local preview command is documented
-[x] strict MkDocs build passes
-```
-
-## D2: Developer Navigation Layer
-
-Goal: give developers stable entry points.
+Goal: ensure public docs and release notes say exactly what v0.5 can do.
 
 Acceptance:
 
 ```text
-[x] wiki index explains purpose and source-of-truth hierarchy
-[x] developer guide defines what belongs in the wiki
-[x] code map names commands, packages, and ownership split
-[x] state-machine map names readiness, node, delete-safety, finalizer states
-[x] phase map groups Phases 1-44 by product theme
-[x] QA/TestOps map explains gate realism and scenario families
+[ ] README feature table matches v0.5 bounded lifecycle claim
+[ ] quickstart does not over-claim lifecycle-owner as production operator
+[ ] docs/releases/v0.5-beta-candidate.md is current
+[ ] docs/roadmap.md says next product work is rebuild/reintegration after v0.5
+[ ] wiki links remain internal/developer documentation, not release claims
 ```
 
-## D3: Deep-Dive Expansion Plan
+## D2: Artifact / Image Check
 
-Goal: identify the first detailed wiki deep dives to write next.
+Goal: confirm release images match the code that passed Phase 44.
 
 Acceptance:
 
 ```text
-[x] domain coverage matrix exists
-[x] major domains from the last several months are listed
-[x] each domain maps to source evidence and current wiki coverage
-[x] priority deep pages are ordered for review
-[x] operation-layer v0.5 deep dive
-[x] block engine / WAL dirty-failure deep dive
-[x] CSI + SwBlockVolume lifecycle deep dive
-[x] TestOps scenario authoring deep dive
-[x] authority / epoch / promotion deep dive
-[x] iSCSI ALUA / multipath deep dive
-[x] returned-replica rebuild readiness deep dive
+[ ] matching seaweed-block and seaweed-block-csi images are published or named
+[ ] release note records the immutable tags/digests
+[ ] README/quickstart use the same public tags if this is a public release
+[ ] chart defaults do not point at an incompatible older image
 ```
 
-## D4: Publish / Serve Decision
+## D3: Release Smoke
 
-Goal: choose how the team serves the wiki internally.
+Goal: prove the shipped artifacts, not only local builds, run the user path.
 
-Recommended default:
+Minimum gate:
 
 ```text
-MkDocs Material static site
-git-backed markdown
-served by local `mkdocs serve`, Docker, or a simple internal static server
+[ ] Helm install with pinned images
+[ ] first PVC writer/reader passes
+[ ] SwBlockVolume CR is created
+[ ] lifecycle-owner adds protection finalizer
+[ ] operator-status writes Ready/first_volume_verified and Events
+[ ] delete request holds when cleanup evidence is missing/unsafe
+[ ] clean cleanup evidence releases the protection finalizer
+[ ] uninstall cleanup verifier reports zero residue
 ```
+
+## D4: Merge / Release Close
+
+Goal: merge the release docs and publish the release note.
 
 Acceptance:
 
 ```text
-[ ] local preview works on Windows/WSL
-[ ] Docker preview command works or is documented
-[ ] internal host target is chosen
-[ ] generated `site/` is not committed
+[ ] PR/admin-merge summary uses product language, not phase-internal language
+[ ] QA evidence is linked
+[ ] non-claims are preserved
+[ ] docs/wiki maintenance commits are described as documentation support
+[ ] next product phase is explicitly named
 ```
 
-## Current Progress
+## Next Formal Product Phase
 
-- MkDocs scaffold added in `mkdocs.yml`.
-- Initial wiki pages added under `docs/wiki/`.
-- Strict build validated in a temporary Python environment:
-  `mkdocs build --strict --site-dir <temp>`.
-
-## Next Step
-
-Expand the wiki from navigation into detailed engineering chapters:
+Recommended next formal phase after v0.5 release close:
 
 ```text
-1. Operation layer v0.5: facts -> judgment -> action -> admission -> evidence.
-2. Block engine and WAL failure semantics: why false Ready was possible and how
-   the gate forced a real fix.
-3. CSI lifecycle: PVC -> CreateVolume -> SwBlockVolume CR -> status/finalizer.
-4. TestOps authoring: avoid self-proof, prefer live/replay/adversarial gates.
+Returned-replica rebuild / reintegration productization
 ```
+
+That phase should reuse the v0.5 fact -> judgment -> action -> evidence model:
+
+- observe returned replica,
+- keep it frontend/ACK fenced,
+- decide catch-up versus rebuild from frontier facts,
+- show progress/status/Events,
+- admit it back only after terminal evidence,
+- prove multi-volume isolation and no false Ready.
+
+NVMe ANA parity, failback, backup/restore, Docker adapter, and GPUDirect/cuFile
+remain future trains until this lifecycle model is reused successfully for a
+real storage recovery action.
