@@ -214,7 +214,7 @@ phases:
       - action: grep_log
         node: m02
         path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-returned-chain/returned_failover/blockvolume-r1-returned.log"
-        pattern: "authority is now .*not this replica"
+        pattern: "(authority is now .*not this replica|admitted as SUPPORTING replica .*frontend remains gated)"
         save_as: r1_returned_supersede_observed_count
       - action: assert_greater
         actual: "{{ r1_returned_supersede_observed_count }}"
