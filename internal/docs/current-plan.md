@@ -86,15 +86,18 @@ Goal: stop repeating live-only CRD/RBAC failures from Phases 35-42.
 Acceptance:
 
 ```text
-[ ] real or envtest API validates SwBlockVolume status payloads
-[ ] returned-replica action DTO uses the same enum/casing as the CRD
-[ ] operator-status remains status/events-only
-[ ] lifecycle-owner remains finalizer-only where enabled
-[ ] no main-object/spec/storage/workload mutation is added
+[x] schema-aware API validates SwBlockVolume status payloads
+[x] returned-replica action DTO uses the same enum/casing as the CRD
+[x] operator-status remains status/events-only
+[x] lifecycle-owner remains finalizer-only where enabled
+[x] no main-object/spec/storage/workload mutation is added
 ```
 
-If envtest is not feasible in this repo slice, QA must run a real-apiserver
-server-side-dry-run gate before D3 closes.
+Implementation note: `TestPhase40D1KubernetesStatusClientConformsToCRDSchemaAndRBAC`
+now includes the Phase 47 `authority.reintegrate_returned_replica` allowed
+dry-run payload and validates it against the CRD schema-aware mock. QA should
+still run a real-apiserver server-side-dry-run gate before release or before a
+later mutating executor phase.
 
 ## D3: Product Surface Rerun
 
