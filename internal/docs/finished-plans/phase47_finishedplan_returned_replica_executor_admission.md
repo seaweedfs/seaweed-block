@@ -1,6 +1,6 @@
 # Phase 47 Finished Plan: Returned-Replica Executor Admission
 
-Status: dev-validated; ready for independent QA.
+Status: complete; QA PASS.
 
 Branch: `phase47-returned-replica-executor-gate`
 
@@ -43,6 +43,7 @@ authority.reintegrate_returned_replica decision=allowed mode=dry_run
 |---|---|---|
 | D1 dry-run admission | `go test -count=1 ./core/ops` | PASS |
 | D2 schema/RBAC conformance | `TestPhase40D1KubernetesStatusClientConformsToCRDSchemaAndRBAC` | PASS |
+| D2 live API status dry-run | `20260620-101008-dbca` | PASS, 12/12 |
 | D3 product surfaces | `TestOpsReturnedReplicaFromBundleSurfacesAcrossReportExplainDashboard` | PASS |
 | D4 component live gate | `20260619-155251-ac1e` | PASS, 16/16 |
 | D4 iSCSI live gate | `20260619-155300-ba6d` | PASS, 57/57 |
@@ -77,7 +78,10 @@ The allowed action decision is therefore validated through the product-surface
 bundle test, not directly from the live iSCSI chain.
 
 Before any future mutating executor phase, add a live scenario artifact that
-emits the required-frontier managed-volume evidence from the same run.
+emits the required-frontier managed-volume evidence from the same run. The D2
+live API gate already proves the returned-replica status/action payload validates
+against the real Kubernetes status subresource and that operator-status cannot
+patch the main object.
 
 ## Next Possible Phase
 

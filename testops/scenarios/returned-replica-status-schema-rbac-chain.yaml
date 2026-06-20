@@ -1,0 +1,72 @@
+# Runner-native Phase 47 D2 gate: live returned-replica status schema/RBAC.
+
+name: returned-replica-status-schema-rbac-chain
+timeout: 5m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: status_schema_rbac_gate
+    actions:
+      - action: exec
+        node: m02
+        timeout: 4m
+        cmd: "rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase47-status-schema-rbac && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase47-status-schema-rbac && cd {{ product_root }} && SW_BLOCK_ARTIFACT_DIR=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase47-status-schema-rbac bash scripts/run-phase47-returned-replica-status-schema-rbac-gate.sh {{ product_root }}"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase47-status-schema-rbac/phase47-returned-replica-status-schema-rbac-summary.txt"
+        pattern: "^phase47_returned_replica_status_schema_rbac_status=ok$"
+        save_as: phase47_status_gate_ok
+      - action: assert_greater
+        actual: "{{ phase47_status_gate_ok }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase47-status-schema-rbac/phase47-returned-replica-status-schema-rbac-summary.txt"
+        pattern: "^valid_returned_replica_status_server_dry_run=true$"
+        save_as: phase47_valid_status_count
+      - action: assert_greater
+        actual: "{{ phase47_valid_status_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase47-status-schema-rbac/phase47-returned-replica-status-schema-rbac-summary.txt"
+        pattern: "^snake_case_action_rejected=true$"
+        save_as: phase47_snake_rejected_count
+      - action: assert_greater
+        actual: "{{ phase47_snake_rejected_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase47-status-schema-rbac/phase47-returned-replica-status-schema-rbac-summary.txt"
+        pattern: "^unsupported_action_mode_rejected=true$"
+        save_as: phase47_mode_rejected_count
+      - action: assert_greater
+        actual: "{{ phase47_mode_rejected_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase47-status-schema-rbac/phase47-returned-replica-status-schema-rbac-summary.txt"
+        pattern: "^operator_status_main_patch_allowed=no$"
+        save_as: phase47_main_patch_denied_count
+      - action: assert_greater
+        actual: "{{ phase47_main_patch_denied_count }}"
+        threshold: "0"
+
+  - name: collect
+    always: true
+    actions:
+      - action: collect_path
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase47-status-schema-rbac"
+        name: "remote-phases"
+        ignore_error: true

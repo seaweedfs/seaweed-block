@@ -135,7 +135,7 @@ Recommended order from here:
    frontend/ACK eligibility until evidence supports reintegration, and
    volume-scoped across multi-volume reports. Automatic failback or broad
    rebuild execution remains a later executor phase.
-4. Phase 47: returned-replica executor admission. **Dev-validated; QA pending**
+4. Phase 47: returned-replica executor admission. **Closed 2026-06-20, QA PASS**
    (`internal/docs/finished-plans/phase47_finishedplan_returned_replica_executor_admission.md`).
    `authority.reintegrate_returned_replica` is allowed only as a dry-run,
    non-mutating action when exact fencing and frontier evidence is present.

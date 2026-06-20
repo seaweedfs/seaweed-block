@@ -95,9 +95,9 @@ Acceptance:
 
 Implementation note: `TestPhase40D1KubernetesStatusClientConformsToCRDSchemaAndRBAC`
 now includes the Phase 47 `authority.reintegrate_returned_replica` allowed
-dry-run payload and validates it against the CRD schema-aware mock. QA should
-still run a real-apiserver server-side-dry-run gate before release or before a
-later mutating executor phase.
+dry-run payload and validates it against the CRD schema-aware mock. The live
+server-side dry-run gate `returned-replica-status-schema-rbac-chain.yaml`
+passed as run `20260620-101008-dbca`.
 
 ## D3: Product Surface Rerun
 
@@ -154,6 +154,6 @@ Acceptance:
 Only after D5 should a later phase consider a real mutating executor for
 catch-up/rebuild/failback.
 
-Implementation note: Phase 47 is dev-validated and ready for independent QA.
+Implementation note: Phase 47 is QA-validated for the dry-run admission slice.
 It admits only a dry-run, non-mutating returned-replica reintegration action.
 The next executor slice must separately gate any authority/storage mutation.
