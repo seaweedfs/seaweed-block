@@ -118,6 +118,7 @@ func TestObservationReportSummary_IncludesReturnedReplicaProjection(t *testing.T
 		"managed_volume=pvc-returned status=recovering",
 		"managed_volume_returned_replica=pvc-returned replica=r1 state=fenced reason=returned_replica_frontend_fenced",
 		"frontend_fenced=true ack_eligible=false durable_frontier_known=true durable_lsn=52",
+		"managed_volume_executor_preflight=authority.reintegrate_returned_replica target=r1 decision=ready reason=preconditions_satisfied mode=dry_run executor=authority_recovery_executor mutation_allowed=false required_lsn=52 durable_lsn=52",
 		"managed_volume_action=authority.reintegrate_returned_replica mode=dry_run side_effect=authority_mutating executor=authority_recovery_executor decision=allowed",
 	} {
 		if !strings.Contains(summary, want) {

@@ -57,8 +57,12 @@ This is the short internal roadmap. Keep it current and readable.
   evidence refs, cleanup visibility, safe next-step hints, and cross-surface
   agreement. This remains read-only and does not add mutating operator
   lifecycle.
-- Active phase: Phase 37 Live Node Evidence Hardening. Keep it read-only and
-  bounded to live node blockers; do not extend it into mutating lifecycle.
+- Current development slice: returned-replica reintegration productization has
+  advanced through Phase 49. Phases 46-49 made returned replicas visible in the
+  ManagedVolume model, admitted reintegration only as a dry-run action, proved
+  same-run live evidence from the iSCSI returned-replica scenario, and added a
+  non-mutating executor preflight. Do not claim automatic reintegration,
+  rebuild, failback, ACK eligibility mutation, or frontend publication yet.
 - Model hardening gate before the next large release: complete the
   ManagedVolume Operations Model under `internal/docs/protocol/` before
   expanding operator or broader HA claims. The goal is to prevent Kubernetes,
@@ -183,11 +187,16 @@ rebuild, delete safety, or cleanup must start as a separate gated phase.
   distinct nodes, non-loopback frontends, node-aware publish target selection,
   authority promotion to a surviving replica, host-path recovery through the
   documented mechanism, and support-bundle proof of fencing and data integrity.
-- Later: returned-replica rebuild/reintegration/failback, NVMe ANA Kubernetes
-  multipath parity, stronger committed-frontier reporting, broad distro/host
-  compatibility, and longer soak under failure. NVMe ANA parity should follow
-  the Kubernetes-native status foundation so ANA facts, path states, and
-  protocol-specific reasons project through the same CRD/Condition/Event model.
+- Current returned-replica status: observed returned replicas are productized
+  through the ManagedVolume surface. A dry-run reintegration action and
+  executor preflight can become ready only with fencing and frontier evidence.
+  The actual authority/storage mutation is still deferred.
+- Later: returned-replica rebuild/reintegration/failback execution, NVMe ANA
+  Kubernetes multipath parity, stronger committed-frontier reporting, broad
+  distro/host compatibility, and longer soak under failure. NVMe ANA parity
+  should follow the Kubernetes-native status foundation so ANA facts, path
+  states, and protocol-specific reasons project through the same
+  CRD/Condition/Event model.
 
 ### Track E: Protocol / Backend Expansion
 

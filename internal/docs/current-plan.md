@@ -1,123 +1,122 @@
-# Current Plan: Phase 48 Returned-Replica Live Evidence Close
+# Current Plan: Phase 49 Returned-Replica Executor Preflight
 
-Status: complete; QA PASS.
+Status: complete; local validation PASS.
 
-Working branch: `phase48-returned-replica-live-evidence`
+Working branch: `phase49-returned-replica-executor-preflight`
 
-Decision note: v0.5 release smoke remains intentionally skipped. Do not mark
-v0.5 released until matching public images are published and the pinned-image
-smoke is run.
+Decision note: this phase does not execute reintegration, rebuild, ACK
+eligibility, failback, or frontend publication. It adds the executable
+preflight contract a future authority executor must satisfy before any storage
+or authority mutation can be considered.
 
-Previous product phase: Phase 47 is closed in
-`internal/docs/finished-plans/phase47_finishedplan_returned_replica_executor_admission.md`.
+Previous product phase: Phase 48 is closed in
+`internal/docs/finished-plans/phase48_finishedplan_returned_replica_live_evidence.md`.
 
 Finished plan:
-`internal/docs/finished-plans/phase48_finishedplan_returned_replica_live_evidence.md`.
+`internal/docs/finished-plans/phase49_finishedplan_returned_replica_executor_preflight.md`.
 
 ## Product Goal
 
-Close the remaining returned-replica evidence gap before any mutating executor:
+Turn Phase 48 same-run returned-replica evidence into a precise executor
+preflight:
 
 ```text
-real iSCSI returned-replica run
--> r2 remains the sole frontend-ready primary
--> returned r1 remains frontend/ACK fenced
--> r1 durable frontier is observed
--> required frontier is derived from the live primary evidence
--> report/explain/dashboard can replay the same run as dry-run allowed
--> no rebuild/failback/ACK/frontend mutation executes
+returned replica evidence
+-> dry-run action admitted
+-> exactly one target replica
+-> frontend/ACK fenced
+-> durable frontier covers required frontier
+-> preflight=ready, mutation_allowed=false
 ```
 
-Phase 47 admitted `authority.reintegrate_returned_replica` only as a dry-run
-action, but the live iSCSI scenario did not emit the managed-volume evidence
-needed to prove the dry-run action from the same run. Phase 48 makes the live
-gate produce and validate that evidence.
+Anything incomplete or unsafe must produce `preflight=hold` with a stable reason.
 
 ## Why This Is Next
 
-Skipping directly from Phase 47 to a mutating executor would repeat the failure
-mode we have been removing:
+Phase 47 admitted `authority.reintegrate_returned_replica` as a dry-run action.
+Phase 48 proved the live iSCSI scenario can carry the required evidence. The
+remaining risk before a real executor is ambiguity: a future mutating component
+should not infer readiness from free-form report lines.
 
-```text
-product surface says an action is allowed
-but the live scenario that drove the storage path did not carry the exact facts
-```
-
-The next executor phase must start from same-run live evidence, not a synthetic
-bundle plus a separate storage smoke.
+Phase 49 adds a typed preflight layer that makes the handoff explicit while
+keeping the no-mutation boundary.
 
 ## Scope Contract
 
 | In | Out |
 |---|---|
-| live returned-replica evidence bundle from the iSCSI scenario | automatic failback |
-| required frontier derived from live durable primary evidence | rebuild traffic |
-| returned replica durable frontier compared to required frontier | ACK eligibility mutation |
-| report/operator-snapshot/dashboard/explain replay from same run | frontend publication change |
-| TestOps assertions for dry-run allowed action from live evidence | release-image publication |
+| `ReturnedReplicaExecutorPreflight` model | ACK eligibility mutation |
+| fail-closed decision reasons | frontend publication mutation |
+| report and explain visibility | rebuild traffic |
+| unit tests for ready/hold states | automatic failback |
+| Phase 48 bundle surface regression | CRD schema change |
 
-## D1: Scenario Evidence Emission
+## D1: Preflight Model
 
-Goal: extend `iscsi-returned-replica-chain.yaml` so the live run emits a
-`product-observation/cluster-evidence.json` bundle after r1 returns.
-
-Acceptance:
-
-```text
-[x] sw-block binary is built with blockmaster/blockvolume
-[x] bundle contains r2 as primary/frontend-ready
-[x] bundle contains returned r1 as frontend-fenced/non-healthy
-[x] bundle contains required_frontier_known=true
-[x] required_frontier_lsn comes from live r2 durable status
-[x] returned r1 durable_lsn >= required_frontier_lsn
-```
-
-## D2: Same-Run Report Replay
-
-Goal: run `sw-block ops report --from-bundle` against the same live scenario
-artifacts and assert the Phase 47 action decision.
+Goal: create a pure `core/ops` preflight contract for
+`authority.reintegrate_returned_replica`.
 
 Acceptance:
 
 ```text
-[x] summary shows returned r1 state=fenced reason=returned_replica_frontend_fenced
-[x] summary shows authority.reintegrate_returned_replica decision=allowed
-[x] action remains mode=dry_run mutation_allowed=false
-[x] report is produced from the live run directory, not a synthetic fixture
-[x] cleanup verifier reports zero residue
+[x] ready only when the dry-run action is allowed
+[x] ready only for exactly one returned replica target
+[x] ready only when frontend_fenced=true and ack_eligible=false
+[x] ready only when durable_lsn >= required_lsn
+[x] mutation_allowed=false in all states
 ```
 
-## D3: Product Surface Parity
+## D2: Fail-Closed Reasons
 
-Goal: ensure the live-derived bundle remains consumable by product surfaces.
+Goal: make unsafe or incomplete evidence explain why a future executor must not
+run.
 
 Acceptance:
 
 ```text
-[x] operator-snapshot carries replica_reintegrations[] for r1
-[x] operator-snapshot carries the dry-run allowed action
-[x] dashboard replay returns the same operator-snapshot
-[x] explain output includes returned-replica state and action decision
+[x] missing frontier -> hold
+[x] unsafe frontend -> hold
+[x] frontier behind -> hold
+[x] ambiguous returned replica -> hold
+[x] action rejected -> hold
 ```
 
-Implementation may be either scenario-level assertions or a small wrapper gate
-that replays the collected bundle after the iSCSI scenario.
+## D3: Product Surface Visibility
 
-## D4: Close / Executor Readiness Decision
-
-Goal: decide whether the next phase is allowed to design a real mutating
-executor.
+Goal: show the preflight in the surfaces that already carry returned-replica
+evidence.
 
 Acceptance:
 
 ```text
-[x] QA sign-off states same-run live evidence status
-[x] finished plan records the no-mutation boundary
-[x] roadmap separates "executor admission" from "executor execution"
-[x] next phase is explicitly scoped if mutation is proposed
+[x] report summary renders managed_volume_executor_preflight=...
+[x] ops explain renders managed_volume_executor_preflight ...
+[x] existing returned-replica bundle test asserts both surfaces
+[x] operator-snapshot/CRD remain unchanged in this phase
 ```
 
-Only after D4 should a later phase consider a bounded executor for
-catch-up/rebuild/failback. That later phase must define owner, admission/RBAC,
-preconditions, terminal evidence, rollback behavior, and multi-volume isolation
-before enabling any mutation.
+## D4: Validation
+
+Validation completed:
+
+```text
+[x] go test -count=1 ./core/ops
+[x] go test -count=1 ./cmd/sw-block -run TestOpsReturnedReplicaFromBundleSurfacesAcrossReportExplainDashboard
+```
+
+## Next Phase Candidate
+
+The next storage-executor phase, if started, must define:
+
+```text
+owner executor
+admission/RBAC boundary
+exact mutation set
+terminal evidence after mutation
+hold/retry behavior
+multi-volume isolation
+rollback/fail-closed behavior
+live QA gate
+```
+
+Do not enable a mutating returned-replica executor from Phase 49 alone.

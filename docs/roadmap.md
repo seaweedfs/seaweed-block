@@ -146,7 +146,13 @@ Recommended order from here:
    evidence proving r1 remains fenced, r2 remains the primary, and the returned
    replica covers the required frontier before any future executor mutates
    authority or storage state.
-6. Add backup/restore and NVMe ANA parity after they can reuse the same action
+6. Phase 49: returned-replica executor preflight. **Closed 2026-06-20, local PASS**
+   (`internal/docs/finished-plans/phase49_finishedplan_returned_replica_executor_preflight.md`).
+   The returned-replica dry-run action now has a typed preflight that is ready
+   only when the target is unique, frontend/ACK fenced, and durable frontier
+   evidence covers the required frontier. It remains non-mutating and does not
+   claim automatic reintegration, rebuild, failback, or frontend publication.
+7. Add backup/restore and NVMe ANA parity after they can reuse the same action
    owner, evidence, and status model rather than creating another isolated
    control plane.
 
@@ -155,7 +161,8 @@ The internal release-train contract is
 the operation-layer loop for a bounded `SwBlockVolume` protection finalizer.
 Phase 46 reused this same fact -> judgment -> action -> evidence pattern for
 returned-replica reintegration before any larger storage feature is enabled.
-Phase 47 starts the executor-admission bridge without allowing mutation.
+Phases 47-49 start the executor-admission and preflight bridge without allowing
+mutation.
 
 The practical rule is:
 
