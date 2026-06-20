@@ -606,12 +606,13 @@ func TestOpsExplainProjectsDeletingCRFromCleanupSummary(t *testing.T) {
 	t.Setenv("KUBERNETES_SERVICE_HOST", "10.0.0.1")
 
 	cleanupSummary := filepath.Join(t.TempDir(), "cleanup-summary.txt")
+	cleanupObservedAt := time.Now().UTC().Format(time.RFC3339)
 	if err := os.WriteFile(cleanupSummary, []byte(strings.Join([]string{
 		"cleanup_status=failed",
 		"iscsi_residue_count=1",
 		"failure_count=1",
 		"reason_codes=iscsi_node_records_present",
-		"cleanup_observed_at=2026-06-17T08:00:00Z",
+		"cleanup_observed_at=" + cleanupObservedAt,
 	}, "\n")), 0o600); err != nil {
 		t.Fatal(err)
 	}
