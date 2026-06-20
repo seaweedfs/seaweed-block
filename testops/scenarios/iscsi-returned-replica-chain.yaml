@@ -49,7 +49,7 @@ phases:
       - action: exec
         node: m02
         timeout: 8m
-        cmd: "cd {{ product_root }} && go build -o /mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-returned-chain/bin/blockmaster ./cmd/blockmaster && go build -o /mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-returned-chain/bin/blockvolume ./cmd/blockvolume"
+        cmd: "cd {{ product_root }} && go build -o /mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-returned-chain/bin/blockmaster ./cmd/blockmaster && go build -o /mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-returned-chain/bin/blockvolume ./cmd/blockvolume && go build -o /mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-returned-chain/bin/sw-block ./cmd/sw-block"
       - action: exec
         node: m02
         cmd: "cd {{ product_root }} && git rev-parse HEAD > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-returned-chain/pin_build/git.sha && git status --short > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-returned-chain/pin_build/git.status && /mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-returned-chain/bin/blockmaster --version > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-returned-chain/pin_build/blockmaster.version.txt && /mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-returned-chain/bin/blockvolume --version > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-returned-chain/pin_build/blockvolume.version.txt"
@@ -242,6 +242,139 @@ phases:
         save_as: r2_durable_operational_count
       - action: assert_greater
         actual: "{{ r2_durable_operational_count }}"
+        threshold: "0"
+      - action: exec
+        node: m02
+        timeout: 2m
+        cmd: |
+          ROOT=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-returned-chain/returned_failover
+          mkdir -p "$ROOT/product-observation" "$ROOT/report"
+          python3 - "$ROOT" <<'PY'
+          import datetime, json, pathlib, sys
+          root = pathlib.Path(sys.argv[1])
+          r1 = json.loads((root / 'status-r1-returned.json').read_text())
+          r2 = json.loads((root / 'status-r2-after-r1-return.json').read_text())
+          dr1 = json.loads((root / 'status-durable-r1-returned.json').read_text())['Volumes'][0]
+          dr2 = json.loads((root / 'status-durable-r2-primary-after-r1-return.json').read_text())['Volumes'][0]
+          required = int(dr2.get('DurableLSN') or 0)
+          r1_durable = int(dr1.get('DurableLSN') or 0)
+          cluster = {
+            'schema_version': '1.0',
+            'captured_at': datetime.datetime.now(datetime.timezone.utc).isoformat().replace('+00:00', 'Z'),
+            'product_revision': 'returned-replica-live-gate',
+            'status': 'recovering',
+            'volumes': [{
+              'volume_id': 'v1',
+              'namespace': 'testops',
+              'pvc_name': 'iscsi-returned-replica-chain',
+              'replication_factor': 2,
+              'ack_profile': 'sync-quorum',
+              'status': 'recovering',
+              'reason': 'returned_replica_frontend_fenced',
+              'primary_replica': 'r2',
+              'primary_node': 'm02',
+              'publish_target': '127.0.0.1:3281',
+              'epoch': int(r2.get('Epoch') or 0),
+              'endpoint_version': int(r2.get('EndpointVersion') or 0),
+              'required_frontier_known': required > 0,
+              'required_frontier_lsn': required,
+              'replicas': [{
+                'replica_id': 'r1',
+                'server_id': 's1',
+                'kubernetes_node': 'm02',
+                'observed': True,
+                'role': 'returned',
+                'replication_role': str(r1.get('ReplicationRole') or 'replica_ready'),
+                'durable_latched': bool(dr1.get('Latched')),
+                'durable_frontier_known': bool(dr1.get('FrontierKnown')),
+                'durable_frontier_lsn': r1_durable,
+                'healthy': bool(r1.get('Healthy')),
+                'frontend_primary_ready': bool(r1.get('FrontendPrimaryReady')),
+                'frontend_protocol': 'iscsi',
+                'frontend_addr': '127.0.0.1:3280',
+                'status_addr': '127.0.0.1:19603',
+                'stale_primary_fenced': True,
+                'support_bundle_path': 'status-r1-returned.json'
+              }, {
+                'replica_id': 'r2',
+                'server_id': 's2',
+                'kubernetes_node': 'm02',
+                'observed': True,
+                'role': 'primary',
+                'replication_role': str(r2.get('ReplicationRole') or 'none'),
+                'durable_latched': bool(dr2.get('Latched')),
+                'durable_frontier_known': bool(dr2.get('FrontierKnown')),
+                'durable_frontier_lsn': required,
+                'healthy': bool(r2.get('Healthy')),
+                'frontend_primary_ready': bool(r2.get('FrontendPrimaryReady')),
+                'frontend_protocol': 'iscsi',
+                'frontend_addr': '127.0.0.1:3281',
+                'status_addr': '127.0.0.1:19613'
+              }]
+            }],
+            'non_claims': ['no automatic returned-replica failback or rebuild mutation executed']
+          }
+          (root / 'product-observation' / 'cluster-evidence.json').write_text(json.dumps(cluster, indent=2) + '\n')
+          (root / 'returned-replica-live-evidence-summary.txt').write_text('\n'.join([
+            'returned_replica_live_evidence_status=ok',
+            f'required_frontier_lsn={required}',
+            f'r1_durable_lsn={r1_durable}',
+            f'r2_durable_lsn={required}',
+            f'frontier_covered={str(r1_durable >= required).lower()}',
+          ]) + '\n')
+          PY
+          /mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-returned-chain/bin/sw-block ops report --from-bundle "$ROOT" --out "$ROOT/report" > "$ROOT/report.stdout.txt" 2> "$ROOT/report.stderr.txt"
+          /mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-returned-chain/bin/sw-block ops explain volume --from-bundle "$ROOT" v1 > "$ROOT/explain.txt" 2> "$ROOT/explain.stderr.txt"
+          port=19487
+          /mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-returned-chain/bin/sw-block ops dashboard --from-bundle "$ROOT" --listen "127.0.0.1:${port}" --serve-duration 8s > "$ROOT/dashboard.stdout.txt" 2> "$ROOT/dashboard.stderr.txt" &
+          dashboard_pid=$!
+          for _ in $(seq 1 80); do
+            if curl -fsS "http://127.0.0.1:${port}/operator-snapshot.json" > "$ROOT/dashboard-operator-snapshot.json" 2> "$ROOT/dashboard-curl.stderr.txt"; then
+              break
+            fi
+            sleep 0.1
+          done
+          test -s "$ROOT/dashboard-operator-snapshot.json"
+          wait "$dashboard_pid" || true
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-returned-chain/returned_failover/returned-replica-live-evidence-summary.txt"
+        pattern: "^frontier_covered=true$"
+        save_as: returned_live_frontier_covered_count
+      - action: assert_greater
+        actual: "{{ returned_live_frontier_covered_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-returned-chain/returned_failover/report/summary.txt"
+        pattern: "managed_volume_returned_replica=v1 replica=r1 state=fenced reason=returned_replica_frontend_fenced"
+        save_as: returned_live_projection_count
+      - action: assert_greater
+        actual: "{{ returned_live_projection_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-returned-chain/returned_failover/report/summary.txt"
+        pattern: "managed_volume_action=authority.reintegrate_returned_replica mode=dry_run side_effect=authority_mutating executor=authority_recovery_executor decision=allowed"
+        save_as: returned_live_action_allowed_count
+      - action: assert_greater
+        actual: "{{ returned_live_action_allowed_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-returned-chain/returned_failover/explain.txt"
+        pattern: "managed_volume_action authority.reintegrate_returned_replica mode=dry_run"
+        save_as: returned_live_explain_action_count
+      - action: assert_greater
+        actual: "{{ returned_live_explain_action_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-iscsi-returned-chain/returned_failover/dashboard-operator-snapshot.json"
+        pattern: "\"type\": \"authority.reintegrate_returned_replica\""
+        save_as: returned_live_dashboard_action_count
+      - action: assert_greater
+        actual: "{{ returned_live_dashboard_action_count }}"
         threshold: "0"
       - action: assert_no_active_iscsi_sessions
         node: m02

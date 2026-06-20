@@ -562,7 +562,11 @@ product risk. The recommended order is:
    present
    (`internal/docs/finished-plans/phase47_finishedplan_returned_replica_executor_admission.md`).
    It is the bridge toward a future executor, not automatic failback.
-11. **Backup/snapshot/restore and NVMe ANA parity.**
+11. **Phase 48: returned-replica live evidence close.** Closed.
+   The live iSCSI returned-replica gate emits same-run managed-volume
+   evidence for required frontier coverage and replay it through report/status
+   surfaces before any mutating returned-replica executor is proposed.
+12. **Backup/snapshot/restore and NVMe ANA parity.**
    Important, but they should reuse the status/action model rather than create
    another isolated control plane.
 
@@ -630,6 +634,9 @@ Approximate engineering effort if scope remains tight:
   `authority.reintegrate_returned_replica` dry-run/non-mutating while proving
   exact fencing/frontier evidence and schema/RBAC conformance, including a live
   Kubernetes status-subresource server-side dry-run gate.
+- Phase 48 Returned-Replica Live Evidence Close is closed. It connects the
+  live iSCSI returned-replica run to the same managed-volume evidence/action
+  surfaces used by Phase 47, without enabling rebuild/failback mutation.
 - Phase 41-44 are the Operation Layer v0.5 release train: lifecycle-owner
   foundation, real API/admission proof, first bounded finalizer mutation, and
   delete lifecycle close gate.

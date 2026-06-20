@@ -140,7 +140,13 @@ Recommended order from here:
    `authority.reintegrate_returned_replica` is allowed only as a dry-run,
    non-mutating action when exact fencing and frontier evidence is present.
    This is not automatic failback or rebuild execution.
-5. Add backup/restore and NVMe ANA parity after they can reuse the same action
+5. Phase 48: returned-replica live evidence close. **Closed 2026-06-20, QA PASS**
+   (`internal/docs/finished-plans/phase48_finishedplan_returned_replica_live_evidence.md`).
+   The live iSCSI returned-replica scenario now emits same-run managed-volume
+   evidence proving r1 remains fenced, r2 remains the primary, and the returned
+   replica covers the required frontier before any future executor mutates
+   authority or storage state.
+6. Add backup/restore and NVMe ANA parity after they can reuse the same action
    owner, evidence, and status model rather than creating another isolated
    control plane.
 
