@@ -214,6 +214,32 @@ func TestPhase46D2SwBlockVolumeReturnedReplicaSchema(t *testing.T) {
 	}
 }
 
+func TestPhase50SwBlockVolumeExecutorPreflightSchema(t *testing.T) {
+	doc := readYAMLMap(t, "charts/seaweed-block/crds/swblockvolumes.block.seaweedfs.com.yaml")
+	statusProperties := crdStatusProperties(t, doc)
+	preflightProperties := yamlMap(t, yamlMap(t, yamlMap(t, statusProperties, "executorPreflights"), "items"), "properties")
+	for _, want := range []string{"actionType", "replicaID", "decision", "reason", "mode", "sideEffectClass", "ownerExecutor", "mutationAllowed", "frontendFenced", "ackEligible", "durableFrontierKnown", "durableFrontierLsn", "requiredFrontierKnown", "requiredFrontierLsn", "evidenceRequired", "evidenceRefs", "forbiddenMutationClass"} {
+		if _, ok := preflightProperties[want]; !ok {
+			t.Fatalf("SwBlockVolume.status.executorPreflights[] schema missing %s", want)
+		}
+	}
+	decisionEnum := yamlStringSet(t, yamlMap(t, preflightProperties, "decision"), "enum")
+	for _, want := range []string{"ready", "hold"} {
+		if !decisionEnum[want] {
+			t.Fatalf("SwBlockVolume.status.executorPreflights[].decision enum missing %s: %+v", want, decisionEnum)
+		}
+	}
+	modeEnum := yamlStringSet(t, yamlMap(t, preflightProperties, "mode"), "enum")
+	if !modeEnum[ManagedVolumeActionModeDryRun] {
+		t.Fatalf("SwBlockVolume.status.executorPreflights[].mode enum missing dry_run: %+v", modeEnum)
+	}
+	for _, forbidden := range []string{"action_type", "side_effect_class", "owner_executor", "mutation_allowed", "durable_frontier_lsn", "required_frontier_lsn"} {
+		if _, ok := preflightProperties[forbidden]; ok {
+			t.Fatalf("SwBlockVolume.status.executorPreflights[] leaked snake_case %s", forbidden)
+		}
+	}
+}
+
 func TestOperatorStatusRBACIsStatusEventsOnly(t *testing.T) {
 	raw := readRepoFile(t, "charts/seaweed-block/templates/operator-status-rbac.yaml")
 	required := []string{

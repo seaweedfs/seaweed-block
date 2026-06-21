@@ -187,6 +187,72 @@ spec:
                         type: array
                         items:
                           type: string
+                executorPreflights:
+                  type: array
+                  items:
+                    type: object
+                    required:
+                      - actionType
+                      - decision
+                      - reason
+                      - mode
+                      - sideEffectClass
+                      - ownerExecutor
+                      - mutationAllowed
+                      - frontendFenced
+                      - ackEligible
+                      - durableFrontierKnown
+                      - requiredFrontierKnown
+                    properties:
+                      actionType:
+                        type: string
+                      replicaID:
+                        type: string
+                      decision:
+                        type: string
+                        enum:
+                          - ready
+                          - hold
+                      reason:
+                        type: string
+                      mode:
+                        type: string
+                        enum:
+                          - dry_run
+                      sideEffectClass:
+                        type: string
+                        enum:
+                          - authority_mutating
+                      ownerExecutor:
+                        type: string
+                      mutationAllowed:
+                        type: boolean
+                      frontendFenced:
+                        type: boolean
+                      ackEligible:
+                        type: boolean
+                      durableFrontierKnown:
+                        type: boolean
+                      durableFrontierLsn:
+                        type: integer
+                        format: int64
+                        minimum: 0
+                      requiredFrontierKnown:
+                        type: boolean
+                      requiredFrontierLsn:
+                        type: integer
+                        format: int64
+                        minimum: 0
+                      evidenceRequired:
+                        type: string
+                      evidenceRefs:
+                        type: array
+                        items:
+                          type: string
+                      forbiddenMutationClass:
+                        type: array
+                        items:
+                          type: string
                 nonClaims:
                   type: array
                   items:

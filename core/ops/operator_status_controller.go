@@ -263,17 +263,18 @@ func supportBundleReason(cluster ClusterEvidence) string {
 }
 
 type SwBlockVolumeCRDStatus struct {
-	VolumeID              string                            `json:"volumeID,omitempty"`
-	PVCName               string                            `json:"pvcName,omitempty"`
-	Status                string                            `json:"status"`
-	ReasonCode            string                            `json:"reasonCode,omitempty"`
-	ObservedAt            time.Time                         `json:"observedAt,omitempty"`
-	Conditions            []ObservationCondition            `json:"conditions,omitempty"`
-	DeleteSafety          *SwBlockVolumeCRDDeleteSafety     `json:"deleteSafety"`
-	ReplicaReintegrations []SwBlockVolumeCRDReturnedReplica `json:"replicaReintegrations,omitempty"`
-	NonClaims             []string                          `json:"nonClaims,omitempty"`
-	EvidenceRefs          []string                          `json:"evidenceRefs,omitempty"`
-	AllowedActions        []SwBlockVolumeCRDAction          `json:"allowedActions,omitempty"`
+	VolumeID              string                              `json:"volumeID,omitempty"`
+	PVCName               string                              `json:"pvcName,omitempty"`
+	Status                string                              `json:"status"`
+	ReasonCode            string                              `json:"reasonCode,omitempty"`
+	ObservedAt            time.Time                           `json:"observedAt,omitempty"`
+	Conditions            []ObservationCondition              `json:"conditions,omitempty"`
+	DeleteSafety          *SwBlockVolumeCRDDeleteSafety       `json:"deleteSafety"`
+	ReplicaReintegrations []SwBlockVolumeCRDReturnedReplica   `json:"replicaReintegrations,omitempty"`
+	ExecutorPreflights    []SwBlockVolumeCRDExecutorPreflight `json:"executorPreflights,omitempty"`
+	NonClaims             []string                            `json:"nonClaims,omitempty"`
+	EvidenceRefs          []string                            `json:"evidenceRefs,omitempty"`
+	AllowedActions        []SwBlockVolumeCRDAction            `json:"allowedActions,omitempty"`
 }
 
 type SwBlockVolumeCRDReturnedReplica struct {
@@ -288,6 +289,26 @@ type SwBlockVolumeCRDReturnedReplica struct {
 	RequiredFrontierKnown bool     `json:"requiredFrontierKnown,omitempty"`
 	RequiredFrontierLSN   uint64   `json:"requiredFrontierLsn,omitempty"`
 	EvidenceRefs          []string `json:"evidenceRefs,omitempty"`
+}
+
+type SwBlockVolumeCRDExecutorPreflight struct {
+	ActionType             string   `json:"actionType"`
+	ReplicaID              string   `json:"replicaID,omitempty"`
+	Decision               string   `json:"decision"`
+	Reason                 string   `json:"reason"`
+	Mode                   string   `json:"mode"`
+	SideEffectClass        string   `json:"sideEffectClass"`
+	OwnerExecutor          string   `json:"ownerExecutor"`
+	MutationAllowed        bool     `json:"mutationAllowed"`
+	FrontendFenced         bool     `json:"frontendFenced"`
+	AckEligible            bool     `json:"ackEligible"`
+	DurableFrontierKnown   bool     `json:"durableFrontierKnown"`
+	DurableFrontierLSN     uint64   `json:"durableFrontierLsn,omitempty"`
+	RequiredFrontierKnown  bool     `json:"requiredFrontierKnown"`
+	RequiredFrontierLSN    uint64   `json:"requiredFrontierLsn,omitempty"`
+	EvidenceRequired       string   `json:"evidenceRequired,omitempty"`
+	EvidenceRefs           []string `json:"evidenceRefs,omitempty"`
+	ForbiddenMutationClass []string `json:"forbiddenMutationClass,omitempty"`
 }
 
 type SwBlockVolumeCRDDeleteSafety struct {
@@ -416,6 +437,7 @@ func (r OperatorStatusReconciler) Reconcile(ctx context.Context) (OperatorStatus
 			Conditions:            append([]ObservationCondition(nil), volume.Status.Conditions...),
 			DeleteSafety:          swBlockVolumeCRDDeleteSafety(volume.Status.DeleteSafety),
 			ReplicaReintegrations: swBlockVolumeCRDReturnedReplicas(volume.Status.ReplicaReintegrations),
+			ExecutorPreflights:    swBlockVolumeCRDExecutorPreflights(volume.Status.ExecutorPreflights),
 			NonClaims:             append([]string(nil), volume.Status.NonClaims...),
 			EvidenceRefs:          append([]string(nil), volume.Status.EvidenceRefs...),
 			AllowedActions:        swBlockVolumeCRDActions(volume.AllowedActions),
@@ -483,6 +505,35 @@ func swBlockVolumeCRDReturnedReplicas(returned []ReturnedReplicaProjection) []Sw
 			RequiredFrontierKnown: replica.RequiredFrontierKnown,
 			RequiredFrontierLSN:   replica.RequiredFrontierLSN,
 			EvidenceRefs:          append([]string(nil), replica.EvidenceRefs...),
+		})
+	}
+	return out
+}
+
+func swBlockVolumeCRDExecutorPreflights(preflights []ReturnedReplicaExecutorPreflight) []SwBlockVolumeCRDExecutorPreflight {
+	if len(preflights) == 0 {
+		return nil
+	}
+	out := make([]SwBlockVolumeCRDExecutorPreflight, 0, len(preflights))
+	for _, preflight := range preflights {
+		out = append(out, SwBlockVolumeCRDExecutorPreflight{
+			ActionType:             preflight.ActionType,
+			ReplicaID:              preflight.ReplicaID,
+			Decision:               preflight.Decision,
+			Reason:                 preflight.Reason,
+			Mode:                   preflight.Mode,
+			SideEffectClass:        preflight.SideEffectClass,
+			OwnerExecutor:          preflight.OwnerExecutor,
+			MutationAllowed:        preflight.MutationAllowed,
+			FrontendFenced:         preflight.FrontendFenced,
+			AckEligible:            preflight.AckEligible,
+			DurableFrontierKnown:   preflight.DurableFrontierKnown,
+			DurableFrontierLSN:     preflight.DurableFrontierLSN,
+			RequiredFrontierKnown:  preflight.RequiredFrontierKnown,
+			RequiredFrontierLSN:    preflight.RequiredFrontierLSN,
+			EvidenceRequired:       preflight.EvidenceRequired,
+			EvidenceRefs:           append([]string(nil), preflight.EvidenceRefs...),
+			ForbiddenMutationClass: append([]string(nil), preflight.ForbiddenMutationClass...),
 		})
 	}
 	return out

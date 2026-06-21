@@ -78,6 +78,25 @@ func TestKubernetesStatusClientPatchesOnlyStatusSubresources(t *testing.T) {
 			RequiredFrontierLSN:   52,
 			EvidenceRefs:          []string{"returned-replica-summary.txt"},
 		}},
+		ExecutorPreflights: []SwBlockVolumeCRDExecutorPreflight{{
+			ActionType:             ManagedVolumeActionReintegrateReturned,
+			ReplicaID:              "r1",
+			Decision:               ReturnedReplicaExecutorPreflightReady,
+			Reason:                 ReturnedReplicaExecutorPreflightReasonSatisfied,
+			Mode:                   ManagedVolumeActionModeDryRun,
+			SideEffectClass:        ManagedVolumeSideEffectAuthorityMutating,
+			OwnerExecutor:          "authority_recovery_executor",
+			MutationAllowed:        false,
+			FrontendFenced:         true,
+			AckEligible:            false,
+			DurableFrontierKnown:   true,
+			DurableFrontierLSN:     52,
+			RequiredFrontierKnown:  true,
+			RequiredFrontierLSN:    52,
+			EvidenceRequired:       "returned_replica_reintegration_evidence",
+			EvidenceRefs:           []string{"returned-replica-summary.txt"},
+			ForbiddenMutationClass: []string{"ack_eligibility"},
+		}},
 		AllowedActions: []SwBlockVolumeCRDAction{{
 			Type:             "observe.collect_bundle",
 			Mode:             "read_only",
@@ -158,6 +177,17 @@ func TestKubernetesStatusClientPatchesOnlyStatusSubresources(t *testing.T) {
 	for _, forbidden := range []string{"replica_id", "frontend_primary_ready", "ack_eligible", "durable_frontier_lsn"} {
 		if _, ok := returned[forbidden]; ok {
 			t.Fatalf("returned replica leaked snake_case %s: %+v", forbidden, returned)
+		}
+	}
+	preflight := volumeStatus["executorPreflights"].([]any)[0].(map[string]any)
+	for _, want := range []string{"actionType", "replicaID", "sideEffectClass", "ownerExecutor", "mutationAllowed", "frontendFenced", "ackEligible", "durableFrontierKnown", "durableFrontierLsn", "requiredFrontierKnown", "requiredFrontierLsn", "evidenceRequired", "forbiddenMutationClass"} {
+		if _, ok := preflight[want]; !ok {
+			t.Fatalf("executor preflight missing camelCase %s: %+v", want, preflight)
+		}
+	}
+	for _, forbidden := range []string{"action_type", "side_effect_class", "owner_executor", "mutation_allowed", "durable_frontier_lsn", "required_frontier_lsn"} {
+		if _, ok := preflight[forbidden]; ok {
+			t.Fatalf("executor preflight leaked snake_case %s: %+v", forbidden, preflight)
 		}
 	}
 }

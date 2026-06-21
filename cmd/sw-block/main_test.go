@@ -1179,8 +1179,10 @@ func TestOpsReturnedReplicaFromBundleSurfacesAcrossReportExplainDashboard(t *tes
 	}
 	for _, want := range []string{
 		`"replica_reintegrations": [`,
+		`"executor_preflights": [`,
 		`"state": "fenced"`,
 		`"reason_code": "returned_replica_frontend_fenced"`,
+		`"reason": "preconditions_satisfied"`,
 		`"type": "authority.reintegrate_returned_replica"`,
 	} {
 		if !strings.Contains(string(snapshot), want) {
@@ -1248,6 +1250,8 @@ func TestOpsReturnedReplicaFromBundleSurfacesAcrossReportExplainDashboard(t *tes
 	body := waitForHTTPContains(t, "http://"+addr+"/operator-snapshot.json", `"replica_reintegrations": [`)
 	for _, want := range []string{
 		`"reason_code": "returned_replica_frontend_fenced"`,
+		`"executor_preflights": [`,
+		`"reason": "preconditions_satisfied"`,
 		`"type": "authority.reintegrate_returned_replica"`,
 	} {
 		if !strings.Contains(body, want) {

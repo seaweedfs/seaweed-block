@@ -16,6 +16,7 @@ type ManagedVolumeOperatorStatus struct {
 	Conditions            []ObservationCondition             `json:"conditions,omitempty"`
 	DeleteSafety          *SwBlockVolumeDeleteSafetyDecision `json:"delete_safety,omitempty"`
 	ReplicaReintegrations []ReturnedReplicaProjection        `json:"replica_reintegrations,omitempty"`
+	ExecutorPreflights    []ReturnedReplicaExecutorPreflight `json:"executor_preflights,omitempty"`
 	NonClaims             []string                           `json:"non_claims,omitempty"`
 	EvidenceRefs          []string                           `json:"evidence_refs,omitempty"`
 }
@@ -54,6 +55,7 @@ func ManagedVolumeOperatorContractFromProjection(projection ManagedVolumeProject
 			Conditions:            append([]ObservationCondition(nil), projection.Conditions...),
 			DeleteSafety:          cloneSwBlockVolumeDeleteSafetyDecision(projection.DeleteSafety),
 			ReplicaReintegrations: cloneReturnedReplicaProjections(projection.ReplicaReintegrations),
+			ExecutorPreflights:    cloneReturnedReplicaExecutorPreflights(ReturnedReplicaExecutorPreflights(projection)),
 			NonClaims:             append([]string(nil), projection.NonClaims...),
 			EvidenceRefs:          append([]string(nil), projection.EvidenceRefs...),
 		},
@@ -81,6 +83,18 @@ func ManagedVolumeOperatorContractFromProjection(projection ManagedVolumeProject
 		contract.AllowedActions = append(contract.AllowedActions, managedVolumeOperatorActionFromDeleteSafety(*projection.DeleteSafety))
 	}
 	return contract
+}
+
+func cloneReturnedReplicaExecutorPreflights(in []ReturnedReplicaExecutorPreflight) []ReturnedReplicaExecutorPreflight {
+	if len(in) == 0 {
+		return nil
+	}
+	out := append([]ReturnedReplicaExecutorPreflight(nil), in...)
+	for i := range out {
+		out[i].EvidenceRefs = append([]string(nil), in[i].EvidenceRefs...)
+		out[i].ForbiddenMutationClass = append([]string(nil), in[i].ForbiddenMutationClass...)
+	}
+	return out
 }
 
 func cloneReturnedReplicaProjections(in []ReturnedReplicaProjection) []ReturnedReplicaProjection {

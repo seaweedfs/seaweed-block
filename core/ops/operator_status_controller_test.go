@@ -133,6 +133,79 @@ func TestOperatorStatusReconcilerWritesStatusOnlyProjection(t *testing.T) {
 	}
 }
 
+func TestOperatorStatusReconcilerWritesReturnedReplicaExecutorPreflight(t *testing.T) {
+	capturedAt := time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)
+	source := fakeOperatorStatusSource{cluster: ClusterEvidence{
+		SchemaVersion: ObservationSchemaVersion,
+		CapturedAt:    capturedAt,
+		Status:        ObservationStatusRecovering,
+		ManagedVolumes: []ManagedVolumeProjection{ProjectManagedVolume(ManagedVolumeFacts{
+			VolumeID: "pvc-returned",
+			PVCName:  "returned-pvc",
+			Authority: &AuthorityFact{
+				PrimaryReplica:        "r2",
+				PreviousPrimary:       "r1",
+				RequiredFrontierKnown: true,
+				RequiredFrontierLSN:   52,
+			},
+			Replicas: []ReplicaFact{{
+				ReplicaID:            "r1",
+				Observed:             true,
+				Role:                 "previous_primary",
+				DurableFrontierKnown: true,
+				DurableFrontierLSN:   52,
+				FrontendPrimaryReady: false,
+				StalePrimaryFenced:   true,
+			}, {
+				ReplicaID:            "r2",
+				Observed:             true,
+				Role:                 "primary",
+				DurableFrontierKnown: true,
+				DurableFrontierLSN:   52,
+			}},
+			EvidenceRefs: []string{"returned-replica-summary.txt"},
+		})},
+	}}
+	writer := &fakeOperatorStatusWriter{}
+
+	_, err := (OperatorStatusReconciler{
+		Namespace: "kube-system",
+		Source:    source,
+		Writer:    writer,
+	}).Reconcile(context.Background())
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if len(writer.volumes) != 1 {
+		t.Fatalf("volume writes=%+v", writer.volumes)
+	}
+	status := writer.volumes[0].status
+	if len(status.ExecutorPreflights) != 1 {
+		t.Fatalf("executor preflights=%+v", status.ExecutorPreflights)
+	}
+	preflight := status.ExecutorPreflights[0]
+	if preflight.ActionType != ManagedVolumeActionReintegrateReturned ||
+		preflight.Decision != ReturnedReplicaExecutorPreflightReady ||
+		preflight.Reason != ReturnedReplicaExecutorPreflightReasonSatisfied ||
+		preflight.MutationAllowed {
+		t.Fatalf("executor preflight=%+v", preflight)
+	}
+	raw, err := json.Marshal(status)
+	if err != nil {
+		t.Fatalf("marshal status: %v", err)
+	}
+	for _, want := range []string{`"executorPreflights"`, `"actionType"`, `"mutationAllowed"`, `"durableFrontierLsn"`, `"forbiddenMutationClass"`} {
+		if !strings.Contains(string(raw), want) {
+			t.Fatalf("CRD status missing %s: %s", want, string(raw))
+		}
+	}
+	for _, forbidden := range []string{"executor_preflights", "action_type", "mutation_allowed", "durable_frontier_lsn"} {
+		if strings.Contains(string(raw), forbidden) {
+			t.Fatalf("CRD status leaked snake_case %s: %s", forbidden, string(raw))
+		}
+	}
+}
+
 func TestOperatorStatusReconcilerProjectsNodeReadiness(t *testing.T) {
 	heartbeat := time.Date(2026, 6, 5, 16, 0, 0, 0, time.UTC)
 	source := fakeOperatorStatusSource{cluster: ClusterEvidence{

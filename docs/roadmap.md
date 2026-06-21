@@ -152,7 +152,12 @@ Recommended order from here:
    only when the target is unique, frontend/ACK fenced, and durable frontier
    evidence covers the required frontier. It remains non-mutating and does not
    claim automatic reintegration, rebuild, failback, or frontend publication.
-7. Add backup/restore and NVMe ANA parity after they can reuse the same action
+7. Phase 50: returned-replica preflight status schema. **Closed 2026-06-20, local PASS**
+   (`internal/docs/finished-plans/phase50_finishedplan_returned_replica_preflight_status_schema.md`).
+   The preflight is now machine-readable in operator-snapshot JSON and
+   SwBlockVolume `.status.executorPreflights[]`, with OpenAPI schema and
+   status-writer coverage. It is still non-mutating.
+8. Add backup/restore and NVMe ANA parity after they can reuse the same action
    owner, evidence, and status model rather than creating another isolated
    control plane.
 
@@ -161,8 +166,8 @@ The internal release-train contract is
 the operation-layer loop for a bounded `SwBlockVolume` protection finalizer.
 Phase 46 reused this same fact -> judgment -> action -> evidence pattern for
 returned-replica reintegration before any larger storage feature is enabled.
-Phases 47-49 start the executor-admission and preflight bridge without allowing
-mutation.
+Phases 47-50 start the executor-admission, preflight, and status-schema bridge
+without allowing mutation.
 
 The practical rule is:
 

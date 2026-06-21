@@ -115,4 +115,15 @@ func TestManagedVolumeOperatorContract_ReturnedReplicaProjection(t *testing.T) {
 	if returned.ReplicaID != "r1" || returned.State != ReturnedReplicaStateFenced || returned.ReasonCode != ReasonReturnedReplicaFrontendFenced {
 		t.Fatalf("returned replica=%+v", returned)
 	}
+	if len(contract.Status.ExecutorPreflights) != 1 {
+		t.Fatalf("executor preflights=%+v", contract.Status.ExecutorPreflights)
+	}
+	preflight := contract.Status.ExecutorPreflights[0]
+	if preflight.ActionType != ManagedVolumeActionReintegrateReturned ||
+		preflight.ReplicaID != "r1" ||
+		preflight.Decision != ReturnedReplicaExecutorPreflightReady ||
+		preflight.Reason != ReturnedReplicaExecutorPreflightReasonSatisfied ||
+		preflight.MutationAllowed {
+		t.Fatalf("executor preflight=%+v", preflight)
+	}
 }

@@ -58,11 +58,13 @@ This is the short internal roadmap. Keep it current and readable.
   agreement. This remains read-only and does not add mutating operator
   lifecycle.
 - Current development slice: returned-replica reintegration productization has
-  advanced through Phase 49. Phases 46-49 made returned replicas visible in the
+  advanced through Phase 50. Phases 46-50 made returned replicas visible in the
   ManagedVolume model, admitted reintegration only as a dry-run action, proved
-  same-run live evidence from the iSCSI returned-replica scenario, and added a
-  non-mutating executor preflight. Do not claim automatic reintegration,
-  rebuild, failback, ACK eligibility mutation, or frontend publication yet.
+  same-run live evidence from the iSCSI returned-replica scenario, added a
+  non-mutating executor preflight, and published that preflight through
+  operator-snapshot plus SwBlockVolume `.status`. Do not claim automatic
+  reintegration, rebuild, failback, ACK eligibility mutation, or frontend
+  publication yet.
 - Model hardening gate before the next large release: complete the
   ManagedVolume Operations Model under `internal/docs/protocol/` before
   expanding operator or broader HA claims. The goal is to prevent Kubernetes,
@@ -189,8 +191,9 @@ rebuild, delete safety, or cleanup must start as a separate gated phase.
   documented mechanism, and support-bundle proof of fencing and data integrity.
 - Current returned-replica status: observed returned replicas are productized
   through the ManagedVolume surface. A dry-run reintegration action and
-  executor preflight can become ready only with fencing and frontier evidence.
-  The actual authority/storage mutation is still deferred.
+  executor preflight can become ready only with fencing and frontier evidence,
+  and that preflight is now available through machine-readable status. The
+  actual authority/storage mutation is still deferred.
 - Later: returned-replica rebuild/reintegration/failback execution, NVMe ANA
   Kubernetes multipath parity, stronger committed-frontier reporting, broad
   distro/host compatibility, and longer soak under failure. NVMe ANA parity

@@ -1,98 +1,89 @@
-# Current Plan: Phase 49 Returned-Replica Executor Preflight
+# Current Plan: Phase 50 Returned-Replica Executor Preflight Status Schema
 
 Status: complete; local validation PASS.
 
-Working branch: `phase49-returned-replica-executor-preflight`
+Working branch: `phase50-test-validation-hygiene`
 
-Decision note: this phase does not execute reintegration, rebuild, ACK
-eligibility, failback, or frontend publication. It adds the executable
-preflight contract a future authority executor must satisfy before any storage
-or authority mutation can be considered.
+Decision note: Phase 50 keeps returned-replica reintegration non-mutating. It
+publishes the Phase 49 executor preflight into machine-readable
+operator-snapshot and SwBlockVolume `.status` surfaces so a future executor can
+consume a typed contract instead of parsing report text.
 
-Previous product phase: Phase 48 is closed in
-`internal/docs/finished-plans/phase48_finishedplan_returned_replica_live_evidence.md`.
+Previous product phase: Phase 49 is closed in
+`internal/docs/finished-plans/phase49_finishedplan_returned_replica_executor_preflight.md`.
 
 Finished plan:
-`internal/docs/finished-plans/phase49_finishedplan_returned_replica_executor_preflight.md`.
+`internal/docs/finished-plans/phase50_finishedplan_returned_replica_preflight_status_schema.md`.
 
 ## Product Goal
 
-Turn Phase 48 same-run returned-replica evidence into a precise executor
-preflight:
+Make returned-replica executor preflight visible in the same machine-readable
+surfaces used by the rest of the operation layer:
 
 ```text
-returned replica evidence
--> dry-run action admitted
--> exactly one target replica
--> frontend/ACK fenced
--> durable frontier covers required frontier
--> preflight=ready, mutation_allowed=false
+ManagedVolume projection
+-> executor_preflights[] in operator-snapshot.json
+-> executorPreflights[] in SwBlockVolume.status
+-> CRD OpenAPI schema validates the camelCase status payload
+-> status writer tests catch casing/schema drift before live QA
 ```
-
-Anything incomplete or unsafe must produce `preflight=hold` with a stable reason.
 
 ## Why This Is Next
 
-Phase 47 admitted `authority.reintegrate_returned_replica` as a dry-run action.
-Phase 48 proved the live iSCSI scenario can carry the required evidence. The
-remaining risk before a real executor is ambiguity: a future mutating component
-should not infer readiness from free-form report lines.
-
-Phase 49 adds a typed preflight layer that makes the handoff explicit while
-keeping the no-mutation boundary.
+Phase 49 made the preflight explicit, but only report and explain text carried
+it. That is useful for humans but insufficient for a future in-cluster executor.
+Before any mutation is proposed, the preflight must be a typed status field with
+schema and writer coverage.
 
 ## Scope Contract
 
 | In | Out |
 |---|---|
-| `ReturnedReplicaExecutorPreflight` model | ACK eligibility mutation |
-| fail-closed decision reasons | frontend publication mutation |
-| report and explain visibility | rebuild traffic |
-| unit tests for ready/hold states | automatic failback |
-| Phase 48 bundle surface regression | CRD schema change |
+| operator-snapshot `status.executor_preflights[]` | ACK eligibility mutation |
+| CRD `status.executorPreflights[]` | frontend publication mutation |
+| OpenAPI schema and camelCase tests | rebuild traffic |
+| status writer/reconciler tests | automatic failback |
+| returned-replica bundle surface regression | lifecycle-owner RBAC expansion |
 
-## D1: Preflight Model
+## D1: Operator-Snapshot Status
 
-Goal: create a pure `core/ops` preflight contract for
-`authority.reintegrate_returned_replica`.
+Goal: carry `ReturnedReplicaExecutorPreflight` in the snapshot contract.
 
 Acceptance:
 
 ```text
-[x] ready only when the dry-run action is allowed
-[x] ready only for exactly one returned replica target
-[x] ready only when frontend_fenced=true and ack_eligible=false
-[x] ready only when durable_lsn >= required_lsn
-[x] mutation_allowed=false in all states
+[x] ManagedVolumeOperatorStatus includes executor_preflights[]
+[x] returned-replica projection produces one ready preflight
+[x] snapshot JSON remains snake_case
+[x] mutation_allowed=false
 ```
 
-## D2: Fail-Closed Reasons
+## D2: CRD Status Schema
 
-Goal: make unsafe or incomplete evidence explain why a future executor must not
-run.
+Goal: publish the same preflight to SwBlockVolume `.status` with Kubernetes
+camelCase fields.
 
 Acceptance:
 
 ```text
-[x] missing frontier -> hold
-[x] unsafe frontend -> hold
-[x] frontier behind -> hold
-[x] ambiguous returned replica -> hold
-[x] action rejected -> hold
+[x] SwBlockVolumeCRDStatus includes executorPreflights[]
+[x] CRD OpenAPI schema includes all fields
+[x] decision enum includes ready/hold
+[x] mode enum is dry_run
+[x] snake_case is rejected by schema tests
 ```
 
-## D3: Product Surface Visibility
+## D3: Writer / Reconciler Coverage
 
-Goal: show the preflight in the surfaces that already carry returned-replica
-evidence.
+Goal: shift live-API class bugs left into local tests.
 
 Acceptance:
 
 ```text
-[x] report summary renders managed_volume_executor_preflight=...
-[x] ops explain renders managed_volume_executor_preflight ...
-[x] existing returned-replica bundle test asserts both surfaces
-[x] operator-snapshot/CRD remain unchanged in this phase
+[x] KubernetesStatusClient emits camelCase executorPreflights
+[x] status conformance gate includes executorPreflights
+[x] OperatorStatusReconciler writes the preflight into volume status
+[x] no spec/finalizer/storage mutation is added
 ```
 
 ## D4: Validation
@@ -100,23 +91,19 @@ Acceptance:
 Validation completed:
 
 ```text
+[x] go test -count=1 ./cmd/sw-block
 [x] go test -count=1 ./core/ops
-[x] go test -count=1 ./cmd/sw-block -run TestOpsReturnedReplicaFromBundleSurfacesAcrossReportExplainDashboard
 ```
 
 ## Next Phase Candidate
 
-The next storage-executor phase, if started, must define:
+The next phase can either:
 
 ```text
-owner executor
-admission/RBAC boundary
-exact mutation set
-terminal evidence after mutation
-hold/retry behavior
-multi-volume isolation
-rollback/fail-closed behavior
-live QA gate
+1. run a live CRD/status schema gate for executorPreflights, or
+2. start a still-bounded executor design gate that defines exact mutations,
+   admission/RBAC, terminal evidence, and multi-volume isolation.
 ```
 
-Do not enable a mutating returned-replica executor from Phase 49 alone.
+Do not enable returned-replica mutation until that executor phase exists and is
+QA-validated.
