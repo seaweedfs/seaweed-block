@@ -1,6 +1,6 @@
 # Current Plan: Phase 50 Returned-Replica Executor Preflight Status Schema
 
-Status: complete; local validation PASS; live gate wrapper updated.
+Status: complete; local validation PASS; live gate PASS.
 
 Working branch: `phase50-test-validation-hygiene`
 
@@ -110,6 +110,8 @@ Validation completed:
 [x] go test -count=1 ./cmd/sw-block
 [x] go test -count=1 ./core/ops
 [x] swblock validate testops/scenarios/returned-replica-status-schema-rbac-chain.yaml
+[x] swblock run testops/scenarios/returned-replica-status-schema-rbac-chain.yaml
+    run: 20260620-224255-2225, 16/16 PASS
 ```
 
 ## Next Phase Candidate

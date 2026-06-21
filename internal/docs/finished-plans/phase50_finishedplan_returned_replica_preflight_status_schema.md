@@ -46,9 +46,25 @@ mutation_allowed remains false
 go test -count=1 ./cmd/sw-block
 go test -count=1 ./core/ops
 swblock validate testops/scenarios/returned-replica-status-schema-rbac-chain.yaml
+swblock run testops/scenarios/returned-replica-status-schema-rbac-chain.yaml
 ```
 
-Both passed.
+All passed. Live run `20260620-224255-2225` completed 16/16 actions.
+
+Key live summary:
+
+```text
+operator_status_patch_status_allowed=yes
+operator_status_main_patch_allowed=no
+operator_status_finalizers_patch_allowed=no
+valid_returned_replica_status_server_dry_run=true
+valid_executor_preflight_status_server_dry_run=true
+executor_preflight_forbidden_mutation_class_projected=true
+snake_case_action_rejected=true
+unsupported_action_mode_rejected=true
+server_dry_run_status_mutated=false
+phase47_returned_replica_status_schema_rbac_status=ok
+```
 
 ## Non-Claims
 
