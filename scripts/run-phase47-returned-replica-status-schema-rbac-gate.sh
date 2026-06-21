@@ -182,6 +182,27 @@ cat >"${ARTIFACT_DIR}/valid-status-patch.json" <<'JSON'
         "evidenceRefs": ["returned-replica-summary.txt"]
       }
     ],
+    "executorPreflights": [
+      {
+        "actionType": "authority.reintegrate_returned_replica",
+        "replicaID": "r1",
+        "decision": "ready",
+        "reason": "preconditions_satisfied",
+        "mode": "dry_run",
+        "sideEffectClass": "authority_mutating",
+        "ownerExecutor": "authority_recovery_executor",
+        "mutationAllowed": false,
+        "frontendFenced": true,
+        "ackEligible": false,
+        "durableFrontierKnown": true,
+        "durableFrontierLsn": 52,
+        "requiredFrontierKnown": true,
+        "requiredFrontierLsn": 52,
+        "evidenceRequired": "returned_replica_reintegration_evidence",
+        "evidenceRefs": ["returned-replica-summary.txt"],
+        "forbiddenMutationClass": ["ack_eligibility", "frontend_publication", "rebuild_traffic", "failback"]
+      }
+    ],
     "allowedActions": [
       {
         "type": "authority.reintegrate_returned_replica",
@@ -211,6 +232,14 @@ cat >"${ARTIFACT_DIR}/snake-status-patch.json" <<'JSON'
         "mode": "dry_run",
         "mutation_allowed": false
       }
+    ],
+    "executorPreflights": [
+      {
+        "action_type": "authority.reintegrate_returned_replica",
+        "decision": "ready",
+        "mode": "dry_run",
+        "mutation_allowed": false
+      }
     ]
   }
 }
@@ -226,6 +255,21 @@ cat >"${ARTIFACT_DIR}/bad-mode-status-patch.json" <<'JSON'
         "mode": "execute",
         "mutationAllowed": false
       }
+    ],
+    "executorPreflights": [
+      {
+        "actionType": "authority.reintegrate_returned_replica",
+        "decision": "ready",
+        "reason": "preconditions_satisfied",
+        "mode": "execute",
+        "sideEffectClass": "authority_mutating",
+        "ownerExecutor": "authority_recovery_executor",
+        "mutationAllowed": false,
+        "frontendFenced": true,
+        "ackEligible": false,
+        "durableFrontierKnown": true,
+        "requiredFrontierKnown": true
+      }
     ]
   }
 }
@@ -236,6 +280,10 @@ run_expect_success valid-status-server-dry-run \
     --subresource=status --type=merge --patch-file "${ARTIFACT_DIR}/valid-status-patch.json" \
     --dry-run=server -o yaml --as "${SA_USER}"
 write_summary "valid_returned_replica_status_server_dry_run=true"
+grep -q "executorPreflights:" "${ARTIFACT_DIR}/valid-status-server-dry-run.stdout.txt"
+write_summary "valid_executor_preflight_status_server_dry_run=true"
+grep -q "forbiddenMutationClass:" "${ARTIFACT_DIR}/valid-status-server-dry-run.stdout.txt"
+write_summary "executor_preflight_forbidden_mutation_class_projected=true"
 
 run_expect_failure snake-status-server-dry-run \
   "${KUBECTL}" patch swblockvolume phase47-returned -n "${NAMESPACE}" \

@@ -14,16 +14,18 @@ Kubernetes mutation gate was added in this phase.
 | G3 writer payload | PASS | status writer emits `executorPreflights`, `actionType`, `mutationAllowed`, `durableFrontierLsn`, not snake_case |
 | G4 reconciler | PASS | operator-status reconciler writes preflight into `SwBlockVolumeCRDStatus` |
 | G5 command surfaces | PASS | returned-replica bundle test sees preflight in report, explain, and operator-snapshot/dashboard JSON |
-| G6 package baseline | PASS | `cmd/sw-block` and `core/ops` package tests pass |
+| G6 live gate wrapper | PASS | `returned-replica-status-schema-rbac-chain.yaml` now asserts valid `executorPreflights[]` server-side dry-run and forbidden drift |
+| G7 package baseline | PASS | `cmd/sw-block` and `core/ops` package tests pass |
 
 ## Commands
 
 ```text
 go test -count=1 ./cmd/sw-block
 go test -count=1 ./core/ops
+swblock validate testops/scenarios/returned-replica-status-schema-rbac-chain.yaml
 ```
 
-Both passed.
+All passed locally. Full live execution of the wrapper remains a QA/lab step.
 
 ## Boundary
 

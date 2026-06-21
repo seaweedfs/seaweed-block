@@ -1,6 +1,6 @@
 # Current Plan: Phase 50 Returned-Replica Executor Preflight Status Schema
 
-Status: complete; local validation PASS.
+Status: complete; local validation PASS; live gate wrapper updated.
 
 Working branch: `phase50-test-validation-hygiene`
 
@@ -86,13 +86,30 @@ Acceptance:
 [x] no spec/finalizer/storage mutation is added
 ```
 
-## D4: Validation
+## D4: Live Gate Wrapper
+
+Goal: extend the existing returned-replica status/RBAC live gate so QA can
+server-side dry-run `executorPreflights[]` against a real CRD schema and the
+operator-status RBAC boundary.
+
+Acceptance:
+
+```text
+[x] valid status patch includes executorPreflights[]
+[x] server-side dry-run output contains executorPreflights
+[x] forbiddenMutationClass is projected
+[x] snake_case executor preflight payload is rejected
+[x] unsupported executor preflight mode is rejected
+```
+
+## D5: Validation
 
 Validation completed:
 
 ```text
 [x] go test -count=1 ./cmd/sw-block
 [x] go test -count=1 ./core/ops
+[x] swblock validate testops/scenarios/returned-replica-status-schema-rbac-chain.yaml
 ```
 
 ## Next Phase Candidate

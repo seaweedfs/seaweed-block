@@ -40,6 +40,22 @@ phases:
       - action: grep_log
         node: m02
         path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase47-status-schema-rbac/phase47-returned-replica-status-schema-rbac-summary.txt"
+        pattern: "^valid_executor_preflight_status_server_dry_run=true$"
+        save_as: phase50_valid_preflight_count
+      - action: assert_greater
+        actual: "{{ phase50_valid_preflight_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase47-status-schema-rbac/phase47-returned-replica-status-schema-rbac-summary.txt"
+        pattern: "^executor_preflight_forbidden_mutation_class_projected=true$"
+        save_as: phase50_forbidden_mutation_class_count
+      - action: assert_greater
+        actual: "{{ phase50_forbidden_mutation_class_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase47-status-schema-rbac/phase47-returned-replica-status-schema-rbac-summary.txt"
         pattern: "^snake_case_action_rejected=true$"
         save_as: phase47_snake_rejected_count
       - action: assert_greater
