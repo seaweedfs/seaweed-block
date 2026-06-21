@@ -155,6 +155,8 @@ func TestOperatorStatusReconcilerWritesReturnedReplicaExecutorPreflight(t *testi
 				DurableFrontierKnown: true,
 				DurableFrontierLSN:   52,
 				FrontendPrimaryReady: false,
+				AckEligibilityKnown:  true,
+				AckEligible:          false,
 				StalePrimaryFenced:   true,
 			}, {
 				ReplicaID:            "r2",

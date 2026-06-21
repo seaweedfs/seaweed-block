@@ -172,6 +172,8 @@ type ReplicaFact struct {
 	DurableFrontierLSN   uint64   `json:"durable_frontier_lsn,omitempty"`
 	Healthy              bool     `json:"healthy,omitempty"`
 	FrontendPrimaryReady bool     `json:"frontend_primary_ready,omitempty"`
+	AckEligibilityKnown  bool     `json:"ack_eligibility_known,omitempty"`
+	AckEligible          bool     `json:"ack_eligible,omitempty"`
 	FrontendProtocol     string   `json:"frontend_protocol,omitempty"`
 	FrontendAddr         string   `json:"frontend_addr,omitempty"`
 	StatusAddr           string   `json:"status_addr,omitempty"`
@@ -232,6 +234,7 @@ type ReturnedReplicaProjection struct {
 	ReasonCode            string   `json:"reason_code,omitempty"`
 	FrontendFenced        bool     `json:"frontend_fenced"`
 	FrontendPrimaryReady  bool     `json:"frontend_primary_ready"`
+	AckEligibilityKnown   bool     `json:"ack_eligibility_known"`
 	AckEligible           bool     `json:"ack_eligible"`
 	DurableFrontierKnown  bool     `json:"durable_frontier_known"`
 	DurableFrontierLSN    uint64   `json:"durable_frontier_lsn,omitempty"`
@@ -305,12 +308,13 @@ func RenderManagedVolumeProjectionText(projection ManagedVolumeProjection) strin
 		}
 	}
 	for _, returned := range projection.ReplicaReintegrations {
-		fmt.Fprintf(&b, "managed_volume_returned_replica=%s replica=%s state=%s reason=%s frontend_fenced=%t ack_eligible=%t durable_frontier_known=%t durable_lsn=%d required_frontier_known=%t required_lsn=%d\n",
+		fmt.Fprintf(&b, "managed_volume_returned_replica=%s replica=%s state=%s reason=%s frontend_fenced=%t ack_eligibility_known=%t ack_eligible=%t durable_frontier_known=%t durable_lsn=%d required_frontier_known=%t required_lsn=%d\n",
 			explicitUnavailable(projection.VolumeID),
 			emptyAsDash(returned.ReplicaID),
 			emptyAsDash(returned.State),
 			emptyAsDash(returned.ReasonCode),
 			returned.FrontendFenced,
+			returned.AckEligibilityKnown,
 			returned.AckEligible,
 			returned.DurableFrontierKnown,
 			returned.DurableFrontierLSN,
@@ -318,7 +322,7 @@ func RenderManagedVolumeProjectionText(projection ManagedVolumeProjection) strin
 			returned.RequiredFrontierLSN)
 	}
 	for _, preflight := range ReturnedReplicaExecutorPreflights(projection) {
-		fmt.Fprintf(&b, "managed_volume_executor_preflight %s target=%s decision=%s reason=%s mode=%s executor=%s mutation_allowed=%t required_lsn=%d durable_lsn=%d\n",
+		fmt.Fprintf(&b, "managed_volume_executor_preflight %s target=%s decision=%s reason=%s mode=%s executor=%s mutation_allowed=%t ack_eligibility_known=%t required_lsn=%d durable_lsn=%d\n",
 			emptyAsDash(preflight.ActionType),
 			emptyAsDash(preflight.ReplicaID),
 			emptyAsDash(preflight.Decision),
@@ -326,6 +330,7 @@ func RenderManagedVolumeProjectionText(projection ManagedVolumeProjection) strin
 			emptyAsDash(preflight.Mode),
 			emptyAsDash(preflight.OwnerExecutor),
 			preflight.MutationAllowed,
+			preflight.AckEligibilityKnown,
 			preflight.RequiredFrontierLSN,
 			preflight.DurableFrontierLSN)
 	}
@@ -430,6 +435,8 @@ func managedVolumeFactsFromVolumeEvidence(volume VolumeEvidence) ManagedVolumeFa
 			DurableFrontierLSN:   replica.DurableFrontierLSN,
 			Healthy:              replica.Healthy,
 			FrontendPrimaryReady: replica.FrontendPrimaryReady,
+			AckEligibilityKnown:  replica.AckEligibilityKnown,
+			AckEligible:          replica.AckEligible,
 			FrontendProtocol:     replica.FrontendProtocol,
 			FrontendAddr:         replica.FrontendAddr,
 			StatusAddr:           replica.StatusAddr,
@@ -799,7 +806,8 @@ func returnedReplicaProjections(facts ManagedVolumeFacts) []ReturnedReplicaProje
 			ReplicaID:             replica.ReplicaID,
 			FrontendPrimaryReady:  replica.FrontendPrimaryReady,
 			FrontendFenced:        !replica.FrontendPrimaryReady,
-			AckEligible:           false,
+			AckEligibilityKnown:   replica.AckEligibilityKnown,
+			AckEligible:           replica.AckEligible,
 			DurableFrontierKnown:  replica.DurableFrontierKnown,
 			DurableFrontierLSN:    replica.DurableFrontierLSN,
 			RequiredFrontierKnown: facts.Authority.RequiredFrontierKnown,

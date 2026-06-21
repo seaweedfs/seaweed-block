@@ -150,6 +150,7 @@ spec:
                       - state
                       - frontendFenced
                       - frontendPrimaryReady
+                      - ackEligibilityKnown
                       - ackEligible
                       - durableFrontierKnown
                     properties:
@@ -168,6 +169,8 @@ spec:
                       frontendFenced:
                         type: boolean
                       frontendPrimaryReady:
+                        type: boolean
+                      ackEligibilityKnown:
                         type: boolean
                       ackEligible:
                         type: boolean
@@ -200,6 +203,7 @@ spec:
                       - ownerExecutor
                       - mutationAllowed
                       - frontendFenced
+                      - ackEligibilityKnown
                       - ackEligible
                       - durableFrontierKnown
                       - requiredFrontierKnown
@@ -228,6 +232,8 @@ spec:
                       mutationAllowed:
                         type: boolean
                       frontendFenced:
+                        type: boolean
+                      ackEligibilityKnown:
                         type: boolean
                       ackEligible:
                         type: boolean

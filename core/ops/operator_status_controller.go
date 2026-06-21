@@ -283,6 +283,7 @@ type SwBlockVolumeCRDReturnedReplica struct {
 	ReasonCode            string   `json:"reasonCode,omitempty"`
 	FrontendFenced        bool     `json:"frontendFenced"`
 	FrontendPrimaryReady  bool     `json:"frontendPrimaryReady"`
+	AckEligibilityKnown   bool     `json:"ackEligibilityKnown"`
 	AckEligible           bool     `json:"ackEligible"`
 	DurableFrontierKnown  bool     `json:"durableFrontierKnown"`
 	DurableFrontierLSN    uint64   `json:"durableFrontierLsn,omitempty"`
@@ -301,6 +302,7 @@ type SwBlockVolumeCRDExecutorPreflight struct {
 	OwnerExecutor          string   `json:"ownerExecutor"`
 	MutationAllowed        bool     `json:"mutationAllowed"`
 	FrontendFenced         bool     `json:"frontendFenced"`
+	AckEligibilityKnown    bool     `json:"ackEligibilityKnown"`
 	AckEligible            bool     `json:"ackEligible"`
 	DurableFrontierKnown   bool     `json:"durableFrontierKnown"`
 	DurableFrontierLSN     uint64   `json:"durableFrontierLsn,omitempty"`
@@ -499,6 +501,7 @@ func swBlockVolumeCRDReturnedReplicas(returned []ReturnedReplicaProjection) []Sw
 			ReasonCode:            replica.ReasonCode,
 			FrontendFenced:        replica.FrontendFenced,
 			FrontendPrimaryReady:  replica.FrontendPrimaryReady,
+			AckEligibilityKnown:   replica.AckEligibilityKnown,
 			AckEligible:           replica.AckEligible,
 			DurableFrontierKnown:  replica.DurableFrontierKnown,
 			DurableFrontierLSN:    replica.DurableFrontierLSN,
@@ -526,6 +529,7 @@ func swBlockVolumeCRDExecutorPreflights(preflights []ReturnedReplicaExecutorPref
 			OwnerExecutor:          preflight.OwnerExecutor,
 			MutationAllowed:        preflight.MutationAllowed,
 			FrontendFenced:         preflight.FrontendFenced,
+			AckEligibilityKnown:    preflight.AckEligibilityKnown,
 			AckEligible:            preflight.AckEligible,
 			DurableFrontierKnown:   preflight.DurableFrontierKnown,
 			DurableFrontierLSN:     preflight.DurableFrontierLSN,

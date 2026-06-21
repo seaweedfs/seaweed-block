@@ -114,6 +114,45 @@ stateDiagram-v2
 | ManagedVolume model | can expose facts, but needs returned-replica states/actions |
 | operation-layer action model | can host future rebuild action contracts, but no executor yet |
 
+## Executor Preflight Boundary
+
+The current product exposes a dry-run returned-replica reintegration action and
+an executor preflight. The distinction matters:
+
+```text
+dry-run action visible
+  means: the product can explain the candidate and required evidence
+
+executor preflight ready
+  means: a future bounded executor has enough typed evidence to consider work
+```
+
+Phase 51 added an explicit ACK eligibility gate to avoid a common control-plane
+mistake: treating a missing fact as a safe false value.
+
+The preflight may be `ready` only when all of these are true:
+
+```text
+exactly one returned replica target
+frontend_fenced=true
+ack_eligibility_known=true
+ack_eligible=false
+required_frontier_known=true
+durable_frontier_known=true
+durable_lsn >= required_lsn
+mutation_allowed=false
+```
+
+If `ack_eligibility_known=false`, the preflight must hold with:
+
+```text
+reason=returned_replica_ack_eligibility_unknown
+```
+
+This is still not rebuild execution. It is a machine-readable contract that a
+future executor can consume without parsing report text or inferring safety from
+absence.
+
 ## QA Gate Shape Needed
 
 A real returned-replica gate should prove:
@@ -148,4 +187,3 @@ facts -> judgment -> action -> boundary -> evidence
 Returned-replica rebuild should be the next major storage feature only if it
 uses that shape. Otherwise it will recreate the old problem: engine semantics
 that look coherent internally but are not a complete product capability.
-

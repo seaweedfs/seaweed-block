@@ -157,7 +157,13 @@ Recommended order from here:
    The preflight is now machine-readable in operator-snapshot JSON and
    SwBlockVolume `.status.executorPreflights[]`, with OpenAPI schema and
    status-writer coverage. It is still non-mutating.
-8. Add backup/restore and NVMe ANA parity after they can reuse the same action
+8. Phase 51: returned-replica ACK evidence gate. **Closed 2026-06-21, QA PASS**
+   (`internal/docs/finished-plans/phase51_finishedplan_returned_replica_ack_evidence_gate.md`).
+   The executor preflight now distinguishes explicit ACK non-eligibility from
+   missing ACK evidence. A future executor may not treat default
+   `ack_eligible=false` as proof; preflight readiness requires
+   `ack_eligibility_known=true` and `ack_eligible=false`.
+9. Add backup/restore and NVMe ANA parity after they can reuse the same action
    owner, evidence, and status model rather than creating another isolated
    control plane.
 
@@ -166,8 +172,8 @@ The internal release-train contract is
 the operation-layer loop for a bounded `SwBlockVolume` protection finalizer.
 Phase 46 reused this same fact -> judgment -> action -> evidence pattern for
 returned-replica reintegration before any larger storage feature is enabled.
-Phases 47-50 start the executor-admission, preflight, and status-schema bridge
-without allowing mutation.
+Phases 47-51 closed the executor-admission, preflight, status-schema, and ACK
+evidence bridge without allowing mutation.
 
 The practical rule is:
 

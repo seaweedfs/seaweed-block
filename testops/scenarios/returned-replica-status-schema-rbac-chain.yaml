@@ -56,6 +56,14 @@ phases:
       - action: grep_log
         node: m02
         path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase47-status-schema-rbac/phase47-returned-replica-status-schema-rbac-summary.txt"
+        pattern: "^executor_preflight_ack_eligibility_known_projected=true$"
+        save_as: phase51_ack_known_projected_count
+      - action: assert_greater
+        actual: "{{ phase51_ack_known_projected_count }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase47-status-schema-rbac/phase47-returned-replica-status-schema-rbac-summary.txt"
         pattern: "^snake_case_action_rejected=true$"
         save_as: phase47_snake_rejected_count
       - action: assert_greater

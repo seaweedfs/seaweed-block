@@ -156,6 +156,8 @@ type ReplicaEvidence struct {
 	CandidateReadyReason string                 `json:"candidate_ready_reason,omitempty"`
 	Healthy              bool                   `json:"healthy,omitempty"`
 	FrontendPrimaryReady bool                   `json:"frontend_primary_ready,omitempty"`
+	AckEligibilityKnown  bool                   `json:"ack_eligibility_known,omitempty"`
+	AckEligible          bool                   `json:"ack_eligible,omitempty"`
 	FrontendProtocol     string                 `json:"frontend_protocol,omitempty"`
 	FrontendAddr         string                 `json:"frontend_addr,omitempty"`
 	StatusAddr           string                 `json:"status_addr,omitempty"`

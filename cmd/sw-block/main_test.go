@@ -1166,7 +1166,7 @@ func TestOpsReturnedReplicaFromBundleSurfacesAcrossReportExplainDashboard(t *tes
 	}
 	for _, want := range []string{
 		"managed_volume_returned_replica=pvc-returned replica=r1 state=fenced reason=returned_replica_frontend_fenced",
-		"managed_volume_executor_preflight=authority.reintegrate_returned_replica target=r1 decision=ready reason=preconditions_satisfied mode=dry_run executor=authority_recovery_executor mutation_allowed=false required_lsn=4241 durable_lsn=4241",
+		"managed_volume_executor_preflight=authority.reintegrate_returned_replica target=r1 decision=ready reason=preconditions_satisfied mode=dry_run executor=authority_recovery_executor mutation_allowed=false ack_eligibility_known=true required_lsn=4241 durable_lsn=4241",
 		"managed_volume_action=authority.reintegrate_returned_replica mode=dry_run side_effect=authority_mutating executor=authority_recovery_executor decision=allowed",
 	} {
 		if !strings.Contains(string(summary), want) {
@@ -1227,7 +1227,7 @@ func TestOpsReturnedReplicaFromBundleSurfacesAcrossReportExplainDashboard(t *tes
 	}
 	for _, want := range []string{
 		"managed_volume_returned_replica=pvc-returned replica=r1 state=fenced reason=returned_replica_frontend_fenced",
-		"managed_volume_executor_preflight authority.reintegrate_returned_replica target=r1 decision=ready reason=preconditions_satisfied mode=dry_run executor=authority_recovery_executor mutation_allowed=false required_lsn=4241 durable_lsn=4241",
+		"managed_volume_executor_preflight authority.reintegrate_returned_replica target=r1 decision=ready reason=preconditions_satisfied mode=dry_run executor=authority_recovery_executor mutation_allowed=false ack_eligibility_known=true required_lsn=4241 durable_lsn=4241",
 		"managed_volume_action authority.reintegrate_returned_replica mode=dry_run",
 	} {
 		if !strings.Contains(stdout.String(), want) {
@@ -1786,6 +1786,8 @@ func writeCmdReturnedReplicaBundle(t *testing.T) string {
 			ReplicationRole:      "replica_ready",
 			Healthy:              false,
 			FrontendPrimaryReady: false,
+			AckEligibilityKnown:  true,
+			AckEligible:          false,
 			DurableFrontierKnown: true,
 			DurableFrontierLSN:   4241,
 			StalePrimaryFenced:   true,

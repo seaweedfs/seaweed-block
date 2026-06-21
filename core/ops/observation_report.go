@@ -160,12 +160,13 @@ func renderManagedProjectionSummary(b *strings.Builder, managed ManagedVolumePro
 		}
 	}
 	for _, returned := range managed.ReplicaReintegrations {
-		fmt.Fprintf(b, "managed_volume_returned_replica=%s replica=%s state=%s reason=%s frontend_fenced=%t ack_eligible=%t durable_frontier_known=%t durable_lsn=%d required_frontier_known=%t required_lsn=%d\n",
+		fmt.Fprintf(b, "managed_volume_returned_replica=%s replica=%s state=%s reason=%s frontend_fenced=%t ack_eligibility_known=%t ack_eligible=%t durable_frontier_known=%t durable_lsn=%d required_frontier_known=%t required_lsn=%d\n",
 			emptyAsDash(managed.VolumeID),
 			emptyAsDash(returned.ReplicaID),
 			emptyAsDash(returned.State),
 			emptyAsDash(returned.ReasonCode),
 			returned.FrontendFenced,
+			returned.AckEligibilityKnown,
 			returned.AckEligible,
 			returned.DurableFrontierKnown,
 			returned.DurableFrontierLSN,
@@ -173,7 +174,7 @@ func renderManagedProjectionSummary(b *strings.Builder, managed ManagedVolumePro
 			returned.RequiredFrontierLSN)
 	}
 	for _, preflight := range ReturnedReplicaExecutorPreflights(managed) {
-		fmt.Fprintf(b, "managed_volume_executor_preflight=%s target=%s decision=%s reason=%s mode=%s executor=%s mutation_allowed=%t required_lsn=%d durable_lsn=%d\n",
+		fmt.Fprintf(b, "managed_volume_executor_preflight=%s target=%s decision=%s reason=%s mode=%s executor=%s mutation_allowed=%t ack_eligibility_known=%t required_lsn=%d durable_lsn=%d\n",
 			emptyAsDash(preflight.ActionType),
 			emptyAsDash(preflight.ReplicaID),
 			emptyAsDash(preflight.Decision),
@@ -181,6 +182,7 @@ func renderManagedProjectionSummary(b *strings.Builder, managed ManagedVolumePro
 			emptyAsDash(preflight.Mode),
 			emptyAsDash(preflight.OwnerExecutor),
 			preflight.MutationAllowed,
+			preflight.AckEligibilityKnown,
 			preflight.RequiredFrontierLSN,
 			preflight.DurableFrontierLSN)
 	}

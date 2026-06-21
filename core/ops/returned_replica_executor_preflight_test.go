@@ -46,6 +46,24 @@ func TestReturnedReplicaExecutorPreflight_HoldsUnsafeFrontend(t *testing.T) {
 	}
 }
 
+func TestReturnedReplicaExecutorPreflight_HoldsUnknownAckEligibility(t *testing.T) {
+	projection := returnedReplicaPreflightProjection(t, func(facts *ManagedVolumeFacts) {
+		facts.Replicas[0].AckEligibilityKnown = false
+	})
+
+	preflight := onlyReturnedReplicaPreflight(t, projection)
+	if preflight.Decision != ReturnedReplicaExecutorPreflightHold || preflight.Reason != ReturnedReplicaExecutorPreflightReasonAckEligibilityUnknown {
+		t.Fatalf("preflight=%+v", preflight)
+	}
+	if preflight.AckEligible || preflight.AckEligibilityKnown {
+		t.Fatalf("unknown ACK eligibility must not be treated as a known false fact: %+v", preflight)
+	}
+	action := findManagedVolumeAction(projection.Actions, ManagedVolumeActionReintegrateReturned)
+	if action == nil || action.Decision != ManagedVolumeActionDecisionAllowed {
+		t.Fatalf("dry-run action should remain visible while executor preflight holds: %+v", projection.Actions)
+	}
+}
+
 func TestReturnedReplicaExecutorPreflight_HoldsFrontierBehind(t *testing.T) {
 	projection := returnedReplicaPreflightProjection(t, func(facts *ManagedVolumeFacts) {
 		facts.Replicas[0].DurableFrontierLSN = 51
@@ -67,6 +85,8 @@ func TestReturnedReplicaExecutorPreflight_HoldsAmbiguousReturnedReplicas(t *test
 			DurableFrontierKnown: true,
 			DurableFrontierLSN:   52,
 			FrontendPrimaryReady: false,
+			AckEligibilityKnown:  true,
+			AckEligible:          false,
 			StalePrimaryFenced:   true,
 		})
 	})
@@ -100,6 +120,8 @@ func returnedReplicaPreflightProjection(t *testing.T, mutate func(*ManagedVolume
 			DurableFrontierKnown: true,
 			DurableFrontierLSN:   52,
 			FrontendPrimaryReady: false,
+			AckEligibilityKnown:  true,
+			AckEligible:          false,
 			StalePrimaryFenced:   true,
 		}, {
 			ReplicaID:            "r2",

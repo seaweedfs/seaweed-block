@@ -196,7 +196,7 @@ func TestPhase46D2SwBlockVolumeReturnedReplicaSchema(t *testing.T) {
 	doc := readYAMLMap(t, "charts/seaweed-block/crds/swblockvolumes.block.seaweedfs.com.yaml")
 	statusProperties := crdStatusProperties(t, doc)
 	returnedProperties := yamlMap(t, yamlMap(t, yamlMap(t, statusProperties, "replicaReintegrations"), "items"), "properties")
-	for _, want := range []string{"replicaID", "state", "reasonCode", "frontendFenced", "frontendPrimaryReady", "ackEligible", "durableFrontierKnown", "durableFrontierLsn", "requiredFrontierKnown", "requiredFrontierLsn", "evidenceRefs"} {
+	for _, want := range []string{"replicaID", "state", "reasonCode", "frontendFenced", "frontendPrimaryReady", "ackEligibilityKnown", "ackEligible", "durableFrontierKnown", "durableFrontierLsn", "requiredFrontierKnown", "requiredFrontierLsn", "evidenceRefs"} {
 		if _, ok := returnedProperties[want]; !ok {
 			t.Fatalf("SwBlockVolume.status.replicaReintegrations[] schema missing %s", want)
 		}
@@ -207,7 +207,7 @@ func TestPhase46D2SwBlockVolumeReturnedReplicaSchema(t *testing.T) {
 			t.Fatalf("SwBlockVolume.status.replicaReintegrations[].state enum missing %s: %+v", want, stateEnum)
 		}
 	}
-	for _, forbidden := range []string{"replica_id", "frontend_primary_ready", "ack_eligible", "durable_frontier_lsn"} {
+	for _, forbidden := range []string{"replica_id", "frontend_primary_ready", "ack_eligibility_known", "ack_eligible", "durable_frontier_lsn"} {
 		if _, ok := returnedProperties[forbidden]; ok {
 			t.Fatalf("SwBlockVolume.status.replicaReintegrations[] leaked snake_case %s", forbidden)
 		}
@@ -218,7 +218,7 @@ func TestPhase50SwBlockVolumeExecutorPreflightSchema(t *testing.T) {
 	doc := readYAMLMap(t, "charts/seaweed-block/crds/swblockvolumes.block.seaweedfs.com.yaml")
 	statusProperties := crdStatusProperties(t, doc)
 	preflightProperties := yamlMap(t, yamlMap(t, yamlMap(t, statusProperties, "executorPreflights"), "items"), "properties")
-	for _, want := range []string{"actionType", "replicaID", "decision", "reason", "mode", "sideEffectClass", "ownerExecutor", "mutationAllowed", "frontendFenced", "ackEligible", "durableFrontierKnown", "durableFrontierLsn", "requiredFrontierKnown", "requiredFrontierLsn", "evidenceRequired", "evidenceRefs", "forbiddenMutationClass"} {
+	for _, want := range []string{"actionType", "replicaID", "decision", "reason", "mode", "sideEffectClass", "ownerExecutor", "mutationAllowed", "frontendFenced", "ackEligibilityKnown", "ackEligible", "durableFrontierKnown", "durableFrontierLsn", "requiredFrontierKnown", "requiredFrontierLsn", "evidenceRequired", "evidenceRefs", "forbiddenMutationClass"} {
 		if _, ok := preflightProperties[want]; !ok {
 			t.Fatalf("SwBlockVolume.status.executorPreflights[] schema missing %s", want)
 		}
@@ -233,7 +233,7 @@ func TestPhase50SwBlockVolumeExecutorPreflightSchema(t *testing.T) {
 	if !modeEnum[ManagedVolumeActionModeDryRun] {
 		t.Fatalf("SwBlockVolume.status.executorPreflights[].mode enum missing dry_run: %+v", modeEnum)
 	}
-	for _, forbidden := range []string{"action_type", "side_effect_class", "owner_executor", "mutation_allowed", "durable_frontier_lsn", "required_frontier_lsn"} {
+	for _, forbidden := range []string{"action_type", "side_effect_class", "owner_executor", "mutation_allowed", "ack_eligibility_known", "durable_frontier_lsn", "required_frontier_lsn"} {
 		if _, ok := preflightProperties[forbidden]; ok {
 			t.Fatalf("SwBlockVolume.status.executorPreflights[] leaked snake_case %s", forbidden)
 		}

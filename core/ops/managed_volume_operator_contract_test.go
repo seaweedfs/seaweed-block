@@ -101,6 +101,8 @@ func TestManagedVolumeOperatorContract_ReturnedReplicaProjection(t *testing.T) {
 			DurableFrontierKnown: true,
 			DurableFrontierLSN:   52,
 			FrontendPrimaryReady: false,
+			AckEligibilityKnown:  true,
+			AckEligible:          false,
 		}, {
 			ReplicaID: "r2",
 			Observed:  true,

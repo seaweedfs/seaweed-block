@@ -174,6 +174,7 @@ cat >"${ARTIFACT_DIR}/valid-status-patch.json" <<'JSON'
         "reasonCode": "returned_replica_frontend_fenced",
         "frontendFenced": true,
         "frontendPrimaryReady": false,
+        "ackEligibilityKnown": true,
         "ackEligible": false,
         "durableFrontierKnown": true,
         "durableFrontierLsn": 52,
@@ -193,6 +194,7 @@ cat >"${ARTIFACT_DIR}/valid-status-patch.json" <<'JSON'
         "ownerExecutor": "authority_recovery_executor",
         "mutationAllowed": false,
         "frontendFenced": true,
+        "ackEligibilityKnown": true,
         "ackEligible": false,
         "durableFrontierKnown": true,
         "durableFrontierLsn": 52,
@@ -238,6 +240,7 @@ cat >"${ARTIFACT_DIR}/snake-status-patch.json" <<'JSON'
         "action_type": "authority.reintegrate_returned_replica",
         "decision": "ready",
         "mode": "dry_run",
+        "ack_eligibility_known": true,
         "mutation_allowed": false
       }
     ]
@@ -266,6 +269,7 @@ cat >"${ARTIFACT_DIR}/bad-mode-status-patch.json" <<'JSON'
         "ownerExecutor": "authority_recovery_executor",
         "mutationAllowed": false,
         "frontendFenced": true,
+        "ackEligibilityKnown": true,
         "ackEligible": false,
         "durableFrontierKnown": true,
         "requiredFrontierKnown": true
@@ -282,6 +286,8 @@ run_expect_success valid-status-server-dry-run \
 write_summary "valid_returned_replica_status_server_dry_run=true"
 grep -q "executorPreflights:" "${ARTIFACT_DIR}/valid-status-server-dry-run.stdout.txt"
 write_summary "valid_executor_preflight_status_server_dry_run=true"
+grep -q "ackEligibilityKnown: true" "${ARTIFACT_DIR}/valid-status-server-dry-run.stdout.txt"
+write_summary "executor_preflight_ack_eligibility_known_projected=true"
 grep -q "forbiddenMutationClass:" "${ARTIFACT_DIR}/valid-status-server-dry-run.stdout.txt"
 write_summary "executor_preflight_forbidden_mutation_class_projected=true"
 

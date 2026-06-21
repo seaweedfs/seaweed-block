@@ -4,18 +4,19 @@ const (
 	ReturnedReplicaExecutorPreflightReady = "ready"
 	ReturnedReplicaExecutorPreflightHold  = "hold"
 
-	ReturnedReplicaExecutorPreflightReasonSatisfied           = "preconditions_satisfied"
-	ReturnedReplicaExecutorPreflightReasonActionNotAllowed    = "action_not_allowed"
-	ReturnedReplicaExecutorPreflightReasonAmbiguousReplica    = "ambiguous_returned_replica"
-	ReturnedReplicaExecutorPreflightReasonNoReturnedReplica   = "no_returned_replica"
-	ReturnedReplicaExecutorPreflightReasonFrontendNotFenced   = "returned_replica_frontend_not_fenced"
-	ReturnedReplicaExecutorPreflightReasonAckEligible         = "returned_replica_ack_eligible"
-	ReturnedReplicaExecutorPreflightReasonMissingFrontier     = "required_frontier_missing"
-	ReturnedReplicaExecutorPreflightReasonDurableMissing      = "durable_frontier_missing"
-	ReturnedReplicaExecutorPreflightReasonFrontierBehind      = "returned_replica_frontier_behind"
-	ReturnedReplicaExecutorPreflightReasonWrongExecutor       = "wrong_owner_executor"
-	ReturnedReplicaExecutorPreflightReasonUnsupportedMode     = "unsupported_action_mode"
-	ReturnedReplicaExecutorPreflightReasonUnsupportedMutation = "unexpected_mutation_permission"
+	ReturnedReplicaExecutorPreflightReasonSatisfied             = "preconditions_satisfied"
+	ReturnedReplicaExecutorPreflightReasonActionNotAllowed      = "action_not_allowed"
+	ReturnedReplicaExecutorPreflightReasonAmbiguousReplica      = "ambiguous_returned_replica"
+	ReturnedReplicaExecutorPreflightReasonNoReturnedReplica     = "no_returned_replica"
+	ReturnedReplicaExecutorPreflightReasonFrontendNotFenced     = "returned_replica_frontend_not_fenced"
+	ReturnedReplicaExecutorPreflightReasonAckEligibilityUnknown = "returned_replica_ack_eligibility_unknown"
+	ReturnedReplicaExecutorPreflightReasonAckEligible           = "returned_replica_ack_eligible"
+	ReturnedReplicaExecutorPreflightReasonMissingFrontier       = "required_frontier_missing"
+	ReturnedReplicaExecutorPreflightReasonDurableMissing        = "durable_frontier_missing"
+	ReturnedReplicaExecutorPreflightReasonFrontierBehind        = "returned_replica_frontier_behind"
+	ReturnedReplicaExecutorPreflightReasonWrongExecutor         = "wrong_owner_executor"
+	ReturnedReplicaExecutorPreflightReasonUnsupportedMode       = "unsupported_action_mode"
+	ReturnedReplicaExecutorPreflightReasonUnsupportedMutation   = "unexpected_mutation_permission"
 )
 
 // ReturnedReplicaExecutorPreflight is the non-mutating handoff contract for a
@@ -33,6 +34,7 @@ type ReturnedReplicaExecutorPreflight struct {
 	OwnerExecutor          string   `json:"owner_executor"`
 	MutationAllowed        bool     `json:"mutation_allowed"`
 	FrontendFenced         bool     `json:"frontend_fenced"`
+	AckEligibilityKnown    bool     `json:"ack_eligibility_known"`
 	AckEligible            bool     `json:"ack_eligible"`
 	DurableFrontierKnown   bool     `json:"durable_frontier_known"`
 	DurableFrontierLSN     uint64   `json:"durable_frontier_lsn,omitempty"`
@@ -98,6 +100,10 @@ func ReturnedReplicaExecutorPreflights(projection ManagedVolumeProjection) []Ret
 		preflight.Reason = ReturnedReplicaExecutorPreflightReasonFrontendNotFenced
 		return []ReturnedReplicaExecutorPreflight{preflight}
 	}
+	if !returned.AckEligibilityKnown {
+		preflight.Reason = ReturnedReplicaExecutorPreflightReasonAckEligibilityUnknown
+		return []ReturnedReplicaExecutorPreflight{preflight}
+	}
 	if returned.AckEligible {
 		preflight.Reason = ReturnedReplicaExecutorPreflightReasonAckEligible
 		return []ReturnedReplicaExecutorPreflight{preflight}
@@ -122,6 +128,7 @@ func ReturnedReplicaExecutorPreflights(projection ManagedVolumeProjection) []Ret
 func populateReturnedReplicaPreflight(preflight *ReturnedReplicaExecutorPreflight, returned ReturnedReplicaProjection) {
 	preflight.ReplicaID = returned.ReplicaID
 	preflight.FrontendFenced = returned.FrontendFenced
+	preflight.AckEligibilityKnown = returned.AckEligibilityKnown
 	preflight.AckEligible = returned.AckEligible
 	preflight.DurableFrontierKnown = returned.DurableFrontierKnown
 	preflight.DurableFrontierLSN = returned.DurableFrontierLSN
@@ -132,6 +139,9 @@ func populateReturnedReplicaPreflight(preflight *ReturnedReplicaExecutorPrefligh
 func returnedReplicaPreflightHoldReason(returned ReturnedReplicaProjection) string {
 	if !returned.FrontendFenced || returned.FrontendPrimaryReady {
 		return ReturnedReplicaExecutorPreflightReasonFrontendNotFenced
+	}
+	if !returned.AckEligibilityKnown {
+		return ReturnedReplicaExecutorPreflightReasonAckEligibilityUnknown
 	}
 	if returned.AckEligible {
 		return ReturnedReplicaExecutorPreflightReasonAckEligible

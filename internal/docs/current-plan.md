@@ -1,128 +1,136 @@
-# Current Plan: Phase 50 Returned-Replica Executor Preflight Status Schema
+# Current Plan: Phase 51 Returned-Replica ACK Evidence Gate
 
 Status: complete; local validation PASS; live gate PASS.
 
-Working branch: `phase50-test-validation-hygiene`
+Working branch: `phase51-returned-replica-ack-evidence-gate`
 
-Decision note: Phase 50 keeps returned-replica reintegration non-mutating. It
-publishes the Phase 49 executor preflight into machine-readable
-operator-snapshot and SwBlockVolume `.status` surfaces so a future executor can
-consume a typed contract instead of parsing report text.
+Decision note: Phase 51 keeps returned-replica reintegration non-mutating. It
+tightens the executor preflight so a missing ACK-eligibility fact is not treated
+as `ack_eligible=false`.
 
-Previous product phase: Phase 49 is closed in
-`internal/docs/finished-plans/phase49_finishedplan_returned_replica_executor_preflight.md`.
-
-Finished plan:
+Previous product phase: Phase 50 is closed in
 `internal/docs/finished-plans/phase50_finishedplan_returned_replica_preflight_status_schema.md`.
 
 ## Product Goal
 
-Make returned-replica executor preflight visible in the same machine-readable
-surfaces used by the rest of the operation layer:
+Prevent the next executor phase from confusing "no evidence of ACK eligibility"
+with "known not ACK eligible":
 
 ```text
-ManagedVolume projection
--> executor_preflights[] in operator-snapshot.json
--> executorPreflights[] in SwBlockVolume.status
--> CRD OpenAPI schema validates the camelCase status payload
--> status writer tests catch casing/schema drift before live QA
+returned replica observed
+-> frontend fenced
+-> durable frontier covers required frontier
+-> ACK eligibility explicitly known false
+-> executor preflight may be ready
+```
+
+If ACK eligibility is unknown, the human-facing dry-run action can still be
+shown, but the executor preflight must hold with a stable reason:
+
+```text
+returned_replica_ack_eligibility_unknown
 ```
 
 ## Why This Is Next
 
-Phase 49 made the preflight explicit, but only report and explain text carried
-it. That is useful for humans but insufficient for a future in-cluster executor.
-Before any mutation is proposed, the preflight must be a typed status field with
-schema and writer coverage.
+Phases 46-50 made returned-replica state, action, preflight, and CRD status
+visible. While reviewing the next mutating executor step, one gap remained:
+`ack_eligible=false` was projected from absence, not from a live ACK-admission
+fact. That is safe for a read-only status surface, but not enough for an
+executor handoff.
+
+Phase 51 closes that semantic gap before adding any mutation.
 
 ## Scope Contract
 
 | In | Out |
 |---|---|
-| operator-snapshot `status.executor_preflights[]` | ACK eligibility mutation |
-| CRD `status.executorPreflights[]` | frontend publication mutation |
-| OpenAPI schema and camelCase tests | rebuild traffic |
-| status writer/reconciler tests | automatic failback |
-| returned-replica bundle surface regression | lifecycle-owner RBAC expansion |
+| `ack_eligibility_known` model field | ACK eligibility mutation |
+| executor preflight holds on unknown ACK evidence | frontend publication |
+| CRD/operator-snapshot/report expose the known bit | rebuild traffic |
+| schema and writer tests | automatic failback |
+| live status/RBAC gate payload update | lifecycle-owner/RBAC expansion |
 
-## D1: Operator-Snapshot Status
+## D1: Model Gate
 
-Goal: carry `ReturnedReplicaExecutorPreflight` in the snapshot contract.
-
-Acceptance:
-
-```text
-[x] ManagedVolumeOperatorStatus includes executor_preflights[]
-[x] returned-replica projection produces one ready preflight
-[x] snapshot JSON remains snake_case
-[x] mutation_allowed=false
-```
-
-## D2: CRD Status Schema
-
-Goal: publish the same preflight to SwBlockVolume `.status` with Kubernetes
-camelCase fields.
+Goal: make ACK eligibility evidence explicit in returned-replica facts and
+projection.
 
 Acceptance:
 
 ```text
-[x] SwBlockVolumeCRDStatus includes executorPreflights[]
-[x] CRD OpenAPI schema includes all fields
-[x] decision enum includes ready/hold
-[x] mode enum is dry_run
-[x] snake_case is rejected by schema tests
+[x] ReplicaFact carries ack_eligibility_known and ack_eligible
+[x] ReturnedReplicaProjection carries ack_eligibility_known
+[x] missing ACK evidence does not become a known false value
 ```
 
-## D3: Writer / Reconciler Coverage
+## D2: Executor Preflight Gate
 
-Goal: shift live-API class bugs left into local tests.
+Goal: require explicit ACK non-eligibility before preflight `ready`.
 
 Acceptance:
 
 ```text
-[x] KubernetesStatusClient emits camelCase executorPreflights
-[x] status conformance gate includes executorPreflights
-[x] OperatorStatusReconciler writes the preflight into volume status
-[x] no spec/finalizer/storage mutation is added
+[x] known false ACK eligibility can produce ready
+[x] unknown ACK eligibility produces hold
+[x] hold reason is returned_replica_ack_eligibility_unknown
+[x] existing dry-run action remains visible and non-mutating
 ```
 
-## D4: Live Gate Wrapper
+## D3: Status / Schema Contract
 
-Goal: extend the existing returned-replica status/RBAC live gate so QA can
-server-side dry-run `executorPreflights[]` against a real CRD schema and the
-operator-status RBAC boundary.
+Goal: carry ACK evidence through every machine-readable status surface.
 
 Acceptance:
 
 ```text
-[x] valid status patch includes executorPreflights[]
-[x] server-side dry-run output contains executorPreflights
-[x] forbiddenMutationClass is projected
-[x] snake_case executor preflight payload is rejected
-[x] unsupported executor preflight mode is rejected
+[x] report/explain text includes ack_eligibility_known
+[x] operator-snapshot uses ack_eligibility_known
+[x] SwBlockVolume.status uses ackEligibilityKnown
+[x] CRD schema requires camelCase ackEligibilityKnown
+[x] snake_case ack_eligibility_known remains rejected in CRD payloads
 ```
 
-## D5: Validation
+Finished plan:
+`internal/docs/finished-plans/phase51_finishedplan_returned_replica_ack_evidence_gate.md`.
 
-Validation completed:
+## D4: Validation
+
+Required before close:
 
 ```text
-[x] go test -count=1 ./cmd/sw-block
 [x] go test -count=1 ./core/ops
+[x] go test -count=1 ./cmd/sw-block
+[x] bash -n scripts/run-phase47-returned-replica-status-schema-rbac-gate.sh
 [x] swblock validate testops/scenarios/returned-replica-status-schema-rbac-chain.yaml
 [x] swblock run testops/scenarios/returned-replica-status-schema-rbac-chain.yaml
-    run: 20260620-224255-2225, 16/16 PASS
+    run: 20260621-003502-a3ce, 18/18 PASS
 ```
+
+## QA Assignment
+
+QA/live validation re-ran the returned-replica status schema/RBAC chain and
+verified:
+
+```text
+valid status payload includes ackEligibilityKnown=true
+missing/snake_case ack_eligibility_known is rejected by the CRD schema
+executorPreflights[].decision remains ready only for known ACK non-eligible evidence
+operator-status RBAC remains status/events-only
+server_dry_run_status_mutated=false
+```
+
+## Non-Claims
+
+- No ACK eligibility mutation.
+- No frontend publication.
+- No rebuild traffic.
+- No automatic failback.
+- No lifecycle-owner/operator-status RBAC expansion.
+- No release-image claim.
 
 ## Next Phase Candidate
 
-The next phase can either:
-
-```text
-1. run a live CRD/status schema gate for executorPreflights, or
-2. start a still-bounded executor design gate that defines exact mutations,
-   admission/RBAC, terminal evidence, and multi-volume isolation.
-```
-
-Do not enable returned-replica mutation until that executor phase exists and is
-QA-validated.
+Only after Phase 51 is validated should the project design the real returned
+replica executor boundary: exact mutation set, admission/RBAC, terminal
+evidence, failure handling, and multi-volume isolation.

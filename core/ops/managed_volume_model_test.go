@@ -504,6 +504,8 @@ func TestManagedVolumeProjection_ReturnedPreviousPrimaryStaysFrontendFenced(t *t
 			DurableFrontierLSN:   52,
 			Healthy:              false,
 			FrontendPrimaryReady: false,
+			AckEligibilityKnown:  true,
+			AckEligible:          false,
 			StalePrimaryFenced:   true,
 		}, {
 			ReplicaID:            "r2",
