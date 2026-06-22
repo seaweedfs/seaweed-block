@@ -163,7 +163,14 @@ Recommended order from here:
    missing ACK evidence. A future executor may not treat default
    `ack_eligible=false` as proof; preflight readiness requires
    `ack_eligibility_known=true` and `ack_eligible=false`.
-9. Add backup/restore and NVMe ANA parity after they can reuse the same action
+9. Phase 52: returned-replica executor contract. **Closed 2026-06-21, QA PASS**
+   (`internal/docs/finished-plans/phase52_finishedplan_returned_replica_executor_contract.md`).
+   The future executor boundary is published as a non-mutating contract:
+   execution remains disabled, only ACK eligibility is named as the future
+   allowed mutation class, frontend publication/rebuild traffic/failback remain
+   forbidden, and terminal evidence is required before any later executor can
+   claim completion.
+10. Add backup/restore and NVMe ANA parity after they can reuse the same action
    owner, evidence, and status model rather than creating another isolated
    control plane.
 
@@ -172,8 +179,8 @@ The internal release-train contract is
 the operation-layer loop for a bounded `SwBlockVolume` protection finalizer.
 Phase 46 reused this same fact -> judgment -> action -> evidence pattern for
 returned-replica reintegration before any larger storage feature is enabled.
-Phases 47-51 closed the executor-admission, preflight, status-schema, and ACK
-evidence bridge without allowing mutation.
+Phases 47-52 close the executor-admission, preflight, status-schema, ACK
+evidence, and executor-contract bridge without allowing mutation.
 
 The practical rule is:
 

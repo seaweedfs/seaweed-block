@@ -240,6 +240,28 @@ func TestPhase50SwBlockVolumeExecutorPreflightSchema(t *testing.T) {
 	}
 }
 
+func TestPhase52SwBlockVolumeExecutorContractSchema(t *testing.T) {
+	doc := readYAMLMap(t, "charts/seaweed-block/crds/swblockvolumes.block.seaweedfs.com.yaml")
+	statusProperties := crdStatusProperties(t, doc)
+	contractProperties := yamlMap(t, yamlMap(t, yamlMap(t, statusProperties, "executorContracts"), "items"), "properties")
+	for _, want := range []string{"actionType", "replicaID", "decision", "reason", "ownerExecutor", "executionEnabled", "mutationAllowed", "preflightDecision", "preflightReason", "allowedMutationClass", "forbiddenMutationClass", "terminalEvidenceRequired", "evidenceRefs"} {
+		if _, ok := contractProperties[want]; !ok {
+			t.Fatalf("SwBlockVolume.status.executorContracts[] schema missing %s", want)
+		}
+	}
+	decisionEnum := yamlStringSet(t, yamlMap(t, contractProperties, "decision"), "enum")
+	for _, want := range []string{ReturnedReplicaExecutorContractBlocked, ReturnedReplicaExecutorContractDisabled} {
+		if !decisionEnum[want] {
+			t.Fatalf("SwBlockVolume.status.executorContracts[].decision enum missing %s: %+v", want, decisionEnum)
+		}
+	}
+	for _, forbidden := range []string{"action_type", "owner_executor", "execution_enabled", "mutation_allowed", "preflight_decision", "allowed_mutation_class", "terminal_evidence_required"} {
+		if _, ok := contractProperties[forbidden]; ok {
+			t.Fatalf("SwBlockVolume.status.executorContracts[] leaked snake_case %s", forbidden)
+		}
+	}
+}
+
 func TestOperatorStatusRBACIsStatusEventsOnly(t *testing.T) {
 	raw := readRepoFile(t, "charts/seaweed-block/templates/operator-status-rbac.yaml")
 	required := []string{

@@ -334,6 +334,18 @@ func RenderManagedVolumeProjectionText(projection ManagedVolumeProjection) strin
 			preflight.RequiredFrontierLSN,
 			preflight.DurableFrontierLSN)
 	}
+	for _, contract := range ReturnedReplicaExecutorContracts(projection) {
+		fmt.Fprintf(&b, "managed_volume_executor_contract %s target=%s decision=%s reason=%s executor=%s execution_enabled=%t mutation_allowed=%t allowed_mutation=%s terminal_evidence=%s\n",
+			emptyAsDash(contract.ActionType),
+			emptyAsDash(contract.ReplicaID),
+			emptyAsDash(contract.Decision),
+			emptyAsDash(contract.Reason),
+			emptyAsDash(contract.OwnerExecutor),
+			contract.ExecutionEnabled,
+			contract.MutationAllowed,
+			emptyAsDash(strings.Join(contract.AllowedMutationClass, ",")),
+			emptyAsDash(strings.Join(contract.TerminalEvidenceRequired, ",")))
+	}
 	for _, condition := range projection.Conditions {
 		fmt.Fprintf(&b, "managed_volume_condition %s status=%s reason=%s severity=%s",
 			emptyAsDash(condition.Type),

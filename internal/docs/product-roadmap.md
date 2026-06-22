@@ -191,9 +191,12 @@ rebuild, delete safety, or cleanup must start as a separate gated phase.
   documented mechanism, and support-bundle proof of fencing and data integrity.
 - Current returned-replica status: observed returned replicas are productized
   through the ManagedVolume surface. A dry-run reintegration action and
-  executor preflight can become ready only with fencing and frontier evidence,
-  and that preflight is now available through machine-readable status. The
-  actual authority/storage mutation is still deferred.
+  executor preflight can become ready only with fencing, frontier, and explicit
+  ACK eligibility evidence, and that preflight is now available through
+  machine-readable status. Phase 52 adds a still-disabled executor contract:
+  only ACK eligibility is named as the future allowed mutation class, while
+  frontend publication, rebuild traffic, and failback stay forbidden. The actual
+  authority/storage mutation is still deferred.
 - Later: returned-replica rebuild/reintegration/failback execution, NVMe ANA
   Kubernetes multipath parity, stronger committed-frontier reporting, broad
   distro/host compatibility, and longer soak under failure. NVMe ANA parity

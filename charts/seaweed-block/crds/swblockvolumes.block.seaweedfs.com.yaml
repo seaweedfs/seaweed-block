@@ -259,6 +259,55 @@ spec:
                         type: array
                         items:
                           type: string
+                executorContracts:
+                  type: array
+                  items:
+                    type: object
+                    required:
+                      - actionType
+                      - decision
+                      - reason
+                      - ownerExecutor
+                      - executionEnabled
+                      - mutationAllowed
+                    properties:
+                      actionType:
+                        type: string
+                      replicaID:
+                        type: string
+                      decision:
+                        type: string
+                        enum:
+                          - blocked
+                          - disabled
+                      reason:
+                        type: string
+                      ownerExecutor:
+                        type: string
+                      executionEnabled:
+                        type: boolean
+                      mutationAllowed:
+                        type: boolean
+                      preflightDecision:
+                        type: string
+                      preflightReason:
+                        type: string
+                      allowedMutationClass:
+                        type: array
+                        items:
+                          type: string
+                      forbiddenMutationClass:
+                        type: array
+                        items:
+                          type: string
+                      terminalEvidenceRequired:
+                        type: array
+                        items:
+                          type: string
+                      evidenceRefs:
+                        type: array
+                        items:
+                          type: string
                 nonClaims:
                   type: array
                   items:

@@ -1167,6 +1167,7 @@ func TestOpsReturnedReplicaFromBundleSurfacesAcrossReportExplainDashboard(t *tes
 	for _, want := range []string{
 		"managed_volume_returned_replica=pvc-returned replica=r1 state=fenced reason=returned_replica_frontend_fenced",
 		"managed_volume_executor_preflight=authority.reintegrate_returned_replica target=r1 decision=ready reason=preconditions_satisfied mode=dry_run executor=authority_recovery_executor mutation_allowed=false ack_eligibility_known=true required_lsn=4241 durable_lsn=4241",
+		"managed_volume_executor_contract=authority.reintegrate_returned_replica target=r1 decision=disabled reason=executor_policy_disabled executor=authority_recovery_executor execution_enabled=false mutation_allowed=false allowed_mutation=ack_eligibility terminal_evidence=ack_eligibility_known,ack_eligible_true,frontend_fenced_after_execution,primary_unchanged,durable_frontier_covered,no_cross_volume_identity_change",
 		"managed_volume_action=authority.reintegrate_returned_replica mode=dry_run side_effect=authority_mutating executor=authority_recovery_executor decision=allowed",
 	} {
 		if !strings.Contains(string(summary), want) {
@@ -1180,8 +1181,11 @@ func TestOpsReturnedReplicaFromBundleSurfacesAcrossReportExplainDashboard(t *tes
 	for _, want := range []string{
 		`"replica_reintegrations": [`,
 		`"executor_preflights": [`,
+		`"executor_contracts": [`,
 		`"state": "fenced"`,
 		`"reason_code": "returned_replica_frontend_fenced"`,
+		`"reason": "executor_policy_disabled"`,
+		`"execution_enabled": false`,
 		`"reason": "preconditions_satisfied"`,
 		`"type": "authority.reintegrate_returned_replica"`,
 	} {
@@ -1209,6 +1213,13 @@ func TestOpsReturnedReplicaFromBundleSurfacesAcrossReportExplainDashboard(t *tes
 	if len(returned) != 1 || returned[0].ReplicaID != "r1" || returned[0].State != ops.ReturnedReplicaStateFenced {
 		t.Fatalf("CRD returned replicas=%+v", returned)
 	}
+	contracts := writer.volumes[0].status.ExecutorContracts
+	if len(contracts) != 1 ||
+		contracts[0].Decision != ops.ReturnedReplicaExecutorContractDisabled ||
+		contracts[0].ExecutionEnabled ||
+		contracts[0].MutationAllowed {
+		t.Fatalf("CRD executor contracts=%+v", contracts)
+	}
 	foundReintegrate := false
 	for _, action := range writer.volumes[0].status.AllowedActions {
 		if action.Type == ops.ManagedVolumeActionReintegrateReturned {
@@ -1228,6 +1239,7 @@ func TestOpsReturnedReplicaFromBundleSurfacesAcrossReportExplainDashboard(t *tes
 	for _, want := range []string{
 		"managed_volume_returned_replica=pvc-returned replica=r1 state=fenced reason=returned_replica_frontend_fenced",
 		"managed_volume_executor_preflight authority.reintegrate_returned_replica target=r1 decision=ready reason=preconditions_satisfied mode=dry_run executor=authority_recovery_executor mutation_allowed=false ack_eligibility_known=true required_lsn=4241 durable_lsn=4241",
+		"managed_volume_executor_contract authority.reintegrate_returned_replica target=r1 decision=disabled reason=executor_policy_disabled executor=authority_recovery_executor execution_enabled=false mutation_allowed=false allowed_mutation=ack_eligibility terminal_evidence=ack_eligibility_known,ack_eligible_true,frontend_fenced_after_execution,primary_unchanged,durable_frontier_covered,no_cross_volume_identity_change",
 		"managed_volume_action authority.reintegrate_returned_replica mode=dry_run",
 	} {
 		if !strings.Contains(stdout.String(), want) {
@@ -1251,7 +1263,10 @@ func TestOpsReturnedReplicaFromBundleSurfacesAcrossReportExplainDashboard(t *tes
 	for _, want := range []string{
 		`"reason_code": "returned_replica_frontend_fenced"`,
 		`"executor_preflights": [`,
+		`"executor_contracts": [`,
 		`"reason": "preconditions_satisfied"`,
+		`"reason": "executor_policy_disabled"`,
+		`"execution_enabled": false`,
 		`"type": "authority.reintegrate_returned_replica"`,
 	} {
 		if !strings.Contains(body, want) {

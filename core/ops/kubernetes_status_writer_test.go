@@ -99,6 +99,21 @@ func TestKubernetesStatusClientPatchesOnlyStatusSubresources(t *testing.T) {
 			EvidenceRefs:           []string{"returned-replica-summary.txt"},
 			ForbiddenMutationClass: []string{"ack_eligibility"},
 		}},
+		ExecutorContracts: []SwBlockVolumeCRDExecutorContract{{
+			ActionType:               ManagedVolumeActionReintegrateReturned,
+			ReplicaID:                "r1",
+			Decision:                 ReturnedReplicaExecutorContractDisabled,
+			Reason:                   ReturnedReplicaExecutorContractReasonExecutorDisabled,
+			OwnerExecutor:            "authority_recovery_executor",
+			ExecutionEnabled:         false,
+			MutationAllowed:          false,
+			PreflightDecision:        ReturnedReplicaExecutorPreflightReady,
+			PreflightReason:          ReturnedReplicaExecutorPreflightReasonSatisfied,
+			AllowedMutationClass:     []string{"ack_eligibility"},
+			ForbiddenMutationClass:   []string{"frontend_publication", "rebuild_traffic", "failback"},
+			TerminalEvidenceRequired: []string{"ack_eligibility_known", "ack_eligible_true", "frontend_fenced_after_execution", "primary_unchanged", "durable_frontier_covered", "no_cross_volume_identity_change"},
+			EvidenceRefs:             []string{"returned-replica-summary.txt"},
+		}},
 		AllowedActions: []SwBlockVolumeCRDAction{{
 			Type:             "observe.collect_bundle",
 			Mode:             "read_only",
@@ -190,6 +205,17 @@ func TestKubernetesStatusClientPatchesOnlyStatusSubresources(t *testing.T) {
 	for _, forbidden := range []string{"action_type", "side_effect_class", "owner_executor", "mutation_allowed", "durable_frontier_lsn", "required_frontier_lsn"} {
 		if _, ok := preflight[forbidden]; ok {
 			t.Fatalf("executor preflight leaked snake_case %s: %+v", forbidden, preflight)
+		}
+	}
+	executorContract := volumeStatus["executorContracts"].([]any)[0].(map[string]any)
+	for _, want := range []string{"actionType", "replicaID", "ownerExecutor", "executionEnabled", "mutationAllowed", "preflightDecision", "allowedMutationClass", "forbiddenMutationClass", "terminalEvidenceRequired"} {
+		if _, ok := executorContract[want]; !ok {
+			t.Fatalf("executor contract missing camelCase %s: %+v", want, executorContract)
+		}
+	}
+	for _, forbidden := range []string{"action_type", "owner_executor", "execution_enabled", "mutation_allowed", "preflight_decision", "allowed_mutation_class", "terminal_evidence_required"} {
+		if _, ok := executorContract[forbidden]; ok {
+			t.Fatalf("executor contract leaked snake_case %s: %+v", forbidden, executorContract)
 		}
 	}
 }

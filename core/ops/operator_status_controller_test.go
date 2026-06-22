@@ -192,16 +192,29 @@ func TestOperatorStatusReconcilerWritesReturnedReplicaExecutorPreflight(t *testi
 		preflight.MutationAllowed {
 		t.Fatalf("executor preflight=%+v", preflight)
 	}
+	if len(status.ExecutorContracts) != 1 {
+		t.Fatalf("executor contracts=%+v", status.ExecutorContracts)
+	}
+	contract := status.ExecutorContracts[0]
+	if contract.ActionType != ManagedVolumeActionReintegrateReturned ||
+		contract.Decision != ReturnedReplicaExecutorContractDisabled ||
+		contract.Reason != ReturnedReplicaExecutorContractReasonExecutorDisabled ||
+		contract.ExecutionEnabled ||
+		contract.MutationAllowed ||
+		!containsActionFact(contract.AllowedMutationClass, "ack_eligibility") ||
+		!containsActionFact(contract.TerminalEvidenceRequired, "frontend_fenced_after_execution") {
+		t.Fatalf("executor contract=%+v", contract)
+	}
 	raw, err := json.Marshal(status)
 	if err != nil {
 		t.Fatalf("marshal status: %v", err)
 	}
-	for _, want := range []string{`"executorPreflights"`, `"actionType"`, `"mutationAllowed"`, `"durableFrontierLsn"`, `"forbiddenMutationClass"`} {
+	for _, want := range []string{`"executorPreflights"`, `"executorContracts"`, `"actionType"`, `"mutationAllowed"`, `"executionEnabled"`, `"durableFrontierLsn"`, `"forbiddenMutationClass"`, `"terminalEvidenceRequired"`} {
 		if !strings.Contains(string(raw), want) {
 			t.Fatalf("CRD status missing %s: %s", want, string(raw))
 		}
 	}
-	for _, forbidden := range []string{"executor_preflights", "action_type", "mutation_allowed", "durable_frontier_lsn"} {
+	for _, forbidden := range []string{"executor_preflights", "executor_contracts", "action_type", "mutation_allowed", "execution_enabled", "durable_frontier_lsn", "terminal_evidence_required"} {
 		if strings.Contains(string(raw), forbidden) {
 			t.Fatalf("CRD status leaked snake_case %s: %s", forbidden, string(raw))
 		}

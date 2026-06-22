@@ -128,4 +128,14 @@ func TestManagedVolumeOperatorContract_ReturnedReplicaProjection(t *testing.T) {
 		preflight.MutationAllowed {
 		t.Fatalf("executor preflight=%+v", preflight)
 	}
+	if len(contract.Status.ExecutorContracts) != 1 {
+		t.Fatalf("executor contracts=%+v", contract.Status.ExecutorContracts)
+	}
+	executorContract := contract.Status.ExecutorContracts[0]
+	if executorContract.Decision != ReturnedReplicaExecutorContractDisabled ||
+		executorContract.Reason != ReturnedReplicaExecutorContractReasonExecutorDisabled ||
+		executorContract.ExecutionEnabled ||
+		executorContract.MutationAllowed {
+		t.Fatalf("executor contract=%+v", executorContract)
+	}
 }

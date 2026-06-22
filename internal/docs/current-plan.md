@@ -1,136 +1,126 @@
-# Current Plan: Phase 51 Returned-Replica ACK Evidence Gate
+# Current Plan: Phase 52 Returned-Replica Executor Contract
 
-Status: complete; local validation PASS; live gate PASS.
+Status: complete. Finished record:
+`internal/docs/finished-plans/phase52_finishedplan_returned_replica_executor_contract.md`.
 
-Working branch: `phase51-returned-replica-ack-evidence-gate`
+Branch: `phase52-returned-replica-executor-contract`
 
-Decision note: Phase 51 keeps returned-replica reintegration non-mutating. It
-tightens the executor preflight so a missing ACK-eligibility fact is not treated
-as `ack_eligible=false`.
+Decision note: Phase 52 still does not execute returned-replica reintegration,
+rebuild, failback, frontend publication, or storage traffic. It adds the
+machine-readable contract for the future executor boundary so the product can
+say exactly what would be allowed, what remains forbidden, and what terminal
+evidence must exist before any later mutating executor is enabled.
 
-Previous product phase: Phase 50 is closed in
-`internal/docs/finished-plans/phase50_finishedplan_returned_replica_preflight_status_schema.md`.
+## Why This Phase Exists
 
-## Product Goal
+Phases 46-51 made returned-replica state visible and progressively safer:
 
-Prevent the next executor phase from confusing "no evidence of ACK eligibility"
-with "known not ACK eligible":
+- Phase 46 exposed returned-replica facts and dry-run actions.
+- Phase 47 admitted the dry-run reintegration action only with fenced/frontier
+  evidence.
+- Phase 48 connected the live iSCSI returned-replica scenario to the same
+  managed-volume evidence path.
+- Phase 49 added a typed executor preflight.
+- Phase 50 published that preflight into SwBlockVolume status.
+- Phase 51 required explicit ACK eligibility evidence rather than treating a
+  default false as proof.
 
-```text
-returned replica observed
--> frontend fenced
--> durable frontier covers required frontier
--> ACK eligibility explicitly known false
--> executor preflight may be ready
-```
+The remaining gap before a real executor is not code that mutates state. The
+gap is a contract: which mutation class would a future executor own, which
+mutation classes are still forbidden, and which terminal evidence proves it did
+not accidentally publish an old frontend, change primary authority, or mix
+volume identity.
 
-If ACK eligibility is unknown, the human-facing dry-run action can still be
-shown, but the executor preflight must hold with a stable reason:
+## Scope
 
-```text
-returned_replica_ack_eligibility_unknown
-```
+In scope:
 
-## Why This Is Next
+- Add a returned-replica executor contract derived from the existing preflight.
+- Publish the contract in:
+  - report summary
+  - explain text
+  - operator-snapshot JSON
+  - dashboard JSON
+  - SwBlockVolume `.status.executorContracts[]`
+- Keep `executionEnabled=false` and `mutationAllowed=false`.
+- Name the only future allowed mutation class as `ack_eligibility`.
+- Keep these mutation classes explicitly forbidden:
+  - `frontend_publication`
+  - `rebuild_traffic`
+  - `failback`
+- Require terminal evidence:
+  - `ack_eligibility_known`
+  - `ack_eligible_true`
+  - `frontend_fenced_after_execution`
+  - `primary_unchanged`
+  - `durable_frontier_covered`
+  - `no_cross_volume_identity_change`
+- Extend the live returned-replica CRD/RBAC gate so the contract validates
+  against the real Kubernetes status subresource schema.
 
-Phases 46-50 made returned-replica state, action, preflight, and CRD status
-visible. While reviewing the next mutating executor step, one gap remained:
-`ack_eligible=false` was projected from absence, not from a live ACK-admission
-fact. That is safe for a read-only status surface, but not enough for an
-executor handoff.
+Out of scope:
 
-Phase 51 closes that semantic gap before adding any mutation.
-
-## Scope Contract
-
-| In | Out |
-|---|---|
-| `ack_eligibility_known` model field | ACK eligibility mutation |
-| executor preflight holds on unknown ACK evidence | frontend publication |
-| CRD/operator-snapshot/report expose the known bit | rebuild traffic |
-| schema and writer tests | automatic failback |
-| live status/RBAC gate payload update | lifecycle-owner/RBAC expansion |
-
-## D1: Model Gate
-
-Goal: make ACK eligibility evidence explicit in returned-replica facts and
-projection.
-
-Acceptance:
-
-```text
-[x] ReplicaFact carries ack_eligibility_known and ack_eligible
-[x] ReturnedReplicaProjection carries ack_eligibility_known
-[x] missing ACK evidence does not become a known false value
-```
-
-## D2: Executor Preflight Gate
-
-Goal: require explicit ACK non-eligibility before preflight `ready`.
-
-Acceptance:
-
-```text
-[x] known false ACK eligibility can produce ready
-[x] unknown ACK eligibility produces hold
-[x] hold reason is returned_replica_ack_eligibility_unknown
-[x] existing dry-run action remains visible and non-mutating
-```
-
-## D3: Status / Schema Contract
-
-Goal: carry ACK evidence through every machine-readable status surface.
-
-Acceptance:
-
-```text
-[x] report/explain text includes ack_eligibility_known
-[x] operator-snapshot uses ack_eligibility_known
-[x] SwBlockVolume.status uses ackEligibilityKnown
-[x] CRD schema requires camelCase ackEligibilityKnown
-[x] snake_case ack_eligibility_known remains rejected in CRD payloads
-```
-
-Finished plan:
-`internal/docs/finished-plans/phase51_finishedplan_returned_replica_ack_evidence_gate.md`.
-
-## D4: Validation
-
-Required before close:
-
-```text
-[x] go test -count=1 ./core/ops
-[x] go test -count=1 ./cmd/sw-block
-[x] bash -n scripts/run-phase47-returned-replica-status-schema-rbac-gate.sh
-[x] swblock validate testops/scenarios/returned-replica-status-schema-rbac-chain.yaml
-[x] swblock run testops/scenarios/returned-replica-status-schema-rbac-chain.yaml
-    run: 20260621-003502-a3ce, 18/18 PASS
-```
-
-## QA Assignment
-
-QA/live validation re-ran the returned-replica status schema/RBAC chain and
-verified:
-
-```text
-valid status payload includes ackEligibilityKnown=true
-missing/snake_case ack_eligibility_known is rejected by the CRD schema
-executorPreflights[].decision remains ready only for known ACK non-eligible evidence
-operator-status RBAC remains status/events-only
-server_dry_run_status_mutated=false
-```
-
-## Non-Claims
-
-- No ACK eligibility mutation.
+- No returned-replica rebuild execution.
+- No automatic reintegration or failback.
 - No frontend publication.
-- No rebuild traffic.
-- No automatic failback.
-- No lifecycle-owner/operator-status RBAC expansion.
-- No release-image claim.
+- No authority mutation.
+- No storage write or rebuild traffic.
+- No RBAC expansion beyond existing status/events.
 
-## Next Phase Candidate
+## Success Criteria
 
-Only after Phase 51 is validated should the project design the real returned
-replica executor boundary: exact mutation set, admission/RBAC, terminal
-evidence, failure handling, and multi-volume isolation.
+1. A ready preflight creates exactly one executor contract with:
+   - `decision=disabled`
+   - `reason=executor_policy_disabled`
+   - `execution_enabled=false`
+   - `mutation_allowed=false`
+   - `allowed_mutation=ack_eligibility`
+   - terminal evidence listed above
+
+2. A held preflight creates a blocked executor contract with:
+   - `decision=blocked`
+   - `reason=preflight_not_ready`
+   - copied preflight reason
+   - no allowed mutation class
+   - copied forbidden mutation class
+
+3. SwBlockVolume CRD status uses camelCase:
+   - `executorContracts`
+   - `executionEnabled`
+   - `allowedMutationClass`
+   - `terminalEvidenceRequired`
+
+4. The live server-dry-run gate accepts the valid `executorContracts[]`
+   payload and rejects snake-case drift.
+
+5. Existing non-claims stay true:
+   - no executor command
+   - no lifecycle-owner involvement
+   - no finalizer/spec/storage/workload mutation
+   - no broad rebuild/failback claim
+
+## Validation
+
+Run before close:
+
+```text
+go test -count=1 ./core/ops ./cmd/sw-block
+bash -n scripts/run-phase47-returned-replica-status-schema-rbac-gate.sh
+swblock validate testops/scenarios/returned-replica-status-schema-rbac-chain.yaml
+swblock run testops/scenarios/returned-replica-status-schema-rbac-chain.yaml
+```
+
+The live run must show:
+
+```text
+valid_executor_contract_status_server_dry_run=true
+executor_contract_execution_disabled_projected=true
+executor_contract_terminal_evidence_projected=true
+```
+
+## Expected Close
+
+Close Phase 52 only if the executor contract is visible and schema-valid while
+execution remains disabled. The next phase may decide whether to start an
+executor implementation, but it must reuse this contract rather than inventing
+a separate mutation path.

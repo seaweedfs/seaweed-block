@@ -116,8 +116,9 @@ stateDiagram-v2
 
 ## Executor Preflight Boundary
 
-The current product exposes a dry-run returned-replica reintegration action and
-an executor preflight. The distinction matters:
+The current product exposes a dry-run returned-replica reintegration action, an
+executor preflight, and a still-disabled executor contract. The distinction
+matters:
 
 ```text
 dry-run action visible
@@ -125,6 +126,9 @@ dry-run action visible
 
 executor preflight ready
   means: a future bounded executor has enough typed evidence to consider work
+
+executor contract disabled
+  means: the future executor boundary is named, but execution is still off
 ```
 
 Phase 51 added an explicit ACK eligibility gate to avoid a common control-plane
@@ -153,6 +157,30 @@ This is still not rebuild execution. It is a machine-readable contract that a
 future executor can consume without parsing report text or inferring safety from
 absence.
 
+Phase 52 adds the next non-mutating boundary:
+
+```text
+executor_contracts[].decision=disabled
+execution_enabled=false
+mutation_allowed=false
+allowed_mutation_class=ack_eligibility
+forbidden_mutation_class=frontend_publication,rebuild_traffic,failback
+```
+
+The terminal evidence required by that contract is:
+
+```text
+ack_eligibility_known
+ack_eligible_true
+frontend_fenced_after_execution
+primary_unchanged
+durable_frontier_covered
+no_cross_volume_identity_change
+```
+
+This prevents the next implementation from silently turning "mark replica
+eligible for ACKs" into a broad rebuild, failback, or frontend-publication path.
+
 ## QA Gate Shape Needed
 
 A real returned-replica gate should prove:
@@ -174,6 +202,8 @@ cleanup verifier remains clean
 - No automated returned-replica rebuild is currently claimed.
 - No failback policy is claimed.
 - No backup/restore is implied.
+- The executor contract is visible, but `execution_enabled=false` and
+  `mutation_allowed=false`.
 - No broad HA production claim follows from lower-level recovery code alone.
 
 ## Why This Is Next After Operation Layer

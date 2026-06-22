@@ -272,6 +272,7 @@ type SwBlockVolumeCRDStatus struct {
 	DeleteSafety          *SwBlockVolumeCRDDeleteSafety       `json:"deleteSafety"`
 	ReplicaReintegrations []SwBlockVolumeCRDReturnedReplica   `json:"replicaReintegrations,omitempty"`
 	ExecutorPreflights    []SwBlockVolumeCRDExecutorPreflight `json:"executorPreflights,omitempty"`
+	ExecutorContracts     []SwBlockVolumeCRDExecutorContract  `json:"executorContracts,omitempty"`
 	NonClaims             []string                            `json:"nonClaims,omitempty"`
 	EvidenceRefs          []string                            `json:"evidenceRefs,omitempty"`
 	AllowedActions        []SwBlockVolumeCRDAction            `json:"allowedActions,omitempty"`
@@ -311,6 +312,22 @@ type SwBlockVolumeCRDExecutorPreflight struct {
 	EvidenceRequired       string   `json:"evidenceRequired,omitempty"`
 	EvidenceRefs           []string `json:"evidenceRefs,omitempty"`
 	ForbiddenMutationClass []string `json:"forbiddenMutationClass,omitempty"`
+}
+
+type SwBlockVolumeCRDExecutorContract struct {
+	ActionType               string   `json:"actionType"`
+	ReplicaID                string   `json:"replicaID,omitempty"`
+	Decision                 string   `json:"decision"`
+	Reason                   string   `json:"reason"`
+	OwnerExecutor            string   `json:"ownerExecutor"`
+	ExecutionEnabled         bool     `json:"executionEnabled"`
+	MutationAllowed          bool     `json:"mutationAllowed"`
+	PreflightDecision        string   `json:"preflightDecision,omitempty"`
+	PreflightReason          string   `json:"preflightReason,omitempty"`
+	AllowedMutationClass     []string `json:"allowedMutationClass,omitempty"`
+	ForbiddenMutationClass   []string `json:"forbiddenMutationClass,omitempty"`
+	TerminalEvidenceRequired []string `json:"terminalEvidenceRequired,omitempty"`
+	EvidenceRefs             []string `json:"evidenceRefs,omitempty"`
 }
 
 type SwBlockVolumeCRDDeleteSafety struct {
@@ -440,6 +457,7 @@ func (r OperatorStatusReconciler) Reconcile(ctx context.Context) (OperatorStatus
 			DeleteSafety:          swBlockVolumeCRDDeleteSafety(volume.Status.DeleteSafety),
 			ReplicaReintegrations: swBlockVolumeCRDReturnedReplicas(volume.Status.ReplicaReintegrations),
 			ExecutorPreflights:    swBlockVolumeCRDExecutorPreflights(volume.Status.ExecutorPreflights),
+			ExecutorContracts:     swBlockVolumeCRDExecutorContracts(volume.Status.ExecutorContracts),
 			NonClaims:             append([]string(nil), volume.Status.NonClaims...),
 			EvidenceRefs:          append([]string(nil), volume.Status.EvidenceRefs...),
 			AllowedActions:        swBlockVolumeCRDActions(volume.AllowedActions),
@@ -538,6 +556,31 @@ func swBlockVolumeCRDExecutorPreflights(preflights []ReturnedReplicaExecutorPref
 			EvidenceRequired:       preflight.EvidenceRequired,
 			EvidenceRefs:           append([]string(nil), preflight.EvidenceRefs...),
 			ForbiddenMutationClass: append([]string(nil), preflight.ForbiddenMutationClass...),
+		})
+	}
+	return out
+}
+
+func swBlockVolumeCRDExecutorContracts(contracts []ReturnedReplicaExecutorContract) []SwBlockVolumeCRDExecutorContract {
+	if len(contracts) == 0 {
+		return nil
+	}
+	out := make([]SwBlockVolumeCRDExecutorContract, 0, len(contracts))
+	for _, contract := range contracts {
+		out = append(out, SwBlockVolumeCRDExecutorContract{
+			ActionType:               contract.ActionType,
+			ReplicaID:                contract.ReplicaID,
+			Decision:                 contract.Decision,
+			Reason:                   contract.Reason,
+			OwnerExecutor:            contract.OwnerExecutor,
+			ExecutionEnabled:         contract.ExecutionEnabled,
+			MutationAllowed:          contract.MutationAllowed,
+			PreflightDecision:        contract.PreflightDecision,
+			PreflightReason:          contract.PreflightReason,
+			AllowedMutationClass:     append([]string(nil), contract.AllowedMutationClass...),
+			ForbiddenMutationClass:   append([]string(nil), contract.ForbiddenMutationClass...),
+			TerminalEvidenceRequired: append([]string(nil), contract.TerminalEvidenceRequired...),
+			EvidenceRefs:             append([]string(nil), contract.EvidenceRefs...),
 		})
 	}
 	return out

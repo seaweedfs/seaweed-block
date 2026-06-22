@@ -205,6 +205,30 @@ cat >"${ARTIFACT_DIR}/valid-status-patch.json" <<'JSON'
         "forbiddenMutationClass": ["ack_eligibility", "frontend_publication", "rebuild_traffic", "failback"]
       }
     ],
+    "executorContracts": [
+      {
+        "actionType": "authority.reintegrate_returned_replica",
+        "replicaID": "r1",
+        "decision": "disabled",
+        "reason": "executor_policy_disabled",
+        "ownerExecutor": "authority_recovery_executor",
+        "executionEnabled": false,
+        "mutationAllowed": false,
+        "preflightDecision": "ready",
+        "preflightReason": "preconditions_satisfied",
+        "allowedMutationClass": ["ack_eligibility"],
+        "forbiddenMutationClass": ["frontend_publication", "rebuild_traffic", "failback"],
+        "terminalEvidenceRequired": [
+          "ack_eligibility_known",
+          "ack_eligible_true",
+          "frontend_fenced_after_execution",
+          "primary_unchanged",
+          "durable_frontier_covered",
+          "no_cross_volume_identity_change"
+        ],
+        "evidenceRefs": ["returned-replica-summary.txt"]
+      }
+    ],
     "allowedActions": [
       {
         "type": "authority.reintegrate_returned_replica",
@@ -241,6 +265,16 @@ cat >"${ARTIFACT_DIR}/snake-status-patch.json" <<'JSON'
         "decision": "ready",
         "mode": "dry_run",
         "ack_eligibility_known": true,
+        "mutation_allowed": false
+      }
+    ],
+    "executorContracts": [
+      {
+        "action_type": "authority.reintegrate_returned_replica",
+        "decision": "disabled",
+        "reason": "executor_policy_disabled",
+        "owner_executor": "authority_recovery_executor",
+        "execution_enabled": false,
         "mutation_allowed": false
       }
     ]
@@ -290,6 +324,12 @@ grep -q "ackEligibilityKnown: true" "${ARTIFACT_DIR}/valid-status-server-dry-run
 write_summary "executor_preflight_ack_eligibility_known_projected=true"
 grep -q "forbiddenMutationClass:" "${ARTIFACT_DIR}/valid-status-server-dry-run.stdout.txt"
 write_summary "executor_preflight_forbidden_mutation_class_projected=true"
+grep -q "executorContracts:" "${ARTIFACT_DIR}/valid-status-server-dry-run.stdout.txt"
+write_summary "valid_executor_contract_status_server_dry_run=true"
+grep -q "executionEnabled: false" "${ARTIFACT_DIR}/valid-status-server-dry-run.stdout.txt"
+write_summary "executor_contract_execution_disabled_projected=true"
+grep -q "terminalEvidenceRequired:" "${ARTIFACT_DIR}/valid-status-server-dry-run.stdout.txt"
+write_summary "executor_contract_terminal_evidence_projected=true"
 
 run_expect_failure snake-status-server-dry-run \
   "${KUBECTL}" patch swblockvolume phase47-returned -n "${NAMESPACE}" \

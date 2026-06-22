@@ -17,6 +17,7 @@ type ManagedVolumeOperatorStatus struct {
 	DeleteSafety          *SwBlockVolumeDeleteSafetyDecision `json:"delete_safety,omitempty"`
 	ReplicaReintegrations []ReturnedReplicaProjection        `json:"replica_reintegrations,omitempty"`
 	ExecutorPreflights    []ReturnedReplicaExecutorPreflight `json:"executor_preflights,omitempty"`
+	ExecutorContracts     []ReturnedReplicaExecutorContract  `json:"executor_contracts,omitempty"`
 	NonClaims             []string                           `json:"non_claims,omitempty"`
 	EvidenceRefs          []string                           `json:"evidence_refs,omitempty"`
 }
@@ -56,6 +57,7 @@ func ManagedVolumeOperatorContractFromProjection(projection ManagedVolumeProject
 			DeleteSafety:          cloneSwBlockVolumeDeleteSafetyDecision(projection.DeleteSafety),
 			ReplicaReintegrations: cloneReturnedReplicaProjections(projection.ReplicaReintegrations),
 			ExecutorPreflights:    cloneReturnedReplicaExecutorPreflights(ReturnedReplicaExecutorPreflights(projection)),
+			ExecutorContracts:     cloneReturnedReplicaExecutorContracts(ReturnedReplicaExecutorContracts(projection)),
 			NonClaims:             append([]string(nil), projection.NonClaims...),
 			EvidenceRefs:          append([]string(nil), projection.EvidenceRefs...),
 		},
@@ -93,6 +95,20 @@ func cloneReturnedReplicaExecutorPreflights(in []ReturnedReplicaExecutorPrefligh
 	for i := range out {
 		out[i].EvidenceRefs = append([]string(nil), in[i].EvidenceRefs...)
 		out[i].ForbiddenMutationClass = append([]string(nil), in[i].ForbiddenMutationClass...)
+	}
+	return out
+}
+
+func cloneReturnedReplicaExecutorContracts(in []ReturnedReplicaExecutorContract) []ReturnedReplicaExecutorContract {
+	if len(in) == 0 {
+		return nil
+	}
+	out := append([]ReturnedReplicaExecutorContract(nil), in...)
+	for i := range out {
+		out[i].AllowedMutationClass = append([]string(nil), in[i].AllowedMutationClass...)
+		out[i].ForbiddenMutationClass = append([]string(nil), in[i].ForbiddenMutationClass...)
+		out[i].TerminalEvidenceRequired = append([]string(nil), in[i].TerminalEvidenceRequired...)
+		out[i].EvidenceRefs = append([]string(nil), in[i].EvidenceRefs...)
 	}
 	return out
 }
