@@ -136,7 +136,8 @@ is implemented.
 
 ### D3: Admission/RBAC Boundary
 
-Status: chart RBAC target added; live proof and writer path still pending.
+Status: chart RBAC target and Kubernetes status writer path added; live proof
+and executor call-site still pending.
 
 Add real Kubernetes proof for the chosen mutation target.
 
@@ -160,8 +161,18 @@ still no swblockvolumes/status, swblockvolumes/finalizers, Events, pods, PVCs,
 PVs, storageclasses, secrets, or delete/create verbs
 ```
 
-Execution still fails closed until the status writer is implemented and the
-live RBAC/admission gate passes.
+Execution still fails closed until the executor call-site is implemented and
+the live RBAC/admission gate passes.
+
+Writer path now exists:
+
+```text
+KubernetesStatusClient.WriteReplicaEligibilityStatus(...)
+PATCH /apis/block.seaweedfs.com/v1alpha1/namespaces/<ns>/
+  swblockreplicaeligibilities/<name>/status
+```
+
+The executor does not call it yet.
 
 ### D4: Terminal Evidence Projection
 

@@ -69,6 +69,10 @@ func (c *KubernetesStatusClient) WriteVolumeStatus(ctx context.Context, ref Oper
 	return c.patchStatus(ctx, ref.Namespace, SwBlockVolumePlural, ref.Name, status)
 }
 
+func (c *KubernetesStatusClient) WriteReplicaEligibilityStatus(ctx context.Context, ref OperatorObjectRef, status SwBlockReplicaEligibilityCRDStatus) error {
+	return c.patchStatus(ctx, ref.Namespace, SwBlockReplicaEligibilityPlural, ref.Name, status)
+}
+
 func IsKubernetesStatusNotFound(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "http 404")
 }

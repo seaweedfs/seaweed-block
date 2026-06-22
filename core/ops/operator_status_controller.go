@@ -356,6 +356,23 @@ type SwBlockVolumeCRDAction struct {
 	EvidenceRefs     []string `json:"evidenceRefs,omitempty"`
 }
 
+type SwBlockReplicaEligibilityCRDStatus struct {
+	ObservedAt                   time.Time              `json:"observedAt,omitempty"`
+	ObservedGeneration           int64                  `json:"observedGeneration,omitempty"`
+	Executor                     string                 `json:"executor,omitempty"`
+	ReasonCode                   string                 `json:"reasonCode,omitempty"`
+	AckEligibilityKnown          bool                   `json:"ackEligibilityKnown"`
+	AckEligible                  bool                   `json:"ackEligible"`
+	FrontendFencedAfterExecution bool                   `json:"frontendFencedAfterExecution"`
+	PrimaryUnchanged             bool                   `json:"primaryUnchanged"`
+	DurableFrontierCovered       bool                   `json:"durableFrontierCovered"`
+	NoCrossVolumeIdentityChange  bool                   `json:"noCrossVolumeIdentityChange"`
+	EvidenceGeneration           string                 `json:"evidenceGeneration,omitempty"`
+	Conditions                   []ObservationCondition `json:"conditions,omitempty"`
+	EvidenceRefs                 []string               `json:"evidenceRefs,omitempty"`
+	NonClaims                    []string               `json:"nonClaims,omitempty"`
+}
+
 type OperatorKubernetesEvent struct {
 	InvolvedObject OperatorObjectRef `json:"involvedObject"`
 	Type           string            `json:"type"`

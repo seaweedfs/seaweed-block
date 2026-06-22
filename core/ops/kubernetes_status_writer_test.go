@@ -127,13 +127,34 @@ func TestKubernetesStatusClientPatchesOnlyStatusSubresources(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("write volume status: %v", err)
 	}
+	if err := client.WriteReplicaEligibilityStatus(context.Background(), OperatorObjectRef{
+		Namespace: "kube-system",
+		Name:      "demo-pvc-r1",
+	}, SwBlockReplicaEligibilityCRDStatus{
+		ObservedAt:                   observedAt,
+		ObservedGeneration:           7,
+		Executor:                     "authority_recovery_executor",
+		ReasonCode:                   "ack_eligibility_recorded",
+		AckEligibilityKnown:          true,
+		AckEligible:                  true,
+		FrontendFencedAfterExecution: true,
+		PrimaryUnchanged:             true,
+		DurableFrontierCovered:       true,
+		NoCrossVolumeIdentityChange:  true,
+		EvidenceGeneration:           "executor-run-1",
+		EvidenceRefs:                 []string{"returned-replica-summary.txt"},
+		NonClaims:                    []string{"no_frontend_publication", "no_rebuild_traffic", "no_failback"},
+	}); err != nil {
+		t.Fatalf("write replica eligibility status: %v", err)
+	}
 
-	if len(requests) != 2 {
-		t.Fatalf("requests=%d want 2: %+v", len(requests), requests)
+	if len(requests) != 3 {
+		t.Fatalf("requests=%d want 3: %+v", len(requests), requests)
 	}
 	wantPaths := []string{
 		"/apis/block.seaweedfs.com/v1alpha1/namespaces/kube-system/swblockclusters/sw-block/status",
 		"/apis/block.seaweedfs.com/v1alpha1/namespaces/kube-system/swblockvolumes/demo-pvc/status",
+		"/apis/block.seaweedfs.com/v1alpha1/namespaces/kube-system/swblockreplicaeligibilities/demo-pvc-r1/status",
 	}
 	for i, req := range requests {
 		if req.Method != http.MethodPatch {
@@ -216,6 +237,25 @@ func TestKubernetesStatusClientPatchesOnlyStatusSubresources(t *testing.T) {
 	for _, forbidden := range []string{"action_type", "owner_executor", "execution_enabled", "mutation_allowed", "preflight_decision", "allowed_mutation_class", "terminal_evidence_required"} {
 		if _, ok := executorContract[forbidden]; ok {
 			t.Fatalf("executor contract leaked snake_case %s: %+v", forbidden, executorContract)
+		}
+	}
+	replicaEligibilityStatus := requests[2].Body["status"].(map[string]any)
+	for _, want := range []string{
+		"ackEligibilityKnown",
+		"ackEligible",
+		"frontendFencedAfterExecution",
+		"primaryUnchanged",
+		"durableFrontierCovered",
+		"noCrossVolumeIdentityChange",
+		"evidenceGeneration",
+	} {
+		if _, ok := replicaEligibilityStatus[want]; !ok {
+			t.Fatalf("replica eligibility status missing camelCase %s: %+v", want, replicaEligibilityStatus)
+		}
+	}
+	for _, forbidden := range []string{"ack_eligible", "frontend_fenced_after_execution", "spec"} {
+		if _, ok := replicaEligibilityStatus[forbidden]; ok {
+			t.Fatalf("replica eligibility status leaked %s: %+v", forbidden, replicaEligibilityStatus)
 		}
 	}
 }
