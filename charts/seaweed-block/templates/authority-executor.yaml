@@ -32,5 +32,10 @@ spec:
             - "ops"
             - "authority-executor"
             - "--namespace={{ .Release.Namespace }}"
+            - "--allowed-mutation-class={{ .Values.authorityExecutor.execution.allowedMutationClass }}"
+            {{- if .Values.authorityExecutor.execution.enabled }}
+            - "--execution-policy"
+            - "--enable-execution"
+            {{- end }}
             - "--interval={{ .Values.authorityExecutor.interval }}"
 {{- end }}

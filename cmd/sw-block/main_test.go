@@ -525,6 +525,9 @@ func TestOpsAuthorityExecutorObservesDisabledContractsWithoutMutation(t *testing
 		"authority_executor=disabled namespace=kube-system volumes=1 contracts=1",
 		"disabled_contracts=1",
 		"terminal_evidence_required=1",
+		"allowed_mutation_class=ack_eligibility",
+		"execution_requested=false",
+		"execution_policy_enabled=false",
 		"mutation_attempts=0",
 		"ack_eligibility_mutation_attempts=0",
 		"mutation_allowed=false",
@@ -541,7 +544,34 @@ func TestOpsAuthorityExecutorRejectsExecutionFlag(t *testing.T) {
 	if code != ops.VolumeStatusExitInvalid {
 		t.Fatalf("exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
 	}
-	if !strings.Contains(stderr.String(), "execution is disabled by product policy") {
+	if !strings.Contains(stderr.String(), "reason=executor_policy_disabled") ||
+		!strings.Contains(stderr.String(), "mutation_attempts=0") ||
+		!strings.Contains(stderr.String(), "ack_eligibility_mutation_attempts=0") {
+		t.Fatalf("stderr=%s", stderr.String())
+	}
+}
+
+func TestOpsAuthorityExecutorRejectsUnsupportedMutationClass(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ops", "authority-executor", "--allowed-mutation-class", "rebuild_traffic"}, &stdout, &stderr)
+	if code != ops.VolumeStatusExitInvalid {
+		t.Fatalf("exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "unsupported mutation class") ||
+		!strings.Contains(stderr.String(), "reason=unsupported_mutation_class") {
+		t.Fatalf("stderr=%s", stderr.String())
+	}
+}
+
+func TestOpsAuthorityExecutorExecutionPolicyBlocksWhenAckTargetMissing(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ops", "authority-executor", "--enable-execution", "--execution-policy"}, &stdout, &stderr)
+	if code != ops.VolumeStatusExitInvalid {
+		t.Fatalf("exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "reason=ack_eligibility_mutation_target_missing") ||
+		!strings.Contains(stderr.String(), "mutation_attempts=0") ||
+		!strings.Contains(stderr.String(), "ack_eligibility_mutation_attempts=0") {
 		t.Fatalf("stderr=%s", stderr.String())
 	}
 }

@@ -340,6 +340,11 @@ func TestPhase53AuthorityExecutorPackagingIsDisabledAndReadOnly(t *testing.T) {
 	values := readYAMLMap(t, "charts/seaweed-block/values.yaml")
 	authorityExecutor := yamlMap(t, values, "authorityExecutor")
 	assertYAMLBool(t, authorityExecutor, "create", false)
+	executionValues := yamlMap(t, authorityExecutor, "execution")
+	assertYAMLBool(t, executionValues, "enabled", false)
+	if got := executionValues["allowedMutationClass"]; got != "ack_eligibility" {
+		t.Fatalf("authorityExecutor.execution.allowedMutationClass=%v", got)
+	}
 	rbacValues := yamlMap(t, authorityExecutor, "rbac")
 	assertYAMLBool(t, rbacValues, "create", true)
 
@@ -351,6 +356,10 @@ func TestPhase53AuthorityExecutorPackagingIsDisabledAndReadOnly(t *testing.T) {
 		`command: ["/usr/local/bin/sw-block"]`,
 		`- "authority-executor"`,
 		`- "--namespace={{ .Release.Namespace }}"`,
+		`- "--allowed-mutation-class={{ .Values.authorityExecutor.execution.allowedMutationClass }}"`,
+		`{{- if .Values.authorityExecutor.execution.enabled }}`,
+		`- "--execution-policy"`,
+		`- "--enable-execution"`,
 		`- "--interval={{ .Values.authorityExecutor.interval }}"`,
 	} {
 		if !strings.Contains(deploy, want) {

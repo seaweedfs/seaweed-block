@@ -5,27 +5,50 @@ import (
 	"fmt"
 )
 
+const (
+	AuthorityExecutorAllowedMutationAckEligibility = "ack_eligibility"
+	AuthorityExecutorBlockedPolicyDisabled         = "executor_policy_disabled"
+	AuthorityExecutorBlockedMutationTargetMissing  = "ack_eligibility_mutation_target_missing"
+)
+
 type AuthorityExecutorClient interface {
 	ListSwBlockVolumes(ctx context.Context, namespace string) ([]SwBlockVolumeObject, error)
 }
 
 type AuthorityExecutorReconciler struct {
-	Namespace string
-	Client    AuthorityExecutorClient
+	Namespace              string
+	Client                 AuthorityExecutorClient
+	ExecutionRequested     bool
+	ExecutionPolicyEnabled bool
+	AllowedMutationClass   string
 }
 
 type AuthorityExecutorReconcileResult struct {
-	VolumeCount                    int `json:"volumeCount"`
-	ContractCount                  int `json:"contractCount"`
-	DisabledContractCount          int `json:"disabledContractCount"`
-	BlockedContractCount           int `json:"blockedContractCount"`
-	TerminalEvidenceRequiredCount  int `json:"terminalEvidenceRequiredCount"`
-	UnsafeExecutionContractCount   int `json:"unsafeExecutionContractCount"`
-	MutationAttemptCount           int `json:"mutationAttemptCount"`
-	AckEligibilityMutationAttempts int `json:"ackEligibilityMutationAttempts"`
+	VolumeCount                    int    `json:"volumeCount"`
+	ContractCount                  int    `json:"contractCount"`
+	DisabledContractCount          int    `json:"disabledContractCount"`
+	BlockedContractCount           int    `json:"blockedContractCount"`
+	TerminalEvidenceRequiredCount  int    `json:"terminalEvidenceRequiredCount"`
+	UnsafeExecutionContractCount   int    `json:"unsafeExecutionContractCount"`
+	MutationAttemptCount           int    `json:"mutationAttemptCount"`
+	AckEligibilityMutationAttempts int    `json:"ackEligibilityMutationAttempts"`
+	BlockedReason                  string `json:"blockedReason,omitempty"`
 }
 
 func (r AuthorityExecutorReconciler) Reconcile(ctx context.Context) (AuthorityExecutorReconcileResult, error) {
+	allowedMutationClass := defaultString(r.AllowedMutationClass, AuthorityExecutorAllowedMutationAckEligibility)
+	if allowedMutationClass != AuthorityExecutorAllowedMutationAckEligibility {
+		result := AuthorityExecutorReconcileResult{BlockedReason: "unsupported_mutation_class"}
+		return result, fmt.Errorf("authority executor unsupported mutation class %q", allowedMutationClass)
+	}
+	if r.ExecutionRequested && !r.ExecutionPolicyEnabled {
+		result := AuthorityExecutorReconcileResult{BlockedReason: AuthorityExecutorBlockedPolicyDisabled}
+		return result, fmt.Errorf("authority executor execution is disabled by product policy")
+	}
+	if r.ExecutionRequested {
+		result := AuthorityExecutorReconcileResult{BlockedReason: AuthorityExecutorBlockedMutationTargetMissing}
+		return result, fmt.Errorf("authority executor ACK eligibility mutation target is not implemented")
+	}
 	if r.Client == nil {
 		return AuthorityExecutorReconcileResult{}, fmt.Errorf("authority executor client is required")
 	}

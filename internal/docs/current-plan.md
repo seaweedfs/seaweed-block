@@ -67,6 +67,9 @@ Out of scope:
 
 ### D1: Executor Policy and Command Gate
 
+Status: implemented on branch. The command and Helm chart now expose the policy
+gate while keeping execution disabled by default.
+
 Add explicit command-line and Helm policy:
 
 ```text
@@ -83,7 +86,19 @@ Acceptance:
 - unsupported mutation classes fail closed,
 - no RBAC expansion yet.
 
+Current behavior:
+
+```text
+--allowed-mutation-class accepts only ack_eligibility
+--enable-execution without --execution-policy -> executor_policy_disabled
+--enable-execution with --execution-policy -> ack_eligibility_mutation_target_missing
+mutation_attempts remains 0 on every blocked path
+```
+
 ### D2: Mutation Target Contract
+
+Status: design blocker documented in
+`internal/docs/ref/phase54-ack-eligibility-mutation-target-contract.md`.
 
 Define the exact target the executor is allowed to mutate.
 
@@ -107,6 +122,16 @@ Acceptance:
 - one owner writes the ACK eligibility fact,
 - user-visible status can show who wrote it and when,
 - old-primary/frontend publication remains impossible from this path.
+
+Current conclusion:
+
+```text
+No durable narrow ACK eligibility mutation target exists yet.
+SwBlockVolume status is a projection surface owned by operator-status and must
+not be used as fake executor state.
+```
+
+Phase 54 must not proceed to D3-D7 mutation gates until the target is chosen.
 
 ### D3: Admission/RBAC Boundary
 

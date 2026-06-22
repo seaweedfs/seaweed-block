@@ -64,6 +64,51 @@ func TestAuthorityExecutorReconcilerFailsClosedOnExecutionEnabledContract(t *tes
 	}
 }
 
+func TestAuthorityExecutorReconcilerRejectsUnsupportedMutationClass(t *testing.T) {
+	result, err := (AuthorityExecutorReconciler{
+		Client:               fakeAuthorityExecutorClient{},
+		AllowedMutationClass: "rebuild_traffic",
+	}).Reconcile(context.Background())
+	if err == nil {
+		t.Fatalf("expected unsupported mutation class to fail closed, result=%+v", result)
+	}
+	if result.BlockedReason != "unsupported_mutation_class" || result.MutationAttemptCount != 0 {
+		t.Fatalf("result=%+v", result)
+	}
+}
+
+func TestAuthorityExecutorReconcilerRejectsExecutionWhenPolicyDisabled(t *testing.T) {
+	result, err := (AuthorityExecutorReconciler{
+		Client:             fakeAuthorityExecutorClient{},
+		ExecutionRequested: true,
+	}).Reconcile(context.Background())
+	if err == nil {
+		t.Fatalf("expected disabled policy to fail closed, result=%+v", result)
+	}
+	if result.BlockedReason != AuthorityExecutorBlockedPolicyDisabled ||
+		result.MutationAttemptCount != 0 ||
+		result.AckEligibilityMutationAttempts != 0 {
+		t.Fatalf("result=%+v", result)
+	}
+}
+
+func TestAuthorityExecutorReconcilerBlocksExecutionWhenAckTargetMissing(t *testing.T) {
+	result, err := (AuthorityExecutorReconciler{
+		Client:                 fakeAuthorityExecutorClient{},
+		ExecutionRequested:     true,
+		ExecutionPolicyEnabled: true,
+		AllowedMutationClass:   AuthorityExecutorAllowedMutationAckEligibility,
+	}).Reconcile(context.Background())
+	if err == nil {
+		t.Fatalf("expected missing ACK target to fail closed, result=%+v", result)
+	}
+	if result.BlockedReason != AuthorityExecutorBlockedMutationTargetMissing ||
+		result.MutationAttemptCount != 0 ||
+		result.AckEligibilityMutationAttempts != 0 {
+		t.Fatalf("result=%+v", result)
+	}
+}
+
 type fakeAuthorityExecutorClient struct {
 	volumes []SwBlockVolumeObject
 }
