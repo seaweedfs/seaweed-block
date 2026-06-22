@@ -197,6 +197,35 @@ Its Helm packaging is disabled by default and grants only `get/list/watch` on
 the place where a later ACK-eligibility mutation must be inserted if and only if
 the contract and admission gates prove it safe.
 
+Phase 54 is planned as a larger milestone rather than another one-patch phase.
+It groups the remaining executor work:
+
+```text
+D1 executor policy gate
+D2 ACK eligibility mutation target
+D3 admission/RBAC boundary
+D4 terminal evidence projection
+D5 failure and hold states
+D6 multi-volume isolation
+D7 live close gate
+```
+
+The first mutation remains intentionally narrow:
+
+```text
+returned replica ACK eligibility only
+```
+
+Everything else remains outside the executor:
+
+```text
+no frontend publication
+no rebuild traffic
+no failback
+no primary authority change
+no cross-volume mutation
+```
+
 ## QA Gate Shape Needed
 
 A real returned-replica gate should prove:

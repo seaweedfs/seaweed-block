@@ -197,7 +197,10 @@ rebuild, delete safety, or cleanup must start as a separate gated phase.
   only ACK eligibility is named as the future allowed mutation class, while
   frontend publication, rebuild traffic, and failback stay forbidden. Phase 53
   adds the disabled executor process boundary with read-only SwBlockVolume
-  access. The actual authority/storage mutation is still deferred.
+  access. Phase 54 is the larger milestone for the first bounded mutation:
+  returned-replica ACK eligibility only, with admission/RBAC, terminal evidence,
+  failure states, and multi-volume isolation in one close gate. Broader
+  authority/storage mutation is still deferred.
 - Later: returned-replica rebuild/reintegration/failback execution, NVMe ANA
   Kubernetes multipath parity, stronger committed-frontier reporting, broad
   distro/host compatibility, and longer soak under failure. NVMe ANA parity
