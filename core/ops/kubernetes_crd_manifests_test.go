@@ -447,13 +447,42 @@ func TestPhase53AuthorityExecutorPackagingIsDisabledAndReadOnly(t *testing.T) {
 		`resources: ["swblockvolumes/status"]`,
 		`resources: ["swblockvolumes/finalizers"]`,
 		`resources: ["events"]`,
-		`"patch"`,
-		`"update"`,
 		`"create"`,
 		`"delete"`,
 	} {
 		if strings.Contains(rbac, forbidden) {
 			t.Fatalf("authority-executor RBAC contains forbidden fragment %q\n%s", forbidden, rbac)
+		}
+	}
+}
+
+func TestPhase54D3AuthorityExecutorExecutionRBACIsNarrow(t *testing.T) {
+	rbac := readRepoFile(t, "charts/seaweed-block/templates/authority-executor-rbac.yaml")
+	for _, want := range []string{
+		`{{- if .Values.authorityExecutor.execution.enabled }}`,
+		`resources: ["swblockreplicaeligibilities"]`,
+		`verbs: ["get", "list", "watch"]`,
+		`resources: ["swblockreplicaeligibilities/status"]`,
+		`verbs: ["get", "update", "patch"]`,
+	} {
+		if !strings.Contains(rbac, want) {
+			t.Fatalf("authority-executor execution RBAC missing %q\n%s", want, rbac)
+		}
+	}
+	for _, forbidden := range []string{
+		`resources: ["swblockvolumes/status"]`,
+		`resources: ["swblockvolumes/finalizers"]`,
+		`resources: ["events"]`,
+		`resources: ["pods"]`,
+		`resources: ["persistentvolumes"]`,
+		`resources: ["persistentvolumeclaims"]`,
+		`resources: ["storageclasses"]`,
+		`resources: ["secrets"]`,
+		`"create"`,
+		`"delete"`,
+	} {
+		if strings.Contains(rbac, forbidden) {
+			t.Fatalf("authority-executor execution RBAC contains forbidden fragment %q\n%s", forbidden, rbac)
 		}
 	}
 }

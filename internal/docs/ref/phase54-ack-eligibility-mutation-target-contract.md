@@ -70,8 +70,7 @@ Pros:
 
 Open follow-ups:
 
-- D3 must add narrow RBAC/admission for status-only writes by the authority
-  executor.
+- D3 must prove the narrow RBAC/admission boundary live.
 - D4 must teach `operator-status` to consume this evidence and project
   terminal status.
 - Later lifecycle work must define garbage collection tied to SwBlockVolume/PVC
@@ -106,8 +105,8 @@ Cons:
 
 ## Current Phase 54 Behavior
 
-Until D3 adds the writer boundary and D4 consumes the target, the executor must
-fail closed:
+Until the writer path is implemented and D4 consumes the target, the executor
+must fail closed:
 
 ```text
 --enable-execution without policy -> executor_policy_disabled

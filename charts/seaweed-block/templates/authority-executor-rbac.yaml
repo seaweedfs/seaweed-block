@@ -17,6 +17,14 @@ rules:
   - apiGroups: ["block.seaweedfs.com"]
     resources: ["swblockvolumes"]
     verbs: ["get", "list", "watch"]
+  {{- if .Values.authorityExecutor.execution.enabled }}
+  - apiGroups: ["block.seaweedfs.com"]
+    resources: ["swblockreplicaeligibilities"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["block.seaweedfs.com"]
+    resources: ["swblockreplicaeligibilities/status"]
+    verbs: ["get", "update", "patch"]
+  {{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

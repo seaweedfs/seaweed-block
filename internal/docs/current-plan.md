@@ -136,6 +136,8 @@ is implemented.
 
 ### D3: Admission/RBAC Boundary
 
+Status: chart RBAC target added; live proof and writer path still pending.
+
 Add real Kubernetes proof for the chosen mutation target.
 
 Acceptance:
@@ -147,6 +149,19 @@ Acceptance:
   requires a narrow subresource/status field,
 - executor cannot create pods/PVC/PV/storageclasses/secrets,
 - live `kubectl auth can-i` gate proves the boundary.
+
+Current chart boundary:
+
+```text
+default authorityExecutor.execution.enabled=false -> no target write RBAC
+enabled -> get/list/watch swblockreplicaeligibilities
+enabled -> get/update/patch swblockreplicaeligibilities/status
+still no swblockvolumes/status, swblockvolumes/finalizers, Events, pods, PVCs,
+PVs, storageclasses, secrets, or delete/create verbs
+```
+
+Execution still fails closed until the status writer is implemented and the
+live RBAC/admission gate passes.
 
 ### D4: Terminal Evidence Projection
 
