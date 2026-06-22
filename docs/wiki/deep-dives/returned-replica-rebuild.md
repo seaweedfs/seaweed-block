@@ -181,6 +181,22 @@ no_cross_volume_identity_change
 This prevents the next implementation from silently turning "mark replica
 eligible for ACKs" into a broad rebuild, failback, or frontend-publication path.
 
+Phase 53 adds the disabled executor process boundary:
+
+```text
+sw-block ops authority-executor
+  reads: SwBlockVolume.status.executorContracts[]
+  writes: nothing
+  events: none
+  mutation_allowed=false
+  --enable-execution: rejected
+```
+
+Its Helm packaging is disabled by default and grants only `get/list/watch` on
+`swblockvolumes`. This is deliberately still not a rebuild implementation; it is
+the place where a later ACK-eligibility mutation must be inserted if and only if
+the contract and admission gates prove it safe.
+
 ## QA Gate Shape Needed
 
 A real returned-replica gate should prove:
@@ -204,6 +220,8 @@ cleanup verifier remains clean
 - No backup/restore is implied.
 - The executor contract is visible, but `execution_enabled=false` and
   `mutation_allowed=false`.
+- The authority executor process can be packaged, but it is read-only and
+  rejects execution.
 - No broad HA production claim follows from lower-level recovery code alone.
 
 ## Why This Is Next After Operation Layer

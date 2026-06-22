@@ -336,6 +336,52 @@ func TestPhase35D3OperatorStatusDeploymentCanRunDryRunOrStatusWriteMode(t *testi
 	}
 }
 
+func TestPhase53AuthorityExecutorPackagingIsDisabledAndReadOnly(t *testing.T) {
+	values := readYAMLMap(t, "charts/seaweed-block/values.yaml")
+	authorityExecutor := yamlMap(t, values, "authorityExecutor")
+	assertYAMLBool(t, authorityExecutor, "create", false)
+	rbacValues := yamlMap(t, authorityExecutor, "rbac")
+	assertYAMLBool(t, rbacValues, "create", true)
+
+	deploy := readRepoFile(t, "charts/seaweed-block/templates/authority-executor.yaml")
+	for _, want := range []string{
+		`kind: Deployment`,
+		`name: sw-block-authority-executor`,
+		`serviceAccountName: {{ include "seaweed-block.fullname" . }}-authority-executor`,
+		`command: ["/usr/local/bin/sw-block"]`,
+		`- "authority-executor"`,
+		`- "--namespace={{ .Release.Namespace }}"`,
+		`- "--interval={{ .Values.authorityExecutor.interval }}"`,
+	} {
+		if !strings.Contains(deploy, want) {
+			t.Fatalf("authority-executor deployment missing %q\n%s", want, deploy)
+		}
+	}
+
+	rbac := readRepoFile(t, "charts/seaweed-block/templates/authority-executor-rbac.yaml")
+	for _, want := range []string{
+		`resources: ["swblockvolumes"]`,
+		`verbs: ["get", "list", "watch"]`,
+	} {
+		if !strings.Contains(rbac, want) {
+			t.Fatalf("authority-executor RBAC missing %q\n%s", want, rbac)
+		}
+	}
+	for _, forbidden := range []string{
+		`resources: ["swblockvolumes/status"]`,
+		`resources: ["swblockvolumes/finalizers"]`,
+		`resources: ["events"]`,
+		`"patch"`,
+		`"update"`,
+		`"create"`,
+		`"delete"`,
+	} {
+		if strings.Contains(rbac, forbidden) {
+			t.Fatalf("authority-executor RBAC contains forbidden fragment %q\n%s", forbidden, rbac)
+		}
+	}
+}
+
 func readRepoFile(t *testing.T, repoPath string) string {
 	t.Helper()
 	raw, err := os.ReadFile(filepath.Join("..", "..", filepath.FromSlash(repoPath)))

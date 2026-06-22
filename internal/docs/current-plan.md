@@ -1,103 +1,70 @@
-# Current Plan: Phase 52 Returned-Replica Executor Contract
+# Current Plan: Phase 53 Returned-Replica Executor Skeleton
 
 Status: complete. Finished record:
-`internal/docs/finished-plans/phase52_finishedplan_returned_replica_executor_contract.md`.
+`internal/docs/finished-plans/phase53_finishedplan_returned_replica_executor_skeleton.md`.
 
-Branch: `phase52-returned-replica-executor-contract`
+Branch: `phase53-returned-replica-executor-skeleton`
 
-Decision note: Phase 52 still does not execute returned-replica reintegration,
-rebuild, failback, frontend publication, or storage traffic. It adds the
-machine-readable contract for the future executor boundary so the product can
-say exactly what would be allowed, what remains forbidden, and what terminal
-evidence must exist before any later mutating executor is enabled.
+## Goal
 
-## Why This Phase Exists
+Add the first product-owned returned-replica executor shape without enabling any
+returned-replica mutation.
 
-Phases 46-51 made returned-replica state visible and progressively safer:
-
-- Phase 46 exposed returned-replica facts and dry-run actions.
-- Phase 47 admitted the dry-run reintegration action only with fenced/frontier
-  evidence.
-- Phase 48 connected the live iSCSI returned-replica scenario to the same
-  managed-volume evidence path.
-- Phase 49 added a typed executor preflight.
-- Phase 50 published that preflight into SwBlockVolume status.
-- Phase 51 required explicit ACK eligibility evidence rather than treating a
-  default false as proof.
-
-The remaining gap before a real executor is not code that mutates state. The
-gap is a contract: which mutation class would a future executor own, which
-mutation classes are still forbidden, and which terminal evidence proves it did
-not accidentally publish an old frontend, change primary authority, or mix
-volume identity.
+Phase 52 published the non-mutating executor contract in
+`SwBlockVolume.status.executorContracts[]`. Phase 53 adds the future executor
+process boundary that consumes that contract, proves its RBAC is read-only, and
+fails closed if any contract claims execution is already enabled.
 
 ## Scope
 
 In scope:
 
-- Add a returned-replica executor contract derived from the existing preflight.
-- Publish the contract in:
-  - report summary
-  - explain text
-  - operator-snapshot JSON
-  - dashboard JSON
-  - SwBlockVolume `.status.executorContracts[]`
-- Keep `executionEnabled=false` and `mutationAllowed=false`.
-- Name the only future allowed mutation class as `ack_eligibility`.
-- Keep these mutation classes explicitly forbidden:
-  - `frontend_publication`
-  - `rebuild_traffic`
-  - `failback`
-- Require terminal evidence:
-  - `ack_eligibility_known`
-  - `ack_eligible_true`
-  - `frontend_fenced_after_execution`
-  - `primary_unchanged`
-  - `durable_frontier_covered`
-  - `no_cross_volume_identity_change`
-- Extend the live returned-replica CRD/RBAC gate so the contract validates
-  against the real Kubernetes status subresource schema.
+- Add `sw-block ops authority-executor`.
+- Add a small `AuthorityExecutorReconciler`.
+- Package the executor behind `authorityExecutor.create=false`.
+- Grant only `get/list/watch` on `swblockvolumes`.
+- Observe returned-replica executor contracts and report counters.
+- Reject `--enable-execution`.
+- Fail closed if a contract has `executionEnabled=true` or
+  `mutationAllowed=true`.
 
 Out of scope:
 
-- No returned-replica rebuild execution.
-- No automatic reintegration or failback.
+- No ACK eligibility mutation.
 - No frontend publication.
-- No authority mutation.
-- No storage write or rebuild traffic.
-- No RBAC expansion beyond existing status/events.
+- No rebuild traffic.
+- No failback.
+- No Events.
+- No status patches.
+- No finalizer/spec/storage/workload mutation.
 
 ## Success Criteria
 
-1. A ready preflight creates exactly one executor contract with:
-   - `decision=disabled`
-   - `reason=executor_policy_disabled`
-   - `execution_enabled=false`
-   - `mutation_allowed=false`
-   - `allowed_mutation=ack_eligibility`
-   - terminal evidence listed above
+1. CLI:
+   - `sw-block ops authority-executor --namespace <ns>` exits 0 in disabled
+     mode.
+   - output includes `authority_executor=disabled`.
+   - output includes `mutation_allowed=false`.
+   - output includes zero mutation attempts.
+   - `--enable-execution` is rejected.
 
-2. A held preflight creates a blocked executor contract with:
-   - `decision=blocked`
-   - `reason=preflight_not_ready`
-   - copied preflight reason
-   - no allowed mutation class
-   - copied forbidden mutation class
+2. Reconciler:
+   - counts disabled returned-replica executor contracts.
+   - counts blocked returned-replica executor contracts.
+   - counts terminal-evidence requirements.
+   - returns an error on execution-enabled or mutating contracts.
 
-3. SwBlockVolume CRD status uses camelCase:
-   - `executorContracts`
-   - `executionEnabled`
-   - `allowedMutationClass`
-   - `terminalEvidenceRequired`
+3. Helm/RBAC:
+   - default `authorityExecutor.create=false`.
+   - optional Deployment uses `sw-block ops authority-executor`.
+   - RBAC has only `get/list/watch` on `swblockvolumes`.
+   - RBAC has no patch/update/create/delete/status/finalizer/Event verbs.
 
-4. The live server-dry-run gate accepts the valid `executorContracts[]`
-   payload and rejects snake-case drift.
-
-5. Existing non-claims stay true:
-   - no executor command
-   - no lifecycle-owner involvement
-   - no finalizer/spec/storage/workload mutation
-   - no broad rebuild/failback claim
+4. Non-claims stay true:
+   - no executor mutation,
+   - no returned-replica rebuild,
+   - no failback,
+   - no storage traffic.
 
 ## Validation
 
@@ -105,22 +72,23 @@ Run before close:
 
 ```text
 go test -count=1 ./core/ops ./cmd/sw-block
-bash -n scripts/run-phase47-returned-replica-status-schema-rbac-gate.sh
-swblock validate testops/scenarios/returned-replica-status-schema-rbac-chain.yaml
-swblock run testops/scenarios/returned-replica-status-schema-rbac-chain.yaml
+helm lint charts/seaweed-block
+helm template sw-block charts/seaweed-block --namespace kube-system --set authorityExecutor.create=true
+bash -n scripts/run-phase53-authority-executor-rbac-gate.sh
+swblock validate testops/scenarios/authority-executor-rbac-chain.yaml
+swblock run testops/scenarios/authority-executor-rbac-chain.yaml
 ```
 
-The live run must show:
+Optional QA follow-up:
 
 ```text
-valid_executor_contract_status_server_dry_run=true
-executor_contract_execution_disabled_projected=true
-executor_contract_terminal_evidence_projected=true
+kubectl auth can-i get/list/watch swblockvolumes --as <authority-executor-sa>
+kubectl auth can-i patch swblockvolumes --as <authority-executor-sa> # no
+kubectl auth can-i patch swblockvolumes/status --as <authority-executor-sa> # no
+kubectl auth can-i create events --as <authority-executor-sa> # no
 ```
 
-## Expected Close
+## Expected Next Phase
 
-Close Phase 52 only if the executor contract is visible and schema-valid while
-execution remains disabled. The next phase may decide whether to start an
-executor implementation, but it must reuse this contract rather than inventing
-a separate mutation path.
+Phase 54 may design the first bounded ACK-eligibility mutation only if Phase 53
+proves the executor boundary is present, disabled by default, and read-only.

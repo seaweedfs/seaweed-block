@@ -170,7 +170,13 @@ Recommended order from here:
    allowed mutation class, frontend publication/rebuild traffic/failback remain
    forbidden, and terminal evidence is required before any later executor can
    claim completion.
-10. Add backup/restore and NVMe ANA parity after they can reuse the same action
+10. Phase 53: returned-replica authority executor skeleton. **Closed 2026-06-22, QA PASS**
+    (`internal/docs/finished-plans/phase53_finishedplan_returned_replica_executor_skeleton.md`).
+    The executor process boundary is now disabled-by-default with
+    read-only `SwBlockVolume` access. It consumes executor contracts and fails
+    closed on execution-enabled or mutating contracts, but still performs no ACK
+    eligibility mutation, frontend publication, rebuild traffic, or failback.
+11. Add backup/restore and NVMe ANA parity after they can reuse the same action
    owner, evidence, and status model rather than creating another isolated
    control plane.
 
@@ -179,8 +185,9 @@ The internal release-train contract is
 the operation-layer loop for a bounded `SwBlockVolume` protection finalizer.
 Phase 46 reused this same fact -> judgment -> action -> evidence pattern for
 returned-replica reintegration before any larger storage feature is enabled.
-Phases 47-52 close the executor-admission, preflight, status-schema, ACK
-evidence, and executor-contract bridge without allowing mutation.
+Phases 47-53 close the executor-admission, preflight, status-schema, ACK
+evidence, executor-contract, and disabled executor-process bridge without
+allowing mutation.
 
 The practical rule is:
 

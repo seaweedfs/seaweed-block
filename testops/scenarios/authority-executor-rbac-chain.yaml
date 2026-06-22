@@ -1,0 +1,72 @@
+# Runner-native Phase 53 gate: authority-executor RBAC boundary.
+
+name: authority-executor-rbac-chain
+timeout: 5m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: authority_executor_rbac_gate
+    actions:
+      - action: exec
+        node: m02
+        timeout: 4m
+        cmd: "rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase53-authority-executor-rbac && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase53-authority-executor-rbac && cd {{ product_root }} && SW_BLOCK_ARTIFACT_DIR=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase53-authority-executor-rbac bash scripts/run-phase53-authority-executor-rbac-gate.sh {{ product_root }}"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase53-authority-executor-rbac/phase53-authority-executor-rbac-summary.txt"
+        pattern: "^phase53_authority_executor_rbac_status=ok$"
+        save_as: phase53_rbac_ok
+      - action: assert_greater
+        actual: "{{ phase53_rbac_ok }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase53-authority-executor-rbac/phase53-authority-executor-rbac-summary.txt"
+        pattern: "^authority_executor_get_swblockvolumes_allowed=yes$"
+        save_as: phase53_get_allowed
+      - action: assert_greater
+        actual: "{{ phase53_get_allowed }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase53-authority-executor-rbac/phase53-authority-executor-rbac-summary.txt"
+        pattern: "^authority_executor_patch_swblockvolumes_denied=no$"
+        save_as: phase53_patch_denied
+      - action: assert_greater
+        actual: "{{ phase53_patch_denied }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase53-authority-executor-rbac/phase53-authority-executor-rbac-summary.txt"
+        pattern: "^authority_executor_patch_status_denied=no$"
+        save_as: phase53_status_denied
+      - action: assert_greater
+        actual: "{{ phase53_status_denied }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase53-authority-executor-rbac/phase53-authority-executor-rbac-summary.txt"
+        pattern: "^authority_executor_create_events_denied=no$"
+        save_as: phase53_events_denied
+      - action: assert_greater
+        actual: "{{ phase53_events_denied }}"
+        threshold: "0"
+
+  - name: collect
+    always: true
+    actions:
+      - action: collect_path
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase53-authority-executor-rbac"
+        name: "remote-phases"
+        ignore_error: true

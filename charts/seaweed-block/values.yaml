@@ -142,6 +142,17 @@ lifecycleOwner:
     create: true
   nodeSelector: {}
 
+authorityExecutor:
+  # Phase 53 returned-replica authority executor skeleton. Disabled by default.
+  # It observes SwBlockVolume.status.executorContracts[] and keeps execution
+  # disabled; it has no status, finalizer, workload, storage, or Event mutation
+  # permissions.
+  create: false
+  interval: 30s
+  rbac:
+    create: true
+  nodeSelector: {}
+
 csiController:
   replicas: 1
 

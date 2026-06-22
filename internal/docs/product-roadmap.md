@@ -195,8 +195,9 @@ rebuild, delete safety, or cleanup must start as a separate gated phase.
   ACK eligibility evidence, and that preflight is now available through
   machine-readable status. Phase 52 adds a still-disabled executor contract:
   only ACK eligibility is named as the future allowed mutation class, while
-  frontend publication, rebuild traffic, and failback stay forbidden. The actual
-  authority/storage mutation is still deferred.
+  frontend publication, rebuild traffic, and failback stay forbidden. Phase 53
+  adds the disabled executor process boundary with read-only SwBlockVolume
+  access. The actual authority/storage mutation is still deferred.
 - Later: returned-replica rebuild/reintegration/failback execution, NVMe ANA
   Kubernetes multipath parity, stronger committed-frontier reporting, broad
   distro/host compatibility, and longer soak under failure. NVMe ANA parity

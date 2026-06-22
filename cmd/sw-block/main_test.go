@@ -483,6 +483,69 @@ func TestOpsLifecycleOwnerReleasesProtectionFinalizerWhenDeleteSafetyAllows(t *t
 	}
 }
 
+func TestOpsAuthorityExecutorObservesDisabledContractsWithoutMutation(t *testing.T) {
+	client := &lifecycleOwnerTestClient{
+		volumes: []ops.SwBlockVolumeObject{{
+			Ref: ops.OperatorObjectRef{
+				APIVersion: ops.SwBlockVolumeAPIVersion,
+				Kind:       ops.SwBlockVolumeKind,
+				Namespace:  "kube-system",
+				Name:       "returned",
+			},
+			Status: ops.SwBlockVolumeCRDStatus{ExecutorContracts: []ops.SwBlockVolumeCRDExecutorContract{{
+				ActionType:               ops.ManagedVolumeActionReintegrateReturned,
+				ReplicaID:                "r1",
+				Decision:                 ops.ReturnedReplicaExecutorContractDisabled,
+				Reason:                   ops.ReturnedReplicaExecutorContractReasonExecutorDisabled,
+				OwnerExecutor:            "authority_recovery_executor",
+				ExecutionEnabled:         false,
+				MutationAllowed:          false,
+				AllowedMutationClass:     []string{"ack_eligibility"},
+				ForbiddenMutationClass:   []string{"frontend_publication", "rebuild_traffic", "failback"},
+				TerminalEvidenceRequired: []string{"ack_eligibility_known", "frontend_fenced_after_execution"},
+			}}},
+		}},
+	}
+	oldFactory := opsAuthorityExecutorClientFactory
+	opsAuthorityExecutorClientFactory = func() (ops.AuthorityExecutorClient, error) {
+		return client, nil
+	}
+	t.Cleanup(func() { opsAuthorityExecutorClientFactory = oldFactory })
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ops", "authority-executor", "--namespace", "kube-system"}, &stdout, &stderr)
+	if code != ops.VolumeStatusExitOK {
+		t.Fatalf("exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	if len(client.patches) != 0 || len(client.events) != 0 {
+		t.Fatalf("authority executor must not patch or emit events: patches=%+v events=%+v", client.patches, client.events)
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"authority_executor=disabled namespace=kube-system volumes=1 contracts=1",
+		"disabled_contracts=1",
+		"terminal_evidence_required=1",
+		"mutation_attempts=0",
+		"ack_eligibility_mutation_attempts=0",
+		"mutation_allowed=false",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("stdout missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestOpsAuthorityExecutorRejectsExecutionFlag(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ops", "authority-executor", "--enable-execution"}, &stdout, &stderr)
+	if code != ops.VolumeStatusExitInvalid {
+		t.Fatalf("exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "execution is disabled by product policy") {
+		t.Fatalf("stderr=%s", stderr.String())
+	}
+}
+
 func TestOpsClusterMasterAPIUsesSharedInClusterNodeEvidenceEnrichment(t *testing.T) {
 	masterAddr, closeMaster := startCmdFakeMaster(t)
 	defer closeMaster()

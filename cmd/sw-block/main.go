@@ -48,6 +48,9 @@ var (
 		client.EventComponent = "sw-block-lifecycle-owner"
 		return client, client, nil
 	}
+	opsAuthorityExecutorClientFactory = func() (ops.AuthorityExecutorClient, error) {
+		return ops.NewInClusterKubernetesStatusClient()
+	}
 )
 
 func run(args []string, stdout, stderr io.Writer) int {
@@ -65,7 +68,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return ops.VolumeStatusExitInvalid
 	}
 	if len(args) < 2 {
-		fmt.Fprintln(stderr, "sw-block: expected subcommand ops status|inventory|list|cluster|volumes|describe|timeline|explain|report|dashboard|generate-helm-values|operator-status|lifecycle-owner")
+		fmt.Fprintln(stderr, "sw-block: expected subcommand ops status|inventory|list|cluster|volumes|describe|timeline|explain|report|dashboard|generate-helm-values|operator-status|lifecycle-owner|authority-executor")
 		usage(stderr)
 		return ops.VolumeStatusExitInvalid
 	}
@@ -94,10 +97,71 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runOpsOperatorStatus(args[2:], stdout, stderr)
 	case "lifecycle-owner":
 		return runOpsLifecycleOwner(args[2:], stdout, stderr)
+	case "authority-executor":
+		return runOpsAuthorityExecutor(args[2:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "sw-block: unknown ops subcommand %q\n", args[1])
 		usage(stderr)
 		return ops.VolumeStatusExitInvalid
+	}
+}
+
+func runOpsAuthorityExecutor(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("sw-block ops authority-executor", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	var (
+		namespace       string
+		enableExecution bool
+		interval        time.Duration
+	)
+	fs.StringVar(&namespace, "namespace", "default", "Kubernetes namespace containing SwBlockVolume objects")
+	fs.BoolVar(&enableExecution, "enable-execution", false, "enable returned-replica executor mutation; currently rejected")
+	fs.DurationVar(&interval, "interval", 0, "repeat authority-executor reconciliation at this interval; 0 runs once")
+	if err := fs.Parse(args); err != nil {
+		return ops.VolumeStatusExitInvalid
+	}
+	if fs.NArg() != 0 {
+		fmt.Fprintf(stderr, "sw-block ops authority-executor: unexpected args %s\n", strings.Join(fs.Args(), " "))
+		return ops.VolumeStatusExitInvalid
+	}
+	if enableExecution {
+		fmt.Fprintln(stderr, "sw-block ops authority-executor: returned-replica execution is disabled by product policy")
+		return ops.VolumeStatusExitInvalid
+	}
+	runOnce := func() int {
+		client, err := opsAuthorityExecutorClientFactory()
+		if err != nil {
+			fmt.Fprintf(stderr, "sw-block ops authority-executor: %v\n", err)
+			return ops.VolumeStatusExitInvalid
+		}
+		result, err := (ops.AuthorityExecutorReconciler{
+			Namespace: namespace,
+			Client:    client,
+		}).Reconcile(context.Background())
+		if err != nil {
+			fmt.Fprintf(stderr, "sw-block ops authority-executor: %v\n", err)
+			return ops.VolumeStatusExitInvalid
+		}
+		fmt.Fprintf(stdout, "authority_executor=disabled namespace=%s volumes=%d contracts=%d disabled_contracts=%d blocked_contracts=%d terminal_evidence_required=%d mutation_attempts=%d ack_eligibility_mutation_attempts=%d mutation_allowed=false\n",
+			namespace,
+			result.VolumeCount,
+			result.ContractCount,
+			result.DisabledContractCount,
+			result.BlockedContractCount,
+			result.TerminalEvidenceRequiredCount,
+			result.MutationAttemptCount,
+			result.AckEligibilityMutationAttempts)
+		return ops.VolumeStatusExitOK
+	}
+	if interval <= 0 {
+		return runOnce()
+	}
+	for {
+		code := runOnce()
+		if code != ops.VolumeStatusExitOK {
+			fmt.Fprintf(stderr, "sw-block ops authority-executor: iteration failed exit=%d; retrying in %s\n", code, interval)
+		}
+		time.Sleep(interval)
 	}
 }
 
@@ -1620,6 +1684,7 @@ func usage(w io.Writer) {
 	fmt.Fprintln(w, "      [--restart-persistence ephemeral|hostpath] [--state-hostpath /var/lib/sw-block] [--timeout 10s]")
 	fmt.Fprintln(w, "  sw-block ops operator-status --dry-run [--master-api <addr>|--from-bundle <dir>] [--cleanup-summary <file>] [--interval 30s]")
 	fmt.Fprintln(w, "  sw-block ops lifecycle-owner [--dry-run] [--namespace <ns>] [--interval 30s]")
+	fmt.Fprintln(w, "  sw-block ops authority-executor [--namespace <ns>] [--interval 30s]")
 }
 
 func emptyCLI(value string) string {
