@@ -32,6 +32,13 @@ func TestPhase35D1CRDManifestsMatchManagedVolumeContract(t *testing.T) {
 			plural:   "swblockvolumes",
 			singular: "swblockvolume",
 		},
+		{
+			path:     "charts/seaweed-block/crds/swblockreplicaeligibilities.block.seaweedfs.com.yaml",
+			name:     "swblockreplicaeligibilities.block.seaweedfs.com",
+			kind:     SwBlockReplicaEligibilityKind,
+			plural:   SwBlockReplicaEligibilityPlural,
+			singular: SwBlockReplicaEligibilitySingular,
+		},
 	} {
 		t.Run(tc.kind, func(t *testing.T) {
 			doc := readYAMLMap(t, tc.path)
@@ -258,6 +265,66 @@ func TestPhase52SwBlockVolumeExecutorContractSchema(t *testing.T) {
 	for _, forbidden := range []string{"action_type", "owner_executor", "execution_enabled", "mutation_allowed", "preflight_decision", "allowed_mutation_class", "terminal_evidence_required"} {
 		if _, ok := contractProperties[forbidden]; ok {
 			t.Fatalf("SwBlockVolume.status.executorContracts[] leaked snake_case %s", forbidden)
+		}
+	}
+}
+
+func TestPhase54D2SwBlockReplicaEligibilityTargetSchema(t *testing.T) {
+	doc := readYAMLMap(t, "charts/seaweed-block/crds/swblockreplicaeligibilities.block.seaweedfs.com.yaml")
+	spec := yamlMap(t, doc, "spec")
+	names := yamlMap(t, spec, "names")
+	assertYAMLString(t, names, "kind", SwBlockReplicaEligibilityKind)
+	assertYAMLString(t, names, "plural", SwBlockReplicaEligibilityPlural)
+	assertYAMLString(t, names, "singular", SwBlockReplicaEligibilitySingular)
+
+	version := yamlMapFromValue(t, yamlSlice(t, spec, "versions")[0])
+	if _, ok := yamlMap(t, version, "subresources")["status"]; !ok {
+		t.Fatalf("%s missing status subresource", SwBlockReplicaEligibilityKind)
+	}
+
+	rootProperties := yamlMap(t,
+		yamlMap(t,
+			yamlMap(t, version, "schema"),
+			"openAPIV3Schema"),
+		"properties")
+	specProperties := yamlMap(t, yamlMap(t, rootProperties, "spec"), "properties")
+	for _, want := range []string{"volumeName", "volumeID", "pvcName", "replicaID"} {
+		if _, ok := specProperties[want]; !ok {
+			t.Fatalf("%s.spec schema missing %s", SwBlockReplicaEligibilityKind, want)
+		}
+	}
+
+	statusProperties := yamlMap(t, yamlMap(t, rootProperties, "status"), "properties")
+	for _, want := range []string{
+		"observedAt",
+		"observedGeneration",
+		"executor",
+		"reasonCode",
+		"ackEligibilityKnown",
+		"ackEligible",
+		"frontendFencedAfterExecution",
+		"primaryUnchanged",
+		"durableFrontierCovered",
+		"noCrossVolumeIdentityChange",
+		"evidenceGeneration",
+		"conditions",
+		"evidenceRefs",
+		"nonClaims",
+	} {
+		if _, ok := statusProperties[want]; !ok {
+			t.Fatalf("%s.status schema missing %s", SwBlockReplicaEligibilityKind, want)
+		}
+	}
+	for _, forbidden := range []string{
+		"frontendPublished",
+		"rebuildStarted",
+		"failbackStarted",
+		"primaryChanged",
+		"ack_eligible",
+		"frontend_fenced_after_execution",
+	} {
+		if _, ok := statusProperties[forbidden]; ok {
+			t.Fatalf("%s.status leaked forbidden field %s", SwBlockReplicaEligibilityKind, forbidden)
 		}
 	}
 }

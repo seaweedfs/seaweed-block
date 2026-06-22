@@ -1,9 +1,12 @@
 package ops
 
 const (
-	SwBlockVolumeAPIVersion = "block.seaweedfs.com/v1alpha1"
-	SwBlockVolumeKind       = "SwBlockVolume"
-	SwBlockClusterKind      = "SwBlockCluster"
+	SwBlockVolumeAPIVersion           = "block.seaweedfs.com/v1alpha1"
+	SwBlockVolumeKind                 = "SwBlockVolume"
+	SwBlockClusterKind                = "SwBlockCluster"
+	SwBlockReplicaEligibilityKind     = "SwBlockReplicaEligibility"
+	SwBlockReplicaEligibilityPlural   = "swblockreplicaeligibilities"
+	SwBlockReplicaEligibilitySingular = "swblockreplicaeligibility"
 
 	ConditionReady           = "Ready"
 	ConditionRecovered       = "Recovered"

@@ -1,6 +1,7 @@
 # Phase 54 ACK Eligibility Mutation Target Contract
 
-Status: design blocker documented.
+Status: target selected; execution remains blocked until RBAC/admission and
+writer logic are added.
 
 ## Problem
 
@@ -13,11 +14,19 @@ set returned replica ACK eligibility only
 That mutation must not publish a frontend, start rebuild traffic, change
 primary authority, perform failback, or affect another volume.
 
-The current codebase does not yet expose a durable, narrow ACK eligibility
-mutation target for the authority executor. Existing fields such as
-`ack_eligibility_known` and `ack_eligible` are projected observation/status
-facts. Writing those fields directly from the executor would make status look
-like product state without changing any authority-owned eligibility decision.
+Existing fields such as `ack_eligibility_known` and `ack_eligible` are
+projected observation/status facts. Writing those fields directly from the
+executor would make status look like product state without changing any
+authority-owned eligibility decision.
+
+Phase 54 selects a separate narrow CRD target:
+
+```text
+SwBlockReplicaEligibility
+```
+
+The CRD is introduced as an API target only. The authority executor still has
+no write RBAC and still fails closed when execution is requested.
 
 ## Required Target Properties
 
@@ -36,14 +45,17 @@ A valid ACK eligibility target must satisfy all of these:
 
 ## Candidate Targets
 
-### Separate evidence CR
+### Selected: separate evidence CR
 
 Example shape:
 
 ```text
 SwBlockReplicaEligibility
-  spec.volumeRef
+  spec.volumeName
+  spec.volumeID
+  spec.pvcName
   spec.replicaID
+  status.ackEligibilityKnown
   status.ackEligible
   status.executor
   status.evidenceGeneration
@@ -56,10 +68,14 @@ Pros:
 - Clear owner: authority executor writes this object only.
 - `operator-status` remains the owner of broad `SwBlockVolume.status`.
 
-Cons:
+Open follow-ups:
 
-- New CRD and lifecycle rules.
-- Requires garbage-collection policy tied to SwBlockVolume/PVC lifecycle.
+- D3 must add narrow RBAC/admission for status-only writes by the authority
+  executor.
+- D4 must teach `operator-status` to consume this evidence and project
+  terminal status.
+- Later lifecycle work must define garbage collection tied to SwBlockVolume/PVC
+  lifecycle.
 
 ### Authority-store state
 
@@ -90,7 +106,8 @@ Cons:
 
 ## Current Phase 54 Behavior
 
-Until a valid target exists, the executor must fail closed:
+Until D3 adds the writer boundary and D4 consumes the target, the executor must
+fail closed:
 
 ```text
 --enable-execution without policy -> executor_policy_disabled
@@ -108,8 +125,9 @@ mutation_allowed=false
 
 ## Recommendation
 
-Prefer a separate, narrow eligibility evidence CR unless the authority-store
-owner provides a concrete persisted ACK eligibility API first.
+Use `SwBlockReplicaEligibility.status` as the first bounded ACK eligibility
+target.
 
-Do not implement Phase 54 D3-D7 execution gates until D2 chooses one target and
-defines its RBAC/admission boundary.
+Do not enable executor writes until D3 proves that the authority executor can
+patch only this target and cannot patch SwBlockVolume status/spec/finalizers,
+workloads, storage, or other volumes.

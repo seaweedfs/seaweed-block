@@ -97,7 +97,7 @@ mutation_attempts remains 0 on every blocked path
 
 ### D2: Mutation Target Contract
 
-Status: design blocker documented in
+Status: target selected in
 `internal/docs/ref/phase54-ack-eligibility-mutation-target-contract.md`.
 
 Define the exact target the executor is allowed to mutate.
@@ -126,12 +126,13 @@ Acceptance:
 Current conclusion:
 
 ```text
-No durable narrow ACK eligibility mutation target exists yet.
+SwBlockReplicaEligibility is the narrow ACK eligibility evidence target.
 SwBlockVolume status is a projection surface owned by operator-status and must
 not be used as fake executor state.
 ```
 
-Phase 54 must not proceed to D3-D7 mutation gates until the target is chosen.
+Execution still fails closed until D3 proves RBAC/admission and the writer path
+is implemented.
 
 ### D3: Admission/RBAC Boundary
 

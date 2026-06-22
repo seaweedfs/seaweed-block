@@ -1,0 +1,128 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: swblockreplicaeligibilities.block.seaweedfs.com
+spec:
+  group: block.seaweedfs.com
+  scope: Namespaced
+  names:
+    plural: swblockreplicaeligibilities
+    singular: swblockreplicaeligibility
+    kind: SwBlockReplicaEligibility
+    shortNames:
+      - swbre
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Volume
+          type: string
+          jsonPath: .spec.volumeName
+        - name: Replica
+          type: string
+          jsonPath: .spec.replicaID
+        - name: Eligible
+          type: boolean
+          jsonPath: .status.ackEligible
+        - name: Reason
+          type: string
+          jsonPath: .status.reasonCode
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      schema:
+        openAPIV3Schema:
+          type: object
+          description: Narrow ACK eligibility evidence target for returned-replica reintegration.
+          properties:
+            spec:
+              type: object
+              description: Identity of the returned replica whose ACK eligibility may be recorded.
+              required:
+                - volumeName
+                - replicaID
+              properties:
+                volumeName:
+                  type: string
+                volumeID:
+                  type: string
+                pvcName:
+                  type: string
+                replicaID:
+                  type: string
+            status:
+              type: object
+              properties:
+                observedAt:
+                  type: string
+                  format: date-time
+                observedGeneration:
+                  type: integer
+                  format: int64
+                  minimum: 0
+                executor:
+                  type: string
+                reasonCode:
+                  type: string
+                ackEligibilityKnown:
+                  type: boolean
+                ackEligible:
+                  type: boolean
+                frontendFencedAfterExecution:
+                  type: boolean
+                primaryUnchanged:
+                  type: boolean
+                durableFrontierCovered:
+                  type: boolean
+                noCrossVolumeIdentityChange:
+                  type: boolean
+                evidenceGeneration:
+                  type: string
+                conditions:
+                  type: array
+                  items:
+                    type: object
+                    required:
+                      - type
+                      - status
+                    properties:
+                      type:
+                        type: string
+                        enum:
+                          - Ready
+                          - Blocked
+                          - EvidenceStale
+                      status:
+                        type: string
+                        enum:
+                          - "True"
+                          - "False"
+                          - Unknown
+                      reason:
+                        type: string
+                      severity:
+                        type: string
+                        enum:
+                          - info
+                          - warning
+                          - error
+                      message:
+                        type: string
+                      lastTransitionTime:
+                        type: string
+                        format: date-time
+                      evidenceRefs:
+                        type: array
+                        items:
+                          type: string
+                evidenceRefs:
+                  type: array
+                  items:
+                    type: string
+                nonClaims:
+                  type: array
+                  items:
+                    type: string
