@@ -252,10 +252,19 @@ Acceptance:
 
 ### D5: Failure and Hold States
 
-Status: pending. D4 already covers target-missing and terminal-evidence-missing
-holds; D5 should broaden the matrix to stale evidence, ambiguous targets,
-cross-volume identity mismatch, blocked preflight, and partial multi-contract
-behavior.
+Status: **QA PASS** on live m02 k3s run `20260623-112339-a395`
+(`authority-executor-negative-chain`, 26/26 actions).
+
+Runner gate:
+
+```text
+testops/scenarios/authority-executor-negative-chain.yaml
+scripts/run-phase54-authority-executor-negative-gate.sh
+```
+
+D5 broadened the D4 holds to stale/frontier-behind evidence, unsafe frontend
+state, ambiguous targets, cross-volume identity mismatch, blocked preflight, and
+partial multi-contract behavior.
 
 Cover negative cases:
 
@@ -274,6 +283,10 @@ Acceptance:
 - failure evidence is visible to a cold reviewer.
 
 ### D6: Multi-Volume Isolation
+
+Status: pending. D5 includes a mixed partial reconcile smoke; D6 should make
+multi-volume isolation the primary gate with explicit no-contamination assertions
+across identities, target statuses, and cleanup.
 
 Exercise at least three volumes:
 
