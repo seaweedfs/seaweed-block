@@ -182,9 +182,10 @@ Recommended order from here:
     groups executor policy, the ACK eligibility mutation target, admission/RBAC,
     terminal evidence, failure states, multi-volume isolation, and a live close
     gate into one milestone. The first allowed mutation remains narrow:
-    returned-replica ACK eligibility only. D1-D3 are implemented, with D3 live
-    RBAC QA PASS; D4 has the executor call-site implemented and awaits terminal
-    evidence QA.
+    returned-replica ACK eligibility only. D1-D4 are implemented and live QA
+    passed through the RBAC boundary plus executor call-site terminal-evidence
+    gate; D5-D7 remain for broader failure states, multi-volume isolation, and
+    the live returned-replica close gate.
 12. Add backup/restore and NVMe ANA parity after they can reuse the same action
    owner, evidence, and status model rather than creating another isolated
    control plane.

@@ -2,6 +2,18 @@
 
 Status: ready for QA after D3 RBAC PASS.
 
+Runner scenario:
+
+```text
+testops/scenarios/authority-executor-callsite-chain.yaml
+```
+
+Gate script:
+
+```text
+scripts/run-phase54-authority-executor-callsite-gate.sh
+```
+
 ## Goal
 
 Validate that `sw-block ops authority-executor --enable-execution
@@ -18,6 +30,14 @@ frontend, start rebuild/catch-up, perform failback, or touch another volume.
 
 - Phase 54 D3 RBAC gate is PASS.
 - CRDs are installed, including `SwBlockReplicaEligibility`.
+- A current image containing `sw-block ops authority-executor` is available to
+  the k3s node. The gate defaults to `sw-block:local`; QA may override with:
+
+  ```text
+  SW_BLOCK_PHASE54_IMAGE=<image>
+  SW_BLOCK_PHASE54_IMAGE_PULL_POLICY=IfNotPresent
+  ```
+
 - `authorityExecutor.execution.enabled=true` so the executor ServiceAccount has
   only:
   - get/list/watch `swblockvolumes`

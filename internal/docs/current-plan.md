@@ -185,7 +185,15 @@ default SA: denied for swblockreplicaeligibilities/status
 
 ### D4: Terminal Evidence Projection
 
-Status: implemented locally, pending QA.
+Status: **QA PASS** on live m02 k3s run `20260623-110832-6b9c`
+(`authority-executor-callsite-chain`, 36/36 actions).
+
+Runner gate:
+
+```text
+testops/scenarios/authority-executor-callsite-chain.yaml
+scripts/run-phase54-authority-executor-callsite-gate.sh
+```
 
 After execution, project terminal evidence:
 
@@ -243,6 +251,11 @@ Acceptance:
 - no claim of rebuild/failback.
 
 ### D5: Failure and Hold States
+
+Status: pending. D4 already covers target-missing and terminal-evidence-missing
+holds; D5 should broaden the matrix to stale evidence, ambiguous targets,
+cross-volume identity mismatch, blocked preflight, and partial multi-contract
+behavior.
 
 Cover negative cases:
 
