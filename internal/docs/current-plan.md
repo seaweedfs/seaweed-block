@@ -94,7 +94,7 @@ Implementation:
 
 ### D3: Executor Non-Execution Gate
 
-Status: pending.
+Status: implemented locally.
 
 Prove the existing authority executor does not act on
 `authority.rebuild_returned_replica` yet:
@@ -104,6 +104,14 @@ Prove the existing authority executor does not act on
 - no frontend publication;
 - no failback;
 - no cross-volume mutation.
+
+Implementation:
+
+- `AuthorityExecutorReconciler` ignores disabled non-ACK contracts without
+  mutation.
+- If any unsupported/non-ACK contract is incorrectly marked
+  `executionEnabled=true` or `mutationAllowed=true`, the reconciler fails
+  closed through `UnsafeExecutionContractCount`.
 
 ## Verification
 

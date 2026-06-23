@@ -78,6 +78,52 @@ func TestAuthorityExecutorReconcilerRejectsUnsupportedMutationClass(t *testing.T
 	}
 }
 
+func TestAuthorityExecutorReconcilerIgnoresDisabledRebuildContractWithoutMutation(t *testing.T) {
+	client := &fakeAuthorityExecutorClient{
+		volumes: []SwBlockVolumeObject{authorityExecutorRebuildVolume(false, false)},
+		eligibilities: []SwBlockReplicaEligibilityObject{{
+			Ref: OperatorObjectRef{Namespace: "kube-system", Name: "rebuild-r1"},
+			Spec: SwBlockReplicaEligibilitySpec{
+				VolumeName: "rebuild",
+				VolumeID:   "pvc-rebuild",
+				PVCName:    "rebuild-pvc",
+				ReplicaID:  "r1",
+			},
+		}},
+	}
+	result, err := (AuthorityExecutorReconciler{
+		Namespace:              "kube-system",
+		Client:                 client,
+		ExecutionRequested:     true,
+		ExecutionPolicyEnabled: true,
+		AllowedMutationClass:   AuthorityExecutorAllowedMutationAckEligibility,
+	}).Reconcile(context.Background())
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if result.VolumeCount != 1 ||
+		result.ContractCount != 0 ||
+		result.MutationAttemptCount != 0 ||
+		result.AckEligibilityMutationAttempts != 0 ||
+		len(client.writes) != 0 {
+		t.Fatalf("result=%+v writes=%+v", result, client.writes)
+	}
+}
+
+func TestAuthorityExecutorReconcilerFailsClosedOnEnabledRebuildContract(t *testing.T) {
+	client := &fakeAuthorityExecutorClient{volumes: []SwBlockVolumeObject{authorityExecutorRebuildVolume(true, false)}}
+	result, err := (AuthorityExecutorReconciler{
+		Namespace: "kube-system",
+		Client:    client,
+	}).Reconcile(context.Background())
+	if err == nil {
+		t.Fatalf("expected enabled rebuild contract to fail closed, result=%+v", result)
+	}
+	if result.UnsafeExecutionContractCount != 1 || result.MutationAttemptCount != 0 || len(client.writes) != 0 {
+		t.Fatalf("result=%+v writes=%+v", result, client.writes)
+	}
+}
+
 func TestAuthorityExecutorReconcilerRejectsExecutionWhenPolicyDisabled(t *testing.T) {
 	result, err := (AuthorityExecutorReconciler{
 		Client:             &fakeAuthorityExecutorClient{},
@@ -236,6 +282,45 @@ func authorityExecutorReadyVolume() SwBlockVolumeObject {
 				ForbiddenMutationClass:   []string{"frontend_publication", "rebuild_traffic", "failback"},
 				TerminalEvidenceRequired: returnedReplicaTerminalEvidenceRequired(ManagedVolumeActionReintegrateReturned),
 				EvidenceRefs:             []string{"contract.txt"},
+			}},
+		},
+	}
+}
+
+func authorityExecutorRebuildVolume(executionEnabled, mutationAllowed bool) SwBlockVolumeObject {
+	return SwBlockVolumeObject{
+		Ref: OperatorObjectRef{Namespace: "kube-system", Name: "rebuild"},
+		Status: SwBlockVolumeCRDStatus{
+			VolumeID: "pvc-rebuild",
+			PVCName:  "rebuild-pvc",
+			ReplicaReintegrations: []SwBlockVolumeCRDReturnedReplica{{
+				ReplicaID:             "r1",
+				State:                 ReturnedReplicaStateRecovering,
+				ReasonCode:            ReasonCandidateFrontierBehind,
+				FrontendFenced:        true,
+				FrontendPrimaryReady:  false,
+				AckEligibilityKnown:   true,
+				AckEligible:           false,
+				DurableFrontierKnown:  true,
+				DurableFrontierLSN:    51,
+				RequiredFrontierKnown: true,
+				RequiredFrontierLSN:   52,
+				EvidenceRefs:          []string{"rebuild.txt"},
+			}},
+			ExecutorContracts: []SwBlockVolumeCRDExecutorContract{{
+				ActionType:               ManagedVolumeActionRebuildReturned,
+				ReplicaID:                "r1",
+				Decision:                 ReturnedReplicaExecutorContractDisabled,
+				Reason:                   ReturnedReplicaExecutorContractReasonExecutorDisabled,
+				OwnerExecutor:            "authority_recovery_executor",
+				ExecutionEnabled:         executionEnabled,
+				MutationAllowed:          mutationAllowed,
+				PreflightDecision:        ReturnedReplicaExecutorPreflightReady,
+				PreflightReason:          ReturnedReplicaExecutorPreflightReasonSatisfied,
+				AllowedMutationClass:     []string{"rebuild_traffic"},
+				ForbiddenMutationClass:   []string{"ack_eligibility", "frontend_publication", "failback"},
+				TerminalEvidenceRequired: returnedReplicaTerminalEvidenceRequired(ManagedVolumeActionRebuildReturned),
+				EvidenceRefs:             []string{"rebuild-contract.txt"},
 			}},
 		},
 	}

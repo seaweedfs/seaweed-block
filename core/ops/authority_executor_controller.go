@@ -72,6 +72,9 @@ func (r AuthorityExecutorReconciler) Reconcile(ctx context.Context) (AuthorityEx
 	for _, volume := range volumes {
 		for _, contract := range volume.Status.ExecutorContracts {
 			if contract.ActionType != ManagedVolumeActionReintegrateReturned {
+				if contract.ExecutionEnabled || contract.MutationAllowed {
+					result.UnsafeExecutionContractCount++
+				}
 				continue
 			}
 			result.ContractCount++
