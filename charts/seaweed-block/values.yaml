@@ -156,6 +156,18 @@ authorityExecutor:
     create: true
   nodeSelector: {}
 
+rebuildTargetOwner:
+  # Rebuild target owner. Disabled by default. When enabled it creates
+  # SwBlockReplicaRebuild target CRs from ready rebuild_returned_replica
+  # executor contracts. It does not write status, publish frontend paths,
+  # start rebuild traffic, or change authority.
+  create: false
+  dryRun: true
+  interval: 30s
+  rbac:
+    create: true
+  nodeSelector: {}
+
 csiController:
   replicas: 1
 

@@ -1,0 +1,39 @@
+{{- if .Values.rebuildTargetOwner.create }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sw-block-rebuild-target-owner
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "seaweed-block.labels" . | nindent 4 }}
+    app: sw-block-rebuild-target-owner
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sw-block-rebuild-target-owner
+  template:
+    metadata:
+      labels:
+        app: sw-block-rebuild-target-owner
+        {{- include "seaweed-block.labels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "seaweed-block.fullname" . }}-rebuild-target-owner
+      {{- with .Values.rebuildTargetOwner.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: rebuild-target-owner
+          image: {{ include "seaweed-block.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/usr/local/bin/sw-block"]
+          args:
+            - "ops"
+            - "rebuild-target-owner"
+            - "--namespace={{ .Release.Namespace }}"
+            {{- if .Values.rebuildTargetOwner.dryRun }}
+            - "--dry-run"
+            {{- end }}
+            - "--interval={{ .Values.rebuildTargetOwner.interval }}"
+{{- end }}

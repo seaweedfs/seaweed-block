@@ -230,6 +230,47 @@ func (c *KubernetesStatusClient) ListSwBlockReplicaRebuilds(ctx context.Context,
 	return out, nil
 }
 
+func (c *KubernetesStatusClient) CreateSwBlockReplicaRebuild(ctx context.Context, namespace string, obj SwBlockReplicaRebuildObject) error {
+	if namespace == "" || obj.Ref.Name == "" {
+		return fmt.Errorf("namespace and name are required for SwBlockReplicaRebuild create")
+	}
+	body, err := json.Marshal(map[string]any{
+		"apiVersion": SwBlockVolumeAPIVersion,
+		"kind":       SwBlockReplicaRebuildKind,
+		"metadata": kubernetesMetadata{
+			Name:      obj.Ref.Name,
+			Namespace: namespace,
+		},
+		"spec": obj.Spec,
+	})
+	if err != nil {
+		return fmt.Errorf("marshal SwBlockReplicaRebuild create: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.resourceCollectionURL(namespace, SwBlockReplicaRebuildPlural), bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Content-Type", "application/json")
+	if c.BearerToken != "" {
+		req.Header.Set("Authorization", "Bearer "+c.BearerToken)
+	}
+	client := c.HTTPClient
+	if client == nil {
+		client = http.DefaultClient
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		return nil
+	}
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	return fmt.Errorf("create %s/%s failed: http %d %s", SwBlockReplicaRebuildPlural, obj.Ref.Name, resp.StatusCode, strings.TrimSpace(string(raw)))
+}
+
 func (c *KubernetesStatusClient) PatchSwBlockVolumeFinalizers(ctx context.Context, ref OperatorObjectRef, finalizers []string) error {
 	if ref.Namespace == "" || ref.Name == "" {
 		return fmt.Errorf("namespace and name are required for SwBlockVolume finalizer patch")

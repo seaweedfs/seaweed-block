@@ -573,6 +573,62 @@ func TestPhase54D3AuthorityExecutorExecutionRBACIsNarrow(t *testing.T) {
 	}
 }
 
+func TestPhase58RebuildTargetOwnerPackagingIsNarrow(t *testing.T) {
+	values := readYAMLMap(t, "charts/seaweed-block/values.yaml")
+	rebuildTargetOwner := yamlMap(t, values, "rebuildTargetOwner")
+	assertYAMLBool(t, rebuildTargetOwner, "create", false)
+	assertYAMLBool(t, rebuildTargetOwner, "dryRun", true)
+	rbacValues := yamlMap(t, rebuildTargetOwner, "rbac")
+	assertYAMLBool(t, rbacValues, "create", true)
+
+	deploy := readRepoFile(t, "charts/seaweed-block/templates/rebuild-target-owner.yaml")
+	for _, want := range []string{
+		`kind: Deployment`,
+		`name: sw-block-rebuild-target-owner`,
+		`serviceAccountName: {{ include "seaweed-block.fullname" . }}-rebuild-target-owner`,
+		`command: ["/usr/local/bin/sw-block"]`,
+		`- "rebuild-target-owner"`,
+		`- "--namespace={{ .Release.Namespace }}"`,
+		`{{- if .Values.rebuildTargetOwner.dryRun }}`,
+		`- "--dry-run"`,
+		`- "--interval={{ .Values.rebuildTargetOwner.interval }}"`,
+	} {
+		if !strings.Contains(deploy, want) {
+			t.Fatalf("rebuild-target-owner deployment missing %q\n%s", want, deploy)
+		}
+	}
+
+	rbac := readRepoFile(t, "charts/seaweed-block/templates/rebuild-target-owner-rbac.yaml")
+	for _, want := range []string{
+		`resources: ["swblockvolumes"]`,
+		`verbs: ["get", "list", "watch"]`,
+		`resources: ["swblockreplicarebuilds"]`,
+		`verbs: ["get", "list", "watch", "create"]`,
+	} {
+		if !strings.Contains(rbac, want) {
+			t.Fatalf("rebuild-target-owner RBAC missing %q\n%s", want, rbac)
+		}
+	}
+	for _, forbidden := range []string{
+		`resources: ["swblockvolumes/status"]`,
+		`resources: ["swblockvolumes/finalizers"]`,
+		`resources: ["swblockreplicarebuilds/status"]`,
+		`resources: ["events"]`,
+		`resources: ["pods"]`,
+		`resources: ["persistentvolumes"]`,
+		`resources: ["persistentvolumeclaims"]`,
+		`resources: ["storageclasses"]`,
+		`resources: ["secrets"]`,
+		`"update"`,
+		`"patch"`,
+		`"delete"`,
+	} {
+		if strings.Contains(rbac, forbidden) {
+			t.Fatalf("rebuild-target-owner RBAC contains forbidden fragment %q\n%s", forbidden, rbac)
+		}
+	}
+}
+
 func readRepoFile(t *testing.T, repoPath string) string {
 	t.Helper()
 	raw, err := os.ReadFile(filepath.Join("..", "..", filepath.FromSlash(repoPath)))

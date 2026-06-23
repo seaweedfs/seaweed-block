@@ -51,6 +51,9 @@ var (
 	opsAuthorityExecutorClientFactory = func() (ops.AuthorityExecutorClient, error) {
 		return ops.NewInClusterKubernetesStatusClient()
 	}
+	opsRebuildTargetOwnerClientFactory = func() (ops.RebuildTargetOwnerClient, error) {
+		return ops.NewInClusterKubernetesStatusClient()
+	}
 )
 
 func run(args []string, stdout, stderr io.Writer) int {
@@ -68,7 +71,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return ops.VolumeStatusExitInvalid
 	}
 	if len(args) < 2 {
-		fmt.Fprintln(stderr, "sw-block: expected subcommand ops status|inventory|list|cluster|volumes|describe|timeline|explain|report|dashboard|generate-helm-values|operator-status|lifecycle-owner|authority-executor")
+		fmt.Fprintln(stderr, "sw-block: expected subcommand ops status|inventory|list|cluster|volumes|describe|timeline|explain|report|dashboard|generate-helm-values|operator-status|lifecycle-owner|authority-executor|rebuild-target-owner")
 		usage(stderr)
 		return ops.VolumeStatusExitInvalid
 	}
@@ -99,10 +102,73 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runOpsLifecycleOwner(args[2:], stdout, stderr)
 	case "authority-executor":
 		return runOpsAuthorityExecutor(args[2:], stdout, stderr)
+	case "rebuild-target-owner":
+		return runOpsRebuildTargetOwner(args[2:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "sw-block: unknown ops subcommand %q\n", args[1])
 		usage(stderr)
 		return ops.VolumeStatusExitInvalid
+	}
+}
+
+func runOpsRebuildTargetOwner(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("sw-block ops rebuild-target-owner", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	var (
+		dryRun    bool
+		namespace string
+		interval  time.Duration
+	)
+	fs.BoolVar(&dryRun, "dry-run", false, "evaluate rebuild target planning without creating SwBlockReplicaRebuild objects")
+	fs.StringVar(&namespace, "namespace", "default", "Kubernetes namespace containing SwBlockVolume objects")
+	fs.DurationVar(&interval, "interval", 0, "repeat rebuild-target-owner reconciliation at this interval; 0 runs once")
+	if err := fs.Parse(args); err != nil {
+		return ops.VolumeStatusExitInvalid
+	}
+	if fs.NArg() != 0 {
+		fmt.Fprintf(stderr, "sw-block ops rebuild-target-owner: unexpected args %s\n", strings.Join(fs.Args(), " "))
+		return ops.VolumeStatusExitInvalid
+	}
+	runOnce := func() int {
+		client, err := opsRebuildTargetOwnerClientFactory()
+		if err != nil {
+			fmt.Fprintf(stderr, "sw-block ops rebuild-target-owner: %v\n", err)
+			return ops.VolumeStatusExitInvalid
+		}
+		result, err := (ops.RebuildTargetOwnerReconciler{
+			Namespace: namespace,
+			Client:    client,
+			DryRun:    dryRun,
+		}).Reconcile(context.Background())
+		if err != nil {
+			fmt.Fprintf(stderr, "sw-block ops rebuild-target-owner: %v\n", err)
+			return ops.VolumeStatusExitInvalid
+		}
+		mode := "target_mutation"
+		if dryRun {
+			mode = "dry_run"
+		}
+		fmt.Fprintf(stdout, "rebuild_target_owner=%s namespace=%s volumes=%d contracts=%d targets_planned=%d targets_existing=%d targets_created=%d invalid_contracts=%d mutation_allowed=%t storage_mutation_allowed=false frontend_publication_allowed=false failback_allowed=false\n",
+			mode,
+			namespace,
+			result.VolumeCount,
+			result.ContractCount,
+			result.TargetPlannedCount,
+			result.TargetExistingCount,
+			result.TargetCreateCount,
+			result.InvalidContractCount,
+			!dryRun && result.TargetCreateCount > 0)
+		return ops.VolumeStatusExitOK
+	}
+	if interval <= 0 {
+		return runOnce()
+	}
+	for {
+		code := runOnce()
+		if code != ops.VolumeStatusExitOK {
+			fmt.Fprintf(stderr, "sw-block ops rebuild-target-owner: iteration failed exit=%d; retrying in %s\n", code, interval)
+		}
+		time.Sleep(interval)
 	}
 }
 
@@ -1718,6 +1784,7 @@ func usage(w io.Writer) {
 	fmt.Fprintln(w, "  sw-block ops operator-status --dry-run [--master-api <addr>|--from-bundle <dir>] [--cleanup-summary <file>] [--interval 30s]")
 	fmt.Fprintln(w, "  sw-block ops lifecycle-owner [--dry-run] [--namespace <ns>] [--interval 30s]")
 	fmt.Fprintln(w, "  sw-block ops authority-executor [--namespace <ns>] [--allowed-mutation-class ack_eligibility|rebuild_traffic] [--interval 30s]")
+	fmt.Fprintln(w, "  sw-block ops rebuild-target-owner [--dry-run] [--namespace <ns>] [--interval 30s]")
 }
 
 func emptyCLI(value string) string {

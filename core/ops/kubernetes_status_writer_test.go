@@ -503,6 +503,69 @@ func TestKubernetesStatusClientPatchesOnlySwBlockVolumeFinalizers(t *testing.T) 
 	}
 }
 
+func TestKubernetesStatusClientCreatesSwBlockReplicaRebuildWithoutStatus(t *testing.T) {
+	var request recordedStatusPatch
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&request.Body); err != nil {
+			t.Fatalf("decode request body: %v", err)
+		}
+		request.Method = r.Method
+		request.Path = r.URL.Path
+		request.ContentType = r.Header.Get("Content-Type")
+		request.Authorization = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer server.Close()
+
+	err := (&KubernetesStatusClient{
+		BaseURL:     server.URL,
+		BearerToken: "target-owner-token",
+		HTTPClient:  server.Client(),
+	}).CreateSwBlockReplicaRebuild(context.Background(), "kube-system", SwBlockReplicaRebuildObject{
+		Ref: OperatorObjectRef{
+			Name: "demo-pvc-r2-rebuild",
+		},
+		Spec: SwBlockReplicaRebuildSpec{
+			VolumeName: "demo-pvc",
+			VolumeID:   "pvc-demo",
+			PVCName:    "demo-pvc",
+			ReplicaID:  "r2",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create rebuild target: %v", err)
+	}
+	if request.Method != http.MethodPost {
+		t.Fatalf("method=%s", request.Method)
+	}
+	if request.Path != "/apis/block.seaweedfs.com/v1alpha1/namespaces/kube-system/swblockreplicarebuilds" {
+		t.Fatalf("path=%s", request.Path)
+	}
+	if request.ContentType != "application/json" {
+		t.Fatalf("content-type=%s", request.ContentType)
+	}
+	if request.Authorization != "Bearer target-owner-token" {
+		t.Fatalf("authorization=%s", request.Authorization)
+	}
+	if request.Body["apiVersion"] != SwBlockVolumeAPIVersion || request.Body["kind"] != SwBlockReplicaRebuildKind {
+		t.Fatalf("body identity=%+v", request.Body)
+	}
+	metadata := request.Body["metadata"].(map[string]any)
+	if metadata["name"] != "demo-pvc-r2-rebuild" || metadata["namespace"] != "kube-system" {
+		t.Fatalf("metadata=%+v", metadata)
+	}
+	spec := request.Body["spec"].(map[string]any)
+	if spec["volumeName"] != "demo-pvc" ||
+		spec["volumeID"] != "pvc-demo" ||
+		spec["pvcName"] != "demo-pvc" ||
+		spec["replicaID"] != "r2" {
+		t.Fatalf("spec=%+v", spec)
+	}
+	if _, ok := request.Body["status"]; ok {
+		t.Fatalf("target create must not include status: %+v", request.Body)
+	}
+}
+
 func TestKubernetesEventNameSeparatesTypeAndReason(t *testing.T) {
 	base := OperatorKubernetesEvent{
 		InvolvedObject: OperatorObjectRef{Name: "demo-pvc"},

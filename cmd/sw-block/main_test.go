@@ -662,6 +662,118 @@ func TestOpsAuthorityExecutorWritesRebuildPlannedStatus(t *testing.T) {
 	}
 }
 
+func TestOpsRebuildTargetOwnerCreatesTarget(t *testing.T) {
+	client := &lifecycleOwnerTestClient{
+		volumes: []ops.SwBlockVolumeObject{{
+			Ref: ops.OperatorObjectRef{
+				APIVersion: ops.SwBlockVolumeAPIVersion,
+				Kind:       ops.SwBlockVolumeKind,
+				Namespace:  "kube-system",
+				Name:       "demo-pvc",
+			},
+			Status: ops.SwBlockVolumeCRDStatus{
+				VolumeID: "pvc-demo",
+				PVCName:  "demo-pvc",
+				ExecutorContracts: []ops.SwBlockVolumeCRDExecutorContract{{
+					ActionType:           ops.ManagedVolumeActionRebuildReturned,
+					ReplicaID:            "r2",
+					Decision:             ops.ReturnedReplicaExecutorContractDisabled,
+					Reason:               ops.ReturnedReplicaExecutorContractReasonExecutorDisabled,
+					PreflightDecision:    ops.ReturnedReplicaExecutorPreflightReady,
+					PreflightReason:      ops.ReturnedReplicaExecutorPreflightReasonSatisfied,
+					AllowedMutationClass: []string{ops.AuthorityExecutorAllowedMutationRebuildTraffic},
+				}},
+			},
+		}},
+	}
+	oldFactory := opsRebuildTargetOwnerClientFactory
+	opsRebuildTargetOwnerClientFactory = func() (ops.RebuildTargetOwnerClient, error) {
+		return client, nil
+	}
+	t.Cleanup(func() { opsRebuildTargetOwnerClientFactory = oldFactory })
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ops", "rebuild-target-owner", "--namespace", "kube-system"}, &stdout, &stderr)
+	if code != ops.VolumeStatusExitOK {
+		t.Fatalf("exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	if len(client.rebuildCreates) != 1 {
+		t.Fatalf("rebuildCreates=%+v", client.rebuildCreates)
+	}
+	created := client.rebuildCreates[0]
+	if created.Ref.Name != "demo-pvc-r2-rebuild" ||
+		created.Spec.VolumeName != "demo-pvc" ||
+		created.Spec.ReplicaID != "r2" {
+		t.Fatalf("created=%+v", created)
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"rebuild_target_owner=target_mutation",
+		"namespace=kube-system",
+		"volumes=1",
+		"contracts=1",
+		"targets_planned=1",
+		"targets_existing=0",
+		"targets_created=1",
+		"mutation_allowed=true",
+		"storage_mutation_allowed=false",
+		"frontend_publication_allowed=false",
+		"failback_allowed=false",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("stdout missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestOpsRebuildTargetOwnerDryRunDoesNotCreateTarget(t *testing.T) {
+	client := &lifecycleOwnerTestClient{
+		volumes: []ops.SwBlockVolumeObject{{
+			Ref: ops.OperatorObjectRef{
+				Name: "demo-pvc",
+			},
+			Status: ops.SwBlockVolumeCRDStatus{
+				VolumeID: "pvc-demo",
+				PVCName:  "demo-pvc",
+				ExecutorContracts: []ops.SwBlockVolumeCRDExecutorContract{{
+					ActionType:           ops.ManagedVolumeActionRebuildReturned,
+					ReplicaID:            "r2",
+					Decision:             ops.ReturnedReplicaExecutorContractDisabled,
+					Reason:               ops.ReturnedReplicaExecutorContractReasonExecutorDisabled,
+					PreflightDecision:    ops.ReturnedReplicaExecutorPreflightReady,
+					PreflightReason:      ops.ReturnedReplicaExecutorPreflightReasonSatisfied,
+					AllowedMutationClass: []string{ops.AuthorityExecutorAllowedMutationRebuildTraffic},
+				}},
+			},
+		}},
+	}
+	oldFactory := opsRebuildTargetOwnerClientFactory
+	opsRebuildTargetOwnerClientFactory = func() (ops.RebuildTargetOwnerClient, error) {
+		return client, nil
+	}
+	t.Cleanup(func() { opsRebuildTargetOwnerClientFactory = oldFactory })
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ops", "rebuild-target-owner", "--dry-run", "--namespace", "kube-system"}, &stdout, &stderr)
+	if code != ops.VolumeStatusExitOK {
+		t.Fatalf("exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	if len(client.rebuildCreates) != 0 {
+		t.Fatalf("dry-run creates=%+v", client.rebuildCreates)
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"rebuild_target_owner=dry_run",
+		"targets_planned=1",
+		"targets_created=0",
+		"mutation_allowed=false",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("stdout missing %q:\n%s", want, out)
+		}
+	}
+}
+
 func TestOpsAuthorityExecutorExecutionPolicyBlocksWhenAckTargetMissing(t *testing.T) {
 	client := &lifecycleOwnerTestClient{
 		volumes: []ops.SwBlockVolumeObject{{
@@ -1037,6 +1149,7 @@ type lifecycleOwnerTestClient struct {
 	events            []ops.OperatorKubernetesEvent
 	eligibilityWrites []lifecycleOwnerTestEligibilityWrite
 	rebuildWrites     []lifecycleOwnerTestRebuildWrite
+	rebuildCreates    []ops.SwBlockReplicaRebuildObject
 }
 
 type lifecycleOwnerTestPatch struct {
@@ -1073,6 +1186,11 @@ func (c *lifecycleOwnerTestClient) WriteReplicaEligibilityStatus(_ context.Conte
 
 func (c *lifecycleOwnerTestClient) WriteReplicaRebuildStatus(_ context.Context, ref ops.OperatorObjectRef, status ops.SwBlockReplicaRebuildCRDStatus) error {
 	c.rebuildWrites = append(c.rebuildWrites, lifecycleOwnerTestRebuildWrite{ref: ref, status: status})
+	return nil
+}
+
+func (c *lifecycleOwnerTestClient) CreateSwBlockReplicaRebuild(_ context.Context, _ string, obj ops.SwBlockReplicaRebuildObject) error {
+	c.rebuildCreates = append(c.rebuildCreates, obj)
 	return nil
 }
 

@@ -1,4 +1,4 @@
-# Current Plan: Phase 57 Rebuild Progress Target
+# Current Plan: Phase 58 Rebuild Target Owner
 
 Status: complete.
 
@@ -6,176 +6,181 @@ Branch target: `phase54-returned-replica-reintegration-executor`
 
 ## Goal
 
-Phase 56 made returned-replica rebuild/catch-up visible as a disabled executor
-contract:
+Phase 57 added `SwBlockReplicaRebuild.status` as the narrow status target for
+future returned-replica rebuild progress. That still required a target CR to
+exist before the executor could write planned rebuild status.
+
+Phase 58 adds the missing owner for that target:
 
 ```text
-authority.rebuild_returned_replica
-allowed_mutation_class=rebuild_traffic
-execution_enabled=false
+SwBlockVolume.status.executorContracts[]
+  actionType=authority.rebuild_returned_replica
+  allowedMutationClass=rebuild_traffic
+  preflight=ready
+        |
+        v
+SwBlockReplicaRebuild.spec
+  volumeName / volumeID / pvcName / replicaID
 ```
 
-Phase 57 adds the next bounded control-plane target for that future executor:
-
-```text
-SwBlockReplicaRebuild.status
-```
-
-The authority executor may write a narrow planned-progress status to that target
-when explicitly enabled for `rebuild_traffic`, while still not starting data
-movement, not publishing any frontend, not changing primary authority, and not
-touching `SwBlockVolume.status`.
+The target owner may create the `SwBlockReplicaRebuild` main object. It does
+not write status, start rebuild traffic, publish a frontend, fail back a
+replica, or change primary authority.
 
 ## Scope
 
 In scope:
 
-- Add `SwBlockReplicaRebuild` CRD as a narrow rebuild/catch-up status target.
-- Add Kubernetes status-writer support for
-  `swblockreplicarebuilds/status`.
-- Extend authority-executor execution mode with
-  `--allowed-mutation-class rebuild_traffic`.
-- Write only a planned rebuild status:
-  - `state=planned`;
-  - `reasonCode=rebuild_progress_planned`;
-  - `rebuildTrafficStarted=false`;
-  - `noFrontendPublication=true`;
-  - `noCrossVolumeIdentityChange=true`.
-- Keep ACK eligibility and rebuild progress as separate target CRDs and
-  separate mutation classes.
-- Gate RBAC so the executor can only read rebuild targets and write their
-  `/status` subresource.
+- Add a `rebuild-target-owner` reconciler.
+- Add `sw-block ops rebuild-target-owner`.
+- Add Kubernetes create support for `SwBlockReplicaRebuild` main objects.
+- Package an optional Helm Deployment and narrow RBAC identity.
+- Gate live RBAC:
+  - can read `SwBlockVolume`;
+  - can read/create `SwBlockReplicaRebuild`;
+  - cannot patch/update/delete rebuild targets;
+  - cannot write rebuild target status;
+  - cannot write `SwBlockVolume` status/finalizers;
+  - cannot mutate events, pods, PVCs, or storage classes.
 
 Out of scope:
 
 - No rebuild data movement.
 - No WAL/block copy.
+- No rebuild status write by the target owner.
 - No frontend publication.
 - No failback.
 - No primary authority change.
-- No `SwBlockVolume.status` writes by authority-executor.
-- No automatic creation of rebuild targets by this phase.
+- No cross-volume mutation.
 
 ## Deliverables
 
-### D1: SwBlockReplicaRebuild CRD
+### D1: Rebuild Target Owner Controller
 
 Status: implemented locally.
 
-Add a namespaced `SwBlockReplicaRebuild` CRD with:
-
-- spec identity:
-  - `volumeName`;
-  - `volumeID`;
-  - `pvcName`;
-  - `replicaID`;
-  - `sourceReplicaID`;
-- status evidence:
-  - observed time/generation;
-  - executor;
-  - state/reason;
-  - durable and required frontier;
-  - frontend-fenced-before-rebuild;
-  - primary-unchanged;
-  - rebuild-traffic-started;
-  - no-frontend-publication;
-  - no-cross-volume-identity-change;
-  - conditions/evidence/non-claims.
-
-### D2: Executor Planned-Status Write
-
-Status: implemented locally.
-
-When all of these are true:
-
-- execution is explicitly requested;
-- execution policy is explicitly enabled;
-- allowed mutation class is `rebuild_traffic`;
-- the volume has a disabled `authority.rebuild_returned_replica` contract;
-- rebuild preflight is ready;
-- the target `SwBlockReplicaRebuild` exists and matches volume + replica;
-
-the executor writes:
+The controller lists `SwBlockVolume` objects and existing
+`SwBlockReplicaRebuild` targets. It creates one target only when a volume has a
+ready disabled rebuild contract:
 
 ```text
-SwBlockReplicaRebuild.status.state=planned
-SwBlockReplicaRebuild.status.reasonCode=rebuild_progress_planned
-SwBlockReplicaRebuild.status.rebuildTrafficStarted=false
-SwBlockReplicaRebuild.status.noFrontendPublication=true
-SwBlockReplicaRebuild.status.noCrossVolumeIdentityChange=true
+actionType=authority.rebuild_returned_replica
+decision=disabled
+reason=executor_disabled
+preflightDecision=ready
+preflightReason=satisfied
+allowedMutationClass contains rebuild_traffic
+replicaID != ""
 ```
 
-It does not write ACK eligibility, `SwBlockVolume.status`, Events, finalizers,
-frontend state, or storage objects.
+Existing targets are detected by volume identity plus replica ID and are not
+duplicated.
 
-### D3: RBAC Target Gate
+### D2: CLI and Kubernetes Create Client
+
+Status: implemented locally.
+
+Added:
+
+```text
+sw-block ops rebuild-target-owner [--dry-run] [--namespace <ns>] [--interval 30s]
+```
+
+The command reports terminal evidence:
+
+```text
+rebuild_target_owner=target_mutation|dry_run
+targets_planned=<n>
+targets_existing=<n>
+targets_created=<n>
+invalid_contracts=<n>
+storage_mutation_allowed=false
+frontend_publication_allowed=false
+failback_allowed=false
+```
+
+The Kubernetes client creates only the main `SwBlockReplicaRebuild` object with
+`apiVersion`, `kind`, `metadata`, and `spec`; it does not include `status`.
+
+### D3: Helm Packaging and RBAC
+
+Status: implemented locally.
+
+Added optional chart values:
+
+```yaml
+rebuildTargetOwner:
+  create: false
+  dryRun: true
+  interval: 30s
+```
+
+The packaged identity is intentionally separate from authority-executor:
+
+- `rebuild-target-owner`: creates target CRs only;
+- `authority-executor`: writes target `/status` only.
+
+### D4: Runner RBAC Gate
 
 Status: QA PASS.
 
 Added:
 
-- `scripts/run-phase57-authority-executor-rebuild-target-rbac-gate.sh`
-- `testops/scenarios/authority-executor-rebuild-target-rbac-chain.yaml`
+- `scripts/run-phase58-rebuild-target-owner-rbac-gate.sh`
+- `testops/scenarios/rebuild-target-owner-rbac-chain.yaml`
 
-The gate proves:
+The live gate proves both `kubectl auth can-i` and runtime behavior:
 
-- default authority-executor identity cannot patch
-  `swblockreplicarebuilds/status`;
-- execution identity can get/list/watch `swblockreplicarebuilds`;
-- execution identity can update/patch `swblockreplicarebuilds/status`;
-- execution identity can actually patch a CRD-valid planned status payload;
-- execution identity cannot patch main rebuild objects;
-- execution identity cannot patch `SwBlockVolume.status`;
-- execution identity cannot patch eligibility target status;
-- execution identity cannot mutate events, pods, PVCs, or storage classes.
+- default identity cannot create rebuild targets;
+- owner identity can create one CRD-valid target;
+- owner identity cannot patch the created target;
+- created target has spec identity and empty status;
+- owner identity cannot mutate status, Events, workloads, PVCs, or storage
+  classes.
 
 ## Verification
 
-Current local checks:
+Local checks:
 
 ```text
-go test ./core/ops ./cmd/sw-block
+go test ./core/ops ./cmd/sw-block ./scripts
 helm lint charts/seaweed-block
-swblock validate testops/scenarios/authority-executor-rebuild-target-rbac-chain.yaml
+swblock validate testops/scenarios/rebuild-target-owner-rbac-chain.yaml
 ```
 
-QA gate:
+Live gate:
 
 ```text
-swblock run testops/scenarios/authority-executor-rebuild-target-rbac-chain.yaml
+swblock run testops/scenarios/rebuild-target-owner-rbac-chain.yaml
 ```
 
 Expected terminal evidence:
 
 ```text
-phase57_authority_executor_rebuild_target_rbac_status=ok
-default_patch_swblockreplicarebuilds_status_denied=no
-exec_patch_swblockreplicarebuilds_status_allowed=yes
-exec_patch_swblockreplicarebuilds_main_denied=no
-exec_patch_swblockvolumes_status_denied=no
-exec_patch_swblockreplicaeligibilities_status_denied=no
-exec_create_events_denied=no
-default_rebuild_status_patch_runtime_denied=true
-runtime_rebuild_status_state=planned
-runtime_rebuild_status_reason=rebuild_progress_planned
-runtime_rebuild_traffic_started=false
-runtime_no_frontend_publication=true
+phase58_rebuild_target_owner_rbac_status=ok
+owner_create_swblockreplicarebuilds_allowed=yes
+owner_create_rebuild_target_runtime_allowed=true
+default_create_rebuild_target_runtime_denied=true
+owner_patch_rebuild_target_runtime_denied=true
+owner_patch_swblockreplicarebuilds_status_denied=no
+owner_create_events_denied=no
+runtime_rebuild_target_status_state=
 ```
 
 ## Exit
 
-Phase 57 closes when the CRD/status writer/executor planned-status path is
-locally verified and the runner proves the rebuild target RBAC boundary live.
-The phase does not claim rebuild data movement.
+Phase 58 closes when local tests pass and the runner proves the target owner can
+create only rebuild target CRs, while all status, storage, frontend, workload,
+and authority mutations remain denied.
 
 Result:
 
 ```text
-20260623-153515-68cf authority-executor-rebuild-target-rbac-chain PASS 26/26
+20260623-164948-4735 rebuild-target-owner-rbac-chain PASS 18/18
 ```
 
 Sign-off:
 
 ```text
-internal/docs/qa-assignments/phase57-rebuild-progress-target-qa-signoff.md
+internal/docs/qa-assignments/phase58-rebuild-target-owner-qa-signoff.md
 ```
