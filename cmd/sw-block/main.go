@@ -119,7 +119,7 @@ func runOpsAuthorityExecutor(args []string, stdout, stderr io.Writer) int {
 	fs.StringVar(&namespace, "namespace", "default", "Kubernetes namespace containing SwBlockVolume objects")
 	fs.BoolVar(&enableExecution, "enable-execution", false, "request returned-replica executor mutation")
 	fs.BoolVar(&executionPolicyEnabled, "execution-policy", false, "allow authority executor to evaluate execution; still blocked until ACK mutation target exists")
-	fs.StringVar(&allowedMutationClass, "allowed-mutation-class", ops.AuthorityExecutorAllowedMutationAckEligibility, "only supported value is ack_eligibility")
+	fs.StringVar(&allowedMutationClass, "allowed-mutation-class", ops.AuthorityExecutorAllowedMutationAckEligibility, "supported values: ack_eligibility, rebuild_traffic")
 	fs.DurationVar(&interval, "interval", 0, "repeat authority-executor reconciliation at this interval; 0 runs once")
 	if err := fs.Parse(args); err != nil {
 		return ops.VolumeStatusExitInvalid
@@ -128,12 +128,12 @@ func runOpsAuthorityExecutor(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "sw-block ops authority-executor: unexpected args %s\n", strings.Join(fs.Args(), " "))
 		return ops.VolumeStatusExitInvalid
 	}
-	if allowedMutationClass != ops.AuthorityExecutorAllowedMutationAckEligibility {
-		fmt.Fprintf(stderr, "sw-block ops authority-executor: unsupported mutation class %q reason=unsupported_mutation_class mutation_attempts=0 ack_eligibility_mutation_attempts=0\n", allowedMutationClass)
+	if allowedMutationClass != ops.AuthorityExecutorAllowedMutationAckEligibility && allowedMutationClass != ops.AuthorityExecutorAllowedMutationRebuildTraffic {
+		fmt.Fprintf(stderr, "sw-block ops authority-executor: unsupported mutation class %q reason=unsupported_mutation_class mutation_attempts=0 ack_eligibility_mutation_attempts=0 rebuild_progress_mutation_attempts=0\n", allowedMutationClass)
 		return ops.VolumeStatusExitInvalid
 	}
 	if enableExecution && !executionPolicyEnabled {
-		fmt.Fprintf(stderr, "sw-block ops authority-executor: returned-replica execution is disabled by product policy reason=%s mutation_attempts=0 ack_eligibility_mutation_attempts=0\n", ops.AuthorityExecutorBlockedPolicyDisabled)
+		fmt.Fprintf(stderr, "sw-block ops authority-executor: returned-replica execution is disabled by product policy reason=%s mutation_attempts=0 ack_eligibility_mutation_attempts=0 rebuild_progress_mutation_attempts=0\n", ops.AuthorityExecutorBlockedPolicyDisabled)
 		return ops.VolumeStatusExitInvalid
 	}
 	runOnce := func() int {
@@ -151,8 +151,8 @@ func runOpsAuthorityExecutor(args []string, stdout, stderr io.Writer) int {
 		}).Reconcile(context.Background())
 		if err != nil {
 			if result.BlockedReason != "" {
-				fmt.Fprintf(stderr, "sw-block ops authority-executor: %v reason=%s mutation_attempts=%d ack_eligibility_mutation_attempts=%d\n",
-					err, result.BlockedReason, result.MutationAttemptCount, result.AckEligibilityMutationAttempts)
+				fmt.Fprintf(stderr, "sw-block ops authority-executor: %v reason=%s mutation_attempts=%d ack_eligibility_mutation_attempts=%d rebuild_progress_mutation_attempts=%d\n",
+					err, result.BlockedReason, result.MutationAttemptCount, result.AckEligibilityMutationAttempts, result.RebuildProgressMutationAttempts)
 			} else {
 				fmt.Fprintf(stderr, "sw-block ops authority-executor: %v\n", err)
 			}
@@ -166,7 +166,7 @@ func runOpsAuthorityExecutor(args []string, stdout, stderr io.Writer) int {
 		} else if enableExecution && result.BlockedReason != "" {
 			status = "blocked"
 		}
-		fmt.Fprintf(stdout, "authority_executor=%s namespace=%s volumes=%d contracts=%d disabled_contracts=%d blocked_contracts=%d terminal_evidence_required=%d terminal_evidence_missing=%d ack_eligibility_target_missing=%d allowed_mutation_class=%s execution_requested=%t execution_policy_enabled=%t mutation_attempts=%d ack_eligibility_mutation_attempts=%d mutation_allowed=%t storage_mutation_allowed=false\n",
+		fmt.Fprintf(stdout, "authority_executor=%s namespace=%s volumes=%d contracts=%d disabled_contracts=%d blocked_contracts=%d terminal_evidence_required=%d terminal_evidence_missing=%d ack_eligibility_target_missing=%d rebuild_target_missing=%d allowed_mutation_class=%s execution_requested=%t execution_policy_enabled=%t mutation_attempts=%d ack_eligibility_mutation_attempts=%d rebuild_progress_mutation_attempts=%d mutation_allowed=%t storage_mutation_allowed=false\n",
 			status,
 			namespace,
 			result.VolumeCount,
@@ -176,11 +176,13 @@ func runOpsAuthorityExecutor(args []string, stdout, stderr io.Writer) int {
 			result.TerminalEvidenceRequiredCount,
 			result.TerminalEvidenceMissingCount,
 			result.AckEligibilityTargetMissingCount,
+			result.RebuildTargetMissingCount,
 			allowedMutationClass,
 			enableExecution,
 			executionPolicyEnabled,
 			result.MutationAttemptCount,
 			result.AckEligibilityMutationAttempts,
+			result.RebuildProgressMutationAttempts,
 			result.MutationAttemptCount > 0)
 		return ops.VolumeStatusExitOK
 	}
@@ -1715,7 +1717,7 @@ func usage(w io.Writer) {
 	fmt.Fprintln(w, "      [--restart-persistence ephemeral|hostpath] [--state-hostpath /var/lib/sw-block] [--timeout 10s]")
 	fmt.Fprintln(w, "  sw-block ops operator-status --dry-run [--master-api <addr>|--from-bundle <dir>] [--cleanup-summary <file>] [--interval 30s]")
 	fmt.Fprintln(w, "  sw-block ops lifecycle-owner [--dry-run] [--namespace <ns>] [--interval 30s]")
-	fmt.Fprintln(w, "  sw-block ops authority-executor [--namespace <ns>] [--allowed-mutation-class ack_eligibility] [--interval 30s]")
+	fmt.Fprintln(w, "  sw-block ops authority-executor [--namespace <ns>] [--allowed-mutation-class ack_eligibility|rebuild_traffic] [--interval 30s]")
 }
 
 func emptyCLI(value string) string {

@@ -73,6 +73,10 @@ func (c *KubernetesStatusClient) WriteReplicaEligibilityStatus(ctx context.Conte
 	return c.patchStatus(ctx, ref.Namespace, SwBlockReplicaEligibilityPlural, ref.Name, status)
 }
 
+func (c *KubernetesStatusClient) WriteReplicaRebuildStatus(ctx context.Context, ref OperatorObjectRef, status SwBlockReplicaRebuildCRDStatus) error {
+	return c.patchStatus(ctx, ref.Namespace, SwBlockReplicaRebuildPlural, ref.Name, status)
+}
+
 func IsKubernetesStatusNotFound(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "http 404")
 }
@@ -167,6 +171,55 @@ func (c *KubernetesStatusClient) ListSwBlockReplicaEligibilities(ctx context.Con
 			Ref: OperatorObjectRef{
 				APIVersion: SwBlockVolumeAPIVersion,
 				Kind:       SwBlockReplicaEligibilityKind,
+				Namespace:  refNamespace,
+				Name:       item.Metadata.Name,
+			},
+			Spec:   item.Spec,
+			Status: item.Status,
+		})
+	}
+	return out, nil
+}
+
+func (c *KubernetesStatusClient) ListSwBlockReplicaRebuilds(ctx context.Context, namespace string) ([]SwBlockReplicaRebuildObject, error) {
+	if namespace == "" {
+		return nil, fmt.Errorf("namespace is required for SwBlockReplicaRebuild list")
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.resourceCollectionURL(namespace, SwBlockReplicaRebuildPlural), nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/json")
+	if c.BearerToken != "" {
+		req.Header.Set("Authorization", "Bearer "+c.BearerToken)
+	}
+	client := c.HTTPClient
+	if client == nil {
+		client = http.DefaultClient
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return nil, fmt.Errorf("list %s failed: http %d %s", SwBlockReplicaRebuildPlural, resp.StatusCode, strings.TrimSpace(string(raw)))
+	}
+	var list kubernetesSwBlockReplicaRebuildList
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&list); err != nil {
+		return nil, fmt.Errorf("decode %s list: %w", SwBlockReplicaRebuildPlural, err)
+	}
+	out := make([]SwBlockReplicaRebuildObject, 0, len(list.Items))
+	for _, item := range list.Items {
+		refNamespace := item.Metadata.Namespace
+		if refNamespace == "" {
+			refNamespace = namespace
+		}
+		out = append(out, SwBlockReplicaRebuildObject{
+			Ref: OperatorObjectRef{
+				APIVersion: SwBlockVolumeAPIVersion,
+				Kind:       SwBlockReplicaRebuildKind,
 				Namespace:  refNamespace,
 				Name:       item.Metadata.Name,
 			},
@@ -399,4 +452,14 @@ type kubernetesSwBlockReplicaEligibility struct {
 	Metadata kubernetesMetadata                 `json:"metadata"`
 	Spec     SwBlockReplicaEligibilitySpec      `json:"spec"`
 	Status   SwBlockReplicaEligibilityCRDStatus `json:"status"`
+}
+
+type kubernetesSwBlockReplicaRebuildList struct {
+	Items []kubernetesSwBlockReplicaRebuild `json:"items"`
+}
+
+type kubernetesSwBlockReplicaRebuild struct {
+	Metadata kubernetesMetadata             `json:"metadata"`
+	Spec     SwBlockReplicaRebuildSpec      `json:"spec"`
+	Status   SwBlockReplicaRebuildCRDStatus `json:"status"`
 }

@@ -8,16 +8,21 @@ import (
 
 const (
 	AuthorityExecutorAllowedMutationAckEligibility = "ack_eligibility"
+	AuthorityExecutorAllowedMutationRebuildTraffic = "rebuild_traffic"
 	AuthorityExecutorBlockedPolicyDisabled         = "executor_policy_disabled"
 	AuthorityExecutorBlockedMutationTargetMissing  = "ack_eligibility_mutation_target_missing"
+	AuthorityExecutorBlockedRebuildTargetMissing   = "rebuild_target_missing"
 	AuthorityExecutorBlockedTerminalEvidence       = "terminal_evidence_missing"
 	AuthorityExecutorReasonAckEligibilityRecorded  = "ack_eligibility_recorded"
+	AuthorityExecutorReasonRebuildPlanned          = "rebuild_progress_planned"
 )
 
 type AuthorityExecutorClient interface {
 	ListSwBlockVolumes(ctx context.Context, namespace string) ([]SwBlockVolumeObject, error)
 	ListSwBlockReplicaEligibilities(ctx context.Context, namespace string) ([]SwBlockReplicaEligibilityObject, error)
+	ListSwBlockReplicaRebuilds(ctx context.Context, namespace string) ([]SwBlockReplicaRebuildObject, error)
 	WriteReplicaEligibilityStatus(ctx context.Context, ref OperatorObjectRef, status SwBlockReplicaEligibilityCRDStatus) error
+	WriteReplicaRebuildStatus(ctx context.Context, ref OperatorObjectRef, status SwBlockReplicaRebuildCRDStatus) error
 }
 
 type AuthorityExecutorReconciler struct {
@@ -37,15 +42,17 @@ type AuthorityExecutorReconcileResult struct {
 	TerminalEvidenceRequiredCount    int    `json:"terminalEvidenceRequiredCount"`
 	TerminalEvidenceMissingCount     int    `json:"terminalEvidenceMissingCount"`
 	AckEligibilityTargetMissingCount int    `json:"ackEligibilityTargetMissingCount"`
+	RebuildTargetMissingCount        int    `json:"rebuildTargetMissingCount"`
 	UnsafeExecutionContractCount     int    `json:"unsafeExecutionContractCount"`
 	MutationAttemptCount             int    `json:"mutationAttemptCount"`
 	AckEligibilityMutationAttempts   int    `json:"ackEligibilityMutationAttempts"`
+	RebuildProgressMutationAttempts  int    `json:"rebuildProgressMutationAttempts"`
 	BlockedReason                    string `json:"blockedReason,omitempty"`
 }
 
 func (r AuthorityExecutorReconciler) Reconcile(ctx context.Context) (AuthorityExecutorReconcileResult, error) {
 	allowedMutationClass := defaultString(r.AllowedMutationClass, AuthorityExecutorAllowedMutationAckEligibility)
-	if allowedMutationClass != AuthorityExecutorAllowedMutationAckEligibility {
+	if allowedMutationClass != AuthorityExecutorAllowedMutationAckEligibility && allowedMutationClass != AuthorityExecutorAllowedMutationRebuildTraffic {
 		result := AuthorityExecutorReconcileResult{BlockedReason: "unsupported_mutation_class"}
 		return result, fmt.Errorf("authority executor unsupported mutation class %q", allowedMutationClass)
 	}
@@ -62,8 +69,15 @@ func (r AuthorityExecutorReconciler) Reconcile(ctx context.Context) (AuthorityEx
 		return AuthorityExecutorReconcileResult{}, err
 	}
 	var targets []SwBlockReplicaEligibilityObject
-	if r.ExecutionRequested {
+	var rebuildTargets []SwBlockReplicaRebuildObject
+	if r.ExecutionRequested && allowedMutationClass == AuthorityExecutorAllowedMutationAckEligibility {
 		targets, err = r.Client.ListSwBlockReplicaEligibilities(ctx, namespace)
+		if err != nil {
+			return AuthorityExecutorReconcileResult{}, err
+		}
+	}
+	if r.ExecutionRequested && allowedMutationClass == AuthorityExecutorAllowedMutationRebuildTraffic {
+		rebuildTargets, err = r.Client.ListSwBlockReplicaRebuilds(ctx, namespace)
 		if err != nil {
 			return AuthorityExecutorReconcileResult{}, err
 		}
@@ -71,7 +85,7 @@ func (r AuthorityExecutorReconciler) Reconcile(ctx context.Context) (AuthorityEx
 	result := AuthorityExecutorReconcileResult{VolumeCount: len(volumes)}
 	for _, volume := range volumes {
 		for _, contract := range volume.Status.ExecutorContracts {
-			if contract.ActionType != ManagedVolumeActionReintegrateReturned {
+			if contract.ActionType != ManagedVolumeActionReintegrateReturned && contract.ActionType != ManagedVolumeActionRebuildReturned {
 				if contract.ExecutionEnabled || contract.MutationAllowed {
 					result.UnsafeExecutionContractCount++
 				}
@@ -91,8 +105,13 @@ func (r AuthorityExecutorReconciler) Reconcile(ctx context.Context) (AuthorityEx
 			case ReturnedReplicaExecutorContractBlocked:
 				result.BlockedContractCount++
 			}
-			if r.ExecutionRequested {
+			if r.ExecutionRequested && allowedMutationClass == AuthorityExecutorAllowedMutationAckEligibility && contract.ActionType == ManagedVolumeActionReintegrateReturned {
 				if err := r.evaluateAckEligibility(ctx, &result, volume, contract, targets); err != nil {
+					return result, err
+				}
+			}
+			if r.ExecutionRequested && allowedMutationClass == AuthorityExecutorAllowedMutationRebuildTraffic && contract.ActionType == ManagedVolumeActionRebuildReturned {
+				if err := r.evaluateRebuildPlanning(ctx, &result, volume, contract, rebuildTargets); err != nil {
 					return result, err
 				}
 			}
@@ -126,6 +145,28 @@ func (r AuthorityExecutorReconciler) evaluateAckEligibility(ctx context.Context,
 	return nil
 }
 
+func (r AuthorityExecutorReconciler) evaluateRebuildPlanning(ctx context.Context, result *AuthorityExecutorReconcileResult, volume SwBlockVolumeObject, contract SwBlockVolumeCRDExecutorContract, targets []SwBlockReplicaRebuildObject) error {
+	returned, ok := authorityExecutorRebuildEvidenceReady(volume, contract)
+	if !ok {
+		result.TerminalEvidenceMissingCount++
+		result.BlockedReason = authorityExecutorFirstNonEmpty(result.BlockedReason, AuthorityExecutorBlockedTerminalEvidence)
+		return nil
+	}
+	target, ok := authorityExecutorFindRebuildTarget(volume, contract, targets)
+	if !ok {
+		result.RebuildTargetMissingCount++
+		result.BlockedReason = authorityExecutorFirstNonEmpty(result.BlockedReason, AuthorityExecutorBlockedRebuildTargetMissing)
+		return nil
+	}
+	result.MutationAttemptCount++
+	result.RebuildProgressMutationAttempts++
+	if err := r.Client.WriteReplicaRebuildStatus(ctx, target.Ref, authorityExecutorRebuildPlannedStatus(r.now()(), volume, contract, returned)); err != nil {
+		result.BlockedReason = "rebuild_status_write_failed"
+		return fmt.Errorf("write rebuild status: %w", err)
+	}
+	return nil
+}
+
 func authorityExecutorTerminalEvidenceReady(volume SwBlockVolumeObject, contract SwBlockVolumeCRDExecutorContract) (SwBlockVolumeCRDReturnedReplica, bool) {
 	if contract.Decision != ReturnedReplicaExecutorContractDisabled ||
 		contract.Reason != ReturnedReplicaExecutorContractReasonExecutorDisabled ||
@@ -146,6 +187,31 @@ func authorityExecutorTerminalEvidenceReady(volume SwBlockVolumeObject, contract
 			!returned.RequiredFrontierKnown ||
 			!returned.DurableFrontierKnown ||
 			returned.DurableFrontierLSN < returned.RequiredFrontierLSN {
+			return SwBlockVolumeCRDReturnedReplica{}, false
+		}
+		return returned, true
+	}
+	return SwBlockVolumeCRDReturnedReplica{}, false
+}
+
+func authorityExecutorRebuildEvidenceReady(volume SwBlockVolumeObject, contract SwBlockVolumeCRDExecutorContract) (SwBlockVolumeCRDReturnedReplica, bool) {
+	if contract.Decision != ReturnedReplicaExecutorContractDisabled ||
+		contract.Reason != ReturnedReplicaExecutorContractReasonExecutorDisabled ||
+		contract.PreflightDecision != ReturnedReplicaExecutorPreflightReady ||
+		contract.PreflightReason != ReturnedReplicaExecutorPreflightReasonSatisfied ||
+		!authorityExecutorStringSliceContains(contract.AllowedMutationClass, AuthorityExecutorAllowedMutationRebuildTraffic) ||
+		contract.ReplicaID == "" {
+		return SwBlockVolumeCRDReturnedReplica{}, false
+	}
+	for _, returned := range volume.Status.ReplicaReintegrations {
+		if returned.ReplicaID != contract.ReplicaID {
+			continue
+		}
+		if !returned.FrontendFenced ||
+			returned.FrontendPrimaryReady ||
+			!returned.RequiredFrontierKnown ||
+			!returned.DurableFrontierKnown ||
+			returned.DurableFrontierLSN >= returned.RequiredFrontierLSN {
 			return SwBlockVolumeCRDReturnedReplica{}, false
 		}
 		return returned, true
@@ -179,6 +245,32 @@ func authorityExecutorFindTarget(volume SwBlockVolumeObject, contract SwBlockVol
 	return matches[0], true
 }
 
+func authorityExecutorFindRebuildTarget(volume SwBlockVolumeObject, contract SwBlockVolumeCRDExecutorContract, targets []SwBlockReplicaRebuildObject) (SwBlockReplicaRebuildObject, bool) {
+	var matches []SwBlockReplicaRebuildObject
+	for _, target := range targets {
+		if target.Spec.VolumeName == "" && target.Spec.VolumeID == "" && target.Spec.PVCName == "" {
+			continue
+		}
+		if target.Spec.ReplicaID != contract.ReplicaID {
+			continue
+		}
+		if target.Spec.VolumeName != "" && target.Spec.VolumeName != volume.Ref.Name {
+			continue
+		}
+		if target.Spec.VolumeID != "" && target.Spec.VolumeID != volume.Status.VolumeID {
+			continue
+		}
+		if target.Spec.PVCName != "" && target.Spec.PVCName != volume.Status.PVCName {
+			continue
+		}
+		matches = append(matches, target)
+	}
+	if len(matches) != 1 {
+		return SwBlockReplicaRebuildObject{}, false
+	}
+	return matches[0], true
+}
+
 func authorityExecutorAckEligibilityStatus(now time.Time, volume SwBlockVolumeObject, contract SwBlockVolumeCRDExecutorContract, returned SwBlockVolumeCRDReturnedReplica) SwBlockReplicaEligibilityCRDStatus {
 	evidenceRefs := appendUniqueStrings(nil, contract.EvidenceRefs...)
 	evidenceRefs = appendUniqueStrings(evidenceRefs, returned.EvidenceRefs...)
@@ -203,6 +295,42 @@ func authorityExecutorAckEligibilityStatus(now time.Time, volume SwBlockVolumeOb
 		NonClaims: []string{
 			"no_frontend_publication",
 			"no_rebuild_traffic",
+			"no_failback",
+			"no_primary_authority_change",
+			"no_cross_volume_mutation",
+		},
+	}
+}
+
+func authorityExecutorRebuildPlannedStatus(now time.Time, volume SwBlockVolumeObject, contract SwBlockVolumeCRDExecutorContract, returned SwBlockVolumeCRDReturnedReplica) SwBlockReplicaRebuildCRDStatus {
+	evidenceRefs := appendUniqueStrings(nil, contract.EvidenceRefs...)
+	evidenceRefs = appendUniqueStrings(evidenceRefs, returned.EvidenceRefs...)
+	return SwBlockReplicaRebuildCRDStatus{
+		ObservedAt:                  now,
+		Executor:                    defaultString(contract.OwnerExecutor, "authority_recovery_executor"),
+		State:                       "planned",
+		ReasonCode:                  AuthorityExecutorReasonRebuildPlanned,
+		FrontendFencedBeforeRebuild: returned.FrontendFenced && !returned.FrontendPrimaryReady,
+		PrimaryUnchanged:            returned.FrontendFenced && !returned.FrontendPrimaryReady,
+		DurableFrontierKnown:        returned.DurableFrontierKnown,
+		DurableFrontierLSN:          returned.DurableFrontierLSN,
+		RequiredFrontierKnown:       returned.RequiredFrontierKnown,
+		RequiredFrontierLSN:         returned.RequiredFrontierLSN,
+		DurableFrontierCaughtUp:     returned.DurableFrontierKnown && returned.RequiredFrontierKnown && returned.DurableFrontierLSN >= returned.RequiredFrontierLSN,
+		RebuildTrafficStarted:       false,
+		NoFrontendPublication:       true,
+		NoCrossVolumeIdentityChange: true,
+		Conditions: []ObservationCondition{{
+			Type:     ConditionRecovering,
+			Status:   "True",
+			Reason:   AuthorityExecutorReasonRebuildPlanned,
+			Severity: "info",
+			Message:  "returned-replica rebuild/catch-up was planned; no rebuild traffic or frontend publication has started",
+		}},
+		EvidenceRefs: evidenceRefs,
+		NonClaims: []string{
+			"no_rebuild_data_movement",
+			"no_frontend_publication",
 			"no_failback",
 			"no_primary_authority_change",
 			"no_cross_volume_mutation",

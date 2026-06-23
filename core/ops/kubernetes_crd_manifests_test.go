@@ -39,6 +39,13 @@ func TestPhase35D1CRDManifestsMatchManagedVolumeContract(t *testing.T) {
 			plural:   SwBlockReplicaEligibilityPlural,
 			singular: SwBlockReplicaEligibilitySingular,
 		},
+		{
+			path:     "charts/seaweed-block/crds/swblockreplicarebuilds.block.seaweedfs.com.yaml",
+			name:     "swblockreplicarebuilds.block.seaweedfs.com",
+			kind:     SwBlockReplicaRebuildKind,
+			plural:   SwBlockReplicaRebuildPlural,
+			singular: SwBlockReplicaRebuildSingular,
+		},
 	} {
 		t.Run(tc.kind, func(t *testing.T) {
 			doc := readYAMLMap(t, tc.path)
@@ -329,6 +336,83 @@ func TestPhase54D2SwBlockReplicaEligibilityTargetSchema(t *testing.T) {
 	}
 }
 
+func TestPhase57D1SwBlockReplicaRebuildTargetSchema(t *testing.T) {
+	doc := readYAMLMap(t, "charts/seaweed-block/crds/swblockreplicarebuilds.block.seaweedfs.com.yaml")
+	spec := yamlMap(t, doc, "spec")
+	names := yamlMap(t, spec, "names")
+	assertYAMLString(t, names, "kind", SwBlockReplicaRebuildKind)
+	assertYAMLString(t, names, "plural", SwBlockReplicaRebuildPlural)
+	assertYAMLString(t, names, "singular", SwBlockReplicaRebuildSingular)
+
+	version := yamlMapFromValue(t, yamlSlice(t, spec, "versions")[0])
+	if _, ok := yamlMap(t, version, "subresources")["status"]; !ok {
+		t.Fatalf("%s missing status subresource", SwBlockReplicaRebuildKind)
+	}
+
+	rootProperties := yamlMap(t,
+		yamlMap(t,
+			yamlMap(t, version, "schema"),
+			"openAPIV3Schema"),
+		"properties")
+	specProperties := yamlMap(t, yamlMap(t, rootProperties, "spec"), "properties")
+	for _, want := range []string{"volumeName", "volumeID", "pvcName", "replicaID", "sourceReplicaID"} {
+		if _, ok := specProperties[want]; !ok {
+			t.Fatalf("%s.spec schema missing %s", SwBlockReplicaRebuildKind, want)
+		}
+	}
+	required := yamlStringSet(t, yamlMap(t, rootProperties, "spec"), "required")
+	for _, want := range []string{"volumeName", "replicaID"} {
+		if !required[want] {
+			t.Fatalf("%s.spec required missing %s: %+v", SwBlockReplicaRebuildKind, want, required)
+		}
+	}
+
+	statusProperties := yamlMap(t, yamlMap(t, rootProperties, "status"), "properties")
+	for _, want := range []string{
+		"observedAt",
+		"observedGeneration",
+		"executor",
+		"state",
+		"reasonCode",
+		"frontendFencedBeforeRebuild",
+		"primaryUnchanged",
+		"durableFrontierKnown",
+		"durableFrontierLsn",
+		"requiredFrontierKnown",
+		"requiredFrontierLsn",
+		"durableFrontierCaughtUp",
+		"rebuildTrafficStarted",
+		"noFrontendPublication",
+		"noCrossVolumeIdentityChange",
+		"evidenceGeneration",
+		"conditions",
+		"evidenceRefs",
+		"nonClaims",
+	} {
+		if _, ok := statusProperties[want]; !ok {
+			t.Fatalf("%s.status schema missing %s", SwBlockReplicaRebuildKind, want)
+		}
+	}
+	stateEnum := yamlStringSet(t, yamlMap(t, statusProperties, "state"), "enum")
+	for _, want := range []string{"planned", "blocked", "running", "caught_up"} {
+		if !stateEnum[want] {
+			t.Fatalf("%s.status.state enum missing %s: %+v", SwBlockReplicaRebuildKind, want, stateEnum)
+		}
+	}
+	for _, forbidden := range []string{
+		"frontend_fenced_before_rebuild",
+		"durable_frontier_lsn",
+		"required_frontier_lsn",
+		"rebuild_traffic_started",
+		"frontendPublished",
+		"failbackStarted",
+	} {
+		if _, ok := statusProperties[forbidden]; ok {
+			t.Fatalf("%s.status leaked forbidden field %s", SwBlockReplicaRebuildKind, forbidden)
+		}
+	}
+}
+
 func TestOperatorStatusRBACIsStatusEventsOnly(t *testing.T) {
 	raw := readRepoFile(t, "charts/seaweed-block/templates/operator-status-rbac.yaml")
 	required := []string{
@@ -464,6 +548,8 @@ func TestPhase54D3AuthorityExecutorExecutionRBACIsNarrow(t *testing.T) {
 		`verbs: ["get", "list", "watch"]`,
 		`resources: ["swblockreplicaeligibilities/status"]`,
 		`verbs: ["get", "update", "patch"]`,
+		`resources: ["swblockreplicarebuilds"]`,
+		`resources: ["swblockreplicarebuilds/status"]`,
 	} {
 		if !strings.Contains(rbac, want) {
 			t.Fatalf("authority-executor execution RBAC missing %q\n%s", want, rbac)

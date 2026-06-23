@@ -68,7 +68,7 @@ func TestAuthorityExecutorReconcilerFailsClosedOnExecutionEnabledContract(t *tes
 func TestAuthorityExecutorReconcilerRejectsUnsupportedMutationClass(t *testing.T) {
 	result, err := (AuthorityExecutorReconciler{
 		Client:               &fakeAuthorityExecutorClient{},
-		AllowedMutationClass: "rebuild_traffic",
+		AllowedMutationClass: "frontend_publication",
 	}).Reconcile(context.Background())
 	if err == nil {
 		t.Fatalf("expected unsupported mutation class to fail closed, result=%+v", result)
@@ -102,7 +102,8 @@ func TestAuthorityExecutorReconcilerIgnoresDisabledRebuildContractWithoutMutatio
 		t.Fatalf("reconcile: %v", err)
 	}
 	if result.VolumeCount != 1 ||
-		result.ContractCount != 0 ||
+		result.ContractCount != 1 ||
+		result.DisabledContractCount != 1 ||
 		result.MutationAttemptCount != 0 ||
 		result.AckEligibilityMutationAttempts != 0 ||
 		len(client.writes) != 0 {
@@ -121,6 +122,58 @@ func TestAuthorityExecutorReconcilerFailsClosedOnEnabledRebuildContract(t *testi
 	}
 	if result.UnsafeExecutionContractCount != 1 || result.MutationAttemptCount != 0 || len(client.writes) != 0 {
 		t.Fatalf("result=%+v writes=%+v", result, client.writes)
+	}
+}
+
+func TestAuthorityExecutorReconcilerWritesRebuildPlannedStatus(t *testing.T) {
+	client := &fakeAuthorityExecutorClient{
+		volumes:  []SwBlockVolumeObject{authorityExecutorRebuildVolume(false, false)},
+		rebuilds: []SwBlockReplicaRebuildObject{authorityExecutorRebuildTarget()},
+	}
+	now := time.Date(2026, 6, 23, 19, 0, 0, 0, time.UTC)
+	result, err := (AuthorityExecutorReconciler{
+		Namespace:              "kube-system",
+		Client:                 client,
+		ExecutionRequested:     true,
+		ExecutionPolicyEnabled: true,
+		AllowedMutationClass:   AuthorityExecutorAllowedMutationRebuildTraffic,
+		Now:                    func() time.Time { return now },
+	}).Reconcile(context.Background())
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if result.MutationAttemptCount != 1 ||
+		result.RebuildProgressMutationAttempts != 1 ||
+		result.AckEligibilityMutationAttempts != 0 ||
+		result.BlockedReason != "" ||
+		len(client.writes) != 0 ||
+		len(client.rebuildWrites) != 1 {
+		t.Fatalf("result=%+v ack_writes=%+v rebuild_writes=%+v", result, client.writes, client.rebuildWrites)
+	}
+	write := client.rebuildWrites[0]
+	if write.ref.Name != "rebuild-r1" {
+		t.Fatalf("write ref=%+v", write.ref)
+	}
+	status := write.status
+	if status.State != "planned" ||
+		status.ReasonCode != AuthorityExecutorReasonRebuildPlanned ||
+		!status.FrontendFencedBeforeRebuild ||
+		!status.PrimaryUnchanged ||
+		!status.DurableFrontierKnown ||
+		status.DurableFrontierLSN != 51 ||
+		!status.RequiredFrontierKnown ||
+		status.RequiredFrontierLSN != 52 ||
+		status.DurableFrontierCaughtUp ||
+		status.RebuildTrafficStarted ||
+		!status.NoFrontendPublication ||
+		!status.NoCrossVolumeIdentityChange ||
+		!status.ObservedAt.Equal(now) {
+		t.Fatalf("status=%+v", status)
+	}
+	for _, want := range []string{"no_rebuild_data_movement", "no_frontend_publication", "no_failback"} {
+		if !authorityExecutorStringSliceContains(status.NonClaims, want) {
+			t.Fatalf("non-claims missing %s: %+v", want, status.NonClaims)
+		}
 	}
 }
 
@@ -227,12 +280,19 @@ func TestAuthorityExecutorReconcilerWritesAckEligibilityStatusWhenTerminalEviden
 type fakeAuthorityExecutorClient struct {
 	volumes       []SwBlockVolumeObject
 	eligibilities []SwBlockReplicaEligibilityObject
+	rebuilds      []SwBlockReplicaRebuildObject
 	writes        []fakeReplicaEligibilityWrite
+	rebuildWrites []fakeReplicaRebuildWrite
 }
 
 type fakeReplicaEligibilityWrite struct {
 	ref    OperatorObjectRef
 	status SwBlockReplicaEligibilityCRDStatus
+}
+
+type fakeReplicaRebuildWrite struct {
+	ref    OperatorObjectRef
+	status SwBlockReplicaRebuildCRDStatus
 }
 
 func (f *fakeAuthorityExecutorClient) ListSwBlockVolumes(context.Context, string) ([]SwBlockVolumeObject, error) {
@@ -243,8 +303,17 @@ func (f *fakeAuthorityExecutorClient) ListSwBlockReplicaEligibilities(context.Co
 	return append([]SwBlockReplicaEligibilityObject(nil), f.eligibilities...), nil
 }
 
+func (f *fakeAuthorityExecutorClient) ListSwBlockReplicaRebuilds(context.Context, string) ([]SwBlockReplicaRebuildObject, error) {
+	return append([]SwBlockReplicaRebuildObject(nil), f.rebuilds...), nil
+}
+
 func (f *fakeAuthorityExecutorClient) WriteReplicaEligibilityStatus(_ context.Context, ref OperatorObjectRef, status SwBlockReplicaEligibilityCRDStatus) error {
 	f.writes = append(f.writes, fakeReplicaEligibilityWrite{ref: ref, status: status})
+	return nil
+}
+
+func (f *fakeAuthorityExecutorClient) WriteReplicaRebuildStatus(_ context.Context, ref OperatorObjectRef, status SwBlockReplicaRebuildCRDStatus) error {
+	f.rebuildWrites = append(f.rebuildWrites, fakeReplicaRebuildWrite{ref: ref, status: status})
 	return nil
 }
 
@@ -338,6 +407,23 @@ func authorityExecutorTarget() SwBlockReplicaEligibilityObject {
 			VolumeName: "returned",
 			VolumeID:   "pvc-1",
 			PVCName:    "demo",
+			ReplicaID:  "r1",
+		},
+	}
+}
+
+func authorityExecutorRebuildTarget() SwBlockReplicaRebuildObject {
+	return SwBlockReplicaRebuildObject{
+		Ref: OperatorObjectRef{
+			APIVersion: SwBlockVolumeAPIVersion,
+			Kind:       SwBlockReplicaRebuildKind,
+			Namespace:  "kube-system",
+			Name:       "rebuild-r1",
+		},
+		Spec: SwBlockReplicaRebuildSpec{
+			VolumeName: "rebuild",
+			VolumeID:   "pvc-rebuild",
+			PVCName:    "rebuild-pvc",
 			ReplicaID:  "r1",
 		},
 	}

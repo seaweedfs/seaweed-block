@@ -147,14 +147,40 @@ func TestKubernetesStatusClientPatchesOnlyStatusSubresources(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("write replica eligibility status: %v", err)
 	}
+	if err := client.WriteReplicaRebuildStatus(context.Background(), OperatorObjectRef{
+		Namespace: "kube-system",
+		Name:      "demo-pvc-r1-rebuild",
+	}, SwBlockReplicaRebuildCRDStatus{
+		ObservedAt:                  observedAt,
+		ObservedGeneration:          8,
+		Executor:                    "authority_recovery_executor",
+		State:                       "planned",
+		ReasonCode:                  AuthorityExecutorReasonRebuildPlanned,
+		FrontendFencedBeforeRebuild: true,
+		PrimaryUnchanged:            true,
+		DurableFrontierKnown:        true,
+		DurableFrontierLSN:          51,
+		RequiredFrontierKnown:       true,
+		RequiredFrontierLSN:         52,
+		DurableFrontierCaughtUp:     false,
+		RebuildTrafficStarted:       false,
+		NoFrontendPublication:       true,
+		NoCrossVolumeIdentityChange: true,
+		EvidenceGeneration:          "executor-run-2",
+		EvidenceRefs:                []string{"returned-replica-summary.txt"},
+		NonClaims:                   []string{"no_rebuild_data_movement", "no_frontend_publication", "no_failback"},
+	}); err != nil {
+		t.Fatalf("write replica rebuild status: %v", err)
+	}
 
-	if len(requests) != 3 {
-		t.Fatalf("requests=%d want 3: %+v", len(requests), requests)
+	if len(requests) != 4 {
+		t.Fatalf("requests=%d want 4: %+v", len(requests), requests)
 	}
 	wantPaths := []string{
 		"/apis/block.seaweedfs.com/v1alpha1/namespaces/kube-system/swblockclusters/sw-block/status",
 		"/apis/block.seaweedfs.com/v1alpha1/namespaces/kube-system/swblockvolumes/demo-pvc/status",
 		"/apis/block.seaweedfs.com/v1alpha1/namespaces/kube-system/swblockreplicaeligibilities/demo-pvc-r1/status",
+		"/apis/block.seaweedfs.com/v1alpha1/namespaces/kube-system/swblockreplicarebuilds/demo-pvc-r1-rebuild/status",
 	}
 	for i, req := range requests {
 		if req.Method != http.MethodPatch {
@@ -256,6 +282,29 @@ func TestKubernetesStatusClientPatchesOnlyStatusSubresources(t *testing.T) {
 	for _, forbidden := range []string{"ack_eligible", "frontend_fenced_after_execution", "spec"} {
 		if _, ok := replicaEligibilityStatus[forbidden]; ok {
 			t.Fatalf("replica eligibility status leaked %s: %+v", forbidden, replicaEligibilityStatus)
+		}
+	}
+	replicaRebuildStatus := requests[3].Body["status"].(map[string]any)
+	for _, want := range []string{
+		"frontendFencedBeforeRebuild",
+		"primaryUnchanged",
+		"durableFrontierKnown",
+		"durableFrontierLsn",
+		"requiredFrontierKnown",
+		"requiredFrontierLsn",
+		"durableFrontierCaughtUp",
+		"rebuildTrafficStarted",
+		"noFrontendPublication",
+		"noCrossVolumeIdentityChange",
+		"evidenceGeneration",
+	} {
+		if _, ok := replicaRebuildStatus[want]; !ok {
+			t.Fatalf("replica rebuild status missing camelCase %s: %+v", want, replicaRebuildStatus)
+		}
+	}
+	for _, forbidden := range []string{"frontend_fenced_before_rebuild", "durable_frontier_lsn", "rebuild_traffic_started", "spec"} {
+		if _, ok := replicaRebuildStatus[forbidden]; ok {
+			t.Fatalf("replica rebuild status leaked %s: %+v", forbidden, replicaRebuildStatus)
 		}
 	}
 }

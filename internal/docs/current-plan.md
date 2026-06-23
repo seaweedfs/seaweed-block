@@ -1,4 +1,4 @@
-# Current Plan: Phase 56 Returned Replica Rebuild/Catch-up Contract
+# Current Plan: Phase 57 Rebuild Progress Target
 
 Status: complete.
 
@@ -6,112 +6,128 @@ Branch target: `phase54-returned-replica-reintegration-executor`
 
 ## Goal
 
-Move from Phase 54's narrow ACK-eligibility executor to the next returned
-replica milestone without starting release work.
-
-Phase 54 proved this bounded mutation:
+Phase 56 made returned-replica rebuild/catch-up visible as a disabled executor
+contract:
 
 ```text
-SwBlockReplicaEligibility.status ACK eligibility
+authority.rebuild_returned_replica
+allowed_mutation_class=rebuild_traffic
+execution_enabled=false
 ```
 
-Phase 56 defines the next executor boundary for a returned replica whose durable
-frontier is behind the required frontier. The product must say, in machine
-readable status:
+Phase 57 adds the next bounded control-plane target for that future executor:
 
 ```text
-this replica needs rebuild/catch-up traffic,
-the future executor envelope is rebuild_traffic,
-execution is still disabled,
-no frontend publication/failback/ACK mutation is allowed by this contract.
+SwBlockReplicaRebuild.status
 ```
+
+The authority executor may write a narrow planned-progress status to that target
+when explicitly enabled for `rebuild_traffic`, while still not starting data
+movement, not publishing any frontend, not changing primary authority, and not
+touching `SwBlockVolume.status`.
 
 ## Scope
 
 In scope:
 
-- Action/preflight/contract split between:
-  - `authority.reintegrate_returned_replica` for ACK-eligible fenced replicas
-    with frontier coverage.
-  - `authority.rebuild_returned_replica` for fenced replicas whose durable
-    frontier is behind the required frontier.
-- SwBlockVolume status projection through existing `executorPreflights[]` and
-  `executorContracts[]`.
-- Report/explain/dashboard compatibility through the existing managed-volume
-  rendering path.
-- Unit and status-writer tests that prove the contract reaches CRD-shaped
-  status without widening mutation authority.
+- Add `SwBlockReplicaRebuild` CRD as a narrow rebuild/catch-up status target.
+- Add Kubernetes status-writer support for
+  `swblockreplicarebuilds/status`.
+- Extend authority-executor execution mode with
+  `--allowed-mutation-class rebuild_traffic`.
+- Write only a planned rebuild status:
+  - `state=planned`;
+  - `reasonCode=rebuild_progress_planned`;
+  - `rebuildTrafficStarted=false`;
+  - `noFrontendPublication=true`;
+  - `noCrossVolumeIdentityChange=true`.
+- Keep ACK eligibility and rebuild progress as separate target CRDs and
+  separate mutation classes.
+- Gate RBAC so the executor can only read rebuild targets and write their
+  `/status` subresource.
 
 Out of scope:
 
 - No rebuild data movement.
+- No WAL/block copy.
 - No frontend publication.
 - No failback.
-- No broad `SwBlockVolume.status` rewrite by the authority executor.
-- No release smoke or published-image work before the next feature milestone.
+- No primary authority change.
+- No `SwBlockVolume.status` writes by authority-executor.
+- No automatic creation of rebuild targets by this phase.
 
 ## Deliverables
 
-### D1: Rebuild/Catch-up Contract Projection
+### D1: SwBlockReplicaRebuild CRD
 
 Status: implemented locally.
 
-When a returned replica is fenced but its durable frontier is behind the
-required frontier:
+Add a namespaced `SwBlockReplicaRebuild` CRD with:
 
-- project `authority.rebuild_returned_replica`;
-- mark executor preflight `ready` only when the frontier gap is known;
-- keep `execution_enabled=false` and `mutation_allowed=false`;
-- name future allowed mutation class as `rebuild_traffic`;
-- forbid `ack_eligibility`, `frontend_publication`, and `failback`;
-- require terminal evidence:
-  - `frontend_fenced_before_rebuild`;
-  - `primary_unchanged`;
-  - `durable_frontier_caught_up`;
-  - `no_frontend_publication`;
-  - `no_cross_volume_identity_change`.
+- spec identity:
+  - `volumeName`;
+  - `volumeID`;
+  - `pvcName`;
+  - `replicaID`;
+  - `sourceReplicaID`;
+- status evidence:
+  - observed time/generation;
+  - executor;
+  - state/reason;
+  - durable and required frontier;
+  - frontend-fenced-before-rebuild;
+  - primary-unchanged;
+  - rebuild-traffic-started;
+  - no-frontend-publication;
+  - no-cross-volume-identity-change;
+  - conditions/evidence/non-claims.
 
-Durable frontier missing remains a hold state, because the product cannot
-classify the gap precisely enough to hand off rebuild execution.
+### D2: Executor Planned-Status Write
 
-### D2: Surface And CRD Status Gate
+Status: implemented locally.
+
+When all of these are true:
+
+- execution is explicitly requested;
+- execution policy is explicitly enabled;
+- allowed mutation class is `rebuild_traffic`;
+- the volume has a disabled `authority.rebuild_returned_replica` contract;
+- rebuild preflight is ready;
+- the target `SwBlockReplicaRebuild` exists and matches volume + replica;
+
+the executor writes:
+
+```text
+SwBlockReplicaRebuild.status.state=planned
+SwBlockReplicaRebuild.status.reasonCode=rebuild_progress_planned
+SwBlockReplicaRebuild.status.rebuildTrafficStarted=false
+SwBlockReplicaRebuild.status.noFrontendPublication=true
+SwBlockReplicaRebuild.status.noCrossVolumeIdentityChange=true
+```
+
+It does not write ACK eligibility, `SwBlockVolume.status`, Events, finalizers,
+frontend state, or storage objects.
+
+### D3: RBAC Target Gate
 
 Status: QA PASS.
 
-Prove the D1 contract reaches all user-visible status surfaces:
+Added:
 
-- `summary.txt`;
-- `ops explain`;
-- dashboard/operator-snapshot;
-- SwBlockVolume `.status.executorPreflights[]`;
-- SwBlockVolume `.status.executorContracts[]`.
+- `scripts/run-phase57-authority-executor-rebuild-target-rbac-gate.sh`
+- `testops/scenarios/authority-executor-rebuild-target-rbac-chain.yaml`
 
-Implementation:
+The gate proves:
 
-- Added `TestOpsReturnedReplicaRebuildFromBundleSurfacesAcrossReportExplainDashboard`.
-- Added `scripts/run-phase56-returned-replica-rebuild-contract-gate.sh`.
-- Added `testops/scenarios/returned-replica-rebuild-contract-chain.yaml`.
-
-### D3: Executor Non-Execution Gate
-
-Status: QA PASS.
-
-Prove the existing authority executor does not act on
-`authority.rebuild_returned_replica` yet:
-
-- no `SwBlockReplicaEligibility.status` ACK mutation for rebuild actions;
-- no rebuild traffic;
-- no frontend publication;
-- no failback;
-- no cross-volume mutation.
-
-Implementation:
-
-- `AuthorityExecutorReconciler` ignores disabled non-ACK contracts without
-  mutation.
-- If any unsupported/non-ACK contract is incorrectly marked
-  `executionEnabled=true` or `mutationAllowed=true`, the reconciler fails
-  closed through `UnsafeExecutionContractCount`.
+- default authority-executor identity cannot patch
+  `swblockreplicarebuilds/status`;
+- execution identity can get/list/watch `swblockreplicarebuilds`;
+- execution identity can update/patch `swblockreplicarebuilds/status`;
+- execution identity can actually patch a CRD-valid planned status payload;
+- execution identity cannot patch main rebuild objects;
+- execution identity cannot patch `SwBlockVolume.status`;
+- execution identity cannot patch eligibility target status;
+- execution identity cannot mutate events, pods, PVCs, or storage classes.
 
 ## Verification
 
@@ -120,52 +136,46 @@ Current local checks:
 ```text
 go test ./core/ops ./cmd/sw-block
 helm lint charts/seaweed-block
-swblock validate testops/scenarios/returned-replica-rebuild-contract-chain.yaml
+swblock validate testops/scenarios/authority-executor-rebuild-target-rbac-chain.yaml
 ```
 
-Before Phase 56 close:
+QA gate:
 
 ```text
-go test ./core/ops ./cmd/sw-block
-helm lint charts/seaweed-block
-swblock validate <new phase56 scenario>
-```
-
-## Exit
-
-Phase 56 closes when rebuild/catch-up is represented as a precise disabled
-executor contract with status-surface agreement and a gate proving no rebuild
-execution occurs yet.
-
-## QA Ready Gate
-
-Run:
-
-```text
-swblock run testops/scenarios/returned-replica-rebuild-contract-chain.yaml
+swblock run testops/scenarios/authority-executor-rebuild-target-rbac-chain.yaml
 ```
 
 Expected terminal evidence:
 
 ```text
-phase56_returned_replica_rebuild_contract_status=ok
-summary_rebuild_preflight_ready=1
-summary_rebuild_contract_disabled=1
-summary_rebuild_action_disabled=1
-operator_snapshot_rebuild_contract=ok
-dashboard_rebuild_contract=ok
+phase57_authority_executor_rebuild_target_rbac_status=ok
+default_patch_swblockreplicarebuilds_status_denied=no
+exec_patch_swblockreplicarebuilds_status_allowed=yes
+exec_patch_swblockreplicarebuilds_main_denied=no
+exec_patch_swblockvolumes_status_denied=no
+exec_patch_swblockreplicaeligibilities_status_denied=no
+exec_create_events_denied=no
+default_rebuild_status_patch_runtime_denied=true
+runtime_rebuild_status_state=planned
+runtime_rebuild_status_reason=rebuild_progress_planned
+runtime_rebuild_traffic_started=false
+runtime_no_frontend_publication=true
 ```
 
-If the runner gate passes, Phase 56 can move from `dev complete` to `closed`.
+## Exit
+
+Phase 57 closes when the CRD/status writer/executor planned-status path is
+locally verified and the runner proves the rebuild target RBAC boundary live.
+The phase does not claim rebuild data movement.
 
 Result:
 
 ```text
-20260623-144531-00ee returned-replica-rebuild-contract-chain PASS 14/14
+20260623-153515-68cf authority-executor-rebuild-target-rbac-chain PASS 26/26
 ```
 
 Sign-off:
 
 ```text
-internal/docs/qa-assignments/phase56-returned-replica-rebuild-contract-qa-signoff.md
+internal/docs/qa-assignments/phase57-rebuild-progress-target-qa-signoff.md
 ```

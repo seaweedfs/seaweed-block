@@ -373,6 +373,28 @@ type SwBlockReplicaEligibilityCRDStatus struct {
 	NonClaims                    []string               `json:"nonClaims,omitempty"`
 }
 
+type SwBlockReplicaRebuildCRDStatus struct {
+	ObservedAt                  time.Time              `json:"observedAt,omitempty"`
+	ObservedGeneration          int64                  `json:"observedGeneration,omitempty"`
+	Executor                    string                 `json:"executor,omitempty"`
+	State                       string                 `json:"state,omitempty"`
+	ReasonCode                  string                 `json:"reasonCode,omitempty"`
+	FrontendFencedBeforeRebuild bool                   `json:"frontendFencedBeforeRebuild"`
+	PrimaryUnchanged            bool                   `json:"primaryUnchanged"`
+	DurableFrontierKnown        bool                   `json:"durableFrontierKnown"`
+	DurableFrontierLSN          uint64                 `json:"durableFrontierLsn,omitempty"`
+	RequiredFrontierKnown       bool                   `json:"requiredFrontierKnown"`
+	RequiredFrontierLSN         uint64                 `json:"requiredFrontierLsn,omitempty"`
+	DurableFrontierCaughtUp     bool                   `json:"durableFrontierCaughtUp"`
+	RebuildTrafficStarted       bool                   `json:"rebuildTrafficStarted"`
+	NoFrontendPublication       bool                   `json:"noFrontendPublication"`
+	NoCrossVolumeIdentityChange bool                   `json:"noCrossVolumeIdentityChange"`
+	EvidenceGeneration          string                 `json:"evidenceGeneration,omitempty"`
+	Conditions                  []ObservationCondition `json:"conditions,omitempty"`
+	EvidenceRefs                []string               `json:"evidenceRefs,omitempty"`
+	NonClaims                   []string               `json:"nonClaims,omitempty"`
+}
+
 type OperatorKubernetesEvent struct {
 	InvolvedObject OperatorObjectRef `json:"involvedObject"`
 	Type           string            `json:"type"`

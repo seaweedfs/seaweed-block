@@ -7,6 +7,9 @@ const (
 	SwBlockReplicaEligibilityKind     = "SwBlockReplicaEligibility"
 	SwBlockReplicaEligibilityPlural   = "swblockreplicaeligibilities"
 	SwBlockReplicaEligibilitySingular = "swblockreplicaeligibility"
+	SwBlockReplicaRebuildKind         = "SwBlockReplicaRebuild"
+	SwBlockReplicaRebuildPlural       = "swblockreplicarebuilds"
+	SwBlockReplicaRebuildSingular     = "swblockreplicarebuild"
 
 	ConditionReady           = "Ready"
 	ConditionRecovered       = "Recovered"

@@ -24,6 +24,12 @@ rules:
   - apiGroups: ["block.seaweedfs.com"]
     resources: ["swblockreplicaeligibilities/status"]
     verbs: ["get", "update", "patch"]
+  - apiGroups: ["block.seaweedfs.com"]
+    resources: ["swblockreplicarebuilds"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["block.seaweedfs.com"]
+    resources: ["swblockreplicarebuilds/status"]
+    verbs: ["get", "update", "patch"]
   {{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
