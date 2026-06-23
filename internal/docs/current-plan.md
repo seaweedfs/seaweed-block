@@ -1,6 +1,6 @@
 # Current Plan: Phase 56 Returned Replica Rebuild/Catch-up Contract
 
-Status: dev complete; QA ready.
+Status: complete.
 
 Branch target: `phase54-returned-replica-reintegration-executor`
 
@@ -76,7 +76,7 @@ classify the gap precisely enough to hand off rebuild execution.
 
 ### D2: Surface And CRD Status Gate
 
-Status: implemented locally.
+Status: QA PASS.
 
 Prove the D1 contract reaches all user-visible status surfaces:
 
@@ -94,7 +94,7 @@ Implementation:
 
 ### D3: Executor Non-Execution Gate
 
-Status: implemented locally.
+Status: QA PASS.
 
 Prove the existing authority executor does not act on
 `authority.rebuild_returned_replica` yet:
@@ -157,3 +157,15 @@ dashboard_rebuild_contract=ok
 ```
 
 If the runner gate passes, Phase 56 can move from `dev complete` to `closed`.
+
+Result:
+
+```text
+20260623-144531-00ee returned-replica-rebuild-contract-chain PASS 14/14
+```
+
+Sign-off:
+
+```text
+internal/docs/qa-assignments/phase56-returned-replica-rebuild-contract-qa-signoff.md
+```
