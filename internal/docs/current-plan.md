@@ -308,7 +308,9 @@ Acceptance:
 
 ### D7: Live Close Gate
 
-Run the returned-replica live chain with the executor policy enabled only for
+Status: **QA PASS** (`20260623-114709-aa80`, 34/34 actions).
+
+Ran the returned-replica live chain with the executor policy enabled only for
 the bounded ACK eligibility path.
 
 Acceptance:
@@ -320,6 +322,23 @@ Acceptance:
 - no frontend publication/rebuild/failback occurs,
 - final report/dashboard/CRD agree,
 - TestRunner bundle captures enough evidence for QA review.
+
+Closed evidence:
+
+```text
+previous_primary_frontend_fenced=true
+current_primary_unchanged=true
+durable_frontier_covered=true
+executor_ack_mutation_attempts=1
+target_reason=ack_eligibility_recorded
+target_ack_eligible=true
+target_frontend_fenced=true
+target_primary_unchanged=true
+target_frontier_covered=true
+target_no_cross_volume=true
+source_ack_still_false=false
+target_nonclaims_ok=true
+```
 
 ## Validation Plan
 
@@ -342,17 +361,17 @@ returned-replica multi-volume isolation gate
 returned-replica live close gate
 ```
 
-## Non-Claims Until D7 Passes
+## Remaining Non-Claims After D7
 
-- No productized returned-replica rebuild.
 - No automatic failback.
 - No frontend publication.
 - No rebuild/catch-up traffic.
+- No broad returned-replica rebuild claim.
 - No production HA/SLO claim.
 
 ## Exit
 
-Phase 54 closes only when the bounded ACK eligibility mutation is proven end to
-end with live evidence and multi-volume isolation. If D2 concludes the correct
-ACK eligibility target is not ready, the phase should stop at a documented
-design blocker rather than implement a fake mutation path.
+Phase 54 is closed. The bounded ACK eligibility mutation is proven end to end
+with live returned-replica evidence and multi-volume isolation. The only
+executor-owned mutation is `SwBlockReplicaEligibility.status`; broader rebuild,
+frontend publication, and failback remain explicitly out of scope.

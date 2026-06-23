@@ -176,16 +176,17 @@ Recommended order from here:
     read-only `SwBlockVolume` access. It consumes executor contracts and fails
     closed on execution-enabled or mutating contracts, but still performs no ACK
     eligibility mutation, frontend publication, rebuild traffic, or failback.
-11. Phase 54: returned-replica reintegration executor milestone. **In progress**
-    (`internal/docs/current-plan.md`).
+11. Phase 54: returned-replica reintegration executor milestone. **Closed 2026-06-23, QA PASS**
+    (`internal/docs/finished-plans/phase54_finishedplan_returned_replica_reintegration_executor.md`).
     This is intentionally larger than the previous safety-latch phases. It
     groups executor policy, the ACK eligibility mutation target, admission/RBAC,
     terminal evidence, failure states, multi-volume isolation, and a live close
     gate into one milestone. The first allowed mutation remains narrow:
-    returned-replica ACK eligibility only. D1-D6 are implemented and live QA
-    passed through the RBAC boundary, executor call-site terminal-evidence gate,
-    negative/hold matrix, and dedicated multi-volume isolation. D7 remains for
-    the live returned-replica close gate.
+    returned-replica ACK eligibility only. D1-D7 passed live QA through the RBAC
+    boundary, executor call-site terminal-evidence gate, negative/hold matrix,
+    dedicated multi-volume isolation, and the live returned-replica close gate.
+    Frontend publication, rebuild traffic, and automatic failback remain
+    non-claims.
 12. Add backup/restore and NVMe ANA parity after they can reuse the same action
    owner, evidence, and status model rather than creating another isolated
    control plane.
@@ -195,9 +196,10 @@ The internal release-train contract is
 the operation-layer loop for a bounded `SwBlockVolume` protection finalizer.
 Phase 46 reused this same fact -> judgment -> action -> evidence pattern for
 returned-replica reintegration before any larger storage feature is enabled.
-Phases 47-53 close the executor-admission, preflight, status-schema, ACK
-evidence, executor-contract, and disabled executor-process bridge without
-allowing mutation.
+Phases 47-54 close the executor-admission, preflight, status-schema, ACK
+evidence, executor-contract, disabled executor-process bridge, and first
+bounded ACK eligibility mutation without allowing frontend publication, rebuild
+traffic, or failback.
 
 The practical rule is:
 
