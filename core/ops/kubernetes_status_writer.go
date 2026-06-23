@@ -128,6 +128,55 @@ func (c *KubernetesStatusClient) ListSwBlockVolumes(ctx context.Context, namespa
 	return out, nil
 }
 
+func (c *KubernetesStatusClient) ListSwBlockReplicaEligibilities(ctx context.Context, namespace string) ([]SwBlockReplicaEligibilityObject, error) {
+	if namespace == "" {
+		return nil, fmt.Errorf("namespace is required for SwBlockReplicaEligibility list")
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.resourceCollectionURL(namespace, SwBlockReplicaEligibilityPlural), nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/json")
+	if c.BearerToken != "" {
+		req.Header.Set("Authorization", "Bearer "+c.BearerToken)
+	}
+	client := c.HTTPClient
+	if client == nil {
+		client = http.DefaultClient
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return nil, fmt.Errorf("list %s failed: http %d %s", SwBlockReplicaEligibilityPlural, resp.StatusCode, strings.TrimSpace(string(raw)))
+	}
+	var list kubernetesSwBlockReplicaEligibilityList
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&list); err != nil {
+		return nil, fmt.Errorf("decode %s list: %w", SwBlockReplicaEligibilityPlural, err)
+	}
+	out := make([]SwBlockReplicaEligibilityObject, 0, len(list.Items))
+	for _, item := range list.Items {
+		refNamespace := item.Metadata.Namespace
+		if refNamespace == "" {
+			refNamespace = namespace
+		}
+		out = append(out, SwBlockReplicaEligibilityObject{
+			Ref: OperatorObjectRef{
+				APIVersion: SwBlockVolumeAPIVersion,
+				Kind:       SwBlockReplicaEligibilityKind,
+				Namespace:  refNamespace,
+				Name:       item.Metadata.Name,
+			},
+			Spec:   item.Spec,
+			Status: item.Status,
+		})
+	}
+	return out, nil
+}
+
 func (c *KubernetesStatusClient) PatchSwBlockVolumeFinalizers(ctx context.Context, ref OperatorObjectRef, finalizers []string) error {
 	if ref.Namespace == "" || ref.Name == "" {
 		return fmt.Errorf("namespace and name are required for SwBlockVolume finalizer patch")
@@ -340,4 +389,14 @@ type kubernetesSwBlockVolume struct {
 	Metadata kubernetesMetadata     `json:"metadata"`
 	Spec     SwBlockVolumeSpec      `json:"spec"`
 	Status   SwBlockVolumeCRDStatus `json:"status"`
+}
+
+type kubernetesSwBlockReplicaEligibilityList struct {
+	Items []kubernetesSwBlockReplicaEligibility `json:"items"`
+}
+
+type kubernetesSwBlockReplicaEligibility struct {
+	Metadata kubernetesMetadata                 `json:"metadata"`
+	Spec     SwBlockReplicaEligibilitySpec      `json:"spec"`
+	Status   SwBlockReplicaEligibilityCRDStatus `json:"status"`
 }

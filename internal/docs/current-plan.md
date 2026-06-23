@@ -131,13 +131,13 @@ SwBlockVolume status is a projection surface owned by operator-status and must
 not be used as fake executor state.
 ```
 
-Execution still fails closed until D3 proves RBAC/admission and the writer path
-is implemented.
+Execution remains disabled by default. The bounded writer path now exists; D4
+must prove the executor calls it only with complete terminal evidence.
 
 ### D3: Admission/RBAC Boundary
 
-Status: chart RBAC target and Kubernetes status writer path added; live proof
-and executor call-site still pending.
+Status: **QA PASS**. The live m02 k3s gate passed through
+`testops/scenarios/authority-executor-target-rbac-chain.yaml`.
 
 Add real Kubernetes proof for the chosen mutation target.
 
@@ -161,9 +161,6 @@ still no swblockvolumes/status, swblockvolumes/finalizers, Events, pods, PVCs,
 PVs, storageclasses, secrets, or delete/create verbs
 ```
 
-Execution still fails closed until the executor call-site is implemented and
-the live RBAC/admission gate passes.
-
 Writer path now exists:
 
 ```text
@@ -172,9 +169,23 @@ PATCH /apis/block.seaweedfs.com/v1alpha1/namespaces/<ns>/
   swblockreplicaeligibilities/<name>/status
 ```
 
-The executor does not call it yet.
+The D4 call-site uses this writer only for the matching
+`SwBlockReplicaEligibility.status` object.
+
+D3 close evidence:
+
+```text
+phase54_authority_executor_target_rbac_status=ok
+executor SA: get/list/watch swblockvolumes and swblockreplicaeligibilities
+executor SA: update/patch swblockreplicaeligibilities/status
+executor SA: denied for SwBlockVolume status/finalizers, main object, Events,
+pods, PVCs, PVs, storageclasses, secrets, and delete/create verbs
+default SA: denied for swblockreplicaeligibilities/status
+```
 
 ### D4: Terminal Evidence Projection
+
+Status: implemented locally, pending QA.
 
 After execution, project terminal evidence:
 
@@ -186,6 +197,44 @@ primary_unchanged=true
 durable_frontier_covered=true
 no_cross_volume_identity_change=true
 ```
+
+Implementation boundary:
+
+```text
+authority-executor --enable-execution --execution-policy
+  -> reads SwBlockVolume executorContracts + returned-replica status
+  -> reads existing SwBlockReplicaEligibility targets
+  -> patches only matching SwBlockReplicaEligibility.status
+```
+
+The executor does **not** create the target CR. A missing target is a hold with
+`ack_eligibility_mutation_target_missing` and zero mutation attempts. This keeps
+object identity ownership outside the executor.
+
+Terminal evidence required before any patch:
+
+```text
+contract.actionType=authority.reintegrate_returned_replica
+contract.decision=disabled
+contract.reason=executor_policy_disabled
+contract.preflightDecision=ready
+contract.preflightReason=preconditions_satisfied
+contract.allowedMutationClass includes ack_eligibility
+returned replica exists for contract.replicaID
+frontendFenced=true
+frontendPrimaryReady=false
+ackEligibilityKnown=true
+ackEligible=false before execution
+requiredFrontierKnown=true
+durableFrontierKnown=true
+durableFrontierLsn >= requiredFrontierLsn
+exactly one SwBlockReplicaEligibility target matches volume identity + replicaID
+```
+
+`primary_unchanged` is intentionally bounded: the call-site can prove the
+returned replica did not become frontend-primary-ready because it remains
+frontend-fenced. It does not claim a broad cluster primary proof from this
+executor path.
 
 Acceptance:
 
@@ -251,6 +300,7 @@ Minimum local checks:
 go test -count=1 ./core/ops ./cmd/sw-block
 helm lint charts/seaweed-block
 swblock validate testops/scenarios/authority-executor-rbac-chain.yaml
+swblock validate testops/scenarios/authority-executor-target-rbac-chain.yaml
 swblock validate testops/scenarios/iscsi-returned-replica-chain.yaml
 ```
 

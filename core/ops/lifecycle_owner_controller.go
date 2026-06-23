@@ -24,6 +24,19 @@ type SwBlockVolumeSpec struct {
 	StorageClass string `json:"storageClass,omitempty"`
 }
 
+type SwBlockReplicaEligibilityObject struct {
+	Ref    OperatorObjectRef                  `json:"ref"`
+	Spec   SwBlockReplicaEligibilitySpec      `json:"spec,omitempty"`
+	Status SwBlockReplicaEligibilityCRDStatus `json:"status,omitempty"`
+}
+
+type SwBlockReplicaEligibilitySpec struct {
+	VolumeName string `json:"volumeName,omitempty"`
+	VolumeID   string `json:"volumeID,omitempty"`
+	PVCName    string `json:"pvcName,omitempty"`
+	ReplicaID  string `json:"replicaID,omitempty"`
+}
+
 type LifecycleOwnerReconciler struct {
 	Namespace string
 	Client    LifecycleOwnerClient

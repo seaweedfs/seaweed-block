@@ -136,10 +136,6 @@ func runOpsAuthorityExecutor(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "sw-block ops authority-executor: returned-replica execution is disabled by product policy reason=%s mutation_attempts=0 ack_eligibility_mutation_attempts=0\n", ops.AuthorityExecutorBlockedPolicyDisabled)
 		return ops.VolumeStatusExitInvalid
 	}
-	if enableExecution {
-		fmt.Fprintf(stderr, "sw-block ops authority-executor: ACK eligibility mutation target is not implemented reason=%s mutation_attempts=0 ack_eligibility_mutation_attempts=0\n", ops.AuthorityExecutorBlockedMutationTargetMissing)
-		return ops.VolumeStatusExitInvalid
-	}
 	runOnce := func() int {
 		client, err := opsAuthorityExecutorClientFactory()
 		if err != nil {
@@ -162,18 +158,30 @@ func runOpsAuthorityExecutor(args []string, stdout, stderr io.Writer) int {
 			}
 			return ops.VolumeStatusExitInvalid
 		}
-		fmt.Fprintf(stdout, "authority_executor=disabled namespace=%s volumes=%d contracts=%d disabled_contracts=%d blocked_contracts=%d terminal_evidence_required=%d allowed_mutation_class=%s execution_requested=%t execution_policy_enabled=%t mutation_attempts=%d ack_eligibility_mutation_attempts=%d mutation_allowed=false\n",
+		status := "disabled"
+		if enableExecution && result.MutationAttemptCount > 0 && result.BlockedReason != "" {
+			status = "partial"
+		} else if enableExecution && result.MutationAttemptCount > 0 {
+			status = "executed"
+		} else if enableExecution && result.BlockedReason != "" {
+			status = "blocked"
+		}
+		fmt.Fprintf(stdout, "authority_executor=%s namespace=%s volumes=%d contracts=%d disabled_contracts=%d blocked_contracts=%d terminal_evidence_required=%d terminal_evidence_missing=%d ack_eligibility_target_missing=%d allowed_mutation_class=%s execution_requested=%t execution_policy_enabled=%t mutation_attempts=%d ack_eligibility_mutation_attempts=%d mutation_allowed=%t storage_mutation_allowed=false\n",
+			status,
 			namespace,
 			result.VolumeCount,
 			result.ContractCount,
 			result.DisabledContractCount,
 			result.BlockedContractCount,
 			result.TerminalEvidenceRequiredCount,
+			result.TerminalEvidenceMissingCount,
+			result.AckEligibilityTargetMissingCount,
 			allowedMutationClass,
 			enableExecution,
 			executionPolicyEnabled,
 			result.MutationAttemptCount,
-			result.AckEligibilityMutationAttempts)
+			result.AckEligibilityMutationAttempts,
+			result.MutationAttemptCount > 0)
 		return ops.VolumeStatusExitOK
 	}
 	if interval <= 0 {

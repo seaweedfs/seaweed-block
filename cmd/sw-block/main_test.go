@@ -564,15 +564,70 @@ func TestOpsAuthorityExecutorRejectsUnsupportedMutationClass(t *testing.T) {
 }
 
 func TestOpsAuthorityExecutorExecutionPolicyBlocksWhenAckTargetMissing(t *testing.T) {
+	client := &lifecycleOwnerTestClient{
+		volumes: []ops.SwBlockVolumeObject{{
+			Ref: ops.OperatorObjectRef{
+				APIVersion: ops.SwBlockVolumeAPIVersion,
+				Kind:       ops.SwBlockVolumeKind,
+				Namespace:  "kube-system",
+				Name:       "returned",
+			},
+			Status: ops.SwBlockVolumeCRDStatus{
+				VolumeID: "pvc-1",
+				PVCName:  "demo",
+				ReplicaReintegrations: []ops.SwBlockVolumeCRDReturnedReplica{{
+					ReplicaID:             "r1",
+					State:                 ops.ReturnedReplicaStateFenced,
+					ReasonCode:            ops.ReasonReturnedReplicaFrontendFenced,
+					FrontendFenced:        true,
+					FrontendPrimaryReady:  false,
+					AckEligibilityKnown:   true,
+					AckEligible:           false,
+					DurableFrontierKnown:  true,
+					DurableFrontierLSN:    52,
+					RequiredFrontierKnown: true,
+					RequiredFrontierLSN:   52,
+				}},
+				ExecutorContracts: []ops.SwBlockVolumeCRDExecutorContract{{
+					ActionType:             ops.ManagedVolumeActionReintegrateReturned,
+					ReplicaID:              "r1",
+					Decision:               ops.ReturnedReplicaExecutorContractDisabled,
+					Reason:                 ops.ReturnedReplicaExecutorContractReasonExecutorDisabled,
+					OwnerExecutor:          "authority_recovery_executor",
+					ExecutionEnabled:       false,
+					MutationAllowed:        false,
+					PreflightDecision:      ops.ReturnedReplicaExecutorPreflightReady,
+					PreflightReason:        ops.ReturnedReplicaExecutorPreflightReasonSatisfied,
+					AllowedMutationClass:   []string{ops.AuthorityExecutorAllowedMutationAckEligibility},
+					ForbiddenMutationClass: []string{"frontend_publication", "rebuild_traffic", "failback"},
+				}},
+			},
+		}},
+	}
+	oldFactory := opsAuthorityExecutorClientFactory
+	opsAuthorityExecutorClientFactory = func() (ops.AuthorityExecutorClient, error) {
+		return client, nil
+	}
+	t.Cleanup(func() { opsAuthorityExecutorClientFactory = oldFactory })
+
 	var stdout, stderr bytes.Buffer
 	code := run([]string{"ops", "authority-executor", "--enable-execution", "--execution-policy"}, &stdout, &stderr)
-	if code != ops.VolumeStatusExitInvalid {
+	if code != ops.VolumeStatusExitOK {
 		t.Fatalf("exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
 	}
-	if !strings.Contains(stderr.String(), "reason=ack_eligibility_mutation_target_missing") ||
-		!strings.Contains(stderr.String(), "mutation_attempts=0") ||
-		!strings.Contains(stderr.String(), "ack_eligibility_mutation_attempts=0") {
-		t.Fatalf("stderr=%s", stderr.String())
+	out := stdout.String()
+	for _, want := range []string{
+		"authority_executor=blocked",
+		"execution_requested=true",
+		"execution_policy_enabled=true",
+		"ack_eligibility_target_missing=1",
+		"mutation_attempts=0",
+		"ack_eligibility_mutation_attempts=0",
+		"mutation_allowed=false",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("stdout missing %q:\n%s", want, out)
+		}
 	}
 }
 
@@ -876,9 +931,11 @@ func (w *operatorStatusTestWriter) WriteVolumeStatus(_ context.Context, ref ops.
 }
 
 type lifecycleOwnerTestClient struct {
-	volumes []ops.SwBlockVolumeObject
-	patches []lifecycleOwnerTestPatch
-	events  []ops.OperatorKubernetesEvent
+	volumes           []ops.SwBlockVolumeObject
+	eligibilities     []ops.SwBlockReplicaEligibilityObject
+	patches           []lifecycleOwnerTestPatch
+	events            []ops.OperatorKubernetesEvent
+	eligibilityWrites []lifecycleOwnerTestEligibilityWrite
 }
 
 type lifecycleOwnerTestPatch struct {
@@ -886,8 +943,22 @@ type lifecycleOwnerTestPatch struct {
 	finalizers []string
 }
 
+type lifecycleOwnerTestEligibilityWrite struct {
+	ref    ops.OperatorObjectRef
+	status ops.SwBlockReplicaEligibilityCRDStatus
+}
+
 func (c *lifecycleOwnerTestClient) ListSwBlockVolumes(_ context.Context, _ string) ([]ops.SwBlockVolumeObject, error) {
 	return append([]ops.SwBlockVolumeObject(nil), c.volumes...), nil
+}
+
+func (c *lifecycleOwnerTestClient) ListSwBlockReplicaEligibilities(_ context.Context, _ string) ([]ops.SwBlockReplicaEligibilityObject, error) {
+	return append([]ops.SwBlockReplicaEligibilityObject(nil), c.eligibilities...), nil
+}
+
+func (c *lifecycleOwnerTestClient) WriteReplicaEligibilityStatus(_ context.Context, ref ops.OperatorObjectRef, status ops.SwBlockReplicaEligibilityCRDStatus) error {
+	c.eligibilityWrites = append(c.eligibilityWrites, lifecycleOwnerTestEligibilityWrite{ref: ref, status: status})
+	return nil
 }
 
 func (c *lifecycleOwnerTestClient) PatchSwBlockVolumeFinalizers(_ context.Context, ref ops.OperatorObjectRef, finalizers []string) error {

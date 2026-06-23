@@ -176,13 +176,15 @@ Recommended order from here:
     read-only `SwBlockVolume` access. It consumes executor contracts and fails
     closed on execution-enabled or mutating contracts, but still performs no ACK
     eligibility mutation, frontend publication, rebuild traffic, or failback.
-11. Phase 54: returned-replica reintegration executor milestone. **Planned**
+11. Phase 54: returned-replica reintegration executor milestone. **In progress**
     (`internal/docs/current-plan.md`).
     This is intentionally larger than the previous safety-latch phases. It
     groups executor policy, the ACK eligibility mutation target, admission/RBAC,
     terminal evidence, failure states, multi-volume isolation, and a live close
     gate into one milestone. The first allowed mutation remains narrow:
-    returned-replica ACK eligibility only.
+    returned-replica ACK eligibility only. D1-D3 are implemented, with D3 live
+    RBAC QA PASS; D4 has the executor call-site implemented and awaits terminal
+    evidence QA.
 12. Add backup/restore and NVMe ANA parity after they can reuse the same action
    owner, evidence, and status model rather than creating another isolated
    control plane.
