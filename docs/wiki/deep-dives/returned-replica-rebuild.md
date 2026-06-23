@@ -197,8 +197,8 @@ Its Helm packaging is disabled by default and grants only `get/list/watch` on
 the place where a later ACK-eligibility mutation must be inserted if and only if
 the contract and admission gates prove it safe.
 
-Phase 54 is planned as a larger milestone rather than another one-patch phase.
-It groups the remaining executor work:
+Phase 54 closed the first bounded executor step as a larger milestone rather
+than another one-patch phase. It grouped:
 
 ```text
 D1 executor policy gate
@@ -210,7 +210,7 @@ D6 multi-volume isolation
 D7 live close gate
 ```
 
-The first mutation remains intentionally narrow:
+The first mutation is intentionally narrow:
 
 ```text
 returned replica ACK eligibility only
@@ -225,6 +225,26 @@ no failback
 no primary authority change
 no cross-volume mutation
 ```
+
+Phase 54 live close evidence:
+
+```text
+run=20260623-114709-aa80
+previous_primary_frontend_fenced=true
+current_primary_unchanged=true
+durable_frontier_covered=true
+executor_ack_mutation_attempts=1
+target_reason=ack_eligibility_recorded
+target_ack_eligible=true
+target_frontend_fenced=true
+target_primary_unchanged=true
+target_frontier_covered=true
+target_no_cross_volume=true
+```
+
+This closes ACK eligibility recording, not rebuild execution. The remaining
+rebuild design work still needs a catch-up/rebuild executor, progress states,
+terminal barrier evidence, and failure handling for dirty or stale recovery.
 
 ## QA Gate Shape Needed
 
@@ -247,10 +267,9 @@ cleanup verifier remains clean
 - No automated returned-replica rebuild is currently claimed.
 - No failback policy is claimed.
 - No backup/restore is implied.
-- The executor contract is visible, but `execution_enabled=false` and
-  `mutation_allowed=false`.
-- The authority executor process can be packaged, but it is read-only and
-  rejects execution.
+- The authority executor can now record ACK eligibility on
+  `SwBlockReplicaEligibility.status` after terminal evidence, but it still does
+  not execute rebuild, frontend publication, or failback.
 - No broad HA production claim follows from lower-level recovery code alone.
 
 ## Why This Is Next After Operation Layer

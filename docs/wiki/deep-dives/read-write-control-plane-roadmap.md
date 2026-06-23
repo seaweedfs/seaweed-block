@@ -31,18 +31,20 @@ The current operation layer is intentionally narrow:
 CSI creates SwBlockVolume identity/spec
 operator-status writes .status and Events
 lifecycle-owner mutates only the protection finalizer
+authority-executor mutates only SwBlockReplicaEligibility.status ACK eligibility
 support/report/dashboard/explain are read-only
 cleanup evidence is observed, not executed
 ```
 
-This is already one real write path:
+These are already real but narrow write paths:
 
 ```text
 SwBlockVolume.metadata.finalizers add/remove
+SwBlockReplicaEligibility.status ACK eligibility
 ```
 
-But it is not broad read-write operation. It is one admitted lifecycle metadata
-mutation.
+But this is not broad read-write operation. These are admitted, evidence-gated
+single-purpose mutations.
 
 ## Why Not Jump Directly To A Full Operator
 
@@ -187,6 +189,9 @@ Scope:
 - choose catch-up or rebuild from frontier facts,
 - run recovery,
 - admit it back to ACK/placement only after terminal evidence.
+
+Current state: ACK eligibility recording is now proven as a bounded target
+status write. Rebuild/catch-up traffic and failback are still future work.
 
 Required gates:
 

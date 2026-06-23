@@ -187,7 +187,12 @@ Recommended order from here:
     dedicated multi-volume isolation, and the live returned-replica close gate.
     Frontend publication, rebuild traffic, and automatic failback remain
     non-claims.
-12. Add backup/restore and NVMe ANA parity after they can reuse the same action
+12. Phase 55: release and documentation hardening. **Closed 2026-06-23, local PASS**
+    (`internal/docs/finished-plans/phase55_finishedplan_release_docs_hardening.md`).
+    This phase aligns README, release notes, user capabilities, and developer
+    wiki pages with the Phase 54 boundary. It should not add a new storage
+    feature or broaden the claim beyond ACK eligibility target status.
+13. Add backup/restore and NVMe ANA parity after they can reuse the same action
    owner, evidence, and status model rather than creating another isolated
    control plane.
 

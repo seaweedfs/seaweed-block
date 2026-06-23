@@ -34,8 +34,9 @@ This is an **alpha** product path for supported lab clusters, not production.
 | Multi-volume RF=3 lab path | Gated | CSI reattach recovery | Gated |
 | iSCSI ALUA/dm-multipath mounted failover | Gated | Restart persistence with hostPath | Gated |
 | Actionable read-only CRD status + Events | Available | Bounded SwBlockVolume finalizer lifecycle | Beta candidate |
-| Backup/snapshot/restore | Planned | Returned-replica rebuild/failback | Planned |
-| NVMe ANA parity | Planned | Production SLO/performance claims | Not claimed |
+| Returned-replica ACK eligibility executor | Beta candidate | Returned-replica rebuild/failback | Planned |
+| Backup/snapshot/restore | Planned | NVMe ANA parity | Planned |
+| Production SLO/performance claims | Not claimed | Hosted production UI | Not claimed |
 
 ## What You Can Do Today
 
@@ -59,6 +60,10 @@ This is an **alpha** product path for supported lab clusters, not production.
   supplied cleanup evidence.
 - Inspect install drift status for current versus desired chart/app/image
   identity. This is visibility only, not upgrade execution.
+- In the gated returned-replica path, inspect a bounded authority-executor
+  result that records ACK eligibility on `SwBlockReplicaEligibility.status`
+  after live evidence proves the old primary remains fenced, the current primary
+  is unchanged, and the required durable frontier is covered.
 - Replay support bundles offline.
 
 These are narrow alpha claims tied to documented gates. See
@@ -73,7 +78,9 @@ These are narrow alpha claims tied to documented gates. See
 - Automatic cleanup execution, host repair, or PVC/PV/workload deletion.
   Delete-safety uses externally supplied cleanup evidence.
 - Backup, snapshot, or restore.
-- Returned-replica rebuild, reintegration, or failback.
+- Returned-replica rebuild traffic, frontend publication, or automatic
+  failback. The beta-candidate executor records only ACK eligibility on its
+  narrow target CRD status.
 - Transparent Kubernetes node-loss failover without pod recreate.
 - NVMe ANA parity for the transparent failover path.
 - Broad distro/kernel/initiator compatibility.
@@ -123,6 +130,9 @@ This tag covers the v0.4 read-only/status foundation path. The v0.5
 bounded lifecycle-owner path requires matching `sw-block` and `sw-block-csi`
 images published from the Phase 44 release commit; do not use the older
 quickstart tag to validate lifecycle-owner behavior.
+The v0.6 returned-replica ACK eligibility executor path likewise requires
+matching images published from the Phase 54 release commit and must be validated
+with the release smoke before it is marked shipped.
 
 Mutable `:alpha` is a smoke/demo tag only; it can drift from the source tree.
 
