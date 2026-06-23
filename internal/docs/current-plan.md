@@ -284,9 +284,10 @@ Acceptance:
 
 ### D6: Multi-Volume Isolation
 
-Status: pending. D5 includes a mixed partial reconcile smoke; D6 should make
-multi-volume isolation the primary gate with explicit no-contamination assertions
-across identities, target statuses, and cleanup.
+Status: **QA PASS** (`20260623-113753-d07f`, 32/32 actions). D5 included a
+mixed partial reconcile smoke; D6 made multi-volume isolation the primary gate
+with explicit no-contamination assertions across identities, target statuses,
+and cleanup.
 
 Exercise at least three volumes:
 
@@ -298,10 +299,12 @@ C: no returned-replica contract
 
 Acceptance:
 
-- A's executor result does not affect B/C,
-- B's blocked state does not block A/C status publication,
-- no cross-volume executor evidence contamination,
-- cleanup remains zero-residue.
+- A/B eligible executor results did not affect blocked/no-contract/mismatched
+  volumes,
+- blocked state did not block eligible status publication,
+- no cross-volume executor evidence contamination
+  (`cross_contamination_count=0`),
+- cleanup remained zero-residue.
 
 ### D7: Live Close Gate
 
