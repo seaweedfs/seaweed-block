@@ -1,6 +1,6 @@
 # Current Plan: Phase 56 Returned Replica Rebuild/Catch-up Contract
 
-Status: in progress.
+Status: dev complete; QA ready.
 
 Branch target: `phase54-returned-replica-reintegration-executor`
 
@@ -136,3 +136,24 @@ swblock validate <new phase56 scenario>
 Phase 56 closes when rebuild/catch-up is represented as a precise disabled
 executor contract with status-surface agreement and a gate proving no rebuild
 execution occurs yet.
+
+## QA Ready Gate
+
+Run:
+
+```text
+swblock run testops/scenarios/returned-replica-rebuild-contract-chain.yaml
+```
+
+Expected terminal evidence:
+
+```text
+phase56_returned_replica_rebuild_contract_status=ok
+summary_rebuild_preflight_ready=1
+summary_rebuild_contract_disabled=1
+summary_rebuild_action_disabled=1
+operator_snapshot_rebuild_contract=ok
+dashboard_rebuild_contract=ok
+```
+
+If the runner gate passes, Phase 56 can move from `dev complete` to `closed`.
