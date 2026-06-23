@@ -1,101 +1,123 @@
-# Current Plan: Phase 55 Release And Documentation Hardening
+# Current Plan: Phase 56 Returned Replica Rebuild/Catch-up Contract
 
-Status: complete.
+Status: in progress.
 
 Branch target: `phase54-returned-replica-reintegration-executor`
 
 ## Goal
 
-Close the documentation and release-claim gap after Phase 54.
+Move from Phase 54's narrow ACK-eligibility executor to the next returned
+replica milestone without starting release work.
 
-Phase 54 proved the first bounded returned-replica authority executor mutation:
+Phase 54 proved this bounded mutation:
 
 ```text
 SwBlockReplicaEligibility.status ACK eligibility
 ```
 
-Phase 55 is intentionally not a new storage feature. It makes the public and
-developer-facing documents precise enough that a release reviewer does not
-mistake ACK eligibility recording for rebuild, frontend publication, or
-failback.
+Phase 56 defines the next executor boundary for a returned replica whose durable
+frontier is behind the required frontier. The product must say, in machine
+readable status:
+
+```text
+this replica needs rebuild/catch-up traffic,
+the future executor envelope is rebuild_traffic,
+execution is still disabled,
+no frontend publication/failback/ACK mutation is allowed by this contract.
+```
 
 ## Scope
 
 In scope:
 
-- README capability and non-claim alignment.
-- Release note for the v0.6 beta candidate.
-- User-capability page update.
-- Wiki/deep-dive update for returned-replica and read-write control-plane
-  roadmap.
-- Roadmap wording audit after Phase 54 close.
-- Release smoke checklist for future published images.
+- Action/preflight/contract split between:
+  - `authority.reintegrate_returned_replica` for ACK-eligible fenced replicas
+    with frontier coverage.
+  - `authority.rebuild_returned_replica` for fenced replicas whose durable
+    frontier is behind the required frontier.
+- SwBlockVolume status projection through existing `executorPreflights[]` and
+  `executorContracts[]`.
+- Report/explain/dashboard compatibility through the existing managed-volume
+  rendering path.
+- Unit and status-writer tests that prove the contract reaches CRD-shaped
+  status without widening mutation authority.
 
 Out of scope:
 
-- No product code changes.
-- No new executor mutation.
-- No release-image publish.
-- No QA re-run unless docs expose a missing gate.
+- No rebuild data movement.
+- No frontend publication.
+- No failback.
+- No broad `SwBlockVolume.status` rewrite by the authority executor.
+- No release smoke or published-image work before the next feature milestone.
 
 ## Deliverables
 
-### D1: Public Docs Alignment
+### D1: Rebuild/Catch-up Contract Projection
 
-Status: implemented.
+Status: implemented locally.
 
-Update README and user capability docs so they say:
+When a returned replica is fenced but its durable frontier is behind the
+required frontier:
 
-- returned-replica ACK eligibility executor is a beta-candidate gated
-  capability,
-- rebuild/failback/frontend publication remain non-claims,
-- published quickstart image tags do not validate Phase 54 until matching
-  release images are published.
+- project `authority.rebuild_returned_replica`;
+- mark executor preflight `ready` only when the frontier gap is known;
+- keep `execution_enabled=false` and `mutation_allowed=false`;
+- name future allowed mutation class as `rebuild_traffic`;
+- forbid `ack_eligibility`, `frontend_publication`, and `failback`;
+- require terminal evidence:
+  - `frontend_fenced_before_rebuild`;
+  - `primary_unchanged`;
+  - `durable_frontier_caught_up`;
+  - `no_frontend_publication`;
+  - `no_cross_volume_identity_change`.
 
-### D2: Release Note
+Durable frontier missing remains a hold state, because the product cannot
+classify the gap precisely enough to hand off rebuild execution.
 
-Status: implemented.
+### D2: Surface And CRD Status Gate
 
-Add `docs/releases/v0.6-beta-candidate.md` and link it from release notes.
+Status: pending.
 
-The note must include:
+Prove the D1 contract reaches all user-visible status surfaces:
 
-- narrow claim,
-- Phase 54 live close evidence,
-- pending image-publish warning,
-- release checklist.
+- `summary.txt`;
+- `ops explain`;
+- dashboard/operator-snapshot;
+- SwBlockVolume `.status.executorPreflights[]`;
+- SwBlockVolume `.status.executorContracts[]`.
 
-### D3: Developer Wiki Alignment
+### D3: Executor Non-Execution Gate
 
-Status: implemented.
+Status: pending.
 
-Update returned-replica and read-write control-plane wiki pages so future
-developers see the current boundary:
+Prove the existing authority executor does not act on
+`authority.rebuild_returned_replica` yet:
+
+- no `SwBlockReplicaEligibility.status` ACK mutation for rebuild actions;
+- no rebuild traffic;
+- no frontend publication;
+- no failback;
+- no cross-volume mutation.
+
+## Verification
+
+Current local checks:
 
 ```text
-ACK eligibility target status is proven
-rebuild/catch-up/failback still need their own executor and gates
+go test ./core/ops
+go test ./cmd/sw-block
 ```
 
-### D4: Verification
-
-Minimum checks:
+Before Phase 56 close:
 
 ```text
 go test ./core/ops ./cmd/sw-block
 helm lint charts/seaweed-block
-swblock validate testops/scenarios/authority-executor-live-close-chain.yaml
-swblock validate testops/scenarios/authority-executor-multivolume-chain.yaml
+swblock validate <new phase56 scenario>
 ```
-
-Docs are complete only if all checks pass and the diff does not introduce a
-broader product claim than Phase 54 proved.
 
 ## Exit
 
-Phase 55 is closed when docs are committed and the next step is clear:
-
-```text
-either release smoke on published images,
-or start the next executor milestone with the same evidence/action boundary.
-```
+Phase 56 closes when rebuild/catch-up is represented as a precise disabled
+executor contract with status-surface agreement and a gate proving no rebuild
+execution occurs yet.

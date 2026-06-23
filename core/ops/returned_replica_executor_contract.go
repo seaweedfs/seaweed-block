@@ -47,21 +47,36 @@ func ReturnedReplicaExecutorContracts(projection ManagedVolumeProjection) []Retu
 			PreflightDecision:        preflight.Decision,
 			PreflightReason:          preflight.Reason,
 			ForbiddenMutationClass:   append([]string(nil), preflight.ForbiddenMutationClass...),
-			TerminalEvidenceRequired: returnedReplicaTerminalEvidenceRequired(),
+			TerminalEvidenceRequired: returnedReplicaTerminalEvidenceRequired(preflight.ActionType),
 			EvidenceRefs:             append([]string(nil), preflight.EvidenceRefs...),
 		}
 		if preflight.Decision == ReturnedReplicaExecutorPreflightReady {
 			contract.Decision = ReturnedReplicaExecutorContractDisabled
 			contract.Reason = ReturnedReplicaExecutorContractReasonExecutorDisabled
-			contract.AllowedMutationClass = []string{"ack_eligibility"}
-			contract.ForbiddenMutationClass = []string{"frontend_publication", "rebuild_traffic", "failback"}
+			switch preflight.ActionType {
+			case ManagedVolumeActionRebuildReturned:
+				contract.AllowedMutationClass = []string{"rebuild_traffic"}
+				contract.ForbiddenMutationClass = []string{"ack_eligibility", "frontend_publication", "failback"}
+			default:
+				contract.AllowedMutationClass = []string{"ack_eligibility"}
+				contract.ForbiddenMutationClass = []string{"frontend_publication", "rebuild_traffic", "failback"}
+			}
 		}
 		out = append(out, contract)
 	}
 	return out
 }
 
-func returnedReplicaTerminalEvidenceRequired() []string {
+func returnedReplicaTerminalEvidenceRequired(actionType string) []string {
+	if actionType == ManagedVolumeActionRebuildReturned {
+		return []string{
+			"frontend_fenced_before_rebuild",
+			"primary_unchanged",
+			"durable_frontier_caught_up",
+			"no_frontend_publication",
+			"no_cross_volume_identity_change",
+		}
+	}
 	return []string{
 		"ack_eligibility_known",
 		"ack_eligible_true",

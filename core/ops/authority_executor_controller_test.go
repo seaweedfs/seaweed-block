@@ -234,7 +234,7 @@ func authorityExecutorReadyVolume() SwBlockVolumeObject {
 				PreflightReason:          ReturnedReplicaExecutorPreflightReasonSatisfied,
 				AllowedMutationClass:     []string{AuthorityExecutorAllowedMutationAckEligibility},
 				ForbiddenMutationClass:   []string{"frontend_publication", "rebuild_traffic", "failback"},
-				TerminalEvidenceRequired: returnedReplicaTerminalEvidenceRequired(),
+				TerminalEvidenceRequired: returnedReplicaTerminalEvidenceRequired(ManagedVolumeActionReintegrateReturned),
 				EvidenceRefs:             []string{"contract.txt"},
 			}},
 		},

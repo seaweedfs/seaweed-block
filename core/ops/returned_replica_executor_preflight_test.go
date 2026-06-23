@@ -64,13 +64,36 @@ func TestReturnedReplicaExecutorPreflight_HoldsUnknownAckEligibility(t *testing.
 	}
 }
 
-func TestReturnedReplicaExecutorPreflight_HoldsFrontierBehind(t *testing.T) {
+func TestReturnedReplicaExecutorPreflight_RebuildReadyWhenFrontierBehind(t *testing.T) {
 	projection := returnedReplicaPreflightProjection(t, func(facts *ManagedVolumeFacts) {
 		facts.Replicas[0].DurableFrontierLSN = 51
 	})
 
 	preflight := onlyReturnedReplicaPreflight(t, projection)
-	if preflight.Decision != ReturnedReplicaExecutorPreflightHold || preflight.Reason != ReturnedReplicaExecutorPreflightReasonFrontierBehind {
+	if preflight.ActionType != ManagedVolumeActionRebuildReturned {
+		t.Fatalf("action_type=%s want %s", preflight.ActionType, ManagedVolumeActionRebuildReturned)
+	}
+	if preflight.Decision != ReturnedReplicaExecutorPreflightReady || preflight.Reason != ReturnedReplicaExecutorPreflightReasonSatisfied {
+		t.Fatalf("preflight=%+v", preflight)
+	}
+	if preflight.DurableFrontierLSN != 51 || preflight.RequiredFrontierLSN != 52 {
+		t.Fatalf("frontiers=%+v", preflight)
+	}
+	if preflight.MutationAllowed {
+		t.Fatalf("rebuild preflight must stay non-mutating: %+v", preflight)
+	}
+}
+
+func TestReturnedReplicaExecutorPreflight_RebuildHoldsWhenDurableFrontierMissing(t *testing.T) {
+	projection := returnedReplicaPreflightProjection(t, func(facts *ManagedVolumeFacts) {
+		facts.Replicas[0].DurableFrontierKnown = false
+		facts.Replicas[0].DurableFrontierLSN = 0
+	})
+
+	preflight := onlyReturnedReplicaPreflight(t, projection)
+	if preflight.ActionType != ManagedVolumeActionRebuildReturned ||
+		preflight.Decision != ReturnedReplicaExecutorPreflightHold ||
+		preflight.Reason != ReturnedReplicaExecutorPreflightReasonDurableMissing {
 		t.Fatalf("preflight=%+v", preflight)
 	}
 }
