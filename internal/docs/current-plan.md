@@ -76,7 +76,7 @@ classify the gap precisely enough to hand off rebuild execution.
 
 ### D2: Surface And CRD Status Gate
 
-Status: pending.
+Status: implemented locally.
 
 Prove the D1 contract reaches all user-visible status surfaces:
 
@@ -85,6 +85,12 @@ Prove the D1 contract reaches all user-visible status surfaces:
 - dashboard/operator-snapshot;
 - SwBlockVolume `.status.executorPreflights[]`;
 - SwBlockVolume `.status.executorContracts[]`.
+
+Implementation:
+
+- Added `TestOpsReturnedReplicaRebuildFromBundleSurfacesAcrossReportExplainDashboard`.
+- Added `scripts/run-phase56-returned-replica-rebuild-contract-gate.sh`.
+- Added `testops/scenarios/returned-replica-rebuild-contract-chain.yaml`.
 
 ### D3: Executor Non-Execution Gate
 
@@ -104,8 +110,9 @@ Prove the existing authority executor does not act on
 Current local checks:
 
 ```text
-go test ./core/ops
-go test ./cmd/sw-block
+go test ./core/ops ./cmd/sw-block
+helm lint charts/seaweed-block
+swblock validate testops/scenarios/returned-replica-rebuild-contract-chain.yaml
 ```
 
 Before Phase 56 close:

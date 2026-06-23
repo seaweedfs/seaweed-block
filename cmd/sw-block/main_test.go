@@ -1447,6 +1447,125 @@ func TestOpsReturnedReplicaFromBundleSurfacesAcrossReportExplainDashboard(t *tes
 	}
 }
 
+func TestOpsReturnedReplicaRebuildFromBundleSurfacesAcrossReportExplainDashboard(t *testing.T) {
+	dir := writeCmdReturnedReplicaRebuildBundle(t)
+	outDir := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ops", "report", "--from-bundle", dir, "--out", outDir}, &stdout, &stderr)
+	if code != ops.VolumeStatusExitOK {
+		t.Fatalf("report exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	summary, err := os.ReadFile(filepath.Join(outDir, ops.ObservationReportTextArtifact))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"managed_volume_returned_replica=pvc-rebuild replica=r1 state=recovering reason=candidate_frontier_behind",
+		"managed_volume_executor_preflight=authority.rebuild_returned_replica target=r1 decision=ready reason=preconditions_satisfied mode=dry_run executor=authority_recovery_executor mutation_allowed=false ack_eligibility_known=true required_lsn=4241 durable_lsn=4240",
+		"managed_volume_executor_contract=authority.rebuild_returned_replica target=r1 decision=disabled reason=executor_policy_disabled executor=authority_recovery_executor execution_enabled=false mutation_allowed=false allowed_mutation=rebuild_traffic terminal_evidence=frontend_fenced_before_rebuild,primary_unchanged,durable_frontier_caught_up,no_frontend_publication,no_cross_volume_identity_change",
+		"managed_volume_action=authority.rebuild_returned_replica mode=dry_run side_effect=authority_mutating executor=authority_recovery_executor decision=rejected reason=policy_disabled",
+	} {
+		if !strings.Contains(string(summary), want) {
+			t.Fatalf("report summary missing %q:\n%s", want, summary)
+		}
+	}
+	snapshot, err := os.ReadFile(filepath.Join(outDir, ops.ObservationOperatorSnapshotArtifact))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		`"reason_code": "candidate_frontier_behind"`,
+		`"type": "authority.rebuild_returned_replica"`,
+		`"allowed_mutation_class": [`,
+		`"rebuild_traffic"`,
+		`"durable_frontier_caught_up"`,
+		`"decision_reason": "policy_disabled"`,
+	} {
+		if !strings.Contains(string(snapshot), want) {
+			t.Fatalf("operator snapshot missing %q:\n%s", want, snapshot)
+		}
+	}
+
+	writer := &operatorStatusTestWriter{}
+	oldFactory := opsOperatorStatusWriterFactory
+	opsOperatorStatusWriterFactory = func() (ops.OperatorStatusWriter, error) {
+		return writer, nil
+	}
+	t.Cleanup(func() { opsOperatorStatusWriterFactory = oldFactory })
+	stdout.Reset()
+	stderr.Reset()
+	code = run([]string{"ops", "operator-status", "--from-bundle", dir, "--namespace", "kube-system"}, &stdout, &stderr)
+	if code != ops.VolumeStatusExitOK {
+		t.Fatalf("operator-status exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	if len(writer.volumes) != 1 {
+		t.Fatalf("operator-status writes=%+v", writer.volumes)
+	}
+	status := writer.volumes[0].status
+	if len(status.ExecutorPreflights) != 1 ||
+		status.ExecutorPreflights[0].ActionType != ops.ManagedVolumeActionRebuildReturned ||
+		status.ExecutorPreflights[0].Decision != ops.ReturnedReplicaExecutorPreflightReady {
+		t.Fatalf("CRD preflights=%+v", status.ExecutorPreflights)
+	}
+	if len(status.ExecutorContracts) != 1 ||
+		status.ExecutorContracts[0].ActionType != ops.ManagedVolumeActionRebuildReturned ||
+		status.ExecutorContracts[0].Decision != ops.ReturnedReplicaExecutorContractDisabled ||
+		status.ExecutorContracts[0].ExecutionEnabled ||
+		status.ExecutorContracts[0].MutationAllowed ||
+		!cmdStringSliceContains(status.ExecutorContracts[0].AllowedMutationClass, "rebuild_traffic") {
+		t.Fatalf("CRD contracts=%+v", status.ExecutorContracts)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = run([]string{"ops", "explain", "volume", "--from-bundle", dir, "pvc-rebuild"}, &stdout, &stderr)
+	if code != ops.VolumeStatusExitOK {
+		t.Fatalf("explain exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	for _, want := range []string{
+		"managed_volume_executor_preflight authority.rebuild_returned_replica target=r1 decision=ready reason=preconditions_satisfied mode=dry_run executor=authority_recovery_executor mutation_allowed=false ack_eligibility_known=true required_lsn=4241 durable_lsn=4240",
+		"managed_volume_executor_contract authority.rebuild_returned_replica target=r1 decision=disabled reason=executor_policy_disabled executor=authority_recovery_executor execution_enabled=false mutation_allowed=false allowed_mutation=rebuild_traffic terminal_evidence=frontend_fenced_before_rebuild,primary_unchanged,durable_frontier_caught_up,no_frontend_publication,no_cross_volume_identity_change",
+		"managed_volume_action authority.rebuild_returned_replica mode=dry_run",
+	} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("explain missing %q:\n%s", want, stdout.String())
+		}
+	}
+
+	addr := freeTCPAddr(t)
+	stdout.Reset()
+	stderr.Reset()
+	done := make(chan int, 1)
+	go func() {
+		done <- run([]string{
+			"ops", "dashboard",
+			"--from-bundle", dir,
+			"--listen", addr,
+			"--serve-duration", "500ms",
+		}, &stdout, &stderr)
+	}()
+	body := waitForHTTPContains(t, "http://"+addr+"/operator-snapshot.json", `"type": "authority.rebuild_returned_replica"`)
+	for _, want := range []string{
+		`"reason_code": "candidate_frontier_behind"`,
+		`"allowed_mutation_class": [`,
+		`"rebuild_traffic"`,
+		`"execution_enabled": false`,
+		`"decision_reason": "policy_disabled"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("dashboard operator snapshot missing %q:\n%s", want, body)
+		}
+	}
+	select {
+	case code := <-done:
+		if code != ops.VolumeStatusExitOK {
+			t.Fatalf("dashboard exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("dashboard command did not stop; stdout=%s stderr=%s", stdout.String(), stderr.String())
+	}
+}
+
 func TestOpsReportFromBundleAllowsEmptyClusterEvidence(t *testing.T) {
 	dir := t.TempDir()
 	productDir := filepath.Join(dir, "demo", "product-observation")
@@ -1994,6 +2113,66 @@ func writeCmdReturnedReplicaBundle(t *testing.T) string {
 	return dir
 }
 
+func writeCmdReturnedReplicaRebuildBundle(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	productDir := filepath.Join(dir, "demo", "product-observation")
+	if err := os.MkdirAll(productDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cluster := ops.NewClusterEvidence(time.Date(2026, 6, 23, 18, 0, 0, 0, time.UTC))
+	cluster.ProductRevision = "phase56-test"
+	cluster.Status = ops.ObservationStatusRecovering
+	cluster.Volumes = []ops.VolumeEvidence{{
+		VolumeID:              "pvc-rebuild",
+		Namespace:             "default",
+		PVCName:               "rebuild-pvc",
+		ReplicationFactor:     3,
+		Status:                ops.ObservationStatusRecovering,
+		PrimaryReplica:        "r2",
+		PrimaryNode:           "m02",
+		PublishTarget:         "192.168.1.184:3260",
+		Epoch:                 3,
+		EndpointVersion:       7,
+		RequiredFrontierKnown: true,
+		RequiredFrontierLSN:   4241,
+		Replicas: []ops.ReplicaEvidence{{
+			ReplicaID:            "r1",
+			KubernetesNode:       "m01",
+			Observed:             true,
+			Role:                 "previous_primary",
+			ReplicationRole:      "replica_behind",
+			Healthy:              false,
+			FrontendPrimaryReady: false,
+			AckEligibilityKnown:  true,
+			AckEligible:          false,
+			DurableFrontierKnown: true,
+			DurableFrontierLSN:   4240,
+			StalePrimaryFenced:   true,
+			SupportBundlePath:    "returned-replica-rebuild-summary.txt",
+		}, {
+			ReplicaID:            "r2",
+			KubernetesNode:       "m02",
+			Observed:             true,
+			Role:                 "primary",
+			Healthy:              true,
+			FrontendPrimaryReady: true,
+			ReplicationRole:      "primary",
+			FrontendAddr:         "192.168.1.184:3260",
+			DurableFrontierKnown: true,
+			DurableFrontierLSN:   4241,
+		}},
+	}}
+	raw, err := ops.MarshalObservationJSON(cluster)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(productDir, ops.ClusterEvidenceArtifact), raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
 func fixtureCmdKubectl(outputs map[string]string) func(context.Context, string, ...string) ([]byte, error) {
 	return func(_ context.Context, name string, args ...string) ([]byte, error) {
 		key := strings.TrimSpace(name + " " + strings.Join(args, " "))
@@ -2144,4 +2323,13 @@ func writeCmdJSON(t *testing.T, w http.ResponseWriter, v any) {
 	if err := json.NewEncoder(w).Encode(v); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func cmdStringSliceContains(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }

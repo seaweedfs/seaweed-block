@@ -1,0 +1,80 @@
+# Runner-native Phase 56 D2 gate: returned-replica rebuild/catch-up contract surfaces.
+
+name: returned-replica-rebuild-contract-chain
+timeout: 8m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: rebuild_contract_surface_gate
+    actions:
+      - action: exec
+        node: m02
+        timeout: 7m
+        cmd: "rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase56-returned-replica-rebuild-contract && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase56-returned-replica-rebuild-contract && cd {{ product_root }} && SW_BLOCK_ARTIFACT_DIR=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase56-returned-replica-rebuild-contract bash scripts/run-phase56-returned-replica-rebuild-contract-gate.sh {{ product_root }}"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase56-returned-replica-rebuild-contract/phase56-returned-replica-rebuild-contract-summary.txt"
+        pattern: "^phase56_returned_replica_rebuild_contract_status=ok$"
+        save_as: phase56_rebuild_contract_ok
+      - action: assert_greater
+        actual: "{{ phase56_rebuild_contract_ok }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase56-returned-replica-rebuild-contract/phase56-returned-replica-rebuild-contract-summary.txt"
+        pattern: "^summary_rebuild_preflight_ready=1$"
+        save_as: rebuild_preflight_ready
+      - action: assert_greater
+        actual: "{{ rebuild_preflight_ready }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase56-returned-replica-rebuild-contract/phase56-returned-replica-rebuild-contract-summary.txt"
+        pattern: "^summary_rebuild_contract_disabled=1$"
+        save_as: rebuild_contract_disabled
+      - action: assert_greater
+        actual: "{{ rebuild_contract_disabled }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase56-returned-replica-rebuild-contract/phase56-returned-replica-rebuild-contract-summary.txt"
+        pattern: "^summary_rebuild_action_disabled=1$"
+        save_as: rebuild_action_disabled
+      - action: assert_greater
+        actual: "{{ rebuild_action_disabled }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase56-returned-replica-rebuild-contract/phase56-returned-replica-rebuild-contract-summary.txt"
+        pattern: "^operator_snapshot_rebuild_contract=ok$"
+        save_as: snapshot_rebuild_contract
+      - action: assert_greater
+        actual: "{{ snapshot_rebuild_contract }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase56-returned-replica-rebuild-contract/phase56-returned-replica-rebuild-contract-summary.txt"
+        pattern: "^dashboard_rebuild_contract=ok$"
+        save_as: dashboard_rebuild_contract
+      - action: assert_greater
+        actual: "{{ dashboard_rebuild_contract }}"
+        threshold: "0"
+
+  - name: collect
+    always: true
+    actions:
+      - action: collect_path
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase56-returned-replica-rebuild-contract"
+        name: "remote-phases"
+        ignore_error: true
