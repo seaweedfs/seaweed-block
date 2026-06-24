@@ -213,7 +213,21 @@ Recommended order from here:
     This gate connects Phases 56-58 as one product path:
     rebuild contract -> target-owner-created target CR -> executor planned
     status. It is still planning/status only, not real rebuild data movement.
-17. Add backup/restore and NVMe ANA parity after they can reuse the same action
+17. Phase 60: rebuild/catch-up data-path gate. **Closed 2026-06-23, QA PASS**
+    (`internal/docs/finished-plans/phase60_finishedplan_rebuild_catchup_datapath_gate.md`).
+    The existing engine/adapter/transport/recovery stack now has a repeatable
+    gate proving catch-up traffic, dual-lane rebuild traffic, session close,
+    durable ack, live WAL during rebuild, same-LBA arbitration, and byte-equal
+    convergence. This proves the data path beneath the planning model; it does
+    not yet wire the Kubernetes authority executor to trigger that traffic in a
+    live blockvolume pod.
+18. Phase 61: executor-to-runtime rebuild call-site. **Next recommended slice**.
+    Connect the bounded `authority-executor` path to the blockvolume runtime so
+    `SwBlockReplicaRebuild.status` can move from `planned` to real
+    running/completed/failed terminal evidence driven by data-path traffic.
+    Keep frontend publication, failback, and ACK eligibility mutation out of
+    scope unless separately gated.
+19. Add backup/restore and NVMe ANA parity after they can reuse the same action
    owner, evidence, and status model rather than creating another isolated
    control plane.
 
@@ -227,7 +241,10 @@ evidence, executor-contract, disabled executor-process bridge, and first
 bounded ACK eligibility mutation without allowing frontend publication, rebuild
 traffic, or failback. Phases 56-59 extend that same pattern to returned-replica
 rebuild planning: contract, target CR, target owner, and planned status before
-any real rebuild/catch-up traffic is enabled.
+any real rebuild/catch-up traffic is enabled. Phase 60 proves that the existing
+data path underneath that planning model can move bytes and converge replicas;
+Phase 61 should connect the executor call-site to that runtime path without
+broadening the frontend/failback claims.
 
 The practical rule is:
 

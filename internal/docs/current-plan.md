@@ -1,4 +1,4 @@
-# Current Plan: Phase 59 Rebuild Planning Close Gate
+# Current Plan: Phase 60 Rebuild/Catch-Up Data-Path Gate
 
 Status: complete.
 
@@ -6,146 +6,152 @@ Branch target: `phase54-returned-replica-reintegration-executor`
 
 ## Goal
 
-Phases 56-58 built the returned-replica rebuild planning chain in pieces:
+Phases 56-59 closed the returned-replica rebuild planning path:
 
 ```text
-Phase 56: SwBlockVolume.status exposes rebuild_returned_replica contract
-Phase 57: SwBlockReplicaRebuild.status target exists for planned progress
-Phase 58: rebuild-target-owner creates SwBlockReplicaRebuild target CRs
+rebuild contract
+  -> target-owner creates SwBlockReplicaRebuild
+  -> authority-executor writes planned rebuild status
 ```
 
-Phase 59 closes that planning loop as one product path:
+That path intentionally did not move data. Phase 60 closes the next narrow
+question:
 
 ```text
-SwBlockVolume.status.executorContracts[]
-  -> sw-block ops rebuild-target-owner
-  -> SwBlockReplicaRebuild.spec target exists
-  -> sw-block ops authority-executor --allowed-mutation-class=rebuild_traffic
-  -> SwBlockReplicaRebuild.status.state=planned
+Do the existing rebuild/catch-up data paths actually move bytes, close sessions,
+and converge replicas under the engine/adapter/transport/recovery stack?
 ```
 
-This phase still does not move data. It proves the target no longer has to be
-manually stubbed before the executor can write planned rebuild status.
+This phase turns the existing component/transport evidence into a repeatable
+TestRunner gate with terminal evidence.
 
 ## Scope
 
 In scope:
 
-- Add an integrated TestRunner gate using real `sw-block` CLI commands.
-- Compile the current `sw-block` binary on the lab node.
-- Run `rebuild-target-owner` inside Kubernetes with its own ServiceAccount.
-- Run `authority-executor` inside Kubernetes with its own ServiceAccount.
-- Verify the target-owner creates exactly one `SwBlockReplicaRebuild` target.
-- Verify a second target-owner run is idempotent.
-- Verify the executor writes planned rebuild status to that target.
-- Verify `SwBlockVolume.status` and finalizers remain unchanged.
+- Run engine-driven catch-up evidence.
+- Run transport catch-up evidence with barrier confirmation.
+- Run engine-driven dual-lane rebuild evidence.
+- Run post-close durable-ack publication ordering evidence.
+- Run live-write-during-rebuild evidence.
+- Run same-LBA arbitration evidence.
+- Emit terminal key/value evidence that names the observed data-path events.
+- Keep the claim honest: this is data-path proof, not Kubernetes executor
+  call-site wiring.
 
 Out of scope:
 
-- No rebuild data movement.
-- No WAL/block copy.
+- No Kubernetes `authority-executor` trigger into a live blockvolume process.
+- No `SwBlockReplicaRebuild.status.state=running/completed` driven by real bytes.
 - No frontend publication.
 - No failback.
-- No primary authority change.
 - No ACK eligibility mutation.
-- No cross-volume mutation.
+- No cross-volume or RF=3 Kubernetes rebuild orchestration.
 
 ## Deliverables
 
-### D1: Integrated Gate Script
-
-Status: implemented locally.
-
-Added:
-
-```text
-scripts/run-phase59-rebuild-planning-close-gate.sh
-```
-
-The script creates synthetic CRD evidence, runs product CLI commands inside
-Kubernetes jobs, and records terminal evidence.
-
-### D2: TestRunner Scenario
-
-Status: implemented locally.
-
-Added:
-
-```text
-testops/scenarios/rebuild-planning-close-chain.yaml
-```
-
-The scenario asserts:
-
-- target-owner first run creates one target;
-- target-owner second run detects the existing target and creates zero more;
-- target status is empty before executor;
-- executor writes `state=planned`;
-- `rebuildTrafficStarted=false`;
-- `noFrontendPublication=true`;
-- the source `SwBlockVolume` reason and finalizers do not change.
-
-### D3: Roadmap Alignment
+### D1: Data-Path Gate Script
 
 Status: complete.
 
-Update roadmap wording so Phase 56-59 are visible as the rebuild planning
-train, not a shipped real rebuild data path.
+Added:
+
+```text
+scripts/run-phase60-rebuild-catchup-datapath-gate.sh
+```
+
+The script runs targeted Go component/transport tests and records evidence such
+as:
+
+```text
+start_catchup_observed=true
+catchup_session_completed_observed=true
+start_rebuild_observed=true
+dual_lane_rebuild_observed=true
+session_closed_completed_observed=true
+durable_ack_observed=true
+barrier_handshake_observed=true
+byte_equal_assertions_passed=true
+same_lba_last_write_wins_asserted=true
+authority_executor_datapath_callsite=false
+```
+
+### D2: TestRunner Scenario
+
+Status: complete.
+
+Added:
+
+```text
+testops/scenarios/rebuild-catchup-datapath-chain.yaml
+```
+
+The scenario runs the gate on `m02` against `/tmp/seaweed_block` and asserts the
+terminal evidence.
+
+### D3: Local Validation
+
+Status: PASS.
+
+Run:
+
+```text
+go test ./core/replication/component ./core/transport -run "<Phase60 patterns>" -count=1 -v
+C:\work\swblock.exe validate testops\scenarios\rebuild-catchup-datapath-chain.yaml
+```
 
 ### D4: Live QA Gate
 
 Status: QA PASS.
 
-Run:
+Sync the current tree to `m02:/tmp/seaweed_block`, then run:
 
 ```text
-swblock run testops/scenarios/rebuild-planning-close-chain.yaml
+swblock run testops/scenarios/rebuild-catchup-datapath-chain.yaml
 ```
 
 Expected terminal evidence:
 
 ```text
-phase59_rebuild_planning_close_status=ok
-rebuild_target_owner=target_mutation ... targets_created=1 ...
-rebuild_target_owner=target_mutation ... targets_existing=1 targets_created=0 ...
-rebuild_target_status_before_executor=
-authority_executor=executed ... rebuild_progress_mutation_attempts=1 ...
-rebuild_status_state_after_executor=planned
-rebuild_traffic_started_after_executor=false
-no_frontend_publication_after_executor=true
-swblockvolume_reason_unchanged=candidate_frontier_behind
+phase60_rebuild_catchup_datapath_status=ok
+rebuild_traffic_started=true
+catchup_traffic_started=true
+byte_equal_assertions_passed=true
+authority_executor_datapath_callsite=false
+frontend_publication_allowed=false
+failback_allowed=false
 ```
 
-## Verification
+### D5: Close Docs
 
-Local:
+Status: complete.
+
+On PASS, write:
 
 ```text
-go test ./core/ops ./cmd/sw-block ./scripts
-helm lint charts/seaweed-block
-swblock validate testops/scenarios/rebuild-planning-close-chain.yaml
+internal/docs/qa-assignments/phase60-rebuild-catchup-datapath-qa-signoff.md
+internal/docs/finished-plans/phase60_finishedplan_rebuild_catchup_datapath_gate.md
 ```
 
-Live:
-
-```text
-swblock run testops/scenarios/rebuild-planning-close-chain.yaml
-```
+Updated `docs/roadmap.md` to state that Phase 60 proves the existing
+rebuild/catch-up data path, while Phase 61 remains the executor-to-runtime
+call-site milestone.
 
 ## Exit
 
-Phase 59 closes when the live gate proves the returned-replica rebuild planning
-chain works end-to-end without manual target stubs and without claiming rebuild
-data movement.
+Phase 60 closed when the live TestRunner gate proved both catch-up and rebuild
+traffic paths, byte-equality convergence, session close, durable ack ordering,
+and explicitly states that executor/runtime Kubernetes wiring is still out of
+scope.
 
 Result:
 
 ```text
-20260623-174546-3054 rebuild-planning-close-chain PASS 22/22
+20260623-194022-f4ea rebuild-catchup-datapath-chain PASS 34/34
 ```
 
 Sign-off:
 
 ```text
-internal/docs/qa-assignments/phase59-rebuild-planning-close-qa-signoff.md
+internal/docs/qa-assignments/phase60-rebuild-catchup-datapath-qa-signoff.md
 ```
