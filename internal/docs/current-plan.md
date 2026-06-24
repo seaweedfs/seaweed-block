@@ -1,4 +1,4 @@
-# Current Plan: Phase 60 Rebuild/Catch-Up Data-Path Gate
+# Current Plan: Phase 61 Authority Executor Runtime Call-site
 
 Status: complete.
 
@@ -6,152 +6,138 @@ Branch target: `phase54-returned-replica-reintegration-executor`
 
 ## Goal
 
-Phases 56-59 closed the returned-replica rebuild planning path:
+Phase 60 proved the existing rebuild/catch-up data path below Kubernetes:
 
 ```text
-rebuild contract
-  -> target-owner creates SwBlockReplicaRebuild
-  -> authority-executor writes planned rebuild status
+engine / adapter -> transport/recovery -> byte-equal convergence
 ```
 
-That path intentionally did not move data. Phase 60 closes the next narrow
-question:
+Phase 61 connects the authority executor to a runtime call-site seam so rebuild
+execution is no longer only a planned status write:
 
 ```text
-Do the existing rebuild/catch-up data paths actually move bytes, close sessions,
-and converge replicas under the engine/adapter/transport/recovery stack?
+SwBlockVolume.status.executorContracts[]
+  -> authority-executor
+  -> AuthorityRebuildRuntime.ExecuteRebuild(...)
+  -> SwBlockReplicaRebuild.status running/caught_up/blocked
 ```
-
-This phase turns the existing component/transport evidence into a repeatable
-TestRunner gate with terminal evidence.
 
 ## Scope
 
 In scope:
 
-- Run engine-driven catch-up evidence.
-- Run transport catch-up evidence with barrier confirmation.
-- Run engine-driven dual-lane rebuild evidence.
-- Run post-close durable-ack publication ordering evidence.
-- Run live-write-during-rebuild evidence.
-- Run same-LBA arbitration evidence.
-- Emit terminal key/value evidence that names the observed data-path events.
-- Keep the claim honest: this is data-path proof, not Kubernetes executor
-  call-site wiring.
+- Add a narrow `AuthorityRebuildRuntime` interface to the authority executor.
+- Preserve Phase 59 behavior when no runtime is provided: write `planned`.
+- When a runtime is provided, write `running`, invoke the runtime, then write
+  `caught_up` if terminal durable-frontier evidence covers the required LSN.
+- Write `blocked` if the runtime fails or returns insufficient terminal
+  evidence.
+- Keep non-claims explicit: no frontend publication, no failback, no ACK
+  eligibility mutation, no blockvolume RPC yet.
+- Add a TestRunner gate for the call-site and status mapping.
 
 Out of scope:
 
-- No Kubernetes `authority-executor` trigger into a live blockvolume process.
-- No `SwBlockReplicaRebuild.status.state=running/completed` driven by real bytes.
+- No blockvolume RPC/HTTP/gRPC runtime transport.
+- No Kubernetes pod-to-pod rebuild command.
+- No RF=3 orchestration.
 - No frontend publication.
 - No failback.
 - No ACK eligibility mutation.
-- No cross-volume or RF=3 Kubernetes rebuild orchestration.
 
 ## Deliverables
 
-### D1: Data-Path Gate Script
+### D1: Runtime Call-site Interface
 
 Status: complete.
 
 Added:
 
 ```text
-scripts/run-phase60-rebuild-catchup-datapath-gate.sh
+AuthorityRebuildRuntime
+AuthorityRebuildRuntimeRequest
+AuthorityRebuildRuntimeResult
 ```
 
-The script runs targeted Go component/transport tests and records evidence such
-as:
+The authority executor uses this interface only for
+`allowed-mutation-class=rebuild_traffic`.
 
-```text
-start_catchup_observed=true
-catchup_session_completed_observed=true
-start_rebuild_observed=true
-dual_lane_rebuild_observed=true
-session_closed_completed_observed=true
-durable_ack_observed=true
-barrier_handshake_observed=true
-byte_equal_assertions_passed=true
-same_lba_last_write_wins_asserted=true
-authority_executor_datapath_callsite=false
-```
-
-### D2: TestRunner Scenario
+### D2: Status Mapping
 
 Status: complete.
 
-Added:
+Runtime path status flow:
 
 ```text
-testops/scenarios/rebuild-catchup-datapath-chain.yaml
+planned path: no runtime -> state=planned
+runtime path: runtime invoked -> state=running -> state=caught_up
+failure path: runtime error or insufficient frontier -> state=blocked
 ```
 
-The scenario runs the gate on `m02` against `/tmp/seaweed_block` and asserts the
-terminal evidence.
-
-### D3: Local Validation
+### D3: Regression Tests
 
 Status: PASS.
 
-Run:
+Added tests proving:
 
-```text
-go test ./core/replication/component ./core/transport -run "<Phase60 patterns>" -count=1 -v
-C:\work\swblock.exe validate testops\scenarios\rebuild-catchup-datapath-chain.yaml
-```
+- planned status is preserved when no runtime exists;
+- runtime request carries volume/replica/frontier/fencing evidence;
+- successful runtime writes `running` then `caught_up`;
+- failed runtime writes `blocked`.
 
-### D4: Live QA Gate
+### D4: TestRunner Gate
 
 Status: QA PASS.
 
-Sync the current tree to `m02:/tmp/seaweed_block`, then run:
+Added:
 
 ```text
-swblock run testops/scenarios/rebuild-catchup-datapath-chain.yaml
+scripts/run-phase61-authority-executor-runtime-callsite-gate.sh
+testops/scenarios/authority-executor-runtime-callsite-chain.yaml
 ```
 
-Expected terminal evidence:
+Live run:
 
 ```text
-phase60_rebuild_catchup_datapath_status=ok
-rebuild_traffic_started=true
-catchup_traffic_started=true
-byte_equal_assertions_passed=true
-authority_executor_datapath_callsite=false
+20260623-212206-8afb authority-executor-runtime-callsite-chain PASS 28/28
+```
+
+Terminal evidence:
+
+```text
+phase61_authority_executor_runtime_callsite_status=ok
+runtime_callsite_invoked=true
+rebuild_status_running_written=true
+rebuild_status_caught_up_written=true
+rebuild_status_blocked_on_runtime_failure=true
+rebuild_traffic_started_when_runtime_invoked=true
+durable_frontier_caught_up_after_runtime=true
+planned_status_preserved_without_runtime=true
+blockvolume_rpc_wired=false
 frontend_publication_allowed=false
 failback_allowed=false
+ack_eligibility_mutation_allowed=false
 ```
 
 ### D5: Close Docs
 
 Status: complete.
 
-On PASS, write:
-
-```text
-internal/docs/qa-assignments/phase60-rebuild-catchup-datapath-qa-signoff.md
-internal/docs/finished-plans/phase60_finishedplan_rebuild_catchup_datapath_gate.md
-```
-
-Updated `docs/roadmap.md` to state that Phase 60 proves the existing
-rebuild/catch-up data path, while Phase 61 remains the executor-to-runtime
-call-site milestone.
-
-## Exit
-
-Phase 60 closed when the live TestRunner gate proved both catch-up and rebuild
-traffic paths, byte-equality convergence, session close, durable ack ordering,
-and explicitly states that executor/runtime Kubernetes wiring is still out of
-scope.
-
-Result:
-
-```text
-20260623-194022-f4ea rebuild-catchup-datapath-chain PASS 34/34
-```
-
 Sign-off:
 
 ```text
-internal/docs/qa-assignments/phase60-rebuild-catchup-datapath-qa-signoff.md
+internal/docs/qa-assignments/phase61-authority-executor-runtime-callsite-qa-signoff.md
 ```
+
+Finished plan:
+
+```text
+internal/docs/finished-plans/phase61_finishedplan_authority_executor_runtime_callsite.md
+```
+
+## Exit
+
+Phase 61 closed when the live TestRunner gate proved the authority executor can
+call a bounded rebuild runtime seam and map terminal evidence into
+`SwBlockReplicaRebuild.status`, while explicitly preserving the boundary that
+blockvolume RPC wiring remains future work.

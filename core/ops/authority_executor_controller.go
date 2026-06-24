@@ -15,6 +15,9 @@ const (
 	AuthorityExecutorBlockedTerminalEvidence       = "terminal_evidence_missing"
 	AuthorityExecutorReasonAckEligibilityRecorded  = "ack_eligibility_recorded"
 	AuthorityExecutorReasonRebuildPlanned          = "rebuild_progress_planned"
+	AuthorityExecutorReasonRebuildRunning          = "rebuild_runtime_running"
+	AuthorityExecutorReasonRebuildCaughtUp         = "rebuild_runtime_caught_up"
+	AuthorityExecutorReasonRebuildRuntimeFailed    = "rebuild_runtime_failed"
 )
 
 type AuthorityExecutorClient interface {
@@ -28,10 +31,37 @@ type AuthorityExecutorClient interface {
 type AuthorityExecutorReconciler struct {
 	Namespace              string
 	Client                 AuthorityExecutorClient
+	RebuildRuntime         AuthorityRebuildRuntime
 	ExecutionRequested     bool
 	ExecutionPolicyEnabled bool
 	AllowedMutationClass   string
 	Now                    func() time.Time
+}
+
+type AuthorityRebuildRuntime interface {
+	ExecuteRebuild(ctx context.Context, req AuthorityRebuildRuntimeRequest) (AuthorityRebuildRuntimeResult, error)
+}
+
+type AuthorityRebuildRuntimeRequest struct {
+	VolumeName            string
+	VolumeID              string
+	PVCName               string
+	ReplicaID             string
+	DurableFrontierKnown  bool
+	DurableFrontierLSN    uint64
+	RequiredFrontierKnown bool
+	RequiredFrontierLSN   uint64
+	FrontendFenced        bool
+	FrontendPrimaryReady  bool
+	NoFrontendPublication bool
+	NoCrossVolumeMutation bool
+	EvidenceRefs          []string
+}
+
+type AuthorityRebuildRuntimeResult struct {
+	DurableFrontierKnown bool
+	DurableFrontierLSN   uint64
+	EvidenceRefs         []string
 }
 
 type AuthorityExecutorReconcileResult struct {
@@ -160,9 +190,36 @@ func (r AuthorityExecutorReconciler) evaluateRebuildPlanning(ctx context.Context
 	}
 	result.MutationAttemptCount++
 	result.RebuildProgressMutationAttempts++
-	if err := r.Client.WriteReplicaRebuildStatus(ctx, target.Ref, authorityExecutorRebuildPlannedStatus(r.now()(), volume, contract, returned)); err != nil {
+	if r.RebuildRuntime == nil {
+		if err := r.Client.WriteReplicaRebuildStatus(ctx, target.Ref, authorityExecutorRebuildPlannedStatus(r.now()(), volume, contract, returned)); err != nil {
+			result.BlockedReason = "rebuild_status_write_failed"
+			return fmt.Errorf("write rebuild status: %w", err)
+		}
+		return nil
+	}
+	if err := r.Client.WriteReplicaRebuildStatus(ctx, target.Ref, authorityExecutorRebuildRunningStatus(r.now()(), volume, contract, returned)); err != nil {
 		result.BlockedReason = "rebuild_status_write_failed"
 		return fmt.Errorf("write rebuild status: %w", err)
+	}
+	runtimeResult, err := r.RebuildRuntime.ExecuteRebuild(ctx, authorityExecutorRebuildRuntimeRequest(volume, contract, returned))
+	if err != nil {
+		result.BlockedReason = AuthorityExecutorReasonRebuildRuntimeFailed
+		if writeErr := r.Client.WriteReplicaRebuildStatus(ctx, target.Ref, authorityExecutorRebuildBlockedStatus(r.now()(), volume, contract, returned, runtimeResult, AuthorityExecutorReasonRebuildRuntimeFailed)); writeErr != nil {
+			return fmt.Errorf("write failed rebuild status after runtime error %v: %w", err, writeErr)
+		}
+		return fmt.Errorf("execute rebuild runtime: %w", err)
+	}
+	if !runtimeResult.DurableFrontierKnown || !returned.RequiredFrontierKnown || runtimeResult.DurableFrontierLSN < returned.RequiredFrontierLSN {
+		result.BlockedReason = AuthorityExecutorBlockedTerminalEvidence
+		if err := r.Client.WriteReplicaRebuildStatus(ctx, target.Ref, authorityExecutorRebuildBlockedStatus(r.now()(), volume, contract, returned, runtimeResult, AuthorityExecutorBlockedTerminalEvidence)); err != nil {
+			result.BlockedReason = "rebuild_status_write_failed"
+			return fmt.Errorf("write incomplete rebuild status: %w", err)
+		}
+		return nil
+	}
+	if err := r.Client.WriteReplicaRebuildStatus(ctx, target.Ref, authorityExecutorRebuildCaughtUpStatus(r.now()(), volume, contract, returned, runtimeResult)); err != nil {
+		result.BlockedReason = "rebuild_status_write_failed"
+		return fmt.Errorf("write caught-up rebuild status: %w", err)
 	}
 	return nil
 }
@@ -335,6 +392,103 @@ func authorityExecutorRebuildPlannedStatus(now time.Time, volume SwBlockVolumeOb
 			"no_primary_authority_change",
 			"no_cross_volume_mutation",
 		},
+	}
+}
+
+func authorityExecutorRebuildRunningStatus(now time.Time, volume SwBlockVolumeObject, contract SwBlockVolumeCRDExecutorContract, returned SwBlockVolumeCRDReturnedReplica) SwBlockReplicaRebuildCRDStatus {
+	status := authorityExecutorRebuildPlannedStatus(now, volume, contract, returned)
+	status.State = "running"
+	status.ReasonCode = AuthorityExecutorReasonRebuildRunning
+	status.RebuildTrafficStarted = true
+	status.Conditions = []ObservationCondition{{
+		Type:     ConditionRecovering,
+		Status:   "True",
+		Reason:   AuthorityExecutorReasonRebuildRunning,
+		Severity: "info",
+		Message:  "returned-replica rebuild/catch-up runtime was invoked; frontend publication remains disabled",
+	}}
+	status.NonClaims = []string{
+		"no_frontend_publication",
+		"no_failback",
+		"no_primary_authority_change",
+		"no_cross_volume_mutation",
+	}
+	return status
+}
+
+func authorityExecutorRebuildCaughtUpStatus(now time.Time, volume SwBlockVolumeObject, contract SwBlockVolumeCRDExecutorContract, returned SwBlockVolumeCRDReturnedReplica, runtimeResult AuthorityRebuildRuntimeResult) SwBlockReplicaRebuildCRDStatus {
+	evidenceRefs := appendUniqueStrings(nil, contract.EvidenceRefs...)
+	evidenceRefs = appendUniqueStrings(evidenceRefs, returned.EvidenceRefs...)
+	evidenceRefs = appendUniqueStrings(evidenceRefs, runtimeResult.EvidenceRefs...)
+	return SwBlockReplicaRebuildCRDStatus{
+		ObservedAt:                  now,
+		Executor:                    defaultString(contract.OwnerExecutor, "authority_recovery_executor"),
+		State:                       "caught_up",
+		ReasonCode:                  AuthorityExecutorReasonRebuildCaughtUp,
+		FrontendFencedBeforeRebuild: returned.FrontendFenced && !returned.FrontendPrimaryReady,
+		PrimaryUnchanged:            returned.FrontendFenced && !returned.FrontendPrimaryReady,
+		DurableFrontierKnown:        runtimeResult.DurableFrontierKnown,
+		DurableFrontierLSN:          runtimeResult.DurableFrontierLSN,
+		RequiredFrontierKnown:       returned.RequiredFrontierKnown,
+		RequiredFrontierLSN:         returned.RequiredFrontierLSN,
+		DurableFrontierCaughtUp:     runtimeResult.DurableFrontierKnown && returned.RequiredFrontierKnown && runtimeResult.DurableFrontierLSN >= returned.RequiredFrontierLSN,
+		RebuildTrafficStarted:       true,
+		NoFrontendPublication:       true,
+		NoCrossVolumeIdentityChange: true,
+		Conditions: []ObservationCondition{{
+			Type:     ConditionRecovered,
+			Status:   "True",
+			Reason:   AuthorityExecutorReasonRebuildCaughtUp,
+			Severity: "info",
+			Message:  "returned-replica rebuild/catch-up reached the required durable frontier; frontend publication remains disabled",
+		}},
+		EvidenceRefs: evidenceRefs,
+		NonClaims: []string{
+			"no_frontend_publication",
+			"no_failback",
+			"no_primary_authority_change",
+			"no_cross_volume_mutation",
+		},
+	}
+}
+
+func authorityExecutorRebuildBlockedStatus(now time.Time, volume SwBlockVolumeObject, contract SwBlockVolumeCRDExecutorContract, returned SwBlockVolumeCRDReturnedReplica, runtimeResult AuthorityRebuildRuntimeResult, reason string) SwBlockReplicaRebuildCRDStatus {
+	status := authorityExecutorRebuildRunningStatus(now, volume, contract, returned)
+	status.State = "blocked"
+	status.ReasonCode = reason
+	status.DurableFrontierKnown = runtimeResult.DurableFrontierKnown
+	if runtimeResult.DurableFrontierKnown {
+		status.DurableFrontierLSN = runtimeResult.DurableFrontierLSN
+	}
+	status.DurableFrontierCaughtUp = runtimeResult.DurableFrontierKnown && returned.RequiredFrontierKnown && runtimeResult.DurableFrontierLSN >= returned.RequiredFrontierLSN
+	status.EvidenceRefs = appendUniqueStrings(status.EvidenceRefs, runtimeResult.EvidenceRefs...)
+	status.Conditions = []ObservationCondition{{
+		Type:     ConditionBlocked,
+		Status:   "True",
+		Reason:   reason,
+		Severity: "warning",
+		Message:  "returned-replica rebuild/catch-up did not produce terminal durable-frontier evidence",
+	}}
+	return status
+}
+
+func authorityExecutorRebuildRuntimeRequest(volume SwBlockVolumeObject, contract SwBlockVolumeCRDExecutorContract, returned SwBlockVolumeCRDReturnedReplica) AuthorityRebuildRuntimeRequest {
+	evidenceRefs := appendUniqueStrings(nil, contract.EvidenceRefs...)
+	evidenceRefs = appendUniqueStrings(evidenceRefs, returned.EvidenceRefs...)
+	return AuthorityRebuildRuntimeRequest{
+		VolumeName:            volume.Ref.Name,
+		VolumeID:              volume.Status.VolumeID,
+		PVCName:               volume.Status.PVCName,
+		ReplicaID:             contract.ReplicaID,
+		DurableFrontierKnown:  returned.DurableFrontierKnown,
+		DurableFrontierLSN:    returned.DurableFrontierLSN,
+		RequiredFrontierKnown: returned.RequiredFrontierKnown,
+		RequiredFrontierLSN:   returned.RequiredFrontierLSN,
+		FrontendFenced:        returned.FrontendFenced,
+		FrontendPrimaryReady:  returned.FrontendPrimaryReady,
+		NoFrontendPublication: true,
+		NoCrossVolumeMutation: true,
+		EvidenceRefs:          evidenceRefs,
 	}
 }
 

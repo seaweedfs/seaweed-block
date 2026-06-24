@@ -2,6 +2,7 @@ package ops
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 )
@@ -177,6 +178,103 @@ func TestAuthorityExecutorReconcilerWritesRebuildPlannedStatus(t *testing.T) {
 	}
 }
 
+func TestAuthorityExecutorReconcilerExecutesRebuildRuntimeAndWritesCaughtUpStatus(t *testing.T) {
+	client := &fakeAuthorityExecutorClient{
+		volumes:  []SwBlockVolumeObject{authorityExecutorRebuildVolume(false, false)},
+		rebuilds: []SwBlockReplicaRebuildObject{authorityExecutorRebuildTarget()},
+	}
+	runtime := &fakeAuthorityRebuildRuntime{
+		result: AuthorityRebuildRuntimeResult{
+			DurableFrontierKnown: true,
+			DurableFrontierLSN:   52,
+			EvidenceRefs:         []string{"runtime-terminal-evidence.txt"},
+		},
+	}
+	now := time.Date(2026, 6, 23, 20, 0, 0, 0, time.UTC)
+	result, err := (AuthorityExecutorReconciler{
+		Namespace:              "kube-system",
+		Client:                 client,
+		RebuildRuntime:         runtime,
+		ExecutionRequested:     true,
+		ExecutionPolicyEnabled: true,
+		AllowedMutationClass:   AuthorityExecutorAllowedMutationRebuildTraffic,
+		Now:                    func() time.Time { return now },
+	}).Reconcile(context.Background())
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if result.MutationAttemptCount != 1 ||
+		result.RebuildProgressMutationAttempts != 1 ||
+		result.BlockedReason != "" ||
+		len(runtime.requests) != 1 ||
+		len(client.rebuildWrites) != 2 {
+		t.Fatalf("result=%+v runtime=%+v rebuild_writes=%+v", result, runtime.requests, client.rebuildWrites)
+	}
+	req := runtime.requests[0]
+	if req.VolumeName != "rebuild" ||
+		req.VolumeID != "pvc-rebuild" ||
+		req.PVCName != "rebuild-pvc" ||
+		req.ReplicaID != "r1" ||
+		req.DurableFrontierLSN != 51 ||
+		req.RequiredFrontierLSN != 52 ||
+		!req.FrontendFenced ||
+		req.FrontendPrimaryReady ||
+		!req.NoFrontendPublication ||
+		!req.NoCrossVolumeMutation {
+		t.Fatalf("runtime request=%+v", req)
+	}
+	running := client.rebuildWrites[0].status
+	if running.State != "running" ||
+		running.ReasonCode != AuthorityExecutorReasonRebuildRunning ||
+		!running.RebuildTrafficStarted ||
+		running.DurableFrontierCaughtUp {
+		t.Fatalf("running status=%+v", running)
+	}
+	caughtUp := client.rebuildWrites[1].status
+	if caughtUp.State != "caught_up" ||
+		caughtUp.ReasonCode != AuthorityExecutorReasonRebuildCaughtUp ||
+		!caughtUp.RebuildTrafficStarted ||
+		!caughtUp.DurableFrontierCaughtUp ||
+		caughtUp.DurableFrontierLSN != 52 ||
+		!caughtUp.NoFrontendPublication ||
+		!caughtUp.NoCrossVolumeIdentityChange ||
+		!authorityExecutorStringSliceContains(caughtUp.EvidenceRefs, "runtime-terminal-evidence.txt") {
+		t.Fatalf("caught_up status=%+v", caughtUp)
+	}
+}
+
+func TestAuthorityExecutorReconcilerWritesBlockedStatusWhenRebuildRuntimeFails(t *testing.T) {
+	client := &fakeAuthorityExecutorClient{
+		volumes:  []SwBlockVolumeObject{authorityExecutorRebuildVolume(false, false)},
+		rebuilds: []SwBlockReplicaRebuildObject{authorityExecutorRebuildTarget()},
+	}
+	runtime := &fakeAuthorityRebuildRuntime{err: errors.New("runtime refused")}
+	result, err := (AuthorityExecutorReconciler{
+		Namespace:              "kube-system",
+		Client:                 client,
+		RebuildRuntime:         runtime,
+		ExecutionRequested:     true,
+		ExecutionPolicyEnabled: true,
+		AllowedMutationClass:   AuthorityExecutorAllowedMutationRebuildTraffic,
+	}).Reconcile(context.Background())
+	if err == nil {
+		t.Fatalf("expected runtime failure, result=%+v", result)
+	}
+	if result.BlockedReason != AuthorityExecutorReasonRebuildRuntimeFailed ||
+		result.MutationAttemptCount != 1 ||
+		len(runtime.requests) != 1 ||
+		len(client.rebuildWrites) != 2 {
+		t.Fatalf("result=%+v runtime=%+v rebuild_writes=%+v", result, runtime.requests, client.rebuildWrites)
+	}
+	blocked := client.rebuildWrites[1].status
+	if blocked.State != "blocked" ||
+		blocked.ReasonCode != AuthorityExecutorReasonRebuildRuntimeFailed ||
+		!blocked.RebuildTrafficStarted ||
+		blocked.DurableFrontierCaughtUp {
+		t.Fatalf("blocked status=%+v", blocked)
+	}
+}
+
 func TestAuthorityExecutorReconcilerRejectsExecutionWhenPolicyDisabled(t *testing.T) {
 	result, err := (AuthorityExecutorReconciler{
 		Client:             &fakeAuthorityExecutorClient{},
@@ -283,6 +381,17 @@ type fakeAuthorityExecutorClient struct {
 	rebuilds      []SwBlockReplicaRebuildObject
 	writes        []fakeReplicaEligibilityWrite
 	rebuildWrites []fakeReplicaRebuildWrite
+}
+
+type fakeAuthorityRebuildRuntime struct {
+	result   AuthorityRebuildRuntimeResult
+	err      error
+	requests []AuthorityRebuildRuntimeRequest
+}
+
+func (f *fakeAuthorityRebuildRuntime) ExecuteRebuild(_ context.Context, req AuthorityRebuildRuntimeRequest) (AuthorityRebuildRuntimeResult, error) {
+	f.requests = append(f.requests, req)
+	return f.result, f.err
 }
 
 type fakeReplicaEligibilityWrite struct {

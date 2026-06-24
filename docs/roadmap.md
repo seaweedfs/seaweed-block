@@ -221,13 +221,20 @@ Recommended order from here:
     convergence. This proves the data path beneath the planning model; it does
     not yet wire the Kubernetes authority executor to trigger that traffic in a
     live blockvolume pod.
-18. Phase 61: executor-to-runtime rebuild call-site. **Next recommended slice**.
-    Connect the bounded `authority-executor` path to the blockvolume runtime so
-    `SwBlockReplicaRebuild.status` can move from `planned` to real
-    running/completed/failed terminal evidence driven by data-path traffic.
-    Keep frontend publication, failback, and ACK eligibility mutation out of
-    scope unless separately gated.
-19. Add backup/restore and NVMe ANA parity after they can reuse the same action
+18. Phase 61: authority executor runtime call-site. **Closed 2026-06-23, QA PASS**
+    (`internal/docs/finished-plans/phase61_finishedplan_authority_executor_runtime_callsite.md`).
+    The authority executor now has a bounded `AuthorityRebuildRuntime` seam.
+    With no runtime it preserves the Phase 59 `planned` behavior; with a
+    runtime it writes `running`, invokes the runtime, and maps terminal evidence
+    to `caught_up` or `blocked`. This still does not wire a concrete
+    blockvolume RPC/HTTP/gRPC transport.
+19. Phase 62: concrete blockvolume runtime transport. **Next recommended slice**.
+    Connect the Phase 61 runtime seam to a live blockvolume runtime transport
+    and run it against the Phase 60 data-path proof. The target claim should be
+    limited to `SwBlockReplicaRebuild.status` moving from planned/running to
+    caught_up/blocked from terminal evidence. Keep frontend publication,
+    failback, and ACK eligibility mutation out of scope unless separately gated.
+20. Add backup/restore and NVMe ANA parity after they can reuse the same action
    owner, evidence, and status model rather than creating another isolated
    control plane.
 
@@ -242,9 +249,11 @@ bounded ACK eligibility mutation without allowing frontend publication, rebuild
 traffic, or failback. Phases 56-59 extend that same pattern to returned-replica
 rebuild planning: contract, target CR, target owner, and planned status before
 any real rebuild/catch-up traffic is enabled. Phase 60 proves that the existing
-data path underneath that planning model can move bytes and converge replicas;
-Phase 61 should connect the executor call-site to that runtime path without
-broadening the frontend/failback claims.
+data path underneath that planning model can move bytes and converge replicas.
+Phase 61 connects the executor call-site seam and terminal-status mapping
+without a concrete blockvolume RPC transport. Phase 62 should connect that seam
+to the live blockvolume runtime path without broadening the frontend/failback
+claims.
 
 The practical rule is:
 
