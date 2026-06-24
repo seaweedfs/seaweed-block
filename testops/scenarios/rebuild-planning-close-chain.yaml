@@ -1,0 +1,112 @@
+# Runner-native Phase 59 gate: returned-replica rebuild planning close path.
+
+name: rebuild-planning-close-chain
+timeout: 8m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: rebuild_planning_close_gate
+    actions:
+      - action: exec
+        node: m02
+        timeout: 7m
+        cmd: "rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase59-rebuild-planning-close && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase59-rebuild-planning-close && cd {{ product_root }} && SW_BLOCK_ARTIFACT_DIR=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase59-rebuild-planning-close bash scripts/run-phase59-rebuild-planning-close-gate.sh {{ product_root }}"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase59-rebuild-planning-close/phase59-rebuild-planning-close-summary.txt"
+        pattern: "^phase59_rebuild_planning_close_status=ok$"
+        save_as: phase59_ok
+      - action: assert_greater
+        actual: "{{ phase59_ok }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase59-rebuild-planning-close/phase59-rebuild-planning-close-summary.txt"
+        pattern: "^rebuild_target_owner=target_mutation namespace=sw-block-phase59-rebuild-planning volumes=1 contracts=1 targets_planned=1 targets_existing=0 targets_created=1 invalid_contracts=0 mutation_allowed=true storage_mutation_allowed=false frontend_publication_allowed=false failback_allowed=false$"
+        save_as: target_owner_created
+      - action: assert_greater
+        actual: "{{ target_owner_created }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase59-rebuild-planning-close/phase59-rebuild-planning-close-summary.txt"
+        pattern: "^rebuild_target_owner=target_mutation namespace=sw-block-phase59-rebuild-planning volumes=1 contracts=1 targets_planned=1 targets_existing=1 targets_created=0 invalid_contracts=0 mutation_allowed=false storage_mutation_allowed=false frontend_publication_allowed=false failback_allowed=false$"
+        save_as: target_owner_idempotent
+      - action: assert_greater
+        actual: "{{ target_owner_idempotent }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase59-rebuild-planning-close/phase59-rebuild-planning-close-summary.txt"
+        pattern: "^rebuild_target_count_after_owner=1$"
+        save_as: target_count_one
+      - action: assert_greater
+        actual: "{{ target_count_one }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase59-rebuild-planning-close/phase59-rebuild-planning-close-summary.txt"
+        pattern: "^rebuild_target_status_before_executor=$"
+        save_as: target_status_empty
+      - action: assert_greater
+        actual: "{{ target_status_empty }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase59-rebuild-planning-close/phase59-rebuild-planning-close-summary.txt"
+        pattern: "^authority_executor=executed namespace=sw-block-phase59-rebuild-planning volumes=1 contracts=1 disabled_contracts=1 blocked_contracts=0 terminal_evidence_required=1 terminal_evidence_missing=0 ack_eligibility_target_missing=0 rebuild_target_missing=0 allowed_mutation_class=rebuild_traffic execution_requested=true execution_policy_enabled=true mutation_attempts=1 ack_eligibility_mutation_attempts=0 rebuild_progress_mutation_attempts=1 mutation_allowed=true storage_mutation_allowed=false$"
+        save_as: executor_executed
+      - action: assert_greater
+        actual: "{{ executor_executed }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase59-rebuild-planning-close/phase59-rebuild-planning-close-summary.txt"
+        pattern: "^rebuild_status_state_after_executor=planned$"
+        save_as: rebuild_planned
+      - action: assert_greater
+        actual: "{{ rebuild_planned }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase59-rebuild-planning-close/phase59-rebuild-planning-close-summary.txt"
+        pattern: "^rebuild_traffic_started_after_executor=false$"
+        save_as: no_traffic
+      - action: assert_greater
+        actual: "{{ no_traffic }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase59-rebuild-planning-close/phase59-rebuild-planning-close-summary.txt"
+        pattern: "^no_frontend_publication_after_executor=true$"
+        save_as: no_frontend
+      - action: assert_greater
+        actual: "{{ no_frontend }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase59-rebuild-planning-close/phase59-rebuild-planning-close-summary.txt"
+        pattern: "^swblockvolume_reason_unchanged=candidate_frontier_behind$"
+        save_as: volume_unchanged
+      - action: assert_greater
+        actual: "{{ volume_unchanged }}"
+        threshold: "0"
+
+  - name: collect
+    always: true
+    actions:
+      - action: collect_path
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase59-rebuild-planning-close"
+        name: "remote-phases"
+        ignore_error: true

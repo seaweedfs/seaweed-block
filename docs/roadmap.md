@@ -192,7 +192,28 @@ Recommended order from here:
     This phase aligns README, release notes, user capabilities, and developer
     wiki pages with the Phase 54 boundary. It should not add a new storage
     feature or broaden the claim beyond ACK eligibility target status.
-13. Add backup/restore and NVMe ANA parity after they can reuse the same action
+13. Phase 56: returned-replica rebuild/catch-up contract. **Closed 2026-06-23, QA PASS**
+    (`internal/docs/finished-plans/phase56_finishedplan_returned_replica_rebuild_contract.md`).
+    The product now surfaces `authority.rebuild_returned_replica` as a disabled
+    future action when a returned replica is frontend-fenced and behind the
+    required frontier. It does not start rebuild traffic.
+14. Phase 57: rebuild progress target. **Closed 2026-06-23, QA PASS**
+    (`internal/docs/finished-plans/phase57_finishedplan_rebuild_progress_target.md`).
+    `SwBlockReplicaRebuild.status` exists as the narrow target for planned
+    rebuild progress. The authority executor may write only planned status under
+    the `rebuild_traffic` mutation class; it still does not copy data, publish a
+    frontend, or fail back a replica.
+15. Phase 58: rebuild target owner. **Closed 2026-06-23, QA PASS**
+    (`internal/docs/finished-plans/phase58_finishedplan_rebuild_target_owner.md`).
+    A separate target-owner identity can create `SwBlockReplicaRebuild` main
+    objects from ready rebuild contracts. It cannot write status or mutate
+    volume, workload, frontend, or storage state.
+16. Phase 59: rebuild planning close gate. **Closed 2026-06-23, QA PASS**
+    (`internal/docs/finished-plans/phase59_finishedplan_rebuild_planning_close_gate.md`).
+    This gate connects Phases 56-58 as one product path:
+    rebuild contract -> target-owner-created target CR -> executor planned
+    status. It is still planning/status only, not real rebuild data movement.
+17. Add backup/restore and NVMe ANA parity after they can reuse the same action
    owner, evidence, and status model rather than creating another isolated
    control plane.
 
@@ -204,7 +225,9 @@ returned-replica reintegration before any larger storage feature is enabled.
 Phases 47-54 close the executor-admission, preflight, status-schema, ACK
 evidence, executor-contract, disabled executor-process bridge, and first
 bounded ACK eligibility mutation without allowing frontend publication, rebuild
-traffic, or failback.
+traffic, or failback. Phases 56-59 extend that same pattern to returned-replica
+rebuild planning: contract, target CR, target owner, and planned status before
+any real rebuild/catch-up traffic is enabled.
 
 The practical rule is:
 
