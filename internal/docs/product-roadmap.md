@@ -59,7 +59,7 @@ This is the short internal roadmap. Keep it current and readable.
   lifecycle.
 - Current development slice: returned-replica rebuild/reintegration runtime
   productization has advanced through Phase 64. Phases 46-54 made returned
-  replicas visible and action-gated, Phases 60-66 connected the bounded
+  replicas visible and action-gated, Phases 60-67 connected the bounded
   rebuild/catch-up runtime path through target facts, executor HTTP transport,
   an opt-in blockvolume runtime start endpoint, and terminal caught-up evidence.
   Phase 66 adds the disabled publication-decision surface after caught-up. Do
@@ -584,15 +584,15 @@ product risk. The recommended order is:
    The live iSCSI returned-replica gate emits same-run managed-volume
    evidence for required frontier coverage and replay it through report/status
    surfaces before any mutating returned-replica executor is proposed.
-12. **Phase 60-66: rebuild runtime path.** Closed through caught-up publication preflight.
+12. **Phase 60-67: rebuild runtime path and ACK eligibility publication.** Closed through bounded ACK eligibility.
    Phase 60 proved the existing datapath, Phase 61 added the executor call-site,
    Phase 62 added HTTP runtime transport, Phase 63 locked runtime target facts,
    Phase 64 added the opt-in blockvolume endpoint that starts recovery after
    primary/lineage validation, Phase 65 added terminal durable-frontier
-   evidence, and Phase 66 surfaces caught-up as publication preflight while
-   keeping mutation disabled. The remaining operation gap before NVMe is an
-   ACK-eligibility publication mutation with separate admission/RBAC/evidence,
-   if the team chooses to continue.
+   evidence, Phase 66 surfaces caught-up as publication preflight while keeping
+   publication disabled, and Phase 67 publishes only ACK eligibility after
+   caught-up terminal evidence. Frontend publication and failback remain
+   separate gated work before NVMe.
 13. **Backup/snapshot/restore and NVMe ANA parity.**
    Important, but they should reuse the status/action model rather than create
    another isolated control plane.
@@ -612,10 +612,11 @@ Approximate engineering effort if scope remains tight:
   API/admission proof that only finalizers can be patched.
 - Productized returned-replica rebuild/reintegration/failback: high. Phase 46
   closed the status/decision slice: returned replicas are visible, fenced, and
-  volume-scoped across product surfaces. Phases 47-66 have advanced from
+  volume-scoped across product surfaces. Phases 47-67 have advanced from
   dry-run admission to bounded runtime start, terminal completion evidence, and
-  disabled publication preflight. ACK eligibility mutation, frontend
-  publication, and failback remain separate gated work.
+  disabled publication preflight. Phase 67 adds the first bounded ACK
+  eligibility status publication. Frontend publication and failback remain
+  separate gated work.
 - Backup/snapshot/restore: high. Requires durable data semantics and user-facing
   restore guarantees.
 - NVMe ANA parity: medium/high. Protocol-specific work, but cheaper if it uses
@@ -693,9 +694,14 @@ Approximate engineering effort if scope remains tight:
   status now exposes `publicationDecision` / `publicationReason` /
   `publicationMutationAllowed`, with publication blocked until caught-up and
   disabled after caught-up.
-- Phase 67 can either add the first bounded ACK eligibility publication
-  mutation with admission/RBAC/evidence gates, or stop this operation line and
-  start NVMe ANA using the same status/action/evidence model.
+- Phase 67 ACK Eligibility Publication is closed. After matching rebuild
+  terminal evidence is `caught_up`, authority-executor can publish only
+  `SwBlockReplicaEligibility.status` with `ack_eligibility_recorded`; frontend
+  publication, failback, storage mutation, and primary authority changes remain
+  explicitly out of scope.
+- Phase 68 should be frontend publication preflight, not failback. It should
+  surface the exact evidence and decision state needed for frontend publication
+  while keeping the frontend mutation disabled.
 - Phase 41-44 are the Operation Layer v0.5 release train: lifecycle-owner
   foundation, real API/admission proof, first bounded finalizer mutation, and
   delete lifecycle close gate.

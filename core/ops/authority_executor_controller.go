@@ -120,6 +120,10 @@ func (r AuthorityExecutorReconciler) Reconcile(ctx context.Context) (AuthorityEx
 		if err != nil {
 			return AuthorityExecutorReconcileResult{}, err
 		}
+		rebuildTargets, err = r.Client.ListSwBlockReplicaRebuilds(ctx, namespace)
+		if err != nil {
+			return AuthorityExecutorReconcileResult{}, err
+		}
 	}
 	if r.ExecutionRequested && allowedMutationClass == AuthorityExecutorAllowedMutationRebuildTraffic {
 		rebuildTargets, err = r.Client.ListSwBlockReplicaRebuilds(ctx, namespace)
@@ -155,6 +159,11 @@ func (r AuthorityExecutorReconciler) Reconcile(ctx context.Context) (AuthorityEx
 					return result, err
 				}
 			}
+			if r.ExecutionRequested && allowedMutationClass == AuthorityExecutorAllowedMutationAckEligibility && contract.ActionType == ManagedVolumeActionRebuildReturned {
+				if err := r.evaluateAckEligibilityAfterRebuild(ctx, &result, volume, contract, targets, rebuildTargets); err != nil {
+					return result, err
+				}
+			}
 			if r.ExecutionRequested && allowedMutationClass == AuthorityExecutorAllowedMutationRebuildTraffic && contract.ActionType == ManagedVolumeActionRebuildReturned {
 				if err := r.evaluateRebuildPlanning(ctx, &result, volume, contract, rebuildTargets); err != nil {
 					return result, err
@@ -186,6 +195,35 @@ func (r AuthorityExecutorReconciler) evaluateAckEligibility(ctx context.Context,
 	if err := r.Client.WriteReplicaEligibilityStatus(ctx, target.Ref, authorityExecutorAckEligibilityStatus(r.now()(), volume, contract, returned)); err != nil {
 		result.BlockedReason = "ack_eligibility_status_write_failed"
 		return fmt.Errorf("write ACK eligibility status: %w", err)
+	}
+	return nil
+}
+
+func (r AuthorityExecutorReconciler) evaluateAckEligibilityAfterRebuild(ctx context.Context, result *AuthorityExecutorReconcileResult, volume SwBlockVolumeObject, contract SwBlockVolumeCRDExecutorContract, targets []SwBlockReplicaEligibilityObject, rebuildTargets []SwBlockReplicaRebuildObject) error {
+	returned, ok := authorityExecutorRebuildEvidenceReady(volume, contract)
+	if !ok {
+		result.TerminalEvidenceMissingCount++
+		result.BlockedReason = authorityExecutorFirstNonEmpty(result.BlockedReason, AuthorityExecutorBlockedTerminalEvidence)
+		return nil
+	}
+	rebuildTarget, ok := authorityExecutorFindRebuildTarget(volume, contract, rebuildTargets)
+	if !ok || !authorityExecutorRebuildCaughtUpPublicationReady(rebuildTarget.Status) {
+		result.TerminalEvidenceMissingCount++
+		result.BlockedReason = authorityExecutorFirstNonEmpty(result.BlockedReason, AuthorityExecutorBlockedTerminalEvidence)
+		return nil
+	}
+	target, ok := authorityExecutorFindTarget(volume, contract, targets)
+	if !ok {
+		result.AckEligibilityTargetMissingCount++
+		result.BlockedReason = authorityExecutorFirstNonEmpty(result.BlockedReason, AuthorityExecutorBlockedMutationTargetMissing)
+		return nil
+	}
+	result.MutationAttemptCount++
+	result.AckEligibilityMutationAttempts++
+	status := authorityExecutorAckEligibilityStatusFromRebuild(r.now()(), volume, contract, returned, rebuildTarget.Status)
+	if err := r.Client.WriteReplicaEligibilityStatus(ctx, target.Ref, status); err != nil {
+		result.BlockedReason = "ack_eligibility_status_write_failed"
+		return fmt.Errorf("write rebuild ACK eligibility status: %w", err)
 	}
 	return nil
 }
@@ -359,6 +397,21 @@ func authorityExecutorFindRebuildTarget(volume SwBlockVolumeObject, contract SwB
 	return matches[0], true
 }
 
+func authorityExecutorRebuildCaughtUpPublicationReady(status SwBlockReplicaRebuildCRDStatus) bool {
+	return status.State == "caught_up" &&
+		status.ReasonCode == AuthorityExecutorReasonRebuildCaughtUp &&
+		status.RebuildTrafficStarted &&
+		status.DurableFrontierKnown &&
+		status.RequiredFrontierKnown &&
+		status.DurableFrontierCaughtUp &&
+		status.DurableFrontierLSN >= status.RequiredFrontierLSN &&
+		status.PublicationDecision == AuthorityExecutorPublicationDecisionDisabled &&
+		status.PublicationReason == AuthorityExecutorPublicationReasonPolicyDisabled &&
+		!status.PublicationMutationAllowed &&
+		status.NoFrontendPublication &&
+		status.NoCrossVolumeIdentityChange
+}
+
 func authorityExecutorRebuildRuntimeTargetReady(spec SwBlockReplicaRebuildSpec) bool {
 	return spec.RuntimeEndpoint != "" &&
 		spec.SessionID != 0 &&
@@ -391,6 +444,37 @@ func authorityExecutorAckEligibilityStatus(now time.Time, volume SwBlockVolumeOb
 		NonClaims: []string{
 			"no_frontend_publication",
 			"no_rebuild_traffic",
+			"no_failback",
+			"no_primary_authority_change",
+			"no_cross_volume_mutation",
+		},
+	}
+}
+
+func authorityExecutorAckEligibilityStatusFromRebuild(now time.Time, volume SwBlockVolumeObject, contract SwBlockVolumeCRDExecutorContract, returned SwBlockVolumeCRDReturnedReplica, rebuild SwBlockReplicaRebuildCRDStatus) SwBlockReplicaEligibilityCRDStatus {
+	evidenceRefs := appendUniqueStrings(nil, contract.EvidenceRefs...)
+	evidenceRefs = appendUniqueStrings(evidenceRefs, returned.EvidenceRefs...)
+	evidenceRefs = appendUniqueStrings(evidenceRefs, rebuild.EvidenceRefs...)
+	return SwBlockReplicaEligibilityCRDStatus{
+		ObservedAt:                   now,
+		Executor:                     defaultString(contract.OwnerExecutor, "authority_recovery_executor"),
+		ReasonCode:                   AuthorityExecutorReasonAckEligibilityRecorded,
+		AckEligibilityKnown:          true,
+		AckEligible:                  true,
+		FrontendFencedAfterExecution: returned.FrontendFenced && !returned.FrontendPrimaryReady,
+		PrimaryUnchanged:             returned.FrontendFenced && !returned.FrontendPrimaryReady,
+		DurableFrontierCovered:       rebuild.DurableFrontierKnown && rebuild.RequiredFrontierKnown && rebuild.DurableFrontierLSN >= rebuild.RequiredFrontierLSN,
+		NoCrossVolumeIdentityChange:  rebuild.NoCrossVolumeIdentityChange,
+		Conditions: []ObservationCondition{{
+			Type:     ConditionReady,
+			Status:   "True",
+			Reason:   AuthorityExecutorReasonAckEligibilityRecorded,
+			Severity: "info",
+			Message:  "ACK eligibility was recorded only after returned-replica rebuild reached the required durable frontier",
+		}},
+		EvidenceRefs: evidenceRefs,
+		NonClaims: []string{
+			"no_frontend_publication",
 			"no_failback",
 			"no_primary_authority_change",
 			"no_cross_volume_mutation",

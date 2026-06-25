@@ -298,6 +298,91 @@ func TestAuthorityExecutorReconcilerKeepsRunningWhenRuntimeOnlyStarts(t *testing
 	}
 }
 
+func TestAuthorityExecutorReconcilerPublishesAckEligibilityAfterRebuildCaughtUp(t *testing.T) {
+	client := &fakeAuthorityExecutorClient{
+		volumes:       []SwBlockVolumeObject{authorityExecutorRebuildVolume(false, false)},
+		eligibilities: []SwBlockReplicaEligibilityObject{authorityExecutorRebuildEligibilityTarget()},
+		rebuilds:      []SwBlockReplicaRebuildObject{authorityExecutorCaughtUpRebuildTarget()},
+	}
+	now := time.Date(2026, 6, 25, 2, 0, 0, 0, time.UTC)
+	result, err := (AuthorityExecutorReconciler{
+		Namespace:              "kube-system",
+		Client:                 client,
+		ExecutionRequested:     true,
+		ExecutionPolicyEnabled: true,
+		AllowedMutationClass:   AuthorityExecutorAllowedMutationAckEligibility,
+		Now:                    func() time.Time { return now },
+	}).Reconcile(context.Background())
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if result.MutationAttemptCount != 1 ||
+		result.AckEligibilityMutationAttempts != 1 ||
+		result.RebuildProgressMutationAttempts != 0 ||
+		result.BlockedReason != "" ||
+		len(client.writes) != 1 ||
+		len(client.rebuildWrites) != 0 {
+		t.Fatalf("result=%+v ack_writes=%+v rebuild_writes=%+v", result, client.writes, client.rebuildWrites)
+	}
+	write := client.writes[0]
+	if write.ref.Name != "rebuild-r1-ack" {
+		t.Fatalf("write ref=%+v", write.ref)
+	}
+	status := write.status
+	if status.ReasonCode != AuthorityExecutorReasonAckEligibilityRecorded ||
+		!status.AckEligibilityKnown ||
+		!status.AckEligible ||
+		!status.FrontendFencedAfterExecution ||
+		!status.PrimaryUnchanged ||
+		!status.DurableFrontierCovered ||
+		!status.NoCrossVolumeIdentityChange ||
+		!status.ObservedAt.Equal(now) {
+		t.Fatalf("status=%+v", status)
+	}
+	for _, want := range []string{"rebuild-contract.txt", "rebuild.txt", "runtime-terminal-evidence.txt"} {
+		if !authorityExecutorStringSliceContains(status.EvidenceRefs, want) {
+			t.Fatalf("evidence refs missing %s: %+v", want, status.EvidenceRefs)
+		}
+	}
+	for _, want := range []string{"no_frontend_publication", "no_failback", "no_primary_authority_change", "no_cross_volume_mutation"} {
+		if !authorityExecutorStringSliceContains(status.NonClaims, want) {
+			t.Fatalf("non-claims missing %s: %+v", want, status.NonClaims)
+		}
+	}
+}
+
+func TestAuthorityExecutorReconcilerHoldsAckEligibilityUntilRebuildCaughtUp(t *testing.T) {
+	for name, rebuild := range map[string]SwBlockReplicaRebuildObject{
+		"running":        authorityExecutorRunningRebuildTarget(),
+		"policy_allowed": authorityExecutorCaughtUpRebuildTargetWithPublicationAllowed(),
+	} {
+		t.Run(name, func(t *testing.T) {
+			client := &fakeAuthorityExecutorClient{
+				volumes:       []SwBlockVolumeObject{authorityExecutorRebuildVolume(false, false)},
+				eligibilities: []SwBlockReplicaEligibilityObject{authorityExecutorRebuildEligibilityTarget()},
+				rebuilds:      []SwBlockReplicaRebuildObject{rebuild},
+			}
+			result, err := (AuthorityExecutorReconciler{
+				Namespace:              "kube-system",
+				Client:                 client,
+				ExecutionRequested:     true,
+				ExecutionPolicyEnabled: true,
+				AllowedMutationClass:   AuthorityExecutorAllowedMutationAckEligibility,
+			}).Reconcile(context.Background())
+			if err != nil {
+				t.Fatalf("reconcile: %v", err)
+			}
+			if result.BlockedReason != AuthorityExecutorBlockedTerminalEvidence ||
+				result.TerminalEvidenceMissingCount != 1 ||
+				result.MutationAttemptCount != 0 ||
+				result.AckEligibilityMutationAttempts != 0 ||
+				len(client.writes) != 0 {
+				t.Fatalf("result=%+v writes=%+v", result, client.writes)
+			}
+		})
+	}
+}
+
 func TestAuthorityExecutorReconcilerTransitionsFromStartedToCaughtUpOnTerminalRuntimeEvidence(t *testing.T) {
 	client := &fakeAuthorityExecutorClient{
 		volumes:  []SwBlockVolumeObject{authorityExecutorRebuildVolume(false, false)},
@@ -698,5 +783,76 @@ func authorityExecutorRuntimeRebuildTarget() SwBlockReplicaRebuildObject {
 	target.Spec.FromLSN = 52
 	target.Spec.FrontierHintLSN = 52
 	target.Spec.BasePinLSN = 60
+	return target
+}
+
+func authorityExecutorRebuildEligibilityTarget() SwBlockReplicaEligibilityObject {
+	return SwBlockReplicaEligibilityObject{
+		Ref: OperatorObjectRef{
+			APIVersion: SwBlockVolumeAPIVersion,
+			Kind:       SwBlockReplicaEligibilityKind,
+			Namespace:  "kube-system",
+			Name:       "rebuild-r1-ack",
+		},
+		Spec: SwBlockReplicaEligibilitySpec{
+			VolumeName: "rebuild",
+			VolumeID:   "pvc-rebuild",
+			PVCName:    "rebuild-pvc",
+			ReplicaID:  "r1",
+		},
+	}
+}
+
+func authorityExecutorRunningRebuildTarget() SwBlockReplicaRebuildObject {
+	target := authorityExecutorRebuildTarget()
+	target.Status = SwBlockReplicaRebuildCRDStatus{
+		Executor:                    "authority_recovery_executor",
+		State:                       "running",
+		ReasonCode:                  AuthorityExecutorReasonRebuildRunning,
+		FrontendFencedBeforeRebuild: true,
+		PrimaryUnchanged:            true,
+		DurableFrontierKnown:        true,
+		DurableFrontierLSN:          51,
+		RequiredFrontierKnown:       true,
+		RequiredFrontierLSN:         52,
+		DurableFrontierCaughtUp:     false,
+		RebuildTrafficStarted:       true,
+		PublicationDecision:         AuthorityExecutorPublicationDecisionBlocked,
+		PublicationReason:           AuthorityExecutorPublicationReasonCaughtUpRequired,
+		PublicationMutationAllowed:  false,
+		NoFrontendPublication:       true,
+		NoCrossVolumeIdentityChange: true,
+		EvidenceRefs:                []string{"runtime-running-evidence.txt"},
+	}
+	return target
+}
+
+func authorityExecutorCaughtUpRebuildTarget() SwBlockReplicaRebuildObject {
+	target := authorityExecutorRebuildTarget()
+	target.Status = SwBlockReplicaRebuildCRDStatus{
+		Executor:                    "authority_recovery_executor",
+		State:                       "caught_up",
+		ReasonCode:                  AuthorityExecutorReasonRebuildCaughtUp,
+		FrontendFencedBeforeRebuild: true,
+		PrimaryUnchanged:            true,
+		DurableFrontierKnown:        true,
+		DurableFrontierLSN:          52,
+		RequiredFrontierKnown:       true,
+		RequiredFrontierLSN:         52,
+		DurableFrontierCaughtUp:     true,
+		RebuildTrafficStarted:       true,
+		PublicationDecision:         AuthorityExecutorPublicationDecisionDisabled,
+		PublicationReason:           AuthorityExecutorPublicationReasonPolicyDisabled,
+		PublicationMutationAllowed:  false,
+		NoFrontendPublication:       true,
+		NoCrossVolumeIdentityChange: true,
+		EvidenceRefs:                []string{"runtime-terminal-evidence.txt"},
+	}
+	return target
+}
+
+func authorityExecutorCaughtUpRebuildTargetWithPublicationAllowed() SwBlockReplicaRebuildObject {
+	target := authorityExecutorCaughtUpRebuildTarget()
+	target.Status.PublicationMutationAllowed = true
 	return target
 }

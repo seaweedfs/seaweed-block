@@ -1,121 +1,138 @@
-# Current Plan: Phase 66 Caught-up Publication Preflight
+# Current Plan: Phase 67 ACK Eligibility Publication
 
 Status: complete.
 
 ## Goal
 
-Phase 65 proved runtime rebuild/catch-up can reach terminal caught-up evidence.
-Phase 66 consumes that evidence without enabling publication.
+Phase 64-65 proved the runtime rebuild endpoint can start returned-replica
+catch-up and report terminal durable-frontier evidence. Phase 66 consumed that
+terminal state as a publication preflight but kept all publication mutations
+disabled.
 
-The product now exposes the next operation decision on
-`SwBlockReplicaRebuild.status`:
+Phase 67 adds the narrowest next mutation: publish ACK eligibility as a
+`SwBlockReplicaEligibility.status` update after a matching
+`SwBlockReplicaRebuild.status` is terminal `caught_up`.
 
-```text
-not caught_up -> publicationDecision=blocked
-caught_up     -> publicationDecision=disabled
-```
-
-`disabled` means the precondition is satisfied but the policy for publication
-mutation remains off. This keeps the control model honest: caught-up is
-necessary, but not sufficient, for ACK eligibility, frontend publication, or
-failback.
+This is not frontend publication, failback, primary swap, or automatic authority
+promotion. It only records that the returned replica is eligible to ACK again
+after rebuild/catch-up evidence has converged.
 
 ## Delivered
 
-### D1: Publication Decision Surface
+### D1: Rebuild Caught-up as ACK Publication Precondition
 
-`SwBlockReplicaRebuild.status` now includes:
-
-```text
-publicationDecision
-publicationReason
-publicationMutationAllowed
-```
-
-The CRD schema locks the allowed decision values:
+`authority-executor --allowed-mutation-class ack_eligibility --enable-execution
+--execution-policy` now also reads `SwBlockReplicaRebuild` targets. For a
+`authority.rebuild_returned_replica` contract it writes ACK eligibility only
+when the matching rebuild target is:
 
 ```text
-blocked
-disabled
+state=caught_up
+reasonCode=rebuild_runtime_caught_up
+rebuildTrafficStarted=true
+durableFrontierCaughtUp=true
+publicationDecision=disabled
+publicationReason=publication_policy_disabled
+publicationMutationAllowed=false
+noFrontendPublication=true
+noCrossVolumeIdentityChange=true
 ```
 
-### D2: Status Semantics
+If the rebuild is still running, missing, not caught up, or carries an
+unexpected publication mutation flag, ACK publication stays held.
 
-Rebuild states project publication readiness as:
+### D2: Status-only Mutation
+
+The only product write is:
 
 ```text
-planned/running/blocked:
-  publicationDecision=blocked
-  publicationReason=rebuild_caught_up_required
-  publicationMutationAllowed=false
-
-caught_up:
-  publicationDecision=disabled
-  publicationReason=publication_policy_disabled
-  publicationMutationAllowed=false
+SwBlockReplicaEligibility.status
 ```
 
-### D3: Gate
+The published status records:
+
+```text
+reasonCode=ack_eligibility_recorded
+ackEligibilityKnown=true
+ackEligible=true
+frontendFencedAfterExecution=true
+primaryUnchanged=true
+durableFrontierCovered=true
+noCrossVolumeIdentityChange=true
+```
+
+Evidence refs are merged from the executor contract, returned-replica evidence,
+and runtime terminal rebuild evidence.
+
+### D3: Non-Claims
+
+Phase 67 explicitly does not claim:
+
+```text
+frontend publication
+frontend target change
+primary authority change
+failback
+storage/workload mutation
+NVMe ANA behavior
+```
+
+### D4: Gate
 
 Gate files:
 
 ```text
-scripts/run-phase66-caught-up-publication-preflight-gate.sh
-testops/scenarios/caught-up-publication-preflight-chain.yaml
+scripts/run-phase67-ack-eligibility-publication-gate.sh
+testops/scenarios/ack-eligibility-publication-chain.yaml
 ```
 
-The gate proves schema, Kubernetes writer casing, blocked-before-caught-up, and
-disabled-after-caught-up behavior.
-
-## Non-Claims
-
-Phase 66 does not claim:
-
-```text
-ACK eligibility mutation
-frontend publication
-failback
-automatic publish target change
-NVMe/ANA behavior
-```
+The gate proves the positive caught-up publication path and the negative hold
+paths before caught-up / unexpected publication mutation.
 
 ## Verification
 
 Local:
 
 ```text
-go test ./core/ops ./core/transport ./core/replication ./core/host/volume ./cmd/blockvolume
-C:\work\swblock.exe validate testops\scenarios\caught-up-publication-preflight-chain.yaml
+go test ./core/ops ./cmd/sw-block
+C:\work\swblock.exe validate testops\scenarios\ack-eligibility-publication-chain.yaml
 ```
 
 Live:
 
 ```text
-20260625-014356-978b caught-up-publication-preflight-chain PASS 12/12
+20260625-020908-a6ed ack-eligibility-publication-chain PASS 14/14
 ```
 
 Terminal evidence:
 
 ```text
-phase66_caught_up_publication_preflight_status=ok
-publication_decision_schema_locked=true
-publication_decision_camel_case=true
-publication_blocked_until_caught_up=true
-publication_disabled_after_caught_up=true
-publication_mutation_allowed=false
-frontend_publication_allowed=false
-failback_allowed=false
-ack_eligibility_mutation_allowed=false
+phase67_ack_eligibility_publication_status=ok
+core_ops_ack_publication_tests=pass
+eligibility_status_schema_locked=true
+rebuild_status_schema_locked=true
+ack_publication_after_caught_up=true
+ack_publication_holds_before_caught_up=true
+ack_eligibility_status_mutation_allowed=true
+ack_publication_requires_rebuild_caught_up=true
+ack_publication_rejects_running_rebuild=true
+ack_publication_rejects_unexpected_publication_allowed=true
+rebuild_status_mutation_attempts=0
+frontend_publication_attempts=0
+failback_attempts=0
+storage_mutation_allowed=false
 ```
 
 ## Next
 
-Phase 67 can either:
+Phase 68 should not jump to failback. The next operation-layer slice should be
+frontend publication preflight:
 
 ```text
-1. add the first bounded ACK-eligibility publication mutation, with admission/RBAC/evidence gates; or
-2. stop the returned-replica executor line here and start NVMe ANA using the same status/action model.
+ACK eligibility published -> frontend publication decision surface
 ```
 
-If continuing operations, do not jump directly to frontend/failback. ACK
-eligibility is the narrowest next mutation.
+The first Phase 68 deliverable should surface the exact evidence required to
+publish the frontend, while still keeping the frontend mutation disabled. Only
+after that gate passes should a bounded frontend publication mutation be
+considered.
