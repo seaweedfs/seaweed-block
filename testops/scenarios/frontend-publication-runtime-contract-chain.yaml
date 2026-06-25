@@ -1,0 +1,131 @@
+# Runner-native Phase 72 gate: frontend publication runtime contract.
+
+name: frontend-publication-runtime-contract-chain
+timeout: 8m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: frontend_publication_runtime_contract_gate
+    actions:
+      - action: exec
+        node: m02
+        timeout: 7m
+        cmd: "rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase72-frontend-publication-runtime-contract && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase72-frontend-publication-runtime-contract && cd {{ product_root }} && SW_BLOCK_ARTIFACT_DIR=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase72-frontend-publication-runtime-contract bash scripts/run-phase72-frontend-publication-runtime-contract-gate.sh {{ product_root }}"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase72-frontend-publication-runtime-contract/phase72-frontend-publication-runtime-contract-summary.txt"
+        pattern: "^phase72_frontend_publication_runtime_contract_status=ok$"
+        save_as: phase72_ok
+      - action: assert_greater
+        actual: "{{ phase72_ok }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase72-frontend-publication-runtime-contract/phase72-frontend-publication-runtime-contract-summary.txt"
+        pattern: "^frontend_publication_runtime_contract_schema_locked=true$"
+        save_as: schema_locked
+      - action: assert_greater
+        actual: "{{ schema_locked }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase72-frontend-publication-runtime-contract/phase72-frontend-publication-runtime-contract-summary.txt"
+        pattern: "^frontend_publication_runtime_endpoint_field=true$"
+        save_as: endpoint_field
+      - action: assert_greater
+        actual: "{{ endpoint_field }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase72-frontend-publication-runtime-contract/phase72-frontend-publication-runtime-contract-summary.txt"
+        pattern: "^frontend_publication_execution_policy_gate=true$"
+        save_as: policy_gate
+      - action: assert_greater
+        actual: "{{ policy_gate }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase72-frontend-publication-runtime-contract/phase72-frontend-publication-runtime-contract-summary.txt"
+        pattern: "^frontend_publication_runtime_invoked_only_when_enabled=true$"
+        save_as: runtime_invoked_only_when_enabled
+      - action: assert_greater
+        actual: "{{ runtime_invoked_only_when_enabled }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase72-frontend-publication-runtime-contract/phase72-frontend-publication-runtime-contract-summary.txt"
+        pattern: "^frontend_publication_runtime_failure_no_false_publish=true$"
+        save_as: no_false_publish
+      - action: assert_greater
+        actual: "{{ no_false_publish }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase72-frontend-publication-runtime-contract/phase72-frontend-publication-runtime-contract-summary.txt"
+        pattern: "^frontend_publication_runtime_invalid_terminal_evidence_no_false_publish=true$"
+        save_as: invalid_terminal_no_false_publish
+      - action: assert_greater
+        actual: "{{ invalid_terminal_no_false_publish }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase72-frontend-publication-runtime-contract/phase72-frontend-publication-runtime-contract-summary.txt"
+        pattern: "^frontend_publication_attempts=1$"
+        save_as: one_frontend_attempt
+      - action: assert_greater
+        actual: "{{ one_frontend_attempt }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase72-frontend-publication-runtime-contract/phase72-frontend-publication-runtime-contract-summary.txt"
+        pattern: "^frontend_published=true$"
+        save_as: frontend_published
+      - action: assert_greater
+        actual: "{{ frontend_published }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase72-frontend-publication-runtime-contract/phase72-frontend-publication-runtime-contract-summary.txt"
+        pattern: "^failback_started=false$"
+        save_as: failback_not_started
+      - action: assert_greater
+        actual: "{{ failback_not_started }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase72-frontend-publication-runtime-contract/phase72-frontend-publication-runtime-contract-summary.txt"
+        pattern: "^storage_mutation_allowed=false$"
+        save_as: no_storage_mutation
+      - action: assert_greater
+        actual: "{{ no_storage_mutation }}"
+        threshold: "0"
+
+  - name: collect
+    always: true
+    actions:
+      - action: collect_path
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase72-frontend-publication-runtime-contract"
+        name: "remote-phases"
+        ignore_error: true

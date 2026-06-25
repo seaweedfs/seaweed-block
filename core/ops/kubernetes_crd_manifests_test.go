@@ -479,6 +479,7 @@ func TestPhase69SwBlockFrontendPublicationTargetSchema(t *testing.T) {
 		"frontendPublicationDecision",
 		"frontendPublicationReason",
 		"frontendPublicationMutationAllowed",
+		"runtimeEndpoint",
 	} {
 		if _, ok := specProperties[want]; !ok {
 			t.Fatalf("%s.spec schema missing %s", SwBlockFrontendPublicationKind, want)
@@ -491,7 +492,7 @@ func TestPhase69SwBlockFrontendPublicationTargetSchema(t *testing.T) {
 		}
 	}
 	decisionEnum := yamlStringSet(t, yamlMap(t, specProperties, "frontendPublicationDecision"), "enum")
-	for _, want := range []string{"blocked", "disabled"} {
+	for _, want := range []string{"blocked", "disabled", "enabled"} {
 		if !decisionEnum[want] {
 			t.Fatalf("%s.spec.frontendPublicationDecision enum missing %s: %+v", SwBlockFrontendPublicationKind, want, decisionEnum)
 		}

@@ -2,6 +2,7 @@ package ops
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 )
@@ -92,6 +93,125 @@ func TestFrontendPublicationExecutorMarksInvalidTargets(t *testing.T) {
 	}
 }
 
+func TestFrontendPublicationExecutorExecutionPolicyBlocks(t *testing.T) {
+	client := &fakeFrontendPublicationExecutorClient{
+		targets: []SwBlockFrontendPublicationObject{frontendPublicationExecutorExecutableTargetFixture()},
+	}
+	_, err := (FrontendPublicationExecutorReconciler{
+		Namespace:          "kube-system",
+		Client:             client,
+		ExecutionRequested: true,
+	}).Reconcile(context.Background())
+	if err == nil || err.Error() != "frontend publication executor execution is disabled by product policy" {
+		t.Fatalf("err=%v", err)
+	}
+	if len(client.writes) != 0 {
+		t.Fatalf("policy-disabled execution wrote status: %+v", client.writes)
+	}
+}
+
+func TestFrontendPublicationExecutorInvokesRuntimeWhenExplicitlyEnabled(t *testing.T) {
+	target := frontendPublicationExecutorExecutableTargetFixture()
+	client := &fakeFrontendPublicationExecutorClient{targets: []SwBlockFrontendPublicationObject{target}}
+	runtime := &fakeFrontendPublicationRuntime{result: FrontendPublicationRuntimeResult{
+		FrontendPublished:           true,
+		FailbackStarted:             false,
+		NoStorageMutation:           true,
+		NoCrossVolumeIdentityChange: true,
+		EvidenceRefs:                []string{"frontend-runtime.txt"},
+	}}
+	result, err := (FrontendPublicationExecutorReconciler{
+		Namespace:              "kube-system",
+		Client:                 client,
+		Runtime:                runtime,
+		ExecutionRequested:     true,
+		ExecutionPolicyEnabled: true,
+		Now:                    func() time.Time { return time.Date(2026, 6, 25, 12, 0, 0, 0, time.UTC) },
+	}).Reconcile(context.Background())
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if result.FrontendPublicationAttempts != 1 ||
+		result.FailbackAttempts != 0 ||
+		result.StatusWriteCount != 1 ||
+		result.StorageMutationAllowed {
+		t.Fatalf("result=%+v", result)
+	}
+	if len(runtime.requests) != 1 {
+		t.Fatalf("runtime requests=%+v", runtime.requests)
+	}
+	req := runtime.requests[0]
+	if req.VolumeName != target.Spec.VolumeName ||
+		req.ReplicaID != target.Spec.ReplicaID ||
+		!req.AckEligible ||
+		!req.NoCrossVolumeIdentityChange {
+		t.Fatalf("runtime request=%+v", req)
+	}
+	status := client.writes[0].status
+	if status.State != FrontendPublicationStatePublished ||
+		status.ReasonCode != AuthorityExecutorFrontendPublicationReasonPublished ||
+		status.PublicationMutationAllowed ||
+		!status.FrontendPublished ||
+		status.FailbackStarted ||
+		!status.NoStorageMutation ||
+		!status.NoCrossVolumeIdentityChange {
+		t.Fatalf("status=%+v", status)
+	}
+}
+
+func TestFrontendPublicationExecutorRuntimeFailureWritesBlockedStatus(t *testing.T) {
+	client := &fakeFrontendPublicationExecutorClient{targets: []SwBlockFrontendPublicationObject{frontendPublicationExecutorExecutableTargetFixture()}}
+	runtime := &fakeFrontendPublicationRuntime{err: errors.New("runtime refused")}
+	result, err := (FrontendPublicationExecutorReconciler{
+		Namespace:              "kube-system",
+		Client:                 client,
+		Runtime:                runtime,
+		ExecutionRequested:     true,
+		ExecutionPolicyEnabled: true,
+	}).Reconcile(context.Background())
+	if err == nil {
+		t.Fatalf("expected runtime error")
+	}
+	if result.FrontendPublicationAttempts != 1 || result.StatusWriteCount != 1 {
+		t.Fatalf("result=%+v", result)
+	}
+	if got := client.writes[0].status.ReasonCode; got != "frontend_publication_runtime_failed" {
+		t.Fatalf("reason=%s", got)
+	}
+	if client.writes[0].status.FrontendPublished {
+		t.Fatalf("failed runtime must not claim published: %+v", client.writes[0].status)
+	}
+}
+
+func TestFrontendPublicationExecutorRejectsInvalidRuntimeTerminalEvidence(t *testing.T) {
+	client := &fakeFrontendPublicationExecutorClient{targets: []SwBlockFrontendPublicationObject{frontendPublicationExecutorExecutableTargetFixture()}}
+	runtime := &fakeFrontendPublicationRuntime{result: FrontendPublicationRuntimeResult{
+		FrontendPublished:           true,
+		FailbackStarted:             true,
+		NoStorageMutation:           true,
+		NoCrossVolumeIdentityChange: true,
+	}}
+	result, err := (FrontendPublicationExecutorReconciler{
+		Namespace:              "kube-system",
+		Client:                 client,
+		Runtime:                runtime,
+		ExecutionRequested:     true,
+		ExecutionPolicyEnabled: true,
+	}).Reconcile(context.Background())
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if result.FrontendPublicationAttempts != 1 || result.FailbackAttempts != 1 || result.StatusWriteCount != 1 {
+		t.Fatalf("result=%+v", result)
+	}
+	status := client.writes[0].status
+	if status.State != FrontendPublicationStateBlocked ||
+		status.ReasonCode != "frontend_publication_runtime_invalid_terminal_evidence" ||
+		status.FrontendPublished {
+		t.Fatalf("status=%+v", status)
+	}
+}
+
 func frontendPublicationExecutorTestTarget() SwBlockFrontendPublicationObject {
 	return SwBlockFrontendPublicationObject{
 		Ref: OperatorObjectRef{
@@ -119,9 +239,32 @@ func frontendPublicationExecutorTestTarget() SwBlockFrontendPublicationObject {
 	}
 }
 
+func frontendPublicationExecutorExecutableTargetFixture() SwBlockFrontendPublicationObject {
+	target := frontendPublicationExecutorTestTarget()
+	target.Spec.FrontendPublicationDecision = AuthorityExecutorPublicationDecisionEnabled
+	target.Spec.FrontendPublicationReason = "frontend_publication_requested"
+	target.Spec.FrontendPublicationMutationAllowed = true
+	target.Spec.RuntimeEndpoint = "http://127.0.0.1:23260/runtime/frontend-publication"
+	return target
+}
+
 type fakeFrontendPublicationExecutorClient struct {
 	targets []SwBlockFrontendPublicationObject
 	writes  []fakeFrontendPublicationStatusWrite
+}
+
+type fakeFrontendPublicationRuntime struct {
+	requests []FrontendPublicationRuntimeRequest
+	result   FrontendPublicationRuntimeResult
+	err      error
+}
+
+func (f *fakeFrontendPublicationRuntime) ExecuteFrontendPublication(_ context.Context, req FrontendPublicationRuntimeRequest) (FrontendPublicationRuntimeResult, error) {
+	f.requests = append(f.requests, req)
+	if f.err != nil {
+		return FrontendPublicationRuntimeResult{}, f.err
+	}
+	return f.result, nil
 }
 
 type fakeFrontendPublicationStatusWrite struct {

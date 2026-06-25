@@ -1,91 +1,109 @@
-# Current Plan: Phase 71 Frontend Publication Live API Boundary
+# Current Plan: Phase 72 Frontend Publication Runtime Contract
 
 Status: complete.
 
 ## Goal
 
-Phase 70 added the frontend publication executor as a status-only controller:
+Phase 71 proved the live Kubernetes API/RBAC boundary for the frontend
+publication executor. Phase 72 adds the next code seam: a typed frontend
+publication runtime contract and an explicit executor policy gate.
 
-```text
-SwBlockFrontendPublication.status
-```
-
-Phase 71 closes the live Kubernetes API gap for that boundary. The gate proves
-against a real apiserver that the executor may patch only the
-`SwBlockFrontendPublication` status subresource and cannot mutate:
-
-```text
-target spec
-target metadata
-target finalizers
-SwBlockVolume
-SwBlockReplicaEligibility
-workloads
-PVC/PV
-StorageClass
-Secrets
-Nodes / CSIDrivers / CSINodes
-```
-
-This is intentionally not frontend publication execution. It is the live API
-proof required before we grant any broader authority in a later phase.
+This phase still does not wire a real blockmaster or blockvolume frontend
+publication endpoint. The purpose is to prevent the next implementation from
+becoming a fake status-only publish.
 
 ## Delivered
 
-### D1: Live API Gate
+### D1: Runtime Contract
 
 Added:
 
 ```text
-scripts/run-phase71-frontend-publication-live-api-boundary-gate.sh
+FrontendPublicationRuntime
+FrontendPublicationRuntimeRequest
+FrontendPublicationRuntimeResult
+HTTPFrontendPublicationRuntime
 ```
 
-The gate installs the `SwBlockFrontendPublication` CRD, creates a scoped
-executor service account and RBAC, creates one target object, then verifies:
+The HTTP client posts JSON to an explicit runtime endpoint and decodes:
 
 ```text
-patch swblockfrontendpublications/status = allowed
-patch swblockfrontendpublications main object = denied
-create/update/delete swblockfrontendpublications = denied
-patch finalizers endpoint = denied
-events/workload/storage mutation = denied
+frontendPublished
+failbackStarted
+noStorageMutation
+noCrossVolumeIdentityChange
+evidenceRefs
 ```
 
-It writes a disabled/blocked status through the real status subresource and
-checks that spec/labels/annotations remain unchanged.
+### D2: Explicit Executor Gate
 
-### D2: Runner Scenario
+`FrontendPublicationExecutorReconciler` now supports an opt-in execution path:
+
+```text
+ExecutionRequested=true
+ExecutionPolicyEnabled=true
+```
+
+Without both flags, execution is blocked. Default reconciliation remains the
+Phase 70/71 status-only disabled path.
+
+The runtime path requires an explicit target shape:
+
+```text
+frontendPublicationDecision=enabled
+frontendPublicationMutationAllowed=true
+runtimeEndpoint=<non-empty>
+ackEligibilityKnown=true
+ackEligible=true
+frontendFencedAfterExecution=true
+primaryUnchanged=true
+durableFrontierCovered=true
+noCrossVolumeIdentityChange=true
+```
+
+### D3: Schema Contract
+
+`SwBlockFrontendPublication.spec` now admits the future execution contract:
+
+```text
+frontendPublicationDecision=enabled
+runtimeEndpoint
+```
+
+The existing target owner still creates only disabled targets, so default
+product behavior does not change.
+
+### D4: Gate
 
 Added:
 
 ```text
-testops/scenarios/frontend-publication-live-api-boundary-chain.yaml
+scripts/run-phase72-frontend-publication-runtime-contract-gate.sh
+testops/scenarios/frontend-publication-runtime-contract-chain.yaml
 ```
 
-The scenario asserts the terminal evidence:
+The gate proves:
 
 ```text
-phase71_frontend_publication_live_api_boundary_status=ok
-frontend_publication_executor_status_writes=true
-frontend_publication_executor_status=blocked
-frontend_publication_executor_reason=frontend_publication_policy_disabled
-frontend_publication_executor_rbac_status_only=true
-frontend_publication_mutation_allowed=false
-frontend_published=false
-failback_started=false
-storage_mutation_allowed=false
-target_object_integrity_preserved=true
+default executor remains disabled
+execution policy blocks when not explicitly enabled
+enabled target invokes runtime exactly through the typed contract
+runtime failure does not claim frontendPublished
+HTTP runtime errors surface
+failback remains false
+storage mutation remains false
 ```
 
 ## Non-Claims
 
-Phase 71 does not claim:
+Phase 72 does not claim:
 
 ```text
-frontend publication execution
-frontend publish target update
+real frontend publication endpoint exists
+blockmaster publish target update
+blockvolume runtime frontend switch
 primary authority change
-failback
+failback execution
 storage/workload mutation
 NVMe ANA behavior
 ```
@@ -93,35 +111,36 @@ NVMe ANA behavior
 ## Verification
 
 ```text
-C:\work\swblock.exe validate testops\scenarios\frontend-publication-live-api-boundary-chain.yaml
-20260625-112540-ca98 frontend-publication-live-api-boundary-chain PASS 32/32
+go test ./core/ops ./cmd/sw-block
+C:\work\swblock.exe validate testops\scenarios\frontend-publication-runtime-contract-chain.yaml
+20260625-153846-1bf7 frontend-publication-runtime-contract-chain PASS 24/24
 ```
 
 Terminal evidence:
 
 ```text
-phase71_frontend_publication_live_api_boundary_status=ok
-executor_status_patch_succeeded=true
-frontend_publication_executor_status_writes=true
-frontend_publication_executor_status=blocked
-frontend_publication_executor_reason=frontend_publication_policy_disabled
-frontend_publication_executor_status_mutation_allowed=true
-frontend_publication_mutation_allowed=false
-frontend_published=false
+phase72_frontend_publication_runtime_contract_status=ok
+core_ops_frontend_publication_runtime_tests=pass
+frontend_publication_runtime_contract_schema_locked=true
+frontend_publication_runtime_endpoint_field=true
+frontend_publication_execution_policy_gate=true
+frontend_publication_runtime_invoked_only_when_enabled=true
+frontend_publication_runtime_failure_no_false_publish=true
+frontend_publication_runtime_invalid_terminal_evidence_no_false_publish=true
+frontend_publication_attempts=1
+frontend_published=true
 failback_started=false
-frontend_publication_attempts=0
-failback_attempts=0
 storage_mutation_allowed=false
-frontend_publication_executor_rbac_status_only=true
-executor_spec_patch_allowed=false
-executor_label_patch_allowed=false
-executor_finalizers_endpoint_allowed=false
-target_object_integrity_preserved=true
 ```
 
 ## Next
 
-If Phase 71 passes live QA, Phase 72 may introduce the first opt-in frontend
-publication mutation. That phase must define exactly which product-owned field
-or runtime endpoint changes and must include admission/RBAC and multi-volume
-isolation gates before any failback claim.
+Phase 73 should implement the real runtime endpoint owner. The key design
+decision is still open:
+
+```text
+blockmaster authority endpoint vs blockvolume runtime endpoint
+```
+
+Do not mark a target as published until a real endpoint performs a real
+product-owned side effect and returns terminal evidence.

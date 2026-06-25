@@ -72,10 +72,13 @@ spec:
                   enum:
                     - blocked
                     - disabled
+                    - enabled
                 frontendPublicationReason:
                   type: string
                 frontendPublicationMutationAllowed:
                   type: boolean
+                runtimeEndpoint:
+                  type: string
             status:
               type: object
               properties:

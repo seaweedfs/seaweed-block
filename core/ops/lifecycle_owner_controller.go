@@ -80,6 +80,7 @@ type SwBlockFrontendPublicationSpec struct {
 	FrontendPublicationDecision        string `json:"frontendPublicationDecision,omitempty"`
 	FrontendPublicationReason          string `json:"frontendPublicationReason,omitempty"`
 	FrontendPublicationMutationAllowed bool   `json:"frontendPublicationMutationAllowed"`
+	RuntimeEndpoint                    string `json:"runtimeEndpoint,omitempty"`
 }
 
 type SwBlockFrontendPublicationCRDStatus struct {

@@ -58,7 +58,7 @@ This is the short internal roadmap. Keep it current and readable.
   agreement. This remains read-only and does not add mutating operator
   lifecycle.
 - Current development slice: returned-replica rebuild/reintegration runtime
-  productization has advanced through Phase 71. Phases 46-54 made returned
+  productization has advanced through Phase 72. Phases 46-54 made returned
   replicas visible and action-gated, Phases 60-67 connected the bounded
   rebuild/catch-up runtime path through target facts, executor HTTP transport,
   an opt-in blockvolume runtime start endpoint, terminal caught-up evidence,
@@ -68,8 +68,10 @@ This is the short internal roadmap. Keep it current and readable.
   publication executor boundary. Phase 71 adds the live Kubernetes API/RBAC
   proof that the executor can patch only `SwBlockFrontendPublication.status`
   and cannot mutate target spec, target finalizers, workload/storage resources,
-  frontend publication, or failback. Do not claim frontend publication
-  execution, failback, backup/restore, or NVMe parity yet.
+  frontend publication, or failback. Phase 72 adds the typed runtime contract
+  for a future frontend publication endpoint and proves that invalid or failed
+  runtime evidence cannot claim publication. Do not claim real frontend
+  publication execution, failback, backup/restore, or NVMe parity yet.
 - Model hardening gate before the next large release: complete the
   ManagedVolume Operations Model under `internal/docs/protocol/` before
   expanding operator or broader HA claims. The goal is to prevent Kubernetes,
@@ -207,9 +209,10 @@ rebuild, delete safety, or cleanup must start as a separate gated phase.
   explicitly disabled on that eligibility. Phase 69 creates the next typed
   frontend-publication target object without executing publication. Phase 70
   adds the status-only frontend publication executor boundary. Phase 71 adds
-  the live API/RBAC boundary for that executor. The remaining gap before
-  failback is the first real frontend publication mutation with admission/RBAC
-  proof and multi-volume isolation.
+  the live API/RBAC boundary for that executor. Phase 72 adds the typed runtime
+  contract for frontend publication, but no real endpoint yet. The remaining
+  gap before failback is the first real frontend publication mutation with
+  admission/RBAC proof and multi-volume isolation.
 - Later: returned-replica frontend publication/failback execution, NVMe ANA
   Kubernetes multipath parity, stronger committed-frontier reporting, broad
   distro/host compatibility, and longer soak under failure. NVMe ANA parity
