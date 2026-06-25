@@ -290,6 +290,14 @@ type SwBlockVolumeCRDReturnedReplica struct {
 	DurableFrontierLSN    uint64   `json:"durableFrontierLsn,omitempty"`
 	RequiredFrontierKnown bool     `json:"requiredFrontierKnown,omitempty"`
 	RequiredFrontierLSN   uint64   `json:"requiredFrontierLsn,omitempty"`
+	RuntimeEndpoint       string   `json:"runtimeEndpoint,omitempty"`
+	TargetDataAddr        string   `json:"targetDataAddr,omitempty"`
+	SessionID             uint64   `json:"sessionID,omitempty"`
+	Epoch                 uint64   `json:"epoch,omitempty"`
+	EndpointVersion       uint64   `json:"endpointVersion,omitempty"`
+	FromLSN               uint64   `json:"fromLsn,omitempty"`
+	FrontierHintLSN       uint64   `json:"frontierHintLsn,omitempty"`
+	BasePinLSN            uint64   `json:"basePinLsn,omitempty"`
 	EvidenceRefs          []string `json:"evidenceRefs,omitempty"`
 }
 

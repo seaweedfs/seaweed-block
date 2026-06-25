@@ -148,7 +148,7 @@ func runOpsRebuildTargetOwner(args []string, stdout, stderr io.Writer) int {
 		if dryRun {
 			mode = "dry_run"
 		}
-		fmt.Fprintf(stdout, "rebuild_target_owner=%s namespace=%s volumes=%d contracts=%d targets_planned=%d targets_existing=%d targets_created=%d invalid_contracts=%d mutation_allowed=%t storage_mutation_allowed=false frontend_publication_allowed=false failback_allowed=false\n",
+		fmt.Fprintf(stdout, "rebuild_target_owner=%s namespace=%s volumes=%d contracts=%d targets_planned=%d targets_existing=%d targets_created=%d invalid_contracts=%d runtime_target_ready=%d runtime_target_missing=%d mutation_allowed=%t storage_mutation_allowed=false frontend_publication_allowed=false failback_allowed=false\n",
 			mode,
 			namespace,
 			result.VolumeCount,
@@ -157,6 +157,8 @@ func runOpsRebuildTargetOwner(args []string, stdout, stderr io.Writer) int {
 			result.TargetExistingCount,
 			result.TargetCreateCount,
 			result.InvalidContractCount,
+			result.RuntimeTargetReadyCount,
+			result.RuntimeTargetMissingCount,
 			!dryRun && result.TargetCreateCount > 0)
 		return ops.VolumeStatusExitOK
 	}

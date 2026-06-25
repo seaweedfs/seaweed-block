@@ -21,7 +21,9 @@ func TestRebuildTargetOwnerDryRunPlansTargetWithoutCreate(t *testing.T) {
 		result.ContractCount != 1 ||
 		result.TargetPlannedCount != 1 ||
 		result.TargetCreateCount != 0 ||
-		result.InvalidContractCount != 0 {
+		result.InvalidContractCount != 0 ||
+		result.RuntimeTargetReadyCount != 1 ||
+		result.RuntimeTargetMissingCount != 0 {
 		t.Fatalf("result=%+v", result)
 	}
 	if len(client.creates) != 0 {
@@ -52,7 +54,15 @@ func TestRebuildTargetOwnerCreatesMissingTarget(t *testing.T) {
 		created.Spec.VolumeName != "demo-pvc" ||
 		created.Spec.VolumeID != "pvc-demo" ||
 		created.Spec.PVCName != "demo-pvc" ||
-		created.Spec.ReplicaID != "r2" {
+		created.Spec.ReplicaID != "r2" ||
+		created.Spec.RuntimeEndpoint != "http://127.0.0.1:23260/rebuild/runtime" ||
+		created.Spec.TargetDataAddr != "127.0.0.1:19103" ||
+		created.Spec.SessionID != 1001 ||
+		created.Spec.Epoch != 7 ||
+		created.Spec.EndpointVersion != 3 ||
+		created.Spec.FromLSN != 52 ||
+		created.Spec.FrontierHintLSN != 53 ||
+		created.Spec.BasePinLSN != 60 {
 		t.Fatalf("created=%+v", created)
 	}
 	if created.Status.State != "" {
@@ -82,6 +92,31 @@ func TestRebuildTargetOwnerSkipsExistingTarget(t *testing.T) {
 		t.Fatalf("reconcile: %v", err)
 	}
 	if result.TargetExistingCount != 1 || result.TargetCreateCount != 0 {
+		t.Fatalf("result=%+v", result)
+	}
+	if len(client.creates) != 0 {
+		t.Fatalf("unexpected creates=%+v", client.creates)
+	}
+}
+
+func TestRebuildTargetOwnerDoesNotCreateTargetWithoutRuntimeFacts(t *testing.T) {
+	volume := rebuildTargetOwnerTestVolume()
+	volume.Status.ReplicaReintegrations[0].RuntimeEndpoint = ""
+	client := &fakeRebuildTargetOwnerClient{
+		volumes: []SwBlockVolumeObject{volume},
+	}
+	result, err := (RebuildTargetOwnerReconciler{
+		Namespace: "kube-system",
+		Client:    client,
+	}).Reconcile(context.Background())
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if result.ContractCount != 1 ||
+		result.RuntimeTargetMissingCount != 1 ||
+		result.RuntimeTargetReadyCount != 0 ||
+		result.TargetPlannedCount != 0 ||
+		result.TargetCreateCount != 0 {
 		t.Fatalf("result=%+v", result)
 	}
 	if len(client.creates) != 0 {
@@ -120,6 +155,25 @@ func rebuildTargetOwnerTestVolume() SwBlockVolumeObject {
 		Status: SwBlockVolumeCRDStatus{
 			VolumeID: "pvc-demo",
 			PVCName:  "demo-pvc",
+			ReplicaReintegrations: []SwBlockVolumeCRDReturnedReplica{{
+				ReplicaID:             "r2",
+				State:                 ReturnedReplicaStateRecovering,
+				ReasonCode:            ReasonCandidateFrontierBehind,
+				FrontendFenced:        true,
+				FrontendPrimaryReady:  false,
+				DurableFrontierKnown:  true,
+				DurableFrontierLSN:    51,
+				RequiredFrontierKnown: true,
+				RequiredFrontierLSN:   53,
+				RuntimeEndpoint:       "http://127.0.0.1:23260/rebuild/runtime",
+				TargetDataAddr:        "127.0.0.1:19103",
+				SessionID:             1001,
+				Epoch:                 7,
+				EndpointVersion:       3,
+				FromLSN:               52,
+				FrontierHintLSN:       53,
+				BasePinLSN:            60,
+			}},
 			ExecutorContracts: []SwBlockVolumeCRDExecutorContract{{
 				ActionType:           ManagedVolumeActionRebuildReturned,
 				ReplicaID:            "r2",

@@ -526,10 +526,18 @@ func TestKubernetesStatusClientCreatesSwBlockReplicaRebuildWithoutStatus(t *test
 			Name: "demo-pvc-r2-rebuild",
 		},
 		Spec: SwBlockReplicaRebuildSpec{
-			VolumeName: "demo-pvc",
-			VolumeID:   "pvc-demo",
-			PVCName:    "demo-pvc",
-			ReplicaID:  "r2",
+			VolumeName:      "demo-pvc",
+			VolumeID:        "pvc-demo",
+			PVCName:         "demo-pvc",
+			ReplicaID:       "r2",
+			RuntimeEndpoint: "http://127.0.0.1:23260/rebuild/runtime",
+			TargetDataAddr:  "127.0.0.1:19103",
+			SessionID:       1001,
+			Epoch:           7,
+			EndpointVersion: 3,
+			FromLSN:         52,
+			FrontierHintLSN: 53,
+			BasePinLSN:      60,
 		},
 	})
 	if err != nil {
@@ -558,8 +566,21 @@ func TestKubernetesStatusClientCreatesSwBlockReplicaRebuildWithoutStatus(t *test
 	if spec["volumeName"] != "demo-pvc" ||
 		spec["volumeID"] != "pvc-demo" ||
 		spec["pvcName"] != "demo-pvc" ||
-		spec["replicaID"] != "r2" {
+		spec["replicaID"] != "r2" ||
+		spec["runtimeEndpoint"] != "http://127.0.0.1:23260/rebuild/runtime" ||
+		spec["targetDataAddr"] != "127.0.0.1:19103" ||
+		spec["sessionID"] != float64(1001) ||
+		spec["epoch"] != float64(7) ||
+		spec["endpointVersion"] != float64(3) ||
+		spec["fromLsn"] != float64(52) ||
+		spec["frontierHintLsn"] != float64(53) ||
+		spec["basePinLsn"] != float64(60) {
 		t.Fatalf("spec=%+v", spec)
+	}
+	for _, forbidden := range []string{"runtime_endpoint", "target_data_addr", "session_id", "endpoint_version", "from_lsn", "frontier_hint_lsn", "base_pin_lsn"} {
+		if _, ok := spec[forbidden]; ok {
+			t.Fatalf("spec leaked %s: %+v", forbidden, spec)
+		}
 	}
 	if _, ok := request.Body["status"]; ok {
 		t.Fatalf("target create must not include status: %+v", request.Body)

@@ -181,7 +181,7 @@ func TestAuthorityExecutorReconcilerWritesRebuildPlannedStatus(t *testing.T) {
 func TestAuthorityExecutorReconcilerExecutesRebuildRuntimeAndWritesCaughtUpStatus(t *testing.T) {
 	client := &fakeAuthorityExecutorClient{
 		volumes:  []SwBlockVolumeObject{authorityExecutorRebuildVolume(false, false)},
-		rebuilds: []SwBlockReplicaRebuildObject{authorityExecutorRebuildTarget()},
+		rebuilds: []SwBlockReplicaRebuildObject{authorityExecutorRuntimeRebuildTarget()},
 	}
 	runtime := &fakeAuthorityRebuildRuntime{
 		result: AuthorityRebuildRuntimeResult{
@@ -215,6 +215,14 @@ func TestAuthorityExecutorReconcilerExecutesRebuildRuntimeAndWritesCaughtUpStatu
 		req.VolumeID != "pvc-rebuild" ||
 		req.PVCName != "rebuild-pvc" ||
 		req.ReplicaID != "r1" ||
+		req.RuntimeEndpoint != "http://127.0.0.1:23260/rebuild/runtime" ||
+		req.TargetDataAddr != "127.0.0.1:19103" ||
+		req.SessionID != 1001 ||
+		req.Epoch != 7 ||
+		req.EndpointVersion != 3 ||
+		req.FromLSN != 52 ||
+		req.FrontierHintLSN != 52 ||
+		req.BasePinLSN != 60 ||
 		req.DurableFrontierLSN != 51 ||
 		req.RequiredFrontierLSN != 52 ||
 		!req.FrontendFenced ||
@@ -246,7 +254,7 @@ func TestAuthorityExecutorReconcilerExecutesRebuildRuntimeAndWritesCaughtUpStatu
 func TestAuthorityExecutorReconcilerWritesBlockedStatusWhenRebuildRuntimeFails(t *testing.T) {
 	client := &fakeAuthorityExecutorClient{
 		volumes:  []SwBlockVolumeObject{authorityExecutorRebuildVolume(false, false)},
-		rebuilds: []SwBlockReplicaRebuildObject{authorityExecutorRebuildTarget()},
+		rebuilds: []SwBlockReplicaRebuildObject{authorityExecutorRuntimeRebuildTarget()},
 	}
 	runtime := &fakeAuthorityRebuildRuntime{err: errors.New("runtime refused")}
 	result, err := (AuthorityExecutorReconciler{
@@ -272,6 +280,37 @@ func TestAuthorityExecutorReconcilerWritesBlockedStatusWhenRebuildRuntimeFails(t
 		!blocked.RebuildTrafficStarted ||
 		blocked.DurableFrontierCaughtUp {
 		t.Fatalf("blocked status=%+v", blocked)
+	}
+}
+
+func TestAuthorityExecutorReconcilerBlocksWhenRuntimeTargetFactsMissing(t *testing.T) {
+	target := authorityExecutorRebuildTarget()
+	target.Spec.RuntimeEndpoint = ""
+	client := &fakeAuthorityExecutorClient{
+		volumes:  []SwBlockVolumeObject{authorityExecutorRebuildVolume(false, false)},
+		rebuilds: []SwBlockReplicaRebuildObject{target},
+	}
+	result, err := (AuthorityExecutorReconciler{
+		Namespace:              "kube-system",
+		Client:                 client,
+		RebuildRuntime:         &fakeAuthorityRebuildRuntime{},
+		ExecutionRequested:     true,
+		ExecutionPolicyEnabled: true,
+		AllowedMutationClass:   AuthorityExecutorAllowedMutationRebuildTraffic,
+	}).Reconcile(context.Background())
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if result.RebuildRuntimeTargetMissingCount != 1 ||
+		result.BlockedReason != AuthorityExecutorReasonRebuildRuntimeTargetMissing ||
+		len(client.rebuildWrites) != 1 {
+		t.Fatalf("result=%+v writes=%+v", result, client.rebuildWrites)
+	}
+	status := client.rebuildWrites[0].status
+	if status.State != "blocked" ||
+		status.ReasonCode != AuthorityExecutorReasonRebuildRuntimeTargetMissing ||
+		!status.RebuildTrafficStarted {
+		t.Fatalf("status=%+v", status)
 	}
 }
 
@@ -536,4 +575,17 @@ func authorityExecutorRebuildTarget() SwBlockReplicaRebuildObject {
 			ReplicaID:  "r1",
 		},
 	}
+}
+
+func authorityExecutorRuntimeRebuildTarget() SwBlockReplicaRebuildObject {
+	target := authorityExecutorRebuildTarget()
+	target.Spec.RuntimeEndpoint = "http://127.0.0.1:23260/rebuild/runtime"
+	target.Spec.TargetDataAddr = "127.0.0.1:19103"
+	target.Spec.SessionID = 1001
+	target.Spec.Epoch = 7
+	target.Spec.EndpointVersion = 3
+	target.Spec.FromLSN = 52
+	target.Spec.FrontierHintLSN = 52
+	target.Spec.BasePinLSN = 60
+	return target
 }

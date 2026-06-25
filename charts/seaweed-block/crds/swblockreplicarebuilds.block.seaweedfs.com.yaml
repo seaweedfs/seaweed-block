@@ -55,6 +55,34 @@ spec:
                   type: string
                 sourceReplicaID:
                   type: string
+                runtimeEndpoint:
+                  type: string
+                targetDataAddr:
+                  type: string
+                sessionID:
+                  type: integer
+                  format: int64
+                  minimum: 0
+                epoch:
+                  type: integer
+                  format: int64
+                  minimum: 0
+                endpointVersion:
+                  type: integer
+                  format: int64
+                  minimum: 0
+                fromLsn:
+                  type: integer
+                  format: int64
+                  minimum: 0
+                frontierHintLsn:
+                  type: integer
+                  format: int64
+                  minimum: 0
+                basePinLsn:
+                  type: integer
+                  format: int64
+                  minimum: 0
             status:
               type: object
               properties:

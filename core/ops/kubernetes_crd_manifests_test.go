@@ -210,7 +210,7 @@ func TestPhase46D2SwBlockVolumeReturnedReplicaSchema(t *testing.T) {
 	doc := readYAMLMap(t, "charts/seaweed-block/crds/swblockvolumes.block.seaweedfs.com.yaml")
 	statusProperties := crdStatusProperties(t, doc)
 	returnedProperties := yamlMap(t, yamlMap(t, yamlMap(t, statusProperties, "replicaReintegrations"), "items"), "properties")
-	for _, want := range []string{"replicaID", "state", "reasonCode", "frontendFenced", "frontendPrimaryReady", "ackEligibilityKnown", "ackEligible", "durableFrontierKnown", "durableFrontierLsn", "requiredFrontierKnown", "requiredFrontierLsn", "evidenceRefs"} {
+	for _, want := range []string{"replicaID", "state", "reasonCode", "frontendFenced", "frontendPrimaryReady", "ackEligibilityKnown", "ackEligible", "durableFrontierKnown", "durableFrontierLsn", "requiredFrontierKnown", "requiredFrontierLsn", "runtimeEndpoint", "targetDataAddr", "sessionID", "epoch", "endpointVersion", "fromLsn", "frontierHintLsn", "basePinLsn", "evidenceRefs"} {
 		if _, ok := returnedProperties[want]; !ok {
 			t.Fatalf("SwBlockVolume.status.replicaReintegrations[] schema missing %s", want)
 		}
@@ -221,7 +221,7 @@ func TestPhase46D2SwBlockVolumeReturnedReplicaSchema(t *testing.T) {
 			t.Fatalf("SwBlockVolume.status.replicaReintegrations[].state enum missing %s: %+v", want, stateEnum)
 		}
 	}
-	for _, forbidden := range []string{"replica_id", "frontend_primary_ready", "ack_eligibility_known", "ack_eligible", "durable_frontier_lsn"} {
+	for _, forbidden := range []string{"replica_id", "frontend_primary_ready", "ack_eligibility_known", "ack_eligible", "durable_frontier_lsn", "runtime_endpoint", "target_data_addr", "session_id", "endpoint_version", "from_lsn", "frontier_hint_lsn", "base_pin_lsn"} {
 		if _, ok := returnedProperties[forbidden]; ok {
 			t.Fatalf("SwBlockVolume.status.replicaReintegrations[] leaked snake_case %s", forbidden)
 		}
@@ -355,7 +355,7 @@ func TestPhase57D1SwBlockReplicaRebuildTargetSchema(t *testing.T) {
 			"openAPIV3Schema"),
 		"properties")
 	specProperties := yamlMap(t, yamlMap(t, rootProperties, "spec"), "properties")
-	for _, want := range []string{"volumeName", "volumeID", "pvcName", "replicaID", "sourceReplicaID"} {
+	for _, want := range []string{"volumeName", "volumeID", "pvcName", "replicaID", "sourceReplicaID", "runtimeEndpoint", "targetDataAddr", "sessionID", "epoch", "endpointVersion", "fromLsn", "frontierHintLsn", "basePinLsn"} {
 		if _, ok := specProperties[want]; !ok {
 			t.Fatalf("%s.spec schema missing %s", SwBlockReplicaRebuildKind, want)
 		}
@@ -400,6 +400,13 @@ func TestPhase57D1SwBlockReplicaRebuildTargetSchema(t *testing.T) {
 		}
 	}
 	for _, forbidden := range []string{
+		"runtime_endpoint",
+		"target_data_addr",
+		"session_id",
+		"endpoint_version",
+		"from_lsn",
+		"frontier_hint_lsn",
+		"base_pin_lsn",
 		"frontend_fenced_before_rebuild",
 		"durable_frontier_lsn",
 		"required_frontier_lsn",

@@ -21,12 +21,14 @@ type RebuildTargetOwnerReconciler struct {
 }
 
 type RebuildTargetOwnerReconcileResult struct {
-	VolumeCount          int `json:"volumeCount"`
-	ContractCount        int `json:"contractCount"`
-	TargetPlannedCount   int `json:"targetPlannedCount"`
-	TargetExistingCount  int `json:"targetExistingCount"`
-	TargetCreateCount    int `json:"targetCreateCount"`
-	InvalidContractCount int `json:"invalidContractCount"`
+	VolumeCount               int `json:"volumeCount"`
+	ContractCount             int `json:"contractCount"`
+	TargetPlannedCount        int `json:"targetPlannedCount"`
+	TargetExistingCount       int `json:"targetExistingCount"`
+	TargetCreateCount         int `json:"targetCreateCount"`
+	InvalidContractCount      int `json:"invalidContractCount"`
+	RuntimeTargetReadyCount   int `json:"runtimeTargetReadyCount"`
+	RuntimeTargetMissingCount int `json:"runtimeTargetMissingCount"`
 }
 
 func (r RebuildTargetOwnerReconciler) Reconcile(ctx context.Context) (RebuildTargetOwnerReconcileResult, error) {
@@ -53,12 +55,18 @@ func (r RebuildTargetOwnerReconciler) Reconcile(ctx context.Context) (RebuildTar
 				result.InvalidContractCount++
 				continue
 			}
+			returned, ok := rebuildTargetOwnerReturnedReplica(volume, contract)
+			if !ok || !rebuildTargetOwnerRuntimeFactsReady(returned) {
+				result.RuntimeTargetMissingCount++
+				continue
+			}
+			result.RuntimeTargetReadyCount++
 			result.TargetPlannedCount++
 			if rebuildTargetOwnerHasTarget(volume, contract, targets) {
 				result.TargetExistingCount++
 				continue
 			}
-			obj := rebuildTargetOwnerObject(namespace, volume, contract)
+			obj := rebuildTargetOwnerObject(namespace, volume, contract, returned)
 			if !r.DryRun {
 				if err := r.Client.CreateSwBlockReplicaRebuild(ctx, namespace, obj); err != nil {
 					return result, err
@@ -79,6 +87,23 @@ func rebuildTargetOwnerContractReady(contract SwBlockVolumeCRDExecutorContract) 
 		contract.ReplicaID != ""
 }
 
+func rebuildTargetOwnerReturnedReplica(volume SwBlockVolumeObject, contract SwBlockVolumeCRDExecutorContract) (SwBlockVolumeCRDReturnedReplica, bool) {
+	for _, returned := range volume.Status.ReplicaReintegrations {
+		if returned.ReplicaID == contract.ReplicaID {
+			return returned, true
+		}
+	}
+	return SwBlockVolumeCRDReturnedReplica{}, false
+}
+
+func rebuildTargetOwnerRuntimeFactsReady(returned SwBlockVolumeCRDReturnedReplica) bool {
+	return returned.RuntimeEndpoint != "" &&
+		returned.SessionID != 0 &&
+		returned.Epoch != 0 &&
+		returned.EndpointVersion != 0 &&
+		returned.FrontierHintLSN != 0
+}
+
 func rebuildTargetOwnerHasTarget(volume SwBlockVolumeObject, contract SwBlockVolumeCRDExecutorContract, targets []SwBlockReplicaRebuildObject) bool {
 	for _, target := range targets {
 		if target.Spec.ReplicaID != contract.ReplicaID {
@@ -97,7 +122,7 @@ func rebuildTargetOwnerHasTarget(volume SwBlockVolumeObject, contract SwBlockVol
 	return false
 }
 
-func rebuildTargetOwnerObject(namespace string, volume SwBlockVolumeObject, contract SwBlockVolumeCRDExecutorContract) SwBlockReplicaRebuildObject {
+func rebuildTargetOwnerObject(namespace string, volume SwBlockVolumeObject, contract SwBlockVolumeCRDExecutorContract, returned SwBlockVolumeCRDReturnedReplica) SwBlockReplicaRebuildObject {
 	return SwBlockReplicaRebuildObject{
 		Ref: OperatorObjectRef{
 			APIVersion: SwBlockVolumeAPIVersion,
@@ -106,10 +131,18 @@ func rebuildTargetOwnerObject(namespace string, volume SwBlockVolumeObject, cont
 			Name:       rebuildTargetOwnerName(volume.Ref.Name, contract.ReplicaID),
 		},
 		Spec: SwBlockReplicaRebuildSpec{
-			VolumeName: volume.Ref.Name,
-			VolumeID:   volume.Status.VolumeID,
-			PVCName:    volume.Status.PVCName,
-			ReplicaID:  contract.ReplicaID,
+			VolumeName:      volume.Ref.Name,
+			VolumeID:        volume.Status.VolumeID,
+			PVCName:         volume.Status.PVCName,
+			ReplicaID:       contract.ReplicaID,
+			RuntimeEndpoint: returned.RuntimeEndpoint,
+			TargetDataAddr:  returned.TargetDataAddr,
+			SessionID:       returned.SessionID,
+			Epoch:           returned.Epoch,
+			EndpointVersion: returned.EndpointVersion,
+			FromLSN:         returned.FromLSN,
+			FrontierHintLSN: returned.FrontierHintLSN,
+			BasePinLSN:      returned.BasePinLSN,
 		},
 	}
 }

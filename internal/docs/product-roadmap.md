@@ -668,9 +668,15 @@ Approximate engineering effort if scope remains tight:
   explicit HTTP runtime URL for `rebuild_traffic` execution and validates the
   executor-to-runtime transport contract. It still does not claim a live
   blockvolume endpoint.
-- Phase 63 should wire a blockvolume-side runtime endpoint only after the CRD
-  or runtime target carries enough address/session evidence to call the data
-  path safely.
+- Phase 63 Rebuild Runtime Target Contract is closed. It schema-locks the
+  runtime target facts (`runtimeEndpoint`, data address, session, epoch,
+  endpoint version, and frontier hints), copies them from returned-replica
+  status into `SwBlockReplicaRebuild.spec`, and makes target-owner /
+  authority-executor fail closed when those facts are missing. It still does
+  not call live `StartRebuild`.
+- Phase 64 should wire a blockvolume-side runtime endpoint against the Phase 63
+  target contract. The endpoint must validate local assignment/session/epoch
+  facts before calling `StartRebuild` or `StartCatchUp`.
 - Phase 41-44 are the Operation Layer v0.5 release train: lifecycle-owner
   foundation, real API/admission proof, first bounded finalizer mutation, and
   delete lifecycle close gate.

@@ -7,17 +7,18 @@ import (
 )
 
 const (
-	AuthorityExecutorAllowedMutationAckEligibility = "ack_eligibility"
-	AuthorityExecutorAllowedMutationRebuildTraffic = "rebuild_traffic"
-	AuthorityExecutorBlockedPolicyDisabled         = "executor_policy_disabled"
-	AuthorityExecutorBlockedMutationTargetMissing  = "ack_eligibility_mutation_target_missing"
-	AuthorityExecutorBlockedRebuildTargetMissing   = "rebuild_target_missing"
-	AuthorityExecutorBlockedTerminalEvidence       = "terminal_evidence_missing"
-	AuthorityExecutorReasonAckEligibilityRecorded  = "ack_eligibility_recorded"
-	AuthorityExecutorReasonRebuildPlanned          = "rebuild_progress_planned"
-	AuthorityExecutorReasonRebuildRunning          = "rebuild_runtime_running"
-	AuthorityExecutorReasonRebuildCaughtUp         = "rebuild_runtime_caught_up"
-	AuthorityExecutorReasonRebuildRuntimeFailed    = "rebuild_runtime_failed"
+	AuthorityExecutorAllowedMutationAckEligibility     = "ack_eligibility"
+	AuthorityExecutorAllowedMutationRebuildTraffic     = "rebuild_traffic"
+	AuthorityExecutorBlockedPolicyDisabled             = "executor_policy_disabled"
+	AuthorityExecutorBlockedMutationTargetMissing      = "ack_eligibility_mutation_target_missing"
+	AuthorityExecutorBlockedRebuildTargetMissing       = "rebuild_target_missing"
+	AuthorityExecutorBlockedTerminalEvidence           = "terminal_evidence_missing"
+	AuthorityExecutorReasonAckEligibilityRecorded      = "ack_eligibility_recorded"
+	AuthorityExecutorReasonRebuildPlanned              = "rebuild_progress_planned"
+	AuthorityExecutorReasonRebuildRunning              = "rebuild_runtime_running"
+	AuthorityExecutorReasonRebuildCaughtUp             = "rebuild_runtime_caught_up"
+	AuthorityExecutorReasonRebuildRuntimeFailed        = "rebuild_runtime_failed"
+	AuthorityExecutorReasonRebuildRuntimeTargetMissing = "rebuild_runtime_target_missing"
 )
 
 type AuthorityExecutorClient interface {
@@ -47,6 +48,14 @@ type AuthorityRebuildRuntimeRequest struct {
 	VolumeID              string   `json:"volumeID"`
 	PVCName               string   `json:"pvcName"`
 	ReplicaID             string   `json:"replicaID"`
+	RuntimeEndpoint       string   `json:"runtimeEndpoint,omitempty"`
+	TargetDataAddr        string   `json:"targetDataAddr,omitempty"`
+	SessionID             uint64   `json:"sessionID,omitempty"`
+	Epoch                 uint64   `json:"epoch,omitempty"`
+	EndpointVersion       uint64   `json:"endpointVersion,omitempty"`
+	FromLSN               uint64   `json:"fromLsn,omitempty"`
+	FrontierHintLSN       uint64   `json:"frontierHintLsn,omitempty"`
+	BasePinLSN            uint64   `json:"basePinLsn,omitempty"`
 	DurableFrontierKnown  bool     `json:"durableFrontierKnown"`
 	DurableFrontierLSN    uint64   `json:"durableFrontierLsn"`
 	RequiredFrontierKnown bool     `json:"requiredFrontierKnown"`
@@ -73,6 +82,7 @@ type AuthorityExecutorReconcileResult struct {
 	TerminalEvidenceMissingCount     int    `json:"terminalEvidenceMissingCount"`
 	AckEligibilityTargetMissingCount int    `json:"ackEligibilityTargetMissingCount"`
 	RebuildTargetMissingCount        int    `json:"rebuildTargetMissingCount"`
+	RebuildRuntimeTargetMissingCount int    `json:"rebuildRuntimeTargetMissingCount"`
 	UnsafeExecutionContractCount     int    `json:"unsafeExecutionContractCount"`
 	MutationAttemptCount             int    `json:"mutationAttemptCount"`
 	AckEligibilityMutationAttempts   int    `json:"ackEligibilityMutationAttempts"`
@@ -190,10 +200,23 @@ func (r AuthorityExecutorReconciler) evaluateRebuildPlanning(ctx context.Context
 	}
 	result.MutationAttemptCount++
 	result.RebuildProgressMutationAttempts++
-	if r.RebuildRuntime == nil {
+	runtime := r.RebuildRuntime
+	if runtime == nil && target.Spec.RuntimeEndpoint != "" {
+		runtime = NewHTTPAuthorityRebuildRuntime(target.Spec.RuntimeEndpoint, nil)
+	}
+	if runtime == nil {
 		if err := r.Client.WriteReplicaRebuildStatus(ctx, target.Ref, authorityExecutorRebuildPlannedStatus(r.now()(), volume, contract, returned)); err != nil {
 			result.BlockedReason = "rebuild_status_write_failed"
 			return fmt.Errorf("write rebuild status: %w", err)
+		}
+		return nil
+	}
+	if !authorityExecutorRebuildRuntimeTargetReady(target.Spec) {
+		result.RebuildRuntimeTargetMissingCount++
+		result.BlockedReason = authorityExecutorFirstNonEmpty(result.BlockedReason, AuthorityExecutorReasonRebuildRuntimeTargetMissing)
+		if err := r.Client.WriteReplicaRebuildStatus(ctx, target.Ref, authorityExecutorRebuildBlockedStatus(r.now()(), volume, contract, returned, AuthorityRebuildRuntimeResult{}, AuthorityExecutorReasonRebuildRuntimeTargetMissing)); err != nil {
+			result.BlockedReason = "rebuild_status_write_failed"
+			return fmt.Errorf("write missing runtime target status: %w", err)
 		}
 		return nil
 	}
@@ -201,7 +224,7 @@ func (r AuthorityExecutorReconciler) evaluateRebuildPlanning(ctx context.Context
 		result.BlockedReason = "rebuild_status_write_failed"
 		return fmt.Errorf("write rebuild status: %w", err)
 	}
-	runtimeResult, err := r.RebuildRuntime.ExecuteRebuild(ctx, authorityExecutorRebuildRuntimeRequest(volume, contract, returned))
+	runtimeResult, err := runtime.ExecuteRebuild(ctx, authorityExecutorRebuildRuntimeRequest(volume, contract, returned, target.Spec))
 	if err != nil {
 		result.BlockedReason = AuthorityExecutorReasonRebuildRuntimeFailed
 		if writeErr := r.Client.WriteReplicaRebuildStatus(ctx, target.Ref, authorityExecutorRebuildBlockedStatus(r.now()(), volume, contract, returned, runtimeResult, AuthorityExecutorReasonRebuildRuntimeFailed)); writeErr != nil {
@@ -326,6 +349,14 @@ func authorityExecutorFindRebuildTarget(volume SwBlockVolumeObject, contract SwB
 		return SwBlockReplicaRebuildObject{}, false
 	}
 	return matches[0], true
+}
+
+func authorityExecutorRebuildRuntimeTargetReady(spec SwBlockReplicaRebuildSpec) bool {
+	return spec.RuntimeEndpoint != "" &&
+		spec.SessionID != 0 &&
+		spec.Epoch != 0 &&
+		spec.EndpointVersion != 0 &&
+		spec.FrontierHintLSN != 0
 }
 
 func authorityExecutorAckEligibilityStatus(now time.Time, volume SwBlockVolumeObject, contract SwBlockVolumeCRDExecutorContract, returned SwBlockVolumeCRDReturnedReplica) SwBlockReplicaEligibilityCRDStatus {
@@ -472,7 +503,7 @@ func authorityExecutorRebuildBlockedStatus(now time.Time, volume SwBlockVolumeOb
 	return status
 }
 
-func authorityExecutorRebuildRuntimeRequest(volume SwBlockVolumeObject, contract SwBlockVolumeCRDExecutorContract, returned SwBlockVolumeCRDReturnedReplica) AuthorityRebuildRuntimeRequest {
+func authorityExecutorRebuildRuntimeRequest(volume SwBlockVolumeObject, contract SwBlockVolumeCRDExecutorContract, returned SwBlockVolumeCRDReturnedReplica, spec SwBlockReplicaRebuildSpec) AuthorityRebuildRuntimeRequest {
 	evidenceRefs := appendUniqueStrings(nil, contract.EvidenceRefs...)
 	evidenceRefs = appendUniqueStrings(evidenceRefs, returned.EvidenceRefs...)
 	return AuthorityRebuildRuntimeRequest{
@@ -480,6 +511,14 @@ func authorityExecutorRebuildRuntimeRequest(volume SwBlockVolumeObject, contract
 		VolumeID:              volume.Status.VolumeID,
 		PVCName:               volume.Status.PVCName,
 		ReplicaID:             contract.ReplicaID,
+		RuntimeEndpoint:       spec.RuntimeEndpoint,
+		TargetDataAddr:        spec.TargetDataAddr,
+		SessionID:             spec.SessionID,
+		Epoch:                 spec.Epoch,
+		EndpointVersion:       spec.EndpointVersion,
+		FromLSN:               spec.FromLSN,
+		FrontierHintLSN:       spec.FrontierHintLSN,
+		BasePinLSN:            spec.BasePinLSN,
 		DurableFrontierKnown:  returned.DurableFrontierKnown,
 		DurableFrontierLSN:    returned.DurableFrontierLSN,
 		RequiredFrontierKnown: returned.RequiredFrontierKnown,

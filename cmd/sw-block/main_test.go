@@ -713,10 +713,18 @@ func TestOpsAuthorityExecutorRebuildRuntimeURLWritesCaughtUpStatus(t *testing.T)
 				Name:       "rebuild-r1",
 			},
 			Spec: ops.SwBlockReplicaRebuildSpec{
-				VolumeName: "rebuild",
-				VolumeID:   "pvc-rebuild",
-				PVCName:    "rebuild-pvc",
-				ReplicaID:  "r1",
+				VolumeName:      "rebuild",
+				VolumeID:        "pvc-rebuild",
+				PVCName:         "rebuild-pvc",
+				ReplicaID:       "r1",
+				RuntimeEndpoint: "http://127.0.0.1:23260/rebuild/runtime",
+				TargetDataAddr:  "127.0.0.1:19103",
+				SessionID:       1001,
+				Epoch:           7,
+				EndpointVersion: 3,
+				FromLSN:         52,
+				FrontierHintLSN: 52,
+				BasePinLSN:      60,
 			},
 		}},
 	}
@@ -758,6 +766,14 @@ func TestOpsAuthorityExecutorRebuildRuntimeURLWritesCaughtUpStatus(t *testing.T)
 		got.VolumeID != "pvc-rebuild" ||
 		got.PVCName != "rebuild-pvc" ||
 		got.ReplicaID != "r1" ||
+		got.RuntimeEndpoint != "http://127.0.0.1:23260/rebuild/runtime" ||
+		got.TargetDataAddr != "127.0.0.1:19103" ||
+		got.SessionID != 1001 ||
+		got.Epoch != 7 ||
+		got.EndpointVersion != 3 ||
+		got.FromLSN != 52 ||
+		got.FrontierHintLSN != 52 ||
+		got.BasePinLSN != 60 ||
 		got.DurableFrontierLSN != 51 ||
 		got.RequiredFrontierLSN != 52 ||
 		!got.NoFrontendPublication ||
@@ -823,6 +839,25 @@ func TestOpsRebuildTargetOwnerCreatesTarget(t *testing.T) {
 			Status: ops.SwBlockVolumeCRDStatus{
 				VolumeID: "pvc-demo",
 				PVCName:  "demo-pvc",
+				ReplicaReintegrations: []ops.SwBlockVolumeCRDReturnedReplica{{
+					ReplicaID:             "r2",
+					State:                 ops.ReturnedReplicaStateRecovering,
+					ReasonCode:            ops.ReasonCandidateFrontierBehind,
+					FrontendFenced:        true,
+					FrontendPrimaryReady:  false,
+					DurableFrontierKnown:  true,
+					DurableFrontierLSN:    51,
+					RequiredFrontierKnown: true,
+					RequiredFrontierLSN:   53,
+					RuntimeEndpoint:       "http://127.0.0.1:23260/rebuild/runtime",
+					TargetDataAddr:        "127.0.0.1:19103",
+					SessionID:             1001,
+					Epoch:                 7,
+					EndpointVersion:       3,
+					FromLSN:               52,
+					FrontierHintLSN:       53,
+					BasePinLSN:            60,
+				}},
 				ExecutorContracts: []ops.SwBlockVolumeCRDExecutorContract{{
 					ActionType:           ops.ManagedVolumeActionRebuildReturned,
 					ReplicaID:            "r2",
@@ -852,7 +887,15 @@ func TestOpsRebuildTargetOwnerCreatesTarget(t *testing.T) {
 	created := client.rebuildCreates[0]
 	if created.Ref.Name != "demo-pvc-r2-rebuild" ||
 		created.Spec.VolumeName != "demo-pvc" ||
-		created.Spec.ReplicaID != "r2" {
+		created.Spec.ReplicaID != "r2" ||
+		created.Spec.RuntimeEndpoint != "http://127.0.0.1:23260/rebuild/runtime" ||
+		created.Spec.TargetDataAddr != "127.0.0.1:19103" ||
+		created.Spec.SessionID != 1001 ||
+		created.Spec.Epoch != 7 ||
+		created.Spec.EndpointVersion != 3 ||
+		created.Spec.FromLSN != 52 ||
+		created.Spec.FrontierHintLSN != 53 ||
+		created.Spec.BasePinLSN != 60 {
 		t.Fatalf("created=%+v", created)
 	}
 	out := stdout.String()
@@ -864,6 +907,8 @@ func TestOpsRebuildTargetOwnerCreatesTarget(t *testing.T) {
 		"targets_planned=1",
 		"targets_existing=0",
 		"targets_created=1",
+		"runtime_target_ready=1",
+		"runtime_target_missing=0",
 		"mutation_allowed=true",
 		"storage_mutation_allowed=false",
 		"frontend_publication_allowed=false",
@@ -884,6 +929,25 @@ func TestOpsRebuildTargetOwnerDryRunDoesNotCreateTarget(t *testing.T) {
 			Status: ops.SwBlockVolumeCRDStatus{
 				VolumeID: "pvc-demo",
 				PVCName:  "demo-pvc",
+				ReplicaReintegrations: []ops.SwBlockVolumeCRDReturnedReplica{{
+					ReplicaID:             "r2",
+					State:                 ops.ReturnedReplicaStateRecovering,
+					ReasonCode:            ops.ReasonCandidateFrontierBehind,
+					FrontendFenced:        true,
+					FrontendPrimaryReady:  false,
+					DurableFrontierKnown:  true,
+					DurableFrontierLSN:    51,
+					RequiredFrontierKnown: true,
+					RequiredFrontierLSN:   53,
+					RuntimeEndpoint:       "http://127.0.0.1:23260/rebuild/runtime",
+					TargetDataAddr:        "127.0.0.1:19103",
+					SessionID:             1001,
+					Epoch:                 7,
+					EndpointVersion:       3,
+					FromLSN:               52,
+					FrontierHintLSN:       53,
+					BasePinLSN:            60,
+				}},
 				ExecutorContracts: []ops.SwBlockVolumeCRDExecutorContract{{
 					ActionType:           ops.ManagedVolumeActionRebuildReturned,
 					ReplicaID:            "r2",
@@ -915,6 +979,69 @@ func TestOpsRebuildTargetOwnerDryRunDoesNotCreateTarget(t *testing.T) {
 		"rebuild_target_owner=dry_run",
 		"targets_planned=1",
 		"targets_created=0",
+		"runtime_target_ready=1",
+		"runtime_target_missing=0",
+		"mutation_allowed=false",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("stdout missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestOpsRebuildTargetOwnerDoesNotCreateTargetWhenRuntimeFactsMissing(t *testing.T) {
+	client := &lifecycleOwnerTestClient{
+		volumes: []ops.SwBlockVolumeObject{{
+			Ref: ops.OperatorObjectRef{
+				Name: "demo-pvc",
+			},
+			Status: ops.SwBlockVolumeCRDStatus{
+				VolumeID: "pvc-demo",
+				PVCName:  "demo-pvc",
+				ReplicaReintegrations: []ops.SwBlockVolumeCRDReturnedReplica{{
+					ReplicaID:             "r2",
+					State:                 ops.ReturnedReplicaStateRecovering,
+					ReasonCode:            ops.ReasonCandidateFrontierBehind,
+					FrontendFenced:        true,
+					FrontendPrimaryReady:  false,
+					DurableFrontierKnown:  true,
+					DurableFrontierLSN:    51,
+					RequiredFrontierKnown: true,
+					RequiredFrontierLSN:   53,
+				}},
+				ExecutorContracts: []ops.SwBlockVolumeCRDExecutorContract{{
+					ActionType:           ops.ManagedVolumeActionRebuildReturned,
+					ReplicaID:            "r2",
+					Decision:             ops.ReturnedReplicaExecutorContractDisabled,
+					Reason:               ops.ReturnedReplicaExecutorContractReasonExecutorDisabled,
+					PreflightDecision:    ops.ReturnedReplicaExecutorPreflightReady,
+					PreflightReason:      ops.ReturnedReplicaExecutorPreflightReasonSatisfied,
+					AllowedMutationClass: []string{ops.AuthorityExecutorAllowedMutationRebuildTraffic},
+				}},
+			},
+		}},
+	}
+	oldFactory := opsRebuildTargetOwnerClientFactory
+	opsRebuildTargetOwnerClientFactory = func() (ops.RebuildTargetOwnerClient, error) {
+		return client, nil
+	}
+	t.Cleanup(func() { opsRebuildTargetOwnerClientFactory = oldFactory })
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ops", "rebuild-target-owner", "--namespace", "kube-system"}, &stdout, &stderr)
+	if code != ops.VolumeStatusExitOK {
+		t.Fatalf("exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	if len(client.rebuildCreates) != 0 {
+		t.Fatalf("unexpected creates=%+v", client.rebuildCreates)
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"rebuild_target_owner=target_mutation",
+		"targets_planned=0",
+		"targets_created=0",
+		"runtime_target_ready=0",
+		"runtime_target_missing=1",
 		"mutation_allowed=false",
 	} {
 		if !strings.Contains(out, want) {

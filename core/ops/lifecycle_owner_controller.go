@@ -49,6 +49,14 @@ type SwBlockReplicaRebuildSpec struct {
 	PVCName         string `json:"pvcName,omitempty"`
 	ReplicaID       string `json:"replicaID,omitempty"`
 	SourceReplicaID string `json:"sourceReplicaID,omitempty"`
+	RuntimeEndpoint string `json:"runtimeEndpoint,omitempty"`
+	TargetDataAddr  string `json:"targetDataAddr,omitempty"`
+	SessionID       uint64 `json:"sessionID,omitempty"`
+	Epoch           uint64 `json:"epoch,omitempty"`
+	EndpointVersion uint64 `json:"endpointVersion,omitempty"`
+	FromLSN         uint64 `json:"fromLsn,omitempty"`
+	FrontierHintLSN uint64 `json:"frontierHintLsn,omitempty"`
+	BasePinLSN      uint64 `json:"basePinLsn,omitempty"`
 }
 
 type LifecycleOwnerReconciler struct {
