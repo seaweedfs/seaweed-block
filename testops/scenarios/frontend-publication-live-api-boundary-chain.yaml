@@ -1,0 +1,167 @@
+# Runner-native Phase 71 gate: frontend publication executor live API boundary.
+
+name: frontend-publication-live-api-boundary-chain
+timeout: 8m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: frontend_publication_live_api_boundary_gate
+    actions:
+      - action: exec
+        node: m02
+        timeout: 7m
+        cmd: "rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase71-frontend-publication-live-api-boundary && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase71-frontend-publication-live-api-boundary && cd {{ product_root }} && SW_BLOCK_ARTIFACT_DIR=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase71-frontend-publication-live-api-boundary bash scripts/run-phase71-frontend-publication-live-api-boundary-gate.sh {{ product_root }}"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase71-frontend-publication-live-api-boundary/phase71-frontend-publication-live-api-boundary-summary.txt"
+        pattern: "^phase71_frontend_publication_live_api_boundary_status=ok$"
+        save_as: phase71_ok
+      - action: assert_greater
+        actual: "{{ phase71_ok }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase71-frontend-publication-live-api-boundary/phase71-frontend-publication-live-api-boundary-summary.txt"
+        pattern: "^executor_status_patch_succeeded=true$"
+        save_as: status_patch
+      - action: assert_greater
+        actual: "{{ status_patch }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase71-frontend-publication-live-api-boundary/phase71-frontend-publication-live-api-boundary-summary.txt"
+        pattern: "^frontend_publication_executor_status_writes=true$"
+        save_as: status_writes
+      - action: assert_greater
+        actual: "{{ status_writes }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase71-frontend-publication-live-api-boundary/phase71-frontend-publication-live-api-boundary-summary.txt"
+        pattern: "^frontend_publication_executor_status=blocked$"
+        save_as: status_blocked
+      - action: assert_greater
+        actual: "{{ status_blocked }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase71-frontend-publication-live-api-boundary/phase71-frontend-publication-live-api-boundary-summary.txt"
+        pattern: "^frontend_publication_executor_reason=frontend_publication_policy_disabled$"
+        save_as: reason_disabled
+      - action: assert_greater
+        actual: "{{ reason_disabled }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase71-frontend-publication-live-api-boundary/phase71-frontend-publication-live-api-boundary-summary.txt"
+        pattern: "^frontend_publication_executor_status_mutation_allowed=true$"
+        save_as: status_mutation
+      - action: assert_greater
+        actual: "{{ status_mutation }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase71-frontend-publication-live-api-boundary/phase71-frontend-publication-live-api-boundary-summary.txt"
+        pattern: "^frontend_publication_mutation_allowed=false$"
+        save_as: frontend_mutation_denied
+      - action: assert_greater
+        actual: "{{ frontend_mutation_denied }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase71-frontend-publication-live-api-boundary/phase71-frontend-publication-live-api-boundary-summary.txt"
+        pattern: "^frontend_published=false$"
+        save_as: no_frontend_published
+      - action: assert_greater
+        actual: "{{ no_frontend_published }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase71-frontend-publication-live-api-boundary/phase71-frontend-publication-live-api-boundary-summary.txt"
+        pattern: "^failback_started=false$"
+        save_as: no_failback_started
+      - action: assert_greater
+        actual: "{{ no_failback_started }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase71-frontend-publication-live-api-boundary/phase71-frontend-publication-live-api-boundary-summary.txt"
+        pattern: "^storage_mutation_allowed=false$"
+        save_as: no_storage_mutation
+      - action: assert_greater
+        actual: "{{ no_storage_mutation }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase71-frontend-publication-live-api-boundary/phase71-frontend-publication-live-api-boundary-summary.txt"
+        pattern: "^frontend_publication_executor_rbac_status_only=true$"
+        save_as: rbac_status_only
+      - action: assert_greater
+        actual: "{{ rbac_status_only }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase71-frontend-publication-live-api-boundary/phase71-frontend-publication-live-api-boundary-summary.txt"
+        pattern: "^executor_spec_patch_allowed=false$"
+        save_as: spec_patch_denied
+      - action: assert_greater
+        actual: "{{ spec_patch_denied }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase71-frontend-publication-live-api-boundary/phase71-frontend-publication-live-api-boundary-summary.txt"
+        pattern: "^executor_label_patch_allowed=false$"
+        save_as: label_patch_denied
+      - action: assert_greater
+        actual: "{{ label_patch_denied }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase71-frontend-publication-live-api-boundary/phase71-frontend-publication-live-api-boundary-summary.txt"
+        pattern: "^executor_finalizers_endpoint_allowed=false$"
+        save_as: finalizers_denied
+      - action: assert_greater
+        actual: "{{ finalizers_denied }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase71-frontend-publication-live-api-boundary/phase71-frontend-publication-live-api-boundary-summary.txt"
+        pattern: "^target_object_integrity_preserved=true$"
+        save_as: integrity_preserved
+      - action: assert_greater
+        actual: "{{ integrity_preserved }}"
+        threshold: "0"
+
+  - name: collect
+    always: true
+    actions:
+      - action: collect_path
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase71-frontend-publication-live-api-boundary"
+        name: "remote-phases"
+        ignore_error: true
