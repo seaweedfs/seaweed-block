@@ -59,6 +59,46 @@ type SwBlockReplicaRebuildSpec struct {
 	BasePinLSN      uint64 `json:"basePinLsn,omitempty"`
 }
 
+type SwBlockFrontendPublicationObject struct {
+	Ref    OperatorObjectRef                   `json:"ref"`
+	Spec   SwBlockFrontendPublicationSpec      `json:"spec,omitempty"`
+	Status SwBlockFrontendPublicationCRDStatus `json:"status,omitempty"`
+}
+
+type SwBlockFrontendPublicationSpec struct {
+	VolumeName                         string `json:"volumeName,omitempty"`
+	VolumeID                           string `json:"volumeID,omitempty"`
+	PVCName                            string `json:"pvcName,omitempty"`
+	ReplicaID                          string `json:"replicaID,omitempty"`
+	SourceEligibilityName              string `json:"sourceEligibilityName,omitempty"`
+	AckEligibilityKnown                bool   `json:"ackEligibilityKnown"`
+	AckEligible                        bool   `json:"ackEligible"`
+	FrontendFencedAfterExecution       bool   `json:"frontendFencedAfterExecution"`
+	PrimaryUnchanged                   bool   `json:"primaryUnchanged"`
+	DurableFrontierCovered             bool   `json:"durableFrontierCovered"`
+	NoCrossVolumeIdentityChange        bool   `json:"noCrossVolumeIdentityChange"`
+	FrontendPublicationDecision        string `json:"frontendPublicationDecision,omitempty"`
+	FrontendPublicationReason          string `json:"frontendPublicationReason,omitempty"`
+	FrontendPublicationMutationAllowed bool   `json:"frontendPublicationMutationAllowed"`
+}
+
+type SwBlockFrontendPublicationCRDStatus struct {
+	ObservedAt                  time.Time              `json:"observedAt,omitempty"`
+	ObservedGeneration          int64                  `json:"observedGeneration,omitempty"`
+	Executor                    string                 `json:"executor,omitempty"`
+	State                       string                 `json:"state,omitempty"`
+	ReasonCode                  string                 `json:"reasonCode,omitempty"`
+	PublicationMutationAllowed  bool                   `json:"publicationMutationAllowed"`
+	FrontendPublished           bool                   `json:"frontendPublished"`
+	FailbackStarted             bool                   `json:"failbackStarted"`
+	NoStorageMutation           bool                   `json:"noStorageMutation"`
+	NoCrossVolumeIdentityChange bool                   `json:"noCrossVolumeIdentityChange"`
+	EvidenceGeneration          string                 `json:"evidenceGeneration,omitempty"`
+	Conditions                  []ObservationCondition `json:"conditions,omitempty"`
+	EvidenceRefs                []string               `json:"evidenceRefs,omitempty"`
+	NonClaims                   []string               `json:"nonClaims,omitempty"`
+}
+
 type LifecycleOwnerReconciler struct {
 	Namespace string
 	Client    LifecycleOwnerClient

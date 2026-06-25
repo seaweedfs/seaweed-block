@@ -1,0 +1,37 @@
+{{- if .Values.frontendPublicationTargetOwner.create }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sw-block-frontend-publication-target-owner
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: sw-block-frontend-publication-target-owner
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sw-block-frontend-publication-target-owner
+  template:
+    metadata:
+      labels:
+        app: sw-block-frontend-publication-target-owner
+    spec:
+      serviceAccountName: {{ include "seaweed-block.fullname" . }}-frontend-publication-target-owner
+      {{- with .Values.frontendPublicationTargetOwner.nodeSelector }}
+      nodeSelector:
+{{ toYaml . | indent 8 }}
+      {{- end }}
+      containers:
+        - name: frontend-publication-target-owner
+          image: {{ include "seaweed-block.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/usr/local/bin/sw-block"]
+          args:
+            - "ops"
+            - "frontend-publication-target-owner"
+            - "--namespace={{ .Release.Namespace }}"
+            {{- if .Values.frontendPublicationTargetOwner.dryRun }}
+            - "--dry-run"
+            {{- end }}
+            - "--interval={{ .Values.frontendPublicationTargetOwner.interval }}"
+{{- end }}

@@ -604,6 +604,103 @@ func TestKubernetesStatusClientCreatesSwBlockReplicaRebuildWithoutStatus(t *test
 	}
 }
 
+func TestKubernetesStatusClientCreatesSwBlockFrontendPublicationWithoutStatus(t *testing.T) {
+	var request recordedStatusPatch
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&request.Body); err != nil {
+			t.Fatalf("decode request body: %v", err)
+		}
+		request.Method = r.Method
+		request.Path = r.URL.Path
+		request.ContentType = r.Header.Get("Content-Type")
+		request.Authorization = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer server.Close()
+
+	err := (&KubernetesStatusClient{
+		BaseURL:     server.URL,
+		BearerToken: "frontend-target-owner-token",
+		HTTPClient:  server.Client(),
+	}).CreateSwBlockFrontendPublication(context.Background(), "kube-system", SwBlockFrontendPublicationObject{
+		Ref: OperatorObjectRef{
+			Name: "demo-pvc-r2-frontend-publication",
+		},
+		Spec: SwBlockFrontendPublicationSpec{
+			VolumeName:                         "demo-pvc",
+			VolumeID:                           "pvc-demo",
+			PVCName:                            "demo-pvc",
+			ReplicaID:                          "r2",
+			SourceEligibilityName:              "demo-pvc-r2-ack",
+			AckEligibilityKnown:                true,
+			AckEligible:                        true,
+			FrontendFencedAfterExecution:       true,
+			PrimaryUnchanged:                   true,
+			DurableFrontierCovered:             true,
+			NoCrossVolumeIdentityChange:        true,
+			FrontendPublicationDecision:        AuthorityExecutorPublicationDecisionDisabled,
+			FrontendPublicationReason:          AuthorityExecutorFrontendPublicationReasonDisabled,
+			FrontendPublicationMutationAllowed: false,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create frontend publication target: %v", err)
+	}
+	if request.Method != http.MethodPost {
+		t.Fatalf("method=%s", request.Method)
+	}
+	if request.Path != "/apis/block.seaweedfs.com/v1alpha1/namespaces/kube-system/swblockfrontendpublications" {
+		t.Fatalf("path=%s", request.Path)
+	}
+	if request.ContentType != "application/json" {
+		t.Fatalf("content-type=%s", request.ContentType)
+	}
+	if request.Authorization != "Bearer frontend-target-owner-token" {
+		t.Fatalf("authorization=%s", request.Authorization)
+	}
+	if request.Body["apiVersion"] != SwBlockVolumeAPIVersion || request.Body["kind"] != SwBlockFrontendPublicationKind {
+		t.Fatalf("body identity=%+v", request.Body)
+	}
+	metadata := request.Body["metadata"].(map[string]any)
+	if metadata["name"] != "demo-pvc-r2-frontend-publication" || metadata["namespace"] != "kube-system" {
+		t.Fatalf("metadata=%+v", metadata)
+	}
+	spec := request.Body["spec"].(map[string]any)
+	for _, want := range []string{
+		"volumeName",
+		"volumeID",
+		"pvcName",
+		"replicaID",
+		"sourceEligibilityName",
+		"ackEligibilityKnown",
+		"ackEligible",
+		"frontendFencedAfterExecution",
+		"primaryUnchanged",
+		"durableFrontierCovered",
+		"noCrossVolumeIdentityChange",
+		"frontendPublicationDecision",
+		"frontendPublicationReason",
+		"frontendPublicationMutationAllowed",
+	} {
+		if _, ok := spec[want]; !ok {
+			t.Fatalf("spec missing %s: %+v", want, spec)
+		}
+	}
+	for _, forbidden := range []string{"source_eligibility_name", "ack_eligible", "frontend_fenced_after_execution", "frontend_publication_decision", "frontend_publication_mutation_allowed"} {
+		if _, ok := spec[forbidden]; ok {
+			t.Fatalf("spec leaked %s: %+v", forbidden, spec)
+		}
+	}
+	if spec["frontendPublicationDecision"] != AuthorityExecutorPublicationDecisionDisabled ||
+		spec["frontendPublicationReason"] != AuthorityExecutorFrontendPublicationReasonDisabled ||
+		spec["frontendPublicationMutationAllowed"] != false {
+		t.Fatalf("frontend publication preflight spec=%+v", spec)
+	}
+	if _, ok := request.Body["status"]; ok {
+		t.Fatalf("target create must not include status: %+v", request.Body)
+	}
+}
+
 func TestKubernetesEventNameSeparatesTypeAndReason(t *testing.T) {
 	base := OperatorKubernetesEvent{
 		InvolvedObject: OperatorObjectRef{Name: "demo-pvc"},

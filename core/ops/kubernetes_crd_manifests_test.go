@@ -46,6 +46,13 @@ func TestPhase35D1CRDManifestsMatchManagedVolumeContract(t *testing.T) {
 			plural:   SwBlockReplicaRebuildPlural,
 			singular: SwBlockReplicaRebuildSingular,
 		},
+		{
+			path:     "charts/seaweed-block/crds/swblockfrontendpublications.block.seaweedfs.com.yaml",
+			name:     "swblockfrontendpublications.block.seaweedfs.com",
+			kind:     SwBlockFrontendPublicationKind,
+			plural:   SwBlockFrontendPublicationPlural,
+			singular: SwBlockFrontendPublicationSingular,
+		},
 	} {
 		t.Run(tc.kind, func(t *testing.T) {
 			doc := readYAMLMap(t, tc.path)
@@ -438,6 +445,101 @@ func TestPhase57D1SwBlockReplicaRebuildTargetSchema(t *testing.T) {
 	}
 }
 
+func TestPhase69SwBlockFrontendPublicationTargetSchema(t *testing.T) {
+	doc := readYAMLMap(t, "charts/seaweed-block/crds/swblockfrontendpublications.block.seaweedfs.com.yaml")
+	spec := yamlMap(t, doc, "spec")
+	names := yamlMap(t, spec, "names")
+	assertYAMLString(t, names, "kind", SwBlockFrontendPublicationKind)
+	assertYAMLString(t, names, "plural", SwBlockFrontendPublicationPlural)
+	assertYAMLString(t, names, "singular", SwBlockFrontendPublicationSingular)
+
+	version := yamlMapFromValue(t, yamlSlice(t, spec, "versions")[0])
+	if _, ok := yamlMap(t, version, "subresources")["status"]; !ok {
+		t.Fatalf("%s missing status subresource", SwBlockFrontendPublicationKind)
+	}
+
+	rootProperties := yamlMap(t,
+		yamlMap(t,
+			yamlMap(t, version, "schema"),
+			"openAPIV3Schema"),
+		"properties")
+	specProperties := yamlMap(t, yamlMap(t, rootProperties, "spec"), "properties")
+	for _, want := range []string{
+		"volumeName",
+		"volumeID",
+		"pvcName",
+		"replicaID",
+		"sourceEligibilityName",
+		"ackEligibilityKnown",
+		"ackEligible",
+		"frontendFencedAfterExecution",
+		"primaryUnchanged",
+		"durableFrontierCovered",
+		"noCrossVolumeIdentityChange",
+		"frontendPublicationDecision",
+		"frontendPublicationReason",
+		"frontendPublicationMutationAllowed",
+	} {
+		if _, ok := specProperties[want]; !ok {
+			t.Fatalf("%s.spec schema missing %s", SwBlockFrontendPublicationKind, want)
+		}
+	}
+	required := yamlStringSet(t, yamlMap(t, rootProperties, "spec"), "required")
+	for _, want := range []string{"volumeName", "replicaID"} {
+		if !required[want] {
+			t.Fatalf("%s.spec required missing %s: %+v", SwBlockFrontendPublicationKind, want, required)
+		}
+	}
+	decisionEnum := yamlStringSet(t, yamlMap(t, specProperties, "frontendPublicationDecision"), "enum")
+	for _, want := range []string{"blocked", "disabled"} {
+		if !decisionEnum[want] {
+			t.Fatalf("%s.spec.frontendPublicationDecision enum missing %s: %+v", SwBlockFrontendPublicationKind, want, decisionEnum)
+		}
+	}
+
+	statusProperties := yamlMap(t, yamlMap(t, rootProperties, "status"), "properties")
+	for _, want := range []string{
+		"observedAt",
+		"observedGeneration",
+		"executor",
+		"state",
+		"reasonCode",
+		"publicationMutationAllowed",
+		"frontendPublished",
+		"failbackStarted",
+		"noStorageMutation",
+		"noCrossVolumeIdentityChange",
+		"evidenceGeneration",
+		"conditions",
+		"evidenceRefs",
+		"nonClaims",
+	} {
+		if _, ok := statusProperties[want]; !ok {
+			t.Fatalf("%s.status schema missing %s", SwBlockFrontendPublicationKind, want)
+		}
+	}
+	stateEnum := yamlStringSet(t, yamlMap(t, statusProperties, "state"), "enum")
+	for _, want := range []string{"planned", "blocked", "published"} {
+		if !stateEnum[want] {
+			t.Fatalf("%s.status.state enum missing %s: %+v", SwBlockFrontendPublicationKind, want, stateEnum)
+		}
+	}
+	for _, forbidden := range []string{
+		"source_eligibility_name",
+		"ack_eligible",
+		"frontend_fenced_after_execution",
+		"frontend_publication_decision",
+		"frontend_publication_mutation_allowed",
+		"publishTarget",
+		"authorityEpoch",
+		"failbackMutationAllowed",
+	} {
+		if _, ok := specProperties[forbidden]; ok {
+			t.Fatalf("%s.spec leaked forbidden field %s", SwBlockFrontendPublicationKind, forbidden)
+		}
+	}
+}
+
 func TestOperatorStatusRBACIsStatusEventsOnly(t *testing.T) {
 	raw := readRepoFile(t, "charts/seaweed-block/templates/operator-status-rbac.yaml")
 	required := []string{
@@ -650,6 +752,63 @@ func TestPhase58RebuildTargetOwnerPackagingIsNarrow(t *testing.T) {
 	} {
 		if strings.Contains(rbac, forbidden) {
 			t.Fatalf("rebuild-target-owner RBAC contains forbidden fragment %q\n%s", forbidden, rbac)
+		}
+	}
+}
+
+func TestPhase69FrontendPublicationTargetOwnerPackagingIsNarrow(t *testing.T) {
+	values := readYAMLMap(t, "charts/seaweed-block/values.yaml")
+	targetOwner := yamlMap(t, values, "frontendPublicationTargetOwner")
+	assertYAMLBool(t, targetOwner, "create", false)
+	assertYAMLBool(t, targetOwner, "dryRun", true)
+	rbacValues := yamlMap(t, targetOwner, "rbac")
+	assertYAMLBool(t, rbacValues, "create", true)
+
+	deploy := readRepoFile(t, "charts/seaweed-block/templates/frontend-publication-target-owner.yaml")
+	for _, want := range []string{
+		`kind: Deployment`,
+		`name: sw-block-frontend-publication-target-owner`,
+		`serviceAccountName: {{ include "seaweed-block.fullname" . }}-frontend-publication-target-owner`,
+		`command: ["/usr/local/bin/sw-block"]`,
+		`- "frontend-publication-target-owner"`,
+		`- "--namespace={{ .Release.Namespace }}"`,
+		`{{- if .Values.frontendPublicationTargetOwner.dryRun }}`,
+		`- "--dry-run"`,
+		`- "--interval={{ .Values.frontendPublicationTargetOwner.interval }}"`,
+	} {
+		if !strings.Contains(deploy, want) {
+			t.Fatalf("frontend-publication-target-owner deployment missing %q\n%s", want, deploy)
+		}
+	}
+
+	rbac := readRepoFile(t, "charts/seaweed-block/templates/frontend-publication-target-owner-rbac.yaml")
+	for _, want := range []string{
+		`resources: ["swblockreplicaeligibilities"]`,
+		`verbs: ["get", "list", "watch"]`,
+		`resources: ["swblockfrontendpublications"]`,
+		`verbs: ["get", "list", "watch", "create"]`,
+	} {
+		if !strings.Contains(rbac, want) {
+			t.Fatalf("frontend-publication-target-owner RBAC missing %q\n%s", want, rbac)
+		}
+	}
+	for _, forbidden := range []string{
+		`resources: ["swblockvolumes"]`,
+		`resources: ["swblockreplicaeligibilities/status"]`,
+		`resources: ["swblockfrontendpublications/status"]`,
+		`resources: ["swblockvolumes/finalizers"]`,
+		`resources: ["events"]`,
+		`resources: ["pods"]`,
+		`resources: ["persistentvolumes"]`,
+		`resources: ["persistentvolumeclaims"]`,
+		`resources: ["storageclasses"]`,
+		`resources: ["secrets"]`,
+		`"update"`,
+		`"patch"`,
+		`"delete"`,
+	} {
+		if strings.Contains(rbac, forbidden) {
+			t.Fatalf("frontend-publication-target-owner RBAC contains forbidden fragment %q\n%s", forbidden, rbac)
 		}
 	}
 }

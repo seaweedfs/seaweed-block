@@ -1,15 +1,18 @@
 package ops
 
 const (
-	SwBlockVolumeAPIVersion           = "block.seaweedfs.com/v1alpha1"
-	SwBlockVolumeKind                 = "SwBlockVolume"
-	SwBlockClusterKind                = "SwBlockCluster"
-	SwBlockReplicaEligibilityKind     = "SwBlockReplicaEligibility"
-	SwBlockReplicaEligibilityPlural   = "swblockreplicaeligibilities"
-	SwBlockReplicaEligibilitySingular = "swblockreplicaeligibility"
-	SwBlockReplicaRebuildKind         = "SwBlockReplicaRebuild"
-	SwBlockReplicaRebuildPlural       = "swblockreplicarebuilds"
-	SwBlockReplicaRebuildSingular     = "swblockreplicarebuild"
+	SwBlockVolumeAPIVersion            = "block.seaweedfs.com/v1alpha1"
+	SwBlockVolumeKind                  = "SwBlockVolume"
+	SwBlockClusterKind                 = "SwBlockCluster"
+	SwBlockReplicaEligibilityKind      = "SwBlockReplicaEligibility"
+	SwBlockReplicaEligibilityPlural    = "swblockreplicaeligibilities"
+	SwBlockReplicaEligibilitySingular  = "swblockreplicaeligibility"
+	SwBlockReplicaRebuildKind          = "SwBlockReplicaRebuild"
+	SwBlockReplicaRebuildPlural        = "swblockreplicarebuilds"
+	SwBlockReplicaRebuildSingular      = "swblockreplicarebuild"
+	SwBlockFrontendPublicationKind     = "SwBlockFrontendPublication"
+	SwBlockFrontendPublicationPlural   = "swblockfrontendpublications"
+	SwBlockFrontendPublicationSingular = "swblockfrontendpublication"
 
 	ConditionReady           = "Ready"
 	ConditionRecovered       = "Recovered"

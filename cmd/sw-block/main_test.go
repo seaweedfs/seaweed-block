@@ -1050,6 +1050,95 @@ func TestOpsRebuildTargetOwnerDoesNotCreateTargetWhenRuntimeFactsMissing(t *test
 	}
 }
 
+func TestOpsFrontendPublicationTargetOwnerCreatesTarget(t *testing.T) {
+	client := &lifecycleOwnerTestClient{
+		eligibilities: []ops.SwBlockReplicaEligibilityObject{cmdFrontendPublicationEligibility()},
+	}
+	oldFactory := opsFrontendPublicationTargetOwnerClientFactory
+	opsFrontendPublicationTargetOwnerClientFactory = func() (ops.FrontendPublicationTargetOwnerClient, error) {
+		return client, nil
+	}
+	t.Cleanup(func() { opsFrontendPublicationTargetOwnerClientFactory = oldFactory })
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ops", "frontend-publication-target-owner", "--namespace", "kube-system"}, &stdout, &stderr)
+	if code != ops.VolumeStatusExitOK {
+		t.Fatalf("exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	if len(client.frontendPublicationCreates) != 1 {
+		t.Fatalf("frontendPublicationCreates=%+v", client.frontendPublicationCreates)
+	}
+	created := client.frontendPublicationCreates[0]
+	if created.Ref.Name != "demo-pvc-r2-frontend-publication" ||
+		created.Spec.VolumeName != "demo-pvc" ||
+		created.Spec.ReplicaID != "r2" ||
+		created.Spec.SourceEligibilityName != "demo-pvc-r2-ack" ||
+		!created.Spec.AckEligibilityKnown ||
+		!created.Spec.AckEligible ||
+		!created.Spec.FrontendFencedAfterExecution ||
+		!created.Spec.PrimaryUnchanged ||
+		!created.Spec.DurableFrontierCovered ||
+		!created.Spec.NoCrossVolumeIdentityChange ||
+		created.Spec.FrontendPublicationDecision != ops.AuthorityExecutorPublicationDecisionDisabled ||
+		created.Spec.FrontendPublicationReason != ops.AuthorityExecutorFrontendPublicationReasonDisabled ||
+		created.Spec.FrontendPublicationMutationAllowed {
+		t.Fatalf("created=%+v", created)
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"frontend_publication_target_owner=target_mutation",
+		"namespace=kube-system",
+		"eligibilities=1",
+		"ready_eligibilities=1",
+		"targets_planned=1",
+		"targets_existing=0",
+		"targets_created=1",
+		"invalid_eligibilities=0",
+		"frontend_publication_attempts=0",
+		"failback_attempts=0",
+		"mutation_allowed=true",
+		"storage_mutation_allowed=false",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("stdout missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestOpsFrontendPublicationTargetOwnerDryRunDoesNotCreateTarget(t *testing.T) {
+	client := &lifecycleOwnerTestClient{
+		eligibilities: []ops.SwBlockReplicaEligibilityObject{cmdFrontendPublicationEligibility()},
+	}
+	oldFactory := opsFrontendPublicationTargetOwnerClientFactory
+	opsFrontendPublicationTargetOwnerClientFactory = func() (ops.FrontendPublicationTargetOwnerClient, error) {
+		return client, nil
+	}
+	t.Cleanup(func() { opsFrontendPublicationTargetOwnerClientFactory = oldFactory })
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ops", "frontend-publication-target-owner", "--dry-run", "--namespace", "kube-system"}, &stdout, &stderr)
+	if code != ops.VolumeStatusExitOK {
+		t.Fatalf("exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	if len(client.frontendPublicationCreates) != 0 {
+		t.Fatalf("dry-run creates=%+v", client.frontendPublicationCreates)
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"frontend_publication_target_owner=dry_run",
+		"targets_planned=1",
+		"targets_created=0",
+		"frontend_publication_attempts=0",
+		"failback_attempts=0",
+		"mutation_allowed=false",
+		"storage_mutation_allowed=false",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("stdout missing %q:\n%s", want, out)
+		}
+	}
+}
+
 func TestOpsAuthorityExecutorExecutionPolicyBlocksWhenAckTargetMissing(t *testing.T) {
 	client := &lifecycleOwnerTestClient{
 		volumes: []ops.SwBlockVolumeObject{{
@@ -1407,6 +1496,35 @@ type operatorStatusTestVolumeWrite struct {
 	status ops.SwBlockVolumeCRDStatus
 }
 
+func cmdFrontendPublicationEligibility() ops.SwBlockReplicaEligibilityObject {
+	return ops.SwBlockReplicaEligibilityObject{
+		Ref: ops.OperatorObjectRef{
+			APIVersion: ops.SwBlockVolumeAPIVersion,
+			Kind:       ops.SwBlockReplicaEligibilityKind,
+			Namespace:  "kube-system",
+			Name:       "demo-pvc-r2-ack",
+		},
+		Spec: ops.SwBlockReplicaEligibilitySpec{
+			VolumeName: "demo-pvc",
+			VolumeID:   "pvc-demo",
+			PVCName:    "demo-pvc",
+			ReplicaID:  "r2",
+		},
+		Status: ops.SwBlockReplicaEligibilityCRDStatus{
+			ReasonCode:                         ops.ReturnedReplicaExecutorPreflightReasonAckEligible,
+			AckEligibilityKnown:                true,
+			AckEligible:                        true,
+			FrontendFencedAfterExecution:       true,
+			PrimaryUnchanged:                   true,
+			DurableFrontierCovered:             true,
+			NoCrossVolumeIdentityChange:        true,
+			FrontendPublicationDecision:        ops.AuthorityExecutorPublicationDecisionDisabled,
+			FrontendPublicationReason:          ops.AuthorityExecutorFrontendPublicationReasonDisabled,
+			FrontendPublicationMutationAllowed: false,
+		},
+	}
+}
+
 func (w *operatorStatusTestWriter) WriteClusterStatus(_ context.Context, _ ops.OperatorObjectRef, status ops.SwBlockClusterCRDStatus) error {
 	w.cluster = status
 	return nil
@@ -1418,14 +1536,16 @@ func (w *operatorStatusTestWriter) WriteVolumeStatus(_ context.Context, ref ops.
 }
 
 type lifecycleOwnerTestClient struct {
-	volumes           []ops.SwBlockVolumeObject
-	eligibilities     []ops.SwBlockReplicaEligibilityObject
-	rebuilds          []ops.SwBlockReplicaRebuildObject
-	patches           []lifecycleOwnerTestPatch
-	events            []ops.OperatorKubernetesEvent
-	eligibilityWrites []lifecycleOwnerTestEligibilityWrite
-	rebuildWrites     []lifecycleOwnerTestRebuildWrite
-	rebuildCreates    []ops.SwBlockReplicaRebuildObject
+	volumes                    []ops.SwBlockVolumeObject
+	eligibilities              []ops.SwBlockReplicaEligibilityObject
+	rebuilds                   []ops.SwBlockReplicaRebuildObject
+	frontendTargets            []ops.SwBlockFrontendPublicationObject
+	patches                    []lifecycleOwnerTestPatch
+	events                     []ops.OperatorKubernetesEvent
+	eligibilityWrites          []lifecycleOwnerTestEligibilityWrite
+	rebuildWrites              []lifecycleOwnerTestRebuildWrite
+	rebuildCreates             []ops.SwBlockReplicaRebuildObject
+	frontendPublicationCreates []ops.SwBlockFrontendPublicationObject
 }
 
 type lifecycleOwnerTestPatch struct {
@@ -1455,6 +1575,10 @@ func (c *lifecycleOwnerTestClient) ListSwBlockReplicaRebuilds(_ context.Context,
 	return append([]ops.SwBlockReplicaRebuildObject(nil), c.rebuilds...), nil
 }
 
+func (c *lifecycleOwnerTestClient) ListSwBlockFrontendPublications(_ context.Context, _ string) ([]ops.SwBlockFrontendPublicationObject, error) {
+	return append([]ops.SwBlockFrontendPublicationObject(nil), c.frontendTargets...), nil
+}
+
 func (c *lifecycleOwnerTestClient) WriteReplicaEligibilityStatus(_ context.Context, ref ops.OperatorObjectRef, status ops.SwBlockReplicaEligibilityCRDStatus) error {
 	c.eligibilityWrites = append(c.eligibilityWrites, lifecycleOwnerTestEligibilityWrite{ref: ref, status: status})
 	return nil
@@ -1467,6 +1591,11 @@ func (c *lifecycleOwnerTestClient) WriteReplicaRebuildStatus(_ context.Context, 
 
 func (c *lifecycleOwnerTestClient) CreateSwBlockReplicaRebuild(_ context.Context, _ string, obj ops.SwBlockReplicaRebuildObject) error {
 	c.rebuildCreates = append(c.rebuildCreates, obj)
+	return nil
+}
+
+func (c *lifecycleOwnerTestClient) CreateSwBlockFrontendPublication(_ context.Context, _ string, obj ops.SwBlockFrontendPublicationObject) error {
+	c.frontendPublicationCreates = append(c.frontendPublicationCreates, obj)
 	return nil
 }
 

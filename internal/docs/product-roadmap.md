@@ -58,13 +58,14 @@ This is the short internal roadmap. Keep it current and readable.
   agreement. This remains read-only and does not add mutating operator
   lifecycle.
 - Current development slice: returned-replica rebuild/reintegration runtime
-  productization has advanced through Phase 64. Phases 46-54 made returned
+  productization has advanced through Phase 69. Phases 46-54 made returned
   replicas visible and action-gated, Phases 60-67 connected the bounded
   rebuild/catch-up runtime path through target facts, executor HTTP transport,
-  an opt-in blockvolume runtime start endpoint, and terminal caught-up evidence.
-  Phase 66 adds the disabled publication-decision surface after caught-up. Do
-  not claim ACK eligibility mutation, frontend publication, failback,
-  backup/restore, or NVMe parity yet.
+  an opt-in blockvolume runtime start endpoint, terminal caught-up evidence,
+  and ACK eligibility publication. Phase 68 added the disabled frontend
+  publication preflight. Phase 69 adds the disabled-by-default frontend
+  publication target contract. Do not claim frontend publication execution,
+  failback, backup/restore, or NVMe parity yet.
 - Model hardening gate before the next large release: complete the
   ManagedVolume Operations Model under `internal/docs/protocol/` before
   expanding operator or broader HA claims. The goal is to prevent Kubernetes,
@@ -197,9 +198,12 @@ rebuild, delete safety, or cleanup must start as a separate gated phase.
   opt-in blockvolume runtime endpoint that starts local rebuild/catch-up only
   after primary and lineage/session validation. Phase 65 adds terminal runtime
   evidence: `started -> running -> durable frontier -> caught_up`. Phase 66
-  consumes caught-up as a disabled publication preflight. The remaining gap is
-  an explicitly bounded ACK eligibility publication mutation, if the team
-  chooses to continue this operation line before NVMe.
+  consumes caught-up as a disabled publication preflight. Phase 67 publishes
+  ACK eligibility after caught-up. Phase 68 makes frontend publication
+  explicitly disabled on that eligibility. Phase 69 creates the next typed
+  frontend-publication target object without executing publication. The
+  remaining gap before failback is a real frontend publication executor
+  boundary with admission/RBAC proof and multi-volume isolation.
 - Later: returned-replica frontend publication/failback execution, NVMe ANA
   Kubernetes multipath parity, stronger committed-frontier reporting, broad
   distro/host compatibility, and longer soak under failure. NVMe ANA parity
