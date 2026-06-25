@@ -1,156 +1,156 @@
-# Current Plan: Phase 63 Rebuild Runtime Target Contract
+# Current Plan: Phase 64 Blockvolume Runtime Rebuild Endpoint
 
 Status: complete.
 
 ## Goal
 
-Phase 60 proved the existing engine/adapter/transport rebuild/catch-up data
-path can move bytes and converge durable content. Phase 61 added the authority
-executor runtime call-site seam. Phase 62 added an explicit HTTP runtime
-transport.
+Phase 60 proved the existing engine/adapter/transport rebuild and catch-up data
+path can move bytes. Phase 61 added the authority-executor runtime call-site.
+Phase 62 added the HTTP runtime transport. Phase 63 schema-locked the runtime
+target facts needed to address a returned replica safely.
 
-Phase 63 closes the missing addressing contract between Kubernetes status and
-that runtime transport. It does not add the blockvolume runtime endpoint yet.
-Instead, it makes the next step safe by requiring exact runtime target facts
-before any executor can issue rebuild traffic:
+Phase 64 wires the first blockvolume-side runtime endpoint against that
+contract:
 
 ```text
-SwBlockVolume.status.replicaReintegrations[]
-  -> SwBlockReplicaRebuild.spec
-  -> authority-executor runtime request
+SwBlockReplicaRebuild.spec runtime facts
+  -> authority-executor HTTP runtime POST
+  -> blockvolume /runtime/rebuild
+  -> local assignment/session validation
+  -> ReplicationVolume.StartRuntimeRecovery
+  -> peer executor StartRebuild/StartCatchUp
 ```
 
-The key rule is fail-closed: do not infer runtime endpoint, data address,
-session ID, epoch, endpoint version, or frontier hints from partial evidence.
+The key rule remains fail-closed. The endpoint must not infer session, epoch,
+endpoint-version, replica identity, or frontend publication from partial
+evidence.
 
 ## Delivered
 
-### D1: Runtime Target Schema
+### D1: Opt-in Blockvolume Runtime Endpoint
 
-`SwBlockVolume.status.replicaReintegrations[]` and
-`SwBlockReplicaRebuild.spec` now carry the same runtime target fields:
-
-```text
-runtimeEndpoint
-targetDataAddr
-sessionID
-epoch
-endpointVersion
-fromLsn
-frontierHintLsn
-basePinLsn
-```
-
-The CRD tests assert camelCase schema fields and reject snake_case leaks.
-
-### D2: Target Owner Fail-Closed Creation
-
-`rebuild-target-owner` now creates a `SwBlockReplicaRebuild` target only when
-the returned-replica fact carries complete runtime target evidence. If the
-facts are missing, it reports:
+`cmd/blockvolume` now has an explicit flag:
 
 ```text
-runtime_target_missing=1
-mutation_allowed=false
+--runtime-rebuild-endpoint
 ```
 
-No target is created from guessed data-path or session facts.
-
-### D3: Authority Executor Target Validation
-
-`authority-executor` can use the target's own `spec.runtimeEndpoint` when a
-runtime is selected. Before posting to the runtime, it validates the target
-contains:
+When enabled, the blockvolume status server exposes:
 
 ```text
-runtimeEndpoint
-sessionID
-epoch
-endpointVersion
-frontierHintLsn
+POST /runtime/rebuild
 ```
 
-If any required runtime fact is missing, it writes blocked status:
+The endpoint is disabled by default.
+
+### D2: Local Primary And Lineage Validation
+
+The endpoint starts runtime recovery only when all of these hold:
 
 ```text
-state=blocked
-reasonCode=rebuild_runtime_target_missing
+request.volumeID == served volume
+status projection says FrontendPrimaryReady
+replicaID is present
+sessionID > 0
+epoch > 0
+endpointVersion > 0
+frontierHintLsn > 0
+runtime recovery source is wired
 ```
 
-and does not POST to the runtime.
+`ReplicationVolume.StartRuntimeRecovery` and `Peer.StartRuntimeRecovery` then
+validate the local peer before calling the executor:
+
+```text
+replica identity matches
+targetDataAddr does not drift
+epoch matches
+endpointVersion matches
+peer is not closed
+```
+
+### D3: Runtime Start Without Fake Terminal Evidence
+
+The endpoint returns:
+
+```text
+runtimeState=started
+rebuildTrafficStarted=true
+durableFrontierKnown=false
+```
+
+The authority executor preserves `SwBlockReplicaRebuild.status.state=running`
+when the runtime reports `started`. It does not mark `caught_up` until a future
+terminal-evidence path exists.
 
 ### D4: Gate
 
 Gate files:
 
 ```text
-scripts/run-phase63-rebuild-runtime-target-contract-gate.sh
-testops/scenarios/rebuild-runtime-target-contract-chain.yaml
+scripts/run-phase64-blockvolume-runtime-endpoint-gate.sh
+testops/scenarios/blockvolume-runtime-endpoint-chain.yaml
 ```
 
-The gate proves schema, target-owner, executor, CLI, and Kubernetes writer
-behavior using terminal key/value evidence.
+The gate proves endpoint opt-in, exact-lineage POST behavior, non-primary
+rejection, replication lineage rejection, and authority-executor handling of
+`runtimeState=started`.
 
 ## Non-Claims
 
-Phase 63 does not claim:
+Phase 64 does not claim:
 
 ```text
-blockvolume_runtime_endpoint_wired
-transport.StartRebuild called by blockvolume
+terminal durable frontier known
+caught_up from runtime start alone
 frontend publication
 failback
-session ID inference
-automatic recovery-session minting
+automatic session minting
+NVMe/ANA behavior
 ```
 
-Those belong to the next storage runtime phase. The blockvolume endpoint must
-own or validate the recovery session before it calls `StartRebuild` or
-`StartCatchUp`.
+Those belong to later gated phases.
 
 ## Verification
 
 Local:
 
 ```text
-go test ./core/ops ./cmd/sw-block
-C:\work\swblock.exe validate testops\scenarios\rebuild-runtime-target-contract-chain.yaml
+go test ./core/ops ./core/host/volume ./core/replication ./cmd/blockvolume
+C:\work\swblock.exe validate testops\scenarios\blockvolume-runtime-endpoint-chain.yaml
 ```
 
 Live:
 
 ```text
-20260625-011115-b01b rebuild-runtime-target-contract-chain PASS 22/22
+20260625-012440-775a blockvolume-runtime-endpoint-chain PASS 18/18
 ```
 
 Terminal evidence:
 
 ```text
-phase63_rebuild_runtime_target_contract_status=ok
-runtime_target_fields_schema_locked=true
-runtime_target_camel_case=true
-target_owner_requires_runtime_facts=true
-target_owner_creates_only_when_runtime_facts_complete=true
-target_owner_missing_runtime_no_target=true
-authority_executor_missing_runtime_target_blocks=true
-authority_executor_runtime_request_carries_target_lineage=true
-runtime_target_can_drive_http_runtime=true
-session_id_inferred=false
-blockvolume_runtime_endpoint_wired=false
-start_rebuild_called=false
+phase64_blockvolume_runtime_endpoint_status=ok
+runtime_state_started_supported=true
+authority_executor_started_result_not_blocked=true
+blockvolume_runtime_endpoint_opt_in=true
+blockvolume_runtime_endpoint_posts_started=true
+blockvolume_runtime_endpoint_requires_primary=true
+blockvolume_runtime_endpoint_requires_lineage=true
+replication_runtime_rejects_lineage_drift=true
+runtime_endpoint_terminal_frontier_claimed=false
 frontend_publication_allowed=false
 failback_allowed=false
 ```
 
 ## Next
 
-Phase 64 can add the blockvolume-side runtime endpoint only if it preserves the
-same contract:
+Phase 65 should add terminal runtime evidence before any publication/failback
+claim. The next contract should answer:
 
 ```text
-exact target facts -> local assignment/session validation -> StartRebuild/StartCatchUp
+started -> running -> terminal frontier observed -> caught_up
 ```
 
-The endpoint must fail closed on stale assignment, wrong replica, missing
-session, wrong epoch, or insufficient frontier evidence. NVMe should still wait
-until the rebuild runtime endpoint has a real terminal-evidence gate.
+Until that exists, the executor must keep rebuild targets in `running` after a
+successful start and must not publish the returned replica to ACK eligibility or
+frontend service.

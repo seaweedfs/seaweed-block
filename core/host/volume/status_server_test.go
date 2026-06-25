@@ -4,6 +4,7 @@
 package volume
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -529,6 +530,117 @@ func TestStatusServer_RecoveryEndpoint_Disabled_Returns404(t *testing.T) {
 	}
 }
 
+func TestStatusServer_RuntimeRebuild_Disabled_Returns404(t *testing.T) {
+	s := NewStatusServer(NewAdapterProjectionView(
+		stubProjector{p: engine.ReplicaProjection{Mode: engine.ModeHealthy}},
+		"v1", "r1", nil))
+	addr, err := s.Start("127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer func() { _ = s.Close(context.Background()) }()
+	resp, err := http.Post("http://"+addr+"/runtime/rebuild", "application/json", strings.NewReader(`{"volumeID":"v1"}`))
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 404 {
+		t.Fatalf("disabled runtime endpoint: got %d want 404", resp.StatusCode)
+	}
+}
+
+func TestStatusServer_RuntimeRebuild_StartsRecoveryWithExactLineage(t *testing.T) {
+	src := &fakeRuntimeRecoverySource{}
+	s := NewStatusServer(NewAdapterProjectionView(
+		stubProjector{p: engine.ReplicaProjection{Mode: engine.ModeHealthy, Epoch: 7, EndpointVersion: 3}},
+		"v1", "primary", nil))
+	s.EnableRuntimeEndpoint()
+	s.SetRuntimeRecoverySource(src)
+	addr, err := s.Start("127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer func() { _ = s.Close(context.Background()) }()
+	body, _ := json.Marshal(RuntimeRebuildRequest{
+		VolumeID:        "v1",
+		ReplicaID:       "r2",
+		TargetDataAddr:  "127.0.0.1:19103",
+		SessionID:       1001,
+		Epoch:           7,
+		EndpointVersion: 3,
+		FromLSN:         52,
+		FrontierHintLSN: 90,
+		BasePinLSN:      60,
+		EvidenceRefs:    []string{"target-evidence.txt"},
+	})
+	resp, err := http.Post("http://"+addr+"/runtime/rebuild", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("runtime rebuild status=%d", resp.StatusCode)
+	}
+	if len(src.requests) != 1 {
+		t.Fatalf("runtime calls=%d", len(src.requests))
+	}
+	got := src.requests[0]
+	if got.ReplicaID != "r2" ||
+		got.TargetDataAddr != "127.0.0.1:19103" ||
+		got.SessionID != 1001 ||
+		got.Epoch != 7 ||
+		got.EndpointVersion != 3 ||
+		got.FromLSN != 52 ||
+		got.FrontierHintLSN != 90 ||
+		got.BasePinLSN != 60 {
+		t.Fatalf("runtime request=%+v", got)
+	}
+	var result RuntimeRebuildResult
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("decode result: %v", err)
+	}
+	if result.RuntimeState != "started" ||
+		!result.RebuildTrafficStarted ||
+		result.DurableFrontierKnown ||
+		!containsString(result.EvidenceRefs, "blockvolume_runtime_rebuild_started") ||
+		!containsString(result.EvidenceRefs, "target-evidence.txt") {
+		t.Fatalf("result=%+v", result)
+	}
+}
+
+func TestStatusServer_RuntimeRebuild_RejectsNonPrimary(t *testing.T) {
+	src := &fakeRuntimeRecoverySource{}
+	s := NewStatusServer(NewAdapterProjectionView(
+		stubProjector{p: engine.ReplicaProjection{Mode: engine.ModeDegraded, Epoch: 7, EndpointVersion: 3}},
+		"v1", "r1", nil))
+	s.EnableRuntimeEndpoint()
+	s.SetRuntimeRecoverySource(src)
+	addr, err := s.Start("127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer func() { _ = s.Close(context.Background()) }()
+	body, _ := json.Marshal(RuntimeRebuildRequest{
+		VolumeID:        "v1",
+		ReplicaID:       "r2",
+		SessionID:       1001,
+		Epoch:           7,
+		EndpointVersion: 3,
+		FrontierHintLSN: 90,
+	})
+	resp, err := http.Post("http://"+addr+"/runtime/rebuild", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 409 {
+		t.Fatalf("non-primary runtime status=%d want 409", resp.StatusCode)
+	}
+	if len(src.requests) != 0 {
+		t.Fatalf("runtime source called on non-primary: %+v", src.requests)
+	}
+}
+
 // TestStatusServer_RecoveryEndpoint_Enabled_ReturnsEngineProjection
 // — pins that EnableRecoveryEndpoint exposes the engine projection
 // over HTTP with R/S/H + Mode + RecoveryDecision visible (the fields
@@ -821,4 +933,22 @@ func TestG9B_StatusProjection_ReturnedReplicaCanBeDurableReadyButFrontendNotRead
 	if !gotDurable.Latched || !gotDurable.Operational {
 		t.Fatalf("returned replica must expose local durable readiness separately: %+v", durableBody.Volumes)
 	}
+}
+
+type fakeRuntimeRecoverySource struct {
+	requests []replication.RuntimeRecoveryRequest
+}
+
+func (f *fakeRuntimeRecoverySource) StartRuntimeRecovery(_ context.Context, req replication.RuntimeRecoveryRequest) error {
+	f.requests = append(f.requests, req)
+	return nil
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }

@@ -59,6 +59,7 @@ type flags struct {
 	// External status bind is off by default. Node-loss gates opt in so
 	// blockmaster can probe surviving replicas across Kubernetes nodes.
 	allowExternalStatusBind bool
+	runtimeRebuildEndpoint  bool
 
 	// iSCSI frontend flags. iscsiListen is the TCP address the iSCSI
 	// target binds on; empty disables the frontend. The safe default
@@ -138,6 +139,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.StringVar(&f.statusAddr, "status-addr", "", "address for the status HTTP endpoint (e.g. 127.0.0.1:0); empty disables")
 	fs.BoolVar(&f.statusRecovery, "status-recovery", false, "expose /status/recovery?volume=<id> with engine.ReplicaProjection (Mode/R/S/H/RecoveryDecision); off by default; loopback-only; intended for hardware test orchestration")
 	fs.BoolVar(&f.allowExternalStatusBind, "allow-external-status-bind", false, "allow the unauthenticated status endpoint to bind and serve non-loopback addresses; intended only for explicit Kubernetes node-loss gates")
+	fs.BoolVar(&f.runtimeRebuildEndpoint, "runtime-rebuild-endpoint", false, "expose POST /runtime/rebuild on the status HTTP listener; off by default; starts primary-side rebuild/catch-up traffic only after request lineage validation")
 	fs.StringVar(&f.iscsiListen, "iscsi-listen", "", "iSCSI target bind address (e.g. 127.0.0.1:0); empty disables. Loopback-only unless paired with an operator-managed proxy")
 	fs.StringVar(&f.iscsiIQN, "iscsi-iqn", "", "iSCSI target IQN (required if --iscsi-listen is set)")
 	fs.StringVar(&f.iscsiPortalAddr, "iscsi-portal-addr", "", "iSCSI TargetAddress advertised in SendTargets responses (e.g. 203.0.113.10:3260,1). Defaults to the bound listen address. Does not change the loopback-only bind policy")
@@ -423,6 +425,9 @@ func run(f flags) int {
 		if f.statusRecovery {
 			status.EnableRecoveryEndpoint()
 		}
+		if f.runtimeRebuildEndpoint {
+			status.EnableRuntimeEndpoint()
+		}
 		if f.allowExternalStatusBind {
 			status.AllowExternalAccess()
 		}
@@ -547,6 +552,7 @@ func run(f flags) int {
 		replVolume = replication.NewReplicationVolume(f.volumeID, store)
 		if status != nil {
 			status.SetPeerStatusSource(replVolume)
+			status.SetRuntimeRecoverySource(replVolume)
 		}
 		repMode, writeAck, err := parseReplicationAckProfile(f.replicationAck)
 		if err != nil {

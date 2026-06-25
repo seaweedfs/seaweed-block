@@ -68,6 +68,7 @@ type AuthorityRebuildRuntimeRequest struct {
 }
 
 type AuthorityRebuildRuntimeResult struct {
+	RuntimeState         string   `json:"runtimeState,omitempty"`
 	DurableFrontierKnown bool     `json:"durableFrontierKnown"`
 	DurableFrontierLSN   uint64   `json:"durableFrontierLsn"`
 	EvidenceRefs         []string `json:"evidenceRefs,omitempty"`
@@ -231,6 +232,9 @@ func (r AuthorityExecutorReconciler) evaluateRebuildPlanning(ctx context.Context
 			return fmt.Errorf("write failed rebuild status after runtime error %v: %w", err, writeErr)
 		}
 		return fmt.Errorf("execute rebuild runtime: %w", err)
+	}
+	if runtimeResult.RuntimeState == "started" {
+		return nil
 	}
 	if !runtimeResult.DurableFrontierKnown || !returned.RequiredFrontierKnown || runtimeResult.DurableFrontierLSN < returned.RequiredFrontierLSN {
 		result.BlockedReason = AuthorityExecutorBlockedTerminalEvidence

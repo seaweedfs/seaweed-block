@@ -251,6 +251,45 @@ func TestAuthorityExecutorReconcilerExecutesRebuildRuntimeAndWritesCaughtUpStatu
 	}
 }
 
+func TestAuthorityExecutorReconcilerKeepsRunningWhenRuntimeOnlyStarts(t *testing.T) {
+	client := &fakeAuthorityExecutorClient{
+		volumes:  []SwBlockVolumeObject{authorityExecutorRebuildVolume(false, false)},
+		rebuilds: []SwBlockReplicaRebuildObject{authorityExecutorRuntimeRebuildTarget()},
+	}
+	runtime := &fakeAuthorityRebuildRuntime{
+		result: AuthorityRebuildRuntimeResult{
+			RuntimeState: "started",
+			EvidenceRefs: []string{
+				"blockvolume-runtime-started.txt",
+			},
+		},
+	}
+	result, err := (AuthorityExecutorReconciler{
+		Namespace:              "kube-system",
+		Client:                 client,
+		RebuildRuntime:         runtime,
+		ExecutionRequested:     true,
+		ExecutionPolicyEnabled: true,
+		AllowedMutationClass:   AuthorityExecutorAllowedMutationRebuildTraffic,
+	}).Reconcile(context.Background())
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if result.BlockedReason != "" ||
+		result.MutationAttemptCount != 1 ||
+		len(runtime.requests) != 1 ||
+		len(client.rebuildWrites) != 1 {
+		t.Fatalf("result=%+v runtime=%+v rebuild_writes=%+v", result, runtime.requests, client.rebuildWrites)
+	}
+	running := client.rebuildWrites[0].status
+	if running.State != "running" ||
+		running.ReasonCode != AuthorityExecutorReasonRebuildRunning ||
+		!running.RebuildTrafficStarted ||
+		running.DurableFrontierCaughtUp {
+		t.Fatalf("running status=%+v", running)
+	}
+}
+
 func TestAuthorityExecutorReconcilerWritesBlockedStatusWhenRebuildRuntimeFails(t *testing.T) {
 	client := &fakeAuthorityExecutorClient{
 		volumes:  []SwBlockVolumeObject{authorityExecutorRebuildVolume(false, false)},

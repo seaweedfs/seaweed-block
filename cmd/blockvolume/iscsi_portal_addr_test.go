@@ -141,6 +141,25 @@ func TestParseFlags_ExternalStatusBindIsExplicitFlag(t *testing.T) {
 	}
 }
 
+func TestParseFlags_RuntimeRebuildEndpointIsExplicitFlag(t *testing.T) {
+	f, err := parseFlags([]string{
+		"--master", "127.0.0.1:9333",
+		"--server-id", "m01",
+		"--volume-id", "v1",
+		"--replica-id", "r1",
+		"--data-addr", "127.0.0.1:19101",
+		"--ctrl-addr", "127.0.0.1:19102",
+		"--status-addr", "127.0.0.1:23260",
+		"--runtime-rebuild-endpoint",
+	})
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if !f.runtimeRebuildEndpoint {
+		t.Fatalf("runtimeRebuildEndpoint=false, want true")
+	}
+}
+
 func TestParseFlags_IscsiDataOutTimeoutRequiresListen(t *testing.T) {
 	args := append(requiredBlockvolumeArgs(),
 		"--iscsi-dataout-timeout", "5s",

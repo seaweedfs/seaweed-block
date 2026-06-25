@@ -50,9 +50,11 @@ type StatusServer struct {
 	srv             *http.Server
 	addr            string
 	recoveryEnabled bool // G5-5: gates /status/recovery; off by default
+	runtimeEnabled  bool
 	allowExternal   bool
 	peerSource      peerStatusSource
 	durableSource   durableStatusSource
+	runtimeSource   runtimeRecoverySource
 }
 
 type peerStatusSource interface {
@@ -61,6 +63,36 @@ type peerStatusSource interface {
 
 type durableStatusSource interface {
 	DurableStatuses() []durable.VolumeStatus
+}
+
+type runtimeRecoverySource interface {
+	StartRuntimeRecovery(context.Context, replication.RuntimeRecoveryRequest) error
+}
+
+type RuntimeRebuildRequest struct {
+	VolumeName          string   `json:"volumeName,omitempty"`
+	VolumeID            string   `json:"volumeID"`
+	PVCName             string   `json:"pvcName,omitempty"`
+	ReplicaID           string   `json:"replicaID"`
+	RuntimeEndpoint     string   `json:"runtimeEndpoint,omitempty"`
+	TargetDataAddr      string   `json:"targetDataAddr,omitempty"`
+	SessionID           uint64   `json:"sessionID"`
+	Epoch               uint64   `json:"epoch"`
+	EndpointVersion     uint64   `json:"endpointVersion"`
+	FromLSN             uint64   `json:"fromLsn,omitempty"`
+	FrontierHintLSN     uint64   `json:"frontierHintLsn"`
+	BasePinLSN          uint64   `json:"basePinLsn,omitempty"`
+	DurableFrontierLSN  uint64   `json:"durableFrontierLsn,omitempty"`
+	RequiredFrontierLSN uint64   `json:"requiredFrontierLsn,omitempty"`
+	EvidenceRefs        []string `json:"evidenceRefs,omitempty"`
+}
+
+type RuntimeRebuildResult struct {
+	RuntimeState          string   `json:"runtimeState"`
+	RebuildTrafficStarted bool     `json:"rebuildTrafficStarted"`
+	DurableFrontierKnown  bool     `json:"durableFrontierKnown"`
+	DurableFrontierLSN    uint64   `json:"durableFrontierLsn,omitempty"`
+	EvidenceRefs          []string `json:"evidenceRefs,omitempty"`
 }
 
 const (
@@ -111,6 +143,12 @@ func (s *StatusServer) EnableRecoveryEndpoint() {
 	s.recoveryEnabled = true
 }
 
+func (s *StatusServer) EnableRuntimeEndpoint() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.runtimeEnabled = true
+}
+
 // AllowExternalAccess opts into binding and serving on non-loopback addresses.
 // This is for controlled Kubernetes node-loss gates where blockmaster must
 // probe surviving replicas across nodes. The default remains loopback-only.
@@ -141,6 +179,12 @@ func (s *StatusServer) SetDurableStatusSource(src durableStatusSource) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.durableSource = src
+}
+
+func (s *StatusServer) SetRuntimeRecoverySource(src runtimeRecoverySource) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.runtimeSource = src
 }
 
 // Start binds on addr and spawns the HTTP serve goroutine.
@@ -176,6 +220,9 @@ func (s *StatusServer) Start(addr string) (string, error) {
 	mux.HandleFunc("/status/durable", s.handleStatusDurable)
 	if s.recoveryEnabled {
 		mux.HandleFunc("/status/recovery", s.handleStatusRecovery)
+	}
+	if s.runtimeEnabled {
+		mux.HandleFunc("/runtime/rebuild", s.handleRuntimeRebuild)
 	}
 	s.srv = &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 
@@ -379,6 +426,72 @@ func (s *StatusServer) handleStatusDurable(w http.ResponseWriter, r *http.Reques
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(body)
+}
+
+func (s *StatusServer) handleRuntimeRebuild(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "runtime rebuild requires POST", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.externalAccessAllowed() && !isLoopbackRemote(r.RemoteAddr) {
+		http.Error(w, "runtime endpoint restricted to loopback", http.StatusForbidden)
+		return
+	}
+	var req RuntimeRebuildRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64*1024)).Decode(&req); err != nil {
+		http.Error(w, "decode runtime rebuild request: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	p := s.statusProjection()
+	if req.VolumeID == "" {
+		http.Error(w, "volumeID is required", http.StatusBadRequest)
+		return
+	}
+	if p.VolumeID != req.VolumeID {
+		http.Error(w, fmt.Sprintf("volume %q not served by this host (serves %q)", req.VolumeID, p.VolumeID), http.StatusNotFound)
+		return
+	}
+	if !p.FrontendPrimaryReady {
+		http.Error(w, "runtime rebuild requires local frontend primary readiness", http.StatusConflict)
+		return
+	}
+	if req.ReplicaID == "" {
+		http.Error(w, "replicaID is required", http.StatusBadRequest)
+		return
+	}
+	if req.SessionID == 0 || req.Epoch == 0 || req.EndpointVersion == 0 || req.FrontierHintLSN == 0 {
+		http.Error(w, "nonzero sessionID, epoch, endpointVersion, and frontierHintLsn are required", http.StatusBadRequest)
+		return
+	}
+	s.mu.Lock()
+	src := s.runtimeSource
+	s.mu.Unlock()
+	if src == nil {
+		http.Error(w, "runtime recovery source is not configured", http.StatusNotFound)
+		return
+	}
+	if err := src.StartRuntimeRecovery(r.Context(), replication.RuntimeRecoveryRequest{
+		ReplicaID:       req.ReplicaID,
+		TargetDataAddr:  req.TargetDataAddr,
+		SessionID:       req.SessionID,
+		Epoch:           req.Epoch,
+		EndpointVersion: req.EndpointVersion,
+		FromLSN:         req.FromLSN,
+		FrontierHintLSN: req.FrontierHintLSN,
+		BasePinLSN:      req.BasePinLSN,
+	}); err != nil {
+		http.Error(w, "start runtime recovery: "+err.Error(), http.StatusConflict)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(RuntimeRebuildResult{
+		RuntimeState:          "started",
+		RebuildTrafficStarted: true,
+		DurableFrontierKnown:  false,
+		EvidenceRefs: append([]string{
+			"blockvolume_runtime_rebuild_started",
+		}, req.EvidenceRefs...),
+	})
 }
 
 // enforceLoopbackBind refuses to bind on anything other than

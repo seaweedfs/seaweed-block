@@ -57,14 +57,13 @@ This is the short internal roadmap. Keep it current and readable.
   evidence refs, cleanup visibility, safe next-step hints, and cross-surface
   agreement. This remains read-only and does not add mutating operator
   lifecycle.
-- Current development slice: returned-replica reintegration productization has
-  advanced through Phase 50. Phases 46-50 made returned replicas visible in the
-  ManagedVolume model, admitted reintegration only as a dry-run action, proved
-  same-run live evidence from the iSCSI returned-replica scenario, added a
-  non-mutating executor preflight, and published that preflight through
-  operator-snapshot plus SwBlockVolume `.status`. Do not claim automatic
-  reintegration, rebuild, failback, ACK eligibility mutation, or frontend
-  publication yet.
+- Current development slice: returned-replica rebuild/reintegration runtime
+  productization has advanced through Phase 64. Phases 46-54 made returned
+  replicas visible and action-gated, Phases 60-64 connected the bounded
+  rebuild/catch-up runtime path through target facts, executor HTTP transport,
+  and an opt-in blockvolume runtime start endpoint. Do not claim terminal
+  caught-up evidence, frontend publication, failback, backup/restore, or NVMe
+  parity yet.
 - Model hardening gate before the next large release: complete the
   ManagedVolume Operations Model under `internal/docs/protocol/` before
   expanding operator or broader HA claims. The goal is to prevent Kubernetes,
@@ -190,20 +189,14 @@ rebuild, delete safety, or cleanup must start as a separate gated phase.
   authority promotion to a surviving replica, host-path recovery through the
   documented mechanism, and support-bundle proof of fencing and data integrity.
 - Current returned-replica status: observed returned replicas are productized
-  through the ManagedVolume surface. A dry-run reintegration action and
-  executor preflight can become ready only with fencing, frontier, and explicit
-  ACK eligibility evidence, and that preflight is now available through
-  machine-readable status. Phase 52 adds a still-disabled executor contract:
-  only ACK eligibility is named as the future allowed mutation class, while
-  frontend publication, rebuild traffic, and failback stay forbidden. Phase 53
-  adds the disabled executor process boundary with read-only SwBlockVolume
-  access. Phase 54 is the larger milestone for the first bounded mutation:
-  returned-replica ACK eligibility only, with admission/RBAC, terminal evidence,
-  failure states, and multi-volume isolation in one close gate. D1-D3 are
-  implemented and D3 has live RBAC QA PASS; D4 now connects the executor
-  call-site to the narrow ACK eligibility status target and is pending terminal
-  evidence QA. Broader authority/storage mutation is still deferred.
-- Later: returned-replica rebuild/reintegration/failback execution, NVMe ANA
+  through the ManagedVolume surface and executor/action model. Phase 60 proved
+  the rebuild/catch-up datapath can converge durable content. Phase 61 added
+  the authority-executor runtime call-site. Phase 62 added HTTP runtime
+  transport. Phase 63 schema-locked runtime target facts. Phase 64 added an
+  opt-in blockvolume runtime endpoint that starts local rebuild/catch-up only
+  after primary and lineage/session validation. The remaining gap is terminal
+  runtime evidence: `started -> running -> durable frontier -> caught_up`.
+- Later: returned-replica frontend publication/failback execution, NVMe ANA
   Kubernetes multipath parity, stronger committed-frontier reporting, broad
   distro/host compatibility, and longer soak under failure. NVMe ANA parity
   should follow the Kubernetes-native status foundation so ANA facts, path
@@ -587,7 +580,14 @@ product risk. The recommended order is:
    The live iSCSI returned-replica gate emits same-run managed-volume
    evidence for required frontier coverage and replay it through report/status
    surfaces before any mutating returned-replica executor is proposed.
-12. **Backup/snapshot/restore and NVMe ANA parity.**
+12. **Phase 60-64: rebuild runtime path.** Closed through runtime start.
+   Phase 60 proved the existing datapath, Phase 61 added the executor call-site,
+   Phase 62 added HTTP runtime transport, Phase 63 locked runtime target facts,
+   and Phase 64 added the opt-in blockvolume endpoint that starts recovery after
+   primary/lineage validation. The remaining pre-NVMe gap is terminal evidence:
+   a started runtime session must report durable frontier/caught-up completion
+   before frontend publication or failback can be claimed.
+13. **Backup/snapshot/restore and NVMe ANA parity.**
    Important, but they should reuse the status/action model rather than create
    another isolated control plane.
 
@@ -606,10 +606,9 @@ Approximate engineering effort if scope remains tight:
   API/admission proof that only finalizers can be patched.
 - Productized returned-replica rebuild/reintegration/failback: high. Phase 46
   closed the status/decision slice: returned replicas are visible, fenced, and
-  volume-scoped across product surfaces. Phase 47 starts dry-run executor
-  admission for safe reintegration evidence only. Executor-enabled
-  rebuild/failback remains a later decision and should not be claimed until
-  separately gated.
+  volume-scoped across product surfaces. Phases 47-64 have advanced from
+  dry-run admission to bounded runtime start, but terminal completion evidence,
+  frontend publication, and failback remain separate gated work.
 - Backup/snapshot/restore: high. Requires durable data semantics and user-facing
   restore guarantees.
 - NVMe ANA parity: medium/high. Protocol-specific work, but cheaper if it uses
@@ -674,9 +673,14 @@ Approximate engineering effort if scope remains tight:
   status into `SwBlockReplicaRebuild.spec`, and makes target-owner /
   authority-executor fail closed when those facts are missing. It still does
   not call live `StartRebuild`.
-- Phase 64 should wire a blockvolume-side runtime endpoint against the Phase 63
-  target contract. The endpoint must validate local assignment/session/epoch
-  facts before calling `StartRebuild` or `StartCatchUp`.
+- Phase 64 Blockvolume Runtime Rebuild Endpoint is closed. It adds an explicit
+  opt-in blockvolume `/runtime/rebuild` endpoint, validates local primary
+  readiness plus session/epoch/endpoint-version facts, starts
+  `StartRebuild`/`StartCatchUp`, and keeps authority status `running` when the
+  runtime reports only `runtimeState=started`.
+- Phase 65 should add terminal runtime evidence. It should prove the running
+  runtime session can report durable frontier/caught-up completion before any
+  ACK eligibility, frontend publication, failback, or NVMe claim.
 - Phase 41-44 are the Operation Layer v0.5 release train: lifecycle-owner
   foundation, real API/admission proof, first bounded finalizer mutation, and
   delete lifecycle close gate.

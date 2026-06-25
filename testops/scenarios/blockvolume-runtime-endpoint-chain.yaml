@@ -1,0 +1,96 @@
+# Runner-native Phase 64 gate: blockvolume runtime rebuild start endpoint.
+
+name: blockvolume-runtime-endpoint-chain
+timeout: 8m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: blockvolume_runtime_endpoint_gate
+    actions:
+      - action: exec
+        node: m02
+        timeout: 7m
+        cmd: "rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase64-blockvolume-runtime-endpoint && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase64-blockvolume-runtime-endpoint && cd {{ product_root }} && SW_BLOCK_ARTIFACT_DIR=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase64-blockvolume-runtime-endpoint bash scripts/run-phase64-blockvolume-runtime-endpoint-gate.sh {{ product_root }}"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase64-blockvolume-runtime-endpoint/phase64-blockvolume-runtime-endpoint-summary.txt"
+        pattern: "^phase64_blockvolume_runtime_endpoint_status=ok$"
+        save_as: phase64_ok
+      - action: assert_greater
+        actual: "{{ phase64_ok }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase64-blockvolume-runtime-endpoint/phase64-blockvolume-runtime-endpoint-summary.txt"
+        pattern: "^runtime_state_started_supported=true$"
+        save_as: started_supported
+      - action: assert_greater
+        actual: "{{ started_supported }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase64-blockvolume-runtime-endpoint/phase64-blockvolume-runtime-endpoint-summary.txt"
+        pattern: "^authority_executor_started_result_not_blocked=true$"
+        save_as: started_not_blocked
+      - action: assert_greater
+        actual: "{{ started_not_blocked }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase64-blockvolume-runtime-endpoint/phase64-blockvolume-runtime-endpoint-summary.txt"
+        pattern: "^blockvolume_runtime_endpoint_opt_in=true$"
+        save_as: opt_in
+      - action: assert_greater
+        actual: "{{ opt_in }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase64-blockvolume-runtime-endpoint/phase64-blockvolume-runtime-endpoint-summary.txt"
+        pattern: "^blockvolume_runtime_endpoint_posts_started=true$"
+        save_as: posts_started
+      - action: assert_greater
+        actual: "{{ posts_started }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase64-blockvolume-runtime-endpoint/phase64-blockvolume-runtime-endpoint-summary.txt"
+        pattern: "^blockvolume_runtime_endpoint_requires_primary=true$"
+        save_as: requires_primary
+      - action: assert_greater
+        actual: "{{ requires_primary }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase64-blockvolume-runtime-endpoint/phase64-blockvolume-runtime-endpoint-summary.txt"
+        pattern: "^replication_runtime_rejects_lineage_drift=true$"
+        save_as: rejects_drift
+      - action: assert_greater
+        actual: "{{ rejects_drift }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase64-blockvolume-runtime-endpoint/phase64-blockvolume-runtime-endpoint-summary.txt"
+        pattern: "^runtime_endpoint_terminal_frontier_claimed=false$"
+        save_as: no_terminal_claim
+      - action: assert_greater
+        actual: "{{ no_terminal_claim }}"
+        threshold: "0"
+
+  - name: collect
+    always: true
+    actions:
+      - action: collect_path
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase64-blockvolume-runtime-endpoint"
+        name: "remote-phases"
+        ignore_error: true

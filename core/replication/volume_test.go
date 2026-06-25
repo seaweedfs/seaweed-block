@@ -104,6 +104,45 @@ func TestReplicationVolume_PeerStatuses_SortedStateSnapshot(t *testing.T) {
 	}
 }
 
+func TestReplicationVolume_StartRuntimeRecovery_ValidatesPeerLineage(t *testing.T) {
+	addr, _ := replicaHarness(t, "r1")
+	v := volumeHarness(t, "vol1")
+	if err := v.UpdateReplicaSet(42, []ReplicaTarget{targetFor("r1", addr, 3, 2)}); err != nil {
+		t.Fatalf("UpdateReplicaSet: %v", err)
+	}
+	if err := v.StartRuntimeRecovery(context.Background(), RuntimeRecoveryRequest{
+		ReplicaID:       "r1",
+		TargetDataAddr:  addr,
+		SessionID:       1001,
+		Epoch:           3,
+		EndpointVersion: 2,
+		FromLSN:         1,
+		FrontierHintLSN: 1,
+	}); err != nil {
+		t.Fatalf("StartRuntimeRecovery valid catch-up: %v", err)
+	}
+	if err := v.StartRuntimeRecovery(context.Background(), RuntimeRecoveryRequest{
+		ReplicaID:       "r1",
+		TargetDataAddr:  addr,
+		SessionID:       1002,
+		Epoch:           4,
+		EndpointVersion: 2,
+		FrontierHintLSN: 1,
+	}); err == nil || !strings.Contains(err.Error(), "lineage drift") {
+		t.Fatalf("StartRuntimeRecovery wrong epoch err=%v, want lineage drift", err)
+	}
+	if err := v.StartRuntimeRecovery(context.Background(), RuntimeRecoveryRequest{
+		ReplicaID:       "r1",
+		TargetDataAddr:  "127.0.0.1:1",
+		SessionID:       1003,
+		Epoch:           3,
+		EndpointVersion: 2,
+		FrontierHintLSN: 1,
+	}); err == nil || !strings.Contains(err.Error(), "target data address drift") {
+		t.Fatalf("StartRuntimeRecovery wrong addr err=%v, want target data address drift", err)
+	}
+}
+
 // --- Test 2: Opt-3 three-assertion pin ---
 
 // TestReplicationVolume_UpdateReplicaSet_RemovePeer_ExecutorTornDown —
