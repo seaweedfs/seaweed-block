@@ -79,6 +79,15 @@ spec:
                   type: boolean
                 noCrossVolumeIdentityChange:
                   type: boolean
+                frontendPublicationDecision:
+                  type: string
+                  enum:
+                    - blocked
+                    - disabled
+                frontendPublicationReason:
+                  type: string
+                frontendPublicationMutationAllowed:
+                  type: boolean
                 evidenceGeneration:
                   type: string
                 conditions:

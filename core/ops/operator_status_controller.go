@@ -365,20 +365,23 @@ type SwBlockVolumeCRDAction struct {
 }
 
 type SwBlockReplicaEligibilityCRDStatus struct {
-	ObservedAt                   time.Time              `json:"observedAt,omitempty"`
-	ObservedGeneration           int64                  `json:"observedGeneration,omitempty"`
-	Executor                     string                 `json:"executor,omitempty"`
-	ReasonCode                   string                 `json:"reasonCode,omitempty"`
-	AckEligibilityKnown          bool                   `json:"ackEligibilityKnown"`
-	AckEligible                  bool                   `json:"ackEligible"`
-	FrontendFencedAfterExecution bool                   `json:"frontendFencedAfterExecution"`
-	PrimaryUnchanged             bool                   `json:"primaryUnchanged"`
-	DurableFrontierCovered       bool                   `json:"durableFrontierCovered"`
-	NoCrossVolumeIdentityChange  bool                   `json:"noCrossVolumeIdentityChange"`
-	EvidenceGeneration           string                 `json:"evidenceGeneration,omitempty"`
-	Conditions                   []ObservationCondition `json:"conditions,omitempty"`
-	EvidenceRefs                 []string               `json:"evidenceRefs,omitempty"`
-	NonClaims                    []string               `json:"nonClaims,omitempty"`
+	ObservedAt                         time.Time              `json:"observedAt,omitempty"`
+	ObservedGeneration                 int64                  `json:"observedGeneration,omitempty"`
+	Executor                           string                 `json:"executor,omitempty"`
+	ReasonCode                         string                 `json:"reasonCode,omitempty"`
+	AckEligibilityKnown                bool                   `json:"ackEligibilityKnown"`
+	AckEligible                        bool                   `json:"ackEligible"`
+	FrontendFencedAfterExecution       bool                   `json:"frontendFencedAfterExecution"`
+	PrimaryUnchanged                   bool                   `json:"primaryUnchanged"`
+	DurableFrontierCovered             bool                   `json:"durableFrontierCovered"`
+	NoCrossVolumeIdentityChange        bool                   `json:"noCrossVolumeIdentityChange"`
+	FrontendPublicationDecision        string                 `json:"frontendPublicationDecision,omitempty"`
+	FrontendPublicationReason          string                 `json:"frontendPublicationReason,omitempty"`
+	FrontendPublicationMutationAllowed bool                   `json:"frontendPublicationMutationAllowed"`
+	EvidenceGeneration                 string                 `json:"evidenceGeneration,omitempty"`
+	Conditions                         []ObservationCondition `json:"conditions,omitempty"`
+	EvidenceRefs                       []string               `json:"evidenceRefs,omitempty"`
+	NonClaims                          []string               `json:"nonClaims,omitempty"`
 }
 
 type SwBlockReplicaRebuildCRDStatus struct {

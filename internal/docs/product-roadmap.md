@@ -584,15 +584,16 @@ product risk. The recommended order is:
    The live iSCSI returned-replica gate emits same-run managed-volume
    evidence for required frontier coverage and replay it through report/status
    surfaces before any mutating returned-replica executor is proposed.
-12. **Phase 60-67: rebuild runtime path and ACK eligibility publication.** Closed through bounded ACK eligibility.
+12. **Phase 60-68: rebuild runtime path, ACK eligibility, and frontend preflight.** Closed through frontend publication preflight.
    Phase 60 proved the existing datapath, Phase 61 added the executor call-site,
    Phase 62 added HTTP runtime transport, Phase 63 locked runtime target facts,
    Phase 64 added the opt-in blockvolume endpoint that starts recovery after
    primary/lineage validation, Phase 65 added terminal durable-frontier
    evidence, Phase 66 surfaces caught-up as publication preflight while keeping
-   publication disabled, and Phase 67 publishes only ACK eligibility after
-   caught-up terminal evidence. Frontend publication and failback remain
-   separate gated work before NVMe.
+   publication disabled, Phase 67 publishes only ACK eligibility after
+   caught-up terminal evidence, and Phase 68 surfaces frontend publication as
+   disabled preflight on the ACK eligibility status. Frontend publication and
+   failback remain separate gated work before NVMe.
 13. **Backup/snapshot/restore and NVMe ANA parity.**
    Important, but they should reuse the status/action model rather than create
    another isolated control plane.
@@ -615,8 +616,9 @@ Approximate engineering effort if scope remains tight:
   volume-scoped across product surfaces. Phases 47-67 have advanced from
   dry-run admission to bounded runtime start, terminal completion evidence, and
   disabled publication preflight. Phase 67 adds the first bounded ACK
-  eligibility status publication. Frontend publication and failback remain
-  separate gated work.
+  eligibility status publication. Phase 68 adds frontend publication preflight
+  while keeping the frontend mutation disabled. Frontend publication and
+  failback remain separate gated work.
 - Backup/snapshot/restore: high. Requires durable data semantics and user-facing
   restore guarantees.
 - NVMe ANA parity: medium/high. Protocol-specific work, but cheaper if it uses
@@ -699,9 +701,13 @@ Approximate engineering effort if scope remains tight:
   `SwBlockReplicaEligibility.status` with `ack_eligibility_recorded`; frontend
   publication, failback, storage mutation, and primary authority changes remain
   explicitly out of scope.
-- Phase 68 should be frontend publication preflight, not failback. It should
-  surface the exact evidence and decision state needed for frontend publication
-  while keeping the frontend mutation disabled.
+- Phase 68 Frontend Publication Preflight is closed. `SwBlockReplicaEligibility`
+  status now carries `frontendPublicationDecision`, `frontendPublicationReason`,
+  and `frontendPublicationMutationAllowed`; the decision is currently
+  `disabled` with mutation allowed false.
+- Phase 69 should define the frontend publication target contract and
+  admission/RBAC boundary before any real frontend publication mutation. Do not
+  jump directly to failback.
 - Phase 41-44 are the Operation Layer v0.5 release train: lifecycle-owner
   foundation, real API/admission proof, first bounded finalizer mutation, and
   delete lifecycle close gate.

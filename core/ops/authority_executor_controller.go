@@ -23,6 +23,7 @@ const (
 	AuthorityExecutorPublicationDecisionDisabled       = "disabled"
 	AuthorityExecutorPublicationReasonCaughtUpRequired = "rebuild_caught_up_required"
 	AuthorityExecutorPublicationReasonPolicyDisabled   = "publication_policy_disabled"
+	AuthorityExecutorFrontendPublicationReasonDisabled = "frontend_publication_policy_disabled"
 )
 
 type AuthorityExecutorClient interface {
@@ -424,15 +425,18 @@ func authorityExecutorAckEligibilityStatus(now time.Time, volume SwBlockVolumeOb
 	evidenceRefs := appendUniqueStrings(nil, contract.EvidenceRefs...)
 	evidenceRefs = appendUniqueStrings(evidenceRefs, returned.EvidenceRefs...)
 	return SwBlockReplicaEligibilityCRDStatus{
-		ObservedAt:                   now,
-		Executor:                     defaultString(contract.OwnerExecutor, "authority_recovery_executor"),
-		ReasonCode:                   AuthorityExecutorReasonAckEligibilityRecorded,
-		AckEligibilityKnown:          true,
-		AckEligible:                  true,
-		FrontendFencedAfterExecution: returned.FrontendFenced && !returned.FrontendPrimaryReady,
-		PrimaryUnchanged:             returned.FrontendFenced && !returned.FrontendPrimaryReady,
-		DurableFrontierCovered:       returned.DurableFrontierKnown && returned.RequiredFrontierKnown && returned.DurableFrontierLSN >= returned.RequiredFrontierLSN,
-		NoCrossVolumeIdentityChange:  true,
+		ObservedAt:                         now,
+		Executor:                           defaultString(contract.OwnerExecutor, "authority_recovery_executor"),
+		ReasonCode:                         AuthorityExecutorReasonAckEligibilityRecorded,
+		AckEligibilityKnown:                true,
+		AckEligible:                        true,
+		FrontendFencedAfterExecution:       returned.FrontendFenced && !returned.FrontendPrimaryReady,
+		PrimaryUnchanged:                   returned.FrontendFenced && !returned.FrontendPrimaryReady,
+		DurableFrontierCovered:             returned.DurableFrontierKnown && returned.RequiredFrontierKnown && returned.DurableFrontierLSN >= returned.RequiredFrontierLSN,
+		NoCrossVolumeIdentityChange:        true,
+		FrontendPublicationDecision:        AuthorityExecutorPublicationDecisionDisabled,
+		FrontendPublicationReason:          AuthorityExecutorFrontendPublicationReasonDisabled,
+		FrontendPublicationMutationAllowed: false,
 		Conditions: []ObservationCondition{{
 			Type:     ConditionReady,
 			Status:   "True",
@@ -456,15 +460,18 @@ func authorityExecutorAckEligibilityStatusFromRebuild(now time.Time, volume SwBl
 	evidenceRefs = appendUniqueStrings(evidenceRefs, returned.EvidenceRefs...)
 	evidenceRefs = appendUniqueStrings(evidenceRefs, rebuild.EvidenceRefs...)
 	return SwBlockReplicaEligibilityCRDStatus{
-		ObservedAt:                   now,
-		Executor:                     defaultString(contract.OwnerExecutor, "authority_recovery_executor"),
-		ReasonCode:                   AuthorityExecutorReasonAckEligibilityRecorded,
-		AckEligibilityKnown:          true,
-		AckEligible:                  true,
-		FrontendFencedAfterExecution: returned.FrontendFenced && !returned.FrontendPrimaryReady,
-		PrimaryUnchanged:             returned.FrontendFenced && !returned.FrontendPrimaryReady,
-		DurableFrontierCovered:       rebuild.DurableFrontierKnown && rebuild.RequiredFrontierKnown && rebuild.DurableFrontierLSN >= rebuild.RequiredFrontierLSN,
-		NoCrossVolumeIdentityChange:  rebuild.NoCrossVolumeIdentityChange,
+		ObservedAt:                         now,
+		Executor:                           defaultString(contract.OwnerExecutor, "authority_recovery_executor"),
+		ReasonCode:                         AuthorityExecutorReasonAckEligibilityRecorded,
+		AckEligibilityKnown:                true,
+		AckEligible:                        true,
+		FrontendFencedAfterExecution:       returned.FrontendFenced && !returned.FrontendPrimaryReady,
+		PrimaryUnchanged:                   returned.FrontendFenced && !returned.FrontendPrimaryReady,
+		DurableFrontierCovered:             rebuild.DurableFrontierKnown && rebuild.RequiredFrontierKnown && rebuild.DurableFrontierLSN >= rebuild.RequiredFrontierLSN,
+		NoCrossVolumeIdentityChange:        rebuild.NoCrossVolumeIdentityChange,
+		FrontendPublicationDecision:        AuthorityExecutorPublicationDecisionDisabled,
+		FrontendPublicationReason:          AuthorityExecutorFrontendPublicationReasonDisabled,
+		FrontendPublicationMutationAllowed: false,
 		Conditions: []ObservationCondition{{
 			Type:     ConditionReady,
 			Status:   "True",

@@ -313,6 +313,9 @@ func TestPhase54D2SwBlockReplicaEligibilityTargetSchema(t *testing.T) {
 		"primaryUnchanged",
 		"durableFrontierCovered",
 		"noCrossVolumeIdentityChange",
+		"frontendPublicationDecision",
+		"frontendPublicationReason",
+		"frontendPublicationMutationAllowed",
 		"evidenceGeneration",
 		"conditions",
 		"evidenceRefs",
@@ -329,10 +332,16 @@ func TestPhase54D2SwBlockReplicaEligibilityTargetSchema(t *testing.T) {
 		"primaryChanged",
 		"ack_eligible",
 		"frontend_fenced_after_execution",
+		"frontend_publication_decision",
+		"frontend_publication_mutation_allowed",
 	} {
 		if _, ok := statusProperties[forbidden]; ok {
 			t.Fatalf("%s.status leaked forbidden field %s", SwBlockReplicaEligibilityKind, forbidden)
 		}
+	}
+	decisionEnum := yamlStringSet(t, yamlMap(t, statusProperties, "frontendPublicationDecision"), "enum")
+	if !decisionEnum[AuthorityExecutorPublicationDecisionBlocked] || !decisionEnum[AuthorityExecutorPublicationDecisionDisabled] {
+		t.Fatalf("%s.status.frontendPublicationDecision enum=%+v", SwBlockReplicaEligibilityKind, decisionEnum)
 	}
 }
 

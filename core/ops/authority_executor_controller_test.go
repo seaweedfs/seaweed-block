@@ -336,6 +336,9 @@ func TestAuthorityExecutorReconcilerPublishesAckEligibilityAfterRebuildCaughtUp(
 		!status.PrimaryUnchanged ||
 		!status.DurableFrontierCovered ||
 		!status.NoCrossVolumeIdentityChange ||
+		status.FrontendPublicationDecision != AuthorityExecutorPublicationDecisionDisabled ||
+		status.FrontendPublicationReason != AuthorityExecutorFrontendPublicationReasonDisabled ||
+		status.FrontendPublicationMutationAllowed ||
 		!status.ObservedAt.Equal(now) {
 		t.Fatalf("status=%+v", status)
 	}
@@ -595,6 +598,9 @@ func TestAuthorityExecutorReconcilerWritesAckEligibilityStatusWhenTerminalEviden
 		!status.PrimaryUnchanged ||
 		!status.DurableFrontierCovered ||
 		!status.NoCrossVolumeIdentityChange ||
+		status.FrontendPublicationDecision != AuthorityExecutorPublicationDecisionDisabled ||
+		status.FrontendPublicationReason != AuthorityExecutorFrontendPublicationReasonDisabled ||
+		status.FrontendPublicationMutationAllowed ||
 		status.ReasonCode != AuthorityExecutorReasonAckEligibilityRecorded ||
 		!status.ObservedAt.Equal(now) {
 		t.Fatalf("status=%+v", status)

@@ -131,19 +131,22 @@ func TestKubernetesStatusClientPatchesOnlyStatusSubresources(t *testing.T) {
 		Namespace: "kube-system",
 		Name:      "demo-pvc-r1",
 	}, SwBlockReplicaEligibilityCRDStatus{
-		ObservedAt:                   observedAt,
-		ObservedGeneration:           7,
-		Executor:                     "authority_recovery_executor",
-		ReasonCode:                   "ack_eligibility_recorded",
-		AckEligibilityKnown:          true,
-		AckEligible:                  true,
-		FrontendFencedAfterExecution: true,
-		PrimaryUnchanged:             true,
-		DurableFrontierCovered:       true,
-		NoCrossVolumeIdentityChange:  true,
-		EvidenceGeneration:           "executor-run-1",
-		EvidenceRefs:                 []string{"returned-replica-summary.txt"},
-		NonClaims:                    []string{"no_frontend_publication", "no_rebuild_traffic", "no_failback"},
+		ObservedAt:                         observedAt,
+		ObservedGeneration:                 7,
+		Executor:                           "authority_recovery_executor",
+		ReasonCode:                         "ack_eligibility_recorded",
+		AckEligibilityKnown:                true,
+		AckEligible:                        true,
+		FrontendFencedAfterExecution:       true,
+		PrimaryUnchanged:                   true,
+		DurableFrontierCovered:             true,
+		NoCrossVolumeIdentityChange:        true,
+		FrontendPublicationDecision:        AuthorityExecutorPublicationDecisionDisabled,
+		FrontendPublicationReason:          AuthorityExecutorFrontendPublicationReasonDisabled,
+		FrontendPublicationMutationAllowed: false,
+		EvidenceGeneration:                 "executor-run-1",
+		EvidenceRefs:                       []string{"returned-replica-summary.txt"},
+		NonClaims:                          []string{"no_frontend_publication", "no_rebuild_traffic", "no_failback"},
 	}); err != nil {
 		t.Fatalf("write replica eligibility status: %v", err)
 	}
@@ -276,16 +279,24 @@ func TestKubernetesStatusClientPatchesOnlyStatusSubresources(t *testing.T) {
 		"primaryUnchanged",
 		"durableFrontierCovered",
 		"noCrossVolumeIdentityChange",
+		"frontendPublicationDecision",
+		"frontendPublicationReason",
+		"frontendPublicationMutationAllowed",
 		"evidenceGeneration",
 	} {
 		if _, ok := replicaEligibilityStatus[want]; !ok {
 			t.Fatalf("replica eligibility status missing camelCase %s: %+v", want, replicaEligibilityStatus)
 		}
 	}
-	for _, forbidden := range []string{"ack_eligible", "frontend_fenced_after_execution", "spec"} {
+	for _, forbidden := range []string{"ack_eligible", "frontend_fenced_after_execution", "frontend_publication_decision", "frontend_publication_mutation_allowed", "spec"} {
 		if _, ok := replicaEligibilityStatus[forbidden]; ok {
 			t.Fatalf("replica eligibility status leaked %s: %+v", forbidden, replicaEligibilityStatus)
 		}
+	}
+	if replicaEligibilityStatus["frontendPublicationDecision"] != AuthorityExecutorPublicationDecisionDisabled ||
+		replicaEligibilityStatus["frontendPublicationReason"] != AuthorityExecutorFrontendPublicationReasonDisabled ||
+		replicaEligibilityStatus["frontendPublicationMutationAllowed"] != false {
+		t.Fatalf("frontend publication preflight=%+v", replicaEligibilityStatus)
 	}
 	replicaRebuildStatus := requests[3].Body["status"].(map[string]any)
 	for _, want := range []string{
