@@ -67,6 +67,7 @@ type durableStatusSource interface {
 
 type runtimeRecoverySource interface {
 	StartRuntimeRecovery(context.Context, replication.RuntimeRecoveryRequest) error
+	RuntimeRecoveryStatus(context.Context, replication.RuntimeRecoveryRequest) (replication.RuntimeRecoveryStatus, error)
 }
 
 type RuntimeRebuildRequest struct {
@@ -470,7 +471,7 @@ func (s *StatusServer) handleRuntimeRebuild(w http.ResponseWriter, r *http.Reque
 		http.Error(w, "runtime recovery source is not configured", http.StatusNotFound)
 		return
 	}
-	if err := src.StartRuntimeRecovery(r.Context(), replication.RuntimeRecoveryRequest{
+	recoveryReq := replication.RuntimeRecoveryRequest{
 		ReplicaID:       req.ReplicaID,
 		TargetDataAddr:  req.TargetDataAddr,
 		SessionID:       req.SessionID,
@@ -479,7 +480,42 @@ func (s *StatusServer) handleRuntimeRebuild(w http.ResponseWriter, r *http.Reque
 		FromLSN:         req.FromLSN,
 		FrontierHintLSN: req.FrontierHintLSN,
 		BasePinLSN:      req.BasePinLSN,
-	}); err != nil {
+	}
+	if status, err := src.RuntimeRecoveryStatus(r.Context(), recoveryReq); err != nil {
+		http.Error(w, "query runtime recovery status: "+err.Error(), http.StatusConflict)
+		return
+	} else if status.State == "caught_up" {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(RuntimeRebuildResult{
+			RuntimeState:          "caught_up",
+			RebuildTrafficStarted: true,
+			DurableFrontierKnown:  true,
+			DurableFrontierLSN:    status.AchievedLSN,
+			EvidenceRefs: append([]string{
+				"blockvolume_runtime_rebuild_caught_up",
+			}, req.EvidenceRefs...),
+		})
+		return
+	} else if status.State == "failed" {
+		reason := status.FailReason
+		if reason == "" {
+			reason = status.FailureKind
+		}
+		http.Error(w, "runtime recovery failed: "+reason, http.StatusConflict)
+		return
+	} else if status.State == "running" {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(RuntimeRebuildResult{
+			RuntimeState:          "started",
+			RebuildTrafficStarted: true,
+			DurableFrontierKnown:  false,
+			EvidenceRefs: append([]string{
+				"blockvolume_runtime_rebuild_running",
+			}, req.EvidenceRefs...),
+		})
+		return
+	}
+	if err := src.StartRuntimeRecovery(r.Context(), recoveryReq); err != nil {
 		http.Error(w, "start runtime recovery: "+err.Error(), http.StatusConflict)
 		return
 	}

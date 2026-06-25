@@ -179,6 +179,35 @@ func TestTransport_Rebuild_StreamsAndAdvancesFrontier(t *testing.T) {
 	assertDataMatch(t, "rebuild", primary, replica, 10)
 }
 
+func TestTransport_Rebuild_RecordsTerminalSessionStatus(t *testing.T) {
+	primary, _, listener := setupPrimaryReplica(t)
+	writeTestBlocks(primary, 4)
+
+	exec := NewBlockExecutor(primary, listener.Addr())
+	_, _, pH := primary.Boundaries()
+	if err := exec.StartRebuild("r1", 44, 1, 1, pH); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.After(5 * time.Second)
+	for {
+		status := exec.RecoverySessionStatus("r1", 44)
+		if status.State == RecoverySessionStateCaughtUp {
+			if status.AchievedLSN != pH {
+				t.Fatalf("achieved=%d want %d", status.AchievedLSN, pH)
+			}
+			return
+		}
+		if status.State == RecoverySessionStateFailed {
+			t.Fatalf("session failed: %+v", status)
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("timeout waiting for terminal status, last=%+v", status)
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
+
 func TestTransport_CatchUp_DialFailureDoesNotEmitStarted(t *testing.T) {
 	primary := storage.NewBlockStore(64, 4096)
 	writeTestBlocks(primary, 4)

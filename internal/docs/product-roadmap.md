@@ -59,11 +59,11 @@ This is the short internal roadmap. Keep it current and readable.
   lifecycle.
 - Current development slice: returned-replica rebuild/reintegration runtime
   productization has advanced through Phase 64. Phases 46-54 made returned
-  replicas visible and action-gated, Phases 60-64 connected the bounded
+  replicas visible and action-gated, Phases 60-65 connected the bounded
   rebuild/catch-up runtime path through target facts, executor HTTP transport,
-  and an opt-in blockvolume runtime start endpoint. Do not claim terminal
-  caught-up evidence, frontend publication, failback, backup/restore, or NVMe
-  parity yet.
+  an opt-in blockvolume runtime start endpoint, and terminal caught-up evidence.
+  Do not claim frontend publication, failback, backup/restore, or NVMe parity
+  yet.
 - Model hardening gate before the next large release: complete the
   ManagedVolume Operations Model under `internal/docs/protocol/` before
   expanding operator or broader HA claims. The goal is to prevent Kubernetes,
@@ -194,8 +194,10 @@ rebuild, delete safety, or cleanup must start as a separate gated phase.
   the authority-executor runtime call-site. Phase 62 added HTTP runtime
   transport. Phase 63 schema-locked runtime target facts. Phase 64 added an
   opt-in blockvolume runtime endpoint that starts local rebuild/catch-up only
-  after primary and lineage/session validation. The remaining gap is terminal
-  runtime evidence: `started -> running -> durable frontier -> caught_up`.
+  after primary and lineage/session validation. Phase 65 adds terminal runtime
+  evidence: `started -> running -> durable frontier -> caught_up`. The
+  remaining gap is consuming caught-up as a precondition for a separately gated
+  publication/failback decision.
 - Later: returned-replica frontend publication/failback execution, NVMe ANA
   Kubernetes multipath parity, stronger committed-frontier reporting, broad
   distro/host compatibility, and longer soak under failure. NVMe ANA parity
@@ -580,13 +582,14 @@ product risk. The recommended order is:
    The live iSCSI returned-replica gate emits same-run managed-volume
    evidence for required frontier coverage and replay it through report/status
    surfaces before any mutating returned-replica executor is proposed.
-12. **Phase 60-64: rebuild runtime path.** Closed through runtime start.
+12. **Phase 60-65: rebuild runtime path.** Closed through runtime caught-up.
    Phase 60 proved the existing datapath, Phase 61 added the executor call-site,
    Phase 62 added HTTP runtime transport, Phase 63 locked runtime target facts,
-   and Phase 64 added the opt-in blockvolume endpoint that starts recovery after
-   primary/lineage validation. The remaining pre-NVMe gap is terminal evidence:
-   a started runtime session must report durable frontier/caught-up completion
-   before frontend publication or failback can be claimed.
+   Phase 64 added the opt-in blockvolume endpoint that starts recovery after
+   primary/lineage validation, and Phase 65 added terminal durable-frontier
+   evidence. The remaining pre-NVMe gap is publication decision safety: caught-up
+   must be consumed through a separate fact/judgment/action/evidence gate before
+   frontend publication or failback can be claimed.
 13. **Backup/snapshot/restore and NVMe ANA parity.**
    Important, but they should reuse the status/action model rather than create
    another isolated control plane.
@@ -606,9 +609,9 @@ Approximate engineering effort if scope remains tight:
   API/admission proof that only finalizers can be patched.
 - Productized returned-replica rebuild/reintegration/failback: high. Phase 46
   closed the status/decision slice: returned replicas are visible, fenced, and
-  volume-scoped across product surfaces. Phases 47-64 have advanced from
-  dry-run admission to bounded runtime start, but terminal completion evidence,
-  frontend publication, and failback remain separate gated work.
+  volume-scoped across product surfaces. Phases 47-65 have advanced from
+  dry-run admission to bounded runtime start plus terminal completion evidence,
+  but frontend publication and failback remain separate gated work.
 - Backup/snapshot/restore: high. Requires durable data semantics and user-facing
   restore guarantees.
 - NVMe ANA parity: medium/high. Protocol-specific work, but cheaper if it uses
@@ -678,9 +681,13 @@ Approximate engineering effort if scope remains tight:
   readiness plus session/epoch/endpoint-version facts, starts
   `StartRebuild`/`StartCatchUp`, and keeps authority status `running` when the
   runtime reports only `runtimeState=started`.
-- Phase 65 should add terminal runtime evidence. It should prove the running
-  runtime session can report durable frontier/caught-up completion before any
-  ACK eligibility, frontend publication, failback, or NVMe claim.
+- Phase 65 Runtime Terminal Evidence is closed. The runtime records terminal
+  session status, the blockvolume endpoint returns `runtimeState=caught_up`
+  with durable frontier evidence without restarting traffic, and the authority
+  executor transitions `running -> caught_up`.
+- Phase 66 should use caught-up as a precondition for a bounded publication
+  decision while keeping ACK eligibility, frontend publication, failback, and
+  NVMe behind separate explicit gates until proven.
 - Phase 41-44 are the Operation Layer v0.5 release train: lifecycle-owner
   foundation, real API/admission proof, first bounded finalizer mutation, and
   delete lifecycle close gate.

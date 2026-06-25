@@ -290,6 +290,62 @@ func TestAuthorityExecutorReconcilerKeepsRunningWhenRuntimeOnlyStarts(t *testing
 	}
 }
 
+func TestAuthorityExecutorReconcilerTransitionsFromStartedToCaughtUpOnTerminalRuntimeEvidence(t *testing.T) {
+	client := &fakeAuthorityExecutorClient{
+		volumes:  []SwBlockVolumeObject{authorityExecutorRebuildVolume(false, false)},
+		rebuilds: []SwBlockReplicaRebuildObject{authorityExecutorRuntimeRebuildTarget()},
+	}
+	runtime := &fakeAuthorityRebuildRuntime{
+		results: []AuthorityRebuildRuntimeResult{
+			{
+				RuntimeState: "started",
+				EvidenceRefs: []string{
+					"blockvolume-runtime-started.txt",
+				},
+			},
+			{
+				RuntimeState:         "caught_up",
+				DurableFrontierKnown: true,
+				DurableFrontierLSN:   52,
+				EvidenceRefs: []string{
+					"blockvolume-runtime-caught-up.txt",
+				},
+			},
+		},
+	}
+	reconciler := AuthorityExecutorReconciler{
+		Namespace:              "kube-system",
+		Client:                 client,
+		RebuildRuntime:         runtime,
+		ExecutionRequested:     true,
+		ExecutionPolicyEnabled: true,
+		AllowedMutationClass:   AuthorityExecutorAllowedMutationRebuildTraffic,
+	}
+	if _, err := reconciler.Reconcile(context.Background()); err != nil {
+		t.Fatalf("first reconcile: %v", err)
+	}
+	if _, err := reconciler.Reconcile(context.Background()); err != nil {
+		t.Fatalf("second reconcile: %v", err)
+	}
+	if len(runtime.requests) != 2 || len(client.rebuildWrites) != 3 {
+		t.Fatalf("requests=%d writes=%d", len(runtime.requests), len(client.rebuildWrites))
+	}
+	if got := client.rebuildWrites[0].status; got.State != "running" || got.DurableFrontierCaughtUp {
+		t.Fatalf("first running status=%+v", got)
+	}
+	if got := client.rebuildWrites[1].status; got.State != "running" || got.DurableFrontierCaughtUp {
+		t.Fatalf("second running status=%+v", got)
+	}
+	caughtUp := client.rebuildWrites[2].status
+	if caughtUp.State != "caught_up" ||
+		caughtUp.ReasonCode != AuthorityExecutorReasonRebuildCaughtUp ||
+		!caughtUp.DurableFrontierCaughtUp ||
+		caughtUp.DurableFrontierLSN != 52 ||
+		!authorityExecutorStringSliceContains(caughtUp.EvidenceRefs, "blockvolume-runtime-caught-up.txt") {
+		t.Fatalf("caught_up status=%+v", caughtUp)
+	}
+}
+
 func TestAuthorityExecutorReconcilerWritesBlockedStatusWhenRebuildRuntimeFails(t *testing.T) {
 	client := &fakeAuthorityExecutorClient{
 		volumes:  []SwBlockVolumeObject{authorityExecutorRebuildVolume(false, false)},
@@ -463,12 +519,18 @@ type fakeAuthorityExecutorClient struct {
 
 type fakeAuthorityRebuildRuntime struct {
 	result   AuthorityRebuildRuntimeResult
+	results  []AuthorityRebuildRuntimeResult
 	err      error
 	requests []AuthorityRebuildRuntimeRequest
 }
 
 func (f *fakeAuthorityRebuildRuntime) ExecuteRebuild(_ context.Context, req AuthorityRebuildRuntimeRequest) (AuthorityRebuildRuntimeResult, error) {
 	f.requests = append(f.requests, req)
+	if len(f.results) > 0 {
+		result := f.results[0]
+		f.results = f.results[1:]
+		return result, f.err
+	}
 	return f.result, f.err
 }
 

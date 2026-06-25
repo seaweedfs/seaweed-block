@@ -1,0 +1,80 @@
+# Runner-native Phase 65 gate: runtime terminal evidence.
+
+name: runtime-terminal-evidence-chain
+timeout: 8m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: runtime_terminal_evidence_gate
+    actions:
+      - action: exec
+        node: m02
+        timeout: 7m
+        cmd: "rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase65-runtime-terminal-evidence && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase65-runtime-terminal-evidence && cd {{ product_root }} && SW_BLOCK_ARTIFACT_DIR=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase65-runtime-terminal-evidence bash scripts/run-phase65-runtime-terminal-evidence-gate.sh {{ product_root }}"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase65-runtime-terminal-evidence/phase65-runtime-terminal-evidence-summary.txt"
+        pattern: "^phase65_runtime_terminal_evidence_status=ok$"
+        save_as: phase65_ok
+      - action: assert_greater
+        actual: "{{ phase65_ok }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase65-runtime-terminal-evidence/phase65-runtime-terminal-evidence-summary.txt"
+        pattern: "^runtime_terminal_status_recorded=true$"
+        save_as: terminal_recorded
+      - action: assert_greater
+        actual: "{{ terminal_recorded }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase65-runtime-terminal-evidence/phase65-runtime-terminal-evidence-summary.txt"
+        pattern: "^runtime_endpoint_terminal_caught_up=true$"
+        save_as: endpoint_caught_up
+      - action: assert_greater
+        actual: "{{ endpoint_caught_up }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase65-runtime-terminal-evidence/phase65-runtime-terminal-evidence-summary.txt"
+        pattern: "^runtime_endpoint_terminal_does_not_restart=true$"
+        save_as: no_restart
+      - action: assert_greater
+        actual: "{{ no_restart }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase65-runtime-terminal-evidence/phase65-runtime-terminal-evidence-summary.txt"
+        pattern: "^authority_executor_running_to_caught_up=true$"
+        save_as: executor_caught_up
+      - action: assert_greater
+        actual: "{{ executor_caught_up }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase65-runtime-terminal-evidence/phase65-runtime-terminal-evidence-summary.txt"
+        pattern: "^frontend_publication_allowed=false$"
+        save_as: no_frontend
+      - action: assert_greater
+        actual: "{{ no_frontend }}"
+        threshold: "0"
+
+  - name: collect
+    always: true
+    actions:
+      - action: collect_path
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase65-runtime-terminal-evidence"
+        name: "remote-phases"
+        ignore_error: true

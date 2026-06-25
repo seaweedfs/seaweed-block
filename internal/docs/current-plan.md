@@ -1,156 +1,143 @@
-# Current Plan: Phase 64 Blockvolume Runtime Rebuild Endpoint
+# Current Plan: Phase 65 Runtime Terminal Evidence
 
 Status: complete.
 
 ## Goal
 
-Phase 60 proved the existing engine/adapter/transport rebuild and catch-up data
-path can move bytes. Phase 61 added the authority-executor runtime call-site.
-Phase 62 added the HTTP runtime transport. Phase 63 schema-locked the runtime
-target facts needed to address a returned replica safely.
-
-Phase 64 wires the first blockvolume-side runtime endpoint against that
-contract:
-
-```text
-SwBlockReplicaRebuild.spec runtime facts
-  -> authority-executor HTTP runtime POST
-  -> blockvolume /runtime/rebuild
-  -> local assignment/session validation
-  -> ReplicationVolume.StartRuntimeRecovery
-  -> peer executor StartRebuild/StartCatchUp
-```
-
-The key rule remains fail-closed. The endpoint must not infer session, epoch,
-endpoint-version, replica identity, or frontend publication from partial
-evidence.
-
-## Delivered
-
-### D1: Opt-in Blockvolume Runtime Endpoint
-
-`cmd/blockvolume` now has an explicit flag:
-
-```text
---runtime-rebuild-endpoint
-```
-
-When enabled, the blockvolume status server exposes:
-
-```text
-POST /runtime/rebuild
-```
-
-The endpoint is disabled by default.
-
-### D2: Local Primary And Lineage Validation
-
-The endpoint starts runtime recovery only when all of these hold:
-
-```text
-request.volumeID == served volume
-status projection says FrontendPrimaryReady
-replicaID is present
-sessionID > 0
-epoch > 0
-endpointVersion > 0
-frontierHintLsn > 0
-runtime recovery source is wired
-```
-
-`ReplicationVolume.StartRuntimeRecovery` and `Peer.StartRuntimeRecovery` then
-validate the local peer before calling the executor:
-
-```text
-replica identity matches
-targetDataAddr does not drift
-epoch matches
-endpointVersion matches
-peer is not closed
-```
-
-### D3: Runtime Start Without Fake Terminal Evidence
-
-The endpoint returns:
+Phase 64 added the opt-in blockvolume runtime endpoint, but it deliberately
+returned only:
 
 ```text
 runtimeState=started
-rebuildTrafficStarted=true
 durableFrontierKnown=false
 ```
 
-The authority executor preserves `SwBlockReplicaRebuild.status.state=running`
-when the runtime reports `started`. It does not mark `caught_up` until a future
-terminal-evidence path exists.
+Phase 65 closes the next required gap: terminal runtime evidence. A runtime
+session that was started by the blockvolume endpoint can now later report its
+terminal durable frontier back through the same runtime HTTP contract.
 
-### D4: Gate
+The rule is:
+
+```text
+started -> running -> terminal session close -> caught_up
+```
+
+No frontend publication, failback, ACK eligibility mutation, or NVMe claim is
+added.
+
+## Delivered
+
+### D1: Transport Session Terminal Status
+
+`BlockExecutor` now records terminal session results from the existing
+`finishSession` / recovery close path:
+
+```text
+state=caught_up
+achievedLSN=<durable frontier>
+```
+
+Failures are recorded as:
+
+```text
+state=failed
+failureKind=<typed transport/storage failure>
+failReason=<diagnostic text>
+```
+
+This is runtime-owned evidence, not a status-surface guess.
+
+### D2: Replication Runtime Status Query
+
+`ReplicationVolume.RuntimeRecoveryStatus` validates the same replica identity,
+target address, epoch, and endpoint-version facts used by
+`StartRuntimeRecovery`, then reads the executor's session status.
+
+### D3: HTTP Runtime Terminal Response
+
+`POST /runtime/rebuild` is now idempotent for the same session:
+
+```text
+unknown -> start runtime recovery -> runtimeState=started
+running -> runtimeState=started
+caught_up -> runtimeState=caught_up, durableFrontierKnown=true
+failed -> HTTP 409
+```
+
+Terminal caught-up responses do not restart recovery traffic.
+
+### D4: Authority Executor Transition
+
+The authority executor already understood terminal runtime results. Phase 65
+adds the regression that two reconciles over the same target transition:
+
+```text
+runtimeState=started -> SwBlockReplicaRebuild.status.state=running
+runtimeState=caught_up + durableFrontierLsn -> state=caught_up
+```
+
+### D5: Gate
 
 Gate files:
 
 ```text
-scripts/run-phase64-blockvolume-runtime-endpoint-gate.sh
-testops/scenarios/blockvolume-runtime-endpoint-chain.yaml
+scripts/run-phase65-runtime-terminal-evidence-gate.sh
+testops/scenarios/runtime-terminal-evidence-chain.yaml
 ```
-
-The gate proves endpoint opt-in, exact-lineage POST behavior, non-primary
-rejection, replication lineage rejection, and authority-executor handling of
-`runtimeState=started`.
 
 ## Non-Claims
 
-Phase 64 does not claim:
+Phase 65 does not claim:
 
 ```text
-terminal durable frontier known
-caught_up from runtime start alone
 frontend publication
 failback
-automatic session minting
+ACK eligibility mutation
+automatic publish target change
 NVMe/ANA behavior
 ```
 
-Those belong to later gated phases.
+The rebuild target can become `caught_up`, but publication/failback must remain
+a later gated decision.
 
 ## Verification
 
 Local:
 
 ```text
-go test ./core/ops ./core/host/volume ./core/replication ./cmd/blockvolume
-C:\work\swblock.exe validate testops\scenarios\blockvolume-runtime-endpoint-chain.yaml
+go test ./core/transport ./core/replication ./core/host/volume ./core/ops ./cmd/blockvolume
+C:\work\swblock.exe validate testops\scenarios\runtime-terminal-evidence-chain.yaml
 ```
 
 Live:
 
 ```text
-20260625-012440-775a blockvolume-runtime-endpoint-chain PASS 18/18
+20260625-013718-69c8 runtime-terminal-evidence-chain PASS 14/14
 ```
 
 Terminal evidence:
 
 ```text
-phase64_blockvolume_runtime_endpoint_status=ok
-runtime_state_started_supported=true
-authority_executor_started_result_not_blocked=true
-blockvolume_runtime_endpoint_opt_in=true
-blockvolume_runtime_endpoint_posts_started=true
-blockvolume_runtime_endpoint_requires_primary=true
-blockvolume_runtime_endpoint_requires_lineage=true
-replication_runtime_rejects_lineage_drift=true
-runtime_endpoint_terminal_frontier_claimed=false
+phase65_runtime_terminal_evidence_status=ok
+transport_records_caught_up_session=true
+replication_reports_terminal_frontier=true
+runtime_endpoint_returns_caught_up_without_restart=true
+runtime_endpoint_still_starts_unknown_session=true
+authority_executor_started_then_caught_up=true
+runtime_terminal_status_recorded=true
+runtime_terminal_frontier_reported=true
+runtime_endpoint_terminal_caught_up=true
+runtime_endpoint_terminal_does_not_restart=true
+authority_executor_running_to_caught_up=true
+runtime_start_without_terminal_still_running=true
 frontend_publication_allowed=false
 failback_allowed=false
+ack_eligibility_mutation_allowed=false
 ```
 
 ## Next
 
-Phase 65 should add terminal runtime evidence before any publication/failback
-claim. The next contract should answer:
-
-```text
-started -> running -> terminal frontier observed -> caught_up
-```
-
-Until that exists, the executor must keep rebuild targets in `running` after a
-successful start and must not publish the returned replica to ACK eligibility or
-frontend service.
+Phase 66 should decide the next bounded operation step. The clean next step is
+not NVMe yet; it is to consume `caught_up` as a precondition for a still-bounded
+publication decision, while keeping failback/frontend mutation disabled until a
+separate admission/RBAC/evidence gate exists.

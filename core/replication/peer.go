@@ -470,23 +470,9 @@ func (p *ReplicaPeer) Target() ReplicaTarget { return p.target }
 func (p *ReplicaPeer) Executor() *transport.BlockExecutor { return p.executor }
 
 func (p *ReplicaPeer) StartRuntimeRecovery(req RuntimeRecoveryRequest) error {
-	p.mu.Lock()
-	if p.closed {
-		p.mu.Unlock()
-		return fmt.Errorf("replication: runtime recovery: peer %s closed", req.ReplicaID)
-	}
-	target := p.target
-	executor := p.executor
-	p.mu.Unlock()
-	if target.ReplicaID != req.ReplicaID {
-		return fmt.Errorf("replication: runtime recovery: replicaID drift target=%s request=%s", target.ReplicaID, req.ReplicaID)
-	}
-	if target.DataAddr != "" && req.TargetDataAddr != "" && target.DataAddr != req.TargetDataAddr {
-		return fmt.Errorf("replication: runtime recovery: target data address drift target=%s request=%s", target.DataAddr, req.TargetDataAddr)
-	}
-	if target.Epoch != req.Epoch || target.EndpointVersion != req.EndpointVersion {
-		return fmt.Errorf("replication: runtime recovery: lineage drift target=%d/%d request=%d/%d",
-			target.Epoch, target.EndpointVersion, req.Epoch, req.EndpointVersion)
+	_, executor, err := p.runtimeRecoveryTarget(req)
+	if err != nil {
+		return err
 	}
 	if req.FromLSN > 0 {
 		return executor.StartCatchUp(req.ReplicaID, req.SessionID, req.Epoch, req.EndpointVersion, req.FromLSN, req.FrontierHintLSN)
@@ -495,6 +481,36 @@ func (p *ReplicaPeer) StartRuntimeRecovery(req RuntimeRecoveryRequest) error {
 		return executor.StartRebuildPinned(req.ReplicaID, req.SessionID, req.Epoch, req.EndpointVersion, req.BasePinLSN, req.FrontierHintLSN)
 	}
 	return executor.StartRebuild(req.ReplicaID, req.SessionID, req.Epoch, req.EndpointVersion, req.FrontierHintLSN)
+}
+
+func (p *ReplicaPeer) RuntimeRecoveryStatus(req RuntimeRecoveryRequest) (RuntimeRecoveryStatus, error) {
+	_, executor, err := p.runtimeRecoveryTarget(req)
+	if err != nil {
+		return RuntimeRecoveryStatus{}, err
+	}
+	return runtimeStatusFromTransport(executor.RecoverySessionStatus(req.ReplicaID, req.SessionID)), nil
+}
+
+func (p *ReplicaPeer) runtimeRecoveryTarget(req RuntimeRecoveryRequest) (ReplicaTarget, *transport.BlockExecutor, error) {
+	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+		return ReplicaTarget{}, nil, fmt.Errorf("replication: runtime recovery: peer %s closed", req.ReplicaID)
+	}
+	target := p.target
+	executor := p.executor
+	p.mu.Unlock()
+	if target.ReplicaID != req.ReplicaID {
+		return ReplicaTarget{}, nil, fmt.Errorf("replication: runtime recovery: replicaID drift target=%s request=%s", target.ReplicaID, req.ReplicaID)
+	}
+	if target.DataAddr != "" && req.TargetDataAddr != "" && target.DataAddr != req.TargetDataAddr {
+		return ReplicaTarget{}, nil, fmt.Errorf("replication: runtime recovery: target data address drift target=%s request=%s", target.DataAddr, req.TargetDataAddr)
+	}
+	if target.Epoch != req.Epoch || target.EndpointVersion != req.EndpointVersion {
+		return ReplicaTarget{}, nil, fmt.Errorf("replication: runtime recovery: lineage drift target=%d/%d request=%d/%d",
+			target.Epoch, target.EndpointVersion, req.Epoch, req.EndpointVersion)
+	}
+	return target, executor, nil
 }
 
 // probeSessionIDCounter mints SessionIDs for runtime-driven probes —

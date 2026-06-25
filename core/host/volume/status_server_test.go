@@ -608,6 +608,59 @@ func TestStatusServer_RuntimeRebuild_StartsRecoveryWithExactLineage(t *testing.T
 	}
 }
 
+func TestStatusServer_RuntimeRebuild_ReturnsTerminalEvidenceWithoutRestart(t *testing.T) {
+	src := &fakeRuntimeRecoverySource{
+		status: replication.RuntimeRecoveryStatus{
+			State:       "caught_up",
+			ReplicaID:   "r2",
+			SessionID:   1001,
+			AchievedLSN: 90,
+		},
+	}
+	s := NewStatusServer(NewAdapterProjectionView(
+		stubProjector{p: engine.ReplicaProjection{Mode: engine.ModeHealthy, Epoch: 7, EndpointVersion: 3}},
+		"v1", "primary", nil))
+	s.EnableRuntimeEndpoint()
+	s.SetRuntimeRecoverySource(src)
+	addr, err := s.Start("127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer func() { _ = s.Close(context.Background()) }()
+	body, _ := json.Marshal(RuntimeRebuildRequest{
+		VolumeID:        "v1",
+		ReplicaID:       "r2",
+		SessionID:       1001,
+		Epoch:           7,
+		EndpointVersion: 3,
+		FrontierHintLSN: 90,
+		EvidenceRefs:    []string{"target-evidence.txt"},
+	})
+	resp, err := http.Post("http://"+addr+"/runtime/rebuild", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("runtime terminal status=%d", resp.StatusCode)
+	}
+	if len(src.requests) != 0 {
+		t.Fatalf("terminal status must not restart recovery: %+v", src.requests)
+	}
+	var result RuntimeRebuildResult
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("decode result: %v", err)
+	}
+	if result.RuntimeState != "caught_up" ||
+		!result.RebuildTrafficStarted ||
+		!result.DurableFrontierKnown ||
+		result.DurableFrontierLSN != 90 ||
+		!containsString(result.EvidenceRefs, "blockvolume_runtime_rebuild_caught_up") ||
+		!containsString(result.EvidenceRefs, "target-evidence.txt") {
+		t.Fatalf("terminal result=%+v", result)
+	}
+}
+
 func TestStatusServer_RuntimeRebuild_RejectsNonPrimary(t *testing.T) {
 	src := &fakeRuntimeRecoverySource{}
 	s := NewStatusServer(NewAdapterProjectionView(
@@ -937,11 +990,19 @@ func TestG9B_StatusProjection_ReturnedReplicaCanBeDurableReadyButFrontendNotRead
 
 type fakeRuntimeRecoverySource struct {
 	requests []replication.RuntimeRecoveryRequest
+	status   replication.RuntimeRecoveryStatus
 }
 
 func (f *fakeRuntimeRecoverySource) StartRuntimeRecovery(_ context.Context, req replication.RuntimeRecoveryRequest) error {
 	f.requests = append(f.requests, req)
 	return nil
+}
+
+func (f *fakeRuntimeRecoverySource) RuntimeRecoveryStatus(context.Context, replication.RuntimeRecoveryRequest) (replication.RuntimeRecoveryStatus, error) {
+	if f.status.State == "" {
+		return replication.RuntimeRecoveryStatus{State: "unknown"}, nil
+	}
+	return f.status, nil
 }
 
 func containsString(values []string, want string) bool {

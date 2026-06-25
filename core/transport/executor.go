@@ -40,6 +40,7 @@ type BlockExecutor struct {
 	onDurableAck    adapter.OnDurableAck
 	onFenceComplete adapter.OnFenceComplete
 	sessions        map[uint64]*activeSession
+	sessionResults  map[uint64]RecoverySessionStatus
 	stepDelay       time.Duration
 
 	// walShippers is the per-replica WalShipper registry per
@@ -164,6 +165,22 @@ type activeSession struct {
 	conn    net.Conn
 }
 
+type RecoverySessionStatus struct {
+	State       string
+	ReplicaID   string
+	SessionID   uint64
+	AchievedLSN uint64
+	FailureKind string
+	FailReason  string
+}
+
+const (
+	RecoverySessionStateUnknown  = "unknown"
+	RecoverySessionStateRunning  = "running"
+	RecoverySessionStateCaughtUp = "caught_up"
+	RecoverySessionStateFailed   = "failed"
+)
+
 var errSessionInvalidated = errors.New("session invalidated")
 
 const recoveryConnTimeout = 5 * time.Second
@@ -172,9 +189,10 @@ const recoveryConnTimeout = 5 * time.Second
 // pair. StartRebuild uses the existing single-lane MsgRebuildBlock path.
 func NewBlockExecutor(primaryStore storage.LogicalStorage, replicaAddr string) *BlockExecutor {
 	return &BlockExecutor{
-		primaryStore: primaryStore,
-		replicaAddr:  replicaAddr,
-		sessions:     make(map[uint64]*activeSession),
+		primaryStore:   primaryStore,
+		replicaAddr:    replicaAddr,
+		sessions:       make(map[uint64]*activeSession),
+		sessionResults: make(map[uint64]RecoverySessionStatus),
 	}
 }
 
@@ -252,6 +270,7 @@ func NewBlockExecutorWithDualLane(
 			} else {
 				res.FailReason = err.Error()
 			}
+			e.recordSessionTerminal(res)
 			if cb != nil {
 				cb(res)
 			}
@@ -682,6 +701,34 @@ func (e *BlockExecutor) InvalidateSession(replicaID string, sessionID uint64, re
 	log.Printf("executor: invalidate session %d for %s: %s", sessionID, replicaID, reason)
 }
 
+func (e *BlockExecutor) RecoverySessionStatus(replicaID string, sessionID uint64) RecoverySessionStatus {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if status, ok := e.sessionResults[sessionID]; ok {
+		if replicaID == "" || status.ReplicaID == "" || status.ReplicaID == replicaID {
+			return status
+		}
+		return RecoverySessionStatus{
+			State:      RecoverySessionStateFailed,
+			ReplicaID:  replicaID,
+			SessionID:  sessionID,
+			FailReason: fmt.Sprintf("session replica mismatch status=%s request=%s", status.ReplicaID, replicaID),
+		}
+	}
+	if _, ok := e.sessions[sessionID]; ok {
+		return RecoverySessionStatus{
+			State:     RecoverySessionStateRunning,
+			ReplicaID: replicaID,
+			SessionID: sessionID,
+		}
+	}
+	return RecoverySessionStatus{
+		State:     RecoverySessionStateUnknown,
+		ReplicaID: replicaID,
+		SessionID: sessionID,
+	}
+}
+
 func (e *BlockExecutor) PublishHealthy(replicaID string) {
 	log.Printf("executor: publish healthy for %s", replicaID)
 }
@@ -931,6 +978,7 @@ func (e *BlockExecutor) registerSession(lineage RecoveryLineage) (*activeSession
 	if _, exists := e.sessions[lineage.SessionID]; exists {
 		return nil, fmt.Errorf("executor: session %d already active", lineage.SessionID)
 	}
+	delete(e.sessionResults, lineage.SessionID)
 	session := &activeSession{
 		lineage: lineage,
 		cancel:  make(chan struct{}),
@@ -993,7 +1041,25 @@ func (e *BlockExecutor) finishSession(replicaID string, session *activeSession, 
 	cb := e.onSessionClose
 	e.mu.Unlock()
 
+	var result adapter.SessionCloseResult
 	if cb == nil {
+		if err != nil {
+			result = adapter.SessionCloseResult{
+				ReplicaID:   replicaID,
+				SessionID:   session.lineage.SessionID,
+				Success:     false,
+				FailureKind: classifyRecoveryFailure(err),
+				FailReason:  err.Error(),
+			}
+		} else {
+			result = adapter.SessionCloseResult{
+				ReplicaID:   replicaID,
+				SessionID:   session.lineage.SessionID,
+				Success:     true,
+				AchievedLSN: achieved,
+			}
+		}
+		e.recordSessionTerminal(result)
 		return
 	}
 	if err != nil {
@@ -1001,19 +1067,51 @@ func (e *BlockExecutor) finishSession(replicaID string, session *activeSession, 
 		// to engine-owned RecoveryFailureKind. Engine MUST NOT import
 		// core/storage; transport does the mapping at the boundary
 		// (transport already imports both packages).
-		cb(adapter.SessionCloseResult{
+		result = adapter.SessionCloseResult{
 			ReplicaID:   replicaID,
 			SessionID:   session.lineage.SessionID,
 			Success:     false,
 			FailureKind: classifyRecoveryFailure(err),
 			FailReason:  err.Error(),
-		})
+		}
+		e.recordSessionTerminal(result)
+		cb(result)
 		return
 	}
-	cb(adapter.SessionCloseResult{
+	result = adapter.SessionCloseResult{
 		ReplicaID:   replicaID,
 		SessionID:   session.lineage.SessionID,
 		Success:     true,
 		AchievedLSN: achieved,
-	})
+	}
+	e.recordSessionTerminal(result)
+	cb(result)
+}
+
+func (e *BlockExecutor) recordSessionTerminal(result adapter.SessionCloseResult) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	status := RecoverySessionStatus{
+		ReplicaID:   result.ReplicaID,
+		SessionID:   result.SessionID,
+		AchievedLSN: result.AchievedLSN,
+		FailureKind: fmt.Sprint(result.FailureKind),
+		FailReason:  result.FailReason,
+	}
+	if result.Success {
+		status.State = RecoverySessionStateCaughtUp
+	} else {
+		status.State = RecoverySessionStateFailed
+	}
+	e.sessionResults[result.SessionID] = status
+}
+
+func (e *BlockExecutor) recordSessionRunning(replicaID string, sessionID uint64) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.sessionResults[sessionID] = RecoverySessionStatus{
+		State:     RecoverySessionStateRunning,
+		ReplicaID: replicaID,
+		SessionID: sessionID,
+	}
 }
