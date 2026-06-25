@@ -395,6 +395,9 @@ type SwBlockReplicaRebuildCRDStatus struct {
 	RequiredFrontierLSN         uint64                 `json:"requiredFrontierLsn,omitempty"`
 	DurableFrontierCaughtUp     bool                   `json:"durableFrontierCaughtUp"`
 	RebuildTrafficStarted       bool                   `json:"rebuildTrafficStarted"`
+	PublicationDecision         string                 `json:"publicationDecision,omitempty"`
+	PublicationReason           string                 `json:"publicationReason,omitempty"`
+	PublicationMutationAllowed  bool                   `json:"publicationMutationAllowed"`
 	NoFrontendPublication       bool                   `json:"noFrontendPublication"`
 	NoCrossVolumeIdentityChange bool                   `json:"noCrossVolumeIdentityChange"`
 	EvidenceGeneration          string                 `json:"evidenceGeneration,omitempty"`

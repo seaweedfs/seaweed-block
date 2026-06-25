@@ -59,11 +59,12 @@ This is the short internal roadmap. Keep it current and readable.
   lifecycle.
 - Current development slice: returned-replica rebuild/reintegration runtime
   productization has advanced through Phase 64. Phases 46-54 made returned
-  replicas visible and action-gated, Phases 60-65 connected the bounded
+  replicas visible and action-gated, Phases 60-66 connected the bounded
   rebuild/catch-up runtime path through target facts, executor HTTP transport,
   an opt-in blockvolume runtime start endpoint, and terminal caught-up evidence.
-  Do not claim frontend publication, failback, backup/restore, or NVMe parity
-  yet.
+  Phase 66 adds the disabled publication-decision surface after caught-up. Do
+  not claim ACK eligibility mutation, frontend publication, failback,
+  backup/restore, or NVMe parity yet.
 - Model hardening gate before the next large release: complete the
   ManagedVolume Operations Model under `internal/docs/protocol/` before
   expanding operator or broader HA claims. The goal is to prevent Kubernetes,
@@ -195,9 +196,10 @@ rebuild, delete safety, or cleanup must start as a separate gated phase.
   transport. Phase 63 schema-locked runtime target facts. Phase 64 added an
   opt-in blockvolume runtime endpoint that starts local rebuild/catch-up only
   after primary and lineage/session validation. Phase 65 adds terminal runtime
-  evidence: `started -> running -> durable frontier -> caught_up`. The
-  remaining gap is consuming caught-up as a precondition for a separately gated
-  publication/failback decision.
+  evidence: `started -> running -> durable frontier -> caught_up`. Phase 66
+  consumes caught-up as a disabled publication preflight. The remaining gap is
+  an explicitly bounded ACK eligibility publication mutation, if the team
+  chooses to continue this operation line before NVMe.
 - Later: returned-replica frontend publication/failback execution, NVMe ANA
   Kubernetes multipath parity, stronger committed-frontier reporting, broad
   distro/host compatibility, and longer soak under failure. NVMe ANA parity
@@ -582,14 +584,15 @@ product risk. The recommended order is:
    The live iSCSI returned-replica gate emits same-run managed-volume
    evidence for required frontier coverage and replay it through report/status
    surfaces before any mutating returned-replica executor is proposed.
-12. **Phase 60-65: rebuild runtime path.** Closed through runtime caught-up.
+12. **Phase 60-66: rebuild runtime path.** Closed through caught-up publication preflight.
    Phase 60 proved the existing datapath, Phase 61 added the executor call-site,
    Phase 62 added HTTP runtime transport, Phase 63 locked runtime target facts,
    Phase 64 added the opt-in blockvolume endpoint that starts recovery after
-   primary/lineage validation, and Phase 65 added terminal durable-frontier
-   evidence. The remaining pre-NVMe gap is publication decision safety: caught-up
-   must be consumed through a separate fact/judgment/action/evidence gate before
-   frontend publication or failback can be claimed.
+   primary/lineage validation, Phase 65 added terminal durable-frontier
+   evidence, and Phase 66 surfaces caught-up as publication preflight while
+   keeping mutation disabled. The remaining operation gap before NVMe is an
+   ACK-eligibility publication mutation with separate admission/RBAC/evidence,
+   if the team chooses to continue.
 13. **Backup/snapshot/restore and NVMe ANA parity.**
    Important, but they should reuse the status/action model rather than create
    another isolated control plane.
@@ -609,9 +612,10 @@ Approximate engineering effort if scope remains tight:
   API/admission proof that only finalizers can be patched.
 - Productized returned-replica rebuild/reintegration/failback: high. Phase 46
   closed the status/decision slice: returned replicas are visible, fenced, and
-  volume-scoped across product surfaces. Phases 47-65 have advanced from
-  dry-run admission to bounded runtime start plus terminal completion evidence,
-  but frontend publication and failback remain separate gated work.
+  volume-scoped across product surfaces. Phases 47-66 have advanced from
+  dry-run admission to bounded runtime start, terminal completion evidence, and
+  disabled publication preflight. ACK eligibility mutation, frontend
+  publication, and failback remain separate gated work.
 - Backup/snapshot/restore: high. Requires durable data semantics and user-facing
   restore guarantees.
 - NVMe ANA parity: medium/high. Protocol-specific work, but cheaper if it uses
@@ -685,9 +689,13 @@ Approximate engineering effort if scope remains tight:
   session status, the blockvolume endpoint returns `runtimeState=caught_up`
   with durable frontier evidence without restarting traffic, and the authority
   executor transitions `running -> caught_up`.
-- Phase 66 should use caught-up as a precondition for a bounded publication
-  decision while keeping ACK eligibility, frontend publication, failback, and
-  NVMe behind separate explicit gates until proven.
+- Phase 66 Caught-up Publication Preflight is closed. `SwBlockReplicaRebuild`
+  status now exposes `publicationDecision` / `publicationReason` /
+  `publicationMutationAllowed`, with publication blocked until caught-up and
+  disabled after caught-up.
+- Phase 67 can either add the first bounded ACK eligibility publication
+  mutation with admission/RBAC/evidence gates, or stop this operation line and
+  start NVMe ANA using the same status/action/evidence model.
 - Phase 41-44 are the Operation Layer v0.5 release train: lifecycle-owner
   foundation, real API/admission proof, first bounded finalizer mutation, and
   delete lifecycle close gate.

@@ -1,135 +1,108 @@
-# Current Plan: Phase 65 Runtime Terminal Evidence
+# Current Plan: Phase 66 Caught-up Publication Preflight
 
 Status: complete.
 
 ## Goal
 
-Phase 64 added the opt-in blockvolume runtime endpoint, but it deliberately
-returned only:
+Phase 65 proved runtime rebuild/catch-up can reach terminal caught-up evidence.
+Phase 66 consumes that evidence without enabling publication.
+
+The product now exposes the next operation decision on
+`SwBlockReplicaRebuild.status`:
 
 ```text
-runtimeState=started
-durableFrontierKnown=false
+not caught_up -> publicationDecision=blocked
+caught_up     -> publicationDecision=disabled
 ```
 
-Phase 65 closes the next required gap: terminal runtime evidence. A runtime
-session that was started by the blockvolume endpoint can now later report its
-terminal durable frontier back through the same runtime HTTP contract.
-
-The rule is:
-
-```text
-started -> running -> terminal session close -> caught_up
-```
-
-No frontend publication, failback, ACK eligibility mutation, or NVMe claim is
-added.
+`disabled` means the precondition is satisfied but the policy for publication
+mutation remains off. This keeps the control model honest: caught-up is
+necessary, but not sufficient, for ACK eligibility, frontend publication, or
+failback.
 
 ## Delivered
 
-### D1: Transport Session Terminal Status
+### D1: Publication Decision Surface
 
-`BlockExecutor` now records terminal session results from the existing
-`finishSession` / recovery close path:
-
-```text
-state=caught_up
-achievedLSN=<durable frontier>
-```
-
-Failures are recorded as:
+`SwBlockReplicaRebuild.status` now includes:
 
 ```text
-state=failed
-failureKind=<typed transport/storage failure>
-failReason=<diagnostic text>
+publicationDecision
+publicationReason
+publicationMutationAllowed
 ```
 
-This is runtime-owned evidence, not a status-surface guess.
-
-### D2: Replication Runtime Status Query
-
-`ReplicationVolume.RuntimeRecoveryStatus` validates the same replica identity,
-target address, epoch, and endpoint-version facts used by
-`StartRuntimeRecovery`, then reads the executor's session status.
-
-### D3: HTTP Runtime Terminal Response
-
-`POST /runtime/rebuild` is now idempotent for the same session:
+The CRD schema locks the allowed decision values:
 
 ```text
-unknown -> start runtime recovery -> runtimeState=started
-running -> runtimeState=started
-caught_up -> runtimeState=caught_up, durableFrontierKnown=true
-failed -> HTTP 409
+blocked
+disabled
 ```
 
-Terminal caught-up responses do not restart recovery traffic.
+### D2: Status Semantics
 
-### D4: Authority Executor Transition
-
-The authority executor already understood terminal runtime results. Phase 65
-adds the regression that two reconciles over the same target transition:
+Rebuild states project publication readiness as:
 
 ```text
-runtimeState=started -> SwBlockReplicaRebuild.status.state=running
-runtimeState=caught_up + durableFrontierLsn -> state=caught_up
+planned/running/blocked:
+  publicationDecision=blocked
+  publicationReason=rebuild_caught_up_required
+  publicationMutationAllowed=false
+
+caught_up:
+  publicationDecision=disabled
+  publicationReason=publication_policy_disabled
+  publicationMutationAllowed=false
 ```
 
-### D5: Gate
+### D3: Gate
 
 Gate files:
 
 ```text
-scripts/run-phase65-runtime-terminal-evidence-gate.sh
-testops/scenarios/runtime-terminal-evidence-chain.yaml
+scripts/run-phase66-caught-up-publication-preflight-gate.sh
+testops/scenarios/caught-up-publication-preflight-chain.yaml
 ```
+
+The gate proves schema, Kubernetes writer casing, blocked-before-caught-up, and
+disabled-after-caught-up behavior.
 
 ## Non-Claims
 
-Phase 65 does not claim:
+Phase 66 does not claim:
 
 ```text
+ACK eligibility mutation
 frontend publication
 failback
-ACK eligibility mutation
 automatic publish target change
 NVMe/ANA behavior
 ```
-
-The rebuild target can become `caught_up`, but publication/failback must remain
-a later gated decision.
 
 ## Verification
 
 Local:
 
 ```text
-go test ./core/transport ./core/replication ./core/host/volume ./core/ops ./cmd/blockvolume
-C:\work\swblock.exe validate testops\scenarios\runtime-terminal-evidence-chain.yaml
+go test ./core/ops ./core/transport ./core/replication ./core/host/volume ./cmd/blockvolume
+C:\work\swblock.exe validate testops\scenarios\caught-up-publication-preflight-chain.yaml
 ```
 
 Live:
 
 ```text
-20260625-013718-69c8 runtime-terminal-evidence-chain PASS 14/14
+20260625-014356-978b caught-up-publication-preflight-chain PASS 12/12
 ```
 
 Terminal evidence:
 
 ```text
-phase65_runtime_terminal_evidence_status=ok
-transport_records_caught_up_session=true
-replication_reports_terminal_frontier=true
-runtime_endpoint_returns_caught_up_without_restart=true
-runtime_endpoint_still_starts_unknown_session=true
-authority_executor_started_then_caught_up=true
-runtime_terminal_status_recorded=true
-runtime_terminal_frontier_reported=true
-runtime_endpoint_terminal_caught_up=true
-runtime_endpoint_terminal_does_not_restart=true
-authority_executor_running_to_caught_up=true
-runtime_start_without_terminal_still_running=true
+phase66_caught_up_publication_preflight_status=ok
+publication_decision_schema_locked=true
+publication_decision_camel_case=true
+publication_blocked_until_caught_up=true
+publication_disabled_after_caught_up=true
+publication_mutation_allowed=false
 frontend_publication_allowed=false
 failback_allowed=false
 ack_eligibility_mutation_allowed=false
@@ -137,7 +110,12 @@ ack_eligibility_mutation_allowed=false
 
 ## Next
 
-Phase 66 should decide the next bounded operation step. The clean next step is
-not NVMe yet; it is to consume `caught_up` as a precondition for a still-bounded
-publication decision, while keeping failback/frontend mutation disabled until a
-separate admission/RBAC/evidence gate exists.
+Phase 67 can either:
+
+```text
+1. add the first bounded ACK-eligibility publication mutation, with admission/RBAC/evidence gates; or
+2. stop the returned-replica executor line here and start NVMe ANA using the same status/action model.
+```
+
+If continuing operations, do not jump directly to frontend/failback. ACK
+eligibility is the narrowest next mutation.

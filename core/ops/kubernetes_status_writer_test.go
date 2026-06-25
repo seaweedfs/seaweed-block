@@ -164,6 +164,9 @@ func TestKubernetesStatusClientPatchesOnlyStatusSubresources(t *testing.T) {
 		RequiredFrontierLSN:         52,
 		DurableFrontierCaughtUp:     false,
 		RebuildTrafficStarted:       false,
+		PublicationDecision:         AuthorityExecutorPublicationDecisionBlocked,
+		PublicationReason:           AuthorityExecutorPublicationReasonCaughtUpRequired,
+		PublicationMutationAllowed:  false,
 		NoFrontendPublication:       true,
 		NoCrossVolumeIdentityChange: true,
 		EvidenceGeneration:          "executor-run-2",
@@ -294,6 +297,9 @@ func TestKubernetesStatusClientPatchesOnlyStatusSubresources(t *testing.T) {
 		"requiredFrontierLsn",
 		"durableFrontierCaughtUp",
 		"rebuildTrafficStarted",
+		"publicationDecision",
+		"publicationReason",
+		"publicationMutationAllowed",
 		"noFrontendPublication",
 		"noCrossVolumeIdentityChange",
 		"evidenceGeneration",
@@ -302,7 +308,7 @@ func TestKubernetesStatusClientPatchesOnlyStatusSubresources(t *testing.T) {
 			t.Fatalf("replica rebuild status missing camelCase %s: %+v", want, replicaRebuildStatus)
 		}
 	}
-	for _, forbidden := range []string{"frontend_fenced_before_rebuild", "durable_frontier_lsn", "rebuild_traffic_started", "spec"} {
+	for _, forbidden := range []string{"frontend_fenced_before_rebuild", "durable_frontier_lsn", "rebuild_traffic_started", "publication_decision", "publication_mutation_allowed", "spec"} {
 		if _, ok := replicaRebuildStatus[forbidden]; ok {
 			t.Fatalf("replica rebuild status leaked %s: %+v", forbidden, replicaRebuildStatus)
 		}

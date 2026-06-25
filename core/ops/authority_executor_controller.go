@@ -19,6 +19,10 @@ const (
 	AuthorityExecutorReasonRebuildCaughtUp             = "rebuild_runtime_caught_up"
 	AuthorityExecutorReasonRebuildRuntimeFailed        = "rebuild_runtime_failed"
 	AuthorityExecutorReasonRebuildRuntimeTargetMissing = "rebuild_runtime_target_missing"
+	AuthorityExecutorPublicationDecisionBlocked        = "blocked"
+	AuthorityExecutorPublicationDecisionDisabled       = "disabled"
+	AuthorityExecutorPublicationReasonCaughtUpRequired = "rebuild_caught_up_required"
+	AuthorityExecutorPublicationReasonPolicyDisabled   = "publication_policy_disabled"
 )
 
 type AuthorityExecutorClient interface {
@@ -410,6 +414,9 @@ func authorityExecutorRebuildPlannedStatus(now time.Time, volume SwBlockVolumeOb
 		RequiredFrontierLSN:         returned.RequiredFrontierLSN,
 		DurableFrontierCaughtUp:     returned.DurableFrontierKnown && returned.RequiredFrontierKnown && returned.DurableFrontierLSN >= returned.RequiredFrontierLSN,
 		RebuildTrafficStarted:       false,
+		PublicationDecision:         AuthorityExecutorPublicationDecisionBlocked,
+		PublicationReason:           AuthorityExecutorPublicationReasonCaughtUpRequired,
+		PublicationMutationAllowed:  false,
 		NoFrontendPublication:       true,
 		NoCrossVolumeIdentityChange: true,
 		Conditions: []ObservationCondition{{
@@ -468,6 +475,9 @@ func authorityExecutorRebuildCaughtUpStatus(now time.Time, volume SwBlockVolumeO
 		RequiredFrontierLSN:         returned.RequiredFrontierLSN,
 		DurableFrontierCaughtUp:     runtimeResult.DurableFrontierKnown && returned.RequiredFrontierKnown && runtimeResult.DurableFrontierLSN >= returned.RequiredFrontierLSN,
 		RebuildTrafficStarted:       true,
+		PublicationDecision:         AuthorityExecutorPublicationDecisionDisabled,
+		PublicationReason:           AuthorityExecutorPublicationReasonPolicyDisabled,
+		PublicationMutationAllowed:  false,
 		NoFrontendPublication:       true,
 		NoCrossVolumeIdentityChange: true,
 		Conditions: []ObservationCondition{{

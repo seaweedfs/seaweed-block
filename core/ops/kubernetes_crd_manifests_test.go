@@ -382,6 +382,9 @@ func TestPhase57D1SwBlockReplicaRebuildTargetSchema(t *testing.T) {
 		"requiredFrontierLsn",
 		"durableFrontierCaughtUp",
 		"rebuildTrafficStarted",
+		"publicationDecision",
+		"publicationReason",
+		"publicationMutationAllowed",
 		"noFrontendPublication",
 		"noCrossVolumeIdentityChange",
 		"evidenceGeneration",
@@ -397,6 +400,12 @@ func TestPhase57D1SwBlockReplicaRebuildTargetSchema(t *testing.T) {
 	for _, want := range []string{"planned", "blocked", "running", "caught_up"} {
 		if !stateEnum[want] {
 			t.Fatalf("%s.status.state enum missing %s: %+v", SwBlockReplicaRebuildKind, want, stateEnum)
+		}
+	}
+	publicationDecisionEnum := yamlStringSet(t, yamlMap(t, statusProperties, "publicationDecision"), "enum")
+	for _, want := range []string{"blocked", "disabled"} {
+		if !publicationDecisionEnum[want] {
+			t.Fatalf("%s.status.publicationDecision enum missing %s: %+v", SwBlockReplicaRebuildKind, want, publicationDecisionEnum)
 		}
 	}
 	for _, forbidden := range []string{

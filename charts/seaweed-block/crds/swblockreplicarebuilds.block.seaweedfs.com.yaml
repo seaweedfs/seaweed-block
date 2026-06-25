@@ -124,6 +124,15 @@ spec:
                   type: boolean
                 rebuildTrafficStarted:
                   type: boolean
+                publicationDecision:
+                  type: string
+                  enum:
+                    - blocked
+                    - disabled
+                publicationReason:
+                  type: string
+                publicationMutationAllowed:
+                  type: boolean
                 noFrontendPublication:
                   type: boolean
                 noCrossVolumeIdentityChange:

@@ -235,7 +235,10 @@ func TestAuthorityExecutorReconcilerExecutesRebuildRuntimeAndWritesCaughtUpStatu
 	if running.State != "running" ||
 		running.ReasonCode != AuthorityExecutorReasonRebuildRunning ||
 		!running.RebuildTrafficStarted ||
-		running.DurableFrontierCaughtUp {
+		running.DurableFrontierCaughtUp ||
+		running.PublicationDecision != AuthorityExecutorPublicationDecisionBlocked ||
+		running.PublicationReason != AuthorityExecutorPublicationReasonCaughtUpRequired ||
+		running.PublicationMutationAllowed {
 		t.Fatalf("running status=%+v", running)
 	}
 	caughtUp := client.rebuildWrites[1].status
@@ -244,6 +247,9 @@ func TestAuthorityExecutorReconcilerExecutesRebuildRuntimeAndWritesCaughtUpStatu
 		!caughtUp.RebuildTrafficStarted ||
 		!caughtUp.DurableFrontierCaughtUp ||
 		caughtUp.DurableFrontierLSN != 52 ||
+		caughtUp.PublicationDecision != AuthorityExecutorPublicationDecisionDisabled ||
+		caughtUp.PublicationReason != AuthorityExecutorPublicationReasonPolicyDisabled ||
+		caughtUp.PublicationMutationAllowed ||
 		!caughtUp.NoFrontendPublication ||
 		!caughtUp.NoCrossVolumeIdentityChange ||
 		!authorityExecutorStringSliceContains(caughtUp.EvidenceRefs, "runtime-terminal-evidence.txt") {
@@ -285,7 +291,9 @@ func TestAuthorityExecutorReconcilerKeepsRunningWhenRuntimeOnlyStarts(t *testing
 	if running.State != "running" ||
 		running.ReasonCode != AuthorityExecutorReasonRebuildRunning ||
 		!running.RebuildTrafficStarted ||
-		running.DurableFrontierCaughtUp {
+		running.DurableFrontierCaughtUp ||
+		running.PublicationDecision != AuthorityExecutorPublicationDecisionBlocked ||
+		running.PublicationMutationAllowed {
 		t.Fatalf("running status=%+v", running)
 	}
 }
@@ -341,6 +349,8 @@ func TestAuthorityExecutorReconcilerTransitionsFromStartedToCaughtUpOnTerminalRu
 		caughtUp.ReasonCode != AuthorityExecutorReasonRebuildCaughtUp ||
 		!caughtUp.DurableFrontierCaughtUp ||
 		caughtUp.DurableFrontierLSN != 52 ||
+		caughtUp.PublicationDecision != AuthorityExecutorPublicationDecisionDisabled ||
+		caughtUp.PublicationMutationAllowed ||
 		!authorityExecutorStringSliceContains(caughtUp.EvidenceRefs, "blockvolume-runtime-caught-up.txt") {
 		t.Fatalf("caught_up status=%+v", caughtUp)
 	}
