@@ -662,6 +662,155 @@ func TestOpsAuthorityExecutorWritesRebuildPlannedStatus(t *testing.T) {
 	}
 }
 
+func TestOpsAuthorityExecutorRebuildRuntimeURLWritesCaughtUpStatus(t *testing.T) {
+	client := &lifecycleOwnerTestClient{
+		volumes: []ops.SwBlockVolumeObject{{
+			Ref: ops.OperatorObjectRef{
+				APIVersion: ops.SwBlockVolumeAPIVersion,
+				Kind:       ops.SwBlockVolumeKind,
+				Namespace:  "kube-system",
+				Name:       "rebuild",
+			},
+			Status: ops.SwBlockVolumeCRDStatus{
+				VolumeID: "pvc-rebuild",
+				PVCName:  "rebuild-pvc",
+				ReplicaReintegrations: []ops.SwBlockVolumeCRDReturnedReplica{{
+					ReplicaID:             "r1",
+					State:                 ops.ReturnedReplicaStateRecovering,
+					ReasonCode:            ops.ReasonCandidateFrontierBehind,
+					FrontendFenced:        true,
+					FrontendPrimaryReady:  false,
+					AckEligibilityKnown:   true,
+					AckEligible:           false,
+					DurableFrontierKnown:  true,
+					DurableFrontierLSN:    51,
+					RequiredFrontierKnown: true,
+					RequiredFrontierLSN:   52,
+					EvidenceRefs:          []string{"rebuild.txt"},
+				}},
+				ExecutorContracts: []ops.SwBlockVolumeCRDExecutorContract{{
+					ActionType:               ops.ManagedVolumeActionRebuildReturned,
+					ReplicaID:                "r1",
+					Decision:                 ops.ReturnedReplicaExecutorContractDisabled,
+					Reason:                   ops.ReturnedReplicaExecutorContractReasonExecutorDisabled,
+					OwnerExecutor:            "authority_recovery_executor",
+					ExecutionEnabled:         false,
+					MutationAllowed:          false,
+					PreflightDecision:        ops.ReturnedReplicaExecutorPreflightReady,
+					PreflightReason:          ops.ReturnedReplicaExecutorPreflightReasonSatisfied,
+					AllowedMutationClass:     []string{ops.AuthorityExecutorAllowedMutationRebuildTraffic},
+					ForbiddenMutationClass:   []string{"ack_eligibility", "frontend_publication", "failback"},
+					TerminalEvidenceRequired: []string{"frontend_fenced_before_rebuild", "primary_unchanged", "durable_frontier_caught_up", "no_frontend_publication", "no_cross_volume_identity_change"},
+					EvidenceRefs:             []string{"rebuild-contract.txt"},
+				}},
+			},
+		}},
+		rebuilds: []ops.SwBlockReplicaRebuildObject{{
+			Ref: ops.OperatorObjectRef{
+				APIVersion: ops.SwBlockVolumeAPIVersion,
+				Kind:       ops.SwBlockReplicaRebuildKind,
+				Namespace:  "kube-system",
+				Name:       "rebuild-r1",
+			},
+			Spec: ops.SwBlockReplicaRebuildSpec{
+				VolumeName: "rebuild",
+				VolumeID:   "pvc-rebuild",
+				PVCName:    "rebuild-pvc",
+				ReplicaID:  "r1",
+			},
+		}},
+	}
+	oldFactory := opsAuthorityExecutorClientFactory
+	opsAuthorityExecutorClientFactory = func() (ops.AuthorityExecutorClient, error) {
+		return client, nil
+	}
+	t.Cleanup(func() { opsAuthorityExecutorClientFactory = oldFactory })
+
+	var got ops.AuthorityRebuildRuntimeRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Fatalf("method=%s", r.Method)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		_ = json.NewEncoder(w).Encode(ops.AuthorityRebuildRuntimeResult{
+			DurableFrontierKnown: true,
+			DurableFrontierLSN:   52,
+			EvidenceRefs:         []string{"http-runtime.txt"},
+		})
+	}))
+	defer server.Close()
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"ops", "authority-executor",
+		"--namespace", "kube-system",
+		"--allowed-mutation-class", "rebuild_traffic",
+		"--enable-execution",
+		"--execution-policy",
+		"--rebuild-runtime-url", server.URL,
+	}, &stdout, &stderr)
+	if code != ops.VolumeStatusExitOK {
+		t.Fatalf("exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	if got.VolumeName != "rebuild" ||
+		got.VolumeID != "pvc-rebuild" ||
+		got.PVCName != "rebuild-pvc" ||
+		got.ReplicaID != "r1" ||
+		got.DurableFrontierLSN != 51 ||
+		got.RequiredFrontierLSN != 52 ||
+		!got.NoFrontendPublication ||
+		!got.NoCrossVolumeMutation {
+		t.Fatalf("runtime request=%+v", got)
+	}
+	if len(client.eligibilityWrites) != 0 || len(client.rebuildWrites) != 2 {
+		t.Fatalf("eligibility_writes=%+v rebuild_writes=%+v", client.eligibilityWrites, client.rebuildWrites)
+	}
+	running := client.rebuildWrites[0].status
+	if running.State != "running" ||
+		running.ReasonCode != ops.AuthorityExecutorReasonRebuildRunning ||
+		!running.RebuildTrafficStarted ||
+		!running.NoFrontendPublication {
+		t.Fatalf("running status=%+v", running)
+	}
+	caughtUp := client.rebuildWrites[1].status
+	if caughtUp.State != "caught_up" ||
+		caughtUp.ReasonCode != ops.AuthorityExecutorReasonRebuildCaughtUp ||
+		!caughtUp.DurableFrontierCaughtUp ||
+		caughtUp.DurableFrontierLSN != 52 ||
+		!cmdStringSliceContains(caughtUp.EvidenceRefs, "http-runtime.txt") ||
+		!caughtUp.NoFrontendPublication ||
+		!caughtUp.NoCrossVolumeIdentityChange {
+		t.Fatalf("caught_up status=%+v", caughtUp)
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"authority_executor=executed",
+		"allowed_mutation_class=rebuild_traffic",
+		"mutation_attempts=1",
+		"rebuild_progress_mutation_attempts=1",
+		"mutation_allowed=true",
+		"storage_mutation_allowed=false",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("stdout missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestOpsAuthorityExecutorRejectsRebuildRuntimeURLForAckEligibility(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ops", "authority-executor", "--rebuild-runtime-url", "http://127.0.0.1:1/runtime"}, &stdout, &stderr)
+	if code != ops.VolumeStatusExitInvalid {
+		t.Fatalf("exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "--rebuild-runtime-url requires --allowed-mutation-class rebuild_traffic") ||
+		!strings.Contains(stderr.String(), "reason=unsupported_runtime_mutation_class") {
+		t.Fatalf("stderr=%s", stderr.String())
+	}
+}
+
 func TestOpsRebuildTargetOwnerCreatesTarget(t *testing.T) {
 	client := &lifecycleOwnerTestClient{
 		volumes: []ops.SwBlockVolumeObject{{

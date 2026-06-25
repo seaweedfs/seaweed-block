@@ -658,6 +658,19 @@ Approximate engineering effort if scope remains tight:
 - Phase 48 Returned-Replica Live Evidence Close is closed. It connects the
   live iSCSI returned-replica run to the same managed-volume evidence/action
   surfaces used by Phase 47, without enabling rebuild/failback mutation.
+- Phase 60 Rebuild Catch-up Datapath Gate is closed. It proved the existing
+  engine/adapter/transport/recovery data path can move catch-up/rebuild bytes
+  and converge durable content, but it did not connect the authority executor.
+- Phase 61 Authority Executor Runtime Call-site is closed. It added the
+  bounded runtime interface and `running/caught_up/blocked` status mapping,
+  while preserving the non-claim that blockvolume RPC is not wired.
+- Phase 62 Authority Executor HTTP Runtime Transport is closed. It adds an
+  explicit HTTP runtime URL for `rebuild_traffic` execution and validates the
+  executor-to-runtime transport contract. It still does not claim a live
+  blockvolume endpoint.
+- Phase 63 should wire a blockvolume-side runtime endpoint only after the CRD
+  or runtime target carries enough address/session evidence to call the data
+  path safely.
 - Phase 41-44 are the Operation Layer v0.5 release train: lifecycle-owner
   foundation, real API/admission proof, first bounded finalizer mutation, and
   delete lifecycle close gate.

@@ -135,9 +135,93 @@ Finished plan:
 internal/docs/finished-plans/phase61_finishedplan_authority_executor_runtime_callsite.md
 ```
 
+## Phase 62: Authority Executor HTTP Runtime Transport
+
+Status: complete.
+
+QA: PASS.
+
+## Why
+
+Phase 61 proved the authority executor can call an in-process
+`AuthorityRebuildRuntime`. Phase 62 adds a concrete HTTP transport selected by
+`--rebuild-runtime-url`, while staying honest that blockvolume does not yet have
+a mutating rebuild control endpoint.
+
+The current blockvolume status HTTP surface is read-only, and the current CRD
+evidence does not carry enough session/addressing facts to safely call
+`transport.StartRebuild` directly. Phase 62 therefore wires the executor to an
+explicit runtime URL and keeps the blockvolume endpoint as Phase 63 work.
+
+## D1: HTTP Runtime Client
+
+Status: implemented; local tests PASS.
+
+Added `HTTPAuthorityRebuildRuntime`, which:
+
+- POSTs `AuthorityRebuildRuntimeRequest` as JSON;
+- decodes terminal `AuthorityRebuildRuntimeResult`;
+- treats non-2xx responses as execution failures, letting the reconciler write
+  blocked status.
+
+## D2: CLI Wiring
+
+Status: implemented; local tests PASS.
+
+Added:
+
+```text
+sw-block ops authority-executor --rebuild-runtime-url <url>
+```
+
+The flag is accepted only with:
+
+```text
+--allowed-mutation-class rebuild_traffic
+```
+
+No runtime URL preserves the planned-only fallback from Phase 61.
+
+## D3: Gate
+
+Status: QA PASS.
+
+Added:
+
+```text
+scripts/run-phase62-authority-executor-http-runtime-gate.sh
+testops/scenarios/authority-executor-http-runtime-chain.yaml
+```
+
+Required terminal evidence:
+
+```text
+phase62_authority_executor_http_runtime_status=ok
+http_runtime_posts_request=true
+http_runtime_decodes_terminal_frontier=true
+cli_rebuild_runtime_url_enabled=true
+rebuild_status_running_written=true
+rebuild_status_caught_up_written=true
+blockvolume_runtime_endpoint_wired=false
+frontend_publication_allowed=false
+failback_allowed=false
+```
+
+Live run:
+
+```text
+20260624-170419-1409 authority-executor-http-runtime-chain PASS 26/26
+```
+
 ## Exit
 
-Phase 61 closed when the live TestRunner gate proved the authority executor can
-call a bounded rebuild runtime seam and map terminal evidence into
-`SwBlockReplicaRebuild.status`, while explicitly preserving the boundary that
-blockvolume RPC wiring remains future work.
+Phase 62 closed when local tests and the TestRunner gate proved the explicit
+HTTP runtime transport can drive `running -> caught_up` / `blocked` status,
+without claiming a blockvolume endpoint or frontend/failback behavior.
+
+## Next: Phase 63
+
+Add the blockvolume-side runtime endpoint/addressing contract. The first
+acceptable slice is not "call StartRebuild somehow"; it must define the runtime
+target evidence needed to safely identify the primary process, target replica,
+session, epoch, endpoint version, and transport lane.

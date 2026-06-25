@@ -1,0 +1,128 @@
+# Runner-native Phase 62 gate: authority-executor HTTP rebuild runtime transport.
+
+name: authority-executor-http-runtime-chain
+timeout: 8m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: authority_executor_http_runtime_gate
+    actions:
+      - action: exec
+        node: m02
+        timeout: 7m
+        cmd: "rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase62-authority-executor-http-runtime && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase62-authority-executor-http-runtime && cd {{ product_root }} && SW_BLOCK_ARTIFACT_DIR=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase62-authority-executor-http-runtime bash scripts/run-phase62-authority-executor-http-runtime-gate.sh {{ product_root }}"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase62-authority-executor-http-runtime/phase62-authority-executor-http-runtime-summary.txt"
+        pattern: "^phase62_authority_executor_http_runtime_status=ok$"
+        save_as: phase62_ok
+      - action: assert_greater
+        actual: "{{ phase62_ok }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase62-authority-executor-http-runtime/phase62-authority-executor-http-runtime-summary.txt"
+        pattern: "^http_runtime_posts_request=true$"
+        save_as: posts_request
+      - action: assert_greater
+        actual: "{{ posts_request }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase62-authority-executor-http-runtime/phase62-authority-executor-http-runtime-summary.txt"
+        pattern: "^http_runtime_decodes_terminal_frontier=true$"
+        save_as: decodes_frontier
+      - action: assert_greater
+        actual: "{{ decodes_frontier }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase62-authority-executor-http-runtime/phase62-authority-executor-http-runtime-summary.txt"
+        pattern: "^cli_rebuild_runtime_url_enabled=true$"
+        save_as: cli_enabled
+      - action: assert_greater
+        actual: "{{ cli_enabled }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase62-authority-executor-http-runtime/phase62-authority-executor-http-runtime-summary.txt"
+        pattern: "^cli_rebuild_runtime_url_requires_rebuild_traffic=true$"
+        save_as: cli_guard
+      - action: assert_greater
+        actual: "{{ cli_guard }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase62-authority-executor-http-runtime/phase62-authority-executor-http-runtime-summary.txt"
+        pattern: "^rebuild_status_running_written=true$"
+        save_as: running_written
+      - action: assert_greater
+        actual: "{{ running_written }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase62-authority-executor-http-runtime/phase62-authority-executor-http-runtime-summary.txt"
+        pattern: "^rebuild_status_caught_up_written=true$"
+        save_as: caught_up_written
+      - action: assert_greater
+        actual: "{{ caught_up_written }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase62-authority-executor-http-runtime/phase62-authority-executor-http-runtime-summary.txt"
+        pattern: "^rebuild_status_blocked_on_runtime_failure=true$"
+        save_as: blocked_written
+      - action: assert_greater
+        actual: "{{ blocked_written }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase62-authority-executor-http-runtime/phase62-authority-executor-http-runtime-summary.txt"
+        pattern: "^planned_status_preserved_without_runtime=true$"
+        save_as: planned_preserved
+      - action: assert_greater
+        actual: "{{ planned_preserved }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase62-authority-executor-http-runtime/phase62-authority-executor-http-runtime-summary.txt"
+        pattern: "^blockvolume_runtime_endpoint_wired=false$"
+        save_as: endpoint_not_wired
+      - action: assert_greater
+        actual: "{{ endpoint_not_wired }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase62-authority-executor-http-runtime/phase62-authority-executor-http-runtime-summary.txt"
+        pattern: "^frontend_publication_allowed=false$"
+        save_as: no_frontend
+      - action: assert_greater
+        actual: "{{ no_frontend }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase62-authority-executor-http-runtime/phase62-authority-executor-http-runtime-summary.txt"
+        pattern: "^failback_allowed=false$"
+        save_as: no_failback
+      - action: assert_greater
+        actual: "{{ no_failback }}"
+        threshold: "0"
+
+  - name: collect
+    always: true
+    actions:
+      - action: collect_path
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase62-authority-executor-http-runtime"
+        name: "remote-phases"
+        ignore_error: true

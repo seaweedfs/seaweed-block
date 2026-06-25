@@ -180,12 +180,14 @@ func runOpsAuthorityExecutor(args []string, stdout, stderr io.Writer) int {
 		enableExecution        bool
 		executionPolicyEnabled bool
 		allowedMutationClass   string
+		rebuildRuntimeURL      string
 		interval               time.Duration
 	)
 	fs.StringVar(&namespace, "namespace", "default", "Kubernetes namespace containing SwBlockVolume objects")
 	fs.BoolVar(&enableExecution, "enable-execution", false, "request returned-replica executor mutation")
 	fs.BoolVar(&executionPolicyEnabled, "execution-policy", false, "allow authority executor to evaluate execution; still blocked until ACK mutation target exists")
 	fs.StringVar(&allowedMutationClass, "allowed-mutation-class", ops.AuthorityExecutorAllowedMutationAckEligibility, "supported values: ack_eligibility, rebuild_traffic")
+	fs.StringVar(&rebuildRuntimeURL, "rebuild-runtime-url", "", "HTTP endpoint for rebuild_traffic runtime execution; empty preserves planned-only status")
 	fs.DurationVar(&interval, "interval", 0, "repeat authority-executor reconciliation at this interval; 0 runs once")
 	if err := fs.Parse(args); err != nil {
 		return ops.VolumeStatusExitInvalid
@@ -198,6 +200,10 @@ func runOpsAuthorityExecutor(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "sw-block ops authority-executor: unsupported mutation class %q reason=unsupported_mutation_class mutation_attempts=0 ack_eligibility_mutation_attempts=0 rebuild_progress_mutation_attempts=0\n", allowedMutationClass)
 		return ops.VolumeStatusExitInvalid
 	}
+	if strings.TrimSpace(rebuildRuntimeURL) != "" && allowedMutationClass != ops.AuthorityExecutorAllowedMutationRebuildTraffic {
+		fmt.Fprintf(stderr, "sw-block ops authority-executor: --rebuild-runtime-url requires --allowed-mutation-class rebuild_traffic reason=unsupported_runtime_mutation_class mutation_attempts=0 ack_eligibility_mutation_attempts=0 rebuild_progress_mutation_attempts=0\n")
+		return ops.VolumeStatusExitInvalid
+	}
 	if enableExecution && !executionPolicyEnabled {
 		fmt.Fprintf(stderr, "sw-block ops authority-executor: returned-replica execution is disabled by product policy reason=%s mutation_attempts=0 ack_eligibility_mutation_attempts=0 rebuild_progress_mutation_attempts=0\n", ops.AuthorityExecutorBlockedPolicyDisabled)
 		return ops.VolumeStatusExitInvalid
@@ -208,9 +214,14 @@ func runOpsAuthorityExecutor(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintf(stderr, "sw-block ops authority-executor: %v\n", err)
 			return ops.VolumeStatusExitInvalid
 		}
+		var rebuildRuntime ops.AuthorityRebuildRuntime
+		if strings.TrimSpace(rebuildRuntimeURL) != "" {
+			rebuildRuntime = ops.NewHTTPAuthorityRebuildRuntime(rebuildRuntimeURL, nil)
+		}
 		result, err := (ops.AuthorityExecutorReconciler{
 			Namespace:              namespace,
 			Client:                 client,
+			RebuildRuntime:         rebuildRuntime,
 			ExecutionRequested:     enableExecution,
 			ExecutionPolicyEnabled: executionPolicyEnabled,
 			AllowedMutationClass:   allowedMutationClass,

@@ -43,25 +43,25 @@ type AuthorityRebuildRuntime interface {
 }
 
 type AuthorityRebuildRuntimeRequest struct {
-	VolumeName            string
-	VolumeID              string
-	PVCName               string
-	ReplicaID             string
-	DurableFrontierKnown  bool
-	DurableFrontierLSN    uint64
-	RequiredFrontierKnown bool
-	RequiredFrontierLSN   uint64
-	FrontendFenced        bool
-	FrontendPrimaryReady  bool
-	NoFrontendPublication bool
-	NoCrossVolumeMutation bool
-	EvidenceRefs          []string
+	VolumeName            string   `json:"volumeName"`
+	VolumeID              string   `json:"volumeID"`
+	PVCName               string   `json:"pvcName"`
+	ReplicaID             string   `json:"replicaID"`
+	DurableFrontierKnown  bool     `json:"durableFrontierKnown"`
+	DurableFrontierLSN    uint64   `json:"durableFrontierLsn"`
+	RequiredFrontierKnown bool     `json:"requiredFrontierKnown"`
+	RequiredFrontierLSN   uint64   `json:"requiredFrontierLsn"`
+	FrontendFenced        bool     `json:"frontendFenced"`
+	FrontendPrimaryReady  bool     `json:"frontendPrimaryReady"`
+	NoFrontendPublication bool     `json:"noFrontendPublication"`
+	NoCrossVolumeMutation bool     `json:"noCrossVolumeMutation"`
+	EvidenceRefs          []string `json:"evidenceRefs,omitempty"`
 }
 
 type AuthorityRebuildRuntimeResult struct {
-	DurableFrontierKnown bool
-	DurableFrontierLSN   uint64
-	EvidenceRefs         []string
+	DurableFrontierKnown bool     `json:"durableFrontierKnown"`
+	DurableFrontierLSN   uint64   `json:"durableFrontierLsn"`
+	EvidenceRefs         []string `json:"evidenceRefs,omitempty"`
 }
 
 type AuthorityExecutorReconcileResult struct {
