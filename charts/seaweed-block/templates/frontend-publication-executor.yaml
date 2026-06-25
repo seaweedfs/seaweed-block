@@ -1,0 +1,37 @@
+{{- if .Values.frontendPublicationExecutor.create }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sw-block-frontend-publication-executor
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: sw-block-frontend-publication-executor
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sw-block-frontend-publication-executor
+  template:
+    metadata:
+      labels:
+        app: sw-block-frontend-publication-executor
+    spec:
+      serviceAccountName: {{ include "seaweed-block.fullname" . }}-frontend-publication-executor
+      {{- with .Values.frontendPublicationExecutor.nodeSelector }}
+      nodeSelector:
+{{ toYaml . | indent 8 }}
+      {{- end }}
+      containers:
+        - name: frontend-publication-executor
+          image: {{ include "seaweed-block.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/usr/local/bin/sw-block"]
+          args:
+            - "ops"
+            - "frontend-publication-executor"
+            - "--namespace={{ .Release.Namespace }}"
+            {{- if .Values.frontendPublicationExecutor.dryRun }}
+            - "--dry-run"
+            {{- end }}
+            - "--interval={{ .Values.frontendPublicationExecutor.interval }}"
+{{- end }}

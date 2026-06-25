@@ -813,6 +813,61 @@ func TestPhase69FrontendPublicationTargetOwnerPackagingIsNarrow(t *testing.T) {
 	}
 }
 
+func TestPhase70FrontendPublicationExecutorPackagingIsStatusOnly(t *testing.T) {
+	values := readYAMLMap(t, "charts/seaweed-block/values.yaml")
+	executor := yamlMap(t, values, "frontendPublicationExecutor")
+	assertYAMLBool(t, executor, "create", false)
+	assertYAMLBool(t, executor, "dryRun", true)
+	rbacValues := yamlMap(t, executor, "rbac")
+	assertYAMLBool(t, rbacValues, "create", true)
+
+	deploy := readRepoFile(t, "charts/seaweed-block/templates/frontend-publication-executor.yaml")
+	for _, want := range []string{
+		`kind: Deployment`,
+		`name: sw-block-frontend-publication-executor`,
+		`serviceAccountName: {{ include "seaweed-block.fullname" . }}-frontend-publication-executor`,
+		`command: ["/usr/local/bin/sw-block"]`,
+		`- "frontend-publication-executor"`,
+		`- "--namespace={{ .Release.Namespace }}"`,
+		`{{- if .Values.frontendPublicationExecutor.dryRun }}`,
+		`- "--dry-run"`,
+		`- "--interval={{ .Values.frontendPublicationExecutor.interval }}"`,
+	} {
+		if !strings.Contains(deploy, want) {
+			t.Fatalf("frontend-publication-executor deployment missing %q\n%s", want, deploy)
+		}
+	}
+
+	rbac := readRepoFile(t, "charts/seaweed-block/templates/frontend-publication-executor-rbac.yaml")
+	for _, want := range []string{
+		`resources: ["swblockfrontendpublications"]`,
+		`verbs: ["get", "list", "watch"]`,
+		`resources: ["swblockfrontendpublications/status"]`,
+		`verbs: ["get", "update", "patch"]`,
+	} {
+		if !strings.Contains(rbac, want) {
+			t.Fatalf("frontend-publication-executor RBAC missing %q\n%s", want, rbac)
+		}
+	}
+	for _, forbidden := range []string{
+		`resources: ["swblockvolumes"]`,
+		`resources: ["swblockreplicaeligibilities"]`,
+		`resources: ["swblockfrontendpublications/finalizers"]`,
+		`resources: ["events"]`,
+		`resources: ["pods"]`,
+		`resources: ["persistentvolumes"]`,
+		`resources: ["persistentvolumeclaims"]`,
+		`resources: ["storageclasses"]`,
+		`resources: ["secrets"]`,
+		`"create"`,
+		`"delete"`,
+	} {
+		if strings.Contains(rbac, forbidden) {
+			t.Fatalf("frontend-publication-executor RBAC contains forbidden fragment %q\n%s", forbidden, rbac)
+		}
+	}
+}
+
 func readRepoFile(t *testing.T, repoPath string) string {
 	t.Helper()
 	raw, err := os.ReadFile(filepath.Join("..", "..", filepath.FromSlash(repoPath)))

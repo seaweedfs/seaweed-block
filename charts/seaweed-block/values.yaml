@@ -180,6 +180,18 @@ frontendPublicationTargetOwner:
     create: true
   nodeSelector: {}
 
+frontendPublicationExecutor:
+  # Frontend publication executor boundary. Disabled by default. This phase
+  # writes disabled/blocked SwBlockFrontendPublication.status only. It does not
+  # publish frontend targets, fail back authority, create targets, or mutate
+  # storage.
+  create: false
+  dryRun: true
+  interval: 30s
+  rbac:
+    create: true
+  nodeSelector: {}
+
 csiController:
   replicas: 1
 

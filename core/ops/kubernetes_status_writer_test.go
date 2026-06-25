@@ -178,15 +178,36 @@ func TestKubernetesStatusClientPatchesOnlyStatusSubresources(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("write replica rebuild status: %v", err)
 	}
+	if err := client.WriteFrontendPublicationStatus(context.Background(), OperatorObjectRef{
+		Namespace: "kube-system",
+		Name:      "demo-pvc-r1-frontend-publication",
+	}, SwBlockFrontendPublicationCRDStatus{
+		ObservedAt:                  observedAt,
+		ObservedGeneration:          9,
+		Executor:                    "frontend-publication-executor",
+		State:                       FrontendPublicationStateBlocked,
+		ReasonCode:                  AuthorityExecutorFrontendPublicationReasonDisabled,
+		PublicationMutationAllowed:  false,
+		FrontendPublished:           false,
+		FailbackStarted:             false,
+		NoStorageMutation:           true,
+		NoCrossVolumeIdentityChange: true,
+		EvidenceGeneration:          "executor-run-3",
+		EvidenceRefs:                []string{"frontend-publication-summary.txt"},
+		NonClaims:                   []string{"no_frontend_publication", "no_failback", "no_storage_mutation"},
+	}); err != nil {
+		t.Fatalf("write frontend publication status: %v", err)
+	}
 
-	if len(requests) != 4 {
-		t.Fatalf("requests=%d want 4: %+v", len(requests), requests)
+	if len(requests) != 5 {
+		t.Fatalf("requests=%d want 5: %+v", len(requests), requests)
 	}
 	wantPaths := []string{
 		"/apis/block.seaweedfs.com/v1alpha1/namespaces/kube-system/swblockclusters/sw-block/status",
 		"/apis/block.seaweedfs.com/v1alpha1/namespaces/kube-system/swblockvolumes/demo-pvc/status",
 		"/apis/block.seaweedfs.com/v1alpha1/namespaces/kube-system/swblockreplicaeligibilities/demo-pvc-r1/status",
 		"/apis/block.seaweedfs.com/v1alpha1/namespaces/kube-system/swblockreplicarebuilds/demo-pvc-r1-rebuild/status",
+		"/apis/block.seaweedfs.com/v1alpha1/namespaces/kube-system/swblockfrontendpublications/demo-pvc-r1-frontend-publication/status",
 	}
 	for i, req := range requests {
 		if req.Method != http.MethodPatch {
@@ -323,6 +344,29 @@ func TestKubernetesStatusClientPatchesOnlyStatusSubresources(t *testing.T) {
 		if _, ok := replicaRebuildStatus[forbidden]; ok {
 			t.Fatalf("replica rebuild status leaked %s: %+v", forbidden, replicaRebuildStatus)
 		}
+	}
+	frontendPublicationStatus := requests[4].Body["status"].(map[string]any)
+	for _, want := range []string{
+		"publicationMutationAllowed",
+		"frontendPublished",
+		"failbackStarted",
+		"noStorageMutation",
+		"noCrossVolumeIdentityChange",
+		"evidenceGeneration",
+	} {
+		if _, ok := frontendPublicationStatus[want]; !ok {
+			t.Fatalf("frontend publication status missing camelCase %s: %+v", want, frontendPublicationStatus)
+		}
+	}
+	for _, forbidden := range []string{"publication_mutation_allowed", "frontend_published", "failback_started", "no_storage_mutation", "spec"} {
+		if _, ok := frontendPublicationStatus[forbidden]; ok {
+			t.Fatalf("frontend publication status leaked %s: %+v", forbidden, frontendPublicationStatus)
+		}
+	}
+	if frontendPublicationStatus["frontendPublished"] != false ||
+		frontendPublicationStatus["failbackStarted"] != false ||
+		frontendPublicationStatus["noStorageMutation"] != true {
+		t.Fatalf("frontend publication status=%+v", frontendPublicationStatus)
 	}
 }
 
