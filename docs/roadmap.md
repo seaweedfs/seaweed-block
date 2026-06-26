@@ -547,6 +547,9 @@ control-plane path is mature.
      frontend publication remain separate opt-in gates
    - failback target activation is explicit and default-off: policy plus runtime
      endpoint are required before a target can be stamped `enabled`
+   - target-owner to executor handoff is locally gated: expected-current
+     authority facts reach the runtime request and terminal evidence controls
+     `failed_back`; live deployed failback remains a separate release gate
 
 4. Flow-control and pressure behavior.
 

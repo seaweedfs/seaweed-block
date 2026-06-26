@@ -1,0 +1,88 @@
+# Runner-native Phase 92 gate: target owner creates an enabled failback target,
+# executor consumes it through a fake/local runtime, and expected-current
+# authority facts reach the runtime request.
+
+name: failback-target-executor-handoff-chain
+timeout: 5m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: failback_target_executor_handoff_gate
+    actions:
+      - action: exec
+        node: m02
+        timeout: 4m
+        cmd: "rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase92-failback-target-executor-handoff && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase92-failback-target-executor-handoff && cd {{ product_root }} && SW_BLOCK_ARTIFACT_DIR=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase92-failback-target-executor-handoff bash scripts/run-phase92-failback-target-executor-handoff-gate.sh {{ product_root }}"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase92-failback-target-executor-handoff/phase92-failback-target-executor-handoff-summary.txt"
+        pattern: "^phase92_failback_target_executor_handoff_status=ok$"
+        save_as: phase92_ok
+      - action: assert_greater
+        actual: "{{ phase92_ok }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase92-failback-target-executor-handoff/phase92-failback-target-executor-handoff-summary.txt"
+        pattern: "^target_owner_created_enabled_target=true$"
+        save_as: owner_created
+      - action: assert_greater
+        actual: "{{ owner_created }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase92-failback-target-executor-handoff/phase92-failback-target-executor-handoff-summary.txt"
+        pattern: "^executor_consumed_target=true$"
+        save_as: executor_consumed
+      - action: assert_greater
+        actual: "{{ executor_consumed }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase92-failback-target-executor-handoff/phase92-failback-target-executor-handoff-summary.txt"
+        pattern: "^runtime_request_expected_current_replica=r2$"
+        save_as: expected_replica
+      - action: assert_greater
+        actual: "{{ expected_replica }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase92-failback-target-executor-handoff/phase92-failback-target-executor-handoff-summary.txt"
+        pattern: "^runtime_request_expected_current_epoch=7$"
+        save_as: expected_epoch
+      - action: assert_greater
+        actual: "{{ expected_epoch }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase92-failback-target-executor-handoff/phase92-failback-target-executor-handoff-summary.txt"
+        pattern: "^frontend_publication_after_failback_claimed=false$"
+        save_as: no_frontend_publication
+      - action: assert_greater
+        actual: "{{ no_frontend_publication }}"
+        threshold: "0"
+
+  - name: collect
+    always: true
+    actions:
+      - action: collect_path
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase92-failback-target-executor-handoff"
+        name: "remote-phases"
+        ignore_error: true

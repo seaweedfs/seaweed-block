@@ -1,108 +1,76 @@
-# Current Plan: Phase 91 Failback Target Activation Policy
+# Current Plan: Phase 92 Failback Target -> Executor Handoff
 
 Status: complete.
 
 ## Goal
 
-Phase 91 adds an explicit activation policy to the failback target-owner path.
-By default, target-owner behavior remains unchanged: it creates disabled,
-non-mutating `SwBlockReplicaFailback` targets only.
-
-When all activation knobs are explicitly supplied, the owner may create an
-enabled target:
+Phase 92 proves the first integrated handoff between the failback target owner
+and failback executor:
 
 ```text
---activate-targets
---activation-policy
---runtime-endpoint <addr>
+SwBlockVolume.status authority facts
+-> target owner creates enabled SwBlockReplicaFailback target
+-> executor consumes the target
+-> runtime request receives expected-current replica and epoch
+-> executor writes terminal failed_back status from runtime evidence
 ```
 
-This phase still does not call the failback runtime. It only stamps the target
-so the separate failback executor can decide whether to execute it.
+This is still a local/fake-runtime gate. It does not claim a live Kubernetes
+blockmaster runtime smoke or frontend publication.
 
 ## Deliverables
 
-### D1: Target Owner Policy
+### D1: Integrated Handoff Test
 
-`FailbackTargetOwnerReconciler` now has:
+Added `TestFailbackTargetOwnerExecutorHandoffUsesExpectedCurrentAuthority`.
 
-```text
-ActivateTargets
-ActivationPolicyEnabled
-RuntimeEndpoint
-```
-
-Activation fails closed unless policy is enabled and a runtime endpoint is
-present.
-
-### D2: CLI And Helm Wiring
-
-`sw-block ops failback-target-owner` accepts:
+It proves:
 
 ```text
---activate-targets
---activation-policy
---runtime-endpoint <addr>
+target owner creates one enabled target
+expectedCurrentReplicaID=r2 reaches the runtime request
+expectedCurrentEpoch=7 reaches the runtime request
+executor writes failed_back only after valid terminal runtime evidence
+frontend publication remains false
+storage mutation remains false
 ```
 
-Helm exposes these under:
-
-```text
-failbackTargetOwner.activation.enabled
-failbackTargetOwner.activation.policy
-failbackTargetOwner.activation.runtimeEndpoint
-```
-
-Defaults keep activation off and omit all activation flags.
-
-### D3: Gate
+### D2: Gate
 
 Added:
 
 ```text
-scripts/run-phase91-failback-target-activation-policy-gate.sh
-testops/scenarios/failback-target-activation-policy-chain.yaml
-```
-
-The gate proves:
-
-```text
-default Helm render omits activation flags
-explicit values render activation flags
-policy is required
-runtime endpoint is required
-enabled targets retain expected-current authority facts
-no failback runtime call is attempted
-frontend publication remains unclaimed
+scripts/run-phase92-failback-target-executor-handoff-gate.sh
+testops/scenarios/failback-target-executor-handoff-chain.yaml
 ```
 
 ## Verification
 
 ```text
-bash scripts/run-phase91-failback-target-activation-policy-gate.sh .
-swblock validate testops/scenarios/failback-target-activation-policy-chain.yaml
+bash scripts/run-phase92-failback-target-executor-handoff-gate.sh .
+swblock validate testops/scenarios/failback-target-executor-handoff-chain.yaml
 ```
 
 Expected terminal evidence:
 
 ```text
-phase91_failback_target_activation_policy_status=ok
-activation_default_off=true
-activation_policy_required=true
-activation_runtime_endpoint_required=true
-activated_target_failback_decision=enabled
-activated_target_failback_mutation_allowed=true
-failback_runtime_call_attempted=false
+phase92_failback_target_executor_handoff_status=ok
+target_owner_created_enabled_target=true
+executor_consumed_target=true
+runtime_request_expected_current_replica=r2
+runtime_request_expected_current_epoch=7
+executor_terminal_state=failed_back
+frontend_publication_after_failback_claimed=false
+storage_mutation_allowed=false
 ```
 
 ## Next
 
-Phase 92 should run the first integrated target-owner -> executor handoff smoke:
+Phase 93 should choose the next proof boundary:
 
 ```text
-target owner creates an enabled target with expected-current facts
-executor consumes that target
-runtime remains fake/local unless a live service gate is explicitly selected
-terminal evidence decides status
-frontend publication remains separate
+live blockmaster gRPC runtime smoke using the deployed suite, or
+multi-volume failback handoff isolation before live runtime
 ```
+
+Do not combine frontend publication into that step.

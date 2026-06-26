@@ -237,6 +237,7 @@ ambiguous HTTP/gRPC runtime addresses.
 | 89 | projects current authority facts into `SwBlockVolume.status`, operator-snapshot, and summary text for later expected-current failback activation |
 | 90 | makes target-owner creation require current authority facts and stamp `expectedCurrentReplicaID` / `expectedCurrentEpoch` onto disabled targets |
 | 91 | adds explicit target activation policy plus runtime endpoint wiring; default remains disabled and no runtime call is made by the target owner |
+| 92 | proves local target-owner -> executor handoff, including expected-current facts in the runtime request and terminal `failed_back` evidence |
 
 ## Failure Classes
 
@@ -264,12 +265,14 @@ Before enabling broader failback behavior:
 6. Require explicit target activation policy and runtime endpoint before
    stamping `failbackDecision=enabled`.
 7. Pass expected-current replica and epoch to blockmaster.
-8. Run through blockmaster-owned `FailbackService`, not a sidecar authority copy.
-9. Require terminal evidence before writing `failed_back`.
-10. Keep frontend publication as a separate gated action.
-11. Keep rebuild/catch-up traffic as a separate gated action.
-12. Run multi-volume isolation gates.
-13. Document exactly what is automatic and what is opt-in.
+8. Prove target-owner -> executor handoff locally before the live deployed
+   runtime smoke.
+9. Run through blockmaster-owned `FailbackService`, not a sidecar authority copy.
+10. Require terminal evidence before writing `failed_back`.
+11. Keep frontend publication as a separate gated action.
+12. Keep rebuild/catch-up traffic as a separate gated action.
+13. Run multi-volume isolation gates.
+14. Document exactly what is automatic and what is opt-in.
 
 ## Current Limits
 

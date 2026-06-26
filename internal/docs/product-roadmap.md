@@ -743,6 +743,10 @@ Approximate engineering effort if scope remains tight:
   is still default-off, but explicit policy plus runtime endpoint can stamp an
   enabled failback target for the executor handoff. The target owner still does
   not call the runtime or publish a frontend.
+- Phase 92 Failback Target -> Executor Handoff is closed. A local/fake-runtime
+  gate proves expected-current authority facts survive target creation into the
+  executor runtime request and terminal evidence drives `failed_back` status.
+  Live deployed failback remains a separate gate.
 - Phase 41-44 are the Operation Layer v0.5 release train: lifecycle-owner
   foundation, real API/admission proof, first bounded finalizer mutation, and
   delete lifecycle close gate.
