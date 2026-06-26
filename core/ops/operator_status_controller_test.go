@@ -34,8 +34,10 @@ func TestOperatorStatusReconcilerWritesStatusOnlyProjection(t *testing.T) {
 				PVCName:  "demo-pvc",
 				PVC:      &PVCFact{Phase: "Bound"},
 				Authority: &AuthorityFact{
-					PrimaryReplica: "r1",
-					PublishTarget:  "192.168.1.184:3260",
+					PrimaryReplica:  "r1",
+					PublishTarget:   "192.168.1.184:3260",
+					Epoch:           11,
+					EndpointVersion: 12,
 				},
 				Replicas: []ReplicaFact{{
 					ReplicaID:      "r1",
@@ -95,6 +97,12 @@ func TestOperatorStatusReconcilerWritesStatusOnlyProjection(t *testing.T) {
 	if got := writer.volumes[0].status.Status; got != ManagedVolumeStatusReady {
 		t.Fatalf("ready volume status=%s", got)
 	}
+	if ready := writer.volumes[0].status; ready.PrimaryReplicaID != "r1" ||
+		ready.PublishTarget != "192.168.1.184:3260" ||
+		ready.AuthorityEpoch != 11 ||
+		ready.AuthorityEndpointVersion != 12 {
+		t.Fatalf("ready volume authority status=%+v", ready)
+	}
 	if got := writer.volumes[1].status.ReasonCode; got != ReasonCSINodeImagePullFailed {
 		t.Fatalf("blocked volume reason=%s", got)
 	}
@@ -112,8 +120,18 @@ func TestOperatorStatusReconcilerWritesStatusOnlyProjection(t *testing.T) {
 	if !strings.Contains(string(rawStatus), `"mutationAllowed":false`) {
 		t.Fatalf("CRD volume status must use camelCase mutationAllowed: %s", string(rawStatus))
 	}
+	for _, want := range []string{`"primaryReplicaID":"r1"`, `"publishTarget":"192.168.1.184:3260"`, `"authorityEpoch":11`, `"authorityEndpointVersion":12`} {
+		if !strings.Contains(string(rawStatus), want) {
+			t.Fatalf("CRD volume status missing %s: %s", want, string(rawStatus))
+		}
+	}
 	if strings.Contains(string(rawStatus), "mutation_allowed") {
 		t.Fatalf("CRD volume status must not use operator-snapshot snake_case fields: %s", string(rawStatus))
+	}
+	for _, forbidden := range []string{"primary_replica_id", "publish_target", "authority_epoch", "authority_endpoint_version"} {
+		if strings.Contains(string(rawStatus), forbidden) {
+			t.Fatalf("CRD volume status leaked snake_case %s: %s", forbidden, string(rawStatus))
+		}
 	}
 	if events.countByReason(ReasonFirstVolumeVerified) == 0 {
 		t.Fatalf("missing ready event: %+v", events.events)

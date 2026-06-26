@@ -9,17 +9,21 @@ type ManagedVolumeOperatorContract struct {
 }
 
 type ManagedVolumeOperatorStatus struct {
-	VolumeID              string                             `json:"volume_id,omitempty"`
-	PVCName               string                             `json:"pvc_name,omitempty"`
-	Status                string                             `json:"status"`
-	ReasonCode            string                             `json:"reason_code,omitempty"`
-	Conditions            []ObservationCondition             `json:"conditions,omitempty"`
-	DeleteSafety          *SwBlockVolumeDeleteSafetyDecision `json:"delete_safety,omitempty"`
-	ReplicaReintegrations []ReturnedReplicaProjection        `json:"replica_reintegrations,omitempty"`
-	ExecutorPreflights    []ReturnedReplicaExecutorPreflight `json:"executor_preflights,omitempty"`
-	ExecutorContracts     []ReturnedReplicaExecutorContract  `json:"executor_contracts,omitempty"`
-	NonClaims             []string                           `json:"non_claims,omitempty"`
-	EvidenceRefs          []string                           `json:"evidence_refs,omitempty"`
+	VolumeID                 string                             `json:"volume_id,omitempty"`
+	PVCName                  string                             `json:"pvc_name,omitempty"`
+	PrimaryReplicaID         string                             `json:"primary_replica_id,omitempty"`
+	PublishTarget            string                             `json:"publish_target,omitempty"`
+	AuthorityEpoch           uint64                             `json:"authority_epoch,omitempty"`
+	AuthorityEndpointVersion uint64                             `json:"authority_endpoint_version,omitempty"`
+	Status                   string                             `json:"status"`
+	ReasonCode               string                             `json:"reason_code,omitempty"`
+	Conditions               []ObservationCondition             `json:"conditions,omitempty"`
+	DeleteSafety             *SwBlockVolumeDeleteSafetyDecision `json:"delete_safety,omitempty"`
+	ReplicaReintegrations    []ReturnedReplicaProjection        `json:"replica_reintegrations,omitempty"`
+	ExecutorPreflights       []ReturnedReplicaExecutorPreflight `json:"executor_preflights,omitempty"`
+	ExecutorContracts        []ReturnedReplicaExecutorContract  `json:"executor_contracts,omitempty"`
+	NonClaims                []string                           `json:"non_claims,omitempty"`
+	EvidenceRefs             []string                           `json:"evidence_refs,omitempty"`
 }
 
 type ManagedVolumeOperatorEvent struct {
@@ -49,17 +53,21 @@ func ManagedVolumeOperatorContractFromProjection(projection ManagedVolumeProject
 		APIVersion: "block.seaweedfs.com/v1alpha1",
 		Kind:       "ManagedVolumeStatusContract",
 		Status: ManagedVolumeOperatorStatus{
-			VolumeID:              projection.VolumeID,
-			PVCName:               projection.PVCName,
-			Status:                projection.Status,
-			ReasonCode:            projection.ReasonCode,
-			Conditions:            append([]ObservationCondition(nil), projection.Conditions...),
-			DeleteSafety:          cloneSwBlockVolumeDeleteSafetyDecision(projection.DeleteSafety),
-			ReplicaReintegrations: cloneReturnedReplicaProjections(projection.ReplicaReintegrations),
-			ExecutorPreflights:    cloneReturnedReplicaExecutorPreflights(ReturnedReplicaExecutorPreflights(projection)),
-			ExecutorContracts:     cloneReturnedReplicaExecutorContracts(ReturnedReplicaExecutorContracts(projection)),
-			NonClaims:             append([]string(nil), projection.NonClaims...),
-			EvidenceRefs:          append([]string(nil), projection.EvidenceRefs...),
+			VolumeID:                 projection.VolumeID,
+			PVCName:                  projection.PVCName,
+			PrimaryReplicaID:         projection.PrimaryReplicaID,
+			PublishTarget:            projection.PublishTarget,
+			AuthorityEpoch:           projection.AuthorityEpoch,
+			AuthorityEndpointVersion: projection.AuthorityEndpointVersion,
+			Status:                   projection.Status,
+			ReasonCode:               projection.ReasonCode,
+			Conditions:               append([]ObservationCondition(nil), projection.Conditions...),
+			DeleteSafety:             cloneSwBlockVolumeDeleteSafetyDecision(projection.DeleteSafety),
+			ReplicaReintegrations:    cloneReturnedReplicaProjections(projection.ReplicaReintegrations),
+			ExecutorPreflights:       cloneReturnedReplicaExecutorPreflights(ReturnedReplicaExecutorPreflights(projection)),
+			ExecutorContracts:        cloneReturnedReplicaExecutorContracts(ReturnedReplicaExecutorContracts(projection)),
+			NonClaims:                append([]string(nil), projection.NonClaims...),
+			EvidenceRefs:             append([]string(nil), projection.EvidenceRefs...),
 		},
 	}
 	for _, condition := range projection.Conditions {

@@ -47,6 +47,16 @@ func TestManagedVolumeProjection_HealthyFirstVolumeReady(t *testing.T) {
 		projection.States.Workload != ManagedVolumeWorkloadVerified {
 		t.Fatalf("states=%+v", projection.States)
 	}
+	if projection.PrimaryReplicaID != "r1" ||
+		projection.PublishTarget != "127.0.0.1:3260" ||
+		projection.AuthorityEpoch != 1 ||
+		projection.AuthorityEndpointVersion != 1 {
+		t.Fatalf("authority facts primary=%s target=%s epoch=%d endpoint=%d",
+			projection.PrimaryReplicaID,
+			projection.PublishTarget,
+			projection.AuthorityEpoch,
+			projection.AuthorityEndpointVersion)
+	}
 	if len(projection.Actions) != 1 || projection.Actions[0].Type != ManagedVolumeActionCollectBundle {
 		t.Fatalf("actions=%+v", projection.Actions)
 	}

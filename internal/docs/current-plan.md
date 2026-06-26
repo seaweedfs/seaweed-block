@@ -1,86 +1,108 @@
-# Current Plan: Phase 88 Failback Deployed Suite Packaging
+# Current Plan: Phase 89 SwBlockVolume Authority Facts
 
 Status: complete.
 
 ## Goal
 
-Phase 88 closes the next safe step after the source-gated failback runtime:
-prove the deployable Kubernetes component suite can be rendered together with
-explicit opt-in values, bounded RBAC, and schema coverage.
-
-This phase does **not** claim automatic live failback. It packages the pieces
-needed for a later live release smoke:
+Phase 89 closes the status-evidence gap found after Phase 88. The failback
+target owner can only safely activate a returned-replica failback target when
+it has current authority inputs:
 
 ```text
-blockmaster FailbackService RPC
-failback target owner
-failback executor
-executor gRPC runtime address
-explicit execution policy
+expectedCurrentReplicaID
+expectedCurrentEpoch
 ```
+
+Those facts already exist in internal volume evidence, but they were not
+visible on `SwBlockVolume.status`. This phase projects them through the
+read-only/status path so later failback activation can consume observed state
+instead of hardcoded or manual inputs.
 
 ## Deliverables
 
-### D1: Helm Values Schema
+### D1: Projection Contract
 
-Added `failbackTargetOwner` to `charts/seaweed-block/values.schema.json` so the
-full failback component suite is schema-visible, not just template-visible.
+`ManagedVolumeProjection` now preserves:
 
-### D2: Deployed Suite Gate
+```text
+primary_replica_id
+publish_target
+authority_epoch
+authority_endpoint_version
+```
+
+`ManagedVolumeOperatorStatus` exposes the same fields in snake_case for
+`operator-snapshot.json`.
+
+### D2: Kubernetes Status Contract
+
+`SwBlockVolume.status` now exposes the same facts as camelCase:
+
+```text
+primaryReplicaID
+publishTarget
+authorityEpoch
+authorityEndpointVersion
+```
+
+The CRD schema includes those fields with integer `int64` authority counters.
+
+### D3: Report Surface
+
+`summary.txt` now includes a compact authority line:
+
+```text
+managed_volume_authority=<volume> primary=<replica> publish_target=<addr> epoch=<n> endpoint_version=<n>
+```
+
+### D4: Gate
 
 Added:
 
 ```text
-scripts/run-phase88-failback-deployed-suite-gate.sh
-testops/scenarios/failback-deployed-suite-chain.yaml
+scripts/run-phase89-swblockvolume-authority-facts-gate.sh
+testops/scenarios/swblockvolume-authority-facts-chain.yaml
 ```
 
 The gate proves:
 
 ```text
-defaults omit failback runtime RPC, target owner, executor, and execution flags
-explicit values render all three deployable pieces
-target owner can create only SwBlockReplicaFailback targets
-executor can write only SwBlockReplicaFailback.status
-execution still requires explicit policy and gRPC address
-frontend publication after failback is still not rendered
-values schema covers target owner and executor knobs
+projection preserves observed authority facts
+operator-snapshot uses snake_case authority fields
+SwBlockVolume.status uses camelCase authority fields
+CRD schema contains the new status fields
+report summary includes authority facts
+no failback target is created
+no failback activation is attempted
 ```
 
 ## Verification
 
 ```text
-"C:\Program Files\Git\bin\bash.exe" scripts/run-phase88-failback-deployed-suite-gate.sh .
-C:\work\swblock.exe validate testops/scenarios/failback-deployed-suite-chain.yaml
+bash scripts/run-phase89-swblockvolume-authority-facts-gate.sh .
+swblock validate testops/scenarios/swblockvolume-authority-facts-chain.yaml
 ```
 
 Expected terminal evidence:
 
 ```text
-phase88_failback_deployed_suite_status=ok
-default_omits_failback_target_owner=true
-default_omits_failback_executor=true
-enabled_renders_failback_target_owner=true
-enabled_renders_failback_executor=true
-values_schema_covers_failback_suite=true
-target_owner_rbac_create_targets_only=true
-executor_rbac_status_only=true
-automatic_failback_claimed=false
-frontend_publication_after_failback_claimed=false
+phase89_swblockvolume_authority_facts_status=ok
+crd_status_primary_replica_id=true
+crd_status_authority_epoch=true
+operator_snapshot_snake_authority=true
+crd_status_camel_authority=true
+report_summary_authority_line=true
+failback_activation_attempted=false
+failback_target_created=false
 ```
 
 ## Next
 
-The next step is the first real Kubernetes failback release smoke:
+Phase 90 should use these status facts to make failback target activation
+explicitly evidence-gated:
 
 ```text
-fresh local images
-install with failback suite enabled
-create a real volume and returned-replica target
-executor calls blockmaster gRPC
-authority moves only with terminal evidence
-no frontend publication claim until the publication phase lands
+only activate when SwBlockVolume.status has current primary + epoch
+write expectedCurrentReplicaID and expectedCurrentEpoch onto the target
+still do not claim frontend publication after failback
 ```
-
-If that smoke is too lab-expensive, defer the live claim and start the next
-operation-layer close gate before NVMe.

@@ -1,6 +1,10 @@
 package ops
 
-import "testing"
+import (
+	"encoding/json"
+	"strings"
+	"testing"
+)
 
 func TestManagedVolumeOperatorContract_ReadinessConditionAndEvents(t *testing.T) {
 	projection := ProjectManagedVolume(ManagedVolumeFacts{
@@ -8,8 +12,10 @@ func TestManagedVolumeOperatorContract_ReadinessConditionAndEvents(t *testing.T)
 		PVCName:  "demo-pvc",
 		PVC:      &PVCFact{Phase: "Bound"},
 		Authority: &AuthorityFact{
-			PrimaryReplica: "r1",
-			PublishTarget:  "127.0.0.1:3260",
+			PrimaryReplica:  "r1",
+			PublishTarget:   "127.0.0.1:3260",
+			Epoch:           7,
+			EndpointVersion: 9,
 		},
 		Replicas: []ReplicaFact{{
 			ReplicaID:      "r1",
@@ -33,6 +39,21 @@ func TestManagedVolumeOperatorContract_ReadinessConditionAndEvents(t *testing.T)
 	}
 	if len(contract.Status.Conditions) < 2 {
 		t.Fatalf("conditions=%+v", contract.Status.Conditions)
+	}
+	if contract.Status.PrimaryReplicaID != "r1" ||
+		contract.Status.PublishTarget != "127.0.0.1:3260" ||
+		contract.Status.AuthorityEpoch != 7 ||
+		contract.Status.AuthorityEndpointVersion != 9 {
+		t.Fatalf("authority status=%+v", contract.Status)
+	}
+	raw, err := json.Marshal(contract.Status)
+	if err != nil {
+		t.Fatalf("marshal status: %v", err)
+	}
+	for _, want := range []string{`"primary_replica_id":"r1"`, `"publish_target":"127.0.0.1:3260"`, `"authority_epoch":7`, `"authority_endpoint_version":9`} {
+		if !strings.Contains(string(raw), want) {
+			t.Fatalf("operator status missing %s: %s", want, string(raw))
+		}
 	}
 	if len(contract.Events) == 0 || contract.Events[0].Type != "Warning" {
 		t.Fatalf("events=%+v", contract.Events)

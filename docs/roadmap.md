@@ -539,6 +539,9 @@ control-plane path is mature.
    - candidate -> syncing/rebuilding -> ready is visible in CRD/report/dashboard
    - ready status gates placement/ACK eligibility
    - rebuild/reintegration/failback action owner is explicit and audited
+   - current authority facts are visible in `SwBlockVolume.status`
+     (`primaryReplicaID`, `publishTarget`, `authorityEpoch`) before any
+     failback activation path consumes them
 
 4. Flow-control and pressure behavior.
 

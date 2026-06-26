@@ -725,9 +725,19 @@ Approximate engineering effort if scope remains tight:
   status now carries `frontendPublicationDecision`, `frontendPublicationReason`,
   and `frontendPublicationMutationAllowed`; the decision is currently
   `disabled` with mutation allowed false.
-- Phase 69 should define the frontend publication target contract and
-  admission/RBAC boundary before any real frontend publication mutation. Do not
-  jump directly to failback.
+- Phase 88 Failback Deployed Suite Packaging is closed. The failback target
+  owner, failback executor, and blockmaster gRPC runtime can be rendered as one
+  explicit opt-in suite, still without claiming automatic failback or frontend
+  publication.
+- Phase 89 SwBlockVolume Authority Facts is closed. `SwBlockVolume.status` now
+  exposes `primaryReplicaID`, `publishTarget`, `authorityEpoch`, and
+  `authorityEndpointVersion`; operator-snapshot and summary surfaces expose the
+  same facts. These fields are the observed inputs for the next failback target
+  activation phase.
+- Phase 90 should use the Phase 89 authority facts to activate
+  `SwBlockReplicaFailback` targets with explicit expected-current replica and
+  epoch, while preserving the non-claims that frontend publication and automatic
+  failback remain disabled until their own gates pass.
 - Phase 41-44 are the Operation Layer v0.5 release train: lifecycle-owner
   foundation, real API/admission proof, first bounded finalizer mutation, and
   delete lifecycle close gate.

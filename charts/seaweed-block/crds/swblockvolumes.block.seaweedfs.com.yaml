@@ -50,6 +50,18 @@ spec:
                   type: string
                 pvcName:
                   type: string
+                primaryReplicaID:
+                  type: string
+                publishTarget:
+                  type: string
+                authorityEpoch:
+                  type: integer
+                  format: int64
+                  minimum: 0
+                authorityEndpointVersion:
+                  type: integer
+                  format: int64
+                  minimum: 0
                 status:
                   type: string
                   enum:

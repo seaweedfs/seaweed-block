@@ -80,6 +80,7 @@ func TestObservationReportSummary_IncludesManagedVolumeStatus(t *testing.T) {
 		"cleanup_evidence=cleanup-summary.txt",
 		"volume=pvc-healthy status=ok pvc=default/mysql-data",
 		"managed_volume=pvc-healthy status=ready reason=first_volume_verified",
+		"managed_volume_authority=pvc-healthy primary=r1 publish_target=192.168.1.181:3260 epoch=1 endpoint_version=1",
 		"managed_volume_condition=Ready status=True reason=first_volume_verified severity=info",
 		"managed_volume_action=observe.collect_bundle mode=read_only side_effect=observe",
 	} {

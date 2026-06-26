@@ -1,0 +1,97 @@
+# Runner-native Phase 89 gate: SwBlockVolume.status exposes current authority
+# facts for later failback target activation. This is status projection only,
+# not a failback execution claim.
+
+name: swblockvolume-authority-facts-chain
+timeout: 5m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: swblockvolume_authority_facts_gate
+    actions:
+      - action: exec
+        node: m02
+        timeout: 4m
+        cmd: "rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase89-swblockvolume-authority-facts && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase89-swblockvolume-authority-facts && cd {{ product_root }} && SW_BLOCK_ARTIFACT_DIR=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase89-swblockvolume-authority-facts bash scripts/run-phase89-swblockvolume-authority-facts-gate.sh {{ product_root }}"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase89-swblockvolume-authority-facts/phase89-swblockvolume-authority-facts-summary.txt"
+        pattern: "^phase89_swblockvolume_authority_facts_status=ok$"
+        save_as: phase89_ok
+      - action: assert_greater
+        actual: "{{ phase89_ok }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase89-swblockvolume-authority-facts/phase89-swblockvolume-authority-facts-summary.txt"
+        pattern: "^crd_status_primary_replica_id=true$"
+        save_as: crd_primary
+      - action: assert_greater
+        actual: "{{ crd_primary }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase89-swblockvolume-authority-facts/phase89-swblockvolume-authority-facts-summary.txt"
+        pattern: "^crd_status_authority_epoch=true$"
+        save_as: crd_epoch
+      - action: assert_greater
+        actual: "{{ crd_epoch }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase89-swblockvolume-authority-facts/phase89-swblockvolume-authority-facts-summary.txt"
+        pattern: "^operator_snapshot_snake_authority=true$"
+        save_as: snapshot_authority
+      - action: assert_greater
+        actual: "{{ snapshot_authority }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase89-swblockvolume-authority-facts/phase89-swblockvolume-authority-facts-summary.txt"
+        pattern: "^crd_status_camel_authority=true$"
+        save_as: crd_camel
+      - action: assert_greater
+        actual: "{{ crd_camel }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase89-swblockvolume-authority-facts/phase89-swblockvolume-authority-facts-summary.txt"
+        pattern: "^report_summary_authority_line=true$"
+        save_as: report_authority
+      - action: assert_greater
+        actual: "{{ report_authority }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase89-swblockvolume-authority-facts/phase89-swblockvolume-authority-facts-summary.txt"
+        pattern: "^failback_activation_attempted=false$"
+        save_as: no_failback_activation
+      - action: assert_greater
+        actual: "{{ no_failback_activation }}"
+        threshold: "0"
+
+  - name: collect
+    always: true
+    actions:
+      - action: collect_path
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase89-swblockvolume-authority-facts"
+        name: "remote-phases"
+        ignore_error: true

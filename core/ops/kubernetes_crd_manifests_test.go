@@ -197,6 +197,26 @@ func TestPhase38D3SwBlockVolumeAllowedActionEvaluationSchema(t *testing.T) {
 	}
 }
 
+func TestPhase89SwBlockVolumeAuthorityFactsSchema(t *testing.T) {
+	doc := readYAMLMap(t, "charts/seaweed-block/crds/swblockvolumes.block.seaweedfs.com.yaml")
+	statusProperties := crdStatusProperties(t, doc)
+	for _, want := range []string{"primaryReplicaID", "publishTarget", "authorityEpoch", "authorityEndpointVersion"} {
+		if _, ok := statusProperties[want]; !ok {
+			t.Fatalf("SwBlockVolume.status schema missing authority field %s", want)
+		}
+	}
+	for _, numeric := range []string{"authorityEpoch", "authorityEndpointVersion"} {
+		prop := yamlMap(t, statusProperties, numeric)
+		assertYAMLString(t, prop, "type", "integer")
+		assertYAMLString(t, prop, "format", "int64")
+	}
+	for _, forbidden := range []string{"primary_replica_id", "publish_target", "authority_epoch", "authority_endpoint_version"} {
+		if _, ok := statusProperties[forbidden]; ok {
+			t.Fatalf("SwBlockVolume.status schema leaked snake_case %s", forbidden)
+		}
+	}
+}
+
 func TestPhase39D2SwBlockVolumeDeleteSafetySchema(t *testing.T) {
 	doc := readYAMLMap(t, "charts/seaweed-block/crds/swblockvolumes.block.seaweedfs.com.yaml")
 	statusProperties := crdStatusProperties(t, doc)

@@ -263,19 +263,23 @@ func supportBundleReason(cluster ClusterEvidence) string {
 }
 
 type SwBlockVolumeCRDStatus struct {
-	VolumeID              string                              `json:"volumeID,omitempty"`
-	PVCName               string                              `json:"pvcName,omitempty"`
-	Status                string                              `json:"status"`
-	ReasonCode            string                              `json:"reasonCode,omitempty"`
-	ObservedAt            time.Time                           `json:"observedAt,omitempty"`
-	Conditions            []ObservationCondition              `json:"conditions,omitempty"`
-	DeleteSafety          *SwBlockVolumeCRDDeleteSafety       `json:"deleteSafety"`
-	ReplicaReintegrations []SwBlockVolumeCRDReturnedReplica   `json:"replicaReintegrations,omitempty"`
-	ExecutorPreflights    []SwBlockVolumeCRDExecutorPreflight `json:"executorPreflights,omitempty"`
-	ExecutorContracts     []SwBlockVolumeCRDExecutorContract  `json:"executorContracts,omitempty"`
-	NonClaims             []string                            `json:"nonClaims,omitempty"`
-	EvidenceRefs          []string                            `json:"evidenceRefs,omitempty"`
-	AllowedActions        []SwBlockVolumeCRDAction            `json:"allowedActions,omitempty"`
+	VolumeID                 string                              `json:"volumeID,omitempty"`
+	PVCName                  string                              `json:"pvcName,omitempty"`
+	PrimaryReplicaID         string                              `json:"primaryReplicaID,omitempty"`
+	PublishTarget            string                              `json:"publishTarget,omitempty"`
+	AuthorityEpoch           uint64                              `json:"authorityEpoch,omitempty"`
+	AuthorityEndpointVersion uint64                              `json:"authorityEndpointVersion,omitempty"`
+	Status                   string                              `json:"status"`
+	ReasonCode               string                              `json:"reasonCode,omitempty"`
+	ObservedAt               time.Time                           `json:"observedAt,omitempty"`
+	Conditions               []ObservationCondition              `json:"conditions,omitempty"`
+	DeleteSafety             *SwBlockVolumeCRDDeleteSafety       `json:"deleteSafety"`
+	ReplicaReintegrations    []SwBlockVolumeCRDReturnedReplica   `json:"replicaReintegrations,omitempty"`
+	ExecutorPreflights       []SwBlockVolumeCRDExecutorPreflight `json:"executorPreflights,omitempty"`
+	ExecutorContracts        []SwBlockVolumeCRDExecutorContract  `json:"executorContracts,omitempty"`
+	NonClaims                []string                            `json:"nonClaims,omitempty"`
+	EvidenceRefs             []string                            `json:"evidenceRefs,omitempty"`
+	AllowedActions           []SwBlockVolumeCRDAction            `json:"allowedActions,omitempty"`
 }
 
 type SwBlockVolumeCRDReturnedReplica struct {
@@ -502,19 +506,23 @@ func (r OperatorStatusReconciler) Reconcile(ctx context.Context) (OperatorStatus
 			Name:       SwBlockVolumeObjectName(volume.Status),
 		}
 		volumeStatus := SwBlockVolumeCRDStatus{
-			VolumeID:              volume.Status.VolumeID,
-			PVCName:               volume.Status.PVCName,
-			Status:                volume.Status.Status,
-			ReasonCode:            volume.Status.ReasonCode,
-			ObservedAt:            observedAt,
-			Conditions:            append([]ObservationCondition(nil), volume.Status.Conditions...),
-			DeleteSafety:          swBlockVolumeCRDDeleteSafety(volume.Status.DeleteSafety),
-			ReplicaReintegrations: swBlockVolumeCRDReturnedReplicas(volume.Status.ReplicaReintegrations),
-			ExecutorPreflights:    swBlockVolumeCRDExecutorPreflights(volume.Status.ExecutorPreflights),
-			ExecutorContracts:     swBlockVolumeCRDExecutorContracts(volume.Status.ExecutorContracts),
-			NonClaims:             append([]string(nil), volume.Status.NonClaims...),
-			EvidenceRefs:          append([]string(nil), volume.Status.EvidenceRefs...),
-			AllowedActions:        swBlockVolumeCRDActions(volume.AllowedActions),
+			VolumeID:                 volume.Status.VolumeID,
+			PVCName:                  volume.Status.PVCName,
+			PrimaryReplicaID:         volume.Status.PrimaryReplicaID,
+			PublishTarget:            volume.Status.PublishTarget,
+			AuthorityEpoch:           volume.Status.AuthorityEpoch,
+			AuthorityEndpointVersion: volume.Status.AuthorityEndpointVersion,
+			Status:                   volume.Status.Status,
+			ReasonCode:               volume.Status.ReasonCode,
+			ObservedAt:               observedAt,
+			Conditions:               append([]ObservationCondition(nil), volume.Status.Conditions...),
+			DeleteSafety:             swBlockVolumeCRDDeleteSafety(volume.Status.DeleteSafety),
+			ReplicaReintegrations:    swBlockVolumeCRDReturnedReplicas(volume.Status.ReplicaReintegrations),
+			ExecutorPreflights:       swBlockVolumeCRDExecutorPreflights(volume.Status.ExecutorPreflights),
+			ExecutorContracts:        swBlockVolumeCRDExecutorContracts(volume.Status.ExecutorContracts),
+			NonClaims:                append([]string(nil), volume.Status.NonClaims...),
+			EvidenceRefs:             append([]string(nil), volume.Status.EvidenceRefs...),
+			AllowedActions:           swBlockVolumeCRDActions(volume.AllowedActions),
 		}
 		if err := r.Writer.WriteVolumeStatus(ctx, volumeRef, volumeStatus); err != nil {
 			if IsKubernetesStatusNotFound(err) {

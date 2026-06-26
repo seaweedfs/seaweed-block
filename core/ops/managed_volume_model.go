@@ -212,23 +212,27 @@ type WorkloadCheckFact struct {
 }
 
 type ManagedVolumeProjection struct {
-	VolumeID              string                             `json:"volume_id,omitempty"`
-	Namespace             string                             `json:"namespace,omitempty"`
-	PVCName               string                             `json:"pvc_name,omitempty"`
-	PVName                string                             `json:"pv_name,omitempty"`
-	StorageClass          string                             `json:"storage_class,omitempty"`
-	ReplicationFactor     int                                `json:"replication_factor,omitempty"`
-	AckProfile            string                             `json:"ack_profile,omitempty"`
-	ClaimProfile          string                             `json:"claim_profile,omitempty"`
-	Status                string                             `json:"status"`
-	ReasonCode            string                             `json:"reason_code,omitempty"`
-	States                ManagedVolumeStates                `json:"states"`
-	Actions               []ManagedVolumeAction              `json:"actions,omitempty"`
-	Conditions            []ObservationCondition             `json:"conditions,omitempty"`
-	DeleteSafety          *SwBlockVolumeDeleteSafetyDecision `json:"delete_safety,omitempty"`
-	ReplicaReintegrations []ReturnedReplicaProjection        `json:"replica_reintegrations,omitempty"`
-	NonClaims             []string                           `json:"non_claims,omitempty"`
-	EvidenceRefs          []string                           `json:"evidence_refs,omitempty"`
+	VolumeID                 string                             `json:"volume_id,omitempty"`
+	Namespace                string                             `json:"namespace,omitempty"`
+	PVCName                  string                             `json:"pvc_name,omitempty"`
+	PVName                   string                             `json:"pv_name,omitempty"`
+	StorageClass             string                             `json:"storage_class,omitempty"`
+	ReplicationFactor        int                                `json:"replication_factor,omitempty"`
+	AckProfile               string                             `json:"ack_profile,omitempty"`
+	ClaimProfile             string                             `json:"claim_profile,omitempty"`
+	PrimaryReplicaID         string                             `json:"primary_replica_id,omitempty"`
+	PublishTarget            string                             `json:"publish_target,omitempty"`
+	AuthorityEpoch           uint64                             `json:"authority_epoch,omitempty"`
+	AuthorityEndpointVersion uint64                             `json:"authority_endpoint_version,omitempty"`
+	Status                   string                             `json:"status"`
+	ReasonCode               string                             `json:"reason_code,omitempty"`
+	States                   ManagedVolumeStates                `json:"states"`
+	Actions                  []ManagedVolumeAction              `json:"actions,omitempty"`
+	Conditions               []ObservationCondition             `json:"conditions,omitempty"`
+	DeleteSafety             *SwBlockVolumeDeleteSafetyDecision `json:"delete_safety,omitempty"`
+	ReplicaReintegrations    []ReturnedReplicaProjection        `json:"replica_reintegrations,omitempty"`
+	NonClaims                []string                           `json:"non_claims,omitempty"`
+	EvidenceRefs             []string                           `json:"evidence_refs,omitempty"`
 }
 
 type ReturnedReplicaProjection struct {
@@ -298,6 +302,11 @@ func RenderManagedVolumeProjectionText(projection ManagedVolumeProjection) strin
 		emptyAsDash(projection.States.HostPath),
 		emptyAsDash(projection.States.Recovery),
 		emptyAsDash(projection.States.Workload))
+	fmt.Fprintf(&b, "managed_volume_authority primary=%s publish_target=%s epoch=%d endpoint_version=%d\n",
+		emptyAsDash(projection.PrimaryReplicaID),
+		emptyAsDash(projection.PublishTarget),
+		projection.AuthorityEpoch,
+		projection.AuthorityEndpointVersion)
 	if projection.DeleteSafety != nil {
 		fmt.Fprintf(&b, "managed_volume_delete_safety state=%s decision=%s reason=%s release_allowed=%t action=%s\n",
 			emptyAsDash(projection.DeleteSafety.State),
@@ -485,6 +494,12 @@ func ProjectManagedVolume(facts ManagedVolumeFacts) ManagedVolumeProjection {
 			Workload:   ManagedVolumeWorkloadUnknown,
 		},
 		EvidenceRefs: append([]string(nil), facts.EvidenceRefs...),
+	}
+	if facts.Authority != nil {
+		projection.PrimaryReplicaID = facts.Authority.PrimaryReplica
+		projection.PublishTarget = facts.Authority.PublishTarget
+		projection.AuthorityEpoch = facts.Authority.Epoch
+		projection.AuthorityEndpointVersion = facts.Authority.EndpointVersion
 	}
 
 	deriveManagedVolumeStates(&projection, facts)

@@ -138,6 +138,12 @@ func renderManagedProjectionSummary(b *strings.Builder, managed ManagedVolumePro
 		emptyAsDash(managed.VolumeID),
 		emptyAsDash(managed.Status),
 		emptyAsDash(managed.ReasonCode))
+	fmt.Fprintf(b, "managed_volume_authority=%s primary=%s publish_target=%s epoch=%d endpoint_version=%d\n",
+		emptyAsDash(managed.VolumeID),
+		emptyAsDash(managed.PrimaryReplicaID),
+		emptyAsDash(managed.PublishTarget),
+		managed.AuthorityEpoch,
+		managed.AuthorityEndpointVersion)
 	for _, condition := range managed.Conditions {
 		fmt.Fprintf(b, "managed_volume_condition=%s status=%s reason=%s severity=%s\n",
 			emptyAsDash(condition.Type),
