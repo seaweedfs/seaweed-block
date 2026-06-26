@@ -1,19 +1,15 @@
-# Current Plan: Phase 82 Failback Executor gRPC Runtime
+# Phase 82 Finished Plan: Failback Executor gRPC Runtime
 
 Status: complete.
 
-## Goal
+## Problem
 
-Phase 81 added a disabled-by-default blockmaster FailbackService RPC. Phase 82
-wires the failback executor to call that RPC as a runtime transport, still
-behind the existing explicit execution policy.
+Phase 81 added the disabled-by-default blockmaster FailbackService RPC. The
+failback executor still knew only fake/in-process runtimes and the older HTTP
+runtime test seam. Phase 82 adds the real gRPC client transport the executor can
+use to call blockmaster.
 
-Default behavior remains status-only. A gRPC address alone is rejected unless
-execution is explicitly requested.
-
-## Deliverables
-
-### D1: gRPC Runtime Client
+## Implementation
 
 Added:
 
@@ -22,33 +18,29 @@ core/ops.GRPCFailbackRuntime
 core/ops.NewGRPCFailbackRuntime
 ```
 
-The runtime maps `ops.FailbackRuntimeRequest` to:
+The runtime calls:
 
 ```text
 control.FailbackService.ExecuteFailback
 ```
 
-and maps `FailbackResponse` back to `ops.FailbackRuntimeResult`.
+and maps all authority evidence fields in both directions.
 
-### D2: CLI Runtime Transport
-
-Added:
+Added CLI flag:
 
 ```text
-sw-block ops failback-executor --failback-runtime-grpc-addr <blockmaster-addr>
+sw-block ops failback-executor --failback-runtime-grpc-addr <addr>
 ```
 
 Guardrails:
 
 ```text
---failback-runtime-grpc-addr requires --enable-execution
---failback-runtime-url and --failback-runtime-grpc-addr are mutually exclusive
---execution-policy is still required for any execution
+gRPC runtime address requires --enable-execution
+execution still requires --execution-policy
+HTTP and gRPC runtime transports are mutually exclusive
 ```
 
-The existing HTTP runtime remains supported.
-
-### D3: Gate
+## Gate
 
 Added:
 
@@ -57,33 +49,18 @@ scripts/run-phase82-failback-executor-grpc-runtime-gate.sh
 testops/scenarios/failback-executor-grpc-runtime-chain.yaml
 ```
 
-The gate proves:
+The gate checks:
 
 ```text
 gRPC runtime calls FailbackService
 request fields are mapped
 response terminal evidence is mapped
-CLI gRPC runtime writes failed_back status on terminal evidence
+CLI gRPC runtime writes failed_back status
 gRPC runtime requires --enable-execution
 HTTP and gRPC transports are mutually exclusive
 HTTP runtime still works
 frontend publication remains false
 storage mutation remains false
-```
-
-## Non-Claims
-
-Phase 82 does not implement:
-
-```text
-chart-enabled failback executor gRPC address
-automatic failback from the deployed controller loop
-default-enabled failback RPC
-blockvolume frontend switching
-frontend publication after failback
-storage rebuild/catch-up traffic
-workload mutation
-NVMe ANA behavior
 ```
 
 ## Verification
@@ -119,8 +96,23 @@ frontend_publication_allowed=false
 storage_mutation_allowed=false
 ```
 
+## Non-Claims
+
+Phase 82 does not implement:
+
+```text
+chart-enabled failback executor gRPC address
+automatic failback from the deployed controller loop
+default-enabled failback RPC
+blockvolume frontend switching
+frontend publication after failback
+storage rebuild/catch-up traffic
+workload mutation
+NVMe ANA behavior
+```
+
 ## Next
 
-The next phase should add Helm/chart wiring for this transport while keeping it
-disabled by default, or run an integrated local blockmaster + executor smoke
-with both flags explicitly enabled.
+Add disabled-by-default Helm wiring for the gRPC runtime address, then run an
+integrated blockmaster + failback executor smoke with both sides explicitly
+enabled.

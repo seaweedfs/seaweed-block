@@ -334,7 +334,14 @@ Recommended order from here:
     enabled, it delegates to the master-owned failback runtime and can advance
     the live Publisher with expected-current and terminal evidence. Default
     installs still do not expose an active failback mutation path.
-39. Add backup/restore and NVMe ANA parity after they can reuse the same action
+39. Phase 82: failback executor gRPC runtime. **Closed 2026-06-26, local PASS**
+    (`internal/docs/finished-plans/phase82_finishedplan_failback_executor_grpc_runtime.md`).
+    The failback executor can now call blockmaster's FailbackService through a
+    gRPC runtime transport when `--enable-execution`, `--execution-policy`, and
+    `--failback-runtime-grpc-addr` are all explicit. HTTP runtime remains
+    supported; HTTP and gRPC transports are mutually exclusive. Default
+    behavior remains status-only.
+40. Add backup/restore and NVMe ANA parity after they can reuse the same action
    owner, evidence, and status model rather than creating another isolated
    control plane.
 
@@ -368,6 +375,8 @@ from the component that owns the live Publisher. Automatic deployed failback,
 frontend publication, and storage/workload mutation remain disabled. Phase 81
 adds the disabled-by-default RPC boundary that a separate failback executor can
 call in a later phase; default installs still keep the mutation path off.
+Phase 82 adds that executor-side gRPC runtime transport, still requiring
+explicit execution policy and an explicit blockmaster address.
 
 The practical rule is:
 

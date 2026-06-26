@@ -1412,6 +1412,114 @@ func TestOpsFailbackExecutorRuntimeURLWritesFailedBackStatus(t *testing.T) {
 	}
 }
 
+func TestOpsFailbackExecutorGRPCRuntimeWritesFailedBackStatus(t *testing.T) {
+	client := &lifecycleOwnerTestClient{
+		failbacks: []ops.SwBlockReplicaFailbackObject{cmdFailbackExecutableTarget()},
+	}
+	oldFactory := opsFailbackExecutorClientFactory
+	opsFailbackExecutorClientFactory = func() (ops.FailbackExecutorClient, error) {
+		return client, nil
+	}
+	t.Cleanup(func() { opsFailbackExecutorClientFactory = oldFactory })
+
+	server := grpc.NewServer()
+	fake := &cmdFailbackService{}
+	control.RegisterFailbackServiceServer(server, fake)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		done <- server.Serve(ln)
+	}()
+	t.Cleanup(func() {
+		server.Stop()
+		_ = ln.Close()
+		<-done
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"ops", "failback-executor",
+		"--namespace", "kube-system",
+		"--enable-execution",
+		"--execution-policy",
+		"--failback-runtime-grpc-addr", ln.Addr().String(),
+	}, &stdout, &stderr)
+	if code != ops.VolumeStatusExitOK {
+		t.Fatalf("exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	got := fake.request
+	if got == nil ||
+		got.GetVolumeId() != "pvc-demo" ||
+		got.GetReplicaId() != "r1" ||
+		got.GetTargetDataAddr() != "data-r1" ||
+		got.GetTargetCtrlAddr() != "ctrl-r1" ||
+		got.GetExpectedCurrentReplicaId() != "r2" ||
+		got.GetExpectedCurrentEpoch() != 7 ||
+		!got.GetAckEligible() ||
+		!got.GetFrontendFencedBeforeFailback() ||
+		!got.GetDurableFrontierCovered() ||
+		!got.GetNoCrossVolumeIdentityChange() {
+		t.Fatalf("grpc request=%+v", got)
+	}
+	if len(client.failbackStatusWrites) != 1 {
+		t.Fatalf("failbackStatusWrites=%+v", client.failbackStatusWrites)
+	}
+	status := client.failbackStatusWrites[0].status
+	if status.State != ops.FailbackStateFailedBack ||
+		status.ReasonCode != ops.AuthorityExecutorFailbackReasonCompleted ||
+		!status.FailbackStarted ||
+		!status.AuthorityEpochAdvanced ||
+		!status.SinglePrimaryAfterFailback ||
+		!status.PublishTargetSwappedAfterFailback {
+		t.Fatalf("status=%+v", status)
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"failback_executor=write_status",
+		"failback_attempts=1",
+		"execution_requested=true",
+		"execution_policy_enabled=true",
+		"authority_mutation_allowed=true",
+		"frontend_publication_allowed=false",
+		"storage_mutation_allowed=false",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("stdout missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestOpsFailbackExecutorRejectsGRPCRuntimeWithoutEnable(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ops", "failback-executor", "--failback-runtime-grpc-addr", "127.0.0.1:9333"}, &stdout, &stderr)
+	if code != ops.VolumeStatusExitInvalid {
+		t.Fatalf("exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "--failback-runtime-grpc-addr requires --enable-execution") {
+		t.Fatalf("stderr=%s", stderr.String())
+	}
+}
+
+func TestOpsFailbackExecutorRejectsAmbiguousRuntimeTransports(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"ops", "failback-executor",
+		"--enable-execution",
+		"--execution-policy",
+		"--failback-runtime-url", "http://127.0.0.1:23260/runtime",
+		"--failback-runtime-grpc-addr", "127.0.0.1:9333",
+	}, &stdout, &stderr)
+	if code != ops.VolumeStatusExitInvalid {
+		t.Fatalf("exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "mutually exclusive") {
+		t.Fatalf("stderr=%s", stderr.String())
+	}
+}
+
 func TestOpsFrontendPublicationExecutorWritesDisabledStatus(t *testing.T) {
 	client := &lifecycleOwnerTestClient{
 		frontendTargets: []ops.SwBlockFrontendPublicationObject{cmdFrontendPublicationTarget()},
@@ -2008,6 +2116,24 @@ type lifecycleOwnerTestClient struct {
 	failbackStatusWrites            []lifecycleOwnerTestFailbackWrite
 	frontendPublicationCreates      []ops.SwBlockFrontendPublicationObject
 	frontendPublicationStatusWrites []lifecycleOwnerTestFrontendPublicationWrite
+}
+
+type cmdFailbackService struct {
+	control.UnimplementedFailbackServiceServer
+	request *control.FailbackRequest
+}
+
+func (s *cmdFailbackService) ExecuteFailback(_ context.Context, req *control.FailbackRequest) (*control.FailbackResponse, error) {
+	s.request = req
+	return &control.FailbackResponse{
+		FailbackStarted:                   true,
+		AuthorityEpochAdvanced:            true,
+		SinglePrimaryAfterFailback:        true,
+		PublishTargetSwappedAfterFailback: true,
+		NoStorageMutation:                 true,
+		NoCrossVolumeIdentityChange:       true,
+		EvidenceRefs:                      []string{"grpc-runtime.txt"},
+	}, nil
 }
 
 type lifecycleOwnerTestPatch struct {

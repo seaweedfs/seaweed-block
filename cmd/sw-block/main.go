@@ -203,6 +203,7 @@ func runOpsFailbackExecutor(args []string, stdout, stderr io.Writer) int {
 		enableExecution        bool
 		executionPolicyEnabled bool
 		failbackRuntimeURL     string
+		failbackRuntimeGRPC    string
 		interval               time.Duration
 	)
 	fs.BoolVar(&dryRun, "dry-run", false, "evaluate failback targets without writing SwBlockReplicaFailback status")
@@ -210,6 +211,7 @@ func runOpsFailbackExecutor(args []string, stdout, stderr io.Writer) int {
 	fs.BoolVar(&enableExecution, "enable-execution", false, "request failback runtime execution")
 	fs.BoolVar(&executionPolicyEnabled, "execution-policy", false, "allow failback executor to evaluate execution; default is disabled")
 	fs.StringVar(&failbackRuntimeURL, "failback-runtime-url", "", "HTTP endpoint for failback runtime execution; empty uses target runtimeEndpoint when execution is enabled")
+	fs.StringVar(&failbackRuntimeGRPC, "failback-runtime-grpc-addr", "", "gRPC blockmaster FailbackService address for failback runtime execution")
 	fs.DurationVar(&interval, "interval", 0, "repeat failback-executor reconciliation at this interval; 0 runs once")
 	if err := fs.Parse(args); err != nil {
 		return ops.VolumeStatusExitInvalid
@@ -220,6 +222,14 @@ func runOpsFailbackExecutor(args []string, stdout, stderr io.Writer) int {
 	}
 	if strings.TrimSpace(failbackRuntimeURL) != "" && !enableExecution {
 		fmt.Fprintf(stderr, "sw-block ops failback-executor: --failback-runtime-url requires --enable-execution reason=unsupported_runtime_without_execution failback_attempts=0\n")
+		return ops.VolumeStatusExitInvalid
+	}
+	if strings.TrimSpace(failbackRuntimeGRPC) != "" && !enableExecution {
+		fmt.Fprintf(stderr, "sw-block ops failback-executor: --failback-runtime-grpc-addr requires --enable-execution reason=unsupported_runtime_without_execution failback_attempts=0\n")
+		return ops.VolumeStatusExitInvalid
+	}
+	if strings.TrimSpace(failbackRuntimeURL) != "" && strings.TrimSpace(failbackRuntimeGRPC) != "" {
+		fmt.Fprintf(stderr, "sw-block ops failback-executor: --failback-runtime-url and --failback-runtime-grpc-addr are mutually exclusive reason=ambiguous_runtime failback_attempts=0\n")
 		return ops.VolumeStatusExitInvalid
 	}
 	if enableExecution && !executionPolicyEnabled {
@@ -235,6 +245,8 @@ func runOpsFailbackExecutor(args []string, stdout, stderr io.Writer) int {
 		var runtime ops.FailbackRuntime
 		if strings.TrimSpace(failbackRuntimeURL) != "" {
 			runtime = ops.NewHTTPFailbackRuntime(failbackRuntimeURL, nil)
+		} else if strings.TrimSpace(failbackRuntimeGRPC) != "" {
+			runtime = ops.NewGRPCFailbackRuntime(failbackRuntimeGRPC)
 		}
 		result, err := (ops.FailbackExecutorReconciler{
 			Namespace:              namespace,

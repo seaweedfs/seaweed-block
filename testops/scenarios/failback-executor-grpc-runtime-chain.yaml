@@ -1,0 +1,115 @@
+# Runner-native Phase 82 gate: failback executor can use the blockmaster
+# FailbackService gRPC runtime transport, still behind explicit execution
+# policy. HTTP runtime remains supported; HTTP and gRPC are mutually exclusive.
+
+name: failback-executor-grpc-runtime-chain
+timeout: 8m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: failback_executor_grpc_runtime_gate
+    actions:
+      - action: exec
+        node: m02
+        timeout: 7m
+        cmd: "rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase82-failback-executor-grpc-runtime && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase82-failback-executor-grpc-runtime && cd {{ product_root }} && SW_BLOCK_ARTIFACT_DIR=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase82-failback-executor-grpc-runtime bash scripts/run-phase82-failback-executor-grpc-runtime-gate.sh {{ product_root }}"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase82-failback-executor-grpc-runtime/phase82-failback-executor-grpc-runtime-summary.txt"
+        pattern: "^phase82_failback_executor_grpc_runtime_status=ok$"
+        save_as: phase82_ok
+      - action: assert_greater
+        actual: "{{ phase82_ok }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase82-failback-executor-grpc-runtime/phase82-failback-executor-grpc-runtime-summary.txt"
+        pattern: "^grpc_runtime_calls_failback_service=true$"
+        save_as: grpc_calls_service
+      - action: assert_greater
+        actual: "{{ grpc_calls_service }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase82-failback-executor-grpc-runtime/phase82-failback-executor-grpc-runtime-summary.txt"
+        pattern: "^cmd_grpc_runtime_writes_failed_back_status=true$"
+        save_as: grpc_status
+      - action: assert_greater
+        actual: "{{ grpc_status }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase82-failback-executor-grpc-runtime/phase82-failback-executor-grpc-runtime-summary.txt"
+        pattern: "^cmd_grpc_runtime_requires_enable=true$"
+        save_as: requires_enable
+      - action: assert_greater
+        actual: "{{ requires_enable }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase82-failback-executor-grpc-runtime/phase82-failback-executor-grpc-runtime-summary.txt"
+        pattern: "^cmd_rejects_ambiguous_runtime_transports=true$"
+        save_as: ambiguous_rejected
+      - action: assert_greater
+        actual: "{{ ambiguous_rejected }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase82-failback-executor-grpc-runtime/phase82-failback-executor-grpc-runtime-summary.txt"
+        pattern: "^cmd_http_runtime_still_supported=true$"
+        save_as: http_still_supported
+      - action: assert_greater
+        actual: "{{ http_still_supported }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase82-failback-executor-grpc-runtime/phase82-failback-executor-grpc-runtime-summary.txt"
+        pattern: "^execution_policy_still_required=true$"
+        save_as: policy_gate
+      - action: assert_greater
+        actual: "{{ policy_gate }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase82-failback-executor-grpc-runtime/phase82-failback-executor-grpc-runtime-summary.txt"
+        pattern: "^frontend_publication_allowed=false$"
+        save_as: no_frontend_publication
+      - action: assert_greater
+        actual: "{{ no_frontend_publication }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase82-failback-executor-grpc-runtime/phase82-failback-executor-grpc-runtime-summary.txt"
+        pattern: "^storage_mutation_allowed=false$"
+        save_as: no_storage_mutation
+      - action: assert_greater
+        actual: "{{ no_storage_mutation }}"
+        threshold: "0"
+
+  - name: collect
+    always: true
+    actions:
+      - action: collect_path
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase82-failback-executor-grpc-runtime"
+        name: "remote-phases"
+        ignore_error: true
