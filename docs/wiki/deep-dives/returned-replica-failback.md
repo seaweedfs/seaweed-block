@@ -238,6 +238,7 @@ ambiguous HTTP/gRPC runtime addresses.
 | 90 | makes target-owner creation require current authority facts and stamp `expectedCurrentReplicaID` / `expectedCurrentEpoch` onto disabled targets |
 | 91 | adds explicit target activation policy plus runtime endpoint wiring; default remains disabled and no runtime call is made by the target owner |
 | 92 | proves local target-owner -> executor handoff, including expected-current facts in the runtime request and terminal `failed_back` evidence |
+| 93 | proves multi-volume handoff isolation for expected-current authority and target data/control addresses |
 
 ## Failure Classes
 
@@ -267,12 +268,13 @@ Before enabling broader failback behavior:
 7. Pass expected-current replica and epoch to blockmaster.
 8. Prove target-owner -> executor handoff locally before the live deployed
    runtime smoke.
-9. Run through blockmaster-owned `FailbackService`, not a sidecar authority copy.
-10. Require terminal evidence before writing `failed_back`.
-11. Keep frontend publication as a separate gated action.
-12. Keep rebuild/catch-up traffic as a separate gated action.
-13. Run multi-volume isolation gates.
-14. Document exactly what is automatic and what is opt-in.
+9. Prove multi-volume handoff isolation before the live deployed runtime smoke.
+10. Run through blockmaster-owned `FailbackService`, not a sidecar authority copy.
+11. Require terminal evidence before writing `failed_back`.
+12. Keep frontend publication as a separate gated action.
+13. Keep rebuild/catch-up traffic as a separate gated action.
+14. Run multi-volume isolation gates.
+15. Document exactly what is automatic and what is opt-in.
 
 ## Current Limits
 

@@ -550,6 +550,8 @@ control-plane path is mature.
    - target-owner to executor handoff is locally gated: expected-current
      authority facts reach the runtime request and terminal evidence controls
      `failed_back`; live deployed failback remains a separate release gate
+   - multi-volume handoff isolation is gated before live runtime testing, so
+     expected-current facts and target addresses cannot silently cross volumes
 
 4. Flow-control and pressure behavior.
 

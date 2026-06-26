@@ -747,6 +747,9 @@ Approximate engineering effort if scope remains tight:
   gate proves expected-current authority facts survive target creation into the
   executor runtime request and terminal evidence drives `failed_back` status.
   Live deployed failback remains a separate gate.
+- Phase 93 Failback Handoff Isolation is closed. The local handoff now proves
+  two volumes keep independent expected-current authority and target address
+  facts through target creation and executor runtime requests.
 - Phase 41-44 are the Operation Layer v0.5 release train: lifecycle-owner
   foundation, real API/admission proof, first bounded finalizer mutation, and
   delete lifecycle close gate.
