@@ -290,7 +290,13 @@ Recommended order from here:
     present. It can create the target object only; it cannot write status,
     finalizers, Events, storage/workloads, authority state, frontend
     publication, or failback execution.
-33. Add backup/restore and NVMe ANA parity after they can reuse the same action
+33. Phase 76: returned-replica failback executor boundary. **Closed 2026-06-25, local PASS**
+    (`internal/docs/finished-plans/phase76_finishedplan_failback_executor_boundary.md`).
+    The failback executor can read `SwBlockReplicaFailback` targets and write
+    disabled/blocked status through `swblockreplicafailbacks/status`. It remains
+    status-only: no failback, authority epoch advance, primary reassignment,
+    publish-target swap, frontend publication, or storage mutation is executed.
+34. Add backup/restore and NVMe ANA parity after they can reuse the same action
    owner, evidence, and status model rather than creating another isolated
    control plane.
 
@@ -313,7 +319,9 @@ authority/failback owner is implemented and gated. Phase 74 names that missing
 owner contract explicitly as `authority.failback_returned_replica` while
 keeping execution disabled. Phase 75 adds the first target-owner seam for that
 contract: `SwBlockReplicaFailback` can be planned as a handoff object, but no
-failback, authority mutation, or frontend publication is executed.
+failback, authority mutation, or frontend publication is executed. Phase 76 adds
+the matching executor identity and status-only boundary for those failback
+targets, still keeping all real failback side effects disabled.
 
 The practical rule is:
 

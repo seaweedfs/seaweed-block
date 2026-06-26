@@ -1134,6 +1134,90 @@ func TestOpsFailbackTargetOwnerDryRunDoesNotCreateTarget(t *testing.T) {
 	}
 }
 
+func TestOpsFailbackExecutorWritesDisabledStatus(t *testing.T) {
+	client := &lifecycleOwnerTestClient{
+		failbacks: []ops.SwBlockReplicaFailbackObject{cmdFailbackTarget()},
+	}
+	oldFactory := opsFailbackExecutorClientFactory
+	opsFailbackExecutorClientFactory = func() (ops.FailbackExecutorClient, error) {
+		return client, nil
+	}
+	t.Cleanup(func() { opsFailbackExecutorClientFactory = oldFactory })
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ops", "failback-executor", "--namespace", "kube-system"}, &stdout, &stderr)
+	if code != ops.VolumeStatusExitOK {
+		t.Fatalf("exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	if len(client.failbackStatusWrites) != 1 {
+		t.Fatalf("failbackStatusWrites=%+v", client.failbackStatusWrites)
+	}
+	status := client.failbackStatusWrites[0].status
+	if status.State != ops.FailbackStateBlocked ||
+		status.ReasonCode != ops.AuthorityExecutorFailbackReasonDisabled ||
+		status.FailbackMutationAllowed ||
+		status.FailbackStarted ||
+		status.AuthorityEpochAdvanced ||
+		status.SinglePrimaryAfterFailback ||
+		status.PublishTargetSwappedAfterFailback {
+		t.Fatalf("status=%+v", status)
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"failback_executor=write_status",
+		"namespace=kube-system",
+		"targets=1",
+		"status_writes=1",
+		"invalid_targets=0",
+		"failback_attempts=0",
+		"status_mutation_allowed=true",
+		"authority_mutation_allowed=false",
+		"frontend_publication_allowed=false",
+		"mutation_allowed=true",
+		"storage_mutation_allowed=false",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("stdout missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestOpsFailbackExecutorDryRunDoesNotWriteStatus(t *testing.T) {
+	client := &lifecycleOwnerTestClient{
+		failbacks: []ops.SwBlockReplicaFailbackObject{cmdFailbackTarget()},
+	}
+	oldFactory := opsFailbackExecutorClientFactory
+	opsFailbackExecutorClientFactory = func() (ops.FailbackExecutorClient, error) {
+		return client, nil
+	}
+	t.Cleanup(func() { opsFailbackExecutorClientFactory = oldFactory })
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ops", "failback-executor", "--dry-run", "--namespace", "kube-system"}, &stdout, &stderr)
+	if code != ops.VolumeStatusExitOK {
+		t.Fatalf("exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	if len(client.failbackStatusWrites) != 0 {
+		t.Fatalf("dry-run writes=%+v", client.failbackStatusWrites)
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"failback_executor=dry_run",
+		"targets=1",
+		"status_writes=0",
+		"failback_attempts=0",
+		"status_mutation_allowed=false",
+		"authority_mutation_allowed=false",
+		"frontend_publication_allowed=false",
+		"mutation_allowed=false",
+		"storage_mutation_allowed=false",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("stdout missing %q:\n%s", want, out)
+		}
+	}
+}
+
 func TestOpsFrontendPublicationTargetOwnerCreatesTarget(t *testing.T) {
 	client := &lifecycleOwnerTestClient{
 		eligibilities: []ops.SwBlockReplicaEligibilityObject{cmdFrontendPublicationEligibility()},
@@ -1719,6 +1803,27 @@ func cmdFrontendPublicationTarget() ops.SwBlockFrontendPublicationObject {
 	}
 }
 
+func cmdFailbackTarget() ops.SwBlockReplicaFailbackObject {
+	return ops.SwBlockReplicaFailbackObject{
+		Ref: ops.OperatorObjectRef{
+			APIVersion: ops.SwBlockVolumeAPIVersion,
+			Kind:       ops.SwBlockReplicaFailbackKind,
+			Namespace:  "kube-system",
+			Name:       "demo-pvc-r1-failback",
+		},
+		Spec: ops.SwBlockReplicaFailbackSpec{
+			VolumeName:                   "demo-pvc",
+			VolumeID:                     "pvc-demo",
+			PVCName:                      "demo-pvc",
+			ReplicaID:                    "r1",
+			AckEligible:                  true,
+			FrontendFencedBeforeFailback: true,
+			DurableFrontierCovered:       true,
+			NoCrossVolumeIdentityChange:  true,
+		},
+	}
+}
+
 func cmdFailbackTargetVolume() ops.SwBlockVolumeObject {
 	return ops.SwBlockVolumeObject{
 		Ref: ops.OperatorObjectRef{
@@ -1777,6 +1882,7 @@ type lifecycleOwnerTestClient struct {
 	rebuildWrites                   []lifecycleOwnerTestRebuildWrite
 	rebuildCreates                  []ops.SwBlockReplicaRebuildObject
 	failbackCreates                 []ops.SwBlockReplicaFailbackObject
+	failbackStatusWrites            []lifecycleOwnerTestFailbackWrite
 	frontendPublicationCreates      []ops.SwBlockFrontendPublicationObject
 	frontendPublicationStatusWrites []lifecycleOwnerTestFrontendPublicationWrite
 }
@@ -1794,6 +1900,11 @@ type lifecycleOwnerTestEligibilityWrite struct {
 type lifecycleOwnerTestRebuildWrite struct {
 	ref    ops.OperatorObjectRef
 	status ops.SwBlockReplicaRebuildCRDStatus
+}
+
+type lifecycleOwnerTestFailbackWrite struct {
+	ref    ops.OperatorObjectRef
+	status ops.SwBlockReplicaFailbackCRDStatus
 }
 
 type lifecycleOwnerTestFrontendPublicationWrite struct {
@@ -1828,6 +1939,11 @@ func (c *lifecycleOwnerTestClient) WriteReplicaEligibilityStatus(_ context.Conte
 
 func (c *lifecycleOwnerTestClient) WriteReplicaRebuildStatus(_ context.Context, ref ops.OperatorObjectRef, status ops.SwBlockReplicaRebuildCRDStatus) error {
 	c.rebuildWrites = append(c.rebuildWrites, lifecycleOwnerTestRebuildWrite{ref: ref, status: status})
+	return nil
+}
+
+func (c *lifecycleOwnerTestClient) WriteReplicaFailbackStatus(_ context.Context, ref ops.OperatorObjectRef, status ops.SwBlockReplicaFailbackCRDStatus) error {
+	c.failbackStatusWrites = append(c.failbackStatusWrites, lifecycleOwnerTestFailbackWrite{ref: ref, status: status})
 	return nil
 }
 

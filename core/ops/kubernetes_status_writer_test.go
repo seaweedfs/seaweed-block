@@ -198,9 +198,30 @@ func TestKubernetesStatusClientPatchesOnlyStatusSubresources(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("write frontend publication status: %v", err)
 	}
+	if err := client.WriteReplicaFailbackStatus(context.Background(), OperatorObjectRef{
+		Namespace: "kube-system",
+		Name:      "demo-pvc-r1-failback",
+	}, SwBlockReplicaFailbackCRDStatus{
+		ObservedAt:                        observedAt,
+		ObservedGeneration:                10,
+		Executor:                          "failback-executor",
+		State:                             FailbackStateBlocked,
+		ReasonCode:                        AuthorityExecutorFailbackReasonDisabled,
+		FailbackMutationAllowed:           false,
+		FailbackStarted:                   false,
+		AuthorityEpochAdvanced:            false,
+		SinglePrimaryAfterFailback:        false,
+		PublishTargetSwappedAfterFailback: false,
+		NoCrossVolumeIdentityChange:       true,
+		EvidenceGeneration:                "executor-run-4",
+		EvidenceRefs:                      []string{"failback-summary.txt"},
+		NonClaims:                         []string{"no_failback", "no_frontend_publication", "no_storage_mutation"},
+	}); err != nil {
+		t.Fatalf("write replica failback status: %v", err)
+	}
 
-	if len(requests) != 5 {
-		t.Fatalf("requests=%d want 5: %+v", len(requests), requests)
+	if len(requests) != 6 {
+		t.Fatalf("requests=%d want 6: %+v", len(requests), requests)
 	}
 	wantPaths := []string{
 		"/apis/block.seaweedfs.com/v1alpha1/namespaces/kube-system/swblockclusters/sw-block/status",
@@ -208,6 +229,7 @@ func TestKubernetesStatusClientPatchesOnlyStatusSubresources(t *testing.T) {
 		"/apis/block.seaweedfs.com/v1alpha1/namespaces/kube-system/swblockreplicaeligibilities/demo-pvc-r1/status",
 		"/apis/block.seaweedfs.com/v1alpha1/namespaces/kube-system/swblockreplicarebuilds/demo-pvc-r1-rebuild/status",
 		"/apis/block.seaweedfs.com/v1alpha1/namespaces/kube-system/swblockfrontendpublications/demo-pvc-r1-frontend-publication/status",
+		"/apis/block.seaweedfs.com/v1alpha1/namespaces/kube-system/swblockreplicafailbacks/demo-pvc-r1-failback/status",
 	}
 	for i, req := range requests {
 		if req.Method != http.MethodPatch {

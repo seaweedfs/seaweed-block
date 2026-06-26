@@ -180,6 +180,17 @@ failbackTargetOwner:
     create: true
   nodeSelector: {}
 
+failbackExecutor:
+  # Failback executor boundary. Disabled by default. This phase writes
+  # disabled/blocked SwBlockReplicaFailback.status only. It does not execute
+  # failback, advance authority, publish frontend paths, or mutate storage.
+  create: false
+  dryRun: true
+  interval: 30s
+  rbac:
+    create: true
+  nodeSelector: {}
+
 frontendPublicationTargetOwner:
   # Frontend publication target owner. Disabled by default. When enabled it
   # creates SwBlockFrontendPublication target CRs from terminal ACK eligibility

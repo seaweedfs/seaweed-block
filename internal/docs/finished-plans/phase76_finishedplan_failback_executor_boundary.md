@@ -1,25 +1,15 @@
-# Current Plan: Phase 76 Returned-Replica Failback Executor Boundary
+# Phase 76 Finished Plan: Returned-Replica Failback Executor Boundary
 
 Status: complete.
 
-## Goal
+## Problem
 
-Phase 75 created the failback handoff target:
+Phase 75 introduced `SwBlockReplicaFailback` as the handoff target for future
+returned-replica failback. The target existed, but no executor identity owned
+its status surface. Without that boundary, the next implementation would jump
+straight from a target object to authority mutation.
 
-```text
-SwBlockReplicaFailback
-```
-
-Phase 76 adds the first executor boundary for that target. The executor can
-read targets and write `SwBlockReplicaFailback.status`, but it still cannot
-execute failback.
-
-This phase is intentionally status-only. It does not advance authority, change
-the primary, swap publish targets, publish frontend paths, or mutate storage.
-
-## Deliverables
-
-### D1: Status-Only Failback Executor
+## Implementation
 
 Added:
 
@@ -27,7 +17,7 @@ Added:
 sw-block ops failback-executor
 ```
 
-For each target it writes:
+The executor reads `SwBlockReplicaFailback` targets and writes disabled status:
 
 ```text
 state=blocked
@@ -39,32 +29,19 @@ singlePrimaryAfterFailback=false
 publishTargetSwappedAfterFailback=false
 ```
 
-Invalid targets are also blocked:
+Invalid targets are blocked with:
 
 ```text
 reasonCode=missing_required_facts
 ```
 
-### D2: Kubernetes Status Writer
-
-Added:
-
-```text
-WriteReplicaFailbackStatus(...)
-```
-
-The writer patches only:
+Added Kubernetes status writer support:
 
 ```text
 swblockreplicafailbacks/status
 ```
 
-It never patches spec, finalizers, Events, workloads, storage objects, or
-frontend publication resources.
-
-### D3: Helm Packaging + RBAC
-
-Added disabled-by-default packaging:
+Added disabled-by-default Helm packaging:
 
 ```text
 failbackExecutor.create=false
@@ -78,7 +55,7 @@ swblockreplicafailbacks: get,list,watch
 swblockreplicafailbacks/status: get,update,patch
 ```
 
-### D4: Gate
+## Gate
 
 Added:
 
@@ -87,33 +64,18 @@ scripts/run-phase76-failback-executor-boundary-gate.sh
 testops/scenarios/failback-executor-boundary-chain.yaml
 ```
 
-The gate proves:
+The gate checks:
 
 ```text
-failback executor writes disabled/blocked status
-dry-run writes no status
-invalid targets are blocked
-status writer uses /status
+disabled status write
+dry-run no status write
+invalid target blocked
+Kubernetes writer uses status subresource
 RBAC is status-only
-failback_attempts=0
-authority_mutation_allowed=false
-frontend_publication_allowed=false
-storage_mutation_allowed=false
-```
-
-## Non-Claims
-
-Phase 76 does not implement:
-
-```text
-real failback execution
-authority epoch mutation
-primary reassignment
-publish-target swap
-frontend publication
-blockvolume frontend switching
-storage/workload mutation
-NVMe ANA behavior
+failback attempts = 0
+authority mutation allowed = false
+frontend publication allowed = false
+storage mutation allowed = false
 ```
 
 ## Verification
@@ -136,6 +98,7 @@ core_ops_failback_executor_tests=pass
 cmd_failback_executor_tests=pass
 failback_executor_writes_disabled_status=true
 failback_executor_dry_run_no_status_write=true
+failback_executor_invalid_target_blocked=true
 kubernetes_writer_failback_status_subresource=true
 failback_executor_rbac_status_only=true
 failback_attempts=0
@@ -144,9 +107,22 @@ frontend_publication_allowed=false
 storage_mutation_allowed=false
 ```
 
+## Non-Claims
+
+Phase 76 does not implement:
+
+```text
+failback execution
+authority epoch mutation
+primary reassignment
+publish-target swap
+frontend publication
+blockvolume frontend switching
+storage/workload mutation
+```
+
 ## Next
 
-The next step is a failback execution preflight/runtime contract. It must remain
-disabled until it can prove the full terminal evidence: authority ownership,
-epoch advance, single-primary state, publish-target swap, and cross-volume
-identity isolation.
+The next phase should add an execution preflight/runtime contract for failback,
+still disabled until it can prove authority ownership, epoch advance,
+single-primary state, publish-target swap, and cross-volume isolation.

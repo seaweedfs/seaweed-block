@@ -1,0 +1,39 @@
+{{- if .Values.failbackExecutor.create }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sw-block-failback-executor
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "seaweed-block.labels" . | nindent 4 }}
+    app: sw-block-failback-executor
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sw-block-failback-executor
+  template:
+    metadata:
+      labels:
+        app: sw-block-failback-executor
+        {{- include "seaweed-block.labels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "seaweed-block.fullname" . }}-failback-executor
+      {{- with .Values.failbackExecutor.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: failback-executor
+          image: {{ include "seaweed-block.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/usr/local/bin/sw-block"]
+          args:
+            - "ops"
+            - "failback-executor"
+            - "--namespace={{ .Release.Namespace }}"
+            {{- if .Values.failbackExecutor.dryRun }}
+            - "--dry-run"
+            {{- end }}
+            - "--interval={{ .Values.failbackExecutor.interval }}"
+{{- end }}

@@ -898,6 +898,62 @@ func TestPhase75FailbackTargetOwnerPackagingIsNarrow(t *testing.T) {
 	}
 }
 
+func TestPhase76FailbackExecutorPackagingIsStatusOnly(t *testing.T) {
+	values := readYAMLMap(t, "charts/seaweed-block/values.yaml")
+	executor := yamlMap(t, values, "failbackExecutor")
+	assertYAMLBool(t, executor, "create", false)
+	assertYAMLBool(t, executor, "dryRun", true)
+	rbacValues := yamlMap(t, executor, "rbac")
+	assertYAMLBool(t, rbacValues, "create", true)
+
+	deploy := readRepoFile(t, "charts/seaweed-block/templates/failback-executor.yaml")
+	for _, want := range []string{
+		`kind: Deployment`,
+		`name: sw-block-failback-executor`,
+		`serviceAccountName: {{ include "seaweed-block.fullname" . }}-failback-executor`,
+		`command: ["/usr/local/bin/sw-block"]`,
+		`- "failback-executor"`,
+		`- "--namespace={{ .Release.Namespace }}"`,
+		`{{- if .Values.failbackExecutor.dryRun }}`,
+		`- "--dry-run"`,
+		`- "--interval={{ .Values.failbackExecutor.interval }}"`,
+	} {
+		if !strings.Contains(deploy, want) {
+			t.Fatalf("failback-executor deployment missing %q\n%s", want, deploy)
+		}
+	}
+
+	rbac := readRepoFile(t, "charts/seaweed-block/templates/failback-executor-rbac.yaml")
+	for _, want := range []string{
+		`resources: ["swblockreplicafailbacks"]`,
+		`verbs: ["get", "list", "watch"]`,
+		`resources: ["swblockreplicafailbacks/status"]`,
+		`verbs: ["get", "update", "patch"]`,
+	} {
+		if !strings.Contains(rbac, want) {
+			t.Fatalf("failback-executor RBAC missing %q\n%s", want, rbac)
+		}
+	}
+	for _, forbidden := range []string{
+		`resources: ["swblockvolumes"]`,
+		`resources: ["swblockreplicafailbacks/finalizers"]`,
+		`resources: ["swblockfrontendpublications"]`,
+		`resources: ["swblockreplicarebuilds"]`,
+		`resources: ["events"]`,
+		`resources: ["pods"]`,
+		`resources: ["persistentvolumes"]`,
+		`resources: ["persistentvolumeclaims"]`,
+		`resources: ["storageclasses"]`,
+		`resources: ["secrets"]`,
+		`"create"`,
+		`"delete"`,
+	} {
+		if strings.Contains(rbac, forbidden) {
+			t.Fatalf("failback-executor RBAC contains forbidden fragment %q\n%s", forbidden, rbac)
+		}
+	}
+}
+
 func TestPhase69FrontendPublicationTargetOwnerPackagingIsNarrow(t *testing.T) {
 	values := readYAMLMap(t, "charts/seaweed-block/values.yaml")
 	targetOwner := yamlMap(t, values, "frontendPublicationTargetOwner")
