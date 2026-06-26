@@ -5,6 +5,9 @@ import (
 	"testing"
 
 	"github.com/seaweedfs/seaweed-block/core/authority"
+	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 func TestHostFailbackAuthorityRuntimeUsesLivePublisher(t *testing.T) {
@@ -53,4 +56,85 @@ func TestHostFailbackAuthorityRuntimeUsesLivePublisher(t *testing.T) {
 		line.CtrlAddr != "127.0.0.1:9101" {
 		t.Fatalf("line=%+v current=%+v", line, current)
 	}
+}
+
+func TestFailbackServiceDefaultDisabled(t *testing.T) {
+	h := newTestMaster(t, t.TempDir())
+	defer closeTestMaster(t, h)
+
+	_, err := newServices(h).ExecuteFailback(context.Background(), &control.FailbackRequest{
+		VolumeId:                     "vol-a",
+		ReplicaId:                    "r1",
+		TargetDataAddr:               "127.0.0.1:9201",
+		TargetCtrlAddr:               "127.0.0.1:9101",
+		ExpectedCurrentReplicaId:     "r2",
+		ExpectedCurrentEpoch:         1,
+		AckEligible:                  true,
+		FrontendFencedBeforeFailback: true,
+		DurableFrontierCovered:       true,
+		NoCrossVolumeIdentityChange:  true,
+	})
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("err=%v code=%s", err, status.Code(err))
+	}
+	if _, ok := h.Publisher().VolumeAuthorityLine("vol-a"); ok {
+		t.Fatalf("disabled failback RPC mutated authority")
+	}
+}
+
+func TestFailbackServiceEnabledUsesHostRuntime(t *testing.T) {
+	h := newTestMasterWithFailbackRuntimeRPC(t)
+	defer closeTestMaster(t, h)
+	seedVerifiedExistingReplicaPlacement(t, h)
+	if _, err := h.RunLifecycleProductTick(); err != nil {
+		t.Fatalf("product tick: %v", err)
+	}
+	current := waitAuthorityLine(t, h.Publisher(), "vol-a")
+
+	resp, err := newServices(h).ExecuteFailback(context.Background(), &control.FailbackRequest{
+		VolumeId:                     "vol-a",
+		ReplicaId:                    "r1",
+		TargetDataAddr:               "127.0.0.1:9201",
+		TargetCtrlAddr:               "127.0.0.1:9101",
+		ExpectedCurrentReplicaId:     current.ReplicaID,
+		ExpectedCurrentEpoch:         current.Epoch,
+		AckEligible:                  true,
+		FrontendFencedBeforeFailback: true,
+		DurableFrontierCovered:       true,
+		NoCrossVolumeIdentityChange:  true,
+		EvidenceRefs:                 []string{"phase81-service-test"},
+	})
+	if err != nil {
+		t.Fatalf("ExecuteFailback: %v", err)
+	}
+	if !resp.GetFailbackStarted() ||
+		!resp.GetAuthorityEpochAdvanced() ||
+		!resp.GetSinglePrimaryAfterFailback() ||
+		!resp.GetPublishTargetSwappedAfterFailback() ||
+		!resp.GetNoStorageMutation() ||
+		!resp.GetNoCrossVolumeIdentityChange() {
+		t.Fatalf("resp=%+v", resp)
+	}
+	line, ok := h.Publisher().VolumeAuthorityLine("vol-a")
+	if !ok {
+		t.Fatalf("missing authority line after service failback")
+	}
+	if line.ReplicaID != "r1" || line.Epoch != current.Epoch+1 {
+		t.Fatalf("line=%+v current=%+v", line, current)
+	}
+}
+
+func newTestMasterWithFailbackRuntimeRPC(t *testing.T) *Host {
+	t.Helper()
+	h, err := New(Config{
+		AuthorityStoreDir:  t.TempDir(),
+		LifecycleStoreDir:  t.TempDir(),
+		Listen:             "127.0.0.1:0",
+		FailbackRuntimeRPC: true,
+	})
+	if err != nil {
+		t.Fatalf("master.New: %v", err)
+	}
+	h.Start()
+	return h
 }

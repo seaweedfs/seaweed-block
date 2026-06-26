@@ -1,99 +1,118 @@
-# Current Plan: Phase 80 Master Failback Runtime Factory
+# Current Plan: Phase 81 Failback Service RPC
 
 Status: complete.
 
 ## Goal
 
-Phase 79 wired the failback executor to an in-process authority runtime adapter,
-but the adapter still needed a safe construction point from the component that
-owns the live Publisher. Phase 80 exposes that construction point from
-`master.Host`.
+Phase 80 exposed a master-owned failback runtime factory, but a separate
+executor process still needs a transport boundary to reach the master-owned
+Publisher. Phase 81 adds that boundary as a blockmaster FailbackService RPC,
+disabled by default.
 
-This remains deliberately pre-RPC and disabled by default:
+The RPC is registered but not usable unless explicitly enabled:
 
 ```text
-no public failback RPC
-no automatic deployed failback loop
-no frontend publication
-no storage mutation
+--failback-runtime-rpc
 ```
+
+Default installs do not pass that flag.
 
 ## Deliverables
 
-### D1: Master Factory
+### D1: Wire Contract
+
+Added protobuf service:
+
+```text
+service FailbackService {
+  rpc ExecuteFailback(FailbackRequest) returns (FailbackResponse);
+}
+```
+
+`FailbackRequest` carries:
+
+```text
+volume_id
+replica_id
+target_data_addr
+target_ctrl_addr
+expected_current_replica_id
+expected_current_epoch
+ack_eligible
+frontend_fenced_before_failback
+durable_frontier_covered
+no_cross_volume_identity_change
+evidence_refs
+```
+
+The request still carries no epoch to mint and no endpoint version. Those are
+authored only inside the master Publisher.
+
+### D2: Disabled-by-Default Gate
+
+Added blockmaster config/flag:
+
+```text
+Config.FailbackRuntimeRPC
+--failback-runtime-rpc
+```
+
+Default:
+
+```text
+FailbackRuntimeRPC=false
+```
+
+When disabled, `ExecuteFailback` returns `FailedPrecondition` and does not
+mutate authority.
+
+### D3: Enabled Path
+
+When explicitly enabled, the handler delegates to:
+
+```text
+h.FailbackAuthorityRuntime().ExecuteFailback(...)
+```
+
+The enabled test proves:
+
+```text
+product-loop current authority -> ExecuteFailback -> Publisher line advanced
+authorityEpochAdvanced=true
+singlePrimaryAfterFailback=true
+publishTargetSwappedAfterFailback=true
+noStorageMutation=true
+```
+
+### D4: Gate
 
 Added:
 
 ```text
-(*master.Host).FailbackAuthorityRuntime() authority.FailbackAuthorityRuntime
-```
-
-The factory returns a runtime backed by:
-
-```text
-h.Publisher()
-```
-
-Constructing the runtime does not execute failback. Callers still need the
-Phase 79 explicit policy gate before invoking it.
-
-### D2: Host-Level Test
-
-Added:
-
-```text
-TestHostFailbackAuthorityRuntimeUsesLivePublisher
-```
-
-The test seeds authority through the normal product-loop path:
-
-```text
-placement + observation -> RunLifecycleProductTick -> r2 current authority
-```
-
-Then it invokes the host failback runtime:
-
-```text
-expected current: r2@current_epoch
-target returned replica: r1
-```
-
-The host's live Publisher advances to:
-
-```text
-r1@(current_epoch+1)
-```
-
-### D3: Gate
-
-Added:
-
-```text
-scripts/run-phase80-master-failback-runtime-factory-gate.sh
-testops/scenarios/master-failback-runtime-factory-chain.yaml
+scripts/run-phase81-failback-service-rpc-gate.sh
+testops/scenarios/failback-service-rpc-chain.yaml
 ```
 
 The gate proves:
 
 ```text
-host failback runtime uses live Publisher
-publisher authority line advances
-authority epoch advances
-single primary after failback
-publish target swaps after failback
-no public failback RPC was added
-automatic failback remains disabled
+FailbackService is registered
+RPC is disabled by default
+flag default is false
+flag can opt in
+enabled RPC advances Publisher through master runtime
 frontend publication remains false
 storage mutation remains false
 ```
 
 ## Non-Claims
 
-Phase 80 does not implement:
+Phase 81 does not implement:
 
 ```text
-public blockmaster failback RPC
+chart-enabled failback RPC
 automatic failback from the deployed controller loop
+failback executor HTTP/gRPC client to blockmaster
 blockvolume frontend switching
 frontend publication after failback
 storage rebuild/catch-up traffic
@@ -104,34 +123,36 @@ NVMe ANA behavior
 ## Verification
 
 ```text
-go test ./core/host/master -run "TestHostFailbackAuthorityRuntimeUsesLivePublisher" -count=1 -v
+go test ./core/host/master -run "TestFailbackService|TestHostFailbackAuthorityRuntimeUsesLivePublisher" -count=1 -v
+go test ./cmd/blockmaster -run "TestParseFlags_FailbackRuntimeRPCDisabledByDefault|TestBlockmasterBareTopologyRegistersVolumeControlServices" -count=1 -v
 go test ./core/authority ./core/ops ./core/host/master ./cmd/blockmaster ./cmd/sw-block
 helm lint charts/seaweed-block
-"C:\Program Files\Git\bin\bash.exe" scripts/run-phase80-master-failback-runtime-factory-gate.sh .
-C:\work\swblock.exe validate testops\scenarios\master-failback-runtime-factory-chain.yaml
+"C:\Program Files\Git\bin\bash.exe" scripts/run-phase81-failback-service-rpc-gate.sh .
+C:\work\swblock.exe validate testops\scenarios\failback-service-rpc-chain.yaml
 git diff --check
 ```
 
 Terminal evidence:
 
 ```text
-phase80_master_failback_runtime_factory_status=ok
-core_master_failback_runtime_tests=pass
-host_failback_runtime_uses_live_publisher=true
-publisher_authority_line_advanced=true
+phase81_failback_service_rpc_status=ok
+core_master_failback_service_tests=pass
+cmd_blockmaster_failback_service_tests=pass
+failback_service_default_disabled=true
+enabled_failback_service_advances_publisher=true
+failback_runtime_rpc_flag_default_false=true
+failback_runtime_rpc_flag_opt_in=true
+failback_service_registered=true
 authority_epoch_advanced=true
 single_primary_after_failback=true
 publish_target_swapped_after_failback=true
-no_storage_mutation=true
-no_cross_volume_identity_change=true
-automatic_failback_enabled=false
-public_failback_rpc_added=false
+public_rpc_enabled_by_default=false
 frontend_publication_allowed=false
 storage_mutation_allowed=false
 ```
 
 ## Next
 
-The next phase should add the first disabled-by-default product wiring from
-executor composition to this master factory, or decide that a public RPC is the
-right boundary and add that as an explicitly gated API.
+The next phase should wire the failback executor to call this RPC when and only
+when execution policy is explicitly enabled, keeping default installs
+status-only.

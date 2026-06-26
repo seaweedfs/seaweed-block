@@ -327,7 +327,14 @@ Recommended order from here:
     authority can advance through the runtime while no public failback RPC,
     automatic failback loop, frontend publication, or storage mutation is
     enabled.
-38. Add backup/restore and NVMe ANA parity after they can reuse the same action
+38. Phase 81: failback service RPC. **Closed 2026-06-26, local PASS**
+    (`internal/docs/finished-plans/phase81_finishedplan_failback_service_rpc.md`).
+    Blockmaster now registers a `FailbackService.ExecuteFailback` RPC that is
+    disabled by default behind `--failback-runtime-rpc`. When explicitly
+    enabled, it delegates to the master-owned failback runtime and can advance
+    the live Publisher with expected-current and terminal evidence. Default
+    installs still do not expose an active failback mutation path.
+39. Add backup/restore and NVMe ANA parity after they can reuse the same action
    owner, evidence, and status model rather than creating another isolated
    control plane.
 
@@ -358,7 +365,9 @@ the first authority-owned failback seam through `Publisher.apply(IntentReassign)
 Phase 79 wires that seam to the failback executor as an explicit-policy-gated
 in-process call-site. Phase 80 exposes the corresponding master-owned factory
 from the component that owns the live Publisher. Automatic deployed failback,
-frontend publication, and storage/workload mutation remain disabled.
+frontend publication, and storage/workload mutation remain disabled. Phase 81
+adds the disabled-by-default RPC boundary that a separate failback executor can
+call in a later phase; default installs still keep the mutation path off.
 
 The practical rule is:
 

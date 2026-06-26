@@ -51,6 +51,28 @@ func TestParseFlags_LifecyclePlacementSeedOptional(t *testing.T) {
 	}
 }
 
+func TestParseFlags_FailbackRuntimeRPCDisabledByDefault(t *testing.T) {
+	f, err := parseFlags([]string{
+		"--authority-store", "authority-dir",
+	})
+	if err != nil {
+		t.Fatalf("parseFlags: %v", err)
+	}
+	if f.failbackRuntimeRPC {
+		t.Fatal("failback runtime RPC must be disabled by default")
+	}
+	f, err = parseFlags([]string{
+		"--authority-store", "authority-dir",
+		"--failback-runtime-rpc",
+	})
+	if err != nil {
+		t.Fatalf("parseFlags with failback runtime RPC: %v", err)
+	}
+	if !f.failbackRuntimeRPC {
+		t.Fatal("failback runtime RPC flag not set")
+	}
+}
+
 func TestParseFlags_ClusterSpecOptional(t *testing.T) {
 	f, err := parseFlags([]string{
 		"--authority-store", "authority-dir",
@@ -147,5 +169,13 @@ func TestBlockmasterBareTopologyRegistersVolumeControlServices(t *testing.T) {
 	}
 	if status.Code(err) == codes.Unavailable || status.Code(err) == codes.DeadlineExceeded {
 		t.Fatalf("transport error while checking AssignmentService registration: %v", err)
+	}
+
+	_, err = control.NewFailbackServiceClient(conn).ExecuteFailback(ctx, &control.FailbackRequest{VolumeId: "vol-a"})
+	if status.Code(err) == codes.Unimplemented || strings.Contains(err.Error(), "unknown service") {
+		t.Fatalf("FailbackService not registered on bare blockmaster: %v", err)
+	}
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("ExecuteFailback default-disabled code=%s err=%v", status.Code(err), err)
 	}
 }

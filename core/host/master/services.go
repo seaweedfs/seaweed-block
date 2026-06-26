@@ -34,6 +34,7 @@ type services struct {
 	control.UnimplementedEvidenceServiceServer
 	control.UnimplementedClusterEvidenceServiceServer
 	control.UnimplementedLifecycleServiceServer
+	control.UnimplementedFailbackServiceServer
 
 	host *Host
 	// seq is incremented per ReportHeartbeat handler invocation.
@@ -85,6 +86,37 @@ func (s *services) DeleteVolume(ctx context.Context, req *control.DeleteVolumeRe
 		return nil, lifecycleError("delete volume", err)
 	}
 	return &control.DeleteVolumeResponse{}, nil
+}
+
+func (s *services) ExecuteFailback(ctx context.Context, req *control.FailbackRequest) (*control.FailbackResponse, error) {
+	if !s.host.cfg.FailbackRuntimeRPC {
+		return nil, status.Error(codes.FailedPrecondition, "failback runtime RPC is disabled")
+	}
+	result, err := s.host.FailbackAuthorityRuntime().ExecuteFailback(ctx, authority.FailbackRuntimeRequest{
+		VolumeID:                     req.GetVolumeId(),
+		ReplicaID:                    req.GetReplicaId(),
+		TargetDataAddr:               req.GetTargetDataAddr(),
+		TargetCtrlAddr:               req.GetTargetCtrlAddr(),
+		ExpectedCurrentReplicaID:     req.GetExpectedCurrentReplicaId(),
+		ExpectedCurrentEpoch:         req.GetExpectedCurrentEpoch(),
+		AckEligible:                  req.GetAckEligible(),
+		FrontendFencedBeforeFailback: req.GetFrontendFencedBeforeFailback(),
+		DurableFrontierCovered:       req.GetDurableFrontierCovered(),
+		NoCrossVolumeIdentityChange:  req.GetNoCrossVolumeIdentityChange(),
+		EvidenceRefs:                 append([]string(nil), req.GetEvidenceRefs()...),
+	})
+	if err != nil {
+		return nil, status.Errorf(codes.FailedPrecondition, "execute failback: %v", err)
+	}
+	return &control.FailbackResponse{
+		FailbackStarted:                   result.FailbackStarted,
+		AuthorityEpochAdvanced:            result.AuthorityEpochAdvanced,
+		SinglePrimaryAfterFailback:        result.SinglePrimaryAfterFailback,
+		PublishTargetSwappedAfterFailback: result.PublishTargetSwappedAfterFailback,
+		NoStorageMutation:                 result.NoStorageMutation,
+		NoCrossVolumeIdentityChange:       result.NoCrossVolumeIdentityChange,
+		EvidenceRefs:                      append([]string(nil), result.EvidenceRefs...),
+	}, nil
 }
 
 // ReportHeartbeat receives a volume's observation. It validates

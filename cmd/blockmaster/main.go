@@ -49,6 +49,7 @@ type flags struct {
 	launcherCHAPSecretName  string
 	launcherCHAPUserKey     string
 	launcherCHAPSecretKey   string
+	failbackRuntimeRPC      bool
 	version                 bool
 	// printReadyLine: test-only flag that emits a single
 	// structured JSON line to stdout after the gRPC listener is
@@ -89,6 +90,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.StringVar(&f.launcherCHAPSecretName, "launcher-iscsi-chap-secret-name", "", "optional Kubernetes Secret name used by generated blockvolume Deployments for target-side iSCSI CHAP")
 	fs.StringVar(&f.launcherCHAPUserKey, "launcher-iscsi-chap-username-key", "chapUsername", "Kubernetes Secret key for generated blockvolume iSCSI CHAP username")
 	fs.StringVar(&f.launcherCHAPSecretKey, "launcher-iscsi-chap-secret-key", "chapSecret", "Kubernetes Secret key for generated blockvolume iSCSI CHAP secret")
+	fs.BoolVar(&f.failbackRuntimeRPC, "failback-runtime-rpc", false, "enable disabled-by-default authority failback RPC; requires expected-current and terminal evidence")
 	fs.BoolVar(&f.version, "version", false, "print build provenance and exit")
 	fs.BoolVar(&f.printReadyLine, "t0-print-ready", false, "internal test-only: emit one structured JSON line on stdout after listener bound")
 	fs.SetOutput(os.Stderr)
@@ -142,12 +144,13 @@ func run(f flags) int {
 		fmt.Fprintln(os.Stderr, "blockmaster: dynamic lifecycle topology enabled by cluster-spec node inventory; assignments will be derived from verified placement intents")
 	}
 	cfg := master.Config{
-		AuthorityStoreDir: f.authorityStore,
-		LifecycleStoreDir: f.lifecycleStore,
-		Listen:            f.listen,
-		Topology:          topo,
-		Freshness:         authority.FreshnessConfig{FreshnessWindow: f.freshnessWindow, PendingGrace: f.pendingGrace},
-		ControllerConfig:  authority.TopologyControllerConfig{ExpectedSlotsPerVolume: f.expectedSlotsPerVol},
+		AuthorityStoreDir:  f.authorityStore,
+		LifecycleStoreDir:  f.lifecycleStore,
+		Listen:             f.listen,
+		Topology:           topo,
+		Freshness:          authority.FreshnessConfig{FreshnessWindow: f.freshnessWindow, PendingGrace: f.pendingGrace},
+		ControllerConfig:   authority.TopologyControllerConfig{ExpectedSlotsPerVolume: f.expectedSlotsPerVol},
+		FailbackRuntimeRPC: f.failbackRuntimeRPC,
 	}
 	h, err := master.New(cfg)
 	if err != nil {

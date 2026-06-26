@@ -59,6 +59,11 @@ type Config struct {
 	// NOT drive assignment publication.
 	LifecycleStoreDir string
 
+	// FailbackRuntimeRPC enables the authority failback RPC surface. It is
+	// disabled by default; callers must still provide expected-current and
+	// terminal evidence when enabled.
+	FailbackRuntimeRPC bool
+
 	// Logger is used for structured startup and error logging. If
 	// nil, the default log package logger is used.
 	Logger *log.Logger
@@ -214,6 +219,7 @@ func New(cfg Config) (*Host, error) {
 	control.RegisterEvidenceServiceServer(grpcSrv, svc)
 	control.RegisterClusterEvidenceServiceServer(grpcSrv, svc)
 	control.RegisterLifecycleServiceServer(grpcSrv, svc)
+	control.RegisterFailbackServiceServer(grpcSrv, svc)
 	h.grpc = grpcSrv
 
 	lg.Printf("blockmaster: lock acquired, reloaded=%d, listen=%s",
