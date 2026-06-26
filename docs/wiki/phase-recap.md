@@ -81,6 +81,7 @@ important line is returned-replica recovery:
 | 68-73 | Frontend publication was too dangerous to couple directly to returned-replica eligibility. | Frontend publication target/executor boundaries that deliberately block returned-replica publication. | Publishing a frontend path is separated from ACK/rebuild evidence so the product cannot accidentally expose an unsafe target. |
 | 74-88 | Failback needed an authority-owned path rather than frontend-publication inference. | `authority.failback_returned_replica`, `SwBlockReplicaFailback`, failback executor, typed runtime, blockmaster RPC, Helm packaging. | Authority reassignment belongs to blockmaster/Publisher and remains default-off until explicit evidence and policy exist. |
 | 89-95 | The packaged failback path still needed current authority facts and live deployed proof. | Authority facts in `SwBlockVolume.status`, expected-current guards, activation policy, handoff isolation, real gRPC smoke, live k3s deployed-suite gate. | The deployable failback control path can now run end-to-end without claiming frontend publication or workload-visible data-path switch. |
+| 96 | Terminal failback evidence existed, but frontend publication had no post-failback source object. | `SwBlockReplicaFailback.status=failed_back/failback_completed` can create a disabled `SwBlockFrontendPublication` target with failback-source fields. | The next publication step is explicit, but executor publication and workload-visible path switching remain separate later gates. |
 
 ## Product Logic Across The Phases
 

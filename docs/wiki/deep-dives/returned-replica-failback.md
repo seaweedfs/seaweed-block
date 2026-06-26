@@ -241,6 +241,7 @@ ambiguous HTTP/gRPC runtime addresses.
 | 93 | proves multi-volume handoff isolation for expected-current authority and target data/control addresses |
 | 94 | proves full opt-in Helm suite render plus executor -> real blockmaster gRPC FailbackService smoke |
 | 95 | installs the opt-in suite in k3s, creates a live first-volume authority line, injects returned-replica failback evidence, and waits for deployed target-owner/executor to write terminal `failed_back` status through live blockmaster gRPC |
+| 96 | consumes terminal `failed_back/failback_completed` evidence to create a disabled `SwBlockFrontendPublication` target with explicit failback-source fields |
 
 ## Failure Classes
 
@@ -277,26 +278,29 @@ Before enabling broader failback behavior:
 12. Require terminal evidence before writing `failed_back`.
 13. Prove the full opt-in suite can run in Kubernetes with fresh images, Helm,
     real service DNS, CRDs, RBAC, and cleanup.
-14. Keep frontend publication as a separate gated action.
+14. Create a disabled frontend-publication target only from terminal failback
+    evidence; reject non-terminal failback targets.
 15. Keep rebuild/catch-up traffic as a separate gated action.
 16. Run multi-volume isolation gates.
 17. Document exactly what is automatic and what is opt-in.
 
 ## Current Boundary
 
-After Phase 95, the intended product statement is:
+After Phase 96, the intended product statement is:
 
 ```text
 The failback authority control path is deployable and opt-in. The executor can
-drive blockmaster-owned authority reassignment and write terminal target status.
+drive blockmaster-owned authority reassignment, write terminal failback status,
+and plan the next disabled frontend-publication target from that terminal
+evidence.
 ```
 
 The intended non-claim remains:
 
 ```text
-The product does not yet publish the failed-back frontend path to workloads or
-prove post-failback application I/O. That belongs to the next frontend
-publication/data-path phase.
+The product does not yet execute frontend publication, publish the failed-back
+frontend path to workloads, or prove post-failback application I/O. Those belong
+to separate frontend-publication and data-path phases.
 ```
 
 ## Current Limits
@@ -305,7 +309,7 @@ Current source has an opt-in local failback runtime path. It does not yet claim:
 
 - automatic deployed Kubernetes failback,
 - live lab failback release smoke on published images,
-- frontend publication after failback,
+- executed frontend publication after failback,
 - storage rebuild/catch-up traffic,
 - backup/restore,
 - NVMe ANA parity.

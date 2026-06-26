@@ -1,0 +1,97 @@
+# Runner-native Phase 96 gate: terminal SwBlockReplicaFailback evidence creates
+# a disabled SwBlockFrontendPublication target. This is not a frontend
+# publication execution or data-path claim.
+
+name: failback-frontend-publication-target-chain
+timeout: 8m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: failback_frontend_publication_target_gate
+    actions:
+      - action: exec
+        node: m02
+        timeout: 7m
+        cmd: "rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase96-failback-frontend-publication-target && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase96-failback-frontend-publication-target && cd {{ product_root }} && SW_BLOCK_ARTIFACT_DIR=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase96-failback-frontend-publication-target bash scripts/run-phase96-failback-frontend-publication-target-gate.sh {{ product_root }}"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase96-failback-frontend-publication-target/phase96-failback-frontend-publication-target-summary.txt"
+        pattern: "^phase96_failback_frontend_publication_target_status=ok$"
+        save_as: phase96_ok
+      - action: assert_greater
+        actual: "{{ phase96_ok }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase96-failback-frontend-publication-target/phase96-failback-frontend-publication-target-summary.txt"
+        pattern: "^terminal_failed_back_creates_frontend_publication_target=true$"
+        save_as: target_created
+      - action: assert_greater
+        actual: "{{ target_created }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase96-failback-frontend-publication-target/phase96-failback-frontend-publication-target-summary.txt"
+        pattern: "^non_terminal_failback_rejected=true$"
+        save_as: rejects_non_terminal
+      - action: assert_greater
+        actual: "{{ rejects_non_terminal }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase96-failback-frontend-publication-target/phase96-failback-frontend-publication-target-summary.txt"
+        pattern: "^executor_accepts_failback_target_as_disabled=true$"
+        save_as: executor_disabled
+      - action: assert_greater
+        actual: "{{ executor_disabled }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase96-failback-frontend-publication-target/phase96-failback-frontend-publication-target-summary.txt"
+        pattern: "^frontend_publication_attempts=0$"
+        save_as: no_publication_attempts
+      - action: assert_greater
+        actual: "{{ no_publication_attempts }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase96-failback-frontend-publication-target/phase96-failback-frontend-publication-target-summary.txt"
+        pattern: "^failback_attempts=0$"
+        save_as: no_failback_attempts
+      - action: assert_greater
+        actual: "{{ no_failback_attempts }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase96-failback-frontend-publication-target/phase96-failback-frontend-publication-target-summary.txt"
+        pattern: "^storage_mutation_allowed=false$"
+        save_as: no_storage_mutation
+      - action: assert_greater
+        actual: "{{ no_storage_mutation }}"
+        threshold: "0"
+
+  - name: collect
+    always: true
+    actions:
+      - action: collect_path
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase96-failback-frontend-publication-target"
+        name: "remote-phases"
+        ignore_error: true

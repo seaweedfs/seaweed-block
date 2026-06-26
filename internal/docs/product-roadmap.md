@@ -217,11 +217,14 @@ rebuild, delete safety, or cleanup must start as a separate gated phase.
   gRPC/HTTP endpoint decoupling. This is an opt-in/source-gated failback
   runtime path. Phase 88 packages the disabled-by-default failback target owner,
   failback executor, and blockmaster gRPC runtime as one explicitly enabled
-  Helm suite with schema coverage and bounded RBAC. Automatic live failback and
-  frontend publication after failback remain future work.
-- Later: live returned-replica failback smoke on Kubernetes, frontend publication after
-  failback, NVMe ANA Kubernetes multipath parity, stronger committed-frontier
-  reporting, broad
+  Helm suite with schema coverage and bounded RBAC. Phases 89-95 add current
+  authority facts, activation, handoff isolation, deployed render, real
+  blockmaster gRPC smoke, and a live k3s deployed-suite gate. Phase 96 plans a
+  disabled frontend-publication target from terminal `failed_back` evidence.
+  Automatic frontend publication after failback remains future work.
+- Later: frontend publication execution after failback, workload-visible
+  post-failback I/O, NVMe ANA Kubernetes multipath parity, stronger
+  committed-frontier reporting, broad
   distro/host compatibility, and longer soak under failure. NVMe ANA parity
   should follow the Kubernetes-native status foundation so ANA facts, path
   states, and protocol-specific reasons project through the same

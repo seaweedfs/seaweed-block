@@ -1321,6 +1321,57 @@ func TestOpsFrontendPublicationTargetOwnerCreatesTarget(t *testing.T) {
 	}
 }
 
+func TestOpsFrontendPublicationTargetOwnerCreatesTargetFromFailback(t *testing.T) {
+	client := &lifecycleOwnerTestClient{
+		failbacks: []ops.SwBlockReplicaFailbackObject{cmdTerminalFailbackTarget()},
+	}
+	oldFactory := opsFrontendPublicationTargetOwnerClientFactory
+	opsFrontendPublicationTargetOwnerClientFactory = func() (ops.FrontendPublicationTargetOwnerClient, error) {
+		return client, nil
+	}
+	t.Cleanup(func() { opsFrontendPublicationTargetOwnerClientFactory = oldFactory })
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ops", "frontend-publication-target-owner", "--namespace", "kube-system"}, &stdout, &stderr)
+	if code != ops.VolumeStatusExitOK {
+		t.Fatalf("exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	if len(client.frontendPublicationCreates) != 1 {
+		t.Fatalf("frontendPublicationCreates=%+v", client.frontendPublicationCreates)
+	}
+	created := client.frontendPublicationCreates[0]
+	if created.Ref.Name != "demo-pvc-r1-frontend-publication" ||
+		created.Spec.VolumeName != "demo-pvc" ||
+		created.Spec.ReplicaID != "r1" ||
+		created.Spec.SourceFailbackName != "demo-pvc-r1-failback" ||
+		created.Spec.SourceEligibilityName != "" ||
+		!created.Spec.FailbackCompleted ||
+		!created.Spec.AuthorityEpochAdvanced ||
+		!created.Spec.SinglePrimaryAfterFailback ||
+		!created.Spec.PublishTargetSwappedAfterFailback ||
+		!created.Spec.NoCrossVolumeIdentityChange ||
+		created.Spec.FrontendPublicationDecision != ops.AuthorityExecutorPublicationDecisionDisabled ||
+		created.Spec.FrontendPublicationReason != ops.AuthorityExecutorFrontendPublicationReasonDisabled ||
+		created.Spec.FrontendPublicationMutationAllowed {
+		t.Fatalf("created=%+v", created)
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"failbacks=1",
+		"terminal_failbacks=1",
+		"targets_planned=1",
+		"targets_created=1",
+		"invalid_failbacks=0",
+		"frontend_publication_attempts=0",
+		"failback_attempts=0",
+		"storage_mutation_allowed=false",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("stdout missing %q:\n%s", want, out)
+		}
+	}
+}
+
 func TestOpsFrontendPublicationTargetOwnerDryRunDoesNotCreateTarget(t *testing.T) {
 	client := &lifecycleOwnerTestClient{
 		eligibilities: []ops.SwBlockReplicaEligibilityObject{cmdFrontendPublicationEligibility()},
@@ -2093,6 +2144,22 @@ func cmdFailbackExecutableTarget() ops.SwBlockReplicaFailbackObject {
 	target.Spec.RuntimeEndpoint = "http://127.0.0.1:23260/runtime/failback"
 	target.Spec.ExpectedCurrentReplicaID = "r2"
 	target.Spec.ExpectedCurrentEpoch = 7
+	return target
+}
+
+func cmdTerminalFailbackTarget() ops.SwBlockReplicaFailbackObject {
+	target := cmdFailbackTarget()
+	target.Status = ops.SwBlockReplicaFailbackCRDStatus{
+		Executor:                          "failback-executor",
+		State:                             ops.FailbackStateFailedBack,
+		ReasonCode:                        ops.AuthorityExecutorFailbackReasonCompleted,
+		FailbackMutationAllowed:           false,
+		FailbackStarted:                   true,
+		AuthorityEpochAdvanced:            true,
+		SinglePrimaryAfterFailback:        true,
+		PublishTargetSwappedAfterFailback: true,
+		NoCrossVolumeIdentityChange:       true,
+	}
 	return target
 }
 

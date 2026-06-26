@@ -52,6 +52,37 @@ func TestFrontendPublicationExecutorWritesDisabledStatus(t *testing.T) {
 	}
 }
 
+func TestFrontendPublicationExecutorAcceptsFailbackTerminalTargetAsDisabled(t *testing.T) {
+	client := &fakeFrontendPublicationExecutorClient{
+		targets: []SwBlockFrontendPublicationObject{frontendPublicationExecutorFailbackTerminalTarget()},
+	}
+	result, err := (FrontendPublicationExecutorReconciler{
+		Namespace: "kube-system",
+		Client:    client,
+	}).Reconcile(context.Background())
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if result.TargetCount != 1 ||
+		result.StatusWriteCount != 1 ||
+		result.InvalidTargetCount != 0 ||
+		result.FrontendPublicationAttempts != 0 ||
+		result.FailbackAttempts != 0 ||
+		result.StorageMutationAllowed {
+		t.Fatalf("result=%+v", result)
+	}
+	status := client.writes[0].status
+	if status.State != FrontendPublicationStateBlocked ||
+		status.ReasonCode != AuthorityExecutorFrontendPublicationReasonDisabled ||
+		status.PublicationMutationAllowed ||
+		status.FrontendPublished ||
+		status.FailbackStarted ||
+		!status.NoStorageMutation ||
+		!status.NoCrossVolumeIdentityChange {
+		t.Fatalf("status=%+v", status)
+	}
+}
+
 func TestFrontendPublicationExecutorDryRunDoesNotWriteStatus(t *testing.T) {
 	client := &fakeFrontendPublicationExecutorClient{
 		targets: []SwBlockFrontendPublicationObject{frontendPublicationExecutorTestTarget()},
@@ -272,6 +303,32 @@ func frontendPublicationExecutorTestTarget() SwBlockFrontendPublicationObject {
 			PrimaryUnchanged:                   true,
 			DurableFrontierCovered:             true,
 			NoCrossVolumeIdentityChange:        true,
+			FrontendPublicationDecision:        AuthorityExecutorPublicationDecisionDisabled,
+			FrontendPublicationReason:          AuthorityExecutorFrontendPublicationReasonDisabled,
+			FrontendPublicationMutationAllowed: false,
+		},
+	}
+}
+
+func frontendPublicationExecutorFailbackTerminalTarget() SwBlockFrontendPublicationObject {
+	return SwBlockFrontendPublicationObject{
+		Ref: OperatorObjectRef{
+			APIVersion: SwBlockVolumeAPIVersion,
+			Kind:       SwBlockFrontendPublicationKind,
+			Namespace:  "kube-system",
+			Name:       "demo-pvc-r2-frontend-publication",
+		},
+		Spec: SwBlockFrontendPublicationSpec{
+			VolumeName:                         "demo-pvc",
+			VolumeID:                           "pvc-demo",
+			PVCName:                            "demo-pvc",
+			ReplicaID:                          "r2",
+			SourceFailbackName:                 "demo-pvc-r2-failback",
+			NoCrossVolumeIdentityChange:        true,
+			FailbackCompleted:                  true,
+			AuthorityEpochAdvanced:             true,
+			SinglePrimaryAfterFailback:         true,
+			PublishTargetSwappedAfterFailback:  true,
 			FrontendPublicationDecision:        AuthorityExecutorPublicationDecisionDisabled,
 			FrontendPublicationReason:          AuthorityExecutorFrontendPublicationReasonDisabled,
 			FrontendPublicationMutationAllowed: false,

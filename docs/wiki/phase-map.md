@@ -20,7 +20,7 @@ see [Phase Recap](phase-recap.md).
 | 41-44 | bounded lifecycle owner | finalizer add/release, delete-safety hold/release, integrated close gate |
 | 47-67 | returned-replica ACK/rebuild planning and runtime | eligibility, rebuild target, catch-up runtime, terminal evidence |
 | 68-74 | frontend publication and failback contract separation | publication stays blocked until authority-owned failback exists |
-| 75-95 | returned-replica failback control path | target CR, executor, runtime, blockmaster RPC, deployed-suite smoke |
+| 75-96 | returned-replica failback control path | target CR, executor, runtime, blockmaster RPC, deployed-suite smoke, disabled frontend-publication target |
 
 ## The Important Pivot
 
@@ -86,13 +86,15 @@ flowchart LR
   F --> G[blockmaster FailbackService]
   G --> H[Publisher IntentReassign]
   H --> I[failed_back terminal target status]
+  I --> J[disabled SwBlockFrontendPublication target]
 ```
 
-The Phase 95 boundary is explicit:
+The Phase 96 boundary is explicit:
 
 ```text
 authority control path can run when opt-in
-frontend publication after failback is still not claimed
+frontend publication target can be planned from terminal failback evidence
+frontend publication execution is still not claimed
 workload-visible path switch is still not claimed
 ```
 

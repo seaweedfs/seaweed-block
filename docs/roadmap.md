@@ -422,7 +422,15 @@ Recommended order from here:
     creation, executor gRPC call to live blockmaster, terminal `failed_back`
     status, RBAC boundary, and cleanup. It still does not claim frontend
     publication or workload-visible path switch.
-53. Add backup/restore and NVMe ANA parity after they can reuse the same action
+53. Phase 96: failback terminal evidence to frontend publication target. **Closed
+    2026-06-26, runner PASS**
+    (`internal/docs/finished-plans/phase96_finishedplan_failback_frontend_publication_target.md`).
+    The frontend-publication target owner now accepts terminal
+    `SwBlockReplicaFailback.status=failed_back/failback_completed` evidence and
+    creates a disabled `SwBlockFrontendPublication` target with explicit
+    failback-source fields. The executor remains default-off; no frontend path
+    is published.
+54. Add backup/restore and NVMe ANA parity after they can reuse the same action
    owner, evidence, and status model rather than creating another isolated
    control plane.
 
@@ -468,7 +476,12 @@ runtime path require an unrelated HTTP target endpoint. Phase 87 aligns the
 public/internal docs with that source-gated state. Phase 88 packages the
 complete failback target-owner/executor/RPC suite behind explicit Helm values
 and schema coverage, while still deferring the live automatic failback claim to
-a later Kubernetes smoke.
+a later Kubernetes smoke. Phase 89-95 add the current-authority facts,
+activation policy, executor handoff, multi-volume isolation, deployed render,
+real blockmaster gRPC smoke, and finally a live Kubernetes smoke that writes
+terminal `failed_back` evidence. Phase 96 consumes that terminal evidence to
+create a disabled frontend-publication target, keeping actual frontend
+publication and workload-visible path switching as separate later gates.
 
 The practical rule is:
 

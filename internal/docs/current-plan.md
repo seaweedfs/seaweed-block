@@ -1,122 +1,146 @@
-# Current Plan: Phase 95 Failback Live Deployed Suite Smoke
+# Current Plan: Phase 96 Failback -> Frontend Publication Target
 
 Status: complete.
 
 ## Goal
 
-Phase 95 pays the real Kubernetes cost that Phase 94 intentionally deferred:
+Phase 96 connects the terminal failback evidence from Phase 95 into the next
+control object:
 
 ```text
-fresh local images
-install the opt-in failback deployed suite in k3s
-create live first-volume authority state
-inject returned-replica failback terminal evidence into SwBlockVolume.status
-target owner creates an enabled SwBlockReplicaFailback target
-executor calls the live blockmaster FailbackService over gRPC
-executor writes failed_back terminal status
-cleanup leaves zero residue
+SwBlockReplicaFailback.status.state=failed_back
+reasonCode=failback_completed
+publishTargetSwappedAfterFailback=true
+        |
+        v
+SwBlockFrontendPublication target CR
+frontendPublicationDecision=disabled
+frontendPublicationMutationAllowed=false
 ```
 
-This is still **not** a frontend-publication or data-path failback claim. The
-gate proves the deployed authority failback control path can run in Kubernetes.
-Publishing the new frontend path to workload/CSI remains a later phase.
+This is still **not** a workload-visible frontend publication claim. The phase
+only creates a disabled target from terminal failback evidence and proves the
+executor continues to block publication by policy.
 
 ## Deliverables
 
-### D1: Live Gate Script
+### D1: Target-Owner Input Expansion
+
+`FrontendPublicationTargetOwnerReconciler` now reads two input streams:
+
+- `SwBlockReplicaEligibility` for the older ACK-eligibility target path;
+- `SwBlockReplicaFailback` for the returned-replica failback terminal path.
+
+Only terminal failback evidence is accepted:
+
+```text
+state=failed_back
+reasonCode=failback_completed
+failbackMutationAllowed=false
+failbackStarted=true
+authorityEpochAdvanced=true
+singlePrimaryAfterFailback=true
+publishTargetSwappedAfterFailback=true
+noCrossVolumeIdentityChange=true
+```
+
+Non-terminal failback targets are rejected and do not create publication
+targets.
+
+### D2: Frontend Publication Target Schema
+
+`SwBlockFrontendPublication.spec` now has explicit failback-source fields:
+
+```text
+sourceFailbackName
+failbackCompleted
+authorityEpochAdvanced
+singlePrimaryAfterFailback
+publishTargetSwappedAfterFailback
+```
+
+The older `sourceEligibilityName` path remains unchanged. The new fields avoid
+pretending a post-failback target is the same thing as an ACK-eligibility target.
+
+### D3: Executor Boundary
+
+The frontend publication executor recognizes disabled targets from either
+source:
+
+- ACK-eligibility target;
+- terminal failback target.
+
+It still writes blocked/disabled status only unless explicit publication
+execution is separately enabled in a later phase.
+
+### D4: Runner Gate
 
 Added:
 
 ```text
-scripts/run-phase95-failback-live-deployed-suite-gate.sh
+scripts/run-phase96-failback-frontend-publication-target-gate.sh
+testops/scenarios/failback-frontend-publication-target-chain.yaml
 ```
 
-The script:
+The gate asserts:
 
-- builds and imports fresh `sw-block:phase95` / `sw-block-csi:phase95` images;
-- generates Day-1 Helm values for a single-node lab target;
-- enables only the failback suite:
-  - `blockmaster.failbackRuntimeRPC=true`;
-  - `failbackTargetOwner.create=true`;
-  - `failbackTargetOwner.activation.enabled/policy=true`;
-  - `failbackExecutor.create=true`;
-  - `failbackExecutor.execution.enabled/policy=true`;
-  - `failbackExecutor.execution.failbackRuntimeGrpcAddr=blockmaster.<ns>.svc:9333`;
-- installs the chart and waits for blockmaster, failback target owner, and
-  failback executor Deployments;
-- runs the documented first-volume writer/reader path without immediate cleanup;
-- extracts the live volume ID, primary replica, and authority epoch;
-- patches a minimal `SwBlockVolume.status` failback contract with terminal
-  returned-replica evidence;
-- waits for the target owner to create `SwBlockReplicaFailback`;
-- waits for the executor to write `status.state=failed_back`;
-- checks terminal evidence fields and RBAC;
-- uninstalls and verifies cleanup.
-
-### D2: Runner Scenario
-
-Added:
-
-```text
-testops/scenarios/failback-live-deployed-suite-chain.yaml
-```
-
-The scenario runs the live gate on `m02` and asserts terminal summary keys.
+- terminal failback creates exactly one frontend publication target;
+- non-terminal failback is rejected;
+- the target records `sourceFailbackName`;
+- frontend publication remains disabled;
+- frontend publication attempts stay `0`;
+- failback attempts stay `0`;
+- storage mutation stays disallowed.
 
 ## Verification
 
-Local/static checks:
+Local checks:
 
 ```text
-swblock validate testops/scenarios/failback-live-deployed-suite-chain.yaml
-bash -n scripts/run-phase95-failback-live-deployed-suite-gate.sh
+go test ./core/ops ./cmd/sw-block ./core/host/master -count=1
 helm lint charts/seaweed-block
+swblock validate testops/scenarios/failback-frontend-publication-target-chain.yaml
+git diff --check
 ```
 
-Live runner check:
+Runner check:
 
 ```text
-swblock run testops/scenarios/failback-live-deployed-suite-chain.yaml
+swblock run testops/scenarios/failback-frontend-publication-target-chain.yaml
+run=20260626-154640-206b
+result=PASS 16/16
 ```
 
-Expected terminal evidence:
+Terminal evidence:
 
 ```text
-phase95_failback_live_deployed_suite_status=ok
-helm_install=pass
-deployed_suite_pods_ready=true
-first_volume_writer_reader=pass
-swblockvolume_failback_contract_patched=true
-failback_target_created=true
-failback_executor_completed=true
-executor_status_failed_back=true
-master_publisher_epoch_advanced=true
-publish_target_swapped_after_failback=true
-failback_status_mutation_allowed=false
-frontend_publication_after_failback_claimed=false
+phase96_failback_frontend_publication_target_status=ok
+terminal_failed_back_creates_frontend_publication_target=true
+non_terminal_failback_rejected=true
+executor_accepts_failback_target_as_disabled=true
+frontend_publication_target_created_from_failback=true
+frontend_publication_target_source_failback_name=true
+frontend_publication_decision=disabled
+frontend_publication_reason=frontend_publication_policy_disabled
+frontend_publication_mutation_allowed=false
+frontend_publication_attempts=0
+failback_attempts=0
 storage_mutation_allowed=false
-cleanup_status=ok
-```
-
-Validated live:
-
-```text
-swblock run testops/scenarios/failback-live-deployed-suite-chain.yaml
-run=20260626-152618-5993
-result=PASS 22/22
 ```
 
 ## Next
 
-The next boundary is the real frontend handoff after failback:
+The next boundary is explicit-policy frontend publication execution after
+failback. It should remain separate because it is the first step that can make a
+post-failback frontend path visible to workloads.
+
+Expected next scope:
 
 ```text
-failed_back target evidence
-frontend publication target creation
-frontend publication executor remains default-off
-explicit-policy publication writes only the bounded frontend target
-workload-visible path switch gets its own gate
+enabled SwBlockFrontendPublication target
+executor call-site with explicit policy
+terminal frontend publication evidence
+no failback re-entry
+no storage mutation
+then a later workload I/O gate
 ```
-
-That should remain separate because it changes the user-facing data path, while
-Phase 95 only closes the deployed authority call path.

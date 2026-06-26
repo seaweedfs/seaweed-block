@@ -179,6 +179,11 @@ func frontendPublicationExecutorRequiresAuthorityOwner(target SwBlockFrontendPub
 }
 
 func frontendPublicationExecutorTargetValid(target SwBlockFrontendPublicationObject) bool {
+	return frontendPublicationExecutorEligibilityTargetValid(target) ||
+		frontendPublicationExecutorFailbackTargetValid(target)
+}
+
+func frontendPublicationExecutorEligibilityTargetValid(target SwBlockFrontendPublicationObject) bool {
 	spec := target.Spec
 	return spec.VolumeName != "" &&
 		spec.ReplicaID != "" &&
@@ -187,6 +192,21 @@ func frontendPublicationExecutorTargetValid(target SwBlockFrontendPublicationObj
 		spec.FrontendFencedAfterExecution &&
 		spec.PrimaryUnchanged &&
 		spec.DurableFrontierCovered &&
+		spec.NoCrossVolumeIdentityChange &&
+		spec.FrontendPublicationDecision == AuthorityExecutorPublicationDecisionDisabled &&
+		spec.FrontendPublicationReason == AuthorityExecutorFrontendPublicationReasonDisabled &&
+		!spec.FrontendPublicationMutationAllowed
+}
+
+func frontendPublicationExecutorFailbackTargetValid(target SwBlockFrontendPublicationObject) bool {
+	spec := target.Spec
+	return spec.VolumeName != "" &&
+		spec.ReplicaID != "" &&
+		spec.SourceFailbackName != "" &&
+		spec.FailbackCompleted &&
+		spec.AuthorityEpochAdvanced &&
+		spec.SinglePrimaryAfterFailback &&
+		spec.PublishTargetSwappedAfterFailback &&
 		spec.NoCrossVolumeIdentityChange &&
 		spec.FrontendPublicationDecision == AuthorityExecutorPublicationDecisionDisabled &&
 		spec.FrontendPublicationReason == AuthorityExecutorFrontendPublicationReasonDisabled &&

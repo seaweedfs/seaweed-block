@@ -9,6 +9,7 @@ import (
 
 type FrontendPublicationTargetOwnerClient interface {
 	ListSwBlockReplicaEligibilities(ctx context.Context, namespace string) ([]SwBlockReplicaEligibilityObject, error)
+	ListSwBlockReplicaFailbacks(ctx context.Context, namespace string) ([]SwBlockReplicaFailbackObject, error)
 	ListSwBlockFrontendPublications(ctx context.Context, namespace string) ([]SwBlockFrontendPublicationObject, error)
 	CreateSwBlockFrontendPublication(ctx context.Context, namespace string, obj SwBlockFrontendPublicationObject) error
 }
@@ -23,10 +24,13 @@ type FrontendPublicationTargetOwnerReconciler struct {
 type FrontendPublicationTargetOwnerReconcileResult struct {
 	EligibilityCount            int  `json:"eligibilityCount"`
 	ReadyEligibilityCount       int  `json:"readyEligibilityCount"`
+	FailbackCount               int  `json:"failbackCount"`
+	TerminalFailbackCount       int  `json:"terminalFailbackCount"`
 	TargetPlannedCount          int  `json:"targetPlannedCount"`
 	TargetExistingCount         int  `json:"targetExistingCount"`
 	TargetCreateCount           int  `json:"targetCreateCount"`
 	InvalidEligibilityCount     int  `json:"invalidEligibilityCount"`
+	InvalidFailbackCount        int  `json:"invalidFailbackCount"`
 	FrontendPublicationAttempts int  `json:"frontendPublicationAttempts"`
 	FailbackAttempts            int  `json:"failbackAttempts"`
 	StorageMutationAllowed      bool `json:"storageMutationAllowed"`
@@ -41,11 +45,19 @@ func (r FrontendPublicationTargetOwnerReconciler) Reconcile(ctx context.Context)
 	if err != nil {
 		return FrontendPublicationTargetOwnerReconcileResult{}, err
 	}
+	failbacks, err := r.Client.ListSwBlockReplicaFailbacks(ctx, namespace)
+	if err != nil {
+		return FrontendPublicationTargetOwnerReconcileResult{}, err
+	}
 	targets, err := r.Client.ListSwBlockFrontendPublications(ctx, namespace)
 	if err != nil {
 		return FrontendPublicationTargetOwnerReconcileResult{}, err
 	}
-	result := FrontendPublicationTargetOwnerReconcileResult{EligibilityCount: len(eligibilities)}
+	result := FrontendPublicationTargetOwnerReconcileResult{
+		EligibilityCount: len(eligibilities),
+		FailbackCount:    len(failbacks),
+	}
+	planned := append([]SwBlockFrontendPublicationObject(nil), targets...)
 	for _, eligibility := range eligibilities {
 		if !frontendPublicationTargetOwnerEligibilityReady(eligibility) {
 			result.InvalidEligibilityCount++
@@ -53,17 +65,38 @@ func (r FrontendPublicationTargetOwnerReconciler) Reconcile(ctx context.Context)
 		}
 		result.ReadyEligibilityCount++
 		result.TargetPlannedCount++
-		if frontendPublicationTargetOwnerHasTarget(eligibility, targets) {
+		if frontendPublicationTargetOwnerHasTarget(eligibility.Spec.VolumeName, eligibility.Spec.VolumeID, eligibility.Spec.PVCName, eligibility.Spec.ReplicaID, planned) {
 			result.TargetExistingCount++
 			continue
 		}
-		obj := frontendPublicationTargetOwnerObject(namespace, eligibility)
+		obj := frontendPublicationTargetOwnerObjectFromEligibility(namespace, eligibility)
 		if !r.DryRun {
 			if err := r.Client.CreateSwBlockFrontendPublication(ctx, namespace, obj); err != nil {
 				return result, err
 			}
 			result.TargetCreateCount++
 		}
+		planned = append(planned, obj)
+	}
+	for _, failback := range failbacks {
+		if !frontendPublicationTargetOwnerFailbackTerminal(failback) {
+			result.InvalidFailbackCount++
+			continue
+		}
+		result.TerminalFailbackCount++
+		result.TargetPlannedCount++
+		if frontendPublicationTargetOwnerHasTarget(failback.Spec.VolumeName, failback.Spec.VolumeID, failback.Spec.PVCName, failback.Spec.ReplicaID, planned) {
+			result.TargetExistingCount++
+			continue
+		}
+		obj := frontendPublicationTargetOwnerObjectFromFailback(namespace, failback)
+		if !r.DryRun {
+			if err := r.Client.CreateSwBlockFrontendPublication(ctx, namespace, obj); err != nil {
+				return result, err
+			}
+			result.TargetCreateCount++
+		}
+		planned = append(planned, obj)
 	}
 	return result, nil
 }
@@ -83,25 +116,39 @@ func frontendPublicationTargetOwnerEligibilityReady(eligibility SwBlockReplicaEl
 		!status.FrontendPublicationMutationAllowed
 }
 
-func frontendPublicationTargetOwnerHasTarget(eligibility SwBlockReplicaEligibilityObject, targets []SwBlockFrontendPublicationObject) bool {
+func frontendPublicationTargetOwnerFailbackTerminal(failback SwBlockReplicaFailbackObject) bool {
+	status := failback.Status
+	return failback.Spec.VolumeName != "" &&
+		failback.Spec.ReplicaID != "" &&
+		status.State == FailbackStateFailedBack &&
+		status.ReasonCode == AuthorityExecutorFailbackReasonCompleted &&
+		!status.FailbackMutationAllowed &&
+		status.FailbackStarted &&
+		status.AuthorityEpochAdvanced &&
+		status.SinglePrimaryAfterFailback &&
+		status.PublishTargetSwappedAfterFailback &&
+		status.NoCrossVolumeIdentityChange
+}
+
+func frontendPublicationTargetOwnerHasTarget(volumeName, volumeID, pvcName, replicaID string, targets []SwBlockFrontendPublicationObject) bool {
 	for _, target := range targets {
-		if target.Spec.ReplicaID != eligibility.Spec.ReplicaID {
+		if target.Spec.ReplicaID != replicaID {
 			continue
 		}
-		if target.Spec.VolumeName != "" && target.Spec.VolumeName == eligibility.Spec.VolumeName {
+		if target.Spec.VolumeName != "" && target.Spec.VolumeName == volumeName {
 			return true
 		}
-		if target.Spec.VolumeID != "" && target.Spec.VolumeID == eligibility.Spec.VolumeID {
+		if target.Spec.VolumeID != "" && target.Spec.VolumeID == volumeID {
 			return true
 		}
-		if target.Spec.PVCName != "" && target.Spec.PVCName == eligibility.Spec.PVCName {
+		if target.Spec.PVCName != "" && target.Spec.PVCName == pvcName {
 			return true
 		}
 	}
 	return false
 }
 
-func frontendPublicationTargetOwnerObject(namespace string, eligibility SwBlockReplicaEligibilityObject) SwBlockFrontendPublicationObject {
+func frontendPublicationTargetOwnerObjectFromEligibility(namespace string, eligibility SwBlockReplicaEligibilityObject) SwBlockFrontendPublicationObject {
 	status := eligibility.Status
 	return SwBlockFrontendPublicationObject{
 		Ref: OperatorObjectRef{
@@ -125,6 +172,33 @@ func frontendPublicationTargetOwnerObject(namespace string, eligibility SwBlockR
 			FrontendPublicationDecision:        status.FrontendPublicationDecision,
 			FrontendPublicationReason:          status.FrontendPublicationReason,
 			FrontendPublicationMutationAllowed: status.FrontendPublicationMutationAllowed,
+		},
+	}
+}
+
+func frontendPublicationTargetOwnerObjectFromFailback(namespace string, failback SwBlockReplicaFailbackObject) SwBlockFrontendPublicationObject {
+	status := failback.Status
+	return SwBlockFrontendPublicationObject{
+		Ref: OperatorObjectRef{
+			APIVersion: SwBlockVolumeAPIVersion,
+			Kind:       SwBlockFrontendPublicationKind,
+			Namespace:  namespace,
+			Name:       frontendPublicationTargetOwnerName(failback.Spec.VolumeName, failback.Spec.ReplicaID),
+		},
+		Spec: SwBlockFrontendPublicationSpec{
+			VolumeName:                         failback.Spec.VolumeName,
+			VolumeID:                           failback.Spec.VolumeID,
+			PVCName:                            failback.Spec.PVCName,
+			ReplicaID:                          failback.Spec.ReplicaID,
+			SourceFailbackName:                 failback.Ref.Name,
+			NoCrossVolumeIdentityChange:        status.NoCrossVolumeIdentityChange,
+			FailbackCompleted:                  status.State == FailbackStateFailedBack && status.ReasonCode == AuthorityExecutorFailbackReasonCompleted,
+			AuthorityEpochAdvanced:             status.AuthorityEpochAdvanced,
+			SinglePrimaryAfterFailback:         status.SinglePrimaryAfterFailback,
+			PublishTargetSwappedAfterFailback:  status.PublishTargetSwappedAfterFailback,
+			FrontendPublicationDecision:        AuthorityExecutorPublicationDecisionDisabled,
+			FrontendPublicationReason:          AuthorityExecutorFrontendPublicationReasonDisabled,
+			FrontendPublicationMutationAllowed: false,
 		},
 	}
 }

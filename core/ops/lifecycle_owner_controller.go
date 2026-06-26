@@ -71,12 +71,17 @@ type SwBlockFrontendPublicationSpec struct {
 	PVCName                            string `json:"pvcName,omitempty"`
 	ReplicaID                          string `json:"replicaID,omitempty"`
 	SourceEligibilityName              string `json:"sourceEligibilityName,omitempty"`
+	SourceFailbackName                 string `json:"sourceFailbackName,omitempty"`
 	AckEligibilityKnown                bool   `json:"ackEligibilityKnown"`
 	AckEligible                        bool   `json:"ackEligible"`
 	FrontendFencedAfterExecution       bool   `json:"frontendFencedAfterExecution"`
 	PrimaryUnchanged                   bool   `json:"primaryUnchanged"`
 	DurableFrontierCovered             bool   `json:"durableFrontierCovered"`
 	NoCrossVolumeIdentityChange        bool   `json:"noCrossVolumeIdentityChange"`
+	FailbackCompleted                  bool   `json:"failbackCompleted"`
+	AuthorityEpochAdvanced             bool   `json:"authorityEpochAdvanced"`
+	SinglePrimaryAfterFailback         bool   `json:"singlePrimaryAfterFailback"`
+	PublishTargetSwappedAfterFailback  bool   `json:"publishTargetSwappedAfterFailback"`
 	FrontendPublicationDecision        string `json:"frontendPublicationDecision,omitempty"`
 	FrontendPublicationReason          string `json:"frontendPublicationReason,omitempty"`
 	FrontendPublicationMutationAllowed bool   `json:"frontendPublicationMutationAllowed"`

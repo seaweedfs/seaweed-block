@@ -329,15 +329,18 @@ func runOpsFrontendPublicationTargetOwner(args []string, stdout, stderr io.Write
 		if dryRun {
 			mode = "dry_run"
 		}
-		fmt.Fprintf(stdout, "frontend_publication_target_owner=%s namespace=%s eligibilities=%d ready_eligibilities=%d targets_planned=%d targets_existing=%d targets_created=%d invalid_eligibilities=%d frontend_publication_attempts=%d failback_attempts=%d mutation_allowed=%t storage_mutation_allowed=%t\n",
+		fmt.Fprintf(stdout, "frontend_publication_target_owner=%s namespace=%s eligibilities=%d ready_eligibilities=%d failbacks=%d terminal_failbacks=%d targets_planned=%d targets_existing=%d targets_created=%d invalid_eligibilities=%d invalid_failbacks=%d frontend_publication_attempts=%d failback_attempts=%d mutation_allowed=%t storage_mutation_allowed=%t\n",
 			mode,
 			namespace,
 			result.EligibilityCount,
 			result.ReadyEligibilityCount,
+			result.FailbackCount,
+			result.TerminalFailbackCount,
 			result.TargetPlannedCount,
 			result.TargetExistingCount,
 			result.TargetCreateCount,
 			result.InvalidEligibilityCount,
+			result.InvalidFailbackCount,
 			result.FrontendPublicationAttempts,
 			result.FailbackAttempts,
 			!dryRun && result.TargetCreateCount > 0,

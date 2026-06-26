@@ -204,8 +204,8 @@ failbackExecutor:
 frontendPublicationTargetOwner:
   # Frontend publication target owner. Disabled by default. When enabled it
   # creates SwBlockFrontendPublication target CRs from terminal ACK eligibility
-  # evidence. It does not publish frontend paths, fail back authority, write
-  # status, or mutate storage.
+  # evidence or terminal failed_back failback evidence. It does not publish
+  # frontend paths, fail back authority, write status, or mutate storage.
   create: false
   dryRun: true
   interval: 30s
