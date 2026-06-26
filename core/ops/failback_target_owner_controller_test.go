@@ -37,6 +37,8 @@ func TestFailbackTargetOwnerCreatesTargetFromReadyContract(t *testing.T) {
 		created.Spec.ReplicaID != "r1" ||
 		created.Spec.TargetDataAddr != "data-r1" ||
 		created.Spec.TargetCtrlAddr != "ctrl-r1" ||
+		created.Spec.ExpectedCurrentReplicaID != "r2" ||
+		created.Spec.ExpectedCurrentEpoch != 7 ||
 		!created.Spec.AckEligible ||
 		!created.Spec.FrontendFencedBeforeFailback ||
 		!created.Spec.DurableFrontierCovered ||
@@ -45,6 +47,30 @@ func TestFailbackTargetOwnerCreatesTargetFromReadyContract(t *testing.T) {
 		created.Spec.FailbackReason != AuthorityExecutorFailbackReasonDisabled ||
 		created.Spec.FailbackMutationAllowed {
 		t.Fatalf("created=%+v", created)
+	}
+}
+
+func TestFailbackTargetOwnerRequiresCurrentAuthorityFacts(t *testing.T) {
+	volume := failbackTargetOwnerTestVolume()
+	volume.Status.PrimaryReplicaID = ""
+	volume.Status.AuthorityEpoch = 0
+	client := &fakeFailbackTargetOwnerClient{volumes: []SwBlockVolumeObject{volume}}
+
+	result, err := (FailbackTargetOwnerReconciler{
+		Namespace: "kube-system",
+		Client:    client,
+	}).Reconcile(context.Background())
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if result.AuthorityFactsMissing != 1 ||
+		result.TargetPlannedCount != 0 ||
+		result.TerminalEvidenceReady != 0 ||
+		result.TargetCreateCount != 0 {
+		t.Fatalf("result=%+v", result)
+	}
+	if len(client.creates) != 0 {
+		t.Fatalf("missing authority facts created target=%+v", client.creates)
 	}
 }
 
@@ -134,8 +160,10 @@ func failbackTargetOwnerTestVolume() SwBlockVolumeObject {
 			Name:       "demo-pvc",
 		},
 		Status: SwBlockVolumeCRDStatus{
-			VolumeID: "pvc-demo",
-			PVCName:  "demo-pvc",
+			VolumeID:         "pvc-demo",
+			PVCName:          "demo-pvc",
+			PrimaryReplicaID: "r2",
+			AuthorityEpoch:   7,
 			ReplicaReintegrations: []SwBlockVolumeCRDReturnedReplica{{
 				ReplicaID:             "r1",
 				State:                 ReturnedReplicaStateFenced,

@@ -734,10 +734,11 @@ Approximate engineering effort if scope remains tight:
   `authorityEndpointVersion`; operator-snapshot and summary surfaces expose the
   same facts. These fields are the observed inputs for the next failback target
   activation phase.
-- Phase 90 should use the Phase 89 authority facts to activate
-  `SwBlockReplicaFailback` targets with explicit expected-current replica and
-  epoch, while preserving the non-claims that frontend publication and automatic
-  failback remain disabled until their own gates pass.
+- Phase 90 Failback Target Authority Gate is closed. The target owner now
+  refuses to create a target without current `SwBlockVolume.status` authority
+  facts and stamps `expectedCurrentReplicaID` / `expectedCurrentEpoch` onto
+  created disabled targets, while preserving the non-claims that frontend
+  publication and automatic failback remain disabled until their own gates pass.
 - Phase 41-44 are the Operation Layer v0.5 release train: lifecycle-owner
   foundation, real API/admission proof, first bounded finalizer mutation, and
   delete lifecycle close gate.

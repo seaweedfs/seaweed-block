@@ -1076,6 +1076,8 @@ func TestOpsFailbackTargetOwnerCreatesTarget(t *testing.T) {
 		created.Spec.ReplicaID != "r1" ||
 		created.Spec.TargetDataAddr != "data-r1" ||
 		created.Spec.TargetCtrlAddr != "ctrl-r1" ||
+		created.Spec.ExpectedCurrentReplicaID != "r2" ||
+		created.Spec.ExpectedCurrentEpoch != 7 ||
 		!created.Spec.AckEligible ||
 		!created.Spec.FrontendFencedBeforeFailback ||
 		!created.Spec.DurableFrontierCovered ||
@@ -2062,8 +2064,10 @@ func cmdFailbackTargetVolume() ops.SwBlockVolumeObject {
 			Name:       "demo-pvc",
 		},
 		Status: ops.SwBlockVolumeCRDStatus{
-			VolumeID: "pvc-demo",
-			PVCName:  "demo-pvc",
+			VolumeID:         "pvc-demo",
+			PVCName:          "demo-pvc",
+			PrimaryReplicaID: "r2",
+			AuthorityEpoch:   7,
 			ReplicaReintegrations: []ops.SwBlockVolumeCRDReturnedReplica{{
 				ReplicaID:             "r1",
 				State:                 ops.ReturnedReplicaStateFenced,

@@ -542,6 +542,9 @@ control-plane path is mature.
    - current authority facts are visible in `SwBlockVolume.status`
      (`primaryReplicaID`, `publishTarget`, `authorityEpoch`) before any
      failback activation path consumes them
+   - failback handoff targets carry `expectedCurrentReplicaID` and
+     `expectedCurrentEpoch` from volume status, while failback execution and
+     frontend publication remain separate opt-in gates
 
 4. Flow-control and pressure behavior.
 

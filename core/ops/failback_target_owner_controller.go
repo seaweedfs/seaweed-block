@@ -27,6 +27,7 @@ type FailbackTargetOwnerReconcileResult struct {
 	TargetExistingCount        int  `json:"targetExistingCount"`
 	TargetCreateCount          int  `json:"targetCreateCount"`
 	InvalidContractCount       int  `json:"invalidContractCount"`
+	AuthorityFactsMissing      int  `json:"authorityFactsMissing"`
 	TerminalEvidenceReady      int  `json:"terminalEvidenceReady"`
 	TerminalEvidenceMissing    int  `json:"terminalEvidenceMissing"`
 	FailbackAttempts           int  `json:"failbackAttempts"`
@@ -56,6 +57,10 @@ func (r FailbackTargetOwnerReconciler) Reconcile(ctx context.Context) (FailbackT
 			result.ContractCount++
 			if !failbackTargetOwnerContractReady(contract) {
 				result.InvalidContractCount++
+				continue
+			}
+			if !failbackTargetOwnerAuthorityFactsReady(volume) {
+				result.AuthorityFactsMissing++
 				continue
 			}
 			returned, ok := failbackTargetOwnerReturnedReplica(volume, contract)
@@ -88,6 +93,10 @@ func failbackTargetOwnerContractReady(contract SwBlockVolumeCRDExecutorContract)
 		contract.PreflightReason == ReturnedReplicaExecutorPreflightReasonSatisfied &&
 		authorityExecutorStringSliceContains(contract.AllowedMutationClass, "failback") &&
 		contract.ReplicaID != ""
+}
+
+func failbackTargetOwnerAuthorityFactsReady(volume SwBlockVolumeObject) bool {
+	return volume.Status.PrimaryReplicaID != "" && volume.Status.AuthorityEpoch != 0
 }
 
 func failbackTargetOwnerReturnedReplica(volume SwBlockVolumeObject, contract SwBlockVolumeCRDExecutorContract) (SwBlockVolumeCRDReturnedReplica, bool) {
@@ -142,6 +151,8 @@ func failbackTargetOwnerObject(namespace string, volume SwBlockVolumeObject, con
 			ReplicaID:                    contract.ReplicaID,
 			TargetDataAddr:               returned.TargetDataAddr,
 			TargetCtrlAddr:               returned.TargetCtrlAddr,
+			ExpectedCurrentReplicaID:     volume.Status.PrimaryReplicaID,
+			ExpectedCurrentEpoch:         volume.Status.AuthorityEpoch,
 			AckEligible:                  returned.AckEligibilityKnown && returned.AckEligible,
 			FrontendFencedBeforeFailback: returned.FrontendFenced && !returned.FrontendPrimaryReady,
 			DurableFrontierCovered:       returned.DurableFrontierKnown && returned.RequiredFrontierKnown && returned.DurableFrontierLSN >= returned.RequiredFrontierLSN,
