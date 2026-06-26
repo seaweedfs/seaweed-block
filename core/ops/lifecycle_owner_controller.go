@@ -83,6 +83,41 @@ type SwBlockFrontendPublicationSpec struct {
 	RuntimeEndpoint                    string `json:"runtimeEndpoint,omitempty"`
 }
 
+type SwBlockReplicaFailbackObject struct {
+	Ref    OperatorObjectRef               `json:"ref"`
+	Spec   SwBlockReplicaFailbackSpec      `json:"spec,omitempty"`
+	Status SwBlockReplicaFailbackCRDStatus `json:"status,omitempty"`
+}
+
+type SwBlockReplicaFailbackSpec struct {
+	VolumeName                   string `json:"volumeName,omitempty"`
+	VolumeID                     string `json:"volumeID,omitempty"`
+	PVCName                      string `json:"pvcName,omitempty"`
+	ReplicaID                    string `json:"replicaID,omitempty"`
+	AckEligible                  bool   `json:"ackEligible"`
+	FrontendFencedBeforeFailback bool   `json:"frontendFencedBeforeFailback"`
+	DurableFrontierCovered       bool   `json:"durableFrontierCovered"`
+	NoCrossVolumeIdentityChange  bool   `json:"noCrossVolumeIdentityChange"`
+}
+
+type SwBlockReplicaFailbackCRDStatus struct {
+	ObservedAt                        time.Time              `json:"observedAt,omitempty"`
+	ObservedGeneration                int64                  `json:"observedGeneration,omitempty"`
+	Executor                          string                 `json:"executor,omitempty"`
+	State                             string                 `json:"state,omitempty"`
+	ReasonCode                        string                 `json:"reasonCode,omitempty"`
+	FailbackMutationAllowed           bool                   `json:"failbackMutationAllowed"`
+	FailbackStarted                   bool                   `json:"failbackStarted"`
+	AuthorityEpochAdvanced            bool                   `json:"authorityEpochAdvanced"`
+	SinglePrimaryAfterFailback        bool                   `json:"singlePrimaryAfterFailback"`
+	PublishTargetSwappedAfterFailback bool                   `json:"publishTargetSwappedAfterFailback"`
+	NoCrossVolumeIdentityChange       bool                   `json:"noCrossVolumeIdentityChange"`
+	EvidenceGeneration                string                 `json:"evidenceGeneration,omitempty"`
+	Conditions                        []ObservationCondition `json:"conditions,omitempty"`
+	EvidenceRefs                      []string               `json:"evidenceRefs,omitempty"`
+	NonClaims                         []string               `json:"nonClaims,omitempty"`
+}
+
 type SwBlockFrontendPublicationCRDStatus struct {
 	ObservedAt                  time.Time              `json:"observedAt,omitempty"`
 	ObservedGeneration          int64                  `json:"observedGeneration,omitempty"`

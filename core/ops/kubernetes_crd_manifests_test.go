@@ -541,6 +541,91 @@ func TestPhase69SwBlockFrontendPublicationTargetSchema(t *testing.T) {
 	}
 }
 
+func TestPhase75SwBlockReplicaFailbackTargetSchema(t *testing.T) {
+	doc := readYAMLMap(t, "charts/seaweed-block/crds/swblockreplicafailbacks.block.seaweedfs.com.yaml")
+	spec := yamlMap(t, doc, "spec")
+	names := yamlMap(t, spec, "names")
+	assertYAMLString(t, names, "kind", SwBlockReplicaFailbackKind)
+	assertYAMLString(t, names, "plural", SwBlockReplicaFailbackPlural)
+	assertYAMLString(t, names, "singular", SwBlockReplicaFailbackSingular)
+
+	version := yamlMapFromValue(t, yamlSlice(t, spec, "versions")[0])
+	if _, ok := yamlMap(t, version, "subresources")["status"]; !ok {
+		t.Fatalf("%s missing status subresource", SwBlockReplicaFailbackKind)
+	}
+
+	rootProperties := yamlMap(t,
+		yamlMap(t,
+			yamlMap(t, version, "schema"),
+			"openAPIV3Schema"),
+		"properties")
+	specProperties := yamlMap(t, yamlMap(t, rootProperties, "spec"), "properties")
+	for _, want := range []string{
+		"volumeName",
+		"volumeID",
+		"pvcName",
+		"replicaID",
+		"ackEligible",
+		"frontendFencedBeforeFailback",
+		"durableFrontierCovered",
+		"noCrossVolumeIdentityChange",
+	} {
+		if _, ok := specProperties[want]; !ok {
+			t.Fatalf("%s.spec schema missing %s", SwBlockReplicaFailbackKind, want)
+		}
+	}
+	required := yamlStringSet(t, yamlMap(t, rootProperties, "spec"), "required")
+	for _, want := range []string{"volumeName", "replicaID"} {
+		if !required[want] {
+			t.Fatalf("%s.spec required missing %s: %+v", SwBlockReplicaFailbackKind, want, required)
+		}
+	}
+
+	statusProperties := yamlMap(t, yamlMap(t, rootProperties, "status"), "properties")
+	for _, want := range []string{
+		"observedAt",
+		"observedGeneration",
+		"executor",
+		"state",
+		"reasonCode",
+		"failbackMutationAllowed",
+		"failbackStarted",
+		"authorityEpochAdvanced",
+		"singlePrimaryAfterFailback",
+		"publishTargetSwappedAfterFailback",
+		"noCrossVolumeIdentityChange",
+		"evidenceGeneration",
+		"conditions",
+		"evidenceRefs",
+		"nonClaims",
+	} {
+		if _, ok := statusProperties[want]; !ok {
+			t.Fatalf("%s.status schema missing %s", SwBlockReplicaFailbackKind, want)
+		}
+	}
+	stateEnum := yamlStringSet(t, yamlMap(t, statusProperties, "state"), "enum")
+	for _, want := range []string{"planned", "blocked", "failed_back"} {
+		if !stateEnum[want] {
+			t.Fatalf("%s.status.state enum missing %s: %+v", SwBlockReplicaFailbackKind, want, stateEnum)
+		}
+	}
+	for _, forbidden := range []string{
+		"ack_eligible",
+		"frontend_fenced_before_failback",
+		"failback_mutation_allowed",
+		"publish_target_swapped_after_failback",
+		"frontendPublished",
+		"rebuildTrafficStarted",
+	} {
+		if _, ok := specProperties[forbidden]; ok {
+			t.Fatalf("%s.spec leaked forbidden field %s", SwBlockReplicaFailbackKind, forbidden)
+		}
+		if _, ok := statusProperties[forbidden]; ok {
+			t.Fatalf("%s.status leaked forbidden field %s", SwBlockReplicaFailbackKind, forbidden)
+		}
+	}
+}
+
 func TestOperatorStatusRBACIsStatusEventsOnly(t *testing.T) {
 	raw := readRepoFile(t, "charts/seaweed-block/templates/operator-status-rbac.yaml")
 	required := []string{
@@ -753,6 +838,62 @@ func TestPhase58RebuildTargetOwnerPackagingIsNarrow(t *testing.T) {
 	} {
 		if strings.Contains(rbac, forbidden) {
 			t.Fatalf("rebuild-target-owner RBAC contains forbidden fragment %q\n%s", forbidden, rbac)
+		}
+	}
+}
+
+func TestPhase75FailbackTargetOwnerPackagingIsNarrow(t *testing.T) {
+	values := readYAMLMap(t, "charts/seaweed-block/values.yaml")
+	targetOwner := yamlMap(t, values, "failbackTargetOwner")
+	assertYAMLBool(t, targetOwner, "create", false)
+	assertYAMLBool(t, targetOwner, "dryRun", true)
+	rbacValues := yamlMap(t, targetOwner, "rbac")
+	assertYAMLBool(t, rbacValues, "create", true)
+
+	deploy := readRepoFile(t, "charts/seaweed-block/templates/failback-target-owner.yaml")
+	for _, want := range []string{
+		`kind: Deployment`,
+		`name: sw-block-failback-target-owner`,
+		`serviceAccountName: {{ include "seaweed-block.fullname" . }}-failback-target-owner`,
+		`command: ["/usr/local/bin/sw-block"]`,
+		`- "failback-target-owner"`,
+		`- "--namespace={{ .Release.Namespace }}"`,
+		`{{- if .Values.failbackTargetOwner.dryRun }}`,
+		`- "--dry-run"`,
+		`- "--interval={{ .Values.failbackTargetOwner.interval }}"`,
+	} {
+		if !strings.Contains(deploy, want) {
+			t.Fatalf("failback-target-owner deployment missing %q\n%s", want, deploy)
+		}
+	}
+
+	rbac := readRepoFile(t, "charts/seaweed-block/templates/failback-target-owner-rbac.yaml")
+	for _, want := range []string{
+		`resources: ["swblockvolumes"]`,
+		`verbs: ["get", "list", "watch"]`,
+		`resources: ["swblockreplicafailbacks"]`,
+		`verbs: ["get", "list", "watch", "create"]`,
+	} {
+		if !strings.Contains(rbac, want) {
+			t.Fatalf("failback-target-owner RBAC missing %q\n%s", want, rbac)
+		}
+	}
+	for _, forbidden := range []string{
+		`resources: ["swblockvolumes/status"]`,
+		`resources: ["swblockvolumes/finalizers"]`,
+		`resources: ["swblockreplicafailbacks/status"]`,
+		`resources: ["events"]`,
+		`resources: ["pods"]`,
+		`resources: ["persistentvolumes"]`,
+		`resources: ["persistentvolumeclaims"]`,
+		`resources: ["storageclasses"]`,
+		`resources: ["secrets"]`,
+		`"update"`,
+		`"patch"`,
+		`"delete"`,
+	} {
+		if strings.Contains(rbac, forbidden) {
+			t.Fatalf("failback-target-owner RBAC contains forbidden fragment %q\n%s", forbidden, rbac)
 		}
 	}
 }

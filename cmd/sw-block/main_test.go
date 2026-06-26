@@ -1050,6 +1050,90 @@ func TestOpsRebuildTargetOwnerDoesNotCreateTargetWhenRuntimeFactsMissing(t *test
 	}
 }
 
+func TestOpsFailbackTargetOwnerCreatesTarget(t *testing.T) {
+	client := &lifecycleOwnerTestClient{
+		volumes: []ops.SwBlockVolumeObject{cmdFailbackTargetVolume()},
+	}
+	oldFactory := opsFailbackTargetOwnerClientFactory
+	opsFailbackTargetOwnerClientFactory = func() (ops.FailbackTargetOwnerClient, error) {
+		return client, nil
+	}
+	t.Cleanup(func() { opsFailbackTargetOwnerClientFactory = oldFactory })
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ops", "failback-target-owner", "--namespace", "kube-system"}, &stdout, &stderr)
+	if code != ops.VolumeStatusExitOK {
+		t.Fatalf("exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	if len(client.failbackCreates) != 1 {
+		t.Fatalf("failbackCreates=%+v", client.failbackCreates)
+	}
+	created := client.failbackCreates[0]
+	if created.Ref.Name != "demo-pvc-r1-failback" ||
+		created.Spec.VolumeName != "demo-pvc" ||
+		created.Spec.VolumeID != "pvc-demo" ||
+		created.Spec.PVCName != "demo-pvc" ||
+		created.Spec.ReplicaID != "r1" ||
+		!created.Spec.AckEligible ||
+		!created.Spec.FrontendFencedBeforeFailback ||
+		!created.Spec.DurableFrontierCovered ||
+		!created.Spec.NoCrossVolumeIdentityChange {
+		t.Fatalf("created=%+v", created)
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"failback_target_owner=target_mutation",
+		"namespace=kube-system",
+		"volumes=1",
+		"contracts=1",
+		"targets_planned=1",
+		"targets_existing=0",
+		"targets_created=1",
+		"terminal_evidence_ready=1",
+		"terminal_evidence_missing=0",
+		"failback_attempts=0",
+		"mutation_allowed=true",
+		"storage_mutation_allowed=false",
+		"frontend_publication_allowed=false",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("stdout missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestOpsFailbackTargetOwnerDryRunDoesNotCreateTarget(t *testing.T) {
+	client := &lifecycleOwnerTestClient{
+		volumes: []ops.SwBlockVolumeObject{cmdFailbackTargetVolume()},
+	}
+	oldFactory := opsFailbackTargetOwnerClientFactory
+	opsFailbackTargetOwnerClientFactory = func() (ops.FailbackTargetOwnerClient, error) {
+		return client, nil
+	}
+	t.Cleanup(func() { opsFailbackTargetOwnerClientFactory = oldFactory })
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ops", "failback-target-owner", "--dry-run", "--namespace", "kube-system"}, &stdout, &stderr)
+	if code != ops.VolumeStatusExitOK {
+		t.Fatalf("exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	if len(client.failbackCreates) != 0 {
+		t.Fatalf("dry-run creates=%+v", client.failbackCreates)
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"failback_target_owner=dry_run",
+		"targets_planned=1",
+		"targets_created=0",
+		"terminal_evidence_ready=1",
+		"mutation_allowed=false",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("stdout missing %q:\n%s", want, out)
+		}
+	}
+}
+
 func TestOpsFrontendPublicationTargetOwnerCreatesTarget(t *testing.T) {
 	client := &lifecycleOwnerTestClient{
 		eligibilities: []ops.SwBlockReplicaEligibilityObject{cmdFrontendPublicationEligibility()},
@@ -1635,6 +1719,42 @@ func cmdFrontendPublicationTarget() ops.SwBlockFrontendPublicationObject {
 	}
 }
 
+func cmdFailbackTargetVolume() ops.SwBlockVolumeObject {
+	return ops.SwBlockVolumeObject{
+		Ref: ops.OperatorObjectRef{
+			APIVersion: ops.SwBlockVolumeAPIVersion,
+			Kind:       ops.SwBlockVolumeKind,
+			Namespace:  "kube-system",
+			Name:       "demo-pvc",
+		},
+		Status: ops.SwBlockVolumeCRDStatus{
+			VolumeID: "pvc-demo",
+			PVCName:  "demo-pvc",
+			ReplicaReintegrations: []ops.SwBlockVolumeCRDReturnedReplica{{
+				ReplicaID:             "r1",
+				State:                 ops.ReturnedReplicaStateFenced,
+				FrontendFenced:        true,
+				FrontendPrimaryReady:  false,
+				AckEligibilityKnown:   true,
+				AckEligible:           true,
+				DurableFrontierKnown:  true,
+				DurableFrontierLSN:    52,
+				RequiredFrontierKnown: true,
+				RequiredFrontierLSN:   52,
+			}},
+			ExecutorContracts: []ops.SwBlockVolumeCRDExecutorContract{{
+				ActionType:           ops.ManagedVolumeActionFailbackReturned,
+				ReplicaID:            "r1",
+				Decision:             ops.ReturnedReplicaExecutorContractDisabled,
+				Reason:               ops.ReturnedReplicaExecutorContractReasonExecutorDisabled,
+				PreflightDecision:    ops.ReturnedReplicaExecutorPreflightReady,
+				PreflightReason:      ops.ReturnedReplicaExecutorPreflightReasonSatisfied,
+				AllowedMutationClass: []string{"failback"},
+			}},
+		},
+	}
+}
+
 func (w *operatorStatusTestWriter) WriteClusterStatus(_ context.Context, _ ops.OperatorObjectRef, status ops.SwBlockClusterCRDStatus) error {
 	w.cluster = status
 	return nil
@@ -1649,12 +1769,14 @@ type lifecycleOwnerTestClient struct {
 	volumes                         []ops.SwBlockVolumeObject
 	eligibilities                   []ops.SwBlockReplicaEligibilityObject
 	rebuilds                        []ops.SwBlockReplicaRebuildObject
+	failbacks                       []ops.SwBlockReplicaFailbackObject
 	frontendTargets                 []ops.SwBlockFrontendPublicationObject
 	patches                         []lifecycleOwnerTestPatch
 	events                          []ops.OperatorKubernetesEvent
 	eligibilityWrites               []lifecycleOwnerTestEligibilityWrite
 	rebuildWrites                   []lifecycleOwnerTestRebuildWrite
 	rebuildCreates                  []ops.SwBlockReplicaRebuildObject
+	failbackCreates                 []ops.SwBlockReplicaFailbackObject
 	frontendPublicationCreates      []ops.SwBlockFrontendPublicationObject
 	frontendPublicationStatusWrites []lifecycleOwnerTestFrontendPublicationWrite
 }
@@ -1691,6 +1813,10 @@ func (c *lifecycleOwnerTestClient) ListSwBlockReplicaRebuilds(_ context.Context,
 	return append([]ops.SwBlockReplicaRebuildObject(nil), c.rebuilds...), nil
 }
 
+func (c *lifecycleOwnerTestClient) ListSwBlockReplicaFailbacks(_ context.Context, _ string) ([]ops.SwBlockReplicaFailbackObject, error) {
+	return append([]ops.SwBlockReplicaFailbackObject(nil), c.failbacks...), nil
+}
+
 func (c *lifecycleOwnerTestClient) ListSwBlockFrontendPublications(_ context.Context, _ string) ([]ops.SwBlockFrontendPublicationObject, error) {
 	return append([]ops.SwBlockFrontendPublicationObject(nil), c.frontendTargets...), nil
 }
@@ -1712,6 +1838,11 @@ func (c *lifecycleOwnerTestClient) WriteFrontendPublicationStatus(_ context.Cont
 
 func (c *lifecycleOwnerTestClient) CreateSwBlockReplicaRebuild(_ context.Context, _ string, obj ops.SwBlockReplicaRebuildObject) error {
 	c.rebuildCreates = append(c.rebuildCreates, obj)
+	return nil
+}
+
+func (c *lifecycleOwnerTestClient) CreateSwBlockReplicaFailback(_ context.Context, _ string, obj ops.SwBlockReplicaFailbackObject) error {
+	c.failbackCreates = append(c.failbackCreates, obj)
 	return nil
 }
 

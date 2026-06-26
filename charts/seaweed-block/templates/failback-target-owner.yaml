@@ -1,0 +1,39 @@
+{{- if .Values.failbackTargetOwner.create }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sw-block-failback-target-owner
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "seaweed-block.labels" . | nindent 4 }}
+    app: sw-block-failback-target-owner
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sw-block-failback-target-owner
+  template:
+    metadata:
+      labels:
+        app: sw-block-failback-target-owner
+        {{- include "seaweed-block.labels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "seaweed-block.fullname" . }}-failback-target-owner
+      {{- with .Values.failbackTargetOwner.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: failback-target-owner
+          image: {{ include "seaweed-block.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/usr/local/bin/sw-block"]
+          args:
+            - "ops"
+            - "failback-target-owner"
+            - "--namespace={{ .Release.Namespace }}"
+            {{- if .Values.failbackTargetOwner.dryRun }}
+            - "--dry-run"
+            {{- end }}
+            - "--interval={{ .Values.failbackTargetOwner.interval }}"
+{{- end }}

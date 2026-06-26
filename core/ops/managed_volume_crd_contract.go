@@ -13,6 +13,9 @@ const (
 	SwBlockFrontendPublicationKind     = "SwBlockFrontendPublication"
 	SwBlockFrontendPublicationPlural   = "swblockfrontendpublications"
 	SwBlockFrontendPublicationSingular = "swblockfrontendpublication"
+	SwBlockReplicaFailbackKind         = "SwBlockReplicaFailback"
+	SwBlockReplicaFailbackPlural       = "swblockreplicafailbacks"
+	SwBlockReplicaFailbackSingular     = "swblockreplicafailback"
 
 	ConditionReady           = "Ready"
 	ConditionRecovered       = "Recovered"

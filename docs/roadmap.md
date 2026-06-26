@@ -281,7 +281,16 @@ Recommended order from here:
     It names `failback` as the future mutation envelope, requires terminal
     evidence for authority ownership, epoch advance, single-primary state, and
     publish-target swap, and still performs no failback or frontend publication.
-32. Add backup/restore and NVMe ANA parity after they can reuse the same action
+32. Phase 75: returned-replica failback target owner. **Closed 2026-06-25, local PASS**
+    (`internal/docs/finished-plans/phase75_finishedplan_failback_target_owner.md`).
+    A disabled-by-default target owner can convert a ready
+    `authority.failback_returned_replica` contract into a
+    `SwBlockReplicaFailback` handoff CR only after ACK eligibility, frontend
+    fencing, durable-frontier coverage, and identity-isolation evidence are
+    present. It can create the target object only; it cannot write status,
+    finalizers, Events, storage/workloads, authority state, frontend
+    publication, or failback execution.
+33. Add backup/restore and NVMe ANA parity after they can reuse the same action
    owner, evidence, and status model rather than creating another isolated
    control plane.
 
@@ -302,7 +311,9 @@ and then deliberately constrain frontend publication: the generic runtime seam
 exists, but returned-replica publication remains blocked until a real
 authority/failback owner is implemented and gated. Phase 74 names that missing
 owner contract explicitly as `authority.failback_returned_replica` while
-keeping execution disabled.
+keeping execution disabled. Phase 75 adds the first target-owner seam for that
+contract: `SwBlockReplicaFailback` can be planned as a handoff object, but no
+failback, authority mutation, or frontend publication is executed.
 
 The practical rule is:
 

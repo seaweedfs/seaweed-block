@@ -54,6 +54,9 @@ var (
 	opsRebuildTargetOwnerClientFactory = func() (ops.RebuildTargetOwnerClient, error) {
 		return ops.NewInClusterKubernetesStatusClient()
 	}
+	opsFailbackTargetOwnerClientFactory = func() (ops.FailbackTargetOwnerClient, error) {
+		return ops.NewInClusterKubernetesStatusClient()
+	}
 	opsFrontendPublicationTargetOwnerClientFactory = func() (ops.FrontendPublicationTargetOwnerClient, error) {
 		return ops.NewInClusterKubernetesStatusClient()
 	}
@@ -77,7 +80,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return ops.VolumeStatusExitInvalid
 	}
 	if len(args) < 2 {
-		fmt.Fprintln(stderr, "sw-block: expected subcommand ops status|inventory|list|cluster|volumes|describe|timeline|explain|report|dashboard|generate-helm-values|operator-status|lifecycle-owner|authority-executor|rebuild-target-owner|frontend-publication-target-owner|frontend-publication-executor")
+		fmt.Fprintln(stderr, "sw-block: expected subcommand ops status|inventory|list|cluster|volumes|describe|timeline|explain|report|dashboard|generate-helm-values|operator-status|lifecycle-owner|authority-executor|rebuild-target-owner|failback-target-owner|frontend-publication-target-owner|frontend-publication-executor")
 		usage(stderr)
 		return ops.VolumeStatusExitInvalid
 	}
@@ -110,6 +113,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runOpsAuthorityExecutor(args[2:], stdout, stderr)
 	case "rebuild-target-owner":
 		return runOpsRebuildTargetOwner(args[2:], stdout, stderr)
+	case "failback-target-owner":
+		return runOpsFailbackTargetOwner(args[2:], stdout, stderr)
 	case "frontend-publication-target-owner":
 		return runOpsFrontendPublicationTargetOwner(args[2:], stdout, stderr)
 	case "frontend-publication-executor":
@@ -306,6 +311,72 @@ func runOpsRebuildTargetOwner(args []string, stdout, stderr io.Writer) int {
 		code := runOnce()
 		if code != ops.VolumeStatusExitOK {
 			fmt.Fprintf(stderr, "sw-block ops rebuild-target-owner: iteration failed exit=%d; retrying in %s\n", code, interval)
+		}
+		time.Sleep(interval)
+	}
+}
+
+func runOpsFailbackTargetOwner(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("sw-block ops failback-target-owner", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	var (
+		dryRun    bool
+		namespace string
+		interval  time.Duration
+	)
+	fs.BoolVar(&dryRun, "dry-run", false, "evaluate failback target planning without creating SwBlockReplicaFailback objects")
+	fs.StringVar(&namespace, "namespace", "default", "Kubernetes namespace containing SwBlockVolume objects")
+	fs.DurationVar(&interval, "interval", 0, "repeat failback-target-owner reconciliation at this interval; 0 runs once")
+	if err := fs.Parse(args); err != nil {
+		return ops.VolumeStatusExitInvalid
+	}
+	if fs.NArg() != 0 {
+		fmt.Fprintf(stderr, "sw-block ops failback-target-owner: unexpected args %s\n", strings.Join(fs.Args(), " "))
+		return ops.VolumeStatusExitInvalid
+	}
+	runOnce := func() int {
+		client, err := opsFailbackTargetOwnerClientFactory()
+		if err != nil {
+			fmt.Fprintf(stderr, "sw-block ops failback-target-owner: %v\n", err)
+			return ops.VolumeStatusExitInvalid
+		}
+		result, err := (ops.FailbackTargetOwnerReconciler{
+			Namespace: namespace,
+			Client:    client,
+			DryRun:    dryRun,
+		}).Reconcile(context.Background())
+		if err != nil {
+			fmt.Fprintf(stderr, "sw-block ops failback-target-owner: %v\n", err)
+			return ops.VolumeStatusExitInvalid
+		}
+		mode := "target_mutation"
+		if dryRun {
+			mode = "dry_run"
+		}
+		fmt.Fprintf(stdout, "failback_target_owner=%s namespace=%s volumes=%d contracts=%d targets_planned=%d targets_existing=%d targets_created=%d invalid_contracts=%d terminal_evidence_ready=%d terminal_evidence_missing=%d failback_attempts=%d mutation_allowed=%t storage_mutation_allowed=%t frontend_publication_allowed=%t\n",
+			mode,
+			namespace,
+			result.VolumeCount,
+			result.ContractCount,
+			result.TargetPlannedCount,
+			result.TargetExistingCount,
+			result.TargetCreateCount,
+			result.InvalidContractCount,
+			result.TerminalEvidenceReady,
+			result.TerminalEvidenceMissing,
+			result.FailbackAttempts,
+			!dryRun && result.TargetCreateCount > 0,
+			result.StorageMutationAllowed,
+			result.FrontendPublicationAllowed)
+		return ops.VolumeStatusExitOK
+	}
+	if interval <= 0 {
+		return runOnce()
+	}
+	for {
+		code := runOnce()
+		if code != ops.VolumeStatusExitOK {
+			fmt.Fprintf(stderr, "sw-block ops failback-target-owner: iteration failed exit=%d; retrying in %s\n", code, interval)
 		}
 		time.Sleep(interval)
 	}
@@ -1935,6 +2006,7 @@ func usage(w io.Writer) {
 	fmt.Fprintln(w, "  sw-block ops lifecycle-owner [--dry-run] [--namespace <ns>] [--interval 30s]")
 	fmt.Fprintln(w, "  sw-block ops authority-executor [--namespace <ns>] [--allowed-mutation-class ack_eligibility|rebuild_traffic] [--interval 30s]")
 	fmt.Fprintln(w, "  sw-block ops rebuild-target-owner [--dry-run] [--namespace <ns>] [--interval 30s]")
+	fmt.Fprintln(w, "  sw-block ops failback-target-owner [--dry-run] [--namespace <ns>] [--interval 30s]")
 	fmt.Fprintln(w, "  sw-block ops frontend-publication-target-owner [--dry-run] [--namespace <ns>] [--interval 30s]")
 	fmt.Fprintln(w, "  sw-block ops frontend-publication-executor [--dry-run] [--namespace <ns>] [--interval 30s]")
 }

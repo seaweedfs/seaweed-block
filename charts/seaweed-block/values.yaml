@@ -168,6 +168,18 @@ rebuildTargetOwner:
     create: true
   nodeSelector: {}
 
+failbackTargetOwner:
+  # Failback target owner. Disabled by default. When enabled it creates
+  # SwBlockReplicaFailback target CRs from ready failback_returned_replica
+  # executor contracts. It does not execute failback, publish frontend paths,
+  # write status, or mutate storage.
+  create: false
+  dryRun: true
+  interval: 30s
+  rbac:
+    create: true
+  nodeSelector: {}
+
 frontendPublicationTargetOwner:
   # Frontend publication target owner. Disabled by default. When enabled it
   # creates SwBlockFrontendPublication target CRs from terminal ACK eligibility
