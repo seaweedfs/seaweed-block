@@ -1,73 +1,97 @@
-# Current Plan: Phase 93 Failback Handoff Isolation
+# Current Plan: Phase 94 Failback Deployed gRPC Smoke
 
 Status: complete.
 
 ## Goal
 
-Phase 93 proves multi-volume isolation for the local failback target-owner ->
-executor handoff.
-
-The key risk is cross-volume authority mix-up:
+Phase 94 connects the two halves of the recent failback work:
 
 ```text
-volume A expectedCurrentReplicaID/epoch copied to volume B
-volume A target data/control address copied to volume B
-executor runtime request loses per-volume identity
+Helm deployable suite renders with all opt-in failback components
+executor can call a real blockmaster FailbackService through gRPC
 ```
+
+This is not a live Kubernetes install / real PVC failback claim. It is the
+deployed-suite coherence gate plus the existing real-master gRPC smoke.
 
 ## Deliverables
 
-### D1: Multi-Volume Handoff Test
+### D1: Deployed Suite Render Gate
 
-Added `TestFailbackTargetOwnerExecutorHandoffIsolatesMultipleVolumes`.
+The gate renders Helm defaults and the fully enabled suite.
 
-The test creates two independent volumes:
-
-```text
-pvc-a: returned=r1 current=r2 epoch=7  target=data-a-r1/ctrl-a-r1
-pvc-b: returned=r3 current=r4 epoch=11 target=data-b-r3/ctrl-b-r3
-```
-
-It proves:
+Defaults must omit:
 
 ```text
-target owner creates two enabled targets
-executor makes two runtime requests
-each request keeps the correct volumeID
-each request keeps the correct expected-current replica and epoch
-each request keeps the correct target data/control address
-frontend publication remains false
-storage mutation remains false
+--failback-runtime-rpc
+failback target owner
+failback executor
+--activate-targets
+--enable-execution
 ```
 
-### D2: Gate
+Explicit values must render:
+
+```text
+blockmaster --failback-runtime-rpc
+failback target owner --activate-targets --activation-policy --runtime-endpoint=...
+failback executor --enable-execution --execution-policy --failback-runtime-grpc-addr=...
+```
+
+### D2: Real Master gRPC Smoke
+
+The gate runs:
+
+```text
+TestFailbackServiceDefaultDisabled
+TestFailbackServiceEnabledUsesHostRuntime
+TestFailbackExecutorGRPCRuntimeUsesRealMasterService
+```
+
+This proves the executor can call a real blockmaster `FailbackService`, the
+master publisher advances authority, and terminal evidence drives
+`failed_back`.
+
+### D3: Gate
 
 Added:
 
 ```text
-scripts/run-phase93-failback-handoff-isolation-gate.sh
-testops/scenarios/failback-handoff-isolation-chain.yaml
+scripts/run-phase94-failback-deployed-grpc-smoke-gate.sh
+testops/scenarios/failback-deployed-grpc-smoke-chain.yaml
 ```
 
 ## Verification
 
 ```text
-bash scripts/run-phase93-failback-handoff-isolation-gate.sh .
-swblock validate testops/scenarios/failback-handoff-isolation-chain.yaml
+bash scripts/run-phase94-failback-deployed-grpc-smoke-gate.sh .
+swblock validate testops/scenarios/failback-deployed-grpc-smoke-chain.yaml
 ```
 
 Expected terminal evidence:
 
 ```text
-phase93_failback_handoff_isolation_status=ok
-multi_volume_target_create_count=2
-multi_volume_runtime_request_count=2
-cross_volume_expected_current_mixup=false
-cross_volume_target_addr_mixup=false
+phase94_failback_deployed_grpc_smoke_status=ok
+enabled_renders_failback_runtime_rpc=true
+enabled_target_owner_activates_targets=true
+enabled_executor_grpc_runtime=true
+executor_grpc_uses_real_master_service=true
+master_publisher_epoch_advanced=true
+publish_target_swapped_after_failback=true
+live_kubernetes_install_claimed=false
 ```
 
 ## Next
 
-Phase 94 can move to a live deployed blockmaster gRPC failback smoke, assuming
-the lab is ready and the team wants to pay the runtime-test cost now. Keep
-frontend publication as a separate later gate.
+Phase 95 can pay the real lab cost:
+
+```text
+fresh local images
+install full failback suite in k3s
+create SwBlockVolume + returned-replica evidence
+target owner creates enabled target
+executor calls live blockmaster service
+verify authority status and cleanup
+```
+
+Frontend publication must remain a separate later phase.

@@ -750,6 +750,9 @@ Approximate engineering effort if scope remains tight:
 - Phase 93 Failback Handoff Isolation is closed. The local handoff now proves
   two volumes keep independent expected-current authority and target address
   facts through target creation and executor runtime requests.
+- Phase 94 Failback Deployed gRPC Smoke is closed. The full opt-in Helm suite
+  renders coherently and the executor-to-real-blockmaster gRPC smoke passes.
+  This is still not a live Kubernetes PVC failback claim.
 - Phase 41-44 are the Operation Layer v0.5 release train: lifecycle-owner
   foundation, real API/admission proof, first bounded finalizer mutation, and
   delete lifecycle close gate.

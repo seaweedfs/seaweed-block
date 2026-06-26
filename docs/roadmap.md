@@ -552,6 +552,9 @@ control-plane path is mature.
      `failed_back`; live deployed failback remains a separate release gate
    - multi-volume handoff isolation is gated before live runtime testing, so
      expected-current facts and target addresses cannot silently cross volumes
+   - the full opt-in failback suite renders coherently and the executor can call
+     a real blockmaster gRPC FailbackService in local test; live Kubernetes PVC
+     failback remains a separate release gate
 
 4. Flow-control and pressure behavior.
 
