@@ -320,7 +320,14 @@ Recommended order from here:
     blocks the call-site; frontend publication and storage mutation remain
     false. The deployed controller loop still does not perform automatic
     failback.
-37. Add backup/restore and NVMe ANA parity after they can reuse the same action
+37. Phase 80: master failback runtime factory. **Closed 2026-06-26, local PASS**
+    (`internal/docs/finished-plans/phase80_finishedplan_master_failback_runtime_factory.md`).
+    Blockmaster now exposes a master-owned failback authority runtime factory
+    backed by its live Publisher. A host-level gate proves product-loop-seeded
+    authority can advance through the runtime while no public failback RPC,
+    automatic failback loop, frontend publication, or storage mutation is
+    enabled.
+38. Add backup/restore and NVMe ANA parity after they can reuse the same action
    owner, evidence, and status model rather than creating another isolated
    control plane.
 
@@ -349,8 +356,9 @@ targets, still keeping all real failback side effects disabled. Phase 77 adds
 the typed failback runtime contract and opt-in execution gate. Phase 78 adds
 the first authority-owned failback seam through `Publisher.apply(IntentReassign)`.
 Phase 79 wires that seam to the failback executor as an explicit-policy-gated
-in-process call-site. Automatic deployed failback, frontend publication, and
-storage/workload mutation remain disabled.
+in-process call-site. Phase 80 exposes the corresponding master-owned factory
+from the component that owns the live Publisher. Automatic deployed failback,
+frontend publication, and storage/workload mutation remain disabled.
 
 The practical rule is:
 

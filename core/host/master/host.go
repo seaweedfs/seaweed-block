@@ -254,6 +254,13 @@ func (h *Host) Addr() string { return h.ln.Addr().String() }
 // evidence-query path.
 func (h *Host) Publisher() *authority.Publisher { return h.boot.Publisher }
 
+// FailbackAuthorityRuntime exposes the authority-owned failback seam backed by
+// the live Publisher. Callers still need an explicit policy gate before using
+// it; constructing the runtime does not execute failback.
+func (h *Host) FailbackAuthorityRuntime() authority.FailbackAuthorityRuntime {
+	return authority.FailbackAuthorityRuntime{Publisher: h.Publisher()}
+}
+
 // Controller exposes the controller for tests.
 func (h *Host) Controller() *authority.TopologyController { return h.ctrl }
 

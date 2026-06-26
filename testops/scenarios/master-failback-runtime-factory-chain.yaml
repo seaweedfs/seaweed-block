@@ -1,0 +1,97 @@
+# Runner-native Phase 80 gate: blockmaster exposes a failback authority runtime
+# factory backed by its live Publisher. This is not a public failback RPC and
+# does not enable automatic failback.
+
+name: master-failback-runtime-factory-chain
+timeout: 8m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: master_failback_runtime_factory_gate
+    actions:
+      - action: exec
+        node: m02
+        timeout: 7m
+        cmd: "rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase80-master-failback-runtime-factory && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase80-master-failback-runtime-factory && cd {{ product_root }} && SW_BLOCK_ARTIFACT_DIR=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase80-master-failback-runtime-factory bash scripts/run-phase80-master-failback-runtime-factory-gate.sh {{ product_root }}"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase80-master-failback-runtime-factory/phase80-master-failback-runtime-factory-summary.txt"
+        pattern: "^phase80_master_failback_runtime_factory_status=ok$"
+        save_as: phase80_ok
+      - action: assert_greater
+        actual: "{{ phase80_ok }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase80-master-failback-runtime-factory/phase80-master-failback-runtime-factory-summary.txt"
+        pattern: "^host_failback_runtime_uses_live_publisher=true$"
+        save_as: live_publisher
+      - action: assert_greater
+        actual: "{{ live_publisher }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase80-master-failback-runtime-factory/phase80-master-failback-runtime-factory-summary.txt"
+        pattern: "^publisher_authority_line_advanced=true$"
+        save_as: publisher_advanced
+      - action: assert_greater
+        actual: "{{ publisher_advanced }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase80-master-failback-runtime-factory/phase80-master-failback-runtime-factory-summary.txt"
+        pattern: "^automatic_failback_enabled=false$"
+        save_as: automatic_disabled
+      - action: assert_greater
+        actual: "{{ automatic_disabled }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase80-master-failback-runtime-factory/phase80-master-failback-runtime-factory-summary.txt"
+        pattern: "^public_failback_rpc_added=false$"
+        save_as: no_public_rpc
+      - action: assert_greater
+        actual: "{{ no_public_rpc }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase80-master-failback-runtime-factory/phase80-master-failback-runtime-factory-summary.txt"
+        pattern: "^frontend_publication_allowed=false$"
+        save_as: no_frontend_publication
+      - action: assert_greater
+        actual: "{{ no_frontend_publication }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase80-master-failback-runtime-factory/phase80-master-failback-runtime-factory-summary.txt"
+        pattern: "^storage_mutation_allowed=false$"
+        save_as: no_storage_mutation
+      - action: assert_greater
+        actual: "{{ no_storage_mutation }}"
+        threshold: "0"
+
+  - name: collect
+    always: true
+    actions:
+      - action: collect_path
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase80-master-failback-runtime-factory"
+        name: "remote-phases"
+        ignore_error: true

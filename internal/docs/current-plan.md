@@ -1,118 +1,99 @@
-# Current Plan: Phase 79 Failback Authority Call-site
+# Current Plan: Phase 80 Master Failback Runtime Factory
 
 Status: complete.
 
 ## Goal
 
-Phase 78 added the authority-owned failback seam, but the failback executor did
-not yet have a product call-site to invoke it. Phase 79 wires the executor's
-runtime contract to that seam through an in-process adapter.
+Phase 79 wired the failback executor to an in-process authority runtime adapter,
+but the adapter still needed a safe construction point from the component that
+owns the live Publisher. Phase 80 exposes that construction point from
+`master.Host`.
 
-Default behavior remains disabled/status-only. The adapter is used only when
-the existing explicit execution gate is satisfied:
+This remains deliberately pre-RPC and disabled by default:
 
 ```text
---enable-execution
---execution-policy
-executable SwBlockReplicaFailback target
+no public failback RPC
+no automatic deployed failback loop
+no frontend publication
+no storage mutation
 ```
 
 ## Deliverables
 
-### D1: Runtime Adapter
+### D1: Master Factory
 
 Added:
 
 ```text
-core/ops.AuthorityFailbackRuntime
-core/ops.NewAuthorityFailbackRuntime
+(*master.Host).FailbackAuthorityRuntime() authority.FailbackAuthorityRuntime
 ```
 
-The adapter implements the existing `ops.FailbackRuntime` interface and maps
-the executor request into:
+The factory returns a runtime backed by:
 
 ```text
-authority.FailbackAuthorityRuntime.ExecuteFailback
+h.Publisher()
 ```
 
-### D2: Executor Call-site
+Constructing the runtime does not execute failback. Callers still need the
+Phase 79 explicit policy gate before invoking it.
 
-The failback executor can now use the authority adapter as its runtime:
+### D2: Host-Level Test
+
+Added:
 
 ```text
-FailbackExecutorReconciler{
-  Runtime: NewAuthorityFailbackRuntime(publisher),
-  ExecutionRequested: true,
-  ExecutionPolicyEnabled: true,
-}
+TestHostFailbackAuthorityRuntimeUsesLivePublisher
 ```
 
-The test path proves:
+The test seeds authority through the normal product-loop path:
 
 ```text
-current authority line: r2@2
+placement + observation -> RunLifecycleProductTick -> r2 current authority
+```
+
+Then it invokes the host failback runtime:
+
+```text
+expected current: r2@current_epoch
 target returned replica: r1
-executor invokes adapter
-adapter invokes authority runtime
-Publisher.apply(IntentReassign) advances line to r1@3
-SwBlockReplicaFailback.status.state=failed_back
 ```
 
-### D3: Negative Guard
-
-Stale expected-current evidence still fails closed:
+The host's live Publisher advances to:
 
 ```text
-expectedCurrentReplicaID=r2
-expectedCurrentEpoch=99
-actual current line=r2@2
+r1@(current_epoch+1)
 ```
 
-The executor writes blocked status and does not claim failback.
-
-### D4: Boundary
-
-The existing boundaries remain:
-
-```text
-execution policy is still required
-dry-run writes no status
-default authority_mutation_allowed=false
-frontend_publication_allowed=false
-storage_mutation_allowed=false
-```
-
-Only the explicit adapter call-site path can advance authority.
-
-### D5: Gate
+### D3: Gate
 
 Added:
 
 ```text
-scripts/run-phase79-failback-authority-callsite-gate.sh
-testops/scenarios/failback-authority-callsite-chain.yaml
+scripts/run-phase80-master-failback-runtime-factory-gate.sh
+testops/scenarios/master-failback-runtime-factory-chain.yaml
 ```
 
 The gate proves:
 
 ```text
-executor invokes authority runtime adapter
+host failback runtime uses live Publisher
 publisher authority line advances
-stale expected-current evidence blocks the call-site
-execution policy remains required
-failed_back status is written only after terminal evidence
-runtime failure produces no false failback
+authority epoch advances
+single primary after failback
+publish target swaps after failback
+no public failback RPC was added
+automatic failback remains disabled
 frontend publication remains false
 storage mutation remains false
 ```
 
 ## Non-Claims
 
-Phase 79 does not implement:
+Phase 80 does not implement:
 
 ```text
+public blockmaster failback RPC
 automatic failback from the deployed controller loop
-blockmaster HTTP/gRPC failback endpoint
 blockvolume frontend switching
 frontend publication after failback
 storage rebuild/catch-up traffic
@@ -120,43 +101,37 @@ workload mutation
 NVMe ANA behavior
 ```
 
-It wires the product call-site in-process for controlled execution. The deployed
-default remains disabled/status-only.
-
 ## Verification
 
 ```text
-go test ./core/ops -run "TestFailbackExecutorUsesAuthorityRuntimeAdapter|TestFailbackAuthorityRuntimeAdapterRejectsStaleExpectedCurrent|TestFailbackExecutorExecutionPolicyBlocks|TestFailbackExecutorDryRunDoesNotWriteStatus" -count=1 -v
-go test ./core/authority ./core/ops ./cmd/sw-block
+go test ./core/host/master -run "TestHostFailbackAuthorityRuntimeUsesLivePublisher" -count=1 -v
+go test ./core/authority ./core/ops ./core/host/master ./cmd/blockmaster ./cmd/sw-block
 helm lint charts/seaweed-block
-"C:\Program Files\Git\bin\bash.exe" scripts/run-phase79-failback-authority-callsite-gate.sh .
-C:\work\swblock.exe validate testops\scenarios\failback-authority-callsite-chain.yaml
+"C:\Program Files\Git\bin\bash.exe" scripts/run-phase80-master-failback-runtime-factory-gate.sh .
+C:\work\swblock.exe validate testops\scenarios\master-failback-runtime-factory-chain.yaml
 git diff --check
 ```
 
 Terminal evidence:
 
 ```text
-phase79_failback_authority_callsite_status=ok
-core_ops_failback_authority_callsite_tests=pass
-authority_runtime_adapter_invoked_by_executor=true
-stale_expected_current_blocks_callsite=true
-execution_policy_still_required=true
-dry_run_no_status_write=true
+phase80_master_failback_runtime_factory_status=ok
+core_master_failback_runtime_tests=pass
+host_failback_runtime_uses_live_publisher=true
 publisher_authority_line_advanced=true
 authority_epoch_advanced=true
 single_primary_after_failback=true
 publish_target_swapped_after_failback=true
-failed_back_status_written=true
-runtime_failure_no_false_failback=true
-authority_mutation_allowed_only_with_execution_policy=true
+no_storage_mutation=true
+no_cross_volume_identity_change=true
+automatic_failback_enabled=false
+public_failback_rpc_added=false
 frontend_publication_allowed=false
 storage_mutation_allowed=false
 ```
 
 ## Next
 
-The next phase should decide how this in-process call-site becomes reachable in
-the product. The safest next increment is a disabled-by-default CLI or
-controller wiring gate that can construct the adapter from a real Publisher
-without enabling automatic failback.
+The next phase should add the first disabled-by-default product wiring from
+executor composition to this master factory, or decide that a public RPC is the
+right boundary and add that as an explicitly gated API.
