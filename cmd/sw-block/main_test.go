@@ -1141,6 +1141,47 @@ func TestOpsFailbackTargetOwnerDryRunDoesNotCreateTarget(t *testing.T) {
 	}
 }
 
+func TestOpsFailbackTargetOwnerCreatesActivatedTargetWithExplicitPolicy(t *testing.T) {
+	client := &lifecycleOwnerTestClient{
+		volumes: []ops.SwBlockVolumeObject{cmdFailbackTargetVolume()},
+	}
+	oldFactory := opsFailbackTargetOwnerClientFactory
+	opsFailbackTargetOwnerClientFactory = func() (ops.FailbackTargetOwnerClient, error) {
+		return client, nil
+	}
+	t.Cleanup(func() { opsFailbackTargetOwnerClientFactory = oldFactory })
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ops", "failback-target-owner", "--namespace", "kube-system", "--activate-targets", "--activation-policy", "--runtime-endpoint", "blockmaster.kube-system.svc:9333"}, &stdout, &stderr)
+	if code != ops.VolumeStatusExitOK {
+		t.Fatalf("exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	if len(client.failbackCreates) != 1 {
+		t.Fatalf("failbackCreates=%+v", client.failbackCreates)
+	}
+	created := client.failbackCreates[0]
+	if created.Spec.FailbackDecision != ops.AuthorityExecutorFailbackDecisionEnabled ||
+		created.Spec.FailbackReason != ops.AuthorityExecutorFailbackReasonRequested ||
+		!created.Spec.FailbackMutationAllowed ||
+		created.Spec.RuntimeEndpoint != "blockmaster.kube-system.svc:9333" ||
+		created.Spec.ExpectedCurrentReplicaID != "r2" ||
+		created.Spec.ExpectedCurrentEpoch != 7 {
+		t.Fatalf("created=%+v", created)
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"activate_targets=true",
+		"activation_policy=true",
+		"failback_attempts=0",
+		"storage_mutation_allowed=false",
+		"frontend_publication_allowed=false",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("stdout missing %q:\n%s", want, out)
+		}
+	}
+}
+
 func TestOpsFailbackExecutorWritesDisabledStatus(t *testing.T) {
 	client := &lifecycleOwnerTestClient{
 		failbacks: []ops.SwBlockReplicaFailbackObject{cmdFailbackTarget()},

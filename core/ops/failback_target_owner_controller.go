@@ -14,10 +14,13 @@ type FailbackTargetOwnerClient interface {
 }
 
 type FailbackTargetOwnerReconciler struct {
-	Namespace string
-	Client    FailbackTargetOwnerClient
-	DryRun    bool
-	Now       func() time.Time
+	Namespace               string
+	Client                  FailbackTargetOwnerClient
+	DryRun                  bool
+	ActivateTargets         bool
+	ActivationPolicyEnabled bool
+	RuntimeEndpoint         string
+	Now                     func() time.Time
 }
 
 type FailbackTargetOwnerReconcileResult struct {
@@ -36,6 +39,12 @@ type FailbackTargetOwnerReconcileResult struct {
 }
 
 func (r FailbackTargetOwnerReconciler) Reconcile(ctx context.Context) (FailbackTargetOwnerReconcileResult, error) {
+	if r.ActivateTargets && !r.ActivationPolicyEnabled {
+		return FailbackTargetOwnerReconcileResult{}, fmt.Errorf("failback target activation is disabled by product policy")
+	}
+	if r.ActivateTargets && strings.TrimSpace(r.RuntimeEndpoint) == "" {
+		return FailbackTargetOwnerReconcileResult{}, fmt.Errorf("failback target activation requires runtime endpoint")
+	}
 	if r.Client == nil {
 		return FailbackTargetOwnerReconcileResult{}, fmt.Errorf("failback target owner client is required")
 	}
@@ -74,7 +83,7 @@ func (r FailbackTargetOwnerReconciler) Reconcile(ctx context.Context) (FailbackT
 				result.TargetExistingCount++
 				continue
 			}
-			obj := failbackTargetOwnerObject(namespace, volume, contract, returned)
+			obj := r.failbackTargetOwnerObject(namespace, volume, contract, returned)
 			if !r.DryRun {
 				if err := r.Client.CreateSwBlockReplicaFailback(ctx, namespace, obj); err != nil {
 					return result, err
@@ -136,8 +145,8 @@ func failbackTargetOwnerHasTarget(volume SwBlockVolumeObject, contract SwBlockVo
 	return false
 }
 
-func failbackTargetOwnerObject(namespace string, volume SwBlockVolumeObject, contract SwBlockVolumeCRDExecutorContract, returned SwBlockVolumeCRDReturnedReplica) SwBlockReplicaFailbackObject {
-	return SwBlockReplicaFailbackObject{
+func (r FailbackTargetOwnerReconciler) failbackTargetOwnerObject(namespace string, volume SwBlockVolumeObject, contract SwBlockVolumeCRDExecutorContract, returned SwBlockVolumeCRDReturnedReplica) SwBlockReplicaFailbackObject {
+	obj := SwBlockReplicaFailbackObject{
 		Ref: OperatorObjectRef{
 			APIVersion: SwBlockVolumeAPIVersion,
 			Kind:       SwBlockReplicaFailbackKind,
@@ -162,6 +171,13 @@ func failbackTargetOwnerObject(namespace string, volume SwBlockVolumeObject, con
 			FailbackMutationAllowed:      false,
 		},
 	}
+	if r.ActivateTargets {
+		obj.Spec.FailbackDecision = AuthorityExecutorFailbackDecisionEnabled
+		obj.Spec.FailbackReason = AuthorityExecutorFailbackReasonRequested
+		obj.Spec.FailbackMutationAllowed = true
+		obj.Spec.RuntimeEndpoint = strings.TrimSpace(r.RuntimeEndpoint)
+	}
+	return obj
 }
 
 func failbackTargetOwnerName(volumeName, replicaID string) string {

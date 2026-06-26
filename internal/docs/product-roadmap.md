@@ -739,6 +739,10 @@ Approximate engineering effort if scope remains tight:
   facts and stamps `expectedCurrentReplicaID` / `expectedCurrentEpoch` onto
   created disabled targets, while preserving the non-claims that frontend
   publication and automatic failback remain disabled until their own gates pass.
+- Phase 91 Failback Target Activation Policy is closed. Target-owner activation
+  is still default-off, but explicit policy plus runtime endpoint can stamp an
+  enabled failback target for the executor handoff. The target owner still does
+  not call the runtime or publish a frontend.
 - Phase 41-44 are the Operation Layer v0.5 release train: lifecycle-owner
   foundation, real API/admission proof, first bounded finalizer mutation, and
   delete lifecycle close gate.

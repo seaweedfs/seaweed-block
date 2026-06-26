@@ -545,6 +545,8 @@ control-plane path is mature.
    - failback handoff targets carry `expectedCurrentReplicaID` and
      `expectedCurrentEpoch` from volume status, while failback execution and
      frontend publication remain separate opt-in gates
+   - failback target activation is explicit and default-off: policy plus runtime
+     endpoint are required before a target can be stamped `enabled`
 
 4. Flow-control and pressure behavior.
 

@@ -236,6 +236,7 @@ ambiguous HTTP/gRPC runtime addresses.
 | 88 | packages target owner + executor + blockmaster RPC as one explicit Helm suite |
 | 89 | projects current authority facts into `SwBlockVolume.status`, operator-snapshot, and summary text for later expected-current failback activation |
 | 90 | makes target-owner creation require current authority facts and stamp `expectedCurrentReplicaID` / `expectedCurrentEpoch` onto disabled targets |
+| 91 | adds explicit target activation policy plus runtime endpoint wiring; default remains disabled and no runtime call is made by the target owner |
 
 ## Failure Classes
 
@@ -260,13 +261,15 @@ Before enabling broader failback behavior:
    (`primaryReplicaID`, `authorityEpoch`) before activating a failback target.
 5. Stamp expected-current replica and epoch onto the `SwBlockReplicaFailback`
    target before any executor/runtime call.
-6. Pass expected-current replica and epoch to blockmaster.
-7. Run through blockmaster-owned `FailbackService`, not a sidecar authority copy.
-8. Require terminal evidence before writing `failed_back`.
-9. Keep frontend publication as a separate gated action.
-10. Keep rebuild/catch-up traffic as a separate gated action.
-11. Run multi-volume isolation gates.
-12. Document exactly what is automatic and what is opt-in.
+6. Require explicit target activation policy and runtime endpoint before
+   stamping `failbackDecision=enabled`.
+7. Pass expected-current replica and epoch to blockmaster.
+8. Run through blockmaster-owned `FailbackService`, not a sidecar authority copy.
+9. Require terminal evidence before writing `failed_back`.
+10. Keep frontend publication as a separate gated action.
+11. Keep rebuild/catch-up traffic as a separate gated action.
+12. Run multi-volume isolation gates.
+13. Document exactly what is automatic and what is opt-in.
 
 ## Current Limits
 

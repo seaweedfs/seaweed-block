@@ -1,60 +1,77 @@
-# Current Plan: Phase 90 Failback Target Authority Gate
+# Current Plan: Phase 91 Failback Target Activation Policy
 
 Status: complete.
 
 ## Goal
 
-Phase 90 consumes the Phase 89 authority facts in the failback target-owner
-path. A target owner may create a `SwBlockReplicaFailback` handoff target only
-when the source `SwBlockVolume.status` contains current authority evidence:
+Phase 91 adds an explicit activation policy to the failback target-owner path.
+By default, target-owner behavior remains unchanged: it creates disabled,
+non-mutating `SwBlockReplicaFailback` targets only.
+
+When all activation knobs are explicitly supplied, the owner may create an
+enabled target:
 
 ```text
-primaryReplicaID
-authorityEpoch
+--activate-targets
+--activation-policy
+--runtime-endpoint <addr>
 ```
 
-The created target records those values as:
-
-```text
-spec.expectedCurrentReplicaID
-spec.expectedCurrentEpoch
-```
-
-This prevents a later executor from acting against an ambiguous or stale current
-primary.
+This phase still does not call the failback runtime. It only stamps the target
+so the separate failback executor can decide whether to execute it.
 
 ## Deliverables
 
-### D1: Missing-Authority Hold
+### D1: Target Owner Policy
 
-`FailbackTargetOwnerReconciler` now refuses to create a failback target when the
-source volume lacks `PrimaryReplicaID` or a non-zero `AuthorityEpoch`.
-
-### D2: Expected-Current Target Fields
-
-Created `SwBlockReplicaFailback` targets now copy:
+`FailbackTargetOwnerReconciler` now has:
 
 ```text
-SwBlockVolume.status.primaryReplicaID -> spec.expectedCurrentReplicaID
-SwBlockVolume.status.authorityEpoch   -> spec.expectedCurrentEpoch
+ActivateTargets
+ActivationPolicyEnabled
+RuntimeEndpoint
 ```
+
+Activation fails closed unless policy is enabled and a runtime endpoint is
+present.
+
+### D2: CLI And Helm Wiring
+
+`sw-block ops failback-target-owner` accepts:
+
+```text
+--activate-targets
+--activation-policy
+--runtime-endpoint <addr>
+```
+
+Helm exposes these under:
+
+```text
+failbackTargetOwner.activation.enabled
+failbackTargetOwner.activation.policy
+failbackTargetOwner.activation.runtimeEndpoint
+```
+
+Defaults keep activation off and omit all activation flags.
 
 ### D3: Gate
 
 Added:
 
 ```text
-scripts/run-phase90-failback-target-authority-gate.sh
-testops/scenarios/failback-target-authority-chain.yaml
+scripts/run-phase91-failback-target-activation-policy-gate.sh
+testops/scenarios/failback-target-activation-policy-chain.yaml
 ```
 
 The gate proves:
 
 ```text
-ready target creation carries expected-current replica and epoch
-missing current authority facts create zero targets
-created target remains failbackDecision=disabled
-created target remains failbackMutationAllowed=false
+default Helm render omits activation flags
+explicit values render activation flags
+policy is required
+runtime endpoint is required
+enabled targets retain expected-current authority facts
 no failback runtime call is attempted
 frontend publication remains unclaimed
 ```
@@ -62,30 +79,30 @@ frontend publication remains unclaimed
 ## Verification
 
 ```text
-bash scripts/run-phase90-failback-target-authority-gate.sh .
-swblock validate testops/scenarios/failback-target-authority-chain.yaml
+bash scripts/run-phase91-failback-target-activation-policy-gate.sh .
+swblock validate testops/scenarios/failback-target-activation-policy-chain.yaml
 ```
 
 Expected terminal evidence:
 
 ```text
-phase90_failback_target_authority_status=ok
-expected_current_replica_from_swblockvolume_status=true
-expected_current_epoch_from_swblockvolume_status=true
-missing_current_authority_target_create_count=0
-created_target_failback_decision=disabled
-created_target_failback_mutation_allowed=false
+phase91_failback_target_activation_policy_status=ok
+activation_default_off=true
+activation_policy_required=true
+activation_runtime_endpoint_required=true
+activated_target_failback_decision=enabled
+activated_target_failback_mutation_allowed=true
 failback_runtime_call_attempted=false
 ```
 
 ## Next
 
-Phase 91 can decide whether to:
+Phase 92 should run the first integrated target-owner -> executor handoff smoke:
 
 ```text
-enable target activation only under an explicit policy, or
-run a live Kubernetes failback target-owner smoke with the deployed suite
+target owner creates an enabled target with expected-current facts
+executor consumes that target
+runtime remains fake/local unless a live service gate is explicitly selected
+terminal evidence decides status
+frontend publication remains separate
 ```
-
-Do not claim frontend publication after failback until a separate publication
-target/executor gate exists.

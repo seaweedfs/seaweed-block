@@ -885,6 +885,9 @@ func TestPhase75FailbackTargetOwnerPackagingIsNarrow(t *testing.T) {
 	targetOwner := yamlMap(t, values, "failbackTargetOwner")
 	assertYAMLBool(t, targetOwner, "create", false)
 	assertYAMLBool(t, targetOwner, "dryRun", true)
+	activation := yamlMap(t, targetOwner, "activation")
+	assertYAMLBool(t, activation, "enabled", false)
+	assertYAMLBool(t, activation, "policy", false)
 	rbacValues := yamlMap(t, targetOwner, "rbac")
 	assertYAMLBool(t, rbacValues, "create", true)
 
@@ -899,6 +902,12 @@ func TestPhase75FailbackTargetOwnerPackagingIsNarrow(t *testing.T) {
 		`{{- if .Values.failbackTargetOwner.dryRun }}`,
 		`- "--dry-run"`,
 		`- "--interval={{ .Values.failbackTargetOwner.interval }}"`,
+		`{{- if .Values.failbackTargetOwner.activation.enabled }}`,
+		`- "--activate-targets"`,
+		`{{- if .Values.failbackTargetOwner.activation.policy }}`,
+		`- "--activation-policy"`,
+		`{{- if .Values.failbackTargetOwner.activation.runtimeEndpoint }}`,
+		`- "--runtime-endpoint={{ .Values.failbackTargetOwner.activation.runtimeEndpoint }}"`,
 	} {
 		if !strings.Contains(deploy, want) {
 			t.Fatalf("failback-target-owner deployment missing %q\n%s", want, deploy)

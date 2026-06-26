@@ -423,13 +423,19 @@ func runOpsFailbackTargetOwner(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("sw-block ops failback-target-owner", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	var (
-		dryRun    bool
-		namespace string
-		interval  time.Duration
+		dryRun                  bool
+		namespace               string
+		interval                time.Duration
+		activateTargets         bool
+		activationPolicyEnabled bool
+		runtimeEndpoint         string
 	)
 	fs.BoolVar(&dryRun, "dry-run", false, "evaluate failback target planning without creating SwBlockReplicaFailback objects")
 	fs.StringVar(&namespace, "namespace", "default", "Kubernetes namespace containing SwBlockVolume objects")
 	fs.DurationVar(&interval, "interval", 0, "repeat failback-target-owner reconciliation at this interval; 0 runs once")
+	fs.BoolVar(&activateTargets, "activate-targets", false, "create failback targets with failbackDecision=enabled")
+	fs.BoolVar(&activationPolicyEnabled, "activation-policy", false, "allow failback target activation when --activate-targets is set")
+	fs.StringVar(&runtimeEndpoint, "runtime-endpoint", "", "failback runtime endpoint to stamp on activated targets")
 	if err := fs.Parse(args); err != nil {
 		return ops.VolumeStatusExitInvalid
 	}
@@ -444,9 +450,12 @@ func runOpsFailbackTargetOwner(args []string, stdout, stderr io.Writer) int {
 			return ops.VolumeStatusExitInvalid
 		}
 		result, err := (ops.FailbackTargetOwnerReconciler{
-			Namespace: namespace,
-			Client:    client,
-			DryRun:    dryRun,
+			Namespace:               namespace,
+			Client:                  client,
+			DryRun:                  dryRun,
+			ActivateTargets:         activateTargets,
+			ActivationPolicyEnabled: activationPolicyEnabled,
+			RuntimeEndpoint:         runtimeEndpoint,
 		}).Reconcile(context.Background())
 		if err != nil {
 			fmt.Fprintf(stderr, "sw-block ops failback-target-owner: %v\n", err)
@@ -456,7 +465,7 @@ func runOpsFailbackTargetOwner(args []string, stdout, stderr io.Writer) int {
 		if dryRun {
 			mode = "dry_run"
 		}
-		fmt.Fprintf(stdout, "failback_target_owner=%s namespace=%s volumes=%d contracts=%d targets_planned=%d targets_existing=%d targets_created=%d invalid_contracts=%d terminal_evidence_ready=%d terminal_evidence_missing=%d failback_attempts=%d mutation_allowed=%t storage_mutation_allowed=%t frontend_publication_allowed=%t\n",
+		fmt.Fprintf(stdout, "failback_target_owner=%s namespace=%s volumes=%d contracts=%d targets_planned=%d targets_existing=%d targets_created=%d invalid_contracts=%d authority_facts_missing=%d terminal_evidence_ready=%d terminal_evidence_missing=%d activate_targets=%t activation_policy=%t failback_attempts=%d mutation_allowed=%t storage_mutation_allowed=%t frontend_publication_allowed=%t\n",
 			mode,
 			namespace,
 			result.VolumeCount,
@@ -465,8 +474,11 @@ func runOpsFailbackTargetOwner(args []string, stdout, stderr io.Writer) int {
 			result.TargetExistingCount,
 			result.TargetCreateCount,
 			result.InvalidContractCount,
+			result.AuthorityFactsMissing,
 			result.TerminalEvidenceReady,
 			result.TerminalEvidenceMissing,
+			activateTargets,
+			activationPolicyEnabled,
 			result.FailbackAttempts,
 			!dryRun && result.TargetCreateCount > 0,
 			result.StorageMutationAllowed,
@@ -2109,7 +2121,7 @@ func usage(w io.Writer) {
 	fmt.Fprintln(w, "  sw-block ops lifecycle-owner [--dry-run] [--namespace <ns>] [--interval 30s]")
 	fmt.Fprintln(w, "  sw-block ops authority-executor [--namespace <ns>] [--allowed-mutation-class ack_eligibility|rebuild_traffic] [--interval 30s]")
 	fmt.Fprintln(w, "  sw-block ops rebuild-target-owner [--dry-run] [--namespace <ns>] [--interval 30s]")
-	fmt.Fprintln(w, "  sw-block ops failback-target-owner [--dry-run] [--namespace <ns>] [--interval 30s]")
+	fmt.Fprintln(w, "  sw-block ops failback-target-owner [--dry-run] [--namespace <ns>] [--interval 30s] [--activate-targets --activation-policy --runtime-endpoint <addr>]")
 	fmt.Fprintln(w, "  sw-block ops failback-executor [--dry-run] [--namespace <ns>] [--enable-execution] [--execution-policy] [--failback-runtime-url <url>] [--interval 30s]")
 	fmt.Fprintln(w, "  sw-block ops frontend-publication-target-owner [--dry-run] [--namespace <ns>] [--interval 30s]")
 	fmt.Fprintln(w, "  sw-block ops frontend-publication-executor [--dry-run] [--namespace <ns>] [--interval 30s]")

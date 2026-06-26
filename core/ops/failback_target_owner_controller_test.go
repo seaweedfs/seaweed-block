@@ -74,6 +74,59 @@ func TestFailbackTargetOwnerRequiresCurrentAuthorityFacts(t *testing.T) {
 	}
 }
 
+func TestFailbackTargetOwnerCanCreateEnabledTargetWithExplicitPolicy(t *testing.T) {
+	client := &fakeFailbackTargetOwnerClient{volumes: []SwBlockVolumeObject{failbackTargetOwnerTestVolume()}}
+
+	result, err := (FailbackTargetOwnerReconciler{
+		Namespace:               "kube-system",
+		Client:                  client,
+		ActivateTargets:         true,
+		ActivationPolicyEnabled: true,
+		RuntimeEndpoint:         "blockmaster.kube-system.svc:9333",
+	}).Reconcile(context.Background())
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if result.TargetCreateCount != 1 || result.FailbackAttempts != 0 || result.StorageMutationAllowed || result.FrontendPublicationAllowed {
+		t.Fatalf("result=%+v", result)
+	}
+	if len(client.creates) != 1 {
+		t.Fatalf("creates=%+v", client.creates)
+	}
+	created := client.creates[0]
+	if created.Spec.FailbackDecision != AuthorityExecutorFailbackDecisionEnabled ||
+		created.Spec.FailbackReason != AuthorityExecutorFailbackReasonRequested ||
+		!created.Spec.FailbackMutationAllowed ||
+		created.Spec.RuntimeEndpoint != "blockmaster.kube-system.svc:9333" ||
+		created.Spec.ExpectedCurrentReplicaID != "r2" ||
+		created.Spec.ExpectedCurrentEpoch != 7 {
+		t.Fatalf("created=%+v", created)
+	}
+}
+
+func TestFailbackTargetOwnerActivationRequiresPolicyAndRuntimeEndpoint(t *testing.T) {
+	client := &fakeFailbackTargetOwnerClient{volumes: []SwBlockVolumeObject{failbackTargetOwnerTestVolume()}}
+	if _, err := (FailbackTargetOwnerReconciler{
+		Namespace:       "kube-system",
+		Client:          client,
+		ActivateTargets: true,
+		RuntimeEndpoint: "blockmaster.kube-system.svc:9333",
+	}).Reconcile(context.Background()); err == nil {
+		t.Fatalf("expected policy error")
+	}
+	if _, err := (FailbackTargetOwnerReconciler{
+		Namespace:               "kube-system",
+		Client:                  client,
+		ActivateTargets:         true,
+		ActivationPolicyEnabled: true,
+	}).Reconcile(context.Background()); err == nil {
+		t.Fatalf("expected runtime endpoint error")
+	}
+	if len(client.creates) != 0 {
+		t.Fatalf("activation precondition failure created targets=%+v", client.creates)
+	}
+}
+
 func TestFailbackTargetOwnerDryRunDoesNotCreateTarget(t *testing.T) {
 	client := &fakeFailbackTargetOwnerClient{volumes: []SwBlockVolumeObject{failbackTargetOwnerTestVolume()}}
 

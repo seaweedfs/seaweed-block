@@ -113,6 +113,14 @@
         "create": { "type": "boolean" },
         "dryRun": { "type": "boolean" },
         "interval": { "type": "string" },
+        "activation": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "policy": { "type": "boolean" },
+            "runtimeEndpoint": { "type": "string" }
+          }
+        },
         "rbac": {
           "type": "object",
           "properties": {

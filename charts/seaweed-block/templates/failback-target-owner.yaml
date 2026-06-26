@@ -36,4 +36,13 @@ spec:
             - "--dry-run"
             {{- end }}
             - "--interval={{ .Values.failbackTargetOwner.interval }}"
+            {{- if .Values.failbackTargetOwner.activation.enabled }}
+            - "--activate-targets"
+            {{- end }}
+            {{- if .Values.failbackTargetOwner.activation.policy }}
+            - "--activation-policy"
+            {{- end }}
+            {{- if .Values.failbackTargetOwner.activation.runtimeEndpoint }}
+            - "--runtime-endpoint={{ .Values.failbackTargetOwner.activation.runtimeEndpoint }}"
+            {{- end }}
 {{- end }}

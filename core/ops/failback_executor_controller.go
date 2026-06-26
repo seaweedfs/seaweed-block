@@ -16,6 +16,7 @@ const (
 	AuthorityExecutorFailbackReasonRuntimeFailed           = "failback_runtime_failed"
 	AuthorityExecutorFailbackReasonInvalidTerminalEvidence = "failback_runtime_invalid_terminal_evidence"
 	AuthorityExecutorFailbackReasonCompleted               = "failback_completed"
+	AuthorityExecutorFailbackReasonRequested               = "failback_requested"
 	AuthorityExecutorFailbackDecisionDisabled              = "disabled"
 	AuthorityExecutorFailbackDecisionEnabled               = "enabled"
 )
