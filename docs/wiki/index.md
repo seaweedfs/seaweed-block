@@ -4,7 +4,7 @@ This wiki is the engineering map for Seaweed Block development. It is not a
 replacement for finished plans, QA sign-offs, or release notes. It is the entry
 point that explains how those documents fit together.
 
-Seaweed Block has passed through more than forty phases. A single architecture
+Seaweed Block has passed through more than ninety phases. A single architecture
 document cannot explain the accumulated product model. The useful structure is:
 
 ```text
@@ -35,7 +35,8 @@ Start here:
   violate.
 - [Protocol Catalog](protocol-catalog.md) - the current catalog of mini
   protocols and state machines that deserve Mermaid diagrams.
-- [Phase Map](phase-map.md) - how Phase 1 through Phase 44 connect.
+- [Phase Map](phase-map.md) - how the early storage phases, operation-layer
+  closure, and returned-replica failback line connect.
 - [Phase Recap](phase-recap.md) - what each phase solved and how the feature
   logic accumulated.
 - [QA and TestOps Map](testops-map.md) - which gates prove which claims.
@@ -65,12 +66,14 @@ Helm install
 ```
 
 This is a bounded operation-layer capability. It is not automatic cleanup, not a
-production operator, and not rebuild/failback/backup/NVMe expansion.
+production operator, and not backup/NVMe expansion.
 
 Recent returned-replica work adds a separately gated, opt-in failback runtime
 path. See [Returned Replica Failback Runtime](deep-dives/returned-replica-failback.md)
 for the authority owner, target CR, executor, gRPC service, terminal evidence,
-and non-claims.
+and non-claims. As of Phase 95, that line is focused on a deployable authority
+control path; frontend publication and workload-visible path switching remain
+separate gates.
 
 ## Source Evidence
 

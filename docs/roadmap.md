@@ -379,7 +379,50 @@ Recommended order from here:
     `failbackTargetOwner` values-schema coverage and keeps default installs
     non-mutating. This remains a packaging gate, not an automatic live failback
     release claim.
-46. Add backup/restore and NVMe ANA parity after they can reuse the same action
+46. Phase 89: SwBlockVolume authority facts. **Closed 2026-06-26, local PASS**
+    (`internal/docs/finished-plans/phase89_finishedplan_swblockvolume_authority_facts.md`).
+    `SwBlockVolume.status`, operator-snapshot, and reports now carry the
+    current primary replica, publish target, authority epoch, and endpoint
+    version so later failback planning does not infer authority from stale or
+    side-channel state.
+47. Phase 90: failback targets require current authority facts. **Closed
+    2026-06-26, local PASS**
+    (`internal/docs/finished-plans/phase90_finishedplan_failback_target_authority_gate.md`).
+    The failback target owner refuses to create targets unless the source
+    `SwBlockVolume.status` contains positive current-authority evidence, and it
+    stamps expected-current replica/epoch guards on the target.
+48. Phase 91: explicit failback target activation policy. **Closed
+    2026-06-26, local PASS**
+    (`internal/docs/finished-plans/phase91_finishedplan_failback_target_activation_policy.md`).
+    Failback target activation is default-off and requires both an explicit
+    activation policy and a runtime endpoint before the target can be marked
+    executable.
+49. Phase 92: failback target-owner -> executor handoff. **Closed
+    2026-06-26, local PASS**
+    (`internal/docs/finished-plans/phase92_finishedplan_failback_target_executor_handoff.md`).
+    The target owner and executor now share an executable target contract that
+    preserves expected-current authority guards and terminal returned-replica
+    evidence through the handoff.
+50. Phase 93: multi-volume failback handoff isolation. **Closed 2026-06-26,
+    local PASS**
+    (`internal/docs/finished-plans/phase93_finishedplan_failback_handoff_isolation.md`).
+    Multi-volume target-owner/executor handoff keeps volume IDs, returned
+    replicas, expected-current authority, and target data/control addresses
+    isolated.
+51. Phase 94: deployed failback suite render + gRPC smoke. **Closed
+    2026-06-26, local PASS**
+    (`internal/docs/finished-plans/phase94_finishedplan_failback_deployed_grpc_smoke.md`).
+    The full opt-in Helm suite renders with blockmaster failback RPC,
+    target-owner activation, and executor gRPC runtime flags, and the executor
+    can call a real blockmaster FailbackService in a local Go smoke.
+52. Phase 95: live deployed failback suite smoke. **Closed 2026-06-26, live PASS**
+    (`internal/docs/finished-plans/phase95_finishedplan_failback_live_deployed_suite.md`).
+    This gate pays the real k3s cost: fresh images, Helm install, first-volume
+    authority line, returned-replica failback contract injection, target
+    creation, executor gRPC call to live blockmaster, terminal `failed_back`
+    status, RBAC boundary, and cleanup. It still does not claim frontend
+    publication or workload-visible path switch.
+53. Add backup/restore and NVMe ANA parity after they can reuse the same action
    owner, evidence, and status model rather than creating another isolated
    control plane.
 

@@ -18,6 +18,9 @@ see [Phase Recap](phase-recap.md).
 | 33-34 | failure hardening and test realism | live dirty-failure gates, no false Ready |
 | 35-40 | Kubernetes-native read-only operator foundation | CRD status, Events, node evidence, action model, release hardening |
 | 41-44 | bounded lifecycle owner | finalizer add/release, delete-safety hold/release, integrated close gate |
+| 47-67 | returned-replica ACK/rebuild planning and runtime | eligibility, rebuild target, catch-up runtime, terminal evidence |
+| 68-74 | frontend publication and failback contract separation | publication stays blocked until authority-owned failback exists |
+| 75-95 | returned-replica failback control path | target CR, executor, runtime, blockmaster RPC, deployed-suite smoke |
 
 ## The Important Pivot
 
@@ -70,6 +73,28 @@ install
 
 The remaining release step is artifact validation: publish matching immutable
 images and rerun pinned-image smoke.
+
+Returned-replica failback now has a separately gated control path:
+
+```mermaid
+flowchart LR
+  A[Live authority facts] --> B[Returned replica terminal evidence]
+  B --> C[SwBlockVolume failback contract]
+  C --> D[Failback target owner]
+  D --> E[SwBlockReplicaFailback target]
+  E --> F[Failback executor]
+  F --> G[blockmaster FailbackService]
+  G --> H[Publisher IntentReassign]
+  H --> I[failed_back terminal target status]
+```
+
+The Phase 95 boundary is explicit:
+
+```text
+authority control path can run when opt-in
+frontend publication after failback is still not claimed
+workload-visible path switch is still not claimed
+```
 
 ## Next Feature Rule
 

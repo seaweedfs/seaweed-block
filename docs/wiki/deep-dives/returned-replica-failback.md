@@ -240,6 +240,7 @@ ambiguous HTTP/gRPC runtime addresses.
 | 92 | proves local target-owner -> executor handoff, including expected-current facts in the runtime request and terminal `failed_back` evidence |
 | 93 | proves multi-volume handoff isolation for expected-current authority and target data/control addresses |
 | 94 | proves full opt-in Helm suite render plus executor -> real blockmaster gRPC FailbackService smoke |
+| 95 | installs the opt-in suite in k3s, creates a live first-volume authority line, injects returned-replica failback evidence, and waits for deployed target-owner/executor to write terminal `failed_back` status through live blockmaster gRPC |
 
 ## Failure Classes
 
@@ -274,10 +275,29 @@ Before enabling broader failback behavior:
     and executor gRPC runtime together.
 11. Run through blockmaster-owned `FailbackService`, not a sidecar authority copy.
 12. Require terminal evidence before writing `failed_back`.
-13. Keep frontend publication as a separate gated action.
-14. Keep rebuild/catch-up traffic as a separate gated action.
-15. Run multi-volume isolation gates.
-16. Document exactly what is automatic and what is opt-in.
+13. Prove the full opt-in suite can run in Kubernetes with fresh images, Helm,
+    real service DNS, CRDs, RBAC, and cleanup.
+14. Keep frontend publication as a separate gated action.
+15. Keep rebuild/catch-up traffic as a separate gated action.
+16. Run multi-volume isolation gates.
+17. Document exactly what is automatic and what is opt-in.
+
+## Current Boundary
+
+After Phase 95, the intended product statement is:
+
+```text
+The failback authority control path is deployable and opt-in. The executor can
+drive blockmaster-owned authority reassignment and write terminal target status.
+```
+
+The intended non-claim remains:
+
+```text
+The product does not yet publish the failed-back frontend path to workloads or
+prove post-failback application I/O. That belongs to the next frontend
+publication/data-path phase.
+```
 
 ## Current Limits
 

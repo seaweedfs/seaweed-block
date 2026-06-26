@@ -69,6 +69,19 @@ delete, block, and release safely.
 | 43 | The first real product mutation needed bounded add and release. | Protection finalizer add/release gates. | Added the first admitted metadata mutation: hold on missing/blocked/stale delete safety, release only clean/releasable, preserve foreign finalizers. |
 | 44 | The integrated delete lifecycle still had manual gaps. | CSI-created protected CR, status publication, delete-request hold/release, multi-volume close gate. | Closed the user-visible loop: PVC -> CR -> finalizer -> status -> delete hold/release -> zero residue. |
 
+## Recap Addendum: Phases 45-95
+
+Phases after 44 reuse the operation-layer closure instead of bypassing it. The
+important line is returned-replica recovery:
+
+| Phase range | Problem solved | Capability added | Product logic / why it mattered |
+|---|---|---|---|
+| 45-54 | A returned replica could not be admitted back through a bounded executor path. | ACK eligibility CRs, executor preflight/status schema, terminal-evidence gate, first bounded ACK eligibility mutation. | Reintegrating a returned replica starts as evidence and eligibility, not as automatic primary movement. |
+| 56-67 | Returned-replica rebuild/catch-up needed a target and runtime loop before failback. | Rebuild target CR, target owner, planned/running/caught-up status, terminal catch-up evidence. | A replica may only become useful after durable frontier evidence proves it caught up. |
+| 68-73 | Frontend publication was too dangerous to couple directly to returned-replica eligibility. | Frontend publication target/executor boundaries that deliberately block returned-replica publication. | Publishing a frontend path is separated from ACK/rebuild evidence so the product cannot accidentally expose an unsafe target. |
+| 74-88 | Failback needed an authority-owned path rather than frontend-publication inference. | `authority.failback_returned_replica`, `SwBlockReplicaFailback`, failback executor, typed runtime, blockmaster RPC, Helm packaging. | Authority reassignment belongs to blockmaster/Publisher and remains default-off until explicit evidence and policy exist. |
+| 89-95 | The packaged failback path still needed current authority facts and live deployed proof. | Authority facts in `SwBlockVolume.status`, expected-current guards, activation policy, handoff isolation, real gRPC smoke, live k3s deployed-suite gate. | The deployable failback control path can now run end-to-end without claiming frontend publication or workload-visible data-path switch. |
+
 ## Product Logic Across The Phases
 
 ```mermaid
