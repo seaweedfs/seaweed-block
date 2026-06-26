@@ -71,9 +71,9 @@ production operator, and not backup/NVMe expansion.
 Recent returned-replica work adds a separately gated, opt-in failback runtime
 path. See [Returned Replica Failback Runtime](deep-dives/returned-replica-failback.md)
 for the authority owner, target CR, executor, gRPC service, terminal evidence,
-and non-claims. As of Phase 96, that line can plan a disabled frontend
-publication target from terminal failback evidence; frontend publication
-execution and workload-visible path switching remain separate gates.
+and non-claims. As of Phase 97, that line can plan a frontend-publication
+target from terminal failback evidence and invoke the publication runtime only
+under explicit policy; workload-visible path switching remains a separate gate.
 
 ## Source Evidence
 

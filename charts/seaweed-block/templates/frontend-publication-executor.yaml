@@ -33,5 +33,14 @@ spec:
             {{- if .Values.frontendPublicationExecutor.dryRun }}
             - "--dry-run"
             {{- end }}
+            {{- if .Values.frontendPublicationExecutor.execution.enabled }}
+            - "--enable-execution"
+            {{- end }}
+            {{- if .Values.frontendPublicationExecutor.execution.policy }}
+            - "--execution-policy"
+            {{- end }}
+            {{- if .Values.frontendPublicationExecutor.execution.runtimeUrl }}
+            - "--frontend-publication-runtime-url={{ .Values.frontendPublicationExecutor.execution.runtimeUrl }}"
+            {{- end }}
             - "--interval={{ .Values.frontendPublicationExecutor.interval }}"
 {{- end }}

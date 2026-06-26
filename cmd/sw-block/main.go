@@ -135,18 +135,28 @@ func runOpsFrontendPublicationExecutor(args []string, stdout, stderr io.Writer) 
 	fs := flag.NewFlagSet("sw-block ops frontend-publication-executor", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	var (
-		dryRun    bool
-		namespace string
-		interval  time.Duration
+		dryRun                 bool
+		namespace              string
+		enableExecution        bool
+		executionPolicyEnabled bool
+		runtimeURL             string
+		interval               time.Duration
 	)
 	fs.BoolVar(&dryRun, "dry-run", false, "evaluate frontend publication targets without writing status")
 	fs.StringVar(&namespace, "namespace", "default", "Kubernetes namespace containing SwBlockFrontendPublication objects")
+	fs.BoolVar(&enableExecution, "enable-execution", false, "request frontend publication runtime execution for enabled SwBlockFrontendPublication targets")
+	fs.BoolVar(&executionPolicyEnabled, "execution-policy", false, "allow frontend publication runtime execution; must be set with --enable-execution")
+	fs.StringVar(&runtimeURL, "frontend-publication-runtime-url", "", "HTTP runtime endpoint for frontend publication execution")
 	fs.DurationVar(&interval, "interval", 0, "repeat frontend-publication-executor reconciliation at this interval; 0 runs once")
 	if err := fs.Parse(args); err != nil {
 		return ops.VolumeStatusExitInvalid
 	}
 	if fs.NArg() != 0 {
 		fmt.Fprintf(stderr, "sw-block ops frontend-publication-executor: unexpected args %s\n", strings.Join(fs.Args(), " "))
+		return ops.VolumeStatusExitInvalid
+	}
+	if strings.TrimSpace(runtimeURL) != "" && !enableExecution {
+		fmt.Fprintln(stderr, "sw-block ops frontend-publication-executor: --frontend-publication-runtime-url requires --enable-execution")
 		return ops.VolumeStatusExitInvalid
 	}
 	runOnce := func() int {
@@ -156,9 +166,12 @@ func runOpsFrontendPublicationExecutor(args []string, stdout, stderr io.Writer) 
 			return ops.VolumeStatusExitInvalid
 		}
 		result, err := (ops.FrontendPublicationExecutorReconciler{
-			Namespace: namespace,
-			Client:    client,
-			DryRun:    dryRun,
+			Namespace:              namespace,
+			Client:                 client,
+			DryRun:                 dryRun,
+			ExecutionRequested:     enableExecution,
+			ExecutionPolicyEnabled: executionPolicyEnabled,
+			Runtime:                frontendPublicationRuntimeFromURL(runtimeURL),
 		}).Reconcile(context.Background())
 		if err != nil {
 			fmt.Fprintf(stderr, "sw-block ops frontend-publication-executor: %v\n", err)
@@ -192,6 +205,13 @@ func runOpsFrontendPublicationExecutor(args []string, stdout, stderr io.Writer) 
 		}
 		time.Sleep(interval)
 	}
+}
+
+func frontendPublicationRuntimeFromURL(runtimeURL string) ops.FrontendPublicationRuntime {
+	if strings.TrimSpace(runtimeURL) == "" {
+		return nil
+	}
+	return ops.NewHTTPFrontendPublicationRuntime(runtimeURL, nil)
 }
 
 func runOpsFailbackExecutor(args []string, stdout, stderr io.Writer) int {
@@ -2127,7 +2147,7 @@ func usage(w io.Writer) {
 	fmt.Fprintln(w, "  sw-block ops failback-target-owner [--dry-run] [--namespace <ns>] [--interval 30s] [--activate-targets --activation-policy --runtime-endpoint <addr>]")
 	fmt.Fprintln(w, "  sw-block ops failback-executor [--dry-run] [--namespace <ns>] [--enable-execution] [--execution-policy] [--failback-runtime-url <url>] [--interval 30s]")
 	fmt.Fprintln(w, "  sw-block ops frontend-publication-target-owner [--dry-run] [--namespace <ns>] [--interval 30s]")
-	fmt.Fprintln(w, "  sw-block ops frontend-publication-executor [--dry-run] [--namespace <ns>] [--interval 30s]")
+	fmt.Fprintln(w, "  sw-block ops frontend-publication-executor [--dry-run] [--namespace <ns>] [--enable-execution] [--execution-policy] [--frontend-publication-runtime-url <url>] [--interval 30s]")
 }
 
 func emptyCLI(value string) string {

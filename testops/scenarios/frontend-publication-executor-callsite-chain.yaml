@@ -1,0 +1,97 @@
+# Runner-native Phase 97 gate: explicit-policy frontend publication executor
+# call-site after terminal failback evidence. This proves executor/runtime
+# handoff only; workload-visible I/O remains a later gate.
+
+name: frontend-publication-executor-callsite-chain
+timeout: 8m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: frontend_publication_executor_callsite_gate
+    actions:
+      - action: exec
+        node: m02
+        timeout: 7m
+        cmd: "rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase97-frontend-publication-executor-callsite && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase97-frontend-publication-executor-callsite && cd {{ product_root }} && SW_BLOCK_ARTIFACT_DIR=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase97-frontend-publication-executor-callsite bash scripts/run-phase97-frontend-publication-executor-callsite-gate.sh {{ product_root }}"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase97-frontend-publication-executor-callsite/phase97-frontend-publication-executor-callsite-summary.txt"
+        pattern: "^phase97_frontend_publication_executor_callsite_status=ok$"
+        save_as: phase97_ok
+      - action: assert_greater
+        actual: "{{ phase97_ok }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase97-frontend-publication-executor-callsite/phase97-frontend-publication-executor-callsite-summary.txt"
+        pattern: "^failback_target_runtime_invoked=true$"
+        save_as: runtime_invoked
+      - action: assert_greater
+        actual: "{{ runtime_invoked }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase97-frontend-publication-executor-callsite/phase97-frontend-publication-executor-callsite-summary.txt"
+        pattern: "^frontend_publication_attempts=1$"
+        save_as: publication_attempt
+      - action: assert_greater
+        actual: "{{ publication_attempt }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase97-frontend-publication-executor-callsite/phase97-frontend-publication-executor-callsite-summary.txt"
+        pattern: "^frontend_published=true$"
+        save_as: frontend_published
+      - action: assert_greater
+        actual: "{{ frontend_published }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase97-frontend-publication-executor-callsite/phase97-frontend-publication-executor-callsite-summary.txt"
+        pattern: "^failback_attempts=0$"
+        save_as: no_failback_attempts
+      - action: assert_greater
+        actual: "{{ no_failback_attempts }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase97-frontend-publication-executor-callsite/phase97-frontend-publication-executor-callsite-summary.txt"
+        pattern: "^failback_started=false$"
+        save_as: no_failback_started
+      - action: assert_greater
+        actual: "{{ no_failback_started }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase97-frontend-publication-executor-callsite/phase97-frontend-publication-executor-callsite-summary.txt"
+        pattern: "^storage_mutation_allowed=false$"
+        save_as: no_storage_mutation
+      - action: assert_greater
+        actual: "{{ no_storage_mutation }}"
+        threshold: "0"
+
+  - name: collect
+    always: true
+    actions:
+      - action: collect_path
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase97-frontend-publication-executor-callsite"
+        name: "remote-phases"
+        ignore_error: true

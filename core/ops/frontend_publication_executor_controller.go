@@ -31,19 +31,24 @@ type FrontendPublicationRuntime interface {
 }
 
 type FrontendPublicationRuntimeRequest struct {
-	VolumeName                   string   `json:"volumeName"`
-	VolumeID                     string   `json:"volumeID"`
-	PVCName                      string   `json:"pvcName"`
-	ReplicaID                    string   `json:"replicaID"`
-	RuntimeEndpoint              string   `json:"runtimeEndpoint,omitempty"`
-	SourceEligibilityName        string   `json:"sourceEligibilityName,omitempty"`
-	AckEligibilityKnown          bool     `json:"ackEligibilityKnown"`
-	AckEligible                  bool     `json:"ackEligible"`
-	FrontendFencedAfterExecution bool     `json:"frontendFencedAfterExecution"`
-	PrimaryUnchanged             bool     `json:"primaryUnchanged"`
-	DurableFrontierCovered       bool     `json:"durableFrontierCovered"`
-	NoCrossVolumeIdentityChange  bool     `json:"noCrossVolumeIdentityChange"`
-	EvidenceRefs                 []string `json:"evidenceRefs,omitempty"`
+	VolumeName                        string   `json:"volumeName"`
+	VolumeID                          string   `json:"volumeID"`
+	PVCName                           string   `json:"pvcName"`
+	ReplicaID                         string   `json:"replicaID"`
+	RuntimeEndpoint                   string   `json:"runtimeEndpoint,omitempty"`
+	SourceEligibilityName             string   `json:"sourceEligibilityName,omitempty"`
+	SourceFailbackName                string   `json:"sourceFailbackName,omitempty"`
+	AckEligibilityKnown               bool     `json:"ackEligibilityKnown"`
+	AckEligible                       bool     `json:"ackEligible"`
+	FrontendFencedAfterExecution      bool     `json:"frontendFencedAfterExecution"`
+	PrimaryUnchanged                  bool     `json:"primaryUnchanged"`
+	DurableFrontierCovered            bool     `json:"durableFrontierCovered"`
+	NoCrossVolumeIdentityChange       bool     `json:"noCrossVolumeIdentityChange"`
+	FailbackCompleted                 bool     `json:"failbackCompleted"`
+	AuthorityEpochAdvanced            bool     `json:"authorityEpochAdvanced"`
+	SinglePrimaryAfterFailback        bool     `json:"singlePrimaryAfterFailback"`
+	PublishTargetSwappedAfterFailback bool     `json:"publishTargetSwappedAfterFailback"`
+	EvidenceRefs                      []string `json:"evidenceRefs,omitempty"`
 }
 
 type FrontendPublicationRuntimeResult struct {
@@ -214,6 +219,11 @@ func frontendPublicationExecutorFailbackTargetValid(target SwBlockFrontendPublic
 }
 
 func frontendPublicationExecutorExecutableTarget(target SwBlockFrontendPublicationObject) bool {
+	return frontendPublicationExecutorExecutableEligibilityTarget(target) ||
+		frontendPublicationExecutorExecutableFailbackTarget(target)
+}
+
+func frontendPublicationExecutorExecutableEligibilityTarget(target SwBlockFrontendPublicationObject) bool {
 	spec := target.Spec
 	return spec.VolumeName != "" &&
 		spec.ReplicaID != "" &&
@@ -223,6 +233,21 @@ func frontendPublicationExecutorExecutableTarget(target SwBlockFrontendPublicati
 		spec.FrontendFencedAfterExecution &&
 		spec.PrimaryUnchanged &&
 		spec.DurableFrontierCovered &&
+		spec.NoCrossVolumeIdentityChange &&
+		spec.FrontendPublicationDecision == AuthorityExecutorPublicationDecisionEnabled &&
+		spec.FrontendPublicationMutationAllowed
+}
+
+func frontendPublicationExecutorExecutableFailbackTarget(target SwBlockFrontendPublicationObject) bool {
+	spec := target.Spec
+	return spec.VolumeName != "" &&
+		spec.ReplicaID != "" &&
+		spec.RuntimeEndpoint != "" &&
+		spec.SourceFailbackName != "" &&
+		spec.FailbackCompleted &&
+		spec.AuthorityEpochAdvanced &&
+		spec.SinglePrimaryAfterFailback &&
+		spec.PublishTargetSwappedAfterFailback &&
 		spec.NoCrossVolumeIdentityChange &&
 		spec.FrontendPublicationDecision == AuthorityExecutorPublicationDecisionEnabled &&
 		spec.FrontendPublicationMutationAllowed
@@ -290,18 +315,23 @@ func frontendPublicationExecutorPublishedStatus(now time.Time, target SwBlockFro
 func frontendPublicationRuntimeRequest(target SwBlockFrontendPublicationObject) FrontendPublicationRuntimeRequest {
 	spec := target.Spec
 	return FrontendPublicationRuntimeRequest{
-		VolumeName:                   spec.VolumeName,
-		VolumeID:                     spec.VolumeID,
-		PVCName:                      spec.PVCName,
-		ReplicaID:                    spec.ReplicaID,
-		RuntimeEndpoint:              spec.RuntimeEndpoint,
-		SourceEligibilityName:        spec.SourceEligibilityName,
-		AckEligibilityKnown:          spec.AckEligibilityKnown,
-		AckEligible:                  spec.AckEligible,
-		FrontendFencedAfterExecution: spec.FrontendFencedAfterExecution,
-		PrimaryUnchanged:             spec.PrimaryUnchanged,
-		DurableFrontierCovered:       spec.DurableFrontierCovered,
-		NoCrossVolumeIdentityChange:  spec.NoCrossVolumeIdentityChange,
+		VolumeName:                        spec.VolumeName,
+		VolumeID:                          spec.VolumeID,
+		PVCName:                           spec.PVCName,
+		ReplicaID:                         spec.ReplicaID,
+		RuntimeEndpoint:                   spec.RuntimeEndpoint,
+		SourceEligibilityName:             spec.SourceEligibilityName,
+		SourceFailbackName:                spec.SourceFailbackName,
+		AckEligibilityKnown:               spec.AckEligibilityKnown,
+		AckEligible:                       spec.AckEligible,
+		FrontendFencedAfterExecution:      spec.FrontendFencedAfterExecution,
+		PrimaryUnchanged:                  spec.PrimaryUnchanged,
+		DurableFrontierCovered:            spec.DurableFrontierCovered,
+		NoCrossVolumeIdentityChange:       spec.NoCrossVolumeIdentityChange,
+		FailbackCompleted:                 spec.FailbackCompleted,
+		AuthorityEpochAdvanced:            spec.AuthorityEpochAdvanced,
+		SinglePrimaryAfterFailback:        spec.SinglePrimaryAfterFailback,
+		PublishTargetSwappedAfterFailback: spec.PublishTargetSwappedAfterFailback,
 	}
 }
 

@@ -214,13 +214,18 @@ frontendPublicationTargetOwner:
   nodeSelector: {}
 
 frontendPublicationExecutor:
-  # Frontend publication executor boundary. Disabled by default. This phase
-  # writes disabled/blocked SwBlockFrontendPublication.status only. It does not
-  # publish frontend targets, fail back authority, create targets, or mutate
+  # Frontend publication executor boundary. Disabled by default. With execution
+  # disabled it writes blocked SwBlockFrontendPublication.status only. Execution
+  # requires both execution.enabled and execution.policy plus an explicit
+  # runtimeUrl. It must not fail back authority, create targets, or mutate
   # storage.
   create: false
   dryRun: true
   interval: 30s
+  execution:
+    enabled: false
+    policy: false
+    runtimeUrl: ""
   rbac:
     create: true
   nodeSelector: {}

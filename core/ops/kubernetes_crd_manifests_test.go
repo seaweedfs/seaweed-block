@@ -955,6 +955,10 @@ func TestPhase76FailbackExecutorPackagingIsStatusOnly(t *testing.T) {
 	executor := yamlMap(t, values, "failbackExecutor")
 	assertYAMLBool(t, executor, "create", false)
 	assertYAMLBool(t, executor, "dryRun", true)
+	execution := yamlMap(t, executor, "execution")
+	assertYAMLBool(t, execution, "enabled", false)
+	assertYAMLBool(t, execution, "policy", false)
+	assertYAMLString(t, execution, "runtimeUrl", "")
 	rbacValues := yamlMap(t, executor, "rbac")
 	assertYAMLBool(t, rbacValues, "create", true)
 
@@ -1083,6 +1087,12 @@ func TestPhase70FrontendPublicationExecutorPackagingIsStatusOnly(t *testing.T) {
 		`- "--namespace={{ .Release.Namespace }}"`,
 		`{{- if .Values.frontendPublicationExecutor.dryRun }}`,
 		`- "--dry-run"`,
+		`{{- if .Values.frontendPublicationExecutor.execution.enabled }}`,
+		`- "--enable-execution"`,
+		`{{- if .Values.frontendPublicationExecutor.execution.policy }}`,
+		`- "--execution-policy"`,
+		`{{- if .Values.frontendPublicationExecutor.execution.runtimeUrl }}`,
+		`- "--frontend-publication-runtime-url={{ .Values.frontendPublicationExecutor.execution.runtimeUrl }}"`,
 		`- "--interval={{ .Values.frontendPublicationExecutor.interval }}"`,
 	} {
 		if !strings.Contains(deploy, want) {

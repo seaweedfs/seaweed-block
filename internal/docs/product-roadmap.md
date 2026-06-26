@@ -221,9 +221,10 @@ rebuild, delete safety, or cleanup must start as a separate gated phase.
   authority facts, activation, handoff isolation, deployed render, real
   blockmaster gRPC smoke, and a live k3s deployed-suite gate. Phase 96 plans a
   disabled frontend-publication target from terminal `failed_back` evidence.
-  Automatic frontend publication after failback remains future work.
-- Later: frontend publication execution after failback, workload-visible
-  post-failback I/O, NVMe ANA Kubernetes multipath parity, stronger
+  Phase 97 wires the explicit-policy frontend-publication executor call-site.
+  Workload-visible post-failback I/O remains future work.
+- Later: workload-visible frontend publication after failback, post-failback
+  I/O, NVMe ANA Kubernetes multipath parity, stronger
   committed-frontier reporting, broad
   distro/host compatibility, and longer soak under failure. NVMe ANA parity
   should follow the Kubernetes-native status foundation so ANA facts, path

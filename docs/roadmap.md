@@ -430,7 +430,14 @@ Recommended order from here:
     creates a disabled `SwBlockFrontendPublication` target with explicit
     failback-source fields. The executor remains default-off; no frontend path
     is published.
-54. Add backup/restore and NVMe ANA parity after they can reuse the same action
+54. Phase 97: frontend publication executor call-site. **Closed 2026-06-26,
+    runner PASS**
+    (`internal/docs/finished-plans/phase97_finishedplan_frontend_publication_executor_callsite.md`).
+    The executor can invoke a frontend-publication runtime for an enabled
+    failback-source target only under explicit policy and writes
+    `frontend_published` only from valid terminal evidence. Workload-visible
+    I/O remains a separate gate.
+55. Add backup/restore and NVMe ANA parity after they can reuse the same action
    owner, evidence, and status model rather than creating another isolated
    control plane.
 
@@ -481,7 +488,10 @@ activation policy, executor handoff, multi-volume isolation, deployed render,
 real blockmaster gRPC smoke, and finally a live Kubernetes smoke that writes
 terminal `failed_back` evidence. Phase 96 consumes that terminal evidence to
 create a disabled frontend-publication target, keeping actual frontend
-publication and workload-visible path switching as separate later gates.
+publication and workload-visible path switching as separate later gates. Phase
+97 wires the explicit-policy executor call-site for that target and proves
+terminal frontend-publication evidence, while keeping workload-visible I/O as a
+separate gate.
 
 The practical rule is:
 

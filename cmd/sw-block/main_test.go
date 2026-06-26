@@ -1697,6 +1697,114 @@ func TestOpsFrontendPublicationExecutorDryRunDoesNotWriteStatus(t *testing.T) {
 	}
 }
 
+func TestOpsFrontendPublicationExecutorRejectsRuntimeWithoutEnable(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ops", "frontend-publication-executor", "--frontend-publication-runtime-url", "http://127.0.0.1:23260/runtime"}, &stdout, &stderr)
+	if code != ops.VolumeStatusExitInvalid {
+		t.Fatalf("exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "--frontend-publication-runtime-url requires --enable-execution") {
+		t.Fatalf("stderr=%s", stderr.String())
+	}
+}
+
+func TestOpsFrontendPublicationExecutorPolicyBlocksExecution(t *testing.T) {
+	client := &lifecycleOwnerTestClient{
+		frontendTargets: []ops.SwBlockFrontendPublicationObject{cmdFrontendPublicationFailbackExecutableTarget()},
+	}
+	oldFactory := opsFrontendPublicationExecutorClientFactory
+	opsFrontendPublicationExecutorClientFactory = func() (ops.FrontendPublicationExecutorClient, error) {
+		return client, nil
+	}
+	t.Cleanup(func() { opsFrontendPublicationExecutorClientFactory = oldFactory })
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ops", "frontend-publication-executor", "--enable-execution", "--namespace", "kube-system"}, &stdout, &stderr)
+	if code != ops.VolumeStatusExitInvalid {
+		t.Fatalf("exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "execution is disabled by product policy") {
+		t.Fatalf("stderr=%s", stderr.String())
+	}
+	if len(client.frontendPublicationStatusWrites) != 0 {
+		t.Fatalf("policy blocked execution wrote status: %+v", client.frontendPublicationStatusWrites)
+	}
+}
+
+func TestOpsFrontendPublicationExecutorExecutesFailbackTargetWithExplicitPolicy(t *testing.T) {
+	client := &lifecycleOwnerTestClient{
+		frontendTargets: []ops.SwBlockFrontendPublicationObject{cmdFrontendPublicationFailbackExecutableTarget()},
+	}
+	oldFactory := opsFrontendPublicationExecutorClientFactory
+	opsFrontendPublicationExecutorClientFactory = func() (ops.FrontendPublicationExecutorClient, error) {
+		return client, nil
+	}
+	t.Cleanup(func() { opsFrontendPublicationExecutorClientFactory = oldFactory })
+
+	var got ops.FrontendPublicationRuntimeRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Fatalf("decode runtime request: %v", err)
+		}
+		_ = json.NewEncoder(w).Encode(ops.FrontendPublicationRuntimeResult{
+			FrontendPublished:           true,
+			FailbackStarted:             false,
+			NoStorageMutation:           true,
+			NoCrossVolumeIdentityChange: true,
+			EvidenceRefs:                []string{"frontend-after-failback.txt"},
+		})
+	}))
+	defer server.Close()
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"ops", "frontend-publication-executor",
+		"--enable-execution",
+		"--execution-policy",
+		"--frontend-publication-runtime-url", server.URL,
+		"--namespace", "kube-system",
+	}, &stdout, &stderr)
+	if code != ops.VolumeStatusExitOK {
+		t.Fatalf("exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	if got.SourceFailbackName != "demo-pvc-r1-failback" ||
+		!got.FailbackCompleted ||
+		!got.AuthorityEpochAdvanced ||
+		!got.SinglePrimaryAfterFailback ||
+		!got.PublishTargetSwappedAfterFailback ||
+		got.AckEligible ||
+		got.PrimaryUnchanged {
+		t.Fatalf("runtime request=%+v", got)
+	}
+	if len(client.frontendPublicationStatusWrites) != 1 {
+		t.Fatalf("frontendPublicationStatusWrites=%+v", client.frontendPublicationStatusWrites)
+	}
+	status := client.frontendPublicationStatusWrites[0].status
+	if status.State != ops.FrontendPublicationStatePublished ||
+		status.ReasonCode != ops.AuthorityExecutorFrontendPublicationReasonPublished ||
+		status.PublicationMutationAllowed ||
+		!status.FrontendPublished ||
+		status.FailbackStarted ||
+		!status.NoStorageMutation ||
+		!status.NoCrossVolumeIdentityChange {
+		t.Fatalf("status=%+v", status)
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"frontend_publication_executor=write_status",
+		"targets=1",
+		"status_writes=1",
+		"invalid_targets=0",
+		"frontend_publication_attempts=1",
+		"failback_attempts=0",
+		"storage_mutation_allowed=false",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("stdout missing %q:\n%s", want, out)
+		}
+	}
+}
+
 func TestOpsAuthorityExecutorExecutionPolicyBlocksWhenAckTargetMissing(t *testing.T) {
 	client := &lifecycleOwnerTestClient{
 		volumes: []ops.SwBlockVolumeObject{{
@@ -2106,6 +2214,33 @@ func cmdFrontendPublicationTarget() ops.SwBlockFrontendPublicationObject {
 			FrontendPublicationDecision:        ops.AuthorityExecutorPublicationDecisionDisabled,
 			FrontendPublicationReason:          ops.AuthorityExecutorFrontendPublicationReasonDisabled,
 			FrontendPublicationMutationAllowed: false,
+		},
+	}
+}
+
+func cmdFrontendPublicationFailbackExecutableTarget() ops.SwBlockFrontendPublicationObject {
+	return ops.SwBlockFrontendPublicationObject{
+		Ref: ops.OperatorObjectRef{
+			APIVersion: ops.SwBlockVolumeAPIVersion,
+			Kind:       ops.SwBlockFrontendPublicationKind,
+			Namespace:  "kube-system",
+			Name:       "demo-pvc-r1-frontend-publication",
+		},
+		Spec: ops.SwBlockFrontendPublicationSpec{
+			VolumeName:                         "demo-pvc",
+			VolumeID:                           "pvc-demo",
+			PVCName:                            "demo-pvc",
+			ReplicaID:                          "r1",
+			SourceFailbackName:                 "demo-pvc-r1-failback",
+			NoCrossVolumeIdentityChange:        true,
+			FailbackCompleted:                  true,
+			AuthorityEpochAdvanced:             true,
+			SinglePrimaryAfterFailback:         true,
+			PublishTargetSwappedAfterFailback:  true,
+			FrontendPublicationDecision:        ops.AuthorityExecutorPublicationDecisionEnabled,
+			FrontendPublicationReason:          "frontend_publication_requested",
+			FrontendPublicationMutationAllowed: true,
+			RuntimeEndpoint:                    "http://127.0.0.1:23260/runtime/frontend-publication",
 		},
 	}
 }

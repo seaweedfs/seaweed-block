@@ -230,6 +230,57 @@ func TestFrontendPublicationExecutorInvokesRuntimeWhenExplicitlyEnabled(t *testi
 	}
 }
 
+func TestFrontendPublicationExecutorInvokesRuntimeForFailbackTargetWhenExplicitlyEnabled(t *testing.T) {
+	target := frontendPublicationExecutorFailbackExecutableTargetFixture()
+	client := &fakeFrontendPublicationExecutorClient{targets: []SwBlockFrontendPublicationObject{target}}
+	runtime := &fakeFrontendPublicationRuntime{result: FrontendPublicationRuntimeResult{
+		FrontendPublished:           true,
+		FailbackStarted:             false,
+		NoStorageMutation:           true,
+		NoCrossVolumeIdentityChange: true,
+		EvidenceRefs:                []string{"frontend-after-failback.txt"},
+	}}
+	result, err := (FrontendPublicationExecutorReconciler{
+		Namespace:              "kube-system",
+		Client:                 client,
+		Runtime:                runtime,
+		ExecutionRequested:     true,
+		ExecutionPolicyEnabled: true,
+	}).Reconcile(context.Background())
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if result.FrontendPublicationAttempts != 1 ||
+		result.FailbackAttempts != 0 ||
+		result.StatusWriteCount != 1 ||
+		result.StorageMutationAllowed {
+		t.Fatalf("result=%+v", result)
+	}
+	if len(runtime.requests) != 1 {
+		t.Fatalf("runtime requests=%+v", runtime.requests)
+	}
+	req := runtime.requests[0]
+	if req.SourceFailbackName != target.Spec.SourceFailbackName ||
+		!req.FailbackCompleted ||
+		!req.AuthorityEpochAdvanced ||
+		!req.SinglePrimaryAfterFailback ||
+		!req.PublishTargetSwappedAfterFailback ||
+		req.AckEligible ||
+		req.PrimaryUnchanged {
+		t.Fatalf("runtime request=%+v", req)
+	}
+	status := client.writes[0].status
+	if status.State != FrontendPublicationStatePublished ||
+		status.ReasonCode != AuthorityExecutorFrontendPublicationReasonPublished ||
+		status.PublicationMutationAllowed ||
+		!status.FrontendPublished ||
+		status.FailbackStarted ||
+		!status.NoStorageMutation ||
+		!status.NoCrossVolumeIdentityChange {
+		t.Fatalf("status=%+v", status)
+	}
+}
+
 func TestFrontendPublicationExecutorRuntimeFailureWritesBlockedStatus(t *testing.T) {
 	client := &fakeFrontendPublicationExecutorClient{targets: []SwBlockFrontendPublicationObject{frontendPublicationExecutorGenericExecutableTargetFixture()}}
 	runtime := &fakeFrontendPublicationRuntime{err: errors.New("runtime refused")}
@@ -348,6 +399,15 @@ func frontendPublicationExecutorExecutableTargetFixture() SwBlockFrontendPublica
 func frontendPublicationExecutorGenericExecutableTargetFixture() SwBlockFrontendPublicationObject {
 	target := frontendPublicationExecutorExecutableTargetFixture()
 	target.Spec.SourceEligibilityName = ""
+	return target
+}
+
+func frontendPublicationExecutorFailbackExecutableTargetFixture() SwBlockFrontendPublicationObject {
+	target := frontendPublicationExecutorFailbackTerminalTarget()
+	target.Spec.FrontendPublicationDecision = AuthorityExecutorPublicationDecisionEnabled
+	target.Spec.FrontendPublicationReason = "frontend_publication_requested"
+	target.Spec.FrontendPublicationMutationAllowed = true
+	target.Spec.RuntimeEndpoint = "http://127.0.0.1:23260/runtime/frontend-publication"
 	return target
 }
 
