@@ -93,6 +93,9 @@ spec:
             {{- end }}
             - "--launcher-kubernetes-apply"
             - "--listen=0.0.0.0:{{ .Values.blockmaster.listenPort }}"
+            {{- if .Values.blockmaster.failbackRuntimeRPC }}
+            - "--failback-runtime-rpc"
+            {{- end }}
             - "--expected-slots-per-volume={{ include "seaweed-block.expectedSlotsPerVolume" . }}"
           ports:
             - name: grpc

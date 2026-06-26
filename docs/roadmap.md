@@ -341,7 +341,14 @@ Recommended order from here:
     `--failback-runtime-grpc-addr` are all explicit. HTTP runtime remains
     supported; HTTP and gRPC transports are mutually exclusive. Default
     behavior remains status-only.
-40. Add backup/restore and NVMe ANA parity after they can reuse the same action
+40. Phase 83: failback runtime chart wiring. **Closed 2026-06-26, local PASS**
+    (`internal/docs/finished-plans/phase83_finishedplan_failback_chart_runtime_wiring.md`).
+    Helm can now render the disabled-by-default blockmaster failback RPC and
+    failback-executor gRPC runtime flags when every execution switch is
+    explicit. Default chart behavior remains non-mutating. The chart fails fast
+    for dry-run execution, missing execution policy, and ambiguous HTTP/gRPC
+    runtime transports.
+41. Add backup/restore and NVMe ANA parity after they can reuse the same action
    owner, evidence, and status model rather than creating another isolated
    control plane.
 
@@ -376,7 +383,9 @@ frontend publication, and storage/workload mutation remain disabled. Phase 81
 adds the disabled-by-default RPC boundary that a separate failback executor can
 call in a later phase; default installs still keep the mutation path off.
 Phase 82 adds that executor-side gRPC runtime transport, still requiring
-explicit execution policy and an explicit blockmaster address.
+explicit execution policy and an explicit blockmaster address. Phase 83 packages
+that path in Helm while preserving the default-off boundary and adding render
+guardrails for incoherent execution values.
 
 The practical rule is:
 

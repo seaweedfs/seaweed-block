@@ -115,6 +115,29 @@ stage2Multipath:
 This only enables chart wiring. The host still needs iSCSI, multipath, and ALUA
 support configured.
 
+## Optional Failback Runtime Wiring
+
+Returned-replica failback execution is disabled by default. The chart only
+renders the blockmaster failback RPC and executor runtime flags when all
+execution switches are explicit:
+
+```yaml
+blockmaster:
+  failbackRuntimeRPC: true
+
+failbackExecutor:
+  create: true
+  dryRun: false
+  execution:
+    enabled: true
+    policy: true
+    failbackRuntimeGrpcAddr: blockmaster.kube-system.svc:9333
+```
+
+The chart rejects unsafe combinations such as execution with `dryRun: true`,
+missing execution policy, or both HTTP and gRPC runtime addresses. This wiring
+does not enable automatic failback by default.
+
 ## Current Boundary
 
 - Use immutable image tags such as `sha-<commit>` for QA and release checks.

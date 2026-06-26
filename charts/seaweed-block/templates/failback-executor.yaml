@@ -1,4 +1,19 @@
 {{- if .Values.failbackExecutor.create }}
+{{- if and .Values.failbackExecutor.execution.enabled .Values.failbackExecutor.dryRun -}}
+{{- fail "failbackExecutor.execution.enabled=true requires failbackExecutor.dryRun=false" -}}
+{{- end -}}
+{{- if and .Values.failbackExecutor.execution.enabled (not .Values.failbackExecutor.execution.policy) -}}
+{{- fail "failbackExecutor.execution.enabled=true requires failbackExecutor.execution.policy=true" -}}
+{{- end -}}
+{{- if and .Values.failbackExecutor.execution.failbackRuntimeGrpcAddr (not .Values.failbackExecutor.execution.enabled) -}}
+{{- fail "failbackExecutor.execution.failbackRuntimeGrpcAddr requires failbackExecutor.execution.enabled=true" -}}
+{{- end -}}
+{{- if and .Values.failbackExecutor.execution.failbackRuntimeURL (not .Values.failbackExecutor.execution.enabled) -}}
+{{- fail "failbackExecutor.execution.failbackRuntimeURL requires failbackExecutor.execution.enabled=true" -}}
+{{- end -}}
+{{- if and .Values.failbackExecutor.execution.failbackRuntimeGrpcAddr .Values.failbackExecutor.execution.failbackRuntimeURL -}}
+{{- fail "failbackExecutor.execution.failbackRuntimeGrpcAddr and failbackExecutor.execution.failbackRuntimeURL are mutually exclusive" -}}
+{{- end -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -34,6 +49,18 @@ spec:
             - "--namespace={{ .Release.Namespace }}"
             {{- if .Values.failbackExecutor.dryRun }}
             - "--dry-run"
+            {{- end }}
+            {{- if .Values.failbackExecutor.execution.enabled }}
+            - "--enable-execution"
+            {{- end }}
+            {{- if .Values.failbackExecutor.execution.policy }}
+            - "--execution-policy"
+            {{- end }}
+            {{- if .Values.failbackExecutor.execution.failbackRuntimeGrpcAddr }}
+            - "--failback-runtime-grpc-addr={{ .Values.failbackExecutor.execution.failbackRuntimeGrpcAddr }}"
+            {{- end }}
+            {{- if .Values.failbackExecutor.execution.failbackRuntimeURL }}
+            - "--failback-runtime-url={{ .Values.failbackExecutor.execution.failbackRuntimeURL }}"
             {{- end }}
             - "--interval={{ .Values.failbackExecutor.interval }}"
 {{- end }}

@@ -31,6 +31,7 @@ blockmaster:
   nodeSelector: {}
   serviceName: blockmaster
   listenPort: 9333
+  failbackRuntimeRPC: false
   authorityStore: /var/lib/sw-block/authority
   lifecycleStore: /var/lib/sw-block/lifecycle
   durableRoot: /var/lib/sw-block
@@ -187,6 +188,11 @@ failbackExecutor:
   create: false
   dryRun: true
   interval: 30s
+  execution:
+    enabled: false
+    policy: false
+    failbackRuntimeGrpcAddr: ""
+    failbackRuntimeURL: ""
   rbac:
     create: true
   nodeSelector: {}

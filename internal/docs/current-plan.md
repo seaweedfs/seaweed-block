@@ -1,85 +1,110 @@
-# Current Plan: Phase 82 Failback Executor gRPC Runtime
+# Current Plan: Phase 83 Failback Runtime Chart Wiring
 
 Status: complete.
 
 ## Goal
 
-Phase 81 added a disabled-by-default blockmaster FailbackService RPC. Phase 82
-wires the failback executor to call that RPC as a runtime transport, still
-behind the existing explicit execution policy.
+Phase 82 added the failback executor gRPC transport. Phase 83 packages that
+transport in the Helm chart without enabling it by default.
 
-Default behavior remains status-only. A gRPC address alone is rejected unless
-execution is explicitly requested.
+Default installs remain non-mutating:
+
+```text
+blockmaster.failbackRuntimeRPC=false
+failbackExecutor.create=false
+failbackExecutor.execution.enabled=false
+```
+
+The chart only renders the active failback RPC/executor path when the operator
+sets all execution switches explicitly.
 
 ## Deliverables
 
-### D1: gRPC Runtime Client
+### D1: Blockmaster RPC Flag
 
 Added:
 
 ```text
-core/ops.GRPCFailbackRuntime
-core/ops.NewGRPCFailbackRuntime
+blockmaster.failbackRuntimeRPC
 ```
 
-The runtime maps `ops.FailbackRuntimeRequest` to:
+When true, the blockmaster Deployment renders:
 
 ```text
-control.FailbackService.ExecuteFailback
+--failback-runtime-rpc
 ```
 
-and maps `FailbackResponse` back to `ops.FailbackRuntimeResult`.
+The value defaults to false.
 
-### D2: CLI Runtime Transport
+### D2: Failback Executor Runtime Values
 
 Added:
 
 ```text
-sw-block ops failback-executor --failback-runtime-grpc-addr <blockmaster-addr>
+failbackExecutor.execution.enabled
+failbackExecutor.execution.policy
+failbackExecutor.execution.failbackRuntimeGrpcAddr
+failbackExecutor.execution.failbackRuntimeURL
 ```
 
-Guardrails:
+When explicitly enabled with `dryRun=false`, the failback executor can render:
 
 ```text
---failback-runtime-grpc-addr requires --enable-execution
---failback-runtime-url and --failback-runtime-grpc-addr are mutually exclusive
---execution-policy is still required for any execution
+--enable-execution
+--execution-policy
+--failback-runtime-grpc-addr=<addr>
 ```
 
-The existing HTTP runtime remains supported.
+HTTP runtime remains available through:
 
-### D3: Gate
+```text
+--failback-runtime-url=<url>
+```
+
+### D3: Render Guardrails
+
+Helm now fails fast for incoherent execution values:
+
+```text
+execution.enabled=true with dryRun=true
+execution.enabled=true without execution.policy=true
+runtime address without execution.enabled=true
+both HTTP and gRPC runtime addresses
+```
+
+This keeps chart behavior aligned with the CLI contract and avoids deployed
+pods that immediately reject their own flags.
+
+### D4: Gate
 
 Added:
 
 ```text
-scripts/run-phase82-failback-executor-grpc-runtime-gate.sh
-testops/scenarios/failback-executor-grpc-runtime-chain.yaml
+scripts/run-phase83-failback-chart-runtime-gate.sh
+testops/scenarios/failback-chart-runtime-chain.yaml
 ```
 
 The gate proves:
 
 ```text
-gRPC runtime calls FailbackService
-request fields are mapped
-response terminal evidence is mapped
-CLI gRPC runtime writes failed_back status on terminal evidence
-gRPC runtime requires --enable-execution
-HTTP and gRPC transports are mutually exclusive
-HTTP runtime still works
-frontend publication remains false
-storage mutation remains false
+default chart omits --failback-runtime-rpc
+default chart does not create failback executor
+default chart omits --enable-execution and runtime address
+explicit chart renders blockmaster RPC flag
+explicit chart renders failback executor execution policy and gRPC address
+dry-run execution is rejected
+missing execution policy is rejected
+ambiguous HTTP/gRPC runtime is rejected
 ```
 
 ## Non-Claims
 
-Phase 82 does not implement:
+Phase 83 does not implement:
 
 ```text
-chart-enabled failback executor gRPC address
 automatic failback from the deployed controller loop
 default-enabled failback RPC
-blockvolume frontend switching
+live end-to-end failback through Helm install
 frontend publication after failback
 storage rebuild/catch-up traffic
 workload mutation
@@ -89,38 +114,38 @@ NVMe ANA behavior
 ## Verification
 
 ```text
-go test ./core/ops -run "TestGRPCFailbackRuntime" -count=1 -v
-go test ./cmd/sw-block -run "TestOpsFailbackExecutor(GRPCRuntimeWritesFailedBackStatus|RejectsGRPCRuntimeWithoutEnable|RejectsAmbiguousRuntimeTransports|RuntimeURLWritesFailedBackStatus)" -count=1 -v
-go test ./core/authority ./core/ops ./core/host/master ./cmd/blockmaster ./cmd/sw-block
 helm lint charts/seaweed-block
-"C:\Program Files\Git\bin\bash.exe" scripts/run-phase82-failback-executor-grpc-runtime-gate.sh .
-C:\work\swblock.exe validate testops\scenarios\failback-executor-grpc-runtime-chain.yaml
-git diff --check
+"C:\Program Files\Git\bin\bash.exe" scripts/run-phase83-failback-chart-runtime-gate.sh .
+C:\work\swblock.exe validate testops\scenarios\failback-chart-runtime-chain.yaml
 ```
 
 Terminal evidence:
 
 ```text
-phase82_failback_executor_grpc_runtime_status=ok
-core_ops_grpc_failback_runtime_tests=pass
-cmd_failback_grpc_runtime_tests=pass
-grpc_runtime_calls_failback_service=true
-grpc_runtime_requires_address=true
-cmd_grpc_runtime_writes_failed_back_status=true
-cmd_grpc_runtime_requires_enable=true
-cmd_rejects_ambiguous_runtime_transports=true
-cmd_http_runtime_still_supported=true
-grpc_runtime_request_fields_mapped=true
-grpc_runtime_response_fields_mapped=true
+phase83_failback_chart_runtime_status=ok
+helm_lint=pass
+default_omits_failback_runtime_rpc=true
+default_omits_failback_executor_deployment=true
+default_omits_enable_execution=true
+default_omits_failback_grpc_addr=true
+enabled_renders_failback_runtime_rpc=true
+enabled_renders_failback_executor_deployment=true
+enabled_renders_enable_execution=true
+enabled_renders_execution_policy=true
+enabled_renders_failback_grpc_addr=true
+enabled_omits_dry_run=true
+rejects_execution_with_dry_run=true
+rejects_execution_without_policy=true
+rejects_ambiguous_runtime_transports=true
 execution_policy_still_required=true
-http_grpc_runtime_mutually_exclusive=true
-authority_mutation_allowed_only_with_execution_policy=true
+runtime_transport_must_be_unambiguous=true
+chart_default_remains_non_mutating=true
 frontend_publication_allowed=false
 storage_mutation_allowed=false
 ```
 
 ## Next
 
-The next phase should add Helm/chart wiring for this transport while keeping it
-disabled by default, or run an integrated local blockmaster + executor smoke
-with both flags explicitly enabled.
+The next phase should run an integrated local blockmaster + failback-executor
+smoke with all flags explicitly enabled, or add the missing release/README
+documentation for the opt-in failback path before any public release claim.
