@@ -34,7 +34,8 @@ This is an **alpha** product path for supported lab clusters, not production.
 | Multi-volume RF=3 lab path | Gated | CSI reattach recovery | Gated |
 | iSCSI ALUA/dm-multipath mounted failover | Gated | Restart persistence with hostPath | Gated |
 | Actionable read-only CRD status + Events | Available | Bounded SwBlockVolume finalizer lifecycle | Beta candidate |
-| Returned-replica ACK eligibility executor | Beta candidate | Returned-replica rebuild/failback | Planned |
+| Returned-replica ACK eligibility executor | Beta candidate | Returned-replica failback runtime | Source-gated |
+| Returned-replica rebuild traffic | Planned | Frontend publication after failback | Planned |
 | Backup/snapshot/restore | Planned | NVMe ANA parity | Planned |
 | Production SLO/performance claims | Not claimed | Hosted production UI | Not claimed |
 
@@ -64,6 +65,11 @@ This is an **alpha** product path for supported lab clusters, not production.
   result that records ACK eligibility on `SwBlockReplicaEligibility.status`
   after live evidence proves the old primary remains fenced, the current primary
   is unchanged, and the required durable frontier is covered.
+- From source, run the opt-in returned-replica failback runtime gates. This path
+  can move authority through blockmaster only when a `SwBlockReplicaFailback`
+  target, explicit execution policy, expected-current evidence, and terminal
+  evidence are all present. It is not enabled by default and is not yet a
+  published release claim.
 - Replay support bundles offline.
 
 These are narrow alpha claims tied to documented gates. See
@@ -78,9 +84,9 @@ These are narrow alpha claims tied to documented gates. See
 - Automatic cleanup execution, host repair, or PVC/PV/workload deletion.
   Delete-safety uses externally supplied cleanup evidence.
 - Backup, snapshot, or restore.
-- Returned-replica rebuild traffic, frontend publication, or automatic
-  failback. The beta-candidate executor records only ACK eligibility on its
-  narrow target CRD status.
+- Returned-replica rebuild traffic, frontend publication after failback, or
+  automatic deployed failback. The failback runtime path is explicit, opt-in,
+  and source-gated until a release smoke validates it on published images.
 - Transparent Kubernetes node-loss failover without pod recreate.
 - NVMe ANA parity for the transparent failover path.
 - Broad distro/kernel/initiator compatibility.
@@ -133,6 +139,8 @@ quickstart tag to validate lifecycle-owner behavior.
 The v0.6 returned-replica ACK eligibility executor path likewise requires
 matching images published from the Phase 54 release commit and must be validated
 with the release smoke before it is marked shipped.
+The returned-replica failback runtime added after v0.6 is source-gated and
+requires a future release smoke before it becomes a public image claim.
 
 Mutable `:alpha` is a smoke/demo tag only; it can drift from the source tree.
 

@@ -210,11 +210,16 @@ rebuild, delete safety, or cleanup must start as a separate gated phase.
   frontend-publication target object without executing publication. Phase 70
   adds the status-only frontend publication executor boundary. Phase 71 adds
   the live API/RBAC boundary for that executor. Phase 72 adds the typed runtime
-  contract for frontend publication, but no real endpoint yet. The remaining
-  gap before failback is the first real frontend publication mutation with
-  admission/RBAC proof and multi-volume isolation.
-- Later: returned-replica frontend publication/failback execution, NVMe ANA
-  Kubernetes multipath parity, stronger committed-frontier reporting, broad
+  contract for frontend publication, but no real endpoint yet. Phases 74-86 add
+  the returned-replica failback contract, failback target CR, failback executor,
+  master-owned authority runtime, disabled-by-default blockmaster RPC, executor
+  gRPC transport, chart wiring, real-master local smoke, policy safety gate, and
+  gRPC/HTTP endpoint decoupling. This is an opt-in/source-gated failback
+  runtime path; automatic deployed failback and frontend publication after
+  failback remain future work.
+- Later: deployed returned-replica failback smoke, frontend publication after
+  failback, NVMe ANA Kubernetes multipath parity, stronger committed-frontier
+  reporting, broad
   distro/host compatibility, and longer soak under failure. NVMe ANA parity
   should follow the Kubernetes-native status foundation so ANA facts, path
   states, and protocol-specific reasons project through the same

@@ -69,7 +69,8 @@ Status meanings:
 | restart authority persistence | summary | authority page |
 | recovery/catch-up/rebuild mechanics | mapped | returned-replica page + historical tutorial |
 | returned-replica rebuild productization | tutorial initial | `deep-dives/returned-replica-rebuild.md` |
-| failback policy | future | roadmap only |
+| returned-replica failback runtime | deep | `deep-dives/returned-replica-failback.md` |
+| automatic deployed failback policy | future | roadmap only |
 | promotion readiness probes | summary | authority page |
 | multi-volume authority isolation | mapped | QA/phase docs |
 

@@ -366,7 +366,12 @@ Recommended order from here:
     Explicit gRPC failback runtime no longer depends on the legacy target-local
     HTTP `runtimeEndpoint` field. HTTP endpoint fallback remains supported, and
     invalid targets still block without runtime calls.
-44. Add backup/restore and NVMe ANA parity after they can reuse the same action
+44. Phase 87: failback documentation alignment. **Closed 2026-06-26, local PASS**
+    (`internal/docs/finished-plans/phase87_finishedplan_failback_docs_alignment.md`).
+    README, product roadmap, and engineering wiki now agree that returned-replica
+    failback runtime is opt-in/source-gated, automatic deployed failback is not
+    claimed, and frontend publication after failback remains future work.
+45. Add backup/restore and NVMe ANA parity after they can reuse the same action
    owner, evidence, and status model rather than creating another isolated
    control plane.
 
@@ -408,7 +413,8 @@ fake-service gap by proving the executor gRPC runtime against the real
 blockmaster service and master Publisher. Phase 85 proves the deployed-loop
 safety invariant: explicit execution flags do not cause runtime calls without a
 valid executable target. Phase 86 removes the stale coupling that made the gRPC
-runtime path require an unrelated HTTP target endpoint.
+runtime path require an unrelated HTTP target endpoint. Phase 87 aligns the
+public/internal docs with that source-gated state.
 
 The practical rule is:
 

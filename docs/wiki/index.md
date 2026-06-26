@@ -67,6 +67,11 @@ Helm install
 This is a bounded operation-layer capability. It is not automatic cleanup, not a
 production operator, and not rebuild/failback/backup/NVMe expansion.
 
+Recent returned-replica work adds a separately gated, opt-in failback runtime
+path. See [Returned Replica Failback Runtime](deep-dives/returned-replica-failback.md)
+for the authority owner, target CR, executor, gRPC service, terminal evidence,
+and non-claims.
+
 ## Source Evidence
 
 The wiki links to these source areas:

@@ -1,128 +1,129 @@
-# Current Plan: Phase 86 Failback gRPC Runtime Endpoint Decoupling
+# Current Plan: Phase 87 Failback Documentation Alignment
 
 Status: complete.
 
 ## Goal
 
-Phase 86 removes a stale coupling between the new gRPC failback runtime and the
-legacy per-target HTTP `runtimeEndpoint` field.
+Phase 87 aligns user-facing and engineering docs with the actual returned-replica
+failback state after Phases 74-86.
 
-Before this phase, an executable failback target required:
-
-```text
-spec.runtimeEndpoint != ""
-```
-
-even when the executor was configured with:
+The required wording is:
 
 ```text
---failback-runtime-grpc-addr <blockmaster>
+opt-in/source-gated failback runtime exists
+automatic deployed failback is not claimed
+frontend publication after failback is not claimed
+release image smoke is still required before public release claim
 ```
-
-That made gRPC execution depend on an unrelated HTTP endpoint placeholder.
 
 ## Deliverables
 
-### D1: Runtime-Aware Target Validation
+### D1: README Claim Boundary
 
-Changed:
-
-```text
-failbackExecutorExecutableTarget(target)
-```
-
-to:
+Updated `README.md`:
 
 ```text
-failbackExecutorExecutableTarget(target, runtimeProvided)
+Returned-replica failback runtime | Source-gated
+Returned-replica rebuild traffic | Planned
+Frontend publication after failback | Planned
 ```
 
-The target now requires `runtimeEndpoint` only when the executor has no explicit
-runtime and must fall back to target-provided HTTP runtime.
+The "What You Can Do Today" section now says the failback runtime can be run
+from source through opt-in gates only, and the non-claims section still rejects
+automatic deployed failback.
 
-### D2: gRPC Override Test
+### D2: Engineering Wiki Deep Dive
 
 Added:
 
 ```text
-TestFailbackExecutorGRPCRuntimeDoesNotRequireTargetRuntimeEndpoint
+docs/wiki/deep-dives/returned-replica-failback.md
 ```
 
-This proves:
+The page covers:
 
 ```text
-explicit runtime provided
-target runtimeEndpoint empty
-runtime is called
-failed_back status is written
+domain background
+product contract
+state machine
+ownership model
+CRD shape
+CLI/chart shape
+code entry points
+phase history
+failure classes
+implementation checklist
+current limits
 ```
 
-### D3: Real Master Carry-Forward
+### D3: Wiki Inventory Links
 
 Updated:
 
 ```text
-TestFailbackExecutorGRPCRuntimeUsesRealMasterService
+docs/wiki/index.md
+docs/wiki/topic-inventory.md
 ```
 
-The test now omits `RuntimeEndpoint` from the target and still proves:
+### D4: Product Roadmap Alignment
+
+Updated:
 
 ```text
-executor -> gRPC runtime -> real blockmaster service -> Publisher
+internal/docs/product-roadmap.md
 ```
 
-### D4: Gate
+The roadmap now records Phases 74-86 as the opt-in/source-gated failback runtime
+path and still defers automatic deployed failback plus frontend publication
+after failback.
+
+### D5: Gate
 
 Added:
 
 ```text
-scripts/run-phase86-failback-grpc-runtime-endpoint-decoupling-gate.sh
-testops/scenarios/failback-grpc-runtime-endpoint-decoupling-chain.yaml
-```
-
-## Non-Claims
-
-Phase 86 does not implement:
-
-```text
-Kubernetes live failback through deployed pods
-automatic failback target selection
-frontend publication after failback
-storage rebuild/catch-up traffic
-workload mutation
-NVMe ANA behavior
+scripts/run-phase87-failback-docs-alignment-gate.sh
+testops/scenarios/failback-docs-alignment-chain.yaml
 ```
 
 ## Verification
 
 ```text
-go test ./core/ops -run "TestFailbackExecutor(GRPCRuntimeDoesNotRequireTargetRuntimeEndpoint|ExecutionInvalidTargetDoesNotCallRuntime|InvokesRuntimeWhenExplicitlyEnabled)" -count=1 -v
-go test ./core/host/master -run TestFailbackExecutorGRPCRuntimeUsesRealMasterService -count=1 -v
-"C:\Program Files\Git\bin\bash.exe" scripts/run-phase86-failback-grpc-runtime-endpoint-decoupling-gate.sh .
-C:\work\swblock.exe validate testops\scenarios\failback-grpc-runtime-endpoint-decoupling-chain.yaml
+"C:\Program Files\Git\bin\bash.exe" scripts/run-phase87-failback-docs-alignment-gate.sh .
+C:\work\swblock.exe validate testops\scenarios\failback-docs-alignment-chain.yaml
 ```
 
 Terminal evidence:
 
 ```text
-phase86_failback_grpc_runtime_endpoint_decoupling_status=ok
-core_ops_failback_grpc_endpoint_decoupling_tests=pass
-core_host_master_failback_grpc_no_endpoint_test=pass
-grpc_runtime_does_not_require_target_runtime_endpoint=true
-invalid_target_still_blocks_without_runtime_call=true
-http_runtime_endpoint_fallback_still_supported=true
-real_master_grpc_service_without_target_endpoint=true
-explicit_grpc_runtime_is_sufficient=true
-legacy_http_runtime_endpoint_still_supported=true
-invalid_target_writes_blocked_status=true
-master_publisher_epoch_advanced=true
-frontend_publication_allowed=false
-storage_mutation_allowed=false
+phase87_failback_docs_alignment_status=ok
+readme_names_source_gated_failback=true
+readme_names_no_automatic_failback=true
+readme_names_release_smoke_requirement=true
+wiki_deep_dive_exists=true
+wiki_names_terminal_evidence=true
+wiki_names_code_entry_points=true
+wiki_names_current_limits=true
+wiki_index_links_failback=true
+topic_inventory_classifies_failback=true
+product_roadmap_names_phase86=true
+product_roadmap_names_opt_in=true
+product_roadmap_defers_automatic=true
+failback_runtime_public_claim_aligned=true
+automatic_failback_not_claimed=true
+frontend_publication_after_failback_not_claimed=true
 ```
 
 ## Next
 
-The next phase should validate a Kubernetes-deployed failback executor smoke
-when a lab image is available, or close the failback operation-layer milestone
-with a release-note/readme update that accurately states what is automatic and
-what remains opt-in.
+The next operation-layer step should be either:
+
+```text
+Kubernetes-deployed failback smoke with fresh local images
+```
+
+or:
+
+```text
+start NVMe planning if the team accepts failback as source-gated until release smoke
+```
