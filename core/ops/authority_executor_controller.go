@@ -28,6 +28,10 @@ const (
 	AuthorityExecutorFrontendPublicationReasonPublished = "frontend_published"
 )
 
+const (
+	AuthorityExecutorFrontendPublicationReasonAuthorityOwnerRequired = "frontend_publication_requires_authority_owner"
+)
+
 type AuthorityExecutorClient interface {
 	ListSwBlockVolumes(ctx context.Context, namespace string) ([]SwBlockVolumeObject, error)
 	ListSwBlockReplicaEligibilities(ctx context.Context, namespace string) ([]SwBlockReplicaEligibilityObject, error)

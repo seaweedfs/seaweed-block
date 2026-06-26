@@ -1,109 +1,81 @@
-# Current Plan: Phase 72 Frontend Publication Runtime Contract
+# Current Plan: Phase 73 Frontend Publication Authority Owner Guard
 
 Status: complete.
 
 ## Goal
 
-Phase 71 proved the live Kubernetes API/RBAC boundary for the frontend
-publication executor. Phase 72 adds the next code seam: a typed frontend
-publication runtime contract and an explicit executor policy gate.
-
-This phase still does not wire a real blockmaster or blockvolume frontend
-publication endpoint. The purpose is to prevent the next implementation from
-becoming a fake status-only publish.
-
-## Delivered
-
-### D1: Runtime Contract
-
-Added:
+Phase 72 added a generic typed runtime seam for future frontend publication.
+Reviewing the actual product topology exposed a tighter rule:
 
 ```text
-FrontendPublicationRuntime
-FrontendPublicationRuntimeRequest
-FrontendPublicationRuntimeResult
-HTTPFrontendPublicationRuntime
+returned-replica frontend publication cannot be a standalone runtime status
+success while primaryUnchanged=true.
 ```
 
-The HTTP client posts JSON to an explicit runtime endpoint and decodes:
+For a returned replica, making it the active frontend is an authority/failback
+operation. If the product does not move authority, then claiming
+`frontendPublished=true` is a semantic false-positive. If the product does move
+authority, that must be owned by a future authority/failback executor, not by a
+status-only frontend-publication executor.
+
+## Deliverables
+
+### D1: Returned-Replica Guard
+
+When a `SwBlockFrontendPublication` target is sourced from ACK eligibility:
 
 ```text
-frontendPublished
-failbackStarted
-noStorageMutation
-noCrossVolumeIdentityChange
-evidenceRefs
-```
-
-### D2: Explicit Executor Gate
-
-`FrontendPublicationExecutorReconciler` now supports an opt-in execution path:
-
-```text
-ExecutionRequested=true
-ExecutionPolicyEnabled=true
-```
-
-Without both flags, execution is blocked. Default reconciliation remains the
-Phase 70/71 status-only disabled path.
-
-The runtime path requires an explicit target shape:
-
-```text
+sourceEligibilityName != ""
 frontendPublicationDecision=enabled
 frontendPublicationMutationAllowed=true
-runtimeEndpoint=<non-empty>
-ackEligibilityKnown=true
-ackEligible=true
-frontendFencedAfterExecution=true
 primaryUnchanged=true
-durableFrontierCovered=true
-noCrossVolumeIdentityChange=true
 ```
 
-### D3: Schema Contract
-
-`SwBlockFrontendPublication.spec` now admits the future execution contract:
+the executor must:
 
 ```text
-frontendPublicationDecision=enabled
-runtimeEndpoint
+write status=blocked
+reason=frontend_publication_requires_authority_owner
+not call runtime
+not claim frontendPublished
+not start failback
+not mutate storage/workload state
 ```
 
-The existing target owner still creates only disabled targets, so default
-product behavior does not change.
+### D2: Preserve Generic Runtime Seam
 
-### D4: Gate
+The generic Phase 72 HTTP runtime contract remains covered for non-returned
+targets. This keeps the typed request/result seam available while preventing
+the returned-replica pipeline from using it as a fake publication.
+
+### D3: Gate
 
 Added:
 
 ```text
-scripts/run-phase72-frontend-publication-runtime-contract-gate.sh
-testops/scenarios/frontend-publication-runtime-contract-chain.yaml
+scripts/run-phase73-frontend-publication-authority-owner-gate.sh
+testops/scenarios/frontend-publication-authority-owner-chain.yaml
 ```
 
 The gate proves:
 
 ```text
-default executor remains disabled
-execution policy blocks when not explicitly enabled
-enabled target invokes runtime exactly through the typed contract
-runtime failure does not claim frontendPublished
-HTTP runtime errors surface
-failback remains false
-storage mutation remains false
+returned replica runtime invocations = 0
+returned replica frontend_published=false
+generic runtime seam preserved
+runtime failure still does not false-publish
+invalid terminal evidence still does not false-publish
 ```
 
 ## Non-Claims
 
-Phase 72 does not claim:
+Phase 73 does not implement:
 
 ```text
-real frontend publication endpoint exists
-blockmaster publish target update
-blockvolume runtime frontend switch
-primary authority change
-failback execution
+real frontend publication endpoint
+authority reassign/failback
+blockmaster runtime HTTP/gRPC endpoint
+blockvolume frontend switch
 storage/workload mutation
 NVMe ANA behavior
 ```
@@ -111,36 +83,32 @@ NVMe ANA behavior
 ## Verification
 
 ```text
+go test ./core/ops -run "TestFrontendPublicationExecutorBlocksReturnedReplicaRuntimeWithoutAuthorityOwner|TestFrontendPublicationExecutorInvokesRuntimeWhenExplicitlyEnabled|TestFrontendPublicationExecutorRuntimeFailureWritesBlockedStatus|TestFrontendPublicationExecutorRejectsInvalidRuntimeTerminalEvidence|TestHTTPFrontendPublicationRuntime" -count=1 -v
 go test ./core/ops ./cmd/sw-block
-C:\work\swblock.exe validate testops\scenarios\frontend-publication-runtime-contract-chain.yaml
-20260625-153846-1bf7 frontend-publication-runtime-contract-chain PASS 24/24
+C:\work\swblock.exe validate testops\scenarios\frontend-publication-authority-owner-chain.yaml
+"C:\Program Files\Git\bin\bash.exe" scripts/run-phase73-frontend-publication-authority-owner-gate.sh .
 ```
 
 Terminal evidence:
 
 ```text
-phase72_frontend_publication_runtime_contract_status=ok
-core_ops_frontend_publication_runtime_tests=pass
-frontend_publication_runtime_contract_schema_locked=true
-frontend_publication_runtime_endpoint_field=true
-frontend_publication_execution_policy_gate=true
-frontend_publication_runtime_invoked_only_when_enabled=true
-frontend_publication_runtime_failure_no_false_publish=true
-frontend_publication_runtime_invalid_terminal_evidence_no_false_publish=true
-frontend_publication_attempts=1
-frontend_published=true
-failback_started=false
-storage_mutation_allowed=false
+phase73_frontend_publication_authority_owner_status=ok
+core_ops_frontend_publication_authority_owner_tests=pass
+returned_replica_frontend_publication_blocked=true
+generic_runtime_contract_still_wired=true
+runtime_failure_no_false_publish=true
+runtime_invalid_terminal_evidence_no_false_publish=true
+frontend_publication_requires_authority_owner=true
+returned_replica_runtime_invocations=0
+returned_replica_frontend_published=false
+generic_runtime_seam_preserved=true
+frontend_publication_attempts=0
+failback_attempts=0
 ```
 
 ## Next
 
-Phase 73 should implement the real runtime endpoint owner. The key design
-decision is still open:
-
-```text
-blockmaster authority endpoint vs blockvolume runtime endpoint
-```
-
-Do not mark a target as published until a real endpoint performs a real
-product-owned side effect and returns terminal evidence.
+The next real product capability must choose and implement an authority/failback
+owner before enabling returned-replica frontend publication. Until then, the
+safe product behavior is to keep frontend publication blocked with explicit
+reason `frontend_publication_requires_authority_owner`.

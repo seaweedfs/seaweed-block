@@ -228,13 +228,53 @@ Recommended order from here:
     runtime it writes `running`, invokes the runtime, and maps terminal evidence
     to `caught_up` or `blocked`. This still does not wire a concrete
     blockvolume RPC/HTTP/gRPC transport.
-19. Phase 62: concrete blockvolume runtime transport. **Next recommended slice**.
-    Connect the Phase 61 runtime seam to a live blockvolume runtime transport
-    and run it against the Phase 60 data-path proof. The target claim should be
-    limited to `SwBlockReplicaRebuild.status` moving from planned/running to
-    caught_up/blocked from terminal evidence. Keep frontend publication,
-    failback, and ACK eligibility mutation out of scope unless separately gated.
-20. Add backup/restore and NVMe ANA parity after they can reuse the same action
+19. Phase 62: authority executor HTTP runtime. **Closed 2026-06-23, QA PASS**
+    (`internal/docs/finished-plans/phase62_finishedplan_authority_executor_http_runtime.md`).
+    The executor can call a typed HTTP runtime seam and preserve the
+    no-frontend/no-failback/non-ACK-mutation boundary.
+20. Phase 63: rebuild runtime target contract. **Closed 2026-06-24, QA PASS**
+    (`internal/docs/finished-plans/phase63_finishedplan_rebuild_runtime_target_contract.md`).
+    Runtime targets carry the explicit endpoint/session/frontier fields needed
+    before a blockvolume runtime call can be attempted.
+21. Phase 64: blockvolume runtime endpoint. **Closed 2026-06-24, QA PASS**
+    (`internal/docs/finished-plans/phase64_finishedplan_blockvolume_runtime_endpoint.md`).
+    The blockvolume status server exposes the bounded `/runtime/rebuild`
+    endpoint for rebuild/catch-up traffic under explicit opt-in.
+22. Phase 65: runtime terminal evidence. **Closed 2026-06-24, QA PASS**
+    (`internal/docs/finished-plans/phase65_finishedplan_runtime_terminal_evidence.md`).
+    Rebuild runtime results now distinguish running/caught_up/blocked without
+    claiming frontend publication or failback.
+23. Phase 66: caught-up publication preflight. **Closed 2026-06-24, QA PASS**
+    (`internal/docs/finished-plans/phase66_finishedplan_caught_up_publication_preflight.md`).
+    Caught-up rebuild evidence feeds the next publication preflight while
+    keeping ACK eligibility, frontend publication, and failback disabled.
+24. Phase 67: ACK eligibility publication. **Closed 2026-06-25, QA PASS**
+    (`internal/docs/finished-plans/phase67_finishedplan_ack_eligibility_publication.md`).
+    Terminal caught-up evidence can now record ACK eligibility, still without
+    frontend publication, rebuild traffic, or failback.
+25. Phase 68: frontend publication preflight. **Closed 2026-06-25, QA PASS**
+    (`internal/docs/finished-plans/phase68_finishedplan_frontend_publication_preflight.md`).
+    The product surfaces frontend-publication as an explicit disabled
+    preflight rather than implying it from ACK eligibility.
+26. Phase 69: frontend publication target contract. **Closed 2026-06-25, QA PASS**
+    (`internal/docs/finished-plans/phase69_finishedplan_frontend_publication_target_contract.md`).
+    A typed `SwBlockFrontendPublication` target exists, but it creates no
+    frontend or authority side effect.
+27. Phase 70: frontend publication executor boundary. **Closed 2026-06-25, QA PASS**
+    (`internal/docs/finished-plans/phase70_finishedplan_frontend_publication_executor_boundary.md`).
+    The executor writes disabled status only.
+28. Phase 71: frontend publication live API boundary. **Closed 2026-06-25, QA PASS**
+    (`internal/docs/finished-plans/phase71_finishedplan_frontend_publication_live_api_boundary.md`).
+    Live Kubernetes API/RBAC proves the executor remains status-only.
+29. Phase 72: frontend publication runtime contract. **Closed 2026-06-25, QA PASS**
+    (`internal/docs/finished-plans/phase72_finishedplan_frontend_publication_runtime_contract.md`).
+    A generic typed HTTP runtime seam exists for future publication work.
+30. Phase 73: frontend publication authority owner guard. **Closed 2026-06-25, local PASS**
+    (`internal/docs/finished-plans/phase73_finishedplan_frontend_publication_authority_owner_guard.md`).
+    The returned-replica pipeline now blocks independent frontend publication
+    when `primaryUnchanged=true`, because making a returned replica active is an
+    authority/failback operation, not a standalone runtime status success.
+31. Add backup/restore and NVMe ANA parity after they can reuse the same action
    owner, evidence, and status model rather than creating another isolated
    control plane.
 
@@ -248,12 +288,12 @@ evidence, executor-contract, disabled executor-process bridge, and first
 bounded ACK eligibility mutation without allowing frontend publication, rebuild
 traffic, or failback. Phases 56-59 extend that same pattern to returned-replica
 rebuild planning: contract, target CR, target owner, and planned status before
-any real rebuild/catch-up traffic is enabled. Phase 60 proves that the existing
-data path underneath that planning model can move bytes and converge replicas.
-Phase 61 connects the executor call-site seam and terminal-status mapping
-without a concrete blockvolume RPC transport. Phase 62 should connect that seam
-to the live blockvolume runtime path without broadening the frontend/failback
-claims.
+any real rebuild/catch-up traffic is enabled. Phases 60-65 prove and wire the
+bounded rebuild/catch-up runtime path through terminal evidence. Phases 66-67
+record ACK eligibility after terminal caught-up evidence. Phases 68-73 define
+and then deliberately constrain frontend publication: the generic runtime seam
+exists, but returned-replica publication remains blocked until a real
+authority/failback owner is implemented and gated.
 
 The practical rule is:
 

@@ -110,8 +110,48 @@ func TestFrontendPublicationExecutorExecutionPolicyBlocks(t *testing.T) {
 	}
 }
 
-func TestFrontendPublicationExecutorInvokesRuntimeWhenExplicitlyEnabled(t *testing.T) {
+func TestFrontendPublicationExecutorBlocksReturnedReplicaRuntimeWithoutAuthorityOwner(t *testing.T) {
 	target := frontendPublicationExecutorExecutableTargetFixture()
+	client := &fakeFrontendPublicationExecutorClient{targets: []SwBlockFrontendPublicationObject{target}}
+	runtime := &fakeFrontendPublicationRuntime{result: FrontendPublicationRuntimeResult{
+		FrontendPublished:           true,
+		FailbackStarted:             false,
+		NoStorageMutation:           true,
+		NoCrossVolumeIdentityChange: true,
+	}}
+	result, err := (FrontendPublicationExecutorReconciler{
+		Namespace:              "kube-system",
+		Client:                 client,
+		Runtime:                runtime,
+		ExecutionRequested:     true,
+		ExecutionPolicyEnabled: true,
+		Now:                    func() time.Time { return time.Date(2026, 6, 25, 12, 30, 0, 0, time.UTC) },
+	}).Reconcile(context.Background())
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if result.FrontendPublicationAttempts != 0 ||
+		result.FailbackAttempts != 0 ||
+		result.StatusWriteCount != 1 ||
+		result.InvalidTargetCount != 1 ||
+		result.StorageMutationAllowed {
+		t.Fatalf("result=%+v", result)
+	}
+	if len(runtime.requests) != 0 {
+		t.Fatalf("returned-replica frontend publication must not invoke runtime: %+v", runtime.requests)
+	}
+	status := client.writes[0].status
+	if status.State != FrontendPublicationStateBlocked ||
+		status.ReasonCode != AuthorityExecutorFrontendPublicationReasonAuthorityOwnerRequired ||
+		status.FrontendPublished ||
+		status.FailbackStarted ||
+		!status.NoStorageMutation {
+		t.Fatalf("status=%+v", status)
+	}
+}
+
+func TestFrontendPublicationExecutorInvokesRuntimeWhenExplicitlyEnabled(t *testing.T) {
+	target := frontendPublicationExecutorGenericExecutableTargetFixture()
 	client := &fakeFrontendPublicationExecutorClient{targets: []SwBlockFrontendPublicationObject{target}}
 	runtime := &fakeFrontendPublicationRuntime{result: FrontendPublicationRuntimeResult{
 		FrontendPublished:           true,
@@ -160,7 +200,7 @@ func TestFrontendPublicationExecutorInvokesRuntimeWhenExplicitlyEnabled(t *testi
 }
 
 func TestFrontendPublicationExecutorRuntimeFailureWritesBlockedStatus(t *testing.T) {
-	client := &fakeFrontendPublicationExecutorClient{targets: []SwBlockFrontendPublicationObject{frontendPublicationExecutorExecutableTargetFixture()}}
+	client := &fakeFrontendPublicationExecutorClient{targets: []SwBlockFrontendPublicationObject{frontendPublicationExecutorGenericExecutableTargetFixture()}}
 	runtime := &fakeFrontendPublicationRuntime{err: errors.New("runtime refused")}
 	result, err := (FrontendPublicationExecutorReconciler{
 		Namespace:              "kube-system",
@@ -184,7 +224,7 @@ func TestFrontendPublicationExecutorRuntimeFailureWritesBlockedStatus(t *testing
 }
 
 func TestFrontendPublicationExecutorRejectsInvalidRuntimeTerminalEvidence(t *testing.T) {
-	client := &fakeFrontendPublicationExecutorClient{targets: []SwBlockFrontendPublicationObject{frontendPublicationExecutorExecutableTargetFixture()}}
+	client := &fakeFrontendPublicationExecutorClient{targets: []SwBlockFrontendPublicationObject{frontendPublicationExecutorGenericExecutableTargetFixture()}}
 	runtime := &fakeFrontendPublicationRuntime{result: FrontendPublicationRuntimeResult{
 		FrontendPublished:           true,
 		FailbackStarted:             true,
@@ -245,6 +285,12 @@ func frontendPublicationExecutorExecutableTargetFixture() SwBlockFrontendPublica
 	target.Spec.FrontendPublicationReason = "frontend_publication_requested"
 	target.Spec.FrontendPublicationMutationAllowed = true
 	target.Spec.RuntimeEndpoint = "http://127.0.0.1:23260/runtime/frontend-publication"
+	return target
+}
+
+func frontendPublicationExecutorGenericExecutableTargetFixture() SwBlockFrontendPublicationObject {
+	target := frontendPublicationExecutorExecutableTargetFixture()
+	target.Spec.SourceEligibilityName = ""
 	return target
 }
 

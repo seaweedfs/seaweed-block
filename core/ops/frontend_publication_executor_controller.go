@@ -101,6 +101,19 @@ func (r FrontendPublicationExecutorReconciler) Reconcile(ctx context.Context) (F
 
 func (r FrontendPublicationExecutorReconciler) executeTarget(ctx context.Context, result *FrontendPublicationExecutorReconcileResult, target SwBlockFrontendPublicationObject) error {
 	status := frontendPublicationExecutorDisabledStatus(r.now()(), target)
+	if frontendPublicationExecutorRequiresAuthorityOwner(target) {
+		result.InvalidTargetCount++
+		status.ReasonCode = AuthorityExecutorFrontendPublicationReasonAuthorityOwnerRequired
+		status.Conditions[0].Reason = AuthorityExecutorFrontendPublicationReasonAuthorityOwnerRequired
+		status.Conditions[0].Message = "frontend publication requires an authority/failback owner; primary-unchanged runtime publication is not a valid product side effect"
+		if !r.DryRun {
+			if err := r.Client.WriteFrontendPublicationStatus(ctx, target.Ref, status); err != nil {
+				return err
+			}
+			result.StatusWriteCount++
+		}
+		return nil
+	}
 	if !frontendPublicationExecutorExecutableTarget(target) {
 		result.InvalidTargetCount++
 		status.ReasonCode = "missing_required_facts"
@@ -155,6 +168,14 @@ func (r FrontendPublicationExecutorReconciler) executeTarget(ctx context.Context
 	}
 	result.StatusWriteCount++
 	return nil
+}
+
+func frontendPublicationExecutorRequiresAuthorityOwner(target SwBlockFrontendPublicationObject) bool {
+	spec := target.Spec
+	return spec.FrontendPublicationDecision == AuthorityExecutorPublicationDecisionEnabled &&
+		spec.FrontendPublicationMutationAllowed &&
+		spec.SourceEligibilityName != "" &&
+		spec.PrimaryUnchanged
 }
 
 func frontendPublicationExecutorTargetValid(target SwBlockFrontendPublicationObject) bool {

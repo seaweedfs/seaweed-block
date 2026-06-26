@@ -1,0 +1,96 @@
+# Runner-native Phase 73 gate: returned-replica frontend publication requires
+# a real authority/failback owner and must not be faked by runtime status.
+
+name: frontend-publication-authority-owner-chain
+timeout: 8m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: frontend_publication_authority_owner_gate
+    actions:
+      - action: exec
+        node: m02
+        timeout: 7m
+        cmd: "rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase73-frontend-publication-authority-owner && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase73-frontend-publication-authority-owner && cd {{ product_root }} && SW_BLOCK_ARTIFACT_DIR=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase73-frontend-publication-authority-owner bash scripts/run-phase73-frontend-publication-authority-owner-gate.sh {{ product_root }}"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase73-frontend-publication-authority-owner/phase73-frontend-publication-authority-owner-summary.txt"
+        pattern: "^phase73_frontend_publication_authority_owner_status=ok$"
+        save_as: phase73_ok
+      - action: assert_greater
+        actual: "{{ phase73_ok }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase73-frontend-publication-authority-owner/phase73-frontend-publication-authority-owner-summary.txt"
+        pattern: "^frontend_publication_requires_authority_owner=true$"
+        save_as: authority_owner_required
+      - action: assert_greater
+        actual: "{{ authority_owner_required }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase73-frontend-publication-authority-owner/phase73-frontend-publication-authority-owner-summary.txt"
+        pattern: "^returned_replica_runtime_invocations=0$"
+        save_as: no_returned_runtime
+      - action: assert_greater
+        actual: "{{ no_returned_runtime }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase73-frontend-publication-authority-owner/phase73-frontend-publication-authority-owner-summary.txt"
+        pattern: "^returned_replica_frontend_published=false$"
+        save_as: no_false_publish
+      - action: assert_greater
+        actual: "{{ no_false_publish }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase73-frontend-publication-authority-owner/phase73-frontend-publication-authority-owner-summary.txt"
+        pattern: "^generic_runtime_seam_preserved=true$"
+        save_as: generic_seam_preserved
+      - action: assert_greater
+        actual: "{{ generic_seam_preserved }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase73-frontend-publication-authority-owner/phase73-frontend-publication-authority-owner-summary.txt"
+        pattern: "^frontend_publication_attempts=0$"
+        save_as: no_publication_attempts
+      - action: assert_greater
+        actual: "{{ no_publication_attempts }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase73-frontend-publication-authority-owner/phase73-frontend-publication-authority-owner-summary.txt"
+        pattern: "^failback_attempts=0$"
+        save_as: no_failback_attempts
+      - action: assert_greater
+        actual: "{{ no_failback_attempts }}"
+        threshold: "0"
+
+  - name: collect
+    always: true
+    actions:
+      - action: collect_path
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase73-frontend-publication-authority-owner"
+        name: "remote-phases"
+        ignore_error: true
