@@ -303,7 +303,15 @@ Recommended order from here:
     runtime can prove the terminal evidence shape for authority epoch advance,
     single-primary state, publish-target swap, and no storage mutation, but no
     real blockmaster failback endpoint or authority mutation is shipped.
-35. Add backup/restore and NVMe ANA parity after they can reuse the same action
+35. Phase 78: failback authority runtime seam. **Closed 2026-06-26, local PASS**
+    (`internal/docs/finished-plans/phase78_finishedplan_failback_authority_runtime.md`).
+    Returned-replica failback now has a first product-owned authority seam:
+    validated endpoint and expected-current evidence can mint
+    `Publisher.apply(IntentReassign)` and prove epoch advance, single-primary
+    state, and publish-target swap. Default deployed behavior remains disabled;
+    no automatic failback call-site, frontend publication, storage mutation, or
+    workload mutation is enabled.
+36. Add backup/restore and NVMe ANA parity after they can reuse the same action
    owner, evidence, and status model rather than creating another isolated
    control plane.
 
@@ -329,8 +337,10 @@ contract: `SwBlockReplicaFailback` can be planned as a handoff object, but no
 failback, authority mutation, or frontend publication is executed. Phase 76 adds
 the matching executor identity and status-only boundary for those failback
 targets, still keeping all real failback side effects disabled. Phase 77 adds
-the typed failback runtime contract and opt-in execution gate, but still does
-not ship a real failback endpoint or authority mutation.
+the typed failback runtime contract and opt-in execution gate. Phase 78 adds
+the first authority-owned failback seam through `Publisher.apply(IntentReassign)`,
+but still does not enable automatic deployed failback, frontend publication, or
+storage/workload mutation.
 
 The practical rule is:
 

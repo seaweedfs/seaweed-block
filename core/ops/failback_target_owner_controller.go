@@ -140,6 +140,8 @@ func failbackTargetOwnerObject(namespace string, volume SwBlockVolumeObject, con
 			VolumeID:                     volume.Status.VolumeID,
 			PVCName:                      volume.Status.PVCName,
 			ReplicaID:                    contract.ReplicaID,
+			TargetDataAddr:               returned.TargetDataAddr,
+			TargetCtrlAddr:               returned.TargetCtrlAddr,
 			AckEligible:                  returned.AckEligibilityKnown && returned.AckEligible,
 			FrontendFencedBeforeFailback: returned.FrontendFenced && !returned.FrontendPrimaryReady,
 			DurableFrontierCovered:       returned.DurableFrontierKnown && returned.RequiredFrontierKnown && returned.DurableFrontierLSN >= returned.RequiredFrontierLSN,

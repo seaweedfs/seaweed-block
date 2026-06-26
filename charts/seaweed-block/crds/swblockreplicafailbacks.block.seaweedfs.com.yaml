@@ -53,6 +53,16 @@ spec:
                   type: string
                 replicaID:
                   type: string
+                targetDataAddr:
+                  type: string
+                targetCtrlAddr:
+                  type: string
+                expectedCurrentReplicaID:
+                  type: string
+                expectedCurrentEpoch:
+                  type: integer
+                  format: int64
+                  minimum: 0
                 ackEligible:
                   type: boolean
                 frontendFencedBeforeFailback:

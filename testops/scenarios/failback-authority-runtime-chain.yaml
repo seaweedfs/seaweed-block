@@ -1,0 +1,125 @@
+# Runner-native Phase 78 gate: failback has a first authority-owned runtime
+# seam. It mints authority reassignment through Publisher.apply only after
+# expected-current and terminal-evidence guards pass. Default behavior remains
+# disabled and non-mutating.
+
+name: failback-authority-runtime-chain
+timeout: 8m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: failback_authority_runtime_gate
+    actions:
+      - action: exec
+        node: m02
+        timeout: 7m
+        cmd: "rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase78-failback-authority-runtime && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase78-failback-authority-runtime && cd {{ product_root }} && SW_BLOCK_ARTIFACT_DIR=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase78-failback-authority-runtime bash scripts/run-phase78-failback-authority-runtime-gate.sh {{ product_root }}"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase78-failback-authority-runtime/phase78-failback-authority-runtime-summary.txt"
+        pattern: "^phase78_failback_authority_runtime_status=ok$"
+        save_as: phase78_ok
+      - action: assert_greater
+        actual: "{{ phase78_ok }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase78-failback-authority-runtime/phase78-failback-authority-runtime-summary.txt"
+        pattern: "^authority_failback_reassign_minted=true$"
+        save_as: reassign_minted
+      - action: assert_greater
+        actual: "{{ reassign_minted }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase78-failback-authority-runtime/phase78-failback-authority-runtime-summary.txt"
+        pattern: "^stale_expected_current_rejected=true$"
+        save_as: stale_guard
+      - action: assert_greater
+        actual: "{{ stale_guard }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase78-failback-authority-runtime/phase78-failback-authority-runtime-summary.txt"
+        pattern: "^terminal_preconditions_required=true$"
+        save_as: terminal_guard
+      - action: assert_greater
+        actual: "{{ terminal_guard }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase78-failback-authority-runtime/phase78-failback-authority-runtime-summary.txt"
+        pattern: "^failback_target_endpoint_fields=true$"
+        save_as: endpoint_fields
+      - action: assert_greater
+        actual: "{{ endpoint_fields }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase78-failback-authority-runtime/phase78-failback-authority-runtime-summary.txt"
+        pattern: "^failback_target_expected_current_fields=true$"
+        save_as: expected_current_fields
+      - action: assert_greater
+        actual: "{{ expected_current_fields }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase78-failback-authority-runtime/phase78-failback-authority-runtime-summary.txt"
+        pattern: "^executable_failback_requires_authority_endpoint=true$"
+        save_as: executable_requires_endpoint
+      - action: assert_greater
+        actual: "{{ executable_requires_endpoint }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase78-failback-authority-runtime/phase78-failback-authority-runtime-summary.txt"
+        pattern: "^explicit_runtime_authority_mutation_allowed=true$"
+        save_as: authority_mutation
+      - action: assert_greater
+        actual: "{{ authority_mutation }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase78-failback-authority-runtime/phase78-failback-authority-runtime-summary.txt"
+        pattern: "^storage_mutation_allowed=false$"
+        save_as: no_storage_mutation
+      - action: assert_greater
+        actual: "{{ no_storage_mutation }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase78-failback-authority-runtime/phase78-failback-authority-runtime-summary.txt"
+        pattern: "^frontend_publication_allowed=false$"
+        save_as: no_frontend_publication
+      - action: assert_greater
+        actual: "{{ no_frontend_publication }}"
+        threshold: "0"
+
+  - name: collect
+    always: true
+    actions:
+      - action: collect_path
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase78-failback-authority-runtime"
+        name: "remote-phases"
+        ignore_error: true

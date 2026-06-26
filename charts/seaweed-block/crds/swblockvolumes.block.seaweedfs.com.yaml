@@ -190,6 +190,8 @@ spec:
                         type: string
                       targetDataAddr:
                         type: string
+                      targetCtrlAddr:
+                        type: string
                       sessionID:
                         type: integer
                         format: int64

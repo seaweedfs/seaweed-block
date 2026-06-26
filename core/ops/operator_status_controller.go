@@ -292,6 +292,7 @@ type SwBlockVolumeCRDReturnedReplica struct {
 	RequiredFrontierLSN   uint64   `json:"requiredFrontierLsn,omitempty"`
 	RuntimeEndpoint       string   `json:"runtimeEndpoint,omitempty"`
 	TargetDataAddr        string   `json:"targetDataAddr,omitempty"`
+	TargetCtrlAddr        string   `json:"targetCtrlAddr,omitempty"`
 	SessionID             uint64   `json:"sessionID,omitempty"`
 	Epoch                 uint64   `json:"epoch,omitempty"`
 	EndpointVersion       uint64   `json:"endpointVersion,omitempty"`
@@ -578,6 +579,8 @@ func swBlockVolumeCRDReturnedReplicas(returned []ReturnedReplicaProjection) []Sw
 			DurableFrontierLSN:    replica.DurableFrontierLSN,
 			RequiredFrontierKnown: replica.RequiredFrontierKnown,
 			RequiredFrontierLSN:   replica.RequiredFrontierLSN,
+			TargetDataAddr:        replica.TargetDataAddr,
+			TargetCtrlAddr:        replica.TargetCtrlAddr,
 			EvidenceRefs:          append([]string(nil), replica.EvidenceRefs...),
 		})
 	}

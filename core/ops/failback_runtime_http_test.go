@@ -38,6 +38,10 @@ func TestHTTPFailbackRuntimePostsRequestAndDecodesResult(t *testing.T) {
 		VolumeID:                     "pvc-demo",
 		PVCName:                      "demo-pvc",
 		ReplicaID:                    "r2",
+		TargetDataAddr:               "data-r2",
+		TargetCtrlAddr:               "ctrl-r2",
+		ExpectedCurrentReplicaID:     "r1",
+		ExpectedCurrentEpoch:         3,
 		RuntimeEndpoint:              server.URL,
 		AckEligible:                  true,
 		FrontendFencedBeforeFailback: true,
@@ -51,6 +55,10 @@ func TestHTTPFailbackRuntimePostsRequestAndDecodesResult(t *testing.T) {
 	if got.VolumeName != "demo" ||
 		got.VolumeID != "pvc-demo" ||
 		got.ReplicaID != "r2" ||
+		got.TargetDataAddr != "data-r2" ||
+		got.TargetCtrlAddr != "ctrl-r2" ||
+		got.ExpectedCurrentReplicaID != "r1" ||
+		got.ExpectedCurrentEpoch != 3 ||
 		!got.AckEligible ||
 		!got.FrontendFencedBeforeFailback ||
 		!got.NoCrossVolumeIdentityChange {

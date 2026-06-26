@@ -44,6 +44,10 @@ type FailbackRuntimeRequest struct {
 	VolumeID                     string   `json:"volumeID"`
 	PVCName                      string   `json:"pvcName"`
 	ReplicaID                    string   `json:"replicaID"`
+	TargetDataAddr               string   `json:"targetDataAddr,omitempty"`
+	TargetCtrlAddr               string   `json:"targetCtrlAddr,omitempty"`
+	ExpectedCurrentReplicaID     string   `json:"expectedCurrentReplicaID,omitempty"`
+	ExpectedCurrentEpoch         uint64   `json:"expectedCurrentEpoch,omitempty"`
 	RuntimeEndpoint              string   `json:"runtimeEndpoint,omitempty"`
 	AckEligible                  bool     `json:"ackEligible"`
 	FrontendFencedBeforeFailback bool     `json:"frontendFencedBeforeFailback"`
@@ -125,6 +129,7 @@ func (r FailbackExecutorReconciler) executeTarget(ctx context.Context, result *F
 		}
 		return nil
 	}
+	result.AuthorityMutationAllowed = true
 	runtime := r.Runtime
 	if runtime == nil && target.Spec.RuntimeEndpoint != "" {
 		runtime = NewHTTPFailbackRuntime(target.Spec.RuntimeEndpoint, nil)
@@ -185,6 +190,10 @@ func failbackExecutorExecutableTarget(target SwBlockReplicaFailbackObject) bool 
 	return spec.VolumeName != "" &&
 		spec.ReplicaID != "" &&
 		spec.RuntimeEndpoint != "" &&
+		spec.TargetDataAddr != "" &&
+		spec.TargetCtrlAddr != "" &&
+		spec.ExpectedCurrentReplicaID != "" &&
+		spec.ExpectedCurrentEpoch != 0 &&
 		spec.AckEligible &&
 		spec.FrontendFencedBeforeFailback &&
 		spec.DurableFrontierCovered &&
@@ -265,6 +274,10 @@ func failbackRuntimeRequest(target SwBlockReplicaFailbackObject) FailbackRuntime
 		VolumeID:                     spec.VolumeID,
 		PVCName:                      spec.PVCName,
 		ReplicaID:                    spec.ReplicaID,
+		TargetDataAddr:               spec.TargetDataAddr,
+		TargetCtrlAddr:               spec.TargetCtrlAddr,
+		ExpectedCurrentReplicaID:     spec.ExpectedCurrentReplicaID,
+		ExpectedCurrentEpoch:         spec.ExpectedCurrentEpoch,
 		RuntimeEndpoint:              spec.RuntimeEndpoint,
 		AckEligible:                  spec.AckEligible,
 		FrontendFencedBeforeFailback: spec.FrontendFencedBeforeFailback,

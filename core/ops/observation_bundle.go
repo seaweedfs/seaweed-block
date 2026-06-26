@@ -387,6 +387,8 @@ func observationVolumeFromInventory(volume VolumeInventoryVolume, evidencePath s
 			FrontendProtocol:     replica.Protocol,
 			FrontendAddr:         replica.FrontendAddress,
 			StatusAddr:           replica.StatusAddress,
+			DataAddr:             replica.DataAddr,
+			CtrlAddr:             replica.CtrlAddr,
 			StalePrimaryFenced:   containsIssuePrefix(replica.Issues, "stale_primary_frontend_ready=") || replica.AuthorityRole == "superseded",
 			SupportBundlePath:    replica.SupportBundle,
 		}

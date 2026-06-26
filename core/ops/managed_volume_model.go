@@ -178,6 +178,8 @@ type ReplicaFact struct {
 	FrontendProtocol     string   `json:"frontend_protocol,omitempty"`
 	FrontendAddr         string   `json:"frontend_addr,omitempty"`
 	StatusAddr           string   `json:"status_addr,omitempty"`
+	DataAddr             string   `json:"data_addr,omitempty"`
+	CtrlAddr             string   `json:"ctrl_addr,omitempty"`
 	StalePrimaryFenced   bool     `json:"stale_primary_fenced,omitempty"`
 }
 
@@ -241,6 +243,8 @@ type ReturnedReplicaProjection struct {
 	DurableFrontierLSN    uint64   `json:"durable_frontier_lsn,omitempty"`
 	RequiredFrontierKnown bool     `json:"required_frontier_known,omitempty"`
 	RequiredFrontierLSN   uint64   `json:"required_frontier_lsn,omitempty"`
+	TargetDataAddr        string   `json:"target_data_addr,omitempty"`
+	TargetCtrlAddr        string   `json:"target_ctrl_addr,omitempty"`
 	EvidenceRefs          []string `json:"evidence_refs,omitempty"`
 }
 
@@ -453,6 +457,8 @@ func managedVolumeFactsFromVolumeEvidence(volume VolumeEvidence) ManagedVolumeFa
 			FrontendProtocol:     replica.FrontendProtocol,
 			FrontendAddr:         replica.FrontendAddr,
 			StatusAddr:           replica.StatusAddr,
+			DataAddr:             replica.DataAddr,
+			CtrlAddr:             replica.CtrlAddr,
 			StalePrimaryFenced:   replica.StalePrimaryFenced,
 		})
 	}
@@ -837,6 +843,8 @@ func returnedReplicaProjections(facts ManagedVolumeFacts) []ReturnedReplicaProje
 			DurableFrontierLSN:    replica.DurableFrontierLSN,
 			RequiredFrontierKnown: facts.Authority.RequiredFrontierKnown,
 			RequiredFrontierLSN:   facts.Authority.RequiredFrontierLSN,
+			TargetDataAddr:        replica.DataAddr,
+			TargetCtrlAddr:        replica.CtrlAddr,
 			EvidenceRefs:          append([]string(nil), facts.EvidenceRefs...),
 		}
 		switch {

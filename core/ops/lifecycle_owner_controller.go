@@ -94,6 +94,10 @@ type SwBlockReplicaFailbackSpec struct {
 	VolumeID                     string `json:"volumeID,omitempty"`
 	PVCName                      string `json:"pvcName,omitempty"`
 	ReplicaID                    string `json:"replicaID,omitempty"`
+	TargetDataAddr               string `json:"targetDataAddr,omitempty"`
+	TargetCtrlAddr               string `json:"targetCtrlAddr,omitempty"`
+	ExpectedCurrentReplicaID     string `json:"expectedCurrentReplicaID,omitempty"`
+	ExpectedCurrentEpoch         uint64 `json:"expectedCurrentEpoch,omitempty"`
 	AckEligible                  bool   `json:"ackEligible"`
 	FrontendFencedBeforeFailback bool   `json:"frontendFencedBeforeFailback"`
 	DurableFrontierCovered       bool   `json:"durableFrontierCovered"`

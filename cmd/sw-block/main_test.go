@@ -1074,6 +1074,8 @@ func TestOpsFailbackTargetOwnerCreatesTarget(t *testing.T) {
 		created.Spec.VolumeID != "pvc-demo" ||
 		created.Spec.PVCName != "demo-pvc" ||
 		created.Spec.ReplicaID != "r1" ||
+		created.Spec.TargetDataAddr != "data-r1" ||
+		created.Spec.TargetCtrlAddr != "ctrl-r1" ||
 		!created.Spec.AckEligible ||
 		!created.Spec.FrontendFencedBeforeFailback ||
 		!created.Spec.DurableFrontierCovered ||
@@ -1374,6 +1376,10 @@ func TestOpsFailbackExecutorRuntimeURLWritesFailedBackStatus(t *testing.T) {
 	if got.VolumeName != "demo-pvc" ||
 		got.ReplicaID != "r1" ||
 		got.RuntimeEndpoint != "http://127.0.0.1:23260/runtime/failback" ||
+		got.TargetDataAddr != "data-r1" ||
+		got.TargetCtrlAddr != "ctrl-r1" ||
+		got.ExpectedCurrentReplicaID != "r2" ||
+		got.ExpectedCurrentEpoch != 7 ||
 		!got.AckEligible ||
 		!got.FrontendFencedBeforeFailback {
 		t.Fatalf("runtime request=%+v", got)
@@ -1396,7 +1402,7 @@ func TestOpsFailbackExecutorRuntimeURLWritesFailedBackStatus(t *testing.T) {
 		"failback_attempts=1",
 		"execution_requested=true",
 		"execution_policy_enabled=true",
-		"authority_mutation_allowed=false",
+		"authority_mutation_allowed=true",
 		"frontend_publication_allowed=false",
 		"storage_mutation_allowed=false",
 	} {
@@ -1915,6 +1921,8 @@ func cmdFailbackTarget() ops.SwBlockReplicaFailbackObject {
 			VolumeID:                     "pvc-demo",
 			PVCName:                      "demo-pvc",
 			ReplicaID:                    "r1",
+			TargetDataAddr:               "data-r1",
+			TargetCtrlAddr:               "ctrl-r1",
 			AckEligible:                  true,
 			FrontendFencedBeforeFailback: true,
 			DurableFrontierCovered:       true,
@@ -1932,6 +1940,8 @@ func cmdFailbackExecutableTarget() ops.SwBlockReplicaFailbackObject {
 	target.Spec.FailbackReason = "failback_requested"
 	target.Spec.FailbackMutationAllowed = true
 	target.Spec.RuntimeEndpoint = "http://127.0.0.1:23260/runtime/failback"
+	target.Spec.ExpectedCurrentReplicaID = "r2"
+	target.Spec.ExpectedCurrentEpoch = 7
 	return target
 }
 
@@ -1957,6 +1967,8 @@ func cmdFailbackTargetVolume() ops.SwBlockVolumeObject {
 				DurableFrontierLSN:    52,
 				RequiredFrontierKnown: true,
 				RequiredFrontierLSN:   52,
+				TargetDataAddr:        "data-r1",
+				TargetCtrlAddr:        "ctrl-r1",
 			}},
 			ExecutorContracts: []ops.SwBlockVolumeCRDExecutorContract{{
 				ActionType:           ops.ManagedVolumeActionFailbackReturned,

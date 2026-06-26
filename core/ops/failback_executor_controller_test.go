@@ -149,7 +149,7 @@ func TestFailbackExecutorInvokesRuntimeWhenExplicitlyEnabled(t *testing.T) {
 	}
 	if result.FailbackAttempts != 1 ||
 		result.StatusWriteCount != 1 ||
-		result.AuthorityMutationAllowed ||
+		!result.AuthorityMutationAllowed ||
 		result.FrontendPublicationAllowed ||
 		result.StorageMutationAllowed {
 		t.Fatalf("result=%+v", result)
@@ -160,6 +160,10 @@ func TestFailbackExecutorInvokesRuntimeWhenExplicitlyEnabled(t *testing.T) {
 	req := runtime.requests[0]
 	if req.VolumeName != target.Spec.VolumeName ||
 		req.ReplicaID != target.Spec.ReplicaID ||
+		req.TargetDataAddr != target.Spec.TargetDataAddr ||
+		req.TargetCtrlAddr != target.Spec.TargetCtrlAddr ||
+		req.ExpectedCurrentReplicaID != target.Spec.ExpectedCurrentReplicaID ||
+		req.ExpectedCurrentEpoch != target.Spec.ExpectedCurrentEpoch ||
 		!req.AckEligible ||
 		!req.FrontendFencedBeforeFailback ||
 		!req.NoCrossVolumeIdentityChange {
@@ -264,6 +268,10 @@ func failbackExecutorExecutableTargetFixture() SwBlockReplicaFailbackObject {
 	target.Spec.FailbackReason = "failback_requested"
 	target.Spec.FailbackMutationAllowed = true
 	target.Spec.RuntimeEndpoint = "http://127.0.0.1:23260/runtime/failback"
+	target.Spec.TargetDataAddr = "data-r1"
+	target.Spec.TargetCtrlAddr = "ctrl-r1"
+	target.Spec.ExpectedCurrentReplicaID = "r2"
+	target.Spec.ExpectedCurrentEpoch = 7
 	return target
 }
 

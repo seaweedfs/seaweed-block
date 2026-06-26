@@ -697,6 +697,10 @@ func TestKubernetesStatusClientCreatesSwBlockReplicaFailbackWithoutStatus(t *tes
 			VolumeID:                     "pvc-demo",
 			PVCName:                      "demo-pvc",
 			ReplicaID:                    "r2",
+			TargetDataAddr:               "data-r2",
+			TargetCtrlAddr:               "ctrl-r2",
+			ExpectedCurrentReplicaID:     "r1",
+			ExpectedCurrentEpoch:         3,
 			AckEligible:                  true,
 			FrontendFencedBeforeFailback: true,
 			DurableFrontierCovered:       true,
@@ -734,6 +738,10 @@ func TestKubernetesStatusClientCreatesSwBlockReplicaFailbackWithoutStatus(t *tes
 		spec["volumeID"] != "pvc-demo" ||
 		spec["pvcName"] != "demo-pvc" ||
 		spec["replicaID"] != "r2" ||
+		spec["targetDataAddr"] != "data-r2" ||
+		spec["targetCtrlAddr"] != "ctrl-r2" ||
+		spec["expectedCurrentReplicaID"] != "r1" ||
+		spec["expectedCurrentEpoch"] != float64(3) ||
 		spec["ackEligible"] != true ||
 		spec["frontendFencedBeforeFailback"] != true ||
 		spec["durableFrontierCovered"] != true ||
@@ -744,7 +752,7 @@ func TestKubernetesStatusClientCreatesSwBlockReplicaFailbackWithoutStatus(t *tes
 		spec["runtimeEndpoint"] != "http://127.0.0.1:23260/runtime/failback" {
 		t.Fatalf("spec=%+v", spec)
 	}
-	for _, forbidden := range []string{"ack_eligible", "frontend_fenced_before_failback", "failback_decision", "failback_mutation_allowed", "runtime_endpoint"} {
+	for _, forbidden := range []string{"ack_eligible", "frontend_fenced_before_failback", "failback_decision", "failback_mutation_allowed", "runtime_endpoint", "target_data_addr", "target_ctrl_addr", "expected_current_replica_id", "expected_current_epoch"} {
 		if _, ok := spec[forbidden]; ok {
 			t.Fatalf("spec leaked %s: %+v", forbidden, spec)
 		}

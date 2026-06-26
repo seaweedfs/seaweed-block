@@ -161,6 +161,8 @@ type ReplicaEvidence struct {
 	FrontendProtocol     string                 `json:"frontend_protocol,omitempty"`
 	FrontendAddr         string                 `json:"frontend_addr,omitempty"`
 	StatusAddr           string                 `json:"status_addr,omitempty"`
+	DataAddr             string                 `json:"data_addr,omitempty"`
+	CtrlAddr             string                 `json:"ctrl_addr,omitempty"`
 	StalePrimaryFenced   bool                   `json:"stale_primary_fenced"`
 	Conditions           []ObservationCondition `json:"conditions,omitempty"`
 	SupportBundlePath    string                 `json:"support_bundle_path,omitempty"`

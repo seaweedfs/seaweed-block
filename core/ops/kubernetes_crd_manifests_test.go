@@ -217,7 +217,7 @@ func TestPhase46D2SwBlockVolumeReturnedReplicaSchema(t *testing.T) {
 	doc := readYAMLMap(t, "charts/seaweed-block/crds/swblockvolumes.block.seaweedfs.com.yaml")
 	statusProperties := crdStatusProperties(t, doc)
 	returnedProperties := yamlMap(t, yamlMap(t, yamlMap(t, statusProperties, "replicaReintegrations"), "items"), "properties")
-	for _, want := range []string{"replicaID", "state", "reasonCode", "frontendFenced", "frontendPrimaryReady", "ackEligibilityKnown", "ackEligible", "durableFrontierKnown", "durableFrontierLsn", "requiredFrontierKnown", "requiredFrontierLsn", "runtimeEndpoint", "targetDataAddr", "sessionID", "epoch", "endpointVersion", "fromLsn", "frontierHintLsn", "basePinLsn", "evidenceRefs"} {
+	for _, want := range []string{"replicaID", "state", "reasonCode", "frontendFenced", "frontendPrimaryReady", "ackEligibilityKnown", "ackEligible", "durableFrontierKnown", "durableFrontierLsn", "requiredFrontierKnown", "requiredFrontierLsn", "runtimeEndpoint", "targetDataAddr", "targetCtrlAddr", "sessionID", "epoch", "endpointVersion", "fromLsn", "frontierHintLsn", "basePinLsn", "evidenceRefs"} {
 		if _, ok := returnedProperties[want]; !ok {
 			t.Fatalf("SwBlockVolume.status.replicaReintegrations[] schema missing %s", want)
 		}
@@ -228,7 +228,7 @@ func TestPhase46D2SwBlockVolumeReturnedReplicaSchema(t *testing.T) {
 			t.Fatalf("SwBlockVolume.status.replicaReintegrations[].state enum missing %s: %+v", want, stateEnum)
 		}
 	}
-	for _, forbidden := range []string{"replica_id", "frontend_primary_ready", "ack_eligibility_known", "ack_eligible", "durable_frontier_lsn", "runtime_endpoint", "target_data_addr", "session_id", "endpoint_version", "from_lsn", "frontier_hint_lsn", "base_pin_lsn"} {
+	for _, forbidden := range []string{"replica_id", "frontend_primary_ready", "ack_eligibility_known", "ack_eligible", "durable_frontier_lsn", "runtime_endpoint", "target_data_addr", "target_ctrl_addr", "session_id", "endpoint_version", "from_lsn", "frontier_hint_lsn", "base_pin_lsn"} {
 		if _, ok := returnedProperties[forbidden]; ok {
 			t.Fatalf("SwBlockVolume.status.replicaReintegrations[] leaked snake_case %s", forbidden)
 		}
@@ -565,6 +565,10 @@ func TestPhase75SwBlockReplicaFailbackTargetSchema(t *testing.T) {
 		"volumeID",
 		"pvcName",
 		"replicaID",
+		"targetDataAddr",
+		"targetCtrlAddr",
+		"expectedCurrentReplicaID",
+		"expectedCurrentEpoch",
 		"ackEligible",
 		"frontendFencedBeforeFailback",
 		"durableFrontierCovered",
@@ -623,6 +627,10 @@ func TestPhase75SwBlockReplicaFailbackTargetSchema(t *testing.T) {
 		"ack_eligible",
 		"frontend_fenced_before_failback",
 		"failback_mutation_allowed",
+		"target_data_addr",
+		"target_ctrl_addr",
+		"expected_current_replica_id",
+		"expected_current_epoch",
 		"publish_target_swapped_after_failback",
 		"frontendPublished",
 		"rebuildTrafficStarted",

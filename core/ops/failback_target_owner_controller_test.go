@@ -35,6 +35,8 @@ func TestFailbackTargetOwnerCreatesTargetFromReadyContract(t *testing.T) {
 		created.Spec.VolumeID != "pvc-demo" ||
 		created.Spec.PVCName != "demo-pvc" ||
 		created.Spec.ReplicaID != "r1" ||
+		created.Spec.TargetDataAddr != "data-r1" ||
+		created.Spec.TargetCtrlAddr != "ctrl-r1" ||
 		!created.Spec.AckEligible ||
 		!created.Spec.FrontendFencedBeforeFailback ||
 		!created.Spec.DurableFrontierCovered ||
@@ -145,6 +147,8 @@ func failbackTargetOwnerTestVolume() SwBlockVolumeObject {
 				DurableFrontierLSN:    52,
 				RequiredFrontierKnown: true,
 				RequiredFrontierLSN:   52,
+				TargetDataAddr:        "data-r1",
+				TargetCtrlAddr:        "ctrl-r1",
 			}},
 			ExecutorContracts: []SwBlockVolumeCRDExecutorContract{{
 				ActionType:           ManagedVolumeActionFailbackReturned,
