@@ -348,7 +348,14 @@ Recommended order from here:
     explicit. Default chart behavior remains non-mutating. The chart fails fast
     for dry-run execution, missing execution policy, and ambiguous HTTP/gRPC
     runtime transports.
-41. Add backup/restore and NVMe ANA parity after they can reuse the same action
+41. Phase 84: failback integrated gRPC smoke. **Closed 2026-06-26, local PASS**
+    (`internal/docs/finished-plans/phase84_finishedplan_failback_integrated_grpc_smoke.md`).
+    A local integrated test now drives the failback executor through
+    `GRPCFailbackRuntime` into a real blockmaster `FailbackService`, which then
+    advances the master-owned Publisher. This proves executor status,
+    authority-epoch advance, and publish-target swap through the real service
+    path while keeping frontend publication and storage mutation false.
+42. Add backup/restore and NVMe ANA parity after they can reuse the same action
    owner, evidence, and status model rather than creating another isolated
    control plane.
 
@@ -385,7 +392,9 @@ call in a later phase; default installs still keep the mutation path off.
 Phase 82 adds that executor-side gRPC runtime transport, still requiring
 explicit execution policy and an explicit blockmaster address. Phase 83 packages
 that path in Helm while preserving the default-off boundary and adding render
-guardrails for incoherent execution values.
+guardrails for incoherent execution values. Phase 84 closes the local
+fake-service gap by proving the executor gRPC runtime against the real
+blockmaster service and master Publisher.
 
 The practical rule is:
 

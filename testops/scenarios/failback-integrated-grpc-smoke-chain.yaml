@@ -1,0 +1,96 @@
+# Runner-native Phase 84 gate: local integrated smoke for failback executor ->
+# gRPC runtime -> real blockmaster FailbackService -> master Publisher.
+
+name: failback-integrated-grpc-smoke-chain
+timeout: 6m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: failback_integrated_grpc_smoke
+    actions:
+      - action: exec
+        node: m02
+        timeout: 5m
+        cmd: "rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase84-failback-integrated-grpc && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase84-failback-integrated-grpc && cd {{ product_root }} && SW_BLOCK_ARTIFACT_DIR=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase84-failback-integrated-grpc bash scripts/run-phase84-failback-integrated-grpc-smoke.sh {{ product_root }}"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase84-failback-integrated-grpc/phase84-failback-integrated-grpc-summary.txt"
+        pattern: "^phase84_failback_integrated_grpc_status=ok$"
+        save_as: phase84_ok
+      - action: assert_greater
+        actual: "{{ phase84_ok }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase84-failback-integrated-grpc/phase84-failback-integrated-grpc-summary.txt"
+        pattern: "^service_default_disabled_test=true$"
+        save_as: default_disabled
+      - action: assert_greater
+        actual: "{{ default_disabled }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase84-failback-integrated-grpc/phase84-failback-integrated-grpc-summary.txt"
+        pattern: "^executor_grpc_uses_real_master_service=true$"
+        save_as: integrated
+      - action: assert_greater
+        actual: "{{ integrated }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase84-failback-integrated-grpc/phase84-failback-integrated-grpc-summary.txt"
+        pattern: "^master_publisher_epoch_advanced=true$"
+        save_as: epoch_advanced
+      - action: assert_greater
+        actual: "{{ epoch_advanced }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase84-failback-integrated-grpc/phase84-failback-integrated-grpc-summary.txt"
+        pattern: "^publish_target_swapped_after_failback=true$"
+        save_as: target_swapped
+      - action: assert_greater
+        actual: "{{ target_swapped }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase84-failback-integrated-grpc/phase84-failback-integrated-grpc-summary.txt"
+        pattern: "^frontend_publication_allowed=false$"
+        save_as: no_frontend
+      - action: assert_greater
+        actual: "{{ no_frontend }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase84-failback-integrated-grpc/phase84-failback-integrated-grpc-summary.txt"
+        pattern: "^storage_mutation_allowed=false$"
+        save_as: no_storage
+      - action: assert_greater
+        actual: "{{ no_storage }}"
+        threshold: "0"
+
+  - name: collect
+    always: true
+    actions:
+      - action: collect_path
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase84-failback-integrated-grpc"
+        name: "remote-phases"
+        ignore_error: true
