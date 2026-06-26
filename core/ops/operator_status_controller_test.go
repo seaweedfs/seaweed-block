@@ -307,6 +307,92 @@ func TestOperatorStatusReconcilerWritesReturnedReplicaRebuildContract(t *testing
 	}
 }
 
+func TestOperatorStatusReconcilerWritesReturnedReplicaFailbackContract(t *testing.T) {
+	capturedAt := time.Date(2026, 6, 24, 12, 0, 0, 0, time.UTC)
+	source := fakeOperatorStatusSource{cluster: ClusterEvidence{
+		SchemaVersion: ObservationSchemaVersion,
+		CapturedAt:    capturedAt,
+		Status:        ObservationStatusRecovering,
+		ManagedVolumes: []ManagedVolumeProjection{ProjectManagedVolume(ManagedVolumeFacts{
+			VolumeID: "pvc-failback",
+			PVCName:  "failback-pvc",
+			Authority: &AuthorityFact{
+				PrimaryReplica:        "r2",
+				PreviousPrimary:       "r1",
+				RequiredFrontierKnown: true,
+				RequiredFrontierLSN:   52,
+			},
+			Replicas: []ReplicaFact{{
+				ReplicaID:            "r1",
+				Observed:             true,
+				Role:                 "previous_primary",
+				DurableFrontierKnown: true,
+				DurableFrontierLSN:   52,
+				FrontendPrimaryReady: false,
+				AckEligibilityKnown:  true,
+				AckEligible:          true,
+				StalePrimaryFenced:   true,
+			}, {
+				ReplicaID:            "r2",
+				Observed:             true,
+				Role:                 "primary",
+				DurableFrontierKnown: true,
+				DurableFrontierLSN:   52,
+			}},
+			EvidenceRefs: []string{"returned-replica-summary.txt"},
+		})},
+	}}
+	writer := &fakeOperatorStatusWriter{}
+
+	_, err := (OperatorStatusReconciler{
+		Namespace: "kube-system",
+		Source:    source,
+		Writer:    writer,
+	}).Reconcile(context.Background())
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if len(writer.volumes) != 1 {
+		t.Fatalf("volume writes=%+v", writer.volumes)
+	}
+	status := writer.volumes[0].status
+	if len(status.ExecutorPreflights) != 1 {
+		t.Fatalf("executor preflights=%+v", status.ExecutorPreflights)
+	}
+	preflight := status.ExecutorPreflights[0]
+	if preflight.ActionType != ManagedVolumeActionFailbackReturned ||
+		preflight.Decision != ReturnedReplicaExecutorPreflightReady ||
+		preflight.Reason != ReturnedReplicaExecutorPreflightReasonSatisfied ||
+		!preflight.AckEligible ||
+		preflight.MutationAllowed {
+		t.Fatalf("failback preflight=%+v", preflight)
+	}
+	if len(status.ExecutorContracts) != 1 {
+		t.Fatalf("executor contracts=%+v", status.ExecutorContracts)
+	}
+	contract := status.ExecutorContracts[0]
+	if contract.ActionType != ManagedVolumeActionFailbackReturned ||
+		contract.Decision != ReturnedReplicaExecutorContractDisabled ||
+		contract.Reason != ReturnedReplicaExecutorContractReasonExecutorDisabled ||
+		contract.ExecutionEnabled ||
+		contract.MutationAllowed ||
+		!containsActionFact(contract.AllowedMutationClass, "failback") ||
+		!containsActionFact(contract.ForbiddenMutationClass, "frontend_publication") ||
+		!containsActionFact(contract.TerminalEvidenceRequired, "failback_authority_owner") ||
+		!containsActionFact(contract.TerminalEvidenceRequired, "publish_target_swapped_after_failback") {
+		t.Fatalf("failback contract=%+v", contract)
+	}
+	raw, err := json.Marshal(status)
+	if err != nil {
+		t.Fatalf("marshal status: %v", err)
+	}
+	for _, want := range []string{`"actionType":"authority.failback_returned_replica"`, `"allowedMutationClass":["failback"]`, `"executionEnabled":false`, `"mutationAllowed":false`} {
+		if !strings.Contains(string(raw), want) {
+			t.Fatalf("CRD status missing %s: %s", want, string(raw))
+		}
+	}
+}
+
 func TestOperatorStatusReconcilerProjectsNodeReadiness(t *testing.T) {
 	heartbeat := time.Date(2026, 6, 5, 16, 0, 0, 0, time.UTC)
 	source := fakeOperatorStatusSource{cluster: ClusterEvidence{

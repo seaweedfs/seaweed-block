@@ -95,6 +95,44 @@ func TestReturnedReplicaExecutorContract_DisablesRebuildTrafficWhenFrontierBehin
 	}
 }
 
+func TestReturnedReplicaExecutorContract_DisablesFailbackAfterAckEligibility(t *testing.T) {
+	projection := returnedReplicaPreflightProjection(t, func(facts *ManagedVolumeFacts) {
+		facts.Replicas[0].AckEligible = true
+	})
+
+	contract := onlyReturnedReplicaExecutorContract(t, projection)
+	if contract.ActionType != ManagedVolumeActionFailbackReturned {
+		t.Fatalf("action_type=%s want %s", contract.ActionType, ManagedVolumeActionFailbackReturned)
+	}
+	if contract.Decision != ReturnedReplicaExecutorContractDisabled ||
+		contract.Reason != ReturnedReplicaExecutorContractReasonExecutorDisabled ||
+		contract.ExecutionEnabled ||
+		contract.MutationAllowed {
+		t.Fatalf("failback contract=%+v", contract)
+	}
+	if !containsActionFact(contract.AllowedMutationClass, "failback") {
+		t.Fatalf("failback contract should name failback as future envelope: %+v", contract.AllowedMutationClass)
+	}
+	for _, want := range []string{"ack_eligibility", "frontend_publication", "rebuild_traffic"} {
+		if !containsActionFact(contract.ForbiddenMutationClass, want) {
+			t.Fatalf("forbidden mutation classes missing %s: %+v", want, contract.ForbiddenMutationClass)
+		}
+	}
+	for _, want := range []string{
+		"ack_eligible_true",
+		"frontend_fenced_before_failback",
+		"failback_authority_owner",
+		"authority_epoch_advanced",
+		"single_primary_after_failback",
+		"publish_target_swapped_after_failback",
+		"no_cross_volume_identity_change",
+	} {
+		if !containsActionFact(contract.TerminalEvidenceRequired, want) {
+			t.Fatalf("terminal evidence missing %s: %+v", want, contract.TerminalEvidenceRequired)
+		}
+	}
+}
+
 func onlyReturnedReplicaExecutorContract(t *testing.T, projection ManagedVolumeProjection) ReturnedReplicaExecutorContract {
 	t.Helper()
 	contracts := ReturnedReplicaExecutorContracts(projection)

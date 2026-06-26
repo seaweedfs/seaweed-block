@@ -1,80 +1,124 @@
-# Current Plan: Phase 73 Frontend Publication Authority Owner Guard
+# Current Plan: Phase 74 Returned-Replica Failback Contract
 
 Status: complete.
 
 ## Goal
 
-Phase 72 added a generic typed runtime seam for future frontend publication.
-Reviewing the actual product topology exposed a tighter rule:
+Phase 73 correctly blocked returned-replica frontend publication unless a real
+authority/failback owner exists. Phase 74 names that missing owner as an
+explicit product contract:
 
 ```text
-returned-replica frontend publication cannot be a standalone runtime status
-success while primaryUnchanged=true.
+authority.failback_returned_replica
 ```
 
-For a returned replica, making it the active frontend is an authority/failback
-operation. If the product does not move authority, then claiming
-`frontendPublished=true` is a semantic false-positive. If the product does move
-authority, that must be owned by a future authority/failback executor, not by a
-status-only frontend-publication executor.
+This phase does not execute failback. It makes the ACK-after state visible and
+bounded so future implementation cannot reuse the ACK-eligibility or generic
+frontend-publication path as a fake failback.
 
 ## Deliverables
 
-### D1: Returned-Replica Guard
+### D1: Explicit Failback Action
 
-When a `SwBlockFrontendPublication` target is sourced from ACK eligibility:
-
-```text
-sourceEligibilityName != ""
-frontendPublicationDecision=enabled
-frontendPublicationMutationAllowed=true
-primaryUnchanged=true
-```
-
-the executor must:
+When a returned replica is:
 
 ```text
-write status=blocked
-reason=frontend_publication_requires_authority_owner
-not call runtime
-not claim frontendPublished
-not start failback
-not mutate storage/workload state
+frontend_fenced=true
+ack_eligibility_known=true
+ack_eligible=true
+durable_frontier_covered=true
 ```
 
-### D2: Preserve Generic Runtime Seam
+the managed-volume projection now surfaces:
 
-The generic Phase 72 HTTP runtime contract remains covered for non-returned
-targets. This keeps the typed request/result seam available while preventing
-the returned-replica pipeline from using it as a fake publication.
+```text
+managed_volume_action=authority.failback_returned_replica
+mode=dry_run
+side_effect=authority_mutating
+executor=authority_recovery_executor
+decision=rejected
+reason=policy_disabled
+```
 
-### D3: Gate
+The action is visible, but not executable.
+
+### D2: Failback Preflight + Executor Contract
+
+The returned-replica executor handoff now uses the ACK-after state to produce:
+
+```text
+managed_volume_executor_preflight=authority.failback_returned_replica
+decision=ready
+mutation_allowed=false
+```
+
+and a disabled executor contract:
+
+```text
+managed_volume_executor_contract=authority.failback_returned_replica
+decision=disabled
+reason=executor_policy_disabled
+execution_enabled=false
+mutation_allowed=false
+allowed_mutation=failback
+forbidden_mutation=ack_eligibility,frontend_publication,rebuild_traffic
+```
+
+Required terminal evidence:
+
+```text
+ack_eligible_true
+frontend_fenced_before_failback
+failback_authority_owner
+authority_epoch_advanced
+single_primary_after_failback
+publish_target_swapped_after_failback
+no_cross_volume_identity_change
+```
+
+### D3: Preserve Existing Returned-Replica Contracts
+
+Phase 74 preserves:
+
+```text
+authority.reintegrate_returned_replica -> allowed_mutation=ack_eligibility
+authority.rebuild_returned_replica     -> allowed_mutation=rebuild_traffic
+```
+
+Failback is only surfaced after ACK eligibility is already true. It is not
+shown during the pre-ACK reintegration path.
+
+### D4: Gate
 
 Added:
 
 ```text
-scripts/run-phase73-frontend-publication-authority-owner-gate.sh
-testops/scenarios/frontend-publication-authority-owner-chain.yaml
+scripts/run-phase74-returned-replica-failback-contract-gate.sh
+testops/scenarios/returned-replica-failback-contract-chain.yaml
 ```
 
 The gate proves:
 
 ```text
-returned replica runtime invocations = 0
-returned replica frontend_published=false
-generic runtime seam preserved
-runtime failure still does not false-publish
-invalid terminal evidence still does not false-publish
+failback action is policy-disabled
+failback preflight is ready after ACK eligibility
+failback executor contract is disabled
+allowed mutation class is failback only
+ACK and rebuild contracts are preserved
+frontend publication attempts = 0
+failback runtime invocations = 0
 ```
 
 ## Non-Claims
 
-Phase 73 does not implement:
+Phase 74 does not implement:
 
 ```text
-real frontend publication endpoint
-authority reassign/failback
-blockmaster runtime HTTP/gRPC endpoint
+real failback execution
+authority epoch mutation
+primary reassignment
+publish target swap
+blockmaster failback endpoint
 blockvolume frontend switch
 storage/workload mutation
 NVMe ANA behavior
@@ -83,32 +127,35 @@ NVMe ANA behavior
 ## Verification
 
 ```text
-go test ./core/ops -run "TestFrontendPublicationExecutorBlocksReturnedReplicaRuntimeWithoutAuthorityOwner|TestFrontendPublicationExecutorInvokesRuntimeWhenExplicitlyEnabled|TestFrontendPublicationExecutorRuntimeFailureWritesBlockedStatus|TestFrontendPublicationExecutorRejectsInvalidRuntimeTerminalEvidence|TestHTTPFrontendPublicationRuntime" -count=1 -v
+go test ./core/ops -run "TestEvaluateManagedVolumeAction|TestReturnedReplicaExecutor|TestManagedVolumeProjection_ReturnedReplica|TestOperatorStatusReconcilerWritesReturnedReplica|TestObservationReportSummary_IncludesReturnedReplica" -count=1
 go test ./core/ops ./cmd/sw-block
-C:\work\swblock.exe validate testops\scenarios\frontend-publication-authority-owner-chain.yaml
-"C:\Program Files\Git\bin\bash.exe" scripts/run-phase73-frontend-publication-authority-owner-gate.sh .
+C:\work\swblock.exe validate testops\scenarios\returned-replica-failback-contract-chain.yaml
+"C:\Program Files\Git\bin\bash.exe" scripts/run-phase74-returned-replica-failback-contract-gate.sh .
 ```
 
 Terminal evidence:
 
 ```text
-phase73_frontend_publication_authority_owner_status=ok
-core_ops_frontend_publication_authority_owner_tests=pass
-returned_replica_frontend_publication_blocked=true
-generic_runtime_contract_still_wired=true
-runtime_failure_no_false_publish=true
-runtime_invalid_terminal_evidence_no_false_publish=true
-frontend_publication_requires_authority_owner=true
-returned_replica_runtime_invocations=0
-returned_replica_frontend_published=false
-generic_runtime_seam_preserved=true
+phase74_returned_replica_failback_contract_status=ok
+core_ops_failback_contract_tests=pass
+failback_action_policy_disabled=true
+failback_preflight_ready_after_ack=true
+failback_contract_disabled=true
+failback_projection_visible_after_ack=true
+failback_crd_contract_surface=true
+failback_report_surface=true
+ack_eligibility_contract_preserved=true
+rebuild_contract_preserved=true
+failback_allowed_mutation_class=failback
+forbidden_mutation_classes=ack_eligibility,frontend_publication,rebuild_traffic
+failback_mutation_allowed=false
+failback_runtime_invocations=0
 frontend_publication_attempts=0
-failback_attempts=0
 ```
 
 ## Next
 
-The next real product capability must choose and implement an authority/failback
-owner before enabling returned-replica frontend publication. Until then, the
-safe product behavior is to keep frontend publication blocked with explicit
-reason `frontend_publication_requires_authority_owner`.
+The next implementation step is not NVMe. It is the real authority/failback
+owner: a bounded executor path that can advance authority, switch publish
+target, prove single-primary terminal evidence, and only then unblock returned
+replica frontend publication.

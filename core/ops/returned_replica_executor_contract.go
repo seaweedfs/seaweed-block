@@ -57,6 +57,9 @@ func ReturnedReplicaExecutorContracts(projection ManagedVolumeProjection) []Retu
 			case ManagedVolumeActionRebuildReturned:
 				contract.AllowedMutationClass = []string{"rebuild_traffic"}
 				contract.ForbiddenMutationClass = []string{"ack_eligibility", "frontend_publication", "failback"}
+			case ManagedVolumeActionFailbackReturned:
+				contract.AllowedMutationClass = []string{"failback"}
+				contract.ForbiddenMutationClass = []string{"ack_eligibility", "frontend_publication", "rebuild_traffic"}
 			default:
 				contract.AllowedMutationClass = []string{"ack_eligibility"}
 				contract.ForbiddenMutationClass = []string{"frontend_publication", "rebuild_traffic", "failback"}
@@ -74,6 +77,17 @@ func returnedReplicaTerminalEvidenceRequired(actionType string) []string {
 			"primary_unchanged",
 			"durable_frontier_caught_up",
 			"no_frontend_publication",
+			"no_cross_volume_identity_change",
+		}
+	}
+	if actionType == ManagedVolumeActionFailbackReturned {
+		return []string{
+			"ack_eligible_true",
+			"frontend_fenced_before_failback",
+			"failback_authority_owner",
+			"authority_epoch_advanced",
+			"single_primary_after_failback",
+			"publish_target_swapped_after_failback",
 			"no_cross_volume_identity_change",
 		}
 	}

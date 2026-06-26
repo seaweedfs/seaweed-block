@@ -274,7 +274,14 @@ Recommended order from here:
     The returned-replica pipeline now blocks independent frontend publication
     when `primaryUnchanged=true`, because making a returned replica active is an
     authority/failback operation, not a standalone runtime status success.
-31. Add backup/restore and NVMe ANA parity after they can reuse the same action
+31. Phase 74: returned-replica failback contract. **Closed 2026-06-25, local PASS**
+    (`internal/docs/finished-plans/phase74_finishedplan_returned_replica_failback_contract.md`).
+    The ACK-after returned-replica state now surfaces an explicit
+    `authority.failback_returned_replica` action and disabled executor contract.
+    It names `failback` as the future mutation envelope, requires terminal
+    evidence for authority ownership, epoch advance, single-primary state, and
+    publish-target swap, and still performs no failback or frontend publication.
+32. Add backup/restore and NVMe ANA parity after they can reuse the same action
    owner, evidence, and status model rather than creating another isolated
    control plane.
 
@@ -293,7 +300,9 @@ bounded rebuild/catch-up runtime path through terminal evidence. Phases 66-67
 record ACK eligibility after terminal caught-up evidence. Phases 68-73 define
 and then deliberately constrain frontend publication: the generic runtime seam
 exists, but returned-replica publication remains blocked until a real
-authority/failback owner is implemented and gated.
+authority/failback owner is implemented and gated. Phase 74 names that missing
+owner contract explicitly as `authority.failback_returned_replica` while
+keeping execution disabled.
 
 The practical rule is:
 

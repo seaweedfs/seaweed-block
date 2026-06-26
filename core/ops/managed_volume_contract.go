@@ -591,5 +591,17 @@ func ManagedVolumeActionContract() []ManagedVolumeActionContractEntry {
 			EvidenceRequired: "returned_replica_rebuild_evidence",
 			MutationAllowed:  false,
 		},
+		{
+			Type:             ManagedVolumeActionFailbackReturned,
+			Master:           MasterEngine,
+			Mode:             ManagedVolumeActionModeDryRun,
+			SideEffectClass:  ManagedVolumeSideEffectAuthorityMutating,
+			OwnerExecutor:    "authority_recovery_executor",
+			PolicyGate:       ActionPolicyDisabled,
+			RequiredFacts:    []string{"authority.primary_replica", "returned_replica.ack_eligible_true", "returned_replica.required_frontier_covered"},
+			InvariantRefs:    []string{"INV-RETURNED-REPLICA-FENCING-001", "INV-RETURNED-REPLICA-FRONTIER-001"},
+			EvidenceRequired: "returned_replica_failback_evidence",
+			MutationAllowed:  false,
+		},
 	}
 }

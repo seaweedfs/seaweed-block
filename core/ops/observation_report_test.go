@@ -130,6 +130,49 @@ func TestObservationReportSummary_IncludesReturnedReplicaProjection(t *testing.T
 	}
 }
 
+func TestObservationReportSummary_IncludesReturnedReplicaFailbackContract(t *testing.T) {
+	cluster := NewClusterEvidence(time.Date(2026, 6, 24, 12, 0, 0, 0, time.UTC))
+	cluster.ManagedVolumes = []ManagedVolumeProjection{ProjectManagedVolume(ManagedVolumeFacts{
+		VolumeID: "pvc-failback",
+		Authority: &AuthorityFact{
+			PrimaryReplica:        "r2",
+			PreviousPrimary:       "r1",
+			RequiredFrontierKnown: true,
+			RequiredFrontierLSN:   52,
+		},
+		Replicas: []ReplicaFact{{
+			ReplicaID:            "r1",
+			Observed:             true,
+			Role:                 "previous_primary",
+			DurableFrontierKnown: true,
+			DurableFrontierLSN:   52,
+			FrontendPrimaryReady: false,
+			AckEligibilityKnown:  true,
+			AckEligible:          true,
+			StalePrimaryFenced:   true,
+		}, {
+			ReplicaID: "r2",
+			Observed:  true,
+			Role:      "primary",
+		}},
+		EvidenceRefs: []string{"returned-replica-summary.txt"},
+	})}
+
+	summary := RenderObservationReportSummary(cluster)
+	for _, want := range []string{
+		"managed_volume_returned_replica=pvc-failback replica=r1 state=fenced",
+		"ack_eligibility_known=true ack_eligible=true",
+		"managed_volume_executor_preflight=authority.failback_returned_replica target=r1 decision=ready reason=preconditions_satisfied",
+		"managed_volume_executor_contract=authority.failback_returned_replica target=r1 decision=disabled reason=executor_policy_disabled executor=authority_recovery_executor execution_enabled=false mutation_allowed=false allowed_mutation=failback",
+		"terminal_evidence=ack_eligible_true,frontend_fenced_before_failback,failback_authority_owner,authority_epoch_advanced,single_primary_after_failback,publish_target_swapped_after_failback,no_cross_volume_identity_change",
+		"managed_volume_action=authority.failback_returned_replica mode=dry_run side_effect=authority_mutating executor=authority_recovery_executor decision=rejected",
+	} {
+		if !strings.Contains(summary, want) {
+			t.Fatalf("summary missing %q:\n%s", want, summary)
+		}
+	}
+}
+
 func TestObservationReportHTML_IncludesManagedVolumeConditions(t *testing.T) {
 	cluster := NewClusterEvidence(time.Date(2026, 5, 20, 12, 0, 0, 0, time.UTC))
 	cluster.Status = ObservationStatusBlocked

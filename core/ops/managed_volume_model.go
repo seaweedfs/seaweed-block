@@ -65,6 +65,7 @@ const (
 	ManagedVolumeActionRequestPromotion       = "authority.request_promotion"
 	ManagedVolumeActionReintegrateReturned    = "authority.reintegrate_returned_replica"
 	ManagedVolumeActionRebuildReturned        = "authority.rebuild_returned_replica"
+	ManagedVolumeActionFailbackReturned       = "authority.failback_returned_replica"
 
 	ReasonMultiplePrimariesObserved      = "multiple_primaries_observed"
 	ReasonPublishTargetLoopbackCrossNode = "publish_target_loopback_cross_node"
@@ -766,6 +767,18 @@ func managedVolumeActionsForProjection(p ManagedVolumeProjection, facts ManagedV
 				OwnerExecutor:   "authority_recovery_executor",
 				Preconditions:   []string{"returned_replica_frontend_fenced", "durable_frontier_evidence"},
 				InvariantRefs:   []string{"INV-RETURNED-REPLICA-FENCING-001"},
+				EvidenceRefs:    append([]string(nil), returned.EvidenceRefs...),
+			})
+		}
+		if returned.State == ReturnedReplicaStateFenced && returned.AckEligibilityKnown && returned.AckEligible {
+			actions = append(actions, ManagedVolumeAction{
+				Type:            ManagedVolumeActionFailbackReturned,
+				Target:          returned.ReplicaID,
+				Mode:            ManagedVolumeActionModeDryRun,
+				SideEffectClass: ManagedVolumeSideEffectAuthorityMutating,
+				OwnerExecutor:   "authority_recovery_executor",
+				Preconditions:   []string{"ack_eligible_true", "returned_replica_frontend_fenced", "durable_frontier_covered"},
+				InvariantRefs:   []string{"INV-RETURNED-REPLICA-FENCING-001", "INV-RETURNED-REPLICA-FRONTIER-001"},
 				EvidenceRefs:    append([]string(nil), returned.EvidenceRefs...),
 			})
 		}

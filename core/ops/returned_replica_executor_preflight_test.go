@@ -98,6 +98,25 @@ func TestReturnedReplicaExecutorPreflight_RebuildHoldsWhenDurableFrontierMissing
 	}
 }
 
+func TestReturnedReplicaExecutorPreflight_FailbackReadyAfterAckEligibility(t *testing.T) {
+	projection := returnedReplicaPreflightProjection(t, func(facts *ManagedVolumeFacts) {
+		facts.Replicas[0].AckEligible = true
+	})
+
+	preflight := onlyReturnedReplicaPreflight(t, projection)
+	if preflight.ActionType != ManagedVolumeActionFailbackReturned {
+		t.Fatalf("action_type=%s want %s", preflight.ActionType, ManagedVolumeActionFailbackReturned)
+	}
+	if preflight.Decision != ReturnedReplicaExecutorPreflightReady ||
+		preflight.Reason != ReturnedReplicaExecutorPreflightReasonSatisfied ||
+		preflight.MutationAllowed {
+		t.Fatalf("failback preflight=%+v", preflight)
+	}
+	if !preflight.AckEligibilityKnown || !preflight.AckEligible || !preflight.FrontendFenced {
+		t.Fatalf("failback preflight missing ACK/fencing facts: %+v", preflight)
+	}
+}
+
 func TestReturnedReplicaExecutorPreflight_HoldsAmbiguousReturnedReplicas(t *testing.T) {
 	projection := returnedReplicaPreflightProjection(t, func(facts *ManagedVolumeFacts) {
 		facts.Authority.PreviousPrimary = ""

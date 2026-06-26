@@ -156,6 +156,13 @@ func managedVolumeActionFactPresent(requiredFact string, facts ManagedVolumeFact
 			}
 		}
 		return false
+	case "returned_replica.ack_eligible_true":
+		for _, returned := range returnedReplicaProjections(facts) {
+			if returned.State == ReturnedReplicaStateFenced && returned.FrontendFenced && !returned.FrontendPrimaryReady && returned.AckEligibilityKnown && returned.AckEligible {
+				return true
+			}
+		}
+		return false
 	case "returned_replica.required_frontier_covered":
 		for _, returned := range returnedReplicaProjections(facts) {
 			if returned.State != ReturnedReplicaStateFenced || !returned.DurableFrontierKnown {

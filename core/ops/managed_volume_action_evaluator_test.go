@@ -77,6 +77,27 @@ func TestEvaluateManagedVolumeAction_RejectsDisabledAuthorityMutation(t *testing
 	}
 }
 
+func TestEvaluateManagedVolumeAction_RejectsDisabledReturnedReplicaFailback(t *testing.T) {
+	facts := returnedReplicaActionFacts(52, 52, false)
+	facts.Replicas[0].AckEligible = true
+	evaluation := EvaluateManagedVolumeAction(ManagedVolumeActionFailbackReturned, facts)
+
+	if evaluation.Decision != ManagedVolumeActionDecisionRejected {
+		t.Fatalf("decision=%s want rejected", evaluation.Decision)
+	}
+	if evaluation.Reason != ManagedVolumeActionRejectDisabled {
+		t.Fatalf("reason=%s want %s", evaluation.Reason, ManagedVolumeActionRejectDisabled)
+	}
+	if evaluation.SideEffectClass != ManagedVolumeSideEffectAuthorityMutating ||
+		evaluation.OwnerExecutor != "authority_recovery_executor" ||
+		evaluation.MutationAllowed {
+		t.Fatalf("failback boundary=%+v", evaluation)
+	}
+	if evaluation.EvidenceRequired != "returned_replica_failback_evidence" {
+		t.Fatalf("evidence_required=%s", evaluation.EvidenceRequired)
+	}
+}
+
 func TestEvaluateManagedVolumeAction_AllowsReturnedReplicaReintegrateDryRunWithFencedFrontier(t *testing.T) {
 	evaluation := EvaluateManagedVolumeAction(ManagedVolumeActionReintegrateReturned, returnedReplicaActionFacts(52, 52, false))
 

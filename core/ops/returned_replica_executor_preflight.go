@@ -11,6 +11,7 @@ const (
 	ReturnedReplicaExecutorPreflightReasonFrontendNotFenced     = "returned_replica_frontend_not_fenced"
 	ReturnedReplicaExecutorPreflightReasonAckEligibilityUnknown = "returned_replica_ack_eligibility_unknown"
 	ReturnedReplicaExecutorPreflightReasonAckEligible           = "returned_replica_ack_eligible"
+	ReturnedReplicaExecutorPreflightReasonAckNotEligible        = "returned_replica_ack_not_eligible"
 	ReturnedReplicaExecutorPreflightReasonMissingFrontier       = "required_frontier_missing"
 	ReturnedReplicaExecutorPreflightReasonDurableMissing        = "durable_frontier_missing"
 	ReturnedReplicaExecutorPreflightReasonFrontierBehind        = "returned_replica_frontier_behind"
@@ -49,6 +50,9 @@ type ReturnedReplicaExecutorPreflight struct {
 func ReturnedReplicaExecutorPreflights(projection ManagedVolumeProjection) []ReturnedReplicaExecutorPreflight {
 	if action := returnedReplicaRebuildAction(projection.Actions); action != nil || len(returnedReplicaRebuildCandidates(projection.ReplicaReintegrations)) > 0 {
 		return []ReturnedReplicaExecutorPreflight{returnedReplicaRebuildPreflight(projection, action)}
+	}
+	if action := returnedReplicaFailbackAction(projection.Actions); action != nil || len(returnedReplicaFailbackCandidates(projection.ReplicaReintegrations)) > 0 {
+		return []ReturnedReplicaExecutorPreflight{returnedReplicaFailbackPreflight(projection, action)}
 	}
 	return returnedReplicaReintegratePreflights(projection)
 }
@@ -193,6 +197,74 @@ func returnedReplicaRebuildPreflight(projection ManagedVolumeProjection, action 
 	return preflight
 }
 
+func returnedReplicaFailbackPreflight(projection ManagedVolumeProjection, action *ManagedVolumeAction) ReturnedReplicaExecutorPreflight {
+	preflight := ReturnedReplicaExecutorPreflight{
+		ActionType:             ManagedVolumeActionFailbackReturned,
+		VolumeID:               projection.VolumeID,
+		Decision:               ReturnedReplicaExecutorPreflightHold,
+		Reason:                 ReturnedReplicaExecutorPreflightReasonActionNotAllowed,
+		Mode:                   ManagedVolumeActionModeDryRun,
+		SideEffectClass:        ManagedVolumeSideEffectAuthorityMutating,
+		OwnerExecutor:          "authority_recovery_executor",
+		MutationAllowed:        false,
+		EvidenceRequired:       "returned_replica_failback_evidence",
+		ForbiddenMutationClass: []string{"ack_eligibility", "frontend_publication", "rebuild_traffic", "failback"},
+	}
+	target := ""
+	if action != nil {
+		target = action.Target
+		preflight.Mode = action.Mode
+		preflight.SideEffectClass = action.SideEffectClass
+		preflight.OwnerExecutor = action.OwnerExecutor
+		preflight.EvidenceRequired = action.EvidenceRequired
+		preflight.EvidenceRefs = append([]string(nil), action.EvidenceRefs...)
+		if action.Mode != ManagedVolumeActionModeDryRun {
+			preflight.Reason = ReturnedReplicaExecutorPreflightReasonUnsupportedMode
+			return preflight
+		}
+		if action.SideEffectClass != ManagedVolumeSideEffectAuthorityMutating || action.OwnerExecutor != "authority_recovery_executor" {
+			preflight.Reason = ReturnedReplicaExecutorPreflightReasonWrongExecutor
+			return preflight
+		}
+	}
+	returned, reason := returnedReplicaForExecutorPreflight(returnedReplicaFailbackCandidates(projection.ReplicaReintegrations), target)
+	if reason != "" {
+		preflight.Reason = reason
+		return preflight
+	}
+	populateReturnedReplicaPreflight(&preflight, returned)
+	if len(preflight.EvidenceRefs) == 0 {
+		preflight.EvidenceRefs = append([]string(nil), returned.EvidenceRefs...)
+	}
+	if !returned.FrontendFenced || returned.FrontendPrimaryReady {
+		preflight.Reason = ReturnedReplicaExecutorPreflightReasonFrontendNotFenced
+		return preflight
+	}
+	if !returned.AckEligibilityKnown {
+		preflight.Reason = ReturnedReplicaExecutorPreflightReasonAckEligibilityUnknown
+		return preflight
+	}
+	if !returned.AckEligible {
+		preflight.Reason = ReturnedReplicaExecutorPreflightReasonAckNotEligible
+		return preflight
+	}
+	if !returned.RequiredFrontierKnown {
+		preflight.Reason = ReturnedReplicaExecutorPreflightReasonMissingFrontier
+		return preflight
+	}
+	if !returned.DurableFrontierKnown {
+		preflight.Reason = ReturnedReplicaExecutorPreflightReasonDurableMissing
+		return preflight
+	}
+	if returned.DurableFrontierLSN < returned.RequiredFrontierLSN {
+		preflight.Reason = ReturnedReplicaExecutorPreflightReasonFrontierBehind
+		return preflight
+	}
+	preflight.Decision = ReturnedReplicaExecutorPreflightReady
+	preflight.Reason = ReturnedReplicaExecutorPreflightReasonSatisfied
+	return preflight
+}
+
 func populateReturnedReplicaPreflight(preflight *ReturnedReplicaExecutorPreflight, returned ReturnedReplicaProjection) {
 	preflight.ReplicaID = returned.ReplicaID
 	preflight.FrontendFenced = returned.FrontendFenced
@@ -244,10 +316,29 @@ func returnedReplicaRebuildAction(actions []ManagedVolumeAction) *ManagedVolumeA
 	return nil
 }
 
+func returnedReplicaFailbackAction(actions []ManagedVolumeAction) *ManagedVolumeAction {
+	for i := range actions {
+		if actions[i].Type == ManagedVolumeActionFailbackReturned {
+			return &actions[i]
+		}
+	}
+	return nil
+}
+
 func returnedReplicaRebuildCandidates(returned []ReturnedReplicaProjection) []ReturnedReplicaProjection {
 	var candidates []ReturnedReplicaProjection
 	for _, replica := range returned {
 		if replica.State == ReturnedReplicaStateRecovering || replica.ReasonCode == ReasonCandidateFrontierBehind || replica.ReasonCode == ReasonDurableFrontierMissing {
+			candidates = append(candidates, replica)
+		}
+	}
+	return candidates
+}
+
+func returnedReplicaFailbackCandidates(returned []ReturnedReplicaProjection) []ReturnedReplicaProjection {
+	var candidates []ReturnedReplicaProjection
+	for _, replica := range returned {
+		if replica.State == ReturnedReplicaStateFenced && replica.FrontendFenced && !replica.FrontendPrimaryReady && replica.AckEligibilityKnown && replica.AckEligible {
 			candidates = append(candidates, replica)
 		}
 	}

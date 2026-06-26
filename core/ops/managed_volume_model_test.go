@@ -536,6 +536,51 @@ func TestManagedVolumeProjection_ReturnedPreviousPrimaryStaysFrontendFenced(t *t
 	if action.Decision != ManagedVolumeActionDecisionAllowed || action.DecisionReason != "" {
 		t.Fatalf("reintegrate action must be dry-run admitted only after fencing/frontier evidence: %+v", action)
 	}
+	if hasManagedVolumeAction(projection.Actions, ManagedVolumeActionFailbackReturned) {
+		t.Fatalf("failback action must not appear before ACK eligibility is recorded: %+v", projection.Actions)
+	}
+}
+
+func TestManagedVolumeProjection_ReturnedReplicaFailbackActionAfterAckEligibility(t *testing.T) {
+	projection := ProjectManagedVolume(ManagedVolumeFacts{
+		VolumeID: "pvc-returned",
+		PVC:      &PVCFact{Phase: "Bound"},
+		Authority: &AuthorityFact{
+			PrimaryReplica:        "r2",
+			PreviousPrimary:       "r1",
+			RequiredFrontierKnown: true,
+			RequiredFrontierLSN:   52,
+		},
+		Replicas: []ReplicaFact{{
+			ReplicaID:            "r1",
+			Observed:             true,
+			Role:                 "replica",
+			ReplicationRole:      "ready",
+			DurableFrontierKnown: true,
+			DurableFrontierLSN:   52,
+			FrontendPrimaryReady: false,
+			AckEligibilityKnown:  true,
+			AckEligible:          true,
+			StalePrimaryFenced:   true,
+		}, {
+			ReplicaID:            "r2",
+			KubernetesNode:       "m02",
+			Observed:             true,
+			Role:                 "primary",
+			DurableFrontierKnown: true,
+			DurableFrontierLSN:   52,
+			FrontendAddr:         "192.168.1.184:3260",
+		}},
+		EvidenceRefs: []string{"returned-replica-summary.txt"},
+	})
+
+	action := findManagedVolumeAction(projection.Actions, ManagedVolumeActionFailbackReturned)
+	if action == nil {
+		t.Fatalf("missing failback action after ACK eligibility: %+v", projection.Actions)
+	}
+	if action.Decision != ManagedVolumeActionDecisionRejected || action.DecisionReason != ManagedVolumeActionRejectDisabled {
+		t.Fatalf("failback action must stay policy-disabled: %+v", action)
+	}
 }
 
 func TestManagedVolumeProjection_ReturnedReplicaFrontendReadyBlocksVolume(t *testing.T) {
