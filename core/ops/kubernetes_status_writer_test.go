@@ -670,6 +670,90 @@ func TestKubernetesStatusClientCreatesSwBlockReplicaRebuildWithoutStatus(t *test
 	}
 }
 
+func TestKubernetesStatusClientCreatesSwBlockReplicaFailbackWithoutStatus(t *testing.T) {
+	var request recordedStatusPatch
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&request.Body); err != nil {
+			t.Fatalf("decode request body: %v", err)
+		}
+		request.Method = r.Method
+		request.Path = r.URL.Path
+		request.ContentType = r.Header.Get("Content-Type")
+		request.Authorization = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer server.Close()
+
+	err := (&KubernetesStatusClient{
+		BaseURL:     server.URL,
+		BearerToken: "failback-target-owner-token",
+		HTTPClient:  server.Client(),
+	}).CreateSwBlockReplicaFailback(context.Background(), "kube-system", SwBlockReplicaFailbackObject{
+		Ref: OperatorObjectRef{
+			Name: "demo-pvc-r2-failback",
+		},
+		Spec: SwBlockReplicaFailbackSpec{
+			VolumeName:                   "demo-pvc",
+			VolumeID:                     "pvc-demo",
+			PVCName:                      "demo-pvc",
+			ReplicaID:                    "r2",
+			AckEligible:                  true,
+			FrontendFencedBeforeFailback: true,
+			DurableFrontierCovered:       true,
+			NoCrossVolumeIdentityChange:  true,
+			FailbackDecision:             AuthorityExecutorFailbackDecisionEnabled,
+			FailbackReason:               "failback_requested",
+			FailbackMutationAllowed:      true,
+			RuntimeEndpoint:              "http://127.0.0.1:23260/runtime/failback",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create failback target: %v", err)
+	}
+	if request.Method != http.MethodPost {
+		t.Fatalf("method=%s", request.Method)
+	}
+	if request.Path != "/apis/block.seaweedfs.com/v1alpha1/namespaces/kube-system/swblockreplicafailbacks" {
+		t.Fatalf("path=%s", request.Path)
+	}
+	if request.ContentType != "application/json" {
+		t.Fatalf("content-type=%s", request.ContentType)
+	}
+	if request.Authorization != "Bearer failback-target-owner-token" {
+		t.Fatalf("authorization=%s", request.Authorization)
+	}
+	if request.Body["apiVersion"] != SwBlockVolumeAPIVersion || request.Body["kind"] != SwBlockReplicaFailbackKind {
+		t.Fatalf("body identity=%+v", request.Body)
+	}
+	metadata := request.Body["metadata"].(map[string]any)
+	if metadata["name"] != "demo-pvc-r2-failback" || metadata["namespace"] != "kube-system" {
+		t.Fatalf("metadata=%+v", metadata)
+	}
+	spec := request.Body["spec"].(map[string]any)
+	if spec["volumeName"] != "demo-pvc" ||
+		spec["volumeID"] != "pvc-demo" ||
+		spec["pvcName"] != "demo-pvc" ||
+		spec["replicaID"] != "r2" ||
+		spec["ackEligible"] != true ||
+		spec["frontendFencedBeforeFailback"] != true ||
+		spec["durableFrontierCovered"] != true ||
+		spec["noCrossVolumeIdentityChange"] != true ||
+		spec["failbackDecision"] != AuthorityExecutorFailbackDecisionEnabled ||
+		spec["failbackReason"] != "failback_requested" ||
+		spec["failbackMutationAllowed"] != true ||
+		spec["runtimeEndpoint"] != "http://127.0.0.1:23260/runtime/failback" {
+		t.Fatalf("spec=%+v", spec)
+	}
+	for _, forbidden := range []string{"ack_eligible", "frontend_fenced_before_failback", "failback_decision", "failback_mutation_allowed", "runtime_endpoint"} {
+		if _, ok := spec[forbidden]; ok {
+			t.Fatalf("spec leaked %s: %+v", forbidden, spec)
+		}
+	}
+	if _, ok := request.Body["status"]; ok {
+		t.Fatalf("target create must not include status: %+v", request.Body)
+	}
+}
+
 func TestKubernetesStatusClientCreatesSwBlockFrontendPublicationWithoutStatus(t *testing.T) {
 	var request recordedStatusPatch
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

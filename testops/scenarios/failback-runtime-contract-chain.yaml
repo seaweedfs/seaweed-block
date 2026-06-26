@@ -1,0 +1,106 @@
+# Runner-native Phase 77 gate: failback has a typed runtime contract and
+# explicit execution-policy gate. Default reconciliation remains disabled; a
+# fake runtime can report terminal evidence only in tests.
+
+name: failback-runtime-contract-chain
+timeout: 8m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: failback_runtime_contract_gate
+    actions:
+      - action: exec
+        node: m02
+        timeout: 7m
+        cmd: "rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase77-failback-runtime-contract && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase77-failback-runtime-contract && cd {{ product_root }} && SW_BLOCK_ARTIFACT_DIR=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase77-failback-runtime-contract bash scripts/run-phase77-failback-runtime-contract-gate.sh {{ product_root }}"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase77-failback-runtime-contract/phase77-failback-runtime-contract-summary.txt"
+        pattern: "^phase77_failback_runtime_contract_status=ok$"
+        save_as: phase77_ok
+      - action: assert_greater
+        actual: "{{ phase77_ok }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase77-failback-runtime-contract/phase77-failback-runtime-contract-summary.txt"
+        pattern: "^failback_execution_policy_gate=true$"
+        save_as: policy_gate
+      - action: assert_greater
+        actual: "{{ policy_gate }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase77-failback-runtime-contract/phase77-failback-runtime-contract-summary.txt"
+        pattern: "^failback_runtime_invoked_only_when_enabled=true$"
+        save_as: runtime_gated
+      - action: assert_greater
+        actual: "{{ runtime_gated }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase77-failback-runtime-contract/phase77-failback-runtime-contract-summary.txt"
+        pattern: "^runtime_failure_no_false_failback=true$"
+        save_as: failure_no_false
+      - action: assert_greater
+        actual: "{{ failure_no_false }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase77-failback-runtime-contract/phase77-failback-runtime-contract-summary.txt"
+        pattern: "^runtime_invalid_terminal_evidence_no_false_failback=true$"
+        save_as: invalid_no_false
+      - action: assert_greater
+        actual: "{{ invalid_no_false }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase77-failback-runtime-contract/phase77-failback-runtime-contract-summary.txt"
+        pattern: "^http_runtime_contract_posts_request=true$"
+        save_as: http_contract
+      - action: assert_greater
+        actual: "{{ http_contract }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase77-failback-runtime-contract/phase77-failback-runtime-contract-summary.txt"
+        pattern: "^target_writer_serializes_runtime_fields=true$"
+        save_as: writer_contract
+      - action: assert_greater
+        actual: "{{ writer_contract }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase77-failback-runtime-contract/phase77-failback-runtime-contract-summary.txt"
+        pattern: "^storage_mutation_allowed=false$"
+        save_as: no_storage_mutation
+      - action: assert_greater
+        actual: "{{ no_storage_mutation }}"
+        threshold: "0"
+
+  - name: collect
+    always: true
+    actions:
+      - action: collect_path
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase77-failback-runtime-contract"
+        name: "remote-phases"
+        ignore_error: true

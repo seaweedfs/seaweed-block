@@ -144,6 +144,9 @@ func failbackTargetOwnerObject(namespace string, volume SwBlockVolumeObject, con
 			FrontendFencedBeforeFailback: returned.FrontendFenced && !returned.FrontendPrimaryReady,
 			DurableFrontierCovered:       returned.DurableFrontierKnown && returned.RequiredFrontierKnown && returned.DurableFrontierLSN >= returned.RequiredFrontierLSN,
 			NoCrossVolumeIdentityChange:  true,
+			FailbackDecision:             AuthorityExecutorFailbackDecisionDisabled,
+			FailbackReason:               AuthorityExecutorFailbackReasonDisabled,
+			FailbackMutationAllowed:      false,
 		},
 	}
 }

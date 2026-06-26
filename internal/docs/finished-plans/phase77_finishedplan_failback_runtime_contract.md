@@ -1,23 +1,17 @@
-# Current Plan: Phase 77 Returned-Replica Failback Runtime Contract
+# Phase 77 Finished Plan: Returned-Replica Failback Runtime Contract
 
 Status: complete.
 
-## Goal
+## Problem
 
-Phase 76 added the status-only failback executor boundary. Phase 77 adds the
-typed runtime contract and opt-in execution-policy gate for future real
-failback.
+Phase 76 gave `SwBlockReplicaFailback` a status-only executor. The next missing
+piece was the execution envelope: what request a future failback runtime would
+receive, what evidence it must return, and how the executor refuses to claim
+failback when policy or terminal evidence is missing.
 
-Default behavior remains disabled and status-only. The runtime path is available
-only when an explicit executable target and explicit execution-policy flags are
-present.
+## Implementation
 
-## Deliverables
-
-### D1: Executable Target Contract
-
-`SwBlockReplicaFailback.spec` now admits the fields needed to distinguish an
-ordinary disabled target from a future executable target:
+Added executable target fields to `SwBlockReplicaFailback.spec`:
 
 ```text
 failbackDecision=disabled|enabled
@@ -26,7 +20,7 @@ failbackMutationAllowed
 runtimeEndpoint
 ```
 
-The Phase 75 target owner still creates disabled targets:
+The Phase 75 target owner now emits explicitly disabled targets:
 
 ```text
 failbackDecision=disabled
@@ -34,9 +28,7 @@ failbackReason=failback_policy_disabled
 failbackMutationAllowed=false
 ```
 
-### D2: Runtime Contract
-
-Added:
+Added runtime contract:
 
 ```text
 FailbackRuntime
@@ -45,21 +37,7 @@ FailbackRuntimeResult
 HTTPFailbackRuntime
 ```
 
-Runtime request carries:
-
-```text
-volumeName
-volumeID
-pvcName
-replicaID
-runtimeEndpoint
-ackEligible
-frontendFencedBeforeFailback
-durableFrontierCovered
-noCrossVolumeIdentityChange
-```
-
-Runtime result must return terminal evidence:
+Terminal success requires:
 
 ```text
 failbackStarted=true
@@ -70,24 +48,15 @@ noStorageMutation=true
 noCrossVolumeIdentityChange=true
 ```
 
-If any terminal evidence is missing, the executor writes blocked status and
-does not claim failback.
-
-### D3: Execution Policy Gate
-
-`sw-block ops failback-executor` now has explicit execution flags:
+Added CLI policy gate:
 
 ```text
---enable-execution
---execution-policy
---failback-runtime-url <url>
+sw-block ops failback-executor --enable-execution --execution-policy --failback-runtime-url <url>
 ```
 
-Execution remains blocked unless both `--enable-execution` and
-`--execution-policy` are set. Passing `--failback-runtime-url` without
-execution is rejected.
+Default reconciliation remains disabled/status-only.
 
-### D4: Gate
+## Gate
 
 Added:
 
@@ -96,7 +65,7 @@ scripts/run-phase77-failback-runtime-contract-gate.sh
 testops/scenarios/failback-runtime-contract-chain.yaml
 ```
 
-The gate proves:
+The gate checks:
 
 ```text
 default executor still disabled
@@ -104,27 +73,10 @@ execution policy blocks without enable
 explicit enabled target invokes runtime
 runtime failure does not claim failback
 invalid terminal evidence does not claim failback
-HTTP runtime posts/decodes contract
+HTTP runtime request/response shape
 target writer serializes runtime fields
-storage_mutation_allowed=false
+storage mutation remains false
 ```
-
-## Non-Claims
-
-Phase 77 does not implement:
-
-```text
-real blockmaster failback endpoint
-real authority epoch mutation
-real primary reassignment
-real publish-target swap
-blockvolume frontend switching
-storage/workload mutation
-NVMe ANA behavior
-```
-
-The successful runtime path in tests uses a fake/HTTP test runtime to validate
-the contract shape only.
 
 ## Verification
 
@@ -158,8 +110,22 @@ publish_target_swapped_after_failback=true
 storage_mutation_allowed=false
 ```
 
+## Non-Claims
+
+Phase 77 does not implement:
+
+```text
+real blockmaster failback endpoint
+real authority epoch mutation
+real primary reassignment
+real publish-target swap
+blockvolume frontend switching
+storage/workload mutation
+```
+
 ## Next
 
-The next phase should add the first real product-owned failback endpoint or
-authority-owner seam. It must mutate only authority state, prove epoch advance
-and single-primary state, and still avoid storage/workload mutation.
+Implement the product-owned failback endpoint or authority-owner seam. It must
+be gated by the runtime contract and prove epoch advance, single-primary state,
+publish-target swap, and cross-volume isolation before any user-facing
+`failed_back` claim is allowed outside test/fake runtime evidence.

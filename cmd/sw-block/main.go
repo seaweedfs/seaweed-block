@@ -198,12 +198,18 @@ func runOpsFailbackExecutor(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("sw-block ops failback-executor", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	var (
-		dryRun    bool
-		namespace string
-		interval  time.Duration
+		dryRun                 bool
+		namespace              string
+		enableExecution        bool
+		executionPolicyEnabled bool
+		failbackRuntimeURL     string
+		interval               time.Duration
 	)
 	fs.BoolVar(&dryRun, "dry-run", false, "evaluate failback targets without writing SwBlockReplicaFailback status")
 	fs.StringVar(&namespace, "namespace", "default", "Kubernetes namespace containing SwBlockReplicaFailback objects")
+	fs.BoolVar(&enableExecution, "enable-execution", false, "request failback runtime execution")
+	fs.BoolVar(&executionPolicyEnabled, "execution-policy", false, "allow failback executor to evaluate execution; default is disabled")
+	fs.StringVar(&failbackRuntimeURL, "failback-runtime-url", "", "HTTP endpoint for failback runtime execution; empty uses target runtimeEndpoint when execution is enabled")
 	fs.DurationVar(&interval, "interval", 0, "repeat failback-executor reconciliation at this interval; 0 runs once")
 	if err := fs.Parse(args); err != nil {
 		return ops.VolumeStatusExitInvalid
@@ -212,16 +218,31 @@ func runOpsFailbackExecutor(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "sw-block ops failback-executor: unexpected args %s\n", strings.Join(fs.Args(), " "))
 		return ops.VolumeStatusExitInvalid
 	}
+	if strings.TrimSpace(failbackRuntimeURL) != "" && !enableExecution {
+		fmt.Fprintf(stderr, "sw-block ops failback-executor: --failback-runtime-url requires --enable-execution reason=unsupported_runtime_without_execution failback_attempts=0\n")
+		return ops.VolumeStatusExitInvalid
+	}
+	if enableExecution && !executionPolicyEnabled {
+		fmt.Fprintf(stderr, "sw-block ops failback-executor: failback execution is disabled by product policy reason=%s failback_attempts=0 authority_mutation_allowed=false frontend_publication_allowed=false storage_mutation_allowed=false\n", ops.AuthorityExecutorFailbackReasonDisabled)
+		return ops.VolumeStatusExitInvalid
+	}
 	runOnce := func() int {
 		client, err := opsFailbackExecutorClientFactory()
 		if err != nil {
 			fmt.Fprintf(stderr, "sw-block ops failback-executor: %v\n", err)
 			return ops.VolumeStatusExitInvalid
 		}
+		var runtime ops.FailbackRuntime
+		if strings.TrimSpace(failbackRuntimeURL) != "" {
+			runtime = ops.NewHTTPFailbackRuntime(failbackRuntimeURL, nil)
+		}
 		result, err := (ops.FailbackExecutorReconciler{
-			Namespace: namespace,
-			Client:    client,
-			DryRun:    dryRun,
+			Namespace:              namespace,
+			Client:                 client,
+			Runtime:                runtime,
+			DryRun:                 dryRun,
+			ExecutionRequested:     enableExecution,
+			ExecutionPolicyEnabled: executionPolicyEnabled,
 		}).Reconcile(context.Background())
 		if err != nil {
 			fmt.Fprintf(stderr, "sw-block ops failback-executor: %v\n", err)
@@ -231,13 +252,15 @@ func runOpsFailbackExecutor(args []string, stdout, stderr io.Writer) int {
 		if dryRun {
 			mode = "dry_run"
 		}
-		fmt.Fprintf(stdout, "failback_executor=%s namespace=%s targets=%d status_writes=%d invalid_targets=%d failback_attempts=%d status_mutation_allowed=%t authority_mutation_allowed=%t frontend_publication_allowed=%t mutation_allowed=%t storage_mutation_allowed=%t\n",
+		fmt.Fprintf(stdout, "failback_executor=%s namespace=%s targets=%d status_writes=%d invalid_targets=%d failback_attempts=%d execution_requested=%t execution_policy_enabled=%t status_mutation_allowed=%t authority_mutation_allowed=%t frontend_publication_allowed=%t mutation_allowed=%t storage_mutation_allowed=%t\n",
 			mode,
 			namespace,
 			result.TargetCount,
 			result.StatusWriteCount,
 			result.InvalidTargetCount,
 			result.FailbackAttempts,
+			enableExecution,
+			executionPolicyEnabled,
 			!dryRun && result.StatusWriteCount > 0,
 			result.AuthorityMutationAllowed,
 			result.FrontendPublicationAllowed,
@@ -2075,7 +2098,7 @@ func usage(w io.Writer) {
 	fmt.Fprintln(w, "  sw-block ops authority-executor [--namespace <ns>] [--allowed-mutation-class ack_eligibility|rebuild_traffic] [--interval 30s]")
 	fmt.Fprintln(w, "  sw-block ops rebuild-target-owner [--dry-run] [--namespace <ns>] [--interval 30s]")
 	fmt.Fprintln(w, "  sw-block ops failback-target-owner [--dry-run] [--namespace <ns>] [--interval 30s]")
-	fmt.Fprintln(w, "  sw-block ops failback-executor [--dry-run] [--namespace <ns>] [--interval 30s]")
+	fmt.Fprintln(w, "  sw-block ops failback-executor [--dry-run] [--namespace <ns>] [--enable-execution] [--execution-policy] [--failback-runtime-url <url>] [--interval 30s]")
 	fmt.Fprintln(w, "  sw-block ops frontend-publication-target-owner [--dry-run] [--namespace <ns>] [--interval 30s]")
 	fmt.Fprintln(w, "  sw-block ops frontend-publication-executor [--dry-run] [--namespace <ns>] [--interval 30s]")
 }

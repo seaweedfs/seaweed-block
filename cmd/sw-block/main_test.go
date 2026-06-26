@@ -1077,7 +1077,10 @@ func TestOpsFailbackTargetOwnerCreatesTarget(t *testing.T) {
 		!created.Spec.AckEligible ||
 		!created.Spec.FrontendFencedBeforeFailback ||
 		!created.Spec.DurableFrontierCovered ||
-		!created.Spec.NoCrossVolumeIdentityChange {
+		!created.Spec.NoCrossVolumeIdentityChange ||
+		created.Spec.FailbackDecision != ops.AuthorityExecutorFailbackDecisionDisabled ||
+		created.Spec.FailbackReason != ops.AuthorityExecutorFailbackReasonDisabled ||
+		created.Spec.FailbackMutationAllowed {
 		t.Fatalf("created=%+v", created)
 	}
 	out := stdout.String()
@@ -1299,6 +1302,102 @@ func TestOpsFrontendPublicationTargetOwnerDryRunDoesNotCreateTarget(t *testing.T
 		"frontend_publication_attempts=0",
 		"failback_attempts=0",
 		"mutation_allowed=false",
+		"storage_mutation_allowed=false",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("stdout missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestOpsFailbackExecutorExecutionPolicyBlocks(t *testing.T) {
+	client := &lifecycleOwnerTestClient{
+		failbacks: []ops.SwBlockReplicaFailbackObject{cmdFailbackExecutableTarget()},
+	}
+	oldFactory := opsFailbackExecutorClientFactory
+	opsFailbackExecutorClientFactory = func() (ops.FailbackExecutorClient, error) {
+		return client, nil
+	}
+	t.Cleanup(func() { opsFailbackExecutorClientFactory = oldFactory })
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ops", "failback-executor", "--enable-execution", "--namespace", "kube-system"}, &stdout, &stderr)
+	if code != ops.VolumeStatusExitInvalid {
+		t.Fatalf("exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "failback execution is disabled by product policy") ||
+		!strings.Contains(stderr.String(), "failback_attempts=0") {
+		t.Fatalf("stderr=%s", stderr.String())
+	}
+	if len(client.failbackStatusWrites) != 0 {
+		t.Fatalf("policy-disabled execution wrote status: %+v", client.failbackStatusWrites)
+	}
+}
+
+func TestOpsFailbackExecutorRuntimeURLWritesFailedBackStatus(t *testing.T) {
+	client := &lifecycleOwnerTestClient{
+		failbacks: []ops.SwBlockReplicaFailbackObject{cmdFailbackExecutableTarget()},
+	}
+	var got ops.FailbackRuntimeRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		_ = json.NewEncoder(w).Encode(ops.FailbackRuntimeResult{
+			FailbackStarted:                   true,
+			AuthorityEpochAdvanced:            true,
+			SinglePrimaryAfterFailback:        true,
+			PublishTargetSwappedAfterFailback: true,
+			NoStorageMutation:                 true,
+			NoCrossVolumeIdentityChange:       true,
+			EvidenceRefs:                      []string{"runtime.txt"},
+		})
+	}))
+	defer server.Close()
+	oldFactory := opsFailbackExecutorClientFactory
+	opsFailbackExecutorClientFactory = func() (ops.FailbackExecutorClient, error) {
+		return client, nil
+	}
+	t.Cleanup(func() { opsFailbackExecutorClientFactory = oldFactory })
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"ops", "failback-executor",
+		"--enable-execution",
+		"--execution-policy",
+		"--failback-runtime-url", server.URL,
+		"--namespace", "kube-system",
+	}, &stdout, &stderr)
+	if code != ops.VolumeStatusExitOK {
+		t.Fatalf("exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	if got.VolumeName != "demo-pvc" ||
+		got.ReplicaID != "r1" ||
+		got.RuntimeEndpoint != "http://127.0.0.1:23260/runtime/failback" ||
+		!got.AckEligible ||
+		!got.FrontendFencedBeforeFailback {
+		t.Fatalf("runtime request=%+v", got)
+	}
+	if len(client.failbackStatusWrites) != 1 {
+		t.Fatalf("failbackStatusWrites=%+v", client.failbackStatusWrites)
+	}
+	status := client.failbackStatusWrites[0].status
+	if status.State != ops.FailbackStateFailedBack ||
+		status.ReasonCode != ops.AuthorityExecutorFailbackReasonCompleted ||
+		!status.FailbackStarted ||
+		!status.AuthorityEpochAdvanced ||
+		!status.SinglePrimaryAfterFailback ||
+		!status.PublishTargetSwappedAfterFailback {
+		t.Fatalf("status=%+v", status)
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"failback_executor=write_status",
+		"failback_attempts=1",
+		"execution_requested=true",
+		"execution_policy_enabled=true",
+		"authority_mutation_allowed=false",
+		"frontend_publication_allowed=false",
 		"storage_mutation_allowed=false",
 	} {
 		if !strings.Contains(out, want) {
@@ -1820,8 +1919,20 @@ func cmdFailbackTarget() ops.SwBlockReplicaFailbackObject {
 			FrontendFencedBeforeFailback: true,
 			DurableFrontierCovered:       true,
 			NoCrossVolumeIdentityChange:  true,
+			FailbackDecision:             ops.AuthorityExecutorFailbackDecisionDisabled,
+			FailbackReason:               ops.AuthorityExecutorFailbackReasonDisabled,
+			FailbackMutationAllowed:      false,
 		},
 	}
+}
+
+func cmdFailbackExecutableTarget() ops.SwBlockReplicaFailbackObject {
+	target := cmdFailbackTarget()
+	target.Spec.FailbackDecision = ops.AuthorityExecutorFailbackDecisionEnabled
+	target.Spec.FailbackReason = "failback_requested"
+	target.Spec.FailbackMutationAllowed = true
+	target.Spec.RuntimeEndpoint = "http://127.0.0.1:23260/runtime/failback"
+	return target
 }
 
 func cmdFailbackTargetVolume() ops.SwBlockVolumeObject {

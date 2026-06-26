@@ -61,6 +61,15 @@ spec:
                   type: boolean
                 noCrossVolumeIdentityChange:
                   type: boolean
+                failbackDecision:
+                  type: string
+                  enum: ["disabled", "enabled"]
+                failbackReason:
+                  type: string
+                failbackMutationAllowed:
+                  type: boolean
+                runtimeEndpoint:
+                  type: string
             status:
               type: object
               properties:

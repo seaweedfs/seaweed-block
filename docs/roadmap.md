@@ -296,7 +296,14 @@ Recommended order from here:
     disabled/blocked status through `swblockreplicafailbacks/status`. It remains
     status-only: no failback, authority epoch advance, primary reassignment,
     publish-target swap, frontend publication, or storage mutation is executed.
-34. Add backup/restore and NVMe ANA parity after they can reuse the same action
+34. Phase 77: returned-replica failback runtime contract. **Closed 2026-06-26, local PASS**
+    (`internal/docs/finished-plans/phase77_finishedplan_failback_runtime_contract.md`).
+    The failback executor now has an explicit runtime request/response contract
+    and execution-policy gate. Default behavior remains disabled. A test/fake
+    runtime can prove the terminal evidence shape for authority epoch advance,
+    single-primary state, publish-target swap, and no storage mutation, but no
+    real blockmaster failback endpoint or authority mutation is shipped.
+35. Add backup/restore and NVMe ANA parity after they can reuse the same action
    owner, evidence, and status model rather than creating another isolated
    control plane.
 
@@ -321,7 +328,9 @@ keeping execution disabled. Phase 75 adds the first target-owner seam for that
 contract: `SwBlockReplicaFailback` can be planned as a handoff object, but no
 failback, authority mutation, or frontend publication is executed. Phase 76 adds
 the matching executor identity and status-only boundary for those failback
-targets, still keeping all real failback side effects disabled.
+targets, still keeping all real failback side effects disabled. Phase 77 adds
+the typed failback runtime contract and opt-in execution gate, but still does
+not ship a real failback endpoint or authority mutation.
 
 The practical rule is:
 

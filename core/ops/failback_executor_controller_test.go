@@ -2,6 +2,7 @@ package ops
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 )
@@ -106,6 +107,133 @@ func TestFailbackExecutorMarksInvalidTargets(t *testing.T) {
 	}
 }
 
+func TestFailbackExecutorExecutionPolicyBlocks(t *testing.T) {
+	client := &fakeFailbackExecutorClient{
+		targets: []SwBlockReplicaFailbackObject{failbackExecutorExecutableTargetFixture()},
+	}
+	_, err := (FailbackExecutorReconciler{
+		Namespace:          "kube-system",
+		Client:             client,
+		ExecutionRequested: true,
+	}).Reconcile(context.Background())
+	if err == nil || err.Error() != "failback executor execution is disabled by product policy" {
+		t.Fatalf("err=%v", err)
+	}
+	if len(client.writes) != 0 {
+		t.Fatalf("policy-disabled execution wrote status: %+v", client.writes)
+	}
+}
+
+func TestFailbackExecutorInvokesRuntimeWhenExplicitlyEnabled(t *testing.T) {
+	target := failbackExecutorExecutableTargetFixture()
+	client := &fakeFailbackExecutorClient{targets: []SwBlockReplicaFailbackObject{target}}
+	runtime := &fakeFailbackRuntime{result: FailbackRuntimeResult{
+		FailbackStarted:                   true,
+		AuthorityEpochAdvanced:            true,
+		SinglePrimaryAfterFailback:        true,
+		PublishTargetSwappedAfterFailback: true,
+		NoStorageMutation:                 true,
+		NoCrossVolumeIdentityChange:       true,
+		EvidenceRefs:                      []string{"failback-runtime.txt"},
+	}}
+	result, err := (FailbackExecutorReconciler{
+		Namespace:              "kube-system",
+		Client:                 client,
+		Runtime:                runtime,
+		ExecutionRequested:     true,
+		ExecutionPolicyEnabled: true,
+		Now:                    func() time.Time { return time.Date(2026, 6, 26, 9, 0, 0, 0, time.UTC) },
+	}).Reconcile(context.Background())
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if result.FailbackAttempts != 1 ||
+		result.StatusWriteCount != 1 ||
+		result.AuthorityMutationAllowed ||
+		result.FrontendPublicationAllowed ||
+		result.StorageMutationAllowed {
+		t.Fatalf("result=%+v", result)
+	}
+	if len(runtime.requests) != 1 {
+		t.Fatalf("runtime requests=%+v", runtime.requests)
+	}
+	req := runtime.requests[0]
+	if req.VolumeName != target.Spec.VolumeName ||
+		req.ReplicaID != target.Spec.ReplicaID ||
+		!req.AckEligible ||
+		!req.FrontendFencedBeforeFailback ||
+		!req.NoCrossVolumeIdentityChange {
+		t.Fatalf("runtime request=%+v", req)
+	}
+	status := client.writes[0].status
+	if status.State != FailbackStateFailedBack ||
+		status.ReasonCode != AuthorityExecutorFailbackReasonCompleted ||
+		status.FailbackMutationAllowed ||
+		!status.FailbackStarted ||
+		!status.AuthorityEpochAdvanced ||
+		!status.SinglePrimaryAfterFailback ||
+		!status.PublishTargetSwappedAfterFailback ||
+		!status.NoCrossVolumeIdentityChange {
+		t.Fatalf("status=%+v", status)
+	}
+}
+
+func TestFailbackExecutorRuntimeFailureWritesBlockedStatus(t *testing.T) {
+	client := &fakeFailbackExecutorClient{targets: []SwBlockReplicaFailbackObject{failbackExecutorExecutableTargetFixture()}}
+	runtime := &fakeFailbackRuntime{err: errors.New("runtime refused")}
+	result, err := (FailbackExecutorReconciler{
+		Namespace:              "kube-system",
+		Client:                 client,
+		Runtime:                runtime,
+		ExecutionRequested:     true,
+		ExecutionPolicyEnabled: true,
+	}).Reconcile(context.Background())
+	if err == nil {
+		t.Fatalf("expected runtime error")
+	}
+	if result.FailbackAttempts != 1 || result.StatusWriteCount != 1 {
+		t.Fatalf("result=%+v", result)
+	}
+	if got := client.writes[0].status.ReasonCode; got != AuthorityExecutorFailbackReasonRuntimeFailed {
+		t.Fatalf("reason=%s", got)
+	}
+	if client.writes[0].status.FailbackStarted {
+		t.Fatalf("failed runtime must not claim failback: %+v", client.writes[0].status)
+	}
+}
+
+func TestFailbackExecutorRejectsInvalidRuntimeTerminalEvidence(t *testing.T) {
+	client := &fakeFailbackExecutorClient{targets: []SwBlockReplicaFailbackObject{failbackExecutorExecutableTargetFixture()}}
+	runtime := &fakeFailbackRuntime{result: FailbackRuntimeResult{
+		FailbackStarted:                   true,
+		AuthorityEpochAdvanced:            true,
+		SinglePrimaryAfterFailback:        false,
+		PublishTargetSwappedAfterFailback: true,
+		NoStorageMutation:                 true,
+		NoCrossVolumeIdentityChange:       true,
+	}}
+	result, err := (FailbackExecutorReconciler{
+		Namespace:              "kube-system",
+		Client:                 client,
+		Runtime:                runtime,
+		ExecutionRequested:     true,
+		ExecutionPolicyEnabled: true,
+	}).Reconcile(context.Background())
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if result.FailbackAttempts != 1 || result.StatusWriteCount != 1 {
+		t.Fatalf("result=%+v", result)
+	}
+	status := client.writes[0].status
+	if status.State != FailbackStateBlocked ||
+		status.ReasonCode != AuthorityExecutorFailbackReasonInvalidTerminalEvidence ||
+		status.FailbackStarted ||
+		status.SinglePrimaryAfterFailback {
+		t.Fatalf("status=%+v", status)
+	}
+}
+
 func failbackExecutorTestTarget() SwBlockReplicaFailbackObject {
 	return SwBlockReplicaFailbackObject{
 		Ref: OperatorObjectRef{
@@ -123,13 +251,39 @@ func failbackExecutorTestTarget() SwBlockReplicaFailbackObject {
 			FrontendFencedBeforeFailback: true,
 			DurableFrontierCovered:       true,
 			NoCrossVolumeIdentityChange:  true,
+			FailbackDecision:             AuthorityExecutorFailbackDecisionDisabled,
+			FailbackReason:               AuthorityExecutorFailbackReasonDisabled,
+			FailbackMutationAllowed:      false,
 		},
 	}
+}
+
+func failbackExecutorExecutableTargetFixture() SwBlockReplicaFailbackObject {
+	target := failbackExecutorTestTarget()
+	target.Spec.FailbackDecision = AuthorityExecutorFailbackDecisionEnabled
+	target.Spec.FailbackReason = "failback_requested"
+	target.Spec.FailbackMutationAllowed = true
+	target.Spec.RuntimeEndpoint = "http://127.0.0.1:23260/runtime/failback"
+	return target
 }
 
 type fakeFailbackExecutorClient struct {
 	targets []SwBlockReplicaFailbackObject
 	writes  []fakeFailbackStatusWrite
+}
+
+type fakeFailbackRuntime struct {
+	requests []FailbackRuntimeRequest
+	result   FailbackRuntimeResult
+	err      error
+}
+
+func (f *fakeFailbackRuntime) ExecuteFailback(_ context.Context, req FailbackRuntimeRequest) (FailbackRuntimeResult, error) {
+	f.requests = append(f.requests, req)
+	if f.err != nil {
+		return FailbackRuntimeResult{}, f.err
+	}
+	return f.result, nil
 }
 
 type fakeFailbackStatusWrite struct {

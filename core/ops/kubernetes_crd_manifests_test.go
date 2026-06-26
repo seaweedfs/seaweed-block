@@ -569,9 +569,19 @@ func TestPhase75SwBlockReplicaFailbackTargetSchema(t *testing.T) {
 		"frontendFencedBeforeFailback",
 		"durableFrontierCovered",
 		"noCrossVolumeIdentityChange",
+		"failbackDecision",
+		"failbackReason",
+		"failbackMutationAllowed",
+		"runtimeEndpoint",
 	} {
 		if _, ok := specProperties[want]; !ok {
 			t.Fatalf("%s.spec schema missing %s", SwBlockReplicaFailbackKind, want)
+		}
+	}
+	decisionEnum := yamlStringSet(t, yamlMap(t, specProperties, "failbackDecision"), "enum")
+	for _, want := range []string{"disabled", "enabled"} {
+		if !decisionEnum[want] {
+			t.Fatalf("%s.spec.failbackDecision enum missing %s: %+v", SwBlockReplicaFailbackKind, want, decisionEnum)
 		}
 	}
 	required := yamlStringSet(t, yamlMap(t, rootProperties, "spec"), "required")

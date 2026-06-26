@@ -38,7 +38,10 @@ func TestFailbackTargetOwnerCreatesTargetFromReadyContract(t *testing.T) {
 		!created.Spec.AckEligible ||
 		!created.Spec.FrontendFencedBeforeFailback ||
 		!created.Spec.DurableFrontierCovered ||
-		!created.Spec.NoCrossVolumeIdentityChange {
+		!created.Spec.NoCrossVolumeIdentityChange ||
+		created.Spec.FailbackDecision != AuthorityExecutorFailbackDecisionDisabled ||
+		created.Spec.FailbackReason != AuthorityExecutorFailbackReasonDisabled ||
+		created.Spec.FailbackMutationAllowed {
 		t.Fatalf("created=%+v", created)
 	}
 }

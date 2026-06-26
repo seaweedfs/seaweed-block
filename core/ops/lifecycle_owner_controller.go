@@ -98,6 +98,10 @@ type SwBlockReplicaFailbackSpec struct {
 	FrontendFencedBeforeFailback bool   `json:"frontendFencedBeforeFailback"`
 	DurableFrontierCovered       bool   `json:"durableFrontierCovered"`
 	NoCrossVolumeIdentityChange  bool   `json:"noCrossVolumeIdentityChange"`
+	FailbackDecision             string `json:"failbackDecision,omitempty"`
+	FailbackReason               string `json:"failbackReason,omitempty"`
+	FailbackMutationAllowed      bool   `json:"failbackMutationAllowed"`
+	RuntimeEndpoint              string `json:"runtimeEndpoint,omitempty"`
 }
 
 type SwBlockReplicaFailbackCRDStatus struct {
