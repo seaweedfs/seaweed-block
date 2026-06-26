@@ -215,9 +215,11 @@ rebuild, delete safety, or cleanup must start as a separate gated phase.
   master-owned authority runtime, disabled-by-default blockmaster RPC, executor
   gRPC transport, chart wiring, real-master local smoke, policy safety gate, and
   gRPC/HTTP endpoint decoupling. This is an opt-in/source-gated failback
-  runtime path; automatic deployed failback and frontend publication after
-  failback remain future work.
-- Later: deployed returned-replica failback smoke, frontend publication after
+  runtime path. Phase 88 packages the disabled-by-default failback target owner,
+  failback executor, and blockmaster gRPC runtime as one explicitly enabled
+  Helm suite with schema coverage and bounded RBAC. Automatic live failback and
+  frontend publication after failback remain future work.
+- Later: live returned-replica failback smoke on Kubernetes, frontend publication after
   failback, NVMe ANA Kubernetes multipath parity, stronger committed-frontier
   reporting, broad
   distro/host compatibility, and longer soak under failure. NVMe ANA parity

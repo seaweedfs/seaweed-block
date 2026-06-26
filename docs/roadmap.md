@@ -371,7 +371,15 @@ Recommended order from here:
     README, product roadmap, and engineering wiki now agree that returned-replica
     failback runtime is opt-in/source-gated, automatic deployed failback is not
     claimed, and frontend publication after failback remains future work.
-45. Add backup/restore and NVMe ANA parity after they can reuse the same action
+45. Phase 88: failback deployed suite packaging. **Closed 2026-06-26, local PASS**
+    (`internal/docs/finished-plans/phase88_finishedplan_failback_deployed_suite.md`).
+    Helm can now render the complete opt-in failback component suite:
+    blockmaster failback RPC, failback target owner, failback executor, explicit
+    execution policy, and gRPC runtime address. The gate also adds
+    `failbackTargetOwner` values-schema coverage and keeps default installs
+    non-mutating. This remains a packaging gate, not an automatic live failback
+    release claim.
+46. Add backup/restore and NVMe ANA parity after they can reuse the same action
    owner, evidence, and status model rather than creating another isolated
    control plane.
 
@@ -414,7 +422,10 @@ blockmaster service and master Publisher. Phase 85 proves the deployed-loop
 safety invariant: explicit execution flags do not cause runtime calls without a
 valid executable target. Phase 86 removes the stale coupling that made the gRPC
 runtime path require an unrelated HTTP target endpoint. Phase 87 aligns the
-public/internal docs with that source-gated state.
+public/internal docs with that source-gated state. Phase 88 packages the
+complete failback target-owner/executor/RPC suite behind explicit Helm values
+and schema coverage, while still deferring the live automatic failback claim to
+a later Kubernetes smoke.
 
 The practical rule is:
 

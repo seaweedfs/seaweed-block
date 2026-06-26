@@ -182,6 +182,10 @@ Chart opt-in:
 blockmaster:
   failbackRuntimeRPC: true
 
+failbackTargetOwner:
+  create: true
+  dryRun: false
+
 failbackExecutor:
   create: true
   dryRun: false
@@ -208,7 +212,7 @@ ambiguous HTTP/gRPC runtime addresses.
 | blockmaster runtime factory | `core/host/master/host.go` |
 | blockmaster gRPC service | `core/host/master/services.go`, `core/rpc/proto/control.proto` |
 | CLI | `cmd/sw-block/main.go`, `cmd/blockmaster/main.go` |
-| chart wiring | `charts/seaweed-block/templates/blockmaster.yaml`, `charts/seaweed-block/templates/failback-executor.yaml` |
+| chart wiring | `charts/seaweed-block/templates/blockmaster.yaml`, `charts/seaweed-block/templates/failback-target-owner.yaml`, `charts/seaweed-block/templates/failback-executor.yaml` |
 
 ## Phase History
 
@@ -227,6 +231,8 @@ ambiguous HTTP/gRPC runtime addresses.
 | 84 | proves executor -> real blockmaster service -> Publisher locally |
 | 85 | proves execution flags alone do not call runtime without a valid target |
 | 86 | decouples gRPC runtime from target-local HTTP `runtimeEndpoint` |
+| 87 | aligns README/wiki/roadmap with source-gated failback claims |
+| 88 | packages target owner + executor + blockmaster RPC as one explicit Helm suite |
 
 ## Failure Classes
 

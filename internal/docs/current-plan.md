@@ -1,129 +1,86 @@
-# Current Plan: Phase 87 Failback Documentation Alignment
+# Current Plan: Phase 88 Failback Deployed Suite Packaging
 
 Status: complete.
 
 ## Goal
 
-Phase 87 aligns user-facing and engineering docs with the actual returned-replica
-failback state after Phases 74-86.
+Phase 88 closes the next safe step after the source-gated failback runtime:
+prove the deployable Kubernetes component suite can be rendered together with
+explicit opt-in values, bounded RBAC, and schema coverage.
 
-The required wording is:
+This phase does **not** claim automatic live failback. It packages the pieces
+needed for a later live release smoke:
 
 ```text
-opt-in/source-gated failback runtime exists
-automatic deployed failback is not claimed
-frontend publication after failback is not claimed
-release image smoke is still required before public release claim
+blockmaster FailbackService RPC
+failback target owner
+failback executor
+executor gRPC runtime address
+explicit execution policy
 ```
 
 ## Deliverables
 
-### D1: README Claim Boundary
+### D1: Helm Values Schema
 
-Updated `README.md`:
+Added `failbackTargetOwner` to `charts/seaweed-block/values.schema.json` so the
+full failback component suite is schema-visible, not just template-visible.
 
-```text
-Returned-replica failback runtime | Source-gated
-Returned-replica rebuild traffic | Planned
-Frontend publication after failback | Planned
-```
-
-The "What You Can Do Today" section now says the failback runtime can be run
-from source through opt-in gates only, and the non-claims section still rejects
-automatic deployed failback.
-
-### D2: Engineering Wiki Deep Dive
+### D2: Deployed Suite Gate
 
 Added:
 
 ```text
-docs/wiki/deep-dives/returned-replica-failback.md
+scripts/run-phase88-failback-deployed-suite-gate.sh
+testops/scenarios/failback-deployed-suite-chain.yaml
 ```
 
-The page covers:
+The gate proves:
 
 ```text
-domain background
-product contract
-state machine
-ownership model
-CRD shape
-CLI/chart shape
-code entry points
-phase history
-failure classes
-implementation checklist
-current limits
-```
-
-### D3: Wiki Inventory Links
-
-Updated:
-
-```text
-docs/wiki/index.md
-docs/wiki/topic-inventory.md
-```
-
-### D4: Product Roadmap Alignment
-
-Updated:
-
-```text
-internal/docs/product-roadmap.md
-```
-
-The roadmap now records Phases 74-86 as the opt-in/source-gated failback runtime
-path and still defers automatic deployed failback plus frontend publication
-after failback.
-
-### D5: Gate
-
-Added:
-
-```text
-scripts/run-phase87-failback-docs-alignment-gate.sh
-testops/scenarios/failback-docs-alignment-chain.yaml
+defaults omit failback runtime RPC, target owner, executor, and execution flags
+explicit values render all three deployable pieces
+target owner can create only SwBlockReplicaFailback targets
+executor can write only SwBlockReplicaFailback.status
+execution still requires explicit policy and gRPC address
+frontend publication after failback is still not rendered
+values schema covers target owner and executor knobs
 ```
 
 ## Verification
 
 ```text
-"C:\Program Files\Git\bin\bash.exe" scripts/run-phase87-failback-docs-alignment-gate.sh .
-C:\work\swblock.exe validate testops\scenarios\failback-docs-alignment-chain.yaml
+"C:\Program Files\Git\bin\bash.exe" scripts/run-phase88-failback-deployed-suite-gate.sh .
+C:\work\swblock.exe validate testops/scenarios/failback-deployed-suite-chain.yaml
 ```
 
-Terminal evidence:
+Expected terminal evidence:
 
 ```text
-phase87_failback_docs_alignment_status=ok
-readme_names_source_gated_failback=true
-readme_names_no_automatic_failback=true
-readme_names_release_smoke_requirement=true
-wiki_deep_dive_exists=true
-wiki_names_terminal_evidence=true
-wiki_names_code_entry_points=true
-wiki_names_current_limits=true
-wiki_index_links_failback=true
-topic_inventory_classifies_failback=true
-product_roadmap_names_phase86=true
-product_roadmap_names_opt_in=true
-product_roadmap_defers_automatic=true
-failback_runtime_public_claim_aligned=true
-automatic_failback_not_claimed=true
-frontend_publication_after_failback_not_claimed=true
+phase88_failback_deployed_suite_status=ok
+default_omits_failback_target_owner=true
+default_omits_failback_executor=true
+enabled_renders_failback_target_owner=true
+enabled_renders_failback_executor=true
+values_schema_covers_failback_suite=true
+target_owner_rbac_create_targets_only=true
+executor_rbac_status_only=true
+automatic_failback_claimed=false
+frontend_publication_after_failback_claimed=false
 ```
 
 ## Next
 
-The next operation-layer step should be either:
+The next step is the first real Kubernetes failback release smoke:
 
 ```text
-Kubernetes-deployed failback smoke with fresh local images
+fresh local images
+install with failback suite enabled
+create a real volume and returned-replica target
+executor calls blockmaster gRPC
+authority moves only with terminal evidence
+no frontend publication claim until the publication phase lands
 ```
 
-or:
-
-```text
-start NVMe planning if the team accepts failback as source-gated until release smoke
-```
+If that smoke is too lab-expensive, defer the live claim and start the next
+operation-layer close gate before NVMe.

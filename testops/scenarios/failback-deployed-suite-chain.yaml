@@ -1,0 +1,106 @@
+# Runner-native Phase 88 gate: returned-replica failback can be packaged as a
+# deployable component suite. This is still a chart/RBAC gate, not a live
+# authority-mutation claim.
+
+name: failback-deployed-suite-chain
+timeout: 5m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: failback_deployed_suite_gate
+    actions:
+      - action: exec
+        node: m02
+        timeout: 4m
+        cmd: "rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase88-failback-deployed-suite && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase88-failback-deployed-suite && cd {{ product_root }} && SW_BLOCK_ARTIFACT_DIR=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase88-failback-deployed-suite bash scripts/run-phase88-failback-deployed-suite-gate.sh {{ product_root }}"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase88-failback-deployed-suite/phase88-failback-deployed-suite-summary.txt"
+        pattern: "^phase88_failback_deployed_suite_status=ok$"
+        save_as: phase88_ok
+      - action: assert_greater
+        actual: "{{ phase88_ok }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase88-failback-deployed-suite/phase88-failback-deployed-suite-summary.txt"
+        pattern: "^default_omits_failback_target_owner=true$"
+        save_as: target_default_off
+      - action: assert_greater
+        actual: "{{ target_default_off }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase88-failback-deployed-suite/phase88-failback-deployed-suite-summary.txt"
+        pattern: "^enabled_renders_failback_target_owner=true$"
+        save_as: target_owner_enabled
+      - action: assert_greater
+        actual: "{{ target_owner_enabled }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase88-failback-deployed-suite/phase88-failback-deployed-suite-summary.txt"
+        pattern: "^enabled_renders_failback_executor=true$"
+        save_as: executor_enabled
+      - action: assert_greater
+        actual: "{{ executor_enabled }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase88-failback-deployed-suite/phase88-failback-deployed-suite-summary.txt"
+        pattern: "^values_schema_covers_failback_suite=true$"
+        save_as: schema_covers_suite
+      - action: assert_greater
+        actual: "{{ schema_covers_suite }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase88-failback-deployed-suite/phase88-failback-deployed-suite-summary.txt"
+        pattern: "^target_owner_rbac_create_targets_only=true$"
+        save_as: target_owner_rbac
+      - action: assert_greater
+        actual: "{{ target_owner_rbac }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase88-failback-deployed-suite/phase88-failback-deployed-suite-summary.txt"
+        pattern: "^executor_rbac_status_only=true$"
+        save_as: executor_rbac
+      - action: assert_greater
+        actual: "{{ executor_rbac }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase88-failback-deployed-suite/phase88-failback-deployed-suite-summary.txt"
+        pattern: "^automatic_failback_claimed=false$"
+        save_as: no_auto_claim
+      - action: assert_greater
+        actual: "{{ no_auto_claim }}"
+        threshold: "0"
+
+  - name: collect
+    always: true
+    actions:
+      - action: collect_path
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase88-failback-deployed-suite"
+        name: "remote-phases"
+        ignore_error: true
