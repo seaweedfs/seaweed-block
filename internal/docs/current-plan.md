@@ -1,153 +1,114 @@
-# Current Plan: Phase 78 Failback Authority Runtime Seam
+# Current Plan: Phase 79 Failback Authority Call-site
 
 Status: complete.
 
 ## Goal
 
-Phase 77 defined the typed failback runtime contract, but the success path was
-still a fake/HTTP runtime claim. Phase 78 adds the first product-owned
-authority runtime seam for returned-replica failback.
+Phase 78 added the authority-owned failback seam, but the failback executor did
+not yet have a product call-site to invoke it. Phase 79 wires the executor's
+runtime contract to that seam through an in-process adapter.
 
-The seam is deliberately narrow:
+Default behavior remains disabled/status-only. The adapter is used only when
+the existing explicit execution gate is satisfied:
 
 ```text
-validated failback target
-  -> expected-current authority guard
-  -> Publisher.apply(IntentReassign)
-  -> terminal evidence for epoch advance, single primary, and publish-target swap
+--enable-execution
+--execution-policy
+executable SwBlockReplicaFailback target
 ```
-
-Default behavior remains disabled/status-only. A normal
-`SwBlockReplicaFailback` target created by the target owner is still not
-executable. Execution requires explicit runtime fields and policy flags.
 
 ## Deliverables
 
-### D1: Authority Runtime Seam
+### D1: Runtime Adapter
 
 Added:
 
 ```text
-core/authority.FailbackAuthorityRuntime
-core/authority.FailbackRuntimeRequest
-core/authority.FailbackRuntimeResult
+core/ops.AuthorityFailbackRuntime
+core/ops.NewAuthorityFailbackRuntime
 ```
 
-The authority runtime requires:
+The adapter implements the existing `ops.FailbackRuntime` interface and maps
+the executor request into:
 
 ```text
-volumeID
-replicaID
-targetDataAddr
-targetCtrlAddr
-expectedCurrentReplicaID
-expectedCurrentEpoch
-ackEligible=true
-frontendFencedBeforeFailback=true
-durableFrontierCovered=true
-noCrossVolumeIdentityChange=true
+authority.FailbackAuthorityRuntime.ExecuteFailback
 ```
 
-It rejects stale expected-current evidence before minting a new authority line.
+### D2: Executor Call-site
 
-### D2: Reassign Through Publisher
-
-The runtime uses the existing authority owner path:
+The failback executor can now use the authority adapter as its runtime:
 
 ```text
-Publisher.apply(AssignmentAsk{Intent: IntentReassign})
+FailbackExecutorReconciler{
+  Runtime: NewAuthorityFailbackRuntime(publisher),
+  ExecutionRequested: true,
+  ExecutionPolicyEnabled: true,
+}
 ```
 
-The result is accepted only when:
+The test path proves:
 
 ```text
-authorityEpochAdvanced=true
-singlePrimaryAfterFailback=true
-publishTargetSwappedAfterFailback=true
-noStorageMutation=true
-noCrossVolumeIdentityChange=true
+current authority line: r2@2
+target returned replica: r1
+executor invokes adapter
+adapter invokes authority runtime
+Publisher.apply(IntentReassign) advances line to r1@3
+SwBlockReplicaFailback.status.state=failed_back
 ```
 
-### D3: Target Endpoint and Expected-Current Contract
+### D3: Negative Guard
 
-`SwBlockReplicaFailback.spec` now carries the runtime facts needed for a real
-authority-owned failback:
+Stale expected-current evidence still fails closed:
 
 ```text
-targetDataAddr
-targetCtrlAddr
-expectedCurrentReplicaID
-expectedCurrentEpoch
+expectedCurrentReplicaID=r2
+expectedCurrentEpoch=99
+actual current line=r2@2
 ```
 
-Returned-replica projection now preserves data/control endpoint facts from
-inventory evidence:
+The executor writes blocked status and does not claim failback.
+
+### D4: Boundary
+
+The existing boundaries remain:
 
 ```text
-VolumeInventoryReplicaInput
-  -> ReplicaEvidence
-  -> ReplicaFact
-  -> ReturnedReplicaProjection
-  -> SwBlockVolume.status.replicaReintegrations[]
-  -> SwBlockReplicaFailback.spec
-```
-
-### D4: Execution Boundary
-
-The executor still refuses to run by default. Executability requires all of:
-
-```text
-failbackDecision=enabled
-failbackMutationAllowed=true
-runtimeEndpoint
-targetDataAddr
-targetCtrlAddr
-expectedCurrentReplicaID
-expectedCurrentEpoch
---enable-execution
---execution-policy
---failback-runtime-url
-```
-
-Only the explicit runtime success path reports:
-
-```text
-authority_mutation_allowed=true
-```
-
-Default and dry-run paths continue to report:
-
-```text
-authority_mutation_allowed=false
-storage_mutation_allowed=false
+execution policy is still required
+dry-run writes no status
+default authority_mutation_allowed=false
 frontend_publication_allowed=false
+storage_mutation_allowed=false
 ```
+
+Only the explicit adapter call-site path can advance authority.
 
 ### D5: Gate
 
 Added:
 
 ```text
-scripts/run-phase78-failback-authority-runtime-gate.sh
-testops/scenarios/failback-authority-runtime-chain.yaml
+scripts/run-phase79-failback-authority-callsite-gate.sh
+testops/scenarios/failback-authority-callsite-chain.yaml
 ```
 
 The gate proves:
 
 ```text
-authority failback reassign is minted through Publisher.apply
-stale expected-current evidence is rejected
-terminal preconditions are required
-target endpoint fields are preserved
-expected-current fields are required for executable targets
-explicit runtime success is the only authority-mutating path
-storage mutation remains false
+executor invokes authority runtime adapter
+publisher authority line advances
+stale expected-current evidence blocks the call-site
+execution policy remains required
+failed_back status is written only after terminal evidence
+runtime failure produces no false failback
 frontend publication remains false
+storage mutation remains false
 ```
 
 ## Non-Claims
 
-Phase 78 does not implement:
+Phase 79 does not implement:
 
 ```text
 automatic failback from the deployed controller loop
@@ -159,44 +120,43 @@ workload mutation
 NVMe ANA behavior
 ```
 
-It creates the authority-owned seam that a future product call-site can invoke.
-The deployed default remains disabled/status-only.
+It wires the product call-site in-process for controlled execution. The deployed
+default remains disabled/status-only.
 
 ## Verification
 
 ```text
-go test ./core/authority -run "TestFailbackAuthorityRuntime" -count=1 -v
-go test ./core/ops -run "TestFailbackExecutor|TestFailbackTargetOwner|TestHTTPFailbackRuntime|TestPhase46D2SwBlockVolumeReturnedReplicaSchema|TestPhase75SwBlockReplicaFailbackTargetSchema|TestKubernetesStatusClientCreatesSwBlockReplicaFailbackWithoutStatus" -count=1 -v
-go test ./cmd/sw-block -run "TestOpsFailback" -count=1 -v
+go test ./core/ops -run "TestFailbackExecutorUsesAuthorityRuntimeAdapter|TestFailbackAuthorityRuntimeAdapterRejectsStaleExpectedCurrent|TestFailbackExecutorExecutionPolicyBlocks|TestFailbackExecutorDryRunDoesNotWriteStatus" -count=1 -v
 go test ./core/authority ./core/ops ./cmd/sw-block
 helm lint charts/seaweed-block
-"C:\Program Files\Git\bin\bash.exe" scripts/run-phase78-failback-authority-runtime-gate.sh .
-C:\work\swblock.exe validate testops\scenarios\failback-authority-runtime-chain.yaml
+"C:\Program Files\Git\bin\bash.exe" scripts/run-phase79-failback-authority-callsite-gate.sh .
+C:\work\swblock.exe validate testops\scenarios\failback-authority-callsite-chain.yaml
+git diff --check
 ```
 
-Expected terminal evidence:
+Terminal evidence:
 
 ```text
-phase78_failback_authority_runtime_status=ok
-core_authority_failback_runtime_tests=pass
-core_ops_failback_authority_runtime_tests=pass
-cmd_failback_authority_runtime_tests=pass
-authority_failback_reassign_minted=true
-stale_expected_current_rejected=true
-terminal_preconditions_required=true
-failback_target_endpoint_fields=true
-failback_target_expected_current_fields=true
-executable_failback_requires_authority_endpoint=true
-explicit_runtime_authority_mutation_allowed=true
+phase79_failback_authority_callsite_status=ok
+core_ops_failback_authority_callsite_tests=pass
+authority_runtime_adapter_invoked_by_executor=true
+stale_expected_current_blocks_callsite=true
+execution_policy_still_required=true
+dry_run_no_status_write=true
+publisher_authority_line_advanced=true
 authority_epoch_advanced=true
 single_primary_after_failback=true
 publish_target_swapped_after_failback=true
-storage_mutation_allowed=false
+failed_back_status_written=true
+runtime_failure_no_false_failback=true
+authority_mutation_allowed_only_with_execution_policy=true
 frontend_publication_allowed=false
+storage_mutation_allowed=false
 ```
 
 ## Next
 
-The next phase should add the product call-site that invokes this authority seam
-from a real failback owner/controller path, still gated by explicit policy,
-expected-current evidence, and terminal status evidence.
+The next phase should decide how this in-process call-site becomes reachable in
+the product. The safest next increment is a disabled-by-default CLI or
+controller wiring gate that can construct the adapter from a real Publisher
+without enabling automatic failback.

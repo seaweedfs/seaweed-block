@@ -311,7 +311,16 @@ Recommended order from here:
     state, and publish-target swap. Default deployed behavior remains disabled;
     no automatic failback call-site, frontend publication, storage mutation, or
     workload mutation is enabled.
-36. Add backup/restore and NVMe ANA parity after they can reuse the same action
+36. Phase 79: failback authority call-site. **Closed 2026-06-26, local PASS**
+    (`internal/docs/finished-plans/phase79_finishedplan_failback_authority_callsite.md`).
+    The failback executor can now invoke an in-process
+    `AuthorityFailbackRuntime` adapter under the explicit execution-policy
+    gate. The adapter advances the Publisher authority line and writes
+    `failed_back` only after terminal evidence. Stale expected-current evidence
+    blocks the call-site; frontend publication and storage mutation remain
+    false. The deployed controller loop still does not perform automatic
+    failback.
+37. Add backup/restore and NVMe ANA parity after they can reuse the same action
    owner, evidence, and status model rather than creating another isolated
    control plane.
 
@@ -338,9 +347,10 @@ failback, authority mutation, or frontend publication is executed. Phase 76 adds
 the matching executor identity and status-only boundary for those failback
 targets, still keeping all real failback side effects disabled. Phase 77 adds
 the typed failback runtime contract and opt-in execution gate. Phase 78 adds
-the first authority-owned failback seam through `Publisher.apply(IntentReassign)`,
-but still does not enable automatic deployed failback, frontend publication, or
-storage/workload mutation.
+the first authority-owned failback seam through `Publisher.apply(IntentReassign)`.
+Phase 79 wires that seam to the failback executor as an explicit-policy-gated
+in-process call-site. Automatic deployed failback, frontend publication, and
+storage/workload mutation remain disabled.
 
 The practical rule is:
 
