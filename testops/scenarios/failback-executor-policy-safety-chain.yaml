@@ -1,0 +1,97 @@
+# Runner-native Phase 85 gate: failback executor policy safety. Explicit
+# execution flags do not cause runtime calls unless a valid executable target
+# exists.
+
+name: failback-executor-policy-safety-chain
+timeout: 6m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: failback_executor_policy_safety
+    actions:
+      - action: exec
+        node: m02
+        timeout: 5m
+        cmd: "rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase85-failback-executor-policy-safety && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase85-failback-executor-policy-safety && cd {{ product_root }} && SW_BLOCK_ARTIFACT_DIR=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase85-failback-executor-policy-safety bash scripts/run-phase85-failback-executor-policy-safety-gate.sh {{ product_root }}"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase85-failback-executor-policy-safety/phase85-failback-executor-policy-safety-summary.txt"
+        pattern: "^phase85_failback_executor_policy_safety_status=ok$"
+        save_as: phase85_ok
+      - action: assert_greater
+        actual: "{{ phase85_ok }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase85-failback-executor-policy-safety/phase85-failback-executor-policy-safety-summary.txt"
+        pattern: "^no_targets_no_runtime_call=true$"
+        save_as: no_targets
+      - action: assert_greater
+        actual: "{{ no_targets }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase85-failback-executor-policy-safety/phase85-failback-executor-policy-safety-summary.txt"
+        pattern: "^invalid_target_no_runtime_call=true$"
+        save_as: invalid_target
+      - action: assert_greater
+        actual: "{{ invalid_target }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase85-failback-executor-policy-safety/phase85-failback-executor-policy-safety-summary.txt"
+        pattern: "^execution_flags_alone_insufficient=true$"
+        save_as: flags_insufficient
+      - action: assert_greater
+        actual: "{{ flags_insufficient }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase85-failback-executor-policy-safety/phase85-failback-executor-policy-safety-summary.txt"
+        pattern: "^runtime_requires_valid_target=true$"
+        save_as: requires_valid
+      - action: assert_greater
+        actual: "{{ requires_valid }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase85-failback-executor-policy-safety/phase85-failback-executor-policy-safety-summary.txt"
+        pattern: "^frontend_publication_allowed=false$"
+        save_as: no_frontend
+      - action: assert_greater
+        actual: "{{ no_frontend }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase85-failback-executor-policy-safety/phase85-failback-executor-policy-safety-summary.txt"
+        pattern: "^storage_mutation_allowed=false$"
+        save_as: no_storage
+      - action: assert_greater
+        actual: "{{ no_storage }}"
+        threshold: "0"
+
+  - name: collect
+    always: true
+    actions:
+      - action: collect_path
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase85-failback-executor-policy-safety"
+        name: "remote-phases"
+        ignore_error: true

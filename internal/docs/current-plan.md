@@ -1,72 +1,84 @@
-# Current Plan: Phase 84 Failback Integrated gRPC Smoke
+# Current Plan: Phase 85 Failback Executor Policy Safety
 
 Status: complete.
 
 ## Goal
 
-Phase 84 proves the executor-to-blockmaster failback runtime path as one local
-product loop:
+Phase 85 proves that deployed failback execution flags are not enough to cause
+authority mutation. The executor must also see a valid executable
+`SwBlockReplicaFailback` target with all required facts.
+
+This protects the deployed-loop shape introduced by Phases 81-84:
 
 ```text
-FailbackExecutorReconciler
-  -> GRPCFailbackRuntime
-  -> blockmaster FailbackService
-  -> master-owned FailbackAuthorityRuntime
-  -> live Publisher.apply(IntentReassign)
+execution flags enabled + no target        -> no runtime call
+execution flags enabled + invalid target   -> blocked status, no runtime call
+execution flags enabled + valid target     -> runtime may be called
 ```
-
-This closes the fake-service gap from Phase 82. The test uses the real
-blockmaster service and real Publisher, not a fake gRPC service.
 
 ## Deliverables
 
-### D1: Real-Service Integration Test
+### D1: No-Target Execution Safety
 
 Added:
 
 ```text
-TestFailbackExecutorGRPCRuntimeUsesRealMasterService
+TestFailbackExecutorExecutionNoTargetsDoesNotAttemptRuntime
 ```
 
-The test:
+This proves:
 
 ```text
-starts a master Host with FailbackRuntimeRPC enabled
-seeds verified existing placement so r2 is current
-runs FailbackExecutorReconciler with NewGRPCFailbackRuntime(h.Addr())
-writes failed_back status from terminal evidence
-asserts master Publisher advances r2@N -> r1@N+1
-asserts publish target swaps to r1 endpoint
-asserts no frontend publication and no storage mutation
+TargetCount=0
+FailbackAttempts=0
+StatusWriteCount=0
+runtime requests=0
+authority_mutation_allowed=false
+frontend_publication_allowed=false
+storage_mutation_allowed=false
 ```
 
-### D2: Default-Off Carry-Forward
-
-The gate also keeps the service boundary tests in scope:
-
-```text
-TestFailbackServiceDefaultDisabled
-TestFailbackServiceEnabledUsesHostRuntime
-```
-
-This proves the RPC remains disabled by default and only delegates to the
-host-owned runtime when explicitly enabled.
-
-### D3: Gate
+### D2: Invalid-Target Execution Safety
 
 Added:
 
 ```text
-scripts/run-phase84-failback-integrated-grpc-smoke.sh
-testops/scenarios/failback-integrated-grpc-smoke-chain.yaml
+TestFailbackExecutorExecutionInvalidTargetDoesNotCallRuntime
+```
+
+This proves a malformed executable target writes blocked status with:
+
+```text
+reason=failback_runtime_target_missing
+FailbackAttempts=0
+runtime requests=0
+```
+
+### D3: Positive Control
+
+The gate keeps the valid-target success test in scope:
+
+```text
+TestFailbackExecutorInvokesRuntimeWhenExplicitlyEnabled
+```
+
+That proves the new safety checks do not break the explicit valid target path.
+
+### D4: Gate
+
+Added:
+
+```text
+scripts/run-phase85-failback-executor-policy-safety-gate.sh
+testops/scenarios/failback-executor-policy-safety-chain.yaml
 ```
 
 ## Non-Claims
 
-Phase 84 does not implement:
+Phase 85 does not implement:
 
 ```text
-deployed Kubernetes failback controller loop
+Kubernetes live failback through deployed pods
 automatic failback target selection
 frontend publication after failback
 storage rebuild/catch-up traffic
@@ -77,30 +89,30 @@ NVMe ANA behavior
 ## Verification
 
 ```text
-go test ./core/host/master -run "Test(FailbackServiceDefaultDisabled|FailbackServiceEnabledUsesHostRuntime|FailbackExecutorGRPCRuntimeUsesRealMasterService)" -count=1 -v
-"C:\Program Files\Git\bin\bash.exe" scripts/run-phase84-failback-integrated-grpc-smoke.sh .
-C:\work\swblock.exe validate testops\scenarios\failback-integrated-grpc-smoke-chain.yaml
+go test ./core/ops -run "TestFailbackExecutor(ExecutionPolicyBlocks|ExecutionNoTargetsDoesNotAttemptRuntime|ExecutionInvalidTargetDoesNotCallRuntime|InvokesRuntimeWhenExplicitlyEnabled)" -count=1 -v
+"C:\Program Files\Git\bin\bash.exe" scripts/run-phase85-failback-executor-policy-safety-gate.sh .
+C:\work\swblock.exe validate testops\scenarios\failback-executor-policy-safety-chain.yaml
 ```
 
 Terminal evidence:
 
 ```text
-phase84_failback_integrated_grpc_status=ok
-core_host_master_failback_grpc_tests=pass
-service_default_disabled_test=true
-service_enabled_uses_host_runtime=true
-executor_grpc_uses_real_master_service=true
-executor_status_failed_back=true
-master_publisher_epoch_advanced=true
-publish_target_swapped_after_failback=true
-terminal_evidence_required=true
+phase85_failback_executor_policy_safety_status=ok
+core_ops_failback_policy_safety_tests=pass
+policy_disabled_blocks_execution=true
+no_targets_no_runtime_call=true
+invalid_target_no_runtime_call=true
+valid_target_runtime_call_still_supported=true
+execution_flags_alone_insufficient=true
+runtime_requires_valid_target=true
+invalid_target_writes_blocked_status=true
+authority_mutation_allowed_only_for_valid_target=true
 frontend_publication_allowed=false
 storage_mutation_allowed=false
 ```
 
 ## Next
 
-The next phase should move from local integration to deployed-loop safety:
-either a Kubernetes smoke with explicitly enabled failback components, or a
-controller policy gate that proves no automatic failback happens without a
-ready `SwBlockReplicaFailback` target and explicit execution policy.
+The next phase can move to a Kubernetes-deployed smoke for the failback
+components, or add a release documentation update that describes the failback
+runtime as opt-in and not automatic.

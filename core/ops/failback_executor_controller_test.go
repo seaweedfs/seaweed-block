@@ -124,6 +124,87 @@ func TestFailbackExecutorExecutionPolicyBlocks(t *testing.T) {
 	}
 }
 
+func TestFailbackExecutorExecutionNoTargetsDoesNotAttemptRuntime(t *testing.T) {
+	client := &fakeFailbackExecutorClient{}
+	runtime := &fakeFailbackRuntime{result: FailbackRuntimeResult{
+		FailbackStarted:                   true,
+		AuthorityEpochAdvanced:            true,
+		SinglePrimaryAfterFailback:        true,
+		PublishTargetSwappedAfterFailback: true,
+		NoStorageMutation:                 true,
+		NoCrossVolumeIdentityChange:       true,
+	}}
+	result, err := (FailbackExecutorReconciler{
+		Namespace:              "kube-system",
+		Client:                 client,
+		Runtime:                runtime,
+		ExecutionRequested:     true,
+		ExecutionPolicyEnabled: true,
+	}).Reconcile(context.Background())
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if result.TargetCount != 0 ||
+		result.FailbackAttempts != 0 ||
+		result.StatusWriteCount != 0 ||
+		result.AuthorityMutationAllowed ||
+		result.FrontendPublicationAllowed ||
+		result.StorageMutationAllowed {
+		t.Fatalf("result=%+v", result)
+	}
+	if len(runtime.requests) != 0 {
+		t.Fatalf("runtime called without targets: %+v", runtime.requests)
+	}
+	if len(client.writes) != 0 {
+		t.Fatalf("writes without targets: %+v", client.writes)
+	}
+}
+
+func TestFailbackExecutorExecutionInvalidTargetDoesNotCallRuntime(t *testing.T) {
+	target := failbackExecutorExecutableTargetFixture()
+	target.Spec.ExpectedCurrentReplicaID = ""
+	client := &fakeFailbackExecutorClient{targets: []SwBlockReplicaFailbackObject{target}}
+	runtime := &fakeFailbackRuntime{result: FailbackRuntimeResult{
+		FailbackStarted:                   true,
+		AuthorityEpochAdvanced:            true,
+		SinglePrimaryAfterFailback:        true,
+		PublishTargetSwappedAfterFailback: true,
+		NoStorageMutation:                 true,
+		NoCrossVolumeIdentityChange:       true,
+	}}
+	result, err := (FailbackExecutorReconciler{
+		Namespace:              "kube-system",
+		Client:                 client,
+		Runtime:                runtime,
+		ExecutionRequested:     true,
+		ExecutionPolicyEnabled: true,
+	}).Reconcile(context.Background())
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if result.TargetCount != 1 ||
+		result.InvalidTargetCount != 1 ||
+		result.FailbackAttempts != 0 ||
+		result.StatusWriteCount != 1 ||
+		result.AuthorityMutationAllowed ||
+		result.FrontendPublicationAllowed ||
+		result.StorageMutationAllowed {
+		t.Fatalf("result=%+v", result)
+	}
+	if len(runtime.requests) != 0 {
+		t.Fatalf("runtime called for invalid target: %+v", runtime.requests)
+	}
+	status := client.writes[0].status
+	if status.State != FailbackStateBlocked ||
+		status.ReasonCode != AuthorityExecutorFailbackReasonRuntimeTargetMissing ||
+		status.FailbackStarted ||
+		status.AuthorityEpochAdvanced ||
+		status.SinglePrimaryAfterFailback ||
+		status.PublishTargetSwappedAfterFailback {
+		t.Fatalf("status=%+v", status)
+	}
+}
+
 func TestFailbackExecutorInvokesRuntimeWhenExplicitlyEnabled(t *testing.T) {
 	target := failbackExecutorExecutableTargetFixture()
 	client := &fakeFailbackExecutorClient{targets: []SwBlockReplicaFailbackObject{target}}

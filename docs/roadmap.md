@@ -355,7 +355,13 @@ Recommended order from here:
     advances the master-owned Publisher. This proves executor status,
     authority-epoch advance, and publish-target swap through the real service
     path while keeping frontend publication and storage mutation false.
-42. Add backup/restore and NVMe ANA parity after they can reuse the same action
+42. Phase 85: failback executor policy safety. **Closed 2026-06-26, local PASS**
+    (`internal/docs/finished-plans/phase85_finishedplan_failback_executor_policy_safety.md`).
+    Execution flags alone are now explicitly tested as insufficient: with no
+    target, the executor performs zero runtime calls; with an invalid target it
+    writes blocked status and still performs zero runtime calls. A valid target
+    remains the only path that may call the failback runtime.
+43. Add backup/restore and NVMe ANA parity after they can reuse the same action
    owner, evidence, and status model rather than creating another isolated
    control plane.
 
@@ -394,7 +400,9 @@ explicit execution policy and an explicit blockmaster address. Phase 83 packages
 that path in Helm while preserving the default-off boundary and adding render
 guardrails for incoherent execution values. Phase 84 closes the local
 fake-service gap by proving the executor gRPC runtime against the real
-blockmaster service and master Publisher.
+blockmaster service and master Publisher. Phase 85 proves the deployed-loop
+safety invariant: explicit execution flags do not cause runtime calls without a
+valid executable target.
 
 The practical rule is:
 
