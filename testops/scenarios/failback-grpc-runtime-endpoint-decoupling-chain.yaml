@@ -1,0 +1,87 @@
+# Runner-native Phase 86 gate: an explicit gRPC failback runtime address is
+# sufficient; the target does not need the legacy HTTP runtimeEndpoint field.
+
+name: failback-grpc-runtime-endpoint-decoupling-chain
+timeout: 6m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: failback_grpc_runtime_endpoint_decoupling
+    actions:
+      - action: exec
+        node: m02
+        timeout: 5m
+        cmd: "rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase86-failback-grpc-runtime-endpoint-decoupling && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase86-failback-grpc-runtime-endpoint-decoupling && cd {{ product_root }} && SW_BLOCK_ARTIFACT_DIR=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase86-failback-grpc-runtime-endpoint-decoupling bash scripts/run-phase86-failback-grpc-runtime-endpoint-decoupling-gate.sh {{ product_root }}"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase86-failback-grpc-runtime-endpoint-decoupling/phase86-failback-grpc-runtime-endpoint-decoupling-summary.txt"
+        pattern: "^phase86_failback_grpc_runtime_endpoint_decoupling_status=ok$"
+        save_as: phase86_ok
+      - action: assert_greater
+        actual: "{{ phase86_ok }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase86-failback-grpc-runtime-endpoint-decoupling/phase86-failback-grpc-runtime-endpoint-decoupling-summary.txt"
+        pattern: "^grpc_runtime_does_not_require_target_runtime_endpoint=true$"
+        save_as: grpc_no_endpoint
+      - action: assert_greater
+        actual: "{{ grpc_no_endpoint }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase86-failback-grpc-runtime-endpoint-decoupling/phase86-failback-grpc-runtime-endpoint-decoupling-summary.txt"
+        pattern: "^legacy_http_runtime_endpoint_still_supported=true$"
+        save_as: http_supported
+      - action: assert_greater
+        actual: "{{ http_supported }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase86-failback-grpc-runtime-endpoint-decoupling/phase86-failback-grpc-runtime-endpoint-decoupling-summary.txt"
+        pattern: "^real_master_grpc_service_without_target_endpoint=true$"
+        save_as: real_master
+      - action: assert_greater
+        actual: "{{ real_master }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase86-failback-grpc-runtime-endpoint-decoupling/phase86-failback-grpc-runtime-endpoint-decoupling-summary.txt"
+        pattern: "^frontend_publication_allowed=false$"
+        save_as: no_frontend
+      - action: assert_greater
+        actual: "{{ no_frontend }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase86-failback-grpc-runtime-endpoint-decoupling/phase86-failback-grpc-runtime-endpoint-decoupling-summary.txt"
+        pattern: "^storage_mutation_allowed=false$"
+        save_as: no_storage
+      - action: assert_greater
+        actual: "{{ no_storage }}"
+        threshold: "0"
+
+  - name: collect
+    always: true
+    actions:
+      - action: collect_path
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase86-failback-grpc-runtime-endpoint-decoupling"
+        name: "remote-phases"
+        ignore_error: true

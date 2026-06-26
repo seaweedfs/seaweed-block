@@ -1,81 +1,88 @@
-# Current Plan: Phase 85 Failback Executor Policy Safety
+# Current Plan: Phase 86 Failback gRPC Runtime Endpoint Decoupling
 
 Status: complete.
 
 ## Goal
 
-Phase 85 proves that deployed failback execution flags are not enough to cause
-authority mutation. The executor must also see a valid executable
-`SwBlockReplicaFailback` target with all required facts.
+Phase 86 removes a stale coupling between the new gRPC failback runtime and the
+legacy per-target HTTP `runtimeEndpoint` field.
 
-This protects the deployed-loop shape introduced by Phases 81-84:
+Before this phase, an executable failback target required:
 
 ```text
-execution flags enabled + no target        -> no runtime call
-execution flags enabled + invalid target   -> blocked status, no runtime call
-execution flags enabled + valid target     -> runtime may be called
+spec.runtimeEndpoint != ""
 ```
+
+even when the executor was configured with:
+
+```text
+--failback-runtime-grpc-addr <blockmaster>
+```
+
+That made gRPC execution depend on an unrelated HTTP endpoint placeholder.
 
 ## Deliverables
 
-### D1: No-Target Execution Safety
+### D1: Runtime-Aware Target Validation
+
+Changed:
+
+```text
+failbackExecutorExecutableTarget(target)
+```
+
+to:
+
+```text
+failbackExecutorExecutableTarget(target, runtimeProvided)
+```
+
+The target now requires `runtimeEndpoint` only when the executor has no explicit
+runtime and must fall back to target-provided HTTP runtime.
+
+### D2: gRPC Override Test
 
 Added:
 
 ```text
-TestFailbackExecutorExecutionNoTargetsDoesNotAttemptRuntime
+TestFailbackExecutorGRPCRuntimeDoesNotRequireTargetRuntimeEndpoint
 ```
 
 This proves:
 
 ```text
-TargetCount=0
-FailbackAttempts=0
-StatusWriteCount=0
-runtime requests=0
-authority_mutation_allowed=false
-frontend_publication_allowed=false
-storage_mutation_allowed=false
+explicit runtime provided
+target runtimeEndpoint empty
+runtime is called
+failed_back status is written
 ```
 
-### D2: Invalid-Target Execution Safety
+### D3: Real Master Carry-Forward
 
-Added:
+Updated:
 
 ```text
-TestFailbackExecutorExecutionInvalidTargetDoesNotCallRuntime
+TestFailbackExecutorGRPCRuntimeUsesRealMasterService
 ```
 
-This proves a malformed executable target writes blocked status with:
+The test now omits `RuntimeEndpoint` from the target and still proves:
 
 ```text
-reason=failback_runtime_target_missing
-FailbackAttempts=0
-runtime requests=0
+executor -> gRPC runtime -> real blockmaster service -> Publisher
 ```
-
-### D3: Positive Control
-
-The gate keeps the valid-target success test in scope:
-
-```text
-TestFailbackExecutorInvokesRuntimeWhenExplicitlyEnabled
-```
-
-That proves the new safety checks do not break the explicit valid target path.
 
 ### D4: Gate
 
 Added:
 
 ```text
-scripts/run-phase85-failback-executor-policy-safety-gate.sh
-testops/scenarios/failback-executor-policy-safety-chain.yaml
+scripts/run-phase86-failback-grpc-runtime-endpoint-decoupling-gate.sh
+testops/scenarios/failback-grpc-runtime-endpoint-decoupling-chain.yaml
 ```
 
 ## Non-Claims
 
-Phase 85 does not implement:
+Phase 86 does not implement:
 
 ```text
 Kubernetes live failback through deployed pods
@@ -89,30 +96,33 @@ NVMe ANA behavior
 ## Verification
 
 ```text
-go test ./core/ops -run "TestFailbackExecutor(ExecutionPolicyBlocks|ExecutionNoTargetsDoesNotAttemptRuntime|ExecutionInvalidTargetDoesNotCallRuntime|InvokesRuntimeWhenExplicitlyEnabled)" -count=1 -v
-"C:\Program Files\Git\bin\bash.exe" scripts/run-phase85-failback-executor-policy-safety-gate.sh .
-C:\work\swblock.exe validate testops\scenarios\failback-executor-policy-safety-chain.yaml
+go test ./core/ops -run "TestFailbackExecutor(GRPCRuntimeDoesNotRequireTargetRuntimeEndpoint|ExecutionInvalidTargetDoesNotCallRuntime|InvokesRuntimeWhenExplicitlyEnabled)" -count=1 -v
+go test ./core/host/master -run TestFailbackExecutorGRPCRuntimeUsesRealMasterService -count=1 -v
+"C:\Program Files\Git\bin\bash.exe" scripts/run-phase86-failback-grpc-runtime-endpoint-decoupling-gate.sh .
+C:\work\swblock.exe validate testops\scenarios\failback-grpc-runtime-endpoint-decoupling-chain.yaml
 ```
 
 Terminal evidence:
 
 ```text
-phase85_failback_executor_policy_safety_status=ok
-core_ops_failback_policy_safety_tests=pass
-policy_disabled_blocks_execution=true
-no_targets_no_runtime_call=true
-invalid_target_no_runtime_call=true
-valid_target_runtime_call_still_supported=true
-execution_flags_alone_insufficient=true
-runtime_requires_valid_target=true
+phase86_failback_grpc_runtime_endpoint_decoupling_status=ok
+core_ops_failback_grpc_endpoint_decoupling_tests=pass
+core_host_master_failback_grpc_no_endpoint_test=pass
+grpc_runtime_does_not_require_target_runtime_endpoint=true
+invalid_target_still_blocks_without_runtime_call=true
+http_runtime_endpoint_fallback_still_supported=true
+real_master_grpc_service_without_target_endpoint=true
+explicit_grpc_runtime_is_sufficient=true
+legacy_http_runtime_endpoint_still_supported=true
 invalid_target_writes_blocked_status=true
-authority_mutation_allowed_only_for_valid_target=true
+master_publisher_epoch_advanced=true
 frontend_publication_allowed=false
 storage_mutation_allowed=false
 ```
 
 ## Next
 
-The next phase can move to a Kubernetes-deployed smoke for the failback
-components, or add a release documentation update that describes the failback
-runtime as opt-in and not automatic.
+The next phase should validate a Kubernetes-deployed failback executor smoke
+when a lab image is available, or close the failback operation-layer milestone
+with a release-note/readme update that accurately states what is automatic and
+what remains opt-in.

@@ -205,6 +205,42 @@ func TestFailbackExecutorExecutionInvalidTargetDoesNotCallRuntime(t *testing.T) 
 	}
 }
 
+func TestFailbackExecutorGRPCRuntimeDoesNotRequireTargetRuntimeEndpoint(t *testing.T) {
+	target := failbackExecutorExecutableTargetFixture()
+	target.Spec.RuntimeEndpoint = ""
+	client := &fakeFailbackExecutorClient{targets: []SwBlockReplicaFailbackObject{target}}
+	runtime := &fakeFailbackRuntime{result: FailbackRuntimeResult{
+		FailbackStarted:                   true,
+		AuthorityEpochAdvanced:            true,
+		SinglePrimaryAfterFailback:        true,
+		PublishTargetSwappedAfterFailback: true,
+		NoStorageMutation:                 true,
+		NoCrossVolumeIdentityChange:       true,
+	}}
+	result, err := (FailbackExecutorReconciler{
+		Namespace:              "kube-system",
+		Client:                 client,
+		Runtime:                runtime,
+		ExecutionRequested:     true,
+		ExecutionPolicyEnabled: true,
+	}).Reconcile(context.Background())
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if result.FailbackAttempts != 1 || result.StatusWriteCount != 1 || !result.AuthorityMutationAllowed {
+		t.Fatalf("result=%+v", result)
+	}
+	if len(runtime.requests) != 1 {
+		t.Fatalf("runtime requests=%+v", runtime.requests)
+	}
+	if runtime.requests[0].RuntimeEndpoint != "" {
+		t.Fatalf("gRPC override should not require target runtime endpoint: %+v", runtime.requests[0])
+	}
+	if got := client.writes[0].status.State; got != FailbackStateFailedBack {
+		t.Fatalf("state=%s", got)
+	}
+}
+
 func TestFailbackExecutorInvokesRuntimeWhenExplicitlyEnabled(t *testing.T) {
 	target := failbackExecutorExecutableTargetFixture()
 	client := &fakeFailbackExecutorClient{targets: []SwBlockReplicaFailbackObject{target}}

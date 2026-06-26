@@ -116,7 +116,8 @@ func (r FailbackExecutorReconciler) Reconcile(ctx context.Context) (FailbackExec
 
 func (r FailbackExecutorReconciler) executeTarget(ctx context.Context, result *FailbackExecutorReconcileResult, target SwBlockReplicaFailbackObject) error {
 	status := failbackExecutorDisabledStatus(r.now()(), target)
-	if !failbackExecutorExecutableTarget(target) {
+	runtime := r.Runtime
+	if !failbackExecutorExecutableTarget(target, runtime != nil) {
 		result.InvalidTargetCount++
 		status.ReasonCode = AuthorityExecutorFailbackReasonRuntimeTargetMissing
 		status.Conditions[0].Reason = AuthorityExecutorFailbackReasonRuntimeTargetMissing
@@ -130,7 +131,6 @@ func (r FailbackExecutorReconciler) executeTarget(ctx context.Context, result *F
 		return nil
 	}
 	result.AuthorityMutationAllowed = true
-	runtime := r.Runtime
 	if runtime == nil && target.Spec.RuntimeEndpoint != "" {
 		runtime = NewHTTPFailbackRuntime(target.Spec.RuntimeEndpoint, nil)
 	}
@@ -185,11 +185,11 @@ func failbackExecutorTargetValid(target SwBlockReplicaFailbackObject) bool {
 		!spec.FailbackMutationAllowed
 }
 
-func failbackExecutorExecutableTarget(target SwBlockReplicaFailbackObject) bool {
+func failbackExecutorExecutableTarget(target SwBlockReplicaFailbackObject, runtimeProvided bool) bool {
 	spec := target.Spec
 	return spec.VolumeName != "" &&
 		spec.ReplicaID != "" &&
-		spec.RuntimeEndpoint != "" &&
+		(runtimeProvided || spec.RuntimeEndpoint != "") &&
 		spec.TargetDataAddr != "" &&
 		spec.TargetCtrlAddr != "" &&
 		spec.ExpectedCurrentReplicaID != "" &&

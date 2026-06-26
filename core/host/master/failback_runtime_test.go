@@ -161,7 +161,6 @@ func TestFailbackExecutorGRPCRuntimeUsesRealMasterService(t *testing.T) {
 				FailbackDecision:             ops.AuthorityExecutorFailbackDecisionEnabled,
 				FailbackReason:               "failback_requested",
 				FailbackMutationAllowed:      true,
-				RuntimeEndpoint:              "grpc://blockmaster",
 			},
 		}},
 	}

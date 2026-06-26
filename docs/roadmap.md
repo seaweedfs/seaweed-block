@@ -361,7 +361,12 @@ Recommended order from here:
     target, the executor performs zero runtime calls; with an invalid target it
     writes blocked status and still performs zero runtime calls. A valid target
     remains the only path that may call the failback runtime.
-43. Add backup/restore and NVMe ANA parity after they can reuse the same action
+43. Phase 86: failback gRPC runtime endpoint decoupling. **Closed 2026-06-26, local PASS**
+    (`internal/docs/finished-plans/phase86_finishedplan_failback_grpc_runtime_endpoint_decoupling.md`).
+    Explicit gRPC failback runtime no longer depends on the legacy target-local
+    HTTP `runtimeEndpoint` field. HTTP endpoint fallback remains supported, and
+    invalid targets still block without runtime calls.
+44. Add backup/restore and NVMe ANA parity after they can reuse the same action
    owner, evidence, and status model rather than creating another isolated
    control plane.
 
@@ -402,7 +407,8 @@ guardrails for incoherent execution values. Phase 84 closes the local
 fake-service gap by proving the executor gRPC runtime against the real
 blockmaster service and master Publisher. Phase 85 proves the deployed-loop
 safety invariant: explicit execution flags do not cause runtime calls without a
-valid executable target.
+valid executable target. Phase 86 removes the stale coupling that made the gRPC
+runtime path require an unrelated HTTP target endpoint.
 
 The practical rule is:
 
