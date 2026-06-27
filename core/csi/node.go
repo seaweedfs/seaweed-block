@@ -285,6 +285,11 @@ func (s *NodeServer) stageNVMe(ctx context.Context, req *csipb.NodeStageVolumeRe
 	}
 	publish := s.refreshPublishContext(ctx, volumeID, req.GetPublishContext())
 	publishContext := publish.Context
+	multipathRequested := iscsiMultipathFromContext(publishContext) || iscsiMultipathFromContext(req.GetPublishContext()) || iscsiMultipathFromContext(req.GetVolumeContext())
+	if multipathRequested {
+		publish = s.waitForNVMeMultipathPublishContext(ctx, volumeID, publish, 2)
+		publishContext = publish.Context
+	}
 	addr, nqn := nvmeFromContext(publishContext)
 	addrs := nvmeAddrsFromContext(publishContext)
 	if addr == "" || nqn == "" {
@@ -718,6 +723,42 @@ func (s *NodeServer) waitForISCSIMultipathPublishContext(ctx context.Context, vo
 
 func hasISCSIMultipathPortals(ctx map[string]string, minPortals int) bool {
 	return iscsiMultipathFromContext(ctx) && len(iscsiPortalsFromContext(ctx)) >= minPortals
+}
+
+func (s *NodeServer) waitForNVMeMultipathPublishContext(ctx context.Context, volumeID string, current publishContextResult, minPortals int) publishContextResult {
+	if hasNVMeMultipathPortals(current.Context, minPortals) {
+		return current
+	}
+	if s.lookup == nil {
+		return current
+	}
+	deadline := time.NewTimer(stage2MultipathPublishWait)
+	defer deadline.Stop()
+	ticker := time.NewTicker(stage2MultipathPublishPoll)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return current
+		case <-deadline.C:
+			return current
+		case <-ticker.C:
+			target, err := s.lookup.LookupPublishTarget(ctx, volumeID, s.nodeID)
+			if err != nil {
+				continue
+			}
+			if refreshed := publishContext(target); len(refreshed) > 0 {
+				current = publishContextResult{Context: refreshed, Target: target, HasTarget: true}
+				if hasNVMeMultipathPortals(current.Context, minPortals) {
+					return current
+				}
+			}
+		}
+	}
+}
+
+func hasNVMeMultipathPortals(ctx map[string]string, minPortals int) bool {
+	return iscsiMultipathFromContext(ctx) && len(nvmeAddrsFromContext(ctx)) >= minPortals
 }
 
 func cloneStringMap(in map[string]string) map[string]string {

@@ -62,14 +62,18 @@ func (s *ControllerServer) CreateVolume(ctx context.Context, req *csipb.CreateVo
 		}
 	}
 	protocol := normalizeProtocol(created.Protocol)
+	volumeContext := map[string]string{
+		"replicationFactor": strconv.Itoa(created.ReplicationFactor),
+		"protocol":          string(protocol),
+	}
+	if iscsiMultipathFromContext(req.GetParameters()) {
+		volumeContext["stage2_multipath"] = "true"
+	}
 	return &csipb.CreateVolumeResponse{
 		Volume: &csipb.Volume{
 			VolumeId:      created.VolumeID,
 			CapacityBytes: int64(created.SizeBytes),
-			VolumeContext: map[string]string{
-				"replicationFactor": strconv.Itoa(created.ReplicationFactor),
-				"protocol":          string(protocol),
-			},
+			VolumeContext: volumeContext,
 		},
 	}, nil
 }
@@ -122,6 +126,9 @@ func (s *ControllerServer) ControllerPublishVolume(ctx context.Context, req *csi
 	pubCtx := publishContext(target)
 	if len(pubCtx) == 0 {
 		return nil, status.Errorf(codes.FailedPrecondition, "volume %q has no attachable frontend target", req.GetVolumeId())
+	}
+	if iscsiMultipathFromContext(req.GetVolumeContext()) {
+		pubCtx["stage2_multipath"] = "true"
 	}
 	return &csipb.ControllerPublishVolumeResponse{PublishContext: pubCtx}, nil
 }

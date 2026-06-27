@@ -1,0 +1,107 @@
+name: nvme-csi-multipath-live-chain
+timeout: 30m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: pre_clean
+    actions:
+      - action: pre_run_cleanup
+        node: m02
+        kill_patterns: "blockmaster,blockvolume,blockcsi,iscsi-target"
+        nvme_disconnect: "true"
+        iscsi_logout_prefix: "iqn.2026-05.io.seaweedfs"
+      - action: exec
+        node: m02
+        cmd: "kubectl -n default delete pod sw-block-dynamic-smoke --ignore-not-found=true --wait=true --timeout=120s; kubectl -n default delete pvc sw-block-dynamic-v1 --ignore-not-found=true --wait=true --timeout=120s; kubectl get pv --no-headers 2>/dev/null | awk '$6==\"sw-block-dynamic\" {print $1}' | xargs -r -I{} kubectl patch pv {} --type=merge -p '{\"metadata\":{\"finalizers\":null}}'; kubectl get pv --no-headers 2>/dev/null | awk '$6==\"sw-block-dynamic\" {print $1}' | xargs -r kubectl delete pv --ignore-not-found=true --wait=false; kubectl delete storageclass sw-block-dynamic --ignore-not-found=true; rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase100-nvme-csi-multipath-live && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase100-nvme-csi-multipath-live"
+      - action: assert_no_active_iscsi_sessions
+        node: m02
+        iqn_substr: "io.seaweedfs"
+
+  - name: pin_build_alpha_images
+    actions:
+      - action: exec
+        node: m02
+        timeout: 8m
+        cmd: "cd {{ product_root }} && bash scripts/build-alpha-images.sh {{ product_root }}"
+        env.SW_BLOCK_IMPORT_K3S: "1"
+        env.SW_BLOCK_IMPORT_K3S_NODES: "192.168.1.181"
+        env.SW_BLOCK_IMPORT_K3S_SSH_USER: "testdev"
+        env.SW_BLOCK_IMPORT_K3S_SSH_KEY: "{{ ssh_key }}"
+        env.SW_BLOCK_DOCKER_NO_CACHE: "1"
+        env.SW_BLOCK_ARTIFACT_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase100-nvme-csi-multipath-live/pin_build"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase100-nvme-csi-multipath-live/pin_build/alpha-images.env"
+        pattern: "SW_BLOCK_IMAGE_ID="
+        save_as: pin_image_id_count
+      - action: assert_greater
+        actual: "{{ pin_image_id_count }}"
+        threshold: "0"
+
+  - name: nvme_multipath_dynamic_pvc
+    actions:
+      - action: exec
+        node: m02
+        timeout: 15m
+        cmd: "cd {{ product_root }} && bash scripts/run-phase100-nvme-csi-multipath-live-gate.sh {{ product_root }}"
+        env.SW_BLOCK_ALPHA_IMAGES_ENV: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase100-nvme-csi-multipath-live/pin_build/alpha-images.env"
+        env.SW_BLOCK_ARTIFACT_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase100-nvme-csi-multipath-live/live_gate"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase100-nvme-csi-multipath-live/live_gate/phase100-nvme-csi-multipath-live-summary.txt"
+        pattern: "^phase100_nvme_csi_multipath_live_status=ok$"
+        save_as: live_ok
+      - action: assert_greater
+        actual: "{{ live_ok }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase100-nvme-csi-multipath-live/live_gate/phase100-nvme-csi-multipath-live-summary.txt"
+        pattern: "^generated_nvme_listen_count=2$"
+        save_as: two_nvme_paths
+      - action: assert_greater
+        actual: "{{ two_nvme_paths }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase100-nvme-csi-multipath-live/live_gate/phase100-nvme-csi-multipath-live-summary.txt"
+        pattern: "^node_stage_nvme_multipath_count=[1-9][0-9]*$"
+        save_as: node_stage_multipath
+      - action: assert_greater
+        actual: "{{ node_stage_multipath }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase100-nvme-csi-multipath-live/live_gate/phase100-nvme-csi-multipath-live-summary.txt"
+        pattern: "^nvme_residue_count=0$"
+        save_as: nvme_clean
+      - action: assert_greater
+        actual: "{{ nvme_clean }}"
+        threshold: "0"
+
+  - name: collect_and_cleanup
+    always: true
+    actions:
+      - action: pre_run_cleanup
+        node: m02
+        kill_patterns: "blockmaster,blockvolume,blockcsi,iscsi-target"
+        nvme_disconnect: "true"
+        iscsi_logout_prefix: "iqn.2026-05.io.seaweedfs"
+      - action: exec
+        node: m02
+        cmd: "kubectl -n default delete pod sw-block-dynamic-smoke --ignore-not-found=true --wait=true --timeout=120s; kubectl -n default delete pvc sw-block-dynamic-v1 --ignore-not-found=true --wait=true --timeout=120s; kubectl get pv --no-headers 2>/dev/null | awk '$6==\"sw-block-dynamic\" {print $1}' | xargs -r -I{} kubectl patch pv {} --type=merge -p '{\"metadata\":{\"finalizers\":null}}'; kubectl get pv --no-headers 2>/dev/null | awk '$6==\"sw-block-dynamic\" {print $1}' | xargs -r kubectl delete pv --ignore-not-found=true --wait=false; kubectl delete storageclass sw-block-dynamic --ignore-not-found=true"
+      - action: collect_path
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase100-nvme-csi-multipath-live"
+        name: "remote-phases"
+        ignore_error: true

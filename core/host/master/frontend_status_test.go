@@ -134,6 +134,33 @@ func TestNodeLoss_StatusFrontendsForAssignedVolume_CurrentPrimaryFirstForCSIAtta
 	}
 }
 
+func TestDynamicLifecycle_ReplicaSlotsForMergesFreshObservedSlots(t *testing.T) {
+	obs := authority.NewObservationHost(authority.ObservationHostConfig{})
+	for _, hb := range []authority.HeartbeatMessage{
+		frontendHeartbeat("node-a", "v1", "r2", "127.0.0.1:4421"),
+		frontendHeartbeat("node-a", "v1", "r1", "127.0.0.1:4420"),
+	} {
+		if err := obs.IngestHeartbeat(hb); err != nil {
+			t.Fatalf("ingest heartbeat: %v", err)
+		}
+	}
+	h := &Host{
+		obs:       obs,
+		lifecycle: &LifecycleStores{},
+	}
+
+	got := h.replicaSlotsFor("v1")
+	want := []string{"r1", "r2"}
+	if len(got) != len(want) {
+		t.Fatalf("replica slots=%v want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("replica slots=%v want %v", got, want)
+		}
+	}
+}
+
 func TestStatusFrontendsForAssignedLine_FailClosedWhenUnassignedOrMissing(t *testing.T) {
 	obs := authority.NewObservationHost(authority.ObservationHostConfig{})
 	if got := statusFrontendsForAssignedLine(obs, "v1", "r1", false); len(got) != 0 {

@@ -57,13 +57,13 @@ This is the short internal roadmap. Keep it current and readable.
   evidence refs, cleanup visibility, safe next-step hints, and cross-surface
   agreement. This remains read-only and does not add mutating operator
   lifecycle.
-- Current development slice: NVMe Kubernetes CSI multipath attach. The
+- Recently closed development slice: NVMe Kubernetes CSI multipath attach. The
   returned-replica rebuild/reintegration/failback/frontend-publication operation
   loop reached a coherent close point at Phase 98, and Phase 99 pinned the
-  existing NVMe ANA/CSI baseline. Phase 100 starts the next storage feature by
-  preserving multiple NVMe frontend paths for one NQN/NSID through master
-  status, CSI publish context, and NodeStage. Live Kubernetes writer/reader
-  evidence remains the next gate before any NVMe multipath release claim.
+  existing NVMe ANA/CSI baseline. Phase 100 closed the next storage feature for
+  the supported lab path: multiple NVMe frontend paths for one NQN/NSID now
+  survive dynamic PVC provisioning, master status, CSI publish context,
+  NodeStage, app writer/reader I/O, and delete cleanup.
   Phases 46-67 made
   returned replicas visible, fenced, action-gated, rebuild/catch-up-capable,
   terminal-evidence-driven, and ACK-eligibility-published. Phases 68-98 then
@@ -786,11 +786,11 @@ Approximate engineering effort if scope remains tight:
   plus the published-image Day-1 smoke before marking the operation milestone
   released. Development has moved ahead in parallel; this does not mark the
   operation milestone released.
-- Phase 100 Kubernetes CSI NVMe Multipath Attach is active. The current slice
-  implements and gates the component path from master NVMe frontend grouping to
-  CSI `nvmeAddrs` publish context and NodeStage multi-address connect. A live
-  k3s dynamic-PVC writer/reader gate is still required before claiming
-  Kubernetes NVMe multipath attach.
+- Phase 100 Kubernetes CSI NVMe Multipath Attach is closed. It implements and
+  gates the path from dynamic PVC `protocol=nvme` and `replicationFactor=2` to
+  master NVMe frontend grouping, CSI `nvmeAddrs` publish context, NodeStage
+  multi-address connect, mounted writer/reader I/O, and zero NVMe residue after
+  delete in the supported lab.
 - Phase 41-44 are the Operation Layer v0.5 release train: lifecycle-owner
   foundation, real API/admission proof, first bounded finalizer mutation, and
   delete lifecycle close gate.

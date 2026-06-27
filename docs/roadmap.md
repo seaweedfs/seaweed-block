@@ -458,12 +458,13 @@ Recommended order from here:
     not be marked shipped until matching `seaweed-block` and
     `seaweed-block-csi` images are published from the same commit and pass the
     pinned-image Day-1 smoke. NVMe multipath is not part of this release claim.
-58. Phase 100: Kubernetes CSI NVMe multipath attach. **Active**
-    The component slice preserves multiple NVMe frontend paths for one
-    NQN/NSID through master status, CSI publish context, and NodeStage
-    connection calls. This is not yet a live Kubernetes app-pod claim; the next
-    gate must prove dynamic PVC, mounted writer/reader I/O, and NVMe cleanup in
-    k3s.
+58. Phase 100: Kubernetes CSI NVMe multipath attach. **Closed 2026-06-27,
+    live k3s PASS**
+    The supported lab path now proves dynamic PVC `protocol=nvme`,
+    `replicationFactor=2`, two NVMe frontend paths for one NQN/NSID, CSI
+    publish/NodeStage multipath attach, mounted writer/reader I/O, and zero
+    Seaweed Block NVMe residue after delete. This is not a RoCE, performance,
+    broad host compatibility, production HA, or soak claim.
 59. Add backup/restore after it can reuse the same action owner, evidence, and
     status model rather than creating another isolated control plane.
 
@@ -659,9 +660,9 @@ control-plane path is mature.
 1. iSCSI and NVMe-oF are the current release-gated frontends.
 
    iSCSI remains the default path for broad compatibility. NVMe-oF is now
-   covered by ANA-aware direct-host multipath/failover and CSI
-   protocol-selection gates. Kubernetes CSI NVMe multipath attach remains the
-   next NVMe parity gap.
+   covered by ANA-aware direct-host multipath/failover, CSI protocol selection,
+   and a supported-lab Kubernetes CSI NVMe multipath attach gate. Broader host
+   compatibility, RoCE, performance, and soak remain future work.
 
    The runtime should be managed as a cluster of explicit mini-protocols:
    authority/epoch, replication recovery, iSCSI, NVMe, CSI lifecycle, and

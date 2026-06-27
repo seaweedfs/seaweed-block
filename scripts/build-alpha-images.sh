@@ -10,6 +10,7 @@ IMPORT_K3S_NODES="${SW_BLOCK_IMPORT_K3S_NODES:-}"
 IMPORT_K3S_SSH_USER="${SW_BLOCK_IMPORT_K3S_SSH_USER:-${USER:-}}"
 IMPORT_K3S_SSH_KEY="${SW_BLOCK_IMPORT_K3S_SSH_KEY:-}"
 IMPORT_K3S_REMOTE_DIR="${SW_BLOCK_IMPORT_K3S_REMOTE_DIR:-/tmp/sw-block-alpha-images}"
+DOCKER_NO_CACHE="${SW_BLOCK_DOCKER_NO_CACHE:-0}"
 
 if [[ -n "$ARTIFACT_DIR" ]]; then
   mkdir -p "$ARTIFACT_DIR"
@@ -20,9 +21,15 @@ echo "[alpha-build] image=$IMAGE"
 echo "[alpha-build] csi_image=$CSI_IMAGE"
 echo "[alpha-build] import_k3s=$IMPORT_K3S"
 echo "[alpha-build] import_k3s_nodes=${IMPORT_K3S_NODES:-<local>}"
+echo "[alpha-build] docker_no_cache=$DOCKER_NO_CACHE"
 
-docker build -t "$IMAGE" -f "$ROOT/deploy/k8s/g15b/Dockerfile.sw-block" "$ROOT"
-docker build -t "$CSI_IMAGE" -f "$ROOT/deploy/k8s/g15b/Dockerfile.blockcsi" "$ROOT"
+docker_build_args=()
+if [[ "$DOCKER_NO_CACHE" == "1" || "$DOCKER_NO_CACHE" == "true" ]]; then
+  docker_build_args+=(--no-cache)
+fi
+
+docker build "${docker_build_args[@]}" -t "$IMAGE" -f "$ROOT/deploy/k8s/g15b/Dockerfile.sw-block" "$ROOT"
+docker build "${docker_build_args[@]}" -t "$CSI_IMAGE" -f "$ROOT/deploy/k8s/g15b/Dockerfile.blockcsi" "$ROOT"
 
 record_build_evidence() {
   [[ -n "$ARTIFACT_DIR" ]] || return 0
@@ -32,6 +39,7 @@ record_build_evidence() {
     echo "SW_BLOCK_CSI_IMAGE=$CSI_IMAGE"
     echo "SW_BLOCK_IMPORT_K3S=$IMPORT_K3S"
     echo "SW_BLOCK_IMPORT_K3S_NODES=$IMPORT_K3S_NODES"
+    echo "SW_BLOCK_DOCKER_NO_CACHE=$DOCKER_NO_CACHE"
     echo "SW_BLOCK_IMAGE_ID=$(docker image inspect "$IMAGE" --format '{{.Id}}')"
     echo "SW_BLOCK_CSI_IMAGE_ID=$(docker image inspect "$CSI_IMAGE" --format '{{.Id}}')"
     if git -C "$ROOT" rev-parse --git-dir >/dev/null 2>&1; then
@@ -52,16 +60,21 @@ import_k3s_image() {
   local image="$1"
   local log_name="$2"
   local -a ctr=()
+  local -a ctr_rm=()
   if command -v sudo >/dev/null 2>&1 && sudo -n k3s --version >/dev/null 2>&1; then
     ctr=(sudo -n k3s ctr -n k8s.io images import -)
+    ctr_rm=(sudo -n k3s ctr -n k8s.io images rm)
   elif command -v k3s >/dev/null 2>&1 && k3s --version >/dev/null 2>&1; then
     ctr=(k3s ctr -n k8s.io images import -)
+    ctr_rm=(k3s ctr -n k8s.io images rm)
   else
     echo "SW_BLOCK_IMPORT_K3S=1 requires k3s or passwordless sudo k3s on PATH" >&2
     exit 2
   fi
 
   echo "[alpha-build] k3s_import image=$image"
+  "${ctr_rm[@]}" "$image" >/dev/null 2>&1 || true
+  "${ctr_rm[@]}" "docker.io/library/$image" >/dev/null 2>&1 || true
   if [[ -n "$ARTIFACT_DIR" ]]; then
     docker save "$image" | "${ctr[@]}" >"$ARTIFACT_DIR/$log_name" 2>&1
   else
@@ -132,6 +145,7 @@ import_k3s_image_to_node() {
   echo "[alpha-build] k3s_import image=$image node=$node"
   if [[ -n "$ARTIFACT_DIR" ]]; then
     {
+      run_ssh "$target" "sudo -n k3s ctr -n k8s.io images rm '$image' >/dev/null 2>&1 || true; sudo -n k3s ctr -n k8s.io images rm 'docker.io/library/$image' >/dev/null 2>&1 || true"
       run_ssh "$target" "mkdir -p '$IMPORT_K3S_REMOTE_DIR'"
       docker save "$image" | run_ssh "$target" "cat > '$IMPORT_K3S_REMOTE_DIR/$tar_name'"
       run_ssh "$target" "sudo -n k3s ctr -n k8s.io images import '$IMPORT_K3S_REMOTE_DIR/$tar_name'"
@@ -139,6 +153,7 @@ import_k3s_image_to_node() {
       run_ssh "$target" "rm -f '$IMPORT_K3S_REMOTE_DIR/$tar_name'"
     } >"$ARTIFACT_DIR/$log_name" 2>&1
   else
+    run_ssh "$target" "sudo -n k3s ctr -n k8s.io images rm '$image' >/dev/null 2>&1 || true; sudo -n k3s ctr -n k8s.io images rm 'docker.io/library/$image' >/dev/null 2>&1 || true"
     run_ssh "$target" "mkdir -p '$IMPORT_K3S_REMOTE_DIR'"
     docker save "$image" | run_ssh "$target" "cat > '$IMPORT_K3S_REMOTE_DIR/$tar_name'"
     run_ssh "$target" "sudo -n k3s ctr -n k8s.io images import '$IMPORT_K3S_REMOTE_DIR/$tar_name'"

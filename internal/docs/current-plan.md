@@ -1,6 +1,6 @@
 # Current Plan: Phase 100 Kubernetes CSI NVMe Multipath Attach
 
-Status: active; D1/D2 component slice PASS.
+Status: closed; D1/D2 component slice PASS, live Kubernetes gate PASS.
 
 ## Goal
 
@@ -53,6 +53,8 @@ Added:
 ```text
 scripts/run-phase100-nvme-csi-multipath-component-gate.sh
 testops/scenarios/nvme-csi-multipath-component-chain.yaml
+scripts/run-phase100-nvme-csi-multipath-live-gate.sh
+testops/scenarios/nvme-csi-multipath-live-chain.yaml
 ```
 
 The component gate proves:
@@ -72,24 +74,47 @@ swblock run 20260627-013844-4a23: PASS, 10/10 actions
 go test ./core/frontend/nvme ./cmd/blockvolume ./core/csi ./core/launcher -count=1: PASS
 ```
 
+## D3/D4 Live Kubernetes Slice
+
+Implemented the live attach close gate:
+
+- dynamic PVC can request `protocol=nvme`, `replicationFactor=2`, and
+  `stage2_multipath=true`;
+- CSI `CreateVolumeResponse.VolumeContext` carries the safe multipath attach
+  parameter forward into PV volume attributes;
+- `ControllerPublish` preserves the multipath request in publish context;
+- `NodeStage` performs a bounded refresh until `nvmeAddrs` contains at least two
+  portals, then connects each portal for the same NQN;
+- dynamic lifecycle status can merge fresh observed replica IDs for read-only
+  publish-target aggregation when lifecycle records do not persist placement
+  slots;
+- the live runner imports fresh local images to every schedulable node and
+  removes stale containerd tags before import.
+
+Verification:
+
+```text
+swblock run testops/scenarios/nvme-csi-multipath-live-chain.yaml
+run: 20260627-024451-2ee8
+result: PASS, 18/18 actions
+
+phase100_nvme_csi_multipath_live_status=ok
+generated_nvme_listen_count=2
+generated_nqn_unique_count=1
+generated_nsid_unique_count=1
+node_stage_nvme_multipath_count=1
+node_stage_two_portals_count=1
+nvme_residue_count=0
+```
+
 ## Non-Claims
 
-- no live Kubernetes app pod NVMe multipath claim yet;
 - no RoCE, performance, broad host compatibility, or production HA claim;
 - no automatic release claim for the operation milestone;
 - no backup/snapshot/restore.
 
 ## Next
 
-After the component gate passes, continue Phase 100 with a live Kubernetes gate:
-
-```text
-NVMe multipath frontend deployment
-  -> CSI dynamic PVC with protocol=nvme
-  -> NodeStage connects multiple paths for one NQN/NSID
-  -> writer/reader verifies mounted data
-  -> cleanup checks nvme subsystem/controller residue
-```
-
-The live gate should be the release-quality proof for the NVMe multipath attach
-claim.
+Phase 100 is closed for the supported lab path. The next NVMe work should not
+expand the claim broadly yet; use a larger follow-up milestone for soak,
+failure-path behavior, or ANA/CSI status surfacing if needed.

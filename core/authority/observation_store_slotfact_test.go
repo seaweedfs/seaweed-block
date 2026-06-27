@@ -39,6 +39,33 @@ func TestObservationStore_SlotFact_NoObservation_ReturnsFalse(t *testing.T) {
 	}
 }
 
+func TestObservationStore_ReplicaIDsForVolume_ReturnsFreshUsableSlots(t *testing.T) {
+	now := time.Date(2026, 6, 27, 10, 0, 0, 0, time.UTC)
+	s := NewObservationStore(FreshnessConfig{FreshnessWindow: 30 * time.Second}, func() time.Time { return now })
+	if err := s.Ingest(Observation{
+		ServerID:   "m01",
+		ObservedAt: now,
+		Slots: []SlotFact{
+			{VolumeID: "v1", ReplicaID: "r2", DataAddr: "127.0.0.1:19103"},
+			{VolumeID: "v1", ReplicaID: "r1", DataAddr: "127.0.0.1:19101"},
+			{VolumeID: "v1", ReplicaID: "empty", DataAddr: ""},
+			{VolumeID: "other", ReplicaID: "r3", DataAddr: "127.0.0.1:19105"},
+		},
+	}); err != nil {
+		t.Fatalf("Ingest: %v", err)
+	}
+	got := s.ReplicaIDsForVolume("v1")
+	want := []string{"r1", "r2"}
+	if len(got) != len(want) {
+		t.Fatalf("replicas=%v want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("replicas=%v want %v", got, want)
+		}
+	}
+}
+
 func TestObservationStore_SlotFact_EmptyDataAddr_FailsClosed(t *testing.T) {
 	now := time.Date(2026, 4, 27, 10, 0, 0, 0, time.UTC)
 	s := NewObservationStore(FreshnessConfig{FreshnessWindow: 30 * time.Second}, func() time.Time { return now })

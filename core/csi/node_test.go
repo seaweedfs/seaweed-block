@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	csipb "github.com/container-storage-interface/spec/lib/go/csi"
 	"google.golang.org/grpc/codes"
@@ -185,6 +186,17 @@ func newTestNodeWithNVMe(mi *mockISCSIUtil, mn *mockNVMeUtil, mm *mockMountUtil)
 		ISCSIUtil: mi,
 		NVMeUtil:  mn,
 		MountUtil: mm,
+	})
+}
+
+func newTestNodeWithNVMeLookup(mi *mockISCSIUtil, mn *mockNVMeUtil, mm *mockMountUtil, lookup PublishTargetLookup) *NodeServer {
+	return NewNodeServer(NodeConfig{
+		NodeID:    "node-a",
+		IQNPrefix: "iqn.2026-05.example.v3",
+		ISCSIUtil: mi,
+		NVMeUtil:  mn,
+		MountUtil: mm,
+		Lookup:    lookup,
 	})
 }
 
@@ -649,6 +661,70 @@ func TestNodeStage_NVMeMultipathConnectsAllTargets(t *testing.T) {
 		t.Fatalf("staged info=%+v", info)
 	}
 	if info.nvmeAddr != "127.0.0.1:4420" || info.nvmeAddrs[1] != "127.0.0.1:4421" {
+		t.Fatalf("staged info=%+v", info)
+	}
+}
+
+func TestNodeStage_NVMeMultipathWaitsForRefreshedMultiPortalTarget(t *testing.T) {
+	mi, mn, mm := newMockISCSIUtil(), newMockNVMeUtil(), newMockMountUtil()
+	lookup := &sequenceLookup{targets: []PublishTarget{
+		{
+			VolumeID:  "v1",
+			ReplicaID: "r1",
+			Protocol:  ProtocolNVMe,
+			NVMeAddr:  "127.0.0.1:4420",
+			NQN:       "nqn.2026-05.io.seaweedfs:v1",
+			NSID:      1,
+		},
+		{
+			VolumeID:  "v1",
+			ReplicaID: "r1",
+			Protocol:  ProtocolNVMe,
+			NVMeAddr:  "127.0.0.1:4420",
+			NVMeAddrs: []string{"127.0.0.1:4420", "127.0.0.1:4421"},
+			NQN:       "nqn.2026-05.io.seaweedfs:v1",
+			NSID:      1,
+			Multipath: true,
+		},
+	}}
+	ns := newTestNodeWithNVMeLookup(mi, mn, mm, lookup)
+	staging := t.TempDir()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	_, err := ns.NodeStageVolume(ctx, &csipb.NodeStageVolumeRequest{
+		VolumeId:          "v1",
+		StagingTargetPath: staging,
+		VolumeCapability:  testVolumeCapability(),
+		PublishContext: map[string]string{
+			"protocol":         "nvme",
+			"nvmeAddr":         "127.0.0.1:4420",
+			"nqn":              "nqn.2026-05.io.seaweedfs:v1",
+			"stage2_multipath": "true",
+		},
+		VolumeContext: map[string]string{
+			"stage2_multipath": "true",
+		},
+	})
+	if err != nil {
+		t.Fatalf("NodeStageVolume: %v", err)
+	}
+	for _, want := range []string{
+		"connect:127.0.0.1:4420:nqn.2026-05.io.seaweedfs:v1",
+		"connect:127.0.0.1:4421:nqn.2026-05.io.seaweedfs:v1",
+	} {
+		found := false
+		for _, call := range mn.calls {
+			if call == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("missing %q in nvme calls=%v", want, mn.calls)
+		}
+	}
+	if info := ns.staged["v1"]; info == nil || !info.multipath || len(info.nvmeAddrs) != 2 {
 		t.Fatalf("staged info=%+v", info)
 	}
 }

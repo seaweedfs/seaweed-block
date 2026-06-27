@@ -314,10 +314,11 @@ func (h *Host) ObservationHost() *authority.ObservationHost { return h.obs }
 // must not be treated as assignment authority.
 func (h *Host) Lifecycle() *LifecycleStores { return h.lifecycle }
 
-// replicaSlotsFor returns the accepted-topology replica IDs for a
-// volume, or nil if the volume isn't in accepted topology. Used
-// by AssignmentService to fan-in per-(vol, rid) publisher
-// subscriptions for volume-scoped delivery.
+// replicaSlotsFor returns replica IDs for a volume. Static topology
+// remains the allow-list. Dynamic lifecycle volumes may not persist
+// placement slots in the lifecycle record, so read-only status paths
+// merge fresh observed slots from the observation store; assignment
+// authority still comes from the publisher/controller, not this helper.
 func (h *Host) replicaSlotsFor(volumeID string) []string {
 	for _, v := range h.topo.Volumes {
 		if v.VolumeID != volumeID {
@@ -329,18 +330,34 @@ func (h *Host) replicaSlotsFor(volumeID string) []string {
 		}
 		return out
 	}
+	var out []string
 	if h.lifecycle != nil && h.lifecycle.Placements != nil {
 		if placement, ok := h.lifecycle.Placements.GetPlacement(volumeID); ok {
-			out := make([]string, 0, len(placement.Slots))
 			for _, slot := range placement.Slots {
 				if slot.ReplicaID != "" {
-					out = append(out, slot.ReplicaID)
+					out = appendReplicaID(out, slot.ReplicaID)
 				}
 			}
-			return out
 		}
 	}
-	return nil
+	if h.lifecycle != nil && h.obs != nil {
+		for _, replicaID := range h.obs.Store().ReplicaIDsForVolume(volumeID) {
+			out = appendReplicaID(out, replicaID)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func appendReplicaID(in []string, replicaID string) []string {
+	for _, existing := range in {
+		if existing == replicaID {
+			return in
+		}
+	}
+	return append(in, replicaID)
 }
 
 // Start runs the publisher, observation rebuild loop, and gRPC
