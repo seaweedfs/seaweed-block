@@ -774,10 +774,15 @@ Approximate engineering effort if scope remains tight:
   opt-in suite now proves returned-replica failback -> frontend publication ->
   post-publication workload writer/reader I/O -> zero-residue cleanup in live
   k3s.
-- Phase 99 NVMe ANA Baseline is active. It pins the current protocol/CSI
+- Phase 99 NVMe ANA Baseline is closed. It pins the current protocol/CSI
   baseline and corrects stale audit wording: ANA log/Identify/provider and CSI
   single-path NVMe stage/unstage are present; Kubernetes CSI NVMe multipath
   attach remains the next implementation target.
+- Operation milestone release readiness is active and blocked only on matching
+  published images. Run `scripts/run-operation-milestone-release-readiness.ps1`
+  plus the published-image Day-1 smoke before marking the operation milestone
+  released. After that, Phase 100 should start Kubernetes CSI NVMe multipath
+  attach.
 - Phase 41-44 are the Operation Layer v0.5 release train: lifecycle-owner
   foundation, real API/admission proof, first bounded finalizer mutation, and
   delete lifecycle close gate.

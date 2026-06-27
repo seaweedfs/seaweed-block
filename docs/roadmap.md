@@ -446,14 +446,19 @@ Recommended order from here:
     loop through live k3s: first PVC writer/reader, returned-replica failback,
     product-owned frontend publication, post-publication writer/reader I/O, and
     zero-residue cleanup. Default automatic failback remains off.
-56. Phase 99: NVMe ANA baseline. **Active**
+56. Phase 99: NVMe ANA baseline. **Closed 2026-06-26, runner PASS**
     Current code already has ANA Identify/Get Log Page behind an ANA provider,
     blockvolume projection-backed ANA state, direct-host P4 ANA/multipath
     gates, and P5 Kubernetes CSI single-path NVMe protocol selection. The next
     parity gap is Kubernetes CSI NVMe multipath attach: multiple NVMe frontend
     paths for one NQN/NSID must survive master status, CSI publish context,
     NodeStage, app writer/reader, and cleanup evidence.
-57. Add backup/restore after it can reuse the same action owner, evidence, and
+57. Operation milestone release readiness. **Active, image-publish blocked**
+    The operation layer is release-ready from code/QA perspective, but it must
+    not be marked shipped until matching `seaweed-block` and
+    `seaweed-block-csi` images are published from the same commit and pass the
+    pinned-image Day-1 smoke. NVMe multipath is not part of this release claim.
+58. Add backup/restore after it can reuse the same action owner, evidence, and
     status model rather than creating another isolated control plane.
 
 The internal release-train contract is
