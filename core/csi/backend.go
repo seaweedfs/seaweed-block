@@ -43,9 +43,10 @@ type PublishTarget struct {
 	LUN        uint32
 	Multipath  bool
 
-	NVMeAddr string
-	NQN      string
-	NSID     uint32
+	NVMeAddr  string
+	NVMeAddrs []string
+	NQN       string
+	NSID      uint32
 }
 
 type PublishTargetLookup interface {
@@ -124,6 +125,13 @@ func publishContext(t PublishTarget) map[string]string {
 	}
 	if t.NVMeAddr != "" && t.NQN != "" {
 		ctx["nvmeAddr"] = t.NVMeAddr
+		ctx["nqn"] = t.NQN
+	}
+	if len(t.NVMeAddrs) > 0 && t.NQN != "" {
+		ctx["nvmeAddrs"] = strings.Join(t.NVMeAddrs, ",")
+		if ctx["nvmeAddr"] == "" {
+			ctx["nvmeAddr"] = t.NVMeAddrs[0]
+		}
 		ctx["nqn"] = t.NQN
 	}
 	return ctx

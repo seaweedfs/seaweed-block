@@ -65,6 +65,7 @@ type stagedVolumeInfo struct {
 	multipath   bool
 	nqn         string
 	nvmeAddr    string
+	nvmeAddrs   []string
 	transport   string
 	fsType      string
 	stagingPath string
@@ -285,11 +286,16 @@ func (s *NodeServer) stageNVMe(ctx context.Context, req *csipb.NodeStageVolumeRe
 	publish := s.refreshPublishContext(ctx, volumeID, req.GetPublishContext())
 	publishContext := publish.Context
 	addr, nqn := nvmeFromContext(publishContext)
+	addrs := nvmeAddrsFromContext(publishContext)
 	if addr == "" || nqn == "" {
 		addr, nqn = nvmeFromContext(req.GetVolumeContext())
+		addrs = nvmeAddrsFromContext(req.GetVolumeContext())
 	}
 	if addr == "" || nqn == "" {
 		return nil, status.Error(codes.FailedPrecondition, "no NVMe publish target")
+	}
+	if len(addrs) == 0 {
+		addrs = []string{addr}
 	}
 	connected, err := s.nvmeUtil.IsConnected(ctx, nqn)
 	if err != nil {
@@ -300,10 +306,12 @@ func (s *NodeServer) stageNVMe(ctx context.Context, req *csipb.NodeStageVolumeRe
 	}
 	connectStarted := false
 	if !connected {
-		if err := s.nvmeUtil.Connect(ctx, addr, nqn); err != nil {
-			return nil, status.Errorf(codes.Internal, "nvme connect: %v", err)
+		for _, pathAddr := range addrs {
+			if err := s.nvmeUtil.Connect(ctx, pathAddr, nqn); err != nil {
+				return nil, status.Errorf(codes.Internal, "nvme connect: %v", err)
+			}
+			connectStarted = true
 		}
-		connectStarted = true
 	}
 	success := false
 	defer func() {
@@ -343,13 +351,15 @@ func (s *NodeServer) stageNVMe(ctx context.Context, req *csipb.NodeStageVolumeRe
 	s.staged[volumeID] = &stagedVolumeInfo{
 		nqn:         nqn,
 		nvmeAddr:    addr,
+		nvmeAddrs:   append([]string(nil), addrs...),
+		multipath:   len(addrs) > 1,
 		transport:   transportNVMe,
 		fsType:      fsType,
 		stagingPath: stagingPath,
 	}
 	s.stagedMu.Unlock()
 
-	s.logger.Printf("NodeStageVolume: %s staged transport=nvme portal=%s target=%s staging=%s", volumeID, addr, nqn, stagingPath)
+	s.logger.Printf("NodeStageVolume: %s staged transport=nvme portal=%s portals=%s target=%s multipath=%v staging=%s", volumeID, addr, strings.Join(addrs, ","), nqn, len(addrs) > 1, stagingPath)
 	success = true
 	s.reportCSIReattachObserved(ctx, volumeID, transportNVMe, addr, publish)
 	return &csipb.NodeStageVolumeResponse{}, nil
@@ -587,7 +597,32 @@ func nvmeFromContext(ctx map[string]string) (addr, nqn string) {
 	if ctx == nil {
 		return "", ""
 	}
+	addrs := nvmeAddrsFromContext(ctx)
+	if len(addrs) > 0 {
+		return addrs[0], ctx["nqn"]
+	}
 	return ctx["nvmeAddr"], ctx["nqn"]
+}
+
+func nvmeAddrsFromContext(ctx map[string]string) []string {
+	if ctx == nil {
+		return nil
+	}
+	raw := ctx["nvmeAddrs"]
+	if raw == "" {
+		raw = ctx["nvmeAddr"]
+	}
+	var out []string
+	seen := map[string]bool{}
+	for _, part := range strings.Split(raw, ",") {
+		addr := strings.TrimSpace(part)
+		if addr == "" || seen[addr] {
+			continue
+		}
+		seen[addr] = true
+		out = append(out, addr)
+	}
+	return out
 }
 
 func transportFromContext(contexts ...map[string]string) string {

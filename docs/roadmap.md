@@ -458,7 +458,13 @@ Recommended order from here:
     not be marked shipped until matching `seaweed-block` and
     `seaweed-block-csi` images are published from the same commit and pass the
     pinned-image Day-1 smoke. NVMe multipath is not part of this release claim.
-58. Add backup/restore after it can reuse the same action owner, evidence, and
+58. Phase 100: Kubernetes CSI NVMe multipath attach. **Active**
+    The component slice preserves multiple NVMe frontend paths for one
+    NQN/NSID through master status, CSI publish context, and NodeStage
+    connection calls. This is not yet a live Kubernetes app-pod claim; the next
+    gate must prove dynamic PVC, mounted writer/reader I/O, and NVMe cleanup in
+    k3s.
+59. Add backup/restore after it can reuse the same action owner, evidence, and
     status model rather than creating another isolated control plane.
 
 The internal release-train contract is

@@ -57,18 +57,21 @@ This is the short internal roadmap. Keep it current and readable.
   evidence refs, cleanup visibility, safe next-step hints, and cross-surface
   agreement. This remains read-only and does not add mutating operator
   lifecycle.
-- Current development slice: returned-replica rebuild/reintegration runtime
-  productization reached a coherent close point at Phase 98. Phases 46-67 made
+- Current development slice: NVMe Kubernetes CSI multipath attach. The
+  returned-replica rebuild/reintegration/failback/frontend-publication operation
+  loop reached a coherent close point at Phase 98, and Phase 99 pinned the
+  existing NVMe ANA/CSI baseline. Phase 100 starts the next storage feature by
+  preserving multiple NVMe frontend paths for one NQN/NSID through master
+  status, CSI publish context, and NodeStage. Live Kubernetes writer/reader
+  evidence remains the next gate before any NVMe multipath release claim.
+  Phases 46-67 made
   returned replicas visible, fenced, action-gated, rebuild/catch-up-capable,
   terminal-evidence-driven, and ACK-eligibility-published. Phases 68-98 then
   connected disabled frontend-publication preflight, failback contracts,
   opt-in failback execution, frontend-publication targets/executors, and a
   live post-publication writer/reader close gate. Default automatic failback
-  remains off. The next development slice starts NVMe parity by first pinning
-  the current ANA/CSI baseline: ANA Identify/Get Log Page/provider projection
-  and CSI single-path NVMe staging exist, while Kubernetes CSI NVMe multipath
-  attach is still the next real gap. Do not claim backup/restore, broad NVMe
-  compatibility, RoCE, performance, or production HA yet.
+  remains off. Do not claim backup/restore, broad NVMe compatibility, RoCE,
+  performance, or production HA yet.
 - Model hardening gate before the next large release: complete the
   ManagedVolume Operations Model under `internal/docs/protocol/` before
   expanding operator or broader HA claims. The goal is to prevent Kubernetes,
@@ -781,8 +784,13 @@ Approximate engineering effort if scope remains tight:
 - Operation milestone release readiness is active and blocked only on matching
   published images. Run `scripts/run-operation-milestone-release-readiness.ps1`
   plus the published-image Day-1 smoke before marking the operation milestone
-  released. After that, Phase 100 should start Kubernetes CSI NVMe multipath
-  attach.
+  released. Development has moved ahead in parallel; this does not mark the
+  operation milestone released.
+- Phase 100 Kubernetes CSI NVMe Multipath Attach is active. The current slice
+  implements and gates the component path from master NVMe frontend grouping to
+  CSI `nvmeAddrs` publish context and NodeStage multi-address connect. A live
+  k3s dynamic-PVC writer/reader gate is still required before claiming
+  Kubernetes NVMe multipath attach.
 - Phase 41-44 are the Operation Layer v0.5 release train: lifecycle-owner
   foundation, real API/admission proof, first bounded finalizer mutation, and
   delete lifecycle close gate.

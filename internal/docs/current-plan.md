@@ -1,120 +1,95 @@
-# Current Plan: Operation Milestone Release Readiness
+# Current Plan: Phase 100 Kubernetes CSI NVMe Multipath Attach
 
-Status: active; blocked until matching published images exist.
+Status: active; D1/D2 component slice PASS.
 
 ## Goal
 
-The operation layer has reached a useful close point:
+Phase 99 pinned the current NVMe baseline:
+
+- ANA Identify/Get Log Page and provider-backed ANA state exist.
+- Direct-host ANA/multipath gates exist.
+- CSI can select and stage a single NVMe publish target.
+
+Phase 100 starts the Kubernetes CSI parity gap that remains:
 
 ```text
-Helm install
-  -> first PVC writer/reader
-  -> SwBlockVolume CR/status/finalizer ownership
-  -> delete-safety hold/release model
-  -> returned-replica failback
-  -> frontend publication
-  -> post-publication workload writer/reader
-  -> zero-residue cleanup
+multiple NVMe frontend paths for one NQN/NSID
+  -> master status groups them as one multipath publish target
+  -> CSI publish context preserves all path addresses
+  -> NodeStage connects every path
+  -> app pod sees one mounted namespace
+  -> cleanup proves no stale NVMe subsystem residue
 ```
 
-Before starting Phase 100 (Kubernetes CSI NVMe multipath attach), run one
-release-readiness pass that proves the operation milestone can be published as
-a beta-quality release. This is a release gate, not a new feature phase.
+This phase is separate from the Operation Layer release-readiness gate. The
+operation milestone release remains blocked until matching published
+`seaweed-block` and `seaweed-block-csi` images exist and pass the pinned-image
+smoke. Development is continuing on NVMe in parallel.
 
-## Release Claim
+## D1/D2 Component Slice
 
-Allowed claim:
+Implemented component-level support for the first half of the path:
 
-```text
-Operation Layer beta: Seaweed Block can install through Helm, create a first
-PVC, publish CRD status/events, protect SwBlockVolume lifecycle with a bounded
-finalizer owner, and run the opt-in returned-replica failback/frontend
-publication close gate with workload I/O evidence.
-```
+- `PublishTarget` can carry `NVMeAddrs` in addition to the legacy first
+  `NVMeAddr`.
+- master status lookup groups multiple NVMe frontends only when they share the
+  same `NQN` and `NSID`.
+- CSI publish context emits:
 
-Non-claims:
+  ```text
+  protocol=nvme
+  nvmeAddr=<first path>
+  nvmeAddrs=<comma-separated paths>
+  nqn=<subsystem NQN>
+  ```
 
-- no production HA/SLO;
-- no default automatic failback;
-- no automatic cleanup execution;
-- no backup/snapshot/restore;
-- no Kubernetes CSI NVMe multipath parity;
-- no broad distro/kernel compatibility or performance claim.
+- NodeStage reads `nvmeAddrs`, connects each address for the same NQN, records
+  staged multipath metadata, and preserves the existing single-path fallback.
 
-## New Gate
+## Gates
 
 Added:
 
 ```text
-scripts/run-operation-milestone-release-readiness.ps1
+scripts/run-phase100-nvme-csi-multipath-component-gate.sh
+testops/scenarios/nvme-csi-multipath-component-chain.yaml
 ```
 
-The gate requires explicit matching images:
+The component gate proves:
+
+- same-NQN/NSID NVMe frontends are grouped into a single CSI multipath target;
+- different NQN frontends are not silently merged;
+- NodeStage connects all NVMe addresses in `nvmeAddrs`;
+- mount failure still cleans up the NVMe connection state;
+- live Kubernetes NVMe multipath attach remains required before release claim.
+
+Verification:
 
 ```text
-SW_BLOCK_RELEASE_IMAGE=ghcr.io/seaweedfs/seaweed-block:sha-<commit>
-SW_BLOCK_CSI_RELEASE_IMAGE=ghcr.io/seaweedfs/seaweed-block-csi:sha-<same-commit>
+local component gate: PASS
+swblock validate nvme-csi-multipath-component-chain.yaml: PASS
+swblock run 20260627-013844-4a23: PASS, 10/10 actions
+go test ./core/frontend/nvme ./cmd/blockvolume ./core/csi ./core/launcher -count=1: PASS
 ```
 
-It performs:
+## Non-Claims
 
-- published image manifest checks;
-- release-scope Go tests;
-- Helm lint;
-- Helm render with operator-status and lifecycle-owner enabled;
-- syntax validation for the published-image Day-1 smoke;
-- syntax validation for the Phase 98 operation close smoke;
-- `git diff --check`.
+- no live Kubernetes app pod NVMe multipath claim yet;
+- no RoCE, performance, broad host compatibility, or production HA claim;
+- no automatic release claim for the operation milestone;
+- no backup/snapshot/restore.
 
-It intentionally reports:
+## Next
+
+After the component gate passes, continue Phase 100 with a live Kubernetes gate:
 
 ```text
-operation_milestone_release_readiness_status=blocked_missing_release_images
+NVMe multipath frontend deployment
+  -> CSI dynamic PVC with protocol=nvme
+  -> NodeStage connects multiple paths for one NQN/NSID
+  -> writer/reader verifies mounted data
+  -> cleanup checks nvme subsystem/controller residue
 ```
 
-when the images are absent. That is the correct state until CI/GHCR publishes
-both images from the same commit.
-
-## Required QA Once Images Exist
-
-1. Run `scripts/run-operation-milestone-release-readiness.ps1` with both image
-   env vars set.
-2. Run the Day-1 published-image scenario:
-
-   ```text
-   swblock run --env sw_block_image=<release-image> --env sw_block_csi_image=<release-csi-image> testops/scenarios/helm-first-volume-via-sw-block-cli-chain.yaml
-   ```
-
-3. Run the operation close regression:
-
-   ```text
-   swblock run testops/scenarios/failback-frontend-workload-close-chain.yaml
-   ```
-
-   This currently remains source-gated/local-image unless the Phase95 build path
-   is adapted to skip local build/import for already-published images.
-
-4. Verify final cleanup:
-
-   ```text
-   cleanup_status=ok
-   k8s_residue_count=0
-   iscsi_residue_count=0
-   multipath_residue_count=0
-   process_residue_count=0
-   hostpath_residue_count=0
-   failure_count=0
-   ```
-
-## Next After Release Gate
-
-If the published-image release smoke passes, tag the operation milestone beta
-and then start Phase 100:
-
-```text
-Kubernetes CSI NVMe multipath attach
-  -> grouped NQN/NSID publish context
-  -> NodeStage connects all NVMe paths
-  -> app pod sees one mounted namespace
-  -> cleanup proves no stale NVMe subsystem residue
-```
+The live gate should be the release-quality proof for the NVMe multipath attach
+claim.

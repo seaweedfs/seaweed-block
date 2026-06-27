@@ -612,6 +612,47 @@ func TestNodeStage_NVMeProtocolUsesNVMeTarget(t *testing.T) {
 	}
 }
 
+func TestNodeStage_NVMeMultipathConnectsAllTargets(t *testing.T) {
+	mi, mn, mm := newMockISCSIUtil(), newMockNVMeUtil(), newMockMountUtil()
+	ns := newTestNodeWithNVMe(mi, mn, mm)
+	staging := t.TempDir()
+
+	_, err := ns.NodeStageVolume(context.Background(), &csipb.NodeStageVolumeRequest{
+		VolumeId:          "v1",
+		StagingTargetPath: staging,
+		VolumeCapability:  testVolumeCapability(),
+		PublishContext: map[string]string{
+			"protocol":  "nvme",
+			"nvmeAddrs": "127.0.0.1:4420,127.0.0.1:4421",
+			"nqn":       "nqn.2026-05.io.seaweedfs:v1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("NodeStageVolume: %v", err)
+	}
+	want := []string{
+		"isconnected:nqn.2026-05.io.seaweedfs:v1",
+		"connect:127.0.0.1:4420:nqn.2026-05.io.seaweedfs:v1",
+		"connect:127.0.0.1:4421:nqn.2026-05.io.seaweedfs:v1",
+		"getdevice:nqn.2026-05.io.seaweedfs:v1",
+	}
+	for i, w := range want {
+		if i >= len(mn.calls) || mn.calls[i] != w {
+			t.Fatalf("nvme calls=%v want prefix=%v", mn.calls, want)
+		}
+	}
+	if len(mi.calls) != 0 {
+		t.Fatalf("nvme path must not call iscsi util, calls=%v", mi.calls)
+	}
+	info := ns.staged["v1"]
+	if info == nil || !info.multipath || len(info.nvmeAddrs) != 2 {
+		t.Fatalf("staged info=%+v", info)
+	}
+	if info.nvmeAddr != "127.0.0.1:4420" || info.nvmeAddrs[1] != "127.0.0.1:4421" {
+		t.Fatalf("staged info=%+v", info)
+	}
+}
+
 func TestNodeStage_NVMeCleansUpConnectWhenMountFails(t *testing.T) {
 	_, mn, mm := newMockISCSIUtil(), newMockNVMeUtil(), newMockMountUtil()
 	mm.formatAndMountErr = errors.New("mkfs failed")
@@ -625,6 +666,38 @@ func TestNodeStage_NVMeCleansUpConnectWhenMountFails(t *testing.T) {
 			"protocol": "nvme",
 			"nvmeAddr": "127.0.0.1:4420",
 			"nqn":      "nqn.2026-05.io.seaweedfs:v1",
+		},
+	})
+	if err == nil {
+		t.Fatal("expected mount failure")
+	}
+	foundDisconnect := false
+	for _, call := range mn.calls {
+		if call == "disconnect:nqn.2026-05.io.seaweedfs:v1" {
+			foundDisconnect = true
+		}
+	}
+	if !foundDisconnect {
+		t.Fatalf("expected cleanup disconnect, calls=%v", mn.calls)
+	}
+	if ns.staged["v1"] != nil {
+		t.Fatalf("staged entry must not be recorded after mount failure: %+v", ns.staged["v1"])
+	}
+}
+
+func TestNodeStage_NVMeMultipathCleansUpConnectsWhenMountFails(t *testing.T) {
+	_, mn, mm := newMockISCSIUtil(), newMockNVMeUtil(), newMockMountUtil()
+	mm.formatAndMountErr = errors.New("mkfs failed")
+	ns := newTestNodeWithNVMe(newMockISCSIUtil(), mn, mm)
+
+	_, err := ns.NodeStageVolume(context.Background(), &csipb.NodeStageVolumeRequest{
+		VolumeId:          "v1",
+		StagingTargetPath: t.TempDir(),
+		VolumeCapability:  testVolumeCapability(),
+		PublishContext: map[string]string{
+			"protocol":  "nvme",
+			"nvmeAddrs": "127.0.0.1:4420,127.0.0.1:4421",
+			"nqn":       "nqn.2026-05.io.seaweedfs:v1",
 		},
 	})
 	if err == nil {
