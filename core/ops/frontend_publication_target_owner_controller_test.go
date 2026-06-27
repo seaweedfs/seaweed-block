@@ -106,6 +106,8 @@ func TestFrontendPublicationTargetOwnerCreatesTargetFromTerminalFailback(t *test
 		created.Spec.VolumeID != "pvc-demo" ||
 		created.Spec.PVCName != "demo-pvc" ||
 		created.Spec.ReplicaID != "r2" ||
+		created.Spec.TargetDataAddr != "data-r2" ||
+		created.Spec.TargetCtrlAddr != "ctrl-r2" ||
 		created.Spec.SourceFailbackName != "demo-pvc-r2-failback" ||
 		created.Spec.SourceEligibilityName != "" ||
 		created.Spec.AckEligibilityKnown ||
@@ -123,6 +125,43 @@ func TestFrontendPublicationTargetOwnerCreatesTargetFromTerminalFailback(t *test
 	}
 	if created.Status.State != "" {
 		t.Fatalf("target owner must not pre-populate status: %+v", created.Status)
+	}
+}
+
+func TestFrontendPublicationTargetOwnerActivatesFailbackTargetWithExplicitPolicy(t *testing.T) {
+	client := &fakeFrontendPublicationTargetOwnerClient{
+		failbacks: []SwBlockReplicaFailbackObject{frontendPublicationTargetOwnerTerminalFailback()},
+	}
+	result, err := (FrontendPublicationTargetOwnerReconciler{
+		Namespace:               "kube-system",
+		Client:                  client,
+		ActivateTargets:         true,
+		ActivationPolicyEnabled: true,
+		RuntimeEndpoint:         "http://blockmaster.kube-system.svc:9334/runtime/frontend-publication",
+	}).Reconcile(context.Background())
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if result.TargetCreateCount != 1 {
+		t.Fatalf("result=%+v", result)
+	}
+	created := client.creates[0]
+	if created.Spec.FrontendPublicationDecision != AuthorityExecutorPublicationDecisionEnabled ||
+		created.Spec.FrontendPublicationReason != "frontend_publication_requested" ||
+		!created.Spec.FrontendPublicationMutationAllowed ||
+		created.Spec.RuntimeEndpoint != "http://blockmaster.kube-system.svc:9334/runtime/frontend-publication" {
+		t.Fatalf("created=%+v", created)
+	}
+}
+
+func TestFrontendPublicationTargetOwnerRejectsActivationWithoutPolicy(t *testing.T) {
+	_, err := (FrontendPublicationTargetOwnerReconciler{
+		Client:          &fakeFrontendPublicationTargetOwnerClient{},
+		ActivateTargets: true,
+		RuntimeEndpoint: "http://blockmaster.kube-system.svc:9334/runtime/frontend-publication",
+	}).Reconcile(context.Background())
+	if err == nil || err.Error() != "frontend publication target activation is disabled by product policy" {
+		t.Fatalf("err=%v", err)
 	}
 }
 
@@ -242,10 +281,12 @@ func frontendPublicationTargetOwnerTerminalFailback() SwBlockReplicaFailbackObje
 			Name:       "demo-pvc-r2-failback",
 		},
 		Spec: SwBlockReplicaFailbackSpec{
-			VolumeName: "demo-pvc",
-			VolumeID:   "pvc-demo",
-			PVCName:    "demo-pvc",
-			ReplicaID:  "r2",
+			VolumeName:     "demo-pvc",
+			VolumeID:       "pvc-demo",
+			PVCName:        "demo-pvc",
+			ReplicaID:      "r2",
+			TargetDataAddr: "data-r2",
+			TargetCtrlAddr: "ctrl-r2",
 		},
 		Status: SwBlockReplicaFailbackCRDStatus{
 			Executor:                          "failback-executor",

@@ -489,6 +489,8 @@ func TestPhase69SwBlockFrontendPublicationTargetSchema(t *testing.T) {
 		"volumeID",
 		"pvcName",
 		"replicaID",
+		"targetDataAddr",
+		"targetCtrlAddr",
 		"sourceEligibilityName",
 		"sourceFailbackName",
 		"ackEligibilityKnown",

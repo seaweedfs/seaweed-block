@@ -316,12 +316,18 @@ func runOpsFrontendPublicationTargetOwner(args []string, stdout, stderr io.Write
 	fs := flag.NewFlagSet("sw-block ops frontend-publication-target-owner", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	var (
-		dryRun    bool
-		namespace string
-		interval  time.Duration
+		dryRun                  bool
+		namespace               string
+		activateTargets         bool
+		activationPolicyEnabled bool
+		runtimeEndpoint         string
+		interval                time.Duration
 	)
 	fs.BoolVar(&dryRun, "dry-run", false, "evaluate frontend publication target planning without creating SwBlockFrontendPublication objects")
-	fs.StringVar(&namespace, "namespace", "default", "Kubernetes namespace containing SwBlockReplicaEligibility objects")
+	fs.StringVar(&namespace, "namespace", "default", "Kubernetes namespace containing SwBlockReplicaEligibility and SwBlockReplicaFailback objects")
+	fs.BoolVar(&activateTargets, "activate-targets", false, "create enabled frontend publication targets for explicit execution")
+	fs.BoolVar(&activationPolicyEnabled, "activation-policy", false, "allow frontend publication target activation; must be set with --activate-targets")
+	fs.StringVar(&runtimeEndpoint, "runtime-endpoint", "", "frontend publication runtime endpoint to stamp on activated targets")
 	fs.DurationVar(&interval, "interval", 0, "repeat frontend-publication-target-owner reconciliation at this interval; 0 runs once")
 	if err := fs.Parse(args); err != nil {
 		return ops.VolumeStatusExitInvalid
@@ -337,9 +343,12 @@ func runOpsFrontendPublicationTargetOwner(args []string, stdout, stderr io.Write
 			return ops.VolumeStatusExitInvalid
 		}
 		result, err := (ops.FrontendPublicationTargetOwnerReconciler{
-			Namespace: namespace,
-			Client:    client,
-			DryRun:    dryRun,
+			Namespace:               namespace,
+			Client:                  client,
+			DryRun:                  dryRun,
+			ActivateTargets:         activateTargets,
+			ActivationPolicyEnabled: activationPolicyEnabled,
+			RuntimeEndpoint:         runtimeEndpoint,
 		}).Reconcile(context.Background())
 		if err != nil {
 			fmt.Fprintf(stderr, "sw-block ops frontend-publication-target-owner: %v\n", err)
@@ -2146,7 +2155,7 @@ func usage(w io.Writer) {
 	fmt.Fprintln(w, "  sw-block ops rebuild-target-owner [--dry-run] [--namespace <ns>] [--interval 30s]")
 	fmt.Fprintln(w, "  sw-block ops failback-target-owner [--dry-run] [--namespace <ns>] [--interval 30s] [--activate-targets --activation-policy --runtime-endpoint <addr>]")
 	fmt.Fprintln(w, "  sw-block ops failback-executor [--dry-run] [--namespace <ns>] [--enable-execution] [--execution-policy] [--failback-runtime-url <url>] [--interval 30s]")
-	fmt.Fprintln(w, "  sw-block ops frontend-publication-target-owner [--dry-run] [--namespace <ns>] [--interval 30s]")
+	fmt.Fprintln(w, "  sw-block ops frontend-publication-target-owner [--dry-run] [--namespace <ns>] [--interval 30s] [--activate-targets --activation-policy --runtime-endpoint <url>]")
 	fmt.Fprintln(w, "  sw-block ops frontend-publication-executor [--dry-run] [--namespace <ns>] [--enable-execution] [--execution-policy] [--frontend-publication-runtime-url <url>] [--interval 30s]")
 }
 

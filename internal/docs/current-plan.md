@@ -1,157 +1,191 @@
-# Current Plan: Phase 97 Frontend Publication Executor Call-site
+# Current Plan: Phase 98 Failback Frontend Workload Close Gate
 
 Status: complete.
 
 ## Goal
 
-Phase 97 connects the frontend-publication executor's explicit execution flags
-to the runtime call-site for a post-failback target:
+Phase 98 closes the returned-replica failback operation loop that Phases 46-97
+built in small safety slices:
 
 ```text
-SwBlockFrontendPublication target
-sourceFailbackName=<SwBlockReplicaFailback>
-failbackCompleted=true
-frontendPublicationDecision=enabled
-frontendPublicationMutationAllowed=true
-runtimeEndpoint=<http runtime>
-        |
-        v
-frontend publication executor
-        |
-        v
-FrontendPublicationRuntime request
-        |
-        v
-status.state=published
-reasonCode=frontend_published
+install Helm suite
+  -> first PVC writer/reader
+  -> returned-replica failback
+  -> product-owned frontend publication
+  -> post-publication writer/reader I/O
+  -> cleanup verifier reports zero residue
 ```
 
-This is still **not** a workload-visible I/O claim. The phase proves the
-executor/runtime handoff and terminal evidence contract only.
+This is the first workload-visible post-failback frontend-publication claim.
 
-## Deliverables
+## What Changed
 
-### D1: Failback-source Runtime Request
+### D1: Product-owned Frontend Publication Runtime
 
-`FrontendPublicationRuntimeRequest` now carries the post-failback source facts:
+`blockmaster` now has an opt-in HTTP runtime endpoint:
 
 ```text
-sourceFailbackName
-failbackCompleted
-authorityEpochAdvanced
-singlePrimaryAfterFailback
-publishTargetSwappedAfterFailback
+--frontend-publication-runtime-http
+--frontend-publication-runtime-listen <addr>
+/runtime/frontend-publication
 ```
 
-The executor accepts an enabled failback-source target only when these facts are
-present and `noCrossVolumeIdentityChange=true`.
-
-### D2: Explicit CLI Policy
-
-`sw-block ops frontend-publication-executor` now supports:
+The endpoint verifies that the current publisher authority line matches the
+terminal failback target:
 
 ```text
---enable-execution
---execution-policy
---frontend-publication-runtime-url <url>
+replicaID
+targetDataAddr
+targetCtrlAddr
 ```
 
-Guards:
+It returns published terminal evidence only when the authority line is already
+the post-failback line. It does not start failback, mutate storage, or change a
+different volume.
 
-- `--frontend-publication-runtime-url` without `--enable-execution` is rejected;
-- `--enable-execution` without `--execution-policy` is rejected by the
-  reconciler;
-- runtime terminal evidence must report `frontendPublished=true`,
-  `failbackStarted=false`, `noStorageMutation=true`, and
-  `noCrossVolumeIdentityChange=true`.
+### D2: Failback-source Publication Targets
 
-### D3: Helm Default-off Wiring
-
-`frontendPublicationExecutor.execution` was added to chart values:
-
-```yaml
-execution:
-  enabled: false
-  policy: false
-  runtimeUrl: ""
-```
-
-Default render still omits the executor. Explicit render can add:
+`SwBlockFrontendPublication.spec` now carries:
 
 ```text
---enable-execution
---execution-policy
---frontend-publication-runtime-url=<url>
+targetDataAddr
+targetCtrlAddr
 ```
 
-### D4: Runner Gate
+The frontend publication target owner copies these fields from terminal
+`SwBlockReplicaFailback` evidence and can activate a target only under explicit
+policy and runtime endpoint configuration.
+
+### D3: Deployed Suite Wiring
+
+The Helm chart can explicitly enable:
+
+```text
+blockmaster.frontendPublicationRuntimeHTTP
+frontendPublicationTargetOwner.activation
+frontendPublicationExecutor.execution
+```
+
+Default installs remain off.
+
+### D4: Live Close Gate
 
 Added:
 
 ```text
-scripts/run-phase97-frontend-publication-executor-callsite-gate.sh
-testops/scenarios/frontend-publication-executor-callsite-chain.yaml
+scripts/run-phase98-failback-frontend-workload-close-gate.sh
+testops/scenarios/failback-frontend-workload-close-chain.yaml
 ```
 
-The gate asserts:
+The gate reuses the deployed Phase 95 suite with
+`SW_BLOCK_PHASE95_FRONTEND_PUBLICATION_CLOSE=true`, applies current CRDs before
+install, and verifies:
 
-- failback-source target invokes runtime only with explicit policy;
-- policy-disabled execution is rejected;
-- runtime URL without `--enable-execution` is rejected;
-- runtime failure and invalid terminal evidence do not falsely publish;
-- Helm default remains off;
-- enabled Helm render includes execution flags;
-- `failback_attempts=0`;
-- `failback_started=false`;
-- `storage_mutation_allowed=false`.
+- first PVC writer/reader passes;
+- failback reaches `failed_back`;
+- frontend publication target reaches `published`;
+- publication evidence says `frontendPublished=true`;
+- publication evidence says `failbackStarted=false`;
+- publication evidence says `noStorageMutation=true`;
+- post-publication writer and reader both pass;
+- cleanup verifier reports zero residue.
 
 ## Verification
 
 Local checks:
 
 ```text
-go test ./core/ops ./cmd/sw-block ./core/host/master -count=1
+go test ./core/ops ./cmd/sw-block ./cmd/blockmaster ./core/host/master -count=1
 helm lint charts/seaweed-block
-swblock validate testops/scenarios/frontend-publication-executor-callsite-chain.yaml
+swblock validate testops/scenarios/failback-frontend-workload-close-chain.yaml
 git diff --check
 ```
 
-Runner check:
+Live runner:
 
 ```text
-swblock run testops/scenarios/frontend-publication-executor-callsite-chain.yaml
-run=20260626-160330-ecc9
+swblock run testops/scenarios/failback-frontend-workload-close-chain.yaml
+run=20260626-171324-40b5
 result=PASS 16/16
 ```
 
 Terminal evidence:
 
 ```text
-phase97_frontend_publication_executor_callsite_status=ok
-failback_target_runtime_invoked=true
-frontend_publication_attempts=1
+phase98_failback_frontend_workload_close_status=ok
+crds_applied=true
+helm_install=pass
+deployed_suite_pods_ready=true
+first_volume_writer_reader=pass
+failback_executor_completed=true
+executor_status_failed_back=true
+master_publisher_epoch_advanced=true
+publish_target_swapped_after_failback=true
+frontend_publication_target_created=true
+frontend_publication_published=true
 frontend_published=true
-failback_attempts=0
-failback_started=false
-publication_status_reason=frontend_published
-publication_mutation_allowed=false
-frontend_publication_executor_default_off=true
-frontend_publication_execution_requires_policy=true
-frontend_publication_runtime_url_requires_enable=true
-storage_mutation_allowed=false
+frontend_publication_failback_started=false
+frontend_publication_storage_mutation_allowed=false
+post_failback_publication_writer_verified=true
+post_failback_publication_reader_verified=true
+cleanup_status=ok
 ```
+
+Cleanup verifier:
+
+```text
+k8s_residue_count=0
+iscsi_residue_count=0
+process_residue_count=0
+multipath_residue_count=0
+hostpath_residue_count=0
+failure_count=0
+```
+
+## Important Finding
+
+The first Phase 98 live run exposed a lab/upgrade hazard: Helm does not update
+pre-existing CRDs from `charts/*/crds`. The current CRD allowed
+`frontendPublicationDecision=enabled`, but the lab still had an older schema
+that allowed only `blocked` and `disabled`, causing a live 422.
+
+The gate now applies current CRDs before install so it tests the working tree
+instead of stale lab state. Release and upgrade docs should keep the same rule:
+apply CRDs before installing or upgrading a chart that changes CRD schema.
+
+## Closed Boundary
+
+Phase 98 closes this operation-layer path:
+
+```text
+returned replica caught up
+  -> ACK eligibility
+  -> failback target
+  -> deployed failback executor
+  -> blockmaster authority failback
+  -> frontend publication target
+  -> deployed frontend publication executor
+  -> product-owned publication runtime
+  -> workload writer/reader still works
+```
+
+Non-claims:
+
+- no default automatic failback;
+- no broad returned-replica rebuild automation;
+- no backup/snapshot/restore;
+- no NVMe ANA parity;
+- no production SLO or broad compatibility claim.
 
 ## Next
 
-The remaining boundary is workload-visible frontend path switching:
+The operation loop has reached a useful close point. The next coherent choices
+are:
 
-```text
-run the deployed failback + frontend-publication suite
-publish the post-failback frontend path through product-owned runtime
-verify reader/writer against the new path
-prove no cross-volume publication
-cleanup leaves zero residue
-```
+1. release hardening for this milestone: publish matching images and run a
+   pinned-image release smoke;
+2. move to a new large feature train: NVMe ANA parity, backup/restore, or a
+   broader production-soak track.
 
-That should remain separate because it is the first user-visible data-path
-claim after failback.
+Avoid adding more small operation phases unless they close a concrete release
+blocker.

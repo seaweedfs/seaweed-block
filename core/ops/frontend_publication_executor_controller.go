@@ -35,6 +35,8 @@ type FrontendPublicationRuntimeRequest struct {
 	VolumeID                          string   `json:"volumeID"`
 	PVCName                           string   `json:"pvcName"`
 	ReplicaID                         string   `json:"replicaID"`
+	TargetDataAddr                    string   `json:"targetDataAddr,omitempty"`
+	TargetCtrlAddr                    string   `json:"targetCtrlAddr,omitempty"`
 	RuntimeEndpoint                   string   `json:"runtimeEndpoint,omitempty"`
 	SourceEligibilityName             string   `json:"sourceEligibilityName,omitempty"`
 	SourceFailbackName                string   `json:"sourceFailbackName,omitempty"`
@@ -207,6 +209,8 @@ func frontendPublicationExecutorFailbackTargetValid(target SwBlockFrontendPublic
 	spec := target.Spec
 	return spec.VolumeName != "" &&
 		spec.ReplicaID != "" &&
+		spec.TargetDataAddr != "" &&
+		spec.TargetCtrlAddr != "" &&
 		spec.SourceFailbackName != "" &&
 		spec.FailbackCompleted &&
 		spec.AuthorityEpochAdvanced &&
@@ -319,6 +323,8 @@ func frontendPublicationRuntimeRequest(target SwBlockFrontendPublicationObject) 
 		VolumeID:                          spec.VolumeID,
 		PVCName:                           spec.PVCName,
 		ReplicaID:                         spec.ReplicaID,
+		TargetDataAddr:                    spec.TargetDataAddr,
+		TargetCtrlAddr:                    spec.TargetCtrlAddr,
 		RuntimeEndpoint:                   spec.RuntimeEndpoint,
 		SourceEligibilityName:             spec.SourceEligibilityName,
 		SourceFailbackName:                spec.SourceFailbackName,

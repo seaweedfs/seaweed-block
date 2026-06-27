@@ -73,6 +73,29 @@ func TestParseFlags_FailbackRuntimeRPCDisabledByDefault(t *testing.T) {
 	}
 }
 
+func TestParseFlags_FrontendPublicationRuntimeHTTPDisabledByDefault(t *testing.T) {
+	f, err := parseFlags([]string{
+		"--authority-store", "authority-dir",
+	})
+	if err != nil {
+		t.Fatalf("parseFlags: %v", err)
+	}
+	if f.frontendPublicationRuntimeHTTP {
+		t.Fatal("frontend publication runtime HTTP must be disabled by default")
+	}
+	f, err = parseFlags([]string{
+		"--authority-store", "authority-dir",
+		"--frontend-publication-runtime-http",
+		"--frontend-publication-runtime-listen", "0.0.0.0:9334",
+	})
+	if err != nil {
+		t.Fatalf("parseFlags with frontend publication runtime HTTP: %v", err)
+	}
+	if !f.frontendPublicationRuntimeHTTP || f.frontendPublicationRuntimeListen != "0.0.0.0:9334" {
+		t.Fatalf("frontend publication runtime flags=%+v", f)
+	}
+}
+
 func TestParseFlags_ClusterSpecOptional(t *testing.T) {
 	f, err := parseFlags([]string{
 		"--authority-store", "authority-dir",

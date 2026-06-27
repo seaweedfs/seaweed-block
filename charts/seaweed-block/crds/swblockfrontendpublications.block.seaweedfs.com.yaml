@@ -53,6 +53,10 @@ spec:
                   type: string
                 replicaID:
                   type: string
+                targetDataAddr:
+                  type: string
+                targetCtrlAddr:
+                  type: string
                 sourceEligibilityName:
                   type: string
                 sourceFailbackName:

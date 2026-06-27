@@ -370,7 +370,9 @@ Recommended order from here:
     (`internal/docs/finished-plans/phase87_finishedplan_failback_docs_alignment.md`).
     README, product roadmap, and engineering wiki now agree that returned-replica
     failback runtime is opt-in/source-gated, automatic deployed failback is not
-    claimed, and frontend publication after failback remains future work.
+    claimed, and frontend publication after failback was still future work at
+    that point. Phase 98 later closed the explicit opt-in frontend-publication
+    and workload-I/O gate.
 45. Phase 88: failback deployed suite packaging. **Closed 2026-06-26, local PASS**
     (`internal/docs/finished-plans/phase88_finishedplan_failback_deployed_suite.md`).
     Helm can now render the complete opt-in failback component suite:
@@ -437,7 +439,14 @@ Recommended order from here:
     failback-source target only under explicit policy and writes
     `frontend_published` only from valid terminal evidence. Workload-visible
     I/O remains a separate gate.
-55. Add backup/restore and NVMe ANA parity after they can reuse the same action
+55. Phase 98: failback frontend workload close gate. **Closed 2026-06-26,
+    live PASS**
+    (`internal/docs/finished-plans/phase98_finishedplan_failback_frontend_workload_close.md`).
+    The deployed opt-in suite now proves the full returned-replica operation
+    loop through live k3s: first PVC writer/reader, returned-replica failback,
+    product-owned frontend publication, post-publication writer/reader I/O, and
+    zero-residue cleanup. Default automatic failback remains off.
+56. Add backup/restore and NVMe ANA parity after they can reuse the same action
    owner, evidence, and status model rather than creating another isolated
    control plane.
 
@@ -487,11 +496,11 @@ a later Kubernetes smoke. Phase 89-95 add the current-authority facts,
 activation policy, executor handoff, multi-volume isolation, deployed render,
 real blockmaster gRPC smoke, and finally a live Kubernetes smoke that writes
 terminal `failed_back` evidence. Phase 96 consumes that terminal evidence to
-create a disabled frontend-publication target, keeping actual frontend
-publication and workload-visible path switching as separate later gates. Phase
-97 wires the explicit-policy executor call-site for that target and proves
-terminal frontend-publication evidence, while keeping workload-visible I/O as a
-separate gate.
+create a disabled frontend-publication target. Phase 97 wires the
+explicit-policy executor call-site for that target and proves terminal
+frontend-publication evidence. Phase 98 closes the deployed user-visible loop:
+product-owned frontend publication after failback is followed by workload
+writer/reader verification and zero-residue cleanup.
 
 The practical rule is:
 

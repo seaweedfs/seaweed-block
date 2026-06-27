@@ -1,7 +1,10 @@
 package master
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"net/http"
 	"testing"
 
 	"github.com/seaweedfs/seaweed-block/core/authority"
@@ -56,6 +59,94 @@ func TestHostFailbackAuthorityRuntimeUsesLivePublisher(t *testing.T) {
 		line.DataAddr != "127.0.0.1:9201" ||
 		line.CtrlAddr != "127.0.0.1:9101" {
 		t.Fatalf("line=%+v current=%+v", line, current)
+	}
+}
+
+func TestHostFrontendPublicationRuntimeHTTPConfirmsPostFailbackAuthorityLine(t *testing.T) {
+	h := newTestMasterWithFrontendPublicationRuntimeHTTP(t)
+	defer closeTestMaster(t, h)
+	seedVerifiedExistingReplicaPlacement(t, h)
+	if _, err := h.RunLifecycleProductTick(); err != nil {
+		t.Fatalf("product tick: %v", err)
+	}
+	current := waitAuthorityLine(t, h.Publisher(), "vol-a")
+	if _, err := h.FailbackAuthorityRuntime().ExecuteFailback(context.Background(), authority.FailbackRuntimeRequest{
+		VolumeID:                     "vol-a",
+		ReplicaID:                    "r1",
+		TargetDataAddr:               "127.0.0.1:9201",
+		TargetCtrlAddr:               "127.0.0.1:9101",
+		ExpectedCurrentReplicaID:     current.ReplicaID,
+		ExpectedCurrentEpoch:         current.Epoch,
+		AckEligible:                  true,
+		FrontendFencedBeforeFailback: true,
+		DurableFrontierCovered:       true,
+		NoCrossVolumeIdentityChange:  true,
+	}); err != nil {
+		t.Fatalf("failback runtime: %v", err)
+	}
+
+	body, err := json.Marshal(map[string]any{
+		"volumeID":                          "vol-a",
+		"replicaID":                         "r1",
+		"targetDataAddr":                    "127.0.0.1:9201",
+		"targetCtrlAddr":                    "127.0.0.1:9101",
+		"sourceFailbackName":                "vol-a-r1-failback",
+		"failbackCompleted":                 true,
+		"authorityEpochAdvanced":            true,
+		"singlePrimaryAfterFailback":        true,
+		"publishTargetSwappedAfterFailback": true,
+		"noCrossVolumeIdentityChange":       true,
+		"evidenceRefs":                      []string{"phase98"},
+	})
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	resp, err := http.Post("http://"+h.FrontendPublicationRuntimeAddr()+"/runtime/frontend-publication", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("post frontend runtime: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status=%s", resp.Status)
+	}
+	var result frontendPublicationRuntimeResult
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("decode result: %v", err)
+	}
+	if !result.FrontendPublished || result.FailbackStarted || !result.NoStorageMutation || !result.NoCrossVolumeIdentityChange {
+		t.Fatalf("result=%+v", result)
+	}
+}
+
+func TestHostFrontendPublicationRuntimeHTTPRejectsMismatchedAuthorityLine(t *testing.T) {
+	h := newTestMasterWithFrontendPublicationRuntimeHTTP(t)
+	defer closeTestMaster(t, h)
+	seedVerifiedExistingReplicaPlacement(t, h)
+	if _, err := h.RunLifecycleProductTick(); err != nil {
+		t.Fatalf("product tick: %v", err)
+	}
+	body, err := json.Marshal(map[string]any{
+		"volumeID":                          "vol-a",
+		"replicaID":                         "r1",
+		"targetDataAddr":                    "127.0.0.1:9201",
+		"targetCtrlAddr":                    "127.0.0.1:9101",
+		"sourceFailbackName":                "vol-a-r1-failback",
+		"failbackCompleted":                 true,
+		"authorityEpochAdvanced":            true,
+		"singlePrimaryAfterFailback":        true,
+		"publishTargetSwappedAfterFailback": true,
+		"noCrossVolumeIdentityChange":       true,
+	})
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	resp, err := http.Post("http://"+h.FrontendPublicationRuntimeAddr()+"/runtime/frontend-publication", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("post frontend runtime: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusPreconditionFailed {
+		t.Fatalf("status=%s", resp.Status)
 	}
 }
 
@@ -215,6 +306,22 @@ func newTestMasterWithFailbackRuntimeRPC(t *testing.T) *Host {
 		LifecycleStoreDir:  t.TempDir(),
 		Listen:             "127.0.0.1:0",
 		FailbackRuntimeRPC: true,
+	})
+	if err != nil {
+		t.Fatalf("master.New: %v", err)
+	}
+	h.Start()
+	return h
+}
+
+func newTestMasterWithFrontendPublicationRuntimeHTTP(t *testing.T) *Host {
+	t.Helper()
+	h, err := New(Config{
+		AuthorityStoreDir:                t.TempDir(),
+		LifecycleStoreDir:                t.TempDir(),
+		Listen:                           "127.0.0.1:0",
+		FrontendPublicationRuntimeHTTP:   true,
+		FrontendPublicationRuntimeListen: "127.0.0.1:0",
 	})
 	if err != nil {
 		t.Fatalf("master.New: %v", err)

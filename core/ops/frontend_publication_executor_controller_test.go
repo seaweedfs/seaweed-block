@@ -261,6 +261,8 @@ func TestFrontendPublicationExecutorInvokesRuntimeForFailbackTargetWhenExplicitl
 	}
 	req := runtime.requests[0]
 	if req.SourceFailbackName != target.Spec.SourceFailbackName ||
+		req.TargetDataAddr != target.Spec.TargetDataAddr ||
+		req.TargetCtrlAddr != target.Spec.TargetCtrlAddr ||
 		!req.FailbackCompleted ||
 		!req.AuthorityEpochAdvanced ||
 		!req.SinglePrimaryAfterFailback ||
@@ -374,6 +376,8 @@ func frontendPublicationExecutorFailbackTerminalTarget() SwBlockFrontendPublicat
 			VolumeID:                           "pvc-demo",
 			PVCName:                            "demo-pvc",
 			ReplicaID:                          "r2",
+			TargetDataAddr:                     "127.0.0.1:39201",
+			TargetCtrlAddr:                     "127.0.0.1:39202",
 			SourceFailbackName:                 "demo-pvc-r2-failback",
 			NoCrossVolumeIdentityChange:        true,
 			FailbackCompleted:                  true,

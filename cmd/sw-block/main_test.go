@@ -1343,6 +1343,8 @@ func TestOpsFrontendPublicationTargetOwnerCreatesTargetFromFailback(t *testing.T
 	if created.Ref.Name != "demo-pvc-r1-frontend-publication" ||
 		created.Spec.VolumeName != "demo-pvc" ||
 		created.Spec.ReplicaID != "r1" ||
+		created.Spec.TargetDataAddr != "data-r1" ||
+		created.Spec.TargetCtrlAddr != "ctrl-r1" ||
 		created.Spec.SourceFailbackName != "demo-pvc-r1-failback" ||
 		created.Spec.SourceEligibilityName != "" ||
 		!created.Spec.FailbackCompleted ||
@@ -1768,6 +1770,8 @@ func TestOpsFrontendPublicationExecutorExecutesFailbackTargetWithExplicitPolicy(
 		t.Fatalf("exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
 	}
 	if got.SourceFailbackName != "demo-pvc-r1-failback" ||
+		got.TargetDataAddr != "data-r1" ||
+		got.TargetCtrlAddr != "ctrl-r1" ||
 		!got.FailbackCompleted ||
 		!got.AuthorityEpochAdvanced ||
 		!got.SinglePrimaryAfterFailback ||
@@ -2231,6 +2235,8 @@ func cmdFrontendPublicationFailbackExecutableTarget() ops.SwBlockFrontendPublica
 			VolumeID:                           "pvc-demo",
 			PVCName:                            "demo-pvc",
 			ReplicaID:                          "r1",
+			TargetDataAddr:                     "data-r1",
+			TargetCtrlAddr:                     "ctrl-r1",
 			SourceFailbackName:                 "demo-pvc-r1-failback",
 			NoCrossVolumeIdentityChange:        true,
 			FailbackCompleted:                  true,

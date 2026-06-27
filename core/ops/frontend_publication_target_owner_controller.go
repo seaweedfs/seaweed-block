@@ -15,10 +15,13 @@ type FrontendPublicationTargetOwnerClient interface {
 }
 
 type FrontendPublicationTargetOwnerReconciler struct {
-	Namespace string
-	Client    FrontendPublicationTargetOwnerClient
-	DryRun    bool
-	Now       func() time.Time
+	Namespace               string
+	Client                  FrontendPublicationTargetOwnerClient
+	DryRun                  bool
+	ActivateTargets         bool
+	ActivationPolicyEnabled bool
+	RuntimeEndpoint         string
+	Now                     func() time.Time
 }
 
 type FrontendPublicationTargetOwnerReconcileResult struct {
@@ -37,6 +40,12 @@ type FrontendPublicationTargetOwnerReconcileResult struct {
 }
 
 func (r FrontendPublicationTargetOwnerReconciler) Reconcile(ctx context.Context) (FrontendPublicationTargetOwnerReconcileResult, error) {
+	if r.ActivateTargets && !r.ActivationPolicyEnabled {
+		return FrontendPublicationTargetOwnerReconcileResult{}, fmt.Errorf("frontend publication target activation is disabled by product policy")
+	}
+	if r.ActivateTargets && strings.TrimSpace(r.RuntimeEndpoint) == "" {
+		return FrontendPublicationTargetOwnerReconcileResult{}, fmt.Errorf("frontend publication target activation requires runtime endpoint")
+	}
 	if r.Client == nil {
 		return FrontendPublicationTargetOwnerReconcileResult{}, fmt.Errorf("frontend publication target owner client is required")
 	}
@@ -69,7 +78,7 @@ func (r FrontendPublicationTargetOwnerReconciler) Reconcile(ctx context.Context)
 			result.TargetExistingCount++
 			continue
 		}
-		obj := frontendPublicationTargetOwnerObjectFromEligibility(namespace, eligibility)
+		obj := r.frontendPublicationTargetOwnerObjectFromEligibility(namespace, eligibility)
 		if !r.DryRun {
 			if err := r.Client.CreateSwBlockFrontendPublication(ctx, namespace, obj); err != nil {
 				return result, err
@@ -89,7 +98,7 @@ func (r FrontendPublicationTargetOwnerReconciler) Reconcile(ctx context.Context)
 			result.TargetExistingCount++
 			continue
 		}
-		obj := frontendPublicationTargetOwnerObjectFromFailback(namespace, failback)
+		obj := r.frontendPublicationTargetOwnerObjectFromFailback(namespace, failback)
 		if !r.DryRun {
 			if err := r.Client.CreateSwBlockFrontendPublication(ctx, namespace, obj); err != nil {
 				return result, err
@@ -148,9 +157,9 @@ func frontendPublicationTargetOwnerHasTarget(volumeName, volumeID, pvcName, repl
 	return false
 }
 
-func frontendPublicationTargetOwnerObjectFromEligibility(namespace string, eligibility SwBlockReplicaEligibilityObject) SwBlockFrontendPublicationObject {
+func (r FrontendPublicationTargetOwnerReconciler) frontendPublicationTargetOwnerObjectFromEligibility(namespace string, eligibility SwBlockReplicaEligibilityObject) SwBlockFrontendPublicationObject {
 	status := eligibility.Status
-	return SwBlockFrontendPublicationObject{
+	obj := SwBlockFrontendPublicationObject{
 		Ref: OperatorObjectRef{
 			APIVersion: SwBlockVolumeAPIVersion,
 			Kind:       SwBlockFrontendPublicationKind,
@@ -174,11 +183,18 @@ func frontendPublicationTargetOwnerObjectFromEligibility(namespace string, eligi
 			FrontendPublicationMutationAllowed: status.FrontendPublicationMutationAllowed,
 		},
 	}
+	if r.ActivateTargets {
+		obj.Spec.FrontendPublicationDecision = AuthorityExecutorPublicationDecisionEnabled
+		obj.Spec.FrontendPublicationReason = "frontend_publication_requested"
+		obj.Spec.FrontendPublicationMutationAllowed = true
+		obj.Spec.RuntimeEndpoint = strings.TrimSpace(r.RuntimeEndpoint)
+	}
+	return obj
 }
 
-func frontendPublicationTargetOwnerObjectFromFailback(namespace string, failback SwBlockReplicaFailbackObject) SwBlockFrontendPublicationObject {
+func (r FrontendPublicationTargetOwnerReconciler) frontendPublicationTargetOwnerObjectFromFailback(namespace string, failback SwBlockReplicaFailbackObject) SwBlockFrontendPublicationObject {
 	status := failback.Status
-	return SwBlockFrontendPublicationObject{
+	obj := SwBlockFrontendPublicationObject{
 		Ref: OperatorObjectRef{
 			APIVersion: SwBlockVolumeAPIVersion,
 			Kind:       SwBlockFrontendPublicationKind,
@@ -190,6 +206,8 @@ func frontendPublicationTargetOwnerObjectFromFailback(namespace string, failback
 			VolumeID:                           failback.Spec.VolumeID,
 			PVCName:                            failback.Spec.PVCName,
 			ReplicaID:                          failback.Spec.ReplicaID,
+			TargetDataAddr:                     failback.Spec.TargetDataAddr,
+			TargetCtrlAddr:                     failback.Spec.TargetCtrlAddr,
 			SourceFailbackName:                 failback.Ref.Name,
 			NoCrossVolumeIdentityChange:        status.NoCrossVolumeIdentityChange,
 			FailbackCompleted:                  status.State == FailbackStateFailedBack && status.ReasonCode == AuthorityExecutorFailbackReasonCompleted,
@@ -201,6 +219,13 @@ func frontendPublicationTargetOwnerObjectFromFailback(namespace string, failback
 			FrontendPublicationMutationAllowed: false,
 		},
 	}
+	if r.ActivateTargets {
+		obj.Spec.FrontendPublicationDecision = AuthorityExecutorPublicationDecisionEnabled
+		obj.Spec.FrontendPublicationReason = "frontend_publication_requested"
+		obj.Spec.FrontendPublicationMutationAllowed = true
+		obj.Spec.RuntimeEndpoint = strings.TrimSpace(r.RuntimeEndpoint)
+	}
+	return obj
 }
 
 func frontendPublicationTargetOwnerName(volumeName, replicaID string) string {

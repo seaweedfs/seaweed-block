@@ -13,6 +13,8 @@ CSI_IMAGE="${SW_BLOCK_PHASE95_CSI_IMAGE:-sw-block-csi:phase95}"
 IMAGE_PULL_POLICY="${SW_BLOCK_PHASE95_IMAGE_PULL_POLICY:-IfNotPresent}"
 KUBECONFIG_PATH="${KUBECONFIG:-/etc/rancher/k3s/k3s.yaml}"
 REMOTE_IMPORT_NODES="${SW_BLOCK_PHASE95_REMOTE_IMPORT_NODES:-192.168.1.181}"
+FRONTEND_PUBLICATION_CLOSE="${SW_BLOCK_PHASE95_FRONTEND_PUBLICATION_CLOSE:-false}"
+FRONTEND_PUBLICATION_RUNTIME_PORT="${SW_BLOCK_PHASE95_FRONTEND_PUBLICATION_RUNTIME_PORT:-9334}"
 
 VALUES_DIR="${ARTIFACT_DIR}/values"
 INSTALL_DIR="${ARTIFACT_DIR}/install"
@@ -84,6 +86,7 @@ for item in doc.get("items", []):
 
 cleanup() {
   set +e
+  kubectl --kubeconfig "${KUBECONFIG_PATH}" -n "${NAMESPACE}" delete swblockfrontendpublication --all --ignore-not-found=true >/dev/null 2>&1
   kubectl --kubeconfig "${KUBECONFIG_PATH}" -n "${NAMESPACE}" delete swblockreplicafailback --all --ignore-not-found=true >/dev/null 2>&1
   kubectl --kubeconfig "${KUBECONFIG_PATH}" -n "${NAMESPACE}" delete swblockvolume phase95-live-failback --ignore-not-found=true >/dev/null 2>&1
   kubectl --kubeconfig "${KUBECONFIG_PATH}" -n "${APP_NAMESPACE}" delete pod sw-block-example-reader sw-block-example-writer --ignore-not-found=true --wait=true --timeout=120s >/dev/null 2>&1
@@ -146,6 +149,9 @@ cleanup
 set -e
 trap cleanup EXIT
 
+kubectl --kubeconfig "${KUBECONFIG_PATH}" apply -f "${PRODUCT_ROOT}/charts/seaweed-block/crds" >"${INSTALL_DIR}/apply-crds.txt" 2>&1
+write_summary "crds_applied=true"
+
 run_capture build-alpha-images env \
   SW_BLOCK_IMAGE="${IMAGE}" \
   SW_BLOCK_CSI_IMAGE="${CSI_IMAGE}" \
@@ -174,6 +180,8 @@ csiImage:
   pullPolicy: ${IMAGE_PULL_POLICY}
 blockmaster:
   failbackRuntimeRPC: true
+  frontendPublicationRuntimeHTTP: ${FRONTEND_PUBLICATION_CLOSE}
+  frontendPublicationRuntimePort: ${FRONTEND_PUBLICATION_RUNTIME_PORT}
   nodeSelector:
     kubernetes.io/hostname: ${NODE_NAME}
 failbackTargetOwner:
@@ -198,6 +206,31 @@ failbackExecutor:
     failbackRuntimeGrpcAddr: blockmaster.${NAMESPACE}.svc:9333
 YAML
 
+if [ "${FRONTEND_PUBLICATION_CLOSE}" = "1" ] || [ "${FRONTEND_PUBLICATION_CLOSE}" = "true" ]; then
+cat >>"${VALUES_DIR}/values.phase95.yaml" <<YAML
+frontendPublicationTargetOwner:
+  create: true
+  dryRun: false
+  interval: 2s
+  nodeSelector:
+    kubernetes.io/hostname: ${NODE_NAME}
+  activation:
+    enabled: true
+    policy: true
+    runtimeEndpoint: http://blockmaster.${NAMESPACE}.svc:${FRONTEND_PUBLICATION_RUNTIME_PORT}/runtime/frontend-publication
+frontendPublicationExecutor:
+  create: true
+  dryRun: false
+  interval: 2s
+  nodeSelector:
+    kubernetes.io/hostname: ${NODE_NAME}
+  execution:
+    enabled: true
+    policy: true
+    runtimeUrl: http://blockmaster.${NAMESPACE}.svc:${FRONTEND_PUBLICATION_RUNTIME_PORT}/runtime/frontend-publication
+YAML
+fi
+
 run_capture helm-lint helm --kubeconfig "${KUBECONFIG_PATH}" lint "${PRODUCT_ROOT}/charts/seaweed-block" \
   -f "${VALUES_DIR}/values.day1.yaml" \
   -f "${VALUES_DIR}/values.phase95.yaml"
@@ -214,6 +247,10 @@ write_summary "helm_install=pass"
 kubectl --kubeconfig "${KUBECONFIG_PATH}" -n "${NAMESPACE}" rollout status deploy/sw-blockmaster --timeout=180s >"${INSTALL_DIR}/rollout-blockmaster.txt" 2>&1
 kubectl --kubeconfig "${KUBECONFIG_PATH}" -n "${NAMESPACE}" rollout status deploy/sw-block-failback-target-owner --timeout=180s >"${INSTALL_DIR}/rollout-failback-target-owner.txt" 2>&1
 kubectl --kubeconfig "${KUBECONFIG_PATH}" -n "${NAMESPACE}" rollout status deploy/sw-block-failback-executor --timeout=180s >"${INSTALL_DIR}/rollout-failback-executor.txt" 2>&1
+if [ "${FRONTEND_PUBLICATION_CLOSE}" = "1" ] || [ "${FRONTEND_PUBLICATION_CLOSE}" = "true" ]; then
+  kubectl --kubeconfig "${KUBECONFIG_PATH}" -n "${NAMESPACE}" rollout status deploy/sw-block-frontend-publication-target-owner --timeout=180s >"${INSTALL_DIR}/rollout-frontend-publication-target-owner.txt" 2>&1
+  kubectl --kubeconfig "${KUBECONFIG_PATH}" -n "${NAMESPACE}" rollout status deploy/sw-block-frontend-publication-executor --timeout=180s >"${INSTALL_DIR}/rollout-frontend-publication-executor.txt" 2>&1
+fi
 write_summary "deployed_suite_pods_ready=true"
 wait_for_blockmaster_grpc
 
@@ -364,6 +401,66 @@ write_summary "executor_status_failed_back=true"
 write_summary "master_publisher_epoch_advanced=true"
 write_summary "publish_target_swapped_after_failback=true"
 write_summary "failback_status_mutation_allowed=false"
+
+if [ "${FRONTEND_PUBLICATION_CLOSE}" = "1" ] || [ "${FRONTEND_PUBLICATION_CLOSE}" = "true" ]; then
+  frontend_target_name="phase95-live-failback-${target_replica}-frontend-publication"
+  if ! wait_for_jsonpath "frontend_publication_target_created" "${target_replica}" "{.spec.replicaID}" \
+    kubectl --kubeconfig "${KUBECONFIG_PATH}" -n "${NAMESPACE}" get swblockfrontendpublication "${frontend_target_name}"; then
+    kubectl --kubeconfig "${KUBECONFIG_PATH}" -n "${NAMESPACE}" logs deploy/sw-block-frontend-publication-target-owner --tail=300 >"${FAILBACK_DIR}/frontend-publication-target-owner.log" 2>&1 || true
+    kubectl --kubeconfig "${KUBECONFIG_PATH}" -n "${NAMESPACE}" logs deploy/sw-block-frontend-publication-executor --tail=300 >"${FAILBACK_DIR}/frontend-publication-executor.log" 2>&1 || true
+    kubectl --kubeconfig "${KUBECONFIG_PATH}" -n "${NAMESPACE}" get swblockreplicafailbacks,swblockfrontendpublications -o yaml >"${FAILBACK_DIR}/frontend-publication-objects.yaml" 2>&1 || true
+    exit 1
+  fi
+  kubectl --kubeconfig "${KUBECONFIG_PATH}" -n "${NAMESPACE}" get swblockfrontendpublication "${frontend_target_name}" -o yaml >"${FAILBACK_DIR}/frontend-publication-target.created.yaml"
+
+  if ! wait_for_jsonpath "frontend_publication_published" "published" "{.status.state}" \
+    kubectl --kubeconfig "${KUBECONFIG_PATH}" -n "${NAMESPACE}" get swblockfrontendpublication "${frontend_target_name}"; then
+    kubectl --kubeconfig "${KUBECONFIG_PATH}" -n "${NAMESPACE}" logs deploy/sw-block-frontend-publication-target-owner --tail=300 >"${FAILBACK_DIR}/frontend-publication-target-owner.log" 2>&1 || true
+    kubectl --kubeconfig "${KUBECONFIG_PATH}" -n "${NAMESPACE}" logs deploy/sw-block-frontend-publication-executor --tail=300 >"${FAILBACK_DIR}/frontend-publication-executor.log" 2>&1 || true
+    kubectl --kubeconfig "${KUBECONFIG_PATH}" -n "${NAMESPACE}" get swblockfrontendpublication "${frontend_target_name}" -o yaml >"${FAILBACK_DIR}/frontend-publication-target.failed.yaml" 2>&1 || true
+    exit 1
+  fi
+  kubectl --kubeconfig "${KUBECONFIG_PATH}" -n "${NAMESPACE}" get swblockfrontendpublication "${frontend_target_name}" -o json >"${FAILBACK_DIR}/frontend-publication-target.final.json"
+  python3 - "${FAILBACK_DIR}/frontend-publication-target.final.json" <<'PY'
+import json, sys
+doc = json.load(open(sys.argv[1]))
+spec = doc.get("spec") or {}
+status = doc.get("status") or {}
+required = {
+    "reasonCode": "frontend_published",
+    "frontendPublished": True,
+    "failbackStarted": False,
+    "noStorageMutation": True,
+    "noCrossVolumeIdentityChange": True,
+}
+for key, want in required.items():
+    if status.get(key) != want:
+        raise SystemExit(f"{key}={status.get(key)!r}, want {want!r}")
+for key in ("targetDataAddr", "targetCtrlAddr"):
+    if not spec.get(key):
+        raise SystemExit(f"missing spec.{key}")
+PY
+  write_summary "frontend_publication_target_published=true"
+  write_summary "frontend_published=true"
+  write_summary "frontend_publication_failback_started=false"
+  write_summary "frontend_publication_storage_mutation_allowed=false"
+
+  post_dir="${FAILBACK_DIR}/post-publication-io"
+  mkdir -p "${post_dir}"
+  kubectl --kubeconfig "${KUBECONFIG_PATH}" -n "${APP_NAMESPACE}" delete pod sw-block-example-reader --ignore-not-found=true --wait=true --timeout=120s >"${post_dir}/delete-reader.txt" 2>&1 || true
+  kubectl --kubeconfig "${KUBECONFIG_PATH}" -n "${APP_NAMESPACE}" delete pod sw-block-example-writer --ignore-not-found=true --wait=true --timeout=120s >"${post_dir}/delete-writer.txt" 2>&1 || true
+  kubectl --kubeconfig "${KUBECONFIG_PATH}" apply -f "${APP_DIR}/writer-pod.rendered.yaml" >"${post_dir}/apply-writer.txt" 2>&1
+  kubectl --kubeconfig "${KUBECONFIG_PATH}" -n "${APP_NAMESPACE}" wait --for=jsonpath='{.status.phase}'=Succeeded pod/sw-block-example-writer --timeout=240s >"${post_dir}/wait-writer.txt" 2>&1
+  kubectl --kubeconfig "${KUBECONFIG_PATH}" -n "${APP_NAMESPACE}" logs sw-block-example-writer >"${post_dir}/writer.log" 2>&1
+  grep -q '/data/demo.bin: OK' "${post_dir}/writer.log"
+  kubectl --kubeconfig "${KUBECONFIG_PATH}" -n "${APP_NAMESPACE}" delete pod sw-block-example-writer --wait=true --timeout=120s >"${post_dir}/delete-writer-after.txt" 2>&1
+  kubectl --kubeconfig "${KUBECONFIG_PATH}" apply -f "${APP_DIR}/reader-pod.rendered.yaml" >"${post_dir}/apply-reader.txt" 2>&1
+  kubectl --kubeconfig "${KUBECONFIG_PATH}" -n "${APP_NAMESPACE}" wait --for=jsonpath='{.status.phase}'=Succeeded pod/sw-block-example-reader --timeout=240s >"${post_dir}/wait-reader.txt" 2>&1
+  kubectl --kubeconfig "${KUBECONFIG_PATH}" -n "${APP_NAMESPACE}" logs sw-block-example-reader >"${post_dir}/reader.log" 2>&1
+  grep -q '/data/demo.bin: OK' "${post_dir}/reader.log"
+  write_summary "post_failback_publication_writer_verified=true"
+  write_summary "post_failback_publication_reader_verified=true"
+fi
 
 can_i() {
   local key="$1"

@@ -1,0 +1,96 @@
+# Runner-native Phase 98 close gate: deployed failback, product-owned frontend
+# publication runtime confirmation, post-publication workload I/O, and cleanup.
+
+name: failback-frontend-workload-close-chain
+timeout: 35m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: failback_frontend_workload_close_gate
+    actions:
+      - action: exec
+        node: m02
+        timeout: 34m
+        cmd: "rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase98-failback-frontend-workload-close && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase98-failback-frontend-workload-close && cd {{ product_root }} && SW_BLOCK_ARTIFACT_DIR=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase98-failback-frontend-workload-close bash scripts/run-phase98-failback-frontend-workload-close-gate.sh {{ product_root }}"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase98-failback-frontend-workload-close/phase98-failback-frontend-workload-close-summary.txt"
+        pattern: "^phase98_failback_frontend_workload_close_status=ok$"
+        save_as: phase98_ok
+      - action: assert_greater
+        actual: "{{ phase98_ok }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase98-failback-frontend-workload-close/phase98-failback-frontend-workload-close-summary.txt"
+        pattern: "^executor_status_failed_back=true$"
+        save_as: failback_done
+      - action: assert_greater
+        actual: "{{ failback_done }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase98-failback-frontend-workload-close/phase98-failback-frontend-workload-close-summary.txt"
+        pattern: "^frontend_published=true$"
+        save_as: frontend_published
+      - action: assert_greater
+        actual: "{{ frontend_published }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase98-failback-frontend-workload-close/phase98-failback-frontend-workload-close-summary.txt"
+        pattern: "^frontend_publication_failback_started=false$"
+        save_as: no_second_failback
+      - action: assert_greater
+        actual: "{{ no_second_failback }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase98-failback-frontend-workload-close/phase98-failback-frontend-workload-close-summary.txt"
+        pattern: "^post_failback_publication_writer_verified=true$"
+        save_as: post_writer
+      - action: assert_greater
+        actual: "{{ post_writer }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase98-failback-frontend-workload-close/phase98-failback-frontend-workload-close-summary.txt"
+        pattern: "^post_failback_publication_reader_verified=true$"
+        save_as: post_reader
+      - action: assert_greater
+        actual: "{{ post_reader }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase98-failback-frontend-workload-close/phase98-failback-frontend-workload-close-summary.txt"
+        pattern: "^cleanup_status=ok$"
+        save_as: cleanup_ok
+      - action: assert_greater
+        actual: "{{ cleanup_ok }}"
+        threshold: "0"
+
+  - name: collect
+    always: true
+    actions:
+      - action: collect_path
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase98-failback-frontend-workload-close"
+        name: "remote-phases"
+        ignore_error: true

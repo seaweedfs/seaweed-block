@@ -33,5 +33,14 @@ spec:
             {{- if .Values.frontendPublicationTargetOwner.dryRun }}
             - "--dry-run"
             {{- end }}
+            {{- if .Values.frontendPublicationTargetOwner.activation.enabled }}
+            - "--activate-targets"
+            {{- end }}
+            {{- if .Values.frontendPublicationTargetOwner.activation.policy }}
+            - "--activation-policy"
+            {{- end }}
+            {{- if .Values.frontendPublicationTargetOwner.activation.runtimeEndpoint }}
+            - "--runtime-endpoint={{ .Values.frontendPublicationTargetOwner.activation.runtimeEndpoint }}"
+            {{- end }}
             - "--interval={{ .Values.frontendPublicationTargetOwner.interval }}"
 {{- end }}

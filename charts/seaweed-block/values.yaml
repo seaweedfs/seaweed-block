@@ -32,6 +32,8 @@ blockmaster:
   serviceName: blockmaster
   listenPort: 9333
   failbackRuntimeRPC: false
+  frontendPublicationRuntimeHTTP: false
+  frontendPublicationRuntimePort: 9334
   authorityStore: /var/lib/sw-block/authority
   lifecycleStore: /var/lib/sw-block/lifecycle
   durableRoot: /var/lib/sw-block
@@ -165,6 +167,10 @@ rebuildTargetOwner:
   create: false
   dryRun: true
   interval: 30s
+  activation:
+    enabled: false
+    policy: false
+    runtimeEndpoint: ""
   rbac:
     create: true
   nodeSelector: {}

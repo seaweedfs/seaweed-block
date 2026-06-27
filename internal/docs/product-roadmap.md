@@ -222,9 +222,10 @@ rebuild, delete safety, or cleanup must start as a separate gated phase.
   blockmaster gRPC smoke, and a live k3s deployed-suite gate. Phase 96 plans a
   disabled frontend-publication target from terminal `failed_back` evidence.
   Phase 97 wires the explicit-policy frontend-publication executor call-site.
-  Workload-visible post-failback I/O remains future work.
-- Later: workload-visible frontend publication after failback, post-failback
-  I/O, NVMe ANA Kubernetes multipath parity, stronger
+  Phase 98 closes the deployed workload-visible path: product-owned frontend
+  publication after failback is followed by writer/reader verification and
+  zero-residue cleanup in live k3s.
+- Later: NVMe ANA Kubernetes multipath parity, backup/restore, stronger
   committed-frontier reporting, broad
   distro/host compatibility, and longer soak under failure. NVMe ANA parity
   should follow the Kubernetes-native status foundation so ANA facts, path
@@ -608,16 +609,19 @@ product risk. The recommended order is:
    The live iSCSI returned-replica gate emits same-run managed-volume
    evidence for required frontier coverage and replay it through report/status
    surfaces before any mutating returned-replica executor is proposed.
-12. **Phase 60-68: rebuild runtime path, ACK eligibility, and frontend preflight.** Closed through frontend publication preflight.
+12. **Phase 60-98: rebuild, failback, frontend publication, and workload close.** Closed through the live post-failback I/O gate.
    Phase 60 proved the existing datapath, Phase 61 added the executor call-site,
    Phase 62 added HTTP runtime transport, Phase 63 locked runtime target facts,
    Phase 64 added the opt-in blockvolume endpoint that starts recovery after
    primary/lineage validation, Phase 65 added terminal durable-frontier
    evidence, Phase 66 surfaces caught-up as publication preflight while keeping
    publication disabled, Phase 67 publishes only ACK eligibility after
-   caught-up terminal evidence, and Phase 68 surfaces frontend publication as
-   disabled preflight on the ACK eligibility status. Frontend publication and
-   failback remain separate gated work before NVMe.
+   caught-up terminal evidence, Phase 68 surfaces frontend publication as
+   disabled preflight on the ACK eligibility status, Phases 74-95 make
+   failback executable only behind explicit policy and then prove it live, and
+   Phases 96-98 connect terminal failback evidence to frontend publication and
+   post-publication workload writer/reader I/O. Default automatic failback
+   remains off.
 13. **Backup/snapshot/restore and NVMe ANA parity.**
    Important, but they should reuse the status/action model rather than create
    another isolated control plane.
@@ -757,16 +761,30 @@ Approximate engineering effort if scope remains tight:
 - Phase 94 Failback Deployed gRPC Smoke is closed. The full opt-in Helm suite
   renders coherently and the executor-to-real-blockmaster gRPC smoke passes.
   This is still not a live Kubernetes PVC failback claim.
+- Phase 95 Failback Live Deployed Suite Smoke is closed. The live k3s gate
+  proves fresh images, Helm install, first PVC writer/reader, failback target
+  creation, executor gRPC call to live blockmaster, terminal `failed_back`
+  status, RBAC boundary, and zero-residue cleanup.
+- Phase 96 Failback Frontend Publication Target is closed. Terminal
+  `failed_back` evidence can create a disabled frontend-publication target with
+  failback-source identity and target address facts.
+- Phase 97 Frontend Publication Executor Call-site is closed. The executor can
+  call a frontend-publication runtime only under explicit policy and can publish
+  terminal status only from valid evidence.
+- Phase 98 Failback Frontend Workload Close Gate is closed. The deployed
+  opt-in suite now proves returned-replica failback -> frontend publication ->
+  post-publication workload writer/reader I/O -> zero-residue cleanup in live
+  k3s.
 - Phase 41-44 are the Operation Layer v0.5 release train: lifecycle-owner
   foundation, real API/admission proof, first bounded finalizer mutation, and
   delete lifecycle close gate.
 - The release-train contract is
   `internal/docs/ref/operation-layer-v0.5-release-train.md`; the Phase 42 gate
   draft is `internal/docs/ref/phase42-lifecycle-owner-api-admission-gate.md`.
-- Do not start NVMe ANA parity, backup/restore, or broad mutating recovery
-  workflows by bypassing the Operation Layer. The next storage feature should
-  either continue the separately gated returned-replica executor path or reuse
-  the same fact -> judgment -> action -> evidence model.
+- The returned-replica operation loop has a coherent close point at Phase 98.
+  The next large storage feature can start, but it should reuse the same
+  fact -> judgment -> action -> evidence model rather than bypassing the
+  Operation Layer.
 - When the current plan closes, move it to `internal/docs/finished-plans/`
   with a phase/topic filename such as
   `phase1_finishedplan_frontend_protocol_readiness.md`.

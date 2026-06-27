@@ -70,6 +70,8 @@ type SwBlockFrontendPublicationSpec struct {
 	VolumeID                           string `json:"volumeID,omitempty"`
 	PVCName                            string `json:"pvcName,omitempty"`
 	ReplicaID                          string `json:"replicaID,omitempty"`
+	TargetDataAddr                     string `json:"targetDataAddr,omitempty"`
+	TargetCtrlAddr                     string `json:"targetCtrlAddr,omitempty"`
 	SourceEligibilityName              string `json:"sourceEligibilityName,omitempty"`
 	SourceFailbackName                 string `json:"sourceFailbackName,omitempty"`
 	AckEligibilityKnown                bool   `json:"ackEligibilityKnown"`
