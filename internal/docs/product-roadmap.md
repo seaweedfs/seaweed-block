@@ -58,20 +58,17 @@ This is the short internal roadmap. Keep it current and readable.
   agreement. This remains read-only and does not add mutating operator
   lifecycle.
 - Current development slice: returned-replica rebuild/reintegration runtime
-  productization has advanced through Phase 72. Phases 46-54 made returned
-  replicas visible and action-gated, Phases 60-67 connected the bounded
-  rebuild/catch-up runtime path through target facts, executor HTTP transport,
-  an opt-in blockvolume runtime start endpoint, terminal caught-up evidence,
-  and ACK eligibility publication. Phase 68 added the disabled frontend
-  publication preflight. Phase 69 adds the disabled-by-default frontend
-  publication target contract. Phase 70 adds the status-only frontend
-  publication executor boundary. Phase 71 adds the live Kubernetes API/RBAC
-  proof that the executor can patch only `SwBlockFrontendPublication.status`
-  and cannot mutate target spec, target finalizers, workload/storage resources,
-  frontend publication, or failback. Phase 72 adds the typed runtime contract
-  for a future frontend publication endpoint and proves that invalid or failed
-  runtime evidence cannot claim publication. Do not claim real frontend
-  publication execution, failback, backup/restore, or NVMe parity yet.
+  productization reached a coherent close point at Phase 98. Phases 46-67 made
+  returned replicas visible, fenced, action-gated, rebuild/catch-up-capable,
+  terminal-evidence-driven, and ACK-eligibility-published. Phases 68-98 then
+  connected disabled frontend-publication preflight, failback contracts,
+  opt-in failback execution, frontend-publication targets/executors, and a
+  live post-publication writer/reader close gate. Default automatic failback
+  remains off. The next development slice starts NVMe parity by first pinning
+  the current ANA/CSI baseline: ANA Identify/Get Log Page/provider projection
+  and CSI single-path NVMe staging exist, while Kubernetes CSI NVMe multipath
+  attach is still the next real gap. Do not claim backup/restore, broad NVMe
+  compatibility, RoCE, performance, or production HA yet.
 - Model hardening gate before the next large release: complete the
   ManagedVolume Operations Model under `internal/docs/protocol/` before
   expanding operator or broader HA claims. The goal is to prevent Kubernetes,
@@ -225,12 +222,14 @@ rebuild, delete safety, or cleanup must start as a separate gated phase.
   Phase 98 closes the deployed workload-visible path: product-owned frontend
   publication after failback is followed by writer/reader verification and
   zero-residue cleanup in live k3s.
-- Later: NVMe ANA Kubernetes multipath parity, backup/restore, stronger
-  committed-frontier reporting, broad
-  distro/host compatibility, and longer soak under failure. NVMe ANA parity
-  should follow the Kubernetes-native status foundation so ANA facts, path
-  states, and protocol-specific reasons project through the same
-  CRD/Condition/Event model.
+- Next: NVMe ANA Kubernetes multipath parity. The protocol baseline already
+  has ANA Identify/Get Log Page/provider projection, direct-host P4
+  ANA/multipath gates, and P5 CSI single-path protocol selection. The next gap
+  is Kubernetes CSI NVMe multipath attach: preserve multiple NVMe frontend
+  paths for one NQN/NSID through master status, CSI publish context, NodeStage,
+  app writer/reader, and cleanup evidence. Backup/restore, stronger
+  committed-frontier reporting, broad distro/host compatibility, RoCE, and
+  longer soak remain later work.
 
 ### Track E: Protocol / Backend Expansion
 
@@ -775,6 +774,10 @@ Approximate engineering effort if scope remains tight:
   opt-in suite now proves returned-replica failback -> frontend publication ->
   post-publication workload writer/reader I/O -> zero-residue cleanup in live
   k3s.
+- Phase 99 NVMe ANA Baseline is active. It pins the current protocol/CSI
+  baseline and corrects stale audit wording: ANA log/Identify/provider and CSI
+  single-path NVMe stage/unstage are present; Kubernetes CSI NVMe multipath
+  attach remains the next implementation target.
 - Phase 41-44 are the Operation Layer v0.5 release train: lifecycle-owner
   foundation, real API/admission proof, first bounded finalizer mutation, and
   delete lifecycle close gate.

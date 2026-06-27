@@ -1,191 +1,133 @@
-# Current Plan: Phase 98 Failback Frontend Workload Close Gate
+# Current Plan: Phase 99 NVMe ANA Baseline And Next Gap
 
-Status: complete.
+Status: complete. Local and remote runner PASS.
 
 ## Goal
 
-Phase 98 closes the returned-replica failback operation loop that Phases 46-97
-built in small safety slices:
+Phase 98 closed the returned-replica operation loop. Phase 99 starts the next
+large feature train by pinning the current NVMe-oF/ANA state before adding new
+NVMe work.
+
+The immediate goal is not to claim full NVMe parity. It is to prevent stale
+docs and vague roadmap wording from hiding the real gap:
 
 ```text
-install Helm suite
-  -> first PVC writer/reader
-  -> returned-replica failback
-  -> product-owned frontend publication
-  -> post-publication writer/reader I/O
-  -> cleanup verifier reports zero residue
+P4 proves target-level NVMe ANA multipath outside Kubernetes.
+P5 proves Kubernetes CSI protocol selection for NVMe single-path.
+The next product gap is Kubernetes CSI NVMe multipath attach.
 ```
 
-This is the first workload-visible post-failback frontend-publication claim.
+## What Exists Now
 
-## What Changed
+Current code already has meaningful NVMe-oF support:
 
-### D1: Product-owned Frontend Publication Runtime
+- NVMe/TCP target protocol core: IC handshake, Fabric Connect, admin/IO queue
+  separation, Identify, Get Log Page, READ, WRITE, FLUSH, inline/R2T paths,
+  KATO/KeepAlive, and disconnect handling.
+- ANA provider seam and ANA log page support.
+- Conditional ANA Identify advertisement when an `ANAProvider` is wired.
+- Blockvolume projection-backed ANA provider mapping primary/standby/fault
+  state into host-visible ANA state.
+- Distinct controller IDs from replica IDs.
+- CSI protocol selection for `protocol=nvme`.
+- CSI NodeStage/NodeUnstage NVMe connect/disconnect component coverage.
+- Launcher render coverage for NVMe blockvolume args.
 
-`blockmaster` now has an opt-in HTTP runtime endpoint:
-
-```text
---frontend-publication-runtime-http
---frontend-publication-runtime-listen <addr>
-/runtime/frontend-publication
-```
-
-The endpoint verifies that the current publisher authority line matches the
-terminal failback target:
-
-```text
-replicaID
-targetDataAddr
-targetCtrlAddr
-```
-
-It returns published terminal evidence only when the authority line is already
-the post-failback line. It does not start failback, mutate storage, or change a
-different volume.
-
-### D2: Failback-source Publication Targets
-
-`SwBlockFrontendPublication.spec` now carries:
-
-```text
-targetDataAddr
-targetCtrlAddr
-```
-
-The frontend publication target owner copies these fields from terminal
-`SwBlockReplicaFailback` evidence and can activate a target only under explicit
-policy and runtime endpoint configuration.
-
-### D3: Deployed Suite Wiring
-
-The Helm chart can explicitly enable:
-
-```text
-blockmaster.frontendPublicationRuntimeHTTP
-frontendPublicationTargetOwner.activation
-frontendPublicationExecutor.execution
-```
-
-Default installs remain off.
-
-### D4: Live Close Gate
+## New Gate
 
 Added:
 
 ```text
-scripts/run-phase98-failback-frontend-workload-close-gate.sh
-testops/scenarios/failback-frontend-workload-close-chain.yaml
+scripts/run-phase99-nvme-ana-baseline-gate.sh
+testops/scenarios/nvme-ana-baseline-chain.yaml
 ```
 
-The gate reuses the deployed Phase 95 suite with
-`SW_BLOCK_PHASE95_FRONTEND_PUBLICATION_CLOSE=true`, applies current CRDs before
-install, and verifies:
+The gate is intentionally a baseline/conformance gate:
 
-- first PVC writer/reader passes;
-- failback reaches `failed_back`;
-- frontend publication target reaches `published`;
-- publication evidence says `frontendPublished=true`;
-- publication evidence says `failbackStarted=false`;
-- publication evidence says `noStorageMutation=true`;
-- post-publication writer and reader both pass;
-- cleanup verifier reports zero residue.
+- runs focused Go tests for NVMe protocol, blockvolume ANA projection, CSI
+  NVMe stage/unstage, and launcher render;
+- validates existing P4/P5 TestOps scenarios;
+- records that live NVMe multipath and CSI gates remain release-required.
+
+It accepts:
+
+```text
+GO_BIN=<path>       # optional Go override
+SWBLOCK_BIN=<path>  # optional TestOps runner override
+```
+
+This keeps Windows/Git-Bash local validation from accidentally using stale WSL
+Go 1.18 while preserving normal Linux execution on the lab.
 
 ## Verification
 
-Local checks:
+Local gate:
 
 ```text
-go test ./core/ops ./cmd/sw-block ./cmd/blockmaster ./core/host/master -count=1
-helm lint charts/seaweed-block
-swblock validate testops/scenarios/failback-frontend-workload-close-chain.yaml
-git diff --check
+bash scripts/run-phase99-nvme-ana-baseline-gate.sh .
+phase99_nvme_ana_baseline_status=ok
+go_binary=go.exe
+go_version=go version go1.25.6 windows/amd64
+go_test_nvme_blockvolume_csi_launcher=pass
+ana_log_page_reports_provider_state=true
+ana_identify_and_log_consistent=true
+ana_identify_controller_advertised_with_provider=true
+ana_identify_namespace_advertised_with_provider=true
+projection_ana_state_mapping=true
+projection_ana_group_dense=true
+projection_ana_change_count_lineage=true
+csi_nvme_node_stage=true
+csi_nvme_unstage=true
+launcher_nvme_manifest=true
+swblock_binary=/mnt/c/work/swblock.exe
+nvme_scenarios_validate=pass
+nvme_p4_scenario_valid=true
+nvme_p5_csi_scenario_valid=true
+nvme_p5_component_scenario_valid=true
+live_nvme_multipath_required_for_release=true
+live_nvme_csi_required_for_release=true
 ```
 
-Live runner:
+Scenario syntax:
 
 ```text
-swblock run testops/scenarios/failback-frontend-workload-close-chain.yaml
-run=20260626-171324-40b5
-result=PASS 16/16
+C:\work\swblock.exe validate testops\scenarios\nvme-ana-baseline-chain.yaml
+VALID: nvme-ana-baseline-chain
 ```
 
-Terminal evidence:
+Remote runner:
 
 ```text
-phase98_failback_frontend_workload_close_status=ok
-crds_applied=true
-helm_install=pass
-deployed_suite_pods_ready=true
-first_volume_writer_reader=pass
-failback_executor_completed=true
-executor_status_failed_back=true
-master_publisher_epoch_advanced=true
-publish_target_swapped_after_failback=true
-frontend_publication_target_created=true
-frontend_publication_published=true
-frontend_published=true
-frontend_publication_failback_started=false
-frontend_publication_storage_mutation_allowed=false
-post_failback_publication_writer_verified=true
-post_failback_publication_reader_verified=true
-cleanup_status=ok
+C:\work\swblock.exe run --env product_root=/tmp/seaweed_block --env ssh_key=C:/work/dev_server/testdev_key testops\scenarios\nvme-ana-baseline-chain.yaml
+run=20260626-173602-7ea9
+result=PASS 12/12
 ```
 
-Cleanup verifier:
+## Non-Claims
 
-```text
-k8s_residue_count=0
-iscsi_residue_count=0
-process_residue_count=0
-multipath_residue_count=0
-hostpath_residue_count=0
-failure_count=0
-```
+Phase 99 does not claim:
 
-## Important Finding
-
-The first Phase 98 live run exposed a lab/upgrade hazard: Helm does not update
-pre-existing CRDs from `charts/*/crds`. The current CRD allowed
-`frontendPublicationDecision=enabled`, but the lab still had an older schema
-that allowed only `blocked` and `disabled`, causing a live 422.
-
-The gate now applies current CRDs before install so it tests the working tree
-instead of stale lab state. Release and upgrade docs should keep the same rule:
-apply CRDs before installing or upgrading a chart that changes CRD schema.
-
-## Closed Boundary
-
-Phase 98 closes this operation-layer path:
-
-```text
-returned replica caught up
-  -> ACK eligibility
-  -> failback target
-  -> deployed failback executor
-  -> blockmaster authority failback
-  -> frontend publication target
-  -> deployed frontend publication executor
-  -> product-owned publication runtime
-  -> workload writer/reader still works
-```
-
-Non-claims:
-
-- no default automatic failback;
-- no broad returned-replica rebuild automation;
-- no backup/snapshot/restore;
-- no NVMe ANA parity;
-- no production SLO or broad compatibility claim.
+- Kubernetes CSI NVMe multipath attach;
+- multi-node Kubernetes NVMe failover;
+- RoCE or labelled performance;
+- long soak;
+- async ANA change notification behavior;
+- DSM / Dataset Management;
+- Write Zeroes;
+- broad kernel or distro compatibility.
 
 ## Next
 
-The operation loop has reached a useful close point. The next coherent choices
-are:
+The next coherent NVMe deliverable is Kubernetes CSI NVMe multipath attach:
 
-1. release hardening for this milestone: publish matching images and run a
-   pinned-image release smoke;
-2. move to a new large feature train: NVMe ANA parity, backup/restore, or a
-   broader production-soak track.
+```text
+master status exposes multiple NVMe frontend paths for one volume
+  -> CSI publish context carries the grouped NQN/NSID plus all addresses
+  -> NodeStage connects all paths under native NVMe multipath
+  -> app pod sees one mounted namespace
+  -> failover/cleanup artifacts prove no stale subsystem residue
+```
 
-Avoid adding more small operation phases unless they close a concrete release
-blocker.
+That should be the first real Phase 100 implementation target. Do not add a
+new control-plane model for it; reuse the existing fact -> judgment -> action
+-> evidence model.

@@ -73,8 +73,8 @@ Updated classifications:
 | Fabric Connect | Admin queue Connect allocates CNTLID; IO queue Connect validates CNTLID / NQN. | Present with CNTLID and identity tests. | Present. | P1 OS gate. |
 | Queue separation | Admin and IO queues are separate TCP sessions. | Present; tests cover wrong queue opcodes and parallel queues. | Present. | Add host evidence. |
 | Number of Queues | V2 grants requested queues up to max. | Present in `admin_features.go`, capped. | Present. | Host fio with `nr_io_queues` profiles later. |
-| Identify Controller | V2 advertises broader capabilities including ANA and DSM/WriteZeroes. | V3 intentionally advertises only implemented features; ANA/DSM/WriteZeroes are zero. | Partially present by design. | P3 flips ANA only with log support. |
-| Identify Namespace | V2 includes namespace identity and ANA group. | V3 includes deterministic NGUID/EUI-64; ANAGRPID pinned zero. | Partially present by design. | P3. |
+| Identify Controller | V2 advertises broader capabilities including ANA and DSM/WriteZeroes. | V3 intentionally advertises only implemented features; ANA is advertised when an `ANAProvider` is wired, while DSM/WriteZeroes remain zero. | ANA present behind provider; optional commands deferred. | Keep ANA field-level tests; defer DSM/WriteZeroes to later storage features. |
+| Identify Namespace | V2 includes namespace identity and ANA group. | V3 includes deterministic NGUID/EUI-64 and advertises ANAGRPID when an `ANAProvider` is wired. | ANA namespace identity present behind provider. | Keep Identify/log group consistency tests. |
 | Namespace Descriptor List | V2 has NGUID/EUI style identity. | V3 has deterministic NGUID/EUI and tests. | Present. | P1 host `nvme id-ns` capture. |
 | In-capsule write data | V2 advertises `IOCCSZ` and `ICDOFF=0`; small writes can carry payload inline. | V3 advertises `IOCCSZ`, `ICDOFF=0`, and parser accepts inline payload. | Present but not host-measured. | P2 add inline-vs-R2T counters and fio evidence. |
 | R2T / H2C write data | V2 supports R2T and chunked H2C. | V3 supports one outstanding R2T per session and buffers interleaved capsules. | Present in component tests. | P1/P2 host large write. |
@@ -82,10 +82,10 @@ Updated classifications:
 | FLUSH | V2 supports Flush to durable backend. | V3 dispatches Flush to `Backend.Sync`; test exists. | Present. | P1 fio/fsync evidence. |
 | KeepAlive / KATO | V2 accepts KATO / KeepAlive. | V3 stores KATO and responds KeepAlive; no fatal timer. | Present. | P1 host connect stability. |
 | Async Event Request | V2 parks AER. | V3 parks one AER and rejects a second slot. | Present minimal. | P3 ANA change notice may need event behavior later. |
-| Get Log Page ANA | V2 returns ANA log page. | V3 has opcode constant but admin dispatch does not serve Get Log Page. | Missing. | P3 implementation. |
-| ANA Identify advertisement | V2 advertises ANA. | V3 tests pin ANA fields to zero until log page lands. | Intentionally deferred. | P3 implementation + host verification. |
-| ANA state provider | V2 maps role to ANA optimized / standby / inaccessible. | V3 currently maps stale-lineage errors to path-related status but does not expose host-visible ANA state. | Missing product behavior. | P3. |
-| Multipath failover | V2 has NVMe failover scenarios. | V3 has no mounted NVMe multipath lab gate. | Missing product behavior. | P4. |
+| Get Log Page ANA | V2 returns ANA log page. | V3 serves ANA Get Log Page when an `ANAProvider` is wired and rejects it when absent. | Present behind provider. | Keep P3/P4 component and host assertions. |
+| ANA Identify advertisement | V2 advertises ANA. | V3 advertises ANA Identify fields only when the ANA provider is present, and keeps fields zero without one. | Present behind provider. | Keep no-provider and with-provider tests. |
+| ANA state provider | V2 maps role to ANA optimized / standby / inaccessible. | V3 blockvolume has a projection-backed ANA provider that maps primary/standby/recovering/fault states to optimized, non-optimized, ANA-change, and inaccessible states. | Present as projection seam. | Next gap is carrying multi-path Kubernetes facts through CSI, not inventing another state model. |
+| Multipath failover | V2 has NVMe failover scenarios. | V3 has direct-host P4 TestOps coverage for ANA-aware multipath and mounted failover outside Kubernetes. | Release-gated outside K8s. | Add Kubernetes CSI NVMe multipath attach as the next product gate. |
 | Target-side write retry | V2 retries transient WAL-full writes in target. | V3 test `t2_v2port_nvme_no_retry_test.go` explicitly rejects target-side retry. | Intentionally not ported. | Keep rejected unless product decision changes. |
 | WAL pressure throttle | V2 throttles on WAL pressure near frontend. | V3 storage layer has WAL admission/throttle; NVMe target-side throttle is not carried. | Architecture difference. | Performance/soak should observe backend pressure, not hide it in protocol. |
 | Dataset Management / Trim | V2 advertises DSM/Trim. | V3 does not advertise DSM. | Deferred. | Later storage feature, not frontend-complete blocker. |
@@ -93,8 +93,8 @@ Updated classifications:
 | OS nvme-cli smoke | V2 has `nvme_connect` TestOps actions and scenarios. | V3 has `scripts/iterate-m01-nvme.sh`, but no release-grade P1 script. | Partial. | P1 create repeatable OS smoke. |
 | NVMe soak | V2 has `cp103-soak-nvme-1h.yaml`. | V3 no equivalent product gate. | Missing. | After P1. |
 | IO queue performance sweeps | V2 has IOQ and max-concurrent-write sweeps. | V3 has component queue tests but no product matrix. | Missing as product evidence. | P2/P6. |
-| NVMe CSI publish target | V2 TestOps can target NVMe. | V3 `ControlStatusLookup` maps NVMe frontend facts. | Partial. | P5. |
-| NVMe CSI NodeStage | V2 not directly comparable. | V3 NodeStage is still iSCSI-only; `transportNVMe` is only recognized for file parsing. | Missing. | P5. |
+| NVMe CSI publish target | V2 TestOps can target NVMe. | V3 `ControlStatusLookup` maps NVMe frontend facts and CSI can select `protocol=nvme`. | Present for single-path NVMe. | Extend publish context to grouped multi-path NVMe facts. |
+| NVMe CSI NodeStage | V2 not directly comparable. | V3 NodeStage/NodeUnstage use the NVMe utility path for `protocol=nvme` and have component coverage. | Present for single-path NVMe. | Add multi-path native NVMe connect/stage coverage. |
 | NVMe auth | V2 public evidence unclear. | V3 has no NVMe authentication story. | Deferred. | Not in current frontend-complete scope. |
 | RoCE / high-speed network | V2 scenarios reference 10.0.0.x and NVMe/RoCE-oriented performance paths. | V3 has no labelled RoCE matrix. | Missing evidence. | P6 after correctness. |
 
@@ -160,10 +160,17 @@ Updated classifications:
   - add debug counters or artifact grep for inline write vs R2T write,
   - run 4 KiB write fio and confirm which path Linux uses,
   - run large write fio and confirm R2T/H2C remains stable.
-- NVMe-P3 ANA red tests:
-  - admin Get Log Page ANA currently returns InvalidOpcode,
-  - Identify ANA fields currently zero,
-  - red test should require both to move together.
+- NVMe-P3/P4 ANA regression:
+  - keep component tests proving ANA Identify and Get Log Page move together,
+  - keep direct-host P4 runner coverage for ANA-aware multipath and mounted
+    failover,
+  - do not claim Kubernetes NVMe multipath from P4 alone.
+- NVMe-P5/P6 Kubernetes NVMe multipath:
+  - master status exposes more than one NVMe frontend path for one volume,
+  - CSI publish context preserves one NQN/NSID plus all addresses,
+  - NodeStage connects all paths under native NVMe multipath,
+  - app writer/reader verifies one mounted namespace,
+  - cleanup asserts no stale `nvme list-subsys` residue.
 
 ## Open Risks
 

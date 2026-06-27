@@ -446,9 +446,15 @@ Recommended order from here:
     loop through live k3s: first PVC writer/reader, returned-replica failback,
     product-owned frontend publication, post-publication writer/reader I/O, and
     zero-residue cleanup. Default automatic failback remains off.
-56. Add backup/restore and NVMe ANA parity after they can reuse the same action
-   owner, evidence, and status model rather than creating another isolated
-   control plane.
+56. Phase 99: NVMe ANA baseline. **Active**
+    Current code already has ANA Identify/Get Log Page behind an ANA provider,
+    blockvolume projection-backed ANA state, direct-host P4 ANA/multipath
+    gates, and P5 Kubernetes CSI single-path NVMe protocol selection. The next
+    parity gap is Kubernetes CSI NVMe multipath attach: multiple NVMe frontend
+    paths for one NQN/NSID must survive master status, CSI publish context,
+    NodeStage, app writer/reader, and cleanup evidence.
+57. Add backup/restore after it can reuse the same action owner, evidence, and
+    status model rather than creating another isolated control plane.
 
 The internal release-train contract is
 `internal/docs/ref/operation-layer-v0.5-release-train.md`. Phases 41-44 close
@@ -642,7 +648,9 @@ control-plane path is mature.
 1. iSCSI and NVMe-oF are the current release-gated frontends.
 
    iSCSI remains the default path for broad compatibility. NVMe-oF is now
-   covered by ANA-aware multipath/failover and CSI protocol-selection gates.
+   covered by ANA-aware direct-host multipath/failover and CSI
+   protocol-selection gates. Kubernetes CSI NVMe multipath attach remains the
+   next NVMe parity gap.
 
    The runtime should be managed as a cluster of explicit mini-protocols:
    authority/epoch, replication recovery, iSCSI, NVMe, CSI lifecycle, and
