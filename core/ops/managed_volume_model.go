@@ -106,6 +106,7 @@ type ManagedVolumeFacts struct {
 	PVName              string               `json:"pv_name,omitempty"`
 	StorageClass        string               `json:"storage_class,omitempty"`
 	ReplicationFactor   int                  `json:"replication_factor,omitempty"`
+	DesiredReplicas     int                  `json:"desired_replicas,omitempty"`
 	AckProfile          string               `json:"ack_profile,omitempty"`
 	ClaimProfile        string               `json:"claim_profile,omitempty"`
 	Protocol            string               `json:"protocol,omitempty"`
@@ -457,6 +458,7 @@ func managedVolumeFactsFromVolumeEvidence(volume VolumeEvidence) ManagedVolumeFa
 		PVCName:           volume.PVCName,
 		PVName:            volume.PVName,
 		ReplicationFactor: volume.ReplicationFactor,
+		DesiredReplicas:   volume.DesiredReplicas,
 		AckProfile:        volume.AckProfile,
 		ClaimProfile:      volume.ClaimProfile,
 		ProductStatus:     volume.Status,
@@ -610,7 +612,11 @@ func managedVolumeNVMeStatus(facts ManagedVolumeFacts) *ManagedVolumeNVMeStatus 
 	if status.ReasonCode == "" && (status.NQN == "" || status.NSID == 0) {
 		status.ReasonCode = ReasonNVMeIdentityIncomplete
 	}
-	if status.ReasonCode == "" && facts.ReplicationFactor > 1 && status.PathCount < facts.ReplicationFactor {
+	expectedPathCount := facts.ReplicationFactor
+	if expectedPathCount <= 0 {
+		expectedPathCount = facts.DesiredReplicas
+	}
+	if status.ReasonCode == "" && expectedPathCount > 1 && status.PathCount < expectedPathCount {
 		status.ReasonCode = ReasonNVMeMultipathPathMissing
 	}
 	return status

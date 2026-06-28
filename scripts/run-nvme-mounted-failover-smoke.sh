@@ -5,6 +5,7 @@ ROOT="${1:-$(pwd)}"
 RUN_ID="${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
 WORK_DIR="${SW_BLOCK_NVME_FAILOVER_WORK_DIR:-/tmp/sw-block-nvme-failover}"
 ARTIFACT_DIR="${SW_BLOCK_ARTIFACT_DIR:-${WORK_DIR}/runs/${RUN_ID}}"
+SUMMARY="${ARTIFACT_DIR}/phase101-nvme-path-failure-summary.txt"
 SUBSYS_NQN="${SW_BLOCK_NVME_NQN:-nqn.2026-05.io.seaweedfs:failover-v1}"
 NSID="${SW_BLOCK_NVME_NSID:-1}"
 BLOCKS="${SW_BLOCK_DURABLE_BLOCKS:-65536}"
@@ -15,6 +16,7 @@ RUN_DIR="${WORK_DIR}/run"
 MOUNT_DIR="${SW_BLOCK_NVME_MOUNT_DIR:-${WORK_DIR}/mnt}"
 
 mkdir -p "$ARTIFACT_DIR" "$BIN_DIR" "$RUN_DIR" "$MOUNT_DIR"
+: >"$SUMMARY"
 
 _USED_PORTS=()
 
@@ -62,6 +64,10 @@ R2_PID=""
 
 log() {
   printf '[nvme-failover] %s\n' "$*" | tee -a "$ARTIFACT_DIR/run.log"
+}
+
+write_summary() {
+  echo "$*" | tee -a "$SUMMARY" >/dev/null
 }
 
 require_cmd() {
@@ -248,6 +254,72 @@ wait_grouped_device() {
   exit 1
 }
 
+capture_ops_cluster() {
+  local label="$1"
+  "${BIN_DIR}/sw-block" ops cluster --master-api "$MASTER_ADDR" -o json \
+    >"$ARTIFACT_DIR/cluster-${label}.json"
+}
+
+managed_nvme_field() {
+  local path="$1"
+  local field="$2"
+  python3 - "$path" "$field" <<'PY'
+import json, sys
+path, field = sys.argv[1], sys.argv[2]
+doc = json.load(open(path))
+managed = doc.get("managed_volumes") or []
+if not managed:
+    sys.exit(2)
+volume = managed[0]
+nvme = volume.get("nvme") or {}
+if field == "status":
+    print(volume.get("status", ""))
+elif field == "reason":
+    print(volume.get("reason_code", ""))
+elif field == "ready_true":
+    print("true" if any(c.get("type") == "Ready" and c.get("status") == "True" for c in volume.get("conditions") or []) else "false")
+elif field == "nvme_reason":
+    print(nvme.get("reason_code", ""))
+elif field == "path_count":
+    print(nvme.get("path_count", 0))
+elif field == "multipath_observed":
+    print(str(bool(nvme.get("multipath_observed", False))).lower())
+elif field == "nqn":
+    print(nvme.get("nqn", ""))
+elif field == "nsid":
+    print(nvme.get("nsid", 0))
+elif field == "addrs":
+    print(",".join(nvme.get("nvme_addrs") or []))
+else:
+    sys.exit(3)
+PY
+}
+
+wait_managed_nvme_status() {
+  local label="$1"
+  local want_paths="$2"
+  local want_reason="$3"
+  local require_not_ready="${4:-false}"
+  local json_path="$ARTIFACT_DIR/cluster-${label}.json"
+  for _ in $(seq 1 120); do
+    if capture_ops_cluster "$label" 2>"$ARTIFACT_DIR/cluster-${label}.stderr"; then
+      local got_paths got_reason ready_true
+      got_paths="$(managed_nvme_field "$json_path" path_count 2>/dev/null || true)"
+      got_reason="$(managed_nvme_field "$json_path" nvme_reason 2>/dev/null || true)"
+      ready_true="$(managed_nvme_field "$json_path" ready_true 2>/dev/null || true)"
+      if [[ "$got_paths" == "$want_paths" && "$got_reason" == "$want_reason" ]]; then
+        if [[ "$require_not_ready" != "true" || "$ready_true" != "true" ]]; then
+          return 0
+        fi
+      fi
+    fi
+    sleep 0.25
+  done
+  echo "timed out waiting for managed NVMe status label=${label} paths=${want_paths} reason=${want_reason}" >&2
+  [[ -f "$json_path" ]] && cat "$json_path" >&2
+  exit 1
+}
+
 require_cmd sudo
 require_cmd nvme
 require_cmd curl
@@ -256,6 +328,8 @@ require_cmd mkfs.ext4
 require_cmd mount
 require_cmd sha256sum
 
+write_summary "phase101_nvme_path_failure_status=running"
+write_summary "phase101_scope=standalone_nvme_multipath_one_path_loss_status_gate"
 log "run_id=$RUN_ID"
 log "root=$ROOT"
 log "artifact_dir=$ARTIFACT_DIR"
@@ -283,6 +357,11 @@ else
   log "build binaries"
   go build -o "${BIN_DIR}/blockmaster" ./cmd/blockmaster
   go build -o "${BIN_DIR}/blockvolume" ./cmd/blockvolume
+  go build -o "${BIN_DIR}/sw-block" ./cmd/sw-block
+fi
+if [[ ! -x "${BIN_DIR}/sw-block" ]]; then
+  require_cmd go
+  go build -o "${BIN_DIR}/sw-block" ./cmd/sw-block
 fi
 
 cat >"$ARTIFACT_DIR/topology.yaml" <<YAML
@@ -384,6 +463,21 @@ sudo nvme connect -t tcp -a 127.0.0.1 -s "$PORT2" -n "$SUBSYS_NQN" \
 wait_nvme_paths
 sudo nvme list-subsys -o json >"$ARTIFACT_DIR/nvme-list-subsys.before-failover.json" 2>&1 || true
 parse_nvme_subsys paths >"$ARTIFACT_DIR/path-summary.before-failover.txt" || true
+wait_managed_nvme_status before-failover 2 ""
+before_status="$(managed_nvme_field "$ARTIFACT_DIR/cluster-before-failover.json" status)"
+before_reason="$(managed_nvme_field "$ARTIFACT_DIR/cluster-before-failover.json" reason)"
+before_path_count="$(managed_nvme_field "$ARTIFACT_DIR/cluster-before-failover.json" path_count)"
+before_multipath_observed="$(managed_nvme_field "$ARTIFACT_DIR/cluster-before-failover.json" multipath_observed)"
+before_nqn="$(managed_nvme_field "$ARTIFACT_DIR/cluster-before-failover.json" nqn)"
+before_nsid="$(managed_nvme_field "$ARTIFACT_DIR/cluster-before-failover.json" nsid)"
+before_addrs="$(managed_nvme_field "$ARTIFACT_DIR/cluster-before-failover.json" addrs)"
+write_summary "before_status=${before_status}"
+write_summary "before_reason=${before_reason:-none}"
+write_summary "before_path_count=${before_path_count}"
+write_summary "before_multipath_observed=${before_multipath_observed}"
+write_summary "before_nqn=${before_nqn}"
+write_summary "before_nsid=${before_nsid}"
+write_summary "before_addrs=${before_addrs}"
 map_dev="$(wait_grouped_device)"
 log "nvme_namespace_device=${map_dev}"
 
@@ -411,6 +505,21 @@ log "wait r2 failover"
 wait_status_role "$R2_STATUS_ADDR" r2 primary 2
 sudo nvme list-subsys -o json >"$ARTIFACT_DIR/nvme-list-subsys.after-failover.json" 2>&1 || true
 parse_nvme_subsys paths >"$ARTIFACT_DIR/path-summary.after-failover.txt" || true
+wait_managed_nvme_status after-failover 1 "nvme_multipath_path_missing" true
+after_status="$(managed_nvme_field "$ARTIFACT_DIR/cluster-after-failover.json" status)"
+after_reason="$(managed_nvme_field "$ARTIFACT_DIR/cluster-after-failover.json" reason)"
+after_nvme_reason="$(managed_nvme_field "$ARTIFACT_DIR/cluster-after-failover.json" nvme_reason)"
+after_ready_true="$(managed_nvme_field "$ARTIFACT_DIR/cluster-after-failover.json" ready_true)"
+after_path_count="$(managed_nvme_field "$ARTIFACT_DIR/cluster-after-failover.json" path_count)"
+after_multipath_observed="$(managed_nvme_field "$ARTIFACT_DIR/cluster-after-failover.json" multipath_observed)"
+after_addrs="$(managed_nvme_field "$ARTIFACT_DIR/cluster-after-failover.json" addrs)"
+write_summary "after_status=${after_status}"
+write_summary "after_reason=${after_reason}"
+write_summary "after_nvme_reason=${after_nvme_reason}"
+write_summary "after_ready_true=${after_ready_true}"
+write_summary "after_path_count=${after_path_count}"
+write_summary "after_multipath_observed=${after_multipath_observed}"
+write_summary "after_addrs=${after_addrs}"
 sleep 3
 
 log "verify mounted workload after failover"
@@ -430,6 +539,8 @@ if grep -q "$SUBSYS_NQN" "$ARTIFACT_DIR/nvme-list-subsys.final.json"; then
   echo "NVMe subsystem still present after disconnect: $SUBSYS_NQN" >&2
   exit 1
 fi
+write_summary "final_nvme_residue_count=0"
 
+write_summary "phase101_nvme_path_failure_status=ok"
 log "PASS: mounted NVMe multipath workload read/wrote through r1->r2 failover"
 log "artifacts=$ARTIFACT_DIR"

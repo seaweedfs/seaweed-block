@@ -178,6 +178,33 @@ func TestManagedVolumeProjection_BlocksMissingNVMeMultipath(t *testing.T) {
 	}
 }
 
+func TestManagedVolumeProjection_BlocksMissingNVMeMultipathFromDesiredReplicas(t *testing.T) {
+	projection := ProjectManagedVolume(ManagedVolumeFacts{
+		VolumeID:        "pvc-nvme",
+		DesiredReplicas: 2,
+		Authority: &AuthorityFact{
+			PrimaryReplica: "r2",
+			PublishTarget:  "127.0.0.1:4421",
+		},
+		Replicas: []ReplicaFact{{
+			ReplicaID:        "r2",
+			Observed:         true,
+			Role:             "primary",
+			FrontendProtocol: "nvme",
+			FrontendAddr:     "127.0.0.1:4421",
+			FrontendNQN:      "nqn.2026-05.io.seaweedfs:pvc-nvme",
+			FrontendNSID:     1,
+		}},
+	})
+
+	if projection.NVMe == nil || projection.NVMe.PathCount != 1 || projection.NVMe.ReasonCode != ReasonNVMeMultipathPathMissing {
+		t.Fatalf("nvme=%+v", projection.NVMe)
+	}
+	if projection.Status != ManagedVolumeStatusBlocked || projection.ReasonCode != ReasonNVMeMultipathPathMissing {
+		t.Fatalf("status=%s reason=%s", projection.Status, projection.ReasonCode)
+	}
+}
+
 func TestManagedVolumeProjection_LoopbackCrossNodeBlocked(t *testing.T) {
 	projection := ProjectManagedVolume(ManagedVolumeFacts{
 		VolumeID:          "pvc-a",
