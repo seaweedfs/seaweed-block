@@ -471,6 +471,13 @@ Recommended order from here:
     stage/unstage zero-residue gate, and a bounded mounted writer/reader soak.
     This remains a supported-lab claim only: no RoCE, production HA, broad host
     compatibility, performance/SLO, or backup/restore claim.
+60. Phase 102: NVMe Release Artifact Smoke. **Active, image-publish blocked**
+    Validate that matching published `seaweed-block` and `seaweed-block-csi`
+    images contain the Phase 100/101 NVMe behavior. The gate pulls the release
+    images, runs Kubernetes CSI NVMe multipath attach against the image pair,
+    and runs the Phase 101 standalone hardening gates using binaries extracted
+    from the published `seaweed-block` image. If images are missing, the gate
+    blocks as an artifact-readiness issue, not a product failure.
 
 The internal release-train contract is
 `internal/docs/ref/operation-layer-v0.5-release-train.md`. Phases 41-44 close

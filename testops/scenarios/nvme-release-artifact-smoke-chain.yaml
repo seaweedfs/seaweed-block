@@ -1,0 +1,111 @@
+name: nvme-release-artifact-smoke-chain
+timeout: 90m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+  release_image: ""
+  release_csi_image: ""
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: pre_clean
+    actions:
+      - action: pre_run_cleanup
+        node: m02
+        kill_patterns: "blockmaster,blockvolume,blockcsi,iscsi-target"
+        nvme_disconnect: "true"
+        iscsi_logout_prefix: "iqn.2026-05.io.seaweedfs"
+      - action: exec
+        node: m02
+        cmd: "kubectl -n default delete pod sw-block-dynamic-smoke --ignore-not-found=true --wait=true --timeout=120s; kubectl -n default delete pvc sw-block-dynamic-v1 --ignore-not-found=true --wait=true --timeout=120s; kubectl delete storageclass sw-block-dynamic --ignore-not-found=true; rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase102-nvme-release-artifact && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase102-nvme-release-artifact"
+
+  - name: nvme_release_artifact_smoke
+    actions:
+      - action: exec
+        node: m02
+        timeout: 80m
+        cmd: "cd {{ product_root }} && bash scripts/run-phase102-nvme-release-artifact-smoke.sh {{ product_root }}"
+        env.SW_BLOCK_ARTIFACT_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase102-nvme-release-artifact/gate"
+        env.SW_BLOCK_RELEASE_IMAGE: "{{ release_image }}"
+        env.SW_BLOCK_CSI_RELEASE_IMAGE: "{{ release_csi_image }}"
+        env.SW_BLOCK_NVME_SOAK_ITERATIONS: "5"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase102-nvme-release-artifact/gate/phase102-nvme-release-artifact-smoke-summary.txt"
+        pattern: "^phase102_nvme_release_artifact_status=ok$"
+        save_as: phase102_ok
+      - action: assert_greater
+        actual: "{{ phase102_ok }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase102-nvme-release-artifact/gate/phase102-nvme-release-artifact-smoke-summary.txt"
+        pattern: "^phase100_nvme_csi_multipath_live_status=ok$"
+        save_as: phase100_ok
+      - action: assert_greater
+        actual: "{{ phase100_ok }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase102-nvme-release-artifact/gate/phase102-nvme-release-artifact-smoke-summary.txt"
+        pattern: "^phase101_nvme_path_failure_status=ok$"
+        save_as: path_failure_ok
+      - action: assert_greater
+        actual: "{{ path_failure_ok }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase102-nvme-release-artifact/gate/phase102-nvme-release-artifact-smoke-summary.txt"
+        pattern: "^phase101_nvme_stage_unstage_status=ok$"
+        save_as: stage_unstage_ok
+      - action: assert_greater
+        actual: "{{ stage_unstage_ok }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase102-nvme-release-artifact/gate/phase102-nvme-release-artifact-smoke-summary.txt"
+        pattern: "^phase101_nvme_soak_status=ok$"
+        save_as: soak_ok
+      - action: assert_greater
+        actual: "{{ soak_ok }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase102-nvme-release-artifact/gate/phase102-nvme-release-artifact-smoke-summary.txt"
+        pattern: "^phase101_soak_false_ready_count=0$"
+        save_as: no_false_ready
+      - action: assert_greater
+        actual: "{{ no_false_ready }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase102-nvme-release-artifact/gate/phase102-nvme-release-artifact-smoke-summary.txt"
+        pattern: "^phase101_soak_identity_drift_count=0$"
+        save_as: no_identity_drift
+      - action: assert_greater
+        actual: "{{ no_identity_drift }}"
+        threshold: "0"
+
+  - name: collect_and_cleanup
+    always: true
+    actions:
+      - action: pre_run_cleanup
+        node: m02
+        kill_patterns: "blockmaster,blockvolume,blockcsi,iscsi-target"
+        nvme_disconnect: "true"
+        iscsi_logout_prefix: "iqn.2026-05.io.seaweedfs"
+      - action: exec
+        node: m02
+        cmd: "kubectl -n default delete pod sw-block-dynamic-smoke --ignore-not-found=true --wait=true --timeout=120s; kubectl -n default delete pvc sw-block-dynamic-v1 --ignore-not-found=true --wait=true --timeout=120s; kubectl delete storageclass sw-block-dynamic --ignore-not-found=true"
+      - action: collect_path
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase102-nvme-release-artifact"
+        name: "remote-phases"
+        ignore_error: true

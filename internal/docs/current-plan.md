@@ -1,186 +1,135 @@
-# Current Plan: Phase 101 NVMe Hardening And Soak
+# Current Plan: Phase 102 NVMe Release Artifact Smoke
 
-Status: complete. Local tests and m02 runner gates PASS on 2026-06-28.
+Status: active plan; gate scaffold implemented, waiting for matching published
+images to run the full release-artifact validation.
 
 ## Why This Is Next
 
-Phase 99 closed the NVMe baseline:
-
-- ANA Identify/Get Log Page and provider-backed ANA state exist.
-- Direct-host ANA/multipath gates exist.
-- CSI can select and stage a single NVMe publish target.
-
-Phase 100 closed the supported-lab Kubernetes CSI NVMe multipath attach path:
+Phase 101 closed the source/lab NVMe hardening slice:
 
 ```text
-dynamic PVC protocol=nvme, replicationFactor=2
-  -> two NVMe frontend paths for one NQN/NSID
-  -> master status groups them as one multipath publish target
-  -> CSI publish context carries nvmeAddrs
-  -> NodeStage connects every path
-  -> app pod writer/reader passes
-  -> cleanup proves no stale NVMe subsystem residue
+Phase 100 Kubernetes CSI NVMe multipath attach
+  -> Phase 101 status/path-loss/stage-unstage/bounded-soak hardening
 ```
 
-The next risk is not "can NVMe attach once"; that is proven. The next risk is
-whether the NVMe path behaves like a product feature when it is stressed,
-observed, and partially failed.
-
-This phase hardens the NVMe path without broadening the claim into production
-HA, RoCE, performance, or broad host compatibility.
+Those gates prove the code and lab behavior. They do not prove that published
+`seaweed-block` and `seaweed-block-csi` images contain the same behavior. The
+project has repeatedly found chart/image skew and stale-image failures, so the
+next step is a release-artifact smoke before any public NVMe claim is widened.
 
 ## Product Goal
 
-Move NVMe from a supported-lab attach proof to a supported-lab hardening proof:
+Turn the source-gated NVMe claim into a release-artifact-gated claim:
 
 ```text
-NVMe multipath attach
-  -> visible path identity and ANA/path health in status surfaces
-  -> one-path failure does not produce false Ready
-  -> path recovery converges
-  -> repeated stage/unstage leaves no residue
-  -> bounded soak keeps writer/reader and cleanup true
+matching published images
+  -> Kubernetes CSI NVMe multipath attach still works
+  -> image-extracted blockmaster/blockvolume/sw-block binaries pass Phase 101
+     standalone hardening gates
+  -> release wording remains narrow and honest
 ```
 
-## D1: NVMe Status Surface Contract
+## Required Inputs
 
-Status: complete.
+The gate must be run with both images from the same source commit:
 
-Expose enough NVMe facts for operators and gates to reason about the attached
-path instead of grepping CSI logs.
+```text
+SW_BLOCK_RELEASE_IMAGE=ghcr.io/seaweedfs/seaweed-block:sha-<commit>
+SW_BLOCK_CSI_RELEASE_IMAGE=ghcr.io/seaweedfs/seaweed-block-csi:sha-<same-commit>
+```
 
-Required facts:
+If either image is missing, the gate must report
+`phase102_nvme_release_artifact_status=blocked_missing_release_images` and must
+not be treated as product failure.
 
-- protocol=`nvme`;
-- `nqn`;
-- `nsid`;
-- first `nvmeAddr`;
-- full `nvmeAddrs[]` path list;
-- path count;
-- multipath requested/observed;
-- ANA state when available;
-- stale/missing path reason when evidence is incomplete.
+## D1: Gate Scaffold
 
-Surfaces:
+Status: implemented.
 
-- CRD status;
-- `operator-snapshot.json`;
-- report summary;
-- dashboard JSON;
-- `ops explain`.
+Files:
 
-Success criteria:
+```text
+scripts/run-phase102-nvme-release-artifact-smoke.sh
+testops/scenarios/nvme-release-artifact-smoke-chain.yaml
+testops/suites/nvme-release-artifact-smoke.yaml
+```
 
-- a healthy Phase 100-style volume shows two NVMe paths and no iSCSI frontend;
-- a missing-path snapshot shows `Ready=Unknown` or `Blocked`, never false
-  `Ready=True`;
-- all surfaces agree.
+The script:
 
-## D2: NVMe Path Failure Gate
+- pulls both published images;
+- extracts `blockmaster`, `blockvolume`, and `sw-block` from the published
+  `seaweed-block` image;
+- writes a release `alpha-images.env` using the published image pair;
+- runs the Phase 100 Kubernetes NVMe CSI multipath live gate against the
+  published images;
+- runs Phase 101 path-failure, stage/unstage, and bounded-soak gates using the
+  extracted release binaries.
 
-Status: complete. Runner `nvme-path-failure-status-chain` PASS
-`20260628-013848-bdd2`.
+## D2: Local Contract Validation
 
-Prove that the system does not lie when one NVMe path disappears.
+Required checks:
 
-Minimum acceptable gate:
+```text
+bash -n scripts/run-phase102-nvme-release-artifact-smoke.sh
+C:\work\swblock.exe validate testops/scenarios/nvme-release-artifact-smoke-chain.yaml
+go test ./scripts ./internal/testops ./core/ops ./core/host/master ./cmd/sw-block ./core/frontend/nvme -count=1
+```
 
-- start from a mounted two-path NVMe volume;
-- make one path unavailable without deleting the whole volume;
-- keep workload data path semantics scoped and explicit;
-- status must not claim a clean two-path Ready state while evidence shows one
-  path missing;
-- cleanup must remove all NVMe subsystem residue.
+Success means the scaffold is syntactically valid and does not regress the
+Phase 101 code/test packages.
 
-Success criteria:
+## D3: Missing-Image Blocked Check
 
-- no false Ready;
-- path-count/path-health reason is visible;
-- writer/reader result is recorded honestly, whether pass or degraded;
-- recovery or final cleanup converges.
+Run the script without image inputs and assert:
 
-## D3: Stage/Unstage Idempotency And Residue Gate
+```text
+phase102_nvme_release_artifact_status=blocked_missing_release_images
+required_env=SW_BLOCK_RELEASE_IMAGE,SW_BLOCK_CSI_RELEASE_IMAGE
+```
 
-Status: complete. Runner `nvme-stage-unstage-residue-chain` PASS
-`20260628-014526-dcd3`.
+This proves the gate fails closed when release artifacts are not available.
 
-Exercise attach/detach repetition, because host initiator residue is a common
-NVMe/iSCSI product failure mode.
+## D4: Published-Image Smoke
 
-Minimum acceptable gate:
+Run once matching images exist:
 
-- repeat NodeStage/NodeUnstage through Kubernetes pod churn or runner helper;
-- record `nvme list-subsys` before/after each cycle;
-- assert no stale subsystem/controller survives final cleanup.
+```text
+swblock run \
+  -env release_image=ghcr.io/seaweedfs/seaweed-block:sha-<commit> \
+  -env release_csi_image=ghcr.io/seaweedfs/seaweed-block-csi:sha-<same-commit> \
+  testops/scenarios/nvme-release-artifact-smoke-chain.yaml
+```
 
-Success criteria:
+Required PASS evidence:
 
-- repeated stage/unstage does not accumulate stale NVMe sessions;
-- failed mid-cycle cleanup is surfaced as cleanup-required, not hidden;
-- final verifier returns zero residue.
+```text
+phase102_nvme_release_artifact_status=ok
+phase100_nvme_csi_multipath_live_status=ok
+phase101_nvme_path_failure_status=ok
+phase101_nvme_stage_unstage_status=ok
+phase101_nvme_soak_status=ok
+phase101_soak_false_ready_count=0
+phase101_soak_identity_drift_count=0
+```
 
-## D4: Bounded NVMe Soak Gate
+## D5: Release Wording
 
-Status: complete. Runner `nvme-bounded-soak-chain` PASS
-`20260628-015211-562f`.
+Only after D4 PASS may docs say the published release artifacts include:
 
-Run a small, deterministic soak rather than a performance benchmark.
+- supported-lab NVMe/TCP CSI multipath attach;
+- NVMe path status/identity projection;
+- one-path-loss negative-first status;
+- repeated stage/unstage zero-residue gate;
+- bounded writer/reader soak.
 
-Minimum acceptable gate:
+Docs must still say:
 
-- mounted writer/reader loop for a bounded duration or iteration count;
-- optional path flap if D2 is stable;
-- periodic status snapshots;
-- final cleanup verifier.
-
-Success criteria:
-
-- no false Ready during the run;
-- no path identity drift across snapshots;
-- no final NVMe residue;
-- result explicitly does not claim throughput, latency, or production SLO.
-
-## D5: Close Gate And Release Wording
-
-Status: complete.
-
-Close the milestone by updating user-facing docs and finished-plan evidence.
-
-Release wording must say:
-
-- NVMe-oF is supported as a lab-gated frontend path;
-- Kubernetes CSI NVMe multipath attach and basic hardening gates exist;
-- iSCSI remains the default broad-compatibility path;
-- no RoCE, production HA, broad distro/kernel compatibility, performance, or
-  soak/SLO claim.
+- no RoCE or NVMe/RDMA claim;
+- no performance/latency/throughput/SLO claim;
+- no broad kernel/distro compatibility claim;
+- no production HA or transparent Kubernetes node-loss failover claim.
 
 ## Non-Claims
 
-- no RoCE claim;
-- no production HA claim;
-- no performance/latency/throughput claim;
-- no broad distro/kernel compatibility claim;
-- no transparent Kubernetes node-loss failover claim;
-- no backup/snapshot/restore claim.
-
-## Release Relationship
-
-Operation Layer v0.5 remains a large release candidate but still needs matching
-published images and pinned-image smoke before being marked released.
-
-Phase 101 is a storage/protocol hardening milestone after Phase 100. It should
-not block the operation release, and the operation release should not claim
-Phase 101 NVMe hardening unless matching release images are published and
-smoked.
-
-## Next Candidate
-
-The next NVMe work should not broaden claims blindly. Reasonable next candidates
-are:
-
-- publish-image smoke for the Phase 101 NVMe gates if this is intended for a
-  release claim;
-- RoCE / multi-host NVMe path design and lab preflight, explicitly separated
-  from the current TCP supported-lab claim;
-- NVMe performance/R2T/in-capsule characterization, explicitly labelled as
-  measurement rather than SLO.
+Phase 102 is not a new NVMe feature. It is release-artifact validation for
+Phases 100 and 101.
