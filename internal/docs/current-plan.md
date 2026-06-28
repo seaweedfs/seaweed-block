@@ -1,6 +1,6 @@
 # Current Plan: Phase 101 NVMe Hardening And Soak
 
-Status: active plan; implementation starting.
+Status: complete. Local tests and m02 runner gates PASS on 2026-06-28.
 
 ## Why This Is Next
 
@@ -44,6 +44,8 @@ NVMe multipath attach
 
 ## D1: NVMe Status Surface Contract
 
+Status: complete.
+
 Expose enough NVMe facts for operators and gates to reason about the attached
 path instead of grepping CSI logs.
 
@@ -76,6 +78,9 @@ Success criteria:
 
 ## D2: NVMe Path Failure Gate
 
+Status: complete. Runner `nvme-path-failure-status-chain` PASS
+`20260628-013848-bdd2`.
+
 Prove that the system does not lie when one NVMe path disappears.
 
 Minimum acceptable gate:
@@ -96,6 +101,9 @@ Success criteria:
 
 ## D3: Stage/Unstage Idempotency And Residue Gate
 
+Status: complete. Runner `nvme-stage-unstage-residue-chain` PASS
+`20260628-014526-dcd3`.
+
 Exercise attach/detach repetition, because host initiator residue is a common
 NVMe/iSCSI product failure mode.
 
@@ -112,6 +120,9 @@ Success criteria:
 - final verifier returns zero residue.
 
 ## D4: Bounded NVMe Soak Gate
+
+Status: complete. Runner `nvme-bounded-soak-chain` PASS
+`20260628-015211-562f`.
 
 Run a small, deterministic soak rather than a performance benchmark.
 
@@ -130,6 +141,8 @@ Success criteria:
 - result explicitly does not claim throughput, latency, or production SLO.
 
 ## D5: Close Gate And Release Wording
+
+Status: complete.
 
 Close the milestone by updating user-facing docs and finished-plan evidence.
 
@@ -159,3 +172,15 @@ Phase 101 is a storage/protocol hardening milestone after Phase 100. It should
 not block the operation release, and the operation release should not claim
 Phase 101 NVMe hardening unless matching release images are published and
 smoked.
+
+## Next Candidate
+
+The next NVMe work should not broaden claims blindly. Reasonable next candidates
+are:
+
+- publish-image smoke for the Phase 101 NVMe gates if this is intended for a
+  release claim;
+- RoCE / multi-host NVMe path design and lab preflight, explicitly separated
+  from the current TCP supported-lab claim;
+- NVMe performance/R2T/in-capsule characterization, explicitly labelled as
+  measurement rather than SLO.

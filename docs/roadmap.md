@@ -465,13 +465,12 @@ Recommended order from here:
     publish/NodeStage multipath attach, mounted writer/reader I/O, and zero
     Seaweed Block NVMe residue after delete. This is not a RoCE, performance,
     broad host compatibility, production HA, or soak claim.
-59. Phase 101: NVMe Hardening And Soak. **Active plan**
-    Harden the Phase 100 NVMe path before broadening the product surface:
-    publish NVMe path identity/health into status surfaces, prove no false
-    Ready on one-path failure, repeat stage/unstage without host residue, and
-    run a bounded writer/reader soak. This remains a supported-lab claim only:
-    no RoCE, production HA, broad host compatibility, performance/SLO, or
-    backup/restore claim.
+59. Phase 101: NVMe Hardening And Soak. **Closed 2026-06-28, runner PASS**
+    The supported-lab NVMe path now has status-surface identity and health
+    projection, a one-path-loss gate that prevents false Ready, a repeated
+    stage/unstage zero-residue gate, and a bounded mounted writer/reader soak.
+    This remains a supported-lab claim only: no RoCE, production HA, broad host
+    compatibility, performance/SLO, or backup/restore claim.
 
 The internal release-train contract is
 `internal/docs/ref/operation-layer-v0.5-release-train.md`. Phases 41-44 close
@@ -666,8 +665,10 @@ control-plane path is mature.
 
    iSCSI remains the default path for broad compatibility. NVMe-oF is now
    covered by ANA-aware direct-host multipath/failover, CSI protocol selection,
-   and a supported-lab Kubernetes CSI NVMe multipath attach gate. Broader host
-   compatibility, RoCE, performance, and soak remain future work.
+   a supported-lab Kubernetes CSI NVMe multipath attach gate, and Phase 101
+   path-status/stage-unstage/bounded-soak hardening. Broader host
+   compatibility, RoCE, performance/SLO, and long-soak claims remain future
+   work.
 
    The runtime should be managed as a cluster of explicit mini-protocols:
    authority/epoch, replication recovery, iSCSI, NVMe, CSI lifecycle, and
