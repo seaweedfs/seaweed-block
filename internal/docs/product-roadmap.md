@@ -225,14 +225,15 @@ rebuild, delete safety, or cleanup must start as a separate gated phase.
   Phase 98 closes the deployed workload-visible path: product-owned frontend
   publication after failback is followed by writer/reader verification and
   zero-residue cleanup in live k3s.
-- Next: Phase 101 Data Lifecycle MVP. Phase 100 closed the Kubernetes CSI NVMe
-  multipath attach gap for the supported lab path: multiple NVMe frontend paths
-  for one NQN/NSID survive master status, CSI publish context, NodeStage, app
-  writer/reader, and cleanup evidence. The next product gap is a narrow
-  snapshot/backup/restore loop that reuses the operation action/evidence/status
-  model instead of creating another isolated control plane. Stronger
-  committed-frontier reporting, broad distro/host compatibility, RoCE,
-  performance, and longer soak remain later work.
+- Next: Phase 101 NVMe Hardening And Soak. Phase 100 closed the Kubernetes CSI
+  NVMe multipath attach gap for the supported lab path: multiple NVMe frontend
+  paths for one NQN/NSID survive master status, CSI publish context, NodeStage,
+  app writer/reader, and cleanup evidence. The next product gap is to harden
+  that path before broadening the product surface: publish NVMe path
+  identity/health into status surfaces, prove no false Ready on one-path
+  failure, repeat stage/unstage without host residue, and run a bounded
+  writer/reader soak. Backup/restore, stronger committed-frontier reporting,
+  broad distro/host compatibility, RoCE, and performance remain later work.
 
 ### Track E: Protocol / Backend Expansion
 
@@ -791,11 +792,10 @@ Approximate engineering effort if scope remains tight:
   master NVMe frontend grouping, CSI `nvmeAddrs` publish context, NodeStage
   multi-address connect, mounted writer/reader I/O, and zero NVMe residue after
   delete in the supported lab.
-- Phase 101 Data Lifecycle MVP is the active plan. It starts the next large
-  user-facing capability: source-gated snapshot evidence, backup artifact
-  metadata, restore preflight, one bounded restore path into a new PVC, and
-  writer/reader verification, all through the existing operation
-  action/evidence/status model.
+- Phase 101 NVMe Hardening And Soak is the active plan. It starts from the
+  Phase 100 supported-lab attach path and adds status-surface visibility,
+  one-path-failure honesty, repeated stage/unstage residue checks, and bounded
+  writer/reader soak before any broader NVMe claim.
 - Phase 41-44 are the Operation Layer v0.5 release train: lifecycle-owner
   foundation, real API/admission proof, first bounded finalizer mutation, and
   delete lifecycle close gate.
