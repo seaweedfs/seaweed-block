@@ -465,8 +465,14 @@ Recommended order from here:
     publish/NodeStage multipath attach, mounted writer/reader I/O, and zero
     Seaweed Block NVMe residue after delete. This is not a RoCE, performance,
     broad host compatibility, production HA, or soak claim.
-59. Add backup/restore after it can reuse the same action owner, evidence, and
-    status model rather than creating another isolated control plane.
+59. Phase 101: Data Lifecycle MVP. **Active plan**
+    Add snapshot/backup/restore after it can reuse the same action owner,
+    evidence, and status model rather than creating another isolated control
+    plane. The first claim is intentionally narrow: source-gated
+    crash-consistent snapshot evidence, backup artifact metadata, restore
+    preflight, one bounded restore path into a new PVC, writer/reader
+    verification, and zero-residue cleanup. No production backup, remote DR,
+    retention, application consistency, encryption/KMS, or broad UI claim.
 
 The internal release-train contract is
 `internal/docs/ref/operation-layer-v0.5-release-train.md`. Phases 41-44 close

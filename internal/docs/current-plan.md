@@ -1,120 +1,174 @@
-# Current Plan: Phase 100 Kubernetes CSI NVMe Multipath Attach
+# Current Plan: Phase 101 Data Lifecycle MVP
 
-Status: closed; D1/D2 component slice PASS, live Kubernetes gate PASS.
+Status: active plan; implementation not started.
 
-## Goal
+## Why This Is Next
 
-Phase 99 pinned the current NVMe baseline:
-
-- ANA Identify/Get Log Page and provider-backed ANA state exist.
-- Direct-host ANA/multipath gates exist.
-- CSI can select and stage a single NVMe publish target.
-
-Phase 100 starts the Kubernetes CSI parity gap that remains:
+The operation layer now has a coherent beta-candidate loop:
 
 ```text
-multiple NVMe frontend paths for one NQN/NSID
-  -> master status groups them as one multipath publish target
-  -> CSI publish context preserves all path addresses
-  -> NodeStage connects every path
-  -> app pod sees one mounted namespace
-  -> cleanup proves no stale NVMe subsystem residue
+PVC / SwBlockVolume identity
+  -> CRD status and Events
+  -> evidence-backed decisions
+  -> bounded lifecycle-owner finalizer mutation
+  -> delete-safety hold/release
 ```
 
-This phase is separate from the Operation Layer release-readiness gate. The
-operation milestone release remains blocked until matching published
-`seaweed-block` and `seaweed-block-csi` images exist and pass the pinned-image
-smoke. Development is continuing on NVMe in parallel.
+Phase 98 closed the returned-replica operation loop. Phase 100 closed the
+supported-lab Kubernetes CSI NVMe multipath attach path. The next user-visible
+gap is data lifecycle: users can create and operate block volumes, but they
+cannot yet create a product-owned recovery point, export it as a backup, or
+restore it into a new PVC-backed volume.
 
-## D1/D2 Component Slice
-
-Implemented component-level support for the first half of the path:
-
-- `PublishTarget` can carry `NVMeAddrs` in addition to the legacy first
-  `NVMeAddr`.
-- master status lookup groups multiple NVMe frontends only when they share the
-  same `NQN` and `NSID`.
-- CSI publish context emits:
-
-  ```text
-  protocol=nvme
-  nvmeAddr=<first path>
-  nvmeAddrs=<comma-separated paths>
-  nqn=<subsystem NQN>
-  ```
-
-- NodeStage reads `nvmeAddrs`, connects each address for the same NQN, records
-  staged multipath metadata, and preserves the existing single-path fallback.
-
-## Gates
-
-Added:
+This phase must reuse the operation model rather than invent a separate control
+plane:
 
 ```text
-scripts/run-phase100-nvme-csi-multipath-component-gate.sh
-testops/scenarios/nvme-csi-multipath-component-chain.yaml
-scripts/run-phase100-nvme-csi-multipath-live-gate.sh
-testops/scenarios/nvme-csi-multipath-live-chain.yaml
+live facts -> judgment -> safe action -> evidence -> CRD/report/dashboard/explain
 ```
 
-The component gate proves:
+## Product Goal
 
-- same-NQN/NSID NVMe frontends are grouped into a single CSI multipath target;
-- different NQN frontends are not silently merged;
-- NodeStage connects all NVMe addresses in `nvmeAddrs`;
-- mount failure still cleans up the NVMe connection state;
-- live Kubernetes NVMe multipath attach remains required before release claim.
-
-Verification:
+Deliver a narrow, honest data-lifecycle MVP:
 
 ```text
-local component gate: PASS
-swblock validate nvme-csi-multipath-component-chain.yaml: PASS
-swblock run 20260627-013844-4a23: PASS, 10/10 actions
-go test ./core/frontend/nvme ./cmd/blockvolume ./core/csi ./core/launcher -count=1: PASS
+source PVC-backed volume
+  -> create a crash-consistent snapshot/checkpoint record
+  -> export/record backup metadata and artifact location
+  -> dry-run restore preflight with explicit blockers
+  -> restore into a new PVC-backed volume only when evidence is sufficient
+  -> writer/reader verifies restored data
+  -> cleanup proves zero residue
 ```
 
-## D3/D4 Live Kubernetes Slice
+The first milestone can be source-gated. Do not claim production backup, remote
+DR, encryption/KMS, incremental forever, application consistency, or broad
+retention policy support.
 
-Implemented the live attach close gate:
+## D1: Data Lifecycle Contract
 
-- dynamic PVC can request `protocol=nvme`, `replicationFactor=2`, and
-  `stage2_multipath=true`;
-- CSI `CreateVolumeResponse.VolumeContext` carries the safe multipath attach
-  parameter forward into PV volume attributes;
-- `ControllerPublish` preserves the multipath request in publish context;
-- `NodeStage` performs a bounded refresh until `nvmeAddrs` contains at least two
-  portals, then connects each portal for the same NQN;
-- dynamic lifecycle status can merge fresh observed replica IDs for read-only
-  publish-target aggregation when lifecycle records do not persist placement
-  slots;
-- the live runner imports fresh local images to every schedulable node and
-  removes stale containerd tags before import.
+Define the product vocabulary and schema before wiring mutation:
 
-Verification:
+- `SwBlockSnapshot` or equivalent snapshot record shape.
+- `SwBlockBackup` or equivalent backup/export record shape.
+- restore request/decision shape.
+- status conditions:
+  - `Ready`
+  - `Blocked`
+  - `EvidenceStale`
+  - `SnapshotCreated`
+  - `BackupAvailable`
+  - `RestoreReady`
+  - `RestoreBlocked`
+- stable reasons:
+  - `snapshot_source_not_ready`
+  - `snapshot_checkpoint_created`
+  - `backup_artifact_recorded`
+  - `restore_source_missing`
+  - `restore_target_exists`
+  - `restore_preflight_passed`
+  - `restore_data_verified`
+- action records:
+  - `data_lifecycle.create_snapshot`
+  - `data_lifecycle.export_backup`
+  - `data_lifecycle.restore_volume`
 
-```text
-swblock run testops/scenarios/nvme-csi-multipath-live-chain.yaml
-run: 20260627-024451-2ee8
-result: PASS, 18/18 actions
+Success criteria:
 
-phase100_nvme_csi_multipath_live_status=ok
-generated_nvme_listen_count=2
-generated_nqn_unique_count=1
-generated_nsid_unique_count=1
-node_stage_nvme_multipath_count=1
-node_stage_two_portals_count=1
-nvme_residue_count=0
-```
+- schema is camelCase and Kubernetes OpenAPI-valid;
+- status/action records appear in report, dashboard, operator-snapshot, and
+  explain;
+- no action claims execution without evidence.
+
+## D2: Snapshot Evidence Gate
+
+Implement the first source-gated snapshot/checkpoint path.
+
+Minimum acceptable scope:
+
+- single source volume;
+- quiesce/application-consistency is not claimed;
+- snapshot is crash-consistent at the block layer only;
+- evidence records source volume ID, PVC, authority epoch, primary, publish
+  target, durable frontier/checkpoint identity, and captured time.
+
+Success criteria:
+
+- snapshot creation refuses when source volume is not Ready;
+- snapshot evidence is stable enough for cold-bundle replay;
+- no false `SnapshotCreated=True` when the checkpoint is missing or stale.
+
+## D3: Backup Artifact Metadata Gate
+
+Record backup/export metadata without overclaiming enterprise backup.
+
+Minimum acceptable scope:
+
+- local filesystem or configured artifact path only;
+- backup artifact has identity, source snapshot, size/checksum if available,
+  created time, and restore compatibility metadata;
+- status surfaces show where the artifact is and whether it is complete.
+
+Success criteria:
+
+- backup metadata is reproducible from support bundle;
+- missing/incomplete artifact surfaces `Blocked` or `EvidenceStale`, never
+  `BackupAvailable=True`;
+- cleanup verifies no temporary export residue.
+
+## D4: Restore Preflight Gate
+
+Before mutating a target volume, implement dry-run restore judgment.
+
+Preflight must check:
+
+- backup artifact exists and matches declared snapshot/source identity;
+- target PVC/volume name is free or explicitly allowed;
+- requested size is compatible;
+- protocol/storage backend compatibility is explicit;
+- restore action owner has the minimum required RBAC and no broad workload or
+  storage mutation power.
+
+Success criteria:
+
+- clean backup -> `restore_preflight_passed`;
+- missing artifact/source mismatch/target collision -> `RestoreBlocked`;
+- CRD/report/dashboard/explain agree;
+- action remains dry-run until the restore executor gate starts.
+
+## D5: Restore Executor Close Gate
+
+Implement one bounded restore path after D4 is green.
+
+Minimum acceptable scope:
+
+- restore one source backup into one new PVC-backed volume;
+- verify mounted reader sees the restored data;
+- status and Events record `restore_data_verified`;
+- multi-volume isolation: restoring volume A cannot change volume B status,
+  finalizers, authority, or frontend publication.
+
+Success criteria:
+
+- writer/reader proves restored data;
+- failed restore leaves no false Ready and no hidden residue;
+- cleanup verifier returns all zero residue counts;
+- final sign-off states exact non-claims.
 
 ## Non-Claims
 
-- no RoCE, performance, broad host compatibility, or production HA claim;
-- no automatic release claim for the operation milestone;
-- no backup/snapshot/restore.
+- no production backup/SLO/retention policy claim;
+- no application-consistent snapshot claim;
+- no remote DR or cross-cluster restore claim;
+- no incremental forever/dedup/compression claim;
+- no backup encryption/KMS claim;
+- no broad UI claim.
 
-## Next
+## Release Relationship
 
-Phase 100 is closed for the supported lab path. The next NVMe work should not
-expand the claim broadly yet; use a larger follow-up milestone for soak,
-failure-path behavior, or ANA/CSI status surfacing if needed.
+Operation Layer v0.5 remains a large release candidate but still needs matching
+published images and pinned-image smoke before being marked released.
+
+Phase 101 is development after that operation milestone. It should not block the
+operation release, and the operation release should not claim Phase 101 data
+lifecycle features.
