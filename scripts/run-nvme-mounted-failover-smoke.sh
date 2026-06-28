@@ -5,7 +5,12 @@ ROOT="${1:-$(pwd)}"
 RUN_ID="${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
 WORK_DIR="${SW_BLOCK_NVME_FAILOVER_WORK_DIR:-/tmp/sw-block-nvme-failover}"
 ARTIFACT_DIR="${SW_BLOCK_ARTIFACT_DIR:-${WORK_DIR}/runs/${RUN_ID}}"
-SUMMARY="${ARTIFACT_DIR}/phase101-nvme-path-failure-summary.txt"
+SOAK_ITERATIONS="${SW_BLOCK_NVME_SOAK_ITERATIONS:-0}"
+if [[ "$SOAK_ITERATIONS" != "0" ]]; then
+  SUMMARY="${ARTIFACT_DIR}/phase101-nvme-soak-summary.txt"
+else
+  SUMMARY="${ARTIFACT_DIR}/phase101-nvme-path-failure-summary.txt"
+fi
 SUBSYS_NQN="${SW_BLOCK_NVME_NQN:-nqn.2026-05.io.seaweedfs:failover-v1}"
 NSID="${SW_BLOCK_NVME_NSID:-1}"
 BLOCKS="${SW_BLOCK_DURABLE_BLOCKS:-65536}"
@@ -328,8 +333,14 @@ require_cmd mkfs.ext4
 require_cmd mount
 require_cmd sha256sum
 
-write_summary "phase101_nvme_path_failure_status=running"
-write_summary "phase101_scope=standalone_nvme_multipath_one_path_loss_status_gate"
+if [[ "$SOAK_ITERATIONS" != "0" ]]; then
+  write_summary "phase101_nvme_soak_status=running"
+  write_summary "phase101_scope=standalone_nvme_bounded_writer_reader_soak"
+  write_summary "soak_iterations=${SOAK_ITERATIONS}"
+else
+  write_summary "phase101_nvme_path_failure_status=running"
+  write_summary "phase101_scope=standalone_nvme_multipath_one_path_loss_status_gate"
+fi
 log "run_id=$RUN_ID"
 log "root=$ROOT"
 log "artifact_dir=$ARTIFACT_DIR"
@@ -512,6 +523,66 @@ log "write pre-failover payload"
 sudo dd if=/dev/urandom of="$MOUNT_DIR/pre.bin" bs=4096 count=64 status=none
 sync
 sudo sha256sum "$MOUNT_DIR/pre.bin" | tee "$ARTIFACT_DIR/pre.sha256"
+
+if [[ "$SOAK_ITERATIONS" != "0" ]]; then
+  if ! [[ "$SOAK_ITERATIONS" =~ ^[0-9]+$ ]]; then
+    echo "SW_BLOCK_NVME_SOAK_ITERATIONS must be numeric, got ${SOAK_ITERATIONS}" >&2
+    exit 2
+  fi
+  if [[ "$SOAK_ITERATIONS" -lt 1 ]]; then
+    echo "SW_BLOCK_NVME_SOAK_ITERATIONS must be >= 1" >&2
+    exit 2
+  fi
+  stable_nqn="$before_nqn"
+  stable_nsid="$before_nsid"
+  stable_addrs="$before_addrs"
+  false_ready_count=0
+  identity_drift_count=0
+  for iter in $(seq 1 "$SOAK_ITERATIONS"); do
+    log "soak iteration ${iter}"
+    sudo dd if=/dev/urandom of="$MOUNT_DIR/soak-${iter}.bin" bs=4096 count=16 status=none
+    sync
+    sudo sha256sum "$MOUNT_DIR/soak-${iter}.bin" >"$ARTIFACT_DIR/soak-${iter}.sha256"
+    sudo sha256sum -c "$ARTIFACT_DIR/soak-${iter}.sha256" >"$ARTIFACT_DIR/soak-${iter}.check"
+
+    capture_ops_cluster "soak-${iter}"
+    iter_path_count="$(managed_nvme_field "$ARTIFACT_DIR/cluster-soak-${iter}.json" path_count)"
+    iter_nqn="$(managed_nvme_field "$ARTIFACT_DIR/cluster-soak-${iter}.json" nqn)"
+    iter_nsid="$(managed_nvme_field "$ARTIFACT_DIR/cluster-soak-${iter}.json" nsid)"
+    iter_addrs="$(managed_nvme_field "$ARTIFACT_DIR/cluster-soak-${iter}.json" addrs)"
+    iter_ready_true="$(managed_nvme_field "$ARTIFACT_DIR/cluster-soak-${iter}.json" ready_true)"
+    write_summary "soak_${iter}_path_count=${iter_path_count}"
+    write_summary "soak_${iter}_ready_true=${iter_ready_true}"
+    if [[ "$iter_path_count" != "2" || "$iter_nqn" != "$stable_nqn" || "$iter_nsid" != "$stable_nsid" || "$iter_addrs" != "$stable_addrs" ]]; then
+      identity_drift_count=$((identity_drift_count + 1))
+    fi
+    if [[ "$iter_ready_true" == "true" && "$iter_path_count" != "2" ]]; then
+      false_ready_count=$((false_ready_count + 1))
+    fi
+  done
+  write_summary "soak_completed_iterations=${SOAK_ITERATIONS}"
+  write_summary "soak_false_ready_count=${false_ready_count}"
+  write_summary "soak_identity_drift_count=${identity_drift_count}"
+  if [[ "$false_ready_count" != "0" || "$identity_drift_count" != "0" ]]; then
+    echo "soak status invariant failed: false_ready=${false_ready_count} identity_drift=${identity_drift_count}" >&2
+    exit 1
+  fi
+
+  log "unmount"
+  sudo umount "$MOUNT_DIR"
+  log "disconnect NVMe subsystem"
+  disconnect_nqn
+  sudo nvme list-subsys -o json >"$ARTIFACT_DIR/nvme-list-subsys.final.json" 2>&1 || true
+  if grep -q "$SUBSYS_NQN" "$ARTIFACT_DIR/nvme-list-subsys.final.json"; then
+    echo "NVMe subsystem still present after disconnect: $SUBSYS_NQN" >&2
+    exit 1
+  fi
+  write_summary "final_nvme_residue_count=0"
+  write_summary "phase101_nvme_soak_status=ok"
+  log "PASS: bounded NVMe multipath writer/reader soak left zero residue"
+  log "artifacts=$ARTIFACT_DIR"
+  exit 0
+fi
 
 if [[ -z "$R1_PID" ]] || ! kill -0 "$R1_PID" >/dev/null 2>&1; then
   echo "could not find live r1 blockvolume pid" >&2
