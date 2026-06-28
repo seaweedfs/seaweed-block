@@ -29,16 +29,23 @@ matching published images
   -> release wording remains narrow and honest
 ```
 
-## Required Inputs
+## Image Selection
 
-The gate must be run with both images from the same source commit:
+By default, the gate expects both images from the current source commit:
+
+```text
+ghcr.io/seaweedfs/seaweed-block:sha-<HEAD>
+ghcr.io/seaweedfs/seaweed-block-csi:sha-<HEAD>
+```
+
+The tags can be overridden explicitly:
 
 ```text
 SW_BLOCK_RELEASE_IMAGE=ghcr.io/seaweedfs/seaweed-block:sha-<commit>
 SW_BLOCK_CSI_RELEASE_IMAGE=ghcr.io/seaweedfs/seaweed-block-csi:sha-<same-commit>
 ```
 
-If either image is missing, the gate must report
+If either manifest is missing, the gate must report
 `phase102_nvme_release_artifact_status=blocked_missing_release_images` and must
 not be treated as product failure.
 
@@ -80,11 +87,11 @@ Phase 101 code/test packages.
 
 ## D3: Missing-Image Blocked Check
 
-Run the script without image inputs and assert:
+Run the script before the matching images are published and assert:
 
 ```text
 phase102_nvme_release_artifact_status=blocked_missing_release_images
-required_env=SW_BLOCK_RELEASE_IMAGE,SW_BLOCK_CSI_RELEASE_IMAGE
+missing_image=ghcr.io/seaweedfs/seaweed-block:sha-<HEAD>
 ```
 
 This proves the gate fails closed when release artifacts are not available.

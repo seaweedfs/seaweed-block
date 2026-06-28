@@ -5,8 +5,9 @@ ROOT="${1:-$(pwd)}"
 RUN_ID="${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
 ARTIFACT_DIR="${SW_BLOCK_ARTIFACT_DIR:-${ROOT}/results/phase102-nvme-release-artifact-smoke-${RUN_ID}}"
 SUMMARY="${ARTIFACT_DIR}/phase102-nvme-release-artifact-smoke-summary.txt"
-IMAGE="${SW_BLOCK_RELEASE_IMAGE:-${SW_BLOCK_IMAGE:-}}"
-CSI_IMAGE="${SW_BLOCK_CSI_RELEASE_IMAGE:-${SW_BLOCK_CSI_IMAGE:-}}"
+DEFAULT_TAG="sha-$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || true)"
+IMAGE="${SW_BLOCK_RELEASE_IMAGE:-${SW_BLOCK_IMAGE:-ghcr.io/seaweedfs/seaweed-block:${DEFAULT_TAG}}}"
+CSI_IMAGE="${SW_BLOCK_CSI_RELEASE_IMAGE:-${SW_BLOCK_CSI_IMAGE:-ghcr.io/seaweedfs/seaweed-block-csi:${DEFAULT_TAG}}}"
 BIN_DIR="${ARTIFACT_DIR}/image-bin"
 IMAGE_ENV="${ARTIFACT_DIR}/release-images.env"
 
@@ -36,6 +37,11 @@ run_step() {
   return 1
 }
 
+manifest_exists() {
+  local image="$1"
+  docker manifest inspect "$image" >"${ARTIFACT_DIR}/manifest-$(printf '%s' "$image" | tr '/:@' '___').json" 2>"${ARTIFACT_DIR}/manifest-$(printf '%s' "$image" | tr '/:@' '___').stderr.txt"
+}
+
 extract_release_binaries() {
   local container
   container="$(docker create "$IMAGE")"
@@ -49,9 +55,9 @@ extract_release_binaries() {
 write_summary "phase102_nvme_release_artifact_status=running"
 write_summary "phase102_scope=published_image_nvme_smoke"
 
-if [[ -z "$IMAGE" || -z "$CSI_IMAGE" ]]; then
+if [[ "$IMAGE" == *":sha-" && "$IMAGE" == "ghcr.io/seaweedfs/seaweed-block:sha-"* ]]; then
   write_summary "phase102_nvme_release_artifact_status=blocked_missing_release_images"
-  write_summary "required_env=SW_BLOCK_RELEASE_IMAGE,SW_BLOCK_CSI_RELEASE_IMAGE"
+  write_summary "reason=git_head_unavailable"
   write_summary "example_SW_BLOCK_RELEASE_IMAGE=ghcr.io/seaweedfs/seaweed-block:sha-<commit>"
   write_summary "example_SW_BLOCK_CSI_RELEASE_IMAGE=ghcr.io/seaweedfs/seaweed-block-csi:sha-<same-commit>"
   exit 2
@@ -60,13 +66,28 @@ fi
 write_summary "release_image=${IMAGE}"
 write_summary "release_csi_image=${CSI_IMAGE}"
 
+cd "$ROOT"
+
 require_cmd docker
+if ! manifest_exists "$IMAGE"; then
+  write_summary "release_image_manifest=missing"
+  write_summary "phase102_nvme_release_artifact_status=blocked_missing_release_images"
+  write_summary "missing_image=${IMAGE}"
+  exit 2
+fi
+write_summary "release_image_manifest=present"
+if ! manifest_exists "$CSI_IMAGE"; then
+  write_summary "release_csi_image_manifest=missing"
+  write_summary "phase102_nvme_release_artifact_status=blocked_missing_release_images"
+  write_summary "missing_image=${CSI_IMAGE}"
+  exit 2
+fi
+write_summary "release_csi_image_manifest=present"
+
 require_cmd bash
 require_cmd go
 require_cmd kubectl
 require_cmd nvme
-
-cd "$ROOT"
 
 run_step "docker_pull_sw_block" docker pull "$IMAGE"
 run_step "docker_pull_sw_block_csi" docker pull "$CSI_IMAGE"
