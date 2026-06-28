@@ -2,6 +2,7 @@ package ops
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 )
@@ -177,6 +178,8 @@ type ReplicaFact struct {
 	AckEligible          bool     `json:"ack_eligible,omitempty"`
 	FrontendProtocol     string   `json:"frontend_protocol,omitempty"`
 	FrontendAddr         string   `json:"frontend_addr,omitempty"`
+	FrontendNQN          string   `json:"frontend_nqn,omitempty"`
+	FrontendNSID         uint32   `json:"frontend_nsid,omitempty"`
 	StatusAddr           string   `json:"status_addr,omitempty"`
 	DataAddr             string   `json:"data_addr,omitempty"`
 	CtrlAddr             string   `json:"ctrl_addr,omitempty"`
@@ -230,9 +233,22 @@ type ManagedVolumeProjection struct {
 	Actions                  []ManagedVolumeAction              `json:"actions,omitempty"`
 	Conditions               []ObservationCondition             `json:"conditions,omitempty"`
 	DeleteSafety             *SwBlockVolumeDeleteSafetyDecision `json:"delete_safety,omitempty"`
+	NVMe                     *ManagedVolumeNVMeStatus           `json:"nvme,omitempty"`
 	ReplicaReintegrations    []ReturnedReplicaProjection        `json:"replica_reintegrations,omitempty"`
 	NonClaims                []string                           `json:"non_claims,omitempty"`
 	EvidenceRefs             []string                           `json:"evidence_refs,omitempty"`
+}
+
+type ManagedVolumeNVMeStatus struct {
+	Protocol          string   `json:"protocol,omitempty"`
+	NQN               string   `json:"nqn,omitempty"`
+	NSID              uint32   `json:"nsid,omitempty"`
+	NVMeAddr          string   `json:"nvme_addr,omitempty"`
+	NVMeAddrs         []string `json:"nvme_addrs,omitempty"`
+	PathCount         int      `json:"path_count"`
+	MultipathObserved bool     `json:"multipath_observed"`
+	ANAState          string   `json:"ana_state,omitempty"`
+	ReasonCode        string   `json:"reason_code,omitempty"`
 }
 
 type ReturnedReplicaProjection struct {
@@ -307,6 +323,17 @@ func RenderManagedVolumeProjectionText(projection ManagedVolumeProjection) strin
 		emptyAsDash(projection.PublishTarget),
 		projection.AuthorityEpoch,
 		projection.AuthorityEndpointVersion)
+	if projection.NVMe != nil {
+		fmt.Fprintf(&b, "managed_volume_nvme protocol=%s nqn=%s nsid=%d addr=%s addrs=%s path_count=%d multipath_observed=%t reason=%s\n",
+			emptyAsDash(projection.NVMe.Protocol),
+			emptyAsDash(projection.NVMe.NQN),
+			projection.NVMe.NSID,
+			emptyAsDash(projection.NVMe.NVMeAddr),
+			emptyAsDash(strings.Join(projection.NVMe.NVMeAddrs, ",")),
+			projection.NVMe.PathCount,
+			projection.NVMe.MultipathObserved,
+			emptyAsDash(projection.NVMe.ReasonCode))
+	}
 	if projection.DeleteSafety != nil {
 		fmt.Fprintf(&b, "managed_volume_delete_safety state=%s decision=%s reason=%s release_allowed=%t action=%s\n",
 			emptyAsDash(projection.DeleteSafety.State),
@@ -465,6 +492,8 @@ func managedVolumeFactsFromVolumeEvidence(volume VolumeEvidence) ManagedVolumeFa
 			AckEligible:          replica.AckEligible,
 			FrontendProtocol:     replica.FrontendProtocol,
 			FrontendAddr:         replica.FrontendAddr,
+			FrontendNQN:          replica.FrontendNQN,
+			FrontendNSID:         replica.FrontendNSID,
 			StatusAddr:           replica.StatusAddr,
 			DataAddr:             replica.DataAddr,
 			CtrlAddr:             replica.CtrlAddr,
@@ -503,6 +532,7 @@ func ProjectManagedVolume(facts ManagedVolumeFacts) ManagedVolumeProjection {
 	}
 
 	deriveManagedVolumeStates(&projection, facts)
+	projection.NVMe = managedVolumeNVMeStatus(facts)
 	projection.ReplicaReintegrations = returnedReplicaProjections(facts)
 	status, reason := classifyManagedVolume(projection, facts)
 	projection.Status = status
@@ -511,6 +541,79 @@ func ProjectManagedVolume(facts ManagedVolumeFacts) ManagedVolumeProjection {
 	projection.Actions = managedVolumeActionsForProjection(projection, facts)
 	projection.Conditions = managedVolumeConditionsForProjection(projection)
 	return projection
+}
+
+func managedVolumeNVMeStatus(facts ManagedVolumeFacts) *ManagedVolumeNVMeStatus {
+	type nvmePath struct {
+		addr string
+		nqn  string
+		nsid uint32
+		ana  string
+	}
+	var paths []nvmePath
+	for _, replica := range facts.Replicas {
+		if replica.FrontendProtocol != "nvme" || replica.FrontendAddr == "" {
+			continue
+		}
+		paths = append(paths, nvmePath{
+			addr: replica.FrontendAddr,
+			nqn:  replica.FrontendNQN,
+			nsid: replica.FrontendNSID,
+		})
+	}
+	for _, hostPath := range facts.HostPaths {
+		if hostPath.Protocol == "nvme" && hostPath.ANAState != "" {
+			for i := range paths {
+				if paths[i].ana == "" {
+					paths[i].ana = hostPath.ANAState
+				}
+			}
+		}
+	}
+	if len(paths) == 0 {
+		return nil
+	}
+	sort.SliceStable(paths, func(i, j int) bool {
+		if paths[i].addr != paths[j].addr {
+			return paths[i].addr < paths[j].addr
+		}
+		if paths[i].nqn != paths[j].nqn {
+			return paths[i].nqn < paths[j].nqn
+		}
+		return paths[i].nsid < paths[j].nsid
+	})
+	status := &ManagedVolumeNVMeStatus{
+		Protocol: "nvme",
+	}
+	seenAddr := map[string]struct{}{}
+	for _, path := range paths {
+		if status.NQN == "" {
+			status.NQN = path.nqn
+			status.NSID = path.nsid
+		} else if path.nqn != status.NQN || path.nsid != status.NSID {
+			status.ReasonCode = ReasonNVMePathIdentityMismatch
+		}
+		if path.ana != "" && status.ANAState == "" {
+			status.ANAState = path.ana
+		}
+		if _, ok := seenAddr[path.addr]; ok {
+			continue
+		}
+		seenAddr[path.addr] = struct{}{}
+		status.NVMeAddrs = append(status.NVMeAddrs, path.addr)
+	}
+	status.PathCount = len(status.NVMeAddrs)
+	status.MultipathObserved = status.PathCount > 1
+	if len(status.NVMeAddrs) > 0 {
+		status.NVMeAddr = status.NVMeAddrs[0]
+	}
+	if status.ReasonCode == "" && (status.NQN == "" || status.NSID == 0) {
+		status.ReasonCode = ReasonNVMeIdentityIncomplete
+	}
+	if status.ReasonCode == "" && facts.ReplicationFactor > 1 && status.PathCount < facts.ReplicationFactor {
+		status.ReasonCode = ReasonNVMeMultipathPathMissing
+	}
+	return status
 }
 
 func applyNodeLossHintsToManagedVolumeFacts(facts *ManagedVolumeFacts, hints map[string]string) {
@@ -660,6 +763,12 @@ func classifyManagedVolume(p ManagedVolumeProjection, facts ManagedVolumeFacts) 
 	}
 	if facts.ProductReason == ReasonWALIntegrityFault {
 		return ManagedVolumeStatusBlocked, ReasonWALIntegrityFault
+	}
+	if p.NVMe != nil {
+		switch p.NVMe.ReasonCode {
+		case ReasonNVMeIdentityIncomplete, ReasonNVMePathIdentityMismatch, ReasonNVMeMultipathPathMissing:
+			return ManagedVolumeStatusBlocked, p.NVMe.ReasonCode
+		}
 	}
 	if hasBlockedCSINode(facts.KubernetesNodes) {
 		return ManagedVolumeStatusBlocked, ReasonCSINodeImagePullFailed

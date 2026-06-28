@@ -144,6 +144,17 @@ func renderManagedProjectionSummary(b *strings.Builder, managed ManagedVolumePro
 		emptyAsDash(managed.PublishTarget),
 		managed.AuthorityEpoch,
 		managed.AuthorityEndpointVersion)
+	if managed.NVMe != nil {
+		fmt.Fprintf(b, "managed_volume_nvme=%s nqn=%s nsid=%d addr=%s addrs=%s path_count=%d multipath_observed=%t reason=%s\n",
+			emptyAsDash(managed.VolumeID),
+			emptyAsDash(managed.NVMe.NQN),
+			managed.NVMe.NSID,
+			emptyAsDash(managed.NVMe.NVMeAddr),
+			emptyAsDash(strings.Join(managed.NVMe.NVMeAddrs, ",")),
+			managed.NVMe.PathCount,
+			managed.NVMe.MultipathObserved,
+			emptyAsDash(managed.NVMe.ReasonCode))
+	}
 	for _, condition := range managed.Conditions {
 		fmt.Fprintf(b, "managed_volume_condition=%s status=%s reason=%s severity=%s\n",
 			emptyAsDash(condition.Type),
@@ -313,17 +324,18 @@ func RenderObservationReportHTML(cluster ClusterEvidence) string {
 		b.WriteString("</tbody></table></section>")
 	}
 
-	b.WriteString("<section><h2>Managed Volumes</h2><table><thead><tr><th>Volume</th><th>Status</th><th>Reason</th><th>Conditions</th><th>Safe Actions</th></tr></thead><tbody>")
+	b.WriteString("<section><h2>Managed Volumes</h2><table><thead><tr><th>Volume</th><th>Status</th><th>Reason</th><th>NVMe</th><th>Conditions</th><th>Safe Actions</th></tr></thead><tbody>")
 	for _, managed := range cluster.ManagedVolumes {
 		class := "ok"
 		if managed.Status != ManagedVolumeStatusReady && managed.Status != ManagedVolumeStatusRecovered {
 			class = "bad"
 		}
-		fmt.Fprintf(&b, "<tr><td><code>%s</code></td><td class=\"%s\">%s</td><td>%s</td><td>%s</td><td>%s</td></tr>",
+		fmt.Fprintf(&b, "<tr><td><code>%s</code></td><td class=\"%s\">%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>",
 			esc(emptyAsDash(managed.VolumeID)),
 			class,
 			esc(emptyAsDash(managed.Status)),
 			esc(emptyAsDash(managed.ReasonCode)),
+			esc(managedNVMeSummary(managed.NVMe)),
 			esc(managedConditionSummary(managed.Conditions)),
 			esc(managedActionSummary(managed.Actions)))
 	}
@@ -399,6 +411,22 @@ func managedConditionSummary(conditions []ObservationCondition) string {
 		parts = append(parts, fmt.Sprintf("%s=%s/%s", emptyAsDash(condition.Type), emptyAsDash(condition.Status), emptyAsDash(condition.Reason)))
 	}
 	return strings.Join(parts, "; ")
+}
+
+func managedNVMeSummary(status *ManagedVolumeNVMeStatus) string {
+	if status == nil {
+		return "-"
+	}
+	parts := []string{
+		"nqn=" + emptyAsDash(status.NQN),
+		fmt.Sprintf("nsid=%d", status.NSID),
+		fmt.Sprintf("paths=%d", status.PathCount),
+		fmt.Sprintf("multipath=%t", status.MultipathObserved),
+	}
+	if status.ReasonCode != "" {
+		parts = append(parts, "reason="+status.ReasonCode)
+	}
+	return strings.Join(parts, " ")
 }
 
 func managedActionSummary(actions []ManagedVolumeAction) string {

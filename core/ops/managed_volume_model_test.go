@@ -65,6 +65,119 @@ func TestManagedVolumeProjection_HealthyFirstVolumeReady(t *testing.T) {
 	}
 }
 
+func TestManagedVolumeProjection_ProjectsNVMeMultipathIdentity(t *testing.T) {
+	projection := ProjectManagedVolume(ManagedVolumeFacts{
+		VolumeID: "pvc-nvme",
+		Authority: &AuthorityFact{
+			PrimaryReplica: "r1",
+			PublishTarget:  "127.0.0.1:4420",
+		},
+		Replicas: []ReplicaFact{{
+			ReplicaID:        "r1",
+			Observed:         true,
+			Role:             "primary",
+			FrontendProtocol: "nvme",
+			FrontendAddr:     "127.0.0.1:4421",
+			FrontendNQN:      "nqn.2026-05.io.seaweedfs:pvc-nvme",
+			FrontendNSID:     1,
+		}, {
+			ReplicaID:        "r2",
+			Observed:         true,
+			Role:             "replica",
+			FrontendProtocol: "nvme",
+			FrontendAddr:     "127.0.0.1:4420",
+			FrontendNQN:      "nqn.2026-05.io.seaweedfs:pvc-nvme",
+			FrontendNSID:     1,
+		}},
+		HostPaths: []HostPathFact{{
+			Protocol: "nvme",
+			ANAState: "optimized",
+		}},
+	})
+
+	if projection.NVMe == nil {
+		t.Fatalf("missing nvme status: %+v", projection)
+	}
+	if projection.NVMe.NQN != "nqn.2026-05.io.seaweedfs:pvc-nvme" ||
+		projection.NVMe.NSID != 1 ||
+		projection.NVMe.NVMeAddr != "127.0.0.1:4420" ||
+		projection.NVMe.PathCount != 2 ||
+		!projection.NVMe.MultipathObserved ||
+		projection.NVMe.ANAState != "optimized" ||
+		projection.NVMe.ReasonCode != "" {
+		t.Fatalf("nvme=%+v", projection.NVMe)
+	}
+	if got := projection.NVMe.NVMeAddrs; len(got) != 2 || got[0] != "127.0.0.1:4420" || got[1] != "127.0.0.1:4421" {
+		t.Fatalf("nvme addrs=%v", got)
+	}
+}
+
+func TestManagedVolumeProjection_FlagsNVMePathIdentityMismatch(t *testing.T) {
+	projection := ProjectManagedVolume(ManagedVolumeFacts{
+		VolumeID: "pvc-nvme",
+		Replicas: []ReplicaFact{{
+			ReplicaID:        "r1",
+			Observed:         true,
+			FrontendProtocol: "nvme",
+			FrontendAddr:     "127.0.0.1:4420",
+			FrontendNQN:      "nqn.2026-05.io.seaweedfs:pvc-a",
+			FrontendNSID:     1,
+		}, {
+			ReplicaID:        "r2",
+			Observed:         true,
+			FrontendProtocol: "nvme",
+			FrontendAddr:     "127.0.0.1:4421",
+			FrontendNQN:      "nqn.2026-05.io.seaweedfs:pvc-b",
+			FrontendNSID:     1,
+		}},
+	})
+
+	if projection.NVMe == nil || projection.NVMe.ReasonCode != ReasonNVMePathIdentityMismatch {
+		t.Fatalf("nvme=%+v", projection.NVMe)
+	}
+	if projection.Status != ManagedVolumeStatusBlocked || projection.ReasonCode != ReasonNVMePathIdentityMismatch {
+		t.Fatalf("status=%s reason=%s", projection.Status, projection.ReasonCode)
+	}
+}
+
+func TestManagedVolumeProjection_BlocksMissingNVMeMultipath(t *testing.T) {
+	projection := ProjectManagedVolume(ManagedVolumeFacts{
+		VolumeID:          "pvc-nvme",
+		ReplicationFactor: 2,
+		PVC: &PVCFact{
+			Phase: "Bound",
+		},
+		Authority: &AuthorityFact{
+			PrimaryReplica: "r1",
+			PublishTarget:  "127.0.0.1:4420",
+		},
+		Replicas: []ReplicaFact{{
+			ReplicaID:        "r1",
+			Observed:         true,
+			Role:             "primary",
+			FrontendProtocol: "nvme",
+			FrontendAddr:     "127.0.0.1:4420",
+			FrontendNQN:      "nqn.2026-05.io.seaweedfs:pvc-nvme",
+			FrontendNSID:     1,
+		}},
+		CSIStages: []CSIStageFact{{
+			NodeName: "m02",
+			Target:   "/var/lib/kubelet/plugins/kubernetes.io/csi",
+		}},
+		Workload: &WorkloadCheckFact{
+			WriterVerified: true,
+			ReaderVerified: true,
+		},
+	})
+
+	if projection.NVMe == nil || projection.NVMe.ReasonCode != ReasonNVMeMultipathPathMissing {
+		t.Fatalf("nvme=%+v", projection.NVMe)
+	}
+	if projection.Status != ManagedVolumeStatusBlocked || projection.ReasonCode != ReasonNVMeMultipathPathMissing {
+		t.Fatalf("status=%s reason=%s", projection.Status, projection.ReasonCode)
+	}
+}
+
 func TestManagedVolumeProjection_LoopbackCrossNodeBlocked(t *testing.T) {
 	projection := ProjectManagedVolume(ManagedVolumeFacts{
 		VolumeID:          "pvc-a",

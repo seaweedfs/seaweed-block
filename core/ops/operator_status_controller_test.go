@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -148,6 +149,92 @@ func TestOperatorStatusReconcilerWritesStatusOnlyProjection(t *testing.T) {
 	}
 	if result.EventCount != len(events.events) {
 		t.Fatalf("event count=%d events=%d", result.EventCount, len(events.events))
+	}
+}
+
+func TestOperatorStatusReconcilerWritesNVMeStatusCamelCase(t *testing.T) {
+	source := fakeOperatorStatusSource{cluster: ClusterEvidence{
+		SchemaVersion: ObservationSchemaVersion,
+		CapturedAt:    time.Date(2026, 6, 28, 12, 0, 0, 0, time.UTC),
+		Status:        ObservationStatusOK,
+		ManagedVolumes: []ManagedVolumeProjection{ProjectManagedVolume(ManagedVolumeFacts{
+			VolumeID: "pvc-nvme",
+			PVCName:  "nvme-pvc",
+			Replicas: []ReplicaFact{{
+				ReplicaID:        "r1",
+				Observed:         true,
+				FrontendProtocol: "nvme",
+				FrontendAddr:     "127.0.0.1:4420",
+				FrontendNQN:      "nqn.2026-05.io.seaweedfs:pvc-nvme",
+				FrontendNSID:     1,
+			}, {
+				ReplicaID:        "r2",
+				Observed:         true,
+				FrontendProtocol: "nvme",
+				FrontendAddr:     "127.0.0.1:4421",
+				FrontendNQN:      "nqn.2026-05.io.seaweedfs:pvc-nvme",
+				FrontendNSID:     1,
+			}},
+		})},
+	}}
+	writer := &fakeOperatorStatusWriter{}
+	if _, err := (OperatorStatusReconciler{
+		Namespace: "kube-system",
+		Source:    source,
+		Writer:    writer,
+	}).Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if len(writer.volumes) != 1 {
+		t.Fatalf("writes=%+v", writer.volumes)
+	}
+	status := writer.volumes[0].status
+	if status.NVMe == nil ||
+		status.NVMe.NQN != "nqn.2026-05.io.seaweedfs:pvc-nvme" ||
+		status.NVMe.NSID != 1 ||
+		status.NVMe.NVMeAddr != "127.0.0.1:4420" ||
+		status.NVMe.PathCount != 2 ||
+		!status.NVMe.MultipathObserved {
+		t.Fatalf("nvme status=%+v", status.NVMe)
+	}
+	raw, err := json.Marshal(status)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	for _, want := range []string{`"nvme"`, `"nvmeAddr":"127.0.0.1:4420"`, `"nvmeAddrs":["127.0.0.1:4420","127.0.0.1:4421"]`, `"pathCount":2`, `"multipathObserved":true`} {
+		if !strings.Contains(string(raw), want) {
+			t.Fatalf("status JSON missing %s: %s", want, string(raw))
+		}
+	}
+	for _, forbidden := range []string{"nvme_addr", "nvme_addrs", "path_count", "multipath_observed"} {
+		if strings.Contains(string(raw), forbidden) {
+			t.Fatalf("status JSON leaked snake_case %s: %s", forbidden, string(raw))
+		}
+	}
+}
+
+func TestSwBlockVolumeCRDSchemaAllowsNVMeStatus(t *testing.T) {
+	body, err := os.ReadFile("../../charts/seaweed-block/crds/swblockvolumes.block.seaweedfs.com.yaml")
+	if err != nil {
+		t.Fatalf("read swblockvolumes CRD: %v", err)
+	}
+	text := string(body)
+	for _, want := range []string{
+		"nvme:",
+		"nvmeAddr:",
+		"nvmeAddrs:",
+		"pathCount:",
+		"multipathObserved:",
+		"anaState:",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("CRD schema missing %s", want)
+		}
+	}
+	for _, forbidden := range []string{"nvme_addr:", "nvme_addrs:", "path_count:", "multipath_observed:"} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("CRD schema leaked snake_case field %s", forbidden)
+		}
 	}
 }
 

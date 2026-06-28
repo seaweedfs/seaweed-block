@@ -90,6 +90,44 @@ func TestObservationReportSummary_IncludesManagedVolumeStatus(t *testing.T) {
 	}
 }
 
+func TestObservationReportSummaryAndHTMLIncludeManagedVolumeNVMeStatus(t *testing.T) {
+	cluster := NewClusterEvidence(time.Date(2026, 6, 28, 12, 0, 0, 0, time.UTC))
+	cluster.ManagedVolumes = []ManagedVolumeProjection{ProjectManagedVolume(ManagedVolumeFacts{
+		VolumeID: "pvc-nvme",
+		PVCName:  "nvme-pvc",
+		Replicas: []ReplicaFact{{
+			ReplicaID:        "r1",
+			Observed:         true,
+			FrontendProtocol: "nvme",
+			FrontendAddr:     "127.0.0.1:4420",
+			FrontendNQN:      "nqn.2026-05.io.seaweedfs:pvc-nvme",
+			FrontendNSID:     1,
+		}, {
+			ReplicaID:        "r2",
+			Observed:         true,
+			FrontendProtocol: "nvme",
+			FrontendAddr:     "127.0.0.1:4421",
+			FrontendNQN:      "nqn.2026-05.io.seaweedfs:pvc-nvme",
+			FrontendNSID:     1,
+		}},
+	})}
+
+	summary := RenderObservationReportSummary(cluster)
+	if want := "managed_volume_nvme=pvc-nvme nqn=nqn.2026-05.io.seaweedfs:pvc-nvme nsid=1 addr=127.0.0.1:4420 addrs=127.0.0.1:4420,127.0.0.1:4421 path_count=2 multipath_observed=true"; !strings.Contains(summary, want) {
+		t.Fatalf("summary missing %q:\n%s", want, summary)
+	}
+	html := RenderObservationReportHTML(cluster)
+	for _, want := range []string{"nqn=nqn.2026-05.io.seaweedfs:pvc-nvme", "paths=2", "multipath=true"} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("html missing %q:\n%s", want, html)
+		}
+	}
+	explain := RenderObservationExplainText(cluster)
+	if !strings.Contains(explain, "managed_volume_nvme protocol=nvme nqn=nqn.2026-05.io.seaweedfs:pvc-nvme nsid=1 addr=127.0.0.1:4420 addrs=127.0.0.1:4420,127.0.0.1:4421 path_count=2 multipath_observed=true") {
+		t.Fatalf("explain missing nvme status:\n%s", explain)
+	}
+}
+
 func TestObservationReportSummary_IncludesReturnedReplicaProjection(t *testing.T) {
 	cluster := NewClusterEvidence(time.Date(2026, 6, 18, 12, 0, 0, 0, time.UTC))
 	cluster.ManagedVolumes = []ManagedVolumeProjection{ProjectManagedVolume(ManagedVolumeFacts{

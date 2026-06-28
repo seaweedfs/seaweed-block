@@ -1262,6 +1262,8 @@ func replicaEvidenceFromWire(replica *control.ReplicaEvidence) ops.ReplicaEviden
 		CandidateReadyReason: replica.GetCandidateReadyReason(),
 		FrontendProtocol:     replica.GetFrontendProtocol(),
 		FrontendAddr:         replica.GetFrontendAddr(),
+		FrontendNQN:          replica.GetFrontendNqn(),
+		FrontendNSID:         replica.GetFrontendNsid(),
 		StatusAddr:           replica.GetStatusAddr(),
 		StalePrimaryFenced:   replica.GetStalePrimaryFenced(),
 		Conditions:           conditionsFromWire(replica.GetConditions()),

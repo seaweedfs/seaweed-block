@@ -153,6 +153,34 @@ spec:
                         type: string
                     safeNextAction:
                       type: string
+                nvme:
+                  type: object
+                  properties:
+                    protocol:
+                      type: string
+                      enum:
+                        - nvme
+                    nqn:
+                      type: string
+                    nsid:
+                      type: integer
+                      format: int64
+                      minimum: 0
+                    nvmeAddr:
+                      type: string
+                    nvmeAddrs:
+                      type: array
+                      items:
+                        type: string
+                    pathCount:
+                      type: integer
+                      minimum: 0
+                    multipathObserved:
+                      type: boolean
+                    anaState:
+                      type: string
+                    reasonCode:
+                      type: string
                 replicaReintegrations:
                   type: array
                   items:

@@ -274,12 +274,25 @@ type SwBlockVolumeCRDStatus struct {
 	ObservedAt               time.Time                           `json:"observedAt,omitempty"`
 	Conditions               []ObservationCondition              `json:"conditions,omitempty"`
 	DeleteSafety             *SwBlockVolumeCRDDeleteSafety       `json:"deleteSafety"`
+	NVMe                     *SwBlockVolumeCRDNVMeStatus         `json:"nvme,omitempty"`
 	ReplicaReintegrations    []SwBlockVolumeCRDReturnedReplica   `json:"replicaReintegrations,omitempty"`
 	ExecutorPreflights       []SwBlockVolumeCRDExecutorPreflight `json:"executorPreflights,omitempty"`
 	ExecutorContracts        []SwBlockVolumeCRDExecutorContract  `json:"executorContracts,omitempty"`
 	NonClaims                []string                            `json:"nonClaims,omitempty"`
 	EvidenceRefs             []string                            `json:"evidenceRefs,omitempty"`
 	AllowedActions           []SwBlockVolumeCRDAction            `json:"allowedActions,omitempty"`
+}
+
+type SwBlockVolumeCRDNVMeStatus struct {
+	Protocol          string   `json:"protocol,omitempty"`
+	NQN               string   `json:"nqn,omitempty"`
+	NSID              uint32   `json:"nsid,omitempty"`
+	NVMeAddr          string   `json:"nvmeAddr,omitempty"`
+	NVMeAddrs         []string `json:"nvmeAddrs,omitempty"`
+	PathCount         int      `json:"pathCount"`
+	MultipathObserved bool     `json:"multipathObserved"`
+	ANAState          string   `json:"anaState,omitempty"`
+	ReasonCode        string   `json:"reasonCode,omitempty"`
 }
 
 type SwBlockVolumeCRDReturnedReplica struct {
@@ -517,6 +530,7 @@ func (r OperatorStatusReconciler) Reconcile(ctx context.Context) (OperatorStatus
 			ObservedAt:               observedAt,
 			Conditions:               append([]ObservationCondition(nil), volume.Status.Conditions...),
 			DeleteSafety:             swBlockVolumeCRDDeleteSafety(volume.Status.DeleteSafety),
+			NVMe:                     swBlockVolumeCRDNVMeStatus(volume.Status.NVMe),
 			ReplicaReintegrations:    swBlockVolumeCRDReturnedReplicas(volume.Status.ReplicaReintegrations),
 			ExecutorPreflights:       swBlockVolumeCRDExecutorPreflights(volume.Status.ExecutorPreflights),
 			ExecutorContracts:        swBlockVolumeCRDExecutorContracts(volume.Status.ExecutorContracts),
@@ -567,6 +581,23 @@ func ProjectSwBlockVolumeDeleteSafety(cluster ClusterEvidence, volumes []SwBlock
 		})
 	}
 	return NormalizeObservationCluster(cluster)
+}
+
+func swBlockVolumeCRDNVMeStatus(in *ManagedVolumeNVMeStatus) *SwBlockVolumeCRDNVMeStatus {
+	if in == nil {
+		return nil
+	}
+	return &SwBlockVolumeCRDNVMeStatus{
+		Protocol:          in.Protocol,
+		NQN:               in.NQN,
+		NSID:              in.NSID,
+		NVMeAddr:          in.NVMeAddr,
+		NVMeAddrs:         append([]string(nil), in.NVMeAddrs...),
+		PathCount:         in.PathCount,
+		MultipathObserved: in.MultipathObserved,
+		ANAState:          in.ANAState,
+		ReasonCode:        in.ReasonCode,
+	}
 }
 
 func swBlockVolumeCRDReturnedReplicas(returned []ReturnedReplicaProjection) []SwBlockVolumeCRDReturnedReplica {

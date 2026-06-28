@@ -316,6 +316,8 @@ message ReplicaEvidence {
     bool stale_primary_fenced = 16;
     repeated ObservationCondition conditions = 17;
     string support_bundle_path = 18;
+    string frontend_nqn = 19;
+    uint32 frontend_nsid = 20;
 }
 
 message ClusterEvent {

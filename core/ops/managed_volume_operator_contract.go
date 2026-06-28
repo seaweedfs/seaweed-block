@@ -19,6 +19,7 @@ type ManagedVolumeOperatorStatus struct {
 	ReasonCode               string                             `json:"reason_code,omitempty"`
 	Conditions               []ObservationCondition             `json:"conditions,omitempty"`
 	DeleteSafety             *SwBlockVolumeDeleteSafetyDecision `json:"delete_safety,omitempty"`
+	NVMe                     *ManagedVolumeNVMeStatus           `json:"nvme,omitempty"`
 	ReplicaReintegrations    []ReturnedReplicaProjection        `json:"replica_reintegrations,omitempty"`
 	ExecutorPreflights       []ReturnedReplicaExecutorPreflight `json:"executor_preflights,omitempty"`
 	ExecutorContracts        []ReturnedReplicaExecutorContract  `json:"executor_contracts,omitempty"`
@@ -63,6 +64,7 @@ func ManagedVolumeOperatorContractFromProjection(projection ManagedVolumeProject
 			ReasonCode:               projection.ReasonCode,
 			Conditions:               append([]ObservationCondition(nil), projection.Conditions...),
 			DeleteSafety:             cloneSwBlockVolumeDeleteSafetyDecision(projection.DeleteSafety),
+			NVMe:                     cloneManagedVolumeNVMeStatus(projection.NVMe),
 			ReplicaReintegrations:    cloneReturnedReplicaProjections(projection.ReplicaReintegrations),
 			ExecutorPreflights:       cloneReturnedReplicaExecutorPreflights(ReturnedReplicaExecutorPreflights(projection)),
 			ExecutorContracts:        cloneReturnedReplicaExecutorContracts(ReturnedReplicaExecutorContracts(projection)),
@@ -93,6 +95,15 @@ func ManagedVolumeOperatorContractFromProjection(projection ManagedVolumeProject
 		contract.AllowedActions = append(contract.AllowedActions, managedVolumeOperatorActionFromDeleteSafety(*projection.DeleteSafety))
 	}
 	return contract
+}
+
+func cloneManagedVolumeNVMeStatus(in *ManagedVolumeNVMeStatus) *ManagedVolumeNVMeStatus {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	out.NVMeAddrs = append([]string(nil), in.NVMeAddrs...)
+	return &out
 }
 
 func cloneReturnedReplicaExecutorPreflights(in []ReturnedReplicaExecutorPreflight) []ReturnedReplicaExecutorPreflight {

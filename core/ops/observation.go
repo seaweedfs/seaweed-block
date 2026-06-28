@@ -43,6 +43,9 @@ const (
 	ReasonInstallDriftAligned             = "install_drift_aligned"
 	ReasonInstallDriftMismatch            = "install_drift_mismatch"
 	ReasonInstallDriftEvidenceMissing     = "install_drift_evidence_missing"
+	ReasonNVMeIdentityIncomplete          = "nvme_identity_incomplete"
+	ReasonNVMePathIdentityMismatch        = "nvme_path_identity_mismatch"
+	ReasonNVMeMultipathPathMissing        = "nvme_multipath_path_missing"
 
 	EventTypeCSIReattachObserved = "csi_reattach_observed"
 )
@@ -160,6 +163,8 @@ type ReplicaEvidence struct {
 	AckEligible          bool                   `json:"ack_eligible,omitempty"`
 	FrontendProtocol     string                 `json:"frontend_protocol,omitempty"`
 	FrontendAddr         string                 `json:"frontend_addr,omitempty"`
+	FrontendNQN          string                 `json:"frontend_nqn,omitempty"`
+	FrontendNSID         uint32                 `json:"frontend_nsid,omitempty"`
 	StatusAddr           string                 `json:"status_addr,omitempty"`
 	DataAddr             string                 `json:"data_addr,omitempty"`
 	CtrlAddr             string                 `json:"ctrl_addr,omitempty"`
