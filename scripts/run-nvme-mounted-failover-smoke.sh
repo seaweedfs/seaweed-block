@@ -374,8 +374,29 @@ volumes:
         server_id: s2
 YAML
 
-rm -rf "${RUN_DIR}/master-store" "${RUN_DIR}/r1-store" "${RUN_DIR}/r2-store"
-mkdir -p "${RUN_DIR}/master-store" "${RUN_DIR}/r1-store" "${RUN_DIR}/r2-store"
+cat >"$ARTIFACT_DIR/placement-seed.json" <<JSON
+[
+  {
+    "volume_id": "v1",
+    "desired_rf": 2,
+    "slots": [
+      {
+        "server_id": "s1",
+        "replica_id": "r1",
+        "source": "existing_replica"
+      },
+      {
+        "server_id": "s2",
+        "replica_id": "r2",
+        "source": "existing_replica"
+      }
+    ]
+  }
+]
+JSON
+
+rm -rf "${RUN_DIR}/master-store" "${RUN_DIR}/lifecycle-store" "${RUN_DIR}/r1-store" "${RUN_DIR}/r2-store"
+mkdir -p "${RUN_DIR}/master-store" "${RUN_DIR}/lifecycle-store" "${RUN_DIR}/r1-store" "${RUN_DIR}/r2-store"
 pkill -KILL -f "${BIN_DIR}/blockvolume" >/dev/null 2>&1 || true
 pkill -KILL -f "${BIN_DIR}/blockmaster" >/dev/null 2>&1 || true
 disconnect_nqn
@@ -386,6 +407,8 @@ sudo dmesg >"$ARTIFACT_DIR/dmesg.before.txt" 2>&1 || true
 log "start blockmaster"
 "${BIN_DIR}/blockmaster" \
   --authority-store "${RUN_DIR}/master-store" \
+  --lifecycle-store "${RUN_DIR}/lifecycle-store" \
+  --lifecycle-placement-seed "$ARTIFACT_DIR/placement-seed.json" \
   --listen "$MASTER_ADDR" \
   --topology "$ARTIFACT_DIR/topology.yaml" \
   --expected-slots-per-volume 2 \
