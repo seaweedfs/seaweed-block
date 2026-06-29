@@ -2,7 +2,7 @@
 
 Status: BLOCKED on release artifacts.
 
-Validated source: `55ad6ae` on branch `phase102-nvme-release-artifact-smoke`.
+Validated branch: `phase102-nvme-release-artifact-smoke`.
 
 ## Scope
 
@@ -29,28 +29,29 @@ go test ./scripts ./internal/testops ./core/ops ./core/host/master ./cmd/sw-bloc
 
 ## Artifact Availability
 
-Expected default images for `55ad6ae`:
+By default the gate expects images tagged from the current source checkout:
 
 ```text
-ghcr.io/seaweedfs/seaweed-block:sha-93d7866
-ghcr.io/seaweedfs/seaweed-block-csi:sha-93d7866
+ghcr.io/seaweedfs/seaweed-block:sha-<current HEAD short SHA>
+ghcr.io/seaweedfs/seaweed-block-csi:sha-<current HEAD short SHA>
 ```
 
-Both manifests are currently missing:
+The image tags can also be pinned explicitly with:
 
 ```text
-sw-block-image=missing
-csi-image=missing
+SW_BLOCK_RELEASE_IMAGE=ghcr.io/seaweedfs/seaweed-block:sha-<commit>
+SW_BLOCK_CSI_RELEASE_IMAGE=ghcr.io/seaweedfs/seaweed-block-csi:sha-<same-commit>
 ```
 
-The gate blocks correctly before any product work:
+The blocked-path check confirms the gate stops on missing manifests before any
+product work:
 
 ```text
 phase102_nvme_release_artifact_status=blocked_missing_release_images
-release_image=ghcr.io/seaweedfs/seaweed-block:sha-93d7866
-release_csi_image=ghcr.io/seaweedfs/seaweed-block-csi:sha-93d7866
+release_image=ghcr.io/seaweedfs/seaweed-block:sha-<checked commit>
+release_csi_image=ghcr.io/seaweedfs/seaweed-block-csi:sha-<checked commit>
 release_image_manifest=missing
-missing_image=ghcr.io/seaweedfs/seaweed-block:sha-93d7866
+missing_image=ghcr.io/seaweedfs/seaweed-block:sha-<checked commit>
 ```
 
 This is an artifact-readiness block, not a product failure.
@@ -61,8 +62,8 @@ When matching images are published, run:
 
 ```text
 C:\work\swblock.exe run \
-  -env release_image=ghcr.io/seaweedfs/seaweed-block:sha-93d7866 \
-  -env release_csi_image=ghcr.io/seaweedfs/seaweed-block-csi:sha-93d7866 \
+  -env release_image=ghcr.io/seaweedfs/seaweed-block:sha-<commit> \
+  -env release_csi_image=ghcr.io/seaweedfs/seaweed-block-csi:sha-<same-commit> \
   testops/scenarios/nvme-release-artifact-smoke-chain.yaml
 ```
 
