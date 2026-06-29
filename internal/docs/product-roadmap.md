@@ -266,6 +266,11 @@ rebuild, delete safety, or cleanup must start as a separate gated phase.
   `ready/first_volume_verified`, expose distinct volume IDs and distinct NVMe
   NQNs, avoid loopback publish targets, and avoid cross-volume identity mix-up.
   A separate strict cleanup audit returned zero residue.
+- Phase 108 NVMe/TCP Multi-Volume Lifecycle Soak is closed for the supported
+  lab path. Two consecutive two-PVC NVMe/TCP cross-node lifecycle cycles
+  verified writer/reader data and then drained generated blockvolume pods,
+  matching PVs, and SeaweedFS NVMe subsystems before each cycle could claim
+  helper cleanup success. Final strict cleanup returned zero residue.
 - Later protocol candidates: implement a real NVMe/RDMA target or characterize
   NVMe/TCP performance. Keep these separate so correctness, transport, and
   performance claims do not get mixed.

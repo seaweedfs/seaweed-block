@@ -1,0 +1,129 @@
+name: nvme-tcp-cross-node-multivolume-lifecycle-soak-chain
+timeout: 45m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+  helm_release: "sw-block"
+  helm_namespace: "kube-system"
+  volume_count: "2"
+  cycle_count: "2"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: pre_clean
+    actions:
+      - action: pre_run_cleanup
+        node: m02
+        kill_patterns: "blockmaster,blockvolume,blockcsi,iscsi-target"
+        nvme_disconnect: "true"
+        iscsi_logout_prefix: "iqn.2026-05.io.seaweedfs"
+      - action: exec
+        node: m02
+        timeout: 5m
+        cmd: "helm status {{ helm_release }} --namespace {{ helm_namespace }} >/dev/null 2>&1 && helm uninstall {{ helm_release }} --namespace {{ helm_namespace }} --wait --timeout 240s || true; kubectl -n default delete pod -l sw-block-test=multi-volume --ignore-not-found=true --wait=true --timeout=45s || true; for i in 1 2 3; do kubectl -n default delete pod sw-block-multi-writer-$i sw-block-multi-reader-$i --ignore-not-found=true --wait=true --timeout=45s || true; kubectl -n default delete pvc sw-block-multi-pvc-$i --ignore-not-found=true --wait=true --timeout=45s || true; done; kubectl delete storageclass sw-block-multi --ignore-not-found=true --wait=true --timeout=45s || true; kubectl get pv --no-headers | awk '/sw-block-multi/ {print $1}' | xargs -r -n1 kubectl patch pv --type=merge -p '{\"metadata\":{\"finalizers\":[]}}' >/dev/null 2>&1 || true; kubectl get pv --no-headers | awk '/sw-block-multi/ {print $1}' | xargs -r kubectl delete pv --wait=false >/dev/null 2>&1 || true; sudo -n nvme disconnect-all >/dev/null 2>&1 || true; rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase108-nvme-lifecycle && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase108-nvme-lifecycle/bin /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase108-nvme-lifecycle/build /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase108-nvme-lifecycle/values /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase108-nvme-lifecycle/install /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase108-nvme-lifecycle/asserts /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase108-nvme-lifecycle/cleanup"
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+
+  - name: build_and_import_images
+    actions:
+      - action: exec
+        node: m02
+        timeout: 10m
+        cmd: "cd {{ product_root }} && if docker image inspect sw-block:local sw-block-csi:local >/dev/null 2>&1; then mkdir -p \"$SW_BLOCK_ARTIFACT_DIR\"; echo \"SW_BLOCK_IMAGE_ID=$(docker image inspect sw-block:local --format '{{.Id}}')\" > \"$SW_BLOCK_ARTIFACT_DIR/alpha-images.env\"; echo \"SW_BLOCK_CSI_IMAGE_ID=$(docker image inspect sw-block-csi:local --format '{{.Id}}')\" >> \"$SW_BLOCK_ARTIFACT_DIR/alpha-images.env\"; echo cached_images=true >> \"$SW_BLOCK_ARTIFACT_DIR/alpha-images.env\"; else bash scripts/build-alpha-images.sh {{ product_root }}; fi"
+        env.SW_BLOCK_IMPORT_K3S: "1"
+        env.SW_BLOCK_IMPORT_K3S_NODES: "192.168.1.181"
+        env.SW_BLOCK_IMPORT_K3S_SSH_USER: "testdev"
+        env.SW_BLOCK_IMPORT_K3S_SSH_KEY: "{{ ssh_key }}"
+        env.SW_BLOCK_ARTIFACT_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase108-nvme-lifecycle/build"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase108-nvme-lifecycle/build/alpha-images.env"
+        pattern: "SW_BLOCK_IMAGE_ID="
+        save_as: image_id_count
+      - action: assert_greater
+        actual: "{{ image_id_count }}"
+        threshold: "0"
+
+  - name: generate_values
+    actions:
+      - action: exec
+        node: m02
+        timeout: 4m
+        cmd: "cd {{ product_root }} && go build -o /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase108-nvme-lifecycle/bin/sw-block ./cmd/sw-block && /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase108-nvme-lifecycle/bin/sw-block ops generate-helm-values --kubeconfig /etc/rancher/k3s/k3s.yaml --out /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase108-nvme-lifecycle/values/values.nvme.yaml --image sw-block:local --csi-image sw-block-csi:local --protocol nvme --node-limit 2 > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase108-nvme-lifecycle/values/generate.stdout.txt && python3 - <<'PY'\nfrom pathlib import Path\nbase=Path('/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase108-nvme-lifecycle')\nnodes=[]\ncur=None\nfor raw in (base/'values/values.nvme.yaml').read_text().splitlines():\n    line=raw.strip()\n    if line.startswith('- name:'):\n        if cur:\n            nodes.append(cur)\n        cur={}\n    if cur is None:\n        continue\n    if line.startswith('kubernetesNode:'):\n        cur['kubernetesNode']=line.split(':',1)[1].strip().strip('\"')\nif cur:\n    nodes.append(cur)\nif len(nodes) < 2:\n    raise SystemExit('need at least two generated nodes')\n(base/'values/blockvolume-node.txt').write_text(nodes[0]['kubernetesNode']+'\\n')\n(base/'values/app-node.txt').write_text(nodes[1]['kubernetesNode']+'\\n')\nPY"
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase108-nvme-lifecycle/values/generate.stdout.txt"
+        pattern: "^network_mode=external-nvme$"
+        save_as: external_nvme_count
+      - action: assert_greater
+        actual: "{{ external_nvme_count }}"
+        threshold: "0"
+
+  - name: helm_install_stack
+    actions:
+      - action: exec
+        node: m02
+        timeout: 12m
+        cmd: "cd {{ product_root }} && helm lint charts/seaweed-block -f /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase108-nvme-lifecycle/values/values.nvme.yaml > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase108-nvme-lifecycle/install/helm-lint.txt && helm template {{ helm_release }} charts/seaweed-block --namespace {{ helm_namespace }} -f /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase108-nvme-lifecycle/values/values.nvme.yaml > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase108-nvme-lifecycle/install/helm-template.yaml && grep -q -- '--launcher-external-nvme' /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase108-nvme-lifecycle/install/helm-template.yaml && ! grep -q -- '--launcher-external-iscsi' /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase108-nvme-lifecycle/install/helm-template.yaml && helm install {{ helm_release }} charts/seaweed-block --namespace {{ helm_namespace }} --create-namespace -f /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase108-nvme-lifecycle/values/values.nvme.yaml --wait --timeout 10m > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase108-nvme-lifecycle/install/helm-install.txt && kubectl -n {{ helm_namespace }} get deploy,ds,pods,svc -o wide > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase108-nvme-lifecycle/install/kube-system.after-install.txt"
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase108-nvme-lifecycle/install/helm-install.txt"
+        pattern: "STATUS: deployed"
+        save_as: helm_deployed_count
+      - action: assert_greater
+        actual: "{{ helm_deployed_count }}"
+        threshold: "0"
+
+  - name: lifecycle_soak
+    actions:
+      - action: exec
+        node: m02
+        timeout: 20m
+        cmd: "set -e; BASE=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase108-nvme-lifecycle; APP_NODE=$(cat \"$BASE/values/app-node.txt\"); cd {{ product_root }}; for cycle in $(seq 1 {{ cycle_count }}); do mkdir -p \"$BASE/cycle-$cycle\"; SW_BLOCK_ARTIFACT_DIR=\"$BASE/cycle-$cycle\" SW_BLOCK_MULTI_VOLUME_NODE_SELECTOR=\"$APP_NODE\" SW_BLOCK_MULTI_VOLUME_PROTOCOL=nvme SW_BLOCK_MULTI_VOLUME_COUNT={{ volume_count }} SW_BLOCK_MULTI_VOLUME_CLEANUP=1 SW_BLOCK_CLI=\"$BASE/bin/sw-block\" bash scripts/run-multi-volume-example.sh {{ product_root }}; sudo -n nvme list-subsys > \"$BASE/cycle-$cycle/nvme-list-subsys.after-cleanup.txt\" 2>&1 || true; kubectl -n default get pods,pvc -o wide > \"$BASE/cycle-$cycle/default.after-cleanup.txt\" 2>&1 || true; kubectl get pv -o wide > \"$BASE/cycle-$cycle/pv.after-cleanup.txt\" 2>&1 || true; kubectl get storageclass sw-block-multi > \"$BASE/cycle-$cycle/storageclass.after-cleanup.txt\" 2>&1 || true; done"
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+      - action: exec
+        node: m02
+        timeout: 3m
+        cmd: "python3 - <<'PY'\nfrom pathlib import Path\nbase=Path('/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase108-nvme-lifecycle')\ncycle_count={{ cycle_count }}\nvolume_count={{ volume_count }}\nlines=['phase108_nvme_tcp_multivolume_lifecycle_soak_status=ok', f'cycle_count={cycle_count}', f'volume_count_per_cycle={volume_count}']\nfor cycle in range(1, cycle_count+1):\n    summary={}\n    for raw in (base/f'cycle-{cycle}/multi-volume-summary.txt').read_text().splitlines():\n        if '=' in raw:\n            k,v=raw.split('=',1)\n            summary[k]=v\n    nvme_text=(base/f'cycle-{cycle}/nvme-list-subsys.after-cleanup.txt').read_text(errors='ignore')\n    default_text=(base/f'cycle-{cycle}/default.after-cleanup.txt').read_text(errors='ignore')\n    pv_text=(base/f'cycle-{cycle}/pv.after-cleanup.txt').read_text(errors='ignore')\n    sc_text=(base/f'cycle-{cycle}/storageclass.after-cleanup.txt').read_text(errors='ignore')\n    if summary.get('multi_volume_status') != 'ok':\n        raise SystemExit(f'cycle {cycle} status={summary.get(\"multi_volume_status\")}')\n    if summary.get('cleanup_status') != 'ok':\n        raise SystemExit(f'cycle {cycle} cleanup={summary.get(\"cleanup_status\")}')\n    if summary.get('writer_verified_count') != str(volume_count):\n        raise SystemExit(f'cycle {cycle} writer_count={summary.get(\"writer_verified_count\")}')\n    if summary.get('reader_verified_count') != str(volume_count):\n        raise SystemExit(f'cycle {cycle} reader_count={summary.get(\"reader_verified_count\")}')\n    nvme_residue=nvme_text.count('nqn.2026-05.io.seaweedfs')\n    pvc_residue=default_text.count('sw-block-multi-pvc')\n    pod_residue=default_text.count('sw-block-multi-reader') + default_text.count('sw-block-multi-writer')\n    pv_residue=pv_text.count('sw-block-multi-pvc')\n    sc_residue=0 if 'not found' in sc_text.lower() else sc_text.count('sw-block-multi')\n    if any([nvme_residue, pvc_residue, pod_residue, pv_residue, sc_residue]):\n        raise SystemExit(f'cycle {cycle} residue nvme={nvme_residue} pvc={pvc_residue} pod={pod_residue} pv={pv_residue} sc={sc_residue}')\n    lines += [\n        f'cycle_{cycle}_status=ok',\n        f'cycle_{cycle}_writer_verified_count={summary.get(\"writer_verified_count\")}',\n        f'cycle_{cycle}_reader_verified_count={summary.get(\"reader_verified_count\")}',\n        f'cycle_{cycle}_cleanup_status=ok',\n        f'cycle_{cycle}_nvme_residue_count=0',\n        f'cycle_{cycle}_k8s_residue_count=0',\n    ]\n(base/'asserts/phase108-lifecycle-soak-summary.txt').write_text('\\n'.join(lines)+'\\n')\nPY"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase108-nvme-lifecycle/asserts/phase108-lifecycle-soak-summary.txt"
+        pattern: "^phase108_nvme_tcp_multivolume_lifecycle_soak_status=ok$"
+        save_as: lifecycle_soak_ok
+      - action: assert_greater
+        actual: "{{ lifecycle_soak_ok }}"
+        threshold: "0"
+
+  - name: helm_uninstall_cleanup
+    always: true
+    actions:
+      - action: exec
+        node: m02
+        timeout: 3m
+        cmd: "helm status {{ helm_release }} --namespace {{ helm_namespace }} >/dev/null 2>&1 && helm uninstall {{ helm_release }} --namespace {{ helm_namespace }} --wait --timeout 120s > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase108-nvme-lifecycle/cleanup/helm-uninstall.txt || true; kubectl -n default delete pod -l sw-block-test=multi-volume --ignore-not-found=true --wait=true --timeout=45s || true; for i in 1 2 3; do kubectl -n default delete pod sw-block-multi-writer-$i sw-block-multi-reader-$i --ignore-not-found=true --wait=true --timeout=45s || true; kubectl -n default delete pvc sw-block-multi-pvc-$i --ignore-not-found=true --wait=true --timeout=45s || true; done; kubectl delete storageclass sw-block-multi --ignore-not-found=true --wait=true --timeout=45s || true; kubectl get pv --no-headers | awk '/sw-block-multi/ {print $1}' | xargs -r -n1 kubectl patch pv --type=merge -p '{\"metadata\":{\"finalizers\":[]}}' >/dev/null 2>&1 || true; kubectl get pv --no-headers | awk '/sw-block-multi/ {print $1}' | xargs -r kubectl delete pv --wait=false >/dev/null 2>&1 || true; sudo -n nvme disconnect-all >/dev/null 2>&1 || true; cd {{ product_root }} && SW_BLOCK_ARTIFACT_DIR=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase108-nvme-lifecycle/cleanup/verify bash scripts/verify-helm-cleanup.sh {{ product_root }}"
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase108-nvme-lifecycle/cleanup/verify/cleanup-summary.txt"
+        pattern: "^cleanup_status=ok$"
+        save_as: cleanup_ok
+      - action: assert_greater
+        actual: "{{ cleanup_ok }}"
+        threshold: "0"
+
+  - name: collect
+    always: true
+    actions:
+      - action: collect_path
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase108-nvme-lifecycle"
+        name: "remote-phases"
+        ignore_error: true
