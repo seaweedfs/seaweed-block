@@ -96,8 +96,10 @@ Seaweed Block can already demonstrate a narrow Kubernetes block-storage loop:
 - NVMe/TCP CSI multipath attach is gated for the supported lab path; RoCE and
   NVMe/RDMA remain explicit non-claims until host preflight plus live I/O gates
   prove them.
-- Cross-node loopback NVMe/TCP topology is explicitly blocked. Cross-node
-  non-loopback NVMe/TCP attach remains the next live gate, not a shipped claim.
+- Cross-node loopback NVMe/TCP topology is explicitly blocked. The
+  non-loopback NVMe/TCP publish path is now explicitly wired through
+  blockvolume, blockmaster, Helm, and generated values, but cross-node
+  writer/reader attach remains the next live gate, not a shipped claim.
 - Install drift status for current versus desired chart/app/image identity
   without upgrade execution.
 - CRD/RBAC status-writer conformance coverage for the failures that previously

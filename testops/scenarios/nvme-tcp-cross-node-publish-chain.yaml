@@ -1,0 +1,95 @@
+name: nvme-tcp-cross-node-publish-chain
+timeout: 20m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: publish_gate
+    actions:
+      - action: exec
+        node: m02
+        timeout: 15m
+        cmd: "rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase106-nvme-publish && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase106-nvme-publish && cd {{ product_root }} && bash scripts/run-phase106-nvme-tcp-cross-node-publish-gate.sh {{ product_root }}"
+        env.SW_BLOCK_ARTIFACT_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase106-nvme-publish/gate"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase106-nvme-publish/gate/phase106-nvme-tcp-cross-node-publish-summary.txt"
+        pattern: "^phase106_nvme_tcp_cross_node_publish_status=ok$"
+        save_as: phase106_ok
+      - action: assert_greater
+        actual: "{{ phase106_ok }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase106-nvme-publish/gate/phase106-nvme-tcp-cross-node-publish-summary.txt"
+        pattern: "^generated_external_nvme=true$"
+        save_as: external_nvme
+      - action: assert_greater
+        actual: "{{ external_nvme }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase106-nvme-publish/gate/phase106-nvme-tcp-cross-node-publish-summary.txt"
+        pattern: "^generated_external_iscsi=false$"
+        save_as: no_external_iscsi_values
+      - action: assert_greater
+        actual: "{{ no_external_iscsi_values }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase106-nvme-publish/gate/phase106-nvme-tcp-cross-node-publish-summary.txt"
+        pattern: "^helm_rendered_launcher_external_nvme=true$"
+        save_as: helm_external_nvme
+      - action: assert_greater
+        actual: "{{ helm_external_nvme }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase106-nvme-publish/gate/phase106-nvme-tcp-cross-node-publish-summary.txt"
+        pattern: "^helm_rendered_launcher_external_iscsi=false$"
+        save_as: no_external_iscsi_helm
+      - action: assert_greater
+        actual: "{{ no_external_iscsi_helm }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase106-nvme-publish/gate/phase106-nvme-tcp-cross-node-publish-summary.txt"
+        pattern: "^helm_rendered_chap=false$"
+        save_as: no_chap
+      - action: assert_greater
+        actual: "{{ no_chap }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase106-nvme-publish/gate/phase106-nvme-tcp-cross-node-publish-summary.txt"
+        pattern: "^live_io_claim=false$"
+        save_as: no_live_io_claim
+      - action: assert_greater
+        actual: "{{ no_live_io_claim }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase106-nvme-publish/gate/phase106-nvme-tcp-cross-node-publish-summary.txt"
+        pattern: "^roce_claim_allowed=false$"
+        save_as: no_roce_claim
+      - action: assert_greater
+        actual: "{{ no_roce_claim }}"
+        threshold: "0"
+
+  - name: collect
+    always: true
+    actions:
+      - action: collect_path
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase106-nvme-publish"
+        name: "remote-phases"
+        ignore_error: true

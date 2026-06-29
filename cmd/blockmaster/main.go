@@ -45,6 +45,7 @@ type flags struct {
 	launcherStatus                   bool
 	launcherKubernetesApply          bool
 	launcherExternalISCSI            bool
+	launcherExternalNVMe             bool
 	launcherExternalStatus           bool
 	launcherCHAPSecretName           string
 	launcherCHAPUserKey              string
@@ -88,6 +89,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.BoolVar(&f.launcherStatus, "launcher-status", false, "render loopback-only blockvolume status endpoints in generated workload manifests; intended for TestOps/diagnostics")
 	fs.BoolVar(&f.launcherKubernetesApply, "launcher-kubernetes-apply", false, "apply/delete generated blockvolume Deployments through the in-cluster Kubernetes API; scoped to app=sw-blockvolume and generated volume/replica labels")
 	fs.BoolVar(&f.launcherExternalISCSI, "launcher-external-iscsi", false, "render generated iSCSI frontends on node addresses instead of loopback; requires --launcher-iscsi-chap-secret-name")
+	fs.BoolVar(&f.launcherExternalNVMe, "launcher-external-nvme", false, "render generated NVMe/TCP frontends on node addresses instead of loopback; unauthenticated and intended only for explicit Kubernetes NVMe/TCP gates")
 	fs.BoolVar(&f.launcherExternalStatus, "launcher-external-status", false, "render blockvolume status endpoints on node addresses instead of loopback; intended for explicit Kubernetes node-loss gates")
 	fs.StringVar(&f.launcherCHAPSecretName, "launcher-iscsi-chap-secret-name", "", "optional Kubernetes Secret name used by generated blockvolume Deployments for target-side iSCSI CHAP")
 	fs.StringVar(&f.launcherCHAPUserKey, "launcher-iscsi-chap-username-key", "chapUsername", "Kubernetes Secret key for generated blockvolume iSCSI CHAP username")
@@ -345,6 +347,7 @@ func runLifecycleLauncherTick(h *master.Host, f flags) error {
 			OwnerReferenceToPVC: f.launcherPVCOwnerRef,
 			EnableStatus:        f.launcherStatus,
 			ExternalISCSI:       f.launcherExternalISCSI,
+			ExternalNVMe:        f.launcherExternalNVMe,
 			ExternalStatus:      f.launcherExternalStatus,
 			ISCSICHAP: launcher.CHAPSecretRef{
 				Name:        f.launcherCHAPSecretName,

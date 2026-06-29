@@ -75,6 +75,7 @@ replication:
 
 network:
   externalISCSI: false
+  externalNVMe: false
   externalStatus: false
   rejectLoopbackPublishTargets: false
 
@@ -99,6 +100,7 @@ chap:
 
 ports:
   iscsiBase: 3260
+  nvmeBase: 4420
   statusBase: 23260
 
 # Initial block-capable nodes. D2 will add a generator that derives this from

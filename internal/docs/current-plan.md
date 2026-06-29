@@ -1,6 +1,9 @@
 # Current Plan: Phase 106 NVMe/TCP Cross-Node Non-Loopback Live Attach
 
-Status: planned next.
+Status: in progress. D1/D2 publish-contract gate passed on
+2026-06-29 (`nvme-tcp-cross-node-publish-chain`, run
+`20260629-005939-14c1`, 18/18 PASS). D3 live cross-node writer/reader remains
+open.
 
 ## Why This Is Next
 
@@ -40,11 +43,18 @@ Ensure NVMe frontend publication exposes a routable node address when the
 workload may run on a different node. Do not regress the same-node loopback lab
 path.
 
-Required local checks:
+Status: closed for the publish-contract slice. Implemented:
 
 ```text
-go test ./core/frontend/nvme ./core/ops ./cmd/blockvolume ./cmd/sw-block -count=1
+blockvolume default NVMe bind remains loopback-only
+--allow-external-nvme-bind is required for non-loopback NVMe/TCP
+blockmaster accepts --launcher-external-nvme
+launcher renders --allow-external-nvme-bind and non-loopback --nvme-listen
+Helm exposes network.externalNVMe and ports.nvmeBase
+generate-helm-values --protocol nvme emits externalNVMe, not externalISCSI/CHAP
 ```
+
+Verified by `scripts/run-phase106-nvme-tcp-cross-node-publish-gate.sh`.
 
 ## D2: CSI Publish / Stage Evidence
 
@@ -53,6 +63,11 @@ stage records the same NQN/NSID/address.
 
 No status surface may claim Ready if publish context and stage evidence
 disagree.
+
+Status: partially closed for render/publish inputs only. The chart and values
+now produce the intended non-loopback NVMe target configuration. The live CSI
+publish/stage agreement remains part of D3 because it requires a mounted
+cross-node workload.
 
 ## D3: Live Cross-Node Writer / Reader Gate
 

@@ -244,6 +244,40 @@ func TestPhase105NVMETCPMultiHostTopologyGateIsReadOnlyAndClaimBounded(t *testin
 	}
 }
 
+func TestPhase106NVMETCPCrossNodePublishGateIsClaimBounded(t *testing.T) {
+	root := repoRoot(t)
+	raw, err := os.ReadFile(filepath.Join(root, "scripts", "run-phase106-nvme-tcp-cross-node-publish-gate.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(raw)
+	for _, want := range []string{
+		"phase106_nvme_tcp_cross_node_publish_status=",
+		"live_io_claim=false",
+		"performance_claim_allowed=false",
+		"roce_claim_allowed=false",
+		"default_loopback_preserved=true",
+		"external_nvme_requires_opt_in=true",
+		"external_nvme_auth_claim=false",
+		"generate_values_external_nvme=pass",
+		"generated_external_nvme=true",
+		"generated_external_iscsi=false",
+		"helm_rendered_launcher_external_nvme=true",
+		"helm_rendered_launcher_external_iscsi=false",
+		"helm_rendered_chap=false",
+		"helm_external_status_guard=pass",
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("phase106 gate missing %q", want)
+		}
+	}
+	for _, forbidden := range []string{"nvme connect", "nvme disconnect", "kubectl patch", "kubectl delete"} {
+		if strings.Contains(script, forbidden) {
+			t.Fatalf("phase106 publish gate must not mutate host or Kubernetes state, found %q", forbidden)
+		}
+	}
+}
+
 func repoRoot(t *testing.T) string {
 	t.Helper()
 	dir, err := os.Getwd()

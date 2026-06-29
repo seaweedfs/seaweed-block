@@ -16,7 +16,9 @@ mutating dashboard, operator reconciliation, backup/restore, or upgrade safety.
 Use generated values for the supported alpha install path. The generator reads
 the live Kubernetes nodes and writes the node names/IPs that the launcher uses
 for placement. On a single-node lab it keeps loopback/local-consumer mode; on a
-multi-node lab it switches to non-loopback iSCSI with CHAP.
+multi-node lab it switches to non-loopback iSCSI with CHAP. For the
+experimental NVMe/TCP path, pass `--protocol nvme`; this switches to
+non-loopback NVMe/TCP plus external status, without enabling iSCSI CHAP.
 
 ```bash
 SW_BLOCK_HELM_VALUES_OUT=values.day1.yaml \
@@ -42,6 +44,7 @@ csiImage:
 
 network:
   externalISCSI: true
+  externalNVMe: false
   externalStatus: true
   rejectLoopbackPublishTargets: true
 
@@ -94,6 +97,7 @@ replication:
   expectedSlotsPerVolume: 3
 network:
   externalISCSI: true
+  externalNVMe: false
   externalStatus: true
   rejectLoopbackPublishTargets: true
 chap:

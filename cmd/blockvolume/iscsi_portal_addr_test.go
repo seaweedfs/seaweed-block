@@ -58,6 +58,50 @@ func TestParseFlags_NVMeTransportRejectsRDMA(t *testing.T) {
 	}
 }
 
+func TestParseFlags_NVMeExternalBindRequiresExplicitOptIn(t *testing.T) {
+	args := append(requiredBlockvolumeArgs(),
+		"--nvme-listen", "203.0.113.10:4420",
+		"--nvme-subsysnqn", "nqn.2026-05.io.seaweedfs:test-v1",
+	)
+	_, err := parseFlags(args)
+	if err == nil {
+		t.Fatal("parseFlags succeeded; want external NVMe/TCP bind rejected")
+	}
+	if !strings.Contains(err.Error(), "not loopback") {
+		t.Fatalf("error = %q, want loopback bind rejection", err)
+	}
+}
+
+func TestParseFlags_NVMeExternalBindOptIn(t *testing.T) {
+	args := append(requiredBlockvolumeArgs(),
+		"--allow-external-nvme-bind",
+		"--nvme-listen", "203.0.113.10:4420",
+		"--nvme-subsysnqn", "nqn.2026-05.io.seaweedfs:test-v1",
+	)
+	got, err := parseFlags(args)
+	if err != nil {
+		t.Fatalf("parseFlags: %v", err)
+	}
+	if !got.allowExternalNVMeBind {
+		t.Fatal("allowExternalNVMeBind=false")
+	}
+}
+
+func TestParseFlags_NVMeExternalBindOptInRejectsLoopback(t *testing.T) {
+	args := append(requiredBlockvolumeArgs(),
+		"--allow-external-nvme-bind",
+		"--nvme-listen", "127.0.0.1:4420",
+		"--nvme-subsysnqn", "nqn.2026-05.io.seaweedfs:test-v1",
+	)
+	_, err := parseFlags(args)
+	if err == nil {
+		t.Fatal("parseFlags succeeded; want loopback external bind rejected")
+	}
+	if !strings.Contains(err.Error(), "non-loopback") {
+		t.Fatalf("error = %q, want non-loopback requirement", err)
+	}
+}
+
 func TestParseFlags_IscsiPortalAddrDoesNotChangeLoopbackBind(t *testing.T) {
 	args := append(requiredBlockvolumeArgs(),
 		"--iscsi-listen", "127.0.0.1:3260",
