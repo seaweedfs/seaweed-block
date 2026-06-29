@@ -78,6 +78,27 @@ The current alpha has gated recovery evidence for:
 The broad claim remains narrow: these are supported lab gates, not production
 HA or broad RTO/SLO commitments.
 
+### Returned-Replica ACK Eligibility Executor
+
+The returned-replica path now has a beta-candidate executor gate for one narrow
+authority fact:
+
+```text
+SwBlockReplicaEligibility.status.ackEligible=true
+```
+
+This gate runs only after live evidence shows:
+
+- the old primary returned as a non-primary replica,
+- the old primary remains frontend-fenced,
+- the current primary remains unchanged,
+- the returned replica covers the required durable frontier,
+- the target identity matches exactly one volume/replica.
+
+The executor writes the narrow `SwBlockReplicaEligibility.status` target. It
+does not rewrite broad `SwBlockVolume.status`, publish a frontend, start
+rebuild/catch-up traffic, change primary authority, or perform failback.
+
 ### Restart Persistence
 
 With the hostPath-backed alpha persistence path, QA gates verify:
@@ -176,6 +197,9 @@ The current status model is negative-first:
 - `install_drift_mismatch` means current install identity differs from desired
   evidence; the operator reports the mismatch but does not execute upgrade or
   rollback.
+- `ack_eligibility_recorded` on `SwBlockReplicaEligibility.status` means the
+  authority executor recorded the ACK eligibility result after terminal
+  returned-replica evidence. It is not a rebuild or failback completion signal.
 - Cluster counters include `ready_volume_count`, `blocked_volume_count`, and
   `stale_volume_count`.
 
@@ -225,14 +249,17 @@ hostpath_residue_count=0
 
 - Not production-ready.
 - No production-grade operator or controller-manager lifecycle.
-- No mutating admin/operator/dashboard actions.
+- No broad mutating admin/dashboard workflow. The current bounded mutations are
+  limited to lifecycle-owner finalizer ownership and authority-executor ACK
+  eligibility target status.
 - No finalizer ownership by operator-status.
 - No automatic cleanup execution.
 - No upgrade or rollback execution.
 - No promote, repair, rebuild, failback, delete, backup, restore, or cleanup
   mutation through UI/API/operator.
 - No backup/snapshot/restore workflow.
-- No returned-replica rebuild or automated failback.
+- No returned-replica rebuild traffic, frontend publication, or automated
+  failback.
 - No transparent Kubernetes node-loss failover without pod recreate.
 - No NVMe ANA parity for the transparent failover path.
 - No broad distro/kernel/initiator compatibility matrix.

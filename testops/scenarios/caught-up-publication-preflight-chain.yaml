@@ -1,0 +1,72 @@
+# Runner-native Phase 66 gate: caught-up publication preflight surface.
+
+name: caught-up-publication-preflight-chain
+timeout: 8m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: publication_preflight_gate
+    actions:
+      - action: exec
+        node: m02
+        timeout: 7m
+        cmd: "rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase66-caught-up-publication-preflight && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase66-caught-up-publication-preflight && cd {{ product_root }} && SW_BLOCK_ARTIFACT_DIR=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase66-caught-up-publication-preflight bash scripts/run-phase66-caught-up-publication-preflight-gate.sh {{ product_root }}"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase66-caught-up-publication-preflight/phase66-caught-up-publication-preflight-summary.txt"
+        pattern: "^phase66_caught_up_publication_preflight_status=ok$"
+        save_as: phase66_ok
+      - action: assert_greater
+        actual: "{{ phase66_ok }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase66-caught-up-publication-preflight/phase66-caught-up-publication-preflight-summary.txt"
+        pattern: "^publication_decision_schema_locked=true$"
+        save_as: schema_locked
+      - action: assert_greater
+        actual: "{{ schema_locked }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase66-caught-up-publication-preflight/phase66-caught-up-publication-preflight-summary.txt"
+        pattern: "^publication_blocked_until_caught_up=true$"
+        save_as: blocked_until_caught_up
+      - action: assert_greater
+        actual: "{{ blocked_until_caught_up }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase66-caught-up-publication-preflight/phase66-caught-up-publication-preflight-summary.txt"
+        pattern: "^publication_disabled_after_caught_up=true$"
+        save_as: disabled_after_caught_up
+      - action: assert_greater
+        actual: "{{ disabled_after_caught_up }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase66-caught-up-publication-preflight/phase66-caught-up-publication-preflight-summary.txt"
+        pattern: "^publication_mutation_allowed=false$"
+        save_as: mutation_false
+      - action: assert_greater
+        actual: "{{ mutation_false }}"
+        threshold: "0"
+
+  - name: collect
+    always: true
+    actions:
+      - action: collect_path
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase66-caught-up-publication-preflight"
+        name: "remote-phases"
+        ignore_error: true

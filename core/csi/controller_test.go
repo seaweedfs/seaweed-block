@@ -153,6 +153,32 @@ func TestControllerPublish_DoesNotExposeAuthorityGenerationInPublishContext(t *t
 	}
 }
 
+func TestControllerPublish_CarriesStage2MultipathRequestFromVolumeContext(t *testing.T) {
+	lookup := &stubLookup{target: PublishTarget{
+		VolumeID:  "v1",
+		ReplicaID: "r1",
+		Protocol:  ProtocolNVMe,
+		NVMeAddr:  "127.0.0.1:4420",
+		NQN:       "nqn.2026-05.io.seaweedfs:v1",
+		NSID:      1,
+	}}
+	s := NewControllerServer(lookup)
+
+	resp, err := s.ControllerPublishVolume(context.Background(), &csipb.ControllerPublishVolumeRequest{
+		VolumeId: "v1",
+		NodeId:   "node-a",
+		VolumeContext: map[string]string{
+			"stage2_multipath": "true",
+		},
+	})
+	if err != nil {
+		t.Fatalf("ControllerPublishVolume: %v", err)
+	}
+	if got := resp.GetPublishContext()["stage2_multipath"]; got != "true" {
+		t.Fatalf("stage2_multipath=%q context=%v", got, resp.GetPublishContext())
+	}
+}
+
 func TestControllerPublish_FailsClosedWithoutVerifiedTarget(t *testing.T) {
 	s := NewControllerServer(&stubLookup{err: ErrPublishTargetNotFound})
 	_, err := s.ControllerPublishVolume(context.Background(), &csipb.ControllerPublishVolumeRequest{
@@ -397,6 +423,29 @@ func TestG15c_ControllerCreateVolume_RecordsProtocolSelection(t *testing.T) {
 				t.Fatalf("response protocol=%q want nvme", got)
 			}
 		})
+	}
+}
+
+func TestControllerCreateVolume_CarriesStage2MultipathVolumeContext(t *testing.T) {
+	prov := &stubProvisioner{}
+	s := NewControllerServerWithProvisioner(nil, prov)
+	resp, err := s.CreateVolume(context.Background(), &csipb.CreateVolumeRequest{
+		Name: "pvc-a",
+		CapacityRange: &csipb.CapacityRange{
+			RequiredBytes: 1048576,
+		},
+		VolumeCapabilities: []*csipb.VolumeCapability{testVolumeCapability()},
+		Parameters: map[string]string{
+			"protocol":          "nvme",
+			"replicationFactor": "2",
+			"stage2_multipath":  "true",
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateVolume: %v", err)
+	}
+	if got := resp.GetVolume().GetVolumeContext()["stage2_multipath"]; got != "true" {
+		t.Fatalf("stage2_multipath=%q context=%v", got, resp.GetVolume().GetVolumeContext())
 	}
 }
 

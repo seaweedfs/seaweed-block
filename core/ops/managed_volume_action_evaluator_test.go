@@ -77,6 +77,78 @@ func TestEvaluateManagedVolumeAction_RejectsDisabledAuthorityMutation(t *testing
 	}
 }
 
+func TestEvaluateManagedVolumeAction_RejectsDisabledReturnedReplicaFailback(t *testing.T) {
+	facts := returnedReplicaActionFacts(52, 52, false)
+	facts.Replicas[0].AckEligible = true
+	evaluation := EvaluateManagedVolumeAction(ManagedVolumeActionFailbackReturned, facts)
+
+	if evaluation.Decision != ManagedVolumeActionDecisionRejected {
+		t.Fatalf("decision=%s want rejected", evaluation.Decision)
+	}
+	if evaluation.Reason != ManagedVolumeActionRejectDisabled {
+		t.Fatalf("reason=%s want %s", evaluation.Reason, ManagedVolumeActionRejectDisabled)
+	}
+	if evaluation.SideEffectClass != ManagedVolumeSideEffectAuthorityMutating ||
+		evaluation.OwnerExecutor != "authority_recovery_executor" ||
+		evaluation.MutationAllowed {
+		t.Fatalf("failback boundary=%+v", evaluation)
+	}
+	if evaluation.EvidenceRequired != "returned_replica_failback_evidence" {
+		t.Fatalf("evidence_required=%s", evaluation.EvidenceRequired)
+	}
+}
+
+func TestEvaluateManagedVolumeAction_AllowsReturnedReplicaReintegrateDryRunWithFencedFrontier(t *testing.T) {
+	evaluation := EvaluateManagedVolumeAction(ManagedVolumeActionReintegrateReturned, returnedReplicaActionFacts(52, 52, false))
+
+	if evaluation.Decision != ManagedVolumeActionDecisionAllowed {
+		t.Fatalf("decision=%s reason=%s missing=%v", evaluation.Decision, evaluation.Reason, evaluation.MissingFacts)
+	}
+	if evaluation.Mode != ManagedVolumeActionModeDryRun {
+		t.Fatalf("mode=%s", evaluation.Mode)
+	}
+	if evaluation.SideEffectClass != ManagedVolumeSideEffectAuthorityMutating {
+		t.Fatalf("side_effect=%s", evaluation.SideEffectClass)
+	}
+	if evaluation.MutationAllowed {
+		t.Fatal("returned-replica reintegration dry-run must not allow mutation")
+	}
+}
+
+func TestEvaluateManagedVolumeAction_RejectsReturnedReplicaReintegrateWithoutFrontierCoverage(t *testing.T) {
+	evaluation := EvaluateManagedVolumeAction(ManagedVolumeActionReintegrateReturned, returnedReplicaActionFacts(51, 52, false))
+
+	if evaluation.Decision != ManagedVolumeActionDecisionRejected {
+		t.Fatalf("decision=%s want rejected", evaluation.Decision)
+	}
+	if evaluation.Reason != ManagedVolumeActionRejectMissingFacts {
+		t.Fatalf("reason=%s want %s", evaluation.Reason, ManagedVolumeActionRejectMissingFacts)
+	}
+	if !containsActionFact(evaluation.MissingFacts, "returned_replica.required_frontier_covered") {
+		t.Fatalf("missing facts=%v", evaluation.MissingFacts)
+	}
+	if evaluation.MutationAllowed {
+		t.Fatal("rejected returned-replica evaluation must not allow mutation")
+	}
+}
+
+func TestEvaluateManagedVolumeAction_RejectsReturnedReplicaReintegrateWhenFrontendReady(t *testing.T) {
+	evaluation := EvaluateManagedVolumeAction(ManagedVolumeActionReintegrateReturned, returnedReplicaActionFacts(52, 52, true))
+
+	if evaluation.Decision != ManagedVolumeActionDecisionRejected {
+		t.Fatalf("decision=%s want rejected", evaluation.Decision)
+	}
+	if evaluation.Reason != ManagedVolumeActionRejectMissingFacts {
+		t.Fatalf("reason=%s want %s", evaluation.Reason, ManagedVolumeActionRejectMissingFacts)
+	}
+	if !containsActionFact(evaluation.MissingFacts, "returned_replica.frontend_fenced") {
+		t.Fatalf("missing facts=%v", evaluation.MissingFacts)
+	}
+	if evaluation.MutationAllowed {
+		t.Fatal("rejected returned-replica evaluation must not allow mutation")
+	}
+}
+
 func TestEvaluateManagedVolumeAction_RejectsUnknownAction(t *testing.T) {
 	evaluation := EvaluateManagedVolumeAction("delete.everything", ManagedVolumeFacts{})
 
@@ -158,5 +230,47 @@ func factsSatisfyingActionContract(entry ManagedVolumeActionContractEntry) Manag
 			StaleFenced: true,
 		}},
 	}
+	if entry.Type == ManagedVolumeActionReintegrateReturned || entry.Type == ManagedVolumeActionRebuildReturned {
+		facts = returnedReplicaActionFacts(52, 52, false)
+	}
 	return facts
+}
+
+func returnedReplicaActionFacts(durableLSN, requiredLSN uint64, frontendReady bool) ManagedVolumeFacts {
+	return ManagedVolumeFacts{
+		VolumeID: "pvc-returned",
+		PVCName:  "demo-pvc",
+		Authority: &AuthorityFact{
+			PrimaryReplica:        "r2",
+			PreviousPrimary:       "r1",
+			PublishTarget:         "192.168.1.184:3260",
+			RequiredFrontierKnown: true,
+			RequiredFrontierLSN:   requiredLSN,
+		},
+		Replicas: []ReplicaFact{{
+			ReplicaID:            "r1",
+			KubernetesNode:       "m01",
+			Observed:             true,
+			Role:                 "replica",
+			DurableFrontierKnown: true,
+			DurableFrontierLSN:   durableLSN,
+			FrontendPrimaryReady: frontendReady,
+			StalePrimaryFenced:   !frontendReady,
+		}, {
+			ReplicaID:      "r2",
+			KubernetesNode: "m02",
+			Observed:       true,
+			Role:           "primary",
+		}},
+		EvidenceRefs: []string{"returned-replica-summary.txt"},
+	}
+}
+
+func containsActionFact(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }

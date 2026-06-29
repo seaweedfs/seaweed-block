@@ -24,6 +24,26 @@ type LocalWrite struct {
 	LSN  uint64
 }
 
+type RuntimeRecoveryRequest struct {
+	ReplicaID       string
+	TargetDataAddr  string
+	SessionID       uint64
+	Epoch           uint64
+	EndpointVersion uint64
+	FromLSN         uint64
+	FrontierHintLSN uint64
+	BasePinLSN      uint64
+}
+
+type RuntimeRecoveryStatus struct {
+	State       string
+	ReplicaID   string
+	SessionID   uint64
+	AchievedLSN uint64
+	FailureKind string
+	FailReason  string
+}
+
 // ReplicationVolume is the per-volume fan-out owner. It:
 //   - tracks the authoritative replica set (peers) from master
 //     assignments;
@@ -620,6 +640,63 @@ func (v *ReplicationVolume) PeerStatuses() []ReplicaPeerStatus {
 		return out[i].ReplicaID < out[j].ReplicaID
 	})
 	return out
+}
+
+func (v *ReplicationVolume) StartRuntimeRecovery(ctx context.Context, req RuntimeRecoveryRequest) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if req.ReplicaID == "" {
+		return fmt.Errorf("replication: runtime recovery: replicaID is required")
+	}
+	if req.SessionID == 0 || req.Epoch == 0 || req.EndpointVersion == 0 || req.FrontierHintLSN == 0 {
+		return fmt.Errorf("replication: runtime recovery: nonzero sessionID, epoch, endpointVersion, and frontierHintLsn are required")
+	}
+	v.mu.Lock()
+	if v.closed {
+		v.mu.Unlock()
+		return fmt.Errorf("replication: runtime recovery: volume %s closed", v.volumeID)
+	}
+	peer := v.peers[req.ReplicaID]
+	v.mu.Unlock()
+	if peer == nil {
+		return fmt.Errorf("replication: runtime recovery: peer %s not found", req.ReplicaID)
+	}
+	return peer.StartRuntimeRecovery(req)
+}
+
+func (v *ReplicationVolume) RuntimeRecoveryStatus(ctx context.Context, req RuntimeRecoveryRequest) (RuntimeRecoveryStatus, error) {
+	if err := ctx.Err(); err != nil {
+		return RuntimeRecoveryStatus{}, err
+	}
+	if req.ReplicaID == "" {
+		return RuntimeRecoveryStatus{}, fmt.Errorf("replication: runtime recovery status: replicaID is required")
+	}
+	if req.SessionID == 0 || req.Epoch == 0 || req.EndpointVersion == 0 {
+		return RuntimeRecoveryStatus{}, fmt.Errorf("replication: runtime recovery status: nonzero sessionID, epoch, and endpointVersion are required")
+	}
+	v.mu.Lock()
+	if v.closed {
+		v.mu.Unlock()
+		return RuntimeRecoveryStatus{}, fmt.Errorf("replication: runtime recovery status: volume %s closed", v.volumeID)
+	}
+	peer := v.peers[req.ReplicaID]
+	v.mu.Unlock()
+	if peer == nil {
+		return RuntimeRecoveryStatus{}, fmt.Errorf("replication: runtime recovery status: peer %s not found", req.ReplicaID)
+	}
+	return peer.RuntimeRecoveryStatus(req)
+}
+
+func runtimeStatusFromTransport(status transport.RecoverySessionStatus) RuntimeRecoveryStatus {
+	return RuntimeRecoveryStatus{
+		State:       status.State,
+		ReplicaID:   status.ReplicaID,
+		SessionID:   status.SessionID,
+		AchievedLSN: status.AchievedLSN,
+		FailureKind: status.FailureKind,
+		FailReason:  status.FailReason,
+	}
 }
 
 // ConfigureProbeLoop installs the per-volume degraded-peer probe loop.

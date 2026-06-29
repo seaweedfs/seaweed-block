@@ -86,6 +86,15 @@ service LifecycleService {
     rpc DeleteVolume(DeleteVolumeRequest) returns (DeleteVolumeResponse);
 }
 
+// FailbackService — disabled-by-default authority failback endpoint.
+// This is the only wire surface that may request returned-replica authority
+// reassignment, and it must be explicitly enabled in blockmaster config. The
+// request carries expected-current guards and terminal evidence; master still
+// authors epoch/endpoint_version internally through Publisher.
+service FailbackService {
+    rpc ExecuteFailback(FailbackRequest) returns (FailbackResponse);
+}
+
 // HeartbeatReport — volume -> master observation fact. Field set
 // field-compatible with authority.HeartbeatMessage (P14 S4 wire).
 // No authority-mutation fields of any kind.
@@ -307,6 +316,8 @@ message ReplicaEvidence {
     bool stale_primary_fenced = 16;
     repeated ObservationCondition conditions = 17;
     string support_bundle_path = 18;
+    string frontend_nqn = 19;
+    uint32 frontend_nsid = 20;
 }
 
 message ClusterEvent {
@@ -367,4 +378,28 @@ message DeleteVolumeRequest {
 }
 
 message DeleteVolumeResponse {
+}
+
+message FailbackRequest {
+    string volume_id = 1;
+    string replica_id = 2;
+    string target_data_addr = 3;
+    string target_ctrl_addr = 4;
+    string expected_current_replica_id = 5;
+    uint64 expected_current_epoch = 6;
+    bool ack_eligible = 7;
+    bool frontend_fenced_before_failback = 8;
+    bool durable_frontier_covered = 9;
+    bool no_cross_volume_identity_change = 10;
+    repeated string evidence_refs = 11;
+}
+
+message FailbackResponse {
+    bool failback_started = 1;
+    bool authority_epoch_advanced = 2;
+    bool single_primary_after_failback = 3;
+    bool publish_target_swapped_after_failback = 4;
+    bool no_storage_mutation = 5;
+    bool no_cross_volume_identity_change = 6;
+    repeated string evidence_refs = 7;
 }

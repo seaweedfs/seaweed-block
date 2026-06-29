@@ -1,0 +1,128 @@
+# Runner-native Phase 57 gate: authority-executor rebuild target RBAC boundary.
+
+name: authority-executor-rebuild-target-rbac-chain
+timeout: 5m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: authority_executor_rebuild_target_rbac_gate
+    actions:
+      - action: exec
+        node: m02
+        timeout: 4m
+        cmd: "rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase57-authority-executor-rebuild-target-rbac && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase57-authority-executor-rebuild-target-rbac && cd {{ product_root }} && SW_BLOCK_ARTIFACT_DIR=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase57-authority-executor-rebuild-target-rbac bash scripts/run-phase57-authority-executor-rebuild-target-rbac-gate.sh {{ product_root }}"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase57-authority-executor-rebuild-target-rbac/phase57-authority-executor-rebuild-target-rbac-summary.txt"
+        pattern: "^phase57_authority_executor_rebuild_target_rbac_status=ok$"
+        save_as: phase57_rbac_ok
+      - action: assert_greater
+        actual: "{{ phase57_rbac_ok }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase57-authority-executor-rebuild-target-rbac/phase57-authority-executor-rebuild-target-rbac-summary.txt"
+        pattern: "^default_patch_swblockreplicarebuilds_status_denied=no$"
+        save_as: default_rebuild_status_denied
+      - action: assert_greater
+        actual: "{{ default_rebuild_status_denied }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase57-authority-executor-rebuild-target-rbac/phase57-authority-executor-rebuild-target-rbac-summary.txt"
+        pattern: "^exec_patch_swblockreplicarebuilds_status_allowed=yes$"
+        save_as: exec_rebuild_status_allowed
+      - action: assert_greater
+        actual: "{{ exec_rebuild_status_allowed }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase57-authority-executor-rebuild-target-rbac/phase57-authority-executor-rebuild-target-rbac-summary.txt"
+        pattern: "^exec_patch_swblockreplicarebuilds_main_denied=no$"
+        save_as: exec_rebuild_main_denied
+      - action: assert_greater
+        actual: "{{ exec_rebuild_main_denied }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase57-authority-executor-rebuild-target-rbac/phase57-authority-executor-rebuild-target-rbac-summary.txt"
+        pattern: "^exec_patch_swblockvolumes_status_denied=no$"
+        save_as: exec_swblockvolume_status_denied
+      - action: assert_greater
+        actual: "{{ exec_swblockvolume_status_denied }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase57-authority-executor-rebuild-target-rbac/phase57-authority-executor-rebuild-target-rbac-summary.txt"
+        pattern: "^exec_patch_swblockreplicaeligibilities_status_denied=no$"
+        save_as: exec_eligibility_status_denied
+      - action: assert_greater
+        actual: "{{ exec_eligibility_status_denied }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase57-authority-executor-rebuild-target-rbac/phase57-authority-executor-rebuild-target-rbac-summary.txt"
+        pattern: "^exec_create_events_denied=no$"
+        save_as: exec_events_denied
+      - action: assert_greater
+        actual: "{{ exec_events_denied }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase57-authority-executor-rebuild-target-rbac/phase57-authority-executor-rebuild-target-rbac-summary.txt"
+        pattern: "^default_rebuild_status_patch_runtime_denied=true$"
+        save_as: default_runtime_patch_denied
+      - action: assert_greater
+        actual: "{{ default_runtime_patch_denied }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase57-authority-executor-rebuild-target-rbac/phase57-authority-executor-rebuild-target-rbac-summary.txt"
+        pattern: "^runtime_rebuild_status_state=planned$"
+        save_as: runtime_state_planned
+      - action: assert_greater
+        actual: "{{ runtime_state_planned }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase57-authority-executor-rebuild-target-rbac/phase57-authority-executor-rebuild-target-rbac-summary.txt"
+        pattern: "^runtime_rebuild_status_reason=rebuild_progress_planned$"
+        save_as: runtime_reason_planned
+      - action: assert_greater
+        actual: "{{ runtime_reason_planned }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase57-authority-executor-rebuild-target-rbac/phase57-authority-executor-rebuild-target-rbac-summary.txt"
+        pattern: "^runtime_rebuild_traffic_started=false$"
+        save_as: runtime_no_traffic
+      - action: assert_greater
+        actual: "{{ runtime_no_traffic }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase57-authority-executor-rebuild-target-rbac/phase57-authority-executor-rebuild-target-rbac-summary.txt"
+        pattern: "^runtime_no_frontend_publication=true$"
+        save_as: runtime_no_frontend_publication
+      - action: assert_greater
+        actual: "{{ runtime_no_frontend_publication }}"
+        threshold: "0"
+
+  - name: collect
+    always: true
+    actions:
+      - action: collect_path
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase57-authority-executor-rebuild-target-rbac"
+        name: "remote-phases"
+        ignore_error: true

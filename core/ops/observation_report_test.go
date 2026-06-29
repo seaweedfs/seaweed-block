@@ -80,8 +80,131 @@ func TestObservationReportSummary_IncludesManagedVolumeStatus(t *testing.T) {
 		"cleanup_evidence=cleanup-summary.txt",
 		"volume=pvc-healthy status=ok pvc=default/mysql-data",
 		"managed_volume=pvc-healthy status=ready reason=first_volume_verified",
+		"managed_volume_authority=pvc-healthy primary=r1 publish_target=192.168.1.181:3260 epoch=1 endpoint_version=1",
 		"managed_volume_condition=Ready status=True reason=first_volume_verified severity=info",
 		"managed_volume_action=observe.collect_bundle mode=read_only side_effect=observe",
+	} {
+		if !strings.Contains(summary, want) {
+			t.Fatalf("summary missing %q:\n%s", want, summary)
+		}
+	}
+}
+
+func TestObservationReportSummaryAndHTMLIncludeManagedVolumeNVMeStatus(t *testing.T) {
+	cluster := NewClusterEvidence(time.Date(2026, 6, 28, 12, 0, 0, 0, time.UTC))
+	cluster.ManagedVolumes = []ManagedVolumeProjection{ProjectManagedVolume(ManagedVolumeFacts{
+		VolumeID: "pvc-nvme",
+		PVCName:  "nvme-pvc",
+		Replicas: []ReplicaFact{{
+			ReplicaID:        "r1",
+			Observed:         true,
+			FrontendProtocol: "nvme",
+			FrontendAddr:     "127.0.0.1:4420",
+			FrontendNQN:      "nqn.2026-05.io.seaweedfs:pvc-nvme",
+			FrontendNSID:     1,
+		}, {
+			ReplicaID:        "r2",
+			Observed:         true,
+			FrontendProtocol: "nvme",
+			FrontendAddr:     "127.0.0.1:4421",
+			FrontendNQN:      "nqn.2026-05.io.seaweedfs:pvc-nvme",
+			FrontendNSID:     1,
+		}},
+	})}
+
+	summary := RenderObservationReportSummary(cluster)
+	if want := "managed_volume_nvme=pvc-nvme nqn=nqn.2026-05.io.seaweedfs:pvc-nvme nsid=1 addr=127.0.0.1:4420 addrs=127.0.0.1:4420,127.0.0.1:4421 path_count=2 multipath_observed=true"; !strings.Contains(summary, want) {
+		t.Fatalf("summary missing %q:\n%s", want, summary)
+	}
+	html := RenderObservationReportHTML(cluster)
+	for _, want := range []string{"nqn=nqn.2026-05.io.seaweedfs:pvc-nvme", "paths=2", "multipath=true"} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("html missing %q:\n%s", want, html)
+		}
+	}
+	explain := RenderObservationExplainText(cluster)
+	if !strings.Contains(explain, "managed_volume_nvme protocol=nvme nqn=nqn.2026-05.io.seaweedfs:pvc-nvme nsid=1 addr=127.0.0.1:4420 addrs=127.0.0.1:4420,127.0.0.1:4421 path_count=2 multipath_observed=true") {
+		t.Fatalf("explain missing nvme status:\n%s", explain)
+	}
+}
+
+func TestObservationReportSummary_IncludesReturnedReplicaProjection(t *testing.T) {
+	cluster := NewClusterEvidence(time.Date(2026, 6, 18, 12, 0, 0, 0, time.UTC))
+	cluster.ManagedVolumes = []ManagedVolumeProjection{ProjectManagedVolume(ManagedVolumeFacts{
+		VolumeID: "pvc-returned",
+		Authority: &AuthorityFact{
+			PrimaryReplica:        "r2",
+			PreviousPrimary:       "r1",
+			RequiredFrontierKnown: true,
+			RequiredFrontierLSN:   52,
+		},
+		Replicas: []ReplicaFact{{
+			ReplicaID:            "r1",
+			Observed:             true,
+			Role:                 "replica",
+			DurableFrontierKnown: true,
+			DurableFrontierLSN:   52,
+			FrontendPrimaryReady: false,
+			AckEligibilityKnown:  true,
+			AckEligible:          false,
+		}, {
+			ReplicaID: "r2",
+			Observed:  true,
+			Role:      "primary",
+		}},
+	})}
+
+	summary := RenderObservationReportSummary(cluster)
+	for _, want := range []string{
+		"managed_volume=pvc-returned status=recovering",
+		"managed_volume_returned_replica=pvc-returned replica=r1 state=fenced reason=returned_replica_frontend_fenced",
+		"frontend_fenced=true ack_eligibility_known=true ack_eligible=false durable_frontier_known=true durable_lsn=52",
+		"managed_volume_executor_preflight=authority.reintegrate_returned_replica target=r1 decision=ready reason=preconditions_satisfied mode=dry_run executor=authority_recovery_executor mutation_allowed=false ack_eligibility_known=true required_lsn=52 durable_lsn=52",
+		"managed_volume_executor_contract=authority.reintegrate_returned_replica target=r1 decision=disabled reason=executor_policy_disabled executor=authority_recovery_executor execution_enabled=false mutation_allowed=false allowed_mutation=ack_eligibility terminal_evidence=ack_eligibility_known,ack_eligible_true,frontend_fenced_after_execution,primary_unchanged,durable_frontier_covered,no_cross_volume_identity_change",
+		"managed_volume_action=authority.reintegrate_returned_replica mode=dry_run side_effect=authority_mutating executor=authority_recovery_executor decision=allowed",
+	} {
+		if !strings.Contains(summary, want) {
+			t.Fatalf("summary missing %q:\n%s", want, summary)
+		}
+	}
+}
+
+func TestObservationReportSummary_IncludesReturnedReplicaFailbackContract(t *testing.T) {
+	cluster := NewClusterEvidence(time.Date(2026, 6, 24, 12, 0, 0, 0, time.UTC))
+	cluster.ManagedVolumes = []ManagedVolumeProjection{ProjectManagedVolume(ManagedVolumeFacts{
+		VolumeID: "pvc-failback",
+		Authority: &AuthorityFact{
+			PrimaryReplica:        "r2",
+			PreviousPrimary:       "r1",
+			RequiredFrontierKnown: true,
+			RequiredFrontierLSN:   52,
+		},
+		Replicas: []ReplicaFact{{
+			ReplicaID:            "r1",
+			Observed:             true,
+			Role:                 "previous_primary",
+			DurableFrontierKnown: true,
+			DurableFrontierLSN:   52,
+			FrontendPrimaryReady: false,
+			AckEligibilityKnown:  true,
+			AckEligible:          true,
+			StalePrimaryFenced:   true,
+		}, {
+			ReplicaID: "r2",
+			Observed:  true,
+			Role:      "primary",
+		}},
+		EvidenceRefs: []string{"returned-replica-summary.txt"},
+	})}
+
+	summary := RenderObservationReportSummary(cluster)
+	for _, want := range []string{
+		"managed_volume_returned_replica=pvc-failback replica=r1 state=fenced",
+		"ack_eligibility_known=true ack_eligible=true",
+		"managed_volume_executor_preflight=authority.failback_returned_replica target=r1 decision=ready reason=preconditions_satisfied",
+		"managed_volume_executor_contract=authority.failback_returned_replica target=r1 decision=disabled reason=executor_policy_disabled executor=authority_recovery_executor execution_enabled=false mutation_allowed=false allowed_mutation=failback",
+		"terminal_evidence=ack_eligible_true,frontend_fenced_before_failback,failback_authority_owner,authority_epoch_advanced,single_primary_after_failback,publish_target_swapped_after_failback,no_cross_volume_identity_change",
+		"managed_volume_action=authority.failback_returned_replica mode=dry_run side_effect=authority_mutating executor=authority_recovery_executor decision=rejected",
 	} {
 		if !strings.Contains(summary, want) {
 			t.Fatalf("summary missing %q:\n%s", want, summary)

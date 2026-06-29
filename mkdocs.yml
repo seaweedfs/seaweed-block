@@ -1,0 +1,77 @@
+site_name: Seaweed Block Engineering Wiki
+site_description: Internal engineering knowledge base for Seaweed Block.
+repo_url: https://github.com/seaweedfs/seaweed-block
+docs_dir: docs
+site_dir: site
+
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - navigation.expand
+    - navigation.indexes
+    - search.suggest
+    - search.highlight
+
+plugins:
+  - search
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.highlight
+  - pymdownx.inlinehilite
+  - toc:
+      permalink: true
+
+nav:
+  - Home: wiki/index.md
+  - Wiki Links:
+      - Block Wiki: http://192.168.1.135:8010/wiki/
+      - RDMA Wiki: http://192.168.1.135:8011/wiki/
+      - TestOps Wiki: http://192.168.1.135:8012/wiki/
+  - Developer Guide:
+      - Wiki Structure: wiki/developer-guide.md
+      - Coverage Matrix: wiki/coverage-matrix.md
+      - Topic Inventory: wiki/topic-inventory.md
+      - Historical Sources: wiki/historical-sources.md
+      - Code Map: wiki/code-map.md
+      - State Machines: wiki/state-machines.md
+      - Protocol Catalog: wiki/protocol-catalog.md
+      - Phase Map: wiki/phase-map.md
+      - Phase Recap: wiki/phase-recap.md
+      - QA and TestOps Map: wiki/testops-map.md
+      - Deep Dives:
+          - Template: wiki/deep-dives/template.md
+          - CSI Lifecycle: wiki/deep-dives/csi-lifecycle.md
+          - Operation Layer v0.5: wiki/deep-dives/operation-layer-v05.md
+          - Status Writer Conformance: wiki/deep-dives/status-writer-conformance.md
+          - ManagedVolume Readiness: wiki/deep-dives/managed-volume-readiness.md
+          - SmartWAL Dirty Failure: wiki/deep-dives/smartwal-dirty-failure.md
+          - WAL Frontier Recovery: wiki/deep-dives/wal-frontier-recovery.md
+          - blockvolume Process Readiness: wiki/deep-dives/blockvolume-process-readiness.md
+          - Authority And Promotion: wiki/deep-dives/authority-promotion.md
+          - iSCSI ALUA Multipath: wiki/deep-dives/iscsi-alua-multipath.md
+          - Live Node Evidence: wiki/deep-dives/live-node-evidence.md
+          - Support Bundle Cold Reader: wiki/deep-dives/support-bundle-cold-reader.md
+          - Release Engineering Image Skew: wiki/deep-dives/release-engineering-image-skew.md
+          - Returned Replica Rebuild: wiki/deep-dives/returned-replica-rebuild.md
+          - Read-Write Control Plane: wiki/deep-dives/read-write-control-plane-roadmap.md
+          - GPUDirect cuFile cuObject: wiki/deep-dives/gpudirect-cufile-cuobject.md
+          - TestOps Authoring: wiki/deep-dives/testops-authoring.md
+  - Product:
+      - Overview: overview.md
+      - User Capabilities: user-capabilities.md
+      - Roadmap: roadmap.md
+      - Releases: releases/README.md
+  - Architecture:
+      - Architecture: architecture.md
+      - Developer Architecture: developer-architecture.md
+      - Runtime State Machines: runtime-state-machines.md
+      - Operations v1: operations-v1.md
+  - Quickstart: quickstart-kubernetes.md

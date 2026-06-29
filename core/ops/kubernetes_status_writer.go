@@ -69,6 +69,22 @@ func (c *KubernetesStatusClient) WriteVolumeStatus(ctx context.Context, ref Oper
 	return c.patchStatus(ctx, ref.Namespace, SwBlockVolumePlural, ref.Name, status)
 }
 
+func (c *KubernetesStatusClient) WriteReplicaEligibilityStatus(ctx context.Context, ref OperatorObjectRef, status SwBlockReplicaEligibilityCRDStatus) error {
+	return c.patchStatus(ctx, ref.Namespace, SwBlockReplicaEligibilityPlural, ref.Name, status)
+}
+
+func (c *KubernetesStatusClient) WriteReplicaRebuildStatus(ctx context.Context, ref OperatorObjectRef, status SwBlockReplicaRebuildCRDStatus) error {
+	return c.patchStatus(ctx, ref.Namespace, SwBlockReplicaRebuildPlural, ref.Name, status)
+}
+
+func (c *KubernetesStatusClient) WriteFrontendPublicationStatus(ctx context.Context, ref OperatorObjectRef, status SwBlockFrontendPublicationCRDStatus) error {
+	return c.patchStatus(ctx, ref.Namespace, SwBlockFrontendPublicationPlural, ref.Name, status)
+}
+
+func (c *KubernetesStatusClient) WriteReplicaFailbackStatus(ctx context.Context, ref OperatorObjectRef, status SwBlockReplicaFailbackCRDStatus) error {
+	return c.patchStatus(ctx, ref.Namespace, SwBlockReplicaFailbackPlural, ref.Name, status)
+}
+
 func IsKubernetesStatusNotFound(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "http 404")
 }
@@ -122,6 +138,325 @@ func (c *KubernetesStatusClient) ListSwBlockVolumes(ctx context.Context, namespa
 		})
 	}
 	return out, nil
+}
+
+func (c *KubernetesStatusClient) ListSwBlockReplicaEligibilities(ctx context.Context, namespace string) ([]SwBlockReplicaEligibilityObject, error) {
+	if namespace == "" {
+		return nil, fmt.Errorf("namespace is required for SwBlockReplicaEligibility list")
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.resourceCollectionURL(namespace, SwBlockReplicaEligibilityPlural), nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/json")
+	if c.BearerToken != "" {
+		req.Header.Set("Authorization", "Bearer "+c.BearerToken)
+	}
+	client := c.HTTPClient
+	if client == nil {
+		client = http.DefaultClient
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return nil, fmt.Errorf("list %s failed: http %d %s", SwBlockReplicaEligibilityPlural, resp.StatusCode, strings.TrimSpace(string(raw)))
+	}
+	var list kubernetesSwBlockReplicaEligibilityList
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&list); err != nil {
+		return nil, fmt.Errorf("decode %s list: %w", SwBlockReplicaEligibilityPlural, err)
+	}
+	out := make([]SwBlockReplicaEligibilityObject, 0, len(list.Items))
+	for _, item := range list.Items {
+		refNamespace := item.Metadata.Namespace
+		if refNamespace == "" {
+			refNamespace = namespace
+		}
+		out = append(out, SwBlockReplicaEligibilityObject{
+			Ref: OperatorObjectRef{
+				APIVersion: SwBlockVolumeAPIVersion,
+				Kind:       SwBlockReplicaEligibilityKind,
+				Namespace:  refNamespace,
+				Name:       item.Metadata.Name,
+			},
+			Spec:   item.Spec,
+			Status: item.Status,
+		})
+	}
+	return out, nil
+}
+
+func (c *KubernetesStatusClient) ListSwBlockReplicaRebuilds(ctx context.Context, namespace string) ([]SwBlockReplicaRebuildObject, error) {
+	if namespace == "" {
+		return nil, fmt.Errorf("namespace is required for SwBlockReplicaRebuild list")
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.resourceCollectionURL(namespace, SwBlockReplicaRebuildPlural), nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/json")
+	if c.BearerToken != "" {
+		req.Header.Set("Authorization", "Bearer "+c.BearerToken)
+	}
+	client := c.HTTPClient
+	if client == nil {
+		client = http.DefaultClient
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return nil, fmt.Errorf("list %s failed: http %d %s", SwBlockReplicaRebuildPlural, resp.StatusCode, strings.TrimSpace(string(raw)))
+	}
+	var list kubernetesSwBlockReplicaRebuildList
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&list); err != nil {
+		return nil, fmt.Errorf("decode %s list: %w", SwBlockReplicaRebuildPlural, err)
+	}
+	out := make([]SwBlockReplicaRebuildObject, 0, len(list.Items))
+	for _, item := range list.Items {
+		refNamespace := item.Metadata.Namespace
+		if refNamespace == "" {
+			refNamespace = namespace
+		}
+		out = append(out, SwBlockReplicaRebuildObject{
+			Ref: OperatorObjectRef{
+				APIVersion: SwBlockVolumeAPIVersion,
+				Kind:       SwBlockReplicaRebuildKind,
+				Namespace:  refNamespace,
+				Name:       item.Metadata.Name,
+			},
+			Spec:   item.Spec,
+			Status: item.Status,
+		})
+	}
+	return out, nil
+}
+
+func (c *KubernetesStatusClient) ListSwBlockFrontendPublications(ctx context.Context, namespace string) ([]SwBlockFrontendPublicationObject, error) {
+	if namespace == "" {
+		return nil, fmt.Errorf("namespace is required for SwBlockFrontendPublication list")
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.resourceCollectionURL(namespace, SwBlockFrontendPublicationPlural), nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/json")
+	if c.BearerToken != "" {
+		req.Header.Set("Authorization", "Bearer "+c.BearerToken)
+	}
+	client := c.HTTPClient
+	if client == nil {
+		client = http.DefaultClient
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return nil, fmt.Errorf("list %s failed: http %d %s", SwBlockFrontendPublicationPlural, resp.StatusCode, strings.TrimSpace(string(raw)))
+	}
+	var list kubernetesSwBlockFrontendPublicationList
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&list); err != nil {
+		return nil, fmt.Errorf("decode %s list: %w", SwBlockFrontendPublicationPlural, err)
+	}
+	out := make([]SwBlockFrontendPublicationObject, 0, len(list.Items))
+	for _, item := range list.Items {
+		refNamespace := item.Metadata.Namespace
+		if refNamespace == "" {
+			refNamespace = namespace
+		}
+		out = append(out, SwBlockFrontendPublicationObject{
+			Ref: OperatorObjectRef{
+				APIVersion: SwBlockVolumeAPIVersion,
+				Kind:       SwBlockFrontendPublicationKind,
+				Namespace:  refNamespace,
+				Name:       item.Metadata.Name,
+			},
+			Spec:   item.Spec,
+			Status: item.Status,
+		})
+	}
+	return out, nil
+}
+
+func (c *KubernetesStatusClient) ListSwBlockReplicaFailbacks(ctx context.Context, namespace string) ([]SwBlockReplicaFailbackObject, error) {
+	if namespace == "" {
+		return nil, fmt.Errorf("namespace is required for SwBlockReplicaFailback list")
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.resourceCollectionURL(namespace, SwBlockReplicaFailbackPlural), nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/json")
+	if c.BearerToken != "" {
+		req.Header.Set("Authorization", "Bearer "+c.BearerToken)
+	}
+	client := c.HTTPClient
+	if client == nil {
+		client = http.DefaultClient
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return nil, fmt.Errorf("list %s failed: http %d %s", SwBlockReplicaFailbackPlural, resp.StatusCode, strings.TrimSpace(string(raw)))
+	}
+	var list kubernetesSwBlockReplicaFailbackList
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&list); err != nil {
+		return nil, fmt.Errorf("decode %s list: %w", SwBlockReplicaFailbackPlural, err)
+	}
+	out := make([]SwBlockReplicaFailbackObject, 0, len(list.Items))
+	for _, item := range list.Items {
+		refNamespace := item.Metadata.Namespace
+		if refNamespace == "" {
+			refNamespace = namespace
+		}
+		out = append(out, SwBlockReplicaFailbackObject{
+			Ref: OperatorObjectRef{
+				APIVersion: SwBlockVolumeAPIVersion,
+				Kind:       SwBlockReplicaFailbackKind,
+				Namespace:  refNamespace,
+				Name:       item.Metadata.Name,
+			},
+			Spec:   item.Spec,
+			Status: item.Status,
+		})
+	}
+	return out, nil
+}
+
+func (c *KubernetesStatusClient) CreateSwBlockReplicaRebuild(ctx context.Context, namespace string, obj SwBlockReplicaRebuildObject) error {
+	if namespace == "" || obj.Ref.Name == "" {
+		return fmt.Errorf("namespace and name are required for SwBlockReplicaRebuild create")
+	}
+	body, err := json.Marshal(map[string]any{
+		"apiVersion": SwBlockVolumeAPIVersion,
+		"kind":       SwBlockReplicaRebuildKind,
+		"metadata": kubernetesMetadata{
+			Name:      obj.Ref.Name,
+			Namespace: namespace,
+		},
+		"spec": obj.Spec,
+	})
+	if err != nil {
+		return fmt.Errorf("marshal SwBlockReplicaRebuild create: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.resourceCollectionURL(namespace, SwBlockReplicaRebuildPlural), bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Content-Type", "application/json")
+	if c.BearerToken != "" {
+		req.Header.Set("Authorization", "Bearer "+c.BearerToken)
+	}
+	client := c.HTTPClient
+	if client == nil {
+		client = http.DefaultClient
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		return nil
+	}
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	return fmt.Errorf("create %s/%s failed: http %d %s", SwBlockReplicaRebuildPlural, obj.Ref.Name, resp.StatusCode, strings.TrimSpace(string(raw)))
+}
+
+func (c *KubernetesStatusClient) CreateSwBlockFrontendPublication(ctx context.Context, namespace string, obj SwBlockFrontendPublicationObject) error {
+	if namespace == "" || obj.Ref.Name == "" {
+		return fmt.Errorf("namespace and name are required for SwBlockFrontendPublication create")
+	}
+	body, err := json.Marshal(map[string]any{
+		"apiVersion": SwBlockVolumeAPIVersion,
+		"kind":       SwBlockFrontendPublicationKind,
+		"metadata": kubernetesMetadata{
+			Name:      obj.Ref.Name,
+			Namespace: namespace,
+		},
+		"spec": obj.Spec,
+	})
+	if err != nil {
+		return fmt.Errorf("marshal SwBlockFrontendPublication create: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.resourceCollectionURL(namespace, SwBlockFrontendPublicationPlural), bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Content-Type", "application/json")
+	if c.BearerToken != "" {
+		req.Header.Set("Authorization", "Bearer "+c.BearerToken)
+	}
+	client := c.HTTPClient
+	if client == nil {
+		client = http.DefaultClient
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		return nil
+	}
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	return fmt.Errorf("create %s/%s failed: http %d %s", SwBlockFrontendPublicationPlural, obj.Ref.Name, resp.StatusCode, strings.TrimSpace(string(raw)))
+}
+
+func (c *KubernetesStatusClient) CreateSwBlockReplicaFailback(ctx context.Context, namespace string, obj SwBlockReplicaFailbackObject) error {
+	if namespace == "" || obj.Ref.Name == "" {
+		return fmt.Errorf("namespace and name are required for SwBlockReplicaFailback create")
+	}
+	body, err := json.Marshal(map[string]any{
+		"apiVersion": SwBlockVolumeAPIVersion,
+		"kind":       SwBlockReplicaFailbackKind,
+		"metadata": kubernetesMetadata{
+			Name:      obj.Ref.Name,
+			Namespace: namespace,
+		},
+		"spec": obj.Spec,
+	})
+	if err != nil {
+		return fmt.Errorf("marshal SwBlockReplicaFailback create: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.resourceCollectionURL(namespace, SwBlockReplicaFailbackPlural), bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Content-Type", "application/json")
+	if c.BearerToken != "" {
+		req.Header.Set("Authorization", "Bearer "+c.BearerToken)
+	}
+	client := c.HTTPClient
+	if client == nil {
+		client = http.DefaultClient
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		return nil
+	}
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	return fmt.Errorf("create %s/%s failed: http %d %s", SwBlockReplicaFailbackPlural, obj.Ref.Name, resp.StatusCode, strings.TrimSpace(string(raw)))
 }
 
 func (c *KubernetesStatusClient) PatchSwBlockVolumeFinalizers(ctx context.Context, ref OperatorObjectRef, finalizers []string) error {
@@ -336,4 +671,44 @@ type kubernetesSwBlockVolume struct {
 	Metadata kubernetesMetadata     `json:"metadata"`
 	Spec     SwBlockVolumeSpec      `json:"spec"`
 	Status   SwBlockVolumeCRDStatus `json:"status"`
+}
+
+type kubernetesSwBlockReplicaEligibilityList struct {
+	Items []kubernetesSwBlockReplicaEligibility `json:"items"`
+}
+
+type kubernetesSwBlockReplicaEligibility struct {
+	Metadata kubernetesMetadata                 `json:"metadata"`
+	Spec     SwBlockReplicaEligibilitySpec      `json:"spec"`
+	Status   SwBlockReplicaEligibilityCRDStatus `json:"status"`
+}
+
+type kubernetesSwBlockReplicaRebuildList struct {
+	Items []kubernetesSwBlockReplicaRebuild `json:"items"`
+}
+
+type kubernetesSwBlockReplicaRebuild struct {
+	Metadata kubernetesMetadata             `json:"metadata"`
+	Spec     SwBlockReplicaRebuildSpec      `json:"spec"`
+	Status   SwBlockReplicaRebuildCRDStatus `json:"status"`
+}
+
+type kubernetesSwBlockFrontendPublicationList struct {
+	Items []kubernetesSwBlockFrontendPublication `json:"items"`
+}
+
+type kubernetesSwBlockFrontendPublication struct {
+	Metadata kubernetesMetadata                  `json:"metadata"`
+	Spec     SwBlockFrontendPublicationSpec      `json:"spec"`
+	Status   SwBlockFrontendPublicationCRDStatus `json:"status"`
+}
+
+type kubernetesSwBlockReplicaFailbackList struct {
+	Items []kubernetesSwBlockReplicaFailback `json:"items"`
+}
+
+type kubernetesSwBlockReplicaFailback struct {
+	Metadata kubernetesMetadata              `json:"metadata"`
+	Spec     SwBlockReplicaFailbackSpec      `json:"spec"`
+	Status   SwBlockReplicaFailbackCRDStatus `json:"status"`
 }

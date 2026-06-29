@@ -1,0 +1,88 @@
+# Runner-native Phase 91 gate: failback target activation is explicit,
+# default-off, and requires both policy and runtime endpoint. The target owner
+# may stamp enabled targets, but it does not call the runtime.
+
+name: failback-target-activation-policy-chain
+timeout: 5m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: failback_target_activation_policy_gate
+    actions:
+      - action: exec
+        node: m02
+        timeout: 4m
+        cmd: "rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase91-failback-target-activation-policy && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase91-failback-target-activation-policy && cd {{ product_root }} && SW_BLOCK_ARTIFACT_DIR=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase91-failback-target-activation-policy bash scripts/run-phase91-failback-target-activation-policy-gate.sh {{ product_root }}"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase91-failback-target-activation-policy/phase91-failback-target-activation-policy-summary.txt"
+        pattern: "^phase91_failback_target_activation_policy_status=ok$"
+        save_as: phase91_ok
+      - action: assert_greater
+        actual: "{{ phase91_ok }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase91-failback-target-activation-policy/phase91-failback-target-activation-policy-summary.txt"
+        pattern: "^activation_default_off=true$"
+        save_as: activation_default_off
+      - action: assert_greater
+        actual: "{{ activation_default_off }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase91-failback-target-activation-policy/phase91-failback-target-activation-policy-summary.txt"
+        pattern: "^activation_policy_required=true$"
+        save_as: policy_required
+      - action: assert_greater
+        actual: "{{ policy_required }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase91-failback-target-activation-policy/phase91-failback-target-activation-policy-summary.txt"
+        pattern: "^activation_runtime_endpoint_required=true$"
+        save_as: runtime_required
+      - action: assert_greater
+        actual: "{{ runtime_required }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase91-failback-target-activation-policy/phase91-failback-target-activation-policy-summary.txt"
+        pattern: "^activated_target_failback_decision=enabled$"
+        save_as: target_enabled
+      - action: assert_greater
+        actual: "{{ target_enabled }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase91-failback-target-activation-policy/phase91-failback-target-activation-policy-summary.txt"
+        pattern: "^failback_runtime_call_attempted=false$"
+        save_as: no_runtime_call
+      - action: assert_greater
+        actual: "{{ no_runtime_call }}"
+        threshold: "0"
+
+  - name: collect
+    always: true
+    actions:
+      - action: collect_path
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase91-failback-target-activation-policy"
+        name: "remote-phases"
+        ignore_error: true

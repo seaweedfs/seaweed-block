@@ -218,6 +218,8 @@ func replicaEvidenceToWire(replica ops.ReplicaEvidence) *control.ReplicaEvidence
 		CandidateReadyReason: replica.CandidateReadyReason,
 		FrontendProtocol:     replica.FrontendProtocol,
 		FrontendAddr:         replica.FrontendAddr,
+		FrontendNqn:          replica.FrontendNQN,
+		FrontendNsid:         replica.FrontendNSID,
 		StatusAddr:           replica.StatusAddr,
 		StalePrimaryFenced:   replica.StalePrimaryFenced,
 		Conditions:           conditionsToWire(replica.Conditions),

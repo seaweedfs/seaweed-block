@@ -1,0 +1,115 @@
+# Runner-native Phase 79 gate: the failback executor can call the
+# authority-owned runtime adapter. Execution remains explicit-policy gated, and
+# stale expected-current evidence blocks the call-site without a false failback.
+
+name: failback-authority-callsite-chain
+timeout: 8m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: failback_authority_callsite_gate
+    actions:
+      - action: exec
+        node: m02
+        timeout: 7m
+        cmd: "rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase79-failback-authority-callsite && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase79-failback-authority-callsite && cd {{ product_root }} && SW_BLOCK_ARTIFACT_DIR=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase79-failback-authority-callsite bash scripts/run-phase79-failback-authority-callsite-gate.sh {{ product_root }}"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase79-failback-authority-callsite/phase79-failback-authority-callsite-summary.txt"
+        pattern: "^phase79_failback_authority_callsite_status=ok$"
+        save_as: phase79_ok
+      - action: assert_greater
+        actual: "{{ phase79_ok }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase79-failback-authority-callsite/phase79-failback-authority-callsite-summary.txt"
+        pattern: "^authority_runtime_adapter_invoked_by_executor=true$"
+        save_as: adapter_invoked
+      - action: assert_greater
+        actual: "{{ adapter_invoked }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase79-failback-authority-callsite/phase79-failback-authority-callsite-summary.txt"
+        pattern: "^publisher_authority_line_advanced=true$"
+        save_as: publisher_advanced
+      - action: assert_greater
+        actual: "{{ publisher_advanced }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase79-failback-authority-callsite/phase79-failback-authority-callsite-summary.txt"
+        pattern: "^stale_expected_current_blocks_callsite=true$"
+        save_as: stale_guard
+      - action: assert_greater
+        actual: "{{ stale_guard }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase79-failback-authority-callsite/phase79-failback-authority-callsite-summary.txt"
+        pattern: "^execution_policy_still_required=true$"
+        save_as: policy_gate
+      - action: assert_greater
+        actual: "{{ policy_gate }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase79-failback-authority-callsite/phase79-failback-authority-callsite-summary.txt"
+        pattern: "^failed_back_status_written=true$"
+        save_as: failed_back_status
+      - action: assert_greater
+        actual: "{{ failed_back_status }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase79-failback-authority-callsite/phase79-failback-authority-callsite-summary.txt"
+        pattern: "^runtime_failure_no_false_failback=true$"
+        save_as: no_false_failback
+      - action: assert_greater
+        actual: "{{ no_false_failback }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase79-failback-authority-callsite/phase79-failback-authority-callsite-summary.txt"
+        pattern: "^frontend_publication_allowed=false$"
+        save_as: no_frontend_publication
+      - action: assert_greater
+        actual: "{{ no_frontend_publication }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase79-failback-authority-callsite/phase79-failback-authority-callsite-summary.txt"
+        pattern: "^storage_mutation_allowed=false$"
+        save_as: no_storage_mutation
+      - action: assert_greater
+        actual: "{{ no_storage_mutation }}"
+        threshold: "0"
+
+  - name: collect
+    always: true
+    actions:
+      - action: collect_path
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase79-failback-authority-callsite"
+        name: "remote-phases"
+        ignore_error: true

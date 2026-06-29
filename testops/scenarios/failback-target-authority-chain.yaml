@@ -1,0 +1,88 @@
+# Runner-native Phase 90 gate: failback target owner consumes current
+# SwBlockVolume.status authority facts before creating a failback target.
+# This does not execute failback or publish a frontend.
+
+name: failback-target-authority-chain
+timeout: 5m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: failback_target_authority_gate
+    actions:
+      - action: exec
+        node: m02
+        timeout: 4m
+        cmd: "rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase90-failback-target-authority && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase90-failback-target-authority && cd {{ product_root }} && SW_BLOCK_ARTIFACT_DIR=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase90-failback-target-authority bash scripts/run-phase90-failback-target-authority-gate.sh {{ product_root }}"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase90-failback-target-authority/phase90-failback-target-authority-summary.txt"
+        pattern: "^phase90_failback_target_authority_status=ok$"
+        save_as: phase90_ok
+      - action: assert_greater
+        actual: "{{ phase90_ok }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase90-failback-target-authority/phase90-failback-target-authority-summary.txt"
+        pattern: "^expected_current_replica_from_swblockvolume_status=true$"
+        save_as: expected_replica_from_status
+      - action: assert_greater
+        actual: "{{ expected_replica_from_status }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase90-failback-target-authority/phase90-failback-target-authority-summary.txt"
+        pattern: "^expected_current_epoch_from_swblockvolume_status=true$"
+        save_as: expected_epoch_from_status
+      - action: assert_greater
+        actual: "{{ expected_epoch_from_status }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase90-failback-target-authority/phase90-failback-target-authority-summary.txt"
+        pattern: "^missing_current_authority_target_create_count=0$"
+        save_as: missing_authority_no_target
+      - action: assert_greater
+        actual: "{{ missing_authority_no_target }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase90-failback-target-authority/phase90-failback-target-authority-summary.txt"
+        pattern: "^created_target_failback_decision=disabled$"
+        save_as: target_disabled
+      - action: assert_greater
+        actual: "{{ target_disabled }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase90-failback-target-authority/phase90-failback-target-authority-summary.txt"
+        pattern: "^failback_runtime_call_attempted=false$"
+        save_as: no_runtime_call
+      - action: assert_greater
+        actual: "{{ no_runtime_call }}"
+        threshold: "0"
+
+  - name: collect
+    always: true
+    actions:
+      - action: collect_path
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase90-failback-target-authority"
+        name: "remote-phases"
+        ignore_error: true

@@ -93,10 +93,21 @@ spec:
             {{- end }}
             - "--launcher-kubernetes-apply"
             - "--listen=0.0.0.0:{{ .Values.blockmaster.listenPort }}"
+            {{- if .Values.blockmaster.failbackRuntimeRPC }}
+            - "--failback-runtime-rpc"
+            {{- end }}
+            {{- if .Values.blockmaster.frontendPublicationRuntimeHTTP }}
+            - "--frontend-publication-runtime-http"
+            - "--frontend-publication-runtime-listen=0.0.0.0:{{ .Values.blockmaster.frontendPublicationRuntimePort }}"
+            {{- end }}
             - "--expected-slots-per-volume={{ include "seaweed-block.expectedSlotsPerVolume" . }}"
           ports:
             - name: grpc
               containerPort: {{ .Values.blockmaster.listenPort }}
+            {{- if .Values.blockmaster.frontendPublicationRuntimeHTTP }}
+            - name: frontend-http
+              containerPort: {{ .Values.blockmaster.frontendPublicationRuntimePort }}
+            {{- end }}
           volumeMounts:
             - name: cluster-spec
               mountPath: /config
@@ -135,3 +146,8 @@ spec:
     - name: grpc
       port: {{ .Values.blockmaster.listenPort }}
       targetPort: grpc
+    {{- if .Values.blockmaster.frontendPublicationRuntimeHTTP }}
+    - name: frontend-http
+      port: {{ .Values.blockmaster.frontendPublicationRuntimePort }}
+      targetPort: frontend-http
+    {{- end }}

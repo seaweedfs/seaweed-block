@@ -244,6 +244,7 @@ func (e *BlockExecutor) startRebuildDualLane(replicaID string, sessionID, epoch,
 		_ = conn.Close()
 		return fmt.Errorf("dual-lane start: %w", err)
 	}
+	e.recordSessionRunning(replicaID, sessionID)
 	log.Printf("g7-debug: startRebuildDualLane returned ok replica=%s sessionID=%d", replicaID, sessionID)
 	return nil
 }

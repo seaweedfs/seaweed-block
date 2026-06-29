@@ -1,0 +1,112 @@
+# Runner-native Phase 63 gate: rebuild runtime target addressing contract.
+
+name: rebuild-runtime-target-contract-chain
+timeout: 8m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: rebuild_runtime_target_contract_gate
+    actions:
+      - action: exec
+        node: m02
+        timeout: 7m
+        cmd: "rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase63-rebuild-runtime-target-contract && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase63-rebuild-runtime-target-contract && cd {{ product_root }} && SW_BLOCK_ARTIFACT_DIR=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase63-rebuild-runtime-target-contract bash scripts/run-phase63-rebuild-runtime-target-contract-gate.sh {{ product_root }}"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase63-rebuild-runtime-target-contract/phase63-rebuild-runtime-target-contract-summary.txt"
+        pattern: "^phase63_rebuild_runtime_target_contract_status=ok$"
+        save_as: phase63_ok
+      - action: assert_greater
+        actual: "{{ phase63_ok }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase63-rebuild-runtime-target-contract/phase63-rebuild-runtime-target-contract-summary.txt"
+        pattern: "^runtime_target_fields_schema_locked=true$"
+        save_as: schema_locked
+      - action: assert_greater
+        actual: "{{ schema_locked }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase63-rebuild-runtime-target-contract/phase63-rebuild-runtime-target-contract-summary.txt"
+        pattern: "^target_owner_requires_runtime_facts=true$"
+        save_as: owner_requires_facts
+      - action: assert_greater
+        actual: "{{ owner_requires_facts }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase63-rebuild-runtime-target-contract/phase63-rebuild-runtime-target-contract-summary.txt"
+        pattern: "^target_owner_missing_runtime_no_target=true$"
+        save_as: owner_missing_no_target
+      - action: assert_greater
+        actual: "{{ owner_missing_no_target }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase63-rebuild-runtime-target-contract/phase63-rebuild-runtime-target-contract-summary.txt"
+        pattern: "^authority_executor_missing_runtime_target_blocks=true$"
+        save_as: executor_missing_blocks
+      - action: assert_greater
+        actual: "{{ executor_missing_blocks }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase63-rebuild-runtime-target-contract/phase63-rebuild-runtime-target-contract-summary.txt"
+        pattern: "^authority_executor_runtime_request_carries_target_lineage=true$"
+        save_as: request_lineage
+      - action: assert_greater
+        actual: "{{ request_lineage }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase63-rebuild-runtime-target-contract/phase63-rebuild-runtime-target-contract-summary.txt"
+        pattern: "^runtime_target_can_drive_http_runtime=true$"
+        save_as: target_drives_runtime
+      - action: assert_greater
+        actual: "{{ target_drives_runtime }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase63-rebuild-runtime-target-contract/phase63-rebuild-runtime-target-contract-summary.txt"
+        pattern: "^session_id_inferred=false$"
+        save_as: no_session_inference
+      - action: assert_greater
+        actual: "{{ no_session_inference }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase63-rebuild-runtime-target-contract/phase63-rebuild-runtime-target-contract-summary.txt"
+        pattern: "^blockvolume_runtime_endpoint_wired=false$"
+        save_as: endpoint_not_wired
+      - action: assert_greater
+        actual: "{{ endpoint_not_wired }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase63-rebuild-runtime-target-contract/phase63-rebuild-runtime-target-contract-summary.txt"
+        pattern: "^start_rebuild_called=false$"
+        save_as: start_rebuild_not_called
+      - action: assert_greater
+        actual: "{{ start_rebuild_not_called }}"
+        threshold: "0"
+
+  - name: collect
+    always: true
+    actions:
+      - action: collect_path
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase63-rebuild-runtime-target-contract"
+        name: "remote-phases"
+        ignore_error: true

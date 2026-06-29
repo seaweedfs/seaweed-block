@@ -1,0 +1,136 @@
+# Runner-native Phase 61 gate: authority-executor rebuild runtime call-site.
+
+name: authority-executor-runtime-callsite-chain
+timeout: 8m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: authority_executor_runtime_callsite_gate
+    actions:
+      - action: exec
+        node: m02
+        timeout: 7m
+        cmd: "rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase61-authority-executor-runtime-callsite && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase61-authority-executor-runtime-callsite && cd {{ product_root }} && SW_BLOCK_ARTIFACT_DIR=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase61-authority-executor-runtime-callsite bash scripts/run-phase61-authority-executor-runtime-callsite-gate.sh {{ product_root }}"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase61-authority-executor-runtime-callsite/phase61-authority-executor-runtime-callsite-summary.txt"
+        pattern: "^phase61_authority_executor_runtime_callsite_status=ok$"
+        save_as: phase61_ok
+      - action: assert_greater
+        actual: "{{ phase61_ok }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase61-authority-executor-runtime-callsite/phase61-authority-executor-runtime-callsite-summary.txt"
+        pattern: "^planned_without_runtime_test=true$"
+        save_as: planned_preserved
+      - action: assert_greater
+        actual: "{{ planned_preserved }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase61-authority-executor-runtime-callsite/phase61-authority-executor-runtime-callsite-summary.txt"
+        pattern: "^runtime_callsite_caught_up_test=true$"
+        save_as: runtime_caught_up
+      - action: assert_greater
+        actual: "{{ runtime_caught_up }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase61-authority-executor-runtime-callsite/phase61-authority-executor-runtime-callsite-summary.txt"
+        pattern: "^runtime_failure_blocked_test=true$"
+        save_as: runtime_blocked
+      - action: assert_greater
+        actual: "{{ runtime_blocked }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase61-authority-executor-runtime-callsite/phase61-authority-executor-runtime-callsite-summary.txt"
+        pattern: "^runtime_callsite_invoked=true$"
+        save_as: callsite_invoked
+      - action: assert_greater
+        actual: "{{ callsite_invoked }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase61-authority-executor-runtime-callsite/phase61-authority-executor-runtime-callsite-summary.txt"
+        pattern: "^rebuild_status_running_written=true$"
+        save_as: running_written
+      - action: assert_greater
+        actual: "{{ running_written }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase61-authority-executor-runtime-callsite/phase61-authority-executor-runtime-callsite-summary.txt"
+        pattern: "^rebuild_status_caught_up_written=true$"
+        save_as: caught_up_written
+      - action: assert_greater
+        actual: "{{ caught_up_written }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase61-authority-executor-runtime-callsite/phase61-authority-executor-runtime-callsite-summary.txt"
+        pattern: "^rebuild_status_blocked_on_runtime_failure=true$"
+        save_as: blocked_written
+      - action: assert_greater
+        actual: "{{ blocked_written }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase61-authority-executor-runtime-callsite/phase61-authority-executor-runtime-callsite-summary.txt"
+        pattern: "^rebuild_traffic_started_when_runtime_invoked=true$"
+        save_as: traffic_started
+      - action: assert_greater
+        actual: "{{ traffic_started }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase61-authority-executor-runtime-callsite/phase61-authority-executor-runtime-callsite-summary.txt"
+        pattern: "^durable_frontier_caught_up_after_runtime=true$"
+        save_as: frontier_caught_up
+      - action: assert_greater
+        actual: "{{ frontier_caught_up }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase61-authority-executor-runtime-callsite/phase61-authority-executor-runtime-callsite-summary.txt"
+        pattern: "^blockvolume_rpc_wired=false$"
+        save_as: rpc_not_wired
+      - action: assert_greater
+        actual: "{{ rpc_not_wired }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase61-authority-executor-runtime-callsite/phase61-authority-executor-runtime-callsite-summary.txt"
+        pattern: "^frontend_publication_allowed=false$"
+        save_as: no_frontend
+      - action: assert_greater
+        actual: "{{ no_frontend }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase61-authority-executor-runtime-callsite/phase61-authority-executor-runtime-callsite-summary.txt"
+        pattern: "^failback_allowed=false$"
+        save_as: no_failback
+      - action: assert_greater
+        actual: "{{ no_failback }}"
+        threshold: "0"
+
+  - name: collect
+    always: true
+    actions:
+      - action: collect_path
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase61-authority-executor-runtime-callsite"
+        name: "remote-phases"
+        ignore_error: true

@@ -48,6 +48,24 @@ var (
 		client.EventComponent = "sw-block-lifecycle-owner"
 		return client, client, nil
 	}
+	opsAuthorityExecutorClientFactory = func() (ops.AuthorityExecutorClient, error) {
+		return ops.NewInClusterKubernetesStatusClient()
+	}
+	opsRebuildTargetOwnerClientFactory = func() (ops.RebuildTargetOwnerClient, error) {
+		return ops.NewInClusterKubernetesStatusClient()
+	}
+	opsFailbackTargetOwnerClientFactory = func() (ops.FailbackTargetOwnerClient, error) {
+		return ops.NewInClusterKubernetesStatusClient()
+	}
+	opsFrontendPublicationTargetOwnerClientFactory = func() (ops.FrontendPublicationTargetOwnerClient, error) {
+		return ops.NewInClusterKubernetesStatusClient()
+	}
+	opsFrontendPublicationExecutorClientFactory = func() (ops.FrontendPublicationExecutorClient, error) {
+		return ops.NewInClusterKubernetesStatusClient()
+	}
+	opsFailbackExecutorClientFactory = func() (ops.FailbackExecutorClient, error) {
+		return ops.NewInClusterKubernetesStatusClient()
+	}
 )
 
 func run(args []string, stdout, stderr io.Writer) int {
@@ -65,7 +83,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return ops.VolumeStatusExitInvalid
 	}
 	if len(args) < 2 {
-		fmt.Fprintln(stderr, "sw-block: expected subcommand ops status|inventory|list|cluster|volumes|describe|timeline|explain|report|dashboard|generate-helm-values|operator-status|lifecycle-owner")
+		fmt.Fprintln(stderr, "sw-block: expected subcommand ops status|inventory|list|cluster|volumes|describe|timeline|explain|report|dashboard|generate-helm-values|operator-status|lifecycle-owner|authority-executor|rebuild-target-owner|failback-target-owner|failback-executor|frontend-publication-target-owner|frontend-publication-executor")
 		usage(stderr)
 		return ops.VolumeStatusExitInvalid
 	}
@@ -94,10 +112,523 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runOpsOperatorStatus(args[2:], stdout, stderr)
 	case "lifecycle-owner":
 		return runOpsLifecycleOwner(args[2:], stdout, stderr)
+	case "authority-executor":
+		return runOpsAuthorityExecutor(args[2:], stdout, stderr)
+	case "rebuild-target-owner":
+		return runOpsRebuildTargetOwner(args[2:], stdout, stderr)
+	case "failback-target-owner":
+		return runOpsFailbackTargetOwner(args[2:], stdout, stderr)
+	case "failback-executor":
+		return runOpsFailbackExecutor(args[2:], stdout, stderr)
+	case "frontend-publication-target-owner":
+		return runOpsFrontendPublicationTargetOwner(args[2:], stdout, stderr)
+	case "frontend-publication-executor":
+		return runOpsFrontendPublicationExecutor(args[2:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "sw-block: unknown ops subcommand %q\n", args[1])
 		usage(stderr)
 		return ops.VolumeStatusExitInvalid
+	}
+}
+
+func runOpsFrontendPublicationExecutor(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("sw-block ops frontend-publication-executor", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	var (
+		dryRun                 bool
+		namespace              string
+		enableExecution        bool
+		executionPolicyEnabled bool
+		runtimeURL             string
+		interval               time.Duration
+	)
+	fs.BoolVar(&dryRun, "dry-run", false, "evaluate frontend publication targets without writing status")
+	fs.StringVar(&namespace, "namespace", "default", "Kubernetes namespace containing SwBlockFrontendPublication objects")
+	fs.BoolVar(&enableExecution, "enable-execution", false, "request frontend publication runtime execution for enabled SwBlockFrontendPublication targets")
+	fs.BoolVar(&executionPolicyEnabled, "execution-policy", false, "allow frontend publication runtime execution; must be set with --enable-execution")
+	fs.StringVar(&runtimeURL, "frontend-publication-runtime-url", "", "HTTP runtime endpoint for frontend publication execution")
+	fs.DurationVar(&interval, "interval", 0, "repeat frontend-publication-executor reconciliation at this interval; 0 runs once")
+	if err := fs.Parse(args); err != nil {
+		return ops.VolumeStatusExitInvalid
+	}
+	if fs.NArg() != 0 {
+		fmt.Fprintf(stderr, "sw-block ops frontend-publication-executor: unexpected args %s\n", strings.Join(fs.Args(), " "))
+		return ops.VolumeStatusExitInvalid
+	}
+	if strings.TrimSpace(runtimeURL) != "" && !enableExecution {
+		fmt.Fprintln(stderr, "sw-block ops frontend-publication-executor: --frontend-publication-runtime-url requires --enable-execution")
+		return ops.VolumeStatusExitInvalid
+	}
+	runOnce := func() int {
+		client, err := opsFrontendPublicationExecutorClientFactory()
+		if err != nil {
+			fmt.Fprintf(stderr, "sw-block ops frontend-publication-executor: %v\n", err)
+			return ops.VolumeStatusExitInvalid
+		}
+		result, err := (ops.FrontendPublicationExecutorReconciler{
+			Namespace:              namespace,
+			Client:                 client,
+			DryRun:                 dryRun,
+			ExecutionRequested:     enableExecution,
+			ExecutionPolicyEnabled: executionPolicyEnabled,
+			Runtime:                frontendPublicationRuntimeFromURL(runtimeURL),
+		}).Reconcile(context.Background())
+		if err != nil {
+			fmt.Fprintf(stderr, "sw-block ops frontend-publication-executor: %v\n", err)
+			return ops.VolumeStatusExitInvalid
+		}
+		mode := "write_status"
+		if dryRun {
+			mode = "dry_run"
+		}
+		statusMutationAllowed := !dryRun && result.StatusWriteCount > 0
+		fmt.Fprintf(stdout, "frontend_publication_executor=%s namespace=%s targets=%d status_writes=%d invalid_targets=%d frontend_publication_attempts=%d failback_attempts=%d status_mutation_allowed=%t frontend_publication_mutation_allowed=false mutation_allowed=%t storage_mutation_allowed=%t\n",
+			mode,
+			namespace,
+			result.TargetCount,
+			result.StatusWriteCount,
+			result.InvalidTargetCount,
+			result.FrontendPublicationAttempts,
+			result.FailbackAttempts,
+			statusMutationAllowed,
+			statusMutationAllowed,
+			result.StorageMutationAllowed)
+		return ops.VolumeStatusExitOK
+	}
+	if interval <= 0 {
+		return runOnce()
+	}
+	for {
+		code := runOnce()
+		if code != ops.VolumeStatusExitOK {
+			fmt.Fprintf(stderr, "sw-block ops frontend-publication-executor: iteration failed exit=%d; retrying in %s\n", code, interval)
+		}
+		time.Sleep(interval)
+	}
+}
+
+func frontendPublicationRuntimeFromURL(runtimeURL string) ops.FrontendPublicationRuntime {
+	if strings.TrimSpace(runtimeURL) == "" {
+		return nil
+	}
+	return ops.NewHTTPFrontendPublicationRuntime(runtimeURL, nil)
+}
+
+func runOpsFailbackExecutor(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("sw-block ops failback-executor", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	var (
+		dryRun                 bool
+		namespace              string
+		enableExecution        bool
+		executionPolicyEnabled bool
+		failbackRuntimeURL     string
+		failbackRuntimeGRPC    string
+		interval               time.Duration
+	)
+	fs.BoolVar(&dryRun, "dry-run", false, "evaluate failback targets without writing SwBlockReplicaFailback status")
+	fs.StringVar(&namespace, "namespace", "default", "Kubernetes namespace containing SwBlockReplicaFailback objects")
+	fs.BoolVar(&enableExecution, "enable-execution", false, "request failback runtime execution")
+	fs.BoolVar(&executionPolicyEnabled, "execution-policy", false, "allow failback executor to evaluate execution; default is disabled")
+	fs.StringVar(&failbackRuntimeURL, "failback-runtime-url", "", "HTTP endpoint for failback runtime execution; empty uses target runtimeEndpoint when execution is enabled")
+	fs.StringVar(&failbackRuntimeGRPC, "failback-runtime-grpc-addr", "", "gRPC blockmaster FailbackService address for failback runtime execution")
+	fs.DurationVar(&interval, "interval", 0, "repeat failback-executor reconciliation at this interval; 0 runs once")
+	if err := fs.Parse(args); err != nil {
+		return ops.VolumeStatusExitInvalid
+	}
+	if fs.NArg() != 0 {
+		fmt.Fprintf(stderr, "sw-block ops failback-executor: unexpected args %s\n", strings.Join(fs.Args(), " "))
+		return ops.VolumeStatusExitInvalid
+	}
+	if strings.TrimSpace(failbackRuntimeURL) != "" && !enableExecution {
+		fmt.Fprintf(stderr, "sw-block ops failback-executor: --failback-runtime-url requires --enable-execution reason=unsupported_runtime_without_execution failback_attempts=0\n")
+		return ops.VolumeStatusExitInvalid
+	}
+	if strings.TrimSpace(failbackRuntimeGRPC) != "" && !enableExecution {
+		fmt.Fprintf(stderr, "sw-block ops failback-executor: --failback-runtime-grpc-addr requires --enable-execution reason=unsupported_runtime_without_execution failback_attempts=0\n")
+		return ops.VolumeStatusExitInvalid
+	}
+	if strings.TrimSpace(failbackRuntimeURL) != "" && strings.TrimSpace(failbackRuntimeGRPC) != "" {
+		fmt.Fprintf(stderr, "sw-block ops failback-executor: --failback-runtime-url and --failback-runtime-grpc-addr are mutually exclusive reason=ambiguous_runtime failback_attempts=0\n")
+		return ops.VolumeStatusExitInvalid
+	}
+	if enableExecution && !executionPolicyEnabled {
+		fmt.Fprintf(stderr, "sw-block ops failback-executor: failback execution is disabled by product policy reason=%s failback_attempts=0 authority_mutation_allowed=false frontend_publication_allowed=false storage_mutation_allowed=false\n", ops.AuthorityExecutorFailbackReasonDisabled)
+		return ops.VolumeStatusExitInvalid
+	}
+	runOnce := func() int {
+		client, err := opsFailbackExecutorClientFactory()
+		if err != nil {
+			fmt.Fprintf(stderr, "sw-block ops failback-executor: %v\n", err)
+			return ops.VolumeStatusExitInvalid
+		}
+		var runtime ops.FailbackRuntime
+		if strings.TrimSpace(failbackRuntimeURL) != "" {
+			runtime = ops.NewHTTPFailbackRuntime(failbackRuntimeURL, nil)
+		} else if strings.TrimSpace(failbackRuntimeGRPC) != "" {
+			runtime = ops.NewGRPCFailbackRuntime(failbackRuntimeGRPC)
+		}
+		result, err := (ops.FailbackExecutorReconciler{
+			Namespace:              namespace,
+			Client:                 client,
+			Runtime:                runtime,
+			DryRun:                 dryRun,
+			ExecutionRequested:     enableExecution,
+			ExecutionPolicyEnabled: executionPolicyEnabled,
+		}).Reconcile(context.Background())
+		if err != nil {
+			fmt.Fprintf(stderr, "sw-block ops failback-executor: %v\n", err)
+			return ops.VolumeStatusExitInvalid
+		}
+		mode := "write_status"
+		if dryRun {
+			mode = "dry_run"
+		}
+		fmt.Fprintf(stdout, "failback_executor=%s namespace=%s targets=%d status_writes=%d invalid_targets=%d failback_attempts=%d execution_requested=%t execution_policy_enabled=%t status_mutation_allowed=%t authority_mutation_allowed=%t frontend_publication_allowed=%t mutation_allowed=%t storage_mutation_allowed=%t\n",
+			mode,
+			namespace,
+			result.TargetCount,
+			result.StatusWriteCount,
+			result.InvalidTargetCount,
+			result.FailbackAttempts,
+			enableExecution,
+			executionPolicyEnabled,
+			!dryRun && result.StatusWriteCount > 0,
+			result.AuthorityMutationAllowed,
+			result.FrontendPublicationAllowed,
+			!dryRun && result.StatusWriteCount > 0,
+			result.StorageMutationAllowed)
+		return ops.VolumeStatusExitOK
+	}
+	if interval <= 0 {
+		return runOnce()
+	}
+	for {
+		code := runOnce()
+		if code != ops.VolumeStatusExitOK {
+			fmt.Fprintf(stderr, "sw-block ops failback-executor: iteration failed exit=%d; retrying in %s\n", code, interval)
+		}
+		time.Sleep(interval)
+	}
+}
+
+func runOpsFrontendPublicationTargetOwner(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("sw-block ops frontend-publication-target-owner", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	var (
+		dryRun                  bool
+		namespace               string
+		activateTargets         bool
+		activationPolicyEnabled bool
+		runtimeEndpoint         string
+		interval                time.Duration
+	)
+	fs.BoolVar(&dryRun, "dry-run", false, "evaluate frontend publication target planning without creating SwBlockFrontendPublication objects")
+	fs.StringVar(&namespace, "namespace", "default", "Kubernetes namespace containing SwBlockReplicaEligibility and SwBlockReplicaFailback objects")
+	fs.BoolVar(&activateTargets, "activate-targets", false, "create enabled frontend publication targets for explicit execution")
+	fs.BoolVar(&activationPolicyEnabled, "activation-policy", false, "allow frontend publication target activation; must be set with --activate-targets")
+	fs.StringVar(&runtimeEndpoint, "runtime-endpoint", "", "frontend publication runtime endpoint to stamp on activated targets")
+	fs.DurationVar(&interval, "interval", 0, "repeat frontend-publication-target-owner reconciliation at this interval; 0 runs once")
+	if err := fs.Parse(args); err != nil {
+		return ops.VolumeStatusExitInvalid
+	}
+	if fs.NArg() != 0 {
+		fmt.Fprintf(stderr, "sw-block ops frontend-publication-target-owner: unexpected args %s\n", strings.Join(fs.Args(), " "))
+		return ops.VolumeStatusExitInvalid
+	}
+	runOnce := func() int {
+		client, err := opsFrontendPublicationTargetOwnerClientFactory()
+		if err != nil {
+			fmt.Fprintf(stderr, "sw-block ops frontend-publication-target-owner: %v\n", err)
+			return ops.VolumeStatusExitInvalid
+		}
+		result, err := (ops.FrontendPublicationTargetOwnerReconciler{
+			Namespace:               namespace,
+			Client:                  client,
+			DryRun:                  dryRun,
+			ActivateTargets:         activateTargets,
+			ActivationPolicyEnabled: activationPolicyEnabled,
+			RuntimeEndpoint:         runtimeEndpoint,
+		}).Reconcile(context.Background())
+		if err != nil {
+			fmt.Fprintf(stderr, "sw-block ops frontend-publication-target-owner: %v\n", err)
+			return ops.VolumeStatusExitInvalid
+		}
+		mode := "target_mutation"
+		if dryRun {
+			mode = "dry_run"
+		}
+		fmt.Fprintf(stdout, "frontend_publication_target_owner=%s namespace=%s eligibilities=%d ready_eligibilities=%d failbacks=%d terminal_failbacks=%d targets_planned=%d targets_existing=%d targets_created=%d invalid_eligibilities=%d invalid_failbacks=%d frontend_publication_attempts=%d failback_attempts=%d mutation_allowed=%t storage_mutation_allowed=%t\n",
+			mode,
+			namespace,
+			result.EligibilityCount,
+			result.ReadyEligibilityCount,
+			result.FailbackCount,
+			result.TerminalFailbackCount,
+			result.TargetPlannedCount,
+			result.TargetExistingCount,
+			result.TargetCreateCount,
+			result.InvalidEligibilityCount,
+			result.InvalidFailbackCount,
+			result.FrontendPublicationAttempts,
+			result.FailbackAttempts,
+			!dryRun && result.TargetCreateCount > 0,
+			result.StorageMutationAllowed)
+		return ops.VolumeStatusExitOK
+	}
+	if interval <= 0 {
+		return runOnce()
+	}
+	for {
+		code := runOnce()
+		if code != ops.VolumeStatusExitOK {
+			fmt.Fprintf(stderr, "sw-block ops frontend-publication-target-owner: iteration failed exit=%d; retrying in %s\n", code, interval)
+		}
+		time.Sleep(interval)
+	}
+}
+
+func runOpsRebuildTargetOwner(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("sw-block ops rebuild-target-owner", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	var (
+		dryRun    bool
+		namespace string
+		interval  time.Duration
+	)
+	fs.BoolVar(&dryRun, "dry-run", false, "evaluate rebuild target planning without creating SwBlockReplicaRebuild objects")
+	fs.StringVar(&namespace, "namespace", "default", "Kubernetes namespace containing SwBlockVolume objects")
+	fs.DurationVar(&interval, "interval", 0, "repeat rebuild-target-owner reconciliation at this interval; 0 runs once")
+	if err := fs.Parse(args); err != nil {
+		return ops.VolumeStatusExitInvalid
+	}
+	if fs.NArg() != 0 {
+		fmt.Fprintf(stderr, "sw-block ops rebuild-target-owner: unexpected args %s\n", strings.Join(fs.Args(), " "))
+		return ops.VolumeStatusExitInvalid
+	}
+	runOnce := func() int {
+		client, err := opsRebuildTargetOwnerClientFactory()
+		if err != nil {
+			fmt.Fprintf(stderr, "sw-block ops rebuild-target-owner: %v\n", err)
+			return ops.VolumeStatusExitInvalid
+		}
+		result, err := (ops.RebuildTargetOwnerReconciler{
+			Namespace: namespace,
+			Client:    client,
+			DryRun:    dryRun,
+		}).Reconcile(context.Background())
+		if err != nil {
+			fmt.Fprintf(stderr, "sw-block ops rebuild-target-owner: %v\n", err)
+			return ops.VolumeStatusExitInvalid
+		}
+		mode := "target_mutation"
+		if dryRun {
+			mode = "dry_run"
+		}
+		fmt.Fprintf(stdout, "rebuild_target_owner=%s namespace=%s volumes=%d contracts=%d targets_planned=%d targets_existing=%d targets_created=%d invalid_contracts=%d runtime_target_ready=%d runtime_target_missing=%d mutation_allowed=%t storage_mutation_allowed=false frontend_publication_allowed=false failback_allowed=false\n",
+			mode,
+			namespace,
+			result.VolumeCount,
+			result.ContractCount,
+			result.TargetPlannedCount,
+			result.TargetExistingCount,
+			result.TargetCreateCount,
+			result.InvalidContractCount,
+			result.RuntimeTargetReadyCount,
+			result.RuntimeTargetMissingCount,
+			!dryRun && result.TargetCreateCount > 0)
+		return ops.VolumeStatusExitOK
+	}
+	if interval <= 0 {
+		return runOnce()
+	}
+	for {
+		code := runOnce()
+		if code != ops.VolumeStatusExitOK {
+			fmt.Fprintf(stderr, "sw-block ops rebuild-target-owner: iteration failed exit=%d; retrying in %s\n", code, interval)
+		}
+		time.Sleep(interval)
+	}
+}
+
+func runOpsFailbackTargetOwner(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("sw-block ops failback-target-owner", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	var (
+		dryRun                  bool
+		namespace               string
+		interval                time.Duration
+		activateTargets         bool
+		activationPolicyEnabled bool
+		runtimeEndpoint         string
+	)
+	fs.BoolVar(&dryRun, "dry-run", false, "evaluate failback target planning without creating SwBlockReplicaFailback objects")
+	fs.StringVar(&namespace, "namespace", "default", "Kubernetes namespace containing SwBlockVolume objects")
+	fs.DurationVar(&interval, "interval", 0, "repeat failback-target-owner reconciliation at this interval; 0 runs once")
+	fs.BoolVar(&activateTargets, "activate-targets", false, "create failback targets with failbackDecision=enabled")
+	fs.BoolVar(&activationPolicyEnabled, "activation-policy", false, "allow failback target activation when --activate-targets is set")
+	fs.StringVar(&runtimeEndpoint, "runtime-endpoint", "", "failback runtime endpoint to stamp on activated targets")
+	if err := fs.Parse(args); err != nil {
+		return ops.VolumeStatusExitInvalid
+	}
+	if fs.NArg() != 0 {
+		fmt.Fprintf(stderr, "sw-block ops failback-target-owner: unexpected args %s\n", strings.Join(fs.Args(), " "))
+		return ops.VolumeStatusExitInvalid
+	}
+	runOnce := func() int {
+		client, err := opsFailbackTargetOwnerClientFactory()
+		if err != nil {
+			fmt.Fprintf(stderr, "sw-block ops failback-target-owner: %v\n", err)
+			return ops.VolumeStatusExitInvalid
+		}
+		result, err := (ops.FailbackTargetOwnerReconciler{
+			Namespace:               namespace,
+			Client:                  client,
+			DryRun:                  dryRun,
+			ActivateTargets:         activateTargets,
+			ActivationPolicyEnabled: activationPolicyEnabled,
+			RuntimeEndpoint:         runtimeEndpoint,
+		}).Reconcile(context.Background())
+		if err != nil {
+			fmt.Fprintf(stderr, "sw-block ops failback-target-owner: %v\n", err)
+			return ops.VolumeStatusExitInvalid
+		}
+		mode := "target_mutation"
+		if dryRun {
+			mode = "dry_run"
+		}
+		fmt.Fprintf(stdout, "failback_target_owner=%s namespace=%s volumes=%d contracts=%d targets_planned=%d targets_existing=%d targets_created=%d invalid_contracts=%d authority_facts_missing=%d terminal_evidence_ready=%d terminal_evidence_missing=%d activate_targets=%t activation_policy=%t failback_attempts=%d mutation_allowed=%t storage_mutation_allowed=%t frontend_publication_allowed=%t\n",
+			mode,
+			namespace,
+			result.VolumeCount,
+			result.ContractCount,
+			result.TargetPlannedCount,
+			result.TargetExistingCount,
+			result.TargetCreateCount,
+			result.InvalidContractCount,
+			result.AuthorityFactsMissing,
+			result.TerminalEvidenceReady,
+			result.TerminalEvidenceMissing,
+			activateTargets,
+			activationPolicyEnabled,
+			result.FailbackAttempts,
+			!dryRun && result.TargetCreateCount > 0,
+			result.StorageMutationAllowed,
+			result.FrontendPublicationAllowed)
+		return ops.VolumeStatusExitOK
+	}
+	if interval <= 0 {
+		return runOnce()
+	}
+	for {
+		code := runOnce()
+		if code != ops.VolumeStatusExitOK {
+			fmt.Fprintf(stderr, "sw-block ops failback-target-owner: iteration failed exit=%d; retrying in %s\n", code, interval)
+		}
+		time.Sleep(interval)
+	}
+}
+
+func runOpsAuthorityExecutor(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("sw-block ops authority-executor", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	var (
+		namespace              string
+		enableExecution        bool
+		executionPolicyEnabled bool
+		allowedMutationClass   string
+		rebuildRuntimeURL      string
+		interval               time.Duration
+	)
+	fs.StringVar(&namespace, "namespace", "default", "Kubernetes namespace containing SwBlockVolume objects")
+	fs.BoolVar(&enableExecution, "enable-execution", false, "request returned-replica executor mutation")
+	fs.BoolVar(&executionPolicyEnabled, "execution-policy", false, "allow authority executor to evaluate execution; still blocked until ACK mutation target exists")
+	fs.StringVar(&allowedMutationClass, "allowed-mutation-class", ops.AuthorityExecutorAllowedMutationAckEligibility, "supported values: ack_eligibility, rebuild_traffic")
+	fs.StringVar(&rebuildRuntimeURL, "rebuild-runtime-url", "", "HTTP endpoint for rebuild_traffic runtime execution; empty preserves planned-only status")
+	fs.DurationVar(&interval, "interval", 0, "repeat authority-executor reconciliation at this interval; 0 runs once")
+	if err := fs.Parse(args); err != nil {
+		return ops.VolumeStatusExitInvalid
+	}
+	if fs.NArg() != 0 {
+		fmt.Fprintf(stderr, "sw-block ops authority-executor: unexpected args %s\n", strings.Join(fs.Args(), " "))
+		return ops.VolumeStatusExitInvalid
+	}
+	if allowedMutationClass != ops.AuthorityExecutorAllowedMutationAckEligibility && allowedMutationClass != ops.AuthorityExecutorAllowedMutationRebuildTraffic {
+		fmt.Fprintf(stderr, "sw-block ops authority-executor: unsupported mutation class %q reason=unsupported_mutation_class mutation_attempts=0 ack_eligibility_mutation_attempts=0 rebuild_progress_mutation_attempts=0\n", allowedMutationClass)
+		return ops.VolumeStatusExitInvalid
+	}
+	if strings.TrimSpace(rebuildRuntimeURL) != "" && allowedMutationClass != ops.AuthorityExecutorAllowedMutationRebuildTraffic {
+		fmt.Fprintf(stderr, "sw-block ops authority-executor: --rebuild-runtime-url requires --allowed-mutation-class rebuild_traffic reason=unsupported_runtime_mutation_class mutation_attempts=0 ack_eligibility_mutation_attempts=0 rebuild_progress_mutation_attempts=0\n")
+		return ops.VolumeStatusExitInvalid
+	}
+	if enableExecution && !executionPolicyEnabled {
+		fmt.Fprintf(stderr, "sw-block ops authority-executor: returned-replica execution is disabled by product policy reason=%s mutation_attempts=0 ack_eligibility_mutation_attempts=0 rebuild_progress_mutation_attempts=0\n", ops.AuthorityExecutorBlockedPolicyDisabled)
+		return ops.VolumeStatusExitInvalid
+	}
+	runOnce := func() int {
+		client, err := opsAuthorityExecutorClientFactory()
+		if err != nil {
+			fmt.Fprintf(stderr, "sw-block ops authority-executor: %v\n", err)
+			return ops.VolumeStatusExitInvalid
+		}
+		var rebuildRuntime ops.AuthorityRebuildRuntime
+		if strings.TrimSpace(rebuildRuntimeURL) != "" {
+			rebuildRuntime = ops.NewHTTPAuthorityRebuildRuntime(rebuildRuntimeURL, nil)
+		}
+		result, err := (ops.AuthorityExecutorReconciler{
+			Namespace:              namespace,
+			Client:                 client,
+			RebuildRuntime:         rebuildRuntime,
+			ExecutionRequested:     enableExecution,
+			ExecutionPolicyEnabled: executionPolicyEnabled,
+			AllowedMutationClass:   allowedMutationClass,
+		}).Reconcile(context.Background())
+		if err != nil {
+			if result.BlockedReason != "" {
+				fmt.Fprintf(stderr, "sw-block ops authority-executor: %v reason=%s mutation_attempts=%d ack_eligibility_mutation_attempts=%d rebuild_progress_mutation_attempts=%d\n",
+					err, result.BlockedReason, result.MutationAttemptCount, result.AckEligibilityMutationAttempts, result.RebuildProgressMutationAttempts)
+			} else {
+				fmt.Fprintf(stderr, "sw-block ops authority-executor: %v\n", err)
+			}
+			return ops.VolumeStatusExitInvalid
+		}
+		status := "disabled"
+		if enableExecution && result.MutationAttemptCount > 0 && result.BlockedReason != "" {
+			status = "partial"
+		} else if enableExecution && result.MutationAttemptCount > 0 {
+			status = "executed"
+		} else if enableExecution && result.BlockedReason != "" {
+			status = "blocked"
+		}
+		fmt.Fprintf(stdout, "authority_executor=%s namespace=%s volumes=%d contracts=%d disabled_contracts=%d blocked_contracts=%d terminal_evidence_required=%d terminal_evidence_missing=%d ack_eligibility_target_missing=%d rebuild_target_missing=%d allowed_mutation_class=%s execution_requested=%t execution_policy_enabled=%t mutation_attempts=%d ack_eligibility_mutation_attempts=%d rebuild_progress_mutation_attempts=%d mutation_allowed=%t storage_mutation_allowed=false\n",
+			status,
+			namespace,
+			result.VolumeCount,
+			result.ContractCount,
+			result.DisabledContractCount,
+			result.BlockedContractCount,
+			result.TerminalEvidenceRequiredCount,
+			result.TerminalEvidenceMissingCount,
+			result.AckEligibilityTargetMissingCount,
+			result.RebuildTargetMissingCount,
+			allowedMutationClass,
+			enableExecution,
+			executionPolicyEnabled,
+			result.MutationAttemptCount,
+			result.AckEligibilityMutationAttempts,
+			result.RebuildProgressMutationAttempts,
+			result.MutationAttemptCount > 0)
+		return ops.VolumeStatusExitOK
+	}
+	if interval <= 0 {
+		return runOnce()
+	}
+	for {
+		code := runOnce()
+		if code != ops.VolumeStatusExitOK {
+			fmt.Fprintf(stderr, "sw-block ops authority-executor: iteration failed exit=%d; retrying in %s\n", code, interval)
+		}
+		time.Sleep(interval)
 	}
 }
 
@@ -731,6 +1262,8 @@ func replicaEvidenceFromWire(replica *control.ReplicaEvidence) ops.ReplicaEviden
 		CandidateReadyReason: replica.GetCandidateReadyReason(),
 		FrontendProtocol:     replica.GetFrontendProtocol(),
 		FrontendAddr:         replica.GetFrontendAddr(),
+		FrontendNQN:          replica.GetFrontendNqn(),
+		FrontendNSID:         replica.GetFrontendNsid(),
 		StatusAddr:           replica.GetStatusAddr(),
 		StalePrimaryFenced:   replica.GetStalePrimaryFenced(),
 		Conditions:           conditionsFromWire(replica.GetConditions()),
@@ -1620,6 +2153,12 @@ func usage(w io.Writer) {
 	fmt.Fprintln(w, "      [--restart-persistence ephemeral|hostpath] [--state-hostpath /var/lib/sw-block] [--timeout 10s]")
 	fmt.Fprintln(w, "  sw-block ops operator-status --dry-run [--master-api <addr>|--from-bundle <dir>] [--cleanup-summary <file>] [--interval 30s]")
 	fmt.Fprintln(w, "  sw-block ops lifecycle-owner [--dry-run] [--namespace <ns>] [--interval 30s]")
+	fmt.Fprintln(w, "  sw-block ops authority-executor [--namespace <ns>] [--allowed-mutation-class ack_eligibility|rebuild_traffic] [--interval 30s]")
+	fmt.Fprintln(w, "  sw-block ops rebuild-target-owner [--dry-run] [--namespace <ns>] [--interval 30s]")
+	fmt.Fprintln(w, "  sw-block ops failback-target-owner [--dry-run] [--namespace <ns>] [--interval 30s] [--activate-targets --activation-policy --runtime-endpoint <addr>]")
+	fmt.Fprintln(w, "  sw-block ops failback-executor [--dry-run] [--namespace <ns>] [--enable-execution] [--execution-policy] [--failback-runtime-url <url>] [--interval 30s]")
+	fmt.Fprintln(w, "  sw-block ops frontend-publication-target-owner [--dry-run] [--namespace <ns>] [--interval 30s] [--activate-targets --activation-policy --runtime-endpoint <url>]")
+	fmt.Fprintln(w, "  sw-block ops frontend-publication-executor [--dry-run] [--namespace <ns>] [--enable-execution] [--execution-policy] [--frontend-publication-runtime-url <url>] [--interval 30s]")
 }
 
 func emptyCLI(value string) string {

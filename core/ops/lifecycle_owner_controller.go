@@ -24,6 +24,132 @@ type SwBlockVolumeSpec struct {
 	StorageClass string `json:"storageClass,omitempty"`
 }
 
+type SwBlockReplicaEligibilityObject struct {
+	Ref    OperatorObjectRef                  `json:"ref"`
+	Spec   SwBlockReplicaEligibilitySpec      `json:"spec,omitempty"`
+	Status SwBlockReplicaEligibilityCRDStatus `json:"status,omitempty"`
+}
+
+type SwBlockReplicaEligibilitySpec struct {
+	VolumeName string `json:"volumeName,omitempty"`
+	VolumeID   string `json:"volumeID,omitempty"`
+	PVCName    string `json:"pvcName,omitempty"`
+	ReplicaID  string `json:"replicaID,omitempty"`
+}
+
+type SwBlockReplicaRebuildObject struct {
+	Ref    OperatorObjectRef              `json:"ref"`
+	Spec   SwBlockReplicaRebuildSpec      `json:"spec,omitempty"`
+	Status SwBlockReplicaRebuildCRDStatus `json:"status,omitempty"`
+}
+
+type SwBlockReplicaRebuildSpec struct {
+	VolumeName      string `json:"volumeName,omitempty"`
+	VolumeID        string `json:"volumeID,omitempty"`
+	PVCName         string `json:"pvcName,omitempty"`
+	ReplicaID       string `json:"replicaID,omitempty"`
+	SourceReplicaID string `json:"sourceReplicaID,omitempty"`
+	RuntimeEndpoint string `json:"runtimeEndpoint,omitempty"`
+	TargetDataAddr  string `json:"targetDataAddr,omitempty"`
+	SessionID       uint64 `json:"sessionID,omitempty"`
+	Epoch           uint64 `json:"epoch,omitempty"`
+	EndpointVersion uint64 `json:"endpointVersion,omitempty"`
+	FromLSN         uint64 `json:"fromLsn,omitempty"`
+	FrontierHintLSN uint64 `json:"frontierHintLsn,omitempty"`
+	BasePinLSN      uint64 `json:"basePinLsn,omitempty"`
+}
+
+type SwBlockFrontendPublicationObject struct {
+	Ref    OperatorObjectRef                   `json:"ref"`
+	Spec   SwBlockFrontendPublicationSpec      `json:"spec,omitempty"`
+	Status SwBlockFrontendPublicationCRDStatus `json:"status,omitempty"`
+}
+
+type SwBlockFrontendPublicationSpec struct {
+	VolumeName                         string `json:"volumeName,omitempty"`
+	VolumeID                           string `json:"volumeID,omitempty"`
+	PVCName                            string `json:"pvcName,omitempty"`
+	ReplicaID                          string `json:"replicaID,omitempty"`
+	TargetDataAddr                     string `json:"targetDataAddr,omitempty"`
+	TargetCtrlAddr                     string `json:"targetCtrlAddr,omitempty"`
+	SourceEligibilityName              string `json:"sourceEligibilityName,omitempty"`
+	SourceFailbackName                 string `json:"sourceFailbackName,omitempty"`
+	AckEligibilityKnown                bool   `json:"ackEligibilityKnown"`
+	AckEligible                        bool   `json:"ackEligible"`
+	FrontendFencedAfterExecution       bool   `json:"frontendFencedAfterExecution"`
+	PrimaryUnchanged                   bool   `json:"primaryUnchanged"`
+	DurableFrontierCovered             bool   `json:"durableFrontierCovered"`
+	NoCrossVolumeIdentityChange        bool   `json:"noCrossVolumeIdentityChange"`
+	FailbackCompleted                  bool   `json:"failbackCompleted"`
+	AuthorityEpochAdvanced             bool   `json:"authorityEpochAdvanced"`
+	SinglePrimaryAfterFailback         bool   `json:"singlePrimaryAfterFailback"`
+	PublishTargetSwappedAfterFailback  bool   `json:"publishTargetSwappedAfterFailback"`
+	FrontendPublicationDecision        string `json:"frontendPublicationDecision,omitempty"`
+	FrontendPublicationReason          string `json:"frontendPublicationReason,omitempty"`
+	FrontendPublicationMutationAllowed bool   `json:"frontendPublicationMutationAllowed"`
+	RuntimeEndpoint                    string `json:"runtimeEndpoint,omitempty"`
+}
+
+type SwBlockReplicaFailbackObject struct {
+	Ref    OperatorObjectRef               `json:"ref"`
+	Spec   SwBlockReplicaFailbackSpec      `json:"spec,omitempty"`
+	Status SwBlockReplicaFailbackCRDStatus `json:"status,omitempty"`
+}
+
+type SwBlockReplicaFailbackSpec struct {
+	VolumeName                   string `json:"volumeName,omitempty"`
+	VolumeID                     string `json:"volumeID,omitempty"`
+	PVCName                      string `json:"pvcName,omitempty"`
+	ReplicaID                    string `json:"replicaID,omitempty"`
+	TargetDataAddr               string `json:"targetDataAddr,omitempty"`
+	TargetCtrlAddr               string `json:"targetCtrlAddr,omitempty"`
+	ExpectedCurrentReplicaID     string `json:"expectedCurrentReplicaID,omitempty"`
+	ExpectedCurrentEpoch         uint64 `json:"expectedCurrentEpoch,omitempty"`
+	AckEligible                  bool   `json:"ackEligible"`
+	FrontendFencedBeforeFailback bool   `json:"frontendFencedBeforeFailback"`
+	DurableFrontierCovered       bool   `json:"durableFrontierCovered"`
+	NoCrossVolumeIdentityChange  bool   `json:"noCrossVolumeIdentityChange"`
+	FailbackDecision             string `json:"failbackDecision,omitempty"`
+	FailbackReason               string `json:"failbackReason,omitempty"`
+	FailbackMutationAllowed      bool   `json:"failbackMutationAllowed"`
+	RuntimeEndpoint              string `json:"runtimeEndpoint,omitempty"`
+}
+
+type SwBlockReplicaFailbackCRDStatus struct {
+	ObservedAt                        time.Time              `json:"observedAt,omitempty"`
+	ObservedGeneration                int64                  `json:"observedGeneration,omitempty"`
+	Executor                          string                 `json:"executor,omitempty"`
+	State                             string                 `json:"state,omitempty"`
+	ReasonCode                        string                 `json:"reasonCode,omitempty"`
+	FailbackMutationAllowed           bool                   `json:"failbackMutationAllowed"`
+	FailbackStarted                   bool                   `json:"failbackStarted"`
+	AuthorityEpochAdvanced            bool                   `json:"authorityEpochAdvanced"`
+	SinglePrimaryAfterFailback        bool                   `json:"singlePrimaryAfterFailback"`
+	PublishTargetSwappedAfterFailback bool                   `json:"publishTargetSwappedAfterFailback"`
+	NoCrossVolumeIdentityChange       bool                   `json:"noCrossVolumeIdentityChange"`
+	EvidenceGeneration                string                 `json:"evidenceGeneration,omitempty"`
+	Conditions                        []ObservationCondition `json:"conditions,omitempty"`
+	EvidenceRefs                      []string               `json:"evidenceRefs,omitempty"`
+	NonClaims                         []string               `json:"nonClaims,omitempty"`
+}
+
+type SwBlockFrontendPublicationCRDStatus struct {
+	ObservedAt                  time.Time              `json:"observedAt,omitempty"`
+	ObservedGeneration          int64                  `json:"observedGeneration,omitempty"`
+	Executor                    string                 `json:"executor,omitempty"`
+	State                       string                 `json:"state,omitempty"`
+	ReasonCode                  string                 `json:"reasonCode,omitempty"`
+	PublicationMutationAllowed  bool                   `json:"publicationMutationAllowed"`
+	FrontendPublished           bool                   `json:"frontendPublished"`
+	FailbackStarted             bool                   `json:"failbackStarted"`
+	NoStorageMutation           bool                   `json:"noStorageMutation"`
+	NoCrossVolumeIdentityChange bool                   `json:"noCrossVolumeIdentityChange"`
+	EvidenceGeneration          string                 `json:"evidenceGeneration,omitempty"`
+	Conditions                  []ObservationCondition `json:"conditions,omitempty"`
+	EvidenceRefs                []string               `json:"evidenceRefs,omitempty"`
+	NonClaims                   []string               `json:"nonClaims,omitempty"`
+}
+
 type LifecycleOwnerReconciler struct {
 	Namespace string
 	Client    LifecycleOwnerClient

@@ -323,6 +323,60 @@ func TestControlStatusLookup_MapsNVMeStatusFrontend(t *testing.T) {
 	}
 }
 
+func TestControlStatusLookup_MapsMultipleNVMeFrontendsToMultipathTarget(t *testing.T) {
+	lookup := NewControlStatusLookupWithMultipath(&fakeEvidenceClient{resp: &control.StatusResponse{
+		VolumeId:  "v1",
+		ReplicaId: "r1",
+		Assigned:  true,
+		Frontends: []*control.FrontendTarget{
+			{Protocol: "nvme", Addr: "127.0.0.1:4420", Nqn: "nqn.2026-05.io.seaweedfs:v1", Nsid: 1},
+			{Protocol: "nvme", Addr: "127.0.0.1:4421", Nqn: "nqn.2026-05.io.seaweedfs:v1", Nsid: 1},
+		},
+	}})
+	got, err := lookup.LookupPublishTarget(context.Background(), "v1", "node-a")
+	if err != nil {
+		t.Fatalf("LookupPublishTarget: %v", err)
+	}
+	if got.Protocol != ProtocolNVMe || !got.Multipath {
+		t.Fatalf("target=%+v want nvme multipath", got)
+	}
+	if got.NVMeAddr != "127.0.0.1:4420" || got.NQN != "nqn.2026-05.io.seaweedfs:v1" || got.NSID != 1 {
+		t.Fatalf("target=%+v", got)
+	}
+	if len(got.NVMeAddrs) != 2 || got.NVMeAddrs[0] != "127.0.0.1:4420" || got.NVMeAddrs[1] != "127.0.0.1:4421" {
+		t.Fatalf("NVMeAddrs=%v", got.NVMeAddrs)
+	}
+	ctx := publishContext(got)
+	if ctx["nvmeAddrs"] != "127.0.0.1:4420,127.0.0.1:4421" {
+		t.Fatalf("nvmeAddrs=%q", ctx["nvmeAddrs"])
+	}
+	if ctx["nvmeAddr"] != "127.0.0.1:4420" || ctx["nqn"] != "nqn.2026-05.io.seaweedfs:v1" {
+		t.Fatalf("publish_context=%+v", ctx)
+	}
+}
+
+func TestControlStatusLookup_DoesNotMergeNVMeFrontendsWithDifferentNQN(t *testing.T) {
+	lookup := NewControlStatusLookupWithMultipath(&fakeEvidenceClient{resp: &control.StatusResponse{
+		VolumeId:  "v1",
+		ReplicaId: "r1",
+		Assigned:  true,
+		Frontends: []*control.FrontendTarget{
+			{Protocol: "nvme", Addr: "127.0.0.1:4420", Nqn: "nqn.2026-05.io.seaweedfs:v1-r1", Nsid: 1},
+			{Protocol: "nvme", Addr: "127.0.0.1:4421", Nqn: "nqn.2026-05.io.seaweedfs:v1-r2", Nsid: 1},
+		},
+	}})
+	got, err := lookup.LookupPublishTarget(context.Background(), "v1", "node-a")
+	if err != nil {
+		t.Fatalf("LookupPublishTarget: %v", err)
+	}
+	if got.Multipath || len(got.NVMeAddrs) != 0 {
+		t.Fatalf("must not merge different NQNs into one multipath target: %+v", got)
+	}
+	if got.NQN != "nqn.2026-05.io.seaweedfs:v1-r1" || got.NVMeAddr != "127.0.0.1:4420" {
+		t.Fatalf("target=%+v", got)
+	}
+}
+
 type fakeLifecycleClient struct {
 	control.LifecycleServiceClient
 	createReq *control.CreateVolumeRequest

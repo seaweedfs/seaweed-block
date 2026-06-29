@@ -1,0 +1,71 @@
+name: nvme-ana-baseline-chain
+timeout: 8m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: nvme_ana_baseline_gate
+    actions:
+      - action: exec
+        node: m02
+        timeout: 7m
+        cmd: "cd {{ product_root }} && bash scripts/run-phase99-nvme-ana-baseline-gate.sh {{ product_root }}"
+        env.SW_BLOCK_ARTIFACT_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase99-nvme-ana-baseline"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase99-nvme-ana-baseline/phase99-nvme-ana-baseline-summary.txt"
+        pattern: "^phase99_nvme_ana_baseline_status=ok$"
+        save_as: phase99_ok
+      - action: assert_greater
+        actual: "{{ phase99_ok }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase99-nvme-ana-baseline/phase99-nvme-ana-baseline-summary.txt"
+        pattern: "^ana_identify_and_log_consistent=true$"
+        save_as: ana_consistent
+      - action: assert_greater
+        actual: "{{ ana_consistent }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase99-nvme-ana-baseline/phase99-nvme-ana-baseline-summary.txt"
+        pattern: "^projection_ana_state_mapping=true$"
+        save_as: projection_ana
+      - action: assert_greater
+        actual: "{{ projection_ana }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase99-nvme-ana-baseline/phase99-nvme-ana-baseline-summary.txt"
+        pattern: "^csi_nvme_node_stage=true$"
+        save_as: csi_nvme_stage
+      - action: assert_greater
+        actual: "{{ csi_nvme_stage }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase99-nvme-ana-baseline/phase99-nvme-ana-baseline-summary.txt"
+        pattern: "^nvme_scenarios_validate=pass$"
+        save_as: scenario_validate
+      - action: assert_greater
+        actual: "{{ scenario_validate }}"
+        threshold: "0"
+
+  - name: collect
+    always: true
+    actions:
+      - action: collect_path
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase99-nvme-ana-baseline"
+        name: "remote-phases"
+        ignore_error: true

@@ -790,3 +790,93 @@ var LifecycleService_ServiceDesc = grpc.ServiceDesc{
 	Streams:  []grpc.StreamDesc{},
 	Metadata: "control.proto",
 }
+
+const (
+	FailbackService_ExecuteFailback_FullMethodName = "/seaweedfs.block.control.FailbackService/ExecuteFailback"
+)
+
+// FailbackServiceClient is the client API for FailbackService service.
+//
+// For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+type FailbackServiceClient interface {
+	ExecuteFailback(ctx context.Context, in *FailbackRequest, opts ...grpc.CallOption) (*FailbackResponse, error)
+}
+
+type failbackServiceClient struct {
+	cc grpc.ClientConnInterface
+}
+
+func NewFailbackServiceClient(cc grpc.ClientConnInterface) FailbackServiceClient {
+	return &failbackServiceClient{cc}
+}
+
+func (c *failbackServiceClient) ExecuteFailback(ctx context.Context, in *FailbackRequest, opts ...grpc.CallOption) (*FailbackResponse, error) {
+	out := new(FailbackResponse)
+	err := c.cc.Invoke(ctx, FailbackService_ExecuteFailback_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// FailbackServiceServer is the server API for FailbackService service.
+// All implementations must embed UnimplementedFailbackServiceServer
+// for forward compatibility
+type FailbackServiceServer interface {
+	ExecuteFailback(context.Context, *FailbackRequest) (*FailbackResponse, error)
+	mustEmbedUnimplementedFailbackServiceServer()
+}
+
+// UnimplementedFailbackServiceServer must be embedded to have forward compatible implementations.
+type UnimplementedFailbackServiceServer struct {
+}
+
+func (UnimplementedFailbackServiceServer) ExecuteFailback(context.Context, *FailbackRequest) (*FailbackResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ExecuteFailback not implemented")
+}
+func (UnimplementedFailbackServiceServer) mustEmbedUnimplementedFailbackServiceServer() {}
+
+// UnsafeFailbackServiceServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to FailbackServiceServer will
+// result in compilation errors.
+type UnsafeFailbackServiceServer interface {
+	mustEmbedUnimplementedFailbackServiceServer()
+}
+
+func RegisterFailbackServiceServer(s grpc.ServiceRegistrar, srv FailbackServiceServer) {
+	s.RegisterService(&FailbackService_ServiceDesc, srv)
+}
+
+func _FailbackService_ExecuteFailback_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(FailbackRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(FailbackServiceServer).ExecuteFailback(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: FailbackService_ExecuteFailback_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(FailbackServiceServer).ExecuteFailback(ctx, req.(*FailbackRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+// FailbackService_ServiceDesc is the grpc.ServiceDesc for FailbackService service.
+// It's only intended for direct use with grpc.RegisterService,
+// and not to be introspected or modified (even as a copy)
+var FailbackService_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "seaweedfs.block.control.FailbackService",
+	HandlerType: (*FailbackServiceServer)(nil),
+	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "ExecuteFailback",
+			Handler:    _FailbackService_ExecuteFailback_Handler,
+		},
+	},
+	Streams:  []grpc.StreamDesc{},
+	Metadata: "control.proto",
+}

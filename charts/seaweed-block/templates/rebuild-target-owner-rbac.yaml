@@ -1,0 +1,38 @@
+{{- if and .Values.rebuildTargetOwner.create .Values.rebuildTargetOwner.rbac.create }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "seaweed-block.fullname" . }}-rebuild-target-owner
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "seaweed-block.labels" . | nindent 4 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "seaweed-block.fullname" . }}-rebuild-target-owner
+  labels:
+    {{- include "seaweed-block.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["block.seaweedfs.com"]
+    resources: ["swblockvolumes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["block.seaweedfs.com"]
+    resources: ["swblockreplicarebuilds"]
+    verbs: ["get", "list", "watch", "create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "seaweed-block.fullname" . }}-rebuild-target-owner
+  labels:
+    {{- include "seaweed-block.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "seaweed-block.fullname" . }}-rebuild-target-owner
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "seaweed-block.fullname" . }}-rebuild-target-owner
+{{- end }}

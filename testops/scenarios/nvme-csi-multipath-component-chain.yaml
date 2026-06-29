@@ -1,0 +1,63 @@
+name: nvme-csi-multipath-component-chain
+timeout: 8m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: nvme_csi_multipath_component_gate
+    actions:
+      - action: exec
+        node: m02
+        timeout: 7m
+        cmd: "cd {{ product_root }} && bash scripts/run-phase100-nvme-csi-multipath-component-gate.sh {{ product_root }}"
+        env.SW_BLOCK_ARTIFACT_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase100-nvme-csi-multipath-component"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase100-nvme-csi-multipath-component/phase100-nvme-csi-multipath-component-summary.txt"
+        pattern: "^phase100_nvme_csi_multipath_component_status=ok$"
+        save_as: phase100_ok
+      - action: assert_greater
+        actual: "{{ phase100_ok }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase100-nvme-csi-multipath-component/phase100-nvme-csi-multipath-component-summary.txt"
+        pattern: "^control_status_nvme_multipath_grouping=true$"
+        save_as: grouping_ok
+      - action: assert_greater
+        actual: "{{ grouping_ok }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase100-nvme-csi-multipath-component/phase100-nvme-csi-multipath-component-summary.txt"
+        pattern: "^node_stage_nvme_multipath_connects_all_targets=true$"
+        save_as: stage_ok
+      - action: assert_greater
+        actual: "{{ stage_ok }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase100-nvme-csi-multipath-component/phase100-nvme-csi-multipath-component-summary.txt"
+        pattern: "^live_k8s_nvme_multipath_required_for_release=true$"
+        save_as: live_required
+      - action: assert_greater
+        actual: "{{ live_required }}"
+        threshold: "0"
+
+  - name: collect
+    always: true
+    actions:
+      - action: collect_path
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase100-nvme-csi-multipath-component"
+        name: "remote-phases"
+        ignore_error: true

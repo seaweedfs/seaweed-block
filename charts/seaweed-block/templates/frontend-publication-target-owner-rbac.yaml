@@ -1,0 +1,35 @@
+{{- if and .Values.frontendPublicationTargetOwner.create .Values.frontendPublicationTargetOwner.rbac.create }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "seaweed-block.fullname" . }}-frontend-publication-target-owner
+  namespace: {{ .Release.Namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "seaweed-block.fullname" . }}-frontend-publication-target-owner
+rules:
+  - apiGroups: ["block.seaweedfs.com"]
+    resources: ["swblockreplicaeligibilities"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["block.seaweedfs.com"]
+    resources: ["swblockreplicafailbacks"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["block.seaweedfs.com"]
+    resources: ["swblockfrontendpublications"]
+    verbs: ["get", "list", "watch", "create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "seaweed-block.fullname" . }}-frontend-publication-target-owner
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "seaweed-block.fullname" . }}-frontend-publication-target-owner
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "seaweed-block.fullname" . }}-frontend-publication-target-owner
+    namespace: {{ .Release.Namespace }}
+{{- end }}

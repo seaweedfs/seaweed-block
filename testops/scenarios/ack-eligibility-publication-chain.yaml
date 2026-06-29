@@ -1,0 +1,80 @@
+# Runner-native Phase 67 gate: caught-up rebuild to ACK eligibility publication.
+
+name: ack-eligibility-publication-chain
+timeout: 8m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: ack_eligibility_publication_gate
+    actions:
+      - action: exec
+        node: m02
+        timeout: 7m
+        cmd: "rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase67-ack-eligibility-publication && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase67-ack-eligibility-publication && cd {{ product_root }} && SW_BLOCK_ARTIFACT_DIR=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase67-ack-eligibility-publication bash scripts/run-phase67-ack-eligibility-publication-gate.sh {{ product_root }}"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase67-ack-eligibility-publication/phase67-ack-eligibility-publication-summary.txt"
+        pattern: "^phase67_ack_eligibility_publication_status=ok$"
+        save_as: phase67_ok
+      - action: assert_greater
+        actual: "{{ phase67_ok }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase67-ack-eligibility-publication/phase67-ack-eligibility-publication-summary.txt"
+        pattern: "^ack_publication_after_caught_up=true$"
+        save_as: ack_after_caught_up
+      - action: assert_greater
+        actual: "{{ ack_after_caught_up }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase67-ack-eligibility-publication/phase67-ack-eligibility-publication-summary.txt"
+        pattern: "^ack_publication_requires_rebuild_caught_up=true$"
+        save_as: requires_caught_up
+      - action: assert_greater
+        actual: "{{ requires_caught_up }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase67-ack-eligibility-publication/phase67-ack-eligibility-publication-summary.txt"
+        pattern: "^ack_publication_rejects_running_rebuild=true$"
+        save_as: rejects_running
+      - action: assert_greater
+        actual: "{{ rejects_running }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase67-ack-eligibility-publication/phase67-ack-eligibility-publication-summary.txt"
+        pattern: "^ack_publication_rejects_unexpected_publication_allowed=true$"
+        save_as: rejects_unexpected_policy
+      - action: assert_greater
+        actual: "{{ rejects_unexpected_policy }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase67-ack-eligibility-publication/phase67-ack-eligibility-publication-summary.txt"
+        pattern: "^frontend_publication_attempts=0$"
+        save_as: no_frontend
+      - action: assert_greater
+        actual: "{{ no_frontend }}"
+        threshold: "0"
+
+  - name: collect
+    always: true
+    actions:
+      - action: collect_path
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase67-ack-eligibility-publication"
+        name: "remote-phases"
+        ignore_error: true

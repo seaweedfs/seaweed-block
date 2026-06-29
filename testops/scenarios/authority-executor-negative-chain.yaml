@@ -1,0 +1,128 @@
+# Runner-native Phase 54 D5 gate: authority-executor negative/hold matrix.
+
+name: authority-executor-negative-chain
+timeout: 10m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: authority_executor_negative_gate
+    actions:
+      - action: exec
+        node: m02
+        timeout: 9m
+        cmd: "rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase54-authority-executor-negative && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase54-authority-executor-negative && cd {{ product_root }} && SW_BLOCK_ARTIFACT_DIR=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase54-authority-executor-negative bash scripts/run-phase54-authority-executor-negative-gate.sh {{ product_root }}"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase54-authority-executor-negative/phase54-authority-executor-negative-summary.txt"
+        pattern: "^phase54_authority_executor_negative_status=ok$"
+        save_as: phase54_negative_ok
+      - action: assert_greater
+        actual: "{{ phase54_negative_ok }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase54-authority-executor-negative/phase54-authority-executor-negative-summary.txt"
+        pattern: "^blocked-preflight_mutation_attempts=0$"
+        save_as: blocked_preflight_no_mutation
+      - action: assert_greater
+        actual: "{{ blocked_preflight_no_mutation }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase54-authority-executor-negative/phase54-authority-executor-negative-summary.txt"
+        pattern: "^stale-frontier_mutation_attempts=0$"
+        save_as: stale_frontier_no_mutation
+      - action: assert_greater
+        actual: "{{ stale_frontier_no_mutation }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase54-authority-executor-negative/phase54-authority-executor-negative-summary.txt"
+        pattern: "^unsafe-frontend_mutation_attempts=0$"
+        save_as: unsafe_frontend_no_mutation
+      - action: assert_greater
+        actual: "{{ unsafe_frontend_no_mutation }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase54-authority-executor-negative/phase54-authority-executor-negative-summary.txt"
+        pattern: "^ambiguous_target_mutation_attempts=0$"
+        save_as: ambiguous_no_mutation
+      - action: assert_greater
+        actual: "{{ ambiguous_no_mutation }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase54-authority-executor-negative/phase54-authority-executor-negative-summary.txt"
+        pattern: "^identity_mismatch_mutation_attempts=0$"
+        save_as: identity_mismatch_no_mutation
+      - action: assert_greater
+        actual: "{{ identity_mismatch_no_mutation }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase54-authority-executor-negative/phase54-authority-executor-negative-summary.txt"
+        pattern: "^partial_mutation_attempts=1$"
+        save_as: partial_one_mutation
+      - action: assert_greater
+        actual: "{{ partial_one_mutation }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase54-authority-executor-negative/phase54-authority-executor-negative-summary.txt"
+        pattern: "^partial_terminal_missing=1$"
+        save_as: partial_one_hold
+      - action: assert_greater
+        actual: "{{ partial_one_hold }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase54-authority-executor-negative/phase54-authority-executor-negative-summary.txt"
+        pattern: "^partial_a_reason=ack_eligibility_recorded$"
+        save_as: partial_a_written
+      - action: assert_greater
+        actual: "{{ partial_a_written }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase54-authority-executor-negative/phase54-authority-executor-negative-summary.txt"
+        pattern: "^partial_b_reason_absent=$"
+        save_as: partial_b_held
+      - action: assert_greater
+        actual: "{{ partial_b_held }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase54-authority-executor-negative/phase54-authority-executor-negative-summary.txt"
+        pattern: "^exec_patch_swblockvolumes_status_denied=no$"
+        save_as: boundary_volume_status_denied
+      - action: assert_greater
+        actual: "{{ boundary_volume_status_denied }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase54-authority-executor-negative/phase54-authority-executor-negative-summary.txt"
+        pattern: "^exec_create_events_denied=no$"
+        save_as: boundary_events_denied
+      - action: assert_greater
+        actual: "{{ boundary_events_denied }}"
+        threshold: "0"
+
+  - name: collect
+    always: true
+    actions:
+      - action: collect_path
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase54-authority-executor-negative"
+        name: "remote-phases"
+        ignore_error: true

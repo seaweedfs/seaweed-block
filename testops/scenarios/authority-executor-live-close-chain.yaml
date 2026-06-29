@@ -1,0 +1,166 @@
+# Runner-native Phase 54 D7 gate: live returned-replica close with bounded ACK eligibility execution.
+
+name: authority-executor-live-close-chain
+timeout: 22m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: pre_clean
+    actions:
+      - action: pre_run_cleanup
+        node: m02
+        kill_patterns: "blockmaster,blockvolume,iscsi-target"
+        unmount: "/tmp/sw-block-phase54-live-close/mnt"
+        nvme_disconnect: "true"
+        iscsi_logout_prefix: "iqn.2026-05.io.seaweedfs"
+      - action: assert_no_active_iscsi_sessions
+        node: m02
+        iqn_substr: "io.seaweedfs"
+      - action: assert_no_processes
+        node: m02
+        pattern: "[/]blockmaster --|[/]blockvolume --|^blockmaster |^blockvolume "
+
+  - name: authority_executor_live_close_gate
+    actions:
+      - action: exec
+        node: m02
+        timeout: 18m
+        cmd: "rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase54-authority-executor-live-close && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase54-authority-executor-live-close && cd {{ product_root }} && SW_BLOCK_ARTIFACT_DIR=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase54-authority-executor-live-close bash scripts/run-phase54-authority-executor-live-close-gate.sh {{ product_root }}"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase54-authority-executor-live-close/phase54-authority-executor-live-close-summary.txt"
+        pattern: "^phase54_authority_executor_live_close_status=ok$"
+        save_as: phase54_live_close_ok
+      - action: assert_greater
+        actual: "{{ phase54_live_close_ok }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase54-authority-executor-live-close/phase54-authority-executor-live-close-summary.txt"
+        pattern: "^previous_primary_frontend_fenced=true$"
+        save_as: previous_primary_fenced
+      - action: assert_greater
+        actual: "{{ previous_primary_fenced }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase54-authority-executor-live-close/phase54-authority-executor-live-close-summary.txt"
+        pattern: "^current_primary_unchanged=true$"
+        save_as: current_primary_unchanged
+      - action: assert_greater
+        actual: "{{ current_primary_unchanged }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase54-authority-executor-live-close/phase54-authority-executor-live-close-summary.txt"
+        pattern: "^durable_frontier_covered=true$"
+        save_as: durable_frontier_covered
+      - action: assert_greater
+        actual: "{{ durable_frontier_covered }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase54-authority-executor-live-close/phase54-authority-executor-live-close-summary.txt"
+        pattern: "^executor_ack_mutation_attempts=1$"
+        save_as: one_ack_mutation
+      - action: assert_greater
+        actual: "{{ one_ack_mutation }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase54-authority-executor-live-close/phase54-authority-executor-live-close-summary.txt"
+        pattern: "^target_reason=ack_eligibility_recorded$"
+        save_as: target_ack_recorded
+      - action: assert_greater
+        actual: "{{ target_ack_recorded }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase54-authority-executor-live-close/phase54-authority-executor-live-close-summary.txt"
+        pattern: "^target_ack_eligible=true$"
+        save_as: target_ack_eligible
+      - action: assert_greater
+        actual: "{{ target_ack_eligible }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase54-authority-executor-live-close/phase54-authority-executor-live-close-summary.txt"
+        pattern: "^target_frontend_fenced=true$"
+        save_as: target_frontend_fenced
+      - action: assert_greater
+        actual: "{{ target_frontend_fenced }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase54-authority-executor-live-close/phase54-authority-executor-live-close-summary.txt"
+        pattern: "^target_primary_unchanged=true$"
+        save_as: target_primary_unchanged
+      - action: assert_greater
+        actual: "{{ target_primary_unchanged }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase54-authority-executor-live-close/phase54-authority-executor-live-close-summary.txt"
+        pattern: "^target_frontier_covered=true$"
+        save_as: target_frontier_covered
+      - action: assert_greater
+        actual: "{{ target_frontier_covered }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase54-authority-executor-live-close/phase54-authority-executor-live-close-summary.txt"
+        pattern: "^target_no_cross_volume=true$"
+        save_as: target_no_cross_volume
+      - action: assert_greater
+        actual: "{{ target_no_cross_volume }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase54-authority-executor-live-close/phase54-authority-executor-live-close-summary.txt"
+        pattern: "^source_ack_still_false=false$"
+        save_as: source_ack_unchanged
+      - action: assert_greater
+        actual: "{{ source_ack_unchanged }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase54-authority-executor-live-close/phase54-authority-executor-live-close-summary.txt"
+        pattern: "^target_nonclaims_ok=true$"
+        save_as: target_nonclaims_ok
+      - action: assert_greater
+        actual: "{{ target_nonclaims_ok }}"
+        threshold: "0"
+
+  - name: final_asserts
+    actions:
+      - action: assert_no_active_iscsi_sessions
+        node: m02
+        iqn_substr: "io.seaweedfs"
+      - action: assert_no_processes
+        node: m02
+        pattern: "[/]blockmaster --|[/]blockvolume --|^blockmaster |^blockvolume "
+
+  - name: collect_and_cleanup
+    always: true
+    actions:
+      - action: pre_run_cleanup
+        node: m02
+        kill_patterns: "blockmaster,blockvolume,iscsi-target"
+        unmount: "/tmp/sw-block-phase54-live-close/mnt"
+        nvme_disconnect: "true"
+        iscsi_logout_prefix: "iqn.2026-05.io.seaweedfs"
+      - action: collect_path
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase54-authority-executor-live-close"
+        name: "remote-phases"
+        ignore_error: true

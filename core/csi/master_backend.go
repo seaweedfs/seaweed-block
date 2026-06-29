@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"strconv"
 
 	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
 )
@@ -177,6 +178,39 @@ func publishTargetFromStatus(resp *control.StatusResponse, enableMultipath bool,
 				out.Multipath = true
 				for _, ft := range frontends {
 					out.ISCSIAddrs = append(out.ISCSIAddrs, ft.GetAddr())
+				}
+			}
+			return out, true
+		}
+		nvmeByKey := map[string][]*control.FrontendTarget{}
+		nvmeOrder := []string{}
+		for _, ft := range resp.GetFrontends() {
+			if ft == nil {
+				continue
+			}
+			if ft.GetProtocol() != string(ProtocolNVMe) || ft.GetAddr() == "" || ft.GetNqn() == "" || rejectFrontendAddr(ft.GetAddr(), rejectLoopback) {
+				continue
+			}
+			key := ft.GetNqn() + "\x00" + strconv.FormatUint(uint64(ft.GetNsid()), 10)
+			if _, ok := nvmeByKey[key]; !ok {
+				nvmeOrder = append(nvmeOrder, key)
+			}
+			nvmeByKey[key] = append(nvmeByKey[key], ft)
+		}
+		for _, key := range nvmeOrder {
+			frontends := nvmeByKey[key]
+			if len(frontends) == 0 {
+				continue
+			}
+			out := base
+			out.Protocol = ProtocolNVMe
+			out.NVMeAddr = frontends[0].GetAddr()
+			out.NQN = frontends[0].GetNqn()
+			out.NSID = frontends[0].GetNsid()
+			if len(frontends) > 1 {
+				out.Multipath = true
+				for _, ft := range frontends {
+					out.NVMeAddrs = append(out.NVMeAddrs, ft.GetAddr())
 				}
 			}
 			return out, true

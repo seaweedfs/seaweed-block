@@ -38,9 +38,14 @@ const (
 	ReasonLoopbackFrontendRejected        = "loopback_frontend_rejected"
 	ReasonStalePrimaryFenced              = "stale_primary_fenced"
 	ReasonWALIntegrityFault               = "wal_integrity_fault"
+	ReasonReturnedReplicaFrontendFenced   = "returned_replica_frontend_fenced"
+	ReasonReturnedReplicaUnsafeFrontend   = "returned_replica_unsafe_frontend_ready"
 	ReasonInstallDriftAligned             = "install_drift_aligned"
 	ReasonInstallDriftMismatch            = "install_drift_mismatch"
 	ReasonInstallDriftEvidenceMissing     = "install_drift_evidence_missing"
+	ReasonNVMeIdentityIncomplete          = "nvme_identity_incomplete"
+	ReasonNVMePathIdentityMismatch        = "nvme_path_identity_mismatch"
+	ReasonNVMeMultipathPathMissing        = "nvme_multipath_path_missing"
 
 	EventTypeCSIReattachObserved = "csi_reattach_observed"
 )
@@ -115,26 +120,28 @@ type NodeEvidence struct {
 }
 
 type VolumeEvidence struct {
-	VolumeID          string                 `json:"volume_id"`
-	Namespace         string                 `json:"namespace,omitempty"`
-	PVCName           string                 `json:"pvc_name,omitempty"`
-	PVName            string                 `json:"pv_name,omitempty"`
-	ReplicationFactor int                    `json:"replication_factor"`
-	AckProfile        string                 `json:"ack_profile,omitempty"`
-	ClaimProfile      string                 `json:"claim_profile,omitempty"`
-	DesiredReplicas   int                    `json:"desired_replicas"`
-	ObservedReplicas  int                    `json:"observed_replicas"`
-	Status            string                 `json:"status"`
-	Reason            string                 `json:"reason,omitempty"`
-	PrimaryReplica    string                 `json:"primary_replica,omitempty"`
-	PrimaryNode       string                 `json:"primary_node,omitempty"`
-	PublishTarget     string                 `json:"publish_target,omitempty"`
-	Epoch             uint64                 `json:"epoch,omitempty"`
-	EndpointVersion   uint64                 `json:"endpoint_version,omitempty"`
-	Replicas          []ReplicaEvidence      `json:"replicas"`
-	Conditions        []ObservationCondition `json:"conditions,omitempty"`
-	NextActions       []string               `json:"next_actions,omitempty"`
-	SupportBundleHint string                 `json:"support_bundle_hint,omitempty"`
+	VolumeID              string                 `json:"volume_id"`
+	Namespace             string                 `json:"namespace,omitempty"`
+	PVCName               string                 `json:"pvc_name,omitempty"`
+	PVName                string                 `json:"pv_name,omitempty"`
+	ReplicationFactor     int                    `json:"replication_factor"`
+	AckProfile            string                 `json:"ack_profile,omitempty"`
+	ClaimProfile          string                 `json:"claim_profile,omitempty"`
+	DesiredReplicas       int                    `json:"desired_replicas"`
+	ObservedReplicas      int                    `json:"observed_replicas"`
+	Status                string                 `json:"status"`
+	Reason                string                 `json:"reason,omitempty"`
+	PrimaryReplica        string                 `json:"primary_replica,omitempty"`
+	PrimaryNode           string                 `json:"primary_node,omitempty"`
+	PublishTarget         string                 `json:"publish_target,omitempty"`
+	Epoch                 uint64                 `json:"epoch,omitempty"`
+	EndpointVersion       uint64                 `json:"endpoint_version,omitempty"`
+	RequiredFrontierKnown bool                   `json:"required_frontier_known,omitempty"`
+	RequiredFrontierLSN   uint64                 `json:"required_frontier_lsn,omitempty"`
+	Replicas              []ReplicaEvidence      `json:"replicas"`
+	Conditions            []ObservationCondition `json:"conditions,omitempty"`
+	NextActions           []string               `json:"next_actions,omitempty"`
+	SupportBundleHint     string                 `json:"support_bundle_hint,omitempty"`
 }
 
 type ReplicaEvidence struct {
@@ -150,9 +157,17 @@ type ReplicaEvidence struct {
 	DurableFrontierLSN   uint64                 `json:"durable_frontier_lsn,omitempty"`
 	CandidateReady       bool                   `json:"candidate_ready"`
 	CandidateReadyReason string                 `json:"candidate_ready_reason,omitempty"`
+	Healthy              bool                   `json:"healthy,omitempty"`
+	FrontendPrimaryReady bool                   `json:"frontend_primary_ready,omitempty"`
+	AckEligibilityKnown  bool                   `json:"ack_eligibility_known,omitempty"`
+	AckEligible          bool                   `json:"ack_eligible,omitempty"`
 	FrontendProtocol     string                 `json:"frontend_protocol,omitempty"`
 	FrontendAddr         string                 `json:"frontend_addr,omitempty"`
+	FrontendNQN          string                 `json:"frontend_nqn,omitempty"`
+	FrontendNSID         uint32                 `json:"frontend_nsid,omitempty"`
 	StatusAddr           string                 `json:"status_addr,omitempty"`
+	DataAddr             string                 `json:"data_addr,omitempty"`
+	CtrlAddr             string                 `json:"ctrl_addr,omitempty"`
 	StalePrimaryFenced   bool                   `json:"stale_primary_fenced"`
 	Conditions           []ObservationCondition `json:"conditions,omitempty"`
 	SupportBundlePath    string                 `json:"support_bundle_path,omitempty"`
@@ -222,6 +237,9 @@ func RenderVolumeEvidenceText(volume VolumeEvidence) string {
 	}
 	if volume.PrimaryReplica != "" || volume.PrimaryNode != "" || volume.PublishTarget != "" {
 		fmt.Fprintf(&b, "primary %s on %s frontend=%s\n", emptyAsDash(volume.PrimaryReplica), emptyAsDash(volume.PrimaryNode), emptyAsDash(volume.PublishTarget))
+	}
+	if volume.RequiredFrontierKnown {
+		fmt.Fprintf(&b, "required_frontier lsn=%d\n", volume.RequiredFrontierLSN)
 	}
 	if volume.DesiredReplicas > 0 || volume.ObservedReplicas > 0 {
 		fmt.Fprintf(&b, "replicas desired=%d observed=%d\n", volume.DesiredReplicas, volume.ObservedReplicas)

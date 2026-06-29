@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -34,8 +35,10 @@ func TestOperatorStatusReconcilerWritesStatusOnlyProjection(t *testing.T) {
 				PVCName:  "demo-pvc",
 				PVC:      &PVCFact{Phase: "Bound"},
 				Authority: &AuthorityFact{
-					PrimaryReplica: "r1",
-					PublishTarget:  "192.168.1.184:3260",
+					PrimaryReplica:  "r1",
+					PublishTarget:   "192.168.1.184:3260",
+					Epoch:           11,
+					EndpointVersion: 12,
 				},
 				Replicas: []ReplicaFact{{
 					ReplicaID:      "r1",
@@ -95,6 +98,12 @@ func TestOperatorStatusReconcilerWritesStatusOnlyProjection(t *testing.T) {
 	if got := writer.volumes[0].status.Status; got != ManagedVolumeStatusReady {
 		t.Fatalf("ready volume status=%s", got)
 	}
+	if ready := writer.volumes[0].status; ready.PrimaryReplicaID != "r1" ||
+		ready.PublishTarget != "192.168.1.184:3260" ||
+		ready.AuthorityEpoch != 11 ||
+		ready.AuthorityEndpointVersion != 12 {
+		t.Fatalf("ready volume authority status=%+v", ready)
+	}
 	if got := writer.volumes[1].status.ReasonCode; got != ReasonCSINodeImagePullFailed {
 		t.Fatalf("blocked volume reason=%s", got)
 	}
@@ -112,8 +121,18 @@ func TestOperatorStatusReconcilerWritesStatusOnlyProjection(t *testing.T) {
 	if !strings.Contains(string(rawStatus), `"mutationAllowed":false`) {
 		t.Fatalf("CRD volume status must use camelCase mutationAllowed: %s", string(rawStatus))
 	}
+	for _, want := range []string{`"primaryReplicaID":"r1"`, `"publishTarget":"192.168.1.184:3260"`, `"authorityEpoch":11`, `"authorityEndpointVersion":12`} {
+		if !strings.Contains(string(rawStatus), want) {
+			t.Fatalf("CRD volume status missing %s: %s", want, string(rawStatus))
+		}
+	}
 	if strings.Contains(string(rawStatus), "mutation_allowed") {
 		t.Fatalf("CRD volume status must not use operator-snapshot snake_case fields: %s", string(rawStatus))
+	}
+	for _, forbidden := range []string{"primary_replica_id", "publish_target", "authority_epoch", "authority_endpoint_version"} {
+		if strings.Contains(string(rawStatus), forbidden) {
+			t.Fatalf("CRD volume status leaked snake_case %s: %s", forbidden, string(rawStatus))
+		}
 	}
 	if events.countByReason(ReasonFirstVolumeVerified) == 0 {
 		t.Fatalf("missing ready event: %+v", events.events)
@@ -130,6 +149,352 @@ func TestOperatorStatusReconcilerWritesStatusOnlyProjection(t *testing.T) {
 	}
 	if result.EventCount != len(events.events) {
 		t.Fatalf("event count=%d events=%d", result.EventCount, len(events.events))
+	}
+}
+
+func TestOperatorStatusReconcilerWritesNVMeStatusCamelCase(t *testing.T) {
+	source := fakeOperatorStatusSource{cluster: ClusterEvidence{
+		SchemaVersion: ObservationSchemaVersion,
+		CapturedAt:    time.Date(2026, 6, 28, 12, 0, 0, 0, time.UTC),
+		Status:        ObservationStatusOK,
+		ManagedVolumes: []ManagedVolumeProjection{ProjectManagedVolume(ManagedVolumeFacts{
+			VolumeID: "pvc-nvme",
+			PVCName:  "nvme-pvc",
+			Replicas: []ReplicaFact{{
+				ReplicaID:        "r1",
+				Observed:         true,
+				FrontendProtocol: "nvme",
+				FrontendAddr:     "127.0.0.1:4420",
+				FrontendNQN:      "nqn.2026-05.io.seaweedfs:pvc-nvme",
+				FrontendNSID:     1,
+			}, {
+				ReplicaID:        "r2",
+				Observed:         true,
+				FrontendProtocol: "nvme",
+				FrontendAddr:     "127.0.0.1:4421",
+				FrontendNQN:      "nqn.2026-05.io.seaweedfs:pvc-nvme",
+				FrontendNSID:     1,
+			}},
+		})},
+	}}
+	writer := &fakeOperatorStatusWriter{}
+	if _, err := (OperatorStatusReconciler{
+		Namespace: "kube-system",
+		Source:    source,
+		Writer:    writer,
+	}).Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if len(writer.volumes) != 1 {
+		t.Fatalf("writes=%+v", writer.volumes)
+	}
+	status := writer.volumes[0].status
+	if status.NVMe == nil ||
+		status.NVMe.NQN != "nqn.2026-05.io.seaweedfs:pvc-nvme" ||
+		status.NVMe.NSID != 1 ||
+		status.NVMe.NVMeAddr != "127.0.0.1:4420" ||
+		status.NVMe.PathCount != 2 ||
+		!status.NVMe.MultipathObserved {
+		t.Fatalf("nvme status=%+v", status.NVMe)
+	}
+	raw, err := json.Marshal(status)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	for _, want := range []string{`"nvme"`, `"nvmeAddr":"127.0.0.1:4420"`, `"nvmeAddrs":["127.0.0.1:4420","127.0.0.1:4421"]`, `"pathCount":2`, `"multipathObserved":true`} {
+		if !strings.Contains(string(raw), want) {
+			t.Fatalf("status JSON missing %s: %s", want, string(raw))
+		}
+	}
+	for _, forbidden := range []string{"nvme_addr", "nvme_addrs", "path_count", "multipath_observed"} {
+		if strings.Contains(string(raw), forbidden) {
+			t.Fatalf("status JSON leaked snake_case %s: %s", forbidden, string(raw))
+		}
+	}
+}
+
+func TestSwBlockVolumeCRDSchemaAllowsNVMeStatus(t *testing.T) {
+	body, err := os.ReadFile("../../charts/seaweed-block/crds/swblockvolumes.block.seaweedfs.com.yaml")
+	if err != nil {
+		t.Fatalf("read swblockvolumes CRD: %v", err)
+	}
+	text := string(body)
+	for _, want := range []string{
+		"nvme:",
+		"nvmeAddr:",
+		"nvmeAddrs:",
+		"pathCount:",
+		"multipathObserved:",
+		"anaState:",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("CRD schema missing %s", want)
+		}
+	}
+	for _, forbidden := range []string{"nvme_addr:", "nvme_addrs:", "path_count:", "multipath_observed:"} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("CRD schema leaked snake_case field %s", forbidden)
+		}
+	}
+}
+
+func TestOperatorStatusReconcilerWritesReturnedReplicaExecutorPreflight(t *testing.T) {
+	capturedAt := time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)
+	source := fakeOperatorStatusSource{cluster: ClusterEvidence{
+		SchemaVersion: ObservationSchemaVersion,
+		CapturedAt:    capturedAt,
+		Status:        ObservationStatusRecovering,
+		ManagedVolumes: []ManagedVolumeProjection{ProjectManagedVolume(ManagedVolumeFacts{
+			VolumeID: "pvc-returned",
+			PVCName:  "returned-pvc",
+			Authority: &AuthorityFact{
+				PrimaryReplica:        "r2",
+				PreviousPrimary:       "r1",
+				RequiredFrontierKnown: true,
+				RequiredFrontierLSN:   52,
+			},
+			Replicas: []ReplicaFact{{
+				ReplicaID:            "r1",
+				Observed:             true,
+				Role:                 "previous_primary",
+				DurableFrontierKnown: true,
+				DurableFrontierLSN:   52,
+				FrontendPrimaryReady: false,
+				AckEligibilityKnown:  true,
+				AckEligible:          false,
+				StalePrimaryFenced:   true,
+			}, {
+				ReplicaID:            "r2",
+				Observed:             true,
+				Role:                 "primary",
+				DurableFrontierKnown: true,
+				DurableFrontierLSN:   52,
+			}},
+			EvidenceRefs: []string{"returned-replica-summary.txt"},
+		})},
+	}}
+	writer := &fakeOperatorStatusWriter{}
+
+	_, err := (OperatorStatusReconciler{
+		Namespace: "kube-system",
+		Source:    source,
+		Writer:    writer,
+	}).Reconcile(context.Background())
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if len(writer.volumes) != 1 {
+		t.Fatalf("volume writes=%+v", writer.volumes)
+	}
+	status := writer.volumes[0].status
+	if len(status.ExecutorPreflights) != 1 {
+		t.Fatalf("executor preflights=%+v", status.ExecutorPreflights)
+	}
+	preflight := status.ExecutorPreflights[0]
+	if preflight.ActionType != ManagedVolumeActionReintegrateReturned ||
+		preflight.Decision != ReturnedReplicaExecutorPreflightReady ||
+		preflight.Reason != ReturnedReplicaExecutorPreflightReasonSatisfied ||
+		preflight.MutationAllowed {
+		t.Fatalf("executor preflight=%+v", preflight)
+	}
+	if len(status.ExecutorContracts) != 1 {
+		t.Fatalf("executor contracts=%+v", status.ExecutorContracts)
+	}
+	contract := status.ExecutorContracts[0]
+	if contract.ActionType != ManagedVolumeActionReintegrateReturned ||
+		contract.Decision != ReturnedReplicaExecutorContractDisabled ||
+		contract.Reason != ReturnedReplicaExecutorContractReasonExecutorDisabled ||
+		contract.ExecutionEnabled ||
+		contract.MutationAllowed ||
+		!containsActionFact(contract.AllowedMutationClass, "ack_eligibility") ||
+		!containsActionFact(contract.TerminalEvidenceRequired, "frontend_fenced_after_execution") {
+		t.Fatalf("executor contract=%+v", contract)
+	}
+	raw, err := json.Marshal(status)
+	if err != nil {
+		t.Fatalf("marshal status: %v", err)
+	}
+	for _, want := range []string{`"executorPreflights"`, `"executorContracts"`, `"actionType"`, `"mutationAllowed"`, `"executionEnabled"`, `"durableFrontierLsn"`, `"forbiddenMutationClass"`, `"terminalEvidenceRequired"`} {
+		if !strings.Contains(string(raw), want) {
+			t.Fatalf("CRD status missing %s: %s", want, string(raw))
+		}
+	}
+	for _, forbidden := range []string{"executor_preflights", "executor_contracts", "action_type", "mutation_allowed", "execution_enabled", "durable_frontier_lsn", "terminal_evidence_required"} {
+		if strings.Contains(string(raw), forbidden) {
+			t.Fatalf("CRD status leaked snake_case %s: %s", forbidden, string(raw))
+		}
+	}
+}
+
+func TestOperatorStatusReconcilerWritesReturnedReplicaRebuildContract(t *testing.T) {
+	capturedAt := time.Date(2026, 6, 23, 12, 0, 0, 0, time.UTC)
+	source := fakeOperatorStatusSource{cluster: ClusterEvidence{
+		SchemaVersion: ObservationSchemaVersion,
+		CapturedAt:    capturedAt,
+		Status:        ObservationStatusRecovering,
+		ManagedVolumes: []ManagedVolumeProjection{ProjectManagedVolume(ManagedVolumeFacts{
+			VolumeID: "pvc-behind",
+			PVCName:  "behind-pvc",
+			Authority: &AuthorityFact{
+				PrimaryReplica:        "r2",
+				PreviousPrimary:       "r1",
+				RequiredFrontierKnown: true,
+				RequiredFrontierLSN:   52,
+			},
+			Replicas: []ReplicaFact{{
+				ReplicaID:            "r1",
+				Observed:             true,
+				Role:                 "previous_primary",
+				DurableFrontierKnown: true,
+				DurableFrontierLSN:   51,
+				FrontendPrimaryReady: false,
+				AckEligibilityKnown:  true,
+				AckEligible:          false,
+				StalePrimaryFenced:   true,
+			}, {
+				ReplicaID:            "r2",
+				Observed:             true,
+				Role:                 "primary",
+				DurableFrontierKnown: true,
+				DurableFrontierLSN:   52,
+			}},
+			EvidenceRefs: []string{"returned-replica-summary.txt"},
+		})},
+	}}
+	writer := &fakeOperatorStatusWriter{}
+
+	_, err := (OperatorStatusReconciler{
+		Namespace: "kube-system",
+		Source:    source,
+		Writer:    writer,
+	}).Reconcile(context.Background())
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if len(writer.volumes) != 1 {
+		t.Fatalf("volume writes=%+v", writer.volumes)
+	}
+	status := writer.volumes[0].status
+	if len(status.ExecutorPreflights) != 1 {
+		t.Fatalf("executor preflights=%+v", status.ExecutorPreflights)
+	}
+	preflight := status.ExecutorPreflights[0]
+	if preflight.ActionType != ManagedVolumeActionRebuildReturned ||
+		preflight.Decision != ReturnedReplicaExecutorPreflightReady ||
+		preflight.Reason != ReturnedReplicaExecutorPreflightReasonSatisfied ||
+		preflight.DurableFrontierLSN != 51 ||
+		preflight.RequiredFrontierLSN != 52 ||
+		preflight.MutationAllowed {
+		t.Fatalf("rebuild preflight=%+v", preflight)
+	}
+	if len(status.ExecutorContracts) != 1 {
+		t.Fatalf("executor contracts=%+v", status.ExecutorContracts)
+	}
+	contract := status.ExecutorContracts[0]
+	if contract.ActionType != ManagedVolumeActionRebuildReturned ||
+		contract.Decision != ReturnedReplicaExecutorContractDisabled ||
+		contract.Reason != ReturnedReplicaExecutorContractReasonExecutorDisabled ||
+		contract.ExecutionEnabled ||
+		contract.MutationAllowed ||
+		!containsActionFact(contract.AllowedMutationClass, "rebuild_traffic") ||
+		!containsActionFact(contract.ForbiddenMutationClass, "frontend_publication") ||
+		!containsActionFact(contract.TerminalEvidenceRequired, "durable_frontier_caught_up") {
+		t.Fatalf("rebuild contract=%+v", contract)
+	}
+	raw, err := json.Marshal(status)
+	if err != nil {
+		t.Fatalf("marshal status: %v", err)
+	}
+	for _, want := range []string{`"actionType":"authority.rebuild_returned_replica"`, `"allowedMutationClass":["rebuild_traffic"]`, `"executionEnabled":false`} {
+		if !strings.Contains(string(raw), want) {
+			t.Fatalf("CRD status missing %s: %s", want, string(raw))
+		}
+	}
+}
+
+func TestOperatorStatusReconcilerWritesReturnedReplicaFailbackContract(t *testing.T) {
+	capturedAt := time.Date(2026, 6, 24, 12, 0, 0, 0, time.UTC)
+	source := fakeOperatorStatusSource{cluster: ClusterEvidence{
+		SchemaVersion: ObservationSchemaVersion,
+		CapturedAt:    capturedAt,
+		Status:        ObservationStatusRecovering,
+		ManagedVolumes: []ManagedVolumeProjection{ProjectManagedVolume(ManagedVolumeFacts{
+			VolumeID: "pvc-failback",
+			PVCName:  "failback-pvc",
+			Authority: &AuthorityFact{
+				PrimaryReplica:        "r2",
+				PreviousPrimary:       "r1",
+				RequiredFrontierKnown: true,
+				RequiredFrontierLSN:   52,
+			},
+			Replicas: []ReplicaFact{{
+				ReplicaID:            "r1",
+				Observed:             true,
+				Role:                 "previous_primary",
+				DurableFrontierKnown: true,
+				DurableFrontierLSN:   52,
+				FrontendPrimaryReady: false,
+				AckEligibilityKnown:  true,
+				AckEligible:          true,
+				StalePrimaryFenced:   true,
+			}, {
+				ReplicaID:            "r2",
+				Observed:             true,
+				Role:                 "primary",
+				DurableFrontierKnown: true,
+				DurableFrontierLSN:   52,
+			}},
+			EvidenceRefs: []string{"returned-replica-summary.txt"},
+		})},
+	}}
+	writer := &fakeOperatorStatusWriter{}
+
+	_, err := (OperatorStatusReconciler{
+		Namespace: "kube-system",
+		Source:    source,
+		Writer:    writer,
+	}).Reconcile(context.Background())
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if len(writer.volumes) != 1 {
+		t.Fatalf("volume writes=%+v", writer.volumes)
+	}
+	status := writer.volumes[0].status
+	if len(status.ExecutorPreflights) != 1 {
+		t.Fatalf("executor preflights=%+v", status.ExecutorPreflights)
+	}
+	preflight := status.ExecutorPreflights[0]
+	if preflight.ActionType != ManagedVolumeActionFailbackReturned ||
+		preflight.Decision != ReturnedReplicaExecutorPreflightReady ||
+		preflight.Reason != ReturnedReplicaExecutorPreflightReasonSatisfied ||
+		!preflight.AckEligible ||
+		preflight.MutationAllowed {
+		t.Fatalf("failback preflight=%+v", preflight)
+	}
+	if len(status.ExecutorContracts) != 1 {
+		t.Fatalf("executor contracts=%+v", status.ExecutorContracts)
+	}
+	contract := status.ExecutorContracts[0]
+	if contract.ActionType != ManagedVolumeActionFailbackReturned ||
+		contract.Decision != ReturnedReplicaExecutorContractDisabled ||
+		contract.Reason != ReturnedReplicaExecutorContractReasonExecutorDisabled ||
+		contract.ExecutionEnabled ||
+		contract.MutationAllowed ||
+		!containsActionFact(contract.AllowedMutationClass, "failback") ||
+		!containsActionFact(contract.ForbiddenMutationClass, "frontend_publication") ||
+		!containsActionFact(contract.TerminalEvidenceRequired, "failback_authority_owner") ||
+		!containsActionFact(contract.TerminalEvidenceRequired, "publish_target_swapped_after_failback") {
+		t.Fatalf("failback contract=%+v", contract)
+	}
+	raw, err := json.Marshal(status)
+	if err != nil {
+		t.Fatalf("marshal status: %v", err)
+	}
+	for _, want := range []string{`"actionType":"authority.failback_returned_replica"`, `"allowedMutationClass":["failback"]`, `"executionEnabled":false`, `"mutationAllowed":false`} {
+		if !strings.Contains(string(raw), want) {
+			t.Fatalf("CRD status missing %s: %s", want, string(raw))
+		}
 	}
 }
 

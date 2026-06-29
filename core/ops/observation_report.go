@@ -138,6 +138,23 @@ func renderManagedProjectionSummary(b *strings.Builder, managed ManagedVolumePro
 		emptyAsDash(managed.VolumeID),
 		emptyAsDash(managed.Status),
 		emptyAsDash(managed.ReasonCode))
+	fmt.Fprintf(b, "managed_volume_authority=%s primary=%s publish_target=%s epoch=%d endpoint_version=%d\n",
+		emptyAsDash(managed.VolumeID),
+		emptyAsDash(managed.PrimaryReplicaID),
+		emptyAsDash(managed.PublishTarget),
+		managed.AuthorityEpoch,
+		managed.AuthorityEndpointVersion)
+	if managed.NVMe != nil {
+		fmt.Fprintf(b, "managed_volume_nvme=%s nqn=%s nsid=%d addr=%s addrs=%s path_count=%d multipath_observed=%t reason=%s\n",
+			emptyAsDash(managed.VolumeID),
+			emptyAsDash(managed.NVMe.NQN),
+			managed.NVMe.NSID,
+			emptyAsDash(managed.NVMe.NVMeAddr),
+			emptyAsDash(strings.Join(managed.NVMe.NVMeAddrs, ",")),
+			managed.NVMe.PathCount,
+			managed.NVMe.MultipathObserved,
+			emptyAsDash(managed.NVMe.ReasonCode))
+	}
 	for _, condition := range managed.Conditions {
 		fmt.Fprintf(b, "managed_volume_condition=%s status=%s reason=%s severity=%s\n",
 			emptyAsDash(condition.Type),
@@ -158,6 +175,45 @@ func renderManagedProjectionSummary(b *strings.Builder, managed ManagedVolumePro
 				emptyAsDash(managed.VolumeID),
 				managed.DeleteSafety.SafeNextAction)
 		}
+	}
+	for _, returned := range managed.ReplicaReintegrations {
+		fmt.Fprintf(b, "managed_volume_returned_replica=%s replica=%s state=%s reason=%s frontend_fenced=%t ack_eligibility_known=%t ack_eligible=%t durable_frontier_known=%t durable_lsn=%d required_frontier_known=%t required_lsn=%d\n",
+			emptyAsDash(managed.VolumeID),
+			emptyAsDash(returned.ReplicaID),
+			emptyAsDash(returned.State),
+			emptyAsDash(returned.ReasonCode),
+			returned.FrontendFenced,
+			returned.AckEligibilityKnown,
+			returned.AckEligible,
+			returned.DurableFrontierKnown,
+			returned.DurableFrontierLSN,
+			returned.RequiredFrontierKnown,
+			returned.RequiredFrontierLSN)
+	}
+	for _, preflight := range ReturnedReplicaExecutorPreflights(managed) {
+		fmt.Fprintf(b, "managed_volume_executor_preflight=%s target=%s decision=%s reason=%s mode=%s executor=%s mutation_allowed=%t ack_eligibility_known=%t required_lsn=%d durable_lsn=%d\n",
+			emptyAsDash(preflight.ActionType),
+			emptyAsDash(preflight.ReplicaID),
+			emptyAsDash(preflight.Decision),
+			emptyAsDash(preflight.Reason),
+			emptyAsDash(preflight.Mode),
+			emptyAsDash(preflight.OwnerExecutor),
+			preflight.MutationAllowed,
+			preflight.AckEligibilityKnown,
+			preflight.RequiredFrontierLSN,
+			preflight.DurableFrontierLSN)
+	}
+	for _, contract := range ReturnedReplicaExecutorContracts(managed) {
+		fmt.Fprintf(b, "managed_volume_executor_contract=%s target=%s decision=%s reason=%s executor=%s execution_enabled=%t mutation_allowed=%t allowed_mutation=%s terminal_evidence=%s\n",
+			emptyAsDash(contract.ActionType),
+			emptyAsDash(contract.ReplicaID),
+			emptyAsDash(contract.Decision),
+			emptyAsDash(contract.Reason),
+			emptyAsDash(contract.OwnerExecutor),
+			contract.ExecutionEnabled,
+			contract.MutationAllowed,
+			emptyAsDash(strings.Join(contract.AllowedMutationClass, ",")),
+			emptyAsDash(strings.Join(contract.TerminalEvidenceRequired, ",")))
 	}
 	for _, action := range managed.Actions {
 		fmt.Fprintf(b, "managed_volume_action=%s mode=%s side_effect=%s executor=%s decision=%s",
@@ -268,17 +324,18 @@ func RenderObservationReportHTML(cluster ClusterEvidence) string {
 		b.WriteString("</tbody></table></section>")
 	}
 
-	b.WriteString("<section><h2>Managed Volumes</h2><table><thead><tr><th>Volume</th><th>Status</th><th>Reason</th><th>Conditions</th><th>Safe Actions</th></tr></thead><tbody>")
+	b.WriteString("<section><h2>Managed Volumes</h2><table><thead><tr><th>Volume</th><th>Status</th><th>Reason</th><th>NVMe</th><th>Conditions</th><th>Safe Actions</th></tr></thead><tbody>")
 	for _, managed := range cluster.ManagedVolumes {
 		class := "ok"
 		if managed.Status != ManagedVolumeStatusReady && managed.Status != ManagedVolumeStatusRecovered {
 			class = "bad"
 		}
-		fmt.Fprintf(&b, "<tr><td><code>%s</code></td><td class=\"%s\">%s</td><td>%s</td><td>%s</td><td>%s</td></tr>",
+		fmt.Fprintf(&b, "<tr><td><code>%s</code></td><td class=\"%s\">%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>",
 			esc(emptyAsDash(managed.VolumeID)),
 			class,
 			esc(emptyAsDash(managed.Status)),
 			esc(emptyAsDash(managed.ReasonCode)),
+			esc(managedNVMeSummary(managed.NVMe)),
 			esc(managedConditionSummary(managed.Conditions)),
 			esc(managedActionSummary(managed.Actions)))
 	}
@@ -354,6 +411,22 @@ func managedConditionSummary(conditions []ObservationCondition) string {
 		parts = append(parts, fmt.Sprintf("%s=%s/%s", emptyAsDash(condition.Type), emptyAsDash(condition.Status), emptyAsDash(condition.Reason)))
 	}
 	return strings.Join(parts, "; ")
+}
+
+func managedNVMeSummary(status *ManagedVolumeNVMeStatus) string {
+	if status == nil {
+		return "-"
+	}
+	parts := []string{
+		"nqn=" + emptyAsDash(status.NQN),
+		fmt.Sprintf("nsid=%d", status.NSID),
+		fmt.Sprintf("paths=%d", status.PathCount),
+		fmt.Sprintf("multipath=%t", status.MultipathObserved),
+	}
+	if status.ReasonCode != "" {
+		parts = append(parts, "reason="+status.ReasonCode)
+	}
+	return strings.Join(parts, " ")
 }
 
 func managedActionSummary(actions []ManagedVolumeAction) string {

@@ -147,6 +147,69 @@ func TestMasterObservationSnapshot_NoLifecycleStoreReturnsEmptyOK(t *testing.T) 
 	}
 }
 
+func TestMasterObservationSnapshot_PreservesNVMeFrontendIdentityInVolumeEvidence(t *testing.T) {
+	h := newTestMasterWithControllerConfig(t, t.TempDir(), authority.TopologyControllerConfig{
+		ExpectedSlotsPerVolume: 1,
+	})
+	defer closeTestMaster(t, h)
+	if _, err := h.Lifecycle().Volumes.CreateVolume(lifecycle.VolumeSpec{
+		VolumeID:          "pvc-nvme",
+		SizeBytes:         1 << 20,
+		ReplicationFactor: 1,
+		Protocol:          "nvme",
+		PVCName:           "nvme-pvc",
+		PVCNamespace:      "default",
+	}); err != nil {
+		t.Fatalf("create volume: %v", err)
+	}
+	if _, err := h.Lifecycle().Placements.ApplyPlan(lifecycle.PlacementPlan{
+		VolumeID:  "pvc-nvme",
+		DesiredRF: 1,
+		Candidates: []lifecycle.PlacementCandidate{{
+			VolumeID:  "pvc-nvme",
+			ServerID:  "m01",
+			ReplicaID: "r1",
+			Source:    lifecycle.PlacementSourceExistingReplica,
+		}},
+	}); err != nil {
+		t.Fatalf("apply placement: %v", err)
+	}
+	if err := h.ObservationHost().Ingest(authority.Observation{
+		ServerID:   "m01",
+		ObservedAt: time.Now().UTC(),
+		Server:     authority.ServerFact{Reachable: true, Eligible: true},
+		Slots: []authority.SlotFact{{
+			VolumeID:        "pvc-nvme",
+			ReplicaID:       "r1",
+			DataAddr:        "192.168.1.181:19101",
+			CtrlAddr:        "192.168.1.181:19102",
+			Reachable:       true,
+			ReadyForPrimary: true,
+			Eligible:        true,
+			Frontends: []authority.FrontendTargetFact{{
+				Protocol: "nvme",
+				Addr:     "127.0.0.1:4420",
+				NQN:      "nqn.2026-05.io.seaweedfs:pvc-nvme",
+				NSID:     1,
+			}},
+		}},
+	}); err != nil {
+		t.Fatalf("ingest nvme observation: %v", err)
+	}
+
+	snapshot := h.ObservationSnapshot(time.Now().UTC())
+	if len(snapshot.Volumes) != 1 || len(snapshot.Volumes[0].Replicas) != 1 {
+		t.Fatalf("snapshot=%+v", snapshot)
+	}
+	replica := snapshot.Volumes[0].Replicas[0]
+	if replica.FrontendProtocol != "nvme" ||
+		replica.FrontendAddr != "127.0.0.1:4420" ||
+		replica.FrontendNQN != "nqn.2026-05.io.seaweedfs:pvc-nvme" ||
+		replica.FrontendNSID != 1 {
+		t.Fatalf("replica frontend=%+v", replica)
+	}
+}
+
 func seedObservationSnapshotVolume(t *testing.T, h *Host) {
 	t.Helper()
 	if _, err := h.Lifecycle().Volumes.CreateVolume(lifecycle.VolumeSpec{

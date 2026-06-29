@@ -1,0 +1,160 @@
+# Runner-native Phase 60 gate: real rebuild/catch-up data-path evidence.
+
+name: rebuild-catchup-datapath-chain
+timeout: 8m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: rebuild_catchup_datapath_gate
+    actions:
+      - action: exec
+        node: m02
+        timeout: 7m
+        cmd: "rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase60-rebuild-catchup-datapath && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase60-rebuild-catchup-datapath && cd {{ product_root }} && SW_BLOCK_ARTIFACT_DIR=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase60-rebuild-catchup-datapath bash scripts/run-phase60-rebuild-catchup-datapath-gate.sh {{ product_root }}"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase60-rebuild-catchup-datapath/phase60-rebuild-catchup-datapath-summary.txt"
+        pattern: "^phase60_rebuild_catchup_datapath_status=ok$"
+        save_as: phase60_ok
+      - action: assert_greater
+        actual: "{{ phase60_ok }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase60-rebuild-catchup-datapath/phase60-rebuild-catchup-datapath-summary.txt"
+        pattern: "^engine_catchup_roundtrip_test=true$"
+        save_as: engine_catchup
+      - action: assert_greater
+        actual: "{{ engine_catchup }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase60-rebuild-catchup-datapath/phase60-rebuild-catchup-datapath-summary.txt"
+        pattern: "^catchup_barrier_confirms_test=true$"
+        save_as: catchup_barrier
+      - action: assert_greater
+        actual: "{{ catchup_barrier }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase60-rebuild-catchup-datapath/phase60-rebuild-catchup-datapath-summary.txt"
+        pattern: "^dual_lane_rebuild_test=true$"
+        save_as: dual_lane_rebuild
+      - action: assert_greater
+        actual: "{{ dual_lane_rebuild }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase60-rebuild-catchup-datapath/phase60-rebuild-catchup-datapath-summary.txt"
+        pattern: "^post_close_durable_ack_test=true$"
+        save_as: durable_ack_test
+      - action: assert_greater
+        actual: "{{ durable_ack_test }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase60-rebuild-catchup-datapath/phase60-rebuild-catchup-datapath-summary.txt"
+        pattern: "^live_write_during_rebuild_test=true$"
+        save_as: live_write
+      - action: assert_greater
+        actual: "{{ live_write }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase60-rebuild-catchup-datapath/phase60-rebuild-catchup-datapath-summary.txt"
+        pattern: "^same_lba_arbitration_test=true$"
+        save_as: same_lba
+      - action: assert_greater
+        actual: "{{ same_lba }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase60-rebuild-catchup-datapath/phase60-rebuild-catchup-datapath-summary.txt"
+        pattern: "^start_catchup_observed=true$"
+        save_as: start_catchup
+      - action: assert_greater
+        actual: "{{ start_catchup }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase60-rebuild-catchup-datapath/phase60-rebuild-catchup-datapath-summary.txt"
+        pattern: "^start_rebuild_observed=true$"
+        save_as: start_rebuild
+      - action: assert_greater
+        actual: "{{ start_rebuild }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase60-rebuild-catchup-datapath/phase60-rebuild-catchup-datapath-summary.txt"
+        pattern: "^session_closed_completed_observed=true$"
+        save_as: session_closed
+      - action: assert_greater
+        actual: "{{ session_closed }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase60-rebuild-catchup-datapath/phase60-rebuild-catchup-datapath-summary.txt"
+        pattern: "^byte_equal_assertions_passed=true$"
+        save_as: byte_equal
+      - action: assert_greater
+        actual: "{{ byte_equal }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase60-rebuild-catchup-datapath/phase60-rebuild-catchup-datapath-summary.txt"
+        pattern: "^rebuild_traffic_started=true$"
+        save_as: rebuild_traffic
+      - action: assert_greater
+        actual: "{{ rebuild_traffic }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase60-rebuild-catchup-datapath/phase60-rebuild-catchup-datapath-summary.txt"
+        pattern: "^catchup_traffic_started=true$"
+        save_as: catchup_traffic
+      - action: assert_greater
+        actual: "{{ catchup_traffic }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase60-rebuild-catchup-datapath/phase60-rebuild-catchup-datapath-summary.txt"
+        pattern: "^authority_executor_datapath_callsite=false$"
+        save_as: executor_not_wired
+      - action: assert_greater
+        actual: "{{ executor_not_wired }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase60-rebuild-catchup-datapath/phase60-rebuild-catchup-datapath-summary.txt"
+        pattern: "^frontend_publication_allowed=false$"
+        save_as: no_frontend
+      - action: assert_greater
+        actual: "{{ no_frontend }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase60-rebuild-catchup-datapath/phase60-rebuild-catchup-datapath-summary.txt"
+        pattern: "^failback_allowed=false$"
+        save_as: no_failback
+      - action: assert_greater
+        actual: "{{ no_failback }}"
+        threshold: "0"
+
+  - name: collect
+    always: true
+    actions:
+      - action: collect_path
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase60-rebuild-catchup-datapath"
+        name: "remote-phases"
+        ignore_error: true

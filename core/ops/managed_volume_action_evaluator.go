@@ -142,11 +142,52 @@ func managedVolumeActionFactPresent(requiredFact string, facts ManagedVolumeFact
 			}
 		}
 		return false
+	case "replica.frontend_primary_ready":
+		for _, replica := range facts.Replicas {
+			if isReturnedReplicaCandidate(replica, derefAuthorityFact(facts.Authority)) {
+				return true
+			}
+		}
+		return false
+	case "returned_replica.frontend_fenced":
+		for _, returned := range returnedReplicaProjections(facts) {
+			if returned.State == ReturnedReplicaStateFenced && returned.FrontendFenced && !returned.FrontendPrimaryReady && !returned.AckEligible {
+				return true
+			}
+		}
+		return false
+	case "returned_replica.ack_eligible_true":
+		for _, returned := range returnedReplicaProjections(facts) {
+			if returned.State == ReturnedReplicaStateFenced && returned.FrontendFenced && !returned.FrontendPrimaryReady && returned.AckEligibilityKnown && returned.AckEligible {
+				return true
+			}
+		}
+		return false
+	case "returned_replica.required_frontier_covered":
+		for _, returned := range returnedReplicaProjections(facts) {
+			if returned.State != ReturnedReplicaStateFenced || !returned.DurableFrontierKnown {
+				continue
+			}
+			if !returned.RequiredFrontierKnown {
+				return false
+			}
+			if returned.DurableFrontierLSN >= returned.RequiredFrontierLSN {
+				return true
+			}
+		}
+		return false
 	default:
 		// Unknown fact names are treated as missing so new contract entries
 		// must be deliberately wired into this executable evaluator.
 		return false
 	}
+}
+
+func derefAuthorityFact(authority *AuthorityFact) AuthorityFact {
+	if authority == nil {
+		return AuthorityFact{}
+	}
+	return *authority
 }
 
 func (e ManagedVolumeActionEvaluation) String() string {

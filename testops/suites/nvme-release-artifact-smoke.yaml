@@ -1,0 +1,16 @@
+name: nvme-release-artifact-smoke-suite
+mode: chain
+
+# Release-artifact gate for Phase 102.
+#
+# Required suite env:
+#   release_image=ghcr.io/seaweedfs/seaweed-block:sha-<commit>
+#   release_csi_image=ghcr.io/seaweedfs/seaweed-block-csi:sha-<same-commit>
+#
+# The scenario validates that the published images, not source-built local
+# images, can run the Phase 100 NVMe CSI multipath attach path and the Phase 101
+# standalone NVMe hardening gates.
+
+scenarios:
+  - id: nvme-release-artifact-smoke
+    path: ../scenarios/nvme-release-artifact-smoke-chain.yaml

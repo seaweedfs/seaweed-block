@@ -1,0 +1,60 @@
+# Runner-native Phase 87 gate: docs agree that returned-replica failback
+# runtime is opt-in/source-gated and automatic deployed failback is not claimed.
+
+name: failback-docs-alignment-chain
+timeout: 4m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: failback_docs_alignment
+    actions:
+      - action: exec
+        node: m02
+        timeout: 3m
+        cmd: "rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase87-failback-docs-alignment && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase87-failback-docs-alignment && cd {{ product_root }} && SW_BLOCK_ARTIFACT_DIR=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase87-failback-docs-alignment bash scripts/run-phase87-failback-docs-alignment-gate.sh {{ product_root }}"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase87-failback-docs-alignment/phase87-failback-docs-alignment-summary.txt"
+        pattern: "^phase87_failback_docs_alignment_status=ok$"
+        save_as: phase87_ok
+      - action: assert_greater
+        actual: "{{ phase87_ok }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase87-failback-docs-alignment/phase87-failback-docs-alignment-summary.txt"
+        pattern: "^automatic_failback_not_claimed=true$"
+        save_as: no_auto
+      - action: assert_greater
+        actual: "{{ no_auto }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase87-failback-docs-alignment/phase87-failback-docs-alignment-summary.txt"
+        pattern: "^frontend_publication_after_failback_not_claimed=true$"
+        save_as: no_publication
+      - action: assert_greater
+        actual: "{{ no_publication }}"
+        threshold: "0"
+
+  - name: collect
+    always: true
+    actions:
+      - action: collect_path
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase87-failback-docs-alignment"
+        name: "remote-phases"
+        ignore_error: true

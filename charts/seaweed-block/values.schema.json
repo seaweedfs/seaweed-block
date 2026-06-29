@@ -34,6 +34,7 @@
           "type": "object",
           "additionalProperties": { "type": "string" }
         },
+        "failbackRuntimeRPC": { "type": "boolean" },
         "durableImpl": { "type": "string", "enum": ["walstore", "smartwal"] },
         "stateHostPath": { "type": "string" },
         "stateHostPathType": { "type": "string" },
@@ -94,6 +95,59 @@
         "dryRun": { "type": "boolean" },
         "interval": { "type": "string" },
         "clusterName": { "type": "string" },
+        "rbac": {
+          "type": "object",
+          "properties": {
+            "create": { "type": "boolean" }
+          }
+        },
+        "nodeSelector": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        }
+      }
+    },
+    "failbackTargetOwner": {
+      "type": "object",
+      "properties": {
+        "create": { "type": "boolean" },
+        "dryRun": { "type": "boolean" },
+        "interval": { "type": "string" },
+        "activation": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "policy": { "type": "boolean" },
+            "runtimeEndpoint": { "type": "string" }
+          }
+        },
+        "rbac": {
+          "type": "object",
+          "properties": {
+            "create": { "type": "boolean" }
+          }
+        },
+        "nodeSelector": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        }
+      }
+    },
+    "failbackExecutor": {
+      "type": "object",
+      "properties": {
+        "create": { "type": "boolean" },
+        "dryRun": { "type": "boolean" },
+        "interval": { "type": "string" },
+        "execution": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "policy": { "type": "boolean" },
+            "failbackRuntimeGrpcAddr": { "type": "string" },
+            "failbackRuntimeURL": { "type": "string" }
+          }
+        },
         "rbac": {
           "type": "object",
           "properties": {

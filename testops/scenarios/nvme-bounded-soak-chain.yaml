@@ -1,0 +1,112 @@
+name: nvme-bounded-soak-chain
+timeout: 30m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: pre_clean
+    actions:
+      - action: pre_run_cleanup
+        node: m02
+        kill_patterns: "blockmaster,blockvolume,blockcsi,iscsi-target"
+        nvme_disconnect: "true"
+        iscsi_logout_prefix: "iqn.2026-05.io.seaweedfs"
+      - action: exec
+        node: m02
+        cmd: "rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase101-nvme-soak && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase101-nvme-soak"
+
+  - name: nvme_bounded_soak
+    actions:
+      - action: exec
+        node: m02
+        timeout: 20m
+        cmd: "cd {{ product_root }} && bash scripts/run-nvme-mounted-failover-smoke.sh {{ product_root }}"
+        env.SW_BLOCK_ARTIFACT_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase101-nvme-soak/gate"
+        env.SW_BLOCK_NVME_SOAK_ITERATIONS: "5"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase101-nvme-soak/gate/phase101-nvme-soak-summary.txt"
+        pattern: "^phase101_nvme_soak_status=ok$"
+        save_as: soak_ok
+      - action: assert_greater
+        actual: "{{ soak_ok }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase101-nvme-soak/gate/phase101-nvme-soak-summary.txt"
+        pattern: "^before_path_count=2$"
+        save_as: before_two_paths
+      - action: assert_greater
+        actual: "{{ before_two_paths }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase101-nvme-soak/gate/phase101-nvme-soak-summary.txt"
+        pattern: "^soak_completed_iterations=5$"
+        save_as: completed_iterations
+      - action: assert_greater
+        actual: "{{ completed_iterations }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase101-nvme-soak/gate/phase101-nvme-soak-summary.txt"
+        pattern: "^soak_1_path_count=2$"
+        save_as: first_iter_two_paths
+      - action: assert_greater
+        actual: "{{ first_iter_two_paths }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase101-nvme-soak/gate/phase101-nvme-soak-summary.txt"
+        pattern: "^soak_5_path_count=2$"
+        save_as: last_iter_two_paths
+      - action: assert_greater
+        actual: "{{ last_iter_two_paths }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase101-nvme-soak/gate/phase101-nvme-soak-summary.txt"
+        pattern: "^soak_false_ready_count=0$"
+        save_as: no_false_ready
+      - action: assert_greater
+        actual: "{{ no_false_ready }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase101-nvme-soak/gate/phase101-nvme-soak-summary.txt"
+        pattern: "^soak_identity_drift_count=0$"
+        save_as: no_identity_drift
+      - action: assert_greater
+        actual: "{{ no_identity_drift }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase101-nvme-soak/gate/phase101-nvme-soak-summary.txt"
+        pattern: "^final_nvme_residue_count=0$"
+        save_as: nvme_clean
+      - action: assert_greater
+        actual: "{{ nvme_clean }}"
+        threshold: "0"
+
+  - name: collect_and_cleanup
+    always: true
+    actions:
+      - action: pre_run_cleanup
+        node: m02
+        kill_patterns: "blockmaster,blockvolume,blockcsi,iscsi-target"
+        nvme_disconnect: "true"
+        iscsi_logout_prefix: "iqn.2026-05.io.seaweedfs"
+      - action: collect_path
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase101-nvme-soak"
+        name: "remote-phases"
+        ignore_error: true

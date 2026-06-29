@@ -47,11 +47,161 @@ func TestManagedVolumeProjection_HealthyFirstVolumeReady(t *testing.T) {
 		projection.States.Workload != ManagedVolumeWorkloadVerified {
 		t.Fatalf("states=%+v", projection.States)
 	}
+	if projection.PrimaryReplicaID != "r1" ||
+		projection.PublishTarget != "127.0.0.1:3260" ||
+		projection.AuthorityEpoch != 1 ||
+		projection.AuthorityEndpointVersion != 1 {
+		t.Fatalf("authority facts primary=%s target=%s epoch=%d endpoint=%d",
+			projection.PrimaryReplicaID,
+			projection.PublishTarget,
+			projection.AuthorityEpoch,
+			projection.AuthorityEndpointVersion)
+	}
 	if len(projection.Actions) != 1 || projection.Actions[0].Type != ManagedVolumeActionCollectBundle {
 		t.Fatalf("actions=%+v", projection.Actions)
 	}
 	if projection.Actions[0].SideEffectClass != ManagedVolumeSideEffectObserve {
 		t.Fatalf("action side effect=%s", projection.Actions[0].SideEffectClass)
+	}
+}
+
+func TestManagedVolumeProjection_ProjectsNVMeMultipathIdentity(t *testing.T) {
+	projection := ProjectManagedVolume(ManagedVolumeFacts{
+		VolumeID: "pvc-nvme",
+		Authority: &AuthorityFact{
+			PrimaryReplica: "r1",
+			PublishTarget:  "127.0.0.1:4420",
+		},
+		Replicas: []ReplicaFact{{
+			ReplicaID:        "r1",
+			Observed:         true,
+			Role:             "primary",
+			FrontendProtocol: "nvme",
+			FrontendAddr:     "127.0.0.1:4421",
+			FrontendNQN:      "nqn.2026-05.io.seaweedfs:pvc-nvme",
+			FrontendNSID:     1,
+		}, {
+			ReplicaID:        "r2",
+			Observed:         true,
+			Role:             "replica",
+			FrontendProtocol: "nvme",
+			FrontendAddr:     "127.0.0.1:4420",
+			FrontendNQN:      "nqn.2026-05.io.seaweedfs:pvc-nvme",
+			FrontendNSID:     1,
+		}},
+		HostPaths: []HostPathFact{{
+			Protocol: "nvme",
+			ANAState: "optimized",
+		}},
+	})
+
+	if projection.NVMe == nil {
+		t.Fatalf("missing nvme status: %+v", projection)
+	}
+	if projection.NVMe.NQN != "nqn.2026-05.io.seaweedfs:pvc-nvme" ||
+		projection.NVMe.NSID != 1 ||
+		projection.NVMe.NVMeAddr != "127.0.0.1:4420" ||
+		projection.NVMe.PathCount != 2 ||
+		!projection.NVMe.MultipathObserved ||
+		projection.NVMe.ANAState != "optimized" ||
+		projection.NVMe.ReasonCode != "" {
+		t.Fatalf("nvme=%+v", projection.NVMe)
+	}
+	if got := projection.NVMe.NVMeAddrs; len(got) != 2 || got[0] != "127.0.0.1:4420" || got[1] != "127.0.0.1:4421" {
+		t.Fatalf("nvme addrs=%v", got)
+	}
+}
+
+func TestManagedVolumeProjection_FlagsNVMePathIdentityMismatch(t *testing.T) {
+	projection := ProjectManagedVolume(ManagedVolumeFacts{
+		VolumeID: "pvc-nvme",
+		Replicas: []ReplicaFact{{
+			ReplicaID:        "r1",
+			Observed:         true,
+			FrontendProtocol: "nvme",
+			FrontendAddr:     "127.0.0.1:4420",
+			FrontendNQN:      "nqn.2026-05.io.seaweedfs:pvc-a",
+			FrontendNSID:     1,
+		}, {
+			ReplicaID:        "r2",
+			Observed:         true,
+			FrontendProtocol: "nvme",
+			FrontendAddr:     "127.0.0.1:4421",
+			FrontendNQN:      "nqn.2026-05.io.seaweedfs:pvc-b",
+			FrontendNSID:     1,
+		}},
+	})
+
+	if projection.NVMe == nil || projection.NVMe.ReasonCode != ReasonNVMePathIdentityMismatch {
+		t.Fatalf("nvme=%+v", projection.NVMe)
+	}
+	if projection.Status != ManagedVolumeStatusBlocked || projection.ReasonCode != ReasonNVMePathIdentityMismatch {
+		t.Fatalf("status=%s reason=%s", projection.Status, projection.ReasonCode)
+	}
+}
+
+func TestManagedVolumeProjection_BlocksMissingNVMeMultipath(t *testing.T) {
+	projection := ProjectManagedVolume(ManagedVolumeFacts{
+		VolumeID:          "pvc-nvme",
+		ReplicationFactor: 2,
+		PVC: &PVCFact{
+			Phase: "Bound",
+		},
+		Authority: &AuthorityFact{
+			PrimaryReplica: "r1",
+			PublishTarget:  "127.0.0.1:4420",
+		},
+		Replicas: []ReplicaFact{{
+			ReplicaID:        "r1",
+			Observed:         true,
+			Role:             "primary",
+			FrontendProtocol: "nvme",
+			FrontendAddr:     "127.0.0.1:4420",
+			FrontendNQN:      "nqn.2026-05.io.seaweedfs:pvc-nvme",
+			FrontendNSID:     1,
+		}},
+		CSIStages: []CSIStageFact{{
+			NodeName: "m02",
+			Target:   "/var/lib/kubelet/plugins/kubernetes.io/csi",
+		}},
+		Workload: &WorkloadCheckFact{
+			WriterVerified: true,
+			ReaderVerified: true,
+		},
+	})
+
+	if projection.NVMe == nil || projection.NVMe.ReasonCode != ReasonNVMeMultipathPathMissing {
+		t.Fatalf("nvme=%+v", projection.NVMe)
+	}
+	if projection.Status != ManagedVolumeStatusBlocked || projection.ReasonCode != ReasonNVMeMultipathPathMissing {
+		t.Fatalf("status=%s reason=%s", projection.Status, projection.ReasonCode)
+	}
+}
+
+func TestManagedVolumeProjection_BlocksMissingNVMeMultipathFromDesiredReplicas(t *testing.T) {
+	projection := ProjectManagedVolume(ManagedVolumeFacts{
+		VolumeID:        "pvc-nvme",
+		DesiredReplicas: 2,
+		Authority: &AuthorityFact{
+			PrimaryReplica: "r2",
+			PublishTarget:  "127.0.0.1:4421",
+		},
+		Replicas: []ReplicaFact{{
+			ReplicaID:        "r2",
+			Observed:         true,
+			Role:             "primary",
+			FrontendProtocol: "nvme",
+			FrontendAddr:     "127.0.0.1:4421",
+			FrontendNQN:      "nqn.2026-05.io.seaweedfs:pvc-nvme",
+			FrontendNSID:     1,
+		}},
+	})
+
+	if projection.NVMe == nil || projection.NVMe.PathCount != 1 || projection.NVMe.ReasonCode != ReasonNVMeMultipathPathMissing {
+		t.Fatalf("nvme=%+v", projection.NVMe)
+	}
+	if projection.Status != ManagedVolumeStatusBlocked || projection.ReasonCode != ReasonNVMeMultipathPathMissing {
+		t.Fatalf("status=%s reason=%s", projection.Status, projection.ReasonCode)
 	}
 }
 
@@ -474,6 +624,147 @@ func TestManagedVolumeProjection_NodeLossReattachRecovered(t *testing.T) {
 	}
 	if len(projection.Actions) != 1 || projection.Actions[0].Type != ManagedVolumeActionCollectBundle {
 		t.Fatalf("actions=%+v", projection.Actions)
+	}
+}
+
+func TestManagedVolumeProjection_ReturnedPreviousPrimaryStaysFrontendFenced(t *testing.T) {
+	projection := ProjectManagedVolume(ManagedVolumeFacts{
+		VolumeID:          "pvc-returned",
+		Namespace:         "default",
+		PVCName:           "demo-pvc",
+		ReplicationFactor: 3,
+		AckProfile:        "sync-quorum",
+		PVC:               &PVCFact{Phase: "Bound"},
+		Authority: &AuthorityFact{
+			PrimaryReplica:        "r2",
+			PreviousPrimary:       "r1",
+			PublishTarget:         "192.168.1.184:3260",
+			Epoch:                 2,
+			EndpointVersion:       9,
+			RequiredFrontierKnown: true,
+			RequiredFrontierLSN:   52,
+		},
+		Replicas: []ReplicaFact{{
+			ReplicaID:            "r1",
+			KubernetesNode:       "m01",
+			Observed:             true,
+			Role:                 "replica",
+			ReplicationRole:      "ready",
+			DurableFrontierKnown: true,
+			DurableFrontierLSN:   52,
+			Healthy:              false,
+			FrontendPrimaryReady: false,
+			AckEligibilityKnown:  true,
+			AckEligible:          false,
+			StalePrimaryFenced:   true,
+		}, {
+			ReplicaID:            "r2",
+			KubernetesNode:       "m02",
+			Observed:             true,
+			Role:                 "primary",
+			DurableFrontierKnown: true,
+			DurableFrontierLSN:   52,
+			FrontendAddr:         "192.168.1.184:3260",
+		}},
+		EvidenceRefs: []string{"returned-replica-summary.txt"},
+	})
+
+	if len(projection.ReplicaReintegrations) != 1 {
+		t.Fatalf("returned replicas=%+v", projection.ReplicaReintegrations)
+	}
+	returned := projection.ReplicaReintegrations[0]
+	if returned.ReplicaID != "r1" || returned.State != ReturnedReplicaStateFenced || returned.ReasonCode != ReasonReturnedReplicaFrontendFenced {
+		t.Fatalf("returned projection=%+v", returned)
+	}
+	if !returned.FrontendFenced || returned.FrontendPrimaryReady || returned.AckEligible {
+		t.Fatalf("returned replica must be fenced and not ack eligible: %+v", returned)
+	}
+	action := findManagedVolumeAction(projection.Actions, ManagedVolumeActionReintegrateReturned)
+	if action == nil {
+		t.Fatalf("missing reintegrate action: %+v", projection.Actions)
+	}
+	if action.Decision != ManagedVolumeActionDecisionAllowed || action.DecisionReason != "" {
+		t.Fatalf("reintegrate action must be dry-run admitted only after fencing/frontier evidence: %+v", action)
+	}
+	if hasManagedVolumeAction(projection.Actions, ManagedVolumeActionFailbackReturned) {
+		t.Fatalf("failback action must not appear before ACK eligibility is recorded: %+v", projection.Actions)
+	}
+}
+
+func TestManagedVolumeProjection_ReturnedReplicaFailbackActionAfterAckEligibility(t *testing.T) {
+	projection := ProjectManagedVolume(ManagedVolumeFacts{
+		VolumeID: "pvc-returned",
+		PVC:      &PVCFact{Phase: "Bound"},
+		Authority: &AuthorityFact{
+			PrimaryReplica:        "r2",
+			PreviousPrimary:       "r1",
+			RequiredFrontierKnown: true,
+			RequiredFrontierLSN:   52,
+		},
+		Replicas: []ReplicaFact{{
+			ReplicaID:            "r1",
+			Observed:             true,
+			Role:                 "replica",
+			ReplicationRole:      "ready",
+			DurableFrontierKnown: true,
+			DurableFrontierLSN:   52,
+			FrontendPrimaryReady: false,
+			AckEligibilityKnown:  true,
+			AckEligible:          true,
+			StalePrimaryFenced:   true,
+		}, {
+			ReplicaID:            "r2",
+			KubernetesNode:       "m02",
+			Observed:             true,
+			Role:                 "primary",
+			DurableFrontierKnown: true,
+			DurableFrontierLSN:   52,
+			FrontendAddr:         "192.168.1.184:3260",
+		}},
+		EvidenceRefs: []string{"returned-replica-summary.txt"},
+	})
+
+	action := findManagedVolumeAction(projection.Actions, ManagedVolumeActionFailbackReturned)
+	if action == nil {
+		t.Fatalf("missing failback action after ACK eligibility: %+v", projection.Actions)
+	}
+	if action.Decision != ManagedVolumeActionDecisionRejected || action.DecisionReason != ManagedVolumeActionRejectDisabled {
+		t.Fatalf("failback action must stay policy-disabled: %+v", action)
+	}
+}
+
+func TestManagedVolumeProjection_ReturnedReplicaFrontendReadyBlocksVolume(t *testing.T) {
+	projection := ProjectManagedVolume(ManagedVolumeFacts{
+		VolumeID: "pvc-unsafe-returned",
+		PVC:      &PVCFact{Phase: "Bound"},
+		Authority: &AuthorityFact{
+			PrimaryReplica:  "r2",
+			PreviousPrimary: "r1",
+			PublishTarget:   "192.168.1.184:3260",
+		},
+		Replicas: []ReplicaFact{{
+			ReplicaID:            "r1",
+			Observed:             true,
+			Role:                 "replica",
+			DurableFrontierKnown: true,
+			DurableFrontierLSN:   52,
+			FrontendPrimaryReady: true,
+		}, {
+			ReplicaID: "r2",
+			Observed:  true,
+			Role:      "primary",
+		}},
+	})
+
+	if projection.Status != ManagedVolumeStatusBlocked {
+		t.Fatalf("status=%s reason=%s returned=%+v", projection.Status, projection.ReasonCode, projection.ReplicaReintegrations)
+	}
+	if projection.ReasonCode != ReasonReturnedReplicaUnsafeFrontend {
+		t.Fatalf("reason=%s", projection.ReasonCode)
+	}
+	ready := findObservationCondition(projection.Conditions, ConditionReady)
+	if ready == nil || ready.Status == "True" {
+		t.Fatalf("unsafe returned replica must not emit Ready=True: %+v", projection.Conditions)
 	}
 }
 

@@ -34,8 +34,10 @@ This is an **alpha** product path for supported lab clusters, not production.
 | Multi-volume RF=3 lab path | Gated | CSI reattach recovery | Gated |
 | iSCSI ALUA/dm-multipath mounted failover | Gated | Restart persistence with hostPath | Gated |
 | Actionable read-only CRD status + Events | Available | Bounded SwBlockVolume finalizer lifecycle | Beta candidate |
-| Backup/snapshot/restore | Planned | Returned-replica rebuild/failback | Planned |
-| NVMe ANA parity | Planned | Production SLO/performance claims | Not claimed |
+| Returned-replica ACK eligibility executor | Beta candidate | Returned-replica failback runtime | Source-gated |
+| Returned-replica rebuild traffic | Planned | Frontend publication after failback | Planned |
+| NVMe-oF CSI multipath + hardening lab path | Gated | Backup/snapshot/restore | Planned |
+| Production SLO/performance claims | Not claimed | Hosted production UI | Not claimed |
 
 ## What You Can Do Today
 
@@ -59,6 +61,20 @@ This is an **alpha** product path for supported lab clusters, not production.
   supplied cleanup evidence.
 - Inspect install drift status for current versus desired chart/app/image
   identity. This is visibility only, not upgrade execution.
+- In the gated returned-replica path, inspect a bounded authority-executor
+  result that records ACK eligibility on `SwBlockReplicaEligibility.status`
+  after live evidence proves the old primary remains fenced, the current primary
+  is unchanged, and the required durable frontier is covered.
+- From source, run the opt-in returned-replica failback runtime gates. This path
+  can move authority through blockmaster only when a `SwBlockReplicaFailback`
+  target, explicit execution policy, expected-current evidence, and terminal
+  evidence are all present. It is not enabled by default and is not yet a
+  published release claim.
+- From source, run the supported-lab NVMe-oF gates: ANA/direct-host baseline,
+  CSI protocol selection, Kubernetes CSI multipath attach for one NQN/NSID with
+  multiple NVMe frontend paths, one-path-loss status honesty, repeated
+  stage/unstage residue checks, and a bounded writer/reader soak. This is a lab
+  gate, not a broad NVMe compatibility or performance claim.
 - Replay support bundles offline.
 
 These are narrow alpha claims tied to documented gates. See
@@ -73,9 +89,12 @@ These are narrow alpha claims tied to documented gates. See
 - Automatic cleanup execution, host repair, or PVC/PV/workload deletion.
   Delete-safety uses externally supplied cleanup evidence.
 - Backup, snapshot, or restore.
-- Returned-replica rebuild, reintegration, or failback.
+- Returned-replica rebuild traffic, frontend publication after failback, or
+  automatic deployed failback. The failback runtime path is explicit, opt-in,
+  and source-gated until a release smoke validates it on published images.
 - Transparent Kubernetes node-loss failover without pod recreate.
-- NVMe ANA parity for the transparent failover path.
+- Broad NVMe/RoCE compatibility, performance/SLO, or transparent failover
+  parity beyond the documented supported-lab gates.
 - Broad distro/kernel/initiator compatibility.
 - Upgrade or rollback execution. The status layer can report install drift, but
   it does not run Helm or kubectl mutations.
@@ -123,6 +142,11 @@ This tag covers the v0.4 read-only/status foundation path. The v0.5
 bounded lifecycle-owner path requires matching `sw-block` and `sw-block-csi`
 images published from the Phase 44 release commit; do not use the older
 quickstart tag to validate lifecycle-owner behavior.
+The v0.6 returned-replica ACK eligibility executor path likewise requires
+matching images published from the Phase 54 release commit and must be validated
+with the release smoke before it is marked shipped.
+The returned-replica failback runtime added after v0.6 is source-gated and
+requires a future release smoke before it becomes a public image claim.
 
 Mutable `:alpha` is a smoke/demo tag only; it can drift from the source tree.
 

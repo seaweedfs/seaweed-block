@@ -1,0 +1,168 @@
+# Runner-native Phase 54 D4 gate: authority-executor ACK eligibility call-site.
+
+name: authority-executor-callsite-chain
+timeout: 8m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: authority_executor_callsite_gate
+    actions:
+      - action: exec
+        node: m02
+        timeout: 7m
+        cmd: "rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase54-authority-executor-callsite && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase54-authority-executor-callsite && cd {{ product_root }} && SW_BLOCK_ARTIFACT_DIR=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase54-authority-executor-callsite bash scripts/run-phase54-authority-executor-callsite-gate.sh {{ product_root }}"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase54-authority-executor-callsite/phase54-authority-executor-callsite-summary.txt"
+        pattern: "^phase54_authority_executor_callsite_status=ok$"
+        save_as: phase54_callsite_ok
+      - action: assert_greater
+        actual: "{{ phase54_callsite_ok }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase54-authority-executor-callsite/phase54-authority-executor-callsite-summary.txt"
+        pattern: "^target_missing_mutation_attempts=0$"
+        save_as: target_missing_no_mutation
+      - action: assert_greater
+        actual: "{{ target_missing_no_mutation }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase54-authority-executor-callsite/phase54-authority-executor-callsite-summary.txt"
+        pattern: "^target_missing_created_targets=0$"
+        save_as: target_missing_no_create
+      - action: assert_greater
+        actual: "{{ target_missing_no_create }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase54-authority-executor-callsite/phase54-authority-executor-callsite-summary.txt"
+        pattern: "^terminal_missing_mutation_attempts=0$"
+        save_as: terminal_missing_no_mutation
+      - action: assert_greater
+        actual: "{{ terminal_missing_no_mutation }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase54-authority-executor-callsite/phase54-authority-executor-callsite-summary.txt"
+        pattern: "^terminal_missing_target_reason_absent=$"
+        save_as: terminal_missing_no_status
+      - action: assert_greater
+        actual: "{{ terminal_missing_no_status }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase54-authority-executor-callsite/phase54-authority-executor-callsite-summary.txt"
+        pattern: "^complete_mutation_attempts=1$"
+        save_as: complete_one_mutation
+      - action: assert_greater
+        actual: "{{ complete_one_mutation }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase54-authority-executor-callsite/phase54-authority-executor-callsite-summary.txt"
+        pattern: "^complete_ack_eligibility_mutation_attempts=1$"
+        save_as: complete_one_ack_mutation
+      - action: assert_greater
+        actual: "{{ complete_one_ack_mutation }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase54-authority-executor-callsite/phase54-authority-executor-callsite-summary.txt"
+        pattern: "^complete_target_reason=ack_eligibility_recorded$"
+        save_as: complete_reason
+      - action: assert_greater
+        actual: "{{ complete_reason }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase54-authority-executor-callsite/phase54-authority-executor-callsite-summary.txt"
+        pattern: "^complete_target_ack_eligible=true$"
+        save_as: complete_ack_eligible
+      - action: assert_greater
+        actual: "{{ complete_ack_eligible }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase54-authority-executor-callsite/phase54-authority-executor-callsite-summary.txt"
+        pattern: "^complete_target_frontend_fenced=true$"
+        save_as: complete_frontend_fenced
+      - action: assert_greater
+        actual: "{{ complete_frontend_fenced }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase54-authority-executor-callsite/phase54-authority-executor-callsite-summary.txt"
+        pattern: "^complete_target_primary_unchanged=true$"
+        save_as: complete_primary_unchanged
+      - action: assert_greater
+        actual: "{{ complete_primary_unchanged }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase54-authority-executor-callsite/phase54-authority-executor-callsite-summary.txt"
+        pattern: "^complete_target_frontier_covered=true$"
+        save_as: complete_frontier_covered
+      - action: assert_greater
+        actual: "{{ complete_frontier_covered }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase54-authority-executor-callsite/phase54-authority-executor-callsite-summary.txt"
+        pattern: "^complete_target_no_cross_volume=true$"
+        save_as: complete_no_cross_volume
+      - action: assert_greater
+        actual: "{{ complete_no_cross_volume }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase54-authority-executor-callsite/phase54-authority-executor-callsite-summary.txt"
+        pattern: "^complete_swblockvolume_ack_still_false=false$"
+        save_as: complete_source_unchanged
+      - action: assert_greater
+        actual: "{{ complete_source_unchanged }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase54-authority-executor-callsite/phase54-authority-executor-callsite-summary.txt"
+        pattern: "^complete_target_nonclaims_ok=true$"
+        save_as: complete_nonclaims
+      - action: assert_greater
+        actual: "{{ complete_nonclaims }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase54-authority-executor-callsite/phase54-authority-executor-callsite-summary.txt"
+        pattern: "^exec_patch_swblockvolumes_status_denied=no$"
+        save_as: boundary_volume_status_denied
+      - action: assert_greater
+        actual: "{{ boundary_volume_status_denied }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase54-authority-executor-callsite/phase54-authority-executor-callsite-summary.txt"
+        pattern: "^exec_create_events_denied=no$"
+        save_as: boundary_events_denied
+      - action: assert_greater
+        actual: "{{ boundary_events_denied }}"
+        threshold: "0"
+
+  - name: collect
+    always: true
+    actions:
+      - action: collect_path
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase54-authority-executor-callsite"
+        name: "remote-phases"
+        ignore_error: true

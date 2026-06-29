@@ -1,0 +1,72 @@
+# Runner-native Phase 68 gate: ACK eligibility to frontend publication preflight.
+
+name: frontend-publication-preflight-chain
+timeout: 8m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: frontend_publication_preflight_gate
+    actions:
+      - action: exec
+        node: m02
+        timeout: 7m
+        cmd: "rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase68-frontend-publication-preflight && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase68-frontend-publication-preflight && cd {{ product_root }} && SW_BLOCK_ARTIFACT_DIR=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase68-frontend-publication-preflight bash scripts/run-phase68-frontend-publication-preflight-gate.sh {{ product_root }}"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase68-frontend-publication-preflight/phase68-frontend-publication-preflight-summary.txt"
+        pattern: "^phase68_frontend_publication_preflight_status=ok$"
+        save_as: phase68_ok
+      - action: assert_greater
+        actual: "{{ phase68_ok }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase68-frontend-publication-preflight/phase68-frontend-publication-preflight-summary.txt"
+        pattern: "^frontend_publication_decision_schema_locked=true$"
+        save_as: schema_locked
+      - action: assert_greater
+        actual: "{{ schema_locked }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase68-frontend-publication-preflight/phase68-frontend-publication-preflight-summary.txt"
+        pattern: "^frontend_publication_decision=disabled$"
+        save_as: decision_disabled
+      - action: assert_greater
+        actual: "{{ decision_disabled }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase68-frontend-publication-preflight/phase68-frontend-publication-preflight-summary.txt"
+        pattern: "^frontend_publication_mutation_allowed=false$"
+        save_as: mutation_false
+      - action: assert_greater
+        actual: "{{ mutation_false }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase68-frontend-publication-preflight/phase68-frontend-publication-preflight-summary.txt"
+        pattern: "^frontend_publication_attempts=0$"
+        save_as: no_frontend_attempts
+      - action: assert_greater
+        actual: "{{ no_frontend_attempts }}"
+        threshold: "0"
+
+  - name: collect
+    always: true
+    actions:
+      - action: collect_path
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase68-frontend-publication-preflight"
+        name: "remote-phases"
+        ignore_error: true

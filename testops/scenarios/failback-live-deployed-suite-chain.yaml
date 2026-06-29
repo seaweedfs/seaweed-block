@@ -1,0 +1,124 @@
+# Runner-native Phase 95 gate: install the failback target-owner/executor
+# suite in k3s and drive one real blockmaster gRPC failback authority call
+# from an in-cluster executor. This is not a frontend publication claim.
+
+name: failback-live-deployed-suite-chain
+timeout: 35m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: failback_live_deployed_suite_gate
+    actions:
+      - action: exec
+        node: m02
+        timeout: 34m
+        cmd: "rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase95-failback-live-deployed-suite && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase95-failback-live-deployed-suite && cd {{ product_root }} && SW_BLOCK_ARTIFACT_DIR=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase95-failback-live-deployed-suite bash scripts/run-phase95-failback-live-deployed-suite-gate.sh {{ product_root }}"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase95-failback-live-deployed-suite/phase95-failback-live-deployed-suite-summary.txt"
+        pattern: "^phase95_failback_live_deployed_suite_status=ok$"
+        save_as: phase95_ok
+      - action: assert_greater
+        actual: "{{ phase95_ok }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase95-failback-live-deployed-suite/phase95-failback-live-deployed-suite-summary.txt"
+        pattern: "^helm_install=pass$"
+        save_as: helm_install_pass
+      - action: assert_greater
+        actual: "{{ helm_install_pass }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase95-failback-live-deployed-suite/phase95-failback-live-deployed-suite-summary.txt"
+        pattern: "^first_volume_writer_reader=pass$"
+        save_as: first_volume_pass
+      - action: assert_greater
+        actual: "{{ first_volume_pass }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase95-failback-live-deployed-suite/phase95-failback-live-deployed-suite-summary.txt"
+        pattern: "^failback_target_created=true$"
+        save_as: target_created
+      - action: assert_greater
+        actual: "{{ target_created }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase95-failback-live-deployed-suite/phase95-failback-live-deployed-suite-summary.txt"
+        pattern: "^failback_executor_completed=true$"
+        save_as: executor_completed
+      - action: assert_greater
+        actual: "{{ executor_completed }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase95-failback-live-deployed-suite/phase95-failback-live-deployed-suite-summary.txt"
+        pattern: "^executor_status_failed_back=true$"
+        save_as: failed_back
+      - action: assert_greater
+        actual: "{{ failed_back }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase95-failback-live-deployed-suite/phase95-failback-live-deployed-suite-summary.txt"
+        pattern: "^master_publisher_epoch_advanced=true$"
+        save_as: epoch_advanced
+      - action: assert_greater
+        actual: "{{ epoch_advanced }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase95-failback-live-deployed-suite/phase95-failback-live-deployed-suite-summary.txt"
+        pattern: "^publish_target_swapped_after_failback=true$"
+        save_as: target_swapped
+      - action: assert_greater
+        actual: "{{ target_swapped }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase95-failback-live-deployed-suite/phase95-failback-live-deployed-suite-summary.txt"
+        pattern: "^frontend_publication_after_failback_claimed=false$"
+        save_as: no_frontend_claim
+      - action: assert_greater
+        actual: "{{ no_frontend_claim }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase95-failback-live-deployed-suite/phase95-failback-live-deployed-suite-summary.txt"
+        pattern: "^cleanup_status=ok$"
+        save_as: cleanup_ok
+      - action: assert_greater
+        actual: "{{ cleanup_ok }}"
+        threshold: "0"
+
+  - name: collect
+    always: true
+    actions:
+      - action: collect_path
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase95-failback-live-deployed-suite"
+        name: "remote-phases"
+        ignore_error: true

@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"net/http"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -59,6 +60,17 @@ type Config struct {
 	// NOT drive assignment publication.
 	LifecycleStoreDir string
 
+	// FailbackRuntimeRPC enables the authority failback RPC surface. It is
+	// disabled by default; callers must still provide expected-current and
+	// terminal evidence when enabled.
+	FailbackRuntimeRPC bool
+
+	// FrontendPublicationRuntimeHTTP enables the frontend publication runtime
+	// HTTP surface. It is disabled by default and only confirms a post-failback
+	// authority line that has already been minted by the failback owner.
+	FrontendPublicationRuntimeHTTP   bool
+	FrontendPublicationRuntimeListen string
+
 	// Logger is used for structured startup and error logging. If
 	// nil, the default log package logger is used.
 	Logger *log.Logger
@@ -76,20 +88,22 @@ type LifecycleStores struct {
 // Host is the composed master-side block product daemon. Lifecycle
 // is: New -> Start -> (serve requests) -> Close.
 type Host struct {
-	cfg             Config
-	log             *log.Logger
-	boot            *bootstrap.DurableAuthorityBootstrap
-	ctrl            *authority.TopologyController
-	obs             *authority.ObservationHost
-	ln              net.Listener
-	grpc            *grpc.Server
-	topo            authority.AcceptedTopology
-	lifecycle       *LifecycleStores
-	events          *eventRing
-	promotionMu     sync.RWMutex
-	promotionProber PromotionEvidenceProvider
-	cancel          context.CancelFunc
-	wg              sync.WaitGroup
+	cfg                 Config
+	log                 *log.Logger
+	boot                *bootstrap.DurableAuthorityBootstrap
+	ctrl                *authority.TopologyController
+	obs                 *authority.ObservationHost
+	ln                  net.Listener
+	frontendRuntimeLn   net.Listener
+	frontendRuntimeHTTP *http.Server
+	grpc                *grpc.Server
+	topo                authority.AcceptedTopology
+	lifecycle           *LifecycleStores
+	events              *eventRing
+	promotionMu         sync.RWMutex
+	promotionProber     PromotionEvidenceProvider
+	cancel              context.CancelFunc
+	wg                  sync.WaitGroup
 
 	started atomic.Bool
 }
@@ -207,6 +221,21 @@ func New(cfg Config) (*Host, error) {
 	h.ln = ln
 	h.lifecycle = lifecycleStores
 
+	if cfg.FrontendPublicationRuntimeHTTP {
+		addr := cfg.FrontendPublicationRuntimeListen
+		if addr == "" {
+			addr = "127.0.0.1:0"
+		}
+		frontendLn, err := net.Listen("tcp", addr)
+		if err != nil {
+			_ = ln.Close()
+			_ = boot.Close()
+			return nil, fmt.Errorf("master.New: frontend publication runtime listen %q: %w", addr, err)
+		}
+		h.frontendRuntimeLn = frontendLn
+		h.frontendRuntimeHTTP = &http.Server{Handler: h.frontendPublicationRuntimeHandler()}
+	}
+
 	grpcSrv := grpc.NewServer()
 	svc := newServices(h)
 	control.RegisterObservationServiceServer(grpcSrv, svc)
@@ -214,10 +243,14 @@ func New(cfg Config) (*Host, error) {
 	control.RegisterEvidenceServiceServer(grpcSrv, svc)
 	control.RegisterClusterEvidenceServiceServer(grpcSrv, svc)
 	control.RegisterLifecycleServiceServer(grpcSrv, svc)
+	control.RegisterFailbackServiceServer(grpcSrv, svc)
 	h.grpc = grpcSrv
 
 	lg.Printf("blockmaster: lock acquired, reloaded=%d, listen=%s",
 		boot.ReloadedRecords, ln.Addr().String())
+	if h.frontendRuntimeLn != nil {
+		lg.Printf("blockmaster: frontend publication runtime listen=%s", h.frontendRuntimeLn.Addr().String())
+	}
 	for _, e := range boot.ReloadSkips {
 		lg.Printf("blockmaster: reload skip: %v", e)
 	}
@@ -250,9 +283,30 @@ func openLifecycleStores(dir string) (*LifecycleStores, error) {
 // Addr returns the bound listener address. Valid after New.
 func (h *Host) Addr() string { return h.ln.Addr().String() }
 
+// FrontendPublicationRuntimeAddr returns the bound frontend publication
+// runtime HTTP address, or empty when the runtime is disabled.
+func (h *Host) FrontendPublicationRuntimeAddr() string {
+	if h.frontendRuntimeLn == nil {
+		return ""
+	}
+	return h.frontendRuntimeLn.Addr().String()
+}
+
 // Publisher exposes the reloaded publisher for tests and for the
 // evidence-query path.
-func (h *Host) Publisher() *authority.Publisher { return h.boot.Publisher }
+func (h *Host) Publisher() *authority.Publisher {
+	if h == nil || h.boot == nil {
+		return nil
+	}
+	return h.boot.Publisher
+}
+
+// FailbackAuthorityRuntime exposes the authority-owned failback seam backed by
+// the live Publisher. Callers still need an explicit policy gate before using
+// it; constructing the runtime does not execute failback.
+func (h *Host) FailbackAuthorityRuntime() authority.FailbackAuthorityRuntime {
+	return authority.FailbackAuthorityRuntime{Publisher: h.Publisher()}
+}
 
 // Controller exposes the controller for tests.
 func (h *Host) Controller() *authority.TopologyController { return h.ctrl }
@@ -265,10 +319,11 @@ func (h *Host) ObservationHost() *authority.ObservationHost { return h.obs }
 // must not be treated as assignment authority.
 func (h *Host) Lifecycle() *LifecycleStores { return h.lifecycle }
 
-// replicaSlotsFor returns the accepted-topology replica IDs for a
-// volume, or nil if the volume isn't in accepted topology. Used
-// by AssignmentService to fan-in per-(vol, rid) publisher
-// subscriptions for volume-scoped delivery.
+// replicaSlotsFor returns replica IDs for a volume. Static topology
+// remains the allow-list. Dynamic lifecycle volumes may not persist
+// placement slots in the lifecycle record, so read-only status paths
+// merge fresh observed slots from the observation store; assignment
+// authority still comes from the publisher/controller, not this helper.
 func (h *Host) replicaSlotsFor(volumeID string) []string {
 	for _, v := range h.topo.Volumes {
 		if v.VolumeID != volumeID {
@@ -280,18 +335,34 @@ func (h *Host) replicaSlotsFor(volumeID string) []string {
 		}
 		return out
 	}
+	var out []string
 	if h.lifecycle != nil && h.lifecycle.Placements != nil {
 		if placement, ok := h.lifecycle.Placements.GetPlacement(volumeID); ok {
-			out := make([]string, 0, len(placement.Slots))
 			for _, slot := range placement.Slots {
 				if slot.ReplicaID != "" {
-					out = append(out, slot.ReplicaID)
+					out = appendReplicaID(out, slot.ReplicaID)
 				}
 			}
-			return out
 		}
 	}
-	return nil
+	if h.lifecycle != nil && h.obs != nil {
+		for _, replicaID := range h.obs.Store().ReplicaIDsForVolume(volumeID) {
+			out = appendReplicaID(out, replicaID)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func appendReplicaID(in []string, replicaID string) []string {
+	for _, existing := range in {
+		if existing == replicaID {
+			return in
+		}
+	}
+	return append(in, replicaID)
 }
 
 // Start runs the publisher, observation rebuild loop, and gRPC
@@ -321,6 +392,16 @@ func (h *Host) Start() context.Context {
 		}
 	}()
 
+	if h.frontendRuntimeHTTP != nil && h.frontendRuntimeLn != nil {
+		h.wg.Add(1)
+		go func() {
+			defer h.wg.Done()
+			if err := h.frontendRuntimeHTTP.Serve(h.frontendRuntimeLn); err != nil && err != http.ErrServerClosed {
+				h.log.Printf("blockmaster: frontend publication runtime Serve: %v", err)
+			}
+		}()
+	}
+
 	return ctx
 }
 
@@ -329,6 +410,9 @@ func (h *Host) Start() context.Context {
 func (h *Host) Close(ctx context.Context) error {
 	if h.cancel != nil {
 		h.cancel()
+	}
+	if h.frontendRuntimeHTTP != nil {
+		_ = h.frontendRuntimeHTTP.Shutdown(ctx)
 	}
 	h.obs.Stop()
 

@@ -1,0 +1,41 @@
+{{- if .Values.authorityExecutor.create }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sw-block-authority-executor
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "seaweed-block.labels" . | nindent 4 }}
+    app: sw-block-authority-executor
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sw-block-authority-executor
+  template:
+    metadata:
+      labels:
+        app: sw-block-authority-executor
+        {{- include "seaweed-block.labels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "seaweed-block.fullname" . }}-authority-executor
+      {{- with .Values.authorityExecutor.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: authority-executor
+          image: {{ include "seaweed-block.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/usr/local/bin/sw-block"]
+          args:
+            - "ops"
+            - "authority-executor"
+            - "--namespace={{ .Release.Namespace }}"
+            - "--allowed-mutation-class={{ .Values.authorityExecutor.execution.allowedMutationClass }}"
+            {{- if .Values.authorityExecutor.execution.enabled }}
+            - "--execution-policy"
+            - "--enable-execution"
+            {{- end }}
+            - "--interval={{ .Values.authorityExecutor.interval }}"
+{{- end }}

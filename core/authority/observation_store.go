@@ -130,6 +130,40 @@ func (s *ObservationStore) SlotFact(volumeID, replicaID string) (SlotFact, bool)
 	return best, found
 }
 
+// ReplicaIDsForVolume returns fresh, usable replica IDs currently
+// observed for a volume. It is a read-only evidence helper for
+// dynamic-lifecycle status surfaces; callers that own a static
+// topology must keep using topology membership as their allow-list.
+func (s *ObservationStore) ReplicaIDsForVolume(volumeID string) []string {
+	if volumeID == "" {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := s.now()
+	seen := map[string]struct{}{}
+	for _, obs := range s.observations {
+		if !obs.ExpiresAt.IsZero() && now.After(obs.ExpiresAt) {
+			continue
+		}
+		for _, slot := range obs.Slots {
+			if slot.VolumeID != volumeID || slot.ReplicaID == "" {
+				continue
+			}
+			if slotExpired(slot, obs, now) || slot.DataAddr == "" {
+				continue
+			}
+			seen[slot.ReplicaID] = struct{}{}
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for replicaID := range seen {
+		out = append(out, replicaID)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // SetNowForTest replaces the store's clock source. Tests use this
 // to drive expiry / freshness deterministically. Symmetric with
 // authority.TopologyController.SetNowForTest. Production code

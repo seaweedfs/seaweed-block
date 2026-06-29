@@ -239,6 +239,8 @@ func (h *Host) observationReplicas(volumeID string, placement lifecycle.Placemen
 			if len(fact.Frontends) > 0 {
 				replica.FrontendProtocol = fact.Frontends[0].Protocol
 				replica.FrontendAddr = fact.Frontends[0].Addr
+				replica.FrontendNQN = fact.Frontends[0].NQN
+				replica.FrontendNSID = fact.Frontends[0].NSID
 			}
 		} else {
 			replica.CandidateReadyReason = ops.ReasonStatusEndpointUnreachable

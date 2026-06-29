@@ -65,6 +65,7 @@ type stagedVolumeInfo struct {
 	multipath   bool
 	nqn         string
 	nvmeAddr    string
+	nvmeAddrs   []string
 	transport   string
 	fsType      string
 	stagingPath string
@@ -284,12 +285,22 @@ func (s *NodeServer) stageNVMe(ctx context.Context, req *csipb.NodeStageVolumeRe
 	}
 	publish := s.refreshPublishContext(ctx, volumeID, req.GetPublishContext())
 	publishContext := publish.Context
+	multipathRequested := iscsiMultipathFromContext(publishContext) || iscsiMultipathFromContext(req.GetPublishContext()) || iscsiMultipathFromContext(req.GetVolumeContext())
+	if multipathRequested {
+		publish = s.waitForNVMeMultipathPublishContext(ctx, volumeID, publish, 2)
+		publishContext = publish.Context
+	}
 	addr, nqn := nvmeFromContext(publishContext)
+	addrs := nvmeAddrsFromContext(publishContext)
 	if addr == "" || nqn == "" {
 		addr, nqn = nvmeFromContext(req.GetVolumeContext())
+		addrs = nvmeAddrsFromContext(req.GetVolumeContext())
 	}
 	if addr == "" || nqn == "" {
 		return nil, status.Error(codes.FailedPrecondition, "no NVMe publish target")
+	}
+	if len(addrs) == 0 {
+		addrs = []string{addr}
 	}
 	connected, err := s.nvmeUtil.IsConnected(ctx, nqn)
 	if err != nil {
@@ -300,10 +311,12 @@ func (s *NodeServer) stageNVMe(ctx context.Context, req *csipb.NodeStageVolumeRe
 	}
 	connectStarted := false
 	if !connected {
-		if err := s.nvmeUtil.Connect(ctx, addr, nqn); err != nil {
-			return nil, status.Errorf(codes.Internal, "nvme connect: %v", err)
+		for _, pathAddr := range addrs {
+			if err := s.nvmeUtil.Connect(ctx, pathAddr, nqn); err != nil {
+				return nil, status.Errorf(codes.Internal, "nvme connect: %v", err)
+			}
+			connectStarted = true
 		}
-		connectStarted = true
 	}
 	success := false
 	defer func() {
@@ -343,13 +356,15 @@ func (s *NodeServer) stageNVMe(ctx context.Context, req *csipb.NodeStageVolumeRe
 	s.staged[volumeID] = &stagedVolumeInfo{
 		nqn:         nqn,
 		nvmeAddr:    addr,
+		nvmeAddrs:   append([]string(nil), addrs...),
+		multipath:   len(addrs) > 1,
 		transport:   transportNVMe,
 		fsType:      fsType,
 		stagingPath: stagingPath,
 	}
 	s.stagedMu.Unlock()
 
-	s.logger.Printf("NodeStageVolume: %s staged transport=nvme portal=%s target=%s staging=%s", volumeID, addr, nqn, stagingPath)
+	s.logger.Printf("NodeStageVolume: %s staged transport=nvme portal=%s portals=%s target=%s multipath=%v staging=%s", volumeID, addr, strings.Join(addrs, ","), nqn, len(addrs) > 1, stagingPath)
 	success = true
 	s.reportCSIReattachObserved(ctx, volumeID, transportNVMe, addr, publish)
 	return &csipb.NodeStageVolumeResponse{}, nil
@@ -587,7 +602,32 @@ func nvmeFromContext(ctx map[string]string) (addr, nqn string) {
 	if ctx == nil {
 		return "", ""
 	}
+	addrs := nvmeAddrsFromContext(ctx)
+	if len(addrs) > 0 {
+		return addrs[0], ctx["nqn"]
+	}
 	return ctx["nvmeAddr"], ctx["nqn"]
+}
+
+func nvmeAddrsFromContext(ctx map[string]string) []string {
+	if ctx == nil {
+		return nil
+	}
+	raw := ctx["nvmeAddrs"]
+	if raw == "" {
+		raw = ctx["nvmeAddr"]
+	}
+	var out []string
+	seen := map[string]bool{}
+	for _, part := range strings.Split(raw, ",") {
+		addr := strings.TrimSpace(part)
+		if addr == "" || seen[addr] {
+			continue
+		}
+		seen[addr] = true
+		out = append(out, addr)
+	}
+	return out
 }
 
 func transportFromContext(contexts ...map[string]string) string {
@@ -683,6 +723,42 @@ func (s *NodeServer) waitForISCSIMultipathPublishContext(ctx context.Context, vo
 
 func hasISCSIMultipathPortals(ctx map[string]string, minPortals int) bool {
 	return iscsiMultipathFromContext(ctx) && len(iscsiPortalsFromContext(ctx)) >= minPortals
+}
+
+func (s *NodeServer) waitForNVMeMultipathPublishContext(ctx context.Context, volumeID string, current publishContextResult, minPortals int) publishContextResult {
+	if hasNVMeMultipathPortals(current.Context, minPortals) {
+		return current
+	}
+	if s.lookup == nil {
+		return current
+	}
+	deadline := time.NewTimer(stage2MultipathPublishWait)
+	defer deadline.Stop()
+	ticker := time.NewTicker(stage2MultipathPublishPoll)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return current
+		case <-deadline.C:
+			return current
+		case <-ticker.C:
+			target, err := s.lookup.LookupPublishTarget(ctx, volumeID, s.nodeID)
+			if err != nil {
+				continue
+			}
+			if refreshed := publishContext(target); len(refreshed) > 0 {
+				current = publishContextResult{Context: refreshed, Target: target, HasTarget: true}
+				if hasNVMeMultipathPortals(current.Context, minPortals) {
+					return current
+				}
+			}
+		}
+	}
+}
+
+func hasNVMeMultipathPortals(ctx map[string]string, minPortals int) bool {
+	return iscsiMultipathFromContext(ctx) && len(nvmeAddrsFromContext(ctx)) >= minPortals
 }
 
 func cloneStringMap(in map[string]string) map[string]string {

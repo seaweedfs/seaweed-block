@@ -1,0 +1,106 @@
+# Runner-native Phase 83 gate: Helm chart wiring for the failback gRPC
+# runtime transport. The default chart remains non-mutating; explicit values
+# render the blockmaster RPC flag plus executor execution/gRPC flags.
+
+name: failback-chart-runtime-chain
+timeout: 6m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: failback_chart_runtime_gate
+    actions:
+      - action: exec
+        node: m02
+        timeout: 5m
+        cmd: "rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase83-failback-chart-runtime && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase83-failback-chart-runtime && cd {{ product_root }} && SW_BLOCK_ARTIFACT_DIR=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase83-failback-chart-runtime bash scripts/run-phase83-failback-chart-runtime-gate.sh {{ product_root }}"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase83-failback-chart-runtime/phase83-failback-chart-runtime-summary.txt"
+        pattern: "^phase83_failback_chart_runtime_status=ok$"
+        save_as: phase83_ok
+      - action: assert_greater
+        actual: "{{ phase83_ok }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase83-failback-chart-runtime/phase83-failback-chart-runtime-summary.txt"
+        pattern: "^default_omits_failback_runtime_rpc=true$"
+        save_as: default_rpc_off
+      - action: assert_greater
+        actual: "{{ default_rpc_off }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase83-failback-chart-runtime/phase83-failback-chart-runtime-summary.txt"
+        pattern: "^enabled_renders_failback_runtime_rpc=true$"
+        save_as: enabled_rpc
+      - action: assert_greater
+        actual: "{{ enabled_rpc }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase83-failback-chart-runtime/phase83-failback-chart-runtime-summary.txt"
+        pattern: "^enabled_renders_failback_grpc_addr=true$"
+        save_as: enabled_grpc
+      - action: assert_greater
+        actual: "{{ enabled_grpc }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase83-failback-chart-runtime/phase83-failback-chart-runtime-summary.txt"
+        pattern: "^rejects_execution_with_dry_run=true$"
+        save_as: rejects_dryrun
+      - action: assert_greater
+        actual: "{{ rejects_dryrun }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase83-failback-chart-runtime/phase83-failback-chart-runtime-summary.txt"
+        pattern: "^rejects_execution_without_policy=true$"
+        save_as: rejects_policy
+      - action: assert_greater
+        actual: "{{ rejects_policy }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase83-failback-chart-runtime/phase83-failback-chart-runtime-summary.txt"
+        pattern: "^rejects_ambiguous_runtime_transports=true$"
+        save_as: rejects_ambiguous
+      - action: assert_greater
+        actual: "{{ rejects_ambiguous }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase83-failback-chart-runtime/phase83-failback-chart-runtime-summary.txt"
+        pattern: "^chart_default_remains_non_mutating=true$"
+        save_as: default_non_mutating
+      - action: assert_greater
+        actual: "{{ default_non_mutating }}"
+        threshold: "0"
+
+  - name: collect
+    always: true
+    actions:
+      - action: collect_path
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase83-failback-chart-runtime"
+        name: "remote-phases"
+        ignore_error: true

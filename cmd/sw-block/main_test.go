@@ -483,6 +483,1400 @@ func TestOpsLifecycleOwnerReleasesProtectionFinalizerWhenDeleteSafetyAllows(t *t
 	}
 }
 
+func TestOpsAuthorityExecutorObservesDisabledContractsWithoutMutation(t *testing.T) {
+	client := &lifecycleOwnerTestClient{
+		volumes: []ops.SwBlockVolumeObject{{
+			Ref: ops.OperatorObjectRef{
+				APIVersion: ops.SwBlockVolumeAPIVersion,
+				Kind:       ops.SwBlockVolumeKind,
+				Namespace:  "kube-system",
+				Name:       "returned",
+			},
+			Status: ops.SwBlockVolumeCRDStatus{ExecutorContracts: []ops.SwBlockVolumeCRDExecutorContract{{
+				ActionType:               ops.ManagedVolumeActionReintegrateReturned,
+				ReplicaID:                "r1",
+				Decision:                 ops.ReturnedReplicaExecutorContractDisabled,
+				Reason:                   ops.ReturnedReplicaExecutorContractReasonExecutorDisabled,
+				OwnerExecutor:            "authority_recovery_executor",
+				ExecutionEnabled:         false,
+				MutationAllowed:          false,
+				AllowedMutationClass:     []string{"ack_eligibility"},
+				ForbiddenMutationClass:   []string{"frontend_publication", "rebuild_traffic", "failback"},
+				TerminalEvidenceRequired: []string{"ack_eligibility_known", "frontend_fenced_after_execution"},
+			}}},
+		}},
+	}
+	oldFactory := opsAuthorityExecutorClientFactory
+	opsAuthorityExecutorClientFactory = func() (ops.AuthorityExecutorClient, error) {
+		return client, nil
+	}
+	t.Cleanup(func() { opsAuthorityExecutorClientFactory = oldFactory })
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ops", "authority-executor", "--namespace", "kube-system"}, &stdout, &stderr)
+	if code != ops.VolumeStatusExitOK {
+		t.Fatalf("exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	if len(client.patches) != 0 || len(client.events) != 0 {
+		t.Fatalf("authority executor must not patch or emit events: patches=%+v events=%+v", client.patches, client.events)
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"authority_executor=disabled namespace=kube-system volumes=1 contracts=1",
+		"disabled_contracts=1",
+		"terminal_evidence_required=1",
+		"allowed_mutation_class=ack_eligibility",
+		"execution_requested=false",
+		"execution_policy_enabled=false",
+		"mutation_attempts=0",
+		"ack_eligibility_mutation_attempts=0",
+		"mutation_allowed=false",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("stdout missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestOpsAuthorityExecutorRejectsExecutionFlag(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ops", "authority-executor", "--enable-execution"}, &stdout, &stderr)
+	if code != ops.VolumeStatusExitInvalid {
+		t.Fatalf("exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "reason=executor_policy_disabled") ||
+		!strings.Contains(stderr.String(), "mutation_attempts=0") ||
+		!strings.Contains(stderr.String(), "ack_eligibility_mutation_attempts=0") {
+		t.Fatalf("stderr=%s", stderr.String())
+	}
+}
+
+func TestOpsAuthorityExecutorRejectsUnsupportedMutationClass(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ops", "authority-executor", "--allowed-mutation-class", "frontend_publication"}, &stdout, &stderr)
+	if code != ops.VolumeStatusExitInvalid {
+		t.Fatalf("exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "unsupported mutation class") ||
+		!strings.Contains(stderr.String(), "reason=unsupported_mutation_class") {
+		t.Fatalf("stderr=%s", stderr.String())
+	}
+}
+
+func TestOpsAuthorityExecutorWritesRebuildPlannedStatus(t *testing.T) {
+	client := &lifecycleOwnerTestClient{
+		volumes: []ops.SwBlockVolumeObject{{
+			Ref: ops.OperatorObjectRef{
+				APIVersion: ops.SwBlockVolumeAPIVersion,
+				Kind:       ops.SwBlockVolumeKind,
+				Namespace:  "kube-system",
+				Name:       "rebuild",
+			},
+			Status: ops.SwBlockVolumeCRDStatus{
+				VolumeID: "pvc-rebuild",
+				PVCName:  "rebuild-pvc",
+				ReplicaReintegrations: []ops.SwBlockVolumeCRDReturnedReplica{{
+					ReplicaID:             "r1",
+					State:                 ops.ReturnedReplicaStateRecovering,
+					ReasonCode:            ops.ReasonCandidateFrontierBehind,
+					FrontendFenced:        true,
+					FrontendPrimaryReady:  false,
+					AckEligibilityKnown:   true,
+					AckEligible:           false,
+					DurableFrontierKnown:  true,
+					DurableFrontierLSN:    51,
+					RequiredFrontierKnown: true,
+					RequiredFrontierLSN:   52,
+					EvidenceRefs:          []string{"rebuild.txt"},
+				}},
+				ExecutorContracts: []ops.SwBlockVolumeCRDExecutorContract{{
+					ActionType:               ops.ManagedVolumeActionRebuildReturned,
+					ReplicaID:                "r1",
+					Decision:                 ops.ReturnedReplicaExecutorContractDisabled,
+					Reason:                   ops.ReturnedReplicaExecutorContractReasonExecutorDisabled,
+					OwnerExecutor:            "authority_recovery_executor",
+					ExecutionEnabled:         false,
+					MutationAllowed:          false,
+					PreflightDecision:        ops.ReturnedReplicaExecutorPreflightReady,
+					PreflightReason:          ops.ReturnedReplicaExecutorPreflightReasonSatisfied,
+					AllowedMutationClass:     []string{ops.AuthorityExecutorAllowedMutationRebuildTraffic},
+					ForbiddenMutationClass:   []string{"ack_eligibility", "frontend_publication", "failback"},
+					TerminalEvidenceRequired: []string{"frontend_fenced_before_rebuild", "primary_unchanged", "durable_frontier_caught_up", "no_frontend_publication", "no_cross_volume_identity_change"},
+					EvidenceRefs:             []string{"rebuild-contract.txt"},
+				}},
+			},
+		}},
+		rebuilds: []ops.SwBlockReplicaRebuildObject{{
+			Ref: ops.OperatorObjectRef{
+				APIVersion: ops.SwBlockVolumeAPIVersion,
+				Kind:       ops.SwBlockReplicaRebuildKind,
+				Namespace:  "kube-system",
+				Name:       "rebuild-r1",
+			},
+			Spec: ops.SwBlockReplicaRebuildSpec{
+				VolumeName: "rebuild",
+				VolumeID:   "pvc-rebuild",
+				PVCName:    "rebuild-pvc",
+				ReplicaID:  "r1",
+			},
+		}},
+	}
+	oldFactory := opsAuthorityExecutorClientFactory
+	opsAuthorityExecutorClientFactory = func() (ops.AuthorityExecutorClient, error) {
+		return client, nil
+	}
+	t.Cleanup(func() { opsAuthorityExecutorClientFactory = oldFactory })
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ops", "authority-executor", "--namespace", "kube-system", "--allowed-mutation-class", "rebuild_traffic", "--enable-execution", "--execution-policy"}, &stdout, &stderr)
+	if code != ops.VolumeStatusExitOK {
+		t.Fatalf("exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	if len(client.eligibilityWrites) != 0 || len(client.rebuildWrites) != 1 {
+		t.Fatalf("eligibility_writes=%+v rebuild_writes=%+v", client.eligibilityWrites, client.rebuildWrites)
+	}
+	write := client.rebuildWrites[0]
+	if write.ref.Name != "rebuild-r1" {
+		t.Fatalf("write ref=%+v", write.ref)
+	}
+	if write.status.State != "planned" ||
+		write.status.ReasonCode != ops.AuthorityExecutorReasonRebuildPlanned ||
+		write.status.RebuildTrafficStarted ||
+		!write.status.NoFrontendPublication ||
+		!write.status.NoCrossVolumeIdentityChange {
+		t.Fatalf("rebuild status=%+v", write.status)
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"authority_executor=executed",
+		"allowed_mutation_class=rebuild_traffic",
+		"mutation_attempts=1",
+		"ack_eligibility_mutation_attempts=0",
+		"rebuild_progress_mutation_attempts=1",
+		"mutation_allowed=true",
+		"storage_mutation_allowed=false",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("stdout missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestOpsAuthorityExecutorRebuildRuntimeURLWritesCaughtUpStatus(t *testing.T) {
+	client := &lifecycleOwnerTestClient{
+		volumes: []ops.SwBlockVolumeObject{{
+			Ref: ops.OperatorObjectRef{
+				APIVersion: ops.SwBlockVolumeAPIVersion,
+				Kind:       ops.SwBlockVolumeKind,
+				Namespace:  "kube-system",
+				Name:       "rebuild",
+			},
+			Status: ops.SwBlockVolumeCRDStatus{
+				VolumeID: "pvc-rebuild",
+				PVCName:  "rebuild-pvc",
+				ReplicaReintegrations: []ops.SwBlockVolumeCRDReturnedReplica{{
+					ReplicaID:             "r1",
+					State:                 ops.ReturnedReplicaStateRecovering,
+					ReasonCode:            ops.ReasonCandidateFrontierBehind,
+					FrontendFenced:        true,
+					FrontendPrimaryReady:  false,
+					AckEligibilityKnown:   true,
+					AckEligible:           false,
+					DurableFrontierKnown:  true,
+					DurableFrontierLSN:    51,
+					RequiredFrontierKnown: true,
+					RequiredFrontierLSN:   52,
+					EvidenceRefs:          []string{"rebuild.txt"},
+				}},
+				ExecutorContracts: []ops.SwBlockVolumeCRDExecutorContract{{
+					ActionType:               ops.ManagedVolumeActionRebuildReturned,
+					ReplicaID:                "r1",
+					Decision:                 ops.ReturnedReplicaExecutorContractDisabled,
+					Reason:                   ops.ReturnedReplicaExecutorContractReasonExecutorDisabled,
+					OwnerExecutor:            "authority_recovery_executor",
+					ExecutionEnabled:         false,
+					MutationAllowed:          false,
+					PreflightDecision:        ops.ReturnedReplicaExecutorPreflightReady,
+					PreflightReason:          ops.ReturnedReplicaExecutorPreflightReasonSatisfied,
+					AllowedMutationClass:     []string{ops.AuthorityExecutorAllowedMutationRebuildTraffic},
+					ForbiddenMutationClass:   []string{"ack_eligibility", "frontend_publication", "failback"},
+					TerminalEvidenceRequired: []string{"frontend_fenced_before_rebuild", "primary_unchanged", "durable_frontier_caught_up", "no_frontend_publication", "no_cross_volume_identity_change"},
+					EvidenceRefs:             []string{"rebuild-contract.txt"},
+				}},
+			},
+		}},
+		rebuilds: []ops.SwBlockReplicaRebuildObject{{
+			Ref: ops.OperatorObjectRef{
+				APIVersion: ops.SwBlockVolumeAPIVersion,
+				Kind:       ops.SwBlockReplicaRebuildKind,
+				Namespace:  "kube-system",
+				Name:       "rebuild-r1",
+			},
+			Spec: ops.SwBlockReplicaRebuildSpec{
+				VolumeName:      "rebuild",
+				VolumeID:        "pvc-rebuild",
+				PVCName:         "rebuild-pvc",
+				ReplicaID:       "r1",
+				RuntimeEndpoint: "http://127.0.0.1:23260/rebuild/runtime",
+				TargetDataAddr:  "127.0.0.1:19103",
+				SessionID:       1001,
+				Epoch:           7,
+				EndpointVersion: 3,
+				FromLSN:         52,
+				FrontierHintLSN: 52,
+				BasePinLSN:      60,
+			},
+		}},
+	}
+	oldFactory := opsAuthorityExecutorClientFactory
+	opsAuthorityExecutorClientFactory = func() (ops.AuthorityExecutorClient, error) {
+		return client, nil
+	}
+	t.Cleanup(func() { opsAuthorityExecutorClientFactory = oldFactory })
+
+	var got ops.AuthorityRebuildRuntimeRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Fatalf("method=%s", r.Method)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		_ = json.NewEncoder(w).Encode(ops.AuthorityRebuildRuntimeResult{
+			DurableFrontierKnown: true,
+			DurableFrontierLSN:   52,
+			EvidenceRefs:         []string{"http-runtime.txt"},
+		})
+	}))
+	defer server.Close()
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"ops", "authority-executor",
+		"--namespace", "kube-system",
+		"--allowed-mutation-class", "rebuild_traffic",
+		"--enable-execution",
+		"--execution-policy",
+		"--rebuild-runtime-url", server.URL,
+	}, &stdout, &stderr)
+	if code != ops.VolumeStatusExitOK {
+		t.Fatalf("exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	if got.VolumeName != "rebuild" ||
+		got.VolumeID != "pvc-rebuild" ||
+		got.PVCName != "rebuild-pvc" ||
+		got.ReplicaID != "r1" ||
+		got.RuntimeEndpoint != "http://127.0.0.1:23260/rebuild/runtime" ||
+		got.TargetDataAddr != "127.0.0.1:19103" ||
+		got.SessionID != 1001 ||
+		got.Epoch != 7 ||
+		got.EndpointVersion != 3 ||
+		got.FromLSN != 52 ||
+		got.FrontierHintLSN != 52 ||
+		got.BasePinLSN != 60 ||
+		got.DurableFrontierLSN != 51 ||
+		got.RequiredFrontierLSN != 52 ||
+		!got.NoFrontendPublication ||
+		!got.NoCrossVolumeMutation {
+		t.Fatalf("runtime request=%+v", got)
+	}
+	if len(client.eligibilityWrites) != 0 || len(client.rebuildWrites) != 2 {
+		t.Fatalf("eligibility_writes=%+v rebuild_writes=%+v", client.eligibilityWrites, client.rebuildWrites)
+	}
+	running := client.rebuildWrites[0].status
+	if running.State != "running" ||
+		running.ReasonCode != ops.AuthorityExecutorReasonRebuildRunning ||
+		!running.RebuildTrafficStarted ||
+		!running.NoFrontendPublication {
+		t.Fatalf("running status=%+v", running)
+	}
+	caughtUp := client.rebuildWrites[1].status
+	if caughtUp.State != "caught_up" ||
+		caughtUp.ReasonCode != ops.AuthorityExecutorReasonRebuildCaughtUp ||
+		!caughtUp.DurableFrontierCaughtUp ||
+		caughtUp.DurableFrontierLSN != 52 ||
+		!cmdStringSliceContains(caughtUp.EvidenceRefs, "http-runtime.txt") ||
+		!caughtUp.NoFrontendPublication ||
+		!caughtUp.NoCrossVolumeIdentityChange {
+		t.Fatalf("caught_up status=%+v", caughtUp)
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"authority_executor=executed",
+		"allowed_mutation_class=rebuild_traffic",
+		"mutation_attempts=1",
+		"rebuild_progress_mutation_attempts=1",
+		"mutation_allowed=true",
+		"storage_mutation_allowed=false",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("stdout missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestOpsAuthorityExecutorRejectsRebuildRuntimeURLForAckEligibility(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ops", "authority-executor", "--rebuild-runtime-url", "http://127.0.0.1:1/runtime"}, &stdout, &stderr)
+	if code != ops.VolumeStatusExitInvalid {
+		t.Fatalf("exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "--rebuild-runtime-url requires --allowed-mutation-class rebuild_traffic") ||
+		!strings.Contains(stderr.String(), "reason=unsupported_runtime_mutation_class") {
+		t.Fatalf("stderr=%s", stderr.String())
+	}
+}
+
+func TestOpsRebuildTargetOwnerCreatesTarget(t *testing.T) {
+	client := &lifecycleOwnerTestClient{
+		volumes: []ops.SwBlockVolumeObject{{
+			Ref: ops.OperatorObjectRef{
+				APIVersion: ops.SwBlockVolumeAPIVersion,
+				Kind:       ops.SwBlockVolumeKind,
+				Namespace:  "kube-system",
+				Name:       "demo-pvc",
+			},
+			Status: ops.SwBlockVolumeCRDStatus{
+				VolumeID: "pvc-demo",
+				PVCName:  "demo-pvc",
+				ReplicaReintegrations: []ops.SwBlockVolumeCRDReturnedReplica{{
+					ReplicaID:             "r2",
+					State:                 ops.ReturnedReplicaStateRecovering,
+					ReasonCode:            ops.ReasonCandidateFrontierBehind,
+					FrontendFenced:        true,
+					FrontendPrimaryReady:  false,
+					DurableFrontierKnown:  true,
+					DurableFrontierLSN:    51,
+					RequiredFrontierKnown: true,
+					RequiredFrontierLSN:   53,
+					RuntimeEndpoint:       "http://127.0.0.1:23260/rebuild/runtime",
+					TargetDataAddr:        "127.0.0.1:19103",
+					SessionID:             1001,
+					Epoch:                 7,
+					EndpointVersion:       3,
+					FromLSN:               52,
+					FrontierHintLSN:       53,
+					BasePinLSN:            60,
+				}},
+				ExecutorContracts: []ops.SwBlockVolumeCRDExecutorContract{{
+					ActionType:           ops.ManagedVolumeActionRebuildReturned,
+					ReplicaID:            "r2",
+					Decision:             ops.ReturnedReplicaExecutorContractDisabled,
+					Reason:               ops.ReturnedReplicaExecutorContractReasonExecutorDisabled,
+					PreflightDecision:    ops.ReturnedReplicaExecutorPreflightReady,
+					PreflightReason:      ops.ReturnedReplicaExecutorPreflightReasonSatisfied,
+					AllowedMutationClass: []string{ops.AuthorityExecutorAllowedMutationRebuildTraffic},
+				}},
+			},
+		}},
+	}
+	oldFactory := opsRebuildTargetOwnerClientFactory
+	opsRebuildTargetOwnerClientFactory = func() (ops.RebuildTargetOwnerClient, error) {
+		return client, nil
+	}
+	t.Cleanup(func() { opsRebuildTargetOwnerClientFactory = oldFactory })
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ops", "rebuild-target-owner", "--namespace", "kube-system"}, &stdout, &stderr)
+	if code != ops.VolumeStatusExitOK {
+		t.Fatalf("exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	if len(client.rebuildCreates) != 1 {
+		t.Fatalf("rebuildCreates=%+v", client.rebuildCreates)
+	}
+	created := client.rebuildCreates[0]
+	if created.Ref.Name != "demo-pvc-r2-rebuild" ||
+		created.Spec.VolumeName != "demo-pvc" ||
+		created.Spec.ReplicaID != "r2" ||
+		created.Spec.RuntimeEndpoint != "http://127.0.0.1:23260/rebuild/runtime" ||
+		created.Spec.TargetDataAddr != "127.0.0.1:19103" ||
+		created.Spec.SessionID != 1001 ||
+		created.Spec.Epoch != 7 ||
+		created.Spec.EndpointVersion != 3 ||
+		created.Spec.FromLSN != 52 ||
+		created.Spec.FrontierHintLSN != 53 ||
+		created.Spec.BasePinLSN != 60 {
+		t.Fatalf("created=%+v", created)
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"rebuild_target_owner=target_mutation",
+		"namespace=kube-system",
+		"volumes=1",
+		"contracts=1",
+		"targets_planned=1",
+		"targets_existing=0",
+		"targets_created=1",
+		"runtime_target_ready=1",
+		"runtime_target_missing=0",
+		"mutation_allowed=true",
+		"storage_mutation_allowed=false",
+		"frontend_publication_allowed=false",
+		"failback_allowed=false",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("stdout missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestOpsRebuildTargetOwnerDryRunDoesNotCreateTarget(t *testing.T) {
+	client := &lifecycleOwnerTestClient{
+		volumes: []ops.SwBlockVolumeObject{{
+			Ref: ops.OperatorObjectRef{
+				Name: "demo-pvc",
+			},
+			Status: ops.SwBlockVolumeCRDStatus{
+				VolumeID: "pvc-demo",
+				PVCName:  "demo-pvc",
+				ReplicaReintegrations: []ops.SwBlockVolumeCRDReturnedReplica{{
+					ReplicaID:             "r2",
+					State:                 ops.ReturnedReplicaStateRecovering,
+					ReasonCode:            ops.ReasonCandidateFrontierBehind,
+					FrontendFenced:        true,
+					FrontendPrimaryReady:  false,
+					DurableFrontierKnown:  true,
+					DurableFrontierLSN:    51,
+					RequiredFrontierKnown: true,
+					RequiredFrontierLSN:   53,
+					RuntimeEndpoint:       "http://127.0.0.1:23260/rebuild/runtime",
+					TargetDataAddr:        "127.0.0.1:19103",
+					SessionID:             1001,
+					Epoch:                 7,
+					EndpointVersion:       3,
+					FromLSN:               52,
+					FrontierHintLSN:       53,
+					BasePinLSN:            60,
+				}},
+				ExecutorContracts: []ops.SwBlockVolumeCRDExecutorContract{{
+					ActionType:           ops.ManagedVolumeActionRebuildReturned,
+					ReplicaID:            "r2",
+					Decision:             ops.ReturnedReplicaExecutorContractDisabled,
+					Reason:               ops.ReturnedReplicaExecutorContractReasonExecutorDisabled,
+					PreflightDecision:    ops.ReturnedReplicaExecutorPreflightReady,
+					PreflightReason:      ops.ReturnedReplicaExecutorPreflightReasonSatisfied,
+					AllowedMutationClass: []string{ops.AuthorityExecutorAllowedMutationRebuildTraffic},
+				}},
+			},
+		}},
+	}
+	oldFactory := opsRebuildTargetOwnerClientFactory
+	opsRebuildTargetOwnerClientFactory = func() (ops.RebuildTargetOwnerClient, error) {
+		return client, nil
+	}
+	t.Cleanup(func() { opsRebuildTargetOwnerClientFactory = oldFactory })
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ops", "rebuild-target-owner", "--dry-run", "--namespace", "kube-system"}, &stdout, &stderr)
+	if code != ops.VolumeStatusExitOK {
+		t.Fatalf("exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	if len(client.rebuildCreates) != 0 {
+		t.Fatalf("dry-run creates=%+v", client.rebuildCreates)
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"rebuild_target_owner=dry_run",
+		"targets_planned=1",
+		"targets_created=0",
+		"runtime_target_ready=1",
+		"runtime_target_missing=0",
+		"mutation_allowed=false",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("stdout missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestOpsRebuildTargetOwnerDoesNotCreateTargetWhenRuntimeFactsMissing(t *testing.T) {
+	client := &lifecycleOwnerTestClient{
+		volumes: []ops.SwBlockVolumeObject{{
+			Ref: ops.OperatorObjectRef{
+				Name: "demo-pvc",
+			},
+			Status: ops.SwBlockVolumeCRDStatus{
+				VolumeID: "pvc-demo",
+				PVCName:  "demo-pvc",
+				ReplicaReintegrations: []ops.SwBlockVolumeCRDReturnedReplica{{
+					ReplicaID:             "r2",
+					State:                 ops.ReturnedReplicaStateRecovering,
+					ReasonCode:            ops.ReasonCandidateFrontierBehind,
+					FrontendFenced:        true,
+					FrontendPrimaryReady:  false,
+					DurableFrontierKnown:  true,
+					DurableFrontierLSN:    51,
+					RequiredFrontierKnown: true,
+					RequiredFrontierLSN:   53,
+				}},
+				ExecutorContracts: []ops.SwBlockVolumeCRDExecutorContract{{
+					ActionType:           ops.ManagedVolumeActionRebuildReturned,
+					ReplicaID:            "r2",
+					Decision:             ops.ReturnedReplicaExecutorContractDisabled,
+					Reason:               ops.ReturnedReplicaExecutorContractReasonExecutorDisabled,
+					PreflightDecision:    ops.ReturnedReplicaExecutorPreflightReady,
+					PreflightReason:      ops.ReturnedReplicaExecutorPreflightReasonSatisfied,
+					AllowedMutationClass: []string{ops.AuthorityExecutorAllowedMutationRebuildTraffic},
+				}},
+			},
+		}},
+	}
+	oldFactory := opsRebuildTargetOwnerClientFactory
+	opsRebuildTargetOwnerClientFactory = func() (ops.RebuildTargetOwnerClient, error) {
+		return client, nil
+	}
+	t.Cleanup(func() { opsRebuildTargetOwnerClientFactory = oldFactory })
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ops", "rebuild-target-owner", "--namespace", "kube-system"}, &stdout, &stderr)
+	if code != ops.VolumeStatusExitOK {
+		t.Fatalf("exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	if len(client.rebuildCreates) != 0 {
+		t.Fatalf("unexpected creates=%+v", client.rebuildCreates)
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"rebuild_target_owner=target_mutation",
+		"targets_planned=0",
+		"targets_created=0",
+		"runtime_target_ready=0",
+		"runtime_target_missing=1",
+		"mutation_allowed=false",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("stdout missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestOpsFailbackTargetOwnerCreatesTarget(t *testing.T) {
+	client := &lifecycleOwnerTestClient{
+		volumes: []ops.SwBlockVolumeObject{cmdFailbackTargetVolume()},
+	}
+	oldFactory := opsFailbackTargetOwnerClientFactory
+	opsFailbackTargetOwnerClientFactory = func() (ops.FailbackTargetOwnerClient, error) {
+		return client, nil
+	}
+	t.Cleanup(func() { opsFailbackTargetOwnerClientFactory = oldFactory })
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ops", "failback-target-owner", "--namespace", "kube-system"}, &stdout, &stderr)
+	if code != ops.VolumeStatusExitOK {
+		t.Fatalf("exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	if len(client.failbackCreates) != 1 {
+		t.Fatalf("failbackCreates=%+v", client.failbackCreates)
+	}
+	created := client.failbackCreates[0]
+	if created.Ref.Name != "demo-pvc-r1-failback" ||
+		created.Spec.VolumeName != "demo-pvc" ||
+		created.Spec.VolumeID != "pvc-demo" ||
+		created.Spec.PVCName != "demo-pvc" ||
+		created.Spec.ReplicaID != "r1" ||
+		created.Spec.TargetDataAddr != "data-r1" ||
+		created.Spec.TargetCtrlAddr != "ctrl-r1" ||
+		created.Spec.ExpectedCurrentReplicaID != "r2" ||
+		created.Spec.ExpectedCurrentEpoch != 7 ||
+		!created.Spec.AckEligible ||
+		!created.Spec.FrontendFencedBeforeFailback ||
+		!created.Spec.DurableFrontierCovered ||
+		!created.Spec.NoCrossVolumeIdentityChange ||
+		created.Spec.FailbackDecision != ops.AuthorityExecutorFailbackDecisionDisabled ||
+		created.Spec.FailbackReason != ops.AuthorityExecutorFailbackReasonDisabled ||
+		created.Spec.FailbackMutationAllowed {
+		t.Fatalf("created=%+v", created)
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"failback_target_owner=target_mutation",
+		"namespace=kube-system",
+		"volumes=1",
+		"contracts=1",
+		"targets_planned=1",
+		"targets_existing=0",
+		"targets_created=1",
+		"terminal_evidence_ready=1",
+		"terminal_evidence_missing=0",
+		"failback_attempts=0",
+		"mutation_allowed=true",
+		"storage_mutation_allowed=false",
+		"frontend_publication_allowed=false",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("stdout missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestOpsFailbackTargetOwnerDryRunDoesNotCreateTarget(t *testing.T) {
+	client := &lifecycleOwnerTestClient{
+		volumes: []ops.SwBlockVolumeObject{cmdFailbackTargetVolume()},
+	}
+	oldFactory := opsFailbackTargetOwnerClientFactory
+	opsFailbackTargetOwnerClientFactory = func() (ops.FailbackTargetOwnerClient, error) {
+		return client, nil
+	}
+	t.Cleanup(func() { opsFailbackTargetOwnerClientFactory = oldFactory })
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ops", "failback-target-owner", "--dry-run", "--namespace", "kube-system"}, &stdout, &stderr)
+	if code != ops.VolumeStatusExitOK {
+		t.Fatalf("exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	if len(client.failbackCreates) != 0 {
+		t.Fatalf("dry-run creates=%+v", client.failbackCreates)
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"failback_target_owner=dry_run",
+		"targets_planned=1",
+		"targets_created=0",
+		"terminal_evidence_ready=1",
+		"mutation_allowed=false",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("stdout missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestOpsFailbackTargetOwnerCreatesActivatedTargetWithExplicitPolicy(t *testing.T) {
+	client := &lifecycleOwnerTestClient{
+		volumes: []ops.SwBlockVolumeObject{cmdFailbackTargetVolume()},
+	}
+	oldFactory := opsFailbackTargetOwnerClientFactory
+	opsFailbackTargetOwnerClientFactory = func() (ops.FailbackTargetOwnerClient, error) {
+		return client, nil
+	}
+	t.Cleanup(func() { opsFailbackTargetOwnerClientFactory = oldFactory })
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ops", "failback-target-owner", "--namespace", "kube-system", "--activate-targets", "--activation-policy", "--runtime-endpoint", "blockmaster.kube-system.svc:9333"}, &stdout, &stderr)
+	if code != ops.VolumeStatusExitOK {
+		t.Fatalf("exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	if len(client.failbackCreates) != 1 {
+		t.Fatalf("failbackCreates=%+v", client.failbackCreates)
+	}
+	created := client.failbackCreates[0]
+	if created.Spec.FailbackDecision != ops.AuthorityExecutorFailbackDecisionEnabled ||
+		created.Spec.FailbackReason != ops.AuthorityExecutorFailbackReasonRequested ||
+		!created.Spec.FailbackMutationAllowed ||
+		created.Spec.RuntimeEndpoint != "blockmaster.kube-system.svc:9333" ||
+		created.Spec.ExpectedCurrentReplicaID != "r2" ||
+		created.Spec.ExpectedCurrentEpoch != 7 {
+		t.Fatalf("created=%+v", created)
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"activate_targets=true",
+		"activation_policy=true",
+		"failback_attempts=0",
+		"storage_mutation_allowed=false",
+		"frontend_publication_allowed=false",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("stdout missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestOpsFailbackExecutorWritesDisabledStatus(t *testing.T) {
+	client := &lifecycleOwnerTestClient{
+		failbacks: []ops.SwBlockReplicaFailbackObject{cmdFailbackTarget()},
+	}
+	oldFactory := opsFailbackExecutorClientFactory
+	opsFailbackExecutorClientFactory = func() (ops.FailbackExecutorClient, error) {
+		return client, nil
+	}
+	t.Cleanup(func() { opsFailbackExecutorClientFactory = oldFactory })
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ops", "failback-executor", "--namespace", "kube-system"}, &stdout, &stderr)
+	if code != ops.VolumeStatusExitOK {
+		t.Fatalf("exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	if len(client.failbackStatusWrites) != 1 {
+		t.Fatalf("failbackStatusWrites=%+v", client.failbackStatusWrites)
+	}
+	status := client.failbackStatusWrites[0].status
+	if status.State != ops.FailbackStateBlocked ||
+		status.ReasonCode != ops.AuthorityExecutorFailbackReasonDisabled ||
+		status.FailbackMutationAllowed ||
+		status.FailbackStarted ||
+		status.AuthorityEpochAdvanced ||
+		status.SinglePrimaryAfterFailback ||
+		status.PublishTargetSwappedAfterFailback {
+		t.Fatalf("status=%+v", status)
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"failback_executor=write_status",
+		"namespace=kube-system",
+		"targets=1",
+		"status_writes=1",
+		"invalid_targets=0",
+		"failback_attempts=0",
+		"status_mutation_allowed=true",
+		"authority_mutation_allowed=false",
+		"frontend_publication_allowed=false",
+		"mutation_allowed=true",
+		"storage_mutation_allowed=false",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("stdout missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestOpsFailbackExecutorDryRunDoesNotWriteStatus(t *testing.T) {
+	client := &lifecycleOwnerTestClient{
+		failbacks: []ops.SwBlockReplicaFailbackObject{cmdFailbackTarget()},
+	}
+	oldFactory := opsFailbackExecutorClientFactory
+	opsFailbackExecutorClientFactory = func() (ops.FailbackExecutorClient, error) {
+		return client, nil
+	}
+	t.Cleanup(func() { opsFailbackExecutorClientFactory = oldFactory })
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ops", "failback-executor", "--dry-run", "--namespace", "kube-system"}, &stdout, &stderr)
+	if code != ops.VolumeStatusExitOK {
+		t.Fatalf("exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	if len(client.failbackStatusWrites) != 0 {
+		t.Fatalf("dry-run writes=%+v", client.failbackStatusWrites)
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"failback_executor=dry_run",
+		"targets=1",
+		"status_writes=0",
+		"failback_attempts=0",
+		"status_mutation_allowed=false",
+		"authority_mutation_allowed=false",
+		"frontend_publication_allowed=false",
+		"mutation_allowed=false",
+		"storage_mutation_allowed=false",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("stdout missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestOpsFrontendPublicationTargetOwnerCreatesTarget(t *testing.T) {
+	client := &lifecycleOwnerTestClient{
+		eligibilities: []ops.SwBlockReplicaEligibilityObject{cmdFrontendPublicationEligibility()},
+	}
+	oldFactory := opsFrontendPublicationTargetOwnerClientFactory
+	opsFrontendPublicationTargetOwnerClientFactory = func() (ops.FrontendPublicationTargetOwnerClient, error) {
+		return client, nil
+	}
+	t.Cleanup(func() { opsFrontendPublicationTargetOwnerClientFactory = oldFactory })
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ops", "frontend-publication-target-owner", "--namespace", "kube-system"}, &stdout, &stderr)
+	if code != ops.VolumeStatusExitOK {
+		t.Fatalf("exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	if len(client.frontendPublicationCreates) != 1 {
+		t.Fatalf("frontendPublicationCreates=%+v", client.frontendPublicationCreates)
+	}
+	created := client.frontendPublicationCreates[0]
+	if created.Ref.Name != "demo-pvc-r2-frontend-publication" ||
+		created.Spec.VolumeName != "demo-pvc" ||
+		created.Spec.ReplicaID != "r2" ||
+		created.Spec.SourceEligibilityName != "demo-pvc-r2-ack" ||
+		!created.Spec.AckEligibilityKnown ||
+		!created.Spec.AckEligible ||
+		!created.Spec.FrontendFencedAfterExecution ||
+		!created.Spec.PrimaryUnchanged ||
+		!created.Spec.DurableFrontierCovered ||
+		!created.Spec.NoCrossVolumeIdentityChange ||
+		created.Spec.FrontendPublicationDecision != ops.AuthorityExecutorPublicationDecisionDisabled ||
+		created.Spec.FrontendPublicationReason != ops.AuthorityExecutorFrontendPublicationReasonDisabled ||
+		created.Spec.FrontendPublicationMutationAllowed {
+		t.Fatalf("created=%+v", created)
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"frontend_publication_target_owner=target_mutation",
+		"namespace=kube-system",
+		"eligibilities=1",
+		"ready_eligibilities=1",
+		"targets_planned=1",
+		"targets_existing=0",
+		"targets_created=1",
+		"invalid_eligibilities=0",
+		"frontend_publication_attempts=0",
+		"failback_attempts=0",
+		"mutation_allowed=true",
+		"storage_mutation_allowed=false",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("stdout missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestOpsFrontendPublicationTargetOwnerCreatesTargetFromFailback(t *testing.T) {
+	client := &lifecycleOwnerTestClient{
+		failbacks: []ops.SwBlockReplicaFailbackObject{cmdTerminalFailbackTarget()},
+	}
+	oldFactory := opsFrontendPublicationTargetOwnerClientFactory
+	opsFrontendPublicationTargetOwnerClientFactory = func() (ops.FrontendPublicationTargetOwnerClient, error) {
+		return client, nil
+	}
+	t.Cleanup(func() { opsFrontendPublicationTargetOwnerClientFactory = oldFactory })
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ops", "frontend-publication-target-owner", "--namespace", "kube-system"}, &stdout, &stderr)
+	if code != ops.VolumeStatusExitOK {
+		t.Fatalf("exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	if len(client.frontendPublicationCreates) != 1 {
+		t.Fatalf("frontendPublicationCreates=%+v", client.frontendPublicationCreates)
+	}
+	created := client.frontendPublicationCreates[0]
+	if created.Ref.Name != "demo-pvc-r1-frontend-publication" ||
+		created.Spec.VolumeName != "demo-pvc" ||
+		created.Spec.ReplicaID != "r1" ||
+		created.Spec.TargetDataAddr != "data-r1" ||
+		created.Spec.TargetCtrlAddr != "ctrl-r1" ||
+		created.Spec.SourceFailbackName != "demo-pvc-r1-failback" ||
+		created.Spec.SourceEligibilityName != "" ||
+		!created.Spec.FailbackCompleted ||
+		!created.Spec.AuthorityEpochAdvanced ||
+		!created.Spec.SinglePrimaryAfterFailback ||
+		!created.Spec.PublishTargetSwappedAfterFailback ||
+		!created.Spec.NoCrossVolumeIdentityChange ||
+		created.Spec.FrontendPublicationDecision != ops.AuthorityExecutorPublicationDecisionDisabled ||
+		created.Spec.FrontendPublicationReason != ops.AuthorityExecutorFrontendPublicationReasonDisabled ||
+		created.Spec.FrontendPublicationMutationAllowed {
+		t.Fatalf("created=%+v", created)
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"failbacks=1",
+		"terminal_failbacks=1",
+		"targets_planned=1",
+		"targets_created=1",
+		"invalid_failbacks=0",
+		"frontend_publication_attempts=0",
+		"failback_attempts=0",
+		"storage_mutation_allowed=false",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("stdout missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestOpsFrontendPublicationTargetOwnerDryRunDoesNotCreateTarget(t *testing.T) {
+	client := &lifecycleOwnerTestClient{
+		eligibilities: []ops.SwBlockReplicaEligibilityObject{cmdFrontendPublicationEligibility()},
+	}
+	oldFactory := opsFrontendPublicationTargetOwnerClientFactory
+	opsFrontendPublicationTargetOwnerClientFactory = func() (ops.FrontendPublicationTargetOwnerClient, error) {
+		return client, nil
+	}
+	t.Cleanup(func() { opsFrontendPublicationTargetOwnerClientFactory = oldFactory })
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ops", "frontend-publication-target-owner", "--dry-run", "--namespace", "kube-system"}, &stdout, &stderr)
+	if code != ops.VolumeStatusExitOK {
+		t.Fatalf("exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	if len(client.frontendPublicationCreates) != 0 {
+		t.Fatalf("dry-run creates=%+v", client.frontendPublicationCreates)
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"frontend_publication_target_owner=dry_run",
+		"targets_planned=1",
+		"targets_created=0",
+		"frontend_publication_attempts=0",
+		"failback_attempts=0",
+		"mutation_allowed=false",
+		"storage_mutation_allowed=false",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("stdout missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestOpsFailbackExecutorExecutionPolicyBlocks(t *testing.T) {
+	client := &lifecycleOwnerTestClient{
+		failbacks: []ops.SwBlockReplicaFailbackObject{cmdFailbackExecutableTarget()},
+	}
+	oldFactory := opsFailbackExecutorClientFactory
+	opsFailbackExecutorClientFactory = func() (ops.FailbackExecutorClient, error) {
+		return client, nil
+	}
+	t.Cleanup(func() { opsFailbackExecutorClientFactory = oldFactory })
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ops", "failback-executor", "--enable-execution", "--namespace", "kube-system"}, &stdout, &stderr)
+	if code != ops.VolumeStatusExitInvalid {
+		t.Fatalf("exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "failback execution is disabled by product policy") ||
+		!strings.Contains(stderr.String(), "failback_attempts=0") {
+		t.Fatalf("stderr=%s", stderr.String())
+	}
+	if len(client.failbackStatusWrites) != 0 {
+		t.Fatalf("policy-disabled execution wrote status: %+v", client.failbackStatusWrites)
+	}
+}
+
+func TestOpsFailbackExecutorRuntimeURLWritesFailedBackStatus(t *testing.T) {
+	client := &lifecycleOwnerTestClient{
+		failbacks: []ops.SwBlockReplicaFailbackObject{cmdFailbackExecutableTarget()},
+	}
+	var got ops.FailbackRuntimeRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		_ = json.NewEncoder(w).Encode(ops.FailbackRuntimeResult{
+			FailbackStarted:                   true,
+			AuthorityEpochAdvanced:            true,
+			SinglePrimaryAfterFailback:        true,
+			PublishTargetSwappedAfterFailback: true,
+			NoStorageMutation:                 true,
+			NoCrossVolumeIdentityChange:       true,
+			EvidenceRefs:                      []string{"runtime.txt"},
+		})
+	}))
+	defer server.Close()
+	oldFactory := opsFailbackExecutorClientFactory
+	opsFailbackExecutorClientFactory = func() (ops.FailbackExecutorClient, error) {
+		return client, nil
+	}
+	t.Cleanup(func() { opsFailbackExecutorClientFactory = oldFactory })
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"ops", "failback-executor",
+		"--enable-execution",
+		"--execution-policy",
+		"--failback-runtime-url", server.URL,
+		"--namespace", "kube-system",
+	}, &stdout, &stderr)
+	if code != ops.VolumeStatusExitOK {
+		t.Fatalf("exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	if got.VolumeName != "demo-pvc" ||
+		got.ReplicaID != "r1" ||
+		got.RuntimeEndpoint != "http://127.0.0.1:23260/runtime/failback" ||
+		got.TargetDataAddr != "data-r1" ||
+		got.TargetCtrlAddr != "ctrl-r1" ||
+		got.ExpectedCurrentReplicaID != "r2" ||
+		got.ExpectedCurrentEpoch != 7 ||
+		!got.AckEligible ||
+		!got.FrontendFencedBeforeFailback {
+		t.Fatalf("runtime request=%+v", got)
+	}
+	if len(client.failbackStatusWrites) != 1 {
+		t.Fatalf("failbackStatusWrites=%+v", client.failbackStatusWrites)
+	}
+	status := client.failbackStatusWrites[0].status
+	if status.State != ops.FailbackStateFailedBack ||
+		status.ReasonCode != ops.AuthorityExecutorFailbackReasonCompleted ||
+		!status.FailbackStarted ||
+		!status.AuthorityEpochAdvanced ||
+		!status.SinglePrimaryAfterFailback ||
+		!status.PublishTargetSwappedAfterFailback {
+		t.Fatalf("status=%+v", status)
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"failback_executor=write_status",
+		"failback_attempts=1",
+		"execution_requested=true",
+		"execution_policy_enabled=true",
+		"authority_mutation_allowed=true",
+		"frontend_publication_allowed=false",
+		"storage_mutation_allowed=false",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("stdout missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestOpsFailbackExecutorGRPCRuntimeWritesFailedBackStatus(t *testing.T) {
+	client := &lifecycleOwnerTestClient{
+		failbacks: []ops.SwBlockReplicaFailbackObject{cmdFailbackExecutableTarget()},
+	}
+	oldFactory := opsFailbackExecutorClientFactory
+	opsFailbackExecutorClientFactory = func() (ops.FailbackExecutorClient, error) {
+		return client, nil
+	}
+	t.Cleanup(func() { opsFailbackExecutorClientFactory = oldFactory })
+
+	server := grpc.NewServer()
+	fake := &cmdFailbackService{}
+	control.RegisterFailbackServiceServer(server, fake)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		done <- server.Serve(ln)
+	}()
+	t.Cleanup(func() {
+		server.Stop()
+		_ = ln.Close()
+		<-done
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"ops", "failback-executor",
+		"--namespace", "kube-system",
+		"--enable-execution",
+		"--execution-policy",
+		"--failback-runtime-grpc-addr", ln.Addr().String(),
+	}, &stdout, &stderr)
+	if code != ops.VolumeStatusExitOK {
+		t.Fatalf("exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	got := fake.request
+	if got == nil ||
+		got.GetVolumeId() != "pvc-demo" ||
+		got.GetReplicaId() != "r1" ||
+		got.GetTargetDataAddr() != "data-r1" ||
+		got.GetTargetCtrlAddr() != "ctrl-r1" ||
+		got.GetExpectedCurrentReplicaId() != "r2" ||
+		got.GetExpectedCurrentEpoch() != 7 ||
+		!got.GetAckEligible() ||
+		!got.GetFrontendFencedBeforeFailback() ||
+		!got.GetDurableFrontierCovered() ||
+		!got.GetNoCrossVolumeIdentityChange() {
+		t.Fatalf("grpc request=%+v", got)
+	}
+	if len(client.failbackStatusWrites) != 1 {
+		t.Fatalf("failbackStatusWrites=%+v", client.failbackStatusWrites)
+	}
+	status := client.failbackStatusWrites[0].status
+	if status.State != ops.FailbackStateFailedBack ||
+		status.ReasonCode != ops.AuthorityExecutorFailbackReasonCompleted ||
+		!status.FailbackStarted ||
+		!status.AuthorityEpochAdvanced ||
+		!status.SinglePrimaryAfterFailback ||
+		!status.PublishTargetSwappedAfterFailback {
+		t.Fatalf("status=%+v", status)
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"failback_executor=write_status",
+		"failback_attempts=1",
+		"execution_requested=true",
+		"execution_policy_enabled=true",
+		"authority_mutation_allowed=true",
+		"frontend_publication_allowed=false",
+		"storage_mutation_allowed=false",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("stdout missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestOpsFailbackExecutorRejectsGRPCRuntimeWithoutEnable(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ops", "failback-executor", "--failback-runtime-grpc-addr", "127.0.0.1:9333"}, &stdout, &stderr)
+	if code != ops.VolumeStatusExitInvalid {
+		t.Fatalf("exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "--failback-runtime-grpc-addr requires --enable-execution") {
+		t.Fatalf("stderr=%s", stderr.String())
+	}
+}
+
+func TestOpsFailbackExecutorRejectsAmbiguousRuntimeTransports(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"ops", "failback-executor",
+		"--enable-execution",
+		"--execution-policy",
+		"--failback-runtime-url", "http://127.0.0.1:23260/runtime",
+		"--failback-runtime-grpc-addr", "127.0.0.1:9333",
+	}, &stdout, &stderr)
+	if code != ops.VolumeStatusExitInvalid {
+		t.Fatalf("exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "mutually exclusive") {
+		t.Fatalf("stderr=%s", stderr.String())
+	}
+}
+
+func TestOpsFrontendPublicationExecutorWritesDisabledStatus(t *testing.T) {
+	client := &lifecycleOwnerTestClient{
+		frontendTargets: []ops.SwBlockFrontendPublicationObject{cmdFrontendPublicationTarget()},
+	}
+	oldFactory := opsFrontendPublicationExecutorClientFactory
+	opsFrontendPublicationExecutorClientFactory = func() (ops.FrontendPublicationExecutorClient, error) {
+		return client, nil
+	}
+	t.Cleanup(func() { opsFrontendPublicationExecutorClientFactory = oldFactory })
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ops", "frontend-publication-executor", "--namespace", "kube-system"}, &stdout, &stderr)
+	if code != ops.VolumeStatusExitOK {
+		t.Fatalf("exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	if len(client.frontendPublicationStatusWrites) != 1 {
+		t.Fatalf("frontendPublicationStatusWrites=%+v", client.frontendPublicationStatusWrites)
+	}
+	status := client.frontendPublicationStatusWrites[0].status
+	if status.State != ops.FrontendPublicationStateBlocked ||
+		status.ReasonCode != ops.AuthorityExecutorFrontendPublicationReasonDisabled ||
+		status.PublicationMutationAllowed ||
+		status.FrontendPublished ||
+		status.FailbackStarted ||
+		!status.NoStorageMutation {
+		t.Fatalf("status=%+v", status)
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"frontend_publication_executor=write_status",
+		"namespace=kube-system",
+		"targets=1",
+		"status_writes=1",
+		"invalid_targets=0",
+		"frontend_publication_attempts=0",
+		"failback_attempts=0",
+		"status_mutation_allowed=true",
+		"frontend_publication_mutation_allowed=false",
+		"mutation_allowed=true",
+		"storage_mutation_allowed=false",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("stdout missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestOpsFrontendPublicationExecutorDryRunDoesNotWriteStatus(t *testing.T) {
+	client := &lifecycleOwnerTestClient{
+		frontendTargets: []ops.SwBlockFrontendPublicationObject{cmdFrontendPublicationTarget()},
+	}
+	oldFactory := opsFrontendPublicationExecutorClientFactory
+	opsFrontendPublicationExecutorClientFactory = func() (ops.FrontendPublicationExecutorClient, error) {
+		return client, nil
+	}
+	t.Cleanup(func() { opsFrontendPublicationExecutorClientFactory = oldFactory })
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ops", "frontend-publication-executor", "--dry-run", "--namespace", "kube-system"}, &stdout, &stderr)
+	if code != ops.VolumeStatusExitOK {
+		t.Fatalf("exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	if len(client.frontendPublicationStatusWrites) != 0 {
+		t.Fatalf("dry-run writes=%+v", client.frontendPublicationStatusWrites)
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"frontend_publication_executor=dry_run",
+		"targets=1",
+		"status_writes=0",
+		"frontend_publication_attempts=0",
+		"failback_attempts=0",
+		"status_mutation_allowed=false",
+		"frontend_publication_mutation_allowed=false",
+		"mutation_allowed=false",
+		"storage_mutation_allowed=false",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("stdout missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestOpsFrontendPublicationExecutorRejectsRuntimeWithoutEnable(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ops", "frontend-publication-executor", "--frontend-publication-runtime-url", "http://127.0.0.1:23260/runtime"}, &stdout, &stderr)
+	if code != ops.VolumeStatusExitInvalid {
+		t.Fatalf("exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "--frontend-publication-runtime-url requires --enable-execution") {
+		t.Fatalf("stderr=%s", stderr.String())
+	}
+}
+
+func TestOpsFrontendPublicationExecutorPolicyBlocksExecution(t *testing.T) {
+	client := &lifecycleOwnerTestClient{
+		frontendTargets: []ops.SwBlockFrontendPublicationObject{cmdFrontendPublicationFailbackExecutableTarget()},
+	}
+	oldFactory := opsFrontendPublicationExecutorClientFactory
+	opsFrontendPublicationExecutorClientFactory = func() (ops.FrontendPublicationExecutorClient, error) {
+		return client, nil
+	}
+	t.Cleanup(func() { opsFrontendPublicationExecutorClientFactory = oldFactory })
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ops", "frontend-publication-executor", "--enable-execution", "--namespace", "kube-system"}, &stdout, &stderr)
+	if code != ops.VolumeStatusExitInvalid {
+		t.Fatalf("exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "execution is disabled by product policy") {
+		t.Fatalf("stderr=%s", stderr.String())
+	}
+	if len(client.frontendPublicationStatusWrites) != 0 {
+		t.Fatalf("policy blocked execution wrote status: %+v", client.frontendPublicationStatusWrites)
+	}
+}
+
+func TestOpsFrontendPublicationExecutorExecutesFailbackTargetWithExplicitPolicy(t *testing.T) {
+	client := &lifecycleOwnerTestClient{
+		frontendTargets: []ops.SwBlockFrontendPublicationObject{cmdFrontendPublicationFailbackExecutableTarget()},
+	}
+	oldFactory := opsFrontendPublicationExecutorClientFactory
+	opsFrontendPublicationExecutorClientFactory = func() (ops.FrontendPublicationExecutorClient, error) {
+		return client, nil
+	}
+	t.Cleanup(func() { opsFrontendPublicationExecutorClientFactory = oldFactory })
+
+	var got ops.FrontendPublicationRuntimeRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Fatalf("decode runtime request: %v", err)
+		}
+		_ = json.NewEncoder(w).Encode(ops.FrontendPublicationRuntimeResult{
+			FrontendPublished:           true,
+			FailbackStarted:             false,
+			NoStorageMutation:           true,
+			NoCrossVolumeIdentityChange: true,
+			EvidenceRefs:                []string{"frontend-after-failback.txt"},
+		})
+	}))
+	defer server.Close()
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"ops", "frontend-publication-executor",
+		"--enable-execution",
+		"--execution-policy",
+		"--frontend-publication-runtime-url", server.URL,
+		"--namespace", "kube-system",
+	}, &stdout, &stderr)
+	if code != ops.VolumeStatusExitOK {
+		t.Fatalf("exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	if got.SourceFailbackName != "demo-pvc-r1-failback" ||
+		got.TargetDataAddr != "data-r1" ||
+		got.TargetCtrlAddr != "ctrl-r1" ||
+		!got.FailbackCompleted ||
+		!got.AuthorityEpochAdvanced ||
+		!got.SinglePrimaryAfterFailback ||
+		!got.PublishTargetSwappedAfterFailback ||
+		got.AckEligible ||
+		got.PrimaryUnchanged {
+		t.Fatalf("runtime request=%+v", got)
+	}
+	if len(client.frontendPublicationStatusWrites) != 1 {
+		t.Fatalf("frontendPublicationStatusWrites=%+v", client.frontendPublicationStatusWrites)
+	}
+	status := client.frontendPublicationStatusWrites[0].status
+	if status.State != ops.FrontendPublicationStatePublished ||
+		status.ReasonCode != ops.AuthorityExecutorFrontendPublicationReasonPublished ||
+		status.PublicationMutationAllowed ||
+		!status.FrontendPublished ||
+		status.FailbackStarted ||
+		!status.NoStorageMutation ||
+		!status.NoCrossVolumeIdentityChange {
+		t.Fatalf("status=%+v", status)
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"frontend_publication_executor=write_status",
+		"targets=1",
+		"status_writes=1",
+		"invalid_targets=0",
+		"frontend_publication_attempts=1",
+		"failback_attempts=0",
+		"storage_mutation_allowed=false",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("stdout missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestOpsAuthorityExecutorExecutionPolicyBlocksWhenAckTargetMissing(t *testing.T) {
+	client := &lifecycleOwnerTestClient{
+		volumes: []ops.SwBlockVolumeObject{{
+			Ref: ops.OperatorObjectRef{
+				APIVersion: ops.SwBlockVolumeAPIVersion,
+				Kind:       ops.SwBlockVolumeKind,
+				Namespace:  "kube-system",
+				Name:       "returned",
+			},
+			Status: ops.SwBlockVolumeCRDStatus{
+				VolumeID: "pvc-1",
+				PVCName:  "demo",
+				ReplicaReintegrations: []ops.SwBlockVolumeCRDReturnedReplica{{
+					ReplicaID:             "r1",
+					State:                 ops.ReturnedReplicaStateFenced,
+					ReasonCode:            ops.ReasonReturnedReplicaFrontendFenced,
+					FrontendFenced:        true,
+					FrontendPrimaryReady:  false,
+					AckEligibilityKnown:   true,
+					AckEligible:           false,
+					DurableFrontierKnown:  true,
+					DurableFrontierLSN:    52,
+					RequiredFrontierKnown: true,
+					RequiredFrontierLSN:   52,
+				}},
+				ExecutorContracts: []ops.SwBlockVolumeCRDExecutorContract{{
+					ActionType:             ops.ManagedVolumeActionReintegrateReturned,
+					ReplicaID:              "r1",
+					Decision:               ops.ReturnedReplicaExecutorContractDisabled,
+					Reason:                 ops.ReturnedReplicaExecutorContractReasonExecutorDisabled,
+					OwnerExecutor:          "authority_recovery_executor",
+					ExecutionEnabled:       false,
+					MutationAllowed:        false,
+					PreflightDecision:      ops.ReturnedReplicaExecutorPreflightReady,
+					PreflightReason:        ops.ReturnedReplicaExecutorPreflightReasonSatisfied,
+					AllowedMutationClass:   []string{ops.AuthorityExecutorAllowedMutationAckEligibility},
+					ForbiddenMutationClass: []string{"frontend_publication", "rebuild_traffic", "failback"},
+				}},
+			},
+		}},
+	}
+	oldFactory := opsAuthorityExecutorClientFactory
+	opsAuthorityExecutorClientFactory = func() (ops.AuthorityExecutorClient, error) {
+		return client, nil
+	}
+	t.Cleanup(func() { opsAuthorityExecutorClientFactory = oldFactory })
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ops", "authority-executor", "--enable-execution", "--execution-policy"}, &stdout, &stderr)
+	if code != ops.VolumeStatusExitOK {
+		t.Fatalf("exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"authority_executor=blocked",
+		"execution_requested=true",
+		"execution_policy_enabled=true",
+		"ack_eligibility_target_missing=1",
+		"mutation_attempts=0",
+		"ack_eligibility_mutation_attempts=0",
+		"mutation_allowed=false",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("stdout missing %q:\n%s", want, out)
+		}
+	}
+}
+
 func TestOpsClusterMasterAPIUsesSharedInClusterNodeEvidenceEnrichment(t *testing.T) {
 	masterAddr, closeMaster := startCmdFakeMaster(t)
 	defer closeMaster()
@@ -606,12 +2000,13 @@ func TestOpsExplainProjectsDeletingCRFromCleanupSummary(t *testing.T) {
 	t.Setenv("KUBERNETES_SERVICE_HOST", "10.0.0.1")
 
 	cleanupSummary := filepath.Join(t.TempDir(), "cleanup-summary.txt")
+	cleanupObservedAt := time.Now().UTC().Format(time.RFC3339)
 	if err := os.WriteFile(cleanupSummary, []byte(strings.Join([]string{
 		"cleanup_status=failed",
 		"iscsi_residue_count=1",
 		"failure_count=1",
 		"reason_codes=iscsi_node_records_present",
-		"cleanup_observed_at=2026-06-17T08:00:00Z",
+		"cleanup_observed_at=" + cleanupObservedAt,
 	}, "\n")), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -771,6 +2166,184 @@ type operatorStatusTestVolumeWrite struct {
 	status ops.SwBlockVolumeCRDStatus
 }
 
+func cmdFrontendPublicationEligibility() ops.SwBlockReplicaEligibilityObject {
+	return ops.SwBlockReplicaEligibilityObject{
+		Ref: ops.OperatorObjectRef{
+			APIVersion: ops.SwBlockVolumeAPIVersion,
+			Kind:       ops.SwBlockReplicaEligibilityKind,
+			Namespace:  "kube-system",
+			Name:       "demo-pvc-r2-ack",
+		},
+		Spec: ops.SwBlockReplicaEligibilitySpec{
+			VolumeName: "demo-pvc",
+			VolumeID:   "pvc-demo",
+			PVCName:    "demo-pvc",
+			ReplicaID:  "r2",
+		},
+		Status: ops.SwBlockReplicaEligibilityCRDStatus{
+			ReasonCode:                         ops.ReturnedReplicaExecutorPreflightReasonAckEligible,
+			AckEligibilityKnown:                true,
+			AckEligible:                        true,
+			FrontendFencedAfterExecution:       true,
+			PrimaryUnchanged:                   true,
+			DurableFrontierCovered:             true,
+			NoCrossVolumeIdentityChange:        true,
+			FrontendPublicationDecision:        ops.AuthorityExecutorPublicationDecisionDisabled,
+			FrontendPublicationReason:          ops.AuthorityExecutorFrontendPublicationReasonDisabled,
+			FrontendPublicationMutationAllowed: false,
+		},
+	}
+}
+
+func cmdFrontendPublicationTarget() ops.SwBlockFrontendPublicationObject {
+	return ops.SwBlockFrontendPublicationObject{
+		Ref: ops.OperatorObjectRef{
+			APIVersion: ops.SwBlockVolumeAPIVersion,
+			Kind:       ops.SwBlockFrontendPublicationKind,
+			Namespace:  "kube-system",
+			Name:       "demo-pvc-r2-frontend-publication",
+		},
+		Spec: ops.SwBlockFrontendPublicationSpec{
+			VolumeName:                         "demo-pvc",
+			VolumeID:                           "pvc-demo",
+			PVCName:                            "demo-pvc",
+			ReplicaID:                          "r2",
+			SourceEligibilityName:              "demo-pvc-r2-ack",
+			AckEligibilityKnown:                true,
+			AckEligible:                        true,
+			FrontendFencedAfterExecution:       true,
+			PrimaryUnchanged:                   true,
+			DurableFrontierCovered:             true,
+			NoCrossVolumeIdentityChange:        true,
+			FrontendPublicationDecision:        ops.AuthorityExecutorPublicationDecisionDisabled,
+			FrontendPublicationReason:          ops.AuthorityExecutorFrontendPublicationReasonDisabled,
+			FrontendPublicationMutationAllowed: false,
+		},
+	}
+}
+
+func cmdFrontendPublicationFailbackExecutableTarget() ops.SwBlockFrontendPublicationObject {
+	return ops.SwBlockFrontendPublicationObject{
+		Ref: ops.OperatorObjectRef{
+			APIVersion: ops.SwBlockVolumeAPIVersion,
+			Kind:       ops.SwBlockFrontendPublicationKind,
+			Namespace:  "kube-system",
+			Name:       "demo-pvc-r1-frontend-publication",
+		},
+		Spec: ops.SwBlockFrontendPublicationSpec{
+			VolumeName:                         "demo-pvc",
+			VolumeID:                           "pvc-demo",
+			PVCName:                            "demo-pvc",
+			ReplicaID:                          "r1",
+			TargetDataAddr:                     "data-r1",
+			TargetCtrlAddr:                     "ctrl-r1",
+			SourceFailbackName:                 "demo-pvc-r1-failback",
+			NoCrossVolumeIdentityChange:        true,
+			FailbackCompleted:                  true,
+			AuthorityEpochAdvanced:             true,
+			SinglePrimaryAfterFailback:         true,
+			PublishTargetSwappedAfterFailback:  true,
+			FrontendPublicationDecision:        ops.AuthorityExecutorPublicationDecisionEnabled,
+			FrontendPublicationReason:          "frontend_publication_requested",
+			FrontendPublicationMutationAllowed: true,
+			RuntimeEndpoint:                    "http://127.0.0.1:23260/runtime/frontend-publication",
+		},
+	}
+}
+
+func cmdFailbackTarget() ops.SwBlockReplicaFailbackObject {
+	return ops.SwBlockReplicaFailbackObject{
+		Ref: ops.OperatorObjectRef{
+			APIVersion: ops.SwBlockVolumeAPIVersion,
+			Kind:       ops.SwBlockReplicaFailbackKind,
+			Namespace:  "kube-system",
+			Name:       "demo-pvc-r1-failback",
+		},
+		Spec: ops.SwBlockReplicaFailbackSpec{
+			VolumeName:                   "demo-pvc",
+			VolumeID:                     "pvc-demo",
+			PVCName:                      "demo-pvc",
+			ReplicaID:                    "r1",
+			TargetDataAddr:               "data-r1",
+			TargetCtrlAddr:               "ctrl-r1",
+			AckEligible:                  true,
+			FrontendFencedBeforeFailback: true,
+			DurableFrontierCovered:       true,
+			NoCrossVolumeIdentityChange:  true,
+			FailbackDecision:             ops.AuthorityExecutorFailbackDecisionDisabled,
+			FailbackReason:               ops.AuthorityExecutorFailbackReasonDisabled,
+			FailbackMutationAllowed:      false,
+		},
+	}
+}
+
+func cmdFailbackExecutableTarget() ops.SwBlockReplicaFailbackObject {
+	target := cmdFailbackTarget()
+	target.Spec.FailbackDecision = ops.AuthorityExecutorFailbackDecisionEnabled
+	target.Spec.FailbackReason = "failback_requested"
+	target.Spec.FailbackMutationAllowed = true
+	target.Spec.RuntimeEndpoint = "http://127.0.0.1:23260/runtime/failback"
+	target.Spec.ExpectedCurrentReplicaID = "r2"
+	target.Spec.ExpectedCurrentEpoch = 7
+	return target
+}
+
+func cmdTerminalFailbackTarget() ops.SwBlockReplicaFailbackObject {
+	target := cmdFailbackTarget()
+	target.Status = ops.SwBlockReplicaFailbackCRDStatus{
+		Executor:                          "failback-executor",
+		State:                             ops.FailbackStateFailedBack,
+		ReasonCode:                        ops.AuthorityExecutorFailbackReasonCompleted,
+		FailbackMutationAllowed:           false,
+		FailbackStarted:                   true,
+		AuthorityEpochAdvanced:            true,
+		SinglePrimaryAfterFailback:        true,
+		PublishTargetSwappedAfterFailback: true,
+		NoCrossVolumeIdentityChange:       true,
+	}
+	return target
+}
+
+func cmdFailbackTargetVolume() ops.SwBlockVolumeObject {
+	return ops.SwBlockVolumeObject{
+		Ref: ops.OperatorObjectRef{
+			APIVersion: ops.SwBlockVolumeAPIVersion,
+			Kind:       ops.SwBlockVolumeKind,
+			Namespace:  "kube-system",
+			Name:       "demo-pvc",
+		},
+		Status: ops.SwBlockVolumeCRDStatus{
+			VolumeID:         "pvc-demo",
+			PVCName:          "demo-pvc",
+			PrimaryReplicaID: "r2",
+			AuthorityEpoch:   7,
+			ReplicaReintegrations: []ops.SwBlockVolumeCRDReturnedReplica{{
+				ReplicaID:             "r1",
+				State:                 ops.ReturnedReplicaStateFenced,
+				FrontendFenced:        true,
+				FrontendPrimaryReady:  false,
+				AckEligibilityKnown:   true,
+				AckEligible:           true,
+				DurableFrontierKnown:  true,
+				DurableFrontierLSN:    52,
+				RequiredFrontierKnown: true,
+				RequiredFrontierLSN:   52,
+				TargetDataAddr:        "data-r1",
+				TargetCtrlAddr:        "ctrl-r1",
+			}},
+			ExecutorContracts: []ops.SwBlockVolumeCRDExecutorContract{{
+				ActionType:           ops.ManagedVolumeActionFailbackReturned,
+				ReplicaID:            "r1",
+				Decision:             ops.ReturnedReplicaExecutorContractDisabled,
+				Reason:               ops.ReturnedReplicaExecutorContractReasonExecutorDisabled,
+				PreflightDecision:    ops.ReturnedReplicaExecutorPreflightReady,
+				PreflightReason:      ops.ReturnedReplicaExecutorPreflightReasonSatisfied,
+				AllowedMutationClass: []string{"failback"},
+			}},
+		},
+	}
+}
+
 func (w *operatorStatusTestWriter) WriteClusterStatus(_ context.Context, _ ops.OperatorObjectRef, status ops.SwBlockClusterCRDStatus) error {
 	w.cluster = status
 	return nil
@@ -782,9 +2355,38 @@ func (w *operatorStatusTestWriter) WriteVolumeStatus(_ context.Context, ref ops.
 }
 
 type lifecycleOwnerTestClient struct {
-	volumes []ops.SwBlockVolumeObject
-	patches []lifecycleOwnerTestPatch
-	events  []ops.OperatorKubernetesEvent
+	volumes                         []ops.SwBlockVolumeObject
+	eligibilities                   []ops.SwBlockReplicaEligibilityObject
+	rebuilds                        []ops.SwBlockReplicaRebuildObject
+	failbacks                       []ops.SwBlockReplicaFailbackObject
+	frontendTargets                 []ops.SwBlockFrontendPublicationObject
+	patches                         []lifecycleOwnerTestPatch
+	events                          []ops.OperatorKubernetesEvent
+	eligibilityWrites               []lifecycleOwnerTestEligibilityWrite
+	rebuildWrites                   []lifecycleOwnerTestRebuildWrite
+	rebuildCreates                  []ops.SwBlockReplicaRebuildObject
+	failbackCreates                 []ops.SwBlockReplicaFailbackObject
+	failbackStatusWrites            []lifecycleOwnerTestFailbackWrite
+	frontendPublicationCreates      []ops.SwBlockFrontendPublicationObject
+	frontendPublicationStatusWrites []lifecycleOwnerTestFrontendPublicationWrite
+}
+
+type cmdFailbackService struct {
+	control.UnimplementedFailbackServiceServer
+	request *control.FailbackRequest
+}
+
+func (s *cmdFailbackService) ExecuteFailback(_ context.Context, req *control.FailbackRequest) (*control.FailbackResponse, error) {
+	s.request = req
+	return &control.FailbackResponse{
+		FailbackStarted:                   true,
+		AuthorityEpochAdvanced:            true,
+		SinglePrimaryAfterFailback:        true,
+		PublishTargetSwappedAfterFailback: true,
+		NoStorageMutation:                 true,
+		NoCrossVolumeIdentityChange:       true,
+		EvidenceRefs:                      []string{"grpc-runtime.txt"},
+	}, nil
 }
 
 type lifecycleOwnerTestPatch struct {
@@ -792,8 +2394,79 @@ type lifecycleOwnerTestPatch struct {
 	finalizers []string
 }
 
+type lifecycleOwnerTestEligibilityWrite struct {
+	ref    ops.OperatorObjectRef
+	status ops.SwBlockReplicaEligibilityCRDStatus
+}
+
+type lifecycleOwnerTestRebuildWrite struct {
+	ref    ops.OperatorObjectRef
+	status ops.SwBlockReplicaRebuildCRDStatus
+}
+
+type lifecycleOwnerTestFailbackWrite struct {
+	ref    ops.OperatorObjectRef
+	status ops.SwBlockReplicaFailbackCRDStatus
+}
+
+type lifecycleOwnerTestFrontendPublicationWrite struct {
+	ref    ops.OperatorObjectRef
+	status ops.SwBlockFrontendPublicationCRDStatus
+}
+
 func (c *lifecycleOwnerTestClient) ListSwBlockVolumes(_ context.Context, _ string) ([]ops.SwBlockVolumeObject, error) {
 	return append([]ops.SwBlockVolumeObject(nil), c.volumes...), nil
+}
+
+func (c *lifecycleOwnerTestClient) ListSwBlockReplicaEligibilities(_ context.Context, _ string) ([]ops.SwBlockReplicaEligibilityObject, error) {
+	return append([]ops.SwBlockReplicaEligibilityObject(nil), c.eligibilities...), nil
+}
+
+func (c *lifecycleOwnerTestClient) ListSwBlockReplicaRebuilds(_ context.Context, _ string) ([]ops.SwBlockReplicaRebuildObject, error) {
+	return append([]ops.SwBlockReplicaRebuildObject(nil), c.rebuilds...), nil
+}
+
+func (c *lifecycleOwnerTestClient) ListSwBlockReplicaFailbacks(_ context.Context, _ string) ([]ops.SwBlockReplicaFailbackObject, error) {
+	return append([]ops.SwBlockReplicaFailbackObject(nil), c.failbacks...), nil
+}
+
+func (c *lifecycleOwnerTestClient) ListSwBlockFrontendPublications(_ context.Context, _ string) ([]ops.SwBlockFrontendPublicationObject, error) {
+	return append([]ops.SwBlockFrontendPublicationObject(nil), c.frontendTargets...), nil
+}
+
+func (c *lifecycleOwnerTestClient) WriteReplicaEligibilityStatus(_ context.Context, ref ops.OperatorObjectRef, status ops.SwBlockReplicaEligibilityCRDStatus) error {
+	c.eligibilityWrites = append(c.eligibilityWrites, lifecycleOwnerTestEligibilityWrite{ref: ref, status: status})
+	return nil
+}
+
+func (c *lifecycleOwnerTestClient) WriteReplicaRebuildStatus(_ context.Context, ref ops.OperatorObjectRef, status ops.SwBlockReplicaRebuildCRDStatus) error {
+	c.rebuildWrites = append(c.rebuildWrites, lifecycleOwnerTestRebuildWrite{ref: ref, status: status})
+	return nil
+}
+
+func (c *lifecycleOwnerTestClient) WriteReplicaFailbackStatus(_ context.Context, ref ops.OperatorObjectRef, status ops.SwBlockReplicaFailbackCRDStatus) error {
+	c.failbackStatusWrites = append(c.failbackStatusWrites, lifecycleOwnerTestFailbackWrite{ref: ref, status: status})
+	return nil
+}
+
+func (c *lifecycleOwnerTestClient) WriteFrontendPublicationStatus(_ context.Context, ref ops.OperatorObjectRef, status ops.SwBlockFrontendPublicationCRDStatus) error {
+	c.frontendPublicationStatusWrites = append(c.frontendPublicationStatusWrites, lifecycleOwnerTestFrontendPublicationWrite{ref: ref, status: status})
+	return nil
+}
+
+func (c *lifecycleOwnerTestClient) CreateSwBlockReplicaRebuild(_ context.Context, _ string, obj ops.SwBlockReplicaRebuildObject) error {
+	c.rebuildCreates = append(c.rebuildCreates, obj)
+	return nil
+}
+
+func (c *lifecycleOwnerTestClient) CreateSwBlockReplicaFailback(_ context.Context, _ string, obj ops.SwBlockReplicaFailbackObject) error {
+	c.failbackCreates = append(c.failbackCreates, obj)
+	return nil
+}
+
+func (c *lifecycleOwnerTestClient) CreateSwBlockFrontendPublication(_ context.Context, _ string, obj ops.SwBlockFrontendPublicationObject) error {
+	c.frontendPublicationCreates = append(c.frontendPublicationCreates, obj)
+	return nil
 }
 
 func (c *lifecycleOwnerTestClient) PatchSwBlockVolumeFinalizers(_ context.Context, ref ops.OperatorObjectRef, finalizers []string) error {
@@ -1148,6 +2821,256 @@ func TestOpsReportFromBundleWritesStaticReadOnlyArtifacts(t *testing.T) {
 		!strings.Contains(stdout.String(), "html=index.html") ||
 		!strings.Contains(stdout.String(), "operator_snapshot=operator-snapshot.json") {
 		t.Fatalf("stdout missing report paths:\n%s", stdout.String())
+	}
+}
+
+func TestOpsReturnedReplicaFromBundleSurfacesAcrossReportExplainDashboard(t *testing.T) {
+	dir := writeCmdReturnedReplicaBundle(t)
+	outDir := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ops", "report", "--from-bundle", dir, "--out", outDir}, &stdout, &stderr)
+	if code != ops.VolumeStatusExitOK {
+		t.Fatalf("report exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	summary, err := os.ReadFile(filepath.Join(outDir, ops.ObservationReportTextArtifact))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"managed_volume_returned_replica=pvc-returned replica=r1 state=fenced reason=returned_replica_frontend_fenced",
+		"managed_volume_executor_preflight=authority.reintegrate_returned_replica target=r1 decision=ready reason=preconditions_satisfied mode=dry_run executor=authority_recovery_executor mutation_allowed=false ack_eligibility_known=true required_lsn=4241 durable_lsn=4241",
+		"managed_volume_executor_contract=authority.reintegrate_returned_replica target=r1 decision=disabled reason=executor_policy_disabled executor=authority_recovery_executor execution_enabled=false mutation_allowed=false allowed_mutation=ack_eligibility terminal_evidence=ack_eligibility_known,ack_eligible_true,frontend_fenced_after_execution,primary_unchanged,durable_frontier_covered,no_cross_volume_identity_change",
+		"managed_volume_action=authority.reintegrate_returned_replica mode=dry_run side_effect=authority_mutating executor=authority_recovery_executor decision=allowed",
+	} {
+		if !strings.Contains(string(summary), want) {
+			t.Fatalf("report summary missing %q:\n%s", want, summary)
+		}
+	}
+	snapshot, err := os.ReadFile(filepath.Join(outDir, ops.ObservationOperatorSnapshotArtifact))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		`"replica_reintegrations": [`,
+		`"executor_preflights": [`,
+		`"executor_contracts": [`,
+		`"state": "fenced"`,
+		`"reason_code": "returned_replica_frontend_fenced"`,
+		`"reason": "executor_policy_disabled"`,
+		`"execution_enabled": false`,
+		`"reason": "preconditions_satisfied"`,
+		`"type": "authority.reintegrate_returned_replica"`,
+	} {
+		if !strings.Contains(string(snapshot), want) {
+			t.Fatalf("operator snapshot missing %q:\n%s", want, snapshot)
+		}
+	}
+
+	writer := &operatorStatusTestWriter{}
+	oldFactory := opsOperatorStatusWriterFactory
+	opsOperatorStatusWriterFactory = func() (ops.OperatorStatusWriter, error) {
+		return writer, nil
+	}
+	t.Cleanup(func() { opsOperatorStatusWriterFactory = oldFactory })
+	stdout.Reset()
+	stderr.Reset()
+	code = run([]string{"ops", "operator-status", "--from-bundle", dir, "--namespace", "kube-system"}, &stdout, &stderr)
+	if code != ops.VolumeStatusExitOK {
+		t.Fatalf("operator-status exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	if len(writer.volumes) != 1 {
+		t.Fatalf("operator-status writes=%+v", writer.volumes)
+	}
+	returned := writer.volumes[0].status.ReplicaReintegrations
+	if len(returned) != 1 || returned[0].ReplicaID != "r1" || returned[0].State != ops.ReturnedReplicaStateFenced {
+		t.Fatalf("CRD returned replicas=%+v", returned)
+	}
+	contracts := writer.volumes[0].status.ExecutorContracts
+	if len(contracts) != 1 ||
+		contracts[0].Decision != ops.ReturnedReplicaExecutorContractDisabled ||
+		contracts[0].ExecutionEnabled ||
+		contracts[0].MutationAllowed {
+		t.Fatalf("CRD executor contracts=%+v", contracts)
+	}
+	foundReintegrate := false
+	for _, action := range writer.volumes[0].status.AllowedActions {
+		if action.Type == ops.ManagedVolumeActionReintegrateReturned {
+			foundReintegrate = true
+		}
+	}
+	if !foundReintegrate {
+		t.Fatalf("CRD actions=%+v", writer.volumes[0].status.AllowedActions)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = run([]string{"ops", "explain", "volume", "--from-bundle", dir, "pvc-returned"}, &stdout, &stderr)
+	if code != ops.VolumeStatusExitOK {
+		t.Fatalf("explain exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	for _, want := range []string{
+		"managed_volume_returned_replica=pvc-returned replica=r1 state=fenced reason=returned_replica_frontend_fenced",
+		"managed_volume_executor_preflight authority.reintegrate_returned_replica target=r1 decision=ready reason=preconditions_satisfied mode=dry_run executor=authority_recovery_executor mutation_allowed=false ack_eligibility_known=true required_lsn=4241 durable_lsn=4241",
+		"managed_volume_executor_contract authority.reintegrate_returned_replica target=r1 decision=disabled reason=executor_policy_disabled executor=authority_recovery_executor execution_enabled=false mutation_allowed=false allowed_mutation=ack_eligibility terminal_evidence=ack_eligibility_known,ack_eligible_true,frontend_fenced_after_execution,primary_unchanged,durable_frontier_covered,no_cross_volume_identity_change",
+		"managed_volume_action authority.reintegrate_returned_replica mode=dry_run",
+	} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("explain missing %q:\n%s", want, stdout.String())
+		}
+	}
+
+	addr := freeTCPAddr(t)
+	stdout.Reset()
+	stderr.Reset()
+	done := make(chan int, 1)
+	go func() {
+		done <- run([]string{
+			"ops", "dashboard",
+			"--from-bundle", dir,
+			"--listen", addr,
+			"--serve-duration", "500ms",
+		}, &stdout, &stderr)
+	}()
+	body := waitForHTTPContains(t, "http://"+addr+"/operator-snapshot.json", `"replica_reintegrations": [`)
+	for _, want := range []string{
+		`"reason_code": "returned_replica_frontend_fenced"`,
+		`"executor_preflights": [`,
+		`"executor_contracts": [`,
+		`"reason": "preconditions_satisfied"`,
+		`"reason": "executor_policy_disabled"`,
+		`"execution_enabled": false`,
+		`"type": "authority.reintegrate_returned_replica"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("dashboard operator snapshot missing %q:\n%s", want, body)
+		}
+	}
+	select {
+	case code := <-done:
+		if code != ops.VolumeStatusExitOK {
+			t.Fatalf("dashboard exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("dashboard command did not stop; stdout=%s stderr=%s", stdout.String(), stderr.String())
+	}
+}
+
+func TestOpsReturnedReplicaRebuildFromBundleSurfacesAcrossReportExplainDashboard(t *testing.T) {
+	dir := writeCmdReturnedReplicaRebuildBundle(t)
+	outDir := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ops", "report", "--from-bundle", dir, "--out", outDir}, &stdout, &stderr)
+	if code != ops.VolumeStatusExitOK {
+		t.Fatalf("report exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	summary, err := os.ReadFile(filepath.Join(outDir, ops.ObservationReportTextArtifact))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"managed_volume_returned_replica=pvc-rebuild replica=r1 state=recovering reason=candidate_frontier_behind",
+		"managed_volume_executor_preflight=authority.rebuild_returned_replica target=r1 decision=ready reason=preconditions_satisfied mode=dry_run executor=authority_recovery_executor mutation_allowed=false ack_eligibility_known=true required_lsn=4241 durable_lsn=4240",
+		"managed_volume_executor_contract=authority.rebuild_returned_replica target=r1 decision=disabled reason=executor_policy_disabled executor=authority_recovery_executor execution_enabled=false mutation_allowed=false allowed_mutation=rebuild_traffic terminal_evidence=frontend_fenced_before_rebuild,primary_unchanged,durable_frontier_caught_up,no_frontend_publication,no_cross_volume_identity_change",
+		"managed_volume_action=authority.rebuild_returned_replica mode=dry_run side_effect=authority_mutating executor=authority_recovery_executor decision=rejected reason=policy_disabled",
+	} {
+		if !strings.Contains(string(summary), want) {
+			t.Fatalf("report summary missing %q:\n%s", want, summary)
+		}
+	}
+	snapshot, err := os.ReadFile(filepath.Join(outDir, ops.ObservationOperatorSnapshotArtifact))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		`"reason_code": "candidate_frontier_behind"`,
+		`"type": "authority.rebuild_returned_replica"`,
+		`"allowed_mutation_class": [`,
+		`"rebuild_traffic"`,
+		`"durable_frontier_caught_up"`,
+		`"decision_reason": "policy_disabled"`,
+	} {
+		if !strings.Contains(string(snapshot), want) {
+			t.Fatalf("operator snapshot missing %q:\n%s", want, snapshot)
+		}
+	}
+
+	writer := &operatorStatusTestWriter{}
+	oldFactory := opsOperatorStatusWriterFactory
+	opsOperatorStatusWriterFactory = func() (ops.OperatorStatusWriter, error) {
+		return writer, nil
+	}
+	t.Cleanup(func() { opsOperatorStatusWriterFactory = oldFactory })
+	stdout.Reset()
+	stderr.Reset()
+	code = run([]string{"ops", "operator-status", "--from-bundle", dir, "--namespace", "kube-system"}, &stdout, &stderr)
+	if code != ops.VolumeStatusExitOK {
+		t.Fatalf("operator-status exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	if len(writer.volumes) != 1 {
+		t.Fatalf("operator-status writes=%+v", writer.volumes)
+	}
+	status := writer.volumes[0].status
+	if len(status.ExecutorPreflights) != 1 ||
+		status.ExecutorPreflights[0].ActionType != ops.ManagedVolumeActionRebuildReturned ||
+		status.ExecutorPreflights[0].Decision != ops.ReturnedReplicaExecutorPreflightReady {
+		t.Fatalf("CRD preflights=%+v", status.ExecutorPreflights)
+	}
+	if len(status.ExecutorContracts) != 1 ||
+		status.ExecutorContracts[0].ActionType != ops.ManagedVolumeActionRebuildReturned ||
+		status.ExecutorContracts[0].Decision != ops.ReturnedReplicaExecutorContractDisabled ||
+		status.ExecutorContracts[0].ExecutionEnabled ||
+		status.ExecutorContracts[0].MutationAllowed ||
+		!cmdStringSliceContains(status.ExecutorContracts[0].AllowedMutationClass, "rebuild_traffic") {
+		t.Fatalf("CRD contracts=%+v", status.ExecutorContracts)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = run([]string{"ops", "explain", "volume", "--from-bundle", dir, "pvc-rebuild"}, &stdout, &stderr)
+	if code != ops.VolumeStatusExitOK {
+		t.Fatalf("explain exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	for _, want := range []string{
+		"managed_volume_executor_preflight authority.rebuild_returned_replica target=r1 decision=ready reason=preconditions_satisfied mode=dry_run executor=authority_recovery_executor mutation_allowed=false ack_eligibility_known=true required_lsn=4241 durable_lsn=4240",
+		"managed_volume_executor_contract authority.rebuild_returned_replica target=r1 decision=disabled reason=executor_policy_disabled executor=authority_recovery_executor execution_enabled=false mutation_allowed=false allowed_mutation=rebuild_traffic terminal_evidence=frontend_fenced_before_rebuild,primary_unchanged,durable_frontier_caught_up,no_frontend_publication,no_cross_volume_identity_change",
+		"managed_volume_action authority.rebuild_returned_replica mode=dry_run",
+	} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("explain missing %q:\n%s", want, stdout.String())
+		}
+	}
+
+	addr := freeTCPAddr(t)
+	stdout.Reset()
+	stderr.Reset()
+	done := make(chan int, 1)
+	go func() {
+		done <- run([]string{
+			"ops", "dashboard",
+			"--from-bundle", dir,
+			"--listen", addr,
+			"--serve-duration", "500ms",
+		}, &stdout, &stderr)
+	}()
+	body := waitForHTTPContains(t, "http://"+addr+"/operator-snapshot.json", `"type": "authority.rebuild_returned_replica"`)
+	for _, want := range []string{
+		`"reason_code": "candidate_frontier_behind"`,
+		`"allowed_mutation_class": [`,
+		`"rebuild_traffic"`,
+		`"execution_enabled": false`,
+		`"decision_reason": "policy_disabled"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("dashboard operator snapshot missing %q:\n%s", want, body)
+		}
+	}
+	select {
+	case code := <-done:
+		if code != ops.VolumeStatusExitOK {
+			t.Fatalf("dashboard exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("dashboard command did not stop; stdout=%s stderr=%s", stdout.String(), stderr.String())
 	}
 }
 
@@ -1638,6 +3561,126 @@ func writeCmdProductClusterBundle(t *testing.T) string {
 	return dir
 }
 
+func writeCmdReturnedReplicaBundle(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	productDir := filepath.Join(dir, "demo", "product-observation")
+	if err := os.MkdirAll(productDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cluster := ops.NewClusterEvidence(time.Date(2026, 6, 19, 8, 40, 0, 0, time.UTC))
+	cluster.ProductRevision = "phase46-test"
+	cluster.Status = ops.ObservationStatusRecovering
+	cluster.Volumes = []ops.VolumeEvidence{{
+		VolumeID:              "pvc-returned",
+		Namespace:             "default",
+		PVCName:               "returned-pvc",
+		ReplicationFactor:     2,
+		Status:                ops.ObservationStatusRecovering,
+		PrimaryReplica:        "r2",
+		PrimaryNode:           "m02",
+		PublishTarget:         "192.168.1.184:3260",
+		Epoch:                 2,
+		EndpointVersion:       1,
+		RequiredFrontierKnown: true,
+		RequiredFrontierLSN:   4241,
+		Replicas: []ops.ReplicaEvidence{{
+			ReplicaID:            "r1",
+			KubernetesNode:       "m01",
+			Observed:             true,
+			Role:                 "previous_primary",
+			ReplicationRole:      "replica_ready",
+			Healthy:              false,
+			FrontendPrimaryReady: false,
+			AckEligibilityKnown:  true,
+			AckEligible:          false,
+			DurableFrontierKnown: true,
+			DurableFrontierLSN:   4241,
+			StalePrimaryFenced:   true,
+			SupportBundlePath:    "returned-replica-summary.txt",
+		}, {
+			ReplicaID:            "r2",
+			KubernetesNode:       "m02",
+			Observed:             true,
+			Role:                 "primary",
+			Healthy:              true,
+			FrontendPrimaryReady: true,
+			ReplicationRole:      "none",
+			FrontendAddr:         "192.168.1.184:3260",
+			DurableFrontierKnown: true,
+			DurableFrontierLSN:   4241,
+		}},
+	}}
+	raw, err := ops.MarshalObservationJSON(cluster)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(productDir, ops.ClusterEvidenceArtifact), raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+func writeCmdReturnedReplicaRebuildBundle(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	productDir := filepath.Join(dir, "demo", "product-observation")
+	if err := os.MkdirAll(productDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cluster := ops.NewClusterEvidence(time.Date(2026, 6, 23, 18, 0, 0, 0, time.UTC))
+	cluster.ProductRevision = "phase56-test"
+	cluster.Status = ops.ObservationStatusRecovering
+	cluster.Volumes = []ops.VolumeEvidence{{
+		VolumeID:              "pvc-rebuild",
+		Namespace:             "default",
+		PVCName:               "rebuild-pvc",
+		ReplicationFactor:     3,
+		Status:                ops.ObservationStatusRecovering,
+		PrimaryReplica:        "r2",
+		PrimaryNode:           "m02",
+		PublishTarget:         "192.168.1.184:3260",
+		Epoch:                 3,
+		EndpointVersion:       7,
+		RequiredFrontierKnown: true,
+		RequiredFrontierLSN:   4241,
+		Replicas: []ops.ReplicaEvidence{{
+			ReplicaID:            "r1",
+			KubernetesNode:       "m01",
+			Observed:             true,
+			Role:                 "previous_primary",
+			ReplicationRole:      "replica_behind",
+			Healthy:              false,
+			FrontendPrimaryReady: false,
+			AckEligibilityKnown:  true,
+			AckEligible:          false,
+			DurableFrontierKnown: true,
+			DurableFrontierLSN:   4240,
+			StalePrimaryFenced:   true,
+			SupportBundlePath:    "returned-replica-rebuild-summary.txt",
+		}, {
+			ReplicaID:            "r2",
+			KubernetesNode:       "m02",
+			Observed:             true,
+			Role:                 "primary",
+			Healthy:              true,
+			FrontendPrimaryReady: true,
+			ReplicationRole:      "primary",
+			FrontendAddr:         "192.168.1.184:3260",
+			DurableFrontierKnown: true,
+			DurableFrontierLSN:   4241,
+		}},
+	}}
+	raw, err := ops.MarshalObservationJSON(cluster)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(productDir, ops.ClusterEvidenceArtifact), raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
 func fixtureCmdKubectl(outputs map[string]string) func(context.Context, string, ...string) ([]byte, error) {
 	return func(_ context.Context, name string, args ...string) ([]byte, error) {
 		key := strings.TrimSpace(name + " " + strings.Join(args, " "))
@@ -1788,4 +3831,13 @@ func writeCmdJSON(t *testing.T, w http.ResponseWriter, v any) {
 	if err := json.NewEncoder(w).Encode(v); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func cmdStringSliceContains(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }

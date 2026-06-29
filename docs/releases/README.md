@@ -15,6 +15,7 @@ is still outside the supported boundary.
 - [v0.3.6 Alpha — Test Realism And Dirty-Failure Hardening](v0.3.6-alpha.md)
 - [v0.4 Beta — Kubernetes-Native Read-Only Operator Foundation](v0.4-beta-candidate.md)
 - [v0.5 Beta Candidate — Bounded SwBlockVolume Lifecycle Owner](v0.5-beta-candidate.md)
+- [v0.6 Beta Candidate — Returned-Replica ACK Eligibility Executor](v0.6-beta-candidate.md)
 
 ## Version Boundary
 
@@ -62,8 +63,16 @@ is still outside the supported boundary.
   finalizer, admission-confined finalizer add/release, evidence-driven
   delete-safety hold/release, multi-volume isolation, and zero-residue close
   gates. It does not execute cleanup or own PVC/PV/workload deletion.
+- `v0.6-beta-candidate` adds the first bounded returned-replica authority
+  executor write: after live terminal evidence proves the returned replica is
+  fenced, the current primary is unchanged, and the durable frontier is
+  covered, the executor records ACK eligibility on
+  `SwBlockReplicaEligibility.status`. It does not publish a frontend, execute
+  rebuild/catch-up traffic, or perform failback.
 
 v0.3 introduces Helm as the preferred Kubernetes alpha install path; the script
 path remains available for development and fallback validation. v0.4 is the
 read-only/status-first operator surface. v0.5 beta candidate adds only a bounded
 `SwBlockVolume` protection-finalizer lifecycle, not broad operator automation.
+v0.6 beta candidate adds only a bounded ACK eligibility executor target, not
+returned-replica rebuild/failback execution.

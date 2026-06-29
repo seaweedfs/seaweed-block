@@ -1,6 +1,10 @@
 package ops
 
-import "testing"
+import (
+	"encoding/json"
+	"strings"
+	"testing"
+)
 
 func TestManagedVolumeOperatorContract_ReadinessConditionAndEvents(t *testing.T) {
 	projection := ProjectManagedVolume(ManagedVolumeFacts{
@@ -8,8 +12,10 @@ func TestManagedVolumeOperatorContract_ReadinessConditionAndEvents(t *testing.T)
 		PVCName:  "demo-pvc",
 		PVC:      &PVCFact{Phase: "Bound"},
 		Authority: &AuthorityFact{
-			PrimaryReplica: "r1",
-			PublishTarget:  "127.0.0.1:3260",
+			PrimaryReplica:  "r1",
+			PublishTarget:   "127.0.0.1:3260",
+			Epoch:           7,
+			EndpointVersion: 9,
 		},
 		Replicas: []ReplicaFact{{
 			ReplicaID:      "r1",
@@ -33,6 +39,21 @@ func TestManagedVolumeOperatorContract_ReadinessConditionAndEvents(t *testing.T)
 	}
 	if len(contract.Status.Conditions) < 2 {
 		t.Fatalf("conditions=%+v", contract.Status.Conditions)
+	}
+	if contract.Status.PrimaryReplicaID != "r1" ||
+		contract.Status.PublishTarget != "127.0.0.1:3260" ||
+		contract.Status.AuthorityEpoch != 7 ||
+		contract.Status.AuthorityEndpointVersion != 9 {
+		t.Fatalf("authority status=%+v", contract.Status)
+	}
+	raw, err := json.Marshal(contract.Status)
+	if err != nil {
+		t.Fatalf("marshal status: %v", err)
+	}
+	for _, want := range []string{`"primary_replica_id":"r1"`, `"publish_target":"127.0.0.1:3260"`, `"authority_epoch":7`, `"authority_endpoint_version":9`} {
+		if !strings.Contains(string(raw), want) {
+			t.Fatalf("operator status missing %s: %s", want, string(raw))
+		}
 	}
 	if len(contract.Events) == 0 || contract.Events[0].Type != "Warning" {
 		t.Fatalf("events=%+v", contract.Events)
@@ -82,5 +103,60 @@ func TestManagedVolumeOperatorContract_RecoveredConditionEventIsNormal(t *testin
 	}
 	if !recovered {
 		t.Fatalf("events=%+v", contract.Events)
+	}
+}
+
+func TestManagedVolumeOperatorContract_ReturnedReplicaProjection(t *testing.T) {
+	contract := ManagedVolumeOperatorContractFromProjection(ProjectManagedVolume(ManagedVolumeFacts{
+		VolumeID: "pvc-returned",
+		Authority: &AuthorityFact{
+			PrimaryReplica:        "r2",
+			PreviousPrimary:       "r1",
+			RequiredFrontierKnown: true,
+			RequiredFrontierLSN:   52,
+		},
+		Replicas: []ReplicaFact{{
+			ReplicaID:            "r1",
+			Observed:             true,
+			Role:                 "replica",
+			DurableFrontierKnown: true,
+			DurableFrontierLSN:   52,
+			FrontendPrimaryReady: false,
+			AckEligibilityKnown:  true,
+			AckEligible:          false,
+		}, {
+			ReplicaID: "r2",
+			Observed:  true,
+			Role:      "primary",
+		}},
+	}))
+
+	if len(contract.Status.ReplicaReintegrations) != 1 {
+		t.Fatalf("returned replicas=%+v", contract.Status.ReplicaReintegrations)
+	}
+	returned := contract.Status.ReplicaReintegrations[0]
+	if returned.ReplicaID != "r1" || returned.State != ReturnedReplicaStateFenced || returned.ReasonCode != ReasonReturnedReplicaFrontendFenced {
+		t.Fatalf("returned replica=%+v", returned)
+	}
+	if len(contract.Status.ExecutorPreflights) != 1 {
+		t.Fatalf("executor preflights=%+v", contract.Status.ExecutorPreflights)
+	}
+	preflight := contract.Status.ExecutorPreflights[0]
+	if preflight.ActionType != ManagedVolumeActionReintegrateReturned ||
+		preflight.ReplicaID != "r1" ||
+		preflight.Decision != ReturnedReplicaExecutorPreflightReady ||
+		preflight.Reason != ReturnedReplicaExecutorPreflightReasonSatisfied ||
+		preflight.MutationAllowed {
+		t.Fatalf("executor preflight=%+v", preflight)
+	}
+	if len(contract.Status.ExecutorContracts) != 1 {
+		t.Fatalf("executor contracts=%+v", contract.Status.ExecutorContracts)
+	}
+	executorContract := contract.Status.ExecutorContracts[0]
+	if executorContract.Decision != ReturnedReplicaExecutorContractDisabled ||
+		executorContract.Reason != ReturnedReplicaExecutorContractReasonExecutorDisabled ||
+		executorContract.ExecutionEnabled ||
+		executorContract.MutationAllowed {
+		t.Fatalf("executor contract=%+v", executorContract)
 	}
 }

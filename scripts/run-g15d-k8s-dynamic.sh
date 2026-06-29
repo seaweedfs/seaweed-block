@@ -23,6 +23,9 @@ CHAP_USERNAME="${SW_BLOCK_ISCSI_CHAP_USERNAME:-}"
 CHAP_SECRET="${SW_BLOCK_ISCSI_CHAP_SECRET:-}"
 CHAP_SECRET_NAME="${SW_BLOCK_ISCSI_CHAP_SECRET_NAME:-sw-block-iscsi-chap}"
 FRONTEND_PROTOCOL="${SW_BLOCK_FRONTEND_PROTOCOL:-iscsi}"
+STAGE2_MULTIPATH="${SW_BLOCK_STAGE2_MULTIPATH:-0}"
+DYNAMIC_REPLICATION_FACTOR="${SW_BLOCK_DYNAMIC_REPLICATION_FACTOR:-}"
+SAME_NODE_LOGICAL_REPLICAS="${SW_BLOCK_SAME_NODE_LOGICAL_REPLICAS:-1}"
 BLOCKVOLUME_NAMESPACE="kube-system"
 if [[ "$LAUNCHER_PVC_OWNER_REF" == "1" || "$LAUNCHER_PVC_OWNER_REF" == "true" ]]; then
   BLOCKVOLUME_NAMESPACE="$NAMESPACE"
@@ -42,6 +45,32 @@ fi
 if [[ "$FRONTEND_PROTOCOL" == "nvme" && "$CHAP_ENABLED" == "1" ]]; then
   echo "iSCSI CHAP is not compatible with SW_BLOCK_FRONTEND_PROTOCOL=nvme" >&2
   exit 2
+fi
+if [[ "$STAGE2_MULTIPATH" != "0" && "$STAGE2_MULTIPATH" != "1" && "$STAGE2_MULTIPATH" != "true" ]]; then
+  echo "SW_BLOCK_STAGE2_MULTIPATH must be 0, 1, or true; got: $STAGE2_MULTIPATH" >&2
+  exit 2
+fi
+case "$SAME_NODE_LOGICAL_REPLICAS" in
+  ''|*[!0-9]*)
+    echo "SW_BLOCK_SAME_NODE_LOGICAL_REPLICAS must be a positive integer; got: $SAME_NODE_LOGICAL_REPLICAS" >&2
+    exit 2
+    ;;
+esac
+if [[ "$SAME_NODE_LOGICAL_REPLICAS" -lt 1 ]]; then
+  echo "SW_BLOCK_SAME_NODE_LOGICAL_REPLICAS must be >= 1; got: $SAME_NODE_LOGICAL_REPLICAS" >&2
+  exit 2
+fi
+if [[ -n "$DYNAMIC_REPLICATION_FACTOR" ]]; then
+  case "$DYNAMIC_REPLICATION_FACTOR" in
+    *[!0-9]*)
+      echo "SW_BLOCK_DYNAMIC_REPLICATION_FACTOR must be a positive integer; got: $DYNAMIC_REPLICATION_FACTOR" >&2
+      exit 2
+      ;;
+  esac
+  if [[ "$DYNAMIC_REPLICATION_FACTOR" -lt 1 ]]; then
+    echo "SW_BLOCK_DYNAMIC_REPLICATION_FACTOR must be >= 1; got: $DYNAMIC_REPLICATION_FACTOR" >&2
+    exit 2
+  fi
 fi
 
 mkdir -p "$ARTIFACT_DIR"
@@ -103,6 +132,43 @@ sed -e "s/__NODE_NAME__/${NODE_NAME}/g" \
   -e "s/sw-block:local/${IMAGE_SED}/g" \
   -e "s/imagePullPolicy: Never/imagePullPolicy: IfNotPresent/g" \
   "$ROOT/deploy/k8s/g15d/block-stack.yaml" >"$STACK_RENDERED"
+if [[ "$SAME_NODE_LOGICAL_REPLICAS" -gt 1 ]]; then
+  SW_BLOCK_G15D_NODE_NAME="$NODE_NAME" SW_BLOCK_G15D_REPLICAS="$SAME_NODE_LOGICAL_REPLICAS" python3 - "$STACK_RENDERED" <<'PY'
+import os
+import re
+import sys
+
+path = sys.argv[1]
+node = os.environ["SW_BLOCK_G15D_NODE_NAME"]
+replicas = int(os.environ["SW_BLOCK_G15D_REPLICAS"])
+raw = open(path, encoding="utf-8").read()
+nodes = ["    nodes:"]
+for i in range(replicas):
+    idx = i + 1
+    nodes.extend([
+        f"      - server_id: {node}-r{idx}",
+        f"        data_addr: 127.0.0.1:{19101 + (i * 10)}",
+        f"        ctrl_addr: 127.0.0.1:{19102 + (i * 10)}",
+        "        labels:",
+        f"          kubernetes.io/hostname: {node}",
+        "        pools:",
+        "          - pool_id: default",
+        "            total_bytes: 1073741824",
+        "            free_bytes: 1073741824",
+        "            block_size: 4096",
+    ])
+replacement = "\n".join(nodes)
+raw = re.sub(
+    r"    nodes:\n(?:      .*\n|        .*\n|          .*\n)*?---",
+    replacement + "\n---",
+    raw,
+    count=1,
+)
+raw = raw.replace('--expected-slots-per-volume=1', f'--expected-slots-per-volume={replicas}')
+open(path, "w", encoding="utf-8").write(raw)
+PY
+  grep -q -- "--expected-slots-per-volume=${SAME_NODE_LOGICAL_REPLICAS}" "$STACK_RENDERED" || { echo "failed to configure same-node logical replica count" >&2; exit 1; }
+fi
 if [[ "$BLOCKVOLUME_NAMESPACE" != "kube-system" ]]; then
   awk '/--launcher-namespace=/{print; print "            - \"--launcher-pvc-owner-ref\""; next} {print}' "$STACK_RENDERED" >"$STACK_RENDERED.tmp"
   mv "$STACK_RENDERED.tmp" "$STACK_RENDERED"
@@ -126,10 +192,41 @@ if [[ "$BLOCKVOLUME_NAMESPACE" != "kube-system" ]]; then
   mv "$CSI_CONTROLLER_RENDERED.tmp" "$CSI_CONTROLLER_RENDERED"
   grep -q -- '--kubernetes-pvc-uid-lookup' "$CSI_CONTROLLER_RENDERED" || { echo "failed to inject --kubernetes-pvc-uid-lookup into $CSI_CONTROLLER_RENDERED" >&2; exit 1; }
 fi
+if [[ "$STAGE2_MULTIPATH" == "1" || "$STAGE2_MULTIPATH" == "true" ]]; then
+  awk '/--node-id=\$\(NODE_NAME\)/{print; print "            - \"--stage2-multipath\""; next} {print}' "$CSI_CONTROLLER_RENDERED" >"$CSI_CONTROLLER_RENDERED.tmp"
+  mv "$CSI_CONTROLLER_RENDERED.tmp" "$CSI_CONTROLLER_RENDERED"
+  grep -q -- '--stage2-multipath' "$CSI_CONTROLLER_RENDERED" || { echo "failed to inject --stage2-multipath into $CSI_CONTROLLER_RENDERED" >&2; exit 1; }
+fi
 sed -e "s/sw-block-csi:local/${CSI_IMAGE_SED}/g" \
   -e "s/imagePullPolicy: Never/imagePullPolicy: IfNotPresent/g" \
   "$ROOT/deploy/k8s/g15b/csi-node.yaml" >"$CSI_NODE_RENDERED"
+if [[ "$STAGE2_MULTIPATH" == "1" || "$STAGE2_MULTIPATH" == "true" ]]; then
+  awk '/--node-id=\$\(NODE_NAME\)/{print; print "            - \"--stage2-multipath\""; next} {print}' "$CSI_NODE_RENDERED" >"$CSI_NODE_RENDERED.tmp"
+  mv "$CSI_NODE_RENDERED.tmp" "$CSI_NODE_RENDERED"
+  grep -q -- '--stage2-multipath' "$CSI_NODE_RENDERED" || { echo "failed to inject --stage2-multipath into $CSI_NODE_RENDERED" >&2; exit 1; }
+fi
 cp "$DYNAMIC_PVC_MANIFEST" "$DYNAMIC_RENDERED"
+if [[ -n "$DYNAMIC_REPLICATION_FACTOR" ]]; then
+  awk -v rf="$DYNAMIC_REPLICATION_FACTOR" '
+    /^  replicationFactor:/ { print "  replicationFactor: \"" rf "\""; next }
+    { print }
+  ' "$DYNAMIC_RENDERED" >"$DYNAMIC_RENDERED.tmp"
+  mv "$DYNAMIC_RENDERED.tmp" "$DYNAMIC_RENDERED"
+  grep -q "replicationFactor: \"${DYNAMIC_REPLICATION_FACTOR}\"" "$DYNAMIC_RENDERED" || { echo "failed to override dynamic replicationFactor" >&2; exit 1; }
+fi
+if [[ "$SAME_NODE_LOGICAL_REPLICAS" -gt 1 ]]; then
+  awk -v node="$NODE_NAME" '
+    /^  restartPolicy:/ {
+      print "  nodeSelector:"
+      print "    kubernetes.io/hostname: " node
+      print
+      next
+    }
+    { print }
+  ' "$DYNAMIC_RENDERED" >"$DYNAMIC_RENDERED.tmp"
+  mv "$DYNAMIC_RENDERED.tmp" "$DYNAMIC_RENDERED"
+  grep -q "kubernetes.io/hostname: ${NODE_NAME}" "$DYNAMIC_RENDERED" || { echo "failed to pin dynamic pod to same-node NVMe target host" >&2; exit 1; }
+fi
 if [[ "$CHAP_ENABLED" == "1" ]]; then
   awk -v secret="$CHAP_SECRET_NAME" -v ns="$NAMESPACE" '
     /^parameters:/ {
@@ -154,6 +251,17 @@ if [[ "$FRONTEND_PROTOCOL" == "nvme" ]]; then
   ' "$DYNAMIC_RENDERED" >"$DYNAMIC_RENDERED.tmp"
   mv "$DYNAMIC_RENDERED.tmp" "$DYNAMIC_RENDERED"
 fi
+if [[ "$STAGE2_MULTIPATH" == "1" || "$STAGE2_MULTIPATH" == "true" ]]; then
+  awk '
+    /^parameters:/ {
+      print
+      print "  stage2_multipath: \"true\""
+      next
+    }
+    {print}
+  ' "$DYNAMIC_RENDERED" >"$DYNAMIC_RENDERED.tmp"
+  mv "$DYNAMIC_RENDERED.tmp" "$DYNAMIC_RENDERED"
+fi
 
 log "artifact_dir=$ARTIFACT_DIR"
 if [[ -n "$ALPHA_IMAGES_ENV" ]]; then
@@ -169,6 +277,9 @@ log "launcher_pvc_owner_ref=$LAUNCHER_PVC_OWNER_REF"
 log "launcher_state_hostpath=${LAUNCHER_STATE_HOSTPATH:-<emptyDir>}"
 log "chap_enabled=$CHAP_ENABLED"
 log "frontend_protocol=$FRONTEND_PROTOCOL"
+log "stage2_multipath=$STAGE2_MULTIPATH"
+log "dynamic_replication_factor=${DYNAMIC_REPLICATION_FACTOR:-manifest-default}"
+log "same_node_logical_replicas=$SAME_NODE_LOGICAL_REPLICAS"
 log "expected_git_revision=${EXPECTED_GIT_REVISION:-unknown}"
 log "dynamic_pvc_manifest=$DYNAMIC_PVC_MANIFEST"
 kubectl version --client=true >"$ARTIFACT_DIR/kubectl-version.txt" 2>&1 || true
@@ -197,6 +308,12 @@ collect_daemon_logs() {
   capture_once "$ARTIFACT_DIR/pod.log" kubectl -n "$NAMESPACE" logs sw-block-dynamic-smoke
   capture_once "$ARTIFACT_DIR/blockmaster.log" kubectl -n kube-system logs deploy/sw-blockmaster -c blockmaster
   capture_once "$ARTIFACT_DIR/blockcsi-controller.log" kubectl -n kube-system logs deploy/sw-block-csi-controller -c block-csi
+  {
+    for pod in $(kubectl -n kube-system get pod -l app=sw-block-csi-node -o name 2>/dev/null); do
+      echo "### $pod"
+      kubectl -n kube-system logs "$pod" -c block-csi --tail=-1 2>&1 || true
+    done
+  } >"$ARTIFACT_DIR/blockcsi-node.log" 2>&1 || true
   capture_once "$ARTIFACT_DIR/csi-provisioner.log" kubectl -n kube-system logs deploy/sw-block-csi-controller -c csi-provisioner
   capture_once "$ARTIFACT_DIR/csi-attacher.log" kubectl -n kube-system logs deploy/sw-block-csi-controller -c csi-attacher
   capture_once "$ARTIFACT_DIR/blockvolume-generated.log" kubectl -n "$BLOCKVOLUME_NAMESPACE" logs -l sw-block.seaweedfs.com/volume -c blockvolume --tail=-1

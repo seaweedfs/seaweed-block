@@ -1,0 +1,79 @@
+# Runner-native Phase 93 gate: multi-volume target-owner -> executor handoff
+# isolation. Runtime requests must not mix expected-current authority or target
+# addresses across volumes.
+
+name: failback-handoff-isolation-chain
+timeout: 5m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: failback_handoff_isolation_gate
+    actions:
+      - action: exec
+        node: m02
+        timeout: 4m
+        cmd: "rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase93-failback-handoff-isolation && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase93-failback-handoff-isolation && cd {{ product_root }} && SW_BLOCK_ARTIFACT_DIR=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase93-failback-handoff-isolation bash scripts/run-phase93-failback-handoff-isolation-gate.sh {{ product_root }}"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase93-failback-handoff-isolation/phase93-failback-handoff-isolation-summary.txt"
+        pattern: "^phase93_failback_handoff_isolation_status=ok$"
+        save_as: phase93_ok
+      - action: assert_greater
+        actual: "{{ phase93_ok }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase93-failback-handoff-isolation/phase93-failback-handoff-isolation-summary.txt"
+        pattern: "^multi_volume_target_create_count=2$"
+        save_as: target_count
+      - action: assert_greater
+        actual: "{{ target_count }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase93-failback-handoff-isolation/phase93-failback-handoff-isolation-summary.txt"
+        pattern: "^multi_volume_runtime_request_count=2$"
+        save_as: request_count
+      - action: assert_greater
+        actual: "{{ request_count }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase93-failback-handoff-isolation/phase93-failback-handoff-isolation-summary.txt"
+        pattern: "^cross_volume_expected_current_mixup=false$"
+        save_as: no_expected_current_mixup
+      - action: assert_greater
+        actual: "{{ no_expected_current_mixup }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase93-failback-handoff-isolation/phase93-failback-handoff-isolation-summary.txt"
+        pattern: "^cross_volume_target_addr_mixup=false$"
+        save_as: no_target_addr_mixup
+      - action: assert_greater
+        actual: "{{ no_target_addr_mixup }}"
+        threshold: "0"
+
+  - name: collect
+    always: true
+    actions:
+      - action: collect_path
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase93-failback-handoff-isolation"
+        name: "remote-phases"
+        ignore_error: true
