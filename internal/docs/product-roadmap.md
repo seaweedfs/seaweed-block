@@ -260,6 +260,12 @@ rebuild, delete safety, or cleanup must start as a separate gated phase.
   (`192.168.1.181:4420`) with managed-volume status
   `ready/first_volume_verified`; a separate strict cleanup audit returned zero
   residue.
+- Phase 107 NVMe/TCP Multi-Volume Cross-Node Isolation is closed for the
+  supported lab path. Two PVCs using `protocol=nvme` can be mounted by
+  writer/reader pods pinned to another Kubernetes node; both volumes report
+  `ready/first_volume_verified`, expose distinct volume IDs and distinct NVMe
+  NQNs, avoid loopback publish targets, and avoid cross-volume identity mix-up.
+  A separate strict cleanup audit returned zero residue.
 - Later protocol candidates: implement a real NVMe/RDMA target or characterize
   NVMe/TCP performance. Keep these separate so correctness, transport, and
   performance claims do not get mixed.

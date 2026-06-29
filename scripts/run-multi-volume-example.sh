@@ -12,6 +12,8 @@ POD_PREFIX="${SW_BLOCK_MULTI_VOLUME_POD_PREFIX:-sw-block-multi}"
 CHAP_SECRET_NAME="${SW_BLOCK_ISCSI_CHAP_SECRET_NAME:-sw-block-iscsi-chap}"
 MASTER_PORT="${SW_BLOCK_MASTER_PORT_FORWARD_PORT:-}"
 CLEANUP_REQUESTED="${SW_BLOCK_MULTI_VOLUME_CLEANUP:-1}"
+MULTI_VOLUME_PROTOCOL="${SW_BLOCK_MULTI_VOLUME_PROTOCOL:-iscsi}"
+MULTI_VOLUME_NODE_SELECTOR="${SW_BLOCK_MULTI_VOLUME_NODE_SELECTOR:-}"
 
 MULTI_VOLUME_STATUS="ok"
 FAILED_PHASE=""
@@ -108,6 +110,10 @@ render_storageclass() {
     echo "allowVolumeExpansion: false"
     echo "parameters:"
     echo "  replicationFactor: \"$REPLICATION_FACTOR\""
+    if [[ "$MULTI_VOLUME_PROTOCOL" == "nvme" ]]; then
+      echo "  sw-block.seaweedfs.com/protocol: \"nvme\""
+      echo "  protocol: \"nvme\""
+    fi
     if kubectl -n "$NAMESPACE" get secret "$CHAP_SECRET_NAME" >/dev/null 2>&1; then
       echo "  csi.storage.k8s.io/node-stage-secret-name: \"$CHAP_SECRET_NAME\""
       echo "  csi.storage.k8s.io/node-stage-secret-namespace: \"$NAMESPACE\""
@@ -134,6 +140,21 @@ spec:
       storage: 1Mi
 YAML
   echo "$out"
+}
+
+inject_pod_node_selector() {
+  local path="$1"
+  [[ -n "$MULTI_VOLUME_NODE_SELECTOR" ]] || return 0
+  awk -v node="$MULTI_VOLUME_NODE_SELECTOR" '
+    /^spec:[[:space:]]*$/ {
+      print
+      print "  nodeSelector:"
+      print "    kubernetes.io/hostname: \"" node "\""
+      next
+    }
+    { print }
+  ' "$path" >"$path.tmp"
+  mv "$path.tmp" "$path"
 }
 
 render_writer() {
@@ -169,6 +190,7 @@ spec:
       persistentVolumeClaim:
         claimName: ${PVC_PREFIX}-${idx}
 YAML
+  inject_pod_node_selector "$out"
   echo "$out"
 }
 
@@ -204,6 +226,7 @@ spec:
       persistentVolumeClaim:
         claimName: ${PVC_PREFIX}-${idx}
 YAML
+  inject_pod_node_selector "$out"
   echo "$out"
 }
 
@@ -309,6 +332,8 @@ write_summary() {
     fi
     echo "namespace=$NAMESPACE"
     echo "storageclass=$STORAGECLASS_NAME"
+    echo "protocol=$MULTI_VOLUME_PROTOCOL"
+    echo "app_node_selector=${MULTI_VOLUME_NODE_SELECTOR:-none}"
     echo "requested_volume_count=$VOLUME_COUNT"
     echo "replication_factor=$REPLICATION_FACTOR"
     echo "writer_verified_count=$writer_count"
@@ -325,6 +350,10 @@ if [[ "$NAMESPACE" != "default" ]]; then
   echo "SW_BLOCK_APP_NAMESPACE=$NAMESPACE is not supported by this helper; use default" >&2
   exit 2
 fi
+if [[ "$MULTI_VOLUME_PROTOCOL" != "iscsi" && "$MULTI_VOLUME_PROTOCOL" != "nvme" ]]; then
+  echo "SW_BLOCK_MULTI_VOLUME_PROTOCOL must be iscsi or nvme" >&2
+  exit 2
+fi
 case "$VOLUME_COUNT" in
   ''|*[!0-9]*|0)
     echo "SW_BLOCK_MULTI_VOLUME_COUNT must be a positive integer; got: $VOLUME_COUNT" >&2
@@ -338,6 +367,8 @@ fi
 log "artifact_dir=$ARTIFACT_DIR"
 log "namespace=$NAMESPACE"
 log "volume_count=$VOLUME_COUNT"
+log "protocol=$MULTI_VOLUME_PROTOCOL"
+log "app_node_selector=${MULTI_VOLUME_NODE_SELECTOR:-none}"
 log "master_port=$MASTER_PORT"
 
 kubectl apply -f "$(render_storageclass)" | tee "$ARTIFACT_DIR/apply-storageclass.log"

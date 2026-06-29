@@ -582,6 +582,23 @@ func TestPhase20FirstVolumeScriptPinsUserLoop(t *testing.T) {
 	}
 }
 
+func TestPhase107MultiVolumeScriptPinsProtocolAndNodeSelector(t *testing.T) {
+	body := g15dReadFile(t, "scripts", "run-multi-volume-example.sh")
+	for _, want := range []string{
+		"SW_BLOCK_MULTI_VOLUME_PROTOCOL",
+		"SW_BLOCK_MULTI_VOLUME_NODE_SELECTOR",
+		"sw-block.seaweedfs.com/protocol: \\\"nvme\\\"",
+		"protocol=$MULTI_VOLUME_PROTOCOL",
+		"app_node_selector=${MULTI_VOLUME_NODE_SELECTOR:-none}",
+		"kubernetes.io/hostname",
+		"SW_BLOCK_MULTI_VOLUME_PROTOCOL must be iscsi or nvme",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("multi-volume wrapper missing %q", want)
+		}
+	}
+}
+
 func TestPhase20FirstVolumeScenarioPinsPublishedUserGate(t *testing.T) {
 	body := g15dReadFile(t, "testops", "scenarios", "activation-day1-first-volume-chain.yaml")
 	for _, want := range []string{
