@@ -530,6 +530,14 @@ Recommended order from here:
     `cycle_1_k8s_residue_count=0`, `cycle_2_nvme_residue_count=0`, and
     `cycle_2_k8s_residue_count=0`; final strict cleanup returned
     `cleanup_status=ok`.
+67. Phase 109: NVMe/TCP Status Surface Evidence. **Closed 2026-06-29,
+    live k3s PASS**
+    Proved two supported-lab NVMe/TCP PVCs publish matching protocol, NQN,
+    namespace ID, address, path count, readiness, and reason across
+    `SwBlockVolume.status.nvme`, report summary, report
+    `operator-snapshot.json`, dashboard `/operator-snapshot.json`, and
+    `ops explain`. The gate owns its CRD baseline so stale live CRDs cannot
+    silently prune new status fields.
 
 The internal release-train contract is
 `internal/docs/ref/operation-layer-v0.5-release-train.md`. Phases 41-44 close

@@ -1363,6 +1363,50 @@ func TestPhase44OperatorStatusReconcilerSkipsDeletedCRDuringStatusPatch(t *testi
 	}
 }
 
+func TestPhase109OperatorStatusReconcilerSkipsMissingClusterCRAndWritesVolumes(t *testing.T) {
+	source := fakeOperatorStatusSource{cluster: ClusterEvidence{
+		SchemaVersion: ObservationSchemaVersion,
+		CapturedAt:    time.Date(2026, 6, 29, 10, 15, 0, 0, time.UTC),
+		Status:        ObservationStatusOK,
+		ManagedVolumes: []ManagedVolumeProjection{
+			{
+				VolumeID:   "pvc-nvme",
+				PVCName:    "default/nvme-pvc",
+				Status:     ManagedVolumeStatusReady,
+				ReasonCode: ReasonFirstVolumeVerified,
+				NVMe: &ManagedVolumeNVMeStatus{
+					Protocol: "nvme",
+					NQN:      "nqn.2026-05.io.seaweedfs:pvc-nvme",
+					NSID:     1,
+					NVMeAddr: "192.168.1.181:4420",
+					NVMeAddrs: []string{
+						"192.168.1.181:4420",
+					},
+					PathCount: 1,
+				},
+			},
+		},
+	}}
+	writer := &clusterNotFoundOperatorStatusWriter{}
+	result, err := (OperatorStatusReconciler{
+		Namespace: "kube-system",
+		Source:    source,
+		Writer:    writer,
+	}).Reconcile(context.Background())
+	if err != nil {
+		t.Fatalf("missing SwBlockCluster must not abort volume status writes: %v", err)
+	}
+	if len(result.VolumeRefs) != 1 || result.VolumeRefs[0].Name != "nvme-pvc" {
+		t.Fatalf("volume refs=%+v", result.VolumeRefs)
+	}
+	if len(writer.volumes) != 1 || writer.volumes[0].ref.Name != "nvme-pvc" {
+		t.Fatalf("written volumes=%+v", writer.volumes)
+	}
+	if writer.volumes[0].status.NVMe == nil || writer.volumes[0].status.NVMe.Protocol != "nvme" {
+		t.Fatalf("missing nvme status=%+v", writer.volumes[0].status.NVMe)
+	}
+}
+
 func TestPhase40D2VolumeStatusClearsStaleDeleteSafety(t *testing.T) {
 	status := SwBlockVolumeCRDStatus{
 		VolumeID:     "pvc-ready",
@@ -1382,9 +1426,10 @@ func TestPhase40D2VolumeStatusClearsStaleDeleteSafety(t *testing.T) {
 
 func TestSwBlockVolumeObjectNameIsDNSLabelLike(t *testing.T) {
 	cases := map[string]string{
-		"Demo_PVC":      "demo-pvc",
-		"pvc:1234.5678": "pvc-1234-5678",
-		"---":           "unknown-volume",
+		"Demo_PVC":         "demo-pvc",
+		"default/Demo_PVC": "demo-pvc",
+		"pvc:1234.5678":    "pvc-1234-5678",
+		"---":              "unknown-volume",
 		"abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnop": "abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijk",
 	}
 	for in, want := range cases {
@@ -1431,6 +1476,14 @@ func (f *fakeOperatorStatusWriter) WriteClusterStatus(_ context.Context, _ Opera
 func (f *fakeOperatorStatusWriter) WriteVolumeStatus(_ context.Context, ref OperatorObjectRef, status SwBlockVolumeCRDStatus) error {
 	f.volumes = append(f.volumes, OperatorStatusWriterVolumeRecord{ref: ref, status: status})
 	return nil
+}
+
+type clusterNotFoundOperatorStatusWriter struct {
+	fakeOperatorStatusWriter
+}
+
+func (f *clusterNotFoundOperatorStatusWriter) WriteClusterStatus(context.Context, OperatorObjectRef, SwBlockClusterCRDStatus) error {
+	return fmt.Errorf("patch swblockclusters/sw-block status failed: http 404 NotFound")
 }
 
 type notFoundOnceOperatorStatusWriter struct {

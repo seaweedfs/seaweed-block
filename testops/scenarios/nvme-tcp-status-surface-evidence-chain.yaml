@@ -1,0 +1,149 @@
+name: nvme-tcp-status-surface-evidence-chain
+timeout: 45m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+  helm_release: "sw-block"
+  helm_namespace: "kube-system"
+  volume_count: "2"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: pre_clean
+    actions:
+      - action: pre_run_cleanup
+        node: m02
+        kill_patterns: "blockmaster,blockvolume,blockcsi,iscsi-target"
+        nvme_disconnect: "true"
+        iscsi_logout_prefix: "iqn.2026-05.io.seaweedfs"
+      - action: exec
+        node: m02
+        timeout: 5m
+        cmd: "helm status {{ helm_release }} --namespace {{ helm_namespace }} >/dev/null 2>&1 && helm uninstall {{ helm_release }} --namespace {{ helm_namespace }} --wait --timeout 240s || true; kubectl -n {{ helm_namespace }} get swblockvolumes.block.seaweedfs.com -o name 2>/dev/null | xargs -r -n1 kubectl -n {{ helm_namespace }} patch --type=merge -p '{\"metadata\":{\"finalizers\":[]}}' >/dev/null 2>&1 || true; kubectl -n {{ helm_namespace }} delete swblockvolumes.block.seaweedfs.com --all --ignore-not-found=true --wait=true --timeout=60s || true; kubectl -n {{ helm_namespace }} delete swblockclusters.block.seaweedfs.com --all --ignore-not-found=true --wait=true --timeout=60s || true; kubectl delete validatingadmissionpolicy,validatingadmissionpolicybinding -l app.kubernetes.io/instance={{ helm_release }} --ignore-not-found=true >/dev/null 2>&1 || true; kubectl delete crd swblockclusters.block.seaweedfs.com swblockvolumes.block.seaweedfs.com swblockreplicaeligibilities.block.seaweedfs.com swblockreplicarebuilds.block.seaweedfs.com swblockreplicafailbacks.block.seaweedfs.com swblockfrontendpublications.block.seaweedfs.com --ignore-not-found=true --wait=true --timeout=60s >/dev/null 2>&1 || true; kubectl -n default delete pod -l sw-block-test=multi-volume --ignore-not-found=true --wait=true --timeout=45s || true; for i in 1 2 3; do kubectl -n default delete pod sw-block-multi-writer-$i sw-block-multi-reader-$i --ignore-not-found=true --wait=true --timeout=45s || true; kubectl -n default delete pvc sw-block-multi-pvc-$i --ignore-not-found=true --wait=true --timeout=45s || true; done; kubectl delete storageclass sw-block-multi --ignore-not-found=true --wait=true --timeout=45s || true; kubectl get pv --no-headers | awk '/sw-block-multi/ {print $1}' | xargs -r -n1 kubectl patch pv --type=merge -p '{\"metadata\":{\"finalizers\":[]}}' >/dev/null 2>&1 || true; kubectl get pv --no-headers | awk '/sw-block-multi/ {print $1}' | xargs -r kubectl delete pv --wait=false >/dev/null 2>&1 || true; sudo -n nvme disconnect-all >/dev/null 2>&1 || true; rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase109-nvme-status && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase109-nvme-status/bin /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase109-nvme-status/build /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase109-nvme-status/values /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase109-nvme-status/install /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase109-nvme-status/multi-volume /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase109-nvme-status/surfaces /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase109-nvme-status/asserts /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase109-nvme-status/cleanup"
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+
+  - name: build_and_import_images
+    actions:
+      - action: exec
+        node: m02
+        timeout: 10m
+        cmd: "cd {{ product_root }} && bash scripts/build-alpha-images.sh {{ product_root }}"
+        env.SW_BLOCK_IMPORT_K3S: "1"
+        env.SW_BLOCK_IMPORT_K3S_NODES: "192.168.1.181"
+        env.SW_BLOCK_IMPORT_K3S_SSH_USER: "testdev"
+        env.SW_BLOCK_IMPORT_K3S_SSH_KEY: "{{ ssh_key }}"
+        env.SW_BLOCK_ARTIFACT_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase109-nvme-status/build"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase109-nvme-status/build/alpha-images.env"
+        pattern: "SW_BLOCK_IMAGE_ID="
+        save_as: image_id_count
+      - action: assert_greater
+        actual: "{{ image_id_count }}"
+        threshold: "0"
+
+  - name: generate_values
+    actions:
+      - action: exec
+        node: m02
+        timeout: 4m
+        cmd: "cd {{ product_root }} && go build -o /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase109-nvme-status/bin/sw-block ./cmd/sw-block && /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase109-nvme-status/bin/sw-block ops generate-helm-values --kubeconfig /etc/rancher/k3s/k3s.yaml --out /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase109-nvme-status/values/values.nvme.yaml --image sw-block:local --csi-image sw-block-csi:local --protocol nvme --node-limit 2 > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase109-nvme-status/values/generate.stdout.txt && cat >> /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase109-nvme-status/values/values.nvme.yaml <<'YAML'\noperatorStatus:\n  create: true\n  dryRun: false\n  interval: 5s\nlifecycleOwner:\n  create: true\n  dryRun: false\n  interval: 5s\nYAML\npython3 - <<'PY'\nfrom pathlib import Path\nbase=Path('/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase109-nvme-status')\nnodes=[]\ncur=None\nfor raw in (base/'values/values.nvme.yaml').read_text().splitlines():\n    line=raw.strip()\n    if line.startswith('- name:'):\n        if cur:\n            nodes.append(cur)\n        cur={}\n    if cur is None:\n        continue\n    if line.startswith('kubernetesNode:'):\n        cur['kubernetesNode']=line.split(':',1)[1].strip().strip('\"')\nif cur:\n    nodes.append(cur)\nif len(nodes) < 2:\n    raise SystemExit('need at least two generated nodes')\n(base/'values/blockvolume-node.txt').write_text(nodes[0]['kubernetesNode']+'\\n')\n(base/'values/app-node.txt').write_text(nodes[1]['kubernetesNode']+'\\n')\nPY"
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase109-nvme-status/values/generate.stdout.txt"
+        pattern: "^network_mode=external-nvme$"
+        save_as: external_nvme_count
+      - action: assert_greater
+        actual: "{{ external_nvme_count }}"
+        threshold: "0"
+
+  - name: helm_install_stack
+    actions:
+      - action: exec
+        node: m02
+        timeout: 12m
+        cmd: "cd {{ product_root }} && helm lint charts/seaweed-block -f /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase109-nvme-status/values/values.nvme.yaml > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase109-nvme-status/install/helm-lint.txt && helm template {{ helm_release }} charts/seaweed-block --namespace {{ helm_namespace }} -f /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase109-nvme-status/values/values.nvme.yaml > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase109-nvme-status/install/helm-template.yaml && grep -q -- '--launcher-external-nvme' /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase109-nvme-status/install/helm-template.yaml && grep -q 'sw-block-operator-status' /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase109-nvme-status/install/helm-template.yaml && grep -q 'sw-block-lifecycle-owner' /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase109-nvme-status/install/helm-template.yaml && helm install {{ helm_release }} charts/seaweed-block --namespace {{ helm_namespace }} --create-namespace -f /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase109-nvme-status/values/values.nvme.yaml --wait --timeout 10m > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase109-nvme-status/install/helm-install.txt && kubectl -n {{ helm_namespace }} get deploy,ds,pods,svc -o wide > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase109-nvme-status/install/kube-system.after-install.txt"
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase109-nvme-status/install/helm-install.txt"
+        pattern: "STATUS: deployed"
+        save_as: helm_deployed_count
+      - action: assert_greater
+        actual: "{{ helm_deployed_count }}"
+        threshold: "0"
+
+  - name: multi_volume_user_loop
+    actions:
+      - action: exec
+        node: m02
+        timeout: 10m
+        cmd: "set -e; APP_NODE=$(cat /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase109-nvme-status/values/app-node.txt); cd {{ product_root }} && SW_BLOCK_MULTI_VOLUME_NODE_SELECTOR=\"$APP_NODE\" SW_BLOCK_MULTI_VOLUME_PROTOCOL=nvme bash scripts/run-multi-volume-example.sh {{ product_root }}"
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+        env.SW_BLOCK_ARTIFACT_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase109-nvme-status/multi-volume"
+        env.SW_BLOCK_MULTI_VOLUME_COUNT: "{{ volume_count }}"
+        env.SW_BLOCK_MULTI_VOLUME_CLEANUP: "0"
+        env.SW_BLOCK_CLI: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase109-nvme-status/bin/sw-block"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase109-nvme-status/multi-volume/multi-volume-summary.txt"
+        pattern: "^multi_volume_status=ok$"
+        save_as: multi_volume_ok
+      - action: assert_greater
+        actual: "{{ multi_volume_ok }}"
+        threshold: "0"
+
+  - name: surface_agreement
+    actions:
+      - action: exec
+        node: m02
+        timeout: 5m
+        cmd: "set -e; BASE=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase109-nvme-status; mkdir -p \"$BASE/surfaces/dashboard\" \"$BASE/surfaces/explain\"; for i in $(seq 1 60); do kubectl -n {{ helm_namespace }} get swblockvolumes -o json > \"$BASE/surfaces/swblockvolumes.json\" 2>/dev/null || true; python3 - <<'PY' \"$BASE/surfaces/swblockvolumes.json\" && exit 0 || true\nimport json, sys\ntry:\n    doc=json.load(open(sys.argv[1]))\nexcept Exception:\n    raise SystemExit(1)\nitems=doc.get('items') or []\nif len(items) != 2:\n    raise SystemExit(1)\nfor item in items:\n    st=item.get('status') or {}\n    nv=st.get('nvme') or {}\n    if st.get('status') != 'ready' or st.get('reasonCode') != 'first_volume_verified':\n        raise SystemExit(1)\n    if nv.get('protocol') != 'nvme' or not nv.get('nqn') or not nv.get('nvmeAddr') or nv.get('pathCount') != 1:\n        raise SystemExit(1)\nPY\nsleep 2; done; echo 'SwBlockVolume NVMe status did not converge' >&2; kubectl -n {{ helm_namespace }} get swblockvolumes -o yaml >&2 || true; exit 1"
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+      - action: exec
+        node: m02
+        timeout: 5m
+        cmd: "set -e; BASE=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase109-nvme-status; /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase109-nvme-status/bin/sw-block ops report --from-bundle \"$BASE/multi-volume\" --out \"$BASE/surfaces/report\" > \"$BASE/surfaces/report.stdout.txt\" 2> \"$BASE/surfaces/report.stderr.txt\"; port=$(python3 - <<'PY'\nimport socket\ns=socket.socket(); s.bind(('127.0.0.1',0)); print(s.getsockname()[1]); s.close()\nPY\n); /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase109-nvme-status/bin/sw-block ops dashboard --from-bundle \"$BASE/multi-volume\" --listen 127.0.0.1:$port > \"$BASE/surfaces/dashboard/stdout.txt\" 2> \"$BASE/surfaces/dashboard/stderr.txt\" & pid=$!; trap 'kill $pid >/dev/null 2>&1 || true; wait $pid >/dev/null 2>&1 || true' EXIT; for i in $(seq 1 50); do code=$(curl -s -o \"$BASE/surfaces/dashboard/operator-snapshot.json\" -w '%{http_code}' \"http://127.0.0.1:$port/operator-snapshot.json\" || true); [ \"$code\" = 200 ] && break; sleep 0.2; done; python3 - <<'PY'\nfrom pathlib import Path\nimport json, re, subprocess\nbase=Path('/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase109-nvme-status')\nsummary=(base/'surfaces/report/summary.txt').read_text()\ncrd=json.loads((base/'surfaces/swblockvolumes.json').read_text())\nsnapshot=json.loads((base/'surfaces/report/operator-snapshot.json').read_text())\ndashboard=json.loads((base/'surfaces/dashboard/operator-snapshot.json').read_text())\ncrd_status=[]\nfor item in crd['items']:\n    st=item['status']; nv=st['nvme']\n    crd_status.append((st['volumeID'], st['pvcName'], st['status'], st['reasonCode'], st['publishTarget'], nv['protocol'], nv['nqn'], nv['nvmeAddr'], int(nv['pathCount'])))\nif len(crd_status) != 2:\n    raise SystemExit('crd count mismatch')\nsummary_nvme=[]\nfor line in summary.splitlines():\n    if line.startswith('managed_volume_nvme='):\n        parts=dict(re.findall(r'([a-z_]+)=([^ ]+)', line))\n        summary_nvme.append((line.split()[0].split('=',1)[1], parts.get('nqn'), parts.get('addr'), int(parts.get('path_count','0'))))\nif len(summary_nvme) != 2:\n    raise SystemExit('summary nvme count mismatch')\nfor doc_name, doc in [('snapshot', snapshot), ('dashboard', dashboard)]:\n    volumes=doc.get('volumes') or []\n    if len(volumes) != 2:\n        raise SystemExit(f'{doc_name} volume count={len(volumes)}')\n    for volume in volumes:\n        st=volume['status']; nv=st.get('nvme') or {}\n        if st.get('status') != 'ready' or st.get('reason_code') != 'first_volume_verified':\n            raise SystemExit(f'{doc_name} status mismatch {st}')\n        if nv.get('protocol') != 'nvme' or not nv.get('nqn') or not nv.get('nvme_addr') or nv.get('path_count') != 1:\n            raise SystemExit(f'{doc_name} nvme mismatch {nv}')\nfor volume_id, pvc, status, reason, publish, protocol, nqn, addr, path_count in crd_status:\n    if protocol != 'nvme' or status != 'ready' or reason != 'first_volume_verified' or publish != addr or path_count != 1:\n        raise SystemExit(f'crd mismatch {volume_id}')\n    if f'managed_volume={volume_id} status=ready reason=first_volume_verified' not in summary:\n        raise SystemExit(f'summary missing managed volume {volume_id}')\n    if f'managed_volume_nvme={volume_id} nqn={nqn}' not in summary or f' addr={addr} ' not in summary:\n        raise SystemExit(f'summary missing nvme {volume_id}')\n    out=subprocess.check_output(['/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase109-nvme-status/bin/sw-block','ops','explain','volume','--from-bundle',str(base/'multi-volume'),volume_id], text=True)\n    (base/f'surfaces/explain/{volume_id}.txt').write_text(out)\n    if f'managed_volume {volume_id} status=ready reason=first_volume_verified' not in out:\n        raise SystemExit(f'explain missing status {volume_id}')\n    if f'managed_volume_nvme protocol=nvme nqn={nqn}' not in out or f'addr={addr}' not in out:\n        raise SystemExit(f'explain missing nvme {volume_id}')\ntext='\\n'.join([\n    'phase109_nvme_tcp_status_surface_status=ok',\n    'volume_count=2',\n    'crd_nvme_status_count=2',\n    'report_nvme_status_count=2',\n    'operator_snapshot_nvme_status_count=2',\n    'dashboard_nvme_status_count=2',\n    'explain_nvme_status_count=2',\n    'all_surfaces_status=ready',\n    'all_surfaces_reason=first_volume_verified',\n    'all_surfaces_protocol=nvme',\n    'publish_target_matches_nvme_addr=true',\n    'mutation_allowed=false',\n])+'\\n'\n(base/'asserts/phase109-surface-summary.txt').write_text(text)\nPY"
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase109-nvme-status/asserts/phase109-surface-summary.txt"
+        pattern: "^phase109_nvme_tcp_status_surface_status=ok$"
+        save_as: surface_ok
+      - action: assert_greater
+        actual: "{{ surface_ok }}"
+        threshold: "0"
+
+  - name: helm_uninstall_cleanup
+    always: true
+    actions:
+      - action: exec
+        node: m02
+        timeout: 6m
+        cmd: "helm status {{ helm_release }} --namespace {{ helm_namespace }} >/dev/null 2>&1 && helm uninstall {{ helm_release }} --namespace {{ helm_namespace }} --wait --timeout 240s > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase109-nvme-status/cleanup/helm-uninstall.txt || true; kubectl -n {{ helm_namespace }} get swblockvolumes.block.seaweedfs.com -o name 2>/dev/null | xargs -r -n1 kubectl -n {{ helm_namespace }} patch --type=merge -p '{\"metadata\":{\"finalizers\":[]}}' >/dev/null 2>&1 || true; kubectl -n {{ helm_namespace }} delete swblockvolumes.block.seaweedfs.com --all --ignore-not-found=true --wait=true --timeout=60s || true; kubectl -n {{ helm_namespace }} delete swblockclusters.block.seaweedfs.com --all --ignore-not-found=true --wait=true --timeout=60s || true; kubectl delete validatingadmissionpolicy,validatingadmissionpolicybinding -l app.kubernetes.io/instance={{ helm_release }} --ignore-not-found=true >/dev/null 2>&1 || true; kubectl delete crd swblockclusters.block.seaweedfs.com swblockvolumes.block.seaweedfs.com swblockreplicaeligibilities.block.seaweedfs.com swblockreplicarebuilds.block.seaweedfs.com swblockreplicafailbacks.block.seaweedfs.com swblockfrontendpublications.block.seaweedfs.com --ignore-not-found=true --wait=true --timeout=60s >/dev/null 2>&1 || true; kubectl -n default delete pod -l sw-block-test=multi-volume --ignore-not-found=true --wait=true --timeout=120s || true; for i in 1 2 3; do kubectl -n default delete pod sw-block-multi-writer-$i sw-block-multi-reader-$i --ignore-not-found=true --wait=true --timeout=120s || true; kubectl -n default delete pvc sw-block-multi-pvc-$i --ignore-not-found=true --wait=true --timeout=120s || true; done; kubectl delete storageclass sw-block-multi --ignore-not-found=true --wait=true --timeout=120s || true; kubectl get pv --no-headers | awk '/sw-block-multi/ {print $1}' | xargs -r -n1 kubectl patch pv --type=merge -p '{\"metadata\":{\"finalizers\":[]}}' >/dev/null 2>&1 || true; kubectl get pv --no-headers | awk '/sw-block-multi/ {print $1}' | xargs -r kubectl delete pv --wait=false >/dev/null 2>&1 || true; sudo -n nvme disconnect-all >/dev/null 2>&1 || true; cd {{ product_root }} && SW_BLOCK_ARTIFACT_DIR=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase109-nvme-status/cleanup/verify bash scripts/verify-helm-cleanup.sh {{ product_root }}"
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase109-nvme-status/cleanup/verify/cleanup-summary.txt"
+        pattern: "^cleanup_status=ok$"
+        save_as: cleanup_ok
+      - action: assert_greater
+        actual: "{{ cleanup_ok }}"
+        threshold: "0"
+
+  - name: collect
+    always: true
+    actions:
+      - action: collect_path
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase109-nvme-status"
+        name: "remote-phases"
+        ignore_error: true
