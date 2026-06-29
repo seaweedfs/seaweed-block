@@ -1,0 +1,95 @@
+name: nvme-tcp-multihost-topology-chain
+timeout: 15m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: topology_gate
+    actions:
+      - action: exec
+        node: m02
+        timeout: 10m
+        cmd: "rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase105-nvme-topology && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase105-nvme-topology && cd {{ product_root }} && bash scripts/run-phase105-nvme-tcp-multihost-topology-gate.sh {{ product_root }}"
+        env.SW_BLOCK_ARTIFACT_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase105-nvme-topology/gate"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase105-nvme-topology/gate/phase105-nvme-tcp-multihost-topology-summary.txt"
+        pattern: "^phase105_nvme_tcp_multihost_topology_status=ok$"
+        save_as: phase105_ok
+      - action: assert_greater
+        actual: "{{ phase105_ok }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase105-nvme-topology/gate/phase105-nvme-tcp-multihost-topology-summary.txt"
+        pattern: "^read_only=true$"
+        save_as: read_only
+      - action: assert_greater
+        actual: "{{ read_only }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase105-nvme-topology/gate/phase105-nvme-tcp-multihost-topology-summary.txt"
+        pattern: "^nvme_cross_node_loopback_status=blocked$"
+        save_as: blocked
+      - action: assert_greater
+        actual: "{{ blocked }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase105-nvme-topology/gate/phase105-nvme-tcp-multihost-topology-summary.txt"
+        pattern: "^nvme_cross_node_loopback_reason=publish_target_loopback_cross_node$"
+        save_as: reason
+      - action: assert_greater
+        actual: "{{ reason }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase105-nvme-topology/gate/phase105-nvme-tcp-multihost-topology-summary.txt"
+        pattern: "^ready_true_count=0$"
+        save_as: no_ready_true
+      - action: assert_greater
+        actual: "{{ no_ready_true }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase105-nvme-topology/gate/phase105-nvme-tcp-multihost-topology-summary.txt"
+        pattern: "^safe_action=observe.inspect_publish_target_topology$"
+        save_as: action
+      - action: assert_greater
+        actual: "{{ action }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase105-nvme-topology/gate/phase105-nvme-tcp-multihost-topology-summary.txt"
+        pattern: "^iscsi_remediation_recommended=false$"
+        save_as: no_iscsi_action
+      - action: assert_greater
+        actual: "{{ no_iscsi_action }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase105-nvme-topology/gate/phase105-nvme-tcp-multihost-topology-summary.txt"
+        pattern: "^live_io_claim=false$"
+        save_as: no_live_io_claim
+      - action: assert_greater
+        actual: "{{ no_live_io_claim }}"
+        threshold: "0"
+
+  - name: collect
+    always: true
+    actions:
+      - action: collect_path
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase105-nvme-topology"
+        name: "remote-phases"
+        ignore_error: true

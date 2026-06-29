@@ -128,6 +128,57 @@ func TestObservationReportSummaryAndHTMLIncludeManagedVolumeNVMeStatus(t *testin
 	}
 }
 
+func TestObservationReportSurfacesNVMeLoopbackCrossNodeWithoutISCSIAction(t *testing.T) {
+	cluster := NewClusterEvidence(time.Date(2026, 6, 29, 12, 0, 0, 0, time.UTC))
+	cluster.ManagedVolumes = []ManagedVolumeProjection{ProjectManagedVolume(ManagedVolumeFacts{
+		VolumeID: "pvc-nvme-loopback",
+		PVCName:  "nvme-pvc",
+		Protocol: "nvme",
+		PVC:      &PVCFact{Phase: "Bound"},
+		Authority: &AuthorityFact{
+			PrimaryReplica: "r1",
+			PublishTarget:  "127.0.0.1:4420",
+		},
+		Replicas: []ReplicaFact{{
+			ReplicaID:        "r1",
+			KubernetesNode:   "m02",
+			Observed:         true,
+			Role:             "primary",
+			FrontendProtocol: "nvme",
+			FrontendAddr:     "127.0.0.1:4420",
+			FrontendNQN:      "nqn.2026-05.io.seaweedfs:pvc-nvme-loopback",
+			FrontendNSID:     1,
+		}},
+		CSIStages: []CSIStageFact{{
+			NodeName: "m01",
+			Target:   "127.0.0.1:4420",
+		}},
+	})}
+
+	summary := RenderObservationReportSummary(cluster)
+	for _, want := range []string{
+		"managed_volume=pvc-nvme-loopback status=blocked reason=publish_target_loopback_cross_node",
+		"managed_volume_nvme=pvc-nvme-loopback nqn=nqn.2026-05.io.seaweedfs:pvc-nvme-loopback nsid=1 addr=127.0.0.1:4420",
+		"managed_volume_condition=Ready status=False reason=publish_target_loopback_cross_node",
+		"managed_volume_action=observe.inspect_publish_target_topology mode=dry_run side_effect=observe executor=ops decision=allowed",
+	} {
+		if !strings.Contains(summary, want) {
+			t.Fatalf("summary missing %q:\n%s", want, summary)
+		}
+	}
+	if strings.Contains(summary, ManagedVolumeActionReinstallExternalISCSI) {
+		t.Fatalf("summary must not recommend iSCSI remediation for NVMe topology:\n%s", summary)
+	}
+
+	explain := RenderObservationExplainText(cluster)
+	if !strings.Contains(explain, "managed_volume_action observe.inspect_publish_target_topology mode=dry_run side_effect=observe executor=ops decision=allowed") {
+		t.Fatalf("explain missing topology action:\n%s", explain)
+	}
+	if strings.Contains(explain, ManagedVolumeActionReinstallExternalISCSI) {
+		t.Fatalf("explain must not recommend iSCSI remediation for NVMe topology:\n%s", explain)
+	}
+}
+
 func TestObservationReportSummary_IncludesReturnedReplicaProjection(t *testing.T) {
 	cluster := NewClusterEvidence(time.Date(2026, 6, 18, 12, 0, 0, 0, time.UTC))
 	cluster.ManagedVolumes = []ManagedVolumeProjection{ProjectManagedVolume(ManagedVolumeFacts{

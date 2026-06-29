@@ -214,6 +214,36 @@ func TestPhase104RoCELiveIOFeasibilityGateIsExplicitRefusal(t *testing.T) {
 	}
 }
 
+func TestPhase105NVMETCPMultiHostTopologyGateIsReadOnlyAndClaimBounded(t *testing.T) {
+	root := repoRoot(t)
+	raw, err := os.ReadFile(filepath.Join(root, "scripts", "run-phase105-nvme-tcp-multihost-topology-gate.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(raw)
+	for _, want := range []string{
+		"phase105_nvme_tcp_multihost_topology_status=",
+		"read_only=true",
+		"live_io_claim=false",
+		"performance_claim_allowed=false",
+		"roce_claim_allowed=false",
+		"reason_code=publish_target_loopback_cross_node",
+		"safe_action=observe.inspect_publish_target_topology",
+		"iscsi_remediation_recommended=false",
+		"same_node_loopback_non_claim=true",
+		"cross_node_non_loopback_live_followup=true",
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("phase105 gate missing %q", want)
+		}
+	}
+	for _, forbidden := range []string{"nvme connect", "nvme disconnect", "kubectl patch", "kubectl delete"} {
+		if strings.Contains(script, forbidden) {
+			t.Fatalf("phase105 gate should be read-only, found %q", forbidden)
+		}
+	}
+}
+
 func repoRoot(t *testing.T) string {
 	t.Helper()
 	dir, err := os.Getwd()

@@ -546,6 +546,17 @@ func ManagedVolumeActionContract() []ManagedVolumeActionContractEntry {
 			EvidenceRequired: "loopback_cross_node_evidence",
 		},
 		{
+			Type:             ManagedVolumeActionInspectTargetTopology,
+			Master:           MasterManagedVolume,
+			Mode:             ManagedVolumeActionModeDryRun,
+			SideEffectClass:  ManagedVolumeSideEffectObserve,
+			OwnerExecutor:    "ops",
+			PolicyGate:       ActionPolicyDryRun,
+			RequiredFacts:    []string{"authority.publish_target", "placement.replica_node"},
+			InvariantRefs:    []string{"INV-K8S-NONLOOPBACK-001"},
+			EvidenceRequired: "loopback_cross_node_evidence",
+		},
+		{
 			Type:             ManagedVolumeActionImportCSIImage,
 			Master:           MasterManagedVolume,
 			Mode:             ManagedVolumeActionModeDryRun,
