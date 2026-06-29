@@ -80,6 +80,7 @@ type flags struct {
 	nvmeListen    string
 	nvmeSubsysNQN string
 	nvmeNS        uint
+	nvmeTransport string
 
 	// Durable-backend flags. When --durable-root is set, the iSCSI
 	// and NVMe providers use DurableProvider instead of memback.
@@ -151,6 +152,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.StringVar(&f.nvmeListen, "nvme-listen", "", "NVMe/TCP target bind address (e.g. 127.0.0.1:0); empty disables. Loopback-only (no auth)")
 	fs.StringVar(&f.nvmeSubsysNQN, "nvme-subsysnqn", "", "NVMe subsystem NQN (required if --nvme-listen is set)")
 	fs.UintVar(&f.nvmeNS, "nvme-ns", 1, "NVMe namespace id (default 1)")
+	fs.StringVar(&f.nvmeTransport, "nvme-transport", "tcp", "NVMe-oF transport. Only \"tcp\" is implemented; \"rdma\"/RoCE is a future gated feature")
 	fs.StringVar(&f.durableRoot, "durable-root", "", "directory for persistent storage files; empty = memback (non-durable)")
 	fs.StringVar(&f.durableImpl, "durable-impl", "smartwal", "LogicalStorage impl: smartwal (default) or walstore; ignored unless --durable-root is set")
 	fs.UintVar(&f.durableBlocks, "durable-blocks", 2048, "number of blocks per volume on first create (ignored when opening existing)")
@@ -246,6 +248,9 @@ func parseFlags(args []string) (flags, error) {
 		return flags{}, fmt.Errorf("--iscsi-chap-username/--iscsi-chap-secret require --iscsi-listen")
 	}
 	if f.nvmeListen != "" {
+		if f.nvmeTransport != "tcp" {
+			return flags{}, fmt.Errorf("--nvme-transport=%q unsupported; only \"tcp\" is implemented", f.nvmeTransport)
+		}
 		if f.nvmeSubsysNQN == "" {
 			return flags{}, fmt.Errorf("--nvme-subsysnqn is required when --nvme-listen is set")
 		}

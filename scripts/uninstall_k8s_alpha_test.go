@@ -192,6 +192,28 @@ func TestPhase103NVMeRoCEPreflightIsReadOnlyAndClaimBounded(t *testing.T) {
 	}
 }
 
+func TestPhase104RoCELiveIOFeasibilityGateIsExplicitRefusal(t *testing.T) {
+	root := repoRoot(t)
+	raw, err := os.ReadFile(filepath.Join(root, "scripts", "run-phase104-roce-live-io-feasibility-gate.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(raw)
+	for _, want := range []string{
+		"phase104_roce_live_io_status=",
+		"target_nvme_transport_supported=tcp",
+		"target_nvme_rdma_supported=false",
+		"phase104_roce_live_io_result=blocked_target_transport_unsupported",
+		"phase104_roce_live_io_gate_required_before_claim=true",
+		"roce_claim_allowed=false",
+		"roce_live_io_claim=false",
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("phase104 gate missing %q", want)
+		}
+	}
+}
+
 func repoRoot(t *testing.T) string {
 	t.Helper()
 	dir, err := os.Getwd()

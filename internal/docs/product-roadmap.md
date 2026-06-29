@@ -242,9 +242,15 @@ rebuild, delete safety, or cleanup must start as a separate gated phase.
   make a host a candidate, and missing RoCE hardware must surface as a
   non-claim rather than a failed product gate. A candidate host is still not a
   RoCE product claim until a live RoCE I/O gate passes.
-- Next protocol candidates after Phase 103: RoCE live I/O on real RDMA
-  hardware, multi-host NVMe/TCP non-loopback topology, or NVMe performance
-  characterization. Keep these separate so correctness, transport, and
+- Phase 104 RoCE Live-I/O Feasibility Boundary is complete. Because the current
+  NVMe target is explicitly TCP-only, this phase adds a machine-checkable
+  refusal: `--nvme-transport=rdma` must fail clearly and release wording must
+  keep RoCE as a non-claim. This is not a RoCE implementation.
+- Phase 105 Multi-Host NVMe/TCP Topology Boundary is planned next. It should
+  block cross-node loopback NVMe/TCP publish targets before any multi-host NVMe
+  claim is made.
+- Later protocol candidates: implement a real NVMe/RDMA target or characterize
+  NVMe/TCP performance. Keep these separate so correctness, transport, and
   performance claims do not get mixed.
 
 ### Track E: Protocol / Backend Expansion
