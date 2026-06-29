@@ -21,26 +21,30 @@ bool() {
 }
 
 module_loaded() {
-  local mod="$1"
-  [[ -d "/sys/module/${mod}" ]] || grep -q "^${mod//-/_} " /proc/modules 2>/dev/null
+	local mod="$1"
+	local sys_mod="${mod//-/_}"
+	[[ -d "/sys/module/${sys_mod}" ]] || grep -q "^${sys_mod} " /proc/modules 2>/dev/null
 }
 
 module_available() {
-  local mod="$1"
-  if command -v modinfo >/dev/null 2>&1 && modinfo "$mod" >/dev/null 2>&1; then
-    return 0
-  fi
-  local kernel
-  kernel="$(uname -r 2>/dev/null || true)"
-  [[ -n "$kernel" ]] && find "/lib/modules/${kernel}" -name "${mod}.ko*" -print -quit 2>/dev/null | grep -q .
+	local mod="$1"
+	local sys_mod="${mod//-/_}"
+	if command -v modinfo >/dev/null 2>&1 && (modinfo "$mod" >/dev/null 2>&1 || modinfo "$sys_mod" >/dev/null 2>&1); then
+		return 0
+	fi
+	local kernel
+	kernel="$(uname -r 2>/dev/null || true)"
+	[[ -n "$kernel" ]] && find "/lib/modules/${kernel}" \( -name "${mod}.ko*" -o -name "${sys_mod}.ko*" \) -print -quit 2>/dev/null | grep -q .
 }
 
 count_rdma_devices() {
-  if [[ ! -d /sys/class/infiniband ]]; then
-    echo 0
-    return
-  fi
-  find /sys/class/infiniband -mindepth 1 -maxdepth 1 -type l -o -type d 2>/dev/null | wc -l | tr -d ' '
+	if [[ ! -d /sys/class/infiniband ]]; then
+		echo 0
+		return
+	fi
+	shopt -s nullglob
+	local devices=(/sys/class/infiniband/*)
+	echo "${#devices[@]}"
 }
 
 write_summary "phase103_nvme_multihost_roce_preflight_status=running"
@@ -77,9 +81,9 @@ done
 rdma_count="$(count_rdma_devices)"
 write_summary "rdma_device_count=${rdma_count}"
 if [[ "${rdma_count}" -gt 0 ]]; then
-  find /sys/class/infiniband -mindepth 1 -maxdepth 1 -printf '%f\n' 2>/dev/null | sort >"${ARTIFACT_DIR}/rdma-devices.txt" || true
+	( cd /sys/class/infiniband && ls -1 ) >"${ARTIFACT_DIR}/rdma-devices.txt" 2>/dev/null || true
 else
-  : >"${ARTIFACT_DIR}/rdma-devices.txt"
+	: >"${ARTIFACT_DIR}/rdma-devices.txt"
 fi
 
 nvme_tcp_ready=false

@@ -187,6 +187,9 @@ func TestPhase103NVMeRoCEPreflightIsReadOnlyAndClaimBounded(t *testing.T) {
 			t.Fatalf("phase103 preflight script should be read-only, found %q", forbidden)
 		}
 	}
+	if strings.Contains(script, "-printf") {
+		t.Fatalf("phase103 preflight script should avoid GNU-only find -printf")
+	}
 }
 
 func repoRoot(t *testing.T) string {

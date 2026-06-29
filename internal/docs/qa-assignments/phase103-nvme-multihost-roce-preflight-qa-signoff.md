@@ -8,7 +8,7 @@ Validated run:
 
 ```text
 scenario=nvme-multihost-roce-preflight-chain
-run=20260629-000859-fc3c
+run=20260629-001336-db89
 result=PASS 14/14
 ```
 
@@ -60,6 +60,9 @@ The preflight gate is working as intended:
   RoCE data-path gate exists;
 - the script is read-only and does not run `modprobe`, `nvme connect`,
   `nvme disconnect`, or Kubernetes mutation.
+- the script uses underscore-normalized kernel module checks and avoids
+  GNU-only `find -printf`, so the preflight is less brittle across Linux
+  environments.
 
 Phase 103 can close. The next phase should be a separate decision between:
 
