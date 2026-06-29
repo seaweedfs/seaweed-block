@@ -156,6 +156,39 @@ func TestVerifyHelmCleanupReportsAllResidueDimensions(t *testing.T) {
 	}
 }
 
+func TestPhase103NVMeRoCEPreflightIsReadOnlyAndClaimBounded(t *testing.T) {
+	root := repoRoot(t)
+	raw, err := os.ReadFile(filepath.Join(root, "scripts", "run-phase103-nvme-multihost-roce-preflight-gate.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(raw)
+	for _, want := range []string{
+		"phase103_nvme_multihost_roce_preflight_status=",
+		"read_only=true",
+		"nvme_cli_present=",
+		"nvme_tcp_preflight_ready=",
+		"rdma_device_count=",
+		"roce_preflight_status=",
+		"roce_preflight_candidate=",
+		"roce_claim_allowed=",
+		"roce_live_gate_required=true",
+		"roce_live_io_claim=false",
+		"performance_claim_allowed=false",
+		"blocked_missing_nvme_cli",
+		"blocked_missing_nvme_tcp_capability",
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("phase103 preflight script missing %q", want)
+		}
+	}
+	for _, forbidden := range []string{"modprobe ", "nvme connect", "nvme disconnect", "kubectl patch", "kubectl delete"} {
+		if strings.Contains(script, forbidden) {
+			t.Fatalf("phase103 preflight script should be read-only, found %q", forbidden)
+		}
+	}
+}
+
 func repoRoot(t *testing.T) string {
 	t.Helper()
 	dir, err := os.Getwd()

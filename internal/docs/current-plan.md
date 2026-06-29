@@ -1,53 +1,47 @@
-# Current Plan: Phase 102 NVMe Release Artifact Smoke
+# Current Plan: Phase 103 NVMe Multi-Host / RoCE Preflight
 
-Status: active plan; gate scaffold implemented, waiting for matching published
-images to run the full release-artifact validation.
+Status: active plan.
 
 ## Why This Is Next
 
-Phase 101 closed the source/lab NVMe hardening slice:
+Phase 100 proved Kubernetes CSI NVMe/TCP multipath attach for the supported lab
+path. Phase 101 hardened that path with path-loss status, repeated
+stage/unstage cleanup, and bounded writer/reader soak. Phase 102 added a
+release-artifact smoke gate, but that gate remains blocked until matching
+published images exist.
+
+The next storage-feature question is not performance yet. It is whether the
+product can tell an operator, from live host facts, what NVMe transport/topology
+is actually supportable:
 
 ```text
-Phase 100 Kubernetes CSI NVMe multipath attach
-  -> Phase 101 status/path-loss/stage-unstage/bounded-soak hardening
+NVMe/TCP multipath on current lab -> supported-lab path
+RoCE / NVMe-RDMA -> explicit preflight only until hardware + live I/O gate exist
+multi-host NVMe -> requires non-loopback, host-capability, and topology evidence
 ```
 
-Those gates prove the code and lab behavior. They do not prove that published
-`seaweed-block` and `seaweed-block-csi` images contain the same behavior. The
-project has repeatedly found chart/image skew and stale-image failures, so the
-next step is a release-artifact smoke before any public NVMe claim is widened.
+Without this preflight, RoCE or multi-host NVMe claims would be another
+documentation-level promise instead of a product capability.
 
 ## Product Goal
 
-Turn the source-gated NVMe claim into a release-artifact-gated claim:
+Add a read-only transport preflight gate that classifies the current host:
 
-```text
-matching published images
-  -> Kubernetes CSI NVMe multipath attach still works
-  -> image-extracted blockmaster/blockvolume/sw-block binaries pass Phase 101
-     standalone hardening gates
-  -> release wording remains narrow and honest
-```
+- `nvme` CLI available;
+- NVMe subsystem inspection is readable;
+- `nvme-fabrics`, `nvme-tcp`, and `nvme-rdma` module loaded/available state;
+- RDMA device count from `/sys/class/infiniband`;
+- NVMe/TCP host capability;
+- RoCE preflight candidacy.
 
-## Image Selection
+The gate must fail closed:
 
-By default, the gate expects both images from the current source commit:
-
-```text
-ghcr.io/seaweedfs/seaweed-block:sha-<HEAD>
-ghcr.io/seaweedfs/seaweed-block-csi:sha-<HEAD>
-```
-
-The tags can be overridden explicitly:
-
-```text
-SW_BLOCK_RELEASE_IMAGE=ghcr.io/seaweedfs/seaweed-block:sha-<commit>
-SW_BLOCK_CSI_RELEASE_IMAGE=ghcr.io/seaweedfs/seaweed-block-csi:sha-<same-commit>
-```
-
-If either manifest is missing, the gate must report
-`phase102_nvme_release_artifact_status=blocked_missing_release_images` and must
-not be treated as product failure.
+- missing `nvme` CLI -> blocked, not product failure;
+- missing NVMe/TCP capability -> blocked, not product failure;
+- no RDMA device or no `nvme-rdma` capability -> not a RoCE candidate;
+- RDMA device plus `nvme-rdma` capability -> candidate only, still
+  `roce_claim_allowed=false` until a live RoCE I/O gate passes;
+- no RoCE live I/O or performance claim may be emitted.
 
 ## D1: Gate Scaffold
 
@@ -56,87 +50,87 @@ Status: implemented.
 Files:
 
 ```text
-scripts/run-phase102-nvme-release-artifact-smoke.sh
-testops/scenarios/nvme-release-artifact-smoke-chain.yaml
-testops/suites/nvme-release-artifact-smoke.yaml
+scripts/run-phase103-nvme-multihost-roce-preflight-gate.sh
+testops/scenarios/nvme-multihost-roce-preflight-chain.yaml
 ```
 
-The script:
-
-- pulls both published images;
-- extracts `blockmaster`, `blockvolume`, and `sw-block` from the published
-  `seaweed-block` image;
-- writes a release `alpha-images.env` using the published image pair;
-- runs the Phase 100 Kubernetes NVMe CSI multipath live gate against the
-  published images;
-- runs Phase 101 path-failure, stage/unstage, and bounded-soak gates using the
-  extracted release binaries.
+The script is intentionally read-only. It reads command availability, `/proc`,
+`/sys/module`, `/lib/modules`, `/sys/class/infiniband`, and `nvme list-subsys`.
+It must not run `modprobe`, `nvme connect`, `nvme disconnect`, or any
+Kubernetes mutation.
 
 ## D2: Local Contract Validation
 
 Required checks:
 
 ```text
-bash -n scripts/run-phase102-nvme-release-artifact-smoke.sh
-C:\work\swblock.exe validate testops/scenarios/nvme-release-artifact-smoke-chain.yaml
-go test ./scripts ./internal/testops ./core/ops ./core/host/master ./cmd/sw-block ./core/frontend/nvme -count=1
+bash -n scripts/run-phase103-nvme-multihost-roce-preflight-gate.sh
+C:\work\swblock.exe validate testops/scenarios/nvme-multihost-roce-preflight-chain.yaml
+go test ./scripts ./internal/testops ./core/frontend/nvme ./core/ops ./cmd/sw-block -count=1
 ```
 
-Success means the scaffold is syntactically valid and does not regress the
-Phase 101 code/test packages.
+Success means the preflight is syntactically valid, scenario-runnable, and
+covered by a read-only/claim-bounded script regression.
 
-## D3: Missing-Image Blocked Check
+## D3: Live Host Preflight
 
-Run the script before the matching images are published and assert:
-
-```text
-phase102_nvme_release_artifact_status=blocked_missing_release_images
-missing_image=ghcr.io/seaweedfs/seaweed-block:sha-<HEAD>
-```
-
-This proves the gate fails closed when release artifacts are not available.
-
-## D4: Published-Image Smoke
-
-Run once matching images exist:
+Run on the NVMe-capable lab node:
 
 ```text
-swblock run \
-  -env release_image=ghcr.io/seaweedfs/seaweed-block:sha-<commit> \
-  -env release_csi_image=ghcr.io/seaweedfs/seaweed-block-csi:sha-<same-commit> \
-  testops/scenarios/nvme-release-artifact-smoke-chain.yaml
+swblock run testops/scenarios/nvme-multihost-roce-preflight-chain.yaml
 ```
 
 Required PASS evidence:
 
 ```text
-phase102_nvme_release_artifact_status=ok
-phase100_nvme_csi_multipath_live_status=ok
-phase101_nvme_path_failure_status=ok
-phase101_nvme_stage_unstage_status=ok
-phase101_nvme_soak_status=ok
-phase101_soak_false_ready_count=0
-phase101_soak_identity_drift_count=0
+phase103_nvme_multihost_roce_preflight_status=ok
+read_only=true
+nvme_cli_present=true
+nvme_tcp_preflight_ready=true
+roce_live_io_claim=false
+performance_claim_allowed=false
 ```
 
-## D5: Release Wording
+If the lab lacks RDMA hardware, the expected result is still PASS as long as it
+reports:
 
-Only after D4 PASS may docs say the published release artifacts include:
+```text
+rdma_device_count=0
+roce_preflight_status=blocked_no_rdma_device
+roce_preflight_candidate=false
+roce_claim_allowed=false
+```
 
-- supported-lab NVMe/TCP CSI multipath attach;
-- NVMe path status/identity projection;
-- one-path-loss negative-first status;
-- repeated stage/unstage zero-residue gate;
-- bounded writer/reader soak.
+If the lab has RDMA hardware and `nvme-rdma`, it may instead report:
 
-Docs must still say:
+```text
+roce_preflight_status=candidate_requires_live_roce_gate
+roce_preflight_candidate=true
+roce_claim_allowed=false
+roce_live_io_claim=false
+```
 
-- no RoCE or NVMe/RDMA claim;
-- no performance/latency/throughput/SLO claim;
-- no broad kernel/distro compatibility claim;
-- no production HA or transparent Kubernetes node-loss failover claim.
+That is the correct product behavior: honest candidate status, not a released
+RoCE claim.
+
+## D4: Next Decision After Preflight
+
+Only after D3 should the team choose one of:
+
+- RoCE live I/O gate on hardware that has RDMA devices and `nvme-rdma`;
+- multi-host NVMe/TCP non-loopback topology gate;
+- NVMe performance characterization.
+
+These must stay separate because they prove different things: transport
+availability, topology correctness, and performance/SLO.
 
 ## Non-Claims
 
-Phase 102 is not a new NVMe feature. It is release-artifact validation for
-Phases 100 and 101.
+Phase 103 does not claim:
+
+- RoCE or NVMe/RDMA I/O works;
+- multi-host failover works;
+- performance, latency, throughput, or SLO;
+- broad distro/kernel compatibility;
+- production HA;
+- release-image validation for NVMe.

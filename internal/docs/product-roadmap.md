@@ -231,14 +231,21 @@ rebuild, delete safety, or cleanup must start as a separate gated phase.
   residue checks, and a bounded writer/reader soak. Backup/restore, stronger
   committed-frontier reporting, broad distro/host compatibility, RoCE, and
   performance remain later work.
-- Phase 102 NVMe Release Artifact Smoke is active and blocked only on matching
+- Phase 102 NVMe Release Artifact Smoke is blocked only on matching
   published images. It validates that the published `seaweed-block` /
   `seaweed-block-csi` image pair can run the Phase 100 Kubernetes NVMe
   multipath attach gate and that binaries extracted from the published
   `seaweed-block` image pass the Phase 101 standalone hardening gates.
-- Next protocol candidates after Phase 102: RoCE / multi-host NVMe design and
-  lab preflight, or NVMe performance characterization. Keep these separate so
-  correctness, transport, and performance claims do not get mixed.
+- Phase 103 NVMe Multi-Host / RoCE Preflight is active. It adds a read-only host
+  capability gate before any RoCE, multi-host, or performance claim: NVMe/TCP
+  capability must be inspectable, RDMA devices and `nvme-rdma` capability can
+  make a host a candidate, and missing RoCE hardware must surface as a
+  non-claim rather than a failed product gate. A candidate host is still not a
+  RoCE product claim until a live RoCE I/O gate passes.
+- Next protocol candidates after Phase 103: RoCE live I/O on real RDMA
+  hardware, multi-host NVMe/TCP non-loopback topology, or NVMe performance
+  characterization. Keep these separate so correctness, transport, and
+  performance claims do not get mixed.
 
 ### Track E: Protocol / Backend Expansion
 
@@ -801,7 +808,8 @@ Approximate engineering effort if scope remains tight:
   supported-lab attach path and adds status-surface visibility,
   one-path-failure honesty, repeated stage/unstage residue checks, and bounded
   writer/reader soak before any broader NVMe claim.
-- Phase 102 NVMe Release Artifact Smoke is active. It does not add product
+- Phase 102 NVMe Release Artifact Smoke is blocked on matching release images.
+  It does not add product
   behavior; it converts the Phase 100/101 source/lab claim into a
   published-image claim once matching release images exist and pass the gate.
 - Phase 41-44 are the Operation Layer v0.5 release train: lifecycle-owner
