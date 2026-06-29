@@ -159,6 +159,32 @@ func TestReplicaPeer_ShipEntry_ConnFailure_MarksDegraded(t *testing.T) {
 	}
 }
 
+func TestReplicaPeer_RuntimeRecoveryRejectsMissingExecutor(t *testing.T) {
+	peer := &ReplicaPeer{
+		target: ReplicaTarget{
+			ReplicaID:       "r-no-exec",
+			DataAddr:        "127.0.0.1:9201",
+			Epoch:           3,
+			EndpointVersion: 2,
+		},
+	}
+	req := RuntimeRecoveryRequest{
+		ReplicaID:       "r-no-exec",
+		TargetDataAddr:  "127.0.0.1:9201",
+		SessionID:       1001,
+		Epoch:           3,
+		EndpointVersion: 2,
+		FromLSN:         1,
+		FrontierHintLSN: 1,
+	}
+	if err := peer.StartRuntimeRecovery(req); err == nil || !strings.Contains(err.Error(), "executor is not configured") {
+		t.Fatalf("StartRuntimeRecovery err=%v, want missing executor", err)
+	}
+	if _, err := peer.RuntimeRecoveryStatus(req); err == nil || !strings.Contains(err.Error(), "executor is not configured") {
+		t.Fatalf("RuntimeRecoveryStatus err=%v, want missing executor", err)
+	}
+}
+
 type peerRecordingSessionSink struct {
 	started chan struct{}
 	release chan struct{}

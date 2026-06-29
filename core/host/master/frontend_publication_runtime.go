@@ -75,7 +75,11 @@ func validateFrontendPublicationRuntimeRequest(h *Host, req frontendPublicationR
 		!req.NoCrossVolumeIdentityChange {
 		return fmt.Errorf("frontend publication runtime: terminal failback evidence is required")
 	}
-	line, ok := h.Publisher().VolumeAuthorityLine(req.VolumeID)
+	pub := h.Publisher()
+	if pub == nil {
+		return fmt.Errorf("frontend publication runtime: authority publisher is not configured")
+	}
+	line, ok := pub.VolumeAuthorityLine(req.VolumeID)
 	if !ok {
 		return fmt.Errorf("frontend publication runtime: missing authority line for volume %s", req.VolumeID)
 	}

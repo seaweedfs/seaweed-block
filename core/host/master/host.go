@@ -294,7 +294,12 @@ func (h *Host) FrontendPublicationRuntimeAddr() string {
 
 // Publisher exposes the reloaded publisher for tests and for the
 // evidence-query path.
-func (h *Host) Publisher() *authority.Publisher { return h.boot.Publisher }
+func (h *Host) Publisher() *authority.Publisher {
+	if h == nil || h.boot == nil {
+		return nil
+	}
+	return h.boot.Publisher
+}
 
 // FailbackAuthorityRuntime exposes the authority-owned failback seam backed by
 // the live Publisher. Callers still need an explicit policy gate before using

@@ -492,6 +492,9 @@ func (p *ReplicaPeer) RuntimeRecoveryStatus(req RuntimeRecoveryRequest) (Runtime
 }
 
 func (p *ReplicaPeer) runtimeRecoveryTarget(req RuntimeRecoveryRequest) (ReplicaTarget, *transport.BlockExecutor, error) {
+	if p == nil {
+		return ReplicaTarget{}, nil, fmt.Errorf("replication: runtime recovery: peer %s is not configured", req.ReplicaID)
+	}
 	p.mu.Lock()
 	if p.closed {
 		p.mu.Unlock()
@@ -509,6 +512,9 @@ func (p *ReplicaPeer) runtimeRecoveryTarget(req RuntimeRecoveryRequest) (Replica
 	if target.Epoch != req.Epoch || target.EndpointVersion != req.EndpointVersion {
 		return ReplicaTarget{}, nil, fmt.Errorf("replication: runtime recovery: lineage drift target=%d/%d request=%d/%d",
 			target.Epoch, target.EndpointVersion, req.Epoch, req.EndpointVersion)
+	}
+	if executor == nil {
+		return ReplicaTarget{}, nil, fmt.Errorf("replication: runtime recovery: executor is not configured for replica %s", req.ReplicaID)
 	}
 	return target, executor, nil
 }

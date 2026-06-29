@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/seaweedfs/seaweed-block/core/authority"
@@ -147,6 +148,24 @@ func TestHostFrontendPublicationRuntimeHTTPRejectsMismatchedAuthorityLine(t *tes
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusPreconditionFailed {
 		t.Fatalf("status=%s", resp.Status)
+	}
+}
+
+func TestHostFrontendPublicationRuntimeRejectsMissingPublisher(t *testing.T) {
+	err := validateFrontendPublicationRuntimeRequest(&Host{}, frontendPublicationRuntimeRequest{
+		VolumeID:                          "vol-a",
+		ReplicaID:                         "r1",
+		TargetDataAddr:                    "127.0.0.1:9201",
+		TargetCtrlAddr:                    "127.0.0.1:9101",
+		SourceFailbackName:                "vol-a-r1-failback",
+		FailbackCompleted:                 true,
+		AuthorityEpochAdvanced:            true,
+		SinglePrimaryAfterFailback:        true,
+		PublishTargetSwappedAfterFailback: true,
+		NoCrossVolumeIdentityChange:       true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "authority publisher is not configured") {
+		t.Fatalf("err=%v, want missing publisher", err)
 	}
 }
 
