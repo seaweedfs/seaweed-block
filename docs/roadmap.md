@@ -520,6 +520,16 @@ Recommended order from here:
     NQNs, no loopback publish target, no cross-volume identity mix-up, and
     strict cleanup audit `cleanup_status=ok`. This still excludes RoCE,
     performance/SLO, broad compatibility, production HA, and broader scale.
+66. Phase 108: NVMe/TCP Multi-Volume Lifecycle Soak. **Closed 2026-06-29,
+    live k3s PASS**
+    Ran two consecutive two-PVC NVMe/TCP cross-node lifecycle cycles with app
+    pods pinned to `m02`. Each cycle verified two writers and two readers, then
+    helper cleanup waited for generated blockvolume pods, matching PVs, and
+    SeaweedFS NVMe subsystems to drain before declaring `cleanup_status=ok`.
+    Terminal evidence showed `cycle_1_nvme_residue_count=0`,
+    `cycle_1_k8s_residue_count=0`, `cycle_2_nvme_residue_count=0`, and
+    `cycle_2_k8s_residue_count=0`; final strict cleanup returned
+    `cleanup_status=ok`.
 
 The internal release-train contract is
 `internal/docs/ref/operation-layer-v0.5-release-train.md`. Phases 41-44 close

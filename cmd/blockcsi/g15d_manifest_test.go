@@ -591,10 +591,31 @@ func TestPhase107MultiVolumeScriptPinsProtocolAndNodeSelector(t *testing.T) {
 		"protocol=$MULTI_VOLUME_PROTOCOL",
 		"app_node_selector=${MULTI_VOLUME_NODE_SELECTOR:-none}",
 		"kubernetes.io/hostname",
+		"list_blockvolume_pods",
+		"list_matching_pvs",
+		"count_seaweed_nvme_subsystems",
 		"SW_BLOCK_MULTI_VOLUME_PROTOCOL must be iscsi or nvme",
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("multi-volume wrapper missing %q", want)
+		}
+	}
+}
+
+func TestPhase108NVMeLifecycleScenarioAssertsResidueFreeCycles(t *testing.T) {
+	body := g15dReadFile(t, "testops", "scenarios", "nvme-tcp-cross-node-multivolume-lifecycle-soak-chain.yaml")
+	for _, want := range []string{
+		"phase108_nvme_tcp_multivolume_lifecycle_soak_status=ok",
+		"cycle_count: \"2\"",
+		"SW_BLOCK_MULTI_VOLUME_PROTOCOL=nvme",
+		"SW_BLOCK_MULTI_VOLUME_CLEANUP=1",
+		"cycle_{cycle}_cleanup_status=ok",
+		"cycle_{cycle}_nvme_residue_count=0",
+		"cycle_{cycle}_k8s_residue_count=0",
+		"cleanup_status=ok",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("phase108 lifecycle scenario missing %q", want)
 		}
 	}
 }

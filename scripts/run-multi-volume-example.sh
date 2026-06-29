@@ -50,6 +50,21 @@ list_blockvolume_deployments() {
     | awk '/^deployment/ { print }'
 }
 
+list_blockvolume_pods() {
+  kubectl -n "$NAMESPACE" get pods -l app=sw-blockvolume -o name 2>/dev/null \
+    | awk '/^pod/ { print }'
+}
+
+list_matching_pvs() {
+  kubectl get pv --no-headers 2>/dev/null \
+    | awk -v prefix="$PVC_PREFIX" '$0 ~ prefix { print $1 }'
+}
+
+count_seaweed_nvme_subsystems() {
+  sudo -n nvme list-subsys 2>/dev/null \
+    | grep -c 'nqn\.2026-05\.io\.seaweedfs' || true
+}
+
 sw_block_cmd() {
   if [[ -n "${SW_BLOCK_CLI:-}" ]]; then
     "$SW_BLOCK_CLI" "$@"
@@ -259,6 +274,9 @@ collect_status_evidence() {
 cleanup_multi_volume() {
   local rc=0
   local deployments_gone=false
+  local pods_gone=false
+  local pvs_gone=false
+  local nvme_gone=true
   for idx in $(seq 1 "$VOLUME_COUNT"); do
     kubectl -n "$NAMESPACE" delete pod "${POD_PREFIX}-reader-${idx}" "${POD_PREFIX}-writer-${idx}" --ignore-not-found=true --wait=true --timeout=120s || rc=1
   done
@@ -285,6 +303,64 @@ cleanup_multi_volume() {
     safe_capture "$ARTIFACT_DIR/logs/blockvolume-deployments.cleanup-timeout.txt" kubectl -n "$NAMESPACE" get deploy -l app=sw-blockvolume -o wide
     rc=1
   fi
+
+  deadline=$((SECONDS + 180))
+  while (( SECONDS <= deadline )); do
+    local remaining_pods
+    remaining_pods="$(list_blockvolume_pods || true)"
+    if [[ -z "$remaining_pods" ]]; then
+      pods_gone=true
+      break
+    fi
+    sleep 2
+  done
+  if [[ "$pods_gone" != "true" ]] && [[ -z "$(list_blockvolume_pods || true)" ]]; then
+    pods_gone=true
+  fi
+  if [[ "$pods_gone" != "true" ]]; then
+    safe_capture "$ARTIFACT_DIR/logs/blockvolume-pods.cleanup-timeout.txt" kubectl -n "$NAMESPACE" get pods -l app=sw-blockvolume -o wide
+    rc=1
+  fi
+
+  deadline=$((SECONDS + 180))
+  while (( SECONDS <= deadline )); do
+    local remaining_pvs
+    remaining_pvs="$(list_matching_pvs || true)"
+    if [[ -z "$remaining_pvs" ]]; then
+      pvs_gone=true
+      break
+    fi
+    sleep 2
+  done
+  if [[ "$pvs_gone" != "true" ]] && [[ -z "$(list_matching_pvs || true)" ]]; then
+    pvs_gone=true
+  fi
+  if [[ "$pvs_gone" != "true" ]]; then
+    safe_capture "$ARTIFACT_DIR/logs/pvs.cleanup-timeout.txt" kubectl get pv -o wide
+    rc=1
+  fi
+
+  if [[ "$MULTI_VOLUME_PROTOCOL" == "nvme" ]]; then
+    nvme_gone=false
+    deadline=$((SECONDS + 120))
+    while (( SECONDS <= deadline )); do
+      local nvme_count
+      nvme_count="$(count_seaweed_nvme_subsystems)"
+      if [[ "$nvme_count" == "0" ]]; then
+        nvme_gone=true
+        break
+      fi
+      sleep 2
+    done
+    if [[ "$nvme_gone" != "true" ]] && [[ "$(count_seaweed_nvme_subsystems)" == "0" ]]; then
+      nvme_gone=true
+    fi
+    if [[ "$nvme_gone" != "true" ]]; then
+      safe_capture "$ARTIFACT_DIR/logs/nvme-subsystems.cleanup-timeout.txt" sudo -n nvme list-subsys
+      rc=1
+    fi
+  fi
+
   kubectl delete storageclass "$STORAGECLASS_NAME" --ignore-not-found=true --wait=true --timeout=120s || rc=1
   return "$rc"
 }
