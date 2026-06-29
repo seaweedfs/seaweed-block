@@ -59,6 +59,7 @@ const (
 	ManagedVolumeActionCollectBundle          = "observe.collect_bundle"
 	ManagedVolumeActionVerifyCleanup          = "observe.verify_cleanup"
 	ManagedVolumeActionReinstallExternalISCSI = "safe_k8s.reinstall_external_iscsi"
+	ManagedVolumeActionInspectTargetTopology  = "observe.inspect_publish_target_topology"
 	ManagedVolumeActionWaitForPVCBound        = "observe.wait_for_pvc_bound"
 	ManagedVolumeActionInspectMountFailure    = "observe.inspect_mount_failure"
 	ManagedVolumeActionImportCSIImage         = "safe_k8s.import_csi_image"
@@ -837,20 +838,7 @@ func managedVolumeActionsForProjection(p ManagedVolumeProjection, facts ManagedV
 	}}
 	switch p.ReasonCode {
 	case ReasonPublishTargetLoopbackCrossNode:
-		actions = append(actions, ManagedVolumeAction{
-			Type:            ManagedVolumeActionReinstallExternalISCSI,
-			Target:          facts.PVCName,
-			Mode:            ManagedVolumeActionModeDryRun,
-			SideEffectClass: ManagedVolumeSideEffectSafeK8S,
-			OwnerExecutor:   "installer_or_operator",
-			Preconditions: []string{
-				"multiple_kubernetes_nodes",
-				"loopback_publish_target",
-				"pod_scheduled_on_different_node",
-			},
-			InvariantRefs: []string{"INV-K8S-NONLOOPBACK-001"},
-			EvidenceRefs:  append([]string(nil), p.EvidenceRefs...),
-		})
+		actions = append(actions, loopbackCrossNodeAction(p, facts))
 	case ReasonPVCUnbound:
 		actions = append(actions, ManagedVolumeAction{
 			Type:            ManagedVolumeActionWaitForPVCBound,
@@ -942,6 +930,29 @@ func managedVolumeActionsForProjection(p ManagedVolumeProjection, facts ManagedV
 		}
 	}
 	return actions
+}
+
+func loopbackCrossNodeAction(p ManagedVolumeProjection, facts ManagedVolumeFacts) ManagedVolumeAction {
+	action := ManagedVolumeAction{
+		Type:            ManagedVolumeActionReinstallExternalISCSI,
+		Target:          facts.PVCName,
+		Mode:            ManagedVolumeActionModeDryRun,
+		SideEffectClass: ManagedVolumeSideEffectSafeK8S,
+		OwnerExecutor:   "installer_or_operator",
+		Preconditions: []string{
+			"multiple_kubernetes_nodes",
+			"loopback_publish_target",
+			"pod_scheduled_on_different_node",
+		},
+		InvariantRefs: []string{"INV-K8S-NONLOOPBACK-001"},
+		EvidenceRefs:  append([]string(nil), p.EvidenceRefs...),
+	}
+	if p.NVMe != nil {
+		action.Type = ManagedVolumeActionInspectTargetTopology
+		action.SideEffectClass = ManagedVolumeSideEffectObserve
+		action.OwnerExecutor = "ops"
+	}
+	return action
 }
 
 func managedVolumeNonClaims(p ManagedVolumeProjection, facts ManagedVolumeFacts) []string {

@@ -255,6 +255,69 @@ func TestManagedVolumeProjection_LoopbackCrossNodeBlocked(t *testing.T) {
 	}
 }
 
+func TestManagedVolumeProjection_NVMeLoopbackCrossNodeBlocked(t *testing.T) {
+	projection := ProjectManagedVolume(ManagedVolumeFacts{
+		VolumeID:          "pvc-nvme",
+		Namespace:         "default",
+		PVCName:           "nvme-pvc",
+		ReplicationFactor: 1,
+		Protocol:          "nvme",
+		PVC: &PVCFact{
+			Phase: "Bound",
+		},
+		Authority: &AuthorityFact{
+			PrimaryReplica: "r1",
+			PublishTarget:  "127.0.0.1:4420",
+		},
+		Replicas: []ReplicaFact{{
+			ReplicaID:        "r1",
+			KubernetesNode:   "m02",
+			Role:             "primary",
+			Observed:         true,
+			FrontendProtocol: "nvme",
+			FrontendAddr:     "127.0.0.1:4420",
+			FrontendNQN:      "nqn.2026-05.io.seaweedfs:pvc-nvme",
+			FrontendNSID:     1,
+		}},
+		CSIStages: []CSIStageFact{{
+			NodeName: "m01",
+			Target:   "127.0.0.1:4420",
+		}},
+		PodMounts: []PodMountFact{{
+			PodName:  "writer",
+			NodeName: "m01",
+			Phase:    "Pending",
+		}},
+	})
+
+	if projection.Status != ManagedVolumeStatusBlocked || projection.ReasonCode != ReasonPublishTargetLoopbackCrossNode {
+		t.Fatalf("status=%s reason=%s", projection.Status, projection.ReasonCode)
+	}
+	ready := findObservationCondition(projection.Conditions, ConditionReady)
+	if ready == nil || ready.Status == "True" {
+		t.Fatalf("cross-node loopback nvme must not claim Ready=True: %+v", projection.Conditions)
+	}
+	if projection.NVMe == nil || projection.NVMe.Protocol != "nvme" || projection.NVMe.NVMeAddr != "127.0.0.1:4420" {
+		t.Fatalf("nvme status=%+v", projection.NVMe)
+	}
+	if hasManagedVolumeAction(projection.Actions, ManagedVolumeActionReinstallExternalISCSI) {
+		t.Fatalf("nvme topology blocker must not recommend iSCSI remediation: %+v", projection.Actions)
+	}
+	action := findManagedVolumeAction(projection.Actions, ManagedVolumeActionInspectTargetTopology)
+	if action == nil {
+		t.Fatalf("missing topology inspection action: %+v", projection.Actions)
+	}
+	if action.SideEffectClass != ManagedVolumeSideEffectObserve || action.OwnerExecutor != "ops" || action.Mode != ManagedVolumeActionModeDryRun {
+		t.Fatalf("action boundary=%+v", action)
+	}
+	if action.Decision != ManagedVolumeActionDecisionAllowed {
+		t.Fatalf("action decision=%s reason=%s missing=%v", action.Decision, action.DecisionReason, action.MissingFacts)
+	}
+	if action.EvidenceRequired != "loopback_cross_node_evidence" {
+		t.Fatalf("evidence_required=%q", action.EvidenceRequired)
+	}
+}
+
 func TestManagedVolumeProjection_PVCPendingBlocked(t *testing.T) {
 	projection := ProjectManagedVolume(ManagedVolumeFacts{
 		VolumeID: "pvc-pending",

@@ -236,7 +236,7 @@ rebuild, delete safety, or cleanup must start as a separate gated phase.
   `seaweed-block-csi` image pair can run the Phase 100 Kubernetes NVMe
   multipath attach gate and that binaries extracted from the published
   `seaweed-block` image pass the Phase 101 standalone hardening gates.
-- Phase 103 NVMe Multi-Host / RoCE Preflight is active. It adds a read-only host
+- Phase 103 NVMe Multi-Host / RoCE Preflight is closed. It adds a read-only host
   capability gate before any RoCE, multi-host, or performance claim: NVMe/TCP
   capability must be inspectable, RDMA devices and `nvme-rdma` capability can
   make a host a candidate, and missing RoCE hardware must surface as a
@@ -246,9 +246,14 @@ rebuild, delete safety, or cleanup must start as a separate gated phase.
   NVMe target is explicitly TCP-only, this phase adds a machine-checkable
   refusal: `--nvme-transport=rdma` must fail clearly and release wording must
   keep RoCE as a non-claim. This is not a RoCE implementation.
-- Phase 105 Multi-Host NVMe/TCP Topology Boundary is planned next. It should
-  block cross-node loopback NVMe/TCP publish targets before any multi-host NVMe
-  claim is made.
+- Phase 105 Multi-Host NVMe/TCP Topology Boundary is closed. It blocks
+  cross-node loopback NVMe/TCP evidence with the existing protocol-neutral
+  `publish_target_loopback_cross_node` reason, keeps `Ready=True` false, and
+  surfaces `observe.inspect_publish_target_topology` instead of an iSCSI-only
+  remediation.
+- Phase 106 NVMe/TCP Cross-Node Non-Loopback Live Attach is next. It should
+  prove the positive multi-host path: a routable NVMe/TCP target, CSI
+  stage/publish agreement, app writer/reader I/O, and zero residue.
 - Later protocol candidates: implement a real NVMe/RDMA target or characterize
   NVMe/TCP performance. Keep these separate so correctness, transport, and
   performance claims do not get mixed.

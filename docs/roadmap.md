@@ -96,6 +96,8 @@ Seaweed Block can already demonstrate a narrow Kubernetes block-storage loop:
 - NVMe/TCP CSI multipath attach is gated for the supported lab path; RoCE and
   NVMe/RDMA remain explicit non-claims until host preflight plus live I/O gates
   prove them.
+- Cross-node loopback NVMe/TCP topology is explicitly blocked. Cross-node
+  non-loopback NVMe/TCP attach remains the next live gate, not a shipped claim.
 - Install drift status for current versus desired chart/app/image identity
   without upgrade execution.
 - CRD/RBAC status-writer conformance coverage for the failures that previously
@@ -481,6 +483,26 @@ Recommended order from here:
     and runs the Phase 101 standalone hardening gates using binaries extracted
     from the published `seaweed-block` image. If images are missing, the gate
     blocks as an artifact-readiness issue, not a product failure.
+61. Phase 103: NVMe Multi-Host / RoCE Preflight. **Closed 2026-06-29,
+    runner PASS**
+    Adds a read-only host capability gate for NVMe/TCP and RoCE candidacy. RDMA
+    hardware plus `nvme-rdma` module availability can make a host a candidate,
+    but still does not permit a RoCE or performance product claim.
+62. Phase 104: RoCE Live-I/O Feasibility Boundary. **Closed 2026-06-29,
+    runner PASS**
+    Makes the current target boundary explicit: `--nvme-transport=rdma` is
+    rejected because only NVMe/TCP is implemented. This is a refusal gate, not a
+    RoCE implementation.
+63. Phase 105: NVMe/TCP Multi-Host Topology Boundary. **Closed 2026-06-29,
+    runner PASS**
+    Cross-node loopback NVMe/TCP evidence now blocks with
+    `publish_target_loopback_cross_node`, never emits false `Ready=True`, and
+    surfaces the read-only `observe.inspect_publish_target_topology` action
+    instead of an iSCSI remediation.
+64. Phase 106: NVMe/TCP Cross-Node Non-Loopback Live Attach. **Planned**
+    Prove the positive multi-host path with a routable NVMe/TCP target, CSI
+    publish/stage agreement, app writer/reader I/O, and zero residue. This still
+    excludes RoCE, performance/SLO, broad compatibility, and production HA.
 
 The internal release-train contract is
 `internal/docs/ref/operation-layer-v0.5-release-train.md`. Phases 41-44 close

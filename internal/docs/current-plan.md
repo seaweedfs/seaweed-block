@@ -1,94 +1,100 @@
-# Current Plan: Phase 105 Multi-Host NVMe/TCP Topology Boundary
+# Current Plan: Phase 106 NVMe/TCP Cross-Node Non-Loopback Live Attach
 
 Status: planned next.
 
 ## Why This Is Next
 
-Phase 103 proved host transport preflight. Phase 104 proved the current product
-is explicitly NVMe/TCP-only and must not claim RoCE/NVMe-RDMA.
+Phase 103 proved the host can support NVMe/TCP preflight. Phase 104 proved the
+product must not claim RoCE/NVMe-RDMA. Phase 105 proved the topology boundary:
+cross-node loopback NVMe/TCP evidence is blocked with
+`publish_target_loopback_cross_node`, no false `Ready=True`, and no iSCSI-only
+remediation.
 
-The next useful NVMe feature is therefore not RoCE and not performance. It is
-multi-host NVMe/TCP topology correctness:
+The next useful NVMe feature is therefore the positive live path that Phase 105
+explicitly did not claim:
 
 ```text
-NVMe/TCP frontend address must be non-loopback for cross-node attach
-CSI publish context must not hand a pod on node A a 127.0.0.1 target from node B
-status must block unsafe topology instead of claiming Ready=True
+blockvolume publishes a non-loopback NVMe/TCP target on node B
+CSI stages it for a workload on node A
+writer/reader I/O succeeds
+status surfaces Ready only after live evidence
 ```
-
-This mirrors the earlier iSCSI loopback-cross-node blocker, but for NVMe/TCP.
 
 ## Product Goal
 
-Add a topology boundary that distinguishes:
+Make cross-node NVMe/TCP attach a real gated capability for the lab path, not a
+model-only promise.
 
-- same-node loopback NVMe/TCP attach: allowed under the supported lab path;
-- cross-node loopback NVMe/TCP attach: blocked with a stable reason;
-- cross-node non-loopback NVMe/TCP attach: eligible for a future live gate.
+Required behavior:
 
-The intended reason code is:
+- loopback target across nodes stays blocked by Phase 105;
+- non-loopback target across nodes can be staged by CSI;
+- the published NQN/NSID/address in master status, CSI publish context, node
+  stage evidence, report, dashboard, and CRD status agree;
+- app writer/reader verifies data through the mounted volume;
+- cleanup leaves zero Kubernetes, NVMe, process, and host residue.
 
-```text
-nvme_publish_target_loopback_cross_node
-```
+## D1: Publish Target Selection
 
-or a reused protocol-neutral reason if the existing model can carry it cleanly.
-
-## D1: Model / Reason Contract
-
-Define how ManagedVolume facts represent an NVMe publish target whose address is
-loopback while the workload node differs from the blockvolume node.
+Ensure NVMe frontend publication exposes a routable node address when the
+workload may run on a different node. Do not regress the same-node loopback lab
+path.
 
 Required local checks:
 
 ```text
-go test ./core/ops ./cmd/sw-block -count=1
+go test ./core/frontend/nvme ./core/ops ./cmd/blockvolume ./cmd/sw-block -count=1
 ```
 
-## D2: Report / Dashboard / Explain Agreement
+## D2: CSI Publish / Stage Evidence
 
-The blocked state must appear consistently in:
+Confirm CSI publish context carries the non-loopback NVMe/TCP target and node
+stage records the same NQN/NSID/address.
 
-- summary.txt;
-- operator-snapshot.json;
-- dashboard `/operator-snapshot.json`;
-- `ops explain`;
-- CRD status if the operator-status path consumes the same evidence.
+No status surface may claim Ready if publish context and stage evidence
+disagree.
 
-No surface may show `Ready=True` for cross-node loopback NVMe/TCP.
+## D3: Live Cross-Node Writer / Reader Gate
 
-## D3: TestOps Scenario
-
-Add a scenario/gate that crafts or induces:
+Run a TestOps scenario that pins or schedules:
 
 ```text
-protocol=nvme
-publish_target=127.0.0.1:<port>
 blockvolume_node=m02
 workload_node=m01
+publish_target=<m02 routable IP>:4420
+protocol=nvme
 ```
 
 Expected evidence:
 
 ```text
-status=blocked
-reason=nvme_publish_target_loopback_cross_node
-ready_true_count=0
-safe action is observe/read_only or dry_run
+writer_verified=true
+reader_verified=true
+status=ready
+reason=first_volume_verified
+nvme_target_loopback=false
+ready_true_allowed_only_after_reader=true
 ```
 
-## D4: Live Follow-up
+## D4: Negative Regression
 
-If the lab can schedule a real pod on a different node while the NVMe frontend is
-loopback-bound, run the live negative gate. Otherwise close D3 as replay-only
-with a clear live follow-up, the same way earlier host-prereq gates handled
-environment-limited cases.
+Keep the Phase 105 negative topology scenario in the suite:
+
+```text
+publish_target=127.0.0.1:4420
+blockvolume_node=m02
+workload_node=m01
+status=blocked
+reason=publish_target_loopback_cross_node
+ready_true_count=0
+```
 
 ## Non-Claims
 
-Phase 105 does not claim:
+Phase 106 still does not claim:
 
-- multi-host NVMe/TCP attach works;
-- RoCE/NVMe-RDMA works;
+- RoCE/NVMe-RDMA;
+- multi-path failover across real hosts;
 - performance or SLO;
+- broad distro/kernel compatibility;
 - production HA.
