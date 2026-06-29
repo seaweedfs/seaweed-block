@@ -1,0 +1,79 @@
+name: nvme-multihost-roce-preflight-chain
+timeout: 15m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: preflight
+    actions:
+      - action: exec
+        node: m02
+        timeout: 10m
+        cmd: "rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase103-nvme-roce-preflight && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase103-nvme-roce-preflight && cd {{ product_root }} && bash scripts/run-phase103-nvme-multihost-roce-preflight-gate.sh {{ product_root }}"
+        env.SW_BLOCK_ARTIFACT_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase103-nvme-roce-preflight/gate"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase103-nvme-roce-preflight/gate/phase103-nvme-multihost-roce-preflight-summary.txt"
+        pattern: "^phase103_nvme_multihost_roce_preflight_status=ok$"
+        save_as: phase103_ok
+      - action: assert_greater
+        actual: "{{ phase103_ok }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase103-nvme-roce-preflight/gate/phase103-nvme-multihost-roce-preflight-summary.txt"
+        pattern: "^read_only=true$"
+        save_as: read_only
+      - action: assert_greater
+        actual: "{{ read_only }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase103-nvme-roce-preflight/gate/phase103-nvme-multihost-roce-preflight-summary.txt"
+        pattern: "^nvme_tcp_preflight_ready=true$"
+        save_as: nvme_tcp_ready
+      - action: assert_greater
+        actual: "{{ nvme_tcp_ready }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase103-nvme-roce-preflight/gate/phase103-nvme-multihost-roce-preflight-summary.txt"
+        pattern: "^roce_claim_allowed=false$"
+        save_as: no_roce_claim
+      - action: assert_greater
+        actual: "{{ no_roce_claim }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase103-nvme-roce-preflight/gate/phase103-nvme-multihost-roce-preflight-summary.txt"
+        pattern: "^roce_live_io_claim=false$"
+        save_as: no_roce_io_claim
+      - action: assert_greater
+        actual: "{{ no_roce_io_claim }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase103-nvme-roce-preflight/gate/phase103-nvme-multihost-roce-preflight-summary.txt"
+        pattern: "^performance_claim_allowed=false$"
+        save_as: no_perf_claim
+      - action: assert_greater
+        actual: "{{ no_perf_claim }}"
+        threshold: "0"
+
+  - name: collect
+    always: true
+    actions:
+      - action: collect_path
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase103-nvme-roce-preflight"
+        name: "remote-phases"
+        ignore_error: true

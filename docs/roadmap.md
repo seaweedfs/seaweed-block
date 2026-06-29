@@ -93,6 +93,9 @@ Seaweed Block can already demonstrate a narrow Kubernetes block-storage loop:
 - Bounded `SwBlockVolume` finalizer lifecycle in the v0.5 beta-candidate path:
   CSI-created identity CRs, lifecycle-owner protection finalizer, evidence-driven
   hold/release, Events, and multi-volume isolation.
+- NVMe/TCP CSI multipath attach is gated for the supported lab path; RoCE and
+  NVMe/RDMA remain explicit non-claims until host preflight plus live I/O gates
+  prove them.
 - Install drift status for current versus desired chart/app/image identity
   without upgrade execution.
 - CRD/RBAC status-writer conformance coverage for the failures that previously
