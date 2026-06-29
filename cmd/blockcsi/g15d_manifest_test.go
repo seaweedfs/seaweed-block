@@ -620,6 +620,26 @@ func TestPhase108NVMeLifecycleScenarioAssertsResidueFreeCycles(t *testing.T) {
 	}
 }
 
+func TestPhase109NVMeStatusSurfaceScenarioChecksCRDAndSupportSurfaces(t *testing.T) {
+	body := g15dReadFile(t, "testops", "scenarios", "nvme-tcp-status-surface-evidence-chain.yaml")
+	for _, want := range []string{
+		"phase109_nvme_tcp_status_surface_status=ok",
+		"operatorStatus:",
+		"lifecycleOwner:",
+		"crd_nvme_status_count=2",
+		"report_nvme_status_count=2",
+		"operator_snapshot_nvme_status_count=2",
+		"dashboard_nvme_status_count=2",
+		"explain_nvme_status_count=2",
+		"publish_target_matches_nvme_addr=true",
+		"ops','explain','volume','--from-bundle'",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("phase109 status surface scenario missing %q", want)
+		}
+	}
+}
+
 func TestPhase20FirstVolumeScenarioPinsPublishedUserGate(t *testing.T) {
 	body := g15dReadFile(t, "testops", "scenarios", "activation-day1-first-volume-chain.yaml")
 	for _, want := range []string{

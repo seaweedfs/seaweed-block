@@ -271,6 +271,11 @@ rebuild, delete safety, or cleanup must start as a separate gated phase.
   verified writer/reader data and then drained generated blockvolume pods,
   matching PVs, and SeaweedFS NVMe subsystems before each cycle could claim
   helper cleanup success. Final strict cleanup returned zero residue.
+- Phase 109 NVMe/TCP Status Surface Evidence is closed for the supported lab
+  path. Two NVMe/TCP PVCs now expose matching protocol, NQN, namespace ID,
+  address, path count, ready status, and `first_volume_verified` reason across
+  `SwBlockVolume.status.nvme`, report summary, report operator snapshot,
+  dashboard operator snapshot, and `ops explain`.
 - Later protocol candidates: implement a real NVMe/RDMA target or characterize
   NVMe/TCP performance. Keep these separate so correctness, transport, and
   performance claims do not get mixed.

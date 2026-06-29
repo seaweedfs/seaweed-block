@@ -506,7 +506,7 @@ func (r OperatorStatusReconciler) Reconcile(ctx context.Context) (OperatorStatus
 	}
 	clusterStatus.Cleanup = swBlockCleanupStatus(snapshot.Cluster.Cleanup)
 	clusterStatus.InstallDrift = swBlockInstallDriftStatus(snapshot.Cluster.InstallDrift)
-	if err := r.Writer.WriteClusterStatus(ctx, clusterRef, clusterStatus); err != nil {
+	if err := r.Writer.WriteClusterStatus(ctx, clusterRef, clusterStatus); err != nil && !IsKubernetesStatusNotFound(err) {
 		return OperatorStatusReconcileResult{}, err
 	}
 
@@ -859,12 +859,19 @@ func (r OperatorStatusReconciler) now() func() time.Time {
 
 func SwBlockVolumeObjectName(status ManagedVolumeOperatorStatus) string {
 	if status.PVCName != "" {
-		return kubernetesName(status.PVCName)
+		return kubernetesName(pvcObjectName(status.PVCName))
 	}
 	if status.VolumeID != "" {
 		return kubernetesName(status.VolumeID)
 	}
 	return "unknown-volume"
+}
+
+func pvcObjectName(pvcName string) string {
+	if idx := strings.LastIndex(pvcName, "/"); idx >= 0 && idx < len(pvcName)-1 {
+		return pvcName[idx+1:]
+	}
+	return pvcName
 }
 
 func kubernetesName(in string) string {
