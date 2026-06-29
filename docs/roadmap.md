@@ -511,6 +511,15 @@ Recommended order from here:
     `ready/first_volume_verified`, writer/reader verified, and strict cleanup
     audit `cleanup_status=ok`. This still excludes RoCE, performance/SLO,
     broad compatibility, and production HA.
+65. Phase 107: NVMe/TCP Multi-Volume Cross-Node Isolation. **Closed
+    2026-06-29, live k3s PASS**
+    Proved the new routable NVMe/TCP path with two PVCs in the supported lab:
+    `protocol=nvme`, app pods pinned to `m02`, `writer_verified_count=2`,
+    `reader_verified_count=2`, managed volumes
+    `ready/first_volume_verified`, two distinct volume IDs, two distinct NVMe
+    NQNs, no loopback publish target, no cross-volume identity mix-up, and
+    strict cleanup audit `cleanup_status=ok`. This still excludes RoCE,
+    performance/SLO, broad compatibility, production HA, and broader scale.
 
 The internal release-train contract is
 `internal/docs/ref/operation-layer-v0.5-release-train.md`. Phases 41-44 close
