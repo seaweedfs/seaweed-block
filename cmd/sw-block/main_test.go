@@ -2566,6 +2566,7 @@ func TestOpsGenerateHelmValuesSingleNodeFromKubernetes(t *testing.T) {
 		"repository: ghcr.io/seaweedfs/seaweed-block",
 		"tag: sha-test",
 		"externalISCSI: false",
+		"externalNVMe: false",
 		"externalStatus: false",
 		"rejectLoopbackPublishTargets: false",
 		"restartPersistence:",
@@ -2610,7 +2611,9 @@ func TestOpsGenerateHelmValuesMultiNodeExternalISCSI(t *testing.T) {
 		"network_mode=external-iscsi",
 		"ready_kubernetes_nodes=3",
 		"external_iscsi=true",
+		"external_nvme=false",
 		"chap_enabled=true",
+		"protocol=iscsi",
 		"ack_profile=sync-quorum",
 		"restart_persistence_mode=ephemeral",
 	} {
@@ -2627,6 +2630,7 @@ func TestOpsGenerateHelmValuesMultiNodeExternalISCSI(t *testing.T) {
 		"ackProfile: sync-quorum",
 		"expectedSlotsPerVolume: 3",
 		"externalISCSI: true",
+		"externalNVMe: false",
 		"externalStatus: true",
 		"rejectLoopbackPublishTargets: true",
 		"restartPersistence:",
@@ -2654,6 +2658,66 @@ func TestOpsGenerateHelmValuesMultiNodeExternalISCSI(t *testing.T) {
 	}
 	if strings.Contains(string(values), "dataPort: 3260") {
 		t.Fatalf("values must not assign dataPort 3260 because it collides with iSCSI listener port:\n%s", values)
+	}
+}
+
+func TestOpsGenerateHelmValuesMultiNodeExternalNVMe(t *testing.T) {
+	oldRunCommand := opsGenerateHelmValuesRunCommand
+	opsGenerateHelmValuesRunCommand = fixtureCmdKubectl(map[string]string{
+		"kubectl get nodes -o wide --no-headers": cmdHelmNodeWide,
+	})
+	defer func() { opsGenerateHelmValuesRunCommand = oldRunCommand }()
+
+	outPath := filepath.Join(t.TempDir(), "values.yaml")
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"ops", "generate-helm-values",
+		"--out", outPath,
+		"--replication-factor", "3",
+		"--protocol", "nvme",
+	}, &stdout, &stderr)
+	if code != ops.VolumeStatusExitOK {
+		t.Fatalf("exit=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	for _, want := range []string{
+		"network_mode=external-nvme",
+		"ready_kubernetes_nodes=3",
+		"external_iscsi=false",
+		"external_nvme=true",
+		"chap_enabled=false",
+		"protocol=nvme",
+	} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("stdout missing %q:\n%s", want, stdout.String())
+		}
+	}
+	values, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"replicationFactor: 3",
+		"protocol: nvme",
+		"externalISCSI: false",
+		"externalNVMe: true",
+		"externalStatus: true",
+		"rejectLoopbackPublishTargets: true",
+		"enabled: false",
+		"create: false",
+		"secret: \"\"",
+		"name: m01",
+		"internalIP: 192.168.1.181",
+		"name: m02",
+		"internalIP: 192.168.1.184",
+		"name: tp01",
+		"internalIP: 192.168.1.188",
+	} {
+		if !strings.Contains(string(values), want) {
+			t.Fatalf("values missing %q:\n%s", want, values)
+		}
+	}
+	if strings.Contains(string(values), "externalISCSI: true") || strings.Contains(string(values), "secret: fixed-chap-secret") {
+		t.Fatalf("nvme values must not enable iSCSI or generate CHAP secret:\n%s", values)
 	}
 }
 

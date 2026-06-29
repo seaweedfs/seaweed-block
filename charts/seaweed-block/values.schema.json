@@ -60,8 +60,17 @@
       "type": "object",
       "properties": {
         "externalISCSI": { "type": "boolean" },
+        "externalNVMe": { "type": "boolean" },
         "externalStatus": { "type": "boolean" },
         "rejectLoopbackPublishTargets": { "type": "boolean" }
+      }
+    },
+    "ports": {
+      "type": "object",
+      "properties": {
+        "iscsiBase": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "nvmeBase": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "statusBase": { "type": "integer", "minimum": 1, "maximum": 65535 }
       }
     },
     "compat": {

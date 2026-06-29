@@ -299,6 +299,53 @@ func TestG15d_K8sRenderer_RendersNVMeBlockVolumeArgs(t *testing.T) {
 	}
 }
 
+func TestPhase106_K8sRenderer_ExternalNVMeUsesNodeAddress(t *testing.T) {
+	plan := sampleWorkloadPlan()
+	plan.Protocol = "nvme"
+	manifests, err := RenderBlockVolumeDeployments(plan, K8sRenderConfig{
+		MasterAddr:   "m:9333",
+		ExternalNVMe: true,
+	})
+	if err != nil {
+		t.Fatalf("RenderBlockVolumeDeployments: %v", err)
+	}
+	raw := string(manifests[0].YAML)
+	for _, want := range []string{
+		"--allow-external-nvme-bind",
+		"--nvme-listen=10.0.0.1:4420",
+		"--nvme-subsysnqn=nqn.test:pvc-a",
+	} {
+		if !strings.Contains(raw, want) {
+			t.Fatalf("manifest missing %q:\n%s", want, raw)
+		}
+	}
+	for _, forbidden := range []string{
+		"--nvme-listen=127.0.0.1:4420",
+		"--allow-external-iscsi-bind",
+		"--iscsi-listen=",
+	} {
+		if strings.Contains(raw, forbidden) {
+			t.Fatalf("external nvme manifest must not contain %q:\n%s", forbidden, raw)
+		}
+	}
+}
+
+func TestPhase106_K8sRenderer_ExternalNVMeRejectsLoopbackNodeAddress(t *testing.T) {
+	plan := sampleWorkloadPlan()
+	plan.Protocol = "nvme"
+	plan.Replicas[0].DataAddr = "127.0.0.1:19101"
+	_, err := RenderBlockVolumeDeployments(plan, K8sRenderConfig{
+		MasterAddr:   "m:9333",
+		ExternalNVMe: true,
+	})
+	if err == nil {
+		t.Fatal("RenderBlockVolumeDeployments succeeded; want loopback external endpoint rejected")
+	}
+	if !strings.Contains(err.Error(), "non-loopback") {
+		t.Fatalf("error = %q, want non-loopback requirement", err)
+	}
+}
+
 func TestG15d_K8sRenderer_CanOptIntoBlockVolumeStatusEndpoint(t *testing.T) {
 	manifests, err := RenderBlockVolumeDeployments(sampleWorkloadPlan(), K8sRenderConfig{
 		MasterAddr:   "m:9333",
@@ -463,7 +510,7 @@ func TestNodeLoss_K8sRenderer_ExternalISCSIRejectsLoopbackNodeAddress(t *testing
 	}
 }
 
-func TestNodeLoss_K8sRenderer_ExternalStatusRequiresExternalISCSI(t *testing.T) {
+func TestNodeLoss_K8sRenderer_ExternalStatusRequiresExternalFrontend(t *testing.T) {
 	_, err := RenderBlockVolumeDeployments(sampleWorkloadPlan(), K8sRenderConfig{
 		MasterAddr:     "m:9333",
 		EnableStatus:   true,
@@ -472,8 +519,33 @@ func TestNodeLoss_K8sRenderer_ExternalStatusRequiresExternalISCSI(t *testing.T) 
 	if err == nil {
 		t.Fatal("RenderBlockVolumeDeployments succeeded; want external status guard")
 	}
-	if !strings.Contains(err.Error(), "external status requires external iSCSI") {
+	if !strings.Contains(err.Error(), "external status requires an external block frontend") {
 		t.Fatalf("error = %q, want external status guard", err)
+	}
+}
+
+func TestPhase106_K8sRenderer_ExternalStatusCanUseExternalNVMe(t *testing.T) {
+	plan := sampleWorkloadPlan()
+	plan.Protocol = "nvme"
+	manifests, err := RenderBlockVolumeDeployments(plan, K8sRenderConfig{
+		MasterAddr:     "m:9333",
+		EnableStatus:   true,
+		ExternalNVMe:   true,
+		ExternalStatus: true,
+	})
+	if err != nil {
+		t.Fatalf("RenderBlockVolumeDeployments: %v", err)
+	}
+	raw := string(manifests[0].YAML)
+	for _, want := range []string{
+		"--status-addr=10.0.0.1:24420",
+		"--allow-external-status-bind",
+		"--allow-external-nvme-bind",
+		"--nvme-listen=10.0.0.1:4420",
+	} {
+		if !strings.Contains(raw, want) {
+			t.Fatalf("manifest missing %q:\n%s", want, raw)
+		}
 	}
 }
 

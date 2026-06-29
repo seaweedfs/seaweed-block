@@ -1677,6 +1677,7 @@ type helmValuesReplication struct {
 
 type helmValuesNetwork struct {
 	ExternalISCSI                bool `yaml:"externalISCSI"`
+	ExternalNVMe                 bool `yaml:"externalNVMe"`
 	ExternalStatus               bool `yaml:"externalStatus"`
 	RejectLoopbackPublishTargets bool `yaml:"rejectLoopbackPublishTargets"`
 }
@@ -1724,6 +1725,7 @@ func runOpsGenerateHelmValues(args []string, stdout, stderr io.Writer) int {
 		replicationFactor  int
 		ackProfile         string
 		storageClass       string
+		protocol           string
 		appNamespace       string
 		targetNode         string
 		nodeLimit          int
@@ -1743,6 +1745,7 @@ func runOpsGenerateHelmValues(args []string, stdout, stderr io.Writer) int {
 	fs.IntVar(&replicationFactor, "replication-factor", 1, "storage class replication factor")
 	fs.StringVar(&ackProfile, "ack-profile", "best-effort", "replication ACK profile: best-effort, sync-quorum, or sync-all")
 	fs.StringVar(&storageClass, "storageclass", "sw-block-dynamic", "StorageClass name")
+	fs.StringVar(&protocol, "protocol", "iscsi", "StorageClass frontend protocol: iscsi or nvme")
 	fs.StringVar(&appNamespace, "app-namespace", "default", "default application namespace")
 	fs.StringVar(&targetNode, "target-node", "", "optional Kubernetes node name to select for single-node values")
 	fs.IntVar(&nodeLimit, "node-limit", 0, "optional maximum selected Ready node count")
@@ -1770,6 +1773,10 @@ func runOpsGenerateHelmValues(args []string, stdout, stderr io.Writer) int {
 	}
 	if !helmValuesAckProfileAccepted(ackProfile) {
 		fmt.Fprintf(stderr, "sw-block ops generate-helm-values: --ack-profile=%q invalid; want best-effort, sync-quorum, or sync-all\n", ackProfile)
+		return ops.VolumeStatusExitInvalid
+	}
+	if !helmValuesProtocolAccepted(protocol) {
+		fmt.Fprintf(stderr, "sw-block ops generate-helm-values: --protocol=%q invalid; want iscsi or nvme\n", protocol)
 		return ops.VolumeStatusExitInvalid
 	}
 	if !helmValuesRestartPersistenceAccepted(restartPersistence) {
@@ -1804,7 +1811,9 @@ func runOpsGenerateHelmValues(args []string, stdout, stderr io.Writer) int {
 	}
 
 	multiNode := len(selected) > 1
-	if multiNode && chapSecret == "" {
+	externalISCSI := multiNode && protocol == "iscsi"
+	externalNVMe := multiNode && protocol == "nvme"
+	if externalISCSI && chapSecret == "" {
 		chapSecret = generateHelmValuesSecret()
 	}
 	values := helmValuesFile{
@@ -1815,14 +1824,15 @@ func runOpsGenerateHelmValues(args []string, stdout, stderr io.Writer) int {
 			Create:            true,
 			Name:              storageClass,
 			ReplicationFactor: replicationFactor,
-			Protocol:          "iscsi",
+			Protocol:          protocol,
 		},
 		Replication: helmValuesReplication{
 			AckProfile:             ackProfile,
 			ExpectedSlotsPerVolume: replicationFactor,
 		},
 		Network: helmValuesNetwork{
-			ExternalISCSI:                multiNode,
+			ExternalISCSI:                externalISCSI,
+			ExternalNVMe:                 externalNVMe,
 			ExternalStatus:               multiNode,
 			RejectLoopbackPublishTargets: multiNode,
 		},
@@ -1830,8 +1840,8 @@ func runOpsGenerateHelmValues(args []string, stdout, stderr io.Writer) int {
 			LauncherRejectLoopbackFlag: false,
 		},
 		CHAP: helmValuesCHAP{
-			Enabled:    multiNode,
-			Create:     multiNode,
+			Enabled:    externalISCSI,
+			Create:     externalISCSI,
 			SecretName: chapSecretName,
 			Username:   chapUsername,
 			Secret:     chapSecret,
@@ -1875,8 +1885,10 @@ func runOpsGenerateHelmValues(args []string, stdout, stderr io.Writer) int {
 	}
 
 	networkMode := "loopback"
-	if multiNode {
+	if externalISCSI {
 		networkMode = "external-iscsi"
+	} else if externalNVMe {
+		networkMode = "external-nvme"
 	}
 	fmt.Fprintln(stdout, "helm_values_status=ok")
 	fmt.Fprintf(stdout, "values_file=%s\n", outPath)
@@ -1885,8 +1897,10 @@ func runOpsGenerateHelmValues(args []string, stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "discovered_kubernetes_nodes=%d\n", len(discovered))
 	fmt.Fprintf(stdout, "target_node=%s\n", emptyCLI(targetNode))
 	fmt.Fprintf(stdout, "node_limit=%s\n", emptyCLI(strconv.Itoa(nodeLimit)))
-	fmt.Fprintf(stdout, "external_iscsi=%t\n", multiNode)
-	fmt.Fprintf(stdout, "chap_enabled=%t\n", multiNode)
+	fmt.Fprintf(stdout, "external_iscsi=%t\n", externalISCSI)
+	fmt.Fprintf(stdout, "external_nvme=%t\n", externalNVMe)
+	fmt.Fprintf(stdout, "chap_enabled=%t\n", externalISCSI)
+	fmt.Fprintf(stdout, "protocol=%s\n", protocol)
 	fmt.Fprintf(stdout, "replication_factor=%d\n", replicationFactor)
 	fmt.Fprintf(stdout, "ack_profile=%s\n", ackProfile)
 	fmt.Fprintf(stdout, "restart_persistence_mode=%s\n", restartPersistence)
@@ -1899,6 +1913,15 @@ func runOpsGenerateHelmValues(args []string, stdout, stderr io.Writer) int {
 func helmValuesAckProfileAccepted(value string) bool {
 	switch value {
 	case "best-effort", "sync-quorum", "sync-all":
+		return true
+	default:
+		return false
+	}
+}
+
+func helmValuesProtocolAccepted(value string) bool {
+	switch value {
+	case "iscsi", "nvme":
 		return true
 	default:
 		return false
@@ -2149,7 +2172,7 @@ func usage(w io.Writer) {
 	fmt.Fprintln(w, "  sw-block ops report --master-api <addr> --out <dir>")
 	fmt.Fprintln(w, "  sw-block ops dashboard --from-bundle <dir> [--listen 127.0.0.1:9334]")
 	fmt.Fprintln(w, "  sw-block ops dashboard --master-api <addr> [--listen 127.0.0.1:9334]")
-	fmt.Fprintln(w, "  sw-block ops generate-helm-values --out values.yaml [--target-node <node>] [--replication-factor <n>]")
+	fmt.Fprintln(w, "  sw-block ops generate-helm-values --out values.yaml [--target-node <node>] [--replication-factor <n>] [--protocol iscsi|nvme]")
 	fmt.Fprintln(w, "      [--restart-persistence ephemeral|hostpath] [--state-hostpath /var/lib/sw-block] [--timeout 10s]")
 	fmt.Fprintln(w, "  sw-block ops operator-status --dry-run [--master-api <addr>|--from-bundle <dir>] [--cleanup-summary <file>] [--interval 30s]")
 	fmt.Fprintln(w, "  sw-block ops lifecycle-owner [--dry-run] [--namespace <ns>] [--interval 30s]")

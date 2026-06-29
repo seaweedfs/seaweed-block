@@ -81,6 +81,10 @@ type flags struct {
 	nvmeSubsysNQN string
 	nvmeNS        uint
 	nvmeTransport string
+	// External NVMe/TCP bind is explicit because the current target has no
+	// authentication. Phase 106 uses it for controlled Kubernetes cross-node
+	// gates; default installs remain loopback-only.
+	allowExternalNVMeBind bool
 
 	// Durable-backend flags. When --durable-root is set, the iSCSI
 	// and NVMe providers use DurableProvider instead of memback.
@@ -153,6 +157,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.StringVar(&f.nvmeSubsysNQN, "nvme-subsysnqn", "", "NVMe subsystem NQN (required if --nvme-listen is set)")
 	fs.UintVar(&f.nvmeNS, "nvme-ns", 1, "NVMe namespace id (default 1)")
 	fs.StringVar(&f.nvmeTransport, "nvme-transport", "tcp", "NVMe-oF transport. Only \"tcp\" is implemented; \"rdma\"/RoCE is a future gated feature")
+	fs.BoolVar(&f.allowExternalNVMeBind, "allow-external-nvme-bind", false, "allow NVMe/TCP to bind a non-loopback address; unauthenticated, intended only for explicit Kubernetes NVMe/TCP gates")
 	fs.StringVar(&f.durableRoot, "durable-root", "", "directory for persistent storage files; empty = memback (non-durable)")
 	fs.StringVar(&f.durableImpl, "durable-impl", "smartwal", "LogicalStorage impl: smartwal (default) or walstore; ignored unless --durable-root is set")
 	fs.UintVar(&f.durableBlocks, "durable-blocks", 2048, "number of blocks per volume on first create (ignored when opening existing)")
@@ -254,7 +259,7 @@ func parseFlags(args []string) (flags, error) {
 		if f.nvmeSubsysNQN == "" {
 			return flags{}, fmt.Errorf("--nvme-subsysnqn is required when --nvme-listen is set")
 		}
-		if err := enforceFrontendLoopbackBind("nvme", f.nvmeListen); err != nil {
+		if err := enforceNVMeBindPolicy(f); err != nil {
 			return flags{}, err
 		}
 		// Symmetric with iSCSI auto-enable per QA checkpoint-7
@@ -347,6 +352,23 @@ func enforceISCSIBindPolicy(f flags) error {
 	}
 	if isLocalhostOrLoopbackHost(host) {
 		return fmt.Errorf("--iscsi-listen %q is loopback; external iSCSI bind requires a non-loopback node address", f.iscsiListen)
+	}
+	return nil
+}
+
+func enforceNVMeBindPolicy(f flags) error {
+	if !f.allowExternalNVMeBind {
+		return enforceFrontendLoopbackBind("nvme", f.nvmeListen)
+	}
+	host, _, err := net.SplitHostPort(f.nvmeListen)
+	if err != nil {
+		return fmt.Errorf("--nvme-listen %q not host:port: %w", f.nvmeListen, err)
+	}
+	if host == "" {
+		return fmt.Errorf("--nvme-listen %q has empty host; external NVMe/TCP bind requires an explicit node address", f.nvmeListen)
+	}
+	if isLocalhostOrLoopbackHost(host) {
+		return fmt.Errorf("--nvme-listen %q is loopback; external NVMe/TCP bind requires a non-loopback node address", f.nvmeListen)
 	}
 	return nil
 }

@@ -25,6 +25,7 @@ type K8sRenderConfig struct {
 	OwnerReferenceToPVC bool
 	EnableStatus        bool
 	ExternalISCSI       bool
+	ExternalNVMe        bool
 	ExternalStatus      bool
 	ISCSICHAP           CHAPSecretRef
 }
@@ -75,8 +76,8 @@ func RenderBlockVolumeDeployments(plan lifecycle.BlockVolumeWorkloadPlan, cfg K8
 	if cfg.ExternalISCSI && cfg.ISCSICHAP.Name == "" {
 		return nil, fmt.Errorf("launcher: external iSCSI requires CHAP secret")
 	}
-	if cfg.ExternalStatus && !cfg.ExternalISCSI {
-		return nil, fmt.Errorf("launcher: external status requires external iSCSI mode")
+	if cfg.ExternalStatus && !cfg.ExternalISCSI && !cfg.ExternalNVMe {
+		return nil, fmt.Errorf("launcher: external status requires an external block frontend mode")
 	}
 	if cfg.MasterAddr == "" {
 		return nil, fmt.Errorf("launcher: master addr is required")
@@ -208,8 +209,17 @@ func blockVolumeArgs(plan lifecycle.BlockVolumeWorkloadPlan, replica lifecycle.B
 	}
 	switch plan.Protocol {
 	case "nvme":
+		nvmeListen := fmt.Sprintf("127.0.0.1:%d", replica.NVMeListenPort)
+		if cfg.ExternalNVMe {
+			host, err := hostFromAddr(replica.DataAddr)
+			if err != nil {
+				return nil, fmt.Errorf("launcher: external NVMe/TCP volume=%s replica=%s: %w", plan.VolumeID, replica.ReplicaID, err)
+			}
+			nvmeListen = fmt.Sprintf("%s:%d", host, replica.NVMeListenPort)
+			args = append(args, "--allow-external-nvme-bind")
+		}
 		args = append(args,
-			fmt.Sprintf("--nvme-listen=127.0.0.1:%d", replica.NVMeListenPort),
+			"--nvme-listen="+nvmeListen,
 			"--nvme-subsysnqn="+replica.NVMeSubsystemNQN,
 			fmt.Sprintf("--nvme-ns=%d", replica.NVMeNSID),
 		)

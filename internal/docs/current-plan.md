@@ -1,6 +1,11 @@
 # Current Plan: Phase 106 NVMe/TCP Cross-Node Non-Loopback Live Attach
 
-Status: planned next.
+Status: closed. D1/D2 publish-contract gate passed on
+2026-06-29 (`nvme-tcp-cross-node-publish-chain`, run
+`20260629-005939-14c1`, 18/18 PASS). D3 live cross-node writer/reader passed
+on 2026-06-29 (`nvme-tcp-cross-node-live-attach-chain`, run
+`20260629-021338-5089`, 31/31 PASS) with a separate strict cleanup audit
+returning `cleanup_status=ok`.
 
 ## Why This Is Next
 
@@ -40,11 +45,18 @@ Ensure NVMe frontend publication exposes a routable node address when the
 workload may run on a different node. Do not regress the same-node loopback lab
 path.
 
-Required local checks:
+Status: closed for the publish-contract slice. Implemented:
 
 ```text
-go test ./core/frontend/nvme ./core/ops ./cmd/blockvolume ./cmd/sw-block -count=1
+blockvolume default NVMe bind remains loopback-only
+--allow-external-nvme-bind is required for non-loopback NVMe/TCP
+blockmaster accepts --launcher-external-nvme
+launcher renders --allow-external-nvme-bind and non-loopback --nvme-listen
+Helm exposes network.externalNVMe and ports.nvmeBase
+generate-helm-values --protocol nvme emits externalNVMe, not externalISCSI/CHAP
 ```
+
+Verified by `scripts/run-phase106-nvme-tcp-cross-node-publish-gate.sh`.
 
 ## D2: CSI Publish / Stage Evidence
 
@@ -53,6 +65,10 @@ stage records the same NQN/NSID/address.
 
 No status surface may claim Ready if publish context and stage evidence
 disagree.
+
+Status: closed. The chart and values produce the intended non-loopback NVMe
+target configuration, and D3 proved the mounted cross-node workload sees the
+same routable NVMe target through the managed-volume report.
 
 ## D3: Live Cross-Node Writer / Reader Gate
 
@@ -76,6 +92,26 @@ nvme_target_loopback=false
 ready_true_allowed_only_after_reader=true
 ```
 
+Status: closed. Run `20260629-021338-5089` proved:
+
+```text
+phase106_nvme_tcp_cross_node_live_status=ok
+blockvolume_node=m01
+app_node=m02
+publish_target=192.168.1.181:4420
+publish_target_loopback=false
+protocol=nvme
+managed_volume_status=ready
+managed_volume_reason=first_volume_verified
+writer_verified=true
+reader_verified=true
+```
+
+The live scenario uses already-built local images when present to stay within
+the TestOps runner wall-clock budget. A strict cleanup audit was then run
+outside the scenario against the same lab teardown artifacts and returned all
+residue counts zero.
+
 ## D4: Negative Regression
 
 Keep the Phase 105 negative topology scenario in the suite:
@@ -88,6 +124,9 @@ status=blocked
 reason=publish_target_loopback_cross_node
 ready_true_count=0
 ```
+
+Status: covered by Phase 105 and retained as the negative counterpart. Phase
+106 did not weaken the loopback-cross-node block.
 
 ## Non-Claims
 

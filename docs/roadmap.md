@@ -96,8 +96,12 @@ Seaweed Block can already demonstrate a narrow Kubernetes block-storage loop:
 - NVMe/TCP CSI multipath attach is gated for the supported lab path; RoCE and
   NVMe/RDMA remain explicit non-claims until host preflight plus live I/O gates
   prove them.
-- Cross-node loopback NVMe/TCP topology is explicitly blocked. Cross-node
-  non-loopback NVMe/TCP attach remains the next live gate, not a shipped claim.
+- Cross-node loopback NVMe/TCP topology is explicitly blocked. The
+  non-loopback NVMe/TCP publish path is wired through blockvolume,
+  blockmaster, Helm, and generated values, and the supported lab path now has a
+  live cross-node writer/reader gate against a routable NVMe/TCP target. This
+  is still not a RoCE, performance/SLO, broad compatibility, or production HA
+  claim.
 - Install drift status for current versus desired chart/app/image identity
   without upgrade execution.
 - CRD/RBAC status-writer conformance coverage for the failures that previously
@@ -499,10 +503,14 @@ Recommended order from here:
     `publish_target_loopback_cross_node`, never emits false `Ready=True`, and
     surfaces the read-only `observe.inspect_publish_target_topology` action
     instead of an iSCSI remediation.
-64. Phase 106: NVMe/TCP Cross-Node Non-Loopback Live Attach. **Planned**
-    Prove the positive multi-host path with a routable NVMe/TCP target, CSI
-    publish/stage agreement, app writer/reader I/O, and zero residue. This still
-    excludes RoCE, performance/SLO, broad compatibility, and production HA.
+64. Phase 106: NVMe/TCP Cross-Node Non-Loopback Live Attach. **Closed
+    2026-06-29, live k3s PASS**
+    Proved the positive multi-host path with a routable NVMe/TCP target:
+    blockvolume on `m01`, workload on `m02`, publish target
+    `192.168.1.181:4420`, protocol `nvme`, managed-volume
+    `ready/first_volume_verified`, writer/reader verified, and strict cleanup
+    audit `cleanup_status=ok`. This still excludes RoCE, performance/SLO,
+    broad compatibility, and production HA.
 
 The internal release-train contract is
 `internal/docs/ref/operation-layer-v0.5-release-train.md`. Phases 41-44 close

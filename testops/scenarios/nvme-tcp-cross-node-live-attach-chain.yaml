@@ -1,0 +1,187 @@
+name: nvme-tcp-cross-node-live-attach-chain
+timeout: 45m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+  helm_release: "sw-block"
+  helm_namespace: "kube-system"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: pre_clean
+    actions:
+      - action: pre_run_cleanup
+        node: m02
+        kill_patterns: "blockmaster,blockvolume,blockcsi,iscsi-target"
+        nvme_disconnect: "true"
+        iscsi_logout_prefix: "iqn.2026-05.io.seaweedfs"
+      - action: exec
+        node: m02
+        timeout: 5m
+        cmd: "helm status {{ helm_release }} --namespace {{ helm_namespace }} >/dev/null 2>&1 && helm uninstall {{ helm_release }} --namespace {{ helm_namespace }} --wait --timeout 240s || true; kubectl -n default delete pod sw-block-example-reader sw-block-example-writer --ignore-not-found=true --wait=true --timeout=120s; kubectl -n default delete pvc sw-block-example-pvc --ignore-not-found=true --wait=true --timeout=120s; kubectl delete storageclass sw-block-example --ignore-not-found=true --wait=true --timeout=120s; sudo -n nvme disconnect-all >/dev/null 2>&1 || true; rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase106-nvme-live && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase106-nvme-live/bin /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase106-nvme-live/build /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase106-nvme-live/values /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase106-nvme-live/install /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase106-nvme-live/basic-app /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase106-nvme-live/asserts /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase106-nvme-live/cleanup"
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+
+  - name: build_and_import_images
+    actions:
+      - action: exec
+        node: m02
+        timeout: 10m
+        cmd: "cd {{ product_root }} && if docker image inspect sw-block:local sw-block-csi:local >/dev/null 2>&1; then mkdir -p \"$SW_BLOCK_ARTIFACT_DIR\"; echo \"SW_BLOCK_IMAGE_ID=$(docker image inspect sw-block:local --format '{{.Id}}')\" > \"$SW_BLOCK_ARTIFACT_DIR/alpha-images.env\"; echo \"SW_BLOCK_CSI_IMAGE_ID=$(docker image inspect sw-block-csi:local --format '{{.Id}}')\" >> \"$SW_BLOCK_ARTIFACT_DIR/alpha-images.env\"; echo cached_images=true >> \"$SW_BLOCK_ARTIFACT_DIR/alpha-images.env\"; else bash scripts/build-alpha-images.sh {{ product_root }}; fi"
+        env.SW_BLOCK_IMPORT_K3S: "1"
+        env.SW_BLOCK_IMPORT_K3S_NODES: "192.168.1.181"
+        env.SW_BLOCK_IMPORT_K3S_SSH_USER: "testdev"
+        env.SW_BLOCK_IMPORT_K3S_SSH_KEY: "{{ ssh_key }}"
+        env.SW_BLOCK_ARTIFACT_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase106-nvme-live/build"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase106-nvme-live/build/alpha-images.env"
+        pattern: "SW_BLOCK_IMAGE_ID="
+        save_as: image_id_count
+      - action: assert_greater
+        actual: "{{ image_id_count }}"
+        threshold: "0"
+
+  - name: generate_values
+    actions:
+      - action: exec
+        node: m02
+        timeout: 4m
+        cmd: "cd {{ product_root }} && go build -o /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase106-nvme-live/bin/sw-block ./cmd/sw-block && /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase106-nvme-live/bin/sw-block ops generate-helm-values --kubeconfig /etc/rancher/k3s/k3s.yaml --out /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase106-nvme-live/values/values.nvme.yaml --image sw-block:local --csi-image sw-block-csi:local --protocol nvme --node-limit 2 > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase106-nvme-live/values/generate.stdout.txt && python3 - <<'PY'\nfrom pathlib import Path\nbase=Path('/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase106-nvme-live')\nnodes=[]\ncur=None\nfor raw in (base/'values/values.nvme.yaml').read_text().splitlines():\n    line=raw.strip()\n    if line.startswith('- name:'):\n        if cur:\n            nodes.append(cur)\n        cur={}\n    if cur is None:\n        continue\n    if line.startswith('kubernetesNode:'):\n        cur['kubernetesNode']=line.split(':',1)[1].strip().strip('\"')\nif cur:\n    nodes.append(cur)\nif len(nodes) < 2:\n    raise SystemExit('need at least two generated nodes')\n(base/'values/blockvolume-node.txt').write_text(nodes[0]['kubernetesNode']+'\\n')\n(base/'values/app-node.txt').write_text(nodes[1]['kubernetesNode']+'\\n')\nPY"
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase106-nvme-live/values/generate.stdout.txt"
+        pattern: "^network_mode=external-nvme$"
+        save_as: external_nvme_count
+      - action: assert_greater
+        actual: "{{ external_nvme_count }}"
+        threshold: "0"
+
+  - name: helm_install_stack
+    actions:
+      - action: exec
+        node: m02
+        timeout: 12m
+        cmd: "cd {{ product_root }} && helm lint charts/seaweed-block -f /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase106-nvme-live/values/values.nvme.yaml > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase106-nvme-live/install/helm-lint.txt && helm template {{ helm_release }} charts/seaweed-block --namespace {{ helm_namespace }} -f /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase106-nvme-live/values/values.nvme.yaml > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase106-nvme-live/install/helm-template.yaml && grep -q -- '--launcher-external-nvme' /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase106-nvme-live/install/helm-template.yaml && ! grep -q -- '--launcher-external-iscsi' /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase106-nvme-live/install/helm-template.yaml && helm install {{ helm_release }} charts/seaweed-block --namespace {{ helm_namespace }} --create-namespace -f /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase106-nvme-live/values/values.nvme.yaml --wait --timeout 10m > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase106-nvme-live/install/helm-install.txt && kubectl -n {{ helm_namespace }} get deploy,ds,pods,svc -o wide > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase106-nvme-live/install/kube-system.after-install.txt"
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase106-nvme-live/install/helm-install.txt"
+        pattern: "STATUS: deployed"
+        save_as: helm_deployed_count
+      - action: assert_greater
+        actual: "{{ helm_deployed_count }}"
+        threshold: "0"
+
+  - name: first_volume_user_loop
+    actions:
+      - action: exec
+        node: m02
+        timeout: 10m
+        cmd: "set -e; APP_NODE=$(cat /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase106-nvme-live/values/app-node.txt); cd {{ product_root }} && SW_BLOCK_BASIC_APP_NODE_SELECTOR=\"$APP_NODE\" SW_BLOCK_BASIC_APP_PROTOCOL=nvme bash scripts/run-basic-app-example.sh {{ product_root }}"
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+        env.SW_BLOCK_ARTIFACT_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase106-nvme-live/basic-app"
+        env.SW_BLOCK_BASIC_APP_CLEANUP: "1"
+        env.SW_BLOCK_INSTALL_MODE: "helm"
+        env.SW_BLOCK_HELM_RELEASE: "{{ helm_release }}"
+        env.SW_BLOCK_HELM_NAMESPACE: "{{ helm_namespace }}"
+        env.SW_BLOCK_HELM_VALUES_FILE: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase106-nvme-live/values/values.nvme.yaml"
+
+  - name: live_asserts
+    actions:
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase106-nvme-live/basic-app/first-volume-summary.txt"
+        pattern: "^first_volume_status=ok$"
+        save_as: first_volume_ok
+      - action: assert_greater
+        actual: "{{ first_volume_ok }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase106-nvme-live/basic-app/first-volume-summary.txt"
+        pattern: "^app_protocol=nvme$"
+        save_as: app_protocol_nvme
+      - action: assert_greater
+        actual: "{{ app_protocol_nvme }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase106-nvme-live/basic-app/first-volume-summary.txt"
+        pattern: "^writer_verified=true$"
+        save_as: writer_verified
+      - action: assert_greater
+        actual: "{{ writer_verified }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase106-nvme-live/basic-app/first-volume-summary.txt"
+        pattern: "^reader_verified=true$"
+        save_as: reader_verified
+      - action: assert_greater
+        actual: "{{ reader_verified }}"
+        threshold: "0"
+      - action: exec
+        node: m02
+        timeout: 2m
+        cmd: "set -e; B=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase106-nvme-live; python3 - <<'PY'\nfrom pathlib import Path\nimport json\nbase=Path('/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase106-nvme-live')\nblock_node=(base/'values/blockvolume-node.txt').read_text().strip()\napp_node=(base/'values/app-node.txt').read_text().strip()\nsummary=(base/'basic-app/first-volume-summary.txt').read_text()\nreport=(base/'basic-app/status/report/summary.txt').read_text()\ncluster=json.load(open(base/'basic-app/status/cluster-evidence.json'))\nvols=cluster.get('volumes') or []\nif not vols:\n    raise SystemExit('no volumes in cluster evidence')\nvol=vols[0]\ntarget=vol.get('publish_target') or ''\nraw_status=vol.get('status') or ''\nif block_node == app_node:\n    raise SystemExit(f'not cross-node: {block_node}')\nif target.startswith('127.') or target.startswith('localhost'):\n    raise SystemExit(f'loopback target: {target}')\nif ':4420' not in target:\n    raise SystemExit(f'unexpected nvme target: {target}')\nif 'managed_volume=' not in report or ' status=ready reason=first_volume_verified' not in report:\n    raise SystemExit('managed-volume report did not surface ready/first_volume_verified')\nif 'managed_volume_nvme=' not in report or target not in report:\n    raise SystemExit('managed-volume NVMe report missing publish target')\ntext='\\n'.join([\n    'phase106_nvme_tcp_cross_node_live_status=ok',\n    f'blockvolume_node={block_node}',\n    f'app_node={app_node}',\n    f'publish_target={target}',\n    'publish_target_loopback=false',\n    'protocol=nvme',\n    f'raw_cluster_status={raw_status}',\n    'managed_volume_status=ready',\n    'managed_volume_reason=first_volume_verified',\n    'writer_verified=true' if 'writer_verified=true' in summary else 'writer_verified=false',\n    'reader_verified=true' if 'reader_verified=true' in summary else 'reader_verified=false',\n])+'\\n'\n(base/'asserts/phase106-live-summary.txt').write_text(text)\nPY"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase106-nvme-live/asserts/phase106-live-summary.txt"
+        pattern: "^phase106_nvme_tcp_cross_node_live_status=ok$"
+        save_as: live_ok
+      - action: assert_greater
+        actual: "{{ live_ok }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase106-nvme-live/asserts/phase106-live-summary.txt"
+        pattern: "^publish_target_loopback=false$"
+        save_as: non_loopback
+      - action: assert_greater
+        actual: "{{ non_loopback }}"
+        threshold: "0"
+
+  - name: helm_uninstall_cleanup
+    always: true
+    actions:
+      - action: exec
+        node: m02
+        timeout: 3m
+        cmd: "helm status {{ helm_release }} --namespace {{ helm_namespace }} >/dev/null 2>&1 && helm uninstall {{ helm_release }} --namespace {{ helm_namespace }} --wait --timeout 45s > /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase106-nvme-live/cleanup/helm-uninstall.txt || true"
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+      - action: exec
+        node: m02
+        timeout: 3m
+        cmd: "kubectl -n default delete pod sw-block-example-reader sw-block-example-writer --ignore-not-found=true --wait=true --timeout=45s || true; kubectl -n default delete pvc sw-block-example-pvc --ignore-not-found=true --wait=true --timeout=45s || true; kubectl delete storageclass sw-block-example --ignore-not-found=true --wait=true --timeout=45s || true"
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+      - action: exec
+        node: m02
+        timeout: 1m
+        cmd: "kubectl get pv --no-headers | awk '/sw-block-example/ {print $1}' | xargs -r -n1 kubectl patch pv --type=merge -p '{\"metadata\":{\"finalizers\":[]}}' >/dev/null 2>&1 || true; kubectl get pv --no-headers | awk '/sw-block-example/ {print $1}' | xargs -r kubectl delete pv --wait=false >/dev/null 2>&1 || true; sudo -n nvme disconnect-all >/dev/null 2>&1 || true"
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+      - action: exec
+        node: m02
+        timeout: 1m
+        cmd: "sleep 5; kubectl get pv --no-headers | awk '/sw-block-example/ {print $1}' | xargs -r -n1 kubectl patch pv --type=merge -p '{\"metadata\":{\"finalizers\":[]}}' >/dev/null 2>&1 || true; kubectl get pv --no-headers | awk '/sw-block-example/ {print $1}' | xargs -r kubectl delete pv --wait=false >/dev/null 2>&1 || true; sudo -n nvme disconnect-all >/dev/null 2>&1 || true"
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+      - action: exec
+        node: m02
+        timeout: 1m
+        cmd: "sleep 10; kubectl get pv --no-headers | awk '/sw-block-example/ {print $1}' | xargs -r -n1 kubectl patch pv --type=merge -p '{\"metadata\":{\"finalizers\":[]}}' >/dev/null 2>&1 || true; kubectl get pv --no-headers | awk '/sw-block-example/ {print $1}' | xargs -r kubectl delete pv --wait=false >/dev/null 2>&1 || true; sudo -n nvme disconnect-all >/dev/null 2>&1 || true"
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+  - name: collect
+    always: true
+    actions:
+      - action: collect_path
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase106-nvme-live"
+        name: "remote-phases"
+        ignore_error: true

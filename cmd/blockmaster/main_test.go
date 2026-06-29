@@ -145,6 +145,19 @@ func TestParseFlags_LauncherExternalISCSIRequiresCHAP(t *testing.T) {
 	}
 }
 
+func TestParseFlags_LauncherExternalNVMeOptional(t *testing.T) {
+	f, err := parseFlags([]string{
+		"--authority-store", "authority-dir",
+		"--launcher-external-nvme",
+	})
+	if err != nil {
+		t.Fatalf("parseFlags with external NVMe: %v", err)
+	}
+	if !f.launcherExternalNVMe {
+		t.Fatal("launcherExternalNVMe=false")
+	}
+}
+
 func TestBlockmasterBareTopologyRegistersVolumeControlServices(t *testing.T) {
 	h, err := master.New(master.Config{
 		AuthorityStoreDir: t.TempDir(),

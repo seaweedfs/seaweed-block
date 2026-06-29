@@ -1,8 +1,8 @@
 {{- if and .Values.network.externalISCSI (not .Values.chap.enabled) -}}
 {{- fail "network.externalISCSI=true requires chap.enabled=true so cross-node iSCSI is not published without CHAP credentials" -}}
 {{- end -}}
-{{- if and .Values.network.externalStatus (not .Values.network.externalISCSI) -}}
-{{- fail "network.externalStatus=true requires network.externalISCSI=true because external status is only supported with external block frontend publishing" -}}
+{{- if and .Values.network.externalStatus (not (or .Values.network.externalISCSI .Values.network.externalNVMe)) -}}
+{{- fail "network.externalStatus=true requires network.externalISCSI=true or network.externalNVMe=true because external status is only supported with external block frontend publishing" -}}
 {{- end -}}
 {{- if and (ne .Values.blockmaster.durableImpl "walstore") (not .Values.compat.launcherDurableImplFlag) -}}
 {{- fail "blockmaster.durableImpl requires compat.launcherDurableImplFlag=true because older published images do not accept --launcher-durable-impl" -}}
@@ -73,6 +73,7 @@ spec:
             - "--launcher-replication-ack={{ .Values.replication.ackProfile }}"
             {{- end }}
             - "--launcher-iscsi-port-base={{ .Values.ports.iscsiBase }}"
+            - "--launcher-nvme-port-base={{ .Values.ports.nvmeBase }}"
             {{- if .Values.blockmaster.launcherPVCOwnerRef }}
             - "--launcher-pvc-owner-ref"
             {{- end }}
@@ -84,6 +85,9 @@ spec:
             - "--launcher-iscsi-chap-secret-name={{ .Values.chap.secretName }}"
             - "--launcher-iscsi-chap-username-key={{ .Values.chap.usernameKey }}"
             - "--launcher-iscsi-chap-secret-key={{ .Values.chap.secretKey }}"
+            {{- end }}
+            {{- if .Values.network.externalNVMe }}
+            - "--launcher-external-nvme"
             {{- end }}
             {{- if .Values.network.externalStatus }}
             - "--launcher-external-status"

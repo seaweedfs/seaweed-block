@@ -18,6 +18,7 @@ HELM_VALUES_FILE="${SW_BLOCK_HELM_VALUES_FILE:-}"
 INSTALL_IMAGE="${SW_BLOCK_IMAGE:-}"
 INSTALL_CSI_IMAGE="${SW_BLOCK_CSI_IMAGE:-}"
 BASIC_APP_NODE_SELECTOR="${SW_BLOCK_BASIC_APP_NODE_SELECTOR:-}"
+BASIC_APP_PROTOCOL="${SW_BLOCK_BASIC_APP_PROTOCOL:-iscsi}"
 FIRST_VOLUME_STATUS="ok"
 FAILED_PHASE=""
 CLEANUP_STATUS="external_to_script"
@@ -97,6 +98,18 @@ render_example_manifest() {
   else
     cp "$input" "$output"
     log "node_stage_secret=none"
+  fi
+  if [[ "$BASIC_APP_PROTOCOL" == "nvme" ]]; then
+    awk '
+      /^parameters:[[:space:]]*$/ {
+        print
+        print "  sw-block.seaweedfs.com/protocol: \"nvme\""
+        print "  protocol: \"nvme\""
+        next
+      }
+      { print }
+    ' "$output" >"$output.tmp"
+    mv "$output.tmp" "$output"
   fi
   EXAMPLE_MANIFEST="$output"
 }
@@ -265,6 +278,7 @@ write_summary() {
       echo "csi_image_digest=$(summary_value "$(image_digest "$INSTALL_CSI_IMAGE")")"
     fi
     echo "app_node_selector=${BASIC_APP_NODE_SELECTOR:-none}"
+    echo "app_protocol=$BASIC_APP_PROTOCOL"
     echo "pvc=$PVC_NAME"
     echo "pvc_phase=${pvc_phase:-unknown}"
     echo "pv=${pv_name:-unknown}"
@@ -286,6 +300,10 @@ if [[ "$NAMESPACE" != "default" ]]; then
   echo "SW_BLOCK_APP_NAMESPACE=$NAMESPACE is not supported by the static basic-app manifests; use default" >&2
   exit 2
 fi
+if [[ "$BASIC_APP_PROTOCOL" != "iscsi" && "$BASIC_APP_PROTOCOL" != "nvme" ]]; then
+  echo "SW_BLOCK_BASIC_APP_PROTOCOL must be iscsi or nvme" >&2
+  exit 2
+fi
 if [[ -z "${SW_BLOCK_CLI:-}" ]] && ! command -v sw-block >/dev/null 2>&1; then
   require_cmd go
 fi
@@ -302,6 +320,7 @@ READER_MANIFEST="$ARTIFACT_DIR/reader-pod.rendered.yaml"
 render_pod_manifest "$EXAMPLE_DIR/writer-pod.yaml" "$WRITER_MANIFEST"
 render_pod_manifest "$EXAMPLE_DIR/reader-pod.yaml" "$READER_MANIFEST"
 log "app_node_selector=${BASIC_APP_NODE_SELECTOR:-none}"
+log "app_protocol=$BASIC_APP_PROTOCOL"
 log "apply StorageClass and PVC"
 kubectl apply -f "$EXAMPLE_MANIFEST" | tee "$ARTIFACT_DIR/apply-storageclass-pvc.log"
 kubectl -n "$NAMESPACE" wait --for=jsonpath='{.status.phase}'=Bound "pvc/${PVC_NAME}" --timeout=180s | tee "$ARTIFACT_DIR/wait-pvc-bound.log"
