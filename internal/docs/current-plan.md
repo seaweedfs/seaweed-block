@@ -1,9 +1,11 @@
 # Current Plan: Phase 106 NVMe/TCP Cross-Node Non-Loopback Live Attach
 
-Status: in progress. D1/D2 publish-contract gate passed on
+Status: closed. D1/D2 publish-contract gate passed on
 2026-06-29 (`nvme-tcp-cross-node-publish-chain`, run
-`20260629-005939-14c1`, 18/18 PASS). D3 live cross-node writer/reader remains
-open.
+`20260629-005939-14c1`, 18/18 PASS). D3 live cross-node writer/reader passed
+on 2026-06-29 (`nvme-tcp-cross-node-live-attach-chain`, run
+`20260629-021338-5089`, 31/31 PASS) with a separate strict cleanup audit
+returning `cleanup_status=ok`.
 
 ## Why This Is Next
 
@@ -64,10 +66,9 @@ stage records the same NQN/NSID/address.
 No status surface may claim Ready if publish context and stage evidence
 disagree.
 
-Status: partially closed for render/publish inputs only. The chart and values
-now produce the intended non-loopback NVMe target configuration. The live CSI
-publish/stage agreement remains part of D3 because it requires a mounted
-cross-node workload.
+Status: closed. The chart and values produce the intended non-loopback NVMe
+target configuration, and D3 proved the mounted cross-node workload sees the
+same routable NVMe target through the managed-volume report.
 
 ## D3: Live Cross-Node Writer / Reader Gate
 
@@ -91,6 +92,26 @@ nvme_target_loopback=false
 ready_true_allowed_only_after_reader=true
 ```
 
+Status: closed. Run `20260629-021338-5089` proved:
+
+```text
+phase106_nvme_tcp_cross_node_live_status=ok
+blockvolume_node=m01
+app_node=m02
+publish_target=192.168.1.181:4420
+publish_target_loopback=false
+protocol=nvme
+managed_volume_status=ready
+managed_volume_reason=first_volume_verified
+writer_verified=true
+reader_verified=true
+```
+
+The live scenario uses already-built local images when present to stay within
+the TestOps runner wall-clock budget. A strict cleanup audit was then run
+outside the scenario against the same lab teardown artifacts and returned all
+residue counts zero.
+
 ## D4: Negative Regression
 
 Keep the Phase 105 negative topology scenario in the suite:
@@ -103,6 +124,9 @@ status=blocked
 reason=publish_target_loopback_cross_node
 ready_true_count=0
 ```
+
+Status: covered by Phase 105 and retained as the negative counterpart. Phase
+106 did not weaken the loopback-cross-node block.
 
 ## Non-Claims
 
