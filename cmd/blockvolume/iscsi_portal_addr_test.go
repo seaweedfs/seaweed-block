@@ -29,6 +29,35 @@ func TestParseFlags_IscsiPortalAddrRequiresListen(t *testing.T) {
 	}
 }
 
+func TestParseFlags_NVMeTransportDefaultsTCP(t *testing.T) {
+	args := append(requiredBlockvolumeArgs(),
+		"--nvme-listen", "127.0.0.1:4420",
+		"--nvme-subsysnqn", "nqn.2026-05.io.seaweedfs:test-v1",
+	)
+	got, err := parseFlags(args)
+	if err != nil {
+		t.Fatalf("parseFlags: %v", err)
+	}
+	if got.nvmeTransport != "tcp" {
+		t.Fatalf("nvmeTransport=%q want tcp", got.nvmeTransport)
+	}
+}
+
+func TestParseFlags_NVMeTransportRejectsRDMA(t *testing.T) {
+	args := append(requiredBlockvolumeArgs(),
+		"--nvme-listen", "127.0.0.1:4420",
+		"--nvme-subsysnqn", "nqn.2026-05.io.seaweedfs:test-v1",
+		"--nvme-transport", "rdma",
+	)
+	_, err := parseFlags(args)
+	if err == nil {
+		t.Fatal("parseFlags succeeded; want rdma transport rejected")
+	}
+	if !strings.Contains(err.Error(), `--nvme-transport="rdma" unsupported`) {
+		t.Fatalf("error = %q, want unsupported transport", err)
+	}
+}
+
 func TestParseFlags_IscsiPortalAddrDoesNotChangeLoopbackBind(t *testing.T) {
 	args := append(requiredBlockvolumeArgs(),
 		"--iscsi-listen", "127.0.0.1:3260",

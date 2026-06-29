@@ -1,136 +1,94 @@
-# Current Plan: Phase 103 NVMe Multi-Host / RoCE Preflight
+# Current Plan: Phase 105 Multi-Host NVMe/TCP Topology Boundary
 
-Status: active plan.
+Status: planned next.
 
 ## Why This Is Next
 
-Phase 100 proved Kubernetes CSI NVMe/TCP multipath attach for the supported lab
-path. Phase 101 hardened that path with path-loss status, repeated
-stage/unstage cleanup, and bounded writer/reader soak. Phase 102 added a
-release-artifact smoke gate, but that gate remains blocked until matching
-published images exist.
+Phase 103 proved host transport preflight. Phase 104 proved the current product
+is explicitly NVMe/TCP-only and must not claim RoCE/NVMe-RDMA.
 
-The next storage-feature question is not performance yet. It is whether the
-product can tell an operator, from live host facts, what NVMe transport/topology
-is actually supportable:
+The next useful NVMe feature is therefore not RoCE and not performance. It is
+multi-host NVMe/TCP topology correctness:
 
 ```text
-NVMe/TCP multipath on current lab -> supported-lab path
-RoCE / NVMe-RDMA -> explicit preflight only until hardware + live I/O gate exist
-multi-host NVMe -> requires non-loopback, host-capability, and topology evidence
+NVMe/TCP frontend address must be non-loopback for cross-node attach
+CSI publish context must not hand a pod on node A a 127.0.0.1 target from node B
+status must block unsafe topology instead of claiming Ready=True
 ```
 
-Without this preflight, RoCE or multi-host NVMe claims would be another
-documentation-level promise instead of a product capability.
+This mirrors the earlier iSCSI loopback-cross-node blocker, but for NVMe/TCP.
 
 ## Product Goal
 
-Add a read-only transport preflight gate that classifies the current host:
+Add a topology boundary that distinguishes:
 
-- `nvme` CLI available;
-- NVMe subsystem inspection is readable;
-- `nvme-fabrics`, `nvme-tcp`, and `nvme-rdma` module loaded/available state;
-- RDMA device count from `/sys/class/infiniband`;
-- NVMe/TCP host capability;
-- RoCE preflight candidacy.
+- same-node loopback NVMe/TCP attach: allowed under the supported lab path;
+- cross-node loopback NVMe/TCP attach: blocked with a stable reason;
+- cross-node non-loopback NVMe/TCP attach: eligible for a future live gate.
 
-The gate must fail closed:
-
-- missing `nvme` CLI -> blocked, not product failure;
-- missing NVMe/TCP capability -> blocked, not product failure;
-- no RDMA device or no `nvme-rdma` capability -> not a RoCE candidate;
-- RDMA device plus `nvme-rdma` capability -> candidate only, still
-  `roce_claim_allowed=false` until a live RoCE I/O gate passes;
-- no RoCE live I/O or performance claim may be emitted.
-
-## D1: Gate Scaffold
-
-Status: implemented.
-
-Files:
+The intended reason code is:
 
 ```text
-scripts/run-phase103-nvme-multihost-roce-preflight-gate.sh
-testops/scenarios/nvme-multihost-roce-preflight-chain.yaml
+nvme_publish_target_loopback_cross_node
 ```
 
-The script is intentionally read-only. It reads command availability, `/proc`,
-`/sys/module`, `/lib/modules`, `/sys/class/infiniband`, and `nvme list-subsys`.
-It must not run `modprobe`, `nvme connect`, `nvme disconnect`, or any
-Kubernetes mutation.
+or a reused protocol-neutral reason if the existing model can carry it cleanly.
 
-## D2: Local Contract Validation
+## D1: Model / Reason Contract
 
-Required checks:
+Define how ManagedVolume facts represent an NVMe publish target whose address is
+loopback while the workload node differs from the blockvolume node.
+
+Required local checks:
 
 ```text
-bash -n scripts/run-phase103-nvme-multihost-roce-preflight-gate.sh
-C:\work\swblock.exe validate testops/scenarios/nvme-multihost-roce-preflight-chain.yaml
-go test ./scripts ./internal/testops ./core/frontend/nvme ./core/ops ./cmd/sw-block -count=1
+go test ./core/ops ./cmd/sw-block -count=1
 ```
 
-Success means the preflight is syntactically valid, scenario-runnable, and
-covered by a read-only/claim-bounded script regression.
+## D2: Report / Dashboard / Explain Agreement
 
-## D3: Live Host Preflight
+The blocked state must appear consistently in:
 
-Run on the NVMe-capable lab node:
+- summary.txt;
+- operator-snapshot.json;
+- dashboard `/operator-snapshot.json`;
+- `ops explain`;
+- CRD status if the operator-status path consumes the same evidence.
+
+No surface may show `Ready=True` for cross-node loopback NVMe/TCP.
+
+## D3: TestOps Scenario
+
+Add a scenario/gate that crafts or induces:
 
 ```text
-swblock run testops/scenarios/nvme-multihost-roce-preflight-chain.yaml
+protocol=nvme
+publish_target=127.0.0.1:<port>
+blockvolume_node=m02
+workload_node=m01
 ```
 
-Required PASS evidence:
+Expected evidence:
 
 ```text
-phase103_nvme_multihost_roce_preflight_status=ok
-read_only=true
-nvme_cli_present=true
-nvme_tcp_preflight_ready=true
-roce_live_io_claim=false
-performance_claim_allowed=false
+status=blocked
+reason=nvme_publish_target_loopback_cross_node
+ready_true_count=0
+safe action is observe/read_only or dry_run
 ```
 
-If the lab lacks RDMA hardware, the expected result is still PASS as long as it
-reports:
+## D4: Live Follow-up
 
-```text
-rdma_device_count=0
-roce_preflight_status=blocked_no_rdma_device
-roce_preflight_candidate=false
-roce_claim_allowed=false
-```
-
-If the lab has RDMA hardware and `nvme-rdma`, it may instead report:
-
-```text
-roce_preflight_status=candidate_requires_live_roce_gate
-roce_preflight_candidate=true
-roce_claim_allowed=false
-roce_live_io_claim=false
-```
-
-That is the correct product behavior: honest candidate status, not a released
-RoCE claim.
-
-## D4: Next Decision After Preflight
-
-Only after D3 should the team choose one of:
-
-- RoCE live I/O gate on hardware that has RDMA devices and `nvme-rdma`;
-- multi-host NVMe/TCP non-loopback topology gate;
-- NVMe performance characterization.
-
-These must stay separate because they prove different things: transport
-availability, topology correctness, and performance/SLO.
+If the lab can schedule a real pod on a different node while the NVMe frontend is
+loopback-bound, run the live negative gate. Otherwise close D3 as replay-only
+with a clear live follow-up, the same way earlier host-prereq gates handled
+environment-limited cases.
 
 ## Non-Claims
 
-Phase 103 does not claim:
+Phase 105 does not claim:
 
-- RoCE or NVMe/RDMA I/O works;
-- multi-host failover works;
-- performance, latency, throughput, or SLO;
-- broad distro/kernel compatibility;
-- production HA;
-- release-image validation for NVMe.
+- multi-host NVMe/TCP attach works;
+- RoCE/NVMe-RDMA works;
+- performance or SLO;
+- production HA.

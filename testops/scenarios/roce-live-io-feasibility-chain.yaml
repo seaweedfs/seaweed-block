@@ -1,0 +1,63 @@
+name: roce-live-io-feasibility-chain
+timeout: 15m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: preflight
+    actions:
+      - action: exec
+        node: m02
+        timeout: 10m
+        cmd: "rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase104-roce-feasibility && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase104-roce-feasibility && cd {{ product_root }} && bash scripts/run-phase104-roce-live-io-feasibility-gate.sh {{ product_root }}"
+        env.SW_BLOCK_ARTIFACT_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase104-roce-feasibility/gate"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase104-roce-feasibility/gate/phase104-roce-live-io-feasibility-summary.txt"
+        pattern: "^phase104_roce_live_io_status=ok$"
+        save_as: phase104_ok
+      - action: assert_greater
+        actual: "{{ phase104_ok }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase104-roce-feasibility/gate/phase104-roce-live-io-feasibility-summary.txt"
+        pattern: "^target_nvme_rdma_supported=false$"
+        save_as: rdma_unsupported
+      - action: assert_greater
+        actual: "{{ rdma_unsupported }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase104-roce-feasibility/gate/phase104-roce-live-io-feasibility-summary.txt"
+        pattern: "^phase104_roce_live_io_result=blocked_target_transport_unsupported$"
+        save_as: blocked_unsupported
+      - action: assert_greater
+        actual: "{{ blocked_unsupported }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase104-roce-feasibility/gate/phase104-roce-live-io-feasibility-summary.txt"
+        pattern: "^roce_claim_allowed=false$"
+        save_as: no_roce_claim
+      - action: assert_greater
+        actual: "{{ no_roce_claim }}"
+        threshold: "0"
+
+  - name: collect
+    always: true
+    actions:
+      - action: collect_path
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase104-roce-feasibility"
+        name: "remote-phases"
+        ignore_error: true
