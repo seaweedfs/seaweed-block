@@ -14,6 +14,7 @@ CSI_IMAGE="${SW_BLOCK_CSI_IMAGE:-sw-block-csi:local}"
 STATUS_PORT="${SW_BLOCK_MASTER_PORT_FORWARD_PORT:-29333}"
 MOUNTED_IO="${SW_BLOCK_NVME_MOUNTED_IO:-0}"
 MOUNTED_POD="${SW_BLOCK_NVME_MOUNTED_POD:-sw-block-phase112-mounted}"
+RESTORE_PATH="${SW_BLOCK_NVME_RESTORE_PATH:-0}"
 
 mkdir -p "${ARTIFACT_DIR}"/{bin,build,values,install,multi-volume,inject,surfaces,cleanup}
 : >"${SUMMARY}"
@@ -415,6 +416,77 @@ if "mutation_allowed=false" not in summary and '"mutation_allowed":false' not in
 ])+"\n")
 PY
 cat "${ARTIFACT_DIR}/nvme-k8s-path-loss-crd-asserts.txt" >>"${SUMMARY}"
+
+if [[ "${RESTORE_PATH}" == "1" || "${RESTORE_PATH}" == "true" ]]; then
+  echo "[phase111] restore removed NVMe path and verify mounted I/O"
+  kubectl -n "${APP_NAMESPACE}" scale "deploy/${TARGET_DEPLOY}" --replicas=1 >"${ARTIFACT_DIR}/inject/restore-target.txt"
+  kubectl -n "${APP_NAMESPACE}" rollout status "deploy/${TARGET_DEPLOY}" --timeout=240s >"${ARTIFACT_DIR}/inject/rollout-target-restore.txt" 2>&1
+
+  wait_for_crd_status "restored" "ready" "first_volume_verified" "2"
+  if [[ "${MOUNTED_IO}" == "1" || "${MOUNTED_IO}" == "true" ]]; then
+    MOUNTED_POD_UID_RESTORED="$(kubectl -n "${APP_NAMESPACE}" get pod "${MOUNTED_POD}" -o jsonpath='{.metadata.uid}')"
+    if [[ "${MOUNTED_POD_UID_RESTORED}" != "${MOUNTED_POD_UID_BEFORE}" ]]; then
+      echo "mounted pod UID changed after restore: before=${MOUNTED_POD_UID_BEFORE} restored=${MOUNTED_POD_UID_RESTORED}" >&2
+      exit 1
+    fi
+    kubectl -n "${APP_NAMESPACE}" exec "${MOUNTED_POD}" -- sh -c 'set -eu; echo after-restore >> /data/phase112-mounted.txt; sync; grep before-path-loss /data/phase112-mounted.txt; grep after-path-loss /data/phase112-mounted.txt; grep after-restore /data/phase112-mounted.txt' >"${ARTIFACT_DIR}/inject/mounted-after-restore.log"
+    write_summary "mounted_pod_uid_after_restore=${MOUNTED_POD_UID_RESTORED}"
+    write_summary "mounted_pod_uid_preserved_after_restore=true"
+    write_summary "mounted_io_after_restore=ok"
+  fi
+
+  with_master_port_forward "${ARTIFACT_DIR}/surfaces/restore-blockmaster-port-forward.log" \
+    "${ARTIFACT_DIR}/bin/sw-block" ops report \
+      --master-api "127.0.0.1:${STATUS_PORT}" \
+      --namespace "${APP_NAMESPACE}" \
+      --out "${ARTIFACT_DIR}/surfaces/restore-report" \
+      --timeout 30s >"${ARTIFACT_DIR}/surfaces/restore-report.stdout.txt" 2>"${ARTIFACT_DIR}/surfaces/restore-report.stderr.txt"
+
+  "${ARTIFACT_DIR}/bin/sw-block" ops explain volume \
+    --from-bundle "${ARTIFACT_DIR}/surfaces/restore-report" \
+    "${VOLUME_ID}" >"${ARTIFACT_DIR}/surfaces/restore-explain.txt" 2>"${ARTIFACT_DIR}/surfaces/restore-explain.stderr.txt"
+
+  python3 - "${ARTIFACT_DIR}" "${VOLUME_ID}" <<'PY'
+import json, sys
+from pathlib import Path
+base=Path(sys.argv[1])
+volume_id=sys.argv[2]
+crd=json.load(open(base/"surfaces/swblockvolumes.restored.json"))
+item=crd["items"][0]
+st=item["status"]
+nv=st.get("nvme") or {}
+summary=(base/"surfaces/restore-report/summary.txt").read_text()
+snapshot=json.load(open(base/"surfaces/restore-report/operator-snapshot.json"))
+explain=(base/"surfaces/restore-explain.txt").read_text()
+if st.get("status") != "ready" or st.get("reasonCode") != "first_volume_verified":
+    raise SystemExit(f"restored CRD mismatch: {st}")
+if nv.get("pathCount") != 2:
+    raise SystemExit(f"restored CRD path count mismatch: {nv}")
+if f"managed_volume={volume_id} status=ready reason=first_volume_verified" not in summary:
+    raise SystemExit("restore report summary missing ready/first_volume_verified")
+if f"managed_volume_nvme={volume_id}" not in summary or "path_count=2" not in summary:
+    raise SystemExit("restore report missing nvme path_count=2")
+vols=snapshot.get("volumes") or []
+if len(vols) != 1:
+    raise SystemExit(f"restore snapshot volume count={len(vols)}")
+s=vols[0].get("status") or {}
+n=s.get("nvme") or {}
+if s.get("status") != "ready" or s.get("reason_code") != "first_volume_verified":
+    raise SystemExit(f"restore snapshot mismatch: {s}")
+if n.get("path_count") != 2:
+    raise SystemExit(f"restore snapshot nvme mismatch: {n}")
+if "status=ready reason=first_volume_verified" not in explain:
+    raise SystemExit("restore explain missing ready/first_volume_verified")
+(base/"nvme-k8s-path-restore-asserts.txt").write_text("\n".join([
+    "restored_path_count=2",
+    "restore_crd_reason=first_volume_verified",
+    "restore_report_reason=first_volume_verified",
+    "restore_operator_snapshot_reason=first_volume_verified",
+    "restore_explain_reason=first_volume_verified",
+])+"\n")
+PY
+  cat "${ARTIFACT_DIR}/nvme-k8s-path-restore-asserts.txt" >>"${SUMMARY}"
+fi
 
 cleanup
 verify_rc=0

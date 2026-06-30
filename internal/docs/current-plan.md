@@ -1,29 +1,28 @@
-# Current Plan: Phase 112 NVMe/TCP K8s Mounted Path-Loss I/O
+# Current Plan: Phase 113 NVMe/TCP K8s Mounted Path Restore
 
 Status: closed.
 
-QA run `20260629-221637-4193` passed 21/21 actions. Sign-off:
-`internal/docs/qa-assignments/phase112-nvme-k8s-mounted-path-loss-io-qa-signoff.md`.
+QA run `20260629-223946-7799` passed 29/29 actions. Sign-off:
+`internal/docs/qa-assignments/phase113-nvme-k8s-mounted-path-restore-qa-signoff.md`.
 
 ## Why This Was Next
 
-Phase 111 closed the live Kubernetes CRD/status non-claim for NVMe/TCP
-one-path loss: a real RF=2 PVC could lose one generated blockvolume path and
-all read-only surfaces would report `blocked/nvme_multipath_path_missing`
-without false `Ready=True`.
+Phase 112 proved the mounted workload survives one observed NVMe/TCP path loss:
+the same pod kept running and wrote/read through the remaining path while
+status honestly reported `blocked/nvme_multipath_path_missing`.
 
-That still left one user-visible non-claim: Phase 111 did not prove that an
-already-mounted workload can continue I/O through the remaining NVMe path. A
-status-only proof is not enough for a storage feature if it does not also prove
-the mounted data path survives the tested fault.
+That still left the other half of the operational loop: if the removed
+blockvolume path comes back, the system must converge back to the healthy
+two-path status without recreating the workload or losing mounted I/O.
 
-Phase 112 closes that gap for the supported lab path.
+Phase 113 closes that restoration gap for the supported lab path.
 
 ## Product Goal
 
 Prove that a mounted Kubernetes workload on an RF=2 NVMe/TCP PVC can continue
-write/read I/O after one observed NVMe path is removed, while the control plane
-still reports the degraded volume honestly as non-ready.
+I/O through path loss and then continue I/O after the removed path is restored,
+while the control plane moves from healthy -> degraded -> healthy with the
+correct reasons.
 
 Required behavior:
 
@@ -34,12 +33,14 @@ Required behavior:
 - wait for `SwBlockVolume.status.nvme.pathCount=2` and
   `Ready=True/first_volume_verified`;
 - scale one generated `sw-blockvolume` deployment to zero;
-- verify the mounted pod UID is unchanged;
-- write/read through the same mounted pod after path loss;
+- verify the mounted pod UID is unchanged and mounted I/O still works;
 - wait for `SwBlockVolume.status.nvme.pathCount=1` and
   `blocked/nvme_multipath_path_missing`;
-- prove report, operator-snapshot, dashboard, and explain agree with the CRD;
-- prove no volume surface claims `Ready=True`;
+- scale the target deployment back to one replica;
+- verify the mounted pod UID is still unchanged and mounted I/O still works;
+- wait for `SwBlockVolume.status.nvme.pathCount=2` and
+  `Ready=True/first_volume_verified`;
+- prove report, operator-snapshot, and explain agree with the restored CRD;
 - cleanup leaves zero Kubernetes/NVMe/iSCSI/process/multipath/hostPath residue.
 
 ## Gate
@@ -47,52 +48,55 @@ Required behavior:
 Scenario:
 
 ```text
-testops/scenarios/nvme-tcp-k8s-mounted-path-loss-io-chain.yaml
+testops/scenarios/nvme-tcp-k8s-mounted-path-restore-chain.yaml
 ```
 
 Gate script:
 
 ```text
-scripts/run-phase112-nvme-k8s-mounted-path-loss-io-gate.sh
+scripts/run-phase113-nvme-k8s-mounted-path-restore-gate.sh
 ```
 
-The Phase 112 wrapper reuses the Phase 111 path-loss gate with mounted-I/O mode
-enabled.
+The Phase 113 wrapper reuses the Phase 111 path-loss gate with mounted-I/O and
+path-restore modes enabled.
 
 Terminal evidence:
 
 ```text
-phase112_nvme_k8s_mounted_path_loss_io_status=ok
+phase113_nvme_k8s_mounted_path_restore_status=ok
 mounted_pod_uid_preserved=true
 mounted_io_after_path_loss=ok
-before_path_count=2
 after_path_count=1
 crd_reason=nvme_multipath_path_missing
-report_reason=nvme_multipath_path_missing
-operator_snapshot_reason=nvme_multipath_path_missing
-dashboard_reason=nvme_multipath_path_missing
-explain_reason=nvme_multipath_path_missing
 surface_ready_true_count=0
-mutation_allowed=false
+mounted_pod_uid_preserved_after_restore=true
+mounted_io_after_restore=ok
+restored_path_count=2
+restore_crd_reason=first_volume_verified
+restore_report_reason=first_volume_verified
+restore_operator_snapshot_reason=first_volume_verified
+restore_explain_reason=first_volume_verified
 cleanup_status=ok
 ```
 
 ## Result
 
-Phase 112 passed on live k3s. The mounted pod kept the same UID and wrote/read
-after one generated blockvolume path was removed. The authoritative CRD and all
-read-only support surfaces reported `blocked/nvme_multipath_path_missing` with
-one observed path and no false volume `Ready=True`. Cleanup was verified clean.
+Phase 113 passed on live k3s. The mounted pod kept the same UID, wrote/read
+before path loss, wrote/read during one-path loss, and wrote/read after the
+target deployment was restored. The authoritative CRD and read-only support
+surfaces returned to `Ready=True/first_volume_verified` with two observed NVMe
+paths. Cleanup was verified clean.
 
 ## Non-Claims
 
-Phase 112 does not claim:
+Phase 113 does not claim:
 
 - RoCE/NVMe-RDMA;
 - performance or SLO;
 - broad distro/kernel compatibility;
 - production HA;
-- automatic rebuild or path restoration;
+- arbitrary path churn;
+- automatic rebuild;
 - every possible NVMe path failure mode;
-- more than the supported lab Kubernetes NVMe/TCP mounted workload behavior
-  under one observed path loss.
+- more than the supported lab Kubernetes NVMe/TCP mounted workload behavior for
+  one removed path and its restoration.
