@@ -73,9 +73,10 @@ This is an **alpha** product path for supported lab clusters, not production.
 - From source, run the supported-lab NVMe/TCP gates: ANA/direct-host baseline,
   CSI protocol selection, Kubernetes CSI multipath attach for one NQN/NSID with
   multiple NVMe frontend paths, one-path-loss status honesty, mounted pod
-  write/read after one observed path loss, repeated stage/unstage residue
-  checks, and a bounded writer/reader soak. This is a lab gate, not a broad
-  NVMe compatibility or performance claim.
+  write/read after one observed path loss, mounted pod write/read after the
+  removed path is restored, repeated stage/unstage residue checks, and a
+  bounded writer/reader soak. This is a lab gate, not a broad NVMe
+  compatibility or performance claim.
 - Replay support bundles offline.
 
 These are narrow alpha claims tied to documented gates. See

@@ -76,7 +76,9 @@ The source-gated NVMe/TCP path now has Kubernetes CSI evidence for:
 - one observed path loss projected as
   `blocked/nvme_multipath_path_missing`, never false `Ready=True`;
 - an already-mounted pod that keeps the same pod UID and writes/reads after one
-  observed path is removed.
+  observed path is removed;
+- restoration of the removed path, with the same mounted pod writing/reading
+  again and status converging back to `Ready=True/first_volume_verified`.
 
 This is a supported-lab NVMe/TCP claim only. It is not a RoCE/NVMe-RDMA claim,
 not a performance/SLO claim, and not a broad distro/kernel compatibility

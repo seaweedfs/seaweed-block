@@ -567,6 +567,14 @@ Recommended order from here:
     remaining NVMe path, and the CRD/report/operator-snapshot/dashboard/explain
     surfaces still report `blocked/nvme_multipath_path_missing` with no false
     volume `Ready=True`, `mutation_allowed=false`, and zero cleanup residue.
+71. Phase 113: NVMe/TCP K8s Mounted Path Restore. **Closed 2026-06-29,
+    runner PASS**
+    Closed the matching restoration loop for the supported-lab path. After the
+    Phase 112 one-path-loss state, the removed blockvolume deployment is scaled
+    back to one replica. The same mounted pod UID survives, the pod writes and
+    reads after restore, and `SwBlockVolume.status`, report,
+    operator-snapshot, and explain converge back to two observed NVMe paths and
+    `Ready=True/first_volume_verified`, with zero cleanup residue.
 
 The internal release-train contract is
 `internal/docs/ref/operation-layer-v0.5-release-train.md`. Phases 41-44 close

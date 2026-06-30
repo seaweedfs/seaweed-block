@@ -296,6 +296,11 @@ rebuild, delete safety, or cleanup must start as a separate gated phase.
   and the CRD/report/operator-snapshot/dashboard/explain surfaces still report
   `blocked/nvme_multipath_path_missing` with no false volume `Ready=True` and
   zero cleanup residue.
+- Phase 113 NVMe/TCP K8s Mounted Path Restore is closed. The supported-lab path
+  now restores the removed blockvolume deployment after one-path loss, keeps the
+  same mounted pod alive, proves post-restore write/read I/O, and converges the
+  CRD/report/operator-snapshot/explain surfaces back to two observed NVMe paths
+  and `Ready=True/first_volume_verified`.
 - Later protocol candidates: implement a real NVMe/RDMA target or characterize
   NVMe/TCP performance. Keep these separate so correctness, transport, and
   performance claims do not get mixed.
