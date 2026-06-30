@@ -78,11 +78,18 @@ The source-gated NVMe/TCP path now has Kubernetes CSI evidence for:
 - an already-mounted pod that keeps the same pod UID and writes/reads after one
   observed path is removed;
 - restoration of the removed path, with the same mounted pod writing/reading
-  again and status converging back to `Ready=True/first_volume_verified`.
+  again and status converging back to `Ready=True/first_volume_verified`;
+- two mounted RF=2 PVCs staying isolated when one volume loses and restores a
+  path;
+- bounded path churn across two mounted RF=2 PVCs: three alternating
+  loss/restore cycles preserve pod identity, write/read I/O, reason-code
+  isolation, publish-target isolation, two-path restoration, and cleanup
+  hygiene.
 
 This is a supported-lab NVMe/TCP claim only. It is not a RoCE/NVMe-RDMA claim,
 not a performance/SLO claim, and not a broad distro/kernel compatibility
-matrix.
+matrix. Public image claims still require matching `seaweed-block` and
+`seaweed-block-csi` images to pass the NVMe release smoke.
 
 ### Recovery And Failover Gates
 

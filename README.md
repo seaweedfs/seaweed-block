@@ -36,7 +36,7 @@ This is an **alpha** product path for supported lab clusters, not production.
 | Actionable read-only CRD status + Events | Available | Bounded SwBlockVolume finalizer lifecycle | Beta candidate |
 | Returned-replica ACK eligibility executor | Beta candidate | Returned-replica failback runtime | Source-gated |
 | Returned-replica rebuild traffic | Planned | Frontend publication after failback | Planned |
-| NVMe/TCP CSI multipath + mounted path-loss lab path | Gated | Backup/snapshot/restore | Planned |
+| NVMe/TCP CSI multipath + mounted churn supported-lab path | Source-gated | Backup/snapshot/restore | Planned |
 | Production SLO/performance claims | Not claimed | Hosted production UI | Not claimed |
 
 ## What You Can Do Today
@@ -74,9 +74,10 @@ This is an **alpha** product path for supported lab clusters, not production.
   CSI protocol selection, Kubernetes CSI multipath attach for one NQN/NSID with
   multiple NVMe frontend paths, one-path-loss status honesty, mounted pod
   write/read after one observed path loss, mounted pod write/read after the
-  removed path is restored, repeated stage/unstage residue checks, and a
-  bounded writer/reader soak. This is a lab gate, not a broad NVMe
-  compatibility or performance claim.
+  removed path is restored, multi-volume mounted path isolation, bounded
+  multi-volume path churn, repeated stage/unstage residue checks, and a bounded
+  writer/reader soak. This is a supported-lab source-gated claim, not a broad
+  NVMe compatibility, RoCE, production HA, or performance claim.
 - Replay support bundles offline.
 
 These are narrow alpha claims tied to documented gates. See
@@ -148,7 +149,9 @@ The v0.6 returned-replica ACK eligibility executor path likewise requires
 matching images published from the Phase 54 release commit and must be validated
 with the release smoke before it is marked shipped.
 The returned-replica failback runtime added after v0.6 is source-gated and
-requires a future release smoke before it becomes a public image claim.
+requires a future release smoke before it becomes a public image claim. The
+NVMe/TCP supported-lab path is also source-gated until matching `seaweed-block`
+and `seaweed-block-csi` images are published and pass the NVMe release smoke.
 
 Mutable `:alpha` is a smoke/demo tag only; it can drift from the source tree.
 
@@ -208,6 +211,8 @@ hostPath residue.
 - [Kubernetes quickstart](docs/quickstart-kubernetes.md) - first install and PVC.
 - [User capabilities](docs/user-capabilities.md) - detailed current behavior.
 - [Release notes](docs/releases/README.md) - exact validated claims and evidence.
+- [NVMe/TCP supported-lab claim](docs/releases/nvme-tcp-supported-lab.md) -
+  source-gated NVMe evidence, release-smoke boundary, and non-claims.
 - [Roadmap](docs/roadmap.md) - public planning summary.
 - [Architecture](docs/architecture.md), [developer architecture](docs/developer-architecture.md),
   and [runtime state machines](docs/runtime-state-machines.md) - engineering

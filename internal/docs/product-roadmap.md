@@ -314,10 +314,13 @@ rebuild, delete safety, or cleanup must start as a separate gated phase.
   alternating path loss/restore across both mounted volumes for three cycles,
   while preserving pod identity, I/O, reason-code isolation, publish-target
   isolation, two-path restoration, and cleanup hygiene.
-- Phase 116 should package the closed Phase 100-115 evidence into a
-  user-facing supported-lab NVMe/TCP release claim: README/docs wording,
-  feature/status matrix, explicit non-claims, and pinned-image release-smoke
-  instructions for matching `seaweed-block` and `seaweed-block-csi` images.
+- Phase 116 packaged the closed Phase 100-115 evidence into a user-facing
+  supported-lab NVMe/TCP release claim: README/docs wording, feature/status
+  matrix, explicit non-claims, and pinned-image release-smoke instructions for
+  matching `seaweed-block` and `seaweed-block-csi` images.
+- Phase 117 should run that pinned-image smoke when matching images exist. If
+  images are not published, the result is artifact-blocked rather than a
+  product failure.
 - Later protocol candidates: implement a real NVMe/RDMA target or characterize
   NVMe/TCP performance. Keep these separate so correctness, transport, and
   performance claims do not get mixed.

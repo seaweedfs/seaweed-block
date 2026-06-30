@@ -593,13 +593,19 @@ Recommended order from here:
     RF=2 NVMe/TCP PVCs for multiple cycles, preserving mounted pod identity,
     writer/reader I/O, volume identity, publish-target isolation, reason-code
     isolation, two-path restoration, and zero cleanup residue.
-74. Phase 116: NVMe/TCP Supported-Lab Release Claim Packaging. **Active,
-    planned**
+74. Phase 116: NVMe/TCP Supported-Lab Release Claim Packaging. **Closed
+    2026-06-30, docs PASS**
     Convert the closed Phase 100-115 evidence into a user-facing supported-lab
     claim: README/docs wording, feature/status matrix, release non-claims, and
     a concise release-smoke plan that uses matching published
     `seaweed-block`/`seaweed-block-csi` images when available. This is a
     packaging and claim-boundary phase, not a new transport feature.
+75. Phase 117: NVMe/TCP Published-Image Release Smoke. **Active, planned**
+    Run the representative NVMe/TCP supported-lab smoke against matching
+    published `seaweed-block` and `seaweed-block-csi` images. If images are not
+    available, this phase blocks as artifact-readiness, not as product failure.
+    Do not mark the NVMe/TCP path as a published-image release claim until this
+    smoke passes.
 
 The internal release-train contract is
 `internal/docs/ref/operation-layer-v0.5-release-train.md`. Phases 41-44 close
