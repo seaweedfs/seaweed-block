@@ -586,13 +586,20 @@ Recommended order from here:
     no cross-volume reason mix-up. After the removed deployment is restored,
     both volumes return to `Ready=True/first_volume_verified` with two live
     host paths and mounted I/O still works, with zero cleanup residue.
-73. Phase 115: NVMe/TCP Mounted Multi-Volume Path Churn Soak. **Active,
-    planned**
+73. Phase 115: NVMe/TCP Mounted Multi-Volume Path Churn Soak. **Closed
+    2026-06-30, runner PASS**
     Extends Phase 114 from a one-shot multi-volume loss/restore proof to a
     bounded churn proof: alternate path loss and restore across two mounted
     RF=2 NVMe/TCP PVCs for multiple cycles, preserving mounted pod identity,
     writer/reader I/O, volume identity, publish-target isolation, reason-code
     isolation, two-path restoration, and zero cleanup residue.
+74. Phase 116: NVMe/TCP Supported-Lab Release Claim Packaging. **Active,
+    planned**
+    Convert the closed Phase 100-115 evidence into a user-facing supported-lab
+    claim: README/docs wording, feature/status matrix, release non-claims, and
+    a concise release-smoke plan that uses matching published
+    `seaweed-block`/`seaweed-block-csi` images when available. This is a
+    packaging and claim-boundary phase, not a new transport feature.
 
 The internal release-train contract is
 `internal/docs/ref/operation-layer-v0.5-release-train.md`. Phases 41-44 close

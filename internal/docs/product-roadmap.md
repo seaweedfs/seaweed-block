@@ -309,11 +309,15 @@ rebuild, delete safety, or cleanup must start as a separate gated phase.
   `ready/first_volume_verified` with two live host paths, both mounted pods keep
   their UIDs and continue I/O, both volumes restore to two live host paths, and
   final cleanup returns zero residue.
-- Phase 115 NVMe/TCP Mounted Multi-Volume Path Churn Soak is next. It should
-  turn the Phase 114 one-shot proof into a bounded repeated-transition proof by
-  alternating path loss/restore across both mounted volumes for multiple cycles,
+- Phase 115 NVMe/TCP Mounted Multi-Volume Path Churn Soak is closed. It turned
+  the Phase 114 one-shot proof into a bounded repeated-transition proof by
+  alternating path loss/restore across both mounted volumes for three cycles,
   while preserving pod identity, I/O, reason-code isolation, publish-target
-  isolation, and cleanup hygiene.
+  isolation, two-path restoration, and cleanup hygiene.
+- Phase 116 should package the closed Phase 100-115 evidence into a
+  user-facing supported-lab NVMe/TCP release claim: README/docs wording,
+  feature/status matrix, explicit non-claims, and pinned-image release-smoke
+  instructions for matching `seaweed-block` and `seaweed-block-csi` images.
 - Later protocol candidates: implement a real NVMe/RDMA target or characterize
   NVMe/TCP performance. Keep these separate so correctness, transport, and
   performance claims do not get mixed.
