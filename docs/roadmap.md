@@ -548,6 +548,16 @@ Recommended order from here:
     `multipath_observed=false`, `mutation_allowed=false`, and zero false
     `Ready=True`. This is support-surface replay of real standalone path-loss
     evidence, not a live Kubernetes CRD negative-path-loss claim.
+69. Phase 111: NVMe/TCP K8s Path-Loss CRD Honesty. **Closed 2026-06-29,
+    runner PASS**
+    Closed the Phase 110 non-claim in the live Kubernetes path. A real RF=2
+    NVMe/TCP PVC first reached `SwBlockVolume.status.nvme.pathCount=2` and
+    `Ready=True/first_volume_verified`; then one generated blockvolume
+    deployment was scaled to zero, reducing the observed NVMe path count to one.
+    `SwBlockVolume.status`, report summary, report `operator-snapshot.json`,
+    dashboard `/operator-snapshot.json`, and `ops explain` all converged on
+    `blocked/nvme_multipath_path_missing` with no false volume `Ready=True`,
+    `mutation_allowed=false`, and zero cleanup residue.
 
 The internal release-train contract is
 `internal/docs/ref/operation-layer-v0.5-release-train.md`. Phases 41-44 close
