@@ -283,6 +283,13 @@ rebuild, delete safety, or cleanup must start as a separate gated phase.
   `multipath_observed=false`, read-only actions, and no false `Ready=True`.
   This deliberately remains a support-surface replay gate, not a live
   Kubernetes CRD negative-path-loss claim.
+- Phase 111 NVMe/TCP K8s Path-Loss CRD Honesty is closed. The supported-lab
+  Kubernetes path now proves the same negative behavior through the authoritative
+  CRD: one RF=2 NVMe/TCP PVC starts with two observed paths and
+  `Ready=True/first_volume_verified`; scaling one generated blockvolume
+  deployment to zero reduces the path count to one, and `SwBlockVolume.status`,
+  report, operator-snapshot, dashboard, and explain all report
+  `blocked/nvme_multipath_path_missing` with no false volume `Ready=True`.
 - Later protocol candidates: implement a real NVMe/RDMA target or characterize
   NVMe/TCP performance. Keep these separate so correctness, transport, and
   performance claims do not get mixed.

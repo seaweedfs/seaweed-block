@@ -1,112 +1,89 @@
-# Current Plan: Phase 110 NVMe/TCP Path-Loss Status Surface Honesty
+# Current Plan: Phase 111 NVMe/TCP K8s Path-Loss CRD Honesty
 
 Status: closed.
 
-QA run `20260629-210857-5c3b` passed 23/23 actions. Sign-off:
-`internal/docs/qa-assignments/phase110-nvme-tcp-path-loss-status-surface-qa-signoff.md`.
+QA run `20260629-213354-02a1` passed 19/19 actions. Sign-off:
+`internal/docs/qa-assignments/phase111-nvme-k8s-path-loss-crd-qa-signoff.md`.
 
 ## Why This Is Next
 
-Phase 109 proved healthy NVMe/TCP identity across CRD, report,
-operator-snapshot, dashboard, and explain. Phase 101 already proved the live
-standalone one-path-loss behavior: a mounted NVMe/TCP workload survives losing
-one path, and the product must not claim `Ready=True` while only one of the
-expected two paths remains.
+Phase 110 deliberately stopped at support-surface replay of real standalone
+path-loss evidence. That was useful, but it left one important non-claim:
+Kubernetes `SwBlockVolume.status` had not yet been proven to turn a live RF=2
+NVMe/TCP path loss into a non-ready CRD status.
 
-The remaining risk is negative visibility. A transport can detect path loss but
-still be operationally unsafe if support surfaces replay stale or over-optimistic
-state. Phase 110 turns the real Phase 101 path-loss evidence into a support
-bundle and proves every user-facing cold-reader surface preserves the same
-non-ready reason.
+Phase 111 closes that gap. It starts from the real Kubernetes CSI path, creates
+one RF=2 NVMe/TCP PVC, verifies the healthy two-path CRD state, then removes one
+launcher-managed blockvolume path by scaling one generated deployment to zero.
+The launcher reconciler explicitly preserves an operator-scaled-zero deployment,
+so this is a stable and product-representative path-loss injection rather than a
+race against the reconciler.
 
 ## Product Goal
 
-Prove that real NVMe/TCP one-path-loss evidence replays as
-`blocked/nvme_multipath_path_missing` across report, operator-snapshot,
-dashboard, and explain, with no false `Ready=True` and no mutating action.
+Prove that live Kubernetes NVMe/TCP path loss projects to
+`SwBlockVolume.status` and every read-only support surface as
+`blocked/nvme_multipath_path_missing`, with no false `Ready=True` and no
+mutating action.
 
 Required behavior:
 
-- run the existing live mounted NVMe/TCP failover/path-loss script;
-- confirm live source evidence starts with two paths and ends with one path;
-- confirm live source reason is `nvme_multipath_path_missing`;
-- normalize `cluster-after-failover.json` into
-  `product-observation/cluster-evidence.json`;
-- replay with `sw-block ops report --from-bundle`;
-- replay with `sw-block ops dashboard --from-bundle`;
-- replay with `sw-block ops explain volume --from-bundle`;
-- prove all surfaces agree on `blocked/nvme_multipath_path_missing`;
-- prove `Ready=True` is absent everywhere;
-- cleanup leaves zero NVMe residue.
+- install Helm with two ready nodes, `protocol=nvme`, operator-status enabled,
+  lifecycle-owner enabled, and RF=2;
+- create one PVC through CSI and verify writer/reader data path;
+- wait for `SwBlockVolume.status.nvme.pathCount=2` and
+  `Ready=True/first_volume_verified`;
+- scale one generated `sw-blockvolume` deployment to zero;
+- wait for `SwBlockVolume.status.nvme.pathCount=1` and
+  `blocked/nvme_multipath_path_missing`;
+- prove report, operator-snapshot, dashboard, and explain agree with the CRD;
+- prove no volume surface claims `Ready=True`;
+- cleanup leaves zero Kubernetes/NVMe/iSCSI/process/multipath/hostPath residue.
 
-## D1: Live Source Gate
+## Gate
 
 Scenario:
 
 ```text
-testops/scenarios/nvme-tcp-path-loss-status-surface-chain.yaml
+testops/scenarios/nvme-tcp-k8s-path-loss-crd-chain.yaml
 ```
 
-Expected terminal evidence:
+Gate script:
 
 ```text
-phase101_nvme_path_failure_status=ok
-before_path_count=2
-after_path_count=1
-after_nvme_reason=nvme_multipath_path_missing
-after_ready_true=false
-final_nvme_residue_count=0
+scripts/run-phase111-nvme-k8s-path-loss-crd-gate.sh
 ```
 
-Actual evidence:
+Terminal evidence:
 
 ```text
-phase101_nvme_path_failure_status=ok
+phase111_nvme_k8s_path_loss_crd_status=ok
 before_path_count=2
 after_path_count=1
-after_nvme_reason=nvme_multipath_path_missing
-after_ready_true=false
-final_nvme_residue_count=0
-```
-
-## D2: Support Surface Replay Gate
-
-Expected terminal evidence:
-
-```text
-phase110_nvme_tcp_path_loss_status_surface_status=ok
-live_path_loss_source=phase101
-before_path_count=2
-after_path_count=1
-after_nvme_reason=nvme_multipath_path_missing
-after_ready_true=false
+crd_reason=nvme_multipath_path_missing
 report_reason=nvme_multipath_path_missing
 operator_snapshot_reason=nvme_multipath_path_missing
 dashboard_reason=nvme_multipath_path_missing
 explain_reason=nvme_multipath_path_missing
 surface_ready_true_count=0
 mutation_allowed=false
+cleanup_status=ok
 ```
 
-Actual evidence matched the expected keys exactly.
+## Result
 
-## D3: Cleanup Gate
-
-Expected terminal evidence:
-
-```text
-final_nvme_residue_count=0
-```
-
-Actual source and final cleanup evidence matched the expected key.
+Phase 111 passed on live k3s. The CRD and all read-only support surfaces agree
+that a one-path RF=2 NVMe/TCP volume is blocked with
+`nvme_multipath_path_missing`. The healthy source state had two NVMe paths; the
+post-injection state had one path; no volume surface claimed `Ready=True`.
 
 ## Non-Claims
 
-Phase 110 does not claim:
+Phase 111 does not claim:
 
 - RoCE/NVMe-RDMA;
 - performance or SLO;
 - broad distro/kernel compatibility;
 - production HA;
-- live Kubernetes CRD negative projection for NVMe path loss;
-- more than support-surface replay of real standalone one-path-loss evidence.
+- automatic rebuild or path restoration;
+- more than the supported lab Kubernetes NVMe/TCP path-loss status behavior.
