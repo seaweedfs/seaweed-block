@@ -575,21 +575,24 @@ Recommended order from here:
     reads after restore, and `SwBlockVolume.status`, report,
     operator-snapshot, and explain converge back to two observed NVMe paths and
     `Ready=True/first_volume_verified`, with zero cleanup residue.
-72. Phase 114: NVMe/TCP K8s Multi-Volume Mounted Path Isolation. **Active,
-    blocked by strict runner**
+72. Phase 114: NVMe/TCP K8s Multi-Volume Mounted Path Isolation. **Closed
+    2026-06-30, runner PASS**
     Extends the Phase 112/113 single-volume mounted path-loss/restore proof to
-    two independent RF=2 NVMe/TCP PVCs. The degraded-state isolation portion is
-    green: when one generated blockvolume deployment is scaled to zero, the
-    affected volume reports `blocked/nvme_multipath_path_missing` with one path,
-    the untouched volume remains `ready/first_volume_verified` with two paths,
-    both mounted pods keep their UIDs, both continue I/O during path loss, and
-    there is no cross-volume reason mix-up. The restore portion is blocked:
-    after the removed deployment returns, the affected volume's CRD reports
-    `Ready=True/first_volume_verified` with two observed paths, but the mounted
-    workload on that same volume returns persistent EIO. Do not extend the
-    Phase 113 restore claim to multi-volume mounted restore until restored-path
-    publication/readiness is gated by positive returned-replica safety evidence
-    or the status remains non-ready with a precise reason.
+    two independent RF=2 NVMe/TCP PVCs. When one generated blockvolume
+    deployment is scaled to zero, the affected volume reports
+    `blocked/nvme_multipath_path_missing` with one live host path, the
+    untouched volume remains `ready/first_volume_verified` with two live host
+    paths, both mounted pods keep their UIDs, both continue I/O, and there is
+    no cross-volume reason mix-up. After the removed deployment is restored,
+    both volumes return to `Ready=True/first_volume_verified` with two live
+    host paths and mounted I/O still works, with zero cleanup residue.
+73. Phase 115: NVMe/TCP Mounted Multi-Volume Path Churn Soak. **Active,
+    planned**
+    Extends Phase 114 from a one-shot multi-volume loss/restore proof to a
+    bounded churn proof: alternate path loss and restore across two mounted
+    RF=2 NVMe/TCP PVCs for multiple cycles, preserving mounted pod identity,
+    writer/reader I/O, volume identity, publish-target isolation, reason-code
+    isolation, two-path restoration, and zero cleanup residue.
 
 The internal release-train contract is
 `internal/docs/ref/operation-layer-v0.5-release-train.md`. Phases 41-44 close
