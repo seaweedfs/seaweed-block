@@ -640,6 +640,26 @@ func TestPhase109NVMeStatusSurfaceScenarioChecksCRDAndSupportSurfaces(t *testing
 	}
 }
 
+func TestPhase110NVMePathLossScenarioChecksSupportSurfaces(t *testing.T) {
+	body := g15dReadFile(t, "testops", "scenarios", "nvme-tcp-path-loss-status-surface-chain.yaml")
+	for _, want := range []string{
+		"phase110_nvme_tcp_path_loss_status_surface_status=ok",
+		"run-nvme-mounted-failover-smoke.sh",
+		"cluster-after-failover.json",
+		"product-observation/cluster-evidence.json",
+		"nvme_multipath_path_missing",
+		"surface_ready_true_count=0",
+		"operator_snapshot_reason=nvme_multipath_path_missing",
+		"dashboard_reason=nvme_multipath_path_missing",
+		"explain_reason=nvme_multipath_path_missing",
+		"mutation_allowed=false",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("phase110 path-loss scenario missing %q", want)
+		}
+	}
+}
+
 func TestPhase20FirstVolumeScenarioPinsPublishedUserGate(t *testing.T) {
 	body := g15dReadFile(t, "testops", "scenarios", "activation-day1-first-volume-chain.yaml")
 	for _, want := range []string{

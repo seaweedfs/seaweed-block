@@ -276,6 +276,13 @@ rebuild, delete safety, or cleanup must start as a separate gated phase.
   address, path count, ready status, and `first_volume_verified` reason across
   `SwBlockVolume.status.nvme`, report summary, report operator snapshot,
   dashboard operator snapshot, and `ops explain`.
+- Phase 110 NVMe/TCP Path-Loss Status Surface Honesty is closed. The real
+  standalone mounted one-path-loss evidence from Phase 101 now replays through
+  report, operator-snapshot, dashboard, and explain as
+  `blocked/nvme_multipath_path_missing`, with `path_count=1`,
+  `multipath_observed=false`, read-only actions, and no false `Ready=True`.
+  This deliberately remains a support-surface replay gate, not a live
+  Kubernetes CRD negative-path-loss claim.
 - Later protocol candidates: implement a real NVMe/RDMA target or characterize
   NVMe/TCP performance. Keep these separate so correctness, transport, and
   performance claims do not get mixed.

@@ -1,0 +1,234 @@
+name: nvme-tcp-path-loss-status-surface-chain
+timeout: 35m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: pre_clean
+    actions:
+      - action: pre_run_cleanup
+        node: m02
+        kill_patterns: "blockmaster,blockvolume,blockcsi,iscsi-target"
+        nvme_disconnect: "true"
+        iscsi_logout_prefix: "iqn.2026-05.io.seaweedfs"
+      - action: exec
+        node: m02
+        cmd: "rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase110-nvme-path-loss-surface && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase110-nvme-path-loss-surface/gate"
+
+  - name: live_path_loss_source
+    actions:
+      - action: exec
+        node: m02
+        timeout: 20m
+        cmd: "cd {{ product_root }} && bash scripts/run-nvme-mounted-failover-smoke.sh {{ product_root }}"
+        env.SW_BLOCK_ARTIFACT_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase110-nvme-path-loss-surface/gate"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase110-nvme-path-loss-surface/gate/phase101-nvme-path-failure-summary.txt"
+        pattern: "^phase101_nvme_path_failure_status=ok$"
+        save_as: live_path_loss_ok
+      - action: assert_greater
+        actual: "{{ live_path_loss_ok }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase110-nvme-path-loss-surface/gate/phase101-nvme-path-failure-summary.txt"
+        pattern: "^before_path_count=2$"
+        save_as: before_two_paths
+      - action: assert_greater
+        actual: "{{ before_two_paths }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase110-nvme-path-loss-surface/gate/phase101-nvme-path-failure-summary.txt"
+        pattern: "^after_path_count=1$"
+        save_as: after_one_path
+      - action: assert_greater
+        actual: "{{ after_one_path }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase110-nvme-path-loss-surface/gate/phase101-nvme-path-failure-summary.txt"
+        pattern: "^after_nvme_reason=nvme_multipath_path_missing$"
+        save_as: live_missing_path_reason
+      - action: assert_greater
+        actual: "{{ live_missing_path_reason }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase110-nvme-path-loss-surface/gate/phase101-nvme-path-failure-summary.txt"
+        pattern: "^after_ready_true=false$"
+        save_as: live_no_false_ready
+      - action: assert_greater
+        actual: "{{ live_no_false_ready }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase110-nvme-path-loss-surface/gate/phase101-nvme-path-failure-summary.txt"
+        pattern: "^final_nvme_residue_count=0$"
+        save_as: live_nvme_clean
+      - action: assert_greater
+        actual: "{{ live_nvme_clean }}"
+        threshold: "0"
+
+  - name: support_surface_replay
+    actions:
+      - action: exec
+        node: m02
+        timeout: 5m
+        cmd: |
+          set -eu
+          ROOT=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase110-nvme-path-loss-surface
+          GATE="$ROOT/gate"
+          BUNDLE="$ROOT/replay-bundle"
+          SURFACES="$ROOT/surfaces"
+          mkdir -p "$BUNDLE/product-observation" "$SURFACES/dashboard" "$SURFACES/explain" "$ROOT/asserts"
+          cp "$GATE/cluster-after-failover.json" "$BUNDLE/product-observation/cluster-evidence.json"
+          cp "$GATE/phase101-nvme-path-failure-summary.txt" "$BUNDLE/"
+          cd {{ product_root }}
+          go build -o "$ROOT/bin/sw-block" ./cmd/sw-block
+          "$ROOT/bin/sw-block" ops report --from-bundle "$BUNDLE" --out "$SURFACES/report" > "$SURFACES/report.stdout.txt" 2> "$SURFACES/report.stderr.txt"
+          "$ROOT/bin/sw-block" ops explain volume --from-bundle "$BUNDLE" v1 > "$SURFACES/explain/v1.txt" 2> "$SURFACES/explain/v1.stderr.txt"
+          port=$(python3 - <<'PY'
+          import socket
+          s=socket.socket(); s.bind(('127.0.0.1',0)); print(s.getsockname()[1]); s.close()
+          PY
+          )
+          "$ROOT/bin/sw-block" ops dashboard --from-bundle "$BUNDLE" --listen "127.0.0.1:${port}" --serve-duration 8s > "$SURFACES/dashboard/stdout.txt" 2> "$SURFACES/dashboard/stderr.txt" &
+          dashboard_pid=$!
+          trap 'kill "$dashboard_pid" >/dev/null 2>&1 || true; wait "$dashboard_pid" >/dev/null 2>&1 || true' EXIT
+          for _ in $(seq 1 80); do
+            if curl -fsS "http://127.0.0.1:${port}/operator-snapshot.json" > "$SURFACES/dashboard/operator-snapshot.json" 2> "$SURFACES/dashboard/curl.stderr.txt"; then
+              break
+            fi
+            sleep 0.1
+          done
+          test -s "$SURFACES/dashboard/operator-snapshot.json"
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          root = Path('/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase110-nvme-path-loss-surface')
+          gate_summary = (root / 'gate/phase101-nvme-path-failure-summary.txt').read_text()
+          report_summary = (root / 'surfaces/report/summary.txt').read_text()
+          explain = (root / 'surfaces/explain/v1.txt').read_text()
+          report_snapshot = json.loads((root / 'surfaces/report/operator-snapshot.json').read_text())
+          dashboard_snapshot = json.loads((root / 'surfaces/dashboard/operator-snapshot.json').read_text())
+          evidence = json.loads((root / 'replay-bundle/product-observation/cluster-evidence.json').read_text())
+
+          def kv(text, key):
+            for line in text.splitlines():
+              if line.startswith(key + '='):
+                return line.split('=', 1)[1].strip()
+            return ''
+
+          if kv(gate_summary, 'before_path_count') != '2':
+            raise SystemExit('live source did not start with two paths')
+          if kv(gate_summary, 'after_path_count') != '1':
+            raise SystemExit('live source did not lose exactly one path')
+          if kv(gate_summary, 'after_nvme_reason') != 'nvme_multipath_path_missing':
+            raise SystemExit('live source reason mismatch')
+          if kv(gate_summary, 'after_ready_true') != 'false':
+            raise SystemExit('live source reported false Ready=True')
+
+          managed = evidence.get('managed_volumes') or []
+          if len(managed) != 1:
+            raise SystemExit(f'expected one managed volume in source evidence, got {len(managed)}')
+          status = managed[0]
+          nvme = status.get('nvme') or {}
+          if status.get('status') != 'blocked' or status.get('reason_code') != 'nvme_multipath_path_missing':
+            raise SystemExit(f'source managed status mismatch: {status}')
+          if nvme.get('path_count') != 1 or nvme.get('reason_code') != 'nvme_multipath_path_missing':
+            raise SystemExit(f'source nvme status mismatch: {nvme}')
+
+          if 'managed_volume=v1 status=blocked reason=nvme_multipath_path_missing' not in report_summary:
+            raise SystemExit('report summary missing blocked/missing-path reason')
+          if 'managed_volume_nvme=v1 ' not in report_summary or 'path_count=1' not in report_summary or 'reason=nvme_multipath_path_missing' not in report_summary:
+            raise SystemExit('report summary missing nvme path-loss detail')
+          if 'managed_volume_condition=Ready status=True' in report_summary:
+            raise SystemExit('report summary has false Ready=True')
+          if 'managed_volume v1 status=blocked reason=nvme_multipath_path_missing' not in explain:
+            raise SystemExit('explain missing blocked/missing-path reason')
+          if 'managed_volume_nvme protocol=nvme' not in explain or 'path_count=1' not in explain or 'reason=nvme_multipath_path_missing' not in explain:
+            raise SystemExit('explain missing nvme path-loss detail')
+          if 'managed_volume_condition Ready status=True' in explain:
+            raise SystemExit('explain has false Ready=True')
+
+          def check_snapshot(name, snap):
+            vols = snap.get('volumes') or []
+            if len(vols) != 1:
+              raise SystemExit(f'{name} volume count={len(vols)}')
+            st = vols[0].get('status') or {}
+            nv = st.get('nvme') or {}
+            if st.get('status') != 'blocked' or st.get('reason_code') != 'nvme_multipath_path_missing':
+              raise SystemExit(f'{name} status mismatch: {st}')
+            if nv.get('protocol') != 'nvme' or nv.get('path_count') != 1 or nv.get('reason_code') != 'nvme_multipath_path_missing':
+              raise SystemExit(f'{name} nvme mismatch: {nv}')
+            for condition in st.get('conditions') or []:
+              if condition.get('type') == 'Ready' and condition.get('status') == 'True':
+                raise SystemExit(f'{name} false Ready=True')
+            mutation = snap.get('mutation') or {}
+            if mutation.get('mutation_allowed') is not False:
+              raise SystemExit(f'{name} mutation boundary mismatch: {mutation}')
+
+          check_snapshot('report operator-snapshot', report_snapshot)
+          check_snapshot('dashboard operator-snapshot', dashboard_snapshot)
+          (root / 'asserts/phase110-surface-summary.txt').write_text('\n'.join([
+            'phase110_nvme_tcp_path_loss_status_surface_status=ok',
+            'live_path_loss_source=phase101',
+            'before_path_count=2',
+            'after_path_count=1',
+            'after_nvme_reason=nvme_multipath_path_missing',
+            'after_ready_true=false',
+            'report_reason=nvme_multipath_path_missing',
+            'operator_snapshot_reason=nvme_multipath_path_missing',
+            'dashboard_reason=nvme_multipath_path_missing',
+            'explain_reason=nvme_multipath_path_missing',
+            'surface_ready_true_count=0',
+            'mutation_allowed=false',
+          ]) + '\n')
+          PY
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase110-nvme-path-loss-surface/asserts/phase110-surface-summary.txt"
+        pattern: "^phase110_nvme_tcp_path_loss_status_surface_status=ok$"
+        save_as: surface_ok
+      - action: assert_greater
+        actual: "{{ surface_ok }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase110-nvme-path-loss-surface/asserts/phase110-surface-summary.txt"
+        pattern: "^surface_ready_true_count=0$"
+        save_as: no_false_ready_surface
+      - action: assert_greater
+        actual: "{{ no_false_ready_surface }}"
+        threshold: "0"
+
+  - name: collect_and_cleanup
+    always: true
+    actions:
+      - action: pre_run_cleanup
+        node: m02
+        kill_patterns: "blockmaster,blockvolume,blockcsi,iscsi-target"
+        nvme_disconnect: "true"
+        iscsi_logout_prefix: "iqn.2026-05.io.seaweedfs"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase110-nvme-path-loss-surface/gate/phase101-nvme-path-failure-summary.txt"
+        pattern: "^final_nvme_residue_count=0$"
+        save_as: nvme_clean
+        ignore_error: true
+      - action: collect_path
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase110-nvme-path-loss-surface"
+        name: "remote-phases"
+        ignore_error: true

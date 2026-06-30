@@ -538,6 +538,16 @@ Recommended order from here:
     `operator-snapshot.json`, dashboard `/operator-snapshot.json`, and
     `ops explain`. The gate owns its CRD baseline so stale live CRDs cannot
     silently prune new status fields.
+68. Phase 110: NVMe/TCP Path-Loss Status Surface Honesty. **Closed
+    2026-06-29, runner PASS**
+    Reused the live mounted NVMe/TCP one-path-loss gate from Phase 101 and
+    replayed its after-failover `cluster-after-failover.json` through the
+    support-bundle surfaces. Report summary, report `operator-snapshot.json`,
+    dashboard `/operator-snapshot.json`, and `ops explain` all preserve
+    `blocked/nvme_multipath_path_missing`, `path_count=1`,
+    `multipath_observed=false`, `mutation_allowed=false`, and zero false
+    `Ready=True`. This is support-surface replay of real standalone path-loss
+    evidence, not a live Kubernetes CRD negative-path-loss claim.
 
 The internal release-train contract is
 `internal/docs/ref/operation-layer-v0.5-release-train.md`. Phases 41-44 close

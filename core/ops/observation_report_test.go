@@ -128,6 +128,50 @@ func TestObservationReportSummaryAndHTMLIncludeManagedVolumeNVMeStatus(t *testin
 	}
 }
 
+func TestObservationReportSurfacesNVMeMissingPathWithoutFalseReady(t *testing.T) {
+	cluster := NewClusterEvidence(time.Date(2026, 6, 29, 12, 0, 0, 0, time.UTC))
+	cluster.ManagedVolumes = []ManagedVolumeProjection{ProjectManagedVolume(ManagedVolumeFacts{
+		VolumeID:        "pvc-nvme-loss",
+		PVCName:         "nvme-pvc",
+		DesiredReplicas: 2,
+		Replicas: []ReplicaFact{{
+			ReplicaID:        "r2",
+			Observed:         true,
+			Role:             "primary",
+			FrontendProtocol: "nvme",
+			FrontendAddr:     "127.0.0.1:4421",
+			FrontendNQN:      "nqn.2026-05.io.seaweedfs:pvc-nvme-loss",
+			FrontendNSID:     1,
+		}},
+	})}
+
+	summary := RenderObservationReportSummary(cluster)
+	for _, want := range []string{
+		"managed_volume=pvc-nvme-loss status=blocked reason=nvme_multipath_path_missing",
+		"managed_volume_nvme=pvc-nvme-loss nqn=nqn.2026-05.io.seaweedfs:pvc-nvme-loss nsid=1 addr=127.0.0.1:4421 addrs=127.0.0.1:4421 path_count=1 multipath_observed=false reason=nvme_multipath_path_missing",
+		"managed_volume_condition=Ready status=False reason=nvme_multipath_path_missing",
+		"managed_volume_condition=Blocked status=True reason=nvme_multipath_path_missing",
+	} {
+		if !strings.Contains(summary, want) {
+			t.Fatalf("summary missing %q:\n%s", want, summary)
+		}
+	}
+	if strings.Contains(summary, "managed_volume_condition=Ready status=True") {
+		t.Fatalf("summary must not claim Ready=True for missing NVMe path:\n%s", summary)
+	}
+
+	explain := RenderObservationExplainText(cluster)
+	if !strings.Contains(explain, "managed_volume pvc-nvme-loss status=blocked reason=nvme_multipath_path_missing") {
+		t.Fatalf("explain missing blocked reason:\n%s", explain)
+	}
+	if !strings.Contains(explain, "managed_volume_nvme protocol=nvme nqn=nqn.2026-05.io.seaweedfs:pvc-nvme-loss nsid=1 addr=127.0.0.1:4421 addrs=127.0.0.1:4421 path_count=1 multipath_observed=false reason=nvme_multipath_path_missing") {
+		t.Fatalf("explain missing nvme missing-path status:\n%s", explain)
+	}
+	if strings.Contains(explain, "managed_volume_condition Ready status=True") {
+		t.Fatalf("explain must not claim Ready=True for missing NVMe path:\n%s", explain)
+	}
+}
+
 func TestObservationReportSurfacesNVMeLoopbackCrossNodeWithoutISCSIAction(t *testing.T) {
 	cluster := NewClusterEvidence(time.Date(2026, 6, 29, 12, 0, 0, 0, time.UTC))
 	cluster.ManagedVolumes = []ManagedVolumeProjection{ProjectManagedVolume(ManagedVolumeFacts{
