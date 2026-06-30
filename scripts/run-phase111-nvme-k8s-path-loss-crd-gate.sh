@@ -3,13 +3,17 @@ set -euo pipefail
 
 ROOT="${1:-$(pwd)}"
 ARTIFACT_DIR="${SW_BLOCK_ARTIFACT_DIR:-${ROOT}/results/phase111-nvme-k8s-path-loss-crd-gate}"
-SUMMARY="${ARTIFACT_DIR}/phase111-nvme-k8s-path-loss-crd-summary.txt"
+SUMMARY_NAME="${SW_BLOCK_NVME_PATH_LOSS_SUMMARY_NAME:-phase111-nvme-k8s-path-loss-crd-summary.txt}"
+SUMMARY="${ARTIFACT_DIR}/${SUMMARY_NAME}"
+PHASE_STATUS_KEY="${SW_BLOCK_NVME_PATH_LOSS_PHASE_STATUS_KEY:-phase111_nvme_k8s_path_loss_crd_status}"
 HELM_RELEASE="${SW_BLOCK_HELM_RELEASE:-sw-block}"
 HELM_NAMESPACE="${SW_BLOCK_HELM_NAMESPACE:-kube-system}"
 APP_NAMESPACE="${SW_BLOCK_APP_NAMESPACE:-default}"
 IMAGE="${SW_BLOCK_IMAGE:-sw-block:local}"
 CSI_IMAGE="${SW_BLOCK_CSI_IMAGE:-sw-block-csi:local}"
 STATUS_PORT="${SW_BLOCK_MASTER_PORT_FORWARD_PORT:-29333}"
+MOUNTED_IO="${SW_BLOCK_NVME_MOUNTED_IO:-0}"
+MOUNTED_POD="${SW_BLOCK_NVME_MOUNTED_POD:-sw-block-phase112-mounted}"
 
 mkdir -p "${ARTIFACT_DIR}"/{bin,build,values,install,multi-volume,inject,surfaces,cleanup}
 : >"${SUMMARY}"
@@ -24,15 +28,58 @@ capture() {
   "$@" >"$out" 2>&1 || true
 }
 
+delete_pod_before_uninstall() {
+  local pod="$1"
+  local log="${ARTIFACT_DIR}/cleanup/delete-${pod}.txt"
+  kubectl -n "${APP_NAMESPACE}" delete pod "${pod}" --ignore-not-found=true --wait=true --timeout=120s >"${log}" 2>&1 && return 0
+  {
+    echo "--- pod did not delete gracefully; forcing test cleanup ---"
+    kubectl -n "${APP_NAMESPACE}" get pod "${pod}" -o wide || true
+    kubectl -n "${APP_NAMESPACE}" describe pod "${pod}" || true
+    kubectl -n "${APP_NAMESPACE}" delete pod "${pod}" --ignore-not-found=true --force --grace-period=0 --wait=false || true
+  } >>"${log}" 2>&1
+  for _ in $(seq 1 60); do
+    kubectl -n "${APP_NAMESPACE}" get pod "${pod}" >/dev/null 2>&1 || return 0
+    sleep 1
+  done
+}
+
+wait_for_no_sw_block_k8s() {
+  local log="$1"
+  local deadline=$((SECONDS + 180))
+  : >"${log}"
+  while (( SECONDS < deadline )); do
+    local residue
+    residue="$(
+      {
+        kubectl get deploy,daemonset,statefulset,pod,svc,pvc,pv,configmap,secret,serviceaccount -A -o name
+        kubectl get storageclass,csidriver,clusterrole,clusterrolebinding -o name
+      } 2>/dev/null | grep -E '(sw-block|seaweed-block|block\.csi\.seaweedfs\.com)' || true
+    )"
+    if [[ -z "${residue}" ]]; then
+      echo "sw_block_k8s_residue=0" >>"${log}"
+      return 0
+    fi
+    printf '%s\n' "--- residue still present at $(date -u +%Y-%m-%dT%H:%M:%SZ) ---" "${residue}" >>"${log}"
+    sleep 2
+  done
+  echo "sw_block_k8s_residue=timeout" >>"${log}"
+  return 1
+}
+
 cleanup() {
   set +e
-  helm status "${HELM_RELEASE}" --namespace "${HELM_NAMESPACE}" >/dev/null 2>&1 && \
-    helm uninstall "${HELM_RELEASE}" --namespace "${HELM_NAMESPACE}" --wait --timeout 240s \
-      >"${ARTIFACT_DIR}/cleanup/helm-uninstall.txt" 2>&1
+  # Delete mounted consumers while CSI is still installed so normal detach/delete can run.
+  delete_pod_before_uninstall "${MOUNTED_POD}"
   kubectl -n "${APP_NAMESPACE}" delete pod -l sw-block-test=multi-volume --ignore-not-found=true --wait=true --timeout=120s >/dev/null 2>&1
   kubectl -n "${APP_NAMESPACE}" delete pod sw-block-multi-reader-1 sw-block-multi-writer-1 --ignore-not-found=true --wait=true --timeout=120s >/dev/null 2>&1
   kubectl -n "${APP_NAMESPACE}" delete pvc sw-block-multi-pvc-1 --ignore-not-found=true --wait=true --timeout=120s >/dev/null 2>&1
   kubectl delete storageclass sw-block-multi --ignore-not-found=true --wait=true --timeout=120s >/dev/null 2>&1
+  sudo -n nvme disconnect-all >/dev/null 2>&1 || true
+  helm status "${HELM_RELEASE}" --namespace "${HELM_NAMESPACE}" >/dev/null 2>&1 && \
+    helm uninstall "${HELM_RELEASE}" --namespace "${HELM_NAMESPACE}" --wait --timeout 240s \
+      >"${ARTIFACT_DIR}/cleanup/helm-uninstall.txt" 2>&1
+  wait_for_no_sw_block_k8s "${ARTIFACT_DIR}/cleanup/wait-after-helm-uninstall.txt" || true
   kubectl -n "${APP_NAMESPACE}" delete deploy -l app=sw-blockvolume --ignore-not-found=true --wait=false >/dev/null 2>&1
   kubectl -n "${HELM_NAMESPACE}" delete deploy -l app=sw-blockvolume --ignore-not-found=true --wait=false >/dev/null 2>&1
   kubectl -n "${HELM_NAMESPACE}" get swblockvolumes.block.seaweedfs.com -o name 2>/dev/null | \
@@ -50,6 +97,8 @@ cleanup() {
     --ignore-not-found=true --wait=true --timeout=60s >/dev/null 2>&1
   kubectl get pv --no-headers 2>/dev/null | awk '/sw-block-multi/ {print $1}' | \
     xargs -r -n1 kubectl patch pv --type=merge -p '{"metadata":{"finalizers":[]}}' >/dev/null 2>&1
+  kubectl -n "${APP_NAMESPACE}" get pvc sw-block-multi-pvc-1 >/dev/null 2>&1 && \
+    kubectl -n "${APP_NAMESPACE}" patch pvc sw-block-multi-pvc-1 --type=merge -p '{"metadata":{"finalizers":[]}}' >/dev/null 2>&1
   kubectl get pv --no-headers 2>/dev/null | awk '/sw-block-multi/ {print $1}' | xargs -r kubectl delete pv --wait=false >/dev/null 2>&1
   sudo -n nvme disconnect-all >/dev/null 2>&1 || true
 }
@@ -141,7 +190,7 @@ PY
   return 1
 }
 
-write_summary "phase111_nvme_k8s_path_loss_crd_status=running"
+write_summary "${PHASE_STATUS_KEY}=running"
 cleanup
 
 echo "[phase111] build sw-block CLI"
@@ -203,6 +252,40 @@ grep -q '^reader_verified_count=1$' "${ARTIFACT_DIR}/multi-volume/multi-volume-s
 
 wait_for_crd_status "healthy" "ready" "first_volume_verified" "2"
 
+MOUNTED_POD_UID_BEFORE=""
+if [[ "${MOUNTED_IO}" == "1" || "${MOUNTED_IO}" == "true" ]]; then
+  echo "[phase111] create mounted pod for post-path-loss I/O"
+  cat >"${ARTIFACT_DIR}/inject/mounted-pod.yaml" <<YAML
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ${MOUNTED_POD}
+  namespace: ${APP_NAMESPACE}
+  labels:
+    sw-block-test: nvme-mounted-path-loss
+spec:
+  restartPolicy: Never
+  nodeSelector:
+    kubernetes.io/hostname: ${APP_NODE}
+  containers:
+    - name: app
+      image: busybox:1.36
+      command: ["/bin/sh", "-c", "trap : TERM INT; sleep 3600 & wait"]
+      volumeMounts:
+        - name: data
+          mountPath: /data
+  volumes:
+    - name: data
+      persistentVolumeClaim:
+        claimName: sw-block-multi-pvc-1
+YAML
+  kubectl -n "${APP_NAMESPACE}" apply -f "${ARTIFACT_DIR}/inject/mounted-pod.yaml" >"${ARTIFACT_DIR}/inject/apply-mounted-pod.txt"
+  kubectl -n "${APP_NAMESPACE}" wait --for=condition=Ready "pod/${MOUNTED_POD}" --timeout=180s >"${ARTIFACT_DIR}/inject/wait-mounted-pod.txt"
+  MOUNTED_POD_UID_BEFORE="$(kubectl -n "${APP_NAMESPACE}" get pod "${MOUNTED_POD}" -o jsonpath='{.metadata.uid}')"
+  kubectl -n "${APP_NAMESPACE}" exec "${MOUNTED_POD}" -- sh -c 'set -eu; echo before-path-loss > /data/phase112-mounted.txt; sync; grep before-path-loss /data/phase112-mounted.txt' >"${ARTIFACT_DIR}/inject/mounted-before.log"
+  write_summary "mounted_pod_uid_before=${MOUNTED_POD_UID_BEFORE}"
+fi
+
 echo "[phase111] scale one blockvolume deployment to zero to remove one NVMe path"
 kubectl -n "${APP_NAMESPACE}" get deploy -l app=sw-blockvolume -o json >"${ARTIFACT_DIR}/inject/blockvolume-deployments.before.json"
 TARGET_DEPLOY="$(python3 - "${ARTIFACT_DIR}/inject/blockvolume-deployments.before.json" <<'PY'
@@ -234,6 +317,19 @@ PY
 )"
 write_summary "volume_id=${VOLUME_ID}"
 
+if [[ "${MOUNTED_IO}" == "1" || "${MOUNTED_IO}" == "true" ]]; then
+  echo "[phase111] verify mounted pod survives and writes after one path loss"
+  MOUNTED_POD_UID_AFTER="$(kubectl -n "${APP_NAMESPACE}" get pod "${MOUNTED_POD}" -o jsonpath='{.metadata.uid}')"
+  if [[ "${MOUNTED_POD_UID_AFTER}" != "${MOUNTED_POD_UID_BEFORE}" ]]; then
+    echo "mounted pod UID changed: before=${MOUNTED_POD_UID_BEFORE} after=${MOUNTED_POD_UID_AFTER}" >&2
+    exit 1
+  fi
+  kubectl -n "${APP_NAMESPACE}" exec "${MOUNTED_POD}" -- sh -c 'set -eu; echo after-path-loss >> /data/phase112-mounted.txt; sync; grep before-path-loss /data/phase112-mounted.txt; grep after-path-loss /data/phase112-mounted.txt' >"${ARTIFACT_DIR}/inject/mounted-after.log"
+  write_summary "mounted_pod_uid_after=${MOUNTED_POD_UID_AFTER}"
+  write_summary "mounted_pod_uid_preserved=true"
+  write_summary "mounted_io_after_path_loss=ok"
+fi
+
 echo "[phase111] collect live surfaces"
 with_master_port_forward "${ARTIFACT_DIR}/surfaces/blockmaster-port-forward.log" \
   "${ARTIFACT_DIR}/bin/sw-block" ops report \
@@ -263,7 +359,7 @@ done
 kill "${DASH_PID}" >/dev/null 2>&1 || true
 wait "${DASH_PID}" >/dev/null 2>&1 || true
 
-python3 - "${ARTIFACT_DIR}" <<'PY'
+SW_BLOCK_NVME_PATH_LOSS_PHASE_STATUS_KEY="${PHASE_STATUS_KEY}" python3 - "${ARTIFACT_DIR}" <<'PY'
 import json, re, sys
 from pathlib import Path
 base=Path(sys.argv[1])
@@ -305,8 +401,8 @@ if "status=blocked reason=nvme_multipath_path_missing" not in explain:
     raise SystemExit("explain missing blocked/path-missing")
 if "mutation_allowed=false" not in summary and '"mutation_allowed":false' not in json.dumps(snapshot):
     raise SystemExit("mutation_allowed=false not surfaced")
-(base/"phase111-nvme-k8s-path-loss-crd-asserts.txt").write_text("\n".join([
-    "phase111_nvme_k8s_path_loss_crd_status=ok",
+(base/"nvme-k8s-path-loss-crd-asserts.txt").write_text("\n".join([
+    __import__("os").environ.get("SW_BLOCK_NVME_PATH_LOSS_PHASE_STATUS_KEY", "phase111_nvme_k8s_path_loss_crd_status")+"=ok",
     "before_path_count=2",
     "after_path_count=1",
     "crd_reason=nvme_multipath_path_missing",
@@ -318,14 +414,20 @@ if "mutation_allowed=false" not in summary and '"mutation_allowed":false' not in
     "mutation_allowed=false",
 ])+"\n")
 PY
-cat "${ARTIFACT_DIR}/phase111-nvme-k8s-path-loss-crd-asserts.txt" >>"${SUMMARY}"
+cat "${ARTIFACT_DIR}/nvme-k8s-path-loss-crd-asserts.txt" >>"${SUMMARY}"
 
 cleanup
+verify_rc=0
 (
   cd "${ROOT}"
-  SW_BLOCK_ARTIFACT_DIR="${ARTIFACT_DIR}/cleanup/verify" bash scripts/verify-helm-cleanup.sh "${ROOT}"
-)
+  SW_BLOCK_CLEANUP_WAIT_SECONDS=180 \
+  SW_BLOCK_ARTIFACT_DIR="${ARTIFACT_DIR}/cleanup/verify" bash scripts/verify-helm-cleanup.sh "${ROOT}" \
+    >"${ARTIFACT_DIR}/cleanup/verify.stdout.txt" 2>"${ARTIFACT_DIR}/cleanup/verify.stderr.txt"
+) || verify_rc=$?
+cat "${ARTIFACT_DIR}/cleanup/verify/cleanup-summary.txt" >>"${SUMMARY}"
 grep -q '^cleanup_status=ok$' "${ARTIFACT_DIR}/cleanup/verify/cleanup-summary.txt"
-write_summary "cleanup_status=ok"
+if [[ "${verify_rc}" -ne 0 ]]; then
+  exit "${verify_rc}"
+fi
 
 echo "[phase111] PASS"

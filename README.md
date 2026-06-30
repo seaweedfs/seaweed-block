@@ -36,7 +36,7 @@ This is an **alpha** product path for supported lab clusters, not production.
 | Actionable read-only CRD status + Events | Available | Bounded SwBlockVolume finalizer lifecycle | Beta candidate |
 | Returned-replica ACK eligibility executor | Beta candidate | Returned-replica failback runtime | Source-gated |
 | Returned-replica rebuild traffic | Planned | Frontend publication after failback | Planned |
-| NVMe-oF CSI multipath + hardening lab path | Gated | Backup/snapshot/restore | Planned |
+| NVMe/TCP CSI multipath + mounted path-loss lab path | Gated | Backup/snapshot/restore | Planned |
 | Production SLO/performance claims | Not claimed | Hosted production UI | Not claimed |
 
 ## What You Can Do Today
@@ -70,11 +70,12 @@ This is an **alpha** product path for supported lab clusters, not production.
   target, explicit execution policy, expected-current evidence, and terminal
   evidence are all present. It is not enabled by default and is not yet a
   published release claim.
-- From source, run the supported-lab NVMe-oF gates: ANA/direct-host baseline,
+- From source, run the supported-lab NVMe/TCP gates: ANA/direct-host baseline,
   CSI protocol selection, Kubernetes CSI multipath attach for one NQN/NSID with
-  multiple NVMe frontend paths, one-path-loss status honesty, repeated
-  stage/unstage residue checks, and a bounded writer/reader soak. This is a lab
-  gate, not a broad NVMe compatibility or performance claim.
+  multiple NVMe frontend paths, one-path-loss status honesty, mounted pod
+  write/read after one observed path loss, repeated stage/unstage residue
+  checks, and a bounded writer/reader soak. This is a lab gate, not a broad
+  NVMe compatibility or performance claim.
 - Replay support bundles offline.
 
 These are narrow alpha claims tied to documented gates. See

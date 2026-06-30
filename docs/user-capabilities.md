@@ -63,6 +63,25 @@ The gated lab path validates three RF=3 PVC-backed volumes at the same time:
 
 This is a lab-gated capability, not a broad scale claim.
 
+### NVMe/TCP Supported-Lab Path
+
+The source-gated NVMe/TCP path now has Kubernetes CSI evidence for:
+
+- protocol selection through generated Helm values;
+- one PVC with multiple NVMe frontend paths for one NQN/NSID;
+- multiple PVCs with distinct NVMe identities and no cross-volume mixup;
+- lifecycle soak with repeated stage/unstage and zero NVMe residue;
+- status surfaces that expose protocol, NQN, namespace ID, address, and path
+  count;
+- one observed path loss projected as
+  `blocked/nvme_multipath_path_missing`, never false `Ready=True`;
+- an already-mounted pod that keeps the same pod UID and writes/reads after one
+  observed path is removed.
+
+This is a supported-lab NVMe/TCP claim only. It is not a RoCE/NVMe-RDMA claim,
+not a performance/SLO claim, and not a broad distro/kernel compatibility
+matrix.
+
 ### Recovery And Failover Gates
 
 The current alpha has gated recovery evidence for:
