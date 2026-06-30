@@ -558,6 +558,15 @@ Recommended order from here:
     dashboard `/operator-snapshot.json`, and `ops explain` all converged on
     `blocked/nvme_multipath_path_missing` with no false volume `Ready=True`,
     `mutation_allowed=false`, and zero cleanup residue.
+70. Phase 112: NVMe/TCP K8s Mounted Path-Loss I/O. **Closed 2026-06-29,
+    runner PASS**
+    Closed the remaining user-visible gap after Phase 111. The live
+    Kubernetes RF=2 NVMe/TCP path now keeps an already-mounted pod on the same
+    PVC while one generated blockvolume deployment is scaled to zero. The same
+    pod UID survives, the pod writes and reads after path loss through the
+    remaining NVMe path, and the CRD/report/operator-snapshot/dashboard/explain
+    surfaces still report `blocked/nvme_multipath_path_missing` with no false
+    volume `Ready=True`, `mutation_allowed=false`, and zero cleanup residue.
 
 The internal release-train contract is
 `internal/docs/ref/operation-layer-v0.5-release-train.md`. Phases 41-44 close

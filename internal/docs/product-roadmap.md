@@ -290,6 +290,12 @@ rebuild, delete safety, or cleanup must start as a separate gated phase.
   deployment to zero reduces the path count to one, and `SwBlockVolume.status`,
   report, operator-snapshot, dashboard, and explain all report
   `blocked/nvme_multipath_path_missing` with no false volume `Ready=True`.
+- Phase 112 NVMe/TCP K8s Mounted Path-Loss I/O is closed. The supported-lab
+  Kubernetes path now keeps a mounted pod alive through one observed NVMe path
+  loss: the pod UID is unchanged, the same pod writes and reads after path loss,
+  and the CRD/report/operator-snapshot/dashboard/explain surfaces still report
+  `blocked/nvme_multipath_path_missing` with no false volume `Ready=True` and
+  zero cleanup residue.
 - Later protocol candidates: implement a real NVMe/RDMA target or characterize
   NVMe/TCP performance. Keep these separate so correctness, transport, and
   performance claims do not get mixed.
