@@ -1,6 +1,6 @@
 # Current Plan: Phase 117 NVMe/TCP Published-Image Release Smoke
 
-Status: planned.
+Status: gate implemented; waiting for matching published images.
 
 Phase 116 is closed:
 
@@ -46,7 +46,7 @@ ghcr.io/seaweedfs/seaweed-block-csi:<candidate>
 Both images must be built from the same source commit. If either image is
 missing, mark this phase artifact-blocked, not product-failed.
 
-## Proposed Gate
+## Gate
 
 Use a small release-smoke gate rather than rerunning every Phase 100-115 gate:
 
@@ -54,6 +54,11 @@ Use a small release-smoke gate rather than rerunning every Phase 100-115 gate:
 scripts/run-phase117-nvme-release-image-smoke-gate.sh
 testops/scenarios/nvme-tcp-release-image-smoke-chain.yaml
 ```
+
+If `SW_BLOCK_RELEASE_IMAGE` / `SW_BLOCK_CSI_RELEASE_IMAGE` are not supplied, or
+if either manifest is missing, the gate writes
+`phase117_nvme_release_image_smoke_status=blocked_missing_release_images`. That
+is an artifact-readiness blocker, not a product failure.
 
 Minimum terminal evidence:
 

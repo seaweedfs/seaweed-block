@@ -318,9 +318,9 @@ rebuild, delete safety, or cleanup must start as a separate gated phase.
   supported-lab NVMe/TCP release claim: README/docs wording, feature/status
   matrix, explicit non-claims, and pinned-image release-smoke instructions for
   matching `seaweed-block` and `seaweed-block-csi` images.
-- Phase 117 should run that pinned-image smoke when matching images exist. If
-  images are not published, the result is artifact-blocked rather than a
-  product failure.
+- Phase 117 has a pinned-image smoke gate and TestOps scenario ready. It should
+  run when matching images exist. If images are not published, the result is
+  artifact-blocked rather than a product failure.
 - Later protocol candidates: implement a real NVMe/RDMA target or characterize
   NVMe/TCP performance. Keep these separate so correctness, transport, and
   performance claims do not get mixed.

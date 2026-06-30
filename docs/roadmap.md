@@ -600,12 +600,15 @@ Recommended order from here:
     a concise release-smoke plan that uses matching published
     `seaweed-block`/`seaweed-block-csi` images when available. This is a
     packaging and claim-boundary phase, not a new transport feature.
-75. Phase 117: NVMe/TCP Published-Image Release Smoke. **Active, planned**
+75. Phase 117: NVMe/TCP Published-Image Release Smoke. **Active, gate
+    implemented; waiting for images**
     Run the representative NVMe/TCP supported-lab smoke against matching
-    published `seaweed-block` and `seaweed-block-csi` images. If images are not
-    available, this phase blocks as artifact-readiness, not as product failure.
-    Do not mark the NVMe/TCP path as a published-image release claim until this
-    smoke passes.
+    published `seaweed-block` and `seaweed-block-csi` images via
+    `scripts/run-phase117-nvme-release-image-smoke-gate.sh` /
+    `testops/scenarios/nvme-tcp-release-image-smoke-chain.yaml`. If images are
+    not available, this phase blocks as artifact-readiness, not as product
+    failure. Do not mark the NVMe/TCP path as a published-image release claim
+    until this smoke passes.
 
 The internal release-train contract is
 `internal/docs/ref/operation-layer-v0.5-release-train.md`. Phases 41-44 close
