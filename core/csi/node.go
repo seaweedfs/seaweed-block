@@ -44,6 +44,7 @@ type NVMeUtil interface {
 	Disconnect(ctx context.Context, nqn string) error
 	GetDeviceByNQN(ctx context.Context, nqn string) (string, error)
 	IsConnected(ctx context.Context, nqn string) (bool, error)
+	IsPathConnected(ctx context.Context, nqn, addr string) (bool, error)
 }
 
 type ISCSIAuth struct {
@@ -302,21 +303,49 @@ func (s *NodeServer) stageNVMe(ctx context.Context, req *csipb.NodeStageVolumeRe
 	if len(addrs) == 0 {
 		addrs = []string{addr}
 	}
+	if multipathRequested && len(addrs) < 2 {
+		return nil, status.Errorf(codes.FailedPrecondition, "NVMe multipath requires at least two portals, got %d", len(addrs))
+	}
+	connectAllPaths := multipathRequested || len(addrs) > 1
 	connected, err := s.nvmeUtil.IsConnected(ctx, nqn)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "check nvme connect: %v", err)
 	}
 	if connected && !s.hasStagedIdentity(volumeID, stagingPath) {
-		return nil, status.Errorf(codes.FailedPrecondition, "NVMe subsystem %q is already connected without staged volume identity", nqn)
+		s.logger.Printf("NodeStageVolume: %s NVMe subsystem %q already connected without marker at %s; recreating staging identity", volumeID, nqn, stagingPath)
 	}
 	connectStarted := false
-	if !connected {
+	if connectAllPaths {
 		for _, pathAddr := range addrs {
-			if err := s.nvmeUtil.Connect(ctx, pathAddr, nqn); err != nil {
-				return nil, status.Errorf(codes.Internal, "nvme connect: %v", err)
+			pathConnected, err := s.nvmeUtil.IsPathConnected(ctx, nqn, pathAddr)
+			if err != nil {
+				return nil, status.Errorf(codes.Internal, "check nvme path connect: %v", err)
 			}
-			connectStarted = true
+			if !pathConnected {
+				if err := s.nvmeUtil.Connect(ctx, pathAddr, nqn); err != nil {
+					return nil, status.Errorf(codes.Internal, "nvme connect: %v", err)
+				}
+				connectStarted = true
+			}
 		}
+	} else if !connected {
+		if err := s.nvmeUtil.Connect(ctx, addr, nqn); err != nil {
+			return nil, status.Errorf(codes.Internal, "nvme connect: %v", err)
+		}
+		connectStarted = true
+	}
+	if connectAllPaths {
+		for _, pathAddr := range addrs {
+			pathConnected, err := s.nvmeUtil.IsPathConnected(ctx, nqn, pathAddr)
+			if err != nil {
+				return nil, status.Errorf(codes.Internal, "verify nvme path connect: %v", err)
+			}
+			if !pathConnected {
+				return nil, status.Errorf(codes.FailedPrecondition, "NVMe multipath %q missing path %s", nqn, pathAddr)
+			}
+		}
+	} else if !connected {
+		connected = true
 	}
 	success := false
 	defer func() {

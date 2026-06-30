@@ -102,6 +102,7 @@ cleanup() {
     kubectl -n "${APP_NAMESPACE}" patch pvc sw-block-multi-pvc-1 --type=merge -p '{"metadata":{"finalizers":[]}}' >/dev/null 2>&1
   kubectl get pv --no-headers 2>/dev/null | awk '/sw-block-multi/ {print $1}' | xargs -r kubectl delete pv --wait=false >/dev/null 2>&1
   sudo -n nvme disconnect-all >/dev/null 2>&1 || true
+  set -e
 }
 trap cleanup EXIT
 

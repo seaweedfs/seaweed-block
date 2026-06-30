@@ -340,6 +340,14 @@ func (r *realNVMeUtil) IsConnected(ctx context.Context, nqn string) (bool, error
 	return nvmeSubsystemPathCount(doc, nqn) > 0, nil
 }
 
+func (r *realNVMeUtil) IsPathConnected(ctx context.Context, nqn, addr string) (bool, error) {
+	doc, err := nvmeListSubsystems(ctx)
+	if err != nil {
+		return false, err
+	}
+	return nvmeSubsystemHasPath(doc, nqn, addr), nil
+}
+
 func (r *realNVMeUtil) GetDeviceByNQN(ctx context.Context, nqn string) (string, error) {
 	deadline := time.After(30 * time.Second)
 	ticker := time.NewTicker(200 * time.Millisecond)
@@ -394,6 +402,43 @@ func nvmeSubsystemPathCount(doc any, nqn string) int {
 		}
 	}
 	return total
+}
+
+func nvmeSubsystemHasPath(doc any, nqn, addr string) bool {
+	host, port, err := splitHostPort(addr)
+	if err != nil {
+		return false
+	}
+	for _, sub := range iterNVMeSubsystems(doc) {
+		if got, _ := sub["NQN"].(string); got != nqn {
+			continue
+		}
+		paths, _ := sub["Paths"].([]any)
+		for _, path := range paths {
+			pathMap, _ := path.(map[string]any)
+			rawAddr, _ := pathMap["Address"].(string)
+			if rawAddr == "" {
+				continue
+			}
+			fields := parseNVMeAddressFields(rawAddr)
+			if fields["traddr"] == host && fields["trsvcid"] == port {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func parseNVMeAddressFields(raw string) map[string]string {
+	out := map[string]string{}
+	for _, part := range strings.Split(raw, ",") {
+		key, value, ok := strings.Cut(strings.TrimSpace(part), "=")
+		if !ok {
+			continue
+		}
+		out[strings.TrimSpace(key)] = strings.TrimSpace(value)
+	}
+	return out
 }
 
 func iterNVMeSubsystems(node any) []map[string]any {

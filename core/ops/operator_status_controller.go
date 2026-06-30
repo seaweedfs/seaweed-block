@@ -292,7 +292,7 @@ type SwBlockVolumeCRDNVMeStatus struct {
 	PathCount         int      `json:"pathCount"`
 	MultipathObserved bool     `json:"multipathObserved"`
 	ANAState          string   `json:"anaState,omitempty"`
-	ReasonCode        string   `json:"reasonCode,omitempty"`
+	ReasonCode        string   `json:"reasonCode"`
 }
 
 type SwBlockVolumeCRDReturnedReplica struct {

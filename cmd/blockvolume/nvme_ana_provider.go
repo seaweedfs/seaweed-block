@@ -30,10 +30,10 @@ func (p *projectionANAProvider) ANAState() nvme.ANAState {
 		return nvme.ANAInaccessible
 	}
 	fp := p.view.Projection()
-	ep := p.view.EngineProjection()
 	if fp.VolumeID != p.volumeID || fp.ReplicaID != p.replicaID {
 		return nvme.ANAInaccessible
 	}
+	ep := p.view.EngineProjection()
 	if fp.Healthy {
 		return nvme.ANAOptimized
 	}
@@ -47,13 +47,6 @@ func (p *projectionANAProvider) ANAState() nvme.ANAState {
 	default:
 		return nvme.ANAChange
 	}
-}
-
-func (p *projectionANAProvider) ANAGroupID() uint32 {
-	// Linux validates ANA group descriptors against Identify Controller's
-	// ANAGRPMAX/NANAGRPID. The current target exposes one namespace and one ANA
-	// group, so the only valid advertised group id is the dense group 1.
-	return 1
 }
 
 func (p *projectionANAProvider) ANAChangeCount() uint64 {
@@ -79,4 +72,11 @@ func (p *projectionANAProvider) ANAChangeCount() uint64 {
 		return 1
 	}
 	return count
+}
+
+func (p *projectionANAProvider) ANAGroupID() uint32 {
+	// Linux validates ANA group descriptors against Identify Controller's
+	// ANAGRPMAX/NANAGRPID. The current target exposes one namespace and one ANA
+	// group, so the only valid advertised group id is the dense group 1.
+	return 1
 }

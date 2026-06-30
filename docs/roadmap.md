@@ -575,6 +575,21 @@ Recommended order from here:
     reads after restore, and `SwBlockVolume.status`, report,
     operator-snapshot, and explain converge back to two observed NVMe paths and
     `Ready=True/first_volume_verified`, with zero cleanup residue.
+72. Phase 114: NVMe/TCP K8s Multi-Volume Mounted Path Isolation. **Active,
+    blocked by strict runner**
+    Extends the Phase 112/113 single-volume mounted path-loss/restore proof to
+    two independent RF=2 NVMe/TCP PVCs. The degraded-state isolation portion is
+    green: when one generated blockvolume deployment is scaled to zero, the
+    affected volume reports `blocked/nvme_multipath_path_missing` with one path,
+    the untouched volume remains `ready/first_volume_verified` with two paths,
+    both mounted pods keep their UIDs, both continue I/O during path loss, and
+    there is no cross-volume reason mix-up. The restore portion is blocked:
+    after the removed deployment returns, the affected volume's CRD reports
+    `Ready=True/first_volume_verified` with two observed paths, but the mounted
+    workload on that same volume returns persistent EIO. Do not extend the
+    Phase 113 restore claim to multi-volume mounted restore until restored-path
+    publication/readiness is gated by positive returned-replica safety evidence
+    or the status remains non-ready with a precise reason.
 
 The internal release-train contract is
 `internal/docs/ref/operation-layer-v0.5-release-train.md`. Phases 41-44 close

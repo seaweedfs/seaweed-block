@@ -301,6 +301,17 @@ rebuild, delete safety, or cleanup must start as a separate gated phase.
   same mounted pod alive, proves post-restore write/read I/O, and converges the
   CRD/report/operator-snapshot/explain surfaces back to two observed NVMe paths
   and `Ready=True/first_volume_verified`.
+- Phase 114 NVMe/TCP K8s Multi-Volume Mounted Path Isolation is active and
+  blocked by the strict runner. It has already proven the degraded-state
+  isolation half: one affected volume can report
+  `blocked/nvme_multipath_path_missing` with one path while an untouched mounted
+  volume remains `ready/first_volume_verified` with two paths, with both pods
+  preserving UID and I/O during path loss. The restore half exposed a product
+  gap: after the removed path returns, the affected volume is projected as
+  `Ready=True/first_volume_verified` with two paths while its mounted workload
+  returns persistent EIO. Multi-volume mounted restore must stay non-claim until
+  restored-path publication/readiness is gated by positive returned-replica
+  safety evidence or the volume remains non-ready with a precise reason.
 - Later protocol candidates: implement a real NVMe/RDMA target or characterize
   NVMe/TCP performance. Keep these separate so correctness, transport, and
   performance claims do not get mixed.

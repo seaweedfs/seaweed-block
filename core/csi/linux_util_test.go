@@ -52,3 +52,25 @@ func TestParseISCSIMultipathDeviceForIQN_IgnoresUnrelatedMaps(t *testing.T) {
 		t.Fatalf("dev=%q paths=%d want empty", dev, paths)
 	}
 }
+
+func TestNVMeSubsystemHasPathRequiresTargetAddressNotSourceAddress(t *testing.T) {
+	doc := map[string]any{
+		"Subsystems": []any{
+			map[string]any{
+				"NQN": "nqn.2026-05.io.seaweedfs:v1",
+				"Paths": []any{
+					map[string]any{
+						"Address": "traddr=192.168.1.181,trsvcid=4420,src_addr=192.168.1.184",
+						"State":   "live",
+					},
+				},
+			},
+		},
+	}
+	if !nvmeSubsystemHasPath(doc, "nqn.2026-05.io.seaweedfs:v1", "192.168.1.181:4420") {
+		t.Fatal("expected exact traddr/trsvcid path to match")
+	}
+	if nvmeSubsystemHasPath(doc, "nqn.2026-05.io.seaweedfs:v1", "192.168.1.184:4420") {
+		t.Fatal("src_addr must not satisfy requested target traddr")
+	}
+}

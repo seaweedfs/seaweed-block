@@ -258,7 +258,7 @@ func (t *Target) tryProbeBackend(ctx context.Context, openErr error) (frontend.B
 		return nil, false, false
 	}
 	switch ana.ANAState() {
-	case ANAOptimized:
+	case ANAOptimized, ANAInaccessible:
 		return nil, false, false
 	}
 	backend, err := t.cfg.ProbeProvider.ProbeBackend(ctx, t.cfg.VolumeID)

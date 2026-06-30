@@ -97,11 +97,12 @@ type mockNVMeUtil struct {
 	getDeviceResult string
 	getDeviceErr    error
 	connected       map[string]bool
+	connectedPaths  map[string]bool
 	calls           []string
 }
 
 func newMockNVMeUtil() *mockNVMeUtil {
-	return &mockNVMeUtil{connected: map[string]bool{}, getDeviceResult: "/dev/nvme1n1"}
+	return &mockNVMeUtil{connected: map[string]bool{}, connectedPaths: map[string]bool{}, getDeviceResult: "/dev/nvme1n1"}
 }
 
 func (m *mockNVMeUtil) Connect(_ context.Context, addr, nqn string) error {
@@ -110,6 +111,7 @@ func (m *mockNVMeUtil) Connect(_ context.Context, addr, nqn string) error {
 		return m.connectErr
 	}
 	m.connected[nqn] = true
+	m.connectedPaths[nqn+"|"+addr] = true
 	return nil
 }
 
@@ -119,6 +121,11 @@ func (m *mockNVMeUtil) Disconnect(_ context.Context, nqn string) error {
 		return m.disconnectErr
 	}
 	delete(m.connected, nqn)
+	for key := range m.connectedPaths {
+		if strings.HasPrefix(key, nqn+"|") {
+			delete(m.connectedPaths, key)
+		}
+	}
 	return nil
 }
 
@@ -130,6 +137,11 @@ func (m *mockNVMeUtil) GetDeviceByNQN(_ context.Context, nqn string) (string, er
 func (m *mockNVMeUtil) IsConnected(_ context.Context, nqn string) (bool, error) {
 	m.calls = append(m.calls, "isconnected:"+nqn)
 	return m.connected[nqn], nil
+}
+
+func (m *mockNVMeUtil) IsPathConnected(_ context.Context, nqn, addr string) (bool, error) {
+	m.calls = append(m.calls, "ispathconnected:"+addr+":"+nqn)
+	return m.connectedPaths[nqn+"|"+addr], nil
 }
 
 func newMockMountUtil() *mockMountUtil {
@@ -644,8 +656,12 @@ func TestNodeStage_NVMeMultipathConnectsAllTargets(t *testing.T) {
 	}
 	want := []string{
 		"isconnected:nqn.2026-05.io.seaweedfs:v1",
+		"ispathconnected:127.0.0.1:4420:nqn.2026-05.io.seaweedfs:v1",
 		"connect:127.0.0.1:4420:nqn.2026-05.io.seaweedfs:v1",
+		"ispathconnected:127.0.0.1:4421:nqn.2026-05.io.seaweedfs:v1",
 		"connect:127.0.0.1:4421:nqn.2026-05.io.seaweedfs:v1",
+		"ispathconnected:127.0.0.1:4420:nqn.2026-05.io.seaweedfs:v1",
+		"ispathconnected:127.0.0.1:4421:nqn.2026-05.io.seaweedfs:v1",
 		"getdevice:nqn.2026-05.io.seaweedfs:v1",
 	}
 	for i, w := range want {
@@ -726,6 +742,81 @@ func TestNodeStage_NVMeMultipathWaitsForRefreshedMultiPortalTarget(t *testing.T)
 	}
 	if info := ns.staged["v1"]; info == nil || !info.multipath || len(info.nvmeAddrs) != 2 {
 		t.Fatalf("staged info=%+v", info)
+	}
+}
+
+func TestNodeStage_NVMeMultipathFailsClosedWithSinglePortal(t *testing.T) {
+	_, mn, mm := newMockISCSIUtil(), newMockNVMeUtil(), newMockMountUtil()
+	ns := newTestNodeWithNVMe(newMockISCSIUtil(), mn, mm)
+
+	_, err := ns.NodeStageVolume(context.Background(), &csipb.NodeStageVolumeRequest{
+		VolumeId:          "v1",
+		StagingTargetPath: t.TempDir(),
+		VolumeCapability:  testVolumeCapability(),
+		PublishContext: map[string]string{
+			"protocol":         "nvme",
+			"nvmeAddr":         "127.0.0.1:4420",
+			"nqn":              "nqn.2026-05.io.seaweedfs:v1",
+			"stage2_multipath": "true",
+		},
+		VolumeContext: map[string]string{
+			"stage2_multipath": "true",
+		},
+	})
+	if err == nil {
+		t.Fatal("expected NVMe multipath stage to fail closed with one portal")
+	}
+	st, _ := status.FromError(err)
+	if st.Code() != codes.FailedPrecondition {
+		t.Fatalf("code=%v want FailedPrecondition err=%v", st.Code(), err)
+	}
+	if len(mn.calls) != 0 {
+		t.Fatalf("single-portal multipath refusal should happen before nvme calls, got %v", mn.calls)
+	}
+}
+
+func TestNodeStage_NVMeRecreatesStagingIdentityForAlreadyConnectedSubsystem(t *testing.T) {
+	_, mn, mm := newMockISCSIUtil(), newMockNVMeUtil(), newMockMountUtil()
+	ns := newTestNodeWithNVMe(newMockISCSIUtil(), mn, mm)
+	nqn := "nqn.2026-05.io.seaweedfs:v1"
+	addrs := []string{"127.0.0.1:4420", "127.0.0.1:4421"}
+	mn.connected[nqn] = true
+	for _, addr := range addrs {
+		mn.connectedPaths[nqn+"|"+addr] = true
+	}
+	staging := t.TempDir()
+
+	_, err := ns.NodeStageVolume(context.Background(), &csipb.NodeStageVolumeRequest{
+		VolumeId:          "v1",
+		StagingTargetPath: staging,
+		VolumeCapability:  testVolumeCapability(),
+		PublishContext: map[string]string{
+			"protocol":         "nvme",
+			"nvmeAddr":         addrs[0],
+			"nvmeAddrs":        strings.Join(addrs, ","),
+			"nqn":              nqn,
+			"stage2_multipath": "true",
+		},
+	})
+	if err != nil {
+		t.Fatalf("NodeStageVolume: %v", err)
+	}
+	if got := readVolumeFile(staging); got != "v1" {
+		t.Fatalf("volume marker=%q want v1", got)
+	}
+	if got := readTargetFile(staging); got != nqn {
+		t.Fatalf("target marker=%q want %s", got, nqn)
+	}
+	if got := readTransportFile(staging); got != transportNVMe {
+		t.Fatalf("transport marker=%q want %s", got, transportNVMe)
+	}
+	if info := ns.staged["v1"]; info == nil || !info.multipath || len(info.nvmeAddrs) != 2 || info.stagingPath != staging {
+		t.Fatalf("staged info=%+v", info)
+	}
+	for _, call := range mn.calls {
+		if strings.HasPrefix(call, "connect:") {
+			t.Fatalf("already connected remount should not reconnect, calls=%v", mn.calls)
+		}
 	}
 }
 

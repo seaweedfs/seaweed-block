@@ -201,7 +201,7 @@ func TestOperatorStatusReconcilerWritesNVMeStatusCamelCase(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	for _, want := range []string{`"nvme"`, `"nvmeAddr":"127.0.0.1:4420"`, `"nvmeAddrs":["127.0.0.1:4420","127.0.0.1:4421"]`, `"pathCount":2`, `"multipathObserved":true`} {
+	for _, want := range []string{`"nvme"`, `"nvmeAddr":"127.0.0.1:4420"`, `"nvmeAddrs":["127.0.0.1:4420","127.0.0.1:4421"]`, `"pathCount":2`, `"multipathObserved":true`, `"reasonCode":""`} {
 		if !strings.Contains(string(raw), want) {
 			t.Fatalf("status JSON missing %s: %s", want, string(raw))
 		}
