@@ -19,6 +19,8 @@ env:
   single_node: "m02"
   sw_block_image: "ghcr.io/seaweedfs/seaweed-block:sha-28a99ce4f644"
   sw_block_csi_image: "ghcr.io/seaweedfs/seaweed-block-csi:sha-28a99ce4f644"
+  sw_block_ref: "sha-28a99ce4f644"     # tested image tag (the artifact under test)
+  sw_block_commit: "28a99ce4f644"      # its commit sha
 
 topology:
   nodes:
@@ -177,6 +179,20 @@ phases:
       - action: assert_greater
         actual: "{{ cleanup_ok_count }}"
         threshold: "0"
+
+  - name: first_volume_provenance
+    actions:
+      # Emit the common control-plane envelope so the shared qa-assert.sh accepts
+      # this block bundle (docs/control-plane-product-contract.md §1). Reached only
+      # after the first-volume asserts pass.
+      - action: emit_provenance
+        product: block
+        tested_ref: "{{ sw_block_ref }}"
+        tested_sha: "{{ sw_block_commit }}"
+        __block_first_volume_ok: "{{ first_volume_ok_count }}"
+        __block_writer_verified: "{{ writer_verified_count }}"
+        __block_reader_verified: "{{ reader_verified_count }}"
+        __block_basic_app_cleanup_ok: "{{ cleanup_ok_count }}"
 
   - name: helm_uninstall_cleanup
     always: true
