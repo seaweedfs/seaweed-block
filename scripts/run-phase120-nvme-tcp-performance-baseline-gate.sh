@@ -376,7 +376,9 @@ kubectl delete storageclass "${SC_NAME}" --ignore-not-found=true --wait=true --t
 sudo -n nvme disconnect-all >/dev/null 2>&1 || true
 helm uninstall "${HELM_RELEASE}" --namespace "${HELM_NAMESPACE}" --wait --timeout 240s \
   >"${ARTIFACT_DIR}/cleanup/helm-uninstall.txt" 2>&1 || true
-SW_BLOCK_ARTIFACT_DIR="${ARTIFACT_DIR}/cleanup/verify" bash scripts/verify-helm-cleanup.sh "${ROOT}" \
+SW_BLOCK_CLEANUP_WAIT_SECONDS="${SW_BLOCK_CLEANUP_WAIT_SECONDS:-180}" \
+SW_BLOCK_ARTIFACT_DIR="${ARTIFACT_DIR}/cleanup/verify" \
+  bash scripts/verify-helm-cleanup.sh "${ROOT}" \
   >"${ARTIFACT_DIR}/cleanup/verify-helm-cleanup.stdout.txt" \
   2>"${ARTIFACT_DIR}/cleanup/verify-helm-cleanup.stderr.txt"
 grep -q '^cleanup_status=ok$' "${ARTIFACT_DIR}/cleanup/verify/cleanup-summary.txt"
