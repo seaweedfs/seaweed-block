@@ -305,20 +305,25 @@ python3 - "${ARTIFACT_DIR}/status/cluster-evidence.json" "${ARTIFACT_DIR}/status
 import json
 import sys
 doc = json.load(open(sys.argv[1]))
-vols = doc.get("volumes") or []
-if len(vols) != 1:
-    raise SystemExit(f"volume_count={len(vols)}, want 1")
-vol = vols[0]
-target = vol.get("publish_target") or ""
-if vol.get("status") != "ready":
-    raise SystemExit(f"volume status={vol.get('status')}, want ready")
+managed = doc.get("managed_volumes") or []
+raw = doc.get("volumes") or []
+if len(managed) != 1:
+    raise SystemExit(f"managed_volume_count={len(managed)}, want 1")
+vol = managed[0]
+target = vol.get("publish_target") or (raw[0].get("publish_target") if raw else "")
+status = vol.get("status")
+reason = vol.get("reason_code") or vol.get("reasonCode") or ""
+if status != "ready":
+    raise SystemExit(f"managed volume status={status}, want ready")
+if reason != "first_volume_verified":
+    raise SystemExit(f"managed volume reason={reason}, want first_volume_verified")
 if ":4420" not in target:
     raise SystemExit(f"unexpected publish_target={target}")
 if target.startswith("127.") or target.startswith("localhost"):
     raise SystemExit(f"loopback target={target}")
 with open(sys.argv[2], "w") as f:
-    f.write("managed_volume_status=ready\n")
-    f.write("managed_volume_reason=first_volume_verified\n")
+    f.write(f"managed_volume_status={status}\n")
+    f.write(f"managed_volume_reason={reason}\n")
     f.write("publish_target_loopback=false\n")
     f.write(f"publish_target={target}\n")
 PY
