@@ -325,13 +325,17 @@ rebuild, delete safety, or cleanup must start as a separate gated phase.
   seam inside `core/frontend/nvme.Target`. TCP remains the only implemented
   public path; RDMA is now a typed target-layer unsupported transport rather
   than just a CLI string rejection.
-- Phase 119 uses `C:\work\rdma\seaweed-mono-rdma-refresh` as the current
+- Phase 119 used `C:\work\rdma\seaweed-mono-rdma-refresh` as the current
   RDMA/VFS/RustVolume/NIXL evidence source. That repo proves useful VFS/object
   acceleration and NIXL-shaped object compatibility, but it does not implement
-  a Linux `nvme connect -t rdma` compatible target. The current decision gate is
-  therefore: build or bind a real NVMe-oF/RDMA protocol layer, keep RDMA scoped
-  to VFS/object/NIXL for now, or first run a block NVMe/TCP performance
+  a Linux `nvme connect -t rdma` compatible target. The decision was to keep
+  RoCE/NVMe-RDMA as a non-claim and first run a block NVMe/TCP performance
   baseline before spending more time on RoCE.
+- Phase 120 is the active plan. It adds a supported-lab Kubernetes PVC gate for
+  the implemented NVMe/TCP path and records sequential write/read MiB/s plus
+  small-write IOPS as baseline evidence only. It does not create a performance
+  SLO, RoCE/NVMe-RDMA claim, GPU/cuObject claim, NIXL claim, broad compatibility
+  claim, or published-image claim.
 - Later protocol candidates: complete a real NVMe/RDMA target, characterize
   NVMe/TCP performance, or bridge to object/NIXL acceleration where the product
   surface is object/storage rather than block PVC. Keep these separate so
@@ -908,11 +912,14 @@ Approximate engineering effort if scope remains tight:
 - Phase 118 NVMe/RDMA Transport Seam is implemented locally: the target has a
   TCP/RDMA selector seam, TCP remains the only implemented path, and RDMA stays
   a typed unsupported/public refusal.
-- Phase 119 is the active plan. It imports the current mono RDMA/VFS/RustVolume
-  and NIXL evidence from `C:\work\rdma\seaweed-mono-rdma-refresh`, separates
-  object/VFS acceleration from block NVMe/RDMA, and chooses whether the next
-  block protocol step is a real NVMe-oF/RDMA implementation, a scoped non-claim,
-  or a block NVMe/TCP performance baseline.
+- Phase 119 is closed as an evidence decision. It imported the current mono
+  RDMA/VFS/RustVolume and NIXL evidence from
+  `C:\work\rdma\seaweed-mono-rdma-refresh`, separated object/VFS acceleration
+  from block NVMe/RDMA, and chose a block NVMe/TCP performance baseline as the
+  next conservative step.
+- Phase 120 is active. It packages the supported-lab NVMe/TCP performance
+  baseline gate and keeps all performance, RoCE/NVMe-RDMA, GPU/cuObject, NIXL,
+  broad compatibility, and published-image claims explicitly out of scope.
 - Phase 41-44 are the Operation Layer v0.5 release train: lifecycle-owner
   foundation, real API/admission proof, first bounded finalizer mutation, and
   delete lifecycle close gate.

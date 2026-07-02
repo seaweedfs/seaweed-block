@@ -616,16 +616,22 @@ Recommended order from here:
     unsupported error at the target layer, and `blockvolume
     --nvme-transport=rdma` still refuses publicly until a real RDMA listener
     lands.
-77. Phase 119: Mono RDMA Evidence And NVMe/RDMA Decision. **Active**
+77. Phase 119: Mono RDMA Evidence And NVMe/RDMA Decision. **Closed
+    2026-07-02, evidence decision**
     Use the current mono RDMA/VFS/RustVolume/NIXL work under
     `C:\work\rdma\seaweed-mono-rdma-refresh` as read-only evidence before
     adding more block RDMA code. That work proves real VFS/object acceleration
     and NIXL-shaped object compatibility, but it is not an NVMe-oF/RDMA target
     implementation. Phase 119 records the reusable components and performance
-    evidence, keeps RoCE/NVMe-RDMA as a non-claim, and chooses the next concrete
-    path: build or bind a real NVMe-oF/RDMA protocol layer, keep RDMA scoped to
-    VFS/object/NIXL for now, or first run a block NVMe/TCP performance baseline
-    to find the actual bottleneck.
+    evidence, keeps RoCE/NVMe-RDMA as a non-claim, and chooses the conservative
+    next step: first run a block NVMe/TCP performance baseline to find the
+    actual bottleneck.
+78. Phase 120: NVMe/TCP Performance Baseline. **Active**
+    Add a supported-lab Kubernetes PVC gate that measures the current NVMe/TCP
+    path before any RoCE/NVMe-RDMA investment. The gate records sequential
+    write/read MiB/s and small-write IOPS as baseline evidence only, with
+    explicit non-claims for RoCE, NVMe/RDMA, performance SLO, GPU/cuObject,
+    NIXL, broad compatibility, and published-image support.
 
 The internal release-train contract is
 `internal/docs/ref/operation-layer-v0.5-release-train.md`. Phases 41-44 close

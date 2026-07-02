@@ -1,0 +1,128 @@
+name: nvme-tcp-performance-baseline-chain
+timeout: 40m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: pre_clean
+    actions:
+      - action: pre_run_cleanup
+        node: m02
+        kill_patterns: "blockmaster,blockvolume,blockcsi,iscsi-target"
+        nvme_disconnect: "true"
+        iscsi_logout_prefix: "iqn.2026-05.io.seaweedfs"
+      - action: exec
+        node: m02
+        timeout: 5m
+        cmd: "helm status sw-block --namespace kube-system >/dev/null 2>&1 && helm uninstall sw-block --namespace kube-system --wait --timeout 240s || true; kubectl -n default delete pod sw-block-phase120-perf --ignore-not-found=true --wait=true --timeout=60s || true; kubectl -n default delete pvc sw-block-phase120-pvc --ignore-not-found=true --wait=true --timeout=60s || true; kubectl delete storageclass sw-block-phase120 --ignore-not-found=true --wait=true --timeout=60s || true; kubectl get pv --no-headers | awk '/sw-block-phase120/ {print $1}' | xargs -r -n1 kubectl patch pv --type=merge -p '{\"metadata\":{\"finalizers\":[]}}' >/dev/null 2>&1 || true; kubectl get pv --no-headers | awk '/sw-block-phase120/ {print $1}' | xargs -r kubectl delete pv --wait=false >/dev/null 2>&1 || true; kubectl -n kube-system get swblockvolumes.block.seaweedfs.com -o name 2>/dev/null | xargs -r -n1 kubectl -n kube-system patch --type=merge -p '{\"metadata\":{\"finalizers\":[]}}' >/dev/null 2>&1 || true; kubectl -n kube-system delete swblockvolumes.block.seaweedfs.com --all --ignore-not-found=true --wait=true --timeout=60s >/dev/null 2>&1 || true; kubectl -n kube-system delete swblockclusters.block.seaweedfs.com --all --ignore-not-found=true --wait=true --timeout=60s >/dev/null 2>&1 || true; kubectl delete validatingadmissionpolicy,validatingadmissionpolicybinding -l app.kubernetes.io/instance=sw-block --ignore-not-found=true >/dev/null 2>&1 || true; kubectl delete crd swblockclusters.block.seaweedfs.com swblockvolumes.block.seaweedfs.com swblockreplicaeligibilities.block.seaweedfs.com swblockreplicarebuilds.block.seaweedfs.com swblockreplicafailbacks.block.seaweedfs.com swblockfrontendpublications.block.seaweedfs.com --ignore-not-found=true --wait=true --timeout=60s >/dev/null 2>&1 || true; sudo -n nvme disconnect-all >/dev/null 2>&1 || true; rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase120-nvme-perf && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase120-nvme-perf"
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+
+  - name: run_gate
+    actions:
+      - action: exec
+        node: m02
+        timeout: 35m
+        cmd: "cd {{ product_root }} && SW_BLOCK_ARTIFACT_DIR=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase120-nvme-perf bash scripts/run-phase120-nvme-tcp-performance-baseline-gate.sh {{ product_root }}"
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+        env.SW_BLOCK_IMPORT_K3S_SSH_KEY: "/opt/work/testdev_key"
+
+  - name: assert_summary
+    actions:
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase120-nvme-perf/phase120-nvme-tcp-performance-baseline-summary.txt"
+        pattern: "^phase120_nvme_tcp_performance_baseline_status=ok$"
+        save_as: phase120_status_ok
+      - action: assert_greater
+        actual: "{{ phase120_status_ok }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase120-nvme-perf/phase120-nvme-tcp-performance-baseline-summary.txt"
+        pattern: "^protocol=nvme$"
+        save_as: protocol_nvme
+      - action: assert_greater
+        actual: "{{ protocol_nvme }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase120-nvme-perf/phase120-nvme-tcp-performance-baseline-summary.txt"
+        pattern: "^frontend_transport=tcp$"
+        save_as: frontend_transport_tcp
+      - action: assert_greater
+        actual: "{{ frontend_transport_tcp }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase120-nvme-perf/phase120-nvme-tcp-performance-baseline-summary.txt"
+        pattern: "^performance_claim_allowed=false$"
+        save_as: performance_claim_denied
+      - action: assert_greater
+        actual: "{{ performance_claim_denied }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase120-nvme-perf/phase120-nvme-tcp-performance-baseline-summary.txt"
+        pattern: "^roce_claim_allowed=false$"
+        save_as: roce_claim_denied
+      - action: assert_greater
+        actual: "{{ roce_claim_denied }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase120-nvme-perf/phase120-nvme-tcp-performance-baseline-summary.txt"
+        pattern: "^seq_write_mibps=[0-9]"
+        save_as: seq_write_metric
+      - action: assert_greater
+        actual: "{{ seq_write_metric }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase120-nvme-perf/phase120-nvme-tcp-performance-baseline-summary.txt"
+        pattern: "^seq_read_mibps=[0-9]"
+        save_as: seq_read_metric
+      - action: assert_greater
+        actual: "{{ seq_read_metric }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase120-nvme-perf/phase120-nvme-tcp-performance-baseline-summary.txt"
+        pattern: "^small_write_iops=[0-9]"
+        save_as: small_write_metric
+      - action: assert_greater
+        actual: "{{ small_write_metric }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase120-nvme-perf/phase120-nvme-tcp-performance-baseline-summary.txt"
+        pattern: "^final_data_verified=true$"
+        save_as: final_data_verified
+      - action: assert_greater
+        actual: "{{ final_data_verified }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase120-nvme-perf/phase120-nvme-tcp-performance-baseline-summary.txt"
+        pattern: "^cleanup_status=ok$"
+        save_as: cleanup_ok
+      - action: assert_greater
+        actual: "{{ cleanup_ok }}"
+        threshold: "0"
+
+  - name: collect
+    always: true
+    actions:
+      - action: collect_path
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase120-nvme-perf"
+        name: "remote-phases"
+        ignore_error: true
