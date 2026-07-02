@@ -321,7 +321,12 @@ rebuild, delete safety, or cleanup must start as a separate gated phase.
 - Phase 117 has a pinned-image smoke gate and TestOps scenario ready. It should
   run when matching images exist. If images are not published, the result is
   artifact-blocked rather than a product failure.
-- Later protocol candidates: implement a real NVMe/RDMA target or characterize
+- Phase 118 starts the NVMe/RDMA/RoCE implementation track with a transport
+  seam inside `core/frontend/nvme.Target`. TCP remains the only implemented
+  public path; RDMA is now a typed target-layer unsupported transport rather
+  than just a CLI string rejection. The next protocol step is a minimal RDMA
+  listener or a concrete lab-backed blocker from the RDMA integration work.
+- Later protocol candidates: complete a real NVMe/RDMA target or characterize
   NVMe/TCP performance. Keep these separate so correctness, transport, and
   performance claims do not get mixed.
 

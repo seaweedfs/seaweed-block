@@ -1,6 +1,6 @@
 package nvme
 
-// NVMe/TCP target — TCP listener + accept loop.
+// NVMe-oF target — listener + accept loop.
 //
 // Symmetric with core/frontend/iscsi/target.go: one Target per
 // volume, opens a frontend.Backend per session via the supplied
@@ -23,9 +23,13 @@ type ProbeBackendProvider interface {
 	ProbeBackend(ctx context.Context, volumeID string) (frontend.Backend, error)
 }
 
-// TargetConfig configures an NVMe/TCP Target.
+// TargetConfig configures an NVMe-oF Target.
 type TargetConfig struct {
-	// Listen TCP address (":0" for tests).
+	// Transport selects the NVMe-oF listener. Empty means TCP. RDMA is a
+	// reserved seam and currently returns ErrTransportUnsupported.
+	Transport Transport
+
+	// Listen address (":0" for tests).
 	Listen string
 
 	// SubsysNQN is the subsystem NVMe Qualified Name advertised
@@ -58,9 +62,13 @@ type TargetConfig struct {
 
 	// Logger (nil → log.Default).
 	Logger *log.Logger
+
+	// ListenerFactory is test/future-transport injection. Nil uses the built-in
+	// TCP listener and explicit RDMA unsupported boundary.
+	ListenerFactory ListenerFactory
 }
 
-// Target is a TCP-listening NVMe/TCP target.
+// Target is an NVMe-oF target.
 type Target struct {
 	cfg TargetConfig
 
@@ -144,9 +152,14 @@ func (t *Target) Start() (string, error) {
 	if t.ln != nil {
 		return "", fmt.Errorf("nvme: Target already started")
 	}
-	ln, err := net.Listen("tcp", t.cfg.Listen)
+	listen := defaultListenerFactory
+	if t.cfg.ListenerFactory != nil {
+		listen = t.cfg.ListenerFactory
+	}
+	transport := normalizeTransport(t.cfg.Transport)
+	ln, err := listen(transport, t.cfg.Listen)
 	if err != nil {
-		return "", fmt.Errorf("nvme: listen %q: %w", t.cfg.Listen, err)
+		return "", fmt.Errorf("nvme: listen transport=%s addr=%q: %w", transport, t.cfg.Listen, err)
 	}
 	t.ln = ln
 	go t.acceptLoop(ln)

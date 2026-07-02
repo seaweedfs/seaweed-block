@@ -878,6 +878,7 @@ func run(f flags) int {
 			probeProvider = &durableProbeProvider{provider: durableProv}
 		}
 		nvmeTarget = nvme.NewTarget(nvme.TargetConfig{
+			Transport:     nvme.Transport(f.nvmeTransport),
 			Listen:        f.nvmeListen,
 			SubsysNQN:     f.nvmeSubsysNQN,
 			VolumeID:      f.volumeID,

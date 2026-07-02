@@ -609,6 +609,14 @@ Recommended order from here:
     not available, this phase blocks as artifact-readiness, not as product
     failure. Do not mark the NVMe/TCP path as a published-image release claim
     until this smoke passes.
+76. Phase 118: NVMe/RDMA Transport Seam. **Active**
+    Start the RoCE/NVMe-RDMA implementation track without making a false RoCE
+    claim. The NVMe target now has an explicit transport selector and listener
+    seam: TCP remains the default implemented path, RDMA returns a typed
+    unsupported error at the target layer, and `blockvolume
+    --nvme-transport=rdma` still refuses publicly until a real RDMA listener
+    lands. The next step is a minimal RDMA listener or a concrete lab-backed
+    blocker from the RDMA integration work.
 
 The internal release-train contract is
 `internal/docs/ref/operation-layer-v0.5-release-train.md`. Phases 41-44 close

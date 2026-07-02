@@ -1,84 +1,86 @@
-# Current Plan: Phase 117 NVMe/TCP Published-Image Release Smoke
+# Current Plan: Phase 118 NVMe/RDMA Transport Seam
 
-Status: gate implemented; waiting for matching published images.
+Status: D1 implemented locally; QA gate pending.
 
-Phase 116 is closed:
+Phase 117 remains ready but artifact-blocked until matching published images
+exist:
 
 ```text
-Result: docs PASS
-Docs:
-  README.md
-  docs/user-capabilities.md
-  docs/releases/README.md
-  docs/releases/nvme-tcp-supported-lab.md
+SW_BLOCK_RELEASE_IMAGE=ghcr.io/seaweedfs/seaweed-block:sha-<commit>
+SW_BLOCK_CSI_RELEASE_IMAGE=ghcr.io/seaweedfs/seaweed-block-csi:sha-<same-commit>
 ```
 
 ## Why This Is Next
 
-Phases 100-115 are source-gated and live-lab validated. Phase 116 packaged the
-claim boundary for users. The remaining release gap is artifact verification:
-the documented NVMe/TCP path must be proven on matching published
-`seaweed-block` and `seaweed-block-csi` images before it becomes a
-published-image claim.
+Phases 100-115 proved the NVMe/TCP supported-lab path. Phase 116 packaged the
+claim, and Phase 117 prepared the published-image smoke. The next product
+expansion is NVMe/RDMA/RoCE, but the current target is hardwired to TCP and
+Phase 104 intentionally rejects `--nvme-transport=rdma`.
+
+The first useful implementation step is not a fake RoCE claim. It is a narrow
+target transport seam that:
+
+- preserves the TCP data path unchanged;
+- gives the target an explicit transport selector;
+- returns a typed unsupported error for RDMA;
+- keeps the public blockvolume CLI refusal until a real RDMA listener exists.
 
 ## Product Goal
 
-Validate that the published image pair contains the same NVMe/TCP behavior that
-passed in source-gated lab runs:
+Move from "RDMA is only a command-line refusal" to "the NVMe target has a real
+transport boundary where an RDMA listener can be inserted and tested."
 
-- generated Helm values select `protocol=nvme`;
-- chart render enables external NVMe/TCP and stage-2 multipath;
-- one RF=2 NVMe/TCP PVC mounts into an app pod;
-- writer/reader I/O passes;
-- `SwBlockVolume.status.nvme.pathCount=2`;
-- status is `Ready=True/first_volume_verified`;
-- cleanup verifier returns zero residue.
+This lets the next phase focus on the hard part: mapping an RDMA-capable
+listener into the existing NVMe session model without bypassing authority,
+readiness, ANA, cleanup, or status.
 
-## Inputs Required
+## Deliverables
 
-Exact matching image tags or digests:
+Implemented:
 
 ```text
-ghcr.io/seaweedfs/seaweed-block:<candidate>
-ghcr.io/seaweedfs/seaweed-block-csi:<candidate>
+core/frontend/nvme/transport.go
+core/frontend/nvme/transport_test.go
+scripts/run-phase118-nvme-rdma-transport-seam-gate.sh
+testops/scenarios/nvme-rdma-transport-seam-chain.yaml
+internal/docs/qa-assignments/phase118-nvme-rdma-transport-seam-qa-signoff.md
 ```
 
-Both images must be built from the same source commit. If either image is
-missing, mark this phase artifact-blocked, not product-failed.
-
-## Gate
-
-Use a small release-smoke gate rather than rerunning every Phase 100-115 gate:
+Changed:
 
 ```text
-scripts/run-phase117-nvme-release-image-smoke-gate.sh
-testops/scenarios/nvme-tcp-release-image-smoke-chain.yaml
+core/frontend/nvme/target.go
+cmd/blockvolume/main.go
 ```
 
-If `SW_BLOCK_RELEASE_IMAGE` / `SW_BLOCK_CSI_RELEASE_IMAGE` are not supplied, or
-if either manifest is missing, the gate writes
-`phase117_nvme_release_image_smoke_status=blocked_missing_release_images`. That
-is an artifact-readiness blocker, not a product failure.
+## Gate Evidence
 
-Minimum terminal evidence:
+Required terminal evidence:
 
 ```text
-phase117_nvme_release_image_smoke_status=ok
-image_pair_commit_match=true
-helm_values_protocol=nvme
-stage2_multipath_enabled=true
-writer_verified=true
-reader_verified=true
-volume_status=ready
-volume_reason=first_volume_verified
-nvme_path_count=2
-cleanup_status=ok
-failure_count=0
+phase118_nvme_rdma_transport_seam_status=ok
+go_test_nvme_blockvolume=ok
+target_transport_seam_present=true
+rdma_target_error_typed=true
+blockvolume_rdma_public_refusal=true
+rdma_listener_implemented=false
+roce_claim_allowed=false
 ```
+
+## Next After D1
+
+Phase 119 should choose one concrete RDMA implementation path:
+
+- implement a minimal RDMA listener that can satisfy the target listener seam;
+- or prove, with code and lab evidence, which dependency blocks that listener
+  (`libibverbs`, `rdma-core`, kernel ULP, SPDK/NVMe target reuse, or cgo
+  packaging).
+
+Do not add Kubernetes/Helm RoCE flags until a local target listener can accept a
+real RDMA connection or emits a precise implementation blocker.
 
 ## Non-Claims
 
-Phase 117 does not add RoCE/NVMe-RDMA, performance/SLO, broad host
-compatibility, production HA, node-loss survival, backup/restore, or unbounded
-path churn claims. It only verifies that the published image pair can run the
-representative supported-lab NVMe/TCP path.
+Phase 118 does not claim NVMe/RDMA attach, RoCE I/O, performance/SLO, broad
+host compatibility, production HA, node-loss survival, backup/restore, or
+published-image support.
