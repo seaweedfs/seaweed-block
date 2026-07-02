@@ -5,6 +5,19 @@ k3s lab and delivering a verdict. You should be able to follow this end-to-end
 without asking for more context. Read it top to bottom the first time; after that
 use the [cheat sheet](#11-cheat-sheet).
 
+> **Unified TestOps context:** before running block gates as a reusable test
+> agent, read the platform docs in
+> `C:\work\seaweedfs\learn\sw-test-runner-standalone\docs\`:
+>
+> 1. `unified-testops.md` — global platform overview and 9099 dashboard/submit model.
+> 2. `wiki/submitting.md` — developer submit and scenario authoring workflow.
+> 3. `control-plane-product-contract.md` — common envelope, suite, worker, and product rows.
+> 4. `qa-bundle-assert.md` — `qa-assert.sh` acceptance contract.
+>
+> This file is the **block phase-gate specialization** of that platform. If the
+> Unified TestOps docs and this file disagree, follow this file for current
+> seaweed_block phase gates and report the doc drift.
+
 > **Your job:** the dev pushes a phase's commits + a gate, you run the **live**
 > gate on the lab and report **PASS / FAIL / PARTIAL** with the exact terminal
 > evidence. You do **not** edit product code. The dev's `go test` / `helm lint` /

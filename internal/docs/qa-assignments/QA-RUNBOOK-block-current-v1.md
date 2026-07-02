@@ -12,10 +12,22 @@ project, evidence rows, and failure classes are block's, not RDMA's.
 > [`QA-AGENT-RUNBOOK.md`](QA-AGENT-RUNBOOK.md). This runbook is the higher-level
 > *which path / accept criteria / provenance* SOP.
 
-> **Block ≠ RDMA in one important way:** there is **no 9099 submit-queue/worker**
-> for block (that is RDMA-specific). A block gate is run by the QA agent with
-> `swblock.exe` directly: sync `product_root` → `swblock run` → read the dashboard
-> bundle. Do not pretend a `POST /api/rdma/submit` runs block.
+> **Unified TestOps parent docs:** the platform-level contract lives in
+> `C:\work\seaweedfs\learn\sw-test-runner-standalone\docs\`:
+> `unified-testops.md`, `wiki/submitting.md`,
+> `control-plane-product-contract.md`, and `qa-bundle-assert.md`. Read those for
+> the common 9099 dashboard, bundle envelope, suite/worker model, and shared
+> `qa-assert.sh` contract. This file adds the block-specific current-state
+> rules.
+
+> **Current block split:** the unified runner repo now has a `block-ci` worker
+> script for the canonical published-image first-volume gate. Most active
+> seaweed_block phase gates still validate a source branch or local
+> `sw-block:local` image and are run by the QA agent with `swblock.exe`
+> directly: sync `product_root` → `swblock run` → read/assert the bundle. Do not
+> use `POST /api/rdma/submit` for block; use `/api/block/submit` only when the
+> assigned gate is registered in the TestOps block worker and the tested ref is
+> a published image tag.
 
 ## 0. What To Run
 
@@ -23,9 +35,44 @@ Pick exactly one path.
 
 | Path | Use When | Result Can Be Used For |
 | --- | --- | --- |
-| Standard gate | A reviewable branch / commit (pushed, no dirty source) | QA verdict / phase or release evidence |
+| `block-ci` worker gate | Canonical published-image block gate registered in TestOps | Release/artifact evidence after `qa-assert.sh` |
+| Standard phase gate | A reviewable branch / commit (pushed, no dirty source) | QA verdict / phase evidence |
 | Adhoc dirty debug | Developer has a local uncommitted `sw-block` build | Debug only, **not** QA ACCEPT |
 | Deep runbook | A standard gate fails in/near a specialty area (SmartWAL, iSCSI/NVMe OS, residue) | Specialty QA evidence |
+
+## 0a. Unified `block-ci` Worker Gate
+
+Use this only when the assigned gate is the canonical TestOps block worker path:
+a published `seaweed-block` / `seaweed-block-csi` image tag, staged harness, and
+`docs/qa-profiles/block.expect`.
+
+Runner repo entry point:
+
+```text
+C:\work\seaweedfs\learn\sw-test-runner-standalone\scripts\run-block-ci.sh
+```
+
+Contract:
+
+- ref is a published image tag such as `sha-...`, not a dirty source tree;
+- worker stages the block harness to m02 `product_root`;
+- worker runs `swblock` with `project=block-ci`;
+- worker runs:
+
+  ```bash
+  scripts/qa-assert.sh <bundle> --ref <tag> --profile docs/qa-profiles/block.expect
+  ```
+
+- success prints `Block CI PASS` and the dashboard path:
+
+  ```text
+  http://192.168.1.181:9099/?project=block-ci
+  ```
+
+If the feature under review requires a new source commit, a new scenario, or a
+local `sw-block:local` build, do **not** force it through `block-ci`. Use the
+standard phase-gate path below and report it as phase evidence, not release
+artifact evidence.
 
 ## 1. Standard Gate — Reviewable Branch/Commit
 
