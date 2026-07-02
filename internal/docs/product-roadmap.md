@@ -324,11 +324,18 @@ rebuild, delete safety, or cleanup must start as a separate gated phase.
 - Phase 118 starts the NVMe/RDMA/RoCE implementation track with a transport
   seam inside `core/frontend/nvme.Target`. TCP remains the only implemented
   public path; RDMA is now a typed target-layer unsupported transport rather
-  than just a CLI string rejection. The next protocol step is a minimal RDMA
-  listener or a concrete lab-backed blocker from the RDMA integration work.
-- Later protocol candidates: complete a real NVMe/RDMA target or characterize
-  NVMe/TCP performance. Keep these separate so correctness, transport, and
-  performance claims do not get mixed.
+  than just a CLI string rejection.
+- Phase 119 uses `C:\work\rdma\seaweed-mono-rdma-refresh` as the current
+  RDMA/VFS/RustVolume/NIXL evidence source. That repo proves useful VFS/object
+  acceleration and NIXL-shaped object compatibility, but it does not implement
+  a Linux `nvme connect -t rdma` compatible target. The current decision gate is
+  therefore: build or bind a real NVMe-oF/RDMA protocol layer, keep RDMA scoped
+  to VFS/object/NIXL for now, or first run a block NVMe/TCP performance
+  baseline before spending more time on RoCE.
+- Later protocol candidates: complete a real NVMe/RDMA target, characterize
+  NVMe/TCP performance, or bridge to object/NIXL acceleration where the product
+  surface is object/storage rather than block PVC. Keep these separate so
+  correctness, transport, and performance claims do not get mixed.
 
 ### Track E: Protocol / Backend Expansion
 
@@ -895,6 +902,17 @@ Approximate engineering effort if scope remains tight:
   It does not add product
   behavior; it converts the Phase 100/101 source/lab claim into a
   published-image claim once matching release images exist and pass the gate.
+- Phase 117 has the newer NVMe/TCP published-image smoke gate ready and remains
+  artifact-blocked until matching `seaweed-block` and `seaweed-block-csi`
+  images exist.
+- Phase 118 NVMe/RDMA Transport Seam is implemented locally: the target has a
+  TCP/RDMA selector seam, TCP remains the only implemented path, and RDMA stays
+  a typed unsupported/public refusal.
+- Phase 119 is the active plan. It imports the current mono RDMA/VFS/RustVolume
+  and NIXL evidence from `C:\work\rdma\seaweed-mono-rdma-refresh`, separates
+  object/VFS acceleration from block NVMe/RDMA, and chooses whether the next
+  block protocol step is a real NVMe-oF/RDMA implementation, a scoped non-claim,
+  or a block NVMe/TCP performance baseline.
 - Phase 41-44 are the Operation Layer v0.5 release train: lifecycle-owner
   foundation, real API/admission proof, first bounded finalizer mutation, and
   delete lifecycle close gate.

@@ -1,86 +1,150 @@
-# Current Plan: Phase 118 NVMe/RDMA Transport Seam
+# Current Plan: Phase 119 Mono RDMA Evidence And NVMe/RDMA Decision
 
-Status: D1 implemented locally; QA gate pending.
+Status: planning/evidence import. No block data-plane code changes yet.
 
-Phase 117 remains ready but artifact-blocked until matching published images
-exist:
+Phase 118 added the narrow NVMe target transport seam:
 
 ```text
-SW_BLOCK_RELEASE_IMAGE=ghcr.io/seaweedfs/seaweed-block:sha-<commit>
-SW_BLOCK_CSI_RELEASE_IMAGE=ghcr.io/seaweedfs/seaweed-block-csi:sha-<same-commit>
+TCP target path: implemented and default
+RDMA target path: typed unsupported at target layer
+blockvolume --nvme-transport=rdma: still public refusal
 ```
 
-## Why This Is Next
+Phase 119 answers the next question before adding code: can the RDMA work in
+`C:\work\rdma\seaweed-mono-rdma-refresh` be reused for Seaweed Block's
+NVMe/RDMA path, and what does its performance evidence actually prove?
 
-Phases 100-115 proved the NVMe/TCP supported-lab path. Phase 116 packaged the
-claim, and Phase 117 prepared the published-image smoke. The next product
-expansion is NVMe/RDMA/RoCE, but the current target is hardwired to TCP and
-Phase 104 intentionally rejects `--nvme-transport=rdma`.
+## Source Under Review
 
-The first useful implementation step is not a fake RoCE claim. It is a narrow
-target transport seam that:
+Read-only source:
 
-- preserves the TCP data path unchanged;
-- gives the target an explicit transport selector;
-- returns a typed unsupported error for RDMA;
-- keeps the public blockvolume CLI refusal until a real RDMA listener exists.
+```text
+C:\work\rdma\seaweed-mono-rdma-refresh
+branch: rdma/object-protocol-migration
+```
 
-## Product Goal
+Important: that repo currently has unrelated dirty worktree changes. Treat it
+as a reference source only unless explicitly working in that repo.
 
-Move from "RDMA is only a command-line refusal" to "the NVMe target has a real
-transport boundary where an RDMA listener can be inserted and tested."
+Relevant mono components:
 
-This lets the next phase focus on the hard part: mapping an RDMA-capable
-listener into the existing NVMe session model without bypassing authority,
-readiness, ANA, cleanup, or status.
+- `enterprise/rust/sw-rdma`: Linux `real-rdma` one-sided RC verbs over
+  `rdma_cm`/libibverbs; memory registration, RDMA READ/WRITE, local MR reuse,
+  completions, and typed unsupported behavior outside Linux/feature builds.
+- `enterprise/rust/sw-rdma-loader`: volume transport and `pipes x slots`
+  runtime pool used by VFS/object paths.
+- `enterprise/rust/sw-rdma-vfs`: VFS adapter and M01/M02 read/write gates.
+- `enterprise/rust/sw-rdma-object`: S3/object RDMA token and `x-rdma-info`
+  registered-client path.
+- NIXL research path: `type=seaweed` object/storage adapter work, currently
+  CPU descriptor focused; no GPU/cuObject production claim.
+
+## What The Mono Evidence Proves
+
+The mono work proves real acceleration in the VFS/object lanes:
+
+- VFS 128 MiB read matrix: HTTP about `87 MiB/s`; native RC about
+  `627-646 MiB/s` in the recorded smoke.
+- Later VFS 1 GiB sequential read after copy-path fixes: practical release
+  ceiling about `1.0-1.1 GiB/s` through the mount.
+- S3 registered-client empty-body GET: recorded about `298.5 MiB/s` for
+  `20MiB/c32` and `1799.6 MiB/s` for `128MiB/c32`.
+- NIXL-shaped CPU smoke and local NIXL `type=seaweed` external-descriptor
+  plugin smoke pass, but they are object/storage compatibility proofs, not
+  GPU/cuObject or block-device proofs.
+
+The mono work also records an important negative result:
+
+- Old SRA object path is still materially faster: normal-body old SRA around
+  `3.3 GiB/s`, sink/status path around `5.5 GiB/s`.
+- Current mono object path is correctness-migrated but not performance-parity
+  with the old SRA hot path.
+
+## Why This Does Not Directly Implement Block NVMe/RDMA
+
+Seaweed Block's NVMe frontend is an NVMe-oF target surface. A Linux host
+initiator expects:
+
+```text
+nvme connect -t rdma ...
+  -> NVMe-oF/RDMA capsules and queue pairs
+  -> controller/session semantics
+  -> namespace I/O commands
+```
+
+The mono `sw-rdma` path provides:
+
+```text
+RDMA READ/WRITE primitives
+  -> registered memory descriptors
+  -> VFS/object transfer maps
+  -> out-of-band control plane for addr/rkey
+```
+
+Those primitives are useful engineering substrate and performance evidence, but
+they are not an NVMe-oF/RDMA listener. Reusing them for block requires a real
+NVMe/RDMA protocol layer or a dependency that already provides one. A plain
+`net.Listener`-style adapter is not enough.
 
 ## Deliverables
 
-Implemented:
+1. Record a mono RDMA evidence assessment for block engineers:
 
-```text
-core/frontend/nvme/transport.go
-core/frontend/nvme/transport_test.go
-scripts/run-phase118-nvme-rdma-transport-seam-gate.sh
-testops/scenarios/nvme-rdma-transport-seam-chain.yaml
-internal/docs/qa-assignments/phase118-nvme-rdma-transport-seam-qa-signoff.md
+   ```text
+   internal/docs/ref/phase119-mono-rdma-acceleration-assessment.md
+   ```
+
+2. Keep the Phase 118 public boundary unchanged:
+
+   ```text
+   --nvme-transport=rdma remains unsupported
+   no RoCE attach claim
+   no NVMe/RDMA performance claim
+   ```
+
+3. Define the next implementation decision as one of:
+
+   - **Path A:** build or bind a real NVMe-oF/RDMA target protocol layer;
+   - **Path B:** prove a concrete blocker and keep RDMA scoped to
+     VFS/object/NIXL, while block continues on NVMe/TCP;
+   - **Path C:** defer NVMe/RDMA and first run a block NVMe/TCP performance
+     baseline so the product has a measured storage-performance reference.
+
+## Gate Commands To Reuse From Mono
+
+If the RDMA lab is available, the relevant mono gates are:
+
+```powershell
+# VFS/RustVolume read/write and matrix smoke
+cd C:\work\rdma\seaweed-mono-rdma-refresh
+.\enterprise\rust\sw-rdma-vfs\tests\lab\rdma-write-gate\run.ps1 `
+  -RunV1Acceptance -RunReadMatrixSmoke
+
+# S3 object registered CPU descriptor / NIXL-shaped CPU path
+.\enterprise\rust\sw-rdma-object\tests\lab\s3-object-loader-store\run.ps1 `
+  -ClientRdmaEndpoint -RegisteredClientGetPerf
+
+# NIXL-shaped CPU and local type=seaweed plugin smoke
+.\enterprise\rust\sw-rdma-object\tests\lab\s3-object-loader-store\run.ps1 `
+  -NixlCpuSmoke -NixlPluginSmoke
 ```
 
-Changed:
+These gates answer whether the mono VFS/object RDMA lanes are healthy. They do
+not answer whether Seaweed Block has a working NVMe/RDMA initiator attach.
 
-```text
-core/frontend/nvme/target.go
-cmd/blockvolume/main.go
-```
+## Exit Criteria
 
-## Gate Evidence
+Phase 119 can close when:
 
-Required terminal evidence:
-
-```text
-phase118_nvme_rdma_transport_seam_status=ok
-go_test_nvme_blockvolume=ok
-target_transport_seam_present=true
-rdma_target_error_typed=true
-blockvolume_rdma_public_refusal=true
-rdma_listener_implemented=false
-roce_claim_allowed=false
-```
-
-## Next After D1
-
-Phase 119 should choose one concrete RDMA implementation path:
-
-- implement a minimal RDMA listener that can satisfy the target listener seam;
-- or prove, with code and lab evidence, which dependency blocks that listener
-  (`libibverbs`, `rdma-core`, kernel ULP, SPDK/NVMe target reuse, or cgo
-  packaging).
-
-Do not add Kubernetes/Helm RoCE flags until a local target listener can accept a
-real RDMA connection or emits a precise implementation blocker.
+- the assessment doc lists the reusable mono components, measured evidence, and
+  non-claims;
+- roadmap wording separates VFS/object/NIXL acceleration from block
+  NVMe/RDMA;
+- the next block phase has a concrete implementation choice instead of a vague
+  "add RoCE" task.
 
 ## Non-Claims
 
-Phase 118 does not claim NVMe/RDMA attach, RoCE I/O, performance/SLO, broad
-host compatibility, production HA, node-loss survival, backup/restore, or
+Phase 119 does not claim NVMe/RDMA attach, RoCE I/O, SPDK parity, GPU/cuObject,
+NIXL production support, performance/SLO, broad distro compatibility, or
 published-image support.

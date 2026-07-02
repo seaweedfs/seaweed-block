@@ -609,14 +609,23 @@ Recommended order from here:
     not available, this phase blocks as artifact-readiness, not as product
     failure. Do not mark the NVMe/TCP path as a published-image release claim
     until this smoke passes.
-76. Phase 118: NVMe/RDMA Transport Seam. **Active**
+76. Phase 118: NVMe/RDMA Transport Seam. **Implemented locally; QA pending**
     Start the RoCE/NVMe-RDMA implementation track without making a false RoCE
     claim. The NVMe target now has an explicit transport selector and listener
     seam: TCP remains the default implemented path, RDMA returns a typed
     unsupported error at the target layer, and `blockvolume
     --nvme-transport=rdma` still refuses publicly until a real RDMA listener
-    lands. The next step is a minimal RDMA listener or a concrete lab-backed
-    blocker from the RDMA integration work.
+    lands.
+77. Phase 119: Mono RDMA Evidence And NVMe/RDMA Decision. **Active**
+    Use the current mono RDMA/VFS/RustVolume/NIXL work under
+    `C:\work\rdma\seaweed-mono-rdma-refresh` as read-only evidence before
+    adding more block RDMA code. That work proves real VFS/object acceleration
+    and NIXL-shaped object compatibility, but it is not an NVMe-oF/RDMA target
+    implementation. Phase 119 records the reusable components and performance
+    evidence, keeps RoCE/NVMe-RDMA as a non-claim, and chooses the next concrete
+    path: build or bind a real NVMe-oF/RDMA protocol layer, keep RDMA scoped to
+    VFS/object/NIXL for now, or first run a block NVMe/TCP performance baseline
+    to find the actual bottleneck.
 
 The internal release-train contract is
 `internal/docs/ref/operation-layer-v0.5-release-train.md`. Phases 41-44 close
@@ -814,7 +823,9 @@ control-plane path is mature.
    a supported-lab Kubernetes CSI NVMe multipath attach gate, and Phase 101
    path-status/stage-unstage/bounded-soak hardening. Broader host
    compatibility, RoCE, performance/SLO, and long-soak claims remain future
-   work.
+   work. Mono SeaweedFS RDMA/VFS/object evidence is tracked separately from
+   Seaweed Block NVMe/RDMA because RDMA memory movement and NVMe-oF/RDMA host
+   initiator compatibility are different protocol problems.
 
    The runtime should be managed as a cluster of explicit mini-protocols:
    authority/epoch, replication recovery, iSCSI, NVMe, CSI lifecycle, and
