@@ -62,6 +62,7 @@ The supported-lab claim is intentionally narrow:
 | 122 | 100GbE TCP frontend-address performance baseline | PASS |
 | 123 | NVMe/TCP bottleneck triage with independent 100GbE network comparator | PASS |
 | 124 | Same-shape local-path vs Block NVMe/TCP split | PASS |
+| 125 | Block NVMe/TCP write-path profile with coarse target CPU evidence | PASS |
 
 Key QA sign-offs:
 
@@ -70,6 +71,7 @@ Key QA sign-offs:
 - `internal/docs/qa-assignments/phase122-nvme-tcp-100gbe-baseline-qa-signoff.md`
 - `internal/docs/qa-assignments/phase123-nvme-tcp-bottleneck-triage-qa-signoff.md`
 - `internal/docs/qa-assignments/phase124-nvme-tcp-target-backend-shape-split-qa-signoff.md`
+- `internal/docs/qa-assignments/phase125-block-nvme-tcp-write-path-profile-qa-signoff.md`
 
 ## Performance Baseline
 
@@ -127,6 +129,28 @@ cleanup_status=ok
 This narrows the next engineering work to the Block write path. It still does
 not create a performance/SLO claim, and it does not justify starting NVMe/RDMA
 until the target/backend write-side gap is understood.
+
+Phase 125 profiles a larger 512MiB write and captures coarse blockvolume CPU
+samples during the write:
+
+```text
+network_baseline_mibps=3836.30
+local_path_seq_write_mibps=1147.98
+local_path_seq_read_mibps=513.54
+block_nvme_seq_write_mibps=174.33
+block_nvme_seq_read_mibps=544.10
+block_vs_local_write_ratio=0.152
+block_vs_local_read_ratio=1.060
+blockvolume_cpu_sample_count=3
+blockvolume_cpu_peak_percent=0.80
+write_path_observation=backend_sync
+next_recommendation=phase126_durable_backend_write_optimization
+cleanup_status=ok
+```
+
+The CPU evidence is coarse and does not prove a specific backend function is
+the bottleneck. It is enough to defer NVMe/RDMA and require product-owned
+write-path instrumentation next.
 
 ## Representative Release Smoke
 

@@ -672,11 +672,19 @@ Recommended order from here:
     `273.50 MiB/s`. The read path is not behind local-path, but write is only
     `0.366x` local-path, so the next bottleneck class is
     `block_target_or_backend`.
-83. Phase 125: Block NVMe/TCP Write-Path Profile. **Active**
-    Profile the write-side Block path before any NVMe/RDMA implementation:
-    blockvolume CPU/copy path, durable/backend sync cost, and benchmark shape.
-    The goal is a specific Phase 126 recommendation, not a performance/SLO
-    claim.
+83. Phase 125: Block NVMe/TCP Write-Path Profile. **Closed 2026-07-03,
+    QA PASS**
+    Profiled a 512MiB write over the configured `10.0.0.x` NVMe/TCP path and a
+    same-node `local-path` comparator. Block write was `174.33 MiB/s` while
+    local-path write was `1147.98 MiB/s` (`0.152x`), but Block read was
+    `544.10 MiB/s` versus local-path read `513.54 MiB/s` (`1.060x`). Coarse
+    pod-level CPU samples did not show target CPU saturation
+    (`blockvolume_cpu_peak_percent=0.80`), so the next direction is backend /
+    sync write instrumentation.
+84. Phase 126: Block NVMe/TCP Backend Write Instrumentation. **Active**
+    Add minimal product-owned write-path timing/counter evidence to separate
+    target protocol/copy cost from backend write and sync/flush cost. This is
+    still diagnostic work, not a performance/SLO or NVMe/RDMA claim.
 
 The internal release-train contract is
 `internal/docs/ref/operation-layer-v0.5-release-train.md`. Phases 41-44 close

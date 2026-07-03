@@ -1,78 +1,79 @@
-# Current Plan: Phase 125 Block NVMe/TCP Write-Path Profile
+# Current Plan: Phase 126 Block NVMe/TCP Backend Write Instrumentation
 
 Status: planning and implementation.
 
-Phase 124 split the current NVMe/TCP performance question with an independent
-local-path comparator:
+Phase 125 profiled a 512MiB Block NVMe/TCP write against a same-node local-path
+comparator:
 
 ```text
-network_baseline_mibps=3769.28
-block_nvme_seq_write_mibps=118.74
-block_nvme_seq_read_mibps=273.50
-local_path_seq_write_mibps=324.87
-local_path_seq_read_mibps=235.29
-block_vs_local_read_ratio=1.162
-block_vs_local_write_ratio=0.366
-shape_fsync_penalty=1.180
-top_bottleneck=block_target_or_backend
+network_baseline_mibps=3836.30
+block_nvme_seq_write_mibps=174.33
+block_nvme_seq_read_mibps=544.10
+local_path_seq_write_mibps=1147.98
+local_path_seq_read_mibps=513.54
+block_vs_local_write_ratio=0.152
+block_vs_local_read_ratio=1.060
+blockvolume_cpu_sample_count=3
+blockvolume_cpu_peak_percent=0.80
+write_path_observation=backend_sync
 cleanup_status=ok
 ```
 
-The read path is not the immediate problem: Block read was slightly above the
-local-path comparator. The write path is the gap: Block write was about 36% of
-local-path write on the same app node and same `dd conv=fsync` shape. Phase 125
-should profile the Block write path before any NVMe/RDMA implementation work.
+The read path is not behind local-path. The write path is far behind
+local-path, and coarse pod-level CPU sampling did not show target CPU
+saturation. Phase 126 should instrument the write path closer to code before
+choosing optimization work.
 
 ## Goal
 
-Identify whether the Block NVMe/TCP write gap is mainly:
+Add minimal, targeted write-path evidence that can distinguish:
 
 ```text
-blockvolume target CPU / copy path
-durable backend write or fsync path
-current benchmark shape
-instrumentation gap / unknown
+target receive / protocol handling
+target-to-backend copy/write
+durable backend write
+sync / flush boundary
+benchmark shape artifact
 ```
 
 Required output:
 
 ```text
-phase125_block_nvme_tcp_write_path_profile_status=ok
-network_baseline_mibps=<number>
-local_path_seq_write_mibps=<number>
+phase126_block_nvme_tcp_backend_write_instrumentation_status=ok
 block_nvme_seq_write_mibps=<number>
-blockvolume_cpu_peak_percent=<number|unknown>
-blockvolume_cpu_avg_percent=<number|unknown>
-block_write_duration_ms=<number>
-local_write_duration_ms=<number>
-write_path_observation=<target_cpu|backend_sync|benchmark_shape|unknown>
-top_bottleneck=<target_cpu|backend_sync|benchmark_shape|unknown>
+local_path_seq_write_mibps=<number>
+target_write_observed=true
+target_write_bytes=<number>
+target_write_ops=<number>
+target_write_duration_ms=<number|unknown>
+backend_write_duration_ms=<number|unknown>
+backend_sync_duration_ms=<number|unknown>
+write_path_observation=<target_protocol|target_copy|backend_write|backend_sync|benchmark_shape|unknown>
 next_recommendation=<specific next phase>
 cleanup_status=ok
 ```
 
 ## Why This Is Next
 
-NVMe/RDMA only improves the transport. Phase 124 shows the current TCP network
-has far more headroom than the mounted Block path, and the read path is not
-behind the local-path comparator. The next useful question is narrower: what in
-the write path makes Block much slower than a same-node local-path PVC?
+Metrics-server CPU samples are too coarse to be the final answer. They are
+useful enough to avoid jumping directly to RDMA, but not precise enough to pick
+an optimization patch. The next gate should produce product-owned timing or
+counter evidence from the Block write path itself.
 
 ## Deliverables
 
-1. Add a Phase 125 gate that reuses Phase 124 and collects write-time runtime
-   evidence:
+1. Add minimal instrumentation behind an explicit debug/profile flag or test
+   env path. Keep default runtime behavior unchanged.
+
+2. Capture per-volume write evidence in the Phase 126 gate:
 
    ```text
-   kubectl top pods --containers during write
-   blockvolume process CPU snapshots
-   blockvolume logs around write workload
-   app pod write duration
-   local-path comparator write duration
+   bytes written
+   write op count
+   target-visible duration
+   backend/durable duration if available
+   sync/flush duration if available
    ```
-
-2. If cheap and safe, add minimal target-side timing logs or existing debug
-   counters for the write path. Do not add a broad observability framework.
 
 3. Preserve non-claims:
 
@@ -82,25 +83,27 @@ the write path makes Block much slower than a same-node local-path PVC?
    performance_slo_claim_allowed=false
    ```
 
-4. Emit one concrete recommendation:
+4. Emit one concrete next recommendation:
 
    ```text
-   phase126_target_copy_cpu_optimization
-   phase126_durable_backend_write_optimization
-   phase126_benchmark_shape_correction
-   phase126_start_real_nvme_rdma_target
+   phase127_backend_write_optimization
+   phase127_sync_boundary_optimization
+   phase127_target_copy_optimization
+   phase127_benchmark_shape_correction
+   phase127_start_real_nvme_rdma_target
    ```
 
 ## Exit Criteria
 
-- Runner scenario passes and archives the evidence bundle.
+- Runner scenario passes and archives evidence.
 - Cleanup verifier reports zero residue.
-- The gate names a write-path bottleneck class, or records `unknown` with the
-  missing evidence needed to classify it.
+- The gate records target/backend write evidence generated by the product code,
+  not only external `kubectl top` samples.
+- The next recommendation is tied to the observed write-path stage.
 - No RoCE/NVMe-RDMA or performance/SLO claim is added.
 
 ## Non-Claims
 
-Phase 125 still does not implement NVMe/RDMA, RoCE, GPU Direct, cuFile/cuObject,
-NIXL, production HA, or a performance SLO. It is a write-path profiling gate for
-choosing the next data-plane investment.
+Phase 126 still does not implement NVMe/RDMA, RoCE, GPU Direct, cuFile/cuObject,
+NIXL, production HA, or a performance SLO. It is an instrumentation phase to
+make the next optimization evidence-backed.

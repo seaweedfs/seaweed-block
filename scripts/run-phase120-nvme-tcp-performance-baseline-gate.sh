@@ -20,8 +20,10 @@ SMALL_BLOCK_BYTES="${SW_BLOCK_PHASE120_SMALL_BLOCK_BYTES:-4096}"
 FRONTEND_IP_MAP="${SW_BLOCK_FRONTEND_IP_MAP:-}"
 FRONTEND_NETWORK_CLASS="${SW_BLOCK_FRONTEND_NETWORK_CLASS:-}"
 EXPECTED_FRONTEND_ROUTE_DEV="${SW_BLOCK_EXPECTED_FRONTEND_ROUTE_DEV:-}"
+PROFILE_WRITE="${SW_BLOCK_PHASE120_PROFILE_WRITE:-false}"
+PROFILE_INTERVAL_SECONDS="${SW_BLOCK_PHASE120_PROFILE_INTERVAL_SECONDS:-1}"
 
-mkdir -p "${ARTIFACT_DIR}"/{bin,build,values,install,pvc,perf,status,cleanup}
+mkdir -p "${ARTIFACT_DIR}"/{bin,build,values,install,pvc,perf,status,cleanup,profile}
 : >"${SUMMARY}"
 
 write_summary() {
@@ -134,6 +136,58 @@ measure_exec_ms() {
   start_ns="$(date +%s%N)"
   "$@" >"${log}" 2>&1
   end_ns="$(date +%s%N)"
+  python3 - "$start_ns" "$end_ns" <<'PY'
+import sys
+start = int(sys.argv[1])
+end = int(sys.argv[2])
+print(max((end - start) // 1_000_000, 1))
+PY
+}
+
+profile_write_sample_loop() {
+  local target_pid="$1"
+  local sample_file="$2"
+  local sample=0
+  : >"${sample_file}"
+  while kill -0 "${target_pid}" >/dev/null 2>&1; do
+    {
+      echo "=== sample=${sample} ts=$(date -u +%Y-%m-%dT%H:%M:%SZ) ==="
+      kubectl get pods -A -o wide 2>&1 || true
+      kubectl top pods -A --containers 2>&1 || true
+      kubectl top nodes 2>&1 || true
+      ps -eo pid,ppid,pcpu,pmem,comm,args | grep -E 'blockmaster|blockvolume|blockcsi|sw-block' | grep -v grep || true
+      kubectl -n "${APP_NAMESPACE}" logs -l app=sw-blockvolume --tail=30 --prefix 2>&1 || true
+    } >>"${sample_file}"
+    sample=$((sample + 1))
+    sleep "${PROFILE_INTERVAL_SECONDS}"
+  done
+}
+
+measure_profiled_exec_ms() {
+  local log="$1"
+  local sample_file="$2"
+  shift 2
+  local start_ns end_ns cmd_pid sampler_pid rc
+  start_ns="$(date +%s%N)"
+  "$@" >"${log}" 2>&1 &
+  cmd_pid=$!
+  sampler_pid=""
+  if [[ "${PROFILE_WRITE}" == "true" ]]; then
+    profile_write_sample_loop "${cmd_pid}" "${sample_file}" &
+    sampler_pid=$!
+  fi
+  set +e
+  wait "${cmd_pid}"
+  rc=$?
+  set -e
+  if [[ -n "${sampler_pid}" ]]; then
+    kill "${sampler_pid}" >/dev/null 2>&1 || true
+    wait "${sampler_pid}" >/dev/null 2>&1 || true
+  fi
+  end_ns="$(date +%s%N)"
+  if [[ "${rc}" -ne 0 ]]; then
+    return "${rc}"
+  fi
   python3 - "$start_ns" "$end_ns" <<'PY'
 import sys
 start = int(sys.argv[1])
@@ -384,7 +438,7 @@ write_summary "marker_verify_ms=${MARKER_MS}"
 write_summary "marker_verified=true"
 
 SEQ_BYTES=$((SEQ_MIB * 1024 * 1024))
-SEQ_WRITE_MS="$(measure_exec_ms "${ARTIFACT_DIR}/perf/seq-write.log" \
+SEQ_WRITE_MS="$(measure_profiled_exec_ms "${ARTIFACT_DIR}/perf/seq-write.log" "${ARTIFACT_DIR}/profile/seq-write-samples.txt" \
   kubectl -n "${APP_NAMESPACE}" exec "${PERF_POD}" -- sh -c \
   "set -eu; dd if=/dev/zero of=/data/phase120-seq.bin bs=1M count=${SEQ_MIB} conv=fsync; sync")"
 SEQ_READ_MS="$(measure_exec_ms "${ARTIFACT_DIR}/perf/seq-read.log" \

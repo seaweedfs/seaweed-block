@@ -357,8 +357,15 @@ rebuild, delete safety, or cleanup must start as a separate gated phase.
   behind local-path read (`235.29 MiB/s`), but Block write (`118.74 MiB/s`) was
   only `0.366x` local-path write (`324.87 MiB/s`). The next bottleneck class is
   write-side `block_target_or_backend`, not network/RDMA.
-- Phase 125 is active for Block NVMe/TCP write-path profiling: blockvolume CPU,
-  copy path, durable/backend sync cost, and benchmark-shape validation.
+- Phase 125 is closed. It profiled a 512MiB Block NVMe/TCP write and same-node
+  local-path comparator: Block write `174.33 MiB/s`, local write
+  `1147.98 MiB/s`, Block/local write ratio `0.152`, while Block read stayed
+  comparable to local-path. Coarse pod-level CPU samples did not show target
+  CPU saturation (`0.80%` peak), so the next direction is backend/sync write
+  instrumentation.
+- Phase 126 is active for product-owned Block NVMe/TCP backend write
+  instrumentation: target receive/copy timing, backend write timing, and
+  sync/flush timing.
 - Later protocol candidates: complete a real NVMe/RDMA target, characterize
   NVMe/TCP performance, or bridge to object/NIXL acceleration where the product
   surface is object/storage rather than block PVC. Keep these separate so
@@ -953,7 +960,10 @@ Approximate engineering effort if scope remains tight:
 - Phase 124 is closed for the NVMe/TCP target/backend/test-shape split.
   Same-shape local-path comparison narrowed the gap to Block write-side
   target/backend behavior.
-- Phase 125 is active for Block NVMe/TCP write-path profiling.
+- Phase 125 is closed for Block NVMe/TCP write-path profiling. It narrowed the
+  gap to write-side backend/sync behavior rather than read path, network, or
+  immediate RDMA work.
+- Phase 126 is active for Block NVMe/TCP backend write instrumentation.
 - Phase 41-44 are the Operation Layer v0.5 release train: lifecycle-owner
   foundation, real API/admission proof, first bounded finalizer mutation, and
   delete lifecycle close gate.
