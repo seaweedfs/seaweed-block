@@ -65,16 +65,26 @@ blockNodes:
   - name: m01
     kubernetesNode: m01
     internalIP: 192.168.1.181
+    frontendIP: 10.0.0.181
+    frontendNetworkClass: 100gbe_tcp
   - name: m02
     kubernetesNode: m02
     internalIP: 192.168.1.184
+    frontendIP: 10.0.0.184
+    frontendNetworkClass: 100gbe_tcp
   - name: tp01
     kubernetesNode: tp01
     internalIP: 192.168.1.188
+    frontendIP: 10.0.0.188
+    frontendNetworkClass: 100gbe_tcp
 ```
 
 `blockNodes[*].kubernetesNode` must match a real Kubernetes node name. The
-`internalIP` must be reachable by workloads that may mount the PVC.
+`internalIP` is the management/control-plane address. `frontendIP` is optional;
+when set, blockvolume `data_addr` and NVMe/TCP or iSCSI publish targets use
+that address while `ctrl_addr` remains on `internalIP`. Use
+`frontendNetworkClass: 100gbe_tcp` for a TCP frontend on the lab 100GbE data
+network. This is not an NVMe/RDMA or RoCE claim.
 
 `network.rejectLoopbackPublishTargets` records the intended safety boundary.
 Some blockmaster launcher flags are gated by `compat.*` settings because older

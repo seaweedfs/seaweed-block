@@ -1,0 +1,97 @@
+name: data-plane-address-capability-chain
+timeout: 10m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: run_gate
+    actions:
+      - action: exec
+        node: m02
+        timeout: 8m
+        cmd: "cd {{ product_root }} && SW_BLOCK_ARTIFACT_DIR=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase121-data-plane-address bash scripts/run-phase121-data-plane-address-capability-gate.sh {{ product_root }}"
+
+  - name: assert_summary
+    actions:
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase121-data-plane-address/phase121-data-plane-address-capability-summary.txt"
+        pattern: "^phase121_data_plane_address_capability_status=ok$"
+        save_as: phase121_status_ok
+      - action: assert_greater
+        actual: "{{ phase121_status_ok }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase121-data-plane-address/phase121-data-plane-address-capability-summary.txt"
+        pattern: "^management_ip_m01=192\\.168\\.1\\.181$"
+        save_as: management_ip_recorded
+      - action: assert_greater
+        actual: "{{ management_ip_recorded }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase121-data-plane-address/phase121-data-plane-address-capability-summary.txt"
+        pattern: "^publish_target_ip_m01=10\\.0\\.0\\.181$"
+        save_as: data_plane_ip_recorded
+      - action: assert_greater
+        actual: "{{ data_plane_ip_recorded }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase121-data-plane-address/phase121-data-plane-address-capability-summary.txt"
+        pattern: "^publish_target_network_class=100gbe_tcp$"
+        save_as: network_class_recorded
+      - action: assert_greater
+        actual: "{{ network_class_recorded }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase121-data-plane-address/phase121-data-plane-address-capability-summary.txt"
+        pattern: "^frontend_transport=tcp$"
+        save_as: tcp_transport
+      - action: assert_greater
+        actual: "{{ tcp_transport }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase121-data-plane-address/phase121-data-plane-address-capability-summary.txt"
+        pattern: "^nvme_rdma_supported=false$"
+        save_as: rdma_not_supported
+      - action: assert_greater
+        actual: "{{ rdma_not_supported }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase121-data-plane-address/phase121-data-plane-address-capability-summary.txt"
+        pattern: "^internal_ip_not_reused_as_performance_target=true$"
+        save_as: internal_ip_not_reused
+      - action: assert_greater
+        actual: "{{ internal_ip_not_reused }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase121-data-plane-address/phase121-data-plane-address-capability-summary.txt"
+        pattern: "^cleanup_status=ok$"
+        save_as: cleanup_ok
+      - action: assert_greater
+        actual: "{{ cleanup_ok }}"
+        threshold: "0"
+
+  - name: collect
+    always: true
+    actions:
+      - action: collect_path
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase121-data-plane-address"
+        name: "remote-phases"
+        ignore_error: true

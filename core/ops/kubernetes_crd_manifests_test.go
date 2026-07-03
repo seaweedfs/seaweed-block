@@ -149,7 +149,7 @@ func TestPhase36D1SwBlockClusterActionabilitySchema(t *testing.T) {
 
 	nodeProperties := yamlMap(t, yamlMap(t, statusProperties, "nodes"), "items")
 	nodeProperties = yamlMap(t, nodeProperties, "properties")
-	for _, want := range []string{"name", "kubernetesNode", "internalIP", "schedulable", "ready", "status", "reasonCode", "conditions", "evidenceRefs"} {
+	for _, want := range []string{"name", "kubernetesNode", "internalIP", "frontendIP", "frontendNetworkClass", "schedulable", "ready", "status", "reasonCode", "conditions", "evidenceRefs"} {
 		if _, ok := nodeProperties[want]; !ok {
 			t.Fatalf("SwBlockCluster.status.nodes[] schema missing %s", want)
 		}

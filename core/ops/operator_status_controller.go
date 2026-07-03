@@ -59,19 +59,21 @@ type SwBlockClusterCRDStatus struct {
 }
 
 type SwBlockNodeCRDStatus struct {
-	Name            string                 `json:"name"`
-	KubernetesNode  string                 `json:"kubernetesNode,omitempty"`
-	InternalIP      string                 `json:"internalIP,omitempty"`
-	Schedulable     bool                   `json:"schedulable"`
-	Ready           bool                   `json:"ready"`
-	Status          string                 `json:"status,omitempty"`
-	ReasonCode      string                 `json:"reasonCode,omitempty"`
-	LastHeartbeatAt time.Time              `json:"lastHeartbeatAt,omitempty"`
-	ReplicaCount    int                    `json:"replicaCount,omitempty"`
-	RequiredImages  []string               `json:"requiredImages,omitempty"`
-	MissingImages   []string               `json:"missingImages,omitempty"`
-	Conditions      []ObservationCondition `json:"conditions,omitempty"`
-	EvidenceRefs    []string               `json:"evidenceRefs,omitempty"`
+	Name                 string                 `json:"name"`
+	KubernetesNode       string                 `json:"kubernetesNode,omitempty"`
+	InternalIP           string                 `json:"internalIP,omitempty"`
+	FrontendIP           string                 `json:"frontendIP,omitempty"`
+	FrontendNetworkClass string                 `json:"frontendNetworkClass,omitempty"`
+	Schedulable          bool                   `json:"schedulable"`
+	Ready                bool                   `json:"ready"`
+	Status               string                 `json:"status,omitempty"`
+	ReasonCode           string                 `json:"reasonCode,omitempty"`
+	LastHeartbeatAt      time.Time              `json:"lastHeartbeatAt,omitempty"`
+	ReplicaCount         int                    `json:"replicaCount,omitempty"`
+	RequiredImages       []string               `json:"requiredImages,omitempty"`
+	MissingImages        []string               `json:"missingImages,omitempty"`
+	Conditions           []ObservationCondition `json:"conditions,omitempty"`
+	EvidenceRefs         []string               `json:"evidenceRefs,omitempty"`
 }
 
 type SwBlockSafeNextStep struct {
@@ -729,19 +731,21 @@ func swBlockNodeStatuses(nodes []NodeEvidence) []SwBlockNodeCRDStatus {
 	for _, node := range nodes {
 		status, reason := classifyNodeReadiness(node)
 		out = append(out, SwBlockNodeCRDStatus{
-			Name:            defaultString(node.NodeName, node.KubernetesNode),
-			KubernetesNode:  node.KubernetesNode,
-			InternalIP:      node.InternalIP,
-			Schedulable:     node.Schedulable,
-			Ready:           node.Ready,
-			Status:          status,
-			ReasonCode:      reason,
-			LastHeartbeatAt: node.LastHeartbeatAt,
-			ReplicaCount:    node.ReplicaCount,
-			RequiredImages:  append([]string(nil), node.RequiredImages...),
-			MissingImages:   append([]string(nil), node.MissingImages...),
-			Conditions:      nodeReadinessConditions(node, status, reason),
-			EvidenceRefs:    nodeEvidenceRefs(node),
+			Name:                 defaultString(node.NodeName, node.KubernetesNode),
+			KubernetesNode:       node.KubernetesNode,
+			InternalIP:           node.InternalIP,
+			FrontendIP:           node.FrontendIP,
+			FrontendNetworkClass: node.FrontendNetworkClass,
+			Schedulable:          node.Schedulable,
+			Ready:                node.Ready,
+			Status:               status,
+			ReasonCode:           reason,
+			LastHeartbeatAt:      node.LastHeartbeatAt,
+			ReplicaCount:         node.ReplicaCount,
+			RequiredImages:       append([]string(nil), node.RequiredImages...),
+			MissingImages:        append([]string(nil), node.MissingImages...),
+			Conditions:           nodeReadinessConditions(node, status, reason),
+			EvidenceRefs:         nodeEvidenceRefs(node),
 		})
 	}
 	return out

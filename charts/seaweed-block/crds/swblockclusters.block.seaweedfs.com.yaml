@@ -58,6 +58,10 @@ spec:
                         type: string
                       internalIP:
                         type: string
+                      frontendIP:
+                        type: string
+                      frontendNetworkClass:
+                        type: string
             status:
               type: object
               properties:
@@ -84,6 +88,10 @@ spec:
                       kubernetesNode:
                         type: string
                       internalIP:
+                        type: string
+                      frontendIP:
+                        type: string
+                      frontendNetworkClass:
                         type: string
                       schedulable:
                         type: boolean

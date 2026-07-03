@@ -91,7 +91,11 @@
           "name": { "type": "string", "minLength": 1 },
           "serverID": { "type": "string" },
           "internalIP": { "type": "string", "minLength": 1 },
+          "managementIP": { "type": "string" },
+          "frontendIP": { "type": "string" },
+          "frontendNetworkClass": { "type": "string" },
           "dataPort": { "type": "integer", "minimum": 1 },
+          "controlPort": { "type": "integer", "minimum": 1 },
           "ctrlPort": { "type": "integer", "minimum": 1 },
           "poolID": { "type": "string" }
         }

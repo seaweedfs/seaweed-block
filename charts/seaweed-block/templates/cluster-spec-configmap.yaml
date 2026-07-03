@@ -9,12 +9,18 @@ data:
   cluster-spec.yaml: |
     nodes:
 {{- range $i, $node := .Values.blockNodes }}
+{{- $internalIP := required "blockNodes[].internalIP is required" $node.internalIP }}
+{{- $frontendIP := default $internalIP $node.frontendIP }}
+{{- $managementIP := default $internalIP $node.managementIP }}
       - server_id: {{ default $node.name $node.serverID | quote }}
-        addr: {{ printf "%s:%v" (required "blockNodes[].internalIP is required" $node.internalIP) (default 19101 $node.dataPort) | quote }}
-        data_addr: {{ printf "%s:%v" $node.internalIP (default 19101 $node.dataPort) | quote }}
-        ctrl_addr: {{ printf "%s:%v" $node.internalIP (default 19102 $node.controlPort) | quote }}
+        addr: {{ printf "%s:%v" $frontendIP (default 19101 $node.dataPort) | quote }}
+        data_addr: {{ printf "%s:%v" $frontendIP (default 19101 $node.dataPort) | quote }}
+        ctrl_addr: {{ printf "%s:%v" $internalIP (default 19102 $node.controlPort) | quote }}
         labels:
           kubernetes.io/hostname: {{ default $node.name $node.kubernetesNode | quote }}
+          sw-block.seaweedfs.com/management-ip: {{ $managementIP | quote }}
+          sw-block.seaweedfs.com/frontend-ip: {{ $frontendIP | quote }}
+          sw-block.seaweedfs.com/frontend-network-class: {{ default "management_lan" $node.frontendNetworkClass | quote }}
         pools:
           - pool_id: {{ default (printf "pool-%d" (add $i 1)) $node.poolID | quote }}
             total_bytes: {{ default 1073741824 $node.totalBytes }}

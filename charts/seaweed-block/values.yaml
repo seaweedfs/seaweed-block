@@ -110,6 +110,10 @@ blockNodes:
   - name: m02
     serverID: m02
     internalIP: 127.0.0.1
+    # Optional frontend/data-plane bind address. When set, cluster-spec data_addr
+    # and frontend publish targets use this IP while ctrl_addr keeps internalIP.
+    frontendIP: ""
+    frontendNetworkClass: management_lan
     dataPort: 19101
     ctrlPort: 19102
     poolID: pool-a

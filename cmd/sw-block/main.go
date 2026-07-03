@@ -1701,12 +1701,15 @@ type helmValuesEnabled struct {
 }
 
 type helmValuesBlockNode struct {
-	Name           string `yaml:"name"`
-	KubernetesNode string `yaml:"kubernetesNode"`
-	InternalIP     string `yaml:"internalIP"`
-	DataPort       int    `yaml:"dataPort"`
-	ControlPort    int    `yaml:"controlPort"`
-	Pool           string `yaml:"pool"`
+	Name                 string `yaml:"name"`
+	KubernetesNode       string `yaml:"kubernetesNode"`
+	InternalIP           string `yaml:"internalIP"`
+	ManagementIP         string `yaml:"managementIP,omitempty"`
+	FrontendIP           string `yaml:"frontendIP,omitempty"`
+	FrontendNetworkClass string `yaml:"frontendNetworkClass,omitempty"`
+	DataPort             int    `yaml:"dataPort"`
+	ControlPort          int    `yaml:"controlPort"`
+	Pool                 string `yaml:"pool"`
 }
 
 type kubernetesReadyNode struct {
@@ -1735,6 +1738,8 @@ func runOpsGenerateHelmValues(args []string, stdout, stderr io.Writer) int {
 		stage2Multipath    bool
 		restartPersistence string
 		stateHostPath      string
+		frontendIPMapRaw   string
+		frontendClass      string
 		timeout            time.Duration
 	)
 	fs.StringVar(&outPath, "out", "", "output Helm values.yaml path")
@@ -1755,6 +1760,8 @@ func runOpsGenerateHelmValues(args []string, stdout, stderr io.Writer) int {
 	fs.BoolVar(&stage2Multipath, "stage2-multipath", false, "enable Stage 2 multipath chart values")
 	fs.StringVar(&restartPersistence, "restart-persistence", "ephemeral", "restart persistence mode: ephemeral or hostpath")
 	fs.StringVar(&stateHostPath, "state-hostpath", "/var/lib/sw-block", "hostPath base used when --restart-persistence=hostpath")
+	fs.StringVar(&frontendIPMapRaw, "frontend-ip-map", "", "optional comma-separated Kubernetes node to frontend/data-plane IP map, for example m01=10.0.0.181,m02=10.0.0.184")
+	fs.StringVar(&frontendClass, "frontend-network-class", "", "network class for --frontend-ip-map values: management_lan or 100gbe_tcp")
 	fs.DurationVar(&timeout, "timeout", 10*time.Second, "kubectl discovery timeout")
 	if err := fs.Parse(args); err != nil {
 		return ops.VolumeStatusExitInvalid
@@ -1785,6 +1792,24 @@ func runOpsGenerateHelmValues(args []string, stdout, stderr io.Writer) int {
 	}
 	if restartPersistence == "hostpath" && strings.TrimSpace(stateHostPath) == "" {
 		fmt.Fprintln(stderr, "sw-block ops generate-helm-values: --state-hostpath is required when --restart-persistence=hostpath")
+		return ops.VolumeStatusExitInvalid
+	}
+	frontendIPMap, err := parseHelmValuesNodeIPMap(frontendIPMapRaw)
+	if err != nil {
+		fmt.Fprintf(stderr, "sw-block ops generate-helm-values: %v\n", err)
+		return ops.VolumeStatusExitInvalid
+	}
+	if len(frontendIPMap) > 0 {
+		if strings.TrimSpace(frontendClass) == "" {
+			fmt.Fprintln(stderr, "sw-block ops generate-helm-values: --frontend-network-class is required when --frontend-ip-map is set")
+			return ops.VolumeStatusExitInvalid
+		}
+		if !helmValuesFrontendNetworkClassAccepted(frontendClass) {
+			fmt.Fprintf(stderr, "sw-block ops generate-helm-values: --frontend-network-class=%q invalid; want management_lan or 100gbe_tcp\n", frontendClass)
+			return ops.VolumeStatusExitInvalid
+		}
+	} else if strings.TrimSpace(frontendClass) != "" {
+		fmt.Fprintln(stderr, "sw-block ops generate-helm-values: --frontend-network-class requires --frontend-ip-map")
 		return ops.VolumeStatusExitInvalid
 	}
 
@@ -1859,13 +1884,25 @@ func runOpsGenerateHelmValues(args []string, stdout, stderr io.Writer) int {
 		if !multiNode {
 			ip = "127.0.0.1"
 		}
+		frontendIP := ""
+		if len(frontendIPMap) > 0 {
+			var ok bool
+			frontendIP, ok = frontendIPMap[node.Name]
+			if !ok {
+				fmt.Fprintf(stderr, "sw-block ops generate-helm-values: --frontend-ip-map missing selected node %q\n", node.Name)
+				return ops.VolumeStatusExitInvalid
+			}
+		}
 		values.BlockNodes = append(values.BlockNodes, helmValuesBlockNode{
-			Name:           node.Name,
-			KubernetesNode: node.Name,
-			InternalIP:     ip,
-			DataPort:       19101 + (i * 2),
-			ControlPort:    19102 + (i * 2),
-			Pool:           "default",
+			Name:                 node.Name,
+			KubernetesNode:       node.Name,
+			InternalIP:           ip,
+			ManagementIP:         node.InternalIP,
+			FrontendIP:           frontendIP,
+			FrontendNetworkClass: frontendClass,
+			DataPort:             19101 + (i * 2),
+			ControlPort:          19102 + (i * 2),
+			Pool:                 "default",
 		})
 	}
 	rawValues, err := yaml.Marshal(values)
@@ -1899,6 +1936,8 @@ func runOpsGenerateHelmValues(args []string, stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "node_limit=%s\n", emptyCLI(strconv.Itoa(nodeLimit)))
 	fmt.Fprintf(stdout, "external_iscsi=%t\n", externalISCSI)
 	fmt.Fprintf(stdout, "external_nvme=%t\n", externalNVMe)
+	fmt.Fprintf(stdout, "frontend_ip_map=%s\n", emptyCLI(frontendIPMapRaw))
+	fmt.Fprintf(stdout, "frontend_network_class=%s\n", emptyCLI(frontendClass))
 	fmt.Fprintf(stdout, "chap_enabled=%t\n", externalISCSI)
 	fmt.Fprintf(stdout, "protocol=%s\n", protocol)
 	fmt.Fprintf(stdout, "replication_factor=%d\n", replicationFactor)
@@ -1935,6 +1974,46 @@ func helmValuesRestartPersistenceAccepted(value string) bool {
 	default:
 		return false
 	}
+}
+
+func helmValuesFrontendNetworkClassAccepted(value string) bool {
+	switch value {
+	case "management_lan", "100gbe_tcp":
+		return true
+	default:
+		return false
+	}
+}
+
+func parseHelmValuesNodeIPMap(raw string) (map[string]string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+	out := map[string]string{}
+	for _, part := range strings.Split(raw, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		node, ip, ok := strings.Cut(part, "=")
+		node = strings.TrimSpace(node)
+		ip = strings.TrimSpace(ip)
+		if !ok || node == "" || ip == "" {
+			return nil, fmt.Errorf("--frontend-ip-map entry %q must be node=ip", part)
+		}
+		if helmValuesIPUnsafe(ip) {
+			return nil, fmt.Errorf("--frontend-ip-map node %q has unsafe IP %q", node, ip)
+		}
+		if _, exists := out[node]; exists {
+			return nil, fmt.Errorf("--frontend-ip-map duplicates node %q", node)
+		}
+		out[node] = ip
+	}
+	if len(out) == 0 {
+		return nil, nil
+	}
+	return out, nil
 }
 
 func selectHelmValuesNodes(raw, targetNode string, nodeLimit int) ([]kubernetesReadyNode, []kubernetesReadyNode, error) {

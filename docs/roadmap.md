@@ -635,14 +635,22 @@ Recommended order from here:
     authoritative 100GbE performance baseline. It keeps explicit non-claims for
     RoCE, NVMe/RDMA, performance SLO, GPU/cuObject, NIXL, broad compatibility,
     and published-image support.
-79. Phase 121: Data-Plane Address Capability. **Active**
-    Mirror the Rust volume RDMA pattern before rerunning performance gates:
-    data-plane addresses must be explicit, queryable, and surfaced as evidence
-    instead of inferred from Kubernetes InternalIP. Add per-node management IP
-    versus frontend/data-plane IP distinction, status/report evidence for the
-    selected NVMe/TCP target network, and a gate that refuses to label
-    `192.168.1.x` as a 100GbE performance baseline. This still does not claim
-    RoCE/NVMe-RDMA support.
+79. Phase 121: Data-Plane Address Capability. **Closed 2026-07-02,
+    QA PASS**
+    Mirrors the Rust volume RDMA pattern before rerunning performance gates:
+    data-plane addresses are explicit, queryable, and surfaced as evidence
+    instead of inferred from Kubernetes InternalIP. The product now carries
+    per-node `frontendIP` / `frontendNetworkClass`, renders `data_addr` on the
+    configured data-plane IP while keeping `ctrl_addr` on management/InternalIP,
+    and surfaces the management/frontend distinction in status evidence. The
+    gate proves `192.168.1.x` is not reused as the performance target and keeps
+    RoCE/NVMe-RDMA unsupported.
+80. Phase 122: NVMe/TCP 100GbE Live Baseline. **Active**
+    Re-run the Phase 120 performance shape using the Phase 121 data-plane
+    address model. The live publish target must be `<10.0.0.x>:4420` with
+    `publish_target_network_class=100gbe_tcp`; the gate records write/read/IOPS
+    metrics and still keeps `frontend_transport=tcp`,
+    `nvme_rdma_supported=false`, and `roce_claim_allowed=false`.
 
 The internal release-train contract is
 `internal/docs/ref/operation-layer-v0.5-release-train.md`. Phases 41-44 close
