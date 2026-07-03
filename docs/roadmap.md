@@ -645,12 +645,23 @@ Recommended order from here:
     and surfaces the management/frontend distinction in status evidence. The
     gate proves `192.168.1.x` is not reused as the performance target and keeps
     RoCE/NVMe-RDMA unsupported.
-80. Phase 122: NVMe/TCP 100GbE Live Baseline. **Active**
-    Re-run the Phase 120 performance shape using the Phase 121 data-plane
-    address model. The live publish target must be `<10.0.0.x>:4420` with
-    `publish_target_network_class=100gbe_tcp`; the gate records write/read/IOPS
-    metrics and still keeps `frontend_transport=tcp`,
-    `nvme_rdma_supported=false`, and `roce_claim_allowed=false`.
+80. Phase 122: NVMe/TCP 100GbE Live Baseline. **Closed 2026-07-03,
+    QA PASS**
+    Re-ran the Phase 120 performance shape using the Phase 121 data-plane
+    address model. The live publish target was `10.0.0.1:4420` with
+    `publish_target_network_class=100gbe_tcp`, route device `enp1s0np0`,
+    sequential write `115.11 MiB/s`, sequential read `250.98 MiB/s`, and
+    small-write `606.64 IOPS`. This is a baseline, not a performance/SLO
+    claim. The gate also fixed the ClusterEvidence gRPC wire path so
+    `frontend_ip` and `frontend_network_class` survive `blockmaster ->
+    sw-block ops`.
+81. Phase 123: NVMe/TCP Performance Bottleneck Triage. **Active**
+    Before adding NVMe/RDMA complexity, identify where the current 100GbE
+    NVMe/TCP path is bottlenecked: network, container/Kubernetes path,
+    blockvolume target path, backend/durable store, fio shape, or host config.
+    The exit artifact should name the likely bottleneck and a specific next
+    engineering phase. RoCE/NVMe-RDMA remains a non-claim until a real RDMA
+    target moves bytes.
 
 The internal release-train contract is
 `internal/docs/ref/operation-layer-v0.5-release-train.md`. Phases 41-44 close

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/authority"
+	"github.com/seaweedfs/seaweed-block/core/ops"
 	control "github.com/seaweedfs/seaweed-block/core/rpc/control"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -51,6 +52,18 @@ func TestClusterEvidenceService_GetClusterStatusSharesObservationSnapshot(t *tes
 	}
 	if volume.GetPublishTarget() == "" {
 		t.Fatalf("missing publish target: %+v", volume)
+	}
+}
+
+func TestNodeEvidenceToWirePreservesFrontendAddress(t *testing.T) {
+	wire := nodeEvidenceToWire(ops.NodeEvidence{
+		NodeName:             "m01",
+		InternalIP:           "192.168.1.181",
+		FrontendIP:           "10.0.0.1",
+		FrontendNetworkClass: "100gbe_tcp",
+	})
+	if wire.GetFrontendIp() != "10.0.0.1" || wire.GetFrontendNetworkClass() != "100gbe_tcp" {
+		t.Fatalf("frontend address evidence dropped: %+v", wire)
 	}
 }
 

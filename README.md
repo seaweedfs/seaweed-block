@@ -36,7 +36,7 @@ This is an **alpha** product path for supported lab clusters, not production.
 | Actionable read-only CRD status + Events | Available | Bounded SwBlockVolume finalizer lifecycle | Beta candidate |
 | Returned-replica ACK eligibility executor | Beta candidate | Returned-replica failback runtime | Source-gated |
 | Returned-replica rebuild traffic | Planned | Frontend publication after failback | Planned |
-| NVMe/TCP CSI multipath + mounted churn supported-lab path | Source-gated | Backup/snapshot/restore | Planned |
+| NVMe/TCP CSI multipath + 100GbE TCP baseline | Source-gated | Backup/snapshot/restore | Planned |
 | Production SLO/performance claims | Not claimed | Hosted production UI | Not claimed |
 
 ## What You Can Do Today
@@ -75,9 +75,10 @@ This is an **alpha** product path for supported lab clusters, not production.
   multiple NVMe frontend paths, one-path-loss status honesty, mounted pod
   write/read after one observed path loss, mounted pod write/read after the
   removed path is restored, multi-volume mounted path isolation, bounded
-  multi-volume path churn, repeated stage/unstage residue checks, and a bounded
-  writer/reader soak. This is a supported-lab source-gated claim, not a broad
-  NVMe compatibility, RoCE, production HA, or performance claim.
+  multi-volume path churn, repeated stage/unstage residue checks, a bounded
+  writer/reader soak, and a baseline over the configured 100GbE TCP frontend
+  address. This is a supported-lab source-gated claim, not a broad NVMe
+  compatibility, RoCE/NVMe-RDMA, production HA, or performance/SLO claim.
 - Replay support bundles offline.
 
 These are narrow alpha claims tied to documented gates. See

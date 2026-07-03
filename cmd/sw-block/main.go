@@ -1195,16 +1195,18 @@ func nodeEvidenceFromWire(node *control.NodeEvidence) ops.NodeEvidence {
 		return ops.NodeEvidence{}
 	}
 	out := ops.NodeEvidence{
-		NodeName:       node.GetNodeName(),
-		KubernetesNode: node.GetKubernetesNode(),
-		PhysicalHost:   node.GetPhysicalHost(),
-		InternalIP:     node.GetInternalIp(),
-		Schedulable:    node.GetSchedulable(),
-		Ready:          node.GetReady(),
-		ReplicaCount:   int(node.GetReplicaCount()),
-		RequiredImages: append([]string(nil), node.GetRequiredImages()...),
-		MissingImages:  append([]string(nil), node.GetMissingImages()...),
-		Conditions:     conditionsFromWire(node.GetConditions()),
+		NodeName:             node.GetNodeName(),
+		KubernetesNode:       node.GetKubernetesNode(),
+		PhysicalHost:         node.GetPhysicalHost(),
+		InternalIP:           node.GetInternalIp(),
+		FrontendIP:           node.GetFrontendIp(),
+		FrontendNetworkClass: node.GetFrontendNetworkClass(),
+		Schedulable:          node.GetSchedulable(),
+		Ready:                node.GetReady(),
+		ReplicaCount:         int(node.GetReplicaCount()),
+		RequiredImages:       append([]string(nil), node.GetRequiredImages()...),
+		MissingImages:        append([]string(nil), node.GetMissingImages()...),
+		Conditions:           conditionsFromWire(node.GetConditions()),
 	}
 	if ts := node.GetLastHeartbeatAt(); ts != nil && ts.IsValid() {
 		out.LastHeartbeatAt = ts.AsTime()

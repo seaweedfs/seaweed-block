@@ -1,87 +1,99 @@
-# Current Plan: Phase 122 NVMe/TCP 100GbE Live Baseline
+# Current Plan: Phase 123 NVMe/TCP Performance Bottleneck Triage
 
 Status: planning and implementation.
 
-Phase 120 measured the default NVMe/TCP path on the Kubernetes InternalIP /
-management LAN (`192.168.1.x`). Phase 121 closed the configuration gap: block
-nodes can now carry an explicit frontend/data-plane IP (`10.0.0.x`) while
-status preserves the management IP and records the selected network class.
+Phase 122 closed the 100GbE TCP frontend-address baseline:
 
-Phase 122 should now run the live baseline that Phase 120 was not allowed to
-claim.
+```text
+publish_target=10.0.0.1:4420
+publish_target_route_dev=enp1s0np0
+seq_write_mibps=115.11
+seq_read_mibps=250.98
+small_write_iops=606.64
+cleanup_status=ok
+```
+
+This proves the path is on the configured data-plane network, but it does not
+prove a performance claim. The measured throughput is far below what the
+network can carry, so the next work should identify the bottleneck before
+adding NVMe/RDMA or GPU-direct complexity.
 
 ## Goal
 
-Measure the current Kubernetes NVMe/TCP path over the configured 100GbE TCP
-frontend address, without claiming RoCE or NVMe/RDMA.
+Produce an evidence-backed bottleneck map for the current Kubernetes NVMe/TCP
+path.
 
-Required evidence shape:
+Required output:
 
 ```text
-phase122_nvme_tcp_100gbe_baseline_status=ok
-management_ip=<192.168.1.x>
+phase123_nvme_tcp_bottleneck_triage_status=ok
 publish_target=<10.0.0.x>:4420
-publish_target_network_class=100gbe_tcp
-publish_target_source=configured_data_plane
-frontend_transport=tcp
-nvme_rdma_supported=false
-roce_claim_allowed=false
-seq_write_mibps=<number>
-seq_read_mibps=<number>
-small_write_iops=<number>
+route_dev=enp1s0np0
+network_baseline_mibps=<number>
+host_local_nvme_tcp_mibps=<number>
+k8s_mounted_nvme_tcp_mibps=<number>
+top_bottleneck=<network|target|backend|k8s_attach|fio_shape|unknown>
+next_recommendation=<specific next phase>
 cleanup_status=ok
 ```
 
 ## Why This Is Next
 
-The project has two different questions:
-
-1. Can Block publish NVMe/TCP through Kubernetes CSI? Already yes.
-2. Is the data path fast enough on the intended 100GbE fabric? Unknown until
-   the target is bound to a 100GbE IP and measured.
-
-Running more RDMA or GPU design before this number would be premature. If
-NVMe/TCP over 100GbE is already bottlenecked elsewhere, that bottleneck should
-guide NVMe/RDMA scope.
+If NVMe/TCP is limited by the blockvolume process, backend durability path, or
+test shape, NVMe/RDMA will not automatically fix the product bottleneck. If the
+limit is actually network or host configuration, RDMA work would also be
+misleading. Phase 123 should make the next engineering decision evidence-based.
 
 ## Deliverables
 
-1. Extend the Phase 120 performance gate to pass `--frontend-ip-map` and
-   `--frontend-network-class 100gbe_tcp`.
-
-2. Add route/interface evidence that the publish target is not a management LAN
-   `192.168.1.x` address.
-
-3. Record the same metrics as Phase 120:
+1. A diagnostic gate that reuses the Phase 122 frontend map and captures:
 
    ```text
-   seq_write_mibps
-   seq_read_mibps
-   small_write_iops
+   ip route get <publish-target-host>
+   iperf3 or equivalent network baseline when available
+   CPU snapshot during fio
+   fio profile parameters
+   blockvolume logs around NVMe/TCP I/O
    ```
 
-4. Preserve explicit non-claims:
+2. A small fio matrix, not a broad benchmark suite:
 
    ```text
-   frontend_transport=tcp
-   nvme_rdma_supported=false
-   roce_claim_allowed=false
-   performance_slo_claim_allowed=false
+   sequential write/read, current shape
+   sequential write/read with higher iodepth if supported
+   small write, current shape
+   ```
+
+3. A comparison between:
+
+   ```text
+   host/network baseline
+   direct or host-local target path if available
+   Kubernetes mounted PVC path
+   ```
+
+4. A closed recommendation:
+
+   ```text
+   optimize NVMe/TCP target path
+   tune fio/test shape
+   investigate backend/durable store
+   start real NVMe/RDMA target
+   defer RDMA and improve status/docs only
    ```
 
 ## Exit Criteria
 
-- Generated Helm values include the 100GbE frontend IP map.
-- Rendered cluster-spec uses `10.0.0.x` for `data_addr` and `192.168.1.x` for
-  `ctrl_addr`.
-- The live publish target is `<10.0.0.x>:4420`.
-- Writer/reader and the three baseline measurements complete.
-- Report/CRD/operator-snapshot evidence shows the configured data-plane network
-  class.
-- Cleanup verifier reports zero residue.
+- The gate runs from a clean lab and leaves `cleanup_status=ok`.
+- The publish target is still the configured 100GbE TCP address, not the
+  management LAN.
+- At least one independent network or host-path comparator exists, or the gate
+  records why it cannot be collected.
+- The report names a likely bottleneck with evidence, not intuition.
+- RoCE/NVMe-RDMA remains a non-claim unless a real RDMA target moves bytes.
 
 ## Non-Claims
 
-Phase 122 still does not implement or validate NVMe/RDMA, RoCE transport, GPU
-Direct, cuFile/cuObject, NIXL production acceleration, broad host compatibility,
-or performance SLOs.
+Phase 123 still does not implement NVMe/RDMA, RoCE, GPU Direct, cuFile/cuObject,
+NIXL, production HA, or a performance SLO. It is a decision gate for the next
+data-plane investment.

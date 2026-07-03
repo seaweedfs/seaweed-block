@@ -17,6 +17,9 @@ PVC_SIZE="${SW_BLOCK_PHASE120_PVC_SIZE:-512Mi}"
 SEQ_MIB="${SW_BLOCK_PHASE120_SEQ_MIB:-64}"
 SMALL_OPS="${SW_BLOCK_PHASE120_SMALL_OPS:-256}"
 SMALL_BLOCK_BYTES="${SW_BLOCK_PHASE120_SMALL_BLOCK_BYTES:-4096}"
+FRONTEND_IP_MAP="${SW_BLOCK_FRONTEND_IP_MAP:-}"
+FRONTEND_NETWORK_CLASS="${SW_BLOCK_FRONTEND_NETWORK_CLASS:-}"
+EXPECTED_FRONTEND_ROUTE_DEV="${SW_BLOCK_EXPECTED_FRONTEND_ROUTE_DEV:-}"
 
 mkdir -p "${ARTIFACT_DIR}"/{bin,build,values,install,pvc,perf,status,cleanup}
 : >"${SUMMARY}"
@@ -151,6 +154,8 @@ fi
 write_summary "phase120_nvme_tcp_performance_baseline_status=running"
 write_summary "protocol=nvme"
 write_summary "frontend_transport=tcp"
+write_summary "frontend_ip_map=${FRONTEND_IP_MAP:-<empty>}"
+write_summary "frontend_network_class=${FRONTEND_NETWORK_CLASS:-<empty>}"
 write_summary "roce_claim_allowed=false"
 write_summary "nvme_rdma_claim_allowed=false"
 write_summary "performance_claim_allowed=false"
@@ -176,13 +181,20 @@ grep -q 'SW_BLOCK_CSI_IMAGE_ID=' "${ARTIFACT_DIR}/build/alpha-images.env"
 write_summary "image_ready=true"
 
 go build -o "${ARTIFACT_DIR}/bin/sw-block" ./cmd/sw-block
+generate_args=(
+  --kubeconfig "${KUBECONFIG}"
+  --out "${ARTIFACT_DIR}/values/values.nvme.yaml"
+  --image "${IMAGE}"
+  --csi-image "${CSI_IMAGE}"
+  --protocol nvme
+  --node-limit 2
+)
+if [[ -n "${FRONTEND_IP_MAP}" ]]; then
+  generate_args+=(--frontend-ip-map "${FRONTEND_IP_MAP}")
+  generate_args+=(--frontend-network-class "${FRONTEND_NETWORK_CLASS}")
+fi
 "${ARTIFACT_DIR}/bin/sw-block" ops generate-helm-values \
-  --kubeconfig "${KUBECONFIG}" \
-  --out "${ARTIFACT_DIR}/values/values.nvme.yaml" \
-  --image "${IMAGE}" \
-  --csi-image "${CSI_IMAGE}" \
-  --protocol nvme \
-  --node-limit 2 \
+  "${generate_args[@]}" \
   >"${ARTIFACT_DIR}/values/generate.stdout.txt" \
   2>"${ARTIFACT_DIR}/values/generate.stderr.txt"
 grep -q '^network_mode=external-nvme$' "${ARTIFACT_DIR}/values/generate.stdout.txt"
@@ -301,12 +313,14 @@ kubectl -n "${APP_NAMESPACE}" wait --for=condition=Ready "pod/${PERF_POD}" --tim
 write_summary "perf_pod_ready=true"
 
 with_master_port_forward "${ARTIFACT_DIR}/status/blockmaster-port-forward.log" collect_cluster_evidence
-python3 - "${ARTIFACT_DIR}/status/cluster-evidence.json" "${ARTIFACT_DIR}/status/phase120-status-summary.txt" <<'PY'
+python3 - "${ARTIFACT_DIR}/status/cluster-evidence.json" "${ARTIFACT_DIR}/status/phase120-status-summary.txt" "${FRONTEND_NETWORK_CLASS}" <<'PY'
 import json
 import sys
 doc = json.load(open(sys.argv[1]))
+expected_network_class = sys.argv[3]
 managed = doc.get("managed_volumes") or []
 raw = doc.get("volumes") or []
+nodes = doc.get("nodes") or []
 if len(managed) != 1:
     raise SystemExit(f"managed_volume_count={len(managed)}, want 1")
 vol = managed[0]
@@ -321,13 +335,47 @@ if ":4420" not in target:
     raise SystemExit(f"unexpected publish_target={target}")
 if target.startswith("127.") or target.startswith("localhost"):
     raise SystemExit(f"loopback target={target}")
+target_host = target.rsplit(":", 1)[0]
+node = None
+for item in nodes:
+    if item.get("frontend_ip") == target_host:
+        node = item
+        break
+if expected_network_class:
+    if node is None:
+        raise SystemExit(f"no node has frontend_ip={target_host}")
+    network_class = node.get("frontend_network_class") or ""
+    if network_class != expected_network_class:
+        raise SystemExit(f"frontend_network_class={network_class}, want {expected_network_class}")
 with open(sys.argv[2], "w") as f:
     f.write(f"managed_volume_status={status}\n")
     f.write(f"managed_volume_reason={reason}\n")
     f.write("publish_target_loopback=false\n")
     f.write(f"publish_target={target}\n")
+    if node is not None:
+        f.write(f"management_ip={node.get('internal_ip', '')}\n")
+        f.write(f"frontend_ip={node.get('frontend_ip', '')}\n")
+        f.write(f"publish_target_network_class={node.get('frontend_network_class', '')}\n")
+        f.write("publish_target_source=configured_data_plane\n")
 PY
 cat "${ARTIFACT_DIR}/status/phase120-status-summary.txt" >>"${SUMMARY}"
+
+if [[ -n "${FRONTEND_IP_MAP}" ]]; then
+  PUBLISH_TARGET="$(awk -F= '$1=="publish_target" {print $2; exit}' "${ARTIFACT_DIR}/status/phase120-status-summary.txt")"
+  PUBLISH_TARGET_HOST="${PUBLISH_TARGET%:*}"
+  if [[ "${PUBLISH_TARGET_HOST}" == 192.168.* ]]; then
+    echo "publish target uses management LAN: ${PUBLISH_TARGET}" >&2
+    exit 1
+  fi
+  ip route get "${PUBLISH_TARGET_HOST}" >"${ARTIFACT_DIR}/status/publish-target-route.txt" 2>&1
+  if [[ -n "${EXPECTED_FRONTEND_ROUTE_DEV}" ]] && ! grep -q " dev ${EXPECTED_FRONTEND_ROUTE_DEV} " "${ARTIFACT_DIR}/status/publish-target-route.txt"; then
+    echo "publish target route does not use ${EXPECTED_FRONTEND_ROUTE_DEV}: $(cat "${ARTIFACT_DIR}/status/publish-target-route.txt")" >&2
+    exit 1
+  fi
+  ROUTE_DEV="$(awk '{for (i=1; i<NF; i++) if ($i=="dev") {print $(i+1); exit}}' "${ARTIFACT_DIR}/status/publish-target-route.txt")"
+  write_summary "publish_target_route_dev=${ROUTE_DEV}"
+  write_summary "internal_ip_not_reused_as_performance_target=true"
+fi
 
 MARKER_MS="$(measure_exec_ms "${ARTIFACT_DIR}/perf/marker.log" \
   kubectl -n "${APP_NAMESPACE}" exec "${PERF_POD}" -- sh -c \

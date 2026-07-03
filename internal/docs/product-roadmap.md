@@ -340,9 +340,17 @@ rebuild, delete safety, or cleanup must start as a separate gated phase.
   before rerunning a high-speed NVMe/TCP baseline. It separates management IP
   from NVMe/TCP frontend/data-plane IP and still keeps RoCE/NVMe-RDMA
   unsupported for Block.
-- Phase 122 is active. It should rerun the Phase 120 measurement shape on the
-  configured 100GbE TCP frontend IP (`10.0.0.x:4420`) and record throughput
-  without claiming RoCE, NVMe/RDMA, or performance SLOs.
+- Phase 122 is closed. It reran the Phase 120 measurement shape on the
+  configured 100GbE TCP frontend IP and proved the live target as
+  `10.0.0.1:4420` over `enp1s0np0`, with sequential write `115.11 MiB/s`,
+  sequential read `250.98 MiB/s`, and small-write `606.64 IOPS`. The gate also
+  fixed the gRPC observation wire gap for `frontend_ip` and
+  `frontend_network_class`. This remains a baseline, not a RoCE, NVMe/RDMA, or
+  performance SLO claim.
+- Phase 123 is active for NVMe/TCP performance bottleneck triage. It should
+  compare network, host-local, and Kubernetes mounted paths enough to name the
+  likely bottleneck before choosing NVMe/TCP optimization, backend work, or a
+  real NVMe/RDMA target.
 - Later protocol candidates: complete a real NVMe/RDMA target, characterize
   NVMe/TCP performance, or bridge to object/NIXL acceleration where the product
   surface is object/storage rather than block PVC. Keep these separate so
@@ -927,7 +935,12 @@ Approximate engineering effort if scope remains tight:
 - Phase 120 is closed as a management-LAN/default-network baseline.
 - Phase 121 is closed. It adds the data-plane address capability model needed
   before a real 100GbE NVMe/TCP baseline and before any future NVMe/RDMA work.
-- Phase 122 is active for the live 100GbE NVMe/TCP baseline.
+- Phase 122 is closed for the live 100GbE NVMe/TCP baseline. The target was
+  `10.0.0.1:4420` over `enp1s0np0`; the baseline was `115.11 MiB/s` write,
+  `250.98 MiB/s` read, and `606.64 IOPS` small write, with cleanup clean and
+  no RDMA claim.
+- Phase 123 is active for NVMe/TCP bottleneck triage before any new RDMA
+  implementation work.
 - Phase 41-44 are the Operation Layer v0.5 release train: lifecycle-owner
   foundation, real API/admission proof, first bounded finalizer mutation, and
   delete lifecycle close gate.

@@ -57,11 +57,33 @@ The supported-lab claim is intentionally narrow:
 | 113 | Mounted pod survives path restore | PASS |
 | 114 | Two mounted volumes stay isolated through one volume path loss/restore | PASS |
 | 115 | Two mounted volumes pass three alternating path churn cycles | PASS |
+| 120 | Management-LAN NVMe/TCP performance baseline | PASS |
+| 121 | Explicit data-plane/frontend IP capability | PASS |
+| 122 | 100GbE TCP frontend-address performance baseline | PASS |
 
 Key QA sign-offs:
 
 - `internal/docs/qa-assignments/phase114-nvme-k8s-multivolume-mounted-path-isolation-qa-signoff.md`
 - `internal/docs/qa-assignments/phase115-nvme-k8s-multivolume-mounted-path-churn-soak-qa-signoff.md`
+- `internal/docs/qa-assignments/phase122-nvme-tcp-100gbe-baseline-qa-signoff.md`
+
+## Performance Baseline
+
+Phase 122 is the current supported-lab baseline for the configured 100GbE TCP
+frontend path:
+
+```text
+publish_target=10.0.0.1:4420
+publish_target_network_class=100gbe_tcp
+publish_target_route_dev=enp1s0np0
+seq_write_mibps=115.11
+seq_read_mibps=250.98
+small_write_iops=606.64
+cleanup_status=ok
+```
+
+This proves the target is no longer using the Kubernetes management LAN, but it
+is still a baseline only. It does not create a throughput/SLO claim.
 
 ## Representative Release Smoke
 

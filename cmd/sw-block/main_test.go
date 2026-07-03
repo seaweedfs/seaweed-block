@@ -2799,6 +2799,18 @@ func TestOpsGenerateHelmValuesRejectsIncompleteFrontendIPMap(t *testing.T) {
 	}
 }
 
+func TestNodeEvidenceFromWirePreservesFrontendAddress(t *testing.T) {
+	node := nodeEvidenceFromWire(&control.NodeEvidence{
+		NodeName:             "m01",
+		InternalIp:           "192.168.1.181",
+		FrontendIp:           "10.0.0.1",
+		FrontendNetworkClass: "100gbe_tcp",
+	})
+	if node.FrontendIP != "10.0.0.1" || node.FrontendNetworkClass != "100gbe_tcp" {
+		t.Fatalf("frontend address evidence dropped: %+v", node)
+	}
+}
+
 func TestOpsGenerateHelmValuesRestartPersistenceHostPath(t *testing.T) {
 	oldRunCommand := opsGenerateHelmValuesRunCommand
 	opsGenerateHelmValuesRunCommand = fixtureCmdKubectl(map[string]string{
