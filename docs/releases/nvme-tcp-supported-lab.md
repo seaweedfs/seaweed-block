@@ -61,6 +61,7 @@ The supported-lab claim is intentionally narrow:
 | 121 | Explicit data-plane/frontend IP capability | PASS |
 | 122 | 100GbE TCP frontend-address performance baseline | PASS |
 | 123 | NVMe/TCP bottleneck triage with independent 100GbE network comparator | PASS |
+| 124 | Same-shape local-path vs Block NVMe/TCP split | PASS |
 
 Key QA sign-offs:
 
@@ -68,6 +69,7 @@ Key QA sign-offs:
 - `internal/docs/qa-assignments/phase115-nvme-k8s-multivolume-mounted-path-churn-soak-qa-signoff.md`
 - `internal/docs/qa-assignments/phase122-nvme-tcp-100gbe-baseline-qa-signoff.md`
 - `internal/docs/qa-assignments/phase123-nvme-tcp-bottleneck-triage-qa-signoff.md`
+- `internal/docs/qa-assignments/phase124-nvme-tcp-target-backend-shape-split-qa-signoff.md`
 
 ## Performance Baseline
 
@@ -104,6 +106,27 @@ This shows the configured 10.0.0.x data-plane network is not the immediate
 bottleneck. It still does not identify whether the remaining limit is target
 CPU, durable backend, Kubernetes mounted filesystem overhead, or the current
 `dd` test shape; Phase 124 splits those before any NVMe/RDMA work.
+
+Phase 124 compares the mounted Block NVMe/TCP path with a same-node Kubernetes
+`local-path` PVC using the same `dd` shape:
+
+```text
+network_baseline_mibps=3769.28
+local_path_seq_write_mibps=324.87
+local_path_seq_read_mibps=235.29
+block_nvme_seq_write_mibps=118.74
+block_nvme_seq_read_mibps=273.50
+block_vs_local_read_ratio=1.162
+block_vs_local_write_ratio=0.366
+shape_fsync_penalty=1.180
+top_bottleneck=block_target_or_backend
+next_recommendation=phase125_blockvolume_target_cpu_profile
+cleanup_status=ok
+```
+
+This narrows the next engineering work to the Block write path. It still does
+not create a performance/SLO claim, and it does not justify starting NVMe/RDMA
+until the target/backend write-side gap is understood.
 
 ## Representative Release Smoke
 

@@ -663,11 +663,20 @@ Recommended order from here:
     were `248.06 MiB/s` / `127.74 MiB/s`. The gate names the remaining
     bottleneck as `unknown` because target/backend/Kubernetes/test-shape are
     not yet separated, and recommends `phase124_target_backend_shape_split`.
-82. Phase 124: NVMe/TCP Target / Backend / Shape Split. **Active**
-    Compare the current Block NVMe/TCP mounted path with a same-shape
-    Kubernetes local-path PVC and a minimal write/read shape matrix. This
-    should distinguish test-shape/filesystem overhead from Block target/backend
-    overhead before starting a real NVMe/RDMA target.
+82. Phase 124: NVMe/TCP Target / Backend / Shape Split. **Closed 2026-07-03,
+    QA PASS**
+    Compared the current Block NVMe/TCP mounted path with a same-shape
+    Kubernetes `local-path` PVC on the same app node. The network baseline was
+    `3769.28 MiB/s`; local-path write/read were `324.87 MiB/s` /
+    `235.29 MiB/s`; Block NVMe/TCP write/read were `118.74 MiB/s` /
+    `273.50 MiB/s`. The read path is not behind local-path, but write is only
+    `0.366x` local-path, so the next bottleneck class is
+    `block_target_or_backend`.
+83. Phase 125: Block NVMe/TCP Write-Path Profile. **Active**
+    Profile the write-side Block path before any NVMe/RDMA implementation:
+    blockvolume CPU/copy path, durable/backend sync cost, and benchmark shape.
+    The goal is a specific Phase 126 recommendation, not a performance/SLO
+    claim.
 
 The internal release-train contract is
 `internal/docs/ref/operation-layer-v0.5-release-train.md`. Phases 41-44 close

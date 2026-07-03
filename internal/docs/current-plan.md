@@ -1,101 +1,106 @@
-# Current Plan: Phase 124 NVMe/TCP Target / Backend / Shape Split
+# Current Plan: Phase 125 Block NVMe/TCP Write-Path Profile
 
 Status: planning and implementation.
 
-Phase 123 proved the configured data-plane network is not the immediate
-bottleneck:
+Phase 124 split the current NVMe/TCP performance question with an independent
+local-path comparator:
 
 ```text
-network_baseline_mibps=4106.55
-publish_target=10.0.0.1:4420
-k8s_mounted_seq_write_mibps=127.74
-k8s_mounted_seq_read_mibps=248.06
-k8s_mounted_small_write_iops=755.16
+network_baseline_mibps=3769.28
+block_nvme_seq_write_mibps=118.74
+block_nvme_seq_read_mibps=273.50
+local_path_seq_write_mibps=324.87
+local_path_seq_read_mibps=235.29
+block_vs_local_read_ratio=1.162
+block_vs_local_write_ratio=0.366
+shape_fsync_penalty=1.180
+top_bottleneck=block_target_or_backend
 cleanup_status=ok
 ```
 
-The gap is large, but Phase 123 could not distinguish blockvolume target path,
-durable backend, Kubernetes mounted filesystem overhead, and current `dd` test
-shape. Phase 124 should split those before any NVMe/RDMA implementation work.
+The read path is not the immediate problem: Block read was slightly above the
+local-path comparator. The write path is the gap: Block write was about 36% of
+local-path write on the same app node and same `dd conv=fsync` shape. Phase 125
+should profile the Block write path before any NVMe/RDMA implementation work.
 
 ## Goal
 
-Compare the current Block NVMe/TCP mounted path against a same-shape Kubernetes
-local-path PVC and a small test-shape matrix.
+Identify whether the Block NVMe/TCP write gap is mainly:
+
+```text
+blockvolume target CPU / copy path
+durable backend write or fsync path
+current benchmark shape
+instrumentation gap / unknown
+```
 
 Required output:
 
 ```text
-phase124_nvme_tcp_target_backend_shape_split_status=ok
+phase125_block_nvme_tcp_write_path_profile_status=ok
 network_baseline_mibps=<number>
 local_path_seq_write_mibps=<number>
-local_path_seq_read_mibps=<number>
 block_nvme_seq_write_mibps=<number>
-block_nvme_seq_read_mibps=<number>
-block_vs_local_read_ratio=<number>
-block_vs_local_write_ratio=<number>
-shape_fsync_penalty=<number|unknown>
-top_bottleneck=<test_shape|k8s_mount|block_target_or_backend|unknown>
+blockvolume_cpu_peak_percent=<number|unknown>
+blockvolume_cpu_avg_percent=<number|unknown>
+block_write_duration_ms=<number>
+local_write_duration_ms=<number>
+write_path_observation=<target_cpu|backend_sync|benchmark_shape|unknown>
+top_bottleneck=<target_cpu|backend_sync|benchmark_shape|unknown>
 next_recommendation=<specific next phase>
 cleanup_status=ok
 ```
 
 ## Why This Is Next
 
-If local-path PVC with the same `dd` shape is also slow, the bottleneck is
-mostly test shape / mounted filesystem / host behavior. If local-path is much
-faster but Block is slow, the next split is inside blockvolume target/backend.
-Only if the current target/backend path approaches the host/Kubernetes baseline
-does it make sense to spend on NVMe/RDMA.
+NVMe/RDMA only improves the transport. Phase 124 shows the current TCP network
+has far more headroom than the mounted Block path, and the read path is not
+behind the local-path comparator. The next useful question is narrower: what in
+the write path makes Block much slower than a same-node local-path PVC?
 
 ## Deliverables
 
-1. Add a Phase 124 gate that creates two PVCs in one clean lab run:
+1. Add a Phase 125 gate that reuses Phase 124 and collects write-time runtime
+   evidence:
 
    ```text
-   local-path PVC
-   sw-block NVMe/TCP PVC over 10.0.0.x
+   kubectl top pods --containers during write
+   blockvolume process CPU snapshots
+   blockvolume logs around write workload
+   app pod write duration
+   local-path comparator write duration
    ```
 
-2. Run the same minimal matrix on both:
+2. If cheap and safe, add minimal target-side timing logs or existing debug
+   counters for the write path. Do not add a broad observability framework.
+
+3. Preserve non-claims:
 
    ```text
-   seq write with fsync
-   seq read
-   optional seq write without fsync, if safe
-   small write loop
-   ```
-
-3. Preserve Phase 123 context:
-
-   ```text
-   route_dev=enp1s0np0
-   network_baseline_mibps=<iperf3>
    nvme_rdma_supported=false
    roce_claim_allowed=false
    performance_slo_claim_allowed=false
    ```
 
-4. Emit a recommendation:
+4. Emit one concrete recommendation:
 
    ```text
-   phase125_blockvolume_target_cpu_profile
-   phase125_backend_durable_write_profile
-   phase125_test_shape_correction
-   phase125_start_real_nvme_rdma_target
+   phase126_target_copy_cpu_optimization
+   phase126_durable_backend_write_optimization
+   phase126_benchmark_shape_correction
+   phase126_start_real_nvme_rdma_target
    ```
 
 ## Exit Criteria
 
 - Runner scenario passes and archives the evidence bundle.
-- Both PVC paths write/read and clean up.
-- The gate names a bottleneck class from ratios, or records `unknown` with a
-  specific missing comparator.
 - Cleanup verifier reports zero residue.
+- The gate names a write-path bottleneck class, or records `unknown` with the
+  missing evidence needed to classify it.
 - No RoCE/NVMe-RDMA or performance/SLO claim is added.
 
 ## Non-Claims
 
-Phase 124 still does not implement NVMe/RDMA, RoCE, GPU Direct, cuFile/cuObject,
-NIXL, production HA, or a performance SLO. It is a split gate for choosing the
-next data-plane investment.
+Phase 125 still does not implement NVMe/RDMA, RoCE, GPU Direct, cuFile/cuObject,
+NIXL, production HA, or a performance SLO. It is a write-path profiling gate for
+choosing the next data-plane investment.
