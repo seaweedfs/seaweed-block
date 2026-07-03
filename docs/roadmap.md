@@ -681,10 +681,19 @@ Recommended order from here:
     pod-level CPU samples did not show target CPU saturation
     (`blockvolume_cpu_peak_percent=0.80`), so the next direction is backend /
     sync write instrumentation.
-84. Phase 126: Block NVMe/TCP Backend Write Instrumentation. **Active**
-    Add minimal product-owned write-path timing/counter evidence to separate
-    target protocol/copy cost from backend write and sync/flush cost. This is
-    still diagnostic work, not a performance/SLO or NVMe/RDMA claim.
+84. Phase 126: Block NVMe/TCP Backend Write Instrumentation. **Closed
+    2026-07-03, QA PASS**
+    Added product-owned write-path timing/counter evidence on
+    `/status/durable` and the Phase 126 gate. The same 512MiB mounted
+    NVMe/TCP shape measured Block write `177.72 MiB/s` versus local-path write
+    `1115.47 MiB/s` (`0.159x`), with target/backend write bytes matching
+    `588075008`. Cumulative operation timing localized the immediate write
+    cost to backend writes (`backend_write_duration_ms=33186`,
+    `backend_sync_duration_ms=73`), not frontend network or sync/flush.
+85. Phase 127: Durable Backend Large-Write Batching. **Active**
+    Reduce the durable backend write cost exposed by Phase 126 for large
+    sequential NVMe/TCP writes. This remains a targeted backend optimization,
+    not a performance/SLO, RoCE, or NVMe/RDMA claim.
 
 The internal release-train contract is
 `internal/docs/ref/operation-layer-v0.5-release-train.md`. Phases 41-44 close

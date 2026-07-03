@@ -363,9 +363,13 @@ rebuild, delete safety, or cleanup must start as a separate gated phase.
   comparable to local-path. Coarse pod-level CPU samples did not show target
   CPU saturation (`0.80%` peak), so the next direction is backend/sync write
   instrumentation.
-- Phase 126 is active for product-owned Block NVMe/TCP backend write
-  instrumentation: target receive/copy timing, backend write timing, and
-  sync/flush timing.
+- Phase 126 is closed. It added product-owned write-path timing/counter
+  evidence on `/status/durable` and localized the mounted NVMe/TCP write gap to
+  backend write cost: Block write `177.72 MiB/s`, local-path write
+  `1115.47 MiB/s`, target/backend write bytes `588075008`,
+  `backend_write_duration_ms=33186`, and `backend_sync_duration_ms=73`.
+- Phase 127 is active for durable backend large-write batching, using Phase
+  126's backend-write evidence as the before/after gate.
 - Later protocol candidates: complete a real NVMe/RDMA target, characterize
   NVMe/TCP performance, or bridge to object/NIXL acceleration where the product
   surface is object/storage rather than block PVC. Keep these separate so
@@ -963,7 +967,10 @@ Approximate engineering effort if scope remains tight:
 - Phase 125 is closed for Block NVMe/TCP write-path profiling. It narrowed the
   gap to write-side backend/sync behavior rather than read path, network, or
   immediate RDMA work.
-- Phase 126 is active for Block NVMe/TCP backend write instrumentation.
+- Phase 126 is closed for Block NVMe/TCP backend write instrumentation.
+  Product-owned `/status/durable` evidence localized the remaining write-side
+  gap to backend writes, so Phase 127 moves to durable backend large-write
+  batching.
 - Phase 41-44 are the Operation Layer v0.5 release train: lifecycle-owner
   foundation, real API/admission proof, first bounded finalizer mutation, and
   delete lifecycle close gate.

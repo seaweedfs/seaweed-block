@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend"
 	"github.com/seaweedfs/seaweed-block/core/frontend/durable"
@@ -318,6 +319,55 @@ func TestDurableProvider_DurableStatuses_ReportLineageAndOperationalState(t *tes
 			}
 			if !after[0].FrontierKnown {
 				t.Fatalf("status should expose storage frontier evidence: %+v", after[0])
+			}
+		})
+	}
+}
+
+func TestDurableProvider_DurableStatuses_ReportWriteProfile(t *testing.T) {
+	for _, impl := range implMatrix() {
+		impl := impl
+		t.Run(string(impl), func(t *testing.T) {
+			p, _, _ := newProvider(t, impl)
+			backend, err := p.Open(context.Background(), "v1")
+			if err != nil {
+				t.Fatalf("Open: %v", err)
+			}
+			if _, err := p.RecoverVolume(context.Background(), "v1"); err != nil {
+				t.Fatalf("RecoverVolume: %v", err)
+			}
+			sb, ok := backend.(*durable.StorageBackend)
+			if !ok {
+				t.Fatalf("backend type=%T, want *durable.StorageBackend", backend)
+			}
+
+			if _, err := backend.Write(context.Background(), 0, make([]byte, 4096)); err != nil {
+				t.Fatalf("Write: %v", err)
+			}
+			sb.RecordTargetWrite(4096, time.Millisecond)
+			if err := backend.Sync(context.Background()); err != nil {
+				t.Fatalf("Sync: %v", err)
+			}
+
+			statuses := p.DurableStatuses()
+			if len(statuses) != 1 {
+				t.Fatalf("status count=%d want 1: %+v", len(statuses), statuses)
+			}
+			prof := statuses[0].WriteProfile
+			if prof.TargetWriteOps != 1 || prof.TargetWriteBytes != 4096 {
+				t.Fatalf("target write profile mismatch: %+v", prof)
+			}
+			if prof.TargetWriteDurationNanos == 0 {
+				t.Fatalf("target duration was not recorded: %+v", prof)
+			}
+			if prof.BackendWriteOps != 1 || prof.BackendWriteBytes != 4096 {
+				t.Fatalf("backend write profile mismatch: %+v", prof)
+			}
+			if prof.BackendWriteDurationNanos == 0 {
+				t.Fatalf("backend write duration was not recorded: %+v", prof)
+			}
+			if prof.BackendSyncOps != 1 || prof.BackendSyncDurationNanos == 0 {
+				t.Fatalf("backend sync profile mismatch: %+v", prof)
 			}
 		})
 	}

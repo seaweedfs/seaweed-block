@@ -19,6 +19,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend"
 )
@@ -99,6 +100,10 @@ type IOHandler struct {
 	// NVMe discovery); commands for any other NSID are
 	// rejected with Invalid Namespace.
 	nsid uint32
+}
+
+type targetWriteRecorder interface {
+	RecordTargetWrite(bytes int, d time.Duration)
 }
 
 // HandlerConfig configures an IOHandler. Zero values pick T2
@@ -257,9 +262,13 @@ func (h *IOHandler) write(ctx context.Context, cmd IOCommand) IOResult {
 			Reason: "host data shorter than NLB*BlockSize",
 		}
 	}
-	_, err := h.backend.Write(ctx, int64(cmd.SLBA)*int64(h.blockSize), cmd.Data[:expectedBytes])
+	start := time.Now()
+	n, err := h.backend.Write(ctx, int64(cmd.SLBA)*int64(h.blockSize), cmd.Data[:expectedBytes])
 	if err != nil {
 		return mapBackendError(err, "write")
+	}
+	if rec, ok := h.backend.(targetWriteRecorder); ok {
+		rec.RecordTargetWrite(n, time.Since(start))
 	}
 	return IOResult{SCT: SCTGeneric, SC: SCSuccess}
 }

@@ -129,6 +129,90 @@ collect_cluster_evidence() {
     2>"${ARTIFACT_DIR}/status/inventory.stderr.txt"
 }
 
+collect_durable_write_profile() {
+  python3 - \
+    "${ARTIFACT_DIR}/status/cluster-evidence.json" \
+    "${ARTIFACT_DIR}/status/inventory/volume-inventory.json" \
+    "${ARTIFACT_DIR}/status/status-durable-after-seq-write.json" \
+    "${ARTIFACT_DIR}/status/write-profile-summary.txt" <<'PY'
+import json
+import sys
+import urllib.request
+
+cluster_path, inventory_path, durable_out, summary_out = sys.argv[1:]
+
+def field(obj, *names, default=None):
+    for name in names:
+        if isinstance(obj, dict) and name in obj:
+            return obj[name]
+    return default
+
+doc = json.load(open(cluster_path))
+managed = field(doc, "managed_volumes", "managedVolumes", default=[]) or []
+if len(managed) != 1:
+    raise SystemExit(f"managed_volume_count={len(managed)}, want 1")
+vol = managed[0]
+volume_id = field(vol, "volume_id", "volumeID")
+if not volume_id:
+    raise SystemExit("volume_id unavailable")
+replicas = field(vol, "replicas", default=[]) or []
+if not replicas:
+    inv = json.load(open(inventory_path))
+    for inv_vol in field(inv, "volumes", default=[]) or []:
+        if field(inv_vol, "volume_id", "volumeID") == volume_id:
+            replicas = field(inv_vol, "replicas", default=[]) or []
+            break
+chosen = None
+for replica in replicas:
+    if field(replica, "frontend_primary_ready", "frontendPrimaryReady", default=False):
+        chosen = replica
+        break
+if chosen is None:
+    for replica in replicas:
+        if field(replica, "healthy", default=False):
+            chosen = replica
+            break
+if chosen is None and replicas:
+    chosen = replicas[0]
+status_addr = field(chosen or {}, "status_addr", "statusAddr", "status_address", "statusAddress")
+if not status_addr:
+    raise SystemExit("status_addr unavailable")
+url = f"http://{status_addr}/status/durable?volume={volume_id}"
+with urllib.request.urlopen(url, timeout=10) as resp:
+    raw = resp.read()
+open(durable_out, "wb").write(raw)
+body = json.loads(raw)
+vols = field(body, "Volumes", "volumes", default=[]) or []
+if len(vols) != 1:
+    raise SystemExit(f"durable_volume_count={len(vols)}, want 1")
+profile = field(vols[0], "WriteProfile", "writeProfile", default={}) or {}
+target_ops = int(field(profile, "TargetWriteOps", "targetWriteOps", default=0) or 0)
+target_bytes = int(field(profile, "TargetWriteBytes", "targetWriteBytes", default=0) or 0)
+target_ns = int(field(profile, "TargetWriteDurationNanos", "targetWriteDurationNanos", default=0) or 0)
+backend_ops = int(field(profile, "BackendWriteOps", "backendWriteOps", default=0) or 0)
+backend_bytes = int(field(profile, "BackendWriteBytes", "backendWriteBytes", default=0) or 0)
+backend_ns = int(field(profile, "BackendWriteDurationNanos", "backendWriteDurationNanos", default=0) or 0)
+sync_ops = int(field(profile, "BackendSyncOps", "backendSyncOps", default=0) or 0)
+sync_ns = int(field(profile, "BackendSyncDurationNanos", "backendSyncDurationNanos", default=0) or 0)
+def ms(ns):
+    return (ns + 999_999) // 1_000_000 if ns > 0 else 0
+with open(summary_out, "w") as f:
+    f.write("phase120_write_profile_status=ok\n")
+    f.write(f"write_profile_volume_id={volume_id}\n")
+    f.write(f"write_profile_status_addr={status_addr}\n")
+    f.write(f"target_write_observed={str(target_ops > 0 and target_bytes > 0).lower()}\n")
+    f.write(f"target_write_ops={target_ops}\n")
+    f.write(f"target_write_bytes={target_bytes}\n")
+    f.write(f"target_write_duration_ms={ms(target_ns)}\n")
+    f.write(f"backend_write_ops={backend_ops}\n")
+    f.write(f"backend_write_bytes={backend_bytes}\n")
+    f.write(f"backend_write_duration_ms={ms(backend_ns)}\n")
+    f.write(f"backend_sync_ops={sync_ops}\n")
+    f.write(f"backend_sync_duration_ms={ms(sync_ns)}\n")
+PY
+  cat "${ARTIFACT_DIR}/status/write-profile-summary.txt" >>"${SUMMARY}"
+}
+
 measure_exec_ms() {
   local log="$1"
   shift
@@ -451,6 +535,9 @@ write_summary "seq_write_duration_ms=${SEQ_WRITE_MS}"
 write_summary "seq_write_mibps=${SEQ_WRITE_MIBPS}"
 write_summary "seq_read_duration_ms=${SEQ_READ_MS}"
 write_summary "seq_read_mibps=${SEQ_READ_MIBPS}"
+if [[ "${PROFILE_WRITE}" == "true" ]]; then
+  collect_durable_write_profile
+fi
 
 SMALL_BYTES=$((SMALL_OPS * SMALL_BLOCK_BYTES))
 SMALL_WRITE_MS="$(measure_exec_ms "${ARTIFACT_DIR}/perf/small-write.log" \

@@ -133,6 +133,7 @@ type VolumeStatus struct {
 	HeadLSN         uint64
 	Evidence        string
 	Closed          bool
+	WriteProfile    WriteProfileStatus
 }
 
 // NewDurableProvider constructs a provider. view is the ONLY

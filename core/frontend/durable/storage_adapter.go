@@ -44,6 +44,7 @@ import (
 	"log"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/seaweedfs/seaweed-block/core/frontend"
 	"github.com/seaweedfs/seaweed-block/core/storage"
@@ -142,6 +143,7 @@ type StorageBackend struct {
 	closed   bool
 	observer WriteObserver // optional; nil = no replication fan-out
 	writeAck WriteAckPolicy
+	profile  writeProfile
 }
 
 // NewStorageBackend constructs a backend. Starts NON-operational
@@ -247,6 +249,7 @@ func (b *StorageBackend) durableStatus(volumeID, path, impl string) VolumeStatus
 		HeadLSN:         headLSN,
 		Evidence:        evidence,
 		Closed:          closed,
+		WriteProfile:    b.profile.snapshot(),
 	}
 }
 
@@ -313,6 +316,7 @@ func (b *StorageBackend) Sync(ctx context.Context) error {
 	if err := b.gate(); err != nil {
 		return err
 	}
+	start := time.Now()
 	// T4b-5: if an observer is installed, delegate the FULL sync
 	// job — the observer (ReplicationVolume) owns both the local
 	// LogicalStorage.Sync call and the peer barriers fanned out
@@ -331,13 +335,18 @@ func (b *StorageBackend) Sync(ctx context.Context) error {
 	b.mu.Unlock()
 	if obs != nil {
 		_, _, walHead := b.storage.Boundaries()
-		return obs.Sync(ctx, walHead)
+		if err := obs.Sync(ctx, walHead); err != nil {
+			return err
+		}
+		b.profile.recordBackendSync(time.Since(start))
+		return nil
 	}
 	// No observer installed — observer-free path runs local sync only
 	// (T0 / bootstrap / single-replica dev configurations).
 	if _, err := b.storage.Sync(); err != nil {
 		return fmt.Errorf("durable: storage sync: %w", err)
 	}
+	b.profile.recordBackendSync(time.Since(start))
 	return nil
 }
 
@@ -371,7 +380,19 @@ func (b *StorageBackend) Write(ctx context.Context, offset int64, p []byte) (int
 	if len(p) == 0 {
 		return 0, nil
 	}
-	return b.writeBytes(ctx, offset, p)
+	start := time.Now()
+	n, err := b.writeBytes(ctx, offset, p)
+	if n > 0 {
+		b.profile.recordBackendWrite(n, time.Since(start))
+	}
+	return n, err
+}
+
+// RecordTargetWrite records a successful frontend-target write that reached
+// this durable backend. NVMe/TCP uses this to expose target-level write-path
+// evidence without importing durable internals into the transport package.
+func (b *StorageBackend) RecordTargetWrite(bytes int, d time.Duration) {
+	b.profile.recordTargetWrite(bytes, d)
 }
 
 // gate is the per-I/O precondition stack. Order matters:

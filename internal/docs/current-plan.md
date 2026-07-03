@@ -1,81 +1,100 @@
-# Current Plan: Phase 126 Block NVMe/TCP Backend Write Instrumentation
+# Current Plan: Phase 127 Durable Backend Large-Write Batching
 
 Status: planning and implementation.
 
-Phase 125 profiled a 512MiB Block NVMe/TCP write against a same-node local-path
-comparator:
+Phase 126 closed the ambiguity left by Phase 125. The write bottleneck is now
+product-owned evidence, not a `kubectl top` inference:
 
 ```text
-network_baseline_mibps=3836.30
-block_nvme_seq_write_mibps=174.33
-block_nvme_seq_read_mibps=544.10
-local_path_seq_write_mibps=1147.98
-local_path_seq_read_mibps=513.54
-block_vs_local_write_ratio=0.152
-block_vs_local_read_ratio=1.060
-blockvolume_cpu_sample_count=3
-blockvolume_cpu_peak_percent=0.80
-write_path_observation=backend_sync
+network_baseline_mibps=4180.60
+block_nvme_seq_write_mibps=177.72
+block_nvme_seq_read_mibps=520.85
+local_path_seq_write_mibps=1115.47
+local_path_seq_read_mibps=536.13
+block_vs_local_write_ratio=0.159
+block_vs_local_read_ratio=0.971
+target_write_observed=true
+target_write_bytes=588075008
+target_write_ops=17972
+target_write_duration_ms=34233
+backend_write_bytes=588075008
+backend_write_ops=17972
+backend_write_duration_ms=33186
+backend_sync_ops=9
+backend_sync_duration_ms=73
+write_path_observation=backend_write
 cleanup_status=ok
 ```
 
-The read path is not behind local-path. The write path is far behind
-local-path, and coarse pod-level CPU sampling did not show target CPU
-saturation. Phase 126 should instrument the write path closer to code before
-choosing optimization work.
+The duration fields are cumulative per-operation handler/backend time, not
+wall-clock elapsed time. They are useful for locating the hot path, not for
+publishing a throughput SLO.
 
 ## Goal
 
-Add minimal, targeted write-path evidence that can distinguish:
+Reduce the durable backend write cost for large sequential NVMe/TCP writes by
+optimizing the byte-range to LogicalStorage write path. The first target is the
+adapter/storage seam, not the NVMe transport:
 
 ```text
-target receive / protocol handling
-target-to-backend copy/write
-durable backend write
-sync / flush boundary
-benchmark shape artifact
-```
-
-Required output:
-
-```text
-phase126_block_nvme_tcp_backend_write_instrumentation_status=ok
-block_nvme_seq_write_mibps=<number>
-local_path_seq_write_mibps=<number>
-target_write_observed=true
-target_write_bytes=<number>
-target_write_ops=<number>
-target_write_duration_ms=<number|unknown>
-backend_write_duration_ms=<number|unknown>
-backend_sync_duration_ms=<number|unknown>
-write_path_observation=<target_protocol|target_copy|backend_write|backend_sync|benchmark_shape|unknown>
-next_recommendation=<specific next phase>
-cleanup_status=ok
+frontend byte write -> durable.StorageBackend.writeBytes
+-> LogicalStorage.Write per block -> WAL/SmartWAL metadata path
 ```
 
 ## Why This Is Next
 
-Metrics-server CPU samples are too coarse to be the final answer. They are
-useful enough to avoid jumping directly to RDMA, but not precise enough to pick
-an optimization patch. The next gate should produce product-owned timing or
-counter evidence from the Block write path itself.
+Phase 126 showed:
+
+- the 100GbE TCP network is not the bottleneck;
+- Block read is comparable to same-node local-path read;
+- target and backend write bytes match, so writes are reaching product code;
+- backend write cumulative time accounts for nearly all target write time;
+- backend sync time is small in this gate.
+
+Starting NVMe/RDMA now would optimize the wrong boundary. The next product
+change should reduce the number/cost of backend write operations for large
+sequential writes or expose a clearer lower-level storage bottleneck.
 
 ## Deliverables
 
-1. Add minimal instrumentation behind an explicit debug/profile flag or test
-   env path. Keep default runtime behavior unchanged.
+1. Characterize current write fan-out.
 
-2. Capture per-volume write evidence in the Phase 126 gate:
+   Required evidence:
 
    ```text
-   bytes written
-   write op count
-   target-visible duration
-   backend/durable duration if available
-   sync/flush duration if available
+   backend_write_ops=<number>
+   backend_write_bytes=<number>
+   logical_storage_write_ops=<number if available>
+   avg_backend_write_bytes=<number>
    ```
 
-3. Preserve non-claims:
+2. Implement one narrow large-write optimization, guarded by tests.
+
+   Candidate approaches:
+
+   ```text
+   coalesce aligned contiguous blocks before storage call
+   add a LogicalStorage batch-write seam if single-block calls dominate
+   reduce unnecessary per-block observer/log overhead in the no-replica path
+   ```
+
+3. Rerun the same Phase 126 evidence shape.
+
+   Required output:
+
+   ```text
+   phase127_durable_backend_large_write_batching_status=ok
+   before_block_nvme_seq_write_mibps=<number>
+   after_block_nvme_seq_write_mibps=<number>
+   before_backend_write_ops=<number>
+   after_backend_write_ops=<number>
+   before_backend_write_duration_ms=<number>
+   after_backend_write_duration_ms=<number>
+   local_path_seq_write_mibps=<number>
+   cleanup_status=ok
+   ```
+
+4. Preserve non-claims:
 
    ```text
    nvme_rdma_supported=false
@@ -83,27 +102,18 @@ counter evidence from the Block write path itself.
    performance_slo_claim_allowed=false
    ```
 
-4. Emit one concrete next recommendation:
-
-   ```text
-   phase127_backend_write_optimization
-   phase127_sync_boundary_optimization
-   phase127_target_copy_optimization
-   phase127_benchmark_shape_correction
-   phase127_start_real_nvme_rdma_target
-   ```
-
 ## Exit Criteria
 
-- Runner scenario passes and archives evidence.
+- Unit/component tests prove the optimized path preserves byte-level write/read
+  correctness, partial-block behavior, lineage fencing, and sync semantics.
+- Runner gate passes and archives before/after evidence.
 - Cleanup verifier reports zero residue.
-- The gate records target/backend write evidence generated by the product code,
-  not only external `kubectl top` samples.
-- The next recommendation is tied to the observed write-path stage.
-- No RoCE/NVMe-RDMA or performance/SLO claim is added.
+- The result names the next bottleneck honestly if write performance does not
+  improve.
 
 ## Non-Claims
 
-Phase 126 still does not implement NVMe/RDMA, RoCE, GPU Direct, cuFile/cuObject,
-NIXL, production HA, or a performance SLO. It is an instrumentation phase to
-make the next optimization evidence-backed.
+Phase 127 does not implement NVMe/RDMA, RoCE, GPU Direct, cuFile/cuObject,
+NIXL, production HA, broad host compatibility, or a performance SLO. It is a
+durable backend write-path optimization phase for the already-supported
+NVMe/TCP lab path.

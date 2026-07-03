@@ -63,6 +63,7 @@ The supported-lab claim is intentionally narrow:
 | 123 | NVMe/TCP bottleneck triage with independent 100GbE network comparator | PASS |
 | 124 | Same-shape local-path vs Block NVMe/TCP split | PASS |
 | 125 | Block NVMe/TCP write-path profile with coarse target CPU evidence | PASS |
+| 126 | Block NVMe/TCP backend write instrumentation with product-owned counters | PASS |
 
 Key QA sign-offs:
 
@@ -72,6 +73,7 @@ Key QA sign-offs:
 - `internal/docs/qa-assignments/phase123-nvme-tcp-bottleneck-triage-qa-signoff.md`
 - `internal/docs/qa-assignments/phase124-nvme-tcp-target-backend-shape-split-qa-signoff.md`
 - `internal/docs/qa-assignments/phase125-block-nvme-tcp-write-path-profile-qa-signoff.md`
+- `internal/docs/qa-assignments/phase126-block-nvme-tcp-backend-write-instrumentation-qa-signoff.md`
 
 ## Performance Baseline
 
@@ -151,6 +153,39 @@ cleanup_status=ok
 The CPU evidence is coarse and does not prove a specific backend function is
 the bottleneck. It is enough to defer NVMe/RDMA and require product-owned
 write-path instrumentation next.
+
+Phase 126 adds that product-owned instrumentation to `/status/durable` and
+runs the same mounted NVMe/TCP versus local-path comparison with target/backend
+write counters:
+
+```text
+network_baseline_mibps=4180.60
+local_path_seq_write_mibps=1115.47
+local_path_seq_read_mibps=536.13
+block_nvme_seq_write_mibps=177.72
+block_nvme_seq_read_mibps=520.85
+block_vs_local_write_ratio=0.159
+block_vs_local_read_ratio=0.971
+target_write_observed=true
+target_write_bytes=588075008
+target_write_ops=17972
+target_write_duration_ms=34233
+backend_write_bytes=588075008
+backend_write_ops=17972
+backend_write_duration_ms=33186
+backend_sync_ops=9
+backend_sync_duration_ms=73
+write_path_observation=backend_write
+top_bottleneck=backend_write
+next_recommendation=phase127_durable_backend_write_batching
+cleanup_status=ok
+```
+
+The duration fields are cumulative per-operation timing from the target and
+durable backend, not wall-clock benchmark elapsed time. They are useful for
+localizing the write-side cost and point the next work at durable backend
+large-write batching. They still do not create a throughput/SLO, RoCE, or
+NVMe/RDMA claim.
 
 ## Representative Release Smoke
 
