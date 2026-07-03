@@ -368,8 +368,13 @@ rebuild, delete safety, or cleanup must start as a separate gated phase.
   backend write cost: Block write `177.72 MiB/s`, local-path write
   `1115.47 MiB/s`, target/backend write bytes `588075008`,
   `backend_write_duration_ms=33186`, and `backend_sync_duration_ms=73`.
-- Phase 127 is active for durable backend large-write batching, using Phase
-  126's backend-write evidence as the before/after gate.
+- Phase 127 is closed for source/component NVMe ANA Change Notice. OAES ANA
+  Change Notice is conditional on an ANA provider, a parked AER completes when
+  ANA change count advances, no-provider OAES remains zero, and the AER
+  single-slot limit remains enforced.
+- Phase 128 is active for live Linux host validation of that ANA Change Notice.
+  Durable backend batching is deferred until this correctness item and the
+  follow-on K8s reconnect decision are explicit.
 - Later protocol candidates: complete a real NVMe/RDMA target, characterize
   NVMe/TCP performance, or bridge to object/NIXL acceleration where the product
   surface is object/storage rather than block PVC. Keep these separate so
@@ -969,8 +974,9 @@ Approximate engineering effort if scope remains tight:
   immediate RDMA work.
 - Phase 126 is closed for Block NVMe/TCP backend write instrumentation.
   Product-owned `/status/durable` evidence localized the remaining write-side
-  gap to backend writes, so Phase 127 moves to durable backend large-write
-  batching.
+  gap to backend writes, but Phase 127 intentionally closed the NVMe ANA
+  Change Notice source/component gap before performance optimization.
+- Phase 128 is active for live Linux host AER/ANA notification evidence.
 - Phase 41-44 are the Operation Layer v0.5 release train: lifecycle-owner
   foundation, real API/admission proof, first bounded finalizer mutation, and
   delete lifecycle close gate.

@@ -690,10 +690,19 @@ Recommended order from here:
     `588075008`. Cumulative operation timing localized the immediate write
     cost to backend writes (`backend_write_duration_ms=33186`,
     `backend_sync_duration_ms=73`), not frontend network or sync/flush.
-85. Phase 127: Durable Backend Large-Write Batching. **Active**
-    Reduce the durable backend write cost exposed by Phase 126 for large
-    sequential NVMe/TCP writes. This remains a targeted backend optimization,
-    not a performance/SLO, RoCE, or NVMe/RDMA claim.
+85. Phase 127: NVMe ANA Change Notice. **Closed 2026-07-03,
+    source/component PASS**
+    Closed the source/component NVMe protocol gap before write-path
+    optimization: OAES ANA Change Notice is advertised only when an ANA
+    provider exists, and a parked Async Event Request completes as
+    Notice/ANA Change/ANA log page when the provider's ANA change count
+    advances. No-provider OAES remains zero and the single-slot AER limit is
+    still enforced.
+86. Phase 128: NVMe ANA Change Notice Host Gate. **Active**
+    Prove whether a real Linux NVMe/TCP initiator receives and reacts to the
+    ANA Change Notice during path/role transition. Kubernetes dynamic
+    reconnect/restage, NVMe/RDMA, and performance SLOs remain separate
+    non-claims.
 
 The internal release-train contract is
 `internal/docs/ref/operation-layer-v0.5-release-train.md`. Phases 41-44 close

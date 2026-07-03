@@ -129,6 +129,13 @@ func (s *Session) buildIdentifyController() []byte {
 	// bytes 84-259: various optional / derived controller caps
 	// — most are 0 for a minimal software target.
 
+	// bytes 92-95: OAES (Optional Asynchronous Events Supported).
+	// ANA Change Notice is advertised only when an ANA provider exists; the
+	// AER handler then has a concrete event source based on ANA change count.
+	if ana != nil {
+		binary.LittleEndian.PutUint32(buf[92:], optionalAsyncEventANAChange)
+	}
+
 	// bytes 256-257: OACS (Optional Admin Command Support).
 	// Bit table per NVMe 1.3 §5.15.2.2. 11a implements:
 	//   bit 0 (Security Send/Recv)    = 0

@@ -64,6 +64,7 @@ The supported-lab claim is intentionally narrow:
 | 124 | Same-shape local-path vs Block NVMe/TCP split | PASS |
 | 125 | Block NVMe/TCP write-path profile with coarse target CPU evidence | PASS |
 | 126 | Block NVMe/TCP backend write instrumentation with product-owned counters | PASS |
+| 127 | OAES ANA Change Notice source/component gate | PASS |
 
 Key QA sign-offs:
 
@@ -74,6 +75,7 @@ Key QA sign-offs:
 - `internal/docs/qa-assignments/phase124-nvme-tcp-target-backend-shape-split-qa-signoff.md`
 - `internal/docs/qa-assignments/phase125-block-nvme-tcp-write-path-profile-qa-signoff.md`
 - `internal/docs/qa-assignments/phase126-block-nvme-tcp-backend-write-instrumentation-qa-signoff.md`
+- `internal/docs/qa-assignments/phase127-nvme-ana-change-notice-qa-signoff.md`
 
 ## Performance Baseline
 
@@ -183,9 +185,29 @@ cleanup_status=ok
 
 The duration fields are cumulative per-operation timing from the target and
 durable backend, not wall-clock benchmark elapsed time. They are useful for
-localizing the write-side cost and point the next work at durable backend
-large-write batching. They still do not create a throughput/SLO, RoCE, or
-NVMe/RDMA claim.
+localizing the write-side cost and identify durable backend large-write
+batching as the next performance optimization. That optimization is deferred
+behind the Phase 127/128 NVMe correctness work and still does not create a
+throughput/SLO, RoCE, or NVMe/RDMA claim.
+
+Phase 127 closes the source/component side of the ANA Change Notice gap:
+
+```text
+ana_provider_oaes_ana_change_notice=true
+no_provider_oaes_zero=true
+aer_completes_on_ana_change=true
+aer_completion_event_type=notice
+aer_completion_event_info=ana_change
+aer_completion_log_page=ana
+aer_limit_still_enforced=true
+host_live_aer_claim=false
+k8s_dynamic_reconnect_claim=false
+cleanup_status=ok
+```
+
+This means the target now has a concrete ANA-change async event source when an
+ANA provider is wired. It is still not a live Linux host notification or
+Kubernetes dynamic reconnect claim until those gates pass.
 
 ## Representative Release Smoke
 
@@ -246,6 +268,8 @@ This evidence does not claim:
 - Performance, throughput, latency, or production SLO.
 - Broad Linux distro, kernel, initiator, or cloud compatibility.
 - Production HA, node-loss survival, or arbitrary unbounded path churn.
+- Live Linux host AER/ANA notification behavior.
+- Kubernetes dynamic NVMe reconnect/restage after primary/node failover.
 - Backup, snapshot, restore, disaster recovery, or data migration.
 - Automatic cleanup or host repair.
 - Hosted production UI.

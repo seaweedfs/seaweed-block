@@ -1,0 +1,93 @@
+name: nvme-ana-change-notice-chain
+timeout: 10m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: phase127_nvme_ana_change_notice
+    actions:
+      - action: exec
+        node: m02
+        timeout: 8m
+        cmd: "rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase127-nvme-aer && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase127-nvme-aer && cd {{ product_root }} && SW_BLOCK_ARTIFACT_DIR=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase127-nvme-aer bash scripts/run-phase127-nvme-ana-change-notice-gate.sh {{ product_root }}"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase127-nvme-aer/phase127-summary.txt"
+        pattern: "^phase127_nvme_ana_change_notice_status=ok$"
+        save_as: phase127_ok
+      - action: assert_greater
+        actual: "{{ phase127_ok }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase127-nvme-aer/phase127-summary.txt"
+        pattern: "^ana_provider_oaes_ana_change_notice=true$"
+        save_as: oaes_provider_count
+      - action: assert_greater
+        actual: "{{ oaes_provider_count }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase127-nvme-aer/phase127-summary.txt"
+        pattern: "^no_provider_oaes_zero=true$"
+        save_as: oaes_no_provider_count
+      - action: assert_greater
+        actual: "{{ oaes_no_provider_count }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase127-nvme-aer/phase127-summary.txt"
+        pattern: "^aer_completes_on_ana_change=true$"
+        save_as: aer_completion_count
+      - action: assert_greater
+        actual: "{{ aer_completion_count }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase127-nvme-aer/phase127-summary.txt"
+        pattern: "^aer_limit_still_enforced=true$"
+        save_as: aer_limit_count
+      - action: assert_greater
+        actual: "{{ aer_limit_count }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase127-nvme-aer/phase127-summary.txt"
+        pattern: "^host_live_aer_claim=false$"
+        save_as: host_live_claim_count
+      - action: assert_greater
+        actual: "{{ host_live_claim_count }}"
+        threshold: "0"
+
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase127-nvme-aer/phase127-summary.txt"
+        pattern: "^cleanup_status=ok$"
+        save_as: cleanup_ok
+      - action: assert_greater
+        actual: "{{ cleanup_ok }}"
+        threshold: "0"
+
+  - name: collect
+    always: true
+    actions:
+      - action: collect_path
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase127-nvme-aer"
+        name: "remote-phases"
+        ignore_error: true

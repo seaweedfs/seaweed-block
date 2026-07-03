@@ -58,9 +58,11 @@ frontend boundaries.
   - KATO / KeepAlive support,
   - unit and component tests for queue routing, large writes, pipelining, and
     cleanup.
-- Deliberately not advertised yet:
-  - ANA Identify fields are pinned to zero by tests,
-  - ANA Change Notices are not advertised,
+- Deliberately constrained:
+  - ANA Identify fields and OAES ANA Change Notice are advertised only when an
+    ANA provider is wired,
+  - ANA Change Notice has source/component evidence in Phase 127; live Linux
+    host AER behavior remains a follow-on gate,
   - Dataset Management / Write Zeroes are not advertised.
 - Product gaps:
   - no current NVMe alpha install path,

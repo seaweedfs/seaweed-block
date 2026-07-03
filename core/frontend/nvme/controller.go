@@ -70,10 +70,8 @@ type adminController struct {
 	kato      uint32 // Keep Alive Timeout, milliseconds
 
 	// Single-slot pending AER (QA finding testing-#2, AERL=0
-	// means capacity 1). pendingAERCID != 0 means an AER is
-	// parked waiting for an event that T2 never produces.
-	// Identified by the initiator's CID so the response (if
-	// ever emitted in 11c+) matches.
+	// means capacity 1). The CID is retained so an asynchronous
+	// event completion can use the initiator's original command id.
 	pendingAERCID    uint16
 	pendingAERHasCID bool // distinguishes CID 0 (valid) from "no pending"
 }
@@ -95,27 +93,29 @@ func newAdminController(id uint16, subNQN, hostNQN, volumeID string) *adminContr
 
 // defaultCAP builds the Controller Capabilities register.
 // Layout per NVMe 1.3 §3.1.1:
-//   bits  0:15  MQES   — Max Queue Entries Supported (zero-based)
-//   bit   16    CQR    — Contiguous Queues Required (1 per TCP transport)
-//   bits 17:18  AMS    — Arbitration Mechanism Supported (0 = Round Robin only)
-//   bits 19:23  reserved
-//   bits 24:31  TO     — Timeout, 500ms units (time until CSTS.RDY flips)
-//   bits 32:35  DSTRD  — Doorbell Stride (0 = 4-byte; not used over TCP)
-//   bit   36    NSSRS  — NVM Subsystem Reset Supported (0 in T2)
-//   bits 37:44  CSS    — Command Sets Supported (bit 37 = NVM command set)
-//   bit   45    BPS    — Boot Partition Support (0)
-//   bits 46:47  reserved
-//   bits 48:51  MPSMIN — Min Memory Page Size (0 = 4 KiB)
-//   bits 52:55  MPSMAX — Max Memory Page Size (0 = 4 KiB)
-//   bits 56:63  reserved (PMR/CMB flags on NVMe 1.4+)
+//
+//	bits  0:15  MQES   — Max Queue Entries Supported (zero-based)
+//	bit   16    CQR    — Contiguous Queues Required (1 per TCP transport)
+//	bits 17:18  AMS    — Arbitration Mechanism Supported (0 = Round Robin only)
+//	bits 19:23  reserved
+//	bits 24:31  TO     — Timeout, 500ms units (time until CSTS.RDY flips)
+//	bits 32:35  DSTRD  — Doorbell Stride (0 = 4-byte; not used over TCP)
+//	bit   36    NSSRS  — NVM Subsystem Reset Supported (0 in T2)
+//	bits 37:44  CSS    — Command Sets Supported (bit 37 = NVM command set)
+//	bit   45    BPS    — Boot Partition Support (0)
+//	bits 46:47  reserved
+//	bits 48:51  MPSMIN — Min Memory Page Size (0 = 4 KiB)
+//	bits 52:55  MPSMAX — Max Memory Page Size (0 = 4 KiB)
+//	bits 56:63  reserved (PMR/CMB flags on NVMe 1.4+)
 //
 // We set:
-//   MQES = 63  (64 entries per queue — matches Identify MAXCMD=64)
-//   CQR  = 1   (required for NVMe/TCP)
-//   TO   = 2   (1 second — matches Linux kernel's 1s CC.EN→RDY poll
-//              per QA finding testing-#3; keeps upper bound explicit)
-//   CSS  bit 0 = 1 (NVM command set)
-//   everything else = 0
+//
+//	MQES = 63  (64 entries per queue — matches Identify MAXCMD=64)
+//	CQR  = 1   (required for NVMe/TCP)
+//	TO   = 2   (1 second — matches Linux kernel's 1s CC.EN→RDY poll
+//	           per QA finding testing-#3; keeps upper bound explicit)
+//	CSS  bit 0 = 1 (NVM command set)
+//	everything else = 0
 func defaultCAP() uint64 {
 	var cap uint64
 	cap |= uint64(63) // MQES
@@ -230,9 +230,9 @@ func (c *adminController) getKATO() uint32 {
 // emit a CapsuleResp), false if the slot is full (handler
 // rejects with AER-limit-exceeded).
 //
-// T2 never produces an event, so parked AERs never complete.
-// Cleared on admin session close so the slot frees up when
-// the host disconnects.
+// If an ANA provider is wired, Phase 127 can complete the parked AER when the
+// ANA change count advances. Otherwise the AER remains parked until admin
+// session close.
 func (c *adminController) tryParkAER(cid uint16) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -242,6 +242,20 @@ func (c *adminController) tryParkAER(cid uint16) bool {
 	c.pendingAERCID = cid
 	c.pendingAERHasCID = true
 	return true
+}
+
+// completePendingAER consumes the pending AER slot and returns the CID that
+// must be used for the asynchronous event completion.
+func (c *adminController) completePendingAER() (uint16, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.pendingAERHasCID {
+		return 0, false
+	}
+	cid := c.pendingAERCID
+	c.pendingAERCID = 0
+	c.pendingAERHasCID = false
+	return cid, true
 }
 
 // clearPendingAER is called on admin-session close.

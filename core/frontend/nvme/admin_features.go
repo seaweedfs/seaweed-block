@@ -1,5 +1,7 @@
 package nvme
 
+import "time"
+
 // Admin-queue opcode handlers beyond Identify — Batch 11b.
 //
 // Scope (port plan §7 Batch 11b):
@@ -21,7 +23,7 @@ package nvme
 //      AsyncEventRequestLimitExceeded response.
 //   #2 KATO store-only, no timer.
 //   #3 CC.EN→CSTS.RDY synchronous in controller.go setCC.
-//   #4 OAES stays zero.
+//   #4 OAES advertises ANA Change Notice only when an ANA provider exists.
 
 // Set Features / Get Features feature IDs (NVMe 1.3 §5.21).
 const (
@@ -112,11 +114,19 @@ func (s *Session) handleKeepAlive(req *Request) error {
 	return nil
 }
 
+const (
+	asyncEventTypeNotice        uint8  = 0x02
+	asyncEventInfoANAChange     uint8  = 0x03
+	asyncEventPollInterval             = 50 * time.Millisecond
+	optionalAsyncEventANAChange uint32 = 1 << 11
+)
+
 // handleAsyncEventRequest services admin opcode 0x0C.
 //
 // Per QA constraint #1: first AER parks (return nil, no
 // enqueueResponse). Subsequent AER while slot is full → enqueue
-// AsyncEventRequestLimitExceeded.
+// AsyncEventRequestLimitExceeded. With an ANA provider, a change in the ANA
+// change count completes the pending AER with a Notice / ANA Change event.
 func (s *Session) handleAsyncEventRequest(req *Request) error {
 	cmd := &req.capsule
 	if s.ctrl == nil {
@@ -133,9 +143,49 @@ func (s *Session) handleAsyncEventRequest(req *Request) error {
 		s.enqueueResponse(&response{resp: req.resp})
 		return nil
 	}
+	ana := s.handler.ANAProvider()
+	if ana != nil {
+		go s.watchANAChangeNotice(ana, ana.ANAChangeCount())
+	}
 	if s.logger != nil {
-		s.logger.Printf("nvme: AER parked cid=%d (T2 produces no events)", cmd.CID)
+		if ana == nil {
+			s.logger.Printf("nvme: AER parked cid=%d (no async event sources)", cmd.CID)
+		} else {
+			s.logger.Printf("nvme: AER parked cid=%d (watching ANA change count)", cmd.CID)
+		}
 	}
 	// No CapsuleResp. Session loop continues reading next PDU.
 	return nil
+}
+
+func (s *Session) watchANAChangeNotice(ana ANAProvider, baseline uint64) {
+	ticker := time.NewTicker(asyncEventPollInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			if ana.ANAChangeCount() == baseline {
+				continue
+			}
+			cid, ok := s.ctrl.completePendingAER()
+			if !ok {
+				return
+			}
+			if s.logger != nil {
+				s.logger.Printf("nvme: AER completing cid=%d event=ana_change", cid)
+			}
+			resp := CapsuleResponse{
+				CID: cid,
+				DW0: asyncEventDW0(asyncEventTypeNotice, asyncEventInfoANAChange, logPageANA),
+			}
+			s.enqueueResponse(&response{resp: resp})
+			return
+		case <-s.done:
+			return
+		}
+	}
+}
+
+func asyncEventDW0(eventType, eventInfo, logPage uint8) uint32 {
+	return uint32(eventType&0x7) | uint32(eventInfo)<<8 | uint32(logPage)<<16
 }

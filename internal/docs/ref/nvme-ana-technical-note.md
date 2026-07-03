@@ -55,7 +55,10 @@ Status: reference for NVMe-P3/P4 work.
   - no ANA provider => all ANA Identify fields stay zero,
   - ANA provider present => Identify Controller advertises ANA and Identify
     Namespace carries the provider's ANA group.
-- OAES ANA Change Notice remains off until an async event producer exists.
+- Phase 127 adds the first async event producer: when an ANA provider is wired,
+  Identify Controller advertises OAES ANA Change Notice and a parked AER
+  completes when `ANAChangeCount()` advances. Live Linux host AER behavior is a
+  follow-on gate; source/component evidence is the first close point.
 
 ## V2 Reference Behavior
 
