@@ -335,7 +335,8 @@ rebuild, delete safety, or cleanup must start as a separate gated phase.
   the implemented NVMe/TCP path and records sequential write/read MiB/s plus
   small-write IOPS as baseline evidence only. It does not create a performance
   SLO, RoCE/NVMe-RDMA claim, GPU/cuObject claim, NIXL claim, broad compatibility
-  claim, or published-image claim.
+  claim, or published-image claim. Its `publish_target=<ip>:4420` evidence is a
+  TCP target address, not a RoCE/RDMA address.
 - Later protocol candidates: complete a real NVMe/RDMA target, characterize
   NVMe/TCP performance, or bridge to object/NIXL acceleration where the product
   surface is object/storage rather than block PVC. Keep these separate so

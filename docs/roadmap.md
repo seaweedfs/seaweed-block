@@ -631,7 +631,9 @@ Recommended order from here:
     path before any RoCE/NVMe-RDMA investment. The gate records sequential
     write/read MiB/s and small-write IOPS as baseline evidence only, with
     explicit non-claims for RoCE, NVMe/RDMA, performance SLO, GPU/cuObject,
-    NIXL, broad compatibility, and published-image support.
+    NIXL, broad compatibility, and published-image support. Any
+    `publish_target=<ip>:4420` evidence is a TCP target address, not a
+    RoCE/RDMA address.
 
 The internal release-train contract is
 `internal/docs/ref/operation-layer-v0.5-release-train.md`. Phases 41-44 close

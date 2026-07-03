@@ -99,6 +99,10 @@ The live gate may use local images while this remains a development phase. A
 future release claim still needs matching published `seaweed-block` and
 `seaweed-block-csi` images.
 
+Any `publish_target=<ip>:4420` row in this phase is an NVMe/TCP target address
+on the Kubernetes/LAN network. It is not a RoCE/RDMA address or evidence of
+NVMe/RDMA attach.
+
 ## Exit Criteria
 
 Phase 120 can close when:

@@ -44,6 +44,9 @@ small_write_iops=<number>
 cleanup_status=ok
 ```
 
+Interpret `publish_target=<ip>:4420` as the routable NVMe/TCP target address
+used by the Linux TCP initiator. It is not a RoCE/RDMA address.
+
 ## Required Verdict Shape
 
 Report:

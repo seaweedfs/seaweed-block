@@ -379,3 +379,6 @@ Seaweed NVMe subsystem entries.
 - m02 root disk was 63% used.
 - No pre-existing `sw-block` Helm, pod/PVC/PV/namespace, CRD, or admission-policy residue was present before the run.
 - The remote product root was synced from Git archive `fb19f58`; the synced gate script contained `SW_BLOCK_CLEANUP_WAIT_SECONDS="${SW_BLOCK_CLEANUP_WAIT_SECONDS:-180}"`.
+- `publish_target=192.168.1.181:4420` is the NVMe/TCP LAN target on m01. It is
+  not a RoCE/RDMA address and does not change the explicit
+  `roce_claim_allowed=false` / `nvme_rdma_claim_allowed=false` boundary.
