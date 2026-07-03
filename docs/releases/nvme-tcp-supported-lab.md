@@ -65,6 +65,7 @@ The supported-lab claim is intentionally narrow:
 | 125 | Block NVMe/TCP write-path profile with coarse target CPU evidence | PASS |
 | 126 | Block NVMe/TCP backend write instrumentation with product-owned counters | PASS |
 | 127 | OAES ANA Change Notice source/component gate | PASS |
+| 128 | Live Linux host ANA Change Notice AER gate | PASS |
 
 Key QA sign-offs:
 
@@ -76,6 +77,7 @@ Key QA sign-offs:
 - `internal/docs/qa-assignments/phase125-block-nvme-tcp-write-path-profile-qa-signoff.md`
 - `internal/docs/qa-assignments/phase126-block-nvme-tcp-backend-write-instrumentation-qa-signoff.md`
 - `internal/docs/qa-assignments/phase127-nvme-ana-change-notice-qa-signoff.md`
+- `internal/docs/qa-assignments/phase128-nvme-ana-change-notice-host-qa-signoff.md`
 
 ## Performance Baseline
 
@@ -205,9 +207,30 @@ k8s_dynamic_reconnect_claim=false
 cleanup_status=ok
 ```
 
-This means the target now has a concrete ANA-change async event source when an
-ANA provider is wired. It is still not a live Linux host notification or
-Kubernetes dynamic reconnect claim until those gates pass.
+Phase 127 means the target has a concrete ANA-change async event source when an
+ANA provider is wired. By itself it was not yet a live Linux host notification
+or Kubernetes dynamic reconnect claim.
+
+Phase 128 closes the live Linux host notification half of that gap:
+
+```text
+host_aer_observed=true
+host_aer_result=0x000c0302
+host_aer_event_type=notice
+host_aer_event_info=ana_change
+host_aer_log_page=ana
+oaes_ana_change_notice_advertised=true
+ana_log_change_count_before=4294967297
+ana_log_change_count_after=8589934593
+ana_log_change_count_advanced=true
+host_path_state_refreshed=true
+mounted_io_after_notice=ok
+cleanup_status=ok
+```
+
+This proves the standalone Linux NVMe/TCP initiator sees the ANA Change Notice
+through the kernel `nvme_async_event` tracepoint during r1->r2 failover. It is
+still not a Kubernetes dynamic reconnect/restage claim; Phase 129 owns that.
 
 ## Representative Release Smoke
 

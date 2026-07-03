@@ -144,14 +144,13 @@ Status: PASS on M02 at `e1e0e0c`.
 - No Windows NVMe claim.
 - No performance claim.
 - No long soak.
-- No OAES ANA Change Notice was claimed by the original P4 gate. Phase 127 adds
-  source/component evidence for an ANA-change AER producer; a live host rerun is
-  still a separate follow-up.
+- No OAES ANA Change Notice was claimed by the original P4 gate. Phase 127
+  added source/component evidence for an ANA-change AER producer, and Phase
+  128 added the live Linux host AER rerun.
 
 ## Follow-Up Risks
 
 - Longer soak is still required before any HA durability claim.
 - Kubernetes CSI protocol switching is not covered by P4.
 - RoCE and real network path behavior remain outside this milestone.
-- Live Linux host validation of OAES ANA Change Notice remains a follow-up even
-  after the Phase 127 source/component producer.
+- Kubernetes dynamic reconnect/restage remains outside this milestone.

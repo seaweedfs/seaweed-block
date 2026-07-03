@@ -372,9 +372,14 @@ rebuild, delete safety, or cleanup must start as a separate gated phase.
   Change Notice is conditional on an ANA provider, a parked AER completes when
   ANA change count advances, no-provider OAES remains zero, and the AER
   single-slot limit remains enforced.
-- Phase 128 is active for live Linux host validation of that ANA Change Notice.
-  Durable backend batching is deferred until this correctness item and the
-  follow-on K8s reconnect decision are explicit.
+- Phase 128 is closed for live Linux host validation of ANA Change Notice. The
+  m02 kernel `nvme:nvme_async_event` tracepoint observed
+  `NVME_AEN=0x0c0302` during standalone r1->r2 failover, the ANA log change
+  count advanced, host path state refreshed, mounted I/O remained correct, and
+  cleanup was clean.
+- Phase 129 is active for Kubernetes NVMe dynamic reconnect/restage. Durable
+  backend batching is deferred until the mounted-PVC reconnect owner, trigger,
+  and bounded mutation contract are explicit.
 - Later protocol candidates: complete a real NVMe/RDMA target, characterize
   NVMe/TCP performance, or bridge to object/NIXL acceleration where the product
   surface is object/storage rather than block PVC. Keep these separate so

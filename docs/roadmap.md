@@ -698,11 +698,20 @@ Recommended order from here:
     Notice/ANA Change/ANA log page when the provider's ANA change count
     advances. No-provider OAES remains zero and the single-slot AER limit is
     still enforced.
-86. Phase 128: NVMe ANA Change Notice Host Gate. **Active**
-    Prove whether a real Linux NVMe/TCP initiator receives and reacts to the
-    ANA Change Notice during path/role transition. Kubernetes dynamic
-    reconnect/restage, NVMe/RDMA, and performance SLOs remain separate
-    non-claims.
+86. Phase 128: NVMe ANA Change Notice Host Gate. **Closed 2026-07-03,
+    runner PASS**
+    Proved that a real Linux NVMe/TCP initiator receives the ANA Change Notice
+    during standalone r1->r2 failover. The m02 host tracepoint
+    `nvme:nvme_async_event` observed `NVME_AEN=0x0c0302`, decoding to
+    Notice / ANA Change / ANA log page; OAES ANA Change Notice was advertised,
+    the ANA log change count advanced from `4294967297` to `8589934593`, host
+    path state refreshed, mounted I/O remained correct, and cleanup was clean.
+87. Phase 129: Kubernetes NVMe Dynamic Reconnect / Restage. **Active**
+    Prove the Kubernetes CSI path can safely react when a mounted PVC's
+    published NVMe path set changes: stale host paths removed, replacement
+    paths connected, CRD/report/dashboard evidence agrees, and mounted I/O
+    remains correct. NVMe/RDMA, performance SLOs, and backend write
+    optimization remain separate non-claims.
 
 The internal release-train contract is
 `internal/docs/ref/operation-layer-v0.5-release-train.md`. Phases 41-44 close

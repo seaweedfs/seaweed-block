@@ -40,10 +40,10 @@ Status: reference for NVMe-P3/P4 work.
 
 ## Current V3 State
 
-- V3 intentionally zeros ANA Identify fields today.
-- Existing tests pin that zero state so we do not advertise ANA before the log
-  page and state model exist.
-- V3 already maps stale lineage to NVMe path-related status for I/O errors.
+- Without an ANA provider, V3 intentionally zeros ANA Identify fields.
+- Existing tests pin that zero state so we do not advertise ANA without a real
+  provider, log page, and event source.
+- V3 maps stale lineage to NVMe path-related status for I/O errors.
 - V3 now has an ANA provider seam and a blockvolume projection provider:
   - optimized means the frontend projection is healthy,
   - non-optimized means the path is present for probing/failover but not the
@@ -55,10 +55,13 @@ Status: reference for NVMe-P3/P4 work.
   - no ANA provider => all ANA Identify fields stay zero,
   - ANA provider present => Identify Controller advertises ANA and Identify
     Namespace carries the provider's ANA group.
-- Phase 127 adds the first async event producer: when an ANA provider is wired,
-  Identify Controller advertises OAES ANA Change Notice and a parked AER
-  completes when `ANAChangeCount()` advances. Live Linux host AER behavior is a
-  follow-on gate; source/component evidence is the first close point.
+- Phase 127 added the first async event producer: when an ANA provider is
+  wired, Identify Controller advertises OAES ANA Change Notice and a parked AER
+  completes when `ANAChangeCount()` advances.
+- Phase 128 proved that behavior against a real Linux NVMe/TCP initiator. The
+  kernel `nvme:nvme_async_event` tracepoint observed
+  `NVME_AEN=0x0c0302` during r1->r2 failover, which decodes to Notice / ANA
+  Change / ANA log page.
 
 ## V2 Reference Behavior
 
@@ -94,9 +97,12 @@ from V2 role ownership.
   - status: done.
 - P3-C: flip Identify Controller / Namespace fields only after the log page
   tests pass.
-  - status: done locally; waiting for host validation at current branch HEAD.
+  - status: done.
 - P3-D: add Linux `nvme get-log` / `nvme id-ctrl` / `nvme id-ns` QA assignment.
+  - status: done.
 - P4: add two-path Linux multipath validation and mounted failover evidence.
+  - status: done for standalone host; Kubernetes dynamic reconnect/restage is
+    tracked separately.
 
 ## Non-Goals For P3
 
@@ -104,4 +110,5 @@ from V2 role ownership.
 - No Kubernetes CSI protocol switch.
 - No performance claim.
 - No multi-volume namespace management.
-- No host-visible failover claim until P4 passes.
+- No Kubernetes dynamic reconnect/restage claim until the CSI/node ownership
+  gate passes.
