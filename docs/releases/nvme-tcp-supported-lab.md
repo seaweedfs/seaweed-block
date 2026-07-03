@@ -60,12 +60,14 @@ The supported-lab claim is intentionally narrow:
 | 120 | Management-LAN NVMe/TCP performance baseline | PASS |
 | 121 | Explicit data-plane/frontend IP capability | PASS |
 | 122 | 100GbE TCP frontend-address performance baseline | PASS |
+| 123 | NVMe/TCP bottleneck triage with independent 100GbE network comparator | PASS |
 
 Key QA sign-offs:
 
 - `internal/docs/qa-assignments/phase114-nvme-k8s-multivolume-mounted-path-isolation-qa-signoff.md`
 - `internal/docs/qa-assignments/phase115-nvme-k8s-multivolume-mounted-path-churn-soak-qa-signoff.md`
 - `internal/docs/qa-assignments/phase122-nvme-tcp-100gbe-baseline-qa-signoff.md`
+- `internal/docs/qa-assignments/phase123-nvme-tcp-bottleneck-triage-qa-signoff.md`
 
 ## Performance Baseline
 
@@ -84,6 +86,24 @@ cleanup_status=ok
 
 This proves the target is no longer using the Kubernetes management LAN, but it
 is still a baseline only. It does not create a throughput/SLO claim.
+
+Phase 123 adds an independent network comparator over the same configured
+100GbE TCP route:
+
+```text
+network_baseline_mibps=4106.55
+k8s_mounted_seq_write_mibps=127.74
+k8s_mounted_seq_read_mibps=248.06
+k8s_mounted_small_write_iops=755.16
+top_bottleneck=unknown
+next_recommendation=phase124_target_backend_shape_split
+cleanup_status=ok
+```
+
+This shows the configured 10.0.0.x data-plane network is not the immediate
+bottleneck. It still does not identify whether the remaining limit is target
+CPU, durable backend, Kubernetes mounted filesystem overhead, or the current
+`dd` test shape; Phase 124 splits those before any NVMe/RDMA work.
 
 ## Representative Release Smoke
 

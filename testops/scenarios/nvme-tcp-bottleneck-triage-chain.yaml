@@ -1,0 +1,111 @@
+name: nvme-tcp-bottleneck-triage-chain
+timeout: 50m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: pre_clean
+    actions:
+      - action: pre_run_cleanup
+        node: m02
+        kill_patterns: "blockmaster,blockvolume,blockcsi,iscsi-target"
+        nvme_disconnect: "true"
+        iscsi_logout_prefix: "iqn.2026-05.io.seaweedfs"
+      - action: exec
+        node: m02
+        timeout: 5m
+        cmd: "helm status sw-block --namespace kube-system >/dev/null 2>&1 && helm uninstall sw-block --namespace kube-system --wait --timeout 240s || true; kubectl -n default delete pod sw-block-phase123-perf --ignore-not-found=true --wait=true --timeout=60s || true; kubectl -n default delete pvc sw-block-phase123-pvc --ignore-not-found=true --wait=true --timeout=60s || true; kubectl delete storageclass sw-block-phase123 --ignore-not-found=true --wait=true --timeout=60s || true; kubectl get pv --no-headers | awk '/sw-block-phase123/ {print $1}' | xargs -r -n1 kubectl patch pv --type=merge -p '{\"metadata\":{\"finalizers\":[]}}' >/dev/null 2>&1 || true; kubectl get pv --no-headers | awk '/sw-block-phase123/ {print $1}' | xargs -r kubectl delete pv --wait=false >/dev/null 2>&1 || true; kubectl -n kube-system get swblockvolumes.block.seaweedfs.com -o name 2>/dev/null | xargs -r -n1 kubectl -n kube-system patch --type=merge -p '{\"metadata\":{\"finalizers\":[]}}' >/dev/null 2>&1 || true; kubectl -n kube-system delete swblockvolumes.block.seaweedfs.com --all --ignore-not-found=true --wait=true --timeout=60s >/dev/null 2>&1 || true; kubectl -n kube-system delete swblockclusters.block.seaweedfs.com --all --ignore-not-found=true --wait=true --timeout=60s >/dev/null 2>&1 || true; kubectl delete validatingadmissionpolicy,validatingadmissionpolicybinding -l app.kubernetes.io/instance=sw-block --ignore-not-found=true >/dev/null 2>&1 || true; kubectl delete crd swblockclusters.block.seaweedfs.com swblockvolumes.block.seaweedfs.com swblockreplicaeligibilities.block.seaweedfs.com swblockreplicarebuilds.block.seaweedfs.com swblockreplicafailbacks.block.seaweedfs.com swblockfrontendpublications.block.seaweedfs.com --ignore-not-found=true --wait=true --timeout=60s >/dev/null 2>&1 || true; sudo -n nvme disconnect-all >/dev/null 2>&1 || true; rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase123-nvme-triage && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase123-nvme-triage"
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+
+  - name: run_gate
+    actions:
+      - action: exec
+        node: m02
+        timeout: 42m
+        cmd: "cd {{ product_root }} && SW_BLOCK_ARTIFACT_DIR=/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase123-nvme-triage SW_BLOCK_PHASE123_FRONTEND_IP_MAP=m01=10.0.0.1,m02=10.0.0.3 SW_BLOCK_PHASE123_EXPECTED_ROUTE_DEV=enp1s0np0 SW_BLOCK_IMPORT_K3S_SSH_KEY=/opt/work/testdev_key bash scripts/run-phase123-nvme-tcp-bottleneck-triage-gate.sh {{ product_root }}"
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+
+  - name: assert_summary
+    actions:
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase123-nvme-triage/phase123-nvme-tcp-bottleneck-triage-summary.txt"
+        pattern: "^phase123_nvme_tcp_bottleneck_triage_status=ok$"
+        save_as: phase123_status_ok
+      - action: assert_greater
+        actual: "{{ phase123_status_ok }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase123-nvme-triage/phase123-nvme-tcp-bottleneck-triage-summary.txt"
+        pattern: "^publish_target=10[.]0[.]0[.][0-9][0-9]*:4420$"
+        save_as: target_is_data_plane
+      - action: assert_greater
+        actual: "{{ target_is_data_plane }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase123-nvme-triage/phase123-nvme-tcp-bottleneck-triage-summary.txt"
+        pattern: "^network_baseline_status=ok$"
+        save_as: network_baseline_ok
+      - action: assert_greater
+        actual: "{{ network_baseline_ok }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase123-nvme-triage/phase123-nvme-tcp-bottleneck-triage-summary.txt"
+        pattern: "^network_baseline_mibps=[0-9]"
+        save_as: network_metric
+      - action: assert_greater
+        actual: "{{ network_metric }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase123-nvme-triage/phase123-nvme-tcp-bottleneck-triage-summary.txt"
+        pattern: "^k8s_mounted_nvme_tcp_mibps=[0-9]"
+        save_as: k8s_metric
+      - action: assert_greater
+        actual: "{{ k8s_metric }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase123-nvme-triage/phase123-nvme-tcp-bottleneck-triage-summary.txt"
+        pattern: "^top_bottleneck="
+        save_as: bottleneck_named
+      - action: assert_greater
+        actual: "{{ bottleneck_named }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase123-nvme-triage/phase123-nvme-tcp-bottleneck-triage-summary.txt"
+        pattern: "^next_recommendation=phase"
+        save_as: recommendation_named
+      - action: assert_greater
+        actual: "{{ recommendation_named }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase123-nvme-triage/phase123-nvme-tcp-bottleneck-triage-summary.txt"
+        pattern: "^cleanup_status=ok$"
+        save_as: cleanup_ok
+      - action: assert_greater
+        actual: "{{ cleanup_ok }}"
+        threshold: "0"
+
+  - name: collect
+    always: true
+    actions:
+      - action: collect_path
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase123-nvme-triage"
+        name: "remote-phases"
+        ignore_error: true

@@ -655,13 +655,19 @@ Recommended order from here:
     claim. The gate also fixed the ClusterEvidence gRPC wire path so
     `frontend_ip` and `frontend_network_class` survive `blockmaster ->
     sw-block ops`.
-81. Phase 123: NVMe/TCP Performance Bottleneck Triage. **Active**
-    Before adding NVMe/RDMA complexity, identify where the current 100GbE
-    NVMe/TCP path is bottlenecked: network, container/Kubernetes path,
-    blockvolume target path, backend/durable store, fio shape, or host config.
-    The exit artifact should name the likely bottleneck and a specific next
-    engineering phase. RoCE/NVMe-RDMA remains a non-claim until a real RDMA
-    target moves bytes.
+81. Phase 123: NVMe/TCP Performance Bottleneck Triage. **Closed 2026-07-03,
+    QA PASS**
+    Added an independent `iperf3` comparator over the same `10.0.0.x`
+    data-plane route and proved the network is not the immediate bottleneck:
+    `network_baseline_mibps=4106.55` while mounted Block NVMe/TCP read/write
+    were `248.06 MiB/s` / `127.74 MiB/s`. The gate names the remaining
+    bottleneck as `unknown` because target/backend/Kubernetes/test-shape are
+    not yet separated, and recommends `phase124_target_backend_shape_split`.
+82. Phase 124: NVMe/TCP Target / Backend / Shape Split. **Active**
+    Compare the current Block NVMe/TCP mounted path with a same-shape
+    Kubernetes local-path PVC and a minimal write/read shape matrix. This
+    should distinguish test-shape/filesystem overhead from Block target/backend
+    overhead before starting a real NVMe/RDMA target.
 
 The internal release-train contract is
 `internal/docs/ref/operation-layer-v0.5-release-train.md`. Phases 41-44 close

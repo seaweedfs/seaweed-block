@@ -347,10 +347,14 @@ rebuild, delete safety, or cleanup must start as a separate gated phase.
   fixed the gRPC observation wire gap for `frontend_ip` and
   `frontend_network_class`. This remains a baseline, not a RoCE, NVMe/RDMA, or
   performance SLO claim.
-- Phase 123 is active for NVMe/TCP performance bottleneck triage. It should
-  compare network, host-local, and Kubernetes mounted paths enough to name the
-  likely bottleneck before choosing NVMe/TCP optimization, backend work, or a
-  real NVMe/RDMA target.
+- Phase 123 is closed. It added an independent `iperf3` comparator over the
+  same 10.0.0.x data-plane route and measured `network_baseline_mibps=4106.55`
+  versus mounted Block NVMe/TCP read/write of `248.06 MiB/s` / `127.74 MiB/s`.
+  The network is not the immediate bottleneck, but the remaining bottleneck is
+  still `unknown` because target/backend/Kubernetes/test-shape are not split.
+- Phase 124 is active for NVMe/TCP target/backend/test-shape split. It should
+  compare Block NVMe/TCP against a same-shape local-path PVC before choosing
+  NVMe/TCP optimization, backend work, or a real NVMe/RDMA target.
 - Later protocol candidates: complete a real NVMe/RDMA target, characterize
   NVMe/TCP performance, or bridge to object/NIXL acceleration where the product
   surface is object/storage rather than block PVC. Keep these separate so
@@ -939,8 +943,10 @@ Approximate engineering effort if scope remains tight:
   `10.0.0.1:4420` over `enp1s0np0`; the baseline was `115.11 MiB/s` write,
   `250.98 MiB/s` read, and `606.64 IOPS` small write, with cleanup clean and
   no RDMA claim.
-- Phase 123 is active for NVMe/TCP bottleneck triage before any new RDMA
-  implementation work.
+- Phase 123 is closed for NVMe/TCP bottleneck triage. The 10.0.0.x network
+  comparator reached `4106.55 MiB/s`, far above mounted Block NVMe/TCP, so the
+  next split is target/backend/Kubernetes/test-shape rather than RDMA.
+- Phase 124 is active for the NVMe/TCP target/backend/test-shape split.
 - Phase 41-44 are the Operation Layer v0.5 release train: lifecycle-owner
   foundation, real API/admission proof, first bounded finalizer mutation, and
   delete lifecycle close gate.
