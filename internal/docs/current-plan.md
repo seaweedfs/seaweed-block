@@ -1,80 +1,101 @@
-# Current Plan: Phase 120 NVMe/TCP Performance Baseline
+# Current Plan: Phase 121 Data-Plane Address Capability
 
-Status: implementation and QA-gate packaging.
+Status: planning and implementation.
 
-Phase 119 closed the RDMA evidence review: the mono RDMA/VFS/RustVolume/NIXL
-work proves real object/VFS acceleration, but it is not a Linux
-`nvme connect -t rdma` compatible NVMe-oF/RDMA target. Phase 120 therefore
-takes the conservative next step: measure the supported block path
-(`NVMe/TCP`) before spending more engineering time on RoCE/NVMe-RDMA.
+Phase 120 proved the default Kubernetes NVMe/TCP path and collected a useful
+management-LAN baseline, but it used `kubectl get nodes -o wide` InternalIP
+addresses such as `192.168.1.181:4420`. That is correct for functional
+cross-node attach, but it is not the right source of truth for a performance
+baseline on the 100GbE/RoCE fabric.
 
-This is a baseline phase, not a performance claim phase.
+Rust volume already uses the better pattern:
+
+```text
+[rdma]
+enabled = true
+ip = "<RoCE/data-plane IP>"
+port = 18516
+
+PrepareRdmaRead/Write -> returns ok, rdma_ip, rdma_port, lease/capability
+```
+
+Seaweed Block should mirror that model before any more performance or RDMA
+claims: the data-plane address must be explicit, queryable, and surfaced as
+evidence.
 
 ## Why This Phase Exists
 
-The product already has a supported-lab NVMe/TCP path:
+There are three distinct network facts that must not be mixed:
 
 ```text
-Kubernetes PVC
-  -> CSI dynamic provisioning
-  -> blockmaster/blockvolume external NVMe/TCP publication
-  -> Linux host nvme-tcp attach
-  -> pod mount + write/read
+Kubernetes node InternalIP: 192.168.1.x
+  -> management/LAN path
+  -> valid for functional attach gates
+
+100GbE TCP data-plane IP: usually 10.x.x.x in this lab
+  -> valid for NVMe/TCP performance baseline
+  -> still not RoCE/NVMe-RDMA
+
+RoCE/NVMe-RDMA endpoint
+  -> different protocol path
+  -> requires explicit RDMA support/capability
 ```
 
-The next question is not whether RDMA can move memory quickly in another
-project. The next question is where the current Seaweed Block NVMe/TCP path
-actually spends time under a real Kubernetes PVC workload.
+Phase 121 makes Block express these facts explicitly instead of inferring them
+from Kubernetes InternalIP.
 
-Phase 120 records a repeatable baseline so later work can compare:
+## Target Model
 
-- NVMe/TCP tuning;
-- storage-engine changes;
-- NVMe/RDMA work;
-- object/VFS/NIXL acceleration work that is not directly block PVC.
+Each block node needs separate address fields:
+
+```text
+kubernetesNode: m01
+managementIP: 192.168.1.181
+frontendIP: <data-plane TCP IP for NVMe/TCP, optional>
+rdmaIP: <RoCE/RDMA IP, optional>
+networkClass: management_lan | 100gbe_tcp | roce
+```
+
+The runtime/status surface should expose capability evidence in the same spirit
+as Rust volume's `PrepareRdma*` responses:
+
+```text
+nvme_tcp_supported=true
+nvme_tcp_ip=<ip>
+nvme_tcp_port=4420
+nvme_tcp_network_class=100gbe_tcp
+nvme_rdma_supported=false
+roce_ip=<ip-if-configured-or-empty>
+rdma_capability_source=config|probe|absent
+```
+
+For now, `nvme_rdma_supported=false` remains the correct Block answer.
 
 ## Deliverables
 
-1. Add an executable lab gate:
+1. Add a values/config path that can override the frontend/data-plane IP per
+   Kubernetes node without abusing `internalIP`.
+
+2. Add status/report evidence that identifies the selected frontend network:
 
    ```text
-   scripts/run-phase120-nvme-tcp-performance-baseline-gate.sh
-   testops/scenarios/nvme-tcp-performance-baseline-chain.yaml
+   publish_target=<ip>:4420
+   publish_target_network_class=100gbe_tcp
+   publish_target_source=configured_data_plane
+   management_ip=192.168.1.x
    ```
 
-2. The gate must use the supported Kubernetes NVMe/TCP path, not a standalone
-   helper path.
+3. Add a TestOps gate that refuses to call a run a "performance baseline" unless
+   the publish target is on the configured data-plane network and route/interface
+   evidence agrees.
 
-3. The gate must collect terminal `key=value` evidence:
+4. Keep the protocol boundary explicit:
 
    ```text
-   phase120_nvme_tcp_performance_baseline_status=ok
-   protocol=nvme
    frontend_transport=tcp
-   managed_volume_status=ready
-   publish_target_loopback=false
-   marker_verified=true
-   final_data_verified=true
-   seq_write_mibps=<number>
-   seq_read_mibps=<number>
-   small_write_iops=<number>
-   cleanup_status=ok
-   ```
-
-4. The gate must explicitly record non-claims:
-
-   ```text
-   roce_claim_allowed=false
    nvme_rdma_claim_allowed=false
-   performance_claim_allowed=false
+   roce_claim_allowed=false
    performance_slo_claim_allowed=false
-   perf_gate_type=baseline_no_slo
-   ```
-
-5. Add a QA assignment:
-
-   ```text
-   internal/docs/qa-assignments/phase120-nvme-tcp-performance-baseline-qa.md
    ```
 
 ## Verification
@@ -82,39 +103,38 @@ Phase 120 records a repeatable baseline so later work can compare:
 Local/source checks:
 
 ```powershell
-bash -n scripts/run-phase120-nvme-tcp-performance-baseline-gate.sh
-C:\work\swblock.exe validate testops/scenarios/nvme-tcp-performance-baseline-chain.yaml
-go test ./cmd/blockvolume ./cmd/sw-block
+go test ./cmd/sw-block ./cmd/blockvolume ./core/launcher
+C:\work\swblock.exe validate <phase121-scenario>
 ```
 
-Live gate:
+Live gate should record:
 
-```powershell
-C:\work\swblock.exe run `
-  testops/scenarios/nvme-tcp-performance-baseline-chain.yaml `
-  -env product_root=/tmp/seaweed_block
+```text
+phase121_data_plane_address_capability_status=ok
+management_ip=192.168.1.x
+publish_target=<100G-IP>:4420
+publish_target_network_class=100gbe_tcp
+publish_target_source=configured_data_plane
+frontend_transport=tcp
+nvme_rdma_supported=false
+roce_claim_allowed=false
+cleanup_status=ok
 ```
 
-The live gate may use local images while this remains a development phase. A
-future release claim still needs matching published `seaweed-block` and
-`seaweed-block-csi` images.
-
-Any `publish_target=<ip>:4420` row in this phase is an NVMe/TCP target address
-on the Kubernetes/LAN network. It is not a RoCE/RDMA address or evidence of
-NVMe/RDMA attach.
+Only after this passes should a new high-speed NVMe/TCP baseline run and replace
+the Phase 120 LAN numbers for performance discussion.
 
 ## Exit Criteria
 
-Phase 120 can close when:
+Phase 121 can close when:
 
-- the source checks pass;
-- the TestOps scenario validates;
-- the live supported-lab gate passes or has a concrete lab/artifact blocker;
-- the summary contains numeric baseline rows and the explicit non-claim rows;
-- cleanup leaves `cleanup_status=ok`.
+- values/config can carry a per-node data-plane frontend IP;
+- generated/rendered blockvolume frontends use that data-plane IP;
+- status/report/QA evidence distinguishes management IP from data-plane IP;
+- the gate refuses to label `192.168.1.x` as a performance baseline network;
+- cleanup remains zero-residue.
 
 ## Non-Claims
 
-Phase 120 does not claim RoCE, NVMe/RDMA attach, NVMe/RDMA performance, a
-performance SLO, production tuning, broad kernel/distro compatibility,
-GPU/cuObject, NIXL production support, or published-image support.
+Phase 121 does not implement NVMe/RDMA, RoCE I/O, GPU/cuObject, NIXL production
+support, performance SLOs, broad host compatibility, or published-image support.

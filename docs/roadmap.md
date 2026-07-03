@@ -626,14 +626,23 @@ Recommended order from here:
     evidence, keeps RoCE/NVMe-RDMA as a non-claim, and chooses the conservative
     next step: first run a block NVMe/TCP performance baseline to find the
     actual bottleneck.
-78. Phase 120: NVMe/TCP Performance Baseline. **Active**
+78. Phase 120: NVMe/TCP Management-LAN Baseline. **Closed 2026-07-02,
+    QA PASS**
     Add a supported-lab Kubernetes PVC gate that measures the current NVMe/TCP
-    path before any RoCE/NVMe-RDMA investment. The gate records sequential
-    write/read MiB/s and small-write IOPS as baseline evidence only, with
-    explicit non-claims for RoCE, NVMe/RDMA, performance SLO, GPU/cuObject,
-    NIXL, broad compatibility, and published-image support. Any
-    `publish_target=<ip>:4420` evidence is a TCP target address, not a
-    RoCE/RDMA address.
+    path on the default Kubernetes InternalIP/LAN network. The passing run used
+    `192.168.1.181:4420` and recorded sequential write/read MiB/s plus
+    small-write IOPS. This is a functional/default-network baseline, not the
+    authoritative 100GbE performance baseline. It keeps explicit non-claims for
+    RoCE, NVMe/RDMA, performance SLO, GPU/cuObject, NIXL, broad compatibility,
+    and published-image support.
+79. Phase 121: Data-Plane Address Capability. **Active**
+    Mirror the Rust volume RDMA pattern before rerunning performance gates:
+    data-plane addresses must be explicit, queryable, and surfaced as evidence
+    instead of inferred from Kubernetes InternalIP. Add per-node management IP
+    versus frontend/data-plane IP distinction, status/report evidence for the
+    selected NVMe/TCP target network, and a gate that refuses to label
+    `192.168.1.x` as a 100GbE performance baseline. This still does not claim
+    RoCE/NVMe-RDMA support.
 
 The internal release-train contract is
 `internal/docs/ref/operation-layer-v0.5-release-train.md`. Phases 41-44 close

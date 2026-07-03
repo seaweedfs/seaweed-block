@@ -331,12 +331,15 @@ rebuild, delete safety, or cleanup must start as a separate gated phase.
   a Linux `nvme connect -t rdma` compatible target. The decision was to keep
   RoCE/NVMe-RDMA as a non-claim and first run a block NVMe/TCP performance
   baseline before spending more time on RoCE.
-- Phase 120 is the active plan. It adds a supported-lab Kubernetes PVC gate for
-  the implemented NVMe/TCP path and records sequential write/read MiB/s plus
-  small-write IOPS as baseline evidence only. It does not create a performance
-  SLO, RoCE/NVMe-RDMA claim, GPU/cuObject claim, NIXL claim, broad compatibility
-  claim, or published-image claim. Its `publish_target=<ip>:4420` evidence is a
-  TCP target address, not a RoCE/RDMA address.
+- Phase 120 is closed as a management-LAN/default-network baseline. It proved
+  the implemented Kubernetes NVMe/TCP path and recorded sequential write/read
+  MiB/s plus small-write IOPS on `192.168.1.181:4420`, but those numbers are
+  not the authoritative 100GbE performance baseline.
+- Phase 121 is the active plan. It mirrors the Rust volume RDMA pattern by
+  making data-plane addresses explicit, queryable, and visible in status/report
+  evidence before rerunning a high-speed NVMe/TCP baseline. It separates
+  management IP, NVMe/TCP data-plane IP, and optional RoCE/RDMA IP, while still
+  keeping RoCE/NVMe-RDMA unsupported for Block.
 - Later protocol candidates: complete a real NVMe/RDMA target, characterize
   NVMe/TCP performance, or bridge to object/NIXL acceleration where the product
   surface is object/storage rather than block PVC. Keep these separate so
@@ -918,9 +921,9 @@ Approximate engineering effort if scope remains tight:
   `C:\work\rdma\seaweed-mono-rdma-refresh`, separated object/VFS acceleration
   from block NVMe/RDMA, and chose a block NVMe/TCP performance baseline as the
   next conservative step.
-- Phase 120 is active. It packages the supported-lab NVMe/TCP performance
-  baseline gate and keeps all performance, RoCE/NVMe-RDMA, GPU/cuObject, NIXL,
-  broad compatibility, and published-image claims explicitly out of scope.
+- Phase 120 is closed as a management-LAN/default-network baseline.
+- Phase 121 is active. It adds the data-plane address capability model needed
+  before a real 100GbE NVMe/TCP baseline and before any future NVMe/RDMA work.
 - Phase 41-44 are the Operation Layer v0.5 release train: lifecycle-owner
   foundation, real API/admission proof, first bounded finalizer mutation, and
   delete lifecycle close gate.
