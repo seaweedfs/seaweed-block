@@ -35,6 +35,8 @@ The supported-lab claim is intentionally narrow:
   cycles;
 - changed control-plane desired path sets cause CSI-node to connect the new
   desired NVMe/TCP path for a mounted pod without remounting;
+- stale old host paths for the same NQN are pruned after desired path-set
+  replacement using scoped path disconnects;
 - uninstall/cleanup leaves zero Seaweed Block Kubernetes, iSCSI, process,
   multipath, and hostPath residue.
 
@@ -72,6 +74,7 @@ The supported-lab claim is intentionally narrow:
 | 130 | CSI-node reconnect owner/trigger contract | PASS |
 | 131 | Live Kubernetes host-path reconnect through CSI-node owner | PASS |
 | 132 | Live Kubernetes desired path-set change through CSI-node owner | PASS |
+| 133 | Live Kubernetes stale host-path pruning after desired path replacement | PASS |
 
 Key QA sign-offs:
 
@@ -88,6 +91,7 @@ Key QA sign-offs:
 - `internal/docs/qa-assignments/phase130-nvme-reconnect-owner-qa-signoff.md`
 - `internal/docs/qa-assignments/phase131-nvme-k8s-reconnect-live-qa-signoff.md`
 - `internal/docs/qa-assignments/phase132-nvme-k8s-desired-path-change-qa-signoff.md`
+- `internal/docs/qa-assignments/phase133-nvme-k8s-stale-path-prune-qa-signoff.md`
 
 ## Performance Baseline
 
@@ -294,8 +298,43 @@ cleanup_status=ok
 ```
 
 Phase 131's injected loss is host-local and scoped:
-`nvme disconnect -d <controller>`. It does not prove a changed desired path set
-after frontend replacement/failover. That remains Phase 132.
+`nvme disconnect -d <controller>`. Phase 132 then proved the changed desired
+path-set half of the same loop:
+
+```text
+phase132_nvme_k8s_desired_path_change_status=ok
+initial_path_count=2
+desired_path_set_changed=true
+reconnect_owner=csi-node
+reconnect_invoked=true
+new_desired_path_connected=true
+pod_uid_preserved=true
+mounted_io_after_reconnect=ok
+crd_status_agrees=true
+report_dashboard_agree=true
+cleanup_status=ok
+```
+
+Phase 133 closes the stale host-path gap left by Phase 132:
+
+```text
+phase133_nvme_k8s_stale_path_prune_status=ok
+initial_path_count=2
+old_desired_path=192.168.1.184:4420
+new_desired_path=192.168.1.184:4520
+desired_path_set_changed=true
+reconnect_owner=csi-node
+reconnect_invoked=true
+new_desired_path_connected=true
+stale_old_path_detected=true
+stale_old_path_pruned=true
+host_path_count_after_prune=2
+pod_uid_preserved=true
+mounted_io_after_reconnect=ok
+crd_status_agrees=true
+report_dashboard_agree=true
+cleanup_status=ok
+```
 
 ## Representative Release Smoke
 
@@ -358,8 +397,9 @@ This evidence does not claim:
 - Production HA, node-loss survival, or arbitrary unbounded path churn.
 - Broad Linux host AER/ANA notification compatibility beyond the m02 supported
   lab gate.
-- Kubernetes dynamic NVMe reconnect after control-plane desired path-set
-  replacement/failover until the Phase 132 close gate passes.
+- Published-image Kubernetes dynamic NVMe reconnect after control-plane desired
+  path-set replacement/failover until matching release images pass a release
+  smoke. The current evidence is source-gated.
 - Backup, snapshot, restore, disaster recovery, or data migration.
 - Automatic cleanup or host repair.
 - Hosted production UI.

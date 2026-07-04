@@ -20,6 +20,7 @@ RECONNECT_INTERVAL="${SW_BLOCK_NVME_RECONNECT_INTERVAL:-5s}"
 HOST_PATH_DISCONNECT="${SW_BLOCK_NVME_HOST_PATH_DISCONNECT:-0}"
 FORCE_STAGE2_MULTIPATH="${SW_BLOCK_NVME_FORCE_STAGE2_MULTIPATH:-0}"
 DESIRED_PATH_CHANGE="${SW_BLOCK_NVME_DESIRED_PATH_CHANGE:-0}"
+REQUIRE_STALE_PATH_PRUNE="${SW_BLOCK_NVME_REQUIRE_STALE_PATH_PRUNE:-0}"
 
 mkdir -p "${ARTIFACT_DIR}"/{bin,build,values,install,multi-volume,inject,surfaces,cleanup}
 : >"${SUMMARY}"
@@ -271,9 +272,9 @@ wait_for_host_nvme_path_count() {
 }
 
 wait_for_host_nvme_addr() {
-  local label="$1"
-  local nqn="$2"
-  local want_addr="$3"
+	local label="$1"
+	local nqn="$2"
+	local want_addr="$3"
   for _ in $(seq 1 90); do
     write_host_nvme_path_info "${label}" "${nqn}" || true
     local addrs
@@ -289,12 +290,39 @@ PY
     sleep 1
   done
   echo "NVMe host path ${want_addr} did not appear for ${nqn}" >&2
+	return 1
+}
+
+wait_for_host_nvme_addr_absent_count() {
+  local label="$1"
+  local nqn="$2"
+  local stale_addr="$3"
+  local want_count="$4"
+  for _ in $(seq 1 90); do
+    write_host_nvme_path_info "${label}" "${nqn}" || true
+    local addrs
+    local count
+    addrs="$(read_env_value "${ARTIFACT_DIR}/inject/nvme-path-info.${label}.env" addrs)"
+    count="$(read_env_value "${ARTIFACT_DIR}/inject/nvme-path-info.${label}.env" path_count)"
+    if python3 - "${addrs}" "${stale_addr}" "${count}" "${want_count}" <<'PY'
+import sys
+addrs = [a for a in sys.argv[1].split(",") if a]
+stale_addr = sys.argv[2]
+count, want_count = sys.argv[3], sys.argv[4]
+raise SystemExit(0 if stale_addr not in addrs and count == want_count else 1)
+PY
+    then
+      return 0
+    fi
+    sleep 1
+  done
+  echo "NVMe stale host path ${stale_addr} was not pruned to count ${want_count} for ${nqn}" >&2
   return 1
 }
 
 wait_for_reconnect_owner_log() {
-  local out="$1"
-  for _ in $(seq 1 90); do
+	local out="$1"
+	for _ in $(seq 1 90); do
     kubectl -n "${HELM_NAMESPACE}" logs -l app=sw-block-csi-node -c block-csi --since=10m --prefix=true >"${out}" 2>&1 || true
     if grep -q 'MountedNVMeReconnectOwner: iteration .*reconnected=1' "${out}" || \
        grep -q 'reconciled mounted NVMe paths' "${out}"; then
@@ -606,6 +634,16 @@ PY
     write_summary "stale_old_host_path_after_desired_change=true"
   else
     write_summary "stale_old_host_path_after_desired_change=false"
+  fi
+
+  if [[ "${REQUIRE_STALE_PATH_PRUNE}" == "1" || "${REQUIRE_STALE_PATH_PRUNE}" == "true" ]]; then
+    write_summary "stale_old_path_detected=true"
+    wait_for_host_nvme_addr_absent_count "after-stale-path-prune" "${NQN}" "${OLD_DESIRED_PATH}" "2"
+    HOST_PATH_COUNT_AFTER_PRUNE="$(read_env_value "${ARTIFACT_DIR}/inject/nvme-path-info.after-stale-path-prune.env" path_count)"
+    HOST_PATHS_AFTER_PRUNE="$(read_env_value "${ARTIFACT_DIR}/inject/nvme-path-info.after-stale-path-prune.env" addrs)"
+    write_summary "stale_old_path_pruned=true"
+    write_summary "host_path_count_after_prune=${HOST_PATH_COUNT_AFTER_PRUNE}"
+    write_summary "host_paths_after_prune=${HOST_PATHS_AFTER_PRUNE}"
   fi
 
   if [[ "${MOUNTED_IO}" == "1" || "${MOUNTED_IO}" == "true" ]]; then

@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -130,6 +131,23 @@ func (m *mockNVMeUtil) Disconnect(_ context.Context, nqn string) error {
 	return nil
 }
 
+func (m *mockNVMeUtil) DisconnectPath(_ context.Context, controller string) error {
+	m.calls = append(m.calls, "disconnectpath:"+controller)
+	if m.disconnectErr != nil {
+		return m.disconnectErr
+	}
+	for key := range m.connectedPaths {
+		nqn, addr, ok := strings.Cut(key, "|")
+		if !ok {
+			continue
+		}
+		if mockNVMeController(nqn, addr) == controller {
+			delete(m.connectedPaths, key)
+		}
+	}
+	return nil
+}
+
 func (m *mockNVMeUtil) GetDeviceByNQN(_ context.Context, nqn string) (string, error) {
 	m.calls = append(m.calls, "getdevice:"+nqn)
 	return m.getDeviceResult, m.getDeviceErr
@@ -143,6 +161,28 @@ func (m *mockNVMeUtil) IsConnected(_ context.Context, nqn string) (bool, error) 
 func (m *mockNVMeUtil) IsPathConnected(_ context.Context, nqn, addr string) (bool, error) {
 	m.calls = append(m.calls, "ispathconnected:"+addr+":"+nqn)
 	return m.connectedPaths[nqn+"|"+addr], nil
+}
+
+func (m *mockNVMeUtil) ListPaths(_ context.Context, nqn string) ([]NVMeConnectedPath, error) {
+	m.calls = append(m.calls, "listpaths:"+nqn)
+	var paths []NVMeConnectedPath
+	for key := range m.connectedPaths {
+		gotNQN, addr, ok := strings.Cut(key, "|")
+		if !ok || gotNQN != nqn {
+			continue
+		}
+		paths = append(paths, NVMeConnectedPath{
+			Addr:       addr,
+			Controller: mockNVMeController(gotNQN, addr),
+		})
+	}
+	sort.Slice(paths, func(i, j int) bool { return paths[i].Addr < paths[j].Addr })
+	return paths, nil
+}
+
+func mockNVMeController(nqn, addr string) string {
+	replacer := strings.NewReplacer(":", "-", ".", "-", "/", "-", "|", "-", "=", "-")
+	return "/dev/mock-" + replacer.Replace(nqn+"-"+addr)
 }
 
 func newMockMountUtil() *mockMountUtil {
@@ -1178,6 +1218,88 @@ func TestMountedNVMeReconnectOwner_ReconcilesMissingPublishedPath(t *testing.T) 
 	info := ns.staged["v1"]
 	if info == nil || !info.multipath || len(info.nvmeAddrs) != 2 || info.nvmeAddrs[1] != newAddr {
 		t.Fatalf("staged info=%+v", info)
+	}
+	if len(reporter.events) != 1 || reporter.events[0].Type != EventTypeCSIReattachObserved {
+		t.Fatalf("events=%+v", reporter.events)
+	}
+}
+
+func TestMountedNVMeReconnectOwner_PrunesStaleDesiredPath(t *testing.T) {
+	_, mn, mm := newMockISCSIUtil(), newMockNVMeUtil(), newMockMountUtil()
+	nqn := "nqn.2026-05.io.seaweedfs:v1"
+	otherNQN := "nqn.2026-05.io.seaweedfs:other"
+	oldAddr := "127.0.0.1:4420"
+	remainingAddr := "127.0.0.2:4420"
+	newAddr := "127.0.0.1:4520"
+	otherAddr := "127.0.0.3:4420"
+	mn.connected[nqn] = true
+	mn.connected[otherNQN] = true
+	mn.connectedPaths[nqn+"|"+oldAddr] = true
+	mn.connectedPaths[nqn+"|"+remainingAddr] = true
+	mn.connectedPaths[otherNQN+"|"+otherAddr] = true
+	lookup := &sequenceLookup{targets: []PublishTarget{{
+		VolumeID:  "v1",
+		ReplicaID: "r1",
+		Protocol:  ProtocolNVMe,
+		NVMeAddr:  newAddr,
+		NVMeAddrs: []string{newAddr, remainingAddr},
+		NQN:       nqn,
+		NSID:      1,
+		Multipath: true,
+	}}}
+	reporter := &recordingEventReporter{}
+	ns := NewNodeServer(NodeConfig{
+		NodeID:        "node-a",
+		NVMeUtil:      mn,
+		MountUtil:     mm,
+		Lookup:        lookup,
+		EventReporter: reporter,
+	})
+	staging := t.TempDir()
+	mm.mounted[staging] = true
+	if err := writeTransportFile(staging, transportNVMe); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeVolumeFile(staging, "v1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeTargetFile(staging, nqn); err != nil {
+		t.Fatal(err)
+	}
+	ns.staged["v1"] = &stagedVolumeInfo{
+		nqn:         nqn,
+		nvmeAddr:    oldAddr,
+		nvmeAddrs:   []string{oldAddr, remainingAddr},
+		multipath:   true,
+		transport:   transportNVMe,
+		stagingPath: staging,
+	}
+
+	result, err := ns.ReconcileMountedNVMeVolumes(context.Background())
+	if err != nil {
+		t.Fatalf("ReconcileMountedNVMeVolumes: %v", err)
+	}
+	if result.Checked != 1 || result.Reconnected != 1 || result.Pruned != 1 || result.Failed != 0 {
+		t.Fatalf("result=%+v", result)
+	}
+	if mn.connectedPaths[nqn+"|"+oldAddr] {
+		t.Fatalf("stale old path %s still connected", oldAddr)
+	}
+	for _, key := range []string{nqn + "|" + newAddr, nqn + "|" + remainingAddr, otherNQN + "|" + otherAddr} {
+		if !mn.connectedPaths[key] {
+			t.Fatalf("expected path %s to remain connected, paths=%v", key, mn.connectedPaths)
+		}
+	}
+	if !containsString(mn.calls, "disconnectpath:"+mockNVMeController(nqn, oldAddr)) {
+		t.Fatalf("missing scoped stale path disconnect, calls=%v", mn.calls)
+	}
+	if containsString(mn.calls, "disconnect:"+nqn) || containsString(mn.calls, "disconnect:"+otherNQN) {
+		t.Fatalf("prune must not use full subsystem disconnect, calls=%v", mn.calls)
+	}
+	for _, call := range mn.calls {
+		if call == "disconnectpath:"+mockNVMeController(otherNQN, otherAddr) {
+			t.Fatalf("prune touched unrelated NQN, calls=%v", mn.calls)
+		}
 	}
 	if len(reporter.events) != 1 || reporter.events[0].Type != EventTypeCSIReattachObserved {
 		t.Fatalf("events=%+v", reporter.events)

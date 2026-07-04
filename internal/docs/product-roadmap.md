@@ -394,9 +394,13 @@ rebuild, delete safety, or cleanup must start as a separate gated phase.
   A mounted RF=2 NVMe/TCP PVC starts with two desired paths, one generated
   frontend address is replaced, `SwBlockVolume.status.nvme.nvmeAddrs` changes
   old-to-new, CSI-node connects the new desired path, mounted I/O remains
-  correct, and CRD/report/dashboard agree. The run also exposed that the old
-  host path remains connected, so Phase 133 owns scoped stale-path pruning
-  before returning to durable backend batching.
+  correct, and CRD/report/dashboard agree.
+- Phase 133 is closed for live Kubernetes NVMe stale path pruning after desired
+  path replacement. CSI-node now connects the new desired path and disconnects
+  only stale host paths for the same NQN that are no longer desired, using
+  scoped controller disconnects. Mounted pod UID/I/O are preserved and
+  CRD/report/dashboard agree. The next NVMe work should return to the Phase 126
+  backend-write bottleneck and durable write batching.
 - Later protocol candidates: complete a real NVMe/RDMA target, characterize
   NVMe/TCP performance, or bridge to object/NIXL acceleration where the product
   surface is object/storage rather than block PVC. Keep these separate so
@@ -1003,7 +1007,9 @@ Approximate engineering effort if scope remains tight:
 - Phase 130 is closed for the CSI-node NVMe reconnect owner/trigger contract.
 - Phase 131 is closed for the live Kubernetes NVMe host-path reconnect gate.
 - Phase 132 is closed for the Kubernetes NVMe desired path-set change close
-  gate. Phase 133 owns stale host-path pruning after replacement.
+  gate.
+- Phase 133 is closed for Kubernetes NVMe stale host-path pruning after desired
+  path replacement.
 - Phase 41-44 are the Operation Layer v0.5 release train: lifecycle-owner
   foundation, real API/admission proof, first bounded finalizer mutation, and
   delete lifecycle close gate.

@@ -104,8 +104,8 @@ Seaweed Block can already demonstrate a narrow Kubernetes block-storage loop:
   claim.
 - Kubernetes NVMe/TCP mounted reconnect is source-gated through changed
   desired path-set evidence: CSI-node can connect a newly published desired
-  NVMe path without pod remount and keep mounted I/O working. Stale host-path
-  pruning after replacement remains the next correctness gap.
+  NVMe path, prune the stale old host path for the same NQN, preserve pod
+  identity, and keep mounted I/O working.
 - Install drift status for current versus desired chart/app/image identity
   without upgrade execution.
 - CRD/RBAC status-writer conformance coverage for the failures that previously
@@ -717,11 +717,28 @@ Recommended order from here:
     refreshes publish context, connects missing NVMe paths for the same NQN,
     rejects mounted NQN mismatch, and does not remount or reformat. This phase
     deliberately does not claim an automatic Kubernetes reconnect trigger.
-88. Phase 130: Kubernetes NVMe Reconnect Owner / Trigger Gate. **Active**
-    Prove the live owner/trigger that notices a mounted PVC's desired NVMe path
-    set changed and invokes the bounded reconnect/restage path. This must name
-    the owner, prove replacement path connection, keep pod identity and mounted
-    I/O correct, and keep stale-path disconnect claims honest.
+88. Phase 130: Kubernetes NVMe Reconnect Owner / Trigger Gate. **Closed
+    2026-07-04, runner PASS**
+    Added the source/component owner contract: an opt-in CSI-node loop refreshes
+    mounted NVMe publish evidence and invokes the bounded reconnect path. It is
+    disabled by default and does not itself claim live Kubernetes failover.
+89. Phase 131: Kubernetes NVMe Host-Path Reconnect Live Gate. **Closed
+    2026-07-04, runner PASS**
+    Proved a mounted RF=2 NVMe/TCP PVC survives scoped host path loss:
+    `nvme disconnect -d <controller>` removes one path, CSI-node reconnects it,
+    pod UID/I/O are preserved, and CRD/report/dashboard agree.
+90. Phase 132: Kubernetes NVMe Desired Path-Set Change Gate. **Closed
+    2026-07-04, runner PASS**
+    Proved changed control-plane desired path evidence: a generated frontend
+    address is replaced, `SwBlockVolume.status.nvme.nvmeAddrs` changes
+    old-to-new, CSI-node connects the new desired path, and mounted I/O
+    continues. The run exposed stale old host-path residue.
+91. Phase 133: Kubernetes NVMe Stale Path Pruning Close Gate. **Closed
+    2026-07-04, runner PASS**
+    Closed the Phase 132 residue: after desired path replacement, CSI-node
+    connects the new desired path and prunes the stale old host path for the
+    same NQN using scoped controller disconnects, with pod UID/I/O preserved
+    and cleanup clean.
 
 The internal release-train contract is
 `internal/docs/ref/operation-layer-v0.5-release-train.md`. Phases 41-44 close

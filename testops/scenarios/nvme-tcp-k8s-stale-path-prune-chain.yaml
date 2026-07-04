@@ -1,0 +1,178 @@
+name: nvme-tcp-k8s-stale-path-prune-chain
+timeout: 60m
+
+env:
+  product_root: "/tmp/seaweed_block"
+  ssh_key: "C:\\work\\dev_server\\testdev_key"
+
+topology:
+  nodes:
+    m02:
+      host: 192.168.1.184
+      user: testdev
+      key: "{{ ssh_key }}"
+
+phases:
+  - name: pre_clean
+    actions:
+      - action: pre_run_cleanup
+        node: m02
+        kill_patterns: "blockmaster,blockvolume,blockcsi,iscsi-target"
+        nvme_disconnect: "true"
+        iscsi_logout_prefix: "iqn.2026-05.io.seaweedfs"
+      - action: exec
+        node: m02
+        timeout: 5m
+        cmd: "helm status sw-block --namespace kube-system >/dev/null 2>&1 && helm uninstall sw-block --namespace kube-system --wait --timeout 240s || true; kubectl -n default delete pod sw-block-phase133-mounted --ignore-not-found=true --wait=true --timeout=120s || true; kubectl -n default delete pod -l sw-block-test=multi-volume --ignore-not-found=true --wait=true --timeout=120s || true; kubectl -n default delete pod sw-block-multi-reader-1 sw-block-multi-writer-1 --ignore-not-found=true --wait=true --timeout=120s || true; kubectl -n default delete pvc sw-block-multi-pvc-1 --ignore-not-found=true --wait=true --timeout=120s || true; kubectl delete storageclass sw-block-multi --ignore-not-found=true --wait=true --timeout=120s || true; kubectl -n default delete deploy -l app=sw-blockvolume --ignore-not-found=true --wait=false || true; kubectl -n kube-system delete deploy -l app=sw-blockvolume --ignore-not-found=true --wait=false || true; kubectl -n kube-system get swblockvolumes.block.seaweedfs.com -o name 2>/dev/null | xargs -r -n1 kubectl -n kube-system patch --type=merge -p '{\"metadata\":{\"finalizers\":[]}}' >/dev/null 2>&1 || true; kubectl -n kube-system delete swblockvolumes.block.seaweedfs.com --all --ignore-not-found=true --wait=true --timeout=60s || true; kubectl -n kube-system delete swblockclusters.block.seaweedfs.com --all --ignore-not-found=true --timeout=60s || true; kubectl delete validatingadmissionpolicy,validatingadmissionpolicybinding -l app.kubernetes.io/instance=sw-block --ignore-not-found=true >/dev/null 2>&1 || true; kubectl delete crd swblockclusters.block.seaweedfs.com swblockvolumes.block.seaweedfs.com swblockreplicaeligibilities.block.seaweedfs.com swblockreplicarebuilds.block.seaweedfs.com swblockreplicafailbacks.block.seaweedfs.com swblockfrontendpublications.block.seaweedfs.com --ignore-not-found=true --wait=true --timeout=60s >/dev/null 2>&1 || true; kubectl get pv --no-headers 2>/dev/null | awk '/sw-block-multi/ {print $1}' | xargs -r -n1 kubectl patch pv --type=merge -p '{\"metadata\":{\"finalizers\":[]}}' >/dev/null 2>&1 || true; kubectl get pv --no-headers 2>/dev/null | awk '/sw-block-multi/ {print $1}' | xargs -r kubectl delete pv --wait=false >/dev/null 2>&1 || true; sudo -n nvme disconnect-all >/dev/null 2>&1 || true; rm -rf /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase133-nvme-stale-path-prune && mkdir -p /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase133-nvme-stale-path-prune/build /mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase133-nvme-stale-path-prune/gate"
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+
+  - name: build_and_import_images
+    actions:
+      - action: exec
+        node: m02
+        timeout: 10m
+        cmd: "cd {{ product_root }} && bash scripts/build-alpha-images.sh {{ product_root }}"
+        env.SW_BLOCK_IMPORT_K3S: "1"
+        env.SW_BLOCK_IMPORT_K3S_NODES: "192.168.1.181"
+        env.SW_BLOCK_IMPORT_K3S_SSH_USER: "testdev"
+        env.SW_BLOCK_IMPORT_K3S_SSH_KEY: "{{ ssh_key }}"
+        env.SW_BLOCK_DOCKER_NO_CACHE: "1"
+        env.SW_BLOCK_ARTIFACT_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase133-nvme-stale-path-prune/build"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase133-nvme-stale-path-prune/build/alpha-images.env"
+        pattern: "SW_BLOCK_IMAGE_ID="
+        save_as: image_id_count
+      - action: assert_greater
+        actual: "{{ image_id_count }}"
+        threshold: "0"
+
+  - name: run_phase133_gate
+    actions:
+      - action: exec
+        node: m02
+        timeout: 45m
+        cmd: "cd {{ product_root }} && bash scripts/run-phase133-nvme-k8s-stale-path-prune-gate.sh {{ product_root }}"
+        env.KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+        env.SW_BLOCK_ARTIFACT_DIR: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase133-nvme-stale-path-prune/gate"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase133-nvme-stale-path-prune/gate/phase133-nvme-k8s-stale-path-prune-summary.txt"
+        pattern: "^phase133_nvme_k8s_stale_path_prune_status=ok$"
+        save_as: gate_ok
+      - action: assert_greater
+        actual: "{{ gate_ok }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase133-nvme-stale-path-prune/gate/phase133-nvme-k8s-stale-path-prune-summary.txt"
+        pattern: "^initial_path_count=2$"
+        save_as: initial_two
+      - action: assert_greater
+        actual: "{{ initial_two }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase133-nvme-stale-path-prune/gate/phase133-nvme-k8s-stale-path-prune-summary.txt"
+        pattern: "^desired_path_set_changed=true$"
+        save_as: desired_changed
+      - action: assert_greater
+        actual: "{{ desired_changed }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase133-nvme-stale-path-prune/gate/phase133-nvme-k8s-stale-path-prune-summary.txt"
+        pattern: "^reconnect_owner=csi-node$"
+        save_as: owner
+      - action: assert_greater
+        actual: "{{ owner }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase133-nvme-stale-path-prune/gate/phase133-nvme-k8s-stale-path-prune-summary.txt"
+        pattern: "^reconnect_invoked=true$"
+        save_as: reconnect_invoked
+      - action: assert_greater
+        actual: "{{ reconnect_invoked }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase133-nvme-stale-path-prune/gate/phase133-nvme-k8s-stale-path-prune-summary.txt"
+        pattern: "^new_desired_path_connected=true$"
+        save_as: new_path_connected
+      - action: assert_greater
+        actual: "{{ new_path_connected }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase133-nvme-stale-path-prune/gate/phase133-nvme-k8s-stale-path-prune-summary.txt"
+        pattern: "^stale_old_path_detected=true$"
+        save_as: stale_detected
+      - action: assert_greater
+        actual: "{{ stale_detected }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase133-nvme-stale-path-prune/gate/phase133-nvme-k8s-stale-path-prune-summary.txt"
+        pattern: "^stale_old_path_pruned=true$"
+        save_as: stale_pruned
+      - action: assert_greater
+        actual: "{{ stale_pruned }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase133-nvme-stale-path-prune/gate/phase133-nvme-k8s-stale-path-prune-summary.txt"
+        pattern: "^host_path_count_after_prune=2$"
+        save_as: prune_count_two
+      - action: assert_greater
+        actual: "{{ prune_count_two }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase133-nvme-stale-path-prune/gate/phase133-nvme-k8s-stale-path-prune-summary.txt"
+        pattern: "^pod_uid_preserved=true$"
+        save_as: uid_preserved
+      - action: assert_greater
+        actual: "{{ uid_preserved }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase133-nvme-stale-path-prune/gate/phase133-nvme-k8s-stale-path-prune-summary.txt"
+        pattern: "^mounted_io_after_reconnect=ok$"
+        save_as: io_ok
+      - action: assert_greater
+        actual: "{{ io_ok }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase133-nvme-stale-path-prune/gate/phase133-nvme-k8s-stale-path-prune-summary.txt"
+        pattern: "^crd_status_agrees=true$"
+        save_as: crd_agrees
+      - action: assert_greater
+        actual: "{{ crd_agrees }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase133-nvme-stale-path-prune/gate/phase133-nvme-k8s-stale-path-prune-summary.txt"
+        pattern: "^report_dashboard_agree=true$"
+        save_as: report_dashboard_agree
+      - action: assert_greater
+        actual: "{{ report_dashboard_agree }}"
+        threshold: "0"
+      - action: grep_log
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase133-nvme-stale-path-prune/gate/phase133-nvme-k8s-stale-path-prune-summary.txt"
+        pattern: "^cleanup_status=ok$"
+        save_as: cleanup_ok
+      - action: assert_greater
+        actual: "{{ cleanup_ok }}"
+        threshold: "0"
+
+  - name: collect
+    always: true
+    actions:
+      - action: collect_path
+        node: m02
+        path: "/mnt/smb/work/share/g15d-k8s/{{ run_id }}-phase133-nvme-stale-path-prune"
+        name: "remote-phases"
+        ignore_error: true

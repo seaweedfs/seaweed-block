@@ -339,6 +339,22 @@ func (r *realNVMeUtil) Disconnect(ctx context.Context, nqn string) error {
 	return nil
 }
 
+func (r *realNVMeUtil) DisconnectPath(ctx context.Context, controller string) error {
+	if controller == "" {
+		return fmt.Errorf("nvme controller is required for scoped disconnect")
+	}
+	cmd := exec.CommandContext(ctx, "nvme", "disconnect", "-d", controller)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		outStr := string(out)
+		if strings.Contains(outStr, "No such") || strings.Contains(outStr, "not found") {
+			return nil
+		}
+		return fmt.Errorf("nvme disconnect path: %s: %w", outStr, err)
+	}
+	return nil
+}
+
 func (r *realNVMeUtil) IsConnected(ctx context.Context, nqn string) (bool, error) {
 	doc, err := nvmeListSubsystems(ctx)
 	if err != nil {
@@ -353,6 +369,14 @@ func (r *realNVMeUtil) IsPathConnected(ctx context.Context, nqn, addr string) (b
 		return false, err
 	}
 	return nvmeSubsystemHasPath(doc, nqn, addr), nil
+}
+
+func (r *realNVMeUtil) ListPaths(ctx context.Context, nqn string) ([]NVMeConnectedPath, error) {
+	doc, err := nvmeListSubsystems(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return nvmeSubsystemPaths(doc, nqn), nil
 }
 
 func (r *realNVMeUtil) GetDeviceByNQN(ctx context.Context, nqn string) (string, error) {
@@ -434,6 +458,45 @@ func nvmeSubsystemHasPath(doc any, nqn, addr string) bool {
 		}
 	}
 	return false
+}
+
+func nvmeSubsystemPaths(doc any, nqn string) []NVMeConnectedPath {
+	var out []NVMeConnectedPath
+	for _, sub := range iterNVMeSubsystems(doc) {
+		if got, _ := sub["NQN"].(string); got != nqn {
+			continue
+		}
+		paths, _ := sub["Paths"].([]any)
+		for _, path := range paths {
+			pathMap, _ := path.(map[string]any)
+			rawAddr, _ := pathMap["Address"].(string)
+			fields := parseNVMeAddressFields(rawAddr)
+			addr := ""
+			if fields["traddr"] != "" && fields["trsvcid"] != "" {
+				addr = fields["traddr"] + ":" + fields["trsvcid"]
+			}
+			controller := nvmePathController(pathMap)
+			if addr == "" && controller == "" {
+				continue
+			}
+			out = append(out, NVMeConnectedPath{Addr: addr, Controller: controller})
+		}
+	}
+	return out
+}
+
+func nvmePathController(path map[string]any) string {
+	for _, key := range []string{"Name", "Controller", "Device"} {
+		raw, _ := path[key].(string)
+		if raw == "" {
+			continue
+		}
+		if strings.HasPrefix(raw, "/dev/") {
+			return raw
+		}
+		return "/dev/" + raw
+	}
+	return ""
 }
 
 func parseNVMeAddressFields(raw string) map[string]string {

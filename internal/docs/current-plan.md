@@ -1,78 +1,109 @@
-# Current Plan: Phase 133 Kubernetes NVMe Stale Path Pruning Close Gate
+# Current Plan: Phase 134 Durable Backend Large-Write Batching Gate
 
 Status: planning.
 
-Phase 132 proved live desired path-set convergence: a mounted RF=2 NVMe/TCP PVC
-started with two desired paths, one generated frontend path was replaced with a
-different reachable address, `SwBlockVolume.status.nvme.nvmeAddrs` changed from
-old to new, the CSI-node owner connected the new path, pod UID/I/O were
-preserved, and CRD/report/dashboard agreed.
-
-The live run also exposed the next gap:
+Phase 133 closed the Kubernetes NVMe/TCP mounted correctness gap from Phase
+132:
 
 ```text
-stale_old_host_path_after_desired_change=true
-host_path_count_after_desired_change=3
+desired path set changes old->new
+-> CSI-node owner connects the new desired path
+-> CSI-node owner prunes the stale old host path for the same NQN
+-> mounted pod UID/I/O are preserved
+-> CRD/report/dashboard agree
 ```
 
-The product connects new desired paths, but it does not yet prune stale mounted
-NVMe paths for the same NQN that are no longer in the desired set.
+That makes the supported-lab NVMe/TCP mounted path coherent enough to return to
+the Phase 126 performance finding. Phase 126 showed that the write gap is not
+network-bound and not dominated by sync time:
+
+```text
+network_baseline_mibps=4180.60
+block_nvme_seq_write_mibps=177.72
+local_path_seq_write_mibps=1115.47
+block_vs_local_write_ratio=0.159
+backend_write_ops=17972
+backend_write_duration_ms=33186
+backend_sync_ops=9
+backend_sync_duration_ms=73
+top_bottleneck=backend_write
+next_recommendation=phase127_durable_backend_write_batching
+```
+
+The next product change should therefore target backend write fan-out, not
+RoCE/NVMe-RDMA.
 
 ## Goal
 
 ```text
-mounted RF=2 NVMe/TCP PVC starts with two desired paths
--> one frontend/replica path is replaced with a different reachable address
--> control-plane desired path set changes old->new
--> CSI-node reconnect owner connects the new desired path
--> CSI-node reconnect owner disconnects the stale old path for the same NQN
--> mounted pod UID is preserved and I/O still works
--> CRD/report/dashboard agree
+large sequential mounted NVMe/TCP write
+-> target still receives the same bytes
+-> durable backend writes fewer/larger physical write operations
+-> read-back data remains byte-correct
+-> backend write counters prove the optimization path was exercised
+-> cleanup remains clean
 ```
+
+This phase is an optimization gate, but it must still be correctness-first:
+partial-block writes, repeated writes to the same LBA, and sync/flush semantics
+must remain safe.
 
 ## Required Evidence
 
 ```text
-phase133_nvme_k8s_stale_path_prune_status=ok
-initial_path_count=2
-old_desired_path=<addr>
-new_desired_path=<addr>
-desired_path_set_changed=true
-reconnect_owner=csi-node
-reconnect_invoked=true
-new_desired_path_connected=true
-stale_old_path_detected=true
-stale_old_path_pruned=true
-host_path_count_after_prune=2
-host_paths_after_prune=<new + remaining desired only>
-pod_uid_preserved=true
-mounted_io_after_reconnect=ok
-crd_status_agrees=true
-report_dashboard_agree=true
+phase134_durable_backend_write_batching_status=ok
+frontend_transport=tcp
+roce_claim_allowed=false
+nvme_rdma_claim_allowed=false
+performance_slo_claim_allowed=false
+target_write_observed=true
+target_write_bytes=<bytes>
+backend_write_bytes=<same bytes or justified physical bytes>
+backend_write_ops_before=<from baseline or control run>
+backend_write_ops_after=<optimized run>
+backend_write_op_reduction_ratio=<after/before>
+backend_write_duration_ms=<observed>
+backend_sync_ops=<observed>
+read_after_write_verified=true
+partial_block_regression_passed=true
+same_lba_overwrite_regression_passed=true
 cleanup_status=ok
 ```
 
+The exact throughput number is evidence, not a product claim. PASS requires the
+operation count and correctness assertions, not a fixed MiB/s target.
+
 ## Boundaries
 
-- Do not use `nvme disconnect-all` as proof or implementation.
-- Do not disconnect paths for other NQNs or other volumes.
-- Do not prune a path unless current control-plane evidence positively excludes
-  that address from the desired set for the same NQN.
-- Do not claim pass if only the new path connects while the old host path
-  remains.
-- Do not claim NVMe/RDMA/RoCE or performance/SLO.
+- Do not claim NVMe/RDMA, RoCE, GPU Direct, cuFile/cuObject, NIXL, production
+  HA, broad host compatibility, or performance/SLO.
+- Do not optimize by dropping durability, skipping sync semantics, or assuming
+  sequential-only writes globally.
+- Do not add broad configurability unless the benchmark proves the default
+  needs a guard.
+- Do not change frontend publication, failover, reconnect, or Kubernetes
+  lifecycle behavior in this phase.
 
-## Candidate Gate Design
+## Candidate Implementation
 
-1. Extend the CSI-node mounted NVMe reconnect owner to list current host paths
-   for the staged NQN.
-2. After connecting all desired paths, compute stale connected paths:
-   `connected_for_nqn - desired_addrs`.
-3. Disconnect stale paths by scoped controller/path only.
-4. Reuse the Phase132 live setup and desired-path replacement injection.
-5. Assert the new desired path is connected and the old host path is gone.
-6. Assert mounted pod UID/I/O, CRD/report/dashboard agreement, and cleanup.
+1. Inspect the durable backend write path and identify where large sequential
+   target writes are split into many small backend writes.
+2. Add a minimal batching/coalescing path for contiguous full-block writes.
+3. Preserve the existing direct path for partial-block or non-contiguous writes
+   unless a safe merge is obvious.
+4. Add unit tests for:
+   - contiguous full-block batching;
+   - partial-block writes preserving untouched bytes;
+   - same-LBA overwrite ordering;
+   - sync/flush counter behavior.
+5. Extend the Phase 126 gate or add a Phase134 wrapper that runs the same
+   mounted NVMe/TCP profile shape and captures before/after backend counters.
+6. Update docs only after the gate proves correctness and product-owned
+   counters show the optimized path.
 
-If Phase 133 passes, the Kubernetes NVMe mounted failover path has a much
-stronger correctness loop: fresh desired paths connect and stale paths are
-bounded. Then return to write-path performance optimization from Phase 126.
+## Exit Criteria
+
+Phase 134 can close only if local correctness tests and a live supported-lab
+gate both pass. If the optimization does not reduce backend write fan-out, keep
+the instrumentation and document the next bottleneck instead of claiming a
+performance improvement.

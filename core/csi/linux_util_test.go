@@ -75,6 +75,46 @@ func TestNVMeSubsystemHasPathRequiresTargetAddressNotSourceAddress(t *testing.T)
 	}
 }
 
+func TestNVMeSubsystemPathsReturnsAddressAndController(t *testing.T) {
+	doc := map[string]any{
+		"Subsystems": []any{
+			map[string]any{
+				"NQN": "nqn.2026-05.io.seaweedfs:v1",
+				"Paths": []any{
+					map[string]any{
+						"Name":    "nvme2",
+						"Address": "traddr=192.168.1.181,trsvcid=4420,src_addr=192.168.1.184",
+					},
+					map[string]any{
+						"Controller": "/dev/nvme3",
+						"Address":    "traddr=192.168.1.184,trsvcid=4520",
+					},
+				},
+			},
+			map[string]any{
+				"NQN": "nqn.2026-05.io.seaweedfs:other",
+				"Paths": []any{
+					map[string]any{
+						"Name":    "nvme9",
+						"Address": "traddr=192.168.1.199,trsvcid=4420",
+					},
+				},
+			},
+		},
+	}
+
+	paths := nvmeSubsystemPaths(doc, "nqn.2026-05.io.seaweedfs:v1")
+	if len(paths) != 2 {
+		t.Fatalf("paths=%+v", paths)
+	}
+	if paths[0].Addr != "192.168.1.181:4420" || paths[0].Controller != "/dev/nvme2" {
+		t.Fatalf("path[0]=%+v", paths[0])
+	}
+	if paths[1].Addr != "192.168.1.184:4520" || paths[1].Controller != "/dev/nvme3" {
+		t.Fatalf("path[1]=%+v", paths[1])
+	}
+}
+
 func TestNVMeConnectAlreadyConnectedIsIdempotentSuccess(t *testing.T) {
 	for _, out := range []string{
 		"Failed to write to /dev/nvme-fabrics: Already connected\n",
