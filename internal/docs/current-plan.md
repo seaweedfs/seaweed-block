@@ -1,41 +1,40 @@
-# Current Plan: Phase 131 Kubernetes NVMe Live Reconnect Close Gate
+# Current Plan: Phase 132 Kubernetes NVMe Desired Path-Set Change Close Gate
 
 Status: planning.
 
-Phase 129 closed the mounted restage primitive: repeated `NodeStageVolume` can
-refresh publish context and connect missing NVMe paths without remounting.
-Phase 130 closed the ownership contract: the CSI node plugin now has an opt-in
-owner loop that invokes that primitive from refreshed publish evidence.
+Phase 131 proved live host-path reconnect: a mounted RF=2 NVMe/TCP PVC starts
+with two host paths, one controller/path is disconnected with scoped
+`nvme disconnect -d`, and the CSI-node owner reconnects the missing path while
+pod UID, I/O, and status surfaces stay correct.
 
-Phase 131 should prove the full live Kubernetes user path rather than another
-component contract.
+Phase 132 should close the remaining NVMe Kubernetes failover semantics gap:
+the desired frontend path set itself changes after replacement/failover, and
+the mounted pod reconnects to the new desired path.
 
 ## Goal
 
-Prove a live Kubernetes path for mounted NVMe PVC reconnect after a path-set
-change:
-
 ```text
-mounted NVMe PVC starts with two paths
--> one path is removed
--> desired replacement/restored path appears in publish evidence
--> CSI-node reconnect owner detects the desired path set
--> owner invokes bounded reconnect
--> missing replacement path is connected without remount
--> mounted pod keeps identity and I/O remains correct
+mounted RF=2 NVMe/TCP PVC starts with two desired paths
+-> one frontend/replica path is replaced or failed over
+-> control-plane publish evidence changes to the new desired path set
+-> CSI-node reconnect owner observes the changed desired path set
+-> owner connects the new desired path without remount
+-> mounted pod UID is preserved and I/O still works
+-> CRD/report/dashboard agree
 ```
 
 ## Required Evidence
 
 ```text
-phase131_nvme_k8s_reconnect_live_status=ok
+phase132_nvme_k8s_desired_path_change_status=ok
 initial_path_count=2
-path_loss_detected=true
+old_desired_path=<addr>
+new_desired_path=<addr>
 desired_path_set_changed=true
+path_loss_or_replacement_detected=true
 reconnect_owner=csi-node
 reconnect_invoked=true
-replacement_path_connected=true
-stale_path_disconnect_claim=<true|false-with-reason>
+new_desired_path_connected=true
 pod_uid_preserved=true
 mounted_io_after_reconnect=ok
 crd_status_agrees=true
@@ -45,31 +44,28 @@ cleanup_status=ok
 
 ## Boundaries
 
-- Do not claim automatic reconnect if the gate manually calls NodeStage.
-- Do not use `nvme disconnect-all`; mutation must stay scoped to the affected
-  NQN/path.
+- Do not reuse host-only path disconnect as proof; Phase 131 already covers
+  that.
+- Do not claim pass if Linux auto-reconnects the same old path without a
+  control-plane desired path change.
+- Do not use `nvme disconnect-all` for injected failure.
 - Do not claim NVMe/RDMA/RoCE or performance/SLO.
-- Do not hide a missing owner behind TestOps helper logic. The product log or
-  event must prove the CSI-node owner invoked reconnect.
-- If the kernel auto-reconnects before the owner acts, record that as
-  inconclusive and redesign the trigger stimulus rather than marking PASS.
 
-## Candidate Implementation / Gate
+## Candidate Gate Design
 
-1. Enable `csiNode.nvmeReconnect.enabled=true` and `stage2Multipath.enabled=true`
-   in the NVMe RF=2 Kubernetes scenario.
-2. Start a mounted writer/reader pod and record pod UID plus initial host NVMe
-   path count.
-3. Remove one frontend path or replace it with a different reachable path while
-   keeping the pod mounted.
-4. Wait for publish evidence to carry the desired path set.
-5. Assert CSI-node logs/events show the reconnect owner invocation.
-6. Assert the replacement path is connected, no remount happened, pod UID is
-   preserved, mounted I/O still works, and support surfaces agree.
+1. Start from the Phase131 live setup with `stage2Multipath.enabled=true` and
+   `csiNode.nvmeReconnect.enabled=true`.
+2. Force one frontend path to be replaced with a different reachable
+   `addr/NQN`-compatible path, or add a controlled replacement frontend target
+   for the same NQN/NSID while the old path is removed.
+3. Assert `SwBlockVolume.status.nvme.nvmeAddrs` changes from old to new.
+4. Assert CSI-node owner logs reconnect for the new path.
+5. Assert mounted pod UID and I/O are preserved.
+6. Assert CRD/report/dashboard agree and cleanup is clean.
 
-## Next After Phase 131
+## Next After Phase 132
 
-If Phase 131 passes, the NVMe Kubernetes correctness loop is complete enough to
-return to Phase 126's performance direction: durable backend write batching and
-write-path optimization. If Phase 131 blocks, document the live trigger gap
-before adding backend/performance work.
+If Phase 132 passes, the NVMe Kubernetes correctness loop is strong enough to
+return to write-path performance optimization from Phase 126. If it blocks,
+record whether the missing piece is frontend replacement machinery,
+publish-evidence propagation, or CSI-node trigger semantics.

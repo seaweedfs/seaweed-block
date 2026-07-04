@@ -68,6 +68,7 @@ The supported-lab claim is intentionally narrow:
 | 128 | Live Linux host ANA Change Notice AER gate | PASS |
 | 129 | CSI mounted NVMe restage contract | PASS |
 | 130 | CSI-node reconnect owner/trigger contract | PASS |
+| 131 | Live Kubernetes host-path reconnect through CSI-node owner | PASS |
 
 Key QA sign-offs:
 
@@ -82,6 +83,7 @@ Key QA sign-offs:
 - `internal/docs/qa-assignments/phase128-nvme-ana-change-notice-host-qa-signoff.md`
 - `internal/docs/qa-assignments/phase129-nvme-k8s-mounted-restage-qa-signoff.md`
 - `internal/docs/qa-assignments/phase130-nvme-reconnect-owner-qa-signoff.md`
+- `internal/docs/qa-assignments/phase131-nvme-k8s-reconnect-live-qa-signoff.md`
 
 ## Performance Baseline
 
@@ -267,9 +269,29 @@ live_k8s_gate_required_next=true
 cleanup_status=ok
 ```
 
-The remaining gap is now specifically Phase 131: prove the same owner invocation
-in a live Kubernetes mounted PVC run with pod UID preservation, mounted I/O
-after reconnect, and CRD/report/dashboard agreement.
+Phase 131 proves the same owner in a live mounted Kubernetes PVC path with
+scoped host path loss:
+
+```text
+phase131_nvme_k8s_reconnect_live_status=ok
+stage2_multipath_enabled=true
+initial_path_count=2
+path_loss_detected=true
+after_disconnect_path_count=1
+reconnect_owner=csi-node
+reconnect_invoked=true
+replacement_path_connected=true
+reconnected_path_count=2
+pod_uid_preserved=true
+mounted_io_after_reconnect=ok
+crd_status_agrees=true
+report_dashboard_agree=true
+cleanup_status=ok
+```
+
+Phase 131's injected loss is host-local and scoped:
+`nvme disconnect -d <controller>`. It does not prove a changed desired path set
+after frontend replacement/failover. That remains Phase 132.
 
 ## Representative Release Smoke
 
@@ -332,8 +354,8 @@ This evidence does not claim:
 - Production HA, node-loss survival, or arbitrary unbounded path churn.
 - Broad Linux host AER/ANA notification compatibility beyond the m02 supported
   lab gate.
-- Kubernetes dynamic NVMe reconnect/restage after primary/node failover until
-  the Phase 131 live close gate passes.
+- Kubernetes dynamic NVMe reconnect after control-plane desired path-set
+  replacement/failover until the Phase 132 close gate passes.
 - Backup, snapshot, restore, disaster recovery, or data migration.
 - Automatic cleanup or host repair.
 - Hosted production UI.

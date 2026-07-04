@@ -74,3 +74,17 @@ func TestNVMeSubsystemHasPathRequiresTargetAddressNotSourceAddress(t *testing.T)
 		t.Fatal("src_addr must not satisfy requested target traddr")
 	}
 }
+
+func TestNVMeConnectAlreadyConnectedIsIdempotentSuccess(t *testing.T) {
+	for _, out := range []string{
+		"Failed to write to /dev/nvme-fabrics: Already connected\n",
+		"nvme connect: already connected",
+	} {
+		if !nvmeConnectAlreadyConnected(out) {
+			t.Fatalf("output not recognized: %q", out)
+		}
+	}
+	if nvmeConnectAlreadyConnected("connection refused") {
+		t.Fatal("unrelated connect failure must not be ignored")
+	}
+}

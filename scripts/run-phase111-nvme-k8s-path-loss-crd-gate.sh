@@ -15,6 +15,10 @@ STATUS_PORT="${SW_BLOCK_MASTER_PORT_FORWARD_PORT:-29333}"
 MOUNTED_IO="${SW_BLOCK_NVME_MOUNTED_IO:-0}"
 MOUNTED_POD="${SW_BLOCK_NVME_MOUNTED_POD:-sw-block-phase112-mounted}"
 RESTORE_PATH="${SW_BLOCK_NVME_RESTORE_PATH:-0}"
+RECONNECT_OWNER="${SW_BLOCK_NVME_RECONNECT_OWNER:-0}"
+RECONNECT_INTERVAL="${SW_BLOCK_NVME_RECONNECT_INTERVAL:-5s}"
+HOST_PATH_DISCONNECT="${SW_BLOCK_NVME_HOST_PATH_DISCONNECT:-0}"
+FORCE_STAGE2_MULTIPATH="${SW_BLOCK_NVME_FORCE_STAGE2_MULTIPATH:-0}"
 
 mkdir -p "${ARTIFACT_DIR}"/{bin,build,values,install,multi-volume,inject,surfaces,cleanup}
 : >"${SUMMARY}"
@@ -192,6 +196,106 @@ PY
   return 1
 }
 
+write_host_nvme_path_info() {
+  local label="$1"
+  local nqn="$2"
+  local json_path="${ARTIFACT_DIR}/inject/nvme-list-subsys.${label}.json"
+  local env_path="${ARTIFACT_DIR}/inject/nvme-path-info.${label}.env"
+  sudo -n nvme list-subsys -o json >"${json_path}"
+  python3 - "${json_path}" "${nqn}" >"${env_path}" <<'PY'
+import json
+import sys
+
+path, want_nqn = sys.argv[1:]
+doc = json.load(open(path))
+
+def walk(node):
+    if isinstance(node, dict):
+        if node.get("NQN") == want_nqn and isinstance(node.get("Paths"), list):
+            yield node
+        for value in node.values():
+            yield from walk(value)
+    elif isinstance(node, list):
+        for item in node:
+            yield from walk(item)
+
+def addr(raw):
+    fields = {}
+    for part in str(raw or "").split(","):
+        if "=" not in part:
+            continue
+        k, v = part.split("=", 1)
+        fields[k.strip()] = v.strip()
+    if fields.get("traddr") and fields.get("trsvcid"):
+        return f"{fields['traddr']}:{fields['trsvcid']}"
+    return ""
+
+paths = []
+for sub in walk(doc):
+    paths.extend(sub.get("Paths") or [])
+
+print(f"path_count={len(paths)}")
+if paths:
+    first = paths[0]
+    name = first.get("Name") or first.get("Controller") or first.get("Device") or ""
+    if name and not name.startswith("/dev/"):
+        name = "/dev/" + name
+    print(f"controller={name}")
+    print(f"addr={addr(first.get('Address'))}")
+PY
+}
+
+read_env_value() {
+  local path="$1"
+  local key="$2"
+  awk -F= -v key="${key}" '$1 == key {value = substr($0, length(key) + 2)} END {print value}' "${path}"
+}
+
+wait_for_host_nvme_path_count() {
+  local label="$1"
+  local nqn="$2"
+  local want="$3"
+  for _ in $(seq 1 60); do
+    write_host_nvme_path_info "${label}" "${nqn}" || true
+    local got
+    got="$(read_env_value "${ARTIFACT_DIR}/inject/nvme-path-info.${label}.env" path_count)"
+    if [[ "${got}" == "${want}" ]]; then
+      return 0
+    fi
+    sleep 1
+  done
+  echo "NVMe host path count did not reach ${want} for ${nqn}" >&2
+  return 1
+}
+
+wait_for_reconnect_owner_log() {
+  local out="$1"
+  for _ in $(seq 1 90); do
+    kubectl -n "${HELM_NAMESPACE}" logs -l app=sw-block-csi-node -c block-csi --since=10m --prefix=true >"${out}" 2>&1 || true
+    if grep -q 'MountedNVMeReconnectOwner: iteration .*reconnected=1' "${out}" || \
+       grep -q 'reconciled mounted NVMe paths' "${out}"; then
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
+volume_field_from_crd() {
+  local path="$1"
+  local expr="$2"
+  python3 - "${path}" "${expr}" <<'PY'
+import json
+import sys
+doc = json.load(open(sys.argv[1]))
+expr = sys.argv[2].split(".")
+value = doc["items"][0]
+for part in expr:
+    value = value.get(part, {}) if isinstance(value, dict) else {}
+print(value if isinstance(value, (str, int, float, bool)) else "")
+PY
+}
+
 write_summary "${PHASE_STATUS_KEY}=running"
 cleanup
 
@@ -218,6 +322,23 @@ lifecycleOwner:
   dryRun: false
   interval: 5s
 YAML
+if [[ "${RECONNECT_OWNER}" == "1" || "${RECONNECT_OWNER}" == "true" ]]; then
+  cat >>"${ARTIFACT_DIR}/values/values.nvme.yaml" <<YAML
+csiNode:
+  nvmeReconnect:
+    enabled: true
+    interval: ${RECONNECT_INTERVAL}
+YAML
+  write_summary "reconnect_owner_enabled=true"
+  write_summary "reconnect_owner_interval=${RECONNECT_INTERVAL}"
+fi
+if [[ "${FORCE_STAGE2_MULTIPATH}" == "1" || "${FORCE_STAGE2_MULTIPATH}" == "true" ]]; then
+  cat >>"${ARTIFACT_DIR}/values/values.nvme.yaml" <<'YAML'
+stage2Multipath:
+  enabled: true
+YAML
+  write_summary "stage2_multipath_enabled=true"
+fi
 python3 -c "${python_read_nodes}" "${ARTIFACT_DIR}"
 
 grep -q '^network_mode=external-nvme$' "${ARTIFACT_DIR}/values/generate.stdout.txt"
@@ -286,6 +407,129 @@ YAML
   MOUNTED_POD_UID_BEFORE="$(kubectl -n "${APP_NAMESPACE}" get pod "${MOUNTED_POD}" -o jsonpath='{.metadata.uid}')"
   kubectl -n "${APP_NAMESPACE}" exec "${MOUNTED_POD}" -- sh -c 'set -eu; echo before-path-loss > /data/phase112-mounted.txt; sync; grep before-path-loss /data/phase112-mounted.txt' >"${ARTIFACT_DIR}/inject/mounted-before.log"
   write_summary "mounted_pod_uid_before=${MOUNTED_POD_UID_BEFORE}"
+fi
+
+if [[ "${HOST_PATH_DISCONNECT}" == "1" || "${HOST_PATH_DISCONNECT}" == "true" ]]; then
+  echo "[phase111] disconnect one host NVMe path and wait for CSI-node reconnect owner"
+  VOLUME_ID="$(volume_field_from_crd "${ARTIFACT_DIR}/surfaces/swblockvolumes.healthy.json" "status.volumeID")"
+  NQN="$(volume_field_from_crd "${ARTIFACT_DIR}/surfaces/swblockvolumes.healthy.json" "status.nvme.nqn")"
+  write_summary "volume_id=${VOLUME_ID}"
+  write_summary "nvme_nqn=${NQN}"
+  write_summary "reconnect_owner=csi-node"
+  write_summary "desired_path_set_changed=false-with-reason=host_path_disconnect_uses_stable_publish_evidence"
+  write_host_nvme_path_info "before-host-disconnect" "${NQN}"
+  INITIAL_PATH_COUNT="$(read_env_value "${ARTIFACT_DIR}/inject/nvme-path-info.before-host-disconnect.env" path_count)"
+  TARGET_CONTROLLER="$(read_env_value "${ARTIFACT_DIR}/inject/nvme-path-info.before-host-disconnect.env" controller)"
+  TARGET_ADDR="$(read_env_value "${ARTIFACT_DIR}/inject/nvme-path-info.before-host-disconnect.env" addr)"
+  write_summary "initial_path_count=${INITIAL_PATH_COUNT}"
+  write_summary "target_controller=${TARGET_CONTROLLER}"
+  write_summary "target_addr=${TARGET_ADDR}"
+  if [[ "${INITIAL_PATH_COUNT}" != "2" || -z "${TARGET_CONTROLLER}" ]]; then
+    echo "need exactly two host NVMe paths and a target controller, got count=${INITIAL_PATH_COUNT} controller=${TARGET_CONTROLLER}" >&2
+    exit 1
+  fi
+  sudo -n nvme disconnect -d "${TARGET_CONTROLLER}" >"${ARTIFACT_DIR}/inject/nvme-disconnect-one-path.txt" 2>&1
+  wait_for_host_nvme_path_count "after-host-disconnect" "${NQN}" "1"
+  write_summary "path_loss_detected=true"
+  write_summary "after_disconnect_path_count=1"
+  if ! wait_for_reconnect_owner_log "${ARTIFACT_DIR}/inject/csi-node-reconnect-owner.log"; then
+    echo "CSI-node reconnect owner did not report reconnected=1" >&2
+    exit 1
+  fi
+  wait_for_host_nvme_path_count "after-owner-reconnect" "${NQN}" "2"
+  write_summary "reconnect_invoked=true"
+  write_summary "replacement_path_connected=true"
+  write_summary "reconnected_path_count=2"
+  write_summary "host_mutation_scope=nvme_connect_missing_paths_only"
+  write_summary "stale_path_disconnect_claim=false-with-reason=gate_disconnects_one_test_path_no_product_stale_disconnect"
+
+  if [[ "${MOUNTED_IO}" == "1" || "${MOUNTED_IO}" == "true" ]]; then
+    MOUNTED_POD_UID_RECONNECTED="$(kubectl -n "${APP_NAMESPACE}" get pod "${MOUNTED_POD}" -o jsonpath='{.metadata.uid}')"
+    if [[ "${MOUNTED_POD_UID_RECONNECTED}" != "${MOUNTED_POD_UID_BEFORE}" ]]; then
+      echo "mounted pod UID changed after reconnect: before=${MOUNTED_POD_UID_BEFORE} reconnected=${MOUNTED_POD_UID_RECONNECTED}" >&2
+      exit 1
+    fi
+    kubectl -n "${APP_NAMESPACE}" exec "${MOUNTED_POD}" -- sh -c 'set -eu; echo after-owner-reconnect >> /data/phase131-mounted.txt; sync; grep after-owner-reconnect /data/phase131-mounted.txt' >"${ARTIFACT_DIR}/inject/mounted-after-owner-reconnect.log"
+    write_summary "pod_uid_preserved=true"
+    write_summary "mounted_io_after_reconnect=ok"
+  fi
+
+  wait_for_crd_status "reconnected" "ready" "first_volume_verified" "2"
+  with_master_port_forward "${ARTIFACT_DIR}/surfaces/reconnect-blockmaster-port-forward.log" \
+    "${ARTIFACT_DIR}/bin/sw-block" ops report \
+      --master-api "127.0.0.1:${STATUS_PORT}" \
+      --namespace "${APP_NAMESPACE}" \
+      --out "${ARTIFACT_DIR}/surfaces/reconnect-report" \
+      --timeout 30s >"${ARTIFACT_DIR}/surfaces/reconnect-report.stdout.txt" 2>"${ARTIFACT_DIR}/surfaces/reconnect-report.stderr.txt"
+  DASHBOARD_PORT="$(python3 - <<'PY'
+import socket
+s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()
+PY
+)"
+  "${ARTIFACT_DIR}/bin/sw-block" ops dashboard \
+    --from-bundle "${ARTIFACT_DIR}/surfaces/reconnect-report" \
+    --listen "127.0.0.1:${DASHBOARD_PORT}" >"${ARTIFACT_DIR}/surfaces/reconnect-dashboard.stdout.txt" 2>"${ARTIFACT_DIR}/surfaces/reconnect-dashboard.stderr.txt" &
+  DASH_PID=$!
+  for _ in $(seq 1 50); do
+    code="$(curl -s -o "${ARTIFACT_DIR}/surfaces/reconnect-dashboard-operator-snapshot.json" -w '%{http_code}' "http://127.0.0.1:${DASHBOARD_PORT}/operator-snapshot.json" || true)"
+    [[ "${code}" == "200" ]] && break
+    sleep 0.2
+  done
+  kill "${DASH_PID}" >/dev/null 2>&1 || true
+  wait "${DASH_PID}" >/dev/null 2>&1 || true
+
+  python3 - "${ARTIFACT_DIR}" "${VOLUME_ID}" <<'PY'
+import json
+import sys
+from pathlib import Path
+base = Path(sys.argv[1])
+volume_id = sys.argv[2]
+crd = json.load(open(base/"surfaces/swblockvolumes.reconnected.json"))
+status = crd["items"][0]["status"]
+summary = (base/"surfaces/reconnect-report/summary.txt").read_text()
+snapshot = json.load(open(base/"surfaces/reconnect-report/operator-snapshot.json"))
+dashboard = json.load(open(base/"surfaces/reconnect-dashboard-operator-snapshot.json"))
+if status.get("status") != "ready" or status.get("reasonCode") != "first_volume_verified":
+    raise SystemExit(f"CRD status mismatch: {status}")
+if (status.get("nvme") or {}).get("pathCount") != 2:
+    raise SystemExit(f"CRD path count mismatch: {status.get('nvme')}")
+if f"managed_volume={volume_id} status=ready reason=first_volume_verified" not in summary:
+    raise SystemExit("report missing ready/first_volume_verified")
+if f"managed_volume_nvme={volume_id}" not in summary or "path_count=2" not in summary:
+    raise SystemExit("report missing NVMe path_count=2")
+for name, doc in (("operator_snapshot", snapshot), ("dashboard", dashboard)):
+    vols = doc.get("volumes") or []
+    if len(vols) != 1:
+        raise SystemExit(f"{name} volume count={len(vols)}")
+    st = vols[0].get("status") or {}
+    nvme = st.get("nvme") or {}
+    if st.get("status") != "ready" or st.get("reason_code") != "first_volume_verified":
+        raise SystemExit(f"{name} status mismatch: {st}")
+    if nvme.get("path_count") != 2:
+        raise SystemExit(f"{name} nvme mismatch: {nvme}")
+(base/"nvme-k8s-reconnect-live-asserts.txt").write_text("\n".join([
+    "crd_status_agrees=true",
+    "report_dashboard_agree=true",
+    "surface_ready_reason=first_volume_verified",
+]) + "\n")
+PY
+  cat "${ARTIFACT_DIR}/nvme-k8s-reconnect-live-asserts.txt" >>"${SUMMARY}"
+  write_summary "${PHASE_STATUS_KEY}=ok"
+  cleanup
+  verify_rc=0
+  (
+    cd "${ROOT}"
+    SW_BLOCK_CLEANUP_WAIT_SECONDS=180 \
+    SW_BLOCK_ARTIFACT_DIR="${ARTIFACT_DIR}/cleanup/verify" bash scripts/verify-helm-cleanup.sh "${ROOT}" \
+      >"${ARTIFACT_DIR}/cleanup/verify.stdout.txt" 2>"${ARTIFACT_DIR}/cleanup/verify.stderr.txt"
+  ) || verify_rc=$?
+  cat "${ARTIFACT_DIR}/cleanup/verify/cleanup-summary.txt" >>"${SUMMARY}"
+  grep -q '^cleanup_status=ok$' "${ARTIFACT_DIR}/cleanup/verify/cleanup-summary.txt"
+  if [[ "${verify_rc}" -ne 0 ]]; then
+    exit "${verify_rc}"
+  fi
+  echo "[phase111] PASS"
+  exit 0
 fi
 
 echo "[phase111] scale one blockvolume deployment to zero to remove one NVMe path"

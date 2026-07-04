@@ -314,9 +314,16 @@ func (r *realNVMeUtil) Connect(ctx context.Context, addr, nqn string) error {
 	cmd := exec.CommandContext(ctx, "nvme", "connect", "-t", "tcp", "-a", host, "-s", port, "-n", nqn)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
+		if nvmeConnectAlreadyConnected(string(out)) {
+			return nil
+		}
 		return fmt.Errorf("nvme connect: %s: %w", string(out), err)
 	}
 	return nil
+}
+
+func nvmeConnectAlreadyConnected(out string) bool {
+	return strings.Contains(strings.ToLower(out), "already connected")
 }
 
 func (r *realNVMeUtil) Disconnect(ctx context.Context, nqn string) error {

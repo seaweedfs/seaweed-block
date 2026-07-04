@@ -386,9 +386,13 @@ rebuild, delete safety, or cleanup must start as a separate gated phase.
   The product now has an opt-in CSI node loop that invokes mounted NVMe
   reconnect from refreshed publish evidence and is disabled by default. This is
   a source/component gate, not the full live Kubernetes pod UID/I/O close gate.
-- Phase 131 is active for the live Kubernetes NVMe reconnect close gate.
-  Durable backend batching is deferred until mounted-PVC reconnect is proven in
-  the live K8s path, not just by the owner primitive.
+- Phase 131 is closed for the live Kubernetes NVMe host-path reconnect gate.
+  A mounted RF=2 NVMe/TCP PVC starts with two host paths, one path is removed
+  with scoped `nvme disconnect -d`, CSI-node reconnects it, mounted I/O remains
+  correct, and CRD/report/dashboard agree.
+- Phase 132 is active for the remaining desired path-set replacement/failover
+  gate. Durable backend batching is deferred until mounted-PVC reconnect is
+  proven for changed publish evidence, not just host-path reconnect.
 - Later protocol candidates: complete a real NVMe/RDMA target, characterize
   NVMe/TCP performance, or bridge to object/NIXL acceleration where the product
   surface is object/storage rather than block PVC. Keep these separate so
@@ -993,7 +997,9 @@ Approximate engineering effort if scope remains tight:
 - Phase 128 is closed for live Linux host AER/ANA notification evidence.
 - Phase 129 is closed for the mounted NVMe restage primitive.
 - Phase 130 is closed for the CSI-node NVMe reconnect owner/trigger contract.
-- Phase 131 is active for the live Kubernetes NVMe reconnect close gate.
+- Phase 131 is closed for the live Kubernetes NVMe host-path reconnect gate.
+- Phase 132 is active for the Kubernetes NVMe desired path-set change close
+  gate.
 - Phase 41-44 are the Operation Layer v0.5 release train: lifecycle-owner
   foundation, real API/admission proof, first bounded finalizer mutation, and
   delete lifecycle close gate.

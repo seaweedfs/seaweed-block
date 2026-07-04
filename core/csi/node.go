@@ -546,14 +546,8 @@ func (s *NodeServer) reconcileMountedNVMePaths(ctx context.Context, req *csipb.N
 			}
 			connectedNewPath = true
 		}
-		for _, pathAddr := range addrs {
-			pathConnected, err := s.nvmeUtil.IsPathConnected(ctx, nqn, pathAddr)
-			if err != nil {
-				return false, status.Errorf(codes.Internal, "verify nvme path connect: %v", err)
-			}
-			if !pathConnected {
-				return false, status.Errorf(codes.FailedPrecondition, "NVMe multipath %q missing path %s", nqn, pathAddr)
-			}
+		if err := s.waitForNVMePathsConnected(ctx, nqn, addrs, 60*time.Second); err != nil {
+			return false, err
 		}
 	} else {
 		connected, err := s.nvmeUtil.IsConnected(ctx, nqn)
@@ -593,6 +587,37 @@ func (s *NodeServer) reconcileMountedNVMePaths(ctx context.Context, req *csipb.N
 		s.reportCSIReattachObserved(ctx, volumeID, transportNVMe, addr, publish)
 	}
 	return connectedNewPath, nil
+}
+
+func (s *NodeServer) waitForNVMePathsConnected(ctx context.Context, nqn string, addrs []string, timeout time.Duration) error {
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
+	var lastMissing string
+	for {
+		lastMissing = ""
+		for _, pathAddr := range addrs {
+			pathConnected, err := s.nvmeUtil.IsPathConnected(ctx, nqn, pathAddr)
+			if err != nil {
+				return status.Errorf(codes.Internal, "verify nvme path connect: %v", err)
+			}
+			if !pathConnected {
+				lastMissing = pathAddr
+				break
+			}
+		}
+		if lastMissing == "" {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return status.Errorf(codes.Internal, "verify nvme path connect: %v", ctx.Err())
+		case <-deadline.C:
+			return status.Errorf(codes.FailedPrecondition, "NVMe multipath %q missing path %s", nqn, lastMissing)
+		case <-ticker.C:
+		}
+	}
 }
 
 func (s *NodeServer) reportCSIReattachObserved(ctx context.Context, volumeID, transport, targetAddr string, publish publishContextResult) {

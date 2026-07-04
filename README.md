@@ -77,7 +77,8 @@ This is an **alpha** product path for supported lab clusters, not production.
   removed path is restored, multi-volume mounted path isolation, bounded
   multi-volume path churn, repeated stage/unstage residue checks, a bounded
   writer/reader soak, a baseline over the configured 100GbE TCP frontend
-  address, and a source-gated CSI-node reconnect owner contract. This is a
+  address, a source-gated CSI-node reconnect owner contract, and a live
+  host-path reconnect gate for scoped `nvme disconnect -d` path loss. This is a
   supported-lab source-gated claim, not a broad NVMe
   compatibility, RoCE/NVMe-RDMA, production HA, or performance/SLO claim.
 - Replay support bundles offline.
@@ -100,8 +101,8 @@ These are narrow alpha claims tied to documented gates. See
 - Transparent Kubernetes node-loss failover without pod recreate.
 - Broad NVMe/RoCE compatibility, performance/SLO, or transparent failover
   parity beyond the documented supported-lab gates. The CSI-node reconnect
-  owner exists as a source-gated contract; the full live Kubernetes reconnect
-  close gate is still next.
+  owner and host-path reconnect gate exist; control-plane desired path-set
+  replacement/failover remains next.
 - Broad distro/kernel/initiator compatibility.
 - Upgrade or rollback execution. The status layer can report install drift, but
   it does not run Helm or kubectl mutations.
