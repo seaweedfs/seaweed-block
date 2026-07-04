@@ -192,6 +192,10 @@ target_ns = int(field(profile, "TargetWriteDurationNanos", "targetWriteDurationN
 backend_ops = int(field(profile, "BackendWriteOps", "backendWriteOps", default=0) or 0)
 backend_bytes = int(field(profile, "BackendWriteBytes", "backendWriteBytes", default=0) or 0)
 backend_ns = int(field(profile, "BackendWriteDurationNanos", "backendWriteDurationNanos", default=0) or 0)
+backend_storage_write_calls = int(field(profile, "BackendStorageWriteCalls", "backendStorageWriteCalls", default=0) or 0)
+backend_storage_write_blocks = int(field(profile, "BackendStorageWriteBlocks", "backendStorageWriteBlocks", default=0) or 0)
+backend_storage_batch_calls = int(field(profile, "BackendStorageBatchCalls", "backendStorageBatchCalls", default=0) or 0)
+backend_storage_batch_blocks = int(field(profile, "BackendStorageBatchBlocks", "backendStorageBatchBlocks", default=0) or 0)
 sync_ops = int(field(profile, "BackendSyncOps", "backendSyncOps", default=0) or 0)
 sync_ns = int(field(profile, "BackendSyncDurationNanos", "backendSyncDurationNanos", default=0) or 0)
 def ms(ns):
@@ -207,6 +211,10 @@ with open(summary_out, "w") as f:
     f.write(f"backend_write_ops={backend_ops}\n")
     f.write(f"backend_write_bytes={backend_bytes}\n")
     f.write(f"backend_write_duration_ms={ms(backend_ns)}\n")
+    f.write(f"backend_storage_write_calls={backend_storage_write_calls}\n")
+    f.write(f"backend_storage_write_blocks={backend_storage_write_blocks}\n")
+    f.write(f"backend_storage_batch_calls={backend_storage_batch_calls}\n")
+    f.write(f"backend_storage_batch_blocks={backend_storage_batch_blocks}\n")
     f.write(f"backend_sync_ops={sync_ops}\n")
     f.write(f"backend_sync_duration_ms={ms(sync_ns)}\n")
 PY

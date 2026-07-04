@@ -399,8 +399,18 @@ rebuild, delete safety, or cleanup must start as a separate gated phase.
   path replacement. CSI-node now connects the new desired path and disconnects
   only stale host paths for the same NQN that are no longer desired, using
   scoped controller disconnects. Mounted pod UID/I/O are preserved and
-  CRD/report/dashboard agree. The next NVMe work should return to the Phase 126
-  backend-write bottleneck and durable write batching.
+  CRD/report/dashboard agree.
+- Phase 134 is closed for durable backend write batching. The previous
+  `backend_write_ops` counter was not enough because it measured
+  `StorageBackend.Write` calls, not internal storage fan-out. The product now
+  has bounded full-block `WriteBatch` execution, real `walstore` batch WAL
+  append, strict-ACK batch disablement, and `/status/durable`
+  `backend_storage_*` counters. The live NVMe/TCP gate observed
+  `backend_storage_write_blocks=28872`,
+  `backend_storage_write_calls=3634`, and
+  `backend_storage_batch_calls=3613` with cleanup clean. The next NVMe work can
+  measure wall-clock improvement and identify the next bottleneck; it should
+  still avoid SLO, RoCE, or NVMe/RDMA claims.
 - Later protocol candidates: complete a real NVMe/RDMA target, characterize
   NVMe/TCP performance, or bridge to object/NIXL acceleration where the product
   surface is object/storage rather than block PVC. Keep these separate so
@@ -1010,6 +1020,8 @@ Approximate engineering effort if scope remains tight:
   gate.
 - Phase 133 is closed for Kubernetes NVMe stale host-path pruning after desired
   path replacement.
+- Phase 134 is closed for durable backend write batching and product-owned
+  `backend_storage_*` counters.
 - Phase 41-44 are the Operation Layer v0.5 release train: lifecycle-owner
   foundation, real API/admission proof, first bounded finalizer mutation, and
   delete lifecycle close gate.

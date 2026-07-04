@@ -75,6 +75,7 @@ The supported-lab claim is intentionally narrow:
 | 131 | Live Kubernetes host-path reconnect through CSI-node owner | PASS |
 | 132 | Live Kubernetes desired path-set change through CSI-node owner | PASS |
 | 133 | Live Kubernetes stale host-path pruning after desired path replacement | PASS |
+| 134 | Durable backend full-block write batching with product-owned counters | PASS |
 
 Key QA sign-offs:
 
@@ -92,6 +93,7 @@ Key QA sign-offs:
 - `internal/docs/qa-assignments/phase131-nvme-k8s-reconnect-live-qa-signoff.md`
 - `internal/docs/qa-assignments/phase132-nvme-k8s-desired-path-change-qa-signoff.md`
 - `internal/docs/qa-assignments/phase133-nvme-k8s-stale-path-prune-qa-signoff.md`
+- `internal/docs/qa-assignments/phase134-durable-backend-write-batching-qa-signoff.md`
 
 ## Performance Baseline
 
@@ -205,6 +207,32 @@ localizing the write-side cost and identify durable backend large-write
 batching as the next performance optimization. That optimization is deferred
 behind the Phase 127/128 NVMe correctness work and still does not create a
 throughput/SLO, RoCE, or NVMe/RDMA claim.
+
+Phase 134 returns to that backend-write bottleneck and adds bounded full-block
+write batching plus product-owned internal storage-call counters. The old
+`backend_write_ops` counter remains useful, but it measures frontend
+`StorageBackend.Write` calls, not internal per-block storage fan-out. The new
+`backend_storage_*` counters are the evidence for batching:
+
+```text
+phase134_durable_backend_write_batching_status=ok
+target_write_observed=true
+target_write_bytes=118259712
+backend_write_bytes=118259712
+backend_write_ops=3634
+backend_storage_write_calls=3634
+backend_storage_write_blocks=28872
+backend_storage_batch_calls=3613
+backend_storage_batch_blocks=28851
+backend_storage_batching_effective=true
+strict_ack_batch_disabled=true
+cleanup_status=ok
+```
+
+This proves the supported-lab NVMe/TCP write path exercises durable backend
+batching and still cleans up. It is not a performance/SLO claim; the next
+performance step is to compare wall-clock write behavior after batching and
+identify the next dominant cost.
 
 Phase 127 closes the source/component side of the ANA Change Notice gap:
 

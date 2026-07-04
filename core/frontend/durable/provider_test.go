@@ -5,6 +5,7 @@
 package durable_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
@@ -366,8 +367,60 @@ func TestDurableProvider_DurableStatuses_ReportWriteProfile(t *testing.T) {
 			if prof.BackendWriteDurationNanos == 0 {
 				t.Fatalf("backend write duration was not recorded: %+v", prof)
 			}
+			if prof.BackendStorageWriteCalls != 1 || prof.BackendStorageWriteBlocks != 1 {
+				t.Fatalf("backend storage write profile mismatch: %+v", prof)
+			}
+			if prof.BackendStorageBatchCalls != 0 || prof.BackendStorageBatchBlocks != 0 {
+				t.Fatalf("single-block write must not report batch profile: %+v", prof)
+			}
 			if prof.BackendSyncOps != 1 || prof.BackendSyncDurationNanos == 0 {
 				t.Fatalf("backend sync profile mismatch: %+v", prof)
+			}
+		})
+	}
+}
+
+func TestDurableProvider_DurableStatuses_ReportWriteBatchProfile(t *testing.T) {
+	for _, impl := range implMatrix() {
+		impl := impl
+		t.Run(string(impl), func(t *testing.T) {
+			p, _, _ := newProvider(t, impl)
+			backend, err := p.Open(context.Background(), "v1")
+			if err != nil {
+				t.Fatalf("Open: %v", err)
+			}
+			if _, err := p.RecoverVolume(context.Background(), "v1"); err != nil {
+				t.Fatalf("RecoverVolume: %v", err)
+			}
+
+			payload := make([]byte, 8192)
+			for i := range payload {
+				payload[i] = byte(i)
+			}
+			if _, err := backend.Write(context.Background(), 0, payload); err != nil {
+				t.Fatalf("Write: %v", err)
+			}
+			got := make([]byte, len(payload))
+			if _, err := backend.Read(context.Background(), 0, got); err != nil {
+				t.Fatalf("Read: %v", err)
+			}
+			if !bytes.Equal(got, payload) {
+				t.Fatalf("readback mismatch at %d", firstDiffIdx(got, payload))
+			}
+
+			statuses := p.DurableStatuses()
+			if len(statuses) != 1 {
+				t.Fatalf("status count=%d want 1: %+v", len(statuses), statuses)
+			}
+			prof := statuses[0].WriteProfile
+			if prof.BackendWriteOps != 1 || prof.BackendWriteBytes != uint64(len(payload)) {
+				t.Fatalf("backend write profile mismatch: %+v", prof)
+			}
+			if prof.BackendStorageWriteCalls != 1 || prof.BackendStorageWriteBlocks != 2 {
+				t.Fatalf("backend storage write profile mismatch: %+v", prof)
+			}
+			if prof.BackendStorageBatchCalls != 1 || prof.BackendStorageBatchBlocks != 2 {
+				t.Fatalf("backend batch profile mismatch: %+v", prof)
 			}
 		})
 	}

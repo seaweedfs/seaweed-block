@@ -739,6 +739,17 @@ Recommended order from here:
     connects the new desired path and prunes the stale old host path for the
     same NQN using scoped controller disconnects, with pod UID/I/O preserved
     and cleanup clean.
+92. Phase 134: Durable Backend Write Batching. **Closed 2026-07-04,
+    runner PASS**
+    Returned to the Phase 126 backend-write bottleneck with a correctness-first
+    batch seam. Contiguous full-block writes now use bounded storage
+    `WriteBatch` calls, `walstore` performs a real batch WAL append path while
+    keeping one WAL record/LSN per block, and `/status/durable` exposes
+    internal storage-call/batch counters. The live NVMe/TCP gate observed
+    `backend_storage_write_blocks=28872`,
+    `backend_storage_write_calls=3634`,
+    `backend_storage_batch_calls=3613`, and clean cleanup. This is not a
+    performance/SLO or NVMe/RDMA claim.
 
 The internal release-train contract is
 `internal/docs/ref/operation-layer-v0.5-release-train.md`. Phases 41-44 close

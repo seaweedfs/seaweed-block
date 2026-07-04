@@ -55,6 +55,65 @@ func TestWALStore_WriteSyncCloseReopenRead(t *testing.T) {
 	}
 }
 
+func TestWALStore_WriteBatchSyncCloseReopenRead(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "store.bin")
+
+	{
+		s, err := CreateWALStore(path, 16, 4096)
+		if err != nil {
+			t.Fatal(err)
+		}
+		blocks := [][]byte{
+			makeBlock(4096, 0xA1),
+			makeBlock(4096, 0xA2),
+			makeBlock(4096, 0xA3),
+		}
+		lsns, err := s.WriteBatch(2, blocks)
+		if err != nil {
+			t.Fatalf("WriteBatch: %v", err)
+		}
+		if got, want := len(lsns), len(blocks); got != want {
+			t.Fatalf("WriteBatch LSN count=%d want %d", got, want)
+		}
+		for i := 1; i < len(lsns); i++ {
+			if lsns[i] != lsns[i-1]+1 {
+				t.Fatalf("WriteBatch LSNs not consecutive: %v", lsns)
+			}
+		}
+		if _, err := s.Sync(); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	{
+		s, err := OpenWALStore(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer s.Close()
+		if _, err := s.Recover(); err != nil {
+			t.Fatal(err)
+		}
+		for i, want := range [][]byte{
+			makeBlock(4096, 0xA1),
+			makeBlock(4096, 0xA2),
+			makeBlock(4096, 0xA3),
+		} {
+			got, err := s.Read(uint32(i + 2))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(got, want) {
+				t.Fatalf("LBA %d: batch bytes did not survive close+reopen", i+2)
+			}
+		}
+	}
+}
+
 // TestWALStore_AckedWritesSurviveSimulatedCrash is the real
 // crash-consistency proof. A clean Close persists superblock state,
 // which would mask any per-write durability bug. This test bypasses

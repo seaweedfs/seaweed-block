@@ -15,6 +15,10 @@ type WriteProfileStatus struct {
 	BackendWriteOps           uint64
 	BackendWriteBytes         uint64
 	BackendWriteDurationNanos uint64
+	BackendStorageWriteCalls  uint64
+	BackendStorageWriteBlocks uint64
+	BackendStorageBatchCalls  uint64
+	BackendStorageBatchBlocks uint64
 	BackendSyncOps            uint64
 	BackendSyncDurationNanos  uint64
 }
@@ -26,6 +30,10 @@ type writeProfile struct {
 	backendWriteOps           atomic.Uint64
 	backendWriteBytes         atomic.Uint64
 	backendWriteDurationNanos atomic.Uint64
+	backendStorageWriteCalls  atomic.Uint64
+	backendStorageWriteBlocks atomic.Uint64
+	backendStorageBatchCalls  atomic.Uint64
+	backendStorageBatchBlocks atomic.Uint64
 	backendSyncOps            atomic.Uint64
 	backendSyncDurationNanos  atomic.Uint64
 }
@@ -46,6 +54,18 @@ func (p *writeProfile) recordBackendWrite(bytes int, d time.Duration) {
 	p.backendWriteOps.Add(1)
 	p.backendWriteBytes.Add(uint64(bytes))
 	p.backendWriteDurationNanos.Add(durationNanos(d))
+}
+
+func (p *writeProfile) recordBackendStorageWrite(blocks int, batched bool) {
+	if blocks <= 0 {
+		return
+	}
+	p.backendStorageWriteCalls.Add(1)
+	p.backendStorageWriteBlocks.Add(uint64(blocks))
+	if batched {
+		p.backendStorageBatchCalls.Add(1)
+		p.backendStorageBatchBlocks.Add(uint64(blocks))
+	}
 }
 
 func (p *writeProfile) recordBackendSync(d time.Duration) {
@@ -71,6 +91,10 @@ func (p *writeProfile) snapshot() WriteProfileStatus {
 		BackendWriteOps:           p.backendWriteOps.Load(),
 		BackendWriteBytes:         p.backendWriteBytes.Load(),
 		BackendWriteDurationNanos: p.backendWriteDurationNanos.Load(),
+		BackendStorageWriteCalls:  p.backendStorageWriteCalls.Load(),
+		BackendStorageWriteBlocks: p.backendStorageWriteBlocks.Load(),
+		BackendStorageBatchCalls:  p.backendStorageBatchCalls.Load(),
+		BackendStorageBatchBlocks: p.backendStorageBatchBlocks.Load(),
 		BackendSyncOps:            p.backendSyncOps.Load(),
 		BackendSyncDurationNanos:  p.backendSyncDurationNanos.Load(),
 	}

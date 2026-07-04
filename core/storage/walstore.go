@@ -419,6 +419,71 @@ func (s *WALStore) Write(lba uint32, data []byte) (uint64, error) {
 	return lsn, nil
 }
 
+func (s *WALStore) WriteBatch(startLBA uint32, blocks [][]byte) ([]uint64, error) {
+	if len(blocks) == 0 {
+		return nil, nil
+	}
+	maxLBA := uint32(s.sb.VolumeSize / uint64(s.sb.BlockSize))
+	if uint64(startLBA)+uint64(len(blocks)) > uint64(maxLBA) {
+		return nil, fmt.Errorf("storage: batch [%d,%d) out of range (max %d)", startLBA, uint64(startLBA)+uint64(len(blocks)), maxLBA)
+	}
+	for i, data := range blocks {
+		if len(data) != int(s.sb.BlockSize) {
+			return nil, fmt.Errorf("storage: batch block %d data size %d != block size %d", i, len(data), s.sb.BlockSize)
+		}
+	}
+
+	if s.admission != nil {
+		if err := s.admission.Acquire(s.admissionTimeout); err != nil {
+			return nil, fmt.Errorf("storage: WAL admission: %w", err)
+		}
+		defer s.admission.Release()
+	}
+
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return nil, errors.New("storage: WriteBatch after Close")
+	}
+	firstLSN := s.nextLSN
+	s.nextLSN += uint64(len(blocks))
+	s.mu.Unlock()
+
+	entries := make([]*walEntry, len(blocks))
+	lsns := make([]uint64, len(blocks))
+	for i, data := range blocks {
+		dataCopy := make([]byte, len(data))
+		copy(dataCopy, data)
+		lsn := firstLSN + uint64(i)
+		lsns[i] = lsn
+		entries[i] = &walEntry{
+			LSN:    lsn,
+			Type:   walEntryWrite,
+			LBA:    uint64(startLBA + uint32(i)),
+			Length: uint32(len(dataCopy)),
+			Data:   dataCopy,
+		}
+	}
+	offsets, err := s.wal.appendBatch(entries)
+	if err != nil {
+		return nil, fmt.Errorf("storage: WAL batch append: %w", err)
+	}
+	for i, walRelOff := range offsets {
+		s.dm.put(uint64(startLBA+uint32(i)), walRelOff, lsns[i], uint32(len(blocks[i])))
+	}
+
+	s.mu.Lock()
+	lastLSN := lsns[len(lsns)-1]
+	if lastLSN > s.walHead {
+		s.walHead = lastLSN
+	}
+	if s.walTail == 0 {
+		s.walTail = firstLSN
+	}
+	s.mu.Unlock()
+	return lsns, nil
+}
+
 // Read returns the current bytes at lba. Dirty entries are served
 // from the WAL; clean LBAs are served from the extent.
 func (s *WALStore) Read(lba uint32) ([]byte, error) {

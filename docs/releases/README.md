@@ -79,4 +79,6 @@ v0.6 beta candidate adds only a bounded ACK eligibility executor target, not
 returned-replica rebuild/failback execution. The NVMe/TCP supported-lab path is
 documented separately because it is source-gated until matching
 `seaweed-block` and `seaweed-block-csi` images pass a pinned-image release
-smoke.
+smoke; it now includes source-gated multipath/reconnect correctness and durable
+backend write-batching evidence, but still no RoCE/NVMe-RDMA or performance
+SLO claim.

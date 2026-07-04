@@ -36,7 +36,7 @@ This is an **alpha** product path for supported lab clusters, not production.
 | Actionable read-only CRD status + Events | Available | Bounded SwBlockVolume finalizer lifecycle | Beta candidate |
 | Returned-replica ACK eligibility executor | Beta candidate | Returned-replica failback runtime | Source-gated |
 | Returned-replica rebuild traffic | Planned | Frontend publication after failback | Planned |
-| NVMe/TCP CSI multipath + 100GbE TCP baseline | Source-gated | Backup/snapshot/restore | Planned |
+| NVMe/TCP CSI multipath + backend write batching | Source-gated | Backup/snapshot/restore | Planned |
 | Production SLO/performance claims | Not claimed | Hosted production UI | Not claimed |
 
 ## What You Can Do Today
@@ -81,7 +81,8 @@ This is an **alpha** product path for supported lab clusters, not production.
   host-path reconnect gate for scoped `nvme disconnect -d` path loss, plus a
   live desired path-set replacement gate where CSI-node connects the new
   desired NVMe path and prunes the stale old host path without remounting the
-  pod. This is a
+  pod, and a durable backend full-block write-batching gate with
+  product-owned `/status/durable` counters. This is a
   supported-lab source-gated claim, not a broad NVMe
   compatibility, RoCE/NVMe-RDMA, production HA, or performance/SLO claim.
 - Replay support bundles offline.

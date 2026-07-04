@@ -94,15 +94,135 @@ func (w *walWriter) append(entry *walEntry) (walRelOffset uint64, err error) {
 	return writeOffset, nil
 }
 
+// appendBatch writes entries under one WAL-writer critical section. Each entry
+// remains independently encoded/recoverable; the batch only coalesces adjacent
+// bytes into fewer pwrite calls when the circular WAL layout allows it.
+func (w *walWriter) appendBatch(entries []*walEntry) ([]uint64, error) {
+	if len(entries) == 0 {
+		return nil, nil
+	}
+	bufs := make([][]byte, len(entries))
+	for i, entry := range entries {
+		buf, err := entry.encode()
+		if err != nil {
+			return nil, fmt.Errorf("walWriter.appendBatch: encode entry %d: %w", i, err)
+		}
+		if uint64(len(buf)) > w.walSize {
+			return nil, fmt.Errorf("%w: entry size %d exceeds WAL size %d", errWALFull, len(buf), w.walSize)
+		}
+		bufs[i] = buf
+	}
+
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	offsets, finalHead, err := w.planAppendBatch(bufs)
+	if err != nil {
+		return offsets, err
+	}
+
+	localHead := w.logicalHead
+	var pending []byte
+	var pendingStart uint64
+	flushPending := func() error {
+		if len(pending) == 0 {
+			return nil
+		}
+		if _, err := w.fd.WriteAt(pending, int64(w.walOffset+pendingStart)); err != nil {
+			return fmt.Errorf("walWriter.appendBatch: pwrite at %d: %w", w.walOffset+pendingStart, err)
+		}
+		pending = nil
+		return nil
+	}
+	appendPending := func(phys uint64, buf []byte) error {
+		if len(buf) == 0 {
+			return nil
+		}
+		if len(pending) == 0 {
+			pendingStart = phys
+			pending = append(pending, buf...)
+			return nil
+		}
+		if pendingStart+uint64(len(pending)) != phys {
+			if err := flushPending(); err != nil {
+				return err
+			}
+			pendingStart = phys
+		}
+		pending = append(pending, buf...)
+		return nil
+	}
+
+	for _, buf := range bufs {
+		entryLen := uint64(len(buf))
+		physHead := w.physicalPos(localHead)
+		remaining := w.walSize - physHead
+		if remaining < entryLen {
+			padding, err := encodeWALPadding(remaining)
+			if err != nil {
+				return offsets, fmt.Errorf("walWriter.appendBatch: padding: %w", err)
+			}
+			if err := appendPending(physHead, padding); err != nil {
+				return offsets, err
+			}
+			localHead += remaining
+			physHead = 0
+		}
+		if err := appendPending(physHead, buf); err != nil {
+			return offsets, err
+		}
+		localHead += entryLen
+	}
+	if err := flushPending(); err != nil {
+		return offsets, err
+	}
+	w.logicalHead = finalHead
+	return offsets, nil
+}
+
+func (w *walWriter) planAppendBatch(bufs [][]byte) ([]uint64, uint64, error) {
+	localHead := w.logicalHead
+	offsets := make([]uint64, 0, len(bufs))
+	used := func() uint64 { return localHead - w.logicalTail }
+	for _, buf := range bufs {
+		entryLen := uint64(len(buf))
+		physHead := w.physicalPos(localHead)
+		remaining := w.walSize - physHead
+		if remaining < entryLen {
+			if used()+remaining+entryLen > w.walSize {
+				return offsets, localHead, errWALFull
+			}
+			localHead += remaining
+			physHead = 0
+		}
+		if used()+entryLen > w.walSize {
+			return offsets, localHead, errWALFull
+		}
+		offsets = append(offsets, physHead)
+		localHead += entryLen
+	}
+	return offsets, localHead, nil
+}
+
 // writePadding fills [physPos, physPos+size) with a padding entry so
 // the next write starts at a clean offset. If size is too small for a
 // real header, just zeros the bytes — the recovery scanner skips
 // header-too-short tails.
 func (w *walWriter) writePadding(size, physPos uint64) error {
-	if size < walEntryHeaderSize {
-		buf := make([]byte, size)
-		_, err := w.fd.WriteAt(buf, int64(w.walOffset+physPos))
+	buf, err := encodeWALPadding(size)
+	if err != nil {
 		return err
+	}
+	if len(buf) == 0 {
+		return nil
+	}
+	_, err = w.fd.WriteAt(buf, int64(w.walOffset+physPos))
+	return err
+}
+
+func encodeWALPadding(size uint64) ([]byte, error) {
+	if size < walEntryHeaderSize {
+		return make([]byte, size), nil
 	}
 	buf := make([]byte, size)
 	le := binary.LittleEndian
@@ -124,8 +244,7 @@ func (w *walWriter) writePadding(size, physPos uint64) error {
 	crc := crc32.ChecksumIEEE(buf[:dataEnd])
 	le.PutUint32(buf[dataEnd:], crc)
 	le.PutUint32(buf[dataEnd+4:], uint32(size))
-	_, err := w.fd.WriteAt(buf, int64(w.walOffset+physPos))
-	return err
+	return buf, nil
 }
 
 // advanceTail moves the tail forward by (newPhysTail - currentPhysTail
